@@ -1,0 +1,26 @@
+<tad version="1.0" encoding="UTF-8" filename="編集">
+<document>
+<p>編集</p>
+<p>基本図形編集の編集。メニューの定義。</p>
+</document>
+<menu>
+<item code="tray">トレー<link id="01a0d889-460c-7eda-8b47-5745d175681c_0.xtad" vobjid="01a0d8c3-2002-722f-a6a0-5e84c02e809a"/></item>
+<line/>
+<item code="undo">取消</item>
+<item code="copy" key="C">トレーへ複写</item>
+<item code="paste" key="V">トレーから複写</item>
+<item code="cut" key="X">トレーへ移動</item>
+<item code="moveback" key="Z">トレーから移動</item>
+<item code="delete" key="Delete">削除</item>
+<line/>
+<item code="group">グループ化</item>
+<item code="ungroup">グループ化解除</item>
+<item code="selectall" key="A">全て選択</item>
+<line/>
+<item code="front" key="F">いちばん前へ</item>
+<item code="back" key="R">いちばん後へ</item>
+<item code="forward">ひとつ前へ</item>
+<item code="backward">ひとつ後へ</item>
+<item code="align">位置あわせ</item>
+</menu>
+</tad>

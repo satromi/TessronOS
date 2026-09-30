@@ -1,0 +1,52 @@
+{
+  "name": "実時間TADデモ",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-01-24T00:00:00Z",
+  "updateDate": "2026-01-24T00:00:00.00Z",
+  "accessDate": "2026-01-24T00:00:00.00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TADjs User",
+  "window": {
+    "pos": {
+      "x": 100,
+      "y": 100
+    },
+    "width": 400,
+    "height": 600,
+    "minWidth": 200,
+    "minHeight": 200,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff",
+    "scrollPos": {
+      "x": 0,
+      "y": 0
+    },
+    "wordWrap": true
+  },
+  "applist": {
+    "basic-slide": {
+      "name": "スライド",
+      "defaultOpen": true
+    },
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": false
+    }
+  },
+  "realId": "72c584f2-af6c-45cb-8dfc-3f181d13cd0a",
+  "recordCount": 1
+}

@@ -1,0 +1,14 @@
+<tad version="1.0" encoding="UTF-8" filename="仮身一覧のメニュー">
+<document>
+<p>仮身一覧のメニュー</p>
+<p>仮身一覧の窓のメニュー。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7758-975d-83783ff822e2"/></include>
+<item>保存<link id="01a0d889-45ed-7774-81e6-53a2d63223c7_0.xtad" vobjid="01a0d8c3-2002-79b0-af9c-c04d75e10950"/></item>
+<item>表示<link id="01a0d889-45ee-738d-a35f-e296aada3554_0.xtad" vobjid="01a0d8c3-2002-7873-a806-c8370bbf01db"/></item>
+<item>編集<link id="01a0d889-45ef-778e-84b5-6c8c31ca020a_0.xtad" vobjid="01a0d8c3-2002-7f01-b5bd-1c4469b6b7bd"/></item>
+<item>保護<link id="01a0d889-45f0-730d-9ed9-6c8646593b2c_0.xtad" vobjid="01a0d8c3-2002-7c3e-90d4-a1d1ead49474"/></item>
+<include><link id="01a0d889-45ec-766a-986d-5fad49d48e06_0.xtad" vobjid="01a0d8c3-2002-76a7-b86d-3a1d6ab4c6c0"/></include>
+</menu>
+</tad>

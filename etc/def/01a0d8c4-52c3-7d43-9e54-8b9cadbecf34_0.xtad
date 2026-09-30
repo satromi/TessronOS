@@ -1,0 +1,7 @@
+<tad version="1.0" encoding="UTF-8" filename="音箱">
+<figure>
+<link id="01a0d8c4-52c4-7e54-8f65-9cadbecfd045_0.xtad" vobjid="01a0d8c4-5217-7a76-9b18-3d2cbfa09188" vobjleft="8" vobjtop="8" vobjright="248" vobjbottom="33" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d8c4-52c5-7f65-9a76-adbecfd0e156_0.xtad" vobjid="01a0d8c4-5217-7b87-8c29-4e3dc0b1a299" vobjleft="8" vobjtop="40" vobjright="248" vobjbottom="65" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d8c4-52c6-7076-8b87-becfd0e1f267_0.xtad" vobjid="01a0d8c4-5217-7c98-9d3a-5f4ed1c2b3aa" vobjleft="8" vobjtop="72" vobjright="248" vobjbottom="97" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+</figure>
+</tad>

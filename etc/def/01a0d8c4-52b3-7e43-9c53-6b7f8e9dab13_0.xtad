@@ -1,0 +1,6 @@
+<tad version="1.0" encoding="UTF-8" filename="暦">
+<document>
+<p>暦</p>
+<p>システムの時間帯を持つ実身。時間帯はメタデータのtessronos.calendar.tz(UTCから東へ何分か)にあり、dt_setsystzで替えるとここに残る。替えられるのはこの実身の属性を書ける者(既定では管理者)。</p>
+</document>
+</tad>

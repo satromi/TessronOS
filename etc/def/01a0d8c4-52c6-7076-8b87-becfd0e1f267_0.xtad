@@ -1,0 +1,6 @@
+<tad version="1.0" encoding="UTF-8" filename="離し音">
+<document>
+<p>離し音</p>
+<p>ボタンを離したときのクリック音。押下音より低い。音色は属性の tessronos.sound.tone(周波数 hz、長さ ms)で、レコード1に WAV を置けばその音が鳴る。サウンドのデバイス実身から鳴らす。</p>
+</document>
+</tad>

@@ -1,0 +1,25 @@
+# 書庫解凍 on the desktop (design 17.16), for tools/desk_act.sh:
+#   cd build_make && ELF=tessronos<id>desk.elf DISK=obj/_QEMU_VIRT__ktest<id>/test_disk.img \
+#     ../tools/desk_act.sh ../tools/tests/desk_unpack.steps \
+#     "unpack: ready 33 objects" "unpack: done 33 objects" "unpack: root placed on the desktop"
+# The initial window BTRON is at the top left; 仮身サンプル is opened from
+# it, and in it the sample archive, which starts 書庫解凍. The root's
+# link in its window is carried into the BTRON window and let go; the
+# desktop asks, Enter answers yes, and the objects are taken out with the
+# link to the root put where it was let go (unpack3.png shows it).
+at 60 141
+dclick
+sleep 8
+shot unpack1
+at 420 464
+dclick
+sleep 12
+shot unpack2
+at 214 270
+down
+at 250 100
+up
+sleep 2
+key ret
+sleep 60
+shot unpack3

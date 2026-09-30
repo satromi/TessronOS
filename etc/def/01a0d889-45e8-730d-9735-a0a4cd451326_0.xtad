@@ -1,0 +1,15 @@
+<tad version="1.0" encoding="UTF-8" filename="仮身操作">
+<document>
+<p>仮身操作</p>
+<p>押した位置の仮身に対する操作。メニューの定義。</p>
+</document>
+<menu>
+<item code="vobj.open">開く</item>
+<item code="vobj.close">閉じる</item>
+<line/>
+<item code="vobj.attr">属性変更</item>
+<item code="vobj.relation">続柄設定</item>
+<line/>
+<item code="vobj.reconnect">接続</item>
+</menu>
+</tad>

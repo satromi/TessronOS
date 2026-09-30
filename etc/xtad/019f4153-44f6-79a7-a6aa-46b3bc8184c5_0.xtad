@@ -1,0 +1,68 @@
+<tad version="0121" filename="SCRIPT／MCP認証" encoding="UTF-8">
+<document>
+<docScale hunit="-120" vunit="-120"/>
+<text lang="33" bpat="0"/>
+<p><paper type="doc" length="1403" width="992" binding="0" imposition="0" top="94" bottom="94" left="108" right="85" />
+<docmargin top="94" bottom="94" left="108" right="85" />
+<font direction="0" kerning="0" pattern="1" space="0"/><font size="7.2"/>VERSION　2</p>
+<p>DEBUG　0</p>
+<p></p>
+<p>PROLOGUE</p>
+<p>LOCAL　トークン：C［128］</p>
+<p>LOCAL　ヘッダ：C［512］</p>
+<p>LOCAL　本文：C［512］</p>
+<p>LOCAL　値：C［64］</p>
+<p>LOCAL　名前：C［128］</p>
+<p>LOCAL　応答：C［256］</p>
+<p>LOCAL　大きさ：I</p>
+<p>LOCAL　長さ：I</p>
+<p></p>
+<p>CONSOLE　1</p>
+<p>MESG　”＝＝＝　MCP認証+動的呼び出し (2026-07-28)　＝＝＝”</p>
+<p>MESG　”接続先: http://localhost:3333/mcp”</p>
+<p>MESG　”(ローカルMCPサーバを起動しておくこと)”</p>
+<p></p>
+<p># --- 認証トークンを実身「APIキー」から読む(FREADが実身をTAD変換して読む) ---</p>
+<p># offset=4 で TS_TEXT ヘッダ(0xffe1,len の2UH)を飛ばし、 0xffe2(65506)まで=トークン</p>
+<p>FREAD　”APIキー”，0，4，240，トークン，大きさ</p>
+<p>長さ＝0</p>
+<p>WHILE　（トークン［長さ］！＝0　＆＆　トークン［長さ］！＝65506）</p>
+<p>　長さ＝長さ＋1</p>
+<p>ENDWHILE</p>
+<p>トークン［長さ］＝0</p>
+<p>MESG　”トークン取得: ％s (len=％d)”，トークン，長さ</p>
+<p></p>
+<p># --- 必須ヘッダ(MCP-Protocol-Version/Mcp-Method)+認証を SPRINTF で組む ---</p>
+<p>SPRINTF　ヘッダ，”Content-Type:application/json\nAccept:application/json, text/event-stream\nMCP-Protocol-Version:2026-07-28\nMcp-Method:tools/list\nAuthorization:Bearer %s”，トークン</p>
+<p></p>
+<p>MESG　”[1] tools/list (認証ヘッダ付き)”</p>
+<p>HTTPREQ　”POST”，”http://localhost:3333/mcp”，ヘッダ，”{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"tadjs\",\"version\":\"1.0\"},\"io.modelcontextprotocol/clientCapabilities\":{}}}}”</p>
+<p>IF　（＄ERR＝＝0）</p>
+<p>　MESG　”　ステータス=％d”，＄HTTPST</p>
+<p>　JSONGET　名前，”result.tools.0.name”</p>
+<p>　IF　（＄ERR＝＝0）</p>
+<p>　　MESG　”　道具0 名前 = ％s”，名前</p>
+<p>　ENDIF</p>
+<p>ELSE</p>
+<p>　MESG　”　失敗 (ERR=％d)”，＄ERR</p>
+<p>ENDIF</p>
+<p></p>
+<p># --- 動的 tools/call: 実行時に決めた値を SPRINTF で本文に埋め込む ---</p>
+<p># tools/call はヘッダに Mcp-Name(=params.name) も必須</p>
+<p>MESG　”[2] tools/call (動的引数)”</p>
+<p>SPRINTF　値，”BTRON-microscript”</p>
+<p>SPRINTF　ヘッダ，”Content-Type:application/json\nAccept:application/json, text/event-stream\nMCP-Protocol-Version:2026-07-28\nMcp-Method:tools/call\nMcp-Name:echo\nAuthorization:Bearer %s”，トークン</p>
+<p>SPRINTF　本文，”{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"%s\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"tadjs\",\"version\":\"1.0\"},\"io.modelcontextprotocol/clientCapabilities\":{}}}}”，値</p>
+<p>HTTPREQ　”POST”，”http://localhost:3333/mcp”，ヘッダ，本文</p>
+<p>IF　（＄ERR＝＝0）</p>
+<p>　MESG　”　ステータス=％d”，＄HTTPST</p>
+<p>　JSONGET　応答，”result.content.0.text”</p>
+<p>　IF　（＄ERR＝＝0）</p>
+<p>　　MESG　”　応答 = ％s”，応答</p>
+<p>　ENDIF</p>
+<p>ENDIF</p>
+<p></p>
+<p>MESG　”＝＝＝　完了　＝＝＝”</p>
+<p>END</p>
+</document>
+</tad>

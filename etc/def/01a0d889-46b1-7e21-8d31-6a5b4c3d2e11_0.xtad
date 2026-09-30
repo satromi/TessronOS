@@ -1,0 +1,25 @@
+<tad version="1.0" encoding="UTF-8" filename="ファイル変換のメニュー">
+<document>
+<p>ファイル変換のメニュー</p>
+<p>ファイル変換の窓のメニュー。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7eb1-8a31-6c5d4e3f2a11"/></include>
+<item code="open">開く</item>
+<item code="import" key="I">実身に変換（取込）</item>
+<item code="export" key="O">ファイルに変換（書出）</item>
+<line/>
+<item code="mount" key="M">マウント・取外し</item>
+<item code="ro" key="W">読込みのみでマウント</item>
+<item code="ftp" key="F">FTP に接続</item>
+<item code="dir">ディレクトリ<link id="01a0d889-46b2-7f32-8e42-7b6c5d4e3f22_0.xtad" vobjid="01a0d8c3-2002-7ec1-8a41-7c6d5e4f3a21"/></item>
+<item code="all" key="A">すべて選択</item>
+<item code="refresh" key="R">一覧を新しく</item>
+<line/>
+<item code="tadjs" key="T">TADjs の組で書き出す</item>
+<item code="layout" key="L">図形の配置も書き出す</item>
+<item code="sjis" key="J">文章を Shift_JIS で書き出す</item>
+<item code="argbox" key="B">起動した実身に取り込む</item>
+<item code="win">ウインドウ<link id="01a0d889-46ba-7c69-8f7a-b0c1d2e3f456_0.xtad" vobjid="01a0d8c3-2002-7e67-8a05-92a3b4c5d6e7"/></item>
+</menu>
+</tad>

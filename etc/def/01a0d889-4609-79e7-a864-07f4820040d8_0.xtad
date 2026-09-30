@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="操作">
+<document>
+<p>操作</p>
+<p>仮身ネットワークの表示方法。メニューの定義。</p>
+</document>
+<menu>
+<item code="net" key="N">仮身ネットワーク表示</item>
+<item code="graph" key="G">仮身グラフ表示</item>
+</menu>
+</tad>

@@ -1,0 +1,47 @@
+{
+  "name": "基本表計算",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2025-11-23T07:09:55.529Z",
+  "updateDate": "2025-12-06T08:04:37.434Z",
+  "accessDate": "2025-12-06T08:04:52.052Z",
+  "periodDate": null,
+  "refCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TRON User",
+  "window": {
+    "pos": {
+      "x": 100,
+      "y": 100
+    },
+    "width": 767,
+    "height": 423,
+    "minWidth": 200,
+    "minHeight": 200,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff"
+  },
+  "applist": {
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": true
+    },
+    "virtual-object-list": {
+      "name": "仮身一覧",
+      "defaultOpen": false
+    }
+  },
+  "realId": "019af2b0-ffba-70d3-8110-68302de59ba1",
+  "recordCount": 1
+}

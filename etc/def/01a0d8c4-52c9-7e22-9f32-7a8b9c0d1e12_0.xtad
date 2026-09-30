@@ -1,0 +1,120 @@
+<tad version="1.0" encoding="UTF-8" filename="システム環境設定のデータボックス">
+<document>
+<p>システム環境設定のデータボックス</p>
+<p>システム環境設定の窓のパネルと、尋ねるパネルの定義。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,600,470" title="システム環境設定" kind="bare">
+<tags num="100" rect="0,0,600,470" inner="4,28,596,466" value="1"><tag>＠機器</tag><tag>機器情報</tag><tag>＋電源管理</tag><tag>＠画面</tag><tag>背景</tag><tag>＋配色</tag><tag>書体</tag><tag>バージョン</tag></tags>
+<list num="1" sheet="1" rect="12,64,480,454"/>
+<button num="2" sheet="1" rect="496,64,584,88" emph="true">表示</button>
+<text sheet="2" x="16" y="89">現在の電源：</text>
+<box num="3" sheet="2" rect="184,70,588,96" off="true"/>
+<text sheet="2" x="16" y="123">バッテリ：</text>
+<box num="4" sheet="2" rect="184,104,588,130" off="true"/>
+<text sheet="2" x="16" y="157">電源管理機能：</text>
+<box num="5" sheet="2" rect="184,138,588,164" off="true"/>
+<button num="6" sheet="2" rect="184,192,304,216">再起動</button>
+<button num="7" sheet="2" rect="320,192,440,216">電源を切る</button>
+<list num="8" sheet="3" rect="12,64,588,386"/>
+<text sheet="3" x="16" y="412">配置：</text>
+<select num="9" sheet="3" rect="104,394,434,428" across="true" value="1"><name>並べる</name><name>中央</name><name>拡大</name></select>
+<text sheet="3" x="16" y="454">名前を選ぶとただちに背景が変わります</text>
+<list num="11" sheet="4" rect="12,64,588,416"/>
+<text sheet="4" x="16" y="448">すでに開いているウィンドウは、開き直すと反映されることがあります</text>
+<list num="13" sheet="5" rect="12,40,588,416"/>
+<box num="14" sheet="5" rect="12,424,588,450" off="true"/>
+<text sheet="6" x="16" y="59">システムバージョン：</text>
+<box num="15" sheet="6" rect="184,40,588,66" off="true"/>
+<text sheet="6" x="16" y="89">カーネル：</text>
+<box num="16" sheet="6" rect="184,70,588,96" off="true"/>
+<text sheet="6" x="16" y="119">作成日時：</text>
+<box num="17" sheet="6" rect="184,100,588,126" off="true"/>
+<text sheet="6" x="16" y="149">機種：</text>
+<box num="18" sheet="6" rect="184,130,588,156" off="true"/>
+<text sheet="6" x="16" y="179">プロセッサ：</text>
+<box num="19" sheet="6" rect="184,160,588,186" off="true"/>
+<text sheet="6" x="16" y="209">メモリ：</text>
+<box num="20" sheet="6" rect="184,190,588,216" off="true"/>
+<list num="21" sheet="6" rect="12,228,588,422"/>
+<text sheet="6" x="16" y="452">パッケージ（.tpk）を落とすとインストール・更新</text>
+<button num="46" sheet="6" rect="480,434,588,458">詳細情報</button>
+<text sheet="8" x="16" y="83">画面サイズ／色数</text>
+<list num="23" sheet="8" rect="12,94,380,420"/>
+<text num="24" sheet="8" x="396" y="113">色数：１６７７万色</text>
+<button num="25" sheet="8" rect="400,434,488,458">取り消し</button>
+<button num="26" sheet="8" rect="496,434,584,458" emph="true">設定</button>
+<text sheet="9" x="16" y="89">アダプタ：</text>
+<box num="27" sheet="9" rect="184,70,588,96" off="true"/>
+<text sheet="9" x="16" y="119">ＭＡＣアドレス：</text>
+<box num="28" sheet="9" rect="184,100,588,126" off="true"/>
+<text sheet="9" x="16" y="149">リンク：</text>
+<box num="29" sheet="9" rect="184,130,588,156" off="true"/>
+<text sheet="9" x="16" y="179">ＩＰアドレス：</text>
+<box num="30" sheet="9" rect="184,160,588,186" off="true"/>
+<text sheet="9" x="16" y="209">ＤＨＣＰ：</text>
+<box num="31" sheet="9" rect="184,190,588,216" off="true"/>
+<text sheet="9" x="16" y="239">送受信：</text>
+<box num="32" sheet="9" rect="184,220,588,246" off="true"/>
+<button num="22" sheet="9" rect="496,434,584,458" emph="true">確認</button>
+<text sheet="10" x="16" y="83">ＵＳＢ接続機器（階層 ポート 機器ID 種別 名前）</text>
+<list num="33" sheet="10" rect="12,94,588,422"/>
+<button num="34" sheet="10" rect="12,434,132,458">表示更新</button>
+<button num="22" sheet="10" rect="496,434,584,458" emph="true">確認</button>
+<text sheet="11" x="16" y="83">ディスク（名前 大きさ 付け先）</text>
+<list num="35" sheet="11" rect="12,94,588,422"/>
+<button num="22" sheet="11" rect="496,434,584,458" emph="true">確認</button>
+<text sheet="12" x="16" y="89">画面：</text>
+<box num="36" sheet="12" rect="184,70,588,96" off="true"/>
+<text sheet="12" x="16" y="119">画素：</text>
+<box num="37" sheet="12" rect="184,100,588,126" off="true"/>
+<text sheet="12" x="16" y="149">ドライバ：</text>
+<box num="38" sheet="12" rect="184,130,588,156" off="true"/>
+<button num="22" sheet="12" rect="496,434,584,458" emph="true">確認</button>
+<text sheet="13" x="16" y="102">キーボード種別：</text>
+<select num="39" sheet="13" rect="184,70,520,130" value="1"><name>１０６／１０９日本語キーボード</name><name>１０１／１０４英語キーボード</name></select>
+<text sheet="13" x="16" y="165">起動時の入力モード：</text>
+<select num="40" sheet="13" rect="184,142,400,176" across="true" value="1"><name>かな</name><name>英数</name></select>
+<text sheet="13" x="16" y="209">これはかな入力／ローマ字入力の設定ではありません（ユーザ環境設定で設定します）</text>
+<button num="41" sheet="13" rect="400,434,488,458">取り消し</button>
+<button num="42" sheet="13" rect="496,434,584,458" emph="true">設定</button>
+<text sheet="14" x="16" y="89">出力：</text>
+<box num="43" sheet="14" rect="184,70,588,96" off="true"/>
+<text sheet="14" x="16" y="119">標本化周波数：</text>
+<box num="44" sheet="14" rect="184,100,588,126" off="true"/>
+<text sheet="14" x="16" y="149">チャネル：</text>
+<box num="45" sheet="14" rect="184,130,588,156" off="true"/>
+<button num="22" sheet="14" rect="496,434,584,458" emph="true">確認</button>
+</panel>
+<panel num="10" rect="0,0,460,106" title="システム環境設定">
+<text num="1" x="24" y="44"> </text>
+<button num="101" rect="348,70,436,94" answer="ok" emph="true">確認</button>
+</panel>
+<panel num="11" rect="0,0,460,128" title="システム環境設定">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="102" rect="196,92,284,116" answer="cancel">取り消し</button>
+<button num="3" rect="296,92,436,116" answer="ok" emph="true"> </button>
+</panel>
+<panel num="13" rect="0,0,520,214" title="アプリケーションの詳細情報">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="64"> </text>
+<text num="3" x="24" y="88"> </text>
+<text num="4" x="24" y="112"> </text>
+<text num="5" x="24" y="136"> </text>
+<text num="6" x="24" y="160"> </text>
+<button num="106" rect="408,178,496,202" answer="ok" emph="true">確認</button>
+</panel>
+<panel num="12" rect="0,0,480,236" title="システム環境設定">
+<text x="24" y="40">画面の設定を変更しましたのでシステムを再起動します。</text>
+<text x="24" y="62">再起動すると、画面の確認パネルが表示されますので、</text>
+<text x="24" y="84">正しく表示されたときは、３０秒以内に［Ｅｎｔｅｒ］</text>
+<text x="24" y="106">キーを押してください。</text>
+<text x="24" y="128">正しく表示されなかったときは、［Ｅｎｔｅｒ］以外の</text>
+<text x="24" y="150">キーを押すか、３０秒以上キーを押さないでください。</text>
+<text x="24" y="172">以前の画面の設定に戻します。</text>
+<button num="104" rect="192,200,320,224" answer="cancel">再起動しない</button>
+<button num="105" rect="332,200,460,224" answer="ok" emph="true">再起動する</button>
+</panel>
+</databox>
+</tad>

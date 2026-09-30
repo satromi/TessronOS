@@ -1,0 +1,14 @@
+#################################################
+# NETCONF for TessronOS
+#################################################
+#
+# Network Conf
+#
+$$HOST	___0 cnet 255.255.255.0 0.0.0.0 NETDRV DEVICE=neta
+$$DNS
+$$DNS
+$$GW
+#
+# Time Server
+#
+$$NTP	pool.ntp.org

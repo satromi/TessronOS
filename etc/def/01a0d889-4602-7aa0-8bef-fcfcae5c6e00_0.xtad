@@ -1,0 +1,16 @@
+<tad version="1.0" encoding="UTF-8" filename="基本図形編集のメニュー">
+<document>
+<p>基本図形編集のメニュー</p>
+<p>基本図形編集の窓のメニュー。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7450-9e63-3c6752aa8425"/></include>
+<item>保存<link id="01a0d889-45ed-7774-81e6-53a2d63223c7_0.xtad" vobjid="01a0d8c3-2002-7a63-a11c-6233230a413d"/></item>
+<item>表示<link id="01a0d889-45fe-787a-ac32-208923558717_0.xtad" vobjid="01a0d8c3-2002-7891-b408-36afb22eff10"/></item>
+<item>編集<link id="01a0d889-45ff-78ca-937b-8a84e95b7bf5_0.xtad" vobjid="01a0d8c3-2002-7507-bdee-3b3a7f4988d5"/></item>
+<item>図形操作<link id="01a0d889-4600-7d4e-b3a8-3d83cfa5ffd9_0.xtad" vobjid="01a0d8c3-2002-7d36-b25b-49ec32ef22a5"/></item>
+<item>保護<link id="01a0d889-45f0-730d-9ed9-6c8646593b2c_0.xtad" vobjid="01a0d8c3-2002-7f21-9d99-88bc4e870a01"/></item>
+<item>書式/印刷<link id="01a0d889-4601-781c-93e3-2adaac65ea0b_0.xtad" vobjid="01a0d8c3-2002-7afa-b72b-2e117e503cb4"/></item>
+<include><link id="01a0d889-45ec-766a-986d-5fad49d48e06_0.xtad" vobjid="01a0d8c3-2002-77d8-b51a-37c5b1125d17"/></include>
+</menu>
+</tad>

@@ -1,0 +1,13 @@
+<tad version="1.0" encoding="UTF-8" filename="コンソールのメニュー">
+<document>
+<p>コンソールのメニュー</p>
+<p>コンソールの窓のメニュー。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7e01-8a13-5b2c7d9e0f14"/></include>
+<item code="clear">画面消去</item>
+<item code="history">起動からの記録を表示</item>
+<item code="follow">末尾を追う</item>
+<item code="win">ウインドウ<link id="01a0d889-46ba-7c69-8f7a-b0c1d2e3f456_0.xtad" vobjid="01a0d8c3-2002-7e67-8a00-92a3b4c5d6e7"/></item>
+</menu>
+</tad>

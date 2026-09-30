@@ -1,0 +1,19 @@
+<tad version="1.0" encoding="UTF-8" filename="バックアップのメニュー">
+<document>
+<p>バックアップのメニュー</p>
+<p>バックアップの窓のメニュー。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7eb0-9f35-d1a2c3b4e5f6"/></include>
+<item code="save" key="S">保存</item>
+<item code="restore" key="R">復帰</item>
+<line/>
+<item code="pick">保存する根の印</item>
+<item code="exclude">除く実身の印</item>
+<item code="dest">保存先を替える</item>
+<item code="source">書庫の場所を替える</item>
+<line/>
+<item code="stop">中止</item>
+<item code="win">ウインドウ<link id="01a0d889-46ba-7c69-8f7a-b0c1d2e3f456_0.xtad" vobjid="01a0d8c3-2002-7e67-8a04-92a3b4c5d6e7"/></item>
+</menu>
+</tad>

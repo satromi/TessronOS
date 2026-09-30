@@ -1,0 +1,31 @@
+<tad version="1.0" encoding="UTF-8">
+<figure>
+<figView top="0" left="0" right="800" bottom="600"/>
+<figDraw top="0" left="0" right="800" bottom="600"/>
+<figScale hunit="-96" vunit="-96"/>
+<link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" vobjid="019cf904-441d-7eba-8f0b-06de04052009" vobjleft="41" vobjtop="65" vobjright="165" vobjbottom="90" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="5" pictdisp="true" namedisp="true" roledisp="false" typedisp="false" updatedisp="false" framedisp="true" autoopen="false" zIndex="1" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true}}"/>
+<link id="019a6c9a-fbc2-76c1-b965-4ac1f7e4dcb7_0.xtad" vobjid="019cf904-441d-7c35-93ef-67b73976e0d8" vobjleft="308" vobjtop="248" vobjright="408" vobjbottom="273" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="3" pictdisp="true" namedisp="true" roledisp="false" typedisp="false" updatedisp="false" framedisp="true" autoopen="false" zIndex="2" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true}}"/>
+<line lineType="0" lineWidth="1" l_pat="1" f_pat="0" start_arrow="0" end_arrow="1" arrow_type="filled" conn_pat="3" start_conn="0,4" end_conn="1,0" lineConnectionType="curve" points="103,96 358,248" zIndex="3" />
+<document>
+<docView viewleft="175" viewtop="65" viewright="471" viewbottom="126"/>
+<docDraw drawleft="175" drawtop="65" drawright="471" drawbottom="126"/>
+<docScale hunit="-96" vunit="-96"/>
+<text lang="0" bpat="0" zIndex="4"/>
+<font size="12"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+・線は線種、矢印など変更でき、<br/>
+仮身含めた図形を線で繋げられます。</document>
+<image lineType="0" lineWidth="1" l_pat="0" f_pat="0" angle="0" rotation="0" flipH="false" flipV="false" left="37" top="187" right="175" bottom="325" href="019aaa4e-de25-72ad-8518-ab392b7ea301_0_0.png" zIndex="5" />
+<document>
+<docView viewleft="35" viewtop="326" viewright="488" viewbottom="387"/>
+<docDraw drawleft="35" drawtop="326" drawright="488" drawbottom="387"/>
+<docScale hunit="-96" vunit="-96"/>
+<text lang="0" bpat="0" zIndex="6"/>
+<font size="12"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+・画像もExplorerなど別アプリから、<br/>
+基本図形編集のウインドウにドラッグして配置できます。</document>
+</figure>
+</tad>

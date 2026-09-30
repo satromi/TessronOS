@@ -1,0 +1,38 @@
+{
+  "name": "仮身一覧",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-09-26T00:00:00Z",
+  "updateDate": "2026-09-26T00:00:00Z",
+  "accessDate": "2026-09-26T00:00:00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 1,
+  "editable": false,
+  "deletable": false,
+  "readable": true,
+  "maker": "TessronOS",
+  "applist": {},
+  "tessronos": {
+    "program": {
+      "id": "virtual-object-list",
+      "kind": "app",
+      "name": "仮身一覧",
+      "version": "R1.000",
+      "builtin": true,
+      "base": [
+        "0199ce60-532a-7670-b8bc-84c970de11dc"
+      ]
+    },
+    "access": {
+      "owner": "01a0d680-3aa0-75b3-bd7d-075e14217cd2",
+      "group": "01a0d680-3aa1-7922-ae79-ba5cbbaa2037",
+      "mode": "rwxr-xr-x",
+      "attr": [
+        "perm"
+      ],
+      "acl": [],
+      "records": []
+    }
+  }
+}

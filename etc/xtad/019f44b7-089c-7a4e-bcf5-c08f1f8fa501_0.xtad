@@ -1,0 +1,44 @@
+<tad version="0121" filename="SCRIPT／MCP入力" encoding="UTF-8">
+<document>
+<docScale hunit="-120" vunit="-120"/>
+<text lang="33" bpat="0"/>
+<p><paper type="doc" length="1403" width="992" binding="0" imposition="0" top="94" bottom="94" left="108" right="85" />
+<docmargin top="94" bottom="94" left="108" right="85" />
+<font direction="0" kerning="0" pattern="1" space="0"/><font size="7.2"/>VERSION　2</p>
+<p>DEBUG　0</p>
+<p></p>
+<p>PROLOGUE</p>
+<p>　MESG　”＝＝＝　入力連動 tools/call (2026-07-28)　＝＝＝”</p>
+<p>　MESG　”@入力 に文字を入れEnterEnter、 [操作]→送信”</p>
+<p>　# 役者を可視化する(APPEAR しないと描画されない=箱も文字も見えない)</p>
+<p>　APPEAR　入力</p>
+<p>　APPEAR　結果</p>
+<p>　# 役者 @入力 を入力モードにする(ユーザが文字を打てる)</p>
+<p>　INPUT　入力</p>
+<p>END</p>
+<p></p>
+<p>ACTION　送信　MENU　”送信”</p>
+<p>　LOCAL　値：C［128］</p>
+<p>　LOCAL　本文：C［512］</p>
+<p>　LOCAL　応答：C［128］</p>
+<p>　LOCAL　長さ：I</p>
+<p>　# 役者 @入力 の文字を読む (.TL=文字数, .TX=文字コード配列)</p>
+<p>　長さ＝入力.TL</p>
+<p>　値［0：長さ］＝入力.TX</p>
+<p>　値［長さ］＝0</p>
+<p>　MESG　”送信: ％s (len=％d)”，値，長さ</p>
+<p>　# tools/call 本文 (params._meta にプロトコル版とクライアント情報が必須)</p>
+<p>　SPRINTF　本文，”{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"%s\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"tadjs\",\"version\":\"1.0\"},\"io.modelcontextprotocol/clientCapabilities\":{}}}}”，値</p>
+<p>　HTTPREQ　”POST”，”http://localhost:3333/mcp”，”Content-Type:application/json\nAccept:application/json, text/event-stream\nMCP-Protocol-Version:2026-07-28\nMcp-Method:tools/call\nMcp-Name:echo”，本文</p>
+<p>　IF　（＄ERR＝＝0）</p>
+<p>　　JSONGET　応答，”result.content.0.text”</p>
+<p>　　IF　（＄ERR＝＝0）</p>
+<p>　　　MESG　”応答 = ％s”，応答</p>
+<p>　　　TEXT　結果，”％s”，応答</p>
+<p>　　ENDIF</p>
+<p>　ELSE</p>
+<p>　　MESG　”失敗 ERR=％d”，＄ERR</p>
+<p>　ENDIF</p>
+<p>END</p>
+</document>
+</tad>

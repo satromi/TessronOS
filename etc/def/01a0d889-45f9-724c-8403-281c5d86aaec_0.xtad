@@ -1,0 +1,19 @@
+<tad version="1.0" encoding="UTF-8" filename="書式">
+<document>
+<p>書式</p>
+<p>書式。メニューの定義。</p>
+</document>
+<menu>
+<item code="fmt.tab">新規タブ書式...</item>
+<item code="fmt.indent" key="I">字下げ</item>
+<item>行揃え<link id="01a0d889-45fb-7af6-bb25-906b9f4219b9_0.xtad" vobjid="01a0d8c3-2002-7e4d-810e-c8c0436801d4"/></item>
+<item>文字間隔<link id="01a0d889-45fc-7456-9e2d-8ea53ed127b0_0.xtad" vobjid="01a0d8c3-2002-79b8-8ebc-34d9c89e37e8"/></item>
+<line/>
+<item>ルビ<link id="01a0d889-45fd-7c2a-8c47-978990884a80_0.xtad" vobjid="01a0d8c3-2002-7a52-8db1-8a1c76466e61"/></item>
+<line/>
+<item code="pagebreak">改ページ</item>
+<line/>
+<item code="paperframe">用紙枠表示オンオフ</item>
+<item code="pagesetup">用紙設定...</item>
+</menu>
+</tad>

@@ -1,0 +1,13 @@
+<tad version="1.0" encoding="UTF-8">
+<document>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0"/>
+<p>
+<font size="28"><font color="#51aefb"><bold>□書庫解凍</bold></font></font>
+</p>
+<p>
+<font size="14">書庫解凍は、BTORN（超漢字） の圧縮ツールで圧縮された複数の実身を展開します。<br/>
+書庫形式（拡張子:BPK）で圧縮されたファイルを解凍、TADデータに変換した上で、TADセグメントを読んでいってTADjs Desktopで扱えるxmlTADに変換します。</font>
+</p>
+</document>
+</tad>

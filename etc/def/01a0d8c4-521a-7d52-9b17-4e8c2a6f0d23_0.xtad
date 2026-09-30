@@ -1,0 +1,6 @@
+<tad version="1.0" encoding="UTF-8" filename="シリアル通信">
+<document>
+<p>シリアル通信</p>
+<p>シリアルポートとの送受信。プロセスとして動く小物。実行形式はレコード1</p>
+</document>
+</tad>

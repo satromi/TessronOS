@@ -1,0 +1,6 @@
+<tad version="1.0" encoding="UTF-8" filename="押下音">
+<document>
+<p>押下音</p>
+<p>キーやボタンを押したときのクリック音(ユーザ環境設定の音属性で鳴らすと決めたとき)。音色は属性の tessronos.sound.tone(周波数 hz、長さ ms)で、レコード1に WAV を置けばその音が鳴る。サウンドのデバイス実身から鳴らす。</p>
+</document>
+</tad>

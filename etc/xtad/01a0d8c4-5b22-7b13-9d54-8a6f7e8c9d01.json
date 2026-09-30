@@ -1,0 +1,52 @@
+{
+  "name": "ブラウザ",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-09-28T00:00:00Z",
+  "updateDate": "2026-09-28T00:00:00Z",
+  "accessDate": "2026-09-28T00:00:00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TessronOS",
+  "window": {
+    "pos": {
+      "x": 120,
+      "y": 80
+    },
+    "width": 800,
+    "height": 560,
+    "minWidth": 240,
+    "minHeight": 160,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff"
+  },
+  "applist": {
+    "web-browser": {
+      "name": "ブラウザ",
+      "defaultOpen": true
+    },
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": false
+    }
+  },
+  "webBrowser": {
+    "url": "https://www.tron.org",
+    "title": "ブラウザ",
+    "back": [],
+    "forward": []
+  }
+}

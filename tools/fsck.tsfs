@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Check a TSFS native volume, version 4 (design 11.6, 11.11).
+
+  tools/fsck.tsfs [--fix] [--relink] [--json] [-v]
+                 [--partition N | --offset N | --whole] image
+
+Without options it only reads: the two superblocks and the spares, the
+journal, every group head and free map, the three trees (the index, the
+garbage list, the orphan tree), every object block with its parts, the
+reference counts against the link tables and the holds, the garbage
+list and the orphan tree against the marks of the objects. Transactions
+the journal holds but never put in place are laid over the blocks in
+memory and checked as the kernel will see them after it replays them.
+Objects deleted while open and link tables marked to be made again are
+what a cut in the power leaves; the kernel finishes them when it mounts
+the volume, so they are warnings.
+
+  --fix      replay the journal, make the free maps, the group heads and
+             the free counts again from what is in use, then finish the
+             orphan tree as the kernel does at mount (objects deleted
+             while open taken away, marked link tables made again), and
+             write both superblocks and the spares
+  --relink   make every object's link table again from its xmlTAD
+             records, and every reference count from the link tables
+             and the holds (the superblock's roots each hold theirs)
+  --json     the report as JSON on standard output
+
+Exit status: 0 when the volume has no errors (after --fix, when none are
+left), 1 when it has, 2 when it could not be read at all.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from tsfs_py import TsfsError, Volume
+from tsfs_py.check import Checker
+from tsfs_py.cli import add_volume_args, open_device
+from tsfs_py import repair
+
+
+def show(rep, verbose):
+    if verbose:
+        for where, what in rep.notes:
+            print("  %s: %s" % (where, what))
+    for where, what in rep.warnings:
+        print("warning: %s: %s" % (where, what))
+    for where, what in rep.errors:
+        print("error: %s: %s" % (where, what))
+
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="fsck.tsfs", description="check a TSFS native volume")
+    p.add_argument("image", help="image file holding the volume")
+    p.add_argument("--fix", action="store_true",
+                   help="replay the journal and make the maps again")
+    p.add_argument("--relink", action="store_true",
+                   help="make the link tables and reference counts again")
+    p.add_argument("--json", action="store_true",
+                   help="write the report as JSON")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="say what was looked at, not only what is wrong")
+    add_volume_args(p)
+    args = p.parse_args()
+    writing = args.fix or args.relink
+
+    try:
+        dev = open_device(args.image, args, writable=writing)
+        vol = Volume.open(dev, replay=writing)
+    except (TsfsError, OSError) as e:
+        if args.json:
+            print(json.dumps({"image": args.image, "readable": False,
+                              "error": str(e)}, indent=2))
+        else:
+            sys.stderr.write("fsck.tsfs: %s\n" % e)
+        return 2
+
+    actions = []
+    first = None
+    with vol:
+        if vol.replayed[0]:
+            actions.append("%d transaction(s) of the journal were put in "
+                           "place (%d blocks)" % vol.replayed)
+            vol.reload_sb()
+        checker = Checker(vol)
+        rep = checker.run()
+        first = rep
+
+        def again(reload):
+            if reload:
+                vol.reload_sb()
+            vol.maps = None
+            c = Checker(vol)
+            return c, c.run()
+
+        try:
+            # the maps first, so that what follows takes only free blocks
+            if args.fix and (rep.errors or rep.warnings or actions):
+                actions.extend(repair.fix(vol, checker))
+                checker, rep = again(True)
+            changed = False
+            if args.fix and repair.tidy_needed(checker):
+                if rep.errors:
+                    actions.append("the orphan tree was left alone: the "
+                                   "volume still has errors")
+                else:
+                    actions.extend(repair.tidy(vol, checker))
+                    checker, rep = again(False)
+                    changed = True
+            if args.relink:
+                actions.extend(repair.relink(vol, checker))
+                checker, rep = again(False)
+                changed = True
+            if args.fix and changed and (rep.errors or rep.warnings):
+                actions.extend(repair.fix(vol, checker))
+                checker, rep = again(True)
+        except (TsfsError, OSError) as e:
+            actions.append("stopped: %s" % e)
+        rep.actions = actions
+
+        if args.json:
+            out = {"image": args.image, "readable": True,
+                   "volume": vol.sb.summary(),
+                   "journal": vol.journal.summary() if vol.journal else None,
+                   "clean": rep.ok}
+            out.update(rep.to_dict())
+            if first is not rep:
+                out["before"] = {"errors": len(first.errors),
+                                 "warnings": len(first.warnings)}
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+        else:
+            print("%s: %s" % (args.image, vol.sb.label or "(no label)"))
+            if args.verbose:
+                print(str(vol.sb))
+            if first is not rep:
+                print("before: %d errors, %d warnings"
+                      % (len(first.errors), len(first.warnings)))
+            for a in actions:
+                print("done: %s" % a)
+            show(rep, args.verbose)
+            st = rep.stats
+            print("%s: %d objects, %d records, %d resources, %d links, "
+                  "%d deleted while open; %d of %d blocks free"
+                  % (args.image, st.get("objects", 0), st.get("records", 0),
+                     st.get("resources", 0), st.get("links", 0),
+                     st.get("orphans", 0),
+                     st.get("free", 0), st.get("blocks", 0)))
+            if rep.ok:
+                print("%s: no errors (%d warnings)"
+                      % (args.image, len(rep.warnings)))
+            else:
+                print("%s: %d errors, %d warnings"
+                      % (args.image, len(rep.errors), len(rep.warnings)))
+    return 0 if rep.ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

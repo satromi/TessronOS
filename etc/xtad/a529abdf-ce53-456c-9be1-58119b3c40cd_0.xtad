@@ -1,0 +1,81 @@
+<tad version="1.0" encoding="UTF-8" filename="タイトル">
+<realtime autoplay="true">
+<figure>
+<figView top="0" left="0" right="1920" bottom="1080"/>
+<figDraw top="0" left="0" right="1920" bottom="1080"/>
+<figScale hunit="-72" vunit="-72"/>
+<patterns>
+<pattern id="128" width="1" height="1" ncol="1" fgcolors="#1a1a2e" bgcolor="#ffffff"/>
+</patterns>
+
+<!-- 背景色は JSON metadata window.backgroundColor で指定 (<rect> は背景に使わない) -->
+
+<!-- メインタイトル -->
+<document>
+<docView viewleft="100" viewtop="350" viewright="1820" viewbottom="500"/>
+<docDraw drawleft="100" drawtop="350" drawright="1820" drawbottom="500"/>
+<docScale hunit="-72" vunit="-72"/>
+<text id="mainTitle" lang="0" bpat="0" zIndex="90"/>
+<font size="54"/>
+<font face="sans-serif"/>
+<font color="#FFFFFF"/>
+<p align="center">実時間制御TAD</p>
+</document>
+
+<!-- サブタイトル -->
+<document>
+<docView viewleft="100" viewtop="550" viewright="1820" viewbottom="650"/>
+<docDraw drawleft="100" drawtop="550" drawright="1820" drawbottom="650"/>
+<docScale hunit="-72" vunit="-72"/>
+<text id="subTitle" lang="0" bpat="0" zIndex="80"/>
+<font size="27"/>
+<font color="#AAAAAA"/>
+<p align="center">マルチメディアプレゼンテーションのための拡張仕様</p>
+</document>
+
+<!-- 日付 -->
+<document>
+<docView viewleft="100" viewtop="900" viewright="1820" viewbottom="1000"/>
+<docDraw drawleft="100" drawtop="900" drawright="1820" drawbottom="1000"/>
+<docScale hunit="-72" vunit="-72"/>
+<text id="date" lang="0" bpat="0" zIndex="70"/>
+<font size="18"/>
+<font color="#888888"/>
+<p align="center">2026年1月</p>
+</document>
+</figure>
+
+<realData>
+<stream number="1">
+<deviceName>display:</deviceName>
+</stream>
+
+<!-- タイトルのフェードイン（500ms〜） -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="500"/>
+<interpolate function="linear" divisions="30">
+<textControl ref="mainTitle" command="setAlpha" value="0.0"/>
+<textControl ref="mainTitle" command="setAlpha" value="1.0"/>
+</interpolate>
+</realGroup>
+
+<!-- サブタイトルのフェードイン（1500ms〜） -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="1500"/>
+<interpolate function="linear" divisions="20">
+<textControl ref="subTitle" command="setAlpha" value="0.0"/>
+<textControl ref="subTitle" command="setAlpha" value="1.0"/>
+</interpolate>
+</realGroup>
+
+<!-- 日付のフェードイン（2500ms〜） -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="2500"/>
+<interpolate function="linear" divisions="15">
+<textControl ref="date" command="setAlpha" value="0.0"/>
+<textControl ref="date" command="setAlpha" value="1.0"/>
+</interpolate>
+</realGroup>
+</realData>
+</realtime>
+</tad>

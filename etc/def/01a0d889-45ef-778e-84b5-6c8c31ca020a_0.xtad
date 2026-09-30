@@ -1,0 +1,22 @@
+<tad version="1.0" encoding="UTF-8" filename="編集">
+<document>
+<p>編集</p>
+<p>仮身一覧の編集。メニューの定義。</p>
+</document>
+<menu>
+<item code="tray">トレー<link id="01a0d889-460c-7eda-8b47-5745d175681c_0.xtad" vobjid="01a0d8c3-2002-798f-bcc3-0ca096915b1e"/></item>
+<line/>
+<item code="undo">取消</item>
+<item code="copy" key="C">トレーへ複写</item>
+<item code="paste" key="V">トレーから複写</item>
+<item code="cut" key="X">トレーへ移動</item>
+<item code="moveback" key="Z">トレーから移動</item>
+<line/>
+<item code="delete" key="Delete">削除</item>
+<line/>
+<item code="front" key="F">いちばん前へ移動</item>
+<item code="back" key="R">いちばん後ろへ移動</item>
+<line/>
+<item code="arrange" key="D">整頓</item>
+</menu>
+</tad>

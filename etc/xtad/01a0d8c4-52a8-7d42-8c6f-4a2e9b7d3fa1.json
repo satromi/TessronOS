@@ -1,0 +1,39 @@
+{
+  "name": "20251018発表資料公開用",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-09-27T00:00:00Z",
+  "updateDate": "2026-09-27T00:00:00Z",
+  "accessDate": "2026-09-27T00:00:00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 2,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TessronOS",
+  "applist": {
+    "unpack-file": {
+      "name": "書庫解凍",
+      "defaultOpen": true
+    }
+  },
+  "tessronos": {
+    "file": {
+      "name": "20251018発表資料公開用.bpk",
+      "mediatype": "application/x-btron-archive",
+      "size": 29288,
+      "source": "etc/xtad"
+    },
+    "records": [
+      {
+        "n": 0,
+        "rt": 1
+      },
+      {
+        "n": 1,
+        "rt": 15
+      }
+    ]
+  }
+}

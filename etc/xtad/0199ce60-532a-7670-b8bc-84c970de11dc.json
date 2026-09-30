@@ -1,0 +1,46 @@
+{
+  "name": "仮身一覧",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2025-10-13T00:00:00Z",
+  "updateDate": "2025-10-13T00:00:00Z",
+  "accessDate": "2025-10-13T00:00:00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TRON User",
+  "window": {
+    "pos": {
+      "x": 100,
+      "y": 100
+    },
+    "width": 600,
+    "height": 400,
+    "minWidth": 200,
+    "minHeight": 200,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff"
+  },
+  "applist": {
+    "virtual-object-list": {
+      "name": "仮身一覧",
+      "defaultOpen": true
+    },
+    "basic-figure-editor": {
+      "name": "基本図形編集",
+      "defaultOpen": false
+    }
+  }
+}

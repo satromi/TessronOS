@@ -1,0 +1,43 @@
+{
+  "name": "SCRIPT:サンプル1",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-06-08T00:00:00Z",
+  "updateDate": "2026-06-08T00:00:00Z",
+  "accessDate": "2026-06-08T00:00:00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TRON User",
+  "window": {
+    "pos": {
+      "x": 150,
+      "y": 150
+    },
+    "width": 640,
+    "height": 480,
+    "minWidth": 320,
+    "minHeight": 240,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "wordWrap": true,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff"
+  },
+  "applist": {
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": true
+    }
+  }
+}

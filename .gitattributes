@@ -1,0 +1,7 @@
+# WSL と Windows の両方からビルドするため、テキストは LF で統一する
+* text=auto eol=lf
+*.pdf binary
+*.png binary
+*.img binary
+*.bpk binary
+*.TAD binary

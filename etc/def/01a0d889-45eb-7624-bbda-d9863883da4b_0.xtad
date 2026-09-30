@@ -1,0 +1,9 @@
+<tad version="1.0" encoding="UTF-8" filename="実行">
+<document>
+<p>実行</p>
+<p>実身を開くプログラム(実身のapplist)。メニューの定義。</p>
+</document>
+<menu>
+<list code="exec.app"/>
+</menu>
+</tad>

@@ -1,0 +1,13 @@
+<tad version="1.0" encoding="UTF-8" filename="実身/仮身検索のメニュー">
+<document>
+<p>実身/仮身検索のメニュー</p>
+<p>実身/仮身検索の窓のメニュー。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-71b7-b062-bd4df16994b1"/></include>
+<item>表示<link id="01a0d889-4603-7dd8-911f-eb562fc8aa50_0.xtad" vobjid="01a0d8c3-2002-7bdb-8fee-055ffe28757c"/></item>
+<item>編集<link id="01a0d889-4606-7d93-a511-f92cc814ff3c_0.xtad" vobjid="01a0d8c3-2002-7bc1-9bb5-38d9a3105cf3"/></item>
+<item code="research">再検索</item>
+<include><link id="01a0d889-45ec-766a-986d-5fad49d48e06_0.xtad" vobjid="01a0d8c3-2002-7f2d-aa72-92cc5361b35b"/></include>
+</menu>
+</tad>

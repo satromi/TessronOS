@@ -1,0 +1,18 @@
+<tad version="1.0" encoding="UTF-8" filename="表示">
+<document>
+<p>表示</p>
+<p>基本文章編集の表示。メニューの定義。</p>
+</document>
+<menu>
+<item code="view.xml">原稿（xml直接表示）モード</item>
+<item code="view.detail">詳細モード</item>
+<item code="view.clean">清書モード</item>
+<line/>
+<item code="fullscreen" key="L">全画面表示オンオフ</item>
+<item code="refresh">再表示</item>
+<item code="bgcolour">背景色変更</item>
+<item code="hidden">隠蔽仮身を表示</item>
+<line/>
+<item code="wrap">ウインドウ幅で折り返し</item>
+</menu>
+</tad>

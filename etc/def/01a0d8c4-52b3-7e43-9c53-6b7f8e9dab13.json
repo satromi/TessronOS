@@ -1,0 +1,36 @@
+{
+  "name": "暦",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-09-28T00:00:00Z",
+  "updateDate": "2026-09-28T00:00:00Z",
+  "accessDate": "2026-09-28T00:00:00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 1,
+  "editable": true,
+  "deletable": false,
+  "readable": true,
+  "maker": "TessronOS",
+  "applist": {
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": true
+    }
+  },
+  "tessronos": {
+    "calendar": {
+      "tz": 540
+    },
+    "access": {
+      "owner": "01a0d680-3aa0-75b3-bd7d-075e14217cd2",
+      "group": "01a0d680-3aa1-7922-ae79-ba5cbbaa2037",
+      "mode": "rw-r--r--",
+      "attr": [
+        "perm"
+      ],
+      "acl": [],
+      "records": []
+    }
+  }
+}

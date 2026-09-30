@@ -1,0 +1,43 @@
+{
+  "name": "閉じた仮身",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2025-11-22T11:46:48.927Z",
+  "updateDate": "2025-11-22T11:49:02.011Z",
+  "accessDate": "2025-11-22T11:49:02.011Z",
+  "periodDate": null,
+  "refCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TRON User",
+  "window": {
+    "pos": {
+      "x": 100,
+      "y": 100
+    },
+    "width": 600,
+    "height": 400,
+    "minWidth": 200,
+    "minHeight": 200,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff"
+  },
+  "applist": {
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": true
+    }
+  },
+  "realId": "019aab65-6bbb-7566-bd9e-5f3d96485719",
+  "recordCount": 1
+}

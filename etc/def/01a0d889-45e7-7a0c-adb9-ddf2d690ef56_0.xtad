@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="窓の共通メニュー">
+<document>
+<p>窓の共通メニュー</p>
+<p>どの窓のメニューにも先頭に出る項目。メニューの定義。</p>
+</document>
+<menu>
+<item code="close" key="E">閉じる</item>
+<line/>
+</menu>
+</tad>

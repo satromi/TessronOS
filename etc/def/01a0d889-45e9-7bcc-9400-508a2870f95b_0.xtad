@@ -1,0 +1,16 @@
+<tad version="1.0" encoding="UTF-8" filename="実身操作">
+<document>
+<p>実身操作</p>
+<p>押した位置の仮身が指す実身に対する操作。メニューの定義。</p>
+</document>
+<menu>
+<item code="real.rename">実身名変更</item>
+<item code="real.duplicate">実身複製</item>
+<item code="real.newversion">新版作成</item>
+<item code="real.lock">起動アプリを固定する</item>
+<item code="real.unlock">起動アプリを最新にする</item>
+<item code="real.info">管理情報</item>
+<item code="real.network">仮身ネットワーク</item>
+<item code="real.search">実身/仮身検索</item>
+</menu>
+</tad>

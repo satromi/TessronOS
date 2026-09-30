@@ -1,0 +1,42 @@
+{
+  "name": "書庫解凍",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2025-11-09T00:00:00.000Z",
+  "updateDate": "2025-11-09T00:00:00.000Z",
+  "accessDate": "2025-11-09T00:00:00.000Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TRON User",
+  "window": {
+    "pos": {
+      "x": 100,
+      "y": 100
+    },
+    "width": 300,
+    "height": 200,
+    "minWidth": 50,
+    "minHeight": 50,
+    "resizable": false,
+    "scrollable": false,
+    "maximize": false,
+    "maximizable": false,
+    "minimizable": false,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff"
+  },
+  "applist": {
+    "unpack-file": {
+      "name": "書庫解凍",
+      "defaultOpen": true
+    }
+  }
+}

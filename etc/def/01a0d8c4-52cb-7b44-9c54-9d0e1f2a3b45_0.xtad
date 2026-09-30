@@ -1,0 +1,58 @@
+<tad version="1.0" encoding="UTF-8" filename="ファイル変換のデータボックス">
+<document>
+<p>ファイル変換のデータボックス</p>
+<p>ファイル変換が尋ねるパネルの定義。FTP の接続先、ファイルを実身にする変換方法、実身をファイルにする変換方法、知らせ。</p>
+</document>
+<databox>
+<panel num="20" rect="0,0,480,388" title="FTP 接続">
+<text x="16" y="36">接続先（ホスト）：</text>
+<box num="11" rect="168,14,464,44" max="120" ascii="true"/>
+<text x="16" y="72">ポート：</text>
+<box num="12" rect="168,50,240,80" max="5" digits="true"/>
+<switch num="13" rect="256,53,464,77">SSH を使う（SFTP）</switch>
+<text x="16" y="108">ユーザ名：</text>
+<box num="14" rect="168,86,464,116" max="120" ascii="true"/>
+<text x="16" y="144">パスワード：</text>
+<secret num="15" rect="168,122,464,152" max="120"/>
+<switch num="16" rect="168,158,464,182">パスワードを保存する（平文）</switch>
+<switch num="17" rect="168,190,280,214" value="1">パッシブ</switch>
+<text x="290" y="208">能動のポート：</text>
+<box num="18" rect="400,188,464,216" max="5" digits="true"/>
+<text x="16" y="244">名前の文字コード：</text>
+<select num="19" rect="168,224,464,258" across="true" value="1"><name>UTF-8</name><name>Shift_JIS</name><name>EUC-JP</name></select>
+<text x="16" y="290">接続名：</text>
+<box num="20" rect="168,268,464,298" max="40" jp="true"/>
+<text num="21" x="16" y="326"> </text>
+<button num="101" rect="264,348,356,374" answer="cancel">取消</button>
+<button num="102" rect="368,348,464,374" answer="ok" emph="true">接続</button>
+</panel>
+<panel num="21" rect="0,0,440,372" title="実身への変換">
+<text num="1" x="16" y="30"> </text>
+<text x="16" y="62">変換方法：</text>
+<select num="11" rect="120,44,424,224" value="1"><name>自動（ファイルの種類を見て）</name><name>文章（全角／半角混在）</name><name>文章（全角のみ）</name><name>画像（BMP・JPEG・PNG・GIF）</name><name>無変換（基本）</name><name>書庫（BPK）</name></select>
+<text x="16" y="256">文字コード：</text>
+<select num="12" rect="120,236,424,270" across="true" value="1"><name>自動</name><name>SJIS</name><name>EUC</name><name>JIS</name><name>UTF-8</name></select>
+<text x="16" y="300">画像の縮小：</text>
+<select num="13" rect="120,280,424,314" across="true" value="1"><name>等倍</name><name>1/2</name><name>1/4</name><name>1/8</name></select>
+<button num="101" rect="228,334,320,360" answer="cancel">取消</button>
+<button num="102" rect="332,334,424,360" answer="ok" emph="true">実行</button>
+</panel>
+<panel num="22" rect="0,0,440,356" title="ファイルへの変換">
+<text num="1" x="16" y="30"> </text>
+<text x="16" y="66">出力ファイル名：</text>
+<box num="11" rect="136,44,424,74" max="120" jp="true"/>
+<text x="16" y="102">変換方法：</text>
+<select num="12" rect="136,84,424,234" value="1"><name>自動（元の形式・文章・フォルダ）</name><name>文章（Shift_JIS）</name><name>文章（UTF-8）</name><name>xmlTAD（無変換）</name><name>TADjs の組</name></select>
+<switch num="13" rect="136,242,424,266">図形の配置も書き出す</switch>
+<text num="2" x="16" y="296"> </text>
+<button num="101" rect="228,318,320,344" answer="cancel">取消</button>
+<button num="102" rect="332,318,424,344" answer="ok" emph="true">実行</button>
+</panel>
+<panel num="23" rect="0,0,460,128" title="ファイル変換">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<text num="3" x="24" y="84"> </text>
+<button num="101" rect="348,92,436,116" answer="ok" emph="true">確認</button>
+</panel>
+</databox>
+</tad>

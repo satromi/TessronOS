@@ -1,0 +1,20 @@
+<tad version="1.0" encoding="UTF-8" filename="文字色">
+<document>
+<p>文字色</p>
+<p>文字色。メニューの定義。</p>
+</document>
+<menu>
+<item code="colour.black">黒色</item>
+<item code="colour.blue">青色</item>
+<item code="colour.red">赤色（238,0,0）</item>
+<item code="colour.pink">ピンク色</item>
+<item code="colour.orange">橙色</item>
+<item code="colour.green">緑色</item>
+<item code="colour.lime">黄緑色</item>
+<item code="colour.cyan">水色</item>
+<item code="colour.yellow">黄色</item>
+<item code="colour.white">白色</item>
+<line/>
+<item code="colour.custom">文字色指定（RGB（FFFFFF））</item>
+</menu>
+</tad>

@@ -1,0 +1,8 @@
+# DEVCONF for TessronOS
+#
+# KBTYPE: 0x41 日本語キーボード, 0x40 英語キーボード
+KBTYPE	0x41
+# KBMODE: 起動時の入力モード 0 かな, 1 英数
+KBMODE	1
+# VIDEOMODE: 次の画面 幅x高さ, 前の画面 幅x高さ(確かめる前), 有効画面 幅 高さ
+VIDEOMODE	0

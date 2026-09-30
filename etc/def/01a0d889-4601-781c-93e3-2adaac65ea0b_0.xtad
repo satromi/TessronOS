@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="書式/印刷">
+<document>
+<p>書式/印刷</p>
+<p>用紙。メニューの定義。</p>
+</document>
+<menu>
+<item code="paper">用紙枠表示オンオフ</item>
+<item code="pagesetup">用紙枠設定</item>
+</menu>
+</tad>

@@ -1,0 +1,55 @@
+{
+  "name": "書庫解凍",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-09-27T00:00:00Z",
+  "updateDate": "2026-09-27T00:00:00Z",
+  "accessDate": "2026-09-27T00:00:00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 2,
+  "editable": false,
+  "deletable": false,
+  "readable": true,
+  "maker": "TessronOS",
+  "applist": {},
+  "tessronos": {
+    "program": {
+      "id": "unpack-file",
+      "kind": "app",
+      "name": "書庫解凍",
+      "version": "R1.000",
+      "menu": false,
+      "builtin": false,
+      "base": [
+        "0199eb7d-6e78-79fb-fe14-1865d0a23d0f"
+      ]
+    },
+    "exec": {
+      "record": 1,
+      "type": "application/x-elf",
+      "arch": "aarch64",
+      "abi": "tessronos-1"
+    },
+    "records": [
+      {
+        "n": 0,
+        "rt": 1
+      },
+      {
+        "n": 1,
+        "rt": 9
+      }
+    ],
+    "access": {
+      "owner": "01a0d680-3aa0-75b3-bd7d-075e14217cd2",
+      "group": "01a0d680-3aa1-7922-ae79-ba5cbbaa2037",
+      "mode": "rwxr-xr-x",
+      "attr": [
+        "perm"
+      ],
+      "acl": [],
+      "records": []
+    }
+  }
+}

@@ -1,0 +1,17 @@
+<tad version="1.0" encoding="UTF-8" filename="図形操作">
+<document>
+<p>図形操作</p>
+<p>図形の変形。メニューの定義。</p>
+</document>
+<menu>
+<item code="undo">取消</item>
+<line/>
+<item code="transform">変形</item>
+<item code="invert">色反転</item>
+<item code="burn">焼き付け</item>
+<item code="flip.h">左右反転</item>
+<item code="flip.v">上下反転</item>
+<item code="rot.l">左90度回転</item>
+<item code="rot.r">右90度回転</item>
+</menu>
+</tad>

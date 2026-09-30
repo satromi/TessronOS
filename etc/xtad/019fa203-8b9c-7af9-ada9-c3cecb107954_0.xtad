@@ -1,0 +1,97 @@
+<tad version="1.0" encoding="UTF-8" filename="マイクロスクリプト通信サンプル説明">
+<document>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0"/>
+<p>
+<font size="28"><font color="#51aefb"><bold>□</bold>マイクロスクリプト通信サンプル説明</font></font>
+</p>
+<p>
+<font size="14">この文章は、マイクロスクリプトの通信機能（TADjs独自拡張）のサンプル6種の使い方をまとめたものです。<br/>
+各サンプルの仮身をダブルクリックすると、マイクロスクリプトプラグインで開いて台本が自動実行されます。もう一度実行したい場合は、ウインドウを閉じて開き直してください。</font>
+</p>
+<p>
+<font size="18">□共通の準備と注意</font>
+</p>
+<p>
+・接続許可について
+</p>
+<p>
+<font size="14">未許可のホストへ初めて接続するときは、接続許可のオーバーレイが表示されます。接続先を確認して許可すると実行が続行されます。<br/>
+許可は実行中の実身ごとに保存され（実身管理用jsonのnetworkGrants）、同じオーバーレイの許可済み一覧から取り消すこともできます。</font>
+</p>
+<p>
+・MCP系サンプルのローカルサーバ
+</p>
+<p>
+<font size="14">MCP通信・MCP認証・入力tools/callはポート3333、MCP-SSEはポート3334のローカルMCPサーバに接続します。開発リポジトリ（c:\btron-desktop）で次のコマンドを実行してから、サンプルを開いてください。<br/>
+・ポート3333（plain-JSON応答）: node test/microscript/servers/mcp-test-server.js<br/>
+・ポート3334（SSE応答）: node test/microscript/servers/mcp-sse-server.js<br/>
+どちらもMCPプロトコル版 2026-07-28（ステートレス）準拠で、必須ヘッダと本文の突合検証を行うため、台本側の書き漏れも実機で検出できます。</font>
+</p>
+<p>
+<font size="18">□シリアル受信端末</font>
+</p>
+<p>
+<font size="14">RS系命令（RSINIT/RSGET/RSWAIT）でシリアルポートを読み取り、受信文字を画面に表示する受信端末です。<br/>
+初回実行時にポート割り当てのオーバーレイが出るので、論理番号にCOMポートを割り当ててください（割り当ては実身ごとに保存されます）。115200bps 8N1 の機器（μT-Kernel機など）を接続して使います。</font>
+</p>
+<p>
+<link id="019f377f-60c1-77d4-a637-147678496743_0.xtad" vobjid="019fa20b-3372-77c2-b35d-09957e4bc6bd" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;microscript&quot;:{&quot;name&quot;:&quot;マイクロスクリプト&quot;,&quot;defaultOpen&quot;:true},&quot;basic-figure-editor&quot;:{&quot;name&quot;:&quot;基本図形編集&quot;,&quot;defaultOpen&quot;:false}}"/>
+</p>
+<p>
+<font size="18">□HTTP通信テスト</font>
+</p>
+<p>
+<font size="14">HTTPREQ 命令で example.com へ GET し、jsonplaceholder から取得した JSON を JSONGET 命令で取り出して表示します。HTTP通信とJSON解析のいちばん基本的な形です。サーバの事前起動は不要です（インターネット接続が必要）。</font>
+</p>
+<p>
+<link id="019f4049-ecb3-7a75-b543-f8b23da4f0d1_0.xtad" vobjid="019fa20b-3377-7452-99ef-4e07ff9b0998" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;microscript&quot;:{&quot;name&quot;:&quot;マイクロスクリプト&quot;,&quot;defaultOpen&quot;:true},&quot;basic-figure-editor&quot;:{&quot;name&quot;:&quot;基本図形編集&quot;,&quot;defaultOpen&quot;:false}}"/>
+</p>
+<p>
+<font size="18">□MCP通信テスト</font>
+</p>
+<p>
+<font size="14">MCPサーバとの基本フローの見本です。server/discover でサーバ情報（対応版・サーバ名）を取得し、tools/list で道具一覧、tools/call で echo を呼びます。<br/>
+全リクエストの params._meta にプロトコル版を載せ、ヘッダに MCP-Protocol-Version / Mcp-Method（tools/call では Mcp-Name も）を付ける、2026-07-28 ステートレス方式の実例になっています。<br/>
+実行前にポート3333のサーバを起動してください。</font>
+</p>
+<p>
+<link id="019f4140-3d5e-72ef-af0d-d6148c537a37_0.xtad" vobjid="019fa20b-3377-7f4e-a3f1-3b1e11d7aaa7" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;microscript&quot;:{&quot;name&quot;:&quot;マイクロスクリプト&quot;,&quot;defaultOpen&quot;:true},&quot;basic-figure-editor&quot;:{&quot;name&quot;:&quot;基本図形編集&quot;,&quot;defaultOpen&quot;:false}}"/>
+</p>
+<p>
+<font size="18">□MCP認証テスト</font>
+</p>
+<p>
+<font size="14">認証トークンを実身「APIキー」から FREAD で読み取り、SPRINTF で Authorization ヘッダと動的な tools/call 本文を組み立てて送ります。トークンを台本に直書きせず実身に隔離する作法の見本です。<br/>
+実行前にポート3333のサーバを起動してください。サーバ側のログにはトークンの先頭のみが表示されます。</font>
+</p>
+<p>
+<link id="019f4153-44f6-7522-8ec0-262e1e6aec1a_0.xtad" vobjid="019fa20b-3377-7f09-8e1f-42b7f03f35f3" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;microscript&quot;:{&quot;name&quot;:&quot;マイクロスクリプト&quot;,&quot;defaultOpen&quot;:true},&quot;basic-figure-editor&quot;:{&quot;name&quot;:&quot;基本図形編集&quot;,&quot;defaultOpen&quot;:false}}"/>
+</p>
+<p>
+<font size="18">□MCP-SSEテスト</font>
+</p>
+<p>
+<font size="14">SSE（text/event-stream）で応答するMCPサーバとの通信です。応答がSSEでも自動でJSONにパースされ、HTTPHDR 命令で応答ヘッダ（Content-Type）を確認できます。<br/>
+旧仕様のセッション（Mcp-Session-Id）は廃止されており、リクエストごとに必須ヘッダを付けるだけで通信できます。実行前にポート3334のサーバを起動してください。</font>
+</p>
+<p>
+<link id="019f44a9-ded2-7d70-9850-3a7c99ba15d2_0.xtad" vobjid="019fa20b-3377-76db-9cda-c940ff116371" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;microscript&quot;:{&quot;name&quot;:&quot;マイクロスクリプト&quot;,&quot;defaultOpen&quot;:true},&quot;basic-figure-editor&quot;:{&quot;name&quot;:&quot;基本図形編集&quot;,&quot;defaultOpen&quot;:false}}"/>
+</p>
+<p>
+<font size="18">□入力tools/call</font>
+</p>
+<p>
+<font size="14">役者 @入力 の枠にキーボードで文字を入力し（入力後にEnterを2回）、[操作]メニューから「送信」を選ぶと、入力値を tools/call の引数に載せてサーバ（ポート3333）へ送り、応答を @結果 に表示します。ユーザー入力を通信に連動させる見本です。</font>
+</p>
+<p>
+<link id="019f44b7-08a0-734d-8ccb-859b9740fa16_0.xtad" vobjid="019fa20b-3377-7b95-b7b1-85683ae6eee2" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;microscript&quot;:{&quot;name&quot;:&quot;マイクロスクリプト&quot;,&quot;defaultOpen&quot;:true},&quot;basic-figure-editor&quot;:{&quot;name&quot;:&quot;基本図形編集&quot;,&quot;defaultOpen&quot;:false}}"/>
+</p>
+<p>
+<font size="18">□さらに詳しく</font>
+</p>
+<p>
+<font size="14">命令一覧・JSON本文の書き方・文字列の組み立て・認証・接続許可の詳細は docs/microscript-network-guide.md にまとまっています。</font>
+</p>
+</document>
+</tad>

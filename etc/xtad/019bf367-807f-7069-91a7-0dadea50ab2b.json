@@ -1,0 +1,48 @@
+{
+  "name": "実時間制御TAD仕様",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-01-25T04:26:45.247Z",
+  "updateDate": "2026-01-25T04:26:45.247Z",
+  "accessDate": "2026-01-25T04:26:45.247Z",
+  "periodDate": null,
+  "refCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "satromi",
+  "window": {
+    "pos": {
+      "x": 100,
+      "y": 100
+    },
+    "width": 600,
+    "height": 400,
+    "minWidth": 200,
+    "minHeight": 200,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff",
+    "scrollPos": {
+      "x": 0,
+      "y": 0
+    },
+    "wordWrap": true
+  },
+  "applist": {
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": true
+    }
+  },
+  "realId": "019bf367-807f-7069-91a7-0dadea50ab2b",
+  "recordCount": 1
+}

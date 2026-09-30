@@ -1,0 +1,20 @@
+# 仮身の右ボタンのメニューから管理情報を開き、窓の一覧と画面を確かめる(tools/ui_run.py)
+wins
+click 110 100
+hold 110 100 1
+wait 500
+move 140 240
+wait 150
+move 230 240
+wait 150
+move 230 321
+wait 150
+up 1
+win TADjsについての管理情報
+shot info_window
+click 262 93
+wait 200
+shot info_apps
+click 355 474
+wait 300
+wins

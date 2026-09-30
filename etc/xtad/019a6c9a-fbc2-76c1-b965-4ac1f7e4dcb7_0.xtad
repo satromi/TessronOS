@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8">
+<document>
+<p>
+TAD（TRON Application Databus）は、BTRONの文章/画像/図形を横断的に扱える標準フォーマットです。
+</p>
+<p>
+1つの実身で、文章ファイル・画像ファイル・図形ファイルを分け隔てることなく統合的に扱うことができ、1つの実身を複数のアプリから使い分けることができます。<br/>
+</p>
+</document>
+</tad>

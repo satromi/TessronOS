@@ -1,0 +1,15 @@
+<tad version="1.0" encoding="UTF-8" filename="文字間隔">
+<document>
+<p>文字間隔</p>
+<p>文字間隔。valueは段階の番号。メニューの定義。</p>
+</document>
+<menu>
+<item code="space" value="0">文字間隔なし</item>
+<item code="space" value="1">1/16字あき</item>
+<item code="space" value="2">1/8字あき</item>
+<item code="space" value="3">1/4字あき</item>
+<item code="space" value="4">3/8字あき</item>
+<item code="space" value="5">1/2字あき</item>
+<item code="space" value="6">3/4字あき</item>
+</menu>
+</tad>

@@ -1,0 +1,48 @@
+{
+  "name": "基本表計算プラグイン",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2025-12-13T04:29:43.435Z",
+  "updateDate": "2025-12-13T04:30:07.159Z",
+  "accessDate": "2025-12-13T04:29:47.589Z",
+  "periodDate": null,
+  "refCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "satromi",
+  "window": {
+    "pos": {
+      "x": 100,
+      "y": 100
+    },
+    "width": 600,
+    "height": 400,
+    "minWidth": 200,
+    "minHeight": 200,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff",
+    "scrollPos": {
+      "x": 0,
+      "y": 0
+    },
+    "wordWrap": true
+  },
+  "applist": {
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": true
+    }
+  },
+  "realId": "019b15f8-c48b-74d6-8296-6723c74e26be",
+  "recordCount": 1
+}

@@ -1,0 +1,52 @@
+{
+  "name": "実身/仮身検索",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2025-12-14T09:03:59.705Z",
+  "updateDate": "2026-01-10T23:36:45.453Z",
+  "accessDate": "2026-01-10T23:36:40.706Z",
+  "periodDate": null,
+  "refCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TADjs User",
+  "window": {
+    "pos": {
+      "x": 204,
+      "y": 337
+    },
+    "width": 767,
+    "height": 423,
+    "minWidth": 200,
+    "minHeight": 200,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff",
+    "scrollPos": {
+      "x": 0,
+      "y": 90
+    },
+    "wordWrap": true
+  },
+  "applist": {
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": true
+    },
+    "virtual-object-list": {
+      "name": "仮身一覧",
+      "defaultOpen": false
+    }
+  },
+  "realId": "019b1c1a-3ad9-7b3d-b9b9-13b190692d05",
+  "recordCount": 1
+}

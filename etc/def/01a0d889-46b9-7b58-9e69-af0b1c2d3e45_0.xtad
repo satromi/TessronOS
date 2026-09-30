@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="管理情報の編集メニュー">
+<document>
+<p>管理情報の編集メニュー</p>
+<p>付箋指定で選んだ機能付箋をトレーへ複写し、トレーの付箋のプログラムを機能付箋に加える。メニューの定義。</p>
+</document>
+<menu>
+<item code="info.copy">コピー</item>
+<item code="info.paste">貼り付け</item>
+</menu>
+</tad>

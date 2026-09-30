@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="トレー">
+<document>
+<p>トレー</p>
+<p>トレーの履歴。選んだ段が手元の段になる。メニューの定義。</p>
+</document>
+<menu>
+<list code="tray.level"/>
+<line/>
+<item code="tray.clear">トレーを空にする</item>
+</menu>
+</tad>

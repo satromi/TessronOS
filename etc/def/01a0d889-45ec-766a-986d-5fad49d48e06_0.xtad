@@ -1,0 +1,14 @@
+<tad version="1.0" encoding="UTF-8" filename="実身の共通メニュー">
+<document>
+<p>実身の共通メニュー</p>
+<p>どの窓のメニューにも末尾に出る項目。メニューの定義。</p>
+</document>
+<menu>
+<item code="vobj">仮身操作<link id="01a0d889-45e8-730d-9735-a0a4cd451326_0.xtad" vobjid="01a0d8c3-2002-7b97-adc3-b7a4e0f2d6ee"/></item>
+<item code="real">実身操作<link id="01a0d889-45e9-7bcc-9400-508a2870f95b_0.xtad" vobjid="01a0d8c3-2002-763a-a155-35ce709ce799"/></item>
+<item code="trash">屑実身操作</item>
+<item code="win">ウインドウ<link id="01a0d889-46ba-7c69-8f7a-b0c1d2e3f456_0.xtad" vobjid="01a0d8c3-2002-7e64-8d6f-708192a3b4c5"/></item>
+<item code="acc">小物<link id="01a0d889-45ea-781b-8701-66f15a81b862_0.xtad" vobjid="01a0d8c3-2002-7178-8193-9567635b25a8"/></item>
+<item code="exec">実行<link id="01a0d889-45eb-7624-bbda-d9863883da4b_0.xtad" vobjid="01a0d8c3-2002-76f9-8585-bb361bdca239"/></item>
+</menu>
+</tad>

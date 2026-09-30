@@ -1,0 +1,12 @@
+<tad version="1.0" encoding="UTF-8" filename="ファイル変換のディレクトリメニュー">
+<document>
+<p>ファイル変換のディレクトリメニュー</p>
+<p>ファイル一覧の窓で、上のディレクトリ、ルート、これまでに開いたディレクトリへ移る。メニューの定義。</p>
+</document>
+<menu>
+<item code="up" key="U">上のディレクトリへ</item>
+<item code="root">ルートへ</item>
+<line/>
+<list code="dir.hist"/>
+</menu>
+</tad>

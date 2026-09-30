@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Make a TSFS native volume, version 4 (design 11.6), on an image file or
+a partition within one, and optionally put objects on it.
+
+  tools/mktsfs [-L label] [--size N] [--uuid UUID]
+              [--from DIR ...] [--root UUID] [--sysbox UUID] [--domain UUID]
+              [--partition N | --offset N | --whole] image
+
+With neither --offset nor --partition, an image that carries a GPT with a
+TessronOS partition is formatted in that partition, and any other file is
+formatted as a whole.
+
+--from takes every object whose files are in the directory, in the TADjs
+form ({uuid}.json, {uuid}_N.xtad, {uuid}_N.bin, {uuid}.ico,
+{uuid}_N_M.ext). The files of one object may be spread over several
+--from directories (etc/def and obj/rec). --root, --sysbox and --domain
+name objects for the superblock to point at; each is a hold on its
+object (the holds field of the object block, counted in its reference
+count), so that the object is never taken for garbage.
+
+Exit status: 0 when every object went on, 1 when the volume was made but
+some object was left out, 2 when no volume was made.
+"""
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from tsfs_py import BLOCK_SIZE, LABEL_MAX, TsfsError, Volume
+from tsfs_py.cli import add_volume_args, open_device, parse_size, uuid_arg
+from tsfs_py import transfer
+
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="mktsfs", description="make a TSFS native volume")
+    p.add_argument("image", help="image file to write into")
+    p.add_argument("-L", "--label", default="",
+                   help="volume label, up to %d bytes" % (LABEL_MAX - 1))
+    p.add_argument("--size", metavar="BYTES",
+                   help="size of the volume (suffix K, M or G); "
+                        "the file is made or grown to fit")
+    p.add_argument("--uuid", type=uuid_arg, help="UUID of the volume")
+    p.add_argument("--from", dest="dirs", action="append", default=[],
+                   metavar="DIR", help="directory of TADjs objects to put on")
+    p.add_argument("--root", type=uuid_arg, help="the object a volume opens with")
+    p.add_argument("--sysbox", type=uuid_arg, help="the system box")
+    p.add_argument("--domain", type=uuid_arg, help="the protection domain")
+    p.add_argument("-q", "--quiet", action="store_true")
+    add_volume_args(p)
+    args = p.parse_args()
+
+    def die(msg):
+        sys.stderr.write("mktsfs: %s\n" % msg)
+        return 2
+
+    if len(args.label.encode("utf-8")) > LABEL_MAX - 1:
+        return die("the label is longer than %d bytes" % (LABEL_MAX - 1))
+    if (args.root or args.sysbox or args.domain) and not args.dirs:
+        return die("--root, --sysbox and --domain need --from")
+
+    try:
+        length = parse_size(args.size) if args.size else None
+        if length is not None:
+            length -= length % BLOCK_SIZE
+        dev = open_device(args.image, args, writable=True, length=length,
+                          create=True)
+    except (TsfsError, OSError) as e:
+        return die(str(e))
+
+    skipped, problems = [], []
+    try:
+        with dev:
+            vol = Volume.format(dev, label=args.label, vol_uuid=args.uuid)
+            written = 0
+            if args.dirs:
+                roots = {"root": args.root, "sysbox": args.sysbox,
+                         "domain": args.domain}
+                written, skipped = transfer.build(vol, args.dirs, roots,
+                                                  problems)
+                vol.flush(both=True, spares=True)
+            if not args.quiet:
+                print("%s: a volume of %d blocks at offset %d"
+                      % (args.image, vol.sb.total_blocks, dev.offset))
+                print(str(vol.sb))
+                if args.dirs:
+                    print("%d objects put on, %d left out"
+                          % (written, len(skipped)))
+    except (TsfsError, OSError) as e:
+        return die(str(e))
+
+    for msg in problems:
+        sys.stderr.write("mktsfs: %s\n" % msg)
+    for u, why in skipped:
+        sys.stderr.write("mktsfs: %s left out: %s\n" % (u, why))
+    return 1 if skipped else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

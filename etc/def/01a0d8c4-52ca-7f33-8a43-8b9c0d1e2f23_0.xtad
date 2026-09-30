@@ -1,0 +1,199 @@
+<tad version="1.0" encoding="UTF-8" filename="ユーザ環境設定のデータボックス">
+<document>
+<p>ユーザ環境設定のデータボックス</p>
+<p>ユーザ環境設定の窓のパネルと、尋ねるパネルの定義。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,580,470" title="ユーザ環境設定" kind="bare">
+<tags num="100" rect="0,0,580,470" inner="4,28,576,466" value="1"><tag>個人属性</tag><tag>ＰＤ属性</tag><tag>キー属性</tag><tag>表示属性</tag><tag>音属性</tag><tag>キー操作</tag></tags>
+<text sheet="1" x="16" y="63">使用者：</text>
+<box num="1" sheet="1" rect="184,44,424,70" max="12" jp="true"/>
+<text sheet="1" x="434" y="63">（再起動後に有効）</text>
+<text sheet="1" x="16" y="112">入力方式：</text>
+<select num="2" sheet="1" rect="184,76,384,136" value="1"><name>かな入力</name><name>ローマ字入力</name></select>
+<text sheet="1" x="16" y="167">漢字変換：</text>
+<button num="3" sheet="1" rect="184,148,364,174" off="true">かな漢字変換設定</button>
+<text sheet="1" x="16" y="207">現在時刻：</text>
+<serial num="4" sheet="1" rect="184,186,414,216"><f w="4" lo="1985" hi="2099" zero="true"/>年<f w="2" lo="1" hi="12" zero="true"/>月<f w="2" lo="1" hi="31" zero="true"/>日 <f w="2" lo="0" hi="23" zero="true"/>：<f w="2" lo="0" hi="59" zero="true"/></serial>
+<text sheet="1" x="16" y="243">時刻合わせ：</text>
+<switch num="5" sheet="1" rect="184,224,384,250">時刻サーバで合わせる</switch>
+<text sheet="1" x="16" y="275">時刻サーバ：</text>
+<box num="6" sheet="1" rect="184,256,464,282" max="79" ascii="true"/>
+<text sheet="1" x="16" y="313">タイムゾーン：</text>
+<serial num="7" sheet="1" rect="184,292,484,322"><n w="16"><name>UTC-12:00 日付変更線西</name><name>UTC-11:00 サモア</name><name>UTC-10:00 ハワイ</name><name>UTC-9:00 アラスカ</name><name>UTC-8:00 太平洋（米国）</name><name>UTC-7:00 山岳部（米国）</name><name>UTC-6:00 中部（米国）</name><name>UTC-5:00 東部（米国）</name><name>UTC-4:00 大西洋</name><name>UTC-3:00 ブラジリア</name><name>UTC-2:00 中部大西洋</name><name>UTC-1:00 アゾレス</name><name>UTC 協定世界時</name><name>UTC+1:00 中央ヨーロッパ</name><name>UTC+2:00 東ヨーロッパ</name><name>UTC+3:00 モスクワ</name><name>UTC+3:30 テヘラン</name><name>UTC+4:00 ドバイ</name><name>UTC+4:30 カブール</name><name>UTC+5:00 カラチ</name><name>UTC+5:30 インド</name><name>UTC+5:45 カトマンズ</name><name>UTC+6:00 ダッカ</name><name>UTC+6:30 ヤンゴン</name><name>UTC+7:00 バンコク</name><name>UTC+8:00 北京・シンガポール</name><name>UTC+9:00 日本（東京）</name><name>UTC+9:30 アデレード</name><name>UTC+10:00 シドニー</name><name>UTC+11:00 ソロモン諸島</name><name>UTC+12:00 ニュージーランド</name><name>UTC+13:00 トンガ</name><name>UTC+14:00 ライン諸島</name></n></serial>
+<text sheet="1" x="184" y="347">［▲］［▼］キーか［変換］［無変換］で選びます</text>
+<text sheet="2" x="16" y="63">ボタン有効時間：</text>
+<text sheet="2" x="190" y="63">短</text>
+<volume num="19130" sheet="2" rect="212,46,420,68" across="true" lo="100" hi="0" value="50"/>
+<text sheet="2" x="428" y="63">長</text>
+<box num="29130" sheet="2" rect="456,44,572,70" off="true"/>
+<text sheet="2" x="16" y="95">ボタン無効時間：</text>
+<text sheet="2" x="190" y="95">短</text>
+<volume num="19131" sheet="2" rect="212,78,420,100" across="true" lo="100" hi="0" value="50"/>
+<text sheet="2" x="428" y="95">長</text>
+<box num="29131" sheet="2" rect="456,76,572,102" off="true"/>
+<text sheet="2" x="16" y="127">ダブルクリック間隔：</text>
+<text sheet="2" x="190" y="127">短</text>
+<volume num="10304" sheet="2" rect="212,110,420,132" across="true" lo="100" hi="0" value="50"/>
+<text sheet="2" x="428" y="127">長</text>
+<box num="20304" sheet="2" rect="456,108,572,134" off="true"/>
+<text sheet="2" x="16" y="159">位置許容度：</text>
+<text sheet="2" x="190" y="159">小</text>
+<volume num="19139" sheet="2" rect="212,142,420,164" across="true" lo="100" hi="0" value="50"/>
+<text sheet="2" x="428" y="159">大</text>
+<box num="29139" sheet="2" rect="456,140,572,166" off="true"/>
+<text sheet="2" x="16" y="191">ポインタ移動速度：</text>
+<text sheet="2" x="190" y="191">速</text>
+<volume num="19132" sheet="2" rect="212,174,420,196" across="true" lo="100" hi="0" value="50"/>
+<text sheet="2" x="428" y="191">遅</text>
+<box num="29132" sheet="2" rect="456,172,572,198" off="true"/>
+<text sheet="2" x="16" y="223">加速開始：</text>
+<text sheet="2" x="190" y="223">速</text>
+<volume num="19133" sheet="2" rect="212,206,420,228" across="true" lo="100" hi="0" value="50"/>
+<text sheet="2" x="428" y="223">遅</text>
+<box num="29133" sheet="2" rect="456,204,572,230" off="true"/>
+<text sheet="2" x="16" y="255">ポインタ制御キー速度：</text>
+<text sheet="2" x="190" y="255">速</text>
+<volume num="19134" sheet="2" rect="212,238,420,260" across="true" lo="100" hi="0" value="50"/>
+<text sheet="2" x="428" y="255">遅</text>
+<box num="29134" sheet="2" rect="456,236,572,262" off="true"/>
+<text sheet="2" x="16" y="293">メインボタン：</text>
+<select num="19135" sheet="2" rect="184,270,344,304" across="true" value="1"><name>左</name><name>右</name></select>
+<text sheet="2" x="16" y="329">ペン動作：</text>
+<select num="19136" sheet="2" rect="184,306,344,340" across="true" value="1"><name>絶対</name><name>相対</name></select>
+<text sheet="2" x="16" y="365">中ボタン：</text>
+<switch num="19137" sheet="2" rect="184,346,324,372">ダブルクリック</switch>
+<switch num="19138" sheet="2" rect="344,346,464,372">ホイール</switch>
+<text sheet="3" x="16" y="63">キー有効時間：</text>
+<text sheet="3" x="190" y="63">短</text>
+<volume num="19120" sheet="3" rect="212,46,420,68" across="true" lo="100" hi="0" value="50"/>
+<text sheet="3" x="428" y="63">長</text>
+<box num="29120" sheet="3" rect="456,44,572,70" off="true"/>
+<text sheet="3" x="16" y="95">キー無効時間：</text>
+<text sheet="3" x="190" y="95">短</text>
+<volume num="19121" sheet="3" rect="212,78,420,100" across="true" lo="100" hi="0" value="50"/>
+<text sheet="3" x="428" y="95">長</text>
+<box num="29121" sheet="3" rect="456,76,572,102" off="true"/>
+<text sheet="3" x="16" y="127">同時押し許容時間：</text>
+<text sheet="3" x="190" y="127">短</text>
+<volume num="19122" sheet="3" rect="212,110,420,132" across="true" lo="100" hi="0" value="50"/>
+<text sheet="3" x="428" y="127">長</text>
+<box num="29122" sheet="3" rect="456,108,572,134" off="true"/>
+<text sheet="3" x="16" y="165">キーリピート：</text>
+<switch num="19123" sheet="3" rect="184,146,264,172">あり</switch>
+<text sheet="3" x="16" y="197">開始時間：</text>
+<text sheet="3" x="190" y="197">短</text>
+<volume num="19124" sheet="3" rect="212,180,420,202" across="true" lo="100" hi="0" value="50"/>
+<text sheet="3" x="428" y="197">長</text>
+<box num="29124" sheet="3" rect="456,178,572,204" off="true"/>
+<text sheet="3" x="16" y="229">間隔：</text>
+<text sheet="3" x="190" y="229">短</text>
+<volume num="19125" sheet="3" rect="212,212,420,234" across="true" lo="100" hi="0" value="50"/>
+<text sheet="3" x="428" y="229">長</text>
+<box num="29125" sheet="3" rect="456,210,572,236" off="true"/>
+<text sheet="3" x="16" y="267">一時シフトの間隔：</text>
+<text sheet="3" x="190" y="267">短</text>
+<volume num="19126" sheet="3" rect="212,250,420,272" across="true" lo="100" hi="0" value="50"/>
+<text sheet="3" x="428" y="267">長</text>
+<box num="29126" sheet="3" rect="456,248,572,274" off="true"/>
+<switch num="19127" sheet="3" rect="184,280,384,306">一時シフト仕様</switch>
+<text sheet="4" x="16" y="63">タイトル文字サイズ：</text>
+<text sheet="4" x="190" y="63">小</text>
+<volume num="10300" sheet="4" rect="212,46,420,68" across="true" lo="100" hi="0" value="50"/>
+<text sheet="4" x="428" y="63">大</text>
+<box num="20300" sheet="4" rect="456,44,572,70" off="true"/>
+<text sheet="4" x="16" y="95">スクロールバー幅：</text>
+<text sheet="4" x="190" y="95">小</text>
+<volume num="10302" sheet="4" rect="212,78,420,100" across="true" lo="100" hi="0" value="50"/>
+<text sheet="4" x="428" y="95">大</text>
+<box num="20302" sheet="4" rect="456,76,572,102" off="true"/>
+<text sheet="4" x="16" y="127">メニュー文字サイズ：</text>
+<text sheet="4" x="190" y="127">小</text>
+<volume num="10301" sheet="4" rect="212,110,420,132" across="true" lo="100" hi="0" value="50"/>
+<text sheet="4" x="428" y="127">大</text>
+<box num="20301" sheet="4" rect="456,108,572,134" off="true"/>
+<text sheet="4" x="16" y="159">カーソル点滅間隔：</text>
+<text sheet="4" x="190" y="159">短</text>
+<volume num="10306" sheet="4" rect="212,142,420,164" across="true" lo="100" hi="0" value="50"/>
+<text sheet="4" x="428" y="159">長</text>
+<box num="20306" sheet="4" rect="456,140,572,166" off="true"/>
+<text sheet="4" x="16" y="191">選択枠チラツキ間隔：</text>
+<text sheet="4" x="190" y="191">短</text>
+<volume num="10308" sheet="4" rect="212,174,420,196" across="true" lo="100" hi="0" value="50"/>
+<text sheet="4" x="428" y="191">長</text>
+<box num="20308" sheet="4" rect="456,172,572,198" off="true"/>
+<text sheet="4" x="16" y="223">メニュー反応時間：</text>
+<text sheet="4" x="190" y="223">短</text>
+<volume num="19140" sheet="4" rect="212,206,420,228" across="true" lo="100" hi="0" value="50"/>
+<text sheet="4" x="428" y="223">長</text>
+<box num="29140" sheet="4" rect="456,204,572,230" off="true"/>
+<text sheet="4" x="16" y="261">カーソル太さ：</text>
+<select num="10307" sheet="4" rect="184,238,384,272" across="true" value="1"><name>細</name><name>中</name><name>太</name></select>
+<text sheet="4" x="16" y="297">選択枠太さ：</text>
+<select num="10309" sheet="4" rect="184,274,384,308" across="true" value="1"><name>細</name><name>中</name><name>太</name></select>
+<text sheet="4" x="16" y="333">ポインタの大きさ：</text>
+<select num="19141" sheet="4" rect="184,310,384,344" across="true" value="1"><name>小</name><name>中</name><name>大</name></select>
+<text sheet="4" x="16" y="369">スクロール動作：</text>
+<switch num="19142" sheet="4" rect="184,350,344,376">追従して表示</switch>
+<text sheet="5" x="16" y="63">ブザー音</text>
+<text sheet="5" x="16" y="95">周波数：</text>
+<text sheet="5" x="190" y="95">低</text>
+<volume num="11" sheet="5" rect="212,78,420,100" across="true" lo="100" hi="0" value="50"/>
+<text sheet="5" x="428" y="95">高</text>
+<box num="10011" sheet="5" rect="456,76,572,102" off="true"/>
+<text sheet="5" x="16" y="127">時間：</text>
+<text sheet="5" x="190" y="127">短</text>
+<volume num="12" sheet="5" rect="212,110,420,132" across="true" lo="100" hi="0" value="50"/>
+<text sheet="5" x="428" y="127">長</text>
+<box num="10012" sheet="5" rect="456,108,572,134" off="true"/>
+<button num="9" sheet="5" rect="184,140,272,164">試聴</button>
+<text sheet="5" x="16" y="201">クリック音</text>
+<text sheet="5" x="16" y="233">周波数：</text>
+<text sheet="5" x="190" y="233">低</text>
+<volume num="13" sheet="5" rect="212,216,420,238" across="true" lo="100" hi="0" value="50"/>
+<text sheet="5" x="428" y="233">高</text>
+<box num="10013" sheet="5" rect="456,214,572,240" off="true"/>
+<text sheet="5" x="16" y="265">時間：</text>
+<text sheet="5" x="190" y="265">短</text>
+<volume num="14" sheet="5" rect="212,248,420,270" across="true" lo="100" hi="0" value="50"/>
+<text sheet="5" x="428" y="265">長</text>
+<box num="10014" sheet="5" rect="456,246,572,272" off="true"/>
+<button num="15" sheet="5" rect="184,278,272,302">試聴</button>
+<text sheet="5" x="16" y="333">有無：</text>
+<switch num="19154" sheet="5" rect="184,314,264,340">キー</switch>
+<switch num="19155" sheet="5" rect="284,314,374,340">ボタン</switch>
+<text sheet="5" x="16" y="375">スピーカー：</text>
+<select num="19156" sheet="5" rect="184,352,344,386" across="true" value="1"><name>オン</name><name>オフ</name></select>
+<text sheet="6" x="16" y="63">編集メニューのキー割り当て（［Ｃｔｒｌ］＋［Ｚ］［Ｘ］［Ｖ］）：</text>
+<select num="19160" sheet="6" rect="184,76,444,110" across="true" value="1"><name>ＢＴＲＯＮ</name><name>Ｗｉｎｄｏｗｓ</name></select>
+<text sheet="6" x="40" y="147">機能</text>
+<text sheet="6" x="210" y="147">ＢＴＲＯＮ</text>
+<text sheet="6" x="400" y="147">Ｗｉｎｄｏｗｓ</text>
+<text sheet="6" x="40" y="179">トレーへ複写</text>
+<text sheet="6" x="210" y="179">［Ｃｔｒｌ］＋［Ｃ］</text>
+<text sheet="6" x="400" y="179">［Ｃｔｒｌ］＋［Ｃ］</text>
+<text sheet="6" x="40" y="211">トレーから複写</text>
+<text sheet="6" x="210" y="211">［Ｃｔｒｌ］＋［Ｚ］</text>
+<text sheet="6" x="400" y="211">［Ｃｔｒｌ］＋［Ｖ］</text>
+<text sheet="6" x="40" y="243">トレーへ移動</text>
+<text sheet="6" x="210" y="243">［Ｃｔｒｌ］＋［Ｖ］</text>
+<text sheet="6" x="400" y="243">［Ｃｔｒｌ］＋［Ｘ］</text>
+<text sheet="6" x="40" y="275">トレーから移動</text>
+<text sheet="6" x="210" y="275">［Ｃｔｒｌ］＋［Ｘ］</text>
+<text sheet="6" x="400" y="275">［Ｃｔｒｌ］＋［Ｚ］</text>
+</panel>
+<panel num="10" rect="0,0,460,128" title="ユーザ環境設定">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<text num="3" x="24" y="84"> </text>
+<button num="101" rect="348,92,436,116" answer="ok" emph="true">確認</button>
+</panel>
+<panel num="11" rect="0,0,460,128" title="ユーザ環境設定">
+<text x="24" y="40">設定した値で更新しますか？</text>
+<text num="1" x="24" y="62"> </text>
+<button num="102" rect="16,92,104,116" answer="cancel">取り消し</button>
+<button num="106" rect="188,92,312,116">元に戻して終了</button>
+<button num="107" rect="324,92,436,116" answer="ok" emph="true">更新して終了</button>
+</panel>
+</databox>
+</tad>

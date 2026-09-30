@@ -1,0 +1,9 @@
+<tad version="1.0" encoding="UTF-8" filename="ポートのメニュー">
+<document>
+<p>ポートのメニュー</p>
+<p>シリアル通信で開くポート。一覧は小物が埋める。</p>
+</document>
+<menu>
+<list code="port"/>
+</menu>
+</tad>

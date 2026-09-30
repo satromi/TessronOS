@@ -1,0 +1,240 @@
+<tad version="1.0" filename="基本表計算" encoding="UTF-8">
+<document>
+<calcSize cell="5" height="49"/>
+<calcSize cell="6" height="55"/>
+<calcSize cell="B" width="137"/>
+<calcSize cell="D" width="245"/>
+<p>
+<paper imposition="0" binding="0" length="1403" width="992" top="94" bottom="94" left="94" right="47" />
+<docmargin top="94" bottom="94" left="94" right="47" />
+<calcPos cell="A1"/>	<calcPos cell="B1"/>	<calcPos cell="C1"/>	<calcPos cell="D1"/>	<calcPos cell="E1"/>	<calcPos cell="F1"/>	<calcPos cell="G1"/></p>
+<p><calcPos cell="A2"/>	<calcPos cell="B2"/>	<calcPos cell="C2"/>	<calcPos cell="D2"/>	<calcPos cell="E2"/>	<calcPos cell="F2"/>	<calcPos cell="G2"/></p>
+<p><calcPos cell="A3"/>	<calcPos cell="B3"/>	<calcPos cell="C3"/>	<calcPos cell="D3"/>	<calcPos cell="E3"/>	<calcPos cell="F3"/>	<calcPos cell="G3"/></p>
+<p><calcPos cell="A4"/>	<calcPos cell="B4"/>	<calcPos cell="C4"/>	<calcPos cell="D4"/>	<calcPos cell="E4"/>	<calcPos cell="F4"/>	<calcPos cell="G4"/></p>
+<p><calcPos cell="A5"/>	<calcPos cell="B5"/>仮身も入れられます	<calcPos cell="C5"/>	<calcPos cell="D5"/><link id="f22289dc-a180-494c-a918-f856ea61b404_0.xtad" vobjid="019cf904-4420-797a-859f-6b0a297fb6c5" name="原紙箱" tbcol="#000000" frcol="#000000" chcol="#ffff9c" bgcol="#ffffff" namedisp="true" pictdisp="true" width="143" heightPx="31" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;base-file-manager&quot;:{&quot;name&quot;:&quot;原紙箱&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>	<calcPos cell="E5"/>	<calcPos cell="F5"/>	<calcPos cell="G5"/></p>
+<p><calcPos cell="A6"/>	<calcPos cell="B6"/>	<calcPos cell="C6"/>	<calcPos cell="D6"/><link id="019a6c96-e262-7dfd-a3bc-1e85d495d60d_0.xtad" vobjid="019cf904-4420-70b4-ab4f-2afa353348fa" name="TADjsについて" tbcol="#e1f2f9" frcol="#000000" chcol="#3f4345" bgcol="#ffffff" namedisp="true" pictdisp="true" width="170" heightPx="31" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true}}"/>	<calcPos cell="E6"/>	<calcPos cell="F6"/>	<calcPos cell="G6"/></p>
+<p><calcPos cell="A7"/>	<calcPos cell="B7"/>表を作成したら	<calcPos cell="C7"/>	<calcPos cell="D7"/>	<calcPos cell="E7"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>A	<calcPos cell="F7"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>1	<calcPos cell="G7"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>2</p>
+<p><calcPos cell="A8"/>	<calcPos cell="B8"/>	<calcPos cell="C8"/>	<calcPos cell="D8"/>	<calcPos cell="E8"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>B	<calcPos cell="F8"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>4	<calcPos cell="G8"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>3</p>
+<p><calcPos cell="A9"/>	<calcPos cell="B9"/>	<calcPos cell="C9"/>	<calcPos cell="D9"/>	<calcPos cell="E9"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>C	<calcPos cell="F9"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>2	<calcPos cell="G9"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>1</p>
+<p><calcPos cell="A10"/>	<calcPos cell="B10"/>	<calcPos cell="C10"/>	<calcPos cell="D10"/>	<calcPos cell="E10"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>D	<calcPos cell="F10"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>3	<calcPos cell="G10"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>5</p>
+<p><calcPos cell="A11"/>	<calcPos cell="B11"/>	<calcPos cell="C11"/>	<calcPos cell="D11"/>	<calcPos cell="E11"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>E	<calcPos cell="F11"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>5	<calcPos cell="G11"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>2</p>
+<p><calcPos cell="A12"/>	<calcPos cell="B12"/>	<calcPos cell="C12"/>	<calcPos cell="D12"/>	<calcPos cell="E12"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>F	<calcPos cell="F12"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>8	<calcPos cell="G12"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>7</p>
+<p><calcPos cell="A13"/>	<calcPos cell="B13"/>	<calcPos cell="C13"/>	<calcPos cell="D13"/>	<calcPos cell="E13"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>G	<calcPos cell="F13"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>11	<calcPos cell="G13"/><calcCell borderTop="1" borderTopType="line" borderTopWidth="1" borderTopColor="#000000" borderBottom="1" borderBottomType="line" borderBottomWidth="1" borderBottomColor="#000000" borderLeft="1" borderLeftType="line" borderLeftWidth="1" borderLeftColor="#000000" borderRight="1" borderRightType="line" borderRightWidth="1" borderRightColor="#000000"/>13</p>
+<p><calcPos cell="A14"/>	<calcPos cell="B14"/>	<calcPos cell="C14"/>	<calcPos cell="D14"/>	<calcPos cell="E14"/>	<calcPos cell="F14"/>	<calcPos cell="G14"/></p>
+<p><calcPos cell="A15"/>	<calcPos cell="B15"/>グラフ化できます	<calcPos cell="C15"/>	<calcPos cell="D15"/>	<calcPos cell="E15"/>	<calcPos cell="F15"/>	<calcPos cell="G15"/></p>
+<group left="574" top="395" right="774" bottom="595">
+<calc chartType="clustered-bar" dataRange="E7:G13">
+<figure>
+<figView top="0" left="0" right="200" bottom="200"/>
+<figDraw top="0" left="0" right="200" bottom="200"/>
+<figScale hunit="-72" vunit="-72"/>
+<patterns>
+<pattern id="128" type="0" width="4" height="4" ncol="1" fgcolors="#ffffff" bgcolor="transparent" masks="7" />
+<pattern id="129" type="0" width="4" height="4" ncol="1" fgcolors="#51aefb" bgcolor="transparent" masks="7" />
+<pattern id="130" type="0" width="4" height="4" ncol="1" fgcolors="#ff7f50" bgcolor="transparent" masks="7" />
+</patterns>
+<rect round="0" lineType="0" lineWidth="1" l_pat="0" f_pat="128" angle="0" left="0" top="0" right="200" bottom="200" zIndex="0"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" left="32" top="159" right="40" bottom="170" zIndex="100"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" left="40" top="148" right="48" bottom="170" zIndex="99"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" left="52" top="127" right="60" bottom="170" zIndex="98"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" left="60" top="138" right="68" bottom="170" zIndex="97"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" left="72" top="148" right="80" bottom="170" zIndex="96"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" left="80" top="159" right="88" bottom="170" zIndex="95"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" left="92" top="138" right="100" bottom="170" zIndex="94"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" left="100" top="116" right="108" bottom="170" zIndex="93"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" left="112" top="116" right="120" bottom="170" zIndex="92"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" left="120" top="148" right="128" bottom="170" zIndex="91"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" left="132" top="84" right="140" bottom="170" zIndex="90"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" left="140" top="95" right="148" bottom="170" zIndex="89"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" left="152" top="52" right="160" bottom="170" zIndex="88"/>
+<rect round="0" lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" left="160" top="30" right="168" bottom="170" zIndex="87"/>
+<document>
+<docView viewleft="30" viewtop="175" viewright="50" viewbottom="190"/>
+<docDraw drawleft="30" drawtop="175" drawright="50" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="86"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+A
+</document>
+<document>
+<docView viewleft="50" viewtop="175" viewright="70" viewbottom="190"/>
+<docDraw drawleft="50" drawtop="175" drawright="70" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="85"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+B
+</document>
+<document>
+<docView viewleft="70" viewtop="175" viewright="90" viewbottom="190"/>
+<docDraw drawleft="70" drawtop="175" drawright="90" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="84"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+C
+</document>
+<document>
+<docView viewleft="90" viewtop="175" viewright="110" viewbottom="190"/>
+<docDraw drawleft="90" drawtop="175" drawright="110" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="83"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+D
+</document>
+<document>
+<docView viewleft="110" viewtop="175" viewright="130" viewbottom="190"/>
+<docDraw drawleft="110" drawtop="175" drawright="130" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="82"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+E
+</document>
+<document>
+<docView viewleft="130" viewtop="175" viewright="150" viewbottom="190"/>
+<docDraw drawleft="130" drawtop="175" drawright="150" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="81"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+F
+</document>
+<document>
+<docView viewleft="150" viewtop="175" viewright="170" viewbottom="190"/>
+<docDraw drawleft="150" drawtop="175" drawright="170" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="80"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+G
+</document>
+</figure>
+</calc>
+</group>
+<group left="312" top="392" right="512" bottom="592">
+<calc chartType="line" dataRange="E7:G13">
+<figure>
+<figView top="0" left="0" right="200" bottom="200"/>
+<figDraw top="0" left="0" right="200" bottom="200"/>
+<figScale hunit="-72" vunit="-72"/>
+<patterns>
+<pattern id="128" type="0" width="4" height="4" ncol="1" fgcolors="#ffffff" bgcolor="transparent" masks="7" />
+<pattern id="129" type="0" width="4" height="4" ncol="1" fgcolors="#51aefb" bgcolor="transparent" masks="7" />
+<pattern id="130" type="0" width="4" height="4" ncol="1" fgcolors="#ff7f50" bgcolor="transparent" masks="7" />
+</patterns>
+<rect round="0" lineType="0" lineWidth="1" l_pat="0" f_pat="128" angle="0" left="0" top="0" right="200" bottom="200" zIndex="0"/>
+<polyline lineType="0" lineWidth="2" l_pat="129" f_pat="0" points="30,159 53,127 77,148 100,138 123,116 147,84 170,52" zIndex="100"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" cx="30" cy="159" rx="4" ry="4" zIndex="99"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" cx="53" cy="127" rx="4" ry="4" zIndex="98"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" cx="77" cy="148" rx="4" ry="4" zIndex="97"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" cx="100" cy="138" rx="4" ry="4" zIndex="96"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" cx="123" cy="116" rx="4" ry="4" zIndex="95"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" cx="147" cy="84" rx="4" ry="4" zIndex="94"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="129" angle="0" cx="170" cy="52" rx="4" ry="4" zIndex="93"/>
+<polyline lineType="0" lineWidth="2" l_pat="130" f_pat="0" points="30,148 53,138 77,159 100,116 123,148 147,95 170,30" zIndex="92"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" cx="30" cy="148" rx="4" ry="4" zIndex="91"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" cx="53" cy="138" rx="4" ry="4" zIndex="90"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" cx="77" cy="159" rx="4" ry="4" zIndex="89"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" cx="100" cy="116" rx="4" ry="4" zIndex="88"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" cx="123" cy="148" rx="4" ry="4" zIndex="87"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" cx="147" cy="95" rx="4" ry="4" zIndex="86"/>
+<ellipse lineType="0" lineWidth="0" l_pat="0" f_pat="130" angle="0" cx="170" cy="30" rx="4" ry="4" zIndex="85"/>
+<document>
+<docView viewleft="18" viewtop="175" viewright="41" viewbottom="190"/>
+<docDraw drawleft="18" drawtop="175" drawright="41" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="84"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+A
+</document>
+<document>
+<docView viewleft="42" viewtop="175" viewright="65" viewbottom="190"/>
+<docDraw drawleft="42" drawtop="175" drawright="65" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="83"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+B
+</document>
+<document>
+<docView viewleft="65" viewtop="175" viewright="88" viewbottom="190"/>
+<docDraw drawleft="65" drawtop="175" drawright="88" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="82"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+C
+</document>
+<document>
+<docView viewleft="88" viewtop="175" viewright="111" viewbottom="190"/>
+<docDraw drawleft="88" drawtop="175" drawright="111" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="81"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+D
+</document>
+<document>
+<docView viewleft="112" viewtop="175" viewright="135" viewbottom="190"/>
+<docDraw drawleft="112" drawtop="175" drawright="135" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="80"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+E
+</document>
+<document>
+<docView viewleft="135" viewtop="175" viewright="158" viewbottom="190"/>
+<docDraw drawleft="135" drawtop="175" drawright="158" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="79"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+F
+</document>
+<document>
+<docView viewleft="158" viewtop="175" viewright="181" viewbottom="190"/>
+<docDraw drawleft="158" drawtop="175" drawright="181" drawbottom="190"/>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0" zIndex="78"/>
+<font size="8"/>
+<font face="sans-serif"/>
+<font color="#000000"/>
+<text align="center"/>
+G
+</document>
+</figure>
+</calc>
+</group>
+</document>
+</tad>

@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="行揃え">
+<document>
+<p>行揃え</p>
+<p>行揃え。メニューの定義。</p>
+</document>
+<menu>
+<item code="align.left">行頭揃え</item>
+<item code="align.centre">中央揃え</item>
+<item code="align.right">行末揃え</item>
+</menu>
+</tad>

@@ -1,0 +1,27 @@
+<tad version="1.0" encoding="UTF-8" filename="文字修飾">
+<document>
+<p>文字修飾</p>
+<p>文字修飾。メニューの定義。</p>
+</document>
+<menu>
+<item code="style.normal">標準</item>
+<item code="style.bold" key="B">太字</item>
+<item code="style.italic">斜体</item>
+<item code="style.bagchar">袋文字</item>
+<item code="style.box">枠囲み</item>
+<item code="style.shadow">影付き</item>
+<line/>
+<item code="style.underline">下線</item>
+<item code="style.overline">上線</item>
+<item code="style.strike">取り消し線</item>
+<item code="style.hatch">網掛</item>
+<item code="style.inverse">反転</item>
+<item code="style.noprint">無印字</item>
+<line/>
+<item code="style.super">上付き</item>
+<item code="style.sub">下付き</item>
+<line/>
+<item code="style.indent" key="Tab">字下げ</item>
+<item code="style.clear">解除</item>
+</menu>
+</tad>

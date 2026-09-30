@@ -1,0 +1,145 @@
+<tad version="1.0" encoding="UTF-8">
+<document>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0"/>
+<p>
+<font size="28"><font color="#51aefb"><bold>□</bold>TADjs Desktop紹介</font></font>
+</p>
+<p>
+<font size="14">TADjs Desktopは、BTRONの使用感を再現したデスクトップ環境です。<br/>
+TADjsはBTRON標準データフォーマットであるTADデータをブラウザで扱うための仕組みでしたが、よりBTRON仕様の再現度を上げたデスクトップ環境です。</font>
+</p>
+<p>
+BTRONでは、<link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" vobjid="019cf904-4417-7579-8562-bea3e6add6b3" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="30" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true}}"/> という概念でハイパーテキストをOS自体に組み込んでいます。<br/>
+「実身」がファイル本体で、「仮身」がリンクだと捉えてください。上記の「実身/仮身」という箱形のテキストの「仮身」をダブルクリックすると、参照先の「実身」データを開くことができます。<br/>
+そのため、フォルダ、ファイルパス、アプリといったことを気にせず、自由に「実身」の中に「仮身」を配置できますし、1つの「実身」に対して、いくらでも「仮身」を自由に配置することができます。
+</p>
+<p>
+この柔軟性をElectronアプリとして再現したのが、TADjs Desktopです。<br/>
+全ての機能要素はプラグインアプリとして搭載しているため、プラグインアプリを独自に開発することでBTRONアプリを移植することも可能になっています。
+</p>
+<p>
+<font size="18">□TADjs Desktop、BTRONの操作方法</font>
+</p>
+<p>
+<font size="14">TADjs Desktopで基本となる操作があります。ちょっと特殊な操作もありますが、BTRONの操作性を再現していますのでこういうものだとご理解ください。</font>
+</p>
+<p>
+・【実身新規作成時の操作】原紙箱からドラッグする
+</p>
+<p>
+新規で実身を作成する際は、原紙箱のウインドウから実身を別のウインドウ（例:仮身一覧プラグインや基本文章編集プラグイン）に仮身をドラッグします。<br/>
+実身名称入力ダイアログが表示されますので、実身名称を入力して&quot;決定&quot;ボタンを押下するとドラッグ先に実身が作成されます。
+</p>
+<p>
+・【実身複製時の操作】ダブルクリックドラッグ
+</p>
+<p>
+実身を複製したい場合は、対象の実身の仮身をダブルクリックした後にドラッグします。<br/>
+実身名称入力ダイアログが表示されますので、実身名称を入力して&quot;決定&quot;ボタンを押下するとドラッグ先に実身が複製されます。
+</p>
+<p>
+・【仮身複製時の操作】右クリックドラッグ（複写ドラッグ）
+</p>
+<p>
+仮身を複製したい場合は、若干特殊な操作になります。<br/>
+対象の仮身を左クリックボタンでプレスした後に右クリックボタンもプレスします。その状態でボタンを放さずにドラッグして、左クリックボタンからリリースして、最後に右クリックボタンもリリースします。<br/>
+リリースした位置に仮身が複製されます。
+</p>
+<p>
+<font size="18">□プラグインアプリについて</font>
+</p>
+<p>
+<font size="14">BTRONで基本となる、<link id="019aaf8c-3fb1-7c1a-b87e-748c9086b234_0.xtad" vobjid="019cf904-4418-7371-acae-798e807a3c29" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/> 、<link id="019aaf9c-0e6a-7b17-bfb6-a0f6a6067133" vobjid="019cf904-4418-71ce-bdab-035b2f7c100d" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>、<link id="019aaf9d-2b0d-79e8-bbe2-5baf847986dc" vobjid="019cf904-4418-7172-a6bd-3573ed2d58e8" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>、<link id="019af2ae-06b3-78a7-910a-bfb05789fd3c_0.xtad" vobjid="019cf904-4418-74e0-b1ae-1fd02f257b84" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>、<link id="019aafb3-2536-74e0-8f32-52673733bf21" vobjid="019cf904-4419-7fcc-b046-7991e8c82830" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>といったアプリを参考に基本的なBTRON機能をプラグインアプリとして移植しているので、BTRONの基本的な考え方を元に使えるハイパーテキストエディタになっています。</font>
+</p>
+<p>
+<font size="16">□アプリタイプ（原紙、小物）について</font>
+</p>
+<p>
+<font size="14">BTRONでは、「実身/仮身」を主に扱う「原紙」タイプのアプリと、メニューから起動する「小物」タイプのアプリがあります。</font>
+</p>
+<p>
+・「原紙」アプリ
+</p>
+<p>
+原紙箱というアプリ（TADjs Desktopでは初期ウインドウから自動起動）から、各アプリを実行可能な属性がついた「原紙」という仮身を別の表示中の実身にドラッグして、新たな実身をコピーして作成してから使うタイプのアプリです。主にTADデータを扱うアプリは「原紙」からコピーして使います。<br/>
+現状、<link id="019aafc1-0e79-7996-9739-53b8f6a25c8b" vobjid="019cf904-4419-72d9-9980-f308fdb0b54a" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>、<link id="019aaf8c-3fb1-7c1a-b87e-748c9086b234_0.xtad" vobjid="019cf904-4419-7a7e-81cd-e8cc895e43bf" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/> 、<link id="019aaf9c-0e6a-7b17-bfb6-a0f6a6067133" vobjid="019cf904-4419-7e69-8bde-d1b4bb4eb778" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>、<link id="019aaf9d-2b0d-79e8-bbe2-5baf847986dc" vobjid="019cf904-4419-7e4b-9e55-70547244069a" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/> 、<link id="019af2ae-06b3-78a7-910a-bfb05789fd3c_0.xtad" vobjid="019cf904-4419-7af4-9d5d-5d8edaf3f02f" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>、<link id="019aafb3-2536-74e0-8f32-52673733bf21" vobjid="019cf904-4419-71cc-8964-f378ce0a950f" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>、<link id="019aafbf-ec6d-7cff-918b-b7e36ed637b2" vobjid="019cf904-441a-788a-b0c9-a74736da171a" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>、<link id="019ab4b4-b635-7d5c-bd9c-5c6b761ead0d" vobjid="019cf904-441a-7a17-b995-cf0b05c522d8" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/> 、<link id="019baac6-663a-76cb-b3cb-ce3270898e1f_0.xtad" vobjid="019cf904-441a-7977-aa15-2315f50003f8" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>というアプリがあります。
+</p>
+<p>
+・「小物」アプリ
+</p>
+<p>
+右クリックメニューから「小物」を選択して起動するタイプのアプリです。<br/>
+これらのアプリは基本現状、下記があります。
+</p>
+<p>
+<link id="019ab4b0-5083-7496-af93-7b89a5b7f8ee" vobjid="019cf904-441a-74fb-83b7-5e73c23ca8ce" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/> 、<link id="019ab372-4302-7ae6-b537-1f100ceb335b" vobjid="019cf904-441a-7da7-9d7a-05e9bd709a66" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>、<link id="019ab376-44fb-75a9-b4ac-fd05a52f8997" vobjid="019cf904-441b-7044-80ba-b9e71b93f5ab" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>、<link id="019ab4c0-8d40-7590-89a9-cde7934a6a2b" vobjid="019cf904-441b-72be-8bc8-66d5b1a9a1a0" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>、<br/>
+<link id="019b1c1a-3ad9-7b3d-b9b9-13b190692d05_0.xtad" vobjid="019cf904-441b-7a23-bb0e-0b690997f417" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>、<link id="019b1c1a-eb61-721f-ac6d-b7e553382800_0.xtad" vobjid="019cf904-441c-77f8-a038-1b0ba01d3ac0" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/><br/>
+
+</p>
+<p>
+<font size="18">□TADとは</font>
+</p>
+<p>
+<font size="14">BTRONでもう一 つ重要な概念として、標準データフォーマットである<link id="019a6c9a-fbc2-76c1-b965-4ac1f7e4dcb7_0.xtad" vobjid="019cf904-441c-7cca-9edd-896cb59ac1e4" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="30" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true}}"/> があります。実身/仮身という形でハイパーテキストを実現しているため、文章ファイル・画像ファイル・図形ファイルを分け隔てることなく統合的に扱うことができ、1つのデータを複数のアプリから使い分けることができます。</font>
+</p>
+<p>
+<font size="18">□注意点</font>
+</p>
+<p>
+<font size="14">TADjs Desktopはまだβ版なので、「実身」特に基本文章編集プラグインで編集した文章xmlTADの解釈や保存において不具合が出るケースがあります。 <br/>
+その場合、通常のテキストエディタで対象の実身の.xtadファイルを開いて、おかしな記載や連続した改段落・改行のようなxmlTADタグが無いか探して修正してください。</font>
+</p>
+<p>
+<font size="28">□BTRONユーザ向け説明</font>
+</p>
+<p>
+<font size="14">BTRON（超漢字シリーズ）で作成したデータは、BTRON書庫管理で圧縮した書庫形式のファイル（BPK）ファイルをTADjs Desktopに取り込めるようになっています。<br/>
+ちなみに、書庫以外のファイルも取 り込んで、「既存データ起動」でファイルを開けます。</font>
+</p>
+<p>
+・書庫形式（BPK）のTADファイル、通常のファイルを取り込む「ファイル取込」の使い方
+</p>
+<p>
+<link id="019ab4b0-5083-7496-af93-7b89a5b7f8ee" vobjid="019cf904-441c-7092-b45f-532dce8ce18c" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/> を参照してください。
+</p>
+<p>
+・取込済ファイル（書庫形式以外）を起動する「既存データ起動」の使い方
+</p>
+<p>
+<link id="019ab4b4-b635-7d5c-bd9c-5c6b761ead0d" vobjid="019cf904-441c-7027-84af-db5a5defb30e" tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="31" dlen="0" chsz="14" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true},&quot;virtual-object-list&quot;:{&quot;name&quot;:&quot;仮身一覧&quot;,&quot;defaultOpen&quot;:false}}"/>を参照してください。
+</p>
+<p>
+<font size="18">□現状の制約・不具合<br/>
+</font>
+</p>
+<p>
+<font size="14">・図形TADを基本文章編集プラグインで開けない</font>
+</p>
+<p>
+図形TADは基本文章編集プラグインで開けません。理由としては、xmlTADで図形TADを＜figure＞というxmlTADタグを解釈できないためです。これは、基本文章編集プラグインが採用しているHTMLベースのリッチテキストエディタによるところなので、対策方法を検討中です。いっそのこと開き直って、文章TAD中に図形TADが出てきたら開いた仮身のように基本図形編集プラグインで描画するという方法を採用するかもしれません。<br/>
+※TADjs Desktopの各プラグインアプリで開いたウインドウ、開いた仮身はiframeというブラウザ要素で描画されているため、iframeという領域を基本文章編集プラグインのウインドウ内に出現させて、そこだけは別のプラグインで描画するということも可能です。
+</p>
+<p>
+・文章TADを基本図形編集プラグインで開けない
+</p>
+<p>
+文章TADは基本図形編集プラグインで開けません。理由として同上です。<br/>
+※ただし、仮身一覧も図形TADデータで保持しています。
+</p>
+<p>
+・アプリの起動付箋編集が画面上ではできない<br/>
+アプリの起動付箋に関する情報はxmlTADの実身管理用セグメントjson（実身の.xtadファイルと同名の.jsonファイル）に記載されていますが、画面上から編集する機能はありません。そのため、原紙箱から実身を作成した際に起動可能なプラグインアプリ以外でその実身を開きたい場合は、実身管理用セグメントjsonの&quot;applist&quot;に追加してください。
+</p>
+<p>
+・字下げがいまいちうまくいかない
+</p>
+<p>
+字下げは、文章TADでタブ書式を用いる上で重要な機能ですが、いまいち上手く動作しません。
+</p>
+<p>
+<br/>
+
+</p>
+</document>
+</tad>

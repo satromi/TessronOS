@@ -1,0 +1,69 @@
+<tad version="0121" filename="SCRIPT／MCP-SSE" encoding="UTF-8">
+<document>
+<docScale hunit="-120" vunit="-120"/>
+<text lang="33" bpat="0"/>
+<p><paper type="doc" length="1403" width="992" binding="0" imposition="0" top="94" bottom="94" left="108" right="85" />
+<docmargin top="94" bottom="94" left="108" right="85" />
+<font direction="0" kerning="0" pattern="1" space="0"/><font size="7.2"/>VERSION　2</p>
+<p>DEBUG　0</p>
+<p></p>
+<p>PROLOGUE</p>
+<p>LOCAL　種類：C［64］</p>
+<p>LOCAL　名前：C［64］</p>
+<p>LOCAL　版：C［32］</p>
+<p>LOCAL　応答：C［64］</p>
+<p></p>
+<p>CONSOLE　1</p>
+<p>MESG　”＝＝＝　MCP Streamable HTTP (2026-07-28)　＝＝＝”</p>
+<p>MESG　”接続先: http://localhost:3334/mcp”</p>
+<p>MESG　”(ローカルSSEサーバを起動しておくこと。セッションは廃止=ステートレス)”</p>
+<p></p>
+<p># [1] server/discover。 SSE(text/event-stream)応答は自動で JSON にパースされる</p>
+<p>MESG　”[1] server/discover”</p>
+<p>HTTPREQ　”POST”，”http://localhost:3334/mcp”，”Content-Type:application/json\nAccept:application/json, text/event-stream\nMCP-Protocol-Version:2026-07-28\nMcp-Method:server/discover”，”{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"tadjs\",\"version\":\"1.0\"},\"io.modelcontextprotocol/clientCapabilities\":{}}}}”</p>
+<p>IF　（＄ERR！＝0）</p>
+<p>　MESG　”　失敗 (ERR=％d)”，＄ERR</p>
+<p>ELSE</p>
+<p>　MESG　”　ステータス=％d”，＄HTTPST</p>
+<p>　# 応答が SSE ストリームであることをレスポンスヘッダで確認</p>
+<p>　HTTPHDR　種類，”Content-Type”</p>
+<p>　IF　（＄ERR＝＝0）</p>
+<p>　　MESG　”　Content-Type = ％s”，種類</p>
+<p>　ENDIF</p>
+<p>　JSONGET　名前，”result._meta.io.modelcontextprotocol/serverInfo.name”</p>
+<p>　IF　（＄ERR＝＝0）</p>
+<p>　　MESG　”　サーバ = ％s”，名前</p>
+<p>　ENDIF</p>
+<p>　JSONGET　版，”result.supportedVersions.0”</p>
+<p>　IF　（＄ERR＝＝0）</p>
+<p>　　MESG　”　対応版 = ％s”，版</p>
+<p>　ENDIF</p>
+<p></p>
+<p>　# [2] tools/list (セッション不要。 必須ヘッダのみ)</p>
+<p>　MESG　”[2] tools/list”</p>
+<p>　HTTPREQ　”POST”，”http://localhost:3334/mcp”，”Content-Type:application/json\nAccept:application/json, text/event-stream\nMCP-Protocol-Version:2026-07-28\nMcp-Method:tools/list”，”{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"tadjs\",\"version\":\"1.0\"},\"io.modelcontextprotocol/clientCapabilities\":{}}}}”</p>
+<p>　IF　（＄ERR＝＝0）</p>
+<p>　　MESG　”　ステータス=％d”，＄HTTPST</p>
+<p>　　JSONGET　名前，”result.tools.0.name”</p>
+<p>　　IF　（＄ERR＝＝0）</p>
+<p>　　　MESG　”　道具0 名前 = ％s”，名前</p>
+<p>　　ENDIF</p>
+<p>　ELSE</p>
+<p>　　MESG　”　tools/list 失敗 ERR=％d”，＄ERR</p>
+<p>　ENDIF</p>
+<p></p>
+<p>　# [3] tools/call (ヘッダに Mcp-Name(=params.name) も必須)</p>
+<p>　MESG　”[3] tools/call (echo)”</p>
+<p>　HTTPREQ　”POST”，”http://localhost:3334/mcp”，”Content-Type:application/json\nAccept:application/json, text/event-stream\nMCP-Protocol-Version:2026-07-28\nMcp-Method:tools/call\nMcp-Name:echo”，”{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"BTRON via SSE\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"tadjs\",\"version\":\"1.0\"},\"io.modelcontextprotocol/clientCapabilities\":{}}}}”</p>
+<p>　IF　（＄ERR＝＝0）</p>
+<p>　　JSONGET　応答，”result.content.0.text”</p>
+<p>　　IF　（＄ERR＝＝0）</p>
+<p>　　　MESG　”　応答 = ％s”，応答</p>
+<p>　　ENDIF</p>
+<p>　ENDIF</p>
+<p>ENDIF</p>
+<p></p>
+<p>MESG　”＝＝＝　完了　＝＝＝”</p>
+<p>END</p>
+</document>
+</tad>

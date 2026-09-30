@@ -1,0 +1,9 @@
+<tad version="1.0" encoding="UTF-8" filename="操作のメニュー">
+<document>
+<p>操作のメニュー</p>
+<p>マイクロスクリプトの台本が MENU で定めた手続き。一覧はプログラムが埋める。</p>
+</document>
+<menu>
+<list code="op"/>
+</menu>
+</tad>

@@ -1,0 +1,56 @@
+<tad version="0121" filename="SCRIPT／HTTP通信" encoding="UTF-8">
+<document>
+<docScale hunit="-120" vunit="-120"/>
+<text lang="33" bpat="0"/>
+<p><paper type="doc" length="1403" width="992" binding="0" imposition="0" top="94" bottom="94" left="108" right="85" />
+<docmargin top="94" bottom="94" left="108" right="85" />
+<font direction="0" kerning="0" pattern="1" space="0"/><font size="7.2"/>VERSION　2</p>
+<p>DEBUG　0</p>
+<p></p>
+<p>PROLOGUE</p>
+<p>LOCAL　本文：C［512］</p>
+<p>LOCAL　長さ：I</p>
+<p>LOCAL　タイトル：C［256］</p>
+<p>LOCAL　番号：I</p>
+<p></p>
+<p>CONSOLE　1</p>
+<p>MESG　”＝＝＝　HTTP通信テスト　＝＝＝”</p>
+<p>MESG　”[1] https://example.com/ を GET します”</p>
+<p>HTTPREQ　”GET”，”https://example.com/”</p>
+<p>IF　（＄ERR！＝0）</p>
+<p>　MESG　”　失敗 (ERR=％d)”，＄ERR</p>
+<p>ELSE</p>
+<p>　MESG　”　ステータス=％d　本文長=％dバイト”，＄HTTPST，＄HTTPLEN</p>
+<p>　長さ＝＄HTTPLEN</p>
+<p>　IF　（長さ＞200）</p>
+<p>　　長さ＝200</p>
+<p>　ENDIF</p>
+<p>　REPEAT　長さ</p>
+<p>　　本文［＄CNT］＝＄HTTPBODY［＄CNT］</p>
+<p>　ENDREPEAT</p>
+<p>　本文［長さ］＝0</p>
+<p>　MESG　”　先頭: ％s”，本文</p>
+<p>ENDIF</p>
+<p></p>
+<p>MESG　”[2] jsonplaceholder /todos/1 (JSON)”</p>
+<p>HTTPREQ　”GET”，”https://jsonplaceholder.typicode.com/todos/1”</p>
+<p>IF　（＄ERR！＝0）</p>
+<p>　MESG　”　失敗 (ERR=％d)”，＄ERR</p>
+<p>ELSE</p>
+<p>　MESG　”　ステータス=％d”，＄HTTPST</p>
+<p>　JSONGET　タイトル，”title”</p>
+<p>　IF　（＄ERR＝＝0）</p>
+<p>　　MESG　”　title = ％s”，タイトル</p>
+<p>　ELSE</p>
+<p>　　MESG　”　title 取得失敗 (ERR=％d)”，＄ERR</p>
+<p>　ENDIF</p>
+<p>　JSONGET　番号，”id”</p>
+<p>　IF　（＄ERR＝＝0）</p>
+<p>　　MESG　”　id = ％d”，番号</p>
+<p>　ENDIF</p>
+<p>ENDIF</p>
+<p></p>
+<p>MESG　”＝＝＝　完了　＝＝＝”</p>
+<p>END</p>
+</document>
+</tad>

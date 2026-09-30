@@ -1,0 +1,21 @@
+<tad version="1.0" encoding="UTF-8" filename="編集">
+<document>
+<p>編集</p>
+<p>基本文章編集の編集。メニューの定義。</p>
+</document>
+<menu>
+<item code="tray">トレー<link id="01a0d889-460c-7eda-8b47-5745d175681c_0.xtad" vobjid="01a0d8c3-2002-70f1-ab2e-e765ecf49849"/></item>
+<line/>
+<item code="undo">取消</item>
+<item code="copy" key="C">トレーへ複写</item>
+<item code="paste" key="V">トレーから複写</item>
+<item code="cut" key="X">トレーへ移動</item>
+<item code="moveback" key="Z">トレーから移動</item>
+<line/>
+<item code="selectall">すべて選択</item>
+<line/>
+<item code="find" key="F">検索/置換</item>
+<line/>
+<item code="virtualize" key="9">仮身化</item>
+</menu>
+</tad>

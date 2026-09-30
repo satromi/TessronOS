@@ -1,0 +1,15 @@
+<tad version="1.0" encoding="UTF-8" filename="表示">
+<document>
+<p>表示</p>
+<p>基本図形編集の表示。メニューの定義。</p>
+</document>
+<menu>
+<item code="panel">道具パネル表示オンオフ</item>
+<item code="realsize">実寸パネル表示</item>
+<item code="pattern">パターン編集</item>
+<item code="fullscreen" key="L">全画面表示オンオフ</item>
+<item code="refresh">再表示</item>
+<item code="bgcolour">背景色変更</item>
+<item code="hidden">隠蔽仮身を表示</item>
+</menu>
+</tad>

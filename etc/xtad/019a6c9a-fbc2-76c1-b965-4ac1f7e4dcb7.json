@@ -1,0 +1,46 @@
+{
+  "name": "TAD",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2025-11-10T07:11:27.702Z",
+  "updateDate": "2026-01-10T23:35:57.971Z",
+  "accessDate": "2026-01-10T23:35:56.887Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TADjs User",
+  "window": {
+    "pos": {
+      "x": 100,
+      "y": 87
+    },
+    "width": 774,
+    "height": 502,
+    "minWidth": 200,
+    "minHeight": 200,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff",
+    "scrollPos": {
+      "x": 0,
+      "y": 0
+    }
+  },
+  "applist": {
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": true
+    }
+  }
+}

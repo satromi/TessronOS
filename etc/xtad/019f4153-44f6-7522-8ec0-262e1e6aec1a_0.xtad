@@ -1,0 +1,23 @@
+<tad version="0121" filename="MCP認証テスト" encoding="UTF-8">
+<figure>
+<figView left="16" top="16" right="320" bottom="130"/>
+<figDraw left="16" top="16" right="320" bottom="130"/>
+<figScale hunit="-120" vunit="-120"/>
+<paper imposition="0" binding="0" length="1403" width="992" top="94" bottom="94" left="94" right="47" />
+<paper margintop="94" marginbottom="94" marginleft="94" marginright="47" />
+<pattern id="1" type="0" width="16" height="16" ncol="1" fgcolors="#ffffff" bgcolor="transparent" masks="7" />
+<link id="019f4153-44f6-79a7-a6aa-46b3bc8184c5_0.xtad" vobjid="019f4153-44f6-717d-9cb0-82f677003503" vobjleft="16" vobjtop="56" vobjright="192" vobjbottom="83" vobjheight="90" chsz="16" frcol="#000000" chcol="#000000" tbcol="#dfdfdf" bgcol="#ffffff" dlen="0" scrollx="0" scrolly="0" zoomratio="1" zIndex="1"/>
+<link id="019f4153-44f3-79b1-9b7a-7a47f61df936_0.xtad" vobjid="019f4153-44f6-710d-aa33-f7b6df40ff18" vobjleft="16" vobjtop="84" vobjright="192" vobjbottom="111" vobjheight="90" chsz="16" frcol="#000000" chcol="#000000" tbcol="#fff0d8" bgcol="#ffffff" dlen="0" scrollx="0" scrolly="0" zoomratio="1" zIndex="2"/>
+<group>
+<document>
+<docScale hunit="0" vunit="0"/>
+<text lang="0" bpat="0"/>
+<p><docView viewleft="16" viewtop="16" viewright="320" viewbottom="40"/>
+<docDraw drawleft="16" drawtop="16" drawright="320" drawbottom="40"/>
+<docScale hunit="0" vunit="0"/>
+<text lang="33" bpat="1"/>
+<font face="明朝体"/><font size="9.6"/><font direction="0" kerning="0" pattern="1" space="0"/><font color="#000000"/><text line-height="1"/>MCP認証テスト (microscript)</p>
+</document>
+</group>
+</figure>
+</tad>

@@ -1,0 +1,48 @@
+{
+  "name": "BTRON",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2024-06-20T12:00:00Z",
+  "updateDate": "2026-01-02T00:36:42.178Z",
+  "accessDate": "2025-11-10T07:06:39.616Z",
+  "periodDate": null,
+  "refCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TADjs User",
+  "window": {
+    "pos": {
+      "x": 0,
+      "y": 0
+    },
+    "width": 350,
+    "height": 226,
+    "minWidth": 50,
+    "minHeight": 50,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#f3ffff"
+  },
+  "applist": {
+    "virtual-object-list": {
+      "name": "仮身一覧",
+      "defaultOpen": true
+    },
+    "basic-figure-editor": {
+      "name": "基本図形編集",
+      "defaultOpen": false
+    }
+  },
+  "realId": "0199ce83-6e83-7d42-8962-d2ad8c721654",
+  "recordCount": 1,
+  "isFullscreen": false
+}

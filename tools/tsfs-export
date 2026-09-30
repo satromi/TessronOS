@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Write the objects of a TSFS native volume out as TADjs files.
+
+  tools/tsfs-export [-o dir] [--partition N | --offset N | --whole] image
+
+Each object goes out as the TADjs Desktop keeps it (design 11.3):
+{uuid}.json as ts_obj_get_meta gives it, the reference count, the record
+count and the dates put in first (a text that is not a JSON object as it
+is), the record at position N as {uuid}_N.xtad or {uuid}_N.bin,
+the icon as {uuid}.ico and every other resource as {uuid}_N_M.ext.
+tsfs-volume.json beside them keeps the label, the volume UUID and the
+roots. The volume is only read; a journal that was not replayed is read
+as the kernel will leave it.
+
+Exit status: 0 when every object was written, 1 when some could not be
+read, 2 when the volume could not be opened.
+"""
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from tsfs_py import TsfsError, Volume
+from tsfs_py.cli import add_volume_args, open_device
+from tsfs_py import transfer
+
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="tsfs-export", description="write out the objects of a volume")
+    p.add_argument("image", help="image file holding the volume")
+    p.add_argument("-o", "--outdir", default="tsfs-export",
+                   help="directory to write into (made if it is not there)")
+    add_volume_args(p)
+    args = p.parse_args()
+
+    try:
+        dev = open_device(args.image, args, writable=False)
+        vol = Volume.open(dev)
+    except (TsfsError, OSError) as e:
+        sys.stderr.write("tsfs-export: %s\n" % e)
+        return 2
+
+    problems = []
+    try:
+        with vol:
+            nobj, nrec, nres, failed = transfer.export(vol, args.outdir,
+                                                       problems)
+    except (TsfsError, OSError) as e:
+        sys.stderr.write("tsfs-export: %s\n" % e)
+        return 1
+
+    print("%s: %d objects, %d records, %d resources to %s"
+          % (args.image, nobj, nrec, nres, args.outdir))
+    for msg in problems:
+        sys.stderr.write("tsfs-export: %s\n" % msg)
+    for u, why in failed:
+        sys.stderr.write("tsfs-export: %s not written: %s\n" % (u, why))
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

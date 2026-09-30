@@ -1,0 +1,19 @@
+<tad version="1.0" encoding="UTF-8">
+<document>
+<p>
+<font size="28"/><font color="rgb(81, 174, 251)"/><bold>□既存データ起動</bold>
+</p>
+<p>
+<font size="14"/>既存データ起動は、「ファイル取込」小物で取り込んだファイルを起動するランチャーです。<br/>
+「ファイル取込」でTADjs Desktopのフォルダに取り込んだファイルをコピーして格納するので、それを扱えるようにしています。
+</p>
+<p>
+<font size="18"/><br/>
+
+</p>
+<p>
+<br/>
+
+</p>
+</document>
+</tad>

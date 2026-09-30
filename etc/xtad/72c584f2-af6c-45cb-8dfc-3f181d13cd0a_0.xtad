@@ -1,0 +1,23 @@
+<tad version="1.0" encoding="UTF-8">
+<document>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="33" bpat="0"/>
+<paper imposition="0" binding="0" length="1403" width="992" top="94" bottom="70" left="108" right="85" />
+<docmargin top="94" bottom="118" left="108" right="85" />
+<p>
+<font size="18">%size:1920＊1080</font>
+</p>
+<p>
+<font size="18"><link id="a529abdf-ce53-456c-9be1-58119b3c40cd_0.xtad" vobjid="019cf904-4422-7555-a065-320541fd8964" tbcol="#ffffff" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="30" dlen="32" chsz="24" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" vobjheight="204" zindex="1" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true}}"/></font>
+</p>
+<p>
+<font size="18"><link id="db566f80-c4e3-432f-829d-7b55cd3afa85_0.xtad" vobjid="019cf904-4422-7d20-8100-9c086e75ee61" tbcol="#ffffff" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="30" dlen="32" chsz="24" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" vobjheight="204" zindex="2" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true}}"/></font>
+</p>
+<p>
+<font size="18"><link id="713b8f42-b7f6-42a8-979e-90af8b824d70_0.xtad" vobjid="019cf904-4422-7d7f-a074-b47af1f8cdf2" tbcol="#ffffff" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="30" dlen="32" chsz="24" framedisp="true" namedisp="true" pictdisp="true" roledisp="false" typedisp="false" updatedisp="false" vobjheight="204" zindex="3" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true}}"/></font>
+</p>
+<p>
+<font size="24"></font>
+</p>
+</document>
+</tad>

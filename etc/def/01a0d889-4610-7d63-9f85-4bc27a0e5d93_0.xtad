@@ -1,0 +1,19 @@
+<tad version="1.0" encoding="UTF-8" filename="通信速度のメニュー">
+<document>
+<p>通信速度のメニュー</p>
+<p>シリアル通信の速度(ビット毎秒)。</p>
+</document>
+<menu>
+<item code="s1200" value="1200">1200</item>
+<item code="s2400" value="2400">2400</item>
+<item code="s4800" value="4800">4800</item>
+<item code="s9600" value="9600">9600</item>
+<item code="s19200" value="19200">19200</item>
+<item code="s38400" value="38400">38400</item>
+<item code="s57600" value="57600">57600</item>
+<item code="s115200" value="115200">115200</item>
+<item code="s230400" value="230400">230400</item>
+<item code="s460800" value="460800">460800</item>
+<item code="s921600" value="921600">921600</item>
+</menu>
+</tad>

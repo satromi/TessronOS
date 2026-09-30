@@ -1,0 +1,18 @@
+<tad version="1.0" encoding="UTF-8" filename="基本文章編集のメニュー">
+<document>
+<p>基本文章編集のメニュー</p>
+<p>基本文章編集の窓のメニュー。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7307-b076-eccad8306cdf"/></include>
+<item>保存<link id="01a0d889-45f2-7004-ac99-04af5a613993_0.xtad" vobjid="01a0d8c3-2002-7c1c-aae7-d18024df1c99"/></item>
+<item>表示<link id="01a0d889-45f3-77e0-bedd-ab1f2c1ddd35_0.xtad" vobjid="01a0d8c3-2002-783d-9d27-3cfd52d774e4"/></item>
+<item>編集<link id="01a0d889-45f4-7b3c-9819-34efe698ed10_0.xtad" vobjid="01a0d8c3-2002-7aa7-a541-c13bf8144397"/></item>
+<item>書体<link id="01a0d889-45f5-7fd2-87cf-db4c472ef838_0.xtad" vobjid="01a0d8c3-2002-74fa-8fc4-e5b813939040"/></item>
+<item>文字修飾<link id="01a0d889-45f6-7796-aec5-427384dd88ac_0.xtad" vobjid="01a0d8c3-2002-7e89-a633-d67adfd2f3f0"/></item>
+<item>文字サイズ<link id="01a0d889-45f7-7a8a-99ad-1f4dcbaf330c_0.xtad" vobjid="01a0d8c3-2002-7b52-8e7c-4ef6af79bf3b"/></item>
+<item>文字色<link id="01a0d889-45f8-7313-8cf3-81f89dd63774_0.xtad" vobjid="01a0d8c3-2002-79e9-a862-930c2b538621"/></item>
+<item>書式<link id="01a0d889-45f9-724c-8403-281c5d86aaec_0.xtad" vobjid="01a0d8c3-2002-7276-b351-a2e1310a966e"/></item>
+<include><link id="01a0d889-45ec-766a-986d-5fad49d48e06_0.xtad" vobjid="01a0d8c3-2002-7c90-a814-8fcb2c5c5840"/></include>
+</menu>
+</tad>

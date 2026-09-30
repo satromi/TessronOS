@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="送信する改行のメニュー">
+<document>
+<p>送信する改行のメニュー</p>
+<p>Enter で送るもの。</p>
+</document>
+<menu>
+<item code="nl.cr">CR</item>
+<item code="nl.lf">LF</item>
+<item code="nl.crlf">CR+LF</item>
+</menu>
+</tad>

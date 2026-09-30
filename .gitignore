@@ -1,0 +1,46 @@
+# ビルド成果物
+build_make/obj/
+build_make/*.elf
+build_make/*.img
+build_make/*.map
+build_make/*.lst
+build_make/*.bin
+*.o
+*.d
+*.a
+
+# QEMU 用ボリューム画像、テスト出力
+tsfs.img
+*.img
+*.ppm
+*.log
+tests/out/
+build_make/.qemu_run.*/
+build_make/*.dtb
+
+# 別に取得・生成するもの(ビルドの外に置く。配布するイメージはリリースで)
+*.tpk
+*.elf
+*.map
+*.lst
+.VSCodeCounter/
+
+# Python
+__pycache__/
+*.pyc
+
+# エディタ・OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+
+# 試験用に置く書体。再配布できるもの(Noto、SIL OFL 1.1)だけを追跡する。
+# それ以外は資産なので置いても追跡しない(設計書 17.1)
+etc/font/*
+!etc/font/NotoSansJP-Regular.otf
+!etc/font/OFL.txt
+
+# Claude Code の作業木
+.claude/

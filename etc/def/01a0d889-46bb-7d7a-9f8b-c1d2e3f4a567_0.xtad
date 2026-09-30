@@ -1,0 +1,9 @@
+<tad version="1.0" encoding="UTF-8" filename="システム環境設定の操作メニュー">
+<document>
+<p>システム環境設定の操作メニュー</p>
+<p>〈バージョン〉の一覧で選んだアプリケーションを削除する。メニューの定義。</p>
+</document>
+<menu>
+<item code="prog.delete">削除</item>
+</menu>
+</tad>

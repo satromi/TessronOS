@@ -1,0 +1,12 @@
+<tad version="1.0" encoding="UTF-8" filename="システム環境設定のメニュー">
+<document>
+<p>システム環境設定のメニュー</p>
+<p>システム環境設定の窓のメニュー。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7eb6-8b27-4d5e6f7a8c92"/></include>
+<item>操作<link id="01a0d889-46bb-7d7a-9f8b-c1d2e3f4a567_0.xtad" vobjid="01a0d8c3-2002-7e65-9e70-8192a3b4c5d6"/></item>
+<item code="again">表示更新</item>
+<item code="win">ウインドウ<link id="01a0d889-46ba-7c69-8f7a-b0c1d2e3f456_0.xtad" vobjid="01a0d8c3-2002-7e67-8a07-92a3b4c5d6e7"/></item>
+</menu>
+</tad>

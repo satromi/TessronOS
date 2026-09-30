@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="保存">
+<document>
+<p>保存</p>
+<p>仮身一覧・基本図形編集の保存。メニューの定義。</p>
+</document>
+<menu>
+<item code="save" key="S">元の実身に保存</item>
+<item code="save.new">新たな実身に保存</item>
+</menu>
+</tad>

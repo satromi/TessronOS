@@ -1,0 +1,13 @@
+<tad version="1.0" encoding="UTF-8" filename="保護">
+<document>
+<p>保護</p>
+<p>仮身一覧・基本図形編集の保護。メニューの定義。</p>
+</document>
+<menu>
+<item code="fix">固定化</item>
+<item code="unfix">固定解除</item>
+<line/>
+<item code="bg">背景化</item>
+<item code="unbg">背景解除</item>
+</menu>
+</tad>

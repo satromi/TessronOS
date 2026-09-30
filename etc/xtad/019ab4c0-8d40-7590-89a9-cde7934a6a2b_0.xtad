@@ -1,0 +1,25 @@
+<tad version="1.0" encoding="UTF-8">
+<document>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0"/>
+<p>
+<font size="28"><font color="#51aefb"><bold>□屑実身操作</bold></font></font>
+</p>
+<p>
+<font size="14">屑実身操作は、どの仮身からも参照されなくなってしまった実身（屑実身と呼ぶ）を探して復活させることができる機能です。</font>
+</p>
+<p>
+<font size="18">□使い方</font>
+</p>
+<p>
+1.右クリックメニューで「小物」、「屑実身操作」を選択する。
+</p>
+<p>
+<font size="14">2.ウインドウが開くので、表示された屑実身を仮身一覧等のウインドウにドラッグすると実身を復活させることができる。</font>
+</p>
+<p>
+<br/>
+
+</p>
+</document>
+</tad>

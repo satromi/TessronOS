@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="小物">
+<document>
+<p>小物</p>
+<p>小物箱と、メニューに出す小物。メニューの定義。</p>
+</document>
+<menu>
+<item code="acc.box">小物箱</item>
+<line/>
+<list code="acc.item"/>
+</menu>
+</tad>

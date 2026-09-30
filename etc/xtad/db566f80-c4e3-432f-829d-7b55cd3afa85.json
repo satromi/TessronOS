@@ -1,0 +1,46 @@
+{
+  "name": "機能概要",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-01-25T00:00:00Z",
+  "updateDate": "2026-01-25T00:00:00Z",
+  "accessDate": "2026-01-25T00:00:00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TADjs User",
+  "window": {
+    "pos": {
+      "x": 100,
+      "y": 100
+    },
+    "width": 1920,
+    "height": 1080,
+    "minWidth": 200,
+    "minHeight": 200,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#2a2a4e",
+    "scrollPos": {
+      "x": 0,
+      "y": 0
+    }
+  },
+  "applist": {
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": true
+    }
+  }
+}

@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Make a TSFS native volume from directories of TADjs files.
+
+  tools/tsfs-import [-L label] [--size N] [--keep-uuid]
+                   [--root UUID] [--sysbox UUID] [--domain UUID]
+                   [--partition N | --offset N | --whole] dir [dir ...] image
+
+The volume is made afresh and every object whose files are in the
+directories is put on it, as mktsfs --from does. tsfs-volume.json, as
+tsfs-export writes it, gives the label and the roots unless the options
+say otherwise; with --keep-uuid the volume takes its UUID as well. Each
+root is a hold on its object, as with mktsfs.
+
+Exit status: 0 when every object went on, 1 when some was left out, 2
+when no volume was made.
+"""
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from tsfs_py import BLOCK_SIZE, LABEL_MAX, TsfsError, Volume
+from tsfs_py.cli import add_volume_args, open_device, parse_size, uuid_arg
+from tsfs_py import transfer
+
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="tsfs-import", description="make a volume from TADjs files")
+    p.add_argument("paths", nargs="+", metavar="dir ... image",
+                   help="directories of TADjs files, then the image")
+    p.add_argument("-L", "--label", help="label to give the volume")
+    p.add_argument("--size", metavar="BYTES",
+                   help="size of the volume (suffix K, M or G)")
+    p.add_argument("--keep-uuid", action="store_true",
+                   help="give the volume the UUID tsfs-volume.json names")
+    p.add_argument("--root", type=uuid_arg)
+    p.add_argument("--sysbox", type=uuid_arg)
+    p.add_argument("--domain", type=uuid_arg)
+    add_volume_args(p)
+    args = p.parse_args()
+
+    def die(msg):
+        sys.stderr.write("tsfs-import: %s\n" % msg)
+        return 2
+
+    if len(args.paths) < 2:
+        return die("name at least one directory and the image")
+    dirs, image = args.paths[:-1], args.paths[-1]
+
+    info = {}
+    try:
+        for d in dirs:
+            info = transfer.read_volume_file(d)
+            if info:
+                break
+    except (TsfsError, ValueError, OSError) as e:
+        return die(str(e))
+    label = args.label if args.label is not None else info.get("label", "")
+    if len(label.encode("utf-8")) > LABEL_MAX - 1:
+        return die("the label is longer than %d bytes" % (LABEL_MAX - 1))
+    roots = {}
+    for k in ("root", "sysbox", "domain"):
+        roots[k] = getattr(args, k) or info.get(k)
+
+    try:
+        length = parse_size(args.size) if args.size else None
+        if length is not None:
+            length -= length % BLOCK_SIZE
+        dev = open_device(image, args, writable=True, length=length,
+                          create=True)
+    except (TsfsError, OSError) as e:
+        return die(str(e))
+
+    problems = []
+    try:
+        with dev:
+            vol = Volume.format(dev, label=label,
+                                vol_uuid=info.get("uuid") if args.keep_uuid
+                                else None)
+            written, skipped = transfer.build(vol, dirs, roots, problems)
+            vol.flush(both=True, spares=True)
+    except (TsfsError, OSError) as e:
+        return die(str(e))
+
+    print("%s: %d objects into a volume of %d blocks%s"
+          % (image, written, dev.nblk,
+             ", %d left out" % len(skipped) if skipped else ""))
+    for msg in problems:
+        sys.stderr.write("tsfs-import: %s\n" % msg)
+    for u, why in skipped:
+        sys.stderr.write("tsfs-import: %s left out: %s\n" % (u, why))
+    return 1 if skipped else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

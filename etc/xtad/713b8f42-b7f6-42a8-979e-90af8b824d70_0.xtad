@@ -1,0 +1,100 @@
+<tad version="1.0" encoding="UTF-8" filename="仕様紹介">
+<realtime autoplay="true">
+    <figure>
+<figView top="0" left="0" right="1920" bottom="1080"/>
+        <figDraw top="0" left="0" right="1920" bottom="1080"/>
+        <figScale hunit="-72" vunit="-72"/>
+        <patterns>
+        <pattern id="128" width="1" height="1" ncol="1" fgcolors="#3a3a6e" bgcolor="#ffffff"/>
+        <pattern id="129" width="1" height="1" ncol="1" fgcolors="#6080FF" bgcolor="#ffffff"/>
+        </patterns>
+
+        <!-- 背景色は JSON metadata window.backgroundColor で指定 (<rect> は背景に使わない) -->
+
+        <!-- ページタイトル -->
+        <document>
+            <docView viewleft="100" viewtop="50" viewright="1820" viewbottom="130"/>
+            <docDraw drawleft="100" drawtop="50" drawright="1820" drawbottom="130"/>
+            <docScale hunit="-72" vunit="-72"/>
+            <text id="pageTitle" lang="0" bpat="0" zIndex="90"/>
+            <font size="36"/>
+            <font face="sans-serif"/>
+            <font color="#FFFFFF"/>
+            実時間制御TAD仕様紹介
+        </document>
+
+        <!-- 仕様説明1 -->
+        <document>
+            <docView viewleft="150" viewtop="200" viewright="1770" viewbottom="300"/>
+            <docDraw drawleft="150" drawtop="200" drawright="1770" drawbottom="300"/>
+            <docScale hunit="-72" vunit="-72"/>
+            <text id="spec1" lang="0" bpat="0" zIndex="80"/>
+            <font size="18"/>
+            <font color="#EEEEEE"/>
+            <p>realtime要素: autoplay属性で自動再生を制御</p>
+        </document>
+
+        <!-- 仕様説明2 -->
+        <document>
+            <docView viewleft="150" viewtop="320" viewright="1770" viewbottom="420"/>
+            <docDraw drawleft="150" drawtop="320" drawright="1770" drawbottom="420"/>
+            <docScale hunit="-72" vunit="-72"/>
+            <text id="spec2" lang="0" bpat="0" zIndex="80"/>
+            <font size="18"/>
+            <font color="#EEEEEE"/>
+            <p>video要素: left/top/right/bottom属性で配置位置を指定</p>
+        </document>
+
+        <!-- 仕様説明3 -->
+        <document>
+            <docView viewleft="150" viewtop="440" viewright="1770" viewbottom="540"/>
+            <docDraw drawleft="150" drawtop="440" drawright="1770" drawbottom="540"/>
+            <docScale hunit="-72" vunit="-72"/>
+            <text id="spec3" lang="0" bpat="0" zIndex="80"/>
+            <font size="18"/>
+            <font color="#EEEEEE"/>
+            <p>audio要素: BGMやナレーション音声を自動再生</p>
+        </document>
+
+        <!-- 仕様説明4 -->
+        <document>
+            <docView viewleft="150" viewtop="560" viewright="1770" viewbottom="660"/>
+            <docDraw drawleft="150" drawtop="560" drawright="1770" drawbottom="660"/>
+            <docScale hunit="-72" vunit="-72"/>
+            <text id="spec4" lang="0" bpat="0" zIndex="80"/>
+            <font size="18"/>
+            <font color="#EEEEEE"/>
+            <p>onended属性: 再生終了時のスライド遷移アクション (slide:next等)</p>
+        </document>
+
+        <!-- 仕様説明5 -->
+        <document>
+            <docView viewleft="150" viewtop="680" viewright="1770" viewbottom="780"/>
+            <docDraw drawleft="150" drawtop="680" drawright="1770" drawbottom="780"/>
+            <docScale hunit="-72" vunit="-72"/>
+            <text id="spec5" lang="0" bpat="0" zIndex="80"/>
+            <font size="18"/>
+            <font color="#EEEEEE"/>
+            <p>realData/realGroup: タイムライン制御によるアニメーション定義</p>
+        </document>
+
+        <!-- 音符アイコン風の装飾 -->
+        <circle id="noteIcon"
+                left="1650" top="800" right="1750" bottom="900"
+                lineType="0" lineWidth="0" l_pat="0"
+                f_pat="129" zIndex="60"/>
+    </figure>
+
+    <!-- BGM音声（自動再生） -->
+    <audio id="bgm" href="713b8f42-b7f6-42a8-979e-90af8b824d70_0_0.mp3" autoplay="true" loop="false" onended="slide:next"/>
+
+    <realData>
+        <stream number="1">
+            <deviceName>display:</deviceName>
+        </stream>
+        <stream number="2">
+            <deviceName>audio:</deviceName>
+        </stream>
+    </realData>
+</realtime>
+</tad>

@@ -1,0 +1,13 @@
+<tad version="1.0" encoding="UTF-8" filename="仮身ネットワークのメニュー">
+<document>
+<p>仮身ネットワークのメニュー</p>
+<p>仮身ネットワークの窓のメニュー。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7338-94ee-9ee79d004bb3"/></include>
+<item>表示<link id="01a0d889-4608-7a73-af37-9c12f2c1ba26_0.xtad" vobjid="01a0d8c3-2002-7f4d-92bc-d5550b3aa83b"/></item>
+<item>操作<link id="01a0d889-4609-79e7-a864-07f4820040d8_0.xtad" vobjid="01a0d8c3-2002-7c28-8aca-a0ef7dd2fcc5"/></item>
+<item>編集<link id="01a0d889-4606-7d93-a511-f92cc814ff3c_0.xtad" vobjid="01a0d8c3-2002-73bd-88af-8298b969982d"/></item>
+<include><link id="01a0d889-45ec-766a-986d-5fad49d48e06_0.xtad" vobjid="01a0d8c3-2002-7ddc-b7be-34b7cc884f1f"/></include>
+</menu>
+</tad>

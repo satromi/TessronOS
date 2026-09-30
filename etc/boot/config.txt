@@ -1,0 +1,11 @@
+# TessronOS (Raspberry Pi 5) — 設計書 4.9
+kernel=tessronos.img
+kernel_address=0x200000
+device_tree=bcm2712-rpi-5-b.dtb
+enable_uart=1
+uart_2ndstage=1
+pciex4_reset=0
+# 画面(設計書 16.5.1): ファームウェアの用意する画面を4バイトの画素にし、
+# 上の1バイトを不透明度として読ませない
+framebuffer_depth=32
+framebuffer_ignore_alpha=1

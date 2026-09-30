@@ -1,0 +1,49 @@
+{
+  "name": "原紙箱",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2025-10-13T00:00:00Z",
+  "updateDate": "2026-01-25T04:24:27.374Z",
+  "accessDate": "2026-01-25T04:25:34.139Z",
+  "periodDate": null,
+  "refCount": 3,
+  "recordCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TADjs User",
+  "window": {
+    "pos": {
+      "x": 893,
+      "y": 35
+    },
+    "width": 200,
+    "height": 600,
+    "minWidth": 200,
+    "minHeight": 200,
+    "resizable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#f3ffff",
+    "scrollPos": {
+      "x": 0,
+      "y": 0
+    }
+  },
+  "applist": {
+    "base-file-manager": {
+      "name": "原紙箱",
+      "defaultOpen": true
+    },
+    "virtual-object-list": {
+      "name": "仮身一覧",
+      "defaultOpen": false
+    }
+  }
+}

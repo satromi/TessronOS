@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="編集">
+<document>
+<p>編集</p>
+<p>道具の窓の編集。メニューの定義。</p>
+</document>
+<menu>
+<item code="tray">トレー<link id="01a0d889-460c-7eda-8b47-5745d175681c_0.xtad" vobjid="01a0d8c3-2002-7d69-b192-7e42a84fc0eb"/></item>
+<line/>
+<item code="copy" key="C">トレーへ複写</item>
+</menu>
+</tad>

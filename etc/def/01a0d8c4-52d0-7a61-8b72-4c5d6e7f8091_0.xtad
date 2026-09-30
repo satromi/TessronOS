@@ -1,0 +1,1 @@
+<tad version="1.0" encoding="UTF-8" filename="ルート証明書"><document><p>HTTPSで接続先を確かめるときに信頼する認証局の証明書。レコード1にPEMで置く。MozillaのCA証明書一覧(curlのcacert.pem)による。Mozilla Public License 2.0(https://mozilla.org/MPL/2.0/)に従う。</p></document></tad>

@@ -1,0 +1,52 @@
+{
+  "name": "基本表計算",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2025-11-23T07:09:55.529Z",
+  "updateDate": "2026-01-10T23:37:19.556Z",
+  "accessDate": "2026-01-10T23:37:17.057Z",
+  "periodDate": null,
+  "refCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TADjs User",
+  "window": {
+    "pos": {
+      "x": 100,
+      "y": 100
+    },
+    "width": 767,
+    "height": 423,
+    "minWidth": 200,
+    "minHeight": 200,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff",
+    "scrollPos": {
+      "x": 0,
+      "y": 486.6666564941406
+    },
+    "wordWrap": true
+  },
+  "applist": {
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": true
+    },
+    "virtual-object-list": {
+      "name": "仮身一覧",
+      "defaultOpen": false
+    }
+  },
+  "realId": "019af2ae-06b3-78a7-910a-bfb05789fd3c",
+  "recordCount": 1
+}

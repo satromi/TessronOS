@@ -1,0 +1,36 @@
+<tad version="0121" filename="入力tools/call" encoding="UTF-8">
+<figure>
+<figView left="0" top="0" right="400" bottom="180"/>
+<figDraw left="0" top="0" right="400" bottom="180"/>
+<figScale hunit="-120" vunit="-120"/>
+<paper imposition="0" binding="0" length="1403" width="992" top="94" bottom="94" left="94" right="47" />
+<pattern id="1" type="0" width="16" height="16" ncol="1" fgcolors="#eaeaea" bgcolor="#eaeaea" />
+<link id="019f44b7-089c-7a4e-bcf5-c08f1f8fa501_0.xtad" vobjid="019f44b7-08a0-71ff-9dc1-0915619412db" vobjleft="16" vobjtop="8" vobjright="192" vobjbottom="33" vobjheight="90" chsz="14" frcol="#000000" chcol="#000000" tbcol="#dfdfdf" bgcol="#ffffff" dlen="0" scrollx="0" scrolly="0" zoomratio="1" zIndex="1"/>
+<group>
+<rect left="16" top="48" right="384" bottom="78" lineType="1" lineWidth="1" f_pat="1" zIndex="1"/>
+<document>
+<docScale hunit="0" vunit="0"/>
+<text lang="33" bpat="0"/>
+<p><docView viewleft="22" viewtop="54" viewright="378" viewbottom="74"/><docDraw drawleft="22" drawtop="54" drawright="378" drawbottom="74"/><docScale hunit="0" vunit="0"/><text lang="33" bpat="0"/><font face="明朝体"/><font size="9.6"/><font direction="0" kerning="0" pattern="1" space="0"/><font color="#000000"/></p>
+</document>
+<document>
+<docScale hunit="0" vunit="0"/>
+<text lang="33" bpat="0"/>
+<p><docView viewleft="16" viewtop="80" viewright="384" viewbottom="100"/><docDraw drawleft="16" drawtop="80" drawright="384" drawbottom="100"/><docScale hunit="0" vunit="0"/><text lang="33" bpat="0"/><font face="明朝体"/><font size="9.6"/><font direction="0" kerning="0" pattern="1" space="0"/><font color="#000000"/>@入力</p>
+</document>
+</group>
+<group>
+<rect left="16" top="120" right="384" bottom="150" lineType="1" lineWidth="1" f_pat="1" zIndex="1"/>
+<document>
+<docScale hunit="0" vunit="0"/>
+<text lang="33" bpat="0"/>
+<p><docView viewleft="22" viewtop="126" viewright="378" viewbottom="146"/><docDraw drawleft="22" drawtop="126" drawright="378" drawbottom="146"/><docScale hunit="0" vunit="0"/><text lang="33" bpat="0"/><font face="明朝体"/><font size="9.6"/><font direction="0" kerning="0" pattern="1" space="0"/><font color="#000000"/></p>
+</document>
+<document>
+<docScale hunit="0" vunit="0"/>
+<text lang="33" bpat="0"/>
+<p><docView viewleft="16" viewtop="152" viewright="384" viewbottom="172"/><docDraw drawleft="16" drawtop="152" drawright="384" drawbottom="172"/><docScale hunit="0" vunit="0"/><text lang="33" bpat="0"/><font face="明朝体"/><font size="9.6"/><font direction="0" kerning="0" pattern="1" space="0"/><font color="#000000"/>@結果</p>
+</document>
+</group>
+</figure>
+</tad>

@@ -1,0 +1,13 @@
+<tad version="1.0" encoding="UTF-8" filename="部品箱">
+<figure>
+<link id="01a0d6d1-08da-7ef3-b6e2-e5f07d8606fb_0.xtad" vobjid="01a0d8c3-2002-763a-a9ca-eac19b3a4d07" vobjleft="8" vobjtop="8" vobjright="248" vobjbottom="33" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d6d1-08db-7eb5-a0f1-0dc6270bf19f_0.xtad" vobjid="01a0d8c3-2002-7a66-a1aa-31cb17266f73" vobjleft="8" vobjtop="40" vobjright="248" vobjbottom="65" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d6d1-08dc-7102-b107-02bc29ffd91a_0.xtad" vobjid="01a0d8c3-2002-7d9f-9ff1-f26baa4ce3ed" vobjleft="8" vobjtop="72" vobjright="248" vobjbottom="97" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d6d1-08dd-7d4f-b044-1907546b3e07_0.xtad" vobjid="01a0d8c3-2002-7249-8ffd-8dbe8c628856" vobjleft="8" vobjtop="104" vobjright="248" vobjbottom="129" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d6d1-08de-72c3-9ee8-307e551862d3_0.xtad" vobjid="01a0d8c3-2002-78d3-b893-bd35f5404cdc" vobjleft="8" vobjtop="136" vobjright="248" vobjbottom="161" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d6d1-08df-78a2-bf48-8cb9a5b56bd9_0.xtad" vobjid="01a0d8c3-2002-782f-bd7d-afc81bdd50f7" vobjleft="8" vobjtop="168" vobjright="248" vobjbottom="193" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d6d1-08e0-7c19-bf46-b8e588f3ace9_0.xtad" vobjid="01a0d8c3-2002-790e-bbf3-176f41f40340" vobjleft="8" vobjtop="200" vobjright="248" vobjbottom="225" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d6d1-08e1-7483-90c3-259b6560c167_0.xtad" vobjid="01a0d8c3-2002-7e2a-9009-e45328f91a49" vobjleft="8" vobjtop="232" vobjright="248" vobjbottom="257" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d6d1-08e2-7250-87c5-3c58a87addbb_0.xtad" vobjid="01a0d8c3-2002-7853-9634-94fc8d49498f" vobjleft="8" vobjtop="264" vobjright="248" vobjbottom="289" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+</figure>
+</tad>

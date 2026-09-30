@@ -1,0 +1,15 @@
+<tad version="1.0" encoding="UTF-8" filename="書体">
+<document>
+<p>書体</p>
+<p>書体の選択。末尾は最近使った書体。メニューの定義。</p>
+</document>
+<menu>
+<item code="font.list">書体一覧</item>
+<line/>
+<item code="font.gothic">ゴシック</item>
+<item code="font.mincho">明朝</item>
+<item code="font.meiryo">メイリオ</item>
+<line/>
+<list code="font.recent"/>
+</menu>
+</tad>

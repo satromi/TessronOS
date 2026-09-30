@@ -1,0 +1,19 @@
+<tad version="1.0" encoding="UTF-8">
+<document>
+<docScale hunit="-72" vunit="-72"/>
+<text lang="0" bpat="0"/>
+<p>
+<font size="28"><font color="#51aefb"><bold>□基本図形編集</bold></font></font>
+</p>
+<p>
+<font size="14">基本図形編集は、図形xmlTADを編集・表示するプラグインアプリです。<br/>
+図形パネルにあるアイテムで色々できます。</font>
+</p>
+<p>
+詳しい使い方は、触ってみて覚えてください。
+</p>
+<p>
+なお、ウインドウ内に画像ファイル（pngファイル推奨）をドラッグすると、画像として取り込むことができます。
+</p>
+</document>
+</tad>

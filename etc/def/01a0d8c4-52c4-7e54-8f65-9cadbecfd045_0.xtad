@@ -1,0 +1,6 @@
+<tad version="1.0" encoding="UTF-8" filename="ブザー音">
+<document>
+<p>ブザー音</p>
+<p>システムが知らせるときに鳴らす音。音色は属性の tessronos.sound.tone(周波数 hz、長さ ms)で、レコード1に WAV を置けばその音が鳴る。サウンドのデバイス実身から鳴らす。</p>
+</document>
+</tad>

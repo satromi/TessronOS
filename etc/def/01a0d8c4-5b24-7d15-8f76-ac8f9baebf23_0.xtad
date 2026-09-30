@@ -1,0 +1,6 @@
+<tad version="1.0" encoding="UTF-8" filename="ブラウザの保存域">
+<document>
+<p>ブラウザの保存域</p>
+<p>頁のスクリプトがlocalStorageに入れたもの。起源ごとのキーと値をレコード1にまとめて持ち、ブラウザが起動するときに読み、変わってから少し後に書き直す。</p>
+</document>
+</tad>

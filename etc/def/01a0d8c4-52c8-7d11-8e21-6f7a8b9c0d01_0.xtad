@@ -1,0 +1,63 @@
+<tad version="1.0" encoding="UTF-8" filename="ネットワーク設定のデータボックス">
+<document>
+<p>ネットワーク設定のデータボックス</p>
+<p>ネットワーク設定の窓のパネルと、尋ねるパネルの定義。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,435,324" title="ネットワーク設定" kind="bare">
+<tags num="100" rect="0,0,435,324" inner="4,28,431,320" value="1">
+<tag>＠ネットワーク</tag><tag>アドレス</tag><tag>＋状態</tag>
+</tags>
+<text sheet="1" x="8" y="80">自ホスト：</text>
+<box num="11" sheet="1" rect="136,58,264,88" max="79" ascii="true"/>
+<serial num="12" sheet="1" rect="276,58,408,88"><f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/></serial>
+<text sheet="1" x="8" y="114">ＤＮＳサーバ１：</text>
+<box num="13" sheet="1" rect="136,92,264,122" max="79" ascii="true"/>
+<serial num="14" sheet="1" rect="276,92,408,122"><f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/></serial>
+<text sheet="1" x="8" y="148">ＤＮＳサーバ２：</text>
+<box num="15" sheet="1" rect="136,126,264,156" max="79" ascii="true"/>
+<serial num="16" sheet="1" rect="276,126,408,156"><f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/></serial>
+<text sheet="1" x="8" y="179">ドメイン名：</text>
+<box num="17" sheet="1" rect="136,160,408,184" max="79" ascii="true"/>
+<text sheet="1" x="8" y="210">ゲートウェイ：</text>
+<switch num="18" sheet="1" rect="136,191,224,215">使用する</switch>
+<line sheet="1" rect="224,203,276,203"/>
+<serial num="19" sheet="1" rect="276,188,408,218" blank="true"><f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/></serial>
+<text sheet="1" x="8" y="244">サブネットマスク：</text>
+<serial num="20" sheet="1" rect="276,222,408,252"><f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/>.<f w="3" lo="0" hi="255"/></serial>
+<text sheet="2" x="8" y="80">ＩＰアドレス：</text>
+<box num="31" sheet="2" rect="136,58,408,88" off="true"/>
+<text sheet="2" x="8" y="114">サブネットマスク：</text>
+<box num="32" sheet="2" rect="136,92,408,122" off="true"/>
+<text sheet="2" x="8" y="148">ゲートウェイ：</text>
+<box num="33" sheet="2" rect="136,126,408,156" off="true"/>
+<text sheet="2" x="8" y="182">ＤＮＳサーバ：</text>
+<box num="34" sheet="2" rect="136,160,408,190" off="true"/>
+<button num="35" sheet="2" rect="320,272,408,296">表示更新</button>
+</panel>
+<panel num="10" rect="0,0,440,128" title="ネットワーク設定">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<text num="3" x="24" y="84"> </text>
+<button num="101" rect="328,92,416,116" answer="ok" emph="true">確認</button>
+</panel>
+<panel num="11" rect="0,0,440,106" title="ネットワーク設定">
+<text x="24" y="44">変更した内容でネットワーク設定を更新しますか？</text>
+<button num="102" rect="232,70,320,94" answer="cancel">取り消し</button>
+<button num="103" rect="328,70,416,94" answer="ok" emph="true">更新</button>
+</panel>
+<panel num="12" rect="0,0,440,106" title="ネットワーク設定">
+<text x="24" y="44">変更した内容を保存して終了しますか？</text>
+<button num="102" rect="128,70,216,94" answer="cancel">取り消し</button>
+<button num="104" rect="224,70,320,94">保存しない</button>
+<button num="105" rect="328,70,416,94" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="13" rect="0,0,440,150" title="ネットワーク設定">
+<text x="24" y="44">現在、他のプログラムがネットワークを使用中です。</text>
+<text x="24" y="66">更新した内容は、ネットワークを使用している</text>
+<text x="24" y="88">プログラムをすべて終了した後に有効となります。</text>
+<button num="102" rect="232,114,320,138" answer="cancel">取り消し</button>
+<button num="103" rect="328,114,416,138" answer="ok" emph="true">更新</button>
+</panel>
+</databox>
+</tad>

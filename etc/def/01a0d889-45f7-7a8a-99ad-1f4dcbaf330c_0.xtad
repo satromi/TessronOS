@@ -1,0 +1,28 @@
+<tad version="1.0" encoding="UTF-8" filename="文字サイズ">
+<document>
+<p>文字サイズ</p>
+<p>文字サイズ。valueは0.1ポイント単位の大きさ。メニューの定義。</p>
+</document>
+<menu>
+<item code="size" value="50">5（1/2倍）</item>
+<item code="size" value="70">7（3/4倍）</item>
+<item code="size" value="80">8</item>
+<item code="size" value="96">9.6（旧標準）</item>
+<item code="size" value="110">11</item>
+<item code="size" value="120">12</item>
+<item code="size" value="130">13</item>
+<item code="size" value="140">14（標準）</item>
+<item code="size" value="160">16</item>
+<item code="size" value="180">18</item>
+<item code="size" value="210">21（1.5倍）</item>
+<item code="size" value="280">28（2倍）</item>
+<item code="size" value="400">40</item>
+<item code="size" value="600">60</item>
+<item code="size" value="800">80</item>
+<line/>
+<item code="size.custom">数値指定</item>
+<line/>
+<item code="size.full">全角</item>
+<item code="size.half">半角</item>
+</menu>
+</tad>

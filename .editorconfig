@@ -1,0 +1,24 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# μT-Kernel 3.0 のスタイル: タブ(幅 8)
+[*.{c,h,S,s,ld,mk}]
+indent_style = tab
+indent_size = 8
+
+[makefile]
+indent_style = tab
+
+[*.{py,sh}]
+indent_style = tab
+indent_size = 8
+
+[*.md]
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = false

@@ -1,0 +1,17 @@
+<tad version="1.0" encoding="UTF-8" filename="SCRIPT:サンプル1">
+<document>
+<p>VERSION 3</p>
+<p>PROLOGUE</p>
+<p>  SCENE 花,鳥,ボタン押して</p>
+<p>  MESG "マイクロスクリプト起動"</p>
+<p>END</p>
+<p>ACTION 揺らす CLICK ボタン押して</p>
+<p>  MOVE 花:10,0</p>
+<p>  SLEEP 100</p>
+<p>  MOVE 花:-20,0</p>
+<p>  SLEEP 100</p>
+<p>  MOVE 花:10,0</p>
+<p>  MESG "クリックされました"</p>
+<p>END</p>
+</document>
+</tad>

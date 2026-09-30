@@ -1,0 +1,118 @@
+<tad version="1.0" encoding="UTF-8" filename="機能概要">
+<realtime autoplay="true">
+<figure>
+<figView top="0" left="0" right="1920" bottom="1080"/>
+<figDraw top="0" left="0" right="1920" bottom="1080"/>
+<figScale hunit="-72" vunit="-72"/>
+<patterns>
+<pattern id="128" width="1" height="1" ncol="1" fgcolors="#2a2a4e" bgcolor="#ffffff"/>
+<pattern id="129" width="1" height="1" ncol="1" fgcolors="#2060CC" bgcolor="#ffffff"/>
+<pattern id="130" width="1" height="1" ncol="1" fgcolors="#CC6020" bgcolor="#ffffff"/>
+<pattern id="131" width="1" height="1" ncol="1" fgcolors="#20CC60" bgcolor="#ffffff"/>
+<pattern id="132" width="1" height="1" ncol="1" fgcolors="#4080ff" bgcolor="#ffffff"/>
+<pattern id="133" width="1" height="1" ncol="1" fgcolors="#ff8040" bgcolor="#ffffff"/>
+<pattern id="134" width="1" height="1" ncol="1" fgcolors="#40ff80" bgcolor="#ffffff"/>
+</patterns>
+
+<!-- 背景色は JSON metadata window.backgroundColor で指定 (<rect> は背景に使わない) -->
+
+<!-- ページタイトル -->
+<document>
+<docView viewleft="100" viewtop="50" viewright="1820" viewbottom="130"/>
+<docDraw drawleft="100" drawtop="50" drawright="1820" drawbottom="130"/>
+<docScale hunit="-72" vunit="-72"/>
+<text id="pageTitle" lang="0" bpat="0" zIndex="90"/>
+<font size="36"/>
+<font face="sans-serif"/>
+<font color="#FFFFFF"/>
+実時間制御TADの機能概要
+</document>
+
+<!-- 機能説明テキスト1 -->
+<document>
+<docView viewleft="150" viewtop="200" viewright="900" viewbottom="280"/>
+<docDraw drawleft="150" drawtop="200" drawright="900" drawbottom="280"/>
+<docScale hunit="-72" vunit="-72"/>
+<text id="feature1" lang="0" bpat="0" zIndex="80"/>
+<font size="21"/>
+<font color="#DDDDDD"/>
+1. 動画・音声の配置と再生
+</document>
+
+<!-- 機能説明テキスト2 -->
+<document>
+<docView viewleft="150" viewtop="300" viewright="900" viewbottom="380"/>
+<docDraw drawleft="150" drawtop="300" drawright="900" drawbottom="380"/>
+<docScale hunit="-72" vunit="-72"/>
+<text id="feature2" lang="0" bpat="0" zIndex="80"/>
+<font size="21"/>
+<font color="#DDDDDD"/>
+2. タイムライン制御によるアニメーション
+</document>
+
+<!-- 機能説明テキスト3 -->
+<document>
+<docView viewleft="150" viewtop="400" viewright="900" viewbottom="480"/>
+<docDraw drawleft="150" drawtop="400" drawright="900" drawbottom="480"/>
+<docScale hunit="-72" vunit="-72"/>
+<text id="feature3" lang="0" bpat="0" zIndex="80"/>
+<font size="21"/>
+<font color="#DDDDDD"/>
+3. 図形・テキストの動的制御
+</document>
+
+<!-- 機能説明テキスト4 -->
+<document>
+<docView viewleft="150" viewtop="500" viewright="900" viewbottom="580"/>
+<docDraw drawleft="150" drawtop="500" drawright="900" drawbottom="580"/>
+<docScale hunit="-72" vunit="-72"/>
+<text id="feature4" lang="0" bpat="0" zIndex="80"/>
+<font size="21"/>
+<font color="#DDDDDD"/>
+4. スライド遷移アクション
+</document>
+
+<!-- アニメーション対象の円 -->
+<circle id="animCircle1" left="1100" top="250" right="1300" bottom="450" lineType="1" lineWidth="3" l_pat="132" f_pat="129" zIndex="50"/>
+
+<!-- アニメーション対象の矩形 -->
+<rect id="animRect1" left="1350" top="350" right="1550" bottom="550" lineType="1" lineWidth="3" l_pat="133" f_pat="130" zIndex="50"/>
+
+<!-- アニメーション対象の三角形 -->
+<polygon id="animTriangle1" left="1600" top="200" right="1800" bottom="500" points="1700,200 1600,500 1800,500" lineType="1" lineWidth="3" l_pat="134" f_pat="131" zIndex="50"/>
+</figure>
+
+<realData>
+<stream number="1">
+<deviceName>display:</deviceName>
+</stream>
+
+<!-- 円の拡大アニメーション（1000ms〜） -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="1000"/>
+<interpolate function="easeOut" divisions="30">
+<shapeControl ref="animCircle1" command="setScale" value="0.1"/>
+<shapeControl ref="animCircle1" command="setScale" value="1.0"/>
+</interpolate>
+</realGroup>
+
+<!-- 矩形の回転アニメーション（1500ms〜） -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="1500"/>
+<interpolate function="linear" divisions="60">
+<shapeControl ref="animRect1" command="setRotation" value="0"/>
+<shapeControl ref="animRect1" command="setRotation" value="360"/>
+</interpolate>
+</realGroup>
+
+<!-- 三角形のフェードイン（2000ms〜） -->
+<realGroup type="parallel" stream="1">
+<timeDelta value="2000"/>
+<interpolate function="easeIn" divisions="20">
+<shapeControl ref="animTriangle1" command="setAlpha" value="0.0"/>
+<shapeControl ref="animTriangle1" command="setAlpha" value="1.0"/>
+</interpolate>
+</realGroup>
+</realData>
+</realtime>
+</tad>

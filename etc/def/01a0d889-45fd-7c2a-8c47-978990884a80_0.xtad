@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="ルビ">
+<document>
+<p>ルビ</p>
+<p>ルビ。メニューの定義。</p>
+</document>
+<menu>
+<item code="ruby.top">ルビ（上）</item>
+<item code="ruby.bottom">ルビ（下）</item>
+</menu>
+</tad>

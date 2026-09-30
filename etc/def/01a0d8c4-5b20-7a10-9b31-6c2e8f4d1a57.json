@@ -1,0 +1,55 @@
+{
+  "name": "ブラウザ",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-09-28T00:00:00Z",
+  "updateDate": "2026-09-28T00:00:00Z",
+  "accessDate": "2026-09-28T00:00:00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 2,
+  "editable": false,
+  "deletable": false,
+  "readable": true,
+  "maker": "TessronOS",
+  "applist": {},
+  "tessronos": {
+    "program": {
+      "id": "web-browser",
+      "kind": "app",
+      "name": "ブラウザ",
+      "version": "R1.000",
+      "menu": false,
+      "builtin": false,
+      "base": [
+        "01a0d8c4-5b22-7b13-9d54-8a6f7e8c9d01"
+      ]
+    },
+    "exec": {
+      "record": 1,
+      "type": "application/x-elf",
+      "arch": "aarch64",
+      "abi": "tessronos-1"
+    },
+    "records": [
+      {
+        "n": 0,
+        "rt": 1
+      },
+      {
+        "n": 1,
+        "rt": 9
+      }
+    ],
+    "access": {
+      "owner": "01a0d680-3aa0-75b3-bd7d-075e14217cd2",
+      "group": "01a0d680-3aa1-7922-ae79-ba5cbbaa2037",
+      "mode": "rwxr-xr-x",
+      "attr": [
+        "perm"
+      ],
+      "acl": [],
+      "records": []
+    }
+  }
+}

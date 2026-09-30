@@ -1,0 +1,9 @@
+<tad version="1.0" encoding="UTF-8" filename="ウインドウのメニュー">
+<document>
+<p>ウインドウのメニュー</p>
+<p>開いているウインドウの一覧。選んだウインドウを前に出して入力を渡す。メニューの定義。</p>
+</document>
+<menu>
+<list code="win.item"/>
+</menu>
+</tad>

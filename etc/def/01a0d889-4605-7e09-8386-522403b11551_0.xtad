@@ -1,0 +1,13 @@
+<tad version="1.0" encoding="UTF-8" filename="屑実身操作のメニュー">
+<document>
+<p>屑実身操作のメニュー</p>
+<p>屑実身操作の窓のメニュー。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-772a-9ccb-5028f7b4cecc"/></include>
+<item>表示<link id="01a0d889-4603-7dd8-911f-eb562fc8aa50_0.xtad" vobjid="01a0d8c3-2002-7a71-8fea-e40d9672049e"/></item>
+<item>編集<link id="01a0d889-4604-72ea-a491-5689402bbce3_0.xtad" vobjid="01a0d8c3-2002-71d6-830d-ee6bb06b28fa"/></item>
+<item code="rescan">再探索</item>
+<include><link id="01a0d889-45ec-766a-986d-5fad49d48e06_0.xtad" vobjid="01a0d8c3-2002-7808-be6c-8119d2904c5d"/></include>
+</menu>
+</tad>

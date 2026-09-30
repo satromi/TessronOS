@@ -1,0 +1,15 @@
+<tad version="1.0" encoding="UTF-8" filename="マイクロスクリプトのメニュー">
+<document>
+<p>マイクロスクリプトのメニュー</p>
+<p>マイクロスクリプトの窓のメニュー。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7e0f-8cf1-9d6ebfd0e1f2"/></include>
+<item>操作<link id="01a0d889-4613-708a-8cb8-7ef5ad3a80c6_0.xtad" vobjid="01a0d8c3-2002-7e10-9d02-ae7fc0e1f203"/></item>
+<line/>
+<item code="restart">再起動</item>
+<item code="stop">停止</item>
+<item code="source">ソース表示</item>
+<item code="win">ウインドウ<link id="01a0d889-46ba-7c69-8f7a-b0c1d2e3f456_0.xtad" vobjid="01a0d8c3-2002-7e67-8a02-92a3b4c5d6e7"/></item>
+</menu>
+</tad>

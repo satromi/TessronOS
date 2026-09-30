@@ -1,0 +1,57 @@
+<tad version="0121" filename="SCRIPT／シリアル受信" encoding="UTF-8">
+<document>
+<docScale hunit="-120" vunit="-120"/>
+<text lang="33" bpat="0"/>
+<p><paper type="doc" length="1403" width="992" binding="0" imposition="0" top="94" bottom="94" left="108" right="85" />
+<docmargin top="94" bottom="94" left="108" right="85" />
+<font direction="0" kerning="0" pattern="1" space="0"/><font size="7.2"/>VERSION　2</p>
+<p>DEBUG　0</p>
+<p></p>
+<p>＃ポート番号は「許可順の番号(0始まり)」。 COM番号ではない(COM3でも許可が1個なら0)</p>
+<p>DEFINE　ポート番号　0</p>
+<p>DEFINE　速度　115200</p>
+<p>DEFINE　行最大　256</p>
+<p></p>
+<p>VARIABLE　受信行：C［行最大］</p>
+<p>VARIABLE　書込位置：I</p>
+<p></p>
+<p>PROLOGUE</p>
+<p>LOCAL　文字：I</p>
+<p></p>
+<p>CONSOLE　1</p>
+<p>MESG　”＝＝＝　シリアル受信端末　＝＝＝”</p>
+<p>MESG　”ポート％dを％dbpsで初期化します”，ポート番号，速度</p>
+<p>RSINIT　ポート番号，18，速度</p>
+<p>IF　（＄ERR！＝0）</p>
+<p>　MESG　”RSINIT失敗(ERR=％d): 指定ポートを開けませんでした”，＄ERR</p>
+<p>　MESG　”[マイクロスクリプト]→[シリアルポート割り当て]でUSBシリアル(COM)を許可してください”</p>
+<p>　MESG　”割り当て画面の左の「RSINIT番号」(0始まり)を使ってください。COM番号(例COM3)とは別物です”</p>
+<p>　MESG　”他アプリ(端末ソフト等)がそのCOMを使用中でないかも確認してください”</p>
+<p>ELSE</p>
+<p>　MESG　”受信待ち…　（CR区切りで1行ずつ表示します）”</p>
+<p>　書込位置＝0</p>
+<p>　REPEAT</p>
+<p>　　RSWAIT　ポート番号，0x0D　：　3</p>
+<p>　　IF　（＄ERR＝＝0）</p>
+<p>　　　RSGETC　ポート番号</p>
+<p>　　　REPEAT　＄RSCNT</p>
+<p>　　　　文字＝＄RS［＄CNT］</p>
+<p>　　　　IF　（文字＝＝0x0D）</p>
+<p>　　　　　IF　（書込位置＞0）</p>
+<p>　　　　　　受信行［書込位置］＝0</p>
+<p>　　　　　　MESG　”％s”，受信行</p>
+<p>　　　　　　書込位置＝0</p>
+<p>　　　　　ENDIF</p>
+<p>　　　　ELSE</p>
+<p>　　　　　IF　（（文字！＝0x0A）＆＆（文字！＝0）＆＆（書込位置＜行最大－1））</p>
+<p>　　　　　　受信行［書込位置］＝文字</p>
+<p>　　　　　　書込位置＝書込位置＋1</p>
+<p>　　　　　ENDIF</p>
+<p>　　　　ENDIF</p>
+<p>　　　ENDREPEAT</p>
+<p>　　ENDIF</p>
+<p>　ENDREPEAT</p>
+<p>ENDIF</p>
+<p>END</p>
+</document>
+</tad>

@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="管理情報のメニュー">
+<document>
+<p>管理情報のメニュー</p>
+<p>管理情報の窓のメニュー。付箋指定の機能付箋をトレーへ複写し、トレーから貼り付ける。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7e61-9a3c-4d5e6f708192"/></include>
+<item>編集<link id="01a0d889-46b9-7b58-9e69-af0b1c2d3e45_0.xtad" vobjid="01a0d8c3-2002-7e63-9c5e-6f708192a3b4"/></item>
+<include><link id="01a0d889-45ec-766a-986d-5fad49d48e06_0.xtad" vobjid="01a0d8c3-2002-7e62-8b4d-5e6f708192a3"/></include>
+</menu>
+</tad>

@@ -1,0 +1,52 @@
+{
+  "name": "予定表",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-01-11T01:58:07.675Z",
+  "updateDate": "2026-01-11T02:06:48.016Z",
+  "accessDate": "2026-01-11T02:00:01.287Z",
+  "periodDate": null,
+  "refCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TADjs User",
+  "window": {
+    "pos": {
+      "x": 100,
+      "y": 100
+    },
+    "width": 767,
+    "height": 423,
+    "minWidth": 200,
+    "minHeight": 200,
+    "resizable": true,
+    "scrollable": true,
+    "maximize": false,
+    "maximizable": true,
+    "minimizable": true,
+    "closable": true,
+    "alwaysOnTop": false,
+    "skipTaskbar": false,
+    "frame": true,
+    "transparent": false,
+    "backgroundColor": "#ffffff",
+    "scrollPos": {
+      "x": 0,
+      "y": 0
+    },
+    "wordWrap": true
+  },
+  "applist": {
+    "basic-text-editor": {
+      "name": "基本文章編集",
+      "defaultOpen": true
+    },
+    "virtual-object-list": {
+      "name": "仮身一覧",
+      "defaultOpen": false
+    }
+  },
+  "realId": "019baac6-663a-76cb-b3cb-ce3270898e1f",
+  "recordCount": 1
+}
