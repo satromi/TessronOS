@@ -29,6 +29,7 @@ TADjs Desktopから持ってきたサンプルの実身とアイコン(`etc/xtad
 | libstdc++、libgcc | 同上。C++のプログラムにリンクする | GPLv3とGCC Runtime Library Exception。この例外により、リンクしたプログラムの配布条件は制約されない |
 | Mozc | `make MOZC=1`のときだけ、`tools/mozc/build.sh`でビルドした変換エンジンをリンクする | 修正BSD(3条項) |
 | Mozcの辞書データ | `make MOZC=1`のときだけ、辞書の実身のレコードに格納される | Mozcのデータのライセンス(IPAdic由来の部分を含む)。Mozcの`LICENSE`と`data/`以下の各ファイルを参照 |
+| tessron-chromium(ブラウザのアプリケーションと、ChromiumをTessronOSに載せる移植層) | `make BROWSER=1`のときだけ、ブラウザの実行ファイルにリンクし、プログラム「ブラウザ」の実身のレコード1に格納される | MIT(`tessron-chromium/LICENSE`) |
 | Chromium 153.0.8010.36(Blink、V8、Skia、`base`、`net`、`cc`、`mojo`など)と、その`third_party`のうちコンパイルしたもの(ICU、HarfBuzz、FreeType、libpng、libjpeg-turbo、libwebp、Wuffs、zlib、Brotli、BoringSSL、abseil、Perfetto、Highway、simdutf、dav1d、libyuvなど) | `make BROWSER=1`のときだけ、`tessron-chromium`のスクリプトがコンパイルし直してブラウザの実行ファイルに静的にリンクし、プログラム「ブラウザ」の実身のレコード1に格納される | Chromium、V8、SkiaはBSD 3条項。Blinkの一部のファイル(WebKitとKHTMLに由来するもの)はLGPL 2.1(またはLGPL 2)とBSDのデュアル。`third_party`はそれぞれのライセンス(ICUはUnicode License、BoringSSLはOpenSSL・ISC・Apache 2.0の組合せ、abseilとPerfettoはApache 2.0、dav1dはBSD 2条項など) |
 | Chromiumが使うRustのクレート(Rustの標準ライブラリ、jxl-rs、CrabbyAvif、Fontations、serde_json_lenientなど) | `make BROWSER=1`のときだけ、aarch64向けにビルドしてブラウザの実行ファイルにリンクする | 多くはMITとApache 2.0のデュアル。クレートごとの`LICENSE`による |
 | FFmpeg 4.4.6(libavcodec、libavformat、libavutil、libswresample) | `make BROWSER=1`のときだけ、`tessron-chromium/tools/browser/ffmpeg.sh`がGPLの部分を有効にせずにビルドし、ブラウザの実行ファイルに静的にリンクする | LGPL 2.1以降 |
@@ -78,6 +79,7 @@ BSD 4条項のファイルは、その機能や使用に触れる宣伝の資料
 
 `BROWSER=1`でビルドしたイメージを配布するときは、さらに次のものが要る。
 
+- tessron-chromiumの`LICENSE`(MITライセンスの著作権表示と許諾文)。
 - Chromiumと、コンパイルした`third_party`とRustのクレートの著作権表示とライセンス文。Chromiumの`tools/licenses/licenses.py`(`credits`)が、ビルドの記述(`out/tessronos`)から一覧を作る。
 - LGPLの部分(FFmpegと、Blinkのファイルのうち、LGPLのもの)について、LGPL 2.1の第6節の条件。ブラウザは静的にリンクしているので、利用者が改変したライブラリとリンクし直せるように、ブラウザの実行ファイルのオブジェクトファイル(またはソースコード)と、リンクの手順を提供する。FFmpegとChromiumの対応するソースコードの入手先も示す。
 

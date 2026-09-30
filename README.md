@@ -20,9 +20,11 @@ TessronOSは、μT-Kernel 3.0をベースに、Raspberry Pi 5(Broadcom BCM2712�
 
 ## ライセンス
 
-Copyright (C) 2026 satromi。μT-Kernel 3.0に由来する部分の著作権は、各ファイルのヘッダに記載のとおり坂村健氏にあります。。
+Copyright (C) 2026 satromi。μT-Kernel 3.0に由来する部分の著作権は、各ファイルのヘッダに記載のとおり坂村健氏にあります。
 
-μT-Kernel 3.0に由来する部分はT-License 2.2に従う。新規部分(ソースコード、ビルド用ファイル、ツール、文書、リソース)もT-License 2.2に統一する。T2EXとはシステムコールの名称と引数を合わせているが、T2EXのソースコードは含まない。同梱している第三者のソフトウェアとリソースのライセンスは[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)にまとめた。
+μT-Kernel 3.0に由来する部分はT-License 2.2に従う。新規部分(ソースコード、ビルド用ファイル、ツール、文書、リソース)もT-License 2.2に統一します。T2EXとはシステムコールの名称と引数を合わせているが、T2EXのソースコードは含んでいません。
+
+同梱している第三者のソフトウェアとリソースのライセンスは[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)にまとめています。
 
 TessronOSは、μT-Kernel 3.0のソースコードを利用し改変した派生物として、トロンフォーラムのトレーサビリティサービスに登録しています。
 
