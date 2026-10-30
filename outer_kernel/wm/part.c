@@ -79,6 +79,7 @@ typedef struct {
 	INT		at_row;			/* which row of the parent opened it */
 	INT		pend;			/* the row whose list opens once the pointer has stayed, -1 */
 	UD		pend_at;		/* since when (ns) */
+	BOOL		kept;			/* the list beside a row stays: the row was clicked */
 
 	/*
 	 * What was under it before it opened. A menu covers part of a
@@ -90,6 +91,7 @@ typedef struct {
 	 */
 	UW		*under;
 	INT		under_w, under_h;
+	BOOL		under_dev;		/* under is the window's own pixels at a scale (dp_get_dev) */
 
 	/* a menu's list is a popup window of its own: that window, and the
 	   window the menu was opened from */
@@ -105,9 +107,94 @@ typedef struct {
 	INT		held_half;
 	BOOL		held_in;
 	BOOL		held_knob;
+
+	/*
+	 * Beside what the program draws itself: a panel that is not the
+	 * whole of its window's work area -- the buttons along the top of
+	 * a window whose content is the program's. The keys are the
+	 * content's, so none of its boxes has the letters until it is
+	 * pressed, and a press on the content takes them away again.
+	 */
+	BOOL		beside;
+
+	/*
+	 * A panel of tags whose sheets scroll (P_SCROLL on its tags, the
+	 * index scr; -1 none): the height it was defined with, how much
+	 * shorter its window's work area has made it (cut), where the tags'
+	 * foot and their sheet's foot were defined, and how far the sheet
+	 * shown (sy_sheet) is scrolled. The parts of the sheet stand sy
+	 * higher and are drawn only inside the sheet above its foot parts
+	 * (P_FOOT), which rise by cut with the panel's foot.
+	 */
+	INT		scr;
+	INT		full_h;
+	INT		cut;
+	INT		tag_b0, tag_ib0;
+	INT		sy, sy_sheet;
+	/* what shows of the sheet, worked out once for a whole drawing of the panel */
+	T_DPRECT	vcache;
+	BOOL		vvalid;
 } PANEL;
 
 LOCAL PANEL	pn_tab[WM_PANEL_MAX];
+
+/*
+ * What draws a panel, and what moves its sheet, one task at a time. A
+ * panel is drawn by the task of the program that writes one of its parts
+ * (ob_wri_rec), by the task that reads the input (a press, the caret's
+ * blink, the wheel) and by the desktop's working a window's bar, on any
+ * processor: two drawings at once lay the panel's ground over each
+ * other's parts, and each narrows what its window's environment may draw
+ * (a sheet that scrolls, a box's letters) and puts back what it found,
+ * which may be the other's narrowing -- left so, the window draws in a
+ * strip of itself from then on. The task holding it may take it again
+ * (a drawing calls drawing); it is taken before the window manager's and
+ * the objects' locks, never under them.
+ */
+LOCAL ID	pn_mtx = 0;
+LOCAL ID	pn_owner = 0;
+LOCAL INT	pn_depth = 0;
+
+EXPORT ER knl_pn_init( void )
+{
+	T_CMTX	c;
+
+	if ( pn_mtx > 0 ) {
+		return E_OK;
+	}
+	knl_memset(&c, 0, sizeof(c));
+	c.mtxatr = TA_INHERIT;
+	pn_mtx = tk_cre_mtx(&c);
+	return ( pn_mtx > 0 ) ? E_OK : (ER)pn_mtx;
+}
+
+LOCAL void pn_lock( void )
+{
+	ID	me = tk_get_tid();
+
+	if ( pn_mtx <= 0 ) {
+		return;
+	}
+	if ( pn_owner == me ) {
+		pn_depth++;
+		return;
+	}
+	tk_loc_mtx(pn_mtx, TMO_FEVR);
+	pn_owner = me;
+	pn_depth = 1;
+}
+
+LOCAL void pn_unlock( void )
+{
+	if ( pn_mtx <= 0 || pn_owner != tk_get_tid() ) {
+		return;
+	}
+	if ( --pn_depth > 0 ) {
+		return;
+	}
+	pn_owner = 0;
+	tk_unl_mtx(pn_mtx);
+}
 
 /*
  * The list of a pop-up, open: one at a time on the whole screen, since
@@ -121,11 +208,10 @@ LOCAL INT	ls_pid = 0;
 LOCAL INT	ls_owner = 0;
 LOCAL INT	ls_part = -1;
 LOCAL INT	ls_first = 0;
-LOCAL UD	ls_when = 0;
-LOCAL BOOL	ls_pressed = FALSE;
-LOCAL INT	ls_hot0 = -1;		/* the row lit as it opened */
+LOCAL INT	ls_hot0 = -1;		/* the row under the opening press: where a click stays */
+LOCAL T_WMCLICK	ls_click;		/* the press that opened it, to its release */
 
-LOCAL void pop_open( INT pid, INT i, UD when );
+LOCAL void pop_open( INT pid, INT i, CONST T_WMEV *ev );
 LOCAL void pop_close( BOOL draw );
 
 /*
@@ -148,6 +234,7 @@ LOCAL INT  list_rows( CONST T_DPRECT *r );
 LOCAL void list_press( PANEL *p, T_WMPART *pt, INT x, INT y );
 LOCAL BOOL box_key( T_WMPART *pt, UINT code, UINT mods );
 LOCAL void menu_sub_open( INT pid, INT row );
+LOCAL void menu_sub_keep( INT pid, INT row );
 LOCAL INT  menu_deepest( INT pid );
 LOCAL BOOL menu_in_child( CONST PANEL *p, INT wid );
 LOCAL void menu_paint( PANEL *p );
@@ -156,13 +243,6 @@ typedef struct {
 } MNMET;
 LOCAL void mn_metrics( MNMET *m );
 
-/*
- * A definition is kept in the data box whole, so it has to fit in one
- * entry of it. This stops the build if the sizes of a part or a label
- * are ever raised past that.
- */
-typedef char pn_fits_box[( sizeof(T_WMPANEL) <= DB_MAX_SIZE
-			   && sizeof(T_WMMENU) <= DB_MAX_SIZE ) ? 1 : -1];
 
 /*
  * The face panels and menus write with, at the size they write in. The
@@ -248,13 +328,224 @@ LOCAL T_WMPART *part_of( PANEL *p, INT num )
 	return NULL;
 }
 
+/*
+ * How far a part stands from its place in the definition, in a panel
+ * whose sheets scroll: a part at the foot rises with the panel's foot,
+ * the tags stay, and every other part is as far up as the sheet is
+ * scrolled. Nought in any other panel.
+ */
+LOCAL INT part_dy( CONST PANEL *p, CONST T_WMPART *pt )
+{
+	if ( p->scr < 0 || WM_PT_KIND(pt->type) == TG_PARTS ) {
+		return 0;
+	}
+	return ( ( pt->type & P_FOOT ) != 0 ) ? -p->cut : -p->sy;
+}
+
+/* Whether a part moves as the sheet is scrolled: shown only inside the sheet (pn_view) */
+LOCAL BOOL part_scrolls( CONST PANEL *p, CONST T_WMPART *pt )
+{
+	return (BOOL)( p->scr >= 0 && WM_PT_KIND(pt->type) != TG_PARTS && ( pt->type & P_FOOT ) == 0 );
+}
+
 /* A part's rectangle in the work area, from its place inside the panel */
 LOCAL void part_rect( CONST PANEL *p, CONST T_WMPART *pt, T_DPRECT *out )
 {
+	INT	dy = part_dy(p, pt);
+
 	out->left   = p->def.r.left + pt->r.left;
-	out->top    = p->def.r.top + pt->r.top;
+	out->top    = p->def.r.top + pt->r.top + dy;
 	out->right  = p->def.r.left + pt->r.right;
-	out->bottom = p->def.r.top + pt->r.bottom;
+	out->bottom = p->def.r.top + pt->r.bottom + dy;
+}
+
+/* The panel of tags that makes a panel's sheets scroll (P_SCROLL), found again as the parts change */
+LOCAL void pn_find_scroller( PANEL *p )
+{
+	INT	i, was = p->scr;
+
+	p->scr = -1;
+	for ( i = 0; i < p->def.npart && !p->is_menu; i++ ) {
+		if ( WM_PT_KIND(p->def.part[i].type) == TG_PARTS && ( p->def.part[i].type & P_SCROLL ) != 0 ) {
+			p->scr = i;
+			break;
+		}
+	}
+	if ( p->scr >= 0 && was < 0 ) {
+		/* the feet as defined: what the panel is made shorter from */
+		p->tag_b0 = p->def.part[p->scr].r.bottom + p->cut;
+		p->tag_ib0 = p->def.part[p->scr].inner.bottom + p->cut;
+	}
+}
+
+/*
+ * What of a scrolling panel's sheet shows its parts, in the work area:
+ * the sheet of the tag shown (under the lower row of tags when it has
+ * one) inside its outline, down to the head of the highest part at its
+ * foot. *p_max is how far the sheet can be scrolled: how much further
+ * down than that the lowest of its other parts reaches.
+ */
+LOCAL BOOL pn_view( CONST PANEL *p, T_DPRECT *v, INT *p_max )
+{
+	T_WMPART	*tg;
+	T_DPRECT	s;
+	INT		i, foot = 0x7FFFFFFF, low = 0;
+
+	if ( p->scr < 0 || p->scr >= p->def.npart ) {
+		return FALSE;
+	}
+	tg = (T_WMPART *)&p->def.part[p->scr];
+	pd_tag_sheet(tg, p->def.pool, &s);
+	v->left = p->def.r.left + s.left + 2;
+	v->top = p->def.r.top + s.top + 2;
+	v->right = p->def.r.left + s.right - 2;
+	v->bottom = p->def.r.top + s.bottom - 2;
+	for ( i = 0; i < p->def.npart; i++ ) {
+		CONST T_WMPART	*pt = &p->def.part[i];
+
+		if ( i == p->scr || !pn_shown(p, pt) ) {
+			continue;
+		}
+		if ( ( pt->type & P_FOOT ) != 0 ) {
+			if ( pt->r.top - p->cut < foot ) foot = pt->r.top - p->cut;
+		} else if ( pt->r.bottom > low ) {
+			low = pt->r.bottom;
+		}
+	}
+	if ( foot != 0x7FFFFFFF && p->def.r.top + foot < v->bottom ) {
+		v->bottom = p->def.r.top + foot;
+	}
+	if ( v->bottom < v->top ) {
+		v->bottom = v->top;
+	}
+	if ( p_max != NULL ) {
+		*p_max = p->def.r.top + low - v->bottom;
+		if ( *p_max < 0 ) *p_max = 0;
+	}
+	return TRUE;
+}
+
+/* How far the sheet is scrolled, kept within what it can be: from the top for a sheet shown anew */
+LOCAL void pn_settle( PANEL *p )
+{
+	T_DPRECT	v;
+	INT		mx = 0, sheet;
+
+	if ( !pn_view(p, &v, &mx) ) {
+		p->sy = 0;
+		return;
+	}
+	sheet = p->def.part[p->scr].value;
+	if ( sheet != p->sy_sheet ) {
+		p->sy = 0;
+		p->sy_sheet = sheet;
+	}
+	if ( p->sy > mx ) p->sy = mx;
+	if ( p->sy < 0 ) p->sy = 0;
+}
+
+/*
+ * The window's right bar, when it has one, as the panel's: all of the
+ * sheet against what of it shows, in pixels. A sheet that shows whole
+ * has the knob over the whole bar, and there is nothing to work.
+ */
+LOCAL void pn_bar( PANEL *p )
+{
+	T_WMWIN		w;
+	T_WMBAR		b;
+	T_DPRECT	v;
+	INT		mx = 0, vh;
+
+	if ( !pn_view(p, &v, &mx) || wm_ref(p->wid, &w) < E_OK || ( w.attr & WM_ATTR_RBAR ) == 0 ) {
+		return;
+	}
+	vh = v.bottom - v.top;
+	if ( vh < 1 ) vh = 1;
+	knl_memset(&b, 0, sizeof(b));
+	b.lo = 0;
+	b.hi = vh + mx;
+	b.clo = p->sy;
+	b.chi = p->sy + vh;
+	(void)wm_set_bar(p->wid, WM_BAR_R, &b);
+}
+
+/*
+ * A scrolling panel made as tall as its window's work area lets it, up
+ * to the height it was defined with: shorter, its foot and the tags'
+ * sheet rise with the work area's foot, and its sheets scroll.
+ */
+LOCAL void pn_fit( PANEL *p )
+{
+	T_WMWIN		w;
+	T_WMPART	*tg;
+	INT		h, cut;
+
+	if ( p->scr < 0 || wm_ref(p->wid, &w) < E_OK ) {
+		return;
+	}
+	tg = &p->def.part[p->scr];
+	h = ( w.work.bottom - w.work.top ) - p->def.r.top;
+	cut = p->full_h - h;
+	if ( cut > p->tag_ib0 - tg->inner.top - 1 ) cut = p->tag_ib0 - tg->inner.top - 1;
+	if ( cut < 0 ) cut = 0;
+	p->cut = cut;
+	p->def.r.bottom = p->def.r.top + p->full_h - cut;
+	tg->r.bottom = p->tag_b0 - cut;
+	tg->inner.bottom = p->tag_ib0 - cut;
+	pn_settle(p);
+}
+
+EXPORT void knl_pn_fit( INT pid )
+{
+	PANEL	*p = pn_of(pid);
+
+	if ( p != NULL && !p->is_menu ) {
+		pn_lock();
+		pn_fit(p);
+		pn_unlock();
+	}
+}
+
+/* A part of the sheet brought into what shows of it: the box Tab gives the keys to */
+LOCAL void pn_reveal( PANEL *p, INT i )
+{
+	T_DPRECT	v, r;
+
+	pn_lock();
+	if ( i < 0 || i >= p->def.npart || !part_scrolls(p, &p->def.part[i]) || !pn_view(p, &v, NULL) ) {
+		pn_unlock();
+		return;
+	}
+	part_rect(p, &p->def.part[i], &r);
+	if ( r.top < v.top ) {
+		p->sy -= v.top - r.top;
+	} else if ( r.bottom > v.bottom ) {
+		/* its foot into sight, but never its head out of it */
+		p->sy += ( r.bottom - v.bottom < r.top - v.top ) ? r.bottom - v.bottom : r.top - v.top;
+	}
+	pn_settle(p);
+	pn_unlock();
+}
+
+EXPORT BOOL knl_pn_scroll( INT wid, INT pos )
+{
+	INT	i;
+
+	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
+		PANEL	*p = &pn_tab[i];
+
+		if ( !p->used || p->is_menu || p->wid != wid || p->scr < 0 ) {
+			continue;
+		}
+		pn_lock();
+		p->sy = pos;
+		pn_settle(p);
+		pn_unlock();
+		wm_panel_draw(i + 1);
+		wm_update();
+		return TRUE;
+	}
+	return FALSE;
 }
 
 /* ---------------------------------------------------------------- the object layer's view */
@@ -277,7 +568,19 @@ EXPORT INT knl_pn_count( INT pid, BOOL *p_menu )
  * A part put on a panel that is open, after the ones it has: its place
  * among them is answered. The caller draws the panel again.
  */
+LOCAL INT knl_pn_add_u( INT pid, CONST T_WMPART *pt );
+
 EXPORT INT knl_pn_add( INT pid, CONST T_WMPART *pt )
+{
+	INT	res;
+
+	pn_lock();
+	res = knl_pn_add_u(pid, pt);
+	pn_unlock();
+	return res;
+}
+
+LOCAL INT knl_pn_add_u( INT pid, CONST T_WMPART *pt )
 {
 	PANEL	*p = pn_of(pid);
 	INT	i;
@@ -293,12 +596,25 @@ EXPORT INT knl_pn_add( INT pid, CONST T_WMPART *pt )
 	}
 	i = p->def.npart++;
 	p->def.part[i] = *pt;
+	pn_find_scroller(p);
 
 	return i;
 }
 
 /* A part taken off a panel that is open; the ones after it move up one */
+LOCAL ER knl_pn_del_u( INT pid, INT i );
+
 EXPORT ER knl_pn_del( INT pid, INT i )
+{
+	ER	res;
+
+	pn_lock();
+	res = knl_pn_del_u(pid, i);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER knl_pn_del_u( INT pid, INT i )
 {
 	PANEL	*p = pn_of(pid);
 	INT	k;
@@ -319,13 +635,26 @@ EXPORT ER knl_pn_del( INT pid, INT i )
 	if ( p->pressed == i ) p->pressed = -1; else if ( p->pressed > i ) p->pressed--;
 	if ( p->focus == i ) p->focus = -1; else if ( p->focus > i ) p->focus--;
 	if ( p->hot == i ) p->hot = -1; else if ( p->hot > i ) p->hot--;
+	pn_find_scroller(p);
 	wm_damage(p->wid, &p->def.r);
 
 	return E_OK;
 }
 
 /* A part moved within its panel: the rectangle is the panel's own coordinates */
+LOCAL ER knl_pn_set_rect_u( INT pid, INT i, CONST T_DPRECT *r );
+
 EXPORT ER knl_pn_set_rect( INT pid, INT i, CONST T_DPRECT *r )
+{
+	ER	res;
+
+	pn_lock();
+	res = knl_pn_set_rect_u(pid, i, r);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER knl_pn_set_rect_u( INT pid, INT i, CONST T_DPRECT *r )
 {
 	PANEL	*p = pn_of(pid);
 
@@ -343,7 +672,19 @@ EXPORT ER knl_pn_set_rect( INT pid, INT i, CONST T_DPRECT *r )
 }
 
 /* One of a panel's parts, copied out: nothing outside holds a pointer in */
+LOCAL ER knl_pn_part_u( INT pid, INT i, T_WMPART *out );
+
 EXPORT ER knl_pn_part( INT pid, INT i, T_WMPART *out )
+{
+	ER	res;
+
+	pn_lock();
+	res = knl_pn_part_u(pid, i, out);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER knl_pn_part_u( INT pid, INT i, T_WMPART *out )
 {
 	PANEL	*p = pn_of(pid);
 
@@ -360,7 +701,19 @@ EXPORT ER knl_pn_part( INT pid, INT i, T_WMPART *out )
 
 /* ---------------------------------------------------------------- opening */
 
+LOCAL INT wm_panel_open_u( INT wid, CONST T_WMPANEL *def );
+
 EXPORT INT wm_panel_open( INT wid, CONST T_WMPANEL *def )
+{
+	INT	res;
+
+	pn_lock();
+	res = wm_panel_open_u(wid, def);
+	pn_unlock();
+	return res;
+}
+
+LOCAL INT wm_panel_open_u( INT wid, CONST T_WMPANEL *def )
 {
 	PANEL	*p;
 	INT	i;
@@ -390,15 +743,18 @@ EXPORT INT wm_panel_open( INT wid, CONST T_WMPANEL *def )
 	p->focus   = -1;
 	p->hot     = -1;
 	p->pend    = -1;
+	p->kept    = FALSE;
 	/*
 	 * The first box that can be typed in has the letters from the
 	 * start. A panel that asks for a name and then wants a press on
 	 * the box before it will take one is a panel that loses the first
-	 * thing typed into it.
+	 * thing typed into it. One its program places beside its own
+	 * drawing (knl_pn_set_beside) gives the letters up again.
 	 */
 	{
 		INT	k;
 
+		p->beside = FALSE;
 		for ( k = 0; k < p->def.npart; k++ ) {
 			if ( pn_takes_keys(p, &p->def.part[k]) ) {
 				p->focus = k;
@@ -416,10 +772,19 @@ EXPORT INT wm_panel_open( INT wid, CONST T_WMPANEL *def )
 	p->owner_wid = 0;
 	p->under_w = 0;
 	p->under_h = 0;
+	p->under_dev = FALSE;
 	p->held_at = 0;
 	p->held_half = 0;
 	p->held_in = FALSE;
 	p->held_knob = FALSE;
+	p->full_h = p->def.r.bottom - p->def.r.top;
+	p->cut = 0;
+	p->sy = 0;
+	p->sy_sheet = 0;
+	p->scr = -1;
+	p->vvalid = FALSE;
+	pn_find_scroller(p);
+	pn_fit(p);
 	p->used = TRUE;
 
 	/* what it is about to cover */
@@ -428,7 +793,21 @@ EXPORT INT wm_panel_open( INT wid, CONST T_WMPANEL *def )
 		INT	h = p->def.r.bottom - p->def.r.top;
 		INT	gid = wm_gid(wid);
 
-		if ( gid >= 0 && w > 0 && h > 0
+		if ( gid >= 0 && w > 0 && h > 0 && dp_scale(gid) > 100 ) {
+			/* at a scale, the window's own pixels it covers, put back as they were */
+			UW	*px = NULL;
+			INT	pw, ph;
+
+			if ( dp_get_dev(gid, &p->def.r, &px, &pw, &ph) >= E_OK
+			  && (SZ)pw * ph * sizeof(UW) <= PN_UNDER_MAX * 4 ) {
+				p->under = px;
+				p->under_w = pw;
+				p->under_h = ph;
+				p->under_dev = TRUE;
+			} else if ( px != NULL ) {
+				Kfree(px);
+			}
+		} else if ( gid >= 0 && w > 0 && h > 0
 		  && (SZ)w * h * sizeof(UW) <= PN_UNDER_MAX ) {
 			p->under = (UW *)Kmalloc((SZ)w * h * sizeof(UW));
 			if ( p->under != NULL ) {
@@ -443,6 +822,16 @@ EXPORT INT wm_panel_open( INT wid, CONST T_WMPANEL *def )
 	knl_wmobj_panel(i + 1);
 
 	return i + 1;
+}
+
+EXPORT void knl_pn_set_beside( INT pid )
+{
+	PANEL	*p = pn_of(pid);
+
+	if ( p != NULL && !p->is_menu ) {
+		p->beside = TRUE;
+		p->focus = -1;		/* what is typed is the content's until a box is pressed */
+	}
 }
 
 EXPORT INT wm_panel_open_box( INT wid, INT num, ID owner )
@@ -528,7 +917,19 @@ EXPORT INT wm_panel_front( void )
 	return best;
 }
 
+LOCAL ER wm_panel_close_u( INT pid );
+
 EXPORT ER wm_panel_close( INT pid )
+{
+	ER	res;
+
+	pn_lock();
+	res = wm_panel_close_u(pid);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER wm_panel_close_u( INT pid )
 {
 	PANEL	*p = pn_of(pid);
 
@@ -570,7 +971,9 @@ EXPORT ER wm_panel_close( INT pid )
 	if ( p->under != NULL ) {
 		INT	gid = wm_gid(p->wid);
 
-		if ( gid >= 0 ) {
+		if ( gid >= 0 && p->under_dev ) {
+			(void)dp_put_dev(gid, &p->def.r, p->under, p->under_w, p->under_h);
+		} else if ( gid >= 0 ) {
 			dp_put_argb(gid, p->def.r.left, p->def.r.top,
 				    p->under, p->under_w, p->under_w,
 				    p->under_h, PN_NO_CLEAR);
@@ -785,8 +1188,10 @@ LOCAL BOOL group_first( CONST PANEL *p, INT i )
  */
 #define ICON_KEEP	24
 
+#define ICON_ID		64
+
 typedef struct {
-	UB	id[40];			/* the UUID as it was given */
+	UB	id[ICON_ID];		/* the UUID as it was given, or a picture's href */
 	UW	*px;			/* NULL: the object has no icon */
 	INT	w, h;
 	UW	used_at;		/* for letting the oldest go */
@@ -799,7 +1204,7 @@ LOCAL BOOL icon_same( CONST UB *a, CONST UB *b )
 {
 	INT	i;
 
-	for ( i = 0; i < 39 && a[i] == b[i] && a[i] != 0; i++ ) {
+	for ( i = 0; i < ICON_ID - 1 && a[i] == b[i] && a[i] != 0; i++ ) {
 		;
 	}
 	return ( a[i] == b[i] );
@@ -848,8 +1253,56 @@ LOCAL void icon_load( CONST UB *id )
 		Kfree(k->px);
 	}
 	knl_memset(k, 0, sizeof(*k));
-	for ( i = 0; i < 39 && id[i] != 0; i++ ) {
+	for ( i = 0; i < ICON_ID - 1 && id[i] != 0; i++ ) {
 		k->id[i] = id[i];
+	}
+	k->px = px;
+	k->w = w;
+	k->h = h;
+	k->used_at = ++icon_tick;
+}
+
+/* A slot for something to keep: the one least lately used, emptied */
+LOCAL ICONKEEP *icon_slot( void )
+{
+	ICONKEEP	*k = &icon_keep[0];
+	INT		i;
+
+	for ( i = 1; i < ICON_KEEP; i++ ) {
+		if ( icon_keep[i].used_at < k->used_at ) {
+			k = &icon_keep[i];
+		}
+	}
+	if ( k->px != NULL ) {
+		Kfree(k->px);
+	}
+	knl_memset(k, 0, sizeof(*k));
+	return k;
+}
+
+EXPORT void knl_pn_pict_load( CONST UB *href )
+{
+	TS_UUID		u;
+	CONST UB	*name;
+	ICONKEEP	*k;
+	UB		*png;
+	SZ		size = 0;
+	UW		*px = NULL;
+	INT		i, w = 0, h = 0;
+
+	if ( href == NULL || href[0] == 0 || icon_find(href) != NULL || !om_obj_href(href, &u, &name) ) {
+		return;
+	}
+	png = om_obj_res(&u, name, &size);
+	if ( png != NULL ) {
+		if ( img_png_decode(png, size, &px, &w, &h) < E_OK ) {
+			px = NULL;
+		}
+		Kfree(png);
+	}
+	k = icon_slot();
+	for ( i = 0; i < ICON_ID - 1 && href[i] != 0; i++ ) {
+		k->id[i] = href[i];
 	}
 	k->px = px;
 	k->w = w;
@@ -879,6 +1332,17 @@ LOCAL void icon_draw( INT gid, CONST T_DPRECT *r, CONST UB *id )
 	if ( w <= 0 || h <= 0 ) {
 		return;
 	}
+	if ( dp_scale(gid) > 100 ) {
+		T_DPRECT	b;
+
+		/* at a scale the picture is taken again at the box's own pixels, from all of its detail */
+		b.left = r->left + ( rw - w ) / 2;
+		b.top = r->top + ( rh - h ) / 2;
+		b.right = b.left + w;
+		b.bottom = b.top + h;
+		(void)dp_put_image(gid, &b, k->px, k->w, k->h, k->w, IMG_CLEAR);
+		return;
+	}
 	if ( w == k->w && h == k->h ) {
 		(void)dp_put_argb(gid, r->left + ( rw - w ) / 2, r->top + ( rh - h ) / 2, k->px, k->w, w, h, IMG_CLEAR);
 		return;
@@ -896,7 +1360,46 @@ LOCAL void icon_draw( INT gid, CONST T_DPRECT *r, CONST UB *id )
 	Kfree(sm);
 }
 
+LOCAL void draw_part_body( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margin );
+
+/*
+ * A part of a scrolling sheet is drawn only inside what shows of the
+ * sheet, and not at all when none of it is there.
+ */
 LOCAL void draw_part_at( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margin )
+{
+	T_WMPART	*pt = &p->def.part[i];
+	T_DPRECT	r, v, c;
+	T_DPENV		env;
+
+	if ( !part_scrolls(p, pt) ) {
+		draw_part_body(p, pid, gid, i, rad, margin);
+		return;
+	}
+	if ( p->vvalid ) {
+		v = p->vcache;
+	} else if ( !pn_view(p, &v, NULL) ) {
+		draw_part_body(p, pid, gid, i, rad, margin);
+		return;
+	}
+	part_rect(p, pt, &r);
+	if ( r.bottom <= v.top || r.top >= v.bottom || dp_ref(gid, &env) < E_OK ) {
+		return;
+	}
+	c = env.visible;
+	if ( c.left < v.left )     c.left = v.left;
+	if ( c.top < v.top )       c.top = v.top;
+	if ( c.right > v.right )   c.right = v.right;
+	if ( c.bottom > v.bottom ) c.bottom = v.bottom;
+	if ( c.right <= c.left || c.bottom <= c.top ) {
+		return;
+	}
+	dp_set_visible(gid, &c);
+	draw_part_body(p, pid, gid, i, rad, margin);
+	dp_set_visible(gid, &env.visible);
+}
+
+LOCAL void draw_part_body( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margin )
 {
 	T_WMPART	*pt = &p->def.part[i];
 	T_DPRECT	r;
@@ -953,6 +1456,14 @@ LOCAL void draw_part_at( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margin 
 			c.conv = pn_conv;
 		}
 		pd_part(pt, &r, &c);
+		if ( kind == MS_PARTS && pt->text[0] != 0 ) {
+			/* a button with a picture: in the middle, inside its edge */
+			T_DPRECT	in = r;
+
+			in.left += 3;  in.top += 3;
+			in.right -= 3; in.bottom -= 3;
+			icon_draw(gid, &in, pt->text);
+		}
 		return;
 	}
 	}
@@ -967,7 +1478,19 @@ LOCAL void draw_part_at( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margin 
 	(void)margin;
 }
 
+LOCAL ER panel_draw( INT pid );
+
 EXPORT ER wm_panel_draw( INT pid )
+{
+	ER	er;
+
+	pn_lock();
+	er = panel_draw(pid);
+	pn_unlock();
+	return er;
+}
+
+LOCAL ER panel_draw( INT pid )
 {
 	PANEL		*p = pn_of(pid);
 	INT		gid, i, rad, margin;
@@ -988,13 +1511,21 @@ EXPORT ER wm_panel_draw( INT pid )
 		rad = 12;
 	}
 	margin = part_margin();
+	if ( p->scr >= 0 ) {
+		pn_settle(p);			/* another sheet shown starts from its top */
+	}
 
 	panel_body(p, gid);
 
+	p->vvalid = (BOOL)( p->scr >= 0 && pn_view(p, &p->vcache, NULL) );
 	for ( i = 0; i < p->def.npart; i++ ) {
 		draw_part_at(p, pid, gid, i, rad, margin);
 	}
+	p->vvalid = FALSE;
 	wm_damage(p->wid, &p->def.r);
+	if ( p->scr >= 0 ) {
+		pn_bar(p);
+	}
 	if ( pn_conv != NULL && pn_conv_pid == pid && pn_conv_i >= 0 && pn_conv->list ) {
 		T_DPRECT	r;
 		T_WMWIN		w;
@@ -1034,8 +1565,10 @@ LOCAL void pn_draw_part( PANEL *p, INT pid, INT i )
 		rad = 12;
 	}
 	margin = part_margin();
+	pn_lock();
 	draw_part_at(p, pid, gid, i, rad, margin);
 	part_rect(p, &p->def.part[i], &r);
+	pn_unlock();
 	r.left -= margin + 2;   r.top -= margin + 2;
 	r.right += margin + 2;  r.bottom += margin + 2;
 	wm_damage(p->wid, &r);
@@ -1304,15 +1837,20 @@ LOCAL void list_press( PANEL *p, T_WMPART *pt, INT x, INT y )
 /* Which part is at a place in the work area, or -1 */
 LOCAL INT part_at( PANEL *p, INT x, INT y )
 {
-	T_DPRECT	r;
+	T_DPRECT	r, v;
 	INT		i;
+	BOOL		in_view;
 
+	in_view = (BOOL)( pn_view(p, &v, NULL) && rect_has(&v, x, y) );
 	for ( i = p->def.npart - 1; i >= 0; i-- ) {
 		T_WMPART *pt = &p->def.part[i];
 
 		if ( WM_PT_KIND(pt->type) == WM_PT_LABEL || WM_PT_KIND(pt->type) == WM_PT_LINE || WM_PT_KIND(pt->type) == WM_PT_ICON
 		  || PART_GREY(pt) || !pn_shown(p, pt) ) {
 			continue;		/* it takes nothing */
+		}
+		if ( part_scrolls(p, pt) && !in_view ) {
+			continue;		/* scrolled out of what shows of the sheet */
 		}
 		part_rect(p, pt, &r);
 		if ( rect_has(&r, x, y) ) {
@@ -1397,6 +1935,16 @@ LOCAL ER menu_event( INT pid, CONST T_WMEV *ev, UINT *p_answer )
 			if ( menu_in_child(p, ev->wid) ) {
 				break;
 			}
+			/*
+			 * A list opened by a click on its row is held open: the
+			 * pointer passing over the other rows on the way to it,
+			 * or anywhere else, does not put it away. Only a click
+			 * on another row does (HID_EV_BTN_UP below).
+			 */
+			if ( p->kept && p->child > 0 ) {
+				break;
+			}
+			p->kept = FALSE;
 			i = part_at(p, ev->x, ev->y);
 			if ( i != p->hot ) {
 				p->hot = i;
@@ -1466,7 +2014,10 @@ LOCAL ER menu_event( INT pid, CONST T_WMEV *ev, UINT *p_answer )
 			   pressing and moving away is how a person changes
 			   their mind */
 			if ( part_at(p, ev->x, ev->y) == i ) {
-				if ( p->is_menu && pt->num != 0 ) {
+				if ( p->is_menu && pt->sub != 0 ) {
+					/* a row with a list under it is not chosen: its list is held open */
+					menu_sub_keep(pid, i);
+				} else if ( p->is_menu && pt->num != 0 ) {
 					p->cmd = pt->num;
 					p->answer = WM_ANS_OK;
 				} else if ( pt->answer != WM_ANS_NONE ) {
@@ -1671,6 +2222,17 @@ LOCAL BOOL pn_box_key( T_WMPART *pt, UINT code, UINT mods )
 		}
 	}
 	if ( kind == XB_PARTS ) {
+		/*
+		 * marks standing in for letters kept elsewhere (XB_STANDIN, a
+		 * password saved): the first key takes them all away, and what is
+		 * typed then is the new letters
+		 */
+		if ( len > 0 && pt->text[0] == XB_STANDIN && ( code == K_BS || ( c >= 0x20 && c < 0x7F ) ) ) {
+			pt->text[0] = 0;
+			len = 0;
+			pt->caret = 0;
+			if ( code == K_BS ) return TRUE;
+		}
 		/* letters go on the end and come off it, one at a time */
 		pt->caret = len;
 		if ( code == K_BS ) {
@@ -1863,7 +2425,19 @@ LOCAL BOOL pn_conv_key( PANEL *p, INT pid, INT i, UINT key, UINT mods )
 	return busy;
 }
 
+LOCAL BOOL wm_panel_type_u( INT wid, CONST UB *s, INT n );
+
 EXPORT BOOL wm_panel_type( INT wid, CONST UB *s, INT n )
+{
+	BOOL	res;
+
+	pn_lock();
+	res = wm_panel_type_u(wid, s, n);
+	pn_unlock();
+	return res;
+}
+
+LOCAL BOOL wm_panel_type_u( INT wid, CONST UB *s, INT n )
 {
 	INT	i, k;
 
@@ -1936,6 +2510,7 @@ LOCAL void pn_focus_next( PANEL *p, INT d )
 		at = ( at + d + n ) % n;
 		if ( pn_takes_keys(p, &p->def.part[at]) ) {
 			pn_focus(p, at, TRUE);
+			pn_reveal(p, at);
 			return;
 		}
 	}
@@ -1995,6 +2570,9 @@ LOCAL void pn_press( PANEL *p, INT pid, CONST T_WMEV *ev )
 	p->held_in = TRUE;
 	p->held_knob = FALSE;
 	if ( i < 0 ) {
+		if ( p->beside && p->focus >= 0 ) {
+			p->focus = -1;		/* pressed on the content: the keys are its again */
+		}
 		wm_panel_draw(pid);
 		return;
 	}
@@ -2069,7 +2647,7 @@ LOCAL void pn_press( PANEL *p, INT pid, CONST T_WMEV *ev )
 		p->pressed = -1;
 		wm_panel_draw(pid);
 		knl_wmobj_part(pid, i, OB_E_PRESS, ev);
-		pop_open(pid, i, ev->when);
+		pop_open(pid, i, ev);
 		return;
 	case WM_PT_SWATCH:
 		take_press(p, i);
@@ -2258,22 +2836,28 @@ LOCAL void pn_key( PANEL *p, INT pid, CONST T_WMEV *ev )
 /*
  * The wheel over a list rolls it, as its knob would, a few rows a notch
  * (turned away from the person, up the list); the list's drawing keeps
- * the first row within it.
+ * the first row within it. Lists and the sheet go only up and down, so
+ * the wheel across is let go, not taken for the upright one.
  */
 #define WHEEL_ROWS	3
 
 LOCAL void pn_wheel( PANEL *p, INT pid, CONST T_WMEV *ev )
 {
 	T_WMPART	*pt;
-	T_DPRECT	r;
-	INT		i, was;
+	T_DPRECT	r, v;
+	INT		i, was, mx = 0;
+	BOOL		in_view;
 
-	if ( ev->dz == 0 || wm_num(LK_PD_WHEEL, 1) == 0 ) {
+	if ( ev->dz == 0 || ev->code != HID_WHEEL_V || wm_num(LK_PD_WHEEL, 1) == 0 ) {
 		return;
 	}
+	in_view = (BOOL)( pn_view(p, &v, &mx) && rect_has(&v, ev->x, ev->y) );
 	for ( i = 0; i < p->def.npart; i++ ) {
 		pt = &p->def.part[i];
 		if ( WM_PT_KIND(pt->type) != SS_PARTS || !pn_shown(p, pt) ) {
+			continue;
+		}
+		if ( part_scrolls(p, pt) && !in_view ) {
 			continue;
 		}
 		part_rect(p, pt, &r);
@@ -2293,9 +2877,32 @@ LOCAL void pn_wheel( PANEL *p, INT pid, CONST T_WMEV *ev )
 		}
 		return;
 	}
+	/* anywhere else in a scrolling panel: its sheet, as many rows of a list a notch */
+	if ( p->scr >= 0 && mx > 0 ) {
+		pn_lock();
+		was = p->sy;
+		p->sy -= ev->dz * WHEEL_ROWS * list_rowh();
+		pn_settle(p);
+		pn_unlock();
+		if ( p->sy != was ) {
+			wm_panel_draw(pid);
+		}
+	}
 }
 
+LOCAL ER wm_panel_event_u( INT pid, CONST T_WMEV *ev, UINT *p_answer );
+
 EXPORT ER wm_panel_event( INT pid, CONST T_WMEV *ev, UINT *p_answer )
+{
+	ER	res;
+
+	pn_lock();
+	res = wm_panel_event_u(pid, ev, p_answer);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER wm_panel_event_u( INT pid, CONST T_WMEV *ev, UINT *p_answer )
 {
 	PANEL	*p = pn_of(pid);
 
@@ -2396,8 +3003,10 @@ EXPORT void knl_pn_tick( void )
 		}
 		gid = wm_gid(p->wid);
 		if ( gid < 0 ) continue;
+		pn_lock();
 		draw_part_at(p, i + 1, gid, p->focus, 12, 0);
 		part_rect(p, &p->def.part[p->focus], &r);
+		pn_unlock();
 		wm_damage(p->wid, &r);
 		drew = TRUE;
 	}
@@ -2412,7 +3021,19 @@ EXPORT void knl_pn_tick( void )
  * along a line (an INT each), a selector's name chosen and the name in
  * use now (two INTs), anything else its value (an INT).
  */
+LOCAL INT knl_pn_state_u( INT pid, INT i, UB *buf, INT max );
+
 EXPORT INT knl_pn_state( INT pid, INT i, UB *buf, INT max )
+{
+	INT	res;
+
+	pn_lock();
+	res = knl_pn_state_u(pid, i, buf, max);
+	pn_unlock();
+	return res;
+}
+
+LOCAL INT knl_pn_state_u( INT pid, INT i, UB *buf, INT max )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
@@ -2446,7 +3067,19 @@ EXPORT INT knl_pn_state( INT pid, INT i, UB *buf, INT max )
 	return n;
 }
 
+LOCAL ER knl_pn_set_state_u( INT pid, INT i, CONST UB *buf, INT len );
+
 EXPORT ER knl_pn_set_state( INT pid, INT i, CONST UB *buf, INT len )
+{
+	ER	res;
+
+	pn_lock();
+	res = knl_pn_set_state_u(pid, i, buf, len);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER knl_pn_set_state_u( INT pid, INT i, CONST UB *buf, INT len )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
@@ -2456,6 +3089,12 @@ EXPORT ER knl_pn_set_state( INT pid, INT i, CONST UB *buf, INT len )
 	if ( p == NULL || i < 0 || i >= p->def.npart ) return E_ID;
 	pt = &p->def.part[i];
 	k = WM_PT_KIND(pt->type);
+	if ( k == WM_PT_SWATCH && len >= (INT)sizeof(INT) ) {
+		/* a swatch: the colour it shows */
+		knl_memcpy(v, buf, sizeof(INT));
+		pt->colour = (UW)v[0] & 0x00FFFFFFU;
+		return E_OK;
+	}
 	if ( k == VL_PARTS && len >= (INT)sizeof(v) ) {
 		/* a volume: its value and the two ends it runs between */
 		knl_memcpy(v, buf, sizeof(v));
@@ -2520,7 +3159,7 @@ EXPORT ER knl_pn_set_state( INT pid, INT i, CONST UB *buf, INT len )
 	return E_OK;
 }
 
-/* Whether a part can be worked and is shown: OB_WP_SHOWN, OB_WP_OFF */
+/* Whether a part can be worked and is shown, and has the keys: OB_WP_SHOWN, OB_WP_OFF, OB_WP_FOCUS */
 EXPORT UINT knl_pn_flags( INT pid, INT i )
 {
 	PANEL	*p = pn_of(pid);
@@ -2529,10 +3168,23 @@ EXPORT UINT knl_pn_flags( INT pid, INT i )
 	if ( p == NULL || i < 0 || i >= p->def.npart ) return 0;
 	if ( pn_shown(p, &p->def.part[i]) ) f |= OB_WP_SHOWN;
 	if ( p->def.part[i].type & P_DISABLE ) f |= OB_WP_OFF;
+	if ( p->focus == i ) f |= OB_WP_FOCUS;
 	return f;
 }
 
+LOCAL ER knl_pn_set_flags_u( INT pid, INT i, UINT f );
+
 EXPORT ER knl_pn_set_flags( INT pid, INT i, UINT f )
+{
+	ER	res;
+
+	pn_lock();
+	res = knl_pn_set_flags_u(pid, i, f);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER knl_pn_set_flags_u( INT pid, INT i, UINT f )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
@@ -2549,6 +3201,19 @@ EXPORT ER knl_pn_set_flags( INT pid, INT i, UINT f )
 	}
 	pt->type = ( f & OB_WP_OFF ) ? ( pt->type | P_DISABLE ) : ( pt->type & ~P_DISABLE );
 	if ( p->focus == i && !pn_takes_keys(p, pt) ) pn_focus_first(p);
+	/*
+	 * The program gives the box the keys, as a press on it would: what
+	 * is typed next goes on after what it holds. Written without the
+	 * flag, the keys stay where they are (the flags are read and written
+	 * back to change the others).
+	 */
+	if ( ( f & OB_WP_FOCUS ) != 0 && p->focus != i && pn_takes_keys(p, pt) ) {
+		pn_focus(p, i, FALSE);
+		if ( WM_PT_KIND(pt->type) == TB_PARTS || WM_PT_KIND(pt->type) == XB_PARTS ) {
+			pt->caret = tlen(pt->text);
+			pt->sb_at = -1;
+		}
+	}
 	if ( ls_owner == pid && ls_part == i && ( PART_GREY(pt) || !pn_shown(p, pt) ) ) {
 		pop_close(TRUE);
 	}
@@ -2556,7 +3221,19 @@ EXPORT ER knl_pn_set_flags( INT pid, INT i, UINT f )
 }
 
 /* The names a selector shows, each ending in a nought: how many bytes */
+LOCAL INT knl_pn_names_u( INT pid, INT i, UB *buf, INT max );
+
 EXPORT INT knl_pn_names( INT pid, INT i, UB *buf, INT max )
+{
+	INT	res;
+
+	pn_lock();
+	res = knl_pn_names_u(pid, i, buf, max);
+	pn_unlock();
+	return res;
+}
+
+LOCAL INT knl_pn_names_u( INT pid, INT i, UB *buf, INT max )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
@@ -2578,18 +3255,49 @@ EXPORT INT knl_pn_names( INT pid, INT i, UB *buf, INT max )
  * made again with every part's names where they were and this part's
  * new ones in theirs. names holds count names, each ending in a nought.
  */
+LOCAL ER knl_pn_set_names_u( INT pid, INT i, CONST UB *names, INT len );
+
 EXPORT ER knl_pn_set_names( INT pid, INT i, CONST UB *names, INT len )
+{
+	ER	res;
+
+	pn_lock();
+	res = knl_pn_set_names_u(pid, i, names, len);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER knl_pn_set_names_u( INT pid, INT i, CONST UB *names, INT len )
 {
 	PANEL	*p = pn_of(pid);
 	UB	*np;
 	INT	used = 0, k, f, count = 0, at;
 
 	if ( p == NULL || i < 0 || i >= p->def.npart ) return E_ID;
-	if ( ls_owner == pid && ls_part == i ) {
-		pop_close(TRUE);		/* the list shows names no longer the part's */
-	}
 	for ( k = 0; k < len; k++ ) {
 		if ( names[k] == 0 ) count++;
+	}
+	{
+		/*
+		 * the names it has already, written again (a program that reads
+		 * what it shows every second and sets it each time): nothing
+		 * changes, and a list opened from the part stays open
+		 */
+		T_WMPART	*pt = &p->def.part[i];
+		CONST UB	*e;
+		INT		n = 0;
+
+		if ( pt->count == count && pt->count > 0 && pt->pool >= 0 && pt->pool < WM_POOL_BYTES ) {
+			e = pd_pool_name(p->def.pool, pt->pool, pt->count);
+			n = ( e != NULL ) ? (INT)( e - &p->def.pool[pt->pool] ) : WM_POOL_BYTES - pt->pool;
+		}
+		if ( n == len && n > 0 ) {
+			for ( k = 0; k < len && p->def.pool[pt->pool + k] == names[k]; k++ ) ;
+			if ( k == len ) return E_OK;
+		}
+	}
+	if ( ls_owner == pid && ls_part == i ) {
+		pop_close(TRUE);		/* the list shows names no longer the part's */
 	}
 	np = (UB *)Kmalloc(WM_POOL_BYTES);
 	if ( np == NULL ) return E_NOMEM;
@@ -2641,7 +3349,19 @@ full:
 	return E_LIMIT;
 }
 
+LOCAL ER wm_panel_get_u( INT pid, INT num, INT *p_value );
+
 EXPORT ER wm_panel_get( INT pid, INT num, INT *p_value )
+{
+	ER	res;
+
+	pn_lock();
+	res = wm_panel_get_u(pid, num, p_value);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER wm_panel_get_u( INT pid, INT num, INT *p_value )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
@@ -2660,7 +3380,19 @@ EXPORT ER wm_panel_get( INT pid, INT num, INT *p_value )
 	return E_OK;
 }
 
+LOCAL ER wm_panel_set_u( INT pid, INT num, INT value );
+
 EXPORT ER wm_panel_set( INT pid, INT num, INT value )
+{
+	ER	res;
+
+	pn_lock();
+	res = wm_panel_set_u(pid, num, value);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER wm_panel_set_u( INT pid, INT num, INT value )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
@@ -2793,8 +3525,9 @@ LOCAL void mn_screen( INT *p_w, INT *p_h )
 	*p_w = 1280;
 	*p_h = 800;
 	if ( ts_disp_ref(&spec) >= E_OK ) {
-		*p_w = (INT)spec.width;
-		*p_h = (INT)spec.height;
+		/* the view the windows are laid in */
+		*p_w = (INT)( ( spec.view_w > 0 ) ? spec.view_w : spec.width );
+		*p_h = (INT)( ( spec.view_h > 0 ) ? spec.view_h : spec.height );
 	}
 }
 
@@ -2816,12 +3549,29 @@ LOCAL void mn_keep_on( T_DPRECT *b, CONST MNMET *m )
 }
 
 /*
+ * How a list of n rows is laid: as many rows to a column as the screen
+ * has room for, and as many columns side by side as that takes.
+ */
+LOCAL void mn_columns( INT n, CONST MNMET *m, INT *p_rows, INT *p_cols )
+{
+	INT	sw, sh, fit;
+
+	mn_screen(&sw, &sh);
+	fit = ( sh - 2 * ( MN_FRAME + m->vpad ) - MN_SHADOW ) / m->row;
+	if ( fit < 1 ) fit = 1;
+	if ( n < 1 ) n = 1;
+	*p_rows = ( n < fit ) ? n : fit;
+	*p_cols = ( n + *p_rows - 1 ) / *p_rows;
+}
+
+/*
  * A list opened, its body at a place on the screen: a popup window of
  * its own as large as its frame and its shadow, so that it stands over
  * every window and reaches past the one it was opened from. Its rows
  * are the parts of a panel in that window, one to a row across the
  * body and the padding either side, which is the part a press lands on
- * and the part that is inverted.
+ * and the part that is inverted. A list taller than the screen is in
+ * columns, as many rows to each as the body is high (mn_columns).
  */
 LOCAL INT mn_open_body( INT owner, CONST T_WMMENU *def, CONST T_DPRECT *body,
 			CONST MNMET *m, BOOL marks )
@@ -2829,7 +3579,7 @@ LOCAL INT mn_open_body( INT owner, CONST T_WMMENU *def, CONST T_DPRECT *body,
 	T_WMPANEL	*pn;
 	PANEL		*p;
 	T_DPRECT	o;
-	INT		i, n = 0, pid, pop, gx, gy;
+	INT		i, n = 0, pid, pop, gx, gy, rows, cols, colw;
 
 	gx = MN_FRAME + m->hpad;
 	gy = MN_FRAME + m->vpad;
@@ -2854,11 +3604,16 @@ LOCAL INT mn_open_body( INT owner, CONST T_WMMENU *def, CONST T_DPRECT *body,
 	pn->r.top    = 0;
 	pn->r.right  = ( o.right - o.left ) - MN_SHADOW;
 	pn->r.bottom = ( o.bottom - o.top ) - MN_SHADOW;
+	rows = ( body->bottom - body->top ) / m->row;
+	if ( rows < 1 ) rows = 1;
+	cols = ( def->nitem + rows - 1 ) / rows;
+	if ( cols < 1 ) cols = 1;
+	colw = ( body->right - body->left ) / cols;
 
 	for ( i = 0; i < def->nitem && n < WM_PART_MAX; i++ ) {
 		T_WMPART	*pt = &pn->part[n];
 		CONST T_WMITEM	*it = &def->item[i];
-		INT		k;
+		INT		k, c = i / rows;
 
 		pt->type   = mn_is_rule(it) ? WM_PT_LABEL : WM_PT_BUTTON;
 		if ( it->grey ) {
@@ -2869,9 +3624,9 @@ LOCAL INT mn_open_body( INT owner, CONST T_WMMENU *def, CONST T_DPRECT *body,
 		pt->answer = WM_ANS_OK;
 		pt->value  = it->tick ? 1 : 0;
 		pt->group  = marks ? 1 : 0;	/* the list keeps room for marks */
-		pt->r.left   = MN_FRAME;
-		pt->r.top    = gy + i * m->row;
-		pt->r.right  = pn->r.right - MN_FRAME;
+		pt->r.left   = ( c == 0 ) ? MN_FRAME : gx + c * colw;
+		pt->r.top    = gy + ( i % rows ) * m->row;
+		pt->r.right  = ( c == cols - 1 ) ? pn->r.right - MN_FRAME : gx + ( c + 1 ) * colw;
 		pt->r.bottom = pt->r.top + m->row;
 		for ( k = 0; k < WM_LABEL_MAX; k++ ) {
 			pt->label[k] = it->label[k];
@@ -2904,15 +3659,27 @@ LOCAL INT mn_open_body( INT owner, CONST T_WMMENU *def, CONST T_DPRECT *body,
  * with the press half a row into it, so that choosing the same thing
  * again is no movement at all.
  */
+LOCAL INT wm_menu_open_u( INT wid, CONST T_WMMENU *def, INT x, INT y );
+
 EXPORT INT wm_menu_open( INT wid, CONST T_WMMENU *def, INT x, INT y )
+{
+	INT	res;
+
+	pn_lock();
+	res = wm_menu_open_u(wid, def, x, y);
+	pn_unlock();
+	return res;
+}
+
+LOCAL INT wm_menu_open_u( INT wid, CONST T_WMMENU *def, INT x, INT y )
 {
 	MNMET		m;
 	T_WMWIN		w;
 	T_DPRECT	body;
 	BOOL		marks;
-	INT		wide, cur, sx = x, sy = y;
+	INT		wide, cur, sx = x, sy = y, rows, cols;
 
-	if ( def == NULL || def->nitem <= 0 || def->nitem > WM_ITEM_MAX ) {
+	if ( def == NULL || def->nitem <= 0 ) {
 		return E_PAR;
 	}
 	if ( wm_ref(wid, &w) >= E_OK ) {
@@ -2920,12 +3687,13 @@ EXPORT INT wm_menu_open( INT wid, CONST T_WMMENU *def, INT x, INT y )
 		sy = w.work.top + y;
 	}
 	mn_metrics(&m);
-	wide = mn_body_width(def, &m, &marks);
+	wide = mn_body_width(def, &m, &marks) + 2 * m.hpad;
+	mn_columns(def->nitem, &m, &rows, &cols);
 	cur  = ( def->cur > 0 && def->cur < def->nitem ) ? def->cur : 0;
-	body.left   = sx - m.cw / 2;
-	body.top    = sy - cur * m.row - m.row / 2;
-	body.right  = body.left + wide;
-	body.bottom = body.top + def->nitem * m.row;
+	body.left   = sx - m.cw / 2 - ( cur / rows ) * wide;
+	body.top    = sy - ( cur % rows ) * m.row - m.row / 2;
+	body.right  = body.left + wide * cols - 2 * m.hpad;
+	body.bottom = body.top + rows * m.row;
 	mn_keep_on(&body, &m);
 
 	return mn_open_body(wid, def, &body, &m, marks);
@@ -2948,7 +3716,7 @@ LOCAL void menu_sub_open( INT pid, INT row )
 	T_DPRECT	body, parent;
 	MNMET		m;
 	BOOL		marks;
-	INT		child, wide, top;
+	INT		child, wide, top, size, rows, cols, rowr;
 
 	if ( p == NULL || row < 0 || row >= p->def.npart ) {
 		return;
@@ -2959,36 +3727,44 @@ LOCAL void menu_sub_open( INT pid, INT row )
 	if ( wm_ref(p->wid, &pw) < E_OK ) {
 		return;
 	}
-	def = (T_WMMENU *)Kmalloc(sizeof(T_WMMENU));
+	/* the list as large as the box keeps it */
+	size = db_size(DB_MENU, p->def.part[row].sub, p->def.owner);
+	if ( size < (INT)sizeof(T_WMMENU) ) {
+		return;
+	}
+	def = (T_WMMENU *)Kmalloc((SZ)size);
 	if ( def == NULL ) {
 		return;
 	}
-	if ( db_get(DB_MENU, p->def.part[row].sub, p->def.owner,
-		    def, sizeof(T_WMMENU)) < 0 ) {
+	if ( db_get(DB_MENU, p->def.part[row].sub, p->def.owner, def, (SZ)size) < 0
+	  || (SZ)size < (SZ)WM_MENU_SIZE(def->nitem) || def->nitem <= 0 ) {
 		Kfree(def);
 		return;
 	}
 	def->owner = p->def.owner;
 	mn_metrics(&m);
-	wide = mn_body_width(def, &m, &marks);
+	wide = mn_body_width(def, &m, &marks) + 2 * m.hpad;
+	mn_columns(def->nitem, &m, &rows, &cols);
+	wide = wide * cols - 2 * m.hpad;
 	/* the parent's frame, on the screen */
 	parent.left   = pw.work.left + p->def.r.left;
 	parent.top    = pw.work.top + p->def.r.top;
 	parent.right  = pw.work.left + p->def.r.right;
 	parent.bottom = pw.work.top + p->def.r.bottom;
 	top = pw.work.top + p->def.part[row].r.top;
+	rowr = pw.work.left + p->def.part[row].r.right;	/* the right of the row's column */
 
-	body.left   = parent.right;
+	body.left   = rowr;
 	body.top    = top;
 	body.right  = body.left + wide;
-	body.bottom = top + def->nitem * m.row;
+	body.bottom = top + rows * m.row;
 	mn_keep_on(&body, &m);
-	if ( parent.right - m.cw > body.left ) {
+	if ( rowr - m.cw > body.left ) {
 		/* pushed back over its parent: it goes on the left instead */
 		body.right  = parent.left + m.cw / 2;
 		body.left   = body.right - wide;
 		body.top    = top;
-		body.bottom = top + def->nitem * m.row;
+		body.bottom = top + rows * m.row;
 		mn_keep_on(&body, &m);
 	}
 	child = mn_open_body(p->owner_wid, def, &body, &m, marks);
@@ -3006,6 +3782,52 @@ LOCAL void menu_sub_open( INT pid, INT row )
 }
 
 /*
+ * A click (a release over the row it was pressed on, or over a row of
+ * the menu after the press that opened it) on a row with a list under
+ * it. The row is not an item that can be chosen: its list opens at
+ * once, without waiting for the menu's delay, and is held open, as is
+ * every list of the chain it hangs from, until an item is chosen in it
+ * or another row is clicked. A list open under another row goes first.
+ * Clicked again, the row keeps its list as it is.
+ */
+LOCAL void menu_sub_keep( INT pid, INT row )
+{
+	PANEL	*p = pn_of(pid), *a;
+	INT	depth = 0;
+
+	if ( p == NULL || row < 0 || row >= p->def.npart ) {
+		return;
+	}
+	if ( p->child > 0 ) {
+		PANEL	*c = pn_of(p->child);
+
+		if ( c == NULL || c->at_row != row ) {
+			INT	k = p->child;
+
+			p->child = 0;
+			p->kept = FALSE;
+			wm_panel_close(k);
+		}
+	}
+	p->pend = -1;
+	if ( p->hot != row ) {
+		p->hot = row;
+		wm_panel_draw(pid);
+	}
+	if ( p->child <= 0 ) {
+		menu_sub_open(pid, row);
+	}
+	if ( p->child <= 0 ) {
+		return;				/* nothing to open: the row stays lit */
+	}
+	/* the lists it hangs from stay as they are, too */
+	for ( a = p; a != NULL && depth < WM_PANEL_MAX; depth++ ) {
+		a->kept = TRUE;
+		a = ( a->parent > 0 ) ? pn_of(a->parent) : NULL;
+	}
+}
+
+/*
  * A list drawn: filled in its ground and framed in one line, the shadow
  * laid a half-tone of black over what is below and to the right of it,
  * then each row -- a rule as a dotted line through its middle, a name
@@ -3013,7 +3835,16 @@ LOCAL void menu_sub_open( INT pid, INT row )
  * the indent when the list has room for marks, the key letters two in
  * from the right. The row under the pointer is inverted.
  */
+LOCAL void menu_paint_body( PANEL *p );
+
 LOCAL void menu_paint( PANEL *p )
+{
+	pn_lock();
+	menu_paint_body(p);
+	pn_unlock();
+}
+
+LOCAL void menu_paint_body( PANEL *p )
 {
 	INT		gid = wm_gid(p->wid), i;
 	MNMET		m;
@@ -3201,7 +4032,19 @@ EXPORT BOOL wm_menu_has( INT pid, INT wid )
 	return (BOOL)( p->wid == wid || menu_in_child(p, wid) );
 }
 
+LOCAL ER wm_menu_event_u( INT pid, CONST T_WMEV *ev, INT *p_cmd );
+
 EXPORT ER wm_menu_event( INT pid, CONST T_WMEV *ev, INT *p_cmd )
+{
+	ER	res;
+
+	pn_lock();
+	res = wm_menu_event_u(pid, ev, p_cmd);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER wm_menu_event_u( INT pid, CONST T_WMEV *ev, INT *p_cmd )
 {
 	PANEL	*p = pn_of(pid);
 	UINT	answer = WM_ANS_NONE;
@@ -3307,7 +4150,7 @@ LOCAL void pop_row_words( CONST UB *s, UB *label, UB *key )
  * is moved onto the screen as a menu is. A list longer than the screen
  * shows the rows round the name chosen.
  */
-LOCAL void pop_open( INT pid, INT i, UD when )
+LOCAL void pop_open( INT pid, INT i, CONST T_WMEV *ev )
 {
 	PANEL		*p = pn_of(pid), *l;
 	T_WMPART	*pt;
@@ -3431,9 +4274,16 @@ LOCAL void pop_open( INT pid, INT i, UD when )
 	ls_owner = pid;
 	ls_part = i;
 	ls_first = first;
-	ls_when = when;
-	ls_pressed = FALSE;
-	ls_hot0 = l->hot;
+	/* the row the pointer is on as the list opens over the part, -1 none */
+	{
+		T_WMWIN	lw;
+
+		ls_hot0 = -1;
+		if ( wm_ref(l->wid, &lw) >= E_OK ) {
+			ls_hot0 = part_at(l, w.work.left + ev->x - lw.work.left, w.work.top + ev->y - lw.work.top);
+		}
+	}
+	wm_click_begin(&ls_click, ev->when, ev->code);
 	wm_panel_draw(lp);
 	pn_draw_part(p, pid, i);
 	wm_update();
@@ -3519,15 +4369,28 @@ EXPORT INT knl_pn_list( INT *p_wid )
  * row under it; a release on a row chooses it, and a release anywhere
  * else puts the list away unchanged -- except the release that ends the
  * opening press while it is still a click (within the double click's
- * time, on the row lit as the list opened), after which the list stands until a row is pressed and let go
- * on, or a press is made off it. The second button does nothing. Up and
- * Down move the lit row, Enter chooses it, Escape puts the list away.
+ * time, or with the pointer not moved, wm_click_take), after which the
+ * list stands until a row is pressed and let go on, or a press is made
+ * off it. The second button does nothing, nor does any other button
+ * while the opening one is held. Up and Down move the lit row, Enter
+ * chooses it, Escape puts the list away.
  */
+LOCAL BOOL knl_pn_list_event_u( CONST T_WMEV *ev );
+
 EXPORT BOOL knl_pn_list_event( CONST T_WMEV *ev )
+{
+	BOOL	res;
+
+	pn_lock();
+	res = knl_pn_list_event_u(ev);
+	pn_unlock();
+	return res;
+}
+
+LOCAL BOOL knl_pn_list_event_u( CONST T_WMEV *ev )
 {
 	PANEL	*l, *p;
 	INT	row = -1;
-	UD	gap;
 
 	if ( ls_pid <= 0 || ev == NULL ) {
 		return FALSE;
@@ -3541,6 +4404,13 @@ EXPORT BOOL knl_pn_list_event( CONST T_WMEV *ev )
 	if ( ( ev->type == HID_EV_MOVE || ev->type == HID_EV_BTN_DOWN || ev->type == HID_EV_BTN_UP )
 	  && ev->wid == l->wid ) {
 		row = part_at(l, ev->x, ev->y);
+	}
+	/* carried off the row it opened on: no longer a click, whenever it is let go */
+	if ( ls_click.live && ( ev->type == HID_EV_MOVE || ev->type == HID_EV_BTN_UP ) && row != ls_hot0 ) {
+		ls_click.moved = TRUE;
+	}
+	if ( wm_click_take(&ls_click, ev) != WM_CK_PASS ) {
+		return TRUE;		/* a click: the list stays; another button while it is held */
 	}
 	switch ( ev->type ) {
 	case HID_EV_MOVE:
@@ -3558,7 +4428,6 @@ EXPORT BOOL knl_pn_list_event( CONST T_WMEV *ev )
 			pop_close(TRUE);		/* pressed off the list */
 			break;
 		}
-		ls_pressed = TRUE;
 		if ( row != l->hot ) {
 			l->hot = row;
 			menu_paint(l);
@@ -3567,11 +4436,6 @@ EXPORT BOOL knl_pn_list_event( CONST T_WMEV *ev )
 		break;
 	case HID_EV_BTN_UP:
 		if ( ev->code != 0 ) {
-			break;
-		}
-		gap = (UD)wm_num(WM_LOOK_DBLTIME, 400) * 1000000U;
-		if ( !ls_pressed && ev->when - ls_when < gap && row == ls_hot0 ) {
-			ls_pressed = TRUE;		/* a click: the list stays */
 			break;
 		}
 		if ( row >= 0 ) {
@@ -3711,7 +4575,19 @@ EXPORT ER wm_panel_field( INT pid, INT num, INT field, INT *p_value )
 	return E_OK;
 }
 
+LOCAL ER wm_panel_set_field_u( INT pid, INT num, INT field, INT value );
+
 EXPORT ER wm_panel_set_field( INT pid, INT num, INT field, INT value )
+{
+	ER	res;
+
+	pn_lock();
+	res = wm_panel_set_field_u(pid, num, field, value);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER wm_panel_set_field_u( INT pid, INT num, INT field, INT value )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
@@ -3732,7 +4608,19 @@ EXPORT ER wm_panel_set_field( INT pid, INT num, INT field, INT value )
 	return E_OK;
 }
 
+LOCAL ER wm_panel_text_u( INT pid, INT num, UB *buf, INT max );
+
 EXPORT ER wm_panel_text( INT pid, INT num, UB *buf, INT max )
+{
+	ER	res;
+
+	pn_lock();
+	res = wm_panel_text_u(pid, num, buf, max);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER wm_panel_text_u( INT pid, INT num, UB *buf, INT max )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
@@ -3753,7 +4641,19 @@ EXPORT ER wm_panel_text( INT pid, INT num, UB *buf, INT max )
 	return E_OK;
 }
 
+LOCAL ER wm_panel_set_text_u( INT pid, INT num, CONST UB *str );
+
 EXPORT ER wm_panel_set_text( INT pid, INT num, CONST UB *str )
+{
+	ER	res;
+
+	pn_lock();
+	res = wm_panel_set_text_u(pid, num, str);
+	pn_unlock();
+	return res;
+}
+
+LOCAL ER wm_panel_set_text_u( INT pid, INT num, CONST UB *str )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
@@ -3765,6 +4665,15 @@ EXPORT ER wm_panel_set_text( INT pid, INT num, CONST UB *str )
 	pt = part_of(p, num);
 	if ( pt == NULL || str == NULL ) {
 		return E_PAR;
+	}
+	if ( WM_PT_KIND(pt->type) == WM_PT_LABEL ) {
+		/* words alone: what they say */
+		while ( i < WM_LABEL_MAX - 1 && str[i] != 0 ) {
+			pt->label[i] = str[i];
+			i++;
+		}
+		pt->label[i] = 0;
+		return E_OK;
 	}
 	while ( i < WM_LABEL_MAX - 1 && str[i] != 0 ) {
 		pt->text[i] = str[i];
@@ -3790,6 +4699,9 @@ EXPORT INT wm_panel_self_check( void )
 		}
 		w = p->def.r.right - p->def.r.left;
 		h = p->def.r.bottom - p->def.r.top;
+		if ( p->scr >= 0 ) {
+			h = p->full_h;		/* a scrolling sheet's parts are inside the panel as defined */
+		}
 		for ( j = 0; j < p->def.npart; j++ ) {
 			T_WMPART *a = &p->def.part[j];
 

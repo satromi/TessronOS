@@ -54,6 +54,15 @@ extern "C" {
 #define HID_MOD_RALT	0x40
 #define HID_MOD_RMETA	0x80
 
+/*
+ * The keys the system takes for itself, by their usages on the keyboard
+ * page: the whole's volume a step up or down (the window layer, beep.c).
+ * A machine's own volume buttons are given as them too (the 5-button
+ * array of the ACPI HID event filter, kernel/sysdepend/acpi/acpi_power.c).
+ */
+#define HID_KEY_VOLUP	0x80
+#define HID_KEY_VOLDOWN	0x81
+
 /* One thing that happened */
 typedef struct {
 	UINT	type;
@@ -99,6 +108,16 @@ IMPORT ER  ts_hid_stat( T_HIDSTAT *st );
  * it is, without the attributes below.
  */
 IMPORT ER  knl_hid_inject( UINT src, CONST T_HIDEV *ev );
+
+/*
+ * Whether the event ts_hid_read gave last is a finger's on a touch
+ * screen; then *p_px100 is how many pixels of the view 100 mm of that
+ * screen is, from the size the device says it is (guessed when it does
+ * not say). The window manager asks it of each press it reads, for the
+ * handles a finger reaches farther (wm_hit_slop). A mouse's, a pen's
+ * and what was put in (knl_hid_inject) are not a finger's.
+ */
+IMPORT BOOL knl_hid_taken_touch( INT *p_px100 );
 
 /* The key held let stop repeating (a window closing) */
 IMPORT void knl_hid_repeat_cut( void );
@@ -150,10 +169,22 @@ IMPORT UD  knl_hid_tap_now( void );
  *	sclk		a shift pressed and let go this quickly is one-shot, and
  *			twice within 2.5 times it locks; 0 neither
  *	tshift		each press of a shift goes 通常, 一時シフト, 簡易ロック
+ *	tch_off		a finger's correction off: a double tap's second tap is
+ *			not brought to the first
+ *	tch_dbl		how far apart a double tap's taps may be, 0.1 mm of the
+ *			screen; 0 the default (5 mm)
+ *	tch_hold	held this long (ms), a finger is the second button; 0
+ *			the default (1 s)
+ *	tch_noscr	two fingers not taken together: a second finger is
+ *			left alone, there is no scroll nor tap of two
+ *	tch_scr		how far two fingers move for a notch of the wheel,
+ *			0.1 mm of the screen; 0 the default (10 mm)
  */
 typedef struct {
 	UINT	pd_on, pd_off, speed, accel, main, absolute, middbl;
 	UINT	key_on, key_off, key_sim, krp, krp_start, krp_int, sclk, tshift;
+	UINT	tch_off, tch_dbl, tch_hold;
+	UINT	tch_noscr, tch_scr;
 } T_HIDATTR;
 
 IMPORT ER  ts_hid_setattr( CONST T_HIDATTR *a );

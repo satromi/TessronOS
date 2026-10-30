@@ -65,6 +65,39 @@
 #include "disp_hw.h"
 
 LOCAL T_DISPSPEC	disp_spec;
+
+/*
+ * The scale the screen is drawn at (ts_disp_setscale): the largest of
+ * the list, up to the one asked for, that leaves a view of at least the
+ * least size; 100 when none does. The view is the screen's pixels at
+ * that scale, rounded up.
+ */
+LOCAL CONST UINT	disp_scales[DISP_NSCALE] = DISP_SCALES;
+
+LOCAL UINT scale_for( UINT want, UINT w, UINT h )
+{
+	UINT	s = 100;
+	INT	i;
+
+	for ( i = 0; i < DISP_NSCALE; i++ ) {
+		if ( disp_scales[i] <= want
+		  && disp_view_len(w, disp_scales[i]) >= DISP_VIEW_MIN_W
+		  && disp_view_len(h, disp_scales[i]) >= DISP_VIEW_MIN_H ) {
+			s = disp_scales[i];
+		}
+	}
+	return s;
+}
+
+LOCAL void view_set( void )
+{
+	if ( disp_spec.scale_want == 0 ) {
+		disp_spec.scale_want = 100;
+	}
+	disp_spec.scale = scale_for(disp_spec.scale_want, disp_spec.width, disp_spec.height);
+	disp_spec.view_w = disp_view_len(disp_spec.width, disp_spec.scale);
+	disp_spec.view_h = disp_view_len(disp_spec.height, disp_spec.scale);
+}
 LOCAL T_DISPHW		disp_hw;
 LOCAL BOOL		disp_found = FALSE;
 LOCAL UB		*disp_back = NULL;	/* where everything draws */
@@ -74,6 +107,8 @@ LOCAL UINT		disp_alpha;		/* DISP_ALPHA_* */
 LOCAL ID		disp_mtxid = 0;
 
 LOCAL INT		disp_held = 0;
+LOCAL ID		disp_hold_tsk = 0;	/* the task that took the first hold of those now held */
+LOCAL UD		disp_hold_at = 0;	/* and when, ns */
 LOCAL T_DISPSTAT	disp_stat;
 
 #define DISP_RECTS	16		/* separate rectangles kept at most */
@@ -274,6 +309,22 @@ LOCAL void whole_of( RECTS *l )
 	l->n = 1;
 }
 
+/*
+ * Whoever drew on the screen before the driver (the x64 screen console)
+ * is told once, before the first pixels are sent or the size is first
+ * changed, so that it goes on telling the start-up until then
+ */
+IMPORT void knl_disp_hw_taken( void ) __attribute__((weak));
+LOCAL BOOL		disp_taken = FALSE;
+
+LOCAL void taken( void )
+{
+	if ( !disp_taken ) {
+		disp_taken = TRUE;
+		if ( knl_disp_hw_taken != NULL ) knl_disp_hw_taken();
+	}
+}
+
 /* Each rectangle of a list sent to a page, and the writes made to go out */
 LOCAL void send_list( CONST RECTS *l, UINT page )
 {
@@ -281,6 +332,7 @@ LOCAL void send_list( CONST RECTS *l, UINT page )
 	UD	t0, t1;
 	INT	i;
 
+	taken();
 	(void)ts_get_mono(&t0);
 	for ( i = 0; i < l->n; i++ ) {
 		T_DISPRECT	r = l->r[i];
@@ -525,6 +577,10 @@ EXPORT ER ts_disp_hold( void )
 		return E_NOEXS;
 	}
 	tk_loc_mtx(disp_mtxid, TMO_FEVR);
+	if ( disp_held == 0 ) {
+		disp_hold_tsk = tk_get_tid();
+		(void)ts_get_mono(&disp_hold_at);
+	}
 	disp_held++;
 	tk_unl_mtx(disp_mtxid);
 
@@ -546,6 +602,23 @@ EXPORT ER ts_disp_release( void )
 	tk_unl_mtx(disp_mtxid);
 
 	return E_OK;
+}
+
+/*
+ * How many holds there are now, which task took the first of them and
+ * how many milliseconds ago: for the reports of a screen that is not
+ * brought up to date (the desktop's watch at its start). Read without
+ * the lock, as it is.
+ */
+EXPORT INT knl_disp_hold_note( ID *p_tsk, UW *p_ms )
+{
+	INT	held = disp_held;
+	UD	now, at = disp_hold_at;
+
+	(void)ts_get_mono(&now);
+	if ( p_tsk != NULL ) *p_tsk = ( held > 0 ) ? disp_hold_tsk : 0;
+	if ( p_ms != NULL ) *p_ms = ( held > 0 && now > at ) ? (UW)( ( now - at ) / 1000000 ) : 0;
+	return held;
 }
 
 EXPORT ER ts_disp_flush( void )
@@ -740,11 +813,15 @@ EXPORT ER ts_disp_flip( BOOL on )
 
 /*
  * The screen set to another size (システム環境設定, at the desktop's
- * start before a window is open): the hardware first, then a back
- * buffer of the new size, then whoever keeps the size told. The new
- * size shows its first page; with two pages, the other is sent the
- * whole screen by the next send.
+ * start or while it runs): the hardware first, then a back buffer of the
+ * new size, then whoever keeps the size told. The window manager's lock
+ * is held from before the old back buffer goes until the windows are
+ * laid again for the new one (knl_wm_screen_changing, _changed, _kept).
+ * The new size shows its first page; with two pages, the other is sent
+ * the whole screen by the next send.
  */
+IMPORT void knl_wm_screen_changing( void ) __attribute__((weak));
+IMPORT void knl_wm_screen_kept( void ) __attribute__((weak));
 IMPORT void knl_wm_screen_changed( void ) __attribute__((weak));
 IMPORT void knl_hid_screen_changed( void ) __attribute__((weak));
 
@@ -761,19 +838,25 @@ EXPORT ER ts_disp_setmode( UINT w, UINT h )
 	if ( w == disp_spec.width && h == disp_spec.height ) {
 		return E_OK;
 	}
+	/* nothing builds the screen in the back buffer while it is replaced */
+	if ( knl_wm_screen_changing != NULL ) knl_wm_screen_changing();
 	tk_loc_mtx(disp_mtxid, TMO_FEVR);
 	settle();
+	taken();
 	hw = disp_hw;
 	if ( knl_disp_hw_setmode(&hw, w, h) <= 0 ) {
 		tk_unl_mtx(disp_mtxid);
+		if ( knl_wm_screen_kept != NULL ) knl_wm_screen_kept();
 		return E_NOSPT;
 	}
 	pitch = ( hw.format == DISP_FMT_XRGB8888 ) ? hw.pitch : hw.width * 4;
 	pages = ( (UBINT)pitch * hw.height + PAGE_SIZE - 1 ) / PAGE_SIZE;
 	back = (UB *)knl_vmap(pages, 0);
 	if ( back == NULL ) {
+		hw = disp_hw;
 		(void)knl_disp_hw_setmode(&hw, disp_spec.width, disp_spec.height);
 		tk_unl_mtx(disp_mtxid);
+		if ( knl_wm_screen_kept != NULL ) knl_wm_screen_kept();
 		return E_NOMEM;
 	}
 	knl_memset(back, 0, (SZ)( (UBINT)pitch * hw.height ));
@@ -789,6 +872,7 @@ EXPORT ER ts_disp_setmode( UINT w, UINT h )
 	disp_spec.fb_bpp = hw.bpp;
 	disp_spec.fb_format = hw.format;
 	disp_spec.fb_pages = ( hw.pages >= 2 && hw.flip != NULL ) ? 2 : 1;
+	view_set();
 	disp_fb = (UB *)hw.fb_va;
 	disp_fb2 = (UB *)hw.page2_va;
 	disp_new.n = 0;			/* of the old screen; the new one is laid whole */
@@ -804,6 +888,44 @@ EXPORT ER ts_disp_setmode( UINT w, UINT h )
 	tk_unl_mtx(disp_mtxid);
 	tm_printf((UB *)"TessronOS: display now %d x %d%s\n", (INT)hw.width, (INT)hw.height,
 		  disp_flipping ? ", two pages" : "");
+	if ( knl_wm_screen_changed != NULL ) knl_wm_screen_changed();
+	if ( knl_hid_screen_changed != NULL ) knl_hid_screen_changed();
+	return E_OK;
+}
+
+/*
+ * The screen drawn at another scale: nothing of the hardware or the
+ * back buffer changes, only the view the windows are laid in, so the
+ * window manager lays every window again at the new scale as it does
+ * for a new size, and the pointer is kept within the new view.
+ */
+EXPORT ER ts_disp_setscale( UINT scale )
+{
+	INT	i;
+	UINT	was;
+
+	if ( !disp_found ) {
+		return E_NOEXS;
+	}
+	for ( i = 0; i < DISP_NSCALE && disp_scales[i] != scale; i++ ) ;
+	if ( i == DISP_NSCALE ) {
+		return E_PAR;
+	}
+	if ( scale_for(scale, disp_spec.width, disp_spec.height) != scale ) {
+		return E_NOSPT;			/* the view would be too small */
+	}
+	if ( knl_wm_screen_changing != NULL ) knl_wm_screen_changing();
+	tk_loc_mtx(disp_mtxid, TMO_FEVR);
+	was = disp_spec.scale;
+	disp_spec.scale_want = scale;
+	view_set();
+	tk_unl_mtx(disp_mtxid);
+	if ( disp_spec.scale == was ) {
+		if ( knl_wm_screen_kept != NULL ) knl_wm_screen_kept();
+		return E_OK;
+	}
+	tm_printf((UB *)"TessronOS: display drawn at %d%%, a view of %d x %d\n", (INT)disp_spec.scale,
+		  (INT)disp_spec.view_w, (INT)disp_spec.view_h);
 	if ( knl_wm_screen_changed != NULL ) knl_wm_screen_changed();
 	if ( knl_hid_screen_changed != NULL ) knl_hid_screen_changed();
 	return E_OK;
@@ -1071,6 +1193,7 @@ EXPORT INT knl_disp_init( void )
 	disp_spec.fb_bpp    = hw.bpp;
 	disp_spec.fb_format = hw.format;
 	disp_spec.fb_pages  = ( hw.pages >= 2 && hw.flip != NULL ) ? 2 : 1;
+	view_set();
 	disp_alpha = hw.alpha;
 	disp_fb = (UB *)hw.fb_va;
 	disp_fb2 = (UB *)hw.page2_va;

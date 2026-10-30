@@ -177,7 +177,7 @@ typedef struct t_ctsk {
 	FP	task;		/* Task startup address */
 	PRI	itskpri;	/* Priority at task startup */
 	SZ	stksz;		/* User stack size (byte) */
-	UW	assprc;		/* Processors allowed to run the task (bit n: PRC n+1), with TA_ASSPRC */
+	UBINT	assprc;		/* Processors allowed to run the task (bit n: PRC n+1, PRC 1..64), with TA_ASSPRC; more with tk_set_asp */
 
 #ifdef CTSK_SYSDEPEND_INFO
 	CTSK_SYSDEPEND_INFO
@@ -863,6 +863,15 @@ IMPORT ER tk_ref_sys( T_RSYS *pk_rsys );
 IMPORT ER tk_set_pow( UINT powmode);
 IMPORT ER tk_ref_ver( T_RVER *pk_rver );
 IMPORT ID tk_get_prc( void );		/* SMP T-Kernel: processor of the caller */
+/*
+ * The processors a task may run on (SMP T-Kernel's assignment, bit n for
+ * PRC n+1), as an array of 'size' bytes (a whole number of UBINT) the
+ * caller gives, so that any number of processors can be named: a
+ * TessronOS form of tk_set_asp and tk_ref_asp (design A). An empty set
+ * is any processor. tk_ref_asp answers the words written.
+ */
+IMPORT ER tk_set_asp( ID tskid, CONST UBINT *assprc, SZ size );
+IMPORT INT tk_ref_asp( ID tskid, UBINT *assprc, SZ size );
 
 IMPORT ER tk_def_ssy( ID ssid, CONST T_DSSY *pk_dssy );
 IMPORT ER tk_ref_ssy( ID ssid, T_RSSY *pk_rssy );
@@ -873,6 +882,18 @@ IMPORT ID tk_rea_dev( ID dd, W start, void *buf, SZ size, TMO tmout );
 IMPORT ER tk_srea_dev( ID dd, W start, void *buf, SZ size, SZ *asize );
 IMPORT ID tk_wri_dev( ID dd, W start, CONST void *buf, SZ size, TMO tmout );
 IMPORT ER tk_swri_dev( ID dd, W start, CONST void *buf, SZ size, SZ *asize );
+
+/*
+ * The same with the start in 64 bits, as T-Kernel 2.0 has them: a block
+ * device's sector past 2^31 (a disk of more than 1TB of 512-byte
+ * sectors) is reached only through these. A negative start is an
+ * attribute's number, as for the calls above. tk_rea_dev_du and
+ * tk_wri_dev_du take the time out in microseconds.
+ */
+IMPORT ID tk_rea_dev_du( ID dd, D start_d, void *buf, SZ size, TMO_U tmout_u );
+IMPORT ER tk_srea_dev_d( ID dd, D start_d, void *buf, SZ size, SZ *asize );
+IMPORT ID tk_wri_dev_du( ID dd, D start_d, CONST void *buf, SZ size, TMO_U tmout_u );
+IMPORT ER tk_swri_dev_d( ID dd, D start_d, CONST void *buf, SZ size, SZ *asize );
 IMPORT ID tk_wai_dev( ID dd, ID reqid, SZ *asize, ER *ioer, TMO tmout );
 IMPORT INT tk_sus_dev( UINT mode );
 IMPORT ID tk_get_dev( ID devid, UB *devnm );

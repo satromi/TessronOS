@@ -287,13 +287,13 @@ EXPORT ER knl_fs_probe( CONST char *devnm, T_FSPROBE *p )
 		return (ER)dd;
 	}
 	er = tk_srea_dev(dd, TDN_DISKINFO, &di, sizeof(di), &asz);
-	if ( er < E_OK || di.blocksize <= 0 || di.blockcont <= 0 ) {
+	if ( er < E_OK || di.blocksize <= 0 || di.blockcont_d <= 0 ) {
 		tk_cls_dev(dd, 0);
 		return ( er < E_OK ) ? er : E_NOMDA;
 	}
 	len = PROBE_BYTES;
-	if ( (D)di.blockcont * di.blocksize < len ) {
-		len = (INT)( (D)di.blockcont * di.blocksize );
+	if ( di.blockcont_d * di.blocksize < len ) {
+		len = (INT)( di.blockcont_d * di.blocksize );
 	}
 	len -= len % di.blocksize;
 	buf = (UB *)Kmalloc((SZ)len + 4096);
@@ -319,7 +319,7 @@ EXPORT ER knl_fs_probe( CONST char *devnm, T_FSPROBE *p )
 	probe_bytes(buf, n, di.blocksize,
 		    (BOOL)( rd.nsub > 0 && k > 0 && !( devnm[k - 1] >= '0' && devnm[k - 1] <= '9' ) ), p);
 	Kfree(buf);
-	p->bytes = (UD)di.blockcont * (UD)di.blocksize;
+	p->bytes = (UD)di.blockcont_d * (UD)di.blocksize;
 	p->rdonly = (BOOL)di.protect;
 
 	return E_OK;

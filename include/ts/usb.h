@@ -128,7 +128,8 @@ IMPORT ER  ts_usb_ref_port( INT hc, UINT port, T_USBPORT *p );
 
 /*
  * The devices plugged in now, parents before their children. Answers how
- * many there are; at most max are written.
+ * many there are; at most max are written (max 0 and buf NULL ask only
+ * how many). The tree has no bound of its own on how many it holds.
  */
 IMPORT INT ts_usb_lst_dev( T_USBDEV *buf, INT max );
 IMPORT ER  ts_usb_ref_dev( INT dev, T_USBDEV *pk_dev );
@@ -188,6 +189,9 @@ IMPORT void knl_us_prc_end( ID pid );
  */
 IMPORT void *knl_usb_page_alloc( UD *p_bus );
 IMPORT void  knl_usb_page_free( void *page );
+/* 2^order pages next to each other, the same way */
+IMPORT void *knl_usb_pages_alloc( INT order, UD *p_bus );
+IMPORT void  knl_usb_pages_free( void *page, INT order );
 
 #ifdef __cplusplus
 }

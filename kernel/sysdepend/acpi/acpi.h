@@ -19,7 +19,7 @@
 #ifndef _SYSDEPEND_ACPI_ACPI_
 #define _SYSDEPEND_ACPI_ACPI_
 
-#define ACPI_MAX_CPU		16
+#define ACPI_MAX_CPU		64	/* more than are started (CNF_MAX_PRCID), to count what is left */
 #define ACPI_MAX_IOAPIC		4
 #define ACPI_MAX_ISO		16
 #define ACPI_MAX_MCFG		4
@@ -63,8 +63,10 @@ typedef struct {
 typedef struct {
 	BOOL		present;	/* the tables were there and good */
 	UB		oem[7];		/* the OEM ID of the RSDP */
-	INT		ncpu;
+	INT		ncpu;			/* the enabled processors, threads included */
 	T_ACPICPU	cpu[ACPI_MAX_CPU];	/* the boot processor first */
+	INT		ncpu_later;		/* listed as able to come online later, not started */
+	INT		ncpu_over;		/* enabled ones beyond ACPI_MAX_CPU */
 	UD		lapic_addr;
 	INT		nioapic;
 	T_ACPIIOAPIC	ioapic[ACPI_MAX_IOAPIC];
@@ -105,5 +107,8 @@ IMPORT UW	knl_acpi_isa_gsi( UB irq, UH *p_flags );
 /* Off (ACPI S5), or a reset through the FADT's reset register: FALSE when it did not happen */
 IMPORT BOOL	knl_acpi_poweroff( void );
 IMPORT BOOL	knl_acpi_reset( void );
+
+/* The ACPI interpreter (ACPICA, built apart and linked in) and what the kernel gives it */
+#include "acpica/tsacpi_os.h"
 
 #endif /* _SYSDEPEND_ACPI_ACPI_ */

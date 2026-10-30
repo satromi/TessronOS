@@ -65,6 +65,10 @@ EXPORT ER knl_task_initialize( void )
 		tskid = ID_TSK(i);
 		tcb->tskid = tskid;
 		tcb->state = TS_NONEXIST;
+#if KLK_FINE_OBJ
+		tcb->pri_next = NULL;
+		tcb->pri_queued = FALSE;
+#endif
 #if USE_LEGACY_API && USE_RENDEZVOUS
 		tcb->wrdvno = tskid;
 #endif
@@ -134,9 +138,11 @@ EXPORT void knl_make_dormant( TCB *tcb )
  */
 EXPORT void knl_make_ready( TCB *tcb )
 {
+	KLK_SCHED_DI();
 	tcb->state = TS_READY;
 	knl_ready_queue_insert(&knl_ready_queue, tcb);
-	knl_reschedule();
+	knl_reschedule_lazy();
+	KLK_UNSCHED();
 }
 
 /*
@@ -148,8 +154,10 @@ EXPORT void knl_make_ready( TCB *tcb )
  */
 EXPORT void knl_make_non_ready( TCB *tcb )
 {
+	KLK_SCHED_DI();
 	knl_ready_queue_delete(&knl_ready_queue, tcb);
-	knl_reschedule();
+	knl_reschedule_lazy();
+	KLK_UNSCHED();
 }
 
 /*
@@ -159,6 +167,13 @@ EXPORT void knl_change_task_priority( TCB *tcb, INT priority )
 {
 	INT	oldpri;
 
+	KLK_SCHED_DI();
+#if KLK_FINE_OBJ && CNF_KLOCK_CHECK
+	/* A task that waits is moved in its queue: the lock of the queue is held */
+	if ( (tcb->state & TS_WAIT) != 0 && tcb->wspec->wlock != NULL ) {
+		KLK_ASSERT((*tcb->wspec->wlock)(tcb), "a priority of a task that waits");
+	}
+#endif
 	if ( tcb->state == TS_READY ) {
 		/*
 		 * When deleting a task from the ready queue, 
@@ -169,7 +184,7 @@ EXPORT void knl_change_task_priority( TCB *tcb, INT priority )
 		knl_ready_queue_delete(&knl_ready_queue, tcb);
 		tcb->priority = (UB)priority;
 		knl_ready_queue_insert(&knl_ready_queue, tcb);
-		knl_reschedule();
+		knl_reschedule_lazy();
 	} else {
 		oldpri = tcb->priority;
 		tcb->priority = (UB)priority;
@@ -180,6 +195,7 @@ EXPORT void knl_change_task_priority( TCB *tcb, INT priority )
 			(*tcb->wspec->chg_pri_hook)(tcb, oldpri);
 		}
 	}
+	KLK_UNSCHED();
 }
 
 /*
@@ -187,8 +203,10 @@ EXPORT void knl_change_task_priority( TCB *tcb, INT priority )
  */
 EXPORT void knl_rotate_ready_queue( INT priority )
 {
+	KLK_SCHED_DI();
 	knl_ready_queue_rotate(&knl_ready_queue, priority);
-	knl_reschedule();
+	knl_reschedule_lazy();
+	KLK_UNSCHED();
 }
 
 /*
@@ -196,11 +214,13 @@ EXPORT void knl_rotate_ready_queue( INT priority )
  */
 EXPORT void knl_rotate_ready_queue_run( void )
 {
+	KLK_SCHED_DI();
 	if ( knl_schedtsk != NULL ) {
 		knl_ready_queue_rotate(&knl_ready_queue,
 				knl_ready_queue_top_priority(&knl_ready_queue));
-		knl_reschedule();
+		knl_reschedule_lazy();
 	}
+	KLK_UNSCHED();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -221,12 +241,14 @@ SYSCALL INT td_rdy_que( PRI pri, ID list[], INT nent )
 	CHECK_PRI(pri);
 
 	BEGIN_DISABLE_INTERRUPT;
+	KLK_SCHED_DI();
 	tskque = &knl_ready_queue.tskque[int_priority(pri)];
 	for ( q = tskque->next; q != tskque; q = q->next ) {
 		if ( n++ < nent ) {
 			*(list++) = ((TCB*)q)->tskid;
 		}
 	}
+	KLK_UNSCHED();
 	END_DISABLE_INTERRUPT;
 
 	return n;

@@ -18,7 +18,10 @@
 #include <string.h>
 #include <ts/xfu.h>
 
-#define CHUNK		( 64 * 1024 )
+/* bytes read from and written to a record at a time: each write is made
+   durable when it returns, so the fewer they are the less the medium waits
+   (design 7.3) */
+#define CHUNK		( 4 * 1024 * 1024 )
 #define NAME_TC		20		/* characters a volume's name has at most */
 #define NAKAGURO	"\xE3\x83\xBB"	/* ・ */
 

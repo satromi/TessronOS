@@ -12,7 +12,7 @@ MBEDTLS_DIR := $(TOP)/lib/mbedtls
 TLS_OUT     := $(UOBJ)/lib/tls
 TLS_LIB     := $(UOBJ)/lib/libtls.a
 
-TLS_CFLAGS  := $(ARCHFLAGS) -mstrict-align -fno-stack-protector -O2 -g -DCHK_TKERNEL_CONST \
+TLS_CFLAGS  := $(ARCHFLAGS) $(UARCH_FP) -fno-stack-protector -O2 -g -DCHK_TKERNEL_CONST \
 	'-DMBEDTLS_CONFIG_FILE="ts_tls_config.h"' -I$(TLS_DIR) -I$(MBEDTLS_DIR)/include \
 	-I$(TOP)/include -I$(TOP)/config
 

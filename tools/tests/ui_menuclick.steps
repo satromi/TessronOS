@@ -1,0 +1,66 @@
+# The press that opens a menu or a pop-up's list, and its release (design 10.6, メニューと一覧を
+# 開いた押下の離し), for tools/ui_run.py and tools/x64/ui_run64.py. The window TADjsについて is in
+# front at the start, its work area under 600,420; its menu opens with 閉じる under the pointer.
+# - the second button pressed and let go 50 ms later, and 800 ms later without moving: the menu
+#   stays open both times (shots mc_quick, mc_slow), and Esc puts it away;
+# - the first button pressed and let go while the second is held, as a pointer out of step
+#   reports a button nobody pressed (the TrackPoint of the ThinkPad X1 Yoga): not the menu's,
+#   and 閉じる is not chosen -- the window stays in front;
+# - システム環境設定's pop-up 表示の倍率 (at 658,455; 150% a row of 20 two rows down, 設定 at
+#   706,554, as tools/tests/ui_scale.steps works them) pressed and let go 800 ms later without
+#   moving: its list stays open, and a click on 150% in it chooses it. Enter keeps the scale.
+wait 1000
+move 600 420
+wait 300
+down 1
+wait 50
+up 1
+wait 1000
+shot mc_quick
+key 29
+wait 800
+move 600 420
+down 1
+wait 800
+up 1
+wait 1000
+shot mc_slow
+key 29
+wait 800
+move 600 420
+down 1
+wait 30
+down 0
+wait 30
+up 0
+wait 30
+up 1
+expect desktop: menu: button 0 pressed while the menu's is held: not taken
+wait 1000
+key 29
+wait 800
+front mc TADjsについて
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+wait 800
+win システム環境設定
+click 206 181
+wait 300
+click 706 184
+expect sysenv: screen scale 100%, 3 scales
+wait 500
+move 658 455
+down 0
+wait 800
+up 0
+wait 800
+shot mc_list
+click 658 495
+wait 300
+click 706 554
+expect wm: drawn at 150% (was 100%)
+wait 1500
+key 28
+expect drawn at 150%, kept
+wait 1000
+absent !OACV!

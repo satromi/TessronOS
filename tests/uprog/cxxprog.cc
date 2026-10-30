@@ -433,10 +433,19 @@ static int	exec_flips;
 
 static void code_put( void *page, int v )
 {
+#if defined(__x86_64__)
+	volatile uint8_t	*b = (volatile uint8_t *)page;
+	uint32_t		u = (uint32_t)v & 0xffff;
+
+	b[0] = 0xb8;						/* mov $v, %eax */
+	*(volatile uint32_t *)( b + 1 ) = u;			/* the value in one store, within a cache line */
+	b[5] = 0xc3;						/* ret */
+#else
 	volatile uint32_t	*w = (volatile uint32_t *)page;
 
 	w[0] = 0x52800000u | ( ( (uint32_t)v & 0xffff ) << 5 );	/* movz w0, #v */
 	w[1] = 0xd65f03c0u;					/* ret */
+#endif
 }
 
 static void code_put( CODEFN fn, int v )

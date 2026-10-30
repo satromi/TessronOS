@@ -322,21 +322,21 @@ LOCAL ER admin_unset( void )
 	INT	len = 0, n;
 	ER	er;
 
-	j = (UB *)Kmalloc(OB_META_MAX);
+	j = (UB *)Kmalloc(KT_META_ROOM);
 	if ( j == NULL ) return E_NOMEM;
-	er = knl_ob_meta_read(&ob_user_admin, j, OB_META_MAX, &len);
+	er = knl_ob_meta_read(&ob_user_admin, j, KT_META_ROOM, &len);
 	if ( er >= E_OK ) {
-		n = knl_oj_put(j, 0, OB_META_MAX, "{\"name\":\"管理者\",\"refCount\":0,\"recordCount\":0,"
+		n = knl_oj_put(j, 0, KT_META_ROOM, "{\"name\":\"管理者\",\"refCount\":0,\"recordCount\":0,"
 			       "\"editable\":true,\"deletable\":false,\"readable\":true,"
 			       "\"tessronos\":{\"user\":{\"name\":\"管理者\",\"groups\":[");
-		n = knl_oj_put_uuid(j, n, OB_META_MAX, &ob_group_admin);
-		n = knl_oj_put(j, n, OB_META_MAX, ",");
-		n = knl_oj_put_uuid(j, n, OB_META_MAX, &ob_group_users);
-		n = knl_oj_put(j, n, OB_META_MAX, "]},\"access\":{\"owner\":");
-		n = knl_oj_put_uuid(j, n, OB_META_MAX, &ob_user_system);
-		n = knl_oj_put(j, n, OB_META_MAX, ",\"group\":");
-		n = knl_oj_put_uuid(j, n, OB_META_MAX, &ob_group_admin);
-		n = knl_oj_put(j, n, OB_META_MAX, ",\"mode\":\"rw-------\",\"attr\":[\"perm\"],\"acl\":[],\"records\":[]}}}");
+		n = knl_oj_put_uuid(j, n, KT_META_ROOM, &ob_group_admin);
+		n = knl_oj_put(j, n, KT_META_ROOM, ",");
+		n = knl_oj_put_uuid(j, n, KT_META_ROOM, &ob_group_users);
+		n = knl_oj_put(j, n, KT_META_ROOM, "]},\"access\":{\"owner\":");
+		n = knl_oj_put_uuid(j, n, KT_META_ROOM, &ob_user_system);
+		n = knl_oj_put(j, n, KT_META_ROOM, ",\"group\":");
+		n = knl_oj_put_uuid(j, n, KT_META_ROOM, &ob_group_admin);
+		n = knl_oj_put(j, n, KT_META_ROOM, ",\"mode\":\"rw-------\",\"attr\":[\"perm\"],\"acl\":[],\"records\":[]}}}");
 		er = ( n > 0 ) ? knl_ob_meta_write(&ob_user_admin, j, n) : E_LIMIT;
 	}
 	Kfree(j);
@@ -345,15 +345,16 @@ LOCAL ER admin_unset( void )
 
 LOCAL void test_password( void )
 {
-	T_OBPRT	p;
+	static UD	p_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*p = (T_OBPRT *)p_b;
 	ER	er;
 
 	er = knl_ob_admin_check(NULL);
 	if ( er != E_OK && er != E_NOEXS ) KT_SKIP("no store for 管理者");
 	/* made on the system's volume, the system's and closed to others */
-	KT_ASSERT_ER(ob_get_prt(&ob_user_admin, &p), E_OK);
-	KT_ASSERT(same(&p.owner, &ob_user_system));
-	KT_ASSERT_EQ(p.mode, 0600);
+	KT_ASSERT_ER(ob_get_prt(&ob_user_admin, p, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT(same(&p->owner, &ob_user_system));
+	KT_ASSERT_EQ(p->mode, 0600);
 	KT_ASSERT_ER(admin_unset(), E_OK);
 	KT_ASSERT_ER(knl_ob_admin_check(NULL), E_NOEXS);
 	KT_ASSERT_ER(knl_ob_admin_check((CONST UB *)"anything"), E_NOEXS);
@@ -399,7 +400,8 @@ LOCAL void test_trusted( void )
 LOCAL void test_maker( void )
 {
 	T_OBCRE	c;
-	T_OBPRT	p;
+	static UD	p_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*p = (T_OBPRT *)p_b;
 	TS_UUID	u;
 
 	knl_memset(&c, 0, sizeof(c));
@@ -407,17 +409,17 @@ LOCAL void test_maker( void )
 	c.sub = OB_S_FILE;
 	c.name = (CONST UB *)"ktcred maker";
 	if ( ob_cre_obj(&c, &u) < E_OK ) KT_SKIP("no store");
-	KT_ASSERT_ER(ob_get_prt(&u, &p), E_OK);
-	KT_ASSERT(same(&p.owner, &ob_user_system));
+	KT_ASSERT_ER(ob_get_prt(&u, p, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT(same(&p->owner, &ob_user_system));
 	KT_ASSERT_ER(ob_del_obj(&u), E_OK);
 
 	knl_ob_make_for_person(TRUE);
 	KT_ASSERT_ER(ob_cre_obj(&c, &u), E_OK);
 	knl_ob_make_for_person(FALSE);
-	KT_ASSERT_ER(ob_get_prt(&u, &p), E_OK);
-	KT_ASSERT(same(&p.owner, &knl_ob_session_crd()->user));
-	KT_ASSERT(same(&p.group, &ob_group_users));
-	KT_ASSERT_EQ(p.mode, 0644);
+	KT_ASSERT_ER(ob_get_prt(&u, p, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT(same(&p->owner, &knl_ob_session_crd()->user));
+	KT_ASSERT(same(&p->group, &ob_group_users));
+	KT_ASSERT_EQ(p->mode, 0644);
 	/* the person's programs may change it */
 	KT_ASSERT((knl_ob_permit_on(&u, &knl_ob_crd_person) & OB_OP_WRITE) != 0);
 	KT_ASSERT_ER(ob_del_obj(&u), E_OK);
@@ -441,7 +443,11 @@ LOCAL void test_media( void )
 	for ( i = 0; i < cnt && i < 256; i++ ) {
 		if ( ob_ref_obj(&ids[i], &r) < E_OK || r.sub != OB_S_DISK ) continue;
 		ops = knl_ob_permit_on(&ids[i], &knl_ob_crd_person);
+#if defined(X64)
+		if ( r.name[0] == 'n' && r.name[1] == 'v' ) {
+#else
 		if ( r.name[0] == 'v' || ( r.name[0] == 's' && r.name[1] == 'd' ) ) {
+#endif
 			/* the disk the machine runs on: the administrators' alone */
 			KT_ASSERT_EQ(ops & ( OB_OP_READ | OB_OP_WRITE ), 0);
 			sys++;

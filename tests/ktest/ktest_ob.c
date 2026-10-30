@@ -26,6 +26,7 @@
 #include <ts/ob.h>
 #include <ts/sysdef.h>
 #include <ts/xf.h>
+#include <ts/xfu.h>
 #include <ts/fs.h>
 #include <ts/tsfs.h>
 #include <ts/proc.h>
@@ -40,6 +41,9 @@
 #include <ts/om.h>
 #include <ts/fn.h>
 #include "../../application/desktop/desktop.h"
+
+/* links in one drop: more than the 16 a drop once held */
+#define KT_DROP_MANY	30
 
 #define STORE	"/boot/OBTEST"
 
@@ -142,8 +146,9 @@ LOCAL void test_json( void )
 
 LOCAL void test_permit( void )
 {
-	T_OBPRT	prt;
-	T_OBCRD	own, mem, other, adm;
+	static UD	prt_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*prt = (T_OBPRT *)prt_b;
+	static T_OBCRD	own, mem, other, adm;
 	TS_UUID	u_own, u_mem, u_other, g1, g2;
 	UINT	ops;
 
@@ -160,93 +165,147 @@ LOCAL void test_permit( void )
 	knl_memset(&adm, 0, sizeof(adm));   adm.user = u_other; adm.ngrp = 1;
 	adm.grp[0] = ob_group_admin;
 
-	knl_memset(&prt, 0, sizeof(prt));
-	prt.owner = u_own;
-	prt.group = g1;
-	prt.mode = 0750;			/* rwxr-x--- */
+	knl_memset(prt, 0, KT_PRT_SIZE);
+	prt->owner = u_own;
+	prt->group = g1;
+	prt->mode = 0750;			/* rwxr-x--- */
 
-	ops = knl_ob_permit(&own, &prt, -1);
+	ops = knl_ob_permit(&own, prt, -1);
 	KT_ASSERT_EQ(ops, OB_OP_ALL);		/* all, with changing the protection */
-	ops = knl_ob_permit(&mem, &prt, -1);
+	ops = knl_ob_permit(&mem, prt, -1);
 	KT_ASSERT_EQ(ops, OB_OP_R | OB_OP_X);
-	KT_ASSERT_EQ(knl_ob_permit(&other, &prt, -1), 0);
-	KT_ASSERT_EQ(knl_ob_permit(&adm, &prt, -1), OB_OP_ALL);
+	KT_ASSERT_EQ(knl_ob_permit(&other, prt, -1), 0);
+	KT_ASSERT_EQ(knl_ob_permit(&adm, prt, -1), OB_OP_ALL);
 
 	/* the list gives one user the attributes' writing, and nothing more */
-	prt.nacl = 1;
-	prt.acl[0].kind = OB_ACE_USER;
-	prt.acl[0].who = u_other;
-	prt.acl[0].ops = OB_OP_READ | OB_OP_ATRWR;
-	KT_ASSERT_EQ(knl_ob_permit(&other, &prt, -1), OB_OP_READ | OB_OP_ATRWR);
+	prt->nacl = 1;
+	prt->acl[0].kind = OB_ACE_USER;
+	prt->acl[0].who = u_other;
+	prt->acl[0].ops = OB_OP_READ | OB_OP_ATRWR;
+	KT_ASSERT_EQ(knl_ob_permit(&other, prt, -1), OB_OP_READ | OB_OP_ATRWR);
 
 	/* a group entry, matched by any group of the subject */
-	prt.acl[0].kind = OB_ACE_GROUP;
-	prt.acl[0].who = g2;
-	prt.acl[0].ops = OB_OP_WRITE;
-	KT_ASSERT_EQ(knl_ob_permit(&mem, &prt, -1), OB_OP_R | OB_OP_X | OB_OP_WRITE);
+	prt->acl[0].kind = OB_ACE_GROUP;
+	prt->acl[0].who = g2;
+	prt->acl[0].ops = OB_OP_WRITE;
+	KT_ASSERT_EQ(knl_ob_permit(&mem, prt, -1), OB_OP_R | OB_OP_X | OB_OP_WRITE);
 
 	/* a record's limit takes away on that record only */
-	prt.nrmask = 1;
-	prt.rmask[0].recno = 1;
-	prt.rmask[0].ops = 0;
-	ops = knl_ob_permit(&own, &prt, 1);
+	prt->nrmask = 1;
+	OB_PRT_RMASK(prt)[0].recno = 1;
+	OB_PRT_RMASK(prt)[0].ops = 0;
+	ops = knl_ob_permit(&own, prt, 1);
 	KT_ASSERT_EQ(ops & ( OB_OP_READ | OB_OP_WRITE ), 0);
 	KT_ASSERT(( ops & OB_OP_ATRRD ) != 0);	/* the attributes are not the record */
-	KT_ASSERT(( knl_ob_permit(&own, &prt, 0) & OB_OP_READ ) != 0);
+	KT_ASSERT(( knl_ob_permit(&own, prt, 0) & OB_OP_READ ) != 0);
 
 	/* the attributes bind administrators too */
-	prt.attr = OB_A_RONLY | OB_A_PERM;
-	ops = knl_ob_permit(&adm, &prt, -1);
+	prt->attr = OB_A_RONLY | OB_A_PERM;
+	ops = knl_ob_permit(&adm, prt, -1);
 	KT_ASSERT_EQ(ops & ( OB_OP_WRITE | OB_OP_RECORD | OB_OP_DELETE ), 0);
 	KT_ASSERT(( ops & OB_OP_ATRWR ) != 0);
 
 	/* what the TADjs Desktop writes: no owner, the flags it has */
-	knl_ob_prt_legacy(&prt, TRUE, FALSE, TRUE);
-	ops = knl_ob_permit(&other, &prt, -1);
+	knl_ob_prt_legacy(prt, TRUE, FALSE, TRUE);
+	ops = knl_ob_permit(&other, prt, -1);
 	KT_ASSERT(( ops & OB_OP_READ ) != 0);
 	KT_ASSERT_EQ(ops & OB_OP_WRITE, 0);
 }
 
-/* the protection goes into the metadata and comes back the same */
+/*
+ * the protection goes into the metadata and comes back the same: one
+ * entry and one limit, then more than the 16 of each the protection once
+ * held, the last of each still deciding
+ */
+#define KT_ACL_MANY	40
+#define KT_RMASK_MANY	20
+
 LOCAL void test_prt_text( void )
 {
-	T_OBPRT	a, b;
-	UB	*j = (UB *)Kmalloc(OB_META_MAX);
-	INT	len;
+	T_OBPRT	*a, *b = NULL, *m;
+	T_OBCRD	who;
+	UB	*j;
+	INT	len, cap, i;
 	CONST char *src = "{\"name\":\"x\",\"window\":{\"width\":10}}";
 
-	if ( j == NULL ) KT_SKIP("no memory");
-
-	knl_memset(&a, 0, sizeof(a));
-	make_uuid(&a.owner, 1);
-	make_uuid(&a.group, 2);
-	a.mode = 0640;
-	a.attr = OB_A_PERM;
-	a.nacl = 1;
-	a.acl[0].kind = OB_ACE_USER;
-	make_uuid(&a.acl[0].who, 3);
-	a.acl[0].ops = OB_OP_READ | OB_OP_ATRWR;
-	a.nrmask = 1;
-	a.rmask[0].recno = 2;
-	a.rmask[0].ops = OB_OP_READ;
-
+	a = knl_ob_prt_new(1, 1);
 	len = s_len(src);
+	cap = len;
+	j = (UB *)Kmalloc((SZ)cap + 1);
+	if ( a == NULL || j == NULL ) KT_SKIP("no memory");
+
+	make_uuid(&a->owner, 1);
+	make_uuid(&a->group, 2);
+	a->mode = 0640;
+	a->attr = OB_A_PERM;
+	a->acl[0].kind = OB_ACE_USER;
+	make_uuid(&a->acl[0].who, 3);
+	a->acl[0].ops = OB_OP_READ | OB_OP_ATRWR;
+	OB_PRT_RMASK(a)[0].recno = 2;
+	OB_PRT_RMASK(a)[0].ops = OB_OP_READ;
+
 	knl_memcpy(j, src, len + 1);
-	len = knl_ob_prt_store(j, len, OB_META_MAX, &a);
+	len = knl_ob_prt_store(&j, len, &cap, a);
 	KT_ASSERT(len > 0);
 	KT_ASSERT(has(j, len, "\"mode\":\"rw-r-----\""));
 	KT_ASSERT(has(j, len, "\"deletable\":false"));
 	KT_ASSERT(has(j, len, "\"window\":{\"width\":10}"));	/* the rest untouched */
 	KT_ASSERT_ER(knl_ob_prt_parse(j, len, &b), E_OK);
-	KT_ASSERT_EQ(ts_uuid_cmp(&a.owner, &b.owner), 0);
-	KT_ASSERT_EQ(ts_uuid_cmp(&a.group, &b.group), 0);
-	KT_ASSERT_EQ(b.mode, 0640);
-	KT_ASSERT_EQ(b.attr, OB_A_PERM);
-	KT_ASSERT_EQ(b.nacl, 1);
-	KT_ASSERT_EQ(b.acl[0].ops, OB_OP_READ | OB_OP_ATRWR);
-	KT_ASSERT_EQ(b.nrmask, 1);
-	KT_ASSERT_EQ(b.rmask[0].recno, 2);
-	KT_ASSERT_EQ(b.rmask[0].ops, OB_OP_READ);
+	KT_ASSERT(b != NULL);
+	if ( b != NULL ) {
+		KT_ASSERT_EQ(ts_uuid_cmp(&a->owner, &b->owner), 0);
+		KT_ASSERT_EQ(ts_uuid_cmp(&a->group, &b->group), 0);
+		KT_ASSERT_EQ(b->mode, 0640);
+		KT_ASSERT_EQ(b->attr, OB_A_PERM);
+		KT_ASSERT_EQ(b->nacl, 1);
+		KT_ASSERT_EQ(b->acl[0].ops, OB_OP_READ | OB_OP_ATRWR);
+		KT_ASSERT_EQ(b->nrmask, 1);
+		KT_ASSERT_EQ(OB_PRT_RMASK(b)[0].recno, 2);
+		KT_ASSERT_EQ(OB_PRT_RMASK(b)[0].ops, OB_OP_READ);
+		Kfree(b);
+		b = NULL;
+	}
+
+	/* many: every entry and every limit written, read back, and the last of each heeded */
+	m = knl_ob_prt_room(a, KT_ACL_MANY, KT_RMASK_MANY);
+	KT_ASSERT(m != NULL);
+	if ( m != NULL ) {
+		for ( i = 0; i < KT_ACL_MANY; i++ ) {
+			m->acl[i].kind = OB_ACE_USER;
+			make_uuid(&m->acl[i].who, 0x100 + i);
+			m->acl[i].ops = ( i == KT_ACL_MANY - 1 ) ? OB_OP_ATRWR : OB_OP_ATRRD;
+		}
+		for ( i = 0; i < KT_RMASK_MANY; i++ ) {
+			OB_PRT_RMASK(m)[i].recno = 10 + i;
+			OB_PRT_RMASK(m)[i].ops = OB_OP_READ;
+		}
+		OB_PRT_RMASK(m)[KT_RMASK_MANY - 1].ops = 0;
+		len = knl_ob_prt_store(&j, len, &cap, m);
+		KT_ASSERT(len > 0);
+		KT_ASSERT_ER(knl_ob_prt_parse(j, len, &b), E_OK);
+		KT_ASSERT(b != NULL);
+		if ( b != NULL ) {
+			KT_ASSERT_EQ(b->nacl, KT_ACL_MANY);
+			KT_ASSERT_EQ(b->nrmask, KT_RMASK_MANY);
+			KT_ASSERT_EQ(ts_uuid_cmp(&b->acl[KT_ACL_MANY - 1].who, &m->acl[KT_ACL_MANY - 1].who), 0);
+			KT_ASSERT_EQ(OB_PRT_RMASK(b)[KT_RMASK_MANY - 1].recno, 10 + KT_RMASK_MANY - 1);
+			knl_memset(&who, 0, sizeof(who));
+			who.user = m->acl[KT_ACL_MANY - 1].who;
+			/* the 40th entry gives what it says */
+			KT_ASSERT(( knl_ob_permit(&who, b, -1) & OB_OP_ATRWR ) != 0);
+			/* the 20th limit takes the record away from its owner */
+			knl_memset(&who, 0, sizeof(who));
+			who.user = b->owner;
+			KT_ASSERT_EQ(knl_ob_permit(&who, b, 10 + KT_RMASK_MANY - 1) & OB_OP_READ, 0);
+			KT_ASSERT(( knl_ob_permit(&who, b, 10) & OB_OP_READ ) != 0);
+			tm_printf((UB *)"  %d entries and %d limits: %d bytes of metadata\n",
+				  KT_ACL_MANY, KT_RMASK_MANY, len);
+			Kfree(b);
+		}
+		Kfree(m);
+	} else {
+		Kfree(a);
+	}
 	Kfree(j);
 }
 
@@ -403,7 +462,8 @@ LOCAL void test_file( void )
 {
 	T_OBCRE	c;
 	T_OBREF	r;
-	T_OBPRT	p;
+	static UD	p_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*p = (T_OBPRT *)p_b;
 	T_OBREC	rec[4];
 	TS_UUID	u;
 	UB	*buf;
@@ -412,7 +472,7 @@ LOCAL void test_file( void )
 	ID	key;
 
 	if ( ob_att_vol(STORE, 0) < E_OK ) KT_SKIP("no file system for the store");
-	buf = (UB *)Kmalloc(OB_META_MAX);
+	buf = (UB *)Kmalloc(KT_META_ROOM);
 	if ( buf == NULL ) KT_SKIP("no memory");
 	store_up = TRUE;
 
@@ -427,9 +487,9 @@ LOCAL void test_file( void )
 	KT_ASSERT_EQ(r.name[0], 'o');
 
 	/* made by the system: its owner, rw-r--r-- */
-	KT_ASSERT_ER(ob_get_prt(&u, &p), E_OK);
-	KT_ASSERT_EQ(ts_uuid_cmp(&p.owner, &ob_user_system), 0);
-	KT_ASSERT_EQ(p.mode, 0644);
+	KT_ASSERT_ER(ob_get_prt(&u, p, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT_EQ(ts_uuid_cmp(&p->owner, &ob_user_system), 0);
+	KT_ASSERT_EQ(p->mode, 0644);
 
 	key = ob_opn_obj(&u, OB_OP_R | OB_OP_W);
 	KT_ASSERT(key > 0);
@@ -445,7 +505,7 @@ LOCAL void test_file( void )
 	KT_ASSERT_EQ(rec[0].size, 6);
 	KT_ASSERT_EQ(rec[1].rt, OB_RT_PROG);
 	KT_ASSERT_EQ(rec[1].sub, 355);
-	KT_ASSERT_ER(ob_get_atr(key, buf, OB_META_MAX - 1, &asz), E_OK);
+	KT_ASSERT_ER(ob_get_atr(key, buf, KT_META_ROOM - 1, &asz), E_OK);
 	KT_ASSERT(has(buf, (INT)asz, "\"records\""));
 	KT_ASSERT(has(buf, (INT)asz, "\"access\""));
 
@@ -468,8 +528,8 @@ LOCAL void test_file( void )
 		ID	k2 = ob_dup_key(key, OB_OP_ATRWR | OB_OP_ATRRD, 0);
 
 		KT_ASSERT_ER(ob_set_atr(k2, (CONST UB *)nw, s_len(nw)), E_OK);
-		KT_ASSERT_ER(ob_get_prt(&u, &p), E_OK);
-		KT_ASSERT_EQ(p.mode, 0644);
+		KT_ASSERT_ER(ob_get_prt(&u, p, KT_PRT_SIZE, NULL), E_OK);
+		KT_ASSERT_EQ(p->mode, 0644);
 		KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
 		KT_ASSERT_EQ(r.name[0], 'r');
 		KT_ASSERT_ER(ob_cls_obj(k2), E_OK);
@@ -479,9 +539,14 @@ LOCAL void test_file( void )
 	KT_ASSERT_ER(ob_cls_obj(key), E_OK);
 
 	/* no writing: even the system cannot open it to write */
-	p.attr = OB_A_RONLY;
-	KT_ASSERT_ER(ob_set_prt(&u, &p), E_OK);
+	p->attr = OB_A_RONLY;
+	KT_ASSERT_ER(ob_set_prt(&u, p), E_OK);
 	KT_ASSERT_EQ(ob_opn_obj(&u, OB_OP_WRITE), E_OACV);
+	/* asked without opening: the same answer as the open, and no key */
+	KT_ASSERT_ER(ob_acc_obj(&u, OB_OP_WRITE), E_OACV);
+	KT_ASSERT_ER(ob_acc_obj(&u, OB_OP_READ | OB_OP_ATRRD), E_OK);
+	KT_ASSERT_ER(ob_acc_obj(&u, 0), E_OK);
+	KT_ASSERT_ER(ob_acc_obj(&u, 0x10000), E_PAR);
 	key = ob_opn_obj(&u, OB_OP_READ);
 	KT_ASSERT(key > 0);
 	KT_ASSERT_ER(ob_cls_obj(key), E_OK);
@@ -494,13 +559,14 @@ LOCAL void test_file( void )
 	KT_ASSERT_ER(ob_unl_obj(&u), E_OK);
 
 	/* no deleting */
-	p.attr = OB_A_PERM;
-	KT_ASSERT_ER(ob_set_prt(&u, &p), E_OK);
+	p->attr = OB_A_PERM;
+	KT_ASSERT_ER(ob_set_prt(&u, p), E_OK);
 	KT_ASSERT_ER(ob_del_obj(&u), E_OACV);
-	p.attr = 0;
-	KT_ASSERT_ER(ob_set_prt(&u, &p), E_OK);
+	p->attr = 0;
+	KT_ASSERT_ER(ob_set_prt(&u, p), E_OK);
 	KT_ASSERT_ER(ob_del_obj(&u), E_OK);
 	KT_ASSERT_ER(ob_ref_obj(&u, &r), E_NOEXS);
+	KT_ASSERT_ER(ob_acc_obj(&u, OB_OP_READ), E_NOEXS);
 
 	/* deleting it took its resources with it */
 	{
@@ -518,6 +584,89 @@ LOCAL void test_file( void )
 		KT_ASSERT_ER(fs_stat(path, &st), EX_NOENT);
 	}
 	Kfree(buf);
+}
+
+/*
+ * Metadata longer than any fixed room: 40000 bytes written, read back
+ * whole (read again with more room while it fills the room), and one
+ * member of it read by its path (ob_get_atv), whose whole length is told.
+ */
+#define KT_META_LONG	40000
+
+LOCAL void test_meta_long( void )
+{
+	T_OBCRE	c;
+	TS_UUID	u;
+	UB	*m, *all = NULL, small[16];
+	SZ	asz = 0;
+	INT	n, i, len;
+	ID	key;
+	CONST char *head = "{\"name\":\"long\",\"tessronos\":{\"program\":{\"kind\":\"app\",\"posix\":true},\"note\":\"";
+	CONST char *tail = "\"}}";
+
+	if ( !store_up ) KT_SKIP("no store");
+	{
+		/* the store is on the FAT volume the suites before may have filled with pictures */
+		T_FSSTAT	fst;
+
+		if ( fs_statvfs(STORE, &fst) >= EX_OK && fst.bfree * fst.bsize < (UD)4 * KT_META_LONG ) {
+			KT_SKIP("no room on the store's volume");
+		}
+	}
+	m = (UB *)Kmalloc(KT_META_LONG + 64);
+	if ( m == NULL ) KT_SKIP("no memory");
+	n = s_len(head);
+	knl_memcpy(m, head, n);
+	for ( ; n < KT_META_LONG - 3; n++ ) m[n] = (UB)( 'a' + n % 26 );
+	knl_memcpy(m + n, tail, 3);
+	n += 3;
+
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.json = m;
+	c.jsonsz = n;
+	KT_ASSERT_ER(ob_cre_obj(&c, &u), E_OK);
+	key = ob_opn_obj(&u, OB_OP_R | OB_OP_ATRRD | OB_OP_ATRWR);
+	KT_ASSERT(key > 0);
+	if ( key <= 0 ) {
+		Kfree(m);
+		return;
+	}
+	/* a small room: its start, the room filled (a reader reads again with more) */
+	KT_ASSERT_ER(ob_get_atr(key, small, sizeof(small), &asz), E_OK);
+	KT_ASSERT_EQ(asz, (SZ)sizeof(small));
+	KT_ASSERT_EQ(small[0], '{');
+	/* whole, the end as written */
+	len = knl_ob_atr_all(key, 0, &all, NULL);
+	KT_ASSERT(len > KT_META_LONG);
+	if ( len > 0 && all != NULL ) {
+		KT_ASSERT(has(all, len, "\"name\":\"long\""));
+		for ( i = len - 1; i > 0 && all[i] != '"'; i-- ) ;
+		KT_ASSERT(i > KT_META_LONG - 8 && all[i - 1] >= 'a' && all[i - 1] <= 'z');
+		Kfree(all);
+	}
+	/* one member by its path */
+	KT_ASSERT_ER(ob_get_atv(key, (CONST UB *)"tessronos.program.kind", small, sizeof(small), &asz), E_OK);
+	KT_ASSERT(asz == 5 && small[0] == '"' && small[1] == 'a' && small[4] == '"');
+	KT_ASSERT_ER(ob_get_atv(key, (CONST UB *)"tessronos.program.posix", NULL, 0, &asz), E_OK);
+	KT_ASSERT_EQ(asz, 4);
+	KT_ASSERT_ER(ob_get_atv(key, (CONST UB *)"tessronos.note", small, 4, &asz), E_OK);
+	KT_ASSERT(asz > KT_META_LONG - 200);
+	KT_ASSERT_ER(ob_get_atv(key, (CONST UB *)"tessronos.nothing", small, sizeof(small), &asz), E_NOEXS);
+	KT_ASSERT_ER(ob_get_atv(key, (CONST UB *)"name.more", small, sizeof(small), &asz), E_NOEXS);
+	/* written again, longer, and read back whole */
+	m[n - 4] = 'Z';
+	KT_ASSERT_ER(ob_set_atr(key, m, n), E_OK);
+	len = knl_ob_atr_all(key, 0, &all, NULL);
+	KT_ASSERT(len > KT_META_LONG);
+	if ( all != NULL ) {
+		KT_ASSERT(has(all, len, "Z\""));	/* the protection may follow it */
+		Kfree(all);
+	}
+	KT_ASSERT_ER(ob_cls_obj(key), E_OK);
+	KT_ASSERT_ER(ob_del_obj(&u), E_OK);
+	Kfree(m);
 }
 
 /* ---------------------------------------------------------------- listing */
@@ -629,10 +778,10 @@ LOCAL void test_device( void )
 		if ( key <= 0 ) {
 			KT_SKIP("no volume for the device box");
 		}
-		m = (UB *)Kmalloc(OB_ATR_MAX);
+		m = (UB *)Kmalloc(KT_META_ROOM);
 		KT_ASSERT(m != NULL);
 		if ( m != NULL ) {
-			KT_ASSERT_ER(ob_get_atr(key, m, OB_ATR_MAX, &ms), E_OK);
+			KT_ASSERT_ER(ob_get_atr(key, m, KT_META_ROOM, &ms), E_OK);
 			KT_ASSERT(has(m, (INT)ms, "\"devices\""));
 			if ( found && ts_uuid_to_str(&disk, us, sizeof(us)) >= E_OK ) {
 				KT_ASSERT(has(m, (INT)ms, us));
@@ -755,7 +904,8 @@ LOCAL void test_user( void )
 {
 	T_OBCRE	c;
 	T_OBCRD	crd;
-	T_OBPRT	p;
+	static UD	p_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*p = (T_OBPRT *)p_b;
 	TS_UUID	u, forged;
 	UB	meta[256];
 	INT	n = 0;
@@ -789,9 +939,9 @@ LOCAL void test_user( void )
 	KT_ASSERT_ER(ob_login(&u, (CONST UB *)"secret"), E_OBJ);
 
 	/* a user object someone else made does not count */
-	knl_ob_prt_default(&p, NULL);
-	make_uuid(&p.owner, 0x70);
-	c.prt = &p;
+	knl_ob_prt_default(p, NULL);
+	make_uuid(&p->owner, 0x70);
+	c.prt = p;
 	KT_ASSERT_ER(ob_cre_obj(&c, &forged), E_OK);
 	KT_ASSERT_ER(ob_set_pwd(&forged, (CONST UB *)"x"), E_OK);
 	KT_ASSERT_ER(knl_ob_login_check(&forged, (CONST UB *)"x", &crd), E_OACV);
@@ -800,10 +950,10 @@ LOCAL void test_user( void )
 	{
 		ID	key = ob_opn_obj(&u, OB_OP_ATRRD);
 		SZ	asz = 0;
-		UB	*j = (UB *)Kmalloc(OB_META_MAX);
+		UB	*j = (UB *)Kmalloc(KT_META_ROOM);
 
 		if ( key > 0 && j != NULL ) {
-			KT_ASSERT_ER(ob_get_atr(key, j, OB_META_MAX - 1, &asz), E_OK);
+			KT_ASSERT_ER(ob_get_atr(key, j, KT_META_ROOM - 1, &asz), E_OK);
 			KT_ASSERT(has(j, (INT)asz, "\"hash\""));
 			KT_ASSERT(!has(j, (INT)asz, "secret"));
 		}
@@ -1204,7 +1354,8 @@ LOCAL void test_window( void )
 {
 	T_OBCRE		c;
 	T_OBREF		r;
-	T_OBPRT		p;
+	static UD	p_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*p = (T_OBPRT *)p_b;
 	T_OBWPOS	wp;
 	T_OBNTF		req;
 	T_OBNTM		m;
@@ -1232,12 +1383,12 @@ LOCAL void test_window( void )
 	KT_ASSERT_ER(ob_ref_obj(&w, &r), E_OK);
 	KT_ASSERT_EQ(r.type, OB_T_WINDOW);
 	KT_ASSERT_EQ(r.sub, OB_S_WINDOW);
-	KT_ASSERT_EQ(r.nrec, OB_WR_KIND + 2);		/* and the drop record, the bars */
+	KT_ASSERT_EQ(r.nrec, OB_WR_KIND + 3);		/* and the drop record, the bars, the candidates */
 	KT_ASSERT(( r.flags & OB_F_VOLATILE ) != 0);
 	KT_ASSERT(has(r.name, s_len((CONST char *)r.name), "ob window"));
-	KT_ASSERT_ER(ob_get_prt(&w, &p), E_OK);
-	KT_ASSERT_EQ(ts_uuid_cmp(&p.owner, &ob_user_system), 0);
-	KT_ASSERT_EQ(p.mode, 0644);			/* the creator's default was given */
+	KT_ASSERT_ER(ob_get_prt(&w, p, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT_EQ(ts_uuid_cmp(&p->owner, &ob_user_system), 0);
+	KT_ASSERT_EQ(p->mode, 0644);			/* the creator's default was given */
 
 	kw = ob_opn_obj(&w, OB_OP_ALL);
 	KT_ASSERT(kw > 0);
@@ -1267,8 +1418,9 @@ LOCAL void test_window( void )
 	KT_ASSERT_EQ(asz, sizeof(ob_win_draw) - 1);
 	KT_ASSERT(has(buf, (INT)asz, "<p>window</p>"));
 	KT_ASSERT_ER(ob_lst_rec(kw, rec, 8, &cnt), E_OK);
-	KT_ASSERT_EQ(cnt, OB_WR_KIND + 2);
+	KT_ASSERT_EQ(cnt, OB_WR_KIND + 3);
 	KT_ASSERT_EQ(rec[OB_WR_BARS].size, sizeof(T_OBWBARS));
+	KT_ASSERT_EQ(rec[OB_WR_CAND].size, 0);		/* written only */
 	KT_ASSERT_EQ(rec[OB_WR_DROP].size, 0);		/* nothing dropped yet */
 	KT_ASSERT_EQ(rec[OB_WR_DRAW].rt, OB_RT_TAD);
 	KT_ASSERT_EQ(rec[OB_WR_DRAW].size, sizeof(ob_win_draw) - 1);
@@ -1301,7 +1453,7 @@ LOCAL void test_window( void )
 	/* links dropped on it: refused while nobody asked for drops */
 	{
 		T_OBDROPV	dv[2];
-		T_OBDROP	*dr = (T_OBDROP *)Kmalloc(sizeof(T_OBDROP));
+		T_OBDROP	*dr = (T_OBDROP *)Kmalloc(OB_DROP_SIZE(KT_DROP_MANY));
 		T_OBDRANS	an;
 		T_OBNTF		rq;
 		T_WMWIN		ww;
@@ -1326,8 +1478,8 @@ LOCAL void test_window( void )
 		KT_ASSERT_EQ(m.y, 9);
 		if ( dr != NULL ) {
 			/* the record: the drop, the kernel's grants none (it needs none) */
-			KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_DROP, 0, dr, sizeof(*dr), &asz), E_OK);
-			KT_ASSERT_EQ(asz, sizeof(*dr) - OB_DROP_TEXT - sizeof(T_OBDROPV) * ( OB_DROP_MAX - 2 ));
+			KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_DROP, 0, dr, OB_DROP_SIZE(KT_DROP_MANY), &asz), E_OK);
+			KT_ASSERT_EQ(asz, OB_DROP_SIZE(2));
 			KT_ASSERT_EQ(dr->n, 2);
 			KT_ASSERT_EQ(dr->x, 7);
 			KT_ASSERT_EQ(ts_uuid_cmp(&dr->v[1].target, &ch), 0);
@@ -1341,6 +1493,49 @@ LOCAL void test_window( void )
 			an.seq = dr->seq;
 			KT_ASSERT_ER(ob_wri_rec(kw, OB_WR_DROP, 0, &an, sizeof(an), &asz), E_OK);
 			KT_ASSERT_ER(ob_wri_rec(kw, OB_WR_DROP, 0, &an, sizeof(an), &asz), E_OBJ);
+		}
+		/*
+		 * more links than a drop once held (16): every one is in the
+		 * record, in order, and a read with room for less has the first
+		 */
+		if ( dr != NULL ) {
+			T_OBDROPV	*many = (T_OBDROPV *)Kcalloc(KT_DROP_MANY, sizeof(T_OBDROPV));
+			T_OBNTM		m2;
+			INT		k;
+			ER		er2;
+
+			KT_ASSERT(many != NULL);
+			for ( k = 0; many != NULL && k < KT_DROP_MANY; k++ ) {
+				many[k].target = ( k % 2 ) ? ch : w;
+				many[k].left = k;
+				many[k].name[0] = (UB)( 'A' + k % 26 );
+			}
+			if ( many != NULL ) {
+				KT_ASSERT_ER(wm_obj_drop(wid, ww.work.left + 3, ww.work.top + 4, 0, NULL, many, KT_DROP_MANY), E_OK);
+				do {
+					er2 = take(port, &m2);		/* past the answers' changes */
+				} while ( er2 >= E_OK && m2.event != OB_E_DROP );
+				KT_ASSERT_ER(er2, E_OK);
+				KT_ASSERT_EQ(m2.event, OB_E_DROP);
+				KT_ASSERT_EQ(m2.code, KT_DROP_MANY);
+				KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_DROP, 0, dr, OB_DROP_SIZE(KT_DROP_MANY), &asz), E_OK);
+				KT_ASSERT_EQ(asz, OB_DROP_SIZE(KT_DROP_MANY));
+				KT_ASSERT_EQ(dr->n, KT_DROP_MANY);
+				KT_ASSERT_EQ(dr->v[KT_DROP_MANY - 1].left, KT_DROP_MANY - 1);
+				KT_ASSERT_EQ(dr->v[KT_DROP_MANY - 1].name[0], (UB)( 'A' + ( KT_DROP_MANY - 1 ) % 26 ));
+				KT_ASSERT_EQ(ts_uuid_cmp(&dr->v[KT_DROP_MANY - 1].target, ( ( KT_DROP_MANY - 1 ) % 2 ) ? &ch : &w), 0);
+				KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_DROP, 0, dr, OB_DROP_SIZE(3), &asz), E_OK);
+				KT_ASSERT_EQ(asz, OB_DROP_SIZE(3));
+				KT_ASSERT_EQ(dr->n, KT_DROP_MANY);
+				tm_printf((UB *)"  a drop of %d links: %d bytes\n", KT_DROP_MANY, (INT)OB_DROP_SIZE(KT_DROP_MANY));
+				knl_memset(&an, 0, sizeof(an));
+				an.seq = dr->seq;
+				an.answer = OB_DR_REFUSE;
+				KT_ASSERT_ER(ob_wri_rec(kw, OB_WR_DROP, 0, &an, sizeof(an), &asz), E_OK);
+				Kfree(many);
+			}
+		}
+		if ( dr != NULL ) {
 			Kfree(dr);
 		}
 		/* a window is on no volume; the first volume is there to be asked of */
@@ -1483,7 +1678,7 @@ LOCAL void test_window( void )
 
 	/* a menu: an item a record, its state in the record's subtype */
 	{
-		T_WMMENU	*md = (T_WMMENU *)Kmalloc(sizeof(T_WMMENU));
+		T_WMMENU	*md = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(8));
 
 		if ( md != NULL ) {
 			knl_memset(md, 0, sizeof(*md));
@@ -2014,6 +2209,17 @@ LOCAL BOOL mounted_under( CONST UB *name )
 	return yes;
 }
 
+/* Whether the disk name is the one the system volume is on (CNF_OB_SYSVOL), whole or a partition */
+LOCAL BOOL on_sysvol_disk( CONST UB *name )
+{
+	CONST char	*sv = CNF_OB_SYSVOL;
+	INT		k;
+
+	for ( k = 0; name[k] != 0 && name[k] == (UB)sv[k] && ( name[k] < '0' || name[k] > '9' ); k++ ) ;
+	return ( name[k] == 0 || ( name[k] >= '0' && name[k] <= '9' ) )
+	    && ( sv[k] == 0 || ( sv[k] >= '0' && sv[k] <= '9' ) );
+}
+
 LOCAL void test_media( void )
 {
 	TS_UUID		list[16], ch, dev;
@@ -2026,8 +2232,10 @@ LOCAL void test_media( void )
 
 	KT_ASSERT_ER(ob_lst_obj(OB_T_DEVICE, OB_S_DISK, NULL, list, 16, &cnt), E_OK);
 	for ( i = 0; i < cnt && !found; i++ ) {
-		/* a medium said to go takes its mounts with it: one with none (design 12.2.3) */
-		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_DISK && !mounted_under(r.name) ) {
+		/* a medium said to go takes its mounts with it: one with none (design 12.2.3),
+		   and not the system volume's, which would go with it */
+		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_DISK && !mounted_under(r.name)
+		  && !on_sysvol_disk(r.name) ) {
 			dev = list[i];
 			found = TRUE;
 		}
@@ -2443,7 +2651,12 @@ LOCAL void test_icon( void )
 LOCAL void test_domain( void )
 {
 	T_OBCRE	c;
-	T_OBPRT	p, d, got;
+	static UD	p_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*p = (T_OBPRT *)p_b;
+	static UD	d_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*d = (T_OBPRT *)d_b;
+	static UD	got_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*got = (T_OBPRT *)got_b;
 	T_OBCRD	user;
 	T_OBREF	r;
 	TS_UUID	u, *list;
@@ -2458,45 +2671,45 @@ LOCAL void test_domain( void )
 	make_uuid(&user.grp[0], 0x60);
 
 	/* an object anyone may read and write */
-	knl_memset(&p, 0, sizeof(p));
-	p.owner = ob_user_system;
-	p.group = ob_group_admin;
-	p.mode = 0666;
+	knl_memset(p, 0, KT_PRT_SIZE);
+	p->owner = ob_user_system;
+	p->group = ob_group_admin;
+	p->mode = 0666;
 	knl_memset(&c, 0, sizeof(c));
 	c.type = OB_T_STORAGE;
 	c.sub = OB_S_FILE;
 	c.vol = STORE;
 	c.name = (CONST UB *)"in a domain";
-	c.prt = &p;
+	c.prt = p;
 	(void)ob_set_dom(STORE, NULL);
 	KT_ASSERT_ER(ob_cre_obj(&c, &u), E_OK);
 	ops = knl_ob_permit_on(&u, &user);
 	KT_ASSERT_EQ(ops & ( OB_OP_READ | OB_OP_WRITE ), OB_OP_READ | OB_OP_WRITE);
-	KT_ASSERT_ER(ob_get_dom(STORE, &got), E_NOEXS);
+	KT_ASSERT_ER(ob_get_dom(STORE, got, KT_PRT_SIZE, NULL), E_NOEXS);
 
 	/* a domain only its owner may enter: the user may do nothing */
-	knl_memset(&d, 0, sizeof(d));
-	d.owner = ob_user_system;
-	d.group = ob_group_admin;
-	d.mode = 0700;
-	KT_ASSERT_ER(ob_set_dom(STORE, &d), E_OK);
-	KT_ASSERT_ER(ob_get_dom(STORE, &got), E_OK);
-	KT_ASSERT_EQ(got.mode, 0700);
+	knl_memset(d, 0, KT_PRT_SIZE);
+	d->owner = ob_user_system;
+	d->group = ob_group_admin;
+	d->mode = 0700;
+	KT_ASSERT_ER(ob_set_dom(STORE, d), E_OK);
+	KT_ASSERT_ER(ob_get_dom(STORE, got, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT_EQ(got->mode, 0700);
 	KT_ASSERT_EQ(knl_ob_permit_on(&u, &user), 0);
 	KT_ASSERT_EQ(knl_ob_permit_on(&u, &knl_ob_crd_system), OB_OP_ALL);
 
 	/* one that lets others read: reading, and no more */
-	d.mode = 0704;
-	KT_ASSERT_ER(ob_set_dom(STORE, &d), E_OK);
+	d->mode = 0704;
+	KT_ASSERT_ER(ob_set_dom(STORE, d), E_OK);
 	ops = knl_ob_permit_on(&u, &user);
 	KT_ASSERT(( ops & OB_OP_READ ) != 0);
 	KT_ASSERT_EQ(ops & OB_OP_WRITE, 0);
 
 	/* an owner inside it keeps the right to change the protection */
-	d.mode = 0700;
-	KT_ASSERT_ER(ob_set_dom(STORE, &d), E_OK);
-	p.owner = user.user;
-	KT_ASSERT_ER(ob_set_prt(&u, &p), E_OK);
+	d->mode = 0700;
+	KT_ASSERT_ER(ob_set_dom(STORE, d), E_OK);
+	p->owner = user.user;
+	KT_ASSERT_ER(ob_set_prt(&u, p), E_OK);
 	KT_ASSERT_EQ(knl_ob_permit_on(&u, &user), OB_OP_PROT);
 
 	/* the domain itself is no object anyone sees */
@@ -2514,12 +2727,12 @@ LOCAL void test_domain( void )
 	/* it is kept on the volume: attached again, it is there again */
 	KT_ASSERT_ER(ob_det_vol(STORE), E_OK);
 	KT_ASSERT_ER(ob_att_vol(STORE, 0), E_OK);
-	KT_ASSERT_ER(ob_get_dom(STORE, &got), E_OK);
-	KT_ASSERT_EQ(got.mode, 0700);
+	KT_ASSERT_ER(ob_get_dom(STORE, got, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT_EQ(got->mode, 0700);
 
 	/* taken away: the object's own protection is all there is */
 	KT_ASSERT_ER(ob_set_dom(STORE, NULL), E_OK);
-	KT_ASSERT_ER(ob_get_dom(STORE, &got), E_NOEXS);
+	KT_ASSERT_ER(ob_get_dom(STORE, got, KT_PRT_SIZE, NULL), E_NOEXS);
 	ops = knl_ob_permit_on(&u, &user);
 	KT_ASSERT(( ops & OB_OP_WRITE ) != 0);
 
@@ -2552,11 +2765,14 @@ LOCAL void test_plugin( void )
 	CONST char	*fj =
 		"{\"id\":\"basic-figure-editor\",\"name\":\"基本図形編集\",\"type\":\"base\"}";
 	CONST DTPROG	*pp;
-	TS_UUID		prog, again, base;
+	TS_UUID		prog, again, base, brought, dir, fdir;
 	T_OBREF		r;
+	T_XFUFS		*fs;
+	T_XFUTREE	t;
 	UB		*rec, names[64];
 	SZ		size = 0;
 	INT		cnt = 0;
+	UINT		how = 0;
 	ID		key;
 
 	if ( fs_open("/boot/HELLO.ELF", O_RDONLY) < 0 ) KT_SKIP("no file system");
@@ -2569,20 +2785,30 @@ LOCAL void test_plugin( void )
 	KT_ASSERT_ER(put_file("/boot/PLUGFIG/plugin.json", fj, s_len(fj)), E_OK);
 
 	(void)dt_prog_start();			/* the program box it goes into */
+	KT_ASSERT(dt_prog_find((CONST UB *)"ktest-plugin") == NULL);	/* nothing taken in by itself */
 
-	/* taken in: a program the registry knows by its id, with its template */
-	KT_ASSERT_ER(dt_plugin_import("/boot/PLUGTEST", &prog), E_OK);
+	/* the directories as ファイル変換 takes them in: a figure of their files */
+	fs = (T_XFUFS *)Kmalloc(sizeof(T_XFUFS));
+	KT_ASSERT(fs != NULL);
+	if ( fs == NULL ) return;
+	KT_ASSERT_ER(xfu_fs_tree(fs, "/boot", &t), E_OK);
+	KT_ASSERT_ER(xfu_import(&t, (CONST UB *)"PLUGTEST", NULL, NULL, &dir), E_OK);
+	KT_ASSERT_ER(xfu_import(&t, (CONST UB *)"PLUGFIG", NULL, NULL, &fdir), E_OK);
+	Kfree(fs);
+
+	/* installed: a program the registry knows by its id, with a template of the system's */
+	KT_ASSERT_ER(dt_pkg_install(&dir, FALSE, &prog, &how), E_OK);
+	KT_ASSERT_EQ(how, DT_HOW_NEW);
+	KT_ASSERT_ER(ts_str_to_uuid(PLUG_BASE, &brought), E_OK);
 	pp = dt_prog_find((CONST UB *)"ktest-plugin");
 	KT_ASSERT(pp != NULL);
-	if ( pp != NULL ) {
-		KT_ASSERT_EQ(ts_uuid_cmp(&pp->uuid, &prog), 0);
-		KT_ASSERT_EQ(pp->kind, DT_PK_ACCESSORY);
-		KT_ASSERT(!pp->builtin);
-		KT_ASSERT_EQ(pp->nbase, 1);
-		KT_ASSERT_ER(ts_str_to_uuid(PLUG_BASE, &base), E_OK);
-		KT_ASSERT_EQ(ts_uuid_cmp(&pp->base[0], &base), 0);
-	}
-	KT_ASSERT_ER(ts_str_to_uuid(PLUG_BASE, &base), E_OK);
+	if ( pp == NULL ) return;
+	KT_ASSERT_EQ(ts_uuid_cmp(&pp->uuid, &prog), 0);
+	KT_ASSERT_EQ(pp->kind, DT_PK_ACCESSORY);
+	KT_ASSERT(!pp->builtin);
+	KT_ASSERT_EQ(pp->nbase, 1);
+	base = pp->base[0];
+	KT_ASSERT(ts_uuid_cmp(&base, &brought) != 0);		/* a copy, not what the person has */
 	KT_ASSERT_ER(ob_ref_obj(&base, &r), E_OK);
 	rec = om_obj_record(&base, 0, &size);
 	KT_ASSERT(rec != NULL && has(rec, (INT)size, "<p>base</p>"));
@@ -2596,18 +2822,20 @@ LOCAL void test_plugin( void )
 		ob_cls_obj(key);
 	}
 
-	/* taken in again: the same program, nothing made twice */
-	KT_ASSERT_ER(dt_plugin_import("/boot/PLUGTEST", &again), E_OK);
+	/* installed again: refused unless asked to all the same, then the program replaced */
+	KT_ASSERT_ER(dt_pkg_install(&dir, FALSE, &again, &how), E_LIMIT);
 	KT_ASSERT_EQ(ts_uuid_cmp(&again, &prog), 0);
+	KT_ASSERT_ER(dt_pkg_install(&dir, TRUE, &again, &how), E_OK);
+	KT_ASSERT_EQ(how, DT_HOW_UPDATED);
+	KT_ASSERT(ts_uuid_cmp(&again, &prog) != 0);
+	KT_ASSERT(ob_ref_obj(&prog, &r) < E_OK);			/* the one it replaced, gone */
+	KT_ASSERT(ob_ref_obj(&base, &r) < E_OK);			/* and its template */
 
-	/* one the desktop carries itself: its own program answers */
-	KT_ASSERT_ER(dt_plugin_import("/boot/PLUGFIG", &again), E_OK);
-	pp = dt_prog_find((CONST UB *)"basic-figure-editor");
-	KT_ASSERT(pp != NULL && pp->builtin);
-	if ( pp != NULL ) {
-		KT_ASSERT_EQ(ts_uuid_cmp(&again, &pp->uuid), 0);
-	}
-	KT_ASSERT_ER(dt_plugin_import("/boot/NOPLUGIN", &again), E_NOEXS);
+	/* one the desktop carries itself is not replaced; an object that is no plugin is refused */
+	KT_ASSERT_ER(dt_pkg_install(&fdir, TRUE, &prog, &how), E_PAR);
+	KT_ASSERT_ER(dt_pkg_install(&brought, FALSE, &prog, &how), E_OBJ);
+	KT_ASSERT_ER(dt_prog_remove(&again), E_OK);
+	KT_ASSERT(dt_prog_find((CONST UB *)"ktest-plugin") == NULL);
 }
 
 /* ---------------------------------------------------------------- the system's faces and pictures */
@@ -2642,11 +2870,12 @@ LOCAL void test_sysres( void )
 
 	/* each face an object of the system's, made from the file it names */
 	for ( n = 0; n < before && n < 40; n++ ) {
-		T_OBPRT	prt;
+	static UD	prt_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*prt = (T_OBPRT *)prt_b;
 		UB	name[64];
 
-		KT_ASSERT_ER(ob_get_prt(&ids[n], &prt), E_OK);
-		KT_ASSERT_EQ(ts_uuid_cmp(&prt.owner, &ob_user_system), 0);
+		KT_ASSERT_ER(ob_get_prt(&ids[n], prt, KT_PRT_SIZE, NULL), E_OK);
+		KT_ASSERT_EQ(ts_uuid_cmp(&prt->owner, &ob_user_system), 0);
 		KT_ASSERT_ER(xf_name(&ids[n], name, sizeof(name)), E_OK);
 		KT_ASSERT_EQ(xf_data_rec(&ids[n]), 1);
 	}
@@ -2812,7 +3041,8 @@ LOCAL void test_sound_object( void )
 {
 	TS_UUID	list[32], snd;
 	T_OBREF	r;
-	T_OBPRT	p;
+	static UD	p_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*p = (T_OBPRT *)p_b;
 	T_OBREC	rec[OB_SND_NREC + 2];
 	UB	buf[512], pcm[1024];
 	SZ	asz = 0;
@@ -2832,8 +3062,8 @@ LOCAL void test_sound_object( void )
 	KT_ASSERT_EQ(r.nrec, OB_SND_NREC);
 
 	/* everyone's to play: each opening is a channel of its own */
-	KT_ASSERT_ER(ob_get_prt(&snd, &p), E_OK);
-	KT_ASSERT_EQ(p.mode, 0666);
+	KT_ASSERT_ER(ob_get_prt(&snd, p, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT_EQ(p->mode, 0666);
 
 	key = ob_opn_obj(&snd, OB_OP_R | OB_OP_WRITE);
 	KT_ASSERT(key > 0);
@@ -3270,6 +3500,7 @@ EXPORT void ktest_ob( void )
 	KT_RUN(test_channel);
 	KT_RUN(test_keys);
 	KT_RUN(test_file);
+	KT_RUN(test_meta_long);
 	KT_RUN(test_list);
 	KT_RUN(test_device);
 	KT_RUN(test_process);

@@ -48,7 +48,10 @@ EXPORT void knl_tlb_flush_va( UBINT va )
  * the data cache lines cleaned to the point of unification, then the
  * instruction cache lines of the range invalidated. 'va' may be any
  * mapping of the memory (the linear map). CTR_EL0 says what is needed:
- * IDC and DIC drop the clean and the invalidation; an instruction cache
+ * IDC and DIC drop the clean and the invalidation, and the clean is not
+ * needed either when CLIDR_EL1 puts the point of unification before
+ * every cache level (LoUIS and LoUU 0) or names no level to the point
+ * of coherence (LoC 0) -- the Cortex-A76 has IDC clear and LoUU 0; an instruction cache
  * that is not physically indexed and tagged may hold the lines under
  * another address than the one given, and is invalidated whole. Both
  * kinds of maintenance by address reach the caches of all processors;
@@ -59,13 +62,53 @@ EXPORT void knl_tlb_flush_va( UBINT va )
 #define CTR_DIC			( 1UL << 29 )
 #define CTR_L1IP(c)		( ( (c) >> 14 ) & 3 )
 #define CTR_L1IP_PIPT		3
+#define CLIDR_LOUIS(c)		( ( (c) >> 21 ) & 7 )
+#define CLIDR_LOC(c)		( ( (c) >> 24 ) & 7 )
+#define CLIDR_LOUU(c)		( ( (c) >> 27 ) & 7 )
+
+/* CTR_EL0, IDC set when CLIDR_EL1 says the data cache need not be cleaned for the instruction side */
+LOCAL UD ctr_effective( void )
+{
+	UD	ctr, clidr;
+
+	Asm("mrs %0, ctr_el0" : "=r"(ctr));
+	if ( ( ctr & CTR_IDC ) == 0 ) {
+		Asm("mrs %0, clidr_el1" : "=r"(clidr));
+		if ( CLIDR_LOC(clidr) == 0 || ( CLIDR_LOUIS(clidr) == 0 && CLIDR_LOUU(clidr) == 0 ) ) {
+			ctr |= CTR_IDC;
+		}
+	}
+	return ctr;
+}
+
+/*
+ * Written instructions cleaned out of the data cache to the point of
+ * unification, where the instruction side fetches from, when CTR_EL0
+ * and CLIDR_EL1 say that is needed (ctr_effective: the Cortex-A72; not
+ * the Cortex-A76). The instruction caches are invalidated afterwards,
+ * for all of a program at once (knl_icache_sync_all).
+ */
+EXPORT void knl_dcache_clean_pou( UBINT va, UD size )
+{
+	UD	ctr, dline;
+	UBINT	p, end = va + size;
+
+	ctr = ctr_effective();
+	if ( ( ctr & CTR_IDC ) != 0 ) {
+		return;
+	}
+	dline = 4UL << ( ( ctr >> 16 ) & 0xf );
+	for ( p = va & ~( dline - 1 ); p < end; p += dline ) {
+		Asm("dc cvau, %0" :: "r"(p) : "memory");
+	}
+}
 
 EXPORT void knl_icache_sync( UBINT va, UD size )
 {
 	UD	ctr, dline, iline;
 	UBINT	p, end = va + size;
 
-	Asm("mrs %0, ctr_el0" : "=r"(ctr));
+	ctr = ctr_effective();
 	dline = 4UL << ( ( ctr >> 16 ) & 0xf );
 	iline = 4UL << ( ctr & 0xf );
 	if ( ( ctr & CTR_IDC ) == 0 ) {

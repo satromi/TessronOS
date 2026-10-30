@@ -220,9 +220,15 @@ LOCAL void gpu_bo_map( void )
 		KT_ASSERT_EQ(knl_pt_lookup(sp.l0_pa, va + i * 4096), knl_gpu_bo_page(bo, i));
 	}
 	e = knl_pt_entry(sp.l0_pa, va);
+#if defined(__x86_64__)
+	KT_ASSERT_EQ(e & ( PTE_PWT | PTE_PCD ), PTE_CACHE_WC);		/* write combined */
+	KT_ASSERT_EQ(e & ( PTE_US | PTE_RW ), PTE_US | PTE_RW);		/* the process writes it */
+	KT_ASSERT(( e & PTE_NX ) != 0);					/* and never runs it */
+#else
 	KT_ASSERT_EQ(e & PTE_ATTR(7), PTE_ATTR(MAIR_IDX_NORMAL_NC));	/* uncached */
 	KT_ASSERT_EQ(e & PTE_AP_RO_ALL, PTE_AP_RW_ALL);			/* the process writes it */
 	KT_ASSERT(( e & PTE_UXN ) != 0);				/* and never runs it */
+#endif
 	knl_gpu_bo_ref(bo, &bi);
 	KT_ASSERT_EQ(bi.uva, va);
 	KT_ASSERT_EQ(bi.refcnt, 2);					/* the mapping holds one */

@@ -36,6 +36,11 @@ ifeq ($(KTEST),1)
 SRCS += $(SRCS_KTEST_QEMU)
 endif
 
+# make WIFI=1: Raspberry Pi 5 の Wi-Fi の部分を入れ、ホストの無い機械で何も壊れないことと、
+# 基板の設定の取り出し(KTEST の群 wifinv)を確かめる(設計書 09章 9.6.8)。既定は入れない
+WIFI ?= 0
+include $(TOP)/build_make/wifi_arm.mk
+
 # QEMU 起動オプション(設計書 13.4.1)
 TEST_TMO     ?= 480
 QEMU_MACHINE ?= virt,gic-version=2

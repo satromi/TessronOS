@@ -22,17 +22,15 @@
  *	The keys go to a session of the system's かな漢字変換 in the input
  *	mode the message line shows: what it commits goes in at the caret,
  *	what it is still working on is drawn at the caret, each clause
- *	underlined and the one being converted turned over, with the
- *	candidates listed under it while they are chosen. In 英語 a letter
+ *	underlined and the one being converted turned over. While candidates
+ *	are chosen the system lists them under it in a window of its own
+ *	(OB_WR_CAND); a digit, or a press on a name there, takes one. In 英語 a letter
  *	goes in as it is, half width whatever the mode says of width: a
  *	number or a formula is typed in the letters a formula is read in.
  *
- *	The same words can be typed in the box of the 操作パネル instead
- *	(calc_panel.c): pressed there, or begun with fx, the box shows them
- *	with the caret and what is being converted, and the candidates are
- *	listed in the sheet's window under the box. Enter there puts them in
- *	the cell and leaves the cell in hand where it is. While a cell is
- *	typed into where it is, the box shows the same words.
+ *	The same words can be typed in the box of the 操作パネル instead, a
+ *	box of the panel's own (calc_panel.c); while a cell is typed into
+ *	where it is, the box shows the same words (ed_text).
  */
 
 #include "calc.h"
@@ -40,30 +38,59 @@
 #include <ts/wm.h>
 
 #define LIST_MAX	4096
-#define LIST_ROWS	9
 #define IME_GROUND	0x00FFFFFFU
 #define IME_INK		0x00000000U
 #define IME_TARGET	0x000050A0U
-#define IME_FRAME	0x00808080U
 
 static BOOL	on;
 static INT	ecol, erow;
-static UB	buf[TEXT_MAX];
+/*
+ * What is typed, as long as it is: made larger as it grows. 'tmp' is
+ * room for a part of it to be measured or drawn.
+ */
+static UB	*buf = NULL, *tmp = NULL;
+static INT	bufmax = 0, tmpmax = 0;
 static INT	len, caret;
+
+static BOOL buf_room( INT n )
+{
+	UB	*p;
+	INT	m;
+
+	if ( n + 1 <= bufmax ) return TRUE;
+	m = ( bufmax > 0 ) ? bufmax * 2 : 256;
+	if ( m < n + 1 ) m = n + 1;
+	p = realloc(buf, (size_t)m);
+	if ( p == NULL ) return FALSE;
+	if ( buf == NULL ) p[0] = 0;
+	buf = p;
+	bufmax = m;
+	return TRUE;
+}
+
+/* Room for n letters and their end, apart from what is typed */
+static UB *tmp_room( INT n )
+{
+	UB	*p;
+
+	if ( n + 1 <= tmpmax ) return tmp;
+	p = realloc(tmp, (size_t)( n + 1 ));
+	if ( p == NULL ) return NULL;
+	tmp = p;
+	tmpmax = n + 1;
+	return tmp;
+}
 static BOOL	all;			/* everything is taken: the next letter replaces it */
 
 static INT	kid;
 static T_KCOUT	out;
+static UINT	kmode = WM_MODE_ROMAN;	/* the input mode what is being composed was typed in */
 static INT	base;
 static BOOL	list;
 static UB	cand[LIST_MAX];
 static INT	ncand, first, total, chosen;
-static T_DPRECT	listbox;
-static INT	row_h;
+static BOOL	listed = FALSE;		/* the system lists them for the sheet's window */
 
-static BOOL	field;			/* typed in the panel's box, not over the cell */
-static INT	list_x, list_y;		/* where the candidates stand then, in the window */
-static INT	shown_from;		/* the first letter the box showed */
 
 BOOL ed_on( void )
 {
@@ -82,7 +109,10 @@ static void insert( CONST UB *s, INT n )
 		len = caret = 0;
 		all = FALSE;
 	}
-	if ( len + n >= TEXT_MAX - 1 ) return;
+	if ( !buf_room(len + n) ) {
+		say("メモリが足りないため、入力できません");
+		return;
+	}
 	memmove(buf + caret + n, buf + caret, (size_t)( len - caret ));
 	memcpy(buf + caret, s, (size_t)n);
 	len += n;
@@ -129,7 +159,7 @@ static void commit_ime( void )
 		list = FALSE;
 		return;
 	}
-	r = kc_hid_key(kid, K_ENTER, HID_MOD_LSHIFT, &out);
+	r = kc_hid_key(kid, K_ENTER, HID_MOD_LSHIFT, kmode, &out);
 	if ( r >= 0 && r != KC_NOTMINE ) take(r);
 	base = out.cl[out.n_cl];
 	list = FALSE;
@@ -140,16 +170,27 @@ void ed_begin( INT col, INT row, CONST UB *first_letters, BOOL keep )
 	CONST CXCELL	*c = cx_get(&g_s, col, row);
 
 	on = TRUE;
-	field = FALSE;
-	shown_from = 0;
 	ecol = col;
 	erow = row;
 	len = caret = 0;
 	all = FALSE;
+	if ( !buf_room(0) ) {
+		on = FALSE;
+		warn("入力を始められませんでした", "メモリが足りません");
+		return;
+	}
 	buf[0] = 0;
 	if ( keep && c != NULL && c->kind == CX_TEXT ) {
-		snprintf((char *)buf, sizeof(buf), "%s", (CONST char *)c->text);
-		len = caret = (INT)strlen((char *)buf);
+		/* the whole of what it holds, however long */
+		INT	n = (INT)strlen((CONST char *)c->text);
+
+		if ( !buf_room(n) ) {
+			on = FALSE;
+			warn("セルを編集できませんでした", "メモリが足りません。セルは元のままです");
+			return;
+		}
+		memcpy(buf, c->text, (size_t)n + 1);
+		len = caret = n;
 		all = TRUE;
 	}
 	if ( first_letters != NULL ) insert(first_letters, (INT)strlen((CONST char *)first_letters));
@@ -164,12 +205,19 @@ void ed_begin( INT col, INT row, CONST UB *first_letters, BOOL keep )
 	g_dirty = TRUE;
 }
 
+/* The system's list of candidates put away */
+static void unlist( void )
+{
+	if ( listed ) (void)ob_cand_put(g_kw, 0, 0, 0, NULL, 0, -1, 0, 0);
+	listed = FALSE;
+}
+
 void ed_commit( void )
 {
 	if ( !on ) return;
 	commit_ime();
+	unlist();
 	on = FALSE;
-	field = FALSE;
 	buf[len] = 0;
 	cell_text(ecol, erow, buf);
 	g_dirty = TRUE;
@@ -178,17 +226,18 @@ void ed_commit( void )
 void ed_cancel( void )
 {
 	if ( !on ) return;
-	if ( busy() ) (void)kc_hid_key(kid, K_ESC, 0, &out);
+	if ( busy() ) (void)kc_hid_key(kid, K_ESC, 0, kmode, &out);
 	memset(&out, 0, sizeof(out));
 	base = 0;
 	list = FALSE;
+	unlist();
 	on = FALSE;
-	field = FALSE;
 	g_dirty = TRUE;
 }
 
 void ed_end( void )
 {
+	unlist();
 	if ( kid > 0 ) kc_close(kid);
 	kid = 0;
 }
@@ -210,13 +259,20 @@ static INT step( INT at, INT d )
 	return at;
 }
 
-BOOL ed_key( UINT key, UINT mods )
+/*
+ * A key, in the input mode it came in (T_OBNTM imode). A key in 英語
+ * that comes while something is being composed -- 英数 itself, or one
+ * typed after it -- commits that first, then is 英語's.
+ */
+BOOL ed_key( UINT key, UINT mods, UINT mode )
 {
-	UINT	mode = kc_mode();
 	UB	ch = wm_key_char(key, mods);
 	INT	r;
 
 	if ( !on ) return FALSE;
+	if ( kid > 0 && ( mode & WM_MODE_ALPH ) != 0 && busy() ) {
+		commit_ime();
+	}
 	if ( ( mods & M_CTRL ) != 0 ) return FALSE;
 
 	/* the converter first, while it is composing */
@@ -227,7 +283,8 @@ BOOL ed_key( UINT key, UINT mods )
 			return TRUE;
 		}
 		if ( busy() || ( ch > 0x20 && ch < 0x7F ) ) {
-			r = kc_hid_key(kid, key, mods, &out);
+			kmode = mode;
+			r = kc_hid_key(kid, key, mods, mode, &out);
 			if ( r >= 0 && r != KC_NOTMINE ) {
 				take(r);
 				return TRUE;
@@ -238,10 +295,6 @@ BOOL ed_key( UINT key, UINT mods )
 	switch ( key ) {
 	case K_ENTER:
 	case K_KPENTER:
-		if ( field ) {
-			ed_commit();		/* the box's ✓: the cell in hand stays */
-			return TRUE;
-		}
 		ed_commit();
 		if ( erow < CX_ROWS_MAX ) g_row = g_arow = erow + 1;
 		g_col = g_acol = ecol;
@@ -316,18 +369,15 @@ BOOL ed_key( UINT key, UINT mods )
 	return TRUE;
 }
 
-BOOL ed_press( INT x, INT y )
+void ed_pick( INT row )
 {
-	if ( list && row_h > 0 && x >= listbox.left && x < listbox.right && y >= listbox.top && y < listbox.bottom ) {
-		INT	row = ( y - listbox.top - 2 ) / row_h, r;
+	INT	r;
 
-		if ( row >= 0 && row < ncand ) {
-			r = kc_choose(kid, first + row, &out);
-			if ( r >= 0 && r != KC_NOTMINE ) take(r);
-		}
-		return TRUE;
+	if ( on && list && kid > 0 && row >= 0 && row < ncand ) {
+		r = kc_choose(kid, first + row, &out);
+		if ( r >= 0 && r != KC_NOTMINE ) take(r);
+		g_dirty = TRUE;
 	}
-	return FALSE;
 }
 
 static void piece( INT a, INT b, UB *dst, INT size )
@@ -379,58 +429,24 @@ static void ime_text( INT gid, INT x, INT y, INT px, INT lh )
 	}
 }
 
-/* The candidates, in the sheet's window, from (x, y) down */
-static void ime_list( INT x, INT y, INT px, INT lh )
+/* The candidates, listed by the system under the box from x across, top to bottom */
+static void ime_list( INT x, INT top, INT bottom )
 {
-	CONST UB	*c = cand;
-	INT		w = 0, k, i;
-	UB		row[TSMOZC_TEXT_MAX + 8];
-	T_DPRECT	r;
-
-	if ( !list ) return;
-	row_h = lh + 2;
-	for ( k = 0; k < ncand && k < LIST_ROWS; k++ ) {
-		INT	cw;
-
-		snprintf((char *)row, sizeof(row), "%d %s", k + 1, (CONST char *)c);
-		cw = dp_text_width(row, px);
-		if ( cw > w ) w = cw;
-		c += strlen((CONST char *)c) + 1;
-	}
-	listbox.left = x;
-	listbox.top = y;
-	listbox.right = x + w + 8;
-	listbox.bottom = listbox.top + row_h * k + 4;
-	(void)dp_fill_rect(g_gid, &listbox, IME_GROUND);
-	(void)dp_frame_rect(g_gid, &listbox, IME_FRAME, 1);
-	c = cand;
-	for ( i = 0; i < k; i++ ) {
-		BOOL	sel = (BOOL)( first + i == chosen );
-
-		snprintf((char *)row, sizeof(row), "%d %s", i + 1, (CONST char *)c);
-		if ( sel ) {
-			r.left = listbox.left + 1;
-			r.right = listbox.right - 1;
-			r.top = listbox.top + 2 + i * row_h;
-			r.bottom = r.top + row_h;
-			(void)dp_fill_rect(g_gid, &r, IME_TARGET);
-		}
-		(void)dp_text(g_gid, listbox.left + 4, listbox.top + 2 + i * row_h + px, row,
-			      sel ? IME_GROUND : IME_INK, px);
-		c += strlen((CONST char *)c) + 1;
+	if ( !list ) {
+		unlist();
+	} else if ( ob_cand_put(g_kw, x, top, bottom, cand, ncand, chosen - first, first, total) >= E_OK ) {
+		listed = TRUE;
 	}
 }
 
 void ed_draw( void )
 {
 	T_DPRECT	r, box;
-	UB		head[TEXT_MAX];
+	UB		*head;
 	INT		w, cx, px = 12, y;
 
-	if ( !on ) return;
-	if ( field ) {
-		/* typed in the panel's box: only the candidates are the window's */
-		if ( busy() ) ime_list(list_x, list_y, px, 18);
+	if ( !on || ( head = tmp_room(len) ) == NULL ) {
+		unlist();
 		return;
 	}
 	(void)cell_box(ecol, erow, &r);
@@ -452,10 +468,11 @@ void ed_draw( void )
 	cx = box.left + 4 + dp_text_width(head, px);
 	if ( busy() ) {
 		ime_text(g_gid, cx, r.top + 2, px, r.bottom - r.top - 4);
-		ime_list(cx, r.bottom, px, r.bottom - r.top - 4);
+		ime_list(cx, r.top, r.bottom);
 	} else {
 		T_DPRECT	c;
 
+		unlist();
 		c.left = cx;
 		c.right = cx + 1;
 		c.top = r.top + 3;
@@ -464,104 +481,17 @@ void ed_draw( void )
 	}
 }
 
-/* ---------------------------------------------------------------- the panel's box */
+/* ---------------------------------------------------------------- what the panel's box shows */
 
-BOOL ed_in_field( void )
+INT ed_text( UB *out, INT max )
 {
-	return (BOOL)( on && field );
-}
+	INT	n = 0;
 
-/* What is typed goes on in the panel's box; fx begins a formula there */
-void ed_to_field( BOOL formula )
-{
-	if ( !on ) ed_begin(g_col, g_row, NULL, TRUE);
-	field = TRUE;
-	all = FALSE;
-	if ( formula && buf[0] != '=' && len + 1 < TEXT_MAX - 1 ) {
-		memmove(buf + 1, buf, (size_t)len + 1);
-		buf[0] = '=';
-		len++;
-		caret = len;
+	if ( out == NULL || max <= 0 ) return 0;
+	if ( on && buf != NULL ) {
+		n = ( len < max - 1 ) ? len : max - 1;
+		memcpy(out, buf, (size_t)n);
 	}
-	g_dirty = TRUE;
-}
-
-void ed_field_put( INT x, INT y )
-{
-	list_x = x;
-	list_y = y;
-}
-
-/* The width of the letters from a to b */
-static INT width_of( INT a, INT b, INT px )
-{
-	UB	s[TEXT_MAX];
-
-	if ( b <= a ) return 0;
-	memcpy(s, buf + a, (size_t)( b - a ));
-	s[b - a] = 0;
-	return dp_text_width(s, px);
-}
-
-#define FIELD_PX	12
-
-void ed_field_caret( INT x )
-{
-	INT	at = shown_from;
-
-	if ( !on || !field ) return;
-	commit_ime();
-	while ( at < len ) {
-		INT	next = step(at, 1);
-		INT	a = width_of(shown_from, at, FIELD_PX), b = width_of(shown_from, next, FIELD_PX);
-
-		if ( x < ( a + b ) / 2 ) break;
-		at = next;
-	}
-	caret = at;
-	all = FALSE;
-	g_dirty = TRUE;
-}
-
-/*
- * What is typed, in the box: from a letter that keeps the caret in
- * sight, as many letters as fit; with the caret and what is being
- * converted while it is typed there.
- */
-void ed_draw_field( INT gid, CONST T_DPRECT *box, BOOL show )
-{
-	INT	w = box->right - box->left - 8, end, next, y;
-	UB	s[TEXT_MAX];
-
-	if ( !on ) return;
-	if ( !field ) shown_from = 0;
-	if ( shown_from > caret ) shown_from = caret;
-	while ( field && shown_from < caret && width_of(shown_from, caret, FIELD_PX) > w - 4 ) {
-		shown_from = step(shown_from, 1);
-	}
-	end = shown_from;
-	while ( end < len ) {
-		next = step(end, 1);
-		if ( width_of(shown_from, next, FIELD_PX) > w ) break;
-		end = next;
-	}
-	memcpy(s, buf + shown_from, (size_t)( end - shown_from ));
-	s[end - shown_from] = 0;
-	y = box->top + ( box->bottom - box->top + FIELD_PX ) / 2 - 1;
-	(void)dp_text(gid, box->left + 4, y, s, C_TEXT, FIELD_PX);
-	if ( field && show ) {
-		INT	cx = box->left + 4 + width_of(shown_from, caret, FIELD_PX);
-
-		if ( busy() ) {
-			ime_text(gid, cx, box->top + 3, FIELD_PX, box->bottom - box->top - 6);
-		} else {
-			T_DPRECT	c;
-
-			c.left = cx;
-			c.right = cx + 1;
-			c.top = box->top + 3;
-			c.bottom = box->bottom - 3;
-			(void)dp_fill_rect(gid, &c, C_TEXT);
-		}
-	}
+	out[n] = 0;
+	return n;
 }

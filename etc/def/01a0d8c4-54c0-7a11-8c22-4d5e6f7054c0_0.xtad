@@ -1,0 +1,6 @@
+<tad version="1.0" encoding="UTF-8" filename="システム登録">
+<document>
+<p>システム登録</p>
+<p>microSDやUSBメモリから起動したTessronOSを、PCの内蔵のディスク(NVMe、SATA)に登録する小物。x64のPCだけで使う。いま動いているシステムボリューム(実身、設定、入れたアプリ)と、起動したEFIシステム区画のローダ、カーネル、起動の設定を写す。登録の方法は、Windowsと共存する(空き領域にTessronOSの区画を作り、EFIシステム区画に\EFI\TESSRON\を足す)と、ディスク全体を消して使う(消える区画の一覧と大きさを見せて確かめる)。起動の項目はローダが次の起動で登録する。組込みのプログラム(system-install)</p>
+</document>
+</tad>

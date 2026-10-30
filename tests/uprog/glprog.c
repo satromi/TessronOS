@@ -604,6 +604,51 @@ static int test_v3dpath( void )
 	return 0;
 }
 
+#ifdef __x86_64__
+/*
+ * The platform's choice of Intel's driver (iris), its screen and the
+ * frame of the check, against the DRM shim's pretended Kaby Lake: the
+ * frame is not drawn there, so the platform goes back to softpipe at
+ * that step
+ */
+static int test_irispath( void )
+{
+	EGLint	maj, min;
+	char	drv[16];
+	int	step;
+
+	ts_gl_drm_fake(2);
+	dpy = eglGetPlatformDisplay(EGL_PLATFORM_TESSRONOS, NULL, NULL);
+	if ( dpy == EGL_NO_DISPLAY ) return 901;
+	if ( !eglInitialize(dpy, &maj, &min) ) return 902;
+	step = ts_gl_probe_result(drv, sizeof(drv));
+	printf("glprog: irispath: driver '%s', step %d\n", drv, step);
+	eglTerminate(dpy);
+	ts_gl_drm_fake(0);
+	if ( strcmp(drv, "iris") != 0 ) return 903;
+	if ( step != PROBE_NODRAW ) return 910 + step;
+	return 0;
+}
+
+/*
+ * The DRM shim's waits on synchronisation objects (WAIT_FOR_SUBMIT,
+ * WAIT_ALL) and its reading of the time stamp (REG_READ), against the
+ * pretended Kaby Lake
+ */
+int	ts_gl_i915_check( void );
+
+static int test_i915sync( void )
+{
+	int	r;
+
+	ts_gl_drm_fake(2);
+	r = ts_gl_i915_check();
+	ts_gl_drm_fake(0);
+	printf("glprog: i915sync: step %d\n", r);
+	return ( r == 0 ) ? 0 : 920 + r;
+}
+#endif
+
 int main( void )
 {
 	char	mode[32];
@@ -622,6 +667,10 @@ int main( void )
 	else if ( strcmp(mode, "win") == 0 )	r = test_win();
 	else if ( strcmp(mode, "speed") == 0 )	r = test_speed();
 	else if ( strcmp(mode, "v3dpath") == 0 ) r = test_v3dpath();
+#ifdef __x86_64__
+	else if ( strcmp(mode, "irispath") == 0 ) r = test_irispath();
+	else if ( strcmp(mode, "i915sync") == 0 ) r = test_i915sync();
+#endif
 	else					r = 99;
 	printf("glprog: %s: %s %d (%ld ms)\n", mode, r == 0 ? "ok" : "failed at", r, ( now_us() - t0 ) / 1000);
 	return r;

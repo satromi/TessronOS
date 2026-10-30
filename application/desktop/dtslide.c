@@ -17,8 +17,9 @@
  *	points at -- a document or a figure, drawn by the same layout as
  *	the editors draw it. When the first paragraph is "%size:W:H" the
  *	slides are made for a screen W by H; else for 1920 by 1080. A slide
- *	is drawn magnified in eighths, as large as fits, in the middle of a
- *	window that covers the whole screen, the message line taken down
+ *	is drawn as large as fits, its shape kept, in the middle of a window
+ *	that covers the whole screen: it fills the screen one way, and the
+ *	margin is only the other way, the message line taken down
  *	while a slide window is open and put back when the last closes, on its
  *	object's own colour (its window's background colour); what is round
  *	it is that colour too, or the one chosen in the menu. After the last
@@ -61,7 +62,7 @@
 #define SL_W		1920		/* the screen slides are made for, unless they say */
 #define SL_H		1080
 #define SL_PAD		16		/* round a document on the slide, at life size */
-#define SL_ZOOM_MAX	32		/* eighths: four times */
+#define SL_ZOOM_MAX	4		/* times life size */
 #define SL_APP_MAX	8		/* programs a link in a slide may be run with (実行) */
 
 #define KEY_ENTER	0x28
@@ -215,23 +216,57 @@ EXPORT BOOL dt_slide_takes( CONST T_TAD *rec )
 	return (BOOL)( rec != NULL && ( tad_lnk_count(rec) > 0 || dtrt_has(rec) ) );
 }
 
-EXPORT INT dt_slide_fit( INT ww, INT wh, INT tw, INT th, T_DPRECT *out )
+LOCAL INT gcd( INT a, INT b )
 {
-	INT	z, zw, zh, w, h;
+	while ( b != 0 ) {
+		INT	t = a % b;
+
+		a = b;
+		b = t;
+	}
+	return a;
+}
+
+/*
+ * The magnification z / *p_den that makes the slide as large as the
+ * window lets it be with its shape kept: the narrower way decides and
+ * the slide meets the window's edges that way exactly, so that the
+ * margin is only along the other way. Not smaller than an eighth, nor
+ * larger than SL_ZOOM_MAX times.
+ */
+EXPORT INT dt_slide_fit( INT ww, INT wh, INT tw, INT th, T_DPRECT *out, INT *p_den )
+{
+	INT	z, den, w, h, g;
 
 	if ( tw <= 0 ) tw = SL_W;
 	if ( th <= 0 ) th = SL_H;
-	zw = ww * 8 / tw;
-	zh = wh * 8 / th;
-	z = ( zw < zh ) ? zw : zh;
-	if ( z < 1 ) z = 1;
-	if ( z > SL_ZOOM_MAX ) z = SL_ZOOM_MAX;
-	w = tw * z / 8;
-	h = th * z / 8;
+	if ( ww < 0 ) ww = 0;
+	if ( wh < 0 ) wh = 0;
+	/* ww / tw against wh / th, without dividing */
+	if ( (D)ww * th <= (D)wh * tw ) {
+		z = ww;
+		den = tw;
+	} else {
+		z = wh;
+		den = th;
+	}
+	if ( z * 8 < den ) {
+		z = 1;
+		den = 8;
+	} else if ( z > den * SL_ZOOM_MAX ) {
+		z = SL_ZOOM_MAX;
+		den = 1;
+	}
+	g = gcd(z, den);
+	z /= g;
+	den /= g;
+	w = (INT)( (D)tw * z / den );
+	h = (INT)( (D)th * z / den );
 	out->left = ( ww - w ) / 2;
 	out->top = ( wh - h ) / 2;
 	out->right = out->left + w;
 	out->bottom = out->top + h;
+	*p_den = den;
 	return z;
 }
 
@@ -298,8 +333,8 @@ LOCAL BOOL page_model( T_TAD *rec, T_TVDOC **p_d, T_TVFIG **p_f )
 	return (BOOL)( *p_d != NULL || *p_f != NULL );
 }
 
-/* One slide drawn into area, magnified z eighths; FALSE when there was nothing to draw */
-LOCAL BOOL draw_page( INT gid, CONST TS_UUID *page, CONST T_DPRECT *area, INT z, UW paper )
+/* One slide drawn into area, magnified z / den; FALSE when there was nothing to draw */
+LOCAL BOOL draw_page( INT gid, CONST TS_UUID *page, CONST T_DPRECT *area, INT z, INT den, UW paper )
 {
 	T_TAD	*rec = om_store_get(page, 0);
 	T_TVDOC	*d;
@@ -309,16 +344,17 @@ LOCAL BOOL draw_page( INT gid, CONST TS_UUID *page, CONST T_DPRECT *area, INT z,
 	om_store_self(page);
 	if ( f != NULL ) {
 		f->zoom = z;
+		f->zoom_den = den;
 		(void)tv_fig_draw(gid, f, area, 0, 0, rec, paper);
 		tv_fig_free(f);
 	} else {
 		T_DPRECT	r = *area;
-		INT		pad = SL_PAD * z / 8;
+		INT		pad = SL_PAD * z / den;
 
 		r.left += pad;
 		r.top += pad;
 		r.right -= pad;
-		tv_doc_zoom(z);
+		tv_doc_zoom_by(z, den);
 		(void)tv_doc_draw(gid, d, &r, 0, rec, paper);
 		tv_doc_zoom(8);
 		tv_doc_free(d);
@@ -335,25 +371,26 @@ LOCAL BOOL link_at( SLIDE *s, INT x, INT y, T_VOBJ *v )
 	T_TAD		*rec;
 	T_TVDOC		*d;
 	T_TVFIG		*f;
-	INT		z;
+	INT		z, den;
 	ER		er = E_NOEXS;
 
 	if ( s->end || wm_ref(s->wid, &w) < E_OK ) return FALSE;
 	rec = om_store_get(&s->page[s->cur], 0);
 	if ( !page_model(rec, &d, &f) ) return FALSE;
-	z = dt_slide_fit(w.work.right - w.work.left, w.work.bottom - w.work.top, s->tw, s->th, &area);
+	z = dt_slide_fit(w.work.right - w.work.left, w.work.bottom - w.work.top, s->tw, s->th, &area, &den);
 	if ( f != NULL ) {
 		f->zoom = z;
+		f->zoom_den = den;
 		er = tv_fig_at(f, &area, 0, 0, rec, x, y, v, NULL, NULL);
 		tv_fig_free(f);
 	} else {
-		INT	pad = SL_PAD * z / 8;
+		INT	pad = SL_PAD * z / den;
 
 		r = area;
 		r.left += pad;
 		r.top += pad;
 		r.right -= pad;
-		tv_doc_zoom(z);
+		tv_doc_zoom_by(z, den);
 		er = tv_doc_at(d, &r, 0, rec, x, y, v, NULL, NULL);
 		tv_doc_zoom(8);
 		tv_doc_free(d);
@@ -384,7 +421,7 @@ LOCAL void sl_draw( SLIDE *s )
 {
 	T_WMWIN		w;
 	T_DPRECT	all, area;
-	INT		gid = wm_gid(s->wid), ww, wh, z;
+	INT		gid = wm_gid(s->wid), ww, wh, z, den;
 	UW		paper, ground;
 	UB		name[TAD_NAME_MAX];
 	char		msg[TAD_NAME_MAX + 64];
@@ -408,7 +445,7 @@ LOCAL void sl_draw( SLIDE *s )
 	/* round the slide: what the menu chose, else the slide's own colour */
 	ground = ( s->back != TAD_COL_NONE ) ? s->back : paper;
 	dp_fill_rect(gid, &all, ground);
-	z = dt_slide_fit(ww, wh, s->tw, s->th, &area);
+	z = dt_slide_fit(ww, wh, s->tw, s->th, &area, &den);
 	if ( om_store_name(&s->page[s->cur], name, sizeof(name)) < 0 ) name[0] = 0;
 	rec = om_store_get(&s->page[s->cur], 0);
 	if ( s->rt != NULL && s->rt_page != s->cur ) rt_end(s);
@@ -423,12 +460,12 @@ LOCAL void sl_draw( SLIDE *s )
 		}
 		if ( s->rt == NULL ) {
 			dp_fill_rect(gid, &area, paper);
-			(void)draw_page(gid, &s->page[s->cur], &area, z, paper);
+			(void)draw_page(gid, &s->page[s->cur], &area, z, den, paper);
 		}
 	} else {
 		rt_end(s);
 		dp_fill_rect(gid, &area, paper);
-		if ( !draw_page(gid, &s->page[s->cur], &area, z, paper) ) {
+		if ( !draw_page(gid, &s->page[s->cur], &area, z, den, paper) ) {
 			dt_pn_text((UB *)msg, sizeof(msg), "スライド「");
 			knl_strcat(msg, (CONST char *)name);
 			knl_strcat(msg, "」の読み込みに失敗しました");
@@ -454,7 +491,9 @@ LOCAL void sl_draw( SLIDE *s )
 		knl_strcat(msg, (CONST char *)name);
 		(void)wm_msg_put(msg);
 	}
-	tm_printf((UB *)"slide: %d of %d zoom %d%s\n", s->cur + 1, s->n, z, ( s->rt != NULL ) ? " playing" : "");
+	tm_printf((UB *)"slide: %d of %d zoom %d/%d at %d,%d %dx%d%s\n", s->cur + 1, s->n, z, den,
+		  area.left, area.top, area.right - area.left, area.bottom - area.top,
+		  ( s->rt != NULL ) ? " playing" : "");
 	wm_update();
 }
 
@@ -662,7 +701,7 @@ LOCAL ER sl_print_page( void *arg, INT gid, INT page, CONST T_DPRECT *sheet )
 	SLPRN	*p = (SLPRN *)arg;
 
 	dp_fill_rect(gid, sheet, p->paper);
-	(void)draw_page(gid, &p->s->page[page], sheet, 8, p->paper);
+	(void)draw_page(gid, &p->s->page[page], sheet, 8, 8, p->paper);
 	return E_OK;
 }
 
@@ -809,6 +848,7 @@ LOCAL BOOL sl_input( DTWIN *d, CONST T_WMEV *ev )
 		if ( s->rt != NULL ) (void)dtrt_input(s->rt, ev, FALSE);
 		return TRUE;
 	case HID_EV_WHEEL:
+		if ( ev->code != HID_WHEEL_V ) return TRUE;	/* the slides go one way: across is let go */
 		if ( ev->dz < 0 ) (void)sl_next(s);
 		else if ( ev->dz > 0 ) sl_prev(s);
 		return TRUE;
@@ -834,6 +874,19 @@ LOCAL void sl_poll( DTWIN *d )
 	else if ( a == RT_ACT_INDEX ) sl_go(s, n);
 }
 
+/*
+ * The slide being played, or the document of the slides, can no longer
+ * be found: the window goes before the store lets go of the record the
+ * player holds.
+ */
+LOCAL BOOL sl_lost( DTWIN *d )
+{
+	SLIDE	*s = (SLIDE *)d->self;
+
+	return (BOOL)( s != NULL && ( om_store_lost(&s->id)
+			|| ( s->rt != NULL && om_store_lost(&s->page[s->rt_page]) ) ) );
+}
+
 LOCAL CONST DTOWN	sl_own = {
 	SYSDEF_MENU_SLIDE,
 	sl_own_draw,
@@ -843,5 +896,6 @@ LOCAL CONST DTOWN	sl_own = {
 	sl_menu_do,
 	NULL,
 	sl_own_close,
-	sl_poll
+	sl_poll,
+	sl_lost
 };

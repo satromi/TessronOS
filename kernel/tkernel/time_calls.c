@@ -34,7 +34,9 @@ LOCAL D knl_get_utc_ns( void )
 	D	t;
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_MISC();
 	t = (D)knl_get_mono_ns() + knl_real_time_ofs;
+	KLK_UNMISC();
 	END_CRITICAL_SECTION;
 
 	return t;
@@ -48,7 +50,9 @@ LOCAL D knl_get_utc_ns( void )
 LOCAL void knl_set_utc_ns( D utc_ns )
 {
 	BEGIN_CRITICAL_SECTION;
+	KLK_MISC();
 	knl_real_time_ofs = utc_ns - (D)knl_get_mono_ns();
+	KLK_UNMISC();
 	END_CRITICAL_SECTION;
 
 #if USE_RTC_WRITEBACK
@@ -252,6 +256,9 @@ EXPORT ER knl_cyclichandler_initialize( void )
 	end = knl_cyccb_table + NUM_CYCID;
 	for ( cyccb = knl_cyccb_table; cyccb < end; cyccb++ ) {
 		cyccb->cychdr = NULL; /* Unregistered handler */
+#if KLK_FINE_OBJ
+		cyccb->cycrun = 0;
+#endif
 		QueInsert((QUEUE*)cyccb, &knl_free_cyccb);
 	}
 
@@ -262,6 +269,37 @@ EXPORT ER knl_cyclichandler_initialize( void )
 /*
  * Cyclic handler routine
  */
+#if KLK_FINE_OBJ
+/*
+ * The timer calls this with no lock held (design 4.3.3). Under the lock
+ * of the time events it checks that the handler is still there and
+ * started and that the event was not set again meanwhile, sets the next
+ * one, and notes the processor that calls the handler, which is called
+ * after the lock is let go; tk_del_cyc waits for that call to end.
+ */
+EXPORT void knl_call_cychdr( CYCCB *cyccb )
+{
+	FP	hdr;
+	void	*exinf;
+
+	KLK_TEV_DI();
+	if ( cyccb->cychdr == NULL || (cyccb->cycstat & TCYC_STA) == 0
+	  || knl_timer_stale(&cyccb->cyctmeb) ) {
+		KLK_UNTEV();
+		return;
+	}
+	knl_cyc_timer_insert(cyccb, knl_cyc_next_time(cyccb));
+	hdr = cyccb->cychdr;
+	exinf = cyccb->exinf;
+	cyccb->cycrun = knl_pcpu()->prcid;
+	KLK_UNTEV();
+
+	ENABLE_INTERRUPT_UPTO(TIMER_INTLEVEL);
+	CallUserHandlerP1(exinf, hdr, cyccb);
+	DISABLE_INTERRUPT;
+	__atomic_store_n(&cyccb->cycrun, 0, __ATOMIC_RELEASE);
+}
+#else
 EXPORT void knl_call_cychdr( CYCCB *cyccb )
 {
 	/* Set next startup time */
@@ -272,7 +310,28 @@ EXPORT void knl_call_cychdr( CYCCB *cyccb )
 	CallUserHandlerP1(cyccb->exinf, cyccb->cychdr, cyccb);
 	DISABLE_INTERRUPT;
 }
+#endif
 
+#if KLK_FINE_OBJ
+/*
+ * A handler of a time event about to be deleted that is being called on
+ * another processor is waited for, so that it is not called after the
+ * deletion returns. Called with the interrupts enabled.
+ */
+LOCAL void knl_tev_wait_idle( volatile ID *run )
+{
+	ID	r, me;
+	UINT	s = disint();
+
+	me = knl_pcpu()->prcid;
+	enaint(s);
+	while ( ( r = __atomic_load_n(run, __ATOMIC_ACQUIRE) ) != 0 && r != me ) {
+		CpuRelax();
+	}
+}
+#endif
+
+#if !KLK_FINE_OBJ
 /*
  * Immediate call of cyclic handler
  */
@@ -287,6 +346,7 @@ LOCAL void knl_immediate_call_cychdr( CYCCB *cyccb )
 	CallUserHandlerP1(cyccb->exinf, cyccb->cychdr, cyccb);
 	LEAVE_TASK_INDEPENDENT;
 }
+#endif
 
 #if CHK_RSATR
 LOCAL CONST ATR knl_valid_cycatr = {
@@ -307,12 +367,16 @@ LOCAL ID knl_cre_cyc_ns( void *exinf, ATR cycatr, FP cychdr, CONST UB *dsname, U
 	CYCCB	*cyccb;
 	ABSTIM	tm;
 	ER	ercd = E_OK;
+#if KLK_FINE_OBJ
+	CYCCB	*imm = NULL;		/* called at once, after the lock */
+#endif
 
 	CHECK_RSATR(cycatr, knl_valid_cycatr);
 	CHECK_PAR(cychdr != NULL);
 	CHECK_PAR(cyctim_ns > 0);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TEV();
 	/* Get control block from FreeQue */
 	cyccb = (CYCCB*)QueRemoveNext(&knl_free_cyccb);
 	if ( cyccb == NULL ) {
@@ -343,7 +407,13 @@ LOCAL ID knl_cre_cyc_ns( void *exinf, ATR cycatr, FP cychdr, CONST UB *dsname, U
 		if ( cycphs_ns == 0 ) {
 			/* Immediate execution */
 			cyccb->cyctmeb.time = tm;
+#if KLK_FINE_OBJ
+			knl_cyc_timer_insert(cyccb, knl_cyc_next_time(cyccb));
+			cyccb->cycrun = knl_pcpu()->prcid;
+			imm = cyccb;
+#else
 			knl_immediate_call_cychdr(cyccb);
+#endif
 		} else {
 			/* Register onto timer event queue */
 			knl_cyc_timer_insert(cyccb, tm);
@@ -357,6 +427,15 @@ LOCAL ID knl_cre_cyc_ns( void *exinf, ATR cycatr, FP cychdr, CONST UB *dsname, U
 	ercd = ID_CYC(cyccb - knl_cyccb_table);
 
     error_exit:
+	KLK_UNTEV();
+#if KLK_FINE_OBJ
+	if ( imm != NULL ) {
+		ENTER_TASK_INDEPENDENT;
+		CallUserHandlerP1(exinf, cychdr, imm);
+		LEAVE_TASK_INDEPENDENT;
+		__atomic_store_n(&imm->cycrun, 0, __ATOMIC_RELEASE);
+	}
+#endif
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -395,6 +474,7 @@ SYSCALL ER tk_del_cyc( ID cycid )
 	cyccb = get_cyccb(cycid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TEV();
 	if ( cyccb->cychdr == NULL ) { /* Unregistered handler */
 		ercd = E_NOEXS;
 	} else {
@@ -407,7 +487,13 @@ SYSCALL ER tk_del_cyc( ID cycid )
 		QueInsert((QUEUE*)cyccb, &knl_free_cyccb);
 		cyccb->cychdr = NULL; /* Unregistered handler */
 	}
+	KLK_UNTEV();
 	END_CRITICAL_SECTION;
+#if KLK_FINE_OBJ
+	if ( ercd == E_OK ) {
+		knl_tev_wait_idle(&cyccb->cycrun);
+	}
+#endif
 
 	return ercd;
 }
@@ -428,6 +514,7 @@ SYSCALL ER tk_sta_cyc( ID cycid )
 	cyccb = get_cyccb(cycid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TEV();
 	if ( cyccb->cychdr == NULL ) { /* Unregistered handler */
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -461,6 +548,7 @@ SYSCALL ER tk_sta_cyc( ID cycid )
 	cyccb->cycstat |= TCYC_STA;
 
     error_exit:
+	KLK_UNTEV();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -481,6 +569,7 @@ SYSCALL ER tk_stp_cyc( ID cycid )
 	cyccb = get_cyccb(cycid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TEV();
 	if ( cyccb->cychdr == NULL ) { /* Unregistered handler */
 		ercd = E_NOEXS;
 	} else {
@@ -490,6 +579,7 @@ SYSCALL ER tk_stp_cyc( ID cycid )
 		}
 		cyccb->cycstat &= ~TCYC_STA;
 	}
+	KLK_UNTEV();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -510,6 +600,7 @@ LOCAL ER knl_ref_cyc_ns( ID cycid, void **exinf, UD *left_ns, UINT *cycstat )
 	cyccb = get_cyccb(cycid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TEV();
 	if ( cyccb->cychdr == NULL ) { /* Unregistered handler */
 		ercd = E_NOEXS;
 	} else {
@@ -525,6 +616,7 @@ LOCAL ER knl_ref_cyc_ns( ID cycid, void **exinf, UD *left_ns, UINT *cycstat )
 		*left_ns = knl_timer_left_ns(tm, cur);
 		*cycstat = cyccb->cycstat;
 	}
+	KLK_UNTEV();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -669,6 +761,9 @@ EXPORT ER knl_alarmhandler_initialize( void )
 	end = knl_almcb_table + NUM_ALMID;
 	for ( almcb = knl_almcb_table; almcb < end; almcb++ ) {
 		almcb->almhdr = NULL; /* Unregistered handler */
+#if KLK_FINE_OBJ
+		almcb->almrun = 0;
+#endif
 		QueInsert((QUEUE*)almcb, &knl_free_almcb);
 	}
 
@@ -679,6 +774,31 @@ EXPORT ER knl_alarmhandler_initialize( void )
 /*
  * Alarm handler start routine
  */
+#if KLK_FINE_OBJ
+/* As knl_call_cychdr: checked and noted under the lock, called without it */
+EXPORT void knl_call_almhdr( ALMCB *almcb )
+{
+	FP	hdr;
+	void	*exinf;
+
+	KLK_TEV_DI();
+	if ( almcb->almhdr == NULL || (almcb->almstat & TALM_STA) == 0
+	  || knl_timer_stale(&almcb->almtmeb) ) {
+		KLK_UNTEV();
+		return;
+	}
+	almcb->almstat &= ~TALM_STA;
+	hdr = almcb->almhdr;
+	exinf = almcb->exinf;
+	almcb->almrun = knl_pcpu()->prcid;
+	KLK_UNTEV();
+
+	ENABLE_INTERRUPT_UPTO(TIMER_INTLEVEL);
+	CallUserHandlerP1(exinf, hdr, almcb);
+	DISABLE_INTERRUPT;
+	__atomic_store_n(&almcb->almrun, 0, __ATOMIC_RELEASE);
+}
+#else
 EXPORT void knl_call_almhdr( ALMCB *almcb )
 {
 	almcb->almstat &= ~TALM_STA;
@@ -688,6 +808,7 @@ EXPORT void knl_call_almhdr( ALMCB *almcb )
 	CallUserHandlerP1(almcb->exinf, almcb->almhdr, almcb);
 	DISABLE_INTERRUPT;
 }
+#endif
 
 
 /*
@@ -710,6 +831,7 @@ SYSCALL ID tk_cre_alm( CONST T_CALM *pk_calm )
 	CHECK_PAR(pk_calm->almhdr != NULL);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TEV();
 	/* Get control block from free queue */
 	almcb = (ALMCB*)QueRemoveNext(&knl_free_almcb);
 	if ( almcb == NULL ) {
@@ -731,6 +853,7 @@ SYSCALL ID tk_cre_alm( CONST T_CALM *pk_calm )
 	ercd = ID_ALM(almcb - knl_almcb_table);
 
     error_exit:
+	KLK_UNTEV();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -750,6 +873,7 @@ SYSCALL ER tk_del_alm( ID almid )
 	almcb = get_almcb(almid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TEV();
 	if ( almcb->almhdr == NULL ) { /* Unregistered handler */
 		ercd = E_NOEXS;
 	} else {
@@ -762,12 +886,19 @@ SYSCALL ER tk_del_alm( ID almid )
 		QueInsert((QUEUE*)almcb, &knl_free_almcb);
 		almcb->almhdr = NULL; /* Unregistered handler */
 	}
+	KLK_UNTEV();
 	END_CRITICAL_SECTION;
+#if KLK_FINE_OBJ
+	if ( ercd == E_OK ) {
+		knl_tev_wait_idle(&almcb->almrun);
+	}
+#endif
 
 	return ercd;
 }
 #endif /* USE_FUNC_TK_DEL_ALM */
 
+#if !KLK_FINE_OBJ
 /*
  * Alarm handler immediate call
  */
@@ -781,6 +912,7 @@ LOCAL void knl_immediate_call_almhdr( ALMCB *almcb )
 	CallUserHandlerP1(almcb->exinf, almcb->almhdr, almcb);
 	LEAVE_TASK_INDEPENDENT;
 }
+#endif
 
 /*
  * Start alarm handler (common part; relative time in ns)
@@ -789,12 +921,17 @@ LOCAL ER knl_sta_alm_ns( ID almid, UD almtim_ns )
 {
 	ALMCB	*almcb;
 	ER	ercd = E_OK;
+#if KLK_FINE_OBJ
+	FP	imm = NULL;		/* called at once, after the lock */
+	void	*exinf = NULL;
+#endif
 
 	CHECK_ALMID(almid);
 
 	almcb = get_almcb(almid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TEV();
 	if ( almcb->almhdr == NULL ) { /* Unregistered handler */
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -811,10 +948,26 @@ LOCAL ER knl_sta_alm_ns( ID almid, UD almtim_ns )
 		almcb->almstat |= TALM_STA;
 	} else {
 		/* Immediate execution */
+#if KLK_FINE_OBJ
+		almcb->almstat &= ~TALM_STA;
+		imm = almcb->almhdr;
+		exinf = almcb->exinf;
+		almcb->almrun = knl_pcpu()->prcid;
+#else
 		knl_immediate_call_almhdr(almcb);
+#endif
 	}
 
     error_exit:
+	KLK_UNTEV();
+#if KLK_FINE_OBJ
+	if ( imm != NULL ) {
+		ENTER_TASK_INDEPENDENT;
+		CallUserHandlerP1(exinf, imm, almcb);
+		LEAVE_TASK_INDEPENDENT;
+		__atomic_store_n(&almcb->almrun, 0, __ATOMIC_RELEASE);
+	}
+#endif
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -851,6 +1004,7 @@ SYSCALL ER tk_stp_alm( ID almid )
 	almcb = get_almcb(almid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TEV();
 	if ( almcb->almhdr == NULL ) { /* Unregistered handler */
 		ercd = E_NOEXS;
 	} else {
@@ -860,6 +1014,7 @@ SYSCALL ER tk_stp_alm( ID almid )
 			almcb->almstat &= ~TALM_STA;
 		}
 	}
+	KLK_UNTEV();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -879,6 +1034,7 @@ LOCAL ER knl_ref_alm_ns( ID almid, void **exinf, UD *left_ns, UINT *almstat )
 	almcb = get_almcb(almid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TEV();
 	if ( almcb->almhdr == NULL ) { /* Unregistered handler */
 		ercd = E_NOEXS;
 	} else {
@@ -891,6 +1047,7 @@ LOCAL ER knl_ref_alm_ns( ID almid, void **exinf, UD *left_ns, UINT *almstat )
 		*exinf   = almcb->exinf;
 		*almstat = almcb->almstat;
 	}
+	KLK_UNTEV();
 	END_CRITICAL_SECTION;
 
 	return ercd;

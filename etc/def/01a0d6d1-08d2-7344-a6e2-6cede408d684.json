@@ -18,7 +18,7 @@
       "id": "basic-figure-editor",
       "kind": "app",
       "name": "基本図形編集",
-      "version": "R1.110",
+      "version": "R1.200",
       "builtin": true,
       "base": [
         "019a0f91-066f-706f-93da-ffe8150d6207"

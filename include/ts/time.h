@@ -30,17 +30,23 @@ IMPORT ER ts_get_mono( UD *p_ns );
  * running tasks since the kernel started, in counts of the generic
  * timer (freq a second). A processor's load over a while is what its
  * busy count grew by against what now grew by.
+ *
+ * The caller gives the size of what pk points at, so that a machine of
+ * any number of processors can be told: busy[] has as many processors
+ * as that size holds after the header (TS_TSCPU_SIZE(n) for n of them;
+ * sizeof(T_TSCPU) for none, to learn the number alone). The answer is
+ * the number of processors online, or an error.
  */
-#define TS_CPU_MAX	8
-
 typedef struct {
 	INT	ncpu;			/* processors online */
 	UW	freq;			/* the counts a second */
 	UD	now;			/* the timer's count now */
-	UD	busy[TS_CPU_MAX];	/* each processor's counts spent running tasks */
+	UD	busy[];			/* each processor's counts spent running tasks, as many as fit */
 } T_TSCPU;
 
-IMPORT ER ts_ref_cpu( T_TSCPU *pk );
+#define TS_TSCPU_SIZE(n)	( (SZ)sizeof(T_TSCPU) + (SZ)(n) * (SZ)sizeof(UD) )
+
+IMPORT INT ts_ref_cpu( T_TSCPU *pk, SZ size );
 
 #ifdef __cplusplus
 }

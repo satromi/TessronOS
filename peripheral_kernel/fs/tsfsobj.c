@@ -41,7 +41,14 @@
 #define RELINK_STEP	64		/* links one transaction changes the counts of */
 #define RELINK_GUARD	1000		/* steps one object may take */
 
-#define TSFSO_META_MAX	65536		/* CNF_TSFS_META_MAX (design 11.5) */
+/*
+ * The metadata of one object. It is written in one transaction of the
+ * journal, and a transaction changes at most TSFSJ_MAX_BLOCKS blocks
+ * (what one descriptor block names: the format). Each block of the
+ * metadata written may change a block of the free map besides, and room
+ * is kept for the object's head and the segment's own blocks.
+ */
+#define TSFSO_META_MAX	( ( TSFSJ_MAX_BLOCKS - 8 ) / 2 * TSFSBLK_BLOCK_SIZE )
 #define TSFSO_ICON_MAX	TSFS_ICON_MAX	/* bytes of an icon */
 #define DATA_INLINE_MAX	2048		/* the most bytes of a record held inline */
 #define TSFSO_GC_GUARD	100000		/* objects one collection walks over */
@@ -62,6 +69,16 @@ typedef struct {
 } PEND;
 
 LOCAL PEND	*pend_tbl[TSFSBLK_MAX_VOL];
+
+/*
+ * Each volume's generation: one more at the start and at the end of
+ * every transaction, so that anything read from the volume's objects
+ * and kept while the generation is the same is still what the volume
+ * holds (rc_*). Reads do not change it.
+ */
+LOCAL UD	obj_gen[TSFSBLK_MAX_VOL];
+#define GEN_BUMP(vol)	__atomic_add_fetch(&obj_gen[(vol) - 1], 1, __ATOMIC_RELEASE)
+#define GEN_NOW(vol)	__atomic_load_n(&obj_gen[(vol) - 1], __ATOMIC_ACQUIRE)
 
 /* ---------------------------------------------------------------- bytes */
 
@@ -348,7 +365,9 @@ LOCAL ER pend_add( ID vol, UD start, UD count )
 
 /*
  * The runs a replacement gave up, freed in a transaction of their own
- * now that the one that stopped using them is real. A cut in the power
+ * behind the one that stopped using them: the log puts them on the
+ * medium in that order, and the runs are not handed out again before
+ * the freeing one is there (tsfsblk.c, busy runs). A cut in the power
  * between the two leaves them taken but unused, which a check of the
  * volume finds and gives back.
  */
@@ -360,12 +379,14 @@ LOCAL void pend_apply( ID vol )
 	if ( p == NULL || p->n == 0 ) {
 		return;
 	}
+	GEN_BUMP(vol);
 	if ( ts_jrnl_begin(vol) >= E_OK ) {
 		for ( i = 0; i < p->n; i++ ) {
 			ts_free_ext(vol, p->start[i], p->count[i]);
 		}
-		ts_jrnl_commit(vol);
+		ts_jrnl_close(vol, NULL);
 	}
+	GEN_BUMP(vol);
 	p->n = 0;
 }
 
@@ -535,81 +556,161 @@ typedef struct {
 	UD	n;			/* blocks */
 } XT;
 
-/* The runs a data part's bytes lie in, in order */
-LOCAL ER xt_load( OBJ *o, CONST UB *pl, XT *x, INT *p_n )
+/*
+ * The runs of a data part, as many as it has. One run is kept in the
+ * place itself (F_RUN); up to TSFSO_MAX_EXTENTS in one leaf block
+ * (F_TREE); more in leaves of TSFSO_MAX_EXTENTS each named by an index
+ * block (F_TREE2, design 7.3), up to TSFSO_MAX_EXTENTS of them. A tree
+ * of two levels is used only for a part that does not fit one leaf, and
+ * a volume that has one is marked (TSFSBLK_INCOMPAT_XT2) so that a
+ * kernel that does not know the form does not open it.
+ */
+#define XT2_MAX		( (INT)TSFSO_MAX_EXTENTS * (INT)TSFSO_MAX_EXTENTS )
+
+typedef struct {
+	XT	*x;
+	INT	n, cap;
+	INT	dirty;			/* the first run changed since they were read */
+	UD	*leaf;			/* two levels: the leaves' blocks, as read */
+	INT	nleaf;
+} XTS;
+
+LOCAL ER xts_new( XTS *s )
 {
-	UB	*buf;
+	s->cap = TSFSO_MAX_EXTENTS + 1;
+	s->x = (XT *)Kmalloc(sizeof(XT) * (SZ)s->cap);
+	s->n = 0;
+	s->dirty = 0;
+	s->leaf = NULL;
+	s->nleaf = 0;
+	return ( s->x == NULL ) ? E_NOMEM : E_OK;
+}
+
+LOCAL void xts_free( XTS *s )
+{
+	if ( s->x != NULL ) Kfree(s->x);
+	if ( s->leaf != NULL ) Kfree(s->leaf);
+	s->x = NULL;
+	s->leaf = NULL;
+}
+
+/* Room for `need` runs, the table twice as large each time it fills */
+LOCAL ER xts_fit( XTS *s, INT need )
+{
+	XT	*nx;
+	INT	cap = s->cap;
+
+	if ( need <= cap ) {
+		return E_OK;
+	}
+	if ( need > XT2_MAX ) {
+		return E_NOMEM;			/* the part is broken into too many runs */
+	}
+	while ( cap < need ) cap *= 2;
+	if ( cap > XT2_MAX ) cap = XT2_MAX;
+	nx = (XT *)Kmalloc(sizeof(XT) * (SZ)cap);
+	if ( nx == NULL ) {
+		return E_NOMEM;
+	}
+	knl_memcpy(nx, s->x, sizeof(XT) * (SZ)s->n);
+	Kfree(s->x);
+	s->x = nx;
+	s->cap = cap;
+	return E_OK;
+}
+
+/* The runs of one leaf block appended to the table */
+LOCAL ER leaf_load( OBJ *o, UD blk, XTS *s, UB *buf )
+{
 	INT	i, n;
 	ER	er;
 
-	*p_n = 0;
-	if ( pl[PL_FORM] == F_RUN ) {
-		x[0].l = 0;
-		x[0].p = rd64(pl + PL_A);
-		x[0].n = rd64(pl + PL_B);
-		*p_n = ( x[0].n > 0 ) ? 1 : 0;
-		return E_OK;
-	}
-	if ( pl[PL_FORM] != F_TREE ) {
-		return E_OK;
-	}
-	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
-	if ( buf == NULL ) {
-		return E_NOMEM;
-	}
-	er = meta_read(o->vol, rd64(pl + PL_A), buf);
-	if ( er >= E_OK && ts_blk_check(o->vol, buf, TSFSBLK_MAGIC_TBL, rd64(pl + PL_A)) < E_OK ) {
+	er = meta_read(o->vol, blk, buf);
+	if ( er >= E_OK && ts_blk_check(o->vol, buf, TSFSBLK_MAGIC_TBL, blk) < E_OK ) {
 		er = E_IO;
 	}
 	n = ( er >= E_OK ) ? (INT)rd32(buf + XL_N) : 0;
 	if ( n > TSFSO_MAX_EXTENTS ) {
-		er = E_OBJ;
-		n = 0;
+		return E_OBJ;
 	}
-	for ( i = 0; i < n; i++ ) {
-		x[i].l = rd64(buf + XL_ENT + i * XL_ESZ);
-		x[i].p = rd64(buf + XL_ENT + i * XL_ESZ + 8);
-		x[i].n = rd64(buf + XL_ENT + i * XL_ESZ + 16);
+	if ( er >= E_OK ) er = xts_fit(s, s->n + n);
+	for ( i = 0; i < n && er >= E_OK; i++ ) {
+		s->x[s->n].l = rd64(buf + XL_ENT + i * XL_ESZ);
+		s->x[s->n].p = rd64(buf + XL_ENT + i * XL_ESZ + 8);
+		s->x[s->n].n = rd64(buf + XL_ENT + i * XL_ESZ + 16);
+		s->n++;
 	}
-	Kfree(buf);
-	*p_n = n;
 	return er;
 }
 
-/*
- * The runs written back: one run in the place itself, more than one in
- * the leaf of an extent tree, taken when the part first needs one and
- * given back when it no longer does.
- */
-LOCAL ER xt_store( OBJ *o, UB *pl, CONST XT *x, INT n )
+/* The runs a data part's bytes lie in, in order */
+LOCAL ER xt_load( OBJ *o, CONST UB *pl, XTS *s )
 {
 	UB	*buf;
-	UD	leaf = ( pl[PL_FORM] == F_TREE ) ? rd64(pl + PL_A) : 0, got = 0;
-	INT	i;
-	ER	er;
+	INT	i, nl;
+	ER	er = E_OK;
 
-	if ( n <= 1 ) {
-		if ( leaf != 0 ) {
-			ts_free_ext(o->vol, leaf, 1);
-		}
-		pl[PL_FORM] = ( n == 1 ) ? F_RUN : F_NONE;
-		wr64(pl + PL_A, ( n == 1 ) ? x[0].p : 0);
-		wr64(pl + PL_B, ( n == 1 ) ? x[0].n : 0);
+	s->n = 0;
+	s->nleaf = 0;
+	if ( pl[PL_FORM] == F_RUN ) {
+		s->x[0].l = 0;
+		s->x[0].p = rd64(pl + PL_A);
+		s->x[0].n = rd64(pl + PL_B);
+		s->n = ( s->x[0].n > 0 ) ? 1 : 0;
+		s->dirty = s->n;
 		return E_OK;
 	}
-	if ( n > TSFSO_MAX_EXTENTS ) {
-		return E_NOMEM;			/* the part is broken into too many runs */
-	}
-	if ( leaf == 0 ) {
-		er = ts_alloc_ext(o->vol, 1, &leaf, &got);
-		if ( er < E_OK ) {
-			return er;
-		}
+	if ( pl[PL_FORM] != F_TREE && pl[PL_FORM] != F_TREE2 ) {
+		return E_OK;
 	}
 	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
 	if ( buf == NULL ) {
 		return E_NOMEM;
 	}
+	if ( pl[PL_FORM] == F_TREE ) {
+		er = leaf_load(o, rd64(pl + PL_A), s, buf);
+	} else {
+		/* the index: its leaves in order, each read after it */
+		UD	*leaf = NULL;
+
+		er = meta_read(o->vol, rd64(pl + PL_A), buf);
+		if ( er >= E_OK && ts_blk_check(o->vol, buf, TSFSBLK_MAGIC_TBL, rd64(pl + PL_A)) < E_OK ) {
+			er = E_IO;
+		}
+		nl = ( er >= E_OK ) ? (INT)rd32(buf + XL_N) : 0;
+		if ( nl < 2 || nl > TSFSO_MAX_EXTENTS ) {
+			er = ( er < E_OK ) ? er : E_OBJ;
+			nl = 0;
+		}
+		if ( er >= E_OK ) {
+			leaf = (UD *)Kmalloc(sizeof(UD) * (SZ)nl);
+			if ( leaf == NULL ) er = E_NOMEM;
+		}
+		for ( i = 0; i < nl && er >= E_OK; i++ ) {
+			leaf[i] = rd64(buf + XL_ENT + i * XL_ESZ + 8);
+		}
+		for ( i = 0; i < nl && er >= E_OK; i++ ) {
+			er = leaf_load(o, leaf[i], s, buf);
+		}
+		if ( er >= E_OK ) {
+			if ( s->leaf != NULL ) Kfree(s->leaf);
+			s->leaf = leaf;
+			s->nleaf = nl;
+		} else if ( leaf != NULL ) {
+			Kfree(leaf);
+		}
+	}
+	Kfree(buf);
+	if ( er < E_OK ) s->n = 0;
+	s->dirty = s->n;
+	return er;
+}
+
+/* One leaf written: `n` runs from x, sealed as the object's */
+LOCAL ER leaf_store( OBJ *o, UD blk, CONST XT *x, INT n, UB *buf )
+{
+	INT	i;
+
 	knl_memset(buf, 0, TSFSBLK_BLOCK_SIZE);
 	wr32(buf + XL_N, (UW)n);
 	for ( i = 0; i < n; i++ ) {
@@ -617,12 +718,150 @@ LOCAL ER xt_store( OBJ *o, UB *pl, CONST XT *x, INT n )
 		wr64(buf + XL_ENT + i * XL_ESZ + 8, x[i].p);
 		wr64(buf + XL_ENT + i * XL_ESZ + 16, x[i].n);
 	}
-	ts_blk_seal(o->vol, buf, TSFSBLK_MAGIC_TBL, leaf, o->owner);
-	er = meta_write(o->vol, leaf, buf);
+	ts_blk_seal(o->vol, buf, TSFSBLK_MAGIC_TBL, blk, o->owner);
+	return meta_write(o->vol, blk, buf);
+}
+
+/* The blocks of the tree the place has now, given back (leaves, index) */
+LOCAL ER tree_free( OBJ *o, CONST UB *pl, CONST XTS *s, BOOL later )
+{
+	INT	i;
+	ER	er = E_OK;
+
+	if ( pl[PL_FORM] == F_TREE ) {
+		er = later ? pend_add(o->vol, rd64(pl + PL_A), 1) : ts_free_ext(o->vol, rd64(pl + PL_A), 1);
+	} else if ( pl[PL_FORM] == F_TREE2 ) {
+		for ( i = 0; i < s->nleaf && er >= E_OK; i++ ) {
+			er = later ? pend_add(o->vol, s->leaf[i], 1) : ts_free_ext(o->vol, s->leaf[i], 1);
+		}
+		if ( er >= E_OK ) {
+			er = later ? pend_add(o->vol, rd64(pl + PL_A), 1) : ts_free_ext(o->vol, rd64(pl + PL_A), 1);
+		}
+	}
+	return er;
+}
+
+/*
+ * The runs written back: one run in the place itself, up to a leaf's
+ * worth in one leaf, more in leaves under an index. The blocks of the
+ * tree are taken when the part first needs them and given back when it
+ * no longer does. Of a tree of two levels, only the leaves from the one
+ * holding the first changed run on are written again, so that a part
+ * that grows at its end changes its last leaf and the index.
+ */
+LOCAL ER xt_store( OBJ *o, UB *pl, XTS *s )
+{
+	UB	*buf;
+	UD	got = 0, idx = 0, blk;
+	INT	n = s->n, nl, i, from;
+	ER	er = E_OK;
+
+	if ( n <= 1 ) {
+		er = tree_free(o, pl, s, FALSE);
+		pl[PL_FORM] = ( n == 1 ) ? F_RUN : F_NONE;
+		wr64(pl + PL_A, ( n == 1 ) ? s->x[0].p : 0);
+		wr64(pl + PL_B, ( n == 1 ) ? s->x[0].n : 0);
+		s->nleaf = 0;
+		return er;
+	}
+	if ( n > XT2_MAX ) {
+		return E_NOMEM;			/* the part is broken into too many runs */
+	}
+	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	if ( buf == NULL ) {
+		return E_NOMEM;
+	}
+
+	if ( n <= TSFSO_MAX_EXTENTS ) {
+		/* one leaf: the tree's first leaf kept, the rest given back */
+		if ( pl[PL_FORM] == F_TREE ) {
+			blk = rd64(pl + PL_A);
+		} else if ( pl[PL_FORM] == F_TREE2 && s->nleaf > 0 ) {
+			blk = s->leaf[0];
+			for ( i = 1; i < s->nleaf && er >= E_OK; i++ ) er = ts_free_ext(o->vol, s->leaf[i], 1);
+			if ( er >= E_OK ) er = ts_free_ext(o->vol, rd64(pl + PL_A), 1);
+		} else {
+			er = ts_alloc_ext(o->vol, 1, &blk, &got);
+		}
+		if ( er >= E_OK ) er = leaf_store(o, blk, s->x, n, buf);
+		Kfree(buf);
+		if ( er >= E_OK ) {
+			pl[PL_FORM] = F_TREE;
+			wr64(pl + PL_A, blk);
+			wr64(pl + PL_B, (UD)n);
+			s->nleaf = 0;
+			s->dirty = n;
+		}
+		return er;
+	}
+
+	/* two levels: the leaves it has kept, more taken or the last given back */
+	nl = ( n + TSFSO_MAX_EXTENTS - 1 ) / TSFSO_MAX_EXTENTS;
+	from = s->dirty / TSFSO_MAX_EXTENTS;
+	if ( pl[PL_FORM] != F_TREE2 ) {
+		UD	*leaf = (UD *)Kmalloc(sizeof(UD) * (SZ)TSFSO_MAX_EXTENTS);
+
+		if ( leaf == NULL ) {
+			Kfree(buf);
+			return E_NOMEM;
+		}
+		if ( s->leaf != NULL ) Kfree(s->leaf);
+		s->leaf = leaf;
+		s->nleaf = 0;
+		if ( pl[PL_FORM] == F_TREE ) {
+			s->leaf[s->nleaf++] = rd64(pl + PL_A);	/* the leaf it had is the first */
+		}
+		er = ts_alloc_ext(o->vol, 1, &idx, &got);
+		from = 0;
+		if ( er >= E_OK ) er = ts_blk_xt2(o->vol);	/* the volume says it has the form */
+	} else {
+		UD	*leaf = (UD *)Kmalloc(sizeof(UD) * (SZ)TSFSO_MAX_EXTENTS);
+
+		idx = rd64(pl + PL_A);
+		if ( leaf == NULL ) {
+			Kfree(buf);
+			return E_NOMEM;
+		}
+		knl_memcpy(leaf, s->leaf, sizeof(UD) * (SZ)s->nleaf);
+		Kfree(s->leaf);
+		s->leaf = leaf;
+	}
+	while ( er >= E_OK && s->nleaf < nl ) {
+		if ( from > s->nleaf ) from = s->nleaf;
+		er = ts_alloc_ext(o->vol, 1, &s->leaf[s->nleaf], &got);
+		if ( er >= E_OK ) s->nleaf++;
+	}
+	while ( er >= E_OK && s->nleaf > nl ) {
+		er = ts_free_ext(o->vol, s->leaf[--s->nleaf], 1);
+	}
+	for ( i = from; i < nl && er >= E_OK; i++ ) {
+		INT	k = i * TSFSO_MAX_EXTENTS;
+		INT	m = ( n - k > TSFSO_MAX_EXTENTS ) ? TSFSO_MAX_EXTENTS : n - k;
+
+		er = leaf_store(o, s->leaf[i], s->x + k, m, buf);
+	}
+	if ( er >= E_OK ) {
+		/* the index: each leaf, where its runs start and how many it holds */
+		knl_memset(buf, 0, TSFSBLK_BLOCK_SIZE);
+		wr32(buf + XL_N, (UW)nl);
+		for ( i = 0; i < nl; i++ ) {
+			INT	k = i * TSFSO_MAX_EXTENTS;
+
+			wr64(buf + XL_ENT + i * XL_ESZ, s->x[k].l);
+			wr64(buf + XL_ENT + i * XL_ESZ + 8, s->leaf[i]);
+			wr64(buf + XL_ENT + i * XL_ESZ + 16,
+			     (UD)( ( n - k > TSFSO_MAX_EXTENTS ) ? TSFSO_MAX_EXTENTS : n - k ));
+		}
+		ts_blk_seal(o->vol, buf, TSFSBLK_MAGIC_TBL, idx, o->owner);
+		er = meta_write(o->vol, idx, buf);
+	}
 	Kfree(buf);
-	pl[PL_FORM] = F_TREE;
-	wr64(pl + PL_A, leaf);
-	wr64(pl + PL_B, (UD)n);
+	if ( er >= E_OK ) {
+		pl[PL_FORM] = F_TREE2;
+		wr64(pl + PL_A, idx);
+		wr64(pl + PL_B, (UD)n);
+		s->dirty = n;
+	}
 	return er;
 }
 
@@ -634,15 +873,55 @@ LOCAL UD xt_blocks( CONST XT *x, INT n )
 /* Where block `l` of the part is, and how many follow it in the same run */
 LOCAL UD xt_map( CONST XT *x, INT n, UD l, UD *p_run )
 {
-	INT	i;
+	INT	lo = 0, hi = n - 1, i;
 
-	for ( i = 0; i < n; i++ ) {
-		if ( l >= x[i].l && l < x[i].l + x[i].n ) {
+	/* the runs are in order of their first block: halved to it */
+	while ( lo <= hi ) {
+		i = ( lo + hi ) / 2;
+		if ( l < x[i].l ) {
+			hi = i - 1;
+		} else if ( l >= x[i].l + x[i].n ) {
+			lo = i + 1;
+		} else {
 			if ( p_run != NULL ) *p_run = x[i].l + x[i].n - l;
 			return x[i].p + ( l - x[i].l );
 		}
 	}
 	return 0;
+}
+
+LOCAL UD run_io_max( OBJ *o );
+
+/*
+ * `cnt` blocks at `p` on the volume made zeros: as many together in one
+ * request as the device takes at once, from a buffer of zeros made the
+ * first time it is needed and made again larger for a longer run
+ * (*p_zero, *p_zn blocks of it; Kfree *p_raw).
+ */
+LOCAL ER zero_run( OBJ *o, UD p, UD cnt, UB **p_zero, void **p_raw, UD *p_zn )
+{
+	UD	k, zn = run_io_max(o);
+	ER	er = E_OK;
+
+	if ( zn > cnt ) zn = cnt;
+	if ( *p_zero != NULL && *p_zn < zn ) {
+		Kfree(*p_raw);			/* a longer run than the last: a larger buffer */
+		*p_zero = NULL;
+	}
+	if ( *p_zero == NULL ) {
+		*p_raw = Kmalloc((SZ)( zn * TSFSBLK_BLOCK_SIZE ) + 64);
+		if ( *p_raw == NULL ) return E_NOMEM;
+		*p_zero = (UB *)( ( (UBINT)*p_raw + 63 ) & ~(UBINT)63 );
+		knl_memset(*p_zero, 0, (SZ)( zn * TSFSBLK_BLOCK_SIZE ));
+		*p_zn = zn;
+	}
+	while ( cnt > 0 && er >= E_OK ) {
+		k = ( cnt < *p_zn ) ? cnt : *p_zn;
+		er = ( k == 1 ) ? ts_write_blk(o->vol, p, *p_zero) : ts_write_blks(o->vol, p, k, *p_zero);
+		p += k;
+		cnt -= k;
+	}
+	return er;
 }
 
 /*
@@ -651,59 +930,62 @@ LOCAL UD xt_map( CONST XT *x, INT n, UD l, UD *p_run )
  * The blocks added are cleared unless the caller is about to fill them:
  * [keep_from, keep_to) is what it will write whole.
  */
-LOCAL ER xt_grow( OBJ *o, XT *x, INT *p_n, UD need, UD keep_from, UD keep_to )
+LOCAL ER xt_grow( OBJ *o, XTS *s, UD need, UD keep_from, UD keep_to )
 {
 	UB	*zero = NULL;
-	UD	have = xt_blocks(x, *p_n), start = 0, got = 0, b;
-	INT	n = *p_n;
+	void	*zraw = NULL;
+	UD	have = xt_blocks(s->x, s->n), start = 0, got = 0, zn = 0, a, e;
+	INT	n = s->n;
 	ER	er = E_OK;
 
 	while ( have < need && er >= E_OK ) {
 		er = E_NOMEM;
 		if ( n > 0 ) {
-			er = ts_alloc_ext_at(o->vol, x[n - 1].p + x[n - 1].n, need - have, &got);
+			er = ts_alloc_ext_at(o->vol, s->x[n - 1].p + s->x[n - 1].n, need - have, &got);
 			if ( er >= E_OK ) {
-				start = x[n - 1].p + x[n - 1].n;
-				x[n - 1].n += got;
+				start = s->x[n - 1].p + s->x[n - 1].n;
+				s->x[n - 1].n += got;
+				if ( s->dirty > n - 1 ) s->dirty = n - 1;
 			}
 		}
 		if ( er < E_OK ) {
-			if ( n >= TSFSO_MAX_EXTENTS ) {
+			if ( xts_fit(s, n + 1) < E_OK ) {
 				er = E_NOMEM;
 				break;
 			}
 			er = ts_alloc_ext(o->vol, need - have, &start, &got);
 			if ( er < E_OK ) break;
-			x[n].l = have;
-			x[n].p = start;
-			x[n].n = got;
+			s->x[n].l = have;
+			s->x[n].p = start;
+			s->x[n].n = got;
+			if ( s->dirty > n ) s->dirty = n;
 			n++;
+			s->n = n;
 		}
-		for ( b = 0; b < got && er >= E_OK; b++ ) {
-			if ( have + b >= keep_from && have + b < keep_to ) continue;
-			if ( zero == NULL ) {
-				zero = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
-				if ( zero == NULL ) { er = E_NOMEM; break; }
-				knl_memset(zero, 0, TSFSBLK_BLOCK_SIZE);
-			}
-			er = ts_write_blk(o->vol, start + b, zero);
-		}
+		/* of [have, have + got), what lies before keep_from and after
+		   keep_to is cleared; the caller writes the rest whole */
+		a = ( keep_from > have ) ? keep_from - have : 0;
+		if ( a > got ) a = got;
+		if ( a > 0 && er >= E_OK ) er = zero_run(o, start, a, &zero, &zraw, &zn);
+		e = ( keep_to > have ) ? keep_to - have : 0;
+		if ( e < a ) e = a;
+		if ( e < got && er >= E_OK ) er = zero_run(o, start + e, got - e, &zero, &zraw, &zn);
 		have += got;
 	}
-	if ( zero != NULL ) Kfree(zero);
-	*p_n = n;
+	if ( zraw != NULL ) Kfree(zraw);
+	s->n = n;
 	return er;
 }
 
 /* Blocks past `keep` given back, now or once the transaction is real */
-LOCAL ER xt_shrink( OBJ *o, XT *x, INT *p_n, UD keep, BOOL later )
+LOCAL ER xt_shrink( OBJ *o, XTS *s, UD keep, BOOL later )
 {
-	INT	n = *p_n;
+	INT	n = s->n;
 	UD	cut;
 	ER	er = E_OK;
 
-	while ( n > 0 && xt_blocks(x, n) > keep && er >= E_OK ) {
-		XT	*t = &x[n - 1];
+	while ( n > 0 && xt_blocks(s->x, n) > keep && er >= E_OK ) {
+		XT	*t = &s->x[n - 1];
 
 		cut = ( keep > t->l ) ? keep - t->l : 0;
 		if ( later ) {
@@ -716,8 +998,9 @@ LOCAL ER xt_shrink( OBJ *o, XT *x, INT *p_n, UD keep, BOOL later )
 		} else {
 			t->n = cut;
 		}
+		if ( s->dirty > ( ( cut == 0 ) ? n : n - 1 ) ) s->dirty = ( cut == 0 ) ? n : n - 1;
 	}
-	*p_n = n;
+	s->n = n;
 	return er;
 }
 
@@ -752,10 +1035,6 @@ LOCAL UB *run_io_buf( SZ room, void **p_raw )
 	return ( raw == NULL ) ? NULL : (UB *)( ( (UBINT)raw + RUN_IO_ALIGN - 1 ) & ~(UBINT)( RUN_IO_ALIGN - 1 ) );
 }
 
-LOCAL XT *xt_room( void )
-{
-	return (XT *)Kmalloc(sizeof(XT) * ( TSFSO_MAX_EXTENTS + 1 ));
-}
 
 /* The room for the blocks of one request: as many as `len` bytes can fill */
 LOCAL SZ run_io_room( SZ len, UD max )
@@ -780,36 +1059,26 @@ LOCAL UD run_io_n( UD at, SZ left, UD run, UD max )
 	return ( n >= 2 ) ? n : 0;
 }
 
-LOCAL ER dseg_read( OBJ *o, CONST UB *pl, UD off, UB *dst, SZ len, SZ *p_asize )
+/*
+ * `len` bytes from `off` of a part whose blocks lie in the runs x[0..n),
+ * already cut to what the part holds: whole blocks that lie together go
+ * in one request each, as many as the device takes at once.
+ */
+LOCAL ER runs_read( ID vol, CONST XT *x, INT n, UD off, UB *dst, SZ len, SZ *p_asize )
 {
-	UD	size = rd64(pl + PL_BYTES), l, p, run;
+	UD	l, p, run, rmax = ts_run_blocks(vol);
 	UB	*buf;
 	void	*raw = NULL;
-	UD	rmax;
-	XT	*x;
-	INT	n = 0;
 	SZ	done = 0, k;
-	ER	er;
+	ER	er = E_OK;
 
-	*p_asize = 0;
-	if ( off >= size || len <= 0 ) {
-		return E_OK;
-	}
-	if ( (UD)len > size - off ) len = (SZ)( size - off );
-	if ( pl[PL_FORM] == F_INLINE ) {
-		knl_memcpy(dst, o->hdr + rd16(pl + PL_A) + off, (INT)len);
-		*p_asize = len;
-		return E_OK;
-	}
-	x = xt_room();
-	rmax = run_io_max(o);
+	if ( rmax == 0 ) rmax = RUN_IO_BLOCKS;
+	if ( rmax < 2 ) rmax = 2;
+	if ( rmax > RUN_IO_CAP ) rmax = RUN_IO_CAP;
 	buf = run_io_buf(run_io_room(len, rmax), &raw);
-	if ( x == NULL || buf == NULL ) {
-		if ( x != NULL ) Kfree(x);
-		if ( raw != NULL ) Kfree(raw);
+	if ( buf == NULL ) {
 		return E_NOMEM;
 	}
-	er = xt_load(o, pl, x, &n);
 	while ( er >= E_OK && done < len ) {
 		UD	nb;
 
@@ -821,22 +1090,44 @@ LOCAL ER dseg_read( OBJ *o, CONST UB *pl, UD off, UB *dst, SZ len, SZ *p_asize )
 		}
 		nb = run_io_n(off + (UD)done, len - done, run, rmax);
 		if ( nb > 0 ) {
-			er = ts_read_blks(o->vol, p, nb, buf);
+			er = ts_read_blks(vol, p, nb, buf);
 			if ( er < E_OK ) break;
-			knl_memcpy(dst + done, buf, (INT)( nb * TSFSBLK_BLOCK_SIZE ));
+			knl_memcpy(dst + done, buf, (SZ)( nb * TSFSBLK_BLOCK_SIZE ));
 			done += (SZ)( nb * TSFSBLK_BLOCK_SIZE );
 			continue;
 		}
-		er = ts_read_blk(o->vol, p, buf);
+		er = ts_read_blk(vol, p, buf);
 		if ( er < E_OK ) break;
 		k = TSFSBLK_BLOCK_SIZE - (SZ)( ( off + (UD)done ) % TSFSBLK_BLOCK_SIZE );
 		if ( k > len - done ) k = len - done;
-		knl_memcpy(dst + done, buf + ( off + (UD)done ) % TSFSBLK_BLOCK_SIZE, (INT)k);
+		knl_memcpy(dst + done, buf + ( off + (UD)done ) % TSFSBLK_BLOCK_SIZE, k);
 		done += k;
 	}
 	Kfree(raw);
-	Kfree(x);
 	if ( er >= E_OK ) *p_asize = done;
+	return er;
+}
+
+LOCAL ER dseg_read( OBJ *o, CONST UB *pl, UD off, UB *dst, SZ len, SZ *p_asize )
+{
+	UD	size = rd64(pl + PL_BYTES);
+	XTS	xs;
+	ER	er;
+
+	*p_asize = 0;
+	if ( off >= size || len <= 0 ) {
+		return E_OK;
+	}
+	if ( (UD)len > size - off ) len = (SZ)( size - off );
+	if ( pl[PL_FORM] == F_INLINE ) {
+		knl_memcpy(dst, o->hdr + rd16(pl + PL_A) + off, len);
+		*p_asize = len;
+		return E_OK;
+	}
+	er = xts_new(&xs);
+	if ( er >= E_OK ) er = xt_load(o, pl, &xs);
+	if ( er >= E_OK ) er = runs_read(o->vol, xs.x, xs.n, off, dst, len, p_asize);
+	xts_free(&xs);
 	return er;
 }
 
@@ -886,8 +1177,8 @@ LOCAL ER dseg_write( OBJ *o, UB *pl, UD off, CONST UB *src, SZ len )
 	UB	*buf;
 	void	*raw = NULL;
 	UD	rmax;
-	XT	*x;
-	INT	n = 0, noff;
+	XTS	xs;
+	INT	noff;
 	SZ	done = 0, k;
 	ER	er;
 
@@ -930,29 +1221,29 @@ LOCAL ER dseg_write( OBJ *o, UB *pl, UD off, CONST UB *src, SZ len )
 		return er;
 	}
 
-	x = xt_room();
 	rmax = run_io_max(o);
 	buf = run_io_buf(run_io_room(len, rmax), &raw);
-	if ( x == NULL || buf == NULL ) {
-		if ( x != NULL ) Kfree(x);
+	er = xts_new(&xs);
+	if ( er < E_OK || buf == NULL ) {
+		xts_free(&xs);
 		if ( raw != NULL ) Kfree(raw);
 		return E_NOMEM;
 	}
-	er = xt_load(o, pl, x, &n);
+	er = xt_load(o, pl, &xs);
 	need = BLKS_FOR(end, TSFSBLK_BLOCK_SIZE);
-	if ( er >= E_OK && need > xt_blocks(x, n) ) {
+	if ( er >= E_OK && need > xt_blocks(xs.x, xs.n) ) {
 		/* blocks the write covers whole need not be cleared first */
 		UD	kf = BLKS_FOR(off, TSFSBLK_BLOCK_SIZE);
 		UD	kt = end / TSFSBLK_BLOCK_SIZE;
 
-		er = xt_grow(o, x, &n, need, kf, ( kt > kf ) ? kt : kf);
-		if ( er >= E_OK ) er = xt_store(o, pl, x, n);
+		er = xt_grow(o, &xs, need, kf, ( kt > kf ) ? kt : kf);
+		if ( er >= E_OK ) er = xt_store(o, pl, &xs);
 	}
 	while ( er >= E_OK && done < len ) {
 		UD	at = off + (UD)done, run = 0, nb;
 
 		l = at / TSFSBLK_BLOCK_SIZE;
-		p = xt_map(x, n, l, &run);
+		p = xt_map(xs.x, xs.n, l, &run);
 		if ( p == 0 ) {
 			er = E_OBJ;
 			break;
@@ -975,7 +1266,7 @@ LOCAL ER dseg_write( OBJ *o, UB *pl, UD off, CONST UB *src, SZ len )
 		done += k;
 	}
 	Kfree(raw);
-	Kfree(x);
+	xts_free(&xs);
 	if ( er >= E_OK && end > size ) {
 		wr64(pl + PL_BYTES, end);
 	}
@@ -991,21 +1282,31 @@ LOCAL ER dseg_trunc( OBJ *o, UB *pl, UD nsize )
 {
 	UD	size = rd64(pl + PL_BYTES);
 	UB	*zero;
-	XT	*x;
-	INT	n = 0;
+	XTS	xs;
 	ER	er = E_OK;
 
 	if ( nsize > size ) {
-		zero = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
-		if ( zero == NULL ) return E_NOMEM;
-		knl_memset(zero, 0, TSFSBLK_BLOCK_SIZE);
-		while ( size < nsize && er >= E_OK ) {
-			SZ	k = ( nsize - size > TSFSBLK_BLOCK_SIZE ) ? TSFSBLK_BLOCK_SIZE : (SZ)( nsize - size );
-
-			er = dseg_write(o, pl, size, zero, k);
-			size += (UD)k;
+		/* lengthened: small, it stays inline, written with zeros */
+		if ( ( pl[PL_FORM] == F_NONE || pl[PL_FORM] == F_INLINE ) && nsize <= DATA_INLINE_MAX ) {
+			zero = (UB *)Kmalloc(DATA_INLINE_MAX);
+			if ( zero == NULL ) return E_NOMEM;
+			knl_memset(zero, 0, DATA_INLINE_MAX);
+			er = dseg_write(o, pl, size, zero, (SZ)( nsize - size ));
+			Kfree(zero);
+			return er;
 		}
-		Kfree(zero);
+		/* else blocks: the last one's bytes past the end are zeros
+		   already, and the blocks added are cleared as they are taken */
+		er = dseg_unline(o, pl);
+		if ( er < E_OK ) return er;
+		er = xts_new(&xs);
+		if ( er >= E_OK ) er = xt_load(o, pl, &xs);
+		if ( er >= E_OK && BLKS_FOR(nsize, TSFSBLK_BLOCK_SIZE) > xt_blocks(xs.x, xs.n) ) {
+			er = xt_grow(o, &xs, BLKS_FOR(nsize, TSFSBLK_BLOCK_SIZE), 0, 0);
+			if ( er >= E_OK ) er = xt_store(o, pl, &xs);
+		}
+		xts_free(&xs);
+		if ( er >= E_OK ) wr64(pl + PL_BYTES, nsize);
 		return er;
 	}
 	if ( pl[PL_FORM] == F_INLINE ) {
@@ -1018,14 +1319,13 @@ LOCAL ER dseg_trunc( OBJ *o, UB *pl, UD nsize )
 		}
 		return E_OK;
 	}
-	x = xt_room();
-	if ( x == NULL ) return E_NOMEM;
-	er = xt_load(o, pl, x, &n);
-	if ( er >= E_OK ) er = xt_shrink(o, x, &n, BLKS_FOR(nsize, TSFSBLK_BLOCK_SIZE), FALSE);
-	if ( er >= E_OK ) er = xt_store(o, pl, x, n);
+	er = xts_new(&xs);
+	if ( er >= E_OK ) er = xt_load(o, pl, &xs);
+	if ( er >= E_OK ) er = xt_shrink(o, &xs, BLKS_FOR(nsize, TSFSBLK_BLOCK_SIZE), FALSE);
+	if ( er >= E_OK ) er = xt_store(o, pl, &xs);
 	if ( er >= E_OK && nsize % TSFSBLK_BLOCK_SIZE != 0 ) {
 		UB	*buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
-		UD	p = xt_map(x, n, nsize / TSFSBLK_BLOCK_SIZE, NULL);
+		UD	p = xt_map(xs.x, xs.n, nsize / TSFSBLK_BLOCK_SIZE, NULL);
 
 		if ( buf == NULL ) {
 			er = E_NOMEM;
@@ -1039,19 +1339,18 @@ LOCAL ER dseg_trunc( OBJ *o, UB *pl, UD nsize )
 		}
 		if ( buf != NULL ) Kfree(buf);
 	}
-	Kfree(x);
 	if ( er >= E_OK ) {
 		wr64(pl + PL_BYTES, nsize);
-		if ( n == 0 ) knl_memset(pl, 0, PL_SIZE);
+		if ( xs.n == 0 ) knl_memset(pl, 0, PL_SIZE);
 	}
+	xts_free(&xs);
 	return er;
 }
 
 /* Everything a data part holds given back, now or once it is real */
 LOCAL ER dseg_free( OBJ *o, UB *pl, BOOL later )
 {
-	XT	*x;
-	INT	n = 0;
+	XTS	xs;
 	ER	er;
 
 	if ( pl[PL_FORM] == F_INLINE ) {
@@ -1059,14 +1358,11 @@ LOCAL ER dseg_free( OBJ *o, UB *pl, BOOL later )
 		knl_memset(pl, 0, PL_SIZE);
 		return E_OK;
 	}
-	x = xt_room();
-	if ( x == NULL ) return E_NOMEM;
-	er = xt_load(o, pl, x, &n);
-	if ( er >= E_OK ) er = xt_shrink(o, x, &n, 0, later);
-	if ( er >= E_OK && pl[PL_FORM] == F_TREE ) {
-		er = later ? pend_add(o->vol, rd64(pl + PL_A), 1) : ts_free_ext(o->vol, rd64(pl + PL_A), 1);
-	}
-	Kfree(x);
+	er = xts_new(&xs);
+	if ( er >= E_OK ) er = xt_load(o, pl, &xs);
+	if ( er >= E_OK ) er = xt_shrink(o, &xs, 0, later);
+	if ( er >= E_OK ) er = tree_free(o, pl, &xs, later);
+	xts_free(&xs);
 	knl_memset(pl, 0, PL_SIZE);
 	return er;
 }
@@ -1449,7 +1745,9 @@ LOCAL BOOL vol_ok( ID vol )
 /*
  * One operation is one transaction unless the caller has opened one of
  * its own, in which case the operation joins it and the caller decides
- * when it becomes real.
+ * when it becomes real. The operation's transaction is closed into the
+ * log's queue at its end; the caller that let the volume's lock go makes
+ * it real (tsfs.c, vol_unlock).
  */
 LOCAL ER txn_begin( ID vol )
 {
@@ -1458,6 +1756,7 @@ LOCAL ER txn_begin( ID vol )
 	if ( !vol_ok(vol) ) {
 		return E_ID;
 	}
+	GEN_BUMP(vol);
 	if ( obj_trx[vol - 1] > 0 ) {
 		return E_OK;
 	}
@@ -1472,6 +1771,7 @@ LOCAL ER txn_begin( ID vol )
 
 LOCAL ER txn_end( ID vol, ER er )
 {
+	if ( vol_ok(vol) ) GEN_BUMP(vol);
 	if ( !vol_ok(vol) || obj_trx[vol - 1] > 0 ) {
 		return er;			/* the caller's transaction goes on */
 	}
@@ -1481,7 +1781,7 @@ LOCAL ER txn_end( ID vol, ER er )
 		pend_clear(vol);		/* the old places are still in use */
 		return er;
 	}
-	er = ts_jrnl_commit(vol);
+	er = ts_jrnl_close(vol, NULL);
 	if ( er >= E_OK ) {
 		pend_apply(vol);
 	} else {
@@ -1500,6 +1800,7 @@ EXPORT ER ts_obj_begin( ID vol )
 	if ( obj_trx[vol - 1] > 0 ) {
 		return E_BUSY;			/* one at a time */
 	}
+	GEN_BUMP(vol);
 	er = ts_jrnl_begin(vol);
 	if ( er < E_OK ) {
 		return er;
@@ -1526,15 +1827,18 @@ EXPORT ER ts_obj_end( ID vol, BOOL commit )
 	if ( obj_trx[vol - 1] == 0 ) {
 		return E_OBJ;			/* none was opened */
 	}
+	GEN_BUMP(vol);
 	obj_trx[vol - 1] = 0;
 	ts_btree_jrnl(vol, FALSE);
 	if ( !commit ) {
 		pend_clear(vol);
 		return ts_jrnl_abort(vol);
 	}
-	er = ts_jrnl_commit(vol);
+	/* closed, the freeing behind it closed too, and both made real together */
+	er = ts_jrnl_close(vol, NULL);
 	if ( er >= E_OK ) {
 		pend_apply(vol);
+		er = ts_jrnl_durable(vol, ts_jrnl_next(vol));
 	} else {
 		pend_clear(vol);
 	}
@@ -1548,6 +1852,7 @@ EXPORT ID ts_obj_mount( CONST char *devnm )
 	ID	vol = ts_opn_vol_blk(devnm);
 
 	if ( vol > 0 && vol_ok(vol) ) {
+		GEN_BUMP(vol);			/* nothing kept of a volume before under this number */
 		obj_trx[vol - 1] = 0;
 		pend_clear(vol);
 		ts_btree_jrnl(vol, FALSE);
@@ -1563,6 +1868,7 @@ EXPORT ER ts_obj_unmount( ID vol )
 		ts_obj_end(vol, FALSE);
 	}
 	(void)ts_obj_tidy(vol, NULL);
+	if ( vol_ok(vol) ) GEN_BUMP(vol);
 
 	return ts_cls_vol_blk(vol);
 }
@@ -1799,6 +2105,7 @@ LOCAL BOOL salv_place( CONST UB *pl, UD total, UD max )
 		return (BOOL)( a > 0 && b > 0 && a < total && b <= total - a
 			       && b * TSFSBLK_BLOCK_SIZE >= bytes );
 	case F_TREE:
+	case F_TREE2:
 		return (BOOL)( a > 0 && a < total );
 	default:
 		return FALSE;
@@ -3001,10 +3308,9 @@ LOCAL void scrub_node( void *ctx, UD blk )
 /* The blocks a place lies in: management blocks checked, data read */
 LOCAL void scrub_place( OBJ *o, CONST UB *pl, BOOL mgmt, BOOL data, T_TSFSSCRUB *pk )
 {
-	XT	*x;
+	XTS	xs;
 	UB	*buf;
 	UD	i, k;
-	INT	n = 0;
 
 	if ( pl[PL_FORM] == F_RUN && mgmt ) {
 		for ( i = 0; i < rd64(pl + PL_B); i++ ) {
@@ -3012,27 +3318,34 @@ LOCAL void scrub_place( OBJ *o, CONST UB *pl, BOOL mgmt, BOOL data, T_TSFSSCRUB 
 		}
 		return;
 	}
-	if ( pl[PL_FORM] == F_TREE ) {
+	if ( pl[PL_FORM] == F_TREE || pl[PL_FORM] == F_TREE2 ) {
 		(void)ts_scrub_one_blk(o->vol, rd64(pl + PL_A), TSFSBLK_MAGIC_TBL, pk);
 	}
-	if ( mgmt || !data || ( pl[PL_FORM] != F_RUN && pl[PL_FORM] != F_TREE ) ) {
+	if ( pl[PL_FORM] == F_TREE2 && xts_new(&xs) >= E_OK ) {
+		if ( xt_load(o, pl, &xs) >= E_OK ) {
+			for ( k = 0; k < (UD)xs.nleaf; k++ ) {
+				(void)ts_scrub_one_blk(o->vol, xs.leaf[k], TSFSBLK_MAGIC_TBL, pk);
+			}
+		}
+		xts_free(&xs);
+	}
+	if ( mgmt || !data || ( pl[PL_FORM] != F_RUN && pl[PL_FORM] != F_TREE && pl[PL_FORM] != F_TREE2 ) ) {
 		return;
 	}
-	x = xt_room();
 	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
-	if ( x != NULL && buf != NULL && xt_load(o, pl, x, &n) >= E_OK ) {
-		for ( k = 0; k < (UD)n; k++ ) {
-			for ( i = 0; i < x[k].n; i++ ) {
+	if ( xts_new(&xs) >= E_OK && buf != NULL && xt_load(o, pl, &xs) >= E_OK ) {
+		for ( k = 0; k < (UD)xs.n; k++ ) {
+			for ( i = 0; i < xs.x[k].n; i++ ) {
 				pk->checked++;
-				if ( knl_tsfsblk_raw_read(o->vol, x[k].p + i, buf) < E_OK ) {
-					ts_blk_error(o->vol, x[k].p + i, TSFSBLK_ERR_IO);
+				if ( knl_tsfsblk_raw_read(o->vol, xs.x[k].p + i, buf) < E_OK ) {
+					ts_blk_error(o->vol, xs.x[k].p + i, TSFSBLK_ERR_IO);
 					pk->bad++;
-					if ( pk->first_bad == 0 ) pk->first_bad = x[k].p + i;
+					if ( pk->first_bad == 0 ) pk->first_bad = xs.x[k].p + i;
 				}
 			}
 		}
 	}
-	if ( x != NULL ) Kfree(x);
+	xts_free(&xs);
 	if ( buf != NULL ) Kfree(buf);
 }
 
@@ -3565,31 +3878,284 @@ EXPORT ER ts_obj_ins_rec( ID vol, CONST TS_UUID *uuid, INT pos, UINT rt, UINT su
 				rt, sub, p_pos);
 }
 
+/* ---------------------------------------------------------------- what reading keeps */
+
+/*
+ * A read finds the object, its placement table and its order of
+ * records (which is in the metadata), and the runs of the record --
+ * several blocks read and the metadata parsed -- before the first byte.
+ * What a read found is kept, per volume, for the records read last
+ * (RC_SLOTS), and holds while the volume's generation is the one it was
+ * found under: any change of any object of the volume starts and ends a
+ * transaction, which moves the generation on, and what is kept is then
+ * found again. A record of bytes inline in the object block is not kept.
+ *
+ * A record read from where the last read of it ended is read ahead: a
+ * read smaller than RA_BYTES brings RA_BYTES into the slot's buffer,
+ * and the next reads are served from it. The window is larger than a
+ * page cache's usual one because the device is asked for as much at
+ * once as it takes (design 7.3).
+ */
+#define RC_SLOTS	16
+#define RA_BYTES	( 512 * 1024 )
+
+typedef struct {
+	BOOL	used;
+	UD	gen;			/* the volume's generation it was found under */
+	TS_UUID	uuid;
+	INT	recno;
+	UD	size;			/* bytes the record holds */
+	XT	*x;			/* its runs */
+	INT	n;
+	UD	tick;			/* when it was used last */
+	INT	busy;			/* reads at work on it: it is not taken for another */
+	UD	next;			/* where the last read of it ended */
+	UB	*ra;			/* RA_BYTES read ahead, from ra_off, ra_len of them */
+	UD	ra_off;
+	SZ	ra_len;
+} RCSLOT;
+
+typedef struct {
+	ID	mtx;
+	UD	tick;
+	RCSLOT	s[RC_SLOTS];
+} RCACHE;
+
+LOCAL RCACHE	*rc_tbl[TSFSBLK_MAX_VOL];
+
+/* The volume's table, made the first time a read asks for it */
+LOCAL RCACHE *rc_of( ID vol )
+{
+	RCACHE	*c;
+	T_CMTX	cm;
+
+	if ( !vol_ok(vol) ) {
+		return NULL;
+	}
+	c = __atomic_load_n(&rc_tbl[vol - 1], __ATOMIC_ACQUIRE);
+	if ( c != NULL ) {
+		return c;
+	}
+	c = (RCACHE *)Kcalloc(1, sizeof(RCACHE));
+	if ( c == NULL ) {
+		return NULL;
+	}
+	cm.exinf = NULL;
+	cm.mtxatr = TA_TFIFO;
+	c->mtx = tk_cre_mtx(&cm);
+	if ( c->mtx <= 0 ) {
+		Kfree(c);
+		return NULL;
+	}
+	{
+		RCACHE	*was = NULL;
+
+		if ( !__atomic_compare_exchange_n(&rc_tbl[vol - 1], &was, c, FALSE,
+						  __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ) {
+			tk_del_mtx(c->mtx);	/* another made it first */
+			Kfree(c);
+			c = was;
+		}
+	}
+	return c;
+}
+
+/* The slot of a record still as it was found, held busy; NULL when none. Under the lock */
+LOCAL RCSLOT *rc_find( RCACHE *c, ID vol, CONST TS_UUID *uuid, INT recno )
+{
+	UD	g = GEN_NOW(vol);
+	INT	i;
+
+	for ( i = 0; i < RC_SLOTS; i++ ) {
+		RCSLOT	*s = &c->s[i];
+
+		if ( s->used && s->gen == g && s->recno == recno && ts_uuid_cmp(&s->uuid, uuid) == 0 ) {
+			s->tick = ++c->tick;
+			s->busy++;
+			return s;
+		}
+	}
+	return NULL;
+}
+
+/*
+ * What a read of a record of blocks found, kept: in a slot not busy,
+ * one that no longer holds or the one used longest ago.
+ */
+LOCAL void rc_keep( ID vol, UD gen, CONST TS_UUID *uuid, INT recno, CONST UB *pl, CONST XT *x, INT n )
+{
+	RCACHE	*c = rc_of(vol);
+	RCSLOT	*s = NULL;
+	XT	*nx;
+	INT	i;
+
+	if ( c == NULL || pl[PL_FORM] == F_INLINE || n <= 0 ) {
+		return;
+	}
+	nx = (XT *)Kmalloc(sizeof(XT) * (SZ)n);
+	if ( nx == NULL ) {
+		return;
+	}
+	knl_memcpy(nx, x, sizeof(XT) * (SZ)n);
+	tk_loc_mtx(c->mtx, TMO_FEVR);
+	for ( i = 0; i < RC_SLOTS; i++ ) {
+		RCSLOT	*t = &c->s[i];
+
+		if ( t->busy > 0 ) continue;
+		if ( !t->used || t->gen != GEN_NOW(vol)
+		  || ( t->recno == recno && ts_uuid_cmp(&t->uuid, uuid) == 0 ) ) {
+			s = t;
+			break;
+		}
+		if ( s == NULL || t->tick < s->tick ) s = t;
+	}
+	if ( s != NULL ) {
+		if ( s->x != NULL ) Kfree(s->x);
+		s->used = TRUE;
+		s->gen = gen;
+		s->uuid = *uuid;
+		s->recno = recno;
+		s->size = rd64(pl + PL_BYTES);
+		s->x = nx;
+		s->n = n;
+		s->tick = ++c->tick;
+		s->next = ~(UD)0;
+		s->ra_len = 0;
+		nx = NULL;
+	}
+	tk_unl_mtx(c->mtx);
+	if ( nx != NULL ) Kfree(nx);
+}
+
+/*
+ * A read served from what is kept: E_NOSPT when nothing is kept for
+ * the record, and the caller reads it the long way.
+ */
+LOCAL ER rc_read( ID vol, CONST TS_UUID *uuid, INT recno, UD off, UB *dst, SZ len, SZ *p_asize )
+{
+	RCACHE	*c = rc_of(vol);
+	RCSLOT	*s;
+	SZ	got = 0;
+	BOOL	ahead;
+	ER	er = E_OK;
+
+	if ( c == NULL ) {
+		return E_NOSPT;
+	}
+	tk_loc_mtx(c->mtx, TMO_FEVR);
+	s = rc_find(c, vol, uuid, recno);
+	if ( s == NULL ) {
+		tk_unl_mtx(c->mtx);
+		return E_NOSPT;
+	}
+	*p_asize = 0;
+	if ( off >= s->size || len <= 0 ) {
+		s->busy--;
+		tk_unl_mtx(c->mtx);
+		return E_OK;
+	}
+	if ( (UD)len > s->size - off ) len = (SZ)( s->size - off );
+	/* in what was read ahead */
+	if ( s->ra_len > 0 && off >= s->ra_off && off + (UD)len <= s->ra_off + (UD)s->ra_len ) {
+		knl_memcpy(dst, s->ra + ( off - s->ra_off ), len);
+		s->next = off + (UD)len;
+		s->busy--;
+		tk_unl_mtx(c->mtx);
+		*p_asize = len;
+		return E_OK;
+	}
+	/* read in order, in small pieces, by one reader: the window is filled */
+	ahead = (BOOL)( off == s->next && len < RA_BYTES && s->busy == 1 );
+	if ( ahead ) {
+		s->ra_len = 0;			/* refilled: no other read takes from it meanwhile */
+	}
+	tk_unl_mtx(c->mtx);
+
+	if ( ahead ) {
+		UD	from = off - off % TSFSBLK_BLOCK_SIZE, rlen = 0;
+		SZ	want = RA_BYTES;
+
+		if ( s->ra == NULL ) s->ra = (UB *)Kmalloc(RA_BYTES);
+		if ( s->ra != NULL ) {
+			if ( (UD)want > s->size - from ) want = (SZ)( s->size - from );
+			er = runs_read(vol, s->x, s->n, from, s->ra, want, &got);
+			if ( er >= E_OK && got >= (SZ)( off - from ) + len ) {
+				knl_memcpy(dst, s->ra + ( off - from ), len);
+				rlen = (UD)got;
+				got = len;
+			} else if ( er >= E_OK ) {
+				ahead = FALSE;		/* less came than asked: read it plainly */
+			}
+		} else {
+			ahead = FALSE;
+		}
+		if ( rlen > 0 ) {
+			tk_loc_mtx(c->mtx, TMO_FEVR);
+			s->ra_off = from;
+			s->ra_len = (SZ)rlen;
+			tk_unl_mtx(c->mtx);
+		}
+	}
+	if ( !ahead && er >= E_OK ) {
+		er = runs_read(vol, s->x, s->n, off, dst, len, &got);
+	}
+	tk_loc_mtx(c->mtx, TMO_FEVR);
+	if ( er >= E_OK ) s->next = off + (UD)got;
+	s->busy--;
+	tk_unl_mtx(c->mtx);
+	if ( er >= E_OK ) *p_asize = got;
+	return er;
+}
+
 EXPORT ER ts_obj_rea_rec( ID vol, CONST TS_UUID *uuid, INT recno, D off,
 			  void *buf, SZ size, SZ *p_asize )
 {
 	RECS	*r;
 	UB	*e;
 	SZ	got = 0;
+	UD	gen;
+	XTS	xs;
 	ER	er;
 
 	if ( buf == NULL || off < 0 ) {
 		return E_PAR;
 	}
+	xs.x = NULL;
+	xs.leaf = NULL;
+	er = rc_read(vol, uuid, recno, (UD)off, (UB *)buf, size, &got);
+	if ( er != E_NOSPT ) {
+		if ( er >= E_OK && p_asize != NULL ) *p_asize = got;
+		return er;
+	}
+	gen = vol_ok(vol) ? GEN_NOW(vol) : 0;
 	r = (RECS *)Kmalloc(sizeof(RECS));
-	if ( r == NULL ) return E_NOMEM;
+	if ( r == NULL || xts_new(&xs) < E_OK ) {
+		if ( r != NULL ) Kfree(r);
+		xts_free(&xs);
+		return E_NOMEM;
+	}
 	er = recs_open(vol, uuid, r);
 	if ( er >= E_OK ) {
 		e = recs_entry(r, recno);
 		if ( e == NULL ) {
 			er = E_NOEXS;
-		} else {
+		} else if ( e[PE_PLACE + PL_FORM] == F_INLINE ) {
 			er = dseg_read(&r->o, e + PE_PLACE, (UD)off, (UB *)buf, size, &got);
-			if ( er >= E_OK && p_asize != NULL ) *p_asize = got;
+		} else {
+			UD	rsize = rd64(e + PE_PLACE + PL_BYTES);
+
+			er = xt_load(&r->o, e + PE_PLACE, &xs);
+			if ( er >= E_OK && (UD)off < rsize && size > 0 ) {
+				er = runs_read(vol, xs.x, xs.n, (UD)off, (UB *)buf,
+					       ( (UD)size > rsize - (UD)off ) ? (SZ)( rsize - (UD)off ) : size, &got);
+			}
+			if ( er >= E_OK ) rc_keep(vol, gen, uuid, recno, e + PE_PLACE, xs.x, xs.n);
 		}
+		if ( er >= E_OK && p_asize != NULL ) *p_asize = got;
 	}
 	recs_close(r);
 	Kfree(r);
+	xts_free(&xs);
 	return er;
 }
 
@@ -3646,15 +4212,78 @@ LOCAL ER rec_change( ID vol, CONST TS_UUID *uuid, INT recno, INT how, D off,
 	return txn_end(vol, er);
 }
 
+/*
+ * A record grown by much at once -- written far past its end, or
+ * lengthened by a truncation -- takes as many blocks as it grows by in
+ * one change, and a change may hold only TSFSBLK_HELD_MAP blocks of the
+ * free map until it is real (one maps 128MB). So what grows by more
+ * than GROW_STEP goes in steps of that much, each a change of its own:
+ * after each the record is whole and longer, with zeros. A change that fails part
+ * of the way leaves the record as long as the steps made it. Inside a
+ * transaction a caller opened itself, everything stays in that one.
+ */
+#define GROW_STEP	( (UD)256 * 1024 * 1024 )
+
+/* How many bytes record `recno` holds now */
+LOCAL ER rec_size( ID vol, CONST TS_UUID *uuid, INT recno, UD *p_size )
+{
+	RECS	*r;
+	UB	*e;
+	ER	er;
+
+	r = (RECS *)Kmalloc(sizeof(RECS));
+	if ( r == NULL ) return E_NOMEM;
+	er = recs_open(vol, uuid, r);
+	if ( er >= E_OK ) {
+		e = recs_entry(r, recno);
+		if ( e == NULL ) {
+			er = E_NOEXS;
+		} else {
+			*p_size = rd64(e + PE_PLACE + PL_BYTES);
+		}
+	}
+	recs_close(r);
+	Kfree(r);
+	return er;
+}
+
+/* The record lengthened with zeros, GROW_STEP at a time, until `to` is less than one step away */
+LOCAL ER grow_steps( ID vol, CONST TS_UUID *uuid, INT recno, UD to )
+{
+	UD	size = 0;
+	ER	er;
+
+	if ( !vol_ok(vol) || obj_trx[vol - 1] > 0 ) {
+		return E_OK;
+	}
+	er = rec_size(vol, uuid, recno, &size);
+	while ( er >= E_OK && to > size + GROW_STEP ) {
+		size += GROW_STEP;
+		er = rec_change(vol, uuid, recno, RC_TRUNC, (D)size, NULL, 0);
+	}
+	return er;
+}
+
 EXPORT ER ts_obj_wri_rec( ID vol, CONST TS_UUID *uuid, INT recno, D off,
 			  CONST void *buf, SZ size, SZ *p_asize )
 {
+	SZ	done = 0, n;
 	ER	er;
 
 	if ( buf == NULL || off < 0 ) {
 		return E_PAR;
 	}
-	er = rec_change(vol, uuid, recno, RC_WRITE, off, (CONST UB *)buf, size);
+	er = grow_steps(vol, uuid, recno, (UD)off);
+	/* the bytes themselves: a write larger than a step, a step at a time */
+	do {
+		n = size - done;
+		if ( (UD)n > GROW_STEP && vol_ok(vol) && obj_trx[vol - 1] == 0 ) n = (SZ)GROW_STEP;
+		if ( er >= E_OK ) {
+			er = rec_change(vol, uuid, recno, RC_WRITE, off + done,
+					(CONST UB *)buf + done, n);
+		}
+		if ( er >= E_OK ) done += n;
+	} while ( er >= E_OK && done < size );
 	if ( er >= E_OK && p_asize != NULL ) {
 		*p_asize = size;
 	}
@@ -3672,7 +4301,9 @@ EXPORT ER ts_obj_rpl_rec( ID vol, CONST TS_UUID *uuid, INT recno, CONST void *bu
 
 EXPORT ER ts_obj_trn_rec( ID vol, CONST TS_UUID *uuid, INT recno, UD newsize )
 {
-	return rec_change(vol, uuid, recno, RC_TRUNC, (D)newsize, NULL, 0);
+	ER	er = grow_steps(vol, uuid, recno, newsize);
+
+	return ( er >= E_OK ) ? rec_change(vol, uuid, recno, RC_TRUNC, (D)newsize, NULL, 0) : er;
 }
 
 /*

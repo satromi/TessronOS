@@ -43,7 +43,9 @@ SYSCALL ER tk_def_int( UINT intno, CONST T_DINT *pk_dint )
 	}
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_MISC();
 	ercd = knl_define_inthdr(intno, intatr, inthdr);
+	KLK_UNMISC();
 	END_CRITICAL_SECTION;
 
 	return ercd;

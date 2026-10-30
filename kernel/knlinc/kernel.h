@@ -40,9 +40,19 @@ typedef struct task_control_block	TCB;
 */
 #define TCB_SYSDEPEND_INFO		/* None */
 
+#include "klk.h"
 #include "../tkernel/timer.h"
 #include "../tkernel/winfo.h"
 #include "../tkernel/mutex.h"
+
+#include "prcset.h"
+
+/* The processor holding a task's context (TCB.runprc): PRC 1..CNF_MAX_PRCID, 0 none */
+#if CNF_MAX_PRCID > 255
+typedef UH	RUNPRC;
+#else
+typedef UB	RUNPRC;
+#endif
 
 #include "../sysdepend/sys_msg.h"
 #include "../sysdepend/cpu_status.h"
@@ -80,7 +90,8 @@ struct task_control_block {
 	UB	priority;	/* Current priority */
 
 	UB /*TSTAT*/	state;	/* Task state (Int. expression) */
-	UB	runprc;		/* Processor holding the register context (0: none), dispatch.S */
+	RUNPRC	runprc;		/* Processor holding the register context (0: none), dispatch.S */
+	UW	sch_round;	/* the scheduler's pass that last chose it (smp.c): one look, however many processors */
 
 	BOOL	klockwait:1;	/* TRUE at wait kernel lock */
 	BOOL	klocked:1;	/* TRUE at hold kernel lock */
@@ -94,13 +105,22 @@ struct task_control_block {
 	TMEB	wtmeb;		/* Wait timer event block */
 
 	void	*isstack;	/* stack pointer initial value */
-	UW	assprc;		/* Processors allowed (bit n: PRC n+1), 0: any */
+	T_PRCSET assprc;	/* Processors allowed (bit n: PRC n+1), empty: any */
 
 #if USE_LEGACY_API && USE_RENDEZVOUS
 	RNO	wrdvno;		/* For creating rendezvous number */
 #endif
 #if USE_MUTEX == 1
 	MTXCB	*mtxlist;	/* List of hold mutexes */
+#endif
+#if KLK_FINE_OBJ
+	/*
+	 * The task's priority is to be worked out again before the task
+	 * control lock is let go (mutex.c, design 4.3.3): the next of the
+	 * list, and whether it is in it. Under that lock.
+	 */
+	struct task_control_block *pri_next;
+	BOOL	pri_queued;
 #endif
 
 #if USE_DBGSPT && defined(USE_FUNC_TD_INF_TSK)
@@ -175,6 +195,20 @@ struct task_control_block {
 #define TaskStackFoot(tcb)	( (UD *)((VB *)(tcb)->isstack - (tcb)->sstksz) )
 
 IMPORT void knl_stack_broken( TCB *tcb );
+
+#if CNF_STK_USAGE
+/*
+ * The deepest use of each stack (design 4.7.7): the stack is filled with
+ * STK_FILL when the task is made, and the words above the foot that
+ * still hold it were never reached. What a task used is noted when it is
+ * deleted, by the place it starts at and the size of its stack, so that
+ * a task that came and went is in the account as well.
+ */
+#define STK_FILL		0x4c4c49464b545355ULL
+IMPORT W knl_stk_used( TCB *tcb );
+IMPORT W knl_stk_used_self( void );
+IMPORT void knl_stk_usage_say( void );
+#endif
 #if CNF_STK_WATCH
 IMPORT void knl_stk_snap( TCB *tcb );
 IMPORT void knl_stack_overwritten( TCB *tcb, UD *at, UD was, UB prc, UD since );
@@ -256,6 +290,28 @@ IMPORT TCB  *knl_tsk_self( void );
 IMPORT void knl_tsk_set_owner( ID tskid, ID owner );
 
 /*
+ * The processor that takes each interrupt of a device and the roles of
+ * the processors (inttarget.c, design 4.5)
+ */
+IMPORT T_PRCSET	knl_prc_chore;		/* for the system's chores: the devices' interrupts, the timer */
+IMPORT T_PRCSET	knl_prc_rt;		/* kept for real time */
+IMPORT ER   knl_cpu_roles( CONST T_PRCSET *chore, CONST T_PRCSET *rt );
+IMPORT void knl_cpu_roles_get( T_PRCSET *chore, T_PRCSET *rt );
+IMPORT ER   knl_cpu_roles_text( CONST char *chore, CONST char *rt );	/* "1,3-4" */
+IMPORT void knl_prcset_parse( CONST char *s, INT len, INT nprc, T_PRCSET *set );	/* len bytes of "1,3-4" */
+IMPORT INT  knl_prcset_text( UB *t, INT n, INT max, CONST T_PRCSET *s, INT k );	/* the first k as "1,3-4" (obsys.c) */
+IMPORT void knl_int_owner( UINT intno, CONST UB *devnm );
+IMPORT ER   knl_int_dev_target( CONST UB *devnm, ID prcid );
+IMPORT INT  knl_int_dev_info( CONST UB *devnm, ID *p_want, UINT *intno, ID *prc, INT n );
+IMPORT INT  knl_int_target_of( UINT intno );
+IMPORT INT  knl_int_dev_names( UB (*names)[L_DEVNM + 1], INT n );
+/* the architecture's (x64 apic.c, Arm interrupt.c) */
+IMPORT BOOL knl_int_is_dev( UINT intno );	/* an interrupt of a device, that can be sent to a processor */
+IMPORT BOOL knl_int_is_msi( UINT intno );	/* one by message */
+IMPORT BOOL knl_int_in_use( UINT intno );	/* with a handler */
+IMPORT ER   knl_int_route( UINT intno, INT prc );	/* sent to PRC prc from now on */
+
+/*
  * Kernel-object initialization (each object)
  */
 IMPORT ER knl_task_initialize( void );
@@ -293,6 +349,9 @@ IMPORT void knl_timer_ipi_handler( UINT intno, UW iar );	/* SGI_TIMER: reprogram
  * Mutex control (mutex.c)
  */
 IMPORT void knl_signal_all_mutex( TCB *tcb );
+#if KLK_FINE_OBJ
+IMPORT void knl_tctl_defer( TCB *tcb );	/* its priority worked out again before the task control lock goes */
+#endif
 IMPORT INT knl_chg_pri_mutex( TCB *tcb, INT priority );
 
 /*

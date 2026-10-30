@@ -1,0 +1,226 @@
+# システム環境設定の〈書体〉 on the x64 PC (tools/x64/ui_run64.py --vols DIR): tools/tests/ui_sysenv_font.steps
+# with the disks of the q35 machine: in ファイル変換 the USB disk uda comes after nvmea, nvmea0,
+# nvmea1 and nvmea2 (/tslog), at 200,271; the rest as there.
+# システム環境設定's 〈書体〉 (design 10.3, 11.6), for tools/ui_run.py with
+# --vols holding font.img (tools/tests/mkfontdisk.py: a FAT32 disk with
+# etc/font/NotoSerifJP-Regular.otf on it). The window is at 160,80: the tab 書体
+# at 278,125; the list's lines at 160, 177, 194, 211; 使用する at 340,517 and
+# 使用しない at 480,517; 詳細情報 at 700,516. フォント設定 is at 200,110: 見本表示 at
+# 396,265, 注釈表示 at 548,265, 太字 at 366,367, ファミリの詳細 at 706,432; its
+# title at 500,116 brings it forward over the documents it opens. A menu opens
+# with the item chosen last under the pointer. On this disk the administrator
+# has no password: the first request that needs one asks for one to be chosen
+# (typed twice, Tab between), the later ones for it.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+expect sysenv: fonts 3
+wait 800
+win システム環境設定
+click 278 125
+wait 500
+# 使用しない and 使用する of Noto Serif JP, taken at once
+click 300 194
+wait 300
+click 480 517
+expect sysenv: font use Noto Serif JP 0 (0)
+wait 300
+click 340 517
+expect sysenv: font use Noto Serif JP 1 (0)
+wait 300
+# the system's own face cannot be put out of use (E_RONLY)
+click 300 160
+wait 300
+click 480 517
+expect sysenv: font use Noto Sans JP 0 (-67)
+wait 500
+shot sf_sys
+key 28
+wait 300
+# 詳細情報: フォント設定, its 見本 and 注釈 in windows of the text editor
+click 300 194
+wait 300
+click 700 516
+expect sysenv: fontset open Noto Serif JP faces 1 registered range 16726
+wait 800
+shot sf_set
+click 396 265
+expect sysenv: sample on Noto Serif JP
+wait 1500
+shot sf_sample
+click 500 116
+wait 300
+click 396 265
+expect sysenv: sample off
+wait 500
+click 548 265
+expect sysenv: note on 12
+wait 1500
+shot sf_note
+click 500 116
+wait 300
+click 548 265
+expect sysenv: note off
+wait 500
+# 太字 changed, then closed: 更新しないで終了
+click 366 367
+wait 300
+key 08 01
+wait 800
+shot sf_upd
+click 300 370
+expect sysenv: fontset end none Noto Serif JP (0)
+expect sysenv: fontset closed
+wait 500
+# 操作 → 保存: the copy linked from the first window
+click 300 194
+wait 300
+click 400 300 1
+wait 500
+move 405 341
+wait 150
+move 440 341
+wait 150
+move 470 341
+wait 300
+shot sf_menu_op
+move 495 341
+wait 150
+click 495 341
+wait 1000
+shot sf_save
+key 28
+expect desktop: font saved "NotoSerifJP-Regular" on
+expect sysenv: font save 0
+wait 800
+# 操作 → 削除, confirmed, with the administrator's password chosen
+click 450 95
+wait 300
+click 300 194
+wait 300
+click 400 300 1
+wait 500
+move 405 300
+wait 150
+move 440 300
+wait 150
+move 470 300
+wait 300
+move 495 320
+wait 150
+click 495 320
+wait 800
+shot sf_del
+click 630 383
+wait 1000
+text ktest-admin
+key 2b
+text ktest-admin
+wait 300
+key 28
+expect desktop: font deleted (0)
+expect sysenv: font delete Noto Serif JP (0)
+wait 500
+shot sf_deleted
+# the copy saved dropped on the list: 登録
+drag 80 205 400 300
+expect sysenv: font drop saved
+wait 800
+shot sf_reg
+click 630 383
+wait 1000
+text ktest-admin
+key 28
+expect desktop: font registered "NotoSerifJP-Regular"
+expect sysenv: font register Noto Serif JP new (0)
+wait 500
+# a font file taken in by ファイル変換 from a USB disk
+hmp drive_add 0 if=none,id=ufont,file=$VOLS/font.img,format=raw
+hmp device_add usb-storage,drive=ufont,id=ufontd,bus=xhci.0
+wait 4000
+open 01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91
+expect xfconv: ready
+wait 800
+dclick 200 271
+expect xfconv: window uda
+wait 800
+win uda
+click 300 311
+wait 700
+hold 300 311
+wait 300
+move 150 200
+wait 100
+move 60 120
+wait 300
+up
+expect xfconv: carried 1 into
+expect xfconv: asked how to import 1:
+wait 500
+key 28
+expect xfconv: placed 1 links
+wait 800
+# ... dropped on the list: フォント設定 to register it, the family made a new one
+# with Noto Sans JP its base, and 登録して終了
+click 640 90
+wait 500
+drag 40 127 400 300
+expect sysenv: font drop file
+expect sysenv: fontset open Noto Serif JP faces 1 register range 16726
+wait 800
+shot sf_regset
+click 706 432
+expect sysenv: family panel
+wait 800
+shot sf_family
+click 530 213
+wait 200
+key 2a
+key 2a
+key 2a
+key 2a
+key 2a
+key 2a
+key 2a
+key 2a
+key 2a
+key 2a
+key 2a
+key 2a
+key 2a
+text Test Serif
+wait 300
+click 350 402
+wait 300
+shot sf_family2
+click 660 472
+expect sysenv: family Test Serif 0000 base Noto Sans JP
+wait 500
+key 08 01
+wait 800
+shot sf_regend
+click 682 370
+wait 1000
+text ktest-admin
+key 28
+expect sysenv: fontset end register Test Serif (0)
+expect sysenv: fonts 4
+wait 800
+shot sf_four
+# the face registered is found by the family it was registered under
+click 640 90
+wait 500
+click 300 211
+wait 300
+click 700 516
+expect sysenv: fontset open Noto Serif JP faces 1 registered
+wait 800
+click 396 265
+expect sysenv: sample on Test Serif
+wait 1500
+shot sf_sample2
+click 500 116
+wait 300
+key 08 01
+expect sysenv: fontset end none Test Serif (0)
+# nothing was refused for want of a right
+absent !OACV!

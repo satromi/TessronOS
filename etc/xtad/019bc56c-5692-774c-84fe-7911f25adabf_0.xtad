@@ -1,9 +1,0 @@
-<tad version="1.0" encoding="UTF-8">
-<realtime autoplay="false" preload="metadata" loop="false">
-<realData autoplay="inherit" startDelay="0">
-<stream number="1">
-<deviceName>display:</deviceName>
-</stream>
-</realData>
-</realtime>
-</tad>

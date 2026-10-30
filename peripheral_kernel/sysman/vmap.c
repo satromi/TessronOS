@@ -80,6 +80,58 @@ LOCAL void vmap_free_va( UBINT va, UD npages )
 }
 
 /*
+ * The pages of [va, va + n pages) unmapped and given back; the addresses
+ * are left reserved for the caller to give back
+ */
+LOCAL void vmap_drop_pages( UBINT va, UD n )
+{
+	UBINT	v = va;
+	UD	i;
+
+	if ( n == 0 ) return;
+	if ( knl_vunmap_hook != NULL ) {
+		knl_vunmap_hook(va, n);
+	}
+	for ( i = 0; i < n; i++, v += PAGE_SIZE ) {
+		UD	pa = knl_pt_lookup(knl_pt_l0_k_pa, v);
+		if ( pa != ~(UD)0 ) {
+			knl_pt_unmap(knl_pt_l0_k_pa, v, PAGE_SIZE);
+			knl_free_pages(knl_pa_to_pf(pa), 0);
+		}
+	}
+}
+
+/*
+ * An allocation that failed, said for the first few: callers take NULL
+ * quietly, and what then goes missing (a screen drawn without its
+ * wallpaper, a window not opened) says nothing of why. The area's pages
+ * in use and its longest free run are counted then.
+ */
+#define VMAP_TELL_MAX		8
+LOCAL INT	vmap_told = 0;
+
+LOCAL void vmap_failed( UD npages, CONST char *why )
+{
+	UD	i, used = 0, run = 0, longest = 0;
+	UINT	imask;
+
+	if ( vmap_told >= VMAP_TELL_MAX ) return;
+	vmap_told++;
+	ISpinLock(&vmap_lock, &imask);
+	for ( i = 0; i < VMAP_PAGES; i++ ) {
+		if ( bit_test(i) ) {
+			used++;
+			run = 0;
+		} else if ( ++run > longest ) {
+			longest = run;
+		}
+	}
+	ISpinUnlock(&vmap_lock, &imask);
+	tm_printf((UB *)"vmap: %ld pages not had (%s); the area: %ld of %ld pages in use, the longest free run %ld\n",
+		  (D)npages, why, (D)used, (D)VMAP_PAGES, (D)longest);
+}
+
+/*
  * Allocate npages and map them contiguously. NULL on failure.
  */
 EXPORT void *knl_vmap( UD npages, UINT flags )
@@ -95,16 +147,26 @@ EXPORT void *knl_vmap( UD npages, UINT flags )
 	ISpinLock(&vmap_lock, &imask);
 	va = vmap_alloc_va(npages);
 	ISpinUnlock(&vmap_lock, &imask);
-	if ( va == 0 ) return NULL;
+	if ( va == 0 ) {
+		vmap_failed(npages, "no run of addresses that long");
+		return NULL;
+	}
 
 	for ( i = 0, v = va; i < npages; i++, v += PAGE_SIZE ) {
 		PFRAME	*pf = knl_alloc_pages(0, ZONE_NORMAL, aflags);
 		if ( pf == NULL || knl_pt_map(knl_pt_l0_k_pa, v, knl_pf_to_pa(pf), PAGE_SIZE, attr) != E_OK ) {
 			if ( pf != NULL ) knl_free_pages(pf, 0);
-			knl_vunmap((void *)va, i);
+			/*
+			 * The pages mapped so far given back, and the addresses
+			 * once, all of them: knl_vunmap would give back i of them
+			 * by themselves, and another processor could take those
+			 * before the rest were given back after them
+			 */
+			vmap_drop_pages(va, i);
 			ISpinLock(&vmap_lock, &imask);
-			vmap_free_va(va, npages);	/* knl_vunmap freed only i pages of VA */
+			vmap_free_va(va, npages);
 			ISpinUnlock(&vmap_lock, &imask);
+			vmap_failed(npages, ( pf == NULL ) ? "no free page" : "the page table");
 			return NULL;
 		}
 	}

@@ -1,12 +1,12 @@
 <tad version="1.0" encoding="UTF-8" filename="ネットワーク設定のデータボックス">
 <document>
 <p>ネットワーク設定のデータボックス</p>
-<p>ネットワーク設定のウインドウのパネルと、尋ねるパネルの定義。ウインドウはIPv4の〈ネットワーク〉とIPv6の〈ＩＰｖ６〉のタブを持ち、それぞれ設定と状態のページがある。</p>
+<p>ネットワーク設定のウインドウのパネルと、尋ねるパネルの定義。ウインドウはIPv4の〈ネットワーク〉、IPv6の〈ＩＰｖ６〉、Wi-Fiの〈Ｗｉ－Ｆｉ〉のタブを持ち、それぞれ設定(Wi-Fiは接続)と状態のページがある。</p>
 </document>
 <databox>
 <panel num="1" rect="0,0,520,344" title="ネットワーク設定" kind="bare">
 <tags num="100" rect="0,0,520,344" inner="4,28,516,340" value="1">
-<tag>＠ネットワーク</tag><tag>アドレス</tag><tag>＋状態</tag><tag>＠ＩＰｖ６</tag><tag>設定</tag><tag>＋状態</tag>
+<tag>＠ネットワーク</tag><tag>アドレス</tag><tag>＋状態</tag><tag>＠ＩＰｖ６</tag><tag>設定</tag><tag>＋状態</tag><tag>＠Ｗｉ－Ｆｉ</tag><tag>接続</tag><tag>＋状態</tag>
 </tags>
 <text sheet="1" x="8" y="80">自ホスト：</text>
 <box num="11" sheet="1" rect="136,58,264,88" max="79" ascii="true"/>
@@ -63,6 +63,40 @@
 <text sheet="4" x="8" y="286">ＤＮＳサーバ：</text>
 <box num="54" sheet="4" rect="136,264,508,294" off="true"/>
 <button num="55" sheet="4" rect="420,306,508,330">表示更新</button>
+<text sheet="5" x="8" y="80">Ｗｉ－Ｆｉ：</text>
+<box num="72" sheet="5" rect="136,58,508,88" off="true"/>
+<text sheet="5" x="8" y="112">保存した接続：</text>
+<popup num="61" sheet="5" rect="136,94,380,120"/>
+<button num="69" sheet="5" rect="420,94,508,120">削除</button>
+<text sheet="5" x="8" y="146">ＳＳＩＤ：</text>
+<box num="62" sheet="5" rect="136,126,380,156" max="32"/>
+<button num="67" sheet="5" rect="420,128,508,154">走査</button>
+<list num="63" sheet="5" rect="136,160,508,224" cols="0,64r,112"/>
+<text sheet="5" x="8" y="250">セキュリティ：</text>
+<popup num="64" sheet="5" rect="136,233,380,259" value="2"><name>なし</name><name>WPA2-Personal</name><name>WPA3-Personal</name><name>WPA2/WPA3-Personal</name></popup>
+<text sheet="5" x="8" y="288">パスワード：</text>
+<secret num="65" sheet="5" rect="136,268,380,298" max="63" ascii="true"/>
+<switch num="66" sheet="5" rect="392,271,508,295" value="1">自動で接続</switch>
+<button num="68" sheet="5" rect="136,306,224,330">保存</button>
+<button num="70" sheet="5" rect="232,306,320,330" emph="true">接続</button>
+<button num="71" sheet="5" rect="328,306,416,330">切断</button>
+<text sheet="6" x="8" y="80">状態：</text>
+<box num="73" sheet="6" rect="136,58,508,88" off="true"/>
+<text sheet="6" x="8" y="114">ＳＳＩＤ：</text>
+<box num="74" sheet="6" rect="136,92,508,122" off="true"/>
+<text sheet="6" x="8" y="148">ＢＳＳＩＤ：</text>
+<box num="75" sheet="6" rect="136,126,508,156" off="true"/>
+<text sheet="6" x="8" y="182">周波数：</text>
+<box num="76" sheet="6" rect="136,160,508,190" off="true"/>
+<text sheet="6" x="8" y="216">電波の強さ：</text>
+<box num="77" sheet="6" rect="136,194,508,224" off="true"/>
+<text sheet="6" x="8" y="250">速度：</text>
+<box num="78" sheet="6" rect="136,228,322,258" off="true"/>
+<text sheet="6" x="8" y="284">セキュリティ：</text>
+<box num="79" sheet="6" rect="136,262,508,292" off="true"/>
+<text sheet="6" x="8" y="318">ＭＡＣアドレス：</text>
+<box num="80" sheet="6" rect="136,296,322,326" off="true"/>
+<button num="81" sheet="6" rect="420,306,508,330">表示更新</button>
 </panel>
 <panel num="10" rect="0,0,440,128" title="ネットワーク設定">
 <text num="1" x="24" y="40"> </text>

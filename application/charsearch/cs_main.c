@@ -741,6 +741,7 @@ LOCAL BOOL to_tray( CONST char *s, CONST char *name )
 		else if ( s[i] == '&' ) k += snprintf(frag + k, sizeof(frag) - k, "&amp;");
 		else frag[k++] = s[i];
 	}
+	if ( k > (INT)sizeof(frag) - 40 ) k = (INT)sizeof(frag) - 40;	/* the end of the text has its room */
 	k += snprintf(frag + k, sizeof(frag) - k, "</p></document></tad>");
 	memset(&r, 0, sizeof(r));
 	r.kind = TR_TAD;
@@ -759,7 +760,6 @@ LOCAL ER ask_type( CONST char *s, UINT *p_how )
 	T_OBCRE		c;
 	SZ		asz = 0;
 	ID		k, ka;
-	INT		i;
 	ER		er;
 
 	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
@@ -780,17 +780,14 @@ LOCAL ER ask_type( CONST char *s, UINT *p_how )
 	k = ob_opn_obj(&d, OB_OP_WRITE);
 	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, &rq, sizeof(rq), &asz) : (ER)k;
 	if ( k > 0 ) ob_cls_obj(k);
-	for ( i = 0; er >= E_OK; i += 20 ) {
-		if ( ob_rea_rec(ka, 0, 0, &an, sizeof(an), &asz) >= E_OK && asz == (SZ)sizeof(an) && an.seq == rq.seq ) {
+	/* the answer waited for on its channel, at most 3000 ms */
+	while ( er >= E_OK ) {
+		er = ob_rea_tmo(ka, 0, 0, &an, sizeof(an), &asz, 3000);
+		if ( er >= E_OK && asz == (SZ)sizeof(an) && an.seq == rq.seq ) {
 			er = an.er;
 			*p_how = an.how;
 			break;
 		}
-		if ( i >= 3000 ) {
-			er = E_TMOUT;
-			break;
-		}
-		(void)tk_dly_tsk(20);
 	}
 	ob_cls_obj(ka);
 	(void)ob_del_obj(&reply);
@@ -1549,7 +1546,7 @@ LOCAL void start_with( CONST char *a )
 int main( void )
 {
 	T_OBNTM	m;
-	SZ	asz = 0, argn;
+	SZ	argn;
 	char	arg[256];
 	INT	id, ev;
 
@@ -1576,7 +1573,7 @@ int main( void )
 	if ( argn > 0 ) start_with(arg);
 
 	while ( !closing ) {
-		while ( !closing && ob_rea_rec(ui.port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+		for ( TMO tmo = TMO_FEVR; !closing && ui_wait(&ui, &m, tmo) >= E_OK; tmo = TMO_POL ) {
 			if ( m.event == OB_E_PRESS && m.recno < 0 && m.code == 0 ) {
 				press(&m);
 				continue;
@@ -1601,9 +1598,6 @@ int main( void )
 			default:
 				break;
 			}
-		}
-		if ( !closing ) {
-			(void)tk_dly_tsk(TICK_MS);
 		}
 	}
 	ui_close(&ui);

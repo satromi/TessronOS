@@ -31,13 +31,13 @@
 #include <ts/tsfs.h>
 #include <ts/tsfsobj.h>
 #include <ts/tsfsck.h>
+#include <ts/tsfsjrnl.h>
 #include <ts/json.h>
 #include <ts/proc.h>
 #include <tk/smem.h>
 
 #define TSFS_MAX_VOL	CNF_MAX_VOL	/* volumes at once: the disks times their partitions */
 #define TSFS_MAX_OD	1024		/* objects open at once, on every volume together */
-#define TSFS_JSON_MAX	16384		/* bytes of metadata handled at a time */
 #define TSFS_PATH_MAX	256		/* the store's own paths: its root and a UUID's names */
 
 /*
@@ -45,6 +45,12 @@
  * native volume and whole by everything else (design 11.10). Readers
  * count themselves under `mtxid`; the first to come takes `wsem`, which
  * a writer holds alone, and the last to go gives it back.
+ *
+ * A change to a native volume is closed into its log's queue while the
+ * lock is held, and made real (written to the log on the medium) after
+ * the lock is let go: the caller still returns only once its change is
+ * on the medium, and the others do not wait for the device meanwhile
+ * (docs/tessronos 7.3).
  */
 typedef struct {
 	ID	mtxid;		/* guards `readers` */
@@ -57,6 +63,7 @@ typedef struct {
 	ID	no;		/* its number, where it sits in the table */
 	TS_UUID	vuuid;		/* the FAT store's own UUID (TSFS_VOLID_FILE); the native one's is in its superblock */
 	BOOL	used;
+	UD	jmark;		/* the log's next number when the lock was taken whole */
 } TSFSVOL;
 
 /*
@@ -70,6 +77,7 @@ typedef struct {
 	TS_UUID	uuid;
 	UINT	omode;
 	BOOL	used;
+	UD	dseq;		/* the log is to be on the medium below this when it closes */
 } TSFSOBJ;
 
 /*
@@ -84,14 +92,80 @@ LOCAL INT	tsfs_nvol = 0;
 LOCAL TSFSOBJ	tsfs_od[TSFS_MAX_OD];
 LOCAL ID	tsfs_mtxid = 0;		/* the two tables */
 
+/* The holder noted for the reports of a machine found stopped (lockup.c, x64) */
+IMPORT void	knl_lockup_sem_held( ID semid, BOOL held ) __attribute__((weak));
+
 LOCAL void vol_lock( TSFSVOL *v )
 {
 	tk_wai_sem(v->wsem, 1, TMO_FEVR);
+	if ( knl_lockup_sem_held != NULL ) knl_lockup_sem_held(v->wsem, TRUE);
+	if ( v->bvol > 0 ) {
+		v->jmark = ts_jrnl_next(v->bvol);
+	}
 }
 
-LOCAL void vol_unlock( TSFSVOL *v )
+/*
+ * The whole lock let go. What the holder closed into the log meanwhile
+ * goes to the medium now, outside the lock, and is waited for; the
+ * error is the log's.
+ */
+LOCAL ER vol_unlock( TSFSVOL *v )
 {
+	ID	bvol = v->bvol;
+	UD	upto = 0;
+
+	if ( bvol > 0 ) {
+		upto = ts_jrnl_next(bvol);
+		if ( upto == v->jmark ) {
+			upto = 0;			/* nothing was closed */
+		}
+	}
+	if ( knl_lockup_sem_held != NULL ) knl_lockup_sem_held(v->wsem, FALSE);
 	tk_sig_sem(v->wsem, 1);
+
+	return ( upto > 0 ) ? ts_jrnl_durable(bvol, upto) : E_OK;
+}
+
+/* The lock let go after a change: the change's own error first, then the log's */
+LOCAL ER vol_done( TSFSVOL *v, ER er )
+{
+	ER	e2 = vol_unlock(v);
+
+	return ( er >= E_OK && e2 < E_OK ) ? e2 : er;
+}
+
+/*
+ * The lock let go after a change of an open object's records that need
+ * not be on the medium when the call returns (design 7.3): writing,
+ * adding, cutting, taking out and moving records. What the holder
+ * closed into the log is noted as the object's own, and goes to the
+ * medium with the next batch of the log -- the checkpointer's, at most
+ * CNF_TSFS_FLUSH_MS later, or anyone else's -- or when the object is
+ * closed or made sure of (ts_syn_obj), which wait for it. Replacing a
+ * record whole, the metadata, the icon and the resources are still
+ * on the medium when the call returns (vol_done).
+ */
+#define WRI_PIECE	( (SZ)256 * 1024 )	/* bytes of a write between which the volume is let go */
+
+LOCAL ER vol_lazy( TSFSOBJ *o, ER er )
+{
+	TSFSVOL	*v = o->vol;
+	ID	bvol = v->bvol;
+	UD	upto = 0;
+
+	if ( bvol > 0 ) {
+		upto = ts_jrnl_next(bvol);
+		if ( upto == v->jmark ) {
+			upto = 0;			/* nothing was closed */
+		}
+	}
+	if ( upto > o->dseq ) {
+		o->dseq = upto;
+	}
+	if ( knl_lockup_sem_held != NULL ) knl_lockup_sem_held(v->wsem, FALSE);
+	tk_sig_sem(v->wsem, 1);
+
+	return er;
 }
 
 /* Shared on a native volume; the FAT store is taken whole even to read */
@@ -104,6 +178,8 @@ LOCAL void vol_rlock( TSFSVOL *v )
 	tk_loc_mtx(v->mtxid, TMO_FEVR);
 	if ( v->readers++ == 0 ) {
 		tk_wai_sem(v->wsem, 1, TMO_FEVR);
+		/* the readers' hold is noted as the first reader's */
+		if ( knl_lockup_sem_held != NULL ) knl_lockup_sem_held(v->wsem, TRUE);
 	}
 	tk_unl_mtx(v->mtxid);
 }
@@ -116,6 +192,7 @@ LOCAL void vol_runlock( TSFSVOL *v )
 	}
 	tk_loc_mtx(v->mtxid, TMO_FEVR);
 	if ( --v->readers == 0 ) {
+		if ( knl_lockup_sem_held != NULL ) knl_lockup_sem_held(v->wsem, FALSE);
 		tk_sig_sem(v->wsem, 1);
 	}
 	tk_unl_mtx(v->mtxid);
@@ -433,6 +510,37 @@ LOCAL INT read_meta( TSFSVOL *v, CONST TS_UUID *uuid, UB *buf, INT max )
 	return read_file(path, buf, max);
 }
 
+/*
+ * The metadata of an object read whole, however long the file is, into
+ * a buffer of its own (Kfree it) with room bytes more after the text and
+ * a nought after that: its length, the buffer in *p_buf and what it
+ * holds in *p_cap (NULL: not wanted), or an error.
+ */
+LOCAL INT read_meta_all( TSFSVOL *v, CONST TS_UUID *uuid, INT room, UB **p_buf, INT *p_cap )
+{
+	UB	path[TSFS_PATH_MAX], *b;
+	T_FSTAT	st;
+	INT	n;
+	ER	er;
+
+	*p_buf = NULL;
+	er = obj_path(v, uuid, ".json", path, sizeof(path));
+	if ( er < EX_OK ) return er;
+	if ( fs_stat((CONST char *)path, &st) < EX_OK ) return EX_NOENT;
+	if ( st.size >= 0x3FFFFFFF ) return EX_NOMEM;
+	b = (UB *)Kmalloc((SZ)st.size + room + 1);
+	if ( b == NULL ) return EX_NOMEM;
+	n = read_file(path, b, (INT)st.size);
+	if ( n < 0 ) {
+		Kfree(b);
+		return n;
+	}
+	b[n] = 0;
+	*p_buf = b;
+	if ( p_cap != NULL ) *p_cap = n + room;
+	return n;
+}
+
 LOCAL ER write_meta( TSFSVOL *v, CONST TS_UUID *uuid, CONST UB *buf, INT len )
 {
 	UB	path[TSFS_PATH_MAX];
@@ -730,7 +838,7 @@ EXPORT ER knl_tsfs_set_top( ID vol, CONST TS_UUID *uuid )
 	}
 	vol_lock(v);
 	er = ts_set_top_blk(v->bvol, uuid);
-	vol_unlock(v);
+	er = vol_done(v, er);
 
 	return er;
 }
@@ -772,7 +880,7 @@ EXPORT ER knl_tsfs_set_xref( ID vol, CONST TS_UUID *uuid )
 	}
 	vol_lock(v);
 	er = ts_set_xref_blk(v->bvol, uuid);
-	vol_unlock(v);
+	er = vol_done(v, er);
 
 	return er;
 }
@@ -869,7 +977,7 @@ EXPORT ER ts_cre_obj( ID vol, CONST T_COBJ *pk_cobj, TS_UUID *p_uuid )
 
 		vol_lock(v);
 		er = ts_obj_create(v->bvol, j, jlen, p_uuid);
-		vol_unlock(v);
+		er = vol_done(v, er);
 		return er;
 	}
 	er = ts_gen_uuid(&uuid);
@@ -877,21 +985,24 @@ EXPORT ER ts_cre_obj( ID vol, CONST T_COBJ *pk_cobj, TS_UUID *p_uuid )
 		return er;			/* the clock has not been set */
 	}
 
-	json = (UB *)Kmalloc(TSFS_JSON_MAX);
+	/* the metadata given, however long */
+	len = ( pk_cobj != NULL && pk_cobj->json != NULL && pk_cobj->jsonsz > 0 ) ? (INT)pk_cobj->jsonsz : 0;
+	if ( pk_cobj != NULL && pk_cobj->jsonsz >= 0x3FFFFFFF ) {
+		return E_PAR;
+	}
+	json = (UB *)Kmalloc((SZ)( ( len > 0 ) ? len : s_len(tsfs_default_json) ) + 1);
 	if ( json == NULL ) {
 		return E_NOMEM;
 	}
-	if ( pk_cobj != NULL && pk_cobj->json != NULL && pk_cobj->jsonsz > 0 ) {
-		if ( pk_cobj->jsonsz >= TSFS_JSON_MAX ) { Kfree(json); return E_PAR; }
-		knl_memcpy(json, pk_cobj->json, (INT)pk_cobj->jsonsz);
-		len = (INT)pk_cobj->jsonsz;
+	if ( len > 0 ) {
+		knl_memcpy(json, pk_cobj->json, len);
 	} else {
-		len = s_put(json, 0, TSFS_JSON_MAX, tsfs_default_json);
+		len = s_put(json, 0, s_len(tsfs_default_json) + 1, tsfs_default_json);
 	}
 
 	vol_lock(v);
 	er = write_meta(v, &uuid, json, len);
-	vol_unlock(v);
+	er = vol_done(v, er);
 
 	Kfree(json);
 	if ( er < EX_OK ) {
@@ -934,16 +1045,13 @@ EXPORT ER ts_del_obj( ID vol, CONST TS_UUID *uuid )
 		vol_lock(v);
 		er = ( open_count(v, uuid) > 0 ) ? ts_obj_orphan(v->bvol, uuid)
 						  : ts_obj_delete(v->bvol, uuid);
-		vol_unlock(v);
+		er = vol_done(v, er);
 		return er;
 	}
 	vol_lock(v);
 
-	json = (UB *)Kmalloc(TSFS_JSON_MAX);
-	if ( json == NULL ) { er = E_NOMEM; goto exit; }
-
-	len = read_meta(v, uuid, json, TSFS_JSON_MAX);
-	if ( len < 0 ) { er = E_NOEXS; goto exit; }
+	len = read_meta_all(v, uuid, 0, &json, NULL);
+	if ( len < 0 ) { er = ( len == EX_NOMEM ) ? E_NOMEM : E_NOEXS; goto exit; }
 	refcnt = knl_json_get_num(json, len, "refCount", 0);
 	if ( refcnt > 0 ) { er = E_OBJ; goto exit; }	/* still referred to */
 
@@ -960,10 +1068,14 @@ EXPORT ER ts_del_obj( ID vol, CONST TS_UUID *uuid )
 	}
 	/* and the pictures and the rest beside the records */
 	{
-		UB	*names = (UB *)Kmalloc(2048);
 		INT	cnt = 0, k, at = 0;
+		UB	*names = NULL;
 
-		if ( names != NULL && knl_tsfs_res_lst(vol, uuid, names, 2048, &cnt) >= E_OK ) {
+		/* every one of them: how many first, then their names */
+		if ( knl_tsfs_res_lst(vol, uuid, NULL, 0, &cnt) >= E_OK && cnt > 0 ) {
+			names = (UB *)Kmalloc((SZ)cnt * FS_NAME_MAX + 1);
+		}
+		if ( names != NULL && knl_tsfs_res_lst(vol, uuid, names, (SZ)cnt * FS_NAME_MAX, &cnt) >= E_OK ) {
 			for ( k = 0; k < cnt; k++ ) {
 				INT	l = 0;
 
@@ -987,6 +1099,28 @@ EXPORT ER ts_del_obj( ID vol, CONST TS_UUID *uuid )
 	vol_unlock(v);
 
 	return er;
+}
+
+/*
+ * Whether two keys of one object may be open at once, by their modes
+ * (TFO_*): a key of the attributes alone (TFO_SHARE) is kept out by
+ * nobody and keeps out nobody; TFO_EXCL keeps out every other key;
+ * TFO_WEXCL every other writer, and is kept out by a writer; with none
+ * of them (TFO_NOEXCL, the default) a key keeps out nobody.
+ */
+LOCAL BOOL od_clash( UINT a, UINT b )
+{
+	if ( ( ( a | b ) & TFO_SHARE ) != 0 ) {
+		return FALSE;
+	}
+	if ( ( ( a | b ) & TFO_EXCL ) != 0 ) {
+		return TRUE;
+	}
+	if ( ( ( a & TFO_WEXCL ) != 0 && ( b & TFO_WRITE ) != 0 )
+	  || ( ( b & TFO_WEXCL ) != 0 && ( a & TFO_WRITE ) != 0 ) ) {
+		return TRUE;
+	}
+	return FALSE;
 }
 
 EXPORT ID ts_opn_obj( ID vol, CONST TS_UUID *uuid, UINT omode )
@@ -1022,11 +1156,7 @@ EXPORT ID ts_opn_obj( ID vol, CONST TS_UUID *uuid, UINT omode )
 
 		if ( !t->used ) { if ( o == NULL ) o = t; continue; }
 		if ( t->vol != v || ts_uuid_cmp(&t->uuid, uuid) != 0 ) continue;
-		/* one for the attributes alone keeps no writer out, and is not kept out by one */
-		if ( ((omode | t->omode) & TFO_SHARE) != 0 && ((omode | t->omode) & TFO_EXCL) == 0 ) continue;
-		/* writing is exclusive */
-		if ( ((omode | t->omode) & TFO_WRITE) != 0
-		  || ((omode | t->omode) & TFO_EXCL) != 0 ) {
+		if ( od_clash(omode, t->omode) ) {
 			tk_unl_mtx(tsfs_mtxid);
 			return E_BUSY;
 		}
@@ -1038,6 +1168,7 @@ EXPORT ID ts_opn_obj( ID vol, CONST TS_UUID *uuid, UINT omode )
 	o->vol   = v;
 	o->uuid  = *uuid;
 	o->omode = omode;
+	o->dseq = 0;
 	o->used  = TRUE;
 	tk_unl_mtx(tsfs_mtxid);
 
@@ -1067,6 +1198,8 @@ EXPORT ER ts_cls_obj( ID od )
 	TSFSVOL	*v;
 	TS_UUID	uuid;
 	BOOL	wrote;
+	UD	dseq;
+	ER	er = E_OK;
 
 	if ( o == NULL ) {
 		return E_ID;
@@ -1074,6 +1207,8 @@ EXPORT ER ts_cls_obj( ID od )
 	v = o->vol;
 	uuid = o->uuid;
 	wrote = (BOOL)( ( o->omode & TFO_WRITE ) != 0 );
+	dseq = o->dseq;
+	o->dseq = 0;
 	o->used = FALSE;
 
 	if ( v->bvol > 0 ) {
@@ -1083,16 +1218,61 @@ EXPORT ER ts_cls_obj( ID od )
 				(void)ts_obj_relink(v->bvol, &uuid);
 			}
 		}
-		vol_unlock(v);
+		er = vol_unlock(v);
+		/* what this opening changed is on the medium before it is closed */
+		if ( er >= E_OK && dseq > 0 ) {
+			er = ts_jrnl_durable(v->bvol, dseq);
+		}
 	}
 
-	return E_OK;
+	return er;
+}
+
+/*
+ * What has been changed through this opening of the object, made sure
+ * to be on the medium (design 7.3): fsync and fdatasync of the POSIX
+ * layer, and a program that wants to know its writes are kept.
+ */
+EXPORT ER ts_syn_all( void )
+{
+	INT	i, n;
+	ID	bvol;
+	ER	er = E_OK, e;
+
+	tk_loc_mtx(tsfs_mtxid, TMO_FEVR);
+	n = tsfs_nvol;
+	tk_unl_mtx(tsfs_mtxid);
+	for ( i = 0; i < n; i++ ) {
+		TSFSVOL	*v = tsfs_vol[i];
+
+		bvol = ( v != NULL && v->used ) ? v->bvol : 0;
+		if ( bvol > 0 ) {
+			e = ts_jrnl_durable(bvol, ts_jrnl_next(bvol));
+			if ( e < E_OK ) er = e;
+		}
+	}
+	return er;
+}
+
+EXPORT ER ts_syn_obj( ID od )
+{
+	TSFSOBJ	*o = od_of(od);
+	UD	dseq;
+
+	if ( o == NULL ) {
+		return E_ID;
+	}
+	dseq = o->dseq;
+	if ( o->vol->bvol <= 0 || dseq == 0 ) {
+		return E_OK;
+	}
+	return ts_jrnl_durable(o->vol->bvol, dseq);
 }
 
 EXPORT ER ts_ref_obj( ID vol, CONST TS_UUID *uuid, T_ROBJ *pk_robj )
 {
 	TSFSVOL	*v = vol_of(vol);
-	UB	*json;
+	UB	*json = NULL;
 	INT	len, i;
 	UD	size;
 	ER	er = E_OK;
@@ -1106,13 +1286,9 @@ EXPORT ER ts_ref_obj( ID vol, CONST TS_UUID *uuid, T_ROBJ *pk_robj )
 		vol_runlock(v);
 		return er;
 	}
-	json = (UB *)Kmalloc(TSFS_JSON_MAX);
-	if ( json == NULL ) {
-		return E_NOMEM;
-	}
 	vol_lock(v);
 
-	len = read_meta(v, uuid, json, TSFS_JSON_MAX);
+	len = read_meta_all(v, uuid, 0, &json, NULL);
 	if ( len < 0 ) {
 		er = E_NOEXS;
 	} else {
@@ -1130,7 +1306,7 @@ EXPORT ER ts_ref_obj( ID vol, CONST TS_UUID *uuid, T_ROBJ *pk_robj )
 	}
 
 	vol_unlock(v);
-	Kfree(json);
+	if ( json != NULL ) Kfree(json);
 
 	return er;
 }
@@ -1208,7 +1384,7 @@ LOCAL ER refcnt_add( ID vol, CONST TS_UUID *uuid, INT delta )
 {
 	TSFSVOL	*v = vol_of(vol);
 	UB	*json;
-	INT	len, cur;
+	INT	len, cur, cap = 0;
 	ER	er = E_OK;
 
 	if ( v == NULL || uuid == NULL ) {
@@ -1218,29 +1394,27 @@ LOCAL ER refcnt_add( ID vol, CONST TS_UUID *uuid, INT delta )
 		vol_lock(v);
 		er = ( delta > 0 ) ? ts_obj_link(v->bvol, uuid)
 				   : ts_obj_unlink(v->bvol, uuid);
-		vol_unlock(v);
+		er = vol_done(v, er);
 		return er;
 	}
-	json = (UB *)Kmalloc(TSFS_JSON_MAX);
-	if ( json == NULL ) {
-		return E_NOMEM;
-	}
+	json = NULL;
 	vol_lock(v);
 
-	len = read_meta(v, uuid, json, TSFS_JSON_MAX);
+	/* the metadata whole, with room for the count written longer */
+	len = read_meta_all(v, uuid, 32, &json, &cap);
 	if ( len < 0 ) { er = E_NOEXS; goto exit; }
 
 	cur = knl_json_get_num(json, len, "refCount", 0) + delta;
 	if ( cur < 0 ) { er = E_OBJ; goto exit; }
 
-	len = knl_json_set_num(json, len, TSFS_JSON_MAX, "refCount", cur);
+	len = knl_json_set_num(json, len, cap, "refCount", cur);
 	if ( len < 0 ) { er = E_SYS; goto exit; }
 
 	er = ( write_meta(v, uuid, json, len) >= EX_OK ) ? E_OK : E_IO;
 
     exit:
-	vol_unlock(v);
-	Kfree(json);
+	er = vol_done(v, er);
+	if ( json != NULL ) Kfree(json);
 
 	return er;
 }
@@ -1293,7 +1467,7 @@ EXPORT ER ts_gc_obj( ID vol, CONST TS_UUID *uuid )
 	}
 	vol_lock(v);
 	er = ts_obj_gc_one(v->bvol, uuid);
-	vol_unlock(v);
+	er = vol_done(v, er);
 
 	return er;
 }
@@ -1311,7 +1485,7 @@ EXPORT ER ts_gc_vol( ID vol, INT *p_cnt )
 	}
 	vol_lock(v);
 	er = ts_obj_gc_all(v->bvol, p_cnt);
-	vol_unlock(v);
+	er = vol_done(v, er);
 
 	return er;
 }
@@ -1390,12 +1564,12 @@ EXPORT ER ts_set_met( ID od, CONST UB *json, SZ size )
 	if ( o->vol->bvol > 0 ) {
 		vol_lock(o->vol);
 		er = ts_obj_set_meta(o->vol->bvol, &o->uuid, json, size);
-		vol_unlock(o->vol);
+		er = vol_done(o->vol, er);
 		return er;
 	}
 	vol_lock(o->vol);
 	er = write_meta(o->vol, &o->uuid, json, (INT)size);
-	vol_unlock(o->vol);
+	er = vol_done(o->vol, er);
 
 	return ( er >= EX_OK ) ? E_OK : E_IO;
 }
@@ -1421,7 +1595,7 @@ EXPORT ER ts_get_ico( ID od, UB *buf, SZ size, SZ *p_asize )
 	}
 	vol_lock(o->vol);
 	er = read_icon(o->vol, &o->uuid, buf, size, p_asize);
-	vol_unlock(o->vol);
+	er = vol_done(o->vol, er);
 	return er;
 }
 
@@ -1442,7 +1616,7 @@ EXPORT ER ts_set_ico( ID od, CONST UB *buf, SZ size )
 	vol_lock(o->vol);
 	er = ( o->vol->bvol > 0 ) ? ts_obj_set_icon(o->vol->bvol, &o->uuid, buf, size)
 				 : write_icon(o->vol, &o->uuid, buf, size);
-	vol_unlock(o->vol);
+	er = vol_done(o->vol, er);
 	return er;
 }
 
@@ -1466,7 +1640,7 @@ EXPORT ER ts_set_flg_obj( ID od, UINT flags, UINT mask )
 	}
 	vol_lock(o->vol);
 	er = ts_obj_set_flags(o->vol->bvol, &o->uuid, flags, mask);
-	vol_unlock(o->vol);
+	er = vol_done(o->vol, er);
 
 	return er;
 }
@@ -1475,7 +1649,7 @@ EXPORT ER ts_set_nam( ID od, CONST UB *name )
 {
 	TSFSOBJ	*o = od_of(od);
 	UB	*json;
-	INT	len;
+	INT	len, cap = 0;
 	ER	er = E_OK;
 
 	if ( o == NULL || name == NULL ) {
@@ -1487,26 +1661,24 @@ EXPORT ER ts_set_nam( ID od, CONST UB *name )
 	if ( o->vol->bvol > 0 ) {
 		vol_lock(o->vol);
 		er = ts_obj_set_name(o->vol->bvol, &o->uuid, name);
-		vol_unlock(o->vol);
+		er = vol_done(o->vol, er);
 		return er;
 	}
-	json = (UB *)Kmalloc(TSFS_JSON_MAX);
-	if ( json == NULL ) {
-		return E_NOMEM;
-	}
+	json = NULL;
 	vol_lock(o->vol);
 
-	len = read_meta(o->vol, &o->uuid, json, TSFS_JSON_MAX);
+	/* the metadata whole, with room for the name written into it */
+	len = read_meta_all(o->vol, &o->uuid, s_len((CONST char *)name) * 2 + 16, &json, &cap);
 	if ( len < 0 ) { er = E_NOEXS; goto exit; }
 
-	len = knl_json_set_str(json, len, TSFS_JSON_MAX, "name", name);
+	len = knl_json_set_str(json, len, cap, "name", name);
 	if ( len < 0 ) { er = E_PAR; goto exit; }
 
 	er = ( write_meta(o->vol, &o->uuid, json, len) >= EX_OK ) ? E_OK : E_IO;
 
     exit:
-	vol_unlock(o->vol);
-	Kfree(json);
+	er = vol_done(o->vol, er);
+	if ( json != NULL ) Kfree(json);
 
 	return er;
 }
@@ -1551,7 +1723,7 @@ EXPORT ER ts_rea_rec( ID od, INT recno, D off, void *buf, SZ size, SZ *p_asize )
 	if ( p_asize != NULL ) *p_asize = n;
 
     exit:
-	vol_unlock(o->vol);
+	er = vol_done(o->vol, er);
 
 	return er;
 }
@@ -1570,10 +1742,26 @@ EXPORT ER ts_wri_rec( ID od, INT recno, D off, CONST void *buf, SZ size, SZ *p_a
 		return E_OACV;
 	}
 	if ( o->vol->bvol > 0 ) {
-		vol_lock(o->vol);
-		er = ts_obj_wri_rec(o->vol->bvol, &o->uuid, recno, off,
-				     buf, size, p_asize);
-		vol_unlock(o->vol);
+		/*
+		 * A large write goes a piece at a time, the volume let go
+		 * between them, so that a reader of the same volume waits
+		 * for one piece's blocks to reach the device and not for the
+		 * whole write (an SD card writes 256KB in about 85ms, design
+		 * 7.3). Each piece is a change of its own; what the pieces
+		 * changed goes to the medium with the next batch of the log,
+		 * or when the object is closed or made sure of.
+		 */
+		SZ	done = 0, n, got = 0;
+
+		do {
+			n = ( size - done > WRI_PIECE && !ts_obj_trx_open(o->vol->bvol) ) ? WRI_PIECE : size - done;
+			vol_lock(o->vol);
+			er = ts_obj_wri_rec(o->vol->bvol, &o->uuid, recno, off + done,
+					     (CONST UB *)buf + done, n, &got);
+			er = vol_lazy(o, er);
+			if ( er >= E_OK ) done += n;
+		} while ( er >= E_OK && done < size );
+		if ( er >= E_OK && p_asize != NULL ) *p_asize = done;
 		return er;
 	}
 	vol_lock(o->vol);
@@ -1597,7 +1785,7 @@ EXPORT ER ts_wri_rec( ID od, INT recno, D off, CONST void *buf, SZ size, SZ *p_a
 	if ( p_asize != NULL ) *p_asize = n;
 
     exit:
-	vol_unlock(o->vol);
+	er = vol_done(o->vol, er);
 
 	return er;
 }
@@ -1617,7 +1805,7 @@ EXPORT ER ts_rpl_rec( ID od, INT recno, CONST void *buf, SZ size )
 	if ( o->vol->bvol > 0 ) {
 		vol_lock(o->vol);
 		er = ts_obj_rpl_rec(o->vol->bvol, &o->uuid, recno, buf, size);
-		vol_unlock(o->vol);
+		er = vol_done(o->vol, er);
 		return er;
 	}
 	er = ( size > 0 ) ? ts_wri_rec(od, recno, 0, buf, size, &asize) : E_OK;
@@ -1646,8 +1834,7 @@ EXPORT ER ts_apd_rec( ID od, UINT rectype, INT *p_recno )
 	if ( o->vol->bvol > 0 ) {
 		vol_lock(o->vol);
 		er = ts_obj_apd_rec(o->vol->bvol, &o->uuid, rectype, p_recno);
-		vol_unlock(o->vol);
-		return er;
+		return vol_lazy(o, er);
 	}
 	vol_lock(o->vol);
 
@@ -1685,8 +1872,7 @@ EXPORT ER ts_trn_rec( ID od, INT recno, UD newsize )
 	if ( o->vol->bvol > 0 ) {
 		vol_lock(o->vol);
 		er = ts_obj_trn_rec(o->vol->bvol, &o->uuid, recno, newsize);
-		vol_unlock(o->vol);
-		return er;
+		return vol_lazy(o, er);
 	}
 	vol_lock(o->vol);
 
@@ -1702,7 +1888,7 @@ EXPORT ER ts_trn_rec( ID od, INT recno, UD newsize )
 	fs_close(fd);
 
     exit:
-	vol_unlock(o->vol);
+	er = vol_done(o->vol, er);
 
 	return er;
 }
@@ -1723,8 +1909,7 @@ EXPORT ER ts_del_rec( ID od, INT recno )
 	if ( o->vol->bvol > 0 ) {
 		vol_lock(o->vol);
 		er = ts_obj_del_rec(o->vol->bvol, &o->uuid, recno);
-		vol_unlock(o->vol);
-		return er;
+		return vol_lazy(o, er);
 	}
 	vol_lock(o->vol);
 
@@ -1742,7 +1927,7 @@ EXPORT ER ts_del_rec( ID od, INT recno )
 	er = ( fs_unlink((CONST char *)path) >= EX_OK ) ? E_OK : E_IO;
 
     exit:
-	vol_unlock(o->vol);
+	er = vol_done(o->vol, er);
 
 	return er;
 }
@@ -1778,7 +1963,7 @@ EXPORT ER ts_scr_vol( ID vol, BOOL data, UD *p_checked, UD *p_bad )
 	}
 	vol_lock(v);			/* what is on the medium stays still meanwhile */
 	er = ts_obj_scrub(v->bvol, data, &sc);
-	vol_unlock(v);
+	er = vol_done(v, er);
 	if ( er >= E_OK ) {
 		if ( p_checked != NULL ) *p_checked = sc.checked;
 		if ( p_bad != NULL ) *p_bad = sc.bad;
@@ -1819,7 +2004,7 @@ EXPORT ER ts_chk_vol( ID vol, UINT mode, T_TSFSCK *res, FP_TSFSCK fn, void *ctx 
 		tk_dly_tsk(CHK_WAIT_MS);
 	}
 	er = ts_obj_check(v->bvol, mode, res, fn, ctx);
-	vol_unlock(v);
+	er = vol_done(v, er);
 	return er;
 }
 
@@ -1848,7 +2033,7 @@ EXPORT ER ts_ins_rec( ID od, INT pos, UINT rt, UINT sub, INT *p_pos )
 	if ( o != NULL ) {
 		vol_lock(o->vol);
 		er = ts_obj_ins_rec(o->vol->bvol, &o->uuid, pos, rt, sub, p_pos);
-		vol_unlock(o->vol);
+		er = vol_lazy(o, er);
 	}
 	return er;
 }
@@ -1862,7 +2047,7 @@ EXPORT ER ts_mov_rec( ID od, INT from, INT to )
 	if ( o != NULL ) {
 		vol_lock(o->vol);
 		er = ts_obj_mov_rec(o->vol->bvol, &o->uuid, from, to);
-		vol_unlock(o->vol);
+		er = vol_lazy(o, er);
 	}
 	return er;
 }
@@ -1876,7 +2061,7 @@ EXPORT ER ts_set_rtp( ID od, INT recno, UINT rt, UINT sub )
 	if ( o != NULL ) {
 		vol_lock(o->vol);
 		er = ts_obj_set_rtp(o->vol->bvol, &o->uuid, recno, rt, sub);
-		vol_unlock(o->vol);
+		er = vol_lazy(o, er);
 	}
 	return er;
 }
@@ -1963,7 +2148,7 @@ EXPORT ER ts_wri_res( ID od, INT recno, INT resno, CONST UB *ext,
 	}
 	vol_lock(o->vol);
 	er = ts_obj_wri_res(o->vol->bvol, &o->uuid, recno, resno, ext, buf, size);
-	vol_unlock(o->vol);
+	er = vol_done(o->vol, er);
 
 	return er;
 }
@@ -1984,7 +2169,7 @@ EXPORT ER ts_del_res( ID od, INT recno, INT resno )
 	}
 	vol_lock(o->vol);
 	er = ts_obj_del_res(o->vol->bvol, &o->uuid, recno, resno);
-	vol_unlock(o->vol);
+	er = vol_done(o->vol, er);
 
 	return er;
 }
@@ -2103,7 +2288,7 @@ LOCAL ER nres_wri( TSFSVOL *v, CONST TS_UUID *uuid, CONST UB *name, CONST void *
 	if ( er < E_OK ) return er;
 	vol_lock(v);
 	er = ts_obj_wri_res(v->bvol, uuid, rec, res, ext, buf, size);
-	vol_unlock(v);
+	er = vol_done(v, er);
 	return er;
 }
 
@@ -2116,7 +2301,7 @@ LOCAL ER nres_del( TSFSVOL *v, CONST TS_UUID *uuid, CONST UB *name )
 	if ( er < E_OK ) return er;
 	vol_lock(v);
 	er = ts_obj_del_res(v->bvol, uuid, rec, res);
-	vol_unlock(v);
+	er = vol_done(v, er);
 	return er;
 }
 
@@ -2137,7 +2322,9 @@ LOCAL ER nres_lst( TSFSVOL *v, CONST TS_UUID *uuid, UB *buf, SZ size, INT *p_cnt
 	vol_runlock(v);
 	for ( i = 0; er >= E_OK && i < n; i++ ) {
 		k = res_name(&r[i], nm, sizeof(nm));
-		if ( buf != NULL && at + k + 1 <= size ) {
+		if ( buf == NULL ) {
+			got++;			/* only how many there are */
+		} else if ( at + k + 1 <= size ) {
 			knl_memcpy(buf + at, nm, k + 1);
 			at += k + 1;
 			got++;
@@ -2292,7 +2479,9 @@ EXPORT ER knl_tsfs_res_lst( ID vol, CONST TS_UUID *uuid, UB *buf, SZ size, INT *
 
 			if ( !res_file(de[i].name, us, &rest) ) continue;
 			for ( k = 0; rest[k] != 0; k++ ) ;
-			if ( buf != NULL && at + k + 1 <= size ) {
+			if ( buf == NULL ) {
+				got++;		/* only how many there are */
+			} else if ( at + k + 1 <= size ) {
 				knl_memcpy(buf + at, rest, k + 1);
 				at += k + 1;
 				got++;
@@ -2321,7 +2510,7 @@ EXPORT ER knl_tsfs_cre_as( ID vol, CONST TS_UUID *uuid, CONST UB *json, INT len 
 	if ( v->bvol > 0 ) {
 		vol_lock(v);
 		er = ts_obj_create_as(v->bvol, uuid, json, len);
-		vol_unlock(v);
+		er = vol_done(v, er);
 		return er;
 	}
 	if ( knl_tsfs_exists(vol, uuid) >= E_OK ) {
@@ -2329,7 +2518,7 @@ EXPORT ER knl_tsfs_cre_as( ID vol, CONST TS_UUID *uuid, CONST UB *json, INT len 
 	}
 	vol_lock(v);
 	er = ( write_meta(v, uuid, json, len) >= EX_OK ) ? E_OK : E_IO;
-	vol_unlock(v);
+	er = vol_done(v, er);
 
 	return er;
 }
@@ -2410,7 +2599,7 @@ EXPORT ER knl_tsfs_set_icon( ID vol, CONST TS_UUID *uuid, CONST UB *buf, SZ size
 	vol_lock(v);
 	er = ( v->bvol > 0 ) ? ts_obj_set_icon(v->bvol, uuid, buf, size)
 			     : write_icon(v, uuid, buf, size);
-	vol_unlock(v);
+	er = vol_done(v, er);
 	return er;
 }
 
@@ -2435,7 +2624,7 @@ EXPORT ER knl_tsfs_cre_icon( ID vol, CONST TS_UUID *as, CONST UB *json, INT len,
 	if ( v->bvol > 0 ) {
 		vol_lock(v);
 		er = ts_obj_create_icon(v->bvol, as, json, len, icon, iconlen, p_uuid);
-		vol_unlock(v);
+		er = vol_done(v, er);
 		return er;
 	}
 	if ( as != NULL ) {
@@ -2452,7 +2641,7 @@ EXPORT ER knl_tsfs_cre_icon( ID vol, CONST TS_UUID *as, CONST UB *json, INT len,
 	if ( er >= E_OK && iconlen > 0 ) {
 		vol_lock(v);
 		er = write_icon(v, &uuid, icon, iconlen);
-		vol_unlock(v);
+		er = vol_done(v, er);
 	}
 	if ( er >= E_OK && p_uuid != NULL ) {
 		*p_uuid = uuid;
@@ -2474,7 +2663,7 @@ EXPORT ER knl_tsfs_set_meta( ID vol, CONST TS_UUID *uuid, CONST UB *buf, INT len
 	} else {
 		er = ( write_meta(v, uuid, buf, len) >= EX_OK ) ? E_OK : E_IO;
 	}
-	vol_unlock(v);
+	er = vol_done(v, er);
 
 	return er;
 }
@@ -2491,7 +2680,7 @@ EXPORT ER knl_tsfs_set_flags( ID vol, CONST TS_UUID *uuid, UINT flags, UINT mask
 	if ( v->bvol > 0 ) {
 		er = ts_obj_set_flags(v->bvol, uuid, flags, mask);
 	}
-	vol_unlock(v);
+	er = vol_done(v, er);
 
 	return er;
 }
@@ -2533,29 +2722,15 @@ EXPORT INT knl_tsfs_exec_rec( ID vol, CONST TS_UUID *uuid )
 	if ( v == NULL || uuid == NULL ) {
 		return E_ID;
 	}
-	json = (UB *)Kmalloc(TSFS_JSON_MAX);
-	if ( json == NULL ) {
-		return E_NOMEM;
-	}
-	vol_lock(v);
-
-	if ( v->bvol > 0 ) {
-		SZ	asize = 0;
-
-		len = ( ts_obj_get_meta(v->bvol, uuid, json, TSFS_JSON_MAX,
-					&asize) >= E_OK ) ? (INT)asize : -1;
-	} else {
-		len = read_meta(v, uuid, json, TSFS_JSON_MAX);
-	}
+	json = NULL;
+	len = knl_tsfs_meta_all(vol, uuid, 0, &json, NULL);	/* whole: the member may be anywhere */
 	if ( len > 0
 	  && json_sub(json, len, "tessronos", &off, &sublen)
 	  && json_sub(json + off, sublen, "exec", &off2, &sublen2) ) {
 		rec = knl_json_get_num(json + off + off2, sublen2, "record", -1);
 		if ( rec < 0 || rec >= TSFS_MAX_REC ) rec = E_NOEXS;
 	}
-
-	vol_unlock(v);
-	Kfree(json);
+	if ( json != NULL ) Kfree(json);
 
 	return rec;
 }

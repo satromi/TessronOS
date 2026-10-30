@@ -110,17 +110,20 @@ LOCAL BOOL vhc_port_connected( USBHC *hc, INT port )
 	return port >= 0 && port < VHC_PORTS && vhc_port[port].dev != NULL;
 }
 
-LOCAL BOOL vhc_port_changed( USBHC *hc, INT port )
+LOCAL ER vhc_port_status( USBHC *hc, INT port, UW ack, UW *st )
 {
-	BOOL	c;
-
 	(void)hc;
 	if ( port < 0 || port >= VHC_PORTS ) {
-		return FALSE;
+		return E_PAR;
 	}
-	c = vhc_port[port].changed;
-	vhc_port[port].changed = FALSE;
-	return c;
+	*st = ( vhc_port[port].dev != NULL ) ? ( HUB_PS_CONNECTION | HUB_PS_ENABLE | HUB_PS_POWER ) : HUB_PS_POWER;
+	if ( vhc_port[port].changed ) {
+		*st |= HUB_PC_CONNECTION;
+		if ( (ack & HUB_PC_CONNECTION) != 0 ) {
+			vhc_port[port].changed = FALSE;
+		}
+	}
+	return E_OK;
 }
 
 LOCAL ER vhc_port_reset( USBHC *hc, INT port, INT *speed )
@@ -399,9 +402,12 @@ LOCAL void vhc_info( USBHC *hc, T_USBHC *info )
 }
 
 LOCAL CONST USBHC_OPS vhc_ops = {
-	vhc_nports, vhc_port_connected, vhc_port_changed, vhc_port_reset, vhc_port_state,
+	vhc_nports, vhc_port_connected, vhc_port_status, vhc_port_reset, vhc_port_state,
 	vhc_dev_init, vhc_dev_mps0, vhc_hub_config, vhc_dev_free, vhc_control, vhc_bulk,
-	vhc_stream_open, vhc_stream_open_out, vhc_stream_close, vhc_poll, vhc_info
+	vhc_stream_open, vhc_stream_open_out, vhc_stream_close, vhc_poll, vhc_info,
+	NULL,				/* its endpoints keep no toggle of their own */
+	NULL,				/* no USB 3 ports */
+	NULL				/* its ports are always powered */
 };
 
 /* ---------------------------------------------------------------- for the tests */

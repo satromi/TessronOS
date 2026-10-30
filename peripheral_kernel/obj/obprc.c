@@ -12,7 +12,9 @@
  *	The process manager: running processes as objects (design 18.8)
  *
  *	A process is an object for as long as it lives. Making one is
- *	starting a program object; deleting one ends it. Record 0 is what
+ *	starting a program object; deleting one ends it. Its metadata says
+ *	its number (tessronos.process.pid) for what waits for it or signals
+ *	it; its name ("process" and the number) is only shown. Record 0 is what
  *	the process is doing, written as xmlTAD when it is read, with a
  *	virtual object of the program it runs and one of each socket it has
  *	open (obsock.c). Its owner is the user it acts for: that user may
@@ -27,7 +29,6 @@
 #include <ts/sysdef.h>
 #include "obj.h"
 
-#define OBP_TEXT_MAX	6144		/* the status, the program's link and SO_MAX sockets' */
 
 LOCAL ER obp_find( CONST TS_UUID *uuid )
 {
@@ -58,7 +59,7 @@ LOCAL ER obp_ref( CONST TS_UUID *uuid, T_OBREF *r )
 }
 
 /* The user it acts for owns it: rw-r--r-- */
-LOCAL ER obp_prot( CONST TS_UUID *uuid, T_OBPRT *prt )
+LOCAL ER obp_prot( CONST TS_UUID *uuid, T_OBPRT **p_prt )
 {
 	ID		pid = knl_prc_of_uuid(uuid);
 	CONST T_OBCRD	*crd;
@@ -67,55 +68,68 @@ LOCAL ER obp_prot( CONST TS_UUID *uuid, T_OBPRT *prt )
 		return E_NOEXS;
 	}
 	crd = knl_ob_crd_of(pid);
-	knl_ob_prt_default(prt, crd);
+	*p_prt = knl_ob_prt_new(0, 0);
+	if ( *p_prt == NULL ) {
+		return E_NOMEM;
+	}
+	knl_ob_prt_default(*p_prt, crd);
 
 	return E_OK;
 }
 
 /*
  * The programs the system trusts with its own rights when the kernel
- * starts them: helpers the desktop runs for its own work, which work on
+ * starts them: helpers the desktop runs for its own work (実時間メディア,
+ * what the player of 実時間制御TAD sounds and shows with), which work on
  * the channels and memory objects it makes for them and are never
- * started for a person's own use. None is in a program box.
+ * started for a person's own use. None is in a program box. Such a
+ * program says so in its metadata (tessronos.program.trusted), and
+ * counts as one only when it is also on the volume of the system box,
+ * owned by the system, and not to be written or have its protection
+ * changed by anyone but an administrator: only those who may make the
+ * system's objects can make one, and an object that only says it is one
+ * does not count.
  */
-LOCAL CONST char *CONST obp_trusted[] = {
-	SYSDEF_PROG_RTMEDIA,		/* what the player of 実時間制御TAD sounds and shows with */
-};
+LOCAL BOOL obp_says_trusted( CONST TS_UUID *prog )
+{
+	UB	b[8];
+	SZ	asz = 0;
+	ID	key = ob_opn_obj(prog, OB_OP_ATRRD);
+	BOOL	yes = FALSE;
 
-/*
- * Whether prog is such a helper: one of the identities above, on the
- * volume of the system box, owned by the system, and not to be written
- * or have its protection changed by anyone but an administrator -- an
- * object that only says it is one does not count.
- */
+	if ( key <= 0 ) {
+		return FALSE;
+	}
+	if ( ob_get_atv(key, (CONST UB *)"tessronos.program.trusted", b, sizeof(b), &asz) >= E_OK
+	  && asz == 4 && b[0] == 't' && b[1] == 'r' && b[2] == 'u' && b[3] == 'e' ) {
+		yes = TRUE;
+	}
+	ob_cls_obj(key);
+	return yes;
+}
+
 EXPORT BOOL knl_ob_trusted( CONST TS_UUID *prog )
 {
 	CONST T_OBMGR	*m;
 	T_OBPRT		*prt;
-	TS_UUID		u, box;
-	UINT		i;
+	TS_UUID		box;
 	INT		k;
-	BOOL		named = FALSE, ok = FALSE;
+	BOOL		ok = FALSE;
 
 	if ( prog == NULL ) {
 		return FALSE;
 	}
-	for ( i = 0; i < sizeof(obp_trusted) / sizeof(obp_trusted[0]); i++ ) {
-		if ( ts_str_to_uuid(obp_trusted[i], &u) >= E_OK && ts_uuid_cmp(&u, prog) == 0 ) {
-			named = TRUE;
-		}
-	}
-	if ( !named || ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &box) < E_OK
+	if ( !obp_says_trusted(prog) || ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &box) < E_OK
 	  || knl_obfile_vol_of(prog) <= 0 || knl_obfile_vol_of(prog) != knl_obfile_vol_of(&box) ) {
 		return FALSE;
 	}
 	m = knl_ob_mgr_of(prog);
-	prt = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
-	if ( m != NULL && m->prot != NULL && prt != NULL && m->prot(prog, prt) >= E_OK ) {
+	prt = NULL;
+	if ( m != NULL && m->prot != NULL && m->prot(prog, &prt) >= E_OK && prt != NULL ) {
 		ok = (BOOL)( ts_uuid_cmp(&prt->owner, &ob_user_system) == 0
 			  && ( prt->mode & 0002 ) == 0
 			  && ( ts_uuid_cmp(&prt->group, &ob_group_admin) == 0 || ( prt->mode & 0020 ) == 0 ) );
-		for ( k = 0; ok && k < prt->nacl && k < OB_ACL_MAX; k++ ) {
+		for ( k = 0; ok && k < prt->nacl; k++ ) {
 			if ( ( prt->acl[k].ops & ( OB_OP_W | OB_OP_PROT ) ) != 0 ) {
 				ok = FALSE;
 			}
@@ -220,7 +234,7 @@ LOCAL INT status_text( ID pid, UB *t, INT max )
 	INT	n;
 
 	if ( ts_ref_prc(pid, &rp) < E_OK || knl_prc_uuid(pid, NULL, &prog) < E_OK ) {
-		return -1;
+		return E_NOEXS;
 	}
 	(void)put_name(name, sizeof(name), pid);
 	n = knl_oj_put(t, 0, max, "<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"");
@@ -248,54 +262,34 @@ LOCAL INT status_text( ID pid, UB *t, INT max )
 	return knl_oj_put(t, n, max, "</document></tad>");
 }
 
+/* Record 0, made as long as the process's links need */
+LOCAL INT status_make( void *ctx, UB *t, INT max )
+{
+	return status_text(*(ID *)ctx, t, max);
+}
+
 LOCAL ER obp_rea( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, BOOL nowait )
 {
-	UB	*t;
-	INT	len;
-	SZ	n = 0;
+	ID	pid = (ID)h;
 
 	(void)nowait;
 	if ( recno != 0 ) {
 		return E_NOEXS;
 	}
-	if ( off < 0 ) {
-		return E_PAR;
-	}
-	t = (UB *)Kmalloc(OBP_TEXT_MAX);
-	if ( t == NULL ) {
-		return E_NOMEM;
-	}
-	len = status_text((ID)h, t, OBP_TEXT_MAX);
-	if ( len < 0 ) {
-		Kfree(t);
-		return E_NOEXS;
-	}
-	if ( off < len ) {
-		n = (SZ)( len - off );
-		if ( n > size ) n = size;
-		knl_memcpy(buf, t + off, (INT)n);
-	}
-	Kfree(t);
-	if ( p_asize != NULL ) {
-		*p_asize = n;
-	}
-	return E_OK;
+	return knl_oj_make_rea(status_make, &pid, off, buf, size, p_asize);
 }
 
 LOCAL ER obp_lrc( INT h, T_OBREC *buf, INT n, INT *p_cnt )
 {
+	ID	pid = (ID)h;
 	UB	*t;
 	INT	len;
 
-	t = (UB *)Kmalloc(OBP_TEXT_MAX);
-	if ( t == NULL ) {
-		return E_NOMEM;
-	}
-	len = status_text((ID)h, t, OBP_TEXT_MAX);
-	Kfree(t);
+	len = knl_oj_make(status_make, &pid, &t);
 	if ( len < 0 ) {
-		return E_NOEXS;
+		return (ER)len;
 	}
+	Kfree(t);
 	if ( n > 0 ) {
 		buf[0].recno = 0;
 		buf[0].rt = OB_RT_TAD;
@@ -312,10 +306,13 @@ LOCAL ER obp_gat( INT h, UB *json, SZ size, SZ *p_asize )
 	UB	name[24];
 	INT	n;
 
+	/* its number as an attribute of its own, so that no one reads it out of the name */
 	(void)put_name(name, sizeof(name), (ID)h);
 	n = knl_oj_put(json, 0, (INT)size, "{\"name\":");
 	n = knl_oj_put_str(json, n, (INT)size, name);
-	n = knl_oj_put(json, n, (INT)size, "}");
+	n = knl_oj_put(json, n, (INT)size, ",\"tessronos\":{\"process\":{\"pid\":");
+	n = knl_oj_put_num(json, n, (INT)size, (D)h);
+	n = knl_oj_put(json, n, (INT)size, "}}}");
 	if ( n < 0 ) {
 		return E_LIMIT;
 	}
@@ -396,7 +393,10 @@ LOCAL CONST T_OBMGR obp_mgr = {
 	NULL, NULL, NULL, NULL,
 	NULL, NULL,
 	/* no icon of their own */
-	NULL, NULL
+	NULL, NULL,
+	NULL,			/* records replaced by writing over them */
+	NULL,			/* nothing to wait for */
+	NULL			/* nothing comes in to wait for (ob_rea_tmo) */
 };
 
 EXPORT ER knl_obprc_init( void )

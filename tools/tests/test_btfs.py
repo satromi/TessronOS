@@ -9,7 +9,7 @@ semi-standard and the standard form, with logical blocks of 1024, 2048
 and 4096 bytes -- is read: the file system, each file's records at index
 levels 0, 1 and 2, the runs a connection index adds, the link files.
 Then a file and what it links to are written as one archive, and
-bpk_host takes that archive out as 書庫解凍 would.
+bpk_host takes that archive out as 書庫管理 would.
 """
 
 import json

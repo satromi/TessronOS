@@ -18,7 +18,7 @@
       "id": "basic-print",
       "kind": "utility",
       "name": "基本印刷",
-      "version": "R1.110",
+      "version": "R1.200",
       "builtin": true,
       "base": [],
       "fileTypes": [

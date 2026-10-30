@@ -70,6 +70,10 @@
 	SVCSTUB	dt_setsystz,	TSN_DT_SETSYSTZ
 	SVCSTUB	dt_getsyszone,	TSN_DT_GETSYSZONE
 	SVCSTUB	dt_setsyszone,	TSN_DT_SETSYSZONE
+#ifdef TSN_DT_GETRTC
+	SVCSTUB	dt_getrtc,	TSN_DT_GETRTC
+	SVCSTUB	dt_setrtc,	TSN_DT_SETRTC
+#endif
 	SVCSTUB	ts_snd_msg,	TSN_TS_SND_MSG
 	SVCSTUB	ts_ter_prc,	TSN_TS_TER_PRC
 	SVCSTUB	ts_ref_prc,	TSN_TS_REF_PRC
@@ -87,6 +91,8 @@
 	SVCSTUB	tk_dis_dsp,	TSN_TK_DIS_DSP
 	SVCSTUB	tk_chg_pri,	TSN_TK_CHG_PRI
 	SVCSTUB	tk_chg_slt,	TSN_TK_CHG_SLT
+	SVCSTUB	tk_set_asp,	TSN_TK_SET_ASP
+	SVCSTUB	tk_ref_asp,	TSN_TK_REF_ASP
 	SVCSTUB	tk_rot_rdq,	TSN_TK_ROT_RDQ
 	SVCSTUB	tk_rel_wai,	TSN_TK_REL_WAI
 	SVCSTUB	tk_ref_tsk,	TSN_TK_REF_TSK
@@ -139,6 +145,11 @@
 	SVCSTUB	ob_wri_rec,	TSN_OB_WRI_REC
 	SVCSTUB	ob_apd_rec,	TSN_OB_APD_REC
 	SVCSTUB	ob_trn_rec,	TSN_OB_TRN_REC
+	SVCSTUB	ob_rpl_rec,	TSN_OB_RPL_REC
+	SVCSTUB	ob_syn_obj,	TSN_OB_SYN_OBJ
+	SVCSTUB	ob_rea_tmo,	TSN_OB_REA_TMO
+	SVCSTUB	ob_fnd_sys,	TSN_OB_FND_SYS
+	SVCSTUB	ob_acc_obj,	TSN_OB_ACC_OBJ
 	SVCSTUB	ob_del_rec,	TSN_OB_DEL_REC
 	SVCSTUB	ob_lst_rec,	TSN_OB_LST_REC
 	SVCSTUB	ob_get_atr,	TSN_OB_GET_ATR
@@ -147,6 +158,7 @@
 	SVCSTUB	ob_set_ico,	TSN_OB_SET_ICO
 	SVCSTUB	ob_ref_vol,	TSN_OB_REF_VOL
 	SVCSTUB	ob_wip_vol,	TSN_OB_WIP_VOL
+	SVCSTUB	ob_get_atv,	TSN_OB_GET_ATV
 	SVCSTUB	ob_get_prt,	TSN_OB_GET_PRT
 	SVCSTUB	ob_set_prt,	TSN_OB_SET_PRT
 	SVCSTUB	ob_dup_key,	TSN_OB_DUP_KEY
@@ -195,6 +207,16 @@
 	SVCSTUB	fs_detach_dev,	TSN_FS_DETACH_DEV
 	SVCSTUB	fs_mounts,	TSN_FS_MOUNTS
 	SVCSTUB	fs_utime,	TSN_FS_UTIME
+	SVCSTUB	fs_opn_vol,	TSN_FS_OPN_VOL
+	SVCSTUB	fs_openat,	TSN_FS_OPENAT
+	SVCSTUB	fs_statat,	TSN_FS_STATAT
+	SVCSTUB	fs_mkdirat,	TSN_FS_MKDIRAT
+	SVCSTUB	fs_rmdirat,	TSN_FS_RMDIRAT
+	SVCSTUB	fs_unlinkat,	TSN_FS_UNLINKAT
+	SVCSTUB	fs_utimeat,	TSN_FS_UTIMEAT
+	SVCSTUB	fs_renameat,	TSN_FS_RENAMEAT
+	SVCSTUB	fs_fstatvfs,	TSN_FS_FSTATVFS
+	SVCSTUB	fs_fsync,	TSN_FS_FSYNC
 
 	/* sockets and the interface (class 5) */
 	SVCSTUB	so_socket,	TSN_SO_SOCKET
@@ -260,6 +282,8 @@
 	SVCSTUB	km_set,		TSN_KM_SET
 	SVCSTUB	km_label,	TSN_KM_LABEL
 	SVCSTUB	wm_screen,	TSN_WM_SCREEN
+	SVCSTUB	wm_hit_slop,	TSN_WM_HIT_SLOP
+	SVCSTUB	wm_grab_screen,	TSN_WM_GRAB_SCREEN
 
 	/* the tray (class 9) */
 	SVCSTUB	tr_psh_dat,	TSN_TR_PSH_DAT
@@ -286,6 +310,9 @@
 	SVCSTUB	gp_shr_bo,	TSN_GP_SHR_BO
 	SVCSTUB	gp_imp_bo,	TSN_GP_IMP_BO
 	SVCSTUB	gp_ref_bo,	TSN_GP_REF_BO
+#ifdef TSN_GP_BND_BO
+	SVCSTUB	gp_bnd_bo,	TSN_GP_BND_BO
+#endif
 	/* the serial ports (class 11, include/ts/ser.h) */
 	SVCSTUB	sr_lst_prt,	TSN_SR_LST_PRT
 	SVCSTUB	sr_opn_prt,	TSN_SR_OPN_PRT

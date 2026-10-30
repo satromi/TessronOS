@@ -36,6 +36,7 @@ SYSCALL ER tk_set_pow( UINT pwmode )
 	CHECK_INTSK();
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_MISC();
 
 	switch ( pwmode ) {
 	  case TPW_DOSUSPEND:
@@ -59,6 +60,7 @@ SYSCALL ER tk_set_pow( UINT pwmode )
 	  default:
 		ercd = E_PAR;
 	}
+	KLK_UNMISC();
 	END_CRITICAL_SECTION;
 
 	return ercd;

@@ -442,15 +442,19 @@ LOCAL ER obk_ref( CONST TS_UUID *uuid, T_OBREF *r )
 }
 
 /* The user the process acts for owns it, and only the owner has it: rw------- */
-LOCAL ER obk_prot( CONST TS_UUID *uuid, T_OBPRT *prt )
+LOCAL ER obk_prot( CONST TS_UUID *uuid, T_OBPRT **p_prt )
 {
 	OBSK	e;
 
 	if ( entry_of(uuid, &e) < 0 ) {
 		return E_NOEXS;
 	}
-	knl_ob_prt_default(prt, knl_ob_crd_of(e.owner));
-	prt->mode = 0600;
+	*p_prt = knl_ob_prt_new(0, 0);
+	if ( *p_prt == NULL ) {
+		return E_NOMEM;
+	}
+	knl_ob_prt_default(*p_prt, knl_ob_crd_of(e.owner));
+	(*p_prt)->mode = 0600;
 
 	return E_OK;
 }
@@ -680,7 +684,10 @@ LOCAL CONST T_OBMGR obk_mgr = {
 	NULL, NULL, NULL, NULL,
 	NULL, NULL,
 	/* no icon of their own */
-	NULL, NULL
+	NULL, NULL,
+	NULL,			/* records replaced by writing over them */
+	NULL,			/* nothing to wait for */
+	NULL			/* nothing comes in to wait for (ob_rea_tmo) */
 };
 
 /*

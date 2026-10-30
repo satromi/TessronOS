@@ -268,10 +268,19 @@ static int v_true( const CV *v )
 
 /* ---------------------------------------------------------------- the cells */
 
+/* A range a formula names: from one corner to the other, both in it */
+typedef struct {
+	int	c0, r0, c1, r1;
+} CREF;
+
 typedef struct {
 	int	col, row;
 	char	*value, *formula;
 	CV	shown;			/* displayValue */
+	int	pass;			/* the working out it was last worked out in */
+	int	dpass;			/* and the one its dependents were last looked for in */
+	int	nref;
+	CREF	*refs;			/* what its formula names */
 } CCELL;
 
 static CCELL	*cells;
@@ -279,14 +288,95 @@ static int	ncell, mcell;
 static int	*changed;		/* pairs, in the order they first changed */
 static int	nchg, mchg;
 
+/*
+ * A working out is numbered: a formula worked out once in it keeps what
+ * it came to for the rest of it, so that one named many times is worked
+ * out once. While many cells are put in at once (ce_bulk), nothing is
+ * worked out until they all are.
+ */
+static int	g_pass = 1;
+static int	g_bulk = 0;
+static int	deps_stale = 1;		/* who names whom to be made again (deps_build) */
+
+/*
+ * Places kept in open tables, at least twice as large as what is in
+ * them, so that a place is found at once however many there are: the
+ * cells by their place (each slot the cell's index and one), and the
+ * places changed since last asked (the index in 'changed' and one).
+ */
+typedef struct {
+	int		*slot;
+	unsigned	cap;
+} PTAB;
+
+static PTAB	hx;			/* the cells */
+static PTAB	hc;			/* the places changed */
+
+static unsigned home_of( const PTAB *t, int col, int row )
+{
+	unsigned	h = (unsigned)col * 0x9E3779B1U ^ (unsigned)row * 0x85EBCA77U;
+
+	h ^= h >> 15;
+	return h & ( t->cap - 1 );
+}
+
+static void cell_place( int i, int *c, int *r )		{ *c = cells[i].col; *r = cells[i].row; }
+static void chg_place( int i, int *c, int *r )		{ *c = changed[2 * i]; *r = changed[2 * i + 1]; }
+
+/* The slot of a place, or the empty one it would go in */
+static unsigned pt_slot( const PTAB *t, void (*at)( int, int *, int * ), int col, int row )
+{
+	unsigned	k;
+	int		c, r;
+
+	for ( k = home_of(t, col, row); t->slot[k] != 0; k = ( k + 1 ) & ( t->cap - 1 ) ) {
+		at(t->slot[k] - 1, &c, &r);
+		if ( c == col && r == row ) break;
+	}
+	return k;
+}
+
+/* The table made again for n entries, from 'at' */
+static void pt_build( PTAB *t, void (*at)( int, int *, int * ), int n )
+{
+	unsigned	cap = 64, k;
+	int		i, c, r;
+
+	while ( cap < (unsigned)n * 2 + 16 ) cap *= 2;
+	free(t->slot);
+	t->slot = calloc(cap, sizeof(int));
+	t->cap = ( t->slot != NULL ) ? cap : 0;
+	for ( i = 0; t->slot != NULL && i < n; i++ ) {
+		at(i, &c, &r);
+		for ( k = home_of(t, c, r); t->slot[k] != 0; k = ( k + 1 ) & ( t->cap - 1 ) ) ;
+		t->slot[k] = i + 1;
+	}
+}
+
+/* An entry taken out, those after it in its run moved back into its place */
+static void pt_del( PTAB *t, void (*at)( int, int *, int * ), int col, int row )
+{
+	unsigned	s, j, h;
+	int		c, r;
+
+	if ( t->cap == 0 ) return;
+	s = pt_slot(t, at, col, row);
+	if ( t->slot[s] == 0 ) return;
+	for ( j = ( s + 1 ) & ( t->cap - 1 ); t->slot[j] != 0; j = ( j + 1 ) & ( t->cap - 1 ) ) {
+		at(t->slot[j] - 1, &c, &r);
+		h = home_of(t, c, r);
+		if ( ( j > s && ( h <= s || h > j ) ) || ( j < s && h <= s && h > j ) ) {
+			t->slot[s] = t->slot[j];
+			s = j;
+		}
+	}
+	t->slot[s] = 0;
+}
+
 static int find_cell( int col, int row )
 {
-	int	i;
-
-	for ( i = 0; i < ncell; i++ ) {
-		if ( cells[i].col == col && cells[i].row == row ) return i;
-	}
-	return -1;
+	if ( hx.cap == 0 ) return -1;
+	return hx.slot[pt_slot(&hx, cell_place, col, row)] - 1;
 }
 
 static int make_cell( int col, int row )
@@ -308,15 +398,20 @@ static int make_cell( int col, int row )
 	cells[ncell].value = strdup("");
 	cells[ncell].formula = strdup("");
 	cells[ncell].shown = v_str("");
-	return ncell++;
+	ncell++;
+	if ( (unsigned)ncell * 2 + 16 > hx.cap ) {
+		pt_build(&hx, cell_place, ncell);
+	} else {
+		hx.slot[pt_slot(&hx, cell_place, col, row)] = ncell;
+	}
+	return ncell - 1;
 }
 
+/* A place changed, kept once, in the order it first changed */
 static void touch( int col, int row )
 {
-	int	i;
-
-	for ( i = 0; i < nchg; i++ ) {
-		if ( changed[2 * i] == col && changed[2 * i + 1] == row ) return;
+	if ( hc.cap != 0 && hc.slot[pt_slot(&hc, chg_place, col, row)] != 0 ) {
+		return;
 	}
 	if ( nchg == mchg ) {
 		int	m = mchg ? mchg * 2 : 64, *c = realloc(changed, sizeof(int) * 2 * (size_t)m);
@@ -328,6 +423,11 @@ static void touch( int col, int row )
 	changed[2 * nchg] = col;
 	changed[2 * nchg + 1] = row;
 	nchg++;
+	if ( (unsigned)nchg * 2 + 16 > hc.cap ) {
+		pt_build(&hc, chg_place, nchg);
+	} else {
+		hc.slot[pt_slot(&hc, chg_place, col, row)] = nchg;
+	}
 }
 
 /* ---------------------------------------------------------------- names in a formula */
@@ -342,21 +442,6 @@ static int letter_col( const char *s, int n )
 		if ( col > 0x3FFFFFFF ) return 0x3FFFFFFF;
 	}
 	return (int)col;
-}
-
-static int col_letters( int col, char *out )
-{
-	char	t[8];
-	int	n = 0, k = 0;
-
-	while ( col > 0 && n < 7 ) {
-		col--;
-		t[n++] = (char)( 'A' + col % 26 );
-		col /= 26;
-	}
-	while ( n > 0 ) out[k++] = t[--n];
-	out[k] = 0;
-	return k;
 }
 
 static int up( char c )		{ return c >= 'A' && c <= 'Z'; }
@@ -410,6 +495,9 @@ static CV value_recalc( int col, int row, const EVSET *ev )
 	int	i = find_cell(col, row);
 
 	if ( i < 0 ) return v_str("");
+	if ( cells[i].formula[0] != 0 && cells[i].pass == g_pass ) {
+		return v_copy(&cells[i].shown);		/* worked out already in this one */
+	}
 	if ( cells[i].formula[0] != 0 ) {
 		EVSET	in;
 		CV	v;
@@ -429,6 +517,7 @@ static CV value_recalc( int col, int row, const EVSET *ev )
 		if ( i >= 0 ) {
 			v_free(&cells[i].shown);
 			cells[i].shown = v_copy(&v);
+			cells[i].pass = g_pass;
 		}
 		return v;
 	}
@@ -1265,59 +1354,245 @@ static CV evaluate( const char *formula, int col, int row, const EVSET *ev )
 
 /* ---------------------------------------------------------------- the calls */
 
-/* Whether a formula names (col, row): as A1 between the edges of words, or as [row,col] */
-static int names( const char *f, int col, int row )
+/* What a formula names: its ranges, its A1 names and its [row,col] ones, as ranges */
+static void refs_of( CCELL *c )
 {
-	char	ref[24], old[40];
-	int	n, i, k;
+	const char	*f = c->formula;
+	int		i, n = 0, m = 0;
+	CREF		*r = NULL;
 
-	n = col_letters(col, ref);
-	snprintf(ref + n, sizeof(ref) - (size_t)n, "%d", row);
-	n = (int)strlen(ref);
-	for ( i = 0; f[i] != 0; i++ ) {
-		if ( strncmp(f + i, ref, (size_t)n) == 0 && ( i == 0 || !word(f[i - 1]) ) && !word(f[i + n]) ) return 1;
+	if ( c->nref > 0 ) {
+		deps_stale = 1;
 	}
-	snprintf(old, sizeof(old), "[%d,%d]", row, col);
-	if ( strstr(f, old) != NULL ) return 1;
-	snprintf(old, sizeof(old), "\xEF\xBC\xBB%d\xEF\xBC\x8C%d\xEF\xBC\xBD", row, col);
-	k = ( strstr(f, old) != NULL );
-	return k;
+	free(c->refs);
+	c->refs = NULL;
+	c->nref = 0;
+	if ( f == NULL || f[0] != '=' ) return;
+	deps_stale = 1;
+	for ( i = 0; f[i] != 0; ) {
+		int		c0, c1, len, k, nl;
+		long long	r0, r1;
+		CREF		one;
+
+		len = a1_at(f, i, &c0, &r0, 0, &nl);
+		if ( len > 0 && f[i + len] == ':' && ( k = a1_at(f, i + len + 1, &c1, &r1, 0, &nl) ) > 0 ) {
+			one.c0 = ( c0 < c1 ) ? c0 : c1;  one.c1 = ( c0 < c1 ) ? c1 : c0;
+			one.r0 = (int)( ( r0 < r1 ) ? r0 : r1 );  one.r1 = (int)( ( r0 < r1 ) ? r1 : r0 );
+			len += 1 + k;
+		} else if ( ( len = a1_at(f, i, &c0, &r0, 1, &nl) ) > 0 || ( len = old_at(f, i, &c0, &r0) ) > 0 ) {
+			one.c0 = one.c1 = c0;
+			one.r0 = one.r1 = (int)( ( r0 > 0x3FFFFFFF ) ? 0x3FFFFFFF : r0 );
+		} else {
+			i++;
+			continue;
+		}
+		if ( n == m ) {
+			CREF	*q;
+
+			m = m ? m * 2 : 4;
+			q = realloc(r, sizeof(CREF) * (size_t)m);
+			if ( q == NULL ) break;
+			r = q;
+		}
+		r[n++] = one;
+		i += len;
+	}
+	c->refs = r;
+	c->nref = n;
 }
 
-static void recalc_dependents( int col, int row )
+static int refs_hold( const CCELL *c, int col, int row )
 {
-	int	i;
+	int	k;
 
-	for ( i = 0; i < ncell; i++ ) {
-		int	c = cells[i].col, r = cells[i].row;
-
-		if ( cells[i].formula[0] == 0 || ( c == col && r == row ) ) continue;
-		if ( names(cells[i].formula, col, row) ) {
-			EVSET	ev;
-			int	k[2];
-			char	*f = strdup(cells[i].formula);
-			CV	v;
-
-			k[0] = c;
-			k[1] = r;
-			ev.n = 1;
-			ev.k = k;
-			v = evaluate(f, c, r, &ev);
-			free(f);
-			{
-				int	j = find_cell(c, r);
-
-				if ( j >= 0 ) {
-					v_free(&cells[j].shown);
-					cells[j].shown = v;
-				} else {
-					v_free(&v);
-				}
-			}
-			touch(c, r);
-			recalc_dependents(c, r);
+	for ( k = 0; k < c->nref; k++ ) {
+		if ( col >= c->refs[k].c0 && col <= c->refs[k].c1 && row >= c->refs[k].r0 && row <= c->refs[k].r1 ) {
+			return 1;
 		}
 	}
+	return 0;
+}
+
+/*
+ * Who names whom, made from the formulas' references when it is next
+ * wanted after a formula changed: each place a formula names on its own,
+ * in the order of the places, and each range a formula names. A changed
+ * cell's formulas are then found at once, however many cells there are.
+ */
+typedef struct {
+	int	col, row;		/* named */
+	int	fc, fr;			/* by the formula there */
+} DONE1;
+
+typedef struct {
+	CREF	r;
+	int	fc, fr;
+} DRANGE;
+
+static DONE1	*d1;
+static int	nd1;
+static DRANGE	*dr;
+static int	ndr;
+
+static int d1_cmp( const void *a, const void *b )
+{
+	const DONE1	*x = a, *y = b;
+
+	if ( x->row != y->row ) return ( x->row < y->row ) ? -1 : 1;
+	if ( x->col != y->col ) return ( x->col < y->col ) ? -1 : 1;
+	return 0;
+}
+
+static void deps_build( void )
+{
+	int	i, k, n1 = 0, nr = 0;
+
+	free(d1);
+	free(dr);
+	d1 = NULL;
+	dr = NULL;
+	nd1 = ndr = 0;
+	for ( i = 0; i < ncell; i++ ) {
+		for ( k = 0; k < cells[i].nref; k++ ) {
+			if ( cells[i].refs[k].c0 == cells[i].refs[k].c1 && cells[i].refs[k].r0 == cells[i].refs[k].r1 ) n1++;
+			else nr++;
+		}
+	}
+	d1 = malloc(sizeof(DONE1) * (size_t)( n1 + 1 ));
+	dr = malloc(sizeof(DRANGE) * (size_t)( nr + 1 ));
+	if ( d1 == NULL || dr == NULL ) {
+		free(d1);
+		free(dr);
+		d1 = NULL;
+		dr = NULL;
+		return;				/* stays stale: looked for the slow way */
+	}
+	for ( i = 0; i < ncell; i++ ) {
+		for ( k = 0; k < cells[i].nref; k++ ) {
+			CREF	*r = &cells[i].refs[k];
+
+			if ( r->c0 == r->c1 && r->r0 == r->r1 ) {
+				d1[nd1].col = r->c0;
+				d1[nd1].row = r->r0;
+				d1[nd1].fc = cells[i].col;
+				d1[nd1].fr = cells[i].row;
+				nd1++;
+			} else {
+				dr[ndr].r = *r;
+				dr[ndr].fc = cells[i].col;
+				dr[ndr].fr = cells[i].row;
+				ndr++;
+			}
+		}
+	}
+	qsort(d1, (size_t)nd1, sizeof(DONE1), d1_cmp);
+	deps_stale = 0;
+}
+
+/* Places to look at next, in the order they came */
+typedef struct {
+	int	*p;			/* pairs */
+	int	head, n, max;
+} WQ;
+
+static void wq_put( WQ *q, int col, int row )
+{
+	if ( q->n == q->max ) {
+		int	m = q->max ? q->max * 2 : 64, *np;
+
+		/* what was taken off the front is dropped as it grows */
+		if ( q->head > 0 ) {
+			memmove(q->p, q->p + 2 * q->head, sizeof(int) * 2 * (size_t)( q->n - q->head ));
+			q->n -= q->head;
+			q->head = 0;
+		}
+		if ( q->n == q->max ) {
+			np = realloc(q->p, sizeof(int) * 2 * (size_t)m);
+			if ( np == NULL ) return;
+			q->p = np;
+			q->max = m;
+		}
+	}
+	q->p[2 * q->n] = col;
+	q->p[2 * q->n + 1] = row;
+	q->n++;
+}
+
+/* The formula at (c, r) worked out in this working out, when it is not yet, and looked past */
+static void dep_one( WQ *q, int c, int r )
+{
+	int	i = find_cell(c, r);
+
+	if ( i < 0 || cells[i].formula[0] == 0 || cells[i].dpass == g_pass ) return;
+	cells[i].dpass = g_pass;
+	if ( cells[i].pass != g_pass ) {
+		EVSET	ev;
+		int	k[2];
+		CV	v;
+
+		k[0] = c;
+		k[1] = r;
+		ev.n = 1;
+		ev.k = k;
+		v = value_recalc(c, r, &ev);
+		v_free(&v);
+	}
+	touch(c, r);
+	wq_put(q, c, r);
+}
+
+/*
+ * Every formula naming the cell worked out again, and the ones naming
+ * those, each once in a working out: a ring of them does not go round
+ * for ever, and a long chain is followed one link after another rather
+ * than by calling down it.
+ */
+static void recalc_dependents( int col, int row )
+{
+	WQ	q = { NULL, 0, 0, 0 };
+
+	if ( g_bulk ) return;
+	if ( deps_stale ) deps_build();
+	wq_put(&q, col, row);
+	while ( q.head < q.n ) {
+		int	c = q.p[2 * q.head], r = q.p[2 * q.head + 1], k;
+
+		q.head++;
+		if ( deps_stale ) {
+			/* no room for the index: every formula looked at */
+			int	i;
+
+			for ( i = 0; i < ncell; i++ ) {
+				if ( cells[i].nref > 0 && refs_hold(&cells[i], c, r) ) {
+					dep_one(&q, cells[i].col, cells[i].row);
+				}
+			}
+			continue;
+		}
+		{
+			/* those naming it on its own: the first of them, then on */
+			int	lo = 0, hi = nd1;
+			DONE1	key;
+
+			key.col = c;
+			key.row = r;
+			while ( lo < hi ) {
+				int	mid = ( lo + hi ) / 2;
+
+				if ( d1_cmp(&d1[mid], &key) < 0 ) lo = mid + 1;
+				else hi = mid;
+			}
+			for ( k = lo; k < nd1 && d1[k].col == c && d1[k].row == r; k++ ) {
+				dep_one(&q, d1[k].fc, d1[k].fr);
+			}
+		}
+		for ( k = 0; k < ndr; k++ ) {
+			if ( c >= dr[k].r.c0 && c <= dr[k].r.c1 && r >= dr[k].r.r0 && r <= dr[k].r.r1 ) {
+				dep_one(&q, dr[k].fc, dr[k].fr);
+			}
+		}
+	}
+	free(q.p);
 }
 
 int ce_start( void )
@@ -1350,6 +1625,18 @@ int ce_set( int col, int row, const unsigned char *text )
 	free(cells[i].value);
 	free(cells[i].formula);
 	v_free(&cells[i].shown);
+	if ( !g_bulk ) {
+		g_pass++;			/* a new working out */
+	}
+	if ( t[0] == '=' && g_bulk ) {
+		/* worked out with all the others, when they are all in (ce_bulk) */
+		cells[i].formula = t;
+		cells[i].value = strdup("");
+		cells[i].shown = v_str("");
+		refs_of(&cells[i]);
+		touch(col, row);
+		return 0;
+	}
 	if ( t[0] == '=' ) {
 		EVSET	ev;
 		int	k[2] = { col, row };
@@ -1358,6 +1645,7 @@ int ce_set( int col, int row, const unsigned char *text )
 		cells[i].formula = t;
 		cells[i].value = strdup("");
 		cells[i].shown = v_str("");
+		refs_of(&cells[i]);
 		ev.n = 1;
 		ev.k = k;
 		v = evaluate(t, col, row, &ev);
@@ -1365,24 +1653,77 @@ int ce_set( int col, int row, const unsigned char *text )
 		if ( i >= 0 ) {
 			v_free(&cells[i].shown);
 			cells[i].shown = v;
+			cells[i].pass = g_pass;
 		}
 	} else {
 		cells[i].value = t;
 		cells[i].formula = strdup("");
 		cells[i].shown = v_str(t);
+		refs_of(&cells[i]);
+		if ( g_bulk ) {
+			/*
+			 * What it shows is what it was given, which the sheet holds
+			 * already: not told back (a sheet read keeps a million
+			 * numbers from being taken again one at a time).
+			 */
+			return 0;
+		}
+	}
+	if ( i >= 0 ) {
+		cells[i].dpass = g_pass;
 	}
 	touch(col, row);
 	recalc_dependents(col, row);
 	return 0;
 }
 
+/*
+ * Many cells put in at once: from ce_bulk(1) on, a cell is kept as it
+ * is given and nothing is worked out; at ce_bulk(0) every formula is
+ * worked out once, each in the light of the others.
+ */
+int ce_bulk( int on )
+{
+	int	i;
+
+	if ( on ) {
+		g_bulk = 1;
+		return 0;
+	}
+	g_bulk = 0;
+	g_pass++;
+	for ( i = 0; i < ncell; i++ ) {
+		if ( cells[i].formula[0] != 0 && cells[i].pass != g_pass ) {
+			int	c = cells[i].col, r = cells[i].row;
+			EVSET	ev;
+			CV	v;
+
+			ev.n = 0;
+			ev.k = NULL;
+			v = value_recalc(c, r, &ev);
+			v_free(&v);
+			touch(c, r);
+		}
+	}
+	return 0;
+}
+
 static void drop_at( int i )
 {
+	if ( cells[i].nref > 0 ) {
+		deps_stale = 1;
+	}
+	pt_del(&hx, cell_place, cells[i].col, cells[i].row);
 	free(cells[i].value);
 	free(cells[i].formula);
+	free(cells[i].refs);
 	v_free(&cells[i].shown);
-	memmove(&cells[i], &cells[i + 1], sizeof(CCELL) * (size_t)( ncell - i - 1 ));
 	ncell--;
+	if ( i < ncell ) {
+		/* the last in its place: in the table, under its own place */
+		cells[i] = cells[ncell];
+		hx.slot[pt_slot(&hx, cell_place, cells[i].col, cells[i].row)] = i + 1;
+	}
 }
 
 int ce_clear( int col, int row )
@@ -1391,6 +1732,10 @@ int ce_clear( int col, int row )
 
 	if ( i >= 0 ) drop_at(i);
 	touch(col, row);
+	if ( !g_bulk ) {
+		g_pass++;
+		recalc_dependents(col, row);	/* what named it names nothing now */
+	}
 	return 0;
 }
 
@@ -1401,6 +1746,12 @@ int ce_blank( int col, int row )
 	if ( i < 0 ) return -1;
 	free(cells[i].value);
 	free(cells[i].formula);
+	if ( cells[i].nref > 0 ) {
+		deps_stale = 1;
+	}
+	free(cells[i].refs);
+	cells[i].refs = NULL;
+	cells[i].nref = 0;
 	v_free(&cells[i].shown);
 	cells[i].value = strdup("");
 	cells[i].formula = strdup("");
@@ -1411,25 +1762,43 @@ int ce_blank( int col, int row )
 
 int ce_move( int cols, int at, int d )
 {
-	int	i;
+	int	i, k = 0;
 
-	for ( i = 0; i < ncell; ) {
+	/* in one walk: those taken out let go, the others renamed and closed up */
+	for ( i = 0; i < ncell; i++ ) {
 		int	*v = cols ? &cells[i].col : &cells[i].row;
 
 		if ( d < 0 && *v == at ) {
-			drop_at(i);
+			free(cells[i].value);
+			free(cells[i].formula);
+			free(cells[i].refs);
+			v_free(&cells[i].shown);
 			continue;
 		}
 		if ( *v > at || ( d > 0 && *v == at ) ) *v += d;
-		i++;
+		cells[k++] = cells[i];
 	}
+	ncell = k;
+	pt_build(&hx, cell_place, ncell);
+	deps_stale = 1;			/* the places renamed */
 	return 0;
 }
 
 int ce_reset( void )
 {
-	while ( ncell > 0 ) drop_at(ncell - 1);
+	int	i;
+
+	for ( i = 0; i < ncell; i++ ) {
+		free(cells[i].value);
+		free(cells[i].formula);
+		free(cells[i].refs);
+		v_free(&cells[i].shown);
+	}
+	ncell = 0;
 	nchg = 0;
+	deps_stale = 1;
+	pt_build(&hx, cell_place, 0);
+	pt_build(&hc, chg_place, 0);
 	return 0;
 }
 
@@ -1450,6 +1819,9 @@ int ce_taken( CE_FN fn, void *arg )
 		free(w);
 	}
 	nchg = 0;
+	if ( hc.cap != 0 ) {
+		memset(hc.slot, 0, sizeof(int) * hc.cap);
+	}
 	return n;
 }
 
@@ -1468,17 +1840,15 @@ int ce_replace( const unsigned char *text, const unsigned char *pat, const unsig
 
 	(void)regex;
 	if ( max <= 0 ) return -1;
+	/* written as far as there is room; the whole counted all the same */
 	while ( lp > 0 && ( f = strstr(s, (const char *)pat) ) != NULL ) {
-		size_t	m = (size_t)( f - s );
+		size_t	m = (size_t)( f - s ), i;
 
-		if ( k + (int)( m + lr ) >= max ) break;
-		memcpy(out + k, s, m);
-		k += (int)m;
-		memcpy(out + k, rep, lr);
-		k += (int)lr;
+		for ( i = 0; i < m; i++, k++ ) if ( k < max - 1 ) out[k] = (unsigned char)s[i];
+		for ( i = 0; i < lr; i++, k++ ) if ( k < max - 1 ) out[k] = rep[i];
 		s = f + lp;
 	}
-	while ( *s != 0 && k < max - 1 ) out[k++] = (unsigned char)*s++;
-	out[k] = 0;
+	for ( ; *s != 0; s++, k++ ) if ( k < max - 1 ) out[k] = (unsigned char)*s;
+	out[( k < max - 1 ) ? k : max - 1] = 0;
 	return k;
 }

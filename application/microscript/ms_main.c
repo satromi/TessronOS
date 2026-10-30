@@ -31,6 +31,8 @@
 #include <stdio.h>
 #include <ts/sysdef.h>
 #include <ts/json.h>
+#include <ts/obatr.h>
+#include <ts/ui.h>
 
 IMPORT ER ts_get_mono( UD *p_ns );
 
@@ -61,6 +63,11 @@ MSPROG	ms_prog;
 
 static TS_UUID	win, ch;
 static ID	kw, port;
+
+ID ms_win_key( void )
+{
+	return kw;
+}
 static INT	gid = -1;
 static BOOL	dirty = TRUE, closing;
 static char	*source;
@@ -248,75 +255,60 @@ void ms_message_clear( void )
 }
 
 /*
- * Asking whether a host may be reached: a box over the window with the
- * host and two buttons, answered with them or with Y and N (Enter and
- * Esc). The thread that asks waits for the answer; the window goes on
- * reading what the person does.
+ * Asking whether a host may be reached: a panel of the data box
+ * (SYSDEF_BOX_MICROSCRIPT) in front of the window, with the host,
+ * 〈拒否〉 (the safe one, framed thick: Enter) and 〈許可〉; Esc or the
+ * panel closed is 〈拒否〉. The thread that asks waits for the answer;
+ * the window's own loop opens the panel and hears it (ask_tick), and the
+ * window takes nothing from the person meanwhile.
  */
-#define ASK_W		360
-#define ASK_H		120
-#define ASK_BW		96
-#define ASK_BH		26
+#define PN_ASK		1
+#define PT_ASK_HOST	1
+#define PT_ALLOW	11
+#define PT_DENY		12
 
 static struct {
 	BOOL	pending;
 	INT	answer;			/* 1 yes, 0 no, -1 not yet */
 	char	host[256];
-	T_DPRECT box, yes, no;
+	BOOL	open;			/* its panel is up */
+	UI	q;
 } ask;
+static UI	ms_ui;			/* what the panels are asked over */
 
-static void ask_layout( INT w, INT h )
+static void work_size( INT *p_w, INT *p_h );
+
+/* The panel opened while a question waits, and taken away once it is answered */
+static void ask_tick( void )
 {
-	INT	l = ( w - ASK_W ) / 2, t = ( h - ASK_H ) / 2;
+	char	line[320];
 
-	if ( l < 0 ) l = 0;
-	if ( t < 0 ) t = 0;
-	ask.box.left = l;
-	ask.box.top = t;
-	ask.box.right = l + ASK_W;
-	ask.box.bottom = t + ASK_H;
-	ask.yes.left = l + ASK_W / 2 - ASK_BW - 10;
-	ask.yes.top = t + ASK_H - ASK_BH - 14;
-	ask.yes.right = ask.yes.left + ASK_BW;
-	ask.yes.bottom = ask.yes.top + ASK_BH;
-	ask.no.left = l + ASK_W / 2 + 10;
-	ask.no.top = ask.yes.top;
-	ask.no.right = ask.no.left + ASK_BW;
-	ask.no.bottom = ask.yes.bottom;
+	if ( ask.pending && !ask.open ) {
+		work_size(&ms_ui.w, &ms_ui.h);
+		if ( ui_dlg_open(&ms_ui, PN_ASK, &ask.q) < E_OK ) {
+			ask.answer = 0;			/* no panel: not allowed */
+			return;
+		}
+		snprintf(line, sizeof(line), "%s に接続します。よろしいですか。", ask.host);
+		ui_set_text(&ask.q, PT_ASK_HOST, line);
+		ask.open = TRUE;
+		tm_putstring((const UB *)"microscript: asked to connect\n");
+	} else if ( !ask.pending && ask.open ) {
+		ui_dlg_close(&ask.q);
+		ask.open = FALSE;
+	}
 }
 
-static void ask_button( INT gid, const T_DPRECT *b, const char *label )
+/* A notice of the panel's: TRUE when it was one */
+static BOOL ask_notice( const T_OBNTM *m )
 {
-	T_DPRECT	r = *b;
-	INT		tw = dp_text_width((const UB *)label, CON_PX);
+	INT	num = 0, ev;
 
-	(void)dp_fill_rect(gid, &r, 0x00000000U);
-	r.left++; r.top++; r.right--; r.bottom--;
-	(void)dp_fill_rect(gid, &r, 0x00E0E0E0U);
-	(void)dp_text(gid, b->left + ( ( b->right - b->left ) - tw ) / 2, b->top + ( ASK_BH + CON_PX ) / 2 - 2,
-		      (const UB *)label, CON_INK, CON_PX);
-}
-
-static void ask_draw( INT gid, INT w, INT h )
-{
-	T_DPRECT	r;
-	char		line[320];
-
-	ask_layout(w, h);
-	r = ask.box;
-	(void)dp_fill_rect(gid, &r, 0x00000000U);
-	r.left += 2; r.top += 2; r.right -= 2; r.bottom -= 2;
-	(void)dp_fill_rect(gid, &r, 0x00FFFFF0U);
-	(void)dp_text(gid, ask.box.left + 14, ask.box.top + 12 + CON_PX, (const UB *)"接続の許可", CON_INK, CON_PX);
-	snprintf(line, sizeof(line), "%s に接続します。よろしいですか。", ask.host);
-	(void)dp_text(gid, ask.box.left + 14, ask.box.top + 38 + CON_PX, (const UB *)line, CON_INK, CON_PX);
-	ask_button(gid, &ask.yes, "許可(Y)");
-	ask_button(gid, &ask.no, "拒否(N)");
-}
-
-static BOOL in_rect( const T_DPRECT *r, INT x, INT y )
-{
-	return (BOOL)( x >= r->left && x < r->right && y >= r->top && y < r->bottom );
+	if ( !ask.open || ( m->id != 2 && m->id != 3 ) ) return FALSE;
+	ev = ui_dlg_take(&ask.q, m, &num);
+	if ( ev == UI_EV_BUTTON && ask.answer < 0 ) ask.answer = ( num == PT_ALLOW ) ? 1 : 0;
+	else if ( ev == UI_EV_CLOSE && ask.answer < 0 ) ask.answer = 0;
+	return TRUE;
 }
 
 INT ms_net_ask( const char *host )
@@ -328,9 +320,10 @@ INT ms_net_ask( const char *host )
 	ask.answer = -1;
 	ask.pending = TRUE;
 	ms_dirty();
-	while ( ask.answer < 0 ) {
-		if ( rt.cur != NULL && th_stop(rt.cur) ) break;
-		ms_yield(ms_now_ms() + 50);
+	/* the answer comes as a notice of the panel, which stirs the run */
+	for ( BOOL again = FALSE; ask.answer < 0; again = TRUE ) {
+		if ( rt.cur == NULL || th_stop(rt.cur) ) break;
+		th_wait(rt.cur, MS_NEVER, TRUE, again);
 	}
 	a = ask.answer;
 	ask.pending = FALSE;
@@ -367,7 +360,6 @@ static void draw_all( void )
 	ms_win.wdh = h;
 	if ( console_on ) con_draw(gid, w, h);
 	else st_render(gid, w, h, NULL);
-	if ( ask.pending ) ask_draw(gid, w, h);
 	(void)wm_obj_flush(kw, NULL);
 	dirty = FALSE;
 }
@@ -527,17 +519,22 @@ void ms_beep( double freq, double dur )
 
 /* ---------------------------------------------------------------- the figure's metadata */
 
-static char	meta[OB_ATR_MAX + 1];
+static char	meta_none[1];
+static char	*meta = meta_none;	/* the figure's metadata, whole ("" when none) */
 static SZ	metalen;
 
 static void meta_read( void )
 {
-	SZ	asz = 0;
+	UB	*m = NULL;
+	INT	n;
 
+	if ( meta != meta_none ) free(meta);
+	meta = meta_none;
 	metalen = 0;
-	if ( ob_get_atr(ms_win.kfig, (UB *)meta, OB_ATR_MAX, &asz) >= E_OK ) {
-		metalen = asz;
-		meta[metalen] = 0;
+	n = ob_atr_read(ms_win.kfig, 0, &m);
+	if ( n >= 0 ) {
+		meta = (char *)m;
+		metalen = n;
 	}
 }
 
@@ -610,10 +607,16 @@ static void meta_put( const char *key, const MSBUF *a )
 	if ( ms_win.kfig > 0 ) ob_cls_obj(ms_win.kfig);
 	k = ob_opn_obj(&ms_win.fig, OB_OP_R | OB_OP_ATRWR);
 	if ( k > 0 ) {
-		if ( b.n <= OB_ATR_MAX && ob_set_atr(k, (const UB *)b.s, b.n) >= E_OK ) {
-			memcpy(meta, b.s, (size_t)b.n);
+		char	*m = malloc((size_t)b.n + 1);
+
+		if ( m != NULL && ob_set_atr(k, (const UB *)b.s, b.n) >= E_OK ) {
+			memcpy(m, b.s, (size_t)b.n);
+			m[b.n] = 0;
+			if ( meta != meta_none ) free(meta);
+			meta = m;
 			metalen = b.n;
-			meta[metalen] = 0;
+		} else {
+			free(m);
 		}
 		ob_cls_obj(k);
 	}
@@ -789,23 +792,22 @@ BOOL ms_link_by_name( const char *name, TS_UUID *u )
 /* An object's name and its first record */
 static BOOL read_object( const TS_UUID *u, char *name, INT nmax, char **p_rec, INT *p_len )
 {
-	static char	atr[OB_ATR_MAX + 1];
+	UB		*atr = NULL;
 	SZ		asz = 0;
 	ID		k = ob_opn_obj(u, OB_OP_R);
 	T_JSON		root;
 	T_OBREC		r[4];
-	INT		cnt = 0;
+	INT		cnt = 0, n;
 
 	name[0] = 0;
 	*p_rec = NULL;
 	*p_len = 0;
 	if ( k <= 0 ) return FALSE;
-	if ( ob_get_atr(k, (UB *)atr, OB_ATR_MAX, &asz) >= E_OK ) {
-		atr[asz] = 0;
-		if ( js_parse((const UB *)atr, (INT)asz, &root) >= E_OK ) {
-			(void)js_get_str(&root, "name", (UB *)name, nmax);
-		}
+	n = ob_atr_read(k, 0, &atr);
+	if ( n >= 0 && js_parse(atr, n, &root) >= E_OK ) {
+		(void)js_get_str(&root, "name", (UB *)name, nmax);
 	}
+	free(atr);
 	if ( p_rec != NULL && ob_lst_rec(k, r, 4, &cnt) >= E_OK && cnt > 0 ) {
 		*p_rec = ms_alloc((size_t)r[0].size + 1);
 		if ( ob_rea_rec(k, 0, 0, *p_rec, (SZ)r[0].size, &asz) >= E_OK ) {
@@ -1077,6 +1079,7 @@ static void restart( void )
 	rt.finished = TRUE;
 	rt.epilogue_done = TRUE;
 	for ( t = rt.threads; t != NULL; t = t->next ) t->terminated = TRUE;
+	rt_wake_all();
 	closing = TRUE;
 }
 
@@ -1134,6 +1137,7 @@ static void menu( const T_OBNTM *m )
 			MSTH	*t;
 
 			for ( t = rt.threads; t != NULL; t = t->next ) t->terminated = TRUE;
+			rt_wake_all();
 		} else if ( sel_is(&sel, "source") ) {
 			show_source();
 		} else if ( sel_is(&sel, "op") ) {
@@ -1205,29 +1209,24 @@ static void fire_click( MSSEG *s, INT x, INT y )
 	rt_event(EV_QPRESS, s, x, y);
 }
 
-static BOOL	ime_pressed;		/* the press was on the candidates: its release is theirs */
-
 static void pointer( const T_OBNTM *m )
 {
 	MSSEG	*s;
 
+	if ( m->event == OB_E_PRESS && m->recno == OB_WR_CAND ) {
+		ms_ime_pick((INT)m->code);	/* a name on the list of candidates */
+		return;
+	}
 	ms_win.pdx = m->x;
 	ms_win.pdy = m->y;
 	if ( m->event == OB_E_MOVE ) return;
-	if ( ask.pending ) {
-		if ( m->event == OB_E_RELEASE && m->code != 1 ) {
-			if ( in_rect(&ask.yes, m->x, m->y) ) ask.answer = 1;
-			else if ( in_rect(&ask.no, m->x, m->y) ) ask.answer = 0;
-		}
-		return;
-	}
+	if ( ask.pending ) return;		/* the panel in front is answered first */
 	if ( m->event == OB_E_PRESS ) {
 		if ( m->code == 1 ) {
 			menu(m);
 			return;
 		}
-		ime_pressed = ms_ime_press(m->x, m->y);
-		if ( ime_pressed ) return;
+		ms_ime_commit();
 		ms_win.pdb = 1;
 		s = st_hit(m->x, m->y, has_pointer_handler);
 		if ( s != NULL ) rt_event(EV_PRESS, s, m->x, m->y);
@@ -1235,10 +1234,6 @@ static void pointer( const T_OBNTM *m )
 	}
 	/* released: a click on what is under it */
 	if ( m->code == 1 ) return;
-	if ( ime_pressed ) {
-		ime_pressed = FALSE;
-		return;
-	}
 	ms_win.pdb = 0;
 	s = st_hit(m->x, m->y, has_pointer_handler);
 	if ( s == NULL ) return;
@@ -1266,16 +1261,12 @@ static void key( const T_OBNTM *m )
 		closing = TRUE;
 		return;
 	}
-	if ( ask.pending ) {
-		if ( ascii == 'y' || ascii == 'Y' || code == 0x0A || code == 0x0D ) ask.answer = 1;
-		else if ( ascii == 'n' || ascii == 'N' || code == 0x1B ) ask.answer = 0;
-		return;
-	}
+	if ( ask.pending ) return;
 	if ( st_input_seg() != NULL ) {
 		UW	ch = ( code == 0x0A || code == 0x08 || code == 0x7F || code == 0x102 || code == 0x103 ) ? code : ascii;
 
 		/* KINPUT: the converter first */
-		if ( st_input_kanji() && ms_ime_key(m->code, m->mods) ) return;
+		if ( st_input_kanji() && ms_ime_key(m->code, m->mods, m->imode) ) return;
 
 		if ( code == 0x09 ) {
 			rt_key(0x09, meta);
@@ -1350,6 +1341,14 @@ static ER open_window( const char *title )
 		ms_win.scrh = wp.sh;
 	}
 	if ( wnext.mode == WM_NORMAL ) ms_win_resize(w, h);
+
+	/* the panels: the data box, asked over this window, heard on its channel */
+	memset(&ms_ui, 0, sizeof(ms_ui));
+	if ( ui_uuid(SYSDEF_BOX_MICROSCRIPT, &ms_ui.box) >= E_OK ) {
+		ms_ui.kw = kw;
+		ms_ui.port = port;
+		ms_ui.win = win;
+	}
 	return E_OK;
 }
 
@@ -1449,6 +1448,27 @@ static BOOL boot( void )
 	return TRUE;
 }
 
+/* The ms from now until at, 0 once it has passed */
+static TMO ms_left( UD at )
+{
+	UD	now = ms_now_ms();
+
+	if ( at <= now ) return TMO_POL;
+	return ( at - now > 0x7FFFFFFF ) ? 0x7FFFFFFF : (TMO)( at - now );
+}
+
+/* When the loop has something to do next: now when a thread is to run, MS_NEVER nothing */
+static UD next_due( UD close_at )
+{
+	UD	at;
+
+	if ( rt_ready() || ( dirty && ms_win.update ) ) return 0;
+	at = rt_next_wake();
+	if ( pend_seg != NULL && pend_at + DCLICK_MS < at ) at = pend_at + DCLICK_MS;
+	if ( close_at != 0 && close_at < at ) at = close_at;
+	return at;
+}
+
 int main( void )
 {
 	T_OBNTM	m;
@@ -1485,10 +1505,23 @@ int main( void )
 	(void)boot();
 	draw_all();
 
+	/*
+	 * The window's channel waited on until the first of what has a time:
+	 * a thread's (SLEEP, a WAIT's limit, a source looked at again), the
+	 * second press of a double click, the end after closing. A notice
+	 * stirs the run: a thread that waits for something the program is
+	 * told of looks at it again then.
+	 */
 	for ( ;; ) {
-		UD	now, wake;
+		UD	at;
+		BOOL	told = FALSE;
 
-		while ( ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+		ask_tick();
+		at = next_due(close_at);
+		for ( TMO tmo = ( at == MS_NEVER ) ? TMO_FEVR : ms_left(at);
+		      ob_rea_tmo(port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) {
+			told = TRUE;
+			if ( ask_notice(&m) ) continue;
 			switch ( m.event ) {
 			case OB_E_CLOSE:
 			case OB_E_DELETE:
@@ -1509,6 +1542,7 @@ int main( void )
 				break;
 			}
 		}
+		if ( told ) rt_stir();
 		if ( closing && close_at == 0 ) {
 			rt_stop();
 			close_at = ms_now_ms() + 3000;
@@ -1523,11 +1557,9 @@ int main( void )
 		if ( dirty && ms_win.update ) draw_all();
 		if ( rt.finished && ( rt_epilogue_done() || ( close_at != 0 && ms_now_ms() >= close_at ) ) ) break;
 		if ( rt.finished && close_at == 0 ) close_at = ms_now_ms() + 3000;
-		if ( rt_ready() ) continue;
-		now = ms_now_ms();
-		wake = rt_next_wake();
-		tk_dly_tsk(( wake > now + TICK_MS || wake <= now ) ? TICK_MS : (TMO)( wake - now ));
 	}
+	ask.pending = FALSE;
+	ask_tick();
 	ms_ime_end();
 	ms_net_end();
 	ms_vobj_end();

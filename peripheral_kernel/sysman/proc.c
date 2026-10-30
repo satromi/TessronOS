@@ -95,6 +95,14 @@ typedef struct {
 	 * whether the process is to end, which it does when the last of
 	 * them has come out; and whether a task is finishing it
 	 * (knl_prc_call_enter, prc_mark, prc_finish).
+	 *
+	 * incall and ending are read and written with atomic operations,
+	 * in sequential consistency, without the table's lock: a call
+	 * counts itself in and then looks at ending, and prc_mark sets
+	 * ending and then looks at incall, so that of a call coming in and
+	 * the process being marked at once, at least one sees the other
+	 * (the call goes out again, or the marking leaves the finishing to
+	 * the call). Everything else of the end is decided under the lock.
 	 */
 	INT	incall;
 	BOOL	ending;
@@ -189,7 +197,35 @@ LOCAL ID	prc_next_pid = 1;
 LOCAL ID	prc_init_pid = 0;	/* the init process, 0 while there is none */
 LOCAL ID	prc_reaper_tid = 0;	/* gives back what an ended process held (prc_reaper) */
 
+/*
+ * The process table's lock taken. In the UI tests' builds the takes are
+ * counted, and those that had to wait for it (knl_prc_lock_stat).
+ */
+#ifdef USE_UITEST
+LOCAL volatile UD	prc_lock_takes = 0, prc_lock_waits = 0;
+
+EXPORT void knl_prc_lock_stat( UD *p_takes, UD *p_waits )
+{
+	*p_takes = __atomic_load_n(&prc_lock_takes, __ATOMIC_RELAXED);
+	*p_waits = __atomic_load_n(&prc_lock_waits, __ATOMIC_RELAXED);
+}
+
+LOCAL void prc_lock( void )
+{
+	__atomic_fetch_add(&prc_lock_takes, 1, __ATOMIC_RELAXED);
+	if ( tk_loc_mtx(prc_mtxid, TMO_POL) < E_OK ) {
+		__atomic_fetch_add(&prc_lock_waits, 1, __ATOMIC_RELAXED);
+		tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	}
+}
+#else
+#define prc_lock()	tk_loc_mtx(prc_mtxid, TMO_FEVR)
+#endif
+
 #define PCB_OF(q)	( (T_PCB *)( (UB *)(q) - offsetof(T_PCB, link) ) )
+
+#define INCALL(p)	__atomic_load_n(&(p)->incall, __ATOMIC_SEQ_CST)
+#define ENDING(p)	__atomic_load_n(&(p)->ending, __ATOMIC_SEQ_CST)
 #define FOR_EACH_PCB(p, q) \
 	for ( (q) = prc_all.next; (q) != &prc_all && ( ( (p) = PCB_OF(q) ) != NULL ); (q) = (q)->next )
 
@@ -214,14 +250,18 @@ LOCAL T_PCB *ttbr0_to_pcb( UD ttbr0 )
 
 /*
  * The process the calling task belongs to, found through the space its
- * TTBR0 names. Kernel tasks and the system process give NULL.
+ * TTBR0 names. Kernel tasks and the system process give NULL. The task
+ * is read once, as the processor's own (knl_self_ctxtsk): with
+ * interrupts enabled, two reads could each be of another processor's.
  */
 LOCAL T_PCB *cur_pcb( void )
 {
-	if ( knl_ctxtsk == NULL ) {
+	TCB	*me = knl_self_ctxtsk();
+
+	if ( me == NULL ) {
 		return NULL;
 	}
-	return ttbr0_to_pcb(knl_ctxtsk->tskctxb.ttbr0);
+	return ttbr0_to_pcb(me->tskctxb.ttbr0);
 }
 
 #define PRC_REAPER_PRI		12	/* above the programs, so that what ended goes back soon */
@@ -435,7 +475,7 @@ LOCAL BOOL prc_reap_ended( void )
 	INT	n = 0, i;
 
 	(void)ts_get_mono(&now);
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	FOR_EACH_PCB(p, q) {
 		if ( p->used && p->told && !p->released ) {
 			if ( n == PRC_REAP_BATCH ) {
@@ -456,7 +496,7 @@ LOCAL BOOL prc_reap_ended( void )
 			more = TRUE;
 			continue;
 		}
-		tk_loc_mtx(prc_mtxid, TMO_FEVR);
+		prc_lock();
 		p = pid_to_pcb(pids[i]);
 		if ( p != NULL && p->gen == gens[i] && p->told && !p->released ) {
 			prc_release(p);
@@ -510,7 +550,7 @@ LOCAL BOOL prc_free_orphans( void )
 		n = 0;
 		old = NULL;
 		gone = 0;
-		tk_loc_mtx(prc_mtxid, TMO_FEVR);
+		prc_lock();
 		FOR_EACH_PCB(p, q) {
 			if ( !p->used || p->state != PS_ZOMBIE || !p->released || prc_has_collector(p) ) {
 				continue;
@@ -760,7 +800,7 @@ LOCAL ID cre_prc( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, CONST T_SPAWN *sp )
 	}
 
 	/* no process could be made: not worth reading the program for */
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	room = (BOOL)( prc_count < CNF_MAX_PRC );
 	tk_unl_mtx(prc_mtxid);
 	if ( !room ) {
@@ -773,7 +813,7 @@ LOCAL ID cre_prc( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, CONST T_SPAWN *sp )
 		return er;
 	}
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 
 	if ( prc_count >= CNF_MAX_PRC || ( npid = pid_new() ) <= 0 ) {
 		er = E_LIMIT;
@@ -1012,11 +1052,11 @@ LOCAL BOOL prc_mark( T_PCB *p, INT code )
 	if ( !p->ending ) {
 		p->exitcd = code;
 		p->state  = PS_EXITING;
-		p->ending = TRUE;
 		p->end_at = 0;
 		(void)ts_get_mono(&p->end_at);
+		__atomic_store_n(&p->ending, TRUE, __ATOMIC_SEQ_CST);
 	}
-	if ( p->incall > 0 || p->finishing ) {
+	if ( INCALL(p) > 0 || p->finishing ) {
 		return FALSE;
 	}
 	p->finishing = TRUE;
@@ -1038,7 +1078,7 @@ LOCAL void prc_finish( T_PCB *p )
 	ID	self = tk_get_tid(), pid, ppid;
 	INT	n, i, code;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	pid = p->pid;
 	ppid = p->ppid;
 	code = p->exitcd;
@@ -1067,7 +1107,7 @@ LOCAL void prc_finish( T_PCB *p )
 		(void)snd_msg_as(ppid, &m, TMO_POL, pid);
 	}
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	tk_set_flg(p->flgid, PRC_FLG_EXIT);
 	p->told = TRUE;
 	p->told_at = 0;
@@ -1099,7 +1139,7 @@ EXPORT void ts_ext_prc( INT exitcd )
 	T_PCB	*p;
 	BOOL	fin = FALSE;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL ) {
 		fin = prc_mark(p, exitcd);
@@ -1132,7 +1172,7 @@ EXPORT ER ts_ter_prc( ID pid, INT abortcd )
 	BOOL	fin = FALSE, mine = FALSE;
 	ER	er = E_OK;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 
 	p = pid_to_pcb(pid);
 	if ( p == NULL ) {
@@ -1253,27 +1293,39 @@ LOCAL TCB *prc_task( T_PCB *p )
  * network stack, drawing or the windows begins. Every task of the process is counted, on
  * its own and for the process: none is taken down while it is inside.
  * A process that is to end lets no task in (E_DISWAI).
+ *
+ * No lock is taken on the way in: the calling task's process and its
+ * control block stay while the task runs, the task's own count is
+ * written only by the task, and the process's is counted atomically
+ * before ending is looked at (prc_mark looks the other way round). A
+ * call that finds the process marked goes out again; when the marking
+ * left the finishing to it, it finishes the process and ends.
  */
 EXPORT ER knl_prc_call_enter( void )
 {
-	T_PCB	*p;
-	TCB	*t;
-	ER	er = E_OK;
+	T_PCB	*p = cur_pcb();
+	TCB	*t = prc_task(p);
+	BOOL	fin = FALSE;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
-	p = cur_pcb();
-	t = prc_task(p);
-	if ( t != NULL ) {
-		if ( p->ending ) {
-			er = E_DISWAI;
-		} else {
-			p->incall++;
-			t->svcin++;
-		}
+	if ( t == NULL ) {
+		return E_OK;
 	}
-	tk_unl_mtx(prc_mtxid);
-
-	return er;
+	t->svcin++;
+	(void)__atomic_add_fetch(&p->incall, 1, __ATOMIC_SEQ_CST);
+	if ( !ENDING(p) ) {
+		return E_OK;
+	}
+	t->svcin--;
+	if ( __atomic_sub_fetch(&p->incall, 1, __ATOMIC_SEQ_CST) == 0 ) {
+		prc_lock();
+		fin = prc_mark(p, p->exitcd);	/* marked already: only who finishes it is decided */
+		tk_unl_mtx(prc_mtxid);
+	}
+	if ( fin ) {
+		prc_finish(p);
+		tk_ext_tsk();			/* no return */
+	}
+	return E_DISWAI;
 }
 
 /*
@@ -1283,6 +1335,12 @@ EXPORT ER knl_prc_call_enter( void )
  * was not there while it worked for it -- the task does not go back to
  * the program: it ends, and the last task of the process to come out
  * finishes the process on the way.
+ *
+ * The way out takes no lock unless there is something to do under it:
+ * the process is to end, the kernel met a bad address of it, or this
+ * was the last call out while pages it gave back are held for the calls
+ * (umem.c). The count goes down before ending is looked at, as on the
+ * way in.
  */
 EXPORT void knl_prc_call_leave( BOOL entered )
 {
@@ -1291,17 +1349,27 @@ EXPORT void knl_prc_call_leave( BOOL entered )
 	BOOL	end = FALSE, fin = FALSE, fault = FALSE, note = FALSE, pan = FALSE;
 	UBINT	va = 0;
 	ID	pid = 0;
+	INT	left;
 	T_PRCFLT info;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
 	p = cur_pcb();
 	t = prc_task(p);
-	if ( t != NULL ) {
-		if ( entered && t->svcin > 0 ) {
-			t->svcin--;
-			p->incall--;
-		}
-		if ( p->incall == 0 ) {
+	if ( t == NULL ) {
+		return;
+	}
+	if ( entered && t->svcin > 0 ) {
+		t->svcin--;
+		left = __atomic_sub_fetch(&p->incall, 1, __ATOMIC_SEQ_CST);
+	} else {
+		left = INCALL(p);
+	}
+	if ( !p->kfault && !ENDING(p) && !( left == 0 && knl_umem_held(p->umem) ) ) {
+		return;
+	}
+
+	prc_lock();
+	{
+		if ( INCALL(p) == 0 ) {
 			knl_umem_flush(p->umem);	/* no call holds its pages now */
 		}
 		if ( p->kfault ) {
@@ -1326,9 +1394,9 @@ EXPORT void knl_prc_call_leave( BOOL entered )
 				note = TRUE;
 				p->exitcd = TS_ABORT_FAULT;
 				p->state  = PS_EXITING;
-				p->ending = TRUE;
 				p->end_at = 0;
 				(void)ts_get_mono(&p->end_at);
+				__atomic_store_n(&p->ending, TRUE, __ATOMIC_SEQ_CST);
 			}
 		}
 		if ( p->ending ) {
@@ -1453,7 +1521,7 @@ EXPORT BOOL knl_prc_ufault( UBINT va, UD esr )
 	} else {
 		return FALSE;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL && p->space.l0_pa != 0 ) {
 		ent = knl_pt_entry(p->space.l0_pa, va & ~(UBINT)( PAGE_SIZE - 1 ));
@@ -1482,7 +1550,7 @@ EXPORT ER ts_def_flt( void (*f)( T_TSFLT *flt ) )
 	if ( f != NULL && ( va < USER_TEXT_VA || va >= USER_STACK_TOP || ( va & UFLT_PC_MASK ) != 0 ) ) {
 		return E_PAR;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL ) {
 		p->flt_entry = (UD)va;
@@ -1513,7 +1581,7 @@ EXPORT BOOL knl_prc_flt_give( void *frame, UD esr, UD far )
 	if ( !knl_ufault_is_data(esr) ) {
 		return FALSE;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL && !p->ending ) {
 		entry = p->flt_entry;
@@ -1570,7 +1638,7 @@ EXPORT ER knl_prc_mem_wx( ID pid, UD out[6] )
 	T_PCB	*p;
 	ER	er = E_NOEXS;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p != NULL && p->used && p->space.l0_pa != 0 ) {
 		knl_umem_wx(p->umem, &p->space, out);
@@ -1603,9 +1671,9 @@ EXPORT INT knl_prc_dma( CONST void *uaddr, INT len, BOOL into, void **p_kaddr )
 	T_PCB	*p;
 	TCB	*t;
 	UBINT	va = (UBINT)uaddr, end, pg;
-	UD	e, ap, pa, first = 0, next = 0;
+	UD	e, pa, first = 0, next = 0;
 
-	if ( len <= 0 || p_kaddr == NULL || knl_ctxtsk == NULL ) {
+	if ( len <= 0 || p_kaddr == NULL || knl_self_ctxtsk() == NULL ) {
 		return E_PAR;
 	}
 	p = cur_pcb();
@@ -1622,10 +1690,9 @@ EXPORT INT knl_prc_dma( CONST void *uaddr, INT len, BOOL into, void **p_kaddr )
 	}
 	for ( pg = va & PAGE_MASK; pg < end; pg += PAGE_SIZE ) {
 		e = knl_pt_entry(p->space.l0_pa, pg);
-		ap = ( e >> 6 ) & 3;
 
-		/* AP: 1 read and write for all, 3 read only for all */
-		if ( e == 0 || !( ap == 1 || ( ap == 3 && !into ) ) ) {
+		/* the process may read it, and write it when it is to be written into */
+		if ( e == 0 || !PTE_USER_OK(e, into) ) {
 			break;
 		}
 		pa = e & PTE_ADDR_MASK;
@@ -1647,15 +1714,9 @@ EXPORT INT knl_prc_dma( CONST void *uaddr, INT len, BOOL into, void **p_kaddr )
 /* Whether the calling task's process is to end as soon as it is out of the layer it is in */
 EXPORT BOOL knl_prc_ending( void )
 {
-	T_PCB	*p;
-	BOOL	yes;
+	T_PCB	*p = cur_pcb();		/* the caller's own: it stays while the caller runs */
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
-	p = cur_pcb();
-	yes = ( p != NULL && p->ending );
-	tk_unl_mtx(prc_mtxid);
-
-	return yes;
+	return (BOOL)( p != NULL && ENDING(p) );
 }
 
 /*
@@ -1666,13 +1727,56 @@ EXPORT BOOL knl_prc_ending( void )
  * it is what ends the process: not for a process already ending, nor
  * for a second task of it faulting as well.
  */
+/*
+ * The code around where a task of the process at EL0 met its exception,
+ * as the process's pages hold it, into the record: read through the
+ * process's own mapping (the faulting task's space is the one in use),
+ * four bytes at a time, those on a page not mapped left out. Set beside
+ * the instruction the processor reported, it tells a program that is
+ * not the one thought apart from pages that changed under it. Put on
+ * the console too.
+ */
+LOCAL void flt_code( UD ttbr0, T_PRCFLT *f )
+{
+	UD	l0 = ttbr0 & PTE_ADDR_MASK;
+	UBINT	va = (UBINT)f->elr - TS_FLT_CODE_BACK, w;
+	UW	*code = (UW *)f->code;
+	INT	i;
+
+	f->codeok = 0;
+	f->codepa = knl_pt_lookup(l0, (UBINT)f->elr & PAGE_MASK);
+	if ( f->codepa != ~(UD)0 ) {
+		f->codepa += (UBINT)f->elr & ~PAGE_MASK;
+	}
+	for ( i = 0; i < TS_FLT_CODE / 4; i++ ) {
+		w = va + (UBINT)i * 4;
+		code[i] = 0;
+		if ( w < USER_TEXT_VA || w + 4 > USER_STACK_TOP
+		  || knl_pt_lookup(l0, w & PAGE_MASK) == ~(UD)0
+		  || knl_pt_lookup(l0, ( w + 3 ) & PAGE_MASK) == ~(UD)0 ) {
+			continue;
+		}
+		knl_ua_get(&code[i], (CONST void *)w, 4);
+		f->codeok |= 1U << i;
+	}
+	tm_printf((UB*)"TessronOS: task %d code at %lx (pa %lx) from -%d:"
+		  " %08x %08x %08x %08x [%08x] %08x %08x %08x (read %02x)\n",
+		  f->tskid, f->elr, f->codepa, TS_FLT_CODE_BACK,
+		  code[0], code[1], code[2], code[3], code[4], code[5], code[6], code[7], f->codeok);
+}
+
 EXPORT void knl_prc_abort( UD ttbr0, INT abortcd, CONST T_PRCFLT *f )
 {
 	T_PCB	*p;
 	BOOL	fin = FALSE, note = FALSE;
-	T_PRCFLT info;
+	T_PRCFLT info, fc;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	if ( f != NULL && f->kind == TS_FLT_EL0 ) {
+		fc = *f;
+		flt_code(ttbr0, &fc);
+		f = &fc;
+	}
+	prc_lock();
 	p = ttbr0_to_pcb(ttbr0);
 	if ( p != NULL ) {
 		if ( !p->ending && f != NULL ) {
@@ -1740,7 +1844,7 @@ EXPORT INT knl_prc_name( ID pid, UB *buf, INT max )
 
 	knl_memset(&prog, 0, sizeof(prog));
 	file[0] = 0;
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p != NULL ) {
 		prog = p->prog;
@@ -1789,7 +1893,7 @@ EXPORT ER knl_prc_force_end( ID pid )
 	T_PCB	*p;
 	ER	er = E_OK;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p == NULL || p->state == PS_ZOMBIE || p->state == PS_NONEXIST ) {
 		er = E_NOEXS;
@@ -1814,7 +1918,7 @@ LOCAL BOOL prc_done( ID pid, UW gen )
 	T_RFLG	rf;
 	BOOL	done;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	done = (BOOL)( p == NULL || !p->used || p->gen != gen
 		    || ( p->flgid > 0 && tk_ref_flg(p->flgid, &rf) >= E_OK
@@ -1841,7 +1945,7 @@ LOCAL INT prc_cut_waits( ID pid )
 	T_RTSK	r;
 	INT	n, i, cut = 0;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	n = knl_own_list(TK_OWN_TSK, pid, tids, TS_PRC_TSK_MAX);
 	tk_unl_mtx(prc_mtxid);
 	for ( i = 0; i < n && i < TS_PRC_TSK_MAX; i++ ) {
@@ -1877,7 +1981,7 @@ EXPORT ER knl_prc_kill( ID pid )
 	BOOL	fin = FALSE;
 	ER	er = E_OK;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p == NULL || !p->used || p->state == PS_ZOMBIE || p->state == PS_NONEXIST ) {
 		er = E_NOEXS;
@@ -1913,7 +2017,7 @@ EXPORT ER knl_prc_kill( ID pid )
 	}
 
 	/* stopped where they stand */
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p == NULL || p->gen != gen ) {
 		tk_unl_mtx(prc_mtxid);
@@ -1938,7 +2042,7 @@ EXPORT ER knl_prc_kill( ID pid )
 			t->svcdepth = 0;
 		}
 	}
-	p->incall = 0;
+	__atomic_store_n(&p->incall, 0, __ATOMIC_SEQ_CST);
 	p->killed = TRUE;
 	if ( inside > 0 ) {
 		p->keep_space = TRUE;
@@ -1975,7 +2079,7 @@ EXPORT ER knl_prc_info( ID pid, T_PRCINFO *pi )
 	}
 	knl_memset(pi, 0, sizeof(*pi));
 	(void)ts_get_mono(&now);
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p == NULL || !p->used ) {
 		tk_unl_mtx(prc_mtxid);
@@ -1989,7 +2093,7 @@ EXPORT ER knl_prc_info( ID pid, T_PRCINFO *pi )
 	pi->killed = p->killed;
 	pi->ending_ms = ( p->ending && p->end_at != 0 && now > p->end_at )
 		      ? (UW)( ( now - p->end_at ) / 1000000ULL ) : 0;
-	pi->incall = p->incall;
+	pi->incall = INCALL(p);
 	pi->done = (BOOL)( p->flgid > 0 && tk_ref_flg(p->flgid, &rf) >= E_OK
 			&& ( rf.flgptn & PRC_FLG_EXIT ) != 0 );
 	pi->memsz = p->memsz + knl_umem_bytes(p->umem);
@@ -2040,7 +2144,7 @@ EXPORT ID knl_start_init( CONST char *path )
 
 	pid = ts_cre_prc(path, &cprc);
 	if ( pid > 0 ) {
-		tk_loc_mtx(prc_mtxid, TMO_FEVR);
+		prc_lock();
 		prc_init_pid = pid;
 		tk_unl_mtx(prc_mtxid);
 		tm_printf((UB*)"TessronOS: init started as pid %d from %s\n", pid, path);
@@ -2076,7 +2180,7 @@ EXPORT ER ts_snd_msg( ID pid, CONST T_TSMSG *msg, TMO tmout )
 	T_PCB	*self;
 	ID	from;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	self = cur_pcb();
 	from = ( self != NULL ) ? self->pid : 0;
 	tk_unl_mtx(prc_mtxid);
@@ -2095,7 +2199,7 @@ LOCAL ER snd_msg_as( ID pid, CONST T_TSMSG *msg, TMO tmout, ID from )
 	if ( msg == NULL || msg->size > TS_MSG_MAX ) {
 		return E_PAR;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p == NULL || p->state != PS_RUNNING ) {
 		tk_unl_mtx(prc_mtxid);
@@ -2114,7 +2218,7 @@ LOCAL ER snd_msg_as( ID pid, CONST T_TSMSG *msg, TMO tmout, ID from )
 		return er;			/* the queue stayed full */
 	}
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p == NULL || p->gen != gen || p->msgq == NULL ) {
 		tk_unl_mtx(prc_mtxid);
@@ -2143,7 +2247,7 @@ EXPORT ER ts_rcv_msg( T_TSMSG *buf, TMO tmout )
 	if ( buf == NULL ) {
 		return E_PAR;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p == NULL ) {
 		tk_unl_mtx(prc_mtxid);
@@ -2161,7 +2265,7 @@ EXPORT ER ts_rcv_msg( T_TSMSG *buf, TMO tmout )
 		return er;			/* nothing arrived */
 	}
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	*buf = p->msgq[p->msg_head];
 	p->msg_head = (p->msg_head + 1) % TS_MSG_QLEN;
 	sem = p->msg_free;
@@ -2184,7 +2288,7 @@ EXPORT ER ts_wai_prc( ID pid, T_PSTS *pk_psts, TMO tmout )
 	UW	gen;
 	ER	er;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	self = cur_pcb();
 
 	if ( pid == TS_PRC_ANY ) {
@@ -2208,7 +2312,7 @@ EXPORT ER ts_wai_prc( ID pid, T_PSTS *pk_psts, TMO tmout )
 
 	er = tk_wai_flg(flgid, PRC_FLG_EXIT, TWF_ORW, &ptn, tmout);
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p != NULL && p->gen == gen ) {
 		p->waiters--;
@@ -2252,7 +2356,7 @@ EXPORT ER ts_ref_prc( ID pid, T_RPRC *pk_rprc )
 	if ( pk_rprc == NULL ) {
 		return E_PAR;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 
 	p = ( pid == 0 ) ? cur_pcb() : pid_to_pcb(pid);
 	if ( p == NULL ) {
@@ -2297,7 +2401,7 @@ EXPORT ID knl_prc_self( ID *p_main, PRI *p_base )
 	T_PCB	*p;
 	ID	pid = 0;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL ) {
 		pid = p->pid;
@@ -2330,7 +2434,7 @@ EXPORT ID knl_prc_tk_cre( INT kind, CONST void *pk )
 	T_PCB	*p;
 	ID	id;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p == NULL ) {
 		id = E_OBJ;
@@ -2377,7 +2481,7 @@ EXPORT ID knl_prc_cre_tsk( CONST T_CTSK *pk )
 	c.stksz  = 0;			/* the system stack: the least a task of a process has */
 	c.bufptr = NULL;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p == NULL ) {
 		tid = E_OBJ;
@@ -2416,7 +2520,7 @@ EXPORT ER knl_prc_map_shared( ID pid, UBINT va, UD pa, UD size, BOOL write )
 	if ( va < SHM_WINDOW_BASE || va + size > SHM_WINDOW_END || size == 0 ) {
 		return E_PAR;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p == NULL || p->space.l0_pa == 0 ) {
 		er = E_NOEXS;
@@ -2439,7 +2543,7 @@ EXPORT ER knl_prc_unmap_shared( ID pid, UBINT va, UD size )
 	if ( va < SHM_WINDOW_BASE || va + size > SHM_WINDOW_END ) {
 		return E_PAR;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p != NULL && p->space.l0_pa != 0 ) {
 		er = knl_pt_unmap(p->space.l0_pa, va, size);
@@ -2457,7 +2561,7 @@ EXPORT ER knl_prc_space_call( ID pid, ER (*fn)( void *space, void *arg ), void *
 	if ( fn == NULL ) {
 		return E_PAR;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p != NULL && p->space.l0_pa != 0 ) {
 		er = fn(&p->space, arg);
@@ -2487,7 +2591,7 @@ EXPORT ER knl_prc_map_kernel( ID pid, CONST void *kva, UD size, UBINT *p_va )
 	if ( va == 0 ) {
 		return E_LIMIT;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p == NULL || p->space.l0_pa == 0 ) {
 		er = E_NOEXS;
@@ -2519,7 +2623,7 @@ EXPORT ER knl_prc_sink_shared( ID pid, UBINT va, UD size )
 	if ( va < SHM_WINDOW_BASE || va + size > SHM_WINDOW_END || ( ( va | size ) & ( PAGE_SIZE - 1 ) ) != 0 ) {
 		return E_PAR;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p != NULL && p->space.l0_pa != 0 ) {
 		er = E_OK;
@@ -2540,7 +2644,7 @@ EXPORT BOOL knl_prc_user_ok( ID pid, CONST void *p, SZ len, BOOL write )
 {
 	T_PCB	*pc;
 	UBINT	va = (UBINT)p, end, pg;
-	BOOL	ok = TRUE;
+	BOOL	ok = TRUE, mine;
 
 	if ( p == NULL || len < 0 ) {
 		return FALSE;
@@ -2549,19 +2653,31 @@ EXPORT BOOL knl_prc_user_ok( ID pid, CONST void *p, SZ len, BOOL write )
 	if ( end < va || end > USER_STACK_TOP || va < USER_TEXT_VA ) {
 		return FALSE;			/* not in the process's half at all */
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
-	pc = pid_to_pcb(pid);
+	/*
+	 * The caller's own process -- every call asks of its own -- needs no
+	 * lock: its control block and its space stay while the caller runs,
+	 * and the tables are walked as knl_pt_entry walks them, without the
+	 * lock of the tables. Another process's block may go meanwhile, and
+	 * is looked at under the table's lock.
+	 */
+	pc = cur_pcb();
+	mine = ( pc != NULL && pc->pid == pid );
+	if ( !mine ) {
+		prc_lock();
+		pc = pid_to_pcb(pid);
+	}
 	if ( pc == NULL || pc->space.l0_pa == 0 ) {
 		ok = FALSE;
 	}
 	for ( pg = va & PAGE_MASK; ok && pg < end; pg += PAGE_SIZE ) {
 		UD	e = knl_pt_entry(pc->space.l0_pa, pg);
-		UD	ap = ( e >> 6 ) & 3;
 
-		/* AP: 1 read and write for all, 3 read only for all */
-		ok = ( e != 0 && ( ap == 1 || ( ap == 3 && !write ) ) );
+		/* the process may read it, and write it when it is to be written */
+		ok = ( e != 0 && PTE_USER_OK(e, write) );
 	}
-	tk_unl_mtx(prc_mtxid);
+	if ( !mine ) {
+		tk_unl_mtx(prc_mtxid);
+	}
 
 	return ok;
 }
@@ -2571,7 +2687,7 @@ EXPORT UD knl_prc_lookup( ID pid, UBINT va )
 	T_PCB	*p;
 	UD	pa = ~(UD)0;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p != NULL && p->space.l0_pa != 0 ) {
 		pa = knl_pt_lookup(p->space.l0_pa, va & PAGE_MASK);
@@ -2588,7 +2704,7 @@ EXPORT ER knl_prc_uuid( ID pid, TS_UUID *p_uuid, TS_UUID *p_prog )
 {
 	T_PCB	*p;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p != NULL ) {
 		if ( p_uuid != NULL ) *p_uuid = p->uuid;
@@ -2608,7 +2724,7 @@ EXPORT ID knl_prc_of_uuid( CONST TS_UUID *uuid )
 	if ( uuid == NULL || ( uuid->d.hi == 0 && uuid->d.lo == 0 ) ) {
 		return E_NOEXS;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	FOR_EACH_PCB(p, q) {
 		if ( ts_uuid_cmp(&p->uuid, uuid) == 0 ) {
 			pid = p->pid;
@@ -2627,7 +2743,7 @@ EXPORT INT knl_prc_list( ID *pids, INT n )
 	T_PCB	*p;
 	QUEUE	*q;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	FOR_EACH_PCB(p, q) {
 		if ( k >= n ) {
 			break;
@@ -2640,6 +2756,22 @@ EXPORT INT knl_prc_list( ID *pids, INT n )
 }
 
 /* ---------------------------------------------------------------- memory asked for */
+
+/*
+ * Pages a change of the reservations takes away are always held, and
+ * given back at once only when no call of the process is inside (umem.c).
+ * The count is looked at after the change, past a full barrier: a call
+ * counts itself in before it reads the tables, so either it finds the
+ * page gone or the count shows it, and the page then waits for the last
+ * call out (knl_prc_call_leave).
+ */
+LOCAL void umem_settle( T_PCB *p )
+{
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	if ( INCALL(p) == 0 ) {
+		knl_umem_flush(p->umem);
+	}
+}
 
 /*
  * Reservations and pages in the calling process's own half (design
@@ -2656,18 +2788,17 @@ EXPORT ER ts_map_mem( void **p_adr, SZ size, SZ align, UINT prot )
 	if ( p_adr == NULL || size <= 0 || align < 0 ) {
 		return E_PAR;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p == NULL || p->space.l0_pa == 0 ) {
 		er = E_NOSPT;
 	} else {
 		va = (UBINT)*p_adr;
-		er = knl_umem_map(&p->umem, &p->space, &va, (UD)size, (UD)align, prot,
-				  (BOOL)( p->incall > 0 ));
+		er = knl_umem_map(&p->umem, &p->space, &va, (UD)size, (UD)align, prot, TRUE);
 		if ( er == E_OK ) {
 			*p_adr = (void *)va;
 		}
-		if ( p->incall == 0 ) knl_umem_flush(p->umem);
+		umem_settle(p);
 	}
 	tk_unl_mtx(prc_mtxid);
 
@@ -2682,13 +2813,13 @@ EXPORT ER ts_unm_mem( void *adr, SZ size )
 	if ( size <= 0 ) {
 		return E_PAR;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p == NULL || p->space.l0_pa == 0 ) {
 		er = E_NOSPT;
 	} else {
-		er = knl_umem_unmap(&p->umem, &p->space, (UBINT)adr, (UD)size, (BOOL)( p->incall > 0 ));
-		if ( p->incall == 0 ) knl_umem_flush(p->umem);
+		er = knl_umem_unmap(&p->umem, &p->space, (UBINT)adr, (UD)size, TRUE);
+		umem_settle(p);
 	}
 	tk_unl_mtx(prc_mtxid);
 
@@ -2703,14 +2834,13 @@ EXPORT ER ts_ctl_mem( void *adr, SZ size, UINT prot )
 	if ( size <= 0 ) {
 		return E_PAR;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p == NULL || p->space.l0_pa == 0 ) {
 		er = E_NOSPT;
 	} else {
-		er = knl_umem_ctl(&p->umem, &p->space, (UBINT)adr, (UD)size, prot,
-				  (BOOL)( p->incall > 0 ));
-		if ( p->incall == 0 ) knl_umem_flush(p->umem);
+		er = knl_umem_ctl(&p->umem, &p->space, (UBINT)adr, (UD)size, prot, TRUE);
+		umem_settle(p);
 	}
 	tk_unl_mtx(prc_mtxid);
 
@@ -2728,7 +2858,7 @@ EXPORT SZ ts_get_arg( void *buf, SZ size )
 	SZ	n = 0;
 	void	*page;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p == NULL ) {
 		tk_unl_mtx(prc_mtxid);
@@ -2751,17 +2881,12 @@ EXPORT SZ ts_get_arg( void *buf, SZ size )
 	return n;
 }
 
+/* The caller's process: its block stays while the caller runs, so no lock is taken */
 EXPORT ID ts_get_pid( void )
 {
-	T_PCB	*p;
-	ID	pid;
+	T_PCB	*p = cur_pcb();
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
-	p = cur_pcb();
-	pid = ( p != NULL ) ? p->pid : 0;
-	tk_unl_mtx(prc_mtxid);
-
-	return pid;
+	return ( p != NULL ) ? p->pid : 0;
 }
 
 /* ---------------------------------------------------------------- POSIX (design 5.8) */
@@ -2860,8 +2985,6 @@ EXPORT ID ts_spn_prc( CONST char *path, CONST T_SPAWN *sp )
 {
 	T_CPRC	cprc;
 	TS_UUID	uuid;
-	ID	vol, me;
-	PRI	base = 0;
 	ER	er;
 
 	if ( path == NULL || sp == NULL ) {
@@ -2888,6 +3011,20 @@ EXPORT ID ts_spn_prc( CONST char *path, CONST T_SPAWN *sp )
 		     : ( er == EX_ACCES ) ? E_OACV
 		     : ( er == EX_ISDIR ) ? E_OBJ : E_PAR;
 	}
+	return ts_spn_obj(&uuid, sp);
+}
+
+EXPORT ID ts_spn_obj( CONST TS_UUID *prog, CONST T_SPAWN *sp )
+{
+	T_CPRC	cprc;
+	TS_UUID	uuid;
+	ID	vol, me;
+	PRI	base = 0;
+
+	if ( prog == NULL || sp == NULL ) {
+		return E_PAR;
+	}
+	uuid = *prog;
 	if ( ( knl_ob_permit_on(&uuid, knl_ob_crd_of(ts_get_pid())) & OB_OP_EXEC ) == 0 ) {
 		knl_ob_deny_note("run", &uuid, OB_OP_EXEC, 0);
 		return E_OACV;
@@ -2910,7 +3047,7 @@ EXPORT INT ts_get_inh( INT *fds, INT max )
 	T_PCB	*p;
 	INT	n = 0, i;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL && p->inh != NULL ) {
 		n = p->ninh;
@@ -3034,7 +3171,7 @@ LOCAL void act_on( ID pid, INT act, INT sig )
 
 	switch ( act ) {
 	  case ACT_TERM:
-		tk_loc_mtx(prc_mtxid, TMO_FEVR);
+		prc_lock();
 		p = pid_to_pcb(pid);
 		if ( p != NULL && ( p->stopped || p->stopping ) ) {
 			p->stopped = p->stopping = FALSE;
@@ -3044,7 +3181,7 @@ LOCAL void act_on( ID pid, INT act, INT sig )
 		(void)ts_ter_prc(pid, TS_ABORT_SIG(sig));
 		break;
 	  case ACT_STOP:
-		tk_loc_mtx(prc_mtxid, TMO_FEVR);
+		prc_lock();
 		p = pid_to_pcb(pid);
 		if ( p != NULL && p->used && !p->ending && !p->stopped ) {
 			p->stopping = TRUE;
@@ -3059,7 +3196,7 @@ LOCAL void act_on( ID pid, INT act, INT sig )
 		if ( parent > 0 ) (void)knl_psx_kill(parent, TS_SIGCHLD);
 		break;
 	  case ACT_CONT:
-		tk_loc_mtx(prc_mtxid, TMO_FEVR);
+		prc_lock();
 		p = pid_to_pcb(pid);
 		if ( p != NULL && p->used && ( p->stopped || p->stopping ) ) {
 			p->stopping = FALSE;
@@ -3086,7 +3223,7 @@ LOCAL ER kill_one( ID pid, INT sig, ID from )
 	T_PCB	*p;
 	INT	act;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p == NULL || !p->used || p->state == PS_ZOMBIE ) {
 		tk_unl_mtx(prc_mtxid);
@@ -3119,7 +3256,7 @@ LOCAL ER kill_group( ID pgid, INT sig, ID from, BOOL (*may)( ID pid ) )
 	if ( pids == NULL ) {
 		return E_NOMEM;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	FOR_EACH_PCB(p, q) {
 		if ( p->used && p->pgid == pgid && p->state == PS_RUNNING && n < 1024 ) {
 			pids[n++] = p->pid;
@@ -3201,7 +3338,7 @@ EXPORT ER ts_sig_set( UINT what, CONST T_TSSIG *in, T_TSSIG *old )
 	INT	act = ACT_NONE, sig = 0;
 	ID	pid;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p == NULL ) {
 		tk_unl_mtx(prc_mtxid);
@@ -3247,12 +3384,13 @@ EXPORT ER ts_sig_set( UINT what, CONST T_TSSIG *in, T_TSSIG *old )
 EXPORT BOOL knl_psx_intr( void )
 {
 	T_PCB	*p;
+	TCB	*me = knl_self_ctxtsk();
 	BOOL	yes = FALSE;
 
-	if ( prc_mtxid <= 0 || knl_ctxtsk == NULL || knl_ctxtsk->owner <= 0 ) {
+	if ( prc_mtxid <= 0 || me == NULL || me->owner <= 0 ) {
 		return FALSE;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL ) {
 		yes = (BOOL)( p->ending || ( p->sig_pend & p->sig_catch & ~p->sig_mask ) != 0 );
@@ -3276,7 +3414,7 @@ EXPORT ER ts_sig_sus( UD mask )
 	T_PCB	*p;
 	ID	flgid;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p == NULL ) {
 		tk_unl_mtx(prc_mtxid);
@@ -3290,7 +3428,7 @@ EXPORT ER ts_sig_sus( UD mask )
 
 	while ( !sig_wait(p, flgid, 100) ) ;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	if ( p->ending ) {
 		p->sig_mask = p->sus_mask;
 		p->sus_restore = FALSE;
@@ -3305,7 +3443,7 @@ EXPORT ER ts_slp_psx( UD ns, UD *p_left )
 	ID	flgid;
 	UD	start = 0, now = 0, left;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	flgid = ( p != NULL ) ? p->flgid : 0;
 	tk_unl_mtx(prc_mtxid);
@@ -3348,7 +3486,7 @@ LOCAL void psx_alarm( INT stacd, void *exinf )
 		(void)ts_get_mono(&now);
 		next = 0;
 		n = 0;
-		tk_loc_mtx(prc_mtxid, TMO_FEVR);
+		prc_lock();
 		FOR_EACH_PCB(p, q) {
 			if ( !p->used || p->alarm_at == 0 ) continue;
 			if ( p->alarm_at <= now ) {
@@ -3376,7 +3514,7 @@ EXPORT INT ts_sig_alm( UINT ms )
 	INT	left = 0;
 
 	(void)ts_get_mono(&now);
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p == NULL ) {
 		tk_unl_mtx(prc_mtxid);
@@ -3422,7 +3560,7 @@ EXPORT BOOL knl_psx_deliver( void *frame, UD ret )
 	}
 	knl_memset(c, 0, sizeof(*c));
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	deliv = p->sig_pend & p->sig_catch & ~p->sig_mask;
 	entry = p->sig_entry;
 	for ( sig = 1; sig < TS_NSIG && ( deliv & SIG_BIT(sig) ) == 0; sig++ ) ;
@@ -3476,7 +3614,7 @@ EXPORT ER knl_psx_sig_return( void *frame, CONST T_TSSIGFR *ufr )
 	if ( er < E_OK ) {
 		return er;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL ) {
 		p->sig_mask = mask & SIG_ALL & ~SIG_UNCATCH;
@@ -3505,7 +3643,7 @@ EXPORT ID knl_psx_pgid( void )
 	ID	g = 0;
 
 	if ( prc_mtxid <= 0 ) return 0;
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL ) g = p->pgid;
 	tk_unl_mtx(prc_mtxid);
@@ -3518,7 +3656,7 @@ EXPORT ID knl_psx_sid( void )
 	ID	s = 0;
 
 	if ( prc_mtxid <= 0 ) return 0;
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL ) s = p->sid;
 	tk_unl_mtx(prc_mtxid);
@@ -3531,7 +3669,7 @@ EXPORT BOOL knl_psx_pg_in_sid( ID pgid, ID sid )
 	QUEUE	*q;
 	BOOL	yes = FALSE;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	FOR_EACH_PCB(p, q) {
 		if ( p->used && p->pgid == pgid && p->sid == sid && p->state == PS_RUNNING ) {
 			yes = TRUE;
@@ -3548,7 +3686,7 @@ EXPORT BOOL knl_psx_sig_blocked( INT sig )
 	BOOL	yes = FALSE;
 
 	if ( sig <= 0 || sig >= TS_NSIG ) return FALSE;
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL ) yes = (BOOL)( ( ( p->sig_ign | p->sig_mask ) & SIG_BIT(sig) ) != 0 );
 	tk_unl_mtx(prc_mtxid);
@@ -3561,7 +3699,7 @@ EXPORT INT knl_psx_ctty( void )
 	INT	t = -1;
 
 	if ( prc_mtxid <= 0 ) return -1;
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL ) t = p->ctty;
 	tk_unl_mtx(prc_mtxid);
@@ -3575,7 +3713,7 @@ EXPORT ER knl_psx_set_ctty( INT tty )
 	QUEUE	*q;
 	ER	er = E_OK;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p == NULL || p->sid != p->pid ) {
 		er = E_OBJ;
@@ -3593,7 +3731,7 @@ EXPORT void knl_psx_tty_gone( INT tty )
 	T_PCB	*c;
 	QUEUE	*q;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	FOR_EACH_PCB(c, q) {
 		if ( c->used && c->ctty == tty ) c->ctty = -1;
 	}
@@ -3610,7 +3748,7 @@ EXPORT ER ts_set_pgid( ID pid, ID pgid )
 	if ( pid < 0 || pgid < 0 ) {
 		return E_PAR;
 	}
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	me = cur_pcb();
 	p = ( pid == 0 ) ? me : pid_to_pcb(pid);
 	if ( me == NULL || p == NULL || !p->used ) {
@@ -3641,7 +3779,7 @@ EXPORT ID ts_get_pgid( ID pid )
 	T_PCB	*p;
 	ID	g;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = ( pid == 0 ) ? cur_pcb() : pid_to_pcb(pid);
 	g = ( p != NULL && p->used ) ? p->pgid : E_NOEXS;
 	tk_unl_mtx(prc_mtxid);
@@ -3654,7 +3792,7 @@ EXPORT ID ts_set_sid( void )
 	QUEUE	*q;
 	ID	s = E_OBJ;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL ) {
 		BOOL	leads = FALSE;
@@ -3679,7 +3817,7 @@ EXPORT ID ts_get_sid( ID pid )
 	T_PCB	*p;
 	ID	s;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = ( pid == 0 ) ? cur_pcb() : pid_to_pcb(pid);
 	s = ( p != NULL && p->used ) ? p->sid : E_NOEXS;
 	tk_unl_mtx(prc_mtxid);
@@ -3691,7 +3829,7 @@ EXPORT ID ts_get_ppid( void )
 	T_PCB	*p;
 	ID	pp = 0;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = cur_pcb();
 	if ( p != NULL ) pp = p->ppid;
 	tk_unl_mtx(prc_mtxid);
@@ -3703,7 +3841,7 @@ EXPORT ER ts_ref_psx( ID pid, T_PSXREF *pk )
 	T_PCB	*p;
 	ER	er = E_OK;
 
-	tk_loc_mtx(prc_mtxid, TMO_FEVR);
+	prc_lock();
 	p = ( pid == 0 ) ? cur_pcb() : pid_to_pcb(pid);
 	if ( p == NULL || !p->used ) {
 		er = E_NOEXS;
@@ -3767,7 +3905,7 @@ EXPORT ID ts_wai_psx( ID pid, UINT options, INT *p_status )
 		gone = 0;
 		have = FALSE;
 		status = 0;
-		tk_loc_mtx(prc_mtxid, TMO_FEVR);
+		prc_lock();
 		me = cur_pcb();
 		if ( me == NULL ) {
 			tk_unl_mtx(prc_mtxid);

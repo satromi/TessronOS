@@ -814,6 +814,9 @@ LOCAL BOOL trv_input( DTWIN *d, CONST T_WMEV *ev )
 		return TRUE;
 	}
 	if ( ev->type == HID_EV_WHEEL ) {
+		if ( ev->code != HID_WHEEL_V ) {
+			return TRUE;		/* the view and its list go only up and down */
+		}
 		if ( !st->list && ev->dz != 0 ) {
 			wind(d, -ev->dz * TV_WHEEL);
 			return TRUE;

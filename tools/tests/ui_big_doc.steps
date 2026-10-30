@@ -1,0 +1,68 @@
+# 大きな文章 (design 11.3, docs/private/fixed-buffer-audit.md 10), for
+# tools/ui_run.py: a text of 65536 paragraphs, 12 MB, made as a copy of the
+# template 基本文章編集 (mkbig), opened, edited at its end, saved by closing,
+# opened again and found as it was saved (sum). The times are printed
+# ("time ..."); the limits under them are only what would mean something
+# has gone back to laying out the whole text at every turn.
+mkbig doc 65536
+sum
+keep made
+mark
+open big
+waitwin 基本文章編集 600
+under open 10000
+sync 600
+under drawn 10000
+shot big_doc_open
+# to the end of the text, a letter typed and taken (Enter ends the
+# composition), the line before and after, a page down
+mark
+key 4D 01
+sync 600
+under end 2000
+mark
+text x
+sync 600
+under letter 2000
+mark
+key 28
+sync 600
+under commit 2000
+mark
+text y
+key 28
+sync 600
+under letter2 2000
+mark
+key 52
+sync 600
+under up 2000
+mark
+key 51
+sync 600
+under down 2000
+mark
+key 4B
+sync 600
+under pageup 2000
+shot big_doc_edited
+# closed: saved, and the record no longer what was made
+mark
+key 08 01
+sync 600
+under closed 10000
+sum
+keep saved
+mark
+open big
+waitwin 基本文章編集 600
+sync 600
+under reopen 10000
+key 4D 01
+caret
+want ok c 65537,0 a 65537,0
+key 08 01
+sync 600
+sum
+same saved
+absent !OACV!

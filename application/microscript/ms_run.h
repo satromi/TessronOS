@@ -45,6 +45,8 @@ typedef struct msthread {
 	MSSTR		*name;
 	MSPROC		*proc;
 	BOOL		terminated, waiting, brk, done, turn, err, epilogue;
+	BOOL		stir;		/* waits also for the run to stir (th_wait) */
+	BOOL		again;		/* its turn ended looking again at what it waits for */
 	double		cnt;		/* $CNT */
 	INT		depth;
 	INT		steps;		/* since it last let the others go */
@@ -93,7 +95,29 @@ void	scope_free( MSSCOPE *s );
 
 void	th_fail( MSTH *t, const char *fmt, ... );
 BOOL	th_stop( MSTH *t );
-BOOL	th_wait_round( MSTH *t, UD step_ms );
+
+/*
+ * A thread waits: until the time at (MS_NEVER: no time), and, with
+ * stir, until the run stirs (rt_stir) -- a notice came to the window's
+ * channel, or another thread did something -- which may have made true
+ * what it waits for. again says that the thread comes back to look at
+ * the same thing once more, having done nothing else since: such a
+ * turn does not stir the others, so that threads that wait for each
+ * other's changes do not wake each other for ever. A thread that waits
+ * for something the program is not told of -- a process ending, a
+ * message, the bytes of a serial line or of a socket, a window opened
+ * from a link closing -- looks at it again every MS_LOOK_MS (th_look)
+ * as well. rt_wake wakes a thread whatever it waits for: BREAK,
+ * TERMINATE and the run ending, which it then sees (th_stop, brk).
+ */
+#define MS_NEVER	( ~(UD)0 )
+#define MS_LOOK_MS	50
+void	th_wait( MSTH *t, UD at, BOOL stir, BOOL again );
+UD	th_until( UD start, double tmo );	/* the end of a wait of tmo seconds, MS_NEVER none */
+void	th_look( MSTH *t, UD at, BOOL again );
+void	rt_stir( void );
+void	rt_wake( MSTH *t );
+void	rt_wake_all( void );
 MSSEG	*th_seg( MSTH *t, MSN *e, MSSCOPE *sc );
 MSV	ev( MSTH *t, MSN *n, MSSCOPE *sc );
 INT	exec_block( MSTH *t, MSN **v, INT n, MSSCOPE *sc );

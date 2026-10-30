@@ -30,25 +30,27 @@
 /* A node taken out of the list of its parent's children */
 LOCAL void ed_unhook( T_TADNODE *nd )
 {
-	T_TADNODE	*parent = nd->parent, *p, *last = NULL;
+	T_TADNODE	*parent = nd->parent, *p, *prev = NULL;
 
 	if ( parent == NULL ) {
 		return;
 	}
+	tad_touch(parent);
 	if ( parent->first == nd ) {
 		parent->first = nd->next;
 	} else {
 		for ( p = parent->first; p != NULL; p = p->next ) {
 			if ( p->next == nd ) {
 				p->next = nd->next;
+				prev = p;
 				break;
 			}
 		}
 	}
-	for ( p = parent->first; p != NULL; p = p->next ) {
-		last = p;
+	/* the last child is the one before only when this was the last */
+	if ( parent->last == nd ) {
+		parent->last = prev;
 	}
-	parent->last = last;
 	nd->parent = NULL;
 	nd->next = NULL;
 }
@@ -62,6 +64,7 @@ LOCAL void ed_hook( T_TADNODE *parent, T_TADNODE *nd, T_TADNODE *before )
 		tad_add_child(parent, nd);
 		return;
 	}
+	tad_touch(parent);
 	nd->parent = parent;
 	nd->next = before;
 	if ( parent->first == before ) {
@@ -81,6 +84,7 @@ LOCAL void ed_hook_after( T_TADNODE *nd, T_TADNODE *after )
 {
 	T_TADNODE	*parent = after->parent;
 
+	tad_touch(parent);
 	nd->parent = parent;
 	nd->next = after->next;
 	after->next = nd;
@@ -125,6 +129,7 @@ EXPORT ER tad_text_splice( T_TAD *doc, T_TADNODE *nd, INT at, INT cut,
 	nd->text = nt;
 	nd->raw = NULL;
 	nd->rawlen = 0;
+	tad_touch(nd);
 
 	return E_OK;
 }

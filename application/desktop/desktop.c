@@ -53,6 +53,7 @@
 #include <ts/kconv.h>
 #include <ts/ob.h>
 #include <ts/dtreq.h>
+#include <ts/rtmedia.h>
 #include <ts/img.h>
 #include <ts/sysdef.h>
 #include <ts/so.h>
@@ -90,13 +91,26 @@ LOCAL INT	dt_first_wid = 0;	/* the window the desktop opened with (the cabinet) 
 LOCAL BOOL	dt_poweroff = FALSE;	/* the person chose to turn the machine off */
 LOCAL BOOL	dt_restart = FALSE;	/* or to start it again */
 
+LOCAL BOOL	dt_quit_asked = FALSE;	/* dt_quit waits for the session to end */
+
+EXPORT BOOL dt_stopping( void )
+{
+	return dt_quit_asked;
+}
+
 /*
  * The system object's power record written (obsys.c, システム環境設定):
  * the session ends as closing the first window ends it, the machine then
  * going off (how 0) or starting again (how 1).
  */
+LOCAL UW	dt_stop_at = 0;		/* when the power record asked the session to end, ms */
+
 LOCAL ER dt_power( INT how )
 {
+	SYSTIM	t;
+
+	(void)tk_get_otm(&t);
+	dt_stop_at = (UW)t.lo;
 	dt_poweroff = TRUE;
 	dt_restart = (BOOL)( how == 1 );
 	dt_stop = TRUE;
@@ -195,6 +209,28 @@ EXPORT BOOL dt_carry_end( INT wid )
 
 LOCAL UINT	dt_up_mods = 0;	/* the keys held when the button was let go */
 LOCAL ID	dt_tskid = 0;	/* the desktop's task, while it runs */
+
+/*
+ * The start of the desktop watched from the task that waits for it
+ * (ts_desktop): each step before the loop is said as it begins, and
+ * the loop counted as it comes round. What stands too long is told
+ * with where the task waits (lockup.c), long before the watch of the
+ * loop would (LK_SILENT_S): a step not done, the screen held so that
+ * nothing drawn reaches it.
+ */
+IMPORT void knl_lockup_tell_task( ID tskid, CONST char *why );	/* lockup.c */
+IMPORT INT  knl_disp_hold_note( ID *p_tsk, UW *p_ms );		/* disp.c */
+IMPORT ID   knl_wm_compositor( void );				/* wm.c */
+IMPORT void knl_bootlog_soon( void ) __attribute__((weak));	/* bootlog.c (x64): the records written soon */
+
+#define DT_STEP_STUCK_MS	5000	/* a step before the loop this long: told */
+#define DT_HELD_STUCK_MS	3000	/* the screen held this long: told */
+#define DT_WATCH_SAY_MS		30000	/* the state said every DT_WATCH_EVERY_MS up to this */
+#define DT_WATCH_EVERY_MS	5000
+
+LOCAL CONST char * volatile	dt_step = "";	/* the step of the start begun last */
+LOCAL volatile UW	dt_step_at = 0;		/* when, ms */
+LOCAL volatile UW	dt_loops = 0;		/* times the loop came round */
 #if USE_KTEST
 EXPORT volatile INT	dt_test_stall = 0;	/* the tests: the loop stopped (desktop.h) */
 #endif
@@ -433,6 +469,9 @@ EXPORT void dt_draw( DTWIN *d )
 		}
 		d->height = tv_doc_draw(gid, d->doc, &r, d->scroll_y, d->rec,
 					d->paper);
+		if ( d->doc->layc != NULL ) {
+			d->settling = TRUE;	/* what was not laid at this width, laid while idle */
+		}
 		tv_draw_host(NULL);
 		if ( d->paper_frame && !d->xml_view ) {
 			paper_frame(d, gid, &r);
@@ -529,6 +568,9 @@ EXPORT void dt_draw( DTWIN *d )
  * LK_BLINK (0: it does not blink). The loop wakes at least this often.
  */
 #define DT_BLINK_MS	200
+#define DT_PRE_IDLE_MS	300		/* nothing pressed so long: idle work begins */
+
+LOCAL UW	dt_last_input = 0;		/* when a key or a button was last pressed */
 
 LOCAL UW	blink_at;		/* when the turn last changed, in ms */
 LOCAL UW	caret_at;		/* and the caret's */
@@ -1173,7 +1215,6 @@ LOCAL void process_requests( void )
 	T_DTANS		an;
 	T_VOBJ		v;
 	SZ		asz = 0;
-	CONST DTPROG	*list[64];
 	INT		i, n;
 	SZ		anssz;
 
@@ -1216,6 +1257,7 @@ LOCAL void process_requests( void )
 			v.target = rq.target;
 			v.recno = rq.recno;
 			v.frcol = v.chcol = v.tbcol = v.bgcol = TAD_COL_NONE;
+			dt_req_applist(&rq, &v);	/* the program a fixed link keeps to */
 			dt_open_vobj(NULL, &v);
 		} else if ( rq.req == DT_RQ_CARRY ) {
 			carry_start(&rq, anssz);	/* answered when the hand lets go */
@@ -1224,8 +1266,13 @@ LOCAL void process_requests( void )
 			an.er = carry_place(&rq, (BOOL)( rq.req == DT_RQ_PLACE_MORE ), &an.into);
 		} else if ( rq.req >= DT_RQ_CLOSE && rq.req <= DT_RQ_FULL ) {
 			an.er = dt_proc_link_op(&rq, &an);	/* 仮身操作 and 実身操作 of a program's link */
+		} else if ( rq.req == DT_RQ_APPS ) {
+			an.er = dt_apps_req(&rq, &an);		/* 実行's list for a program's link */
 		} else if ( rq.req == DT_RQ_ADMIN ) {
 			an.er = dt_admin_req(&rq, knl_obchan_last_from(&dt_req_u));
+		} else if ( rq.req == DT_RQ_SYSUP ) {
+			/* the system updated from its package: the administrator asked at its beginning */
+			an.er = dt_sysup_req(&rq, &an, knl_obchan_last_from(&dt_req_u));
 		} else if ( ( rq.req == DT_RQ_INSTALL || rq.req == DT_RQ_REMOVE )
 			 && !knl_ob_pid_admin(knl_obchan_last_from(&dt_req_u))
 			 && ( an.er = dt_admin_ask(knl_obchan_last_from(&dt_req_u),
@@ -1245,21 +1292,32 @@ LOCAL void process_requests( void )
 		} else if ( rq.req >= DT_RQ_FONT_REG && rq.req <= DT_RQ_FONT_TRY ) {
 			an.er = dt_font_req(&rq, &an);		/* システム環境設定's 書体 */
 		} else if ( rq.req == DT_RQ_TOOL ) {
+			CONST DTPROG	**acc;
+
 			rq.name[sizeof(rq.name) - 1] = 0;
-			n = dt_prog_list(DT_PK_ACCESSORY, list, 64);
-			an.er = E_NOEXS;
+			/* every accessory, however many: room for as many as there are */
+			n = dt_prog_count(DT_PK_ACCESSORY);
+			acc = (CONST DTPROG **)Kmalloc(sizeof(DTPROG *) * (SZ)( ( n > 0 ) ? n : 1 ));
+			n = ( acc != NULL ) ? dt_prog_list(DT_PK_ACCESSORY, acc, n) : 0;
+			an.er = ( acc != NULL ) ? E_NOEXS : E_NOMEM;
 			for ( i = 0; i < n; i++ ) {
-				if ( knl_strcmp((CONST char *)list[i]->name, (CONST char *)rq.name) == 0 ) {
-					an.er = dt_prog_run(NULL, list[i], NULL);
+				if ( knl_strcmp((CONST char *)acc[i]->name, (CONST char *)rq.name) == 0 ) {
+					an.er = dt_prog_run(NULL, acc[i], NULL);
 					break;
 				}
 			}
+			if ( acc != NULL ) Kfree((void *)acc);
 		} else if ( rq.req == DT_RQ_TYPE ) {
 			an.er = dt_type_req(&rq, &an);	/* letters into the window the keys went to before */
 		} else if ( rq.req == DT_RQ_PRINT ) {
 			an.er = dt_print_spool(&rq, &an);	/* 印刷 of the pages it made */
 		} else if ( rq.req == DT_RQ_NOTIFY ) {
 			an.er = dt_note_req(&rq, &an);		/* 通知: shown, what comes of it told later */
+		} else if ( rq.req == DT_RQ_SCREEN ) {
+			an.er = dt_screen_req(&rq);		/* システム環境設定's 画面サイズ, now */
+		} else if ( rq.req >= DT_RQ_RT_OPEN && rq.req <= DT_RQ_RT_CLOSE ) {
+			/* 実時間制御TAD played in the process's window */
+			an.er = dt_rthost_req(&rq, &an, knl_obchan_last_from(&dt_req_u));
 		} else {
 			an.er = E_PAR;
 		}
@@ -1361,7 +1419,12 @@ LOCAL void port_close( void )
 	dt_port = dt_req = 0;
 }
 
-LOCAL INT win_open( CONST TS_UUID *id, INT recno, INT x, INT y )
+/*
+ * 'use' is the program the window is of, decided by whoever opens it
+ * (the one asked for from 実行, or the one the link opens with); NULL
+ * takes the one the object's applist opens it with.
+ */
+LOCAL INT win_open( CONST TS_UUID *id, INT recno, INT x, INT y, CONST UB *use )
 {
 	DTWIN		*d = NULL;
 	T_TAD		*rec;
@@ -1380,8 +1443,8 @@ LOCAL INT win_open( CONST TS_UUID *id, INT recno, INT x, INT y )
 		return E_LIMIT;
 	}
 	app[0] = 0;
-	if ( win_app != NULL ) {
-		for ( i = 0; win_app[i] != 0 && i < DT_PROG_ID - 1; i++ ) app[i] = win_app[i];
+	if ( use != NULL ) {
+		for ( i = 0; use[i] != 0 && i < DT_PROG_ID - 1; i++ ) app[i] = use[i];
 		app[i] = 0;
 	} else if ( om_store_default_app(id, app, DT_PROG_ID) < 0 ) {
 		app[0] = 0;
@@ -1714,9 +1777,104 @@ EXPORT void dt_remade( DTWIN *d, T_TAD *rec )
 	d->kind = tv_kind(rec);
 	d->npick = 0;
 	d->scroll_x = d->scroll_y = 0;
-	knl_memset(d->pick, 0, sizeof(d->pick));
+	if ( d->pick != NULL ) {
+		knl_memset(d->pick, 0, sizeof(UINT) * (SZ)d->maxpick);
+	}
 	ed_model(d);
 	dt_draw(d);
+}
+
+/*
+ * The disk of the object a window shows went and the window stays: the
+ * record it shows is taken out of the store, which lets go of what it
+ * holds of the object next, and is the window's own until the object is
+ * found again. For the first window, which is never closed. FALSE when
+ * the record is not the store's to take.
+ */
+EXPORT BOOL dt_win_keep( DTWIN *d )
+{
+	T_TAD	*rec;
+
+	if ( d == NULL || !d->used || d->sealed || d->kept || d->rec == NULL ) {
+		return FALSE;
+	}
+	rec = om_store_take(&d->id, d->recno);
+	if ( rec == NULL ) {
+		return FALSE;
+	}
+	if ( rec != d->rec ) {
+		tad_free(rec);			/* not the one shown: the store's copy goes */
+		return FALSE;
+	}
+	d->kept = TRUE;
+	return TRUE;
+}
+
+/*
+ * The object of a window kept with dt_win_keep found again: its record
+ * read anew from the store, and what was changed in the window while the
+ * disk was out written to it. The window shows the store's record again.
+ */
+EXPORT ER dt_win_back( DTWIN *d )
+{
+	T_TAD	*own, *rec;
+	UB	*xml = NULL;
+	SZ	size = 0, cap;
+	ER	er = E_OK;
+
+	if ( d == NULL || !d->used || !d->kept ) {
+		return E_PAR;
+	}
+	own = d->rec;
+	if ( d->dirty ) {
+		/* the window's record as text, the way the store takes it back */
+		cap = 64 * 1024;
+		for ( ;; ) {
+			xml = (UB *)Kmalloc(cap + 1);
+			if ( xml == NULL ) {
+				return E_NOMEM;
+			}
+			er = tad_write_mem(own, xml, cap + 1, &size);
+			if ( er != E_NOMEM || size <= cap ) {
+				break;
+			}
+			Kfree(xml);
+			xml = NULL;
+			cap = size;
+		}
+		if ( er < E_OK ) {
+			Kfree(xml);
+			return er;
+		}
+	}
+	om_store_forget(&d->id);		/* what was read meanwhile is not what the window shows */
+	rec = om_store_get(&d->id, d->recno);
+	if ( rec != NULL && xml != NULL ) {
+		rec = om_store_restore(&d->id, d->recno, xml, size);
+		er = ( rec != NULL ) ? om_store_save(&d->id, d->recno) : E_IO;
+	}
+	if ( xml != NULL ) {
+		Kfree(xml);
+	}
+	if ( rec == NULL ) {
+		return E_NOEXS;			/* not readable yet: kept as it is */
+	}
+	df_text_end(d);				/* a piece of text being edited is in the old record */
+	ed_forget(d);
+	d->rec = rec;
+	d->kept = FALSE;
+	if ( er >= E_OK ) {
+		d->dirty = FALSE;
+	}
+	tad_free(own);
+	d->kind = tv_kind(rec);
+	d->npick = 0;
+	if ( d->pick != NULL ) {
+		knl_memset(d->pick, 0, sizeof(UINT) * (SZ)d->maxpick);
+	}
+	ed_model(d);
+	dt_draw(d);
+	return er;
 }
 
 
@@ -1903,6 +2061,18 @@ LOCAL void win_close_asked( DTWIN *d )
 		}
 		return;
 	}
+	/*
+	 * What could not be saved is not closed away: the window stays,
+	 * with it. A composition in it is part of what is saved.
+	 */
+	if ( d->own == NULL ) {
+		tip_forget(d);
+	}
+	if ( win_save(d) < E_OK ) {
+		dt_tell(d, "保存できなかったため、ウインドウを閉じませんでした",
+			"メモリやディスクの空きを確かめてから、もう一度閉じてください");
+		return;
+	}
 	win_close(d);
 }
 
@@ -1959,16 +2129,30 @@ LOCAL void win_close( DTWIN *d )
 		d->xrec = NULL;
 	}
 	d->xml_view = FALSE;
-	if ( d->sealed && d->rec != NULL ) {
-		tad_free(d->rec);		/* made here, not the store's */
+	if ( ( d->sealed || d->kept ) && d->rec != NULL ) {
+		tad_free(d->rec);		/* made here or taken out of the store: not the store's */
 	}
+	d->kept = FALSE;
 	for ( i = 0; i < d->nundo; i++ ) {
 		Kfree(d->undo[i]);
 	}
 	for ( i = 0; i < d->nredo; i++ ) {
 		Kfree(d->redo[i]);
 	}
+	if ( d->undo != NULL ) Kfree(d->undo);
+	if ( d->undo_len != NULL ) Kfree(d->undo_len);
+	if ( d->redo != NULL ) Kfree(d->redo);
+	if ( d->redo_len != NULL ) Kfree(d->redo_len);
+	if ( d->pick != NULL ) Kfree(d->pick);
+	if ( d->pre != NULL ) Kfree(d->pre);
+	d->pre = NULL;
+	d->pre_len = 0;
+	d->pick = NULL;
+	d->maxpick = 0;
+	d->undo = d->redo = NULL;
+	d->undo_len = d->redo_len = NULL;
 	d->nundo = d->nredo = 0;
+	d->maxundo = d->maxredo = 0;
 	if ( d->okey > 0 ) {
 		(void)ob_cls_obj(d->okey);	/* and its request goes with it */
 		d->okey = 0;
@@ -2015,6 +2199,14 @@ EXPORT void dt_open_vobj( DTWIN *from, CONST T_VOBJ *v )
 	if ( dt_disk_absent(from, v) ) {
 		return;
 	}
+	/* from ウインドウ一覧: a program's window showing it brought to the front */
+	if ( from != NULL && from->tool == DT_TOOL_WINLIST && w == NULL
+	  && ( wid = wm_obj_showing(&v->target) ) > 0 ) {
+		wm_raise(wid);
+		(void)wm_focus(wid);
+		wm_update();
+		return;
+	}
 	/* a program object: the program is run */
 	p = dt_prog_of(&v->target);
 	if ( p != NULL ) {
@@ -2040,19 +2232,22 @@ EXPORT void dt_open_vobj( DTWIN *from, CONST T_VOBJ *v )
 		return;
 	}
 	/*
-	 * 基本動画再生: a record of 実時間制御TAD played in a window of its
-	 * own -- asked for, or a record that is nothing but a <realtime>,
-	 * which the editors have no page for, opened by a double press
+	 * A record of 実時間制御TAD -- asked to be played by the id of the
+	 * player that plays media (an applist a TADjs Desktop wrote names it
+	 * basic-player, an alias of the player), or a record that is nothing
+	 * but a <realtime>, which the editors have no page for -- played by
+	 * that player, which hands the scene to the desktop (dtrthost.c)
 	 */
-	if ( app_is(( win_app != NULL ) ? win_app : app, "basic-player") ) {
-		dt_rtwin_open(from, v);
+	if ( app_is(( win_app != NULL ) ? win_app : app, "basic-player")
+	  || app_is(( win_app != NULL ) ? win_app : app, RTM_VIDEO_PROG) ) {
+		dt_rt_play(from, v);
 		return;
 	}
 	if ( win_app == NULL && w == NULL ) {
 		T_TAD	*rec = om_store_get(&v->target, ( v->recno >= 0 ) ? v->recno : 0);
 
 		if ( rec != NULL && tv_kind(rec) == TV_KIND_NONE && dtrt_has(rec) ) {
-			dt_rtwin_open(from, v);
+			dt_rt_play(from, v);
 			return;
 		}
 	}
@@ -2071,8 +2266,10 @@ EXPORT void dt_open_vobj( DTWIN *from, CONST T_VOBJ *v )
 			n++;
 		}
 	}
+	/* the program decided above: a link fixed to its program keeps to it here too */
 	wid = win_open(&v->target, ( v->recno >= 0 ) ? v->recno : 0,
-		       60 + n * 28, 40 + n * 28);
+		       60 + n * 28, 40 + n * 28,
+		       ( win_app != NULL ) ? win_app : ( app[0] != 0 ) ? app : NULL);
 	if ( wid >= 0 ) {
 		w = dt_win_of(wid);
 		if ( w != NULL && from != NULL ) {
@@ -2206,39 +2403,26 @@ EXPORT ER dt_open_as( DTWIN *from, CONST T_VOBJ *v, CONST UB *app )
 }
 
 /*
- * The program at a place of an object's applist run on it (実行). Unless
- * the link keeps to its program (起動固定), the one run last is the one
- * the object opens with from now, when it is opened by a double press.
+ * The program at a place of the list 実行 shows (dt_app_list) run on the
+ * object. One its applist names: unless the link keeps to its program
+ * (起動固定), the one run last is written into the object's metadata as
+ * the one it opens with from now, when it is opened by a double press
+ * (om_link_ran). One offered for the object's kind leaves its default
+ * as it is.
  */
 EXPORT void dt_exec( DTWIN *from, CONST T_VOBJ *v, INT index )
 {
-	UB	app[DT_PROG_ID];
-	UB	(*names)[OM_APP_NAME] = (UB (*)[OM_APP_NAME])Kmalloc(sizeof(UB) * OM_APP_NAME * 16);
-	INT	napp = 0;
+	INT	room = dt_app_list(v, NULL, 0, NULL), n;
+	DTAPP	*a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
 
-	/* the applist's programs counted as the menu lists them (dtvmn.c) */
-	if ( names != NULL ) {
-		napp = om_link_apps(v, names, 16);
-		Kfree(names);
-		if ( napp < 0 ) napp = 0;
-	}
-	if ( index < napp && om_link_app_id(v, index, app, DT_PROG_ID) > 0 ) {
-		if ( !dt_app_locked(v) ) {
-			(void)om_store_set_default_app(&v->target, app);
-		}
-		(void)dt_open_as(from, v, app);
+	n = ( a != NULL ) ? dt_app_list(v, a, room, NULL) : 0;
+	if ( index >= 0 && index < n ) {
+		if ( a[index].listed ) (void)om_link_ran(v, a[index].raw);
+		(void)dt_open_as(from, v, a[index].id);
 	} else {
-		/* past the applist: a program that opens objects of its kind, the object's default left as it is */
-		CONST DTPROG	*by[16];
-		INT		k, m = dt_prog_by_type(v, by, 16);
-
-		k = index - napp;
-		if ( k >= 0 && k < m ) {
-			(void)dt_open_as(from, v, by[k]->id);
-		} else {
-			dt_open_vobj(from, v);
-		}
+		dt_open_vobj(from, v);
 	}
+	if ( a != NULL ) Kfree(a);
 }
 
 /* The window a virtual object was opened into, closed */
@@ -2259,34 +2443,40 @@ EXPORT void dt_close_vobj( CONST T_VOBJ *v )
  * place: whether the press was on a virtual object, whether that one is
  * open in a window, whether anything is taken.
  *
- * The button that opened it is pressed and let go: the menu stays, and
- * a row is chosen with the first button only (wm_menu_event), and a
- * press anywhere off the menu puts it away. The button held, carried
- * off the menu and let go there puts it away too.
+ * The button that opened it is pressed and let go as a click (quickly,
+ * or without the pointer moving, wm_click_take): the menu stays, and a
+ * row is chosen with the first button only (wm_menu_event), and a press
+ * anywhere off the menu puts it away. While the button that opened it
+ * is held, the other buttons are not the menu's. The button held,
+ * carried off the menu and let go there puts it away too.
  */
 EXPORT INT dt_run_menu( DTWIN *d, INT pid, UD when )
 {
-	T_WMEV	ev;
-	INT	cmd = 0;
-	UD	gap;
+	T_WMEV		ev;
+	T_WMCLICK	ck;
+	INT		cmd = 0, k;
 
 	wm_panel_draw(pid);
 	wm_update();
 
-	gap = (UD)wm_num(WM_LOOK_DBLTIME, 400) * 1000000U;
+	wm_click_begin(&ck, when, WM_CK_FIND);
 	while ( !dt_stop ) {
 		BOOL	on_menu;
 
 		if ( wm_read_event(&ev, 2000) < E_OK ) {
 			continue;
 		}
+		k = wm_click_take(&ck, &ev);
+		if ( k != WM_CK_PASS ) {
+			if ( k == WM_CK_EAT ) {
+				tm_printf((UB *)"desktop: menu: button %d %s while the menu's is held: not taken\n",
+					  ev.code, ( ev.type == HID_EV_BTN_DOWN ) ? "pressed" : "let go");
+			}
+			continue;	/* a click: the menu stays */
+		}
 		on_menu = wm_menu_has(pid, ev.wid);
 		if ( ev.type == HID_EV_BTN_DOWN && !on_menu ) {
 			break;		/* a press off the menu puts it away */
-		}
-		if ( ev.type == HID_EV_BTN_UP && ev.code == 1
-		  && ev.when - when < gap ) {
-			continue;	/* a click: the menu stays */
 		}
 		if ( wm_menu_event(pid, &ev, &cmd) < E_OK ) {
 			break;
@@ -2766,9 +2956,14 @@ LOCAL ID disp_key( void )
 
 LOCAL BOOL size_of( CONST char *s, UINT *p_w, UINT *p_h );
 
-EXPORT ER dt_screen_size( UINT *p_w, UINT *p_h )
+/*
+ * A size of the screen object's record 1: "SIZE", the screen's pixels,
+ * or "VIEW", the view the windows are laid in (the screen at its scale;
+ * the size where the record has no view)
+ */
+LOCAL ER screen_rec_size( CONST char *what, UINT *p_w, UINT *p_h )
 {
-	UB	t[512];
+	UB	t[640];
 	char	v[32];
 	SZ	asz = 0;
 	ID	key = disp_key();
@@ -2781,22 +2976,105 @@ EXPORT ER dt_screen_size( UINT *p_w, UINT *p_h )
 	if ( er < E_OK ) {
 		return er;
 	}
-	if ( !cf_get(t, (INT)asz, "SIZE", 0, v, sizeof(v)) || !size_of(v, p_w, p_h) ) {
-		return E_NOEXS;
+	if ( ( cf_get(t, (INT)asz, what, 0, v, sizeof(v)) && size_of(v, p_w, p_h) )
+	  || ( cf_get(t, (INT)asz, "SIZE", 0, v, sizeof(v)) && size_of(v, p_w, p_h) ) ) {
+		return E_OK;
 	}
-	return E_OK;
+	return E_NOEXS;
 }
 
-LOCAL ER screen_set( UINT w, UINT h )
+EXPORT ER dt_screen_size( UINT *p_w, UINT *p_h )
 {
-	char	s[32];
+	return screen_rec_size("VIEW", p_w, p_h);
+}
+
+/* The screen's own pixels, which a size is set in */
+LOCAL ER screen_px_size( UINT *p_w, UINT *p_h )
+{
+	return screen_rec_size("SIZE", p_w, p_h);
+}
+
+/*
+ * The screen set to w x h; 'fit' ("aspect" or "stretch", or NULL or ""
+ * for neither) says how a size of another shape than the panel is laid
+ * on it, where the screen can choose (画面's FIT)
+ */
+LOCAL ER screen_set_fit( UINT w, UINT h, CONST char *fit )
+{
+	char	s[48];
 	ID	key = disp_key();
 
 	if ( key <= 0 ) {
 		return E_NOEXS;
 	}
-	tm_sprintf((UB *)s, (UB *)"%dx%d", (INT)w, (INT)h);
+	if ( fit != NULL && fit[0] != 0 ) {
+		tm_sprintf((UB *)s, (UB *)"%dx%d %s", (INT)w, (INT)h, fit);
+	} else {
+		tm_sprintf((UB *)s, (UB *)"%dx%d", (INT)w, (INT)h);
+	}
 	return ob_wri_rec(key, OB_DSP_MODE, 0, s, (SZ)knl_strlen(s), NULL);
+}
+
+LOCAL ER screen_set( UINT w, UINT h )
+{
+	return screen_set_fit(w, h, NULL);
+}
+
+/* How the screen lays a size of another shape now (画面's FIT): "" where it does not choose */
+/* The scale the screen is drawn at (画面's SCALE), 100 where it says none */
+LOCAL UINT screen_scale( void )
+{
+	UB	t[640];
+	char	v[16];
+	SZ	asz = 0;
+	ID	key = disp_key();
+
+	if ( key > 0 && ob_rea_rec(key, OB_DSP_MODE, 0, t, sizeof(t), &asz) >= E_OK
+	  && cf_get(t, (INT)asz, "SCALE", 0, v, sizeof(v)) && cf_num(v, 100) >= 100 ) {
+		return (UINT)cf_num(v, 100);
+	}
+	return 100;
+}
+
+/* The screen drawn at a scale (percent): E_NOSPT when the view would be too small */
+LOCAL ER screen_set_scale( UINT scale )
+{
+	char	s[16];
+	ID	key = disp_key();
+
+	if ( key <= 0 ) {
+		return E_NOEXS;
+	}
+	tm_sprintf((UB *)s, (UB *)"%d%%", (INT)scale);
+	return ob_wri_rec(key, OB_DSP_MODE, 0, s, (SZ)knl_strlen(s), NULL);
+}
+
+/* "150%" among the words of a line: the scale, or 0 */
+LOCAL UINT word_scale( CONST char *t )
+{
+	char	a[16];
+	INT	k, n;
+
+	for ( k = 0; k < 6 && cf_word(t, k, a, sizeof(a)); k++ ) {
+		n = (INT)knl_strlen(a);
+		if ( n >= 2 && a[n - 1] == '%' ) {
+			a[n - 1] = 0;
+			return (UINT)cf_num(a, 0);
+		}
+	}
+	return 0;
+}
+
+LOCAL void screen_fit( char *v, INT max )
+{
+	UB	t[512];
+	SZ	asz = 0;
+	ID	key = disp_key();
+
+	v[0] = 0;
+	if ( key > 0 && ob_rea_rec(key, OB_DSP_MODE, 0, t, sizeof(t), &asz) >= E_OK ) {
+		(void)cf_get(t, (INT)asz, "FIT", 0, v, max);
+	}
 }
 
 /*
@@ -2822,20 +3100,90 @@ LOCAL BOOL size_of( CONST char *s, UINT *p_w, UINT *p_h )
 	return TRUE;
 }
 
+/*
+ * The system's containers named as the objects they hold, not as boxes
+ * (docs/private/btron2-audit.md 10): a system volume made before has
+ * them by their old names, and each still named so is renamed, once, at
+ * the start. A name an administrator gave is left as it is. Nothing
+ * looks for these objects by their names -- they are opened by their
+ * identities -- so the names are only what the person sees.
+ */
+LOCAL void sysdef_names( void )
+{
+	static CONST struct {
+		CONST char	*id;
+		CONST char	*was;
+		CONST char	*now;
+	} nm[] = {
+		{ SYSDEF_SYSTEM_BOX,				"システム箱",	"システム" },
+		{ SYSDEF_BOX,					"定義箱",	"画面の定義" },
+		{ "01a0d889-45e6-7ad9-ba7f-b36dc9467f24",	"メニュー箱",	"メニューの定義" },
+		{ "01a0d6d1-08d9-79a7-b927-ed74aba76bce",	"部品箱",	"部品の定義" },
+		{ SYSDEF_FONT_BOX,				"書体箱",	"書体" },
+		{ SYSDEF_WALL_BOX,				"壁紙箱",	"壁紙" },
+		{ SYSDEF_LEARN_BOX,				"学習箱",	"かな漢字変換の学習" },
+		{ SYSDEF_DICT_BOX,				"辞書箱",	"辞書" },
+		{ SYSDEF_SND_BOX,				"音箱",		"システムの音" },
+		{ SYSDEF_XFCONV_BOX,				"ファイル変換の箱", "ファイル変換" },
+	};
+	TS_UUID	u;
+	T_OBREF	r;
+	UINT	i;
+	INT	k;
+
+	for ( i = 0; i < sizeof(nm) / sizeof(nm[0]); i++ ) {
+		if ( ts_str_to_uuid(nm[i].id, &u) < E_OK || ob_ref_obj(&u, &r) < E_OK ) continue;
+		for ( k = 0; nm[i].was[k] != 0 && r.name[k] == (UB)nm[i].was[k]; k++ ) ;
+		if ( nm[i].was[k] != 0 || r.name[k] != 0 ) continue;
+		if ( om_store_rename(&u, (CONST UB *)nm[i].now) >= E_OK ) {
+			tm_printf((UB *)"TessronOS desktop: %s renamed %s\n", nm[i].was, nm[i].now);
+		}
+	}
+}
+
 LOCAL void video_start( void )
 {
-	char	v[CF_VAL_MAX], a[32], b[32];
+	char	v[CF_VAL_MAX], a[32], b[32], fit[16];
 
 	vm_w = vm_h = vm_ow = vm_oh = 0;
+	if ( !wm_dev_conf_get("VIDEOFIT", fit, sizeof(fit)) ) fit[0] = 0;
 	if ( !wm_dev_conf_get("VIDEOMODE", v, sizeof(v)) || !cf_word(v, 0, a, sizeof(a))
 	  || !size_of(a, &vm_w, &vm_h) ) {
+		UINT	w, h;
+
+		if ( fit[0] != 0 && screen_px_size(&w, &h) >= E_OK ) {
+			(void)screen_set_fit(w, h, fit);	/* the shape alone was chosen */
+		}
 		return;
 	}
 	if ( cf_word(v, 1, b, sizeof(b)) ) (void)size_of(b, &vm_ow, &vm_oh);
-	if ( screen_set(vm_w, vm_h) < E_OK ) {
+	if ( screen_set_fit(vm_w, vm_h, fit) < E_OK ) {
 		tm_printf((UB *)"TessronOS desktop: the screen cannot be %d x %d\n", (INT)vm_w, (INT)vm_h);
 		vm_ow = vm_oh = 0;
 	}
+}
+
+/*
+ * The scale the machine's settings ask for (VIDEOSCALE, percent), set as
+ * the desktop starts, after the size: a scale the screen's size cannot
+ * take is kept asked for and the largest that it can take is used
+ * (ts_disp_setscale says so for a size that leaves too small a view).
+ */
+LOCAL void scale_start( void )
+{
+	char	v[CF_VAL_MAX];
+	UINT	sc;
+	ER	er;
+
+	if ( !wm_dev_conf_get("VIDEOSCALE", v, sizeof(v)) ) {
+		return;
+	}
+	sc = (UINT)cf_num(v, 100);
+	if ( sc == 100 || sc == screen_scale() ) {
+		return;
+	}
+	er = screen_set_scale(sc);
+	tm_printf((UB *)"TessronOS desktop: the screen drawn at %d%% (%d)\n", (INT)sc, (INT)er);
 }
 
 LOCAL void video_confirm( DTWIN *d )
@@ -2869,6 +3217,107 @@ LOCAL void video_confirm( DTWIN *d )
 	(void)wm_dev_conf_put("VIDEOMODE", s);	/* seen: no longer asked */
 }
 
+/*
+ * DT_RQ_SCREEN (システム環境設定's 画面サイズ, while the desktop runs):
+ * the screen set now to the size and shape rq->text says
+ * ("WIDTHxHEIGHT" and "aspect" or "stretch"), every window of the
+ * desktop drawn again and the wallpaper laid again, then asked about:
+ * Enter or 確認 within thirty seconds keeps it, and the machine's
+ * settings take it for the next start (VIDEOMODE, VIDEOFIT); anything
+ * else, or nothing, puts back the size and shape there were. E_OK when
+ * kept, E_ABORT when put back, E_NOSPT when the screen cannot be set
+ * so, E_PAR for words that are not a size.
+ */
+LOCAL void screen_redraw( void )
+{
+	INT	i;
+
+	for ( i = 0; i < DT_MAX_WIN; i++ ) {
+		if ( dt_win[i].used ) dt_draw(&dt_win[i]);
+	}
+	(void)dt_res_wall(WM_WALL_FIT);
+	(void)wm_composite();
+	wm_update();
+}
+
+EXPORT ER dt_screen_req( CONST T_DTREQ *rq )
+{
+	CONST char *CONST lines[5] = {
+		"画面の設定を切り換えましたので表示を確認してください。",
+		"正しく表示されているときは、３０秒以内に［Ｅｎｔｅｒ］",
+		"キーか［確認］を押してください。",
+		"［Ｅｎｔｅｒ］以外のキーを押すか、３０秒以上キーを押さ",
+		"ないと、以前の画面の設定に戻します。",
+	};
+	char	t[DT_CARRY_TEXT], a[32], fit[16], ofit[16], s[48];
+	UINT	w, h, ow, oh, sc, osc;
+	ER	er;
+
+	knl_memcpy(t, rq->text, sizeof(t));
+	t[sizeof(t) - 1] = 0;
+	if ( !cf_word(t, 0, a, sizeof(a)) || !size_of(a, &w, &h) ) {
+		return E_PAR;
+	}
+	if ( !cf_word(t, 1, fit, sizeof(fit)) || fit[knl_strlen(fit) - 1] == '%' ) fit[0] = 0;
+	if ( screen_px_size(&ow, &oh) < E_OK ) {
+		return E_NOEXS;
+	}
+	osc = screen_scale();
+	sc = word_scale(t);			/* "150%": the scale it is to be drawn at */
+	if ( sc == 0 ) sc = osc;
+	screen_fit(ofit, sizeof(ofit));
+	if ( fit[0] != 0 && ofit[0] == 0 ) fit[0] = 0;	/* a screen that does not choose the shape */
+	tm_printf((UB *)"TessronOS desktop: the screen %d x %d %s -> %d x %d %s, asked\n", (INT)ow, (INT)oh, ofit,
+		  (INT)w, (INT)h, fit);
+	if ( sc != osc ) {
+		tm_printf((UB *)"TessronOS desktop: drawn at %d%% -> %d%%, asked\n", (INT)osc, (INT)sc);
+	}
+	if ( w == ow && h == oh && knl_strcmp(fit, ofit) == 0 && sc == osc ) {
+		return E_OK;
+	}
+	er = ( w == ow && h == oh && knl_strcmp(fit, ofit) == 0 ) ? E_OK : screen_set_fit(w, h, fit);
+	if ( er < E_OK ) {
+		tm_printf((UB *)"TessronOS desktop: the screen cannot be %d x %d (%d)\n", (INT)w, (INT)h, (INT)er);
+		return er;
+	}
+	if ( sc != screen_scale() ) {
+		er = screen_set_scale(sc);
+		if ( er < E_OK ) {
+			tm_printf((UB *)"TessronOS desktop: the screen cannot be drawn at %d%% (%d)\n", (INT)sc, (INT)er);
+			if ( w != ow || h != oh || knl_strcmp(fit, ofit) != 0 ) {
+				(void)screen_set_fit(ow, oh, ofit);
+				screen_redraw();
+			}
+			return er;
+		}
+	}
+	screen_redraw();
+	if ( dt_first_win() != NULL && dt_confirm_timed(dt_first_win(), lines, 5, "取り消し", "確認", 30000) ) {
+		tm_sprintf((UB *)s, (UB *)"%dx%d", (INT)w, (INT)h);
+		(void)wm_dev_conf_put("VIDEOMODE", s);
+		if ( fit[0] != 0 ) (void)wm_dev_conf_put("VIDEOFIT", fit);
+		tm_printf((UB *)"TessronOS desktop: the screen of %s %s kept\n", s, fit);
+		if ( sc != osc ) {
+			tm_sprintf((UB *)s, (UB *)"%d", (INT)sc);
+			(void)wm_dev_conf_put("VIDEOSCALE", s);
+			tm_printf((UB *)"TessronOS desktop: drawn at %d%%, kept\n", (INT)sc);
+		}
+		return E_OK;
+	}
+	if ( w != ow || h != oh || knl_strcmp(fit, ofit) != 0 ) {
+		(void)screen_set_fit(ow, oh, ofit);
+	}
+	if ( sc != osc ) {
+		(void)screen_set_scale(osc);
+	}
+	screen_redraw();
+	tm_printf((UB *)"TessronOS desktop: the screen put back to %d x %d %s\n", (INT)ow, (INT)oh, ofit);
+	if ( sc != osc ) {
+		tm_printf((UB *)"TessronOS desktop: drawn at %d%% again\n", (INT)osc);
+	}
+	return E_ABORT;
+}
+
 /* ---------------------------------------------------------------- the loop */
 
 /*
@@ -2882,6 +3331,21 @@ LOCAL void video_confirm( DTWIN *d )
  * other, and putting it back is the only way to say where it really
  * was.
  */
+/*
+ * Whether a press on a window's frame at (sx, sy) on the screen is on
+ * the corner at its foot that sizes it (WM_GRIP_CORNER). A finger's
+ * (wm_hit_slop) reaches it farther along the frame, and out of the
+ * window, where the window manager gave it the press (wm_read_event).
+ */
+LOCAL BOOL grip_at( CONST T_WMWIN *w, INT sx, INT sy, UD when )
+{
+	INT	slop = wm_hit_slop(when);
+	INT	cx = wm_hit_in(WM_GRIP_CORNER, slop, w->outer.right - w->outer.left);
+	INT	cy = wm_hit_in(WM_GRIP_CORNER, slop, w->outer.bottom - w->outer.top);
+
+	return (BOOL)( sx > w->outer.right - cx && sy > w->outer.bottom - cy );
+}
+
 LOCAL void press( DTWIN *d, CONST T_WMEV *ev )
 {
 	UINT		which = 0;
@@ -2922,8 +3386,7 @@ LOCAL void press( DTWIN *d, CONST T_WMEV *ev )
 			return;
 		}
 		dt_move_wid = d->wid;
-		dt_sizing = (BOOL)( sx > w.outer.right - 20
-				 && sy > w.outer.bottom - 20 );
+		dt_sizing = grip_at(&w, sx, sy, ev->when);
 		dt_grab_dx = sx - ( dt_sizing ? w.outer.right : w.outer.left );
 		dt_grab_dy = sy - ( dt_sizing ? w.outer.bottom : w.outer.top );
 		wm_set_pointer(dt_sizing ? WM_PT_PICK : WM_PT_MOVE);
@@ -2972,7 +3435,7 @@ LOCAL void press( DTWIN *d, CONST T_WMEV *ev )
 		return;
 	}
 	/* a handle of 変形, or the end of a picked line, carried */
-	if ( df_transform_press(d, ev->x, ev->y) || df_end_press(d, ev->x, ev->y) ) {
+	if ( df_transform_press(d, ev->x, ev->y, ev->when) || df_end_press(d, ev->x, ev->y, ev->when) ) {
 		return;
 	}
 	/* 詳細: the flags and rulers of the settings */
@@ -2984,7 +3447,7 @@ LOCAL void press( DTWIN *d, CONST T_WMEV *ev )
 		       ev->when) ) {
 		if ( dd_editable(d) ) {
 			dd_press(d, ev->x, ev->y,
-				 (BOOL)( ( ev->mods & MOD_SHIFT ) != 0 ));
+				 (BOOL)( ( ev->mods & MOD_SHIFT ) != 0 ), ev->when);
 		}
 	} else if ( df_is(d) ) {
 		df_take_look(d);		/* the palettes follow what is picked */
@@ -3046,8 +3509,7 @@ LOCAL void obj_press( CONST T_WMEV *ev )
 			       || sx >= w.work.right || sy >= w.work.bottom )
 	  && !( wm_part_at(sx, sy, &got, &bar) == WM_PART_PICT && got == ev->wid ) ) {
 		dt_move_wid = ev->wid;
-		dt_sizing = (BOOL)( ( w.attr & WM_ATTR_RESIZE ) != 0
-				 && sx > w.outer.right - 20 && sy > w.outer.bottom - 20 );
+		dt_sizing = (BOOL)( ( w.attr & WM_ATTR_RESIZE ) != 0 && grip_at(&w, sx, sy, ev->when) );
 		dt_grab_dx = sx - ( dt_sizing ? w.outer.right : w.outer.left );
 		dt_grab_dy = sy - ( dt_sizing ? w.outer.bottom : w.outer.top );
 		wm_set_pointer(dt_sizing ? WM_PT_PICK : WM_PT_MOVE);
@@ -3076,6 +3538,7 @@ LOCAL BOOL key_letter( INT code, UB *p_letter )
 LOCAL void key( DTWIN *d, CONST T_WMEV *ev )
 {
 	BOOL	ctrl  = (BOOL)( ( ev->mods & MOD_CTRL ) != 0 );
+	UINT	cmd = wm_key_cmd(ev->code);		/* the key of the letter it types: a command's */
 	T_MNSEL	sel;
 	UB	letter;
 	ID	mid;
@@ -3099,7 +3562,7 @@ LOCAL void key( DTWIN *d, CONST T_WMEV *ev )
 		if ( own_give(d->wid, &e) ) {
 			return;
 		}
-		if ( ctrl && key_letter(ev->code, &letter) && win_menu(d, FALSE, NULL, &mid) >= E_OK ) {
+		if ( ctrl && key_letter(cmd, &letter) && win_menu(d, FALSE, NULL, &mid) >= E_OK ) {
 			er = mn_fnd_key(mid, letter, &sel);
 			(void)mn_del_men(mid);
 			if ( er >= E_OK ) {
@@ -3136,7 +3599,7 @@ LOCAL void key( DTWIN *d, CONST T_WMEV *ev )
 		return;
 	}
 	/* a menu letter: the item of the window's menu that has it */
-	if ( key_letter(ev->code, &letter) && win_menu(d, FALSE, NULL, &mid) >= E_OK ) {
+	if ( key_letter(cmd, &letter) && win_menu(d, FALSE, NULL, &mid) >= E_OK ) {
 		er = mn_fnd_key(mid, letter, &sel);
 		(void)mn_del_men(mid);
 		if ( er >= E_OK ) {
@@ -3145,7 +3608,7 @@ LOCAL void key( DTWIN *d, CONST T_WMEV *ev )
 		}
 	}
 	/* the keys that are not in a menu */
-	switch ( ev->code ) {
+	switch ( cmd ) {
 	case KEY_O:	ed_open_picked(d);		break;
 	case KEY_A:
 		ed_pick_all(d);
@@ -3184,9 +3647,6 @@ EXPORT BOOL dt_drop_links( DTWIN *d, INT sx, INT sy, CONST T_VOBJ *v, INT n )
 
 	if ( wid <= 0 || dt_win_of(wid) != NULL || n <= 0 ) {
 		return FALSE;			/* the ground, or a window of the desktop's */
-	}
-	if ( n > OB_DROP_MAX ) {
-		n = OB_DROP_MAX;
 	}
 	dv = (T_OBDROPV *)Kmalloc(sizeof(T_OBDROPV) * (SZ)n);
 	name = (UB *)Kmalloc(TAD_NAME_MAX);
@@ -3233,6 +3693,80 @@ EXPORT BOOL dt_drop_links( DTWIN *d, INT sx, INT sy, CONST T_VOBJ *v, INT n )
 	return TRUE;			/* over another's window, nothing here moves */
 }
 
+/* A step of the start begun: said, and its time kept for the watch */
+LOCAL void dt_begin( CONST char *step )
+{
+	dt_step_at = now_ms();
+	dt_step = step;
+	tm_printf((UB *)"TessronOS desktop: - %s\n", step);
+}
+
+/* How a task stands, in a few words: its state, what it waits for and on which object */
+LOCAL void task_note( char *s, ID tskid )
+{
+	T_RTSK	r;
+
+	if ( tskid <= 0 || tk_ref_tsk(tskid, &r) < E_OK ) {
+		tm_sprintf((UB *)s, (UB *)"none");
+		return;
+	}
+	tm_sprintf((UB *)s, (UB *)"state %x waits %x on %d", (UINT)r.tskstat, (UINT)r.tskwait, (INT)r.wid);
+}
+
+/*
+ * The watch, from the task waiting for the desktop, once a second from
+ * its start (ms after it): the state said every DT_WATCH_EVERY_MS up to
+ * DT_WATCH_SAY_MS; a step before the loop that stands DT_STEP_STUCK_MS,
+ * and the screen held DT_HELD_STUCK_MS, told once each with where the
+ * tasks concerned wait.
+ */
+LOCAL void dt_watch( UW ms )
+{
+	static UW	said_at = 0;
+	static CONST char *step_told = NULL;
+	static BOOL	held_told = FALSE;
+	CONST char	*step = dt_step;
+	T_WMSTAT	ws;
+	T_DISPSTAT	ds;
+	ID		holder = 0;
+	UW		held_ms = 0, stood;
+	INT		held;
+	char		a[48], b[48], why[96];
+
+	held = knl_disp_hold_note(&holder, &held_ms);
+	stood = now_ms() - dt_step_at;
+	if ( ms <= DT_WATCH_SAY_MS && ms - said_at >= DT_WATCH_EVERY_MS ) {
+		said_at = ms;
+		if ( wm_stat(&ws) < E_OK ) knl_memset(&ws, 0, sizeof(ws));
+		if ( ts_disp_stat(&ds) < E_OK ) knl_memset(&ds, 0, sizeof(ds));
+		task_note(a, dt_tskid);
+		task_note(b, knl_wm_compositor());
+		tm_printf((UB *)"TessronOS desktop: at %d s: step %s (%d ms), loop %d; built %ld, sent %ld, "
+			  "held %d (task %d, %d ms); desktop %s; compositor %s\n",
+			  (INT)( ms / 1000 ), step, (INT)stood, (INT)dt_loops, (D)ws.composites, (D)ds.sends,
+			  held, (INT)holder, (INT)held_ms, a, b);
+	}
+	if ( step[0] != 0 && knl_strcmp(step, "the loop") != 0 && stood >= DT_STEP_STUCK_MS && step_told != step ) {
+		step_told = step;
+		tm_sprintf((UB *)why, (UB *)"TessronOS desktop: the step \"%s\" has stood %d ms; the desktop's task:",
+			   step, (INT)stood);
+		knl_lockup_tell_task(dt_tskid, why);
+		knl_lockup_tell_task(knl_wm_compositor(), "TessronOS desktop: the compositor's task:");
+		if ( knl_bootlog_soon != NULL ) knl_bootlog_soon();
+	}
+	if ( held > 0 && held_ms >= DT_HELD_STUCK_MS ) {
+		if ( !held_told ) {
+			held_told = TRUE;
+			tm_sprintf((UB *)why, (UB *)"TessronOS desktop: the screen held %d ms (%d holds), the first by task %d:",
+				   (INT)held_ms, held, (INT)holder);
+			knl_lockup_tell_task(holder, why);
+			if ( knl_bootlog_soon != NULL ) knl_bootlog_soon();
+		}
+	} else {
+		held_told = FALSE;
+	}
+}
+
 LOCAL void desktop_run( void )
 {
 	T_WMEV	ev;
@@ -3273,9 +3807,12 @@ LOCAL void desktop_run( void )
 		 */
 		om_store_files(( ob_ref_vol(NULL, &vol) >= E_OK ) ? NULL : "/boot");
 	}
+	sysdef_names();				/* the system's containers by their names of now */
+	knl_sys_mark();				/* the root's links known by their relationships */
 	(void)wm_conf_apply();			/* the person's settings (ユーザ環境設定) */
 	(void)wm_dev_conf_apply();		/* the machine's (システム環境設定) */
 	video_start();				/* the screen's size, before any window */
+	scale_start();				/* and the scale it is drawn at */
 	(void)wm_conf_watch();			/* the network's behind, and each again when written */
 	knl_obsys_power((FP)dt_power);		/* the system object's power record comes here */
 	(void)dt_prog_start();			/* the programs, as real objects */
@@ -3283,11 +3820,15 @@ LOCAL void desktop_run( void )
 	port_open();
 	dt_tail_start();			/* 小物 and 実行 in the programs' menus */
 	dt_fault_forget();			/* exceptions before the desktop was up: the console said them */
+	dt_begin("mozc");
 	(void)kc_start();			/* かな漢字変換: mozc starts behind */
+	dt_begin("the wallpaper");
 	if ( dt_res_wall(WM_WALL_FIT) < E_OK ) {	/* a picture of the 壁紙箱 */
 		tm_printf((UB *)"TessronOS desktop: no wallpaper\n");
 	}
+	dt_begin("the message line");
 	(void)wm_msg_show(TRUE);		/* the message line along the foot */
+	dt_begin("the input modes");
 	tip_start();
 
 	/*
@@ -3295,16 +3836,23 @@ LOCAL void desktop_run( void )
 	 * system's own settings; until there are settings, the one the
 	 * records this system was given open with is named here.
 	 */
+	dt_begin("the cabinet");
 	if ( ts_str_to_uuid(DT_CABINET, &cab) < E_OK
-	  || ( cwid = win_open(&cab, 0, 60, 40) ) < 0 ) {
+	  || ( cwid = win_open(&cab, 0, 60, 40, NULL) ) < 0 ) {
 		tm_printf((UB *)"TessronOS desktop: no cabinet to open\n");
 	} else {
 		dt_first_wid = cwid;
 		auto_open(dt_win_of(cwid));
 	}
+	dt_begin("the first screen");
 	wm_composite();
+	dt_begin("the screen's size confirmed");
 	video_confirm(dt_win_of(dt_first_wid));
+	dt_begin("the disk repair's result");
 	dt_fix_boot();				/* the system volume repaired at this start: what came of it */
+	dt_begin("a system update left");
+	dt_sysup_resume(dt_win_of(dt_first_wid));	/* a system update the last start did not end */
+	dt_begin("the loop");
 
 	while ( !dt_stop ) {
 		DTWIN	*d;
@@ -3315,6 +3863,7 @@ LOCAL void desktop_run( void )
 			port_open();		/* one that could not be made at the start */
 		}
 		knl_wdog_alive();		/* the loop came round (lockup.c tells one that does not) */
+		dt_loops++;
 #if USE_KTEST
 		/* the tests stop the loop here: 1 waits, 2 runs on the spot */
 		while ( dt_test_stall == 1 ) {
@@ -3327,7 +3876,9 @@ LOCAL void desktop_run( void )
 		close_requests();
 		process_requests();
 		dt_fault_poll();		/* a process ended by an exception: told in a dialog */
-		own_poll();			/* a slide's or a player's program asked for something */
+		own_poll();			/* a slide's program asked for something */
+		dt_rthost_poll();		/* a player in a process's window: gone with the window */
+		dt_uitest_poll();		/* nothing unless built with UITEST=1 */
 		dt_tail_poll();			/* an accessory chosen in a program's menu */
 		dt_winlist_poll();		/* ウインドウ一覧, when the windows changed */
 		df_panel_poll();		/* 道具パネル: with the figure in use */
@@ -3347,9 +3898,21 @@ LOCAL void desktop_run( void )
 			}
 			wm_update();
 		}
-		if ( wm_read_event(&ev, DT_BLINK_MS / 2) < E_OK ) {
+		/* with paragraphs still to lay, they are laid between the events */
+		if ( wm_read_event(&ev, dd_settle_pending() ? 0 : DT_BLINK_MS / 2) < E_OK ) {
+			dt_uitest_idle();	/* no input left: what was put in has been taken */
+			if ( (UW)( now_ms() - dt_last_input ) >= DT_PRE_IDLE_MS
+			  && ed_prepare_pending() ) {
+				/* nothing done for a while: the next change's "as it was" written out */
+				ed_prepare_step();
+			} else if ( dd_settle_pending() ) {
+				dd_settle_step();
+			}
 			blink_step();
 			continue;
+		}
+		if ( ev.type == HID_EV_KEY_DOWN || ev.type == HID_EV_BTN_DOWN ) {
+			dt_last_input = now_ms();
 		}
 		if ( ev.type == HID_EV_BTN_DOWN || ev.type == HID_EV_KEY_DOWN ) {
 			/* what was just done shows at once, and for a whole turn */
@@ -3541,6 +4104,7 @@ LOCAL void desktop_run( void )
 				dd_link_release(px, py);
 			}
 			df_panel_let_go();
+			df_panel_release(&ev);
 			if ( ed_holding() ) {
 				if ( ts_hid_pointer(&px, &py, &btn) >= E_OK ) {
 					ed_release(px, py);
@@ -3709,6 +4273,7 @@ EXPORT ER dt_start( void )
 	}
 	knl_fq_desktop(&dt_fq_ops);		/* 強制終了 knows it from now on */
 	dt_stop = FALSE;
+	dt_quit_asked = FALSE;
 	knl_memset(&ctsk, 0, sizeof(ctsk));
 	ctsk.exinf   = NULL;
 	ctsk.tskatr  = TA_HLNG | TA_RNG0;
@@ -3735,6 +4300,7 @@ EXPORT void dt_quit( void )
 {
 	INT	i;
 
+	dt_quit_asked = TRUE;
 	dt_stop = TRUE;
 	for ( i = 0; i < 100 && dt_tskid > 0; i++ ) {
 		tk_dly_tsk(100);
@@ -3744,6 +4310,7 @@ EXPORT void dt_quit( void )
 EXPORT INT ts_desktop( void )
 {
 	UINT		sw, sh;
+	UW		t0;
 
 	/*
 	 * Without a screen there is no desktop to run, but the machine is
@@ -3766,11 +4333,14 @@ EXPORT INT ts_desktop( void )
 	 * above every other, is not let run for twenty seconds, the machine
 	 * has stopped (lockup.c), and is reset after the time set.
 	 */
+	t0 = now_ms();
 	while ( !dt_stop ) {
 		knl_wdog_kick();
 		tk_dly_tsk(1000);
+		dt_watch(now_ms() - t0);
 	}
 	knl_wdog_kick_stop();			/* what follows takes as long as it takes */
+	t0 = ( dt_stop_at != 0 ) ? dt_stop_at : now_ms();
 	/*
 	 * Turned off from the desktop: its windows are saved and closed by
 	 * its own task on the way out, which is waited for, and what the
@@ -3782,6 +4352,12 @@ EXPORT INT ts_desktop( void )
 
 		for ( i = 0; i < 100 && dt_tskid > 0; i++ ) {
 			tk_dly_tsk(100);
+		}
+		if ( dt_tskid > 0 ) {
+			knl_lockup_tell_task(dt_tskid, "TessronOS desktop: its task has not ended in 10 s:");
+		} else {
+			tm_printf((UB *)"TessronOS desktop: its task ended %d ms after the session was asked to end\n",
+				  (INT)( now_ms() - t0 ));
 		}
 		(void)fs_sync();
 		tm_printf((UB *)( dt_restart ? "TessronOS desktop: starting the machine again\n"

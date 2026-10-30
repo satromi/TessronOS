@@ -139,6 +139,33 @@ IMPORT void ts_pcie_cfg_write( UINT bus, UINT dev, UINT fn, UINT off,
  */
 IMPORT ER  ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno );
 
+#ifdef __x86_64__
+/* The same through the plain message capability (MSI), for a function that has no MSI-X (ts_pcie_irq_alloc tries it) */
+IMPORT ER  ts_pcie_msi_plain_alloc( CONST T_PCIDEV *dev, UINT *p_intno );
+#endif
+
+/*
+ * One interrupt for a function, the way the function and the machine
+ * allow, tried in this order: MSI-X, MSI (x64), its line (INTx; on x64
+ * the GSI the ACPI _PRT tables name, taken only when no other handler
+ * has it), and only when line is TRUE. Answers the kind (PCI_IRQ_*), or
+ * an error; *p_intno is 0 for PCI_IRQ_POLL, when the driver polls.
+ * The interrupt goes where SetIntTarget and the device's object say,
+ * as any other does. The console is told which it was, and why the
+ * earlier ones were not had.
+ */
+#define PCI_IRQ_POLL		0
+#define PCI_IRQ_MSIX		1
+#define PCI_IRQ_MSI		2
+#define PCI_IRQ_INTX		3
+IMPORT INT ts_pcie_irq_alloc( CONST T_PCIDEV *dev, UINT *p_intno, BOOL line );
+
+/* "MSI-X", "MSI", "INTx" or "polled" */
+IMPORT CONST char *ts_pcie_irq_name( INT kind );
+
+/* The kind ts_pcie_irq_alloc gave the function and its number, E_NOEXS when it was not asked */
+IMPORT INT ts_pcie_irq_kind( CONST T_PCIDEV *dev, UINT *p_intno );
+
 /* The offset of a capability, or 0 when the function has none of it */
 IMPORT UINT ts_pcie_cap_find( CONST T_PCIDEV *dev, UINT cap_id );
 

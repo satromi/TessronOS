@@ -66,6 +66,10 @@
 
 typedef UBINT (*SVCFN)( UBINT, UBINT, UBINT, UBINT, UBINT, UBINT, UBINT, UBINT );
 
+#ifdef USE_UITEST
+EXPORT volatile UD	knl_svc_calls = 0;	/* calls of processes made, for the UI tests (svcstat) */
+#endif
+
 #define F(fn)	((FP)(fn))
 
 LOCAL ID svc_sys_cre_tsk( CONST T_CTSK *pk );
@@ -151,6 +155,8 @@ LOCAL const FP tk_svc_tbl[TSN_TK_MAX + 1] = {
 	[TSN_NUMBER(TSN_TK_GET_UTC)]	= F(tk_get_utc),
 	[TSN_NUMBER(TSN_TK_GET_PRC)]	= F(tk_get_prc),
 	[TSN_NUMBER(TSN_TK_CHG_SLT)]	= F(tk_chg_slt),
+	[TSN_NUMBER(TSN_TK_SET_ASP)]	= F(tk_set_asp),
+	[TSN_NUMBER(TSN_TK_REF_ASP)]	= F(tk_ref_asp),
 };
 
 /* Whether the calling process may use its memory at p..p+len for this */
@@ -304,18 +310,33 @@ LOCAL ER svc_ts_rcv_msg( T_TSMSG *buf, TMO tmout )
 	return er;
 }
 
-LOCAL ER svc_ts_ref_cpu( T_TSCPU *pk )
-{
-	T_TSCPU	c;
-	ER	er;
+/* As many processors as the caller's size holds, and no more than there are */
+IMPORT INT	knl_num_prc;
 
-	if ( !user_ok(pk, sizeof(*pk), TRUE) ) {
+LOCAL INT svc_ts_ref_cpu( T_TSCPU *pk, SZ size )
+{
+	T_TSCPU	*c;
+	SZ	want = size;
+	INT	er;
+
+	if ( size < (SZ)sizeof(T_TSCPU) ) {
+		return E_PAR;
+	}
+	if ( !user_ok(pk, size, TRUE) ) {
 		return E_MACV;
 	}
-	er = ts_ref_cpu(&c);
-	if ( er >= E_OK ) {
-		knl_ua_put(pk, &c, sizeof(c));
+	if ( want > TS_TSCPU_SIZE(knl_num_prc) ) {
+		want = TS_TSCPU_SIZE(knl_num_prc);
 	}
+	c = (T_TSCPU *)Kmalloc((size_t)want);
+	if ( c == NULL ) {
+		return E_NOMEM;
+	}
+	er = ts_ref_cpu(c, want);
+	if ( er >= E_OK ) {
+		knl_ua_put(pk, c, want);
+	}
+	Kfree(c);
 	return er;
 }
 
@@ -356,25 +377,63 @@ LOCAL ER svc_ts_map_mem( void **p_adr, SZ size, SZ align, UINT prot )
 LOCAL ER user_cstr( CONST char *src, char *dst, INT max );
 
 /*
- * A spawn: the path, the T_SPAWN, its start-up argument and descriptors
- * all copied into the kernel's memory before anything is looked at.
+ * What a spawn is given -- the T_SPAWN, its start-up argument and its
+ * descriptors -- copied into the kernel's memory before anything is
+ * looked at; spn_free lets the copies go.
  */
+LOCAL ER spn_copy( CONST T_SPAWN *usp, T_SPAWN *sp )
+{
+	void	*arg = NULL;
+	INT	*fds = NULL;
+
+	if ( !user_ok(usp, sizeof(*sp), FALSE) ) {
+		return E_MACV;
+	}
+	knl_ua_get(sp, usp, sizeof(*sp));
+	if ( sp->argsz < 0 || sp->argsz > TS_SPN_ARG_MAX || sp->nfd < 0 || sp->nfd > TS_SPN_FD_MAX ) {
+		return E_PAR;
+	}
+	if ( sp->argsz > 0 ) {
+		if ( sp->arg == NULL || !user_ok(sp->arg, sp->argsz, FALSE) ) {
+			return E_MACV;
+		}
+		arg = Kmalloc((size_t)sp->argsz);
+		if ( arg == NULL ) {
+			return E_NOMEM;
+		}
+		knl_ua_get(arg, sp->arg, (SZ)sp->argsz);
+	}
+	if ( sp->nfd > 0 ) {
+		if ( sp->fds == NULL || !user_ok(sp->fds, (SZ)sp->nfd * (SZ)sizeof(INT), FALSE) ) {
+			if ( arg != NULL ) Kfree(arg);
+			return E_MACV;
+		}
+		fds = (INT *)Kmalloc(sizeof(INT) * (SZ)sp->nfd);
+		if ( fds == NULL ) {
+			if ( arg != NULL ) Kfree(arg);
+			return E_NOMEM;
+		}
+		knl_ua_get(fds, sp->fds, (SZ)sp->nfd * (SZ)sizeof(INT));
+	}
+	sp->arg = arg;
+	sp->fds = fds;
+	return E_OK;
+}
+
+LOCAL void spn_free( T_SPAWN *sp )
+{
+	if ( sp->arg != NULL ) Kfree((void *)sp->arg);
+	if ( sp->fds != NULL ) Kfree((void *)sp->fds);
+}
+
+/* A spawn by a path: the path copied too, and asked whether the caller may name it */
 LOCAL ID svc_ts_spn_prc( CONST char *path, CONST T_SPAWN *usp )
 {
 	T_SPAWN	sp;
 	char	*p;
-	void	*arg = NULL;
-	INT	*fds = NULL;
 	ID	pid;
 	ER	er;
 
-	if ( !user_ok(usp, sizeof(sp), FALSE) ) {
-		return E_MACV;
-	}
-	knl_ua_get(&sp, usp, sizeof(sp));
-	if ( sp.argsz < 0 || sp.argsz > TS_SPN_ARG_MAX || sp.nfd < 0 || sp.nfd > TS_SPN_FD_MAX ) {
-		return E_PAR;
-	}
 	p = (char *)Kmalloc(FS_PATH_MAX);
 	if ( p == NULL ) {
 		return E_NOMEM;
@@ -387,38 +446,65 @@ LOCAL ID svc_ts_spn_prc( CONST char *path, CONST T_SPAWN *usp )
 		Kfree(p);
 		return ( er == EX_FAULT ) ? E_MACV : E_PAR;
 	}
-	if ( sp.argsz > 0 ) {
-		if ( sp.arg == NULL || !user_ok(sp.arg, sp.argsz, FALSE) ) {
-			Kfree(p);
-			return E_MACV;
-		}
-		arg = Kmalloc((size_t)sp.argsz);
-		if ( arg == NULL ) {
-			Kfree(p);
-			return E_NOMEM;
-		}
-		knl_ua_get(arg, sp.arg, (SZ)sp.argsz);
+	er = spn_copy(usp, &sp);
+	if ( er < E_OK ) {
+		Kfree(p);
+		return er;
 	}
-	if ( sp.nfd > 0 ) {
-		if ( sp.fds == NULL || !user_ok(sp.fds, (SZ)sp.nfd * (SZ)sizeof(INT), FALSE) ) {
-			er = E_MACV;
-		} else if ( ( fds = (INT *)Kmalloc(sizeof(INT) * (SZ)sp.nfd) ) == NULL ) {
-			er = E_NOMEM;
-		} else {
-			knl_ua_get(fds, sp.fds, (SZ)sp.nfd * (SZ)sizeof(INT));
-		}
-		if ( er < E_OK ) {
-			Kfree(p);
-			if ( arg != NULL ) Kfree(arg);
-			return er;
-		}
-	}
-	sp.arg = arg;
-	sp.fds = fds;
 	pid = ts_spn_prc(p, &sp);
 	Kfree(p);
-	if ( arg != NULL ) Kfree(arg);
-	if ( fds != NULL ) Kfree(fds);
+	spn_free(&sp);
+	return pid;
+}
+
+/* The object a path of the object world names */
+LOCAL ER svc_ts_lkp_obj( CONST char *path, TS_UUID *p_uuid )
+{
+	TS_UUID	u;
+	char	*p;
+	ER	er;
+
+	if ( !user_ok(p_uuid, sizeof(u), TRUE) ) {
+		return E_MACV;
+	}
+	p = (char *)Kmalloc(FS_PATH_MAX);
+	if ( p == NULL ) {
+		return E_NOMEM;
+	}
+	er = user_cstr(path, p, FS_PATH_MAX);
+	if ( er >= EX_OK && !knl_fs_path_let(p, knl_ob_crd_of(ts_get_pid())) ) {
+		er = EX_ACCES;
+	}
+	if ( er >= EX_OK ) {
+		er = knl_objfs_lookup(p, &u);
+	}
+	Kfree(p);
+	if ( er < EX_OK ) {
+		return ( er == EX_FAULT ) ? E_MACV : ( er == EX_ACCES ) ? E_OACV
+		     : ( er == EX_NOENT || er == EX_NOTDIR ) ? E_NOEXS : E_PAR;
+	}
+	knl_ua_put(p_uuid, &u, sizeof(u));
+	return E_OK;
+}
+
+/* A spawn of the program object a link points at */
+LOCAL ID svc_ts_spn_obj( CONST TS_UUID *uprog, CONST T_SPAWN *usp )
+{
+	T_SPAWN	sp;
+	TS_UUID	prog;
+	ID	pid;
+	ER	er;
+
+	if ( !user_ok(uprog, sizeof(prog), FALSE) ) {
+		return E_MACV;
+	}
+	knl_ua_get(&prog, uprog, sizeof(prog));
+	er = spn_copy(usp, &sp);
+	if ( er < E_OK ) {
+		return er;
+	}
+	pid = ts_spn_obj(&prog, &sp);
+	spn_free(&sp);
 	return pid;
 }
 
@@ -548,6 +634,8 @@ LOCAL const FP ts_svc_tbl[TSN_TS_MAX + 1] = {
 	[TSN_NUMBER(TSN_TS_GET_PPID)]	= F(ts_get_ppid),
 	[TSN_NUMBER(TSN_TS_REF_PSX)]	= F(svc_ts_ref_psx),
 	[TSN_NUMBER(TSN_TS_LST_PRC)]	= F(svc_ts_lst_prc),
+	[TSN_NUMBER(TSN_TS_SPN_OBJ)]	= F(svc_ts_spn_obj),
+	[TSN_NUMBER(TSN_TS_LKP_OBJ)]	= F(svc_ts_lkp_obj),
 	[TSN_NUMBER(TSN_TS_GET_MONO)]	= F(svc_ts_get_mono),
 	[TSN_NUMBER(TSN_TS_REF_CPU)]	= F(svc_ts_ref_cpu),
 	[TSN_NUMBER(TSN_TS_DEF_FLT)]	= F(ts_def_flt),
@@ -676,6 +764,23 @@ LOCAL ER svc_dt_setsyszone( CONST char *name, INT minutes )
 	return E_PAR;
 }
 
+#ifdef TSN_DT_GETRTC
+LOCAL ER svc_dt_getrtc( INT *p_mode )
+{
+	INT	m = 0;
+	ER	er;
+
+	if ( !user_ok(p_mode, sizeof(*p_mode), TRUE) ) {
+		return E_MACV;
+	}
+	er = dt_getrtc(&m);
+	if ( er >= E_OK ) {
+		knl_ua_put(p_mode, &m, sizeof(m));
+	}
+	return er;
+}
+#endif
+
 LOCAL const FP dt_prc_tbl[TSN_DT_MAX + 1] = {
 	[TSN_NUMBER(TSN_DT_GETTIME)]	= F(svc_dt_gettime),
 	[TSN_NUMBER(TSN_DT_SETTIME)]	= F(dt_settime),
@@ -686,6 +791,10 @@ LOCAL const FP dt_prc_tbl[TSN_DT_MAX + 1] = {
 	[TSN_NUMBER(TSN_DT_SETSYSTZ)]	= F(dt_setsystz),
 	[TSN_NUMBER(TSN_DT_GETSYSZONE)]	= F(svc_dt_getsyszone),
 	[TSN_NUMBER(TSN_DT_SETSYSZONE)]	= F(svc_dt_setsyszone),
+#ifdef TSN_DT_GETRTC
+	[TSN_NUMBER(TSN_DT_GETRTC)]	= F(svc_dt_getrtc),
+	[TSN_NUMBER(TSN_DT_SETRTC)]	= F(dt_setrtc),
+#endif
 };
 
 LOCAL const FP dt_svc_tbl[TSN_DT_MAX + 1] = {
@@ -698,6 +807,10 @@ LOCAL const FP dt_svc_tbl[TSN_DT_MAX + 1] = {
 	[TSN_NUMBER(TSN_DT_SETSYSTZ)]	= F(dt_setsystz),
 	[TSN_NUMBER(TSN_DT_GETSYSZONE)]	= F(dt_getsyszone),
 	[TSN_NUMBER(TSN_DT_SETSYSZONE)]	= F(dt_setsyszone),
+#ifdef TSN_DT_GETRTC
+	[TSN_NUMBER(TSN_DT_GETRTC)]	= F(dt_getrtc),
+	[TSN_NUMBER(TSN_DT_SETRTC)]	= F(dt_setrtc),
+#endif
 };
 
 /* ob_ (class 7): peripheral_kernel/obj/obsvc.c, which makes sure of every pointer */
@@ -1105,6 +1218,93 @@ LOCAL ER svc_fs_chmod( CONST char *path, UINT mode )
 	return ( er < EX_OK ) ? er : fs_chmod(p, mode);
 }
 
+/*
+ * A disk reached from its device object's key (design 7.2): the key's
+ * rights are all there is to it, so the paths below the disk's root are
+ * not looked at as paths of the tree are (knl_fs_path_let); they are
+ * copied in and the layer keeps them below the root.
+ */
+LOCAL INT svc_fs_opn_vol( ID devkey, CONST char *fimpnm, UINT flags )
+{
+	char	f[FS_FIMPNM_MAX];
+	ID	pid = ts_get_pid();
+	ER	er;
+
+	if ( pid <= 0 ) return EX_PERM;
+	if ( fimpnm == NULL ) return knl_fs_opn_vol_as(devkey, NULL, flags, pid);
+	if ( ( er = user_cstr(fimpnm, f, sizeof(f)) ) < EX_OK ) return er;
+	return knl_fs_opn_vol_as(devkey, f, flags, pid);
+}
+
+LOCAL INT svc_fs_openat( INT vd, CONST char *path, UINT oflags )
+{
+	char	p[FS_PATH_MAX];
+	ER	er;
+
+	if ( !fd_mine(vd) ) return EX_BADF;
+	if ( ( er = user_cstr(path, p, FS_PATH_MAX) ) < EX_OK ) return er;
+	return knl_fs_openat_as(vd, p, oflags, ts_get_pid());
+}
+
+LOCAL ER svc_fs_statat( INT vd, CONST char *path, T_FSTAT *st )
+{
+	char	p[FS_PATH_MAX];
+	ER	er;
+
+	if ( !fd_mine(vd) ) return EX_BADF;
+	if ( ( er = user_cstr(path, p, FS_PATH_MAX) ) < EX_OK ) return er;
+	if ( !user_ok(st, sizeof(*st), TRUE) ) return EX_FAULT;
+	return UACCESS(fs_statat(vd, p, st));
+}
+
+/* mkdirat, rmdirat and unlinkat: one path, the change of the disk */
+LOCAL ER at_path( INT vd, CONST char *path, ER (*fn)( INT vd, CONST char *path ) )
+{
+	char	p[FS_PATH_MAX];
+	ER	er;
+
+	if ( !fd_mine(vd) ) return EX_BADF;
+	if ( ( er = user_cstr(path, p, FS_PATH_MAX) ) < EX_OK ) return er;
+	return fn(vd, p);
+}
+
+LOCAL ER svc_fs_mkdirat( INT vd, CONST char *path ) { return at_path(vd, path, fs_mkdirat); }
+LOCAL ER svc_fs_rmdirat( INT vd, CONST char *path ) { return at_path(vd, path, fs_rmdirat); }
+LOCAL ER svc_fs_unlinkat( INT vd, CONST char *path ) { return at_path(vd, path, fs_unlinkat); }
+
+LOCAL ER svc_fs_utimeat( INT vd, CONST char *path, UD mtime )
+{
+	char	p[FS_PATH_MAX];
+	ER	er;
+
+	if ( !fd_mine(vd) ) return EX_BADF;
+	if ( ( er = user_cstr(path, p, FS_PATH_MAX) ) < EX_OK ) return er;
+	return fs_utimeat(vd, p, mtime);
+}
+
+LOCAL ER svc_fs_renameat( INT vd, CONST char *from, CONST char *to )
+{
+	char	f[FS_PATH_MAX], t[FS_PATH_MAX];
+	ER	er;
+
+	if ( !fd_mine(vd) ) return EX_BADF;
+	if ( ( er = user_cstr(from, f, FS_PATH_MAX) ) < EX_OK ) return er;
+	if ( ( er = user_cstr(to, t, FS_PATH_MAX) ) < EX_OK ) return er;
+	return fs_renameat(vd, f, t);
+}
+
+LOCAL ER svc_fs_fstatvfs( INT vd, T_FSSTAT *st )
+{
+	if ( !fd_mine(vd) ) return EX_BADF;
+	if ( !user_ok(st, sizeof(*st), TRUE) ) return EX_FAULT;
+	return UACCESS(fs_fstatvfs(vd, st));
+}
+
+LOCAL ER svc_fs_fsync( INT fd )
+{
+	return fd_mine(fd) ? fs_fsync(fd) : EX_BADF;
+}
+
 LOCAL const FP fs_svc_tbl[TSN_FS_MAX + 1] = {
 	[TSN_NUMBER(TSN_FS_DUP)]	= F(svc_fs_dup),
 	[TSN_NUMBER(TSN_FS_PIPE)]	= F(svc_fs_pipe),
@@ -1135,6 +1335,16 @@ LOCAL const FP fs_svc_tbl[TSN_FS_MAX + 1] = {
 	[TSN_NUMBER(TSN_FS_DETACH_DEV)]	= F(fs_detach_dev),
 	[TSN_NUMBER(TSN_FS_MOUNTS)]	= F(svc_fs_mounts),
 	[TSN_NUMBER(TSN_FS_UTIME)]	= F(svc_fs_utime),
+	[TSN_NUMBER(TSN_FS_OPN_VOL)]	= F(svc_fs_opn_vol),
+	[TSN_NUMBER(TSN_FS_OPENAT)]	= F(svc_fs_openat),
+	[TSN_NUMBER(TSN_FS_STATAT)]	= F(svc_fs_statat),
+	[TSN_NUMBER(TSN_FS_MKDIRAT)]	= F(svc_fs_mkdirat),
+	[TSN_NUMBER(TSN_FS_RMDIRAT)]	= F(svc_fs_rmdirat),
+	[TSN_NUMBER(TSN_FS_UNLINKAT)]	= F(svc_fs_unlinkat),
+	[TSN_NUMBER(TSN_FS_UTIMEAT)]	= F(svc_fs_utimeat),
+	[TSN_NUMBER(TSN_FS_RENAMEAT)]	= F(svc_fs_renameat),
+	[TSN_NUMBER(TSN_FS_FSTATVFS)]	= F(svc_fs_fstatvfs),
+	[TSN_NUMBER(TSN_FS_FSYNC)]	= F(svc_fs_fsync),
 };
 
 /* so_ (class 5): peripheral_kernel/network/so_prc.c */
@@ -1493,43 +1703,44 @@ LOCAL UB svc_wm_key_char( UINT code, UINT mods )
 }
 
 /*
- * Menus for a process. A menu is the process's that made it; one whose
- * process has ended is let go of when the next is made.
+ * Menus for a process. A menu is the process's that made it (the menu
+ * keeps it, knl_mn_owner); one whose process has ended is let go of when
+ * the next is made.
  */
-LOCAL ID	mn_owner[MN_MAX + 1];
+IMPORT ID   knl_mn_owner( ID mid );		/* outer_kernel/wm/mn.c */
+IMPORT void knl_mn_set_owner( ID mid, ID pid );
+IMPORT void knl_mn_reap( BOOL (*gone)( ID pid ) );
 
 LOCAL BOOL mn_mine( ID mid )
 {
-	return (BOOL)( mid >= 1 && mid <= MN_MAX && mn_owner[mid] > 0
-		    && mn_owner[mid] == ts_get_pid() );
+	ID	pid = knl_mn_owner(mid);
+
+	return (BOOL)( pid > 0 && pid == ts_get_pid() );
+}
+
+LOCAL BOOL mn_prc_gone( ID pid )
+{
+	T_RPRC	r;
+
+	return (BOOL)( ts_ref_prc(pid, &r) < E_OK );
 }
 
 LOCAL ER svc_mn_cre_men( CONST TS_UUID *def, ID *p_mid )
 {
-	T_RPRC	r;
 	TS_UUID	d;
-	ID	mid, i;
+	ID	mid;
 	ER	er;
 
 	if ( !user_ok(def, sizeof(*def), FALSE) || !user_ok(p_mid, sizeof(*p_mid), TRUE) ) {
 		return E_MACV;
 	}
-	for ( i = 1; i <= MN_MAX; i++ ) {
-		if ( mn_owner[i] > 0 && ts_ref_prc(mn_owner[i], &r) < E_OK ) {
-			(void)mn_del_men(i);		/* its process has gone */
-			mn_owner[i] = 0;
-		}
-	}
+	knl_mn_reap(mn_prc_gone);		/* those whose process has gone */
 	knl_ua_get(&d, def, sizeof(d));
 	er = mn_cre_men(&d, &mid);
 	if ( er < E_OK ) {
 		return er;
 	}
-	if ( mid < 1 || mid > MN_MAX ) {
-		(void)mn_del_men(mid);
-		return E_LIMIT;
-	}
-	mn_owner[mid] = ts_get_pid();
+	knl_mn_set_owner(mid, ts_get_pid());
 	knl_ua_put(p_mid, &mid, sizeof(mid));
 	return E_OK;
 }
@@ -1537,7 +1748,6 @@ LOCAL ER svc_mn_cre_men( CONST TS_UUID *def, ID *p_mid )
 LOCAL ER svc_mn_del_men( ID mid )
 {
 	if ( !mn_mine(mid) ) return E_ID;
-	mn_owner[mid] = 0;
 	return mn_del_men(mid);
 }
 
@@ -1575,7 +1785,7 @@ LOCAL ER svc_mn_set_lst( ID mid, CONST TS_UUID *def, CONST char *code,
 	ER		er;
 
 	if ( !mn_mine(mid) ) return E_ID;
-	if ( n < 0 || n > WM_ITEM_MAX || stride <= 0 || stride > 4096 ) return E_PAR;
+	if ( n < 0 || stride <= 0 || stride > 4096 ) return E_PAR;
 	if ( user_def(def, &d, &pd) < E_OK || !user_str((CONST UB *)code, c, sizeof(c))
 	  || ( n > 0 && !user_ok(labels, (SZ)stride * n, FALSE) ) ) {
 		return E_MACV;
@@ -1640,7 +1850,7 @@ LOCAL ER svc_mn_pop_men( ID mid, ID wkey, INT x, INT y, UD when, T_MNSEL *sel )
 /*
  * かな漢字変換 for a process: a session of the converter that is the
  * process's, keys given as the keyboard gives them and turned into the
- * converter's in the input mode the message line shows. A session whose
+ * converter's in the input mode each key came in. A session whose
  * process has ended is closed when the next is opened.
  */
 #define KC_SESS_MAX	16
@@ -1706,22 +1916,27 @@ LOCAL INT kc_answer( INT r, CONST T_KCOUT *o, T_KCOUT *out )
 }
 
 /*
- * A key as the keyboard gave it. In 英語 nothing is the converter's. In
- * 日本語 a key that is not a letter is the converter's while it is
- * composing, and a letter always: romaji as the letter, kana keys as
- * the kana on the key.
+ * A key as the keyboard gave it, in the input mode it came in (T_OBNTM
+ * imode: the mode once the key was worked, in the keys' order). In 日本語
+ * a key that is not a letter is the converter's while it is composing,
+ * and a letter always: romaji as the letter, kana keys as the kana on
+ * the key. In 英語 no key is the converter's. The mode is the caller's,
+ * never the one the message line shows now: a mode key pressed after
+ * this key may have changed that already.
  */
-LOCAL INT svc_kc_hid_key( INT kid, UINT key, UINT mods, T_KCOUT *out )
+LOCAL INT svc_kc_hid_key( INT kid, UINT key, UINT mods, UINT mode, T_KCOUT *out )
 {
 	INT	i = kc_slot(kid), r, roman;
-	UINT	mode = wm_msg_get_mode(), code, stat = 0;
+	UINT	code, stat = 0;
 	BOOL	shift = (BOOL)( ( mods & ( HID_MOD_LSHIFT | HID_MOD_RSHIFT ) ) != 0 );
 	UB	ch;
 	T_KCOUT	*o;
 
 	if ( i < 0 ) return E_ID;
 	if ( !user_ok(out, sizeof(*out), TRUE) ) return E_MACV;
-	if ( ( mode & WM_MODE_ALPH ) != 0 ) return KC_NOTMINE;
+	if ( ( mode & WM_MODE_ALPH ) != 0 ) {
+		return KC_NOTMINE;
+	}
 	roman = ( ( mode & WM_MODE_ROMAN ) != 0 ) ? 1 : 0;
 	if ( roman != kc_roman[i] ) {
 		(void)kc_input(kid, roman ? TSMOZC_M_ROMAN : 0);
@@ -1822,8 +2037,8 @@ LOCAL UW svc_wm_look( UINT num )
 	return wm_look(num);
 }
 
-/* Whether the credentials let ops on the object named by the string s */
-LOCAL BOOL may_on( CONST char *s, CONST T_OBCRD *crd, UINT ops );
+/* Whether the credentials let ops on the system's object of role (fixed by default) */
+LOCAL BOOL may_on( CONST char *role, CONST char *fixed, CONST T_OBCRD *crd, UINT ops );
 
 LOCAL ER svc_wm_set_look( UINT num, UW value )
 {
@@ -1831,9 +2046,9 @@ LOCAL ER svc_wm_set_look( UINT num, UW value )
 	BOOL		may;
 
 	if ( cf_user_look(num) != NULL ) {
-		may = may_on(SYSDEF_CONF_USER, crd, OB_OP_WRITE);
+		may = may_on(SYSROLE_CONF_USER, SYSDEF_CONF_USER, crd, OB_OP_WRITE);
 	} else if ( cf_look_look(num) != NULL ) {
-		may = may_on(SYSDEF_CONF_DEV, crd, OB_OP_WRITE);
+		may = may_on(SYSROLE_CONF_DEV, SYSDEF_CONF_DEV, crd, OB_OP_WRITE);
 	} else {
 		may = knl_ob_is_admin(crd);
 	}
@@ -1899,15 +2114,19 @@ LOCAL ER svc_km_set( CONST T_KMSTATE *st, UINT what )
 	T_KMSTATE	s;
 	TS_UUID		u;
 	ID		k;
+	INT		n;
 
 	if ( !user_ok(st, sizeof(*st), FALSE) ) {
 		return E_MACV;
 	}
 	knl_ua_get(&s, st, sizeof(s));
-	if ( ts_str_to_uuid(SYSDEF_CONF_DEV, &u) < E_OK ) {
+	if ( ob_fnd_sys(SYSROLE_CONF_DEV, SYSDEF_CONF_DEV, &u) < E_OK ) {
 		return E_SYS;
 	}
-	k = ob_opn_obj(&u, OB_OP_WRITE);
+	/* whether the caller may write them: readers not kept out, a writer met waited for (up to a second) */
+	for ( n = 0; ( k = ob_opn_obj(&u, OB_OP_WRITE | OB_O_WEXCL) ) == E_BUSY && n < 100; n++ ) {
+		tk_dly_tsk(10);
+	}
 	if ( k < E_OK ) {
 		return ( k == E_NOEXS ) ? E_NOEXS : E_OACV;
 	}
@@ -1942,6 +2161,51 @@ LOCAL ER svc_wm_screen( INT *p_w, INT *p_h )
 	knl_ua_put(p_w, &w, sizeof(w));
 	knl_ua_put(p_h, &h, sizeof(h));
 	return E_OK;
+}
+
+/* How much farther a handle is reached by the press made at when: a number, nothing to copy */
+LOCAL INT svc_wm_hit_slop( UD when )
+{
+	return wm_hit_slop(when);
+}
+
+/*
+ * A rectangle of the screen copied into the process's memory (a program
+ * that shares the screen the person chose to share, as the browser's
+ * getDisplayMedia does), 'pitch' pixels to a row. The rows pass through
+ * a band of the kernel's memory, GRAB_BAND pixels at most, each band
+ * copied under the manager's lock as wm_grab_screen copies it.
+ */
+#define GRAB_BAND	( 64 * 1024 )
+
+LOCAL ER svc_wm_grab_screen( UW *dst, INT pitch, CONST T_DPRECT *r, BOOL pointer )
+{
+	T_DPRECT	k, band;
+	UW		*buf;
+	INT		w, h, y, i, rows;
+	ER		er = E_OK;
+
+	if ( user_rect(r, &k) < E_OK ) return E_MACV;
+	w = k.right - k.left;
+	h = k.bottom - k.top;
+	if ( w <= 0 || h <= 0 || pitch < w ) return E_PAR;
+	if ( !user_ok(dst, ( (SZ)( h - 1 ) * pitch + w ) * (SZ)sizeof(UW), TRUE) ) return E_MACV;
+	rows = GRAB_BAND / w;
+	if ( rows < 1 ) rows = 1;
+	if ( rows > h ) rows = h;
+	buf = (UW *)Kmalloc((size_t)rows * (size_t)w * sizeof(UW));
+	if ( buf == NULL ) return E_NOMEM;
+	for ( y = 0; y < h && er >= E_OK; y += rows ) {
+		band = k;
+		band.top = k.top + y;
+		band.bottom = ( band.top + rows < k.bottom ) ? band.top + rows : k.bottom;
+		er = wm_grab_screen(buf, w, &band, pointer);
+		for ( i = 0; er >= E_OK && i < band.bottom - band.top; i++ ) {
+			knl_ua_put(dst + (SZ)( y + i ) * pitch, buf + (SZ)i * w, (SZ)w * (SZ)sizeof(UW));
+		}
+	}
+	Kfree(buf);
+	return er;
 }
 
 /* A scroll bar as the windows' own are drawn, in a window of the process's */
@@ -2261,6 +2525,8 @@ LOCAL const FP wm_svc_tbl[TSN_WM_MAX + 1] = {
 	[TSN_NUMBER(TSN_KM_SET)]	= F(svc_km_set),
 	[TSN_NUMBER(TSN_KM_LABEL)]	= F(svc_km_label),
 	[TSN_NUMBER(TSN_WM_SCREEN)]	= F(svc_wm_screen),
+	[TSN_NUMBER(TSN_WM_HIT_SLOP)]	= F(svc_wm_hit_slop),
+	[TSN_NUMBER(TSN_WM_GRAB_SCREEN)]	= F(svc_wm_grab_screen),
 };
 
 /* What went to the console, from where the process had got to */
@@ -2356,6 +2622,9 @@ LOCAL const SVCRIGHT svc_rights[] = {
 	{ TSN_DT_SETTIME,	TSN_RIGHT_CLOCK },
 	{ TSN_DT_SETSYSTZ,	TSN_RIGHT_ZONE },
 	{ TSN_DT_SETSYSZONE,	TSN_RIGHT_ZONE },
+#ifdef TSN_DT_SETRTC
+	{ TSN_DT_SETRTC,	TSN_RIGHT_ZONE },
+#endif
 	{ TSN_SO_SETIFADDR,	TSN_RIGHT_ADMIN },
 	{ TSN_SO_DHCP_START,	TSN_RIGHT_ADMIN },
 	{ TSN_OB_ATT_VOL,	TSN_RIGHT_ADMIN },
@@ -2366,11 +2635,11 @@ LOCAL const SVCRIGHT svc_rights[] = {
 };
 
 /* Whether the credentials let ops on the object named by the string s */
-LOCAL BOOL may_on( CONST char *s, CONST T_OBCRD *crd, UINT ops )
+LOCAL BOOL may_on( CONST char *role, CONST char *fixed, CONST T_OBCRD *crd, UINT ops )
 {
 	TS_UUID	u;
 
-	return ( ts_str_to_uuid(s, &u) >= E_OK && ( knl_ob_permit_on(&u, crd) & ops ) == ops );
+	return ( ob_fnd_sys(role, fixed, &u) >= E_OK && ( knl_ob_permit_on(&u, crd) & ops ) == ops );
 }
 
 /* E_OK when process pid has the right call fncd takes, E_OACV when not */
@@ -2398,13 +2667,13 @@ LOCAL ER svc_right( UINT fncd, ID pid )
 		ok = ( ( knl_ob_permit_on(&ob_uuid_clock, crd) & OB_OP_WRITE ) != 0 );
 		break;
 	  case TSN_RIGHT_ZONE:
-		ok = may_on(SYSDEF_CALENDAR, crd, OB_OP_ATRRD | OB_OP_ATRWR);
+		ok = may_on(SYSROLE_CALENDAR, SYSDEF_CALENDAR, crd, OB_OP_ATRRD | OB_OP_ATRWR);
 		break;
 	  case TSN_RIGHT_CONF_DEV:
-		ok = may_on(SYSDEF_CONF_DEV, crd, OB_OP_WRITE);
+		ok = may_on(SYSROLE_CONF_DEV, SYSDEF_CONF_DEV, crd, OB_OP_WRITE);
 		break;
 	  case TSN_RIGHT_CONF_USER:
-		ok = may_on(SYSDEF_CONF_USER, crd, OB_OP_WRITE);
+		ok = may_on(SYSROLE_CONF_USER, SYSDEF_CONF_USER, crd, OB_OP_WRITE);
 		break;
 	  default:				/* TSN_RIGHT_ADMIN */
 		break;
@@ -2503,6 +2772,11 @@ EXPORT UBINT knl_svc_gateway( T_EXCFRAME *frame )
 	if ( busy ) {
 		me->svcdepth++;
 	}
+#ifdef USE_UITEST
+	if ( prc > 0 ) {
+		__atomic_fetch_add(&knl_svc_calls, 1, __ATOMIC_RELAXED);
+	}
+#endif
 	enaint(0);				/* the system call may block or be preempted */
 
 	/*
@@ -2539,7 +2813,8 @@ EXPORT UBINT knl_svc_gateway( T_EXCFRAME *frame )
 	 */
 	inside = ( cls == TSN_CLASS_FS || cls == TSN_CLASS_SO || cls == TSN_CLASS_OB
 		|| cls == TSN_CLASS_DP || cls == TSN_CLASS_WM || cls == TSN_CLASS_GP
-		|| fncd == TSN_TS_SPN_PRC );
+		|| fncd == TSN_TS_SPN_PRC || fncd == TSN_TS_SPN_OBJ
+		|| fncd == TSN_TS_LKP_OBJ );
 	if ( inside && knl_prc_call_enter() < E_OK ) {
 		ret = (UBINT)(BINT)( ( cls == TSN_CLASS_FS ) ? EX_INTR : E_DISWAI );
 	} else if ( fncd == TSN_TS_FLT_RET ) {

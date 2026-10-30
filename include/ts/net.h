@@ -51,6 +51,20 @@ IMPORT INT knl_vnet_init( void );	/* virtio-net (device/vnet/vnet.c) */
 IMPORT INT knl_eth_rp1_init( void );	/* RP1 Ethernet (device/net/eth_rp1.c) */
 IMPORT INT knl_netdev_init( void );	/* the card as "neta" (device/net/netdev.c) */
 
+/*
+ * A card's link came up or went down, or a card came or went (a USB
+ * adapter): said by its driver as it sees it, so that the adapters'
+ * manager (device/net/netadp.c) looks at the cards again then, and not
+ * by looking every so often. A build without that manager has none of
+ * it, and nothing is said.
+ */
+IMPORT void knl_netadp_link( void ) __attribute__((weak));
+
+static __inline__ void knl_net_link_said( void )
+{
+	if ( knl_netadp_link != NULL ) knl_netadp_link();
+}
+
 #ifdef __cplusplus
 }
 #endif

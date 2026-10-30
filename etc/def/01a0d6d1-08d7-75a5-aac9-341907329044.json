@@ -18,7 +18,7 @@
       "id": "real-object-search",
       "kind": "utility",
       "name": "実身/仮身検索",
-      "version": "R1.110",
+      "version": "R1.200",
       "builtin": true,
       "base": []
     },

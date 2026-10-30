@@ -208,6 +208,9 @@ typedef struct fs_fimp {
 	UINT	(*poll)( T_FILE *f, UINT events );
 	ER	(*link)( T_MOUNT *m, CONST char *from, CONST char *to );
 	ER	(*chmod)( T_MOUNT *m, CONST char *path, UINT mode );
+
+	/* what was written to the open file on the medium (fs_fsync); NULL: the mount's sync */
+	ER	(*fsync)( T_FILE *f );
 } T_FIMP;
 
 struct fs_mount {
@@ -291,6 +294,14 @@ IMPORT ER  fs_rename( CONST char *from, CONST char *to );
 IMPORT ER  fs_utime( CONST char *path, UD mtime );
 IMPORT ER  fs_statvfs( CONST char *path, T_FSSTAT *st );
 IMPORT ER  fs_sync( void );
+
+/*
+ * What was written to one open file made sure to be on the medium:
+ * POSIX's fsync and fdatasync. The file's own when its fimp can tell
+ * (an object of the object world), else its mount's (FAT); fs_sync is
+ * every mount's.
+ */
+IMPORT ER  fs_fsync( INT fd );
 
 /*
  * The POSIX layer's (design 5.8): a second descriptor of the same open
@@ -425,6 +436,33 @@ IMPORT UINT knl_fs_uid_of( CONST TS_UUID *who );
  */
 IMPORT ER  fs_attach_dev( ID devkey, CONST char *fimpnm, UINT flags );
 IMPORT ER  fs_detach_dev( ID devkey );
+
+/*
+ * A disk's file system reached from its device object's key with no
+ * path in the tree (design 7.2): the root of the disk as a descriptor
+ * (vd), from which its files are opened and its names changed by paths
+ * below that root only ("." and ".." are folded, and one that would
+ * leave the root is refused, EX_ACCES). The key's rights are looked at
+ * as for fs_attach_dev; a vd opened FS_MNT_RDONLY changes nothing
+ * (EX_ROFS), whatever others opened the disk for. Those who open the
+ * same disk share its mount, with a path of FS_MEDIA_DIR as well; the
+ * mount goes with the last descriptor of it. When the disk goes, the
+ * vd and what was opened from it answer EX_IO and close.
+ */
+IMPORT INT fs_opn_vol( ID devkey, CONST char *fimpnm, UINT flags );
+IMPORT INT fs_openat( INT vd, CONST char *path, UINT oflags );
+IMPORT ER  fs_statat( INT vd, CONST char *path, T_FSTAT *st );
+IMPORT ER  fs_mkdirat( INT vd, CONST char *path );
+IMPORT ER  fs_rmdirat( INT vd, CONST char *path );
+IMPORT ER  fs_unlinkat( INT vd, CONST char *path );
+IMPORT ER  fs_utimeat( INT vd, CONST char *path, UD mtime );
+IMPORT ER  fs_renameat( INT vd, CONST char *from, CONST char *to );
+IMPORT ER  fs_fstatvfs( INT vd, T_FSSTAT *st );
+
+/* The same for the device manager and the gate: by the device's name, for owner */
+IMPORT INT knl_fs_open_vol( CONST char *fimpnm, CONST char *devnm, UINT flags, ID owner );
+IMPORT INT knl_fs_openat_as( INT vd, CONST char *path, UINT oflags, ID owner );
+IMPORT INT knl_fs_opn_vol_as( ID devkey, CONST char *fimpnm, UINT flags, ID owner );
 
 /*
  * What is on a disk or a partition (design 7.6), as its first blocks

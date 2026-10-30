@@ -54,6 +54,8 @@
 #define CR0_NE			0x00000020
 #define CR0_WP			0x00010000
 #define CR0_AM			0x00040000
+#define CR0_NW			0x20000000
+#define CR0_CD			0x40000000
 #define CR0_PG			0x80000000
 
 #define CR4_PSE			0x00000010
@@ -149,9 +151,19 @@
 #define KIMG_VA_BASE		U64(0xFFFFFFFF80000000)
 #define KIMG_LINK_VA		U64(0xFFFFFFFF80200000)	/* where the image is linked */
 
-#define DEV_BASE(pa)		(DEV_VA_BASE + (pa))
-
 #ifndef _in_asm_source_
+/*
+ * The window holds the physical addresses below DEV_NEAR_SIZE (15TB) at
+ * DEV_VA_BASE + PA. A machine with more address bits puts its 64 bit
+ * BARs far above (QEMU at the top of what the host processor can
+ * address): such a gigabyte is given a slot of the window's last
+ * terabyte as it is first asked for (knl_dev_far, mmu.c)
+ */
+#define DEV_NEAR_SIZE		U64(0x00000F0000000000)
+extern unsigned long long	knl_dev_far( unsigned long long pa );
+#define DEV_BASE(pa)		( (unsigned long long)(pa) < DEV_NEAR_SIZE			\
+				  ? DEV_VA_BASE + (unsigned long long)(pa)		\
+				  : knl_dev_far((unsigned long long)(pa)) )
 extern unsigned long long	knl_kimg_off;		/* image VA - image PA (reset_main.c) */
 #define PA2VA(pa)		((void *)((UBINT)(pa) + KVA_BASE))
 #define VA2PA(va)		( (UBINT)(va) >= KIMG_VA_BASE				\
@@ -193,6 +205,8 @@ extern unsigned long long	knl_kimg_off;		/* image VA - image PA (reset_main.c) *
 #define PTE_USER_R(e)		( ( (e) & PTE_US ) != 0 )
 #define PTE_USER_W(e)		( ( (e) & ( PTE_US | PTE_RW ) ) == ( PTE_US | PTE_RW ) )
 #define PTE_USER_X(e)		( ( (e) & PTE_US ) != 0 && ( (e) & PTE_NX ) == 0 )
+/* the process may read it, and write it when w */
+#define PTE_USER_OK(e, w)	( PTE_USER_R(e) && ( !(w) || PTE_USER_W(e) ) )
 
 /* Entry of a table that points to the next level: the leaves decide the rights */
 #define PTE_TABLE_DESC		(PTE_P | PTE_RW | PTE_US)

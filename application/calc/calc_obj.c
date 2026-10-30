@@ -34,6 +34,7 @@
 
 #include "calc.h"
 #include <ts/json.h>
+#include <ts/obatr.h>
 #include <ts/hid.h>
 #include <ts/tray.h>
 
@@ -41,60 +42,27 @@
 
 static UB *rec_read( CONST TS_UUID *u, INT recno, INT *p_len )
 {
-	T_OBREC	r[16];
-	INT	cnt = 0, i, at = 0;
-	UD	size = 0;
-	SZ	asz = 0;
 	UB	*buf = NULL;
-	BOOL	found = FALSE;
-	ID	k;
+	INT	len = ui_rec_all(u, recno, 1, &buf);
 
-	*p_len = 0;
-	k = ob_opn_obj(u, OB_OP_R);
-	if ( k <= 0 ) return NULL;
-	if ( ob_lst_rec(k, r, 16, &cnt) >= E_OK ) {
-		for ( i = 0; i < cnt && i < 16; i++ ) {
-			if ( r[i].recno == recno ) {
-				size = r[i].size;
-				found = TRUE;
-			}
-		}
-	}
-	if ( found && size < 64 * 1024 * 1024 ) buf = malloc((size_t)size + 1);
-	while ( buf != NULL && (UD)at < size ) {
-		SZ	n = ( size - at > CHUNK ) ? CHUNK : (SZ)( size - at );
-
-		if ( ob_rea_rec(k, recno, (D)at, buf + at, n, &asz) < E_OK || asz <= 0 ) break;
-		at += (INT)asz;
-	}
-	ob_cls_obj(k);
-	if ( buf != NULL && (UD)at != size ) {
+	if ( len < 0 || buf == NULL ) {
 		free(buf);
-		buf = NULL;
+		*p_len = 0;
+		return NULL;
 	}
-	if ( buf != NULL ) {
-		buf[size] = 0;
-		*p_len = (INT)size;
-	}
+	buf[len] = 0;
+	*p_len = len;
 	return buf;
 }
 
 static ER rec_write( CONST TS_UUID *u, CONST UB *data, INT len )
 {
 	ID	k = ob_opn_obj(u, OB_OP_R | OB_OP_W);
-	INT	at = 0;
-	SZ	asz = 0;
-	ER	er = E_OK;
+	ER	er;
 
 	if ( k <= 0 ) return (ER)k;
-	while ( at < len && er >= E_OK ) {
-		SZ	n = ( len - at > CHUNK ) ? CHUNK : (SZ)( len - at );
-
-		er = ob_wri_rec(k, 0, (D)at, data + at, n, &asz);
-		if ( er >= E_OK && asz != n ) er = E_IO;
-		at += (INT)n;
-	}
-	if ( er >= E_OK ) er = ob_trn_rec(k, 0, (UD)len);
+	/* replaced in one change: a cut in the power leaves the old record or the new one */
+	er = ob_rpl_rec(k, 0, data, (SZ)len);
 	ob_cls_obj(k);
 	return er;
 }
@@ -112,15 +80,22 @@ void name_of( CONST TS_UUID *u, UB *out )
 
 INT meta_of( CONST TS_UUID *u )
 {
-	SZ	asz = 0;
+	UB	*m = NULL;
+	INT	n;
 	ID	k = ob_opn_obj(u, OB_OP_ATRRD);
 
-	g_meta[0] = 0;
+	/* the metadata whole, in memory of its own: the last one read let go */
+	if ( g_meta != g_meta_none ) free(g_meta);
+	g_meta = g_meta_none;
 	if ( k <= 0 ) return 0;
-	if ( ob_get_atr(k, (UB *)g_meta, OB_ATR_MAX, &asz) < E_OK || asz < 0 ) asz = 0;
+	n = ob_atr_read(k, 0, &m);
 	ob_cls_obj(k);
-	g_meta[asz] = 0;
-	return (INT)asz;
+	if ( n <= 0 ) {
+		free(m);
+		return 0;
+	}
+	g_meta = (char *)m;
+	return n;
 }
 
 void new_vobjid( TS_UUID *u )
@@ -156,6 +131,13 @@ void shown_all( void )
 	g_dirty = TRUE;
 }
 
+/*
+ * Many cells being put in at once (a paste): each is not told on the
+ * console, nor are the words shown taken one cell at a time; that is
+ * done once when they are all in.
+ */
+static BOOL	g_many = FALSE;
+
 void cell_text( INT col, INT row, CONST UB *text )
 {
 	CXCELL	*c = cx_get(&g_s, col, row);
@@ -169,8 +151,11 @@ void cell_text( INT col, INT row, CONST UB *text )
 	}
 	cx_grow(&g_s, col, row);
 	(void)ce_set(col, row, text);
-	shown_all();
 	g_changed = TRUE;
+	if ( g_many ) {
+		return;
+	}
+	shown_all();
 	{
 		char	s[200], nm[16];
 
@@ -245,12 +230,14 @@ ER load( void )
 	er = cx_read(&g_s, x, n);
 	free(x);
 	if ( er < E_OK ) return er;
-	/* the cells' text worked out in the order the record has them */
+	/* the cells' text given all at once, and the formulas worked out together */
+	(void)ce_bulk(1);
 	for ( i = 0; i < g_s.n; i++ ) {
 		CXCELL	*c = g_s.c[i];
 
 		if ( c->kind == CX_TEXT ) (void)ce_set(c->col, c->row, c->text);
 	}
+	(void)ce_bulk(0);
 	shown_all();
 	free(g_was);
 	g_nwas = links_now(&g_was);
@@ -261,25 +248,17 @@ ER load( void )
 ER save( void )
 {
 	CTBUF	b;
-	UB	*buf = NULL;
-	INT	max = 256 * 1024;
 	ER	er;
 
-	for ( ;; ) {
-		free(buf);
-		buf = malloc((size_t)max);
-		if ( buf == NULL ) return E_NOMEM;
-		ct_buf(&b, buf, max);
-		cx_write(&b, &g_s, g_name, chart_xml, NULL);
-		if ( !b.fail ) break;
-		if ( max >= 256 * 1024 * 1024 ) {
-			free(buf);
-			return E_LIMIT;
-		}
-		max *= 4;
+	/* written out as long as it comes to */
+	ct_buf_grow(&b, 256 * 1024, ct_more);
+	cx_write(&b, &g_s, g_name, chart_xml, NULL);
+	if ( b.fail ) {
+		(void)ct_more(b.p, 0);
+		return E_NOMEM;
 	}
 	er = rec_write(&g_obj, b.p, b.n);
-	free(buf);
+	(void)ct_more(b.p, 0);
 	if ( er >= E_OK ) {
 		links_count();
 		g_changed = FALSE;
@@ -319,23 +298,19 @@ ER print_sheet( void )
 {
 	T_UIPRN		up;
 	CXPRINT		pr;
-	UB		*page = malloc(2 * 1024 * 1024);
 	INT		n;
 	ER		er;
 	char		line[96];
 
-	if ( page == NULL ) return E_NOMEM;
 	er = ui_prn_open(&up, &g_obj);
 	if ( er < E_OK ) {
-		free(page);
 		return er;
 	}
 	memset(&pr, 0, sizeof(pr));
 	pr.put = prn_put;
 	pr.arg = &up;
 	pr.chart = chart_print;
-	pr.mem = page;
-	pr.max = 2 * 1024 * 1024;
+	pr.more = ct_more;
 	n = cx_print(&g_s, &pr);
 	er = ( n < 0 ) ? (ER)n : ui_prn_ready(&up);
 	snprintf(line, sizeof(line), "print %d pages (%d)", n, (INT)er);
@@ -356,7 +331,6 @@ ER print_sheet( void )
 		note(line);
 	}
 	ui_prn_close(&up);
-	free(page);
 	return er;
 }
 
@@ -367,7 +341,6 @@ ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	T_OBCRE		c;
 	SZ		asz = 0;
 	ID		k, ka;
-	INT		i;
 	ER		er;
 
 	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
@@ -385,16 +358,13 @@ ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	k = ob_opn_obj(&d, OB_OP_WRITE);
 	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
 	if ( k > 0 ) ob_cls_obj(k);
-	for ( i = 0; er >= E_OK; i += 20 ) {
-		if ( ob_rea_rec(ka, 0, 0, an, sizeof(*an), &asz) >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
+	/* the answer waited for on its channel, at most wait_ms */
+	while ( er >= E_OK ) {
+		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
+		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
 			er = an->er;
 			break;
 		}
-		if ( i >= wait_ms ) {
-			er = E_TMOUT;
-			break;
-		}
-		(void)tk_dly_tsk(20);
 	}
 	ob_cls_obj(ka);
 	(void)ob_del_obj(&reply);
@@ -460,6 +430,7 @@ void link_open( INT col, INT row )
 	rq.req = DT_RQ_OPEN;
 	if ( !link_target(c, &rq.target) ) return;
 	rq.recno = -1;
+	ct_link_req(&rq, c->el, c->ellen);	/* the program it keeps to, when it does */
 	er = ask_desktop(&rq, &an, 3000);
 	name_of(&rq.target, nm);
 	snprintf(s, sizeof(s), "opened %s (%d)", nm, (INT)er);
@@ -489,42 +460,55 @@ static BOOL link_edit( CXCELL *c, CONST CTSET *set, INT n )
 }
 
 /* The applist of the link: its own, or its object's */
-static INT app_json( CONST CXCELL *c, UB *out, INT max )
+static INT app_json( CONST CXCELL *c, UB **p_out )
 {
 	T_JSON	root, al;
 	TS_UUID	u;
-	INT	n = ct_attr_text(c->el, c->ellen, "applist", out, max), k;
+	INT	n;
 
+	/* the link's own: no longer than the link it is written in */
+	*p_out = malloc((size_t)c->ellen + 1);
+	if ( *p_out == NULL ) return 0;
+	n = ct_attr_text(c->el, c->ellen, "applist", *p_out, c->ellen + 1);
 	if ( n > 0 ) return n;
 	if ( !link_target(c, &u) ) return 0;
 	n = meta_of(&u);
 	if ( n <= 0 || js_parse((CONST UB *)g_meta, n, &root) < E_OK || js_get(&root, "applist", &al) < E_OK ) {
-		out[0] = 0;
+		(*p_out)[0] = 0;
 		return 0;
 	}
-	for ( k = 0; k < al.len && k < max - 1; k++ ) out[k] = al.s[k];
-	out[k] = 0;
-	return k;
+	free(*p_out);
+	*p_out = malloc((size_t)al.len + 1);
+	if ( *p_out == NULL ) return 0;
+	memcpy(*p_out, al.s, (size_t)al.len);
+	(*p_out)[al.len] = 0;
+	return al.len;
 }
 
-#define APP_MAX		8
+#define APP_MAX		24
 static INT	g_napp;
 static UB	g_app_id[APP_MAX][CT_APP_ID], g_app_name[APP_MAX][CT_APP_NAME];
+static BOOL	g_app_kind[APP_MAX];		/* offered for the object's kind, not in its applist */
 
+/* 実行: the list the desktop's own links show (DT_RQ_APPS), asked entry by entry */
 void exec_menu( ID mid )
 {
 	static UB	rows[APP_MAX][WM_LABEL_MAX];
 	CXCELL		*c = the_link();
-	TS_UUID		ed, u;
-	T_JSON		root, al;
-	INT		n, k;
+	TS_UUID		ed;
+	T_DTREQ		rq;
+	T_DTANS		an;
+	INT		n = 1, k;
 
 	g_napp = 0;
-	if ( c != NULL && link_target(c, &u) ) {
-		n = meta_of(&u);
-		if ( n > 0 && js_parse((CONST UB *)g_meta, n, &root) >= E_OK && js_get(&root, "applist", &al) >= E_OK ) {
-			g_napp = ct_app_list(al.s, al.len, g_app_id, g_app_name, APP_MAX);
-		}
+	for ( k = 0; c != NULL && k < n && g_napp < APP_MAX; k++ ) {
+		ask_of(c, DT_RQ_APPS, &rq);
+		ct_link_req(&rq, c->el, c->ellen);
+		rq.recno = k;
+		memset(&an, 0, sizeof(an));
+		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
+		n = (INT)an.how;
+		if ( ct_app_entry(&an, g_app_id[g_napp], g_app_name[g_napp], &g_app_kind[g_napp]) ) g_napp++;
 	}
 	for ( k = 0; k < g_napp; k++ ) snprintf((char *)rows[k], WM_LABEL_MAX, "%s", (char *)g_app_name[k]);
 	if ( ui_uuid(SYSDEF_MENU_EXEC, &ed) >= E_OK ) {
@@ -536,12 +520,12 @@ void exec_menu( ID mid )
 BOOL app_kept( void )
 {
 	CXCELL	*c = the_link();
-	UB	*j = malloc(OB_ATR_MAX);
+	UB	*j = NULL;
 	INT	n;
 	BOOL	kept = FALSE;
 
-	if ( c != NULL && j != NULL ) {
-		n = app_json(c, j, OB_ATR_MAX);
+	if ( c != NULL ) {
+		n = app_json(c, &j);
 		kept = ( n > 0 ) ? ct_app_locked(j, n) : FALSE;
 	}
 	free(j);
@@ -550,16 +534,17 @@ BOOL app_kept( void )
 
 static void app_keep( CXCELL *c )
 {
-	UB	*j = malloc(OB_ATR_MAX), *out = malloc(OB_ATR_MAX + 64);
+	UB	*j = NULL, *out = NULL;
 	CTBUF	b;
 	CTSET	set;
 	INT	n;
 	BOOL	keep;
 
+	n = app_json(c, &j);
+	if ( j != NULL ) out = malloc((size_t)n + 64);	/* with "defaultOpenLock" put in */
 	if ( j != NULL && out != NULL ) {
-		n = app_json(c, j, OB_ATR_MAX);
 		keep = !ct_app_locked(j, n);
-		ct_buf(&b, out, OB_ATR_MAX + 64);
+		ct_buf(&b, out, n + 64);
 		set.name = "applist";
 		set.value = b.p;
 		if ( n > 0 && ct_app_lock(&b, j, n, keep) >= E_OK && link_edit(c, &set, 1) ) {
@@ -737,6 +722,7 @@ void link_op( CONST char *code, INT index )
 		ask_of(c, DT_RQ_EXEC, &rq);
 		snprintf((char *)rq.name, sizeof(rq.name), "%s", (char *)g_app_id[index]);
 		if ( app_kept() ) rq.flags |= DT_F_KEEP;
+		if ( g_app_kind[index] ) rq.flags |= DT_F_KIND;
 		er = ask_desktop(&rq, &an, 5000);
 		snprintf(s, sizeof(s), "exec %s %s (%d)", nm, (char *)g_app_id[index], (INT)er);
 		note(s);
@@ -792,20 +778,20 @@ static BOOL put_link( INT col, INT row, CONST UB *el, INT len )
 /* Links dropped on the window: in a row of cells from the one they were let go over */
 void dropped( void )
 {
-	static T_OBDROP	d;
+	T_OBDROP	*d;
 	char		el[900], fr[8], ch[8], tb[8], bg[8], vs[40], ts[40];
 	INT		i, n = 0, col, row;
 
-	if ( ui_drop(&g_ui, &d) < E_OK ) return;
-	col = col_at(d.x - grid_left() + g_sx);
-	row = row_at(d.y - grid_top() + g_sy);
-	if ( d.y < grid_top() || d.x < grid_left() || col < 1 || row < 1 ) {
-		ui_drop_answer(&g_ui, &d, OB_DR_REFUSE, "セルの上に置いてください");
+	if ( ( d = ui_drop(&g_ui) ) == NULL ) return;
+	col = col_at(d->x - grid_left() + g_sx);
+	row = row_at(d->y - grid_top() + g_sy);
+	if ( d->y < grid_top() || d->x < grid_left() || col < 1 || row < 1 ) {
+		ui_drop_answer(&g_ui, d, OB_DR_REFUSE, "セルの上に置いてください");
 		return;
 	}
-	ui_drop_answer(&g_ui, &d, OB_DR_ACCEPT, "");
-	for ( i = 0; i < d.n && i < OB_DROP_MAX && col + i <= CX_COLS_MAX; i++ ) {
-		T_OBDROPV	*v = &d.v[i];
+	ui_drop_answer(&g_ui, d, OB_DR_ACCEPT, "");
+	for ( i = 0; i < d->n && col + i <= CX_COLS_MAX; i++ ) {
+		T_OBDROPV	*v = &d->v[i];
 		INT		w = v->right - v->left, h = v->bottom - v->top;
 		UINT		disp = ( v->disp != 0 ) ? v->disp : 0x31U;
 		TS_UUID		vid;
@@ -901,11 +887,12 @@ typedef struct {
 	INT	kind;
 	UB	*text, *el;
 	INT	ellen;
-	CXSTYLE	st;
-	BOOL	there;			/* a cell was there */
+	CONST CXSTYLE	*st;	/* shared (cx_style) */
+	INT	dc, dr;			/* where in the range, from its corner */
 } CLIP;
 
-static CLIP	*g_clip;		/* the cells copied, row by row */
+static CLIP	*g_clip;		/* the cells copied that were there, row by row */
+static INT	g_nclip;
 static INT	g_clip_w, g_clip_h, g_clip_col, g_clip_row;
 static BOOL	g_clip_cut;
 static D	g_clip_time;		/* when it went in the tray */
@@ -915,12 +902,13 @@ static void clip_free( void )
 {
 	INT	i;
 
-	for ( i = 0; g_clip != NULL && i < g_clip_w * g_clip_h; i++ ) {
+	for ( i = 0; g_clip != NULL && i < g_nclip; i++ ) {
 		free(g_clip[i].text);
 		free(g_clip[i].el);
 	}
 	free(g_clip);
 	g_clip = NULL;
+	g_nclip = 0;
 	g_clip_w = g_clip_h = 0;
 }
 
@@ -978,14 +966,19 @@ static UB *dup_str( CONST UB *s, INT n )
 	return d;
 }
 
-/* What is taken, to the tray: kept here as cells, put there as words or links */
+/*
+ * What is taken, to the tray: kept here as cells, put there as words or
+ * links. Only the cells that are there are kept, so that a large range
+ * with little in it takes little; what could not be kept is told, and
+ * nothing is taken away then.
+ */
 void copy_cells( BOOL cut )
 {
 	CXRANGE	r;
 	CTLNK	*l;
 	CTBUF	b;
 	T_TRREC	tr;
-	INT	col, row, i = 0, nl = 0;
+	INT	i, n = 0, nl = 0, row, last_row, last_col;
 	char	s[80];
 	ER	er;
 
@@ -993,47 +986,63 @@ void copy_cells( BOOL cut )
 	clip_free();
 	g_clip_w = r.c1 - r.c0 + 1;
 	g_clip_h = r.r1 - r.r0 + 1;
-	g_clip = calloc((size_t)( g_clip_w * g_clip_h ), sizeof(CLIP));
-	l = calloc((size_t)( g_clip_w * g_clip_h ), sizeof(CTLNK));
+	for ( i = 0; i < g_s.n; i++ ) {
+		CONST CXCELL	*c = g_s.c[i];
+
+		if ( c->col >= r.c0 && c->col <= r.c1 && c->row >= r.r0 && c->row <= r.r1 ) n++;
+	}
+	g_clip = calloc((size_t)( n + 1 ), sizeof(CLIP));
+	l = calloc((size_t)( n + 1 ), sizeof(CTLNK));
 	if ( g_clip == NULL || l == NULL ) {
 		free(l);
 		clip_free();
+		warn("トレーに入れられませんでした", "メモリが足りません。セルは元のままです");
 		return;
 	}
 	g_clip_col = r.c0;
 	g_clip_row = r.r0;
 	g_clip_cut = cut;
-	ct_buf(&b, g_out, OUT_MAX);
+	/* the words, a paragraph a row and a tab between the cells, the cells in order */
+	ct_buf_grow(&b, 64 * 1024, ct_more);
 	ct_put(&b, "<tad version=\"1.0\" encoding=\"UTF-8\">\n<document>\n");
-	for ( row = r.r0; row <= r.r1; row++ ) {
-		ct_put(&b, "<p>");
-		for ( col = r.c0; col <= r.c1; col++, i++ ) {
-			CXCELL	*c = cx_get(&g_s, col, row);
-			CLIP	*k = &g_clip[i];
+	last_row = r.r0;
+	last_col = r.c0;
+	ct_put(&b, "<p>");
+	for ( i = 0; i < g_s.n; i++ ) {
+		CXCELL	*c = g_s.c[i];
+		CLIP	*k;
 
-			if ( col > r.c0 ) ct_put(&b, "\t");
-			if ( c == NULL ) continue;
-			k->there = TRUE;
-			k->kind = c->kind;
-			k->text = dup_str(c->text, (INT)strlen((char *)c->text));
-			k->st = c->st;
-			if ( c->el != NULL ) {
-				k->el = dup_str(c->el, c->ellen);
-				k->ellen = c->ellen;
-			}
-			if ( c->kind == CX_LINK && c->el != NULL ) {
-				l[nl].el = c->el;
-				l[nl].len = c->ellen;
-				l[nl].name = (CONST UB *)"";
-				nl++;
-			}
-			cx_esc(&b, c->text, (INT)strlen((char *)c->text));
+		if ( c->col < r.c0 || c->col > r.c1 || c->row < r.r0 || c->row > r.r1 ) continue;
+		for ( row = last_row; row < c->row; row++ ) {
+			ct_put(&b, "</p>\n<p>");
+			last_col = r.c0;
 		}
-		ct_put(&b, "</p>\n");
+		last_row = c->row;
+		for ( ; last_col < c->col; last_col++ ) ct_put(&b, "\t");
+		k = &g_clip[g_nclip++];
+		k->dc = c->col - r.c0;
+		k->dr = c->row - r.r0;
+		k->kind = c->kind;
+		k->text = dup_str(c->text, (INT)strlen((char *)c->text));
+		k->st = c->st;
+		if ( c->el != NULL ) {
+			k->el = dup_str(c->el, c->ellen);
+			k->ellen = c->ellen;
+		}
+		if ( k->text == NULL || ( c->el != NULL && k->el == NULL ) ) b.fail = TRUE;
+		if ( c->kind == CX_LINK && c->el != NULL ) {
+			l[nl].el = c->el;
+			l[nl].len = c->ellen;
+			l[nl].name = (CONST UB *)"";
+			nl++;
+		}
+		cx_esc(&b, c->text, (INT)strlen((char *)c->text));
 	}
-	ct_put(&b, "</document>\n</tad>\n");
-	if ( nl > 0 ) {
-		ct_buf(&b, g_out, OUT_MAX);
+	for ( row = last_row; row < r.r1; row++ ) ct_put(&b, "</p>\n<p>");
+	ct_put(&b, "</p>\n</document>\n</tad>\n");
+	if ( nl > 0 && !b.fail ) {
+		(void)ct_more(b.p, 0);
+		ct_buf_grow(&b, 64 * 1024, ct_more);
 		(void)ct_frag(&b, l, nl);
 		snprintf(s, sizeof(s), "仮身%d個", nl);
 	} else {
@@ -1044,18 +1053,24 @@ void copy_cells( BOOL cut )
 	tr.kind = TR_TAD;
 	tr.data = b.p;
 	tr.size = b.n;
-	er = b.fail ? E_LIMIT : tr_psh_dat(&tr, 1, (CONST UB *)s);
+	er = b.fail ? E_NOMEM : tr_psh_dat(&tr, 1, (CONST UB *)s);
+	(void)ct_more(b.p, 0);
 	if ( er < E_OK || !hand_set(&g_clip_time, g_clip_name, NULL) ) {
-		say("トレーに入れられませんでした");
 		clip_free();
+		warn("トレーに入れられませんでした", ( er == E_NOMEM )
+		     ? "メモリが足りません。セルは元のままです" : "セルは元のままです");
 		return;
 	}
 	if ( cut ) {
-		for ( row = r.r0; row <= r.r1; row++ ) {
-			for ( col = r.c0; col <= r.c1; col++ ) {
-				if ( cx_get(&g_s, col, row) != NULL ) cell_clear(col, row);
-			}
+		/* taken away all at once, and what named them worked out after */
+		(void)ce_bulk(1);
+		for ( i = 0; i < g_nclip; i++ ) {
+			(void)ce_clear(r.c0 + g_clip[i].dc, r.r0 + g_clip[i].dr);
 		}
+		(void)cx_remove_range(&g_s, &r);
+		(void)ce_bulk(0);
+		shown_all();
+		g_changed = TRUE;
 	}
 	snprintf(s, sizeof(s), "%s %d", cut ? "cut" : "copied", g_clip_w * g_clip_h);
 	note(s);
@@ -1068,11 +1083,9 @@ static void paste_one( CONST CLIP *k, INT col, INT row, INT dc, INT dr, BOOL kee
 {
 	if ( k->kind == CX_LINK && k->el != NULL ) {
 		CXCELL	*c;
-		UB	*tmp = malloc((size_t)k->ellen + 128);
 		CTBUF	b;
 
-		if ( tmp == NULL ) return;
-		ct_buf(&b, tmp, k->ellen + 128);
+		ct_buf_grow(&b, k->ellen + 128, ct_more);
 		if ( keep_id ) {
 			ct_putn(&b, k->el, k->ellen);
 		} else {
@@ -1087,28 +1100,28 @@ static void paste_one( CONST CLIP *k, INT col, INT row, INT dc, INT dr, BOOL kee
 			ct_link_edit(&b, k->el, k->ellen, &set, 1);
 		}
 		if ( !b.fail && put_link(col, row, b.p, b.n) && ( c = cx_get(&g_s, col, row) ) != NULL ) {
-			memset(&c->st, 0, sizeof(c->st));
-			cx_style_merge(&c->st, &k->st);
+			c->st = k->st;
 		}
-		free(tmp);
+		(void)ct_more(b.p, 0);
 	} else if ( k->kind == CX_IMAGE && k->el != NULL ) {
 		CXCELL	*c = cx_make(&g_s, col, row);
 
 		if ( c != NULL && cx_set_el(c, CX_IMAGE, k->el, k->ellen) ) {
-			cx_style_merge(&c->st, &k->st);
+			(void)cx_style_add(c, k->st);
 			(void)ce_blank(col, row);
 		}
 	} else {
-		UB	*t = malloc(TEXT_MAX * 2);
+		/* a reference moved may grow by a few letters, or to #REF! */
+		INT	n = (INT)strlen((char *)k->text), max = n * 2 + 64;
+		UB	*t = malloc((size_t)max);
 		CXCELL	*c;
 
 		if ( t == NULL ) return;
-		if ( k->text[0] == '=' ) (void)cx_move_refs(k->text, (INT)strlen((char *)k->text), dc, dr,
-							      g_s.maxcol, g_s.maxrow, t, TEXT_MAX * 2);
-		else snprintf((char *)t, TEXT_MAX * 2, "%s", (char *)k->text);
+		if ( k->text[0] == '=' ) (void)cx_move_refs(k->text, n, dc, dr, g_s.maxcol, g_s.maxrow, t, max);
+		else memcpy(t, k->text, (size_t)n + 1);
 		cell_text(col, row, t);
 		c = cx_get(&g_s, col, row);
-		if ( c != NULL && k->st.has != 0 ) cx_style_merge(&c->st, &k->st);
+		if ( c != NULL && k->st->has != 0 ) (void)cx_style_add(c, k->st);
 		free(t);
 	}
 	cx_grow(&g_s, col, row);
@@ -1125,7 +1138,7 @@ static UB *tray_frag( INT *p_len )
 	*p_len = 0;
 	for ( i = 0; i < TR_REC_MAX; i++ ) {
 		if ( tr_ref_rec(TR_HAND, i, &inf) < E_OK ) return NULL;
-		if ( inf.kind == TR_TAD && inf.size > 0 && inf.size < 16 * 1024 * 1024 ) break;
+		if ( inf.kind == TR_TAD && inf.size > 0 ) break;
 	}
 	if ( i == TR_REC_MAX ) return NULL;
 	buf = malloc((size_t)inf.size + 1);
@@ -1191,18 +1204,34 @@ void paste_cells( BOOL take )
 {
 	D	t;
 	UB	nm[TR_NAME_MAX];
-	INT	i, col, row, n = 0;
+	INT	i, n = 0;
 	char	s[80];
 
 	if ( g_clip != NULL && hand_set(&t, nm, NULL) && t == g_clip_time && memcmp(nm, g_clip_name, TR_NAME_MAX) == 0 ) {
-		for ( row = 0; row < g_clip_h; row++ ) {
-			for ( col = 0; col < g_clip_w; col++ ) {
-				CLIP	*k = &g_clip[row * g_clip_w + col];
-				INT	tc = g_col + col, tr = g_row + row;
+		/* put in all at once, and worked out together */
+		(void)ce_bulk(1);
+		g_many = TRUE;
+		for ( i = 0; i < g_nclip; i++ ) {
+			CLIP	*k = &g_clip[i];
+			INT	tc = g_col + k->dc, tr = g_row + k->dr;
 
-				if ( !k->there || tc > g_s.maxcol || tr > g_s.maxrow ) continue;
-				paste_one(k, tc, tr, tc - ( g_clip_col + col ), tr - ( g_clip_row + row ), g_clip_cut);
-				n++;
+			if ( tc > CX_COLS_MAX || tr > CX_ROWS_MAX ) continue;
+			paste_one(k, tc, tr, tc - ( g_clip_col + k->dc ), tr - ( g_clip_row + k->dr ), g_clip_cut);
+			n++;
+		}
+		g_many = FALSE;
+		(void)ce_bulk(0);
+		shown_all();
+		/* each cell told on the console as one typed is, while they are few enough to read */
+		if ( g_nclip <= 256 ) {
+			for ( i = 0; i < g_nclip; i++ ) {
+				CONST CXCELL	*c = cx_get(&g_s, g_col + g_clip[i].dc, g_row + g_clip[i].dr);
+				char		ln[200], cn[16];
+
+				if ( c == NULL || c->kind != CX_TEXT ) continue;
+				(void)cx_cell_name(c->col, c->row, cn);
+				snprintf(ln, sizeof(ln), "set %s shows %.80s", cn, (CONST char *)cx_shown(c));
+				note(ln);
 			}
 		}
 	} else {
@@ -1214,8 +1243,10 @@ void paste_cells( BOOL take )
 			say("トレーに貼り付けるものがありません");
 			return;
 		}
-		el = malloc(sizeof(CTEL) * 256);
-		k = ( el != NULL ) ? ct_links(x, len, el, 256) : 0;
+		/* every link in it */
+		k = ct_links(x, len, NULL, 0);
+		el = malloc(sizeof(CTEL) * (size_t)( k + 1 ));
+		k = ( el != NULL ) ? ct_links(x, len, el, k) : 0;
 		if ( k > 0 ) {
 			for ( i = 0; i < k && g_col + i <= CX_COLS_MAX; i++ ) {
 				CONST UB	*e = x + el[i].at;

@@ -30,6 +30,16 @@
 
 static inline __attribute__((always_inline)) UBINT u_svc( UBINT fncd, UBINT a0, UBINT a1, UBINT a2 )
 {
+#if defined(__x86_64__)
+	register UBINT rax __asm__("rax") = fncd;
+	register UBINT rdi __asm__("rdi") = a0;
+	register UBINT rsi __asm__("rsi") = a1;
+	register UBINT rdx __asm__("rdx") = a2;
+
+	__asm__ volatile("syscall" : "+r"(rax), "+r"(rdi), "+r"(rsi), "+r"(rdx)
+			 : : "memory", "rcx", "r8", "r9", "r10", "r11");
+	return rax;
+#else
 	register UBINT x8 __asm__("x8") = fncd;
 	register UBINT x0 __asm__("x0") = a0;
 	register UBINT x1 __asm__("x1") = a1;
@@ -37,6 +47,7 @@ static inline __attribute__((always_inline)) UBINT u_svc( UBINT fncd, UBINT a0, 
 
 	__asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory", "x3", "x4", "x5");
 	return x0;
+#endif
 }
 
 USER_DATA volatile UD	u_shared[8];
@@ -62,7 +73,11 @@ USER_TEXT void u_task_tid( INT stacd, void *exinf )
 	UBINT	tid, ro;
 
 	tid = u_svc(TSN_TK_GET_TID, 0, 0, 0);
+#if defined(__x86_64__)
+	ro = tid;		/* x86-64 has no register the kernel keeps the task ID in for level 3 */
+#else
 	__asm__ volatile("mrs %0, tpidrro_el0" : "=r"(ro));
+#endif
 	u_shared[2] = ( (UW)tid == (UW)ro ) ? 1 : 0;
 	u_shared[3] = u_svc(TSN(0x00ff, 1), 0, 0, 0);			/* unknown class */
 	u_shared[4] = u_svc(TSN_TK_MAX + 1, 0, 0, 0);			/* beyond the table */

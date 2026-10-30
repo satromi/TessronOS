@@ -105,10 +105,12 @@ typedef struct {
 	BOOL	failing;		/* something stands: the reset is counted down */
 	BOOL	hw;			/* there is a hardware watchdog */
 	ID	last_prc;		/* the processor last reported (PRC ID) */
-	UD	beats[8];		/* interrupts of each processor's timer */
 } T_LKSTAT;
 
 IMPORT void knl_lockup_stat( T_LKSTAT *st );
+
+/* The interrupts of each processor's timer so far, up to n of them: how many were written */
+IMPORT INT knl_lockup_beats( UD *beats, INT n );
 
 #if USE_KTEST
 /*

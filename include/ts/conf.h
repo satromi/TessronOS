@@ -29,12 +29,24 @@
 #ifndef __TS_CONF_H__
 #define __TS_CONF_H__
 
+#include <ts/uuid.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define CF_TEXT_MAX	4096		/* bytes of one settings record */
-#define CF_VAL_MAX	128		/* bytes of one line's value */
+/*
+ * A record has no bound on its length, nor a line on its value's: the
+ * one who reads a record reads it whole (knl_ob_rea_all, ui_rec_all),
+ * and a value that is a list of any length -- CPU_CHORE, CPU_RT, IRQ,
+ * MODES, KBMAP -- is read where it stands with cf_find and cf_wfind,
+ * never copied into a buffer of a fixed size. CF_TEXT_MAX is only the
+ * room a record of a few fixed lines is first read into; CF_VAL_MAX the
+ * room for a value whose length is bounded by what it is (a number, an
+ * address, a name), into which cf_get and cf_word copy.
+ */
+#define CF_TEXT_MAX	4096		/* bytes a record of fixed lines is first read into */
+#define CF_VAL_MAX	128		/* bytes of a value bounded by what it is */
 
 /*
  * The value of the nth (0 up) line with this key: *p_val points into
@@ -60,6 +72,12 @@ IMPORT INT cf_put( UB *text, INT len, INT max, CONST char *key, INT nth,
 
 /* The nth (0 up) word of a value, words being parted by blanks */
 IMPORT BOOL cf_word( CONST char *val, INT nth, char *out, INT max );
+
+/*
+ * The same in len bytes of a value as cf_find gives it, however long:
+ * *p_w points at the word and *p_wlen is its length
+ */
+IMPORT BOOL cf_wfind( CONST UB *val, INT len, INT nth, CONST UB **p_w, INT *p_wlen );
 
 /* A number, decimal or 0x hexadecimal; dflt when it is not one */
 IMPORT INT  cf_num( CONST char *s, INT dflt );
@@ -180,6 +198,65 @@ IMPORT CONST CF_ITEM	cf_look_items[];
 IMPORT CONST INT	cf_look_nitem;
 
 IMPORT CONST CF_ITEM *cf_look_look( UINT look );
+
+/* ------------------------------------------------------------ links in a settings object */
+
+/*
+ * A setting that names an object -- the wallpaper, the system's face --
+ * is a link in the settings object's record 0 (xmlTAD), told from the
+ * others by its own relationship (the link's relationship attribute,
+ * words a space apart): the link counts the object as used, and follows
+ * it however it is named. cf_link_get finds the link with that word
+ * and gives the object it points at; cf_link_put sets it to u (vobj the
+ * new link's own identity), in place of the one there, or as a
+ * paragraph label and link before the end of the document when there
+ * is none, and gives in *p_old the object it pointed at before (zero
+ * for none): the new length, -1 when max bytes are not room enough,
+ * -2 when the record has no document to put it in. Text only: whoever
+ * calls reads and writes the record, and counts the links in and out
+ * where the store does not.
+ */
+IMPORT BOOL cf_link_get( CONST UB *text, INT len, CONST char *role, TS_UUID *p_u );
+/* The nth (from 0) of the links with that word, for a setting that is a list of objects */
+IMPORT BOOL cf_link_nth( CONST UB *text, INT len, CONST char *role, INT nth, TS_UUID *p_u );
+IMPORT INT  cf_link_put( UB *text, INT len, INT max, CONST char *role, CONST TS_UUID *u,
+			 CONST TS_UUID *vobj, CONST char *label, TS_UUID *p_old );
+
+/*
+ * The link to u given the word role in its relationship (a link made
+ * before the words were given): the new length, the same when it has
+ * the word, -1 for no room, -2 when no link points at u
+ */
+IMPORT INT  cf_link_tag( UB *text, INT len, INT max, CONST TS_UUID *u, CONST char *role );
+
+#define CF_ROLE_WALL	"tessronos.wallpaper"	/* 機器の設定: the picture the ground is laid with */
+#define CF_ROLE_FACE	"tessronos.systemface"	/* 機器の設定: the face the system's letters are drawn in */
+/*
+ * 機器の設定: an object emptied at each start (tmp), one link each.
+ * The list is the rule: every object a link with this word points at
+ * has its links taken off as the volume it is on is attached, before
+ * anything else uses it. The line CF_CLEAR_LIST of record 1 says the
+ * list has been made, so a volume made before there was one gets tmp
+ * in it once, and a list the administrator emptied is left so.
+ */
+#define CF_ROLE_CLEAR	"tessronos.clearAtStart"
+#define CF_CLEAR_LIST	"CLEAR_LIST"
+/* The objects of the list on the volume attached at path emptied (after the list made, once, for an old volume) */
+IMPORT void knl_sys_clear_start( CONST char *path );
+
+/* In the kernel: the same on a settings object (its UUID as text), read and written whole (uconf.c) */
+IMPORT BOOL knl_conf_link_get( CONST char *uuid, CONST char *role, TS_UUID *p_u );
+IMPORT ER   knl_conf_link_put( CONST char *uuid, CONST char *role, CONST TS_UUID *target, CONST char *label );
+
+/*
+ * In the kernel: a system object found from the root システム by the
+ * relationship of its link, or else by the identity it was made with
+ * (fixed); and the root's links given their relationships at the start
+ */
+IMPORT BOOL knl_sys_find( CONST char *role, CONST char *fixed, TS_UUID *p_u );
+/* The same as the text of its UUID, in buf of TS_UUID_STRLEN + 1 bytes (or fixed itself) */
+IMPORT CONST char *knl_sys_id( CONST char *role, CONST char *fixed, char *buf );
+IMPORT void knl_sys_mark( void );
 
 #ifdef __cplusplus
 }

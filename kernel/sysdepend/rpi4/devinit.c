@@ -50,6 +50,7 @@
 #endif
 
 IMPORT void knl_objtest_start( void );
+IMPORT INT  knl_tpanel_init( void );	/* tpanel.c: a touch screen on the header's pins */
 
 /* Before the kernel starts (no kernel objects available yet) */
 EXPORT ER knl_init_device( void )
@@ -96,6 +97,8 @@ EXPORT ER knl_start_device( void )
 	knl_pcie_rc_init();	/* the lane to the VL805, or to the CM4 carrier's slot (design 10.7) */
 	STEP("usb");
 	knl_usb_init();		/* the USB sockets, behind the PCIe (design 10.14) */
+	STEP("touch screen");
+	knl_tpanel_init();	/* a GT911 on the header's pins (design 6.4.2) */
 	STEP("ethernet");
 	knl_genet_init();	/* the RJ45 socket: GENET and its PHY */
 	STEP("netdev");

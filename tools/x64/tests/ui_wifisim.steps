@@ -1,0 +1,55 @@
+# The Wi-Fi joined from ネットワーク設定 through the Wi-Fi simulator on the x64 PC
+# (docs/tessronos/09-network.md 9.6.12), for tools/x64/ui_run64.py with the image of
+# make TARGET=_X64_ DESKTOP=1 UITEST=1 WIFI_SIM=1 BUILD_ID=simui sdimg. The simulator's station is
+# the card (iwm0, Simulated Wi-Fi) and its access point TessronOS-Sim (WPA2-Personal, passphrase
+# wifisim-pass-2026, DHCP from 192.168.77.100), so no wifitest is asked. The places are those of
+# tools/x64/tests/ui_wifikey.steps and ui_netadp.steps: 〈Ｗｉ－Ｆｉ〉 at 437,163, the scan's first
+# row at 505,321, the password at 463,432, 保存 at 385,466, 接続 at 481,466; システム環境設定's
+# adapters' list (自動 420,396, virtio-net 420,413, the Wi-Fi 420,430) and 設定 at 609,554.
+# The network is saved with its password and joined from the part (4-way handshake on both
+# sides), the Wi-Fi is then chosen as the adapter, and DHCP gives its address over it.
+expect wifisim: AP "TessronOS-Sim", WPA2-Personal
+open 01a0d8c4-52b5-7a41-8c61-2d7e9f0a1b31
+expect netenv: ready
+wait 800
+click 437 163
+expect netenv: scan 1 networks, 1 shown
+wait 2000
+shot ws_list
+click 505 321
+wait 2000
+click 463 432
+wait 1000
+text wifisim-pass-2026
+wait 2000
+click 385 466
+expect wifi: saved a network, a new key: 0 (wpa2)
+expect netenv: wifi changed
+wait 2000
+click 481 466
+expect netenv: wifi joined as saved
+expect wifi: handshake -> connected
+# the page read again as the card tells it changed, nothing looked at in between
+expect netenv: wifi state connected
+expect wifisim: AP: the port of 02:77:73:00:00:02 opened
+wait 3000
+shot ws_connected
+absent !OACV!
+# the adapter: the Wi-Fi chosen, and the address from the simulated network's DHCP
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+wait 3000
+click 270 201
+wait 500
+click 706 185
+expect sysenv: adapters 2
+wait 1500
+shot ws_adapters
+click 420 430
+wait 2500
+click 609 554
+expect sysenv: adapter wifi: 0
+expect net: adapter chosen: wifi
+expect net: DHCP address 192.168.77.100
+wait 1500
+shot ws_adapter_wifi
+absent !OACV!

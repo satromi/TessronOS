@@ -1,66 +1,69 @@
-# 基本動画再生 (design 11.12, 15), for tools/ui_run.py: a sample of 実時間制御TAD
-# opened in its window, begun, paused, its menu, a playlist, closed; and the
-# programs 実行 offers for a link by the type of its object's record. The
-# window is one of the desktop's: its band carries it, its corner sizes it.
-# The menu of the second button opens with the item chosen last on the
-# pointer's row, the rows 20 pixels apart: 閉じる, line, 表示, プレイリスト表示,
-# 操作, ウインドウ, 小物, 実行.
+# MPEG Player playing 実時間制御TAD (design 11.12, 15.5.1), for tools/ui_run.py: a
+# sample whose applist names basic-player (MPEG Player's alias) opened, its scene
+# played by the desktop in the player's window, a press, moves and Space passed on to it,
+# full screen and back, closed; the sample 10.5's playlist stepped with Ctrl+N;
+# and the programs 実行 offers for a link by the type of its object's record.
+# MPEG Player opens with its work area near (104, 108): the video area, 640 by
+# 360, over the control strip.
+logmark
 open 01a0d8c5-6a04-7a04-8a04-5e1a7d000004
-expect player: opened 10.4 アニメーションとの同期
+expectsincein 60 player: hosted
+waitwin MPEG Player 60
 wait 800
 shot player_waiting
+# a press on the scene: the program's, and the window has the keys after it
+logmark
+click 420 280
+expectsince op press
+# the pointer's moves over the scene are the program's too (mouseenter, mouseleave)
+move 380 240
+move 440 300
+expectsince op move
+logmark
 key 2C
-wait 500
+expectsince op toggle
+wait 800
 shot player_playing
-key 13 01
+logmark
+key 2C
+expectsince op toggle
 wait 300
 shot player_paused
-click 480 360 1
-expect desktop: menu 10.4 アニメーションとの同期
+logmark
+key 0F 01
+expectsince mpegplay: fullscreen on
+expectsince op area
 wait 500
-shot player_menu
-key 29
+shot player_fullscreen
+logmark
+key 0F 01
+expectsince mpegplay: fullscreen off
 wait 300
-# プレイリスト表示 of the menu (閉じる under the pointer, three rows below): its list, put away
-click 480 360 1
-wait 300
-click 488 420
-expect desktop: chosen rt.list
-wait 500
-shot player_list
-key 29
-wait 300
-win 10.4 アニメーションとの同期
-drag 400 75 440 95
-wait 300
-win 10.4 アニメーションとの同期
-drag 916 674 860 620
-wait 500
-win 10.4 アニメーションとの同期
-shot player_moved
+logmark
 key 08 01
-expect player: closed
+expectsince closed by its process
+logmark
 open 01a0d8c5-6a05-7a05-8a05-5e1a7d000005
-expect player: opened 10.5 音声プレイリスト
+expectsincein 60 player: hosted
+waitwin MPEG Player 60
+click 420 280
 key 2C
 wait 2500
 shot player_track
-key 0F 01
-wait 300
-shot player_fullscreen
-key 0F 01
-wait 300
-key 1B 01
+logmark
+key 11 01
+expectsince op track
 wait 1500
 shot player_next_track
+logmark
 key 08 01
-expect player: closed
-# 実行 on the link to 仮身サンプル in the first window: スライド and 基本動画再生 take any xmlTAD
+expectsince closed by its process
+# 実行 on the link to 仮身サンプル in the first window: スライド and MPEG Player take any xmlTAD
 click 60 131
 wait 300
 click 60 131 1
 wait 600
-move 68 352
+move 68 372
 wait 800
 shot exec_menu
 key 29

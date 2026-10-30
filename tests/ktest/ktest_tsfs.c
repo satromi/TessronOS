@@ -95,19 +95,41 @@ LOCAL void test_object( void )
 	KT_ASSERT_EQ(robj.name[0], (UB)'f');
 	KT_ASSERT_EQ(robj.name[4], (UB)'t');
 
-	/* opening for writing is exclusive */
-	od = ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE);
+	/* the exclusive modes: TFO_EXCL keeps every key out but one of the attributes alone */
+	od = ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE | TFO_EXCL);
 	KT_ASSERT(od > 0);
 	KT_ASSERT_EQ(ts_opn_obj(vol, &uuid, TFO_READ), E_BUSY);
-	/* but one for the attributes alone shares it, both ways */
+	KT_ASSERT_EQ(ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE), E_BUSY);
 	{
 		ID ods = ts_opn_obj(vol, &uuid, TFO_READ | TFO_SHARE);
+
 		KT_ASSERT(ods > 0);
-		KT_ASSERT_ER(ts_cls_obj(od), E_OK);
-		od = ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE);
-		KT_ASSERT(od > 0);
-		KT_ASSERT_EQ(ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE), E_BUSY);
 		if ( ods > 0 ) KT_ASSERT_ER(ts_cls_obj(ods), E_OK);
+	}
+	KT_ASSERT_ER(ts_cls_obj(od), E_OK);
+	/* TFO_WEXCL: readers let in, other writers kept out, and a writer keeps it out */
+	od = ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE | TFO_WEXCL);
+	KT_ASSERT(od > 0);
+	{
+		ID odr = ts_opn_obj(vol, &uuid, TFO_READ);
+
+		KT_ASSERT(odr > 0);
+		KT_ASSERT_EQ(ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE), E_BUSY);
+		if ( odr > 0 ) KT_ASSERT_ER(ts_cls_obj(odr), E_OK);
+	}
+	KT_ASSERT_ER(ts_cls_obj(od), E_OK);
+	/* none of them, as BTRON has it: writers and readers together */
+	od = ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE);
+	KT_ASSERT(od > 0);
+	{
+		ID odw = ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE);
+		ID odr = ts_opn_obj(vol, &uuid, TFO_READ);
+
+		KT_ASSERT(odw > 0);
+		KT_ASSERT(odr > 0);
+		KT_ASSERT_EQ(ts_opn_obj(vol, &uuid, TFO_READ | TFO_WEXCL), E_BUSY);	/* a writer is there */
+		if ( odw > 0 ) KT_ASSERT_ER(ts_cls_obj(odw), E_OK);
+		if ( odr > 0 ) KT_ASSERT_ER(ts_cls_obj(odr), E_OK);
 	}
 	KT_ASSERT_ER(ts_cls_obj(od), E_OK);
 

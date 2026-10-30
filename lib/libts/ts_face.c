@@ -24,40 +24,9 @@
 #include <ts/sysdef.h>
 #include <ts/face.h>
 
-LOCAL INT hexval( INT c )
-{
-	if ( c >= '0' && c <= '9' ) return c - '0';
-	if ( c >= 'a' && c <= 'f' ) return c - 'a' + 10;
-	if ( c >= 'A' && c <= 'F' ) return c - 'A' + 10;
-	return -1;
-}
-
-/* "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" at s; FALSE when it is not one */
-LOCAL BOOL parse_uuid( CONST UB *s, TS_UUID *u )
-{
-	INT	i, k = 0;
-
-	for ( i = 0; i < 36; i++ ) {
-		INT	hi, lo;
-
-		if ( i == 8 || i == 13 || i == 18 || i == 23 ) {
-			if ( s[i] != '-' ) return FALSE;
-			continue;
-		}
-		hi = hexval(s[i]);
-		lo = hexval(s[i + 1]);
-		if ( hi < 0 || lo < 0 ) return FALSE;
-		u->b[k++] = (UB)( ( hi << 4 ) | lo );
-		i++;
-	}
-	return (BOOL)( k == 16 );
-}
-
 LOCAL BOOL font_box( TS_UUID *box )
 {
-	static CONST char	box_id[] = SYSDEF_FONT_BOX;
-
-	return parse_uuid((CONST UB *)box_id, box);
+	return (BOOL)( ob_fnd_sys(SYSROLE_FONTS, SYSDEF_FONT_BOX, box) >= E_OK );
 }
 
 EXPORT INT ts_face_list( TS_UUID *buf, INT max )

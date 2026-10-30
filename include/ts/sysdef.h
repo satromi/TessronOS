@@ -22,6 +22,27 @@
 /* システム箱: the one object the system's boxes are linked from */
 #define SYSDEF_SYSTEM_BOX	"01a0d8c4-5211-7c52-9e0a-3b61d27f4c85"
 
+/*
+ * The relationships of the links of システム (ob_fnd_sys): what the code
+ * finds each of the system's objects by, the identity given here for it
+ * being the default when the link is not there.
+ */
+#define SYSROLE_DEFS		"system.definitions"	/* SYSDEF_BOX */
+#define SYSROLE_PROGS		"system.programs"	/* SYSDEF_PROG_BOX */
+#define SYSROLE_ACCS		"system.accessories"	/* SYSDEF_ACC_BOX */
+#define SYSROLE_FONTS		"system.fonts"		/* SYSDEF_FONT_BOX */
+#define SYSROLE_WALLS		"system.wallpapers"	/* SYSDEF_WALL_BOX */
+#define SYSROLE_LEARN		"system.learning"	/* SYSDEF_LEARN_BOX */
+#define SYSROLE_DICTS		"system.dictionaries"	/* SYSDEF_DICT_BOX */
+#define SYSROLE_XFCONV		"system.xfconv"		/* SYSDEF_XFCONV_BOX */
+#define SYSROLE_CALENDAR	"system.calendar"	/* SYSDEF_CALENDAR */
+#define SYSROLE_CONF_NET	"system.conf.net"	/* SYSDEF_CONF_NET */
+#define SYSROLE_CONF_DEV	"system.conf.dev"	/* SYSDEF_CONF_DEV */
+#define SYSROLE_CONF_USER	"system.conf.user"	/* SYSDEF_CONF_USER */
+#define SYSROLE_SOUNDS		"system.sounds"		/* SYSDEF_SND_BOX */
+#define SYSROLE_CERTS		"system.certs"		/* SYSDEF_CA_CERTS */
+#define SYSROLE_ROOT		"system.root"		/* SYSDEF_ROOT */
+
 /* The cabinet the desktop opens with (「BTRON」): what the user has starts there */
 #define SYSDEF_CABINET		"0199ce83-6e83-7d42-8962-d2ad8c721654"
 
@@ -74,7 +95,6 @@
 #define SYSDEF_PROG_CONSOLE	"01a0d8c4-5219-7c3e-8a41-2f6b9d0e5c11"	/* コンソール */
 #define SYSDEF_PROG_SERIAL	"01a0d8c4-521a-7d52-9b17-4e8c2a6f0d23"	/* シリアル通信 */
 #define SYSDEF_PROG_MICROSCRIPT	"01a0d8c4-521b-7e63-8c28-5f9d3b7a1e34"	/* マイクロスクリプト */
-#define SYSDEF_PROG_UNPACK	"01a0d8c4-52a7-7c31-9b5e-3f1d8a6c2e90"	/* 書庫解凍 */
 #define SYSDEF_PROG_XFCONV	"01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91"	/* ファイル変換 */
 #define SYSDEF_XFCONV_BOX	"01a0d8c4-52b2-7d32-8b42-5a6f7e8d9ca2"	/* ファイル変換の箱: 取り込んだ箱の置き場 */
 #define SYSDEF_PROG_BACKUP	"01a0d8c4-52b0-7d15-9a3c-4e6f8b2d1c07"	/* バックアップ */
@@ -86,6 +106,7 @@
 #define SYSDEF_PROG_CALC	"01a0d8c4-52e5-7e86-8f97-0a1b2c3d4e51"	/* 基本表計算 */
 #define SYSDEF_PROG_KANATYPE	"01a0d8c4-52f0-7a01-8b12-3c4d5e6f7a90"	/* かな入力練習 */
 #define SYSDEF_PROG_KEYMAP	"01a0d8c4-52e8-7b19-9c2a-3d4e5f6a7b84"	/* キー配列 */
+#define SYSDEF_PROG_SOFTKB	"01a0d8c4-54b0-7ac1-8cd2-9fab0c1d54b0"	/* ソフトウェアキーボード */
 #define SYSDEF_PROG_WORDDIC	"01a0d8c4-5312-7c23-8d34-5e6f7b8c9d12"	/* 単語登録 */
 #define SYSDEF_PROG_CALCU	"01a0d8c4-5320-7a41-8b52-6c7d8e9fa020"	/* 電卓 */
 #define SYSDEF_PROG_SCRPRINT	"01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0"	/* 画面印刷 */
@@ -95,12 +116,13 @@
 #define SYSDEF_PROG_CHARSRCH	"01a0d8c4-5350-7a61-8d72-9fab0c1d5050"	/* 文字検索 */
 #define SYSDEF_PROG_ARCHIVE	"01a0d8c4-5370-7a71-8e82-9fab0c1d7070"	/* 書庫管理 */
 #define SYSDEF_PROG_FQUIT	"01a0d8c4-5420-7a10-8b21-6c3d4e5f5420"	/* 強制終了 */
+#define SYSDEF_PROG_SYSINST	"01a0d8c4-54c0-7a11-8c22-4d5e6f7054c0"	/* システム登録 (x64) */
 #define SYSDEF_TMPL_ARCHIVE	"01a0d8c4-5372-7c93-8aa4-bc1d2e3f7272"	/* 書庫管理の原紙「空書庫」 */
 #define SYSDEF_PROG_TECHO	"01a0d8c4-53c0-7a11-8b22-3c4d5e6f53c0"	/* 電子手帳 */
 #define SYSDEF_TMPL_TECHO	"01a0d8c4-53c4-7e55-8f66-7a8b9cad53c4"	/* 電子手帳の原紙「手帳用紙」 */
 #define SYSDEF_PROG_SLIDE	"01a0d8c4-52d5-7c42-8d53-6e7f8091ab23"	/* スライド (in the desktop) */
-#define SYSDEF_PROG_RTPLAY	"01a0d8c4-52db-7d45-8e56-cf708192a3b4"	/* 基本動画再生 (in the desktop) */
 #define SYSDEF_PROG_RTMEDIA	"01a0d8c4-52da-7c34-9d45-be6f708192a3"	/* 実時間メディア: what the player of 実時間制御TAD sounds with */
+#define SYSDEF_PROG_WPASUPP	"01a0d8c4-5a61-7b02-8c13-5e3f70819a61"	/* wpasupp: wpa_supplicant's process (WPA_MODE=proc) */
 
 /* The system itself: a virtual device whose records say and change what the machine is (OB_SYS_*) */
 #define SYSDEF_SYSTEM		"01a0d680-3aa6-7c52-9d6f-3e72a0b18f14"
@@ -109,6 +131,29 @@
 #define SYSDEF_CONF_NET		"01a0d8c4-52c0-7a10-8b21-5e6f7a8b9c01"	/* ネットワークの設定 */
 #define SYSDEF_CONF_DEV		"01a0d8c4-52c1-7b21-9c32-6f7a8b9cad12"	/* 機器の設定 */
 #define SYSDEF_CONF_USER	"01a0d8c4-52c2-7c32-8d43-7a8b9cadbe23"	/* ユーザ情報 */
+
+/*
+ * The Wi-Fi of the x64 PC (design 9.6): its networks and their passwords,
+ * which only the administrators read and write (the x64 build puts it on
+ * the system volume, linked from the system box), and the firmware of
+ * Intel's 8265 that iwm(4) loads and of the Wi-Fi 6 AX200 that iwx(4)
+ * loads (record 1 the file as Intel publishes it)
+ */
+#define SYSDEF_CONF_WIFI	"01a0d8c4-5481-7b92-9db3-0abc1d2e5481"	/* Ｗｉ－Ｆｉの設定 */
+#define SYSDEF_FW_IWM8265_36	"01a0d8c4-548a-7fab-8c2d-5e6f7081548a"	/* iwlwifi-8265-36.ucode, for OpenBSD's iwm (design 9.6.9) */
+#define SYSDEF_FW_IWXCC_77	"01a0d8c4-548c-71cd-ae4f-708192a3548c"	/* iwlwifi-cc-a0-77.ucode, for OpenBSD's iwx (design 9.6.9) */
+
+/*
+ * The Wi-Fi of the Raspberry Pi 5 (CYW43455 on SDIO, design 9.6.8): the
+ * firmware and the regulatory data (CLM) that bwfm(4) loads into the
+ * chip (record 1 the files as linux-firmware publishes them), and the
+ * settings of the board (NVRAM), a document whose paragraphs are the
+ * lines of the text (record 0, xmlTAD). The Pi 5 build puts them on the
+ * system volume, linked from the system box.
+ */
+#define SYSDEF_FW_BWFM43455	"01a0d8c4-5484-7e95-8a06-3def40515484"	/* cyfmac43455-sdio.bin */
+#define SYSDEF_FW_BWFM43455_CLM	"01a0d8c4-5485-7fa6-9b17-4ef051625485"	/* cyfmac43455-sdio.clm_blob */
+#define SYSDEF_FW_BWFM43455_NV	"01a0d8c4-5486-70b7-ac28-5f0162735486"	/* Ｗｉ－Ｆｉの基板の設定 */
 
 /*
  * The system's sounds: the box they are in, and the buzzer and the
@@ -163,7 +208,6 @@
 #define SYSDEF_MENU_SER_NL	"01a0d889-4611-7e74-8a96-5cd38b1f6ea4"	/* 送信する改行 */
 #define SYSDEF_MENU_MICROSCRIPT	"01a0d889-4612-7f85-9ba7-6de49c2f7fb5"	/* マイクロスクリプト */
 #define SYSDEF_MENU_MS_OPS	"01a0d889-4613-708a-8cb8-7ef5ad3a80c6"	/* 操作 */
-#define SYSDEF_MENU_UNPACK	"01a0d889-46a7-7e53-9d70-5b3fac8e4b02"	/* 書庫解凍 */
 #define SYSDEF_MENU_XFCONV	"01a0d889-46b1-7e21-8d31-6a5b4c3d2e11"	/* ファイル変換 */
 #define SYSDEF_MENU_XFC_DIR	"01a0d889-46b2-7f32-8e42-7b6c5d4e3f22"	/* ファイル変換のディレクトリ */
 #define SYSDEF_MENU_BACKUP	"01a0d889-46b0-7e21-8c4d-2a5f9e3b6d18"	/* バックアップ */
@@ -182,9 +226,6 @@
 #define SYSDEF_MENU_FQUIT	"01a0d889-5423-7d43-8e54-9f6071b2c423"	/* 強制終了 */
 #define SYSDEF_MENU_CALENDAR	"01a0d889-46c0-7a11-8b22-3c4d5e6f7a81"	/* 予定表 */
 #define SYSDEF_MENU_SLIDE	"01a0d889-46c1-7b22-9c33-4d5e6f7a8b92"	/* スライド */
-#define SYSDEF_MENU_RTPLAY	"01a0d889-46c2-7c33-8d44-5e6f7a8b9ca3"	/* 基本動画再生 */
-#define SYSDEF_MENU_RTPLAY_VIEW	"01a0d889-46c3-7d44-9e55-6f7a8b9cadb4"	/* 基本動画再生の表示 */
-#define SYSDEF_MENU_RTPLAY_OPS	"01a0d889-46c4-7e55-8f66-7a8b9cadbec5"	/* 基本動画再生の操作 */
 #define SYSDEF_MENU_CAL_VIEW	"01a0d889-46c5-7f66-9a77-8b9cadbecfd6"	/* 予定表の表示 */
 #define SYSDEF_MENU_CAL_EDIT	"01a0d889-46c6-7077-8b88-9cadbecfd0e7"	/* 予定表の編集 */
 #define SYSDEF_MENU_CALC	"01a0d889-46d0-7a01-8b12-3c4d5e6f7a01"	/* 基本表計算 */
@@ -205,12 +246,16 @@
 #define SYSDEF_MENU_KM_LATIN	"01a0d889-4741-7a12-8b23-3c4d5e6f7e41"	/* キー配列の英字配列 */
 #define SYSDEF_MENU_KM_KANA	"01a0d889-4742-7a23-8b34-3c4d5e6f7e42"	/* キー配列のかな配列 */
 #define SYSDEF_MENU_KM_SHAPE	"01a0d889-4743-7a34-8b45-3c4d5e6f7e43"	/* キー配列のキーボードの形 */
+#define SYSDEF_MENU_SOFTKB	"01a0d889-47b0-7a01-8b12-3c4d5e6f47b0"	/* ソフトウェアキーボード */
+#define SYSDEF_MENU_SK_LAYOUT	"01a0d889-47b1-7a12-8b23-3c4d5e6f47b1"	/* ソフトウェアキーボードの配列 */
 #define SYSDEF_MENU_KM_VIEW	"01a0d889-4744-7a45-8b56-3c4d5e6f7e44"	/* キー配列の表示 */
 #define SYSDEF_MENU_DISKFIX	"01a0d889-47e0-7a01-8b12-3c4d5e6f47e0"	/* ディスク修復 */
 #define SYSDEF_MENU_DFIX_INFO	"01a0d889-47e1-7a12-8b23-3c4d5e6f47e1"	/* ディスク修復の障害情報 */
+#define SYSDEF_MENU_SYSINST	"01a0d889-4810-7a11-8b22-3c4d5e6f4810"	/* システム登録 */
 #define SYSDEF_MENU_TRAYV	"01a0d889-47f0-7a01-8b12-3c4d5e6f47f0"	/* トレー */
 #define SYSDEF_MENU_TRAYV_VIEW	"01a0d889-47f1-7a12-8b23-3c4d5e6f47f1"	/* トレーの表示 */
 #define SYSDEF_MENU_NOTE	"01a0d889-47f2-7a23-8b34-3c4d5e6f47f2"	/* 通知 */
+#define SYSDEF_MENU_FPAT	"01a0d889-4800-7a01-8b12-3c4d5e6f4800"	/* パターン編集 */
 #define SYSDEF_MENU_MCARD	"01a0d889-4730-7a01-8b12-3c4d5e6f7e30"	/* マイクロカード */
 #define SYSDEF_MENU_CHARSRCH	"01a0d889-4750-7a01-8b12-3c4d5e6f7f50"	/* 文字検索 */
 #define SYSDEF_MENU_ARCHIVE	"01a0d889-4770-7a01-8b12-3c4d5e6f7f70"	/* 書庫管理 */
@@ -233,7 +278,12 @@
 #define SYSDEF_BOX_WORDDIC	"01a0d8c4-5314-7e45-8f56-7b8c9daebf14"	/* 単語登録: 窓のパネルと尋ねるパネル */
 #define SYSDEF_BOX_CALCU	"01a0d8c4-5322-7c63-8d74-8e9fabc21022"	/* 電卓: 標準と関数電卓のパネル */
 #define SYSDEF_BOX_MCARD	"01a0d8c4-5332-7c73-8e84-9fabc4d53232"	/* マイクロカード: 表示設定、並べ替え、印刷などのパネル */
+#define SYSDEF_BOX_KEYMAP	"01a0d8c4-52ea-7d3b-8e4c-5f6a7b8c9d96"	/* キー配列: ウインドウの上の帯と下の一覧 */
+#define SYSDEF_BOX_FIG		"01a0d8c4-52ec-7f5d-9a6e-7b8c9daebf08"	/* 基本図形編集: 道具パネルのボタンの絵 */
 #define SYSDEF_BOX_CHARSRCH	"01a0d8c4-5352-7c83-8f94-bc1d2e3f5252"	/* 文字検索: 窓のパネルと尋ねるパネル */
+#define SYSDEF_BOX_ARCHIVE	"01a0d8c4-5376-7d95-8ea6-bc1d2e3f7676"	/* 書庫管理: 書籍の作成、書籍情報、実身名一覧のパネル */
+#define SYSDEF_BOX_MICROSCRIPT	"01a0d8c4-521c-7f74-8d39-6fae4c8b2f45"	/* マイクロスクリプト: 接続の許可を尋ねるパネル */
+#define SYSDEF_BOX_BACKUP	"01a0d8c4-52b4-7f54-8d64-7c8f9fa0beb4"	/* バックアップ: 窓のパネル(保存と復帰のタブ)と次の媒体を尋ねるパネル */
 #define SYSDEF_BOX_FQUIT	"01a0d8c4-5422-7c32-9d43-8e5f6071a422"	/* 強制終了: 窓のパネルと立ち上げ直しを尋ねるパネル */
 #define SYSDEF_BOX_TECHO	"01a0d8c4-53c2-7c33-8d44-5e6f7a8b53c2"	/* 電子手帳: 検索パネル、用紙設定、印刷と閉じるときに尋ねるパネル */
 #define SYSDEF_BOX_BROWSER	"01a0d8c4-5442-7c94-8a05-1b2c3d4e5442"	/* ブラウザ: 頁の alert・confirm・prompt と select の一覧のパネル */

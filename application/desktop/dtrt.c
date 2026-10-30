@@ -132,7 +132,7 @@ struct dtrt {
 	INT		wid, gid;
 	T_DPRECT	area;		/* of the window's work area, where the scene may go */
 	T_DPRECT	fit;		/* where it goes */
-	INT		z;		/* eighths */
+	INT		z, zd;		/* magnified z / zd */
 	INT		tw, th;		/* the scene, its units */
 	UW		paper;
 	TS_UUID		obj;
@@ -175,6 +175,9 @@ struct dtrt {
 	UD		last_click;
 	INT		last_cx, last_cy;
 	BOOL		said_novideo;
+	/* played in a window of a process's (dtrthost.c): drawn only while it is that window */
+	BOOL		hosted;
+	TS_UUID		host_win;
 };
 
 /* ---------------------------------------------------------------- small things */
@@ -204,13 +207,13 @@ LOCAL void wake( DTRT *p )
 
 LOCAL INT zs( DTRT *p, INT v )
 {
-	return v * p->z / 8;
+	return (INT)( (D)v * p->z / p->zd );
 }
 
 LOCAL INT zv( DTRT *p, RT_V v )
 {
 	/* millionths of a unit into zoomed pixels, rounded down past zero */
-	D	x = v * p->z / 8;
+	D	x = v * p->z / p->zd;
 
 	return (INT)( ( x >= 0 ) ? x / RT_ONE : -( ( -x + RT_ONE - 1 ) / RT_ONE ) );
 }
@@ -1053,6 +1056,7 @@ LOCAL void item_draw( DTRT *p, INT gid, CONST ITEM *it, INT dx, INT dy )
 		sub.sh = &it->fig->sh[it->sh];
 		sub.nsh = 1;
 		sub.zoom = p->z;
+		sub.zoom_den = p->zd;
 		sub.over_on = 0;
 		for ( k = 0; k < TV_MAX_OVER; k++ ) sub.over[k] = NULL;
 		{
@@ -1072,13 +1076,13 @@ LOCAL void item_draw( DTRT *p, INT gid, CONST ITEM *it, INT dx, INT dy )
 		box.right = zs(p, it->box.right) - dx;
 		box.bottom = zs(p, it->box.bottom) - dy;
 		if ( it->kind == IT_PAGE ) {
-			INT	pad = 16 * p->z / 8;
+			INT	pad = 16 * p->z / p->zd;
 
 			box.left += pad;
 			box.top += pad;
 			box.right -= pad;
 		}
-		tv_doc_zoom(p->z);
+		tv_doc_zoom_by(p->z, p->zd);
 		(void)tv_doc_draw(gid, it->doc, &box, 0, p->rec, TAD_COL_NONE);
 		tv_doc_zoom(8);
 		break;
@@ -1100,7 +1104,7 @@ LOCAL void item_draw( DTRT *p, INT gid, CONST ITEM *it, INT dx, INT dy )
 /* What the items cover, zoomed, with room round for strokes */
 LOCAL void items_box( DTRT *p, INT first, INT n, T_DPRECT *r )
 {
-	INT	i, m = MARGIN * p->z / 8 + 2;
+	INT	i, m = MARGIN * p->z / p->zd + 2;
 
 	knl_memset(r, 0, sizeof(*r));
 	for ( i = first; i < first + n; i++ ) {
@@ -1539,11 +1543,27 @@ LOCAL void compose_sprite( DTRT *p, CONST LAYER *L, CONST T_DPRECT *R )
 	}
 }
 
+/*
+ * Whether the window is still the one the player was opened in: a
+ * process's window goes with the process, and its number and its
+ * drawing environment may be another window's before the desktop's loop
+ * closes the player
+ */
+LOCAL BOOL host_here( DTRT *p )
+{
+	TS_UUID	u;
+
+	if ( !p->hosted ) return TRUE;
+	return (BOOL)( wm_obj_uuid(p->wid, &u) >= E_OK && ts_uuid_cmp(&u, &p->host_win) == 0 );
+}
+
 /* A part of the scene made again, and put in the window */
 LOCAL void compose( DTRT *p, CONST T_DPRECT *r0 )
 {
 	T_DPRECT	all, R;
 	INT		y, i;
+
+	if ( !host_here(p) ) return;
 
 	all.left = 0;
 	all.top = 0;
@@ -1772,7 +1792,7 @@ EXPORT DTRT *dtrt_open( INT wid, CONST TS_UUID *obj, INT recno, CONST T_DPRECT *
 		return NULL;
 	}
 	rt_set_var(p->rt, RT_SV_SLIDE, slide_no);
-	p->z = dt_slide_fit(area->right - area->left, area->bottom - area->top, tw, th, &p->fit);
+	p->z = dt_slide_fit(area->right - area->left, area->bottom - area->top, tw, th, &p->fit, &p->zd);
 	p->fit.left += area->left;
 	p->fit.right += area->left;
 	p->fit.top += area->top;
@@ -1812,8 +1832,8 @@ EXPORT DTRT *dtrt_open( INT wid, CONST TS_UUID *obj, INT recno, CONST T_DPRECT *
 		dtrt_close(p);
 		return NULL;
 	}
-	tm_printf((UB *)"realtime: %d things shown, %d layers, %d objects, %d media, zoom %d\n", p->nitem, p->nlayer,
-		  rt_nobj(p->rt), rt_nmedia(p->rt), p->z);
+	tm_printf((UB *)"realtime: %d things shown, %d layers, %d objects, %d media, zoom %d/%d\n", p->nitem, p->nlayer,
+		  rt_nobj(p->rt), rt_nmedia(p->rt), p->z, p->zd);
 
 	knl_memset(&cm, 0, sizeof(cm));
 	cm.mtxatr = TA_INHERIT;
@@ -1946,8 +1966,8 @@ EXPORT BOOL dtrt_input( DTRT *p, CONST T_WMEV *ev, BOOL look )
 
 	if ( p == NULL ) return FALSE;
 	knl_memset(&in, 0, sizeof(in));
-	in.x = ( ev->x - p->fit.left ) * 8 / ( p->z > 0 ? p->z : 8 );
-	in.y = ( ev->y - p->fit.top ) * 8 / ( p->z > 0 ? p->z : 8 );
+	in.x = ( ev->x - p->fit.left ) * p->zd / p->z;
+	in.y = ( ev->y - p->fit.top ) * p->zd / p->z;
 	lock(p);
 	switch ( ev->type ) {
 	case HID_EV_BTN_DOWN:
@@ -2190,6 +2210,34 @@ EXPORT INT dtrt_now_playing( DTRT *p, UB *buf, INT max )
 	return n;
 }
 
+/* Whether the program has run to its end */
+EXPORT BOOL dtrt_done( DTRT *p )
+{
+	return (BOOL)( p != NULL && rt_done(p->rt) );
+}
+
+/* The program's time, in ms */
+EXPORT INT dtrt_time( DTRT *p )
+{
+	RT_TIME	t;
+
+	if ( p == NULL ) return 0;
+	lock(p);
+	t = rt_now(p->rt);
+	unlock(p);
+	return (INT)( t / 1000 );
+}
+
+/* The window is a process's, win: the scene is drawn only while the window is there */
+EXPORT void dtrt_host( DTRT *p, CONST TS_UUID *win )
+{
+	if ( p == NULL ) return;
+	lock(p);
+	p->host_win = *win;
+	p->hosted = TRUE;
+	unlock(p);
+}
+
 /* The window's size changed: the scene laid out again at the new size, where the program has it now */
 EXPORT void dtrt_relayout( DTRT *p, CONST T_DPRECT *area )
 {
@@ -2207,7 +2255,7 @@ EXPORT void dtrt_relayout( DTRT *p, CONST T_DPRECT *area )
 	p->nlayer = 0;
 	p->ndirty = 0;
 	p->area = *area;
-	p->z = dt_slide_fit(area->right - area->left, area->bottom - area->top, p->tw, p->th, &p->fit);
+	p->z = dt_slide_fit(area->right - area->left, area->bottom - area->top, p->tw, p->th, &p->fit, &p->zd);
 	p->fit.left += area->left;
 	p->fit.right += area->left;
 	p->fit.top += area->top;

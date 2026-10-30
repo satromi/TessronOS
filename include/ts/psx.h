@@ -184,6 +184,21 @@ typedef struct {
  */
 IMPORT ID  ts_spn_prc( CONST char *path, CONST T_SPAWN *sp );
 
+/*
+ * The same for the program object prog itself, as a link points at it:
+ * what found the program by its link starts that one, whatever names
+ * stand on the way to it.
+ */
+IMPORT ID  ts_spn_obj( CONST TS_UUID *prog, CONST T_SPAWN *sp );
+
+/*
+ * The object a path of the object world (objfs, from "/") names, looked
+ * up with the caller's rights: what holds a place as an object asks
+ * whether a path it made reaches that very object. E_NOEXS: no such
+ * path; E_OACV: a box on the way the caller may not read.
+ */
+IMPORT ER  ts_lkp_obj( CONST char *path, TS_UUID *p_uuid );
+
 /* The descriptors the caller was given when it was started, in order; how many */
 IMPORT INT ts_get_inh( INT *fds, INT max );
 

@@ -366,6 +366,188 @@ LOCAL void lamp( INT gid, INT l, INT t, INT b, INT sel, BOOL off, BOOL held, UIN
 	dp_frame_rect_pat(gid, &q, &pat, w);
 }
 
+/* ---------------------------------------------------------------- columns */
+
+/*
+ * A name with tabs in it is a row of columns, the tabs parting them (a
+ * name, a size, a version). Each column has its own width, the same in
+ * every row of the part, and what does not fit in it is cut short and
+ * ends in "…" -- the letters never run into the next column nor out of
+ * the part. The widths are the definition's when it gives them (cols="
+ * 0,72r,96" in the data box: a width in pixels for each column from the
+ * left, 0 for one that takes an equal share of what the others leave,
+ * r for one whose letters stand against its right end), and else come
+ * from the letters: every column after the first is as wide as its
+ * widest entry in the part, those together being given at most half
+ * the row (in proportion when they would take more), and the first
+ * takes the rest. The widths are in the window's own pixels, so that
+ * a scale draws the same columns larger; every column's letters are
+ * also drawn clipped to it, so that letters a scale draws a little
+ * wider than they measure still stay inside.
+ */
+#define COL_MAX		16		/* columns a row is parted into, at most */
+#define COL_GAP		( MARGIN / 2 )	/* between two columns */
+#define COL_END		( MARGIN / 2 )	/* left free at the right of the row */
+
+typedef struct {
+	INT	n;			/* how many columns */
+	INT	x[COL_MAX];		/* where each starts, from the row's first letter */
+	INT	w[COL_MAX];		/* how wide each is */
+	BOOL	right[COL_MAX];		/* its letters set against its right end */
+} PDCOLS;
+
+LOCAL CONST UB	ellipsis[] = { 0xE2, 0x80, 0xA6, 0 };	/* … */
+
+/* How many columns n bytes of a name make: one more than its tabs, at most COL_MAX */
+LOCAL INT col_count( CONST UB *s, INT n )
+{
+	INT	i, k = 1;
+
+	for ( i = 0; i < n && s[i] != 0; i++ ) {
+		if ( s[i] == 0x09 ) k++;
+	}
+	return ( k < COL_MAX ) ? k : COL_MAX;
+}
+
+/* Where column k (0 up) of n bytes of a name is, [*b, *e); FALSE when there is none */
+LOCAL BOOL col_of( CONST UB *s, INT n, INT k, INT *b, INT *e )
+{
+	INT	i = 0, c = 0;
+
+	while ( c < k ) {
+		while ( i < n && s[i] != 0 && s[i] != 0x09 ) i++;
+		if ( i >= n || s[i] != 0x09 ) return FALSE;
+		i++;
+		c++;
+	}
+	*b = i;
+	/* the last column a row may have takes whatever follows, tabs and all */
+	while ( i < n && s[i] != 0 && ( s[i] != 0x09 || k == COL_MAX - 1 ) ) i++;
+	*e = i;
+	return TRUE;
+}
+
+/*
+ * The columns laid over a row 'room' wide: from the definition's widths
+ * (pt's sbw and sbf, sb_n of them) where it has them, else from nat[],
+ * the widest entry of each column.
+ */
+LOCAL void cols_lay( CONST T_WMPART *pt, INT n, CONST INT *nat, INT room, PDCOLS *c )
+{
+	INT	k, avail = room - COL_GAP * ( n - 1 ), sum = 0, x = 0;
+
+	if ( n < 1 ) n = 1;
+	if ( avail < 0 ) avail = 0;
+	c->n = n;
+	for ( k = 0; k < n; k++ ) {
+		c->w[k] = 0;
+		c->right[k] = FALSE;
+	}
+	if ( pt != NULL && pt->sb_n > 0 && WM_PT_KIND(pt->type) != SB_PARTS ) {
+		INT	flex = 0, left;
+
+		for ( k = 0; k < n; k++ ) {
+			if ( k < pt->sb_n && k < WM_SB_MAX ) {
+				c->w[k] = ( pt->sbw[k] > 0 ) ? pt->sbw[k] : 0;
+				c->right[k] = ( pt->sbf[k] & SBF_RIGHT ) != 0;
+			}
+			if ( c->w[k] == 0 ) flex++;
+			sum += c->w[k];
+		}
+		if ( sum > avail && sum > 0 ) {
+			/* more than the row holds: every fixed column narrowed alike */
+			for ( k = 0; k < n; k++ ) c->w[k] = (INT)( (D)c->w[k] * avail / sum );
+			sum = avail;
+		}
+		left = avail - sum;
+		for ( k = 0; k < n && flex > 0; k++ ) {
+			if ( c->w[k] == 0 && ( k >= pt->sb_n || pt->sbw[k] <= 0 ) ) {
+				c->w[k] = left / flex;
+				left -= c->w[k];
+				flex--;
+			}
+		}
+	} else {
+		for ( k = 1; k < n; k++ ) sum += nat[k];
+		for ( k = 1; k < n; k++ ) {
+			c->w[k] = ( sum <= avail / 2 ) ? nat[k] : (INT)( (D)nat[k] * ( avail / 2 ) / sum );
+		}
+		c->w[0] = avail;
+		for ( k = 1; k < n; k++ ) c->w[0] -= c->w[k];
+	}
+	for ( k = 0; k < n; k++ ) {
+		c->x[k] = x;
+		x += c->w[k] + COL_GAP;
+	}
+}
+
+/* The columns of every name of a list or a selector, from its definition or from the widest of each */
+LOCAL void cols_part( CONST T_WMPART *pt, CONST UB *pool, INT room, PDCOLS *c )
+{
+	INT		nat[COL_MAX], n = 1, i, k, b, e;
+	CONST UB	*nm = pd_pool_name(pool, pt->pool, 0);
+
+	for ( k = 0; k < COL_MAX; k++ ) nat[k] = 0;
+	for ( i = 0; i < pt->count && nm != NULL; i++ ) {
+		INT	len = s_len(nm, WM_LABEL_MAX), m = col_count(nm, len);
+
+		if ( m > n ) n = m;
+		for ( k = 1; k < m; k++ ) {
+			if ( col_of(nm, len, k, &b, &e) ) {
+				INT	w = width(nm + b, e - b, 0);
+
+				if ( w > nat[k] ) nat[k] = w;
+			}
+		}
+		nm = pd_pool_name(pool, (INT)( nm - pool ), 1);
+	}
+	cols_lay(pt, n, nat, room, c);
+}
+
+/*
+ * n bytes of letters in a column w wide from x on the base line y: as
+ * they are when they fit, else as many as fit with room for "…" after
+ * them. Drawn twice, as a name's letters are, and clipped to the column
+ * from top to bottom. How wide what was drawn is.
+ */
+LOCAL INT col_put( INT gid, INT x, INT y, INT w, CONST UB *s, INT n, BOOL right,
+		   UW fg, UW lt, INT top, INT bottom )
+{
+	UB		buf[WM_LABEL_MAX + 8];
+	INT		tw = width(s, n, 0), m = n, i = 0, at = 0, ew;
+	T_DPRECT	q, was;
+
+	if ( w <= 0 || n <= 0 ) {
+		return 0;
+	}
+	if ( tw > w ) {
+		/* the letters that fit before "…" */
+		ew = width(ellipsis, 3, 0);
+		while ( i < n && s[i] != 0 ) {
+			INT	k = u8len(s + i);
+
+			if ( width(s, i + k, 0) + ew > w ) break;
+			i += k;
+		}
+		if ( i > WM_LABEL_MAX ) i = WM_LABEL_MAX;
+		knl_memcpy(buf, s, i);
+		knl_memcpy(buf + i, ellipsis, 3);
+		m = i + 3;
+		buf[m] = 0;
+		s = buf;
+		tw = width(s, m, 0);
+	}
+	if ( right && tw < w ) at = w - tw;
+	rc(&q, x, top, x + w, bottom);
+	clip_in(gid, &q, &was);
+	if ( fg != lt ) {
+		(void)text(gid, x + at + 1, y + 1, s, m, 0, lt);
+	}
+	(void)text(gid, x + at, y, s, m, 0, fg);
+	clip_back(gid, &was);
+	return ( tw < w ) ? tw : w;
+}
+
 /*
  * A name in its cell: after its lamp and the margin, or -- with xoff
  * below nought, a push button's -- spread over the cell with the room
@@ -373,14 +555,16 @@ LOCAL void lamp( INT gid, INT l, INT t, INT b, INT sel, BOOL off, BOOL held, UIN
  * them. The base line is half the letters' height below the middle,
  * less one. The letters are drawn twice when their colour is not the
  * light one: a pixel down and to the right in the light colour, then
- * in their own. A name in use now is underlined two deep, in half-tone
+ * in their own. A name after a lamp is laid in its columns (cols, the
+ * part's, or NULL for the name's own), each cut short with "…" when it
+ * does not fit. A name in use now is underlined two deep, in half-tone
  * when it cannot be worked. Nothing is drawn outside the part.
  */
 LOCAL void name_in( INT gid, CONST T_DPRECT *part, CONST T_DPRECT *cell, CONST UB *name,
-		    INT sel, BOOL off, BOOL held, INT xoff, BOOL now, UINT ground )
+		    INT sel, BOOL off, BOOL held, INT xoff, BOOL now, UINT ground, CONST PDCOLS *cols )
 {
 	INT		y = ( cell->top + cell->bottom + PD_FH ) / 2 - 1;
-	INT		x = cell->left + xoff + MARGIN, gap = 0, n = s_len(name, WM_LABEL_MAX);
+	INT		x = cell->left + xoff + MARGIN, gap = 0, n = s_len(name, WM_LABEL_MAX), uw = 0;
 	UW		fg = wm_look(off ? LK_INACTPARTSCOL : LK_ACTPARTSCOL);
 	UW		lt = wm_look(LK_LIGHTPARTSCOL);
 	T_DPRECT	was;
@@ -400,29 +584,42 @@ LOCAL void name_in( INT gid, CONST T_DPRECT *part, CONST T_DPRECT *cell, CONST U
 		return;
 	}
 	clip_in(gid, part, &was);
-	if ( xoff >= 0 ) {
-		/* a tab: what follows it stands against the cell's right end (a version, a size) */
-		INT	t;
+	if ( xoff < 0 ) {
+		if ( fg != lt ) {
+			(void)text(gid, x + 1, y + 1, name, n, gap, lt);
+		}
+		(void)text(gid, x, y, name, n, gap, fg);
+		uw = width(name, n, gap);
+	} else {
+		PDCOLS	own;
+		INT	k, b, e, w;
 
-		for ( t = 0; t < n && name[t] != 0x09; t++ ) ;
-		if ( t < n ) {
-			INT	rn = n - t - 1, rx = cell->right - MARGIN - width(name + t + 1, rn, 0);
+		if ( cols == NULL ) {
+			/*
+			 * a name by itself: its columns as wide as its own entries. One
+			 * of a single column (a switch's, a choice of a selector) may
+			 * run on over the cells after its own to the part's end, as
+			 * such names always have; only there is it cut short.
+			 */
+			INT	nat[COL_MAX], m = col_count(name, n), end = cell->right - COL_END;
 
-			if ( fg != lt ) {
-				(void)text(gid, rx + 1, y + 1, name + t + 1, rn, 0, lt);
+			if ( m == 1 && part->right - 4 > end ) end = part->right - 4;
+			for ( k = 0; k < m; k++ ) {
+				nat[k] = col_of(name, n, k, &b, &e) ? width(name + b, e - b, 0) : 0;
 			}
-			(void)text(gid, rx, y, name + t + 1, rn, 0, fg);
-			n = t;
+			cols_lay(NULL, m, nat, end - x, &own);
+			cols = &own;
+		}
+		for ( k = 0; k < cols->n && col_of(name, n, k, &b, &e); k++ ) {
+			w = col_put(gid, x + cols->x[k], y, cols->w[k], name + b, e - b, cols->right[k],
+				    fg, lt, cell->top, cell->bottom);
+			if ( k == 0 ) uw = w;
 		}
 	}
-	if ( fg != lt ) {
-		(void)text(gid, x + 1, y + 1, name, n, gap, lt);
-	}
-	(void)text(gid, x, y, name, n, gap, fg);
 	if ( now ) {
 		T_DPRECT	u;
 
-		rc(&u, x, y, x + width(name, n, gap), y + 2);
+		rc(&u, x, y, x + uw, y + 2);
 		if ( off ) {
 			half_fill(gid, &u, BLACK, FALSE);
 		} else {
@@ -839,6 +1036,7 @@ LOCAL void draw_scroll( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 	UINT		ground = ( pt->type & P_EMPHAS ) ? LK_ACTPARTS : LK_INACTPARTS;
 	BOOL		off = ( pt->type & ( P_DISABLE | P_INACT ) ) != 0;
 	T_DPRECT	cell;
+	PDCOLS		cols;
 
 	pt->rows = rows;
 	if ( pt->top < 1 ) {
@@ -855,6 +1053,9 @@ LOCAL void draw_scroll( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 		cfill(gid, r->left + 1, r->bottom - 1, r->right - PD_SS_BAR, r->bottom, light());
 		cfill(gid, r->right - 21, r->top + 1, r->right - PD_SS_BAR, r->bottom, light());
 	}
+	/* the columns, the same for every row: from the definition, or from every name of the list */
+	ss_cell(r, 0, &cell);
+	cols_part(pt, c->pool, cell.right - COL_END - ( cell.left + MARGIN ), &cols);
 	for ( i = 0; i < rows && pt->top + i <= pt->count; i++ ) {
 		INT		idx = pt->top + i;
 		CONST UB	*nm = pd_pool_name(c->pool, pt->pool, idx - 1);
@@ -865,7 +1066,7 @@ LOCAL void draw_scroll( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 		}
 		ss_cell(r, i, &cell);
 		name_in(gid, r, &cell, nm, ( pt->value == idx ) ? 1 : -1, noff,
-			(BOOL)( c->held_at == idx ), 0, (BOOL)( pt->now == idx ), ground);
+			(BOOL)( c->held_at == idx ), 0, (BOOL)( pt->now == idx ), ground, &cols);
 		if ( c->focus && pt->value == idx && !off ) {
 			T_DPRECT	f = cell;
 
@@ -1602,6 +1803,24 @@ EXPORT INT pd_tag_at( T_WMPART *pt, CONST UB *pool, INT x, INT y, T_DPRECT *p_ta
 }
 
 /*
+ * The sheet the parts of the tag shown stand on: the sheet of the panel
+ * of tags, below the lower row when the upper tag shown has one.
+ */
+EXPORT void pd_tag_sheet( T_WMPART *pt, CONST UB *pool, T_DPRECT *out )
+{
+	PDTAG	t[PD_TAG_MAX];
+	INT	n = tag_layout(pt, pool, t), k;
+
+	*out = pt->inner;
+	for ( k = 0; k < n; k++ ) {
+		if ( t[k].name != NULL && t[k].sub < 0 && t[k].num == pt->value ) {
+			out->top += PD_FH + 10;
+			break;
+		}
+	}
+}
+
+/*
  * A tag shown. A lower tag becomes the one its upper tag stands for;
  * the answer is the tag, or 0 when it was the one shown already.
  */
@@ -1684,6 +1903,96 @@ EXPORT void pd_cands( INT gid, CONST T_DPRECT *r, T_PDCONV *cv, INT h )
 	}
 }
 
+/* The digits of a number, written at b: how many */
+LOCAL INT cand_num( INT v, UB *b )
+{
+	UB	t[12];
+	INT	n = 0, k = 0;
+
+	if ( v < 0 ) v = 0;
+	do {
+		t[n++] = (UB)( '0' + v % 10 );
+		v /= 10;
+	} while ( v > 0 && n < 11 );
+	while ( n > 0 ) b[k++] = t[--n];
+	return k;
+}
+
+/* "3/42": which of how many, under the names when there are more than a page */
+LOCAL INT cand_foot( INT chosen, INT first, INT total, UB *b )
+{
+	INT	k = cand_num(( chosen >= 0 ) ? first + chosen + 1 : first + 1, b);
+
+	b[k++] = '/';
+	k += cand_num(total, b + k);
+	b[k] = 0;
+	return k;
+}
+
+EXPORT void pd_cand_size( CONST UB *names, INT n, INT total, INT *p_w, INT *p_h )
+{
+	CONST UB	*s = names;
+	UB		row[PD_CONV_TEXT + 8];
+	INT		k, w = 0, rh = PD_FH + 6;
+
+	for ( k = 0; k < n && k < PD_CAND_ROWS; k++ ) {
+		INT	len = s_len(s, PD_CONV_TEXT);
+
+		row[0] = (UB)( '1' + k );
+		row[1] = ' ';
+		knl_memcpy(row + 2, s, len);
+		if ( width(row, len + 2, 0) > w ) w = width(row, len + 2, 0);
+		s += len + 1;
+	}
+	if ( total > k ) {
+		INT	len = cand_foot(total - 1, 0, total, row);
+
+		if ( width(row, len, 0) > w ) w = width(row, len, 0);
+	}
+	*p_w = w + 12;
+	*p_h = rh * k + 4 + ( ( total > k ) ? rh : 0 );
+}
+
+EXPORT void pd_cand_draw( INT gid, INT w, INT h, CONST UB *names, INT n, INT chosen, INT first, INT total )
+{
+	CONST UB	*s = names;
+	UB		row[PD_CONV_TEXT + 8];
+	INT		k, rh = PD_FH + 6, base;
+	T_DPRECT	all, q;
+
+	rc(&all, 0, 0, w, h);
+	dp_fill_rect(gid, &all, WHITE);
+	dp_frame_rect(gid, &all, dark(), 1);
+	for ( k = 0; k < n && k < PD_CAND_ROWS; k++ ) {
+		INT	len = s_len(s, PD_CONV_TEXT), top = 2 + k * rh;
+		BOOL	sel = (BOOL)( k == chosen );
+
+		row[0] = (UB)( '1' + k );
+		row[1] = ' ';
+		knl_memcpy(row + 2, s, len);
+		base = top + ( rh + PD_FH ) / 2 - 2;
+		rc(&q, 1, top, w - 1, top + rh);
+		if ( sel ) {
+			dp_fill_rect(gid, &q, wm_look(LK_ACTPARTSCOL));
+		}
+		(void)text(gid, 6, base, row, len + 2, 0, sel ? WHITE : wm_look(LK_ACTPARTSCOL));
+		s += len + 1;
+	}
+	if ( total > k ) {
+		INT	len = cand_foot(chosen, first, total, row);
+
+		base = 2 + k * rh + ( rh + PD_FH ) / 2 - 2;
+		(void)text(gid, w - 6 - width(row, len, 0), base, row, len, 0, dark());
+	}
+}
+
+EXPORT INT pd_cand_row( INT y, INT n )
+{
+	INT	k = ( y - 2 ) / ( PD_FH + 6 );
+
+	return ( y >= 2 && k >= 0 && k < n && k < PD_CAND_ROWS ) ? k : -1;
+}
+
 EXPORT INT pd_cand_at( CONST T_PDCONV *cv, INT x, INT y )
 {
 	INT	rh = PD_FH + 6, k;
@@ -1720,7 +2029,7 @@ LOCAL void draw_switch( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 			}
 		}
 		name_in(gid, r, r, pt->label, pt->value != 0 ? 1 : 0, off || ( pt->type & P_INACT ),
-			(BOOL)( c->held != 0 ), 0, (BOOL)( ( pt->type & P_NOW ) != 0 ), LK_INACTPARTS);
+			(BOOL)( c->held != 0 ), 0, (BOOL)( ( pt->type & P_NOW ) != 0 ), LK_INACTPARTS, NULL);
 		return;
 	}
 	if ( pt->type & P_NOFRAME ) {
@@ -1737,10 +2046,10 @@ LOCAL void draw_switch( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 	switch ( kind ) {
 	case AS_PARTS:
 		name_in(gid, r, r, pt->label, pt->value ? 1 : 0, off, (BOOL)( c->held != 0 ), 0,
-			FALSE, LK_INACTPARTS);
+			FALSE, LK_INACTPARTS, NULL);
 		break;
 	case MS_PARTS:
-		name_in(gid, r, r, pt->label, 0, off, FALSE, -1, FALSE, LK_INACTPARTS);
+		name_in(gid, r, r, pt->label, 0, off, FALSE, -1, FALSE, LK_INACTPARTS, NULL);
 		if ( c->held != 0 && !( pt->type & P_NOFRAME ) ) {
 			xor_round(gid, r);
 		} else if ( c->held != 0 ) {
@@ -1759,7 +2068,7 @@ LOCAL void draw_switch( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 			}
 			ws_cell(pt, r, pt->count, i, &e);
 			name_in(gid, r, &e, nm, ( pt->value == i + 1 ) ? 1 : 0, noff,
-				(BOOL)( c->held_at == i + 1 ), 0, (BOOL)( pt->now == i + 1 ), LK_INACTPARTS);
+				(BOOL)( c->held_at == i + 1 ), 0, (BOOL)( pt->now == i + 1 ), LK_INACTPARTS, NULL);
 			if ( c->held_at == i + 1 ) {
 				xor_rect(gid, &e);
 			}
@@ -1775,9 +2084,10 @@ LOCAL void draw_switch( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
  * A pop-up: the body of a switch -- a raised box, or only its ground
  * when it has no frame, with the ring inside it when it answers -- and
  * in it the name chosen, after the margin as a selector's names stand
- * but with no lamp, what follows a tab in the name set against the
- * room left of the mark. The mark stands in a column at the right the
- * margin and eight wide: a triangle pointing down, three quarters of
+ * but with no lamp, a name with tabs laid in its own columns over the
+ * room left of the mark and cut short with "…" where it does not fit.
+ * The mark stands in a column at the right the margin and eight wide:
+ * a triangle pointing down, three quarters of
  * the margin across and three eighths of it high, in the pattern of the
  * triangles a volume's knob and a field being worked carry. While the
  * part's list is open its frame is turned over, as a push button's is
@@ -1810,9 +2120,9 @@ LOCAL void draw_popup( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 	clip = *r;
 	clip.right = r->right - POP_MARK;
 	cell = *r;
-	cell.right = clip.right + MARGIN;
+	cell.right = clip.right + COL_END;
 	if ( nm != NULL && clip.right > clip.left ) {
-		name_in(gid, &clip, &cell, nm, -1, off, FALSE, 0, FALSE, LK_INACTPARTS);
+		name_in(gid, &clip, &cell, nm, -1, off, FALSE, 0, FALSE, LK_INACTPARTS, NULL);
 	}
 	cx = r->right - POP_MARK / 2 - 2;
 	cy = ( r->top + r->bottom ) / 2;
@@ -1894,7 +2204,15 @@ EXPORT void pd_part( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 		draw_label(pt, r, c);
 		break;
 	case WM_PT_LINE:
-		dp_line(c->gid, r->left, r->top, r->right, r->bottom, dark());
+		/* a rule one pixel high or wide lies along the rectangle's top or left row, its far
+		   edges being outside it; any other rectangle is a line from corner to corner */
+		if ( r->bottom - r->top <= 1 ) {
+			dp_line(c->gid, r->left, r->top, r->right - 1, r->top, dark());
+		} else if ( r->right - r->left <= 1 ) {
+			dp_line(c->gid, r->left, r->top, r->left, r->bottom - 1, dark());
+		} else {
+			dp_line(c->gid, r->left, r->top, r->right, r->bottom, dark());
+		}
 		break;
 	default:
 		break;

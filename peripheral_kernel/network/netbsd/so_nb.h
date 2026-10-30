@@ -26,6 +26,8 @@
 
 IMPORT int	rump_tsnet_setaddr4( CONST char *ifname, UW addr, UW mask, UW bcast );
 IMPORT int	rump_tsnet_getaddr4( CONST char *ifname, UW *addr, UW *mask );
+/* the address addr's check against the other machines: 0 usable, 1 checking, 2 another's, 3 link down, -1 none */
+IMPORT int	rump_tsnet_addrstate4( CONST char *ifname, UW addr );
 IMPORT int	rump_tsnet_defroute4( UW gw );
 
 /* The IPv6 addresses of an interface (T_SOIF6 has the layout of the kernel's list) */
@@ -87,6 +89,8 @@ IMPORT ER	knl_so_slaac_run( void );	/* listen to the routers, and ask them */
  * well; without, they stay until their lifetimes run out.
  */
 IMPORT void	knl_so_slaac_stop( BOOL forget );
+IMPORT void	knl_so_slaac_relink( void );	/* the link came up again: the routers asked again */
+IMPORT UINT	knl_so_slaac_solicits( void );	/* the router solicitations sent so far */
 IMPORT void	knl_so_slaac_temp( BOOL on );	/* temporary addresses as well (RFC 8981), or not */
 /* The nth IPv6 name server the routers named, and the router the default route goes through */
 IMPORT BOOL	knl_so_slaac_dns( INT n, UB *addr );

@@ -36,6 +36,13 @@
 #include <ts/blk.h>
 #include <ts/fs.h>
 #include <ts/proc.h>
+#if defined(_QEMU_VIRT_) || defined(X64)
+#include "../../device/usb/usbdev.h"
+#include "../../device/usb/vhc.h"
+#define KT_VHC		1		/* the USB controller in software is built */
+#else
+#define KT_VHC		0
+#endif
 
 #define MAXDEV		32
 
@@ -64,7 +71,7 @@ LOCAL T_USBDEV *find_dev( UINT role, UINT speed )
 	return NULL;
 }
 
-#if !KT_BOARD
+#if KT_QEMU_DEVS
 LOCAL T_USBDEV *find_by_handle( INT h )
 {
 	INT	i;
@@ -89,7 +96,11 @@ LOCAL void test_hc( void )
 	if ( n <= 0 ) {
 		KT_SKIP("the machine has no USB controller");
 	}
+#if defined(X64)
+	KT_ASSERT(n >= 1);		/* the PC's own; the RP1 and QEMU virt's test machine have two */
+#else
 	KT_ASSERT(n >= 2);
+#endif
 	for ( i = 0; i < n; i++ ) {
 		KT_ASSERT_ER(ts_usb_ref_hc(i, &hc), E_OK);
 		KT_ASSERT_EQ(hc.running, 1);
@@ -110,7 +121,7 @@ LOCAL void test_hc( void )
 	KT_ASSERT_ER(ts_usb_ref_hc(0, NULL), E_PAR);
 }
 
-#if !KT_BOARD
+#if KT_QEMU_DEVS
 /* every root port answers; the USB 3 ones say so */
 LOCAL void test_ports( void )
 {
@@ -143,7 +154,7 @@ LOCAL void test_ports( void )
 
 /* ---------------------------------------------------------------- the tree */
 
-#if !KT_BOARD
+#if KT_QEMU_DEVS
 LOCAL CONST char *role_name( UINT r )
 {
 	switch ( r ) {
@@ -268,7 +279,7 @@ LOCAL void test_control( void )
 
 /* ---------------------------------------------------------------- HID */
 
-#if !KT_BOARD
+#if KT_QEMU_DEVS
 LOCAL void drain_hid( void )
 {
 	T_HIDEV	ev;
@@ -417,6 +428,127 @@ LOCAL CONST UB rd_push[] = {
 	0x75, 0x08, 0x95, 0x02, 0x81, 0x06, 0xc0, 0xc0
 };
 
+/*
+ * A mouse of the boot subclass without a report ID whose descriptor says
+ * an 8-byte report: eight buttons, 16-bit X and Y (-32767..32767), a
+ * wheel, AC Pan and a byte of padding
+ */
+LOCAL CONST UB rd_pad16[] = {
+	0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x09, 0x01, 0xa1, 0x00,
+	0x05, 0x09, 0x19, 0x01, 0x29, 0x08, 0x15, 0x00, 0x25, 0x01,
+	0x95, 0x08, 0x75, 0x01, 0x81, 0x02,
+	0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x16, 0x01, 0x80, 0x26, 0xff, 0x7f,
+	0x75, 0x10, 0x95, 0x02, 0x81, 0x06,
+	0x09, 0x38, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06,
+	0x05, 0x0c, 0x0a, 0x38, 0x02, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06,
+	0x75, 0x08, 0x95, 0x01, 0x81, 0x01,
+	0xc0, 0xc0
+};
+
+/*
+ * What such a mouse sent while still in the boot protocol: the boot
+ * protocol's three bytes padded with zeros to eight, moving right and
+ * up. Read as the descriptor says, the first is X 0xff02.
+ */
+#define PAD_N	11
+LOCAL CONST UB pad_boot[PAD_N][8] = {
+	{ 0x00, 0x02, 0xff }, { 0x00, 0x04, 0xff }, { 0x00, 0x04, 0xfd }, { 0x00, 0x05, 0xfd },
+	{ 0x00, 0x06, 0xfd }, { 0x00, 0x06, 0xfc }, { 0x00, 0x06, 0xfa }, { 0x00, 0x07, 0xfb },
+	{ 0x00, 0x07, 0xfa }, { 0x00, 0x08, 0xfa }, { 0x00, 0x09, 0xf9 }
+};
+
+/*
+ * The padded boot reports told from the report protocol's: three moves
+ * no byte holds with nothing after the third byte decide it, their
+ * moves held back until then; a byte set after the fourth says the
+ * report protocol, and a fast move with the descriptor's Y in it starts
+ * the count again.
+ */
+LOCAL void test_hid_padded_desc( void )
+{
+	INT	info[PI_N], out[4 * 16];
+	INT	lens[16];
+	INT	i;
+
+	for ( i = 0; i < 16; i++ ) lens[i] = 8;
+
+	/* moving right and up: held twice, then read as the boot protocol from the third */
+	KT_ASSERT(knl_hid_probe(rd_pad16, sizeof(rd_pad16), TRUE, info, &pad_boot[0][0], lens, PAD_N, out));
+	KT_ASSERT_EQ(info[PI_RID], 0);
+	KT_ASSERT_EQ(info[PI_PLEN], 8);
+	KT_ASSERT_EQ(info[PI_XSIZE], 8);	/* the boot layout now */
+	KT_ASSERT_EQ(info[PI_BOOT], 1);
+	KT_ASSERT_EQ(out[1], 0);
+	KT_ASSERT_EQ(out[2], 0);
+	KT_ASSERT_EQ(out[5], 0);
+	KT_ASSERT_EQ(out[6], 0);
+	KT_ASSERT_EQ(out[9], 4);
+	KT_ASSERT_EQ(out[10], -3);
+	KT_ASSERT_EQ(out[4 * 10 + 1], 9);
+	KT_ASSERT_EQ(out[4 * 10 + 2], -7);
+
+	/* slowly to the right: the moves a byte holds go between the votes */
+	{
+		static CONST UB r[8][8] = {
+			{ 0x00, 0x01, 0x00 }, { 0x00, 0x00, 0xff }, { 0x00, 0x01, 0x00 }, { 0x00, 0x01, 0x00 },
+			{ 0x00, 0x01, 0xff }, { 0x00, 0x01, 0xff }, { 0x00, 0x01, 0x00 }, { 0x00, 0x00, 0xff }
+		};
+
+		KT_ASSERT(knl_hid_probe(rd_pad16, sizeof(rd_pad16), TRUE, info, &r[0][0], lens, 8, out));
+		KT_ASSERT_EQ(info[PI_BOOT], 1);
+		KT_ASSERT_EQ(out[1], 1);
+		KT_ASSERT_EQ(out[2], 0);
+		KT_ASSERT_EQ(out[5], 0);		/* a vote, held */
+		KT_ASSERT_EQ(out[6], 0);
+		KT_ASSERT_EQ(out[4 * 5 + 1], 1);	/* the third vote, read as the boot protocol */
+		KT_ASSERT_EQ(out[4 * 5 + 2], -1);
+		KT_ASSERT_EQ(out[4 * 7 + 1], 0);
+		KT_ASSERT_EQ(out[4 * 7 + 2], -1);
+	}
+
+	/* the report protocol: up a little, then fast to the right with Y 0 */
+	{
+		static CONST UB r[3][8] = {
+			{ 0x00, 0x05, 0x00, 0xfd, 0xff }, { 0x00, 0x2c, 0x01 }, { 0x00, 0x2c, 0x01 }
+		};
+		static CONST UB r4[3][8] = {
+			{ 0x00, 0x2c, 0x01 }, { 0x00, 0x2c, 0x01 }, { 0x00, 0x2c, 0x01 }
+		};
+
+		KT_ASSERT(knl_hid_probe(rd_pad16, sizeof(rd_pad16), TRUE, info, &r[0][0], lens, 3, out));
+		KT_ASSERT_EQ(info[PI_BOOT], 0);
+		KT_ASSERT_EQ(info[PI_XSIZE], 16);
+		KT_ASSERT_EQ(out[1], 5);
+		KT_ASSERT_EQ(out[2], -3);
+		KT_ASSERT_EQ(out[5], 300);
+		KT_ASSERT_EQ(out[9], 300);
+		/* the same fast moves first, and three of them: the boot protocol's they could be */
+		KT_ASSERT(knl_hid_probe(rd_pad16, sizeof(rd_pad16), TRUE, info, &r4[0][0], lens, 3, out));
+		KT_ASSERT_EQ(info[PI_BOOT], 1);
+	}
+
+	/* fast moves with the descriptor's Y in them between: the count starts again */
+	{
+		static CONST UB r[6][8] = {
+			{ 0x00, 0x2c, 0x01 }, { 0x00, 0x2c, 0x01, 0x05 }, { 0x00, 0x2c, 0x01 },
+			{ 0x00, 0x2c, 0x01 }, { 0x00, 0x2c, 0x01, 0x03 }, { 0x00, 0x2c, 0x01 }
+		};
+
+		KT_ASSERT(knl_hid_probe(rd_pad16, sizeof(rd_pad16), TRUE, info, &r[0][0], lens, 6, out));
+		KT_ASSERT_EQ(info[PI_BOOT], 0);
+		KT_ASSERT_EQ(out[1], 0);		/* held while it could be either */
+		KT_ASSERT_EQ(out[5], 300);
+		KT_ASSERT_EQ(out[6], 5);
+		KT_ASSERT_EQ(out[4 * 4 + 1], 300);
+		KT_ASSERT_EQ(out[4 * 5 + 1], 0);
+	}
+
+	/* not of the boot subclass: read as the descriptor says, whatever it sends */
+	KT_ASSERT(knl_hid_probe(rd_pad16, sizeof(rd_pad16), FALSE, info, &pad_boot[0][0], lens, PAD_N, out));
+	KT_ASSERT_EQ(info[PI_BOOT], 0);
+	KT_ASSERT_EQ(out[1], -254);
+}
+
 LOCAL void test_hid_desc( void )
 {
 	INT	info[PI_N], out[4 * 4];
@@ -555,11 +687,13 @@ LOCAL void test_hid_desc( void )
 		KT_ASSERT_EQ(info[PI_PLEN], 42);
 		KT_ASSERT_EQ(out[0], 2);
 	}
+
+	test_hid_padded_desc();
 }
 
 /* ---------------------------------------------------------------- disks */
 
-#if !KT_BOARD
+#if KT_QEMU_DEVS
 LOCAL CONST char *disk_of( UINT speed )
 {
 	T_USBDEV	*d;
@@ -692,6 +826,50 @@ LOCAL void test_msc_ss( void )
 	}
 }
 
+IMPORT INT knl_msc_fault( CONST char *devnm, INT n, BOOL bot );	/* msc.c, for the tests */
+
+/*
+ * A disk whose commands time out: each is sent again after the device
+ * was brought back (the port reset, or the Bulk-Only reset when the
+ * port reset cannot be made), and the reads and writes come out as
+ * they would have; the endpoint the timed out transfer was on is used
+ * again after it. The time outs are made on the controller (a status
+ * read with no command), so the controller's side of the recovery
+ * (Stop Endpoint, Set TR Dequeue Pointer, the endpoint started over
+ * after the halt is cleared) runs as it does for a real one.
+ */
+LOCAL void test_msc_recover( void )
+{
+	CONST char	*nm = disk_of(USB_SPEED_SUPER);
+	DiskInfo	di;
+	UB		sec[512], ref[512];
+	SZ		asz = 0;
+	ID		dd;
+	INT		r0, r1;
+	BOOL		bot;
+
+	if ( nm == NULL ) KT_SKIP("no SuperSpeed disk");
+	dd = tk_opn_dev((UB *)nm, TD_UPDATE);
+	KT_ASSERT(dd > 0);
+	if ( dd <= 0 ) return;
+	KT_ASSERT_ER(tk_srea_dev(dd, TDN_DISKINFO, &di, sizeof(di), &asz), E_OK);
+	KT_ASSERT_ER(tk_srea_dev(dd, 0, ref, 512, &asz), E_OK);
+	for ( bot = FALSE; bot <= TRUE; bot++ ) {
+		r0 = knl_msc_fault(nm, 2, bot);
+		KT_ASSERT(r0 >= 0);
+		knl_memset(sec, 0, sizeof(sec));
+		KT_ASSERT_ER(tk_srea_dev(dd, 0, sec, 512, &asz), E_OK);
+		for ( r1 = 0; r1 < 512 && sec[r1] == ref[r1]; r1++ ) ;
+		KT_ASSERT_EQ(r1, 512);
+		r1 = knl_msc_fault(nm, 0, FALSE);
+		tm_printf((UB *)"  %s: %d recoveries by the %s\n", nm, r1 - r0, bot ? "Bulk-Only reset" : "port reset");
+		KT_ASSERT_EQ(r1 - r0, 2);
+		/* a round trip after it, through both endpoints */
+		rw_check(dd, (W)di.blockcont - 2048 + 40, 130, bot ? 0x6b : 0x6a);
+	}
+	KT_ASSERT_ER(tk_cls_dev(dd, 0), E_OK);
+}
+
 /* The file system on the USB disk: a file read, one written and read back */
 LOCAL void test_msc_fat( void )
 {
@@ -775,7 +953,7 @@ LOCAL void test_msc_hs_fs( void )
 
 /* ---------------------------------------------------------------- hot-plug */
 
-#if !KT_BOARD
+#if KT_QEMU_DEVS
 /* Wait for the device list to change from gen, up to ms */
 LOCAL BOOL wait_gen( UW gen, INT ms )
 {
@@ -1032,19 +1210,224 @@ LOCAL void test_msc_whole( void )
 }
 #endif /* KT_BOARD */
 
+#if KT_VHC
+/* ---------------------------------------------------------------- a mouse left in the boot protocol */
+
+/*
+ * A mouse and a keyboard on one device, plugged into the USB controller
+ * in software (device/usb/vhc.c): interface 0 a mouse of the boot
+ * subclass whose descriptor is rd_pad16, interface 1 a boot keyboard.
+ * How it takes SET_PROTOCOL and GET_PROTOCOL is the test's to choose:
+ *   PM_GOOD	each interface as it is told, the report protocol at first
+ *   PM_STUCK	the boot protocol whatever it is told, and says so
+ *   PM_SHARED	one protocol for both interfaces: putting the keyboard into
+ *		the boot protocol puts the mouse there too
+ *   PM_SILENT	stalls both requests
+ * Whichever it is, it sends what it is in: the boot protocol's reports
+ * padded to 8 bytes, or the descriptor's.
+ */
+enum { PM_GOOD, PM_STUCK, PM_SHARED, PM_SILENT };
+
+LOCAL CONST UB pm_ddesc[18] = {
+	18, 1, 0x00, 0x02, 0, 0, 0, 8, 0x34, 0x12, 0x01, 0x9a, 0x00, 0x01, 1, 2, 0, 1
+};
+LOCAL CONST UB pm_kbd_report[63] = {
+	0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01,
+	0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x01, 0x95, 0x05, 0x75, 0x01,
+	0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91, 0x02, 0x95, 0x01, 0x75, 0x03, 0x91, 0x01, 0x95, 0x06,
+	0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00, 0xc0
+};
+LOCAL CONST UB pm_cfg[59] = {
+	9, 2, 59, 0, 2, 1, 0, 0xa0, 50,
+	9, 4, 0, 0, 1, 3, 1, 2, 0,
+	9, 0x21, 0x11, 0x01, 0, 1, 0x22, sizeof(rd_pad16), 0,
+	7, 5, 0x81, 3, 8, 0, 1,
+	9, 4, 1, 0, 1, 3, 1, 1, 0,
+	9, 0x21, 0x11, 0x01, 0, 1, 0x22, sizeof(pm_kbd_report), 0,
+	7, 5, 0x82, 3, 8, 0, 10
+};
+
+LOCAL INT	pm_mode;
+LOCAL UB	pm_proto[2];		/* the protocol each interface is in */
+LOCAL INT	pm_sets[2];		/* SET_PROTOCOL to each */
+
+LOCAL INT pm_klass( CONST UB *setup, UB *data, INT len )
+{
+	INT	ifno = setup[4] & 1;
+
+	switch ( setup[1] ) {
+	case 0x0a:				/* SET_IDLE */
+	case 0x09:				/* SET_REPORT: the keyboard's lamps */
+		return 0;
+	case 0x0b:				/* SET_PROTOCOL */
+		if ( pm_mode == PM_SILENT ) return -1;
+		pm_sets[ifno]++;
+		if ( pm_mode == PM_STUCK ) return 0;
+		if ( pm_mode == PM_SHARED ) {
+			pm_proto[0] = pm_proto[1] = setup[2];
+		} else {
+			pm_proto[ifno] = setup[2];
+		}
+		return 0;
+	case 0x03:				/* GET_PROTOCOL */
+		if ( pm_mode == PM_SILENT || len < 1 ) return -1;
+		data[0] = pm_proto[ifno];
+		return 1;
+	}
+	return -1;
+}
+
+LOCAL CONST T_VHCDEV pm_dev = {
+	pm_ddesc, pm_cfg, sizeof(pm_cfg), { "TessronOS test", "Padded Boot Mouse", NULL, NULL },
+	{ rd_pad16, pm_kbd_report, NULL, NULL }, { sizeof(rd_pad16), sizeof(pm_kbd_report), 0, 0 },
+	NULL, pm_klass
+};
+
+/* The id of a pointer that came after the ids up to last, 0 none yet */
+LOCAL UINT pm_pointer( UINT last, UD *p_reports )
+{
+	T_HIDINFO	h[16];
+	INT		n, i;
+
+	n = knl_hid_list(h, 16);
+	for ( i = 0; i < n && i < 16; i++ ) {
+		if ( !h[i].keyboard && h[i].id > last ) {
+			if ( p_reports != NULL ) *p_reports = h[i].reports;
+			return h[i].id;
+		}
+	}
+	return 0;
+}
+
+LOCAL UINT pm_last_id( void )
+{
+	T_HIDINFO	h[16];
+	INT		n, i;
+	UINT		last = 0;
+
+	n = knl_hid_list(h, 16);
+	for ( i = 0; i < n && i < 16; i++ ) {
+		if ( h[i].id > last ) last = h[i].id;
+	}
+	return last;
+}
+
+/*
+ * Plug the mouse in, in mode, put the pointer at 200,200, send the
+ * reports and see where they took it: no step larger than step, and
+ * the pointer at ex,ey in the end. Answers the SET_PROTOCOL its mouse
+ * interface was sent.
+ */
+LOCAL INT pm_run( INT mode, CONST UB *reps, INT nrep, INT step, INT ex, INT ey )
+{
+	T_HIDEV	ev, evs[64];
+	UINT	id = 0, last;
+	UD	pos, lost = 0, nr = 0, nr0 = 0;
+	INT	i, n, px = 200, py = 200, x, y;
+	UINT	b;
+
+	pm_mode = mode;
+	pm_proto[0] = pm_proto[1] = ( mode == PM_STUCK ) ? 0 : 1;
+	pm_sets[0] = pm_sets[1] = 0;
+	last = pm_last_id();
+	KT_ASSERT_ER(knl_vhc_plug(1, &pm_dev), E_OK);
+	for ( i = 0; i < 60 && ( id = pm_pointer(last, &nr0) ) == 0; i++ ) {
+		tk_dly_tsk(50);
+	}
+	KT_ASSERT(id != 0);
+	if ( id == 0 ) {
+		(void)knl_vhc_unplug(1);
+		return -1;
+	}
+	knl_memset(&ev, 0, sizeof(ev));
+	ev.type = HID_EV_MOVE;
+	ev.x = px;
+	ev.y = py;
+	KT_ASSERT_ER(knl_hid_inject(0, &ev), E_OK);
+	pos = knl_hid_tap_now();
+	for ( i = 0; i < nrep; i++ ) {
+		KT_ASSERT_ER(knl_vhc_in(1, 0x81, reps + 8 * i, 8), E_OK);
+	}
+	for ( i = 0; i < 60; i++ ) {
+		(void)pm_pointer(last, &nr);
+		if ( nr >= nr0 + (UD)nrep ) break;
+		tk_dly_tsk(50);
+	}
+	KT_ASSERT(nr >= nr0 + (UD)nrep);
+	n = knl_hid_tap(&pos, id, evs, 64, &lost);
+	KT_ASSERT(n > 0);
+	KT_ASSERT_EQ((INT)lost, 0);
+	for ( i = 0; i < n; i++ ) {
+		if ( evs[i].type != HID_EV_MOVE ) continue;
+		KT_ASSERT(evs[i].x - px <= step && px - evs[i].x <= step);
+		KT_ASSERT(evs[i].y - py <= step && py - evs[i].y <= step);
+		px = evs[i].x;
+		py = evs[i].y;
+	}
+	KT_ASSERT_ER(ts_hid_pointer(&x, &y, &b), E_OK);
+	tm_printf((UB*)"  mode %d: %d events, the pointer at %d,%d (%d,%d wanted), SET_PROTOCOL %d to the mouse\n",
+		  mode, n, x, y, ex, ey, pm_sets[0]);
+	KT_ASSERT_EQ(px, ex);
+	KT_ASSERT_EQ(py, ey);
+	KT_ASSERT_EQ(x, ex);
+	KT_ASSERT_EQ(y, ey);
+	KT_ASSERT_ER(knl_vhc_unplug(1), E_OK);
+	for ( i = 0; i < 60 && pm_pointer(last, NULL) != 0; i++ ) {
+		tk_dly_tsk(50);
+	}
+	KT_ASSERT(pm_pointer(last, NULL) == 0);
+	return pm_sets[0];
+}
+
+/*
+ * The mouse left in the boot protocol, by each of the ways it can be:
+ * the pointer goes where the boot protocol's reports take it, without a
+ * jump; the mouse that keeps to what it is told is read as its
+ * descriptor says, and is not told what it already says it talks.
+ */
+LOCAL void test_hid_padded( void )
+{
+	T_HIDATTR	a, keep;
+	static CONST UB good[3][8] = {
+		{ 0x00, 0x05, 0x00, 0xfd, 0xff }, { 0x00, 0x96, 0x00 }, { 0x00, 0x74, 0xff, 0x02 }
+	};
+
+	KT_ASSERT_ER(ts_hid_getattr(&keep), E_OK);
+	a = keep;
+	a.speed = 12;			/* as the device moved */
+	a.accel = 7;
+	KT_ASSERT_ER(ts_hid_setattr(&a), E_OK);
+
+	/* the boot protocol from the first report: 64 right and 45 up in all */
+	KT_ASSERT_EQ(pm_run(PM_STUCK, &pad_boot[0][0], PAD_N, 9, 264, 155), 1);
+	KT_ASSERT_EQ(pm_run(PM_SHARED, &pad_boot[0][0], PAD_N, 9, 264, 155), 0);
+	/* nothing said: the first two held back, then the boot protocol */
+	KT_ASSERT_EQ(pm_run(PM_SILENT, &pad_boot[0][0], PAD_N, 9, 258, 157), 0);
+	/* the report protocol it says and sends: 5 - 3, 150 right, 140 left and 2 down */
+	KT_ASSERT_EQ(pm_run(PM_GOOD, &good[0][0], 3, 150, 215, 199), 0);
+	KT_ASSERT_EQ(pm_sets[1], 1);	/* the keyboard put into the boot protocol */
+
+	KT_ASSERT_ER(ts_hid_setattr(&keep), E_OK);
+}
+#endif /* KT_VHC */
+
 EXPORT void ktest_usb( void )
 {
 	KT_RUN(test_hc);
-	KT_RUN_EXCEPT_RPI5(test_ports, "the ports the QEMU machine has in use");
-	KT_RUN_EXCEPT_RPI5(test_tree, "the devices the QEMU machine has");
+	KT_RUN_QEMU_DEVS(test_ports, "the ports the QEMU machine has in use");
+	KT_RUN_QEMU_DEVS(test_tree, "the devices the QEMU machine has");
 	KT_RUN(test_control);
 	KT_RUN(test_hid_desc);
-	KT_RUN_EXCEPT_RPI5(test_hid, "a key is pressed through the QEMU monitor");
-	KT_RUN_EXCEPT_RPI5(test_msc_ss, "a USB disk there is the user's");
-	KT_RUN_EXCEPT_RPI5(test_msc_fat, "a USB disk there is the user's");
-	KT_RUN_EXCEPT_RPI5(test_msc_hs_fs, "a USB disk there is the user's");
-	KT_RUN_EXCEPT_RPI5(test_msc_whole, "a USB disk there is the user's");
-	KT_RUN_EXCEPT_RPI5(test_hotplug, "devices are taken out through the QEMU monitor");
-	KT_RUN_EXCEPT_RPI5(test_hotplug_disk, "devices are taken out through the QEMU monitor");
-	KT_RUN_EXCEPT_RPI5(test_usb_prog, "a device is plugged in through the QEMU monitor");
+#if KT_VHC
+	KT_RUN(test_hid_padded);
+#endif
+	KT_RUN_QEMU_DEVS(test_hid,"a key is pressed through the QEMU monitor");
+	KT_RUN_QEMU_DEVS(test_msc_ss, "a USB disk there is the user's");
+	KT_RUN_QEMU_DEVS(test_msc_recover, "a USB disk there is the user's");
+	KT_RUN_QEMU_DEVS(test_msc_fat, "a USB disk there is the user's");
+	KT_RUN_QEMU_DEVS(test_msc_hs_fs, "a USB disk there is the user's");
+	KT_RUN_QEMU_DEVS(test_msc_whole, "a USB disk there is the user's");
+	KT_RUN_QEMU_DEVS(test_hotplug, "devices are taken out through the QEMU monitor");
+	KT_RUN_QEMU_DEVS(test_hotplug_disk, "devices are taken out through the QEMU monitor");
+	KT_RUN_QEMU_DEVS(test_usb_prog, "a device is plugged in through the QEMU monitor");
 }

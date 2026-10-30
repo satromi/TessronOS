@@ -331,36 +331,20 @@ LOCAL UW colour_or( UW c, UW def )
 	return ( c == TAD_COL_NONE ) ? def : c;
 }
 
-/* What a band shows: any of the picture, the name, the relationship, the kind and the date */
-#define OM_D_BAND	( TAD_D_NAME | TAD_D_PICT | TAD_D_ROLE | TAD_D_TYPE | TAD_D_UPDATE )
 #define OM_GONE_INK	0x00A8A8A8U	/* a 虚身's frame and words */
 #define OM_GONE_PAPER	0x00F4F4F4U	/* and what they are on */
 
 /*
- * How tall the band along the top of a virtual object is: the letters
- * it holds, and a little either side. A link that shows none of the
- * picture, the name, the relationship, the kind and the date has no
- * band at all: it is a plain box in tbcol.
+ * How tall the band along the top of a virtual object is: the height of
+ * the object closed, the letters it holds and a little either side. A
+ * link that shows none of the picture, the name, the relationship, the
+ * kind and the date has no band at all: it is a plain box in tbcol.
+ * The rule belongs to the records, so it is the record layer's
+ * (tad_lnk_closed_h), and every program that sizes a link uses the same.
  */
 EXPORT INT om_band_h( CONST T_VOBJ *vobj )
 {
-	INT	ch;
-
-	if ( vobj == NULL || (vobj->disp & OM_D_BAND) == 0 ) {
-		return 0;
-	}
-	ch = ( vobj->chsz > 0 ) ? vobj->chsz : 14;
-
-	/*
-	 * The band is the letters and eleven pixels: a line above and
-	 * below the name, the frame, and the room the picture needs
-	 * beside it. The number is not chosen here -- it is what the
-	 * records say. A closed virtual object written at fourteen point
-	 * is twenty-five pixels tall in every one of them, and a band
-	 * drawn any other height makes every closed object in a document
-	 * the wrong size.
-	 */
-	return ch + 11;
+	return tad_lnk_closed_h(vobj);
 }
 
 /*
@@ -401,6 +385,15 @@ LOCAL void draw_icon( INT gid, CONST T_DPRECT *box, CONST UW *px, INT w, INT h )
 
 	if ( side > OM_ICON_MAX ) side = OM_ICON_MAX;
 	if ( side <= 0 || w <= 0 || h <= 0 ) {
+		return;
+	}
+	if ( dp_scale(gid) > 100 ) {
+		T_DPRECT	b = *box;
+
+		/* drawn at a scale: the icon taken again at the box's own pixels, from all of its detail */
+		b.right = b.left + side;
+		b.bottom = b.top + side;
+		(void)dp_put_image(gid, &b, px, w, h, w, IMG_CLEAR);
 		return;
 	}
 	/* from the heap: this may run on a process's small stack of calls */
@@ -763,24 +756,28 @@ EXPORT ER om_cre_obj( CONST char *vol, CONST UB *name, UINT body, TS_UUID *p_uui
 /* A record of an object parsed; the document is the caller's to free */
 EXPORT ER om_rea_doc( CONST TS_UUID *uuid, INT recno, CONST T_TADLIM *lim, T_TAD **p_doc )
 {
-	T_OBREC	rec[OM_REC_MAX];
+	T_OBREC	*rec;
 	UB	*buf;
 	SZ	size = 0;
 	INT	cnt, i;
+	BOOL	doc;
 	ER	er;
 
 	if ( uuid == NULL || p_doc == NULL || recno < 0 ) {
 		return E_PAR;
 	}
-	cnt = om_obj_records(uuid, rec, OM_REC_MAX);
+	cnt = om_obj_records_all(uuid, &rec);
 	if ( cnt < 0 ) {
 		return (ER)cnt;
 	}
 	for ( i = 0; i < cnt && rec[i].recno != recno; i++ ) ;
 	if ( i == cnt ) {
+		Kfree(rec);
 		return E_NOEXS;
 	}
-	if ( rec[i].rt != OB_RT_TAD || rec[i].size == 0 ) {
+	doc = (BOOL)( rec[i].rt == OB_RT_TAD && rec[i].size != 0 );
+	Kfree(rec);
+	if ( !doc ) {
 		return E_OBJ;			/* not a document */
 	}
 	buf = om_obj_record(uuid, recno, &size);
@@ -811,7 +808,8 @@ EXPORT ER om_wri_doc( CONST TS_UUID *uuid, INT recno, T_TAD *doc )
 	if ( uuid == NULL || doc == NULL || recno < 0 ) {
 		return E_PAR;
 	}
-	key = ob_opn_obj(uuid, OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRRD);
+	/* links counted against what the record had, then the record replaced: no other writer between */
+	key = ob_opn_obj(uuid, OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRRD | OB_O_WEXCL);
 	if ( key < E_OK ) {
 		return (ER)key;
 	}

@@ -95,7 +95,7 @@ LOCAL void test_calendar( void )
 {
 	TS_TM	tm;
 	TS_TIME	t;
-	char	buf[64];
+	char	buf[64], zone[DT_ZONE_MAX];
 	INT	n, tz;
 
 	/* 2026-03-21 12:34:56 UTC is 1300710896 from 1985-01-01 */
@@ -150,9 +150,14 @@ LOCAL void test_calendar( void )
 		}
 	}
 
-	/* the time zone shifts local time only */
+	/*
+	 * The time zone shifts local time only. The zone the system has
+	 * (the calendar's, 540 minutes and Asia/Tokyo by default) is put
+	 * back afterwards: setting it writes the calendar on the system
+	 * volume, which the suites after this one and the next start read.
+	 */
 	KT_ASSERT_ER(dt_getsystz(&tz), E_OK);
-	KT_ASSERT_EQ(tz, 0);
+	KT_ASSERT(dt_getsyszone(zone, sizeof(zone)) >= 0);
 	KT_ASSERT_ER(dt_setsystz(9 * 60), E_OK);	/* Japan */
 	t = 0;
 	KT_ASSERT_ER(dt_localtime(&t, &tm), E_OK);
@@ -160,7 +165,9 @@ LOCAL void test_calendar( void )
 	KT_ASSERT_ER(dt_mktime_local(&tm, &t), E_OK);
 	KT_ASSERT_EQ(t, 0);
 	KT_ASSERT_ER(dt_setsystz(15 * 60), E_PAR);
-	KT_ASSERT_ER(dt_setsystz(0), E_OK);
+	KT_ASSERT_ER(dt_setsyszone(zone, tz), E_OK);
+	KT_ASSERT_ER(dt_getsystz(&n), E_OK);
+	KT_ASSERT_EQ(n, tz);
 
 	/* formatting */
 	t = 1300710896LL;

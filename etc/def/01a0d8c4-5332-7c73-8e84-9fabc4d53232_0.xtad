@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="マイクロカードのデータボックス">
 <document>
 <p>マイクロカードのデータボックス</p>
-<p>マイクロカードの表示設定、状態表示、並べ替え、重複検索、新しい実身への書き出し、削除と保存と形式変更の確認、印刷(差し込み)、印刷設定のパネルの定義。カードウィンドウと一覧ウィンドウはマイクロカードが自分で描く。</p>
+<p>マイクロカードの表示設定、状態表示、並べ替え、重複検索、新しい実身への書き出し、削除と保存と形式変更の確認、印刷(差し込み)、印刷設定のパネルの定義。パネル21〜23は、カードウィンドウの上の帯(カード画面、検索条件画面、設計画面)。帯の数字と文字はマイクロカードが書き換える。≒の押しボタンの絵はレコード0の資源0(PNG)。カードウィンドウのカードと一覧ウィンドウの表はマイクロカードが描く。</p>
 </document>
 <databox>
 <panel num="2" rect="0,0,452,250" title="表示設定">
@@ -105,6 +105,44 @@
 <box num="20" rect="80,358,444,384" max="60" jp="true"/>
 <button num="101" rect="260,388,348,414" answer="cancel">取消</button>
 <button num="102" rect="356,388,444,414" answer="ok" emph="true">設定</button>
+</panel>
+<panel num="21" rect="0,0,2560,36" title="カード画面" kind="bare">
+<switch num="31" rect="6,7,28,29"> </switch>
+<number num="32" rect="34,6,90,30" value="1"/>
+<text num="33" x="96" y="23"> </text>
+<button num="34" rect="210,6,238,30">◀</button>
+<button num="35" rect="242,6,270,30">▶</button>
+<text num="39" x="308" y="23"> </text>
+<button num="38" rect="374,6,438,30">検索解除</button>
+<button num="37" rect="442,6,506,30">検索条件</button>
+<button num="36" rect="510,6,550,30">一覧</button>
+<line rect="0,35,2560,36"/>
+</panel>
+<panel num="22" rect="0,0,2560,36" title="検索条件画面" kind="bare">
+<button num="41" rect="8,6,31,30">=</button>
+<button num="42" rect="35,6,63,30">≦</button>
+<button num="43" rect="67,6,95,30">≧</button>
+<button num="44" rect="99,6,122,30">&lt;</button>
+<button num="45" rect="126,6,149,30">&gt;</button>
+<button num="46" rect="153,6,181,30">≠</button>
+<button num="47" rect="185,6,213,30" pict="0_0.png">≒</button>
+<button num="48" rect="217,6,240,30">/</button>
+<button num="49" rect="244,6,267,30">?</button>
+<button num="50" rect="271,6,294,30">*</button>
+<button num="54" rect="302,6,366,30">検索解除</button>
+<button num="53" rect="370,6,434,30">絞込検索</button>
+<button num="52" rect="438,6,502,30">新規検索</button>
+<button num="51" rect="506,6,556,30">カード</button>
+<line rect="0,35,2560,36"/>
+</panel>
+<panel num="23" rect="0,0,2560,36" title="設計画面" kind="bare">
+<text x="8" y="23">印刷書式</text>
+<text num="63" x="80" y="23"> </text>
+<button num="64" rect="310,6,362,30">開く</button>
+<button num="65" rect="366,6,418,30">外す</button>
+<button num="62" rect="466,6,506,30">設定</button>
+<button num="61" rect="510,6,550,30">中止</button>
+<line rect="0,35,2560,36"/>
 </panel>
 </databox>
 </tad>

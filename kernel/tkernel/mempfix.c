@@ -45,7 +45,7 @@ EXPORT ER knl_fix_memorypool_initialize( void )
 	end = knl_mpfcb_table + NUM_MPFID;
 	for ( mpfcb = knl_mpfcb_table; mpfcb < end; mpfcb++ ) {
 		mpfcb->mpfid = 0;
-		knl_InitOBJLOCK(&mpfcb->lock);
+		knl_klk_init(&mpfcb->klk);
 		QueInsert(&mpfcb->wait_queue, &knl_free_mpfcb);
 	}
 
@@ -109,21 +109,22 @@ SYSCALL ID tk_cre_mpf( CONST T_CMPF *pk_cmpf )
 	mempool = pk_cmpf->bufptr;
 #endif
 
-	/* Get control block from FreeQue */
-	DISABLE_INTERRUPT;
+	/*
+	 * Get control block from FreeQue. TessronOS: the pool is guarded as
+	 * the other objects are, by the critical section and its lock (design
+	 * 4.3.3), not by masking the interrupts, which keeps nothing from
+	 * the other processors.
+	 */
+	BEGIN_CRITICAL_SECTION;
+	KLK_MISC();
 	mpfcb = (MPFCB*)QueRemoveNext(&knl_free_mpfcb);
-	ENABLE_INTERRUPT;
-
+	KLK_UNMISC();
 	if ( mpfcb == NULL ) {
-#if USE_IMALLOC
-		if ( (pk_cmpf->mpfatr & TA_USERBUF) == 0 ) {
-			knl_Ifree(mempool);
-		}
-#endif
-		return E_LIMIT;
+		mpfid = E_LIMIT;
+		goto error_exit;
 	}
 
-	knl_LockOBJ(&mpfcb->lock);
+	KLK_LOCK(&mpfcb->klk);
 	mpfid = ID_MPF(mpfcb - knl_mpfcb_table);
 
 	/* Initialize control block */
@@ -142,8 +143,16 @@ SYSCALL ID tk_cre_mpf( CONST T_CMPF *pk_cmpf )
 #endif
 
 	mpfcb->mpfid    = mpfid;  /* Set ID after completion */
-	knl_UnlockOBJ(&mpfcb->lock);
+	KLK_UNLOCK(&mpfcb->klk);
 
+    error_exit:
+	END_CRITICAL_SECTION;
+
+#if USE_IMALLOC
+	if ( mpfid < E_OK && (pk_cmpf->mpfatr & TA_USERBUF) == 0 ) {
+		knl_Ifree(mempool);
+	}
+#endif
 	return mpfid;
 }
 
@@ -163,11 +172,11 @@ SYSCALL ER tk_del_mpf( ID mpfid )
 
 	mpfcb = get_mpfcb(mpfid);
 
-	knl_LockOBJ(&mpfcb->lock);
+	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mpfcb->klk);
 	if ( mpfcb->mpfid == 0 ) {
 		ercd = E_NOEXS;
 	} else {
-		DISABLE_INTERRUPT;
 		mempool = mpfcb->mempool;
 		memattr = mpfcb->mpfatr;
 
@@ -175,11 +184,13 @@ SYSCALL ER tk_del_mpf( ID mpfid )
 		knl_wait_delete(&mpfcb->wait_queue);
 
 		/* Return to FreeQue */
-		QueInsert(&mpfcb->wait_queue, &knl_free_mpfcb);
 		mpfcb->mpfid = 0;
-		ENABLE_INTERRUPT;
+		KLK_MISC();
+		QueInsert(&mpfcb->wait_queue, &knl_free_mpfcb);
+		KLK_UNMISC();
 	}
-	knl_UnlockOBJ(&mpfcb->lock);
+	KLK_UNLOCK(&mpfcb->klk);
+	END_CRITICAL_SECTION;
 
 #if USE_IMALLOC
 	if ( (mempool != NULL) && ((memattr & TA_USERBUF) == 0) ) {
@@ -205,8 +216,16 @@ LOCAL void knl_mpf_chg_pri( TCB *tcb, INT oldpri )
 /*
  * Definition of fixed size memory pool wait specification
  */
-LOCAL CONST WSPEC knl_wspec_mpf_tfifo = { TTW_MPF, NULL, NULL };
-LOCAL CONST WSPEC knl_wspec_mpf_tpri  = { TTW_MPF, knl_mpf_chg_pri, NULL };
+/* The lock of the wait (design 4.3.3) */
+#if KLK_FINE_OBJ
+LOCAL KLOCK *mpf_wlock( TCB *tcb )
+{
+	return &get_mpfcb(tcb->wid)->klk;
+}
+#endif
+
+LOCAL CONST WSPEC knl_wspec_mpf_tfifo = { TTW_MPF, NULL, NULL WSPEC_LOCK(mpf_wlock) };
+LOCAL CONST WSPEC knl_wspec_mpf_tpri  = { TTW_MPF, knl_mpf_chg_pri, NULL WSPEC_LOCK(mpf_wlock) };
 
 /*
  * Get fixed size memory block 
@@ -223,7 +242,8 @@ SYSCALL_U ER tk_get_mpf_u( ID mpfid, void **p_blf, TMO_U tmout )
 
 	mpfcb = get_mpfcb(mpfid);
 
-	knl_LockOBJ(&mpfcb->lock);
+	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mpfcb->klk);
 	if ( mpfcb->mpfid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -231,7 +251,15 @@ SYSCALL_U ER tk_get_mpf_u( ID mpfid, void **p_blf, TMO_U tmout )
 
 	/* If there is no space, ready for wait */
 	if ( mpfcb->frbcnt <= 0 ) {
-		goto wait_mpf;
+		ercd = E_TMOUT;
+		if ( tmout == TMO_POL ) {
+			goto error_exit;
+		}
+		knl_ctxtsk->wspec = ( (mpfcb->mpfatr & TA_TPRI) != 0 )?
+					&knl_wspec_mpf_tpri: &knl_wspec_mpf_tfifo;
+		knl_ctxtsk->wercd = &ercd;
+		knl_ctxtsk->winfo.mpf.p_blf = p_blf;
+		knl_gcb_make_wait_u((GCB*)mpfcb, tmout);
 	} else {
 		/* Get memory block */
 		if ( mpfcb->freelist != NULL ) {
@@ -246,20 +274,7 @@ SYSCALL_U ER tk_get_mpf_u( ID mpfid, void **p_blf, TMO_U tmout )
 	}
 
     error_exit:
-	knl_UnlockOBJ(&mpfcb->lock);
-
-	return ercd;
-
-wait_mpf:
-	/* Ready for wait */
-	BEGIN_CRITICAL_SECTION;
-	knl_ctxtsk->wspec = ( (mpfcb->mpfatr & TA_TPRI) != 0 )?
-				&knl_wspec_mpf_tpri: &knl_wspec_mpf_tfifo;
-	knl_ctxtsk->wercd = &ercd;
-	knl_ctxtsk->winfo.mpf.p_blf = p_blf;
-	knl_gcb_make_wait_u((GCB*)mpfcb, tmout);
-
-	knl_UnlockOBJ(&mpfcb->lock);
+	KLK_UNLOCK(&mpfcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -289,7 +304,8 @@ SYSCALL ER tk_rel_mpf( ID mpfid, void *blf )
 
 	mpfcb = get_mpfcb(mpfid);
 
-	knl_LockOBJ(&mpfcb->lock);
+	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mpfcb->klk);
 	if ( mpfcb->mpfid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -301,16 +317,13 @@ SYSCALL ER tk_rel_mpf( ID mpfid, void *blf )
 	}
 #endif
 
-	DISABLE_INTERRUPT;
 	if ( !isQueEmpty(&mpfcb->wait_queue) ) {
 		/* Send memory block to waiting task,
 		   and then release the task */
 		tcb = (TCB*)mpfcb->wait_queue.next;
 		*tcb->winfo.mpf.p_blf = blf;
 		knl_wait_release_ok(tcb);
-		ENABLE_INTERRUPT;
 	} else {
-		ENABLE_INTERRUPT;
 		/* Free memory block */
 		free = (FREEL*)blf;
 		free->next = mpfcb->freelist;
@@ -319,7 +332,8 @@ SYSCALL ER tk_rel_mpf( ID mpfid, void *blf )
 	}
 
 error_exit:
-	knl_UnlockOBJ(&mpfcb->lock);
+	KLK_UNLOCK(&mpfcb->klk);
+	END_CRITICAL_SECTION;
 
 	return ercd;
 }
@@ -338,17 +352,17 @@ SYSCALL ER tk_ref_mpf( ID mpfid, T_RMPF *pk_rmpf )
 
 	mpfcb = get_mpfcb(mpfid);
 
-	knl_LockOBJ(&mpfcb->lock);
+	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mpfcb->klk);
 	if ( mpfcb->mpfid == 0 ) {
 		ercd = E_NOEXS;
 	} else {
-		DISABLE_INTERRUPT;
 		pk_rmpf->wtsk = knl_wait_tskid(&mpfcb->wait_queue);
-		ENABLE_INTERRUPT;
 		pk_rmpf->exinf = mpfcb->exinf;
 		pk_rmpf->frbcnt = mpfcb->frbcnt;
 	}
-	knl_UnlockOBJ(&mpfcb->lock);
+	KLK_UNLOCK(&mpfcb->klk);
+	END_CRITICAL_SECTION;
 
 	return ercd;
 }
@@ -432,8 +446,6 @@ SYSCALL ER td_ref_mpf( ID mpfid, TD_RMPF *pk_rmpf )
 	BEGIN_DISABLE_INTERRUPT;
 	if ( mpfcb->mpfid == 0 ) {
 		ercd = E_NOEXS;
-	} else if ( knl_isLockedOBJ(&mpfcb->lock) ) {
-		ercd = E_CTX;
 	} else {
 		pk_rmpf->wtsk = knl_wait_tskid(&mpfcb->wait_queue);
 		pk_rmpf->exinf = mpfcb->exinf;

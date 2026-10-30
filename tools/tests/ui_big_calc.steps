@@ -1,0 +1,73 @@
+# 大きな表 (docs/private/fixed-buffer-audit.md 10), for tools/ui_run.py:
+# a sheet of 100000 rows and 10 columns (a million cells, the last column
+# of each row a formula of the first two), made as a copy of the 基本表計算
+# template (mkbig) and opened; a SUM of the whole first column typed in K1
+# and its value checked, a cell of the first column changed so that the
+# SUM and the row's formula are worked out again, the sheet saved
+# (Ctrl+S), closed, opened again and found the same as it was saved.
+# The times are printed ("time ..." and "under ...").
+# The template's window is at 100,100, its first cell at 200,163.
+# Keys: → 4F, ← 50, ↑ 52, Enter 28, S 16, E 08 with Ctrl (01).
+mkbig calc 100000 10
+mark
+open big
+waitwin 基本表計算 1200
+sync 600
+under open 60000
+expect calc: ready 基本表計算 cells 1000000
+shot big_calc_open
+click 200 163
+key 4F
+key 4F
+key 4F
+key 4F
+key 4F
+key 4F
+key 4F
+key 4F
+key 4F
+key 4F
+sync 600
+hostmark
+text =SUM(A1:A100000)
+key 28
+expectin 600 calc: set K1 shows 49999500000
+hosttime sum 60000
+shot big_calc_sum
+key 52
+key 50
+key 50
+key 50
+key 50
+key 50
+key 50
+key 50
+key 50
+key 50
+key 50
+hostmark
+text 1000000
+key 28
+expectin 600 calc: set A1 shows 1000000
+sync 600
+hosttime change 10000
+mark
+key 16 01
+expectin 600 calc: saved
+sync 600
+under saved 60000
+sum
+keep saved
+key 08 01
+sync 600
+mark
+open big
+waitwin 基本表計算 1200
+sync 600
+under reopen 60000
+shot big_calc_reopen
+key 08 01
+sync 600
+sum
+same saved
+absent !OACV!

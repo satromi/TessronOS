@@ -42,11 +42,11 @@
 #include "desktop.h"
 
 #define FT_W		580		/* the panel, inside its frame */
-#define FT_H		290
+#define FT_H		316
 #define FT_NAME_W	140		/* the column of what each row is */
 #define FT_ROW0		40		/* the first row */
 #define FT_ROW_H	26
-#define FT_ROWS		9		/* the lines kept for whoever asks (dt_fault_lines) */
+#define FT_ROWS		10		/* the lines kept for whoever asks (dt_fault_lines) */
 
 #define KEY_ENTER	0x28
 #define KEY_ESCAPE	0x29
@@ -128,6 +128,58 @@ LOCAL INT put_hex( UB *b, INT n, INT max, UD v, INT digits )
 	return n;
 }
 
+/* Hex digits without 0x */
+LOCAL INT put_hexd( UB *b, INT n, INT max, UD v, INT digits )
+{
+	static CONST char	hex[] = "0123456789abcdef";
+	INT			i;
+
+	for ( i = digits - 1; i >= 0 && n < max - 1; i-- ) {
+		b[n++] = (UB)hex[( v >> ( i * 4 ) ) & 0xF];
+	}
+	b[n] = 0;
+	return n;
+}
+
+/*
+ * The code at the PC as the program's pages held it when it ended, the
+ * instruction the exception was reported at in brackets; what could
+ * not be read is dashes. Set beside the program's file, it tells
+ * whether the processor ran what the file has there.
+ */
+#ifdef CPU_CORE_X86_64
+#define CODE_FROM	0		/* bytes from the PC */
+#define CODE_TO		12
+#define CODE_UNIT	1
+#else
+#define CODE_FROM	( -4 )		/* the instruction before it and the one after */
+#define CODE_TO		8
+#define CODE_UNIT	4
+#endif
+
+LOCAL void put_code( CONST T_PRCFLT *f, UB *b, INT max )
+{
+	INT	o, at, k, n = 0;
+	UD	v;
+
+	for ( o = CODE_FROM; o < CODE_TO; o += CODE_UNIT ) {
+		at = TS_FLT_CODE_BACK + o;
+		if ( n > 0 ) n = put(b, n, max, " ");
+		if ( o == 0 ) n = put(b, n, max, "[");
+		if ( ( f->codeok & ( 1U << ( at / 4 ) ) ) == 0 ) {
+			n = put(b, n, max, ( CODE_UNIT == 4 ) ? "--------" : "--");
+		} else {
+			for ( v = 0, k = CODE_UNIT - 1; k >= 0; k-- ) {
+				v = ( v << 8 ) | f->code[at + k];
+			}
+			n = put_hexd(b, n, max, v, CODE_UNIT * 2);
+		}
+		if ( o == 0 && CODE_UNIT == 4 ) n = put(b, n, max, "]");
+	}
+	if ( CODE_UNIT == 1 ) (void)put(b, n, max, "]");
+}
+
+#ifndef CPU_CORE_X86_64
 /* What went wrong with the address of an abort, by its fault status code */
 LOCAL CONST char *fsc_word( UW fsc, BOOL exec )
 {
@@ -145,7 +197,49 @@ LOCAL CONST char *fsc_word( UW fsc, BOOL exec )
 	}
 	return NULL;
 }
+#endif
 
+#ifdef CPU_CORE_X86_64
+/*
+ * x86-64: the exception in words, from its vector (bits 39:32 of esr)
+ * and, for a page fault, its error code: P the page was there (and was
+ * refused), W a write, I an instruction's fetch
+ */
+#define PF_P		0x01
+#define PF_W		0x02
+#define PF_I		0x10
+
+LOCAL void describe( CONST T_PRCFLT *f, UB *b, INT max )
+{
+	UW	vec = (UW)( f->esr >> 32 ) & 0xff;
+	UW	err = (UW)f->esr;
+	INT	n = 0;
+
+	switch ( vec ) {
+	case 0:		n = put(b, n, max, "除算エラー");			break;
+	case 3:		n = put(b, n, max, "ブレークポイント");			break;
+	case 4:		n = put(b, n, max, "オーバーフロー");			break;
+	case 5:		n = put(b, n, max, "範囲外(BOUND)");			break;
+	case 6:		n = put(b, n, max, "未定義命令");			break;
+	case 7:		n = put(b, n, max, "浮動小数点・SIMD命令の使用");	break;
+	case 12:	n = put(b, n, max, "スタックセグメント例外");		break;
+	case 13:	n = put(b, n, max, "一般保護例外");			break;
+	case 14:
+		n = put(b, n, max, "ページフォールト(");
+		n = put(b, n, max, ( err & PF_P ) ? ( ( err & PF_I ) ? "実行を許されていないアドレス"
+							   : "アクセスを許されていないアドレス" )
+						   : "マップされていないアドレス");
+		n = put(b, n, max, ( err & PF_I ) ? "の実行)" : ( err & PF_W ) ? "への書込み)" : "からの読出し)");
+		break;
+	case 16:	n = put(b, n, max, "浮動小数点例外");			break;
+	case 17:	n = put(b, n, max, "アライメント例外");			break;
+	case 19:	n = put(b, n, max, "SIMD浮動小数点例外");		break;
+	default:
+		(void)put(b, n, max, ( vec == 1 ) ? "デバッグ例外" : "その他の例外");
+		break;
+	}
+}
+#else
 /* The exception in words, from the exception class of ESR and its syndrome */
 LOCAL void describe( CONST T_PRCFLT *f, UB *b, INT max )
 {
@@ -194,6 +288,7 @@ LOCAL void describe( CONST T_PRCFLT *f, UB *b, INT max )
 		break;
 	}
 }
+#endif
 
 /* ---------------------------------------------------------------- the panel */
 
@@ -251,12 +346,21 @@ LOCAL T_WMPANEL *build( void )
 	describe(f, b, sizeof(b));
 	row(def, 1, "例外", b);
 
+#ifdef CPU_CORE_X86_64
+	(void)put_hex(b, 0, sizeof(b), f->far, 16);
+	row(def, 2, "アドレス(CR2)", b);
+	(void)put_hex(b, 0, sizeof(b), f->elr, 16);
+	row(def, 3, kcall ? "PC(カーネル)" : "PC(RIP)", b);
+	(void)put_hex(b, 0, sizeof(b), f->lr, 16);
+	row(def, 4, kcall ? "RBP(カーネル)" : "RBP", b);
+#else
 	(void)put_hex(b, 0, sizeof(b), f->far, 16);
 	row(def, 2, "アドレス(FAR)", b);
 	(void)put_hex(b, 0, sizeof(b), f->elr, 16);
 	row(def, 3, kcall ? "PC(カーネル)" : "PC(ELR)", b);
 	(void)put_hex(b, 0, sizeof(b), f->lr, 16);
 	row(def, 4, kcall ? "LR(カーネル)" : "LR", b);
+#endif
 
 	n = put_num(b, 0, sizeof(b), f->exitcd);
 	(void)put(b, n, sizeof(b), ( f->exitcd == TS_ABORT_ILL ) ? "(TS_ABORT_ILL)"
@@ -265,18 +369,30 @@ LOCAL T_WMPANEL *build( void )
 
 	n = put(b, 0, sizeof(b), "タスク");
 	n = put_num(b, n, sizeof(b), f->tskid);
+#ifdef CPU_CORE_X86_64
+	n = put(b, n, sizeof(b), "、ベクタ ");
+	n = put_num(b, n, sizeof(b), (D)( ( f->esr >> 32 ) & 0xff ));
+	n = put(b, n, sizeof(b), "、エラーコード ");
+	(void)put_hex(b, n, sizeof(b), f->esr & 0xffffffffU, 8);
+#else
 	n = put(b, n, sizeof(b), "、ESR ");
 	n = put_hex(b, n, sizeof(b), f->esr, 8);
 	n = put(b, n, sizeof(b), "(EC ");
 	n = put_hex(b, n, sizeof(b), ( f->esr >> 26 ) & 0x3f, 2);
 	(void)put(b, n, sizeof(b), ")");
+#endif
 	row(def, 6, "詳細", b);
+
+	if ( f->kind == TS_FLT_EL0 ) {
+		put_code(f, b, sizeof(b));
+		row(def, 7, "PCの命令", b);
+	}
 
 	if ( ft->others > 0 ) {
 		n = put(b, 0, sizeof(b), "このほかに");
 		n = put_num(b, n, sizeof(b), (D)ft->others);
 		(void)put(b, n, sizeof(b), "件、例外で終了したプログラムがあります");
-		(void)dt_pn_add(def, WM_PT_LABEL, 0, 14, FT_ROW0 + 7 * FT_ROW_H + 4, FT_W - 28, 22,
+		(void)dt_pn_add(def, WM_PT_LABEL, 0, 14, FT_ROW0 + 8 * FT_ROW_H + 4, FT_W - 28, 22,
 				(CONST char *)b);
 		if ( ft->nline < FT_ROWS ) {
 			(void)put(ft->line[ft->nline++], 0, WM_LABEL_MAX, (CONST char *)b);
@@ -405,8 +521,13 @@ EXPORT void dt_fault_poll( void )
 	}
 	others += lost;
 	if ( got ) {
+#ifdef CPU_CORE_X86_64
+		tm_printf((UB *)"TessronOS desktop: pid %d ended by an exception (vector %d): told\n",
+			  f.pid, (INT)( ( f.esr >> 32 ) & 0xff ));
+#else
 		tm_printf((UB *)"TessronOS desktop: pid %d ended by an exception (EC %02x): told\n",
 			  f.pid, (INT)( ( f.esr >> 26 ) & 0x3f ));
+#endif
 		show(&f, others);
 	}
 }

@@ -3,7 +3,7 @@
 <figView top="0" left="0" right="400" bottom="400"/>
 <figDraw top="0" left="0" right="400" bottom="400"/>
 <figScale hunit="-72" vunit="-72"/>
-<link id="019b8230-f63a-7985-b69d-20e43d55506c_0.xtad" vobjleft="10" vobjtop="10" vobjright="160" vobjbottom="40" height="30" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="0" pictdisp="true" namedisp="true" roledisp="false" typedisp="false" updatedisp="false" framedisp="true" autoopen="false"/>
-<link id="019b9c16-5d57-7ff4-8359-5af2e5291715_0.xtad" vobjleft="11" vobjtop="52" vobjright="161" vobjbottom="82" height="30" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="0"/>
+<link id="019b8230-f63a-7985-b69d-20e43d55506c_0.xtad" relationship="休日" vobjleft="10" vobjtop="10" vobjright="160" vobjbottom="40" height="30" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="0" pictdisp="true" namedisp="true" roledisp="false" typedisp="false" updatedisp="false" framedisp="true" autoopen="false"/>
+<link id="019b9c16-5d57-7ff4-8359-5af2e5291715_0.xtad" relationship="年月日実身" vobjleft="11" vobjtop="52" vobjright="161" vobjbottom="82" height="30" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="0"/>
 </figure>
 </tad>

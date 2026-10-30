@@ -297,7 +297,7 @@ LOCAL void page_gone( T_UMEM *um, UD pa, BOOL hold )
 	if ( hold ) {
 		*(UD *)PA2VA(pa) = um->held;
 		um->held = pa;
-		um->nheld++;
+		__atomic_store_n(&um->nheld, um->nheld + 1, __ATOMIC_SEQ_CST);
 	} else {
 		knl_free_pages(knl_pa_to_pf(pa), 0);
 	}
@@ -630,6 +630,16 @@ EXPORT void knl_umem_wx( T_UMEM *um, T_SPACE *sp, UD out[6] )
 	out[5] = um->to_write;
 }
 
+/*
+ * Whether pages are held back: read without the lock by the last call
+ * of the process to come out (knl_prc_call_leave), which then gives
+ * them back under it
+ */
+EXPORT BOOL knl_umem_held( T_UMEM *um )
+{
+	return (BOOL)( um != NULL && __atomic_load_n(&um->nheld, __ATOMIC_SEQ_CST) != 0 );
+}
+
 EXPORT void knl_umem_flush( T_UMEM *um )
 {
 	if ( um == NULL ) return;
@@ -639,7 +649,7 @@ EXPORT void knl_umem_flush( T_UMEM *um )
 		um->held = *(UD *)PA2VA(pa);
 		knl_free_pages(knl_pa_to_pf(pa), 0);
 	}
-	um->nheld = 0;
+	__atomic_store_n(&um->nheld, 0, __ATOMIC_SEQ_CST);
 }
 
 EXPORT UD knl_umem_bytes( T_UMEM *um )

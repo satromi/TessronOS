@@ -21,6 +21,8 @@
 
 #if defined(__aarch64__)
 #include "sysdepend/armv8a/pth_cpu.h"
+#elif defined(__x86_64__)
+#include "sysdepend/x86_64/pth_cpu.h"
 #else
 #error "lib/libpthread: no thread pointer for this architecture"
 #endif

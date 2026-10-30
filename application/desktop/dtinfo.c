@@ -27,10 +27,14 @@
  *	of the metadata to agree, so that what the TADjs Desktop reads
  *	says the same.
  *
- *	付箋指定 is the applist: the programs the object can be opened with
- *	(its 機能付箋), and the one it opens with: the one chosen in the
- *	list, its lamp lit. A program is added from those the system holds, so
- *	that what is named is a program that can be run. A program's 付箋
+ *	付箋指定 is the list 実行 of the link's menu shows (dt_app_list): the
+ *	programs of the applist, the object's 機能付箋, then those offered for
+ *	an object of its kind, marked so. The one it opens with is the one
+ *	chosen in the list, its lamp lit; chosen among those of its kind, it
+ *	joins the applist when 適用 writes it. Those of its kind are not taken
+ *	out of the list: they come with the kind. A program is added from
+ *	those the system holds, so that what is named is a program that can
+ *	be run. A program's 付箋
  *	is a link to the program object: コピー in the window's 編集 menu
  *	puts such a link in the tray, and 貼り付け takes the programs of the
  *	links in the tray -- a 付箋 copied from another object's list, or a
@@ -64,9 +68,8 @@
 
 #define IF_W		460		/* the panel, inside its frame */
 #define IF_H		420
-#define IF_APP_MAX	16		/* programs in the applist */
-#define IF_WHO_MAX	(8 + OB_ACL_MAX + CNF_OB_MAX_GROUPS)
-#define IF_TEXT		96		/* one line of a list */
+#define IF_APP_MAX	32		/* programs in the list */
+#define IF_TEXT		128		/* one line of a list */
 #define IF_CHSZ		14		/* a 付箋's letters */
 
 /* The part numbers */
@@ -119,11 +122,12 @@ typedef struct {
 	BOOL		lock_was;
 
 	BOOL		prt_ok;		/* the protection could be read */
-	T_OBPRT		prt, prt0;
+	T_OBPRT		*prt, *prt0;	/* the protection as set here, and as it was read */
 
 	INT		napp, dflt;
 	UB		id[IF_APP_MAX][OM_APP_ID];
 	UB		name[IF_APP_MAX][OM_APP_NAME];
+	BOOL		listed[IF_APP_MAX];	/* in the applist; FALSE: offered for the object's kind */
 	BOOL		apps_changed;
 
 	/* the indices of the parts set anew while the panel is open */
@@ -204,11 +208,14 @@ LOCAL void who_name( CONST TS_UUID *u, UB *b, INT max )
 
 /* ---------------------------------------------------------------- the users and groups there are */
 
+/* The users and groups who_all may give: those it always offers, the protection's, the desktop's groups */
+#define IF_WHO_ROOM(st)	( 8 + (st)->prt->nacl + CNF_OB_MAX_GROUPS )
+
 LOCAL INT who_add( WHO *w, INT n, CONST TS_UUID *u, UINT kind )
 {
 	INT	i;
 
-	if ( n >= IF_WHO_MAX || ts_uuid_cmp(u, &nobody) == 0 ) {
+	if ( ts_uuid_cmp(u, &nobody) == 0 ) {
 		return n;
 	}
 	for ( i = 0; i < n; i++ ) {
@@ -243,11 +250,11 @@ LOCAL INT who_all( CONST INFO *st, UINT kind, WHO *w )
 		}
 	}
 	if ( crd != NULL ) Kfree(crd);
-	if ( kind != W_GROUP ) n = who_add(w, n, &st->prt.owner, W_USER);
-	if ( kind != W_USER )  n = who_add(w, n, &st->prt.group, W_GROUP);
-	for ( i = 0; i < st->prt.nacl; i++ ) {
-		if ( kind == 0 || kind == st->prt.acl[i].kind ) {
-			n = who_add(w, n, &st->prt.acl[i].who, st->prt.acl[i].kind);
+	if ( kind != W_GROUP ) n = who_add(w, n, &st->prt->owner, W_USER);
+	if ( kind != W_USER )  n = who_add(w, n, &st->prt->group, W_GROUP);
+	for ( i = 0; i < st->prt->nacl; i++ ) {
+		if ( kind == 0 || kind == st->prt->acl[i].kind ) {
+			n = who_add(w, n, &st->prt->acl[i].who, st->prt->acl[i].kind);
 		}
 	}
 	return n;
@@ -259,9 +266,9 @@ LOCAL INT who_all( CONST INFO *st, UINT kind, WHO *w )
  */
 LOCAL BOOL who_choose( INFO *st, CONST char *title, UINT kind, BOOL none, WHO *out )
 {
-	WHO		*w = (WHO *)Kmalloc(sizeof(WHO) * IF_WHO_MAX);
-	UB		(*txt)[IF_TEXT] = (UB (*)[IF_TEXT])Kmalloc(IF_TEXT * ( IF_WHO_MAX + 1 ));
-	CONST char	**names = (CONST char **)Kmalloc(sizeof(char *) * ( IF_WHO_MAX + 1 ));
+	WHO		*w = (WHO *)Kmalloc(sizeof(WHO) * IF_WHO_ROOM(st));
+	UB		(*txt)[IF_TEXT] = (UB (*)[IF_TEXT])Kmalloc(IF_TEXT * (SZ)( IF_WHO_ROOM(st) + 1 ));
+	CONST char	**names = (CONST char **)Kmalloc(sizeof(char *) * (SZ)( IF_WHO_ROOM(st) + 1 ));
 	INT		n = 0, m = 0, i, k, at;
 	BOOL		ok = FALSE;
 
@@ -314,9 +321,9 @@ LOCAL void show_owner( INFO *st )
 {
 	UB	b[IF_TEXT];
 
-	who_name(&st->prt.owner, b, sizeof(b));
+	who_name(&st->prt->owner, b, sizeof(b));
 	set_label(st, st->i_owner, b);
-	who_name(&st->prt.group, b, sizeof(b));
+	who_name(&st->prt->group, b, sizeof(b));
 	set_label(st, st->i_group, b);
 }
 
@@ -338,8 +345,8 @@ LOCAL void show_acl( INFO *st )
 	INT	len = 0, i, k;
 
 	if ( all == NULL ) return;
-	for ( i = 0; i < st->prt.nacl && len + IF_TEXT < WM_POOL_BYTES / 2; i++ ) {
-		CONST T_OBACE	*a = &st->prt.acl[i];
+	for ( i = 0; i < st->prt->nacl && len + IF_TEXT < WM_POOL_BYTES / 2; i++ ) {
+		CONST T_OBACE	*a = &st->prt->acl[i];
 		UB		*b = all + len;
 		BOOL		any = FALSE;
 
@@ -353,7 +360,7 @@ LOCAL void show_acl( INFO *st )
 		if ( !any ) k = put(b, k, IF_TEXT, "なし");
 		len += k + 1;
 	}
-	set_names(st, st->i_acl, N_ACL, all, len, st->prt.nacl);
+	set_names(st, st->i_acl, N_ACL, all, len, st->prt->nacl);
 	Kfree(all);
 }
 
@@ -367,7 +374,8 @@ LOCAL void show_apps( INFO *st )
 	for ( i = 0; i < st->napp && len + IF_TEXT < WM_POOL_BYTES / 2; i++ ) {
 		k = put(all + len, 0, IF_TEXT - 44, (CONST char *)st->name[i]);
 		k = put(all + len, k, IF_TEXT, "（");
-		k = put(all + len, k, IF_TEXT - 4, (CONST char *)st->id[i]);
+		k = put(all + len, k, IF_TEXT - 40, (CONST char *)st->id[i]);
+		if ( !st->listed[i] ) k = put(all + len, k, IF_TEXT - 4, "、実身の種類から");
 		k = put(all + len, k, IF_TEXT, "）");
 		len += k + 1;
 	}
@@ -418,6 +426,10 @@ LOCAL void app_add( INFO *st, CONST DTPROG *p )
 
 	for ( i = 0; i < st->napp; i++ ) {
 		if ( str_eq(st->id[i], p->id) ) {
+			if ( !st->listed[i] ) {
+				st->listed[i] = TRUE;	/* one of its kind, now in the applist */
+				st->apps_changed = TRUE;
+			}
 			return;			/* already in it */
 		}
 	}
@@ -426,6 +438,7 @@ LOCAL void app_add( INFO *st, CONST DTPROG *p )
 	}
 	(void)put(st->id[st->napp], 0, OM_APP_ID, (CONST char *)p->id);
 	(void)put(st->name[st->napp], 0, OM_APP_NAME, (CONST char *)p->name);
+	st->listed[st->napp] = TRUE;
 	if ( st->dflt < 0 ) {
 		st->dflt = st->napp;
 	}
@@ -436,32 +449,48 @@ LOCAL void app_add( INFO *st, CONST DTPROG *p )
 /* The program a link names: the program object, or one of its templates */
 LOCAL CONST DTPROG *prog_of_link( CONST TS_UUID *target )
 {
-	CONST DTPROG	*all[64], *p = dt_prog_of(target);
+	CONST DTPROG	**all, *p = dt_prog_of(target);
 	INT		n, i, k;
 
 	if ( p != NULL ) {
 		return p;
 	}
-	n = dt_prog_list(0, all, 64);
-	for ( i = 0; i < n; i++ ) {
+	n = dt_prog_count(0);
+	all = (CONST DTPROG **)Kmalloc(sizeof(DTPROG *) * (SZ)( ( n > 0 ) ? n : 1 ));
+	if ( all == NULL ) {
+		return NULL;
+	}
+	n = dt_prog_list(0, all, n);
+	for ( i = 0; i < n && p == NULL; i++ ) {
 		for ( k = 0; k < all[i]->nbase; k++ ) {
 			if ( ts_uuid_cmp(&all[i]->base[k], target) == 0 ) {
-				return all[i];
+				p = all[i];
 			}
 		}
 	}
-	return NULL;
+	Kfree((void *)all);
+	return p;
 }
 
 LOCAL void choose_app( INFO *st )
 {
-	CONST DTPROG	*all[64];
-	UB		(*txt)[IF_TEXT] = (UB (*)[IF_TEXT])Kmalloc(IF_TEXT * 64);
-	CONST char	*names[64];
+	CONST DTPROG	**all;
+	UB		(*txt)[IF_TEXT];
+	CONST char	**names;
 	INT		n, i, k, at;
 
-	if ( txt == NULL ) return;
-	n = dt_prog_list(0, all, 64);
+	/* every program, however many */
+	n = dt_prog_count(0);
+	all = (CONST DTPROG **)Kmalloc(sizeof(DTPROG *) * (SZ)( ( n > 0 ) ? n : 1 ));
+	txt = (UB (*)[IF_TEXT])Kmalloc(IF_TEXT * (SZ)( ( n > 0 ) ? n : 1 ));
+	names = (CONST char **)Kmalloc(sizeof(char *) * (SZ)( ( n > 0 ) ? n : 1 ));
+	if ( all == NULL || txt == NULL || names == NULL ) {
+		if ( all != NULL ) Kfree((void *)all);
+		if ( txt != NULL ) Kfree(txt);
+		if ( names != NULL ) Kfree((void *)names);
+		return;
+	}
+	n = dt_prog_list(0, all, n);
 	/* a command opens no object: it is not one to add */
 	for ( i = k = 0; i < n; i++ ) {
 		if ( all[i]->kind != DT_PK_COMMAND ) all[k++] = all[i];
@@ -478,6 +507,8 @@ LOCAL void choose_app( INFO *st )
 		app_add(st, all[at]);
 	}
 	Kfree(txt);
+	Kfree((void *)all);
+	Kfree((void *)names);
 }
 
 /* The 付箋 of the program chosen put in the tray: a link to the program object */
@@ -566,13 +597,13 @@ LOCAL void act( INFO *st, UINT a )
 	switch ( a ) {
 	case A_OWNER:
 		if ( who_choose(st, "所有者", W_USER, TRUE, &w) ) {
-			st->prt.owner = w.u;
+			st->prt->owner = w.u;
 			show_owner(st);
 		}
 		break;
 	case A_GROUP:
 		if ( who_choose(st, "グループ", W_GROUP, TRUE, &w) ) {
-			st->prt.group = w.u;
+			st->prt->group = w.u;
 			show_owner(st);
 		}
 		break;
@@ -586,28 +617,37 @@ LOCAL void act( INFO *st, UINT a )
 			break;
 		}
 		/* one entry for each: given again, it is the rights that change */
-		for ( i = 0; i < st->prt.nacl; i++ ) {
-			if ( st->prt.acl[i].kind == w.kind && ts_uuid_cmp(&st->prt.acl[i].who, &w.u) == 0 ) {
+		for ( i = 0; i < st->prt->nacl; i++ ) {
+			if ( st->prt->acl[i].kind == w.kind && ts_uuid_cmp(&st->prt->acl[i].who, &w.u) == 0 ) {
 				break;
 			}
 		}
-		if ( i == st->prt.nacl ) {
-			if ( st->prt.nacl >= OB_ACL_MAX ) break;
-			st->prt.nacl++;
+		if ( i == st->prt->nacl ) {
+			/* one entry more, the records' limits kept after the entries */
+			T_OBPRT	*np = knl_ob_prt_room(st->prt, st->prt->nacl + 1, st->prt->nrmask);
+
+			if ( np == NULL ) break;
+			st->prt = np;
 		}
-		st->prt.acl[i].kind = w.kind;
-		st->prt.acl[i].who = w.u;
-		st->prt.acl[i].ops = ops;
+		st->prt->acl[i].kind = w.kind;
+		st->prt->acl[i].who = w.u;
+		st->prt->acl[i].ops = ops;
 		show_acl(st);
 		break;
 	}
 	case A_ACL_DEL:
 		i = dt_pn_value(st->pid, N_ACL) - 1;
-		if ( i >= 0 && i < st->prt.nacl ) {
-			for ( ; i < st->prt.nacl - 1; i++ ) {
-				st->prt.acl[i] = st->prt.acl[i + 1];
+		if ( i >= 0 && i < st->prt->nacl ) {
+			T_OBPRT	*np;
+
+			for ( ; i < st->prt->nacl - 1; i++ ) {
+				st->prt->acl[i] = st->prt->acl[i + 1];
 			}
-			st->prt.nacl--;
+			/* one entry fewer: the limits move up after the entries left */
+			np = knl_ob_prt_room(st->prt, st->prt->nacl - 1, st->prt->nrmask);
+			if ( np != NULL ) {
+				st->prt = np;
+			}
 			show_acl(st);
 		}
 		break;
@@ -616,10 +656,13 @@ LOCAL void act( INFO *st, UINT a )
 		show_apps(st);
 		break;
 	case A_APP_DEL:
-		if ( sel >= 0 && sel < st->napp ) {
+		if ( sel >= 0 && sel < st->napp && !st->listed[sel] ) {
+			dt_tell(st->d, "実身の種類で選べるプログラムは削除できません", (CONST char *)st->name[sel]);
+		} else if ( sel >= 0 && sel < st->napp ) {
 			for ( i = sel; i < st->napp - 1; i++ ) {
 				knl_memcpy(st->id[i], st->id[i + 1], OM_APP_ID);
 				knl_memcpy(st->name[i], st->name[i + 1], OM_APP_NAME);
+				st->listed[i] = st->listed[i + 1];
 			}
 			st->napp--;
 			if ( st->dflt == sel ) st->dflt = ( st->napp > 0 ) ? 0 : -1;
@@ -737,7 +780,7 @@ LOCAL void build_users( T_WMPANEL *def, INFO *st )
 			pt = add(def, 2, WM_PT_CHECK, N_MODE + r * 3 + c, 130 + c * 96, 132 + r * 26,
 				 90, 22, ops[c]);
 			if ( pt != NULL ) {
-				pt->value = ( st->prt.mode & ( 0400U >> ( r * 3 + c ) ) ) ? 1 : 0;
+				pt->value = ( st->prt->mode & ( 0400U >> ( r * 3 + c ) ) ) ? 1 : 0;
 				if ( off ) pt->type |= P_DISABLE;
 			}
 		}
@@ -745,12 +788,12 @@ LOCAL void build_users( T_WMPANEL *def, INFO *st )
 	(void)add(def, 2, WM_PT_LABEL, 0, 14, 216, 110, 22, "属性");
 	pt = add(def, 2, WM_PT_CHECK, N_RONLY, 130, 216, 110, 22, "編集不可");
 	if ( pt != NULL ) {
-		pt->value = ( st->prt.attr & OB_A_RONLY ) ? 1 : 0;
+		pt->value = ( st->prt->attr & OB_A_RONLY ) ? 1 : 0;
 		if ( off ) pt->type |= P_DISABLE;
 	}
 	pt = add(def, 2, WM_PT_CHECK, N_PERM, 250, 216, 110, 22, "削除不可");
 	if ( pt != NULL ) {
-		pt->value = ( st->prt.attr & OB_A_PERM ) ? 1 : 0;
+		pt->value = ( st->prt->attr & OB_A_PERM ) ? 1 : 0;
 		if ( off ) pt->type |= P_DISABLE;
 	}
 
@@ -801,28 +844,33 @@ LOCAL void build_apps( T_WMPANEL *def, INFO *st )
 
 LOCAL void load( INFO *st )
 {
-	UB	dflt[OM_APP_ID];
-	INT	i;
+	DTAPP	*a;
+	INT	i, n, room, dflt = -1;
 
-	st->prt_ok = (BOOL)( ob_get_prt(&st->v->target, &st->prt) >= E_OK );
+	st->prt = knl_ob_prt_get(&st->v->target);
+	st->prt_ok = (BOOL)( st->prt != NULL );
 	if ( !st->prt_ok ) {
-		knl_memset(&st->prt, 0, sizeof(st->prt));
+		st->prt = knl_ob_prt_new(0, 0);
 	}
-	st->prt0 = st->prt;
+	st->prt0 = ( st->prt != NULL ) ? knl_ob_prt_dup(st->prt) : NULL;
+	if ( st->prt == NULL || st->prt0 == NULL ) {
+		st->prt_ok = FALSE;
+	}
 
-	st->napp = om_store_apps(&st->v->target, st->name, IF_APP_MAX);
+	/* the list 実行 shows */
+	st->napp = 0;
 	st->dflt = -1;
-	if ( om_store_default_app(&st->v->target, dflt, sizeof(dflt)) < 0 ) {
-		dflt[0] = 0;
+	room = dt_app_list(st->v, NULL, 0, NULL);
+	a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
+	n = ( a != NULL ) ? dt_app_list(st->v, a, room, &dflt) : 0;
+	for ( i = 0; i < n && st->napp < IF_APP_MAX; i++ ) {
+		(void)put(st->id[st->napp], 0, OM_APP_ID, (CONST char *)a[i].id);
+		(void)put(st->name[st->napp], 0, OM_APP_NAME, (CONST char *)a[i].name);
+		st->listed[st->napp] = a[i].listed;
+		if ( i == dflt ) st->dflt = st->napp;
+		st->napp++;
 	}
-	for ( i = 0; i < st->napp; i++ ) {
-		if ( om_store_app_id(&st->v->target, i, st->id[i], OM_APP_ID) < 0 ) {
-			st->id[i][0] = 0;
-		}
-		if ( st->dflt < 0 && dflt[0] != 0 && str_eq(st->id[i], dflt) ) {
-			st->dflt = i;
-		}
-	}
+	if ( a != NULL ) Kfree(a);
 }
 
 LOCAL BOOL same_bytes( CONST void *a, CONST void *b, SZ n )
@@ -851,34 +899,43 @@ LOCAL BOOL apply( INFO *st )
 	INT	r, c;
 
 	if ( st->prt_ok ) {
-		st->prt.mode &= ~0777U;
+		st->prt->mode &= ~0777U;
 		for ( r = 0; r < 3; r++ ) {
 			for ( c = 0; c < 3; c++ ) {
 				if ( dt_pn_value(st->pid, N_MODE + r * 3 + c) != 0 ) {
-					st->prt.mode |= 0400U >> ( r * 3 + c );
+					st->prt->mode |= 0400U >> ( r * 3 + c );
 				}
 			}
 		}
-		st->prt.attr &= ~( OB_A_RONLY | OB_A_PERM );
-		if ( dt_pn_value(st->pid, N_RONLY) != 0 ) st->prt.attr |= OB_A_RONLY;
-		if ( dt_pn_value(st->pid, N_PERM) != 0 )  st->prt.attr |= OB_A_PERM;
-		if ( !same_bytes(&st->prt, &st->prt0, sizeof(T_OBPRT))
-		  && ob_set_prt(&st->v->target, &st->prt) < E_OK ) {
+		st->prt->attr &= ~( OB_A_RONLY | OB_A_PERM );
+		if ( dt_pn_value(st->pid, N_RONLY) != 0 ) st->prt->attr |= OB_A_RONLY;
+		if ( dt_pn_value(st->pid, N_PERM) != 0 )  st->prt->attr |= OB_A_PERM;
+		if ( !( OB_PRT_LEN(st->prt) == OB_PRT_LEN(st->prt0)
+			&& same_bytes(st->prt, st->prt0, OB_PRT_LEN(st->prt)) )
+		  && ob_set_prt(&st->v->target, st->prt) < E_OK ) {
 			ok = FALSE;
 		}
 	}
 	if ( st->apps_changed ) {
+		/* the applist's own, and the one it opens with when it is one of its kind */
 		CONST UB	*ids[IF_APP_MAX], *names[IF_APP_MAX];
-		INT		i;
+		INT		i, n = 0, dflt = -1;
 
 		for ( i = 0; i < st->napp; i++ ) {
-			ids[i] = st->id[i];
-			names[i] = st->name[i];
+			if ( !st->listed[i] && i != st->dflt ) continue;
+			if ( i == st->dflt ) dflt = n;
+			ids[n] = st->id[i];
+			names[n++] = st->name[i];
 		}
-		(void)om_store_set_apps(&st->v->target, ids, names, st->napp, st->dflt);
+		(void)om_store_set_apps(&st->v->target, ids, names, n, dflt);
 	}
-	if ( ( dt_pn_value(st->pid, N_LOCK) != 0 ) != st->lock_was && parent_of(st) != NULL ) {
-		dt_lock_app(st->parent, st->v);
+	{
+		BOOL	lock = (BOOL)( dt_pn_value(st->pid, N_LOCK) != 0 );
+
+		/* fixed or let go; still fixed with another default chosen, fixed to that one */
+		if ( parent_of(st) != NULL && ( lock != st->lock_was || ( lock && st->apps_changed ) ) ) {
+			dt_keep_app(st->parent, st->v, lock);
+		}
 	}
 	return ok;
 }
@@ -906,6 +963,14 @@ LOCAL void info_draw( DTWIN *d )
 	wm_update();
 }
 
+/* The panel's state let go, with the protections it holds */
+LOCAL void info_free( INFO *st )
+{
+	if ( st->prt != NULL ) Kfree(st->prt);
+	if ( st->prt0 != NULL ) Kfree(st->prt0);
+	Kfree(st);
+}
+
 LOCAL void info_close( DTWIN *d )
 {
 	INFO	*st = (INFO *)d->self;
@@ -916,7 +981,7 @@ LOCAL void info_close( DTWIN *d )
 	if ( st->pid >= 0 ) {
 		(void)wm_panel_close(st->pid);
 	}
-	Kfree(st);
+	info_free(st);
 	tm_printf((UB *)"info: closed\n");
 }
 
@@ -977,7 +1042,7 @@ EXPORT void dt_real_info( DTWIN *d, CONST T_VOBJ *v )
 
 	def = dt_pn_new(IF_W, IF_H);
 	if ( def == NULL ) {
-		Kfree(st);
+		info_free(st);
 		return;
 	}
 	def->kind = WM_PNL_BARE;
@@ -1018,7 +1083,7 @@ EXPORT void dt_real_info( DTWIN *d, CONST T_VOBJ *v )
 	w = dt_own_open(&info_own, st, &o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE, title, NULL);
 	if ( w == NULL ) {
 		Kfree(def);
-		Kfree(st);
+		info_free(st);
 		return;
 	}
 	st->d = w;

@@ -1,0 +1,34 @@
+# ディスク修復 at start on the x64 PC (tools/x64/ui_run64.py --disk OUT --fresh, OUT made by
+# tools/tests/dfix_disk.py --pc from the x64 disk image: the repair of the system volume nvmea1
+# asked for in DISKFIX.REQ on the EFI system partition); the steps as tools/tests/ui_diskfix_boot.steps.
+# ディスク修復 at start (design 11.25), for tools/ui_run.py with the disk
+# that tools/tests/dfix_disk.py --boot makes: the count of the program box
+# on the system volume raised by two, and the request DISKFIX.REQ on the
+# boot volume, as the accessory leaves them before the machine starts
+# again. The start repairs the system volume before it is attached, and
+# the desktop opens the window by itself with what came of it (where
+# ui_diskfix.steps has it): one thing found and put right, the lines
+# in 障害情報 opened from the menu of the second button (障害情報 three
+# rows below 閉じる under the pointer), its 終了, and the window closed
+# with 閉じる of its menu (障害情報 under the pointer, 閉じる three rows
+# above).
+expect dfix: boot result 1 0
+wait 600
+shot df_boot
+click 640 300 1
+expect dfix: menu 1
+wait 300
+shot df_boot_menu
+click 648 360
+expect desktop: chosen dfix.info
+expect dfix: info 1 page 1
+wait 400
+shot df_boot_info
+click 945 658
+expect dfix: info closed 1
+click 640 300 1
+expect dfix: menu 2
+wait 300
+click 648 240
+expect desktop: chosen close
+expect dfix: closed

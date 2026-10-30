@@ -180,7 +180,7 @@ LOCAL ER rd( GPT *g, UD lba, UD n, void *buf )
 {
 	SZ	asz;
 
-	return tk_srea_dev(g->dd, (W)lba, buf, (SZ)( n * SECT ), &asz);
+	return tk_srea_dev_d(g->dd, (D)lba, buf, (SZ)( n * SECT ), &asz);
 }
 
 LOCAL ER wr( GPT *g, UD lba, UD n, CONST void *buf )
@@ -194,7 +194,7 @@ LOCAL ER wr( GPT *g, UD lba, UD n, CONST void *buf )
 		}
 		gpt_cut_after--;
 	}
-	return tk_swri_dev(g->dd, (W)lba, (void *)buf, (SZ)( n * SECT ), &asz);
+	return tk_swri_dev_d(g->dd, (D)lba, buf, (SZ)( n * SECT ), &asz);
 }
 
 LOCAL void flush( GPT *g )
@@ -283,11 +283,11 @@ LOCAL ER gpt_open( CONST char *disk, GPT *g, UINT mode )
 		return er;
 	}
 	if ( tk_srea_dev(g->dd, TDN_DISKINFO, &info, sizeof(info), &asz) < E_OK
-	  || info.blocksize != SECT || info.blockcont < 4 * GPT_ALIGN ) {
+	  || info.blocksize != SECT || info.blockcont_d < 4 * GPT_ALIGN ) {
 		gpt_close(g);
 		return E_NOSPT;
 	}
-	g->nsect = (UD)info.blockcont;
+	g->nsect = (UD)info.blockcont_d;
 	s = (UB *)Kmalloc(SECT * 2);
 	if ( s == NULL ) {
 		gpt_close(g);
@@ -636,13 +636,41 @@ EXPORT ER knl_gpt_grow( CONST char *part, UD last )
 	return er;
 }
 
+/* A partition's name in UTF-16, from UTF-8: what is past the plane of 16 bits is left out */
+LOCAL void set_name( UB *e, CONST char *name )
+{
+	INT	k, m;
+
+	knl_memset(e + E_NAME, 0, GPT_NAME_MAX * 2);
+	for ( k = 0, m = 0; name != NULL && name[k] != '\0' && m < GPT_NAME_MAX; ) {
+		UB	c = (UB)name[k];
+		UW	ch;
+
+		if ( c < 0x80 ) {
+			ch = c; k += 1;
+		} else if ( ( c & 0xE0 ) == 0xC0 && name[k + 1] != '\0' ) {
+			ch = ( (UW)( c & 0x1F ) << 6 ) | ( (UB)name[k + 1] & 0x3F ); k += 2;
+		} else if ( ( c & 0xF0 ) == 0xE0 && name[k + 1] != '\0' && name[k + 2] != '\0' ) {
+			ch = ( (UW)( c & 0x0F ) << 12 ) | ( (UW)( (UB)name[k + 1] & 0x3F ) << 6 )
+			   | ( (UB)name[k + 2] & 0x3F );
+			k += 3;
+		} else {
+			k++;
+			continue;
+		}
+		e[E_NAME + 2 * m] = (UB)ch;
+		e[E_NAME + 2 * m + 1] = (UB)( ch >> 8 );
+		m++;
+	}
+}
+
 EXPORT ER knl_gpt_add( CONST char *disk, UD first, UD last, CONST UB *type, CONST char *name,
 		       UB *p_part, INT max )
 {
 	GPT	g;
 	TS_UUID	u;
 	UB	*e;
-	INT	i, at = 0, k, m;
+	INT	i, at = 0, k;
 	ER	er;
 
 	if ( disk == NULL || type == NULL || zero16(type) ) {
@@ -672,27 +700,7 @@ EXPORT ER knl_gpt_add( CONST char *disk, UD first, UD last, CONST UB *type, CONS
 	knl_memcpy(e + E_UNIQ, u.b, 16);
 	put64(e + E_FIRST, first);
 	put64(e + E_LAST, last);
-	/* the name in UTF-16, from UTF-8: what is past the plane of 16 bits is left out */
-	for ( k = 0, m = 0; name != NULL && name[k] != '\0' && m < GPT_NAME_MAX; ) {
-		UB	c = (UB)name[k];
-		UW	ch;
-
-		if ( c < 0x80 ) {
-			ch = c; k += 1;
-		} else if ( ( c & 0xE0 ) == 0xC0 && name[k + 1] != '\0' ) {
-			ch = ( (UW)( c & 0x1F ) << 6 ) | ( (UB)name[k + 1] & 0x3F ); k += 2;
-		} else if ( ( c & 0xF0 ) == 0xE0 && name[k + 1] != '\0' && name[k + 2] != '\0' ) {
-			ch = ( (UW)( c & 0x0F ) << 12 ) | ( (UW)( (UB)name[k + 1] & 0x3F ) << 6 )
-			   | ( (UB)name[k + 2] & 0x3F );
-			k += 3;
-		} else {
-			k++;
-			continue;
-		}
-		e[E_NAME + 2 * m] = (UB)ch;
-		e[E_NAME + 2 * m + 1] = (UB)( ch >> 8 );
-		m++;
-	}
+	set_name(e, name);
 	k = unit_of_entry(&g, at);
 	tm_printf((UB *)"gpt: %s%d made, %d sectors at %d\n", disk, k, (INT)( last - first + 1 ), (INT)first);
 	er = gpt_write(&g);
@@ -711,5 +719,41 @@ EXPORT ER knl_gpt_add( CONST char *disk, UD first, UD last, CONST UB *type, CONS
 		while ( j > 0 && n < max - 1 ) p_part[n++] = (UB)t[--j];
 		p_part[n] = 0;
 	}
+	return er;
+}
+
+EXPORT ER knl_gpt_retype( CONST char *part, CONST UB *type, CONST char *name, UB *p_uniq )
+{
+	GPT	g;
+	TS_UUID	u;
+	UB	disk[L_DEVNM + 1];
+	UB	*e;
+	INT	unit, i;
+	ER	er;
+
+	if ( part == NULL || type == NULL || zero16(type) || !split_name(part, disk, &unit) ) {
+		return E_PAR;
+	}
+	er = gpt_open((CONST char *)disk, &g, TD_UPDATE);
+	if ( er < E_OK ) {
+		return er;
+	}
+	i = g.fresh ? -1 : entry_of_unit(&g, unit);
+	if ( i < 0 ) {
+		gpt_close(&g);
+		return E_NOEXS;
+	}
+	e = entry(&g, i);
+	knl_memcpy(e + E_TYPE, type, 16);
+	(void)ts_gen_uuid(&u);
+	knl_memcpy(e + E_UNIQ, u.b, 16);
+	put64(e + E_ATTR, 0);
+	set_name(e, name);
+	tm_printf((UB *)"gpt: %s made another, %d sectors at %d\n", part,
+		  (INT)( le64(e + E_LAST) - le64(e + E_FIRST) + 1 ), (INT)le64(e + E_FIRST));
+	er = gpt_write(&g);
+	if ( er >= E_OK ) er = rescan(&g);
+	gpt_close(&g);
+	if ( er >= E_OK && p_uniq != NULL ) knl_memcpy(p_uniq, u.b, 16);
 	return er;
 }

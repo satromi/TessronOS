@@ -84,6 +84,17 @@ IMPORT ER  gp_wai_bo( INT ctx, UINT handle, TMO_U tmout );
 IMPORT INT gp_shr_bo( INT ctx, UINT handle );
 IMPORT ER  gp_imp_bo( INT ctx, INT name, T_GPBO *bo );
 
+#ifdef __x86_64__
+/*
+ * The BO placed at 'va' (48 bits, page aligned; the upper bits of the
+ * canonical form are let go of) in the context's space, and taken out
+ * of where it was. For a GPU whose user side driver chooses its
+ * addresses (Intel); E_NOSPT where the GPU chooses them. The BO's job
+ * reaches it there once placed; deleting the number takes it out.
+ */
+IMPORT ER  gp_bnd_bo( INT ctx, UINT handle, UD va );
+#endif
+
 #ifdef __cplusplus
 }
 #endif

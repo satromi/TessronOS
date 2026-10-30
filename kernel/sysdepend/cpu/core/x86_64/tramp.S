@@ -48,6 +48,7 @@ knl_tramp_start:
 	shl	$4, %ebx			/* ebx = where the page is, kept to long mode */
 	lgdtl	OFF(knl_tramp_gdt_desc)
 	mov	%cr0, %eax
+	and	$~(CR0_CD | CR0_NW), %eax	/* INIT leaves the caches off */
 	or	$CR0_PE, %eax
 	mov	%eax, %cr0
 	ljmpl	*OFF(knl_tramp_far32)

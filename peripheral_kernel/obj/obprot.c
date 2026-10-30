@@ -82,6 +82,61 @@ EXPORT void knl_ob_prt_default( T_OBPRT *prt, CONST T_OBCRD *crd )
 	}
 }
 
+/* ---------------------------------------------------------------- the memory of a protection */
+
+EXPORT T_OBPRT *knl_ob_prt_new( INT nacl, INT nrmask )
+{
+	T_OBPRT	*p;
+
+	if ( nacl < 0 || nrmask < 0 ) {
+		return NULL;
+	}
+	p = (T_OBPRT *)Kcalloc(1, OB_PRT_SIZE(nacl, nrmask));
+	if ( p != NULL ) {
+		p->nacl = nacl;
+		p->nrmask = nrmask;
+	}
+	return p;
+}
+
+EXPORT T_OBPRT *knl_ob_prt_dup( CONST T_OBPRT *p )
+{
+	T_OBPRT	*d;
+
+	if ( p == NULL || p->nacl < 0 || p->nrmask < 0 ) {
+		return NULL;
+	}
+	d = (T_OBPRT *)Kmalloc(OB_PRT_LEN(p));
+	if ( d != NULL ) {
+		knl_memcpy(d, p, (INT)OB_PRT_LEN(p));
+	}
+	return d;
+}
+
+EXPORT T_OBPRT *knl_ob_prt_room( T_OBPRT *p, INT nacl, INT nrmask )
+{
+	T_OBPRT	*n = knl_ob_prt_new(nacl, nrmask);
+	INT	i;
+
+	if ( n == NULL ) {
+		return NULL;
+	}
+	if ( p != NULL ) {
+		n->owner = p->owner;
+		n->group = p->group;
+		n->mode = p->mode;
+		n->attr = p->attr;
+		for ( i = 0; i < nacl && i < p->nacl; i++ ) {
+			n->acl[i] = p->acl[i];
+		}
+		for ( i = 0; i < nrmask && i < p->nrmask; i++ ) {
+			OB_PRT_RMASK(n)[i] = OB_PRT_RMASK(p)[i];
+		}
+		Kfree(p);
+	}
+	return n;
+}
+
 /* ---------------------------------------------------------------- deciding */
 
 EXPORT UINT knl_ob_permit( CONST T_OBCRD *crd, CONST T_OBPRT *prt, INT recno )
@@ -111,7 +166,7 @@ EXPORT UINT knl_ob_permit( CONST T_OBCRD *crd, CONST T_OBPRT *prt, INT recno )
 		ops = expand(rwx & 7);
 
 		/* the list adds; it never takes away */
-		for ( i = 0; i < prt->nacl && i < OB_ACL_MAX; i++ ) {
+		for ( i = 0; i < prt->nacl; i++ ) {
 			CONST T_OBACE	*a = &prt->acl[i];
 
 			if ( a->kind == OB_ACE_USER && same_uuid(&a->who, &crd->user) ) {
@@ -142,9 +197,9 @@ EXPORT UINT knl_ob_permit( CONST T_OBCRD *crd, CONST T_OBPRT *prt, INT recno )
 	if ( recno >= 0 ) {
 		CONST UINT	onrec = OB_OP_READ | OB_OP_WRITE | OB_OP_RECORD;
 
-		for ( i = 0; i < prt->nrmask && i < OB_RMASK_MAX; i++ ) {
-			if ( prt->rmask[i].recno == recno ) {
-				UINT	lim = prt->rmask[i].ops;
+		for ( i = 0; i < prt->nrmask; i++ ) {
+			if ( OB_PRT_RMASK(prt)[i].recno == recno ) {
+				UINT	lim = OB_PRT_RMASK(prt)[i].ops;
 
 				/* a limit that names x: only one who may control the object */
 				if ( ( lim & OB_OP_EXEC ) != 0 && ( ops & OB_OP_EXEC ) == 0 ) lim = 0;
@@ -207,11 +262,25 @@ LOCAL UINT parse_mode( CONST UB *s )
 	return ( i == 9 ) ? m : 0;
 }
 
-EXPORT ER knl_ob_prt_parse( CONST UB *j, INT len, T_OBPRT *prt )
+/* How many entries of an array of the access text are objects: room for them */
+LOCAL INT count_objs( CONST UB *j, INT len, INT arr )
 {
-	INT	acc, v, pos, e;
-	UB	s[16];
+	INT	pos = arr, e, n = 0;
 
+	while ( arr >= 0 && ( e = knl_oj_next(j, len, arr, &pos) ) >= 0 ) {
+		if ( j[e] == '{' ) n++;
+	}
+	return n;
+}
+
+EXPORT ER knl_ob_prt_parse( CONST UB *j, INT len, T_OBPRT **p_prt )
+{
+	INT	acc, v, pos, e, na, nr;
+	UB	s[16];
+	T_OBPRT	*prt;
+	T_OBRMASK *rm;
+
+	*p_prt = NULL;
 	acc = knl_oj_path(j, len, "tessronos", "access");
 	if ( acc < 0 || j[acc] != '{' ) {
 		INT	root = knl_oj_root(j, len);
@@ -220,11 +289,24 @@ EXPORT ER knl_ob_prt_parse( CONST UB *j, INT len, T_OBPRT *prt )
 		(void)knl_oj_bool(j, len, knl_oj_member(j, len, root, "readable"), &rd);
 		(void)knl_oj_bool(j, len, knl_oj_member(j, len, root, "editable"), &ed);
 		(void)knl_oj_bool(j, len, knl_oj_member(j, len, root, "deletable"), &dl);
+		prt = knl_ob_prt_new(0, 0);
+		if ( prt == NULL ) {
+			return E_NOMEM;
+		}
 		knl_ob_prt_legacy(prt, rd, ed, dl);
+		*p_prt = prt;
 		return E_OK;
 	}
 
-	knl_memset(prt, 0, sizeof(*prt));
+	/* every entry and every limit the text has: room for them first */
+	na = count_objs(j, len, knl_oj_member(j, len, acc, "acl"));
+	nr = count_objs(j, len, knl_oj_member(j, len, acc, "records"));
+	prt = knl_ob_prt_new(na, nr);
+	if ( prt == NULL ) {
+		return E_NOMEM;
+	}
+	prt->nacl = 0;
+	prt->nrmask = 0;
 	(void)parse_uuid(j, len, knl_oj_member(j, len, acc, "owner"), &prt->owner);
 	(void)parse_uuid(j, len, knl_oj_member(j, len, acc, "group"), &prt->group);
 	v = knl_oj_member(j, len, acc, "mode");
@@ -242,7 +324,7 @@ EXPORT ER knl_ob_prt_parse( CONST UB *j, INT len, T_OBPRT *prt )
 
 	v = knl_oj_member(j, len, acc, "acl");
 	pos = v;
-	while ( v >= 0 && prt->nacl < OB_ACL_MAX
+	while ( v >= 0 && prt->nacl < na
 	     && ( e = knl_oj_next(j, len, v, &pos) ) >= 0 ) {
 		T_OBACE	*a = &prt->acl[prt->nacl];
 
@@ -258,11 +340,13 @@ EXPORT ER knl_ob_prt_parse( CONST UB *j, INT len, T_OBPRT *prt )
 		prt->nacl++;
 	}
 
+	/* the limits go after the entries there are: moved up to them when some were left out */
+	rm = (T_OBRMASK *)( prt->acl + na );
 	v = knl_oj_member(j, len, acc, "records");
 	pos = v;
-	while ( v >= 0 && prt->nrmask < OB_RMASK_MAX
+	while ( v >= 0 && prt->nrmask < nr
 	     && ( e = knl_oj_next(j, len, v, &pos) ) >= 0 ) {
-		T_OBRMASK	*m = &prt->rmask[prt->nrmask];
+		T_OBRMASK	*m = &rm[prt->nrmask];
 		D		n;
 
 		if ( j[e] != '{' || !knl_oj_num(j, len, knl_oj_member(j, len, e, "n"), &n) ) {
@@ -272,6 +356,10 @@ EXPORT ER knl_ob_prt_parse( CONST UB *j, INT len, T_OBPRT *prt )
 		m->ops = parse_ops(j, len, knl_oj_member(j, len, e, "ops"));
 		prt->nrmask++;
 	}
+	if ( prt->nacl < na ) {
+		knl_memcpy(OB_PRT_RMASK(prt), rm, (INT)( sizeof(T_OBRMASK) * (SZ)prt->nrmask ));
+	}
+	*p_prt = prt;
 	return E_OK;
 }
 
@@ -293,69 +381,89 @@ EXPORT INT knl_ob_ops_text( UB *out, INT pos, INT max, UINT ops )
 	return knl_oj_put(out, pos, max, "]");
 }
 
-/* The protection written into the metadata; the new length, or -1 */
-EXPORT INT knl_ob_prt_store( UB *json, INT len, INT max, CONST T_OBPRT *prt )
+/* The access text of a protection, made as large as it needs (knl_oj_make) */
+LOCAL INT access_text( void *ctx, UB *t, INT max )
 {
-	UB	*t;
-	INT	n = 0, i, root;
-	char	mode[10];
-	BOOL	first;
+	CONST T_OBPRT	*prt = (CONST T_OBPRT *)ctx;
+	INT		n = 0, i;
+	char		mode[10];
+	BOOL		first;
 
-	t = (UB *)Kmalloc(OB_META_MAX);
-	if ( t == NULL ) {
-		return -1;
-	}
 	for ( i = 0; i < 9; i++ ) {
 		mode[i] = ( ( prt->mode >> ( 8 - i ) ) & 1 ) ? "rwxrwxrwx"[i] : '-';
 	}
 	mode[9] = 0;
 
-	n = knl_oj_put(t, n, OB_META_MAX, "{");
+	n = knl_oj_put(t, n, max, "{");
 	if ( !knl_ob_uuid_zero(&prt->owner) ) {
-		n = knl_oj_put(t, n, OB_META_MAX, "\"owner\":");
-		n = knl_oj_put_uuid(t, n, OB_META_MAX, &prt->owner);
-		n = knl_oj_put(t, n, OB_META_MAX, ",");
+		n = knl_oj_put(t, n, max, "\"owner\":");
+		n = knl_oj_put_uuid(t, n, max, &prt->owner);
+		n = knl_oj_put(t, n, max, ",");
 	}
 	if ( !knl_ob_uuid_zero(&prt->group) ) {
-		n = knl_oj_put(t, n, OB_META_MAX, "\"group\":");
-		n = knl_oj_put_uuid(t, n, OB_META_MAX, &prt->group);
-		n = knl_oj_put(t, n, OB_META_MAX, ",");
+		n = knl_oj_put(t, n, max, "\"group\":");
+		n = knl_oj_put_uuid(t, n, max, &prt->group);
+		n = knl_oj_put(t, n, max, ",");
 	}
-	n = knl_oj_put(t, n, OB_META_MAX, "\"mode\":");
-	n = knl_oj_put_str(t, n, OB_META_MAX, (CONST UB *)mode);
-	n = knl_oj_put(t, n, OB_META_MAX, ",\"attr\":[");
+	n = knl_oj_put(t, n, max, "\"mode\":");
+	n = knl_oj_put_str(t, n, max, (CONST UB *)mode);
+	n = knl_oj_put(t, n, max, ",\"attr\":[");
 	first = TRUE;
 	if ( ( prt->attr & OB_A_RONLY ) != 0 ) {
-		n = knl_oj_put(t, n, OB_META_MAX, "\"ronly\"");
+		n = knl_oj_put(t, n, max, "\"ronly\"");
 		first = FALSE;
 	}
 	if ( ( prt->attr & OB_A_PERM ) != 0 ) {
-		n = knl_oj_put(t, n, OB_META_MAX, first ? "\"perm\"" : ",\"perm\"");
+		n = knl_oj_put(t, n, max, first ? "\"perm\"" : ",\"perm\"");
 	}
-	n = knl_oj_put(t, n, OB_META_MAX, "],\"acl\":[");
-	for ( i = 0; i < prt->nacl && i < OB_ACL_MAX; i++ ) {
-		if ( i > 0 ) n = knl_oj_put(t, n, OB_META_MAX, ",");
-		n = knl_oj_put(t, n, OB_META_MAX, ( prt->acl[i].kind == OB_ACE_USER )
+	n = knl_oj_put(t, n, max, "],\"acl\":[");
+	for ( i = 0; i < prt->nacl; i++ ) {
+		if ( i > 0 ) n = knl_oj_put(t, n, max, ",");
+		n = knl_oj_put(t, n, max, ( prt->acl[i].kind == OB_ACE_USER )
 			       ? "{\"user\":" : "{\"group\":");
-		n = knl_oj_put_uuid(t, n, OB_META_MAX, &prt->acl[i].who);
-		n = knl_oj_put(t, n, OB_META_MAX, ",\"ops\":");
-		n = knl_ob_ops_text(t, n, OB_META_MAX, prt->acl[i].ops);
-		n = knl_oj_put(t, n, OB_META_MAX, "}");
+		n = knl_oj_put_uuid(t, n, max, &prt->acl[i].who);
+		n = knl_oj_put(t, n, max, ",\"ops\":");
+		n = knl_ob_ops_text(t, n, max, prt->acl[i].ops);
+		n = knl_oj_put(t, n, max, "}");
 	}
-	n = knl_oj_put(t, n, OB_META_MAX, "],\"records\":[");
-	for ( i = 0; i < prt->nrmask && i < OB_RMASK_MAX; i++ ) {
-		if ( i > 0 ) n = knl_oj_put(t, n, OB_META_MAX, ",");
-		n = knl_oj_put(t, n, OB_META_MAX, "{\"n\":");
-		n = knl_oj_put_num(t, n, OB_META_MAX, prt->rmask[i].recno);
-		n = knl_oj_put(t, n, OB_META_MAX, ",\"ops\":");
-		n = knl_ob_ops_text(t, n, OB_META_MAX, prt->rmask[i].ops);
-		n = knl_oj_put(t, n, OB_META_MAX, "}");
+	n = knl_oj_put(t, n, max, "],\"records\":[");
+	for ( i = 0; i < prt->nrmask; i++ ) {
+		if ( i > 0 ) n = knl_oj_put(t, n, max, ",");
+		n = knl_oj_put(t, n, max, "{\"n\":");
+		n = knl_oj_put_num(t, n, max, OB_PRT_RMASK(prt)[i].recno);
+		n = knl_oj_put(t, n, max, ",\"ops\":");
+		n = knl_ob_ops_text(t, n, max, OB_PRT_RMASK(prt)[i].ops);
+		n = knl_oj_put(t, n, max, "}");
 	}
-	n = knl_oj_put(t, n, OB_META_MAX, "]}");
+	return knl_oj_put(t, n, max, "]}");
+}
+
+/* The protection written into the metadata; the new length, or -1 */
+EXPORT INT knl_ob_prt_store( UB **p_json, INT len, INT *p_cap, CONST T_OBPRT *prt )
+{
+	UB	*t, *json;
+	INT	n, root, max;
+
+	n = knl_oj_make(access_text, (void *)prt, &t);
 	if ( n < 0 ) {
-		Kfree(t);
 		return -1;
 	}
+	/* room for the text and the two flags, besides what is there */
+	if ( *p_cap < len + n + 128 ) {
+		UB	*nj = (UB *)Kmalloc((SZ)( len + n + 128 ) + 1);
+
+		if ( nj == NULL ) {
+			Kfree(t);
+			return -1;
+		}
+		if ( len > 0 ) knl_memcpy(nj, *p_json, len);
+		nj[len] = 0;
+		if ( *p_json != NULL ) Kfree(*p_json);
+		*p_json = nj;
+		*p_cap = len + n + 128;
+	}
+	json = *p_json;
+	max = *p_cap;
 
 	len = knl_oj_set_path(json, len, max, "tessronos", "access", t, n);
 

@@ -19,8 +19,10 @@
 #include <ts/xfu.h>
 
 typedef struct {
-	char	dir[FS_PATH_MAX];	/* writing: the directory; "" an object */
+	char	dir[FS_PATH_MAX];	/* writing: the directory; "" an object (or a disk's root, ondisk) */
 	char	path[FS_PATH_MAX * 2];	/* the file */
+	BOOL	ondisk;			/* the file is below the root of a disk opened from its device object */
+	INT	vd;			/* that root (fs_opn_vol): dir and path are below it */
 	INT	fd;
 	TS_UUID	obj;			/* the object */
 	TS_UUID	into;			/* writing an object: the cabinet it goes in; 0 the first */

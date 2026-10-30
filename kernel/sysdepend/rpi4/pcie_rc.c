@@ -16,7 +16,9 @@
  *
  *	The firmware leaves the controller in reset, so it is brought up here
  *	in the order the controller needs: the bridge out of reset with the
- *	far end still held, the analogue side powered, the bridge set up to
+ *	far end still held, the analogue side powered, and only then the
+ *	first read of the root port (read while the bridge is held, it is an
+ *	SError); the bridge set up to
  *	answer configuration reads of nothing with all ones rather than an
  *	error, the inbound window (where a card finds memory) and the
  *	outbound window (where the processor finds the cards), the far end
@@ -232,24 +234,63 @@ LOCAL void rc_outbound( UD cpu, UD bus, UD size )
 }
 
 /*
+ * Each step of the bring-up is said on the console with the registers
+ * that tell how far it got, so that a board that stops in it shows at
+ * which step. Only the reset register is read before the bridge is out
+ * of reset: a read of the root port's configuration space while the
+ * bridge is held is an asynchronous external abort (SError), and the
+ * rest of the block is left alone until then too.
+ */
+LOCAL void rc_say( CONST char *step, BOOL out_of_reset )
+{
+	if ( out_of_reset ) {
+		tm_printf((UB *)"TessronOS: pcie %s: reset %08x status %08x debug %08x\n", step,
+			  in_w(RC_SW_INIT_1), in_w(RC_STATUS), in_w(RC_HARD_DEBUG));
+	} else {
+		tm_printf((UB *)"TessronOS: pcie %s: reset %08x\n", step, in_w(RC_SW_INIT_1));
+	}
+}
+
+/*
  * Reset, windows and the link. The steps are millisecond apart where the
  * controller wants microseconds: a little longer does no harm, and it
  * keeps the start-up task off the processor.
+ *
+ * The firmware hands the controller over with the bridge held in reset
+ * (and the boot loader, when it looked for a USB drive to boot from,
+ * reset it again before starting the kernel). Nothing of the block but
+ * the reset register is touched until the bridge is let go and the
+ * analogue side is powered; the root port's own configuration space is
+ * read first after that.
  */
 LOCAL ER rc_start( UD out_cpu, UD out_bus, UD out_size, UD in_bus, UD in_size )
 {
-	UW	v, code;
+	UW	v, code, id;
 	INT	t;
+
+	rc_say("as found", FALSE);
 
 	/* the bridge and the far end into reset, then the bridge out of it */
 	out_w(RC_SW_INIT_1, in_w(RC_SW_INIT_1) | SW_INIT_1_INIT | SW_INIT_1_PERST);
 	tk_dly_tsk(1);
 	out_w(RC_SW_INIT_1, in_w(RC_SW_INIT_1) & ~SW_INIT_1_INIT);
 	tk_dly_tsk(1);
+	rc_say("bridge out of reset", TRUE);
 
 	/* the analogue side powered */
 	out_w(RC_HARD_DEBUG, in_w(RC_HARD_DEBUG) & ~HARD_DEBUG_SERDES_IDDQ);
 	tk_dly_tsk(1);
+	rc_say("serdes on", TRUE);
+
+	/* only now does the root port answer: is it there, and is it a root complex */
+	id = in_w(RC_CFG);
+	tm_printf((UB *)"TessronOS: pcie root port id %08x, revision %08x\n", id, in_w(RC_REVISION));
+	if ( id == 0 || id == 0xFFFFFFFFU ) {
+		return E_NOEXS;
+	}
+	if ( ( in_w(RC_STATUS) & STATUS_PORT_RC ) == 0 ) {
+		return E_SYS;		/* the controller is not a root complex */
+	}
 
 	/* the bridge reaches memory, reads of nothing answer all ones, bursts of 128 bytes */
 	code = win_size_code(in_size);
@@ -269,24 +310,24 @@ LOCAL ER rc_start( UD out_cpu, UD out_bus, UD out_size, UD in_bus, UD in_size )
 	out_w(RC_INTR2_MASK_SET, 0xFFFFFFFFU);
 	out_w(RC_INTR2_CLR, 0xFFFFFFFFU);
 
+	/* the outbound window, the port's class and the inbound window's byte order */
+	rc_outbound(out_cpu, out_bus, out_size);
+	out_w(RC_PRIV1_ID_VAL3, ( in_w(RC_PRIV1_ID_VAL3) & ~CLASS_MASK ) | CLASS_PCI_BRIDGE);
+	out_w(RC_VENDOR_REG1, in_w(RC_VENDOR_REG1) & ~VENDOR_REG1_ENDIAN_MASK);
+	tm_printf((UB *)"TessronOS: pcie windows set: misc %08x inbound %08x\n",
+		  in_w(RC_MISC_CTRL), in_w(RC_BAR2_CONFIG_LO));
+
 	/* the far end let go, and the link waited for */
 	out_w(RC_SW_INIT_1, in_w(RC_SW_INIT_1) & ~SW_INIT_1_PERST);
 	tk_dly_tsk(LINK_WAIT_MS);
 	for ( t = 0; !rc_link_up() && t < LINK_WAIT_MS; t += LINK_POLL_MS ) {
 		tk_dly_tsk(LINK_POLL_MS);
 	}
+	rc_say("far end out of reset", TRUE);
 	if ( !rc_link_up() ) {
 		return E_TMOUT;
 	}
-	if ( ( in_w(RC_STATUS) & STATUS_PORT_RC ) == 0 ) {
-		return E_SYS;		/* the controller is not a root complex */
-	}
 
-	rc_outbound(out_cpu, out_bus, out_size);
-
-	/* the port says it is a bridge; the inbound window is little endian */
-	out_w(RC_PRIV1_ID_VAL3, ( in_w(RC_PRIV1_ID_VAL3) & ~CLASS_MASK ) | CLASS_PCI_BRIDGE);
-	out_w(RC_VENDOR_REG1, in_w(RC_VENDOR_REG1) & ~VENDOR_REG1_ENDIAN_MASK);
 	out_w(RC_HARD_DEBUG, in_w(RC_HARD_DEBUG) | HARD_DEBUG_CLKREQ_EN);
 
 	return E_OK;
@@ -341,7 +382,6 @@ EXPORT INT knl_pcie_rc_init( void )
 	UD	out_size = PCIE_OUTBOUND_SIZE;
 	UD	in_bus = PCIE_INBOUND_BUS_PA, in_cpu = 0, in_size = PCIE_INBOUND_SIZE;
 	UD	c, p, s;
-	UW	id;
 	INT	n, i;
 	ER	er;
 
@@ -362,12 +402,13 @@ EXPORT INT knl_pcie_rc_init( void )
 		in_size = s;
 	}
 
-	id = in_w(RC_CFG);
-	if ( id == 0 || id == 0xFFFFFFFFU ) {
-		tm_printf((UB *)"TessronOS: pcie no root complex at %08x (%08x)\n", (UW)PCIE_PA, id);
+	/* the root port is not read here: until rc_start lets the bridge go it does not answer */
+	er = rc_start(out_cpu, out_bus, out_size, in_bus - in_cpu, in_size);
+	if ( er == E_NOEXS ) {
+		tm_printf((UB *)"TessronOS: pcie no root complex at %08x; no USB behind it\n",
+			  (UW)PCIE_PA);
 		return 0;
 	}
-	er = rc_start(out_cpu, out_bus, out_size, in_bus - in_cpu, in_size);
 	if ( er < E_OK ) {
 		tm_printf((UB *)"TessronOS: pcie link did not come up (%d, status %08x); "
 			  "no USB behind it\n", (INT)er, in_w(RC_STATUS));
@@ -382,6 +423,15 @@ EXPORT INT knl_pcie_rc_init( void )
 
 	rc_bridge_setup(out_bus, out_size);
 	n = knl_pcie_scan(out_bus, out_size);
+	{
+		T_PCIDEV	d;
+
+		for ( i = 0; ts_pcie_get(i, &d) >= E_OK; i++ ) {
+			tm_printf((UB *)"TessronOS: pcie found %d:%d.%d %04x:%04x class %02x%02x%02x "
+				  "window %08x\n", d.bus, d.dev, d.fn, d.vendor, d.device,
+				  d.class_code, d.subclass, d.prog_if, (UW)d.bar[0]);
+		}
+	}
 
 	/* the VL805 on the boards that keep its program for it */
 	if ( knl_board.kind == BOARD_RPI4B || knl_board.kind == BOARD_RPI400 ) {

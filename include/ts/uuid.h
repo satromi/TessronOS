@@ -45,6 +45,24 @@ IMPORT ER ts_str_to_uuid( CONST char *str, TS_UUID *p_uuid );
 IMPORT INT ts_uuid_cmp( CONST TS_UUID *a, CONST TS_UUID *b );
 
 /*
+ * The same text as ts_uuid_to_str, into out of TS_UUID_STRLEN + 1 bytes,
+ * with nothing of the system's: for a program writing a UUID into the
+ * attributes of what it makes ("shows" of a window)
+ */
+static __inline__ void ts_uuid_text( CONST TS_UUID *u, char *out )
+{
+	static CONST char	hex[] = "0123456789abcdef";
+	INT			i, k = 0;
+
+	for ( i = 0; i < 16; i++ ) {
+		if ( i == 4 || i == 6 || i == 8 || i == 10 ) out[k++] = '-';
+		out[k++] = hex[u->b[i] >> 4];
+		out[k++] = hex[u->b[i] & 15];
+	}
+	out[k] = 0;
+}
+
+/*
  * The id of a link (<link id="...">, design 8.3): where the object it
  * points at is, from the outside in, each part a UUID and a slash after
  * it, then the object's UUID and the record ("_0.xtad"):

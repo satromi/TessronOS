@@ -41,7 +41,7 @@
 #define _PATH_NOLOGIN	"/etc/nologin"
 #define _PATH_SENDMAIL	"/bin/sendmail"
 #define _PATH_LOCALE	"/etc/locale"
-#define _PATH_HOME	"/home/BTRON"	/* the cabinet the desktop opens with */
+#define _PATH_HOME	"/home"		/* the object home, which links to the cabinet the desktop opens with */
 #define _PATH_DEFTAPE	"/dev/tape"	/* there is no tape: tar is given -f */
 
 #endif /* _PATHS_H_ */

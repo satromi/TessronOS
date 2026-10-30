@@ -30,14 +30,38 @@ EXPORT void ct_buf( CTBUF *b, UB *mem, INT max )
 	b->n = 0;
 	b->max = max;
 	b->fail = FALSE;
+	b->more = NULL;
 	if ( max > 0 ) mem[0] = 0;
+}
+
+EXPORT void ct_buf_grow( CTBUF *b, INT first, void *(*more)( void *p, SZ size ) )
+{
+	if ( first < 16 ) first = 16;
+	b->p = (UB *)more(NULL, (SZ)first);
+	b->n = 0;
+	b->max = ( b->p != NULL ) ? first : 0;
+	b->fail = (BOOL)( b->p == NULL );
+	b->more = more;
+	if ( b->p != NULL ) b->p[0] = 0;
 }
 
 EXPORT void ct_putn( CTBUF *b, CONST UB *s, INT n )
 {
 	INT	i;
 
-	if ( n < 0 ) return;
+	if ( n < 0 || b->fail ) return;
+	if ( b->n + n + 1 > b->max && b->more != NULL ) {
+		/* twice as long, or as long as wanted */
+		INT	m = ( b->max < 0x3FFFFFFF / 2 ) ? b->max * 2 : 0x7FFFFFF0;
+		UB	*q;
+
+		if ( m < b->n + n + 1 ) m = b->n + n + 1;
+		q = (UB *)b->more(b->p, (SZ)m);
+		if ( q != NULL ) {
+			b->p = q;
+			b->max = m;
+		}
+	}
 	if ( b->n + n + 1 > b->max ) {
 		b->fail = TRUE;
 		return;
@@ -251,7 +275,8 @@ EXPORT INT ct_links( CONST UB *x, INT n, CTEL *out, INT max )
 {
 	INT	i = 0, k = 0, e, c;
 
-	while ( k < max && ( i = find(x, n, i, "<link") ) >= 0 ) {
+	/* with out NULL, only how many there are */
+	while ( ( out == NULL || k < max ) && ( i = find(x, n, i, "<link") ) >= 0 ) {
 		if ( i + 5 >= n || !( space(x[i + 5]) || x[i + 5] == '/' || x[i + 5] == '>' ) ) {
 			i += 5;
 			continue;
@@ -262,8 +287,10 @@ EXPORT INT ct_links( CONST UB *x, INT n, CTEL *out, INT max )
 			c = find(x, n, e, "</link>");
 			if ( c >= 0 ) e = c + 7;
 		}
-		out[k].at = i;
-		out[k].len = e - i;
+		if ( out != NULL ) {
+			out[k].at = i;
+			out[k].len = e - i;
+		}
 		k++;
 		i = e;
 	}
@@ -1140,6 +1167,28 @@ EXPORT BOOL ct_app_locked( CONST UB *json, INT n )
 	return (BOOL)( app_default(json, n, &e) && js_get_bool(&e, "defaultOpenLock", FALSE) );
 }
 
+/*
+ * A request about a link to the desktop given the link's own applist
+ * (DT_F_APPLIST): the desktop decides the program from it as it does for
+ * a link of its own window, so that a link that keeps to its program
+ * (起動アプリの固定) opens with that one when it is opened by a double
+ * press. A link with no applist, or one too long to carry, is asked of
+ * as before, by its object alone.
+ */
+EXPORT void ct_link_req( T_DTREQ *rq, CONST UB *el, INT n )
+{
+	INT	k;
+
+	if ( rq == NULL || el == NULL ) return;
+	/* one that fills the room may have been cut short: not carried */
+	k = ct_attr_text(el, n, "applist", rq->text, (INT)sizeof(rq->text));
+	if ( k > 0 && k < (INT)sizeof(rq->text) - 1 ) {
+		rq->flags |= DT_F_APPLIST;
+	} else {
+		rq->text[0] = 0;
+	}
+}
+
 EXPORT ER ct_app_lock( CTBUF *b, CONST UB *json, INT n, BOOL lock )
 {
 	T_JSON	e, old;
@@ -1202,6 +1251,24 @@ EXPORT INT ct_app_list( CONST UB *json, INT n, UB (*ids)[CT_APP_ID], UB (*names)
 		k++;
 	}
 	return k;
+}
+
+EXPORT BOOL ct_app_entry( CONST T_DTANS *an, UB *id, UB *name, BOOL *p_kind )
+{
+	INT	i = 0, k;
+
+	if ( an == NULL || an->er < E_OK ) return FALSE;
+	for ( k = 0; i < DT_TEXT_MAX && an->text[i] != 0 && an->text[i] != '\t'; i++ ) {
+		if ( k < CT_APP_ID - 1 ) id[k++] = an->text[i];
+	}
+	id[k] = 0;
+	if ( k == 0 || i >= DT_TEXT_MAX || an->text[i] != '\t' ) return FALSE;
+	for ( i++, k = 0; i < DT_TEXT_MAX && an->text[i] != 0; i++ ) {
+		if ( k < CT_APP_NAME - 1 ) name[k++] = an->text[i];
+	}
+	name[k] = 0;
+	if ( p_kind != NULL ) *p_kind = (BOOL)( ( an->flags & DT_F_KIND ) != 0 );
+	return TRUE;
 }
 
 EXPORT UW ct_json_colour( CONST UB *json, INT n, CONST char *outer, CONST char *name, UW dflt )

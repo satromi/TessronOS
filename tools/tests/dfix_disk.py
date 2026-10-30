@@ -17,6 +17,14 @@ a reader of the format other than the one being tested.
 repair on the boot volume (the second partition, FAT32), as the
 accessory leaves it before the machine starts again
 (ui_diskfix_boot.steps).
+
+  tools/tests/dfix_disk.py --pc SD_IMG OUT
+
+does only what --boot does, on the disk image of the x64 PC (make
+TARGET=_X64_ sdimg): the EFI system partition (the first, FAT32) is the
+boot volume and the system volume is the second partition, nvmea1. No
+damaged volume is made there: the first partition is the boot volume
+(tools/x64/tests/ui_diskfix_boot.steps).
 """
 
 import json
@@ -128,27 +136,31 @@ def fat32_put(path, part, name83, data):
         wr(slot, bytes(ent))
 
 
-def boot_request(out):
+def boot_request(out, fat=2, sysvol=3, sysdev=SYSVOL_DEV):
     parts = {p.index: p for p in read_partitions(out)}
-    dev = BlockImage(out, offset=parts[3].offset, length=parts[3].length, writable=True)
+    dev = BlockImage(out, offset=parts[sysvol].offset, length=parts[sysvol].length, writable=True)
     with Volume.open(dev, replay=True) as vol:
         o = vol.object(PROG_BOX)
         o.refcnt = o.refcnt + 2
         o.store()
         vol.flush(both=True, spares=True)
-    fat32_put(out, parts[2], "DISKFIX REQ", ("%s %d\n" % (SYSVOL_DEV, MODE_REPAIR)).encode("ascii"))
-    print("dfix_disk: count of the program box raised by 2, the repair of %s asked for" % SYSVOL_DEV)
+    fat32_put(out, parts[fat], "DISKFIX REQ", ("%s %d\n" % (sysdev, MODE_REPAIR)).encode("ascii"))
+    print("dfix_disk: count of the program box raised by 2, the repair of %s asked for" % sysdev)
 
 
 def main():
     args = sys.argv[1:]
     boot = "--boot" in args
-    args = [a for a in args if a != "--boot"]
+    pc = "--pc" in args
+    args = [a for a in args if a not in ("--boot", "--pc")]
     if len(args) != 2:
         sys.stderr.write(__doc__)
         return 2
     src, out = args
     shutil.copyfile(src, out)
+    if pc:
+        boot_request(out, fat=1, sysvol=2, sysdev="nvmea1")
+        return 0
     root, a, b, c, d = (uuid.uuid4() for _ in range(5))
     tmp = tempfile.mkdtemp(prefix="dfix_")
     try:

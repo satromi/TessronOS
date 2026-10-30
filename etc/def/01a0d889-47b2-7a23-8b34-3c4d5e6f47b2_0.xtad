@@ -1,0 +1,10 @@
+<tad version="1.0" encoding="UTF-8" filename="ソフトウェアキーボードの論理配列">
+<document>
+<p>ソフトウェアキーボードの論理配列</p>
+<p>ソフトウェアキーボードの論理配列。キーの位置に割り当てる英字を、QWERTYかDvorakから選ぶ。システムのキー配列の英字配列と同じもので、物理キーボードにも効く。メニューの定義。</p>
+</document>
+<menu>
+<item code="latin.qwerty">QWERTY</item>
+<item code="latin.dvorak">Dvorak</item>
+</menu>
+</tad>

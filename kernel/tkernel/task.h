@@ -60,7 +60,7 @@ IMPORT QUEUE	knl_free_tcb;	/* FreeQue */
  * Get TCB from task ID.
  */
 #define get_tcb(id)		( &knl_tcb_table[INDEX_TSK(id)] )
-#define get_tcb_self(id)	( ( (id) == TSK_SELF )? knl_ctxtsk: get_tcb(id) )
+#define get_tcb_self(id)	( ( (id) == TSK_SELF )? knl_self_ctxtsk(): get_tcb(id) )
 
 /*
  * Prepare task execution.

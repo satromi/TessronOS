@@ -27,6 +27,7 @@
  */
 
 #include "mc.h"
+#include <ts/obdrop.h>
 
 #define MARK_W		24
 
@@ -325,33 +326,33 @@ static void key( CONST T_OBNTM *m )
 
 void list_dropped( void )
 {
-	static T_OBDROP	d;
+	T_OBDROP	*d;
 	INT		i, p, total = 0;
 	char		s[64];
 
-	/* the list window's own drop record */
-	{
-		SZ	asz = 0;
-
-		memset(&d, 0, sizeof(d));
-		if ( ob_rea_rec(g_lw.kw, OB_WR_DROP, 0, &d, sizeof(d), &asz) < E_OK || d.n <= 0 ) return;
+	/* the list window's own drop record, every link of it */
+	d = ob_drop_read(g_lw.kw);
+	if ( d == NULL ) return;
+	if ( d->n <= 0 ) {
+		free(d);
+		return;
 	}
-	p = pos_at(d.y);
-	if ( p < 0 ) p = ( d.y < head_h() ) ? -1 : mc_count(&g_db) - 1;
+	p = pos_at(d->y);
+	if ( p < 0 ) p = ( d->y < head_h() ) ? -1 : mc_count(&g_db) - 1;
 	{
 		T_OBDRANS	a;
 		SZ		asz = 0;
 
 		memset(&a, 0, sizeof(a));
-		a.seq = d.seq;
+		a.seq = d->seq;
 		a.answer = OB_DR_ACCEPT;
 		(void)ob_wri_rec(g_lw.kw, OB_WR_DROP, 0, &a, sizeof(a), &asz);
 	}
-	for ( i = 0; i < d.n && i < OB_DROP_MAX; i++ ) {
+	for ( i = 0; i < d->n; i++ ) {
 		INT	at = ( p >= 0 ) ? mc_index(&g_db, p) + 1 : 0, r;
 
 		if ( p >= 0 && at <= 0 ) at = g_db.n;
-		r = import_obj(&d.v[i].target, at);
+		r = import_obj(&d->v[i].target, at);
 		if ( r > 0 ) {
 			total += r;
 			p = ( p >= 0 ? p : -1 ) + r;
@@ -367,6 +368,7 @@ void list_dropped( void )
 		say("カードとして読み込めるデータがありません");
 	}
 	redraw_all();
+	free(d);
 }
 
 void list_event( CONST T_OBNTM *m )
@@ -395,7 +397,8 @@ void list_event( CONST T_OBNTM *m )
 		key(m);
 		break;
 	case OB_E_WHEEL:
-		if ( ( m->mods & M_SHIFT ) != 0 ) g_lx -= m->dz * 60;
+		if ( m->code == HID_WHEEL_H ) g_lx += m->dz * 60;	/* across: the way it turns */
+		else if ( ( m->mods & M_SHIFT ) != 0 ) g_lx -= m->dz * 60;
 		else g_ly -= m->dz * 3 * rh();
 		if ( g_lx < 0 ) g_lx = 0;
 		if ( g_ly < 0 ) g_ly = 0;

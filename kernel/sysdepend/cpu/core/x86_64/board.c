@@ -67,6 +67,11 @@ typedef struct {
 LOCAL CONST BOARD_DEF	board_def[] = {
 	{ BOARD_QEMU_Q35, "QEMU", "Standard PC (Q35", "QEMU q35" },
 	{ BOARD_SURFACE_GO2, "Microsoft", "Surface Go 2", "Microsoft Surface Go 2" },
+	/* a ThinkPad's product name is its machine type; the model name is in the version */
+	{ BOARD_X1YOGA3, "LENOVO", "20LD", "Lenovo ThinkPad X1 Yoga (3rd)" },
+	{ BOARD_X1YOGA3, "LENOVO", "20LE", "Lenovo ThinkPad X1 Yoga (3rd)" },
+	{ BOARD_X1YOGA3, "LENOVO", "20LF", "Lenovo ThinkPad X1 Yoga (3rd)" },
+	{ BOARD_X1YOGA3, "LENOVO", "20LG", "Lenovo ThinkPad X1 Yoga (3rd)" },
 };
 #define N_BOARD_DEF	( sizeof(board_def) / sizeof(board_def[0]) )
 

@@ -16,6 +16,12 @@ ifeq ($(BROWSER),1)
 $(error TARGET=_RPI4_ does not take BROWSER=1 (the browser is built for ARMv8.2-A only))
 endif
 
+# イメージに組み込むアプリのパッケージ(.tpk)。etc/pkg/ のものは ARMv8.2-A 向けなので、
+# ARMv8.0-A(Cortex-A72)向けに作ったものを etc/pkg/rpi4/ に置く。MPEG Player は
+# ffmpeg_btron の TS_CPU=cortex-a72 の build-ffmpeg-ts.sh と build-tessron.sh で作る。
+# make PKGS="a.tpk b.tpk" で直に指定もできる
+PKGS ?= $(wildcard $(TOP)/etc/pkg/rpi4/*.tpk)
+
 # make DISP_SWAP_RB=1: 画面の赤と青が入れ替わって見えるとき、ファームウェアの
 # 画素の並びを逆に読む(設計書 16.5.1)
 ifeq ($(DISP_SWAP_RB),1)
@@ -33,6 +39,26 @@ ifeq ($(OBJTEST),0)
 CFLAGS_TARGET += -DCNF_OBJTEST=0
 endif
 
+# make TPANEL=0: 40 ピンヘッダのピンのタッチパネル(GT911)を探さない(設計書 3.6.7)
+ifeq ($(TPANEL),0)
+CFLAGS_TARGET += -DCNF_RPI_TPANEL=0
+endif
+
+# make LCD=dpi35: 3.5inch DPI LCD の画面の設定(etc/boot/config-rpi4-lcd-<名前>.txt)を
+# config.txt の後ろに足す(設計書 3.6.7)。ヘッダの UART のコンソールは使えなくなる。
+# PocketTerm35(HDMI の液晶)は普通の Pi 4 のカードで動き、映らないときだけ config.txt の
+# コメントにした4行を使う。タッチパネルはどちらも起動時に見分ける
+LCD ?=
+ifeq ($(LCD),)
+RPI4_CONFIG := $(TOP)/etc/boot/config-rpi4.txt
+else
+RPI4_LCD_TXT := $(TOP)/etc/boot/config-rpi4-lcd-$(LCD).txt
+ifeq ($(wildcard $(RPI4_LCD_TXT)),)
+$(error LCD=$(LCD): there is no $(RPI4_LCD_TXT) (use LCD=dpi35))
+endif
+RPI4_CONFIG := $(OBJDIR)/config-rpi4.txt
+endif
+
 # make PCIE_POLL=1: PCIe の先の xHCI を割込み(INTA)ではなく一定の間隔で見る
 ifeq ($(PCIE_POLL),1)
 CFLAGS_TARGET += -DCNF_PCIE_POLL=1
@@ -44,6 +70,7 @@ SRCS += kernel/sysdepend/rpi4/hw_setting.c \
 	kernel/sysdepend/rpi4/devinit.c \
 	kernel/sysdepend/rpi4/pcie_rc.c \
 	kernel/sysdepend/rpi4/objtest.c \
+	kernel/sysdepend/rpi4/tpanel.c \
 	kernel/sysdepend/rpi/mbox.c \
 	kernel/sysdepend/rpi/rtc.c \
 	kernel/sysdepend/rpi/rng_hw.c \

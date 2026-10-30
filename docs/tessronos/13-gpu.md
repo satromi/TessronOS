@@ -17,6 +17,7 @@ Raspberry Pi 5のGPU(VideoCore VII、3DブロックはV3D 7.1)を、プロセス
 | Mesaの移植 | EGLとOpenGL ES 3.1を静的ライブラリにし(`make GL=1`)、QEMUの上でsoftpipeで描いてウインドウに出すところまで(M1〜M4、13.6)。V3Dのあるマシンではv3dドライバで描き、ウインドウにも出す作りにした(M6)。実機での確認待ち(13.8.3) |
 | ブラウザ | WebGL 1と2をANGLEでMesaの上に描く(M7、第14章14.6.1)。ページとcanvasの2DをSkiaのGaneshでGPUにラスタ化し、動画のYUVからRGBへの変換をGPUで行う(M8、14.7.2)。QEMUではsoftpipeの上で試験が通り、実機での確認待ち |
 | QEMUでの開発 | Windows版のQEMU 11にvirglのデバイスとGLを持つ表示(`egl-headless`)があり、起動することを確認。3Dのコマンドの実行は未確認(13.7) |
+| IntelのGPU(x64) | ThinkPad X1 Yoga 第3世代とSurface Go 2の第9世代の内蔵GPU。forcewake、PPGTT、論理リングコンテキストとexeclistsでのレンダーとBLTのエンジンへの投入、エンジン単位のリセット、起動時の自己試験、GTの電源(RC6と負荷に応じた周波数、13.11.13)、ウインドウの合成(レンダーのエンジンの計算シェーダ、13.11.14。BLTのエンジンでの写しも残す)、Mesaのirisとi915の要求の模擬を作った。ハードウェアに依らない部分はQEMUの試験`igt`とホストの試験で確かめ、実機での確認待ち(13.11) |
 
 ## 13.2 BCM2712のV3D
 
@@ -177,7 +178,7 @@ TFUのジョブ、ビニングとレンダリングの並行実行(前のジョ�
 
 ### 13.4.3 バックエンド
 
-バックエンドは`T_GPUOPS`(種類、実行できるジョブ、物理アドレスの上限、`info`、`bo_bind`、`bo_unbind`、`kick`、`reset`と、プロセスのアドレス空間の`as_create`、`as_destroy`、`as_bind`、`as_unbind`)を`knl_gpu_register`で登録する。アドレス空間は自分のページテーブルで、そこで走らせるジョブは`knl_gpu_submit_as`で投入し、`kick`がその表を受け取る(13.5.1)。アドレス空間を持たないバックエンドは4つを空にする。ジョブの終わりは`knl_gpu_job_end`で通知し、割込みハンドラからも`kick`の中からも呼べる。同時に登録できるバックエンドは1つである。予定しているバックエンドは、Raspberry Pi 5のV3D(13.3)、QEMUのvirtio-gpu(13.7.2)、試験用のもの(13.7.3)の3つである。
+バックエンドは`T_GPUOPS`(種類、実行できるジョブ、物理アドレスの上限、`info`、`bo_bind`、`bo_unbind`、`kick`、`reset`と、プロセスのアドレス空間の`as_create`、`as_destroy`、`as_bind`、`as_unbind`)を`knl_gpu_register`で登録する。アドレス空間は自分のページテーブルで、そこで走らせるジョブは`knl_gpu_submit_as`で投入し、`kick`がその表を受け取る(13.5.1)。アドレス空間を持たないバックエンドは4つを空にする。ジョブの終わりは`knl_gpu_job_end`で通知し、割込みハンドラからも`kick`の中からも呼べる。同時に登録できるバックエンドは1つである。予定しているバックエンドは、Raspberry Pi 5のV3D(13.3)、x64のIntelのGPU(13.11)、QEMUのvirtio-gpu(13.7.2)、試験用のもの(13.7.3)である。x64では`T_GPUOPS`に、空間の利用者が選んだアドレスにBOを置く`as_bind_at`、`as_unbind_at`と、プロセスのBOのマッピングをキャッシュする印`coherent`が加わる。
 
 ## 13.5 プロセスからの利用
 
@@ -194,6 +195,7 @@ TFUのジョブ、ビニングとレンダリングの並行実行(前のジョ�
 | `gp_wai_fen` | 同期オブジェクトの待ち | フェンスを待つ |
 | `gp_wai_bo` | `WAIT_BO` | BOを使うジョブが終わるのを待つ |
 | `gp_shr_bo`、`gp_imp_bo` | `GEM_FLINK`と`GEM_OPEN`、PRIMEのエクスポートとインポート | BOに名前を付けて他のプロセスに渡す、名前から受け取る |
+| `gp_bnd_bo`(x64) | i915の`EXECBUFFER2`の一覧のアドレス(softpin) | BOをコンテキストの空間の、プロセスが選んだ48ビットのアドレスに置く(13.11.3) |
 
 コンテキストは開いたプロセスのもので、全体で32個まで開ける。表は64個の番号から始まり、足りなくなると倍にして16384個まで伸びる。表の各項目がBOの参照を1つ持ち、プロセスへのマッピングがもう1つ持つ(13.4.1)。プロセスは自分のコンテキストの表にある番号しか指定できず、他のコンテキストの番号、削除した番号、他のプロセスのコンテキストは`E_ID`になる。カーネルはジョブを投入するとき、番号から引いたBOの参照をジョブに持たせる。表はスピンロックで守り、BOを作る、マッピングする、待つといった時間のかかる処理はロックを放してから行う。その間に同じプロセスの他のタスクが番号を削除したときは、後で表を見直して、作ったマッピングを外す。プロセスの空間へのマッピングとその解除は、プロセス表のロックの下で行う(`knl_prc_space_call`)。終了しかけたプロセスの空間が途中で消えないようにするためである。
 
@@ -296,7 +298,7 @@ Mesaの`src/util`、EGL、ドライバがLinuxに求めるものを、次のよ�
 | `getuid`、`getgid`、`getegid`、`sync` | `lib/libcxxrt`(利用者は1人)と`gl_os.c`(待つものがない) |
 | TFUのジョブ(`DRM_IOCTL_V3D_SUBMIT_TFU`) | カーネルはまだTFUを持たず、`GET_PARAM`の`SUPPORTS_TFU`に0を答える。Linuxのv3dドライバはいつも1を答えるので、Mesaのv3dドライバはこれを見ずにblitでTFUのジョブを出し、失敗して`MESA: error: Failed to submit TFU job: -1`を出す。パッチ(`v3d-tfu.patch`)で、画面を作るときに`SUPPORTS_TFU`を読み、0ならTFUを使わずにほかのblitの方法と描画によるミップマップに回す |
 
-プロセスの記述子の番号は、`lib/libcxxrt`と`lib/libgl`が範囲を分けて持つ。ファイルの層の記述子は3から、`eventfd`と`epoll`は0x3000から0x303f、DRMシムのGPUの記述子は0x3400から0x343f、PRIMEの記述子は0x3440から0x347f、sync_fileの記述子は0x3480から0x357f、`/dev/urandom`は0x3800から0x380f、`memfd_create`のメモリのオブジェクトは0x3c00から0x3fff、ソケットは0x4000からである。`lib/libcxxrt`の`close`、`fcntl`、`mmap`はメモリのオブジェクトの範囲をDRMシムより先に調べるので、2つの範囲が重なるとGPUの記述子はDRMシムに届かない。DRMシムの範囲が乱数の範囲に届けばコンパイルで止まる(`gl_drm.c`の`#error`)。
+プロセスの記述子の番号は、`lib/libcxxrt`と`lib/libgl`が範囲を分けて持つ。ファイルの層の記述子は3から、`eventfd`と`epoll`は0x3000から0x303f、DRMシムのGPUの記述子は0x3400から0x343f、PRIMEの記述子は0x3440から0x347f、sync_fileの記述子は0x3480から0x357f、`/dev/urandom`(開くときに実身の木で「/」からdevの文字デバイスをたどって確かめ、読むのは実身「乱数」の鍵から)は0x3800から0x380f、`memfd_create`のメモリのオブジェクトは0x3c00から0x3fff、ソケットは0x4000からである。`lib/libcxxrt`の`close`、`fcntl`、`mmap`はメモリのオブジェクトの範囲をDRMシムより先に調べるので、2つの範囲が重なるとGPUの記述子はDRMシムに届かない。DRMシムの範囲が乱数の範囲に届けばコンパイルで止まる(`gl_drm.c`の`#error`)。
 
 ### 13.6.3 ウインドウシステムとEGL
 
@@ -327,7 +329,7 @@ EGLに新しいプラットフォーム`tessronos`を加えた(`tools/mesa/src/e
 
 ### 13.6.5 ビルドの仕組み
 
-`make GL=1`のとき、`build_make/cxxrt.mk`が`tools/mesa/build.sh all`を呼び、静的ライブラリ`~/tsmesa/libtsgl.a`(置き場は`GL_DIR`)を作る。ライブラリは移植層、パッチ、シム、スクリプトが変わったときだけ作り直し、`build.sh`は変わったものだけをコンパイルする。`GL`を指定しないときは、Mesaに触れず今までどおりにビルドでき、小物「歯車」のレコード1は作り方を言うだけの小さなプログラムになる。
+`make GL=1`のとき、`build_make/cxxrt.mk`が`tools/mesa/build.sh all`を呼び、静的ライブラリ`~/tsmesa/libtsgl.a`(置き場は`GL_DIR`)を作る。ライブラリは移植層、パッチ、シム、スクリプトが変わったときだけ作り直し、`build.sh`は変わったものだけをコンパイルする。x64(`TARGET=_X64_`)では`tools/x64/mesa/build.sh`が同じMesaとパッチ、移植層をx86_64-elfで作り、置き場の既定は`~/tsmesa-x64`、ドライバはsoftpipeとIntelのiris(13.11.9)である(3.10.5)。`GL`を指定しないときは、Mesaに触れず今までどおりにビルドでき、小物「歯車」のレコード1は作り方を言うだけの小さなプログラムになる。
 
 | 段 | 内容 |
 | --- | --- |
@@ -540,7 +542,7 @@ QEMUにはV3Dがないので、プロセスのOpenGL ESがV3Dで描けるかは�
 | `v3d: compute dispatch: the check's job failed (E)` | ジョブが時間内に終わらなかった、または失敗した。`not offered`と同じ扱い |
 | `v3d: the dispatch at the reset: status XXXXXXXX, cfg ...` | 共通層の時間切れでリセットしたとき、走っていたディスパッチの状態と設定 |
 | `egl: the V3D (v3d), a frame cleared and read back in N ms` | プログラムの起動時の確認が通り、v3dで描く |
-| `egl: the V3D did not draw (理由), softpipe` | 確認が通らず、softpipeで描く。理由は段階の順に「no driver named for the descriptor」(`drmGetVersion`の名前からドライバを決められない)、「the loader of the driver v3d did not take the descriptor (errno N)」(記述子の複製など、Galliumのローダの段階)、「the driver v3d did not make its screen」(v3dドライバがレジスタの値を受け付けないなど。直前に`MESA: error:`の行が出る)、「the frame did not end」「N pixels wrong (...)」(画面はできたが、GPUで消したフレームが合わない) |
+| `egl: the V3D did not draw (理由), softpipe` | 確認が通らず、softpipeで描く。理由は段階の順に「no driver named for the descriptor」(`drmGetVersion`の名前からドライバを決められない)、「the loader of the driver v3d did not take the descriptor (errno N)」(記述子の複製など、Galliumのローダの段階)、「the driver v3d did not make its screen」(v3dドライバがレジスタの値を受け付けないなど。直前に`MESA: error:`の行が出る)、「the frame did not end」「N pixels wrong (...)」(画面はできたが、GPUで消したフレームが合わない)。x64のirisでは、次の行に断ったi915の要求の一覧(`egl: i915 (iris): ...`、13.11.9)が出る |
 | `egl: the V3D is not open to this process (no address space), softpipe` | 起動時の確認が通らなかったか、4MBの表を取れなかった |
 | `glgears: V3D 7.1...`で始まる行 | 小物「歯車」がv3dで描いている(softpipeなら`glgears: softpipe, ...`)。続く`glgears: N frames in 5.0 seconds = F fps`が速さで、その行の`drawing`と`eglSwapBuffers`の時間と、同じころの`wm: frames:`と`disp: frames:`の行(10.4.5)で、60フレーム毎秒に届かないときにどこで1フレームを越えたかが分かる |
 | `v3d: MMU fault ...` | プロセスのジョブが自分の表にないアドレスに触れた。ジョブは`E_IO`で終わり、ほかには影響しない |
@@ -565,7 +567,7 @@ QEMUにはV3Dがないので、プロセスのOpenGL ESがV3Dで描けるかは�
 | `device/gpu/v3d/v3d_cp_split.h` | 影と部分を、仕事のある所だけの長方形と使うシェーダに分ける。ジョブのドローを見える所に切り詰め、スーパータイルを分類し、CPUの分担を決める。カーネルとホストの試験が共有する |
 | `device/gpu/v3d/mesa/v3d_cp_shaders.h` | 生成したシェーダ(QPUのコード)、ユニフォームの内容、シェーダステートレコードと浮動小数点数を含むパケットの雛形、パラメータの番号 |
 | `tools/mesa/shaders.sh` | ホストでMesaをビルドし、上のヘッダを生成し、シェーダをホストで確かめる |
-| `tools/mesa/gen_cp_shaders.c` | シェーダを書き、V3D 7.1向けにコンパイルしてヘッダを書くホストのプログラム |
+| `tools/mesa/gen_cp_shaders.c`、`tools/mesa/cp_stages.h` | シェーダを書き、V3D 7.1向けにコンパイルしてヘッダを書くホストのプログラム。シェーダの計算そのもの(NIRのビルダで書いた各段階)は`cp_stages.h`にあり、IntelのGPUのシェーダの生成(13.11.14)と共有する |
 | `tools/mesa/test_cp_shaders.c`、`tools/mesa/hostshim/` | シェーダをNIRのまま解釈して実行し、ホスト向けにビルドした`compose.c`と突き合わせる試験 |
 
 ### 13.10.1 ジョブの種類
@@ -606,7 +608,7 @@ QEMUにはV3Dがないので、プロセスのOpenGL ESがV3Dで描けるかは�
 `tools/mesa/shaders.sh`がWSLのホストで次を行う。Mesaはカーネルにリンクせず、カーネルに入るのは生成したヘッダだけである。
 
 1. Mesa 26.2.3のリリースを`~/mesa`に取得して展開する(SHA-256を検査する)。
-2. NIRと`src/util`の生成物をMesaのPythonスクリプトで作り、NIR、V3Dのシェーダコンパイラ、QPU、`src/util`をホスト向けの静的ライブラリにする。12並列で約30秒、置き場は約0.6GBである。
+2. NIRと`src/util`の生成物をMesaのPythonスクリプトで作り、NIR、V3Dのシェーダコンパイラ、QPU、`src/util`をホスト向けの静的ライブラリにする。12並列で約30秒、置き場は約0.6GBである。DRMの模擬のヘッダ(`tools/mesa/shim`)からは、libdrmの宣言(`xf86drm.h`など)だけを作業の場所に写して使う(残りはnewlibの代わりで、ホストのCライブラリと重なるため)。ホスト向けの`compose.c`が呼ぶx64のベクトルのループ(`cps_*`)とタスクの番号は、`tools/mesa/hostshim`が呼ばれない形で持つ。
 3. `gen_cp_shaders.c`をリンクして実行する。シェーダをNIRのビルダで書き、GLのドライバがコンパイラに渡す前と同じ準備(入出力の変換、最適化)をして、Raspberry Pi 5のV3D(7.1、ハブのリビジョン7、QPU 16、VPM 64KB)向けに`v3d_compile`でコンパイルする。
 4. QPUのコード、ユニフォームの種類と値、シェーダステートレコード(ドローインデックスを持つリビジョン10以降の形と、それより前の形の2つ)とその中のアドレスの位置、頂点属性のレコード、VCMのキャッシュの大きさ、ビニングの前置きのパケット、レンダターゲットのストライド、パラメータの番号、TMUでメモリに書くシェーダの一覧(`CP_FS_TMU_WRITES`)を`device/gpu/v3d/mesa/v3d_cp_shaders.h`に書く。レコードのアドレスの位置は、アドレスだけを変えて2回詰めた差から求め、1ワードに収まることを確かめる。QPUのコードを命令の名前で書き表したものはWORKの`v3d_cp_shaders.dis`に書く。
 5. `test`(13.10.4)を実行する。
@@ -764,3 +766,431 @@ CPUより遅いときは、`caches`と`after`の合計、`render`、`ground by t
 - CPUがバックバッファに書いた範囲を覚えて、ジョブの前のキャッシュの無効化をその範囲だけにすること。
 - CPUとGPUの背景の分担の重み(`CP_CW_*`)は、これまでの実機の内訳から見積もった値である。実機の`ground by the processor`と`GPU`から合わせ直す。CPUの分担は1つのCPUでコピーしているので、複数のCPUで分けることもできる。
 - ウインドウのピクセルからのタイルのロードと、縮小、平滑化、拡大によるぼかしのジョブは、まだ実機で確かめていない。確かめられなければ起動時の確認がその使い方を外す(13.10.6)。
+
+## 13.11 IntelのGPU(x64)
+
+x64のPC(`TARGET=_X64_`)のIntelの内蔵GPU(第9世代。ThinkPad X1 Yoga 第3世代のUHD 620 8086:5917、Surface Go 2のUHD 615 8086:591C)のレンダーとコピー(BLT)のエンジンを、V3Dと同じGPUの共通層(13.4)のバックエンドとして動かす。表示のエンジン(パイプ、プレーン、解像度の変更)は表示の係のドライバで、この節は描画の側である。両者が共有するGGTTの割当てと装置の情報は、どちらにも属さない共有の部品`kernel/sysdepend/x64/igt_ggtt.c`が持つ(分け方は検討書`docs/private/x64_surface_go2_study.md`の5.13と5.14)。QEMUにはIntelのGPUが無いので、ハードウェアの動作は実機の起動時の自己試験で確かめ、ハードウェアに依らない部分はQEMUのカーネル内の試験(13.11.8)で確かめる。
+
+### 13.11.1 ファイル
+
+| ファイル | 内容 |
+| --- | --- |
+| `kernel/sysdepend/x64/igt_ggtt.c`、`igt_ggtt.h` | 共有の部品。装置(00:02.0の第9世代)を見つけ、GGC(GGMS、GMS)、BDSM、BAR2(GMADR)の大きさを読み、GGTTの範囲を1か所で割り当てる。最初の呼出しでmappableな範囲のPTEを読み、ファームウェアが写した範囲(GOPの画面)を「firmware」として使用中にする。電源投入時にGGTTのメモリが消されない機械では、そのごみが数千の短いpresentの並びとして読めるので、並びは近いものから繋いで16個までの範囲にする(ThinkPad X1 Yoga 第3世代では65536項中36781項がpresentで、範囲の表の128個が埋まり、表示の引継ぎと描画のエンジンの割当てがE_LIMITになった)。空きが無いときは、0番地の範囲(GOPの画面)を除くファームウェアの範囲の上に置く。起動時に`igt: the firmware's entries:`の行で、presentの数、並びの数、stolen memoryを指す数、残した範囲を出す。範囲には持ち主と名前がある |
+| `device/gpu/intel/igt_regs.h` | レンダーとBLTのエンジンのレジスタ、コマンド、コンテキストのイメージの並び、PTEのビット |
+| `device/gpu/intel/igt.h` | ドライバの内部の定義 |
+| `device/gpu/intel/igt.c` | forcewake、GTの電源、回避策、PPATとMOCS、エンジンとコンテキスト、投入、完了、割込み、リセット、共通層のバックエンド、デバイスの実身「gpu0」、起動の手順 |
+| `device/gpu/intel/igt_vm.c` | PPGTT(4段、48ビット)、スクラッチの表、カーネルの32ビットのアドレス、共通層のアドレス空間の操作 |
+| `device/gpu/intel/igt_test.c` | 起動時の自己試験(13.11.5) |
+| `device/gpu/intel/igt_pm.c` | forcewakeの参照数、RC6、負荷に応じた周波数(RPS)、パークと起こし(13.11.13) |
+| `device/gpu/intel/igt_compose.c`、`igt_cp.h` | ウインドウの合成のエンジンの選択、BLTのエンジンでの合成、起動時の突き合わせ(13.11.7、13.11.14) |
+| `device/gpu/intel/igt_rcompose.c` | レンダーのエンジンでの合成。計算シェーダのバッチ(13.11.14) |
+| `device/gpu/intel/igt_rplan.c`、`igt_rplan.h` | その長方形の計画。ホストの試験にも組み込む(13.11.14) |
+| `device/gpu/intel/mesa/igt_cp_shaders.h` | 生成した合成のシェーダ(第9世代のコード)、インタフェース記述子、コマンドの雛形とカーネルが埋める欄の位置(13.11.14) |
+| `tools/x64/mesa/igt_shaders.sh`、`gen_igt_shaders.c`、`test_igt_shaders.c`、`hostcc.py`、`hoststub.c`、`hostshim/` | 上のヘッダをホストで生成し、シェーダをホストで確かめる(13.11.14) |
+| `lib/libgl/gl_drm_i915.c` | DRMの模擬のi915の要求(13.11.9)。`gl_drm.c`の末尾でx64のときだけ読み込む |
+| `tools/x64/mesa/build.sh`、`clcstub/`、`patches/` | Mesaのirisを建てる(13.11.9) |
+| `tests/ktest/x86_64/ktest_igt.c` | QEMUのカーネル内の試験の群`igt`(13.11.8) |
+
+共通のファイル(`device/gpu/gpu.c`、`gpu_svc.c`、`gpudev.h`、`include/ts/gpu.h`、`gpuapp.h`、`svc.h`、`lib/libts/svc_stub.S`、`peripheral_kernel/sysman/pcie.c`、`include/ts/pcie.h`、`lib/libgl/gl_drm.c`、`gl_win.c`、`tools/mesa/shim/ts_glport.h`、`xf86drm.h`、`tools/mesa/src/egl/drivers/dri2/platform_tessronos.c`、`tests/uprog/glprog.c`)への足しは、すべて`__x86_64__`の条件の中か定義だけで、Armの生成物は変わらない(13.11.10)。
+
+### 13.11.2 起動の手順
+
+`kernel/sysdepend/x64/devinit.c`の段階「GPU」(画面とウインドウの後)が`knl_igt_init()`を呼ぶ。ここでは装置を見つけて読むだけで、GPUに書く処理は専用のタスク(優先度30)が後で行う。どこまで行うかは起動の設定`cmdline.txt`の`igt=`で決める。
+
+| 指定 | 動作 |
+| --- | --- |
+| `igt=0` | 何もしない |
+| `igt=1` | 装置、リビジョン、GGTTとstolenの大きさを読んで出すだけ。GPUに書かない |
+| `igt=2`(今の既定) | 試しの立ち上げ。起動の30秒後に記録のファイル(`KERNEL.TXT`ほか、3.10.7)を書かせてから立ち上げ、段階の区切りごとに記録を書き直させる。GPUで機械が止まっても、どこまで進んだかが残る。続けて自己試験(13.11.5)と合成の確認(13.11.7) |
+| `igt=3` | 普段の使い方。起動の2秒後に立ち上げ、合成の確認だけをする |
+
+立ち上げは次の順で、各段階の前に`igt: - 段階の名前`を出す。
+
+1. forcewake。render、GT(blitter)、mediaの3つの領域を取り、立ち上げが終わるまで持つ(13.11.13)。要求はマスクつきのビットで、確認が来ないときは2つ目のビットを切り替えて促す(ハードウェア自身の起床と重なって確認が失われることがあるため)。
+2. 電源を切った状態から始める。RC6とパワーゲーティングと周波数の制御を切る(`RC_CONTROL`、`PG_ENABLE`、`RP_CONTROL`を0)。`RP_STATE_CAP`からRP0、RP1、RPnを読み、RP1を求めて、実際の周波数(`RPSTAT1`)を出す。
+3. 構成。`FUSE2`と`EU_DISABLE0`からスライス、サブスライス、EUの数を求め、スライスごとのレジスタの読出しを最初にあるサブスライスへ向ける(`MCR_SELECTOR`)。
+4. 回避策(13.11.6)、PPAT、PPGTTのスクラッチの表、カーネルのアドレス空間。
+5. エンジン(RCSとBCS)。状態のページ(GGTTに置く)、execlistsの有効化(`RING_MODE`の`RUN_LIST_ENABLE`)、割込みのマスク(`RING_IMR`。第9世代では、各エンジンの`RING_IMR`のビットはGTの割込みレジスタ0でのそのエンジンのビットと同じ位置にある。RCSはビット0から、BCSはビット16からで、BCSの下位16bitには何もなく1が読める。以前はBCSにもビット0からの値`fffffef6`を書いていたので、BCSの割込みがすべて止まったままになり、BCSのジョブは1msの見回りでしか終わらなかった(Surface Go 2で`reads ffffffff`)。今はBCSに`fef6ffff`を書く。書いた直後と、各エンジンの最初のコンテキストが走った後に読み返して記録に出す)、コンテキストの状態のバッファ(CSB)のポインタ、MOCS、バッチが書いてよいレジスタ(`FORCE_TO_NONPRIV`)、RCSのエンジンの回避策。
+6. 割込み。GPUはMSIだけを持つので、`ts_pcie_msi_plain_alloc`(`pcie.c`にx64だけ足した、MSI-Xでない形のメッセージ)で1つ取る。マスタ(0x44200)のハンドラはGTの割込み(ユーザの割込み、コンテキストの切替え、コマンドの誤り)を処理し、表示の分が立っていれば表示の係が登録した関数(`knl_igt_irq_display`)を呼ぶ。登録が無いまま表示の割込みが100回を超えたら、マスタを戻さずに1msの見回りだけで続ける。割込みとは別に、1msごとの周期ハンドラがジョブの終わりを見る。
+7. 各エンジンの最初のコンテキスト。エンジンの状態を読み込まない印(restore inhibit)を立てたコンテキストで、コンテキストの回避策をリングから書き、エンジンが保存したイメージを控える。以後の新しいコンテキストはこのイメージから作る。
+8. RC6とRPS(13.11.13)。起動の設定の`igtrc6=0`、`igtrps=0`で切れる。
+9. 共通層への登録。続けて範囲の一覧(`igt: GGTT ...`)。ここで立ち上げの分のforcewakeを放し、以後はジョブの間だけ持つ。続けて自己試験、合成の確認。
+
+最後に`igt: ready: render and copy engines, N execution units, interrupts`が出る。立ち上げに失敗したら`igt: the GPU is NOT used (エラー)`で、GPUを使わずに続く(プロセスのOpenGL ESはsoftpipe、合成はCPU)。
+
+GPUはデバイスの実身「gpu0」(`OB_S_GPU`、デバイス箱)になる。レコード1は状態の「キー 値」の行で、`DEVICE`、`REVISION`、`STATE`(starting、running、not used)、`EU`、`RP0_MHZ`〜`RPN_MHZ`、`RPE_MHZ`(効率のよい周波数)、`RC6`と`RPS`(onかoff)、エンジンごとのジョブとリセットの数、`INTERRUPT`(messageかpolled)、`COMPOSE`(render engine、copy engine、processor)を持ち、立ち上げの段階が進むたびに変化を通知する。
+
+### 13.11.3 アドレス空間とGGTT
+
+すべてのジョブはPPGTT(4段のページテーブル、48ビット、4KBのページ)の中で走る。カーネルの空間(合成と試験のBO、32ビットのアドレスをビットマップで割り当てる)と、プロセスのコンテキストごとの空間がある。どの空間も、何も無いエントリは下の段のスクラッチの表を指し、最後はゼロのスクラッチのページに行き着く。範囲の外への書込みはスクラッチのページに行き、止まらない(この世代のエンジンはページフォールトで止まるため)。スクラッチの表はすべての空間で共通で、変えない。ページのエントリはPPATの4番(LLCとeLLCで書き戻し)、表のエントリは0番(LLCで書き戻し)を指す。CPUとGPUはLLCを共有するので、BOのキャッシュの操作は要らない(自己試験の`coherence`で確かめる)。ページテーブルはCPUのキャッシュを通して書き、書いた行を`clflush`で書き戻してからGPUに見せる。
+
+GGTTに置くのは、コンテキストのイメージとリング(1つの連続した領域)、エンジンの状態のページだけで、共有の部品から取る(mappableの外を先に使う)。プロセスのBOもカーネルのBO(合成のバッファを含む)もGGTTに置かない。
+
+プロセスのBOは、プロセスが選んだアドレスに置く(`gp_bnd_bo`、SVCのクラス10の13番、x64だけ)。irisはBOのアドレスを自分で決める(softpin)ので、カーネルはアドレスを割り当てず、i915がexecbufferの一覧のアドレスにBOを置くのと同じく、DRMの模擬がバッチの前に置き直す。アドレスは48ビットで、正規形の上位のビットは捨てる。番号を消すかコンテキストを閉じると表から外す。
+
+置く所が同じコンテキストの別のBOの所と重なるときは、その別のBOを先に丸ごと表から外し、置かれていないものとする。i915がsoftpinで重なるVMAを追い出すのと同じである。irisは使い終えたBOを番号ごと手元に残し(BOのキャッシュ)、別のメモリの区域で使い直すときはそのアドレスを返してから新しいアドレスを付ける(`alloc_bo_from_cache`)。返したアドレスは、前のBOが新しい所に移る前に別のBOに付くことがある。前のBOを移すか消すときに前の所を外すと、そこにある新しいBOのエントリまでスクラッチに戻り、新しいBOはゼロを読み、書込みは捨てられる。DRMの模擬は置いたつもりのままなので置き直さず、エラーにもならない。追い出したときは、最初の8回を`gpu: number 番号 placed at アドレス (Nページ) over number 番号 at アドレス (Nページ), which is taken out of the space (N so far)`の行でコンソールに出す。
+
+### 13.11.4 コンテキストと投入
+
+エンジンごと、アドレス空間ごとに論理リングコンテキスト(LRC)を持つ。イメージ(RCSは22ページ、BCSは2ページ、先頭がコンテキストごとの状態のページ)の後ろに16KBのリングを続けて1つの連続した領域にし、GGTTに写す。1つの空間は16個までのハードウェアコンテキスト(`GPU_HWC_MAX`)を持ち、ジョブ(`GPU_JOB_BATCH`、`T_GPUBATCH`)が番号で選ぶ。i915のGEMコンテキストのエンジンの表の1項目が1つに当たる(13.11.9)。初めて使うときと`GPU_BATCH_FRESH`の印のときは、最初のイメージから作り直す。
+
+1つのジョブのリングのコマンドは次のとおりである(RCS)。
+
+1. コンテキストが入るときの回避策: L3の書き出しとSLMの消去のパイプコントロール、`COMMON_SLICE_CHICKEN2`、`FF_SLICE_CHICKEN`、`3D_CHICKEN3`の書込み(i915が間接のコンテキストのバッチで行うもの)。
+2. 頂点のキャッシュの無効化の前の空のパイプコントロールと、TLBと各キャッシュの無効化。
+3. `MI_BATCH_BUFFER_START`(PPGTT)。
+4. キャッシュの書き出し、状態のページへのシーケンス番号の書込み(GGTTのアドレス、パイプコントロールの書込み)、`MI_USER_INTERRUPT`。
+
+BCSは`MI_FLUSH_DW`(TLBの無効化と、シーケンス番号の書込み)で同じことをする。書いた後、イメージのリングの末尾(`CTX_RING_TAIL`)を書き換え、コンテキストの記述子(イメージのGGTTのアドレス、48ビットのアドレスの形、有効、特権、上位にコンテキストの番号)をELSPの0番の口に書く(1番の口は空)。GuCとHuCは使わない。
+
+ジョブの終わりは、シーケンス番号が書かれ、かつCSBに「動作中から休止へ」の記録が来たときである(イメージの保存が済み、次のジョブがイメージを書き換えてよい)。割込みか1msの見回りが気づき、共通層に終わりを伝える。番号が書かれてから20msたってもCSBの記録が来なければ終わりとみなし、その回数を数える(`without word of idle`)。コマンドの誤りの割込み(`GT_CS_ERROR`)が来たジョブは`E_IO`で終える。
+
+共通層の時間切れ(2秒)では、走っていたエンジンだけをリセットする。リングを止め(`MI_MODE`の`STOP_RING`)、`RESET_CTL`でリセットの準備を求め、`GDRST`のそのエンジンのビット(RENDERかBLT)を2回立てて戻るのを待つ。その後、エンジンを起こし直し(状態のページ、execlists、割込み、CSBのポインタ、MOCS、whitelist、回避策)、走っていたコンテキストを作り直す印を付ける。前後にエンジンのレジスタ(HEAD、TAIL、ACTHD、BBADDR、INSTDONE、IPEHR、EIR、ESR、CSBのポインタ、フォールトのレジスタ)を出す。GDRSTのFULLは使わない(表示を止めない)。
+
+### 13.11.5 起動時の自己試験(`igt=2`)
+
+1回の起動で分かるように、試験は1件ごとに`igt test:`で始まる行を出し、`KERNEL.TXT`に残る。どのジョブにも時間の上限があり、終わらなければ共通層がエンジンをリセットするので、失敗しても次に進む。止まりを起こす試験は後に置き、その後にもう一度書いて回復を確かめる。
+
+| 試験 | 内容 | 成功の条件 |
+| --- | --- | --- |
+| `store bcs`、`store rcs` | `MI_STORE_DATA_IMM`のバッチで16語をPPGTTのBOに書く | ジョブが`E_OK`、16語が正しく、間の語は書かれない |
+| `fill`、`fill uneven`、`fill large` | `XY_COLOR_BLT`で64×64、100×37、1920×1080を塗る(行の長さは幅より長い) | 全画素が色、範囲の外とBOの残りは元のまま。時間とMB/sを出す |
+| `copy`、`copy unaligned` | `XY_SRC_COPY_BLT`で256×256、173×61(読む位置と書く位置、行の長さが揃わない) | 全画素が一致し、範囲の外は元のまま |
+| `queue of 4 on both engines` | BCSとRCSに交互に4つのジョブを続けて投入し、最後のフェンスを待つ | 4つとも書かれ、フェンスが投入の順 |
+| `coherence` | CPUのキャッシュにだけ書いた元をBLTで写し、写し先の行をCPUのキャッシュに持ったまま読み戻す | 全語が新しい値(GPUがCPUのキャッシュを読み、CPUがGPUの書込みを見た)。新しい値、古い値、それ以外の数を出す |
+| `spaces` | プロセスと同じ作りの空間で、その空間のBOと、カーネルのBOのアドレスに書くバッチを走らせる | 空間のBOは書かれ、カーネルのBOは1語も変わらない(そのアドレスはスクラッチのページに行く)。プロセスの分離の根拠になる行 |
+| `hang bcs`、`hang rcs` | 自分へ飛び続けるバッチ | 約2秒で`E_IO`、エンジンのリセットが1回増える |
+| `after hang` | 止まりの後に`store`をもう一度 | `store`と同じ |
+| `interrupts` | エンジンごとのジョブ、ユーザの割込み、コンテキストの切替えの割込み、誤り、見回りで終えた数、CSBの記録なしで終えた数、リセット | 割込みを取れたときはBCSのユーザの割込みが1回以上 |
+
+最後に`igt test: summary 通った数/件数`と、失敗した試験の名前が出る。
+
+### 13.11.6 回避策(Linuxのi915との比べ)
+
+第9世代(Kaby LakeとAmber Lake)に要る回避策を、Linuxのi915(`gt/intel_workarounds.c`、`intel_clock_gating.c`、`gt/intel_lrc.c`の間接のコンテキストのバッチ、`gt/intel_mocs.c`、`gt/gen8_engine_cs.c`)の処理と1項目ずつ比べて入れた。レジスタの意味と処理の順だけを参考にし、コードは写していない。Kaby LakeのC0より前のステッピングは、PCIのリビジョンが2未満のときとする(手元のX1 Yogaはリビジョン7)。
+
+| 回避策 | 置き場 | i915 | TessronOS |
+| --- | --- | --- | --- |
+| WaProgramMgsrForCorrectSliceSpecificMmioReads | `MCR_SELECTOR` | 最初にあるスライスとサブスライスへ向ける | 同じ |
+| WaDisableKillLogic、WaDisableHDCInvalidation | `GAM_ECOCHK`の`DIS_TLB`、`DISABLE_HDC_INVALIDATION` | GTの初期化で立てる | 同じ |
+| WaCompressedResourceSamplerPbeMediaNewHashMode | `MMCD_MISC_CTRL`、コンテキストの`COMMON_SLICE_CHICKEN2`と`HALF_SLICE_CHICKEN7` | LLCの機械で立てる。表示の側(`CHICKEN_PAR1_1`)と組 | 同じ。表示の側は表示の係の`knl_idisp_hash_mode`を呼ぶ(あるとき) |
+| WaDisableDynamicCreditSharing(C0より前) | `GAMT_CHKN_BIT_REG` | 立てる | 同じ |
+| WaDisableGafsUnitClkGating | `UCGCTL4` | 立てる | 同じ |
+| WaInPlaceDecompressionHang | `GAMT_ECO_REG_RW_IA` | 立てる | 同じ |
+| WaDisableSDEUnitClockGating、WaDisableGamClockGating(C0より前) | `UCGCTL6`、`UCGCTL1` | クロックゲーティングの初期化で立てる | 同じ |
+| WaEnablePreemptionGranularityControlByUMD | `FF_SLICE_CS_CHICKEN1`、whitelistの`CS_CHICKEN1` | エンジンの回避策とwhitelist | 同じ |
+| WaEnableGapsTsvCreditFix | `GARBCNTL` | 立てる | 同じ |
+| WaContextSwitchWithConcurrentTLBInvalidate | `CSFE_CHICKEN1_RCS` | 立てる | 同じ |
+| WaEnableLbsSlaRetryTimerDecrement | `SCRATCH1` | 立てる | 同じ |
+| WaOCLCoherentLineFlush、L3のアトミックを切る | `L3SQCREG4`、`SCRATCH_LNCF1`、`SCRATCH1` | 立てる、消す | 同じ |
+| コンテキストの回避策(WaClearFlowControlGpgpuContextSave、WaDisablePartialInstShootdown、WaEnableYV12BugFixInHalfSliceChicken7、WaEnableSamplerGPGPUPreemptionSupport、Wa4x4STCOptimizationDisable、WaDisablePartialResolveInVc、WaCcsTlbPrefetchDisable、WaForceContextSaveRestoreNonCoherent、WaForceEnableNonCoherent、WaDisableSamplerPowerBypassForSOPingPong、WaDisableSTUnitPowerOptimization、WaDisable3DMidCmdPreemption、WaDisableGPGPUMidCmdPreemption、WaToEnableHwFixForPushConstHWBug(C0以降)、WaDisableSbeCacheDispatchPortSharing) | `ROW_CHICKEN`、`HALF_SLICE_CHICKEN1`〜`7`、`CACHE_MODE_1`、`HDC_CHICKEN0`、`CS_CHICKEN1`、`COMMON_SLICE_CHICKEN2` | カーネルのコンテキストの最初の要求で書き、保存したイメージを新しいコンテキストの元にする | 同じ(各エンジンの最初のコンテキスト、13.11.2の7) |
+| WaClearSlmSpaceAtContextSwitch、WaDisableGatherAtSetShaderCommonSlice、`FF_SLICE_CHICKEN`と`3D_CHICKEN3`の頂点の向きの直し | パイプコントロール、`COMMON_SLICE_CHICKEN2`、`FF_SLICE_CHICKEN`、`3D_CHICKEN3` | 間接のコンテキストのバッチ(コンテキストが入るたび) | ジョブごとのリングの先頭で同じものを書く。TessronOSはジョブごとにコンテキストが入り直すので、同じ時期になる |
+| WaFlushCoherentL3CacheLinesAtContextSwitch | 間接のコンテキストのバッチ | Skylakeだけ | 入れない(Kaby Lakeは対象外) |
+| whitelist | `FORCE_TO_NONPRIV` | `CTX_PREEMPT_REG`、`CS_CHICKEN1`、`HDC_CHICKEN1`、`COMMON_SLICE_CHICKEN2`、Kaby Lakeの`L3SQCREG4`。残りは`RING_NOPID` | 同じ |
+| 頂点のキャッシュの無効化の前の空のパイプコントロール | リング | 第9世代で入れる | 同じ |
+| WaForGAMHang(Kaby LakeのC0より前) | 書き出しのパイプコントロールの前後 | 入れる | 入れない(C0より前の個体は対象にしない) |
+| WaRsForcewakeAddDelayForAck | forcewakeの確認 | 2つ目のビットで促す | 同じ |
+| MOCSとL3のMOCS | `GFX_MOCS`、`BLT_MOCS`、`LNCFCMOCS` | 0は未キャッシュ、1はページテーブルどおり、2は書き戻し、63はL3の追い出し用、残りは1 | 同じ。エンジンのリセットの後に書き直す |
+| PPAT | `PPAT_LO`、`PPAT_HI` | 0はLLCの書き戻し、1は書込み結合、2は第9世代でeLLCの指定に従う書き戻し、3は未キャッシュ、4〜7は年齢の違う書き戻し | 同じ(表示のGGTTのPTEが0番を指すので変えない) |
+| 3Dの初期の状態のバッチ(render state) | カーネルのコンテキスト | 最初に既定の3Dの状態のバッチを走らせる | 入れない。irisがバッチの中で全部の状態を設定する |
+| RC6とRPS | GTの電源 | RC6を有効にし、負荷で周波数を変える | 同じ(13.11.13)。RC6の時間と閾値、パワーゲーティング、RPSの評価区間と閾値、リングの周波数の表はi915の第9世代の値と手順のとおり |
+| RC6のコンテキストの破損(第9世代) | `RC_CONTROL`、`RC6_CTX_INFO` | 忙しい間はハードウェアのタイマーでRC6に入らない(`RC_CONTROL`を0)。アイドルでパークしたときに手動でRC6を求め、その前に`RC6_CTX_INFO`が0なら破損としてRC6を切る | 同じ |
+| `GEN8_PMINTR_DISABLE_REDIRECT_TO_GUC` | `PMINTRMSK`のビット31 | 第8〜10世代では0にする | 同じ |
+| 表示の回避策(`CHICKEN_PAR1_1`のPSRの直し、`GEN8_CHICKEN_DCPR_1`、`DISP_ARB_CTL`、`FBC_LLC_READ_CTRL`) | 表示 | クロックゲーティングの初期化 | 描画の係は表示のレジスタに書かない。表示の係の扱い |
+
+### 13.11.7 BLTのエンジンでの合成
+
+ウインドウの合成は、まずレンダーのエンジン(13.11.14)で試し、起動時の確認に通ればそれを使う。通らなかったときと`igtrc=0`のときに、次のBLTのエンジンでの合成を使う。
+
+BLTのエンジンは矩形の写しと塗りしかできない(混ぜることも角の被覆率もない)ので、CPUの段階(`compose.c`)がただ写すだけのものを受け持つ。背景と、奥から順に、不透明で(`a_frame`と`a_work`が255)、角が丸くなく、影も色の重ね(wash、tint)もなく、キーの透過も外形も開閉中でもないウインドウである。CPUの`lay_piece`はそのようなウインドウの画素をそのまま写すので、結果はビット単位で同じになる。見た目の効果のあるウインドウに当たったらそこで止め、それまでの数を答える(`T_CPGPU`の`lay`)。残りはCPUがいつもどおり重ねる。
+
+写すものは、まずカーネルのメモリの間の写しの一覧(`igt_cp_plan`、`CP_OP`)として決め、次にそれを、メモリのGPUのアドレスを使った`XY_SRC_COPY_BLT`の並びにしてBCSで実行し、終わるのを待つ。一覧の段階はQEMUの試験(13.11.8の`igt_plan`)がCPUの写しで実行してCPUの段階と突き合わせ、コマンドの段階は実機の起動時の確認が突き合わせる。BLTのエンジンは面を元のアドレス、行の長さ、座標で指すので、元のアドレスを最初の画素のあるページとし、ページの中の位置を座標にする。行の長さは32767バイトまでである。
+
+バックバッファ、背景、ウインドウの画素はカーネルのメモリ(`knl_vmap`など)のままで、初めて使うときにその物理ページをカーネルの空間に写し(`knl_gpu_bo_wrap`、96個まで覚える)、カーネルがその範囲を手放したら(`knl_vunmap_hook`)外す。CPUとGPUはLLCで一貫するのでキャッシュの操作はしない。起動時の確認で違いが出たときだけ、写す前と後に`clflush`をする形でもう一度確かめ、通ればその形で使う。
+
+起動時の確認(`igt compose:`の行)は、1024×768の画面を想定し、次の場面をCPUだけとBLTとCPUの組で別々のバックバッファに組み立て、最上位のバイトまで全画素を比べる。
+
+| 場面 | 確かめること |
+| --- | --- |
+| `ground`、`ground in a part` | 背景の写し(全体と一部) |
+| `one window` | 不透明なウインドウ1つ |
+| `two, one past the edge`、`two in a part` | 画面の右と下の外に出るウインドウ、一部の範囲 |
+| `past the left and top` | 画面の左と上の外に出るウインドウ |
+| `many` | 24個のウインドウ |
+| `plain, then a look` | 不透明な2つの後に角と影のあるウインドウ。BLTは2つまで重ね、残りをCPUが重ねる |
+| `a look first` | 最初のウインドウに効果がある。BLTは背景だけ |
+
+全部が一致したら、64×64と1024×768の2つのウインドウの場面でBLTとCPUの時間を測り、BLTのほうが速くなる画素数を求めて閾値にする(`wants`)。全体でもCPUのほうが速ければ使わない。レンダーのエンジンの確認(13.11.14)の後で、使うエンジンを決めて`cp_gpu_set`で使い始める(`igt compose: the windows are composited by ...`の行)。結果はデバイスの実身「gpu0」の`COMPOSE`にも出る。ジョブが失敗したら、その起動の間はCPUに戻す。使用中は60秒ごとに`igt compose: in N s:`の統計の行が出る。
+
+### 13.11.8 QEMUでの試験(群`igt`)
+
+```sh
+make TARGET=_X64_ KTEST=1 KTONLY=igt BUILD_ID=<名前> sdimg
+tools/x64/ktest64.sh build_make/obj/_X64__ktest<名前>/sd.img
+```
+
+| 試験 | 内容 |
+| --- | --- |
+| `test_igt_ggtt` | メモリの上に作った16MBの第1のBAR(PTEは8MBから)で、共有の部品を動かす。ファームウェアが写した2つの範囲を「firmware」として見つけること、mappableの範囲と外からの割当て、境界、大きさの誤り、決まった場所の取得(firmwareの範囲を分ける、他の持ち主の範囲は断る)、名前で引くこと、PTEの書込み(物理アドレスの列と連続、アドレスのビット0を立てた形)と`GFX_FLSH_CNTL`の書込み、スクラッチへの消去、末尾を越える書込みをしないこと、返すこと、表が一杯になること |
+| `test_igt_ppgtt` | 4段の表。何も無い所はどの段でもスクラッチのページ、エントリの物理アドレスとビット、段ごとに表が作られる数、同じ表の共有、48ビットの上端、正規形の高いアドレス、揃わないアドレスと範囲の外の拒否、外したエントリがスクラッチに戻ること、空間を壊すと表のページがすべて返ること |
+| `test_igt_kva` | カーネルの32ビットのアドレスの割当て(続きから探すので、返したアドレスをすぐには使い回さない) |
+| `test_igt_layout` | 新しいコンテキストのイメージの並び。MI_LOAD_REGISTER_IMMの見出しと、`CTX_RING_TAIL`などの値の決まった位置のレジスタが一致すること(2つの独立した表どうしの突き合わせ) |
+| `test_igt_emit` | ジョブのリングのコマンドを読み解き、各コマンドの長さの和がリングの末尾に一致すること、リングが一周して折り返すこと、バッチの開始とアドレス、シーケンス番号の書込みのアドレスと値、レジスタの書込みの数(回避策を含む)、終わりの並び、末尾が8バイトに揃うこと |
+| `test_igt_plan` | 合成の写しの一覧をCPUの写しで実行し、残りをCPUの段階で重ねた結果を、CPUだけで組み立てた結果と、乱数の300場面で全画素比べる |
+| `test_igt_place` | 空間の利用者が選んだ所にBOを置く試験用のGPU(`as_bind_at`と`as_unbind_at`を記録する)を登録し、試験のプログラム`GPPROG.ELF`の`place`が`gp_bnd_bo`で置く。正規形の高いアドレス、同じ所に置き直しても何も起きないこと、置き場所を移すと前の所から外れること、他人の番号(`E_ID`)とアドレス0(`E_PAR`)の拒否、番号を消すと外れること、別のBOの一部に重ねて置くとその別のBOが先に丸ごと外れ、そのBOを後で移しても消しても重ねたBOの所は外れないこと、プロセスが終わると残りが外れて空間が壊されること |
+| `test_igt_irispath` | `make GL=1`のとき。試験のプログラム`GLPROG.ELF`の`irispath`が、DRMの模擬が装うKaby Lake GT2(`ts_gl_drm_fake(2)`)に対して、EGLのプラットフォームがドライバ`iris`を選び、その画面を作り、確認のフレームの提出と待ちまで進むこと(模擬ではフレームが描かれないので、読み戻しで合わずにsoftpipeに戻る段階で止まる) |
+| `test_igt_softpipe` | 同じライブラリのsoftpipeで三角形を描く(`tri`)。irisを入れてもsoftpipeが変わらないこと |
+| `test_igt_i915sync` | `GLPROG.ELF`の`i915sync`が、模擬のKaby Lakeに対して、同期オブジェクトの待ち(投入されていないものは`WAIT_FOR_SUBMIT`なしなら`EINVAL`、ありなら時間切れの`ETIME`、別のスレッドが30ms後に知らせるまで待つこと、`WAIT_ALL`なしでは知らされた1つの番号を答え、ありなら全部を待つこと)と、`REG_READ`(時刻を8バイトの読出しの印の有無の両方で読め、値が戻らないこと、ほかのレジスタと半端な位置は`EINVAL`)を確かめる |
+| `test_igt_rcmd` | レンダーのエンジンでの合成の1つの長方形をコマンドにして、各コマンドの見出しと埋めた欄(プッシュ定数の長さと位置、インタフェース記述子の番号、SIMD16、スレッドグループの横と縦の数、マスク)を、生成したヘッダとは別にPRMの並びで確かめる |
+| `test_igt_rplan` | レンダーのエンジンでの合成の計画を、背景だけ、不透明なウインドウ、角と影、ぼかし、開閉中、画面の一部の場面で作り、背景が最初であること、画面の長方形が組み立てる範囲の中、ぼかしの長方形がT1かT2の中にあること、プッシュ定数の長方形と行の長さ、グループの中の画面の長方形が重ならないこと、ぼかしの段を使えないときと長方形が入りきらないときの答えを確かめる |
+| `test_igt_pm` | GTの電源(13.11.13)を、試験のメモリをレジスタに見立てて動かす。forcewakeの取得、電源を切った状態と周波数の読出し、RC6とRPSの設定値、PMの割込みでの周波数の上げ下げ(1、2、倍の段、戻り)、10ms使われないときのパーク(RC6の手動の要求、forcewakeを放す、最低の周波数、割込みを止める、次の開始の周波数)、起こし(確認が下りないときは数える、パークを解く)、`RC6_CTX_INFO`が0のときにRC6を以後切ることを確かめる |
+
+### 13.11.9 Mesaのirisとi915の要求
+
+`tools/x64/mesa/build.sh`は、`GALLIUM_DRIVERS`に`iris`を含むとき、irisとIntelのコンパイラ(第9世代以降のもの。第8世代のELKは入れない)を建てる。Intelのドライバの内部のシェーダはOpenCL Cで書かれ、Mesaの`mesa_clc`(LLVMとclangが要る)と`vtn_bindgen2`で作るが、ホストにLLVMを用意せずに済むよう、`tools/x64/mesa/clcstub`の代わりの道具を使う(`-Dmesa-clc=system -Dprecomp-compiler=system`)。代わりの`vtn_bindgen2`は、blorpが使う`blorp_check_in_bounds`(元のOpenCL Cと同じ符号なしの範囲の判定)をNIRの命令で直に書き、使わないもの(間接描画の生成、クエリの写し、Vulkanの関数)は呼ばれたら止まる関数にする。irisが間接描画の生成を使わないよう、パッチ`tools/x64/mesa/patches/iris-no-generation.patch`で閾値の既定を最大にする。`iris-tessronos-port.patch`は、装置のファイルの番号(`major`、`minor`)と`DT_LNK`の無いことに合わせる。2026年10月19日の時点で、1181のソースがすべて翻訳でき、ライブラリは55MBになった。
+
+irisはDRMの要求を`drmIoctl`ではなくCライブラリの`ioctl`で出す(`intel_ioctl`)。そこで`gl_drm_i915.c`が、GPUの記述子の要求を`drmIoctl`に渡す`ts_gpu_fd_ioctl`と、それを呼ぶ弱い名前の`ioctl`を持つ。自分の`ioctl`を持つプログラムは、そこからGPUの記述子の要求を`ts_gpu_fd_ioctl`に回さなければならない。ブラウザ(`port/compat/ts_linux.c`)は、どの記述子にも`ENOTTY`を返す強い名前の`ioctl`を持っていたので、弱い名前の`ioctl`は使われず、irisの要求はすべて`ENOTTY`で断られていた(下の2026年10月23日の実機の例)。irisは記述子を`fstat`して装置を見分けるので、`lib/libcxxrt`の`_fstat`がx64ではGPUの記述子を`ts_gpu_fd_fstat`に回し、DRMのレンダーノードの文字装置(226:128)として答える。名前付きのパイプ(`mkfifoat`、Intelのバッチの計測の道具だけが使う)は無いと答える。記述子は`gp_`のコンテキストで、i915のVM(アドレス空間)1つに当たる。模擬のGPU(`ts_gl_drm_fake(2)`)では、失敗した要求を`i915 (pretended): request 番号 of 大きさ bytes: errno`の行で出す。
+
+2026年10月19日、QEMUの`test_igt_irispath`で、模擬のKaby Lakeに対してローダが`iris`を選び、irisが装置の情報(`GETPARAM`、`QUERY`)を読み、画面とコンテキストを作り、確認のフレームを消すバッチを`EXECBUFFER2`で出して終わりを待つところまで進んだ(194ms)。模擬ではGPUが描かないので、読み戻しで4096画素が合わずにsoftpipeに戻る。失敗した要求は、持たないと答えた`GEM_USERPTR`、知らないパラメータの`GETPARAM`と`CONTEXT_GETPARAM`だけだった。
+
+2026年10月23日、ThinkPad X1 Yoga(第3世代、UHD 620 8086:5917)の実機でブラウザを起動すると、カーネルのGPUの自己テストと合成の確認は通ったのに、`MESA: warning: Kernel 4.1 required to properly query GPU properties.`の後に`egl: the GPU did not draw (the driver iris did not make its screen), softpipe`が出た。Mesaの`intel_device_info_i915_get_info_from_fd`は、`QUERY`の`TOPOLOGY_INFO`が得られず、続く`GETPARAM`の`SLICE_MASK`、`EU_TOTAL`、`SUBSLICE_MASK`も得られないときにこの警告を出す。ローダの段(`drmGetVersion`、`drmGetDevice2`)はDRMシムの関数を直に呼ぶので通り、`intel_ioctl`を通る要求だけが、上に書いたブラウザの`ioctl`で`ENOTTY`になっていた。`GETPARAM`の`HAS_CONTEXT_ISOLATION`も得られないので、`iris_screen_create`は「カーネルが古い」として画面を作らない。`GLPROG.ELF`は自分の`ioctl`を持たないので、`test_igt_irispath`ではこれが見えなかった。ブラウザの`ioctl`が`ts_gpu_fd_ioctl`に回すように直し、`test_blink_v3dfall`をx64でも走らせて、ブラウザのプロセスで模擬のKaby Lakeに対してirisが画面を作る(`driver=iris step=6`)ことを確かめるようにした。
+
+次に同じことが起きたときに原因が分かるように、DRMシムはi915の要求の数と、断った要求の種類(要求の名前、`GETPARAM`と`CONTEXT_GETPARAM`、`CONTEXT_SETPARAM`ではパラメータの番号、`QUERY`では負の長さを答えた項目の番号)ごとの`errno`と回数を覚えておく。あわせて、エンジンごとのバッチの数とバイト数、ジョブがエラー(`E_IO`、エンジンが命令を断ったかリセットされた)で終わっていたのを待ちで見つけた数を数える。待ちはこれまでどおり`E_IO`を終わったものとして扱うので、ドライバには見えない。プラットフォームはirisで描けなかったとき(画面が作れない、確認のフレームが合わない)に、`egl: the GPU did not draw (...)`の次の行にそれを出す(`ts_gl_drm_tell`)。
+
+```text
+egl: i915 (iris): 167 requests, batches 6 render 0 copy (5760 bytes), 0 waits found a job ended in an error; 8 refused: QUERY 5 errno 22 (1) GEM_USERPTR errno 19 (1) GETPARAM 1 errno 22 (1) QUERY 7 errno 22 (1) c3 errno 62 (1) GETPARAM 58 errno 19 (1) GETPARAM 54 errno 22 (1) GEM_CONTEXT_GETPARAM 7 errno 22 (1)
+```
+
+これは同じ日にQEMUの`test_blink_v3dfall`で、ブラウザのプロセスが模擬のKaby Lakeに対して出したもので、irisは画面を作り、確認のフレームの段まで進んだ(`driver=iris step=6`)。断ったのはどれもirisが無くても進むもの(`QUERY`の`HWCONFIG_BLOB`(5)と`GUC_SUBMISSION_VERSION`(7)、`GEM_USERPTR`、`GETPARAM`の`IRQ_ACTIVE`(1)、`PERF_REVISION`(54)、`PXP_STATUS`(58)、`CONTEXT_GETPARAM`の`SSEU`(7)、`SYNCOBJ_WAIT`(c3)の時間切れ)である。実機でirisの要求がすべて`ENOTTY`(25)で断られると、ここに`GETPARAM`の多くの番号が`errno 25`で並ぶ。`SYNCOBJ_WAIT`の時間切れは、irisがBOの忙しさを待ち時間0の`SYNCOBJ_WAIT`で確かめるためで(`iris_bo_busy_syncobj`)、Linuxのi915も同じく`ETIME`を返す。
+
+DRMシムは、プロセスの最初の24個のバッチを読み、1つ1行でコンソールに出す。描画(`3DPRIMITIVE`)の種類を直前の`3DSTATE_PS`で分けた記号(Dは描画、Cは速いクリア、Pは部分的なresolve、Rは全体のresolve)、Wはコンピュートのウォーカー、`PIPE_CONTROL`(`|`はレンダーターゲットのフラッシュ、`i`はキャッシュの無効化、`s`は待ちだけ)、Lはレジスタの書込み、`>`は別のBOへの続き、をバッチの順に並べ、書いたレジスタを添える。描画ごとに、ピクセルシェーダのバインディングテーブルの0番(レンダーターゲット)と1番(読む面)のSURFACE_STATEから、形式、タイリング、補助の面のモード、アドレス、そこに入っているクリア色の赤を出す。STATE_BASE_ADDRESSはハードウェアのコンテキストに残るので、それを出さない2つ目以降のバッチでは、バインディングテーブルを引けない(`no binding table`)。カーネルは、ジョブがエンジンにエラー(命令の拒否)を起こしたとき、割込みでEIR、IPEHR、IPEIR、INSTDONE、ACTHD、BBADDRを読んでおき、次のジョブを出すときに`igt: rcs: a job ended in an error ...`の行で出す(最初の16回)。
+
+確認のフレームが合わないときは、プラットフォームがさらに1行で、フレームの語の並び(最初の4語、最後の語、異なる語の種類)、100ms後にもう一度読んだ結果、タイリングも圧縮も速いクリアもない線形のフレームでの結果を出す。irisでは、色の圧縮(CCS)と速いクリアを一時的に切って(`INTEL_DEBUG`の`noccs`、`nofc`と同じビット)もう一度確かめた結果も出す。これは原因を絞るための記録だけで、合ってもGPUは使わない。
+
+```text
+i915: batch 1 (render, context 0, 1520 bytes, 1 pieces, to the end): 1 draws |iL|iLL|si|iC||; registers 7034 20d8 7004
+i915:   draw 1 (C): target format 0c0 tiling 3 aux 5 at fffefff40000 clear 3e808081; source format 000 tiling 0 aux 0 at bffff080 clear 00000000;
+```
+
+同じ日の2回目の実機では、irisは画面を作ったが、確認のフレームが合わなかった(`egl: the GPU did not draw (4096 pixels wrong (first row 81 80 80 3e)), softpipe`)。0x3e808081は64/255の浮動小数点数で、クリアの赤0.25を8ビットに丸めた値そのものである。バッチの記録を足してQEMUで模擬のKaby Lakeに対して動かすと、確認のクリアの描画のレンダーターゲットが`format 000`(R32G32B32A32_FLOAT)になっていた。確認は`pipe->clear_render_target`に、自分で作った`pipe_surface`を渡していた。Mesa 26.2.3のirisの`iris_clear_render_target`は、受け取った`pipe_surface`を自分の`struct iris_surface`(先頭が`isl_view`で、`pipe_surface`を含まない)として扱い、ビューの形式を`pipe_surface`の`first_layer`と`last_layer`の位置、つまり0から読む。そのためblorpは、クリア色の浮動小数点数をそのまま1画素16バイトで、フレームの外まで書いていた。GPU、カーネル、DRMシムの答えの違いではない。glClear(ANGLEの道)は`pipe->clear`を通り、irisが`set_framebuffer_state`で作った`iris_surface`を使うので、これに当たらない。確認を`set_framebuffer_state`と`pipe->clear`に替えると、QEMUの記録で、クリアがB8G8R8A8_UNORMのCCS_Eへの速いクリアになった(`format 0c0 tiling 3 aux 5`、上の例)。
+
+2026年10月30日、x64の実機で、起動直後に開いた小物「歯車」は描けたのに、時間が経ってから開くとウインドウの中が黒いままになり、もう一度開くと一瞬だけ歯車が見えてから黒くなった。起動直後はGPUがまだ準備できておらず、`gp_ref_gpu`が失敗してsoftpipeで描いていた(microSDからの起動のログでは`glgears: softpipe, ...`の行が`igt: - forcewake`より前にある)。黒くなるのはirisの道で、確認のフレームは通り、最初の数フレームは描け、その後の描画だけが消えていた。カーネルとirisのソースを突き合わせると、13.11.3の置き直しで、カーネルが前の所を外すときに、その所に後から置かれた別のBOのエントリまでスクラッチに戻していた(`test_igt_place`の新しい場面で、直す前は移したBOの前の所が外れることを確かめた)。irisのBOのキャッシュは数フレームのうちに別の区域で使い直されるので、頂点のバッファ、シェーダ、状態のBOのどれかがゼロのページを読むようになり、クリアだけが残って黒くなる。エラーもリセットも起きないので、これまでのログには出ない。i915と同じく、重なるBOを先に追い出すように直した。実機ではまだ確かめていない。次に実機で歯車を開いたときは、`gpu: number ... over number ...`の行が出て、歯車が描かれ続けることを確かめる。
+
+| i915の要求 | 対応 |
+| --- | --- |
+| `GETPARAM` | 装置の番号、リビジョン、コマンドストリーマの時刻の周波数(12MHz)、スライスとサブスライスのマスク、EUの数(`gp_ref_gpu`の値から)。`MMAP_GTT_VERSION`は4、softpin、`NO_RELOC`、`HANDLE_LUT`、`BATCH_FIRST`、`FENCE_ARRAY`、コンテキストの分離は持つと答える |
+| `QUERY` | `TOPOLOGY_INFO`(スライス、サブスライス、EUのマスク)、`ENGINE_INFO`(RCSとBCS)、`MEMORY_REGIONS`(系のメモリ1つ)。ほかは`-EINVAL` |
+| `GEM_CREATE`、`GEM_CREATE_EXT`、`GEM_CLOSE` | `gp_cre_bo`、`gp_del_bo` |
+| `GEM_MMAP_OFFSET`、`GEM_MMAP` | 番号のページの位置を答え、`mmap`で`gp_map_bo`。マッピングはキャッシュする(LLCで一貫) |
+| `GEM_SET_DOMAIN`、`GEM_SET_CACHING`、`GEM_MADVISE` | 何もしない(残っていると答える) |
+| `GEM_SET_TILING`、`GEM_GET_TILING` | 覚えて答える。ビット6の入れ替えは無し |
+| `GEM_BUSY`、`GEM_WAIT` | `gp_wai_bo` |
+| `GEM_USERPTR` | 持たない(`ENODEV`) |
+| `GEM_CONTEXT_CREATE(_EXT)`、`DESTROY`、`SETPARAM`、`GETPARAM` | GEMコンテキストをDRMの模擬が持つ。エンジンの表(`PARAM_ENGINES`)の各項目(RCSかBCS)、表の無いコンテキストではRENDERとBLTのリングが、それぞれ空間のハードウェアコンテキスト1つに当たり、初めて使うときに割り当てる。`VM`は1、`GTT_SIZE`は2の48乗 |
+| `GEM_EXECBUFFER2` | 一覧のBOをその位置に置き(`gp_bnd_bo`、位置が変わったときだけ)、バッチ(`BATCH_FIRST`なら最初)の位置と長さ、エンジン、ハードウェアコンテキスト、待つフェンス(`FENCE_ARRAY`の待ちと`FENCE_IN`のsync_file)で`gp_sub_job`。知らせる同期オブジェクトと`FENCE_OUT`のsync_fileにジョブのフェンスを入れる |
+| `SYNCOBJ_*`、`PRIME_*`、`GEM_FLINK`、`GEM_OPEN` | V3Dと同じ表(13.6.2) |
+| `GET_RESET_STATS` | 0 |
+| `SYNCOBJ_WAIT`、`SYNCOBJ_TIMELINE_WAIT` | DRMと同じ意味で待つ(13.11.15)。タイムラインは持たず、どの点もその同期オブジェクトの1つのフェンスとみなす |
+| `REG_READ` | i915がこの世代で答えるもの、レンダーのエンジンの時刻(`RING_TIMESTAMP`、0x2358)だけを8バイトで答える。2つの半分を読む印(`I915_REG_READ_8B_WA`)の有無のどちらも受け付け、ほかは`EINVAL`(13.11.15) |
+| ほか | `EINVAL` |
+
+ローダには、装置をPCIの8086:装置の番号(00:02.0)、カーネルのドライバの名前をi915として見せ、ローダが`iris`を選ぶ。EGLのプラットフォーム`tessronos`は、V3Dと同じく、GPUがあれば画面を作った後で64×64のフレームを消して読み戻し、合わなければsoftpipeに戻る(13.6.3)。コンソールの行は`egl: the GPU (iris), a frame cleared and read back in N ms`か`egl: the GPU did not draw (理由), softpipe`である。
+
+### 13.11.10 Armの生成物の確かめ
+
+共通のファイルへの足しの前に、Armの3つのターゲット(`_RPI5_ V3D=2`、`_QEMU_VIRT_ KTEST=1`、`_RPI4_`)で関係する目的物(`gpu.o`、`gpu_svc.o`、`pcie.o`、`svc_gate.o`、V3Dのドライバ、`ktest_gpu.o`、`ktest_gl.o`)を作って逆アセンブルと`.rodata`、`.data`を控え、足した後に作り直して比べ、差が0であることを確かめた。
+
+### 13.11.11 実機で確かめること
+
+1. `igt=2`(既定)のイメージで起動し、`KERNEL.TXT`の`igt:`の行。最初に止まった段階(`igt: - 段階`の最後の行)、forcewakeの確認、RC6を切る前の`RC_CONTROL`、RP0〜RPnと実際の周波数、フューズとEUの数、割込みの番号と前の値、各エンジンの最初のコンテキストの時間と保存したイメージの値、コンテキストの回避策を読み返した値、GGTTの範囲の一覧。
+2. `igt test:`の各行と`summary`。失敗したら、その行の値と、リセットの前後のエンジンのレジスタの行。
+3. `igt: power:`の行(13.11.13)。立ち上げ前の`RC_CONTROL`、RC6の`RC6_CTX_INFO`、効率のよい周波数とpcodeの答え、リングの周波数の表の書込み、RPSを始めたときの周波数、60秒ごとの状態(RC6にいた割合、パークと起こしの回数、周波数の上げ下げの回数、forcewakeの促しと下りなかった数)。止まりやおかしな動きがあれば、次の起動で`igtrc6=0`か`igtrps=0`で切り分ける。
+4. `igt compose:`と`igt rcompose:`の行。BLTとレンダーのエンジンのそれぞれの場面の`same`、長方形とグループの数、時間、どのエンジンで合成するか(13.11.14)。レンダーのエンジンで違いが出たら、次の起動で`igtrc=0`にすればBLTかCPUで合成する。
+5. デスクトップの小物「歯車」(`make GL=1`)が`egl: the GPU (iris), ...`を出してGPUで描くか。出なければ、その理由の行と`MESA:`で始まる行。
+6. 止まった場合は、次の起動で`igt=1`(読むだけ)か`igt=0`にすれば、GPUに触れずに起動できる。
+
+### 13.11.12 未実装のもの
+
+- レンダーのエンジンでの合成の、実機での確認と時間の計測(13.11.14)。グループの境のバリアを、読む範囲が前の書込みと重なるときだけにすること。
+- 複数のジョブの並行(ELSPの2つの口、プリエンプション)。今は1つずつ終わるのを待つ。
+- メディアのエンジン(動画の復号)、VEBOX。
+- Vulkan(anv)とWebGPU。ブラウザのWebGLは、ブラウザのx64版ができてから。
+
+### 13.11.13 GTの電源(forcewake、RC6、RPS)
+
+`device/gpu/intel/igt_pm.c`が、GTの電源の3つを受け持つ。レジスタの意味はIntelのPRMで、設定の値と手順の順はLinuxのi915(`gt/intel_rc6.c`、`gt/intel_rps.c`、`gt/intel_llc.c`、`gt/intel_gt_pm_irq.c`)で確かめた。コードは写していない。
+
+forcewakeは参照数で持つ。エンジンとGTの電源のレジスタはGTが起きている間しか読み書きできないので、レジスタに触れる処理は`igt_fw_get`で参照を取り、`igt_fw_put`で返す。ジョブは投入の前に取り(`igt_kick`)、終わったとき(割込みか1msの見回り)か、エンジンのリセットで取り上げたときに返す。立ち上げは最初に3つの領域を取ってから終わるまで1つの参照を持つ。参照が0になってから10ms(`IDLE_US`)たつと、1msの見回りの周期ハンドラがGTをパークし、forcewakeの要求を下ろす。GTはそこからRC6で眠れる。次の`igt_fw_get`が3つの領域の要求を上げ(前の確認が下りるのを待ってから)、それがGTをRC6から起こす。確認を待ち、パークを解いてから戻る。確認が下りないまま次の要求になった回数(stuck)と、2つ目のビットで促した回数は数えて記録に出す。
+
+| 段階 | 処理 |
+| --- | --- |
+| 立ち上げの最初(`igt_pm_init`) | RC6、パワーゲーティング、周波数の制御を切る。`RP_STATE_CAP`からRP0、RP1、RPn(50MHz単位)を読み、内部では3倍の50/3MHz単位で持つ。RP1を求める |
+| エンジンの後(`igt_pm_start`) | RC6の設定、RPSの設定、PMの割込みのタスク(優先度12)を作る |
+| パーク | RPS: PMの割込みを止め(`PMINTRMSK`、`GT_IER(2)`、`GT_IMR(2)`)、RPnを求める。次に起きたときの周波数を、今より少し低く(下げる向きが続けば倍)するが、効率のよい周波数(RPe)より下にはしない。RC6: `RC6_CTX_INFO`が0ならRC6のコンテキストが壊れたとみなしてRC6を以後切り、forcewakeを放さない。そうでなければ`RC_CONTROL`にRC6の有効だけを書き、`RC_STATE`の目標をRC6(4)にして、手動でRC6に入れる。そのあとforcewakeの要求を下ろす |
+| 起こし | RC6: `RC_CONTROL`を0に戻す(忙しい間は自動で入らない)。RPS: パークの前の周波数(RPnとRP0の間に収める)を求め、PMの割込みを有効にする |
+
+RC6の設定は次のとおりである。第9世代では、忙しい間にハードウェアのタイマーでRC6に入ると、RC6が保存するコンテキストが壊れることがある。そのためタイマーによる自動の入りは使わず、パークのときだけ手動で入れる。設定のときとパークのたびに`RC6_CTX_INFO`を見て、0なら破損としてRC6を切る。
+
+| レジスタ | 値 |
+| --- | --- |
+| `RC6_WAKE_RATE_LIMIT` | 54<<16(Kaby Lake。Skylakeの108ではない) |
+| `RC_EVALUATION_INTERVAL`、`RC_IDLE_HYSTERSIS` | 125000、25 |
+| 各エンジン(RCS、BCS、VCS、VECS)の`RING_MAX_IDLE` | 10 |
+| `GUC_MAX_IDLE_COUNT`、`RC_SLEEP` | 0xA、0 |
+| `MEDIA_PG_IDLE_HYSTERESIS`、`RENDER_PG_IDLE_HYSTERESIS` | 250、250 |
+| `RC6_THRESHOLD` | 37500 |
+| `PG_ENABLE` | レンダーとメディアのパワーゲーティング(Skylake GT3、GT4の回避策の対象外) |
+| `RC_CONTROL` | 忙しい間は0、パークでRC6の有効だけ |
+
+RPSは、GTが評価区間ごとに測る忙しさで周波数を上げ下げする。
+
+- 効率のよい周波数(RPe)は、電源の制御装置(pcode)に`DYNAMIC_DUTY_CYCLE`(0x1A)で聞き、答えのビット15:8(50MHz単位)をRPnとRP0の間に収める。答えが無ければRP1とする。
+- リング(LLC)の周波数の表を、GTの周波数(50MHz単位)ごとに、リングを同じ値、CPUの周波数の目安を0として、`WRITE_MIN_FREQ_TABLE`(0x8)でpcodeに書く(第9世代の決め方)。
+- pcodeへの要求は、表示の係と共有する部品`kernel/sysdepend/x64/igt_pcode.c`の`knl_igt_pcode_rw`だけを通す。
+- `RC_VIDEO_FREQ`にRP1、`RP_IDLE_HYSTERSIS`に10を書く。RPnから始める。
+- 評価区間と閾値は周波数の高さで3つの段(低、中間、高)を切り替える。上げの区間は16ms、13ms、10ms、下げの区間はどれも32msで、上げの閾値は区間の95%、下げは85%忙しいときとする。値は12MHzの時刻の16刻みの単位である。`RP_CONTROL`はメディアのturbo、通常の動作、GFXの扱い、有効、上げは忙しさの平均、下げはアイドルの平均。
+- 割込みは`UP_THRESHOLD`と`DOWN_THRESHOLD`だけを使う(GTの割込みの2番、マスタの0x30)。割込みは`GT_IMR(2)`で止めてタスクを起こし、タスクが段を1つ上げ下げする(同じ向きが続けば段を倍にする)。周波数を書くたびに、`RP_INTERRUPT_LIMITS`(最高と、最低にいるときだけ最低)と、`PMINTRMSK`(動ける向きの割込みだけ通す。ビット31は0)を書き直し、止めた割込みを戻す。メッセージの割込みが無いときと止めたときは、1msの見回りが`GT_IIR(2)`を読む。
+
+起動の設定(`cmdline.txt`)で切れる。実機で問題が出たときの切り分け用である。
+
+| 指定 | 動作 |
+| --- | --- |
+| `igtrc6=0` | RC6とパワーゲーティングを使わない。forcewakeを放さない(これまでと同じ) |
+| `igtrps=0` | RPSを使わない。RP1に固定し、pcodeにも聞かない |
+
+`KERNEL.TXT`には、各段階で次の行が出る。
+
+| 行 | 内容 |
+| --- | --- |
+| `igt: power: as found: RC_CONTROL ..., RC_STATE ..., PG_ENABLE ...; both off now; RP0 ... RP1 ... RPn ...` | 立ち上げ前の状態、周波数の範囲、RP1を求めた後の実際の周波数 |
+| `igt: power: RC6 asked for, RPS asked for (...)` | 起動の設定 |
+| `igt: power: RC6 set up (RC6_CTX_INFO ..., in RC6 so far ... ms); ...`か`RC6 NOT used: ...` | RC6の設定と、壊れていたときの断り |
+| `igt: power: efficient frequency ... MHz (pcode ..., ...)` | RPeとpcodeの答え |
+| `igt: power: the ring's frequency table: N entries written, M refused` | リングの周波数の表 |
+| `igt: power: RPS on: asked ... MHz, running at ... MHz (RPSTAT1 ...), RP_CONTROL ..., PMINTRMSK ..., GT IER/IMR 2 ...` | RPSを始めたときのレジスタ |
+| `igt: power: RC6 on, RPS on, busy, asked ... MHz (RPn ..., RPe ..., RP1 ..., RP0 ...); parked N times, woken N, steps up N down N; N jobs, in RC6 N% of the last N s, N PM interrupts, N forcewake kicks, N stuck` | GPUが動いている間、60秒ごと |
+| `igt: power: the context RC6 saved was found corrupted (RC6_CTX_INFO 0): RC6 off from now on, ...` | パークで破損に気づいたとき |
+
+QEMUの試験`test_igt_pm`(13.11.8)が、メモリをレジスタに見立ててこの流れを確かめる。
+
+### 13.11.14 レンダーのエンジンでの合成
+
+ウインドウの角、影、半透明、色の重ね、ぼかし、開閉中の拡大と縮小を、CPU(`compose.c`)の代わりにレンダーのエンジンで計算する。BLTのエンジン(13.11.7)と同じく`T_CPGPU`のバックエンドで、組み立てた画面はCPUのものとビット単位で一致し、起動時の確認で一致を確かめたときだけ使う。
+
+#### 作り方の決め方
+
+irisで描く形と、カーネルの固定のシェーダで描く形を比べ、V3D(13.10)と同じ後者にした。
+
+| 比べる点 | irisで描く形 | カーネルの固定のシェーダ(採用) |
+| --- | --- | --- |
+| 合成のある所 | 合成はカーネルのウインドウマネージャの中にあり、バックバッファ、背景、ウインドウのピクセルはカーネルのメモリである。irisはプロセスで動くライブラリ(Cライブラリ、スレッド、DRMの模擬の上、55MB)で、カーネルには結べない。合成をプロセスに移し、毎回の場面とバッファを渡して終わりを待つ形になり、遅れが増え、そのプロセスが止まると画面が止まる | カーネルが直にバッチを作って投入する。V3Dの合成と同じ流れで、失敗したらその起動の間はCPUに戻せる |
+| CPUとの一致 | GLSLとirisの丸め、ブレンドの固定機能に頼ることになり、一致を確かめる手段を別に作る必要がある | 段階の計算はV3Dと同じNIR(`tools/mesa/cp_stages.h`)で、CPUと同じ整数の計算。ホストでNIRのまま解釈して`compose.c`と突き合わせる仕組みもV3Dと同じ形にできる |
+| 生成物 | 実行時にGLSLを翻訳する | ホストでMesaのIntelのコンパイラ(brw)に翻訳させたコードをヘッダにして入れる。カーネルにMesaは入らない |
+
+パイプラインは、3Dでなく、レンダーのエンジンのGPGPU(計算)のパイプラインにした。V3Dではタイルバッファが背後の画素を保ち、フラグメントシェーダがそれを読めるが、IntelのGPUで背後を読むにはレンダーターゲットの読出しのメッセージと、3Dの固定機能の状態(頂点、セットアップ、ピクセルシェーダ、URB、ブレンド、深度)を一式組む必要がある。計算シェーダなら背後をメモリから直に読み書きでき、組む状態は`STATE_BASE_ADDRESS`、`MEDIA_VFE_STATE`、インタフェース記述子、プッシュ定数だけで、irisの計算のディスパッチと同じ命令の並びになる。
+
+#### シェーダ
+
+`tools/mesa/cp_stages.h`の10個のフラグメントシェーダ(13.10.2)を、`tools/x64/mesa/gen_igt_shaders.c`が計算シェーダにしてから翻訳する。V3Dの生成器とこのファイルを共有するために、シェーダの計算を`gen_cp_shaders.c`から`cp_stages.h`に移した。移した後もV3Dの生成物(`v3d_cp_shaders.h`)は1バイトも変わらず、V3Dのホストの試験(13.10.4)も200場面で一致したことを確かめた。
+
+| フラグメントシェーダの形 | 計算シェーダの形 |
+| --- | --- |
+| `gl_FragCoord`とフレームの位置から画素を求める | スレッドグループ(1行の16画素)とその中の位置から、長方形の左端を16に切り下げた所を起点に画素を求める。長方形の左右の外の位置は何も書かない |
+| タイルバッファから背後を読む | 書き先(バックバッファかぼかしのレベル)のメモリから読む |
+| タイルバッファに書く。フラグメントを捨てる(`discard`)と書かない | 書き先のメモリに書く。捨てる代わりに印を立て、印が無いときだけ書く |
+| ユニフォームのパラメータ | プッシュ定数(CURBE)の64ワード。0〜31がV3Dと同じパラメータ(フレームの位置は0)、32〜33が書き先のアドレス、34が行の長さ、35〜38が長方形、40〜45が3つのバッファのアドレス |
+| バッファの番号と位置で読む | 64ビットのアドレスで読む(A64のuntypedの読出しと書込み) |
+
+翻訳はKaby Lake GT2(8086:5917)向けで、第9世代のどの部品にも同じコードを使う。SIMD16だけで、スクラッチ、共有メモリ、バリア、スレッドごとのプッシュ定数、コードの後ろの定数データは無いこと、プッシュ定数が8レジスタであることを生成器が確かめ、外れたら止まる。
+
+| シェーダ | バイト数 |
+| --- | --- |
+| `piece`、`shadow` | 3104、2400 |
+| `halve`、`smooth3`、`smooth5`、`double` | 3616、3072、6736、1920 |
+| `moving` | 3456 |
+| `fill`、`copy`、`invert` | 480、816、752 |
+
+コードは合わせて26688バイトで、各シェーダを64バイトの境界に置き、最後に128バイトの0を付ける。
+
+#### 生成(`tools/x64/mesa/igt_shaders.sh`)
+
+1. `build`。x64のMesaの建て(`tools/x64/mesa/build.sh`の`~/tsmesa-x64/build`)の`compile_commands.json`から、NIR、`src/util`、`src/c11`、Intelのコンパイラ(brw)と装置の情報と`src/intel/mda`、islを、`tools/x64/mesa/hostcc.py`がホストのgcc、g++で翻訳し直して静的ライブラリにする。TessronOSのプロセス向けの指定(`include/tscxx`、`include/tsposix`、DRMの模擬のヘッダ)は外し、libdrmの宣言だけを置いた場所に替える。同じ建ての生成物(NIRの表、Intelの命令の表、genxml)をそのまま使う。C23の`enum`の型の指定を使う新しいバックエンド(`jay`)はホストのgcc 11で翻訳できず、第9世代では使わないので入れない。`MESA_DEBUG=1`ではMesaの`assert`とシェーダの検証を入れて`-O0`で建てる(作業の場所を分ける)。
+2. `gen`。`gen_igt_shaders`を走らせ、`device/gpu/intel/mesa/igt_cp_shaders.h`を書く。`INTEL_DEBUG=cs`でコンパイラが出す逆アセンブルとその検証を作業の場所の`igt_cp_shaders.dis`に残し、検証の誤り(ハードウェアが受け付けない命令)があればヘッダを書き換えずに止まる。
+3. `test`。次の項のホストの確かめ。
+
+生成器には、Mesaの検査を入れた建てで見つかったことを2つ直してある。パラメータの読出しは、brwがプッシュ定数として受け付ける`load_push_data_intel`にする(`load_uniform`のままでは検査を入れない建てで誤ったコードになり、スレッドの終わりの送信が決まったレジスタを使わなかった)。`STATE_BASE_ADDRESS`のMOCSは0にできないので、欄の位置を調べるときも入れる。直した後は、検査を入れた建てと入れない建ての生成物が1バイトも違わない。
+
+ヘッダの中身は、パラメータの番号(V3Dと同じ名前、v3d_cp_split.hがそのまま使える)とプッシュ定数の番号、`IGT_CP_WANT_CODE`を定義したときだけ、コード、シェーダごとのインタフェース記述子(コードの位置、プッシュ定数のレジスタ数、1スレッドのグループ)、コマンドの雛形である。雛形はMesaのgenxmlの第9世代の詰め込みで作り、カーネルが埋める欄は、値を0と最大にして2回詰めた差から語と位置とマスクを求めて書く(アドレスは0と48ビットの値で求め、下位と上位の2語に収まることを確かめる)。
+
+| 雛形 | 内容 | カーネルが埋める欄 |
+| --- | --- | --- |
+| `sync_flush` | パイプの終わりの同期。RT、深度、データのキャッシュの書出し、コマンドストリーマの停止、即値の書込み | 書込みのアドレス |
+| `invalidate` | 読むだけのキャッシュ(テクスチャ、定数、状態、命令)の無効化と停止 | なし |
+| `barrier` | グループの境。データのキャッシュの書出しとコマンドストリーマの停止 | なし |
+| `cc_pointers`、`select_gpgpu` | GPGPUに切り替える前のカラー計算の状態のポインタの消去(第9世代の回避策)、`PIPELINE_SELECT`(GPGPU) | なし |
+| `base` | `STATE_BASE_ADDRESS`。MOCSは書き戻し(2番)、大きさは最大 | 面、動的な状態、命令、bindlessの各基点 |
+| `vfe` | `MEDIA_VFE_STATE`。URBの項目2つ、CURBEは8レジスタ、ゲートウェイのタイマーのリセット | スレッドの最大数 |
+| `idl`、`curbe` | `MEDIA_INTERFACE_DESCRIPTOR_LOAD`、`MEDIA_CURBE_LOAD` | 長さと動的な状態からの位置 |
+| `walker`、`msf` | `GPGPU_WALKER`(SIMD16、グループは1スレッド、奥行1、マスクはすべて)、`MEDIA_STATE_FLUSH` | インタフェース記述子の番号、グループの横と縦の数 |
+
+#### ホストでの確かめ(`test_igt_shaders.c`)
+
+V3Dの`test_cp_shaders.c`と同じ考え方で、生成に使うのと同じ計算シェーダ(brwに渡す直前のNIR)を解釈して実行する。起動ごとに、スレッドグループ、グループの中の位置、プッシュ定数、64ビットのアドレスのメモリを与える。試験のバッファは4GBより上のアドレスに置き、アドレスの上位の半分の計算も確かめる。乱数の場面(150×100の画面、行の長さは画面より64バイト長い、0〜3個のウインドウ、透明度、色の重ね、角の丸み、影、1〜16ドットのぼかし、開閉中、画面の一部だけの組立て)を、ホスト向けにビルドした`compose.c`と、カーネルと同じ計画(`device/gpu/intel/igt_rplan.c`をホストの型で翻訳したもの)で組み立て、最上位のバイトまで全画素を比べる。
+
+GPUでは、1つのグループ(バリアのある長方形から次のバリアの前まで)の長方形は、どの順序でも、同時にも動きうる。試験では、グループの中の読出しはグループの始めの時点のメモリを見るようにし、同じ語にグループの中で違う値を2回書いたら誤りとして数える。計画が頼んでいない順序に頼っていれば違いになって現れる。読出しがバッファの外に出た回数と、書込みが自分の長方形の自分の画素の外に出た回数も数える。
+
+2026年10月19日の時点で、400場面すべてで最上位のバイトまで一致し、バッファの外の読出し、外への書込み、グループの中の食い違う書込みはなかった(3331個の長方形、1323のグループ)。計画からぼかしの段の境のバリアを抜くと、40場面のうち6場面が違いになり、グループの中の食い違う書込みも2659回数えられることを確かめた。確かめられないのは、brwによる翻訳とハードウェアの動作で、それは起動時の確認が受け持つ。
+
+#### 計画(`igt_rplan.c`)
+
+部分を、計算シェーダを走らせる長方形の並びにする。
+
+1. 背景。背景のメモリから部分全体に`copy`。
+2. 奥から順に各ウインドウ。影はウインドウの周りと丸い角の長方形に`shadow`(`v3d_cp_split.h`の`cp_split_shadow`)。ぼかしがあれば、部分ごとに、縮小(`halve`)をレベルごとにT1へ、最も深いレベルの平滑化(`smooth3`か`smooth5`)をT2の画面の行の下へ、拡大(`double`)をT1へ戻し、最後をT2へ(`compose.c`の`cp_spread_plan`)。最後に部分を背後と混ぜ(`piece`)、不透明で色を重ねない部分はピクセルをそのまま写す(`copy`、`cp_split_piece`)。開閉中のウインドウは`moving`の長方形1つ。外形を持つウインドウ、キーの透過、ピクセルをGPUの空間に写せないウインドウ、ぼかしのレベルの置き場が無いときのぼかすウインドウに当たったらそこで止め、それまでの数を答える。残りはCPUが重ねる。
+
+1つの段階(影、ぼかしの1段、部分)の長方形は互いに重ならず、どれも自分の画素の背後と、前の段階が書き終えたものしか読まないので、各段階の最初の長方形にだけバリアを付ける。パラメータはV3Dの`v3d_compose.c`と同じで、フレームの位置を0にする。長方形は1つの部分で2048個まで(`IGT_RD_MAX`)で、越えたらその部分はCPUで組み立てる。
+
+#### バッチとメモリ(`igt_rcompose.c`)
+
+バッチは、パイプの終わりの同期、読むだけのキャッシュの無効化、カラー計算の状態のポインタの消去、`PIPELINE_SELECT`(GPGPU)、同期、`STATE_BASE_ADDRESS`、無効化、`MEDIA_VFE_STATE`、全シェーダのインタフェース記述子の読込みで始まり、長方形ごとに(グループの始めならバリア、)そのプッシュ定数の読込み、`GPGPU_WALKER`、`MEDIA_STATE_FLUSH`を並べ、最後に同期と`MI_BATCH_BUFFER_END`を置く。1つの部分が1つのジョブで、カーネルの空間のRCSのハードウェアコンテキストに投入し、終わりを待つ。スレッドの最大数は、フューズに残ったサブスライスの数×56とする。
+
+| メモリ | 内容 |
+| --- | --- |
+| コード(26688バイト) | 起動時に1回写す。命令の基点 |
+| 動的な状態(576KB) | 0からインタフェース記述子、512に同期の書込み先、1024から角の被覆率の表(半径1〜32)、64KBから長方形ごとのプッシュ定数(256バイト) |
+| バッチ(256KB) | 部分ごとに作る |
+| T1、T2 | ぼかしのレベル。V3Dと同じ並び(`cp_spread_bytes`)で、使うときに取る |
+
+コード、動的な状態、バッチはカーネルのメモリ(`knl_vmap`)をGPUの空間に写したもので、CPUが書いた後に`clflush`する(コマンドストリーマと固定機能はCPUのキャッシュを見ないことがあるため)。バックバッファ、背景、ウインドウのピクセルはBLTのエンジンと同じ写しの表(`igt_cp_wrap`)で写す。BLTの確認がキャッシュの書出しを要した場合は、ここでも部分の前後に同じ書出しをする。
+
+#### 起動時の確認と切り替え
+
+BLTのエンジンの確認の後で、`igt rcompose:`の行を出して準備し、次の場面をCPUとレンダーのエンジンでそれぞれのバックバッファに組み立てて全画素を比べる。行は`igt compose: check r ...`で、長方形とグループの数も出す。
+
+| 場面 | 確かめること |
+| --- | --- |
+| `r ground`、`r ground in a part` | 背景の写し(全体と、16に揃わない一部) |
+| `r one window`、`r plain` | 不透明で四角いウインドウ(`copy`) |
+| `r washed` | 枠の色の重ね(`piece`) |
+| `r see-through` | 半透明の枠とワークエリア |
+| `r corners` | 丸い角と影 |
+| `r spread`、`r spread in a part` | 3つの重なったウインドウのぼかし(縮小、平滑化、拡大) |
+| `r opening` | 開きかけのウインドウ(`moving`) |
+| `r many` | 16個のウインドウ。ぼかし、角、影の混ざったもの |
+
+全部が一致したら、効果の無い2つのウインドウと、角、影、ぼかしのある2つのウインドウで、64×64と1024×768の時間をCPUと比べ、それぞれでレンダーのエンジンのほうが速くなる画素数を閾値にする(`wants`は見た目の効果やぼかしのある部分に後者を使う)。レンダーのエンジンが確認に通り、どちらかの閾値があればレンダーのエンジンで、無ければBLTのエンジン(確認に通り、速いとき)、どちらでもなければCPUで合成する(`igt compose: the windows are composited by ...`)。起動の設定`igtrc=0`でレンダーのエンジンを試さない。ジョブが失敗したら、その起動の間はCPUに戻す。結果はデバイスの実身「gpu0」の`COMPOSE`にも出る。
+
+QEMUの試験では、`test_igt_rcmd`が長方形のコマンドを、`test_igt_rplan`が計画を確かめる(13.11.8)。
+
+### 13.11.15 irisのための同期オブジェクトの待ちと時刻の読出し
+
+DRMの模擬(`lib/libgl/gl_drm_i915.c`)の`SYNCOBJ_WAIT`と`SYNCOBJ_TIMELINE_WAIT`は、Linuxの意味で待つ。
+
+- フェンスがまだ付いていない(何も投入されていない)同期オブジェクトは、`WAIT_FOR_SUBMIT`(タイムラインでは`WAIT_AVAILABLE`も)が無ければ`EINVAL`、あればジョブが付くまで1msごとに見直して待つ。
+- `WAIT_ALL`が無ければ、知らされたものが1つでもあれば終わり、その番号を`first_signaled`に答える。あればすべてを待つ。
+- 投入済みのフェンスは、ジョブが1つずつ順に走るので、最も早いものを待つ。失敗したジョブのフェンスも終わったものとみなす(Linuxでも待ちはフェンスの誤りを返さない)。
+- 期限(単調な時計の絶対時刻)が過ぎれば`ETIME`。
+
+`REG_READ`は、i915がこの世代に許すレジスタ、レンダーのエンジンの時刻(`RING_TIMESTAMP`、0x2358、64ビット)だけに答える。i915と同じく、2つの半分を読む印(`I915_REG_READ_8B_WA`、位置の下位ビット)の有無のどちらも受け付け、ほかの位置と印は`EINVAL`にする。値は、記述子ごとに作る専用の空間(`gp_opn_gpu`)のバッチが、レンダーのエンジン自身に`MI_STORE_REGISTER_MEM`で書かせて読む。上位の半分を下位の前と後に読み、両方の上位が一致すればその組、違えば後の組を使う(下位があふれる間に読んだ場合)。専用の空間を使うので、irisが自分で決めるBOのアドレスには触れず、カーネルの共通のファイルも変えない。模擬のGPUでは単調な時計を12MHzの刻みにして答える。
+
+QEMUの試験`test_igt_i915sync`(13.11.8)が、模擬のKaby Lakeに対してこれらを確かめる。

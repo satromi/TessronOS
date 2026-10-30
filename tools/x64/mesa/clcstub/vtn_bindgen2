@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+#
+# tools/x64/mesa/clcstub/vtn_bindgen2 — Mesa の vtn_bindgen2(SPIR-V の関数を NIR で呼ぶ
+# 関数を書く道具)の代わり。mesa_clc の代わり(同じ置き場)と組で、OpenCL C で書かれた
+# Intel のドライバの内部のシェーダの関数を、宣言どおりの名前で書く。
+#
+#   vtn_bindgen2 <入力.spv> <出力.cpp> <出力.h>
+#
+# - src/intel/shaders(intel_gfxNN_shaders_binding): 間接描画の生成とクエリの写しと
+#   Vulkan の関数。TessronOS の iris は呼ばない(iris-no-generation.patch)ので、呼ばれたら止まる。
+#   世代は出力の名前から読み、Mesa の genX の付け方(gfx9_、gfx125_ など)で名前を作る
+# - src/intel/blorp(blorp_shaders): blorp_check_in_bounds は、元の OpenCL C
+#   (blorp_shaders.cl)と同じ計算(x0 <= x < x1 かつ y0 <= y < y1、符号なし)を NIR の
+#   命令で直に書く。残りの2つ(Vulkan の間接の写し)は呼ばれたら止まる
+#
+import os
+import re
+import sys
+
+if len(sys.argv) != 4:
+    sys.exit('usage: vtn_bindgen2 <in.spv> <out.cpp> <out.h>')
+out_c, out_h = sys.argv[2], sys.argv[3]
+
+head = '''/*
+ * Written by tools/x64/mesa/clcstub/vtn_bindgen2: the internal shaders of
+ * Intel's drivers in OpenCL C are not compiled for TessronOS.
+ */
+'''
+stubs = []
+bodies = []
+m = re.search(r'gfx(\d+)_shaders_binding', out_c)
+if m is not None:
+    verx10 = int(m.group(1))
+    prefix = 'gfx%d_' % (verx10 // 10 if verx10 % 10 == 0 else verx10)
+    stubs = [prefix + n for n in (
+        'libiris_write_draw', 'libanv_write_draw', 'libanv_query_copy', 'libanv_memcpy',
+        'libanv_preprocess_gfx_generate', 'libanv_preprocess_cs_generate',
+        'libanv_postprocess_cs_generate', 'libanv_preprocess_rt_generate', 'libanv_dgc_dump')]
+elif os.path.basename(out_c).startswith('blorp_shaders'):
+    stubs = ['blorp_copy_memory_indirect_shader', 'blorp_copy_memory_to_image_indirect_shader']
+    bodies = [(
+        'nir_def *blorp_check_in_bounds(nir_builder *b, nir_def *bounds_rect, nir_def *pos)',
+        '''{
+   nir_def *x = nir_channel(b, pos, 0), *y = nir_channel(b, pos, 1);
+   nir_def *in_x = nir_iand(b, nir_uge(b, x, nir_channel(b, bounds_rect, 0)),
+                               nir_ult(b, x, nir_channel(b, bounds_rect, 1)));
+   nir_def *in_y = nir_iand(b, nir_uge(b, y, nir_channel(b, bounds_rect, 2)),
+                               nir_ult(b, y, nir_channel(b, bounds_rect, 3)));
+   return nir_iand(b, in_x, in_y);
+}
+''')]
+else:
+    sys.exit('vtn_bindgen2 (stub): no functions known for ' + out_c)
+
+with open(out_h, 'w') as h:
+    h.write(head)
+    h.write('#pragma once\n\n#include "compiler/nir/nir.h"\n#include "compiler/nir/nir_builder.h"\n\n')
+    h.write('#ifdef __cplusplus\nextern "C" {\n#endif\n\n')
+    for n in stubs:
+        h.write('void %s(nir_builder *b, ...);\n' % n)
+    for proto, _ in bodies:
+        h.write(proto + ';\n')
+    h.write('\n#ifdef __cplusplus\n}\n#endif\n')
+with open(out_c, 'w') as c:
+    c.write(head)
+    c.write('#include <stdlib.h>\n#include "%s"\n\n' % os.path.basename(out_h))
+    for n in stubs:
+        c.write('extern "C" void %s(nir_builder *b, ...)\n{\n   (void)b;\n   abort();\n}\n\n' % n)
+    for proto, body in bodies:
+        c.write('extern "C" ' + proto + '\n' + body + '\n')

@@ -292,8 +292,9 @@ LOCAL INT draw_rows( LTWIN *w, CONST UB *s, INT len, INT width, INT row, INT fir
 EXPORT void lt_draw( LTERM *t, LTWIN *w, CONST UB *tail, BOOL caret )
 {
 	T_DPRECT	all, bar;
-	T_WMBAR		b;
-	INT		ww, wh, rows, last, first, row, k, i, nl, width, bw, cx = LT_PAD, cy = LT_PAD;
+	T_OBWBAR	b;
+	SZ		asz = 0;
+	INT		ww, wh, rows, last, first, row, k, i, nl, width, cx = LT_PAD, cy = LT_PAD;
 	INT		tlen = ( tail != NULL ) ? (INT)strlen((CONST char *)tail) : 0;
 
 	work_size(w, &ww, &wh);
@@ -301,10 +302,8 @@ EXPORT void lt_draw( LTERM *t, LTWIN *w, CONST UB *tail, BOOL caret )
 	all.right = ww;  all.bottom = wh;
 	(void)dp_fill_rect(w->gid, &all, GROUND);
 
-	/* the scroll bar down the right side, as wide as the windows' own */
-	bw = (INT)wm_look(LK_BAR_W);
-	if ( bw < 6 || bw > 64 ) bw = 16;
-	width = ww - bw - 2 * LT_PAD;
+	/* the scroll bar is the window's own (WM_ATTR_RBAR), outside the work area */
+	width = ww - 2 * LT_PAD;
 	if ( width < 16 ) width = 16;
 	if ( width != t->wrap_w ) {
 		for ( i = 0; i < LT_LINES; i++ ) t->rows[i] = 0;
@@ -354,70 +353,35 @@ EXPORT void lt_draw( LTERM *t, LTWIN *w, CONST UB *tail, BOOL caret )
 		}
 	}
 
-	t->bar.left = ww - bw;
-	t->bar.top = 0;
-	t->bar.right = ww;
-	t->bar.bottom = wh;
+	/* the window's bar told what there is and what is shown */
+	memset(&b, 0, sizeof(b));
 	b.lo = 0;
 	b.hi = ( t->total > 0 ) ? t->total : 1;
 	b.clo = ( t->total > rows ) ? first : 0;
 	b.chi = ( t->total > rows ) ? first + rows : b.hi;
-	(void)wm_draw_bar(w->gid, &t->bar, &b, FALSE, TRUE);
+	(void)ob_wri_rec(w->kw, OB_WR_BARS, 0, &b, sizeof(b), &asz);
 	if ( !t->hold ) {
 		(void)wm_obj_flush(w->kw, NULL);
 	}
 }
 
-/* The knob's place along the bar, in the same reckoning the bar is drawn with */
-LOCAL void knob_of( CONST LTERM *t, INT *p_k0, INT *p_k1 )
-{
-	INT	len = t->bar.bottom - t->bar.top - 2;
-	INT	total = ( t->total > 0 ) ? t->total : 1;
-	INT	first = total - t->shown - t->back;
-
-	if ( first < 0 ) first = 0;
-	*p_k0 = t->bar.top + 1 + first * len / total;
-	*p_k1 = t->bar.top + 1 + ( first + t->shown ) * len / total;
-	if ( *p_k1 > t->bar.bottom - 1 ) *p_k1 = t->bar.bottom - 1;
-	if ( *p_k1 - *p_k0 < 8 ) *p_k1 = *p_k0 + 8;
-}
-
 EXPORT BOOL lt_pointer( LTERM *t, CONST T_OBNTM *m )
 {
-	INT	k0, k1, len, first;
+	INT	first;
 
 	if ( m->event == OB_E_WHEEL ) {
 		if ( m->code != 0 || m->dz == 0 || wm_look(LK_PD_WHEEL) == 0 ) return FALSE;
 		lt_wind(t, m->dz * LT_WHEEL);
 		return TRUE;
 	}
-	if ( m->event == OB_E_RELEASE ) {
-		if ( t->grab < 0 ) return FALSE;
-		t->grab = -1;
-		return TRUE;
-	}
-	if ( m->event == OB_E_MOVE ) {
-		if ( t->grab < 0 ) return FALSE;
-		len = t->bar.bottom - t->bar.top - 2;
-		if ( len <= 0 ) return FALSE;
-		first = ( m->y - t->grab - t->bar.top - 1 ) * t->total / len;
+	if ( m->event == OB_E_SCROLL && m->code == OB_BAR_R ) {
+		/* the window's bar worked: the view's first row asked to be x */
+		first = m->x;
 		t->back = t->total - t->shown - first;
 		lt_wind(t, 0);
 		return TRUE;
 	}
-	if ( m->event != OB_E_PRESS || m->code != 0 ) return FALSE;
-	if ( m->x < t->bar.left || m->x >= t->bar.right || m->y < t->bar.top || m->y >= t->bar.bottom ) {
-		return FALSE;
-	}
-	knob_of(t, &k0, &k1);
-	if ( m->y < k0 ) {
-		lt_wind(t, t->shown - 1);		/* a page back */
-	} else if ( m->y >= k1 ) {
-		lt_wind(t, -( t->shown - 1 ));		/* a page on */
-	} else {
-		t->grab = m->y - k0;			/* the knob, held until let go */
-	}
-	return TRUE;
+	return FALSE;
 }
 
 /* ---------------------------------------------------------------- the window */
@@ -448,7 +412,7 @@ EXPORT ER lt_open( LTWIN *w, CONST char *name, CONST char *json )
 		? ob_opn_obj(&w->ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) : E_NOEXS;
 	memset(&req, 0, sizeof(req));
 	req.events = OB_E_CLOSE | OB_E_PRESS | OB_E_RELEASE | OB_E_MOVE | OB_E_KEY
-		   | OB_E_REDRAW | OB_E_DELETE | OB_E_WHEEL;
+		   | OB_E_REDRAW | OB_E_DELETE | OB_E_WHEEL | OB_E_SCROLL;
 	if ( w->kw <= 0 || w->gid < 0 || w->port <= 0
 	  || ob_ntf_evt(w->kw, OB_REC_ANY, &req, w->port) <= 0 ) {
 		lt_close(w);

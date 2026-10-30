@@ -18,7 +18,7 @@
       "id": "console",
       "kind": "accessory",
       "name": "コンソール",
-      "version": "R1.110",
+      "version": "R1.200",
       "menu": true,
       "builtin": false,
       "base": []

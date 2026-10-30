@@ -638,7 +638,7 @@ LOCAL INT win_named( CONST char *title, INT ms )
 	char	t[WM_TITLE_MAX];
 
 	for ( ; ms > 0; ms -= 100 ) {
-		for ( wid = 1; wid <= WM_MAX_WIN; wid++ ) {
+		for ( wid = 1; wid <= knl_wm_nwin(); wid++ ) {
 			if ( wm_title(wid, t, sizeof(t)) < 0 ) continue;
 			for ( k = 0; title[k] != 0 && t[k] == title[k]; k++ ) ;
 			if ( title[k] == 0 && t[k] == 0 ) return wid;
@@ -723,8 +723,8 @@ LOCAL void test_program( void )
 
 	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_PROG_TECHO, &prog), E_OK);
 	KT_ASSERT_ER(ts_str_to_uuid(SAMPLE, &obj), E_OK);
-	meta0 = (UB *)Kmalloc(OB_ATR_MAX + 1);
-	if ( meta0 != NULL ) nmeta0 = meta_get(&obj, meta0, OB_ATR_MAX + 1);
+	meta0 = (UB *)Kmalloc(KT_META_ROOM + 1);
+	if ( meta0 != NULL ) nmeta0 = meta_get(&obj, meta0, KT_META_ROOM + 1);
 	knl_memset(&c, 0, sizeof(c));
 	c.type = OB_T_PROCESS;
 	c.prog = prog;
@@ -814,7 +814,7 @@ LOCAL void test_places( void )
 
 	if ( meta0 == NULL || nmeta0 <= 0 ) KT_SKIP("no metadata of the sample");
 	KT_ASSERT_ER(ts_str_to_uuid(SAMPLE, &obj), E_OK);
-	m = (UB *)Kmalloc(OB_ATR_MAX + 1);
+	m = (UB *)Kmalloc(KT_META_ROOM + 1);
 	if ( m == NULL ) KT_SKIP("no memory");
 
 	/* the sample's metadata with the windows as they were left */
@@ -847,7 +847,7 @@ LOCAL void test_places( void )
 	er = ts_wai_prc(pid, &psts, 15000);
 	KT_ASSERT_ER(er, E_OK);
 	KT_ASSERT_EQ(psts.exitcd, 0);
-	n = meta_get(&obj, m, OB_ATR_MAX + 1);
+	n = meta_get(&obj, m, KT_META_ROOM + 1);
 	KT_ASSERT(holds(m, n, "\"techo\":{\"windows\":[{\"x\":40,\"y\":50,\"open\":true},"
 			      "{\"x\":300,\"y\":60,\"open\":false},{\"x\":510,\"y\":310,\"open\":true}]}"));
 	KT_ASSERT(holds(m, n, "\"name\":\"私の手帳\"") || holds(m, n, "\"name\": \"私の手帳\""));

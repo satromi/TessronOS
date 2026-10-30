@@ -313,6 +313,14 @@ EXPORT void knl_el0_fault( void *frame, UD esr, UD far )
 	EXCEPTION_DBG_MSG("\n!EL0 fault! task=%d EC=%02x ISS=%06x FAR=%lx ELR=%lx LR=%lx SP_EL0=%lx\n",
 		(knl_ctxtsk != NULL) ? knl_ctxtsk->tskid : 0,
 		ec, (UW)esr & 0x1ffffff, far, f->elr, f->lr, f->sp_el0);
+	{
+		/* what the caches need for written instructions to be fetched (knl_icache_sync) */
+		UD	ctr, clidr;
+
+		Asm("mrs %0, ctr_el0" : "=r"(ctr));
+		Asm("mrs %0, clidr_el1" : "=r"(clidr));
+		EXCEPTION_DBG_MSG(" CTR_EL0=%lx CLIDR_EL1=%lx\n", ctr, clidr);
+	}
 	if ( knl_ctxtsk == NULL || knl_taskindp > 0 ) {
 		halt();
 	}

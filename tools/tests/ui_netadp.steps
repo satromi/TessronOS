@@ -1,0 +1,43 @@
+# The network adapters and the Wi-Fi on the Arm machines (docs/tessronos/09-network.md 9.6.8),
+# for tools/ui_run.py with the kernel of make TARGET=_QEMU_VIRT_ DESKTOP=1 UITEST=1 WIFI=1 and the
+# test disk of a KTEST=1 WIFI=1 build: システム環境設定 〈機器〉〈機器情報〉〈ネットワークアダプタ〉
+# lists 自動 and the adapters (QEMU: the board's Ethernet, virtio-net, in use); the one to use is
+# the row chosen in the list (自動 at 420,396, 有線 below it at 420,413), set with 設定 (609,554):
+# the machine's setting NET_ADAPTER is written as eth and the system takes it. The row chosen is
+# left a while first, the page being read again every second, and must still be the one set. A
+# row is chosen only after the page says that it lists the adapter (sysenv: adapters 1), not
+# while the list holds 自動 alone.
+# Then ネットワーク設定's 〈Ｗｉ－Ｆｉ〉 (437,163) and its 〈状態〉 (275,190) say that the machine has
+# no Wi-Fi, with their parts not to be worked. The same as the x64 PC's
+# (tools/x64/tests/ui_netadp.steps) but for the adapter's name.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+wait 3000
+click 270 201
+wait 500
+click 706 185
+expect sysenv: adapters 1
+wait 1500
+shot netadp_list
+click 420 413
+wait 2500
+click 609 554
+expect sysenv: adapter eth: 0
+expect net: adapter chosen: eth
+wait 1500
+shot netadp_eth
+click 420 396
+wait 500
+click 609 554
+expect sysenv: adapter auto: 0
+expect net: adapter chosen: auto
+wait 1000
+open 01a0d8c4-52b5-7a41-8c61-2d7e9f0a1b31
+expect netenv: ready
+wait 1500
+click 437 163
+wait 1500
+shot netadp_wifi
+click 275 190
+wait 1500
+shot netadp_wifi_state
+absent !OACV!

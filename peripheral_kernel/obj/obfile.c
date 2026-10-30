@@ -51,6 +51,7 @@ typedef struct {
 	T_OBPRT	*dom;			/* its protection domain, NULL for none */
 	BOOL	native;
 	TS_UUID	vuuid;			/* the native volume's own UUID */
+	BOOL	again;			/* attached before since the start: its disk taken out and put back */
 } OBFVOL;
 
 typedef struct {
@@ -166,14 +167,11 @@ LOCAL BOOL same_path( CONST UB *a, CONST char *b )
 LOCAL void dom_load( OBFVOL *v )
 {
 	T_OBPRT	*d = NULL;
-	UB	*j = (UB *)Kmalloc(OB_META_MAX);
-	INT	len = 0;
+	UB	*j = NULL;
+	INT	len = knl_tsfs_meta_all(v->vol, &ob_uuid_domain, 0, &j, NULL);
 
-	if ( j != NULL && knl_tsfs_get_meta(v->vol, &ob_uuid_domain, j, OB_META_MAX - 1, &len) >= E_OK
-	  && knl_oj_path(j, len, "tessronos", "access") >= 0 ) {
-		d = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
-		if ( d != NULL && knl_ob_prt_parse(j, len, d) < E_OK ) {
-			Kfree(d);
+	if ( len >= 0 && knl_oj_path(j, len, "tessronos", "access") >= 0 ) {
+		if ( knl_ob_prt_parse(j, len, &d) < E_OK ) {
 			d = NULL;
 		}
 	}
@@ -186,51 +184,50 @@ LOCAL void dom_load( OBFVOL *v )
 
 LOCAL OBFVOL *vent_by_path( CONST char *path );
 LOCAL void known_note( CONST TS_UUID *vuuid, CONST UB *label, CONST char *path );
+LOCAL BOOL known_has( CONST TS_UUID *vuuid );
 
-EXPORT ER knl_obfile_domain( CONST TS_UUID *uuid, T_OBPRT *prt )
+EXPORT T_OBPRT *knl_obfile_domain( CONST TS_UUID *uuid )
 {
 	ID	vol = knl_obfile_vol_of(uuid);
-	ER	er = E_NOEXS;
+	T_OBPRT	*d = NULL;
 	INT	i;
 
 	if ( vol <= 0 ) {
-		return E_NOEXS;
+		return NULL;
 	}
 	LOCK();
-	for ( i = 0; i < obf_nvol; i++ ) {
+	for ( i = 0; i < obf_nvol && d == NULL; i++ ) {
 		OBFVOL	*v = obf_vol[i];
 
 		if ( v->used && !v->gone && v->vol == vol && v->dom != NULL ) {
-			*prt = *v->dom;
-			er = E_OK;
+			d = knl_ob_prt_dup(v->dom);
 		}
 	}
 	UNLOCK();
 
-	return er;
+	return d;
 }
 
-EXPORT ER knl_obfile_get_dom( CONST char *path, T_OBPRT *prt )
+EXPORT T_OBPRT *knl_obfile_get_dom( CONST char *path )
 {
 	OBFVOL	*v;
-	ER	er = E_NOEXS;
+	T_OBPRT	*d = NULL;
 
 	LOCK();
 	v = vent_by_path(path);
 	if ( v != NULL && v->dom != NULL ) {
-		*prt = *v->dom;
-		er = E_OK;
+		d = knl_ob_prt_dup(v->dom);
 	}
 	UNLOCK();
 
-	return er;
+	return d;
 }
 
 EXPORT ER knl_obfile_set_dom( CONST char *path, CONST T_OBPRT *prt )
 {
 	OBFVOL	*v;
 	UB	*j;
-	INT	len;
+	INT	len, cap;
 	ER	er;
 	CONST char *base = "{\"name\":\"保護区画\",\"refCount\":1,\"recordCount\":0}";
 
@@ -250,13 +247,15 @@ EXPORT ER knl_obfile_set_dom( CONST char *path, CONST T_OBPRT *prt )
 		if ( er >= E_OK ) dom_load(v);
 		return er;
 	}
-	j = (UB *)Kmalloc(OB_META_MAX);
+	for ( len = 0; base[len] != 0; len++ ) ;
+	cap = len;
+	j = (UB *)Kmalloc((SZ)cap + 1);
 	if ( j == NULL ) {
 		return E_NOMEM;
 	}
 	for ( len = 0; base[len] != 0; len++ ) j[len] = (UB)base[len];
 	j[len] = 0;
-	len = knl_ob_prt_store(j, len, OB_META_MAX, prt);
+	len = knl_ob_prt_store(&j, len, &cap, prt);
 	if ( len < 0 ) {
 		Kfree(j);
 		return E_PAR;
@@ -343,6 +342,7 @@ EXPORT ER knl_obfile_attach( CONST char *path, UINT flags )
 		v->dom = NULL;
 		v->native = inf->native;
 		v->vuuid = inf->vuuid;
+		v->again = known_has(&inf->vuuid);
 		v->gone = FALSE;
 		v->used = TRUE;
 		obf_serial++;
@@ -386,6 +386,20 @@ LOCAL ID vol_by_path( CONST char *path )
 	OBFVOL	*v = vent_by_path(path);
 
 	return ( v != NULL ) ? v->vol : E_NOEXS;
+}
+
+EXPORT INT knl_obfile_nvol( void )
+{
+	INT	i, n = 0;
+
+	LOCK();
+	for ( i = 0; i < obf_nvol; i++ ) {
+		if ( obf_vol[i]->used && !obf_vol[i]->gone ) {
+			n++;
+		}
+	}
+	UNLOCK();
+	return n;
 }
 
 EXPORT INT knl_obfile_vols( UB *buf, INT stride, INT max )
@@ -629,6 +643,37 @@ LOCAL void known_note( CONST TS_UUID *vuuid, CONST UB *label, CONST char *path )
 		for ( ; path[i] != 0 && i < OB_VOL_LABEL - 1; i++ ) k->name[i] = (UB)path[i];
 	}
 	k->name[i] = 0;
+}
+
+/* Whether a volume was attached before since the start. Under the lock */
+LOCAL BOOL known_has( CONST TS_UUID *vuuid )
+{
+	INT	i;
+
+	if ( knl_ob_uuid_zero(vuuid) ) {
+		return FALSE;
+	}
+	for ( i = 0; i < obf_nknown; i++ ) {
+		if ( ts_uuid_cmp(&obf_known[i].vuuid, vuuid) == 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * Whether the volume attached with a path had been attached before since
+ * the start: its disk was taken out and put back. What is emptied at
+ * each start is not emptied again for it.
+ */
+EXPORT BOOL knl_obfile_again( CONST char *path )
+{
+	OBFVOL	*v;
+	BOOL	again;
+
+	LOCK();
+	v = vent_by_path(path);
+	again = (BOOL)( v != NULL && v->again );
+	UNLOCK();
+	return again;
 }
 
 EXPORT ER knl_obfile_vol_name( CONST TS_UUID *vuuid, UB *buf, INT max )
@@ -901,47 +946,38 @@ LOCAL ER obf_ref( CONST TS_UUID *uuid, T_OBREF *r )
 	return E_OK;
 }
 
-LOCAL ER obf_prot( CONST TS_UUID *uuid, T_OBPRT *prt )
+LOCAL ER obf_prot( CONST TS_UUID *uuid, T_OBPRT **p_prt )
 {
-	UB	*j;
-	INT	len = 0;
+	UB	*j = NULL;
+	INT	len;
 	ID	vol = knl_obfile_vol_of(uuid);
 	ER	er;
 
 	if ( vol <= 0 ) {
 		return E_NOEXS;
 	}
-	j = (UB *)Kmalloc(OB_META_MAX);
-	if ( j == NULL ) {
-		return E_NOMEM;
-	}
-	er = knl_tsfs_get_meta(vol, uuid, j, OB_META_MAX, &len);
-	if ( er >= E_OK ) {
-		er = knl_ob_prt_parse(j, len, prt);
-	}
-	Kfree(j);
+	len = knl_tsfs_meta_all(vol, uuid, 0, &j, NULL);
+	er = ( len < 0 ) ? (ER)len : knl_ob_prt_parse(j, len, p_prt);
+	if ( j != NULL ) Kfree(j);
 
 	return er;
 }
 
 LOCAL ER obf_setprot( CONST TS_UUID *uuid, CONST T_OBPRT *prt )
 {
-	UB	*j;
-	INT	len = 0;
+	UB	*j = NULL;
+	INT	len, cap = 0;
 	ID	vol = knl_obfile_vol_of(uuid);
 	ER	er;
 
 	if ( vol <= 0 ) {
 		return E_NOEXS;
 	}
-	j = (UB *)Kmalloc(OB_META_MAX);
-	if ( j == NULL ) {
-		return E_NOMEM;
-	}
-	er = knl_tsfs_get_meta(vol, uuid, j, OB_META_MAX, &len);
+	len = knl_tsfs_meta_all(vol, uuid, 0, &j, &cap);
+	er = ( len < 0 ) ? (ER)len : E_OK;
 	if ( er >= E_OK ) {
-		len = knl_ob_prt_store(j, len, OB_META_MAX, prt);
-		er = ( len < 0 ) ? E_LIMIT : knl_tsfs_set_meta(vol, uuid, j, len);
+		len = knl_ob_prt_store(&j, len, &cap, prt);
+		er = ( len < 0 ) ? E_NOMEM : knl_tsfs_set_meta(vol, uuid, j, len);
 	}
 	if ( er >= E_OK ) {
 		/* the store's own flags say the same as the attributes */
@@ -950,7 +986,7 @@ LOCAL ER obf_setprot( CONST TS_UUID *uuid, CONST T_OBPRT *prt )
 				| ( ( prt->attr & OB_A_PERM ) ? 0 : TSFSO_F_DELETABLE ),
 				TSFSO_F_EDITABLE | TSFSO_F_DELETABLE);
 	}
-	Kfree(j);
+	if ( j != NULL ) Kfree(j);
 
 	return er;
 }
@@ -959,7 +995,7 @@ LOCAL ER obf_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 {
 	T_COBJ	cobj;
 	UB	*j;
-	INT	len, i;
+	INT	len, i, cap;
 	ID	vol;
 	ER	er;
 
@@ -986,15 +1022,18 @@ LOCAL ER obf_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 			return E_OACV;		/* the volume's domain does not let it */
 		}
 	}
-	j = (UB *)Kmalloc(OB_META_MAX);
+	/* the metadata given, however long, with room for the name */
+	len = ( c->json != NULL && c->jsonsz > 0 && c->jsonsz < 0x3FFFFFFF ) ? (INT)c->jsonsz : 0;
+	for ( i = 0; len == 0 && obf_default_json[i] != 0; i++ ) ;
+	cap = ( len > 0 ) ? len : i;
+	cap += OB_NAME_MAX * 2 + 64;
+	j = (UB *)Kmalloc((SZ)cap + 1);
 	if ( j == NULL ) {
 		return E_NOMEM;
 	}
-	if ( c->json != NULL && c->jsonsz > 0 && c->jsonsz < OB_META_MAX ) {
-		knl_memcpy(j, c->json, (INT)c->jsonsz);
-		len = (INT)c->jsonsz;
+	if ( len > 0 ) {
+		knl_memcpy(j, c->json, len);
 	} else {
-		len = 0;
 		for ( i = 0; obf_default_json[i] != 0; i++ ) {
 			j[len++] = (UB)obf_default_json[i];
 		}
@@ -1004,11 +1043,11 @@ LOCAL ER obf_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 		UB	q[OB_NAME_MAX * 2 + 8];
 		INT	qn = knl_oj_put_str(q, 0, sizeof(q), c->name);
 
-		len = ( qn > 0 ) ? knl_oj_set(j, len, OB_META_MAX, knl_oj_root(j, len),
+		len = ( qn > 0 ) ? knl_oj_set(j, len, cap, knl_oj_root(j, len),
 					       "name", q, qn) : -1;
 	}
 	if ( len >= 0 ) {
-		len = knl_ob_prt_store(j, len, OB_META_MAX, prt);
+		len = knl_ob_prt_store(&j, len, &cap, prt);
 	}
 	if ( len < 0 ) {
 		Kfree(j);
@@ -1069,8 +1108,16 @@ LOCAL INT obf_open( CONST TS_UUID *uuid, UINT ops )
 	 * changes, as the settings objects are watched -- is not to keep
 	 * the one who writes the object from opening it.
 	 */
-	if ( ( ops & ~OB_OP_ATRRD ) == 0 ) {
+	if ( ( ops & OB_OP_ALL & ~OB_OP_ATRRD ) == 0 ) {
 		omode |= TFO_SHARE;
+	}
+	/* the exclusive mode asked for (OB_O_EXCL, OB_O_WEXCL, OB_O_NOEXCL) */
+	if ( ( ops & OB_O_EXCL ) != 0 ) {
+		omode |= TFO_EXCL;
+	} else if ( ( ops & OB_O_WEXCL ) != 0 ) {
+		omode |= TFO_WEXCL;
+	} else if ( ( ops & OB_O_NOEXCL ) != 0 ) {
+		omode |= TFO_NOEXCL;
 	}
 	od = ts_opn_obj(vol, uuid, omode);
 	if ( od <= 0 ) {
@@ -1163,30 +1210,35 @@ LOCAL ER obf_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize
 	return ( o != NULL ) ? ts_wri_rec(o->od, recno, off, buf, size, p_asize) : E_ID;
 }
 
+/* An open object's metadata whole (knl_meta_all) */
+LOCAL ER od_meta_get( void *ctx, UB *buf, SZ size, SZ *p_asize )
+{
+	return ts_get_met(((OBFHND *)ctx)->od, buf, size, p_asize);
+}
+
+LOCAL INT od_meta_all( OBFHND *o, INT room, UB **p_buf, INT *p_cap )
+{
+	return knl_meta_all(od_meta_get, o, room, p_buf, p_cap);
+}
+
 /* The declarations in the metadata changed: one added (rt given) or taken away */
 LOCAL ER decl_change( OBFHND *o, INT recno, BOOL add, UINT rt, UINT sub )
 {
 	OBFDECL	*d;
-	UB	*j;
-	SZ	asz = 0;
-	INT	n, i, k, len;
+	UB	*j = NULL;
+	INT	n, i, k, len, cap = 0;
 	ER	er;
 
-	j = (UB *)Kmalloc(OB_META_MAX);
 	d = (OBFDECL *)Kmalloc(sizeof(OBFDECL) * OBF_DECL_MAX);
-	if ( j == NULL || d == NULL ) {
-		if ( j != NULL ) Kfree(j);
-		if ( d != NULL ) Kfree(d);
+	if ( d == NULL ) {
 		return E_NOMEM;
 	}
-	er = ts_get_met(o->od, j, OB_META_MAX - 1, &asz);
-	if ( er < E_OK ) {
-		Kfree(j);
+	/* the metadata whole, with room for the declarations written again */
+	len = od_meta_all(o, DECL_TEXT_MAX, &j, &cap);
+	if ( len < 0 ) {
 		Kfree(d);
-		return er;
+		return (ER)len;
 	}
-	len = (INT)asz;
-	j[len] = 0;
 	n = decl_read(j, len, d, OBF_DECL_MAX);
 	for ( i = 0, k = 0; i < n; i++ ) {
 		if ( d[i].n != recno ) {
@@ -1205,7 +1257,7 @@ LOCAL ER decl_change( OBFHND *o, INT recno, BOOL add, UINT rt, UINT sub )
 		d[n].sub = sub;
 		n++;
 	}
-	len = decl_write(j, len, OB_META_MAX, d, n);
+	len = decl_write(j, len, cap, d, n);
 	er = ( len < 0 ) ? E_LIMIT : ts_set_met(o->od, j, (SZ)len);
 	Kfree(j);
 	Kfree(d);
@@ -1247,6 +1299,26 @@ LOCAL ER obf_apd( INT h, UINT rt, UINT sub, INT *p_recno )
 	return er;
 }
 
+LOCAL ER obf_rpl( INT h, INT recno, CONST void *buf, SZ size )
+{
+	OBFHND	*o = hnd_of(h);
+
+	if ( o != NULL && hnd_gone(o) ) {
+		return E_IO;			/* its volume went */
+	}
+	return ( o != NULL ) ? ts_rpl_rec(o->od, recno, buf, size) : E_ID;
+}
+
+LOCAL ER obf_syn( INT h )
+{
+	OBFHND	*o = hnd_of(h);
+
+	if ( o != NULL && hnd_gone(o) ) {
+		return E_IO;			/* its volume went */
+	}
+	return ( o != NULL ) ? ts_syn_obj(o->od) : E_ID;
+}
+
 LOCAL ER obf_trn( INT h, INT recno, UD size )
 {
 	OBFHND	*o = hnd_of(h);
@@ -1280,7 +1352,7 @@ LOCAL ER obf_lrc( INT h, T_OBREC *buf, INT n, INT *p_cnt )
 	OBFHND	*o = hnd_of(h);
 	T_RREC	*r;
 	OBFDECL	*d;
-	UB	*j;
+	UB	*j = NULL;
 	SZ	asz = 0;
 	INT	got = 0, nd = 0, i, k, ex = -1;
 	ER	er;
@@ -1292,16 +1364,14 @@ LOCAL ER obf_lrc( INT h, T_OBREC *buf, INT n, INT *p_cnt )
 		return E_PAR;
 	}
 	r = (T_RREC *)Kmalloc(sizeof(T_RREC) * (SZ)n);
-	j = (UB *)Kmalloc(OB_META_MAX);
 	d = (OBFDECL *)Kmalloc(sizeof(OBFDECL) * OBF_DECL_MAX);
-	if ( r == NULL || j == NULL || d == NULL ) {
+	if ( r == NULL || d == NULL ) {
 		if ( r != NULL ) Kfree(r);
-		if ( j != NULL ) Kfree(j);
 		if ( d != NULL ) Kfree(d);
 		return E_NOMEM;
 	}
 	er = ts_lst_rec(o->od, r, n, &got);
-	if ( er >= E_OK && ts_get_met(o->od, j, OB_META_MAX - 1, &asz) >= E_OK ) {
+	if ( er >= E_OK && ( asz = od_meta_all(o, 0, &j, NULL) ) >= 0 ) {
 		nd = decl_read(j, (INT)asz, d, OBF_DECL_MAX);
 		ex = exec_rec(j, (INT)asz);
 	}
@@ -1325,7 +1395,7 @@ LOCAL ER obf_lrc( INT h, T_OBREC *buf, INT n, INT *p_cnt )
 		*p_cnt = got;
 	}
 	Kfree(r);
-	Kfree(j);
+	if ( j != NULL ) Kfree(j);
 	Kfree(d);
 
 	return er;
@@ -1484,7 +1554,9 @@ LOCAL CONST T_OBMGR obf_mgr = {
 	obf_gat, obf_sat, obf_lnk, obf_lst, NULL,
 	obf_rres, obf_wres, obf_dres, obf_lres,
 	NULL, NULL,
-	obf_gic, obf_sic
+	obf_gic, obf_sic,
+	obf_rpl, obf_syn,
+	NULL			/* nothing comes in to wait for (ob_rea_tmo) */
 };
 
 EXPORT ER knl_obfile_init( void )

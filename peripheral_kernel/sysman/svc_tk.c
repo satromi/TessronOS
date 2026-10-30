@@ -274,6 +274,48 @@ LOCAL ER svc_tk_chg_slt( ID tid, RELTIM slicetime )
 	return er;
 }
 
+/*
+ * The processors of its own tasks, a set of the caller's size: copied
+ * through the kernel, at most ASP_SIZE_MAX bytes (32768 processors)
+ */
+#define ASP_SIZE_MAX	4096
+
+LOCAL ER svc_tk_set_asp( ID tid, CONST UBINT *set, SZ size )
+{
+	TCB	*t = ME();
+	UBINT	*k = NULL;
+	ER	er;
+
+	if ( size < 0 || size > ASP_SIZE_MAX ) return E_PAR;
+	if ( size > 0 ) {
+		if ( !uok(t, set, size, FALSE) ) return E_MACV;
+		k = (UBINT *)Kmalloc((size_t)size);
+		if ( k == NULL ) return E_NOMEM;
+		knl_ua_get(k, set, size);
+	}
+	CORE(t, er, tk_set_asp(tid, k, size));
+	if ( k != NULL ) Kfree(k);
+	return er;
+}
+
+LOCAL INT svc_tk_ref_asp( ID tid, UBINT *set, SZ size )
+{
+	TCB	*t = ME();
+	UBINT	*k = NULL;
+	INT	er;
+
+	if ( size < 0 || size > ASP_SIZE_MAX ) return E_PAR;
+	if ( size > 0 ) {
+		if ( !uok(t, set, size, TRUE) ) return E_MACV;
+		k = (UBINT *)Kmalloc((size_t)size);
+		if ( k == NULL ) return E_NOMEM;
+	}
+	CORE(t, er, tk_ref_asp(tid, k, size));
+	if ( er >= E_OK && k != NULL ) knl_ua_put(set, k, size);
+	if ( k != NULL ) Kfree(k);
+	return er;
+}
+
 LOCAL ER svc_tk_rot_rdq( PRI pri )
 {
 	TCB	*t = ME();
@@ -805,4 +847,6 @@ EXPORT const FP knl_tk_prc_tbl[TSN_TK_MAX + 1] = {
 	[TSN_NUMBER(TSN_TK_GET_UTC)]	= F(svc_tk_get_utc),
 	[TSN_NUMBER(TSN_TK_GET_PRC)]	= F(tk_get_prc),
 	[TSN_NUMBER(TSN_TK_CHG_SLT)]	= F(svc_tk_chg_slt),
+	[TSN_NUMBER(TSN_TK_SET_ASP)]	= F(svc_tk_set_asp),
+	[TSN_NUMBER(TSN_TK_REF_ASP)]	= F(svc_tk_ref_asp),
 };

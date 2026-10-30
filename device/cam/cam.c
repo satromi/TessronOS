@@ -35,6 +35,7 @@
 #include <ts/proc.h>
 #include <ts/time.h>
 #include <ts/cam.h>
+#include <ts/ob.h>
 
 #define NBUF		3
 #define NSEEN		8		/* the programs whose last frame is kept */
@@ -61,7 +62,23 @@ typedef struct {
 	T_SPLOCK	lk;
 } CAM;
 
-LOCAL CAM	cams[CAM_UNITS];
+/*
+ * The units, as many as cameras have been attached at once: the device
+ * starts with CAM_FIRST and is registered again with twice as many when
+ * they are all taken, up to the CAM_UNITS_MAX a device ID has room for.
+ * Each unit is allocated on its own and never freed, and a larger table
+ * is made whole before it is put in place, so a driver handing a frame
+ * over finds its unit without a lock while the table grows.
+ */
+#define CAM_FIRST	4
+
+typedef struct {
+	INT	n;
+	CAM	*e[];
+} CAMTBL;
+
+LOCAL CAMTBL *volatile	cam_tbl = NULL;
+LOCAL T_DDEV		cam_ddev;
 LOCAL ID	cam_devid = 0;
 LOCAL BOOL	cam_ready = FALSE;
 LOCAL ID	cam_mtx = 0;		/* the requests, and the attaching, one at a time */
@@ -81,13 +98,69 @@ LOCAL ID requester( void )
 	return ( pid > 0 ) ? pid : -tk_get_tid();
 }
 
+/* The unit u, NULL none */
+LOCAL CAM *cam_at( INT u )
+{
+	CAMTBL	*t = cam_tbl;
+
+	return ( t != NULL && u >= 0 && u < t->n ) ? t->e[u] : NULL;
+}
+
 /* The camera of a device id: "cama" and "cama0" are camera 0 */
 LOCAL CAM *cam_of( ID devid )
 {
 	INT	u = (INT)( devid - cam_devid );
 
-	u = ( u == 0 ) ? 0 : u - 1;
-	return ( u >= 0 && u < CAM_UNITS ) ? &cams[u] : NULL;
+	return cam_at(( u == 0 ) ? 0 : u - 1);
+}
+
+/*
+ * Twice as many units (CAM_FIRST the first time), with cam_mtx held
+ * once the device is registered: the device is registered again with
+ * that many subunits.
+ */
+LOCAL ER cam_grow( void )
+{
+	CAMTBL	*t = cam_tbl, *nt;
+	INT	n = ( t != NULL ) ? t->n : 0, cap, i;
+	ID	id;
+
+	if ( n >= CAM_UNITS_MAX ) {
+		return E_LIMIT;
+	}
+	cap = ( n > 0 ) ? n * 2 : CAM_FIRST;
+	if ( cap > CAM_UNITS_MAX ) {
+		cap = CAM_UNITS_MAX;
+	}
+	nt = (CAMTBL *)Kcalloc(1, sizeof(CAMTBL) + sizeof(CAM *) * (SZ)cap);
+	if ( nt == NULL ) {
+		return E_NOMEM;
+	}
+	for ( i = 0; i < cap; i++ ) {
+		if ( i < n ) {
+			nt->e[i] = t->e[i];
+			continue;
+		}
+		nt->e[i] = (CAM *)Kcalloc(1, sizeof(CAM));
+		if ( nt->e[i] == NULL ) {
+			while ( --i >= n ) Kfree(nt->e[i]);
+			Kfree(nt);
+			return E_NOMEM;
+		}
+		InitSpinLock(&nt->e[i]->lk);
+		nt->e[i]->newest = nt->e[i]->filling = nt->e[i]->curmode = -1;
+	}
+	nt->n = cap;
+	__sync_synchronize();
+	cam_tbl = nt;			/* the table before is not freed */
+	if ( cam_devid > 0 ) {
+		cam_ddev.nsub = cap;
+		id = tk_def_dev((UB *)CAM_DEVNM, &cam_ddev, NULL);
+		if ( id < E_OK ) {
+			return id;
+		}
+	}
+	return E_OK;
 }
 
 LOCAL void free_bufs( CAM *c )
@@ -109,12 +182,22 @@ LOCAL void free_bufs( CAM *c )
 EXPORT INT knl_cam_attach( T_CAMSRC *s )
 {
 	INT	i, u = E_LIMIT;
+	BOOL	grew = FALSE;
 
 	if ( !cam_ready || s == NULL ) return E_OBJ;
 	tk_loc_mtx(cam_mtx, TMO_FEVR);
-	for ( i = 0; i < CAM_UNITS && u < 0; i++ ) {
-		if ( cams[i].src == NULL ) {
-			CAM	*c = &cams[i];
+	for ( i = 0; u < 0; i++ ) {
+		if ( i == cam_tbl->n ) {
+			ER	er = cam_grow();
+
+			if ( er < E_OK ) {
+				u = er;
+				break;
+			}
+			grew = TRUE;
+		}
+		if ( cam_tbl->e[i]->src == NULL ) {
+			CAM	*c = cam_tbl->e[i];
 
 			free_bufs(c);
 			knl_memset(&c->setm, 0, sizeof(c->setm));
@@ -129,6 +212,9 @@ EXPORT INT knl_cam_attach( T_CAMSRC *s )
 		}
 	}
 	tk_unl_mtx(cam_mtx);
+	if ( grew ) {
+		knl_obdev_changed();		/* the new units have objects */
+	}
 	if ( u >= 0 ) {
 		tm_printf((UB *)"cam: %s on cama%d, %d modes\n", s->info.product, u, s->nmodes);
 	}
@@ -140,9 +226,8 @@ EXPORT void knl_cam_detach( T_CAMSRC *s )
 	CAM	*c;
 	UINT	im;
 
-	if ( s == NULL || s->unit < 0 || s->unit >= CAM_UNITS ) return;
+	if ( s == NULL || ( c = cam_at(s->unit) ) == NULL ) return;
 	tk_loc_mtx(cam_mtx, TMO_FEVR);
-	c = &cams[s->unit];
 	ISpinLock(&c->lk, &im);
 	c->src = NULL;
 	c->streaming = FALSE;
@@ -169,8 +254,7 @@ EXPORT void knl_cam_frame( T_CAMSRC *s, CONST UB *data, INT len, UW pts )
 	UINT	im;
 	INT	i, b = -1;
 
-	if ( s == NULL || s->unit < 0 || s->unit >= CAM_UNITS ) return;
-	c = &cams[s->unit];
+	if ( s == NULL || ( c = cam_at(s->unit) ) == NULL ) return;
 	ISpinLock(&c->lk, &im);
 	if ( c->streaming && c->cap > 0 && len > 0 && len <= c->cap && c->filling < 0 ) {
 		for ( i = 0; i < NBUF && b < 0; i++ ) {
@@ -202,11 +286,12 @@ EXPORT void knl_cam_frame( T_CAMSRC *s, CONST UB *data, INT len, UW pts )
 EXPORT void knl_cam_dropped( T_CAMSRC *s )
 {
 	UINT	im;
+	CAM	*c;
 
-	if ( s == NULL || s->unit < 0 || s->unit >= CAM_UNITS ) return;
-	ISpinLock(&cams[s->unit].lk, &im);
-	cams[s->unit].stat.dropped++;
-	ISpinUnlock(&cams[s->unit].lk, &im);
+	if ( s == NULL || ( c = cam_at(s->unit) ) == NULL ) return;
+	ISpinLock(&c->lk, &im);
+	c->stat.dropped++;
+	ISpinUnlock(&c->lk, &im);
 }
 
 /* ---------------------------------------------------------------- requests */
@@ -469,7 +554,7 @@ LOCAL INT cam_event( INT evttyp, void *evtinf, void *exinf )
 	INT	i;
 
 	if ( evttyp != TDV_SUSPEND ) return E_OK;
-	for ( i = 0; i < CAM_UNITS; i++ ) stop_stream(&cams[i]);
+	for ( i = 0; cam_at(i) != NULL; i++ ) stop_stream(cam_at(i));
 	return E_OK;
 }
 
@@ -478,7 +563,6 @@ EXPORT ER knl_cam_init( void )
 	T_DDEV	ddev;
 	T_CMTX	cm;
 	ID	id;
-	INT	i;
 
 	if ( cam_ready ) return E_OK;
 	cm.exinf = NULL;
@@ -486,15 +570,11 @@ EXPORT ER knl_cam_init( void )
 	cm.ceilpri = 0;
 	cam_mtx = tk_cre_mtx(&cm);
 	if ( cam_mtx <= 0 ) return cam_mtx;
-	for ( i = 0; i < CAM_UNITS; i++ ) {
-		knl_memset(&cams[i], 0, sizeof(cams[i]));
-		InitSpinLock(&cams[i].lk);
-		cams[i].newest = cams[i].filling = cams[i].curmode = -1;
-	}
+	if ( cam_grow() < E_OK ) return E_NOMEM;
 	ddev.exinf   = NULL;
 	ddev.drvatr  = 0;
 	ddev.devatr  = TDK_CAMERA;
-	ddev.nsub    = CAM_UNITS;
+	ddev.nsub    = cam_tbl->n;
 	ddev.blksz   = 1;
 	ddev.openfn  = (FP)cam_open;
 	ddev.closefn = (FP)cam_close;
@@ -502,6 +582,7 @@ EXPORT ER knl_cam_init( void )
 	ddev.waitfn  = (FP)cam_wait;
 	ddev.abortfn = (FP)cam_abort;
 	ddev.eventfn = (FP)cam_event;
+	cam_ddev = ddev;
 	id = tk_def_dev((UB *)CAM_DEVNM, &ddev, NULL);
 	if ( id <= 0 ) return id;
 	cam_devid = id;

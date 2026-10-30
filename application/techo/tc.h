@@ -153,10 +153,10 @@ IMPORT void ed_begin( INT w, INT f, CONST UB *text );
 IMPORT void ed_commit( void );
 IMPORT void ed_cancel( void );
 IMPORT void ed_end( void );
-IMPORT BOOL ed_key( UINT key, UINT mods );
+IMPORT BOOL ed_key( UINT key, UINT mods, UINT mode );
 IMPORT void ed_insert( CONST UB *s, INT n );
 IMPORT void ed_draw( void );
-IMPORT BOOL ed_ime_press( INT x, INT y );
+IMPORT void ed_pick( INT row );		/* a press on the system's list of candidates (OB_WR_CAND) */
 IMPORT BOOL ed_busy( void );
 /* The caret put where x is (in the window), and with 'extend' the letters from the anchor taken */
 IMPORT void ed_caret_at( INT x, BOOL extend );

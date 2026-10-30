@@ -122,6 +122,7 @@ drmVersionPtr drmGetVersion( int fd );
 void	drmFreeVersion( drmVersionPtr v );
 
 int	drmGetDevices2( uint32_t flags, drmDevicePtr devices[], int max_devices );
+#define DRM_DEVICE_GET_PCI_REVISION	( 1 << 0 )	/* drmGetDevice2: the PCI revision too */
 int	drmGetDevice2( int fd, uint32_t flags, drmDevicePtr *device );
 int	drmGetDeviceFromDevId( dev_t dev_id, uint32_t flags, drmDevicePtr *device );
 void	drmFreeDevice( drmDevicePtr *device );

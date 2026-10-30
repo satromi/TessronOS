@@ -18,7 +18,7 @@
       "id": "file-convert",
       "kind": "accessory",
       "name": "ファイル変換",
-      "version": "R1.110",
+      "version": "R1.200",
       "menu": true,
       "builtin": false,
       "base": []

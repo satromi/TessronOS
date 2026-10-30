@@ -48,7 +48,6 @@ extern "C" {
 #define WM_PART_MAX	200		/* parts in one panel: the words on it are parts too */
 #define WM_POOL_BYTES	8192		/* the names of every list, field and tag in one panel: a list of a few hundred disks */
 #define WM_SB_MAX	6		/* fields in one box along a line */
-#define WM_ITEM_MAX	32		/* items in one menu */
 #define WM_LABEL_MAX	128		/* bytes of a label, with its terminator:
 					   a name of 40 Japanese letters */
 #define WM_KEY_MAX	12		/* bytes of the keys that do the same */
@@ -72,6 +71,14 @@ extern "C" {
  */
 #define TB_PARTS	1		/* a box of letters */
 #define XB_PARTS	2		/* one whose letters are not shown */
+/*
+ * What a program puts in a box whose letters are not shown to stand for
+ * letters it keeps elsewhere and does not know (a password saved): each
+ * shows as a letter does, and the first key typed into the box takes
+ * them all away, so that what is read from the box then is only what
+ * was typed.
+ */
+#define XB_STANDIN	0x7F
 #define NB_PARTS	3		/* a number */
 #define SB_PARTS	4		/* fields along a line */
 #define AS_PARTS	5		/* an alternate switch: on or off */
@@ -103,11 +110,23 @@ extern "C" {
 #define P_BASE		0x01000000U	/* words on a base line four above their rectangle's foot */
 #define P_GONE		0x02000000U	/* put away: not shown and not worked until shown again */
 #define P_DOWN		0x04000000U	/* a panel of tags whose tags stand down the sheet's left side */
+/*
+ * A panel of tags whose sheets scroll (P_SCROLL on the tags): on a
+ * window whose work area is shorter than the panel, the panel ends at
+ * the work area's foot, the parts of the sheet shown move in what is
+ * left of the sheet as its scroll offset says, and the window's right
+ * bar, when it has one, and the wheel work that offset. A part at the
+ * foot (P_FOOT: a sheet's row of buttons) does not scroll: it rises
+ * with the panel's foot and the sheet shows down to its head.
+ */
+#define P_FOOT		0x08000000U	/* stands at the panel's foot: never scrolled */
+#define P_SCROLL	0x10000000U	/* a panel of tags whose sheets scroll */
 
 /* What each field of a box along a line is (sbf) */
 #define SBF_ZERO	0x01		/* shown with noughts to its width */
 #define SBF_NAMES	0x02		/* a field of names, stepped through */
 #define SBF_LEFT	0x04		/* set against its left rather than its right */
+#define SBF_RIGHT	0x08		/* a list's column: its letters set against its right end */
 
 /* The bits a bar is drawn by, which live in the same word */
 #define OB_ACROSS	0x00000020U	/* along the foot rather than down a side */
@@ -201,6 +220,12 @@ typedef struct {
 	 * fields are the part's own label, with a hash where each field
 	 * goes -- "####年##月##日" is three fields and the words around
 	 * them, which is the whole of what such a box is.
+	 *
+	 * A list, a selector or a pop-up whose names are parted into
+	 * columns by tabs keeps here the widths its definition gives the
+	 * columns (cols="0,72r,96"): sb_n of them, each sbw[] in pixels or
+	 * 0 for an equal share of what is left, SBF_RIGHT in sbf[] for one
+	 * set against its right end. sb_n 0: the widths come from the names.
 	 */
 	INT		sbv[WM_SB_MAX];
 	INT		sbw[WM_SB_MAX];
@@ -323,6 +348,7 @@ IMPORT ER  wm_panel_colour( INT pid, INT num, UW *p_colour );
 IMPORT ER  wm_panel_field( INT pid, INT num, INT field, INT *p_value );
 IMPORT ER  wm_panel_set_field( INT pid, INT num, INT field, INT value );
 
+/* A box's letters read or set; set on words alone, they are what the words say */
 IMPORT ER  wm_panel_text( INT pid, INT num, UB *buf, INT max );
 IMPORT ER  wm_panel_set_text( INT pid, INT num, CONST UB *s );
 
@@ -358,8 +384,14 @@ typedef struct {
 	 * was chosen last time.
 	 */
 	INT		cur;
-	T_WMITEM	item[WM_ITEM_MAX];
+	T_WMITEM	item[];		/* nitem of them */
 } T_WMMENU;
+
+/*
+ * The bytes of a menu of n items. A menu has as many as its definition
+ * gives: one taller than the screen is laid in columns side by side.
+ */
+#define WM_MENU_SIZE(n)	( sizeof(T_WMMENU) + sizeof(T_WMITEM) * (SZ)(n) )
 
 /*
  * Open a menu at a place in a window's work area. It is a panel of one
@@ -383,6 +415,48 @@ IMPORT ER  wm_menu_event( INT pid, CONST T_WMEV *ev, INT *p_cmd );
  * any other window puts the menu away.
  */
 IMPORT BOOL wm_menu_has( INT pid, INT wid );
+
+/*
+ * The press a menu or a pop-up's list was opened by, followed to its
+ * release. wm_click_begin takes the press (the time and the button of
+ * the event that opened it, as its notice says); wm_click_take is given
+ * every event read after, before
+ * anything else looks at it, and answers:
+ *   WM_CK_KEPT  it is the release of that press, and the press was a
+ *               click -- let go within the double press's time
+ *               (WM_LOOK_DBLTIME), or with the pointer never more than
+ *               a few pixels from where it went down, however long --:
+ *               the menu or list stays open and chooses nothing;
+ *   WM_CK_EAT   a press or release of another button while the opening
+ *               one is held, or the release of such a press: not the
+ *               menu's or the list's;
+ *   WM_CK_PASS  the rest, to be worked as before.
+ */
+typedef struct {
+	BOOL	live;			/* the opening press not yet let go */
+	BOOL	placed;			/* where it went down is known */
+	BOOL	moved;			/* the pointer went farther than a click allows */
+	UINT	code;			/* its button */
+	UINT	eaten;			/* buttons pressed meanwhile, their releases not passed on */
+	UD	when;
+	INT	x, y;			/* where it went down, on the screen */
+} T_WMCLICK;
+
+#define WM_CK_PASS	0
+#define WM_CK_KEPT	1
+#define WM_CK_EAT	2
+
+/*
+ * code is the opening press's button as its notice says, or WM_CK_FIND
+ * for the button of the press read at time when (knl_wm_press_seen
+ * keeps the last few, as they are read or handed to the objects'
+ * layer); a press not among them is none: nothing is followed, and the
+ * menu or list works every event as it comes.
+ */
+#define WM_CK_FIND	0xFFFFFFFFU
+IMPORT void wm_click_begin( T_WMCLICK *c, UD when, UINT code );
+IMPORT void knl_wm_press_seen( UD when, UINT code );
+IMPORT INT  wm_click_take( T_WMCLICK *c, CONST T_WMEV *ev );
 IMPORT void knl_menu_tick( void );	/* the lists of rows stayed on, opened */
 IMPORT INT  knl_menu_wait( void );	/* ms until a row's list is due, -1 none */
 
@@ -458,11 +532,38 @@ IMPORT ER   knl_pn_set_names( INT pid, INT i, CONST UB *names, INT len );
 IMPORT INT  knl_pn_names( INT pid, INT i, UB *buf, INT max );
 
 /*
+ * A panel whose sheets scroll (P_SCROLL): knl_pn_fit takes the height
+ * of its window's work area again once the window's size changed;
+ * knl_pn_scroll is the right bar of window wid worked (pos where the
+ * start of what shows is asked to go): TRUE when a panel there took it,
+ * and its program is not told.
+ */
+IMPORT void knl_pn_fit( INT pid );
+IMPORT BOOL knl_pn_scroll( INT wid, INT pos );
+
+/*
+ * A panel placed beside what its program draws itself (ui_strip: the
+ * object made with "beside":1): none of its boxes has the letters until
+ * it is pressed, and a press on the content takes them away again. Any
+ * other panel gives the first box the letters as it opens.
+ */
+IMPORT void knl_pn_set_beside( INT pid );
+
+/* The lock of the panels' drawing made, once, as the window manager starts */
+IMPORT ER   knl_pn_init( void );
+
+/*
  * A panel made from a data box: definition number num of the object
  * box, whose record 0 is xmlTAD with a <databox> of <panel>s. Its name
  * (the window's title) comes back in title when asked.
  */
 IMPORT ER   knl_pn_load( CONST TS_UUID *box, INT num, T_WMPANEL *def, UB *title, INT tmax );
+/*
+ * The picture of a push button of a data box (<button pict="0_N.png">):
+ * the PNG resource href ("<uuid>_0_N.png") read now and kept, in the
+ * caller's task; drawn in the middle of the button in place of words
+ */
+IMPORT void knl_pn_pict_load( CONST UB *href );
 
 #ifdef __cplusplus
 }

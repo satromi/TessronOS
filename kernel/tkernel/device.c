@@ -33,9 +33,50 @@ Noinit(EXPORT	T_IDEV		knl_DefaultIDev);
  *	Device registration management
  */
 
-Noinit(EXPORT	DevCB		knl_DevCBtbl[MAX_REGDEV]);	/* Device registration information table */
+Noinit(LOCAL	DevCB		knl_DevCBtbl[MAX_REGDEV]);	/* The first registrations */
+Noinit(LOCAL	DevCB		*knl_DevCBdir0[MAX_REGDEV]);	/* and the first table of them */
+Noinit(EXPORT	DevCB		**knl_DevCBdir);	/* Device registrations, by number - 1 */
+Noinit(EXPORT	INT		knl_DevCBn);
 Noinit(EXPORT	QUEUE		knl_UsedDevCB);	/* In-use queue */
 Noinit(EXPORT	QUEUE		knl_FreeDevCB);	/* Unused queue */
+
+/*
+ * Twice as many registrations, with the device management locked: the
+ * new entries go on the unused queue. FALSE when there is no memory, or
+ * no more numbers an ID has room for.
+ */
+LOCAL BOOL growDevCB( void )
+{
+	INT	n = knl_DevCBn, cap = n * 2, i;
+	DevCB	**dir, *e;
+
+	if ( cap > ( INT_MAX >> 8 ) ) {
+		cap = INT_MAX >> 8;
+	}
+	if ( cap <= n ) {
+		return FALSE;
+	}
+	dir = (DevCB **)Kmalloc(sizeof(DevCB *) * (SZ)cap);
+	e = (DevCB *)Kcalloc((SZ)( cap - n ), sizeof(DevCB));
+	if ( dir == NULL || e == NULL ) {
+		if ( dir != NULL ) Kfree(dir);
+		if ( e != NULL ) Kfree(e);
+		return FALSE;
+	}
+	for ( i = 0; i < cap; i++ ) {
+		if ( i < n ) {
+			dir[i] = knl_DevCBdir[i];
+			continue;
+		}
+		dir[i] = &e[i - n];
+		dir[i]->no = i + 1;
+		dir[i]->devnm[0] = '\0';
+		QueInsert(&dir[i]->q, &knl_FreeDevCB);
+	}
+	knl_DevCBdir = dir;		/* the table before is not freed */
+	knl_DevCBn = cap;
+	return TRUE;
+}
 
 
 /*
@@ -65,6 +106,9 @@ LOCAL DevCB* newDevCB( CONST UB *devnm )
 	DevCB	*devcb;
 
 	devcb = (DevCB*)QueRemoveNext(&knl_FreeDevCB);
+	if ( devcb == NULL && growDevCB() ) {
+		devcb = (DevCB*)QueRemoveNext(&knl_FreeDevCB);
+	}
 	if ( devcb == NULL ) {
 		return NULL; /* No space */
 	}
@@ -461,7 +505,11 @@ LOCAL ER initDevCB( void )
 	QueInit(&knl_FreeDevCB);
 
 	devcb = knl_DevCBtbl;
+	knl_DevCBdir = knl_DevCBdir0;
+	knl_DevCBn = num;
 	while ( num-- > 0 ) {
+		knl_DevCBdir0[devcb - knl_DevCBtbl] = devcb;
+		devcb->no = (INT)( devcb - knl_DevCBtbl ) + 1;
 		QueInsert(&devcb->q, &knl_FreeDevCB);
 		devcb->devnm[0] = '\0';
 		devcb++;

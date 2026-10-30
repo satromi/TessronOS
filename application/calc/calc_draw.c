@@ -30,9 +30,7 @@
 #include "calc.h"
 #include <ts/hid.h>
 
-#define FIG_MAX		( 1024 * 1024 )
 
-static UB	g_fig[FIG_MAX];
 
 /* ---------------------------------------------------------------- where things are */
 
@@ -305,7 +303,7 @@ static BOOL is_error( CONST UB *s )
 /* The words of a decorated cell, as a text in the figure */
 static void doc_put( CTBUF *b, CONST CXCELL *c, CONST T_DPRECT *r, INT px )
 {
-	CONST CXSTYLE	*st = &c->st;
+	CONST CXSTYLE	*st = c->st;
 	CONST UB	*w = cx_shown(c);
 	INT		top = r->top + ( r->bottom - r->top - px - 4 ) / 2;
 	char		col[CX_COLOUR];
@@ -378,7 +376,7 @@ static void draw_cell( CONST CXCELL *c, INT col, INT row, CONST T_DPRECT *r, CON
 {
 	UW		ground = g_bg, ink = C_TEXT;
 	BOOL		in = (BOOL)( g_cells_on && col >= pick->c0 && col <= pick->c1 && row >= pick->r0 && row <= pick->r1 );
-	CONST CXSTYLE	*st = ( c != NULL ) ? &c->st : NULL;
+	CONST CXSTYLE	*st = ( c != NULL ) ? c->st : NULL;
 	INT		px = ( st != NULL ) ? cell_px(st) : 12;
 
 	if ( c != NULL && c->kind == CX_TEXT && is_error(cx_shown(c)) && c->text[0] == '=' ) {
@@ -475,7 +473,7 @@ static void draw_cell( CONST CXCELL *c, INT col, INT row, CONST T_DPRECT *r, CON
 /* A cell's frame, over its neighbours' lines */
 static void draw_frame( CONST CXCELL *c, CONST T_DPRECT *r )
 {
-	CONST CXSTYLE	*st = &c->st;
+	CONST CXSTYLE	*st = c->st;
 
 	if ( st->side[CX_TOP].on ) side_line(r->left, r->top - 1, r->right, r->top - 1, &st->side[CX_TOP]);
 	if ( st->side[CX_BOTTOM].on ) side_line(r->left, r->bottom - 1, r->right, r->bottom - 1, &st->side[CX_BOTTOM]);
@@ -564,7 +562,8 @@ void paint( void )
 	if ( c1 > g_s.maxcol ) c1 = g_s.maxcol;
 	if ( r1 > g_s.maxrow ) r1 = g_s.maxrow;
 
-	ct_buf(&fig, g_fig, FIG_MAX);
+	/* what is drawn as a figure, as long as it comes to */
+	ct_buf_grow(&fig, 64 * 1024, ct_more);
 	ct_put(&fig, "<tad version=\"1.0\" encoding=\"UTF-8\">\n<figure>\n");
 
 	/* the cells in sight, a row at a time; a join is drawn at its corner */
@@ -590,7 +589,7 @@ void paint( void )
 		CONST CXCELL	*c = g_s.c[i];
 
 		if ( c->row < r0 || c->row > r1 || c->col < c0 || c->col > c1 ) continue;
-		if ( ( c->st.has & CX_S_FRAME ) == 0 ) continue;
+		if ( ( c->st->has & CX_S_FRAME ) == 0 ) continue;
 		(void)cell_box(c->col, c->row, &r);
 		draw_frame(c, &r);
 	}
@@ -600,6 +599,7 @@ void paint( void )
 	clip.right = g_w;
 	clip.bottom = g_h;
 	if ( !fig.fail ) (void)dp_draw_tad(g_gid, &clip, 0, 0, fig.p, fig.n);
+	(void)ct_more(fig.p, 0);
 
 	/* the charts */
 	for ( i = 0; i < g_s.nch; i++ ) {

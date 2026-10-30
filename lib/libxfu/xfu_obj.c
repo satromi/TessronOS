@@ -59,15 +59,27 @@ EXPORT UB *xfu_rec_all( ID key, INT recno, SZ *p_size )
 EXPORT UB *xfu_meta_all( ID key, SZ *p_size )
 {
 	UB	*buf;
-	SZ	n = 0;
+	SZ	n, cap = 4096;
 
-	buf = (UB *)xfu_sys_alloc(OB_ATR_MAX + 1);
-	if ( buf == NULL ) {
-		return NULL;
-	}
-	if ( ob_get_atr(key, buf, OB_ATR_MAX, &n) < E_OK || n <= 0 || n > OB_ATR_MAX ) {
+	/* the metadata whole: read again with twice the room while it fills it */
+	for ( ;; ) {
+		buf = (UB *)xfu_sys_alloc(cap + 1);
+		if ( buf == NULL ) {
+			return NULL;
+		}
+		n = 0;
+		if ( ob_get_atr(key, buf, cap, &n) < E_OK || n <= 0 ) {
+			xfu_sys_free(buf);
+			return NULL;
+		}
+		if ( n < cap ) {
+			break;
+		}
 		xfu_sys_free(buf);
-		return NULL;
+		if ( cap >= OB_META_LIMIT ) {
+			return NULL;
+		}
+		cap *= 2;
 	}
 	buf[n] = 0;
 	if ( p_size != NULL ) *p_size = n;
@@ -101,7 +113,7 @@ EXPORT ER xfu_meta_file( ID key, CONST UB *file, SZ n )
 	xb_bytes(&w, old, at);
 	xb_bytes(&w, file, n);
 	xb_bytes(&w, old + at + f.len, olen - at - f.len);
-	er = w.bad ? E_NOMEM : ( w.at > OB_ATR_MAX ) ? E_LIMIT : ob_set_atr(key, w.b, w.at);
+	er = w.bad ? E_NOMEM : ( w.at > OB_META_LIMIT ) ? E_LIMIT : ob_set_atr(key, w.b, w.at);
 	xb_free(&w);
 	xfu_sys_free(old);
 	return er;
@@ -258,7 +270,7 @@ EXPORT ER xfu_link_add( CONST TS_UUID *box, CONST TS_UUID *u )
 	ID	key;
 	ER	er;
 
-	key = ob_opn_obj(box, OB_OP_READ | OB_OP_ATRRD | OB_OP_WRITE);
+	key = ob_opn_obj(box, OB_OP_READ | OB_OP_ATRRD | OB_OP_WRITE | OB_O_WEXCL);	/* read, a link added, written back */
 	if ( key < E_OK ) {
 		return (ER)key;
 	}
@@ -298,8 +310,9 @@ EXPORT ER xfu_link_add( CONST TS_UUID *box, CONST TS_UUID *u )
 	xfu_link_xml(&w, u, 8, low + 8, 248, low + 33, z + 1);
 	xb_bytes(&w, rec + end, size - end);
 	xfu_sys_free(rec);
-	er = w.bad ? E_NOMEM : ob_wri_rec(key, 0, 0, w.b, w.at, &asz);
-	if ( er >= E_OK ) er = ob_trn_rec(key, 0, (UD)w.at);
+	/* replaced in one change: a reader sees the old record or the new one */
+	er = w.bad ? E_NOMEM : ob_rpl_rec(key, 0, w.b, (SZ)w.at);
+	(void)asz;
 	xb_free(&w);
 	ob_cls_obj(key);
 	if ( er >= E_OK && !xfu_counts(box) ) {
@@ -416,7 +429,7 @@ EXPORT void xfu_undo( XFU *x )
 /* ---------------------------------------------------------------- programs */
 
 LOCAL CONST char * CONST app_id[XFU_NAPP] = {
-	"basic-text-editor", "basic-figure-editor", "virtual-object-list", "unpack-file"
+	"basic-text-editor", "basic-figure-editor", "virtual-object-list", "archive-manager"
 };
 
 EXPORT CONST char *xfu_app_id( INT app )
@@ -498,7 +511,7 @@ EXPORT XFUAPP *xfu_app( XFU *x, INT app )
 	}
 	if ( !x->apps ) {
 		x->apps = TRUE;
-		ids = xfu_str_uuid((CONST UB *)SYSDEF_PROG_BOX, &box)
+		ids = ( ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &box) >= E_OK )
 		    ? (TS_UUID *)xfu_sys_alloc(sizeof(TS_UUID) * max) : NULL;
 		if ( ids != NULL ) {
 			if ( ob_lst_lnk(&box, NULL, ids, max, &n) < E_OK ) n = 0;
@@ -571,7 +584,7 @@ EXPORT ER xfu_make_box( CONST UB *name, CONST TS_UUID *near, TS_UUID *p_uuid )
 		er = ob_cre_obj(&c, p_uuid);
 	}
 	if ( er >= E_OK ) {
-		key = ob_opn_obj(p_uuid, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD);
+		key = ob_opn_obj(p_uuid, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_O_EXCL);
 		er = ( key > 0 ) ? ob_apd_rec(key, OB_RT_TAD, 0, &recno) : (ER)key;
 		if ( er >= E_OK ) er = ob_wri_rec(key, recno, 0, r.b, r.at, &asz);
 		if ( key > 0 ) ob_cls_obj(key);

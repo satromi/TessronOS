@@ -1,0 +1,6 @@
+<tad version="1.0" encoding="UTF-8" filename="wpasupp">
+<document>
+<p>wpasupp</p>
+<p>Wi-Fiの鍵の交換(WPA2の4ウェイハンドシェイクとグループ鍵のハンドシェイク、WPA3のSAE)とその暗号(OpenSSL)を行うプロセス。カーネルのWi-Fiの管理がシステムのプロセスとして起動し、デバイスの実身「wpasup」で頼む。ウインドウは持たない。</p>
+</document>
+</tad>

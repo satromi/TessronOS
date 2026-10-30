@@ -77,7 +77,7 @@ EXPORT void knl_ua_put( void *udst, CONST void *src, SZ len )
  */
 EXPORT void knl_task_no_ustack( INT stacd, void *exinf )
 {
-	TCB	*tcb = knl_ctxtsk;
+	TCB	*tcb = knl_self_ctxtsk();
 
 	tm_printf((UB*)"\n!USTACK! task=%d of protection level %d has no user stack: it does not run\n",
 		  ( tcb != NULL ) ? tcb->tskid : 0,

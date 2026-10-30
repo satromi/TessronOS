@@ -44,6 +44,7 @@ EXPORT ER knl_eventflag_initialize( void )
 	end = knl_flgcb_table + NUM_FLGID;
 	for ( flgcb = knl_flgcb_table; flgcb < end; flgcb++ ) {
 		flgcb->flgid = 0;
+		knl_klk_init(&flgcb->klk);
 		QueInsert(&flgcb->wait_queue, &knl_free_flgcb);
 	}
 
@@ -72,7 +73,12 @@ SYSCALL ID tk_cre_flg( CONST T_CFLG *pk_cflg )
 
 	BEGIN_CRITICAL_SECTION;
 	/* Get control block from FreeQue */
+	KLK_MISC();
 	flgcb = (FLGCB*)QueRemoveNext(&knl_free_flgcb);
+	KLK_UNMISC();
+	if ( flgcb != NULL ) {
+		KLK_LOCK(&flgcb->klk);
+	}
 	if ( flgcb == NULL ) {
 		ercd = E_LIMIT;
 	} else {
@@ -94,6 +100,9 @@ SYSCALL ID tk_cre_flg( CONST T_CFLG *pk_cflg )
 #endif
 		ercd = flgid;
 	}
+	if ( flgcb != NULL ) {
+		KLK_UNLOCK(&flgcb->klk);
+	}
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -113,6 +122,7 @@ SYSCALL ER tk_del_flg( ID flgid )
 	flgcb = get_flgcb(flgid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&flgcb->klk);
 	if ( flgcb->flgid == 0 ) {
 		ercd = E_NOEXS;
 	} else if ( knl_not_owner(flgcb->owner) ) {
@@ -122,10 +132,13 @@ SYSCALL ER tk_del_flg( ID flgid )
 		knl_wait_delete(&flgcb->wait_queue);
 
 		/* Return to FreeQue */
+		KLK_MISC();
 		QueInsert(&flgcb->wait_queue, &knl_free_flgcb);
+		KLK_UNMISC();
 		knl_own_note(TK_OWN_FLG, flgcb->owner, -1);
 		flgcb->flgid = 0;
 	}
+	KLK_UNLOCK(&flgcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -148,6 +161,7 @@ SYSCALL ER tk_set_flg( ID flgid, UINT setptn )
 	flgcb = get_flgcb(flgid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&flgcb->klk);
 	if ( flgcb->flgid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -189,6 +203,7 @@ SYSCALL ER tk_set_flg( ID flgid, UINT setptn )
 	}
 
     error_exit:
+	KLK_UNLOCK(&flgcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -207,6 +222,7 @@ SYSCALL ER tk_clr_flg( ID flgid, UINT clrptn )
 	flgcb = get_flgcb(flgid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&flgcb->klk);
 	if ( flgcb->flgid == 0 ) {
 		ercd = E_NOEXS;
 	} else if ( knl_not_owner(flgcb->owner) ) {
@@ -214,6 +230,7 @@ SYSCALL ER tk_clr_flg( ID flgid, UINT clrptn )
 	} else {
 		flgcb->flgptn &= clrptn;
 	}
+	KLK_UNLOCK(&flgcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -233,8 +250,16 @@ LOCAL void flg_chg_pri( TCB *tcb, INT oldpri )
 /*
  * Definition of event flag wait specification
  */
-LOCAL CONST WSPEC knl_wspec_flg_tfifo = { TTW_FLG, NULL, NULL };
-LOCAL CONST WSPEC knl_wspec_flg_tpri  = { TTW_FLG, flg_chg_pri, NULL };
+/* The lock of the wait (design 4.3.3) */
+#if KLK_FINE_OBJ
+LOCAL KLOCK *flg_wlock( TCB *tcb )
+{
+	return &get_flgcb(tcb->wid)->klk;
+}
+#endif
+
+LOCAL CONST WSPEC knl_wspec_flg_tfifo = { TTW_FLG, NULL, NULL WSPEC_LOCK(flg_wlock) };
+LOCAL CONST WSPEC knl_wspec_flg_tpri  = { TTW_FLG, flg_chg_pri, NULL WSPEC_LOCK(flg_wlock) };
 
 /*
  * Event flag wait
@@ -253,6 +278,7 @@ SYSCALL_U ER tk_wai_flg_u( ID flgid, UINT waiptn, UINT wfmode, UINT *p_flgptn, T
 	flgcb = get_flgcb(flgid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&flgcb->klk);
 	if ( flgcb->flgid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -290,6 +316,7 @@ SYSCALL_U ER tk_wai_flg_u( ID flgid, UINT waiptn, UINT wfmode, UINT *p_flgptn, T
 	}
 
     error_exit:
+	KLK_UNLOCK(&flgcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -318,6 +345,7 @@ SYSCALL ER tk_ref_flg( ID flgid, T_RFLG *pk_rflg )
 	flgcb = get_flgcb(flgid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&flgcb->klk);
 	if ( flgcb->flgid == 0 ) {
 		ercd = E_NOEXS;
 	} else if ( knl_not_owner(flgcb->owner) ) {
@@ -327,6 +355,7 @@ SYSCALL ER tk_ref_flg( ID flgid, T_RFLG *pk_rflg )
 		pk_rflg->wtsk = knl_wait_tskid(&flgcb->wait_queue);
 		pk_rflg->flgptn = flgcb->flgptn;
 	}
+	KLK_UNLOCK(&flgcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;

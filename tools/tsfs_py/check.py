@@ -35,7 +35,7 @@ from .btree import (INTERNAL, LEAF, TREE_GC, TREE_OBJ, TREE_ORPHAN,
 from .error import TsfsError
 from .groups import fresh_map
 from .layout import (AG_MAX_BLOCKS, AG_MIN_BLOCKS, BLOCK_SIZE, COMPAT_GROWN,
-                     INCOMPAT_GROWING, JRNL_AREA_BLOCKS, JRNL_MAX_BLOCKS,
+                     INCOMPAT_GROWING, INCOMPAT_XT2, JRNL_AREA_BLOCKS, JRNL_MAX_BLOCKS,
                      KNOWN_INCOMPAT, KNOWN_ROCOMPAT, LABEL_MAX, MAGIC_NODE,
                      ERR_NAMES, NIL_UUID, ST_CLEAN, ST_ERROR, Superblock,
                      grown_count, layout)
@@ -43,7 +43,7 @@ from . import meta as metamod
 from .obj import ICON_MAX, OB_ICON, is_icon
 from .obj import (DATA_INLINE_MAX, F_DELETABLE, F_EDITABLE, F_GARBAGE,
                   F_ORPHAN, F_READABLE, F_RELINK, F_TRASH, FORM_INLINE, FORM_NONE,
-                  FORM_RUN, FORM_TREE, INL_MASK, INL_UNITS, INLINE_UNIT,
+                  FORM_RUN, FORM_TREE, FORM_TREE2, INL_MASK, INL_UNITS, INLINE_UNIT,
                   LK_EXTERNAL, LK_SIZE, LinkEntry, MAX_EXTENTS, MAX_LINK,
                   MAX_REC, MAX_RES, MB_PAY, OB_INLINE, OB_LINK, OB_META,
                   OB_NLINK, OB_NPLACE, OB_NRES, OB_PLACE, OB_RES, ObjectBlock,
@@ -469,12 +469,26 @@ class Checker(object):
                 rep.warn(where, "%s holds %d bytes inline, more than %d"
                          % (what, pl.nbytes, DATA_INLINE_MAX))
             return
-        if pl.form not in (FORM_RUN, FORM_TREE):
+        if pl.form not in (FORM_RUN, FORM_TREE, FORM_TREE2):
             rep.error(where, "%s has form %d" % (what, pl.form))
             self.broken = True
             return
-        if pl.form == FORM_TREE:
-            if not self.claim(pl.a, "the extent leaf of %s" % what, where):
+        if pl.form == FORM_TREE2 and not ( self.vol.sb.incompat & INCOMPAT_XT2 ):
+            rep.error(where, "%s is a tree of two levels on a volume that does not "
+                      "say it has them" % what)
+            self.broken = True
+        if pl.form in (FORM_TREE, FORM_TREE2):
+            if not self.claim(pl.a, "the extent %s of %s"
+                              % ("leaf" if pl.form == FORM_TREE else "index", what), where):
+                return
+        if pl.form == FORM_TREE2:
+            try:
+                for (first, leaf, cnt) in o.leaves(pl):
+                    if not self.claim(leaf, "an extent leaf of %s" % what, where):
+                        return
+            except TsfsError as e:
+                rep.error(where, "%s: %s" % (what, e))
+                self.broken = True
                 return
         problems = []
         try:
@@ -486,9 +500,9 @@ class Checker(object):
         for b, why in problems:
             rep.error(where, "the extent leaf %d of %s: %s" % (b, what, why))
             self.broken = True
-        if pl.form == FORM_TREE and pl.b != len(runs):
-            rep.warn(where, "%s says %d runs, its leaf %d" % (what, pl.b, len(runs)))
-        if len(runs) > MAX_EXTENTS:
+        if pl.form in (FORM_TREE, FORM_TREE2) and pl.b != len(runs):
+            rep.warn(where, "%s says %d runs, its tree %d" % (what, pl.b, len(runs)))
+        if len(runs) > ( MAX_EXTENTS * MAX_EXTENTS if pl.form == FORM_TREE2 else MAX_EXTENTS ):
             rep.error(where, "%s lies in %d runs" % (what, len(runs)))
         have = 0
         for (l, s, c) in runs:

@@ -13,7 +13,9 @@
  *
  *	Every structure the controller walks is one page, because a page is
  *	what the allocator gives out whole and every xHCI structure either
- *	fits in one or is a list of page pointers. Data buffers are made of
+ *	fits in one or is a list of page pointers. The one exception is the
+ *	scratchpad array, which grows to two pages for a controller that
+ *	asks for more than 512 pages. Data buffers are made of
  *	pages too, reached one ring entry per page, so no transfer needs
  *	memory that is contiguous beyond a page.
  *
@@ -43,12 +45,6 @@
 #include "usbdev.h"
 
 /*
- * Taken with interrupts disabled around the table of uncached DMA pages: disabling
- * interrupts alone keeps out only this processor.
- */
-LOCAL T_SPLOCK	usbdma_lock;
-
-/*
  * What the controller adds to a physical address to reach memory, and
  * whether it sees the caches.
  */
@@ -65,33 +61,24 @@ LOCAL T_SPLOCK	usbdma_lock;
 #endif
 
 #if USB_DMA_UNCACHED
-/*
- * The uncached mapping of each page handed out, so that giving it back
- * finds the page frame again. A small table rather than a list: a list
- * would have to live in memory of its own.
- */
-#define USB_DMA_MAXPAGES	1024
-
-typedef struct {
-	void	*va;
-	UD	pa;
-} DMAPAGE;
-
-LOCAL DMAPAGE	dma_page[USB_DMA_MAXPAGES];
-
 LOCAL void dcache_clean_inval( UBINT a, UBINT len )
 {
 	DCacheFlushRange((CONST void *)a, len);
 }
 #endif
 
-EXPORT void *knl_usb_page_alloc( UD *p_bus )
+/*
+ * 2^order pages next to each other, zeroed. Most structures are one
+ * page; the scratchpad array of a controller that lends itself more than
+ * 512 pages is two.
+ */
+EXPORT void *knl_usb_pages_alloc( INT order, UD *p_bus )
 {
 	PFRAME	*pf;
 	UD	pa;
 	void	*va;
 
-	pf = knl_alloc_pages(0, ZONE_DMA32, KAF_ZERO | KAF_DMA32);
+	pf = knl_alloc_pages((UINT)order, ZONE_DMA32, KAF_ZERO | KAF_DMA32);
 	if ( pf == NULL ) {
 		return NULL;
 	}
@@ -99,31 +86,12 @@ EXPORT void *knl_usb_page_alloc( UD *p_bus )
 	va = PA2VA(pa);
 
 #if USB_DMA_UNCACHED
-	{
-		UINT	imask;
-		INT	i;
-
-		/* the zeroes went through the cache: push them out first */
-		dcache_clean_inval((UBINT)va, USB_PAGE);
-		va = knl_vmap_pa(pa, 1, VMAP_NOCACHE);
-		if ( va == NULL ) {
-			knl_free_pages(pf, 0);
-			return NULL;
-		}
-		ISpinLock(&usbdma_lock, &imask);
-		for ( i = 0; i < USB_DMA_MAXPAGES; i++ ) {
-			if ( dma_page[i].va == NULL ) {
-				dma_page[i].va = va;
-				dma_page[i].pa = pa;
-				break;
-			}
-		}
-		ISpinUnlock(&usbdma_lock, &imask);
-		if ( i == USB_DMA_MAXPAGES ) {
-			knl_vunmap_pa(va, 1);
-			knl_free_pages(pf, 0);
-			return NULL;
-		}
+	/* the zeroes went through the cache: push them out first */
+	dcache_clean_inval((UBINT)va, (UBINT)USB_PAGE << order);
+	va = knl_vmap_pa(pa, (UD)1 << order, VMAP_NOCACHE);
+	if ( va == NULL ) {
+		knl_free_pages(pf, (UINT)order);
+		return NULL;
 	}
 #endif
 	if ( p_bus != NULL ) {
@@ -133,7 +101,12 @@ EXPORT void *knl_usb_page_alloc( UD *p_bus )
 	return va;
 }
 
-EXPORT void knl_usb_page_free( void *page )
+/*
+ * The page frame is found again from the mapping itself: the uncached
+ * mapping's page table entry holds it, so no table of the pages handed
+ * out is kept and their number is not bounded by one.
+ */
+EXPORT void knl_usb_pages_free( void *page, INT order )
 {
 	PFRAME	*pf;
 	UD	pa;
@@ -143,31 +116,31 @@ EXPORT void knl_usb_page_free( void *page )
 	}
 #if USB_DMA_UNCACHED
 	{
-		UINT	imask;
-		INT	i;
+		void	*p = NULL;
 
-		pa = 0;
-		ISpinLock(&usbdma_lock, &imask);
-		for ( i = 0; i < USB_DMA_MAXPAGES; i++ ) {
-			if ( dma_page[i].va == page ) {
-				pa = dma_page[i].pa;
-				dma_page[i].va = NULL;
-				break;
-			}
+		if ( ConvPhysicalAddress(page, USB_PAGE, &p) <= 0 ) {
+			return;			/* not mapped: not one of ours */
 		}
-		ISpinUnlock(&usbdma_lock, &imask);
-		if ( i == USB_DMA_MAXPAGES ) {
-			return;			/* not one of ours */
-		}
-		knl_vunmap_pa(page, 1);
+		pa = (UD)(UBINT)p;
+		knl_vunmap_pa(page, (UD)1 << order);
 	}
 #else
 	pa = VA2PA((UBINT)page);
 #endif
 	pf = knl_pa_to_pf(pa);
 	if ( pf != NULL ) {
-		knl_free_pages(pf, 0);
+		knl_free_pages(pf, (UINT)order);
 	}
+}
+
+EXPORT void *knl_usb_page_alloc( UD *p_bus )
+{
+	return knl_usb_pages_alloc(0, p_bus);
+}
+
+EXPORT void knl_usb_page_free( void *page )
+{
+	knl_usb_pages_free(page, 0);
 }
 
 /* ---------------------------------------------------------------- buffers */

@@ -29,7 +29,7 @@
 #endif
 
 #define BI_MAGIC		0x4f42534f	/* "OSBO" */
-#define BI_VERSION		1
+#define BI_VERSION		3
 
 /*
  * The head of the kernel image: the first bytes of its lowest loadable
@@ -126,10 +126,54 @@ typedef struct {
 	char			cmdline[BI_CMDLINE_LEN];	/* the ESP's cmdline.txt, one line */
 	char			fw_vendor[64];	/* the firmware's vendor, in ASCII */
 
+	unsigned int		con_y;		/* the screen's row (pixels) below the loader's last line */
+	unsigned int		con_scale;	/* how many times the console's font is drawn larger */
+	unsigned int		esp_part;	/* the number of the partition the loader came from (1 the first) */
+	int			rtc_tz;		/* the firmware's EFI_TIME.TimeZone, minutes (BI_F_RTC_TZ): UTC = the clock + rtc_tz */
+	unsigned char		esp_guid[16];	/* its GPT unique GUID, as the table holds it (BI_F_ESP_GUID) */
+	unsigned long long	mark_pa;	/* the page of the start's marks (T_BIMARK), 0 for none */
+
 	T_BIMEM			mem[BI_MAX_MEM];
 } T_BOOTINFO;
+
+/*
+ * The marks of the start, for a machine without a serial port where the
+ * screen stays as the loader left it: from the last lines of the loader
+ * to the kernel's console, each step draws a square of its own colour on
+ * the screen, the k-th square (from 1) at the foot of the screen, 8 + (k
+ * - 1) * 30 pixels from the left, and writes its number to the page at
+ * mark_pa (BI_MARK_PA, kept from the firmware's use as the loader's), so
+ * that after a warm reset the next loader reports how far the last start
+ * got. An exception before the kernel's console draws a red square after
+ * them and the vector, RIP, CR2 and the error code in hexadecimal.
+ */
+#define BI_MARK_PA		0x8f000ull	/* asked for at this address; elsewhere when it is taken */
+#define BI_MARK_MAGIC		0x4b4d5354	/* "TSMK" */
+
+#define BI_MK_LOGS		1	/* loader: the records written (blue) */
+#define BI_MK_CLOSED		2	/* loader: the record files closed (cyan) */
+#define BI_MK_MAP		3	/* loader: the memory map taken (green) */
+#define BI_MK_EXIT1		4	/* loader: ExitBootServices: lime done, yellow refused */
+#define BI_MK_EXIT2		5	/* loader: ExitBootServices asked again: orange done */
+#define BI_MK_CONV		6	/* loader: the memory map converted (magenta) */
+#define BI_MK_JUMP		7	/* loader: PAT and EFER set, jumping to the kernel (purple) */
+#define BI_MK_KENTRY		8	/* kernel: reset_main entered (white) */
+#define BI_MK_KIDT		9	/* kernel: its exception table made (grey) */
+#define BI_MK_KTM		10	/* kernel: the console's text routines ready (brown) */
+#define BI_MK_KFB		11	/* kernel: the screen's console started (pink) */
+#define BI_MK_EXC		12	/* an exception before the screen's console (red), with numbers */
+
+typedef struct {
+	unsigned int		magic;		/* BI_MARK_MAGIC */
+	unsigned int		runs;		/* starts that wrote here */
+	unsigned int		last;		/* the last mark of this start */
+	unsigned int		vec;		/* an exception's vector, ~0 none */
+	unsigned long long	rip, cr2, err;
+} T_BIMARK;
 #endif
 
 #define BI_F_1GPAGE		0x0001	/* the linear map is made of 1GB pages */
+#define BI_F_ESP_GUID		0x0002	/* esp_guid names the partition the loader came from */
+#define BI_F_RTC_TZ		0x0004	/* rtc_tz is the zone the firmware gave its clock (GetTime) */
 
 #endif /* _SYSDEPEND_CPU_CORE_BOOTINFO_ */

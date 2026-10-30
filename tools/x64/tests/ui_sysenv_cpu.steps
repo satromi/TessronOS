@@ -1,0 +1,54 @@
+# システム環境設定's 〈機器〉〈機器情報〉「プロセッサ」 (docs/tessronos/04-kernel.md 4.5.1, 11-desktop.md), for
+# tools/x64/ui_run64.py with the image of make TARGET=_X64_ DESKTOP=1 UITEST=1 sdimg, run with 4 processors:
+# the processors and their roles, PRC 2 made one for the chores and back (the machine's settings CPU_CHORE and
+# CPU_RT, which the users may write and the system takes at once), and the disk's interrupts sent to PRC 2
+# through the disk's object (irq.cpu), which only an administrator may write: the user is told so. The window
+# is at 160,80: 「プロセッサ」 is the eighth line of 〈機器情報〉 at 230,303 and 表示 at 706,185; on the page
+# the second line of the processors at 316,205, the roles 普通 and 雑務 at 506,220 and 506,251, the role's 設定
+# at 708,355; the first line of the interrupts at 356,467, the processor's field at 604,495 and its 設定 at
+# 708,495; the panel's 確認 at 627,372. Ctrl+E closes.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+wait 3000
+click 230 303
+wait 500
+click 706 185
+expect sysenv: processors 4 chores 1 real-time
+wait 1000
+shot cpu_page
+# PRC 2 for the chores
+click 316 205
+wait 300
+click 506 251
+wait 300
+click 708 355
+expect sysenv: roles CPU_CHORE 1-2 CPU_RT
+expect cpu: roles: for chores 2, for real time 0
+wait 800
+shot cpu_chore
+# and back
+click 316 205
+wait 300
+click 506 220
+wait 300
+click 708 355
+expect sysenv: roles CPU_CHORE 1 CPU_RT
+expect cpu: roles: for chores 1, for real time 0
+# the disk's interrupts to PRC 2: an administrator's to set
+click 356 467
+wait 300
+click 604 495
+key 2a
+key 2a
+key 2a
+key 2a
+text 2
+wait 300
+click 708 495
+expect sysenv: interrupts of nvmea to 2
+wait 800
+shot cpu_irq
+click 627 372
+wait 500
+key 08 01
+expect sysenv: closed

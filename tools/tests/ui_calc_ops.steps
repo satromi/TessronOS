@@ -31,9 +31,9 @@ click 600 240 1
 wait 400
 move 610 321
 wait 150
-move 700 321
+move 750 321
 wait 300
-click 700 501
+click 750 501
 expect calc: row inserted
 wait 300
 shot calc_row_inserted
@@ -42,9 +42,9 @@ click 600 340 1
 wait 400
 move 610 340
 wait 150
-move 700 340
+move 750 340
 wait 300
-click 720 720
+click 750 720
 expect calc: merged
 wait 300
 shot calc_merged
@@ -52,24 +52,24 @@ click 600 240 1
 wait 400
 move 610 340
 wait 150
-move 700 340
+move 750 340
 wait 400
 shot calc_menu_format
-move 700 341
+move 750 341
 wait 150
-move 720 441
+move 750 441
 wait 150
-click 720 441
+click 750 441
 expect calc: paper frame on
 click 600 340 1
 wait 400
 move 610 340
 wait 150
-move 700 340
+move 750 340
 wait 150
-move 720 461
+move 750 461
 wait 150
-click 720 461
+click 750 461
 wait 800
 shot calc_page
 click 640 519
@@ -88,14 +88,14 @@ click 660 501
 wait 300
 # the panel: 右揃え from the menu of 横の配置, 格子, 太字
 drag 200 163 330 273
-click 547 21
+click 650 21
 wait 400
 shot calc_panel_align
-click 560 76
+click 667 76
 expect calc: panel align.right
 click 124 48
 expect calc: panel frame.all
-click 257 21
+click 263 21
 expect calc: panel style.bold
 wait 300
 shot calc_framed

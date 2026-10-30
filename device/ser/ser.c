@@ -32,6 +32,7 @@
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/ser.h>
+#include <ts/ob.h>
 
 #define SER_RING	4096		/* bytes kept of what came in */
 #define SER_POLL_MS	10
@@ -74,10 +75,20 @@ typedef struct {
 	ID		txmtx;		/* one writer at a time */
 	TMO		rcvtmo;
 	ID		devid;
+	T_OBEDGE	rx_edge;	/* what came in, told (ts/ob.h): armed by a read that found nothing */
+	volatile UW	rx_kick;	/* the edge to be kicked once the ring's lock is let go */
 } SERPORT;
 
-LOCAL SERPORT	ser_port[SER_MAX_PORT];
-LOCAL INT	ser_n = 0;
+/*
+ * The ports, as many as the machine has: each is allocated when it is
+ * found and never freed, and the table of them is made whole before it
+ * is put in place (the one before is kept), so that the interrupt
+ * handler walks it without a lock.
+ */
+LOCAL SERPORT	**ser_tbl = NULL;
+LOCAL INT	ser_n = 0, ser_cap = 0;
+
+#define SER_AT(i)	( ser_tbl[(i)] )
 
 IMPORT UBINT	tm_uart_base;
 
@@ -111,7 +122,21 @@ LOCAL INT drain_locked( SERPORT *p )
 		p->tail = next;
 		n++;
 	}
+	if ( n > 0 && knl_obedge_came(&p->rx_edge) ) {
+		p->rx_kick = 1;
+	}
 	return n;
+}
+
+/*
+ * The edge of what came in (ts/ob.h, T_OBEDGE), kicked once the ring's
+ * lock is let go: the kick may set the flag of the task that tells it
+ */
+LOCAL void ser_kick( SERPORT *p )
+{
+	if ( __atomic_exchange_n(&p->rx_kick, 0, __ATOMIC_SEQ_CST) != 0 ) {
+		knl_ob_edge_kick(&p->rx_edge);
+	}
 }
 
 LOCAL INT drain( SERPORT *p )
@@ -123,7 +148,27 @@ LOCAL INT drain( SERPORT *p )
 	n = drain_locked(p);
 	SpinUnlock(&p->lk);
 	enaint(s);
+	ser_kick(p);
 	return n;
+}
+
+/*
+ * A read found nothing: the edge armed. What is in the ring by now
+ * (taken in from the FIFO here) makes the notice due at once.
+ */
+LOCAL void ser_arm( SERPORT *p )
+{
+	UINT	s = disint();
+
+	SpinLock(&p->lk);
+	(void)drain_locked(p);
+	knl_obedge_arm(&p->rx_edge);
+	if ( p->head != p->tail && knl_obedge_came(&p->rx_edge) ) {
+		p->rx_kick = 1;
+	}
+	SpinUnlock(&p->lk);
+	enaint(s);
+	ser_kick(p);
 }
 
 /* What the ring holds, up to `max` bytes, taken */
@@ -154,9 +199,9 @@ LOCAL INT console_getc( void )
 	UB	c;
 
 	for ( i = 0; i < ser_n; i++ ) {
-		if ( ser_port[i].info.console ) {
-			(void)drain(&ser_port[i]);
-			return ( take(&ser_port[i], &c, 1) == 1 ) ? (INT)c : -1;
+		if ( SER_AT(i)->info.console ) {
+			(void)drain(SER_AT(i));
+			return ( take(SER_AT(i), &c, 1) == 1 ) ? (INT)c : -1;
 		}
 	}
 	return -1;
@@ -167,7 +212,7 @@ LOCAL void ser_inthdr( UINT intno, UW iar )
 	INT	i, n;
 
 	for ( i = 0; i < ser_n; i++ ) {
-		SERPORT	*p = &ser_port[i];
+		SERPORT	*p = SER_AT(i);
 
 		if ( p->intno != intno ) {
 			continue;
@@ -175,12 +220,33 @@ LOCAL void ser_inthdr( UINT intno, UW iar )
 		SpinLock(&p->lk);
 		n = drain_locked(p);
 		SpinUnlock(&p->lk);
+		ser_kick(p);
 		wr(p, PL_ICR, IM_RX | IM_RT);
 		if ( n > 0 ) {
 			tk_set_flg(p->flgid, FLG_RX);
 		}
 	}
 	EndOfInt(intno);
+}
+
+/*
+ * The ports without an interrupt that a reader waits to be told of,
+ * looked at by the task that tells the edges: TRUE while there is one
+ */
+LOCAL BOOL ser_look( void )
+{
+	BOOL	any = FALSE;
+	INT	i;
+
+	for ( i = 0; i < ser_n; i++ ) {
+		SERPORT	*p = SER_AT(i);
+
+		if ( p->info.polled && __atomic_load_n(&p->rx_edge.armed, __ATOMIC_SEQ_CST) != 0 ) {
+			(void)drain(p);
+			any = TRUE;
+		}
+	}
+	return any;
 }
 
 /*
@@ -208,6 +274,9 @@ LOCAL INT ser_read( SERPORT *p, UB *buf, INT size )
 		(void)drain(p);
 		n = take(p, buf, size);
 		if ( n > 0 || p->rcvtmo == TMO_POL ) {
+			if ( n == 0 ) {
+				ser_arm(p);	/* told (OB_E_CHANGE of record 1) when something comes */
+			}
 			return n;
 		}
 		if ( p->info.polled ) {
@@ -386,6 +455,27 @@ LOCAL void put_label( SERPORT *p, CONST char *what, UD pa )
 	p->info.label[n] = 0;
 }
 
+/* The name of the port at place n: "sera" to "serz", then "seraa" on */
+LOCAL void ser_name( INT n, UB *out )
+{
+	UB	t[L_DEVNM];
+	INT	k = 0, i;
+
+	n++;
+	while ( n > 0 && k < L_DEVNM - 3 ) {
+		n--;
+		t[k++] = (UB)( 'a' + n % 26 );
+		n /= 26;
+	}
+	out[0] = 's';
+	out[1] = 'e';
+	out[2] = 'r';
+	for ( i = 0; i < k; i++ ) {
+		out[3 + i] = t[k - 1 - i];
+	}
+	out[3 + k] = 0;
+}
+
 /* One port set up and registered as the next name */
 LOCAL ER port_add( UD pa, UINT intno, UW clock, CONST char *what, BOOL polled )
 {
@@ -394,10 +484,27 @@ LOCAL ER port_add( UD pa, UINT intno, UW clock, CONST char *what, BOOL polled )
 	T_CMTX	cmtx;
 	T_CFLG	cflg;
 
-	if ( ser_n >= SER_MAX_PORT ) {
-		return E_LIMIT;
+	if ( ser_n == ser_cap ) {
+		INT	cap = ( ser_cap > 0 ) ? ser_cap * 2 : 4, i;
+		SERPORT	**t = (SERPORT **)Kcalloc((SZ)cap, sizeof(SERPORT *));
+
+		if ( t == NULL ) {
+			return E_NOMEM;
+		}
+		for ( i = 0; i < ser_n; i++ ) {
+			t[i] = ser_tbl[i];
+		}
+		__sync_synchronize();
+		ser_tbl = t;			/* the table before is not freed */
+		ser_cap = cap;
 	}
-	p = &ser_port[ser_n];
+	if ( ser_tbl[ser_n] == NULL ) {
+		ser_tbl[ser_n] = (SERPORT *)Kcalloc(1, sizeof(SERPORT));
+		if ( ser_tbl[ser_n] == NULL ) {
+			return E_NOMEM;
+		}
+	}
+	p = ser_tbl[ser_n];
 	knl_memset(p, 0, sizeof(*p));
 	p->base = DEV_BASE(pa);
 	p->intno = polled ? 0 : intno;
@@ -407,9 +514,7 @@ LOCAL ER port_add( UD pa, UINT intno, UW clock, CONST char *what, BOOL polled )
 	p->info.polled = (BOOL)( p->intno == 0 );
 	p->info.speed = 115200;
 	put_label(p, what, pa);
-	p->devnm[0] = 's';  p->devnm[1] = 'e';  p->devnm[2] = 'r';
-	p->devnm[3] = (UB)( 'a' + ser_n );
-	p->devnm[4] = 0;
+	ser_name(ser_n, p->devnm);
 
 	cmtx.exinf = NULL;
 	cmtx.mtxatr = TA_TFIFO;
@@ -418,6 +523,7 @@ LOCAL ER port_add( UD pa, UINT intno, UW clock, CONST char *what, BOOL polled )
 	cflg.flgatr = TA_TFIFO | TA_WMUL;
 	cflg.iflgptn = 0;
 	p->flgid = tk_cre_flg(&cflg);
+	(void)knl_ob_edge_add(&p->rx_edge, NULL, p->devnm, 1, p->info.polled ? ser_look : NULL);
 	if ( p->txmtx <= 0 || p->flgid <= 0 ) {
 		return E_LIMIT;
 	}

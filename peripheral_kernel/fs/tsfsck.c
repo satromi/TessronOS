@@ -136,6 +136,7 @@ typedef struct {
 	INT		*owner;		/* while sifting: which object took each block, -1 the volume's own */
 	UD		*stale;		/* blocks of object blocks found to be old copies */
 	INT		nstale, maxstale;
+	BOOL		xt2;		/* the volume says it has trees of two levels */
 } CK;
 
 /* ---------------------------------------------------------------- bytes */
@@ -877,6 +878,85 @@ LOCAL void check_tables( CK *c, UB *hdr )
 	}
 }
 
+/*
+ * The runs of one leaf (in blk) claimed and looked at: each starts where
+ * the one before ended (*p_have), none empty. FALSE when one is wrong.
+ */
+LOCAL BOOL leaf_runs( CK *c, CKOBJ *o, CONST UB *blk, UD n, UD *p_have )
+{
+	UD	k, i, l, p, cnt;
+
+	for ( k = 0; k < n; k++ ) {
+		l = rd64(blk + XL_ENT + k * XL_ESZ);
+		p = rd64(blk + XL_ENT + k * XL_ESZ + 8);
+		cnt = rd64(blk + XL_ENT + k * XL_ESZ + 16);
+		if ( l != *p_have || cnt == 0 || cnt > c->sb.total_blocks ) {
+			found(c, TSFSCK_K_DATA, &o->u, NULL, p, 0, TSFSCK_W_ORDER, 1);
+			c->broken = TRUE;
+			return FALSE;
+		}
+		for ( i = 0; i < cnt; i++ ) {
+			if ( !claim(c, p + i, TSFSCK_K_DATA, &o->u) ) return FALSE;
+		}
+		*p_have = l + cnt;
+	}
+	return TRUE;
+}
+
+/*
+ * A tree of two levels (design 7.3): the index and each leaf claimed,
+ * each leaf where the index says it starts, holding as many runs as the
+ * index says, and all of them full but the last.
+ */
+LOCAL BOOL tree2_runs( CK *c, CKOBJ *o, CONST UB *pl, UB *blk, UD *p_have )
+{
+	UD	idx = rd64(pl + PL_A), nl, k, leaf, cnt, first;
+	UB	*ib;
+	BOOL	ok = TRUE;
+
+	if ( !claim(c, idx, TSFSCK_K_DATA, &o->u) ) {
+		return FALSE;
+	}
+	ib = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	if ( ib == NULL ) {
+		c->broken = TRUE;
+		return FALSE;
+	}
+	if ( !mread(c, idx, ib, TSFSBLK_MAGIC_TBL) ) {
+		found(c, TSFSCK_K_DATA, &o->u, NULL, idx, 0, TSFSCK_W_DAMAGED, 1);
+		c->broken = TRUE;
+		Kfree(ib);
+		return FALSE;
+	}
+	nl = rd32(ib + XL_N);
+	if ( nl < 2 || nl > TSFSO_MAX_EXTENTS ) {
+		found(c, TSFSCK_K_DATA, &o->u, NULL, idx, 0, TSFSCK_W_COUNT, 1);
+		c->broken = TRUE;
+		Kfree(ib);
+		return FALSE;
+	}
+	for ( k = 0; k < nl && ok; k++ ) {
+		first = rd64(ib + XL_ENT + k * XL_ESZ);
+		leaf = rd64(ib + XL_ENT + k * XL_ESZ + 8);
+		cnt = rd64(ib + XL_ENT + k * XL_ESZ + 16);
+		ok = claim(c, leaf, TSFSCK_K_DATA, &o->u);
+		if ( ok && !mread(c, leaf, blk, TSFSBLK_MAGIC_TBL) ) {
+			found(c, TSFSCK_K_DATA, &o->u, NULL, leaf, 0, TSFSCK_W_DAMAGED, 1);
+			c->broken = TRUE;
+			ok = FALSE;
+		}
+		if ( ok && ( rd32(blk + XL_N) != cnt || cnt == 0 || first != *p_have
+			     || ( k + 1 < nl && cnt != TSFSO_MAX_EXTENTS ) || cnt > TSFSO_MAX_EXTENTS ) ) {
+			found(c, TSFSCK_K_DATA, &o->u, NULL, leaf, 0, TSFSCK_W_COUNT, 1);
+			c->broken = TRUE;
+			ok = FALSE;
+		}
+		if ( ok ) ok = leaf_runs(c, o, blk, cnt, p_have);
+	}
+	Kfree(ib);
+	return ok;
+}
+
 /* A data part's place: its units, or its blocks claimed and the runs looked at */
 LOCAL void data_place( CK *c, CKOBJ *o, CONST UB *pl, UB *blk )
 {
@@ -911,6 +991,18 @@ LOCAL void data_place( CK *c, CKOBJ *o, CONST UB *pl, UB *blk )
 			c->broken = TRUE;
 			return;
 		}
+		break;
+	case F_TREE2:
+		if ( !c->xt2 ) {
+			/* the form, on a volume that does not say it has it */
+			found(c, TSFSCK_K_DATA, &o->u, NULL, o->blk, 0, TSFSCK_W_FORM, 1);
+			c->broken = TRUE;
+			return;
+		}
+		if ( !tree2_runs(c, o, pl, blk, &have) ) {
+			return;
+		}
+		n = 0;				/* the runs are looked at */
 		break;
 	default:
 		found(c, TSFSCK_K_DATA, &o->u, NULL, o->blk, 0, TSFSCK_W_FORM, 1);
@@ -949,6 +1041,32 @@ LOCAL void data_read( CK *c, CKOBJ *o, CONST UB *pl, UB *blk, UB *buf )
 {
 	UD	i, k, n, p, cnt;
 
+	if ( pl[PL_FORM] == F_TREE2 ) {
+		/* each leaf the index names, read in turn */
+		UB	*ib = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+		UD	nl, j;
+
+		if ( ib == NULL ) return;
+		if ( ts_jrnl_read(c->vol, rd64(pl + PL_A), ib) >= E_OK ) {
+			nl = rd32(ib + XL_N);
+			for ( j = 0; j < nl && j < TSFSO_MAX_EXTENTS; j++ ) {
+				if ( ts_jrnl_read(c->vol, rd64(ib + XL_ENT + j * XL_ESZ + 8), blk) < E_OK ) continue;
+				n = rd32(blk + XL_N);
+				for ( k = 0; k < n && k < TSFSO_MAX_EXTENTS; k++ ) {
+					p = rd64(blk + XL_ENT + k * XL_ESZ + 8);
+					cnt = rd64(blk + XL_ENT + k * XL_ESZ + 16);
+					for ( i = 0; i < cnt && p + i < c->sb.total_blocks; i++ ) {
+						c->checked++;
+						if ( knl_tsfsblk_raw_read(c->vol, p + i, buf) < E_OK ) {
+							found(c, TSFSCK_K_UNREAD, &o->u, NULL, p + i, 0, 0, 1);
+						}
+					}
+				}
+			}
+		}
+		Kfree(ib);
+		return;
+	}
 	if ( pl[PL_FORM] == F_RUN ) {
 		n = 1;
 	} else if ( pl[PL_FORM] == F_TREE && ts_jrnl_read(c->vol, rd64(pl + PL_A), blk) >= E_OK ) {
@@ -1609,6 +1727,7 @@ LOCAL ER check_super( CK *c )
 	if ( ts_ref_vol_blk(c->vol, &c->sb) < E_OK ) {
 		return E_ID;
 	}
+	c->xt2 = (BOOL)( ( c->sb.incompat & TSFSBLK_INCOMPAT_XT2 ) != 0 );
 	c->ag_first = c->sb.journal_start + c->sb.journal_blocks;
 	c->claim = (UB *)Kmalloc((SZ)( c->sb.total_blocks / 8 + 1 ));
 	c->ag = (T_TSFSAGREF *)Kmalloc(sizeof(T_TSFSAGREF) * (SZ)c->sb.ag_count);

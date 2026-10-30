@@ -101,7 +101,7 @@ IMPORT void knl_usb_unlock( void );
 IMPORT UW   knl_usb_ms( void );
 IMPORT void knl_usb_kick( void );
 
-#define NCH		16		/* channels in use at once */
+#define NCH_FIRST	16		/* channels the table starts with; it doubles when full */
 #define BUF_DEFAULT	32768
 #define BUF_MAX		(1024 * 1024)
 #define REAP_MS		1000		/* ended processes are looked for */
@@ -109,7 +109,6 @@ IMPORT void knl_usb_kick( void );
 #define DRAIN_MS	300		/* output queued ahead of what is heard */
 #define STARVE_MS	500		/* a channel short this long stops */
 #define LOOK_MS		500		/* how often the output is chosen again while playing */
-#define NOUT_ALL	SND_OUT_MAX	/* outputs of all the backends, looked at */
 
 #define MB()		SmpMemBarrier()
 
@@ -157,7 +156,21 @@ typedef struct {
 	BOOL		have_prev;
 } CHAN;
 
-LOCAL CHAN		ch[NCH];
+/*
+ * The channels, as many as programs have opened. Each is allocated on
+ * its own and never freed, so a request goes on with its channel after
+ * the lock is let go while another grows the table. mix_act and
+ * mix_gain are the mixer's room for them, mix_cap entries each. The
+ * mixer may run without the lock (an output's own task calls it), so
+ * the rooms before are not freed either, and mix_cap is written after
+ * the rooms and read before them: a mixer never fills more than the
+ * room it took holds.
+ */
+LOCAL CHAN		**chs = NULL;
+LOCAL INT		nch = 0;
+LOCAL CHAN		**mix_act = NULL;
+LOCAL INT		*mix_gain = NULL;
+LOCAL INT		mix_cap = 0;
 LOCAL CHAN *volatile	rec_ch = NULL;	/* the channel that records */
 LOCAL CONST SNDHW	*play_hw = NULL;	/* the stream that plays */
 LOCAL CONST SNDHW	*rec_hw = NULL;	/* and the one that records */
@@ -179,7 +192,7 @@ LOCAL INT		nmove = 0;		/* the stream moved, since the start */
  * kernel's own tasks). An entry is made when a volume is set for it,
  * and the ones of a program object are kept from one start to the next.
  */
-#define NVOL		32
+#define NVOL_FIRST	32		/* volumes the table starts with; it doubles when full */
 #define GAIN_ONE	0x10000		/* a gain of 1, 16.16 */
 #define LIM_KNEE	24576		/* above this a sum is bent back toward 32767 */
 #define LIM_ROOM	( 32767 - LIM_KNEE )
@@ -193,7 +206,8 @@ typedef struct {
 	BOOL	mute;
 } VOLENT;
 
-LOCAL VOLENT		vols[NVOL];
+LOCAL VOLENT		**vols = NULL;	/* as many as programs have had a volume set */
+LOCAL INT		nvol = 0;
 LOCAL UW		mvol_l = SND_VOL_MAX, mvol_r = SND_VOL_MAX;
 LOCAL BOOL		mmute = FALSE;
 LOCAL UW		mpeak_l, mpeak_r;
@@ -203,6 +217,8 @@ LOCAL ID		keep_tsk = 0;
 
 LOCAL void lock( void )   { knl_usb_lock(); }
 LOCAL void unlock( void ) { knl_usb_unlock(); }
+
+LOCAL void mix_look( void );
 
 /* a / b in 16.16 fixed point, for sample rates */
 LOCAL UW ratio16( UW a, UW b )
@@ -265,6 +281,9 @@ LOCAL CONST SNDHW *CONST play_hws[] = {
 	&knl_i2s_hw,
 	&knl_hdmi_hw,
 #endif
+#ifdef X64
+	&knl_hda_hw,
+#endif
 };
 #define NPLAY_HW	( (INT)( sizeof(play_hws) / sizeof(play_hws[0]) ) )
 
@@ -305,20 +324,61 @@ LOCAL void id_copy( UB *dst, CONST UB *src )
 	dst[i] = 0;
 }
 
-/* Every output of every backend there is now, and the backend of each */
-LOCAL INT all_outputs( SDOut *o, CONST SNDHW **hw, INT max )
+/*
+ * Every output of every backend there is now, and the backend of each,
+ * into out_all and out_hw, with the lock held. The room is kept from one
+ * call to the next and made twice as large while the backends fill it.
+ * -1 when there is no memory for it.
+ */
+#define OUT_FIRST	8
+LOCAL SDOut		*out_all = NULL;
+LOCAL CONST SNDHW	**out_hw = NULL;
+LOCAL INT		out_cap = 0;
+
+LOCAL INT all_outputs( void )
 {
-	INT	b, k, n = 0, m;
+	INT	b, k, n, m;
 
-	for ( b = 0; b < NPLAY_HW && n < max; b++ ) {
-		m = play_hws[b]->outputs(o + n, max - n);
-		for ( k = 0; k < m; k++ ) {
-			hw[n + k] = play_hws[b];
+	for ( ;; ) {
+		if ( out_cap == 0 ) {
+			out_all = (SDOut *)Kmalloc(sizeof(SDOut) * OUT_FIRST);
+			out_hw = (CONST SNDHW **)Kmalloc(sizeof(SNDHW *) * OUT_FIRST);
+			if ( out_all == NULL || out_hw == NULL ) {
+				if ( out_all != NULL ) Kfree(out_all);
+				if ( out_hw != NULL ) Kfree((void *)out_hw);
+				out_all = NULL;
+				out_hw = NULL;
+				return -1;
+			}
+			out_cap = OUT_FIRST;
 		}
-		n += m;
-	}
+		for ( b = 0, n = 0; b < NPLAY_HW && n < out_cap; b++ ) {
+			m = play_hws[b]->outputs(out_all + n, out_cap - n);
+			for ( k = 0; k < m; k++ ) {
+				out_hw[n + k] = play_hws[b];
+			}
+			n += m;
+		}
+		if ( n < out_cap ) {
+			return n;
+		}
+		{
+			/* full: perhaps more there, asked again with twice the room */
+			SDOut		*o = (SDOut *)Kmalloc(sizeof(SDOut) * (SZ)out_cap * 2);
+			CONST SNDHW	**h = (CONST SNDHW **)Kmalloc(sizeof(SNDHW *) * (SZ)out_cap * 2);
 
-	return n;
+			if ( o == NULL || h == NULL ) {
+				if ( o != NULL ) Kfree(o);
+				if ( h != NULL ) Kfree((void *)h);
+				return n;	/* what there was room for */
+			}
+			Kfree(out_all);
+			Kfree((void *)out_hw);
+			out_all = o;
+			out_hw = h;
+			out_cap *= 2;
+		}
+	}
 }
 
 /*
@@ -351,9 +411,13 @@ LOCAL INT chosen_of( CONST SDOut *o, INT n )
  */
 LOCAL CONST SNDHW *pick( UB *id )
 {
-	SDOut		o[NOUT_ALL];
-	CONST SNDHW	*hw[NOUT_ALL];
-	INT		n = all_outputs(o, hw, NOUT_ALL), k;
+	SDOut		*o;
+	INT		n = all_outputs(), k;
+
+	if ( n <= 0 ) {
+		return NULL;
+	}
+	o = out_all;
 
 	k = same_id(sel_id, (CONST UB *)SND_ID_AUTO) ? -1 : chosen_of(o, n);
 	if ( k < 0 || (o[k].flags & SND_OF_NOSOUND) != 0 ) {
@@ -368,7 +432,7 @@ LOCAL CONST SNDHW *pick( UB *id )
 		id_copy(id, o[k].id);
 	}
 
-	return hw[k];
+	return out_hw[k];
 }
 
 LOCAL CONST SNDHW *hw_play( void )
@@ -387,6 +451,11 @@ LOCAL CONST SNDHW *hw_record( void )
 #ifdef RPI5
 	if ( knl_i2s_hw.can_record() ) {
 		return &knl_i2s_hw;
+	}
+#endif
+#ifdef X64
+	if ( knl_hda_hw.can_record() ) {
+		return &knl_hda_hw;
 	}
 #endif
 
@@ -425,8 +494,8 @@ LOCAL void follow( void )
 	INT	i;
 	BOOL	play = FALSE;
 
-	for ( i = 0; i < NCH; i++ ) {
-		if ( ch[i].used && playing(&ch[i]) ) {
+	for ( i = 0; i < nch; i++ ) {
+		if ( chs[i]->used && playing(chs[i]) ) {
 			play = TRUE;
 		}
 	}
@@ -462,6 +531,7 @@ LOCAL void chan_stop( CHAN *c )
 		rec_ch = NULL;
 	}
 	follow();
+	mix_look();				/* a program that stops playing */
 }
 
 LOCAL void chan_free( CHAN *c )
@@ -472,6 +542,7 @@ LOCAL void chan_free( CHAN *c )
 		c->fifo = NULL;
 	}
 	c->used = FALSE;
+	mix_look();				/* a program gone from the mixer */
 }
 
 /* Who is asking: its process, or the task itself outside any process */
@@ -499,20 +570,60 @@ LOCAL BOOL requester_gone( ID key )
 	}
 }
 
-/* The requester's channel, set up at its first request (NULL: all taken) */
+/*
+ * A table twice as large, with the lock held (a semaphore: allocating is
+ * allowed). The entries there are kept; the new ones are made zeroed.
+ */
+LOCAL BOOL chan_grow( void )
+{
+	INT	cap = ( nch > 0 ) ? nch * 2 : NCH_FIRST, i;
+	CHAN	**t = (CHAN **)Kcalloc((SZ)cap, sizeof(CHAN *));
+	CHAN	**act = (CHAN **)Kcalloc((SZ)cap, sizeof(CHAN *));
+	INT	*gain = (INT *)Kcalloc((SZ)cap, sizeof(INT));
+
+	if ( t == NULL || act == NULL || gain == NULL ) {
+		goto none;
+	}
+	for ( i = 0; i < cap; i++ ) {
+		t[i] = ( i < nch ) ? chs[i] : (CHAN *)Kcalloc(1, sizeof(CHAN));
+		if ( t[i] == NULL ) {
+			while ( --i >= nch ) Kfree(t[i]);
+			goto none;
+		}
+	}
+	mix_act = act;
+	mix_gain = gain;
+	MB();
+	mix_cap = cap;
+	MB();
+	chs = t;			/* the table before is not freed */
+	MB();
+	nch = cap;
+	return TRUE;
+none:
+	if ( t != NULL ) Kfree(t);
+	if ( act != NULL ) Kfree(act);
+	if ( gain != NULL ) Kfree(gain);
+	return FALSE;
+}
+
+/* The requester's channel, set up at its first request (NULL: no memory for one) */
 LOCAL CHAN *chan_of( INT unit, ID key, CONST UB *prog )
 {
 	CHAN	*c = NULL;
 	INT	i;
 
-	for ( i = 0; i < NCH && c == NULL; i++ ) {
-		if ( ch[i].used && ch[i].key == key && ch[i].unit == unit ) {
-			c = &ch[i];
+	for ( i = 0; i < nch && c == NULL; i++ ) {
+		if ( chs[i]->used && chs[i]->key == key && chs[i]->unit == unit ) {
+			c = chs[i];
 		}
 	}
-	for ( i = 0; i < NCH && c == NULL; i++ ) {
-		if ( !ch[i].used ) {
-			c = &ch[i];
+	for ( i = 0; c == NULL; i++ ) {
+		if ( i == nch && !chan_grow() ) {
+			break;
+		}
+		if ( !chs[i]->used ) {
+			c = chs[i];
 			knl_memset(c, 0, sizeof(*c));
 			c->key = key;
 			c->unit = unit;
@@ -857,8 +968,8 @@ LOCAL VOLENT *vol_of( CONST UB *prog, ID pid, BOOL make )
 	VOLENT	*free = NULL;
 	INT	i;
 
-	for ( i = 0; i < NVOL; i++ ) {
-		VOLENT	*v = &vols[i];
+	for ( i = 0; i < nvol; i++ ) {
+		VOLENT	*v = vols[i];
 
 		if ( !v->used ) {
 			if ( free == NULL ) free = v;
@@ -869,8 +980,29 @@ LOCAL VOLENT *vol_of( CONST UB *prog, ID pid, BOOL make )
 			return v;
 		}
 	}
-	if ( !make || free == NULL ) {
+	if ( !make ) {
 		return NULL;
+	}
+	if ( free == NULL ) {
+		INT	cap = ( nvol > 0 ) ? nvol * 2 : NVOL_FIRST;
+		VOLENT	**t = (VOLENT **)Kcalloc((SZ)cap, sizeof(VOLENT *));
+
+		if ( t == NULL ) {
+			return NULL;
+		}
+		for ( i = 0; i < cap; i++ ) {
+			t[i] = ( i < nvol ) ? vols[i] : (VOLENT *)Kcalloc(1, sizeof(VOLENT));
+			if ( t[i] == NULL ) {
+				while ( --i >= nvol ) Kfree(t[i]);
+				Kfree(t);
+				return NULL;
+			}
+		}
+		free = t[nvol];
+		MB();
+		vols = t;		/* the table before is not freed */
+		MB();
+		nvol = cap;
 	}
 	knl_memset(free, 0, sizeof(*free));
 	knl_memcpy(free->prog, prog, 16);
@@ -939,9 +1071,9 @@ EXPORT void knl_snd_tag( INT unit, CONST UB *prog )
 	INT	i;
 
 	lock();
-	for ( i = 0; i < NCH; i++ ) {
-		if ( ch[i].used && ch[i].key == key && ch[i].unit == unit ) {
-			knl_memcpy(ch[i].prog, prog, 16);
+	for ( i = 0; i < nch; i++ ) {
+		if ( chs[i]->used && chs[i]->key == key && chs[i]->unit == unit ) {
+			knl_memcpy(chs[i]->prog, prog, 16);
 		}
 	}
 	unlock();
@@ -950,14 +1082,18 @@ EXPORT void knl_snd_tag( INT unit, CONST UB *prog )
 
 EXPORT INT knl_snd_mix( UB *dst, INT frames, UW rate, INT channels, BOOL wait )
 {
-	CHAN	*act[NCH];
-	INT	gain[NCH];
+	INT	cap = mix_cap;
+	CHAN	**act;
+	INT	*gain;
 	INT	n = 0, i, k, o = 0, gl, gr;
 	BOOL	ready = FALSE;
 
 	if ( frames <= 0 || rate == 0 || channels <= 0 ) {
 		return 0;
 	}
+	MB();
+	act = mix_act;			/* at least cap entries: read after cap */
+	gain = mix_gain;
 	mix_rate = rate;
 	if ( leading ) {
 		if ( (INT)(knl_usb_ms() - lead_until) < 0 ) {
@@ -968,8 +1104,8 @@ EXPORT INT knl_snd_mix( UB *dst, INT frames, UW rate, INT channels, BOOL wait )
 		}
 		leading = FALSE;
 	}
-	for ( i = 0; i < NCH; i++ ) {
-		CHAN	*c = &ch[i];
+	for ( i = 0; i < nch && n < cap; i++ ) {
+		CHAN	*c = chs[i];
 
 		if ( !c->used || !playing(c) ) {
 			continue;
@@ -1112,6 +1248,12 @@ LOCAL ER start_rec( CHAN *c )
 	MB();
 	c->ctl = PCM_REC;
 	rec_ch = c;
+	/*
+	 * the manager's task may be asleep for long: it is to serve the
+	 * recording from now on (a backend that does not ride on USB
+	 * transfers, HDA or the I2S, is read only in its round)
+	 */
+	knl_usb_kick();
 
 	return E_OK;
 }
@@ -1142,6 +1284,7 @@ LOCAL ER start_play( CHAN *c, INT how )
 	c->played = TRUE;
 	MB();
 	c->ctl = how;
+	mix_look();				/* a program come, or playing again */
 	if ( play_hw == NULL ) {
 		CONST SNDHW	*hw = pick(id);
 		UW		rate = 0;
@@ -1203,10 +1346,10 @@ LOCAL BOOL move_stream( CONST SNDHW *old )
 		return TRUE;
 	}
 	leading = FALSE;
-	for ( i = 0; i < NCH; i++ ) {
-		if ( ch[i].used && playing(&ch[i]) ) {
-			ch[i].ctl = PCM_STOP;
-			ch[i].top = TRUE;
+	for ( i = 0; i < nch; i++ ) {
+		if ( chs[i]->used && playing(chs[i]) ) {
+			chs[i]->ctl = PCM_STOP;
+			chs[i]->top = TRUE;
 		}
 	}
 
@@ -1269,8 +1412,13 @@ LOCAL BOOL id_ok( CONST UB *id )
 
 	return ( same_id(id, (CONST UB *)SND_ID_AUTO) || same_id(id, (CONST UB *)"i2s")
 	      || same_id(id, (CONST UB *)"hdmi0") || same_id(id, (CONST UB *)"hdmi1")
+#ifdef X64
+	      || same_id(id, (CONST UB *)"hda")
+#endif
 	      || ( n > 5 && id[0] == 'u' && id[1] == 's' && id[2] == 'b' && id[3] == ':' ) );
 }
+
+LOCAL void outputs_look( void );
 
 EXPORT ER knl_snd_select( CONST UB *id )
 {
@@ -1288,6 +1436,7 @@ EXPORT ER knl_snd_select( CONST UB *id )
 	}
 	choose_again();
 	keep_start();
+	outputs_look();
 	unlock();
 
 	return E_OK;
@@ -1317,17 +1466,23 @@ EXPORT BOOL knl_snd_keeping( void )
 	return keep_on;
 }
 
-/* The outputs with "auto" first, and what is chosen and plays marked, with lock held */
+/*
+ * The outputs with "auto" first, and what is chosen and plays marked,
+ * with lock held: up to max of them into o, and how many there are.
+ */
 LOCAL INT outputs_of( SDOut *o, INT max )
 {
-	CONST SNDHW	*hw[NOUT_ALL];
-	SDOut		a[NOUT_ALL];
+	SDOut		*a;
 	INT		n, k, m = 0, c;
 
-	if ( max <= 0 ) {
-		return 0;
+	n = all_outputs();
+	if ( n < 0 ) {
+		n = 0;
 	}
-	n = all_outputs(a, hw, NOUT_ALL);
+	if ( max <= 0 ) {
+		return n + 1;
+	}
+	a = out_all;
 	c = same_id(sel_id, (CONST UB *)SND_ID_AUTO) ? -1 : chosen_of(a, n);
 	knl_snd_out_set(&o[m], (CONST UB *)SND_ID_AUTO, (CONST UB *)"", SND_BE_NONE,
 			same_id(sel_id, (CONST UB *)SND_ID_AUTO) ? SND_OF_CHOSEN : 0);
@@ -1344,7 +1499,7 @@ LOCAL INT outputs_of( SDOut *o, INT max )
 		}
 	}
 
-	return m;
+	return n + 1;
 }
 
 /* ---------------------------------------------------------------- the mixer's settings */
@@ -1354,7 +1509,12 @@ LOCAL volatile UW	mix_gen = 0;		/* changes to be kept, counted */
 /*
  * The keeper's task: once the settings have been still for a second
  * (a volume dragged is many changes), they are kept, outside every lock
- * of this device.
+ * of this device. Each change wakes it, and the wake-ups of the changes
+ * that came while it waited are queued: they are cancelled, and the
+ * settings are written only when a change is still unkept, so that one
+ * drag is one write and not one a second for every step of it (each
+ * write holds the machine's settings open, and a reader or writer that
+ * comes meanwhile is refused with E_BUSY).
  */
 LOCAL void keep_task( INT stacd, void *exinf )
 {
@@ -1364,10 +1524,15 @@ LOCAL void keep_task( INT stacd, void *exinf )
 	(void)exinf;
 	for ( ;; ) {
 		(void)tk_slp_tsk(TMO_FEVR);
+		(void)tk_can_wup(TSK_SELF);
+		if ( !mix_unkept ) {
+			continue;
+		}
 		do {
 			g = mix_gen;
 			tk_dly_tsk(1000);
 		} while ( g != mix_gen );
+		(void)tk_can_wup(TSK_SELF);
 		mix_unkept = FALSE;
 		if ( mix_keep_fn != NULL ) {
 			mix_keep_fn();
@@ -1425,6 +1590,7 @@ EXPORT ER knl_snd_mix_set( CONST SDMixSet *s, BOOL keep )
 	} else {
 		er = E_PAR;
 	}
+	if ( er >= E_OK ) mix_look();
 	unlock();
 	if ( er >= E_OK && keep ) {
 		keep_soon();
@@ -1432,10 +1598,14 @@ EXPORT ER knl_snd_mix_set( CONST SDMixSet *s, BOOL keep )
 	return er;
 }
 
-/* The whole, and the programs that have channels now, with the lock held */
-LOCAL INT mix_of( SDMix *m )
+/*
+ * The whole, and the programs that have channels now, with the lock
+ * held: room for max programs in m->app (a program has a channel at
+ * least, so nch is always enough). How many programs there are.
+ */
+LOCAL INT mix_of( SDMix *m, INT max )
 {
-	INT	i, k;
+	INT	i, k, more = 0;
 
 	knl_memset(m, 0, sizeof(*m));
 	m->lv = mvol_l;
@@ -1443,8 +1613,8 @@ LOCAL INT mix_of( SDMix *m )
 	m->mute = mmute;
 	m->level_l = mpeak_l;
 	m->level_r = mpeak_r;
-	for ( i = 0; i < NCH; i++ ) {
-		CHAN		*c = &ch[i];
+	for ( i = 0; i < nch; i++ ) {
+		CHAN		*c = chs[i];
 		SDMixApp	*a = NULL;
 		VOLENT		*v;
 		ID		pid = chan_pid(c);
@@ -1459,10 +1629,12 @@ LOCAL INT mix_of( SDMix *m )
 			}
 		}
 		if ( a == NULL ) {
-			if ( m->napp >= SND_APP_MAX ) {
+			if ( (INT)m->napp >= max ) {
+				more++;		/* counted only: the same program may be counted twice */
 				continue;
 			}
 			a = &m->app[m->napp++];
+			knl_memset(a, 0, sizeof(*a));	/* the head's clearing does not reach the programs */
 			knl_memcpy(a->prog, c->prog, 16);
 			a->pid = pid;
 			v = vol_of(c->prog, pid, FALSE);
@@ -1477,37 +1649,143 @@ LOCAL INT mix_of( SDMix *m )
 			a->level = c->peak;
 		}
 	}
-	return (INT)m->napp;
+	return (INT)m->napp + more;
 }
 
-EXPORT INT knl_snd_mix_get( SDMix *m )
+EXPORT INT knl_snd_mix_get( SDMix *m, INT max )
 {
 	INT	n;
 
 	lock();
-	n = mix_of(m);
+	n = mix_of(m, max);
 	unlock();
 	return n;
 }
 
-/* The settings of the programs that have an object, for the keeper: how many */
+/* The settings of the programs that have an object, for the keeper: up to max into s, and how many there are */
 EXPORT INT knl_snd_mix_kept( SDMixSet *s, INT max )
 {
 	INT	i, n = 0;
 
 	lock();
-	for ( i = 0; i < NVOL && n < max; i++ ) {
-		if ( vols[i].used && !prog_none(vols[i].prog) ) {
+	for ( i = 0; i < nvol; i++ ) {
+		if ( vols[i]->used && !prog_none(vols[i]->prog) && n >= max ) {
+			n++;
+		} else if ( vols[i]->used && !prog_none(vols[i]->prog) ) {
 			knl_memset(&s[n], 0, sizeof(s[n]));
 			s[n].what = SND_MIX_APP;
-			knl_memcpy(s[n].prog, vols[i].prog, 16);
-			s[n].lv = s[n].rv = vols[i].vol;
-			s[n].mute = vols[i].mute;
+			knl_memcpy(s[n].prog, vols[i]->prog, 16);
+			s[n].lv = s[n].rv = vols[i]->vol;
+			s[n].mute = vols[i]->mute;
 			n++;
 		}
 	}
 	unlock();
 	return n;
+}
+
+/*
+ * The mixer told as it changes (OB_E_CHANGE of the sound device's record
+ * OB_SND_MIX): a program come or gone, one that starts or stops playing,
+ * a volume or a mute set. The levels, which change all the time, are
+ * left out. A read of the record arms the edge before it reads, and a
+ * change after it is told; it is looked at where it changes -- a stream
+ * started (play), a channel let go (chan_free), a setting (knl_snd_mix_set)
+ * -- and in the service's round (knl_snd_poll), where a stream that ran
+ * dry or played to its end stops. With the lock held.
+ */
+LOCAL T_OBEDGE	mix_edge;
+LOCAL UD	mix_seen = 0;
+
+LOCAL UD mix_mixin( UD h, UD v )
+{
+	return ( h ^ v ) * 0x100000001B3ULL;
+}
+
+LOCAL void mix_look( void )
+{
+	UD	h = 0xCBF29CE484222325ULL;
+	INT	i, k;
+
+	h = mix_mixin(h, mvol_l);
+	h = mix_mixin(h, mvol_r);
+	h = mix_mixin(h, mmute);
+	for ( i = 0; i < nch; i++ ) {
+		CHAN		*c = chs[i];
+		CONST VOLENT	*v;
+		ID		pid;
+
+		if ( !c->used || !c->played ) {
+			continue;
+		}
+		pid = chan_pid(c);
+		for ( k = 0; k < 16; k++ ) {
+			h = mix_mixin(h, c->prog[k]);
+		}
+		h = mix_mixin(h, (UD)(UW)pid);
+		h = mix_mixin(h, playing(c) ? 1 : 0);
+		v = vol_of(c->prog, pid, FALSE);
+		h = mix_mixin(h, ( v != NULL ) ? (UD)v->vol : SND_VOL_MAX);
+		h = mix_mixin(h, ( v != NULL && v->mute ) ? 1 : 0);
+	}
+	if ( h != mix_seen ) {
+		mix_seen = h;
+		if ( knl_obedge_came(&mix_edge) ) {
+			knl_ob_edge_kick(&mix_edge);
+		}
+	}
+}
+
+/*
+ * What plays sound, told as it changes (OB_E_CHANGE of the system
+ * object's OB_SYS_SOUND): an output come or gone, the one chosen, the
+ * one playing. A read of the record arms the edge (knl_snd_arm, before
+ * it reads), and a change after it is told; a change before it is in
+ * what it read. The outputs are compared with what was seen last where
+ * they change: as one is chosen (knl_snd_select), and in the service's
+ * round (knl_snd_poll), which runs as the USB controllers say something
+ * -- a device come or gone -- and, while a stream runs, every few
+ * milliseconds, when they are compared every LOOK_MS.
+ */
+#define SIG_OUTS	16
+
+LOCAL T_OBEDGE	out_edge;
+LOCAL UD	out_sig = 0;
+LOCAL UW	sig_ms = 0;
+LOCAL SDOut	sig_o[SIG_OUTS];
+
+EXPORT void knl_snd_arm( void )
+{
+	knl_obedge_arm(&out_edge);
+}
+
+/* The outputs as one number, with lock held */
+LOCAL UD outputs_sig( void )
+{
+	UD	h = 0xCBF29CE484222325ULL;
+	INT	n = outputs_of(sig_o, SIG_OUTS), k, i;
+
+	h = ( h ^ (UD)n ) * 0x100000001B3ULL;
+	for ( k = 0; k < n && k < SIG_OUTS; k++ ) {
+		for ( i = 0; i < SND_ID_MAX && sig_o[k].id[i] != 0; i++ ) {
+			h = ( h ^ sig_o[k].id[i] ) * 0x100000001B3ULL;
+		}
+		h = ( h ^ ( sig_o[k].flags & ( SND_OF_CHOSEN | SND_OF_PLAYING ) ) ) * 0x100000001B3ULL;
+	}
+	return h;
+}
+
+/* The outputs compared with what was seen last, with lock held; a change told */
+LOCAL void outputs_look( void )
+{
+	UD	sig = outputs_sig();
+
+	if ( sig != out_sig ) {
+		out_sig = sig;
+		if ( knl_obedge_came(&out_edge) ) {
+			knl_ob_edge_kick(&out_edge);
+		}
+	}
 }
 
 EXPORT INT knl_snd_outputs( SDOut *o, INT max )
@@ -1537,6 +1815,11 @@ EXPORT void knl_snd_poll( void )
 		return;
 	}
 	now = knl_usb_ms();
+	if ( !knl_snd_active() || (INT)(now - sig_ms) >= LOOK_MS ) {
+		sig_ms = now;
+		outputs_look();
+	}
+	mix_look();
 	if ( play_hw == NULL && keep_on && (INT)(now - look_ms) >= LOOK_MS ) {
 		look_ms = now;
 		keep_start();			/* an output came: the stream on it, in silence */
@@ -1562,8 +1845,8 @@ EXPORT void knl_snd_poll( void )
 			}
 		}
 	}
-	for ( i = 0; i < NCH; i++ ) {
-		CHAN	*c = &ch[i];
+	for ( i = 0; i < nch; i++ ) {
+		CHAN	*c = chs[i];
 
 		if ( !c->used ) {
 			continue;
@@ -1585,8 +1868,8 @@ EXPORT void knl_snd_poll( void )
 	/* channels of programs that have ended, and idle ones of kernel tasks */
 	if ( (INT)(now - last_reap) >= REAP_MS ) {
 		last_reap = now;
-		for ( i = 0; i < NCH; i++ ) {
-			CHAN	*c = &ch[i];
+		for ( i = 0; i < nch; i++ ) {
+			CHAN	*c = chs[i];
 
 			if ( !c->used || (INT)(now - c->last_use) < IDLE_MS ) {
 				continue;
@@ -1596,9 +1879,9 @@ EXPORT void knl_snd_poll( void )
 			}
 		}
 		/* the volume of a process with no program object goes with it */
-		for ( i = 0; i < NVOL; i++ ) {
-			if ( vols[i].used && vols[i].pid > 0 && prog_none(vols[i].prog) && requester_gone(vols[i].pid) ) {
-				vols[i].used = FALSE;
+		for ( i = 0; i < nvol; i++ ) {
+			if ( vols[i]->used && vols[i]->pid > 0 && prog_none(vols[i]->prog) && requester_gone(vols[i]->pid) ) {
+				vols[i]->used = FALSE;
 			}
 		}
 	}
@@ -1741,25 +2024,38 @@ LOCAL ER proc_read( CHAN *c, T_DEVREQ *req )
 		return E_OK;
 	}
 	case DN_SDOUTS: {
-		SDOut	o[SND_OUT_MAX];
+		/* every output: as large as the reply needs (a read of size 0 is told how large) */
+		SDOut	*o;
 		INT	n;
 
 		lock();
-		n = outputs_of(o, SND_OUT_MAX);
+		n = outputs_of(NULL, 0);
+		o = (SDOut *)Kmalloc(sizeof(SDOut) * (SZ)n);
+		if ( o != NULL ) {
+			n = outputs_of(o, n);
+		}
 		unlock();
+		if ( o == NULL ) {
+			return E_NOMEM;
+		}
 		reply(req, o, n * (INT)sizeof(SDOut));
+		Kfree(o);
 		return E_OK;
 	}
 	case DN_SDMIXER: {
-		SDMix	*m = (SDMix *)Kmalloc(sizeof(SDMix));
+		SDMix	*m;
 		INT	k;
 
+		lock();
+		knl_obedge_arm(&mix_edge);	/* a change after this read is told (mix_look) */
+		m = (SDMix *)Kmalloc(SND_MIX_SIZE(nch));
+		if ( m != NULL ) {
+			(void)mix_of(m, nch);
+		}
+		unlock();
 		if ( m == NULL ) {
 			return E_NOMEM;
 		}
-		lock();
-		(void)mix_of(m);
-		unlock();
 		/* the names, outside the lock: the process table and the objects have their own */
 		for ( k = 0; k < (INT)m->napp; k++ ) {
 			SDMixApp	*a = &m->app[k];
@@ -1772,7 +2068,7 @@ LOCAL ER proc_read( CHAN *c, T_DEVREQ *req )
 				knl_strcpy((char *)a->name, "システムの音");
 			}
 		}
-		reply(req, m, sizeof(SDMix));
+		reply(req, m, (INT)SND_MIX_SIZE(m->napp));
 		Kfree(m);
 		return E_OK;
 	}
@@ -1802,10 +2098,10 @@ LOCAL ER proc_read( CHAN *c, T_DEVREQ *req )
 		st.in_rate = ( rec_hw != NULL ) ? rec_in_rate : 0;
 		st.in_channels = ( rec_hw != NULL ) ? (UW)rec_in_channels : 0;
 		st.channels = st.playing = 0;
-		for ( i = 0; i < NCH; i++ ) {
-			if ( ch[i].used ) {
+		for ( i = 0; i < nch; i++ ) {
+			if ( chs[i]->used ) {
 				st.channels++;
-				if ( playing(&ch[i]) ) {
+				if ( playing(chs[i]) ) {
 					st.playing++;
 				}
 			}
@@ -2042,9 +2338,9 @@ LOCAL ER snd_close( ID devid, UINT option, void *exinf )
 	INT	i;
 
 	lock();
-	for ( i = 0; i < NCH; i++ ) {
-		if ( ch[i].used && ch[i].unit == unit ) {
-			chan_free(&ch[i]);
+	for ( i = 0; i < nch; i++ ) {
+		if ( chs[i]->used && chs[i]->unit == unit ) {
+			chan_free(chs[i]);
 		}
 	}
 	unlock();
@@ -2069,7 +2365,7 @@ LOCAL ER snd_exec( T_DEVREQ *req, TMO tmout, void *exinf )
 	c = chan_of(unit, key, (CONST UB *)&prog);
 	unlock();
 	if ( c == NULL ) {
-		req->error = E_LIMIT;		/* too many programs */
+		req->error = E_NOMEM;
 		return E_OK;
 	}
 	req->error = ( req->cmd == TDC_READ ) ? proc_read(c, req) : proc_write(c, req);
@@ -2096,9 +2392,9 @@ LOCAL INT snd_event( INT evttyp, void *evtinf, void *exinf )
 		return E_OK;
 	}
 	lock();
-	for ( i = 0; i < NCH; i++ ) {
-		if ( ch[i].used ) {
-			chan_stop(&ch[i]);
+	for ( i = 0; i < nch; i++ ) {
+		if ( chs[i]->used ) {
+			chan_stop(chs[i]);
 		}
 	}
 	unlock();
@@ -2114,9 +2410,14 @@ EXPORT ER knl_snd_init( void )
 	if ( snd_ready ) {
 		return E_OK;
 	}
+	(void)knl_ob_edge_add(&out_edge, &ob_uuid_system, NULL, OB_SYS_SOUND, NULL);
+	(void)knl_ob_edge_add(&mix_edge, NULL, (CONST UB *)SND_DEVNM, OB_SND_MIX, NULL);
 #ifdef RPI5
 	knl_i2s_init();
 	knl_hdmi_init();
+#endif
+#ifdef X64
+	knl_hda_init();
 #endif
 	ddev.exinf   = NULL;
 	ddev.drvatr  = 0;

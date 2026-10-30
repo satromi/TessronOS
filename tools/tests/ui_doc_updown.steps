@@ -1,0 +1,181 @@
+# 基本文章編集の上下キー (design 11.21), for tools/ui_run.py: ↑ and ↓ go from
+# line to line across the paragraphs too, keeping the place across the
+# caret started from while they follow one another; with Shift the
+# selection follows. Across: short and long paragraphs, an empty one,
+# one in big letters, a virtual object standing in a line, a break
+# inside a paragraph, and the first and the last line. Down the line
+# (縦書き): → and ← do the same.
+# Keys: → 4F, ← 50, ↓ 51, ↑ 52, Home 4A; modifiers: Ctrl 01, Shift 02.
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p>0123456789</p>
+xml <p>abcdefghijklmnopqrstuvwxyz abcdefghijklmnopqrstuvwxyz abcdefghijklmnopqrstuvwxyz abcdefghijklmnopqrstuvwxyz</p>
+xml <p></p>
+xml <p><font size="28">ABCDEFGH</font></p>
+xml <p>0123456789<br/>abc</p>
+xml <p>01<link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" vobjid="019cf904-4417-7579-8562-bea3e6add6b3"
+xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="30" dlen="0" chsz="14"
+xml framedisp="true" namedisp="true" pictdisp="true"/>23456789</p>
+xml <p>0123456789</p>
+xml </document></tad>
+xmlopen 上下キーの試験
+wait 300
+key 4A 01
+caret
+want ok c 0,0 a 0,0
+key 4F
+key 4F
+key 4F
+key 4F
+key 4F
+caret
+want ok c 0,5 a 0,5
+# the first line: ↑ goes nowhere
+key 52
+caret
+want ok c 0,5 a 0,5
+# down every line: the second line of a paragraph, an empty paragraph,
+# big letters (fewer across: the place nearest), then back to the place
+# across the first one began at
+key 51
+caret
+want ok c 1,5 a 1,5
+key 51
+caret
+want ok c 1,59 a 1,59
+key 51
+caret
+want ok c 2,0 a 2,0
+key 51
+caret
+want ok c 3,2 a 3,2
+key 51
+caret
+want ok c 4,5 a 4,5
+key 51
+caret
+want ok c 4,14 a 4,14
+# the line with the virtual object (one place for it: 01, the object, 23...)
+key 51
+caret
+want ok c 5,2 a 5,2
+key 51
+caret
+want ok c 6,5 a 6,5
+# the last line: ↓ goes nowhere
+key 51
+caret
+want ok c 6,5 a 6,5
+shot doc_updown_across
+key 52
+caret
+want ok c 5,2 a 5,2
+key 52
+caret
+want ok c 4,14 a 4,14
+key 52
+caret
+want ok c 4,5 a 4,5
+key 52
+caret
+want ok c 3,2 a 3,2
+key 52
+caret
+want ok c 2,0 a 2,0
+key 52
+caret
+want ok c 1,59 a 1,59
+key 52
+caret
+want ok c 1,5 a 1,5
+key 52
+caret
+want ok c 0,5 a 0,5
+# Shift with ↓ and ↑: the selection from where the caret was
+key 51 02
+caret
+want ok c 1,5 a 0,5
+key 51 02
+caret
+want ok c 1,59 a 0,5
+key 52 02
+caret
+want ok c 1,5 a 0,5
+# without Shift the selection goes, and the caret moves from where it is
+key 52
+caret
+want ok c 0,5 a 0,5
+# another key forgets the place across: ↑ from the end of the big letters (End)
+key 51
+key 51
+key 51
+key 51
+caret
+want ok c 3,2 a 3,2
+key 4D
+key 52
+caret
+want ok c 2,0 a 2,0
+key 52
+caret
+want ok c 1,74 a 1,74
+# 縦書き: ← to the line after (to the left), → to the line before
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0" direction="2"/>
+xml <p>0123456789</p>
+xml <p>あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん</p>
+xml <p></p>
+xml <p><font size="28">ABCDEFGH</font></p>
+xml <p>0123456789</p>
+xml </document></tad>
+xmlopen 縦書きの試験
+wait 300
+key 4A 01
+key 51
+key 51
+key 51
+key 51
+key 51
+caret
+want ok c 0,5 a 0,5
+# the line before the first: nowhere
+key 4F
+caret
+want ok c 0,5 a 0,5
+key 50
+caret
+want ok c 1,15 a 1,15
+key 50
+caret
+want ok c 1,90 a 1,90
+key 50
+caret
+want ok c 2,0 a 2,0
+key 50
+caret
+want ok c 3,3 a 3,3
+key 50
+caret
+want ok c 4,5 a 4,5
+key 50
+caret
+want ok c 4,5 a 4,5
+shot doc_updown_down
+key 4F
+caret
+want ok c 3,3 a 3,3
+key 4F
+caret
+want ok c 2,0 a 2,0
+key 4F
+caret
+want ok c 1,90 a 1,90
+key 4F
+caret
+want ok c 1,15 a 1,15
+key 4F
+caret
+want ok c 0,5 a 0,5
+# Shift with ←: the selection follows
+key 50 02
+caret
+want ok c 1,15 a 0,5
+absent !OACV!

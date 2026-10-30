@@ -30,7 +30,14 @@ SYSCALL ER tk_dis_dsp( void )
 {
 	CHECK_CTX(!in_loc());
 
+	/*
+	 * With interrupts masked: the task, moved to another processor
+	 * between finding this processor's element and the store, would
+	 * stop the dispatch of the one it left and not its own
+	 */
+	BEGIN_DISABLE_INTERRUPT;
 	knl_dispatch_disabled = DDS_DISABLE;
+	END_DISABLE_INTERRUPT;
 
 	return E_OK;
 }
@@ -44,10 +51,16 @@ SYSCALL ER tk_dis_dsp( void )
 #ifdef USE_FUNC_TK_ENA_DSP
 SYSCALL ER tk_ena_dsp( void )
 {
+	BOOL	dsp;
+
 	CHECK_CTX(!in_loc());
 
+	/* this processor's fields, as in tk_dis_dsp */
+	BEGIN_DISABLE_INTERRUPT;
 	knl_dispatch_disabled = DDS_ENABLE;
-	if ( knl_ctxtsk != knl_schedtsk ) {
+	dsp = ( knl_ctxtsk != knl_schedtsk );
+	END_DISABLE_INTERRUPT;
+	if ( dsp ) {
 		knl_dispatch();
 	}
 
@@ -74,11 +87,13 @@ SYSCALL ER tk_set_reg( ID tskid,
 	tcb = get_tcb(tskid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 	if ( tcb->state == TS_NONEXIST ) {
 		ercd = E_NOEXS;
 	} else {
 		knl_set_reg(tcb, pk_regs, pk_eit, pk_cregs);
 	}
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -102,11 +117,13 @@ SYSCALL ER tk_get_reg( ID tskid, T_REGS *pk_regs, T_EIT *pk_eit, T_CREGS *pk_cre
 	tcb = get_tcb(tskid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 	if ( tcb->state == TS_NONEXIST ) {
 		ercd = E_NOEXS;
 	} else {
 		knl_get_reg(tcb, pk_regs, pk_eit, pk_cregs);
 	}
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -137,11 +154,13 @@ SYSCALL ER tk_set_cpr( ID tskid, INT copno, CONST T_COPREGS *pk_copregs )
 	}
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 	if ( tcb->state == TS_NONEXIST ) {
 		ercd = E_NOEXS;
 	} else {
 		ercd = knl_set_cpr(tcb, copno, pk_copregs);
 	}
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -169,11 +188,13 @@ SYSCALL ER tk_get_cpr( ID tskid, INT copno, T_COPREGS *pk_copregs )
 	}
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 	if ( tcb->state == TS_NONEXIST ) {
 		ercd = E_NOEXS;
 	} else {
 		ercd = knl_get_cpr(tcb, copno, pk_copregs);
 	}
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -201,7 +222,7 @@ SYSCALL ER td_set_reg( ID tskid, CONST T_REGS *regs, CONST T_EIT *eit, CONST T_C
 	CHECK_TSKID(tskid);
 
 	tcb = get_tcb(tskid);
-	if ( tcb == knl_ctxtsk ) {
+	if ( tcb == knl_self_ctxtsk() ) {
 		return E_OBJ;
 	}
 
@@ -230,7 +251,7 @@ SYSCALL ER td_get_reg( ID tskid, T_REGS *regs, T_EIT *eit, T_CREGS *cregs )
 	CHECK_TSKID(tskid);
 
 	tcb = get_tcb(tskid);
-	if ( tcb == knl_ctxtsk ) {
+	if ( tcb == knl_self_ctxtsk() ) {
 		return E_OBJ;
 	}
 

@@ -101,6 +101,11 @@ int ts_gl_gpu_kind( void )
 	T_GPUINFO	info;
 
 	if ( ts_gl_drm_faked() ) {
+#ifdef __x86_64__
+		if ( ts_gl_drm_faked() == 2 ) {
+			return TS_GL_GPU_INTEL;	/* the shim pretends an Intel GPU */
+		}
+#endif
 		return TS_GL_GPU_V3D;		/* the shim pretends one */
 	}
 	if ( gp_ref_gpu(&info) < E_OK ) {

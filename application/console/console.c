@@ -32,6 +32,7 @@
  */
 
 #include "console.h"
+#include <ts/wm.h>
 
 #define TICK_MS		40
 #define HIST_MAX	16
@@ -59,7 +60,7 @@
 #define MOD_CTRL	0x11
 #define MOD_SHIFT	0x22
 
-LOCAL CONST char win_json[] = "{\"rect\":[100,80,760,500],\"attr\":7}";
+LOCAL CONST char win_json[] = "{\"rect\":[100,80,760,500],\"attr\":15}";
 
 LOCAL LTERM	term;
 LOCAL LTWIN	win;
@@ -222,22 +223,33 @@ LOCAL BOOL take_log( void )
 /* ---------------------------------------------------------------- commands */
 
 /* The name of each object of a kind the object layer lists */
+/*
+ * The objects of a kind, every one, a page at a time: each page asked
+ * from the last object of the one before (the console keeps no heap)
+ */
+#define LIST_PAGE	64
+
 LOCAL void list_names( UINT type, CONST char *none )
 {
-	TS_UUID	ids[64];
+	TS_UUID	ids[LIST_PAGE], last;
 	T_OBREF	r;
-	INT	cnt = 0, i;
+	INT	cnt, i, all = 0;
 
-	if ( ob_lst_obj(type, 0, NULL, ids, 64, &cnt) < E_OK || cnt == 0 ) {
-		say(none);
-		return;
-	}
-	for ( i = 0; i < cnt && i < 64; i++ ) {
-		if ( ob_ref_obj(&ids[i], &r) >= E_OK ) {
-			say("  ");
-			tm_putstring(( r.name[0] != 0 ) ? r.name : (CONST UB *)"(名前なし)");
-			say("\n");
+	do {
+		cnt = 0;
+		if ( ob_lst_obj(type, 0, ( all > 0 ) ? &last : NULL, ids, LIST_PAGE, &cnt) < E_OK ) break;
+		for ( i = 0; i < cnt; i++ ) {
+			if ( ob_ref_obj(&ids[i], &r) >= E_OK ) {
+				say("  ");
+				tm_putstring(( r.name[0] != 0 ) ? r.name : (CONST UB *)"(名前なし)");
+				say("\n");
+			}
 		}
+		if ( cnt > 0 ) last = ids[cnt - 1];
+		all += cnt;
+	} while ( cnt == LIST_PAGE );
+	if ( all == 0 ) {
+		say(none);
 	}
 }
 
@@ -247,28 +259,35 @@ LOCAL void list_names( UINT type, CONST char *none )
  */
 LOCAL void cmd_ps( void )
 {
-	TS_UUID	ids[64], prog;
+	TS_UUID	ids[LIST_PAGE], last, prog;
 	T_OBREF	r, pr;
-	INT	cnt = 0, i, k, n;
+	INT	cnt, i, k, n, all = 0;
 
-	if ( ob_lst_obj(OB_T_PROCESS, 0, NULL, ids, 64, &cnt) < E_OK || cnt == 0 ) {
-		say("プロセスはありません\n");
-		return;
-	}
-	for ( i = 0; i < cnt && i < 64; i++ ) {
-		if ( ob_ref_obj(&ids[i], &r) < E_OK ) continue;
-		for ( k = 0; r.name[k] != 0 && r.name[k] != ' '; k++ ) ;
-		say("  ");
-		say_u(( r.name[k] == ' ' ) ? r.name + k + 1 : r.name);
-		say("  ");
-		n = 0;
-		if ( ob_lst_lnk(&ids[i], NULL, &prog, 1, &n) >= E_OK && n > 0
-		  && ob_ref_obj(&prog, &pr) >= E_OK && pr.name[0] != 0 ) {
-			say_u(pr.name);
-		} else {
-			say("(プログラムの実身はありません)");
+	do {
+		cnt = 0;
+		if ( ob_lst_obj(OB_T_PROCESS, 0, ( all > 0 ) ? &last : NULL, ids, LIST_PAGE, &cnt) < E_OK ) break;
+		for ( i = 0; i < cnt; i++ ) {
+			if ( ob_ref_obj(&ids[i], &r) < E_OK ) continue;
+			for ( k = 0; r.name[k] != 0 && r.name[k] != ' '; k++ ) ;
+			say("  ");
+			say_u(( r.name[k] == ' ' ) ? r.name + k + 1 : r.name);
+			say("  ");
+			n = 0;
+			if ( ob_acc_obj(&ids[i], OB_OP_READ) < E_OK ) {
+				say("(読めません)");	/* asked, not opened to be refused */
+			} else if ( ob_lst_lnk(&ids[i], NULL, &prog, 1, &n) >= E_OK && n > 0
+			  && ob_ref_obj(&prog, &pr) >= E_OK && pr.name[0] != 0 ) {
+				say_u(pr.name);
+			} else {
+				say("(プログラムの実身はありません)");
+			}
+			say("\n");
 		}
-		say("\n");
+		if ( cnt > 0 ) last = ids[cnt - 1];
+		all += cnt;
+	} while ( cnt == LIST_PAGE );
+	if ( all == 0 ) {
+		say("プロセスはありません\n");
 	}
 }
 
@@ -383,17 +402,25 @@ LOCAL void start_job( CONST TS_UUID *prog, CONST UB *name, INT argc, UB **argv )
 	}
 }
 
-/* What the program wrote, onto the screen, and the terminal's answers back to it; TRUE when anything came */
+/*
+ * What the program wrote, onto the screen, and the terminal's answers
+ * back to it; TRUE when anything came. Read until there is nothing,
+ * which asks to be told of what comes next, or for 64 pieces at most,
+ * the rest left for the next round (vt_more) rather than waited for.
+ */
+LOCAL BOOL	vt_more = FALSE;
+
 LOCAL BOOL vt_pump( void )
 {
 	static UB	buf[1024];
-	INT		n, k = 0;
+	INT		n = 0, k = 0;
 	BOOL		got = FALSE;
 
 	while ( k++ < 64 && ( n = job_pty_read(buf, sizeof(buf)) ) > 0 ) {
 		lt_vt_put(&vt, buf, n);
 		got = TRUE;
 	}
+	vt_more = (BOOL)( n > 0 );
 	while ( ( n = lt_vt_reply(&vt, buf, sizeof(buf)) ) > 0 ) job_pty_write(buf, n);
 	return got;
 }
@@ -429,7 +456,7 @@ LOCAL void vt_key( CONST T_OBNTM *m )
 	UB	b[8];
 	INT	n = 0;
 
-	if ( ime_busy() && ime_key(m->code, m->mods) ) return;
+	if ( ime_busy() && ime_key(m->code, m->mods, m->imode) ) return;
 	switch ( m->code ) {
 	case KEY_ENTER:
 	case KEY_KPENTER:	b[n++] = '\r'; break;
@@ -447,11 +474,11 @@ LOCAL void vt_key( CONST T_OBNTM *m )
 	case KEY_PGUP:		n = lt_vt_key(&vt, VTK_PGUP, b); break;
 	case KEY_PGDN:		n = lt_vt_key(&vt, VTK_PGDN, b); break;
 	default:
-		if ( ctrl && m->code >= KEY_A && m->code <= KEY_Z ) {
-			b[n++] = (UB)( m->code - KEY_A + 1 );	/* ^A .. ^Z: ^C stops what runs */
+		if ( ctrl && wm_key_cmd(m->code) >= KEY_A && wm_key_cmd(m->code) <= KEY_Z ) {
+			b[n++] = (UB)( wm_key_cmd(m->code) - KEY_A + 1 );	/* ^A .. ^Z of the letter typed: ^C stops what runs */
 			break;
 		}
-		if ( ime_key(m->code, m->mods) ) return;	/* its letters come through con_insert */
+		if ( ime_key(m->code, m->mods, m->imode) ) return;	/* its letters come through con_insert */
 		b[0] = wm_key_char(m->code, m->mods);
 		if ( !ctrl && b[0] >= 0x20 && b[0] < 0x7F ) n = 1;
 		break;
@@ -585,7 +612,7 @@ LOCAL void key( CONST T_OBNTM *m, BOOL *p_done )
 	BOOL	shift = (BOOL)( ( m->mods & MOD_SHIFT ) != 0 );
 	UB	ch;
 
-	if ( ctrl && m->code == KEY_E ) {
+	if ( ctrl && wm_key_cmd(m->code) == KEY_E ) {
 		*p_done = TRUE;			/* 閉じる, the window menu's letter */
 		return;
 	}
@@ -602,7 +629,7 @@ LOCAL void key( CONST T_OBNTM *m, BOOL *p_done )
 		if ( ( ctrl && m->code == KEY_C ) || m->code == KEY_ESC ) job_stop();
 		return;
 	}
-	if ( ime_key(m->code, m->mods) ) {
+	if ( ime_key(m->code, m->mods, m->imode) ) {
 		term.back = 0;
 		return;
 	}
@@ -711,6 +738,7 @@ int main( void )
 	SZ	asz = 0;
 	BOOL	done = FALSE, again;
 	INT	k;
+	ID	klog = 0;
 
 	lt_clear(&term);
 	box_init();
@@ -718,26 +746,47 @@ int main( void )
 		tm_putstring((CONST UB *)"console: no window\n");
 		return 1;
 	}
+	job_port(win.port);
+	/* what goes to the console told as it comes (OB_SYS_LOG), once the log has been read to its end */
+	{
+		TS_UUID	u;
+		T_OBNTF	req;
+
+		if ( lt_uuid(SYSDEF_SYSTEM, &u) >= E_OK && ( klog = ob_opn_obj(&u, OB_OP_ATRRD) ) > 0 ) {
+			memset(&req, 0, sizeof(req));
+			req.events = OB_E_CHANGE;
+			(void)ob_ntf_evt(klog, OB_SYS_LOG, &req, win.port);
+		}
+	}
 	(void)take_log();
 	run_given();
 	redraw();
 
 	while ( !done ) {
 		again = FALSE;
-		while ( !done && ob_rea_rec(win.port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+		/* asleep until the window, the log, the program's output or its end has something */
+		for ( TMO tmo = vt_more ? TMO_POL : TMO_FEVR;
+		      !done && ob_rea_tmo(win.port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) {
 			switch ( m.event ) {
 			case OB_E_CLOSE:
 			case OB_E_DELETE:
 				done = TRUE;
 				break;
 			case OB_E_PRESS:
-				if ( m.code == 1 ) menu(&m, &done);
-				else if ( !ime_press(m.x, m.y) ) (void)lt_pointer(&term, &m);
+				if ( m.recno == OB_WR_CAND ) {
+					ime_pick((INT)m.code);	/* a name on the list of candidates */
+				} else if ( m.code == 1 ) {
+					menu(&m, &done);
+				} else {
+					ime_press();
+					(void)lt_pointer(&term, &m);
+				}
 				again = TRUE;
 				break;
 			case OB_E_MOVE:
 			case OB_E_RELEASE:
 			case OB_E_WHEEL:
+			case OB_E_SCROLL:
 				if ( lt_pointer(&term, &m) ) again = TRUE;
 				break;
 			case OB_E_KEY:
@@ -762,14 +811,11 @@ int main( void )
 			if ( vtmode ) vt_end();
 			again = TRUE;
 		}
-		if ( ime_tick() ) {
-			again = TRUE;
-		}
 		if ( take_log() || again ) {
 			redraw();
 		}
-		tk_dly_tsk(TICK_MS);
 	}
+	if ( klog > 0 ) ob_cls_obj(klog);
 
 	/* a program still running ends with the window */
 	job_stop();

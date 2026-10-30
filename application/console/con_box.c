@@ -46,6 +46,8 @@ typedef struct {
 	INT	execrec;		/* the record that holds it */
 	INT	nrec;
 	UD	size;
+	BOOL	noatr;			/* the caller may not read its metadata */
+	BOOL	nodata;			/* the caller may not read its records */
 } ENT;
 
 LOCAL TS_UUID	way[DEPTH_MAX];		/* way[0] "/", way[depth - 1] here */
@@ -54,7 +56,6 @@ LOCAL TS_UUID	sysbox, binobj;
 LOCAL UB	here[OB_NAME_MAX];
 
 LOCAL TS_UUID	links[LINKS_MAX];	/* kept off the stack: a program's is small */
-LOCAL UB	meta[OB_ATR_MAX];
 
 /* ---------------------------------------------------------------- small helpers */
 
@@ -127,12 +128,52 @@ LOCAL void shown_name( CONST ENT *e, UB *out, INT max )
 
 /* ---------------------------------------------------------------- what an object is */
 
+/*
+ * What the metadata says, a member at a time (ob_get_atv): the console
+ * keeps no memory to read the metadata whole into, however long it is.
+ * Whether the member is there; a string of it into out (without its
+ * quotes, "" when it is longer than out has room for); a number of it.
+ */
+LOCAL BOOL atv_has( ID key, CONST char *path )
+{
+	SZ	asz = 0;
+
+	return (BOOL)( ob_get_atv(key, (CONST UB *)path, NULL, 0, &asz) >= E_OK );
+}
+
+LOCAL BOOL atv_str( ID key, CONST char *path, UB *out, INT max )
+{
+	UB	b[64];
+	SZ	asz = 0;
+	INT	i;
+
+	out[0] = 0;
+	if ( ob_get_atv(key, (CONST UB *)path, b, sizeof(b), &asz) < E_OK
+	  || asz < 2 || asz > (SZ)sizeof(b) || b[0] != '"' || b[asz - 1] != '"' || asz - 2 >= max ) {
+		return FALSE;
+	}
+	for ( i = 0; i < (INT)asz - 2; i++ ) out[i] = b[i + 1];
+	out[i] = 0;
+	return TRUE;
+}
+
+LOCAL INT atv_num( ID key, CONST char *path, INT dflt )
+{
+	UB	b[24];
+	SZ	asz = 0;
+	INT	i, v = 0;
+
+	if ( ob_get_atv(key, (CONST UB *)path, b, sizeof(b), &asz) < E_OK || asz <= 0 || asz >= (SZ)sizeof(b) ) {
+		return dflt;
+	}
+	for ( i = 0; i < (INT)asz && b[i] >= '0' && b[i] <= '9'; i++ ) v = v * 10 + ( b[i] - '0' );
+	return ( i == (INT)asz ) ? v : dflt;
+}
+
 LOCAL void look_at( CONST TS_UUID *u, ENT *e )
 {
 	T_OBREF	r;
-	T_JSON	root, al, v, tf, pg, ex;
 	UB	kind[24];
-	SZ	asz = 0;
 	ID	key;
 
 	memset(e, 0, sizeof(*e));
@@ -152,35 +193,36 @@ LOCAL void look_at( CONST TS_UUID *u, ENT *e )
 			 : ( r.type == OB_T_CHANNEL ) ? "通信" : ( r.type == OB_T_WINDOW ) ? "ウインドウ" : "実身";
 		return;
 	}
+	/* asked, not tried: an object the caller may not read is listed as such, not opened to be refused */
+	e->noatr = (BOOL)( ob_acc_obj(u, OB_OP_ATRRD) < E_OK );
+	e->nodata = (BOOL)( ob_acc_obj(u, OB_OP_READ) < E_OK );
+	if ( e->noatr ) {
+		return;
+	}
 	key = ob_opn_obj(u, OB_OP_ATRRD);
 	if ( key <= 0 ) {
 		return;
 	}
-	if ( ob_get_atr(key, meta, sizeof(meta), &asz) >= E_OK && asz > 0
-	  && js_parse(meta, (INT)asz, &root) >= E_OK ) {
-		if ( js_get(&root, "applist", &al) >= E_OK && js_get(&al, "virtual-object-list", &v) >= E_OK ) {
-			e->kind = K_BOX;
-			e->label = "実身";
+	if ( atv_has(key, "applist.virtual-object-list") ) {
+		e->kind = K_BOX;
+		e->label = "実身";
+	}
+	if ( atv_has(key, "tessronos.program") ) {
+		e->kind = K_PROG;
+		e->label = "プログラム";
+		if ( atv_str(key, "tessronos.program.kind", kind, sizeof(kind)) && kind[0] != 0 ) {
+			e->label = lt_same(kind, "command") ? "コマンド"
+				 : lt_same(kind, "accessory") ? "小物"
+				 : lt_same(kind, "app") ? "アプリ"
+				 : lt_same(kind, "utility") ? "ツール" : "プログラム";
 		}
-		if ( js_get(&root, "tessronos", &tf) >= E_OK ) {
-			if ( js_get(&tf, "program", &pg) >= E_OK ) {
-				e->kind = K_PROG;
-				e->label = "プログラム";
-				if ( js_get_str(&pg, "kind", kind, sizeof(kind)) > 0 ) {
-					e->label = lt_same(kind, "command") ? "コマンド"
-						 : lt_same(kind, "accessory") ? "小物"
-						 : lt_same(kind, "app") ? "アプリ"
-						 : lt_same(kind, "utility") ? "ツール" : "プログラム";
-				}
-			}
-			if ( js_get(&tf, "exec", &ex) >= E_OK ) {
-				e->exec = TRUE;
-				e->execrec = (INT)js_get_num(&ex, "record", 1);
-				if ( e->kind != K_PROG ) {
-					e->kind = K_PROG;
-					e->label = "プログラム";
-				}
-			}
+	}
+	if ( atv_has(key, "tessronos.exec") ) {
+		e->exec = TRUE;
+		e->execrec = atv_num(key, "tessronos.exec.record", 1);
+		if ( e->kind != K_PROG ) {
+			e->kind = K_PROG;
+			e->label = "プログラム";
 		}
 	}
 	ob_cls_obj(key);
@@ -208,8 +250,9 @@ LOCAL BOOL enterable( CONST ENT *e )
 {
 	INT	cnt = 0;
 
+	if ( e->type != OB_T_STORAGE || e->nodata ) return FALSE;	/* its links are in a record */
 	if ( e->kind == K_BOX ) return TRUE;
-	if ( e->kind == K_PROG || e->type != OB_T_STORAGE ) return FALSE;
+	if ( e->kind == K_PROG ) return FALSE;
 	return (BOOL)( ob_lst_lnk(&e->u, NULL, NULL, 0, &cnt) >= E_OK && cnt > 0 );
 }
 
@@ -334,7 +377,7 @@ LOCAL void set_here( void )
 
 EXPORT void box_init( void )
 {
-	(void)lt_uuid(SYSDEF_ROOT, &sysbox);
+	(void)ob_fnd_sys(SYSROLE_ROOT, SYSDEF_ROOT, &sysbox);
 	(void)lt_uuid(SYSDEF_BIN, &binobj);
 	way[0] = sysbox;
 	way[1] = binobj;
@@ -345,6 +388,12 @@ EXPORT void box_init( void )
 EXPORT CONST UB *box_here_name( void )
 {
 	return here;
+}
+
+/* The object the console is in */
+EXPORT void box_here_uuid( TS_UUID *p_u )
+{
+	*p_u = way[( depth > 0 ) ? depth - 1 : 0];
 }
 
 EXPORT void box_where( UB *buf, INT max )
@@ -451,6 +500,7 @@ EXPORT void cmd_ls( INT argc, UB **argv )
 			say("] ");
 			say_u(nm);
 			if ( enterable(&e) ) say("/");	/* it has links: cd goes into it */
+			if ( e.noatr || e.nodata ) say("  (読めません)");
 			if ( lng ) {
 				(void)uuid_text(&e.u, id, TS_UUID_STRLEN);
 				say("  ");

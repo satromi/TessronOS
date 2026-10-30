@@ -16,7 +16,9 @@
  *	  "tessronos": { "program": { "id": "basic-text-editor", "kind": "app",
  *		"name": "基本文章編集", "base": [ UUID ], "builtin": true } }
  *	The id is the one an applist names, so what a TADjs Desktop wrote
- *	opens with the program it names. "kind" is app (it has templates,
+ *	opens with the program it names. "aliases" lists ids the program
+ *	had before (書庫管理 took in 書庫解凍, unpack-file): an applist that
+ *	still names one of them opens with it. "kind" is app (it has templates,
  *	原紙, and opens objects), accessory (小物: no data of its own),
  *	utility (a tool of the system) or command (no window of its own: run
  *	in a コンソール, which shows what it prints). A program the desktop carries in
@@ -38,13 +40,12 @@
  *	and placing the copy (ob_map_rec, design 18.13).
  *
  *	A TADjs plugin -- a directory with its plugin.json and the files of
- *	its template -- is taken in as a program object and a template
- *	object (dt_plugin_import, design 18.12). Its code is HTML for the
+ *	its template -- is installed as a program object and a template
+ *	object (dt_plugin_install, design 18.12) from the object ファイル変換
+ *	made of the directory, as a package is: the person drops it on the
+ *	〈バージョン〉 sheet of システム環境設定. Its code is HTML for the
  *	browser and does not run here, so the program has no executable:
- *	what it brings is its name, its id for the applist, and its
- *	template, which is taken in by the common module (xf_import_tadjs,
- *	design 18.20). Every plugin directory under /boot/PLUGINS is taken
- *	in when the desktop starts.
+ *	what it brings is its name, its id for the applist, and its template.
  */
 
 #include <sys/machine.h>
@@ -64,13 +65,47 @@
 #include <ts/json.h>
 #include <ts/xf.h>
 #include <ts/sysdef.h>
+#include <ts/conf.h>
 #include <ts/fquit.h>
 #include "desktop.h"
 
-#define PROG_MAX	64		/* the programs the box may link to */
+/*
+ * The programs of the program box, as many as it links to. Each entry
+ * is allocated once and kept: what dt_prog_find and the others hand out
+ * points at it, and stays good when the box is read again (an entry is
+ * then filled anew, never moved or freed). The table of pointers grows
+ * by a copy; the one before is kept as well.
+ */
+LOCAL DTPROG	**prog = NULL;
+LOCAL INT	nprog = 0, prog_cap = 0;
 
-LOCAL DTPROG	prog[PROG_MAX];
-LOCAL INT	nprog = 0;
+/* Room for one more entry at nprog: FALSE for no memory */
+LOCAL BOOL prog_room( void )
+{
+	DTPROG	**t;
+	INT	cap, i;
+
+	if ( nprog < prog_cap ) {
+		return TRUE;
+	}
+	cap = ( prog_cap > 0 ) ? prog_cap * 2 : 64;
+	t = (DTPROG **)Kcalloc((SZ)cap, sizeof(DTPROG *));
+	if ( t == NULL ) {
+		return FALSE;
+	}
+	for ( i = 0; i < prog_cap; i++ ) t[i] = prog[i];
+	for ( ; i < cap; i++ ) {
+		t[i] = (DTPROG *)Kcalloc(1, sizeof(DTPROG));
+		if ( t[i] == NULL ) break;
+	}
+	if ( i == prog_cap ) {
+		Kfree(t);
+		return FALSE;
+	}
+	prog = t;
+	prog_cap = i;
+	return TRUE;
+}
 
 LOCAL BOOL has_type( CONST UB *types, CONST UB *t );
 
@@ -158,6 +193,14 @@ LOCAL BOOL read_prog( CONST TS_UUID *uuid, DTPROG *p )
 			}
 		}
 
+		/* the ids it had before */
+		p->nalias = 0;
+		if ( js_get(&g, "aliases", &base) >= E_OK ) {
+			for ( it.s = NULL; p->nalias < DT_PROG_ALIAS && js_next(&base, &it); ) {
+				if ( js_str(&it, p->alias[p->nalias], DT_PROG_ID) > 0 ) p->nalias++;
+			}
+		}
+
 		/* its templates */
 		p->nbase = 0;
 		if ( js_get(&g, "base", &base) >= E_OK ) {
@@ -184,15 +227,25 @@ LOCAL void read_box( void )
 	INT	n = 0, i;
 
 	nprog = 0;
-	if ( ts_str_to_uuid(SYSDEF_PROG_BOX, &u) < E_OK ) {
+	if ( !knl_sys_find(SYSROLE_PROGS, SYSDEF_PROG_BOX, &u) ) {
 		return;
 	}
-	lk = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * PROG_MAX);
+	/* every link of the box: asked how many, then taken */
+	if ( ob_lst_lnk(&u, NULL, NULL, 0, &n) < E_OK || n <= 0 ) {
+		return;
+	}
+	lk = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)n);
 	if ( lk != NULL ) {
-		if ( ob_lst_lnk(&u, NULL, lk, PROG_MAX, &n) < E_OK ) n = 0;
-		if ( n > PROG_MAX ) n = PROG_MAX;
-		for ( i = 0; i < n && nprog < PROG_MAX; i++ ) {
-			if ( read_prog(&lk[i], &prog[nprog]) ) {
+		INT	all = 0;
+
+		if ( ob_lst_lnk(&u, NULL, lk, n, &all) < E_OK ) all = 0;
+		if ( all < n ) n = all;
+		for ( i = 0; i < n; i++ ) {
+			if ( !prog_room() ) {
+				tm_printf((UB *)"desktop: no memory for the programs past %d\n", nprog);
+				break;
+			}
+			if ( read_prog(&lk[i], prog[nprog]) ) {
 				nprog++;
 			}
 		}
@@ -202,51 +255,23 @@ LOCAL void read_box( void )
 
 /* ---------------------------------------------------------------- TADjs plugins */
 
-#define PLUGIN_DIR	"/boot/PLUGINS"
+/*
+ * A TADjs plugin is installed from the object ファイル変換 made of its
+ * directory: a figure of links to what the directory held, plugin.json
+ * among them as an object whose record 1 is the file, and the files of
+ * its template already taken in as that TADjs object under its UUID
+ * (design 18.20). Nothing is taken in by itself: the person installs
+ * the plugin as a package is installed, by dropping the object on the
+ * list of the 〈バージョン〉 sheet of システム環境設定 (dt_pkg_install,
+ * design 18.12).
+ */
 #define PLUGIN_JSON_MAX	( 64 * 1024 )
-
-/* A path made of a directory and a name */
-LOCAL void path_of( char *out, INT max, CONST char *dir, CONST UB *name )
-{
-	INT	n = put((UB *)out, 0, max, dir);
-
-	n = put((UB *)out, n, max, "/");
-	(void)put((UB *)out, n, max, (CONST char *)name);
-}
-
-/* plugin.json, read whole; NULL when it is not there */
-LOCAL UB *plugin_json( CONST char *dir, SZ *p_size )
-{
-	char	path[FS_PATH_MAX];
-	T_FSTAT	st;
-	UB	*b;
-	INT	fd, n;
-	SZ	at = 0;
-
-	path_of(path, sizeof(path), dir, (CONST UB *)"plugin.json");
-	if ( fs_stat(path, &st) < EX_OK || st.size > PLUGIN_JSON_MAX ) {
-		return NULL;
-	}
-	b = (UB *)Kmalloc((SZ)st.size + 1);
-	fd = ( b != NULL ) ? fs_open(path, O_RDONLY) : -1;
-	if ( fd < 0 ) {
-		if ( b != NULL ) Kfree(b);
-		return NULL;
-	}
-	while ( at < (SZ)st.size && ( n = fs_read(fd, b + at, (SZ)st.size - at) ) > 0 ) {
-		at += n;
-	}
-	fs_close(fd);
-	b[at] = 0;
-	*p_size = at;
-	return b;
-}
 
 /*
  * The program's metadata: what plugin.json says, as a program, and in
- * "tessronos.file" where it came from.
+ * "tessronos.file" what it was installed from.
  */
-LOCAL INT plugin_meta( UB *m, INT max, CONST char *dir, CONST UB *id, CONST UB *name,
+LOCAL INT plugin_meta( UB *m, INT max, CONST UB *from, CONST UB *id, CONST UB *name,
 		       CONST char *kind, CONST UB *ver, CONST TS_UUID *base, CONST UB *types )
 {
 	char	us[TS_UUID_STRLEN + 1];
@@ -285,12 +310,31 @@ LOCAL INT plugin_meta( UB *m, INT max, CONST char *dir, CONST UB *id, CONST UB *
 	n = put(m, n, max, "},\"plugin\":{\"version\":\"");
 	n = put_json(m, n, max, ver);
 	n = put(m, n, max, "\"},\"file\":{\"name\":\"");
-	n = put_json(m, n, max, (CONST UB *)dir);
-	n = put(m, n, max, "/plugin.json\",\"mediatype\":\"application/json\",\"source\":\"boot\"}}}");
+	n = put_json(m, n, max, from);
+	n = put(m, n, max, "/plugin.json\",\"mediatype\":\"application/json\"}}}");
 	return ( n < max - 1 ) ? n : -1;
 }
 
-EXPORT ER dt_plugin_import( CONST char *dir, TS_UUID *p_prog )
+/*
+ * The plugin's template made the system's: a copy of the TADjs object
+ * the directory brought, beside the program box and protected as the
+ * system's objects are, so that what the person does with the object
+ * they installed from does not touch it
+ */
+LOCAL ER plugin_base( CONST TS_UUID *brought, CONST T_OBPRT *prt, TS_UUID *p_base )
+{
+	T_OBCRE	c;
+	TS_UUID	box;
+
+	knl_memset(&c, 0, sizeof(c));
+	c.prt = prt;
+	if ( ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &box) >= E_OK ) {
+		c.near = box;
+	}
+	return ob_cpy_obj(brought, &c, p_base);
+}
+
+EXPORT ER dt_plugin_install( CONST TS_UUID *dir, BOOL force, TS_UUID *p_prog, UINT *p_how )
 {
 	T_JSON		root, bf, cm, it, ft, t1;
 	UB		id[DT_PROG_ID], name[TAD_NAME_MAX], type[32], ver[32], jf[128];
@@ -298,10 +342,11 @@ EXPORT ER dt_plugin_import( CONST char *dir, TS_UUID *p_prog )
 	UB		*j, *m;
 	SZ		size = 0;
 	INT		n;
-	TS_UUID		base, prog, box;
+	TS_UUID		base, brought, prog, box, pj, old;
+	T_OBREF		r, dr;
 	CONST DTPROG	*have;
 	CONST char	*kind;
-	BOOL		has_base = FALSE;
+	BOOL		has_base = FALSE, had = FALSE;
 	T_OBCRE		c;
 	T_OBPRT		prt;
 	ER		er = E_OK;
@@ -309,15 +354,20 @@ EXPORT ER dt_plugin_import( CONST char *dir, TS_UUID *p_prog )
 	if ( dir == NULL ) {
 		return E_PAR;
 	}
-	j = plugin_json(dir, &size);
-	if ( j == NULL ) {
-		return E_NOEXS;
+	/* plugin.json: a file the directory held */
+	if ( ob_ref_obj(dir, &dr) < E_OK || ob_fnd_lnk(dir, (CONST UB *)"plugin.json", &pj) < E_OK ) {
+		return E_OBJ;
+	}
+	j = om_obj_record(&pj, 1, &size);
+	if ( j == NULL || size <= 0 || size > PLUGIN_JSON_MAX ) {
+		if ( j != NULL ) Kfree(j);
+		return E_OBJ;
 	}
 	if ( js_parse(j, (INT)size, &root) < E_OK
 	  || js_get_str(&root, "id", id, sizeof(id)) <= 0
 	  || js_get_str(&root, "name", name, sizeof(name)) <= 0 ) {
 		Kfree(j);
-		return E_PAR;
+		return E_OBJ;
 	}
 	if ( js_get_str(&root, "type", type, sizeof(type)) <= 0 ) type[0] = 0;
 	/* the kinds of file its menu entries are for, lower case, each once */
@@ -340,19 +390,19 @@ EXPORT ER dt_plugin_import( CONST char *dir, TS_UUID *p_prog )
 		}
 	}
 	if ( js_get_str(&root, "version", ver, sizeof(ver)) <= 0 ) ver[0] = 0;
-	dt_sys_prt(&prt);
 	kind = same(type, "base") ? "app" : same(type, "accessory") ? "accessory" : "utility";
 
-	/* its template: a TADjs object named by its UUID */
+	/* its template: the TADjs object of the directory, named by its UUID */
 	if ( js_get(&root, "basefile", &bf) >= E_OK && js_type(&bf) == JS_OBJECT ) {
 		char	us[TS_UUID_STRLEN + 1];
 		INT	k;
 
-		er = ( js_get_str(&bf, "json", jf, sizeof(jf)) >= TS_UUID_STRLEN ) ? E_OK : E_PAR;
+		er = ( js_get_str(&bf, "json", jf, sizeof(jf)) >= TS_UUID_STRLEN ) ? E_OK : E_OBJ;
 		for ( k = 0; er >= E_OK && k < TS_UUID_STRLEN; k++ ) us[k] = (char)jf[k];
 		us[TS_UUID_STRLEN] = 0;
-		if ( er >= E_OK && ts_str_to_uuid(us, &base) < E_OK ) er = E_PAR;
-		if ( er >= E_OK ) er = xf_import_tadjs(dir, &base, "boot", &prt, NULL);
+		if ( er >= E_OK && ( ts_str_to_uuid(us, &brought) < E_OK || ob_ref_obj(&brought, &r) < E_OK ) ) {
+			er = E_OBJ;		/* the directory did not bring it */
+		}
 		has_base = (BOOL)( er >= E_OK );
 	}
 	Kfree(j);
@@ -360,65 +410,61 @@ EXPORT ER dt_plugin_import( CONST char *dir, TS_UUID *p_prog )
 		return er;
 	}
 
-	/* a program the system has by that id already is left as it is */
+	/* a program the system has by that id: replaced only when asked to all the same */
 	have = dt_prog_find(id);
 	if ( have != NULL ) {
-		if ( p_prog != NULL ) *p_prog = have->uuid;
-		return E_OK;
+		if ( have->builtin ) {
+			return E_PAR;		/* the desktop's own is not replaced */
+		}
+		if ( !force ) {
+			if ( p_prog != NULL ) *p_prog = have->uuid;
+			return E_LIMIT;
+		}
+		had = TRUE;
+		old = have->uuid;
 	}
 
-	m = (UB *)Kmalloc(1024 + FS_PATH_MAX);
-	if ( m == NULL ) {
-		return E_NOMEM;
-	}
-	n = plugin_meta(m, 1024 + FS_PATH_MAX, dir, id, name, kind, ver, has_base ? &base : NULL, types);
-	knl_memset(&c, 0, sizeof(c));
-	c.type = OB_T_STORAGE;
-	c.sub = OB_S_FILE;
-	c.json = m;
-	c.jsonsz = ( n > 0 ) ? n : 0;
-	c.prt = &prt;
+	dt_sys_prt(&prt);
 	if ( has_base ) {
-		c.near = base;				/* beside its template */
-	}
-	er = ( n > 0 ) ? ob_cre_obj(&c, &prog) : E_LIMIT;
-	Kfree(m);
-	if ( er >= E_OK ) {
-		er = ( ts_str_to_uuid(SYSDEF_PROG_BOX, &box) >= E_OK ) ? om_obj_link_add(&box, &prog)
-								      : E_SYS;
-	}
-	if ( er >= E_OK ) {
-		read_box();				/* the registry sees it now */
-		if ( p_prog != NULL ) *p_prog = prog;
-	}
-	return er;
-}
-
-/* Every plugin directory under PLUGIN_DIR taken in */
-LOCAL void plugins_import( void )
-{
-	T_DIRENT	*de;
-	char		path[FS_PATH_MAX];
-	INT		fd, cnt, i;
-
-	fd = fs_open(PLUGIN_DIR, O_RDONLY | O_DIRECTORY);
-	if ( fd < 0 ) {
-		return;
-	}
-	de = (T_DIRENT *)Kmalloc(sizeof(T_DIRENT) * 8);
-	while ( de != NULL && ( cnt = fs_getdents(fd, de, 8) ) > 0 ) {
-		for ( i = 0; i < cnt; i++ ) {
-			if ( ( de[i].mode & FS_IFDIR ) == 0 || de[i].name[0] == '.' ) {
-				continue;
-			}
-			path_of(path, sizeof(path), PLUGIN_DIR, de[i].name);
-			if ( dt_plugin_import(path, NULL) < E_OK ) {
-				tm_printf((UB *)"dtprog: the plugin %s was not taken in\n", de[i].name);
-			}
+		er = plugin_base(&brought, &prt, &base);
+		if ( er < E_OK ) {
+			return er;
 		}
 	}
-	fs_close(fd);
-	if ( de != NULL ) Kfree(de);
+	m = (UB *)Kmalloc(1024 + OB_NAME_MAX * 2);
+	if ( m == NULL ) {
+		er = E_NOMEM;
+	} else {
+		n = plugin_meta(m, 1024 + OB_NAME_MAX * 2, dr.name, id, name, kind, ver,
+				has_base ? &base : NULL, types);
+		knl_memset(&c, 0, sizeof(c));
+		c.type = OB_T_STORAGE;
+		c.sub = OB_S_FILE;
+		c.json = m;
+		c.jsonsz = ( n > 0 ) ? n : 0;
+		c.prt = &prt;
+		if ( has_base ) {
+			c.near = base;			/* beside its template */
+		}
+		er = ( n > 0 ) ? ob_cre_obj(&c, &prog) : E_LIMIT;
+		Kfree(m);
+	}
+	if ( er >= E_OK ) {
+		er = ( ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &box) >= E_OK ) ? om_obj_link_add(&box, &prog)
+										     : E_SYS;
+	}
+	if ( er < E_OK ) {
+		if ( has_base ) (void)ob_del_obj(&base);
+		return er;
+	}
+	if ( had ) {
+		(void)dt_prog_remove(&old);		/* the version it replaces, and its template */
+	}
+	read_box();					/* the registry sees it now */
+	if ( p_prog != NULL ) *p_prog = prog;
+	if ( p_how != NULL ) *p_how = had ? DT_HOW_UPDATED : DT_HOW_NEW;
+	tm_printf((UB *)"dtprog: the plugin %s installed\n", id);
+	return E_OK;
 }
 
 EXPORT void dt_prog_reread( void )
@@ -429,7 +475,6 @@ EXPORT void dt_prog_reread( void )
 EXPORT ER dt_prog_start( void )
 {
 	read_box();
-	plugins_import();
 	tm_printf((UB *)"TessronOS desktop: %d programs\n", nprog);
 
 	return ( nprog > 0 ) ? E_OK : E_NOEXS;
@@ -437,11 +482,19 @@ EXPORT ER dt_prog_start( void )
 
 EXPORT CONST DTPROG *dt_prog_find( CONST UB *id )
 {
-	INT	i;
+	INT	i, k;
 
 	for ( i = 0; id != NULL && i < nprog; i++ ) {
-		if ( same(prog[i].id, (CONST char *)id) ) {
-			return &prog[i];
+		if ( same(prog[i]->id, (CONST char *)id) ) {
+			return prog[i];
+		}
+	}
+	/* no program has it now: the one that had it before */
+	for ( i = 0; id != NULL && i < nprog; i++ ) {
+		for ( k = 0; k < prog[i]->nalias; k++ ) {
+			if ( same(prog[i]->alias[k], (CONST char *)id) ) {
+				return prog[i];
+			}
 		}
 	}
 	return NULL;
@@ -450,7 +503,7 @@ EXPORT CONST DTPROG *dt_prog_find( CONST UB *id )
 /* The i-th program the registry knows, NULL past the last */
 EXPORT CONST DTPROG *dt_prog_at( INT i )
 {
-	return ( i >= 0 && i < nprog ) ? &prog[i] : NULL;
+	return ( i >= 0 && i < nprog ) ? prog[i] : NULL;
 }
 
 EXPORT CONST DTPROG *dt_prog_of( CONST TS_UUID *uuid )
@@ -458,11 +511,22 @@ EXPORT CONST DTPROG *dt_prog_of( CONST TS_UUID *uuid )
 	INT	i;
 
 	for ( i = 0; uuid != NULL && i < nprog; i++ ) {
-		if ( ts_uuid_cmp(&prog[i].uuid, uuid) == 0 ) {
-			return &prog[i];
+		if ( ts_uuid_cmp(&prog[i]->uuid, uuid) == 0 ) {
+			return prog[i];
 		}
 	}
 	return NULL;
+}
+
+/* How many programs of a kind there are (0: of every kind) */
+EXPORT INT dt_prog_count( UINT kind )
+{
+	INT	i, n = 0;
+
+	for ( i = 0; i < nprog; i++ ) {
+		if ( kind == 0 || prog[i]->kind == kind ) n++;
+	}
+	return n;
 }
 
 EXPORT INT dt_prog_list( UINT kind, CONST DTPROG **out, INT max )
@@ -470,8 +534,8 @@ EXPORT INT dt_prog_list( UINT kind, CONST DTPROG **out, INT max )
 	INT	i, n = 0;
 
 	for ( i = 0; i < nprog && n < max; i++ ) {
-		if ( kind == 0 || prog[i].kind == kind ) {
-			out[n++] = &prog[i];
+		if ( kind == 0 || prog[i]->kind == kind ) {
+			out[n++] = prog[i];
 		}
 	}
 	return n;
@@ -526,21 +590,68 @@ LOCAL BOOL has_type( CONST UB *types, CONST UB *t )
 	return FALSE;
 }
 
-EXPORT INT dt_prog_by_type( CONST T_VOBJ *v, CONST DTPROG **out, INT max )
+LOCAL INT copy_s( UB *d, INT max, CONST UB *s )
 {
-	UB	t[16], have[DT_PROG_ID];
-	INT	i, k, n = 0;
+	INT	i;
 
-	if ( v == NULL || !obj_type(v, t, sizeof(t)) ) return 0;
-	for ( i = 0; i < nprog && n < max; i++ ) {
-		BOOL	in_list = FALSE;
+	for ( i = 0; s != NULL && s[i] != 0 && i < max - 1; i++ ) d[i] = s[i];
+	d[i] = 0;
+	return i;
+}
 
-		if ( prog[i].types[0] == 0 || !has_type(prog[i].types, t) ) continue;
-		for ( k = 0; k < 16 && !in_list; k++ ) {
-			if ( om_link_app_id(v, k, have, DT_PROG_ID) <= 0 ) break;
-			in_list = same(have, (CONST char *)prog[i].id);
+/* One entry more, unless the program is in the list already: its place, or -1 */
+LOCAL INT app_put( DTAPP *out, INT max, INT *n, CONST UB *id, CONST UB *raw, CONST UB *name, BOOL listed )
+{
+	INT	i;
+
+	for ( i = 0; i < *n; i++ ) {
+		if ( same(out[i].id, (CONST char *)id) ) return i;
+	}
+	if ( *n >= max ) return -1;
+	(void)copy_s(out[i].id, DT_PROG_ID, id);
+	(void)copy_s(out[i].raw, DT_PROG_ID, raw);
+	(void)copy_s(out[i].name, TAD_NAME_MAX, name);
+	out[i].listed = listed;
+	(*n)++;
+	return i;
+}
+
+EXPORT INT dt_app_list( CONST T_VOBJ *v, DTAPP *out, INT max, INT *p_dflt )
+{
+	UB		(*names)[OM_APP_NAME] = NULL, id[DT_PROG_ID], dflt[DT_PROG_ID], t[16];
+	CONST DTPROG	*p;
+	INT		na, i, n = 0;
+
+	if ( p_dflt != NULL ) *p_dflt = -1;
+	if ( v == NULL ) return 0;
+	na = om_link_napps(v);
+	if ( na < 0 ) na = 0;
+	if ( out == NULL ) return na + nprog;
+
+	/* the applist, each name as the system has the program */
+	if ( na > 0 ) names = (UB (*)[OM_APP_NAME])Kmalloc(sizeof(UB) * OM_APP_NAME * (SZ)na);
+	na = ( names != NULL ) ? om_link_apps(v, names, na) : 0;
+	for ( i = 0; i < na; i++ ) {
+		if ( om_link_app_id(v, i, id, DT_PROG_ID) <= 0 ) continue;
+		p = dt_prog_find(id);
+		(void)app_put(out, max, &n, ( p != NULL ) ? p->id : id, id, ( p != NULL ) ? p->name : names[i], TRUE);
+	}
+	if ( names != NULL ) Kfree(names);
+
+	/* then what opens an object of its kind */
+	if ( obj_type(v, t, sizeof(t)) ) {
+		for ( i = 0; i < nprog; i++ ) {
+			if ( prog[i]->types[0] == 0 || !has_type(prog[i]->types, t) ) continue;
+			(void)app_put(out, max, &n, prog[i]->id, (CONST UB *)"", prog[i]->name, FALSE);
 		}
-		if ( !in_list ) out[n++] = &prog[i];
+	}
+
+	if ( p_dflt != NULL && om_link_default_app(v, dflt, DT_PROG_ID) > 0 ) {
+		p = dt_prog_find(dflt);
+		if ( p != NULL ) (void)copy_s(dflt, DT_PROG_ID, p->id);
+		for ( i = 0; i < n && *p_dflt < 0; i++ ) {
+			if ( same(out[i].id, (CONST char *)dflt) ) *p_dflt = i;
+		}
 	}
 	return n;
 }
@@ -551,23 +662,34 @@ EXPORT INT dt_prog_by_type( CONST T_VOBJ *v, CONST DTPROG **out, INT max )
  */
 EXPORT T_TAD *dt_prog_page( UINT kind )
 {
-	TS_UUID		ids[PROG_MAX * DT_PROG_BASE];
-	CONST char	*names[PROG_MAX * DT_PROG_BASE];
+	TS_UUID		*ids;
+	CONST char	**names;
+	T_TAD		*t;
 	INT		i, k, n = 0;
 
+	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( nprog * DT_PROG_BASE + 1 ));
+	names = (CONST char **)Kmalloc(sizeof(char *) * (SZ)( nprog * DT_PROG_BASE + 1 ));
+	if ( ids == NULL || names == NULL ) {
+		if ( ids != NULL ) Kfree(ids);
+		if ( names != NULL ) Kfree((void *)names);
+		return NULL;
+	}
 	for ( i = 0; i < nprog; i++ ) {
-		if ( prog[i].kind != kind ) continue;
+		if ( prog[i]->kind != kind ) continue;
 		if ( kind == DT_PK_APP ) {
-			for ( k = 0; k < prog[i].nbase; k++ ) {
-				ids[n] = prog[i].base[k];
-				names[n++] = (CONST char *)prog[i].name;
+			for ( k = 0; k < prog[i]->nbase; k++ ) {
+				ids[n] = prog[i]->base[k];
+				names[n++] = (CONST char *)prog[i]->name;
 			}
 		} else {
-			ids[n] = prog[i].uuid;
-			names[n++] = (CONST char *)prog[i].name;
+			ids[n] = prog[i]->uuid;
+			names[n++] = (CONST char *)prog[i]->name;
 		}
 	}
-	return dt_list_record(( kind == DT_PK_APP ) ? "原紙箱" : "小物箱", ids, names, n);
+	t = dt_list_record(( kind == DT_PK_APP ) ? "原紙箱" : "小物箱", ids, names, n);
+	Kfree(ids);
+	Kfree((void *)names);
+	return t;
 }
 
 /*
@@ -580,8 +702,8 @@ EXPORT INT dt_prog_roots( TS_UUID *ids, INT max )
 
 	if ( n < max && ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &ids[n]) >= E_OK ) n++;
 	for ( i = 0; i < nprog; i++ ) {
-		for ( k = 0; k < prog[i].nbase && n < max; k++ ) {
-			ids[n++] = prog[i].base[k];
+		for ( k = 0; k < prog[i]->nbase && n < max; k++ ) {
+			ids[n++] = prog[i]->base[k];
 		}
 	}
 	return n;
@@ -593,9 +715,9 @@ EXPORT CONST char *dt_prog_base_name( CONST TS_UUID *target )
 	INT	i, k;
 
 	for ( i = 0; i < nprog; i++ ) {
-		for ( k = 0; k < prog[i].nbase; k++ ) {
-			if ( ts_uuid_cmp(&prog[i].base[k], target) == 0 ) {
-				return (CONST char *)prog[i].name;
+		for ( k = 0; k < prog[i]->nbase; k++ ) {
+			if ( ts_uuid_cmp(&prog[i]->base[k], target) == 0 ) {
+				return (CONST char *)prog[i]->name;
 			}
 		}
 	}
@@ -874,6 +996,10 @@ EXPORT ER dt_prog_run( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v )
 	}
 	if ( same(p->id, "disk-repair") ) {
 		dt_fix_open();
+		return E_OK;
+	}
+	if ( same(p->id, "system-install") ) {
+		dt_sysinst_open();
 		return E_OK;
 	}
 	if ( same(p->id, "real-object-search") ) {

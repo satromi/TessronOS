@@ -8,3 +8,5 @@ KBMODE	1
 VIDEOMODE	0
 # CPU_MHZ: プロセッサのクロックの上限(MHz)、0 はファームウェアの許す最大。行が無いときも 1800
 CPU_MHZ	1800
+# CLEAR_LIST: 起動のたびに空にする実身の一覧(レコード0の続柄tessronos.clearAtStartの仮身)を作り終えた印
+CLEAR_LIST	1

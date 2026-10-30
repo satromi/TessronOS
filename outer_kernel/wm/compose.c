@@ -525,10 +525,15 @@ EXPORT void cp_shadow( CONST T_CPDST *d, CONST T_CPWIN *w )
 	CONST UB	*cov;
 	INT		rad, y, x, k, ol = w->outer.left, orr = w->outer.right;
 	BOOL		simd = cp_simd_here();
-	SHDTAB		tb;
+	SHDTAB		*tbp;
 
 	if ( !cp_shadow_extent(w, &e) || !cut(&e, &d->box) ) {
 		return;
+	}
+	/* the table is 4KB and more: from the heap, since a task of the kernel has a small stack */
+	tbp = (SHDTAB *)Kmalloc(sizeof(SHDTAB));
+	if ( tbp == NULL ) {
+		return;				/* no shadow this time */
 	}
 	rad = ( w->shape == NULL ) ? cp_round_of(&w->outer, w->round) : 0;
 	cov = cp_corner_cov(rad);
@@ -538,7 +543,7 @@ EXPORT void cp_shadow( CONST T_CPDST *d, CONST T_CPWIN *w )
 	s = w->outer;
 	s.left += w->shd_dx;   s.right += w->shd_dx;
 	s.top += w->shd_dy;    s.bottom += w->shd_dy;
-	shd_make(&tb, w, &s, rad);
+	shd_make(tbp, w, &s, rad);
 
 	for ( y = e.top; y < e.bottom; y++ ) {
 		UW		*row = (UW *)( d->back + (UBINT)y * d->pitch );
@@ -575,7 +580,7 @@ EXPORT void cp_shadow( CONST T_CPDST *d, CONST T_CPWIN *w )
 				INT	m = ( x1 - x0 < SHD_RUN ) ? x1 - x0 : SHD_RUN, i;
 
 				for ( i = 0; i < m; i++ ) {
-					UINT	a = shd_at(&tb, x0 + i, y);
+					UINT	a = shd_at(tbp, x0 + i, y);
 
 					if ( a != 0 && inrow && x0 + i >= ol && x0 + i < orr ) {
 						a = a * ( 255U - cover_x(&w->outer, rad, cr, x0 + i) ) / 255U;
@@ -586,7 +591,7 @@ EXPORT void cp_shadow( CONST T_CPDST *d, CONST T_CPWIN *w )
 				x0 += m;
 			}
 			for ( x = x0; x < x1; x++ ) {
-				UINT	a = shd_at(&tb, x, y);
+				UINT	a = shd_at(tbp, x, y);
 
 				if ( a != 0 && inrow && x >= ol && x < orr ) {
 					a = a * ( 255U - cover_x(&w->outer, rad, cr, x) ) / 255U;
@@ -597,6 +602,7 @@ EXPORT void cp_shadow( CONST T_CPDST *d, CONST T_CPWIN *w )
 			}
 		}
 	}
+	Kfree(tbp);
 }
 
 /* ---------------------------------------------------------------- the parts of a window */

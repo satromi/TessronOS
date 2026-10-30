@@ -10,6 +10,8 @@ SRCS_TKERNEL := \
 	kernel/tkernel/deviceio.c \
 	kernel/tkernel/eventflag.c \
 	kernel/tkernel/int.c \
+	kernel/tkernel/inttarget.c \
+	kernel/tkernel/klk.c \
 	kernel/tkernel/klock.c \
 	kernel/tkernel/mailbox.c \
 	kernel/tkernel/memory.c \
@@ -167,7 +169,13 @@ SRCS_DEVICE  := \
 	device/gpu/gpu.c \
 	device/gpu/gpu_svc.c \
 	device/ser/ser_svc.c \
-	device/gpu/v3d/v3d_mmu.c
+	device/gpu/v3d/v3d_mmu.c \
+	device/i2c/i2c_gpio.c \
+	device/i2c/gt911.c
+
+# i2c_gpio.c と gt911.c は、ピンを動かす I2C と GT911(設計書 6.4.2)。機械に依らないので
+# 全部の機械で建てる。Raspberry Pi 4 のボード側(tpanel.c)が使い、試験(ktest_tpanel.c)は
+# 偽のピンと偽の GT911 でどの機械でも確かめる
 
 # 画面の機械に依らない側・描画・窓・書体。画面を得る側(disp_bochs.c、disp_rpi5.c)は
 # 各 .mk が足す。画面の見つからない機械では起動時に何も描かずに済ませる(設計書 16.5)
@@ -217,6 +225,7 @@ SRCS_DESKTOP := \
 	application/desktop/dtinfo.c \
 	application/desktop/dtfault.c \
 	application/desktop/dtpkg.c \
+	application/desktop/dtsysup.c \
 	application/desktop/dtuitest.c \
 	application/desktop/dtsys.c \
 	application/desktop/dttray.c \
@@ -227,6 +236,8 @@ SRCS_DESKTOP := \
 	application/desktop/dttrayv.c \
 	application/desktop/dtnotify.c \
 	application/desktop/dtfix.c \
+	application/sysinst/sysinst.c \
+	application/sysinst/si_core.c \
 	application/desktop/dtdisk.c \
 	application/desktop/dttype.c \
 	application/desktop/dtadmin.c \
@@ -238,7 +249,7 @@ SRCS_DESKTOP := \
 	application/desktop/dttip.c \
 	application/desktop/dtslide.c \
 	application/desktop/dtrt.c \
-	application/desktop/dtrtwin.c \
+	application/desktop/dtrthost.c \
 	lib/librtad/rt_num.c \
 	lib/librtad/rt_prog.c \
 	lib/librtad/rt_run.c \
@@ -288,6 +299,7 @@ SRCS_APP += \
 	tests/ktest/ktest_mem.c \
 	tests/ktest/ktest_el0.c \
 	tests/ktest/ktest_smp.c \
+	tests/ktest/ktest_klk.c \
 	tests/ktest/ktest_lockup.c \
 	tests/ktest/ktest_blk.c \
 	tests/ktest/ktest_sd.c \
@@ -308,15 +320,19 @@ SRCS_APP += \
 	tests/ktest/ktest_tsfsbtree.c \
 	tests/ktest/ktest_tsfsjrnl.c \
 	tests/ktest/ktest_tsfsobj.c \
+	tests/ktest/ktest_iob.c \
 	tests/ktest/ktest_dfix.c \
 	tests/ktest/ktest_ob.c \
 	tests/ktest/ktest_tad.c \
 	tests/ktest/ktest_om.c \
 	tests/ktest/ktest_usb.c \
+	tests/ktest/ktest_digi.c \
+	tests/ktest/ktest_tpanel.c \
 	tests/ktest/ktest_devob.c \
 	tests/ktest/ktest_snd.c \
 	tests/ktest/ktest_cam.c \
 	tests/ktest/ktest_store.c \
+	tests/ktest/ktest_sysup.c \
 	tests/ktest/ktest_unp.c \
 	lib/libbpk/bpk_lh5.c \
 	tests/ktest/ktest_arc.c \
@@ -395,6 +411,7 @@ SRCS_APP += \
 	application/calculator/cu_dec.c \
 	application/calculator/cu_eng.c \
 	tests/ktest/ktest_km.c \
+	tests/ktest/ktest_skb.c \
 	tests/ktest/ktest_mcard.c \
 	application/mcard/mc_db.c \
 	application/mcard/mc_bin.c \

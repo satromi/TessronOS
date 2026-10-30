@@ -352,7 +352,9 @@ LOCAL void leave_screen( CONST char *path, CONST T_PRNJOB *job, INT page )
 		out[n++] = (UB)( px[i] >> 8 );
 		out[n++] = (UB)px[i];
 	}
-	leave(path, out, (SZ)n);
+	if ( kt_room(path, (UD)n) ) {
+		leave(path, out, (SZ)n);
+	}
 	Kfree(px);
 	Kfree(out);
 }
@@ -1288,12 +1290,15 @@ LOCAL void test_calc( void )
 		CXCELL	*h = cx_make(s, 2 + row, 2);
 
 		if ( h != NULL ) {
+			CXSTYLE	st = *h->st;
+
 			(void)cx_set_text(h, (CONST UB *)heads[row]);
-			h->st.has |= CX_S_BOLD | CX_S_BG | CX_S_FRAME;
-			knl_strcpy(h->st.bg, "#e0e8ff");
-			h->st.side[CX_BOTTOM].on = TRUE;
-			h->st.side[CX_BOTTOM].width = 2;
-			knl_strcpy(h->st.side[CX_BOTTOM].colour, "#000000");
+			st.has |= CX_S_BOLD | CX_S_BG | CX_S_FRAME;
+			knl_strcpy(st.bg, "#e0e8ff");
+			st.side[CX_BOTTOM].on = TRUE;
+			st.side[CX_BOTTOM].width = 2;
+			knl_strcpy(st.side[CX_BOTTOM].colour, "#000000");
+			KT_ASSERT(cx_style_put(h, &st));
 		}
 	}
 	/* 120 rows: more than one page of A4 */
@@ -1311,9 +1316,12 @@ LOCAL void test_calc( void )
 		num[k] = 0;
 		if ( a != NULL ) (void)cx_set_text(a, (CONST UB *)"りんご");
 		if ( b != NULL ) {
+			CXSTYLE	st = *b->st;
+
 			(void)cx_set_text(b, num);
-			b->st.has |= CX_S_ALIGN;
-			knl_strcpy(b->st.align, "right");
+			st.has |= CX_S_ALIGN;
+			knl_strcpy(st.align, "right");
+			KT_ASSERT(cx_style_put(b, &st));
 		}
 	}
 	KT_ASSERT(cx_print_range(s, &rg));

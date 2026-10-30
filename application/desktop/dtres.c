@@ -35,6 +35,7 @@
 #include <ts/json.h>
 #include <ts/dtreq.h>
 #include <ts/part.h>
+#include <ts/conf.h>
 #include "desktop.h"
 
 #define RES_MAX		32		/* faces, or pictures, in one box */
@@ -42,7 +43,13 @@
 LOCAL CONST char font_box_id[] = SYSDEF_FONT_BOX;
 LOCAL CONST char wall_box_id[] = SYSDEF_WALL_BOX;
 
-/* The face the letters of the system are drawn in, when it is there */
+/*
+ * The face the letters of the system are drawn in: the one the link of
+ * 機器の設定 with the relationship CF_ROLE_FACE points at. Until there
+ * is such a link, the first of these files the 書体箱 has, and the link
+ * is then made to it, so that the face is followed by its object from
+ * then on, however it is named.
+ */
 LOCAL CONST char *system_face[] = {
 	"NotoSansJP-Regular.otf", "NOTOSANS.OTF", NULL
 };
@@ -72,13 +79,21 @@ LOCAL BOOL same_name( CONST UB *a, CONST UB *b )
 
 /* ---------------------------------------------------------------- boxes */
 
+/* The box: found from the root システム by its link's relationship, or else by its identity */
+LOCAL BOOL box_of( CONST char *id, TS_UUID *p_u )
+{
+	CONST char	*role = ( id == font_box_id ) ? SYSROLE_FONTS : ( id == wall_box_id ) ? SYSROLE_WALLS : NULL;
+
+	return knl_sys_find(role, id, p_u);
+}
+
 /* What a box links to */
 LOCAL INT box_links( CONST char *id, TS_UUID *ids, INT max )
 {
 	TS_UUID	u;
 	INT	n = 0;
 
-	if ( ts_str_to_uuid(id, &u) < E_OK || ob_lst_lnk(&u, NULL, ids, max, &n) < E_OK ) {
+	if ( !box_of(id, &u) || ob_lst_lnk(&u, NULL, ids, max, &n) < E_OK ) {
 		return 0;
 	}
 	return ( n > max ) ? max : n;
@@ -90,7 +105,7 @@ LOCAL BOOL box_pick( CONST char *id, CONST char **names, TS_UUID *p_uuid )
 	TS_UUID	u;
 	INT	k;
 
-	if ( ts_str_to_uuid(id, &u) < E_OK ) {
+	if ( !box_of(id, &u) ) {
 		return FALSE;
 	}
 	for ( k = 0; names[k] != NULL; k++ ) {
@@ -360,6 +375,7 @@ EXPORT INT dt_res_faces( void )
 	ID	fid, pick = 0;
 	INT	n, i, k, nf, opened = 0;
 	BOOL	have_sys, is_sys = FALSE;
+	char	idb[TS_UUID_STRLEN + 1];
 
 	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * RES_MAX);
 	fs = (FACESET *)Kmalloc(sizeof(FACESET) * FACE_MAX);
@@ -368,7 +384,12 @@ EXPORT INT dt_res_faces( void )
 		if ( fs != NULL ) Kfree(fs);
 		return 0;
 	}
-	have_sys = box_pick(font_box_id, system_face, &sys);
+	have_sys = knl_conf_link_get(knl_sys_id(SYSROLE_CONF_DEV, SYSDEF_CONF_DEV, idb), CF_ROLE_FACE, &sys);
+	if ( !have_sys && box_pick(font_box_id, system_face, &sys) ) {
+		have_sys = TRUE;
+		(void)knl_conf_link_put(knl_sys_id(SYSROLE_CONF_DEV, SYSDEF_CONF_DEV, idb), CF_ROLE_FACE, &sys,
+					"システムの書体：");
+	}
 	n = box_links(font_box_id, ids, RES_MAX);
 	for ( i = 0; i < n; i++ ) {
 		BOOL	this_sys = (BOOL)( have_sys && same_uuid(&ids[i], &sys) );
@@ -449,12 +470,13 @@ LOCAL void faces_off( CONST TS_UUID *u )
 /* An object deleted, whatever keeps it from being so by mistake */
 LOCAL ER del_font_obj( CONST TS_UUID *u )
 {
-	T_OBPRT	prt;
+	T_OBPRT	*prt = knl_ob_prt_get(u);
 
-	if ( ob_get_prt(u, &prt) >= E_OK && ( prt.attr & ( OB_A_PERM | OB_A_RONLY ) ) ) {
-		prt.attr &= ~( OB_A_PERM | OB_A_RONLY );
-		(void)ob_set_prt(u, &prt);
+	if ( prt != NULL && ( prt->attr & ( OB_A_PERM | OB_A_RONLY ) ) ) {
+		prt->attr &= ~( OB_A_PERM | OB_A_RONLY );
+		(void)ob_set_prt(u, prt);
 	}
+	if ( prt != NULL ) Kfree(prt);
 	return ob_del_obj(u);
 }
 
@@ -500,7 +522,7 @@ LOCAL void same_out( CONST TS_UUID *u, ID fid )
 	INT	k;
 
 	if ( fn_family(fid, fam, sizeof(fam)) <= 0 || fn_get_reg(fid, &r) < E_OK
-	  || ts_str_to_uuid(font_box_id, &box) < E_OK ) {
+	  || !box_of(font_box_id, &box) ) {
 		return;
 	}
 	for ( k = 0; k < dt_nfaces; k++ ) {
@@ -713,7 +735,7 @@ EXPORT ER dt_font_req( CONST T_DTREQ *rq, T_DTANS *an )
 	INT	index = ( rq->recno > 0 ) ? rq->recno : 0;
 	ER	er = E_OK;
 
-	if ( ts_str_to_uuid(font_box_id, &box) < E_OK ) {
+	if ( !box_of(font_box_id, &box) ) {
 		return E_SYS;
 	}
 	switch ( rq->req ) {
@@ -815,7 +837,7 @@ EXPORT ER dt_res_wall( UINT mode )
 	TS_UUID	box, pick;
 
 	if ( !box_pick(wall_box_id, system_wall, &pick) ) {
-		if ( ts_str_to_uuid(wall_box_id, &box) < E_OK || ob_fnd_lnk(&box, NULL, &pick) < E_OK ) {
+		if ( !box_of(wall_box_id, &box) || ob_fnd_lnk(&box, NULL, &pick) < E_OK ) {
 			return E_NOEXS;
 		}
 	}

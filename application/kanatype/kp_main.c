@@ -48,6 +48,7 @@
 #include <ts/ui.h>
 #include <ts/sysdef.h>
 #include <ts/json.h>
+#include <ts/obatr.h>
 #include <ts/dtreq.h>
 #include <ts/hid.h>
 #include <ts/uuid.h>
@@ -181,7 +182,8 @@ static UW	g_paper = C_GROUND;	/* the object's window.backgroundColor */
 
 static UB	g_json[JSON_MAX + 1];
 static UB	g_out[JSON_MAX];
-static char	g_meta[OB_ATR_MAX + 1];
+static char	g_meta_none[1];
+static char	*g_meta = g_meta_none;	/* the metadata meta_of read last ("" when none) */
 
 static void event( CONST T_OBNTM *m );
 
@@ -314,15 +316,22 @@ static ER res_write( CONST char *name, CONST UB *json, INT len )
 
 static INT meta_of( CONST TS_UUID *u )
 {
-	SZ	asz = 0;
+	UB	*m = NULL;
+	INT	n;
 	ID	k = ob_opn_obj(u, OB_OP_ATRRD);
 
-	g_meta[0] = 0;
+	/* the metadata whole, in memory of its own: the last one read let go */
+	if ( g_meta != g_meta_none ) free(g_meta);
+	g_meta = g_meta_none;
 	if ( k <= 0 ) return 0;
-	if ( ob_get_atr(k, (UB *)g_meta, OB_ATR_MAX, &asz) < E_OK || asz < 0 ) asz = 0;
+	n = ob_atr_read(k, 0, &m);
 	ob_cls_obj(k);
-	g_meta[asz] = 0;
-	return (INT)asz;
+	if ( n <= 0 ) {
+		free(m);
+		return 0;
+	}
+	g_meta = (char *)m;
+	return n;
 }
 
 /* The paper the object asks for: window.backgroundColor, "#rrggbb" */
@@ -937,7 +946,8 @@ static ER win_open( CONST char *title )
 	T_OBWPOS	wp;
 	T_JSON		root, w, pos;
 	SZ		asz = 0;
-	char		json[200];
+	char		json[260];
+	char		shown[TS_UUID_STRLEN + 1];
 	INT		x = 100, y = 80, ww = 850, wh = 650, mn = meta_of(&g_obj);
 
 	if ( mn > 0 && js_parse((CONST UB *)g_meta, mn, &root) >= E_OK && js_get(&root, "window", &w) >= E_OK ) {
@@ -952,8 +962,9 @@ static ER win_open( CONST char *title )
 	if ( wh < MIN_H ) wh = MIN_H;
 	if ( x < 0 ) x = 0;
 	if ( y < 0 ) y = 0;
-	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":7,\"icon\":\"%s\"}",
-		 x, y, x + ww + FRAME_W, y + wh + TITLE_H, SYSDEF_PROG_KANATYPE);
+	ts_uuid_text(&g_obj, shown);	/* what it shows, for ウインドウ一覧 */
+	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":7,\"icon\":\"%s\",\"shows\":\"%s\"}",
+		 x, y, x + ww + FRAME_W, y + wh + TITLE_H, SYSDEF_PROG_KANATYPE, shown);
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
 	c.sub = OB_S_WINDOW;
@@ -1025,7 +1036,6 @@ static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	T_OBCRE		c;
 	SZ		asz = 0;
 	ID		k, ka;
-	INT		i;
 	ER		er;
 
 	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
@@ -1043,16 +1053,13 @@ static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	k = ob_opn_obj(&d, OB_OP_WRITE);
 	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
 	if ( k > 0 ) ob_cls_obj(k);
-	for ( i = 0; er >= E_OK; i += 20 ) {
-		if ( ob_rea_rec(ka, 0, 0, an, sizeof(*an), &asz) >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
+	/* the answer waited for on its channel, at most wait_ms */
+	while ( er >= E_OK ) {
+		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
+		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
 			er = an->er;
 			break;
 		}
-		if ( i >= wait_ms ) {
-			er = E_TMOUT;
-			break;
-		}
-		(void)tk_dly_tsk(20);
 	}
 	ob_cls_obj(ka);
 	(void)ob_del_obj(&reply);
@@ -1172,7 +1179,7 @@ static void practice_done( void )
 			ui_set_text(&q, i + 1, lp[i]);
 		}
 		while ( done == 0 ) {
-			ev = ui_dlg_next(&g_ui, &q, &m, &num);
+			ev = ( ui_wait(&g_ui, &m, TMO_FEVR) >= E_OK ) ? ui_dlg_take(&q, &m, &num) : UI_EV_CLOSE;
 			switch ( ev ) {
 			case UI_EV_BUTTON:
 				done = ( num == P_RES_RESTART ) ? 1 : 2;
@@ -1184,8 +1191,6 @@ static void practice_done( void )
 				if ( m.id == 3 && m.event == OB_E_KEY && ( m.mods & OB_KEY_UP ) == 0
 				  && ( m.code == KB_K_ENTER || m.code == K_KPENTER ) ) {
 					done = 1;
-				} else {
-					(void)tk_dly_tsk(TICK_MS);
 				}
 				break;
 			default:
@@ -1211,7 +1216,7 @@ static void ask_look( void )
 	if ( ui_dlg_open(&g_ui, PN_LOOK, &q) < E_OK ) return;
 	ui_set_fields(&q, P_LOOK_N, &v, 1);
 	while ( done == 0 ) {
-		ev = ui_dlg_next(&g_ui, &q, &m, &num);
+		ev = ( ui_wait(&g_ui, &m, TMO_FEVR) >= E_OK ) ? ui_dlg_take(&q, &m, &num) : UI_EV_CLOSE;
 		switch ( ev ) {
 		case UI_EV_BUTTON:
 			done = ( num == P_LOOK_OK ) ? 1 : -1;
@@ -1223,8 +1228,6 @@ static void ask_look( void )
 			if ( m.id == 3 && m.event == OB_E_KEY && ( m.mods & OB_KEY_UP ) == 0
 			  && ( m.code == KB_K_ENTER || m.code == K_KPENTER ) ) {
 				done = 1;
-			} else {
-				(void)tk_dly_tsk(TICK_MS);
 			}
 			break;
 		default:
@@ -1400,25 +1403,25 @@ static ER layout_add( CONST UB *json, INT n, CONST UB *fallback )
 
 static void dropped( void )
 {
-	static T_OBDROP	d;
+	T_OBDROP	*d;
 	UB		fb[OB_DROP_NAME];
 	INT		n, k;
 
-	if ( ui_drop(&g_ui, &d) < E_OK ) return;
-	if ( d.n < 1 ) {
-		ui_drop_answer(&g_ui, &d, OB_DR_REFUSE, "");
+	if ( ( d = ui_drop(&g_ui) ) == NULL ) return;
+	if ( d->n < 1 ) {
+		ui_drop_answer(&g_ui, d, OB_DR_REFUSE, "");
 		return;
 	}
-	n = json_of(&d.v[0].target);
+	n = json_of(&d->v[0].target);
 	if ( n <= 0 || kb_kind(g_json, n) == KB_KIND_NONE ) {
-		ui_drop_answer(&g_ui, &d, OB_DR_REFUSE, ( n <= 0 ) ? "JSONファイルの読み込みに失敗しました"
+		ui_drop_answer(&g_ui, d, OB_DR_REFUSE, ( n <= 0 ) ? "JSONファイルの読み込みに失敗しました"
 								 : "不明なJSONファイル形式です");
 		note("dropped: not a layout");
 		return;
 	}
-	ui_drop_answer(&g_ui, &d, OB_DR_ACCEPT, "");
+	ui_drop_answer(&g_ui, d, OB_DR_ACCEPT, "");
 	/* the name the link shows, without .json, when the layout gives none */
-	snprintf((char *)fb, sizeof(fb), "%s", (char *)d.v[0].name);
+	snprintf((char *)fb, sizeof(fb), "%s", (char *)d->v[0].name);
 	k = (INT)strlen((char *)fb);
 	if ( k > 5 && strcmp((char *)fb + k - 5, ".json") == 0 ) fb[k - 5] = 0;
 	(void)layout_add(g_json, n, fb);
@@ -1531,11 +1534,11 @@ static void key( CONST T_OBNTM *m )
 		return;
 	}
 	if ( modifier_only(u) ) return;
-	if ( code == K_L && ( m->mods & M_CTRL ) != 0 && !g_e.practising ) {
+	if ( wm_key_cmd(code) == K_L && ( m->mods & M_CTRL ) != 0 && !g_e.practising ) {
 		fullscreen();
 		return;
 	}
-	if ( code == K_E && ( m->mods & M_CTRL ) != 0 ) {
+	if ( wm_key_cmd(code) == K_E && ( m->mods & M_CTRL ) != 0 ) {
 		finish();
 		return;
 	}
@@ -1621,6 +1624,19 @@ static void event( CONST T_OBNTM *m )
 }
 
 /* Whether a flash ended: the key is drawn again without it */
+/* ms until the first key lit up is to go out, TMO_FEVR when none is lit */
+static TMO flash_left( UD now )
+{
+	UD	first = 0;
+	INT	i;
+
+	for ( i = 0; i < 256; i++ ) {
+		if ( g_flash_until[i] != 0 && ( first == 0 || g_flash_until[i] < first ) ) first = g_flash_until[i];
+	}
+	if ( first == 0 ) return TMO_FEVR;
+	return ( first > now ) ? (TMO)( first - now ) : 0;
+}
+
 static BOOL flash_ended( UD now )
 {
 	INT	i;
@@ -1777,10 +1793,12 @@ int main( void )
 	paint();
 
 	while ( !g_closing ) {
-		while ( !g_closing && ob_rea_rec(g_port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) event(&m);
+		for ( TMO tmo = flash_left(now_ms());
+		      !g_closing && ob_rea_tmo(g_port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) {
+			event(&m);
+		}
 		if ( !g_closing && flash_ended(now_ms()) ) g_dirty = TRUE;
 		if ( g_dirty && !g_closing ) paint();
-		if ( !g_closing ) (void)tk_dly_tsk(TICK_MS);
 	}
 	if ( g_kw > 0 ) ob_cls_obj(g_kw);
 	(void)ob_del_obj(&g_win);

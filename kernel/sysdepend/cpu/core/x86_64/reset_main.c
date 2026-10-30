@@ -133,6 +133,8 @@ LOCAL void print_boot_info( CONST T_BOOTINFO *bi )
 		(UW)((UBINT)knl_lowmem_limit >> 32), (UW)(UBINT)knl_lowmem_limit);
 }
 
+IMPORT void	knl_fbcon_mark( CONST T_BOOTINFO *bi, UW k, UW r, UW g, UW b );	/* fbcon.c */
+
 EXPORT void reset_main( UD bi_pa )
 {
 	CONST T_BOOTINFO	*bi = (CONST T_BOOTINFO *)PA2VA(bi_pa);
@@ -140,16 +142,26 @@ EXPORT void reset_main( UD bi_pa )
 	INT			i;
 
 	/* the boot processor's T_PCPU from the first: knl_pcpu() reads it */
-	knl_pcpu_tbl[0].self = &knl_pcpu_tbl[0];
-	wrmsr(MSR_GS_BASE, (UD)(UBINT)&knl_pcpu_tbl[0]);
+	knl_pcpu_boot.self = &knl_pcpu_boot;
+	wrmsr(MSR_GS_BASE, (UD)(UBINT)&knl_pcpu_boot);
 	knl_bootinfo = bi;
+	/*
+	 * The loader's PML4 from the first: the device window's pages that
+	 * are not mapped yet (a screen above 4GB) are made on first use
+	 * (knl_dev_fault, knl_dev_set_wc), which walks it
+	 */
+	knl_pt_l0_k_pa = bi->pml4_pa;
+	knl_fbcon_mark(bi, BI_MK_KENTRY, 0xff, 0xff, 0xff);
 	knl_kimg_pa = bi->kimg_pa;
 	knl_kimg_off = bi->kimg_va - bi->kimg_pa;
 	knl_user_lma = knl_user_lma - (UBINT)( bi->kimg_va - KIMG_VA_BASE ) + (UBINT)bi->kimg_pa;
 	knl_idt_init();				/* an exception is told from here on */
+	knl_fbcon_mark(bi, BI_MK_KIDT, 0x90, 0x90, 0x90);
 
 	libtm_init();
+	knl_fbcon_mark(bi, BI_MK_KTM, 0x90, 0x50, 0x10);
 	knl_fbcon_init(bi);
+	knl_fbcon_mark(bi, BI_MK_KFB, 0xff, 0x90, 0xc0);
 	tm_printf((UB*)"\nTessronOS x64: kernel %x%08x at %x%08x, %d KB; firmware \"%s\"; settings \"%s\"\n",
 		(UW)(bi->kimg_va >> 32), (UW)bi->kimg_va, (UW)(bi->kimg_pa >> 32), (UW)bi->kimg_pa,
 		(UW)(bi->kimg_size >> 10), bi->fw_vendor, bi->cmdline);
@@ -161,6 +173,7 @@ EXPORT void reset_main( UD bi_pa )
 		}
 	}
 
+	knl_fbcon_stage("the processor");
 	knl_smp_init_primary();		/* GDT, TSS, IDT, GS base, SYSCALL, paging, x87/SSE, SMAP */
 	for ( i = 0; i < KNL_BOOTARGS_LEN - 1 && bi->cmdline[i] != '\0'; i++ ) {
 		knl_bootargs[i] = (UB)bi->cmdline[i];
@@ -168,9 +181,12 @@ EXPORT void reset_main( UD bi_pa )
 	knl_bootargs[i] = '\0';
 	take_memory_map(bi);
 	take_screen(bi);
+	knl_fbcon_stage("ACPI tables");
 	(void)knl_acpi_init(bi->rsdp_pa);
 	knl_board_init();		/* which machine, as SMBIOS names it (board.c) */
+	knl_fbcon_stage("the processor's clock");
 	knl_tsc_calibrate();
+	knl_fbcon_stage("memory management");
 	knl_mmu_init();
 
 	/* Startup hardware (board dependent) */
@@ -194,6 +210,7 @@ EXPORT void reset_main( UD bi_pa )
 	print_boot_info(bi);
 
 	/* Startup Kernel */
+	knl_fbcon_stage("the kernel (other processors, timers, the first task)");
 	knl_main();		/**** No return ****/
 
 	while (1) {

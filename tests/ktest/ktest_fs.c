@@ -139,7 +139,7 @@ LOCAL void test_read_multi( void )
 /* the root of the volume lists the files, and a subdirectory is reachable */
 LOCAL void test_dir( void )
 {
-	T_DIRENT	de[8];
+	static T_DIRENT	de[8];
 	UB		buf[32];
 	INT		fd, n, i;
 	BOOL		saw_hello = FALSE, saw_data = FALSE, saw_sub = FALSE;
@@ -274,7 +274,7 @@ LOCAL void test_write( void )
 /* directories can be made, filled, emptied and removed */
 LOCAL void test_mkdir( void )
 {
-	T_DIRENT	de[8];
+	static T_DIRENT	de[8];
 	T_FSTAT		st;
 	INT		fd, n, i;
 	BOOL		saw = FALSE;
@@ -351,7 +351,7 @@ LOCAL void test_longname( void )
 		"/boot/MixedCase Name.Txt",
 		"/boot/short.txt"
 	};
-	T_DIRENT	de[16];
+	static T_DIRENT	de[16];
 	T_FSTAT		st;
 	INT		fd, i, k, n;
 	INT		found = 0;

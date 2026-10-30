@@ -740,8 +740,50 @@ void ms_yield( UD wake )
 
 	if ( t == NULL ) return;
 	t->wake = wake;
+	t->stir = FALSE;
+	t->again = FALSE;
 	t->steps = 0;
 	ms_co_switch(&t->ctx, &rt.sched);
+}
+
+void th_wait( MSTH *t, UD at, BOOL stir, BOOL again )
+{
+	if ( t == NULL || t != rt.cur ) return;
+	t->wake = at;
+	t->stir = stir;
+	t->again = again;
+	t->steps = 0;
+	ms_co_switch(&t->ctx, &rt.sched);
+	t->stir = FALSE;
+	t->again = FALSE;
+}
+
+void th_look( MSTH *t, UD at, BOOL again )
+{
+	UD	look = ms_now_ms() + MS_LOOK_MS;
+
+	th_wait(t, ( at < look ) ? at : look, TRUE, again);
+}
+
+void rt_stir( void )
+{
+	MSTH	*t;
+
+	for ( t = rt.threads; t != NULL; t = t->next ) {
+		if ( t->stir ) t->wake = 0;
+	}
+}
+
+void rt_wake( MSTH *t )
+{
+	if ( t != NULL ) t->wake = 0;
+}
+
+void rt_wake_all( void )
+{
+	MSTH	*t;
+
+	for ( t = rt.threads; t != NULL; t = t->next ) t->wake = 0;
 }
 
 /* Whether a thread must stop where it is */
@@ -762,10 +804,17 @@ static void thread_free( MSTH *t )
 	ms_free(t);
 }
 
+/*
+ * Each thread whose time has come runs once. A turn that did something
+ * -- any but one that came back to look again at what it waits for --
+ * stirs the run once the round is over, so that what the others wait
+ * for is looked at again.
+ */
 void rt_run_threads( void )
 {
 	MSTH	*t, **pp;
 	UD	now = ms_now_ms();
+	BOOL	stirred = FALSE;
 
 	for ( t = rt.threads; t != NULL; t = t->next ) t->turn = FALSE;
 	for ( ;; ) {
@@ -778,6 +827,7 @@ void rt_run_threads( void )
 		rt.cur = t;
 		ms_co_switch(&rt.sched, &t->ctx);
 		rt.cur = NULL;
+		if ( t->done || !t->again ) stirred = TRUE;
 		if ( t->done ) {
 			for ( pp = &rt.threads; *pp != NULL; pp = &(*pp)->next ) {
 				if ( *pp == t ) { *pp = t->next; break; }
@@ -787,6 +837,7 @@ void rt_run_threads( void )
 			thread_free(t);
 		}
 	}
+	if ( stirred ) rt_stir();
 }
 
 BOOL rt_ready( void )
@@ -834,6 +885,7 @@ void rt_stop( void )
 	if ( rt.finished ) return;
 	rt.finished = TRUE;
 	for ( t = rt.threads; t != NULL; t = t->next ) t->terminated = TRUE;
+	rt_wake_all();
 	if ( p != NULL ) {
 		(void)rt_spawn(p, NULL, 0, TRUE);
 	} else {
@@ -1547,15 +1599,6 @@ static INT st_execute( MSTH *t, MSN *s, MSSCOPE *sc )
 	return FL_NONE;
 }
 
-/* Waiting: SLEEP, WAIT and the like come back here each time round */
-BOOL th_wait_round( MSTH *t, UD step_ms )
-{
-	t->waiting = TRUE;
-	ms_yield(ms_now_ms() + step_ms);
-	t->waiting = FALSE;
-	return (BOOL)!th_stop(t);
-}
-
 static INT st_sleep( MSTH *t, MSN *s, MSSCOPE *sc )
 {
 	MSV	v = ev(t, s->a, sc);
@@ -1568,16 +1611,23 @@ static INT st_sleep( MSTH *t, MSN *s, MSSCOPE *sc )
 	if ( ms > 86400000.0 ) ms = 86400000.0;
 	end = start + (UD)ms;
 	t->waiting = TRUE;
-	while ( !th_stop(t) ) {
-		UD	now;
-
+	/* until the time, or BREAK or the end woke it (rt_wake) */
+	for ( BOOL again = FALSE; !th_stop(t); again = TRUE ) {
 		if ( t->brk ) { t->brk = FALSE; rt.lasterr = 2; break; }
-		now = ms_now_ms();
-		if ( now >= end ) { rt.lasterr = 0; break; }
-		ms_yield(( end - now > 50 ) ? now + 50 : end);
+		if ( ms_now_ms() >= end ) { rt.lasterr = 0; break; }
+		th_wait(t, end, FALSE, again);
 	}
 	t->waiting = FALSE;
 	return FL_NONE;
+}
+
+/* The end of a wait of tmo seconds from start (MS_NEVER, none: tmo below 0) */
+UD th_until( UD start, double tmo )
+{
+	double	ms = tmo * 1000;
+
+	if ( tmo < 0 ) return MS_NEVER;
+	return ( ms >= 86400000.0 * 365 ) ? MS_NEVER : start + (UD)ceil(ms);
 }
 
 static INT st_wait( MSTH *t, MSN *s, MSSCOPE *sc )
@@ -1592,7 +1642,8 @@ static INT st_wait( MSTH *t, MSN *s, MSSCOPE *sc )
 		mv_drop(v);
 	}
 	t->waiting = TRUE;
-	while ( !th_stop(t) ) {
+	/* looked at again as the run stirs, until the time given */
+	for ( BOOL again = FALSE; !th_stop(t); again = TRUE ) {
 		MSV	c = ev(t, s->a, sc);
 		BOOL	ok = mv_truthy(c);
 
@@ -1601,7 +1652,7 @@ static INT st_wait( MSTH *t, MSN *s, MSSCOPE *sc )
 		if ( t->brk ) { t->brk = FALSE; rt.lasterr = 2; break; }
 		if ( tmo == 0 ) { rt.lasterr = 1; break; }
 		if ( tmo > 0 && (double)( ms_now_ms() - start ) >= tmo * 1000 ) { rt.lasterr = 1; break; }
-		ms_yield(ms_now_ms() + 50);
+		th_wait(t, th_until(start, tmo), TRUE, again);
 	}
 	t->waiting = FALSE;
 	return FL_NONE;
@@ -1618,7 +1669,10 @@ static INT st_break( MSTH *t, MSN *s, MSSCOPE *sc )
 		MSTH	*q;
 
 		for ( q = rt.threads; q != NULL; q = q->next ) {
-			if ( nm != NULL && q->name == nm ) q->brk = TRUE;
+			if ( nm != NULL && q->name == nm ) {
+				q->brk = TRUE;
+				rt_wake(q);
+			}
 		}
 	}
 	return FL_NONE;
@@ -1640,14 +1694,22 @@ static INT st_terminate( MSTH *t, MSN *s, MSSCOPE *sc )
 	MSTH	*q;
 
 	if ( s->nv == 0 ) {
-		for ( q = rt.threads; q != NULL; q = q->next ) if ( q != t ) q->terminated = TRUE;
+		for ( q = rt.threads; q != NULL; q = q->next ) {
+			if ( q != t ) {
+				q->terminated = TRUE;
+				rt_wake(q);
+			}
+		}
 		return FL_NONE;
 	}
 	for ( i = 0; i < s->nv; i++ ) {
 		MSV	v = ev(t, s->v[i], sc);
 
 		for ( q = rt.threads; q != NULL; q = q->next ) {
-			if ( thread_matches(q, v) ) q->terminated = TRUE;
+			if ( thread_matches(q, v) ) {
+				q->terminated = TRUE;
+				rt_wake(q);
+			}
 		}
 		mv_drop(v);
 	}
@@ -1682,7 +1744,7 @@ static INT st_suspend( MSTH *t, MSN *s, MSSCOPE *sc )
 		}
 	}
 	t->waiting = TRUE;
-	while ( !th_stop(t) ) {
+	for ( BOOL again = FALSE; !th_stop(t); ) {
 		BOOL	alive = FALSE;
 
 		for ( q = rt.threads; q != NULL && !alive; q = q->next ) {
@@ -1694,7 +1756,9 @@ static INT st_suspend( MSTH *t, MSN *s, MSSCOPE *sc )
 		if ( t->brk ) { t->brk = FALSE; rt.lasterr = 1; break; }
 		if ( tmo == 0 ) { rt.lasterr = 2; break; }
 		if ( tmo > 0 && (double)( ms_now_ms() - start ) >= tmo * 1000 ) { rt.lasterr = 2; break; }
-		ms_yield(ms_now_ms() + 50);
+		/* a thread that ends stirs the run: looked at again then */
+		th_wait(t, th_until(start, tmo), TRUE, again);
+		again = TRUE;
 	}
 	t->waiting = FALSE;
 	return FL_NONE;

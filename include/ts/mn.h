@@ -31,8 +31,6 @@ extern "C" {
 #include <ts/uuid.h>
 #include <ts/part.h>
 
-#define MN_MAX		8		/* menus made at once */
-#define MN_NODE_MAX	24		/* lists in one menu */
 #define MN_CODE_MAX	32		/* bytes of an item's code, with its terminator */
 
 /* The state of an item (mn_chg_atr) */

@@ -13,17 +13,23 @@
  *
  *	It is started with the UUID of an archive object (書庫実身) and
  *	opens a window on it. An empty archive takes a link put into the
- *	window: the objects reachable from it are found and listed, and
- *	開始 packs them into the archive as its book (書籍). An archive that
+ *	window: the objects reachable from it are found, and a panel of the
+ *	data box (SYSDEF_BOX_ARCHIVE) lists them and asks: 〈作成〉 packs
+ *	them into the archive as its book (書籍), 〈取消し〉 or Esc leaves the
+ *	archive empty. An archive that
  *	has a book shows it as a 付箋 with its name; carried out of the
  *	window and let go over a window that takes links, the book is taken
- *	out there, as 書庫解凍 takes one out. The menu has the book's figures
- *	(書籍情報), the names of its objects (実身名一覧), the book taken
- *	away again (書籍の削除) and whether to compress it.
+ *	out there. The menu has the book's figures
+ *	(書籍情報), the names of its objects (実身名一覧), each a panel of the
+ *	data box put away with 〈確認〉, the book taken away again (書籍の削除)
+ *	and whether to compress it. The window shows only what the archive
+ *	holds; every part that is worked is a panel's.
  *
  *	A link put into an empty archive whose object is an archive itself
  *	(a file taken in) has its book copied in. An archive holds one book:
- *	a link put into one that has a book is refused.
+ *	a link put into one that has a book is refused. An object taken in
+ *	from a .bpk file is an archive that has a book, the file kept as it
+ *	was in its record of plain data, and is opened the same way.
  *
  *	Started with a T_ARCARG it does one piece of that at once without a
  *	window and says how it went on the console; with nothing it says what
@@ -35,7 +41,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ts/sysdef.h>
+#include <ts/obdrop.h>
+#include <ts/obatr.h>
 #include <ts/json.h>
+#include <ts/ui.h>
 
 #define WORK_W		520
 #define WORK_H		300
@@ -43,22 +52,13 @@
 #define FRAME_W		16
 #define TEXT_PX		16
 #define LINE_H		24
-#define LIST_LINES	7		/* names the list panel shows at once */
 
 #define M_CTRL		0x11
-#define K_ENTER		0x28
-#define K_ESC		0x29
-#define K_PGDN		0x4E
-#define K_PGUP		0x4B
-#define K_DOWN		0x51
-#define K_UP		0x52
 
 #define C_TEXT		0x00000000
 #define C_DIM		0x00606060
 #define C_BAR		0x004070C0
 #define C_ERR		0x00C00000
-#define C_PANEL		0x00F4F4F4
-#define C_BUTTON	0x00E0E0E0
 
 /* What a link's frame shows (TAD_D_* of the window layer) */
 #define D_NAME		0x0001
@@ -72,22 +72,20 @@
 
 /* What the window shows */
 enum { S_EMPTY, S_FOUND, S_BUSY, S_BOOK, S_BROKEN };
-/* and what it shows over that */
-enum { P_NONE, P_INFO, P_LIST };
 
-typedef struct {
-	T_DPRECT	r;
-	const char	*label;
-	INT		code;
-} BUTTON;
-
-enum { B_START = 1, B_CANCEL, B_CLOSE };
+/* The panels of the data box, and their parts */
+#define PN_MAKE		2		/* the objects found: 〈作成〉 or 〈取消し〉 */
+#define PN_INFO		3		/* 書籍情報 */
+#define PN_LIST		4		/* 実身名一覧 */
+#define PT_MAKE		11
+#define PT_LIST		10
+#define PT_OK		101
 
 static TS_UUID	archive, win, ch;
 static char	arcname[ARC_NAME_MAX];
 static ID	kw, port;
 static INT	gid = -1;
-static INT	state, panel, top;
+static INT	state;
 static BOOL	closing, dirty = TRUE, store;
 static INT	done_n, done_total;
 static char	status[256];
@@ -98,8 +96,7 @@ static ARCJOB	job;			/* the objects found, to pack */
 static ARCLOOK	droplook;		/* how the link put in looked */
 static T_DTLOOK	look;			/* the book's 付箋: its outline carried, the link put */
 static T_DPRECT	bookbox;
-static BUTTON	btn[3];
-static INT	nbtn;
+static UI	ui;			/* what the panels are asked over */
 
 /* ---------------------------------------------------------------- saying things */
 
@@ -255,26 +252,6 @@ static void text( INT x, INT y, const char *s, UW colour )
 	(void)dp_text(gid, x, y, (const UB *)s, colour, TEXT_PX);
 }
 
-static void button( INT x, INT y, const char *label, INT code )
-{
-	T_DPRECT	r;
-	INT		w = dp_text_width((const UB *)label, TEXT_PX) + 28;
-
-	r.left = x;
-	r.top = y;
-	r.right = x + w;
-	r.bottom = y + 26;
-	(void)dp_fill_rect(gid, &r, C_BUTTON);
-	(void)dp_frame_rect(gid, &r, C_TEXT, 1);
-	text(x + 14, y + 19, label, C_TEXT);
-	if ( nbtn < (INT)( sizeof(btn) / sizeof(btn[0]) ) ) {
-		btn[nbtn].r = r;
-		btn[nbtn].label = label;
-		btn[nbtn].code = code;
-		nbtn++;
-	}
-}
-
 /* The book's 付箋, its corner at (x, y) */
 static void draw_book( INT x, INT y )
 {
@@ -293,66 +270,6 @@ static void draw_book( INT x, INT y )
 	}
 }
 
-static void draw_info( INT w, INT h )
-{
-	const BPKARC	*a = &book.arc;
-	T_DPRECT	r = { 24, 16, w - 24, h - 16 };
-	char		line[256], v[32], p[16];
-	INT		y = r.top + 30;
-
-	(void)dp_fill_rect(gid, &r, C_PANEL);
-	(void)dp_frame_rect(gid, &r, C_TEXT, 1);
-	text(r.left + 16, y, "書籍情報", C_TEXT);
-	y += LINE_H + 4;
-	snprintf(line, sizeof(line), "書籍名：%s", a->name);
-	text(r.left + 16, y, line, C_TEXT);
-	y += LINE_H;
-	local_time(a->head.time, v);
-	snprintf(line, sizeof(line), "書籍作成日時：%s", v);
-	text(r.left + 16, y, line, C_TEXT);
-	y += LINE_H;
-	grouped(a->head.filesize, v);
-	snprintf(line, sizeof(line), "実身総サイズ：%s バイト（%u 個）", v, a->nfiles);
-	text(r.left + 16, y, line, C_TEXT);
-	y += LINE_H;
-	grouped(a->origsize, v);
-	percent(a->origsize, a->head.filesize, p);
-	snprintf(line, sizeof(line), "パックサイズ：%s バイト（%s）", v, p);
-	text(r.left + 16, y, line, C_TEXT);
-	y += LINE_H;
-	grouped(a->compsize, v);
-	percent(a->compsize, a->head.filesize, p);
-	snprintf(line, sizeof(line), "書籍サイズ：%s バイト（%s）", v, p);
-	text(r.left + 16, y, line, C_TEXT);
-	y += LINE_H;
-	snprintf(line, sizeof(line), "圧縮方式：%s　CRC：%s", ( a->method == BPK_LH5 ) ? "LH5" : "無圧縮",
-		 a->crcok ? "一致" : "不一致");
-	text(r.left + 16, y, line, a->crcok ? C_TEXT : C_ERR);
-	button(r.right - 96, r.bottom - 38, "閉じる", B_CLOSE);
-}
-
-static void draw_list( INT w, INT h )
-{
-	const BPKARC	*a = &book.arc;
-	T_DPRECT	r = { 24, 16, w - 24, h - 16 };
-	char		line[200];
-	INT		y = r.top + 30, i;
-
-	(void)dp_fill_rect(gid, &r, C_PANEL);
-	(void)dp_frame_rect(gid, &r, C_TEXT, 1);
-	snprintf(line, sizeof(line), "実身名一覧（%u 個中 %d〜%d）", a->nfiles, top + 1,
-		 ( top + LIST_LINES < (INT)a->nfiles ) ? top + LIST_LINES : (INT)a->nfiles);
-	text(r.left + 16, y, line, C_TEXT);
-	y += LINE_H + 4;
-	for ( i = top; i < (INT)a->nfiles && i < top + LIST_LINES; i++ ) {
-		snprintf(line, sizeof(line), "%3d  %s", i + 1, a->file[i].name);
-		text(r.left + 16, y, line, C_TEXT);
-		y += LINE_H - 2;
-	}
-	text(r.left + 16, r.bottom - 14, "↑↓・ホイールで送る", C_DIM);
-	button(r.right - 96, r.bottom - 38, "閉じる", B_CLOSE);
-}
-
 static void draw( void )
 {
 	T_DPRECT	all, bar;
@@ -360,7 +277,6 @@ static void draw( void )
 	char		line[300], a[32], b[32];
 
 	if ( gid < 0 ) return;
-	nbtn = 0;
 	work_size(&w, &h);
 	all.left = 0;
 	all.top = 0;
@@ -397,9 +313,7 @@ static void draw( void )
 			text(16, y, line, C_DIM);
 		}
 		snprintf(line, sizeof(line), "圧縮：%s", store ? "しない" : "LH5");
-		text(16, h - 64, line, C_DIM);
-		button(16, h - 54, "開始", B_START);
-		button(110, h - 54, "取消", B_CANCEL);
+		text(16, h - 40, line, C_DIM);
 		break;
 	case S_BUSY:
 		text(16, y, "書籍を作っています", C_TEXT);
@@ -430,8 +344,6 @@ static void draw( void )
 		break;
 	}
 	text(16, h - 12, status, status_err ? C_ERR : C_TEXT);
-	if ( panel == P_INFO && state == S_BOOK ) draw_info(w, h);
-	if ( panel == P_LIST && state == S_BOOK ) draw_list(w, h);
 	(void)wm_obj_flush(kw, NULL);
 	dirty = FALSE;
 }
@@ -454,6 +366,8 @@ static void log_place( void )
 }
 
 /* ---------------------------------------------------------------- the work */
+
+static void ask_make( void );
 
 static void pack_tell( ARCJOB *j, INT n, INT total, const char *what )
 {
@@ -608,8 +522,7 @@ static void look_of_drop( const T_OBDROPV *v )
  */
 static void dropped( void )
 {
-	T_OBDROP	*d = malloc(sizeof(T_OBDROP));
-	SZ		asz = 0;
+	T_OBDROP	*d = ob_drop_read(kw);
 	char		s[300], id[40];
 	INT		recno = -1;
 	UB		*raw = NULL;
@@ -617,8 +530,7 @@ static void dropped( void )
 	ER		er;
 
 	if ( d == NULL ) return;
-	memset(d, 0, sizeof(*d));
-	if ( ob_rea_rec(kw, OB_WR_DROP, 0, d, sizeof(*d), &asz) < E_OK || d->n <= 0 ) {
+	if ( d->n <= 0 ) {
 		free(d);
 		return;
 	}
@@ -676,9 +588,10 @@ static void dropped( void )
 		state = S_FOUND;
 		snprintf(s, sizeof(s), "found %d objects", job.nobj);
 		log_line(s);
-		say("開始で書籍を作ります", FALSE);
+		say("作成で書籍を作ります", FALSE);
 	}
 	free(d);
+	if ( state == S_FOUND ) ask_make();
 }
 
 static void delete_book( void )
@@ -697,23 +610,118 @@ static void delete_book( void )
 
 /* ---------------------------------------------------------------- the window */
 
-static void open_panel( INT p )
+/* The panels are asked over the window, as large as its work area is now */
+static void ui_place( void )
 {
+	work_size(&ui.w, &ui.h);
+}
+
+/*
+ * The objects found, listed in a panel that asks: 〈作成〉 (or Enter)
+ * packs them, 〈取消し〉 (or Esc) leaves the archive empty.
+ */
+static void ask_make( void )
+{
+	char		l[6][ARC_NAME_MAX + 96], a[32];
+	const char	*lines[6];
+	INT		i, n = 0, answer;
+
+	draw();
+	grouped(job.total, a);
+	snprintf(l[n++], sizeof(l[0]), "「%s」から辿れる実身：%d 個（%s バイト）", job.obj[0].name, job.nobj, a);
+	for ( i = 0; i < job.nobj && n < 5; i++ ) {
+		if ( n == 4 && job.nobj > 4 ) {
+			snprintf(l[n++], sizeof(l[0]), "  ほか %d 個", job.nobj - 3);
+			break;
+		}
+		snprintf(l[n++], sizeof(l[0]), "  %s", job.obj[i].name);
+	}
+	snprintf(l[n++], sizeof(l[0]), "圧縮：%s", store ? "しない" : "LH5");
+	for ( i = 0; i < 6; i++ ) lines[i] = ( i < n ) ? l[i] : " ";
+	ui_place();
+	log_line("asked to make");
+	answer = ui_ask(&ui, PN_MAKE, lines, 6);
+	if ( answer == PT_MAKE ) {
+		start();
+	} else {
+		arc_free(&job);
+		state = S_EMPTY;
+		say("取り消しました", FALSE);
+	}
+}
+
+/* 書籍情報: the book's figures in a panel, put away with 〈確認〉 */
+static void show_info( void )
+{
+	const BPKARC	*a = &book.arc;
+	char		l[7][ARC_NAME_MAX + 96], v[32], p[16];
+	const char	*lines[7];
+	INT		i;
+
 	if ( state != S_BOOK ) return;
-	panel = p;
-	top = 0;
-	log_line( p == P_INFO ? "info shown" : "list shown");
+	snprintf(l[0], sizeof(l[0]), "書籍名：%s", a->name);
+	local_time(a->head.time, v);
+	snprintf(l[1], sizeof(l[0]), "書籍作成日時：%s", v);
+	grouped(a->head.filesize, v);
+	snprintf(l[2], sizeof(l[0]), "実身総サイズ：%s バイト（%u 個）", v, a->nfiles);
+	grouped(a->origsize, v);
+	percent(a->origsize, a->head.filesize, p);
+	snprintf(l[3], sizeof(l[0]), "パックサイズ：%s バイト（%s）", v, p);
+	grouped(a->compsize, v);
+	percent(a->compsize, a->head.filesize, p);
+	snprintf(l[4], sizeof(l[0]), "書籍サイズ：%s バイト（%s）", v, p);
+	snprintf(l[5], sizeof(l[0]), "圧縮方式：%s", ( a->method == BPK_LH5 ) ? "LH5" : "無圧縮");
+	snprintf(l[6], sizeof(l[0]), "CRC：%s", a->crcok ? "一致" : "不一致");
+	for ( i = 0; i < 7; i++ ) lines[i] = l[i];
+	ui_place();
+	log_line("info shown");
+	(void)ui_ask(&ui, PN_INFO, lines, 7);
+	log_line("info put away");
 	dirty = TRUE;
 }
 
-static void scroll( INT by )
+/* 実身名一覧: the names of the book's objects in the list of a panel, put away with 〈確認〉 */
+static void show_list( void )
 {
-	INT	max = (INT)book.arc.nfiles - LIST_LINES;
+	const BPKARC	*a = &book.arc;
+	UI		q;
+	T_OBNTM		m;
+	char		head[80], **names;
+	INT		i, n = (INT)a->nfiles, ev, num = 0;
+	BOOL		done = FALSE;
 
-	if ( panel != P_LIST ) return;
-	top += by;
-	if ( top > max ) top = max;
-	if ( top < 0 ) top = 0;
+	if ( state != S_BOOK ) return;
+	names = (char **)calloc((size_t)( ( n > 0 ) ? n : 1 ), sizeof(char *));
+	if ( names == NULL ) return;
+	for ( i = 0; i < n; i++ ) {
+		size_t	len = strlen(a->file[i].name) + 16;
+
+		names[i] = (char *)malloc(len);
+		if ( names[i] != NULL ) snprintf(names[i], len, "%d\t%s", i + 1, a->file[i].name);
+	}
+	ui_place();
+	if ( ui_dlg_open(&ui, PN_LIST, &q) >= E_OK ) {
+		snprintf(head, sizeof(head), "書籍の実身：%d 個", n);
+		ui_set_text(&q, 1, head);
+		ui_names(&q, PT_LIST, (const char *const *)names, n);
+		log_line("list shown");
+		while ( !done && !closing ) {
+			if ( ui_wait(&ui, &m, TMO_FEVR) < E_OK ) {
+				closing = TRUE;
+				break;
+			}
+			ev = ui_dlg_take(&q, &m, &num);
+			if ( ev == UI_EV_CLOSE || ( ev == UI_EV_BUTTON && num == PT_OK ) ) {
+				done = TRUE;
+			} else if ( ev == UI_EV_OTHER && ( m.event == OB_E_CLOSE || m.event == OB_E_DELETE ) ) {
+				closing = TRUE;
+			}
+		}
+		ui_dlg_close(&q);
+		log_line("list put away");
+	}
+	for ( i = 0; i < n; i++ ) free(names[i]);
+	free(names);
 	dirty = TRUE;
 }
 
@@ -734,8 +742,8 @@ static void menu( const T_OBNTM *m )
 	(void)mn_del_men(mid);
 	if ( !chosen ) return;
 	if ( strcmp((const char *)sel.code, "close") == 0 ) closing = TRUE;
-	else if ( strcmp((const char *)sel.code, "info") == 0 ) open_panel(P_INFO);
-	else if ( strcmp((const char *)sel.code, "list") == 0 ) open_panel(P_LIST);
+	else if ( strcmp((const char *)sel.code, "info") == 0 ) show_info();
+	else if ( strcmp((const char *)sel.code, "list") == 0 ) show_list();
 	else if ( strcmp((const char *)sel.code, "delete") == 0 ) delete_book();
 	else if ( strcmp((const char *)sel.code, "store") == 0 ) {
 		store = (BOOL)!store;
@@ -743,35 +751,11 @@ static void menu( const T_OBNTM *m )
 	}
 }
 
-static INT hit_button( INT x, INT y )
-{
-	INT	i;
-
-	for ( i = 0; i < nbtn; i++ ) {
-		if ( x >= btn[i].r.left && x < btn[i].r.right && y >= btn[i].r.top && y < btn[i].r.bottom ) return btn[i].code;
-	}
-	return 0;
-}
-
+/* A press in the window: on the book's 付箋, the book carried out */
 static void press( const T_OBNTM *m )
 {
-	INT	b = hit_button(m->x, m->y);
-
-	if ( panel != P_NONE ) {
-		if ( b == B_CLOSE ) {
-			panel = P_NONE;
-			dirty = TRUE;
-		}
-		return;
-	}
-	if ( state == S_FOUND && b == B_START ) {
-		start();
-	} else if ( state == S_FOUND && b == B_CANCEL ) {
-		arc_free(&job);
-		state = S_EMPTY;
-		say("取り消しました", FALSE);
-	} else if ( state == S_BOOK && m->x >= bookbox.left && m->x < bookbox.right && m->y >= bookbox.top
-		    && m->y < bookbox.bottom ) {
+	if ( state == S_BOOK && m->x >= bookbox.left && m->x < bookbox.right && m->y >= bookbox.top
+	     && m->y < bookbox.bottom ) {
 		carry(m->x, m->y);
 	}
 }
@@ -782,31 +766,8 @@ static void key( const T_OBNTM *m )
 
 	if ( m->mods & M_CTRL ) {
 		if ( c == 'e' || c == 'E' ) closing = TRUE;
-		else if ( c == 'i' || c == 'I' ) open_panel(P_INFO);
-		else if ( c == 'l' || c == 'L' ) open_panel(P_LIST);
-		return;
-	}
-	if ( panel != P_NONE ) {
-		if ( m->code == K_ENTER || m->code == K_ESC ) {
-			panel = P_NONE;
-			dirty = TRUE;
-		} else if ( m->code == K_DOWN ) {
-			scroll(1);
-		} else if ( m->code == K_UP ) {
-			scroll(-1);
-		} else if ( m->code == K_PGDN ) {
-			scroll(LIST_LINES);
-		} else if ( m->code == K_PGUP ) {
-			scroll(-LIST_LINES);
-		}
-		return;
-	}
-	if ( state == S_FOUND && m->code == K_ENTER ) {
-		start();
-	} else if ( state == S_FOUND && m->code == K_ESC ) {
-		arc_free(&job);
-		state = S_EMPTY;
-		say("取り消しました", FALSE);
+		else if ( c == 'i' || c == 'I' ) show_info();
+		else if ( c == 'l' || c == 'L' ) show_list();
 	}
 }
 
@@ -824,9 +785,6 @@ static void event( const T_OBNTM *m )
 	case OB_E_KEY:
 		key(m);
 		break;
-	case OB_E_WHEEL:
-		scroll(-m->dz);
-		break;
 	case OB_E_DROP:
 		dropped();
 		break;
@@ -841,21 +799,23 @@ static void event( const T_OBNTM *m )
 /* The archive object's name, and the colour its window is to have */
 static void read_archive( void )
 {
-	static char	meta[OB_ATR_MAX + 1];
+	UB		*meta = NULL;
 	T_JSON		root, w;
 	UB		col[16];
-	SZ		asz = 0;
+	INT		asz;
 	ID		k = ob_opn_obj(&archive, OB_OP_ATRRD);
 
 	strncpy(arcname, "書庫管理", sizeof(arcname) - 1);
 	if ( k <= 0 ) return;
-	if ( ob_get_atr(k, (UB *)meta, OB_ATR_MAX, &asz) >= E_OK && js_parse((const UB *)meta, (INT)asz, &root) >= E_OK ) {
+	asz = ob_atr_read(k, 0, &meta);
+	if ( asz >= 0 && js_parse(meta, asz, &root) >= E_OK ) {
 		(void)js_get_str(&root, "name", (UB *)arcname, sizeof(arcname));
 		if ( js_get(&root, "window", &w) >= E_OK && js_get_str(&w, "backgroundColor", col, sizeof(col)) > 0
 		  && col[0] == '#' ) {
 			ground = (UINT)strtoul((const char *)col + 1, NULL, 16) & 0xFFFFFF;
 		}
 	}
+	free(meta);
 	ob_cls_obj(k);
 }
 
@@ -883,7 +843,7 @@ static ER open_window( void )
 	c.type = OB_T_CHANNEL;
 	port = ( ob_cre_obj(&c, &ch) >= E_OK ) ? ob_opn_obj(&ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) : E_NOEXS;
 	memset(&req, 0, sizeof(req));
-	req.events = OB_E_CLOSE | OB_E_PRESS | OB_E_KEY | OB_E_REDRAW | OB_E_DELETE | OB_E_DROP | OB_E_WHEEL;
+	req.events = OB_E_CLOSE | OB_E_PRESS | OB_E_KEY | OB_E_REDRAW | OB_E_DELETE | OB_E_DROP;
 	if ( kw <= 0 || gid < 0 || port <= 0 || ob_ntf_evt(kw, OB_REC_ANY, &req, port) <= 0 ) return E_OBJ;
 
 	/* the frame kept as it is: the work area made the size wanted */
@@ -892,6 +852,14 @@ static ER open_window( void )
 		wp.bottom = wp.top + WORK_H + ( ( wp.bottom - wp.top ) - ( wp.wbottom - wp.wtop ) );
 		(void)ob_wri_rec(kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
 	}
+
+	/* what the panels are asked over: the data box, this window and its channel */
+	memset(&ui, 0, sizeof(ui));
+	if ( !unp_uuid_parse(SYSDEF_BOX_ARCHIVE, &ui.box) ) return E_OBJ;
+	ui.kw = kw;
+	ui.port = port;
+	ui.win = win;
+	ui_place();
 	return E_OK;
 }
 
@@ -1062,10 +1030,13 @@ int main( void )
 	}
 	draw();
 	log_place();
+	/* the window's channel waited on: the first notice of a round for as long as it takes, the rest as they are */
 	while ( !closing ) {
-		while ( !closing && ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) event(&m);
+		for ( TMO tmo = TMO_FEVR; !closing && ob_rea_tmo(port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK;
+		      tmo = TMO_POL ) {
+			event(&m);
+		}
 		if ( dirty ) draw();
-		if ( !closing ) (void)tk_dly_tsk(20);
 	}
 	close_window();
 	(void)wm_msg_put(NULL);

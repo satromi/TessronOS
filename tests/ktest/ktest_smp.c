@@ -19,11 +19,17 @@
 #include "ktest.h"
 #include "kernel.h"			/* T_PCPU statistics */
 #include <ts/time.h>
+#include <ts/ob.h>
 
-#define MAX_PRC		8
+#define MAX_PRC		64		/* spinners and pinned tasks at most */
+#ifdef CPU_CORE_X86_64
+#define KT_PCPU(i)	knl_pcpu_of(i)		/* taken as each processor is found */
+#else
+#define KT_PCPU(i)	( &knl_pcpu_tbl[i] )
+#endif
 #define SPIN_NS		(50 * 1000000ULL)
 
-LOCAL volatile UW	seen_mask[MAX_PRC];	/* processors seen by spinner i */
+LOCAL volatile ID	seen_prc[MAX_PRC];	/* the processor spinner i last ran on */
 LOCAL volatile UW	done_cnt;
 LOCAL volatile ID	pinned_prc[MAX_PRC];
 LOCAL volatile UD	wake_time;
@@ -48,12 +54,12 @@ LOCAL void test_get_prc( void )
 LOCAL void spinner( INT stacd, void *exinf )
 {
 	UD	t0 = mono();
-	UW	mask = 0;
+	ID	prc = 0;
 
 	while ( mono() - t0 < SPIN_NS ) {
-		mask |= 1U << tk_get_prc();
+		prc = tk_get_prc();
 	}
-	seen_mask[stacd] = mask;
+	seen_prc[stacd] = prc;
 	atomic_inc((UW *)&done_cnt);
 	tk_ext_tsk();
 }
@@ -62,8 +68,7 @@ LOCAL void spinner( INT stacd, void *exinf )
 LOCAL void test_parallel( void )
 {
 	ID	id[MAX_PRC];
-	INT	n = knl_num_prc, i;
-	UW	all = 0;
+	INT	n = knl_num_prc, i, differ = 0;
 	UD	t0;
 
 	if ( n < 2 ) KT_SKIP("single processor");
@@ -71,7 +76,7 @@ LOCAL void test_parallel( void )
 
 	done_cnt = 0;
 	for ( i = 0; i < n; i++ ) {
-		seen_mask[i] = 0;
+		seen_prc[i] = 0;
 		id[i] = kt_cre_tsk_any((FP)spinner, KT_PRI_LOW, NULL);
 		KT_ASSERT(id[i] > 0);
 	}
@@ -88,11 +93,12 @@ LOCAL void test_parallel( void )
 	KT_ASSERT_EQ(done_cnt, n);
 	KT_ASSERT(mono() - t0 < (UD)n * SPIN_NS);
 	for ( i = 0; i < n; i++ ) {
-		all |= seen_mask[i];
+		KT_ASSERT(seen_prc[i] >= 1 && seen_prc[i] <= knl_num_prc);
+		if ( seen_prc[i] != seen_prc[0] ) differ++;
 		KT_ASSERT_ER(tk_del_tsk(id[i]), E_OK);
 	}
-	tm_printf((UB*)"  processors used: mask=0x%x\n", all);
-	KT_ASSERT(all != 0 && (all & (all - 1)) != 0);	/* at least two processors */
+	tm_printf((UB*)"  spinners on another processor than the first's: %d of %d\n", differ, n - 1);
+	KT_ASSERT(differ > 0);				/* at least two processors */
 }
 
 /*
@@ -103,13 +109,33 @@ LOCAL void test_parallel( void )
  */
 LOCAL void test_ref_cpu( void )
 {
-	T_TSCPU	a, b;
+	T_TSCPU	*a, *b, h;
 	ID	id[MAX_PRC];
 	INT	n = knl_num_prc, i, loaded = 0;
+	SZ	sz = TS_TSCPU_SIZE(knl_num_prc);
+	UB	*guard;
 
-	KT_ASSERT_ER(ts_ref_cpu(&a), E_OK);
-	KT_ASSERT_EQ(a.ncpu, knl_num_prc);
-	KT_ASSERT(a.freq > 0);
+	/* the number alone, nothing written past the header */
+	guard = (UB *)Kmalloc((size_t)sz + 16);
+	KT_ASSERT(guard != NULL);
+	if ( guard == NULL ) return;
+	knl_memset(guard, 0xa5, (SZ)sz + 16);
+	KT_ASSERT_EQ(ts_ref_cpu((T_TSCPU *)guard, (SZ)sizeof(T_TSCPU)), knl_num_prc);
+	KT_ASSERT(guard[sizeof(T_TSCPU)] == 0xa5 && guard[sz + 15] == 0xa5);
+	KT_ASSERT_EQ(ts_ref_cpu(&h, (SZ)sizeof(h) - 1), E_PAR);
+	Kfree(guard);
+
+	a = (T_TSCPU *)Kmalloc((size_t)sz);
+	b = (T_TSCPU *)Kmalloc((size_t)sz);
+	KT_ASSERT(a != NULL && b != NULL);
+	if ( a == NULL || b == NULL ) {
+		if ( a != NULL ) Kfree(a);
+		if ( b != NULL ) Kfree(b);
+		return;
+	}
+	KT_ASSERT_EQ(ts_ref_cpu(a, sz), knl_num_prc);
+	KT_ASSERT_EQ(a->ncpu, knl_num_prc);
+	KT_ASSERT(a->freq > 0);
 	if ( n > MAX_PRC ) n = MAX_PRC;
 	done_cnt = 0;
 	for ( i = 0; i < n; i++ ) {
@@ -120,20 +146,24 @@ LOCAL void test_ref_cpu( void )
 	for ( i = 0; i < 400 && done_cnt < (UW)n; i++ ) {
 		KT_ASSERT_ER(tk_dly_tsk(1), E_OK);
 	}
-	KT_ASSERT_ER(ts_ref_cpu(&b), E_OK);
+	KT_ASSERT_EQ(ts_ref_cpu(b, sz), knl_num_prc);
 	for ( i = 0; i < n; i++ ) {
 		KT_ASSERT_ER(tk_del_tsk(id[i]), E_OK);
 	}
-	KT_ASSERT(b.now > a.now);
-	for ( i = 0; i < b.ncpu && i < TS_CPU_MAX; i++ ) {
-		UD	grew = b.busy[i] - a.busy[i];
+	KT_ASSERT(b->now > a->now);
+	for ( i = 0; i < b->ncpu; i++ ) {
+		UD	grew = b->busy[i] - a->busy[i];
 
-		tm_printf((UB*)"  processor %d: %d%% busy\n", i + 1, (INT)( grew * 100 / ( b.now - a.now ) ));
-		KT_ASSERT(b.busy[i] >= a.busy[i]);
-		KT_ASSERT(grew <= b.now - a.now + b.freq / 1000);
-		if ( grew * 4 >= b.now - a.now ) loaded++;
+		if ( i < 16 || i == b->ncpu - 1 ) {
+			tm_printf((UB*)"  processor %d: %d%% busy\n", i + 1, (INT)( grew * 100 / ( b->now - a->now ) ));
+		}
+		KT_ASSERT(b->busy[i] >= a->busy[i]);
+		KT_ASSERT(grew <= b->now - a->now + b->freq / 1000);
+		if ( grew * 4 >= b->now - a->now ) loaded++;
 	}
 	KT_ASSERT(loaded >= ( n < 2 ? 1 : 2 ));
+	Kfree(a);
+	Kfree(b);
 }
 
 LOCAL void pinned( INT stacd, void *exinf )
@@ -165,7 +195,7 @@ LOCAL void test_assprc( void )
 		ctsk.task    = (FP)pinned;
 		ctsk.itskpri = KT_PRI_HIGH;
 		ctsk.stksz   = 4096;
-		ctsk.assprc  = 1U << i;
+		ctsk.assprc  = (UBINT)1 << i;
 		id[i] = tk_cre_tsk(&ctsk);
 		KT_ASSERT(id[i] > 0);
 		KT_ASSERT_ER(tk_sta_tsk(id[i], i), E_OK);
@@ -178,8 +208,71 @@ LOCAL void test_assprc( void )
 	}
 
 	/* an invalid processor is rejected */
-	ctsk.assprc = 1U << CNF_MAX_PRCID;
+#if CNF_MAX_PRCID < 64
+	ctsk.assprc = (UBINT)1 << CNF_MAX_PRCID;
 	KT_ASSERT_ER(tk_cre_tsk(&ctsk), E_PAR);
+#endif
+	ctsk.assprc = 0;				/* TA_ASSPRC with none */
+	KT_ASSERT_ER(tk_cre_tsk(&ctsk), E_PAR);
+}
+
+/*
+ * tk_set_asp and tk_ref_asp: a set of the caller's size, which can name
+ * any processor (the last one online, beyond PRC 64 on a large machine),
+ * read back as set; an empty set is every processor online; a set of no
+ * processor online, of one beyond the limit, or of a size that is not a
+ * whole number of words is refused
+ */
+LOCAL void test_set_asp( void )
+{
+	T_CTSK	ctsk;
+	UBINT	set[( CNF_MAX_PRCID + 63 ) / 64 + 1], got[( CNF_MAX_PRCID + 63 ) / 64 + 1];
+	INT	nw = ( CNF_MAX_PRCID + 63 ) / 64, k, cnt;
+	ID	id, last = knl_num_prc;
+
+	ctsk.exinf   = NULL;
+	ctsk.tskatr  = TA_HLNG | TA_RNG0;
+	ctsk.task    = (FP)pinned;
+	ctsk.itskpri = KT_PRI_HIGH;
+	ctsk.stksz   = 4096;
+	id = tk_cre_tsk(&ctsk);
+	KT_ASSERT(id > 0);
+	if ( id <= 0 ) return;
+
+	/* not set: every processor online */
+	KT_ASSERT_EQ(tk_ref_asp(id, got, (SZ)( sizeof(UBINT) * nw )), nw);
+	for ( cnt = 0, k = 0; k < knl_num_prc + 64; k++ ) {
+		if ( k / 64 < nw && ( got[k / 64] >> ( k % 64 ) & 1 ) != 0 ) cnt++;
+	}
+	KT_ASSERT_EQ(cnt, knl_num_prc);
+
+	/* the last processor alone, and it runs there */
+	for ( k = 0; k <= nw; k++ ) set[k] = 0;
+	set[( last - 1 ) / 64] = (UBINT)1 << ( ( last - 1 ) % 64 );
+	KT_ASSERT_ER(tk_set_asp(id, set, (SZ)( sizeof(UBINT) * nw )), E_OK);
+	KT_ASSERT_EQ(tk_ref_asp(id, got, (SZ)( sizeof(UBINT) * ( nw + 1 ) )), nw + 1);
+	for ( k = 0; k < nw; k++ ) KT_ASSERT(got[k] == set[k]);
+	KT_ASSERT(got[nw] == 0);
+	done_cnt = 0;
+	pinned_prc[0] = 0;
+	KT_ASSERT_ER(tk_sta_tsk(id, 0), E_OK);
+	for ( k = 0; k < 200 && done_cnt == 0; k++ ) {
+		KT_ASSERT_ER(tk_dly_tsk(1), E_OK);
+	}
+	tm_printf((UB *)"  pinned to PRC %d with tk_set_asp: ran on %d\n", last, (INT)pinned_prc[0]);
+	KT_ASSERT_EQ(pinned_prc[0], last);
+
+	/* refused */
+	KT_ASSERT_ER(tk_set_asp(TSK_SELF, set, 7), E_PAR);			/* not a whole word */
+	set[nw] = 1;								/* beyond the limit */
+	KT_ASSERT_ER(tk_set_asp(TSK_SELF, set, (SZ)( sizeof(UBINT) * ( nw + 1 ) )), E_PAR);
+	set[nw] = 0;
+	if ( knl_num_prc < CNF_MAX_PRCID ) {					/* none online */
+		for ( k = 0; k < nw; k++ ) set[k] = 0;
+		set[knl_num_prc / 64] = (UBINT)1 << ( knl_num_prc % 64 );
+		KT_ASSERT_ER(tk_set_asp(TSK_SELF, set, (SZ)( sizeof(UBINT) * nw )), E_PAR);
+	}
+	KT_ASSERT_ER(tk_del_tsk(id), E_OK);
 }
 
 LOCAL void sleeper( INT stacd, void *exinf )
@@ -202,12 +295,11 @@ LOCAL void test_cross_wakeup( void )
 	if ( knl_num_prc < 2 ) KT_SKIP("single processor");
 
 	ctsk.exinf   = NULL;
-	ctsk.tskatr  = TA_HLNG | TA_RNG0 | TA_ASSPRC;
+	ctsk.tskatr  = TA_HLNG | TA_RNG0;
 	ctsk.task    = (FP)sleeper;
 	ctsk.itskpri = KT_PRI_HIGH;
 	ctsk.stksz   = 4096;
-	ctsk.assprc  = 1U << (other - 1);
-	id = tk_cre_tsk(&ctsk);
+	id = kt_cre_on(&ctsk, other);
 	KT_ASSERT(id > 0);
 	done_cnt = 0;
 	KT_ASSERT_ER(tk_sta_tsk(id, 0), E_OK);
@@ -358,7 +450,7 @@ LOCAL void test_stress( void )
 	tm_printf((UB*)"  semaphore exchanges in 1s: %d, timeouts: %d\n", (INT)total, (INT)st_tmo);
 	for ( i = 0; i < knl_num_prc; i++ ) {
 		tm_printf((UB*)"  PRC%d: ctxsw=%d ipi=%d\n", i + 1,
-			(INT)knl_pcpu_tbl[i].ctxsw_cnt, (INT)knl_pcpu_tbl[i].ipi_cnt);
+			(INT)KT_PCPU(i)->ctxsw_cnt, (INT)KT_PCPU(i)->ipi_cnt);
 	}
 	KT_ASSERT_EQ(st_tmo, 0);			/* every signal woke its waiter */
 	KT_ASSERT(total > 1000);
@@ -433,12 +525,11 @@ LOCAL ID wr_task( FP fn, PRI pri, INT prc )
 	T_CTSK	ctsk;
 
 	ctsk.exinf   = NULL;
-	ctsk.tskatr  = TA_HLNG | TA_RNG0 | TA_ASSPRC;
+	ctsk.tskatr  = TA_HLNG | TA_RNG0;
 	ctsk.task    = fn;
 	ctsk.itskpri = pri;
 	ctsk.stksz   = 4096;
-	ctsk.assprc  = 1U << ( prc - 1 );
-	return tk_cre_tsk(&ctsk);
+	return kt_cre_on(&ctsk, prc);
 }
 
 /* One run of the pairs for ms, the hooks set as given; the waits ended */
@@ -612,7 +703,11 @@ LOCAL void test_exd_stack( void )
 		while ( t->runprc != 0 ) {
 			if ( !knl_Iinuse(stk) ) {
 				/* free: wrong only if its processor still held it after that */
+#if defined(__x86_64__)
+				SmpMemBarrier();
+#else
 				Asm("dmb ish" ::: "memory");
+#endif
 				if ( t->runprc != 0 ) early++;
 				break;
 			}
@@ -624,16 +719,177 @@ LOCAL void test_exd_stack( void )
 	KT_ASSERT_EQ(early, 0);
 }
 
+/*
+ * The processor that takes a device's interrupt (design 4.5): the disk's
+ * interrupt sent to PRC 2 is taken there and no longer on PRC 1, and
+ * back on PRC 1 when the system chooses again; the same through the
+ * disk's object (irq.cpu); a processor kept for real time is refused.
+ * The disk's handler is wrapped for the test, to count where it runs.
+ */
+#ifdef CPU_CORE_X86_64
+#define IT_TBL		knl_intvec_tbl
+#else
+IMPORT FP	knl_hll_inthdr_tbl[];
+#define IT_TBL		knl_hll_inthdr_tbl
+#endif
+
+LOCAL FP		it_orig;
+LOCAL volatile UW	it_on[MAX_PRC];
+
+LOCAL void it_wrap( UINT intno, UW iar )
+{
+	ID	p = tk_get_prc();
+
+	if ( p >= 1 && p <= MAX_PRC ) atomic_inc((UW *)&it_on[p - 1]);
+	(*(void (*)(UINT, UW))it_orig)(intno, iar);
+}
+
+/* Reads of the disk, for its interrupts; the counts taken from zero */
+LOCAL INT it_reads( ID dd, UB *buf )
+{
+	SZ	asize;
+	INT	i, bad = 0;
+	LOCAL INT	round = 0;
+
+	for ( i = 0; i < MAX_PRC; i++ ) it_on[i] = 0;
+	round++;
+	for ( i = 0; i < 40; i++ ) {
+		if ( tk_srea_dev(dd, (D)( ( i * 997 + round * 4099 ) % 65536 ), buf, 8 * 512, &asize) < E_OK ) bad++;
+	}
+	return bad;
+}
+
+/* The interrupts counted on processors other than PRC prc */
+LOCAL UW it_elsewhere( INT prc )
+{
+	UW	n = 0;
+	INT	i;
+
+	for ( i = 0; i < MAX_PRC; i++ ) {
+		if ( i != prc - 1 ) n += it_on[i];
+	}
+	return n;
+}
+
+LOCAL void test_int_target( void )
+{
+	UINT	intno[4];
+	ID	prc[4], want;
+	ID	dd;
+	UB	*buf;
+	INT	n, bad;
+	TS_UUID	u;
+	IMPORT ER knl_ob_meta_write( CONST TS_UUID *uuid, CONST UB *buf, INT len );
+
+	if ( knl_num_prc < 2 ) KT_SKIP("single processor");
+	n = knl_int_dev_info((CONST UB *)KT_DISK, &want, intno, prc, 4);
+	if ( n <= 0 ) KT_SKIP("the disk's driver names no interrupt");
+	KT_ASSERT_EQ(GetIntTarget(intno[0]), 1);
+	KT_ASSERT_ER(SetIntTarget(intno[0], knl_num_prc + 1), E_PAR);
+	KT_ASSERT_ER(SetIntTarget(5, 2), E_PAR);	/* not a device's */
+
+	dd = tk_opn_dev((UB *)KT_DISK, TD_READ);
+	buf = (UB *)Kmalloc(8 * 512);
+	KT_ASSERT(dd > 0 && buf != NULL);
+	if ( dd <= 0 || buf == NULL ) return;
+	it_orig = IT_TBL[intno[0]];
+	IT_TBL[intno[0]] = (FP)it_wrap;
+
+	/* where it comes now: PRC 1 */
+	bad = it_reads(dd, buf);
+	tm_printf((UB *)"  interrupt %d of %s as it was: on PRC1 %d, elsewhere %d (reads failed %d)\n",
+		  intno[0], KT_DISK, it_on[0], it_elsewhere(1), bad);
+	KT_ASSERT_EQ(bad, 0);
+	if ( it_on[0] + it_elsewhere(1) == 0 ) {
+		IT_TBL[intno[0]] = it_orig;
+		tk_cls_dev(dd, 0);
+		Kfree(buf);
+		KT_SKIP("the disk's reads end without its interrupt");
+	}
+	KT_ASSERT_EQ(it_elsewhere(1), 0);
+
+	/* sent to PRC 2 */
+	KT_ASSERT_ER(SetIntTarget(intno[0], 2), E_OK);
+	KT_ASSERT_EQ(GetIntTarget(intno[0]), 2);
+	(void)it_reads(dd, buf);
+	tm_printf((UB *)"  sent to PRC2: on PRC2 %d, elsewhere %d\n", it_on[1], it_elsewhere(2));
+	KT_ASSERT(it_on[1] > 0);
+	KT_ASSERT_EQ(it_elsewhere(2), 0);
+
+	/* the system's choice again: PRC 1 */
+	KT_ASSERT_ER(SetIntTarget(intno[0], 0), E_OK);
+	KT_ASSERT_EQ(GetIntTarget(intno[0]), 1);
+	(void)it_reads(dd, buf);
+	tm_printf((UB *)"  back to the system's choice: on PRC1 %d, elsewhere %d\n", it_on[0], it_elsewhere(1));
+	KT_ASSERT(it_on[0] > 0);
+	KT_ASSERT_EQ(it_elsewhere(1), 0);
+
+	/* through the disk's object */
+	if ( knl_obdev_uuid((CONST UB *)KT_DISK, &u) >= E_OK ) {
+		static CONST char	on2[] = "{\"irq\":{\"cpu\":2}}", off[] = "{\"irq\":{\"cpu\":0}}";
+
+		KT_ASSERT_ER(knl_ob_meta_write(&u, (CONST UB *)on2, (INT)sizeof(on2) - 1), E_OK);
+		KT_ASSERT_EQ(GetIntTarget(intno[0]), 2);
+		(void)knl_int_dev_info((CONST UB *)KT_DISK, &want, intno, prc, 4);
+		KT_ASSERT_EQ(want, 2);
+		(void)it_reads(dd, buf);
+		KT_ASSERT(it_on[1] > 0);
+		KT_ASSERT_EQ(it_elsewhere(2), 0);
+		KT_ASSERT_ER(knl_ob_meta_write(&u, (CONST UB *)off, (INT)sizeof(off) - 1), E_OK);
+		KT_ASSERT_EQ(GetIntTarget(intno[0]), 1);
+	}
+
+	/* the processors for chores: one by message is spread among them */
+	if ( knl_int_is_msi(intno[0]) && knl_num_prc >= 3 ) {
+		KT_ASSERT_ER(knl_cpu_roles_text("1,3", ""), E_OK);
+		tm_printf((UB *)"  with PRC1 and PRC3 for chores, interrupt %d goes to PRC%d\n",
+			  intno[0], GetIntTarget(intno[0]));
+		KT_ASSERT(GetIntTarget(intno[0]) == 1 || GetIntTarget(intno[0]) == 3);
+		KT_ASSERT_ER(knl_cpu_roles_text("", ""), E_OK);
+		KT_ASSERT_EQ(GetIntTarget(intno[0]), 1);
+	}
+
+#ifdef CPU_CORE_X86_64
+	/* an IOAPIC's input in use (the serial port's): its entry sent to PRC 2 and back */
+	{
+		UINT	v;
+
+		for ( v = INTVEC_GSI(0); v < INTVEC_GSI(INTVEC_GSI_NUM); v++ ) {
+			if ( knl_int_in_use(v) ) break;
+		}
+		if ( v < INTVEC_GSI(INTVEC_GSI_NUM) ) {
+			KT_ASSERT_ER(SetIntTarget(v, 2), E_OK);
+			KT_ASSERT_EQ(GetIntTarget(v), 2);
+			KT_ASSERT_ER(SetIntTarget(v, 0), E_OK);
+			KT_ASSERT_EQ(GetIntTarget(v), 1);
+			tm_printf((UB *)"  IOAPIC input of interrupt %d sent to PRC2 and back\n", v);
+		}
+	}
+#endif
+
+	/* a processor kept for real time takes no device's interrupt */
+	KT_ASSERT_ER(knl_cpu_roles_text("1", "2"), E_OK);
+	KT_ASSERT_ER(SetIntTarget(intno[0], 2), E_OBJ);
+	KT_ASSERT_EQ(GetIntTarget(intno[0]), 1);
+	KT_ASSERT_ER(knl_cpu_roles_text("", ""), E_OK);
+
+	IT_TBL[intno[0]] = it_orig;
+	tk_cls_dev(dd, 0);
+	Kfree(buf);
+}
+
 EXPORT void ktest_smp( void )
 {
 	KT_RUN(test_get_prc);
 	KT_RUN(test_parallel);
 	KT_RUN(test_ref_cpu);
 	KT_RUN(test_assprc);
+	KT_RUN(test_set_asp);
 	KT_RUN(test_cross_wakeup);
 	KT_RUN(test_timer_other_prc);
 	KT_RUN(test_stress);
 	KT_RUN(test_wait_result);
 	KT_RUN(test_del_ended);
 	KT_RUN(test_exd_stack);
+	KT_RUN(test_int_target);
 }

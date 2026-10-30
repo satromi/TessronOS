@@ -19,6 +19,7 @@
     }
   },
   "tessronos": {
+    "update": "keep",
     "calendar": {
       "tz": 540
     },

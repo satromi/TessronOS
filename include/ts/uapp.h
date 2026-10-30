@@ -110,13 +110,18 @@ IMPORT ER  dp_img_decode( CONST UB *data, SZ size, UW *px, SZ maxpx,
 /*
  * かな漢字変換 in a window of one's own: a session opened with kc_open
  * (closed with kc_close), and a key as the keyboard gave it (the usage
- * and its modifiers) handed to it. What comes back is as kc_key's in
+ * and its modifiers) handed to it with the input mode it came in -- the
+ * notice's imode (T_OBNTM), never kc_mode, which keys typed after it
+ * may have changed already. What comes back is as kc_key's in
  * include/ts/kconv.h: KC_NOTMINE for a key that is not the converter's
  * -- every key in 英語 -- or its TSMOZC_* flags, the composition in out.
- * kc_choose and kc_list are as there. kc_mode is the input mode the
- * message line shows (WM_MODE_* of include/ts/wm.h).
+ * A key in 英語 that comes while something is being composed commits it
+ * first: the program hands the converter Shift+Enter in the mode the
+ * composition was typed in, then takes the key as 英語's. kc_choose and
+ * kc_list are as there. kc_mode is the input mode the message line shows
+ * now (WM_MODE_* of include/ts/wm.h), for showing it.
  */
-IMPORT INT  kc_hid_key( INT kid, UINT key, UINT mods, T_KCOUT *out );
+IMPORT INT  kc_hid_key( INT kid, UINT key, UINT mods, UINT mode, T_KCOUT *out );
 IMPORT UINT kc_mode( void );
 
 /*

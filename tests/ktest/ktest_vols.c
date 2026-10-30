@@ -1084,40 +1084,79 @@ IMPORT void knl_obdev_volume_up( void );
 IMPORT ER   knl_obfile_attach( CONST char *path, UINT flags );
 IMPORT ER   knl_obfile_detach( CONST char *path );
 
+/*
+ * The heap counted is the whole kernel's: in a run of every suite, tasks
+ * the suites before this one left (the stores' writing back, the network,
+ * the programs' threads) take and give back memory of their own while a
+ * step is repeated. Each count is therefore made once the heap has stayed
+ * the same for a while, and the ten repeats are measured afresh up to
+ * three times: memory a step itself keeps is left over every time, ten
+ * times what one repeat keeps, while what another task held at one count
+ * is gone at the next.
+ */
+#define LEAK_TRIES	3
+#define LEAK_QUIET_MS	500		/* the heap unchanged this long */
+#define LEAK_QUIET_MAX	3000		/* waited for at the most */
+
+LOCAL void counts_quiet( COUNTS *c )
+{
+	COUNTS	prev;
+	INT	t, still = 0;
+
+	counts(&prev);
+	for ( t = 0; t < LEAK_QUIET_MAX; t += 50 ) {
+		tk_dly_tsk(50);
+		counts(c);
+		if ( c->heap == prev.heap && c->areas == prev.areas ) {
+			still += 50;
+			if ( still >= LEAK_QUIET_MS ) return;
+		} else {
+			still = 0;
+			prev = *c;
+		}
+	}
+	tm_printf((UB *)"  (the heap did not stay still for %d ms in %d ms)\n", LEAK_QUIET_MS, LEAK_QUIET_MAX);
+}
+
 LOCAL void leak_step( CONST char *what, INT step )
 {
 	COUNTS		c0, c1;
 	T_FSPROBE	pr;
 	TS_UUID		u;
 	UB		fat[NAME_MAX], ts[NAME_MAX];
-	INT		i;
+	INT		i, try;
+	SZ		left = 0;
 	ID		key;
 
 	vol_dev(1, fat);
 	vol_dev(0, ts);
 	(void)knl_obdev_uuid(fat, &u);
-	for ( i = 0; i < 12; i++ ) {
-		if ( i == 2 ) counts(&c0);
-		switch ( step ) {
-		case 0:	(void)knl_fs_probe((CONST char *)fat, &pr); break;
-		case 1:	key = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE);
-			if ( key > 0 ) ob_cls_obj(key);
-			break;
-		case 2:	(void)knl_fs_detach_media((CONST char *)fat);
-			(void)knl_fs_attach_media("fatfs", (CONST char *)fat, 0);
-			break;
-		case 3:	(void)knl_obfile_detach((CONST char *)ts);
-			(void)knl_obfile_attach((CONST char *)ts, TSFS_STORE_BLK);
-			break;
-		case 4:	knl_dt_zone_load(); break;
-		case 5:	knl_obdev_volume_up(); break;
-		default: (void)unmount(1); (void)mount_auto(1, 0); break;
+	for ( try = 0; try < LEAK_TRIES; try++ ) {
+		for ( i = 0; i < 12; i++ ) {
+			if ( i == 2 ) counts_quiet(&c0);	/* the first two make what stays made */
+			switch ( step ) {
+			case 0:	(void)knl_fs_probe((CONST char *)fat, &pr); break;
+			case 1:	key = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE);
+				if ( key > 0 ) ob_cls_obj(key);
+				break;
+			case 2:	(void)knl_fs_detach_media((CONST char *)fat);
+				(void)knl_fs_attach_media("fatfs", (CONST char *)fat, 0);
+				break;
+			case 3:	(void)knl_obfile_detach((CONST char *)ts);
+				(void)knl_obfile_attach((CONST char *)ts, TSFS_STORE_BLK);
+				break;
+			case 4:	knl_dt_zone_load(); break;
+			case 5:	knl_obdev_volume_up(); break;
+			default: (void)unmount(1); (void)mount_auto(1, 0); break;
+			}
 		}
+		counts_quiet(&c1);
+		left = c1.heap - c0.heap;
+		tm_printf((UB *)"  %s, ten times: %d bytes in %d areas left over%s\n", what, (INT)left,
+			  c1.areas - c0.areas, ( left < 1024 || try + 1 == LEAK_TRIES ) ? "" : "; again");
+		if ( left < 1024 ) break;
 	}
-	counts(&c1);
-	tm_printf((UB *)"  %s, ten times: %d bytes in %d areas left over\n", what, (INT)( c1.heap - c0.heap ),
-		  c1.areas - c0.areas);
-	KT_ASSERT(c1.heap - c0.heap < 1024);
+	KT_ASSERT(left < 1024);
 }
 
 LOCAL void test_leak( void )

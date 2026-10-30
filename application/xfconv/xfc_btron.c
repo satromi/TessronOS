@@ -22,7 +22,7 @@
  *	is shown as one to go into. A 実身 taken in brings every 実身 it
  *	links to, in turn, with it: they are made one stored BTRON archive
  *	(btfs_book) and taken out by the code that takes an archive out
- *	(application/unpack/unp_obj.c), so that their TAD records become
+ *	(application/archive/unp_obj.c), so that their TAD records become
  *	xmlTAD, the links join the new 実身 together, the 実行機能付箋
  *	choose the programs that open them, and the records of other types
  *	are kept as they are.
@@ -34,7 +34,7 @@
 #include <string.h>
 #include <ts/btfs.h>
 #include <ts/sysdef.h>
-#include "../unpack/unp.h"
+#include "../archive/unp.h"
 
 #define CHUNK		32768		/* a read of the disk: a multiple of any block size */
 #define NCHUNK		8
@@ -260,6 +260,7 @@ EXPORT void xfc_bt_names( XWIN *w, CONST UB *dir, char *out, INT max )
 
 		if ( btfs_file(&w->bt->fs, (UINT)fid, &f) >= E_OK ) {
 			n += snprintf(out + n, max - n, "%s%s", n > 0 ? "/" : "", f.uname);
+			if ( n >= max ) n = max - 1;	/* a long path: it ends where the room does */
 			btfs_file_free(&f);
 		}
 		while ( *p != 0 && *p != '/' ) p++;

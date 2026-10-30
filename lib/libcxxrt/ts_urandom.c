@@ -12,9 +12,15 @@
  *	getrandom, getentropy, and /dev/urandom and /dev/random, all reading
  *	the random source object 乱数 (lib/libts/ts_random.c keeps the key).
  *
- *	The two paths open to a descriptor of a range of their own
- *	(RND_BASE up); reading it gives random bytes, writing it stirs what
- *	is written into the generator, which the object allows only to the
+ *	The two paths are looked up as any other is, in the tree of objects
+ *	from "/": they open only when dev links a device of characters by
+ *	that name (devfs's random source), so that the name is the tree's
+ *	and not this library's. The descriptor is then one of a range of
+ *	this library's own (RND_BASE up), read through the key of 乱数 kept
+ *	open (ts_get_random): a read through the file layer and devfs takes
+ *	about ten times as long for a few bytes, and what is read is the
+ *	same source. Reading gives random bytes, writing stirs what is
+ *	written into the generator, which the object allows only to the
  *	system and the administrators (EPERM otherwise). The source never
  *	has to wait, so neither does any of these, whatever the flags say.
  */
@@ -33,6 +39,20 @@
 #define RND_CHUNK	65536		/* bytes asked of the object at a time */
 
 extern ID	ts_random_key( void );
+
+/* The file layer's look at a path (include/ts/fs.h, declared as ts_syscalls.c has it) */
+typedef struct {
+	UINT	mode;
+	UD	size;
+	UD	mtime;
+	UD	ino;
+	UB	dev[16];
+} RND_FSTAT;
+
+IMPORT ER	fs_stat( CONST char *path, RND_FSTAT *st );
+
+#define RND_IFMT	0xF000
+#define RND_IFCHR	0x2000		/* FS_IFCHR */
 
 static volatile int	rnd_used[RND_MAX];
 
@@ -75,8 +95,15 @@ int ts_rnd_open( const char *path )
 {
 	int	i;
 
+	RND_FSTAT	f;
+
 	if ( strcmp(path, "/dev/urandom") != 0 && strcmp(path, "/dev/random") != 0 ) {
 		return -2;
+	}
+	/* the name as the tree of objects has it: dev's device of characters */
+	if ( fs_stat(path, &f) < 0 || ( f.mode & RND_IFMT ) != RND_IFCHR ) {
+		errno = ENOENT;
+		return -1;
 	}
 	if ( ts_random_key() <= 0 ) {
 		errno = ENOENT;

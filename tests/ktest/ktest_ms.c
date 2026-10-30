@@ -194,7 +194,8 @@ LOCAL void test_run( void )
 	T_OBREF	r;
 	T_PSTS	psts;
 	T_WMEV	ev;
-	UB	*log, figxml[2400];
+	UB	*log;
+	static UB	figxml[2400];
 	char	u[40], v[40], um[40], vmm[40], up[40], vpp[40];
 	UINT	mode0;
 	UD	pos = 0;
@@ -766,6 +767,173 @@ LOCAL void test_img( void )
 }
 
 /*
+ * The script's timers, which the program waits for rather than looks
+ * at again and again: SLEEP and a WAIT's limit end at their time; a
+ * WAIT ends as soon as another thread makes it true; BREAK wakes a
+ * SLEEP at once; ten SLEEPs one after another are all slept. Then the
+ * program is held (its task suspended) past a SLEEP's end and a WAIT's
+ * limit: both end once it goes on, late, neither left behind.
+ */
+LOCAL CONST char timer_xml[] =
+	"<tad version=\"1.0\" encoding=\"UTF-8\"><document>"
+	"<p>VERSION 3</p>"
+	"<p>VARIABLE t0:I, done:I, never:I, n:I, e:I</p>"
+	"<p>PROLOGUE</p>"
+	"<p>  SET t0 = $MSEC</p>"
+	"<p>  SLEEP 300</p>"
+	"<p>  LOG \"tm sleep %d %d\", $MSEC - t0 >= 300, $MSEC - t0</p>"
+	"<p>  SET t0 = $MSEC</p>"
+	"<p>  WAIT never == 1 : 0.4</p>"
+	"<p>  LOG \"tm waitto %d %d %d\", $ERR, $MSEC - t0 >= 400, $MSEC - t0</p>"
+	"<p>  SET t0 = $MSEC</p>"
+	"<p>  EXECUTE raise</p>"
+	"<p>  WAIT done == 1 : 10</p>"
+	"<p>  LOG \"tm waitset %d %d %d\", $ERR, $MSEC - t0 &lt; 3000, $MSEC - t0</p>"
+	"<p>  SET t0 = $MSEC</p>"
+	"<p>  EXECUTE nap</p>"
+	"<p>  EXECUTE rouse</p>"
+	"<p>  SUSPEND nap : 10</p>"
+	"<p>  LOG \"tm break %d %d %d %d\", $ERR, e, $MSEC - t0 &lt; 3000, $MSEC - t0</p>"
+	"<p>  SET t0 = $MSEC</p>"
+	"<p>  REPEAT 10</p>"
+	"<p>    SLEEP 50</p>"
+	"<p>    SET n = n + 1</p>"
+	"<p>  ENDREPEAT</p>"
+	"<p>  LOG \"tm ticks %d %d %d\", n, $MSEC - t0 >= 500, $MSEC - t0</p>"
+	"<p>  EXECUTE late</p>"
+	"<p>  SET t0 = $MSEC</p>"
+	"<p>  LOG \"tm hold\"</p>"
+	"<p>  SLEEP 300</p>"
+	"<p>  LOG \"tm held %d\", $MSEC - t0</p>"
+	"<p>  SUSPEND late : 10</p>"
+	"<p>  FINISH</p>"
+	"<p>END</p>"
+	"<p>ACTION raise</p>"
+	"<p>  SLEEP 200</p>"
+	"<p>  SET done = 1</p>"
+	"<p>END</p>"
+	"<p>ACTION nap</p>"
+	"<p>  SLEEP 20000</p>"
+	"<p>  SET e = $ERR</p>"
+	"<p>END</p>"
+	"<p>ACTION rouse</p>"
+	"<p>  SLEEP 100</p>"
+	"<p>  BREAK nap</p>"
+	"<p>END</p>"
+	"<p>ACTION late</p>"
+	"<p>  WAIT never == 1 : 0.5</p>"
+	"<p>  LOG \"tm late %d\", $ERR</p>"
+	"<p>END</p>"
+	"</document></tad>";
+
+/* The number after a line's words in the log ("tm held 812"), -1 none */
+LOCAL INT num_after( CONST UB *s, INT n, CONST char *w )
+{
+	INT	i, k, m = s_len(w), v;
+
+	for ( i = 0; i + m <= n; i++ ) {
+		for ( k = 0; k < m && s[i + k] == (UB)w[k]; k++ ) ;
+		if ( k < m ) continue;
+		for ( k = i + m, v = 0; k < n && s[k] >= '0' && s[k] <= '9'; k++ ) v = v * 10 + ( s[k] - '0' );
+		return ( k > i + m ) ? v : -1;
+	}
+	return -1;
+}
+
+LOCAL void test_timer( void )
+{
+	TS_UUID	prog, scr, fig, pu, vs;
+	T_OBCRE	c;
+	T_OBREF	r;
+	T_PSTS	psts;
+	T_RPRC	rp;
+	UB	*log, figxml[600];
+	char	u[40], v[40];
+	UD	pos = 0;
+	INT	n = 0, i, held;
+	ID	pid;
+	BOOL	hold = FALSE;
+
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_PROG_MICROSCRIPT, &prog), E_OK);
+	if ( ob_ref_obj(&prog, &r) < E_OK ) KT_SKIP("no microscript program");
+	log = (UB *)Kmalloc(LOG_MAX);
+	if ( log == NULL ) KT_SKIP("no memory");
+	if ( make_object("{\"name\":\"SCRIPT:時間\"}", timer_xml, &scr) < E_OK ) {
+		(void)ob_att_vol(MS_STORE, 0);
+		KT_ASSERT_ER(make_object("{\"name\":\"SCRIPT:時間\"}", timer_xml, &scr), E_OK);
+	}
+	(void)ts_gen_uuid(&vs);
+	ts_uuid_to_str(&scr, u, sizeof(u));
+	ts_uuid_to_str(&vs, v, sizeof(v));
+	{
+		CONST char *parts[] = {
+			"<tad version=\"1.0\" encoding=\"UTF-8\"><figure><link id=\"", (CONST char *)u,
+			"_0.xtad\" vobjid=\"", (CONST char *)v,
+			"\" vobjleft=\"400\" vobjtop=\"50\" vobjright=\"600\" vobjbottom=\"81\"/></figure></tad>", NULL
+		};
+
+		for ( i = 0; parts[i] != NULL; i++ ) {
+			INT	k = s_len(parts[i]);
+
+			knl_memcpy(figxml + n, parts[i], k);
+			n += k;
+		}
+		figxml[n] = 0;
+	}
+	KT_ASSERT_ER(make_object("{\"name\":\"MS時間\"}", (CONST char *)figxml, &fig), E_OK);
+	(void)log_from(&pos, log, LOG_MAX);
+
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_PROCESS;
+	c.prog = prog;
+	c.arg = &fig;
+	c.argsz = sizeof(fig);
+	KT_ASSERT_ER(ob_cre_obj(&c, &pu), E_OK);
+	pid = knl_prc_of_uuid(&pu);
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) { Kfree(log); return; }
+
+	/* held past the SLEEP's end and the WAIT's limit, once it says so */
+	for ( i = 0; i < 600 && !hold; i++ ) {
+		UD	p0 = pos;
+
+		tk_dly_tsk(20);
+		n = log_from(&p0, log, LOG_MAX);
+		hold = has(log, n, "[MS-LOG] tm hold");
+	}
+	KT_ASSERT(hold);
+	if ( hold && ts_ref_prc(pid, &rp) >= E_OK && rp.maintsk > 0 ) {
+		KT_ASSERT_ER(tk_sus_tsk(rp.maintsk), E_OK);
+		tk_dly_tsk(1000);
+		KT_ASSERT_ER(tk_rsm_tsk(rp.maintsk), E_OK);
+	}
+	psts.exitcd = -1;
+	i = ts_wai_prc(pid, &psts, 20000);
+	KT_ASSERT_ER(i, E_OK);
+	KT_ASSERT_EQ(psts.exitcd, 0);
+	if ( i < E_OK ) (void)ts_ter_prc(pid, 0);	/* it did not finish: not left behind */
+
+	n = log_from(&pos, log, LOG_MAX);
+	KT_ASSERT(has(log, n, "[MS-LOG] tm sleep 1 "));
+	KT_ASSERT(has(log, n, "[MS-LOG] tm waitto 1 1 "));
+	KT_ASSERT(has(log, n, "[MS-LOG] tm waitset 0 1 "));
+	KT_ASSERT(has(log, n, "[MS-LOG] tm break 0 2 1 "));
+	KT_ASSERT(has(log, n, "[MS-LOG] tm ticks 10 1 "));
+	KT_ASSERT(has(log, n, "[MS-LOG] tm late 1"));
+	held = num_after(log, n, "[MS-LOG] tm held ");
+	tm_printf((UB *)"  held %d ms: the SLEEP of 300 ms ended once the program went on\n", held);
+	KT_ASSERT(held >= 1000);
+	if ( !has(log, n, "[MS-LOG] tm late 1") || held < 1000 ) {
+		log[( n < LOG_MAX ) ? n : LOG_MAX - 1] = 0;
+		tm_putstring(log);
+	}
+	(void)ob_del_obj(&fig);
+	(void)ob_del_obj(&scr);
+	Kfree(log);
+	wm_update();
+}
+
+/*
  * VOPEN as the desktop sees it: the test keeps the channel the desktop
  * would, takes the request, and answers with a process; the segment's
  * PID becomes that process's number.
@@ -904,8 +1072,8 @@ LOCAL void test_vopen( void )
  * localhost:3333 (JSON) and :3334 (an event stream): here two relays
  * listen there and pass each connection on to the test server on the
  * host (tools/httpd_test.py, started with the FTP server when NET=user).
- * The first sample is not allowed its host beforehand: the window asks,
- * and Enter answers. The others are allowed in their metadata, as a
+ * The first sample is not allowed its host beforehand: the window asks
+ * in a panel, and 〈許可〉 answers. The others are allowed in their metadata, as a
  * person's earlier answer leaves it. HTTP通信テスト reaches the internet;
  * without it, it only has to say that it failed.
  */
@@ -998,14 +1166,14 @@ LOCAL void relay_task( INT which, void *exinf )
 LOCAL INT grant_hosts( CONST TS_UUID *u, UB *was, INT max )
 {
 	CONST char	*add = ",\"networkGrants\":[\"localhost\",\"example.com\",\"jsonplaceholder.typicode.com\"]}";
-	UB	*j = (UB *)Kmalloc(OB_ATR_MAX + 256);
+	UB	*j = (UB *)Kmalloc(KT_META_ROOM + 256);
 	SZ	asz = 0;
 	INT	n, end, k;
 	ID	key;
 
 	if ( j == NULL ) return -1;
 	key = ob_opn_obj(u, OB_OP_R | OB_OP_ATRWR);
-	if ( key <= 0 || ob_get_atr(key, j, OB_ATR_MAX, &asz) < E_OK || (INT)asz > max ) {
+	if ( key <= 0 || ob_get_atr(key, j, KT_META_ROOM, &asz) < E_OK || (INT)asz > max ) {
 		if ( key > 0 ) ob_cls_obj(key);
 		Kfree(j);
 		return -1;
@@ -1054,7 +1222,7 @@ LOCAL void test_net_samples( void )
 	T_OBREF	r;
 	T_PSTS	psts;
 	T_CTSK	ct;
-	UB	*log = (UB *)Kmalloc(LOG_MAX), *was = (UB *)Kmalloc(OB_ATR_MAX);
+	UB	*log = (UB *)Kmalloc(LOG_MAX), *was = (UB *)Kmalloc(KT_META_ROOM);
 	UD	pos;
 	INT	k, i, n, wasn, wid;
 	ID	pid, tid[2];
@@ -1098,7 +1266,7 @@ LOCAL void test_net_samples( void )
 			KT_ASSERT(FALSE);
 			continue;
 		}
-		wasn = sm[k].ask ? -1 : grant_hosts(&base, was, OB_ATR_MAX);
+		wasn = sm[k].ask ? -1 : grant_hosts(&base, was, KT_META_ROOM);
 		pos = ~(UD)0 >> 1;
 		(void)tm_log_read(&pos, log, 1);
 		knl_memset(&c, 0, sizeof(c));
@@ -1116,18 +1284,26 @@ LOCAL void test_net_samples( void )
 			if ( has(log, n, "完了") || ( internet && has(log, n, "[2] jsonplaceholder")
 						     && ( has(log, n, "id = ") || has(log, n, "失敗") ) ) ) break;
 			if ( sm[k].ask && ( i % 5 ) == 4 ) {
-				/* the question, answered: Enter allows */
+				/*
+				 * The question, a panel of its own in front of the
+				 * window: 〈許可〉 pressed (Enter would press 〈拒否〉,
+				 * the safe one)
+				 */
 				T_WMEV	ev;
 				TS_UUID	w;
 
-				wid = window_of(sm[k].title, &w);
+				wid = window_of("接続の許可", &w);
 				if ( wid > 0 ) {
 					knl_memset(&ev, 0, sizeof(ev));
-					ev.type = HID_EV_KEY_DOWN;
 					ev.wid = wid;
-					ev.code = 0x28;
+					ev.x = 266;
+					ev.y = 100;
+					ev.type = HID_EV_MOVE;
 					knl_wmobj_event(&ev);
-					ev.type = HID_EV_KEY_UP;
+					ev.type = HID_EV_BTN_DOWN;
+					knl_wmobj_event(&ev);
+					tk_dly_tsk(80);
+					ev.type = HID_EV_BTN_UP;
 					knl_wmobj_event(&ev);
 				}
 			}
@@ -1157,11 +1333,11 @@ LOCAL void test_net_samples( void )
 			SZ	asz = 0;
 
 			if ( key > 0 ) {
-				(void)ob_get_atr(key, was, OB_ATR_MAX, &asz);
+				(void)ob_get_atr(key, was, KT_META_ROOM, &asz);
 				ob_cls_obj(key);
 			}
 			if ( !has(was, (INT)asz, "networkGrants") ) {
-				was[( asz < OB_ATR_MAX ) ? asz : OB_ATR_MAX - 1] = 0;
+				was[( asz < KT_META_ROOM ) ? asz : KT_META_ROOM - 1] = 0;
 				tm_printf((UB *)"  metadata: %s\n", was);
 			}
 			KT_ASSERT(has(was, (INT)asz, "networkGrants") && has(was, (INT)asz, "localhost"));
@@ -1200,6 +1376,7 @@ EXPORT void ktest_ms( void )
 {
 	KT_RUN(test_img);
 	KT_RUN(test_run);
+	KT_RUN(test_timer);
 	KT_RUN(test_vopen);
 	KT_RUN(test_sample);
 	KT_RUN(test_desktop);

@@ -160,8 +160,12 @@ EXPORT ER knl_start_device( void )
 }
 
 #if USE_SHUTDOWN
+/* the Wi-Fi manager's (device/net/wifi/wifi.c); weak: a build without the Wi-Fi has none */
+IMPORT void	knl_wifi_shutdown( void ) __attribute__((weak));
+
 EXPORT ER knl_finish_device( void )
 {
+	if ( knl_wifi_shutdown != NULL ) knl_wifi_shutdown();	/* the network joined left first */
 	knl_sd_finish();	/* a card at 1.8V powered off, so that the firmware finds it at 3.3V */
 	return E_OK;
 }

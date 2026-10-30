@@ -1,0 +1,96 @@
+ieee80211_output: QoS data frames to a QoS peer from the association on,
+each TID's sequence numbers continuous through a block-ack agreement,
+for a driver that makes the agreements itself (docs/tessronos/
+09-network.md 9.6.9); with ADDBA offload, as the release does.
+
+Why: the release sends data frames without the QoS field until a
+block-ack agreement for their TID has been made ("We use QoS data frames
+for aggregation only"). Those frames take their sequence numbers from
+the counter shared with the management frames (the card's firmware
+fills them in), and the first QoS data frame after the agreement starts
+the TID's own counter at 0, the agreement's starting sequence number
+being 0 too. The sequence numbers the access point sees for the
+station's data therefore go back to 0 when the agreement starts
+(ThinkPad X1 Yoga with a mesh access point, hw11o: 3 to 7 without the
+QoS field, then 0, 1, 2 ... on the aggregation queue); after that, the
+access point acknowledged every frame, but almost none reached the
+network (DHCP's REQUEST unanswered for 30 s, no frame for the station
+received). Linux's mac80211 sends every data frame to a QoS peer as a
+QoS data frame (ieee80211_build_hdr, the station's WME flag), numbers it
+from the TID's counter (ieee80211_tx_h_sequence), sends EAPOL with
+priority 7, and iwlwifi starts an agreement at the TID's next number
+(iwl_mvm_sta_tx_agg_start: the ssn from tid_data->seq_number). The same
+here: the QoS field on every data frame to a QoS peer, EAPOL on TID 7;
+the agreement is asked for as before (its start is decided by
+TessronOS's layer, tswifi_obsd.c), never for EAPOL.
+
+Not with ADDBA offload (IEEE80211_C_ADDBA_OFFLOAD, iwx): there the TX
+command carries neither the station nor the TID (iwx_tx_cmd_gen2 and
+_gen3); each of the firmware's queues is bound to one station and one
+TID when it is enabled (iwx_tx_queue_cfg_cmd, iwx_enable_txq). A TID
+has a queue of its own only once iwx_sta_tx_agg_start has enabled it
+for the agreement; until then iwx_tx puts the TID's frames on the first
+data queue, which is bound to the management TID (IWX_MGMT_TID). A QoS
+data frame of TID 7 or 0 there is one the release never sends, and
+iwlwifi never sends one either (on this firmware it gives every TID its
+own queue before the TID's first QoS frame, iwl_mvm_sta_alloc_queue_tvqm).
+With the QoS field on EAPOL, the AX200 of a Surface Go 2 sent its
+4-way's message 2 four times to an access point that resent message 1
+each time and ended the association with reason 15 (the 4-way's
+timeout) 4 s later; the same access point and handshake work with the
+8265 (iwm), whose TX command carries the TID itself. With ADDBA
+offload, data frames therefore keep the release's form: no QoS field
+until the TID's agreement (and its queue) is there, never for EAPOL.
+
+Applied by tools/openbsd/build.sh to a copy of the file; OpenBSD's tree
+is not changed.
+
+--- a/sys/net80211/ieee80211_output.c
++++ b/sys/net80211/ieee80211_output.c
+@@ -690,17 +690,39 @@
+ 
+ 	if ((ic->ic_flags & IEEE80211_F_QOS) &&
+ 	    (ni->ni_flags & IEEE80211_NODE_QOS) &&
+-	    /* do not QoS-encapsulate EAPOL frames */
+-	    eh.ether_type != htons(ETHERTYPE_EAPOL)) {
++	    (!(ic->ic_caps & IEEE80211_C_ADDBA_OFFLOAD) ||
++	    /* with ADDBA offload, do not QoS-encapsulate EAPOL frames */
++	    eh.ether_type != htons(ETHERTYPE_EAPOL))) {
+ 		struct ieee80211_tx_ba *ba;
+-		tid = ieee80211_classify(ic, m);
++		/*
++		 * Every data frame to a QoS peer is a QoS data frame, from
++		 * the association on, its sequence number from the counter
++		 * of its TID; EAPOL frames with the highest priority (TID 7).
++		 * A block-ack agreement then starts at the TID's next
++		 * sequence number and continues it. Not so with ADDBA
++		 * offload (below).
++		 */
++		if (eh.ether_type == htons(ETHERTYPE_EAPOL))
++			tid = 7;
++		else
++			tid = ieee80211_classify(ic, m);
+ 		ba = &ni->ni_tx_ba[tid];
+-		/* We use QoS data frames for aggregation only. */
+-		if (ba->ba_state != IEEE80211_BA_AGREED) {
++		if (ba->ba_state != IEEE80211_BA_AGREED &&
++		    eh.ether_type != htons(ETHERTYPE_EAPOL) &&
++		    ieee80211_can_use_ampdu(ic, ni))
++			ieee80211_node_trigger_addba_req(ni, tid);
++		if ((ic->ic_caps & IEEE80211_C_ADDBA_OFFLOAD) &&
++		    ba->ba_state != IEEE80211_BA_AGREED) {
++			/*
++			 * With ADDBA offload a TID has a queue of its own
++			 * in the device only under a block-ack agreement;
++			 * without one its frames go on the queue of the
++			 * management frames, whose device takes the TID of
++			 * a frame from the queue, not from the frame. QoS
++			 * data frames for aggregation only, there.
++			 */
+ 			hdrlen = sizeof(struct ieee80211_frame);
+ 			addqos = 0;
+-			if (ieee80211_can_use_ampdu(ic, ni))
+-				ieee80211_node_trigger_addba_req(ni, tid);
+ 		} else {
+ 			hdrlen = sizeof(struct ieee80211_qosframe);
+ 			addqos = 1;

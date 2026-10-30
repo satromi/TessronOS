@@ -160,7 +160,7 @@ typedef struct {
 #define XFU_AS_ZEN	2		/* a text whose letters and digits become full width */
 #define XFU_AS_IMAGE	3		/* a picture, shown as a figure */
 #define XFU_AS_RAW	4		/* bytes kept in record 1, record 0 its name alone */
-#define XFU_AS_ARCHIVE	5		/* a BTRON archive, opened by 書庫解凍 */
+#define XFU_AS_ARCHIVE	5		/* a BTRON archive, opened by 書庫管理 */
 
 /*
  * A file or a directory of a tree taken in. With a box, a link to what
@@ -225,15 +225,23 @@ IMPORT ER   xfu_names_unique( T_XFUNAMES *s, UB *name, INT max, INT namemax );
 
 /* ---------------------------------------------------------------- trees */
 
-/* A directory of the file layer as a tree */
+/*
+ * A directory of the file layer as a tree: by a path of the file layer's
+ * own (xfu_fs_tree, what the kernel reads and writes), or below the root
+ * of a disk opened from its device object (xfu_vol_tree: vd from
+ * fs_opn_vol, root a directory of the disk, "" its root), no path of the
+ * file layer's tree ever named
+ */
 #define XFU_FS_OPEN	8		/* files open at once */
 typedef struct {
 	char	root[XFU_PATH_MAX];
 	INT	fd[XFU_FS_OPEN];
 	char	path[XFU_PATH_MAX];
+	INT	vd;			/* the disk's root; -1: root is a path of the file layer */
 } T_XFUFS;
 
 IMPORT ER  xfu_fs_tree( T_XFUFS *fs, CONST char *root, T_XFUTREE *t );
+IMPORT ER  xfu_vol_tree( T_XFUFS *fs, INT vd, CONST char *root, T_XFUTREE *t );
 
 /* A directory of an FTP server as a tree (include/ts/ftp.h); one file open at a time */
 typedef struct {

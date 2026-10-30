@@ -453,10 +453,17 @@ LOCAL INT changes( void )
 	return n;
 }
 
+/* The end of the zone in the calendar's text: on a PC the RTC's setting follows it */
+#ifdef __x86_64__
+#define CAL_END	","
+#else
+#define CAL_END	"}"
+#endif
+
 /* Whether the calendar's metadata holds the text w */
 LOCAL BOOL cal_says( CONST char *w )
 {
-	UB	*j = (UB *)Kmalloc(OB_ATR_MAX);
+	UB	*j = (UB *)Kmalloc(KT_META_ROOM);
 	SZ	asz = 0;
 	INT	i, k, len = (INT)knl_strlen(w);
 	BOOL	yes = FALSE;
@@ -464,7 +471,7 @@ LOCAL BOOL cal_says( CONST char *w )
 
 	if ( j == NULL ) return FALSE;
 	key = ob_opn_obj(&cal, OB_OP_ATRRD);
-	if ( key > 0 && ob_get_atr(key, j, OB_ATR_MAX, &asz) >= E_OK ) {
+	if ( key > 0 && ob_get_atr(key, j, KT_META_ROOM, &asz) >= E_OK ) {
 		for ( i = 0; i + len <= (INT)asz && !yes; i++ ) {
 			for ( k = 0; k < len && j[i + k] == (UB)w[k]; k++ ) ;
 			yes = (BOOL)( k == len );
@@ -540,7 +547,7 @@ LOCAL void test_clock_set( void )
 	KT_ASSERT_EQ(changes(), 0);
 	KT_ASSERT_ER(dt_setsystz(0), E_OK);
 	KT_ASSERT_EQ(changes(), 1);
-	KT_ASSERT(cal_says("\"tz\":0,\"zone\":\"\"}"));
+	KT_ASSERT(cal_says("\"tz\":0,\"zone\":\"\"" CAL_END));
 	KT_ASSERT_ER(dt_setsystz(ZONE), E_OK);
 	KT_ASSERT_EQ(changes(), 1);
 
@@ -577,7 +584,7 @@ LOCAL void test_zone_kept( void )
 		KT_ASSERT_EQ(z, ZONE);			/* what the calendar keeps */
 	}
 	KT_ASSERT_ER(dt_setsystz(0), E_OK);
-	KT_ASSERT(cal_says("\"tz\":0,\"zone\":\"\"}"));
+	KT_ASSERT(cal_says("\"tz\":0,\"zone\":\"\"" CAL_END));
 }
 
 /*
@@ -634,7 +641,7 @@ LOCAL void test_zone_name( void )
 	KT_ASSERT_ER(dt_setsyszone("America/New_York", -300), E_OK);
 	KT_ASSERT_EQ(dt_getsyszone(name, sizeof(name)), 16);
 	KT_ASSERT(knl_strcmp(name, "America/New_York") == 0);
-	KT_ASSERT(cal_says("\"tz\":-300,\"zone\":\"America/New_York\"}"));
+	KT_ASSERT(cal_says("\"tz\":-300,\"zone\":\"America/New_York\"" CAL_END));
 	KT_ASSERT_EQ(local_hm(utc_of(2026, 1, 15, 12, 0, 0)), 700);
 	KT_ASSERT_EQ(local_hm(utc_of(2026, 7, 1, 12, 0, 0)), 10800);
 	KT_ASSERT_EQ(local_hm(utc_of(2026, 3, 8, 6, 59, 0)), 159);
@@ -666,7 +673,7 @@ LOCAL void test_zone_name( void )
 	KT_ASSERT_EQ(dt_getsyszone(name, sizeof(name)), 10);
 	KT_ASSERT_ER(dt_setsystz(600), E_OK);
 	KT_ASSERT_EQ(dt_getsyszone(name, sizeof(name)), 0);
-	KT_ASSERT(cal_says("\"tz\":600,\"zone\":\"\"}"));
+	KT_ASSERT(cal_says("\"tz\":600,\"zone\":\"\"" CAL_END));
 
 	/* refused, nothing changed */
 	KT_ASSERT_ER(dt_setsyszone("Asia/To kyo", 540), E_PAR);
@@ -679,8 +686,226 @@ LOCAL void test_zone_name( void )
 	KT_ASSERT_ER(dt_setsyszone(was, z0), E_OK);
 }
 
+#ifdef __x86_64__
+/*
+ * The PC's RTC (9.5.1), kept in the local time or in UTC: what its
+ * registers hold after the time is set (as SNTP sets it, tk_set_tim),
+ * after the setting or the zone is changed (the system clock kept), at
+ * the end of summer time with the system running and with the machine
+ * off, the start read by the offset the calendar records or else by the
+ * zone's rules, the start with the calendar saying UTC, and the zone the
+ * firmware gives. Then the setting, the zone and the time as they were.
+ */
+#define UNIX_TRON	473385600LL
+#define RTC_NONE	0x7fffffff
+
+IMPORT void	knl_dt_rtc_test_fw( INT minutes );
+IMPORT void	knl_dt_rtc_test_kept( INT minutes );
+IMPORT INT	knl_dt_rtc_test_held( void );
+IMPORT ER	knl_dt_rtc_test_start( BOOL local );
+
+LOCAL D rtc_now( void )
+{
+	TS_TIME	t = 0;
+
+	(void)dt_gettime(&t);
+	return (D)t + UNIX_TRON;
+}
+
+LOCAL D rtc_wall( void )
+{
+	D	w = 0;
+
+	(void)knl_rtc_read_wall(&w);
+	return w;
+}
+
+LOCAL BOOL rtc_near( D a, D b )
+{
+	D	d = a - b;
+
+	if ( d < -3 || d > 3 ) {
+		tm_printf((UB*)"  %d s off\n", (INT)d);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+/* The system clock set to a moment (UNIX seconds), as SNTP sets it */
+LOCAL ER rtc_set( D u )
+{
+	SYSTIM	s;
+	D	ms = ( u - UNIX_TRON ) * 1000;
+
+	s.hi = (W)( ms >> 32 );
+	s.lo = (UW)ms;
+	return tk_set_tim(&s);
+}
+
+#define U(y, mo, d, h, mi, s)	( (D)utc_of(y, mo, d, h, mi, s) + UNIX_TRON )
+
+LOCAL void test_rtc_kept( void )
+{
+	char	was[DT_ZONE_MAX];
+	INT	z0 = 0, m0 = 0, m = 0;
+	TS_TIME	t0 = 0;
+	UD	o0 = 0, o1 = 0;
+	D	w;
+
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_CALENDAR, &cal), E_OK);
+	KT_ASSERT_ER(dt_getrtc(&m0), E_OK);
+	tm_printf((UB*)"  the RTC reads %d s, the system clock UTC %d s (UNIX), kept as %d\n",
+		  (INT)rtc_wall(), (INT)rtc_now(), m0);
+	if ( ( m0 & DT_RTC_FIRMWARE ) != 0 ) KT_SKIP("the firmware gives the clock a zone");
+	KT_ASSERT_ER(dt_getsystz(&z0), E_OK);
+	KT_ASSERT(dt_getsyszone(was, sizeof(was)) >= 0);
+	KT_ASSERT_ER(dt_gettime(&t0), E_OK);
+	KT_ASSERT_ER(ts_get_mono(&o0), E_OK);
+
+	/* Japan, the local time: the RTC 9 hours ahead of UTC */
+	KT_ASSERT_ER(dt_setsyszone("Asia/Tokyo", 540), E_OK);
+	KT_ASSERT_ER(dt_setrtc(DT_RTC_LOCAL), E_OK);
+	KT_ASSERT_ER(rtc_set(U(2026, 10, 19, 12, 0, 0)), E_OK);
+	KT_ASSERT(rtc_near(rtc_wall(), U(2026, 10, 19, 21, 0, 0)));
+	KT_ASSERT(cal_says("\"rtc\":\"local\",\"rtcofs\":540"));
+	KT_ASSERT_ER(dt_getrtc(&m), E_OK);
+	KT_ASSERT_EQ(m, DT_RTC_LOCAL);
+
+	/* UTC: the RTC written again, the system clock kept */
+	KT_ASSERT_ER(dt_setrtc(DT_RTC_UTC), E_OK);
+	KT_ASSERT(rtc_near(rtc_now(), U(2026, 10, 19, 12, 0, 0)));
+	KT_ASSERT(rtc_near(rtc_wall(), U(2026, 10, 19, 12, 0, 0)));
+	KT_ASSERT(cal_says("\"rtc\":\"utc\",\"rtcofs\":0"));
+	KT_ASSERT_ER(rtc_set(U(2026, 1, 15, 3, 0, 0)), E_OK);
+	KT_ASSERT(rtc_near(rtc_wall(), U(2026, 1, 15, 3, 0, 0)));
+	KT_ASSERT_ER(dt_setrtc(DT_RTC_LOCAL), E_OK);
+	KT_ASSERT(rtc_near(rtc_wall(), U(2026, 1, 15, 12, 0, 0)));
+	KT_ASSERT_ER(dt_setrtc(3), E_PAR);
+
+	/* the zone changed: the RTC follows it, the system clock kept */
+	KT_ASSERT_ER(dt_setsyszone("America/New_York", -300), E_OK);
+	KT_ASSERT(rtc_near(rtc_now(), U(2026, 1, 15, 3, 0, 0)));
+	KT_ASSERT(rtc_near(rtc_wall(), U(2026, 1, 14, 22, 0, 0)));
+	KT_ASSERT(cal_says("\"rtcofs\":-300"));
+	KT_ASSERT_ER(rtc_set(U(2026, 7, 1, 12, 0, 0)), E_OK);
+	KT_ASSERT(rtc_near(rtc_wall(), U(2026, 7, 1, 8, 0, 0)));
+	knl_dt_rtc_check();
+	KT_ASSERT(cal_says("\"rtcofs\":-240"));
+
+	/* the start after summer time ended with the machine off: read by the offset recorded */
+	KT_ASSERT_ER(knl_rtc_write_wall(U(2026, 11, 2, 8, 0, 0)), E_OK);
+	knl_dt_rtc_test_kept(RTC_NONE);			/* not read yet at the start */
+	KT_ASSERT_ER(knl_dt_rtc_test_start(TRUE), E_OK);
+	KT_ASSERT(rtc_near(rtc_now(), U(2026, 11, 2, 13, 0, 0)));	/* by the rules: an hour ahead */
+	knl_dt_zone_load();
+	KT_ASSERT(rtc_near(rtc_now(), U(2026, 11, 2, 12, 0, 0)));
+	KT_ASSERT(rtc_near(rtc_wall(), U(2026, 11, 2, 8, 0, 0)));	/* left as it is */
+	knl_dt_rtc_check();
+	KT_ASSERT(rtc_near(rtc_wall(), U(2026, 11, 2, 7, 0, 0)));	/* written again in standard time */
+	KT_ASSERT(cal_says("\"rtcofs\":-300"));
+
+	/* summer time ends with the system running: written again at the change */
+	KT_ASSERT_ER(rtc_set(U(2026, 11, 1, 5, 59, 58)), E_OK);
+	KT_ASSERT(rtc_near(rtc_wall(), U(2026, 11, 1, 1, 59, 58)));
+	KT_ASSERT_EQ(knl_dt_rtc_test_held(), -240);
+	tk_dly_tsk(3000);
+	knl_dt_rtc_check();
+	KT_ASSERT_EQ(knl_dt_rtc_test_held(), -300);
+	w = rtc_wall();
+	KT_ASSERT(rtc_near(w, rtc_now() - 5 * 3600));
+	KT_ASSERT(rtc_near(w, U(2026, 11, 1, 1, 0, 1)));
+
+	/* no record: the zone's rules, the hour that comes twice taken as summer time */
+	knl_dt_rtc_test_kept(RTC_NONE);
+	KT_ASSERT_ER(knl_rtc_write_wall(U(2026, 11, 1, 1, 30, 0)), E_OK);
+	KT_ASSERT_ER(knl_dt_rtc_test_start(TRUE), E_OK);
+	KT_ASSERT(rtc_near(rtc_now(), U(2026, 11, 1, 5, 30, 0)));
+	knl_dt_rtc_test_kept(RTC_NONE);
+	KT_ASSERT_ER(knl_rtc_write_wall(U(2026, 3, 8, 2, 30, 0)), E_OK);	/* an hour that is not */
+	KT_ASSERT_ER(knl_dt_rtc_test_start(TRUE), E_OK);
+	KT_ASSERT(rtc_near(rtc_now(), U(2026, 3, 8, 7, 30, 0)));
+
+	/* the start with the calendar saying UTC: the clock taken again when it is read */
+	KT_ASSERT_ER(dt_setsyszone("Asia/Tokyo", 540), E_OK);
+	KT_ASSERT_ER(rtc_set(U(2026, 10, 19, 12, 0, 0)), E_OK);
+	KT_ASSERT_ER(dt_setrtc(DT_RTC_UTC), E_OK);
+	KT_ASSERT(rtc_near(rtc_wall(), U(2026, 10, 19, 12, 0, 0)));
+	knl_dt_rtc_test_kept(RTC_NONE);
+	KT_ASSERT_ER(knl_dt_rtc_test_start(TRUE), E_OK);	/* the build's default until the calendar */
+	KT_ASSERT(rtc_near(rtc_now(), U(2026, 10, 19, 3, 0, 0)));
+	knl_dt_zone_load();
+	KT_ASSERT(rtc_near(rtc_now(), U(2026, 10, 19, 12, 0, 0)));
+	KT_ASSERT(rtc_near(rtc_wall(), U(2026, 10, 19, 12, 0, 0)));
+	KT_ASSERT_ER(dt_getrtc(&m), E_OK);
+	KT_ASSERT_EQ(m, DT_RTC_UTC);
+
+	/* the firmware's zone, followed whatever the setting */
+	knl_dt_rtc_test_fw(540);
+	KT_ASSERT_ER(dt_getrtc(&m), E_OK);
+	KT_ASSERT_EQ(m, DT_RTC_FIRMWARE | DT_RTC_LOCAL);
+	KT_ASSERT_ER(rtc_set(U(2026, 10, 19, 12, 0, 0)), E_OK);
+	KT_ASSERT(rtc_near(rtc_wall(), U(2026, 10, 19, 21, 0, 0)));
+	KT_ASSERT_ER(knl_dt_rtc_test_start(FALSE), E_OK);
+	KT_ASSERT(rtc_near(rtc_now(), U(2026, 10, 19, 12, 0, 0)));
+	knl_dt_rtc_test_fw(0);
+	KT_ASSERT_ER(dt_getrtc(&m), E_OK);
+	KT_ASSERT_EQ(m, DT_RTC_FIRMWARE | DT_RTC_UTC);
+	knl_dt_rtc_test_fw(RTC_NONE);
+
+	/* as it was */
+	KT_ASSERT_ER(ts_get_mono(&o1), E_OK);
+	KT_ASSERT_ER(dt_setrtc(m0), E_OK);
+	KT_ASSERT_ER(dt_setsyszone(was, z0), E_OK);
+	KT_ASSERT_ER(dt_settime(t0 + (TS_TIME)( ( o1 - o0 ) / 1000000000ULL )), E_OK);
+	knl_dt_rtc_check();
+	tm_printf((UB*)"  back: the RTC reads %d s, the system clock UTC %d s (UNIX)\n",
+		  (INT)rtc_wall(), (INT)rtc_now());
+}
+#endif /* __x86_64__ */
+
+/*
+ * The calendar as the group found it, put back at the end whatever the
+ * tests did or failed to do: the zone and its name, and on a PC how the
+ * RTC is kept, the RTC written again for them and the offset recorded.
+ * The next start reads the RTC by what the calendar says.
+ */
+LOCAL INT	grp_tz;
+LOCAL char	grp_zone[DT_ZONE_MAX];
+#ifdef __x86_64__
+LOCAL INT	grp_rtc = -1;
+#endif
+
+LOCAL void grp_keep( void )
+{
+	grp_tz = CNF_TIMEZONE;
+	knl_strcpy(grp_zone, CNF_TIMEZONE_NAME);
+	if ( dt_getsystz(&grp_tz) < E_OK || dt_getsyszone(grp_zone, sizeof(grp_zone)) < 0 ) {
+		grp_tz = CNF_TIMEZONE;
+		knl_strcpy(grp_zone, CNF_TIMEZONE_NAME);
+	}
+#ifdef __x86_64__
+	if ( dt_getrtc(&grp_rtc) < E_OK || ( grp_rtc & DT_RTC_FIRMWARE ) != 0 ) {
+		grp_rtc = -1;
+	}
+#endif
+}
+
+LOCAL void grp_back( void )
+{
+	ER	er = dt_setsyszone(grp_zone, grp_tz);
+
+#ifdef __x86_64__
+	if ( grp_rtc >= 0 ) {
+		(void)dt_setrtc(grp_rtc);
+	}
+	knl_dt_rtc_check();
+#endif
+	tm_printf((UB*)"  the calendar put back: %s, %d min (%d)\n", grp_zone, grp_tz, (INT)er);
+}
+
 EXPORT void ktest_time( void )
 {
+	grp_keep();
 	KT_RUN(test_monotonic);
 	KT_RUN(test_set_tim);
 	KT_RUN(test_get_tim_u);
@@ -695,4 +920,8 @@ EXPORT void ktest_time( void )
 	KT_RUN(test_clock_set);
 	KT_RUN(test_zone_kept);
 	KT_RUN(test_zone_name);
+#ifdef __x86_64__
+	KT_RUN(test_rtc_kept);
+#endif
+	grp_back();
 }

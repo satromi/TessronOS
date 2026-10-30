@@ -60,7 +60,7 @@ EXPORT ER ui_prn_open( T_UIPRN *p, CONST TS_UUID *near )
 		p->er = er;
 		return er;
 	}
-	p->key = ob_opn_obj(&p->obj, OB_OP_R | OB_OP_W);
+	p->key = ob_opn_obj(&p->obj, OB_OP_R | OB_OP_W | OB_O_EXCL);	/* written page by page */
 	if ( p->key <= 0 ) {
 		er = ( p->key < 0 ) ? (ER)p->key : E_OBJ;
 		(void)ob_del_obj(&p->obj);

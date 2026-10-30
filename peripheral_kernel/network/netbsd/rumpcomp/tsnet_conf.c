@@ -39,13 +39,17 @@
 #include <sys/timevar.h>
 
 #include <net/if.h>
+#include <net/if_dl.h>
+#include <net/if_ether.h>
 #include <net/route.h>
+#include <net/if_llatbl.h>
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
 #include <netinet/ip.h>
 #include <netinet/in_pcb.h>
 #include <netinet/in_var.h>
 #include <netinet6/in6_var.h>
+#include <netinet6/in6_ifattach.h>
 #include <netinet6/nd6.h>
 #include <netinet6/scope6_var.h>
 
@@ -62,6 +66,7 @@ struct tsnet_a6 {
 
 int	rump_tsnet_setaddr4(const char *, uint32_t, uint32_t, uint32_t);
 int	rump_tsnet_getaddr4(const char *, uint32_t *, uint32_t *);
+int	rump_tsnet_addrstate4(const char *, uint32_t);
 int	rump_tsnet_defroute4(uint32_t);
 int	rump_tsnet_addrs6(const char *, struct tsnet_a6 *, int);
 int	rump_tsnet_setaddr6(const char *, const uint8_t *, int, uint32_t, uint32_t,
@@ -78,6 +83,7 @@ int	rump_tsnet_ifup(const char *, int);
 int	rump_tsnet_fionread(int, int *);
 void	*rump_tsnet_lwp_make(void);
 void	rump_tsnet_host(void);
+int	rump_tswifi_setmac(const char *, const uint8_t *);
 
 static int
 tsnet_socket(struct socket **sop)
@@ -176,6 +182,39 @@ rump_tsnet_getaddr4(const char *ifname, uint32_t *addr, uint32_t *mask)
 out:
 	rump_unschedule();
 	return error;
+}
+
+/*
+ * The state of the IPv4 address addr of the interface as its check
+ * against the other machines on the link left it: 0 usable, 1 being
+ * checked (IN_IFF_TENTATIVE), 2 another machine's (IN_IFF_DUPLICATED),
+ * 3 the link down (IN_IFF_DETACHED), -1 no such address
+ */
+int
+rump_tsnet_addrstate4(const char *ifname, uint32_t addr)
+{
+	struct socket	*so;
+	struct ifreq	ifr;
+	struct sockaddr_in *sin;
+	int		state = -1, f;
+
+	rump_schedule();
+	if (tsnet_socket(&so) != 0)
+		goto out;
+	tsnet_ifreq(&ifr, ifname);
+	sin = satosin(&ifr.ifr_addr);
+	sin->sin_len = sizeof(*sin);
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = addr;
+	if ((*ifioctl)(so, SIOCGIFAFLAG_IN, &ifr, curlwp) == 0) {
+		f = ifr.ifr_addrflags;
+		state = (f & IN_IFF_DUPLICATED) ? 2 : (f & IN_IFF_TENTATIVE) ? 1 :
+		    (f & IN_IFF_DETACHED) ? 3 : 0;
+	}
+	soclose(so);
+out:
+	rump_unschedule();
+	return state;
 }
 
 /* The default route through gw; 0 takes it away */
@@ -627,4 +666,67 @@ rump_tsnet_host(void)
 
 	ipforwarding = 0;
 	ip6_forwarding = 0;
+}
+
+/*
+ * The link-level address of an interface (neta0, when the card under
+ * the device "neta" changes); 0 or an errno value. In every build of
+ * the stack: the card may be outside the rump kernel (OpenBSD's
+ * IEEE 802.11 layer, design 9.6.9)
+ *
+ * The IPv6 link-local address is made of the link-level one (its
+ * interface identifier, EUI-64): the one made of the address before is
+ * taken away and one of the new address made, as at the interface's
+ * start (in6_ifattach), with its check for a duplicate. Without that,
+ * neta0 kept the link-local address of the wired card it started on
+ * after it moved onto the Wi-Fi.
+ */
+int
+rump_tswifi_setmac(const char *ifname, const uint8_t *mac)
+{
+	struct ifnet *ifp;
+	struct in6_ifaddr *ia;
+	int s, same, n;
+
+	rump_schedule();
+	ifp = ifunit(ifname);
+	if (ifp == NULL) {
+		rump_unschedule();
+		return ENXIO;
+	}
+	KERNEL_LOCK(1, NULL);
+	s = splnet();
+	same = ifp->if_sadl != NULL && memcmp(CLLADDR(ifp->if_sadl), mac, ETHER_ADDR_LEN) == 0;
+	if_set_sadl(ifp, mac, ETHER_ADDR_LEN, false);
+	splx(s);
+	if (!same) {
+		IFNET_LOCK(ifp);
+		/* the addresses are read and changed only under the interface's lock */
+		for (n = 0; n < 8 && (ia = in6ifa_ifpforlinklocal(ifp, 0)) != NULL
+		    && (ia->ia_ifa.ifa_flags & IFA_DESTROYING) == 0; n++)
+			in6_purgeaddr(&ia->ia_ifa);
+		if (ifp->if_flags & IFF_UP)
+			in6_ifattach(ifp, NULL);
+		IFNET_UNLOCK(ifp);
+		/*
+		 * IPv4 as Linux has it on a change of the address (NETDEV_CHANGEADDR:
+		 * the neighbours forgotten, the addresses told again with the new
+		 * one): the ARP table emptied as when the interface goes down
+		 * (in_if_down), and each address checked and announced again from
+		 * the new address, as when the link comes back (in_if_link_down,
+		 * in_if_link_up). The entries of the card before may be of another
+		 * network, and the machines on the link know the address by the
+		 * card's address before.
+		 */
+		if (ifp->if_afdata[AF_INET] != NULL) {
+			s = splnet();
+			in_if_link_down(ifp);
+			lltable_purge_entries(LLTABLE(ifp));
+			in_if_link_up(ifp);
+			splx(s);
+		}
+	}
+	KERNEL_UNLOCK_ONE(NULL);
+	rump_unschedule();
+	return 0;
 }

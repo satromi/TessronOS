@@ -41,22 +41,38 @@
 #include "mc.h"
 #include <ts/json.h>
 
-#define TB_H		36			/* the bar along the top */
-#define BTN_H		24
+#define TB_H		36			/* the bar along the top: the panels 21 to 23 of the data box */
 #define NUM_W		34			/* the fields' numbers */
-#define MARK_SZ		18
 
-typedef struct {
-	CONST char	*code;
-	CONST char	*label;
-	T_DPRECT	r;
-	BOOL		on;			/* drawn pressed in */
-} BTN;
+/* The bar: a panel of SYSDEF_BOX_MCARD for each screen, its parts by number */
+#define PN_BAR_CARD	21
+#define PN_BAR_FIND	22
+#define PN_BAR_DESIGN	23
+#define B_MARK		31			/* カード画面: the mark, a switch */
+#define B_POS		32			/* the place of the card shown, a number box */
+#define B_COUNT		33			/* "/N 枚" */
+#define B_PREV		34
+#define B_NEXT		35
+#define B_LIST		36
+#define B_FIND		37
+#define B_OFF		38			/* 検索解除 */
+#define B_STATE		39			/* "検索状態" */
+#define B_SIGN		41			/* 検索条件画面: the signs, 41 up */
+#define B_CARD		51
+#define B_NEW		52
+#define B_NARROW	53
+#define B_FOFF		54
+#define B_DCANCEL	61			/* 設計画面 */
+#define B_DOK		62
+#define B_LAYOUT	63			/* the name of the 印刷書式 */
+#define B_LOPEN		64
+#define B_LTAKE		65
 
-#define BTN_MAX		20
-static BTN	btn[BTN_MAX];
-static INT	nbtn;
-static T_DPRECT	mark_r, pos_r, slot_r;
+static UI	g_bar;				/* the panel of the screen shown */
+static INT	g_bar_scr = -1;			/* which screen's it is, -1 none */
+static INT	g_bar_told = -1;		/* the screen and search state the bar was last told as */
+static UD	g_bar_at;			/* when ◀ or ▶ was last pushed, ms */
+static INT	g_bar_num;			/* and which */
 static INT	g_sy;				/* how far the rows are scrolled */
 static UB	g_fig[256 * 1024];
 
@@ -130,10 +146,6 @@ BOOL card_box( INT kind, INT k, T_DPRECT *r )
 {
 	INT	x[10], t;
 
-	if ( kind == ED_POS ) {
-		*r = pos_r;
-		return (BOOL)( g_screen == SCR_CARD );
-	}
 	t = row_top(k);
 	r->top = t + 2;
 	r->bottom = t + row_h() - 2;
@@ -201,71 +213,76 @@ void card_scroll_to( INT k )
 
 /* ---------------------------------------------------------------- the bar */
 
-static void btn_add( CONST char *code, CONST char *label, INT *px_right, BOOL from_right, INT *px_left, BOOL on )
+/*
+ * The bar along the top of the card window is a panel of the data box,
+ * one for each screen (21 カード画面, 22 検索条件画面, 23 設計画面),
+ * placed on the window (ui_strip) and changed as the screen changes; the
+ * window manager draws and works its parts, and the numbers and words
+ * in it are written here.
+ */
+static void bar_open( void )
 {
-	BTN	*b;
-	INT	w = dp_text_width((CONST UB *)label, 12) + 16;
+	static CONST INT pn[3] = { PN_BAR_CARD, PN_BAR_FIND, PN_BAR_DESIGN };
+	INT	k = ( g_screen == SCR_FIND ) ? 1 : ( g_screen == SCR_DESIGN ) ? 2 : 0;
 
-	if ( nbtn >= BTN_MAX ) return;
-	b = &btn[nbtn++];
-	b->code = code;
-	b->label = label;
-	b->on = on;
-	if ( from_right ) {
-		*px_right -= w + 4;
-		b->r.left = *px_right;
-	} else {
-		b->r.left = *px_left;
-		*px_left += w + 4;
+	if ( g_bar_scr == g_screen || !g_cw.open ) return;
+	if ( g_bar_scr >= 0 ) ui_strip_close(&g_bar);
+	g_bar_scr = -1;
+	g_bar_told = -1;
+	if ( ui_strip(&g_bar, SYSDEF_BOX_MCARD, pn[k], g_cw.kw, g_port, 0, 0) >= E_OK ) {
+		g_bar_scr = g_screen;
 	}
-	b->r.right = b->r.left + w;
-	b->r.top = ( TB_H - BTN_H ) / 2;
-	b->r.bottom = b->r.top + BTN_H;
 }
 
-static void bar_layout( void )
+void card_bar_close( void )
 {
-	INT	right = g_cw.w - 6, left = 8, k;
-	static CONST char *CONST sign[10] = { "=", "≦", "≧", "<", ">", "≠", "≒", "/", "?", "*" };
-	static CONST char *CONST sign_code[10] = { "sign.0", "sign.1", "sign.2", "sign.3", "sign.4",
-						   "sign.5", "sign.6", "sign.7", "sign.8", "sign.9" };
+	if ( g_bar_scr >= 0 ) ui_strip_close(&g_bar);
+	g_bar_scr = -1;
+	g_bar_told = -1;
+}
 
-	nbtn = 0;
-	memset(&mark_r, 0, sizeof(mark_r));
-	memset(&pos_r, 0, sizeof(pos_r));
-	memset(&slot_r, 0, sizeof(slot_r));
-	switch ( g_screen ) {
-	case SCR_CARD:
-		mark_r.left = 8;
-		mark_r.top = ( TB_H - MARK_SZ ) / 2;
-		mark_r.right = mark_r.left + MARK_SZ;
-		mark_r.bottom = mark_r.top + MARK_SZ;
-		pos_r.left = 34;
-		pos_r.top = ( TB_H - BTN_H ) / 2;
-		pos_r.right = 90;
-		pos_r.bottom = pos_r.top + BTN_H;
-		left = 210;
-		btn_add("go.prev", "◀", &right, FALSE, &left, FALSE);
-		btn_add("go.next", "▶", &right, FALSE, &left, FALSE);
-		btn_add("list", "一覧", &right, TRUE, &left, g_lw.open);
-		btn_add("scr.find", "検索条件", &right, TRUE, &left, FALSE);
-		if ( g_db.searching ) btn_add("search.off", "検索解除", &right, TRUE, &left, FALSE);
-		break;
-	case SCR_FIND:
-		for ( k = 0; k < 10; k++ ) btn_add(sign_code[k], sign[k], &right, FALSE, &left, FALSE);
-		btn_add("scr.card", "カード", &right, TRUE, &left, FALSE);
-		if ( g_db.searching ) btn_add("search.off", "検索解除", &right, TRUE, &left, FALSE);
-		if ( g_db.searching ) btn_add("search.narrow", "絞込検索", &right, TRUE, &left, FALSE);
-		btn_add("search.new", "新規検索", &right, TRUE, &left, FALSE);
-		break;
-	default:
-		btn_add("design.cancel", "中止", &right, TRUE, &left, FALSE);
-		btn_add("design.ok", "設定", &right, TRUE, &left, FALSE);
-		slot_r.left = 80;
-		slot_r.top = ( TB_H - BTN_H ) / 2;
-		slot_r.right = ( right - 10 > 300 ) ? 300 : right - 10;
-		slot_r.bottom = slot_r.top + BTN_H;
-		break;
+/*
+ * What the bar shows, from the cards. Once the buttons that depend on
+ * the screen and on whether cards are being searched (検索解除, 絞込検索)
+ * are in place, it is said, since a press reaches them only from then on.
+ */
+static void bar_show( void )
+{
+	char	s[96];
+
+	bar_open();
+	if ( g_bar_scr < 0 ) return;
+	if ( g_screen == SCR_CARD ) {
+		MCCARD	*c = cur_card();
+		INT	total = mc_count(&g_db);
+
+		ui_set_value(&g_bar, B_MARK, ( c != NULL && c->mark ) ? 1 : 0);
+		ui_set_value(&g_bar, B_POS, ( total > 0 ) ? g_cur + 1 : 0);
+		if ( g_db.searching ) snprintf(s, sizeof(s), "/%d 枚 (全%d)", total, g_db.n);
+		else snprintf(s, sizeof(s), "/%d 枚", total);
+		ui_set_text(&g_bar, B_COUNT, s);
+		ui_set_text(&g_bar, B_STATE, g_db.searching ? "検索状態" : " ");
+		ui_show(&g_bar, B_OFF, g_db.searching);
+	} else if ( g_screen == SCR_FIND ) {
+		ui_show(&g_bar, B_NARROW, g_db.searching);
+		ui_show(&g_bar, B_FOFF, g_db.searching);
+	} else {
+		UB	nm[OB_NAME_MAX];
+		TS_UUID	u;
+
+		nm[0] = 0;
+		if ( g_dslayout != NULL && link_target(g_dslayout, &u) ) name_of(&u, nm);
+		ui_set_text(&g_bar, B_LAYOUT, g_dslayout != NULL ? ( nm[0] != 0 ? (char *)nm : "(実身がありません)" )
+							  : "(なし)");
+		ui_off(&g_bar, B_LOPEN, (BOOL)( g_dslayout == NULL ));
+		ui_off(&g_bar, B_LTAKE, (BOOL)( g_dslayout == NULL ));
+	}
+	if ( g_screen * 2 + ( g_db.searching ? 1 : 0 ) != g_bar_told ) {
+		g_bar_told = g_screen * 2 + ( g_db.searching ? 1 : 0 );
+		snprintf(s, sizeof(s), "bar %s search %s",
+			 g_screen == SCR_CARD ? "card" : g_screen == SCR_FIND ? "find" : "design",
+			 g_db.searching ? "on" : "off");
+		note(s);
 	}
 }
 
@@ -291,74 +308,6 @@ static void text_in( CONST T_DPRECT *r, CONST char *s, UW col, INT px, BOOL cent
 	INT	x = centre ? r->left + ( r->right - r->left - w ) / 2 : r->left + 4;
 
 	(void)dp_text(g_cw.gid, x, r->top + ( r->bottom - r->top + px ) / 2 - px / 8, (CONST UB *)s, col, px);
-}
-
-static void bar_paint( void )
-{
-	INT	i;
-	UW	ground = ( g_screen == SCR_DESIGN ) ? C_DESIGN : ( g_db.searching || g_screen == SCR_FIND ) ? C_FIND : C_BAR;
-	char	s[96];
-
-	bar_layout();
-	fill(0, 0, g_cw.w, TB_H, ground);
-	fill(0, TB_H - 1, g_cw.w, TB_H, C_LINE);
-	for ( i = 0; i < nbtn; i++ ) {
-		BTN	*b = &btn[i];
-
-		fill(b->r.left, b->r.top, b->r.right, b->r.bottom, b->on ? C_ROW : C_BUTTON);
-		frame(&b->r, C_LINE, 1);
-		if ( strcmp(b->label, "≒") == 0 ) {
-			/* the system's face has no ≒: an = with a dot over and under it */
-			INT	cx = ( b->r.left + b->r.right ) / 2, cy = ( b->r.top + b->r.bottom ) / 2;
-
-			fill(cx - 5, cy - 3, cx + 5, cy - 2, C_TEXT);
-			fill(cx - 5, cy + 2, cx + 5, cy + 3, C_TEXT);
-			fill(cx - 4, cy - 7, cx - 2, cy - 5, C_TEXT);
-			fill(cx + 2, cy + 5, cx + 4, cy + 7, C_TEXT);
-		} else {
-			text_in(&b->r, b->label, C_TEXT, 12, TRUE);
-		}
-	}
-	if ( g_screen == SCR_CARD ) {
-		MCCARD	*c = cur_card();
-		INT	total = mc_count(&g_db);
-		T_DPRECT r;
-
-		fill(mark_r.left, mark_r.top, mark_r.right, mark_r.bottom, C_PAPER);
-		frame(&mark_r, C_TEXT, 1);
-		if ( c != NULL && c->mark ) {
-			/* ✓ drawn as two strokes */
-			INT	x = mark_r.left, y = mark_r.top, k;
-
-			for ( k = 0; k < 4; k++ ) fill(x + 3 + k, y + 8 + k, x + 5 + k, y + 10 + k, C_PICK);
-			for ( k = 0; k < 8; k++ ) fill(x + 7 + k, y + 11 - k, x + 9 + k, y + 13 - k, C_PICK);
-		}
-		if ( ed_kind() != ED_POS ) {
-			fill(pos_r.left, pos_r.top, pos_r.right, pos_r.bottom, C_PAPER);
-			frame(&pos_r, C_LINE, 1);
-			snprintf(s, sizeof(s), "%d", total > 0 ? g_cur + 1 : 0);
-			r = pos_r;
-			r.right -= 4;
-			(void)dp_text(g_cw.gid, r.right - dp_text_width((CONST UB *)s, 12), r.top + 17, (CONST UB *)s, C_TEXT, 12);
-		}
-		if ( g_db.searching ) snprintf(s, sizeof(s), "/%d 枚 (全%d)", total, g_db.n);
-		else snprintf(s, sizeof(s), "/%d 枚", total);
-		(void)dp_text(g_cw.gid, pos_r.right + 6, pos_r.top + 17, (CONST UB *)s, C_TEXT, 12);
-		if ( g_db.searching ) (void)dp_text(g_cw.gid, btn[0].r.right + 70, pos_r.top + 17, (CONST UB *)"検索状態", C_PICK, 12);
-	} else if ( g_screen == SCR_DESIGN ) {
-		UB	nm[OB_NAME_MAX];
-		TS_UUID	u;
-
-		(void)dp_text(g_cw.gid, 8, slot_r.top + 17, (CONST UB *)"印刷書式", C_TEXT, 12);
-		fill(slot_r.left, slot_r.top, slot_r.right, slot_r.bottom, C_PAPER);
-		frame(&slot_r, C_LINE, 1);
-		nm[0] = 0;
-		if ( g_dslayout != NULL && link_target(g_dslayout, &u) ) name_of(&u, nm);
-		text_in(&slot_r, g_dslayout != NULL ? ( nm[0] != 0 ? (char *)nm : "(実身がありません)" ) : "(なし)",
-			g_dslayout != NULL ? C_TEXT : C_GREY, 12, FALSE);
-	} else {
-		(void)dp_text(g_cw.gid, btn[9].r.right + 12, 23, (CONST UB *)"検索条件", C_PICK, 12);
-	}
 }
 
 /* ---------------------------------------------------------------- values */
@@ -602,7 +551,7 @@ void card_paint( void )
 		r.bottom += 2;
 		frame(&r, C_ORANGE, 2);
 	}
-	bar_paint();
+	bar_show();
 	ed_draw();
 	(void)wm_obj_flush(g_cw.kw, NULL);
 	bars();
@@ -752,13 +701,6 @@ void card_commit( INT kind, INT k, CONST UB *s, INT n )
 			}
 			if ( kind == ED_DMAX ) g_dsf[k].max = v;
 			else g_dsf[k].width = v;
-		}
-		break;
-	case ED_POS:
-		{
-			INT	v = digits_of(s, n);
-
-			if ( v >= 1 ) show_card(v - 1);
 		}
 		break;
 	default:
@@ -945,13 +887,10 @@ static void begin_box( INT kind, INT k )
 		snprintf(s, sizeof(s), "%d", ( kind == ED_DMAX ) ? g_dsf[k].max : g_dsf[k].width);
 		snprintf((char *)v, sizeof(v), "%s", s);
 		break;
-	case ED_POS:
-		snprintf((char *)v, sizeof(v), "%d", g_cur + 1);
-		break;
 	default:
 		break;
 	}
-	if ( kind != ED_POS ) card_scroll_to(k);
+	card_scroll_to(k);
 	ed_begin(kind, k, v, TRUE);
 }
 
@@ -967,47 +906,60 @@ static void sign_put( INT i )
 	ed_insert((CONST UB *)sign[i], (INT)strlen(sign[i]));
 }
 
-static void press_bar( CONST T_OBNTM *m )
+/* What was done on the bar: TRUE when the notice was the bar's */
+BOOL card_bar_event( CONST T_OBNTM *m )
 {
-	INT	i, x = m->x, y = m->y;
+	INT	num, ev;
 
-	for ( i = 0; i < nbtn; i++ ) {
-		BTN	*b = &btn[i];
+	if ( g_bar_scr < 0 || memcmp(&m->uuid, &g_bar.pnl, sizeof(TS_UUID)) != 0 ) return FALSE;
+	ev = ui_event(&g_bar, m, &num);
+	if ( ev != UI_EV_BUTTON && ev != UI_EV_CHANGE ) return TRUE;
+	if ( g_bar_scr == SCR_CARD ) {
+		switch ( num ) {
+		case B_MARK:	command("mark.flip", 0);	break;
+		case B_POS:
+			{
+				INT	v = ui_value(&g_bar, B_POS);
 
-		if ( x < b->r.left || x >= b->r.right || y < b->r.top || y >= b->r.bottom ) continue;
-		if ( strncmp(b->code, "sign.", 5) == 0 ) {
-			sign_put(b->code[5] - '0');
-		} else if ( strcmp(b->code, "go.prev") == 0 || strcmp(b->code, "go.next") == 0 ) {
-			BOOL	twice = (BOOL)( m->when - press_at < DBL_NS && press_f == -10 - i );
+				if ( v >= 1 && v - 1 != g_cur ) show_card(v - 1);
+			}
+			break;
+		case B_PREV:
+		case B_NEXT:
+			{
+				/* pushed twice: to the first or the last card */
+				BOOL	twice = (BOOL)( g_bar_num == num && ui_now() - g_bar_at < DBL_NS / 1000000ULL );
 
-			press_at = m->when;
-			press_f = -10 - i;
-			/* pressed twice: to the first or the last card */
-			if ( twice ) command(b->code[3] == 'p' ? "go.first" : "go.last", 0);
-			else command(b->code, 0);
-		} else {
-			command(b->code, 0);
+				g_bar_at = ui_now();
+				g_bar_num = num;
+				if ( twice ) command(( num == B_PREV ) ? "go.first" : "go.last", 0);
+				else command(( num == B_PREV ) ? "go.prev" : "go.next", 0);
+			}
+			break;
+		case B_LIST:	command("list", 0);		break;
+		case B_FIND:	command("scr.find", 0);		break;
+		case B_OFF:	command("search.off", 0);	break;
+		default:	break;
 		}
-		g_cw.dirty = TRUE;
-		return;
+	} else if ( g_bar_scr == SCR_FIND ) {
+		if ( num >= B_SIGN && num < B_SIGN + 10 ) sign_put(num - B_SIGN);
+		else if ( num == B_CARD ) command("scr.card", 0);
+		else if ( num == B_NEW ) command("search.new", 0);
+		else if ( num == B_NARROW ) command("search.narrow", 0);
+		else if ( num == B_FOFF ) command("search.off", 0);
+	} else {
+		if ( num == B_DCANCEL ) command("design.cancel", 0);
+		else if ( num == B_DOK ) command("design.ok", 0);
+		else if ( num == B_LOPEN && g_dslayout != NULL ) link_open_el(g_dslayout);
+		else if ( num == B_LTAKE && g_dslayout != NULL ) {
+			free(g_dslayout);
+			g_dslayout = NULL;
+			g_dslayoutlen = 0;
+			note("layout cleared");
+		}
 	}
-	if ( g_screen == SCR_CARD && x >= mark_r.left - 2 && x < mark_r.right + 2 && y >= mark_r.top - 2 && y < mark_r.bottom + 2 ) {
-		command("mark.flip", 0);
-		return;
-	}
-	if ( g_screen == SCR_CARD && x >= pos_r.left && x < pos_r.right && y >= pos_r.top && y < pos_r.bottom ) {
-		begin_box(ED_POS, 0);
-		return;
-	}
-	if ( g_screen == SCR_DESIGN && x >= slot_r.left && x < slot_r.right && y >= slot_r.top && y < slot_r.bottom ) {
-		BOOL	twice = (BOOL)( m->when - press_at < DBL_NS && press_f == -2 );
-
-		press_at = m->when;
-		press_f = -2;
-		if ( twice && g_dslayout != NULL ) link_open_el(g_dslayout);
-		g_field = -2;		/* the 印刷書式 is taken: Delete takes it away */
-		g_cw.dirty = TRUE;
-	}
+	g_cw.dirty = TRUE;
+	return TRUE;
 }
 
 static void press_design( CONST T_OBNTM *m, INT k )
@@ -1055,11 +1007,7 @@ static void press( CONST T_OBNTM *m )
 	INT	x = m->x, y = m->y, k;
 
 	if ( x < 0 || y < 0 || x >= g_cw.w || y >= g_cw.h ) return;
-	if ( ed_on() && ed_press(x, y) ) return;
-	if ( y < TB_H ) {
-		press_bar(m);
-		return;
-	}
+	if ( y < TB_H ) return;			/* the bar's own parts */
 	k = row_at(y);
 	if ( k < 0 ) {
 		ed_commit();
@@ -1183,15 +1131,7 @@ void card_key( CONST T_OBNTM *m )
 		if ( g_screen == SCR_DESIGN ) (void)design_apply();
 		return;
 	}
-	if ( ed_on() && ed_kind() == ED_POS ) {
-		if ( code == K_ENTER || code == K_KPENTER || code == K_TAB ) {
-			ed_commit();
-			return;
-		}
-		(void)ed_key(code, mods);
-		return;
-	}
-	if ( ed_on() && !( alt || lctrl ) && ed_key(code, mods) ) return;
+	if ( ed_on() && !( alt || lctrl ) && ed_key(code, mods, m->imode) ) return;
 	if ( ( mods & M_CTRL ) != 0 && !( lctrl && ( code == K_UP || code == K_DOWN ) ) ) {
 		UB	c = wm_key_char(code, 0);
 
@@ -1250,12 +1190,6 @@ void card_key( CONST T_OBNTM *m )
 	case K_BS:
 		if ( g_screen == SCR_CARD && g_link_on && g_field >= 0 ) {
 			command("clear.link", 0);
-		} else if ( g_screen == SCR_DESIGN && g_field == -2 && g_dslayout != NULL ) {
-			free(g_dslayout);
-			g_dslayout = NULL;
-			g_dslayoutlen = 0;
-			note("layout cleared");
-			g_cw.dirty = TRUE;
 		}
 		return;
 	case K_ESC:
@@ -1281,7 +1215,7 @@ void card_key( CONST T_OBNTM *m )
 				if ( g_db.f[k].type == MC_T_LINK ) return;
 				begin_box(ED_VALUE, k);
 			}
-			(void)ed_key(code, mods);
+			(void)ed_key(code, mods, m->imode);
 		}
 	}
 }
@@ -1290,44 +1224,44 @@ void card_key( CONST T_OBNTM *m )
 
 void card_dropped( void )
 {
-	static T_OBDROP	d;
+	T_OBDROP	*d;
 	INT		k;
 	UB		*el;
 	INT		len = 0;
 
-	if ( ui_drop(&g_ui, &d) < E_OK ) return;
-	if ( d.n <= 0 ) return;
+	if ( ( d = ui_drop(&g_ui) ) == NULL ) return;
+	if ( d->n <= 0 ) return;
 	if ( g_screen == SCR_DESIGN ) {
-		if ( d.y < TB_H ) {
-			el = link_el_from_drop(&d.v[0], &len);
+		if ( d->y < TB_H ) {
+			el = link_el_from_drop(&d->v[0], &len);
 			if ( el != NULL ) {
 				free(g_dslayout);
 				g_dslayout = el;
 				g_dslayoutlen = len;
-				ui_drop_answer(&g_ui, &d, OB_DR_ACCEPT, "");
+				ui_drop_answer(&g_ui, d, OB_DR_ACCEPT, "");
 				note("layout dropped");
 				g_cw.dirty = TRUE;
 				return;
 			}
 		}
-		ui_drop_answer(&g_ui, &d, OB_DR_REFUSE, "印刷書式の欄に置いてください");
+		ui_drop_answer(&g_ui, d, OB_DR_REFUSE, "印刷書式の欄に置いてください");
 		return;
 	}
-	k = row_at(d.y);
+	k = row_at(d->y);
 	if ( g_screen != SCR_CARD || k < 0 || g_db.f[k].type != MC_T_LINK || cur_card() == NULL ) {
-		ui_drop_answer(&g_ui, &d, OB_DR_REFUSE, "仮身の項目に置いてください");
+		ui_drop_answer(&g_ui, d, OB_DR_REFUSE, "仮身の項目に置いてください");
 		return;
 	}
 	if ( mc_link_count(&g_db) >= MC_LINK_MAX ) {
-		ui_drop_answer(&g_ui, &d, OB_DR_REFUSE, "これ以上仮身を格納できません");
+		ui_drop_answer(&g_ui, d, OB_DR_REFUSE, "これ以上仮身を格納できません");
 		return;
 	}
-	el = link_el_from_drop(&d.v[0], &len);
+	el = link_el_from_drop(&d->v[0], &len);
 	if ( el == NULL ) {
-		ui_drop_answer(&g_ui, &d, OB_DR_REFUSE, "");
+		ui_drop_answer(&g_ui, d, OB_DR_REFUSE, "");
 		return;
 	}
-	ui_drop_answer(&g_ui, &d, OB_DR_ACCEPT, "");
+	ui_drop_answer(&g_ui, d, OB_DR_ACCEPT, "");
 	undo_keep(cur_card(), k);
 	(void)mc_set(&g_db, cur_card(), k, el, len);
 	free(el);
@@ -1353,7 +1287,8 @@ void card_event( CONST T_OBNTM *m )
 {
 	switch ( m->event ) {
 	case OB_E_PRESS:
-		if ( m->code == 0 ) press(m);
+		if ( m->recno == OB_WR_CAND ) ed_pick((INT)m->code);	/* a name on the list of candidates */
+		else if ( m->code == 0 ) press(m);
 		break;
 	case OB_E_RELEASE:
 		if ( m->code == 0 ) released(m);
@@ -1371,6 +1306,7 @@ void card_event( CONST T_OBNTM *m )
 		card_key(m);
 		break;
 	case OB_E_WHEEL:
+		if ( m->code != HID_WHEEL_V ) break;	/* the card goes only up and down */
 		g_sy -= m->dz * 3 * row_h();
 		if ( g_sy > rows() * row_h() - row_h() ) g_sy = rows() * row_h() - row_h();
 		if ( g_sy < 0 ) g_sy = 0;

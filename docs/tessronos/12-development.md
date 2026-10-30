@@ -14,9 +14,28 @@
 
 `source tools/env.sh`でPATHが設定される。`TS_TOOLCHAIN`で別のツールチェーンを指定することもできる。
 
+x64(`TARGET=_X64_`、3.10)には、別に次のものを使う。カーネル用のlibgccは`-mno-red-zone`の組(マルチライブ)で作ってある。`source tools/x64/env.sh`でPATHが設定され、makeは`TS_X64_TOOLCHAIN`、`TS_X64_EFI_TOOLCHAIN`で別の場所も指せる。
+
+x64のビルドは、Wi-Fi(09章9.6)のために次の3つを使う。無ければ、makeがそれぞれの手順を走らせて作る。手で作るときや作り直すときは次を走らせる。
+
+| 生成物 | 作る手順 | 取得するもの(初めてのときだけ) |
+| --- | --- | --- |
+| `~/tessronos-obsd-x64/obsdwifi.o` | `OUT=~/tessronos-obsd-x64 tools/openbsd/build.sh all` | OpenBSD 8.0の`sys.tar.gz`(`~/openbsd/dl`。SHA-256を確かめる) |
+| `~/tessronos-wpa-x64/wpasupp.o`(Raspberry Pi 5は`~/tessronos-wpa-arm/wpasupp.o`) | `tools/wpa/build.sh all`(Pi 5のものは`ARCH=aarch64`。`test`でホストの試験) | NetBSD 11.0の`src.tgz`(`~/netbsd/dl`。SHA-512を確かめる) |
+| `~/tessronos-wifi-fw`のファームウェアと許諾 | `tools/x64/wifi/fw.sh fetch` | linux-firmware 20230117の`iwlwifi-8265-36.ucode`、`LICENCE.iwlwifi_firmware`(SHA-256を確かめる) |
+
+取得できないときは、それぞれの手順が何を取れなかったかと、場所を指す変数(`NB_URL`、`NB_DL`、`NBDL`、`FW_URL`)を言って止まる。Wi-Fiを含めないときは`make TARGET=_X64_ WIFI=0`とする。このときは`~/tessronos-netbsd-x64/rumpnet.o`を使い、上の3つは要らない。
+
+| ツール | 用途 |
+| --- | --- |
+| x86_64-elf-gcc(`~/.local/xPacks/x86_64-elf-gcc`) | カーネルとプログラム、newlib |
+| x86_64-w64-mingw32-gcc | UEFIのローダ(PE32+) |
+| NASM 3.01(`~/.local/xPacks/nasm`) | x64のブラウザのコーデックのSIMDの部分(14.3.1)。`tools/x64/build_toolchain.sh nasm`で作る。NASMは署名もハッシュの表も公開していないので、リリースの`git.id`がChromiumのDEPSが固定するNASMと同じで、tarballのソースがそのチェックアウトと一致することを確かめた上で、tarballのSHA-256をスクリプトに固定して照合する |
+| WindowsのQEMU(`C:\Program Files\qemu`)とOVMF(`edk2-x86_64-code.fd`) | 試験機。WSLのaptのQEMUは使わない |
+
 ## 12.2 ビルド
 
-makefileは`build_make/`にあり、再帰呼出しをしない1つのmakefileで全体をビルドする。対象マシンは`TARGET`で選ぶ。`TARGET`からアーキテクチャ`ARCH`(今はどれも`aarch64`)とコア依存の置き場の名前`ARCH_CORE`(`armv8a`)が決まり、ツールチェーン、命令セットの基準、インクルードパスとソースの一覧のコア依存の部分がそれで切り替わる(4.8)。出力先は`ARCH`によらず`TARGET`と`BUILD_ID`で決まる。
+makefileは`build_make/`にあり、再帰呼出しをしない1つのmakefileで全体をビルドする。対象マシンは`TARGET`で選ぶ。`TARGET`からアーキテクチャ`ARCH`(`aarch64`、`_X64_`では`x86_64`)とコア依存の置き場の名前`ARCH_CORE`(`armv8a`、`x86_64`)が決まり、ツールチェーン、命令セットの基準、インクルードパスとソースの一覧のコア依存の部分がそれで切り替わる(4.8)。出力先は`ARCH`によらず`TARGET`と`BUILD_ID`で決まる。
 
 | コマンド | 生成物 |
 | --- | --- |
@@ -28,7 +47,13 @@ makefileは`build_make/`にあり、再帰呼出しをしない1つのmakefile�
 | `make TARGET=_RPI4_` | Raspberry Pi 4、400、CM4の`tessronos.img`。ARMv8.0-Aで作る(3.6.2) |
 | `make TARGET=_RPI4_ sdimg` | Raspberry Pi 4系のSDカードのイメージ`sd.img`(12.5、3.6.5) |
 | `make TARGET=_RPI4_ qemu-rpi4`、`test-rpi4` | QEMUの`raspi4b`で起動する、カーネル内の試験を走らせる(3.6.6) |
+| `make TARGET=_X64_` | x64の`tessronos.elf`と、ESPの中身`obj/_X64_<BUILD_ID>/esp/`(`EFI/BOOT/BOOTX64.EFI`、`tessronos.elf`、`cmdline.txt`)。設定は`build_make/x64.mk`(3.10) |
+| `make TARGET=_X64_ qemu-x64` | ビルドして、ESPのディレクトリをFATのディスクとしてWindowsのQEMUの`q35`で起動する |
+| `make TARGET=_X64_ sdimg`、`qemu-x64-disk` | x64のディスクのイメージ`sd.img`(ESPとシステムのボリューム、3.10.4)、それをNVMeとして挿して起動する |
+| `make TARGET=_RPI5_ WIFI=0`、`make TARGET=_QEMU_VIRT_ WIFI=1` | Raspberry Pi 5のWi-Fiを除く(Pi 5は既定で含める)。QEMU virtの`WIFI=1`は、ホストの無い機械で何も壊れないことと、基板の設定の取り出し(KTESTの群`wifinv`)を確かめるためのもの(09章9.6.8) |
+| `make TARGET=_X64_ WIFI=0` | Wi-Fiを除く(既定の`WIFI=1`は含める。09章9.6)。含めるときはOpenBSDの802.11の層とiwm(`~/tessronos-obsd-x64/obsdwifi.o`、9.6.9)と、WPA2の部分`~/tessronos-wpa-x64/wpasupp.o`を結び、ファームウェアの実身とWi-Fiの設定の実身をシステムボリュームに載せる |
 | `make pkg PKG=<id>` | アプリケーションのパッケージ`obj/pkg/<id>.tpk`(11.8) |
+| `make TARGET=<機種> sysup` | システムのパッケージ`obj/<TARGET><BUILD_ID>/tessronos-<機種>-<TS_VERSION>.tpk`。機種は`_RPI5_`、`_RPI4_`、`_X64_`(`_QEMU_VIRT_`は試験用)。システムの実身はイメージと同じ指定(`DESKTOP=1`、`MOZC=1`、`BROWSER=1`、`WIFI`など)で作ったものを集めるので、配るイメージと同じ変数で作る(11.8.1) |
 | `make clean` | 生成物を削除する |
 
 変数で構成を切り替える。
@@ -38,22 +63,27 @@ makefileは`build_make/`にあり、再帰呼出しをしない1つのmakefile�
 | `DESKTOP=1` | 試験ではなく、デスクトップが起動する構成でビルドする |
 | `UITEST=1` | `DESKTOP=1`と併せて、UIの試験用の操作機能を組み込む(12.4) |
 | `KTEST=1` | カーネル内の試験(12.3)を組み込む |
-| `MOZC=1` | Mozcの変換エンジンと辞書をリンクする(先に`tools/mozc/build.sh`でビルドしておく) |
+| `MOZC=1` | Mozcの変換エンジンと辞書をリンクする(先に`tools/mozc/build.sh`でビルドしておく。x64は`tools/x64/mozc/build.sh`) |
 | `NETSTACK=netbsd`、`NETSTACK=lwip` | TCP/IPスタックを選ぶ。デフォルトは`netbsd`で、NetBSDのスタックのオブジェクトがなければ、リンクの前に`tools/netbsd/build.sh`を実行して作る(12.7)。`lwip`は以前のlwIPである(第9章) |
 | `RUTRACE=1` | NetBSDのスタックで、ロックを5秒以上待っているタスクをコンソールに出力する(9.1.2) |
-| `BROWSER=1`、`BROWSER_BLINK=1` | 別のリポジトリ`tessron-chromium`(既定はTessronOSと同じディレクトリ。`CHROMIUM=<場所>`で変える)からブラウザを取り込む。事前にChromiumのコンパイルが要る(14.3) |
+| `BROWSER=1`、`BROWSER_BLINK=1` | 別のリポジトリ`tessron-chromium`(既定はTessronOSと同じディレクトリ。`CHROMIUM=<場所>`で変える)からブラウザを取り込む。事前にChromiumのコンパイルが要る(14.3)。`TARGET=_X64_`ではx64のもの(`TS_ARCH=x86_64`、目的物は`~/tessronos-obj-x64`、生成物は`obj/x64/`)を作る(14.3.1)。Raspberry Pi 4系(`TARGET=_RPI4_`)では使えない |
 | `KT_V8=<試験名>,…`、`KT_SITE=<URL>`、`KT_SITE_WAIT=<ミリ秒>`、`KT_SITE_CLICK=<x>,<y>,…` | 試験グループ`v8`のうち指定した試験だけを実行する、指定したサイトだけを開いてスクリーンショットを撮る、2枚目を撮るまでの時間を決める、その後に画面の座標をクリックする(14.10) |
 | `WV_TEST=<ディレクトリ>` | `BROWSER=1`の試験のディスクの`/boot`に、そのディレクトリの`wv_Packages`と`wv.deb`(開発用のマシンでRaspberry Piのリポジトリから取ったインデックスとWidevineのパッケージ)を載せる。`test_blink_wv`が導入した状態を試すときだけ使い、リポジトリにもシステムのボリュームにも入れない(14.6.3.1) |
 | `V3D=1`、`V3D=2`、`V3D=3` | Raspberry Pi 5のGPUを識別する、さらにMMUと割込みを設定して使えるようにし、起動の後で実機の試験とウインドウの合成の確認をまとめて行う、試験をせずに合成の確認だけをしてGPUで合成する(13.3.1、13.8.2、13.10) |
+| `GL=1` | MesaのEGLとOpenGL ESをプロセス用の静的ライブラリに作り、小物「歯車」と試験のプログラムに結ぶ(13.6。x64は`tools/x64/mesa/build.sh`、13.11.9) |
+| `SNDTEST=1`、`HEVCTEST=1` | Raspberry Pi 5で、起動の後に音の出力先、HEVCの復号器を実機で確かめる(6.5.4、6.7.1) |
+| `KLOCKSTAT=1`、`STKWATCH=1` | カーネルのロックの取得と待ちを場所ごとに数える、走っていないタスクのスタックの書換えを見張る(4.3.2、4.7.6) |
+| `KLOCK=<0〜3>`、`KLOCKCHECK=1` | カーネルの排他の方式を替える(0は大きなロック、3はスケジューラのロックと物ごとのロック。既定はArmが0、x64が3)、ロックの順番の検査を試験のビルドでなくても入れる(4.3.3)。`-D`の定義なので`BUILD_ID`を分ける |
+| `X64_CMDLINE=<設定>`、`SD_LOG_MB=<MB>` | x64のイメージのESPに置く`cmdline.txt`の中身、記録の区画TSLOGの大きさ(3.10.7) |
 | `PCIE_POLL=1` | Raspberry Pi 4系で、PCIeの先のxHCIを割込みではなく一定の間隔で見る(3.6.4) |
 | `OBJTEST=0` | Raspberry Pi 5と4系で、起動の後のデバイスの実身とボードの確認(`objtest:`)を行わない |
-| `TS_VERSION=R1.110` | システムのバージョン。システムの実身の情報に`VERSION`として出る |
-| `PKGS="a.tpk …"` | イメージに組み込むアプリケーションのパッケージ。既定は`etc/pkg/`の.tpkで、Raspberry Pi 4系では空(11.8) |
+| `TS_VERSION=R1.200` | システムのバージョン。システムの実身の情報に`VERSION`として出る |
+| `PKGS="a.tpk …"` | イメージに組み込むアプリケーションのパッケージ。既定は`etc/pkg/`の.tpk、x64では`etc/pkg/x64/`の.tpk、Raspberry Pi 4系では`etc/pkg/rpi4/`の.tpk(`build_make/rpi4.mk`、11.8) |
 | `BUILD_ID=<名前>` | 生成物の出力先を`obj/<マシン><名前>/`と`tessronos<名前>.*`に分ける。同じソースツリーで複数の構成を並行してビルドするときに使う |
 
 システムボリュームは、`etc/def`(システムの実身)、`etc/xtad`(サンプルと原紙)、ビルドで生成したプログラムの実身、組み込むパッケージの実身から`tools/mktsfs`で作成する。
 
-実時間制御TAD(第15章)の実行系`lib/librtad/`と再生部`application/desktop/dtrt.c`、`dtrtwin.c`は、デスクトップと同じくカーネルに入る。音を鳴らす実時間メディア(`application/rtmedia/`)はnewlibとlibmを使うプロセスで、MP3の復号にminimp3(CC0、`application/rtmedia/minimp3.h`)を使う。ビルドでその実行ファイル`obj/rtmedia.elf`を作り、プログラムの実身(`01a0d8c4-52da-7c34-9d45-be6f708192a3`)のレコード1にする。映像は、別のリポジトリ`ffmpeg_btron`のMPEG Playerを使う。MPEG Playerを変えたときは`wsl.exe bash ffmpeg_btron/tessron/build-tessron.sh`でパッケージ`mpegplay.tpk`を作り直し、`etc/pkg/`に置く。
+実時間制御TAD(第15章)の実行系`lib/librtad/`と再生部`application/desktop/dtrt.c`、プロセスのウインドウで再生する`dtrthost.c`は、デスクトップと同じくカーネルに入る。音を鳴らす実時間メディア(`application/rtmedia/`)はnewlibとlibmを使うプロセスで、MP3の復号にminimp3(CC0、`application/rtmedia/minimp3.h`)を使う。ビルドでその実行ファイル`obj/rtmedia.elf`を作り、プログラムの実身(`01a0d8c4-52da-7c34-9d45-be6f708192a3`)のレコード1にする。実時間制御TADの実身を開くアプリと映像の復号は、別のリポジトリ`ffmpeg_btron`のMPEG Playerである(11.12)。MPEG Playerを変えたときは`wsl.exe bash ffmpeg_btron/tessron/build-tessron.sh`でパッケージ`mpegplay.tpk`を作り直し、`etc/pkg/`に置く。x64のものは`TS_ARCH=x86_64`で作って`etc/pkg/x64/`に、Raspberry Pi 4系のものは`TS_CPU=cortex-a72`で作って(FFmpegも`TS_CPU=cortex-a72`の`build-ffmpeg-ts.sh`で一度作っておく)`etc/pkg/rpi4/`に置く。
 
 ## 12.3 カーネル内の試験
 
@@ -64,7 +94,7 @@ make TARGET=_QEMU_VIRT_ KTEST=1 test
 make TARGET=_QEMU_VIRT_ KTEST=1 KTONLY=part,ob BUILD_ID=pt test
 ```
 
-`KTONLY`で試験グループを名前で選ぶ(カンマ区切りで複数指定できる)。グループは`tests/ktest/ktest_<グループ>.c`のファイル単位で、`task`、`sync`、`time`、`mem`、`smp`、`board`、`sd`、`proc`、`fat`、`tsfs`、`ob`、`om`、`dp`、`fn`、`wm`、`part`、`mn`、`cab`、`tv`、`vt`、`usb`、`devob`、`snd`、`net`、`so`、`v8`、`gpu`、`cal`、`kana`、`slide`などがある。`cal`は予定表の実身の読み書き(11.10)、`kana`はかな入力練習の配列の表、問題文、判定、成績と、キーを離した通知(11.14)、`slide`はスライドの並びと画面への収め方(11.11)、`vols`は多くのUSBのディスクと区画の同時の取り付け、形式の見分け、ボリュームをまたぐ仮身とほかのボリュームからの参照の記録、抜き差しの繰り返しと4コアでの同時の使用、26台を超えるディスクと40区画のディスク(7.6、8.3)、`vt`は文章の縦書きの組版と原稿用紙(11.21)、`prn`は印刷のPDFの構造、字の位置、書体の部分集合、画像と各アプリのページ(11.22)、`scr`は画面印刷の取り込んだ画素と画面の一致、図形実身と保存先のディスク、トレーと図形への貼り込み、PNGの書き出し、PDF(11.24)、`dfix`はディスクの検査と修復、ツリーとビットマップが同時に壊れたときの作り直し、壊れた実身ブロックからの救出(7.5)、`rt`は実時間制御TADの実行系と二進TADへの変換(15.10)、`rump`は4つのCPUから同時に掛けたNetBSDのスタックへの負荷(9.1.2)、`smp`の`test_wait_result`、`test_del_ended`、`test_exd_stack`は別のCPUが解除した待ちの結果と、終了したタスクのスタックを返す時機(4.3)を試験する。`devob`は、デバイス管理に登録しないデバイスの実身(乱数、画面、入力、キーボードとポインタ、USBデバイス、システムのレコード3、4、9)の属性、読み書き、保護、仮身、接続と切断の通知を試験し、実身を通す経路と直接の関数の時間を出力する(8.10)。`snd`は、サウンドデバイスのチャネル、変換、混合、録音と、出力先の一覧と選択、再生中の切替え、選んだUSBオーディオの機能を抜いたときに自動の先へ移り挿し直すと戻ること(QEMUのモニタで2つ目の機能を挿す)、システムの実身のレコード8と機器の設定の`SOUND_OUT`による選択、ミキサーの混ぜ合わせ、プログラムごとと全体の左右の音量、消音、ソフトリミッタ、その設定の保存と読み戻しを試験する(6.5.1、6.5.6)。`fault`はデスクトップを起動し、Shift+Pauseによる強制終了と、例外で終了したプロセスのダイアログを試験する(5.5)。`fq`はデスクトップを起動し、デスクトップを止めた状態でのShift+Pause、解放のイベントが失われた後のShift+Pause、強制終了のウインドウからのウインドウのないプロセスの終了、システムコールの中で止まったプロセスの2段の終了、デスクトップがプロセスの依頼で出したパネル、デスクトップの立ち上げ直しを試験する(5.5.6)。`cred`は、デスクトップと同じ方法で起動したプログラムが利用者の資格で動き、時刻、ネットワーク、ボリューム、時計とネットワーク設定の実身を断られ、タイムゾーン、キー配列、ユーザ環境設定の項目、ユーザ情報と機器の設定とシステムの実身を許されること、一時的に与えた管理者の権限で時刻を変えられ、返したあとと期限が過ぎたあとは断られること、ログインした利用者の資格から管理者のグループが除かれること、管理者のパスワードの最初の設定と照合、信頼するプログラムの見分け、デスクトップのタスクが作る実身の所有者、USBの媒体の保護を試験する(8.7)。`board`は、メモリ上に組み立てたデバイスツリーとボードのリビジョンから、Raspberry Pi 5、CM5、CM5 Lite、Raspberry Pi 4、400、CM4を見分けること、起動したマシンのデバイスツリーからノードのプロパティと`ranges`、`dma-ranges`を読めることを試験する(3.5.4)。`sd`は`SD_EMMC=1`を付けるとeMMCに対して行う。`KTONLY`はコンパイル時の定義なので、`BUILD_ID`で出力先を分けないと反映されない。
+`KTONLY`で試験グループを名前で選ぶ(カンマ区切りで複数指定できる)。グループは`tests/ktest/ktest_<グループ>.c`のファイル単位で、`task`、`sync`、`time`、`mem`、`smp`、`board`、`sd`、`proc`、`fat`、`tsfs`、`ob`、`om`、`dp`、`fn`、`wm`、`part`、`mn`、`cab`、`tv`、`vt`、`usb`、`devob`、`snd`、`net`、`so`、`v8`、`gpu`、`cal`、`kana`、`slide`などがある。`cal`は予定表の実身の読み書き(11.10)、`kana`はかな入力練習の配列の表、問題文、判定、成績と、キーを離した通知(11.14)、`slide`はスライドの並びと画面への収め方(11.11)、`vols`は多くのUSBのディスクと区画の同時の取り付け、形式の見分け、ボリュームをまたぐ仮身とほかのボリュームからの参照の記録、抜き差しの繰り返しと4コアでの同時の使用、26台を超えるディスクと40区画のディスク(7.6、8.3)、`vt`は文章の縦書きの組版と原稿用紙(11.21)、`prn`は印刷のPDFの構造、字の位置、書体の部分集合、画像と各アプリのページ(11.22)、`scr`は画面印刷の取り込んだ画素と画面の一致、図形実身と保存先のディスク、トレーと図形への貼り込み、PNGの書き出し、PDF(11.24)、`dfix`はディスクの検査と修復、ツリーとビットマップが同時に壊れたときの作り直し、壊れた実身ブロックからの救出(7.5)、`rt`は実時間制御TADの実行系と二進TADへの変換(15.10)、`rump`は4つのCPUから同時に掛けたNetBSDのスタックへの負荷(9.1.2)、`smp`の`test_wait_result`、`test_del_ended`、`test_exd_stack`は別のCPUが解除した待ちの結果と、終了したタスクのスタックを返す時機(4.3)を試験する。`smp`の`test_int_target`は装置の割込みを受けるCPUの切り替え(4.5.1)を、`klk`はカーネルのロックの順番の検査と、物やタスクをまたぐ呼出しを全部のCPUで重ねたときの結果(4.3.3)を試験する。`devob`は、デバイス管理に登録しないデバイスの実身(乱数、画面、入力、キーボードとポインタ、USBデバイス、システムのレコード3、4、9)の属性、読み書き、保護、仮身、接続と切断の通知を試験し、実身を通す経路と直接の関数の時間を出力する(8.10)。`snd`は、サウンドデバイスのチャネル、変換、混合、録音と、出力先の一覧と選択、再生中の切替え、選んだUSBオーディオの機能を抜いたときに自動の先へ移り挿し直すと戻ること(QEMUのモニタで2つ目の機能を挿す)、システムの実身のレコード8と機器の設定の`SOUND_OUT`による選択、ミキサーの混ぜ合わせ、プログラムごとと全体の左右の音量、消音、ソフトリミッタ、その設定の保存と読み戻しを試験する(6.5.1、6.5.6)。`fault`はデスクトップを起動し、Shift+Pauseによる強制終了と、例外で終了したプロセスのダイアログを試験する(5.5)。`fq`はデスクトップを起動し、デスクトップを止めた状態でのShift+Pause、解放のイベントが失われた後のShift+Pause、強制終了のウインドウからのウインドウのないプロセスの終了、システムコールの中で止まったプロセスの2段の終了、デスクトップがプロセスの依頼で出したパネル、デスクトップの立ち上げ直しを試験する(5.5.6)。`cred`は、デスクトップと同じ方法で起動したプログラムが利用者の資格で動き、時刻、ネットワーク、ボリューム、時計とネットワーク設定の実身を断られ、タイムゾーン、キー配列、ユーザ環境設定の項目、ユーザ情報と機器の設定とシステムの実身を許されること、一時的に与えた管理者の権限で時刻を変えられ、返したあとと期限が過ぎたあとは断られること、ログインした利用者の資格から管理者のグループが除かれること、管理者のパスワードの最初の設定と照合、信頼するプログラムの見分け、デスクトップのタスクが作る実身の所有者、USBの媒体の保護を試験する(8.7)。`board`は、メモリ上に組み立てたデバイスツリーとボードのリビジョンから、Raspberry Pi 5、CM5、CM5 Lite、Raspberry Pi 4、400、CM4を見分けること、起動したマシンのデバイスツリーからノードのプロパティと`ranges`、`dma-ranges`を読めることを試験する(3.5.4)。`sysup`は、試験の中で作ったシステムのパッケージ(この機種の新しいバージョン)で、システムの実身と起動のファイルが新しくなり、利用者の実身、機器の設定、利用者が箱に足した仮身、利用者の起動の設定が残り、前の起動のファイルが`.old`に残ること、同じパッケージでもう一度と、電源が切れた後の起動のときのやり直しで同じ結果になること、別の機種とアーキテクチャのもの、新しくないもの、システムのものでないものを断ることを試験する(11.8.1)。続けて`/boot`の下に作ったシステム登録の形のESP(`\EFI\TESSRON\`にローダ、カーネル、設定、`INSTALL.TXT`、`\EFI\BOOT\BOOTX64.EFI`はWindowsのもの)で、起動のファイルが`\EFI\TESSRON\`に置かれ、Windowsのローダと根が変わらないこと、入れ替えの名前の変更のそれぞれの後で止めても、ローダの探し方でカーネルが読め、次の起動のやり直しで仕上がること、200MBのESPに69MBのカーネルの機械を1/64にした大きさで空きの見積りが通ることを試験する。`sd`は`SD_EMMC=1`を付けるとeMMCに対して行う。`KTONLY`はコンパイル時の定義なので、`BUILD_ID`で出力先を分けないと反映されない。
 
 試験環境は次の構成のQEMUである。
 
@@ -76,6 +106,12 @@ make TARGET=_QEMU_VIRT_ KTEST=1 KTONLY=part,ob BUILD_ID=pt test
 | USB | xHCIに、キーボード、タブレット、マスストレージ2台、オーディオ |
 
 `tools/qemu_run.sh`がQEMUを起動してコンソール出力を監視し、`tools/qemu_qmp.py`が試験からの要求に応じて、USBデバイスの抜き差しやキー入力をQEMUに送る。
+
+試験は目で見るための画面の写しを`/boot`にPPMで残す(`kt_shot`、`prn`の群のページの画像)。1枚が3MBほどあり、全部の群を走らせるとブートパーティションの空き(システムの実身のレコードを置いた後で約47MB)を超える。そのため、写しは書いた後の空きが16MB(`KT_SHOT_KEEP`)を切るときは書かず、コンソールに`KTEST <パス> not written`と出す。また、試験用ディスクは実行をまたいで残るので、試験の始めに前の実行の写し(`/boot`の`.PPM`)を消す。全部の群の実行では後の群の写しが残らないことがあるので、見たい写しは`KTONLY`でその群だけを走らせて撮る。
+
+x64(3.10)では、`make TARGET=_X64_ KTEST=1 BUILD_ID=<名前> sdimg`で試験を組み込んだディスクのイメージ`obj/_X64__ktest<名前>/sd.img`を作り、Git Bashから`tools/x64/ktest64.sh obj/_X64__ktest<名前>/sd.img`でWindowsのQEMUの`q35`に挿して走らせる。`ACCEL=whpx`でWindowsのハイパーバイザを使い(全部の試験が約6分)、`NET=user`でホストの試験用のサーバとつなぐ。`KT_BOARD`はx64でも1で、ディスクは`nvmea`である。QEMUには`-rtc base=localtime`を付け、RTCをWindowsの入ったPCと同じローカル時刻にする(9.5.1)。`EXTRA`に書いた引数はQEMUにそのまま足す(Intel HDAの`-device intel-hda -device hda-duplex`、電池の試験のSSDTの`-acpitable`など)。`NVME4K=<イメージ>`は、論理ブロックが4096バイトの2台目のNVMe(`nvmeb`、QEMUの`nvme`の`logical_block_size=4096`)としてそのイメージを挿す(`pcdev`の群の`test_nvme_4k`が書き込む)。`NVME2=<イメージ>`、`NVME3=<イメージ>`、`NVME4=<イメージ>`は、そのイメージを2台目から4台目のNVMe(`nvmeb`、`nvmec`、`nvmed`)として挿し、`VARS=<ファイル>`はOVMFの変数の書ける写し(`edk2-i386-vars.fd`を写したもの)を2つ目のフラッシュとして与えて、起動の項目を次の起動に残す(システム登録の`sysinst`の群、3.10.10)。`OFFWAIT=1`は、`KTEST SUMMARY`の後もマシンが電源を切るまで待ち、電源を切る前の行(NVMeのシャットダウンの行など、06章6.2.1)をコンソールの出力に残す。`pcdev`の群(`tests/ktest/x86_64/ktest_pcdev.c`)は、PS/2、ACPIの電源の装置、SATA、IntelのLAN、HID over I2Cの実身と、そのUUIDが起動し直しても変わらないことを試験する。
+
+`USBQ=1`を付けると、USBの装置をQEMU virtの試験機と同じ並びにする(1つ目のxHCIのキーボード、タブレット、USB 3の口のディスク、ハブとその先のオーディオ、ディスク、マウス、USB 2だけの2つ目のxHCIのディスク3台とキーボード)。ディスクのイメージは`make TARGET=_X64_ KTEST=1 BUILD_ID=<名前> obj/_X64__ktest<名前>/usb_disk.img`などで、イメージの隣に作る(`usb_disk.img`、`usb_disk2.img`、`usb_disk3.img`、`usb_sf32.img`、`usb_fd.img`、`vols/`、`btcd.iso`)。QEMUにQMPの口を開き、`tools/qemu_qmp.py`(WindowsのPython)が試験からの抜き差しの要求をQEMUに送る。このときWSLのパス(`/mnt/c/...`)はWindowsのパスに直し、WindowsのQEMUが持たない「ファイルから読む文字デバイス」は、`/dev/zero`の代わりに、0を送り続けるループバックのTCPの口にする。WindowsのQEMUは、この口から0が届いている`usb-serial`を`device_del`で抜くと、3回に1回ほど異常終了する。そのため`device_del`を送る前にこの口の接続を切り(QEMUは文字デバイスの線が終わると機器を外す)、0.5秒待ってから`device_del`を送る。x64の試験は、2つのxHCIがあるとき(`kt_qemu_devs`)だけQEMUの機器を前提にする試験(`usb`、`devob`、`snd`の`KT_RUN_QEMU_DEVS`と、`vols`、`grow`、`btcd`の群)を走らせ、ないときは理由を言って飛ばす。オーディオの音を取るときは`USBQ_AUDIO=wav,path=<ファイル>`とする。WindowsのQEMUでは、USBのオーディオの等時転送が1秒あたり150〜210パケットしか進まない(QEMUのxHCIが等時転送のTDを仮想時計のタイマで1つずつ送り出し、Windowsのタイマが粗い)。そのため、再生の時間を見る`snd`の`test_play`、`test_mix`、`test_outputs`はx64でも、WindowsのQEMUで走らせたQEMU virtでも通らない。この3つは、LinuxのQEMUで走るQEMU virtの試験で確かめる。
 
 Raspberry Pi 4系のイメージは、QEMUの`raspi4b`で`make TARGET=_RPI4_ KTEST=1 BUILD_ID=<名前> test-rpi4`として試験する(3.6.6)。試験の中の「QEMUではなくボード」を表す条件は`KT_BOARD`で、Raspberry Pi 5と4系で1になる。
 
@@ -104,11 +140,23 @@ shot info_window
 | `open UUID` | 仮身をダブルクリックしたときと同じように実身を開く |
 | `run PATH [N …]` | プログラムのファイルをプロセスとして起動する。数値(8個まで)が起動時の引数になり、プロセスIDを応答する。例外で終了するプロセスを起こして、例外のダイアログ(11.1)のスクリーンショットを撮るときなどに使う |
 | `win 名前`、`wins` | 指定した名前のウインドウの外形、表示中のウインドウの一覧 |
+| `front TAG 名前1\|名前2…`、`hidden TAG 名前` | ウインドウが前面から指定の名前の順に並んでいること、指定した名前のウインドウが表示されていないことを確かめる。どちらも2秒まで待ち、`ok TAG: in front`、`ok TAG: hidden`と応答する |
+| `waitwin 名前 [S]`、`mark`、`sync [S]` | `waitwin`は指定した名前のウインドウが出るまでS秒(既定60秒)待つ。名前は行の残り全部で、空白を含んでよい(PCM Player)。最後の語が数字ならそれを秒数とする。`sync`は、デスクトップのタスクが`sync`を受けたことをループの頭で知り、そのあと入力を読みに行って何も無かったとき(それまでに入れたキーやボタンを読み終え、その処理を終えたとき)まで、S秒まで待つ。ループが一周したことだけを見ると、段落を組む間に届いたキーをまだ読まないうちに応答してしまう(Ctrl+Eで閉じて保存する前に、保存の結果を確かめてしまう)。どちらも`mark`からの経過時間をミリ秒で応答するので、起動や処理にかかる時間を測るのに使う |
+| `ready` | デスクトップがプロセスからの依頼を受ける口(`DT_REQ_NAME`)を作り終えたら(最大50秒待って)`ok`と応答する。試験の始めに、コマンドを受け付け、`open`で実身を開ける状態になったことを確かめる。口は設定とプログラムを読んだ後に作るので、遅い起動では`uitest: ready`から数秒かかる |
 | `wait MS`、`idle` | 待つ |
 | `lag MS` | MSミリ秒のあいだ、ポインタを50ミリ秒ごとに左右へ動かし、画面のポインタがそこへ描かれるまでの時間を測る。最長の時間(ミリ秒)、動かした回数、200ミリ秒を超えた回数を応答する。プログラムの起動中などに、デスクトップが止まらないことを確かめるのに使う |
+| `stat` | 前回の`stat`からの、ウインドウマネージャの合成の回数、描いた部品の数、合成した画素数(千画素単位)、ポインタの移動の回数、ポインタを描き直した回数と、画面へ送った矩形の数、画素数(千画素単位)を応答する。描画の量を比べるのに使う |
+| `xml 行`、`xmlopen 名前` | `xml`でxmlTADを1行ずつためて、`xmlopen`でその文章を指定した名前のウインドウで開く。文章の実身を作らずに、表示や編集を試験するのに使う |
+| `caret`、`shapes` | 前面の文章(図形の中で編集中の文章を含む)のカーソルと選択の端を`ok c 段落,位置 a 段落,位置`で、前面の図形の図形の数と選択中の数を応答する。`caret`は先に送ったキーが処理されて値が変わらなくなるまで待つ |
+| `mkbig doc\|fig\|calc N [M]`、`sum [UUID]` | `mkbig`は原紙から大きな文章(N段落)、図形、表計算(N行M列)の実身を作り、そのUUIDとバイト数を応答する。`sum`は実身のレコード0のバイト数とハッシュ(FNV-1a、64ビット)を応答する。UUIDを省くと`mkbig`で作った実身を見る。大きな実身の表示と保存の試験に使う |
+| `svcstat`、`waits` | `svcstat`は前回からの、プロセスのシステムコールの回数、プロセスの表のロック(`prc_mtxid`)を取った回数とそのうち待った回数を応答する(5.6.1)。`waits`は今のタスクの状態(実行中、実行可能、時間待ち、起床待ち、セマフォ、イベントフラグ、ミューテックス、メッセージバッファ、その他の待ち、強制待ち)の数と、最も多く待たれている物を3つ(`m12x30`はミューテックス12を30タスクが待つ)応答する。どちらも`UITEST=1`のビルドだけにある |
+| `stkuse` | 今あるタスクと、削除したタスクの開始アドレスとスタックの大きさの組ごとに、スタックの最も深い使用量をコンソールに`stkuse:`の行で出す。残りが4分の1を切るものには`LOW`を付ける(4.7.7) |
+| `look 番号 値` | 見た目の表(`include/ts/look.h`)の項目を書き換えて、画面を合成し直す |
+| `wifitest` | Wi-Fiのデバイスがないマシンに、決まったアクセスポイントの一覧を返す試験用のWi-Fiのデバイスを置く(`device/net/wifi/wifi.c`)。Wi-Fiを入れずにビルドしたカーネルでは`err no wifi`と応答する |
 | `shot NAME`、`expect 文字列` | 画面をPNGで保存する、コンソールに指定の文字列が出るのを待つ(`ui_run.py`が処理する) |
 | `absent 文字列` | その実行でコンソールに指定の文字列がまだ出ていないことを確かめる(`ui_run.py`が処理する)。スクリプトの最後に`absent !OACV!`を置き、権限の不足で断られた呼出しがないことを見る |
 | `hmp コマンド` | QEMUのモニタにコマンドを送る(`ui_run.py`が処理する)。`$VOLS`は`--vols`のイメージのコピーの置き場になる。`drive_add`と`device_add usb-storage`でディスクを挿し、`device_del`で抜く |
+| `expectin S 文字列`、`logmark`、`expectsince 文字列`、`want 応答`、`keep NAME`、`same NAME`、`under NAME MS`、`hostmark`、`hosttime NAME MS` | `ui_run.py`が処理する。`expectin`は待つ時間を秒で指定する`expect`。`want`は直前のコマンドの応答が指定のとおりであることを、`keep`と`same`は直前の応答を名前で残して後の応答と同じであることを確かめる。`under`は直前の応答(`ok MS`)がMSミリ秒以下であることを確かめ、値を名前とともに出す。`hostmark`からの経過時間をホストの時計で測り、`hosttime`がMSミリ秒以下であることを確かめる。`logmark`はコンソールのログのその時点の位置を覚え、`expectsince 文字列`はそれより後にその文字列が出ることを待つ(途中の状態で同じ行が前に出ていても数えない) |
 
 メニューはサブメニューが開くまでに少し時間がかかるので、項目の上を通過するたびに`wait 150`程度を入れる。
 
@@ -123,6 +171,10 @@ WSL版のQEMUはユーザモードネットワークを持たないので、外�
 `--vols ディレクトリ`を付けると、マシンに何もつないでいないUSBのハブを加え、そのディレクトリのディスクイメージ(`tools/tests/mkvoldisk.py`)を実行ごとに一時ディレクトリへコピーする。スクリプトは`hmp`でそれを挿して抜く。ディスク操作の試験(11.26、`tools/tests/ui_vols.steps`、`tools/tests/ui_disk_grow.steps`)に使う。`--keep-disk`と一緒に付けると、実行が書いたディスクイメージをそのディレクトリに書き戻すので、次の実行を`--disk`と`--fresh`で起動し直して、再起動をまたぐ振る舞いを試験できる(`tools/tests/ui_vols2.steps`)。
 
 `--wav ファイル`を付けると、USBのサウンドデバイスを加え、その出力をQEMUがWAVEファイルに書く。音を出す試験(実時間制御TADの`tools/tests/ui_rt.steps`、`ui_rt_player.steps`など)で、鳴った音の大きさと周波数を後から確かめられる。
+
+x64のイメージ(`make TARGET=_X64_ DESKTOP=1 UITEST=1 sdimg`)は`tools/x64/ui_run64.py --disk obj/_X64_<名前>/sd.img`で試験する。引数は`ui_run.py`と同じで、マシンの引数だけを`q35`、OVMF、NVMeのディスク、`virtio-net-pci`、2つ目のシリアルポート、ローカル時刻のRTC(`-rtc base=localtime`)に替える。`UI_ACCEL=whpx`でWindowsのハイパーバイザを使う。NVMeのデバイスは状態を保存できないので、毎回起動から始める(WHPXで約5秒)。`UI_USBBOOT=1`のときは、ディスクのイメージをNVMeでなくUSBの記憶装置(`id=sysdisk`、ルートポート)として挿し、カードから起動したPCと同じく、システムのボリュームを`uda1`にする(ファームウェアはハブの先のディスクから起動しないので、ルートポートに挿す)。台本の`hmp`の行では、`$DISK`が走らせているディスクの写しを指す。`tools/x64/tests/ui_sysgone.steps`はこれで、デスクトップが上がった後にシステムのディスクを`device_del`で抜き、挿し直す(11.26)。
+
+ディスクの名前や並びがQEMU virtと違うために座標や名前が変わる台本は、x64のものを`tools/x64/tests/`に置く。`ui_xfconv`、`ui_scrprint`(ファイル変換の一覧で`/boot`が`nvmea0`の2行目)、`ui_btcd`、`ui_sysenv_font`(USBのディスク`uda`が`nvmea`、`nvmea0`、`nvmea1`、`nvmea2`の後の5行目。`ui_btcd`はファイル変換をプログラムの実身を開いて起こす。x64のイメージの小物のメニューは並びが違うため)、`ui_vols`(〈接続〉のパネルの行が`nvmea2`を含めて5つで、QEMU virtより26ドット低い)、`ui_diskfix`(壊したボリュームを`tools/tests/dfix_disk.py`で`mkvoldisk.py`の`volc.img`の第1区画に作り、USBのディスクとして挿す。一覧はシステムのボリューム`nvmea1`が先)、`ui_diskfix_boot`(`dfix_disk.py --pc`でx64のディスクのイメージに修復の依頼を書く)がある。`ui_vols2`はQEMU virtの台本のまま通る。
 
 以前の`tools/desk_act.sh`(QEMUのモニタからマウスを少しずつ動かす方式)は1回に数分かかるので、新しい試験には使わない。
 
@@ -145,9 +197,15 @@ Raspberry Pi 4、400、CM4では`make TARGET=_RPI4_ sdimg`でイメージを作�
 | `tools/btbackup.py` | BTRONのBACKUP書庫を読み書きする |
 | `tools/ftpd.py` | ネットワークの試験に使うFTPサーバ |
 | `tools/ui_run.py` | UIの試験を、起動済みの状態から数秒で実行する(12.4) |
-| `tools/mktpk.py` | アプリケーションのパッケージ(.tpk)を作成する。`--list`で内容を表示する |
+| `tools/mktpk.py` | アプリケーションのパッケージ(.tpk)を作成する。`--system`でシステムのパッケージを作る(11.8.1)。`--list`で内容を表示する |
 | `tools/pkgstage.py` | イメージに組み込むパッケージを展開し、そのプログラムへの仮身を足したプログラム箱を作る(11.8) |
-| `tools/netbsd/build.sh` | NetBSDのTCP/IPスタックのソースを取得し、rumpカーネルの部品として1つのオブジェクトにビルドする(12.7) |
+| `tools/netbsd/build.sh` | NetBSDのTCP/IPスタックのソースを取得し、rumpカーネルの部品として1つのオブジェクトにビルドする(12.7)。`WIFI=1`は、Raspberry Pi 5のWi-Fi(SDIOのホストのsdhcとsdmmc、bwfm、net80211)を足したものを、別のソースの置き場`~/netbsd/netbsd-11.0-wifi`から`~/tessronos-netbsd-wifi/rumpnet.o`に作る。Pi 5のビルド(既定の`WIFI=1`、`build_make/wifi_arm.mk`)はこれを結び、無ければmakeが作る(09章9.6.8) |
+| `tools/rpi5/wifi/fw.sh` | Raspberry Pi 5のWi-Fiのチップのファームウェア、CLM、基板の設定(NVRAM)と許諾を、linux-firmware 20260810から取得してSHA-256を確かめ、`~/tessronos-rpi5-wifi-fw`に置く。`mkobj.py`がファームウェア、CLM、基板の設定の文章の実身を作り、`nvram.py`は文章から設定を取り出す規則(カーネルと同じ)、`test_nvram.py`はその試験(09章9.6.8) |
+| `tools/x64/ktest64.sh`、`tools/x64/ui_run64.py` | x64のカーネル内の試験とUIの試験を、WindowsのQEMUの`q35`で走らせる(12.3、12.4) |
+| `tools/x64/acpica/build.sh` | ACPIの解釈系ACPICAのリリースを取得し、OSの層と合わせてカーネルに結ぶオブジェクト`~/tessronos-acpica-x64/acpica.o`を作る(3.10.6)。x64のカーネルのビルドは、これがなければ先に作る |
+| `tools/wpa/build.sh` | wpa_supplicantのWPA2の鍵の交換の部分を、NetBSDの`src.tgz`から取り出してカーネル向けに建て、`~/tessronos-wpa-x64/wpasupp.o`にする(`ARCH=aarch64`はRaspberry Pi 5の`~/tessronos-wpa-arm/wpasupp.o`)。`test`はホストでhostapdの認証側と鍵の交換を試す(09章9.6.7) |
+| `tools/x64/wifi/fw.sh`、`mkobj.py` | Wi-Fiのファームウェアをlinux-firmwareから取得してSHA-256を確かめ、システムボリュームに載せる実身(ファームウェア、Wi-Fiの設定、それらを結ぶ実身「システム」)を作る(09章9.6.5) |
+| `tools/x64/netbsd/build.sh`、`tools/x64/mozc/build.sh`、`tools/x64/mesa/build.sh` | NetBSDのスタック、Mozc、Mesaのx86_64用のもの(`~/tessronos-netbsd-x64`、`~/tessronos-mozc-x64`、`~/tsmesa-x64`)を作る。手順はそれぞれ`tools/netbsd`、`tools/mozc`、`tools/mesa`のものと同じで、ツールチェーンと命令セットの基準だけが違う |
 | `tools/chk_isa.sh` | オブジェクトやイメージに、ARMv8.0-AにないLSEのアトミック命令や暗号拡張の命令が残っていないかを調べる(3.6.2) |
 | `tools/mesa/probe.sh` | Mesaを取得し、その一部をプロセス用のツールチェーンでコンパイルしてみる。`pack`はV3Dのパケットを詰めるヘッダを生成してリポジトリに書く(13.6.4) |
 

@@ -69,6 +69,10 @@ ifeq ($(RP1_UART),1)
 CFLAGS_TARGET += -DCNF_RP1_UART0=1
 endif
 
+# Wi-Fi(CYW43455、SDIO。設計書 09章 9.6.8)。make WIFI=0 で入れない
+WIFI ?= 1
+include $(TOP)/build_make/wifi_arm.mk
+
 # ボード依存ソース(コア依存は sources.mk の SRCS_CORE)
 SRCS += kernel/sysdepend/rpi5/hw_setting.c \
 	kernel/sysdepend/rpi5/devinit.c \

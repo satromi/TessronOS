@@ -420,18 +420,40 @@ def fat32_format(img, start, nsect, extra=()):
         name83, ents = place(dest, content, taken)
         root += ents
         print("  %s -> %s (%d bytes)" % (dest, name83, len(content)))
-    for d, items in subdirs.items():
-        sub_taken = set()
+    def make_dir(path, items, parent):
+        """A directory of the files in items, 'd/rest' of them in its
+        directory d (EFI/BOOT/BOOTX64.EFI of an EFI system partition);
+        parent is the cluster of the directory it is in, 0 the root's.
+        Its own cluster is taken before those of the directories in it,
+        whose ".." names it. Answers its cluster."""
+        taken_here = set()
         body = b""
+        nested = {}
         for base, content in items:
-            name83, ents = place(base, content, sub_taken)
+            if "/" in base:
+                d2, rest = base.split("/", 1)
+                nested.setdefault(d2, []).append((rest, content))
+                continue
+            name83, ents = place(base, content, taken_here)
             body += ents
-            print("  %s/%s -> %s (%d bytes)" % (d, base, name83, len(content)))
+            print("  %s/%s -> %s (%d bytes)" % (path, base, name83, len(content)))
+        # the entries that will name the directories in it: as long now as later
+        size = len(body)
+        for d2 in nested:
+            size += len(place(d2, b"", set(taken_here), attr=0x10, clus=0)[1])
         csize = spc * SECTOR
-        nclus = max(1, -(-(64 + len(body)) // csize))
+        nclus = max(1, -(-(64 + size) // csize))
         c_dir = alloc_chain(nclus)
+        for d2, its in nested.items():
+            c_sub = make_dir(path + "/" + d2, its, c_dir)
+            _, ents = place(d2, b"", taken_here, attr=0x10, clus=c_sub)
+            body += ents
         write_clusters(c_dir, dirent(".          ", 0x10, c_dir, 0)
-                       + dirent("..         ", 0x10, 0, 0) + body)
+                       + dirent("..         ", 0x10, parent, 0) + body)
+        return c_dir
+
+    for d, items in subdirs.items():
+        c_dir = make_dir(d, items, 0)
         _, ents = place(d, b"", taken, attr=0x10, clus=c_dir)
         root += ents
 

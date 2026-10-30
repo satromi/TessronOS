@@ -39,9 +39,17 @@ MESA_INC="-I$GEN/src -I$GEN/src/compiler -I$GEN/src/compiler/nir -I$GEN/src/util
  -I$GEN -I$GEN/broadcom -I$MESA/include -I$MESA/src -I$MESA/src/compiler -I$MESA/src/compiler/nir \
  -I$MESA/src/util -I$MESA/src/util/format -I$MESA/src/broadcom -I$MESA/src/broadcom/compiler \
  -I$MESA/src/broadcom/common -I$MESA/src/gallium/include -I$MESA/src/gallium/auxiliary \
- -I$TOP/tools/mesa/shim"
+ -I$WORK/hshim"
 
 log() { echo "shaders: $*"; }
+
+# libdrm's declarations from the shim (tools/mesa/shim), alone: the rest of the shim stands in for
+# newlib's headers, which the host's C library has of its own
+hshim() {
+	mkdir -p "$WORK/hshim"
+	cp "$TOP/tools/mesa/shim/xf86drm.h" "$TOP/tools/mesa/shim/xf86drmMode.h" "$TOP/tools/mesa/shim/libsync.h" \
+		"$WORK/hshim/"
+}
 
 fetch() {
 	mkdir -p "$MESA_HOME"
@@ -117,6 +125,7 @@ compile_lib() {
 build() {
 	fetch
 	mkdir -p "$WORK"
+	hshim
 	[ -f "$GEN/broadcom/compiler/v3d_nir_lower_algebraic.c" ] || generate
 	compile_lib nir "$(ls "$MESA"/src/compiler/nir/*.c "$GEN"/src/compiler/nir/*.c \
 		"$GEN"/src/compiler/builtin_types.c "$MESA"/src/compiler/glsl_types.c \
@@ -139,6 +148,7 @@ build() {
 
 test() {
 	[ -f "$WORK/libnir.a" ] || build
+	hshim
 	gcc -O1 -g0 -std=gnu11 -Wall -Wno-unused-function -I"$TOP/tools/mesa/hostshim" \
 		-c -o "$WORK/compose_host.o" "$TOP/outer_kernel/wm/compose.c"
 	gcc -O1 -g0 -std=gnu11 -Wall -Wno-unused-function -I"$TOP/tools/mesa/hostshim" \

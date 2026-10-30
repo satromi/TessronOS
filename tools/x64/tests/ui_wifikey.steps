@@ -1,0 +1,129 @@
+# The Wi-Fi's saved networks in ネットワーク設定 on the x64 PC (docs/tessronos/09-network.md
+# 9.6.6, 9.6.7), for tools/x64/ui_run64.py with the image of make TARGET=_X64_ DESKTOP=1 UITEST=1
+# sdimg (WIFI=1 is the x64 build's own). QEMU's machine has no Wi-Fi card: the UI test's wifitest
+# gives the Wi-Fi manager a card for the tests. The places, the waits and what is seen are those
+# of tools/tests/ui_wifikey.steps.
+wifitest
+expect wifi: test card ready
+open 01a0d8c4-52b5-7a41-8c61-2d7e9f0a1b31
+expect netenv: ready
+wait 800
+click 437 163
+expect netenv: scan 4 networks, 4 shown
+wait 2000
+shot wk_list
+# TessronOS-Test, the first row: its SSID and WPA2 into the parts
+click 505 321
+wait 2000
+click 463 432
+wait 1000
+text secret-pass1
+wait 2000
+click 385 466
+expect wifi: saved a network, a new key: 0
+expect netenv: wifi changed
+wait 2000
+shot wk_saved
+# another network of the scan (not saved: an empty password), then the one saved again:
+# eight marks for its password
+click 505 338
+wait 2000
+shot wk_other
+# 保存した接続 opened: its list stays open while the program reads the card every second
+# (three seconds: three readings), and the saved network is chosen in it with ↓ and Enter a
+# tenth of a second apart, as quickly as a person types them
+click 463 256
+wait 3000
+shot wk_popup
+key 51
+wait 100
+key 28
+expect netenv: saved network chosen
+wait 2000
+shot wk_masked
+click 481 466
+expect netenv: wifi joined as saved
+expect wifi: test: joining "TessronOS-Test", with the saved key
+wait 2000
+# forgotten, with no question
+click 669 256
+expect wifi: forgot a network: 0
+wait 2000
+shot wk_forgot
+# WPA3-Personal: Office-WPA3-Only typed in ＳＳＩＤ (at 463,289; the scan's list shows three rows
+# of its four), WPA3-Personal chosen in the pop-up of セキュリティ (at 463,394) with ↓ and Enter
+# (its four choices open: shot wk_secpop), a password typed and saved: the kernel keeps the
+# password for SAE (shot wk_wpa3), and 接続 with the marks left joins by SAE with it
+click 463 289
+wait 1000
+text Office-WPA3-Only
+wait 1000
+click 463 394
+wait 1500
+shot wk_secpop
+key 51
+wait 100
+key 28
+wait 1500
+click 463 432
+wait 1000
+text wpa3-secret-9
+wait 1500
+shot wk_wpa3
+click 385 466
+expect wifi: saved a network, a new key: 0 (wpa3)
+expect netenv: wifi changed
+wait 2000
+click 481 466
+expect netenv: wifi joined as saved
+expect wifi: test: joining "Office-WPA3-Only", by SAE with the saved password
+wait 2000
+# WPA2/WPA3-Personal, the next choice of the pop-up, a password typed over the marks and saved:
+# both the PMK and the password kept
+click 463 394
+wait 1500
+key 51
+wait 100
+key 28
+wait 1500
+click 463 432
+wait 1000
+text wpa3-secret-9
+wait 1500
+click 385 466
+expect wifi: changed a network, a new key: 0 (wpa2wpa3)
+wait 2000
+shot wk_wpa2wpa3
+click 481 466
+expect wifi: test: joining "Office-WPA3-Only", with the saved key, by SAE with the saved password
+wait 2000
+click 669 256
+expect wifi: forgot a network: 0
+wait 2000
+# 表示の倍率 150%
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+wait 800
+win システム環境設定
+click 206 181
+wait 300
+click 706 184
+expect sysenv: screen scale 100%, 3 scales
+wait 500
+click 658 455
+wait 300
+click 658 495
+wait 300
+click 706 554
+expect wm: drawn at 150% (was 100%)
+wait 1500
+key 28
+expect drawn at 150%, kept
+wait 1500
+open 01a0d8c4-52b5-7a41-8c61-2d7e9f0a1b31
+expect netenv: ready
+wait 1500
+click 437 163
+wait 2500
+shot wk_list150
+absent !OACV!

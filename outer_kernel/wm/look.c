@@ -375,8 +375,8 @@ EXPORT ER knl_look_setting( UINT num, UW value )
 	changed = (BOOL)( e->fore != value || e->tone != 0 );
 	e->fore = value;
 	e->tone = 0;
-	if ( num >= LK_KEY_ON && num <= LK_DBL_W ) {
-		knl_input_sync();		/* the keyboard's and the pointer's */
+	if ( ( num >= LK_KEY_ON && num <= LK_DBL_W ) || ( num >= LK_TCH_ON && num <= LK_TCH_STEP ) ) {
+		knl_input_sync();		/* the keyboard's, the pointer's and a finger's */
 	}
 	if ( changed && ( num == LK_TITLE_H || num == LK_BAR_W ) ) {
 		wm_relayout();			/* every frame measured again */

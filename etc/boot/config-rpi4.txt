@@ -17,6 +17,15 @@ uart_2ndstage=1
 framebuffer_depth=32
 framebuffer_ignore_alpha=1
 
+# Waveshare の PocketTerm35(3.5inch HDMI LCD (E)、設計書 3.6.7): 液晶の EDID が 640×480 を
+# 返せば、この設定がなくてもその大きさで映る。映らないときだけ、次の4行の先頭の # を消す。
+# ほかの HDMI のモニタも 640×480 に固定されるので、普段は消さない。タッチパネル(GT911)は
+# 設定なしでカーネルが起動時に見つける
+#hdmi_group=2
+#hdmi_mode=87
+#hdmi_cvt=640 480 75 6 0 0 0
+#hdmi_drive=2
+
 # Raspberry Pi 400: デバイスツリーだけを差し替える
 [pi400]
 device_tree=bcm2711-rpi-400.dtb

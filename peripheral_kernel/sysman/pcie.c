@@ -383,9 +383,55 @@ EXPORT ER ts_pcie_find( UINT class_code, UINT subclass, UINT prog_if,
 }
 
 /*
- * Let it answer on its windows and fetch memory for itself. The line is
- * left on: firmware that meant to use messages can leave it switched
- * off, and then nothing the card raises ever arrives.
+ * Every bridge between the host and a card made to pass the card's
+ * memory reads and writes upstream. A bridge whose bus master bit is off
+ * stops both the card's DMA and its message interrupts, which are writes
+ * too; firmware leaves it off on ports it did not use itself. Only the
+ * path to a card a driver enables is opened, so that a port with nothing
+ * in use behind it (a Thunderbolt port) passes no DMA. Says what it
+ * changed.
+ */
+LOCAL void upstream( CONST T_PCIDEV *dev )
+{
+	INT	i, depth;
+	UINT	bus, sec;
+	UW	cmd, want;
+	BOOL	found;
+
+	if ( dev == NULL ) {
+		return;
+	}
+	bus = dev->bus;
+	for ( depth = 0; bus != 0 && depth < 8; depth++ ) {
+		found = FALSE;
+		for ( i = 0; i < pci_ndev; i++ ) {
+			T_PCIDEV	*b = &pci_dev[i];
+
+			if ( b->header != PCI_HDR_BRIDGE ) continue;
+			sec = ts_pcie_cfg_read(b->bus, b->dev, b->fn, PCI_SECONDARY_BUS, 1);
+			if ( sec != bus ) continue;
+			cmd = ts_pcie_cfg_read(b->bus, b->dev, b->fn, PCI_COMMAND, 2);
+			want = cmd | PCI_CMD_MEMORY | PCI_CMD_MASTER;
+			if ( want != cmd ) {
+				ts_pcie_cfg_write(b->bus, b->dev, b->fn, PCI_COMMAND, want, 2);
+			}
+			tm_printf((UB *)"pcie: bridge %02x:%02x.%x above %02x:%02x.%x: command %04x%s%04x\n",
+				  b->bus, b->dev, b->fn, dev->bus, dev->dev, dev->fn, (UINT)cmd,
+				  ( want != cmd ) ? " -> " : ", kept as ",
+				  (UINT)ts_pcie_cfg_read(b->bus, b->dev, b->fn, PCI_COMMAND, 2));
+			bus = b->bus;
+			found = TRUE;
+			break;
+		}
+		if ( !found ) break;
+	}
+}
+
+/*
+ * Let it answer on its windows and fetch memory for itself, and the
+ * bridges above it pass what it fetches. The line is left on: firmware
+ * that meant to use messages can leave it switched off, and then nothing
+ * the card raises ever arrives.
  */
 EXPORT ER ts_pcie_enable( CONST T_PCIDEV *dev )
 {
@@ -394,6 +440,7 @@ EXPORT ER ts_pcie_enable( CONST T_PCIDEV *dev )
 	if ( dev == NULL ) {
 		return E_PAR;
 	}
+	upstream(dev);
 	cmd = ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, PCI_COMMAND, 2);
 	cmd |= PCI_CMD_MEMORY | PCI_CMD_MASTER;
 	cmd &= ~PCI_CMD_INTX_OFF;
@@ -468,6 +515,8 @@ EXPORT UINT ts_pcie_cap_find( CONST T_PCIDEV *dev, UINT cap_id )
 #define MSIX_CAP_TABLE		0x04	/* which window, and where in it */
 #define MSIX_CTRL_ENABLE	0x8000
 #define MSIX_CTRL_FUNCMASK	0x4000
+#define MSIX_CTRL_SIZE		0x07ff	/* entries of the table, less one */
+#define MSIX_ENT_SIZE		16
 #define MSIX_TABLE_BIR(v)	((v) & 0x7)
 #define MSIX_TABLE_OFF(v)	((v) & ~0x7U)
 
@@ -492,10 +541,141 @@ LOCAL ER msi_range( void )
 	return E_OK;
 }
 
+#ifdef __x86_64__
+/*
+ * Where each message was written, so that it can be written again with
+ * another processor's address (SetIntTarget, kernel/tkernel/inttarget.c):
+ * an entry of a function's MSI-X table, or its plain MSI capability
+ */
+#define MSG_NONE	0
+#define MSG_MSIX	1
+#define MSG_PLAIN	2
+#define MSI_CAP_ADDR_LO_W	0x04	/* the plain capability's address, low word */
+
+LOCAL struct {
+	UB	kind;
+	UB	is64;
+	UB	bus, dev, fn;
+	UH	cap;
+	UBINT	entry;			/* MSG_MSIX: the table entry */
+} msg_at[N_INTVEC];
+
+IMPORT ER	(*knl_msi_rewrite_hook)( UINT intno, UD addr );
+
+LOCAL ER msg_rewrite( UINT intno, UD addr )
+{
+	UW	ctrl;
+
+	if ( intno >= N_INTVEC ) {
+		return E_PAR;
+	}
+	switch ( msg_at[intno].kind ) {
+	case MSG_MSIX: {
+		UBINT	t = msg_at[intno].entry;
+
+		ctrl = *(volatile UW *)(t + MSIX_ENT_CTRL);
+		*(volatile UW *)(t + MSIX_ENT_CTRL) = ctrl | MSIX_CTRL_MASK;
+		DeviceBarrier();
+		*(volatile UW *)(t + MSIX_ENT_ADDR_LO) = (UW)addr;
+		*(volatile UW *)(t + MSIX_ENT_ADDR_HI) = (UW)( addr >> 32 );
+		DeviceBarrier();
+		*(volatile UW *)(t + MSIX_ENT_CTRL) = ctrl;
+		DeviceBarrier();
+		return E_OK;
+	}
+	case MSG_PLAIN:
+		/* the processor is in the low word only: one write, whole */
+		ts_pcie_cfg_write(msg_at[intno].bus, msg_at[intno].dev, msg_at[intno].fn,
+				  msg_at[intno].cap + MSI_CAP_ADDR_LO_W, (UW)addr, 4);
+		return E_OK;
+	default:
+		return E_OK;		/* not made yet: made with the new address */
+	}
+}
+
+LOCAL void msg_note( UINT intno, UB kind, CONST T_PCIDEV *dev, UINT cap, UBINT entry )
+{
+	if ( intno >= N_INTVEC ) {
+		return;
+	}
+	msg_at[intno].bus = (UB)dev->bus;
+	msg_at[intno].dev = (UB)dev->dev;
+	msg_at[intno].fn = (UB)dev->fn;
+	msg_at[intno].cap = (UH)cap;
+	msg_at[intno].entry = entry;
+	msg_at[intno].kind = kind;
+	knl_msi_rewrite_hook = msg_rewrite;
+}
+
+
+/* the capability of plain messages (MSI) */
+#define MSI_CAP_CTRL		0x02
+#define MSI_CAP_ADDR_LO		0x04
+#define MSI_CTRL_ENABLE		0x0001
+#define MSI_CTRL_MME		0x0070	/* messages enabled: one */
+#define MSI_CTRL_64		0x0080
+#define MSI_CTRL_PVM		0x0100	/* a mask bit of its own */
+
+/*
+ * A function with plain messages (Intel's integrated graphics has no
+ * others): one message, its address and data written while the
+ * capability is off, and then turned on. Asked for by name, or through
+ * ts_pcie_irq_alloc when the function has no MSI-X.
+ */
+EXPORT ER ts_pcie_msi_plain_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
+{
+	UW	ctrl, data_off;
+	UINT	intno, cap;
+
+	if ( dev == NULL || p_intno == NULL ) {
+		return E_PAR;
+	}
+	if ( msi_range() < E_OK ) {
+		return E_NOEXS;
+	}
+	cap = ts_pcie_cap_find(dev, PCI_CAP_MSI);
+	if ( cap == 0 ) {
+		return E_NOSPT;
+	}
+	if ( msi_next >= msi_end ) {
+		return E_LIMIT;
+	}
+	ctrl = ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, cap + MSI_CAP_CTRL, 2);
+	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSI_CAP_CTRL,
+			  ctrl & ~( MSI_CTRL_ENABLE | MSI_CTRL_MME ), 2);
+	intno = msi_next++;
+	knl_msi_prepare(intno);
+	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSI_CAP_ADDR_LO, (UW)knl_msi_addr(intno), 4);
+	if ( ctrl & MSI_CTRL_64 ) {
+		ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSI_CAP_ADDR_LO + 4,
+				  (UW)( knl_msi_addr(intno) >> 32 ), 4);
+		data_off = 0x0c;
+	} else {
+		data_off = 0x08;
+	}
+	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + data_off, knl_msi_data(intno), 2);
+	if ( ctrl & MSI_CTRL_PVM ) {
+		ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + data_off + 4, 0, 4);	/* not masked */
+	}
+	ctrl = ( ctrl & ~MSI_CTRL_MME ) | MSI_CTRL_ENABLE;
+	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSI_CAP_CTRL, ctrl, 2);
+	msg_note(intno, MSG_PLAIN, dev, cap, 0);
+
+	ctrl = ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, PCI_COMMAND, 2);
+	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, PCI_COMMAND, ctrl | PCI_CMD_INTX_OFF, 2);
+	*p_intno = intno;
+	return E_OK;
+}
+#endif
+
 /*
  * Give a function one message interrupt and answer the number it will
- * raise. The entry is written while it is masked, as the standard
- * requires, and unmasked once it is whole.
+ * raise. The capability is turned on first with the whole function
+ * masked (MSI-X Enable and Function Mask together), as some functions
+ * do not answer their table until MSI-X is on; the first time, every
+ * entry is masked then, so that none left by the firmware fires. The
+ * entry is written while it is masked, as the standard requires, and
+ * unmasked once it is whole; the function is unmasked last.
  */
 EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 {
@@ -531,7 +711,19 @@ EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 	/* the interrupt readied for messages (cpu_msi.h) */
 	knl_msi_prepare(intno);
 
-	/* masked while it is written, as the standard asks */
+	/* the capability on, the function masked as a whole */
+	ctrl = ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, cap + MSIX_CAP_CTRL, 2);
+	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSIX_CAP_CTRL,
+			  ctrl | MSIX_CTRL_ENABLE | MSIX_CTRL_FUNCMASK, 2);
+	if ( ( ctrl & MSIX_CTRL_ENABLE ) == 0 ) {
+		UINT	n = ( ctrl & MSIX_CTRL_SIZE ) + 1, i;
+
+		for ( i = 1; i < n; i++ ) {
+			*(volatile UW *)(table + i * MSIX_ENT_SIZE + MSIX_ENT_CTRL) = MSIX_CTRL_MASK;
+		}
+	}
+
+	/* the entry masked while it is written, as the standard asks */
 	*(volatile UW *)(table + MSIX_ENT_CTRL) = MSIX_CTRL_MASK;
 	DeviceBarrier();
 	*(volatile UW *)(table + MSIX_ENT_ADDR_LO) = (UW)knl_msi_addr(intno);
@@ -540,12 +732,13 @@ EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 	DeviceBarrier();
 	*(volatile UW *)(table + MSIX_ENT_CTRL) = 0;
 	DeviceBarrier();
+#ifdef __x86_64__
+	msg_note(intno, MSG_MSIX, dev, cap, table);
+#endif
 
-	/* and the capability turned on, with nothing held back */
-	ctrl = ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, cap + MSIX_CAP_CTRL, 2);
-	ctrl |= MSIX_CTRL_ENABLE;
-	ctrl &= ~MSIX_CTRL_FUNCMASK;
-	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSIX_CAP_CTRL, ctrl, 2);
+	/* and the function unmasked, with nothing held back */
+	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSIX_CAP_CTRL,
+			  ( ctrl | MSIX_CTRL_ENABLE ) & ~MSIX_CTRL_FUNCMASK, 2);
 
 	/* the line is no use once messages are on */
 	ctrl = ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, PCI_COMMAND, 2);
@@ -568,6 +761,225 @@ EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 }
 
 #endif /* KNL_HAS_MSI */
+
+/* ---------------------------------------------------------------- the interrupt of a function */
+
+/* What each function was given, for the drivers' records and the tests */
+#define IRQ_REC_N	32
+LOCAL struct {
+	UB	used, bus, dev, fn, kind;
+	UINT	intno;
+} irq_rec[IRQ_REC_N];
+
+EXPORT CONST char *ts_pcie_irq_name( INT kind )
+{
+	switch ( kind ) {
+	case PCI_IRQ_MSIX:	return "MSI-X";
+	case PCI_IRQ_MSI:	return "MSI";
+	case PCI_IRQ_INTX:	return "INTx";
+	default:		return "polled";
+	}
+}
+
+EXPORT INT ts_pcie_irq_kind( CONST T_PCIDEV *dev, UINT *p_intno )
+{
+	INT	i;
+
+	for ( i = 0; dev != NULL && i < IRQ_REC_N; i++ ) {
+		if ( irq_rec[i].used && irq_rec[i].bus == dev->bus && irq_rec[i].dev == dev->dev
+		  && irq_rec[i].fn == dev->fn ) {
+			if ( p_intno != NULL ) *p_intno = irq_rec[i].intno;
+			return irq_rec[i].kind;
+		}
+	}
+	return E_NOEXS;
+}
+
+LOCAL void irq_note( CONST T_PCIDEV *dev, INT kind, UINT intno )
+{
+	INT	i, f = -1;
+
+	for ( i = 0; i < IRQ_REC_N; i++ ) {
+		if ( !irq_rec[i].used ) {
+			if ( f < 0 ) f = i;
+			continue;
+		}
+		if ( irq_rec[i].bus == dev->bus && irq_rec[i].dev == dev->dev && irq_rec[i].fn == dev->fn ) {
+			f = i;
+			break;
+		}
+	}
+	if ( f < 0 ) return;
+	irq_rec[f].used = 1;
+	irq_rec[f].bus = dev->bus;
+	irq_rec[f].dev = dev->dev;
+	irq_rec[f].fn = dev->fn;
+	irq_rec[f].kind = (UB)kind;
+	irq_rec[f].intno = intno;
+}
+
+#ifdef __x86_64__
+IMPORT int	knl_acpica_ready( void );
+IMPORT int	knl_acpica_pci_gsi( unsigned int root_bus, const unsigned char *dev, const unsigned char *fn, int n,
+				    unsigned int pin, char *how, int max );
+IMPORT BOOL	knl_int_in_use( UINT intno );
+
+/*
+ * The line of a function on a PC: the GSI the _PRT tables name for it,
+ * found by the path of bridges from the root bus down to it. A line that
+ * a handler or another function already has is not taken: the drivers'
+ * handlers each serve their own card only.
+ */
+LOCAL UINT intx_line( CONST T_PCIDEV *d, char *how, INT max )
+{
+	UB	dv[8], fn[8], rdv[8], rfn[8];
+	UINT	bus = d->bus, v;
+	INT	n = 0, i, k;
+	int	gsi;
+
+	if ( d->int_pin < 1 || d->int_pin > 4 ) {
+		tm_sprintf((UB *)how, (UB *)"no line pin");
+		return 0;
+	}
+	if ( !knl_acpica_ready() ) {
+		tm_sprintf((UB *)how, (UB *)"no ACPI interpreter");
+		return 0;
+	}
+	rdv[n] = d->dev;
+	rfn[n] = d->fn;
+	n++;
+	while ( n < 8 ) {
+		for ( i = 0; i < pci_ndev; i++ ) {
+			if ( pci_dev[i].header == PCI_HDR_BRIDGE
+			  && ts_pcie_cfg_read(pci_dev[i].bus, pci_dev[i].dev, pci_dev[i].fn, PCI_SECONDARY_BUS, 1) == bus ) {
+				break;
+			}
+		}
+		if ( i >= pci_ndev ) break;		/* bus is a root bus */
+		rdv[n] = pci_dev[i].dev;
+		rfn[n] = pci_dev[i].fn;
+		n++;
+		bus = pci_dev[i].bus;
+	}
+	for ( k = 0; k < n; k++ ) {
+		dv[k] = rdv[n - 1 - k];
+		fn[k] = rfn[n - 1 - k];
+	}
+	gsi = knl_acpica_pci_gsi(bus, dv, fn, n, d->int_pin, how, max);
+	if ( gsi < 0 ) return 0;
+	if ( gsi >= INTVEC_GSI_NUM ) {
+		tm_sprintf((UB *)how + knl_strlen((char *)how), (UB *)", GSI %d beyond those served", gsi);
+		return 0;
+	}
+	v = INTVEC_GSI(gsi);
+	for ( i = 0; i < IRQ_REC_N; i++ ) {
+		if ( irq_rec[i].used && irq_rec[i].kind == PCI_IRQ_INTX && irq_rec[i].intno == v ) break;
+	}
+	if ( i < IRQ_REC_N || knl_int_in_use(v) ) {
+		tm_sprintf((UB *)how + knl_strlen((char *)how), (UB *)", GSI %d already in use", gsi);
+		return 0;
+	}
+	tm_sprintf((UB *)how + knl_strlen((char *)how), (UB *)", GSI %d", gsi);
+	SetIntMode(v, IM_LEVEL | IM_LOW);		/* a PCI line: level, active low */
+	return v;
+}
+#endif
+
+#if KNL_HAS_MSI && defined(__x86_64__)
+/*
+ * For trying out a driver's order of setting up its interrupt: with
+ * "msiearly" in the start-up settings (cmdline.txt), each message
+ * interrupt is raised once on the processor it goes to as soon as it is
+ * enabled, as a function the firmware left with an interrupt pending
+ * does, before the driver has defined the handler. The interrupt is
+ * expected to be dropped (exc_hdl.c, Default_Handler) and the device
+ * to work all the same.
+ */
+LOCAL BOOL msi_early_asked( void )
+{
+	CONST char	*c = knl_bootinfo->cmdline, *w = "msiearly";
+	INT		k;
+
+	for ( ; *c != '\0'; c++ ) {
+		if ( c != knl_bootinfo->cmdline && c[-1] != ' ' ) continue;
+		for ( k = 0; w[k] != '\0' && c[k] == w[k]; k++ ) ;
+		if ( w[k] == '\0' && ( c[k] == '\0' || c[k] == ' ' ) ) return TRUE;
+	}
+	return FALSE;
+}
+
+LOCAL void msi_early( UINT intno )
+{
+	UW	apic = knl_msi_apic(intno);
+	UINT	s;
+
+	tm_printf((UB *)"pcie: interrupt %d raised before its handler is defined, on the APIC ID %d (msiearly)\n",
+		  intno, apic);
+	s = disint();			/* the two halves of the command register written together */
+	knl_apic_send(apic, intno, APIC_DM_FIXED);
+	enaint(s);
+}
+#endif
+
+/*
+ * One interrupt for a function, tried in the order MSI-X, MSI, its line
+ * (INTx, only when line is TRUE); the kind it got, *p_intno 0 when
+ * there was none (PCI_IRQ_POLL: the driver polls). What was tried is
+ * said on the console.
+ */
+EXPORT INT ts_pcie_irq_alloc( CONST T_PCIDEV *dev, UINT *p_intno, BOOL line )
+{
+	char	how[200];
+	ER	ex, em = E_NOSPT;
+	UINT	intno = 0;
+	INT	kind = PCI_IRQ_POLL;
+
+	if ( dev == NULL || p_intno == NULL ) {
+		return E_PAR;
+	}
+	how[0] = '\0';
+	ex = ts_pcie_msi_alloc(dev, &intno);
+	if ( ex >= E_OK ) {
+		kind = PCI_IRQ_MSIX;
+	}
+#if KNL_HAS_MSI && defined(__x86_64__)
+	if ( kind == PCI_IRQ_POLL ) {
+		em = ts_pcie_msi_plain_alloc(dev, &intno);
+		if ( em >= E_OK ) kind = PCI_IRQ_MSI;
+	}
+#endif
+	if ( kind == PCI_IRQ_POLL ) {
+		intno = 0;
+		if ( !line ) {
+			tm_sprintf((UB *)how, (UB *)"the line not used");
+		} else {
+#ifdef __x86_64__
+			intno = intx_line(dev, how, (INT)sizeof(how));
+#else
+			intno = dev->intno;
+			if ( intno == 0 ) tm_sprintf((UB *)how, (UB *)"no line");
+#endif
+			if ( intno != 0 ) kind = PCI_IRQ_INTX;
+		}
+	}
+	irq_note(dev, kind, intno);
+	if ( kind == PCI_IRQ_MSIX ) {
+		tm_printf((UB *)"pcie: %02x:%02x.%d %04x:%04x: interrupt by MSI-X (%d)\n",
+			  dev->bus, dev->dev, dev->fn, dev->vendor, dev->device, intno);
+	} else {
+		/* why the earlier ones were not had: E_NOSPT the function has no such capability */
+		tm_printf((UB *)"pcie: %02x:%02x.%d %04x:%04x: interrupt by %s (%d); MSI-X %d, MSI %d%s%s\n",
+			  dev->bus, dev->dev, dev->fn, dev->vendor, dev->device, ts_pcie_irq_name(kind), intno,
+			  (INT)ex, ( kind == PCI_IRQ_MSI ) ? E_OK : (INT)em, ( how[0] != '\0' ) ? ", line: " : "", how);
+	}
+#if KNL_HAS_MSI && defined(__x86_64__)
+	if ( ( kind == PCI_IRQ_MSIX || kind == PCI_IRQ_MSI ) && msi_early_asked() ) {
+		msi_early(intno);
+	}
+#endif
+	*p_intno = intno;
+	return kind;
+}
 
 /* ---------------------------------------------------------------- start-up */
 

@@ -27,7 +27,10 @@
 #include <ts/disp.h>
 #include <ts/hid.h>
 #include <ts/conf.h>
+#include <ts/look.h>
 #include <ts/time.h>
+#include <ts/snd.h>
+#include "../../outer_kernel/wm/wmobj.h"
 #include "../../outer_kernel/wm/compose.h"
 #include "../../device/disp/disp_hw.h"
 
@@ -592,6 +595,45 @@ LOCAL void test_many( void )
 }
 
 /*
+ * More windows than the table first has room for, and more than the
+ * 1024 there once was: each opens with a number of its own, the order
+ * stays whole, and each closes.
+ */
+#define KT_WIN_MANY	1100
+
+LOCAL void test_beyond( void )
+{
+	T_DPRECT	o;
+	INT		*wid;
+	INT		i, n = 0;
+
+	if ( !have_wm ) KT_SKIP("no windows");
+	wid = (INT *)Kmalloc(sizeof(INT) * KT_WIN_MANY);
+	if ( wid == NULL ) KT_SKIP("no memory");
+	for ( i = 0; i < KT_WIN_MANY; i++ ) {
+		rect(&o, 10 + i % 200, 10 + i % 150, 26 + i % 200, 26 + i % 150);
+		wid[i] = wm_open(&o, 0, "beyond");
+		if ( wid[i] < 1 ) break;
+		n++;
+	}
+	KT_ASSERT_EQ(n, KT_WIN_MANY);
+	KT_ASSERT(knl_wm_nwin() >= KT_WIN_MANY);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+	for ( i = 1; i < n; i++ ) {
+		if ( wid[i] == wid[i - 1] ) break;
+	}
+	KT_ASSERT_EQ(i, n);
+	KT_ASSERT_ER(wm_raise(wid[0]), E_OK);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+	for ( i = n - 1; i >= 0; i-- ) {
+		if ( wm_close(wid[i]) < E_OK ) break;
+	}
+	KT_ASSERT_EQ(i, -1);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+	Kfree(wid);
+}
+
+/*
  * Input finds its way to a window. Keys go to whichever window has the
  * input; anything with a place goes to the window under that place.
  * Events are put in as if a device had reported them, because nothing
@@ -693,6 +735,105 @@ LOCAL void test_events( void )
 
 	KT_ASSERT_EQ(wm_self_check(), 0);
 	KT_ASSERT_ER(wm_close(a), E_OK);
+}
+
+/* A volume key pressed and let go, and what reached the windows read: none of it */
+LOCAL void vol_key( UINT code )
+{
+	T_HIDEV	in;
+	T_WMEV	ev;
+
+	knl_memset(&in, 0, sizeof(in));
+	in.type = HID_EV_KEY_DOWN;
+	in.code = code;
+	KT_ASSERT_ER(kt_inject(&in), E_OK);
+	in.type = HID_EV_KEY_UP;
+	KT_ASSERT_ER(kt_inject(&in), E_OK);
+	while ( wm_read_event(&ev, 100) >= E_OK ) {
+		KT_ASSERT(!( ( ev.type == HID_EV_KEY_DOWN || ev.type == HID_EV_KEY_UP )
+			  && ( ev.code == HID_KEY_VOLUP || ev.code == HID_KEY_VOLDOWN ) ));
+	}
+}
+
+LOCAL void vol_set( UINT l, UINT r, UINT mute )
+{
+	SDMixSet	s;
+
+	knl_memset(&s, 0, sizeof(s));
+	s.what = SND_MIX_ALL;
+	s.lv = l;
+	s.rv = r;
+	s.mute = mute;
+	KT_ASSERT_ER(knl_snd_mix_set(&s, FALSE), E_OK);
+}
+
+LOCAL void vol_is( UINT v )
+{
+	SDMix	m;
+
+	knl_memset(&m, 0, sizeof(m));
+	(void)knl_snd_mix_get(&m, 0);
+	KT_ASSERT_EQ(m.lv, v);
+	KT_ASSERT_EQ(m.rv, v);
+	KT_ASSERT_EQ(m.mute, 0);
+}
+
+/*
+ * The volume keys step the mixer's whole by 5, from the louder side,
+ * both sides alike and within 0 .. 100, let a mute go, reach no window,
+ * and say the volume on the message line
+ */
+LOCAL void test_volume_keys( void )
+{
+	SDMix	was;
+	char	t[64];
+
+	if ( !have_wm ) KT_SKIP("no windows");
+	knl_memset(&was, 0, sizeof(was));
+	(void)knl_snd_mix_get(&was, 0);
+
+	vol_set(40, 50, 1);
+	vol_key(HID_KEY_VOLUP);
+	vol_is(55);
+	KT_ASSERT(wm_msg_text(t, sizeof(t)) > 0);
+	tm_printf((UB *)"wm: volume keys: the message line says \"%s\"\n", t);
+	KT_ASSERT(knl_strcmp(t, "音量 55%") == 0);
+
+	vol_key(HID_KEY_VOLDOWN);
+	vol_key(HID_KEY_VOLDOWN);
+	vol_is(45);
+	(void)wm_msg_text(t, sizeof(t));
+	KT_ASSERT(knl_strcmp(t, "音量 45%") == 0);
+
+	vol_set(98, 97, 0);
+	vol_key(HID_KEY_VOLUP);
+	vol_is(100);
+	vol_key(HID_KEY_VOLUP);
+	vol_is(100);
+	(void)wm_msg_text(t, sizeof(t));
+	KT_ASSERT(knl_strcmp(t, "音量 100%") == 0);
+
+	vol_set(3, 0, 0);
+	vol_key(HID_KEY_VOLDOWN);
+	vol_is(0);
+	(void)wm_msg_text(t, sizeof(t));
+	KT_ASSERT(knl_strcmp(t, "音量 0%") == 0);
+
+	/* the note goes after two seconds, the program's message back */
+	KT_ASSERT_ER(wm_msg_put("kt"), E_OK);
+	(void)wm_msg_text(t, sizeof(t));
+	KT_ASSERT(knl_strcmp(t, "音量 0%") == 0);
+	{
+		T_WMEV	ev;
+		INT	i;
+
+		for ( i = 0; i < 30; i++ ) (void)wm_read_event(&ev, 100);
+	}
+	(void)wm_msg_text(t, sizeof(t));
+	KT_ASSERT(knl_strcmp(t, "kt") == 0);
+	KT_ASSERT_ER(wm_msg_put(NULL), E_OK);
+
+	vol_set(was.lv, was.rv, was.mute);
 }
 
 /* the frame is drawn by the manager, from the numbered look table */
@@ -3331,6 +3472,7 @@ LOCAL void test_hide_time( void )
 #define PACE_FRAMES	60
 
 typedef struct {
+	UD		t0;		/* when the run began (ts_get_mono, ns) */
 	UD		us;		/* the whole run */
 	T_WMFRAMES	w;		/* what the counts came to */
 	T_DISPFRAME	d;
@@ -3358,6 +3500,7 @@ LOCAL void pace_run( INT gid, PACE *o )
 	(void)ts_get_mono(&t1);
 	(void)wm_frames(&b);
 	(void)ts_disp_frames(&db);
+	o->t0 = t0;
 	o->us = ( t1 - t0 ) / 1000;
 	o->w.builds = b.builds - a.builds;
 	o->w.apart = b.apart - a.apart;
@@ -3407,7 +3550,10 @@ LOCAL void test_pace( void )
 	/* on a screen that flips, a refresh made up for it: the sends keep it */
 	er = ts_disp_flip(TRUE);
 	if ( er == E_OK ) {
+		UD	t_sim;
+
 		KT_ASSERT_ER(knl_disp_sim_blank(16667), E_OK);
+		(void)ts_get_mono(&t_sim);	/* the made-up refreshes are counted from about here */
 		KT_ASSERT_EQ(ts_disp_paced(), 16667U);
 		pace_run(gid, &p);
 		tm_printf((UB *)"  %d frames put, the sends keeping the pace: %ld us each, %ld flips, refreshes "
@@ -3415,11 +3561,21 @@ LOCAL void test_pace( void )
 			  "the compositor asleep %ld us\n", PACE_FRAMES, (D)( p.us / PACE_FRAMES ), (D)p.d.flips,
 			  (D)p.d.apart[0], (D)p.d.apart[1], (D)p.d.apart[2], (D)( p.d.apart[3] + p.d.apart[4] ),
 			  (D)p.d.waited, (D)p.d.taken, (D)p.w.paced_us);
+		/*
+		 * The first put finds no flip in hand and is not held; each
+		 * after it waits for the refresh that takes the one before.
+		 * The last returns just after the 59th refresh from the first
+		 * flip, and the run began somewhere within the refresh before
+		 * that flip's: at the least 58 refreshes, 59 only when the run
+		 * began right at a refresh.
+		 */
+		tm_printf((UB *)"  the run began %ld us into a refresh\n",
+			  (D)( ( ( p.t0 > t_sim ) ? p.t0 - t_sim : 0 ) / 1000 % 16667U ));
 		KT_ASSERT(p.d.flips >= PACE_FRAMES);
 		KT_ASSERT_EQ(p.d.apart[0], 0);
 		KT_ASSERT(p.d.apart[1] >= PACE_FRAMES - 4);
 		KT_ASSERT_EQ(p.w.paced_us, 0);
-		KT_ASSERT(p.us >= (UD)( PACE_FRAMES - 1 ) * 16667U);
+		KT_ASSERT(p.us >= (UD)( PACE_FRAMES - 2 ) * 16667U);
 		KT_ASSERT(p.us <= (UD)PACE_FRAMES * 16667U + 30000U);
 		KT_ASSERT_ER(knl_disp_sim_blank(0), E_OK);
 		if ( !was ) {
@@ -3435,6 +3591,375 @@ LOCAL void test_pace( void )
 	KT_ASSERT_ER(wm_composite(), E_OK);
 }
 
+/*
+ * The screen set to another size with windows open (システム環境設定
+ * while the desktop runs): every window keeps what it held and can be
+ * drawn in, one as large as the screen above the message line grows and
+ * shrinks with it, one that would be left off the screen is brought
+ * back onto it, and the surfaces stay large enough at the new row length.
+ */
+LOCAL void test_screen_size( void )
+{
+	T_DISPSPEC	s0, s1;
+	T_DPRECT	o, r;
+	T_WMWIN		w;
+	INT		a, full, edge, gid, mh, big = 0, pl = 0, resz = 0;
+	UINT		w0, h0;
+	ER		er;
+
+	if ( !have_wm ) KT_SKIP("no windows");
+	KT_ASSERT_ER(ts_disp_ref(&s0), E_OK);
+	w0 = s0.width;
+	h0 = s0.height;
+	mh = wm_msg_height();
+	/*
+	 * Windows larger than 800 x 600 where the screen has room for them:
+	 * one opened, one a program placed (wm_place), and one the person
+	 * gives another size while the screen is small
+	 */
+	if ( w0 >= 900 && h0 >= (UINT)( 700 + mh ) ) {
+		rect(&o, 40, 30, 890, 680);
+		big = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "big");
+		rect(&o, 20, 20, 120, 120);
+		pl = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "placed");
+		rect(&o, 60, 40, 880, 660);
+		if ( pl > 0 ) KT_ASSERT_ER(wm_place(pl, &o), E_OK);
+		rect(&o, 80, 60, 900, 690);
+		resz = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "resized");
+	}
+
+	rect(&o, 100, 80, 500, 380);
+	a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "a");
+	rect(&o, 0, 0, (INT)w0, (INT)h0 - mh);
+	full = wm_open(&o, 0, "full");
+	rect(&o, (INT)w0 - 300, (INT)h0 - mh - 200, (INT)w0 - 20, (INT)h0 - mh - 20);
+	edge = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "edge");
+	KT_ASSERT(a > 0 && full > 0 && edge > 0);
+	if ( a <= 0 || full <= 0 || edge <= 0 ) goto done;
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+	gid = wm_gid(a);
+	rect(&r, 0, 0, 40, 30);
+	KT_ASSERT_ER(dp_fill_rect(gid, &r, 0x00C02020), E_OK);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+
+	er = ts_disp_setmode(800, 600);
+	if ( er == E_NOSPT ) {
+		tm_printf((UB *)"  the screen keeps its size here\n");
+		goto done;
+	}
+	KT_ASSERT_ER(er, E_OK);
+	KT_ASSERT_ER(ts_disp_ref(&s1), E_OK);
+	spec = s1;
+	KT_ASSERT(s1.width == 800 && s1.height == 600);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+
+	/* what it held came across, and it is drawn in as before */
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	KT_ASSERT(w.outer.left == 100 && w.outer.top == 80);
+	KT_ASSERT_EQ(at(w.work.left + 5, w.work.top + 5), 0xC02020);
+	rect(&r, 0, 0, 40, 30);
+	KT_ASSERT_ER(dp_fill_rect(gid, &r, 0x0020C020), E_OK);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	KT_ASSERT_EQ(at(w.work.left + 5, w.work.top + 5), 0x20C020);
+
+	/* the whole screen's window follows the screen; the one near the edge is on it */
+	KT_ASSERT_ER(wm_ref(full, &w), E_OK);
+	KT_ASSERT(w.outer.left == 0 && w.outer.top == 0 && w.outer.right == 800
+		  && w.outer.bottom == 600 - wm_msg_height());
+	KT_ASSERT_ER(wm_ref(edge, &w), E_OK);
+	KT_ASSERT(w.outer.left >= 0 && w.outer.right <= 800 && w.outer.bottom <= 600 - wm_msg_height());
+	KT_ASSERT_EQ(w.outer.right - w.outer.left, 280);
+
+	/* the large ones made smaller, on the screen; one is given a size, another only moved */
+	if ( big > 0 && pl > 0 && resz > 0 ) {
+		KT_ASSERT_ER(wm_ref(big, &w), E_OK);
+		KT_ASSERT(w.outer.left >= 0 && w.outer.top >= 0 && w.outer.right <= 800
+			  && w.outer.bottom <= 600 - mh);
+		KT_ASSERT_ER(wm_ref(pl, &w), E_OK);
+		KT_ASSERT(w.outer.right <= 800 && w.outer.bottom <= 600 - mh);
+		/* a program asking for more than the screen has is kept on it */
+		rect(&o, 60, 40, 880, 660);
+		KT_ASSERT_ER(wm_place(pl, &o), E_OK);
+		KT_ASSERT_ER(wm_ref(pl, &w), E_OK);
+		KT_ASSERT(w.outer.left >= 0 && w.outer.top >= 0 && w.outer.right <= 800
+			  && w.outer.bottom <= 600 - mh);
+		KT_ASSERT_ER(wm_ref(big, &w), E_OK);
+		o = w.outer;
+		o.left += 10;  o.right += 10;
+		o.top += 5;    o.bottom += 5;
+		if ( o.right > 800 ) {
+			o.left -= 20;  o.right -= 20;
+		}
+		KT_ASSERT_ER(wm_move(big, &o), E_OK);
+		rect(&o, 30, 20, 530, 420);
+		KT_ASSERT_ER(wm_move(resz, &o), E_OK);
+	}
+
+	/* and back to the size it had */
+	KT_ASSERT_ER(ts_disp_setmode(w0, h0), E_OK);
+	KT_ASSERT_ER(ts_disp_ref(&s1), E_OK);
+	spec = s1;
+	KT_ASSERT(s1.width == w0 && s1.height == h0);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	KT_ASSERT_EQ(at(w.work.left + 5, w.work.top + 5), 0x20C020);
+	KT_ASSERT_ER(wm_ref(full, &w), E_OK);
+	KT_ASSERT(w.outer.right == (INT)w0 && w.outer.bottom == (INT)h0 - wm_msg_height());
+
+	/* each as it was asked for: the size given back, where it was asked or moved to */
+	KT_ASSERT_ER(wm_ref(edge, &w), E_OK);
+	KT_ASSERT(w.outer.left == (INT)w0 - 300 && w.outer.top == (INT)h0 - mh - 200
+		  && w.outer.right == (INT)w0 - 20 && w.outer.bottom == (INT)h0 - mh - 20);
+	if ( big > 0 && pl > 0 && resz > 0 ) {
+		KT_ASSERT_ER(wm_ref(big, &w), E_OK);
+		KT_ASSERT_EQ(w.outer.right - w.outer.left, 850);
+		KT_ASSERT_EQ(w.outer.bottom - w.outer.top, 650);
+		KT_ASSERT_ER(wm_ref(pl, &w), E_OK);
+		KT_ASSERT(w.outer.left == 60 && w.outer.top == 40 && w.outer.right == 880 && w.outer.bottom == 660);
+		KT_ASSERT_ER(wm_ref(resz, &w), E_OK);
+		KT_ASSERT(w.outer.left == 30 && w.outer.top == 20 && w.outer.right == 530 && w.outer.bottom == 420);
+		KT_ASSERT_ER(wm_ref(big, &w), E_OK);
+		tm_printf((UB *)"  given back: big %d x %d at %d,%d\n", w.outer.right - w.outer.left,
+			  w.outer.bottom - w.outer.top, w.outer.left, w.outer.top);
+	}
+done:
+	if ( a > 0 ) wm_close(a);
+	if ( full > 0 ) wm_close(full);
+	if ( edge > 0 ) wm_close(edge);
+	if ( big > 0 ) wm_close(big);
+	if ( pl > 0 ) wm_close(pl);
+	if ( resz > 0 ) wm_close(resz);
+	(void)ts_disp_ref(&spec);
+}
+
+/*
+ * The screen drawn at a scale (ts_disp_setscale, design 10.2.3): the
+ * windows are laid in a view of the screen's pixels times 100 over the
+ * scale, a window drawn in at view coordinates is drawn larger in the
+ * screen's pixels, letters are made at the larger size and measured as
+ * before, an icon larger than its box shows all of its pixels, what a
+ * panel covers comes back as it was, and back at 100 the windows are as
+ * they were. A scale that would leave too small a view, or one not of
+ * the list, is refused.
+ */
+LOCAL INT dvs( INT v, UINT sc )
+{
+	return disp_dev_of(v, sc);
+}
+
+/* How many pixels of a rectangle of the screen are neither of two colours */
+LOCAL INT not_of( INT l, INT t, INT r, INT b, UW c1, UW c2 )
+{
+	INT	x, y, n = 0;
+
+	for ( y = t; y < b; y++ ) {
+		for ( x = l; x < r; x++ ) {
+			UW	c = at(x, y);
+
+			if ( c != c1 && c != c2 ) n++;
+		}
+	}
+	return n;
+}
+
+/* Whether every two by two block of a rectangle of the screen is of one colour */
+LOCAL BOOL blocks_whole( INT l, INT t, INT r, INT b )
+{
+	INT	x, y;
+
+	for ( y = t; y + 1 < b; y += 2 ) {
+		for ( x = l; x + 1 < r; x += 2 ) {
+			UW	c = at(x, y);
+
+			if ( at(x + 1, y) != c || at(x, y + 1) != c || at(x + 1, y + 1) != c ) {
+				return FALSE;
+			}
+		}
+	}
+	return TRUE;
+}
+
+LOCAL void test_scale( void )
+{
+	T_DISPSPEC	s0, s1;
+	T_DPRECT	o, r;
+	T_WMWIN		w;
+	INT		a, gid, wid, n100, n150, vw, vh, X, Y;
+	UINT		w0, h0;
+	ID		fid = fn_system();
+	UW		*icon = NULL, *saved = NULL;
+	BOOL		big = FALSE;
+	ER		er;
+
+	if ( !have_wm ) KT_SKIP("no windows");
+	KT_ASSERT_ER(ts_disp_ref(&s0), E_OK);
+	KT_ASSERT_EQ(s0.scale, 100);
+	KT_ASSERT(s0.view_w == s0.width && s0.view_h == s0.height);
+	w0 = s0.width;
+	h0 = s0.height;
+
+	/* not of the list, or a view too small */
+	KT_ASSERT_ER(ts_disp_setscale(133), E_PAR);
+	if ( disp_view_len(w0, 300) < DISP_VIEW_MIN_W || disp_view_len(h0, 300) < DISP_VIEW_MIN_H ) {
+		KT_ASSERT_ER(ts_disp_setscale(300), E_NOSPT);
+	}
+
+	rect(&o, 100, 80, 500, 380);
+	a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "scale");
+	KT_ASSERT(a > 0);
+	if ( a <= 0 ) goto done;
+	gid = wm_gid(a);
+	KT_ASSERT_EQ(dp_scale(gid), 100);
+	if ( fid > 0 ) {
+		fn_set_size(fid, 16);
+		n100 = fn_width(fid, (CONST UB *)"Scale 拡大の試験");
+	} else {
+		n100 = 0;
+	}
+
+	/* at 150%: the view, the windows' place, a rectangle in the screen's pixels */
+	KT_ASSERT_ER(ts_disp_setscale(150), E_OK);
+	KT_ASSERT_ER(ts_disp_ref(&s1), E_OK);
+	spec = s1;
+	KT_ASSERT_EQ(s1.scale, 150);
+	KT_ASSERT_EQ(s1.view_w, disp_view_len(w0, 150));
+	KT_ASSERT_EQ(s1.view_h, disp_view_len(h0, 150));
+	KT_ASSERT(s1.width == w0 && s1.height == h0);
+	wm_screen(&vw, &vh);
+	KT_ASSERT(vw == (INT)s1.view_w && vh == (INT)s1.view_h);
+	KT_ASSERT_EQ(wm_get(LK_SCALE), 150);
+	KT_ASSERT_EQ(dp_scale(gid), 150);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	KT_ASSERT(w.outer.left == 100 && w.outer.top == 80 && w.outer.right == 500);
+	rect(&r, 0, 0, 40, 30);
+	KT_ASSERT_ER(dp_fill_rect(gid, &r, 0x00C02020), E_OK);
+	rect(&r, 40, 0, 400, 300);
+	KT_ASSERT_ER(dp_fill_rect(gid, &r, 0x00FFFFFF), E_OK);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	X = dvs(w.outer.left, 150) + dvs(w.work.left - w.outer.left, 150);
+	Y = dvs(w.outer.top, 150) + dvs(w.work.top - w.outer.top, 150);
+	KT_ASSERT_EQ(at(X, Y), 0xC02020);
+	KT_ASSERT_EQ(at(X + dvs(40, 150) - 1, Y + dvs(30, 150) - 1), 0xC02020);
+	KT_ASSERT_EQ(at(X + dvs(40, 150), Y + 5), 0xFFFFFF);
+	KT_ASSERT_EQ(at(X + 5, Y + dvs(30, 150)), 0xFFFFFF);
+
+	/* letters: measured as at 100, drawn with more pixels */
+	if ( fid > 0 ) {
+		fn_set_size(fid, 16);
+		KT_ASSERT_EQ(fn_width(fid, (CONST UB *)"Scale 拡大の試験"), n100);
+		KT_ASSERT_EQ(fn_draw(gid, fid, 4, 60, (CONST UB *)"Scale 拡大の試験", 0), n100);
+		KT_ASSERT_ER(wm_composite(), E_OK);
+		n150 = not_of(X, Y + dvs(40, 150), X + dvs(4 + n100 + 4, 150), Y + dvs(66, 150),
+			      0xFFFFFF, 0xFFFFFF);
+		tm_printf((UB *)"  150%%: a line of %d view pixels, %d pixels of letters\n", n100, n150);
+		KT_ASSERT(n150 > 0);
+	}
+
+	/* a window opened now is drawn at the scale too, and fits the view */
+	rect(&o, 0, 0, vw, vh - wm_msg_height());
+	wid = wm_open(&o, 0, "full");
+	KT_ASSERT(wid > 0);
+	if ( wid > 0 ) {
+		KT_ASSERT_EQ(dp_scale(wm_gid(wid)), 150);
+		KT_ASSERT_EQ(wm_self_check(), 0);
+		KT_ASSERT_ER(wm_close(wid), E_OK);
+	}
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+
+	/* at 200% where the screen can be made large enough for it */
+	er = ts_disp_setmode(1600, 1200);
+	if ( er >= E_OK ) {
+		big = TRUE;
+		KT_ASSERT_ER(ts_disp_ref(&s1), E_OK);
+		spec = s1;
+		KT_ASSERT_EQ(s1.scale, 150);
+		KT_ASSERT_ER(ts_disp_setscale(200), E_OK);
+		KT_ASSERT_ER(ts_disp_ref(&s1), E_OK);
+		spec = s1;
+		KT_ASSERT(s1.scale == 200 && s1.view_w == 800 && s1.view_h == 600);
+		KT_ASSERT_EQ(wm_self_check(), 0);
+		KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+		X = 2 * w.work.left;
+		Y = 2 * w.work.top;
+		rect(&r, 0, 0, 400, 300);
+		KT_ASSERT_ER(dp_fill_rect(gid, &r, 0x00FFFFFF), E_OK);
+		rect(&r, 10, 10, 11, 20);
+		KT_ASSERT_ER(dp_fill_rect(gid, &r, 0x00000000), E_OK);
+		KT_ASSERT_ER(wm_composite(), E_OK);
+		/* a line one view pixel wide is two of the screen's */
+		KT_ASSERT(at(X + 20, Y + 30) == 0 && at(X + 21, Y + 30) == 0);
+		KT_ASSERT(at(X + 19, Y + 30) == 0xFFFFFF && at(X + 22, Y + 30) == 0xFFFFFF);
+		if ( fid > 0 ) {
+			fn_set_size(fid, 16);
+			(void)fn_draw(gid, fid, 4, 60, (CONST UB *)"Scale 拡大の試験", 0);
+			KT_ASSERT_ER(wm_composite(), E_OK);
+			/* made at 32 pixels, not 16 made larger: the blocks are not whole */
+			KT_ASSERT(!blocks_whole(X + 8, Y + 80, X + 2 * ( 4 + n100 ), Y + 124));
+		}
+		/* an icon of 32 in a box of 16: every pixel of it */
+		icon = (UW *)Kmalloc(32 * 32 * sizeof(UW));
+		if ( icon != NULL ) {
+			INT	i, bad = 0;
+
+			for ( i = 0; i < 32 * 32; i++ ) {
+				icon[i] = ( ( ( i & 31 ) ^ ( i >> 5 ) ) & 1 ) ? 0x00102030 : 0x00F0E0D0;
+			}
+			rect(&r, 200, 100, 216, 116);
+			KT_ASSERT_ER(dp_put_image(gid, &r, icon, 32, 32, 32, 0xFF000000U), E_OK);
+			KT_ASSERT_ER(wm_composite(), E_OK);
+			for ( i = 0; i < 32 * 32; i++ ) {
+				if ( at(X + 400 + ( i & 31 ), Y + 200 + ( i >> 5 )) != ( icon[i] & 0xFFFFFF ) ) bad++;
+			}
+			KT_ASSERT_EQ(bad, 0);
+		}
+		/* what a panel covers, taken in the screen's pixels and put back as it was */
+		{
+			INT	pw = 0, ph = 0, before;
+
+			rect(&r, 0, 50, 120, 70);
+			before = not_of(X, Y + 100, X + 240, Y + 140, 0xFFFFFF, 0xFFFFFF);
+			KT_ASSERT_ER(dp_get_dev(gid, &r, &saved, &pw, &ph), E_OK);
+			KT_ASSERT(pw == 240 && ph == 40);
+			KT_ASSERT_ER(dp_fill_rect(gid, &r, 0x00808080), E_OK);
+			KT_ASSERT_ER(dp_put_dev(gid, &r, saved, pw, ph), E_OK);
+			KT_ASSERT_ER(wm_composite(), E_OK);
+			KT_ASSERT_EQ(not_of(X, Y + 100, X + 240, Y + 140, 0xFFFFFF, 0xFFFFFF), before);
+		}
+	} else {
+		tm_printf((UB *)"  the screen keeps its size here: 200%% not tried\n");
+	}
+
+	/* and back to 100 at the size it had: drawn as it always was */
+	KT_ASSERT_ER(ts_disp_setscale(100), E_OK);
+	if ( big ) {
+		KT_ASSERT_ER(ts_disp_setmode(w0, h0), E_OK);
+	}
+	KT_ASSERT_ER(ts_disp_ref(&s1), E_OK);
+	spec = s1;
+	KT_ASSERT(s1.scale == 100 && s1.width == w0 && s1.view_w == w0 && s1.view_h == h0);
+	KT_ASSERT_EQ(wm_get(LK_SCALE), 100);
+	KT_ASSERT_EQ(dp_scale(gid), 100);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	rect(&r, 0, 0, 40, 30);
+	KT_ASSERT_ER(dp_fill_rect(gid, &r, 0x0020C020), E_OK);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	KT_ASSERT_EQ(at(w.work.left, w.work.top), 0x20C020);
+	KT_ASSERT_EQ(at(w.work.left + 39, w.work.top + 29), 0x20C020);
+	KT_ASSERT(at(w.work.left + 40, w.work.top + 5) != 0x20C020);
+done:
+	if ( icon != NULL ) Kfree(icon);
+	if ( saved != NULL ) Kfree(saved);
+	if ( a > 0 ) wm_close(a);
+	(void)ts_disp_setscale(100);
+	(void)ts_disp_ref(&spec);
+}
+
 EXPORT void ktest_wm( void )
 {
 	KT_RUN(test_open);
@@ -3447,7 +3972,9 @@ EXPORT void ktest_wm( void )
 	KT_RUN(test_skip);
 	KT_RUN(test_damage);
 	KT_RUN(test_many);
+	KT_RUN(test_beyond);
 	KT_RUN(test_events);
+	KT_RUN(test_volume_keys);
 	KT_RUN(test_frame);
 	KT_RUN(test_bars);
 	KT_RUN(test_grab);
@@ -3476,4 +4003,6 @@ EXPORT void ktest_wm( void )
 	KT_RUN(test_hide_same);
 	KT_RUN(test_hide_time);
 	KT_RUN(test_pace);
+	KT_RUN(test_screen_size);
+	KT_RUN(test_scale);
 }

@@ -20,9 +20,14 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <ts/ui.h>
 #include <ts/part.h>
+#include <ts/obdrop.h>
+#include <ts/obatr.h>
+#include <ts/time.h>
+#include <ts/hid.h>
 
 /* ---------------------------------------------------------------- metadata */
 
@@ -96,10 +101,166 @@ EXPORT ER ui_uuid( CONST char *s, TS_UUID *u )
 	return E_OK;
 }
 
+/* ---------------------------------------------------------------- lists read whole */
+
+#define ALL_FIRST	4096			/* bytes a record is first read into */
+#define ALL_LIMIT	( (SZ)0x7FFFFFFF )	/* what the INT the length is answered in holds */
+#define LST_PAGE	256			/* objects asked for at a time */
+
+/*
+ * A record read whole: from its start into a buffer twice as large while
+ * it fills the buffer, so a record made when it is read comes as one
+ * whole, with room bytes more after it and a nought after the text
+ */
+/* What record `recno` of the object open as key holds, under the right to read it; 0 when it cannot be told */
+LOCAL SZ rec_size_of( ID key, INT recno )
+{
+	SZ	size = 0;
+
+	if ( ob_rea_rec(key, recno, 0, NULL, 0, &size) < E_OK || size < 0 || size >= ALL_LIMIT ) {
+		return 0;
+	}
+	return size;
+}
+
+/*
+ * A record read whole: its size asked first (under the right to read
+ * it) and read once into a buffer one byte larger; one that fills it (it
+ * grew, or it is made as it is read and has no size of its own) is read
+ * again from its start into a buffer twice as large while it fills it.
+ */
+EXPORT ID ui_conf_open( CONST TS_UUID *u, UINT ops )
+{
+	ID	key;
+	INT	i;
+
+	if ( ( ops & ( OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRWR ) ) != 0 ) {
+		ops |= OB_O_WEXCL;
+	}
+	for ( i = 0; ; i++ ) {
+		key = ob_opn_obj(u, ops);
+		if ( key != E_BUSY || i >= 100 ) {
+			return key;
+		}
+		(void)tk_dly_tsk(10);
+	}
+}
+
+EXPORT INT ui_key_all( ID key, INT recno, INT room, UB **p_buf, INT *p_cap )
+{
+	UB	*b = NULL, *nb;
+	SZ	cap = ALL_FIRST, asz;
+	ER	er;
+
+	*p_buf = NULL;
+	if ( room < 0 ) return E_PAR;
+	asz = rec_size_of(key, recno);
+	if ( asz >= cap ) cap = asz + 1;
+	for ( ;; ) {
+		b = (UB *)malloc((size_t)cap + 1);
+		if ( b == NULL ) return E_NOMEM;
+		asz = 0;
+		er = ob_rea_rec(key, recno, 0, b, cap, &asz);
+		if ( er < E_OK ) {
+			free(b);
+			return (INT)er;
+		}
+		if ( asz < cap ) break;
+		free(b);
+		if ( cap >= ALL_LIMIT / 2 ) return E_LIMIT;
+		cap *= 2;
+	}
+	if ( asz + (SZ)room >= ALL_LIMIT ) {
+		free(b);
+		return E_LIMIT;
+	}
+	if ( cap - asz < (SZ)room ) {
+		nb = (UB *)realloc(b, (size_t)( asz + room + 1 ));
+		if ( nb == NULL ) {
+			free(b);
+			return E_NOMEM;
+		}
+		b = nb;
+		cap = asz + room;
+	}
+	b[asz] = 0;
+	*p_buf = b;
+	if ( p_cap != NULL ) *p_cap = (INT)cap;
+	return (INT)asz;
+}
+
+EXPORT INT ui_rec_all( CONST TS_UUID *u, INT recno, INT room, UB **p_buf )
+{
+	ID	key;
+	INT	len;
+
+	*p_buf = NULL;
+	key = ob_opn_obj(u, OB_OP_R);
+	if ( key < E_OK ) return (INT)key;
+	len = ui_key_all(key, recno, room, p_buf, NULL);
+	ob_cls_obj(key);
+	return len;
+}
+
+/* Every object of a kind, a page at a time from the last one given */
+EXPORT INT ui_lst_obj( UINT type, UINT sub, TS_UUID **p_ids )
+{
+	TS_UUID	*ids = NULL, *ni;
+	INT	n = 0, got;
+	ER	er;
+
+	*p_ids = NULL;
+	for ( ;; ) {
+		ni = (TS_UUID *)realloc(ids, sizeof(TS_UUID) * (size_t)( n + LST_PAGE ));
+		if ( ni == NULL ) {
+			free(ids);
+			return E_NOMEM;
+		}
+		ids = ni;
+		got = 0;
+		er = ob_lst_obj(type, sub, ( n > 0 ) ? &ids[n - 1] : NULL, ids + n, LST_PAGE, &got);
+		if ( er < E_OK ) {
+			free(ids);
+			return (INT)er;
+		}
+		n += got;
+		if ( got < LST_PAGE ) break;
+	}
+	*p_ids = ids;
+	return n;
+}
+
+/* Every link of a box: asked how many, then taken, again when more came between */
+EXPORT INT ui_lst_lnk( CONST TS_UUID *box, TS_UUID **p_ids )
+{
+	TS_UUID	*ids;
+	INT	cnt = 0, all = 0;
+	ER	er;
+
+	*p_ids = NULL;
+	er = ob_lst_lnk(box, NULL, NULL, 0, &cnt);
+	if ( er < E_OK ) return (INT)er;
+	for ( ;; ) {
+		ids = (TS_UUID *)malloc(sizeof(TS_UUID) * (size_t)( ( cnt > 0 ) ? cnt : 1 ));
+		if ( ids == NULL ) return E_NOMEM;
+		er = ob_lst_lnk(box, NULL, ids, cnt, &all);
+		if ( er < E_OK ) {
+			free(ids);
+			return (INT)er;
+		}
+		if ( all <= cnt ) break;
+		free(ids);
+		cnt = all;
+	}
+	*p_ids = ids;
+	return all;
+}
+
 /* ---------------------------------------------------------------- panels */
 
 /* A panel of the box made and placed on the window at (x, y) of its work area */
-LOCAL ER panel_make( UI *u, INT num, INT x, INT y, TS_UUID *p_pnl, ID *p_key )
+/* beside: placed beside what the program draws itself (ui_strip): its boxes take no keys until pressed */
+LOCAL ER panel_make( UI *u, INT num, INT x, INT y, TS_UUID *p_pnl, ID *p_key, BOOL beside )
 {
 	T_OBCRE	c;
 	T_OBMAP	m;
@@ -110,8 +271,8 @@ LOCAL ER panel_make( UI *u, INT num, INT x, INT y, TS_UUID *p_pnl, ID *p_key )
 	for ( i = 0; i < 16; i++ ) {
 		snprintf(bs + i * 2, 3, "%02x", u->box.b[i]);
 	}
-	snprintf(json, sizeof(json), "{\"tessronos\":{\"part\":{\"sub\":\"panel\",\"box\":\"%.8s-%.4s-%.4s-%.4s-%.12s\",\"num\":%d}}}",
-		 bs, bs + 8, bs + 12, bs + 16, bs + 20, num);
+	snprintf(json, sizeof(json), "{\"tessronos\":{\"part\":{\"sub\":\"panel\",\"box\":\"%.8s-%.4s-%.4s-%.4s-%.12s\",\"num\":%d%s}}}",
+		 bs, bs + 8, bs + 12, bs + 16, bs + 20, num, beside ? ",\"beside\":1" : "");
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
 	c.sub = OB_S_PANEL;
@@ -142,7 +303,7 @@ LOCAL void parts_open( UI *u )
 {
 	TS_UUID	pu;
 	SZ	asz = 0;
-	char	j[512];
+	char	*j = NULL;
 	INT	i;
 
 	u->np = 0;
@@ -157,11 +318,12 @@ LOCAL void parts_open( UI *u )
 		p->key = ob_opn_obj(&pu, OB_OP_R | OB_OP_W | OB_OP_PROT);
 		p->num = 0;
 		p->kind = 0;
-		if ( p->key > 0 && ob_get_atr(p->key, (UB *)j, sizeof(j) - 1, &asz) >= E_OK ) {
-			j[( asz < (SZ)sizeof(j) ) ? asz : (SZ)sizeof(j) - 1] = 0;
-			p->num = json_num(j, "part", 0);
+		if ( p->key > 0 && ob_atr_read(p->key, 0, (UB **)&j) >= 0 ) {
+			p->num = json_num(j, "part", 0);	/* read whole: the keys may come anywhere */
 			p->kind = (UINT)json_num(j, "kind", 0);
 			if ( p->kind == TG_PARTS && u->tags == 0 ) u->tags = p->num;
+			free(j);
+			j = NULL;
 		}
 		/* a part the program has no number for is not worked: let go */
 		if ( p->key > 0 && p->num == 0 ) {
@@ -236,21 +398,42 @@ EXPORT void ui_icon( CONST char *prog )
 	ui_prog[sizeof(ui_prog) - 1] = 0;
 }
 
+LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y );
+
 EXPORT ER ui_open( UI *u, CONST char *box, INT num, INT x, INT y )
+{
+	return open_win(u, 0, box, num, x, y);
+}
+
+EXPORT ER ui_open_on( UI *u, CONST UI *with, CONST char *box, INT num, INT x, INT y )
+{
+	if ( with == NULL || with->port <= 0 ) return E_PAR;
+	return open_win(u, with->port, box, num, x, y);
+}
+
+EXPORT BOOL ui_mine( CONST UI *u, CONST T_OBNTM *m )
+{
+	return (BOOL)( u->kw > 0 && ( memcmp(&m->uuid, &u->win, sizeof(TS_UUID)) == 0
+				   || memcmp(&m->uuid, &u->pnl, sizeof(TS_UUID)) == 0 ) );
+}
+
+/* The window, its notices to port, or to a channel of its own made for it (port 0) */
+LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y )
 {
 	T_OBCRE		c;
 	T_OBNTF		req;
 	T_OBWPOS	wp;
 	SZ		asz = 0;
-	char		json[224], title[128], meta[512];
+	char		json[224], title[128];
 	TS_UUID		pnl;
 	ID		pk;
+	UINT		attr;
 
 	memset(u, 0, sizeof(*u));
 	if ( ui_uuid(box, &u->box) < E_OK ) return E_PAR;
 
 	/* the panel first, standing on its own, for its size and its name */
-	if ( panel_make(u, num, 0, 0, &pnl, &pk) < E_OK ) return E_OBJ;
+	if ( panel_make(u, num, 0, 0, &pnl, &pk, FALSE) < E_OK ) return E_OBJ;
 	if ( ob_rea_rec(pk, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) < E_OK ) {
 		ob_cls_obj(pk);
 		(void)ob_del_obj(&pnl);
@@ -259,17 +442,23 @@ EXPORT ER ui_open( UI *u, CONST char *box, INT num, INT x, INT y )
 	u->w = wp.right - wp.left;
 	u->h = wp.bottom - wp.top;
 	title[0] = 0;
-	if ( ob_get_atr(pk, (UB *)meta, sizeof(meta) - 1, &asz) >= E_OK ) {
-		meta[( asz < (SZ)sizeof(meta) ) ? asz : (SZ)sizeof(meta) - 1] = 0;
-		json_str(meta, "name", title, sizeof(title));
+	{
+		char	*meta = NULL;
+
+		if ( ob_atr_read(pk, 0, (UB **)&meta) >= 0 ) {
+			json_str(meta, "name", title, sizeof(title));
+			free(meta);
+		}
 	}
 
+	attr = ui_more_attr;
+	ui_more_attr = 0;			/* what ui_attr asked was for this window alone */
 	if ( ui_prog[0] != 0 ) {
 		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%u,\"icon\":\"%s\"}",
-			 x, y, x + u->w + 16, y + u->h + 34, 3U | ui_more_attr, ui_prog);
+			 x, y, x + u->w + 16, y + u->h + 34, 3U | attr, ui_prog);
 	} else {
 		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%u}", x, y, x + u->w + 16,
-			 y + u->h + 34, 3U | ui_more_attr);
+			 y + u->h + 34, 3U | attr);
 	}
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
@@ -283,10 +472,19 @@ EXPORT ER ui_open( UI *u, CONST char *box, INT num, INT x, INT y )
 		return E_OBJ;
 	}
 	u->kw = ob_opn_obj(&u->win, OB_OP_R | OB_OP_W | OB_OP_PROT);
-	/* the work area exactly the panel's size, whatever the frame takes */
+	/*
+	 * The work area exactly the panel's size, whatever the frame takes,
+	 * at the place asked for: the system keeps it on a smaller screen
+	 * and gives it back on a larger one.
+	 */
 	if ( u->kw > 0 && ob_rea_rec(u->kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) >= E_OK ) {
-		wp.right = wp.left + u->w + ( ( wp.right - wp.left ) - ( wp.wright - wp.wleft ) );
-		wp.bottom = wp.top + u->h + ( ( wp.bottom - wp.top ) - ( wp.wbottom - wp.wtop ) );
+		INT	fw = ( wp.right - wp.left ) - ( wp.wright - wp.wleft );
+		INT	fh = ( wp.bottom - wp.top ) - ( wp.wbottom - wp.wtop );
+
+		wp.left = x;
+		wp.top = y;
+		wp.right = x + u->w + fw;
+		wp.bottom = y + u->h + fh;
 		(void)ob_wri_rec(u->kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
 	}
 	/* placed on the window, filling its work area */
@@ -305,13 +503,17 @@ EXPORT ER ui_open( UI *u, CONST char *box, INT num, INT x, INT y )
 	u->pk = pk;
 	parts_open(u);
 
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	u->port = ( ob_cre_obj(&c, &u->ch) >= E_OK )
-		? ob_opn_obj(&u->ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) : E_NOEXS;
+	if ( port > 0 ) {
+		u->port = port;			/* the other window's: u->ch stays none */
+	} else {
+		memset(&c, 0, sizeof(c));
+		c.type = OB_T_CHANNEL;
+		u->port = ( ob_cre_obj(&c, &u->ch) >= E_OK )
+			? ob_opn_obj(&u->ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) : E_NOEXS;
+	}
 	memset(&req, 0, sizeof(req));
 	req.events = OB_E_CLOSE | OB_E_DELETE | OB_E_PRESS | OB_E_KEY | OB_E_DROP;
-	if ( ui_more_attr != 0 ) {
+	if ( attr != 0 ) {
 		req.events |= OB_E_WHEEL | OB_E_SCROLL | OB_E_REDRAW;	/* its bar and its size */
 	}
 	if ( u->port <= 0 || ob_ntf_evt(u->kw, OB_REC_ANY, &req, u->port) <= 0 ) {
@@ -327,14 +529,17 @@ EXPORT ER ui_open( UI *u, CONST char *box, INT num, INT x, INT y )
 	return E_OK;
 }
 
-EXPORT ER ui_drop( UI *u, T_OBDROP *d )
+EXPORT T_OBDROP *ui_drop( UI *u )
 {
-	SZ	asz = 0;
-	ER	er;
+	static T_OBDROP	*last = NULL;	/* the one read before: kept until the next */
 
-	memset(d, 0, sizeof(*d));
-	er = ob_rea_rec(u->kw, OB_WR_DROP, 0, d, sizeof(*d), &asz);
-	return ( er >= E_OK && d->n > 0 ) ? E_OK : ( er < E_OK ) ? er : E_NOEXS;
+	free(last);
+	last = ob_drop_read(u->kw);
+	if ( last != NULL && last->n <= 0 ) {
+		free(last);
+		last = NULL;
+	}
+	return last;
 }
 
 EXPORT void ui_drop_answer( UI *u, CONST T_OBDROP *d, UINT answer, CONST char *msg )
@@ -351,9 +556,11 @@ EXPORT void ui_drop_answer( UI *u, CONST T_OBDROP *d, UINT answer, CONST char *m
 
 EXPORT void ui_close( UI *u )
 {
+	static CONST TS_UUID	none;
+
 	parts_close(u);
-	if ( u->port > 0 ) {
-		ob_cls_obj(u->port);
+	if ( u->port > 0 && memcmp(&u->ch, &none, sizeof(none)) != 0 ) {
+		ob_cls_obj(u->port);		/* its own channel, not another window's (ui_open_on) */
 		(void)ob_del_obj(&u->ch);
 	}
 	if ( u->pk > 0 ) {
@@ -373,6 +580,44 @@ LOCAL INT num_of( UI *u, CONST T_OBNTM *m )
 	return ( i >= 0 && i < u->np ) ? u->p[i].num : 0;
 }
 
+EXPORT ER ui_wait( UI *u, T_OBNTM *m, TMO tmo )
+{
+	SZ	asz = 0;
+
+	return ob_rea_tmo(u->port, 0, 0, m, sizeof(*m), &asz, tmo);
+}
+
+EXPORT UD ui_now( void )
+{
+	UD	ns = 0;
+
+	(void)ts_get_mono(&ns);
+	return ns / 1000000;
+}
+
+EXPORT TMO ui_left( UD at )
+{
+	UD	now = ui_now();
+
+	return ( at > now ) ? (TMO)( at - now ) : 0;
+}
+
+EXPORT INT ui_ticks( UD *p_at, INT tick, INT max )
+{
+	UD	now = ui_now(), n;
+
+	if ( now < *p_at || tick <= 0 ) {
+		return 0;
+	}
+	n = ( now - *p_at ) / (UD)tick;
+	if ( n > (UD)max ) {
+		*p_at = now;
+		return 1;
+	}
+	*p_at += n * (UD)tick;
+	return (INT)n;
+}
+
 EXPORT INT ui_event( UI *u, CONST T_OBNTM *m, INT *p_num )
 {
 	INT	num;
@@ -384,12 +629,15 @@ EXPORT INT ui_event( UI *u, CONST T_OBNTM *m, INT *p_num )
 	case OB_E_DELETE:
 		return UI_EV_CLOSE;
 	case OB_E_PRESS:
-		return ( m->code == 1 && m->recno < 0 ) ? UI_EV_MENU : UI_EV_NONE;
+		/* the second button opens the window's menu wherever it is pressed, on a part as well */
+		return ( m->code == 1 ) ? UI_EV_MENU : UI_EV_NONE;
 	case OB_E_KEY:
 		return UI_EV_KEY;
 	case OB_E_DROP:
 		return UI_EV_DROP;
 	case OB_E_WHEEL:
+		/* what the accessories show goes only up and down: the wheel across is let go */
+		if ( m->code != HID_WHEEL_V ) return UI_EV_NONE;
 		*p_num = m->dz;
 		return UI_EV_WHEEL;
 	case OB_E_SCROLL:
@@ -497,22 +745,27 @@ EXPORT void ui_blank( UI *u, INT num )
 	set_state(u, num, "", 0);
 }
 
+/* The names a list or a popup offers, each ending in its nought, as many as are given */
 EXPORT void ui_names( UI *u, INT num, CONST char *const *names, INT n )
 {
 	UIPART	*p = part(u, num);
-	char	buf[2048];
+	char	*buf;
 	SZ	len = 0, asz = 0;
 	INT	i;
 
 	if ( p == NULL ) return;
+	for ( i = 0; i < n; i++ ) len += (SZ)strlen(names[i]) + 1;
+	buf = (char *)malloc(( len > 0 ) ? (size_t)len : 1);
+	if ( buf == NULL ) return;
+	len = 0;
 	for ( i = 0; i < n; i++ ) {
 		SZ	k = (SZ)strlen(names[i]);
 
-		if ( len + k + 1 > (SZ)sizeof(buf) ) break;
-		memcpy(buf + len, names[i], k + 1);
+		memcpy(buf + len, names[i], (size_t)k + 1);
 		len += k + 1;
 	}
 	(void)ob_wri_rec(p->key, OB_WR_KIND, 0, buf, len, &asz);
+	free(buf);
 }
 
 LOCAL void flags( UI *u, INT num, UINT set, UINT clear )
@@ -534,6 +787,11 @@ EXPORT void ui_off( UI *u, INT num, BOOL off )
 EXPORT void ui_show( UI *u, INT num, BOOL shown )
 {
 	flags(u, num, shown ? OB_WP_SHOWN : 0, shown ? 0 : OB_WP_SHOWN);
+}
+
+EXPORT void ui_focus( UI *u, INT num )
+{
+	flags(u, num, OB_WP_FOCUS, 0);
 }
 
 EXPORT void ui_set_ip( UI *u, INT num, UW addr )
@@ -586,7 +844,7 @@ EXPORT INT ui_ask( UI *u, INT num, CONST char *const *lines, INT nline )
 		char		json[96];
 		INT		pw, ph;
 
-		if ( panel_make(&q, num, 0, 0, &q.pnl, &q.pk) < E_OK ) return 0;
+		if ( panel_make(&q, num, 0, 0, &q.pnl, &q.pk, FALSE) < E_OK ) return 0;
 		(void)ob_rea_rec(q.pk, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
 		pw = wp.right - wp.left;
 		ph = wp.bottom - wp.top;
@@ -627,8 +885,11 @@ EXPORT INT ui_ask( UI *u, INT num, CONST char *const *lines, INT nline )
 	req.id = 3;
 	(void)ob_ntf_evt(q.kw, OB_REC_ANY, &req, u->port);
 
+	/* each notice waited for: the program sleeps until the panel is worked */
 	while ( answer < 0 ) {
-		while ( answer < 0 && ob_rea_rec(u->port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+		if ( ob_rea_tmo(u->port, 0, 0, &m, sizeof(m), &asz, TMO_FEVR) < E_OK ) {
+			answer = 0;			/* the channel is gone */
+		} else {
 			if ( m.id == 2 && m.event == OB_E_CHANGE ) {
 				n = num_of(&q, &m);
 				for ( i = 0; i < q.np; i++ ) {
@@ -641,7 +902,6 @@ EXPORT INT ui_ask( UI *u, INT num, CONST char *const *lines, INT nline )
 				answer = 0;
 			}
 		}
-		if ( answer < 0 ) (void)tk_dly_tsk(20);
 	}
 	parts_close(&q);
 	ob_cls_obj(q.pk);
@@ -649,6 +909,49 @@ EXPORT INT ui_ask( UI *u, INT num, CONST char *const *lines, INT nline )
 	ob_cls_obj(q.kw);
 	(void)ob_del_obj(&q.win);
 	return answer;
+}
+
+/* ---------------------------------------------------------------- a panel on a window of the program's own */
+
+EXPORT ER ui_strip( UI *u, CONST char *box, INT num, ID kw, ID port, INT x, INT y )
+{
+	T_OBWPOS	wp;
+	T_OBNTF		req;
+	SZ		asz = 0;
+
+	memset(u, 0, sizeof(*u));
+	if ( ui_uuid(box, &u->box) < E_OK || kw <= 0 ) return E_PAR;
+	u->kw = kw;
+	if ( panel_make(u, num, x, y, &u->pnl, &u->pk, TRUE) < E_OK ) {
+		u->kw = 0;
+		return E_OBJ;
+	}
+	if ( ob_rea_rec(u->pk, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) >= E_OK ) {
+		u->w = wp.right - wp.left;
+		u->h = wp.bottom - wp.top;
+	}
+	parts_open(u);
+	memset(&req, 0, sizeof(req));
+	req.events = OB_E_CHANGE;
+	req.id = 1;
+	if ( port <= 0 || ob_ntf_evt(u->pk, OB_REC_ANY, &req, port) <= 0 ) {
+		ui_strip_close(u);
+		return E_OBJ;
+	}
+	u->port = port;
+	return E_OK;
+}
+
+EXPORT void ui_strip_close( UI *u )
+{
+	parts_close(u);
+	if ( u->pk > 0 ) {
+		ob_cls_obj(u->pk);
+		(void)ob_del_obj(&u->pnl);
+	}
+	u->pk = 0;
+	u->kw = 0;			/* the window is the program's: not closed here */
+	u->port = 0;
 }
 
 /* ---------------------------------------------------------------- a panel worked while it is up */
@@ -660,19 +963,19 @@ EXPORT ER ui_dlg_open( UI *u, INT num, UI *q )
 	T_OBNTF		req;
 	T_OBMAP		m;
 	SZ		asz = 0;
-	char		json[128], title[128], meta[512];
+	char		json[128], title[128], *meta = NULL;
 	INT		pw, ph, x, y;
 
 	memset(q, 0, sizeof(*q));
 	q->box = u->box;
-	if ( panel_make(q, num, 0, 0, &q->pnl, &q->pk) < E_OK ) return E_OBJ;
+	if ( panel_make(q, num, 0, 0, &q->pnl, &q->pk, FALSE) < E_OK ) return E_OBJ;
 	(void)ob_rea_rec(q->pk, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
 	pw = wp.right - wp.left;
 	ph = wp.bottom - wp.top;
 	title[0] = 0;
-	if ( ob_get_atr(q->pk, (UB *)meta, sizeof(meta) - 1, &asz) >= E_OK ) {
-		meta[( asz < (SZ)sizeof(meta) ) ? asz : (SZ)sizeof(meta) - 1] = 0;
+	if ( ob_atr_read(q->pk, 0, (UB **)&meta) >= 0 ) {
 		json_str(meta, "name", title, sizeof(title));
+		free(meta);
 	}
 
 	/* over the middle of the program's window, and on the screen */
@@ -719,10 +1022,17 @@ EXPORT ER ui_dlg_open( UI *u, INT num, UI *q )
 EXPORT INT ui_dlg_next( UI *u, UI *q, T_OBNTM *m, INT *p_num )
 {
 	SZ	asz = 0;
-	INT	n, i;
 
 	*p_num = 0;
 	if ( ob_rea_rec(u->port, 0, 0, m, sizeof(*m), &asz) < E_OK ) return UI_EV_NONE;
+	return ui_dlg_take(q, m, p_num);
+}
+
+EXPORT INT ui_dlg_take( UI *q, CONST T_OBNTM *m, INT *p_num )
+{
+	INT	n, i;
+
+	*p_num = 0;
 	if ( m->id == 2 && m->event == OB_E_CHANGE ) {
 		n = num_of(q, m);
 		*p_num = n;

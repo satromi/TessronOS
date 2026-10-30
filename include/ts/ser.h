@@ -11,7 +11,8 @@
  *	ser.h
  *	Serial ports as devices (design 10.5)
  *
- *	Each port is a device of its own, "sera", "serb", ..., with no
+ *	Each port is a device of its own, "sera", "serb", ... "serz", "seraa"
+ *	on, as many as the machine has, with no
  *	subunits. Data (start 0) is a stream: a read gives what has come in,
  *	waiting up to the receive time-out for the first byte when nothing
  *	has, and a write sends every byte before it returns. The console's
@@ -29,7 +30,6 @@ extern "C" {
 
 #define TDK_SERIAL	0x0090U		/* the kind a serial port registers as */
 
-#define SER_MAX_PORT	4
 #define SER_LABEL_MAX	32
 
 /* Attribute data */

@@ -38,7 +38,7 @@ typedef struct fix_memorypool_control_block {
 	void	*mempool;	/* Top address of memory pool */
 	void	*unused;		/* Top address of unused area */
 	FREEL	*freelist;	/* Free block list */
-	OBJLOCK	lock;		/* Lock for object exclusive access */
+	KLOCK	klk;		/* its lock (klk.h, design 4.3.3) */
 #if USE_OBJECT_NAME
 	UB	name[OBJECT_NAME_LENGTH];	/* name */
 #endif

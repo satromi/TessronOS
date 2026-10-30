@@ -1,0 +1,50 @@
+# システム環境設定's 表示の倍率 while the desktop runs (design 10.2.3), for tools/ui_run.py and
+# tools/x64/ui_run64.py (a screen of 1280x800: 100%, 125% and 150% leave a view of 640x480 or more).
+# The window is at 160,80: the device list's first line 画面サイズ／色数 at 206,181 and 表示 at
+# 706,184; on the screen's page the pop-up 表示の倍率 at 658,455 (its list opens with the row of
+# the scale chosen over it, a row 20 high: 150% two rows down) and 設定 at 706,554. The desktop's
+# question (確認, 30 seconds) is answered with Esc to put the scale before back and Enter to keep it.
+# The window, moved up to fit the view at 150%, comes back to where it was opened, 160,80, when
+# 100% is put back (design 10.2.2).
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+wait 800
+win システム環境設定
+click 206 181
+wait 300
+click 706 184
+expect sysenv: screen scale 100%, 3 scales
+wait 500
+shot sc_page
+click 658 455
+wait 300
+shot sc_list
+click 658 495
+wait 300
+click 706 554
+expect drawn at 100% -> 150%, asked
+expect wm: drawn at 150% (was 100%), a view of 854 x 534
+wait 1500
+shot sc_ask
+key 29
+expect drawn at 100% again
+expect sysenv: screen scale 100%, 3 scales
+wait 800
+shot sc_back
+# moved up inside the view of 854x534 at 150%, the window is back at 160,80 at 100%
+win システム環境設定
+want ok 160 80 780 584
+click 658 455
+wait 300
+click 658 495
+wait 300
+click 706 554
+expect wm: drawn at 150% (was 100%), a view of 854 x 534
+wait 1500
+key 28
+expect drawn at 150%, kept
+expect sysenv: screen scale 150%, 3 scales
+wait 1000
+shot sc_150
+win システム環境設定
+absent !OACV!

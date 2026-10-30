@@ -480,6 +480,44 @@ LOCAL void test_refused( void )
 	KT_ASSERT(r.remaining > 0);
 }
 
+/* What is found on the system volume: the objects (隠れ屑実身, metadata not right) kept, to be named after the check */
+#define HID_MAX		64
+LOCAL TS_UUID	hid[HID_MAX];
+LOCAL INT	nhid;
+
+LOCAL void note_sys( void *ctx, CONST T_TSFSCKEV *ev )
+{
+	note(ctx, ev);
+	if ( ev->has_uuid && ( ev->kind == TSFSCK_K_HIDDEN || ev->kind == TSFSCK_K_META ) && nhid < HID_MAX ) {
+		hid[nhid++] = ev->uuid;
+	}
+}
+
+/* An object found, by its name, so that whoever left it is known */
+LOCAL void say_hidden( CONST TS_UUID *u )
+{
+	UB	*j = (UB *)Kmalloc(KT_META_ROOM + 1);
+	SZ	asz = 0;
+	ID	key = ob_opn_obj(u, OB_OP_ATRRD);
+	INT	i = 0, at, k;
+	char	nm[64], id[40];
+	static CONST char w[] = "\"name\":\"";
+
+	nm[0] = 0;
+	if ( j != NULL && key > 0 && ob_get_atr(key, j, KT_META_ROOM, &asz) >= E_OK ) {
+		for ( at = 0; at + 8 <= (INT)asz; at++ ) {
+			for ( k = 0; k < 8 && j[at + k] == (UB)w[k]; k++ ) ;
+			if ( k == 8 ) break;
+		}
+		for ( at += 8; at < (INT)asz && j[at] != '"' && i < (INT)sizeof(nm) - 1; at++ ) nm[i++] = (char)j[at];
+		nm[i] = 0;
+	}
+	if ( key > 0 ) ob_cls_obj(key);
+	if ( j != NULL ) Kfree(j);
+	(void)ts_uuid_to_str(u, id, sizeof(id));
+	tm_printf((UB *)"  found %s \"%s\"\n", id, nm);
+}
+
 /* the system volume, in use: looked at in place and found clean; its repair waits for the next start */
 LOCAL void test_system( void )
 {
@@ -488,6 +526,7 @@ LOCAL void test_system( void )
 	INT		n, i, sys = -1, scr = -1;
 
 	n = ob_chk_list(d, 8);
+	if ( n > 8 ) n = 8;		/* the first 8: the volumes of the test disk come first */
 	for ( i = 0; i < n; i++ ) {
 		tm_printf((UB *)"  %s \"%s\" %d blocks%s%s\n", d[i].devnm, d[i].label, (INT)d[i].blocks,
 			  d[i].attached ? " attached" : "", d[i].system ? " system" : "");
@@ -501,7 +540,9 @@ LOCAL void test_system( void )
 	}
 	KT_ASSERT(d[sys].attached);
 	ev_n = ev_fixed = 0;
-	KT_ASSERT_ER(ob_chk_run((CONST char *)d[sys].devnm, 0, &r, note, NULL), E_OK);
+	nhid = 0;
+	KT_ASSERT_ER(ob_chk_run((CONST char *)d[sys].devnm, 0, &r, note_sys, NULL), E_OK);
+	for ( i = 0; i < nhid; i++ ) say_hidden(&hid[i]);
 	tm_printf((UB *)"  system volume: %d objects, %d links, %d found\n", (INT)r.objects, (INT)r.links,
 		  r.problems);
 	KT_ASSERT(r.objects > 10);

@@ -1,0 +1,31 @@
+# ユーザ環境設定〈ＰＤ属性〉の指の行 (design 6.4.1, 10.4.6, 11.6), for tools/ui_run.py.
+# The window's work area is at 190,118. The tag ＰＤ属性 at 307,135; タッチ操作補正 at
+# 414,477; the volumes 位置許容度（タッチ） at 506,507, つまみ範囲（タッチ） at 506,535,
+# 長押し時間（タッチ） at 430,563 (towards 短). The switch off: the two lengths grey, a
+# press on them changes nothing; on again: they are worked; the hold is worked either way.
+# What the parts set is said on the console ("userenv: touch NUM = VALUE").
+open 01a0d8c4-52b7-7c63-8e83-4f9a012c3d53
+expect userenv: ready
+wait 800
+click 307 135
+wait 500
+shot ue_pd
+click 414 477
+expect userenv: touch 9144 = 0
+wait 300
+shot ue_touch_off
+click 506 507
+click 506 535
+wait 500
+absent userenv: touch 9145
+absent userenv: touch 9146
+click 430 563
+expect userenv: touch 9147 =
+click 414 477
+expect userenv: touch 9144 = 1
+click 506 507
+expect userenv: touch 9145 =
+click 506 535
+expect userenv: touch 9146 =
+wait 300
+shot ue_touch_on

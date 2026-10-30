@@ -130,11 +130,13 @@ typedef struct {
 	T_FTPNET	fnet;
 	BOOL		is_ftp;
 	TS_UUID		disk;			/* the disk shown */
-	BOOL		mounted;		/* mounted by this window: taken off when it closes */
+	BOOL		mounted;		/* its disk opened by this window (vd): let go when it closes */
+	INT		vd;			/* the disk's root, from its device object (fs_opn_vol) */
+	ID		vkey;			/* the device object, opened for it */
 	BOOL		removable;
 	BOOL		ro;			/* mounted for reading only */
 	UB		dev[64];		/* the disk's name, or the connection's */
-	char		label[160];		/* "/media/uda0" or "ftp://host" */
+	char		label[160];		/* the disk's device object's name, or "ftp://host" */
 	char		source[8];		/* tessronos.file.source */
 	UB		dir[XFU_PATH_MAX];	/* the directory shown, from the root */
 	UB		(*hist)[XFU_PATH_MAX];	/* directories opened before, the latest first */

@@ -18,6 +18,7 @@
 
 #include "kernel.h"
 #include "memory.h"
+#include <tk/smem.h>
 
 /*
  * Taken with interrupts disabled around the kernel heap: disabling
@@ -158,6 +159,162 @@ EXPORT void knl_removeAreaQue( QUEUE *aq )
 
 Noinit(EXPORT IMACB *knl_imacb);
 
+/* The bytes of the heap's areas in use, kept as they are taken and given back */
+LOCAL SZ	knl_imalloc_used = 0;
+
+/* What of the heap is free, at once: for those who size what they keep by it */
+EXPORT SZ knl_Ifree_bytes( void )
+{
+	return (SZ)knl_imacb->memsz - knl_imalloc_used;
+}
+
+/*
+ * Large blocks. The kernel heap is an area of a fixed size, set aside
+ * at start; what one document, picture or table needs may be larger
+ * than all of it. A block of IM_BIG bytes or more is therefore made of
+ * pages of their own, wherever they lie, mapped one after another in
+ * the kernel variable area (knl_vmap), as much as the machine has. Its
+ * head, IM_HEAD bytes before what is handed out, says how many pages
+ * it is. Such a block is not physically contiguous: whoever gives
+ * memory to a device asks where each piece is (ConvPhysicalAddress),
+ * as for any memory of the variable area. Only a task asks for one; in
+ * a handler, and before the tasks run, the heap gives it as before.
+ */
+#define IM_BIG		( 1024 * 1024 )
+#define IM_HEAD		64
+#define IM_MAGIC	0x42494742494D454DULL
+#define IM_PAGE		4096		/* the pages knl_vmap maps */
+
+typedef struct {
+	UD	magic;
+	UD	npages;
+	SZ	size;		/* what was asked for */
+} IMBIG;
+
+/*
+ * Mapping a block's pages and taking them away again costs a good part
+ * of what is done with it: a document made again at each letter typed
+ * frees and asks for blocks of the same few sizes over and over. A few
+ * blocks freed are therefore kept mapped, IM_KEEP of them and no more
+ * than IM_KEEP_BYTES together, and one asked for of about the same size
+ * (no more than a quarter larger) is handed out again. When the pages
+ * for a new block cannot be had, the kept ones are let go first.
+ */
+#define IM_KEEP		8
+#define IM_KEEP_BYTES	( 64 * 1024 * 1024 )
+
+LOCAL T_SPLOCK	im_keep_lock;
+LOCAL void	*im_keep[IM_KEEP];	/* the heads of the blocks kept */
+LOCAL UD	im_keep_pages = 0;
+
+LOCAL BOOL im_is_big( CONST void *ptr )
+{
+	UBINT	v = (UBINT)ptr;
+
+	return (BOOL)( v >= (UBINT)VMAP_VA_BASE && v < (UBINT)VMAP_VA_BASE + CNF_VMAP_SIZE );
+}
+
+LOCAL void *im_big_get( SZ size )
+{
+	UD	np = ( (UD)size + IM_HEAD + IM_PAGE - 1 ) / IM_PAGE;
+	IMBIG	*h;
+
+	UINT	imask;
+	INT	i, best = -1;
+	BOOL	kept;
+
+	if ( in_indp() || knl_ctxtsk == NULL ) {
+		return NULL;
+	}
+	/* a block kept that is about as large */
+	ISpinLock(&im_keep_lock, &imask);
+	for ( i = 0; i < IM_KEEP; i++ ) {
+		IMBIG	*k = (IMBIG *)im_keep[i];
+
+		if ( k != NULL && k->npages >= np && k->npages <= np + np / 4
+		  && ( best < 0 || k->npages < ((IMBIG *)im_keep[best])->npages ) ) {
+			best = i;
+		}
+	}
+	h = NULL;
+	kept = (BOOL)( best >= 0 );
+	if ( best >= 0 ) {
+		h = (IMBIG *)im_keep[best];
+		im_keep[best] = NULL;
+		im_keep_pages -= h->npages;
+	}
+	ISpinUnlock(&im_keep_lock, &imask);
+	if ( h == NULL ) {
+		h = (IMBIG *)knl_vmap(np, 0);
+	}
+	if ( h == NULL ) {
+		/* the pages the kept blocks hold let go, and tried again */
+		for ( i = 0; i < IM_KEEP; i++ ) {
+			IMBIG	*k;
+
+			ISpinLock(&im_keep_lock, &imask);
+			k = (IMBIG *)im_keep[i];
+			im_keep[i] = NULL;
+			if ( k != NULL ) {
+				im_keep_pages -= k->npages;
+			}
+			ISpinUnlock(&im_keep_lock, &imask);
+			if ( k != NULL ) {
+				knl_vunmap(k, k->npages);
+			}
+		}
+		h = (IMBIG *)knl_vmap(np, 0);
+	}
+	if ( h == NULL ) {
+		return NULL;
+	}
+	h->magic = IM_MAGIC;
+	if ( !kept ) {
+		h->npages = np;		/* a kept block keeps how many pages it has */
+	}
+	h->size = size;
+
+	return (VB *)h + IM_HEAD;
+}
+
+LOCAL SZ im_big_size( CONST void *ptr )
+{
+	CONST IMBIG	*h = (CONST IMBIG *)( (CONST VB *)ptr - IM_HEAD );
+
+	return ( h->magic == IM_MAGIC ) ? h->size : 0;
+}
+
+LOCAL void im_big_free( void *ptr )
+{
+	IMBIG	*h = (IMBIG *)( (VB *)ptr - IM_HEAD );
+
+	if ( h->magic != IM_MAGIC ) {
+		return;
+	}
+	h->magic = 0;
+	/* kept mapped for the next one about as large, while there is room */
+	if ( !in_indp() ) {
+		UINT	imask;
+		INT	i;
+
+		ISpinLock(&im_keep_lock, &imask);
+		for ( i = 0; i < IM_KEEP; i++ ) {
+			if ( im_keep[i] == NULL
+			  && ( im_keep_pages + h->npages ) * IM_PAGE <= IM_KEEP_BYTES ) {
+				im_keep[i] = h;
+				im_keep_pages += h->npages;
+				h = NULL;
+				break;
+			}
+		}
+		ISpinUnlock(&im_keep_lock, &imask);
+		if ( h == NULL ) {
+			return;
+		}
+	}
+	knl_vunmap(h, h->npages);
+}
+
 /* ------------------------------------------------------------------------ */
 
 /*
@@ -172,7 +329,16 @@ EXPORT void* knl_Imalloc( SZ size )
 	   allocate the minimum size to it. */
 	if( size <= 0 ) {
 		return (void *)NULL;
-	} else 	if ( size < (SZ)MIN_FRAGMENT ) {
+	}
+	if ( size >= (SZ)IM_BIG ) {
+		void	*big = im_big_get(size);
+
+		if ( big != NULL ) {
+			return big;
+		}
+		/* no pages for it: from the heap, as far as it goes */
+	}
+	if ( size < (SZ)MIN_FRAGMENT ) {
 		size = (SZ)MIN_FRAGMENT;
 	} else {
 		size = ROUND(size);
@@ -204,6 +370,7 @@ EXPORT void* knl_Imalloc( SZ size )
 		knl_appendFreeArea(knl_imacb, aq2);
 	}
 	setAreaFlag(aq, AREA_USE);
+	knl_imalloc_used += (SZ)AreaSize(aq);
 
 err_ret:
 	ISpinUnlock(&knl_imalloc_lock, &imask);
@@ -250,8 +417,12 @@ EXPORT void* knl_Irealloc( void *ptr, SZ size )
 
 	if(ptr != NULL) {
 		if(newptr != NULL) {
-			aq = (QUEUE*)ptr - 1;
-			oldsz = (SZ)AreaSize(aq);
+			if ( im_is_big(ptr) ) {
+				oldsz = im_big_size(ptr);
+			} else {
+				aq = (QUEUE*)ptr - 1;
+				oldsz = (SZ)AreaSize(aq);
+			}
 			knl_memcpy(newptr, ptr, (size > oldsz)?oldsz:size);
 		}
 		knl_Ifree(ptr);
@@ -269,10 +440,15 @@ EXPORT void  knl_Ifree( void *ptr )
 	QUEUE	*aq;
 	UINT	imask;
 
+	if ( im_is_big(ptr) ) {
+		im_big_free(ptr);
+		return;
+	}
 	ISpinLock(&knl_imalloc_lock, &imask);
 
 	aq = (QUEUE*)ptr - 1;
 	clrAreaFlag(aq, AREA_USE);
+	knl_imalloc_used -= (SZ)AreaSize(aq);
 
 	if ( !chkAreaFlag(aq->next, AREA_USE) ) {
 		/* Merge with free area in after location */

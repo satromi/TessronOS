@@ -115,7 +115,7 @@ EXPORT INT xfc_vobj_w( XWIN *w, CONST XFCENT *e )
 
 	xfc_work_size(w, &ww, &wh);
 	v = 2 + PICT + 3 + dp_text_width((CONST UB *)shown_name(e), TEXT_PX) + 10;
-	most = ww - XFC_LEFT - XFC_SB_W - 12 - ( ( e->kind == E_FILE ) ? 96 : ( e->kind == E_DISK ) ? 150 : 0 );
+	most = ww - XFC_LEFT - 12 - ( ( e->kind == E_FILE ) ? 96 : ( e->kind == E_DISK ) ? 150 : 0 );
 	if ( most < 120 ) most = 120;
 	if ( v < 120 ) v = 120;
 	if ( v > most ) v = most;
@@ -280,7 +280,7 @@ static void draw_vobj( XWIN *w, INT i )
 	(void)dp_text(w->gid, tx, r.top + 18, (CONST UB *)s, ch, TEXT_PX);
 	(void)dp_frame_rect(w->gid, &r, fr, 1);
 
-	/* after it: the size, and where a disk is mounted */
+	/* after it: the size, and whether a disk is in use */
 	sz[0] = 0;
 	if ( e->kind == E_FILE ) {
 		xfc_size_text(e->size, sz, sizeof(sz));
@@ -290,7 +290,7 @@ static void draw_vobj( XWIN *w, INT i )
 		xfc_size_text(e->size, b, sizeof(b));
 		if ( e->faint ) snprintf(sz, sizeof(sz), "媒体なし");
 		else if ( e->btron[0] != 0 ) snprintf(sz, sizeof(sz), "%s  BTRON「%s」", b, e->btron);
-		else if ( e->mount[0] != 0 ) snprintf(sz, sizeof(sz), "%s  %s%s", b, e->mount, e->ro ? " 読込みのみ" : "");
+		else if ( e->mount[0] != 0 ) snprintf(sz, sizeof(sz), "%s  使用中%s", b, e->ro ? "（読込みのみ）" : "");
 		else if ( strcmp(e->fmt, "TSFS") == 0 ) snprintf(sz, sizeof(sz), "%s  TSFS（実身のディスク）", b);
 		else if ( strcmp(e->fmt, "blank") == 0 ) snprintf(sz, sizeof(sz), "%s  初期化されていません", b);
 		else if ( e->nofs && e->fmt[0] != 0 && strcmp(e->fmt, "partitioned") != 0 )
@@ -305,19 +305,19 @@ static void draw_vobj( XWIN *w, INT i )
 
 /* ---------------------------------------------------------------- the window */
 
+/* The window's own scroll bar told what there is and what of it is shown */
 static void scroll_bar( XWIN *w, INT ww, INT wh )
 {
-	INT	rows = xfc_rows(w), h = wh - XFC_STATUS_H, kt, kb;
+	T_OBWBAR	b;
+	SZ		asz = 0;
+	INT		rows = xfc_rows(w);
 
-	fill(w, ww - XFC_SB_W, 0, ww, h, C_TRACK);
-	line(w, ww - XFC_SB_W, 0, ww - XFC_SB_W, h - 1, C_LINE);
-	if ( w->nent <= rows ) return;
-	kt = h * w->top / w->nent;
-	kb = h * ( w->top + rows ) / w->nent;
-	if ( kb - kt < 12 ) kb = kt + 12;
-	if ( kb > h ) kb = h;
-	fill(w, ww - XFC_SB_W + 2, kt + 1, ww - 2, kb - 1, C_KNOB);
-	frame(w, ww - XFC_SB_W + 2, kt + 1, ww - 2, kb - 1, C_DIM);
+	memset(&b, 0, sizeof(b));
+	b.lo = 0;
+	b.hi = ( w->nent > 0 ) ? w->nent : 1;
+	b.clo = ( w->nent > rows ) ? w->top : 0;
+	b.chi = ( w->nent > rows ) ? w->top + rows : b.hi;
+	(void)ob_wri_rec(w->kw, OB_WR_BARS, 0, &b, sizeof(b), &asz);
 }
 
 EXPORT void xfc_paint( XWIN *w )

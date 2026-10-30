@@ -58,7 +58,7 @@ EXPORT ER knl_mutex_initialize(void)
  *	(A) The highest priority in all mutexes in which 'tcb' task locks. 
  *	(B) The base priority of 'tcb' task.
  */
-EXPORT void knl_release_mutex( TCB *tcb, MTXCB *relmtxcb )
+LOCAL INT mtx_newpri( TCB *tcb, MTXCB *relmtxcb )
 {
 	MTXCB	*mtxcb, **prev;
 	INT	newpri, pri;
@@ -96,11 +96,73 @@ EXPORT void knl_release_mutex( TCB *tcb, MTXCB *relmtxcb )
 		prev = &mtxcb->mtxlist;
 	}
 
+	return newpri;
+}
+
+EXPORT void knl_release_mutex( TCB *tcb, MTXCB *relmtxcb )
+{
+	INT	newpri = mtx_newpri(tcb, relmtxcb);
+
 	if ( newpri != tcb->priority ) {
 		/* Change priority of lock get task */
+#if KLK_FINE_OBJ
+		knl_tctl_defer(tcb);
+#else
 		knl_change_task_priority(tcb, newpri);
+#endif
 	}
 }
+
+#if KLK_FINE_OBJ
+/*
+ * The priorities to be worked out again (design 4.3.3)
+ *	A change of a task's priority that the mutexes call for is made with
+ *	the locks of that task's wait, which cannot be taken where the need
+ *	is found (under the scheduler's lock, or another task's). The task
+ *	is put in a list under the task control lock, and the list is gone
+ *	through as that lock is let go: each task in turn, under the lock of
+ *	what it waits on and the scheduler's, is given the highest of its
+ *	base priority, the ceilings of the mutexes it holds and the tasks
+ *	that wait for those of them that inherit. A task that waits for a
+ *	mutex that inherits puts the mutex's holder in the list in its turn,
+ *	so that a chain is followed one task at a time.
+ */
+LOCAL TCB	*tctl_fix = NULL;
+
+EXPORT void knl_tctl_defer( TCB *tcb )
+{
+	KLK_ASSERT(&knl_tctl_klk, "a priority to be worked out again");
+	if ( tcb == NULL || tcb->pri_queued ) {
+		return;
+	}
+	tcb->pri_queued = TRUE;
+	tcb->pri_next = tctl_fix;
+	tctl_fix = tcb;
+}
+
+EXPORT void knl_tctl_unlock( void )
+{
+	TCB	*tcb;
+	KLOCK	*wl;
+	INT	pri;
+
+	if ( knl_tctl_klk.depth == 1 ) {
+		while ( ( tcb = tctl_fix ) != NULL ) {
+			tctl_fix = tcb->pri_next;
+			tcb->pri_queued = FALSE;
+			wl = knl_lock_wait_of(tcb);
+			if ( knl_task_alive((TSTAT)tcb->state) ) {
+				pri = mtx_newpri(tcb, NULL);
+				if ( pri != tcb->priority ) {
+					knl_change_task_priority(tcb, pri);
+				}
+			}
+			knl_unlock_wait_of(wl);
+		}
+	}
+	knl_klk_unlock(&knl_tctl_klk);
+}
+#endif /* KLK_FINE_OBJ */
 
 /*
  * Free mutex when task is terminated
@@ -233,6 +295,7 @@ SYSCALL ID tk_cre_mtx( CONST T_CMTX *pk_cmtx )
 	}
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TCTL();
 	/* Get control block from FreeQue */
 	mtxcb = (MTXCB*)QueRemoveNext(&knl_free_mtxcb);
 	if ( mtxcb == NULL ) {
@@ -258,6 +321,7 @@ SYSCALL ID tk_cre_mtx( CONST T_CMTX *pk_cmtx )
 #endif
 		ercd = mtxid;
 	}
+	KLK_UNTCTL();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -277,6 +341,7 @@ SYSCALL ER tk_del_mtx( ID mtxid )
 	mtxcb = get_mtxcb(mtxid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TCTL();
 	if ( mtxcb->mtxid == 0 ) {
 		ercd = E_NOEXS;
 	} else if ( knl_not_owner(mtxcb->owner) ) {
@@ -298,6 +363,7 @@ SYSCALL ER tk_del_mtx( ID mtxid )
 		knl_own_note(TK_OWN_MTX, mtxcb->owner, -1);
 		mtxcb->mtxid = 0;
 	}
+	KLK_UNTCTL();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -318,6 +384,11 @@ LOCAL void mtx_chg_pri( TCB *tcb, INT oldpri )
 
 	if ( (mtxcb->mtxatr & TA_CEILING) == TA_INHERIT ) {
 		mtxtsk = mtxcb->mtxtsk;
+#if KLK_FINE_OBJ
+		knl_tctl_defer(mtxtsk);		/* the holder's, after this */
+		(void)oldpri;
+		return;
+#endif
 		if ( mtxtsk->priority > tcb->priority ) {
 			/* Since the highest priority of the lock wait task
 			   became higher, raise the lock get task priority
@@ -343,6 +414,10 @@ LOCAL void mtx_rel_wai( TCB *tcb )
 	mtxcb = get_mtxcb(tcb->wid);
 	mtxtsk = mtxcb->mtxtsk;
 
+#if KLK_FINE_OBJ
+	knl_tctl_defer(mtxtsk);
+	return;
+#endif
 	if ( mtxtsk->priority == tcb->priority ) {
 		/* Since the highest priority of the lock wait task might 
 		   become lower, adjust this priority */
@@ -353,9 +428,18 @@ LOCAL void mtx_rel_wai( TCB *tcb )
 /*
  * Definition of mutex wait specification
  */
-LOCAL CONST WSPEC knl_wspec_mtx_tfifo   = { TTW_MTX, NULL, NULL };
-LOCAL CONST WSPEC knl_wspec_mtx_tpri    = { TTW_MTX, mtx_chg_pri, NULL };
-LOCAL CONST WSPEC knl_wspec_mtx_inherit = { TTW_MTX, mtx_chg_pri, mtx_rel_wai };
+/* The lock of the wait (design 4.3.3) */
+#if KLK_FINE_OBJ
+LOCAL KLOCK *mtx_wlock( TCB *tcb )
+{
+	(void)tcb;
+	return &knl_tctl_klk;
+}
+#endif
+
+LOCAL CONST WSPEC knl_wspec_mtx_tfifo   = { TTW_MTX, NULL, NULL WSPEC_LOCK(mtx_wlock) };
+LOCAL CONST WSPEC knl_wspec_mtx_tpri    = { TTW_MTX, mtx_chg_pri, NULL WSPEC_LOCK(mtx_wlock) };
+LOCAL CONST WSPEC knl_wspec_mtx_inherit = { TTW_MTX, mtx_chg_pri, mtx_rel_wai WSPEC_LOCK(mtx_wlock) };
 
 /*
  * Lock mutex
@@ -374,6 +458,7 @@ SYSCALL_U ER tk_loc_mtx_u( ID mtxid, TMO_U tmout )
 	mtxcb = get_mtxcb(mtxid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TCTL();
 	if ( mtxcb->mtxid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -421,7 +506,11 @@ SYSCALL_U ER tk_loc_mtx_u( ID mtxid, TMO_U tmout )
 				/* Raise the priority of task during
 				   locking to the same priority as its
 				   own task */
+#if KLK_FINE_OBJ
+				knl_tctl_defer(mtxtsk);		/* once this task waits */
+#else
 				knl_change_task_priority(mtxtsk, knl_ctxtsk->priority);
+#endif
 			}
 		}
 
@@ -431,15 +520,18 @@ SYSCALL_U ER tk_loc_mtx_u( ID mtxid, TMO_U tmout )
 							  &knl_wspec_mtx_tpri;
 		knl_ctxtsk->wercd = &ercd;
 		knl_ctxtsk->wid = mtxcb->mtxid;
+		KLK_SCHED();
 		knl_make_wait_u(tmout, mtxcb->mtxatr);
 		if ( mtxatr == TA_TFIFO ) {
 			QueInsert(&knl_ctxtsk->tskque, &mtxcb->wait_queue);
 		} else {
 			knl_queue_insert_tpri(knl_ctxtsk, &mtxcb->wait_queue);
 		}
+		KLK_UNSCHED();
 	}
 
     error_exit:
+	KLK_UNTCTL();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -469,6 +561,7 @@ SYSCALL ER tk_unl_mtx( ID mtxid )
 	mtxcb = get_mtxcb(mtxid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TCTL();
 	if ( mtxcb->mtxid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -510,6 +603,7 @@ SYSCALL ER tk_unl_mtx( ID mtxid )
 	}
 
     error_exit:
+	KLK_UNTCTL();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -530,6 +624,7 @@ SYSCALL ER tk_ref_mtx( ID mtxid, T_RMTX *pk_rmtx )
 	mtxcb = get_mtxcb(mtxid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TCTL();
 	if ( mtxcb->mtxid == 0 ) {
 		ercd = E_NOEXS;
 	} else if ( knl_not_owner(mtxcb->owner) ) {
@@ -540,6 +635,7 @@ SYSCALL ER tk_ref_mtx( ID mtxid, T_RMTX *pk_rmtx )
 					mtxcb->mtxtsk->tskid: 0;
 		pk_rmtx->wtsk = knl_wait_tskid(&mtxcb->wait_queue);
 	}
+	KLK_UNTCTL();
 	END_CRITICAL_SECTION;
 
 	return ercd;

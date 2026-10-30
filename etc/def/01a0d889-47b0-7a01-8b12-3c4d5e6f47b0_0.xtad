@@ -1,0 +1,12 @@
+<tad version="1.0" encoding="UTF-8" filename="ソフトウェアキーボードのメニュー">
+<document>
+<p>ソフトウェアキーボードのメニュー</p>
+<p>ソフトウェアキーボードのウインドウのメニュー。閉じる、配列、論理配列と、ウインドウ、小物、実行。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-20b0-7001-9a10-c1d2e3f420b1"/></include>
+<item>配列<link id="01a0d889-47b1-7a12-8b23-3c4d5e6f47b1_0.xtad" vobjid="01a0d8c3-20b0-7002-9a10-c1d2e3f420b2"/></item>
+<item>論理配列<link id="01a0d889-47b2-7a23-8b34-3c4d5e6f47b2_0.xtad" vobjid="01a0d8c3-20b0-7004-9a10-c1d2e3f420b4"/></item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-20b0-7003-9a10-c1d2e3f420b3"/></include>
+</menu>
+</tad>

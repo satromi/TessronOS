@@ -30,6 +30,19 @@
  *	Read-modify-write of the function select and pull registers is done
  *	under a spin lock with interrupts off; the set and clear registers
  *	take a write of the one bit and need no lock.
+ *
+ *	A pin of the header (0..27) can tell of an edge or a level on it
+ *	(gpio_irq_set): its detection is enabled (GPREN, GPFEN, GPHEN, GPLEN)
+ *	and its event latched in GPEDS raises the block's first interrupt
+ *	(SPI 113, level high). The handler clears each event and calls the
+ *	pin's function. A level would latch again at once while it holds, so
+ *	its detection is turned off as it is taken, and the driver sets it
+ *	again once it has dealt with the cause; an edge stays enabled, and
+ *	setting the same again leaves an event latched meanwhile in place.
+ *
+ *	A pin a driver of the kernel takes for itself (gpio_claim: a touch
+ *	screen's bus) is shown as the kernel's in the objects of the banks,
+ *	which do not set it (peripheral_kernel/obj/obgpio.c).
  */
 
 #include <sys/machine.h>
@@ -49,6 +62,15 @@ LOCAL T_SPLOCK	gpio_lock;
 #define GPCLR(n)		(GPIO_BASE + 0x28 + (UBINT)(n) * 4)
 #define GPLEV(n)		(GPIO_BASE + 0x34 + (UBINT)(n) * 4)
 #define GPPUPPDN(n)		(GPIO_BASE + 0xe4 + (UBINT)(n) * 4)	/* 16 pins each */
+#define GPEDS(n)		(GPIO_BASE + 0x40 + (UBINT)(n) * 4)	/* events latched; 1 written clears */
+#define GPREN(n)		(GPIO_BASE + 0x4c + (UBINT)(n) * 4)	/* rising edge detection */
+#define GPFEN(n)		(GPIO_BASE + 0x58 + (UBINT)(n) * 4)	/* falling edge */
+#define GPHEN(n)		(GPIO_BASE + 0x64 + (UBINT)(n) * 4)	/* high level */
+#define GPLEN(n)		(GPIO_BASE + 0x70 + (UBINT)(n) * 4)	/* low level */
+#define GPAREN(n)		(GPIO_BASE + 0x7c + (UBINT)(n) * 4)	/* rising edge, not synchronised */
+#define GPAFEN(n)		(GPIO_BASE + 0x88 + (UBINT)(n) * 4)	/* falling edge, not synchronised */
+
+#define IRQ_PINS		28			/* the header's: the block's first interrupt */
 
 /* Function select codes: 0 input, 1 output, then the alternates */
 #define FSEL_IN			0
@@ -172,6 +194,115 @@ EXPORT INT gpio_get_pull( UINT bank, UINT pin )
 EXPORT INT gpio_bank_pins( UINT bank )
 {
 	return ( bank == 0 ) ? GPIO_NPINS : 0;
+}
+
+/* ---------------------------------------------------------------- events of the pins */
+
+typedef struct {
+	INT	mode;			/* GPIO_IRQ_* */
+	void	(*fn)( UINT pin, void *ctx );
+	void	*ctx;
+} PINIRQ;
+
+LOCAL PINIRQ	pin_irq[IRQ_PINS];
+LOCAL BOOL	irq_defined = FALSE;
+LOCAL UD	gpio_claimed = 0;		/* pins of bank 0 a driver took, bit per pin */
+
+/* The detection register of a mode */
+LOCAL UBINT detect_reg( INT mode )
+{
+	switch ( mode ) {
+	case GPIO_IRQ_RISING:	return GPREN(0);
+	case GPIO_IRQ_FALLING:	return GPFEN(0);
+	case GPIO_IRQ_HIGH:	return GPHEN(0);
+	default:		return GPLEN(0);
+	}
+}
+
+LOCAL void detect_off( UINT pin )
+{
+	UW	bit = 1UL << pin;
+
+	out_w(GPREN(0), in_w(GPREN(0)) & ~bit);
+	out_w(GPFEN(0), in_w(GPFEN(0)) & ~bit);
+	out_w(GPHEN(0), in_w(GPHEN(0)) & ~bit);
+	out_w(GPLEN(0), in_w(GPLEN(0)) & ~bit);
+	out_w(GPAREN(0), in_w(GPAREN(0)) & ~bit);
+	out_w(GPAFEN(0), in_w(GPAFEN(0)) & ~bit);
+}
+
+LOCAL void gpio_inthdr( UINT intno )
+{
+	UW	ev, bit;
+	UINT	pin, imask;
+	PINIRQ	pi;
+
+	ev = in_w(GPEDS(0)) & ( ( 1UL << IRQ_PINS ) - 1 );
+	for ( pin = 0; ev != 0 && pin < IRQ_PINS; pin++ ) {
+		bit = 1UL << pin;
+		if ( !( ev & bit ) ) continue;
+		ev &= ~bit;
+		ISpinLock(&gpio_lock, &imask);
+		pi = pin_irq[pin];
+		if ( pi.fn == NULL ) {
+			detect_off(pin);		/* nobody's: not again */
+		} else if ( pi.mode == GPIO_IRQ_LOW || pi.mode == GPIO_IRQ_HIGH ) {
+			out_w(detect_reg(pi.mode), in_w(detect_reg(pi.mode)) & ~bit);
+		}
+		out_w(GPEDS(0), bit);
+		ISpinUnlock(&gpio_lock, &imask);
+		if ( pi.fn != NULL ) {
+			pi.fn(pin, pi.ctx);
+		}
+	}
+	EndOfInt(intno);
+}
+
+EXPORT ER gpio_irq_set( UINT bank, UINT pin, INT mode, void (*fn)( UINT pin, void *ctx ), void *ctx )
+{
+	UINT	imask;
+	UW	bit = 1UL << pin;
+	BOOL	same;
+
+	if ( bank != 0 || pin >= IRQ_PINS || mode < GPIO_IRQ_NONE || mode > GPIO_IRQ_HIGH
+	  || ( mode != GPIO_IRQ_NONE && fn == NULL ) ) {
+		return E_PAR;
+	}
+	if ( !irq_defined && mode != GPIO_IRQ_NONE ) {
+		knl_define_inthdr(GPIO_INTNO0, TA_HLNG, (FP)gpio_inthdr);
+		SetIntMode(GPIO_INTNO0, IM_LEVEL);
+		EnableInt(GPIO_INTNO0, INTPRI_DEVICE);
+		irq_defined = TRUE;
+	}
+	ISpinLock(&gpio_lock, &imask);
+	same = ( mode != GPIO_IRQ_NONE && pin_irq[pin].fn == fn && pin_irq[pin].ctx == ctx
+	      && pin_irq[pin].mode == mode && ( in_w(detect_reg(mode)) & bit ) != 0 );
+	if ( !same ) {
+		detect_off(pin);
+		out_w(GPEDS(0), bit);
+		pin_irq[pin].mode = mode;
+		pin_irq[pin].fn = ( mode != GPIO_IRQ_NONE ) ? fn : NULL;
+		pin_irq[pin].ctx = ctx;
+		if ( mode != GPIO_IRQ_NONE ) {
+			out_w(detect_reg(mode), in_w(detect_reg(mode)) | bit);
+		}
+	}
+	ISpinUnlock(&gpio_lock, &imask);
+	return E_OK;
+}
+
+EXPORT ER gpio_claim( UINT bank, UINT pin )
+{
+	if ( !gpio_valid(bank, pin) ) {
+		return E_PAR;
+	}
+	__atomic_or_fetch(&gpio_claimed, 1ULL << pin, __ATOMIC_SEQ_CST);
+	return E_OK;
+}
+
+EXPORT BOOL gpio_claimed_by_kernel( UINT bank, UINT pin )
+{
+	return ( gpio_valid(bank, pin) && ( __atomic_load_n(&gpio_claimed, __ATOMIC_SEQ_CST) & ( 1ULL << pin ) ) != 0 );
 }
 
 /*

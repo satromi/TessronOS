@@ -165,7 +165,10 @@ EXPORT ER knl_space_create( T_SPACE *sp )
 
 /*
  * Free every page the space maps and the tables themselves. The caller
- * must be sure that no processor still has the space installed. What
+ * must be sure that no task of the space runs any more; a processor
+ * that has it installed still, idle since, is taken off it first
+ * (knl_mmu_space_drop: on x86-64 the kernel's half is reached through
+ * the same root). What
  * is mapped in the shared window is not the space's: its tables go,
  * its pages stay with whoever shared them ('keep').
  */
@@ -228,6 +231,7 @@ EXPORT void knl_space_delete( T_SPACE *sp )
 		return;
 	}
 	stk_forget(sp->l0_pa);
+	knl_mmu_space_drop(sp->ttbr0);
 	free_level(sp->l0_pa, 0, FALSE);
 	knl_tlb_flush_asid(sp->asid);
 

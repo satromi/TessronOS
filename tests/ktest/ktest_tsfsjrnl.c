@@ -18,7 +18,9 @@
  *	Committed transactions wait in the ring and in memory until a
  *	checkpoint puts them in place, so several of them can be there when
  *	the power goes, and a block freed and used again must not get an old
- *	copy back.
+ *	copy back. A transaction closed but not yet in the ring is read from
+ *	memory, goes into the ring with the others closed by then, and what
+ *	it freed is not handed out before it is there.
  */
 
 #include "ktest.h"
@@ -514,6 +516,103 @@ LOCAL void test_handles( void )
 	Kfree(buf);
 }
 
+/* Close one transaction that puts one pattern in one block, without waiting for the ring */
+LOCAL ER put_closed( UD blk, UB pat )
+{
+	UB	*buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	ER	er;
+
+	if ( buf == NULL ) return E_NOMEM;
+	fill(buf, pat);
+	er = ts_jrnl_begin(vol);
+	if ( er >= E_OK ) er = ts_jrnl_write(vol, blk, buf);
+	if ( er >= E_OK ) er = ts_jrnl_close(vol, NULL);
+	Kfree(buf);
+	return er;
+}
+
+/*
+ * Closed transactions wait in a queue: what they wrote is read from
+ * memory at once, the ring gets nothing until one is waited for, and
+ * then all of them go in together, in order. A cut in the power after
+ * that brings back every one of them.
+ */
+LOCAL void test_queue( void )
+{
+	T_TSFSJRNL	j0, j1;
+
+	if ( vol <= 0 ) KT_SKIP("no volume");
+
+	KT_ASSERT_ER(ts_jrnl_checkpoint(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_HOLD), E_OK);	/* the checkpointer waits too */
+	KT_ASSERT_ER(ts_jrnl_ref(vol, &j0), E_OK);
+	KT_ASSERT_EQ(j0.durable, j0.seq);
+	KT_ASSERT_ER(put_closed(blk_a, PATTERN(23)), E_OK);
+	KT_ASSERT_ER(put_closed(blk_b, PATTERN(24)), E_OK);
+	KT_ASSERT_ER(put_closed(blk_a, PATTERN(25)), E_OK);
+
+	KT_ASSERT_ER(ts_jrnl_ref(vol, &j1), E_OK);
+	KT_ASSERT_EQ(j1.seq, j0.seq + 3);
+	KT_ASSERT_EQ(j1.durable, j0.seq);			/* none in the ring yet */
+	KT_ASSERT_EQ(j1.used, 0);
+	KT_ASSERT_EQ(j1.queued, 3 * 3);				/* descriptor, copy, commit each */
+	KT_ASSERT(holds(blk_a, PATTERN(25)));			/* read from memory */
+	KT_ASSERT(holds(blk_b, PATTERN(24)));
+
+	/* the first one waited for takes the others with it */
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_NONE), E_OK);
+	KT_ASSERT_ER(ts_jrnl_durable(vol, j0.seq + 1), E_OK);
+	KT_ASSERT_ER(ts_jrnl_ref(vol, &j1), E_OK);
+	KT_ASSERT_EQ(j1.durable, j0.seq + 3);
+	KT_ASSERT_EQ(j1.batches, j0.batches + 1);
+	KT_ASSERT_EQ(j1.queued, 0);
+
+	/* and the power goes with all of them in the ring, none in place */
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_AFTER_COMMIT), E_OK);
+	KT_ASSERT_ER(put(blk_b, PATTERN(26)), E_OK);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_NONE), E_OK);
+	KT_ASSERT_ER(ts_cls_vol_blk(vol), E_OK);
+	vol = ts_opn_vol_blk(JDEV);
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) return;
+	KT_ASSERT(holds(blk_a, PATTERN(25)));
+	KT_ASSERT(holds(blk_b, PATTERN(26)));
+}
+
+/*
+ * A run freed by a transaction that is closed but not in the ring is
+ * not handed out: the medium still says it belongs to what used it. It
+ * is once the transaction is in the ring.
+ */
+LOCAL void test_busy( void )
+{
+	UD	run = 0, count = 0, other = 0, got = 0;
+
+	if ( vol <= 0 ) KT_SKIP("no volume");
+
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	KT_ASSERT_ER(ts_alloc_ext(vol, 4, &run, &count), E_OK);
+	KT_ASSERT_EQ(count, 4);
+	KT_ASSERT_ER(ts_jrnl_commit(vol), E_OK);
+
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);			/* freed, closed, not in the ring */
+	KT_ASSERT_ER(ts_free_ext(vol, run, 4), E_OK);
+	KT_ASSERT_ER(ts_jrnl_close(vol, NULL), E_OK);
+
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	KT_ASSERT_ER(ts_alloc_ext_at(vol, run, 4, &got), E_NOMEM);
+	KT_ASSERT_ER(ts_alloc_ext(vol, 4, &other, &count), E_OK);
+	KT_ASSERT(other + count <= run || other >= run + 4);	/* somewhere else */
+	KT_ASSERT_ER(ts_jrnl_abort(vol), E_OK);
+
+	KT_ASSERT_ER(ts_jrnl_durable(vol, ts_jrnl_next(vol)), E_OK);
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	KT_ASSERT_ER(ts_alloc_ext_at(vol, run, 4, &got), E_OK);
+	KT_ASSERT_EQ(got, 4);
+	KT_ASSERT_ER(ts_free_ext(vol, run, 4), E_OK);
+	KT_ASSERT_ER(ts_jrnl_commit(vol), E_OK);
+}
+
 /* the ring goes round many times; checkpoints keep up with it */
 LOCAL void test_wrap( void )
 {
@@ -593,6 +692,24 @@ LOCAL void test_stale_ring( void )
 	vol = 0;
 }
 
+/*
+ * A volume whose log was not put in place (opened with an error
+ * recorded): a change is refused, not committed into a ring of no
+ * length; once the log is read again, changes go on
+ */
+IMPORT ER	knl_jrnl_close( ID vol );
+
+LOCAL void test_nolog( void )
+{
+	if ( vol <= 0 ) KT_SKIP("no volume");
+
+	KT_ASSERT_ER(knl_jrnl_close(vol), E_OK);	/* as at a mount that did not replay */
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_RONLY);
+	KT_ASSERT_ER(ts_jrnl_replay(vol), E_OK);	/* as a check does */
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_abort(vol), E_OK);
+}
+
 EXPORT void ktest_tsfsjrnl( void )
 {
 	KT_RUN(test_open);
@@ -605,7 +722,10 @@ EXPORT void ktest_tsfsjrnl( void )
 	KT_RUN(test_several);
 	KT_RUN(test_revoke);
 	KT_RUN(test_handles);
+	KT_RUN(test_queue);
+	KT_RUN(test_busy);
 	KT_RUN(test_wrap);
+	KT_RUN(test_nolog);
 	KT_RUN(test_limit);
 	KT_RUN(test_stale_ring);
 }

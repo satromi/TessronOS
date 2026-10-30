@@ -54,6 +54,7 @@
 #include <ts/ui.h>
 #include <ts/sysdef.h>
 #include <ts/json.h>
+#include <ts/obatr.h>
 #include <ts/dtreq.h>
 #include <ts/uiprn.h>
 #include <ts/hid.h>
@@ -80,7 +81,7 @@
 #define OUT_MAX		( 512 * 1024 )
 #define CHUNK		( 64 * 1024 )
 #define UNDO_MAX	16			/* changes that can be taken back */
-#define APP_MAX		8			/* programs 実行 lists */
+#define APP_MAX		24			/* programs 実行 lists */
 
 /* The strip and the panel that asks for a month (the data box) */
 #define PN_STRIP	1
@@ -188,7 +189,8 @@ static BOOL	g_hold_moved;
 static INT	g_hx0, g_hy0, g_hx, g_hy;
 
 static UB	g_out[OUT_MAX];
-static char	g_meta[OB_ATR_MAX + 1];
+static char	g_meta_none[1];
+static char	*g_meta = g_meta_none;	/* the metadata meta_of read last ("" when none) */
 
 static void layout( void );
 static ER print_months( BOOL all );
@@ -284,8 +286,8 @@ static ER rec_write( CONST TS_UUID *u, CONST UB *data, INT len )
 	ER	er;
 
 	if ( k <= 0 ) return (ER)k;
-	er = write_all(k, 0, data, len);
-	if ( er >= E_OK ) er = ob_trn_rec(k, 0, (UD)len);
+	/* replaced in one change: a cut in the power leaves the old record or the new one */
+	er = ob_rpl_rec(k, 0, data, (SZ)len);
 	ob_cls_obj(k);
 	return er;
 }
@@ -309,15 +311,22 @@ static BOOL name_is( CONST UB *a, CONST char *b )
 /* An object's metadata, in a buffer of this program's; its length, 0 when it cannot be read */
 static INT meta_of( CONST TS_UUID *u )
 {
-	SZ	asz = 0;
+	UB	*m = NULL;
+	INT	n;
 	ID	k = ob_opn_obj(u, OB_OP_ATRRD);
 
-	g_meta[0] = 0;
+	/* the metadata whole, in memory of its own: the last one read let go */
+	if ( g_meta != g_meta_none ) free(g_meta);
+	g_meta = g_meta_none;
 	if ( k <= 0 ) return 0;
-	if ( ob_get_atr(k, (UB *)g_meta, OB_ATR_MAX, &asz) < E_OK || asz < 0 ) asz = 0;
+	n = ob_atr_read(k, 0, &m);
 	ob_cls_obj(k);
-	g_meta[asz] = 0;
-	return (INT)asz;
+	if ( n <= 0 ) {
+		free(m);
+		return 0;
+	}
+	g_meta = (char *)m;
+	return n;
 }
 
 /* ---------------------------------------------------------------- the programs' templates */
@@ -325,16 +334,16 @@ static INT meta_of( CONST TS_UUID *u )
 /* The icon of the template of the program an applist names (id), or NULL; the caller frees it */
 static UB *app_icon( CONST char *id, SZ *p_size )
 {
-	static TS_UUID	lk[64];
-	TS_UUID		box;
+	TS_UUID		box, *lk = NULL;
 	INT		n = 0, i;
 	UB		*ico = NULL;
 
 	*p_size = 0;
-	if ( !ct_uuid_parse((CONST UB *)SYSDEF_PROG_BOX, &box) || ob_lst_lnk(&box, NULL, lk, 64, &n) < E_OK ) {
+	/* every program of the box, however many */
+	if ( ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &box) < E_OK || ( n = ui_lst_lnk(&box, &lk) ) < 0 ) {
 		return NULL;
 	}
-	for ( i = 0; i < n && i < 64 && ico == NULL; i++ ) {
+	for ( i = 0; i < n && ico == NULL; i++ ) {
 		T_JSON	root, tf, pg, base, it;
 		UB	pid[48], bs[48];
 		TS_UUID	bu;
@@ -358,6 +367,7 @@ static UB *app_icon( CONST char *id, SZ *p_size )
 			}
 		}
 	}
+	free(lk);
 	return ico;
 }
 
@@ -386,7 +396,7 @@ static ER obj_make( CONST char *json, CONST char *app, CONST UB *rec, INT len, T
 	er = ob_cre_obj(&c, p_u);
 	free(ico);
 	if ( er < E_OK ) return er;
-	k = ob_opn_obj(p_u, OB_OP_R | OB_OP_W);
+	k = ob_opn_obj(p_u, OB_OP_R | OB_OP_W | OB_O_EXCL);	/* a new object filled: not read half made */
 	if ( k <= 0 ) {
 		(void)ob_del_obj(p_u);
 		return (ER)k;
@@ -413,11 +423,59 @@ static void new_vobjid( TS_UUID *u )
 
 /* ---------------------------------------------------------------- the 予定表 object */
 
-/* Its record read again, and the 休日 object and the template found by their names */
+/*
+ * The 予定表's links to the 休日 object and to the template of a day
+ * (年月日実身) carry those words as their relationship (the link's own
+ * 続柄, xmlTAD's relationship attribute), and are found by them: the
+ * objects may be named anything. A 予定表 made before, or by the TADjs
+ * Desktop, has links without them; those are found by their objects'
+ * names, as the TADjs Desktop finds them, and given the words, so that
+ * they are found so from then on.
+ */
+#define REL_HOL		"休日"
+#define REL_TPL		"年月日実身"
+
+/* Whether the link's relationship has word w among its words */
+static BOOL rel_has( CONST UB *el, INT len, CONST char *w )
+{
+	UB	r[160];
+	INT	n = ct_attr_text(el, len, "relationship", r, sizeof(r)), i = 0, a, wl = (INT)strlen(w);
+
+	while ( n > 0 && i < n ) {
+		while ( i < n && r[i] == ' ' ) i++;
+		a = i;
+		while ( i < n && r[i] != ' ' ) i++;
+		if ( i - a == wl && memcmp(r + a, w, (size_t)wl) == 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
+/* The link at el[i] of the 予定表's record given word w too, the record written again */
+static void rel_give( CTEL *el, INT i, CONST char *w )
+{
+	UB	r[160], v[200];
+	INT	n = ct_attr_text(g_calx + el[i].at, el[i].len, "relationship", r, sizeof(r));
+	CTSET	set;
+	CTBUF	b;
+
+	if ( n < 0 ) n = 0;
+	r[n] = 0;
+	snprintf((char *)v, sizeof(v), "%s%s%s", (char *)r, ( n > 0 ) ? " " : "", w);
+	set.name = "relationship";
+	set.value = v;
+	ct_buf(&b, g_out, OUT_MAX);
+	ct_putn(&b, g_calx, el[i].at);
+	ct_link_edit(&b, g_calx + el[i].at, el[i].len, &set, 1);
+	ct_putn(&b, g_calx + el[i].at + el[i].len, g_caln - el[i].at - el[i].len);
+	if ( b.fail || rec_write(&g_cal, b.p, b.n) < E_OK ) return;
+	note("relationship given");
+}
+
+/* Its record read again, and the 休日 object and the template found by their links' relationships */
 static void cal_read( void )
 {
 	CTEL	el[LINK_MAX];
-	INT	n, i;
+	INT	n, i, hol_by_name = -1, tpl_by_name = -1;
 
 	free(g_calx);
 	g_calx = rec_read(&g_cal, 0, &g_caln);
@@ -426,6 +484,18 @@ static void cal_read( void )
 	n = ct_links(g_calx, g_caln, el, LINK_MAX);
 	for ( i = 0; i < n; i++ ) {
 		TS_UUID	u;
+
+		if ( !ct_target(g_calx + el[i].at, el[i].len, &u) ) continue;
+		if ( !g_has_hol && rel_has(g_calx + el[i].at, el[i].len, REL_HOL) ) {
+			g_hol = u;
+			g_has_hol = TRUE;
+		} else if ( !g_has_tpl && rel_has(g_calx + el[i].at, el[i].len, REL_TPL) ) {
+			g_tpl = u;
+			g_has_tpl = TRUE;
+		}
+	}
+	for ( i = 0; i < n && ( !g_has_hol || !g_has_tpl ); i++ ) {
+		TS_UUID	u;
 		UB	nm[OB_NAME_MAX];
 
 		if ( !ct_target(g_calx + el[i].at, el[i].len, &u) ) continue;
@@ -433,10 +503,27 @@ static void cal_read( void )
 		if ( !g_has_hol && name_is(nm, "休日") ) {
 			g_hol = u;
 			g_has_hol = TRUE;
+			hol_by_name = i;
 		} else if ( !g_has_tpl && name_is(nm, "年月日実身") ) {
 			g_tpl = u;
 			g_has_tpl = TRUE;
+			tpl_by_name = i;
 		}
+	}
+	/* found by their names: given the words, one after the other (the record is read again between) */
+	if ( hol_by_name >= 0 ) {
+		rel_give(el, hol_by_name, REL_HOL);
+		if ( tpl_by_name >= 0 ) {
+			free(g_calx);
+			g_calx = rec_read(&g_cal, 0, &g_caln);
+			n = ( g_calx != NULL ) ? ct_links(g_calx, g_caln, el, LINK_MAX) : 0;
+			if ( tpl_by_name >= n ) tpl_by_name = -1;
+		}
+	}
+	if ( tpl_by_name >= 0 && g_calx != NULL ) rel_give(el, tpl_by_name, REL_TPL);
+	if ( hol_by_name >= 0 || tpl_by_name >= 0 ) {
+		free(g_calx);
+		g_calx = rec_read(&g_cal, 0, &g_caln);
 	}
 }
 
@@ -819,7 +906,6 @@ static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	T_OBCRE		c;
 	SZ		asz = 0;
 	ID		k, ka;
-	INT		i;
 	ER		er;
 
 	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
@@ -837,16 +923,13 @@ static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	k = ob_opn_obj(&d, OB_OP_WRITE);
 	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
 	if ( k > 0 ) ob_cls_obj(k);
-	for ( i = 0; er >= E_OK; i += 20 ) {
-		if ( ob_rea_rec(ka, 0, 0, an, sizeof(*an), &asz) >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
+	/* the answer waited for on its channel, at most wait_ms */
+	while ( er >= E_OK ) {
+		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
+		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
 			er = an->er;
 			break;
 		}
-		if ( i >= wait_ms ) {
-			er = E_TMOUT;
-			break;
-		}
-		(void)tk_dly_tsk(20);
 	}
 	ob_cls_obj(ka);
 	(void)ob_del_obj(&reply);
@@ -1018,6 +1101,7 @@ static void link_open( INT i )
 	rq.req = DT_RQ_OPEN;
 	rq.target = g_l[i].target;
 	rq.recno = -1;
+	ct_link_req(&rq, g_l[i].el, g_l[i].len);	/* the program it keeps to, when it does */
 	er = ask_desktop(&rq, &an, 3000);
 	snprintf(s, sizeof(s), "opened %s (%d)", g_l[i].name, (INT)er);
 	note(s);
@@ -1572,7 +1656,7 @@ static ER win_open( CONST char *title )
 	T_OBWPOS	wp;
 	T_JSON		root, w, pos;
 	SZ		asz = 0;
-	char		json[200];
+	char		json[260], shown[TS_UUID_STRLEN + 1];
 	INT		x = 100, y = 80, ww = 800, wh = 600, mn = meta_of(&g_cal);
 
 	if ( mn > 0 && js_parse((CONST UB *)g_meta, mn, &root) >= E_OK && js_get(&root, "window", &w) >= E_OK ) {
@@ -1587,8 +1671,9 @@ static ER win_open( CONST char *title )
 	if ( wh < MIN_H ) wh = MIN_H;
 	if ( x < 0 ) x = 0;
 	if ( y < 0 ) y = 0;
-	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":7,\"icon\":\"%s\"}",
-		 x, y, x + ww + FRAME_W, y + wh + TITLE_H, SYSDEF_PROG_CALENDAR);
+	ts_uuid_text(&g_cal, shown);	/* what it shows, for ウインドウ一覧 */
+	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":7,\"icon\":\"%s\",\"shows\":\"%s\"}",
+		 x, y, x + ww + FRAME_W, y + wh + TITLE_H, SYSDEF_PROG_CALENDAR, shown);
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
 	c.sub = OB_S_WINDOW;
@@ -1675,7 +1760,7 @@ static void ask_month( void )
 	v[1] = g_m;
 	ui_set_fields(&q, P_YM, v, 2);
 	while ( done == 0 ) {
-		ev = ui_dlg_next(&g_ui, &q, &m, &num);
+		ev = ( ui_wait(&g_ui, &m, TMO_FEVR) >= E_OK ) ? ui_dlg_take(&q, &m, &num) : UI_EV_CLOSE;
 		switch ( ev ) {
 		case UI_EV_BUTTON:
 			done = ( num == P_YM_OK ) ? 1 : -1;
@@ -1685,7 +1770,6 @@ static void ask_month( void )
 			break;
 		case UI_EV_NONE:
 			if ( m.id == 3 && m.event == OB_E_KEY && ( m.code == K_ENTER || m.code == K_KPENTER ) ) done = 1;
-			else (void)tk_dly_tsk(TICK_MS);
 			break;
 		default:
 			break;
@@ -1752,27 +1836,27 @@ static BOOL link_put( CONST UB *el, INT len, CONST TS_UUID *target, INT *box )
 /* Links dropped on the window: put in the month where they were let go */
 static void dropped( void )
 {
-	static T_OBDROP	d;
+	T_OBDROP	*d;
 	char		el[700], fr[8], ch[8], tb[8], bg[8], vs[40], ts[40];
 	INT		i, n = 0, x, y;
 	ER		er;
 
-	if ( ui_drop(&g_ui, &d) < E_OK ) return;
-	if ( g_nl + d.n > LINK_MAX ) {
-		ui_drop_answer(&g_ui, &d, OB_DR_REFUSE, "この月にはこれ以上置けません");
+	if ( ( d = ui_drop(&g_ui) ) == NULL ) return;
+	if ( g_nl + d->n > LINK_MAX ) {
+		ui_drop_answer(&g_ui, d, OB_DR_REFUSE, "この月にはこれ以上置けません");
 		return;
 	}
 	if ( ( er = month_make() ) < E_OK ) {
-		ui_drop_answer(&g_ui, &d, OB_DR_REFUSE, "年月実身を作れません");
+		ui_drop_answer(&g_ui, d, OB_DR_REFUSE, "年月実身を作れません");
 		return;
 	}
-	ui_drop_answer(&g_ui, &d, OB_DR_ACCEPT, "");
+	ui_drop_answer(&g_ui, d, OB_DR_ACCEPT, "");
 	undo_push();
-	x = to_rx(d.x);
-	y = to_ry(d.y);
+	x = to_rx(d->x);
+	y = to_ry(d->y);
 	pick_none();
-	for ( i = 0; i < d.n && i < OB_DROP_MAX; i++ ) {
-		T_OBDROPV	*v = &d.v[i];
+	for ( i = 0; i < d->n; i++ ) {
+		T_OBDROPV	*v = &d->v[i];
 		INT		w = v->right - v->left, h = v->bottom - v->top, box[4];
 		UINT		disp = ( v->disp != 0 ) ? v->disp : 0x31U;
 		TS_UUID		vid;
@@ -2254,37 +2338,51 @@ static void link_copy_put( INT i, CONST TS_UUID *nid, INT step )
 }
 
 /* The applist of a link: its own when it has one, its object's when not; its length */
-static INT app_json( INT i, UB *out, INT max )
+static INT app_json( INT i, UB **p_out )
 {
 	T_JSON	root, al;
-	INT	n = ct_attr_text(g_l[i].el, g_l[i].len, "applist", out, max), k;
+	INT	n;
 
+	/* the link's own: no longer than the link it is written in */
+	*p_out = malloc((size_t)g_l[i].len + 1);
+	if ( *p_out == NULL ) return 0;
+	n = ct_attr_text(g_l[i].el, g_l[i].len, "applist", *p_out, g_l[i].len + 1);
 	if ( n > 0 ) return n;
 	n = meta_of(&g_l[i].target);
 	if ( n <= 0 || js_parse((CONST UB *)g_meta, n, &root) < E_OK || js_get(&root, "applist", &al) < E_OK ) {
-		out[0] = 0;
+		(*p_out)[0] = 0;
 		return 0;
 	}
-	for ( k = 0; k < al.len && k < max - 1; k++ ) out[k] = al.s[k];
-	out[k] = 0;
-	return k;
+	free(*p_out);
+	*p_out = malloc((size_t)al.len + 1);
+	if ( *p_out == NULL ) return 0;
+	memcpy(*p_out, al.s, (size_t)al.len);
+	(*p_out)[al.len] = 0;
+	return al.len;
 }
 
-/* The programs 実行 lists for link i: its object's applist */
+/* The programs 実行 lists for link i: the list the desktop's own links show (DT_RQ_APPS) */
 static INT g_napp;
 static UB g_app_id[APP_MAX][CT_APP_ID], g_app_name[APP_MAX][CT_APP_NAME];
+static BOOL g_app_kind[APP_MAX];		/* offered for the object's kind, not in its applist */
 
 static void exec_menu( ID mid, INT i )
 {
 	static UB	rows[APP_MAX][WM_LABEL_MAX];
 	TS_UUID		ed;
-	T_JSON		root, al;
-	INT		n, k;
+	T_DTREQ		rq;
+	T_DTANS		an;
+	INT		n = 1, k;
 
 	g_napp = 0;
-	n = meta_of(&g_l[i].target);
-	if ( n > 0 && js_parse((CONST UB *)g_meta, n, &root) >= E_OK && js_get(&root, "applist", &al) >= E_OK ) {
-		g_napp = ct_app_list(al.s, al.len, g_app_id, g_app_name, APP_MAX);
+	for ( k = 0; k < n && g_napp < APP_MAX; k++ ) {
+		ask_of(i, DT_RQ_APPS, &rq);
+		ct_link_req(&rq, g_l[i].el, g_l[i].len);
+		rq.recno = k;
+		memset(&an, 0, sizeof(an));
+		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
+		n = (INT)an.how;
+		if ( ct_app_entry(&an, g_app_id[g_napp], g_app_name[g_napp], &g_app_kind[g_napp]) ) g_napp++;
 	}
 	for ( k = 0; k < g_napp; k++ ) {
 		snprintf((char *)rows[k], WM_LABEL_MAX, "%s", (char *)g_app_name[k]);
@@ -2297,12 +2395,11 @@ static void exec_menu( ID mid, INT i )
 /* Whether link i keeps to the program it opens with (起動アプリの固定) */
 static BOOL app_kept( INT i )
 {
-	UB	*j = malloc(OB_ATR_MAX);
+	UB	*j = NULL;
 	INT	n;
 	BOOL	kept = FALSE;
 
-	if ( j == NULL ) return FALSE;
-	n = app_json(i, j, OB_ATR_MAX);
+	n = app_json(i, &j);
 	kept = ( n > 0 ) ? ct_app_locked(j, n) : FALSE;
 	free(j);
 	return kept;
@@ -2311,16 +2408,17 @@ static BOOL app_kept( INT i )
 /* 起動アプリの固定 turned over: the link's own applist says whether it keeps to its program */
 static void app_keep( INT i )
 {
-	UB	*j = malloc(OB_ATR_MAX), *out = malloc(OB_ATR_MAX + 64);
+	UB	*j = NULL, *out = NULL;
 	CTBUF	b;
 	INT	n;
 	BOOL	keep;
 	char	s[120];
 
+	n = app_json(i, &j);
+	if ( j != NULL ) out = malloc((size_t)n + 64);	/* with "defaultOpenLock" put in */
 	if ( j != NULL && out != NULL ) {
-		n = app_json(i, j, OB_ATR_MAX);
 		keep = !ct_app_locked(j, n);
-		ct_buf(&b, out, OB_ATR_MAX + 64);
+		ct_buf(&b, out, n + 64);
 		if ( n > 0 && ct_app_lock(&b, j, n, keep) >= E_OK && link_attr(i, "applist", b.p) ) {
 			snprintf(s, sizeof(s), "%s %s", keep ? "kept" : "let go", g_l[i].name);
 			note(s);
@@ -2418,6 +2516,7 @@ static void link_op( CONST char *code, INT i, INT index )
 		ask_of(i, DT_RQ_EXEC, &rq);
 		snprintf((char *)rq.name, sizeof(rq.name), "%s", (char *)g_app_id[index]);
 		if ( app_kept(i) ) rq.flags |= DT_F_KEEP;
+		if ( g_app_kind[index] ) rq.flags |= DT_F_KIND;
 		er = ask_desktop(&rq, &an, 5000);
 		snprintf(s, sizeof(s), "exec %s %s (%d)", g_l[i].name, (char *)g_app_id[index], (INT)er);
 		note(s);
@@ -2614,18 +2713,46 @@ static void key( CONST T_OBNTM *m )
 	}
 }
 
+/*
+ * The one link picked when a place is just out of its right edge or its
+ * foot, no farther than slop: what a finger's press there is to size.
+ * -1 when it is not.
+ */
+static INT link_near( INT x, INT y, INT slop )
+{
+	INT	i, k = -1, n = 0;
+
+	for ( i = 0; i < g_nl; i++ ) {
+		if ( g_l[i].pick ) {
+			k = i;
+			n++;
+		}
+	}
+	if ( n != 1 || !g_l[k].shown || g_l[k].day ) return -1;
+	{
+		CONST T_DPRECT	*r = &g_l[k].r;
+
+		if ( x >= r->left && x < r->right + slop && y >= r->top && y < r->bottom + slop
+		  && ( x >= r->right || y >= r->bottom ) ) return k;
+	}
+	return -1;
+}
+
 static void press( CONST T_OBNTM *m )
 {
-	INT	i, d;
+	INT	i, d, slop;
 	BOOL	add = (BOOL)( ( m->mods & ( M_CTRL | M_SHIFT ) ) != 0 );
 
 	if ( m->y < STRIP_H ) return;			/* the strip's: its parts tell their own */
 	g_band = FALSE;
 	g_hold = HOLD_NONE;
+	slop = wm_hit_slop(m->when);		/* a finger reaches the edges farther */
 	i = link_at(m->x, m->y);
+	if ( i < 0 && slop > 0 && !add ) i = link_near(m->x, m->y, slop);
 	if ( i >= 0 ) {
 		CLINK	*l = &g_l[i];
 
+		if ( !l->pick ) slop = 0;		/* farther in only on one picked before the press */
 		g_hold_twice = (BOOL)( i == g_press_link && m->when - g_press_at < DBL_NS );
 		g_press_link = g_hold_twice ? -1 : i;
 		g_press_day = 0;
@@ -2640,8 +2767,8 @@ static void press( CONST T_OBNTM *m )
 		g_hold_moved = FALSE;
 		g_hx0 = g_hx = m->x;
 		g_hy0 = g_hy = m->y;
-		g_hold_right = (BOOL)( !l->day && m->x >= l->r.right - EDGE );
-		g_hold_foot = (BOOL)( !l->day && m->y >= l->r.bottom - EDGE );
+		g_hold_right = (BOOL)( !l->day && m->x >= l->r.right - wm_hit_in(EDGE, slop, l->r.right - l->r.left) );
+		g_hold_foot = (BOOL)( !l->day && m->y >= l->r.bottom - wm_hit_in(EDGE, slop, l->r.bottom - l->r.top) );
 		if ( !l->pick ) {
 			g_hold = HOLD_NONE;		/* let go of by Shift or Ctrl: nothing to carry */
 		} else if ( ( g_hold_right || g_hold_foot ) && !g_hold_twice ) {
@@ -2847,9 +2974,8 @@ int main( void )
 	paint();
 
 	while ( !g_closing ) {
-		while ( !g_closing && ob_rea_rec(g_port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) event(&m);
+		for ( TMO tmo = TMO_FEVR; !g_closing && ob_rea_tmo(g_port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) event(&m);
 		if ( g_dirty && !g_closing ) paint();
-		if ( !g_closing ) (void)tk_dly_tsk(TICK_MS);
 	}
 	links_free();
 	undo_clear();

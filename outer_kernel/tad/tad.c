@@ -169,8 +169,23 @@ EXPORT T_TADNODE *tad_new_node( T_TAD *doc, UINT kind )
 	return nd;
 }
 
+LOCAL UW	tad_serials = 0;
+
+EXPORT UW tad_serial( CONST T_TAD *doc )
+{
+	return ( doc != NULL ) ? doc->serial : 0;
+}
+
+EXPORT void tad_touch( T_TADNODE *nd )
+{
+	for ( ; nd != NULL; nd = nd->parent ) {
+		nd->gen++;
+	}
+}
+
 EXPORT void tad_add_child( T_TADNODE *parent, T_TADNODE *nd )
 {
+	tad_touch(parent);
 	nd->parent = parent;
 	nd->next   = NULL;
 	if ( parent->last == NULL ) {
@@ -756,6 +771,7 @@ EXPORT ER tad_parse( CONST UB *xml, SZ size, CONST T_TADLIM *lim, T_TAD **p_doc 
 		return E_NOMEM;
 	}
 	zero(doc, sizeof(T_TAD));
+	doc->serial = __atomic_add_fetch(&tad_serials, 1, __ATOMIC_RELAXED);
 
 	doc->lim.depth   = ( lim != NULL && lim->depth   > 0 ) ? lim->depth   : TAD_DEF_DEPTH;
 	doc->lim.nodes   = ( lim != NULL && lim->nodes   > 0 ) ? lim->nodes   : TAD_DEF_NODES;
@@ -1040,12 +1056,10 @@ EXPORT ER tad_write( ID key, INT recno, CONST T_TAD *doc )
 	}
 	er = tad_write_mem(doc, buf, need, &asize);
 	if ( er >= E_OK ) {
-		er = ob_wri_rec(key, recno, 0, buf, asize, &asize);
+		/* replaced in one change: a cut in the power leaves the old
+		   document or the new one, not part of each */
+		er = ob_rpl_rec(key, recno, buf, asize);
 	}
 	mem_rel(buf);
-	if ( er < E_OK ) {
-		return er;
-	}
-
-	return ob_trn_rec(key, recno, (UD)need);
+	return er;
 }

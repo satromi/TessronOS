@@ -110,6 +110,8 @@ Inline BOOL knl_ready_queue_insert( RDYQUE *rq, TCB *tcb )
 {
 	INT	priority = tcb->priority;
 
+	KLK_ASSERT_SCHED("the ready queue");
+
 	QueInsert(&tcb->tskque, &rq->tskque[priority]);
 #if NUM_TSKPRI <= INT_BITWIDTH
 	rq->bitmap[0] |= (1U << priority);
@@ -166,6 +168,8 @@ Inline void knl_ready_queue_delete( RDYQUE *rq, TCB *tcb )
 	INT	i;
 #endif
 
+	KLK_ASSERT_SCHED("the ready queue");
+
 	if ( rq->klocktsk == tcb ) {
 		rq->klocktsk = NULL;
 	}
@@ -209,6 +213,8 @@ Inline void knl_ready_queue_rotate( RDYQUE *rq, INT priority )
 {
 	QUEUE	*tskque = &rq->tskque[priority];
 	TCB	*tcb;
+
+	KLK_ASSERT_SCHED("the ready queue");
 
 	tcb = (TCB*)QueRemoveNext(tskque);
 	if ( tcb != NULL ) {

@@ -22,9 +22,9 @@
  *	router in between that forwards a port wants a fixed one), and the
  *	server's connection to it is waited for as a read is.
  *
- *	The FTP connections the user made are kept in the metadata of the
- *	program object, "tessronos.xfconv": {"ftp": [...]}. The password is
- *	among them only when the user asked for it to be kept.
+ *	The FTP connections the user made are kept in a settings object of
+ *	the user's own, which only they read (the settings, below). The
+ *	password is among them only when the user asked for it to be kept.
  */
 
 #include "xfc.h"
@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <ts/json.h>
+#include <ts/obatr.h>
 #include <ts/sysdef.h>
 
 /* ---------------------------------------------------------------- UUIDs */
@@ -271,67 +272,158 @@ EXPORT ER xfc_net_up( void )
 /* ---------------------------------------------------------------- the settings */
 
 /*
- * The connections are kept in the metadata of ファイル変換の箱
- * (SYSDEF_XFCONV_BOX), the person's to write as what is taken in is;
- * the program object, which is the system's, is only read, for what a
- * system before kept there.
+ * The connections a person made, with the passwords they asked to be
+ * kept, are a settings object of that person's: 「ファイル変換の接続」,
+ * owned by them and to be read and written by them alone (rw-------),
+ * linked from ファイル変換の箱. Its record 1 is the list, as JSON:
+ * {"ftp": [...]}; its record 0 says what it is. Each person has one;
+ * it is found among the box's links by what its metadata says it is
+ * (tessronos.xfconv.connections) and by its owner, never by its name.
+ *
+ * A system before kept the list in the metadata of the box, which every
+ * user reads, or of the program object. That list is read when the
+ * person has no settings object yet, and taken out of the box once the
+ * object is written; the program object's is taken out too when the
+ * person may write it (an administrator).
  */
+#define CONF_NAME	"ファイル変換の接続"
+#define CONF_TEXT	"<tad version=\"1.0\" encoding=\"UTF-8\">\n<document>\n<p>" \
+			"ファイル変換のFTPの接続の設定です。持ち主だけが読み書きできます。" \
+			"</p>\n</document>\n</tad>\n"
+
+LOCAL BOOL conf_uuid( BOOL prog, TS_UUID *u )
+{
+	if ( !prog ) return (BOOL)( ob_fnd_sys(SYSROLE_XFCONV, SYSDEF_XFCONV_BOX, u) >= E_OK );
+	return xfc_uuid_parse(SYSDEF_PROG_XFCONV, u);
+}
+
 LOCAL ID conf_key( UINT ops, BOOL prog )
 {
 	TS_UUID	u;
 
-	if ( !xfc_uuid_parse(prog ? SYSDEF_PROG_XFCONV : SYSDEF_XFCONV_BOX, &u) ) return E_PAR;
+	if ( !conf_uuid(prog, &u) ) return E_PAR;
 	return ob_opn_obj(&u, ops);
+}
+
+/* Whether u is the person's own settings object */
+LOCAL BOOL conf_mine( CONST TS_UUID *u, CONST T_OBCRD *me )
+{
+	T_JSON	root, tf, xc;
+	UB	pbuf[OB_PRT_SIZE(16, 4)];
+	T_OBPRT	*prt = (T_OBPRT *)pbuf;
+	UB	*meta = NULL;
+	SZ	asz = 0;
+	INT	len;
+	ID	key;
+	BOOL	yes = FALSE;
+
+	if ( ob_get_prt(u, prt, sizeof(pbuf), &asz) < E_OK
+	  || memcmp(&prt->owner, &me->user, sizeof(TS_UUID)) != 0 ) {
+		return FALSE;
+	}
+	key = ob_opn_obj(u, OB_OP_ATRRD);
+	if ( key <= 0 ) return FALSE;
+	len = ob_atr_read(key, 0, &meta);
+	if ( len >= 0 && js_parse(meta, len, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
+	  && js_get(&tf, "xfconv", &xc) >= E_OK ) {
+		yes = js_get_bool(&xc, "connections", FALSE);
+	}
+	free(meta);
+	ob_cls_obj(key);
+	return yes;
+}
+
+/* The person's settings object, found among the box's links */
+LOCAL BOOL conf_find( TS_UUID *p_u )
+{
+	T_OBCRD	me;
+	TS_UUID	box, *lk = NULL;
+	INT	n, i;
+	BOOL	hit = FALSE;
+
+	if ( ob_get_crd(&me) < E_OK || !conf_uuid(FALSE, &box) ) return FALSE;
+	n = ui_lst_lnk(&box, &lk);
+	for ( i = 0; i < n && !hit; i++ ) {
+		if ( conf_mine(&lk[i], &me) ) {
+			*p_u = lk[i];
+			hit = TRUE;
+		}
+	}
+	free(lk);
+	return hit;
+}
+
+/* The connections of a list of JSON ({"ftp": [...]}) */
+LOCAL INT conf_parse( CONST T_JSON *xc, XFCCONN *c, INT max )
+{
+	T_JSON	list, it;
+	INT	n = 0;
+
+	if ( js_get(xc, "ftp", &list) < E_OK ) return 0;
+	for ( it.s = NULL; n < max && js_next(&list, &it); n++ ) {
+		XFCCONN	*k = &c[n];
+		UB	e[24];
+
+		memset(k, 0, sizeof(*k));
+		(void)js_get_str(&it, "host", k->host, sizeof(k->host));
+		(void)js_get_str(&it, "name", k->name, sizeof(k->name));
+		k->ssh = js_get_bool(&it, "ssh", FALSE);
+		snprintf((char *)k->port, sizeof(k->port), "%d", (INT)js_get_num(&it, "port", FTP_PORT));
+		(void)js_get_str(&it, "user", k->user, sizeof(k->user));
+		k->keep = js_get_bool(&it, "keep", FALSE);
+		if ( k->keep ) (void)js_get_str(&it, "pass", k->pass, sizeof(k->pass));
+		k->enc = ( js_get_str(&it, "encoding", e, sizeof(e)) > 0 ) ? txc_by_name(e) : TXC_UTF8;
+		if ( k->enc == TXC_AUTO ) k->enc = TXC_UTF8;
+		k->mode = js_get_bool(&it, "pasv", FALSE) ? XFC_DM_PASV : XFC_DM_EPSV;
+		if ( js_get_str(&it, "data", e, sizeof(e)) > 0 ) {
+			k->mode = ( strcmp((char *)e, "active") == 0 ) ? XFC_DM_ACTIVE
+				: ( strcmp((char *)e, "pasv") == 0 ) ? XFC_DM_PASV : XFC_DM_EPSV;
+		}
+		if ( js_get_num(&it, "dataport", 0) > 0 ) {
+			snprintf((char *)k->lport, sizeof(k->lport), "%d", (INT)js_get_num(&it, "dataport", 0));
+		}
+	}
+	return n;
+}
+
+/* The list a system before kept in the metadata of the box (prog FALSE) or of the program object */
+LOCAL INT conf_load_old( BOOL prog, XFCCONN *c, INT max )
+{
+	T_JSON	root, tf, xc;
+	UB	*meta = NULL;
+	INT	len, n = 0;
+	ID	key;
+
+	key = conf_key(OB_OP_ATRRD, prog);
+	if ( key <= 0 ) return 0;
+	len = ob_atr_read(key, 0, &meta);
+	if ( len >= 0 && js_parse(meta, len, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
+	  && js_get(&tf, "xfconv", &xc) >= E_OK ) {
+		n = conf_parse(&xc, c, max);
+	}
+	free(meta);
+	ob_cls_obj(key);
+	return n;
 }
 
 EXPORT INT xfc_conf_load( XFCCONN *c, INT max )
 {
-	T_JSON	root, tf, xc, list, it;
-	UB	*meta;
-	SZ	len = 0;
-	INT	n = 0, at;
-	ID	key = 0;
-	BOOL	found = FALSE;
+	T_JSON	root;
+	TS_UUID	u;
+	UB	*b = NULL;
+	INT	len, n;
 
-	meta = (UB *)malloc(OB_ATR_MAX + 1);
-	for ( at = 0; at < 2 && !found && meta != NULL; at++ ) {
-		key = conf_key(OB_OP_ATRRD, (BOOL)( at == 1 ));
-		if ( key <= 0 ) continue;
-		found = (BOOL)( ob_get_atr(key, meta, OB_ATR_MAX, &len) >= E_OK
-			     && js_parse(meta, (INT)len, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
-			     && js_get(&tf, "xfconv", &xc) >= E_OK && js_get(&xc, "ftp", &list) >= E_OK );
-		if ( !found ) {
-			ob_cls_obj(key);
-			key = 0;
-		}
+	if ( conf_find(&u) ) {
+		len = ui_rec_all(&u, 1, 0, &b);
+		n = ( len >= 0 && js_parse(b, len, &root) >= E_OK ) ? conf_parse(&root, c, max) : 0;
+		free(b);
+		return n;
 	}
-	if ( found ) {
-		for ( it.s = NULL; n < max && js_next(&list, &it); n++ ) {
-			XFCCONN	*k = &c[n];
-			UB	e[24];
-
-			memset(k, 0, sizeof(*k));
-			(void)js_get_str(&it, "host", k->host, sizeof(k->host));
-			(void)js_get_str(&it, "name", k->name, sizeof(k->name));
-			k->ssh = js_get_bool(&it, "ssh", FALSE);
-			snprintf((char *)k->port, sizeof(k->port), "%d", (INT)js_get_num(&it, "port", FTP_PORT));
-			(void)js_get_str(&it, "user", k->user, sizeof(k->user));
-			k->keep = js_get_bool(&it, "keep", FALSE);
-			if ( k->keep ) (void)js_get_str(&it, "pass", k->pass, sizeof(k->pass));
-			k->enc = ( js_get_str(&it, "encoding", e, sizeof(e)) > 0 ) ? txc_by_name(e) : TXC_UTF8;
-			if ( k->enc == TXC_AUTO ) k->enc = TXC_UTF8;
-			k->mode = js_get_bool(&it, "pasv", FALSE) ? XFC_DM_PASV : XFC_DM_EPSV;
-			if ( js_get_str(&it, "data", e, sizeof(e)) > 0 ) {
-				k->mode = ( strcmp((char *)e, "active") == 0 ) ? XFC_DM_ACTIVE
-					: ( strcmp((char *)e, "pasv") == 0 ) ? XFC_DM_PASV : XFC_DM_EPSV;
-			}
-			if ( js_get_num(&it, "dataport", 0) > 0 ) {
-				snprintf((char *)k->lport, sizeof(k->lport), "%d", (INT)js_get_num(&it, "dataport", 0));
-			}
-		}
+	n = conf_load_old(FALSE, c, max);
+	if ( n <= 0 ) n = conf_load_old(TRUE, c, max);
+	if ( n > 0 && xfc_conf_save(c, n) < E_OK ) {
+		xfc_log("the connections were not moved to the person's own settings");
 	}
-	free(meta);
-	if ( key > 0 ) ob_cls_obj(key);
 	return n;
 }
 
@@ -345,86 +437,141 @@ LOCAL INT jstr( char *o, INT at, INT max, CONST UB *s )
 	return at;
 }
 
-EXPORT ER xfc_conf_save( CONST XFCCONN *c, INT n )
+/* The list as JSON, {"ftp": [...]}, in a buffer the caller frees; its length in *p_w */
+LOCAL char *conf_text( CONST XFCCONN *c, INT n, INT *p_w )
 {
-	T_JSON	root, tf, xc;
-	UB	*meta, *out;
-	char	*v;
-	SZ	len = 0;
-	INT	at = 0, i, w, from, to;
+	INT	vcap = 64 + n * ( 4 * 2 * XFC_FIELD + 256 );	/* each text escaped at most twice as long */
+	char	*v = (char *)malloc((size_t)vcap);
+	INT	w, i;
+
+	if ( v == NULL ) return NULL;
+	w = snprintf(v, vcap, "{\"ftp\":[");
+	for ( i = 0; i < n; i++ ) {
+		if ( i > 0 ) v[w++] = ',';
+		w += snprintf(v + w, vcap - w, "{\"host\":\"");
+		w = jstr(v, w, vcap, c[i].host);
+		w += snprintf(v + w, vcap - w, "\",\"name\":\"");
+		w = jstr(v, w, vcap, c[i].name);
+		w += snprintf(v + w, vcap - w, "\",\"ssh\":%s", c[i].ssh ? "true" : "false");
+		w += snprintf(v + w, vcap - w, ",\"port\":%d,\"user\":\"", atoi((CONST char *)c[i].port));
+		w = jstr(v, w, vcap, c[i].user);
+		w += snprintf(v + w, vcap - w, "\",\"encoding\":\"%s\",\"pasv\":%s,\"data\":\"%s\","
+			      "\"dataport\":%d,\"keep\":%s",
+			      txc_name(c[i].enc), ( c[i].mode == XFC_DM_PASV ) ? "true" : "false",
+			      ( c[i].mode == XFC_DM_ACTIVE ) ? "active" : ( c[i].mode == XFC_DM_PASV ) ? "pasv" : "epsv",
+			      atoi((CONST char *)c[i].lport), c[i].keep ? "true" : "false");
+		if ( c[i].keep ) {
+			w += snprintf(v + w, vcap - w, ",\"pass\":\"");
+			w = jstr(v, w, vcap, c[i].pass);
+			v[w++] = '"';
+		}
+		v[w++] = '}';
+	}
+	w += snprintf(v + w, vcap - w, "]}");
+	*p_w = w;
+	return v;
+}
+
+/* The person's settings object made, theirs alone, and linked from the box */
+LOCAL ER conf_make( TS_UUID *p_u )
+{
+	static CONST char meta[] =
+		"{\"name\":\"" CONF_NAME "\",\"relationship\":[],\"linktype\":false,\"refCount\":0,"
+		"\"recordCount\":2,\"editable\":true,\"deletable\":true,\"readable\":true,\"applist\":{},"
+		"\"tessronos\":{\"xfconv\":{\"connections\":true},"
+		"\"records\":[{\"n\":0,\"rt\":1},{\"n\":1,\"rt\":15}]}}";
+	T_OBCRD	me;
+	T_OBPRT	prt;
+	T_OBCRE	cr;
+	TS_UUID	box;
+	INT	recno = -1;
+	SZ	asz = 0;
 	ID	key;
 	ER	er;
 
-	key = conf_key(OB_OP_ATRRD | OB_OP_ATRWR, FALSE);
-	if ( key <= 0 ) {
-		return (ER)key;
-	}
-	meta = (UB *)malloc(OB_ATR_MAX + 1);
-	out = (UB *)malloc(OB_ATR_MAX + 1);
-	v = (char *)malloc(8192);
-	er = ( meta != NULL && out != NULL && v != NULL ) ? ob_get_atr(key, meta, OB_ATR_MAX, &len) : E_NOMEM;
-	if ( er >= E_OK && ( js_parse(meta, (INT)len, &root) < E_OK || js_get(&root, "tessronos", &tf) < E_OK
-			  || js_type(&tf) != JS_OBJECT ) ) {
-		er = E_OBJ;
-	}
-	if ( er >= E_OK ) {
-		/* the value of "xfconv" */
-		w = snprintf(v, 8192, "{\"ftp\":[");
-		for ( i = 0; i < n && w < 8000; i++ ) {
-			if ( i > 0 ) v[w++] = ',';
-			w += snprintf(v + w, 8192 - w, "{\"host\":\"");
-			w = jstr(v, w, 8192, c[i].host);
-			w += snprintf(v + w, 8192 - w, "\",\"name\":\"");
-			w = jstr(v, w, 8192, c[i].name);
-			w += snprintf(v + w, 8192 - w, "\",\"ssh\":%s", c[i].ssh ? "true" : "false");
-			w += snprintf(v + w, 8192 - w, ",\"port\":%d,\"user\":\"", atoi((CONST char *)c[i].port));
-			w = jstr(v, w, 8192, c[i].user);
-			w += snprintf(v + w, 8192 - w, "\",\"encoding\":\"%s\",\"pasv\":%s,\"data\":\"%s\","
-				      "\"dataport\":%d,\"keep\":%s",
-				      txc_name(c[i].enc), ( c[i].mode == XFC_DM_PASV ) ? "true" : "false",
-				      ( c[i].mode == XFC_DM_ACTIVE ) ? "active" : ( c[i].mode == XFC_DM_PASV ) ? "pasv" : "epsv",
-				      atoi((CONST char *)c[i].lport), c[i].keep ? "true" : "false");
-			if ( c[i].keep ) {
-				w += snprintf(v + w, 8192 - w, ",\"pass\":\"");
-				w = jstr(v, w, 8192, c[i].pass);
-				v[w++] = '"';
-			}
-			v[w++] = '}';
-		}
-		w += snprintf(v + w, 8192 - w, "]}");
+	if ( ob_get_crd(&me) < E_OK || !conf_uuid(FALSE, &box) ) return E_SYS;
+	memset(&prt, 0, sizeof(prt));
+	prt.owner = me.user;
+	if ( me.ngrp > 0 ) prt.group = me.grp[0];
+	prt.mode = 0600;
+	memset(&cr, 0, sizeof(cr));
+	cr.type = OB_T_STORAGE;
+	cr.sub = OB_S_FILE;
+	cr.json = (CONST UB *)meta;
+	cr.jsonsz = (SZ)strlen(meta);
+	cr.near = box;
+	cr.prt = &prt;
+	er = ob_cre_obj(&cr, p_u);
+	if ( er < E_OK ) return er;
+	/* a new object filled record by record: nobody reads it half made */
+	key = ob_opn_obj(p_u, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_O_EXCL);
+	er = ( key > 0 ) ? E_OK : ( key < 0 ) ? (ER)key : E_SYS;
+	if ( er >= E_OK ) er = ob_apd_rec(key, OB_RT_TAD, 0, &recno);
+	if ( er >= E_OK ) er = ob_wri_rec(key, recno, 0, CONF_TEXT, (SZ)strlen(CONF_TEXT), &asz);
+	if ( er >= E_OK ) er = ob_apd_rec(key, OB_RT_SYSDATA, 0, &recno);
+	if ( key > 0 ) ob_cls_obj(key);
+	if ( er >= E_OK ) er = xfu_box_link(&box, p_u);
+	if ( er < E_OK ) (void)ob_del_obj(p_u);
+	return er;
+}
 
-		/* in place of the old one, or first in "tessronos" */
-		if ( js_get(&tf, "xfconv", &xc) >= E_OK ) {
-			from = (INT)( xc.s - meta );
-			to = from + xc.len;
-		} else {
-			from = to = (INT)( tf.s - meta ) + 1;
-		}
-		if ( len + w + 32 > OB_ATR_MAX ) {
-			er = E_LIMIT;
-		} else {
-			memcpy(out, meta, from);
-			at = from;
-			if ( from == to ) {
-				at += snprintf((char *)out + at, 32, "\"xfconv\":");
-			}
-			memcpy(out + at, v, w);
-			at += w;
-			if ( from == to && tf.len > 2 ) {
-				INT	k;
+/* The list a system before kept in an object's metadata, taken out of it */
+LOCAL void conf_drop_old( BOOL prog )
+{
+	T_JSON	root, tf, xc;
+	UB	*meta = NULL, *out = NULL;
+	INT	len, from, to, k;
+	ID	key;
 
-				for ( k = from; k < (INT)len && ( meta[k] == ' ' || meta[k] == '\n'
-							     || meta[k] == '\r' || meta[k] == '\t' ); k++ ) ;
-				if ( meta[k] != '}' ) out[at++] = ',';
-			}
-			memcpy(out + at, meta + to, len - to);
-			at += (INT)( len - to );
-			er = ob_set_atr(key, out, at);
+	key = conf_key(OB_OP_ATRRD | OB_OP_ATRWR | OB_O_WEXCL, prog);	/* read, changed, written back */
+	if ( key <= 0 ) return;
+	len = ob_atr_read(key, 0, &meta);
+	if ( len >= 0 && js_parse(meta, len, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
+	  && js_get(&tf, "xfconv", &xc) >= E_OK && ( out = (UB *)malloc((size_t)len + 1) ) != NULL ) {
+		/* from the member's name, and a comma on one side of it */
+		to = (INT)( xc.s - meta ) + xc.len;
+		for ( from = (INT)( xc.s - meta ) - 1; from > 0 && meta[from] != '"'; from-- ) ;	/* the name's end */
+		for ( from--; from > 0 && meta[from] != '"'; from-- ) ;				/* its start */
+		for ( k = to; k < len && ( meta[k] == ' ' || meta[k] == '\n' || meta[k] == '\r' || meta[k] == '\t' ); k++ ) ;
+		if ( k < len && meta[k] == ',' ) {
+			to = k + 1;
+		} else {
+			for ( k = from - 1; k > 0 && ( meta[k] == ' ' || meta[k] == '\n' || meta[k] == '\r' || meta[k] == '\t' ); k-- ) ;
+			if ( meta[k] == ',' ) from = k;
 		}
+		memcpy(out, meta, (size_t)from);
+		memcpy(out + from, meta + to, (size_t)( len - to ));
+		(void)ob_set_atr(key, out, from + len - to);
 	}
-	free(meta);
 	free(out);
-	free(v);
+	free(meta);
 	ob_cls_obj(key);
+}
+
+EXPORT ER xfc_conf_save( CONST XFCCONN *c, INT n )
+{
+	TS_UUID	u;
+	char	*v;
+	INT	w = 0;
+	SZ	asz = 0;
+	ID	key;
+	ER	er = E_OK;
+
+	if ( !conf_find(&u) ) er = conf_make(&u);
+	if ( er < E_OK ) return er;
+	v = conf_text(c, n, &w);
+	if ( v == NULL ) return E_NOMEM;
+	key = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE | OB_O_WEXCL);
+	er = ( key > 0 ) ? E_OK : ( key < 0 ) ? (ER)key : E_SYS;
+	/* replaced in one change: a reader sees the old record or the new one */
+	if ( er >= E_OK ) er = ob_rpl_rec(key, 1, v, (SZ)w);
+	(void)asz;
+	if ( key > 0 ) ob_cls_obj(key);
+	free(v);
+	if ( er >= E_OK ) {
+		/* what everyone could read is gone once the person's own object has it */
+		conf_drop_old(FALSE);
+		conf_drop_old(TRUE);
+	}
 	return er;
 }

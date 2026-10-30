@@ -229,6 +229,14 @@ typedef struct {
 	T_FILE	**ofile;
 	INT	nofile;
 	INT	maxofile;
+
+	/*
+	 * Written to the cache and not yet to the disk since dirty_ms: the
+	 * flusher puts it out FAT_FLUSH_MS after (fat_flusher). The volumes
+	 * are in a list for it, from fat_vols.
+	 */
+	UD	dirty_ms;
+	void	*lnext;
 } FATVOL;
 
 /*
@@ -315,7 +323,7 @@ LOCAL ER sect_read( FATVOL *v, UD sect, void *buf )
 {
 	SZ	asize;
 
-	return tk_srea_dev(v->dd, (W)sect, buf, SECTOR_SIZE, &asize);
+	return tk_srea_dev_d(v->dd, (D)sect, buf, SECTOR_SIZE, &asize);
 }
 
 /* 'n' sectors one after another */
@@ -323,7 +331,7 @@ LOCAL ER sects_read( FATVOL *v, UD sect, void *buf, UD n )
 {
 	SZ	asize;
 
-	return tk_srea_dev(v->dd, (W)sect, buf, (SZ)n * SECTOR_SIZE, &asize);
+	return tk_srea_dev_d(v->dd, (D)sect, buf, (SZ)n * SECTOR_SIZE, &asize);
 }
 
 LOCAL ER sects_write( FATVOL *v, UD sect, CONST void *buf, UD n )
@@ -337,13 +345,13 @@ LOCAL ER sects_write( FATVOL *v, UD sect, CONST void *buf, UD n )
 
 		if ( ok < n ) {
 			if ( ok > 0 ) {
-				tk_swri_dev(v->dd, (W)sect, buf, (SZ)ok * SECTOR_SIZE, &asize);
+				tk_swri_dev_d(v->dd, (D)sect, buf, (SZ)ok * SECTOR_SIZE, &asize);
 			}
 			return E_IO;
 		}
 	}
 #endif
-	er = tk_swri_dev(v->dd, (W)sect, buf, (SZ)n * SECTOR_SIZE, &asize);
+	er = tk_swri_dev_d(v->dd, (D)sect, buf, (SZ)n * SECTOR_SIZE, &asize);
 	if ( er < E_OK ) {
 		v->ioerr = TRUE;
 	}
@@ -463,6 +471,8 @@ LOCAL ER buf_flush( FATVOL *v )
 {
 	ER	er;
 	INT	i, pick;
+
+	v->dirty_ms = 0;
 
 	fc_park(v);
 	for (;;) {
@@ -2626,6 +2636,9 @@ EXPORT ER knl_fat_verify( T_MOUNT *m, void *arg )
 
 /* ---------------------------------------------------------------- fimp calls */
 
+LOCAL void vols_add( FATVOL *v );
+LOCAL void vols_del( FATVOL *v );
+
 LOCAL ER fat_mount( T_MOUNT *m )
 {
 	FATVOL	*v;
@@ -2802,6 +2815,9 @@ LOCAL ER fat_mount( T_MOUNT *m )
 
 	m->exinf = v;
 	Kfree(bpb);
+	v->dirty_ms = 0;
+	v->lnext = NULL;
+	vols_add(v);
 
 	return EX_OK;
 
@@ -2818,6 +2834,7 @@ LOCAL ER fat_unmount( T_MOUNT *m )
 	FATVOL	*v = (FATVOL *)m->exinf;
 
 	if ( v == NULL ) return EX_OK;
+	vols_del(v);			/* the flusher no longer looks at it */
 	tk_loc_mtx(v->mtxid, TMO_FEVR);
 	if ( buf_flush(v) >= EX_OK && fsi_write(v) >= EX_OK && v->inuse ) {
 		vol_mark(v, FALSE);
@@ -2973,9 +2990,16 @@ LOCAL ER fat_close( T_FILE *f )
 }
 
 /*
- * Update the directory entry of an open file after a write.
+ * The directory entry of an open file brought up to its first cluster,
+ * size and time, in the volume's sector cache. A write leaves it there
+ * with the sectors of the table it changed, and they go to the disk
+ * together -- the table first (buf_flush) -- when the file is closed,
+ * made sure of (fsync), the volume synced, or the cache wants the room:
+ * a file written a little at a time does not write its entry's sector
+ * at every call. A cut in the power before that leaves the entry
+ * behind its chain, which the look over at mount puts right (7.2).
  */
-LOCAL ER fat_update_ent( FATVOL *v, T_FILE *f )
+LOCAL ER ent_put( FATVOL *v, T_FILE *f )
 {
 	UH	date, time;
 	ER	er;
@@ -2992,8 +3016,15 @@ LOCAL ER fat_update_ent( FATVOL *v, T_FILE *f )
 	wr16(v->buf + f->dir_off + 22, time);
 	wr16(v->buf + f->dir_off + 24, date);
 	v->dirty = TRUE;
+	return EX_OK;
+}
 
-	return buf_flush(v);
+/* The directory entry of an open file brought up to date and written, with the table */
+LOCAL ER fat_update_ent( FATVOL *v, T_FILE *f )
+{
+	ER	er = ent_put(v, f);
+
+	return ( er < EX_OK ) ? er : buf_flush(v);
 }
 
 /*
@@ -3068,6 +3099,48 @@ LOCAL UD sect_run( FATVOL *v, T_FILE *f, UD off, UD clus, UD sect, UD want, BOOL
 		run++;
 	}
 	return run;
+}
+
+/*
+ * The largest file FAT can describe: the size in its directory entry is
+ * 32 bits. A write or a truncation past it is refused (EX_FBIG); a write
+ * that would cross it writes what fits.
+ */
+#define FAT_FILE_MAX		0xFFFFFFFFULL
+
+/*
+ * Bytes [from, to) of the file made zeros, in clusters it already has.
+ * A file that was cut short keeps what it held after the cut in its last
+ * cluster; growing it again, by a truncation or by a write past the end,
+ * must show zeros there and not those bytes.
+ */
+LOCAL ER tail_zero( FATVOL *v, T_FILE *f, UD from, UD to )
+{
+	UD	csize = (UD)v->sec_per_clus * SECTOR_SIZE, clus, sect, soff, n;
+	ER	er = EX_OK;
+
+	while ( from < to && er >= EX_OK ) {
+		er = file_clus(v, f, from / csize, FALSE, &clus);
+		if ( er < EX_OK ) break;
+		sect = clus_to_sect(v, clus) + ( from % csize ) / SECTOR_SIZE;
+		soff = from % SECTOR_SIZE;
+		n = SECTOR_SIZE - soff;
+		if ( n > to - from ) n = to - from;
+		er = buf_load(v, sect);
+		if ( er < EX_OK ) break;
+		knl_memset(v->buf + soff, 0, (SZ)n);
+		v->dirty = TRUE;
+		from += n;
+	}
+	return er;
+}
+
+/* Where the file's last cluster ends, for a file of `size` bytes */
+LOCAL UD clus_end( FATVOL *v, UD size )
+{
+	UD	csize = (UD)v->sec_per_clus * SECTOR_SIZE;
+
+	return ( size + csize - 1 ) / csize * csize;
 }
 
 LOCAL INT fat_read( T_FILE *f, void *buf, SZ len )
@@ -3148,10 +3221,27 @@ LOCAL INT fat_write( T_FILE *f, CONST void *buf, SZ len )
 
 	csize = (UD)v->sec_per_clus * SECTOR_SIZE;
 
+	if ( len <= 0 ) {
+		return 0;
+	}
+	if ( f->offset >= FAT_FILE_MAX ) {
+		return EX_FBIG;
+	}
+	if ( (UD)len > FAT_FILE_MAX - f->offset ) {
+		len = (SZ)( FAT_FILE_MAX - f->offset );
+	}
+
 	tk_loc_mtx(v->mtxid, TMO_FEVR);
 
 	er = vol_touch(v);
 	if ( er < EX_OK ) goto exit;
+	if ( f->ino != 0 && f->offset > f->size ) {
+		/* past the end: what the last cluster held after the end reads as zeros */
+		UD	to = clus_end(v, f->size);
+
+		er = tail_zero(v, f, f->size, ( f->offset < to ) ? f->offset : to);
+		if ( er < EX_OK ) goto exit;
+	}
 	if ( f->ino == 0 ) {			/* first write to an empty file */
 		v->no_zero = (BOOL)( f->offset == 0 && len >= (SZ)csize );
 		er = clus_alloc(v, &clus);
@@ -3202,8 +3292,9 @@ LOCAL INT fat_write( T_FILE *f, CONST void *buf, SZ len )
 	}
 
 	if ( done > 0 ) {
-		ER e = fat_update_ent(v, f);
+		ER e = ent_put(v, f);
 		if ( er >= EX_OK ) er = e;
+		if ( v->dirty_ms == 0 ) v->dirty_ms = now_ms();	/* the flusher's clock starts */
 	}
 
     exit:
@@ -3223,6 +3314,9 @@ LOCAL ER fat_truncate( T_FILE *f, UD len )
 
 	if ( f->mode != FS_IFREG ) {
 		return EX_ISDIR;
+	}
+	if ( len > FAT_FILE_MAX ) {
+		return EX_FBIG;
 	}
 	csize = (UD)v->sec_per_clus * SECTOR_SIZE;
 
@@ -3258,6 +3352,19 @@ LOCAL ER fat_truncate( T_FILE *f, UD len )
 				er = fat_set(v, clus, v->eoc_mark);
 			}
 		}
+	} else if ( len > f->size ) {
+		/* longer: the chain grows to hold it, the clusters added are
+		   zeros, and so is what the last one held after the old end */
+		if ( f->ino == 0 ) {
+			er = clus_alloc(v, &clus);
+			if ( er >= EX_OK ) f->ino = clus;
+		} else {
+			UD	to = clus_end(v, f->size);
+
+			er = tail_zero(v, f, f->size, ( len < to ) ? len : to);
+		}
+		if ( er >= EX_OK ) er = chain_nth(v, f->ino, (len - 1) / csize, TRUE, &clus);
+		if ( er >= EX_OK ) er = buf_flush(v);
 	}
 	if ( er >= EX_OK ) {
 		f->size = len;
@@ -3787,6 +3894,103 @@ LOCAL ER fat_sync( T_MOUNT *m )
 	return er;
 }
 
+/*
+ * The flusher: what a write left in the cache of a volume goes to the
+ * disk FAT_FLUSH_MS after, with the table first, as the TSFS checkpointer
+ * does for its log. A USB stick or a card may be taken out without being
+ * ejected; what was written more than that long before is on it, entries
+ * and table, and the disk reads whole on another machine. Ejecting it,
+ * closing what mounted it (the last descriptor of a mount from a key),
+ * syncing and powering off write everything at once.
+ */
+#define FAT_FLUSH_MS	5000
+
+LOCAL FATVOL	*fat_vols = NULL;
+LOCAL ID	fat_vols_mtx = 0;
+LOCAL ID	fat_flush_tsk = 0;
+
+LOCAL void fat_flusher( INT stacd, void *exinf )
+{
+	FATVOL	*v;
+
+	(void)stacd;
+	(void)exinf;
+	for ( ;; ) {
+		(void)tk_dly_tsk(1000);
+		tk_loc_mtx(fat_vols_mtx, TMO_FEVR);
+		for ( v = fat_vols; v != NULL; v = (FATVOL *)v->lnext ) {
+			UD	since = v->dirty_ms;
+
+			if ( since == 0 || now_ms() - since < FAT_FLUSH_MS ) continue;
+			tk_loc_mtx(v->mtxid, TMO_FEVR);
+			if ( v->dirty_ms != 0 && buf_flush(v) >= EX_OK && v->fsi_dirty ) {
+				(void)fsi_write(v);
+			}
+			tk_unl_mtx(v->mtxid);
+		}
+		tk_unl_mtx(fat_vols_mtx);
+	}
+}
+
+/* A volume put in the flusher's list, the list and the flusher made the first time */
+LOCAL void vols_add( FATVOL *v )
+{
+	T_CMTX	cm;
+	T_CTSK	ct;
+
+	if ( fat_vols_mtx <= 0 ) {
+		cm.exinf = NULL;
+		cm.mtxatr = TA_TFIFO;
+		fat_vols_mtx = tk_cre_mtx(&cm);		/* mounts come one at a time, under fs.c's lock */
+		if ( fat_vols_mtx <= 0 ) return;
+	}
+	tk_loc_mtx(fat_vols_mtx, TMO_FEVR);
+	v->lnext = fat_vols;
+	fat_vols = v;
+	tk_unl_mtx(fat_vols_mtx);
+	if ( fat_flush_tsk <= 0 ) {
+		ct.exinf = NULL;
+		ct.tskatr = TA_HLNG | TA_RNG0;
+		ct.task = (FP)fat_flusher;
+		ct.itskpri = CNF_MAX_TSKPRI - 1;
+		ct.stksz = 4096;
+		fat_flush_tsk = tk_cre_tsk(&ct);
+		if ( fat_flush_tsk > 0 ) {
+			(void)tk_sta_tsk(fat_flush_tsk, 0);
+		} else {
+			tm_printf((UB *)"fatfs: the flusher could not be made (%d)\n", (INT)fat_flush_tsk);
+		}
+	}
+}
+
+LOCAL void vols_del( FATVOL *v )
+{
+	FATVOL	**pp;
+
+	if ( fat_vols_mtx <= 0 ) return;
+	tk_loc_mtx(fat_vols_mtx, TMO_FEVR);
+	for ( pp = &fat_vols; *pp != NULL && *pp != v; pp = (FATVOL **)&(*pp)->lnext ) ;
+	if ( *pp == v ) *pp = (FATVOL *)v->lnext;
+	tk_unl_mtx(fat_vols_mtx);
+}
+
+/* What was written to one file on the disk (fs_fsync): its entry and the table, then the device's cache */
+LOCAL ER fat_fsync( T_FILE *f )
+{
+	FATVOL	*v = (FATVOL *)f->mount->exinf;
+	SZ	asz;
+	ER	er;
+
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	er = ( f->mode == FS_IFREG ) ? fat_update_ent(v, f) : buf_flush(v);
+	if ( er >= EX_OK && v->fsi_dirty ) er = fsi_write(v);
+	tk_unl_mtx(v->mtxid);
+	if ( er >= EX_OK && f->mount->dd > 0 ) {
+		(void)tk_swri_dev(f->mount->dd, TDN_FLUSH, NULL, 0, &asz);	/* a device that has no cache says E_PAR */
+	}
+	return er;
+}
+
 EXPORT CONST T_FIMP knl_fimp_fat = {
 	.name     = "fatfs",
 	.mount    = fat_mount,
@@ -3805,4 +4009,5 @@ EXPORT CONST T_FIMP knl_fimp_fat = {
 	.statvfs  = fat_statvfs,
 	.sync     = fat_sync,
 	.utime    = fat_utime,
+	.fsync    = fat_fsync,
 };

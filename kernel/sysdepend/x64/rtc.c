@@ -9,11 +9,19 @@
 
 /*
  *	rtc.c (x64 PC)
- *	Real time clock: the CMOS clock (ports 70h, 71h), in UTC. Its
- *	registers hold BCD or binary, the hour in 12 or 24 hour form, as
- *	register B says; the century is in the register the FADT names, or
- *	taken as 20 when there is none. A read is taken twice to the same
- *	value, outside an update.
+ *	Real time clock: the CMOS clock (ports 70h, 71h). Its registers hold
+ *	BCD or binary, the hour in 12 or 24 hour form, as register B says;
+ *	the century is in the register the FADT names, or taken as 20 when
+ *	there is none. A read is taken twice to the same value, outside an
+ *	update.
+ *
+ *	What the registers say is a wall clock: the local time on a PC that
+ *	Windows keeps, or UTC. knl_rtc_read and knl_rtc_write deal in UTC
+ *	and leave the offset between the two to the calendar
+ *	(knl_dt_rtc_to_utc, knl_dt_utc_to_rtc in datetime.c), which follows
+ *	the zone the firmware gave the clock (EFI_TIME.TimeZone, handed over
+ *	by the loader) or else the setting kept in the calendar object
+ *	(9.5.1).
  */
 
 #include <sys/machine.h>
@@ -22,6 +30,7 @@
 
 #include "kernel.h"
 #include "sysdepend.h"
+#include <ts/dt.h>
 
 #define CMOS_ADDR	0x70
 #define CMOS_DATA	0x71
@@ -98,7 +107,8 @@ LOCAL void read_raw( T_CMOSTM *t )
 	t->cent = ( c != 0 ) ? cmos_rd(c) : -1;
 }
 
-EXPORT ER knl_rtc_read( UD *p_sec )
+/* The registers as a wall clock: seconds from 1970-01-01 of that clock */
+EXPORT ER knl_rtc_read_wall( D *p_wall )
 {
 	T_CMOSTM	a, b;
 	UB		regb;
@@ -135,13 +145,15 @@ EXPORT ER knl_rtc_read( UD *p_sec )
 	if ( a.mon < 1 || a.mon > 12 || a.day < 1 || a.day > 31 || a.hour > 23 || a.min > 59 || a.sec > 59 ) {
 		return E_IO;
 	}
-	*p_sec = (UD)( days_from_civil(year, a.mon, a.day) * 86400
-		     + a.hour * 3600 + a.min * 60 + a.sec );
+	*p_wall = days_from_civil(year, a.mon, a.day) * 86400
+		+ a.hour * 3600 + a.min * 60 + a.sec;
 	return E_OK;
 }
 
-EXPORT ER knl_rtc_write( UD sec )
+/* A wall clock (seconds from 1970-01-01 of that clock) into the registers */
+EXPORT ER knl_rtc_write_wall( D wall )
 {
+	UD	sec = ( wall > 0 ) ? (UD)wall : 0;
 	INT	y, m, d, s = (INT)( sec % 86400 );
 	UB	regb = cmos_rd(0x0b);
 	INT	v[7], i;
@@ -173,6 +185,55 @@ EXPORT ER knl_rtc_write( UD sec )
 	}
 	cmos_wr(0x0b, regb & ~0x80);
 	return E_OK;
+}
+
+/* The system clock (UNIX seconds) from the RTC */
+EXPORT ER knl_rtc_read( UD *p_sec )
+{
+	D	wall, utc;
+	ER	er = knl_rtc_read_wall(&wall);
+
+	if ( er < E_OK ) {
+		return er;
+	}
+	utc = knl_dt_rtc_to_utc(wall);
+	*p_sec = ( utc > 0 ) ? (UD)utc : 0;
+	return E_OK;
+}
+
+/* The system clock (UNIX seconds) into the RTC, as the clock keeps it */
+EXPORT ER knl_rtc_write( UD sec )
+{
+	return knl_rtc_write_wall(knl_dt_utc_to_rtc((D)sec));
+}
+
+/*
+ * The zone the firmware gave its clock, minutes east of UTC: FALSE when
+ * it gave none (EFI_UNSPECIFIED_TIMEZONE, as most PCs do). The loader
+ * hands over EFI_TIME.TimeZone, for which UTC = the clock + TimeZone.
+ */
+EXPORT BOOL knl_rtc_fw_zone( INT *p_minutes )
+{
+	CONST T_BOOTINFO	*bi = knl_bootinfo;
+
+	if ( bi == NULL || ( bi->flags & BI_F_RTC_TZ ) == 0 ) {
+		return FALSE;
+	}
+	*p_minutes = -bi->rtc_tz;
+	return TRUE;
+}
+
+/*
+ * The system clock moved by sec seconds, the RTC left as it is: the
+ * clock taken from the RTC again once the calendar says how it is kept.
+ */
+EXPORT void knl_rtc_shift( D sec )
+{
+	BEGIN_CRITICAL_SECTION;
+	KLK_MISC();
+	knl_real_time_ofs += sec * (D)NS_PER_SEC;
+	KLK_UNMISC();
+	END_CRITICAL_SECTION;
 }
 
 #endif /* X64 */

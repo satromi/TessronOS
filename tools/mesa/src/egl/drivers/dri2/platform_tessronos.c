@@ -58,6 +58,9 @@
 #include "pipe/p_context.h"
 #include "pipe/p_screen.h"
 #include "pipe-loader/pipe_loader.h"
+#ifdef __x86_64__
+#include "intel/dev/intel_debug.h"
+#endif
 #include "ts_glport.h"
 
 #define TS_DAMAGE_MAX	16	/* rectangles of a frame shown at once (WM_PUT_MAX) */
@@ -594,23 +597,83 @@ ts_add_configs(_EGLDisplay *disp)
  */
 #define TS_CHECK_SIZE   64
 
-static bool
-ts_gpu_check(struct pipe_screen *ps, char *why, size_t n)
+/*
+ * The GPU as the console names it: the V3D of the Raspberry Pi, or on
+ * a PC Intel's (iris)
+ */
+#ifdef __x86_64__
+#define TS_GPU_NAME     "the GPU"
+#else
+#define TS_GPU_NAME     "the V3D"
+#endif
+
+/*
+ * The frame of the check read back: the pixels that are not as cleared
+ * (B, G, R, A: 0.75, 0.5, 0.25 and 1 of 255), -1 when it cannot be read.
+ * 'what' gets the first pixels and the last, and how many different
+ * words the frame holds, for the console.
+ */
+static int
+ts_check_read(struct pipe_context *pipe, struct pipe_resource *res, char *what, size_t n, uint8_t first[4])
 {
-   struct pipe_context *pipe = ps->context_create(ps, NULL, 0);
-   struct pipe_resource templ, *res;
-   struct pipe_surface surf;
-   struct pipe_fence_handle *fence = NULL;
    struct pipe_transfer *tr = NULL;
    struct pipe_box box;
-   union pipe_color_union c;
    const uint8_t *map;
-   int bad = 0;
+   uint32_t seen[4];
+   int bad = 0, nseen = 0, more = 0;
 
-   if (!pipe) {
-      snprintf(why, n, "no context");
-      return false;
+   u_box_2d(0, 0, TS_CHECK_SIZE, TS_CHECK_SIZE, &box);
+   map = pipe->texture_map(pipe, res, 0, PIPE_MAP_READ, &box, &tr);
+   if (!map) {
+      snprintf(what, n, "not read");
+      return -1;
    }
+   for (int y = 0; y < TS_CHECK_SIZE; y++) {
+      const uint8_t *p = map + (size_t)y * tr->stride;
+      for (int x = 0; x < TS_CHECK_SIZE; x++, p += 4) {
+         uint32_t w;
+         int k;
+
+         if (abs(p[0] - 191) > 1 || abs(p[1] - 128) > 1 || abs(p[2] - 64) > 1 || p[3] != 255)
+            bad++;
+         memcpy(&w, p, 4);
+         for (k = 0; k < nseen && seen[k] != w; k++)
+            ;
+         if (k == nseen) {
+            if (nseen < 4)
+               seen[nseen++] = w;
+            else
+               more = 1;
+         }
+      }
+   }
+   {
+      const uint32_t *w0 = (const uint32_t *)map;
+      const uint32_t *wl = (const uint32_t *)(map + (size_t)(TS_CHECK_SIZE - 1) * tr->stride);
+
+      memcpy(first, map, 4);
+
+      snprintf(what, n, "%d wrong, stride %u, words %08x %08x %08x %08x .. %08x, %s%d kinds (%08x %08x %08x %08x)",
+               bad, (unsigned)tr->stride, w0[0], w0[1], w0[2], w0[3], wl[TS_CHECK_SIZE - 1],
+               more ? "over " : "", nseen, seen[0], nseen > 1 ? seen[1] : 0, nseen > 2 ? seen[2] : 0,
+               nseen > 3 ? seen[3] : 0);
+   }
+   pipe->texture_unmap(pipe, tr);
+   return bad;
+}
+
+/* A frame of the check, cleared and waited for: 0, or why not on the console's terms */
+static int
+ts_check_clear(struct pipe_screen *ps, struct pipe_context *pipe, bool linear, struct pipe_resource **out)
+{
+   struct pipe_resource templ, *res;
+   struct pipe_surface surf;
+   struct pipe_framebuffer_state fb;
+   struct pipe_fence_handle *fence = NULL;
+   union pipe_color_union c;
+   int r = 0;
+
+   *out = NULL;
    memset(&templ, 0, sizeof(templ));
    templ.target = PIPE_TEXTURE_2D;
    templ.format = PIPE_FORMAT_B8G8R8A8_UNORM;
@@ -619,47 +682,131 @@ ts_gpu_check(struct pipe_screen *ps, char *why, size_t n)
    templ.depth0 = 1;
    templ.array_size = 1;
    templ.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW;
-   res = ps->resource_create(ps, &templ);
-   if (!res) {
-      pipe->destroy(pipe);
-      snprintf(why, n, "no buffer");
-      return false;
+   if (linear) {
+      /* no tiling, no compression and no fast clear: the clear is drawn into the pixels */
+      templ.bind |= PIPE_BIND_LINEAR;
+      templ.usage = PIPE_USAGE_STAGING;
    }
+   res = ps->resource_create(ps, &templ);
+   if (!res)
+      return 1;
    memset(&surf, 0, sizeof(surf));
    pipe_surface_init(pipe, &surf, res, 0, 0);
    c.f[0] = 0.25f;
    c.f[1] = 0.5f;
    c.f[2] = 0.75f;
    c.f[3] = 1.0f;
-   pipe->clear_render_target(pipe, &surf, &c, 0, 0, TS_CHECK_SIZE, TS_CHECK_SIZE, false);
+   /*
+    * Cleared as glClear clears: the frame bound as the render target and
+    * pipe->clear. Not pipe->clear_render_target, which iris takes as its
+    * own surface (struct iris_surface, whose view the driver makes in
+    * set_framebuffer_state) and so reads the view's format from the
+    * pipe_surface's layers, 0: R32G32B32A32_FLOAT, the clear colour's
+    * floats written as they are, 16 bytes a pixel, on past the frame.
+    */
+   memset(&fb, 0, sizeof(fb));
+   fb.width = TS_CHECK_SIZE;
+   fb.height = TS_CHECK_SIZE;
+   fb.layers = 1;
+   fb.nr_cbufs = 1;
+   fb.cbufs[0] = surf;
+   pipe->set_framebuffer_state(pipe, &fb);
+   pipe->clear(pipe, PIPE_CLEAR_COLOR0, 0xf, 0, NULL, &c, 0.0, 0);
+   memset(&fb, 0, sizeof(fb));
+   pipe->set_framebuffer_state(pipe, &fb);
    pipe->flush(pipe, &fence, 0);
-   if (!fence || !ps->fence_finish(ps, pipe, fence, 2000000000ull)) {
+   if (!fence || !ps->fence_finish(ps, pipe, fence, 2000000000ull))
+      r = 2;
+   ps->fence_reference(ps, &fence, NULL);
+   pipe_resource_reference(&surf.texture, NULL);
+   *out = res;
+   return r;
+}
+
+static bool
+ts_gpu_check(struct pipe_screen *ps, const char *driver, char *why, size_t n)
+{
+   struct pipe_context *pipe = ps->context_create(ps, NULL, 0);
+   struct pipe_resource *res = NULL;
+   char what[200];
+   uint8_t first[4];
+   int bad, r;
+
+   if (!pipe) {
+      snprintf(why, n, "no context");
+      return false;
+   }
+   r = ts_check_clear(ps, pipe, false, &res);
+   if (r == 1) {
+      pipe->destroy(pipe);
+      snprintf(why, n, "no buffer");
+      return false;
+   }
+   if (r == 2) {
       snprintf(why, n, "the frame did not end");
       bad = -1;
-   }
-   ps->fence_reference(ps, &fence, NULL);
-   if (bad == 0) {
-      u_box_2d(0, 0, TS_CHECK_SIZE, TS_CHECK_SIZE, &box);
-      map = pipe->texture_map(pipe, res, 0, PIPE_MAP_READ, &box, &tr);
-      if (!map) {
+   } else {
+      bad = ts_check_read(pipe, res, what, sizeof(what), first);
+      if (bad < 0)
          snprintf(why, n, "the frame cannot be read");
-         bad = -1;
-      } else {
-         /* B, G, R, A: 0.75, 0.5, 0.25 and 1 of 255 */
-         for (int y = 0; y < TS_CHECK_SIZE; y++) {
-            const uint8_t *p = map + (size_t)y * tr->stride;
-            for (int x = 0; x < TS_CHECK_SIZE; x++, p += 4) {
-               if (abs(p[0] - 191) > 1 || abs(p[1] - 128) > 1 || abs(p[2] - 64) > 1 || p[3] != 255)
-                  bad++;
-            }
-         }
-         if (bad > 0)
-            snprintf(why, n, "%d pixels wrong (first row %02x %02x %02x %02x)", bad,
-                     map[0], map[1], map[2], map[3]);
-         pipe->texture_unmap(pipe, tr);
+      else if (bad > 0)
+         snprintf(why, n, "%d pixels wrong (first row %02x %02x %02x %02x)", bad, first[0], first[1],
+                  first[2], first[3]);
+   }
+#ifdef __x86_64__
+   if (bad > 0) {
+      /*
+       * Where it goes wrong, on one line: the same frame read again after
+       * 100 ms (a job told over before it was), and a frame without
+       * tiling, compression or a fast clear, cleared and read the same
+       * way (only the clear of a compressed frame and its resolve wrong)
+       */
+      char line[720], again[200], lin[200];
+      uint8_t f2[4];
+      struct pipe_resource *lres = NULL;
+      int r2, lin_bad = -1;
+
+      usleep(100000);
+      (void)ts_check_read(pipe, res, again, sizeof(again), f2);
+      r2 = ts_check_clear(ps, pipe, true, &lres);
+      if (r2 == 1)
+         snprintf(lin, sizeof(lin), "not made");
+      else if (r2 == 2)
+         snprintf(lin, sizeof(lin), "did not end");
+      else
+         lin_bad = ts_check_read(pipe, lres, lin, sizeof(lin), f2);
+      pipe_resource_reference(&lres, NULL);
+      snprintf(line, sizeof(line), "egl: the check: %s; again after 100 ms: %s; linear: %s\n", what, again, lin);
+      ts_gl_log(line);
+
+      /*
+       * Intel's, for the record only: the colour compression (CCS) and the
+       * fast clears turned off for a while (what INTEL_DEBUG noccs,nofc
+       * does, read once by the driver at its first screen), and a tiled
+       * frame made and checked again. Right then, it is the compressed
+       * frame's clear, resolve or copy that goes wrong. The GPU is not
+       * used so: the system's part has to be put right instead.
+       */
+      if (driver != NULL && strcmp(driver, "iris") == 0) {
+         struct pipe_resource *res2 = NULL;
+         int bad2 = -1;
+
+         BITSET_SET(intel_debug, DEBUG_NO_CCS);
+         BITSET_SET(intel_debug, DEBUG_NO_FAST_CLEAR);
+         r2 = ts_check_clear(ps, pipe, false, &res2);
+         if (r2 == 0)
+            bad2 = ts_check_read(pipe, res2, again, sizeof(again), f2);
+         else
+            snprintf(again, sizeof(again), r2 == 1 ? "not made" : "did not end");
+         pipe_resource_reference(&res2, NULL);
+         snprintf(line, sizeof(line), "egl: the check with colour compression and fast clears off: %s (%s)\n",
+                  again, bad2 == 0 ? "right" : "wrong too");
+         ts_gl_log(line);
+         BITSET_CLEAR(intel_debug, DEBUG_NO_CCS);
+         BITSET_CLEAR(intel_debug, DEBUG_NO_FAST_CLEAR);
       }
    }
-   pipe_resource_reference(&surf.texture, NULL);
+#endif
    pipe_resource_reference(&res, NULL);
    pipe->destroy(pipe);
    return bad == 0;
@@ -680,12 +827,16 @@ ts_probe_gpu(_EGLDisplay *disp)
       ts_gl_log("egl: softpipe, as asked\n");
       return false;
    }
+#ifdef __x86_64__
+   if (ts_gl_gpu_kind() != TS_GL_GPU_V3D && ts_gl_gpu_kind() != TS_GL_GPU_INTEL)
+#else
    if (ts_gl_gpu_kind() != TS_GL_GPU_V3D)
+#endif
       return false;                  /* no GPU: softpipe, nothing to tell */
    dri2_dpy->fd_render_gpu = ts_gl_drm_open();
    if (dri2_dpy->fd_render_gpu < 0) {
       ts_gl_probe_note(TS_GL_PROBE_NOOPEN, NULL);
-      ts_gl_log("egl: the V3D is not open to this process (no address space), softpipe\n");
+      ts_gl_log("egl: " TS_GPU_NAME " is not open to this process (no address space), softpipe\n");
       return false;
    }
    dri2_dpy->fd_display_gpu = dri2_dpy->fd_render_gpu;
@@ -714,8 +865,9 @@ ts_probe_gpu(_EGLDisplay *disp)
       if (dri2_create_screen(disp)) {
          ts_gl_probe_note(TS_GL_PROBE_NODRAW, dri2_dpy->driver_name);
          t0 = os_time_get_nano();
-         if (ts_gpu_check(dri2_dpy->dri_screen_render_gpu->base.screen, why, sizeof(why))) {
-            snprintf(line, sizeof(line), "egl: the V3D (%s), a frame cleared and read back in %d ms\n",
+         if (ts_gpu_check(dri2_dpy->dri_screen_render_gpu->base.screen, dri2_dpy->driver_name, why,
+                          sizeof(why))) {
+            snprintf(line, sizeof(line), "egl: " TS_GPU_NAME " (%s), a frame cleared and read back in %d ms\n",
                      dri2_dpy->driver_name, (int)((os_time_get_nano() - t0) / 1000000));
             ts_gl_log(line);
             ts_gl_probe_note(TS_GL_PROBE_DRAWS, dri2_dpy->driver_name);
@@ -735,8 +887,13 @@ ts_probe_gpu(_EGLDisplay *disp)
       }
    }
 fail:
-   snprintf(line, sizeof(line), "egl: the V3D did not draw (%s), softpipe\n", why);
+   snprintf(line, sizeof(line), "egl: " TS_GPU_NAME " did not draw (%s), softpipe\n", why);
    ts_gl_log(line);
+#ifdef __x86_64__
+   /* the requests of i915 the driver made and those refused: where it stopped */
+   if (dri2_dpy->driver_name != NULL && strcmp(dri2_dpy->driver_name, "iris") == 0)
+      ts_gl_drm_tell(dri2_dpy->driver_name);
+#endif
    free(dri2_dpy->driver_name);
    dri2_dpy->driver_name = NULL;
    close(dri2_dpy->fd_render_gpu);

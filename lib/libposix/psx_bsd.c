@@ -170,7 +170,11 @@ int sysctl( const int *name, unsigned int namelen, void *oldp, size_t *oldlenp,
 	if ( namelen == 2 && name[0] == CTL_HW ) {
 		switch ( name[1] ) {
 		  case HW_MACHINE:
+#if defined(__x86_64__)
+		  case HW_MACHINE_ARCH:	s = "x86_64"; break;
+#else
 		  case HW_MACHINE_ARCH:	s = "aarch64"; break;
+#endif
 		  case HW_MODEL:	s = "TessronOS"; break;
 		  case HW_NCPU:		v = sysconf(_SC_NPROCESSORS_ONLN); isnum = 1; break;
 		  case HW_PAGESIZE:	v = 4096; isnum = 1; break;

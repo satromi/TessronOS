@@ -1,0 +1,26 @@
+<tad version="1.0" encoding="UTF-8" filename="キー配列のデータボックス">
+<document>
+<p>キー配列のデータボックス</p>
+<p>キー配列のウインドウの上の帯と下の一覧の定義。帯は英字配列、かな配列、キーボードの形、キーに書く文字のポップアップと、付け替えのスイッチ、案内の行。一覧は付け替えたキーと〈元に戻す〉〈すべて元に戻す〉。どれもキー配列が値を読み書きする。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,616,66" title="キー配列" kind="bare">
+<text x="8" y="24">英字：</text>
+<popup num="11" rect="52,6,240,32" value="1"><name>キーの刻印どおり</name><name>Dvorak</name></popup>
+<text x="256" y="24">かな：</text>
+<popup num="12" rect="300,6,456,32" value="1"><name>JISかな</name><name>TRONかな配列</name><name>親指シフト</name></popup>
+<text x="472" y="24">形：</text>
+<popup num="13" rect="500,6,608,32" value="1"><name>日本語</name><name>英語</name><name>TRON</name></popup>
+<text x="8" y="56">表示：</text>
+<popup num="14" rect="52,38,152,64" value="1"><name>英字</name><name>かな</name></popup>
+<switch num="15" rect="168,39,276,63">付け替え</switch>
+<text num="1" x="292" y="56"> </text>
+</panel>
+<panel num="2" rect="0,0,616,126" title="付け替えたキー" kind="bare">
+<text num="1" x="8" y="18"> </text>
+<list num="21" rect="8,24,480,120"></list>
+<button num="22" rect="492,24,608,50" off="true">元に戻す</button>
+<button num="23" rect="492,58,608,84" off="true">すべて元に戻す</button>
+</panel>
+</databox>
+</tad>

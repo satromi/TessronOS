@@ -104,18 +104,44 @@ static INT snd_r( INT rec )
 	return (INT)w;
 }
 
+/*
+ * Every object of a kind, however many: asked a page at a time, each
+ * page from the last object of the one before. How many, the list in
+ * *p_ids (free it).
+ */
+static INT objs_all( UINT type, UINT sub, TS_UUID **p_ids )
+{
+	TS_UUID	*ids = NULL, *ni;
+	INT	n = 0, got;
+
+	*p_ids = NULL;
+	for ( ;; ) {
+		ni = (TS_UUID *)realloc(ids, sizeof(TS_UUID) * (size_t)( n + 64 ));
+		if ( ni == NULL ) break;
+		ids = ni;
+		got = 0;
+		if ( ob_lst_obj(type, sub, ( n > 0 ) ? &ids[n - 1] : NULL, ids + n, 64, &got) < E_OK ) break;
+		n += got;
+		if ( got < 64 ) break;
+	}
+	*p_ids = ids;
+	return n;
+}
+
 static ER dev_open( void )
 {
-	TS_UUID		list[16];
-	INT		cnt = 0, i;
+	TS_UUID		*list;
+	INT		cnt, i;
 	SDPcmMode	m;
 	SZ		asz = 0;
 
 	if ( snd > 0 ) return E_OK;
-	if ( ob_lst_obj(OB_T_DEVICE, OB_S_SOUND, NULL, list, 16, &cnt) < E_OK || cnt <= 0 ) return E_NOEXS;
+	/* the first sound device that opens, of every one there is */
+	cnt = objs_all(OB_T_DEVICE, OB_S_SOUND, &list);
 	for ( i = 0; i < cnt && snd <= 0; i++ ) {
 		snd = ob_opn_obj(&list[i], OB_OP_R | OB_OP_WRITE);
 	}
+	free(list);
 	if ( snd <= 0 ) {
 		snd = -1;
 		return E_NOEXS;

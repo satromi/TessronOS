@@ -446,7 +446,7 @@ LOCAL INT win_named( CONST char *title, INT ms )
 	char	t[WM_TITLE_MAX];
 
 	for ( ; ms > 0; ms -= 100 ) {
-		for ( wid = 1; wid <= WM_MAX_WIN; wid++ ) {
+		for ( wid = 1; wid <= knl_wm_nwin(); wid++ ) {
 			if ( wm_title(wid, t, sizeof(t)) < 0 ) continue;
 			for ( k = 0; title[k] != 0 && t[k] == title[k]; k++ ) ;
 			if ( title[k] == 0 && t[k] == 0 ) return wid;

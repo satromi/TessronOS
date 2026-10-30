@@ -45,6 +45,7 @@ extern "C" {
 #define GPU_KIND_NONE		0
 #define GPU_KIND_V3D		1	/* Broadcom V3D (Raspberry Pi 5: V3D 7.1) */
 #define GPU_KIND_VIRTIO		2	/* virtio-gpu with virgl (the emulated machine; planned) */
+#define GPU_KIND_INTEL		3	/* Intel's integrated graphics, 9th generation (x64) */
 #define GPU_KIND_TEST		15	/* a backend the in-kernel tests put in */
 
 /* What the GPU can run (T_GPUINFO.feature) */
@@ -53,6 +54,7 @@ extern "C" {
 #define GPU_FEAT_CSD		0x0004	/* compute shader dispatch */
 #define GPU_FEAT_CACHE		0x0008	/* cache clean jobs */
 #define GPU_FEAT_MMU		0x0010	/* its own MMU: BOs need not be contiguous */
+#define GPU_FEAT_BATCH		0x0020	/* batch buffers run by an engine's command streamer */
 
 typedef struct {
 	UINT	kind;		/* GPU_KIND_* */
@@ -94,6 +96,7 @@ typedef struct {
 #define GPU_JOB_TFU		2	/* texture formatting (T_GPUTFU) */
 #define GPU_JOB_CSD		3	/* compute dispatch (T_GPUCSD) */
 #define GPU_JOB_CACHE		4	/* clean the GPU's caches to memory */
+#define GPU_JOB_BATCH		5	/* a batch buffer on an engine (T_GPUBATCH) */
 
 /* T_GPUCL.flags */
 #define GPU_CL_FLUSH_CACHE	0x0001	/* clean the caches when the renderer is done */
@@ -133,6 +136,25 @@ typedef struct {
 	UW	coef[4];
 } T_GPUCSD;
 
+/*
+ * A batch buffer, run by an engine's command streamer in one of the
+ * hardware contexts of the address space the job is submitted in
+ * (Intel). Its address is a GPU address of that space, 48 bits.
+ */
+#define GPU_ENG_RENDER		0
+#define GPU_ENG_COPY		1
+#define GPU_HWC_MAX		16	/* hardware contexts of a space */
+#define GPU_BATCH_FRESH		0x0001	/* the context made anew before the batch runs */
+
+typedef struct {
+	UW	start_lo;	/* the batch's GPU address */
+	UW	start_hi;
+	UW	len;		/* bytes */
+	UW	engine;		/* GPU_ENG_* */
+	UW	hwc;		/* which of the space's hardware contexts */
+	UW	flags;		/* GPU_BATCH_* */
+} T_GPUBATCH;
+
 typedef struct {
 	UINT	kind;		/* GPU_JOB_* */
 	D	after;		/* fence to wait for before it starts; 0: none */
@@ -140,6 +162,7 @@ typedef struct {
 		T_GPUCL		cl;
 		T_GPUTFU	tfu;
 		T_GPUCSD	csd;
+		T_GPUBATCH	batch;
 	} u;
 } T_GPUJOB;
 
@@ -233,6 +256,20 @@ IMPORT void	knl_gpu_as_unbind( T_GPUAS *as, T_GPUBO *bo, UW va );
 
 /* knl_gpu_submit in a space of its own (NULL: the kernel's) */
 IMPORT D	knl_gpu_submit_as( CONST T_GPUJOB *job, T_GPUBO *CONST *bo, INT nbo, T_GPUAS *as );
+
+#ifdef __x86_64__
+/*
+ * A BO entered in the space at an address its user chose (48 bits,
+ * page aligned), and taken out from there: a user side driver that
+ * places its buffers itself (Intel's). E_NOSPT when the backend gives
+ * its spaces no such place.
+ */
+IMPORT ER	knl_gpu_as_bind_at( T_GPUAS *as, T_GPUBO *bo, UD va );
+IMPORT void	knl_gpu_as_unbind_at( T_GPUAS *as, T_GPUBO *bo, UD va );
+
+/* Intel's integrated graphics: the render and copy engines (device/gpu/intel) */
+IMPORT ER	knl_igt_init( void );
+#endif
 
 #ifdef __cplusplus
 }

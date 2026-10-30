@@ -75,6 +75,20 @@ typedef struct {
 	/* A BO's pages entered in it at a new address, and taken out again */
 	ER	(*as_bind)( void *priv, void *as, T_GPUBO *bo, UD npages, UW *p_va );
 	void	(*as_unbind)( void *priv, void *as, UW va, UD npages );
+#ifdef __x86_64__
+	/*
+	 * A BO's pages entered in a space at the address given (the
+	 * space's user chose it), and taken out from there. NULL when the
+	 * backend's spaces have no such place.
+	 */
+	ER	(*as_bind_at)( void *priv, void *as, T_GPUBO *bo, UD npages, UD va );
+	void	(*as_unbind_at)( void *priv, void *as, UD va, UD npages );
+	/*
+	 * The GPU sees memory through the processor's caches: processes
+	 * map BOs cached
+	 */
+	BOOL	coherent;
+#endif
 } T_GPUOPS;
 
 /* The backend's own address space of one of the common layer's */

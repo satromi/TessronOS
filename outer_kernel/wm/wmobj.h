@@ -20,10 +20,17 @@
 #include <ts/wm.h>
 #include <ts/part.h>
 
-#define WM_MAX_WIN	1024		/* windows open at once */
+/*
+ * Window numbers: there is no bound on how many windows are open at
+ * once; a window's number is its place in a table that grows (wm.c), and
+ * goes into its handle in 28 bits (wmobj.c).
+ */
+#define WM_WIN_LAST	0x0FFFFFFF
 
 /* wm.c */
 IMPORT ER   knl_wm_title( INT wid, char *buf, INT max );
+/* The highest window number there is room for now: the windows are 1 to this */
+IMPORT INT  knl_wm_nwin( void );
 
 /* part.c: a panel's parts, copied out */
 IMPORT INT  knl_pn_count( INT pid, BOOL *p_menu );

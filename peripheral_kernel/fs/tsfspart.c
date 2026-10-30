@@ -55,7 +55,7 @@ LOCAL ER dev_blocks( CONST char *part, UD *p_blocks )
 	if ( er < E_OK ) {
 		return er;
 	}
-	*p_blocks = (UD)info.blockcont / TSFSBLK_SECT_PER_BLK;
+	*p_blocks = (UD)info.blockcont_d / TSFSBLK_SECT_PER_BLK;
 	return E_OK;
 }
 
@@ -83,7 +83,12 @@ LOCAL ER vol_grow( CONST char *part, UD *p_from, UD *p_to )
 	er = ts_ref_vol_blk(vol, &sb);
 	*p_from = *p_to = sb.total_blocks;
 	if ( er >= E_OK && blocks >= sb.total_blocks + SLACK_BLOCKS ) {
+		tm_printf((UB *)"tsfs: %s: the volume of %ld blocks (state %x, incompat %lx) to its device's %ld\n",
+			  part, (D)sb.total_blocks, (UINT)sb.state, (UD)sb.incompat, (D)blocks);
 		er = ts_grow_vol_blk(vol, blocks, p_from, p_to);
+		if ( er < E_OK ) {
+			tm_printf((UB *)"tsfs: %s: not grown (%d)\n", part, (INT)er);
+		}
 	}
 	if ( mine ) {
 		ER	e2 = ts_cls_vol_blk(vol);
@@ -185,6 +190,20 @@ EXPORT void knl_sysvol_grow( CONST char *part )
 	}
 	size = gp.last - gp.first + 1;
 	bytes = 0;
+	{
+		T_TSFSBLK_SB	sb;
+		UD		dev = 0;
+		ID		vol = ts_vol_blk_of(part);
+
+		/* where it starts from: the table, the partition's device, and its volume when it is open */
+		(void)dev_blocks(part, &dev);
+		tm_printf((UB *)"sysvol: %s: sectors %ld to %ld of %ld in the table, %ld blocks on its device",
+			  part, (D)gp.first, (D)gp.last, (D)gp.nsect, (D)dev);
+		if ( vol > 0 && ts_ref_vol_blk(vol, &sb) >= E_OK ) {
+			tm_printf((UB *)", its volume %ld blocks", (D)sb.total_blocks);
+		}
+		tm_printf((UB *)"\n");
+	}
 	if ( !gp.tsfs ) {
 		why = "not a TSFS partition";
 	} else if ( size >= limit ) {
@@ -200,12 +219,20 @@ EXPORT void knl_sysvol_grow( CONST char *part )
 	   brought up to it, after a cut in the power between the two */
 	if ( bytes == 0 ) {
 		bytes = size * 512;
+	} else {
+		/* said before it starts: a grow that does not come back is seen on the screen console */
+		tm_printf((UB *)"sysvol: %s growing from %d MB to %d MB\n", part, (INT)( size / MB_SECT ),
+			  (INT)( limit / MB_SECT ));
 	}
 	er = ( gp.tsfs ) ? knl_tsfs_part_grow(part, bytes, &from, &to) : E_OBJ;
 	sysvol_from = from;
 	sysvol_to = to;
 	if ( er >= E_OK && to > from ) {
 		tm_printf((UB *)"sysvol: grown %d MB -> %d MB\n", (INT)( from >> 20 ), (INT)( to >> 20 ));
+	} else if ( why != NULL && er < E_OK && er != E_LIMIT ) {
+		/* the partition may not grow, and bringing its volume up to it failed */
+		tm_printf((UB *)"sysvol: %d MB, not grown (%s); its volume of %d MB not brought up to it (%d)\n",
+			  (INT)( size / MB_SECT ), why, (INT)( from >> 20 ), (INT)er);
 	} else if ( why != NULL ) {
 		tm_printf((UB *)"sysvol: %d MB, not grown (%s)\n", (INT)( size / MB_SECT ), why);
 	} else {

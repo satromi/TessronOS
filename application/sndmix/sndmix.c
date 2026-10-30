@@ -31,10 +31,14 @@
  *
  *	A change is written at once and so heard at once; the device keeps
  *	it for the next start by itself, a second after the last change.
- *	The page is read again every second, so programs that come and go,
- *	and volumes set elsewhere (システム環境設定's 音量 is the whole's),
- *	show up; a part the hand has just moved is left as the hand put it
- *	for a second, so that the reading does not pull it back mid-drag.
+ *	The page is read again when the device tells that the mixer changed
+ *	(OB_E_CHANGE of OB_SND_MIX: a program come or gone, one that starts
+ *	or stops playing, a volume set here or elsewhere -- システム環境設定's
+ *	音量 is the whole's) and when the system object tells that the output
+ *	changed (OB_SYS_SOUND); nothing is looked at between. A part the hand
+ *	has just moved is left as the hand put it for a second, so that a
+ *	reading does not pull it back mid-drag, and read again once the
+ *	second is over.
  *
  *	Everything is the window manager's parts from the data box
  *	(SYSDEF_BOX_SNDMIX): volumes, switches, boxes, the icon part that
@@ -42,15 +46,14 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <ts/ui.h>
 #include <ts/conf.h>
 #include <ts/sysdef.h>
 #include <ts/snd.h>
 
-#define TICK_MS		20
-#define LOOK_TICKS	50		/* the device read again every second */
-#define HOLD_TICKS	50		/* a part just moved is left alone this long */
+#define HOLD_MS		1000		/* a part just moved is left alone this long */
 #define TEXT_MAX	4096
 
 #define PN_MAIN		1
@@ -75,14 +78,33 @@
 LOCAL UI	ui;
 LOCAL BOOL	closing;
 LOCAL ID	dev = 0;		/* the sound device's object */
-LOCAL SDMix	mix;
+LOCAL SDMix	mix_none;		/* no mixer: nothing at all */
+LOCAL SDMix	*mixp = &mix_none;	/* the mixer as last read: the whole and every program */
+#define mix	(*mixp)
 LOCAL INT	top;			/* the program in the first row, from 0 */
 LOCAL INT	vis = START_ROWS;	/* rows the work area has room for */
 LOCAL UB	top_prog[16];		/* the program in the first row, to keep it there */
 LOCAL INT	top_pid = -1;
 LOCAL INT	said_vis = -1, said_top = -1, said_n = -1, said_pid = -2;	/* the list as last said */
-LOCAL INT	held_all;		/* ticks since the whole was last moved */
-LOCAL INT	held[NROW_MAX];		/* and each row */
+LOCAL UD	hold_all;		/* the whole left as the hand put it until then, 0 not */
+LOCAL UD	hold_row[NROW_MAX];	/* and each row */
+
+/*
+ * What the parts were last set to from the mixer. A reading sets a part
+ * only when what the mixer says of it is other than that, or the row now
+ * shows another program: a reading told of something else -- a program
+ * come or gone, the click's own sound -- leaves a switch the hand has
+ * just turned as it is, before the program has taken the turn.
+ */
+typedef struct {
+	BOOL	set;
+	UB	prog[16];
+	INT	pid;
+	UINT	vol, mute;
+} SHOWN;
+
+LOCAL SHOWN	shown_all;
+LOCAL SHOWN	shown_row[NROW_MAX];
 LOCAL INT	shown_rows = -1;	/* rows shown, -1 not yet set */
 LOCAL char	said[512];		/* what was last said of the programs */
 
@@ -106,8 +128,19 @@ LOCAL BOOL mix_read( void )
 	LOCAL ER said_er = 1;
 
 	if ( dev_open() > 0 ) {
-		er = ob_rea_rec(dev, OB_SND_MIX, 0, &mix, sizeof(mix), &asz);
-		if ( er >= E_OK && asz < (SZ)sizeof(mix) ) er = E_OBJ;
+		UB	*b = NULL;
+		INT	cap = 0, len = ui_key_all(dev, OB_SND_MIX, 0, &b, &cap);
+
+		er = ( len < 0 ) ? (ER)len : E_OK;
+		asz = ( len < 0 ) ? 0 : len;
+		if ( er >= E_OK && ( asz < (SZ)sizeof(SDMix)
+				  || asz < (SZ)SND_MIX_SIZE(((SDMix *)b)->napp) ) ) er = E_OBJ;
+		if ( er >= E_OK ) {
+			if ( mixp != &mix_none ) free(mixp);
+			mixp = (SDMix *)b;
+		} else {
+			free(b);
+		}
 	}
 	if ( er < E_OK && er != said_er ) {
 		char	s[80];
@@ -130,21 +163,25 @@ LOCAL ER mix_put( CONST SDMixSet *s )
 /* The output the sound plays on now, or would, for a person */
 LOCAL void out_name( char *out, INT max )
 {
-	static SDOut	o[SND_OUT_MAX];
-	SZ		asz = 0;
-	INT		n, k, at = -1;
+	SDOut		*o;
+	UB		*b = NULL;
+	INT		n, k, at = -1, cap = 0, len;
 	CONST char	*nm;
 
 	snprintf(out, max, "（なし）");
-	if ( dev_open() <= 0 || ob_rea_rec(dev, OB_SND_OUTS, 0, o, sizeof(o), &asz) < E_OK ) return;
-	n = (INT)( asz / (SZ)sizeof(SDOut) );
+	if ( dev_open() <= 0 || ( len = ui_key_all(dev, OB_SND_OUTS, 0, &b, &cap) ) < 0 ) return;
+	o = (SDOut *)b;
+	n = len / (INT)sizeof(SDOut);
 	for ( k = 0; k < n && at < 0; k++ ) {
 		if ( ( o[k].flags & SND_OF_PLAYING ) != 0 ) at = k;
 	}
 	for ( k = 1; k < n && at < 0; k++ ) {
 		if ( ( o[k].flags & SND_OF_NOSOUND ) == 0 ) at = k;	/* what 自動 would take */
 	}
-	if ( at < 0 ) return;
+	if ( at < 0 ) {
+		free(b);
+		return;
+	}
 	nm = (CONST char *)o[at].name;
 	switch ( o[at].kind ) {
 	case SND_BE_USB:
@@ -157,12 +194,16 @@ LOCAL void out_name( char *out, INT max )
 		snprintf(out, max, "%s：%s", ( strcmp((CONST char *)o[at].id, "hdmi1") == 0 ) ? "ＨＤＭＩ１" : "ＨＤＭＩ０",
 			 ( nm[0] != 0 ) ? nm : "画面");
 		break;
+	case SND_BE_HDA:
+		snprintf(out, max, "内蔵のサウンド：%s", ( nm[0] != 0 ) ? nm : "ＨＤオーディオ");
+		break;
 	default:
 		break;
 	}
 	if ( ( o[at].flags & SND_OF_PLAYING ) == 0 ) {
 		strncat(out, "（いまは鳴っていません）", max - strlen(out) - 1);
 	}
+	free(b);
 }
 
 /* ---------------------------------------------------------------- the page */
@@ -254,16 +295,21 @@ LOCAL void fill( void )
 	INT	k, n, at = 0, i, shown;
 
 	if ( !mix_read() ) {
-		memset(&mix, 0, sizeof(mix));
+		if ( mixp != &mix_none ) free(mixp);
+		mixp = &mix_none;
 		ui_set_text(&ui, P_OUT, "（サウンドデバイスがありません）");
 	} else {
 		out_name(t, sizeof(t));
 		ui_set_text(&ui, P_OUT, t);
 	}
-	if ( held_all >= HOLD_TICKS ) {
+	if ( ui_now() >= hold_all && ( !shown_all.set || shown_all.vol != ( mix.lv << 16 | mix.rv )
+				       || shown_all.mute != mix.mute ) ) {
 		vol_show(P_LEFT, P_LEFT_BOX, (INT)mix.lv);
 		vol_show(P_RIGHT, P_RIGHT_BOX, (INT)mix.rv);
 		ui_set_value(&ui, P_MUTE, mix.mute != 0);
+		shown_all.set = TRUE;
+		shown_all.vol = mix.lv << 16 | mix.rv;
+		shown_all.mute = mix.mute;
 	}
 	n = (INT)mix.napp;
 	top_find(n);
@@ -278,7 +324,10 @@ LOCAL void fill( void )
 		a = &mix.app[i];
 		uuid_text(a->prog, u);
 		if ( u[0] == 0 && a->pid == 0 ) {
-			snprintf(u, sizeof(u), "%s", SYSDEF_SND_BOX);	/* the system's own: the sound box's */
+			TS_UUID	snd;
+
+			/* the system's own: the icon of システムの音 */
+			if ( ob_fnd_sys(SYSROLE_SOUNDS, SYSDEF_SND_BOX, &snd) >= E_OK ) uuid_text(snd.b, u);
 		}
 		ui_set_text(&ui, P_ROW(k) + R_ICON, u);
 		/* two of the same name (started from one file) are told apart by their process */
@@ -296,13 +345,24 @@ LOCAL void fill( void )
 			}
 		}
 		ui_set_text(&ui, P_ROW(k) + R_NAME, t);
-		if ( held[k] >= HOLD_TICKS ) {
-			vol_show(P_ROW(k) + R_VOL, P_ROW(k) + R_VOL_BOX, (INT)a->vol);
-			ui_set_value(&ui, P_ROW(k) + R_MUTE, a->mute != 0);
+		if ( ui_now() >= hold_row[k] ) {
+			SHOWN	*w = &shown_row[k];
+
+			if ( !w->set || memcmp(w->prog, a->prog, 16) != 0 || w->pid != a->pid
+			  || w->vol != a->vol || w->mute != a->mute ) {
+				vol_show(P_ROW(k) + R_VOL, P_ROW(k) + R_VOL_BOX, (INT)a->vol);
+				ui_set_value(&ui, P_ROW(k) + R_MUTE, a->mute != 0);
+				w->set = TRUE;
+				memcpy(w->prog, a->prog, 16);
+				w->pid = a->pid;
+				w->vol = a->vol;
+				w->mute = a->mute;
+			}
 		}
 	}
 	shown = ( n - top < vis ) ? n - top : vis;
 	if ( shown < 0 ) shown = 0;
+	for ( k = shown; k < NROW_MAX; k++ ) shown_row[k].set = FALSE;	/* set again when shown again */
 	if ( shown != shown_rows ) {
 		for ( k = 0; k < NROW_MAX; k++ ) row_show(k, k < shown);
 		shown_rows = shown;
@@ -343,7 +403,7 @@ LOCAL void wind( INT first )
 
 	top = first;
 	top_keep((INT)mix.napp);	/* the program now first is the one kept first */
-	for ( k = 0; k < NROW_MAX; k++ ) held[k] = HOLD_TICKS;
+	for ( k = 0; k < NROW_MAX; k++ ) hold_row[k] = 0;
 	fill();
 }
 
@@ -399,7 +459,7 @@ LOCAL void all_set( INT moved )
 	s.rv = (UW)r;
 	s.mute = ( ui_value(&ui, P_MUTE) != 0 );
 	er = mix_put(&s);
-	held_all = 0;
+	hold_all = ui_now() + HOLD_MS;
 	snprintf(t, sizeof(t), "sndmix: whole %d %d mute %d (%d)\n", l, r, (INT)s.mute, (INT)er);
 	tm_putstring((CONST UB *)t);
 }
@@ -428,7 +488,7 @@ LOCAL void row_set( INT k )
 	er = mix_put(&s);
 	a->vol = s.lv;
 	a->mute = s.mute;
-	held[k] = 0;
+	hold_row[k] = ui_now() + HOLD_MS;
 	snprintf(t, sizeof(t), "sndmix: %s %d mute %d (%d)\n", (CONST char *)a->name, v, (INT)s.mute, (INT)er);
 	tm_putstring((CONST UB *)t);
 }
@@ -472,11 +532,78 @@ LOCAL void menu( CONST T_OBNTM *m )
 	}
 }
 
+/* When the first part left as the hand put it is to be read again, 0 none */
+LOCAL UD hold_next( void )
+{
+	UD	at = 0;
+	INT	k;
+
+	if ( hold_all != 0 ) at = hold_all;
+	for ( k = 0; k < NROW_MAX; k++ ) {
+		if ( hold_row[k] != 0 && ( at == 0 || hold_row[k] < at ) ) at = hold_row[k];
+	}
+	return at;
+}
+
+/* The parts whose second is over: no more left alone */
+LOCAL void hold_over( void )
+{
+	UD	now = ui_now();
+	INT	k;
+
+	if ( hold_all != 0 && now >= hold_all ) hold_all = 0;
+	for ( k = 0; k < NROW_MAX; k++ ) {
+		if ( hold_row[k] != 0 && now >= hold_row[k] ) hold_row[k] = 0;
+	}
+}
+
+#define NTF_MIX		12		/* the id of the notices of the mixer */
+#define NTF_OUT		13		/* and of what plays sound (the system object) */
+
+/*
+ * The mixer and the output watched, asked before the page is first read
+ * so that nothing that changes after that read goes untold
+ */
+LOCAL ID mix_watch( void )
+{
+	T_OBNTF	req;
+	TS_UUID	u;
+	ID	k = 0;
+
+	memset(&req, 0, sizeof(req));
+	req.events = OB_E_CHANGE;
+	req.id = NTF_MIX;
+	if ( dev_open() > 0 ) (void)ob_ntf_evt(dev, OB_SND_MIX, &req, ui.port);
+	req.id = NTF_OUT;
+	if ( ui_uuid(SYSDEF_SYSTEM, &u) >= E_OK && ( k = ob_opn_obj(&u, OB_OP_ATRRD) ) > 0
+	  && ob_ntf_evt(k, OB_SYS_SOUND, &req, ui.port) <= 0 ) {
+		ob_cls_obj(k);
+		k = 0;
+	}
+	return ( k > 0 ) ? k : 0;
+}
+
+/*
+ * What plays sound, the record the output's notice is of, read whole: a
+ * change after this read is told again (the page names the output from
+ * the device's own list, OB_SND_OUTS)
+ */
+LOCAL void out_read( void )
+{
+	TS_UUID	u;
+	UB	*b = NULL;
+
+	if ( ui_uuid(SYSDEF_SYSTEM, &u) >= E_OK ) (void)ui_rec_all(&u, OB_SYS_SOUND, 0, &b);
+	free(b);
+}
+
 int main( void )
 {
 	T_OBNTM	m;
 	SZ	asz = 0;
-	INT	id, ev, k, tick = 0;
+	INT	id, ev;
+	ID	ksys;
+	BOOL	told;
 
 	ui_icon(SYSDEF_PROG_SNDMIX);
 	ui_attr(WM_ATTR_RESIZE | WM_ATTR_RBAR);
@@ -494,13 +621,23 @@ int main( void )
 		}
 	}
 	rows_fit();
-	held_all = HOLD_TICKS;
-	for ( k = 0; k < NROW_MAX; k++ ) held[k] = HOLD_TICKS;
+	ksys = mix_watch();
+	out_read();
 	fill();
 	tm_putstring((CONST UB *)"sndmix: ready\n");
 
+	/* until something is told, or a part's second of being left alone is over */
 	while ( !closing ) {
-		while ( !closing && ob_rea_rec(ui.port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+		UD	at = hold_next();
+
+		told = FALSE;
+		for ( TMO tmo = ( at != 0 ) ? ui_left(at) : TMO_FEVR;
+		      !closing && ui_wait(&ui, &m, tmo) >= E_OK; tmo = TMO_POL ) {
+			if ( m.id == NTF_MIX || m.id == NTF_OUT ) {
+				if ( m.id == NTF_OUT ) out_read();
+				told = TRUE;		/* the mixer or the output changed: read once the notices are taken */
+				continue;
+			}
 			ev = ui_event(&ui, &m, &id);
 			switch ( ev ) {
 			case UI_EV_CLOSE:
@@ -532,18 +669,14 @@ int main( void )
 				break;
 			}
 		}
-		if ( !closing ) {
-			(void)tk_dly_tsk(TICK_MS);
-			if ( held_all < HOLD_TICKS ) held_all++;
-			for ( k = 0; k < NROW_MAX; k++ ) {
-				if ( held[k] < HOLD_TICKS ) held[k]++;
-			}
-			if ( ++tick >= LOOK_TICKS ) {
-				tick = 0;
-				fill();		/* programs come and go, volumes set elsewhere */
-			}
+		if ( closing ) break;
+		if ( at != 0 && ui_now() >= at ) {
+			hold_over();
+			told = TRUE;		/* what a part left alone shows, read again */
 		}
+		if ( told ) fill();
 	}
+	if ( ksys > 0 ) ob_cls_obj(ksys);
 	if ( dev > 0 ) ob_cls_obj(dev);
 	ui_close(&ui);
 	tm_putstring((CONST UB *)"sndmix: closed\n");

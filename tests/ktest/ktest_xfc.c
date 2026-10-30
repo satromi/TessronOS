@@ -25,7 +25,10 @@
  *	links to as TADjs file sets. Under NET=user it also asks for SSH,
  *	which is refused as not there yet, then connects to the FTP server
  *	on the host through its panel, takes a file in, writes it back, and
- *	the settings keep the connection but not the password.
+ *	the settings keep the connection but not the password. The
+ *	connections are kept in a settings object of the person's own, read
+ *	and written by its owner alone, and a list a system before kept in
+ *	ファイル変換の箱's metadata is moved there.
  *
  *	What the accessory did is read from the console, where it says it.
  */
@@ -223,6 +226,41 @@ LOCAL BOOL superfloppy( char *name, INT max )
 	return FALSE;
 }
 
+/*
+ * The superfloppy also attached at its place in the file layer
+ * (FS_MEDIA_DIR "/" name), for this test to look at what ファイル変換
+ * wrote through the disk's root it opened (fs_opn_vol): the two share
+ * the disk's mount. Taken off again with on FALSE.
+ */
+LOCAL ID	sf_key;
+
+LOCAL void sf_attach( CONST char *name, BOOL on )
+{
+	TS_UUID	list[64];
+	T_OBREF	r;
+	INT	cnt = 0, i;
+
+	if ( !on ) {
+		if ( sf_key > 0 ) {
+			(void)fs_detach_dev(sf_key);
+			ob_cls_obj(sf_key);
+		}
+		sf_key = 0;
+		return;
+	}
+	if ( sf_key > 0 || ob_lst_obj(OB_T_DEVICE, OB_S_DISK, NULL, list, 64, &cnt) < E_OK ) return;
+	for ( i = 0; i < cnt && i < 64; i++ ) {
+		if ( ob_ref_obj(&list[i], &r) < E_OK || knl_strcmp((CONST char *)r.name, name) != 0 ) continue;
+		sf_key = ob_opn_obj(&list[i], OB_OP_R | OB_OP_WRITE);
+		if ( sf_key <= 0 || fs_attach_dev(sf_key, NULL, 0) < E_OK ) {
+			tm_printf((UB *)"  %s not attached at its place\n", name);
+			if ( sf_key > 0 ) ob_cls_obj(sf_key);
+			sf_key = 0;
+		}
+		return;
+	}
+}
+
 /* A file of the file layer whole into buf; its length or -1 */
 LOCAL INT fs_all( CONST char *path, UB *buf, INT max )
 {
@@ -358,12 +396,12 @@ LOCAL void drop( CONST TS_UUID *u, INT depth )
 	}
 }
 
-/* The box a 取込 made taken out of ファイル変換の箱 and thrown away with what it holds */
+/* The box a 取込 made taken out of the person's cabinet and thrown away with what it holds */
 LOCAL void drop_box( CONST TS_UUID *box )
 {
 	TS_UUID	home;
 
-	if ( ts_str_to_uuid(SYSDEF_XFCONV_BOX, &home) >= E_OK ) (void)om_obj_link_del(&home, box);
+	if ( ts_str_to_uuid(SYSDEF_CABINET, &home) >= E_OK ) (void)om_obj_link_del(&home, box);
 	drop(box, 4);
 }
 
@@ -517,21 +555,21 @@ LOCAL INT open_sf( INT wid, TS_UUID *fwin )
 
 	type(wid, sfname);
 	press(wid, K_ENTER, 0);
-	if ( !wait_for(pos, "xfconv: mounted /media/", 100, NULL, 0) ) return -1;
+	if ( !wait_for(pos, "xfconv: opened disk ", 100, NULL, 0) ) return -1;
 	cat3(line, "xfconv: window ", sfname, "");
 	if ( !wait_for(pos, line, 50, NULL, 0) ) return -1;
 	if ( !wait_for(pos, "xfconv: - SUB/", 100, NULL, 0) ) return -1;
 	return wait_window(sfname, fwin, 30);
 }
 
-/* A file list closed: the volume it mounted taken off again */
+/* A file list closed: the disk it opened let go again */
 LOCAL BOOL close_sf( INT fwid )
 {
 	char	line[64];
 	UD	pos = log_now();
 
 	ctrl(fwid, 'e');
-	cat3(line, "xfconv: unmounted ", sfname, "");
+	cat3(line, "xfconv: closed disk ", sfname, "");
 	return wait_for(pos, line, 100, NULL, 0);
 }
 
@@ -567,6 +605,7 @@ LOCAL void test_disk( void )
 	KT_ASSERT(wait_for(pos, line, 10, NULL, 0));		/* the disk listed */
 	cat3(dir, FS_MEDIA_DIR, "/", sfname);
 	cat3(a, dir, "/", "SUB (2)");
+	sf_attach(sfname, TRUE);
 	rm_dir(a);				/* from a run before */
 
 	/* opened: mounted, its root listed in a window of its own */
@@ -576,6 +615,7 @@ LOCAL void test_disk( void )
 	KT_ASSERT(fwid > 0);
 	if ( fwid <= 0 ) {
 		finish(pid, &win);
+	sf_attach(sfname, FALSE);
 		return;
 	}
 	KT_ASSERT(wait_for(pos, "xfconv: - HELLO.TXT ", 10, NULL, 0));
@@ -668,6 +708,7 @@ LOCAL void test_disk( void )
 
 	/* the window closed: the disk taken off */
 	KT_ASSERT(close_sf(fwid));
+	sf_attach(sfname, FALSE);
 	KT_ASSERT(fs_open(b, O_RDONLY | O_DIRECTORY) < 0);
 	finish(pid, &win);
 	sub_box = box;
@@ -737,6 +778,7 @@ LOCAL void test_arg( void )
 		return;
 	}
 	cat3(dir, FS_MEDIA_DIR, "/", sfname);
+	sf_attach(sfname, TRUE);
 	(void)ts_uuid_to_str(&sub_obj, us, sizeof(us));
 
 	fwid = open_sf(wid, &fwin);
@@ -761,8 +803,117 @@ LOCAL void test_arg( void )
 		KT_ASSERT(close_sf(fwid));
 	}
 	finish(pid, &win);
+	sf_attach(sfname, FALSE);
 	drop_box(&sub_box);
 	KT_ASSERT_EQ(refs(&sub_obj), -1);		/* gone with its box */
+}
+
+/* ---------------------------------------------------------------- the connections' settings */
+
+/* A person's settings object of ファイル変換's connections among the box's links, FALSE none */
+LOCAL BOOL conf_obj( TS_UUID *p_u )
+{
+	TS_UUID	home, ids[64];
+	UB	*meta;
+	SZ	size = 0;
+	INT	n = 0, i;
+	BOOL	hit = FALSE;
+
+	if ( ts_str_to_uuid(SYSDEF_XFCONV_BOX, &home) < E_OK
+	  || ob_lst_lnk(&home, NULL, ids, 64, &n) < E_OK ) return FALSE;
+	for ( i = 0; i < n && i < 64 && !hit; i++ ) {
+		meta = om_obj_meta(&ids[i], &size);
+		if ( meta != NULL && find(meta, (INT)size, "\"connections\":true", 0) >= 0 ) {
+			*p_u = ids[i];
+			hit = TRUE;
+		}
+		if ( meta != NULL ) Kfree(meta);
+	}
+	return hit;
+}
+
+/* Every such object taken out of the box and thrown away */
+LOCAL void conf_drop( void )
+{
+	TS_UUID	home, u;
+	INT	i;
+
+	if ( ts_str_to_uuid(SYSDEF_XFCONV_BOX, &home) < E_OK ) return;
+	for ( i = 0; i < 8 && conf_obj(&u); i++ ) {
+		(void)om_obj_link_del(&home, &u);
+		drop(&u, 0);
+	}
+}
+
+/*
+ * The list a system before kept in the box's metadata, which every user
+ * reads, password and all: moved at the accessory's start into a
+ * settings object only its owner reads and writes, and taken out of the
+ * box.
+ */
+LOCAL void test_conf( void )
+{
+	static CONST char old[] =
+		"\"xfconv\":{\"ftp\":[{\"host\":\"10.9.8.7\",\"name\":\"old\",\"ssh\":false,\"port\":2121,"
+		"\"user\":\"ktuser\",\"encoding\":\"utf-8\",\"pasv\":false,\"data\":\"epsv\",\"dataport\":0,"
+		"\"keep\":true,\"pass\":\"ktsecret\"}]},";
+	UB	pbuf[OB_PRT_SIZE(16, 4)];
+	T_OBPRT	*prt = (T_OBPRT *)pbuf;
+	TS_UUID	home, u, win;
+	UB	*meta, *nm, *rec;
+	SZ	size = 0, asz = 0;
+	INT	at, ol = s_len(old), wid;
+	ID	pid;
+
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_XFCONV_BOX, &home), E_OK);
+	conf_drop();
+	meta = om_obj_meta(&home, &size);
+	KT_ASSERT(meta != NULL);
+	if ( meta == NULL ) return;
+	at = find(meta, (INT)size, "\"tessronos\"", 0);
+	if ( at >= 0 ) at = find(meta, (INT)size, "{", at);
+	KT_ASSERT(at >= 0 && find(meta, (INT)size, "\"xfconv\"", 0) < 0);
+	nm = ( at >= 0 ) ? (UB *)Kmalloc(size + (SZ)ol + 1) : NULL;
+	if ( nm != NULL ) {
+		knl_memcpy(nm, meta, at + 1);
+		knl_memcpy(nm + at + 1, old, ol);
+		knl_memcpy(nm + at + 1 + ol, meta + at + 1, (INT)size - at - 1);
+		KT_ASSERT_ER(om_obj_meta_put(&home, nm, size + (SZ)ol), E_OK);
+		Kfree(nm);
+	}
+	Kfree(meta);
+
+	pid = start(NULL, &win, &wid);
+	KT_ASSERT(pid > 0 && wid > 0);
+	if ( pid > 0 && wid > 0 ) finish(pid, &win);
+
+	/* gone from the box, everything else of its metadata as it was */
+	meta = om_obj_meta(&home, &size);
+	KT_ASSERT(meta != NULL && find(meta, (INT)size, "\"xfconv\"", 0) < 0
+		  && find(meta, (INT)size, "ktsecret", 0) < 0 && find(meta, (INT)size, "\"access\"", 0) >= 0);
+	if ( meta != NULL ) Kfree(meta);
+
+	/* in the person's own object, with the password asked to be kept, read and written by its owner alone */
+	KT_ASSERT(conf_obj(&u));
+	if ( !conf_obj(&u) ) return;
+	rec = om_obj_record(&u, 1, &size);
+	KT_ASSERT(rec != NULL && find(rec, (INT)size, "\"host\":\"10.9.8.7\"", 0) >= 0
+		  && find(rec, (INT)size, "\"port\":2121", 0) >= 0 && find(rec, (INT)size, "\"pass\":\"ktsecret\"", 0) >= 0);
+	if ( rec != NULL ) Kfree(rec);
+	KT_ASSERT_ER(ob_get_prt(&u, prt, sizeof(pbuf), &asz), E_OK);
+	KT_ASSERT_EQ(prt->mode & 0777, 0600);
+	KT_ASSERT_EQ(prt->nacl, 0);
+
+	/* started again, it reads it from there and leaves the box alone */
+	pid = start(NULL, &win, &wid);
+	KT_ASSERT(pid > 0 && wid > 0);
+	if ( pid > 0 && wid > 0 ) finish(pid, &win);
+	{
+		TS_UUID	again;
+
+		KT_ASSERT(conf_obj(&again) && ts_uuid_cmp(&again, &u) == 0);
+	}
+	conf_drop();
 }
 
 #ifdef KT_FTP_PORT
@@ -794,7 +945,7 @@ LOCAL INT ftp_panel( INT wid )
  */
 LOCAL void test_ftp( void )
 {
-	TS_UUID	win, box, u, prog, fwin;
+	TS_UUID	win, box, u, conf, fwin;
 	char	line[256], want[64];
 	UB	*rec, *meta;
 	SZ	size = 0;
@@ -856,9 +1007,9 @@ LOCAL void test_ftp( void )
 	cat3(want, "xfconv: - KTEST (", line, ").TXT 24");
 	KT_ASSERT(wait_for(pos, want, 100, NULL, 0));
 
-	/* kept: the host, not the password */
-	(void)ts_str_to_uuid(SYSDEF_PROG_XFCONV, &prog);
-	meta = om_obj_meta(&prog, &size);
+	/* kept in ファイル変換の箱, the person's (the program object is the system's): the host, not the password */
+	KT_ASSERT(conf_obj(&conf));
+	meta = om_obj_record(&conf, 1, &size);
 	KT_ASSERT(meta != NULL && find(meta, (INT)size, "\"host\":\"10.0.2.2\"", 0) >= 0
 		  && find(meta, (INT)size, "\"pass\"", 0) < 0);
 	if ( meta != NULL ) Kfree(meta);
@@ -903,7 +1054,7 @@ LOCAL void test_ftp( void )
 			rec = om_obj_record(&u, 1, &size);
 			KT_ASSERT(rec != NULL && size == 24 && bytes_cmp(rec, "TessronOS FTP test file\n", 24) == 0);
 			if ( rec != NULL ) Kfree(rec);
-			meta = om_obj_meta(&prog, &size);
+			meta = om_obj_record(&conf, 1, &size);
 			KT_ASSERT(meta != NULL && find(meta, (INT)size, "\"data\":\"active\"", 0) >= 0);
 			if ( meta != NULL ) Kfree(meta);
 			pos = log_now();
@@ -923,6 +1074,7 @@ EXPORT void ktest_xfc( void )
 	if ( logb == NULL ) return;
 	KT_RUN(test_disk);
 	KT_RUN(test_arg);
+	KT_RUN(test_conf);
 #ifdef KT_FTP_PORT
 	KT_RUN(test_ftp);
 #endif

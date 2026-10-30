@@ -700,9 +700,10 @@ LOCAL void test_names( void )
 
 LOCAL void test_listing( void )
 {
-	char		p[FS_PATH_MAX], d[FS_PATH_MAX], nm[16];
-	T_DIRENT	de[4];
-	UB		seen[NLIST];
+	static char	p[FS_PATH_MAX], d[FS_PATH_MAX];
+	char		nm[16];
+	static T_DIRENT	de[4];
+	static UB	seen[NLIST];
 	VOL		*v;
 	UD		f0;
 	INT		fd, n, i, k, dots, other;
@@ -785,8 +786,9 @@ LOCAL char *uuid_name( char *out, INT n, CONST char *end )
  */
 LOCAL void test_many_names( void )
 {
-	char		p[FS_PATH_MAX], q[FS_PATH_MAX], d[FS_PATH_MAX], nm[64];
-	T_DIRENT	de[5];
+	static char	p[FS_PATH_MAX], q[FS_PATH_MAX], d[FS_PATH_MAX];
+	char		nm[64];
+	static T_DIRENT	de[5];
 	VOL		*v;
 	UD		f0;
 	INT		fd, n, i, k, cnt;
@@ -1676,7 +1678,7 @@ LOCAL BOOL cut_state( VOL *v, INT kind, CONST char *from, CONST char *to, BOOL d
 
 LOCAL void test_rename_cut( void )
 {
-	char	from[FS_PATH_MAX], to[FS_PATH_MAX], dir[FS_PATH_MAX];
+	static char	from[FS_PATH_MAX], to[FS_PATH_MAX], dir[FS_PATH_MAX];
 	CONST char *nm;
 	VOL	*v;
 	UD	f0, want;

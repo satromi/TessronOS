@@ -1,0 +1,55 @@
+# パターン編集 (design 17.13), for tools/ui_run.py: the figure 画用紙 opened, its
+# menu's 表示 > パターン編集 chosen, the editor a window of the desktop's like any
+# other, its tools a panel of parts down its right side. Its window is at 140,140,
+# its work area from 146,168: the dots from 156,178 (12 a dot), the panel from
+# 362,218. A colour chosen from the panel's swatches, a dot drawn, the rectangle
+# tool chosen and a rectangle drawn, the pattern turned and the turn taken back,
+# put into the figure with 入替, and the window closed from its menu.
+open 019a0f91-066f-706f-93da-ffe8150d6207
+wait 2000
+win 画用紙
+click 500 400 1
+wait 600
+move 500 461
+wait 150
+move 560 461
+wait 400
+move 660 461
+wait 150
+move 660 501
+wait 150
+click 660 501
+expect pattern: opened 2
+wait 500
+win パターン編集
+shot fpat_open
+# the red of the swatches
+click 460 256
+expect pattern: colour ee0000
+# a dot, then a rectangle with 長方形
+click 162 184
+click 492 363
+expect pattern: tool 1
+drag 186 208 222 244
+wait 300
+shot fpat_drawn
+# 右回, and 復旧 takes it back
+click 383 489
+wait 300
+shot fpat_turned
+click 510 523
+wait 300
+# 入替: into the figure under its number
+click 450 523
+expect pattern: 2 put in the figure
+wait 300
+shot fpat_put
+# closed from the window's menu, 閉じる under the pointer
+click 300 300 1
+wait 600
+move 302 301
+wait 150
+click 302 301
+expect pattern: closed
+wait 300
+shot fpat_closed

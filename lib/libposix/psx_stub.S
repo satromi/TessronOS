@@ -18,6 +18,12 @@
 
 #include <ts/svc.h>
 
+/*
+ * The stub of one call. Another architecture's file (lib/libposix/
+ * x86_64/psx_stub.S) defines its own SVCSTUB and SVCSTUB_ARCH and
+ * includes this one for the list.
+ */
+#ifndef SVCSTUB_ARCH
 	.text
 	.balign	4
 
@@ -31,6 +37,7 @@
 	ret
 	.size	\name, . - \name
 	.endm
+#endif
 
 	SVCSTUB	ts_spn_prc,	TSN_TS_SPN_PRC
 	SVCSTUB	ts_get_inh,	TSN_TS_GET_INH
@@ -48,6 +55,8 @@
 	SVCSTUB	ts_get_ppid,	TSN_TS_GET_PPID
 	SVCSTUB	ts_ref_psx,	TSN_TS_REF_PSX
 	SVCSTUB	ts_lst_prc,	TSN_TS_LST_PRC
+	SVCSTUB	ts_spn_obj,	TSN_TS_SPN_OBJ
+	SVCSTUB	ts_lkp_obj,	TSN_TS_LKP_OBJ
 
 	SVCSTUB	fs_dup,		TSN_FS_DUP
 	SVCSTUB	fs_pipe,	TSN_FS_PIPE

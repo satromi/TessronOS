@@ -444,12 +444,24 @@ LOCAL void test_fault_abort( void )
 	(void)tm_sprintf((UB *)w, (CONST UB *)"SVCPROG.ELF(pid %d)", pid);
 	KT_ASSERT(dialog_says(w));
 	KT_ASSERT(dialog_says("プロセッサの例外"));
+#if defined(X64)
+	KT_ASSERT(dialog_says("例外 ページフォールト(マップされていないアドレスへの書込み)\n"));
+	KT_ASSERT(dialog_says("ベクタ 14、"));
+	KT_ASSERT(dialog_says("アドレス(CR2) " FAULT_VA));
+	KT_ASSERT(dialog_says("PC(RIP) 0x0000000000"));
+	KT_ASSERT(dialog_says("RBP 0x0000"));
+#else
 	KT_ASSERT(dialog_says("例外 データアボート(マップされていないアドレスへの書込み)\n"));
 	KT_ASSERT(dialog_says("(EC 0x24)"));
 	KT_ASSERT(dialog_says("アドレス(FAR) " FAULT_VA));
 	KT_ASSERT(dialog_says("PC(ELR) 0x0000000000"));
 	KT_ASSERT(dialog_says("LR 0x0000000000"));
+#endif
 	KT_ASSERT(dialog_says("終了コード -256(TS_ABORT_FAULT)"));
+	/* the code at the PC, read from the program's pages: the instruction there is read */
+	KT_ASSERT(dialog_says("PCの命令 "));
+	KT_ASSERT(dialog_says("["));
+	KT_ASSERT(!has((CONST char *)lines, "[--"));
 	KT_ASSERT_EQ(wm_focused(), kw);			/* the keys stay where they were */
 	press_ok(wid);
 	KT_ASSERT(dialog_gone());
@@ -465,7 +477,11 @@ LOCAL void test_fault_ill( void )
 	KT_ASSERT(wid > 0);
 	if ( wid <= 0 ) return;
 	KT_ASSERT(dialog_says("例外 未定義命令\n"));
+#if defined(X64)
+	KT_ASSERT(dialog_says("ベクタ 6、"));
+#else
 	KT_ASSERT(dialog_says("(EC 0x00)"));
+#endif
 	KT_ASSERT(dialog_says("終了コード -257(TS_ABORT_ILL)"));
 	/* given the keys by a press on it, Enter closes it */
 	{
@@ -490,10 +506,17 @@ LOCAL void test_fault_iabt( void )
 	wid = fault_run(2, TS_ABORT_FAULT, &pid);
 	KT_ASSERT(wid > 0);
 	if ( wid <= 0 ) return;
+#if defined(X64)
+	KT_ASSERT(dialog_says("例外 ページフォールト(マップされていないアドレスの実行)\n"));
+	KT_ASSERT(dialog_says("ベクタ 14、"));
+	KT_ASSERT(dialog_says("アドレス(CR2) " FAULT_VA));
+	KT_ASSERT(dialog_says("PC(RIP) " FAULT_VA));
+#else
 	KT_ASSERT(dialog_says("例外 命令アボート(マップされていないアドレスの実行)\n"));
 	KT_ASSERT(dialog_says("(EC 0x20)"));
 	KT_ASSERT(dialog_says("アドレス(FAR) " FAULT_VA));
 	KT_ASSERT(dialog_says("PC(ELR) " FAULT_VA));
+#endif
 	/* a double press on its pictogram closes it */
 	KT_ASSERT_ER(wm_ref(wid, &w), E_OK);
 	for ( i = 0; i < 2; i++ ) {
@@ -529,7 +552,11 @@ LOCAL void test_fault_kcall( void )
 	KT_ASSERT(wid > 0);
 	if ( wid <= 0 ) return;
 	KT_ASSERT(dialog_says("システムコールに不正なアドレスを渡した"));
+#if defined(X64)
+	KT_ASSERT(dialog_says("例外 ページフォールト"));
+#else
 	KT_ASSERT(dialog_says("例外 データアボート"));
+#endif
 	KT_ASSERT(dialog_says("PC(カーネル) 0xffff"));
 	KT_ASSERT(dialog_says("終了コード -256(TS_ABORT_FAULT)"));
 	press_ok(wid);

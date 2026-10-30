@@ -1,0 +1,54 @@
+# 大きな図形 (docs/private/fixed-buffer-audit.md 10), for tools/ui_run.py:
+# a figure of 10000 rectangles and two lines of 2000 points each (more than
+# the 256 shapes and 1024 points a shape the figure editor took before),
+# made as a copy of 画用紙 (mkbig) and opened; everything picked and moved
+# to the tray (トレーへ移動) and back (トレーから移動), the tray holding
+# all of it; the figure saved by closing, opened again and found whole.
+# The times are printed ("time ...").
+# Keys: A 04, X 1B, Z 1D, E 08 with Ctrl (01).
+mkbig fig 10000 2000
+mark
+open big
+waitwin 画用紙 600
+sync 600
+under open 30000
+shot big_fig_open
+shapes
+want ok 10002 0
+mark
+key 04 01
+sync 600
+under pickall 10000
+shapes
+want ok 10002 10002
+mark
+key 1B 01
+sync 600
+under cut 30000
+shapes
+want ok 0 0
+mark
+key 1D 01
+sync 600
+under moveback 60000
+shapes
+want ok 10002 10002
+shot big_fig_back
+mark
+key 08 01
+sync 600
+under closed 30000
+sum
+keep saved
+mark
+open big
+waitwin 画用紙 600
+sync 600
+under reopen 30000
+shapes
+want ok 10002 0
+key 08 01
+sync 600
+sum
+same saved
+absent !OACV!

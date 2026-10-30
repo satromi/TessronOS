@@ -18,7 +18,9 @@
  *	does: they come to a raw ICMPv6 socket here. A task of its own asks
  *	the routers to speak (three router solicitations, four seconds
  *	apart, once the link-local address has been checked for duplicates,
- *	and again when the cable comes back) and listens until it is
+ *	and again when the cable comes back or the adapters' manager says the
+ *	link came up again: the Wi-Fi joined a network, the card in use
+ *	changed; knl_so_slaac_relink) and listens until it is
  *	stopped (the settings say IPv6 is not to take addresses from the
  *	routers) or the stack goes down.
  *
@@ -138,6 +140,8 @@ LOCAL ID		sl_tsk = 0;
 LOCAL volatile BOOL	sl_want = FALSE;
 LOCAL volatile BOOL	sl_running = FALSE;	/* the task is listening */
 LOCAL volatile UINT	sl_gen = 0;
+LOCAL volatile UINT	sl_relink = 0;		/* counted up when the link came up again */
+LOCAL volatile UINT	sl_solicits = 0;	/* the router solicitations sent */
 LOCAL volatile BOOL	sl_temp_want = FALSE;	/* temporary addresses asked for */
 LOCAL BOOL		sl_temp_on = FALSE;	/* and being made */
 LOCAL UW		sl_desync;		/* seconds taken off a temporary address's preferred lifetime */
@@ -718,7 +722,9 @@ LOCAL void solicit( INT s, UINT ifindex )
 	to.sin6_addr.s6_addr[1] = 0x02;
 	to.sin6_addr.s6_addr[15] = 0x02;
 	to.sin6_scope_id = ifindex;
-	(void)so_sendto(s, m, sizeof(m), 0, (struct sockaddr *)&to, sizeof(to));
+	if ( so_sendto(s, m, sizeof(m), 0, (struct sockaddr *)&to, sizeof(to)) >= 0 ) {
+		sl_solicits++;
+	}
 }
 
 /* The socket advertisements come to: ICMPv6 of that type only, with their hop limit */
@@ -751,6 +757,7 @@ LOCAL void sl_client( UINT gen )
 	UINT			ifindex;
 	INT			s, n, hlim, rs_left = RS_COUNT;
 	BOOL			was_up = TRUE;
+	UINT			relink = sl_relink;
 
 	if ( !take_iid(gen) ) {
 		while ( sl_gen == gen ) (void)tk_slp_tsk(TMO_FEVR);
@@ -771,6 +778,27 @@ LOCAL void sl_client( UINT gen )
 				next_rs = now;
 			}
 			was_up = st.up;
+		}
+		if ( relink != sl_relink ) {
+			UB	was[8];
+
+			relink = sl_relink;
+			rs_left = RS_COUNT;	/* a new link: the routers asked again at once */
+			next_rs = now;
+			/*
+			 * Another card under neta0 gives the interface another
+			 * link-local address (rump_tswifi_setmac): the addresses
+			 * made with the identifier of the one before are given
+			 * up, and those of the new link made with the new one
+			 */
+			knl_memcpy(was, sl_iid, 8);
+			if ( !take_iid(gen) ) break;
+			if ( !same(was, sl_iid, 8) ) {
+				tm_putstring((UB *)"net: IPv6: the interface identifier changed with the card: "
+					     "the addresses from the routers are made again\n");
+				forget();
+			}
+			now = now_ns();
 		}
 		if ( rs_left > 0 && now >= next_rs ) {
 			solicit(s, ifindex);
@@ -874,6 +902,22 @@ EXPORT void knl_so_slaac_stop( BOOL forget_all )
 	if ( forget_all ) {
 		forget();
 	}
+}
+
+/*
+ * The link came up again (netadp.c: the Wi-Fi joined a network, a cable
+ * put back, another card): the routers are asked again, so that a new
+ * network's prefixes are had without waiting for its next advertisement
+ */
+EXPORT void knl_so_slaac_relink( void )
+{
+	sl_relink++;
+}
+
+/* The router solicitations sent so far (the tests) */
+EXPORT UINT knl_so_slaac_solicits( void )
+{
+	return sl_solicits;
 }
 
 EXPORT void knl_so_slaac_temp( BOOL on )

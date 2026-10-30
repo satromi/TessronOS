@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="ソフトウェアキーボードの配列">
+<document>
+<p>ソフトウェアキーボードの配列</p>
+<p>ソフトウェアキーボードのキーの配列。英字(QWERTY)か、TRON配列か、左右に分けて画面の両端に出すμTRON配列。選んだ配列はユーザ情報の実身に残る。メニューの定義。</p>
+</document>
+<menu>
+<item code="layout.qwerty">英字(QWERTY)</item>
+<item code="layout.tron">TRON配列</item>
+<item code="layout.utron">μTRON配列(左右分割)</item>
+</menu>
+</tad>

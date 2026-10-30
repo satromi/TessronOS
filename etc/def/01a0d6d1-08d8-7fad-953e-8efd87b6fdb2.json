@@ -18,7 +18,7 @@
       "id": "virtual-object-network",
       "kind": "utility",
       "name": "仮身ネットワーク",
-      "version": "R1.110",
+      "version": "R1.200",
       "builtin": true,
       "base": []
     },

@@ -36,7 +36,7 @@ typedef struct {
 typedef struct {
 	TS_UUID	uuid;
 	UB	name[OB_NAME_MAX];
-	T_OBPRT	prt;
+	T_OBPRT	*prt;			/* its own copy */
 	OBCMSG	*q;
 	INT	head, tail, count;
 	ID	sem_free;		/* room on the queue */
@@ -106,6 +106,7 @@ LOCAL void ch_free( INT i )
 	if ( c->sem_free > 0 ) tk_del_sem(c->sem_free);
 	if ( c->sem_used > 0 ) tk_del_sem(c->sem_used);
 	if ( c->q != NULL ) Kfree(c->q);
+	if ( c->prt != NULL ) Kfree(c->prt);
 	Kfree(c);
 	obc[i] = NULL;
 }
@@ -141,26 +142,34 @@ LOCAL ER obc_ref( CONST TS_UUID *uuid, T_OBREF *r )
 	return ( i >= 0 ) ? E_OK : E_NOEXS;
 }
 
-LOCAL ER obc_prot( CONST TS_UUID *uuid, T_OBPRT *prt )
+LOCAL ER obc_prot( CONST TS_UUID *uuid, T_OBPRT **p_prt )
 {
 	INT	i;
 
 	LOCK();
 	i = index_of(uuid);
-	if ( i >= 0 ) *prt = obc[i]->prt;
+	if ( i >= 0 ) *p_prt = knl_ob_prt_dup(obc[i]->prt);
 	UNLOCK();
 
-	return ( i >= 0 ) ? E_OK : E_NOEXS;
+	return ( i < 0 ) ? E_NOEXS : ( *p_prt == NULL ) ? E_NOMEM : E_OK;
 }
 
 LOCAL ER obc_setprot( CONST TS_UUID *uuid, CONST T_OBPRT *prt )
 {
+	T_OBPRT	*n = knl_ob_prt_dup(prt), *old = NULL;
 	INT	i;
 
+	if ( n == NULL ) {
+		return E_NOMEM;
+	}
 	LOCK();
 	i = index_of(uuid);
-	if ( i >= 0 ) obc[i]->prt = *prt;
+	if ( i >= 0 ) {
+		old = obc[i]->prt;
+		obc[i]->prt = n;
+	}
 	UNLOCK();
+	Kfree( ( i >= 0 ) ? old : n );
 
 	return ( i >= 0 ) ? E_OK : E_NOEXS;
 }
@@ -185,7 +194,11 @@ LOCAL ER obc_create( CONST T_OBCRE *cr, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	for ( n = 0; cr->name != NULL && cr->name[n] != 0 && n < OB_NAME_MAX - 1; n++ ) {
 		c->name[n] = cr->name[n];
 	}
-	c->prt = *prt;
+	c->prt = knl_ob_prt_dup(prt);
+	if ( c->prt == NULL ) {
+		Kfree(c);
+		return E_NOMEM;
+	}
 	c->q = (OBCMSG *)Kmalloc(sizeof(OBCMSG) * OB_CH_QLEN);
 	csem.exinf = NULL;
 	csem.sematr = TA_TFIFO | TA_FIRST;
@@ -229,6 +242,7 @@ LOCAL ER obc_create( CONST T_OBCRE *cr, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	if ( c->sem_free > 0 ) tk_del_sem(c->sem_free);
 	if ( c->sem_used > 0 ) tk_del_sem(c->sem_used);
 	if ( c->q != NULL ) Kfree(c->q);
+	if ( c->prt != NULL ) Kfree(c->prt);
 	Kfree(c);
 	return er;
 }
@@ -303,8 +317,9 @@ LOCAL OBCH *ch_of( INT h, ID *p_free, ID *p_used )
 
 /*
  * A wait for room ('room') or for a message on the channel of handle h,
- * a slice at a time: between slices a process's call looks whether the
- * process is to end, and comes out with E_DISWAI to end on its way back
+ * up to tmo (TMO_POL not at all, TMO_FEVR without end), a slice at a
+ * time: between slices a process's call looks whether the process is
+ * to end, and comes out with E_DISWAI to end on its way back
  * (knl_prc_call_enter). The kernel's own callers wait in one piece,
  * not woken for nothing. The channel is looked up again for each
  * slice: deleted between two, its semaphores are gone and their
@@ -313,9 +328,19 @@ LOCAL OBCH *ch_of( INT h, ID *p_free, ID *p_used )
  */
 #define OBC_SLICE_MS	200
 
-LOCAL ER ch_wait( INT h, BOOL room, BOOL nowait, OBCH **p_c, ID *p_sf, ID *p_su )
+LOCAL UD ch_now( void )
 {
-	TMO	tmo = nowait ? TMO_POL : ( ts_get_pid() > 0 ) ? OBC_SLICE_MS : TMO_FEVR;
+	SYSTIM	t;
+
+	(void)tk_get_otm(&t);
+	return ( (UD)(UW)t.hi << 32 ) | (UD)(UW)t.lo;
+}
+
+LOCAL ER ch_wait( INT h, BOOL room, TMO tmo, OBCH **p_c, ID *p_sf, ID *p_su )
+{
+	BOOL	sliced = (BOOL)( tmo != TMO_POL && ts_get_pid() > 0 );
+	UD	start = ( tmo > 0 ) ? ch_now() : 0, gone;
+	TMO	t;
 	ER	er;
 
 	for ( ;; ) {
@@ -323,9 +348,21 @@ LOCAL ER ch_wait( INT h, BOOL room, BOOL nowait, OBCH **p_c, ID *p_sf, ID *p_su 
 		if ( *p_c == NULL ) {
 			return E_DLT;
 		}
-		er = tk_wai_sem(room ? *p_sf : *p_su, 1, tmo);
-		if ( er != E_TMOUT || tmo != OBC_SLICE_MS ) {
-			return er;		/* E_TMOUT only for nowait, or E_DLT: the channel went */
+		t = tmo;
+		if ( sliced ) {
+			if ( tmo == TMO_FEVR ) {
+				t = OBC_SLICE_MS;
+			} else {
+				gone = ch_now() - start;
+				if ( gone >= (UD)tmo ) {
+					return E_TMOUT;
+				}
+				t = ( (UD)tmo - gone < OBC_SLICE_MS ) ? (TMO)( (UD)tmo - gone ) : OBC_SLICE_MS;
+			}
+		}
+		er = tk_wai_sem(room ? *p_sf : *p_su, 1, t);
+		if ( er != E_TMOUT || !sliced ) {
+			return er;		/* E_TMOUT: the time ran out, or E_DLT: the channel went */
 		}
 		if ( knl_prc_ending() ) {
 			return E_DISWAI;
@@ -333,8 +370,8 @@ LOCAL ER ch_wait( INT h, BOOL room, BOOL nowait, OBCH **p_c, ID *p_sf, ID *p_su 
 	}
 }
 
-/* One message taken off */
-LOCAL ER obc_rea( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, BOOL nowait )
+/* One message taken off, waited for up to tmo */
+LOCAL ER obc_rtm( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, TMO tmo )
 {
 	OBCH	*c;
 	ID	sf, su;
@@ -344,7 +381,7 @@ LOCAL ER obc_rea( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, BOOL
 	if ( recno != 0 || off != 0 ) {
 		return E_PAR;
 	}
-	er = ch_wait(h, FALSE, nowait, &c, &sf, &su);
+	er = ch_wait(h, FALSE, tmo, &c, &sf, &su);
 	if ( er < E_OK ) {
 		return er;
 	}
@@ -363,6 +400,12 @@ LOCAL ER obc_rea( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, BOOL
 	return E_OK;
 }
 
+/* One message taken off, waited for as the key says */
+LOCAL ER obc_rea( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, BOOL nowait )
+{
+	return obc_rtm(h, recno, off, buf, size, p_asize, nowait ? TMO_POL : TMO_FEVR);
+}
+
 /* One message put on */
 LOCAL ER obc_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 		  BOOL nowait )
@@ -374,7 +417,7 @@ LOCAL ER obc_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize
 	if ( recno != 0 || off != 0 || size < 0 || size > OB_CH_MSG_MAX ) {
 		return E_PAR;
 	}
-	er = ch_wait(h, TRUE, nowait, &c, &sf, &su);
+	er = ch_wait(h, TRUE, nowait ? TMO_POL : TMO_FEVR, &c, &sf, &su);
 	if ( er < E_OK ) {
 		return er;
 	}
@@ -523,7 +566,10 @@ LOCAL CONST T_OBMGR obc_mgr = {
 	NULL, NULL, NULL, NULL,
 	NULL, NULL,
 	/* no icon of their own */
-	NULL, NULL
+	NULL, NULL,
+	NULL,			/* records replaced by writing over them */
+	NULL,			/* nothing to wait for */
+	obc_rtm
 };
 
 EXPORT ER knl_obchan_init( void )

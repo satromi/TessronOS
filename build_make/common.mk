@@ -42,6 +42,24 @@ ARCH_KFLAGS  := -mgeneral-regs-only -mno-red-zone -mcmodel=kernel
 ARCH_KFLAGS2 :=
 endif
 
+# 利用者のプログラムの旗とアーキテクチャ別の置き場。UARCH_NOFP は浮動小数点を使わない小物の、
+# UARCH_FP は使うプログラムの旗。UARCH_DIR はアセンブラのソース(crt0.S など)のアーキテクチャ別の
+# ディレクトリ(AArch64 は元の場所)、USER_LD_DIR はリンカスクリプトの置き場(etc/linker/<>)
+ifeq ($(ARCH),x86_64)
+UARCH_NOFP  := -mgeneral-regs-only
+UARCH_FP    :=
+UARCH_DIR   := x86_64/
+USER_LD_DIR := x64
+# newlib の x86_64-elf 版が系を呼ぶ名前を、プログラムの下回りの名前(_write など)へ渡す
+UARCH_LIBC  := $(TOP)/lib/libts/x86_64/sysnames.S
+else
+UARCH_NOFP  := -mgeneral-regs-only -mstrict-align
+UARCH_FP    := -mstrict-align
+UARCH_DIR   :=
+USER_LD_DIR := user
+UARCH_LIBC  :=
+endif
+
 # 利用者のプログラムと実身のレコード、それらが結ぶライブラリの置き場。命令セットの基準が
 # 違うターゲットのものは混ぜない
 ifeq ($(TARGET),_RPI4_)
@@ -52,11 +70,14 @@ else
 UOBJ := obj
 endif
 
+# カーネルのタスクのスタックは小さく、下にガードページがないので、4096 バイトを超える
+# フレームは警告にする(設計書 4.7.7)
 CFLAGS_COMMON := $(ARCHFLAGS) $(ARCH_KFLAGS) \
 	-ffreestanding -fno-builtin -fno-common -fno-pic -fno-stack-protector \
 	-fno-omit-frame-pointer $(ARCH_KFLAGS2) \
 	-std=gnu11 -Wall -Wextra -Wno-unused-parameter \
 	-Werror=implicit-function-declaration -Werror=int-conversion \
+	-Wframe-larger-than=4096 \
 	-MMD -MP
 
 # FreeType の構成。何を組み込むか(port/ftmodule.h)と、どの選択肢を落とすか
@@ -103,11 +124,28 @@ ifeq ($(KLOCKSTAT),1)
   CFLAGS_COMMON += -DCNF_KLOCK_STAT=1
 endif
 
+# make KLOCK=<0〜3> で、カーネルの排他の方式を替える(docs/tessronos/04-kernel.md 4.3.3)。
+# 0 は大きなカーネルロック(Arm の既定)、3 はスケジューラのロックと物ごとのロック(x64 の既定)、
+# 1 と 2 はその間の区切り。make KLOCKCHECK=1 で、ロックの順番の検査を試験のビルドでなくても入れる
+ifneq ($(KLOCK),)
+  CFLAGS_COMMON += -DCNF_KLOCK_MODE=$(KLOCK)
+  ASFLAGS_COMMON += -DCNF_KLOCK_MODE=$(KLOCK)
+endif
+ifeq ($(KLOCKCHECK),1)
+  CFLAGS_COMMON += -DCNF_KLOCK_CHECK=1
+endif
+
 # make STKWATCH=1 で、走っていないタスクのスタックの戻り番地が書き換えられたら、
 # ディスパッチャがそのタスクを走らせる前に見つけて止まる(設計書 4.7.6)
 ifeq ($(STKWATCH),1)
   CFLAGS_COMMON += -DCNF_STK_WATCH=1
   ASFLAGS_COMMON += -DCNF_STK_WATCH=1
+endif
+
+# 試験のビルドでは、タスクのスタックを決まった値で埋め、どこまで使ったかを測る。UITEST の
+# stkuse で、タスクごとの最も深い使用量をコンソールに出す(設計書 4.7.7)
+ifneq ($(filter 1,$(KTEST) $(UITEST)),)
+  CFLAGS_COMMON += -DCNF_STK_USAGE=1
 endif
 
 # make DESKTOP=1 で、試験ではなくデスクトップが立ち上がる版を作る
@@ -129,14 +167,13 @@ endif
 # make NETSTACK=netbsd(既定)で、TCP/IP スタックは NetBSD のもの(rump カーネルとして
 # tools/netbsd/build.sh が作る一つのオブジェクト)。NETSTACK=lwip で以前の lwIP に戻す
 # (設計書 12.6)。オブジェクトが無ければ、リンクの前に tools/netbsd/build.sh が作る
-# x86_64 は段階1では lwIP(NetBSD のスタックの x86_64 版はまだ作っていない)
-ifeq ($(ARCH),x86_64)
-NETSTACK ?= lwip
-endif
 NETSTACK ?= netbsd
-# 命令セットの基準ごとに別の置き場に作る(Raspberry Pi 4 系は ARMv8.0-A の版)
+# 命令セットの基準ごとに別の置き場に作る(Raspberry Pi 4 系は ARMv8.0-A の版)。
+# x64 は tools/x64/netbsd/build.sh が作る x86_64 の版
 ifeq ($(TARGET),_RPI4_)
 NETBSD_OBJ ?= $(HOME)/tessronos-netbsd-v80/rumpnet.o
+else ifeq ($(ARCH),x86_64)
+NETBSD_OBJ ?= $(HOME)/tessronos-netbsd-x64/rumpnet.o
 else
 NETBSD_OBJ ?= $(HOME)/tessronos-netbsd/rumpnet.o
 endif
@@ -156,6 +193,9 @@ endif
 # Raspberry Pi 4 系は ARMv8.0-A で作ったもの(OUT=~/tessronos-mozc-v80 MARCH=armv8-a+crc)
 ifeq ($(TARGET),_RPI4_)
 MOZC_OBJ ?= $(HOME)/tessronos-mozc-v80/tsmozc.o
+else ifeq ($(ARCH),x86_64)
+# x64 は tools/x64/mozc/build.sh が作る x86_64 の版
+MOZC_OBJ ?= $(HOME)/tessronos-mozc-x64/tsmozc.o
 else
 MOZC_OBJ ?= $(HOME)/tessronos-mozc/tsmozc.o
 endif

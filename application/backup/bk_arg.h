@@ -24,7 +24,6 @@
 #define BK_ARG_MAGIC	0x504B4B42	/* "BKKP" */
 #define BK_OP_SAVE	1
 #define BK_OP_RESTORE	2
-#define BK_ARG_ROOTS	8
 
 typedef struct {
 	UINT	magic;
@@ -37,12 +36,19 @@ typedef struct {
 	UB	base[64];		/* save: the volumes' name after "N・", "" the root's */
 	TS_UUID	into;			/* save to objects: the cabinet the volumes are linked
 					   into and made on the volume of, 0 the first */
-	INT	nroot;			/* save: more roots after obj, in root[] */
-	TS_UUID	root[BK_ARG_ROOTS];
-	TS_UUID	parent[BK_ARG_ROOTS + 1];	/* where obj, then each of root[], is linked
-					   from, for a restore to put it back; 0 not known */
+	TS_UUID	objparent;		/* save: where obj is linked from, for a restore to
+					   put it back; 0 not known */
+	INT	nroot;			/* save: more roots after obj */
 	INT	nexcl;			/* save: objects left out */
-	TS_UUID	excl[BK_ARG_ROOTS];
+	TS_UUID	ids[];			/* save: the roots after obj (nroot), where each is
+					   linked from (nroot, 0 not known), then the
+					   objects left out (nexcl) */
 } T_BKARG;
+
+/* The bytes of an argument with nroot roots after obj and nexcl objects left out, and its lists */
+#define BK_ARG_SIZE(nroot, nexcl)	( sizeof(T_BKARG) + sizeof(TS_UUID) * (SZ)( (nroot) * 2 + (nexcl) ) )
+#define BK_ARG_ROOT(a)		( (a)->ids )
+#define BK_ARG_PARENT(a)	( (a)->ids + (a)->nroot )
+#define BK_ARG_EXCL(a)		( (a)->ids + (a)->nroot * 2 )
 
 #endif /* __BK_ARG_H__ */

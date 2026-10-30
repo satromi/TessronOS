@@ -16,6 +16,7 @@
 #define _SYSDEPEND_CPU_CORE_SYSDEPEND_
 
 #include "bootinfo.h"
+#include <tk/syslib.h>
 
 /* Exception and interrupt entries (vector.S, dispatch.S) */
 IMPORT void knl_dispatch_entry(void);		/* dispatch entry (int SVC_DISPATCH) */
@@ -87,6 +88,14 @@ IMPORT UW	knl_dtb_u32( CONST char *path, CONST char *prop, UW dflt );
 IMPORT void	knl_fbcon_init( CONST T_BOOTINFO *bi );
 IMPORT void	knl_fbcon_stop( void );
 IMPORT void	knl_fbcon_resume( void );
+IMPORT void	knl_fbcon_stage( CONST char *s );	/* the step of the start-up, in the band at the top */
+IMPORT CONST UB	*knl_fbcon_last_stage( void );
+IMPORT void	knl_fbcon_tail( void );		/* the console's last lines, under the report of a stop */
+IMPORT void	knl_fbcon_early_exc( UW vec, UD rip, UD cr2, UD err );	/* an exception before the console: drawn and kept */
+IMPORT void	knl_fbcon_pin( CONST UB *line );	/* a line kept under the band, whatever the console says after it */
+IMPORT void	knl_fbcon_repaint( void );	/* the screen cleared: the red band, the lines kept, the console's last lines */
+IMPORT void	knl_exc_stop_all( void );	/* exc_hdl.c: the machine stopped once the records are written */
+IMPORT void	knl_bootlog_stopped( CONST char *why );	/* bootlog.c: the records written at once by its task */
 
 /* MMU (mmu.c) */
 IMPORT UD	knl_pt_l0_k_pa;			/* the kernel's PML4 (the loader's, its low half emptied) */
@@ -106,7 +115,9 @@ IMPORT BOOL	knl_pt_reclaim( void );			/* those taken out given back once safe; T
 IMPORT UW	knl_pt_pruned( INT *p_waiting );	/* tables taken out so far (the tests) */
 IMPORT void	knl_icache_sync( UBINT va, UD size );	/* written instructions made fetchable */
 IMPORT void	knl_mmu_space_init_root( UD l0_pa );	/* a new PML4: the kernel's half copied in */
+IMPORT void	knl_mmu_space_drop( UD ttbr0 );		/* a space to be freed taken off every processor */
 IMPORT void	knl_tlb_shootdown( UINT pcid, UBINT va, BOOL all );	/* the others drop it too */
+IMPORT void	knl_tlb_note( UD ttbr0 );	/* the dispatcher: a task of this space about to run here (mmu.c) */
 
 /*
  * The instruction fetch is coherent with the stores of every processor
@@ -118,6 +129,13 @@ IMPORT void	knl_tlb_shootdown( UINT pcid, UBINT va, BOOL all );	/* the others dr
 Inline void knl_icache_sync_all( void )
 {
 	Asm("" ::: "memory");
+}
+
+/* Nothing to clean for the instruction fetch: it sees the stores as they are */
+Inline void knl_dcache_clean_pou( UBINT va, UD size )
+{
+	(void)va;
+	(void)size;
 }
 
 /*
@@ -190,6 +208,31 @@ typedef struct {
 #define PC_ONLINE	2
 #define PC_STOPPED	3
 
+/* What the lockup checks keep of a processor (lockup.c) */
+typedef struct {
+	volatile UD	beat;		/* the counter at its last timer interrupt (0: not started) */
+	volatile UD	beats;
+	/* where the last interrupt found it */
+	volatile UD	s_pc, s_lr, s_sp, s_spsr, s_at;
+	volatile ID	s_tsk;
+	/* the spin lock it waits for too long (lk_spin_stall) */
+	T_SPLOCK * volatile w_lock;
+	volatile UBINT	w_pc;
+	volatile UD	w_since;
+	UW		w_told;
+	BOOL		reported;	/* told it stopped: until it beats again */
+	UD		rep_at;
+	volatile BOOL	dump_req;	/* SGI_LOCKUP: say where you are */
+	volatile BOOL	dump_done;
+	volatile BOOL	nmi_req;	/* the same asked by NMI */
+	volatile BOOL	nmi_done;
+	volatile BOOL	halted;		/* stopped by an exception in the kernel */
+	volatile BOOL	in_hook;
+	volatile BOOL	mute;		/* the tests: looks stopped */
+} T_LKCPU;
+
+#define PT_BATCHES	4		/* page tables taken out, waiting to be given back (mmu.c) */
+
 typedef struct {
 	UW	reserved0;
 	UD	rsp0;		/* the system stack of the task when it entered from user mode */
@@ -221,12 +264,72 @@ typedef struct pcpu {
 	volatile UD tlb_req;		/* SGI_TLB: what to drop (mmu.c) */
 	volatile UW tlb_ack;
 	UW	apic_id;
+	/*
+	 * What each part of the kernel keeps of a processor, here rather
+	 * than in arrays of CNF_MAX_PRCID, so that only the processors
+	 * found take memory
+	 */
+	UW	tlb_seen;		/* its tlb_ack when asked (mmu.c) */
+	/*
+	 * The process spaces (their PML4's address) whose translations it may
+	 * hold: those it ran a task of since it last dropped all its own
+	 * (mmu.c, knl_tlb_note). A change in a space's user half is asked of
+	 * these processors only. tlb_spn beyond TLB_SP_N: any space.
+	 */
+#define TLB_SP_N	16
+	UD	tlb_sp[TLB_SP_N];
+	volatile UW tlb_spn;
+	volatile UW tlb_flushes;	/* times it dropped all its own */
+	UW	tlb_flushes_seen;	/* tlb_flushes when the list was last made again */
+	UD	sync_seen;		/* its ipi_cnt when asked (knl_sync_cores) */
+	UD	pt_seen[PT_BATCHES];	/* its ctxsw_cnt when a batch of tables was taken out (mmu.c) */
+	struct task_control_block *acct_tsk;	/* the task it is charging (smp.c) */
+	UD	acct_at;
+	UD	acct_busy;		/* counts spent running tasks */
+	struct task_control_block *sch_task;	/* the scheduler's choice for it, under the lock */
+	UD	apic_sys_dl;		/* its timer's deadlines (apic.c) */
+	UD	apic_lk_dl;
+	volatile BOOL exc_saying;	/* telling an exception (exc_hdl.c) */
+	UW	core_key;		/* the APIC ID above the threads' bits: same for the threads of a core */
+	UW	pkg_key;		/* above the cores' bits: same for one package */
+	T_LKCPU	lk;
+	T_SPHELD spin_held[SPIN_HELD_N];	/* the spin locks it holds, for the lockup report */
+#if KLK_FINE
+	T_KLKCPU klk;			/* the kernel's locks it holds (klk.c) */
+	T_PRCSET ipi_due;		/* the processors to be told, once the scheduler's lock is let go */
+#endif
+	UB	gdt[8 * 8] __attribute__((aligned(16)));	/* its own GDT: the segments and its TSS */
 	T_TSS	tss;
 	UB	ist_stack[3][IST_STACK_SIZE] __attribute__((aligned(16)));
 } T_PCPU;
 
-IMPORT T_PCPU	knl_pcpu_tbl[];
+/*
+ * The processors' data: PRC 1's from the start (knl_pcpu_boot), each
+ * other's taken as it is started. knl_pcpu_p[i] is PRC i+1's, for i
+ * below knl_num_prc.
+ */
+IMPORT T_PCPU	knl_pcpu_boot;
+IMPORT T_PCPU	*knl_pcpu_p[];
 IMPORT INT	knl_num_prc;			/* processors online */
+
+Inline T_PCPU *knl_pcpu_of( INT i )
+{
+	return knl_pcpu_p[i];
+}
+
+/*
+ * The task this processor runs, read in one instruction relative to the
+ * GS base: a task moved to another processor between two instructions
+ * (the T_PCPU's address, then its ctxtsk) would read the other
+ * processor's task; one instruction cannot be split so
+ */
+Inline struct task_control_block *knl_self_ctxtsk( void )
+{
+	struct task_control_block *t;
+
+	Asm( "movq %%gs:%c1, %0" : "=r"(t) : "i"(__builtin_offsetof(T_PCPU, ctxtsk)) );
+	return t;
+}
 
 Inline T_PCPU *knl_pcpu( void )
 {
@@ -244,7 +347,9 @@ IMPORT BOOL	knl_kernel_locked( void );
 IMPORT void	knl_reschedule( void );			/* assign ready tasks to processors */
 IMPORT struct task_control_block *knl_dispatch_pick( void );	/* dispatcher: take schedtsk under the lock */
 IMPORT void	knl_acct_leave( void );			/* dispatcher: the task that ran charged its time */
-IMPORT void	knl_send_ipi( UW prcmask, UINT sgino );
+IMPORT void	knl_send_ipi( CONST T_PRCSET *prcs, UINT sgino );
+IMPORT void	knl_send_ipi_one( INT i, UINT sgino );	/* to processor i (PRC i+1) */
+IMPORT void	knl_send_ipi_others( UINT sgino );	/* to every processor online but this one */
 IMPORT void	knl_sync_cores( UD ttbr0 );		/* the others running in a space take an interrupt */
 IMPORT void	knl_smp_init_primary( void );
 IMPORT void	knl_smp_init_interrupt( void );

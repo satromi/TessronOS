@@ -17,6 +17,9 @@
 | 60〜74 | マイクロ秒単位の版。`tk_slp_tsk_u`、`tk_dly_tsk_u`、`tk_wai_sem_u`、`tk_wai_flg_u`、`tk_rcv_mbx_u`、`tk_loc_mtx_u`、`tk_snd_mbf_u`、`tk_rcv_mbf_u`、`tk_cre_cyc_u`、`tk_ref_cyc_u`、`tk_sta_alm_u`、`tk_ref_alm_u`、`tk_set_tim_u`、`tk_get_tim_u`、`tk_get_otm_u` |
 | 75〜77 | `tk_set_utc`、`tk_get_utc`、`tk_get_prc` |
 | 78 | `tk_chg_slt`(T-Kernel 2.0。タイムスライス、4.3.1) |
+| 79、80 | `tk_set_asp`、`tk_ref_asp`(TessronOSの拡張。割付けCPUを呼び手が大きさを渡すビットの配列で設定、参照する。4.3.2) |
+
+装置の割込みを受けるCPUを決める`SetIntTarget`、`GetIntTarget`(TessronOSの拡張、4.5.1)は、ドライバのためのカーネルの中の関数で、SVCは無い。プロセスは装置の実身の属性`irq.cpu`(クラス7の属性の書込み、8.4)と、機器の設定の実身の`CPU_CHORE`、`CPU_RT`の行で決める。
 
 ## クラス1　プロセス、メモリ、メッセージ
 
@@ -34,8 +37,12 @@
 | 10、11 | `ts_snd_msg`、`ts_rcv_msg` | プロセスメッセージ |
 | 12 | `ts_get_arg` | 起動時の引数 |
 | 13〜15 | `ts_map_mem`、`ts_unm_mem`、`ts_ctl_mem` | メモリをマッピングする、解除する、属性を変える |
-| 16 | `ts_ref_cpu` | 動いているCPUの数と、各CPUがタスクを走らせた時間 |
+| 16 | `ts_ref_cpu` | 動いているCPUの数と、各CPUがタスクを走らせた時間。呼び手が大きさを渡す(`ts_ref_cpu(pk, size)`、4.3) |
 | 17、18 | `ts_def_flt`、`ts_flt_ret` | プログラムが受け取るデータアボートのエントリを決める、例外の時点の状態(書き換えたもの)へ戻る(5.5.2) |
+| 19 | `ts_spn_prc` | POSIXのプロセスを、パス(objfsの木)で指したプログラムの実身から起動する(5.8) |
+| 20〜34 | `ts_get_inh`、`ts_wai_psx`、`ts_kil_prc`、`ts_sig_set`、`ts_sig_ret`、`ts_sig_sus`、`ts_slp_psx`、`ts_sig_alm`、`ts_set_pgid`、`ts_get_pgid`、`ts_set_sid`、`ts_get_sid`、`ts_get_ppid`、`ts_ref_psx`、`ts_lst_prc` | POSIXのプロセスの記述子、待ち、シグナル、プロセスグループ、セッション(`include/ts/psx.h`) |
+| 35 | `ts_spn_obj` | POSIXのプロセスを、仮身の指すプログラムの実身(UUID)から起動する(5.8) |
+| 36 | `ts_lkp_obj` | 実身の木(objfs、「/」から)のパスが指す実身のUUIDを、呼んだプロセスの資格で引く(5.8) |
 
 ## クラス2　ファイル(FAT)
 
@@ -44,10 +51,13 @@
 | 1〜10 | `fs_open`、`fs_close`、`fs_read`、`fs_write`、`fs_lseek`、`fs_stat`、`fs_fstat`、`fs_ftruncate`、`fs_truncate`、`fs_getdents` |
 | 11〜16 | `fs_mkdir`、`fs_rmdir`、`fs_unlink`、`fs_rename`、`fs_statvfs`、`fs_sync` |
 | 17〜20 | `fs_attach_dev`、`fs_detach_dev`、`fs_mounts`、`fs_utime` |
+| 21〜29 | `fs_dup`、`fs_pipe`、`fs_xstat`、`fs_fxstat`、`fs_ioctl`、`fs_fcntl`、`fs_poll`、`fs_link`、`fs_chmod`(POSIXの層の、5.8) |
+| 30〜38 | `fs_opn_vol`、`fs_openat`、`fs_statat`、`fs_mkdirat`、`fs_rmdirat`、`fs_unlinkat`、`fs_utimeat`、`fs_renameat`、`fs_fstatvfs`(ディスクのデバイスの実身の鍵から、パスの木につながずに開くディスクの中、7.2) |
+| 39 | `fs_fsync`(1つの記述子のファイルを媒体に置く。POSIXの`fsync`と`fdatasync`、7.3) |
 
 ## クラス3　カレンダ
 
-`dt_gettime`、`dt_settime`、`dt_gmtime`、`dt_localtime`、`dt_mktime`、`dt_getsystz`、`dt_setsystz`(1〜7)、`dt_getsyszone`、`dt_setsyszone`(8、9。タイムゾーンのIANAの名前、9.5)。
+`dt_gettime`、`dt_settime`、`dt_gmtime`、`dt_localtime`、`dt_mktime`、`dt_getsystz`、`dt_setsystz`(1〜7)、`dt_getsyszone`、`dt_setsyszone`(8、9。タイムゾーンのIANAの名前、9.5)、`dt_getrtc`、`dt_setrtc`(10、11。x64だけ。PCのRTCをローカル時刻とUTCのどちらとして扱うか、9.5.1)、`dt_getrtc`、`dt_setrtc`(10、11。x64だけ。PCのRTCの扱い、9.5.1)。
 
 ## クラス5　ソケット
 
@@ -81,6 +91,12 @@ IPv6のアドレスの状態(`so_getifaddr6`、`so_getdns6`、`so_getip6`)と設
 | 44、45 | `ob_fnd_lnk`、`ob_lst_lnk`(箱のリンク先を名前で探す、一覧) |
 | 46 | `ob_end_adm`(一時的に得た管理者の権限を返す、8.7) |
 | 47 | `ob_wip_vol`(実身のあるボリュームのジャーナルを、置き終えてから0で書きつぶす。その実身のレコードを書ける者だけ、7.3) |
+| 48 | `ob_get_atv`(メタデータの1つのキーの値) |
+| 49 | `ob_rpl_rec`(レコードの中身を丸ごと置き換える。ネイティブのTSFSでは新しい場所に書いてから1回の変更で差し替えるので、途中で電源が切れても前の中身か新しい中身のどちらかが残る。それができない置き場では上書きしてから切り詰める、7.3) |
+| 50 | `ob_syn_obj`(その鍵で書いたものを媒体に置く。閉じるときと同じ確定を待つ、7.3) |
+| 51 | `ob_rea_tmo`(`ob_rea_rec`を、鍵の開き方によらず、最大で指定のミリ秒だけ待って読む。`TMO_POL`は待たず、`TMO_FEVR`は来るまで待つ。時間切れは`E_TMOUT`。チャネルのように何かが来るものだけが答え、ほかは`E_NOSPT`。プログラムが通知のポートを見に来る代わりに待つのに使う、11.30) |
+| 52 | `ob_fnd_sys`(根「システム」の仮身のうち、指定の続柄のものが指す実身。仮身がないか、指す実身がないときは、既定のUUIDの実身。どちらもなければ`E_NOEXS`。呼んだプロセスの資格で根を読む、8.13) |
+| 53 | `ob_acc_obj`(呼んだプロセスが実身に指定の操作をすべてできるかを、実身を開かずに答える。Unixの`access(2)`に当たる。`ob_opn_obj`と同じ判定(資格、ボリュームの保護ドメイン、ドロップで得た権限)で、できれば`E_OK`、できなければ`E_OACV`、実身がなければ`E_NOEXS`。断ったことにはならないので`!OACV!`の行は出さない、8.7.4) |
 
 音の出力先の選択はSVCにしていない。プロセスは、出力先の一覧と選んだ出力先をサウンドデバイスの実身のレコード24と25(`OB_SND_OUTS`、`OB_SND_OUTSEL`)か、システムの実身のレコード8で読み、選ぶときはシステムの実身のレコード8に`SELECT`と出力先のIDを書く(6.5.1)。システムの音(ブザー、クリック音、〈試聴〉の音)を選んだ出力先で鳴らすときも、サウンドデバイスを自分で開かず、同じレコード8に`PLAY`と音の名前を書く。書込みの戻り値で鳴ったかどうかが分かる(6.5.5)。音量もSVCにしていない。ミキサーの全体の音量(左と右)と消音、音のデバイスを使っているプログラムの一覧とそれぞれの音量と消音は、サウンドデバイスの実身のレコード26(`OB_SND_MIX`、`SDMix`)で読み、レコード27(`OB_SND_MIXSET`、`SDMixSet`)に書いて変える(6.5.6)。
 
@@ -104,10 +120,12 @@ IPv6のアドレスの状態(`so_getifaddr6`、`so_getdns6`、`so_getip6`)と設
 | 32 | `wm_key_put` | 入力の対象にならないウインドウ(`WM_ATTR_NOFOCUS`)から、入力の対象のウインドウへキーを入れる。そのウインドウが押された直後だけ受け付ける(11.15) |
 | 33〜35 | `km_get`、`km_set`、`km_label` | キーの配列と付け替えを読む、設定する(機器の設定を書き込めるプロセス)、キーに書く文字を得る(11.15) |
 | 36 | `wm_screen` | 画面の幅と高さ(ブラウザの`screen.width`と`screen.height`など) |
+| 37 | `wm_hit_slop` | 押下の時刻を渡し、その押下が指のときにつまみの当たりを広げる画素の数を得る。マウスとペンの押下には0(10.4.6) |
+| 38 | `wm_grab_screen` | 画面の矩形を、ポインタの有無を選んでプロセスのメモリに写す。ブラウザが、利用者がパネルで許した画面の共有(`getDisplayMedia`)に使う(10.4.3、14.4.8) |
 
 ## クラス10　GPU
 
-`gp_opn_gpu`、`gp_cls_gpu`、`gp_ref_gpu`、`gp_cre_bo`、`gp_del_bo`、`gp_map_bo`、`gp_sub_job`、`gp_wai_fen`、`gp_wai_bo`、`gp_shr_bo`、`gp_imp_bo`、`gp_ref_bo`(1〜12)。BOは自分のコンテキストの表の番号でだけ指定できる(13.5)。
+`gp_opn_gpu`、`gp_cls_gpu`、`gp_ref_gpu`、`gp_cre_bo`、`gp_del_bo`、`gp_map_bo`、`gp_sub_job`、`gp_wai_fen`、`gp_wai_bo`、`gp_shr_bo`、`gp_imp_bo`、`gp_ref_bo`(1〜12)、`gp_bnd_bo`(13。x64だけ。プロセスが選んだGPUアドレスにBOを置く、13.11.3)。BOは自分のコンテキストの表の番号でだけ指定できる(13.5)。
 
 ## クラス11　シリアルポート
 
@@ -145,7 +163,7 @@ IPv6のアドレスの状態(`so_getifaddr6`、`so_getdns6`、`so_getip6`)と設
 | 権限 | 持つもの | システムコール |
 | --- | --- | --- |
 | `TSN_RIGHT_CLOCK` | 時計の実身(デバイス)に書き込めるもの | `tk_set_tim`、`tk_set_tim_u`、`tk_set_utc`、`dt_settime` |
-| `TSN_RIGHT_ZONE` | 暦の実身の属性を読み書きできるもの | `dt_setsystz`、`dt_setsyszone` |
+| `TSN_RIGHT_ZONE` | 暦の実身の属性を読み書きできるもの | `dt_setsystz`、`dt_setsyszone`、`dt_setrtc` |
 | `TSN_RIGHT_CONF_DEV` | 機器の設定の実身に書き込めるもの | `km_set` |
 | `TSN_RIGHT_CONF_USER` | ユーザ情報の実身に書き込めるもの | `wm_set_look`(項目によってはさらに機器の設定の実身への書込みか管理者であることを求める) |
 | `TSN_RIGHT_ADMIN` | 管理者 | `so_setifaddr`、`so_dhcp_start`、`ob_att_vol`、`ob_det_vol`、`ob_set_dom` |

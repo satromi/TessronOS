@@ -48,6 +48,10 @@
  *	  9 OB_SYS_HW       ハードウェアの状態: the temperature of the chip and
  *			    the rates of the ARM and V3D clocks, which the
  *			    Raspberry Pi's firmware tells, unknown on QEMU;
+ *			    on a PC the temperature, the clock the processors
+ *			    run at (CLOCK_MHZ, their mean, and CLOCK_MOST_MHZ)
+ *			    from their counters and the base and turbo clocks
+ *			    (BASE_MHZ, TURBO_MHZ) they name;
  *			    the limit of the processors' clock (CPU_MHZ) and
  *			    the range the firmware allows, the fan's slowing,
  *			    what the firmware says of the supply, and the
@@ -78,6 +82,7 @@
 #include "obj.h"
 
 IMPORT INT	knl_num_prc;
+IMPORT INT	knl_netadp_label( UB *t, INT max ) __attribute__((weak));	/* device/net/netadp.c */
 
 LOCAL FP	sys_power = NULL;	/* what the desktop gives to be called: (INT how) */
 LOCAL TS_UUID	sys_wall;		/* the wallpaper's object, as last laid */
@@ -92,6 +97,8 @@ LOCAL INT put( UB *t, INT n, INT max, CONST char *key, CONST char *val )
 	n = knl_oj_put(t, n, max, val);
 	return knl_oj_put(t, n, max, "\n");
 }
+
+IMPORT void knl_snd_arm( void );		/* device/snd: told of what plays sound as it changes */
 
 LOCAL INT put_num( UB *t, INT n, INT max, CONST char *key, D v )
 {
@@ -130,6 +137,110 @@ LOCAL INT hex( UB *t, INT n, INT max, UW v, INT digits )
 
 /* ---------------------------------------------------------------- the records */
 
+/* A set of the first k processors as the machine's settings write it: "1,3-4" */
+EXPORT INT knl_prcset_text( UB *t, INT n, INT max, CONST T_PRCSET *s, INT k )
+{
+	INT	i, j;
+	BOOL	first = TRUE;
+
+	for ( i = prcset_next(s, 0, k); i >= 0; i = prcset_next(s, j + 1, k) ) {
+		for ( j = i; j + 1 < k && prcset_has(s, j + 1); j++ ) ;
+		if ( !first ) n = knl_oj_put(t, n, max, ",");
+		n = knl_oj_put_num(t, n, max, i + 1);
+		if ( j > i ) {
+			n = knl_oj_put(t, n, max, "-");
+			n = knl_oj_put_num(t, n, max, j + 1);
+		}
+		first = FALSE;
+	}
+	return n;
+}
+
+/*
+ * The devices' interrupts (design 4.5), a line for each device whose
+ * driver named them: IRQ, the device's name, its object's UUID, the
+ * processor its object asks for (0 none), and each interrupt with the
+ * processor it goes to now ("80:1,81:2")
+ */
+LOCAL INT irq_lines( UB *t, INT n, INT max )
+{
+	UB	(*nm)[L_DEVNM + 1] = NULL;
+	UINT	*intno = NULL;
+	ID	*prc = NULL, want;
+	TS_UUID	u;
+	INT	k, d, i, c, room = 0, cap;
+
+	/*
+	 * as many devices as there are: a list that did not hold them all
+	 * (the count it answers is larger than its room) is asked for again
+	 * in more room
+	 */
+	for ( cap = 16; ; cap = k * 2 ) {
+		nm = Kmalloc(sizeof(*nm) * (SZ)cap);
+		if ( nm == NULL ) {
+			return E_NOMEM;
+		}
+		k = knl_int_dev_names(nm, cap);
+		if ( k <= cap ) break;
+		Kfree(nm);
+	}
+	for ( d = 0; d < k && n >= 0; d++ ) {
+		c = knl_int_dev_info(nm[d], &want, NULL, NULL, 0);
+		if ( c > room ) {
+			if ( intno != NULL ) Kfree(intno);
+			if ( prc != NULL ) Kfree(prc);
+			intno = Kmalloc(sizeof(UINT) * (SZ)c);
+			prc = Kmalloc(sizeof(ID) * (SZ)c);
+			room = c;
+			if ( intno == NULL || prc == NULL ) {
+				n = E_NOMEM;
+				break;
+			}
+		}
+		c = knl_int_dev_info(nm[d], &want, intno, prc, room);
+		if ( c > room ) c = room;		/* one came between the two asks */
+		n = knl_oj_put(t, n, max, "IRQ\t");
+		n = knl_oj_put(t, n, max, (CONST char *)nm[d]);
+		n = knl_oj_put(t, n, max, " ");
+		if ( knl_obdev_uuid(nm[d], &u) >= E_OK ) {
+			char	us[TS_UUID_STRLEN + 1];
+
+			(void)ts_uuid_to_str(&u, us, sizeof(us));
+			n = knl_oj_put(t, n, max, us);
+		} else {
+			n = knl_oj_put(t, n, max, "-");
+		}
+		n = knl_oj_put(t, n, max, " ");
+		n = knl_oj_put_num(t, n, max, want);
+		n = knl_oj_put(t, n, max, " ");
+		for ( i = 0; i < c; i++ ) {
+			if ( i > 0 ) n = knl_oj_put(t, n, max, ",");
+			n = knl_oj_put_num(t, n, max, intno[i]);
+			n = knl_oj_put(t, n, max, ":");
+			n = knl_oj_put_num(t, n, max, prc[i]);
+		}
+		n = knl_oj_put(t, n, max, "\n");
+	}
+	if ( nm != NULL ) Kfree(nm);
+	if ( intno != NULL ) Kfree(intno);
+	if ( prc != NULL ) Kfree(prc);
+	return n;
+}
+
+/* The processors' roles as the system took them (design 4.5) */
+LOCAL INT prc_roles( UB *t, INT n, INT max )
+{
+	T_PRCSET	c, r;
+
+	knl_cpu_roles_get(&c, &r);
+	n = knl_oj_put(t, n, max, "CPU_CHORE\t");
+	n = knl_prcset_text(t, n, max, &c, knl_num_prc);
+	n = knl_oj_put(t, n, max, "\nCPU_RT\t");
+	n = knl_prcset_text(t, n, max, &r, knl_num_prc);
+	n = knl_oj_put(t, n, max, "\n");
+	return irq_lines(t, n, max);
+}
+
 LOCAL INT info_text( UB *t, INT max )
 {
 	UD	ns = 0;
@@ -150,8 +261,27 @@ LOCAL INT info_text( UB *t, INT max )
 		n = hex(t, n, max, knl_board.rev, 6);
 		n = knl_oj_put(t, n, max, "\n");
 	}
+#ifdef X64
+	{
+		IMPORT void knl_cpu_brand( char *b, INT max );	/* smp.c */
+		IMPORT INT  knl_cpu_cores( INT *p_pkgs );
+		char	brand[64];
+		INT	pkgs = 0, cores = knl_cpu_cores(&pkgs);
+
+		knl_cpu_brand(brand, sizeof(brand));
+		n = put(t, n, max, "CPU", ( brand[0] != '\0' ) ? brand : "x86-64");
+		n = put_num(t, n, max, "CPUS", knl_num_prc);
+		n = put_num(t, n, max, "CPU_CORES", cores);		/* the threads of a core count once */
+		n = put_num(t, n, max, "CPU_PACKAGES", pkgs);
+	}
+#elif defined(_RPI4_)
+	n = put(t, n, max, "CPU", "Arm Cortex-A72 (AArch64)");	/* BCM2711 */
+	n = put_num(t, n, max, "CPUS", knl_num_prc);
+#else
 	n = put(t, n, max, "CPU", "Arm Cortex-A76 (AArch64)");
 	n = put_num(t, n, max, "CPUS", knl_num_prc);
+#endif
+	n = prc_roles(t, n, max);
 	n = put_num(t, n, max, "MEMORY_MB", (D)( knl_pf_total_count(-1) >> 8 ));
 	n = put_num(t, n, max, "FREE_MB", (D)( knl_pf_free_count(-1) >> 8 ));
 	(void)ts_get_mono(&ns);
@@ -169,6 +299,11 @@ IMPORT ER knl_fan_state( INT *p_level, INT *p_speed, BOOL *p_pwm );	/* kernel/sy
 #define TAG_GET_CLOCK_RATE	0x00030002U
 #define CLOCK_ARM		3
 #define CLOCK_V3D		5
+#endif
+#ifdef CPU_CORE_X86_64
+IMPORT ER knl_cpu_x64_clock( UW *p_mean, UW *p_most );	/* kernel/sysdepend/cpu/core/x86_64/cpuclk.c */
+IMPORT ER knl_cpu_x64_rated( UW *p_base, UW *p_most );
+IMPORT ER knl_cpu_x64_temp( INT *p_deg );
 #endif
 
 /*
@@ -226,6 +361,32 @@ LOCAL INT hw_text( UB *t, INT max )
 		}
 	}
 #endif
+#elif defined(CPU_CORE_X86_64)
+	/*
+	 * A PC: the processors' own counters and sensor, read by the kernel
+	 * (cpuclk.c), in MHz, beyond what ARM_HZ's 32 bits of Hz hold; none
+	 * on a virtual machine
+	 */
+	{
+		UW	mean = 0, most = 0, base = 0, top = 0;
+		INT	deg = 0;
+
+		if ( knl_cpu_x64_temp(&deg) >= E_OK ) {
+			n = put_num(t, n, max, "TEMPERATURE", deg);
+			n = put_num(t, n, max, "TEMPERATURE_MC", (D)deg * 1000);
+		} else {
+			n = put(t, n, max, "TEMPERATURE", "unknown");
+		}
+		n = put(t, n, max, "ARM_HZ", "unknown");
+		if ( knl_cpu_x64_clock(&mean, &most) >= E_OK ) {
+			n = put_num(t, n, max, "CLOCK_MHZ", mean);
+			n = put_num(t, n, max, "CLOCK_MOST_MHZ", most);
+		}
+		if ( knl_cpu_x64_rated(&base, &top) >= E_OK ) {
+			n = put_num(t, n, max, "BASE_MHZ", base);
+			n = put_num(t, n, max, "TURBO_MHZ", top);
+		}
+	}
 #else
 	/* QEMU has no sensor and no firmware to ask */
 	n = put(t, n, max, "TEMPERATURE", "unknown");
@@ -304,11 +465,11 @@ LOCAL INT life_word( char *s, INT at, UINT life )
  */
 LOCAL INT net6_text( UB *t, INT n, INT max )
 {
-	T_SOIF6	l[8];
+	T_SOIF6	*l = NULL;
 	UB	gw[16];
 	char	s[CF_IP6_STRLEN + 64];
 	UINT	mode = so_getip6();
-	INT	k, i, at;
+	INT	k, i, at, cap;
 
 	switch ( mode & SO_IP6_MODE ) {
 	case SO_IP6_OFF:	n = put(t, n, max, "IPV6", "off");	break;
@@ -316,7 +477,17 @@ LOCAL INT net6_text( UB *t, INT n, INT max )
 	case SO_IP6_FIXED:	n = put(t, n, max, "IPV6", "fixed");	break;
 	default:		n = put(t, n, max, "IPV6", ( mode & SO_IP6_TEMP ) ? "auto temp" : "auto"); break;
 	}
-	k = so_getifaddr6(l, 8, gw);
+	/* every address the interface has: a list that came back full is asked for again in twice the room */
+	for ( cap = 8; ; cap *= 2 ) {
+		l = (T_SOIF6 *)Kmalloc(sizeof(T_SOIF6) * (SZ)cap);
+		if ( l == NULL ) {
+			k = E_NOMEM;
+			break;
+		}
+		k = so_getifaddr6(l, cap, gw);
+		if ( k < cap || cap >= 4096 ) break;
+		Kfree(l);
+	}
 	for ( i = 0; i < k; i++ ) {
 		CONST UB	*a = l[i].addr;
 
@@ -343,6 +514,7 @@ LOCAL INT net6_text( UB *t, INT n, INT max )
 		cf_ip6str(gw, s);
 		n = put(t, n, max, "DNS6", s);
 	}
+	if ( l != NULL ) Kfree(l);
 	return n;
 }
 
@@ -353,13 +525,24 @@ LOCAL INT net_text( UB *t, INT max )
 	UINT		a = 0, m = 0, g = 0, d = 0;
 	INT		n = 0, i;
 
+	{
+		UB	nm[48];
+		INT	k = ( knl_netadp_label != NULL ) ? knl_netadp_label(nm, sizeof(nm) - 1) : 0;
+
+		/* the card the stack uses, when the machine has several to choose from */
+		if ( k > 0 ) {
+			nm[k] = '\0';
+			n = put(t, n, max, "ADAPTER", (CONST char *)nm);
+		} else {
 #if defined(RPI5)
-	n = put(t, n, max, "ADAPTER", "RP1 Gigabit Ethernet (GEM)");
+			n = put(t, n, max, "ADAPTER", "RP1 Gigabit Ethernet (GEM)");
 #elif defined(RPI4)
-	n = put(t, n, max, "ADAPTER", "BCM2711 Gigabit Ethernet (GENET)");
+			n = put(t, n, max, "ADAPTER", "BCM2711 Gigabit Ethernet (GENET)");
 #else
-	n = put(t, n, max, "ADAPTER", "virtio-net");
+			n = put(t, n, max, "ADAPTER", "virtio-net");
 #endif
+		}
+	}
 	{
 		char	h[32];
 
@@ -416,10 +599,11 @@ LOCAL INT sound_text( UB *t, INT max )
 	tk_cls_dev(dd, 0);
 	{
 		SDOutSel	s;
-		SDOut		o[SND_OUT_MAX];
-		INT		k, m;
-		LOCAL CONST char *CONST kind[] = { "none", "usb", "i2s", "hdmi" };
+		SDOut		*o = NULL;
+		INT		k, m, room = 0;
+		LOCAL CONST char *CONST kind[] = { "none", "usb", "i2s", "hdmi", "hda" };
 
+		knl_snd_arm();			/* a change after this read is told (device/snd/snd.c) */
 		dd = tk_opn_dev((UB *)SND_DEVNM, TD_READ);
 		knl_memset(&s, 0, sizeof(s));
 		if ( dd >= E_OK ) {
@@ -430,18 +614,29 @@ LOCAL INT sound_text( UB *t, INT max )
 		n = put(t, n, max, "SELECT", ( s.id[0] != 0 ) ? (CONST char *)s.id : SND_ID_AUTO);
 		n = put(t, n, max, "KEEP", knl_snd_keeping() ? "1" : "0");
 		/* every output: its id, kind, flags (SND_OF_*) and name, a line of each */
-		m = knl_snd_outputs(o, SND_OUT_MAX);
-		for ( k = 0; k < m; k++ ) {
+		while ( ( m = knl_snd_outputs(o, room) ) > room ) {
+			if ( o != NULL ) Kfree(o);
+			room = m + 4;
+			o = (SDOut *)Kmalloc(sizeof(SDOut) * (SZ)room);
+			if ( o == NULL ) {
+				room = 0;
+				break;
+			}
+		}
+		for ( k = 0; k < m && k < room; k++ ) {
 			n = put(t, n, max, "OUT", (CONST char *)o[k].id);
-			n = put(t, n, max, "OUT_KIND", kind[( o[k].kind <= SND_BE_HDMI ) ? o[k].kind : 0]);
+			n = put(t, n, max, "OUT_KIND", kind[( o[k].kind <= SND_BE_HDA ) ? o[k].kind : 0]);
 			n = put_num(t, n, max, "OUT_FLAGS", (D)o[k].flags);
 			n = put(t, n, max, "OUT_NAME", (CONST char *)o[k].name);
 		}
+		if ( o != NULL ) Kfree(o);
 	}
 	return n;
 }
 
 /* ---------------------------------------------------------------- for the device manager */
+
+IMPORT UD tm_log_at( void );			/* lib/libtm: bytes ever written to the console */
 
 EXPORT INT knl_obsys_text( INT recno, UB *t, INT max )
 {
@@ -455,7 +650,8 @@ EXPORT INT knl_obsys_text( INT recno, UB *t, INT max )
 	case OB_SYS_NET:	return net_text(t, max);
 	case OB_SYS_SOUND:	return sound_text(t, max);
 	case OB_SYS_HW:		return hw_text(t, max);
-	default:		return -1;
+	case OB_SYS_LOG:	return put_num(t, 0, max, "END", (D)tm_log_at());
+	default:		return E_NOEXS;
 	}
 }
 

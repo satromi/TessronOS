@@ -100,6 +100,33 @@ Inline UD kl_now( void )
 	return t;
 }
 
+/* The bins' upper edges in ticks, worked out once (knl_cntfrq is known by the first holding) */
+LOCAL UD	kl_edge[KL_HIST_N - 1];
+
+LOCAL INT kl_bin( UD ticks )
+{
+	INT	k;
+
+	if ( kl_edge[0] == 0 ) {
+		for ( k = 0; k < KL_HIST_N - 1; k++ ) {
+			kl_edge[k] = (UD)knl_cntfrq * ( (UD)1 << k ) / 1000000U;
+			if ( kl_edge[k] == 0 ) kl_edge[k] = 1;
+		}
+	}
+	for ( k = 0; k < KL_HIST_N - 1 && ticks >= kl_edge[k]; k++ ) ;
+	return k;
+}
+
+LOCAL void kl_note_hold( T_KLSITE *s, UD held )
+{
+	INT	b = kl_bin(held);
+
+	if ( held > s->hold_max ) s->hold_max = held;
+	if ( held > kl_all.hold_max ) kl_all.hold_max = held;
+	s->hold_hist[b]++;
+	kl_all.hold_hist[b]++;
+}
+
 LOCAL T_KLSITE *kl_site_of( UBINT pc )
 {
 	INT	i;
@@ -178,6 +205,8 @@ EXPORT UINT knl_lock_kernel( void )
 			s->wait += t1 - t0;
 			kl_all.cont++;
 			kl_all.wait += t1 - t0;
+			if ( t1 - t0 > s->wait_max ) s->wait_max = t1 - t0;
+			if ( t1 - t0 > kl_all.wait_max ) kl_all.wait_max = t1 - t0;
 		}
 		kl_held = s;
 		kl_since = t1;
@@ -199,7 +228,10 @@ EXPORT void knl_unlock_kernel_keep( void )
 #if CNF_KLOCK_STAT
 		UD	held = kl_now() - kl_since;
 
-		if ( kl_held != NULL ) kl_held->hold += held;
+		if ( kl_held != NULL ) {
+			kl_held->hold += held;
+			kl_note_hold(kl_held, held);
+		}
 		kl_all.hold += held;
 #endif
 		knl_klock_holder = 0;
@@ -259,24 +291,28 @@ EXPORT void knl_acct_leave( void )
  * The processors online and the time each has run tasks (ts_ref_cpu,
  * design 7.3): a task running now is counted up to now
  */
-EXPORT ER ts_ref_cpu( T_TSCPU *pk )
+EXPORT INT ts_ref_cpu( T_TSCPU *pk, SZ size )
 {
 	UD	now = acct_now(), f;
-	INT	i;
+	INT	i, n;
 
+	if ( size < (SZ)sizeof(T_TSCPU) ) {
+		return E_PAR;
+	}
+	n = (INT)( ( size - (SZ)sizeof(T_TSCPU) ) / (SZ)sizeof(UD) );
 	Asm("mrs %0, cntfrq_el0" : "=r"(f));
-	knl_memset(pk, 0, sizeof(*pk));
+	knl_memset(pk, 0, (SZ)sizeof(*pk));
 	pk->ncpu = knl_num_prc;
 	pk->freq = (UW)f;
 	pk->now = now;
-	for ( i = 0; i < CNF_MAX_PRCID && i < TS_CPU_MAX; i++ ) {
+	for ( i = 0; i < knl_num_prc && i < CNF_MAX_PRCID && i < n; i++ ) {
 		UD	b = __atomic_load_n(&acct_busy[i], __ATOMIC_RELAXED);
 		UD	at = __atomic_load_n(&acct_at[i], __ATOMIC_RELAXED);
 
 		if ( __atomic_load_n(&acct_tsk[i], __ATOMIC_RELAXED) != NULL && now > at ) b += now - at;
 		pk->busy[i] = b;
 	}
-	return E_OK;
+	return knl_num_prc;
 }
 
 #if CNF_STK_WATCH
@@ -343,7 +379,12 @@ EXPORT TCB *knl_dispatch_pick( void )
 	T_PCPU	*p = knl_pcpu();
 	TCB	*tcb;
 
+	KLK_ASSERT_NONE("the dispatcher entered");
+#if KLK_FINE_SCHED
+	KLK_SCHED_DI();
+#else
 	(void)knl_lock_kernel();
+#endif
 	tcb = p->schedtsk;
 	if ( tcb != NULL ) {
 		if ( __atomic_load_n(&tcb->runprc, __ATOMIC_ACQUIRE) != 0 ) {
@@ -359,7 +400,11 @@ EXPORT TCB *knl_dispatch_pick( void )
 			tcb->slice_at = acct_now();	/* its turn runs from here */
 		}
 	}
+#if KLK_FINE_SCHED
+	KLK_UNSCHED();
+#else
 	knl_unlock_kernel_keep();
+#endif
 
 	/*
 	 * A task that overran its stack wrote over whatever the allocator
@@ -480,14 +525,29 @@ LOCAL void knl_ipi_stop_handler( UINT intno, UW iar )
  *	other processors take the remaining tasks in priority order. Every
  *	processor whose schedtsk changed, except the caller, gets an IPI.
  */
+/*
+ * The choices of one pass are in assign[] (or run[]) and, in the task
+ * chosen, the number of the pass (TCB.sch_round): whether a task is
+ * chosen already is one look, not a walk of the processors
+ */
+LOCAL UW	sch_round_now = 0;
+
+LOCAL void sch_round( void )
+{
+	if ( ++sch_round_now == 0 ) sch_round_now = 1;
+}
+
+Inline TCB *sch_mark( TCB *t )
+{
+	if ( t != NULL ) t->sch_round = sch_round_now;
+	return t;
+}
+
 LOCAL BOOL knl_task_assigned( TCB *tcb, TCB **assign, INT n )
 {
-	INT	i;
-
-	for ( i = 0; i < n; i++ ) {
-		if ( assign[i] == tcb ) return TRUE;
-	}
-	return FALSE;
+	(void)assign;
+	(void)n;
+	return (BOOL)( tcb->sch_round == sch_round_now );
 }
 
 /* Processors whose task has just given way at the end of its turn (slice_expire) */
@@ -498,6 +558,12 @@ LOCAL UW	slice_yield = 0;
  * task has just given way, then an idle one, so that a turn moves no
  * task that keeps running to another processor.
  */
+/* The processors a task may run on, as a mask of the PRC 1..CNF_MAX_PRCID there are here */
+Inline UW asp_word( CONST TCB *t )
+{
+	return prcset_empty(&t->assprc) ? ~0U : (UW)t->assprc.w[0];
+}
+
 LOCAL INT knl_pick_prc( TCB *tcb, UW cand )
 {
 	INT	i;
@@ -579,7 +645,7 @@ LOCAL INT slice_waiters( TCB *t, INT i, TCB **run, INT n )
 	for ( q = h->next; q != h; q = q->next ) {
 		u = (TCB *)q;
 		if ( u != t && !knl_task_assigned(u, run, n)
-		  && ( u->assprc == 0 || ( u->assprc & ( 1U << i ) ) != 0 ) ) {
+		  && prcset_may(&u->assprc, i) ) {
 			w++;
 		}
 	}
@@ -595,12 +661,18 @@ LOCAL void slice_expire( void *arg )
 	UW	ms;
 
 	(void)arg;
+	KLK_SCHED_DI();
+	if ( knl_timer_stale(&slice_tmeb) ) {
+		KLK_UNSCHED();			/* set again or taken out meanwhile */
+		return;
+	}
 	slice_armed = FALSE;
 	for ( i = 0; i < NUM_TSKPRI; i++ ) gone[i] = 0;
+	sch_round();
 	for ( i = 0; i < n; i++ ) {
 		T_PCPU	*p = &knl_pcpu_tbl[i];
 
-		run[i] = ( p->state == PC_ONLINE && p->dispatch_disabled < DDS_DISABLE ) ? p->schedtsk : NULL;
+		run[i] = sch_mark(( p->state == PC_ONLINE && p->dispatch_disabled < DDS_DISABLE ) ? p->schedtsk : NULL);
 	}
 	slice_yield = 0;
 	for ( i = 0; i < n; i++ ) {
@@ -621,6 +693,7 @@ LOCAL void slice_expire( void *arg )
 	}
 	knl_reschedule();
 	slice_yield = 0;
+	KLK_UNSCHED();
 }
 
 /*
@@ -671,12 +744,14 @@ EXPORT void knl_reschedule( void )
 	QUEUE	*q;
 	TCB	*tcb;
 
+	KLK_ASSERT_SCHED("the scheduler");
+	sch_round();
 	for ( i = 0; i < n; i++ ) {
 		p = &knl_pcpu_tbl[i];
 		assign[i] = NULL;
 		if ( p->state != PC_ONLINE ) continue;
 		if ( p->dispatch_disabled >= DDS_DISABLE && p->ctxtsk != NULL ) {
-			assign[i] = p->ctxtsk;		/* held by tk_dis_dsp */
+			assign[i] = sch_mark(p->ctxtsk);	/* held by tk_dis_dsp */
 		} else {
 			free |= 1U << i;
 			n_free++;
@@ -687,9 +762,9 @@ EXPORT void knl_reschedule( void )
 		/* The task holding the object lock goes first */
 		tcb = rq->klocktsk;
 		if ( tcb != NULL && !knl_task_assigned(tcb, assign, n) ) {
-			prc = knl_pick_prc(tcb, ( tcb->assprc != 0 ? tcb->assprc : ~0U ) & free);
+			prc = knl_pick_prc(tcb, asp_word(tcb) & free);
 			if ( prc >= 0 ) {
-				assign[prc] = tcb;
+				assign[prc] = sch_mark(tcb);
 				free &= ~(1U << prc);
 				n_free--;
 			}
@@ -698,9 +773,9 @@ EXPORT void knl_reschedule( void )
 			for ( q = rq->tskque[pri].next; q != &rq->tskque[pri] && n_free > 0; q = q->next ) {
 				tcb = (TCB*)q;
 				if ( knl_task_assigned(tcb, assign, n) ) continue;
-				prc = knl_pick_prc(tcb, ( tcb->assprc != 0 ? tcb->assprc : ~0U ) & free);
+				prc = knl_pick_prc(tcb, asp_word(tcb) & free);
 				if ( prc < 0 ) continue;	/* its processors are all taken */
-				assign[prc] = tcb;
+				assign[prc] = sch_mark(tcb);
 				free &= ~(1U << prc);
 				n_free--;
 			}
@@ -711,15 +786,42 @@ EXPORT void knl_reschedule( void )
 		p = &knl_pcpu_tbl[i];
 		if ( p->state != PC_ONLINE ) continue;
 		if ( p->schedtsk != assign[i] ) {
+#if KLK_FINE
+			__atomic_store_n(&p->schedtsk, assign[i], __ATOMIC_RELEASE);
+#else
 			p->schedtsk = assign[i];
+#endif
 			if ( p != me ) ipi |= 1U << i;
 		}
 	}
 	slice_arm(assign, n);
+#if KLK_FINE_SCHED
+	/* told once the lock is let go (knl_sched_ipi_flush): not held while the interrupts are sent */
+	me->ipi_due |= ipi;
+#else
 	if ( ipi != 0 ) {
 		knl_send_ipi(ipi, SGI_DISPATCH);
 	}
+#endif
 }
+
+#if KLK_FINE_SCHED
+/*
+ * The processors whose task the scheduler changed, told by this one as
+ * it has let go of the scheduler's lock (klk.c); interrupts masked. A
+ * processor told late finds its schedtsk as the last pass set it.
+ */
+EXPORT void knl_sched_ipi_flush( void )
+{
+	T_PCPU	*me = knl_pcpu();
+	UW	ipi = me->ipi_due;
+
+	if ( ipi != 0 ) {
+		me->ipi_due = 0;
+		knl_send_ipi(ipi, SGI_DISPATCH);
+	}
+}
+#endif
 
 /* ------------------------------------------------------------------------ */
 /*
@@ -780,6 +882,7 @@ EXPORT void knl_gic_cpu_init( void )
 		out_w(GICD_IPRIORITYR(i), 0xF0F0F0F0U);	/* lowest priority */
 	}
 
+	knl_gic_cpuif_note();				/* its interface's bit, for the SPIs sent to it */
 	out_w(GICC_PMR, 0xFF);				/* accept all priorities */
 	out_w(GICC_BPR, 0);
 	out_w(GICC_CTLR, 0x00000001U);			/* enable group 0 signalling */
@@ -835,9 +938,15 @@ EXPORT void knl_secondary_main( INT i )
 
 	/* Pick up work that was queued before this processor came online */
 	{
+#if KLK_FINE_SCHED
+		KLK_SCHED_DI();
+		knl_reschedule();
+		KLK_UNSCHED();
+#else
 		UINT	s = knl_lock_kernel();
 		knl_reschedule();
 		knl_unlock_kernel(s);
+#endif
 	}
 
 	knl_force_dispatch();			/* idle loop / first task, no return */

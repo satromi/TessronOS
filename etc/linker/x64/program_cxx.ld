@@ -82,15 +82,36 @@ SECTIONS
 	} :data
 	.init_array : {
 		PROVIDE_HIDDEN(__init_array_start = .);
-		KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*)))
-		KEEP(*(.init_array .ctors))
+		KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+		KEEP(*(.init_array))
 		PROVIDE_HIDDEN(__init_array_end = .);
 	} :data
 	.fini_array : {
 		PROVIDE_HIDDEN(__fini_array_start = .);
-		KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*) SORT_BY_INIT_PRIORITY(.dtors.*)))
-		KEEP(*(.fini_array .dtors))
+		KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*)))
+		KEEP(*(.fini_array))
 		PROVIDE_HIDDEN(__fini_array_end = .);
+	} :data
+	/*
+	 * The lists crtbegin.o and crtend.o of x86_64-elf still keep, with
+	 * -1 before them and 0 after, which their own code walks from the
+	 * .init and .fini sections: crtbegin.o's part first, crtend.o's last,
+	 * as the GNU linker's own script lays them, and kept out of the
+	 * arrays above, where -1 and 0 would be called
+	 */
+	.ctors : {
+		KEEP(*crtbegin.o(.ctors))
+		KEEP(*crtbegin?.o(.ctors))
+		KEEP(*(EXCLUDE_FILE(*crtend.o *crtend?.o) .ctors))
+		KEEP(*(SORT(.ctors.*)))
+		KEEP(*(.ctors))
+	} :data
+	.dtors : {
+		KEEP(*crtbegin.o(.dtors))
+		KEEP(*crtbegin?.o(.dtors))
+		KEEP(*(EXCLUDE_FILE(*crtend.o *crtend?.o) .dtors))
+		KEEP(*(SORT(.dtors.*)))
+		KEEP(*(.dtors))
 	} :data
 
 	.data : {

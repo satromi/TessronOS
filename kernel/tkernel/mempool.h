@@ -40,6 +40,7 @@ typedef struct memorypool_control_block {
 #if USE_OBJECT_NAME
 	UB	name[OBJECT_NAME_LENGTH];	/* name */
 #endif
+	KLOCK	klk;		/* its lock (klk.h, design 4.3.3) */
 } MPLCB;
 
 IMPORT MPLCB knl_mplcb_table[];	/* Variable size memory pool control block */

@@ -35,7 +35,8 @@ EXPORT void InitSpinLock( T_SPLOCK *lock )
  * the GS base names (its T_PCPU, whose prcid is 0 until the processor
  * is numbered); before that nothing is kept.
  */
-EXPORT T_SPHELD	knl_spin_held[SPIN_HELD_PRC][SPIN_HELD_N];
+EXPORT T_SPHELD	*knl_spin_held_p[CNF_MAX_PRCID];
+EXPORT INT	knl_spin_held_n = 0;
 
 /*
  * A waiter that has not had the lock for knl_spin_stall_cycles of the
@@ -66,15 +67,16 @@ Inline UD spin_now( void )
 LOCAL void spin_note( T_SPLOCK *lock, UBINT pc )
 {
 	INT	c = spin_prc(), i;
+	T_SPHELD *h;
 
-	if ( c < 0 || c >= SPIN_HELD_PRC ) {
+	if ( c < 0 || c >= knl_spin_held_n || ( h = knl_spin_held_p[c] ) == NULL ) {
 		return;
 	}
 	for ( i = 0; i < SPIN_HELD_N; i++ ) {
-		if ( knl_spin_held[c][i].lock == NULL ) {
-			knl_spin_held[c][i].pc = pc;
-			knl_spin_held[c][i].since = spin_now();
-			knl_spin_held[c][i].lock = lock;
+		if ( h[i].lock == NULL ) {
+			h[i].pc = pc;
+			h[i].since = spin_now();
+			h[i].lock = lock;
 			return;
 		}
 	}
@@ -83,15 +85,17 @@ LOCAL void spin_note( T_SPLOCK *lock, UBINT pc )
 /* Let go of where it was taken: as a rule here, else on the processor that took it */
 LOCAL void spin_forget( T_SPLOCK *lock )
 {
-	INT	c = spin_prc(), i, k;
+	INT	c = spin_prc(), i, k, n = knl_spin_held_n;
+	T_SPHELD *h;
 
-	if ( c < 0 || c >= SPIN_HELD_PRC ) {
+	if ( c < 0 || c >= n ) {
 		return;
 	}
-	for ( k = 0; k < SPIN_HELD_PRC; k++, c = ( c + 1 ) % SPIN_HELD_PRC ) {
+	for ( k = 0; k < n; k++, c = ( c + 1 ) % n ) {
+		if ( ( h = knl_spin_held_p[c] ) == NULL ) continue;
 		for ( i = SPIN_HELD_N - 1; i >= 0; i-- ) {
-			if ( knl_spin_held[c][i].lock == lock ) {
-				knl_spin_held[c][i].lock = NULL;
+			if ( h[i].lock == lock ) {
+				h[i].lock = NULL;
 				return;
 			}
 		}

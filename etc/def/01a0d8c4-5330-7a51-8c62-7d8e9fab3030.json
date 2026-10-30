@@ -18,7 +18,7 @@
       "id": "tessronos-microcard",
       "kind": "app",
       "name": "マイクロカード",
-      "version": "R1.110",
+      "version": "R1.200",
       "menu": false,
       "builtin": false,
       "base": [

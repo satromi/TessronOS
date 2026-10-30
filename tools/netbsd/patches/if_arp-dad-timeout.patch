@@ -1,0 +1,71 @@
+if_arp: the probing of an IPv4 address made as short as Linux's
+NetworkManager makes it (docs/tessronos/09-network.md 9.3.1).
+
+Why: before an address is used, NetBSD checks with ARP that no other
+machine has it (RFC 5227: a wait of up to PROBE_WAIT, PROBE_NUM probes
+PROBE_MIN to PROBE_MAX apart, ANNOUNCE_WAIT after the last), which with
+the RFC's times in seconds keeps a new address from being used for 4 to
+8 s after DHCP's ACK. NetworkManager's ARP checking (n-acd, the
+ipv4.dad-timeout of 200 ms it uses by default) keeps the RFC's three
+probes and its steps, each of the RFC's times scaled by the timeout over
+7000 ms (n_acd_probe_config_set_timeout: PROBE_WAIT and PROBE_MIN
+28.6 ms, PROBE_MAX and ANNOUNCE_WAIT 57.1 ms, at most 200 ms in all),
+and the announcements that follow at the RFC's own times (ANNOUNCE_NUM
+of 2, ANNOUNCE_INTERVAL of 2 s). The same here: ip_dad_timeout_ms (200)
+scales the waits of the probing; ip_dad_count, the announcements and
+the defence (DEFEND_INTERVAL) are not changed. A duplicate seen while
+probing marks the address IN_IFF_DUPLICATED as before.
+
+Applied by tools/netbsd/build.sh and tools/x64/netbsd/build.sh to a copy
+of the file; NetBSD's tree is not changed.
+
+--- a/sys/netinet/if_arp.c
++++ b/sys/netinet/if_arp.c
+@@ -167,6 +167,23 @@
+ };
+ 
+ int ip_dad_count = PROBE_NUM;
++/*
++ * The probing of an address scaled to take at most this many
++ * milliseconds: RFC 5227's waits (PROBE_WAIT, PROBE_MIN, PROBE_MAX,
++ * ANNOUNCE_WAIT, in seconds) times ip_dad_timeout_ms / 7000, 7000 being
++ * the RFC's own total. The announcements after it keep the RFC's times.
++ */
++int ip_dad_timeout_ms = 200;
++
++/* The ticks of an RFC 5227 wait of sec seconds, scaled; at least one */
++static int
++arp_dad_ticks(int sec)
++{
++	int64_t t;
++
++	t = ((int64_t)sec * ip_dad_timeout_ms * hz + 7000 - 1) / 7000;
++	return (t < 1) ? 1 : (int)t;
++}
+ #ifdef ARP_DEBUG
+ int arp_debug = 1;
+ #else
+@@ -1626,7 +1643,7 @@
+ 	ARPLOG(LOG_DEBUG, "%s: starting DAD for %s\n", if_name(ifa->ifa_ifp),
+ 	    ARPLOGADDR(&ia->ia_addr.sin_addr));
+ 
+-	arp_dad_starttimer(dp, cprng_fast32() % (PROBE_WAIT * hz));
++	arp_dad_starttimer(dp, cprng_fast32() % arp_dad_ticks(PROBE_WAIT));
+ 
+ 	mutex_exit(&arp_dad_lock);
+ }
+@@ -1706,11 +1723,11 @@
+ 		 */
+ 		arp_dad_output(dp, ifa);
+ 		if (dp->dad_arp_ocount < dp->dad_count)
+-			adelay = (PROBE_MIN * hz) +
++			adelay = arp_dad_ticks(PROBE_MIN) +
+ 			    (cprng_fast32() %
+-			    ((PROBE_MAX * hz) - (PROBE_MIN * hz)));
++			    (arp_dad_ticks(PROBE_MAX) - arp_dad_ticks(PROBE_MIN) + 1));
+ 		else
+-			adelay = ANNOUNCE_WAIT * hz;
++			adelay = arp_dad_ticks(ANNOUNCE_WAIT);
+ 		arp_dad_starttimer(dp, adelay);
+ 		goto done;
+ 	} else if (dp->dad_arp_acount == 0) {

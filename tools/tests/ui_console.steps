@@ -2,7 +2,7 @@
 # (its window at 100,80 to 760,500), the place it starts in, bin (pwd typed in the full-width
 # letters the system starts with), the links of bin listed by their names, hello run with an
 # argument and its exit code, a name that is nothing, ".." up to "/", hello run from there,
-# the システム箱 by its UUID, the プログラム箱 gone into by a name typed in 日本語 (ぷろぐらむ turned to
+# the object システム by its UUID, the プログラム箱 gone into by a name typed in 日本語 (ぷろぐらむ turned to
 # katakana with Shift+無変換) and completed with Tab, and back to bin. Last, the command hello
 # opened from the desktop as a double press opens it: run in a コンソール of its own.
 open 01a0d8c4-5219-7c3e-8a41-2f6b9d0e5c11
@@ -47,7 +47,7 @@ key 28
 expect hello: 終了コード 3
 wait 300
 shot con_root
-# the システム箱 by its UUID
+# the object システム by its UUID
 text cd
 key 2C
 text 01a0d8c4-5211-7c52-9e0a-3b61d27f4c85
@@ -64,14 +64,13 @@ key 8B 02
 wait 300
 shot con_ime
 key 28
-# the mode keys act at once, the window's keys when it reads them: let Enter be read first
-wait 300
+# 英数 right after the Enter that commits: each key is read in the mode it came in (T_OBNTM imode)
 key 39
 key 2B
 wait 200
 shot con_tab
 key 28
-expect システム箱> cd プログラム箱/
+expect システム> cd プログラム箱/
 text ls
 key 28
 expect [小物] 時計

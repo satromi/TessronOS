@@ -66,7 +66,6 @@
 #define TC_NET		510
 #define TC_GRAPH	511
 
-#define TL_MAX		256		/* objects a tool's page shows */
 
 /* ---------------------------------------------------------------- words */
 
@@ -143,7 +142,7 @@ LOCAL T_TAD *trash_record( INT *p_n )
 	}
 	n = om_store_objects(all, n);
 	nr = dt_roots(roots, 8);
-	for ( i = 0; i < n && keep < TL_MAX; i++ ) {
+	for ( i = 0; i < n; i++ ) {
 		BOOL	root = FALSE;
 
 		for ( k = 0; k < nr; k++ ) {
@@ -187,48 +186,93 @@ EXPORT void dt_trash_open( void )
  * The windows the desktop shows, nearest first, each as a link to the
  * object it shows, named with the window's title: opening one brings
  * that window to the front, as opening an object already open does.
- * Its own window and the other tools' are left out. The list is made
+ * A program's window is among them when the program says what object
+ * it shows (wm_obj_shows, "shows" of the window object): one that says
+ * none -- a settings accessory, a panel -- has no object to be a link
+ * to. Its own window and the other tools' are left out. The list is made
  * again whenever the windows on the screen or their order change
  * (dt_winlist_poll, from the desktop's loop).
  */
-#define WL_MAX		64
+/*
+ * The windows on the screen, nearest first, every one: a list that came
+ * back full is asked for again in twice the room. How many, the list in
+ * *p_wids (Kfree it).
+ */
+LOCAL INT wl_windows( INT **p_wids )
+{
+	INT	room = 64, n;
+	INT	*w;
+
+	for ( ;; ) {
+		w = (INT *)Kmalloc(sizeof(INT) * (SZ)room);
+		if ( w == NULL ) {
+			*p_wids = NULL;
+			return 0;
+		}
+		n = wm_list(w, room);
+		if ( n < room ) break;
+		Kfree(w);
+		room *= 2;
+	}
+	*p_wids = w;
+	return n;
+}
 
 LOCAL UW	wl_seen = 0;		/* the order of the windows when the list was made */
 
 LOCAL T_TAD *winlist_record( void )
 {
-	INT		wids[WL_MAX], n, i, k = 0;
-	TS_UUID		ids[WL_MAX];
-	UB		names[WL_MAX][WM_TITLE_MAX];
-	CONST char	*np[WL_MAX];
+	INT		*wids, n, i, k = 0;
+	TS_UUID		*ids;
+	UB		(*names)[WM_TITLE_MAX];
+	CONST char	**np;
+	T_TAD		*rec;
 
-	n = wm_list(wids, WL_MAX);
-	for ( i = 0; i < n && k < WL_MAX; i++ ) {
+	n = wl_windows(&wids);
+	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( n + 1 ));
+	names = Kmalloc(sizeof(*names) * (SZ)( n + 1 ));
+	np = (CONST char **)Kmalloc(sizeof(char *) * (SZ)( n + 1 ));
+	if ( wids == NULL || ids == NULL || names == NULL || np == NULL ) n = 0;
+	for ( i = 0; i < n; i++ ) {
 		DTWIN	*d = dt_win_of(wids[i]);
+		T_WMWIN	w;
 
-		if ( d == NULL || d->tool != DT_TOOL_NONE || d->sealed ) {
+		if ( d == NULL ) {
+			/* a program's window: the object it says it shows */
+			if ( !wm_obj_shown(wids[i], &ids[k]) || wm_ref(wids[i], &w) < E_OK
+			  || ( w.attr & WM_ATTR_POPUP ) != 0 ) {
+				continue;
+			}
+		} else if ( d->tool != DT_TOOL_NONE || d->sealed ) {
 			continue;
+		} else {
+			ids[k] = d->id;
 		}
-		ids[k] = d->id;
 		if ( wm_title(wids[i], (char *)names[k], WM_TITLE_MAX) <= 0 ) {
 			names[k][0] = 0;
 		}
 		np[k] = (CONST char *)names[k];
 		k++;
 	}
-	return dt_list_record("ウインドウ一覧", ids, np, k);
+	rec = dt_list_record("ウインドウ一覧", ids, np, k);
+	if ( wids != NULL ) Kfree(wids);
+	if ( ids != NULL ) Kfree(ids);
+	if ( names != NULL ) Kfree(names);
+	if ( np != NULL ) Kfree((void *)np);
+	return rec;
 }
 
 /* What the order of the windows comes to, to see when it changes */
 LOCAL UW winlist_sign( void )
 {
-	INT	wids[WL_MAX], n, i;
+	INT	*wids, n, i;
 	UW	h = 2166136261U;
 
-	n = wm_list(wids, WL_MAX);
+	n = wl_windows(&wids);
 	for ( i = 0; i < n; i++ ) {
 		h = ( h ^ (UW)wids[i] ) * 16777619U;
 	}
+	if ( wids != NULL ) Kfree(wids);
 	return h ^ (UW)n;
 }
 
@@ -271,12 +315,18 @@ EXPORT void dt_winlist_poll( void )
  */
 LOCAL void trash_delete( DTWIN *d )
 {
-	TS_UUID	ids[TL_MAX];
+	TS_UUID	*ids;
 	UB	l1[WM_LABEL_MAX * 2];
-	INT	n, i, at = 0;
+	INT	n, i, at = 0, room = ( d->fig != NULL ) ? d->fig->nsh : 0;
 
-	n = picked_targets(d, ids, TL_MAX);
+	/* room for every link picked: no more than the page has shapes */
+	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( ( room > 0 ) ? room : 1 ));
+	if ( ids == NULL ) {
+		return;
+	}
+	n = picked_targets(d, ids, room);
 	if ( n == 0 ) {
+		Kfree(ids);
 		return;
 	}
 	if ( n == 1 ) {
@@ -294,6 +344,7 @@ LOCAL void trash_delete( DTWIN *d )
 	}
 	if ( !dt_confirm(d, (CONST char *)l1, "この操作は取り消せません。",
 			 "いいえ", "はい") ) {
+		Kfree(ids);
 		return;
 	}
 	for ( i = 0; i < n; i++ ) {
@@ -305,6 +356,7 @@ LOCAL void trash_delete( DTWIN *d )
 		}
 		(void)om_store_delete(&ids[i]);
 	}
+	Kfree(ids);
 	dt_tool_refresh(DT_TOOL_TRASH);
 }
 
@@ -547,7 +599,7 @@ LOCAL T_TAD *sr_record( CONST T_DTQUERY *q, INT *p_total, INT *p_hits,
 		return NULL;
 	}
 	n = om_store_objects(all, n);
-	for ( i = 0; i < n && hits < TL_MAX; i++ ) {
+	for ( i = 0; i < n; i++ ) {
 		if ( sr_match(&all[i], q) ) {
 			all[hits++] = all[i];
 		}
@@ -618,13 +670,11 @@ EXPORT void dt_search_open( DTWIN *from )
 
 /* ---------------------------------------------------------------- 仮身ネットワーク */
 
-#define NW_MAX		128		/* objects one network shows */
 #define NW_W		200		/* each one's box */
 #define NW_GAP_X	100		/* between one column and the next */
 #define NW_GAP_Y	20		/* between one row and the next */
 #define NW_PAD		40
 #define NW_CHSZ		14
-#define NW_EDGE_MAX	512
 
 typedef struct {
 	TS_UUID	id;
@@ -632,26 +682,130 @@ typedef struct {
 	INT	x, y;
 } NWNODE;
 
+/*
+ * Every object the network reaches and every link between them: the
+ * lists grow as they are met. hash finds an object's place by its UUID
+ * (open addressing, nhash a power of two, -1 an empty slot).
+ */
 typedef struct {
-	INT	n, nedge;
-	NWNODE	node[NW_MAX];
-	UH	from[NW_EDGE_MAX], to[NW_EDGE_MAX];
+	INT	n, ncap, nedge, ecap;
+	NWNODE	*node;
+	INT	*from, *to;
+	INT	*hash, nhash;
 } NWNET;
 
 LOCAL TS_UUID	nw_start;
 LOCAL BOOL	nw_graph = FALSE;	/* shown as a graph, not in columns */
 
+LOCAL UW nw_hash_of( CONST TS_UUID *id )
+{
+	CONST UB	*b = (CONST UB *)id;
+	UW		h = 2166136261U;
+	INT		i;
+
+	for ( i = 0; i < (INT)sizeof(TS_UUID); i++ ) {
+		h = ( h ^ b[i] ) * 16777619U;
+	}
+	return h;
+}
+
 LOCAL INT nw_find( CONST NWNET *g, CONST TS_UUID *id )
 {
-	INT	i;
+	UW	m = (UW)g->nhash - 1, k;
 
-	for ( i = 0; i < g->n; i++ ) {
-		if ( ts_uuid_cmp(&g->node[i].id, id) == 0 ) {
-			return i;
+	if ( g->nhash == 0 ) {
+		return -1;
+	}
+	for ( k = nw_hash_of(id) & m; g->hash[k] >= 0; k = ( k + 1 ) & m ) {
+		if ( ts_uuid_cmp(&g->node[g->hash[k]].id, id) == 0 ) {
+			return g->hash[k];
 		}
 	}
-
 	return -1;
+}
+
+/* The place of a new object, its hash kept less than half full: -1 for no memory */
+LOCAL INT nw_add( NWNET *g, CONST TS_UUID *id, INT depth )
+{
+	INT	i;
+	UW	m, k;
+
+	if ( g->n == g->ncap ) {
+		INT	cap = ( g->ncap > 0 ) ? g->ncap * 2 : 64;
+		NWNODE	*t = (NWNODE *)Kmalloc(sizeof(NWNODE) * (SZ)cap);
+
+		if ( t == NULL ) {
+			return -1;
+		}
+		if ( g->node != NULL ) {
+			knl_memcpy(t, g->node, sizeof(NWNODE) * (SZ)g->n);
+			Kfree(g->node);
+		}
+		g->node = t;
+		g->ncap = cap;
+	}
+	if ( ( g->n + 1 ) * 2 > g->nhash ) {
+		INT	nh = ( g->nhash > 0 ) ? g->nhash * 2 : 128;
+		INT	*h = (INT *)Kmalloc(sizeof(INT) * (SZ)nh);
+
+		if ( h == NULL ) {
+			return -1;
+		}
+		for ( i = 0; i < nh; i++ ) {
+			h[i] = -1;
+		}
+		for ( i = 0; i < g->n; i++ ) {
+			for ( k = nw_hash_of(&g->node[i].id) & (UW)( nh - 1 ); h[k] >= 0; k = ( k + 1 ) & (UW)( nh - 1 ) ) {
+				;
+			}
+			h[k] = i;
+		}
+		if ( g->hash != NULL ) Kfree(g->hash);
+		g->hash = h;
+		g->nhash = nh;
+	}
+	i = g->n++;
+	g->node[i].id = *id;
+	g->node[i].depth = depth;
+	m = (UW)g->nhash - 1;
+	for ( k = nw_hash_of(id) & m; g->hash[k] >= 0; k = ( k + 1 ) & m ) {
+		;
+	}
+	g->hash[k] = i;
+	return i;
+}
+
+/* A link from a to b: FALSE for no memory */
+LOCAL BOOL nw_edge( NWNET *g, INT a, INT b )
+{
+	if ( g->nedge == g->ecap ) {
+		INT	cap = ( g->ecap > 0 ) ? g->ecap * 2 : 128;
+		INT	*f = (INT *)Kmalloc(sizeof(INT) * (SZ)cap * 2);
+
+		if ( f == NULL ) {
+			return FALSE;
+		}
+		if ( g->from != NULL ) {
+			knl_memcpy(f, g->from, sizeof(INT) * (SZ)g->nedge);
+			knl_memcpy(f + cap, g->to, sizeof(INT) * (SZ)g->nedge);
+			Kfree(g->from);
+		}
+		g->from = f;
+		g->to = f + cap;
+		g->ecap = cap;
+	}
+	g->from[g->nedge] = a;
+	g->to[g->nedge] = b;
+	g->nedge++;
+	return TRUE;
+}
+
+LOCAL void nw_free( NWNET *g )
+{
+	if ( g->node != NULL ) Kfree(g->node);
+	if ( g->from != NULL ) Kfree(g->from);
+	if ( g->hash != NULL ) Kfree(g->hash);
+	knl_memset(g, 0, sizeof(*g));
 }
 
 /*
@@ -662,55 +816,55 @@ LOCAL INT nw_find( CONST NWNET *g, CONST TS_UUID *id )
 LOCAL void nw_build( NWNET *g, CONST TS_UUID *start )
 {
 	TS_UUID	*lk;
-	INT	head = 0, n, j, k;
+	INT	head = 0, n, j, k, ebase;
 
-	g->n = 1;
-	g->nedge = 0;
-	g->node[0].id = *start;
-	g->node[0].depth = 0;
-	lk = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * 256);
-	if ( lk == NULL ) {
+	knl_memset(g, 0, sizeof(*g));
+	if ( nw_add(g, start, 0) < 0 ) {
 		return;
 	}
+	lk = NULL;
 	while ( head < g->n ) {
 		SZ	len = 0;
 		UB	*buf = om_store_read(&g->node[head].id, 0, &len);
 
 		n = 0;
 		if ( buf != NULL ) {
-			n = om_store_links(buf, len, lk, 256);
-			if ( n > 256 ) n = 256;
+			/* every link of the record: asked how many, then taken */
+			n = om_store_links(buf, len, NULL, 0);
+			if ( lk != NULL ) Kfree(lk);
+			lk = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( ( n > 0 ) ? n : 1 ));
+			n = ( lk != NULL ) ? om_store_links(buf, len, lk, n) : 0;
 			Kfree(buf);
 		}
+		ebase = g->nedge;		/* the links of this object start here */
 		for ( j = 0; j < n; j++ ) {
 			k = nw_find(g, &lk[j]);
 			if ( k < 0 ) {
-				if ( g->n >= NW_MAX || om_store_refs(&lk[j]) < 0 ) {
-					continue;	/* too many, or not in the store */
+				if ( om_store_refs(&lk[j]) < 0 ) {
+					continue;	/* not in the store */
 				}
-				k = g->n++;
-				g->node[k].id = lk[j];
-				g->node[k].depth = g->node[head].depth + 1;
+				k = nw_add(g, &lk[j], g->node[head].depth + 1);
+				if ( k < 0 ) {
+					continue;	/* no memory: shown as far as there was */
+				}
 			}
 			{
 				INT	e;
 				BOOL	dup = FALSE;
 
-				for ( e = 0; e < g->nedge; e++ ) {
-					if ( g->from[e] == head && g->to[e] == k ) {
+				for ( e = ebase; e < g->nedge && !dup; e++ ) {
+					if ( g->to[e] == k ) {
 						dup = TRUE;
 					}
 				}
-				if ( !dup && g->nedge < NW_EDGE_MAX ) {
-					g->from[g->nedge] = (UH)head;
-					g->to[g->nedge] = (UH)k;
-					g->nedge++;
+				if ( !dup ) {
+					(void)nw_edge(g, head, k);
 				}
 			}
 		}
 		head++;
 	}
-	Kfree(lk);
+	if ( lk != NULL ) Kfree(lk);
 }
 
 LOCAL SZ nw_put( UB *buf, SZ at, SZ max, CONST char *s )
@@ -760,21 +914,23 @@ LOCAL T_TAD *nw_record( NWNET *g, UB *title, INT max )
 {
 	UB	*xml;
 	SZ	cap, at = 0;
-	INT	row[NW_MAX], i, e, band = NW_CHSZ + 11;
+	INT	*row, i, e, band = NW_CHSZ + 11;
 	T_TAD	*doc = NULL;
 	UB	nm[TAD_NAME_MAX];
 
-	for ( i = 0; i < NW_MAX; i++ ) {
-		row[i] = 0;
+	/* a column to each step: there are no more steps than objects */
+	row = (INT *)Kcalloc((SZ)g->n, sizeof(INT));
+	if ( row == NULL ) {
+		return NULL;
 	}
 	for ( i = 0; i < g->n; i++ ) {
 		INT	dp = g->node[i].depth;
 
-		if ( dp >= NW_MAX ) dp = NW_MAX - 1;
 		g->node[i].x = NW_PAD + dp * ( NW_W + NW_GAP_X );
 		g->node[i].y = NW_PAD + row[dp] * ( band + NW_GAP_Y );
 		row[dp]++;
 	}
+	Kfree(row);
 	cap = 512 + (SZ)g->n * ( 480 + TAD_NAME_MAX * 5 ) + (SZ)g->nedge * 200;
 	xml = (UB *)Kmalloc(cap);
 	if ( xml == NULL ) {
@@ -893,16 +1049,90 @@ LOCAL D isqrt( D v )
 	return r;
 }
 
+/*
+ * The push of k on i, added to i's force (and taken from k's when both).
+ */
+LOCAL void gr_push( D *px, D *py, D *fx, D *fy, INT i, INT k, BOOL both )
+{
+	D	dx = px[i] - px[k], dy = py[i] - py[k];
+	D	d2 = dx * dx + dy * dy, d, f;
+
+	if ( d2 < 256 ) {
+		dx = ( i % 2 ) ? 16 : -16;
+		dy = ( k % 2 ) ? 16 : -16;
+		d2 = 512;
+	}
+	d = isqrt(d2);
+	f = (D)GR_K * GR_K / d;		/* k^2 / d */
+	fx[i] += dx * f / d;  fy[i] += dy * f / d;
+	if ( both ) {
+		fx[k] -= dx * f / d;  fy[k] -= dy * f / d;
+	}
+}
+
+/*
+ * Many objects: each is pushed only by those within twice the length a
+ * link settles to, found through a grid of squares that size, so that a
+ * step costs about as much as there are objects rather than its square.
+ * The squares are kept in a hash of 2^hbits places; a node's square is
+ * kept with it, so that two squares in one place are told apart.
+ */
+#define GR_ALL		256		/* objects pushed each by all the others up to this many */
+#define GR_CELL		( 2 * GR_K )
+
+LOCAL void gr_push_near( NWNET *g, D *px, D *py, D *fx, D *fy, INT *head, INT *next, INT *cx, INT *cy, INT hbits )
+{
+	UW	m = ( 1U << hbits ) - 1;
+	INT	i, k, a, b;
+
+#define GR_SLOT(x, y)	( ( (UW)(x) * 73856093U ^ (UW)(y) * 19349663U ) & m )
+	for ( i = 0; i <= (INT)m; i++ ) {
+		head[i] = -1;
+	}
+	for ( i = 0; i < g->n; i++ ) {
+		UW	h;
+
+		cx[i] = (INT)( px[i] / GR_CELL ) - ( ( px[i] < 0 ) ? 1 : 0 );
+		cy[i] = (INT)( py[i] / GR_CELL ) - ( ( py[i] < 0 ) ? 1 : 0 );
+		h = GR_SLOT(cx[i], cy[i]);
+		next[i] = head[h];
+		head[h] = i;
+	}
+	for ( i = 0; i < g->n; i++ ) {
+		for ( a = cx[i] - 1; a <= cx[i] + 1; a++ ) {
+			for ( b = cy[i] - 1; b <= cy[i] + 1; b++ ) {
+				for ( k = head[GR_SLOT(a, b)]; k >= 0; k = next[k] ) {
+					if ( k != i && cx[k] == a && cy[k] == b ) {
+						gr_push(px, py, fx, fy, i, k, FALSE);
+					}
+				}
+			}
+		}
+	}
+#undef GR_SLOT
+}
+
 LOCAL void gr_layout( NWNET *g, D *px, D *py )
 {
 	D	*fx, *fy;
-	INT	i, k, e, step;
+	INT	i, k, e, step, *head = NULL, *next = NULL, *cx = NULL, *cy = NULL, hbits = 0;
 
 	fx = (D *)Kmalloc(sizeof(D) * (SZ)g->n * 2);
 	if ( fx == NULL ) {
 		return;
 	}
 	fy = fx + g->n;
+	if ( g->n > GR_ALL ) {
+		while ( ( 1 << hbits ) < g->n * 2 ) hbits++;
+		head = (INT *)Kmalloc(sizeof(INT) * ( ( (SZ)1 << hbits ) + (SZ)g->n * 3 ));
+		if ( head == NULL ) {
+			Kfree(fx);
+			return;
+		}
+		next = head + ( 1 << hbits );
+		cx = next + g->n;
+		cy = cx + g->n;
+	}
 	/*
 	 * Round a circle to begin with, sixteen to a ring and each ring
 	 * further out, the one started from in the middle. The directions
@@ -926,21 +1156,14 @@ LOCAL void gr_layout( NWNET *g, D *px, D *py )
 		for ( i = 0; i < g->n; i++ ) {
 			fx[i] = fy[i] = 0;
 		}
-		/* everything pushes everything else away */
-		for ( i = 0; i < g->n; i++ ) {
-			for ( k = i + 1; k < g->n; k++ ) {
-				D	dx = px[i] - px[k], dy = py[i] - py[k];
-				D	d2 = dx * dx + dy * dy, d, f;
-
-				if ( d2 < 256 ) {
-					dx = ( i % 2 ) ? 16 : -16;
-					dy = ( k % 2 ) ? 16 : -16;
-					d2 = 512;
+		/* everything pushes everything else away; of many, those near */
+		if ( head != NULL ) {
+			gr_push_near(g, px, py, fx, fy, head, next, cx, cy, hbits);
+		} else {
+			for ( i = 0; i < g->n; i++ ) {
+				for ( k = i + 1; k < g->n; k++ ) {
+					gr_push(px, py, fx, fy, i, k, TRUE);
 				}
-				d = isqrt(d2);
-				f = (D)GR_K * GR_K / d;		/* k^2 / d */
-				fx[i] += dx * f / d;  fy[i] += dy * f / d;
-				fx[k] -= dx * f / d;  fy[k] -= dy * f / d;
 			}
 		}
 		/* and each link pulls its ends together */
@@ -972,19 +1195,23 @@ LOCAL void gr_layout( NWNET *g, D *px, D *py )
 		}
 	}
 	Kfree(fx);
+	if ( head != NULL ) Kfree(head);
 }
 
 LOCAL T_TAD *gr_record( NWNET *g, UB *title, INT max )
 {
 	UB	*xml;
 	SZ	cap, at = 0;
-	INT	i, e, band = NW_CHSZ + 11, in[NW_MAX];
+	INT	i, e, band = NW_CHSZ + 11, *in;
 	D	*px, *py, minx, miny;
 	T_TAD	*doc = NULL;
 	UB	nm[TAD_NAME_MAX];
 
 	px = (D *)Kmalloc(sizeof(D) * (SZ)g->n * 2);
-	if ( px == NULL ) {
+	in = (INT *)Kmalloc(sizeof(INT) * (SZ)g->n);
+	if ( px == NULL || in == NULL ) {
+		if ( px != NULL ) Kfree(px);
+		if ( in != NULL ) Kfree(in);
 		return NULL;
 	}
 	py = px + g->n;
@@ -1009,6 +1236,7 @@ LOCAL T_TAD *gr_record( NWNET *g, UB *title, INT max )
 	cap = 512 + (SZ)g->n * ( 700 + TAD_NAME_MAX * 5 ) + (SZ)g->nedge * 160;
 	xml = (UB *)Kmalloc(cap);
 	if ( xml == NULL ) {
+		Kfree(in);
 		return NULL;
 	}
 	if ( om_store_name(&g->node[0].id, nm, TAD_NAME_MAX) < 0 ) {
@@ -1092,6 +1320,7 @@ LOCAL T_TAD *gr_record( NWNET *g, UB *title, INT max )
 		doc = NULL;
 	}
 	Kfree(xml);
+	Kfree(in);
 
 	return doc;
 }
@@ -1105,14 +1334,15 @@ LOCAL void nw_show( CONST TS_UUID *start )
 	T_DPRECT	o;
 	UB		title[WM_TITLE_MAX];
 
-	g = (NWNET *)Kmalloc(sizeof(NWNET));
+	g = (NWNET *)Kcalloc(1, sizeof(NWNET));
 	if ( g == NULL ) {
 		return;
 	}
 	nw_start = *start;
 	nw_build(g, start);
-	rec = nw_graph ? gr_record(g, title, sizeof(title))
-		       : nw_record(g, title, sizeof(title));
+	rec = ( g->n == 0 ) ? NULL : nw_graph ? gr_record(g, title, sizeof(title))
+					      : nw_record(g, title, sizeof(title));
+	nw_free(g);
 	Kfree(g);
 	if ( rec == NULL ) {
 		return;
@@ -1272,19 +1502,20 @@ EXPORT void dt_tool_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj,
 EXPORT BOOL dt_tool_key( DTWIN *d, UINT code, UINT mods )
 {
 	BOOL	ctrl = (BOOL)( ( mods & MOD_CTRL ) != 0 );
+	UINT	cmd = wm_key_cmd(code);		/* the letter the key types, for a command */
 
 	if ( d->tool == DT_TOOL_TRASH && !ctrl && code == KEY_DEL ) {
 		trash_delete(d);
 		wm_update();
 		return TRUE;
 	}
-	if ( ctrl && code == KEY_X ) {
+	if ( ctrl && cmd == KEY_X ) {
 		ed_copy(d);
 		return TRUE;
 	}
 	if ( d->tool == DT_TOOL_NETWORK && ctrl
-	  && ( code == KEY_N || code == KEY_G ) ) {
-		nw_graph = (BOOL)( code == KEY_G );
+	  && ( cmd == KEY_N || cmd == KEY_G ) ) {
+		nw_graph = (BOOL)( cmd == KEY_G );
 		dt_tool_refresh(DT_TOOL_NETWORK);
 		return TRUE;
 	}

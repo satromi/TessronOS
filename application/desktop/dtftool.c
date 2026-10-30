@@ -45,6 +45,7 @@
 #include <ts/fn.h>
 #include <ts/look.h>
 #include <ts/docmenu.h>
+#include <ts/sysdef.h>
 #include "desktop.h"
 
 #define KEY_BS		0x2A
@@ -130,12 +131,44 @@ LOCAL BOOL centre_able( INT t )
 /* A shape being drawn: where the hand went down, and where it is */
 LOCAL DTWIN	*df_drawing = NULL;
 LOCAL INT	df_x0, df_y0, df_x1, df_y1;	/* in the figure's coordinates */
-LOCAL T_DPPOINT	df_pts[TV_MAX_PT];
-LOCAL INT	df_npt = 0;
+LOCAL T_DPPOINT	*df_pts = NULL;	/* as many as are drawn: 'df_maxpt' of room */
+LOCAL INT	df_npt = 0, df_maxpt = 0;
 LOCAL UD	df_last_at = 0;
 LOCAL BOOL	df_first_edge = FALSE;	/* a polygon's first side, being dragged */
 LOCAL INT	df_c0_place = -1, df_c0_point = -1;	/* a line's joined ends */
 LOCAL INT	df_c1_place = -1, df_c1_point = -1;
+LOCAL BOOL	df_told = FALSE;	/* the want of memory told for this shape */
+
+/*
+ * Room for n points of the shape being drawn: a line drawn by hand has
+ * as many as the hand gives it. Without the memory for more, that is
+ * told once and the points it has are kept.
+ */
+LOCAL BOOL pts_room( DTWIN *d, INT n )
+{
+	INT		m;
+	T_DPPOINT	*p;
+
+	if ( n <= df_maxpt ) {
+		return TRUE;
+	}
+	m = ( df_maxpt > 0 ) ? df_maxpt * 2 : 256;
+	while ( m < n ) {
+		m *= 2;
+	}
+	p = (T_DPPOINT *)Krealloc(df_pts, sizeof(T_DPPOINT) * (size_t)m);
+	if ( p == NULL ) {
+		if ( !df_told ) {
+			df_told = TRUE;
+			dt_no_memory(d);
+		}
+		return FALSE;
+	}
+	df_pts = p;
+	df_maxpt = m;
+
+	return TRUE;
+}
 
 /* The pointer, in the figure's coordinates, for the panel to show */
 LOCAL BOOL	df_have_xy = FALSE;
@@ -882,8 +915,8 @@ EXPORT BOOL df_tool_press( DTWIN *d, INT x, INT y, UD when, UINT mods )
 					fx = df_pts[df_npt - 1].x;
 				}
 			}
-			if ( df_npt < TV_MAX_PT
-			  && ( df_pts[df_npt - 1].x != fx || df_pts[df_npt - 1].y != fy ) ) {
+			if ( ( df_pts[df_npt - 1].x != fx || df_pts[df_npt - 1].y != fy )
+			  && pts_room(d, df_npt + 1) ) {
 				df_pts[df_npt].x = fx;
 				df_pts[df_npt].y = fy;
 				df_npt++;
@@ -895,6 +928,10 @@ EXPORT BOOL df_tool_press( DTWIN *d, INT x, INT y, UD when, UINT mods )
 			preview(d);
 			return TRUE;
 		}
+		df_told = FALSE;
+		if ( !pts_room(d, 2) ) {
+			return TRUE;
+		}
 		df_drawing = d;
 		df_npt = 1;
 		df_pts[0].x = fx;
@@ -904,6 +941,10 @@ EXPORT BOOL df_tool_press( DTWIN *d, INT x, INT y, UD when, UINT mods )
 		df_last_at = when;
 		df_first_edge = TRUE;
 		preview(d);
+		return TRUE;
+	}
+	df_told = FALSE;
+	if ( !pts_room(d, 2) ) {
 		return TRUE;
 	}
 	df_drawing = d;
@@ -942,8 +983,8 @@ EXPORT void df_tool_follow( INT sx, INT sy, UINT mods )
 	}
 	to_fig(d, sx - w.work.left, sy - w.work.top, &fx, &fy);
 	if ( df_tool == TL_CURVE ) {
-		if ( df_npt < TV_MAX_PT
-		  && ( df_pts[df_npt - 1].x != fx || df_pts[df_npt - 1].y != fy ) ) {
+		if ( ( df_pts[df_npt - 1].x != fx || df_pts[df_npt - 1].y != fy )
+		  && pts_room(d, df_npt + 1) ) {
 			df_pts[df_npt].x = fx;
 			df_pts[df_npt].y = fy;
 			df_npt++;
@@ -1103,16 +1144,24 @@ LOCAL void end_preview( DTWIN *d )
 
 #define END_REACH	6
 
-EXPORT BOOL df_end_press( DTWIN *d, INT x, INT y )
+/*
+ * A press at (x, y) on the end of a picked line: that end carried. A
+ * finger's press (when, wm_hit_slop) reaches an end that much farther,
+ * and takes the nearest end in reach.
+ */
+EXPORT BOOL df_end_press( DTWIN *d, INT x, INT y, UD when )
 {
-	INT		i, k, fx, fy;
-	T_DPPOINT	path[TV_MAX_PT];
+	INT		i, k, fx, fy, slop, reach, best = -1;
+	T_DPPOINT	*path = NULL;
+	BOOL		held = FALSE;
 
 	if ( !df_is(d) || df_tool != TL_SELECT || d->sealed ) {
 		return FALSE;
 	}
 	to_fig(d, x, y, &fx, &fy);
-	for ( i = 0; i < d->fig->nsh; i++ ) {
+	slop = wm_hit_slop(when);
+	reach = END_REACH + slop * 8 / ( fl.zoom > 0 ? fl.zoom : 8 );
+	for ( i = 0; i < d->fig->nsh && !held; i++ ) {
 		CONST T_TVSHAPE	*s = &d->fig->sh[i];
 		INT		n;
 
@@ -1120,8 +1169,16 @@ EXPORT BOOL df_end_press( DTWIN *d, INT x, INT y )
 		  || s->node == NULL || !same_word(s->node->name, "line") ) {
 			continue;
 		}
+		/* the path of a line is some 64KB: from the heap, since the
+		   desktop's task has a stack of no more than that */
+		if ( path == NULL ) {
+			path = (T_DPPOINT *)Kmalloc(sizeof(T_DPPOINT) * (SZ)TV_OUT_PTS(2));
+			if ( path == NULL ) {
+				break;
+			}
+		}
 		/* its ends as it is drawn: a joined end is where it joins */
-		n = tv_line_path(d->fig, s, path, TV_MAX_PT);
+		n = tv_line_path(d->fig, s, path, TV_OUT_PTS(2));
 		if ( n < 2 ) {
 			path[0] = s->pt[0];
 			path[1] = s->pt[1];
@@ -1131,7 +1188,18 @@ EXPORT BOOL df_end_press( DTWIN *d, INT x, INT y )
 			T_DPPOINT	e = ( k == 0 ) ? path[0] : path[n - 1];
 			INT		dx = e.x - fx, dy = e.y - fy;
 
-			if ( dx * dx + dy * dy > END_REACH * END_REACH ) {
+			if ( dx * dx + dy * dy > reach * reach ) {
+				continue;
+			}
+			if ( slop > 0 ) {
+				/* a finger: the nearest of the ends in reach, held once all are seen */
+				if ( best < 0 || dx * dx + dy * dy < best ) {
+					best = dx * dx + dy * dy;
+					df_end_shape = i;
+					df_end_which = k;
+					df_end_pts[0] = path[0];
+					df_end_pts[1] = path[n - 1];
+				}
 				continue;
 			}
 			df_end_win = d;
@@ -1141,11 +1209,20 @@ EXPORT BOOL df_end_press( DTWIN *d, INT x, INT y )
 			df_end_pts[1] = path[n - 1];
 			df_end_place = -1;
 			end_preview(d);
-			return TRUE;
+			held = TRUE;
+			break;
 		}
 	}
-
-	return FALSE;
+	if ( path != NULL ) {
+		Kfree(path);
+	}
+	if ( !held && best >= 0 ) {
+		df_end_win = d;
+		df_end_place = -1;
+		end_preview(d);
+		held = TRUE;
+	}
+	return held;
 }
 
 EXPORT BOOL df_end_carrying( void )
@@ -1271,16 +1348,24 @@ LOCAL INT picked_nodes( DTWIN *d, T_TADNODE **out, UINT *kinds, INT max )
  */
 LOCAL void apply_picked( DTWIN *d, INT what )
 {
-	T_TADNODE	*nodes[128];
-	UINT		kinds[128];
+	T_TADNODE	**nodes;
+	UINT		*kinds;
 	T_TAD		*rec;
 	INT		n, i;
 
-	if ( d == NULL || !df_is(d) || d->sealed ) {
+	if ( d == NULL || !df_is(d) || d->sealed || d->npick == 0 ) {
 		return;
 	}
-	n = picked_nodes(d, nodes, kinds, 128);
+	/* every shape picked: no more than are picked */
+	nodes = (T_TADNODE **)Kmalloc(( sizeof(T_TADNODE *) + sizeof(UINT) ) * (SZ)d->npick);
+	if ( nodes == NULL ) {
+		dt_no_memory(d);
+		return;
+	}
+	kinds = (UINT *)( nodes + d->npick );
+	n = picked_nodes(d, nodes, kinds, d->npick);
 	if ( n == 0 ) {
+		Kfree(nodes);
 		return;
 	}
 	rec = rec_of(d);
@@ -1332,6 +1417,7 @@ LOCAL void apply_picked( DTWIN *d, INT what )
 			break;
 		}
 	}
+	Kfree(nodes);
 	ed_changed(d);
 }
 
@@ -1373,7 +1459,14 @@ EXPORT void df_take_look( DTWIN *d )
 /*
  * The buttons: the first row the palettes, the canvas, the pointer, the
  * magnification and the grid, and after them where the pointer is; the
- * second the templates and the look of text.
+ * second the templates and the look of text. They are the parts of a
+ * panel that fills the window (the window manager draws and works
+ * them): the inside's colour and the colour of lines are swatches, the
+ * tools and the templates are buttons with pictures (PNG resources of
+ * the data box 基本図形編集, SYSDEF_BOX_FIG), the one in hand drawn
+ * with the heavy edge, and its picture with a red mark while it draws
+ * from the middle. The panel is made again whenever what it shows
+ * changes; where the pointer is is only written into its words.
  */
 #define B_FILL		0
 #define B_STROKE	1
@@ -1387,11 +1480,23 @@ EXPORT void df_take_look( DTWIN *d )
 #define B_FONT		( B_ROW2 + 10 )
 #define B_N		( B_ROW2 + 11 )
 
+#define N_XY		100		/* the words of where the pointer is */
+
 /* The tool each template button gives */
 LOCAL CONST INT	df_row2[10] = {
 	TL_CURVE, TL_LINE, TL_ARC, TL_CHORD, TL_EARC, TL_RECT, TL_POLYGON,
 	TL_TRIANGLE, TL_ELLIPSE, TL_TEXT
 };
+
+/* The pictures, by their resource numbers */
+#define PIC_SELECT	0
+#define PIC_CANVAS	1
+#define PIC_BRUSH	2
+#define PIC_LSTYLE	3
+#define PIC_CORNER	4
+#define PIC_GRID	5		/* 5..7: none, shown, snapped to */
+#define PIC_ROW2	8		/* 8..17: the templates */
+#define PIC_CENTRE	18		/* 18..23: line, sector, chord, arc, rectangle, ellipse drawing from the middle */
 
 #define PB		32		/* a button */
 #define PGAP		2
@@ -1400,8 +1505,22 @@ LOCAL CONST INT	df_row2[10] = {
 #define PH		( PPAD * 2 + 2 * PB + PGAP )
 
 LOCAL INT	df_panel = 0;		/* its window */
+LOCAL INT	df_pid = -1;		/* the panel of parts in it */
 LOCAL BOOL	df_panel_moving = FALSE;
+LOCAL BOOL	df_pressing = FALSE;	/* a button of it held in */
 LOCAL INT	df_grab_dx, df_grab_dy;
+
+/* What the panel shows, to see when it has to be made again */
+typedef struct {
+	INT	tool;
+	BOOL	centre, canvas;
+	UW	fill, stroke;
+	BOOL	fill_on;
+	INT	fill_pat, zoom, grid_mode;
+} DFSIG;
+
+LOCAL DFSIG	df_sig;
+LOCAL BOOL	df_sig_ok = FALSE;
 
 LOCAL void button_rect( INT b, T_DPRECT *r )
 {
@@ -1423,19 +1542,6 @@ LOCAL INT button_tool( INT b )
 	return -1;
 }
 
-/* A button's raised edge, or its sunk one when it is in */
-LOCAL void bevel( INT gid, CONST T_DPRECT *c, BOOL in )
-{
-	UW	lit = in ? wm_look(LK_SHADOW) : 0x00FFFFFFU;
-	UW	dark = in ? 0x00FFFFFFU : wm_look(LK_SHADOW);
-
-	dp_fill_rect(gid, c, in ? 0x00B0B0B0U : wm_look(LK_PNLGROUND));
-	dp_line(gid, c->left, c->top, c->right - 1, c->top, lit);
-	dp_line(gid, c->left, c->top, c->left, c->bottom - 1, lit);
-	dp_line(gid, c->left, c->bottom - 1, c->right - 1, c->bottom - 1, dark);
-	dp_line(gid, c->right - 1, c->top, c->right - 1, c->bottom - 1, dark);
-}
-
 LOCAL void fill_pat_rect( INT gid, CONST T_DPRECT *r, INT pat_no, UW col )
 {
 	UW		pc;
@@ -1454,239 +1560,198 @@ LOCAL void fill_pat_rect( INT gid, CONST T_DPRECT *r, INT pat_no, UW col )
 	dp_fill_rect(gid, r, col);
 }
 
-LOCAL void text_at( INT gid, INT x, INT y, INT size, CONST char *s, UW col )
+/* A part's picture: resource n of the data box, read now and kept by the window manager */
+LOCAL void pict_put( T_WMPART *pt, INT n )
 {
-	ID	fid = fn_system();
+	CONST char	*box = SYSDEF_BOX_FIG;
+	UB		num[12];
+	INT		k = 0, i;
 
-	if ( fid > 0 ) {
-		fn_set_size(fid, size);
-		fn_draw(gid, fid, x, y, (CONST UB *)s, col);
-	}
+	for ( i = 0; box[i] != 0 && k < WM_LABEL_MAX - 16; i++ ) pt->text[k++] = (UB)box[i];
+	pt->text[k++] = '_';
+	pt->text[k++] = '0';
+	pt->text[k++] = '_';
+	(void)put_num(num, 0, n);
+	for ( i = 0; num[i] != 0; i++ ) pt->text[k++] = num[i];
+	pt->text[k++] = '.';
+	pt->text[k++] = 'p';
+	pt->text[k++] = 'n';
+	pt->text[k++] = 'g';
+	pt->text[k] = 0;
+	pt->label[0] = 0;
+	knl_pn_pict_load(pt->text);
 }
 
-/* The picture on a button */
-LOCAL void button_icon( INT gid, INT b, CONST T_DPRECT *c )
+/* The picture a template button wears, its mark while it draws from the middle */
+LOCAL INT template_pict( INT b )
 {
-	T_DPRECT	i, s;
-	T_DPPAT		pat;
-	INT		l = c->left + 6, t = c->top + 6;
-	INT		r = c->right - 7, bt = c->bottom - 7;
-	INT		mx = ( l + r ) / 2, my = ( t + bt ) / 2;
+	INT	t = df_row2[b - B_ROW2];
 
-	dp_pat_colour(&pat, 0x00000000U);
-	i.left = c->left + 4;  i.top = c->top + 4;
-	i.right = c->right - 4;  i.bottom = c->bottom - 4;
-	switch ( b ) {
-	case B_FILL:
-		/* the inside's colour or pattern, in a box */
-		if ( fl.fill_on ) {
-			fill_pat_rect(gid, &i, fl.fill_pat, fl.fill);
-		} else {
-			dp_fill_rect(gid, &i, 0x00FFFFFFU);
-			dp_line(gid, i.left, i.bottom - 1, i.right - 1, i.top, 0x00EE0000U);
+	if ( t == df_tool && centre_able(t) && df_centre[t] ) {
+		switch ( t ) {
+		case TL_LINE:		return PIC_CENTRE + 0;
+		case TL_ARC:		return PIC_CENTRE + 1;
+		case TL_CHORD:		return PIC_CENTRE + 2;
+		case TL_EARC:		return PIC_CENTRE + 3;
+		case TL_RECT:		return PIC_CENTRE + 4;
+		default:		return PIC_CENTRE + 5;
 		}
-		dp_frame_rect(gid, &i, 0x00000000U, 1);
-		break;
-	case B_STROKE:
-		dp_fill_rect(gid, &i, 0x00FFFFFFU);
-		dp_frame_rect(gid, &i, 0x00000000U, 1);
-		s.left = i.left + 3;  s.right = i.right - 3;
-		s.top = my - 1;  s.bottom = my + 2;
-		dp_fill_rect(gid, &s, fl.stroke);
-		break;
-	case B_LSTYLE:
-		dp_fill_rect(gid, &i, 0x00FFFFFFU);
-		dp_frame_rect(gid, &i, 0x00000000U, 1);
-		dp_line_wide(gid, i.left + 3, i.top + 6, i.right - 4, i.top + 6, 1, 0, &pat);
-		dp_line_wide(gid, i.left + 3, my, i.right - 4, my, 2, 0, &pat);
-		for ( s.left = i.left + 3; s.left < i.right - 4; s.left += 5 ) {
-			dp_line(gid, s.left, i.bottom - 6, s.left + 2, i.bottom - 6, 0);
-		}
-		break;
-	case B_CORNER:
-		dp_line(gid, l, bt, l, t + 8, 0);
-		dp_frame_round(gid, &i, 16, 16, 1, &pat);
-		break;
-	case B_CANVAS:
-		if ( df_canvas_active() ) {
-			/* 画材: a brush over a palette */
-			s.left = i.left + 1;  s.top = i.top + 8;
-			s.right = i.right - 1;  s.bottom = i.bottom - 1;
-			dp_frame_oval(gid, &s, 1, &pat);
-			s.left = i.left + 5;  s.top = i.top + 12;
-			s.right = s.left + 4;  s.bottom = s.top + 4;
-			dp_fill_rect(gid, &s, 0x00EE0000U);
-			s.left += 6;
-			dp_fill_rect(gid, &s, 0x000000FFU);
-			s.left += 6;
-			dp_fill_rect(gid, &s, 0x0000A000U);
-			dp_line_wide(gid, i.right - 3, i.top + 1, mx, my + 2, 2, 0, &pat);
-			break;
-		}
-		dp_frame_rect(gid, &i, 0x00000000U, 1);
-		dp_line(gid, i.left + 2, i.bottom - 4, mx, my - 2, 0x000000FFU);
-		dp_line(gid, mx, my - 2, i.right - 3, i.bottom - 4, 0x0000A000U);
-		s.left = i.right - 9;  s.top = i.top + 3;
-		s.right = i.right - 4;  s.bottom = i.top + 8;
-		dp_fill_oval(gid, &s, &pat);
-		break;
-	case B_SELECT: {
-		T_DPPOINT	pt[7];
-
-		pt[0].x = l + 4;   pt[0].y = t;
-		pt[1].x = l + 4;   pt[1].y = bt - 2;
-		pt[2].x = l + 8;   pt[2].y = bt - 6;
-		pt[3].x = l + 12;  pt[3].y = bt + 1;
-		pt[4].x = l + 14;  pt[4].y = bt;
-		pt[5].x = l + 11;  pt[5].y = bt - 7;
-		pt[6].x = l + 16;  pt[6].y = bt - 7;
-		dp_fill_poly(gid, pt, 7, DP_POLY_ODD, &pat);
-		break;
 	}
-	case B_ZOOM: {
-		CONST char	*z = ( fl.zoom == 1 ) ? "x1/8" : ( fl.zoom == 2 ) ? "x1/4"
-				   : ( fl.zoom == 4 ) ? "x1/2" : ( fl.zoom == 8 ) ? "x1"
-				   : ( fl.zoom == 16 ) ? "x2" : ( fl.zoom == 24 ) ? "x3"
-				   : ( fl.zoom == 32 ) ? "x4" : ( fl.zoom == 40 ) ? "x5" : "x8";
+	return PIC_ROW2 + ( b - B_ROW2 );
+}
 
-		text_at(gid, c->left + 3, my + 5, 11, z, 0);
-		break;
+/* The words of where the pointer is */
+LOCAL void xy_words( UB *txt )
+{
+	UB	num[16];
+	INT	k = 0, j;
+
+	if ( !df_have_xy ) {
+		txt[0] = ' ';
+		txt[1] = 0;
+		return;
 	}
-	case B_GRID:
-		for ( s.top = i.top + 2; s.top < i.bottom; s.top += 5 ) {
-			for ( s.left = i.left + 2; s.left < i.right; s.left += 5 ) {
-				dp_put_pixel(gid, s.left, s.top,
-					     ( fl.grid_mode == GRID_NONE ) ? 0x00808080U : 0);
+	txt[k++] = 'x';  txt[k++] = ':';
+	(void)put_num(num, 0, df_px);
+	for ( j = 0; num[j] != 0 && k < 14; j++ ) txt[k++] = num[j];
+	txt[k++] = ' ';  txt[k++] = 'y';  txt[k++] = ':';
+	(void)put_num(num, 0, df_py);
+	for ( j = 0; num[j] != 0 && k < 30; j++ ) txt[k++] = num[j];
+	txt[k] = 0;
+}
+
+LOCAL void panel_build( void )
+{
+	T_WMPANEL	*def;
+	T_WMPART	*pt;
+	T_DPRECT	c;
+	INT		b, t;
+	UW		pc;
+	CONST UH	*tex = NULL;
+	static CONST char *CONST zooms[9] = { "x1/8", "x1/4", "x1/2", "x1", "x2", "x3", "x4", "x5", "x8" };
+	static CONST INT zv[9] = { 1, 2, 4, 8, 16, 24, 32, 40, 64 };
+
+	def = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	if ( def == NULL ) {
+		return;
+	}
+	knl_memset(def, 0, sizeof(*def));
+	def->num = 3;
+	def->kind = WM_PNL_BARE;
+	def->r.right = PW;
+	def->r.bottom = PH;
+	for ( b = 0; b < B_N; b++ ) {
+		pt = &def->part[def->npart++];
+		button_rect(b, &c);
+		pt->r = c;
+		pt->num = b + 1;
+		t = button_tool(b);
+		if ( b == B_FILL || b == B_STROKE ) {
+			pt->type = WM_PT_SWATCH;
+			pt->group = b + 1;
+			pt->colour = ( b == B_STROKE ) ? fl.stroke
+				   : !fl.fill_on ? 0x00FFFFFFU
+				   : ( fl.fill_pat > 0 && tv_pattern(fl.fill_pat, &pc, &tex) ) ? pc : fl.fill;
+			continue;
+		}
+		pt->type = WM_PT_BUTTON | ( ( t >= 0 && t == df_tool ) ? P_EMPHAS : 0 );
+		pt->answer = WM_ANS_ACT + b;
+		switch ( b ) {
+		case B_LSTYLE:	pict_put(pt, PIC_LSTYLE);			break;
+		case B_CORNER:	pict_put(pt, PIC_CORNER);			break;
+		case B_CANVAS:	pict_put(pt, df_canvas_active() ? PIC_BRUSH : PIC_CANVAS);	break;
+		case B_SELECT:	pict_put(pt, PIC_SELECT);			break;
+		case B_GRID:	pict_put(pt, PIC_GRID + ( ( fl.grid_mode == GRID_SNAP ) ? 2 : ( fl.grid_mode == GRID_SHOW ) ? 1 : 0 ));	break;
+		case B_ZOOM:
+			{
+				INT	k;
+
+				for ( k = 0; k < 8 && zv[k] != fl.zoom; k++ ) ;
+				dt_pn_text(pt->label, WM_LABEL_MAX, zooms[k]);
 			}
+			break;
+		case B_FONT:	dt_pn_text(pt->label, WM_LABEL_MAX, "書式");	break;
+		default:	pict_put(pt, template_pict(b));			break;
 		}
-		if ( fl.grid_mode == GRID_SNAP ) {
-			dp_frame_rect(gid, &i, 0x00000000U, 1);
-		}
-		break;
-	case B_ROW2 + 0: {			/* 自由曲線 */
-		T_DPPOINT	p[4], out[64];
-		INT		n;
+	}
+	/* where the pointer is, after the first row */
+	pt = &def->part[def->npart++];
+	button_rect(B_GRID, &c);
+	pt->type = WM_PT_LABEL;
+	pt->num = N_XY;
+	pt->r.left = c.right + 6;
+	pt->r.top = c.top + 6;
+	pt->r.right = PW - PPAD;
+	pt->r.bottom = c.bottom - 6;
+	xy_words(pt->label);
+	if ( df_pid >= 0 ) {
+		(void)wm_panel_close(df_pid);
+	}
+	df_pid = wm_panel_open(df_panel, def);
+	Kfree(def);
+}
 
-		p[0].x = l;  p[0].y = bt;
-		p[1].x = l + 5;  p[1].y = t;
-		p[2].x = r - 5;  p[2].y = bt;
-		p[3].x = r;  p[3].y = t;
-		n = tv_curve_points(out, 64, p, 4);
-		tv_stroke(gid, out, n, FALSE, 1, 0, &pat);
-		break;
-	}
-	case B_ROW2 + 1:			/* 直線 */
-		dp_line_wide(gid, l, bt, r, t, 1, 0, &pat);
-		break;
-	case B_ROW2 + 2:			/* 扇形 */
-	case B_ROW2 + 3:			/* 弦 */
-	case B_ROW2 + 4: {			/* 楕円弧 */
-		T_DPPOINT	out[80];
-		INT		n;
-
-		if ( b == B_ROW2 + 2 ) {
-			/* a quarter, and the two radii */
-			n = tv_arc_points(out, 76, (D)( mx - 5 ) * 16,
-					  (D)( my + 5 ) * 16, 208, 208, 3072, 4096, 0);
-			out[n].x = mx - 5;  out[n].y = my + 5;
-			n++;
-		} else {
-			n = tv_arc_points(out, 76, (D)mx * 16, (D)( my + 5 ) * 16,
-					  160, 160, 2048, 4096, 0);
-		}
-		tv_stroke(gid, out, n, (BOOL)( b != B_ROW2 + 4 ), 1, 0, &pat);
-		break;
-	}
-	case B_ROW2 + 5:			/* 長方形 */
-		s.left = l;  s.top = t + 3;  s.right = r + 1;  s.bottom = bt - 2;
-		dp_frame_rect_pat(gid, &s, &pat, 1);
-		break;
-	case B_ROW2 + 6: {			/* 多角形 */
-		T_DPPOINT	p[8];
-
-		p[0].x = l + 2;  p[0].y = t + 2;   p[1].x = l + 10; p[1].y = t;
-		p[2].x = r;      p[2].y = t + 5;   p[3].x = r - 2;  p[3].y = my + 2;
-		p[4].x = r;      p[4].y = bt;      p[5].x = mx;     p[5].y = bt - 2;
-		p[6].x = l + 3;  p[6].y = bt;      p[7].x = l;      p[7].y = my;
-		tv_stroke(gid, p, 8, TRUE, 1, 0, &pat);
-		break;
-	}
-	case B_ROW2 + 7: {			/* 三角形 */
-		T_DPPOINT	p[3];
-
-		p[0].x = l + 2;  p[0].y = t;
-		p[1].x = l + 2;  p[1].y = bt;
-		p[2].x = r;      p[2].y = bt;
-		tv_stroke(gid, p, 3, TRUE, 1, 0, &pat);
-		break;
-	}
-	case B_ROW2 + 8:			/* 楕円 */
-		s.left = l;  s.top = t + 3;  s.right = r + 1;  s.bottom = bt - 2;
-		dp_frame_oval(gid, &s, 1, &pat);
-		break;
-	case B_ROW2 + 9:			/* 文字 */
-		text_at(gid, l + 1, bt - 1, 17, "Ａ", 0);
-		break;
-	case B_FONT:				/* 書式 */
-		text_at(gid, l - 1, my + 1, 10, "書式", 0);
-		dp_line(gid, l, my + 4, r, my + 4, 0);
-		dp_line(gid, l, my + 7, r - 5, my + 7, 0);
-		break;
-	default:
-		break;
-	}
+LOCAL BOOL sig_same( CONST DFSIG *a, CONST DFSIG *b )
+{
+	return (BOOL)( a->tool == b->tool && a->centre == b->centre && a->canvas == b->canvas
+		    && a->fill == b->fill && a->stroke == b->stroke && a->fill_on == b->fill_on
+		    && a->fill_pat == b->fill_pat && a->zoom == b->zoom && a->grid_mode == b->grid_mode );
 }
 
 LOCAL void panel_draw( void )
 {
-	INT		gid = wm_gid(df_panel), b;
-	T_WMWIN		w;
-	T_DPRECT	all, c;
+	DFSIG	s;
+	UB	txt[32];
 
-	if ( df_panel <= 0 || gid < 0 || wm_ref(df_panel, &w) < E_OK ) {
+	if ( df_panel <= 0 ) {
 		return;
 	}
-	all.left = 0;  all.top = 0;
-	all.right = w.work.right - w.work.left;
-	all.bottom = w.work.bottom - w.work.top;
-	dp_fill_rect(gid, &all, wm_look(LK_PNLGROUND));
-
-	for ( b = 0; b < B_N; b++ ) {
-		INT	t = button_tool(b);
-		BOOL	in = (BOOL)( t >= 0 && t == df_tool );
-
-		button_rect(b, &c);
-		bevel(gid, &c, in);
-		button_icon(gid, b, &c);
-		if ( in && centre_able(t) && df_centre[t] ) {
-			/* drawing from the middle: a dot in the middle */
-			T_DPRECT	m;
-
-			m.left = ( c.left + c.right ) / 2 - 2;
-			m.top = c.bottom - 6;
-			m.right = m.left + 4;
-			m.bottom = m.top + 4;
-			dp_fill_rect(gid, &m, 0x00EE0000U);
-		}
+	knl_memset(&s, 0, sizeof(s));
+	s.tool = df_tool;
+	s.centre = (BOOL)( centre_able(df_tool) && df_centre[df_tool] );
+	s.canvas = df_canvas_active();
+	s.fill = fl.fill;
+	s.stroke = fl.stroke;
+	s.fill_on = fl.fill_on;
+	s.fill_pat = fl.fill_pat;
+	s.zoom = fl.zoom;
+	s.grid_mode = fl.grid_mode;
+	if ( !df_sig_ok || df_pid < 0 || !sig_same(&s, &df_sig) ) {
+		df_sig = s;
+		df_sig_ok = TRUE;
+		panel_build();
+	} else {
+		xy_words(txt);
+		(void)wm_panel_set_text(df_pid, N_XY, txt);
 	}
-	/* where the pointer is, after the first row */
-	if ( df_have_xy ) {
-		char	txt[32];
-		INT	k = 0;
-		UB	num[16];
-		INT	j;
-
-		txt[k++] = 'x';  txt[k++] = ':';
-		(void)put_num(num, 0, df_px);
-		for ( j = 0; num[j] != 0 && k < 14; j++ ) txt[k++] = (char)num[j];
-		txt[k++] = ' ';  txt[k++] = 'y';  txt[k++] = ':';
-		(void)put_num(num, 0, df_py);
-		for ( j = 0; num[j] != 0 && k < 30; j++ ) txt[k++] = (char)num[j];
-		txt[k] = 0;
-		button_rect(B_GRID, &c);
-		text_at(gid, c.right + 6, c.top + 20, 11, txt, 0);
+	if ( df_pid >= 0 ) {
+		wm_panel_draw(df_pid);
 	}
-	wm_damage(df_panel, &all);
+}
+
+/* Where windows may stand: the screen above the message line */
+LOCAL void screen_room( T_DPRECT *room )
+{
+	INT	sw = 0, sh = 0;
+
+	wm_screen(&sw, &sh);
+	room->left = 0;
+	room->top = 0;
+	room->right = sw;
+	room->bottom = sh - wm_msg_height();
+}
+
+/* A window's rectangle moved, its size kept, until it is whole inside the room */
+LOCAL void fit_in( T_DPRECT *o, CONST T_DPRECT *room )
+{
+	INT	dx = 0, dy = 0;
+
+	if ( o->right > room->right ) dx = room->right - o->right;
+	if ( o->left + dx < room->left ) dx = room->left - o->left;
+	if ( o->bottom > room->bottom ) dy = room->bottom - o->bottom;
+	if ( o->top + dy < room->top ) dy = room->top - o->top;
+	o->left += dx;  o->right += dx;
+	o->top += dy;  o->bottom += dy;
 }
 
 /* ---------------------------------------------------------------- the palettes */
@@ -1695,7 +1760,11 @@ LOCAL void panel_draw( void )
  * A palette: a small window of rows, each a label and a control. What
  * is changed in it is changed at once, and each change is handed to
  * the palette's own function to be put on what is picked. It goes away
- * when the pointer is pressed outside it, or on Enter or Escape.
+ * when the pointer is pressed outside it, or on Enter or Escape. The
+ * controls are the parts of a panel the window manager draws and works
+ * (choices, a switch, a box of letters, swatches, a push button); only
+ * the fixed patterns to choose from are drawn here, as what is chosen
+ * among rather than as parts.
  */
 #define PI_CHOICE	1		/* one of a row of words */
 #define PI_CHECK	2		/* on or off */
@@ -1705,9 +1774,11 @@ LOCAL void panel_draw( void )
 #define PI_SWATCH	6		/* a row of colours to pick from */
 
 #define PI_MAX		8
-#define POP_W		360
-#define ROW_H		24
-#define LABEL_W		84
+#define POP_W		430
+#define ROW_H		26
+#define LABEL_W		118
+#define CHOICE_PAD	30		/* a choice's lamp and its margins */
+#define PART_FH		16		/* the letters of parts, as high as wide */
 
 typedef struct {
 	UINT		type;
@@ -1726,11 +1797,13 @@ typedef struct {
 typedef struct {
 	POPITEM		it[PI_MAX];
 	INT		n;
-	INT		focus;		/* the PI_TEXT that takes letters, or -1 */
 	void		(*changed)( INT item );
 } POPUP;
 
+#define PN_ITEM( i, k )	( ( ( i ) + 1 ) * 32 + ( k ) )
+
 LOCAL INT	pop_wid = 0;
+LOCAL INT	pop_pid = -1;
 LOCAL DTWIN	*pop_win = NULL;	/* whose picked shapes it changes */
 
 LOCAL INT str_w( CONST char *s, INT size )
@@ -1745,138 +1818,40 @@ LOCAL INT str_w( CONST char *s, INT size )
 	return fn_width(fid, (CONST UB *)s);
 }
 
+/* A row of choices laid across: each name's cell, as many rows as they take */
+LOCAL INT choice_at( CONST POPITEM *it, INT k, T_DPRECT *c )
+{
+	INT	x = LABEL_W, row = 0, j;
+
+	for ( j = 0; j <= k && j < it->n; j++ ) {
+		INT	w = str_w(it->names[j], PART_FH) + CHOICE_PAD;
+
+		if ( x + w > POP_W - 8 && x > LABEL_W ) {
+			row++;
+			x = LABEL_W;
+		}
+		if ( j == k ) {
+			c->left = x;
+			c->top = it->r.top + row * ROW_H + 1;
+			c->right = x + w;
+			c->bottom = c->top + ROW_H - 4;
+		}
+		x += w + 2;
+	}
+	return row + 1;
+}
+
 LOCAL INT item_h( CONST POPITEM *it )
 {
+	T_DPRECT	c;
+
 	if ( it->type == PI_GRID ) {
 		return 8 * 17 + 4;
 	}
-	if ( it->type == PI_CHOICE ) {
-		/* the words laid across, as many rows as they take */
-		INT	x = LABEL_W, rows = 1, k;
-
-		for ( k = 0; k < it->n; k++ ) {
-			INT	w = str_w(it->names[k], 12) + 12;
-
-			if ( x + w > POP_W - 8 && x > LABEL_W ) {
-				rows++;
-				x = LABEL_W;
-			}
-			x += w + 2;
-		}
-		return rows * ROW_H;
+	if ( it->type == PI_CHOICE && it->n > 0 ) {
+		return choice_at(it, it->n - 1, &c) * ROW_H;
 	}
-
 	return ROW_H;
-}
-
-LOCAL void pop_draw( POPUP *p )
-{
-	INT		gid = wm_gid(pop_wid), i, k, y = 6;
-	T_WMWIN		w;
-	T_DPRECT	all, c;
-
-	if ( gid < 0 || wm_ref(pop_wid, &w) < E_OK ) {
-		return;
-	}
-	all.left = 0;  all.top = 0;
-	all.right = w.work.right - w.work.left;
-	all.bottom = w.work.bottom - w.work.top;
-	dp_fill_rect(gid, &all, wm_look(LK_PNLGROUND));
-	for ( i = 0; i < p->n; i++ ) {
-		POPITEM	*it = &p->it[i];
-		INT	h = item_h(it);
-
-		it->r.left = 6;  it->r.top = y;
-		it->r.right = POP_W - 6;  it->r.bottom = y + h;
-		if ( it->label != NULL && it->type != PI_CHECK && it->type != PI_BUTTON ) {
-			text_at(gid, 8, y + 17, 12, it->label, 0);
-		}
-		switch ( it->type ) {
-		case PI_CHOICE: {
-			INT	x = LABEL_W, row = 0;
-
-			for ( k = 0; k < it->n; k++ ) {
-				INT	wd = str_w(it->names[k], 12) + 12;
-
-				if ( x + wd > POP_W - 8 && x > LABEL_W ) {
-					row++;
-					x = LABEL_W;
-				}
-				c.left = x;  c.top = y + row * ROW_H + 1;
-				c.right = x + wd;  c.bottom = c.top + ROW_H - 3;
-				bevel(gid, &c, (BOOL)( *it->value == k ));
-				text_at(gid, x + 6, c.top + 15, 12, it->names[k], 0);
-				x += wd + 2;
-			}
-			break;
-		}
-		case PI_CHECK:
-			c.left = 8;  c.top = y + 5;  c.right = 22;  c.bottom = y + 19;
-			dp_fill_rect(gid, &c, 0x00FFFFFFU);
-			dp_frame_rect(gid, &c, 0x00000000U, 1);
-			if ( *it->value ) {
-				dp_line(gid, c.left + 3, c.top + 7, c.left + 6, c.top + 10, 0);
-				dp_line(gid, c.left + 6, c.top + 10, c.left + 11, c.top + 3, 0);
-				dp_line(gid, c.left + 3, c.top + 8, c.left + 6, c.top + 11, 0);
-				dp_line(gid, c.left + 6, c.top + 11, c.left + 11, c.top + 4, 0);
-			}
-			text_at(gid, 28, y + 17, 12, it->label, 0);
-			break;
-		case PI_GRID:
-			for ( k = 0; k < TV_PAT_FIXED; k++ ) {
-				c.left = 8 + ( k % 16 ) * 17;
-				c.top = y + 2 + ( k / 16 ) * 17;
-				c.right = c.left + 16;
-				c.bottom = c.top + 16;
-				if ( k == 0 ) {
-					dp_fill_rect(gid, &c, fl.fill);
-				} else {
-					fill_pat_rect(gid, &c, k, 0);
-				}
-				dp_frame_rect(gid, &c, 0x00999999U, 1);
-				if ( *it->value == k ) {
-					T_DPRECT	o = c;
-
-					o.left--;  o.top--;  o.right++;  o.bottom++;
-					dp_frame_rect(gid, &o, 0x000078D7U, 2);
-				}
-			}
-			break;
-		case PI_TEXT:
-			c.left = LABEL_W;  c.top = y + 2;
-			c.right = LABEL_W + 110;  c.bottom = y + ROW_H - 2;
-			dp_fill_rect(gid, &c, 0x00FFFFFFU);
-			dp_frame_rect(gid, &c, ( p->focus == i ) ? 0x000078D7U : 0x00000000U, 1);
-			text_at(gid, c.left + 4, c.top + 15, 12, (CONST char *)it->text, 0);
-			if ( p->focus == i ) {
-				INT	cx = c.left + 5 + str_w((CONST char *)it->text, 12);
-
-				dp_line(gid, cx, c.top + 3, cx, c.bottom - 4, 0);
-			}
-			break;
-		case PI_SWATCH:
-			for ( k = 0; k < it->n; k++ ) {
-				c.left = LABEL_W + k * 18;  c.top = y + 3;
-				c.right = c.left + 16;  c.bottom = c.top + 16;
-				dp_fill_rect(gid, &c, it->cols[k]);
-				dp_frame_rect(gid, &c, ( *it->col == it->cols[k] )
-					      ? 0x000078D7U : 0x00999999U, 1);
-			}
-			break;
-		case PI_BUTTON:
-			c.left = 8;  c.top = y + 1;
-			c.right = 8 + str_w(it->label, 12) + 16;  c.bottom = y + ROW_H - 2;
-			bevel(gid, &c, FALSE);
-			text_at(gid, c.left + 8, c.top + 15, 12, it->label, 0);
-			break;
-		default:
-			break;
-		}
-		y += h + 4;
-	}
-	dp_frame_rect(gid, &all, 0x00000000U, 1);
-	wm_damage(pop_wid, &all);
-	wm_update();
 }
 
 LOCAL INT pop_height( POPUP *p )
@@ -1890,107 +1865,224 @@ LOCAL INT pop_height( POPUP *p )
 	return h;
 }
 
-/* A press inside the palette: what it changed, or -1; a button's answer */
-LOCAL INT pop_press( POPUP *p, INT x, INT y, INT *p_button )
+/* The palette's parts, laid row by row, as its items stand */
+LOCAL void pop_build( POPUP *p )
 {
-	INT		i, k;
-	T_DPRECT	c;
+	T_WMPANEL	*def = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	T_WMPART	*pt;
+	INT		i, k, y = 6;
+
+	if ( def == NULL ) {
+		return;
+	}
+	knl_memset(def, 0, sizeof(*def));
+	def->num = 4;
+	def->kind = WM_PNL_BARE;
+	def->r.right = POP_W;
+	def->r.bottom = pop_height(p);
+	for ( i = 0; i < p->n; i++ ) {
+		POPITEM	*it = &p->it[i];
+		INT	h = item_h(it);
+
+		it->r.left = 6;  it->r.top = y;
+		it->r.right = POP_W - 6;  it->r.bottom = y + h;
+		if ( it->label != NULL && it->type != PI_CHECK && it->type != PI_BUTTON && def->npart < WM_PART_MAX ) {
+			pt = &def->part[def->npart++];
+			pt->type = WM_PT_LABEL;
+			pt->r.left = 8;  pt->r.top = y + 2;  pt->r.right = LABEL_W - 4;  pt->r.bottom = y + ROW_H - 4;
+			dt_pn_text(pt->label, WM_LABEL_MAX, it->label);
+		}
+		switch ( it->type ) {
+		case PI_CHOICE:
+			for ( k = 0; k < it->n && def->npart < WM_PART_MAX; k++ ) {
+				pt = &def->part[def->npart++];
+				pt->type = WM_PT_CHOICE;
+				pt->num = PN_ITEM(i, k);
+				pt->group = i + 1;
+				pt->value = ( *it->value == k ) ? 1 : 0;
+				(void)choice_at(it, k, &pt->r);
+				dt_pn_text(pt->label, WM_LABEL_MAX, it->names[k]);
+			}
+			break;
+		case PI_CHECK:
+			pt = &def->part[def->npart++];
+			pt->type = WM_PT_CHECK;
+			pt->num = PN_ITEM(i, 0);
+			pt->value = *it->value ? 1 : 0;
+			pt->r.left = 8;  pt->r.top = y + 1;  pt->r.right = POP_W - 8;  pt->r.bottom = y + ROW_H - 3;
+			dt_pn_text(pt->label, WM_LABEL_MAX, it->label);
+			break;
+		case PI_TEXT:
+			pt = &def->part[def->npart++];
+			pt->type = TB_PARTS | P_ASCII;
+			pt->num = PN_ITEM(i, 0);
+			pt->max = it->max - 1;
+				pt->r.left = LABEL_W;  pt->r.top = y + 1;  pt->r.right = LABEL_W + 110;  pt->r.bottom = y + ROW_H - 3;
+			dt_pn_text(pt->text, WM_LABEL_MAX, (CONST char *)it->text);
+			pt->caret = (INT)knl_strlen((CONST char *)pt->text);
+			break;
+		case PI_SWATCH:
+			for ( k = 0; k < it->n && def->npart < WM_PART_MAX; k++ ) {
+				pt = &def->part[def->npart++];
+				pt->type = WM_PT_SWATCH;
+				pt->num = PN_ITEM(i, k);
+				pt->group = i + 1;
+				pt->colour = it->cols[k];
+				pt->value = ( *it->col == it->cols[k] ) ? 1 : 0;
+				pt->r.left = LABEL_W + k * 20;  pt->r.top = y + 3;
+				pt->r.right = pt->r.left + 18;  pt->r.bottom = pt->r.top + 18;
+			}
+			break;
+		case PI_BUTTON:
+			pt = &def->part[def->npart++];
+			pt->type = WM_PT_BUTTON;
+			pt->num = PN_ITEM(i, 0);
+			pt->answer = WM_ANS_ACT + i;
+			pt->r.left = 8;  pt->r.top = y + 1;
+			pt->r.right = 8 + str_w(it->label, PART_FH) + 24;  pt->r.bottom = y + ROW_H - 3;
+			dt_pn_text(pt->label, WM_LABEL_MAX, it->label);
+			break;
+		default:
+			break;
+		}
+		y += h + 4;
+	}
+	pop_pid = wm_panel_open(pop_wid, def);
+	Kfree(def);
+}
+
+/* The patterns of a PI_GRID, drawn over the panel's ground: what is chosen among, not parts */
+LOCAL void pop_draw( POPUP *p )
+{
+	INT		gid = wm_gid(pop_wid), i, k;
+	T_DPRECT	c, all;
+
+	if ( pop_pid >= 0 ) {
+		wm_panel_draw(pop_pid);
+	}
+	for ( i = 0; gid >= 0 && i < p->n; i++ ) {
+		POPITEM	*it = &p->it[i];
+
+		if ( it->type != PI_GRID ) {
+			continue;
+		}
+		for ( k = 0; k < TV_PAT_FIXED; k++ ) {
+			c.left = 8 + ( k % 16 ) * 17;
+			c.top = it->r.top + 2 + ( k / 16 ) * 17;
+			c.right = c.left + 16;
+			c.bottom = c.top + 16;
+			if ( k == 0 ) {
+				dp_fill_rect(gid, &c, fl.fill);
+			} else {
+				fill_pat_rect(gid, &c, k, 0);
+			}
+			dp_frame_rect(gid, &c, 0x00999999U, 1);
+			if ( *it->value == k ) {
+				T_DPRECT	o = c;
+
+				o.left--;  o.top--;  o.right++;  o.bottom++;
+				dp_frame_rect(gid, &o, 0x000078D7U, 2);
+			}
+		}
+		all = it->r;
+		wm_damage(pop_wid, &all);
+	}
+	wm_update();
+}
+
+/* A press on the patterns: the one under it chosen; the item, or -1 */
+LOCAL INT pop_grid_press( POPUP *p, INT x, INT y )
+{
+	INT	i, k;
 
 	for ( i = 0; i < p->n; i++ ) {
 		POPITEM	*it = &p->it[i];
 
-		if ( y < it->r.top || y >= it->r.bottom ) {
+		if ( it->type != PI_GRID || y < it->r.top || y >= it->r.bottom ) {
 			continue;
 		}
-		switch ( it->type ) {
-		case PI_CHOICE: {
-			INT	cx = LABEL_W, row = 0;
-
-			for ( k = 0; k < it->n; k++ ) {
-				INT	wd = str_w(it->names[k], 12) + 12;
-
-				if ( cx + wd > POP_W - 8 && cx > LABEL_W ) {
-					row++;
-					cx = LABEL_W;
-				}
-				c.left = cx;  c.top = it->r.top + row * ROW_H;
-				c.right = cx + wd;  c.bottom = c.top + ROW_H;
-				if ( x >= c.left && x < c.right && y >= c.top && y < c.bottom ) {
-					*it->value = k;
-					return i;
-				}
-				cx += wd + 2;
-			}
-			break;
-		}
-		case PI_CHECK:
-			*it->value = !*it->value;
+		k = ( ( y - it->r.top - 2 ) / 17 ) * 16 + ( x - 8 ) / 17;
+		if ( x >= 8 && x < 8 + 16 * 17 && k >= 0 && k < TV_PAT_FIXED ) {
+			*it->value = k;
 			return i;
-		case PI_GRID:
-			k = ( ( y - it->r.top - 2 ) / 17 ) * 16 + ( x - 8 ) / 17;
-			if ( x >= 8 && x < 8 + 16 * 17 && k >= 0 && k < TV_PAT_FIXED ) {
-				*it->value = k;
-				return i;
-			}
-			break;
-		case PI_TEXT:
-			p->focus = i;
-			return -1;
-		case PI_SWATCH:
-			k = ( x - LABEL_W ) / 18;
-			if ( x >= LABEL_W && k < it->n ) {
-				*it->col = it->cols[k];
-				return i;
-			}
-			break;
-		case PI_BUTTON:
-			*p_button = i;
-			return -1;
-		default:
-			break;
 		}
 	}
-
 	return -1;
 }
 
-/* A key typed into the palette's box: a letter, or one taken away */
-LOCAL BOOL pop_key( POPUP *p, UINT code, UINT mods )
+/* Whether two strings are the same */
+LOCAL BOOL same_text( CONST UB *a, CONST UB *b )
 {
-	POPITEM	*it;
-	INT	n = 0;
-	UB	c = 0;
+	INT	k;
 
-	if ( p->focus < 0 ) {
-		return FALSE;
+	for ( k = 0; a[k] != 0 && a[k] == b[k]; k++ ) {
+		;
 	}
-	it = &p->it[p->focus];
-	while ( it->text[n] != 0 ) {
-		n++;
-	}
-	if ( code == KEY_BS ) {
-		if ( n > 0 ) {
-			it->text[n - 1] = 0;
-		}
-		return TRUE;
-	}
-	if ( code >= 0x1E && code <= 0x27 ) {
-		c = (UB)( ( code == 0x27 ) ? '0' : '1' + ( code - 0x1E ) );
-		if ( code == 0x20 && ( mods & MOD_SHIFT ) != 0 ) {
-			c = '#';
-		}
-	} else if ( code >= 0x04 && code <= 0x09 ) {
-		c = (UB)( 'a' + ( code - 0x04 ) );	/* the hex letters */
-	} else if ( code == 0x37 ) {
-		c = '.';
-	}
-	if ( c != 0 && n < it->max - 1 ) {
-		it->text[n] = c;
-		it->text[n + 1] = 0;
-		return TRUE;
-	}
+	return (BOOL)( a[k] == b[k] );
+}
 
-	return FALSE;
+/*
+ * What the parts hold, taken back into the items, each item that
+ * changed handed on; a box's words only when 'texts', and only when
+ * they are other than the item's. What the items hold afterwards is
+ * shown again in the boxes: a colour chosen from the swatches is
+ * written into the box of its number.
+ */
+LOCAL void pop_follow( POPUP *p, BOOL texts )
+{
+	INT	i, k, v;
+	UB	buf[WM_LABEL_MAX];
+
+	for ( i = 0; pop_pid >= 0 && i < p->n; i++ ) {
+		POPITEM	*it = &p->it[i];
+		BOOL	changed = FALSE;
+
+		switch ( it->type ) {
+		case PI_CHOICE:
+			for ( k = 0; k < it->n; k++ ) {
+				if ( wm_panel_get(pop_pid, PN_ITEM(i, k), &v) >= E_OK && v != 0 && *it->value != k ) {
+					*it->value = k;
+					changed = TRUE;
+				}
+			}
+			break;
+		case PI_CHECK:
+			if ( wm_panel_get(pop_pid, PN_ITEM(i, 0), &v) >= E_OK && ( v != 0 ) != ( *it->value != 0 ) ) {
+				*it->value = ( v != 0 ) ? 1 : 0;
+				changed = TRUE;
+			}
+			break;
+		case PI_SWATCH:
+			for ( k = 0; k < it->n; k++ ) {
+				if ( wm_panel_get(pop_pid, PN_ITEM(i, k), &v) >= E_OK && v != 0 && *it->col != it->cols[k] ) {
+					*it->col = it->cols[k];
+					changed = TRUE;
+				}
+			}
+			break;
+		case PI_TEXT:
+			if ( texts && wm_panel_text(pop_pid, PN_ITEM(i, 0), buf, sizeof(buf)) >= E_OK
+			  && !same_text(buf, it->text) ) {
+				for ( k = 0; buf[k] != 0 && k < it->max - 1; k++ ) it->text[k] = buf[k];
+				it->text[k] = 0;
+				changed = TRUE;
+			}
+			break;
+		default:
+			break;
+		}
+		if ( changed && p->changed != NULL ) {
+			p->changed(i);
+		}
+	}
+	for ( i = 0; pop_pid >= 0 && i < p->n; i++ ) {
+		POPITEM	*it = &p->it[i];
+
+		if ( it->type == PI_TEXT && wm_panel_text(pop_pid, PN_ITEM(i, 0), buf, sizeof(buf)) >= E_OK
+		  && !same_text(buf, it->text) && !texts ) {
+			(void)wm_panel_set_text(pop_pid, PN_ITEM(i, 0), it->text);
+		}
+	}
 }
 
 /*
@@ -2000,67 +2092,79 @@ LOCAL BOOL pop_key( POPUP *p, UINT code, UINT mods )
 LOCAL INT pop_run( POPUP *p, INT under )
 {
 	T_WMWIN		pw;
-	T_DPRECT	o, c;
-	T_WMEV		ev;
-	INT		answer = -1;
+	T_DPRECT	o, c, room;
+	T_WMEV		ev, e2;
+	UINT		ans;
+	INT		answer = -1, i;
 	BOOL		done = FALSE;
 
 	if ( df_panel <= 0 || wm_ref(df_panel, &pw) < E_OK ) {
 		return -1;
 	}
+	/* under its button, or over the panel when the screen ends first */
 	button_rect(under, &c);
+	screen_room(&room);
 	o.left = pw.work.left + c.left;
 	o.top = pw.work.top + c.bottom + 4;
 	o.right = o.left + POP_W + 2;
 	o.bottom = o.top + pop_height(p) + 2;
-	if ( o.right > 1280 ) {
-		o.left -= o.right - 1280;
-		o.right = 1280;
+	if ( o.bottom > room.bottom ) {
+		o.top = pw.outer.top - ( pop_height(p) + 2 ) - 4;
+		o.bottom = pw.outer.top - 4;
 	}
+	fit_in(&o, &room);
 	pop_wid = wm_open(&o, WM_ATTR_FRAME, NULL);
 	if ( pop_wid < 0 ) {
 		pop_wid = 0;
 		return -1;
 	}
 	wm_raise(pop_wid);
+	pop_build(p);
 	pop_draw(p);
-	wm_update();
 	while ( !done ) {
 		if ( wm_read_event(&ev, 2000) < E_OK ) {
 			continue;
 		}
+		e2 = ev;
 		switch ( ev.type ) {
 		case HID_EV_BTN_DOWN:
 			if ( ev.wid != pop_wid ) {
 				done = TRUE;	/* pressed elsewhere: put away */
 				break;
 			}
-			{
-				INT	button = -1;
-				INT	i = pop_press(p, ev.x, ev.y, &button);
-
-				if ( i >= 0 && p->changed != NULL ) {
-					p->changed(i);
-				}
-				if ( button >= 0 ) {
-					answer = button;
-					done = TRUE;
-				}
+			if ( ( i = pop_grid_press(p, ev.x, ev.y) ) >= 0 ) {
+				if ( p->changed != NULL ) p->changed(i);
+			} else if ( pop_pid >= 0 ) {
+				(void)wm_panel_event(pop_pid, &ev, &ans);
+				pop_follow(p, FALSE);
+			}
+			pop_draw(p);
+			panel_draw();
+			wm_update();
+			break;
+		case HID_EV_BTN_UP:
+			ans = WM_ANS_NONE;
+			if ( pop_pid >= 0 && ev.wid == pop_wid ) {
+				(void)wm_panel_event(pop_pid, &ev, &ans);
+				pop_follow(p, FALSE);
 				pop_draw(p);
 				panel_draw();
 				wm_update();
 			}
+			if ( ans >= WM_ANS_ACT ) {
+				answer = (INT)( ans - WM_ANS_ACT );
+				done = TRUE;
+			}
 			break;
 		case HID_EV_KEY_DOWN:
 			if ( ev.code == KEY_ENTER || ev.code == KEY_ESC ) {
-				if ( ev.code == KEY_ENTER && p->focus >= 0 && p->changed != NULL ) {
-					p->changed(p->focus);
-				}
 				done = TRUE;
 				break;
 			}
-			if ( pop_key(p, ev.code, ev.mods) ) {
-				pop_draw(p);
+			/* the keys are the palette's box's, whichever window has them */
+			e2.wid = pop_wid;
+			if ( pop_pid >= 0 ) {
+				(void)wm_panel_event(pop_pid, &e2, &ans);
 				wm_update();
 			}
 			break;
@@ -2077,15 +2181,18 @@ LOCAL INT pop_run( POPUP *p, INT under )
 			break;
 		}
 	}
-	/* a box still being typed in is taken as it stands */
-	if ( p->focus >= 0 && p->changed != NULL ) {
-		p->changed(p->focus);
+	/* a box being typed in is taken as it stands */
+	pop_follow(p, TRUE);
+	if ( pop_pid >= 0 ) {
+		(void)wm_panel_close(pop_pid);
 	}
+	pop_pid = -1;
 	wm_close(pop_wid);
 	pop_wid = 0;
 	if ( pop_win != NULL && pop_win->used ) {
 		dt_draw(pop_win);
 	}
+	df_sig_ok = FALSE;		/* the swatch that brought it up let go */
 	panel_draw();
 	wm_update();
 
@@ -2143,7 +2250,6 @@ LOCAL void fill_palette( void )
 	p.it[2].value = &pop_pat;
 	p.it[3].type = PI_BUTTON;  p.it[3].label = "パターン編集...";
 	p.n = 4;
-	p.focus = -1;
 	p.changed = fill_changed;
 	if ( pop_run(&p, B_FILL) == 3 && pop_win != NULL ) {
 		df_pattern_edit(pop_win, fl.fill_pat);
@@ -2189,7 +2295,6 @@ LOCAL void stroke_palette( void )
 	p.it[1].n = (INT)( sizeof(df_line_cols) / sizeof(df_line_cols[0]) );
 	p.it[1].col = &pop_col;
 	p.n = 2;
-	p.focus = -1;
 	p.changed = stroke_changed;
 	(void)pop_run(&p, B_STROKE);
 }
@@ -2256,7 +2361,6 @@ LOCAL void lstyle_palette( void )
 	p.it[4].type = PI_CHOICE;  p.it[4].label = "矢印種類:";
 	p.it[4].names = kn;  p.it[4].n = 2;  p.it[4].value = &pop_at;
 	p.n = 5;
-	p.focus = -1;
 	p.changed = lstyle_changed;
 	(void)pop_run(&p, B_LSTYLE);
 }
@@ -2299,7 +2403,6 @@ LOCAL void corner_palette( void )
 	p.it[0].type = PI_TEXT;  p.it[0].label = "角丸半径:";
 	p.it[0].text = pop_num;  p.it[0].max = 4;
 	p.n = 1;
-	p.focus = 0;
 	p.changed = corner_changed;
 	(void)pop_run(&p, B_CORNER);
 }
@@ -2339,7 +2442,6 @@ LOCAL void zoom_palette( void )
 	p.it[0].type = PI_CHOICE;  p.it[0].label = "倍率:";
 	p.it[0].names = zn;  p.it[0].n = 9;  p.it[0].value = &pop_z;
 	p.n = 1;
-	p.focus = -1;
 	p.changed = zoom_changed;
 	(void)pop_run(&p, B_ZOOM);
 }
@@ -2395,7 +2497,6 @@ LOCAL void grid_palette( void )
 	p.it[2].type = PI_TEXT;  p.it[2].label = "自由入力:";
 	p.it[2].text = pop_num;  p.it[2].max = 4;
 	p.n = 3;
-	p.focus = -1;
 	p.changed = grid_changed;
 	(void)pop_run(&p, B_GRID);
 }
@@ -2469,7 +2570,6 @@ LOCAL void font_palette( void )
 	p.it[6].type = PI_CHECK;  p.it[6].label = "下線";  p.it[6].value = &pop_u;
 	p.it[7].type = PI_CHECK;  p.it[7].label = "打ち消し線";  p.it[7].value = &pop_s;
 	p.n = 8;
-	p.focus = -1;
 	p.changed = font_changed;
 	(void)pop_run(&p, B_FONT);
 }
@@ -2528,7 +2628,6 @@ LOCAL void paint_palette( void )
 	p.it[3].type = PI_CHOICE;  p.it[3].label = "太さ:";
 	p.it[3].names = sn;  p.it[3].n = 5;  p.it[3].value = &pop_ps;
 	p.n = 4;
-	p.focus = -1;
 	p.changed = paint_changed;
 	(void)pop_run(&p, B_CANVAS);
 }
@@ -2547,30 +2646,33 @@ LOCAL DTWIN *panel_target( void )
 EXPORT void df_panel_show( DTWIN *d )
 {
 	T_WMWIN		w;
-	T_DPRECT	o;
+	T_DPRECT	o, room;
 	INT		h = PH + 30;
 
 	if ( df_panel > 0 || d == NULL || wm_ref(d->wid, &w) < E_OK ) {
 		return;
 	}
+	/*
+	 * Under the figure's window when there is room for it there, else
+	 * over it, else wherever on the screen it is whole: a panel half off
+	 * the screen or under the message line cannot be used.
+	 */
+	screen_room(&room);
 	o.left = w.outer.left;
-	o.top = w.outer.top - h - 4;
-	if ( o.top < 0 ) {
-		o.top = w.outer.bottom + 4;
-	}
-	if ( o.left + PW + 8 > 1280 ) {
-		o.left = 1280 - PW - 8;
-	}
-	if ( o.left < 0 ) {
-		o.left = 0;
+	o.top = w.outer.bottom + 4;
+	if ( o.top + h > room.bottom ) {
+		o.top = w.outer.top - h - 4;
 	}
 	o.right = o.left + PW + 8;
 	o.bottom = o.top + h;
+	fit_in(&o, &room);
 	df_panel = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "道具パネル");
 	if ( df_panel < 0 ) {
 		df_panel = 0;
 		return;
 	}
+	df_pid = -1;
+	df_sig_ok = FALSE;
 	panel_draw();
 	/*
 	 * A subordinate window of the figure's: kept just in front of it,
@@ -2619,6 +2721,11 @@ EXPORT void df_panel_poll( void )
 
 EXPORT void df_panel_hide( void )
 {
+	if ( df_pid >= 0 ) {
+		(void)wm_panel_close(df_pid);
+		df_pid = -1;
+	}
+	df_pressing = FALSE;
 	if ( df_panel > 0 ) {
 		wm_close(df_panel);
 		df_panel = 0;
@@ -2636,14 +2743,57 @@ EXPORT void df_panel_toggle( DTWIN *d )
 	wm_update();
 }
 
+/* A tool taken from the panel's button b, or a palette brought up from it */
+LOCAL void panel_do( INT b )
+{
+	INT	t = button_tool(b);
+
+	if ( t == TL_CANVAS && df_tool == TL_CANVAS && df_canvas_active() ) {
+		/* painting: the canvas button is the 画材 */
+		pop_win = panel_target();
+		paint_palette();
+		return;
+	}
+	if ( t >= 0 ) {
+		if ( t == df_tool && centre_able(t) ) {
+			df_centre[t] = (BOOL)!df_centre[t];
+		} else if ( t != df_tool ) {
+			df_canvas_leave();
+			df_tool = t;
+		}
+		df_drawing = NULL;
+		df_npt = 0;
+		wm_set_pointer(( t == TL_SELECT ) ? WM_PT_SELECT : WM_PT_MODIFY);
+		return;
+	}
+	pop_win = panel_target();
+	switch ( b ) {
+	case B_FILL:	fill_palette();		break;
+	case B_STROKE:	stroke_palette();	break;
+	case B_LSTYLE:	lstyle_palette();	break;
+	case B_CORNER:	corner_palette();	break;
+	case B_ZOOM:	zoom_palette();		break;
+	case B_GRID:	grid_palette();		break;
+	case B_FONT:	font_palette();		break;
+	default:	break;
+	}
+	if ( pop_win != NULL && pop_win->used ) {
+		dt_draw(pop_win);
+		wm_focus(pop_win->wid);
+	}
+}
+
 /*
- * A press, if it is on the panel: a tool taken, a palette brought up,
- * or the panel taken by its band to be carried. TRUE when it was.
+ * A press, if it is on the panel: TRUE when it was. On its band the
+ * panel is taken to be carried; on a swatch the palette of that colour
+ * comes up at once; on a button the button is held in, and what it
+ * does is done when it is let go over it (df_panel_release).
  */
 EXPORT BOOL df_panel_press( CONST T_WMEV *ev )
 {
 	T_DPRECT	c;
-	INT		b, t;
+	UINT		ans;
+	INT		b;
 
 	if ( df_panel <= 0 || ev->wid != df_panel ) {
 		return FALSE;
@@ -2659,52 +2809,57 @@ EXPORT BOOL df_panel_press( CONST T_WMEV *ev )
 		}
 		return TRUE;
 	}
-	for ( b = 0; b < B_N; b++ ) {
+	for ( b = B_FILL; b <= B_STROKE; b++ ) {
 		button_rect(b, &c);
-		if ( ev->x < c.left || ev->x >= c.right
-		  || ev->y < c.top || ev->y >= c.bottom ) {
-			continue;
-		}
-		t = button_tool(b);
-		if ( t == TL_CANVAS && df_tool == TL_CANVAS && df_canvas_active() ) {
-			/* painting: the canvas button is the 画材 */
-			pop_win = panel_target();
-			paint_palette();
-			break;
-		}
-		if ( t >= 0 ) {
-			if ( t == df_tool && centre_able(t) ) {
-				df_centre[t] = (BOOL)!df_centre[t];
-			} else if ( t != df_tool ) {
-				df_canvas_leave();
-				df_tool = t;
+		if ( ev->x >= c.left && ev->x < c.right && ev->y >= c.top && ev->y < c.bottom ) {
+			if ( df_pid >= 0 ) {
+				(void)wm_panel_set(df_pid, b + 1, 1);	/* the one being worked */
+				wm_panel_draw(df_pid);
 			}
-			df_drawing = NULL;
-			df_npt = 0;
-			wm_set_pointer(( t == TL_SELECT ) ? WM_PT_SELECT : WM_PT_MODIFY);
-			break;
+			panel_do(b);
+			panel_draw();
+			wm_update();
+			return TRUE;
 		}
-		pop_win = panel_target();
-		switch ( b ) {
-		case B_FILL:	fill_palette();		break;
-		case B_STROKE:	stroke_palette();	break;
-		case B_LSTYLE:	lstyle_palette();	break;
-		case B_CORNER:	corner_palette();	break;
-		case B_ZOOM:	zoom_palette();		break;
-		case B_GRID:	grid_palette();		break;
-		case B_FONT:	font_palette();		break;
-		default:	break;
-		}
-		if ( pop_win != NULL && pop_win->used ) {
-			dt_draw(pop_win);
-			wm_focus(pop_win->wid);
-		}
-		break;
+	}
+	if ( df_pid >= 0 ) {
+		(void)wm_panel_event(df_pid, ev, &ans);
+		df_pressing = TRUE;
+		wm_update();
+	}
+	return TRUE;
+}
+
+/*
+ * The button let go: given to the panel as in its window wherever the
+ * pointer is, so that one let go away from it comes up again without
+ * answering, and what one let go over does is done.
+ */
+EXPORT void df_panel_release( CONST T_WMEV *ev )
+{
+	T_WMEV	e = *ev;
+	T_WMWIN	w;
+	INT	px, py;
+	UINT	btn, ans = WM_ANS_NONE;
+
+	if ( !df_pressing ) {
+		return;
+	}
+	df_pressing = FALSE;
+	if ( df_pid < 0 || wm_ref(df_panel, &w) < E_OK ) {
+		return;
+	}
+	if ( ev->wid != df_panel && ts_hid_pointer(&px, &py, &btn) >= E_OK ) {
+		e.wid = df_panel;
+		e.x = px - w.work.left;
+		e.y = py - w.work.top;
+	}
+	(void)wm_panel_event(df_pid, &e, &ans);
+	if ( ans >= WM_ANS_ACT && (INT)( ans - WM_ANS_ACT ) < B_N ) {
+		panel_do((INT)( ans - WM_ANS_ACT ));
 	}
 	panel_draw();
 	wm_update();
-
-	return TRUE;
 }
 
 EXPORT BOOL df_panel_carrying( void )
@@ -2767,13 +2922,14 @@ EXPORT void df_tool_select( void )
 #define TS_START	1001
 #define TS_END		1002
 
-#define TS_MAX		( TV_MAX_PT + 3 )
 
 LOCAL DTWIN	*ts_win = NULL;
 LOCAL INT	ts_shape = -1;
 LOCAL INT	ts_drag = -1;		/* which handle, while carried */
-LOCAL T_DPPOINT	ts_pts[TV_MAX_PT];	/* the points as they are being moved */
-LOCAL INT	ts_npt;
+LOCAL T_DPPOINT	*ts_pts = NULL;	/* the points as they are being moved */
+LOCAL INT	ts_npt, ts_maxpt = 0;
+LOCAL T_DPPOINT	*ts_h = NULL;	/* and the handles: a point each, and three more */
+LOCAL INT	*ts_which = NULL;
 LOCAL T_DPPOINT	ts_c, ts_s, ts_e;	/* an arc's middle and ends */
 
 LOCAL BOOL transformable( CONST T_TVSHAPE *s )
@@ -2851,7 +3007,40 @@ LOCAL void ts_take( void )
 	INT		i;
 
 	ts_npt = 0;
-	for ( i = 0; i < s->npt && i < TV_MAX_PT; i++ ) {
+	if ( s->npt > ts_maxpt ) {
+		INT		m = s->npt;
+		T_DPPOINT	*p = (T_DPPOINT *)Krealloc(ts_pts, sizeof(T_DPPOINT) * (size_t)m);
+		T_DPPOINT	*h = ( p != NULL ) ? (T_DPPOINT *)Krealloc(ts_h, sizeof(T_DPPOINT) * (size_t)( m + 3 )) : NULL;
+		INT		*w = ( h != NULL ) ? (INT *)Krealloc(ts_which, sizeof(INT) * (size_t)( m + 3 )) : NULL;
+
+		if ( p != NULL ) ts_pts = p;
+		if ( h != NULL ) ts_h = h;
+		if ( w != NULL ) ts_which = w;
+		if ( w == NULL ) {
+			/* not changed, rather than changed with points missing */
+			DTWIN	*d = ts_win;
+
+			ts_win = NULL;
+			dt_no_memory(d);
+			return;
+		}
+		ts_maxpt = m;
+	}
+	if ( ts_h == NULL || ts_which == NULL ) {
+		T_DPPOINT	*h = (T_DPPOINT *)Krealloc(ts_h, sizeof(T_DPPOINT) * (size_t)( ts_maxpt + 3 ));
+		INT		*w = ( h != NULL ) ? (INT *)Krealloc(ts_which, sizeof(INT) * (size_t)( ts_maxpt + 3 )) : NULL;
+
+		if ( h != NULL ) ts_h = h;
+		if ( w == NULL ) {
+			DTWIN	*d = ts_win;
+
+			ts_win = NULL;
+			dt_no_memory(d);
+			return;
+		}
+		ts_which = w;
+	}
+	for ( i = 0; i < s->npt; i++ ) {
 		ts_pts[ts_npt++] = s->pt[i];
 	}
 	if ( s->kind == TV_SH_ARC || s->kind == TV_SH_CHORD || s->kind == TV_SH_EARC ) {
@@ -2878,22 +3067,45 @@ EXPORT void df_transform( DTWIN *d )
 	dt_tell(d, "この図形は変形できません", NULL);
 }
 
-/* A press while a shape is being changed: on a handle, it is carried */
-EXPORT BOOL df_transform_press( DTWIN *d, INT x, INT y )
+/*
+ * A press while a shape is being changed: on a handle, it is carried.
+ * A finger's press (when, wm_hit_slop) reaches a handle that much
+ * farther, and takes the nearest handle in reach.
+ */
+#define TS_REACH	5
+
+EXPORT BOOL df_transform_press( DTWIN *d, INT x, INT y, UD when )
 {
-	T_DPPOINT	h[TS_MAX];
-	INT		which[TS_MAX], n, i, wx, wy;
+	T_DPPOINT	*h = ts_h;
+	INT		*which = ts_which, n, i, wx, wy, slop, r, best = -1, near = 0;
 
 	if ( ts_win == NULL || ts_win != d ) {
 		return FALSE;
 	}
+	slop = wm_hit_slop(when);
+	r = TS_REACH + slop;
 	n = ts_handles(h, which);
 	for ( i = 0; i < n; i++ ) {
+		INT	dx, dy, far;
+
 		fig_to_win(d, h[i].x, h[i].y, &wx, &wy);
-		if ( x >= wx - 5 && x <= wx + 5 && y >= wy - 5 && y <= wy + 5 ) {
-			ts_drag = which[i];
-			return TRUE;
+		if ( x >= wx - r && x <= wx + r && y >= wy - r && y <= wy + r ) {
+			if ( slop <= 0 ) {
+				ts_drag = which[i];
+				return TRUE;
+			}
+			dx = ( x > wx ) ? x - wx : wx - x;
+			dy = ( y > wy ) ? y - wy : wy - y;
+			far = ( dx > dy ) ? dx : dy;
+			if ( best < 0 || far < near ) {
+				best = i;
+				near = far;
+			}
 		}
+	}
+	if ( best >= 0 ) {
+		ts_drag = which[best];
+		return TRUE;
 	}
 	/* anywhere else: the change is over */
 	ts_win = NULL;
@@ -3005,8 +3217,8 @@ EXPORT void df_transform_release( void )
 /* The shape's new lines while a handle is carried, or else the handles */
 LOCAL void ts_draw( DTWIN *d, INT gid, BOOL lines )
 {
-	T_DPPOINT	h[TS_MAX];
-	INT		which[TS_MAX], n, i, wx, wy;
+	T_DPPOINT	*h = ts_h;
+	INT		*which = ts_which, n, i, wx, wy;
 
 	if ( ts_win != d ) {
 		return;
@@ -3362,7 +3574,7 @@ EXPORT void df_text_begin( DTWIN *d, T_TADNODE *node, INT x, INT y )
 	ed_model(tb);
 	ed_pick_none(d);
 	if ( x >= 0 ) {
-		dd_press(tb, x, y, FALSE);
+		dd_press(tb, x, y, FALSE, 0);
 		dd_release();
 	}
 	dt_draw(d);
@@ -3400,7 +3612,7 @@ EXPORT BOOL df_text_press( DTWIN *d, INT x, INT y, UD when )
 
 		dt_work_rect(d->tb, &page);
 		if ( x >= page.left && x < page.right && y >= page.top && y < page.bottom ) {
-			dd_press(d->tb, x, y, FALSE);
+			dd_press(d->tb, x, y, FALSE, 0);
 			dt_draw(d);
 			wm_update();
 			return TRUE;

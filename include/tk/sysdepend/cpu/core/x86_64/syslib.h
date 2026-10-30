@@ -65,10 +65,14 @@ typedef struct {
 	UD	since;			/* the system counter then */
 } T_SPHELD;
 
-#define SPIN_HELD_PRC	8
 #define SPIN_HELD_N	4
 
-IMPORT T_SPHELD	knl_spin_held[SPIN_HELD_PRC][SPIN_HELD_N];
+/*
+ * Processor c's (PRC c+1's) list of SPIN_HELD_N, which lies in its
+ * per-processor data: NULL until the processor is set up
+ */
+IMPORT T_SPHELD	*knl_spin_held_p[];
+IMPORT INT	knl_spin_held_n;		/* entries of knl_spin_held_p there are */
 IMPORT UD	knl_spin_stall_cycles;
 IMPORT void	(*knl_spin_stall_hook)( T_SPLOCK *lock, UBINT pc, UD waited );
 IMPORT UW atomic_inc( UW *addr );

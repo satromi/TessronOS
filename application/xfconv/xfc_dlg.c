@@ -84,7 +84,8 @@ static INT run( UI *u, UI *q, void (*changed)( UI *q, INT num, void *arg ), void
 	INT	num, ev;
 
 	for (;;) {
-		ev = ui_dlg_next(u, q, &m, &num);
+		if ( ui_wait(u, &m, TMO_FEVR) < E_OK ) return 0;
+		ev = ui_dlg_take(q, &m, &num);
 		switch ( ev ) {
 		case UI_EV_BUTTON:
 			return num;
@@ -95,9 +96,6 @@ static INT run( UI *u, UI *q, void (*changed)( UI *q, INT num, void *arg ), void
 			break;
 		case UI_EV_OTHER:
 			xfc_meanwhile(&m);
-			break;
-		case UI_EV_NONE:
-			(void)tk_dly_tsk(20);
 			break;
 		default:
 			break;

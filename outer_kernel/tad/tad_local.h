@@ -37,6 +37,17 @@ typedef struct t_taddelta {
 	INT	delta;			/* +1 for a link added, -1 for one removed */
 } T_TADDELTA;
 
+/*
+ * The identity given, while the document is held, to a <link> that came
+ * without a vobjid. It is not an attribute: the record reads back as it
+ * was written until the link is changed, and then it is written.
+ */
+typedef struct t_tadlid {
+	struct t_tadlid *next;
+	CONST T_TADNODE *nd;
+	TS_UUID	vobjid;
+} T_TADLID;
+
 struct t_tad {
 	T_TADCHUNK *chunk;		/* the arena, newest first */
 	UB	*src;			/* the text as it was parsed */
@@ -49,6 +60,8 @@ struct t_tad {
 	T_TADDELTA *delta;
 	T_TADDELTA *delta_last;
 	INT	ndelta;
+	UW	serial;			/* tad_serial */
+	T_TADLID *lid;			/* links read without a vobjid */
 };
 
 /* Memory out of the arena of a document; it comes back zeroed */
@@ -61,6 +74,9 @@ IMPORT void tad_add_child( T_TADNODE *parent, T_TADNODE *nd );
 
 /* A change the file system owes (design 16.3.4) */
 IMPORT ER tad_put_delta( T_TAD *doc, CONST TS_UUID *target, INT delta );
+
+/* tad_lnk_closed_h of a <link> element, read from its own attributes */
+IMPORT INT tad_node_closed_h( CONST T_TADNODE *nd );
 
 /* Text helpers shared by the parts of the library */
 IMPORT SZ tad_slen( CONST char *s );

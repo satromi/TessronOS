@@ -82,17 +82,37 @@ EXPORT ID kt_cre_tsk_any( FP task, PRI pri, void *exinf )
 	return tk_cre_tsk(&ctsk);
 }
 
+EXPORT ID kt_cre_on( T_CTSK *c, ID prc )
+{
+	UBINT	set[( CNF_MAX_PRCID + 63 ) / 64];
+	INT	k;
+	ID	id;
+
+	c->tskatr &= ~TA_ASSPRC;
+	c->assprc = 0;
+	id = tk_cre_tsk(c);
+	if ( id <= 0 ) {
+		return id;
+	}
+	for ( k = 0; k < (INT)( sizeof(set) / sizeof(set[0]) ); k++ ) set[k] = 0;
+	set[( prc - 1 ) / 64] = (UBINT)1 << ( ( prc - 1 ) % 64 );
+	if ( tk_set_asp(id, set, (SZ)sizeof(set)) < E_OK ) {
+		(void)tk_del_tsk(id);
+		return E_PAR;
+	}
+	return id;
+}
+
 EXPORT ID kt_cre_tsk( FP task, PRI pri, void *exinf )
 {
 	T_CTSK	ctsk;
 
 	ctsk.exinf   = exinf;
-	ctsk.tskatr  = TA_HLNG | TA_RNG0 | TA_ASSPRC;
+	ctsk.tskatr  = TA_HLNG | TA_RNG0;
 	ctsk.task    = task;
 	ctsk.itskpri = pri;
 	ctsk.stksz   = 4096;
-	ctsk.assprc  = 1U << (tk_get_prc() - 1);
-	return tk_cre_tsk(&ctsk);
+	return kt_cre_on(&ctsk, tk_get_prc());
 }
 
 /*
@@ -121,20 +141,27 @@ EXPORT ID kt_cre_tsk( FP task, PRI pri, void *exinf )
  */
 #if CNF_KLOCK_STAT
 #include <ts/klstat.h>
+IMPORT UD	knl_cntfrq;		/* the system counter's frequency */
 
 LOCAL T_KLSITE	kl_before;
 
 LOCAL UD kl_us( UD ticks )
 {
-	UD	f;
+	UD	f = knl_cntfrq;
 
-	Asm("mrs %0, cntfrq_el0" : "=r"(f));
 	return ( f > 0 ) ? ticks * 1000000U / f : 0;
 }
+
+#if CNF_KLOCK_MODE >= 1
+LOCAL T_KLSITE	kl_cbefore[8];
+#endif
 
 LOCAL void kl_before_suite( void )
 {
 	(void)knl_klock_stat(&kl_before, NULL, 0);
+#if CNF_KLOCK_MODE >= 1
+	(void)knl_klk_stat(kl_cbefore, 8);
+#endif
 }
 
 LOCAL void kl_after_suite( CONST char *name )
@@ -145,6 +172,21 @@ LOCAL void kl_after_suite( CONST char *name )
 	tm_printf((UB *)"KLOCK suite %s acq %ld cont %ld wait_us %ld hold_us %ld\n", name,
 		  (UD)( now.acq - kl_before.acq ), (UD)( now.cont - kl_before.cont ),
 		  kl_us(now.wait - kl_before.wait), kl_us(now.hold - kl_before.hold));
+#if CNF_KLOCK_MODE >= 1
+	{
+		/* The kernel's locks by rank (design 4.3.3) */
+		T_KLSITE	c[8];
+		INT		r, nr = knl_klk_stat(c, 8);
+
+		for ( r = 1; r < nr && r < 8; r++ ) {
+			if ( c[r].acq == kl_cbefore[r].acq ) continue;
+			tm_printf((UB *)"KLOCK suite %s class %s acq %ld cont %ld wait_us %ld hold_us %ld\n",
+				  name, knl_klk_rank_name(r), (UD)( c[r].acq - kl_cbefore[r].acq ),
+				  (UD)( c[r].cont - kl_cbefore[r].cont ), kl_us(c[r].wait - kl_cbefore[r].wait),
+				  kl_us(c[r].hold - kl_cbefore[r].hold));
+		}
+	}
+#endif
 }
 
 LOCAL void kl_report( void )
@@ -153,13 +195,36 @@ LOCAL void kl_report( void )
 	INT		n, i;
 
 	n = knl_klock_stat(&all, s, 40);
-	tm_printf((UB *)"KLOCK all acq %ld cont %ld wait_us %ld hold_us %ld places %d\n",
-		  all.acq, all.cont, kl_us(all.wait), kl_us(all.hold), n);
+	tm_printf((UB *)"KLOCK all acq %ld cont %ld wait_us %ld hold_us %ld places %d max_wait_us %ld max_hold_us %ld\n",
+		  all.acq, all.cont, kl_us(all.wait), kl_us(all.hold), n, kl_us(all.wait_max), kl_us(all.hold_max));
+	tm_printf((UB *)"KLOCK holds by length (<1us, <2us, ... <16ms, more):");
+	for ( i = 0; i < KL_HIST_N; i++ ) {
+		tm_printf((UB *)" %ld", all.hold_hist[i]);
+	}
+	tm_printf((UB *)"\n");
 	for ( i = 0; s != NULL && i < n && i < 40; i++ ) {
-		tm_printf((UB *)"KLOCK site %lx acq %ld cont %ld wait_us %ld hold_us %ld\n",
-			  (UD)s[i].pc, s[i].acq, s[i].cont, kl_us(s[i].wait), kl_us(s[i].hold));
+		tm_printf((UB *)"KLOCK site %lx acq %ld cont %ld wait_us %ld hold_us %ld max_wait_us %ld max_hold_us %ld\n",
+			  (UD)s[i].pc, s[i].acq, s[i].cont, kl_us(s[i].wait), kl_us(s[i].hold),
+			  kl_us(s[i].wait_max), kl_us(s[i].hold_max));
 	}
 	if ( s != NULL ) Kfree(s);
+#if CNF_KLOCK_MODE >= 1
+	{
+		/* The kernel's locks by rank (design 4.3.3) */
+		T_KLSITE	c[8];
+		INT		r, k, nr = knl_klk_stat(c, 8);
+
+		for ( r = 1; r < nr && r < 8; r++ ) {
+			tm_printf((UB *)"KLOCK class %s acq %ld cont %ld wait_us %ld hold_us %ld max_wait_us %ld max_hold_us %ld hist",
+				  knl_klk_rank_name(r), c[r].acq, c[r].cont, kl_us(c[r].wait), kl_us(c[r].hold),
+				  kl_us(c[r].wait_max), kl_us(c[r].hold_max));
+			for ( k = 0; k < KL_HIST_N; k++ ) {
+				tm_printf((UB *)" %ld", c[r].hold_hist[k]);
+			}
+			tm_printf((UB *)"\n");
+		}
+	}
+#endif
 }
 #define KL_BEFORE()	kl_before_suite()
 #define KL_AFTER(n)	kl_after_suite(n)
@@ -193,7 +258,18 @@ LOCAL BOOL kt_wanted( CONST char *name )
 #else
 #define KT_WANTED(n)	TRUE
 #endif
-#define RUN_SUITE(n)	do { if ( KT_WANTED(n) ) { KL_BEFORE(); ktest_##n(); KL_AFTER(#n); } } while (0)
+#if CNF_STK_USAGE
+/* The suite that took the test task's stack deeper than any before it, told (design 4.7.7) */
+IMPORT W knl_stk_used_self( void );
+LOCAL W	kt_stk_was;
+#define STK_AFTER(n)	do { W u_ = knl_stk_used_self(); if ( u_ > kt_stk_was ) { \
+		tm_printf((UB *)"stkuse: suite %s takes the test task's stack to %d\n", n, (INT)u_); \
+		kt_stk_was = u_; } } while (0)
+#else
+#define STK_AFTER(n)
+#endif
+
+#define RUN_SUITE(n)	do { if ( KT_WANTED(n) ) { KL_BEFORE(); ktest_##n(); KL_AFTER(#n); STK_AFTER(#n); } } while (0)
 
 /*
  * A suite the Raspberry Pi 5 cannot run at all -- its PCI Express is
@@ -201,11 +277,65 @@ LOCAL BOOL kt_wanted( CONST char *name )
  * be skipped once, with the reason, rather than left out without a
  * word; it is not built there. Elsewhere it runs.
  */
-#if KT_BOARD
+#if defined(X64)
+#define RUN_SUITE_QEMU(n, why) \
+	do { if ( KT_WANTED(n) ) kt_skip(#n, "not run (x64: " why ")"); } while (0)
+#elif KT_BOARD
 #define RUN_SUITE_QEMU(n, why) \
 	do { if ( KT_WANTED(n) ) kt_skip(#n, "not run (Raspberry Pi: " why ")"); } while (0)
 #else
 #define RUN_SUITE_QEMU(n, why)	RUN_SUITE(n)
+#endif
+
+/*
+ * A suite that plugs USB devices in through the QEMU monitor: the x64 PC
+ * runs it when it was started on the QEMU test machine's USB devices
+ * (kt_qemu_devs), as QEMU virt always does.
+ */
+#if defined(X64)
+#define RUN_SUITE_QEMU_USB(n, why) \
+	do { if ( kt_qemu_devs() ) { RUN_SUITE(n); } else if ( KT_WANTED(n) ) \
+	     kt_skip(#n, "not run (x64 without the QEMU test machine's USB devices: " why ")"); } while (0)
+#else
+#define RUN_SUITE_QEMU_USB(n, why)	RUN_SUITE_QEMU(n, why)
+#endif
+
+/*
+ * A suite of the Arm machines' own hardware (the device tree, the SD
+ * host controller, the V3D's tables): on the x64 PC it is said to be
+ * skipped, with the reason, and is not built there.
+ */
+#if defined(X64)
+#define RUN_SUITE_ARM(n, why) \
+	do { if ( KT_WANTED(n) ) kt_skip(#n, "not run (x64: " why ")"); } while (0)
+#else
+#define RUN_SUITE_ARM(n, why)	RUN_SUITE(n)
+#endif
+
+#if KT_WIFINV
+IMPORT void ktest_wifinv( void );	/* ktest_wifinv.c, built with WIFI=1 */
+#endif
+#if KT_WIFIKEY
+IMPORT void ktest_wifikey( void );	/* ktest_wifikey.c, built with WIFI=1 */
+#endif
+#if KT_WIFISIM
+IMPORT void ktest_wifisim( void );	/* ktest_wifisim.c, built with WIFI_SIM=1 */
+#endif
+#if KT_WPAPROC
+IMPORT void ktest_wpaproc( void );	/* ktest_wpaproc.c, built with WIFI=1 WPA_MODE=proc */
+#endif
+#if KT_OBSDWIFI
+IMPORT void ktest_obsdwifi( void );	/* ktest_obsdwifi.c, built with WIFI_NET80211=obsd */
+#endif
+
+#ifdef X64
+IMPORT INT ts_usb_hc_count( void );
+
+/* Started on the QEMU test machine's USB devices: two xHCI controllers */
+EXPORT BOOL kt_qemu_devs( void )
+{
+	return ( ts_usb_hc_count() >= 2 );
+}
 #endif
 
 EXPORT BOOL kt_screen( void )
@@ -218,13 +348,13 @@ EXPORT BOOL kt_screen( void )
 /* A suite that draws: skipped whole when no screen was found */
 #define RUN_SUITE_SCREEN(n) \
 	do { if ( KT_WANTED(n) ) { \
-		if ( kt_screen() ) { KL_BEFORE(); ktest_##n(); KL_AFTER(#n); } \
+		if ( kt_screen() ) { KL_BEFORE(); ktest_##n(); KL_AFTER(#n); STK_AFTER(#n); } \
 		else kt_skip(#n, KT_NO_SCREEN); } } while (0)
 
 /* A suite that formats the scratch partition: skipped whole without one */
 #define RUN_SUITE_SCRATCH(n) \
 	do { if ( KT_WANTED(n) ) { \
-		if ( kt_scratch() != NULL ) { KL_BEFORE(); ktest_##n(); KL_AFTER(#n); } \
+		if ( kt_scratch() != NULL ) { KL_BEFORE(); ktest_##n(); KL_AFTER(#n); STK_AFTER(#n); } \
 		else kt_skip(#n, KT_NO_SCRATCH); } } while (0)
 
 /*
@@ -324,6 +454,111 @@ EXPORT UB *kt_obj_data( const TS_UUID *uuid, SZ *p_size )
 	return d;
 }
 
+/*
+ * Room for a picture of 'need' bytes at path. A picture of the whole
+ * screen is some MB, and the pictures of a run of all the suites are
+ * more than the FAT volume of the test disk holds next to its own
+ * files: written regardless, they fill it and the suites after them
+ * fail to make their files there. A picture that would leave less than
+ * KT_SHOT_KEEP free is not written, and the log says so; the same
+ * picture written again takes the place of the old one.
+ */
+#define KT_SHOT_KEEP	( (UD)16 * 1024 * 1024 )
+
+EXPORT BOOL kt_room( const char *path, UD need )
+{
+	T_FSSTAT	fst;
+	T_FSTAT		old;
+	UD		room;
+
+	if ( fs_statvfs(path, &fst) < EX_OK ) {
+		return TRUE;			/* not known: tried, as before */
+	}
+	room = fst.bfree * fst.bsize;
+	if ( fs_stat(path, &old) >= EX_OK ) {
+		room += old.size;
+	}
+	if ( room < need + KT_SHOT_KEEP ) {
+		tm_printf((UB *)"KTEST %s not written: %d KB free, %d KB kept for the suites\n",
+			  path, (INT)( room / 1024 ), (INT)( KT_SHOT_KEEP / 1024 ));
+		return FALSE;
+	}
+	return TRUE;
+}
+
+/*
+ * The pictures a run before this one left on the FAT volume of the test
+ * disk, which is kept from run to run: removed as the run starts, so
+ * that they neither take the room of this run's files nor are taken for
+ * this run's pictures.
+ */
+#define KT_SHOT_DIR	"/boot"
+#define KT_SHOT_OLD	64
+
+LOCAL BOOL shot_name( CONST UB *s )
+{
+	INT	n = 0;
+
+	while ( s[n] != 0 ) n++;
+	return (BOOL)( n > 4 && s[n - 4] == '.' && ( s[n - 3] | 0x20 ) == 'p'
+		       && ( s[n - 2] | 0x20 ) == 'p' && ( s[n - 1] | 0x20 ) == 'm' );
+}
+
+/*
+ * What it works with is taken from the heap: called from the test task,
+ * it would otherwise sit on that task's stack for the whole run.
+ */
+typedef struct {
+	T_DIRENT	de[4];
+	char		path[FS_PATH_MAX];
+	UB		old[KT_SHOT_OLD][FS_NAME_MAX];
+} SHOTS_OLD;
+
+LOCAL void kt_clear_shots( void )
+{
+	SHOTS_OLD	*w = (SHOTS_OLD *)Kmalloc(sizeof(SHOTS_OLD));
+	T_DIRENT	*de;
+	UB		(*old)[FS_NAME_MAX];
+	char		*path;
+	INT		fd, n, i, cnt = 0, gone = 0;
+
+	if ( w == NULL ) {
+		return;
+	}
+	de = w->de;
+	old = w->old;
+	path = w->path;
+	fd = fs_open(KT_SHOT_DIR, O_RDONLY | O_DIRECTORY);
+	while ( fd >= 0 && cnt < KT_SHOT_OLD && ( n = fs_getdents(fd, de, 4) ) > 0 ) {
+		for ( i = 0; i < n && cnt < KT_SHOT_OLD; i++ ) {
+			if ( ( de[i].mode & FS_IFMT ) != FS_IFDIR && shot_name(de[i].name) ) {
+				INT	k;
+
+				for ( k = 0; k < FS_NAME_MAX - 1 && de[i].name[k] != 0; k++ ) old[cnt][k] = de[i].name[k];
+				old[cnt++][k] = 0;
+			}
+		}
+	}
+	if ( fd >= 0 ) {
+		fs_close(fd);
+	}
+	for ( i = 0; i < cnt; i++ ) {
+		CONST char	*d = KT_SHOT_DIR "/";
+		INT		k = 0, j;
+
+		while ( d[k] != 0 ) { path[k] = d[k]; k++; }
+		for ( j = 0; old[i][j] != 0 && k < FS_PATH_MAX - 1; j++ ) path[k++] = (char)old[i][j];
+		path[k] = 0;
+		if ( fs_unlink(path) >= EX_OK ) {
+			gone++;
+		}
+	}
+	Kfree(w);
+	if ( gone > 0 ) {
+		tm_printf((UB *)"KTEST %d pictures of an earlier run removed from " KT_SHOT_DIR "\n", gone);
+	}
+}
+
 EXPORT ER kt_shot( const char *path )
 {
 	T_DISPSPEC	spec;
@@ -339,6 +574,9 @@ EXPORT ER kt_shot( const char *path )
 	fb = (UB *)ts_disp_buffer();
 	if ( fb == NULL ) {
 		return E_NOEXS;
+	}
+	if ( !kt_room(path, (UD)spec.width * spec.height * 3 + 32) ) {
+		return EX_NOSPC;
 	}
 	fd = fs_open(path, O_WRONLY | O_CREAT | O_TRUNC);
 	if ( fd < 0 ) {
@@ -524,6 +762,7 @@ LOCAL void kt_clock_floor( void )
 LOCAL void kt_main_task( INT stacd, void *exinf )
 {
 	tm_printf((UB*)"KTEST START\n");
+	kt_clear_shots();
 
 	/*
 	 * No pointer while the tests run. Several of them read single
@@ -542,15 +781,19 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE(mem);
 	RUN_SUITE(el0);
 	RUN_SUITE(smp);
+	RUN_SUITE(klk);
 	RUN_SUITE(lockup);
-	RUN_SUITE(board);
+	RUN_SUITE_ARM(board, "no device tree");
 	RUN_SUITE(proc);
 	RUN_SUITE(prcobj);
 	RUN_SUITE(pan);
 	RUN_SUITE(cred);
 	RUN_SUITE(cxx);
 	RUN_SUITE(v8);
-	RUN_SUITE(gpu);
+	RUN_SUITE_ARM(gpu, "no V3D");
+#ifdef X64
+	RUN_SUITE(igt);
+#endif
 #endif
 	kt_clock_floor();		/* when the clock's suite did not run */
 #if KT_FS
@@ -565,7 +808,7 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 		INT	failed = kt.total - kt.pass - kt.skipped;
 #endif
 
-		RUN_SUITE(sd);
+		RUN_SUITE_ARM(sd, "no SD host controller");
 #if KT_BOARD
 		if ( kt.total - kt.pass - kt.skipped > failed ) {
 			tm_printf((UB *)"KTEST the SD card driver failed its checks: "
@@ -587,10 +830,11 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE_SCRATCH(dfix);
 	RUN_SUITE(ob);
 	RUN_SUITE(psx);
-	RUN_SUITE_QEMU(vols, "no QEMU monitor to plug disks in through");
-	RUN_SUITE_QEMU(grow, "no QEMU monitor to plug a disk in through");
+	RUN_SUITE_QEMU_USB(vols, "no QEMU monitor to plug disks in through");
+	RUN_SUITE_QEMU_USB(grow, "no QEMU monitor to plug a disk in through");
 #ifdef KT_ONE
 	RUN_SUITE_SCRATCH(tsfscut);	/* without end: only when it is named */
+	RUN_SUITE(iob);			/* wipes a disk of its own: only when it is named */
 #endif
 #endif
 #if KT_GUI
@@ -603,7 +847,7 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	   against a system that had none */
 	RUN_SUITE(fn);
 	RUN_SUITE_SCREEN(wm);
-	RUN_SUITE(gl);
+	RUN_SUITE_ARM(gl, "no V3D");
 	RUN_SUITE_SCREEN(part);
 	RUN_SUITE_SCREEN(mn);
 	RUN_SUITE_SCREEN(ms);
@@ -615,7 +859,7 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE(xf);
 	RUN_SUITE(xfu);
 	RUN_SUITE_SCREEN(xfc);
-	RUN_SUITE_QEMU(btcd, "no QEMU monitor to plug a CD-ROM drive in through");
+	RUN_SUITE_QEMU_USB(btcd, "no QEMU monitor to plug a CD-ROM drive in through");
 	RUN_SUITE_SCREEN(drop);
 	RUN_SUITE_SCREEN(dtwin);
 	RUN_SUITE_SCREEN(fault);
@@ -631,12 +875,14 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE(udic);
 	RUN_SUITE(calcu);
 	RUN_SUITE(km);
+	RUN_SUITE(skb);
 	RUN_SUITE(mcard);
 	RUN_SUITE(techo);
 	RUN_SUITE(chs);
 	RUN_SUITE(slide);
 	RUN_SUITE(rt);
 	RUN_SUITE(store);
+	RUN_SUITE(sysup);
 	/* last: every resource the suites before made is looked for as an object */
 	RUN_SUITE(bt2);
 #endif
@@ -645,11 +891,33 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE(snd);
 	RUN_SUITE(cam);
 	RUN_SUITE(usb);
+	RUN_SUITE(digi);
 	RUN_SUITE(devob);
+	RUN_SUITE(tpanel);
+#ifdef X64
+	RUN_SUITE(pcdev);
+	RUN_SUITE(camisp);		/* the built-in camera's raw pictures made into NV12 and YUY2 */
+	RUN_SUITE(sysinst);		/* the system put on another NVMe disk (NVME2=, NVME3=) */
+#endif
 	RUN_SUITE(net);
 	RUN_SUITE(so);
 	RUN_SUITE(rump);
 	RUN_SUITE(svcio);
+#endif
+#if KT_WIFINV
+	RUN_SUITE(wifinv);		/* the Raspberry Pi 5 Wi-Fi's board settings (WIFI=1) */
+#endif
+#if KT_WIFIKEY
+	RUN_SUITE(wifikey);		/* the Wi-Fi's saved networks and their keys (WIFI=1) */
+#endif
+#if KT_WIFISIM
+	RUN_SUITE(wifisim);		/* the Wi-Fi through the simulator, the scan to the data (WIFI_SIM=1) */
+#endif
+#if KT_WPAPROC
+	RUN_SUITE(wpaproc);		/* wpa_supplicant's process answering the kernel (WPA_MODE=proc) */
+#endif
+#if KT_OBSDWIFI
+	RUN_SUITE(obsdwifi);		/* what OpenBSD's 802.11 layer stands on (WIFI_NET80211=obsd) */
 #endif
 
 #if KT_BOARD && KT_FS
@@ -657,6 +925,14 @@ summary:
 #endif
 #if CNF_KLOCK_STAT
 	kl_report();
+#endif
+#if CNF_STK_USAGE
+	{
+		/* the deepest use of every stack the tests made (design 4.7.7) */
+		IMPORT void knl_stk_usage_say( void );
+
+		knl_stk_usage_say();
+	}
 #endif
 	tm_printf((UB*)"KTEST SUMMARY %d/%d (skipped %d)\n", kt.pass, kt.total, kt.skipped);
 	tk_wup_tsk(init_tid);
@@ -673,7 +949,11 @@ EXPORT INT ktest_main( void )
 	 * CFF outline into pixels needs about 16KB of stack on its own --
 	 * the interpreter keeps its working state there -- and a task that
 	 * runs out writes past the bottom of its stack into whatever the
-	 * allocator handed out below it, silently.
+	 * allocator handed out below it, silently. The tests draw and save
+	 * documents and figures as the desktop and a process's system calls
+	 * do, so the stack is the one those get (CNF_SVC_STKSZ, 64KB): with
+	 * 32KB, the drop suite took it to 35KB of the 36KB there was
+	 * (CNF_STK_USAGE, design 4.7.7).
 	 */
 	{
 		T_CTSK	ctsk;
@@ -682,9 +962,8 @@ EXPORT INT ktest_main( void )
 		ctsk.tskatr  = TA_HLNG | TA_RNG0 | TA_ASSPRC;
 		ctsk.task    = (FP)kt_main_task;
 		ctsk.itskpri = KT_PRI_MAIN;
-		ctsk.stksz   = 32768;
-		ctsk.assprc  = 1U << (tk_get_prc() - 1);
-		id = tk_cre_tsk(&ctsk);
+		ctsk.stksz   = CNF_SVC_STKSZ;
+		id = kt_cre_on(&ctsk, tk_get_prc());
 	}
 	if ( id <= 0 ) {
 		tm_printf((UB*)"KTEST FAIL cannot create the test task (%d)\n", id);

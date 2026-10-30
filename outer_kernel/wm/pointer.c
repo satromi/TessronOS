@@ -37,6 +37,7 @@
 #include <ts/wm.h>
 #include <ts/dp.h>
 #include <ts/hid.h>
+#include <ts/disp.h>
 
 #define PT_SIDE		24			/* the shapes are this square */
 #define PT_PITCH	4			/* bytes in a row of a plane */
@@ -1295,6 +1296,32 @@ LOCAL UINT	pt_kind = WM_PT_SELECT;
 LOCAL BOOL	pt_shown = TRUE;
 
 /*
+ * A finger held still on a touch screen long enough that letting go is
+ * the second button (device/usb/hid.c): the menu's shape is shown
+ * whatever shape is set, so that the hand sees the menu will come.
+ */
+LOCAL volatile BOOL	pt_hold = FALSE;
+
+IMPORT void knl_wm_pointer_hint( void );
+
+EXPORT void knl_pt_hold( BOOL on )
+{
+	pt_hold = on;
+	knl_wm_pointer_hint();			/* laid again in its new shape */
+}
+
+EXPORT BOOL knl_pt_holding( void )
+{
+	return pt_hold;
+}
+
+/* The shape it is laid in now */
+LOCAL UINT pt_now( void )
+{
+	return pt_hold ? WM_PT_MENU : pt_kind;
+}
+
+/*
  * Where it was last laid, and whether it has been laid at all. Whoever
  * repairs the screen after it moves needs the place it is coming from,
  * and this is where that is known.
@@ -1330,10 +1357,19 @@ EXPORT ER wm_show_pointer( BOOL on )
  * drawn one, dot by nearest dot, when the size or the shape changes.
  */
 #define PT_BIG		( PT_SIDE * 3 / 2 )
-#define PT_BIG_PITCH	( ( PT_BIG + 7 ) / 8 )
 
-LOCAL UB	pt_sc_mask[PT_BIG * PT_BIG_PITCH];
-LOCAL UB	pt_sc_body[PT_BIG * PT_BIG_PITCH];
+/*
+ * The screen drawn at a scale (knl_pt_scale): the pointer moves in view
+ * pixels and is laid in pixels of the screen, its square that many
+ * times larger, made from the drawn shape dot by nearest dot as the
+ * sizes are. The largest square is the large size at the largest scale.
+ */
+#define PT_MAX		( PT_BIG * 3 )
+#define PT_MAX_PITCH	( ( PT_MAX + 7 ) / 8 )
+
+LOCAL UB	pt_sc_mask[PT_MAX * PT_MAX_PITCH];
+LOCAL UB	pt_sc_body[PT_MAX * PT_MAX_PITCH];
+LOCAL UINT	pt_scl = 100;
 LOCAL INT	pt_sc_side = 0;
 LOCAL UINT	pt_sc_kind = (UINT)-1;
 
@@ -1372,7 +1408,8 @@ LOCAL void pt_scale( CONST UB *src, UB *dst, INT side )
  */
 EXPORT void wm_draw_pointer( INT gid )
 {
-	CONST PTSHAPE	*sh = &pt_shape[pt_kind];
+	UINT		kind = pt_now();
+	CONST PTSHAPE	*sh = &pt_shape[kind];
 	INT		x = 0, y = 0, side = pt_side();
 	UINT		buttons = 0;
 
@@ -1390,11 +1427,11 @@ EXPORT void wm_draw_pointer( INT gid )
 		dp_put_mono(gid, x, y, sh->body, PT_PITCH, PT_SIDE, PT_SIDE,
 			    0x00000000U);
 	} else {
-		if ( side != pt_sc_side || pt_kind != pt_sc_kind ) {
+		if ( side != pt_sc_side || kind != pt_sc_kind ) {
 			pt_scale(sh->mask, pt_sc_mask, side);
 			pt_scale(sh->body, pt_sc_body, side);
 			pt_sc_side = side;
-			pt_sc_kind = pt_kind;
+			pt_sc_kind = kind;
 		}
 		x -= sh->hot_x * side / PT_SIDE;
 		y -= sh->hot_y * side / PT_SIDE;
@@ -1409,7 +1446,7 @@ EXPORT void wm_draw_pointer( INT gid )
  * pt_under_r's width after another. The window manager calls these with
  * its lock held, which is what keeps them in step with the back buffer.
  */
-LOCAL UW	pt_under[PT_BIG * PT_BIG];
+LOCAL UW	pt_under[PT_MAX * PT_MAX];
 LOCAL T_DPRECT	pt_under_r;
 LOCAL BOOL	pt_on = FALSE;		/* it lies in the back buffer at pt_drawn_* */
 LOCAL UINT	pt_on_kind = WM_PT_SELECT;
@@ -1427,7 +1464,37 @@ EXPORT BOOL knl_pt_want( T_DPRECT *r )
 	if ( !pt_shown || ts_hid_pointer(&x, &y, &buttons) < E_OK ) {
 		return FALSE;
 	}
+	if ( pt_scl != 100 ) {
+		CONST PTSHAPE	*sh = &pt_shape[pt_now()];
+		INT		side = pt_side() * (INT)pt_scl / 100;
+
+		/* in pixels of the screen: the view pixel's place, the square the scale's size */
+		r->left = disp_dev_of(x, pt_scl) - sh->hot_x * side / PT_SIDE;
+		r->top = disp_dev_of(y, pt_scl) - sh->hot_y * side / PT_SIDE;
+		r->right = r->left + side;
+		r->bottom = r->top + side;
+		return TRUE;
+	}
 	wm_pointer_box(x, y, r);
+	return TRUE;
+}
+
+/* The scale the screen is drawn at, from the window manager: the pointer's squares follow it */
+EXPORT void knl_pt_scale( UINT scale )
+{
+	pt_scl = ( scale >= 100 && scale <= 300 ) ? scale : 100;
+	pt_sc_side = 0;				/* made again at the new size */
+}
+
+/* What the pointer covers at pixel X, Y of the screen, where it lies there */
+EXPORT BOOL knl_pt_under_px( INT X, INT Y, UW *c )
+{
+	if ( !pt_on || X < pt_under_r.left || X >= pt_under_r.right
+	  || Y < pt_under_r.top || Y >= pt_under_r.bottom ) {
+		return FALSE;
+	}
+	*c = pt_under[(SZ)( Y - pt_under_r.top ) * ( pt_under_r.right - pt_under_r.left )
+		      + ( X - pt_under_r.left )];
 	return TRUE;
 }
 
@@ -1446,7 +1513,7 @@ EXPORT BOOL knl_pt_on( T_DPRECT *r )
 /* Whether it lies in the back buffer as it is wanted: in that square, in the shape it has now */
 EXPORT BOOL knl_pt_fresh( CONST T_DPRECT *want )
 {
-	return ( pt_on && pt_on_kind == pt_kind
+	return ( pt_on && pt_on_kind == pt_now()
 		 && want->left == pt_drawn_x && want->top == pt_drawn_y
 		 && want->right - want->left == pt_drawn_side );
 }
@@ -1492,12 +1559,13 @@ EXPORT void knl_pt_lift( UB *back, UINT pitch, INT sw, INT sh )
  */
 EXPORT void knl_pt_lay( UB *back, UINT pitch, INT sw, INT sh, CONST T_DPRECT *at )
 {
-	CONST PTSHAPE	*shp = &pt_shape[pt_kind];
+	UINT		kind = pt_now();
+	CONST PTSHAPE	*shp = &pt_shape[kind];
 	CONST UB	*mask, *body;
 	T_DPRECT	c;
 	INT		side = at->right - at->left, bpitch, x, y, w;
 
-	if ( side <= 0 || side > PT_BIG ) {
+	if ( side <= 0 || side > PT_MAX ) {
 		return;
 	}
 	if ( side == PT_SIDE ) {
@@ -1505,11 +1573,11 @@ EXPORT void knl_pt_lay( UB *back, UINT pitch, INT sw, INT sh, CONST T_DPRECT *at
 		body = shp->body;
 		bpitch = PT_PITCH;
 	} else {
-		if ( side != pt_sc_side || pt_kind != pt_sc_kind ) {
+		if ( side != pt_sc_side || kind != pt_sc_kind ) {
 			pt_scale(shp->mask, pt_sc_mask, side);
 			pt_scale(shp->body, pt_sc_body, side);
 			pt_sc_side = side;
-			pt_sc_kind = pt_kind;
+			pt_sc_kind = kind;
 		}
 		mask = pt_sc_mask;
 		body = pt_sc_body;
@@ -1519,7 +1587,7 @@ EXPORT void knl_pt_lay( UB *back, UINT pitch, INT sw, INT sh, CONST T_DPRECT *at
 	pt_drawn_y = at->top;
 	pt_drawn_side = side;
 	pt_drawn = TRUE;
-	pt_on_kind = pt_kind;
+	pt_on_kind = kind;
 	pt_on = FALSE;
 	if ( !pt_cut(at, sw, sh, &c) ) {
 		return;				/* wholly off the screen */
@@ -1581,7 +1649,7 @@ EXPORT void knl_pt_forget( void )
 
 EXPORT void wm_pointer_box( INT x, INT y, T_DPRECT *r )
 {
-	CONST PTSHAPE	*sh = &pt_shape[pt_kind];
+	CONST PTSHAPE	*sh = &pt_shape[pt_now()];
 	INT		side = pt_side();
 
 	r->left   = x - sh->hot_x * side / PT_SIDE;

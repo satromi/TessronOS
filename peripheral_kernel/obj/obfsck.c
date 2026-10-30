@@ -38,7 +38,6 @@
 #include <ts/crc32c.h>
 #include "obj.h"
 
-#define CHK_DEV_MAX	CNF_MAX_REGDEV	/* devices looked at in the device management: every one there can be */
 #define CHK_BOOT_EV	512		/* events of the repair at start kept */
 #define SB_GEN		16
 #define SB_LABEL	40
@@ -130,7 +129,7 @@ LOCAL BOOL read_sb( CONST char *devnm, T_TSFSCKDEV *d )
 	}
 	dd = tk_opn_dev((UB *)devnm, TD_READ);
 	for ( c = 0; dd > 0 && c < 2; c++ ) {
-		if ( tk_srea_dev(dd, (D)( c * TSFSBLK_SECT_PER_BLK ), buf, TSFSBLK_BLOCK_SIZE, &asz) < E_OK
+		if ( tk_srea_dev_d(dd, (D)( c * TSFSBLK_SECT_PER_BLK ), buf, TSFSBLK_BLOCK_SIZE, &asz) < E_OK
 		  || asz < TSFSBLK_BLOCK_SIZE ) {
 			continue;
 		}
@@ -180,7 +179,7 @@ EXPORT INT ob_chk_list( T_TSFSCKDEV *buf, INT max )
 	UB	name[TSFSCK_DEVNM_MAX];
 	INT	start = 0, n = 0, k, s, m, got, cnt;
 
-	while ( start < CHK_DEV_MAX ) {
+	for ( ;; ) {
 		cnt = tk_lst_dev(ld, start, 8);
 		if ( cnt <= 0 ) {
 			break;
@@ -208,7 +207,7 @@ EXPORT INT ob_chk_list( T_TSFSCKDEV *buf, INT max )
 			break;
 		}
 	}
-	return ( n > max ) ? max : n;
+	return n;
 }
 
 /* ---------------------------------------------------------------- checking one */

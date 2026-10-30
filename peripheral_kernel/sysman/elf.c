@@ -399,9 +399,13 @@ LOCAL IMGSEG *img_seg( PROGIMG *e, UBINT start )
 /*
  * Copy 'len' bytes of the image at 'off' into the space at 'va'. The
  * pages are already mapped; they are written through the kernel's
- * linear map. 'buf' holds 'bufsz' bytes.
+ * linear map. 'buf' holds 'bufsz' bytes. Instructions ('code') are
+ * cleaned out to where the instruction side fetches from as they are
+ * written; the instruction caches are invalidated once, after the
+ * whole program (knl_icache_sync_all).
  */
-LOCAL ER load_bytes( ELFSRC *src, T_SPACE *sp, UBINT va, UD off, UD len, UB *buf, UD bufsz )
+LOCAL ER load_bytes( ELFSRC *src, T_SPACE *sp, UBINT va, UD off, UD len, UB *buf, UD bufsz,
+		     BOOL code )
 {
 	UB	*page;
 	UD	got, k, at;
@@ -420,6 +424,9 @@ LOCAL ER load_bytes( ELFSRC *src, T_SPACE *sp, UBINT va, UD off, UD len, UB *buf
 				return E_SYS;
 			}
 			knl_memcpy(page, buf + at, (INT)k);
+			if ( code ) {
+				knl_dcache_clean_pou((UBINT)page, k);
+			}
 		}
 		va  += got;
 		off += got;
@@ -543,7 +550,7 @@ LOCAL ER elf_load( ELFSRC *src, CONST Elf64_Ehdr *eh, CONST Elf64_Phdr *ph, INT 
 
 		if ( ph[i].p_filesz > 0 ) {
 			er = load_bytes(src, sp, (UBINT)ph[i].p_vaddr, ph[i].p_offset, ph[i].p_filesz,
-					buf, bufsz);
+					buf, bufsz, (BOOL)( ( ph[i].p_flags & PF_X ) != 0 ));
 			if ( er < E_OK ) goto exit;
 		}
 		if ( end > brk ) brk = end;

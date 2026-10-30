@@ -32,7 +32,8 @@
  *	(rw-rw-r--): everyone may look, the group and the administrators
  *	may set a pin. A pin a driver of the kernel uses -- the card detect
  *	of the SD socket, the reset of the Ethernet PHY, the header UART when
- *	it is set up, the I2S pins once the sound device has taken them --
+ *	it is set up, the I2S pins once the sound device has taken them, the
+ *	bus and INT line of a touch screen's controller (gpio_claim) --
  *	is shown as the kernel's and is not set. Setting pins to one of the
  *	chip's functions is the drivers' own business and stays in them.
  *
@@ -67,7 +68,6 @@
 #define LED_ON_LEVEL	0		/* lit when low */
 #define CHIP_NAME	"BCM2712"
 #endif
-#define GP_TEXT_MAX	2048
 #define POLL_MS		100
 #define POLL_PRI	30		/* below everything that does work */
 
@@ -126,12 +126,14 @@ LOCAL BOOL kernel_pin( CONST GPBANK *b, UINT pin, INT func )
 {
 #ifdef RPI4
 	/*
-	 * The Raspberry Pi 4: the console UART on the header (14, 15), and
+	 * The Raspberry Pi 4: the console UART on the header (14, 15), a
+	 * pin a driver took (a touch screen's bus and INT line), and
 	 * everything past the header but the activity LED
 	 */
 	(void)b;
 	(void)func;
 	if ( pin == 14 || pin == 15 ) return TRUE;
+	if ( gpio_claimed_by_kernel(0, pin) ) return TRUE;
 	return (BOOL)( pin >= 28 && pin != GPIO_LED_ACT );
 #endif
 	if ( !b->rp1 ) {
@@ -330,34 +332,24 @@ LOCAL INT gp_attr( void *ctx, UB *j, INT n, INT max )
 	return knl_oj_put_num(j, n, max, b->pins);
 }
 
+/* Record 1, made as long as the bank's pins need */
+LOCAL INT pins_make( void *ctx, UB *t, INT max )
+{
+	INT	n;
+
+	tk_loc_mtx(gp_mtx, TMO_FEVR);
+	n = pins_text((CONST GPBANK *)ctx, t, max);
+	tk_unl_mtx(gp_mtx);
+	return n;
+}
+
 LOCAL ER gp_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *p_asize )
 {
-	UB	*t;
-	INT	len;
-	SZ	n = 0;
-
 	(void)pos;
 	if ( recno != OB_GPIO_PINS ) {
 		return E_NOEXS;
 	}
-	if ( off < 0 || size < 0 ) {
-		return E_PAR;
-	}
-	t = (UB *)Kmalloc(GP_TEXT_MAX);
-	if ( t == NULL ) {
-		return E_NOMEM;
-	}
-	tk_loc_mtx(gp_mtx, TMO_FEVR);
-	len = pins_text((CONST GPBANK *)ctx, t, GP_TEXT_MAX);
-	tk_unl_mtx(gp_mtx);
-	if ( len >= 0 && off < len ) {
-		n = (SZ)( len - off );
-		if ( n > size ) n = size;
-		knl_memcpy(buf, t + off, (INT)n);
-	}
-	Kfree(t);
-	if ( p_asize != NULL ) *p_asize = n;
-	return E_OK;
+	return knl_oj_make_rea(pins_make, ctx, off, buf, size, p_asize);
 }
 
 LOCAL ER gp_wri( void *ctx, UD *pos, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize )
@@ -386,20 +378,10 @@ LOCAL ER gp_wri( void *ctx, UD *pos, INT recno, D off, CONST void *buf, SZ size,
 
 LOCAL UD gp_size( void *ctx, INT recno )
 {
-	UB	*t;
-	INT	len = 0;
-
 	if ( recno != OB_GPIO_PINS ) {
 		return 0;
 	}
-	t = (UB *)Kmalloc(GP_TEXT_MAX);
-	if ( t != NULL ) {
-		tk_loc_mtx(gp_mtx, TMO_FEVR);
-		len = pins_text((CONST GPBANK *)ctx, t, GP_TEXT_MAX);
-		tk_unl_mtx(gp_mtx);
-		Kfree(t);
-	}
-	return ( len > 0 ) ? (UD)len : 0;
+	return knl_oj_make_len(pins_make, ctx);
 }
 
 LOCAL CONST T_OBDVOPS gp_ops = {

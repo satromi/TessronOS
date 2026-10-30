@@ -1,0 +1,14 @@
+<tad version="1.0" encoding="UTF-8" filename="パターン編集のメニュー">
+<document>
+<p>パターン編集のメニュー</p>
+<p>図形編集のパターン編集のウインドウのメニュー。閉じる、読込、入替、復旧と、ウインドウ、小物、実行。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2048-7e11-9a10-c1d2e3f44811"/></include>
+<item code="pat.load">読込</item>
+<item code="pat.swap">入替</item>
+<item code="pat.undo">復旧</item>
+<line/>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2048-7e12-9a10-c1d2e3f44812"/></include>
+</menu>
+</tad>

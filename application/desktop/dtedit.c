@@ -45,6 +45,7 @@
 #include <sys/machine.h>
 #include "kernel.h"
 #include <tk/tkernel.h>
+#include <tk/smem.h>
 #include <ts/wm.h>
 #include <ts/dp.h>
 #include <ts/om.h>
@@ -113,20 +114,32 @@ EXPORT void ed_forget( DTWIN *d )
 EXPORT void ed_model( DTWIN *d )
 {
 	INT	i;
+	T_TVDOC	*was = d->doc;
 
+	/* the document made before: what of its layout still holds is taken over */
+	d->doc = NULL;
 	ed_forget(d);
-	if ( d->rec == NULL ) {
-		return;
-	}
-	if ( d->tb_host != NULL ) {
-		/* a piece of text in a figure: its own <document> element */
-		(void)tv_doc_of(d->tb_node, &d->doc);
+	if ( d->rec == NULL || d->tb_host != NULL ) {
+		if ( was != NULL ) {
+			tv_doc_free(was);
+		}
+		if ( d->rec != NULL ) {
+			/* a piece of text in a figure: its own <document> element */
+			(void)tv_doc_of(d->tb_node, &d->doc);
+		}
 		return;
 	}
 	if ( d->kind == TV_KIND_DOC ) {
 		/* in 原稿, the record's text is what is shown and edited */
-		tv_doc(( d->xml_view && d->xrec != NULL ) ? d->xrec : d->rec,
-		       &d->doc);
+		tv_doc_again(( d->xml_view && d->xrec != NULL ) ? d->xrec : d->rec,
+			     was, &d->doc);
+		/*
+		 * The paragraphs laid out are kept: what is drawn and asked
+		 * about lays only what it wants and what has changed.
+		 */
+		if ( d->doc != NULL && tv_doc_cache(d->doc, was) >= E_OK ) {
+			d->settling = TRUE;
+		}
 		if ( d->doc != NULL && !d->xml_view ) {
 			d->doc->detail = d->detail_view;
 			d->doc->show_hidden = d->show_hidden;
@@ -149,8 +162,27 @@ EXPORT void ed_model( DTWIN *d )
 			d->fig->show_hidden = d->show_hidden;
 		}
 	}
+	if ( was != NULL ) {
+		tv_doc_free(was);
+	}
+	/* a pick for every shape there is */
+	if ( d->fig != NULL && d->fig->nsh > d->maxpick ) {
+		INT	m = d->fig->nsh + d->fig->nsh / 2 + 16;
+		UINT	*p = (UINT *)Krealloc(d->pick, sizeof(UINT) * (size_t)m);
+
+		if ( p == NULL ) {
+			/* not shown as a figure that cannot be picked in */
+			tv_fig_free(d->fig);
+			d->fig = NULL;
+			dt_no_memory(d);
+		} else {
+			knl_memset(p + d->maxpick, 0, sizeof(UINT) * (SZ)( m - d->maxpick ));
+			d->pick = p;
+			d->maxpick = m;
+		}
+	}
 	d->npick = 0;
-	for ( i = 0; i < TV_MAX_SHAPE; i++ ) {
+	for ( i = 0; i < d->maxpick; i++ ) {
 		if ( d->pick[i] != 0 ) {
 			if ( d->fig == NULL || i >= d->fig->nsh ) {
 				d->pick[i] = 0;
@@ -181,8 +213,6 @@ LOCAL INT unz( CONST DTWIN *d, INT v )
 }
 
 /* Where shape i is drawn, in the window's own coordinates */
-#define ED_PATH_MAX	( TV_MAX_PT * 8 + 64 )	/* the points of a line's drawn path */
-
 LOCAL BOOL shape_box( CONST DTWIN *d, INT i, T_DPRECT *b )
 {
 	T_DPRECT	page, r;
@@ -198,8 +228,9 @@ LOCAL BOOL shape_box( CONST DTWIN *d, INT i, T_DPRECT *b )
 	if ( d->fig->sh[i].kind == TV_SH_LINE
 	  && ( d->fig->sh[i].c0_shape >= 0 || d->fig->sh[i].c1_shape >= 0 ) ) {
 		/* a line joined to shapes is where it is drawn: its ends at those shapes, bent or curved */
-		T_DPPOINT	*pts = (T_DPPOINT *)Kmalloc(sizeof(T_DPPOINT) * ED_PATH_MAX);
-		INT		n = ( pts != NULL ) ? tv_line_path(d->fig, &d->fig->sh[i], pts, ED_PATH_MAX) : 0, k;
+		INT		max = TV_OUT_PTS(d->fig->sh[i].npt);
+		T_DPPOINT	*pts = (T_DPPOINT *)Kmalloc(sizeof(T_DPPOINT) * (SZ)max);
+		INT		n = ( pts != NULL ) ? tv_line_path(d->fig, &d->fig->sh[i], pts, max) : 0, k;
 
 		for ( k = 0; k < n; k++ ) {
 			if ( k == 0 || pts[k].x < r.left ) r.left = pts[k].x;
@@ -233,6 +264,40 @@ LOCAL BOOL takeable( CONST DTWIN *d, INT i )
 }
 
 /*
+ * The least height shape i may be sized to, on the screen: a link is
+ * never lower than it is closed, whatever the size of its letters; any
+ * other shape, ED_MIN.
+ */
+LOCAL INT least_h( CONST DTWIN *d, INT i )
+{
+	T_VOBJ	v;
+	INT	h;
+
+	if ( !is_link(d, i) || tad_lnk_get(d->rec, d->fig->sh[i].link, &v) < E_OK ) {
+		return ED_MIN;
+	}
+	h = fz(d, tad_lnk_closed_h(&v));
+
+	return ( h > ED_MIN ) ? h : ED_MIN;
+}
+
+/*
+ * A link of the record changed. One that cannot be found or written is
+ * said on the console: the change is not made, and nothing is shown as
+ * if it were.
+ */
+LOCAL ER link_put( DTWIN *d, CONST T_VOBJ *v )
+{
+	ER	er = tad_lnk_set((T_TAD *)d->rec, v);
+
+	if ( er < E_OK ) {
+		tm_printf((UB *)"desktop: the link \"%s\" was not changed (%d)\n", v->name, er);
+	}
+
+	return er;
+}
+
+/*
  * Whether a link is protected -- 固定化 or 背景化 -- which keeps it from
  * being carried, sized, cut or thrown away. It can still be taken, so
  * that the protection can be taken off again.
@@ -260,20 +325,96 @@ LOCAL void stack_clear( UB **stk, INT *n )
 	}
 }
 
-LOCAL void stack_push( UB **stk, SZ *len, INT *n, UB *xml, SZ size )
+/* The oldest of a stack let go */
+LOCAL void stack_drop( UB **stk, SZ *len, INT *n )
 {
-	if ( *n == DT_UNDO_MAX ) {
-		INT	i;
+	INT	i;
 
-		Kfree(stk[0]);			/* the oldest goes */
-		for ( i = 1; i < DT_UNDO_MAX; i++ ) {
-			stk[i - 1] = stk[i];
-			len[i - 1] = len[i];
-		}
-		(*n)--;
+	if ( *n <= 0 ) {
+		return;
 	}
-	stk[*n] = xml;
-	len[*n] = size;
+	Kfree(stk[0]);
+	for ( i = 1; i < *n; i++ ) {
+		stk[i - 1] = stk[i];
+		len[i - 1] = len[i];
+	}
+	(*n)--;
+}
+
+/* What the records kept for taking back take together */
+LOCAL SZ stacks_held( CONST DTWIN *d )
+{
+	SZ	t = 0;
+	INT	i;
+
+	for ( i = 0; i < d->nundo; i++ ) t += d->undo_len[i];
+	for ( i = 0; i < d->nredo; i++ ) t += d->redo_len[i];
+
+	return t;
+}
+
+IMPORT SZ	knl_Ifree_bytes( void );
+
+/*
+ * How much they may take: a quarter of the memory that is free and of
+ * what they hold already, so that taking back never leaves the system
+ * without memory. Any number of changes is kept within it. A record of
+ * less than a megabyte is kept in the kernel heap, and one larger in
+ * pages of its own (Kmalloc): the less free of the two is what counts.
+ */
+LOCAL SZ stacks_room( CONST DTWIN *d, SZ size )
+{
+	T_RSMB	r;
+	SZ	pages = 0, heap, held = stacks_held(d);
+
+	if ( tk_ref_smb(&r) >= E_OK && r.free > 0 && r.blksz > 0 ) {
+		pages = (SZ)r.free * (SZ)r.blksz;
+	}
+	heap = knl_Ifree_bytes();
+	if ( heap < 0 ) {
+		heap = 0;
+	}
+
+	if ( size >= 1024 * 1024 ) {
+		return ( pages + held ) / 4;
+	}
+	return ( ( ( pages < heap ) ? pages : heap ) + held ) / 4;
+}
+
+/*
+ * A record kept on a stack, its newest. The oldest of the changes that
+ * can be taken back go while the kept ones would take more than their
+ * room. When even so it cannot be kept, it goes: the change itself is
+ * made all the same, only it cannot be taken back.
+ */
+LOCAL void stack_push( DTWIN *d, UB ***stk, SZ **len, INT *n, INT *max, UB *xml, SZ size )
+{
+	SZ	room = stacks_room(d, size);
+
+	while ( d->nundo > 0 && stacks_held(d) + size > room ) {
+		stack_drop(d->undo, d->undo_len, &d->nundo);
+	}
+	if ( *n >= *max ) {
+		INT	m = ( *max > 0 ) ? *max * 2 : 16;
+		UB	**ns = (UB **)Krealloc(*stk, sizeof(UB *) * (size_t)m);
+		SZ	*nl;
+
+		if ( ns != NULL ) {
+			*stk = ns;
+		}
+		nl = ( ns != NULL ) ? (SZ *)Krealloc(*len, sizeof(SZ) * (size_t)m) : NULL;
+		if ( nl != NULL ) {
+			*len = nl;
+			*max = m;
+		} else if ( *n > 0 ) {
+			stack_drop(*stk, *len, n);	/* no room for more: the oldest goes */
+		} else {
+			Kfree(xml);
+			return;
+		}
+	}
+	(*stk)[*n] = xml;
+	(*len)[*n] = size;
 	(*n)++;
 }
 
@@ -282,15 +423,102 @@ LOCAL void stack_push( UB **stk, SZ *len, INT *n, UB *xml, SZ size )
  * throws away what had been taken back, because the changes taken back
  * were made to a record that is no longer there.
  */
+/* Whether the record written out ahead is the record as it is now */
+LOCAL BOOL pre_good( CONST DTWIN *d )
+{
+	CONST T_TADNODE	*root = ( d->rec != NULL ) ? tad_root(d->rec) : NULL;
+
+	return (BOOL)( d->pre != NULL && root != NULL && d->pre_gen == root->gen
+		    && d->pre_serial == tad_serial(d->rec) );
+}
+
 LOCAL void before( DTWIN *d )
 {
 	UB	*xml = NULL;
 	SZ	size = 0;
 
-	if ( om_store_snapshot(&d->id, d->recno, &xml, &size) >= E_OK ) {
-		stack_push(d->undo, d->undo_len, &d->nundo, xml, size);
-	}
 	stack_clear(d->redo, &d->nredo);
+	if ( pre_good(d) ) {
+		/* written out ahead, and nothing changed since */
+		xml = d->pre;
+		size = d->pre_len;
+		d->pre = NULL;
+		stack_push(d, &d->undo, &d->undo_len, &d->nundo, &d->maxundo, xml, size);
+		return;
+	}
+	if ( om_store_snapshot(&d->id, d->recno, &xml, &size) >= E_OK ) {
+		stack_push(d, &d->undo, &d->undo_len, &d->nundo, &d->maxundo, xml, size);
+	}
+}
+
+/*
+ * A window whose record is to be written out ahead: one with an object
+ * that can be changed, large enough for the writing to be felt, whose
+ * record has changed since it was last written out. A small record is
+ * written out when it is changed, as quickly.
+ */
+#define PRE_MIN		( 256 * 1024 )
+
+LOCAL BOOL pre_wanted( CONST DTWIN *d )
+{
+	CONST T_TADNODE	*root;
+
+	if ( !d->used || d->sealed || d->tool != DT_TOOL_NONE || d->rec == NULL
+	  || d->tb_host != NULL || d->xml_view || ( root = tad_root(d->rec) ) == NULL ) {
+		return FALSE;
+	}
+	/* the record as it is now not yet written out, nor found too small to be */
+	return (BOOL)( d->pre_gen != root->gen || d->pre_serial != tad_serial(d->rec) );
+}
+
+EXPORT BOOL ed_prepare_pending( void )
+{
+	INT	i;
+
+	for ( i = 0; i < DT_MAX_WIN; i++ ) {
+		if ( pre_wanted(dt_win_at(i)) ) {
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+EXPORT void ed_prepare_step( void )
+{
+	INT	i;
+
+	for ( i = 0; i < DT_MAX_WIN; i++ ) {
+		DTWIN		*d = dt_win_at(i);
+		UB		*xml = NULL;
+		SZ		size = 0;
+		CONST T_TADNODE	*root;
+
+		if ( !pre_wanted(d) ) {
+			continue;
+		}
+		if ( d->pre != NULL ) {
+			Kfree(d->pre);
+			d->pre = NULL;
+		}
+		root = tad_root(d->rec);
+		if ( om_store_snapshot(&d->id, d->recno, &xml, &size) >= E_OK ) {
+			if ( size >= PRE_MIN ) {
+				d->pre = xml;
+				d->pre_len = size;
+				d->pre_gen = root->gen;
+				d->pre_serial = tad_serial(d->rec);
+				return;			/* one a turn */
+			}
+			Kfree(xml);
+		}
+		/* small, or not to be had: not tried again until it has changed */
+		d->pre = NULL;
+		d->pre_len = 0;
+		d->pre_gen = root->gen;
+		d->pre_serial = tad_serial(d->rec);
+		return;
+	}
 }
 
 /*
@@ -304,8 +532,8 @@ LOCAL void pick_add( DTWIN *d, INT i )
 	if ( d->pick[i] != 0 ) {
 		return;
 	}
-	if ( d->pick_seq == 0xFFFF ) {
-		d->pick_seq = 0xFFFE;		/* past counting: they tie */
+	if ( d->pick_seq == 0xFFFFFFFFU ) {
+		d->pick_seq = 0xFFFFFFFEU;	/* past counting: they tie */
 	}
 	d->pick[i] = ++d->pick_seq;
 	d->npick++;
@@ -364,7 +592,11 @@ LOCAL void swap_back( DTWIN *d, UB **from, SZ *from_len, INT *nfrom,
 	Kfree(from[k]);
 	from[k] = NULL;
 	(*nfrom)--;
-	stack_push(to, to_len, nto, now, now_len);
+	if ( to == d->undo ) {
+		stack_push(d, &d->undo, &d->undo_len, &d->nundo, &d->maxundo, now, now_len);
+	} else {
+		stack_push(d, &d->redo, &d->redo_len, &d->nredo, &d->maxredo, now, now_len);
+	}
 	d->rec = rec;
 	ed_pick_none(d);
 	after(d);
@@ -402,14 +634,14 @@ EXPORT void ed_redo( DTWIN *d )
 
 EXPORT BOOL ed_picked( CONST DTWIN *d, INT i )
 {
-	return (BOOL)( i >= 0 && i < TV_MAX_SHAPE && d->pick[i] != 0 );
+	return (BOOL)( i >= 0 && i < d->maxpick && d->pick[i] != 0 );
 }
 
 EXPORT void ed_pick_none( DTWIN *d )
 {
 	INT	i;
 
-	for ( i = 0; i < TV_MAX_SHAPE; i++ ) {
+	for ( i = 0; i < d->maxpick; i++ ) {
 		d->pick[i] = 0;
 	}
 	d->npick = 0;
@@ -439,6 +671,14 @@ EXPORT void ed_pick_only( DTWIN *d, INT i )
 		pick_add(d, i);
 	}
 	df_whole_groups(d);
+}
+
+/* Shape i picked, after those picked already, its group not looked at */
+EXPORT void ed_pick_add( DTWIN *d, INT i )
+{
+	if ( takeable(d, i) && d->pick[i] == 0 ) {
+		pick_add(d, i);
+	}
 }
 
 EXPORT void ed_pick_toggle( DTWIN *d, INT i )
@@ -483,7 +723,7 @@ EXPORT BOOL ed_blinks( CONST DTWIN *d )
 EXPORT void ed_draw_picks( DTWIN *d )
 {
 	INT		gid = wm_gid(d->wid), i, sw;
-	T_DPRECT	b;
+	T_DPRECT	b, page;
 
 	if ( gid < 0 || d->fig == NULL || d->npick == 0 ) {
 		return;
@@ -491,8 +731,14 @@ EXPORT void ed_draw_picks( DTWIN *d )
 	if ( ed_blink_off && df_is(d) && !ed_holding() ) {
 		return;
 	}
+	dt_work_rect(d, &page);
 	for ( i = 0; i < d->fig->nsh; i++ ) {
 		if ( d->pick[i] == 0 || !shape_box(d, i, &b) ) {
+			continue;
+		}
+		/* only those the window shows */
+		if ( b.right + ED_HANDLE < page.left || b.left - ED_HANDLE > page.right
+		  || b.bottom + ED_HANDLE < page.top || b.top - ED_HANDLE > page.bottom ) {
 			continue;
 		}
 		/* the frame as thick as ユーザ環境設定 says: 細 中 太 */
@@ -533,12 +779,13 @@ EXPORT void ed_draw_picks( DTWIN *d )
 
 /*
  * The handle of a picked shape under a place, in the figure editor:
- * the shape it sizes, or -1.
+ * the shape it sizes, or -1. A finger reaches it slop farther out of
+ * the shape, and into it as far as wm_hit_in lets.
  */
-LOCAL INT handle_at( DTWIN *d, INT x, INT y )
+LOCAL INT handle_at( DTWIN *d, INT x, INT y, INT slop )
 {
 	T_DPRECT	b;
-	INT		i;
+	INT		i, ix, iy, out = ED_HANDLE / 2 + 1;
 
 	if ( !df_is(d) ) {
 		return -1;
@@ -548,10 +795,12 @@ LOCAL INT handle_at( DTWIN *d, INT x, INT y )
 		  || d->fig->sh[i].kind == TV_SH_LINE || !shape_box(d, i, &b) ) {
 			continue;
 		}
+		ix = wm_hit_in(out, slop, b.right - b.left);
+		iy = wm_hit_in(out, slop, b.bottom - b.top);
 		b.right += 2;
 		b.bottom += 2;
-		if ( x >= b.right - ED_HANDLE / 2 - 1 && x <= b.right + ED_HANDLE / 2 + 1
-		  && y >= b.bottom - ED_HANDLE / 2 - 1 && y <= b.bottom + ED_HANDLE / 2 + 1 ) {
+		if ( x >= b.right - ix && x <= b.right + out + slop
+		  && y >= b.bottom - iy && y <= b.bottom + out + slop ) {
 			return i;
 		}
 	}
@@ -631,23 +880,35 @@ LOCAL void set_name( UB *out, CONST char *what, INT n )
  * The links and shapes taken, to the tray as one set: a <figure>
  * fragment holding a copy of each shape and a link to each object.
  */
-EXPORT void ed_copy( DTWIN *d )
+/*
+ * The links and shapes taken, to the tray: TRUE when they are there (or
+ * there was nothing to take), FALSE when they could not be put there,
+ * and then the person is told.
+ */
+LOCAL BOOL copy_picked( DTWIN *d )
 {
 	T_TAD	*frag;
 	T_VOBJ	v;
 	TS_UUID	id;
 	UB	name[TR_NAME_MAX];
 	INT	i, nl = 0, ns;
+	ER	er = E_OK;
 
 	if ( d->fig == NULL || d->npick == 0 ) {
-		return;
+		return TRUE;
 	}
 	frag = dt_frag_new("figure");
 	if ( frag == NULL ) {
-		return;
+		dt_no_memory(d);
+		return FALSE;
 	}
 	ed_pasted = 0;
 	ns = df_copy_into(d, frag);
+	if ( ns < 0 ) {
+		tad_free(frag);
+		dt_no_memory(d);
+		return FALSE;
+	}
 	for ( i = 0; i < d->fig->nsh; i++ ) {
 		if ( d->pick[i] != 0 && is_link(d, i)
 		  && tad_lnk_get(d->rec, d->fig->sh[i].link, &v) >= E_OK ) {
@@ -659,9 +920,21 @@ EXPORT void ed_copy( DTWIN *d )
 	}
 	if ( nl + ns > 0 ) {
 		set_name(name, ( ns == 0 ) ? "仮身" : ( nl == 0 ) ? "図形" : "図形と仮身", nl + ns);
-		(void)dt_tray_put(frag, (CONST char *)name);
+		er = dt_tray_put(frag, (CONST char *)name);
 	}
 	tad_free(frag);
+	if ( er < E_OK ) {
+		dt_tell(d, "トレーに入れられませんでした", ( er == E_NOMEM )
+			? "メモリが足りません。図形は元のままです" : "図形は元のままです");
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+EXPORT void ed_copy( DTWIN *d )
+{
+	(void)copy_picked(d);
 }
 
 EXPORT void ed_cut( DTWIN *d )
@@ -678,8 +951,10 @@ EXPORT void ed_cut( DTWIN *d )
 			d->npick--;
 		}
 	}
-	ed_copy(d);
-	del_picked(d, FALSE);
+	/* taken away only once they are safe in the tray */
+	if ( copy_picked(d) ) {
+		del_picked(d, FALSE);
+	}
 }
 
 /*
@@ -942,7 +1217,7 @@ EXPORT void ed_protect( DTWIN *d, BOOL background, BOOL on )
 		} else {
 			v.fixed = on;
 		}
-		tad_lnk_set((T_TAD *)d->rec, &v);
+		(void)link_put(d, &v);
 	}
 	if ( background && on ) {
 		regroup(d, link_background, NULL);
@@ -962,7 +1237,7 @@ EXPORT void ed_set_link( DTWIN *d, CONST T_VOBJ *v )
 		return;
 	}
 	before(d);
-	tad_lnk_set((T_TAD *)d->rec, v);
+	(void)link_put(d, v);
 	after(d);
 }
 
@@ -1259,7 +1534,7 @@ EXPORT void ed_arrange( DTWIN *d, CONST T_ARRANGE *o )
 	before(d);
 	for ( i = 0; i < n; i++ ) {
 		it[i].v.height = it[i].v.bottom - it[i].v.top;
-		tad_lnk_set((T_TAD *)d->rec, &it[i].v);
+		(void)link_put(d, &it[i].v);
 	}
 	Kfree(it);
 	after(d);
@@ -1339,15 +1614,50 @@ LOCAL void band_hide( void )
 	}
 }
 
-LOCAL UINT hold_kind( CONST T_DPRECT *box, INT x, INT y )
+/*
+ * What a press at (x, y) on or by a box does to it: its right edge
+ * sizes its width, its foot its height, the corner both; elsewhere it
+ * is carried. A finger's press (slop, wm_hit_slop) reaches the edges
+ * farther into the box, as far as wm_hit_in lets, and slop out of it.
+ */
+LOCAL UINT hold_kind( CONST T_DPRECT *box, INT x, INT y, INT slop )
 {
-	BOOL	right = (BOOL)( x >= box->right - ED_EDGE );
-	BOOL	foot  = (BOOL)( y >= box->bottom - ED_EDGE );
+	BOOL	right = (BOOL)( x >= box->right - wm_hit_in(ED_EDGE, slop, box->right - box->left) );
+	BOOL	foot  = (BOOL)( y >= box->bottom - wm_hit_in(ED_EDGE, slop, box->bottom - box->top) );
 
 	if ( right && foot ) return HOLD_WH;
 	if ( right )         return HOLD_W;
 	if ( foot )          return HOLD_H;
 	return HOLD_MOVE;
+}
+
+/*
+ * A finger's press just out of the one thing taken, by its right edge
+ * or its foot (no farther than slop): the thing, which the press is to
+ * size, or -1. Only when nothing is under the press: a thing pressed
+ * is always the one pressed, and the band is drawn where the press is
+ * farther from what is taken.
+ */
+LOCAL INT edge_near( DTWIN *d, INT x, INT y, INT slop, T_DPRECT *p_box )
+{
+	T_DPRECT	b;
+	INT		i;
+
+	if ( slop <= 0 || d->fig == NULL || d->npick != 1 ) {
+		return -1;
+	}
+	for ( i = 0; i < d->fig->nsh; i++ ) {
+		if ( d->pick[i] == 0 || !takeable(d, i) || d->fig->sh[i].kind == TV_SH_LINE
+		  || is_protected(d, i) || !shape_box(d, i, &b) ) {
+			continue;
+		}
+		if ( x >= b.left && x < b.right + slop && y >= b.top && y < b.bottom + slop
+		  && ( x >= b.right || y >= b.bottom ) ) {
+			*p_box = b;
+			return i;
+		}
+	}
+	return -1;
 }
 
 /*
@@ -1372,11 +1682,12 @@ EXPORT BOOL ed_press( DTWIN *d, INT x, INT y, BOOL add, UD when )
 	ER		er = E_NOEXS;
 	UD		gap = (UD)wm_num(WM_LOOK_DBLTIME, 400) * 1000000U;
 	BOOL		twice, shape = FALSE;
+	INT		slop = wm_hit_slop(when);
 
 	hold_copy = FALSE;
 	dt_work_rect(d, &page);
 	/* the handle of a picked shape sizes it, from its foot on the right */
-	if ( !add && ( which = handle_at(d, x, y) ) >= 0 && shape_box(d, which, &box)
+	if ( !add && ( which = handle_at(d, x, y, slop) ) >= 0 && shape_box(d, which, &box)
 	  && !is_protected(d, which) ) {
 		hold_d     = d;
 		hold_which = which;
@@ -1404,6 +1715,19 @@ EXPORT BOOL ed_press( DTWIN *d, INT x, INT y, BOOL add, UD when )
 	  && df_takeable(d, which) && shape_box(d, which, &box) ) {
 		shape = TRUE;
 		er = E_OK;
+	}
+	/* a finger by the edge of what is taken, on nothing: that edge, to size it */
+	if ( er < E_OK && !add && ( which = edge_near(d, x, y, slop, &box) ) >= 0 ) {
+		hold_d     = d;
+		hold_which = which;
+		hold_box   = box;
+		hold_how   = hold_kind(&box, x, y, slop);
+		hold_dx = hold_dy = 0;
+		hold_x0 = hold_px = x;
+		hold_y0 = hold_py = y;
+		hold_moved = FALSE;
+		band_shown = FALSE;
+		return TRUE;
 	}
 	twice = (BOOL)( x > click_x - ED_NEAR && x < click_x + ED_NEAR
 		     && y > click_y - ED_NEAR && y < click_y + ED_NEAR
@@ -1433,10 +1757,17 @@ EXPORT BOOL ed_press( DTWIN *d, INT x, INT y, BOOL add, UD when )
 		}
 		if ( d->fig == NULL ) {
 			/* a link in a text: carried if the hand moves */
-			dd_link_take(d, which, &box, x, y);
+			dd_link_take(d, which, &box, x, y, when);
 			return TRUE;
 		}
-		/* taking it */
+		/*
+		 * taking it; a finger reaches the edges farther in only of
+		 * one taken before the press, whose handles are shown, so a
+		 * press to take one is not taken for sizing it
+		 */
+		if ( !ed_picked(d, which) ) {
+			slop = 0;
+		}
 		if ( add ) {
 			ed_pick_toggle(d, which);
 		} else if ( !ed_picked(d, which) ) {
@@ -1452,7 +1783,7 @@ EXPORT BOOL ed_press( DTWIN *d, INT x, INT y, BOOL add, UD when )
 		hold_d     = d;
 		hold_which = which;
 		hold_box   = box;
-		hold_how   = ( d->npick == 1 ) ? hold_kind(&box, x, y) : HOLD_MOVE;
+		hold_how   = ( d->npick == 1 ) ? hold_kind(&box, x, y, slop) : HOLD_MOVE;
 		if ( !ed_picked(d, which) ) {
 			hold_how = HOLD_NONE;	/* let go of by Shift: nothing held */
 		}
@@ -1559,8 +1890,14 @@ EXPORT void ed_follow( INT sx, INT sy )
 	if ( hold_box.right < hold_box.left + ED_MIN ) {
 		hold_box.right = hold_box.left + ED_MIN;
 	}
-	if ( hold_box.bottom < hold_box.top + ED_MIN ) {
-		hold_box.bottom = hold_box.top + ED_MIN;
+	{
+		/* the height is looked into only while it is what changes */
+		INT	least = ( hold_how == HOLD_H || hold_how == HOLD_WH )
+				? least_h(hold_d, hold_which) : ED_MIN;
+
+		if ( hold_box.bottom < hold_box.top + least ) {
+			hold_box.bottom = hold_box.top + least;
+		}
 	}
 	hold_px = x;
 	hold_py = y;
@@ -1922,11 +2259,18 @@ LOCAL BOOL drop_out( DTWIN *d, INT sx, INT sy )
 	INT	i, n = 0;
 	BOOL	done;
 
-	vs = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ) * OB_DROP_MAX);
+	/* every link taken */
+	for ( i = 0; i < d->fig->nsh; i++ ) {
+		if ( d->pick[i] != 0 && is_link(d, i) ) {
+			n++;
+		}
+	}
+	vs = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ) * (SZ)( n + 1 ));
 	if ( vs == NULL ) {
 		return FALSE;
 	}
-	for ( i = 0; i < d->fig->nsh && n < OB_DROP_MAX; i++ ) {
+	n = 0;
+	for ( i = 0; i < d->fig->nsh; i++ ) {
 		if ( d->pick[i] != 0 && is_link(d, i)
 		  && tad_lnk_get(d->rec, d->fig->sh[i].link, &vs[n]) >= E_OK ) {
 			n++;
@@ -2059,7 +2403,7 @@ EXPORT void ed_release( INT sx, INT sy )
 				}
 				v.left += unz(d, hold_dx);  v.right += unz(d, hold_dx);
 				v.top += unz(d, hold_dy);   v.bottom += unz(d, hold_dy);
-				tad_lnk_set((T_TAD *)d->rec, &v);
+				(void)link_put(d, &v);
 			}
 			after(d);
 			if ( keep != NULL ) {
@@ -2100,8 +2444,10 @@ EXPORT void ed_release( INT sx, INT sy )
 				v.top    = unz(d, hold_box.top - oy);
 				v.right  = unz(d, hold_box.right - ox);
 				v.bottom = unz(d, hold_box.bottom - oy);
+				/* closed at the closed height; opened only when well past it */
+				v.bottom = v.top + tad_lnk_fit_h(&v, v.bottom - v.top);
 				v.height = v.bottom - v.top;
-				tad_lnk_set((T_TAD *)d->rec, &v);
+				(void)link_put(d, &v);
 				after(d);
 			}
 			break;

@@ -57,6 +57,16 @@ IMPORT BOOL CheckInt( UINT intno );	/* Check active state for the associated int
 IMPORT void SetIntMode(UINT intno, UINT mode);	/* Set interrupt mode */
 #endif /* TK_SUPPORT_INTMODE */
 
+/*
+ * TessronOS: the processor that takes a device's interrupt (design 4.5).
+ * One processor, by its number (PRC); 0 lets the system choose (the
+ * processors for the system's chores). E_PAR: not a device's interrupt,
+ * or no such processor; E_OBJ: a processor kept for real time; E_NOSPT:
+ * the interrupt cannot be sent there.
+ */
+IMPORT ER SetIntTarget( UINT intno, ID prcid );
+IMPORT ID GetIntTarget( UINT intno );
+
 #if TK_SUPPORT_CPUINTLEVEL
 IMPORT void SetCpuIntLevel( INT level );
 IMPORT INT GetCpuIntLevel( void );

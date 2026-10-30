@@ -48,7 +48,10 @@
 #include <ts/lockup.h>
 #include <ts/wm.h>
 #include <ts/conf.h>
+#include <ts/om.h>
+#include <ts/sysdef.h>
 #include <tk/tkernel.h>
+#include "../../peripheral_kernel/obj/obj.h"
 
 #define SVCPROG		"/boot/SVCPROG.ELF"
 #define SP_DEVOB	27		/* as tests/uprog/svcprog.c */
@@ -288,7 +291,8 @@ LOCAL BOOL user_made( void )
 LOCAL void test_random( void )
 {
 	T_OBREF	r;
-	T_OBPRT	prt;
+	static UD	prt_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*prt = (T_OBPRT *)prt_b;
 	T_OBREC	rr[4];
 	UB	a[64], b[64];
 	SZ	asz = 0;
@@ -319,9 +323,9 @@ LOCAL void test_random( void )
 
 	KT_ASSERT(atr(&ob_uuid_random) > 0 && has(txt, TEXT_MAX, "\"kind\":\"random\""));
 	KT_ASSERT(rec(&ob_uuid_random, OB_OP_R, 0) > 0 && has(txt, TEXT_MAX, "<tad"));
-	KT_ASSERT_ER(ob_get_prt(&ob_uuid_random, &prt), E_OK);
-	KT_ASSERT_EQ(ts_uuid_cmp(&prt.owner, &ob_user_system), 0);
-	KT_ASSERT_EQ(prt.mode, 0644);
+	KT_ASSERT_ER(ob_get_prt(&ob_uuid_random, prt, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT_EQ(ts_uuid_cmp(&prt->owner, &ob_user_system), 0);
+	KT_ASSERT_EQ(prt->mode, 0644);
 }
 
 /* ---------------------------------------------------------------- the screen */
@@ -330,7 +334,8 @@ LOCAL void test_display( void )
 {
 	T_DISPSPEC	s, s2;
 	T_OBREF		r;
-	T_OBPRT		prt;
+	static UD	prt_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*prt = (T_OBPRT *)prt_b;
 	char		want[48], us[TS_UUID_STRLEN + 1];
 	UB		*px;
 	SZ		asz = 0;
@@ -351,7 +356,11 @@ LOCAL void test_display( void )
 	KT_ASSERT(n > 0);
 	tm_sprintf((UB *)want, (UB *)"SIZE\t%dx%d\n", (INT)s.width, (INT)s.height);
 	KT_ASSERT(has(txt, n, want));
+#if defined(X64)
+	KT_ASSERT(has(txt, n, "MODES\t") && has(txt, n, "DRIVER\t"));
+#else
 	KT_ASSERT(has(txt, n, "MODES\t") && has(txt, n, "DRIVER\tbochs-display"));
+#endif
 	n = atr(&ob_uuid_display);
 	tm_sprintf((UB *)want, (UB *)"\"width\":%d", (INT)s.width);
 	KT_ASSERT(n > 0 && has(txt, n, want) && has(txt, n, "\"modes\":[\"640x480\""));
@@ -362,10 +371,10 @@ LOCAL void test_display( void )
 	KT_ASSERT(n > 0 && has(txt, n, us) && has(txt, n, "SIZE\t"));
 
 	/* the pixels: only with x */
-	KT_ASSERT_ER(ob_get_prt(&ob_uuid_display, &prt), E_OK);
-	KT_ASSERT_EQ(prt.mode, 0664);
-	KT_ASSERT(prt.nrmask == 1 && prt.rmask[0].recno == OB_DSP_PIXELS
-		  && ( prt.rmask[0].ops & OB_OP_EXEC ) != 0);
+	KT_ASSERT_ER(ob_get_prt(&ob_uuid_display, prt, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT_EQ(prt->mode, 0664);
+	KT_ASSERT(prt->nrmask == 1 && OB_PRT_RMASK(prt)[0].recno == OB_DSP_PIXELS
+		  && ( OB_PRT_RMASK(prt)[0].ops & OB_OP_EXEC ) != 0);
 	KT_ASSERT_EQ(rec(&ob_uuid_display, OB_OP_R, OB_DSP_PIXELS), E_OACV);
 	px = (UB *)Kmalloc(4096);
 	k = ob_opn_obj(&ob_uuid_display, OB_OP_R | OB_OP_EXEC);
@@ -386,7 +395,19 @@ LOCAL void test_display( void )
 	KT_ASSERT(kd > 0 && ks > 0);
 	k = ob_opn_obj(&ob_uuid_display, OB_OP_R | OB_OP_WRITE);
 	KT_ASSERT(k > 0);
+#if defined(X64)
+	/* the UEFI's frame buffer keeps the size the loader chose */
+	if ( ob_wri_rec(k, OB_DSP_MODE, 0, "800x600", 7, &asz) == E_NOSPT ) {
+		tm_printf((UB *)"  the screen keeps its size (UEFI GOP)\n");
+		if ( k > 0 ) (void)ob_cls_obj(k);
+		if ( kd > 0 ) (void)ob_cls_obj(kd);
+		if ( ks > 0 ) (void)ob_cls_obj(ks);
+		port_gone();
+		return;
+	}
+#else
 	KT_ASSERT_ER(ob_wri_rec(k, OB_DSP_MODE, 0, "800x600", 7, &asz), E_OK);
+#endif
 	KT_ASSERT(ts_disp_ref(&s2) >= E_OK && s2.width == 800 && s2.height == 600);
 	KT_ASSERT(told(&ob_uuid_display, OB_E_CHANGE, OB_DSP_MODE, 2000) >= 1);
 	KT_ASSERT(told(&ob_uuid_system, OB_E_CHANGE, OB_SYS_DISPLAY, 2000) >= 1);
@@ -423,7 +444,8 @@ LOCAL INT with_code( CONST T_HIDEV *ev, INT n, UINT code )
 LOCAL void test_input( void )
 {
 	T_OBREF		r;
-	T_OBPRT		prt;
+	static UD	prt_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*prt = (T_OBPRT *)prt_b;
 	T_HIDSTAT	st0, st1;
 	T_HIDATTR	a, a2;
 	T_HIDEV		e[2], got[32];
@@ -439,9 +461,9 @@ LOCAL void test_input( void )
 	KT_ASSERT(n > 0 && has(txt, n, "\"kind\":\"input\"") && has(txt, n, "\"keyboards\":"));
 	n = rec(&ob_uuid_input, OB_OP_R, OB_IN_STATE);
 	KT_ASSERT(n > 0 && has(txt, n, "KEYBOARDS\t"));
-	KT_ASSERT_ER(ob_get_prt(&ob_uuid_input, &prt), E_OK);
-	KT_ASSERT(prt.nrmask == 1 && prt.rmask[0].recno == OB_IN_EVENTS
-		  && ( prt.rmask[0].ops & OB_OP_EXEC ) != 0);
+	KT_ASSERT_ER(ob_get_prt(&ob_uuid_input, prt, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT(prt->nrmask == 1 && OB_PRT_RMASK(prt)[0].recno == OB_IN_EVENTS
+		  && ( OB_PRT_RMASK(prt)[0].ops & OB_OP_EXEC ) != 0);
 	KT_ASSERT_EQ(rec(&ob_uuid_input, OB_OP_R, OB_IN_EVENTS), E_OACV);
 
 	/* two who look, one who puts in: both see what was put in */
@@ -491,6 +513,9 @@ LOCAL void test_hid_devices( void )
 	n = knl_hid_list(h, 16);
 	if ( n <= 0 ) KT_SKIP("no keyboard or pointer");
 	for ( i = 0; i < n && i < 16; i++ ) {
+#ifdef X64
+		if ( h[i].usbdev == 0 ) continue;	/* the i8042's: ktest_pcdev */
+#endif
 		KT_ASSERT_ER(knl_obinput_uuid(h[i].id, &u), E_OK);
 		KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
 		KT_ASSERT_EQ(r.sub, OB_S_INPUT);
@@ -725,6 +750,208 @@ LOCAL void test_cpu_limit( void )
 	KT_ASSERT_EQ(knl_wdog_get(NULL), wd_had ? cf_num(wd_was, LK_RESET_S_DEFAULT) : LK_RESET_S_DEFAULT);
 }
 
+/* ---------------------------------------------------------------- the wallpaper, a link */
+
+/*
+ * The wallpaper is a link of 機器の設定's record 0 (relationship
+ * CF_ROLE_WALL): a machine whose settings say it only in the WALLPAPER
+ * line, as a system before wrote it, has the link made from the line;
+ * and the link, once there, is what is laid, whatever the line says.
+ */
+LOCAL void test_wall_link( void )
+{
+	static CONST char plain[] = "<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"機器の設定\">\n<document>\n"
+				   "<p>機器の設定</p>\n</document>\n</tad>\n";
+	TS_UUID	box, conf, pic[2], got;
+	UB	*rec0;
+	SZ	size = 0;
+	INT	n = 0, len;
+	char	was[CF_VAL_MAX], line[80], us[40];
+	BOOL	had;
+
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_WALL_BOX, &box), E_OK);
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_CONF_DEV, &conf), E_OK);
+	if ( ob_lst_lnk(&box, NULL, pic, 2, &n) < E_OK || n < 2 ) KT_SKIP("fewer than two pictures in 壁紙");
+	rec0 = om_obj_record(&conf, 0, &size);
+	KT_ASSERT(rec0 != NULL);
+	if ( rec0 == NULL ) return;
+	had = wm_dev_conf_get("WALLPAPER", was, sizeof(was));
+
+	/* as a system before left it: the line alone */
+	KT_ASSERT_ER(om_obj_record_put(&conf, 0, OB_RT_TAD, 0, (CONST UB *)plain, (SZ)knl_strlen(plain)), E_OK);
+	KT_ASSERT(!knl_conf_link_get(SYSDEF_CONF_DEV, CF_ROLE_WALL, &got));
+	(void)ts_uuid_to_str(&pic[0], us, sizeof(us));
+	tm_sprintf((UB *)line, (UB *)"%s 2", us);
+	KT_ASSERT_ER(wm_dev_conf_put("WALLPAPER", line), E_OK);
+	KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
+	KT_ASSERT(knl_conf_link_get(SYSDEF_CONF_DEV, CF_ROLE_WALL, &got) && ts_uuid_cmp(&got, &pic[0]) == 0);
+	len = rec(&conf, OB_OP_R, 0);
+	KT_ASSERT(len > 0 && has(txt, len, "relationship=\"" CF_ROLE_WALL "\"") && has(txt, len, us));
+
+	/* the link moved to the other picture: that one is laid, the line saying the first all the while */
+	KT_ASSERT_ER(knl_conf_link_put(SYSDEF_CONF_DEV, CF_ROLE_WALL, &pic[1], "壁紙："), E_OK);
+	KT_ASSERT(knl_conf_link_get(SYSDEF_CONF_DEV, CF_ROLE_WALL, &got) && ts_uuid_cmp(&got, &pic[1]) == 0);
+	len = rec(&conf, OB_OP_R, 0);
+	KT_ASSERT(len > 0 && !has(txt, len, us));		/* one link with the role, in place of the other */
+	KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
+	if ( kt_screen() ) {
+		(void)ts_uuid_to_str(&pic[1], us, sizeof(us));
+		len = rec(&ob_uuid_system, OB_OP_R, OB_SYS_WALL);
+		KT_ASSERT(len > 0 && has(txt, len, us));
+	}
+
+	/* as it was */
+	KT_ASSERT_ER(om_obj_record_put(&conf, 0, OB_RT_TAD, 0, rec0, size), E_OK);
+	Kfree(rec0);
+	KT_ASSERT_ER(wm_dev_conf_put("WALLPAPER", had ? was : ""), E_OK);
+	KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
+}
+
+/*
+ * The system's objects found from the root システム by their links'
+ * relationships: the fonts' box, as the root links it; a root made
+ * before the links had relationships given them at the start
+ * (knl_sys_mark), and an object the root no longer links found by the
+ * identity it was made with.
+ */
+LOCAL void test_sys_find( void )
+{
+	TS_UUID	root, fonts, got;
+	UB	*rec0, *cut;
+	SZ	size = 0;
+	INT	i, k = 0, m;
+	static CONST char tag[] = " relationship=\"system.fonts\"";
+
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &root), E_OK);
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_FONT_BOX, &fonts), E_OK);
+	KT_ASSERT(knl_sys_find("system.fonts", NULL, &got) && ts_uuid_cmp(&got, &fonts) == 0);
+	KT_ASSERT(knl_sys_find("system.nosuch", SYSDEF_FONT_BOX, &got) && ts_uuid_cmp(&got, &fonts) == 0);
+	KT_ASSERT(!knl_sys_find("system.nosuch", NULL, &got));
+
+	/* the relationship taken off, as a root made before has it: given back at the start */
+	rec0 = om_obj_record(&root, 0, &size);
+	KT_ASSERT(rec0 != NULL);
+	if ( rec0 == NULL ) return;
+	cut = (UB *)Kmalloc(size + 1);
+	KT_ASSERT(cut != NULL);
+	if ( cut == NULL ) {
+		Kfree(rec0);
+		return;
+	}
+	m = (INT)knl_strlen(tag);
+	for ( i = 0; i < (INT)size; ) {
+		INT	j;
+
+		for ( j = 0; j < m && i + j < (INT)size && rec0[i + j] == (UB)tag[j]; j++ ) ;
+		if ( j == m ) {
+			i += m;
+			continue;
+		}
+		cut[k++] = rec0[i++];
+	}
+	KT_ASSERT(k < (INT)size);
+	KT_ASSERT_ER(om_obj_record_put(&root, 0, OB_RT_TAD, 0, cut, (SZ)k), E_OK);
+	KT_ASSERT(!knl_conf_link_get(SYSDEF_SYSTEM_BOX, "system.fonts", &got));
+	KT_ASSERT(knl_sys_find("system.fonts", SYSDEF_FONT_BOX, &got) && ts_uuid_cmp(&got, &fonts) == 0);
+	knl_sys_mark();
+	KT_ASSERT(knl_conf_link_get(SYSDEF_SYSTEM_BOX, "system.fonts", &got) && ts_uuid_cmp(&got, &fonts) == 0);
+
+	/* as it was */
+	KT_ASSERT_ER(om_obj_record_put(&root, 0, OB_RT_TAD, 0, rec0, size), E_OK);
+	Kfree(cut);
+	Kfree(rec0);
+}
+
+/* text with every 'cut' taken out, into out: its length */
+LOCAL INT cut_out( CONST UB *in, INT len, CONST char *cut, UB *out )
+{
+	INT	i, k = 0, m = (INT)knl_strlen(cut);
+
+	for ( i = 0; i < len; ) {
+		INT	j;
+
+		for ( j = 0; j < m && i + j < len && in[i + j] == (UB)cut[j]; j++ ) ;
+		if ( j == m ) {
+			i += m;
+			continue;
+		}
+		out[k++] = in[i++];
+	}
+	return k;
+}
+
+/*
+ * What is emptied at each start: tmp, in the list of 機器の設定 (links
+ * with CF_ROLE_CLEAR in record 0), has its links taken off as its
+ * volume is attached; a settings object made before there was a list
+ * (no CLEAR_LIST line) is given tmp in it once, and a list without tmp
+ * that says it was made is left so.
+ */
+LOCAL void test_clear_start( void )
+{
+	TS_UUID	conf, tmp, fonts, got;
+	UB	*rec0, *rec1, *cut0, *cut1;
+	SZ	s0 = 0, s1 = 0;
+	char	path[FS_PATH_MAX];
+	INT	n = -1, k0, k1;
+	static CONST char role[] = " relationship=\"" CF_ROLE_CLEAR "\"";
+	static CONST char line[] = "CLEAR_LIST\t1\n";
+
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_CONF_DEV, &conf), E_OK);
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_TMP, &tmp), E_OK);
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_FONT_BOX, &fonts), E_OK);
+	KT_ASSERT(knl_conf_link_get(SYSDEF_CONF_DEV, CF_ROLE_CLEAR, &got) && ts_uuid_cmp(&got, &tmp) == 0);
+	KT_ASSERT_ER(knl_obfile_path_of(&tmp, (UB *)path, sizeof(path)), E_OK);
+
+	/* something put in tmp, gone when the volume is attached */
+	KT_ASSERT_ER(om_obj_link_add(&tmp, &fonts), E_OK);
+	KT_ASSERT(ob_lst_lnk(&tmp, NULL, NULL, 0, &n) >= E_OK && n == 1);
+	knl_sys_clear_start(path);
+	KT_ASSERT(ob_lst_lnk(&tmp, NULL, NULL, 0, &n) >= E_OK && n == 0);
+
+	rec0 = om_obj_record(&conf, 0, &s0);
+	rec1 = om_obj_record(&conf, 1, &s1);
+	cut0 = (UB *)Kmalloc(s0 + 1);
+	cut1 = (UB *)Kmalloc(s1 + 1);
+	KT_ASSERT(rec0 != NULL && rec1 != NULL && cut0 != NULL && cut1 != NULL);
+	if ( rec0 == NULL || rec1 == NULL || cut0 == NULL || cut1 == NULL ) goto out;
+	k0 = cut_out(rec0, (INT)s0, role, cut0);
+	k1 = cut_out(rec1, (INT)s1, line, cut1);
+	KT_ASSERT(k0 < (INT)s0 && k1 < (INT)s1);
+
+	/* as R1.110 has it: no list, no line; tmp put in the list, and the line written */
+	KT_ASSERT_ER(om_obj_record_put(&conf, 0, OB_RT_TAD, 0, cut0, (SZ)k0), E_OK);
+	KT_ASSERT_ER(om_obj_record_put(&conf, 1, OB_RT_SYSDATA, 0, cut1, (SZ)k1), E_OK);
+	KT_ASSERT(!knl_conf_link_get(SYSDEF_CONF_DEV, CF_ROLE_CLEAR, &got));
+	KT_ASSERT_ER(om_obj_link_add(&tmp, &fonts), E_OK);
+	knl_sys_clear_start(path);
+	KT_ASSERT(knl_conf_link_get(SYSDEF_CONF_DEV, CF_ROLE_CLEAR, &got) && ts_uuid_cmp(&got, &tmp) == 0);
+	KT_ASSERT(ob_lst_lnk(&tmp, NULL, NULL, 0, &n) >= E_OK && n == 0);
+	{
+		char	v[8];
+
+		KT_ASSERT(wm_dev_conf_get(CF_CLEAR_LIST, v, sizeof(v)) && v[0] == '1');
+	}
+
+	/* the list made, and tmp taken out of it: left so, and tmp kept */
+	KT_ASSERT_ER(om_obj_record_put(&conf, 0, OB_RT_TAD, 0, cut0, (SZ)k0), E_OK);
+	KT_ASSERT_ER(om_obj_record_put(&conf, 1, OB_RT_SYSDATA, 0, rec1, s1), E_OK);
+	KT_ASSERT_ER(om_obj_link_add(&tmp, &fonts), E_OK);
+	knl_sys_clear_start(path);
+	KT_ASSERT(!knl_conf_link_get(SYSDEF_CONF_DEV, CF_ROLE_CLEAR, &got));
+	KT_ASSERT(ob_lst_lnk(&tmp, NULL, NULL, 0, &n) >= E_OK && n == 1);
+	KT_ASSERT_ER(om_obj_links_set(&tmp, NULL, 0), E_OK);
+
+	/* as it was */
+	KT_ASSERT_ER(om_obj_record_put(&conf, 0, OB_RT_TAD, 0, rec0, s0), E_OK);
+	KT_ASSERT_ER(om_obj_record_put(&conf, 1, OB_RT_SYSDATA, 0, rec1, s1), E_OK);
+out:
+	if ( rec0 != NULL ) Kfree(rec0);
+	if ( rec1 != NULL ) Kfree(rec1);
+	if ( cut0 != NULL ) Kfree(cut0);
+	if ( cut1 != NULL ) Kfree(cut1);
+}
+
 /* ---------------------------------------------------------------- coming and going */
 
 LOCAL BOOL wait_gen( UW gen, INT ms )
@@ -929,6 +1156,383 @@ LOCAL void test_measure( void )
 	tm_printf((UB *)"  measure random4k process oldsvc %d ns\n", prog_run(2, 4096, NULL));
 }
 
+/* ---------------------------------------------------------------- lists of any length */
+
+#define KT_NBSS		100
+
+/* A scan's record as the Wi-Fi makes it, KT_NBSS networks long: each line about 90 bytes */
+LOCAL INT bss_make( void *ctx, UB *t, INT max )
+{
+	INT	i, n = 0, k;
+
+	for ( i = 0; i < *(INT *)ctx; i++ ) {
+		n = knl_oj_put(t, n, max, "BSS 02:00:00:00:00:");
+		n = knl_oj_put_num(t, n, max, 10 + i % 90);
+		n = knl_oj_put(t, n, max, " 2412 -");
+		n = knl_oj_put_num(t, n, max, 30 + i % 60);
+		n = knl_oj_put(t, n, max, " wpa2 ");
+		for ( k = 0; k < 24; k++ ) n = knl_oj_put(t, n, max, "41");	/* "AAAA..." in hexadecimal */
+		n = knl_oj_put_num(t, n, max, 1000 + i);
+		n = knl_oj_put(t, n, max, "\n");
+	}
+	return n;
+}
+
+/*
+ * A text longer than any first buffer is made whole: the maker is asked
+ * again with more room until it fits, and the last of a hundred
+ * networks is there, as a reader finds it line by line
+ */
+LOCAL void test_text_grow( void )
+{
+	UB		*t = NULL;
+	CONST UB	*v, *w;
+	INT		n = KT_NBSS, len, vl, wl, k;
+	char		last[16];
+
+	len = knl_oj_make(bss_make, &n, &t);
+	tm_printf((UB *)"  %d networks made %d bytes\n", n, len);
+	KT_ASSERT(len > 4096);
+	KT_ASSERT(t != NULL);
+	if ( t == NULL ) return;
+	for ( k = 0; cf_find(t, len, "BSS", k, &v, &vl); k++ ) ;
+	KT_ASSERT_EQ(k, KT_NBSS);
+	KT_ASSERT(cf_find(t, len, "BSS", KT_NBSS - 1, &v, &vl));
+	KT_ASSERT(cf_wfind(v, vl, 4, &w, &wl));
+	(void)cf_itoa(1000 + KT_NBSS - 1, last);
+	KT_ASSERT(wl == 48 + 4 && same_bytes(w + 48, last, 4) == 0);
+	KT_ASSERT_EQ((INT)knl_oj_make_len(bss_make, &n), len);
+	Kfree(t);
+}
+
+/*
+ * The processors' roles as the settings write them, for a machine of 64
+ * processors and of as many as the system runs: every other one is a
+ * list far longer than a value of CF_VAL_MAX, and it comes back the same
+ */
+LOCAL void prcset_round( INT k )
+{
+	T_PRCSET	s, b;
+	UB		*t = (UB *)Kmalloc(8 * 1024);
+	INT		i, n;
+
+	KT_ASSERT(t != NULL);
+	if ( t == NULL ) return;
+	prcset_zero(&s);
+	for ( i = 0; i < k; i += 2 ) prcset_add(&s, i);
+	n = knl_prcset_text(t, 0, 8 * 1024, &s, k);
+	KT_ASSERT(n > 0);
+	tm_printf((UB *)"  %d processors, every other one: %d bytes\n", k, n);
+	if ( k >= 128 ) KT_ASSERT(n > CF_VAL_MAX);
+	knl_prcset_parse((CONST char *)t, n, k, &b);
+	for ( i = 0; i < k; i++ ) KT_ASSERT_EQ(prcset_has(&b, i), prcset_has(&s, i));
+	/* a run: "2-k" */
+	prcset_zero(&s);
+	for ( i = 1; i < k; i++ ) prcset_add(&s, i);
+	n = knl_prcset_text(t, 0, 8 * 1024, &s, k);
+	knl_prcset_parse((CONST char *)t, n, k, &b);
+	for ( i = 0; i < k; i++ ) KT_ASSERT_EQ(prcset_has(&b, i), ( i >= 1 ));
+	/* a number past the processors, or too large to be one, is left out */
+	knl_prcset_parse("1,99999999999,3-999999", 22, k, &b);
+	KT_ASSERT(prcset_has(&b, 0) && !prcset_has(&b, 1) && prcset_has(&b, 2) && prcset_has(&b, k - 1));
+	Kfree(t);
+}
+
+LOCAL void test_prcset_text( void )
+{
+	prcset_round(( CNF_MAX_PRCID < 64 ) ? CNF_MAX_PRCID : 64);
+	prcset_round(CNF_MAX_PRCID);
+}
+
+/*
+ * The machine's settings with a list of processors longer than a value
+ * of CF_VAL_MAX: the processor at its end is taken all the same
+ */
+LOCAL void test_roles_long( void )
+{
+	char		*l;
+	INT		i, n = 0;
+	T_PRCSET	c, r;
+
+	if ( knl_num_prc < 3 ) KT_SKIP("fewer than three processors");
+	l = (char *)Kmalloc(1024);
+	KT_ASSERT(l != NULL);
+	if ( l == NULL ) return;
+	for ( i = 0; i < 200; i++ ) {
+		l[n++] = '1';
+		l[n++] = ',';
+	}
+	l[n++] = '3';
+	l[n] = '\0';
+	if ( wm_dev_conf_put("CPU_CHORE", l) < E_OK ) {
+		Kfree(l);
+		KT_SKIP("no machine settings object");
+	}
+	KT_ASSERT_ER(wm_cpu_conf_apply(), E_OK);
+	knl_cpu_roles_get(&c, &r);
+	tm_printf((UB *)"  CPU_CHORE of %d bytes: PRC1 %d, PRC3 %d\n", n, prcset_has(&c, 0), prcset_has(&c, 2));
+	KT_ASSERT(prcset_has(&c, 0) && prcset_has(&c, 2));
+	KT_ASSERT_ER(wm_dev_conf_put("CPU_CHORE", ""), E_OK);
+	KT_ASSERT_ER(wm_cpu_conf_apply(), E_OK);
+	knl_cpu_roles_get(&c, &r);
+	KT_ASSERT(!prcset_has(&c, 2));
+	Kfree(l);
+}
+
+/*
+ * The system's record 1 read whole however long, as the record's list
+ * says it is: every device whose interrupts are known has its line
+ */
+LOCAL void test_system_whole( void )
+{
+	T_OBREC	recs[OB_SYS_NREC];
+	UB	*t = NULL, (*nm)[L_DEVNM + 1] = NULL;
+	char	v[CF_VAL_MAX];
+	ID	key;
+	INT	len, cnt = 0, k, devs, i;
+
+	key = ob_opn_obj(&ob_uuid_system, OB_OP_R);
+	KT_ASSERT(key > 0);
+	if ( key <= 0 ) return;
+	len = knl_ob_rea_all(key, OB_SYS_INFO, 0, &t, NULL);
+	KT_ASSERT(len > 0);
+	KT_ASSERT_ER(ob_lst_rec(key, recs, OB_SYS_NREC, &cnt), E_OK);
+	ob_cls_obj(key);
+	if ( len <= 0 ) return;
+	KT_ASSERT_EQ((INT)recs[OB_SYS_INFO].size, len);
+	/* the devices, asked again in more room until they all fit: the first room holds one */
+	for ( k = 1; ; k = devs * 2 ) {
+		nm = Kmalloc(sizeof(*nm) * (SZ)k);
+		devs = ( nm != NULL ) ? knl_int_dev_names(nm, k) : 0;
+		if ( devs <= k ) break;
+		Kfree(nm);
+	}
+	k = lines(t, len, "IRQ\t");
+	tm_printf((UB *)"  record 1: %d bytes, %d devices' interrupts, %d lines\n", len, devs, k);
+	KT_ASSERT_EQ(k, devs);
+	/* each line names one of the devices, as the system has it */
+	for ( i = 0; i < k && nm != NULL; i++ ) {
+		char	w[L_DEVNM + 2];
+		INT	d;
+
+		KT_ASSERT(cf_get(t, len, "IRQ", i, v, sizeof(v)) && cf_word(v, 0, w, sizeof(w)));
+		for ( d = 0; d < devs && knl_strcmp(w, (CONST char *)nm[d]) != 0; d++ ) ;
+		KT_ASSERT(d < devs);
+	}
+	if ( nm != NULL ) Kfree(nm);
+	KT_ASSERT(lines(t, len, "CPU_CHORE\t") == 1 && lines(t, len, "CPU_RT\t") == 1);
+	Kfree(t);
+}
+
+/* ---------------------------------------------------------------- edges of what comes in */
+
+/*
+ * The edges of ts/ob.h (T_OBEDGE): a notice for each time something
+ * comes after a read found nothing, never one left untold, wherever what
+ * came is said -- by a task, inside a critical section of the kernel's
+ * holding one of its locks, or in an interrupt handler -- whether or not
+ * anything else comes after it.
+ */
+#define EDGE_WAIT	2000		/* ms a notice may take, on a slow emulated machine */
+
+/* The console's log read to its end: the edge armed */
+LOCAL void log_drain( UD *p_pos, UB *buf, INT max, BOOL *p_two )
+{
+	INT	n, i;
+
+	while ( ( n = tm_log_read(p_pos, buf, max) ) > 0 ) {
+		for ( i = 0; p_two != NULL && i + 9 <= n; i++ ) {
+			INT	j;
+
+			for ( j = 0; j < 9 && buf[i + j] == (UB)"edge: two"[j]; j++ ) ;
+			if ( j == 9 ) *p_two = TRUE;
+		}
+	}
+}
+
+/* what is written to the console after its log was read to its end is told, once until it is read again */
+LOCAL void test_edge_log( void )
+{
+	UB	*buf;
+	UD	pos = 0;
+	BOOL	two = FALSE;
+	ID	k;
+
+	if ( port_make() < E_OK ) KT_SKIP("no channel");
+	buf = (UB *)Kmalloc(512);
+	k = watch(&ob_uuid_system, OB_E_CHANGE);
+	KT_ASSERT(k > 0 && buf != NULL);
+	if ( k <= 0 || buf == NULL ) {
+		if ( buf != NULL ) Kfree(buf);
+		port_gone();
+		return;
+	}
+	log_drain(&pos, buf, 512, NULL);
+	port_drain();
+
+	tm_putstring((UB *)"  edge: one\n");
+	KT_ASSERT(told(&ob_uuid_system, OB_E_CHANGE, OB_SYS_LOG, EDGE_WAIT) >= 1);
+
+	/* told and not read yet: what comes meanwhile is not told again, and is read with the rest */
+	tm_putstring((UB *)"  edge: two\n");
+	KT_ASSERT_EQ(told(&ob_uuid_system, OB_E_CHANGE, OB_SYS_LOG, 300), 0);
+	log_drain(&pos, buf, 512, &two);
+	KT_ASSERT(two);
+
+	/* read to its end again: what comes next is told */
+	port_drain();
+	tm_putstring((UB *)"  edge: three\n");
+	KT_ASSERT(told(&ob_uuid_system, OB_E_CHANGE, OB_SYS_LOG, EDGE_WAIT) >= 1);
+	log_drain(&pos, buf, 512, NULL);
+
+	Kfree(buf);
+	(void)ob_cls_obj(k);
+	port_gone();
+}
+
+/*
+ * Written inside a critical section of the kernel's, holding one of its
+ * finer locks where the kernel has them (the wake-up owed, and given as
+ * the last lock is let go), and nothing written after it: still told
+ */
+LOCAL void test_edge_locked( void )
+{
+	UB	*buf;
+	UD	pos = 0;
+	ID	k;
+
+	if ( port_make() < E_OK ) KT_SKIP("no channel");
+	buf = (UB *)Kmalloc(512);
+	k = watch(&ob_uuid_system, OB_E_CHANGE);
+	KT_ASSERT(k > 0 && buf != NULL);
+	if ( k <= 0 || buf == NULL ) {
+		if ( buf != NULL ) Kfree(buf);
+		port_gone();
+		return;
+	}
+	log_drain(&pos, buf, 512, NULL);
+	port_drain();
+	BEGIN_CRITICAL_SECTION;
+	KLK_MISC();
+	tm_putstring((UB *)"  edge: written in a critical section\n");
+	KLK_UNMISC();
+	END_CRITICAL_SECTION;
+	KT_ASSERT(told(&ob_uuid_system, OB_E_CHANGE, OB_SYS_LOG, EDGE_WAIT) >= 1);
+	log_drain(&pos, buf, 512, NULL);
+	Kfree(buf);
+	(void)ob_cls_obj(k);
+	port_gone();
+}
+
+/*
+ * Said to have come in an interrupt handler -- holding one of the
+ * kernel's finer locks there where the kernel has them, so that the
+ * wake-up is given as the handler lets go of its last lock -- and told
+ */
+LOCAL T_OBEDGE	edge_kt;
+LOCAL BOOL	edge_kt_added = FALSE;
+LOCAL volatile INT edge_kt_ran = 0;
+
+LOCAL void edge_handler( void *exinf )
+{
+#if KLK_FINE
+	UINT	_intsts_ = disint();
+
+	KLK_MISC_DI();
+	if ( knl_obedge_came(&edge_kt) ) knl_ob_edge_kick(&edge_kt);
+	KLK_UNMISC();
+	enaint(_intsts_);
+#else
+	if ( knl_obedge_came(&edge_kt) ) knl_ob_edge_kick(&edge_kt);
+#endif
+	(void)exinf;
+	edge_kt_ran++;
+}
+
+LOCAL void test_edge_interrupt( void )
+{
+	T_CALM	ca;
+	ID	k, alm;
+
+	if ( !edge_kt_added ) {
+		KT_ASSERT_ER(knl_ob_edge_add(&edge_kt, &ob_uuid_system, NULL, OB_SYS_HW, NULL), E_OK);
+		edge_kt_added = TRUE;
+	}
+	if ( port_make() < E_OK ) KT_SKIP("no channel");
+	k = watch(&ob_uuid_system, OB_E_CHANGE);
+	KT_ASSERT(k > 0);
+	if ( k <= 0 ) {
+		port_gone();
+		return;
+	}
+	port_drain();
+	knl_obedge_arm(&edge_kt);
+	ca.exinf = NULL;
+	ca.almatr = TA_HLNG;
+	ca.almhdr = (FP)edge_handler;
+	alm = tk_cre_alm(&ca);
+	KT_ASSERT(alm > 0);
+	if ( alm > 0 ) {
+		KT_ASSERT_ER(tk_sta_alm(alm, 10), E_OK);
+		KT_ASSERT(told(&ob_uuid_system, OB_E_CHANGE, OB_SYS_HW, EDGE_WAIT) >= 1);
+		KT_ASSERT_EQ(edge_kt_ran, 1);
+		/* not armed again: a second time in the handler tells nothing */
+		edge_kt_ran = 0;
+		KT_ASSERT_ER(tk_sta_alm(alm, 10), E_OK);
+		KT_ASSERT_EQ(told(&ob_uuid_system, OB_E_CHANGE, OB_SYS_HW, 300), 0);
+		KT_ASSERT_EQ(edge_kt_ran, 1);
+		(void)tk_del_alm(alm);
+	}
+	(void)ob_cls_obj(k);
+	port_gone();
+}
+
+/*
+ * What plays sound told as it changes (OB_SYS_SOUND), once the record
+ * has been read: another output chosen, and "auto" again
+ */
+LOCAL BOOL sound_read( void )
+{
+	UB	*t = NULL;
+	ID	key = ob_opn_obj(&ob_uuid_system, OB_OP_R);
+	INT	len;
+
+	if ( key <= 0 ) return FALSE;
+	len = knl_ob_rea_all(key, OB_SYS_SOUND, 0, &t, NULL);
+	ob_cls_obj(key);
+	if ( t != NULL ) Kfree(t);
+	return (BOOL)( len > 0 );
+}
+
+LOCAL void test_edge_sound( void )
+{
+	SDOut	o[8];
+	INT	n, k;
+	ID	key;
+
+	n = knl_snd_outputs(o, 8);
+	for ( k = 1; k < n && k < 8 && o[k].kind == SND_BE_NONE; k++ ) ;
+	if ( k >= n || k >= 8 ) KT_SKIP("no output to choose");
+	if ( port_make() < E_OK ) KT_SKIP("no channel");
+	key = watch(&ob_uuid_system, OB_E_CHANGE);
+	KT_ASSERT(key > 0);
+	if ( key <= 0 ) {
+		port_gone();
+		return;
+	}
+	KT_ASSERT(sound_read());
+	port_drain();
+	KT_ASSERT_ER(knl_snd_select(o[k].id), E_OK);
+	KT_ASSERT(told(&ob_uuid_system, OB_E_CHANGE, OB_SYS_SOUND, 3000) >= 1);
+	tm_printf((UB *)"  %s chosen: told\n", (CONST char *)o[k].id);
+	KT_ASSERT(sound_read());
+	port_drain();
+	KT_ASSERT_ER(knl_snd_select((CONST UB *)SND_ID_AUTO), E_OK);
+	KT_ASSERT(told(&ob_uuid_system, OB_E_CHANGE, OB_SYS_SOUND, 3000) >= 1);
+	(void)ob_cls_obj(key);
+	port_gone();
+}
+
 EXPORT void ktest_devob( void )
 {
 	KT_RUN(test_random);
@@ -938,7 +1542,18 @@ EXPORT void ktest_devob( void )
 	KT_RUN(test_usb_devices);
 	KT_RUN(test_hw_state);
 	KT_RUN(test_cpu_limit);
-	KT_RUN_EXCEPT_RPI5(test_hotplug, "devices are taken out through the QEMU monitor");
+	KT_RUN(test_wall_link);
+	KT_RUN(test_sys_find);
+	KT_RUN(test_clear_start);
+	KT_RUN(test_text_grow);
+	KT_RUN(test_prcset_text);
+	KT_RUN(test_roles_long);
+	KT_RUN(test_system_whole);
+	KT_RUN_QEMU_DEVS(test_hotplug, "devices are taken out through the QEMU monitor");
 	KT_RUN(test_process);
 	KT_RUN(test_measure);
+	KT_RUN(test_edge_log);
+	KT_RUN(test_edge_locked);
+	KT_RUN(test_edge_interrupt);
+	KT_RUN(test_edge_sound);
 }

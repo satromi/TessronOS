@@ -340,7 +340,7 @@ LOCAL void test_menu( void )
 
 	if ( !ready ) KT_SKIP("no window");
 
-	m = (T_WMMENU *)Kmalloc(sizeof(T_WMMENU));
+	m = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(8));
 	KT_ASSERT(m != NULL);
 	if ( m == NULL ) return;
 
@@ -371,7 +371,7 @@ LOCAL void test_menu( void )
 	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
 
 	/* one that cannot be chosen answers nothing */
-	m = (T_WMMENU *)Kmalloc(sizeof(T_WMMENU));
+	m = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(8));
 	KT_ASSERT(m != NULL);
 	if ( m == NULL ) return;
 	m->num = 1;  m->owner = 0;  m->nitem = 2;
@@ -401,6 +401,160 @@ LOCAL void test_menu( void )
 	KT_ASSERT_ER(wm_menu_event(pid, &ev, &cmd), E_OK);
 	KT_ASSERT_EQ(cmd, 21);
 
+	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
+}
+
+/*
+ * A row with a list under it. Clicked, it is not chosen: the menu stays
+ * and its list opens at once and is held open while the pointer passes
+ * over the other rows; an item chosen in that list is the answer. A
+ * click on another row with a list puts the first list away.
+ */
+#define KT_SUB_LIST	0x3E00		/* the list's number in the data box */
+
+/* The list open beside a row of menu pid: its panel, 0 none */
+LOCAL INT menu_child( INT pid )
+{
+	INT	k, w, pw = wm_panel_wid(pid);
+
+	for ( k = 1; k <= WM_PANEL_MAX; k++ ) {
+		w = wm_panel_wid(k);
+		if ( k != pid && w > 0 && w != pw && wm_menu_has(pid, w) ) {
+			return k;
+		}
+	}
+	return 0;
+}
+
+LOCAL void test_menu_sub( void )
+{
+	T_WMMENU	*m, *s;
+	T_WMEV		ev;
+	INT		pid, child, cmd = -1, i;
+
+	if ( !ready ) KT_SKIP("no window");
+
+	s = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(2));
+	m = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(3));
+	KT_ASSERT(s != NULL && m != NULL);
+	if ( s == NULL || m == NULL ) {
+		if ( s != NULL ) Kfree(s);
+		if ( m != NULL ) Kfree(m);
+		return;
+	}
+	s->num = KT_SUB_LIST;  s->owner = 0;  s->nitem = 2;
+	for ( i = 0; i < 2; i++ ) {
+		s->item[i].cmd = 50 + i;
+		s->item[i].label[0] = (UB)( 'a' + i );
+	}
+	KT_ASSERT_ER(db_put(DB_MENU, KT_SUB_LIST, 0, s, WM_MENU_SIZE(2)), E_OK);
+	Kfree(s);
+	/* [0] a plain item, [1] and [2] rows with the list under them */
+	m->num = 1;  m->owner = 0;  m->nitem = 3;
+	for ( i = 0; i < 3; i++ ) {
+		m->item[i].cmd = 40 + i;
+		m->item[i].label[0] = (UB)( 'A' + i );
+		m->item[i].sub = ( i > 0 ) ? KT_SUB_LIST : 0;
+	}
+	pid = wm_menu_open(wid, m, 100, 100);
+	Kfree(m);
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) {
+		(void)db_del(DB_MENU, KT_SUB_LIST, 0);
+		return;
+	}
+	KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
+
+	/* a click on the row opens its list and chooses nothing */
+	ev_row(&ev, HID_EV_BTN_DOWN, pid, 1);
+	KT_ASSERT_ER(wm_menu_event(pid, &ev, &cmd), E_OK);
+	ev_row(&ev, HID_EV_BTN_UP, pid, 1);
+	KT_ASSERT_ER(wm_menu_event(pid, &ev, &cmd), E_OK);
+	KT_ASSERT_EQ(cmd, 0);
+	child = menu_child(pid);
+	KT_ASSERT(child > 0);
+
+	/* the pointer over the other rows leaves it open */
+	ev_row(&ev, HID_EV_MOVE, pid, 0);
+	KT_ASSERT_ER(wm_menu_event(pid, &ev, &cmd), E_OK);
+	KT_ASSERT_EQ(cmd, 0);
+	KT_ASSERT_EQ(menu_child(pid), child);
+
+	/* a click on the other row with a list: that one's list instead */
+	ev_row(&ev, HID_EV_BTN_DOWN, pid, 2);
+	KT_ASSERT_ER(wm_menu_event(pid, &ev, &cmd), E_OK);
+	ev_row(&ev, HID_EV_BTN_UP, pid, 2);
+	KT_ASSERT_ER(wm_menu_event(pid, &ev, &cmd), E_OK);
+	KT_ASSERT_EQ(cmd, 0);
+	child = menu_child(pid);
+	KT_ASSERT(child > 0);
+
+	/* an item of the list held open is the answer */
+	if ( child > 0 ) {
+		ev_row(&ev, HID_EV_MOVE, child, 1);
+		KT_ASSERT_ER(wm_menu_event(pid, &ev, &cmd), E_OK);
+		KT_ASSERT_EQ(cmd, 0);
+		ev_row(&ev, HID_EV_BTN_DOWN, child, 1);
+		KT_ASSERT_ER(wm_menu_event(pid, &ev, &cmd), E_OK);
+		ev_row(&ev, HID_EV_BTN_UP, child, 1);
+		KT_ASSERT_ER(wm_menu_event(pid, &ev, &cmd), E_OK);
+		KT_ASSERT_EQ(cmd, 51);
+	}
+	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
+	KT_ASSERT_EQ(wm_panel_self_check(), 0);
+	(void)db_del(DB_MENU, KT_SUB_LIST, 0);
+}
+
+/*
+ * A menu of more items than the 32 there once was room for: each is
+ * there, the last one is chosen where it is (in a column of its own when
+ * the menu is taller than the screen) and answers its command.
+ */
+#define KT_MENU_MANY	40
+
+LOCAL void test_menu_many( void )
+{
+	T_WMMENU	*m;
+	T_WMEV		ev;
+	T_DPRECT	mr;
+	INT		pid, cmd = -1, i, rh, rows, cols, last = KT_MENU_MANY - 1;
+
+	if ( !ready ) KT_SKIP("no window");
+
+	m = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(KT_MENU_MANY));
+	KT_ASSERT(m != NULL);
+	if ( m == NULL ) return;
+	m->num = 1;  m->owner = 0;  m->nitem = KT_MENU_MANY;
+	for ( i = 0; i < KT_MENU_MANY; i++ ) {
+		m->item[i].cmd = 100 + i;
+		m->item[i].label[0] = (UB)( 'A' + i % 26 );
+	}
+	pid = wm_menu_open(wid, m, 100, 100);
+	Kfree(m);
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) return;
+	KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
+	KT_ASSERT_EQ(wm_panel_self_check(), 0);
+
+	/* where the last item is: its column and its row */
+	mr.left = 0;  mr.top = 0;  mr.right = 0;  mr.bottom = 0;
+	(void)wm_panel_rect(pid, &mr);
+	rh = wm_menu_row_h();
+	rows = ( rh > 0 ) ? ( mr.bottom - mr.top ) / rh : 0;
+	if ( rows > KT_MENU_MANY ) rows = KT_MENU_MANY;
+	KT_ASSERT(rows > 0);
+	if ( rows <= 0 ) {
+		(void)wm_panel_close(pid);
+		return;
+	}
+	cols = ( KT_MENU_MANY + rows - 1 ) / rows;
+	ev_at(&ev, HID_EV_BTN_DOWN, mr.left + ( mr.right - mr.left ) * ( 2 * ( last / rows ) + 1 ) / ( 2 * cols ),
+	      mr.top + ( last % rows ) * rh + rh / 2);
+	ev.wid = wm_panel_wid(pid);
+	KT_ASSERT_ER(wm_menu_event(pid, &ev, &cmd), E_OK);
+	ev.type = HID_EV_BTN_UP;
+	KT_ASSERT_ER(wm_menu_event(pid, &ev, &cmd), E_OK);
+	KT_ASSERT_EQ(cmd, 100 + last);
 	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
 }
 
@@ -711,6 +865,12 @@ LOCAL void test_box( void )
 	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
 }
 
+/* One pixel of the screen as it is shown, without its alpha */
+LOCAL UW screen_px( CONST UB *fb, CONST T_DISPSPEC *sp, INT x, INT y )
+{
+	return *(CONST UW *)( fb + (UBINT)y * sp->pitch + (UBINT)x * 4 ) & 0x00FFFFFF;
+}
+
 /* a menu's row follows the pointer, and a row with nothing in it is a line */
 LOCAL void test_menu_look( void )
 {
@@ -719,12 +879,13 @@ LOCAL void test_menu_look( void )
 	T_WMWIN		w;
 	T_DISPSPEC	spec;
 	UB		*fb;
-	INT		pid, cmd = 0, i, lit = 0;
+	UW		*before;
+	INT		pid, cmd = 0, i, lit = 0, black = 0;
 
 	if ( !ready ) KT_SKIP("no window");
 	if ( ts_disp_ref(&spec) < E_OK ) KT_SKIP("the machine has no screen");
 
-	m = (T_WMMENU *)Kmalloc(sizeof(T_WMMENU));
+	m = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(8));
 	KT_ASSERT(m != NULL);
 	if ( m == NULL ) return;
 	m->num = 3;  m->owner = 0;  m->nitem = 3;
@@ -754,25 +915,43 @@ LOCAL void test_menu_look( void )
 
 		/*
 		 * The pointer over the first row lights it: the row is
-		 * turned over, so the white ground becomes black -- far more
-		 * of it than the letters of a name that are black anyway.
+		 * turned over, so every pixel across its middle becomes the
+		 * other colour of what it was -- the white ground black and
+		 * the letters' pixels light. The row is looked at before and
+		 * after, not for black alone: the list is as narrow as its
+		 * names, and with the system's font set up the letters of a
+		 * name of two can be most of a narrow row's middle.
 		 */
+		KT_ASSERT_ER(wm_composite(), E_OK);
+		KT_ASSERT_ER(wm_ref(wm_panel_wid(pid), &w), E_OK);
+		fb = (UB *)ts_disp_buffer();
+		before = (UW *)Kmalloc(sizeof(UW) * (SZ)( mr.right - mr.left ));
+		KT_ASSERT(before != NULL);
+		if ( before == NULL ) {
+			(void)wm_panel_close(pid);
+			return;
+		}
+		for ( i = mr.left + 2; i < mr.right - 2; i++ ) {
+			before[i - mr.left] = screen_px(fb, &spec, w.work.left + i, w.work.top + my);
+		}
 		ev_row(&ev, HID_EV_MOVE, pid, 0);
 		KT_ASSERT_ER(wm_menu_event(pid, &ev, &cmd), E_OK);
 		KT_ASSERT_ER(wm_composite(), E_OK);
-
-		KT_ASSERT_ER(wm_ref(wm_panel_wid(pid), &w), E_OK);
-		fb = (UB *)ts_disp_buffer();
 		for ( i = mr.left + 2; i < mr.right - 2; i++ ) {
-			INT	sx = w.work.left + i, sy = w.work.top + my;
-			UW	px = *(UW *)(fb + (UBINT)sy * spec.pitch
-					     + (UBINT)sx * 4) & 0x00FFFFFF;
+			UW	px = screen_px(fb, &spec, w.work.left + i, w.work.top + my);
 
-			if ( px == 0 ) {
+			if ( px == ( before[i - mr.left] ^ 0x00FFFFFF ) ) {
 				lit++;
 			}
+			if ( px == 0 ) {
+				black++;
+			}
 		}
+		Kfree(before);
+		tm_printf((UB *)"  the first row, %d wide: %d of %d pixels across its middle turned over, %d black\n",
+			  mr.right - mr.left, lit, mr.right - mr.left - 4, black);
 		KT_ASSERT(lit > ( mr.right - mr.left ) / 2);
+		KT_ASSERT(black > 0);
 
 		/* and pressing it answers with that item's command */
 		ev_row(&ev, HID_EV_BTN_DOWN, pid, 0);
@@ -1224,6 +1403,108 @@ LOCAL void test_centre( void )
 	KT_ASSERT_EQ(wm_panel_self_check(), 0);
 }
 
+/*
+ * A panel whose sheet scrolls (P_SCROLL), drawn by two tasks at once on
+ * two processors, as a program writing a part and the input taking a
+ * press both draw it: each drawing narrows what may be drawn to the
+ * sheet for the parts that scroll and puts it back, so once both are
+ * done what may be drawn is what it was, and the panel stays as short as
+ * its window lets it.
+ */
+#define SD_ROUNDS	60
+
+LOCAL INT	sd_pid;
+LOCAL INT	sd_left;
+
+LOCAL void sd_draw( INT stacd, void *exinf )
+{
+	INT	k;
+
+	(void)exinf;
+	for ( k = 0; k < SD_ROUNDS; k++ ) {
+		(void)wm_panel_draw(sd_pid);
+		if ( ( k & 7 ) == stacd ) {
+			(void)knl_pn_scroll(wid, k * 3);	/* the bar worked meanwhile */
+		}
+		if ( stacd == 1 ) {
+			(void)wm_panel_set_text(sd_pid, 1 + k % 10, ( k & 1 ) ? (CONST UB *)"abc" : (CONST UB *)"");	/* a program writing a part */
+		}
+	}
+	sd_left--;
+	tk_exd_tsk();
+}
+
+LOCAL void test_scroll_draw( void )
+{
+	T_WMPANEL	*d;
+	T_DPENV		e0, e1;
+	T_DPRECT	pr;
+	T_CTSK		ctsk;
+	ID		t[2];
+	INT		gid, i, k, at;
+
+	if ( !ready ) KT_SKIP("no window");
+	d = (T_WMPANEL *)Kcalloc(1, sizeof(T_WMPANEL));
+	KT_ASSERT(d != NULL);
+	if ( d == NULL ) return;
+	d->num = 30;  d->owner = 0;  d->kind = WM_PNL_BARE;
+	d->r.left = 0;  d->r.top = 0;  d->r.right = 400;  d->r.bottom = 700;
+	part_set(&d->part[0], WM_PT_TAGS | P_SCROLL, 100, 0, 0, 400, 700);
+	d->part[0].inner.left = 4;  d->part[0].inner.top = 28;
+	d->part[0].inner.right = 396;  d->part[0].inner.bottom = 696;
+	at = wm_panel_name(d, (CONST UB *)"a");
+	(void)wm_panel_name(d, (CONST UB *)"b");
+	d->part[0].pool = at;
+	d->part[0].count = 2;
+	d->part[0].value = 1;
+	for ( i = 1; i <= 10; i++ ) {
+		part_set(&d->part[i], WM_PT_BOX, i, 10, 40 + ( i - 1 ) * 60, 380, 66 + ( i - 1 ) * 60);
+		d->part[i].sheet = 1;
+	}
+	part_set(&d->part[11], WM_PT_BUTTON, 20, 300, 660, 380, 684);
+	d->part[11].type |= P_FOOT;
+	d->part[11].sheet = 1;
+	d->npart = 12;
+	sd_pid = wm_panel_open(wid, d);
+	Kfree(d);
+	KT_ASSERT(sd_pid > 0);
+	if ( sd_pid <= 0 ) return;
+	KT_ASSERT_ER(wm_panel_rect(sd_pid, &pr), E_OK);
+	KT_ASSERT(pr.bottom - pr.top < 700);		/* made as short as the window */
+	gid = wm_gid(wid);
+	KT_ASSERT_ER(dp_ref(gid, &e0), E_OK);
+
+	sd_left = 2;
+	for ( k = 0; k < 2; k++ ) {
+		{ UB *z = (UB *)&ctsk; SZ n; for ( n = 0; n < (SZ)sizeof(ctsk); n++ ) z[n] = 0; }
+		ctsk.tskatr  = TA_HLNG | TA_RNG0;
+		ctsk.task    = (FP)sd_draw;
+		ctsk.itskpri = KT_PRI_LOW;
+		ctsk.stksz   = 32768;		/* the letters are made on the way */
+		t[k] = tk_cre_tsk(&ctsk);	/* free to run on any processor */
+		KT_ASSERT(t[k] > 0);
+		if ( t[k] > 0 ) {
+			KT_ASSERT_ER(tk_sta_tsk(t[k], k), E_OK);
+		} else {
+			sd_left--;
+		}
+	}
+	for ( k = 0; k < 600 && sd_left > 0; k++ ) {
+		tk_dly_tsk(50);
+	}
+	KT_ASSERT_EQ(sd_left, 0);
+	KT_ASSERT_ER(dp_ref(gid, &e1), E_OK);
+	tm_printf((UB *)"  what may be drawn %d,%d-%d,%d before, %d,%d-%d,%d after\n", e0.visible.left,
+		  e0.visible.top, e0.visible.right, e0.visible.bottom, e1.visible.left, e1.visible.top,
+		  e1.visible.right, e1.visible.bottom);
+	KT_ASSERT(e1.visible.left == e0.visible.left && e1.visible.top == e0.visible.top
+		  && e1.visible.right == e0.visible.right && e1.visible.bottom == e0.visible.bottom);
+	KT_ASSERT_ER(wm_panel_rect(sd_pid, &pr), E_OK);
+	KT_ASSERT(pr.bottom - pr.top < 700);
+	KT_ASSERT_EQ(wm_panel_self_check(), 0);
+	KT_ASSERT_ER(wm_panel_close(sd_pid), E_OK);
+}
+
 EXPORT void ktest_part( void )
 {
 	KT_RUN(test_start);
@@ -1232,6 +1513,8 @@ EXPORT void ktest_part( void )
 	KT_RUN(test_answer);
 	KT_RUN(test_escape);
 	KT_RUN(test_menu);
+	KT_RUN(test_menu_many);
+	KT_RUN(test_menu_sub);
 	KT_RUN(test_label);
 	KT_RUN(test_list);
 	KT_RUN(test_box);
@@ -1242,5 +1525,6 @@ EXPORT void ktest_part( void )
 	KT_RUN(test_boxes);
 	KT_RUN(test_popup_warn);
 	KT_RUN(test_popup_box);
+	KT_RUN(test_scroll_draw);
 	KT_RUN(test_limit);
 }

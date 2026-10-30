@@ -1,0 +1,231 @@
+# ディスク操作 on the x64 PC (tools/x64/ui_run64.py --vols DIR): tools/tests/ui_vols.steps with
+# the disks of the q35 machine: the 接続 panel lists nvmea0 (/boot), nvmea2 (/tslog)
+# and then uda0, uda1, uda2, five rows where QEMU virt has seven, so it is 26 pixels
+# shorter: uda0 at 430,380, uda2 at 430,432 and 接続 at 822,490; the rest as there.
+# ディスク操作 (design 11.26), for tools/ui_run.py --vols DIR, DIR made by
+# tools/tests/mkvoldisk.py: volc.img plugged into the hub (VOLC1 a TSFS
+# partition uda0, a blank one uda1, a FAT16 one uda2). The first window
+# (BTRON) is made larger; 接続 from its menu (ディスク操作 at 440,480 when
+# the menu opens at 400,300, 接続 to its right) offers the partitions in a
+# panel in the middle of the screen, a row 26 pixels apart from 303. The
+# FAT partition is refused as files. VOLC1 attached: its link at the foot
+# of the first window (120,205), marked as on another volume; opened, its
+# window keeps 切り離し from being done; closed, 切り離し leaves the link
+# pale, and opening it says the volume is not attached. 接続 again, then
+# 状態表示. 画面印刷 saved on VOLC1 puts its link in VOLC1's top object.
+# Pulled out with that window open, the window is closed; put back, the
+# disk is attached again by itself.
+hmp drive_add 0 if=none,id=uvc,file=$VOLS/volc.img,format=raw
+hmp device_add usb-storage,drive=uvc,id=uvcd,bus=xhci.0
+wait 3000
+click 250 60
+wait 300
+drag 346 222 620 420
+wait 500
+shot vol_window
+# 接続: the FAT partition first, refused
+click 400 300 1
+wait 300
+move 430 480
+wait 150
+move 440 480
+wait 300
+move 510 480
+wait 150
+move 530 481
+wait 300
+shot vol_menu
+click 530 481
+expect disk: connect offers
+wait 800
+shot vol_connect
+click 430 432
+wait 200
+click 822 490
+expect disk: uda2 is files, not objects
+wait 600
+shot vol_fat
+key 28
+wait 500
+# 接続 again: VOLC1; the menu opens with ディスク操作 under the pointer now
+click 400 300 1
+wait 300
+move 430 300
+wait 150
+move 440 301
+wait 300
+move 510 301
+wait 150
+move 530 301
+wait 300
+click 530 301
+expect disk: connect offers
+wait 800
+click 430 380
+wait 200
+click 822 490
+expect disk: attached uda0 "VOLC1"
+wait 1000
+shot vol_attached
+# its top object opened: 切り離し refused
+dclick 120 205
+wait 1500
+shot vol_top
+click 60 205 1
+wait 300
+move 90 205
+wait 150
+move 100 206
+wait 300
+move 170 206
+wait 150
+move 190 206
+wait 300
+move 185 226
+wait 300
+click 185 226
+expect disk: detach uda0 refused: a window is open
+wait 600
+shot vol_refused
+key 28
+wait 500
+click 600 600
+wait 300
+key 08 01
+wait 1000
+# 切り離し: the link pale, and opening it says which volume to attach
+click 60 205 1
+wait 300
+move 90 205
+wait 150
+move 100 206
+wait 300
+move 170 206
+wait 150
+move 190 206
+wait 300
+move 185 226
+wait 300
+click 185 226
+expect disk: detached uda0
+wait 800
+shot vol_detached
+dclick 120 205
+expect disk: absent: volume "VOLC1" not attached
+wait 600
+shot vol_absent
+key 28
+wait 500
+# 接続 again, then 状態表示
+click 60 205 1
+wait 300
+move 90 205
+wait 150
+move 100 206
+wait 300
+move 170 206
+wait 150
+move 190 206
+wait 300
+click 190 206
+expect disk: connect offers
+wait 800
+click 430 380
+wait 200
+click 822 490
+expect disk: attached uda0
+wait 1000
+click 60 205 1
+wait 300
+move 90 205
+wait 150
+move 100 206
+wait 300
+move 170 206
+wait 150
+move 190 206
+wait 300
+move 190 246
+wait 300
+click 190 246
+expect disk: status "VOLC1"
+wait 800
+shot vol_status
+key 28
+wait 500
+# 画面印刷 saved on VOLC1, at PrintScreen: its link in VOLC1's top object
+open 01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0
+expect scrprint: panel 1
+wait 600
+click 414 313
+click 650 343
+click 414 455
+wait 150
+click 836 511
+expect scrprint: volumes 2
+wait 600
+shot vol_save_to
+click 565 363
+wait 200
+click 803 454
+expect scrprint: save to uda0
+expect scrprint: armed
+move 300 600
+wait 300
+key 46
+expect scrprint: placed in the top of uda0
+expect scrprint: saved 画面印刷
+wait 800
+dclick 120 205
+wait 1500
+shot vol_scrprint
+# pulled out with the window open: the window is closed; put back: attached again
+hmp device_del uvcd
+expect disk: closed window of VOLC1
+wait 1500
+shot vol_pulled
+hmp drive_add 0 if=none,id=uvc,file=$VOLS/volc.img,format=raw
+hmp device_add usb-storage,drive=uvc,id=uvcd,bus=xhci.0
+expect disk: uda0 is back
+expect disk: attached uda0
+wait 1500
+shot vol_back
+# Pulled out with changes not saved (the link in VOLC1's top moved): asked
+# where they go; Enter takes the first, the system's volume, as an object
+# of its own with a link in the first window.
+dclick 120 205
+wait 1500
+drag 270 172 420 300
+wait 500
+hmp device_del uvcd
+expect disk: VOLC1 has changes not saved; 1 volumes to save to
+wait 1000
+shot vol_rescue
+key 28
+expect disk: changes of VOLC1 saved to
+expect disk: closed window of VOLC1
+wait 1000
+shot vol_rescued
+hmp drive_add 0 if=none,id=uvc,file=$VOLS/volc.img,format=raw
+hmp device_add usb-storage,drive=uvc,id=uvcd,bus=xhci.0
+expect disk: attached uda0
+wait 1500
+# again, kept until the disk is put back
+dclick 120 205
+wait 1500
+drag 270 172 420 360
+wait 500
+hmp device_del uvcd
+expect disk: VOLC1 has changes not saved
+wait 1000
+click 500 396
+wait 200
+shot vol_rescue2
+key 28
+expect disk: changes of VOLC1 kept for the disk
+wait 800
+hmp drive_add 0 if=none,id=uvc,file=$VOLS/volc.img,format=raw
+hmp device_add usb-storage,drive=uvc,id=uvcd,bus=xhci.0
+expect disk: kept changes of VOLC1 saved (0)
+wait 1500
+shot vol_kept

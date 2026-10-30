@@ -1,0 +1,54 @@
+# システム環境設定's 〈電源管理〉 as 利用者 on the x64 PC (tools/x64/ui_run64.py): tools/tests/ui_sysenv.steps
+# with the processors' clock left to the firmware. The limit is not offered (its selector is off and the
+# line under it says the firmware sets the speed), 設定 keeps the watchdog alone and writes no CPU_MHZ,
+# and the kernel says once that CPU_MHZ is not used. The window is at 160,80: the tab 電源管理 at
+# 282,151; the limit's 最大 at 583,383 (pressed: nothing changes); ウォッチドッグ's switch at 390,548,
+# its seconds at 465,548, and 設定 at 708,548. Ctrl+E closes.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+expect sysenv: settings CPU_MHZ 1800 WATCHDOG 30
+wait 800
+win システム環境設定
+click 282 151
+wait 500
+expect sysenv: clock （不明）
+shot se_power
+# the limit cannot be chosen; a minute for the watchdog
+click 583 383
+click 465 548
+key 2a
+key 2a
+key 2a
+text 60
+wait 300
+click 708 548
+expect sysenv: performance CPU_MHZ -1 WATCHDOG 60 (0)
+expect watchdog on: reset 60 s
+shot se_wd60
+# opened again: as kept, and still no limit
+key 08 01
+expect sysenv: closed
+# its pages filled (the faces read take a while) before anything is pressed
+logmark
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expectsince sysenv: ready
+expect sysenv: settings CPU_MHZ 1800 WATCHDOG 60
+wait 800
+click 282 151
+wait 500
+shot se_again
+# back as the machine came: 30 seconds
+click 465 548
+key 2a
+key 2a
+key 2a
+text 30
+wait 300
+click 708 548
+expect sysenv: performance CPU_MHZ -1 WATCHDOG 30 (0)
+expect watchdog on: reset 30 s
+wait 1000
+key 08 01
+wait 500
+absent cpu: limit
+absent !OACV!

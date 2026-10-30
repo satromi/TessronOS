@@ -674,7 +674,7 @@ EXPORT ER pdf_cff_subset( PDFFACE *ff, UB **p_out, SZ *p_len )
 	SZ		blen = 0, len;
 	UB		*b = table_all(ff, PDF_TAG('C', 'F', 'F', ' '), &blen);
 	CIDX		names, tops, strs, gsub, cs, fda;
-	DENT		te[DICT_MAX];
+	DENT		*te = NULL;	/* the top DICT's entries, and three more DICTs' behind */
 	INT		nte, nfd = 1, i, g;
 	CONST DENT	*e;
 	BOOL		cid;
@@ -701,6 +701,11 @@ EXPORT ER pdf_cff_subset( PDFFACE *ff, UB **p_out, SZ *p_len )
 	pb_init(&out);
 	pb_init(&cset_b);
 	pb_init(&fsel_b);
+	te = (DENT *)Kmalloc(sizeof(DENT) * DICT_MAX * 4);
+	if ( te == NULL ) {
+		er = E_NOMEM;
+		goto done;
+	}
 	if ( blen < 4 || b[0] != 1 ) {
 		goto done;
 	}
@@ -770,7 +775,7 @@ EXPORT ER pdf_cff_subset( PDFFACE *ff, UB **p_out, SZ *p_len )
 	}
 	knl_memset(fd, 0, sizeof(FDINFO) * (SZ)nfd);
 	for ( i = 0; i < nfd; i++ ) {
-		DENT		pe[DICT_MAX], fe[DICT_MAX];
+		DENT		*pe = te + DICT_MAX, *fe = te + 2 * DICT_MAX;
 		INT		npe, nfe;
 		CONST DENT	*pv, *sv;
 
@@ -1023,7 +1028,7 @@ EXPORT ER pdf_cff_subset( PDFFACE *ff, UB **p_out, SZ *p_len )
 					}
 					/* sizes first */
 					for ( i = 0; i < nfd; i++ ) {
-						DENT		fe[DICT_MAX];
+						DENT		*fe = te + 3 * DICT_MAX;
 						CONST UB	*fdd = idx_item(&fda, i, &len);
 						INT		nfe = ( fdd != NULL ) ? dict_read(fdd, len, fe, DICT_MAX) : 0, k;
 
@@ -1160,6 +1165,7 @@ done:
 	pb_free(&cset_b);
 	pb_free(&fsel_b);
 	if ( keepl != NULL ) Kfree(keepl);
+	if ( te != NULL ) Kfree(te);
 	Kfree(b);
 
 	return er;

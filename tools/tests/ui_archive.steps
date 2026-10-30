@@ -1,14 +1,16 @@
 # 書庫管理 (design 11.20), for tools/ui_run.py: an archive object made
 # from the template 空書庫 out of the 原紙箱 into the BTRON window and
 # opened; the window moved aside and the link 実身/仮身 carried out of
-# the text TADjsについて into it; 開始 makes the book. 書籍情報 (Ctrl+I)
-# and 実身名一覧 (Ctrl+L) shown and put away; the book carried into the
+# the text TADjsについて into it; the panel that asks lists what was
+# found, and Enter (its 〈作成〉) makes the book. 書籍情報 (Ctrl+I) and
+# 実身名一覧 (Ctrl+L), panels of the data box, shown and put away with
+# Esc; the book carried into the
 # BTRON window and taken out after the desktop asked; a second link put
 # in refused (one book to an archive); the menu opened and 書籍の削除
 # chosen, which leaves the archive empty.
 click 990 48
 wait 300
-drag 960 437 250 60
+drag 960 380 250 60
 wait 1000
 key 28
 wait 800
@@ -21,25 +23,30 @@ shot arc_empty
 # the window's work area is at 510,428 from here
 drag 315 331 760 716
 expect archive: found 1 objects
-click 760 716
+expect archive: asked to make
 wait 500
 shot arc_found
-# 開始
-click 545 686
+# 〈作成〉, the emphasised button
+key 28
 expect archive: packed 1 objects
 wait 800
+# the archive's window given the keys again (the panel had them)
+click 760 716
+wait 300
 shot arc_book
 key 0c 1
 expect archive: info shown
 wait 300
 shot arc_info
 key 29
+expect archive: info put away
 wait 300
 key 0f 1
 expect archive: list shown
 wait 300
 shot arc_list
 key 29
+expect archive: list put away
 wait 300
 # the book's 付箋 (526,500-676,530) carried into the BTRON window; Enter answers the desktop
 drag 560 512 300 110

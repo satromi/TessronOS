@@ -44,6 +44,7 @@ EXPORT ER knl_semaphore_initialize( void )
 	end = knl_semcb_table + NUM_SEMID;
 	for ( semcb = knl_semcb_table; semcb < end; semcb++ ) {
 		semcb->semid = 0;
+		knl_klk_init(&semcb->klk);
 		QueInsert(&semcb->wait_queue, &knl_free_semcb);
 	}
 
@@ -76,7 +77,12 @@ SYSCALL ID tk_cre_sem( CONST T_CSEM *pk_csem )
 
 	BEGIN_CRITICAL_SECTION;
 	/* Get control block from FreeQue */
+	KLK_MISC();
 	semcb = (SEMCB*)QueRemoveNext(&knl_free_semcb);
+	KLK_UNMISC();
+	if ( semcb != NULL ) {
+		KLK_LOCK(&semcb->klk);
+	}
 	if ( semcb == NULL ) {
 		ercd = E_LIMIT;
 	} else {
@@ -99,6 +105,9 @@ SYSCALL ID tk_cre_sem( CONST T_CSEM *pk_csem )
 #endif
 		ercd = semid;
 	}
+	if ( semcb != NULL ) {
+		KLK_UNLOCK(&semcb->klk);
+	}
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -118,6 +127,7 @@ SYSCALL ER tk_del_sem( ID semid )
 	semcb = get_semcb(semid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&semcb->klk);
 	if ( semcb->semid == 0 ) {
 		ercd = E_NOEXS;
 	} else if ( knl_not_owner(semcb->owner) ) {
@@ -127,10 +137,13 @@ SYSCALL ER tk_del_sem( ID semid )
 		knl_wait_delete(&semcb->wait_queue);
 
 		/* Return to FreeQue */
+		KLK_MISC();
 		QueInsert(&semcb->wait_queue, &knl_free_semcb);
+		KLK_UNMISC();
 		knl_own_note(TK_OWN_SEM, semcb->owner, -1);
 		semcb->semid = 0;
 	}
+	KLK_UNLOCK(&semcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -153,6 +166,7 @@ SYSCALL ER tk_sig_sem( ID semid, INT cnt )
 	semcb = get_semcb(semid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&semcb->klk);
 	if ( semcb->semid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -169,7 +183,12 @@ SYSCALL ER tk_sig_sem( ID semid, INT cnt )
 	/* Return semaphore counts */
 	semcb->semcnt += cnt;
 
-	/* Search task that frees wait */
+	/*
+	 * Search task that frees wait. The scheduler's lock is held through
+	 * the loop: a task released here is not taken by a processor before
+	 * its count has been read (design 4.3.3).
+	 */
+	KLK_SCHED();
 	queue = semcb->wait_queue.next;
 	while ( queue != &semcb->wait_queue ) {
 		tcb = (TCB*)queue;
@@ -191,8 +210,10 @@ SYSCALL ER tk_sig_sem( ID semid, INT cnt )
 			break;
 		}
 	}
+	KLK_UNSCHED();
 
     error_exit:
+	KLK_UNLOCK(&semcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -247,8 +268,16 @@ LOCAL void sem_rel_wai( TCB *tcb )
 /*
  * Definition of semaphore wait specification
  */
-LOCAL CONST WSPEC knl_wspec_sem_tfifo = { TTW_SEM, NULL,        sem_rel_wai };
-LOCAL CONST WSPEC knl_wspec_sem_tpri  = { TTW_SEM, sem_chg_pri, sem_rel_wai };
+/* The lock of the wait (design 4.3.3) */
+#if KLK_FINE_OBJ
+LOCAL KLOCK *sem_wlock( TCB *tcb )
+{
+	return &get_semcb(tcb->wid)->klk;
+}
+#endif
+
+LOCAL CONST WSPEC knl_wspec_sem_tfifo = { TTW_SEM, NULL,        sem_rel_wai WSPEC_LOCK(sem_wlock) };
+LOCAL CONST WSPEC knl_wspec_sem_tpri  = { TTW_SEM, sem_chg_pri, sem_rel_wai WSPEC_LOCK(sem_wlock) };
 
 /*
  * Wait on semaphore
@@ -266,6 +295,7 @@ SYSCALL_U ER tk_wai_sem_u( ID semid, INT cnt, TMO_U tmout )
 	semcb = get_semcb(semid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&semcb->klk);
 	if ( semcb->semid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -297,6 +327,7 @@ SYSCALL_U ER tk_wai_sem_u( ID semid, INT cnt, TMO_U tmout )
 	}
 
     error_exit:
+	KLK_UNLOCK(&semcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -325,6 +356,7 @@ SYSCALL ER tk_ref_sem( ID semid, T_RSEM *pk_rsem )
 	semcb = get_semcb(semid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&semcb->klk);
 	if ( semcb->semid == 0 ) {
 		ercd = E_NOEXS;
 	} else if ( knl_not_owner(semcb->owner) ) {
@@ -334,6 +366,7 @@ SYSCALL ER tk_ref_sem( ID semid, T_RSEM *pk_rsem )
 		pk_rsem->wtsk   = knl_wait_tskid(&semcb->wait_queue);
 		pk_rsem->semcnt = semcb->semcnt;
 	}
+	KLK_UNLOCK(&semcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;

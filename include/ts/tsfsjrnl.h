@@ -32,9 +32,16 @@
  *	power puts back everything from there that has a good commit block.
  *
  *	Callers that change the volume take a handle on the running
- *	transaction (ts_jrnl_begin) and let it go (ts_jrnl_commit). Several
- *	may hold one at once; the transaction is committed when the last one
- *	lets go.
+ *	transaction (ts_jrnl_begin) and let it go. Several may hold one at
+ *	once; the last one to let go closes the transaction. ts_jrnl_close
+ *	only closes it: its blocks are what every read sees from then on and
+ *	it waits in a queue for the ring, with nothing written to the device.
+ *	ts_jrnl_durable makes everything closed up to a number real: the
+ *	first caller to come writes the whole queue into the ring at once,
+ *	between two flushes of the device's cache, and those who come while
+ *	it writes are made real by it (group commit). ts_jrnl_commit is the
+ *	two together. A volume's lock is let go between the two, so that the
+ *	device's time is not spent holding it (docs/tessronos 7.3).
  */
 
 #ifndef __TS_TSFSJRNL_H__
@@ -74,10 +81,17 @@ typedef struct {
 	UD	used;			/* ring blocks between head and tail */
 	UD	cached;			/* committed blocks waiting for a checkpoint */
 	BOOL	dead;			/* a pretended power cut: nothing more is written */
+	UD	durable;		/* every transaction numbered below this is in the ring */
+	UD	queued;			/* ring blocks the closed ones not yet in it will take */
+	UD	closed;			/* transactions closed since the volume was opened */
+	UD	batches;		/* times the queue was written into the ring */
 } T_TSFSJRNL;
 
 IMPORT ER ts_jrnl_begin( ID vol );
 IMPORT ER ts_jrnl_write( ID vol, UD blk, CONST void *buf );
+IMPORT ER ts_jrnl_close( ID vol, UD *p_seq );
+IMPORT ER ts_jrnl_durable( ID vol, UD upto );
+IMPORT UD ts_jrnl_next( ID vol );
 IMPORT ER ts_jrnl_commit( ID vol );
 IMPORT ER ts_jrnl_abort( ID vol );
 IMPORT ER ts_jrnl_ref( ID vol, T_TSFSJRNL *p_jrnl );
@@ -115,6 +129,7 @@ IMPORT ER ts_jrnl_replay( ID vol );
 #define TSFSJ_FAULT_NONE		0
 #define TSFSJ_FAULT_BEFORE_COMMIT 1	/* the ring is written, the commit block is not */
 #define TSFSJ_FAULT_AFTER_COMMIT	2	/* the commit block is written, nothing is put in place */
+#define TSFSJ_FAULT_HOLD		3	/* nothing goes into the ring until the fault is taken off */
 
 IMPORT ER ts_jrnl_fault( ID vol, UINT where );
 
@@ -128,6 +143,9 @@ IMPORT void knl_jrnl_forget_blk( ID vol, UD blk );
 
 /* Blocks freed by the running transaction: copies of them must not come back */
 IMPORT void knl_jrnl_revoke( ID vol, UD start, UD count );
+
+/* The number the running transaction will take when it is closed */
+IMPORT UD knl_jrnl_running( ID vol );
 
 /* A volume that is closing: what waits goes in place, and its entry goes */
 IMPORT ER knl_jrnl_close( ID vol );

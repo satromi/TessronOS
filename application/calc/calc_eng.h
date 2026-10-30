@@ -53,6 +53,13 @@ extern int  ce_move( int cols, int at, int d );
 /* Every cell taken away */
 extern int  ce_reset( void );
 
+/*
+ * Many cells put in or taken out at once: from ce_bulk(1) on nothing is
+ * worked out as each comes; at ce_bulk(0) every formula is worked out
+ * once, in the light of all the others.
+ */
+extern int  ce_bulk( int on );
+
 /* The cells whose words changed since last asked, told one by one; how many */
 typedef void (*CE_FN)( int col, int row, const unsigned char *shown, int len, void *arg );
 extern int  ce_taken( CE_FN fn, void *arg );
@@ -62,6 +69,8 @@ extern int  ce_taken( CE_FN fn, void *arg );
  * expression that is not one), and text with every pat in it replaced
  * (its length in out, NUL ended). A regular expression is understood
  * only by the V8 engine; the other searches the words as they are.
+ * ce_replace writes as much as max holds and answers how long the whole
+ * is, as snprintf does: an answer of max or more asks for more room.
  */
 extern int  ce_test( const unsigned char *text, const unsigned char *pat, int regex );
 extern int  ce_replace( const unsigned char *text, const unsigned char *pat, const unsigned char *rep,

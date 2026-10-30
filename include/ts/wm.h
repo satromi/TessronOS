@@ -285,8 +285,21 @@ IMPORT ER  wm_ref( INT wid, T_WMWIN *w );
 IMPORT ER  wm_convert( INT wid, UINT from, UINT to, CONST T_DPRECT *in,
 		       T_DPRECT *out );
 
-/* Move a window, resize it, or both. The rectangle is the outer one. */
+/*
+ * Move a window, resize it, or both. The rectangle is the outer one,
+ * and becomes where the window is asked to stand -- but for a move that
+ * keeps the size of a window a smaller screen made smaller, which keeps
+ * the size asked for. A change of the screen's size lays every window
+ * from where it was asked to stand (design 10.2.2).
+ */
 IMPORT ER  wm_move( INT wid, CONST T_DPRECT *outer );
+/*
+ * A program's window placed (OB_WR_PLACE): as wm_move, but kept on the
+ * screen above the message line, made smaller only when it is larger
+ * than that; what was asked for is kept, and a screen with room for it
+ * gives it back.
+ */
+IMPORT ER  wm_place( INT wid, CONST T_DPRECT *outer );
 
 /* Bring a window to the front, or send it behind everything */
 IMPORT ER  wm_raise( INT wid );
@@ -430,6 +443,49 @@ IMPORT ER  wm_bar_drag( INT wid, UINT which, INT x, INT y );
 #define WM_PART_PICT		8	/* the pictogram in the band: close it */
 
 IMPORT INT wm_part_at( INT x, INT y, INT *p_wid, UINT *p_bar );
+
+/*
+ * The corner at a window's foot that sizes it: a press on the frame
+ * this near the right and the lower edges of its outer rectangle
+ */
+#define WM_GRIP_CORNER		20
+
+/*
+ * The handles a finger reaches farther (design 10.4.6): how many pixels
+ * of the view a handle -- the corner of a window, the right edge and
+ * the foot of a link, a picked shape's handle, a line's end -- is to be
+ * taken farther out than it is for the pointer, for the press made at
+ * 'when' (T_WMEV.when, T_OBNTM.when). It is ユーザ環境設定's length
+ * (LK_TCH_HIT, 0.1 mm) on the screen the finger touched, made pixels by
+ * the size the screen says it is, for a press of a finger on a touch
+ * screen with the correction on (LK_TCH_ON); 0 for a mouse's, a pen's,
+ * one put in and one not known, which are taken as they always were.
+ * What is drawn does not change: only where a press counts as on it.
+ */
+IMPORT INT wm_hit_slop( UD when );
+
+/*
+ * How far into a thing len long a handle at its edge is taken: the
+ * pointer's 'in', and with a finger 'slop' more (wm_hit_slop), but not
+ * past a third of the thing, so that two thirds of anything are still
+ * its body to carry and to open. Out of the thing, a handle is reached
+ * the pointer's distance and slop more.
+ */
+static inline INT wm_hit_in( INT in, INT slop, INT len )
+{
+	INT	r = in + slop;
+
+	if ( r > len / 3 ) r = len / 3;
+	return ( r > in ) ? r : in;
+}
+
+/*
+ * A press read (wm_read_event) noted as a finger's or not, by what the
+ * input layer says of the event it gave last (knl_hid_taken_touch). The
+ * window manager calls it for each press; a test that reads the input
+ * layer itself calls it after taking a press.
+ */
+IMPORT void knl_wm_touch_note( UD when );
 
 /*
  * A press on a window's pictogram at (sx, sy) on the screen, at 'when'
@@ -582,6 +638,27 @@ IMPORT ER  wm_read_event( T_WMEV *ev, TMO tmout );
 IMPORT UB  wm_key_char( UINT code, UINT mods );
 
 /*
+ * The key a command is: the key of the letter (or digit) a key types in
+ * the latin layout in use, as it is on the keyboard of the keys as
+ * written -- KEY_E (0x08) for the key that types e, wherever the layout
+ * has it -- and any other key as it is. Ctrl and Alt with a key are
+ * taken by this, as a command of the letter the key types, not of the
+ * place the key is in: in Dvorak, Ctrl and the key that types e (D's
+ * place, 0x07) is Ctrl+E, as Linux takes a command by the keysym and
+ * Windows by the virtual key after the layout.
+ */
+static __inline__ UINT wm_key_cmd( UINT code )
+{
+	UB	c = wm_key_char(code, 0);
+
+	if ( c >= 'a' && c <= 'z' ) return 0x04 + (UINT)( c - 'a' );
+	if ( c >= 'A' && c <= 'Z' ) return 0x04 + (UINT)( c - 'A' );
+	if ( c >= '1' && c <= '9' ) return 0x1E + (UINT)( c - '1' );
+	if ( c == '0' ) return 0x27;
+	return code;
+}
+
+/*
  * A menu a process opened on its window (mn_pop_men), worked from the
  * input as it arrives: the command chosen, 0 for none, when it is done.
  */
@@ -608,6 +685,16 @@ IMPORT ER  wm_msg_put( CONST char *utf8 );	/* NULL takes it away */
 IMPORT INT wm_msg_text( char *buf, INT max );	/* the message shown, "" none */
 IMPORT ER  wm_msg_mode( UINT mode );		/* WM_MODE_* */
 IMPORT UINT wm_msg_get_mode( void );		/* the mode shown */
+
+/*
+ * The mode is the keyboard's and is worked by the window manager as the
+ * keys come, in their order (outer_kernel/wm/msgline.c): each key's
+ * notice carries it (T_OBNTM imode). wm_kbmode_start sets the mode the
+ * machine's settings say to start in; wm_kbmode_key says whether a key
+ * is one that sets the mode.
+ */
+IMPORT void wm_kbmode_start( void );
+IMPORT BOOL wm_kbmode_key( UINT key, UINT mods );
 
 /*
  * Lay the windows onto the screen. Everything above only changes what
@@ -816,6 +903,13 @@ IMPORT ER   wm_set_shape( INT wid, CONST T_DPRGN *rgn );
 IMPORT ER   wm_obj_uuid( INT wid, TS_UUID *p_uuid );
 IMPORT INT  wm_obj_wid( CONST TS_UUID *uuid );		/* a window's number, E_NOEXS */
 IMPORT ER   wm_obj_shows( INT wid, CONST TS_UUID *obj );
+/*
+ * The object a window made as an object says it shows: TRUE with it in
+ * *p_obj, FALSE when it said none. wm_obj_showing is the window nearest
+ * the viewer that says it shows obj, 0 none.
+ */
+IMPORT BOOL wm_obj_shown( INT wid, TS_UUID *p_obj );
+IMPORT INT  wm_obj_showing( CONST TS_UUID *obj );
 IMPORT ER   knl_wmobj_init( void );		/* after the object layer is up */
 
 /*

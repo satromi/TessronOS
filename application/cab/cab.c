@@ -281,6 +281,10 @@ EXPORT ER cab_open( CONST TS_UUID *uuid, INT recno, INT wid )
 		if ( rect_empty(&e->r) ) {
 			auto_place(i, &e->r);
 		}
+		/* a box lower than the object closed is shown at the closed height */
+		if ( e->r.bottom - e->r.top < tad_lnk_closed_h(&e->v) ) {
+			e->r.bottom = e->r.top + tad_lnk_closed_h(&e->v);
+		}
 		e->saved = e->r;
 		e->pick  = -1;
 		e->dirty = TRUE;
@@ -996,6 +1000,8 @@ EXPORT ER cab_resize( INT dw, INT dh )
 		if ( to.bottom <= to.top + CAB_MIN_H ) {
 			to.bottom = to.top + CAB_MIN_H;
 		}
+		/* never lower than closed, and closed when only a little above it */
+		to.bottom = to.top + tad_lnk_fit_h(&e->v, to.bottom - to.top);
 		if ( to.right == was.right && to.bottom == was.bottom ) {
 			continue;		/* already as small as it goes */
 		}

@@ -25,10 +25,6 @@
     "archive-manager": {
       "name": "書庫管理",
       "defaultOpen": true
-    },
-    "unpack-file": {
-      "name": "書庫解凍",
-      "defaultOpen": false
     }
   }
 }

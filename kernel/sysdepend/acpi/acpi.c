@@ -142,7 +142,12 @@ LOCAL void read_madt( CONST T_SDTHDR *h )
 
 	knl_acpi.lapic_addr = rd32(h, 36);
 	knl_acpi.lint_nmi = -1;
-	cpuid(0xb, 0, &a, &b, &c, &d);
+	cpuid(0, 0, &a, &b, &c, &d);
+	if ( a >= 0xb ) {
+		cpuid(0xb, 0, &a, &b, &c, &d);
+	} else {
+		a = b = 0;
+	}
 	boot = d;				/* the boot processor's x2APIC ID */
 	if ( a == 0 && b == 0 ) {
 		cpuid(1, 0, &a, &b, &c, &d);
@@ -162,8 +167,25 @@ LOCAL void read_madt( CONST T_SDTHDR *h )
 				id = rd32(p, 4);
 				flags = rd32(p, 8);
 			}
-			if ( ( flags & 3 ) == 0 || knl_acpi.ncpu >= ACPI_MAX_CPU ) {
-				break;		/* not enabled, nor to be */
+			/*
+			 * Enabled (bit 0): started. Able to come online later
+			 * (bit 1 alone): counted and left, as the processors a
+			 * PC's firmware brings in later are. A processor listed
+			 * twice (as a local APIC and as an x2APIC) once.
+			 */
+			if ( ( flags & 1 ) == 0 ) {
+				if ( ( flags & 2 ) != 0 ) knl_acpi.ncpu_later++;
+				break;
+			}
+			{
+				INT	k;
+
+				for ( k = 0; k < knl_acpi.ncpu && knl_acpi.cpu[k].apic_id != id; k++ ) ;
+				if ( k < knl_acpi.ncpu ) break;
+			}
+			if ( knl_acpi.ncpu >= ACPI_MAX_CPU ) {
+				knl_acpi.ncpu_over++;
+				break;
 			}
 			if ( id == boot && knl_acpi.ncpu > 0 ) {
 				knl_acpi.cpu[knl_acpi.ncpu] = knl_acpi.cpu[0];
@@ -380,16 +402,34 @@ EXPORT UW knl_acpi_isa_gsi( UB irq, UH *p_flags )
 /* ------------------------------------------------------------------------ */
 
 #define SLP_EN		( 1U << 13 )
+#define SLP_TYP_MASK	( 7U << 10 )
+#define PM1_STS_ALL	0x8731U		/* the fixed status bits of PM1 event: written 1 to clear */
 
+/*
+ * Off by the tables alone (no interpreter): the PM1 status cleared (a
+ * wake already latched, the power button's among them, would start the
+ * machine again at once), then each PM1 control block written with its
+ * own SLP_TYP, the other bits (SCI_EN among them) kept, first without
+ * SLP_EN and then with it. A hardware-reduced machine, which has no PM1
+ * blocks, is not turned off this way.
+ */
 EXPORT BOOL knl_acpi_poweroff( void )
 {
+	UH	a, b = 0;
+
 	if ( knl_acpi.pm1a_cnt == 0 || knl_acpi.s5_typa < 0 ) {
 		return FALSE;
 	}
-	out_port_h((UH)knl_acpi.pm1a_cnt, (UH)( ( knl_acpi.s5_typa << 10 ) | SLP_EN ));
+	if ( knl_acpi.pm1a_evt != 0 ) out_port_h((UH)knl_acpi.pm1a_evt, (UH)PM1_STS_ALL);
+	if ( knl_acpi.pm1b_evt != 0 ) out_port_h((UH)knl_acpi.pm1b_evt, (UH)PM1_STS_ALL);
+	a = (UH)( ( in_port_h((UH)knl_acpi.pm1a_cnt) & ~( SLP_TYP_MASK | SLP_EN ) ) | ( (UW)knl_acpi.s5_typa << 10 ) );
 	if ( knl_acpi.pm1b_cnt != 0 ) {
-		out_port_h((UH)knl_acpi.pm1b_cnt, (UH)( ( knl_acpi.s5_typb << 10 ) | SLP_EN ));
+		b = (UH)( ( in_port_h((UH)knl_acpi.pm1b_cnt) & ~( SLP_TYP_MASK | SLP_EN ) ) | ( (UW)knl_acpi.s5_typb << 10 ) );
 	}
+	out_port_h((UH)knl_acpi.pm1a_cnt, a);
+	if ( knl_acpi.pm1b_cnt != 0 ) out_port_h((UH)knl_acpi.pm1b_cnt, b);
+	out_port_h((UH)knl_acpi.pm1a_cnt, (UH)( a | SLP_EN ));
+	if ( knl_acpi.pm1b_cnt != 0 ) out_port_h((UH)knl_acpi.pm1b_cnt, (UH)( b | SLP_EN ));
 	WaitUsec(100000);
 	return FALSE;
 }

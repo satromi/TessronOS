@@ -171,6 +171,35 @@ C ライブラリの不足分は `peripheral_kernel/libc/` にある(`qsort`・`
 
 ルート証明書は curl が配布している Mozilla の CA 証明書リスト(`https://curl.se/ca/cacert.pem`、MPL 2.0)を、実身「ルート証明書」のレコード1(`etc/def/01a0d8c4-52d0-7a61-8b72-4c5d6e7f8091_1.bin`)として格納する。更新するときはこのファイルを差し替える。
 
+## OpenSSL(取り込んでいない。`tools/wpa/proc.sh`が取得してビルドする)
+
+Wi-Fiの鍵の交換をプロセスで動かす形(`WPA_MODE=proc`、docs/tessronos/09-network.md 9.6.11)の暗号は、OpenSSLのlibcryptoである。wpa_supplicantの本流の`src/crypto/crypto_openssl.c`(BSD 3条項、NetBSD 11.0の`src.tgz`の中のもの)をパッチなしで使う。
+
+| 項目 | 内容 |
+| --- | --- |
+| バージョン | 3.5.9(LTS、2026-09-29、サポートは2030-04-08まで)。Apache License 2.0 |
+| 取得 | `https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz`を`~/openssl/dl`に取り、`~/openssl/openssl-3.5.9`に展開する(`OSSL_URL`で取得元を替えられる) |
+| SHA-256 | `603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a`(GitHubの配布物の`.sha256`とopenssl.orgの`.sha256`で同じ値) |
+| 構成 | ソースの外の置き場(`~/tessronos-wpaproc-x64/work/openssl`、ARMは`-arm`、ホストのテストは`host/openssl`)で`linux-generic64`(ホストは`linux-x86_64`)として構成する。`no-asm no-pic no-shared no-module no-dso no-engine no-threads no-sock no-dgram no-http no-autoload-config no-async no-ui-console no-tests no-apps no-docs no-legacy no-ktls`、使わないエンジンとプロトコル(`no-afalgeng no-devcryptoeng no-padlockeng no-capieng no-ocsp no-cms no-ts no-ct no-srp no-quic no-comp no-zlib no-pinshared no-atexit no-ssl-trace no-filenames`)、`--with-rand-seed=getrandom`(`getentropy`をプロセスが乱数の実身から与える) |
+| 外すファイル | `crypto/x509/by_dir.c`と`crypto/bio/bss_log.c`(ファイルのリンクとシステムのログを使う。どこからも届かない)。`crypto/sleep.c`は`OPENSSL_USE_SLEEP_BUSYLOOP`で、ディレクトリを読む部分は`application/wpasupp/include/dirent.h`の宣言で翻訳する(プロセスにはディレクトリが無く、`opendir`は見つけない) |
+| 変更 | OpenSSLのソースは書き換えない |
+
+## wpa_supplicant と crypto_mbedtls.c(取り込んでいない。`tools/wpa/build.sh`が取得してビルドする)
+
+Wi-FiのWPA2とWPA3の鍵の交換(docs/tessronos/09-network.md 9.6.2、9.6.10)は、wpa_supplicantの状態機械とSAEを、Mbed TLSの暗号でカーネルの中で動かす。ソースはリポジトリに含めず、`tools/wpa/build.sh`が取得してWSLのホームに置き、TessronOSのツールチェーンでコンパイルして`~/tessronos-wpa-x64/wpasupp.o`(`ARCH=aarch64`は`~/tessronos-wpa-arm/wpasupp.o`)にする。
+
+| 項目 | 内容 |
+| --- | --- |
+| wpa_supplicant | 2.11。NetBSD 11.0の`src.tgz`の`external/bsd/wpa/dist`(SHA-512を検査する)を`~/netbsd/wpa-11.0`に展開する。BSD 3条項 |
+| 暗号の層 | `src/crypto/crypto_mbedtls.c`(Copyright (c) 2022, Glenn Strauss、BSD 3条項)。hostapdの本流には無く、OpenWrtの当てが新しく足すファイルである |
+| 取得元 | OpenWrtのタグv24.10.0の`package/network/services/hostapd/patches/110-mbedtls-TLS-crypto-option-initial-port.patch`(`https://raw.githubusercontent.com/openwrt/openwrt/v24.10.0/package/network/services/hostapd/patches/110-mbedtls-TLS-crypto-option-initial-port.patch`、`OW_URL`で替えられる) |
+| SHA-256 | 当て`93d3f88cdc5f72be4be74e0f0dbff412e803a1427abbcdf4d323645dcc29883a`、取り出した`crypto_mbedtls.c`(4043行)`3ad41315f6502721fb520d42885338d637c368dcab3fcc20d3d9201007e4287d` |
+| 取り出し方 | 当ての`+++ b/src/crypto/crypto_mbedtls.c`から次の`--- `の行までの、`+`で始まる行の`+`を除いたもの。当ての残り(hostapdとwpa_supplicantの作り方の変更)は使わない |
+| Mbed TLS | `lib/mbedtls`(上の節)の`library`のうち37のファイル。構成は`device/net/wifi/wpa/ts_wpa_mbedtls_config.h`、乱数の源(`mbedtls_hardware_poll`)は`device/net/wifi/wpa/wpa_entropy.c` |
+| 変更 | wpa_supplicant、`crypto_mbedtls.c`、Mbed TLSのどれも書き換えない。足りないCのヘッダは`device/net/wifi/wpa/include`に置く |
+| プロセスの形 | `WPA_MODE=proc`(9.6.11)では、`tools/wpa/proc.sh`が同じソースに、本流の`src/crypto/crypto_openssl.c`と、それが使うPRFとKDFのファイル(`sha1-prf.c`、`sha256-prf.c`、`sha384-prf.c`、`sha512-prf.c`、`sha256-kdf.c`、`sha384-kdf.c`、`sha512-kdf.c`)を足して、OpenSSLのlibcrypto(上の節)とプロセスwpasuppに結ぶ。どれも書き換えない |
+| 試験 | `tools/wpa/build.sh test`(hostapdの認証側と組んだWPA2の試験)と`modtest`(上流の`common_module_tests.c`と`crypto_module_tests.c`をそのまま走らせる) |
+
 ## Chromium(取り込んでいない。別のリポジトリ`tessron-chromium`のスクリプトが読む)
 
 ブラウザ(docs/tessronos/14-browser.md)は、Chromiumのソースをリポジトリに入れず、WSLのホームのチェックアウトを`tessron-chromium`の`tools/browser`がTessronOSのツールチェーンでコンパイルし直して作る。ブラウザの移植層とスクリプトは、TessronOSとは別のリポジトリ`tessron-chromium`にあり、`make BROWSER=1`のときに取り込む。
@@ -219,7 +248,7 @@ GPUのユーザ空間(docs/tessronos/13-gpu.md 13.6)のOpenGL ESはMesaである
 
 足すファイルは`tools/mesa/src/egl/drivers/dri2/platform_tessronos.c`(EGLのプラットフォーム)だけで、TessronOSのファイルである。libdrmなどMesaがLinuxで使うライブラリのヘッダの代わりは`tools/mesa/shim`にあり、その実体はTessronOSの`lib/libgl`(DRMシム`gl_drm.c`、OSの層`gl_os.c`、ウインドウとGPUの問い合わせ`gl_win.c`)である。Mesaのバージョンを上げるときは、`MESA_VER`と`MESA_SHA256`を変え、パッチが当たることを確かめ(`patch`が失敗すればビルドが止まる)、`tools/mesa/build.sh all`でビルドし直し、`ktest`の`gl`の群を走らせる。
 
-現時点でリポジトリにあるMesa由来のものは、V3D 7.1の制御リストのパケットを詰めるヘッダ(`device/gpu/v3d/mesa/v3d_packet_v71_pack.h`)と、ウインドウの合成のシェーダのヘッダ(`device/gpu/v3d/mesa/v3d_cp_shaders.h`)の2つである。これはMesaの`src/broadcom/cle/v3d_packet.xml`を`gen_pack_header.py`で変換したもので、`tools/mesa/probe.sh pack`が生成し、先頭にMITライセンスの著作権表示と許諾文(`tools/mesa/pack_notice.txt`)を付けて書き出す。手で編集せず、Mesaの版を上げるときは`MESA_VER`と`MESA_SHA256`を変えて作り直す。生成したヘッダが呼ぶ補助の関数(`device/gpu/v3d/mesa/cle/v3d_packet_helpers.h`)は、カーネルが浮動小数点のレジスタを使わずに済むように書いたTessronOSのファイルで、Mesaの同名のファイルの写しではない。合成のシェーダのヘッダは、`tools/mesa/shaders.sh`がMesaを`~/mesa`に取得し、NIR、V3Dのシェーダコンパイラ、QPU、`src/util`をホスト向けの静的ライブラリにして`tools/mesa/gen_cp_shaders.c`とリンクし、その出力(QPUのコード、ユニフォームの内容、詰めたレコードとパケット)に先頭のMITライセンスの表示を付けて書き出す。これも手で編集せず、作り直す。`tools/mesa/test_cp_shaders.c`は同じライブラリにリンクしてシェーダをホストで確かめる(13-gpu.md 13.10.4)。それ以外は、`tools/mesa/probe.sh`が取得し、作業ディレクトリ(既定は`/tmp/tsmesa`)で生成とコンパイルを試すだけである。
+現時点でリポジトリにあるMesa由来のものは、V3D 7.1の制御リストのパケットを詰めるヘッダ(`device/gpu/v3d/mesa/v3d_packet_v71_pack.h`)と、ウインドウの合成のシェーダのヘッダ(`device/gpu/v3d/mesa/v3d_cp_shaders.h`)の2つである。これはMesaの`src/broadcom/cle/v3d_packet.xml`を`gen_pack_header.py`で変換したもので、`tools/mesa/probe.sh pack`が生成し、先頭にMITライセンスの著作権表示と許諾文(`tools/mesa/pack_notice.txt`)を付けて書き出す。手で編集せず、Mesaの版を上げるときは`MESA_VER`と`MESA_SHA256`を変えて作り直す。生成したヘッダが呼ぶ補助の関数(`device/gpu/v3d/mesa/cle/v3d_packet_helpers.h`)は、カーネルが浮動小数点のレジスタを使わずに済むように書いたTessronOSのファイルで、Mesaの同名のファイルの写しではない。合成のシェーダのヘッダは、`tools/mesa/shaders.sh`がMesaを`~/mesa`に取得し、NIR、V3Dのシェーダコンパイラ、QPU、`src/util`をホスト向けの静的ライブラリにして`tools/mesa/gen_cp_shaders.c`とリンクし、その出力(QPUのコード、ユニフォームの内容、詰めたレコードとパケット)に先頭のMITライセンスの表示を付けて書き出す。これも手で編集せず、作り直す。`tools/mesa/test_cp_shaders.c`は同じライブラリにリンクしてシェーダをホストで確かめる(13-gpu.md 13.10.4)。IntelのGPUの合成のシェーダのヘッダ(`device/gpu/intel/mesa/igt_cp_shaders.h`)は、`tools/x64/mesa/igt_shaders.sh`が、x64のMesaの建て(`tools/x64/mesa/build.sh`)の翻訳のコマンドからNIR、`src/util`、Intelのシェーダコンパイラと装置の情報、islをホスト向けに翻訳し直して`tools/x64/mesa/gen_igt_shaders.c`とリンクし、その出力(第9世代のコード、インタフェース記述子、genxmlで詰めたコマンドの雛形)に先頭のMITライセンスの表示を付けて書き出す。シェーダの計算はV3Dと同じ`tools/mesa/cp_stages.h`である。これも手で編集せず、作り直す。`tools/x64/mesa/test_igt_shaders.c`がシェーダをホストで確かめる(13-gpu.md 13.11.14)。それ以外は、`tools/mesa/probe.sh`が取得し、作業ディレクトリ(既定は`/tmp/tsmesa`)で生成とコンパイルを試すだけである。
 
 | 項目 | 内容 |
 | --- | --- |

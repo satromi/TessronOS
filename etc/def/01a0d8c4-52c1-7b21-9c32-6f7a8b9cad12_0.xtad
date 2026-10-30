@@ -1,6 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="機器の設定">
 <document>
 <p>機器の設定</p>
-<p>システム環境設定の小物が書く、機器の設定。レコード1が設定の行(画面、キーボード、ネットワークアダプタ、サウンド)。起動時にシステムが読む。</p>
+<p>システム環境設定の小物が書く、機器の設定。レコード1が設定の行(画面、キーボード、ネットワークアダプタ、サウンド)。起動時にシステムが読む。続柄tessronos.clearAtStartの仮身が指す実身は、その実身のあるボリュームをつなぐたびに、中の仮身をすべて外す(起動のたびに空にする実身の一覧。書けるのはシステムと管理者だけ)。</p>
+<p>起動のたびに空にする実身：<link id="01a0d8c4-5473-7a84-8c95-9fab0c1d5473_0.xtad" vobjid="01a0d8c4-5483-7a94-8ca5-9fab0c1d5483" relationship="tessronos.clearAtStart" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" roledisp="false" typedisp="false" updatedisp="false" autoopen="false"/></p>
 </document>
 </tad>

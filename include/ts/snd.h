@@ -187,6 +187,7 @@ typedef struct {
 #define SND_BE_USB		1	/* a USB audio function */
 #define SND_BE_I2S		2	/* the RP1's I2S (Raspberry Pi 5) */
 #define SND_BE_HDMI		3	/* an HDMI socket (Raspberry Pi 5) */
+#define SND_BE_HDA		4	/* Intel High Definition Audio (the x64 PC) */
 
 /*
  * The outputs (DN_SDOUTS, DN_SDOUTSEL). An output is named by an id
@@ -201,6 +202,10 @@ typedef struct {
  * A USB function chosen and plugged into another socket is still the
  * one chosen: with no function at the port named, the first of the same
  * ids is taken.
+ *
+ * DN_SDOUTS answers "auto" and every output there is, an SDOut each, and
+ * as many as there are: a read of size 0 is told the size, and a read
+ * with less room has the first ones.
  */
 /*
  * The structures this system adds (SDOut, SDOutSel, SDMix ...) are made
@@ -209,7 +214,6 @@ typedef struct {
  */
 #define SND_ID_MAX		32
 #define SND_NAME_MAX		64
-#define SND_OUT_MAX		8	/* DN_SDOUTS answers at most this many */
 #define SND_ID_AUTO		"auto"
 
 typedef struct {
@@ -253,7 +257,6 @@ typedef struct {
 #define DN_SDMIXSET		(-144)	/* W : SDMixSet, a volume and mute set */
 
 #define SND_VOL_MAX		100
-#define SND_APP_MAX		16	/* programs DN_SDMIXER answers at most */
 
 typedef struct {
 	UB	prog[16];		/* the program object's UUID; zeros: none */
@@ -271,8 +274,15 @@ typedef struct {
 	UINT	mute;
 	UINT	level_l, level_r;	/* the loudest it sounded of late, 0 .. 32767 */
 	UINT	napp;
-	SDMixApp app[SND_APP_MAX];
+	SDMixApp app[];			/* napp of them */
 } SDMix;
+
+/*
+ * DN_SDMIXER answers SND_MIX_SIZE(napp) bytes, every program that has
+ * channels now: a read of size 0 is told the size, and a read with less
+ * room has the whole and the first programs.
+ */
+#define SND_MIX_SIZE(napp)	( sizeof(SDMix) + sizeof(SDMixApp) * (SZ)(napp) )
 
 #define SND_MIX_ALL		0	/* SDMixSet.what: the whole, lv and rv */
 #define SND_MIX_APP		1	/* a program, lv */
@@ -291,8 +301,8 @@ typedef struct {
  * names.
  */
 IMPORT ER   knl_snd_mix_set( CONST SDMixSet *s, BOOL keep );
-IMPORT INT  knl_snd_mix_get( SDMix *m );
-/* The settings of the programs that have an object, as the keeper keeps them: how many */
+IMPORT INT  knl_snd_mix_get( SDMix *m, INT max );	/* room for max programs; how many there are */
+/* The settings of the programs that have an object, as the keeper keeps them: up to max into s, and how many there are */
 IMPORT INT  knl_snd_mix_kept( SDMixSet *s, INT max );
 /* What keeps the mixer's settings: called a second after they last changed */
 IMPORT void knl_snd_mix_keeper( void (*fn)( void ) );
@@ -358,7 +368,11 @@ IMPORT ER   knl_snd_select( CONST UB *id );
 IMPORT ER   knl_snd_keep( BOOL on );
 IMPORT BOOL knl_snd_keeping( void );
 
-/* The outputs as DN_SDOUTS has them; how many were put in o */
+/*
+ * The outputs as DN_SDOUTS has them: up to max of them into o, and how
+ * many there are. When that is more than max, ask again with more room;
+ * o NULL and max 0 asks only how many.
+ */
 IMPORT INT  knl_snd_outputs( SDOut *o, INT max );
 
 #ifdef __cplusplus

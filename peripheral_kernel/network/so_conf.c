@@ -31,28 +31,26 @@
 #include <ts/uuid.h>
 #include <ts/conf.h>
 #include <ts/sysdef.h>
+#include "obj/obj.h"
 
-/* The record as it stands, into a buffer of CF_TEXT_MAX; its length or an error */
-LOCAL INT conf_text( UB *buf )
+/* The record as it stands, read whole into a buffer of its own (Kfree it); its length or an error */
+LOCAL INT conf_text( UB **p_buf )
 {
 	TS_UUID	u;
 	ID	key;
-	SZ	asz = 0;
-	ER	er;
+	INT	len;
 
-	if ( ts_str_to_uuid(SYSDEF_CONF_NET, &u) < E_OK ) {
+	*p_buf = NULL;
+	if ( ob_fnd_sys(SYSROLE_CONF_NET, SYSDEF_CONF_NET, &u) < E_OK ) {
 		return E_SYS;
 	}
 	key = ob_opn_obj(&u, OB_OP_READ);
 	if ( key < E_OK ) {
 		return (INT)key;
 	}
-	er = ob_rea_rec(key, 1, 0, buf, CF_TEXT_MAX, &asz);
+	len = knl_ob_rea_all(key, 1, 0, p_buf, NULL);
 	ob_cls_obj(key);
-	if ( er < E_OK ) {
-		return (INT)er;
-	}
-	return (INT)( ( asz > CF_TEXT_MAX ) ? CF_TEXT_MAX : asz );
+	return len;
 }
 
 LOCAL void say_ip( CONST char *what, UW a )
@@ -118,17 +116,13 @@ LOCAL ER conf_apply( void )
 	INT	len, i;
 	ER	er = E_OK, er6;
 
-	text = (UB *)Kmalloc(CF_TEXT_MAX);
 	net = (T_CFNET *)Kmalloc(sizeof(T_CFNET));
-	if ( text == NULL || net == NULL ) {
-		if ( text != NULL ) Kfree(text);
-		if ( net != NULL ) Kfree(net);
+	if ( net == NULL ) {
 		return E_NOMEM;
 	}
-	len = conf_text(text);
+	len = conf_text(&text);
 	if ( len < 0 ) {
 		tm_printf((UB *)"net: the settings could not be read (%d)\n", len);
-		Kfree(text);
 		Kfree(net);
 		return (ER)len;
 	}
@@ -138,7 +132,7 @@ LOCAL ER conf_apply( void )
 	if ( i > 0 ) {
 		(void)so_sethostname(net->host, i);
 	} else {
-		(void)so_sethostname("tessronos", 7);
+		(void)so_sethostname("tessronos", 9);
 	}
 	(void)so_setdomain(net->domain);
 	(void)so_setdns(0, net->dns[0]);

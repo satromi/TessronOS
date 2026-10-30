@@ -32,6 +32,7 @@ IMPORT ER   knl_umem_ctl( T_UMEM **pp, T_SPACE *sp, UBINT va, UD size, UINT prot
 IMPORT BOOL knl_umem_fault( T_UMEM *um, T_SPACE *sp, UBINT va, UINT acc );
 IMPORT void knl_umem_wx( T_UMEM *um, T_SPACE *sp, UD out[6] );
 IMPORT void knl_umem_flush( T_UMEM *um );
+IMPORT BOOL knl_umem_held( T_UMEM *um );
 IMPORT UD   knl_umem_bytes( T_UMEM *um );
 IMPORT void knl_umem_free( T_UMEM **pp );
 

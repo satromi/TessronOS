@@ -228,6 +228,7 @@ LOCAL BOOL take_pixels( CONST T_TVSHAPE *s, UW **p_px, INT *p_w, INT *p_h, UW *p
 				Kfree(sc);
 			}
 		}
+		om_store_picture_done(src);
 	}
 	*p_px = px;
 	*p_w = w;
@@ -723,13 +724,15 @@ EXPORT void df_burn( DTWIN *d )
 	part = (T_TVFIG *)Kmalloc(sizeof(T_TVFIG));
 	if ( part == NULL ) {
 		Kfree(px);
+		dt_no_memory(d);
 		return;
 	}
 	*part = *f;
-	part->sh = (T_TVSHAPE *)Kmalloc(sizeof(T_TVSHAPE) * TV_MAX_SHAPE);
+	part->sh = (T_TVSHAPE *)Kmalloc(sizeof(T_TVSHAPE) * (SZ)( f->nsh + 1 ));
 	if ( part->sh == NULL ) {
 		Kfree(part);
 		Kfree(px);
+		dt_no_memory(d);
 		return;
 	}
 	part->nsh = 0;

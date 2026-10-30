@@ -253,8 +253,25 @@ IMPORT ER    om_store_info( CONST TS_UUID *id, T_OMINFO *info );
  * when the object has none, those of the applist the link carries.
  */
 IMPORT INT   om_link_apps( CONST T_VOBJ *v, UB (*names)[OM_APP_NAME], INT max );
+/* How many programs om_link_apps gives: room for all of them */
+IMPORT INT  om_link_napps( CONST T_VOBJ *v );
 IMPORT INT   om_link_app_id( CONST T_VOBJ *v, INT index, UB *buf, INT max );
 IMPORT INT   om_link_default_app( CONST T_VOBJ *v, UB *buf, INT max );
+
+/*
+ * 起動アプリの固定 (design 11.3). A link keeps to the program it opens
+ * with when the default entry of its own applist says
+ * "defaultOpenLock": true; otherwise it opens with the one the object's
+ * applist marks. om_link_ran is a program of the applist run from the
+ * link (実行): written into the object's metadata as the one it opens
+ * with, unless the link keeps to its own. om_link_lock gives the link
+ * the applist its object has now (the link's own when the object has
+ * none) with "defaultOpenLock" as 'keep' says: E_NOEXS when it names no
+ * program, E_LIMIT when the link cannot hold it.
+ */
+IMPORT BOOL  om_link_locked( CONST T_VOBJ *v );
+IMPORT ER    om_link_ran( CONST T_VOBJ *v, CONST UB *app );
+IMPORT ER    om_link_lock( T_VOBJ *v, BOOL keep );
 
 /*
  * What a link's band says, as the link asks (the name, " : " and the
@@ -263,6 +280,8 @@ IMPORT INT   om_link_default_app( CONST T_VOBJ *v, UB *buf, INT max );
  */
 IMPORT INT   om_store_label( CONST T_VOBJ *v, UB *buf, INT max );
 IMPORT ER    om_store_icon( CONST T_VOBJ *v, CONST UW **p_px, INT *p_w, INT *p_h );
+IMPORT void  om_store_icon_done( CONST UW *px );
+IMPORT void  om_store_picture_done( CONST UW *px );
 
 /* The icon of an object replaced (an ICO or a PNG; 0 bytes: none), and shown afresh */
 IMPORT ER    om_store_set_icon( CONST TS_UUID *id, CONST UB *buf, SZ size );
@@ -280,6 +299,9 @@ IMPORT ER    om_store_set_maker( CONST TS_UUID *id );
 IMPORT UB   *om_obj_meta( CONST TS_UUID *id, SZ *p_size );
 IMPORT ER    om_obj_meta_put( CONST TS_UUID *id, CONST UB *buf, SZ size );
 IMPORT INT   om_obj_records( CONST TS_UUID *id, T_OBREC *buf, INT max );
+/* Every record of an object, however many, in a table of its own (Kfree it): how many, or an error */
+IMPORT INT   om_obj_records_all( CONST TS_UUID *id, T_OBREC **p_rec );
+IMPORT INT   om_key_records_all( ID key, T_OBREC **p_rec );
 IMPORT UB   *om_obj_record( CONST TS_UUID *id, INT recno, SZ *p_size );
 IMPORT ER    om_obj_record_put( CONST TS_UUID *id, INT recno, UINT rt, UINT sub,
 				CONST UB *buf, SZ size );
@@ -363,6 +385,16 @@ IMPORT INT   om_link_fix( UB **p_buf, SZ *p_len, CONST TS_UUID *host );
  */
 IMPORT void  om_store_recheck( void );
 
+/*
+ * om_store_lost says whether om_store_recheck lets go of what is held
+ * of an object (it cannot be found now). om_store_take takes a record
+ * out of the store, the caller's to free with tad_free from then on:
+ * for a window that stays open on an object whose disk went. NULL when
+ * the store holds no document of it.
+ */
+IMPORT BOOL   om_store_lost( CONST TS_UUID *id );
+IMPORT T_TAD *om_store_take( CONST TS_UUID *id, INT recno );
+
 /* A record as last written, whole; the caller frees it */
 IMPORT UB   *om_store_read( CONST TS_UUID *id, INT recno, SZ *p_len );
 
@@ -378,6 +410,10 @@ IMPORT ER    om_store_picture( CONST UB *href, CONST UW **p_px, INT *p_w,
 			       INT *p_h );
 IMPORT ER    om_store_put_picture( CONST UB *href, CONST UW *px, INT w, INT h );
 
+/*
+ * The band along the top of a virtual object: the height of the object
+ * closed (tad_lnk_closed_h), and the least any box of it may be.
+ */
 IMPORT INT om_band_h( CONST T_VOBJ *vobj );
 
 /*
@@ -386,7 +422,7 @@ IMPORT INT om_band_h( CONST T_VOBJ *vobj );
  * band from the rounding of whatever laid it out; this is the slack
  * that allows for that and nothing more.
  */
-#define OM_OPEN_SLACK	8
+#define OM_OPEN_SLACK	TAD_OPEN_SLACK
 
 /*
  * Draw one that is open: the same band, and the rectangle under it left

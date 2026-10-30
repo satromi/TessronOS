@@ -60,11 +60,33 @@ EXPORT T_USBSTAT	knl_usb_stat;
 
 IMPORT void knl_obusb_changed( void );		/* peripheral_kernel/obj/obusb.c */
 
-LOCAL USBHC	*hc_tbl[USB_MAX_HC];
-LOCAL INT	nhc = 0;
-LOCAL UW	root_ignored[USB_MAX_HC];	/* bit p: root port p given up on */
-LOCAL USBDEV	*dev_tbl[USB_MAX_DEV];
+/*
+ * The controllers and the devices, in tables that grow as they come. A
+ * table grown is copied and the one before is kept, not freed: the
+ * interface reads the controllers' without the manager's lock.
+ */
+LOCAL USBHC	**hc_tbl = NULL;
+LOCAL INT	nhc = 0, hc_cap = 0;
+LOCAL USBDEV	**dev_tbl = NULL;
+LOCAL INT	dev_cap = 0;
 LOCAL UW	dev_gen = 0;
+
+/* A table of pointers made twice as large (at least 'first'), the old one kept: FALSE for no memory */
+LOCAL BOOL tbl_grow( void ***p_tbl, INT *p_cap, INT first )
+{
+	INT	cap = ( *p_cap > 0 ) ? *p_cap * 2 : first;
+	void	**t = (void **)Kcalloc((SZ)cap, sizeof(void *));
+
+	if ( t == NULL ) {
+		return FALSE;
+	}
+	if ( *p_tbl != NULL ) {
+		knl_memcpy(t, *p_tbl, (INT)( sizeof(void *) * (SZ)*p_cap ));
+	}
+	*p_tbl = t;
+	*p_cap = cap;
+	return TRUE;
+}
 
 LOCAL ID	usb_lock_id = 0;
 LOCAL ID	usb_flg = 0;
@@ -74,13 +96,24 @@ LOCAL BOOL	polled_hc = FALSE;	/* a controller without an interrupt */
 
 /* ---------------------------------------------------------------- lock */
 
+/* Who holds the lock and since when, for the reports of a machine found stopped (lockup.c) */
+EXPORT volatile ID	knl_usb_lock_tsk = 0;
+EXPORT volatile UD	knl_usb_lock_at = 0;
+IMPORT UD	knl_lockup_now( void ) __attribute__((weak));
+IMPORT void	knl_lockup_sem_held( ID semid, BOOL held ) __attribute__((weak));
+
 EXPORT void knl_usb_lock( void )
 {
 	tk_wai_sem(usb_lock_id, 1, TMO_FEVR);
+	knl_usb_lock_at = ( knl_lockup_now != NULL ) ? knl_lockup_now() : 0;
+	knl_usb_lock_tsk = tk_get_tid();
+	if ( knl_lockup_sem_held != NULL ) knl_lockup_sem_held(usb_lock_id, TRUE);
 }
 
 EXPORT void knl_usb_unlock( void )
 {
+	knl_usb_lock_tsk = 0;
+	if ( knl_lockup_sem_held != NULL ) knl_lockup_sem_held(usb_lock_id, FALSE);
 	tk_sig_sem(usb_lock_id, 1);
 }
 
@@ -151,10 +184,14 @@ LOCAL INT dev_slot( USBDEV *d )
 {
 	INT	i;
 
-	for ( i = 0; i < USB_MAX_DEV; i++ ) {
+	for ( i = 0; i < dev_cap; i++ ) {
 		if ( dev_tbl[i] == d ) {
 			return i;
 		}
+	}
+	/* a free place asked for and none: the table grows */
+	if ( d == NULL && dev_cap < USB_DEV_SLOTS && tbl_grow((void ***)&dev_tbl, &dev_cap, 32) ) {
+		return i;
 	}
 
 	return -1;
@@ -164,7 +201,7 @@ LOCAL USBDEV *dev_at( USBHC *hc, USBDEV *parent, INT port )
 {
 	INT	i;
 
-	for ( i = 0; i < USB_MAX_DEV; i++ ) {
+	for ( i = 0; i < dev_cap; i++ ) {
 		if ( dev_tbl[i] != NULL && dev_tbl[i]->hc == hc
 		  && dev_tbl[i]->parent == parent && dev_tbl[i]->port == port ) {
 			return dev_tbl[i];
@@ -176,9 +213,9 @@ LOCAL USBDEV *dev_at( USBHC *hc, USBDEV *parent, INT port )
 
 LOCAL USBDEV *dev_of_handle( INT handle )
 {
-	INT	i = (handle & 0xff) - 1;
+	INT	i = (handle & USB_DEV_SLOTS) - 1;
 
-	if ( handle <= 0 || i < 0 || i >= USB_MAX_DEV ) {
+	if ( handle <= 0 || i < 0 || i >= dev_cap ) {
 		return NULL;
 	}
 	if ( dev_tbl[i] == NULL || dev_tbl[i]->handle != handle ) {
@@ -188,12 +225,20 @@ LOCAL USBDEV *dev_of_handle( INT handle )
 	return dev_tbl[i];
 }
 
+#ifdef X64
+IMPORT BOOL	knl_cdcnet_match( USBDEV *dev );	/* device/usb/x86_64/cdcnet.c */
+IMPORT ER	knl_cdcnet_attach( USBDEV *dev );
+IMPORT void	knl_cdcnet_detach( USBDEV *dev );
+#endif
+
+IMPORT void	knl_xhci_port_say( USBHC *hc, INT port, BOOL conn );	/* xhci.c */
+
 /* Let go of a device and everything behind it, the deepest first */
 LOCAL void detach_tree( USBDEV *dev, CONST char *why )
 {
 	INT	i;
 
-	for ( i = 0; i < USB_MAX_DEV; i++ ) {
+	for ( i = 0; i < dev_cap; i++ ) {
 		if ( dev_tbl[i] != NULL && dev_tbl[i]->parent == dev ) {
 			detach_tree(dev_tbl[i], why);
 		}
@@ -216,6 +261,9 @@ LOCAL void detach_tree( USBDEV *dev, CONST char *why )
 	if ( dev->user != NULL ) {
 		knl_uusb_detach(dev);
 	}
+#ifdef X64
+	knl_cdcnet_detach(dev);
+#endif
 	USB_LOG("usb: %d-%d route %05x addr %d gone (%s)\n", dev->hc->index,
 		dev->root_port, dev->route, dev->addr, why);
 	i = dev_slot(dev);
@@ -232,7 +280,7 @@ LOCAL void mark_ignored( USBHC *hc, USBDEV *parent, INT port )
 	if ( parent != NULL ) {
 		parent->hub_ignored |= 1UL << port;
 	} else {
-		root_ignored[hc->index] |= 1UL << port;
+		if ( port >= 0 && port < hc->nignored ) hc->ignored[port] = 1;
 	}
 }
 
@@ -268,11 +316,24 @@ LOCAL void give_role( USBDEV *dev )
 			dev->role = USB_ROLE_AUDIO;
 		}
 	}
+#ifdef X64
+	/* a network adapter of the communications class, in any of its configurations */
+	if ( dev->role == USB_ROLE_NONE && knl_cdcnet_match(dev) ) {
+		ER	e = knl_cdcnet_attach(dev);
+
+		if ( e < E_OK ) {
+			USB_LOG("usb: cdc: the network adapter not usable (%d)\n", (INT)e);
+		}
+	}
+#endif
 }
+
+LOCAL ER port_debounce( USBHC *hc, USBDEV *hub, INT port, UW *p_st );
 
 /*
  * Something was plugged into a root port (parent NULL) or a hub's port:
- * let it settle, reset the port, bring the device up and give it a role.
+ * let the connection settle, reset the port, bring the device up and
+ * give it a role.
  */
 LOCAL void attach_at( USBHC *hc, USBDEV *parent, INT port )
 {
@@ -281,20 +342,17 @@ LOCAL void attach_at( USBHC *hc, USBDEV *parent, INT port )
 	ER	er;
 	UW	st = 0;
 
-	knl_usb_wait(100);				/* connect debounce */
-	if ( parent == NULL ) {
-		if ( !hc->ops->port_connected(hc, port) ) {
-			return;
+	er = port_debounce(hc, parent, port, &st);
+	if ( er < E_OK ) {
+		if ( er == E_TMOUT && (st & HUB_PS_CONNECTION) != 0 ) {
+			USB_LOG("usb: %d-%d %s port %d: the connection did not settle\n", hc->index,
+				( parent != NULL ) ? parent->root_port : port, ( parent != NULL ) ? "hub" : "root", port);
 		}
-	} else {
-		if ( knl_hub_port_status(parent, port, &st) < E_OK
-		  || (st & HUB_PS_CONNECTION) == 0 ) {
-			return;
-		}
-		if ( parent->depth + 1 > USB_MAX_DEPTH ) {
-			mark_ignored(hc, parent, port);
-			return;
-		}
+		return;
+	}
+	if ( parent != NULL && parent->depth + 1 > USB_MAX_DEPTH ) {
+		mark_ignored(hc, parent, port);
+		return;
 	}
 	slot = dev_slot(NULL);
 	if ( slot < 0 ) {
@@ -315,11 +373,288 @@ LOCAL void attach_at( USBHC *hc, USBDEV *parent, INT port )
 		mark_ignored(hc, parent, port);
 		return;
 	}
-	dev->handle = (INT)((((++dev_gen) & 0x7fffff) << 8) | (UW)(slot + 1));
+	dev->handle = (INT)((((++dev_gen) & 0x7fff) << 16) | (UW)(slot + 1));
 	dev_tbl[slot] = dev;
 	give_role(dev);
 	knl_usb_stat.attached++;
 	knl_usb_stat.gen = dev_gen;
+}
+
+/* ---------------------------------------------------------------- ports */
+
+/*
+ * A root port and a hub's port are looked at alike: their state as a
+ * hub's GET_STATUS gives it, the changes above it (usbdev.h). A
+ * connection is taken as made once it has stayed as it is for
+ * DEBOUNCE_STABLE ms, looked at every DEBOUNCE_STEP ms for
+ * DEBOUNCE_TIMEOUT ms at most (USB 2.0 7.1.7.3: 100 ms at least).
+ */
+#define DEBOUNCE_TIMEOUT	2000
+#define DEBOUNCE_STEP		25
+#define DEBOUNCE_STABLE		100
+#define DISCONNECT_TRIES	5	/* looks, 20 ms apart, for an SS.Inactive link to become a disconnection */
+
+/* The port's state; the changes in 'ack' acknowledged */
+LOCAL ER port_read( USBHC *hc, USBDEV *hub, INT port, UW ack, UW *st )
+{
+	ER	er;
+
+	if ( hub == NULL ) {
+		return hc->ops->port_status(hc, port, ack, st);
+	}
+	er = knl_hub_port_status(hub, port, st);
+	if ( er >= E_OK && (*st & ack & HUB_PC_ALL) != 0 ) {
+		knl_hub_clear_changes(hub, port, *st & ack);
+	}
+	return er;
+}
+
+/* Whether the port is a USB 3 one, whose link state is in its status */
+LOCAL BOOL port_ss( USBHC *hc, USBDEV *hub, INT port )
+{
+	T_USBPORT	p;
+
+	if ( hub != NULL ) {
+		return (BOOL)( hub->speed >= USB_SPEED_SUPER );
+	}
+	return (BOOL)( hc->ops->port_state(hc, port, &p) >= E_OK && p.usb3 );
+}
+
+/* A USB 3 link that leaves its state only by a warm reset */
+LOCAL BOOL warm_needed( BOOL ss, UW st )
+{
+	return (BOOL)( ss && ( HUB_PS_SS_LINK(st) == HUB_SS_LINK_INACTIVE
+			    || HUB_PS_SS_LINK(st) == HUB_SS_LINK_COMPLIANCE ) );
+}
+
+LOCAL ER port_warm_reset( USBHC *hc, USBDEV *hub, INT port )
+{
+	if ( hub != NULL ) {
+		return knl_hub_port_warm_reset(hub, port);
+	}
+	return ( hc->ops->port_warm_reset != NULL ) ? hc->ops->port_warm_reset(hc, port) : E_NOSPT;
+}
+
+LOCAL BOOL port_ignored( USBHC *hc, USBDEV *hub, INT port )
+{
+	if ( hub != NULL ) {
+		return (BOOL)( (hub->hub_ignored & (1UL << port)) != 0 );
+	}
+	return (BOOL)( port < hc->nignored && hc->ignored[port] != 0 );
+}
+
+LOCAL void port_unignore( USBHC *hc, USBDEV *hub, INT port )
+{
+	if ( hub != NULL ) {
+		hub->hub_ignored &= ~(1UL << port);
+	} else if ( port < hc->nignored ) {
+		hc->ignored[port] = 0;
+	}
+}
+
+/*
+ * The connection waited on until it has stayed connected for
+ * DEBOUNCE_STABLE ms: E_OK with the state then, E_TMOUT when it does not
+ * within DEBOUNCE_TIMEOUT (nothing connected, or a connection that keeps
+ * coming and going). Each connection change is acknowledged as it is seen.
+ */
+LOCAL ER port_debounce( USBHC *hc, USBDEV *hub, INT port, UW *p_st )
+{
+	UW	st = 0, conn = 0xffff;
+	INT	total, stable = 0;
+	ER	er;
+
+	for ( total = 0; ; total += DEBOUNCE_STEP ) {
+		er = port_read(hc, hub, port, HUB_PC_CONNECTION, &st);
+		if ( er < E_OK ) {
+			return er;
+		}
+		if ( (st & HUB_PC_CONNECTION) == 0 && (st & HUB_PS_CONNECTION) == conn ) {
+			if ( conn == HUB_PS_CONNECTION ) {
+				stable += DEBOUNCE_STEP;
+			}
+			if ( stable >= DEBOUNCE_STABLE ) {
+				break;
+			}
+		} else {
+			stable = 0;
+			conn = st & HUB_PS_CONNECTION;
+		}
+		if ( total >= DEBOUNCE_TIMEOUT ) {
+			break;
+		}
+		knl_usb_wait(DEBOUNCE_STEP);
+	}
+	*p_st = st;
+	return ( stable >= DEBOUNCE_STABLE ) ? E_OK : E_TMOUT;
+}
+
+/*
+ * Whether the device on a port that says it changed is still the one
+ * that was brought up there: its device descriptor, and the
+ * configuration it was given, read again and the same. A USB 3 port
+ * brings a device back up by itself, so a change there may be the same
+ * device or another.
+ */
+LOCAL BOOL same_device( USBDEV *dev )
+{
+	UB	d[18], *c;
+	INT	n = 0, i, k;
+	BOOL	same = FALSE;
+
+	if ( knl_usb_get_desc(dev, USB_DT_DEVICE, 0, 0, d, sizeof(d), &n) < E_OK || n < (INT)sizeof(d) ) {
+		return FALSE;
+	}
+	for ( k = 0; k < (INT)sizeof(d); k++ ) {
+		if ( d[k] != dev->ddesc[k] ) return FALSE;
+	}
+	if ( dev->cfg == NULL || dev->cfglen <= 0 ) {
+		return TRUE;
+	}
+	c = (UB *)Kmalloc((SZ)dev->cfglen);
+	if ( c == NULL ) {
+		return FALSE;
+	}
+	for ( i = 0; i < d[17] && !same; i++ ) {
+		n = 0;
+		if ( knl_usb_get_desc(dev, USB_DT_CONFIG, (UB)i, 0, c, (UH)dev->cfglen, &n) < E_OK
+		  || n != dev->cfglen || c[5] != dev->cfg_value ) {
+			continue;
+		}
+		for ( k = 0; k < n && c[k] == dev->cfg[k]; k++ ) ;
+		same = (BOOL)( k == n );
+		break;
+	}
+	Kfree(c);
+	return same;
+}
+
+/* What the port said when the device on it was let go, for the console (and KERNEL.TXT) */
+LOCAL void port_say( USBHC *hc, USBDEV *hub, INT port, UW st )
+{
+	BOOL	conn = (BOOL)( (st & HUB_PS_CONNECTION) != 0 );
+
+	if ( hub == NULL ) {
+		knl_xhci_port_say(hc, port, conn);
+		return;
+	}
+	/* the status in the low 16 bits, the changes above */
+	USB_LOG("usb: %d-%d route %05x hub port %d let go: %s; wPortStatus %04x wPortChange %04x"
+		" (%s hub%s%d)\n", hub->hc->index, hub->root_port, hub->route, port,
+		!conn ? "not connected" : "connected, but not enabled or another device",
+		st & 0xffff, st >> 16, ( hub->speed >= USB_SPEED_SUPER ) ? "SuperSpeed" : "USB 2",
+		( hub->speed >= USB_SPEED_SUPER ) ? ", link state " : ", suspended ",
+		( hub->speed >= USB_SPEED_SUPER ) ? (INT)HUB_PS_SS_LINK(st) : (INT)( ( st >> 2 ) & 1 ));
+}
+
+/*
+ * The connection of a port changed. A device still connected and
+ * enabled that answers as the one brought up there stays as it is;
+ * otherwise what was there is let go and, once the connection is
+ * steady, what is there now is brought up.
+ */
+LOCAL void connect_change( USBHC *hc, USBDEV *hub, INT port, UW st, USBDEV *dev )
+{
+	if ( dev != NULL && (st & HUB_PS_CONNECTION) != 0 && (st & HUB_PS_ENABLE) != 0
+	  && same_device(dev) ) {
+		USB_LOG("usb: %d-%d route %05x addr %d: the connection changed, the same device kept\n",
+			hc->index, dev->root_port, dev->route, dev->addr);
+		return;
+	}
+	if ( dev != NULL ) {
+		port_say(hc, hub, port, st);
+		detach_tree(dev, ( (st & HUB_PS_CONNECTION) != 0 ) ? "reconnected" : "unplugged");
+	}
+	if ( (st & HUB_PS_CONNECTION) == 0 || (st & HUB_PC_CONNECTION) != 0 ) {
+		port_unignore(hc, hub, port);
+	}
+	/*
+	 * Nothing connected now: nothing to wait on. One manager task
+	 * serves every port, so a debounce here would hold up the ports
+	 * that went with this one; a device plugged in meanwhile reports a
+	 * connection change of its own and is debounced then.
+	 */
+	if ( (st & HUB_PS_CONNECTION) == 0 ) {
+		return;
+	}
+	if ( !port_ignored(hc, hub, port) ) {
+		attach_at(hc, hub, port);
+	}
+}
+
+/*
+ * What a port reports, taken: its changes acknowledged; a port the hub
+ * disabled on its own while the device stayed (electrical noise) brought
+ * up again; power given back after an over-current; a USB 3 link stuck
+ * in SS.Inactive or the compliance mode warm reset, unless it turns out
+ * to be a disconnection; then a connection change, or something
+ * connected and not yet brought up. E_OK unless the port could not be
+ * read (the hub itself went).
+ */
+LOCAL ER port_event( USBHC *hc, USBDEV *hub, INT port )
+{
+	USBDEV	*dev = dev_at(hc, hub, port);
+	BOOL	ss = port_ss(hc, hub, port), change;
+	UW	st = 0, now = 0;
+	INT	i;
+	ER	er;
+
+	er = port_read(hc, hub, port, HUB_PC_ALL, &st);
+	if ( er < E_OK ) {
+		return er;
+	}
+	change = (BOOL)( (st & HUB_PC_CONNECTION) != 0
+		      || ( dev != NULL && (st & HUB_PS_CONNECTION) == 0 )
+		      || ( dev == NULL && (st & HUB_PS_CONNECTION) != 0 && !port_ignored(hc, hub, port) ) );
+	if ( (st & HUB_PC_ENABLE) != 0 && (st & HUB_PS_ENABLE) == 0 && !change && dev != NULL ) {
+		USB_LOG("usb: %d-%d route %05x addr %d: the port was disabled with the device on it: brought up again\n",
+			hc->index, dev->root_port, dev->route, dev->addr);
+		change = TRUE;
+	}
+	if ( (st & HUB_PC_OVERCURRENT) != 0 ) {
+		USB_LOG("usb: %d-%d %s port %d: over-current changed (%s)\n", hc->index,
+			( hub != NULL ) ? hub->root_port : port, ( hub != NULL ) ? "hub" : "root", port,
+			( (st & HUB_PS_OVERCURRENT) != 0 ) ? "over-current now" : "gone");
+		knl_usb_wait(100);			/* to cool down */
+		if ( hub != NULL ) {
+			knl_hub_port_power(hub, port);
+		} else if ( hc->ops->port_power != NULL ) {
+			hc->ops->port_power(hc, port);
+		}
+		if ( port_read(hc, hub, port, 0, &now) >= E_OK && (now & HUB_PS_OVERCURRENT) != 0 ) {
+			USB_LOG("usb: %d-%d %s port %d: over-current condition\n", hc->index,
+				( hub != NULL ) ? hub->root_port : port, ( hub != NULL ) ? "hub" : "root", port);
+		}
+	}
+	if ( warm_needed(ss, st) ) {
+		/* a link that drops to SS.Inactive as the device is pulled out is a disconnection soon */
+		for ( i = 0; dev != NULL && i < DISCONNECT_TRIES && warm_needed(ss, st); i++ ) {
+			knl_usb_wait(20);
+			if ( port_read(hc, hub, port, 0, &st) < E_OK ) {
+				return E_IO;
+			}
+		}
+		if ( warm_needed(ss, st) ) {
+			if ( dev == NULL || (st & HUB_PS_CONNECTION) == 0 ) {
+				er = port_warm_reset(hc, hub, port);
+				if ( dev == NULL && er == E_NOEXS ) {
+					change = FALSE;
+				}
+			} else {
+				USB_LOG("usb: %d-%d route %05x addr %d: link state %d: the device warm reset\n",
+					hc->index, dev->root_port, dev->route, dev->addr, (INT)HUB_PS_SS_LINK(st));
+				er = knl_usb_reset_device(dev);
+				change = (BOOL)( er < E_OK );	/* not back as it was: brought up anew */
+			}
+		}
+		if ( port_read(hc, hub, port, HUB_PC_ALL, &st) < E_OK ) {
+			return E_IO;
+		}
+	}
+	if ( change ) {
+		connect_change(hc, hub, port, st, dev);
+	}
+	return E_OK;
 }
 
 LOCAL void scan_root( USBHC *hc )
@@ -327,20 +662,7 @@ LOCAL void scan_root( USBHC *hc )
 	INT	n = hc->ops->nports(hc), p;
 
 	for ( p = 0; p < n; p++ ) {
-		BOOL	conn = hc->ops->port_connected(hc, p);
-		BOOL	chg  = hc->ops->port_changed(hc, p);
-		USBDEV	*dev = dev_at(hc, NULL, p);
-
-		if ( dev != NULL && ( !conn || chg ) ) {
-			detach_tree(dev, conn ? "reconnected" : "unplugged");
-			dev = NULL;
-		}
-		if ( !conn || chg ) {
-			root_ignored[hc->index] &= ~(1UL << p);
-		}
-		if ( conn && dev == NULL && (root_ignored[hc->index] & (1UL << p)) == 0 ) {
-			attach_at(hc, NULL, p);
-		}
+		(void)port_event(hc, NULL, p);
 	}
 }
 
@@ -352,31 +674,11 @@ LOCAL void scan_hub( USBDEV *hub, BOOL all )
 
 	hub->hub_change &= ~change;
 	for ( p = 1; p <= hub->hub_ports; p++ ) {
-		UW	st = 0;
-		BOOL	conn, chg;
-		USBDEV	*dev;
-
 		if ( !all && (change & (1UL << p)) == 0 ) {
 			continue;
 		}
-		if ( knl_hub_port_status(hub, p, &st) < E_OK ) {
+		if ( port_event(hub->hc, hub, p) < E_OK ) {
 			return;				/* the hub itself went away */
-		}
-		conn = ( (st & HUB_PS_CONNECTION) != 0 );
-		chg  = ( (st & HUB_PC_CONNECTION) != 0 );
-		if ( (st & HUB_PC_ALL) != 0 ) {
-			knl_hub_clear_changes(hub, p, st);
-		}
-		dev = dev_at(hub->hc, hub, p);
-		if ( dev != NULL && ( !conn || chg ) ) {
-			detach_tree(dev, conn ? "reconnected" : "unplugged");
-			dev = NULL;
-		}
-		if ( !conn || chg ) {
-			hub->hub_ignored &= ~(1UL << p);
-		}
-		if ( conn && dev == NULL && (hub->hub_ignored & (1UL << p)) == 0 ) {
-			attach_at(hub->hc, hub, p);
 		}
 	}
 }
@@ -387,10 +689,14 @@ LOCAL void scan_hub( USBDEV *hub, BOOL all )
  */
 LOCAL void scan_hubs( BOOL hubs_all )
 {
-	USBDEV	*hubs[USB_MAX_DEV];
+	USBDEV	**hubs;
 	INT	i, n = 0;
 
-	for ( i = 0; i < USB_MAX_DEV; i++ ) {
+	hubs = (USBDEV **)Kmalloc(sizeof(USBDEV *) * (SZ)( ( dev_cap > 0 ) ? dev_cap : 1 ));
+	if ( hubs == NULL ) {
+		return;				/* looked at on the next turn */
+	}
+	for ( i = 0; i < dev_cap; i++ ) {
 		if ( dev_tbl[i] != NULL && dev_tbl[i]->role == USB_ROLE_HUB
 		  && !dev_tbl[i]->hc->lost ) {
 			hubs[n++] = dev_tbl[i];
@@ -406,13 +712,14 @@ LOCAL void scan_hubs( BOOL hubs_all )
 			scan_hub(hubs[i], FALSE);
 		}
 	}
+	Kfree(hubs);
 }
 
 LOCAL BOOL hub_without_pipe( void )
 {
 	INT	i;
 
-	for ( i = 0; i < USB_MAX_DEV; i++ ) {
+	for ( i = 0; i < dev_cap; i++ ) {
 		if ( dev_tbl[i] != NULL && dev_tbl[i]->role == USB_ROLE_HUB
 		  && dev_tbl[i]->hub_pipe == NULL ) {
 			return TRUE;
@@ -431,20 +738,71 @@ LOCAL void hc_lost( USBHC *hc )
 {
 	INT	i;
 
-	for ( i = 0; i < USB_MAX_DEV; i++ ) {
+	for ( i = 0; i < dev_cap; i++ ) {
 		if ( dev_tbl[i] != NULL && dev_tbl[i]->hc == hc
 		  && dev_tbl[i]->parent == NULL ) {
 			detach_tree(dev_tbl[i], "controller stopped");
 		}
 	}
-	root_ignored[hc->index] = 0;
+	if ( hc->ignored != NULL ) knl_memset(hc->ignored, 0, hc->nignored);
 }
 
 /* ---------------------------------------------------------------- task */
 
+/*
+ * The interrupts each controller has raised, for the console (and so
+ * KERNEL.TXT): the first, then each tenfold; a controller with an
+ * interrupt that has raised none 10 seconds after the start is said too,
+ * as its messages or its line do not arrive.
+ */
+#define IRQ_SILENT_MS	10000
+
+/* the kinds as ts_pcie_irq_alloc gives them */
+LOCAL CONST char *irq_kind_name( UB kind )
+{
+	static CONST char * CONST n[4] = { "polled", "MSI-X", "MSI", "INTx" };
+
+	return ( kind < 4 ) ? n[kind] : "?";
+}
+
+LOCAL void irq_report( void )
+{
+	USBHC	*hc;
+	INT	i;
+
+	for ( i = 0; i < nhc; i++ ) {
+		hc = hc_tbl[i];
+		if ( hc->intno == 0 ) continue;
+		if ( hc->irq_mark == 0 ) hc->irq_mark = 1;
+		if ( hc->nirq >= hc->irq_mark ) {
+			tm_printf((UB *)"usb: controller %d: %u interrupts arrived (%s, interrupt %d, PRC %d)\n",
+				  hc->index, hc->nirq, irq_kind_name(hc->irqkind), hc->intno,
+				  (INT)GetIntTarget(hc->intno));
+			while ( hc->irq_mark <= hc->nirq && hc->irq_mark < 1000000000U ) hc->irq_mark *= 10;
+		} else if ( hc->nirq == 0 && !hc->irq_silent_told && knl_usb_ms() >= IRQ_SILENT_MS ) {
+			INT	k, devs = 0;
+
+			/* a controller with nothing plugged into it has no reason to interrupt */
+			for ( k = 0; k < dev_cap; k++ ) {
+				if ( dev_tbl[k] != NULL && dev_tbl[k]->hc == hc ) devs++;
+			}
+			hc->irq_silent_told = TRUE;
+			if ( devs == 0 ) {
+				tm_printf((UB *)"usb: controller %d: no interrupt in %d s, as none is due:"
+					  " nothing is plugged into it (%s, interrupt %d)\n",
+					  hc->index, IRQ_SILENT_MS / 1000, irq_kind_name(hc->irqkind), hc->intno);
+			} else {
+				tm_printf((UB *)"usb: controller %d: no interrupt arrived in %d s with %d device%s on it"
+					  " (%s, interrupt %d)\n", hc->index, IRQ_SILENT_MS / 1000, devs,
+					  ( devs == 1 ) ? "" : "s", irq_kind_name(hc->irqkind), hc->intno);
+			}
+		}
+	}
+}
+
 LOCAL void usb_task( INT stacd, void *exinf )
 {
-	UW	lost_seen = 0, last_hub = 0, obj_gen = 0;
+	UW	last_hub = 0, obj_gen = 0;
 	BOOL	first = TRUE;
 	INT	i;
 
@@ -471,9 +829,10 @@ LOCAL void usb_task( INT stacd, void *exinf )
 		}
 		knl_usb_lock();
 		serve_controllers();
+		irq_report();
 		for ( i = 0; i < nhc; i++ ) {
-			if ( hc_tbl[i]->lost && (lost_seen & (1UL << i)) == 0 ) {
-				lost_seen |= 1UL << i;
+			if ( hc_tbl[i]->lost && !hc_tbl[i]->lost_told ) {
+				hc_tbl[i]->lost_told = TRUE;
 				hc_lost(hc_tbl[i]);
 			}
 		}
@@ -521,13 +880,23 @@ LOCAL void usb_task( INT stacd, void *exinf )
 
 /* ---------------------------------------------------------------- controllers */
 
-LOCAL void add_hc( USBHC *hc )
+LOCAL BOOL add_hc( USBHC *hc )
 {
+	INT	np = hc->ops->nports(hc);
+
+	if ( nhc == hc_cap && !tbl_grow((void ***)&hc_tbl, &hc_cap, 4) ) {
+		return FALSE;
+	}
+	hc->ignored = ( np > 0 ) ? (UB *)Kcalloc((SZ)np, 1) : NULL;
+	hc->nignored = ( hc->ignored != NULL ) ? np : 0;
+	hc->lost_told = FALSE;
 	hc->index = nhc;
-	hc_tbl[nhc++] = hc;
+	hc_tbl[nhc] = hc;
+	nhc++;
 	if ( hc->intno == 0 ) {
 		polled_hc = TRUE;
 	}
+	return TRUE;
 }
 
 #ifdef USE_KTEST
@@ -538,12 +907,11 @@ LOCAL void add_hc( USBHC *hc )
  */
 EXPORT ER knl_usb_add_hc( USBHC *hc )
 {
-	if ( nhc >= USB_MAX_HC || usb_flg <= 0 ) {
+	if ( usb_flg <= 0 ) {
 		return E_LIMIT;
 	}
 	hc->flgid = usb_flg;
-	add_hc(hc);
-	return E_OK;
+	return add_hc(hc) ? E_OK : E_NOMEM;
 }
 #endif
 
@@ -552,15 +920,26 @@ EXPORT ER knl_usb_add_hc( USBHC *hc )
 #define PCI_SUBCLASS_USB	0x03
 #define PCI_PROGIF_XHCI		0x30
 
+#ifdef X64
+IMPORT void	knl_xhci_pc_before( CONST T_PCIDEV *d );	/* device/usb/x86_64/xhci_pc.c */
+IMPORT void	knl_xhci_pc_after( USBHC *hc );
+#endif
+
 #ifndef CNF_PCIE_POLL
 #define CNF_PCIE_POLL		0
 #endif
 
+IMPORT ER	knl_xhci_quiesce( UBINT regs, UD size, UD mmio );	/* xhci.c */
+
 /*
- * Every xHCI function on the PCI Express bus, with a message interrupt
- * each; where the machine has nowhere to send messages (the Raspberry Pi
- * 4), with the line the function raises, or polled when built so
- * (CNF_PCIE_POLL).
+ * Every xHCI function on the PCI Express bus, with an interrupt each:
+ * MSI-X, else MSI, else the line the function raises (ts_pcie_irq_alloc;
+ * on the Raspberry Pi 4, which has nowhere to send messages, the line),
+ * or polled when there is none or when built so (CNF_PCIE_POLL). The
+ * controller is taken from the firmware and made quiet first
+ * (knl_xhci_quiesce): one the firmware left running with an interrupt
+ * pending would send it as soon as its messages are enabled, before
+ * knl_xhci_attach defines the handler.
  */
 LOCAL void find_pci( void )
 {
@@ -568,9 +947,9 @@ LOCAL void find_pci( void )
 	UBINT		base;
 	UINT		intno;
 	USBHC		*hc;
-	INT		i;
+	INT		i, kind;
 
-	for ( i = 0; nhc < USB_MAX_HC; i++ ) {
+	for ( i = 0; ; i++ ) {
 		if ( ts_pcie_find(PCI_CLASS_SERIAL, PCI_SUBCLASS_USB,
 				  PCI_PROGIF_XHCI, i, &d) < E_OK ) {
 			break;
@@ -580,12 +959,22 @@ LOCAL void find_pci( void )
 			continue;			/* it was given no window */
 		}
 		ts_pcie_enable(&d);
-		if ( ts_pcie_msi_alloc(&d, &intno) < E_OK ) {
-			intno = CNF_PCIE_POLL ? 0 : d.intno;
+		(void)knl_xhci_quiesce(base, d.bar_size[0], d.bar[0]);
+		kind = ts_pcie_irq_alloc(&d, &intno, !CNF_PCIE_POLL);
+		if ( kind < E_OK ) {
+			kind = PCI_IRQ_POLL;
+			intno = 0;
 		}
+#ifdef X64
+		knl_xhci_pc_before(&d);
+#endif
 		if ( knl_xhci_attach(base, d.bar_size[0], d.bar[0], intno,
 				     usb_flg, &hc) >= E_OK ) {
+			hc->irqkind = (UB)kind;
 			add_hc(hc);
+#ifdef X64
+			knl_xhci_pc_after(hc);
+#endif
 		}
 	}
 }
@@ -642,7 +1031,7 @@ LOCAL void find_rp1( void )
 			  in_w(w + 0x014000), in_w(w + 0x014004), in_w(w + 0x014008), in_w(w + 0x01400c),
 			  in_w(w + 0x0180f4), in_w(w + 0x018104), in_w(w + 0x018114), in_w(w + 0x018124));
 	}
-	for ( i = 0; i < 2 && nhc < USB_MAX_HC; i++ ) {
+	for ( i = 0; i < 2; i++ ) {
 		UBINT	base = DEV_BASE(pa[i]);
 		UW	gctl;
 
@@ -826,7 +1215,7 @@ EXPORT INT ts_usb_lst_dev( T_USBDEV *buf, INT max )
 	}
 	knl_usb_lock();
 	for ( depth = 0; depth <= USB_MAX_DEPTH; depth++ ) {
-		for ( i = 0; i < USB_MAX_DEV; i++ ) {
+		for ( i = 0; i < dev_cap; i++ ) {
 			USBDEV	*d = dev_tbl[i];
 
 			if ( d == NULL || d->depth != depth ) {

@@ -23,6 +23,10 @@
  *	Raspberry Pi 5 itself the tests of playing, which are written for
  *	the USB audio function, are not run; opening, recording from the
  *	test source and closing are.
+ *
+ *	On the x64 PC, recording through Intel HDA is tested when QEMU is
+ *	given its intel-hda and hda-duplex (tools/x64/ktest64.sh, EXTRA);
+ *	without them it is skipped.
  */
 
 #include "ktest.h"
@@ -73,7 +77,7 @@ LOCAL void get_stat( ID dd, SDStat *st )
 	tk_srea_dev(dd, DN_SDSTAT, st, sizeof(*st), &asz);
 }
 
-#if !KT_BOARD
+#if KT_QEMU_DEVS
 /* A tone as a triangle wave: 16 bit, stereo, frames of it at rate */
 LOCAL void tone16( H *buf, INT frames, INT period )
 {
@@ -113,6 +117,7 @@ LOCAL void test_open( void )
 	SDStat		st;
 	SDSel		sel;
 	SZ		asz = 0;
+	ER		er;
 
 	snd_dd = tk_opn_dev((UB *)SND_DEVNM, TD_UPDATE);
 	if ( snd_dd <= 0 ) KT_SKIP("no sound device");
@@ -152,11 +157,21 @@ LOCAL void test_open( void )
 	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMCTL, 9), E_PAR);
 	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMBUFSZ, 0), E_PAR);
 	KT_ASSERT(attr_w(snd_dd, -150, 0) < E_OK);
-	/* nothing records on this machine */
-	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMCTL, PCM_REC), E_NOSPT);
+	/*
+	 * nothing records on this machine, unless it has Intel HDA (the
+	 * x64 PC, QEMU with intel-hda): then the recording is stopped
+	 */
+	er = attr_w(snd_dd, DN_SDPCMCTL, PCM_REC);
+#if defined(X64)
+	if ( er == E_OK ) {
+		KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMCTL, PCM_STOP), E_OK);
+		er = E_NOSPT;
+	}
+#endif
+	KT_ASSERT_ER(er, E_NOSPT);
 }
 
-#if !KT_BOARD
+#if KT_QEMU_DEVS
 /*
  * One second of a tone at 48kHz: the device takes it packet by packet,
  * a packet a millisecond, and the channel stops at its stop count once
@@ -239,7 +254,7 @@ LOCAL void test_mix( void )
 {
 	ID	dd2;
 	H	*pcm;
-	UB	ulaw[8000];
+	static UB	ulaw[8000];
 	SDStat	st;
 	SZ	asz = 0;
 	INT	i, maxplay = 0;
@@ -288,10 +303,92 @@ LOCAL void test_mix( void )
 	KT_ASSERT_ER(tk_cls_dev(dd2, 0), E_OK);
 }
 
+/*
+ * More channels than the table first has room for (16). A channel is a
+ * program's (a task's here) on a unit, so each of KT_CHANS tasks opens
+ * the unit and holds its channel while all the others hold theirs; then
+ * each plays what it was given to the end and closes.
+ */
+#define KT_CHANS	20
+
+LOCAL ID	ch_open, ch_go, ch_done;
+LOCAL INT	ch_ok[KT_CHANS];
+
+LOCAL void ch_task( INT i, void *exinf )
+{
+	static UB	ulaw[800];
+	SZ		asz = 0;
+	ID		dd;
+	INT		k, ok = -1;
+
+	for ( k = 0; k < (INT)sizeof(ulaw); k++ ) ulaw[k] = ( (k / 10) & 1 ) ? 0x80 : 0x00;
+	dd = tk_opn_dev((UB *)"snda0", TD_UPDATE);
+	/* its channel is made at its first request */
+	if ( dd > 0 && set_mode(dd, PCMST8K, PCMFmt8ulaw, 0) >= E_OK ) ok = 0;
+	tk_sig_sem(ch_open, 1);
+	tk_wai_sem(ch_go, 1, 10000);
+	/* what went wrong, when it did: the step's number, negative */
+	if ( ok == 0 ) ok = ( tk_swri_dev(dd, 0, ulaw, sizeof(ulaw), &asz) < E_OK ) ? -3
+			  : ( attr_w(dd, DN_SDPCMENDCNT, sizeof(ulaw)) < E_OK ) ? -4
+			  : ( attr_w(dd, DN_SDPCMCTL, PCM_PLAY) < E_OK ) ? -5
+			  : !wait_stop(dd, 10000) ? -6
+			  : ( attr_r(dd, DN_SDPCMCNT) != (W)sizeof(ulaw) ) ? -7 : 1;
+	ch_ok[i] = ok;
+	if ( dd > 0 ) {
+		(void)attr_w(dd, DN_SDPCMCTL, PCM_STOP);	/* none left playing for the tests after */
+		tk_cls_dev(dd, 0);
+	}
+	tk_sig_sem(ch_done, 1);
+	tk_ext_tsk();
+}
+
+LOCAL void test_channels( void )
+{
+	T_CSEM	cs;
+	T_CTSK	ct;
+	ID	tid[KT_CHANS];
+	INT	i, n = 0, good = 0;
+
+	if ( snd_dd <= 0 ) KT_SKIP("no sound device");
+	knl_memset(&cs, 0, sizeof(cs));
+	cs.sematr = TA_TFIFO | TA_FIRST;
+	cs.maxsem = KT_CHANS;
+	ch_open = tk_cre_sem(&cs);
+	ch_go = tk_cre_sem(&cs);
+	ch_done = tk_cre_sem(&cs);
+	KT_ASSERT(ch_open > 0 && ch_go > 0 && ch_done > 0);
+	knl_memset(&ct, 0, sizeof(ct));
+	ct.tskatr = TA_HLNG | TA_RNG0;
+	ct.task = (FP)ch_task;
+	ct.itskpri = 20;
+	ct.stksz = 8 * 1024;
+	for ( i = 0; i < KT_CHANS; i++ ) {
+		ch_ok[i] = -2;
+		tid[i] = tk_cre_tsk(&ct);
+		if ( tid[i] > 0 && tk_sta_tsk(tid[i], i) >= E_OK ) n++;
+	}
+	KT_ASSERT_EQ(n, KT_CHANS);
+	/* every one holds its channel at once */
+	for ( i = 0; i < n; i++ ) (void)tk_wai_sem(ch_open, 1, 10000);
+	for ( i = 0; i < n; i++ ) KT_ASSERT_EQ(ch_ok[i], -2);
+	(void)tk_sig_sem(ch_go, n);
+	for ( i = 0; i < n; i++ ) (void)tk_wai_sem(ch_done, 1, 20000);
+	for ( i = 0; i < n; i++ ) {
+		if ( ch_ok[i] == 1 ) good++;
+		else tm_printf((UB *)"  channel %d: step %d\n", i, ch_ok[i]);
+	}
+	KT_ASSERT_EQ(good, KT_CHANS);
+	tk_dly_tsk(20);
+	for ( i = 0; i < KT_CHANS; i++ ) if ( tid[i] > 0 ) (void)tk_del_tsk(tid[i]);
+	(void)tk_del_sem(ch_open);
+	(void)tk_del_sem(ch_go);
+	(void)tk_del_sem(ch_done);
+}
+
 /* A channel that runs out of samples stops by itself: an underrun */
 LOCAL void test_underrun( void )
 {
-	H	pcm[4800 * 2];
+	static H	pcm[4800 * 2];
 	SDStat	s0, s1;
 	SZ	asz = 0;
 
@@ -349,7 +446,7 @@ LOCAL INT put( ID dd, W dn, CONST H *pcm, INT bytes )
  */
 LOCAL void test_prime( void )
 {
-	H	pcm[1024 * 2];
+	static H	pcm[1024 * 2];
 	SDStat	s0, s1;
 	INT	bufsz, i;
 	W	n;
@@ -502,7 +599,8 @@ LOCAL void test_switch( void )
  */
 LOCAL void test_record( void )
 {
-	UB	*in, out[4096];
+	UB	*in;
+	static UB	out[4096];
 	SZ	asz = 0;
 	INT	i, got = 0, bad = 0, n;
 	W	bytes;
@@ -564,7 +662,10 @@ LOCAL void test_record( void )
 	Kfree(in);
 }
 
-#if !KT_BOARD
+#if KT_QEMU_DEVS
+/* Room for the outputs a test looks at: more than it ever plugs in */
+#define KT_OUTS		32
+
 /* The outputs there are now: how many, and the one of kind with port (NULL any) */
 LOCAL INT outs( SDOut *o, INT max )
 {
@@ -580,8 +681,8 @@ LOCAL INT outs( SDOut *o, INT max )
 /* The id of the USB output whose id ends in port (its hub port, as ".1"), into id; FALSE none */
 LOCAL BOOL usb_out( CONST char *port, UB *id )
 {
-	SDOut	o[SND_OUT_MAX];
-	INT	n = outs(o, SND_OUT_MAX), k, a, b;
+	SDOut	o[KT_OUTS];
+	INT	n = outs(o, KT_OUTS), k, a, b;
 
 	for ( k = 0; k < n; k++ ) {
 		a = (INT)knl_strlen((CONST char *)o[k].id);
@@ -660,7 +761,7 @@ LOCAL void outputs_by_records( CONST UB *id1 );
  */
 LOCAL void test_outputs( void )
 {
-	SDOut		o[SND_OUT_MAX];
+	static SDOut	o[KT_OUTS];
 	SDOutSel	s;
 	UB		id1[SND_ID_MAX], id2[SND_ID_MAX];
 	H		*pcm;
@@ -669,7 +770,7 @@ LOCAL void test_outputs( void )
 	W		c0, c1;
 
 	if ( snd_dd <= 0 ) KT_SKIP("no sound device");
-	n = outs(o, SND_OUT_MAX);
+	n = outs(o, KT_OUTS);
 	KT_ASSERT(n >= 2);
 	KT_ASSERT_EQ(knl_strcmp((CONST char *)o[0].id, SND_ID_AUTO), 0);
 	KT_ASSERT((o[0].flags & SND_OF_CHOSEN) != 0);
@@ -710,7 +811,7 @@ LOCAL void test_outputs( void )
 	c1 = attr_r(snd_dd, DN_SDPCMCNT);
 	KT_ASSERT_EQ(attr_r(snd_dd, DN_SDPCMCTL), PCM_REPPLAY);
 	KT_ASSERT(c1 != c0);
-	n = outs(o, SND_OUT_MAX);
+	n = outs(o, KT_OUTS);
 	KT_ASSERT(n >= 3);
 
 	/* the chosen one taken out: on to the other; put back: on to it again */
@@ -815,7 +916,7 @@ LOCAL void outputs_by_records( CONST UB *id1 )
 	{
 		TS_UUID	dev;
 		INT	cnt = 0;
-		SDOut	o[SND_OUT_MAX];
+		SDOut	o[KT_OUTS];
 
 		if ( ob_lst_obj(OB_T_DEVICE, OB_S_SOUND, NULL, &dev, 1, &cnt) >= E_OK && cnt > 0 ) {
 			k = ob_opn_obj(&dev, OB_OP_R | OB_OP_WRITE);
@@ -860,7 +961,7 @@ LOCAL void outputs_by_records( CONST UB *id1 )
 }
 #endif /* KT_BOARD */
 
-#if !KT_BOARD
+#if KT_QEMU_DEVS
 /* A level held in both sides, stereo 16 bit, frames of it */
 LOCAL void dc16( H *buf, INT frames, INT l, INT r )
 {
@@ -914,6 +1015,72 @@ LOCAL BOOL same16( CONST UB *x, CONST UB *y )
 
 #define NEAR(a, b)	( (a) - (b) <= 8 && (b) - (a) <= 8 )
 
+/* Whether s holds the text w */
+LOCAL BOOL str_has( CONST char *s, CONST char *w )
+{
+	INT	i, k;
+
+	for ( i = 0; s[i] != 0; i++ ) {
+		for ( k = 0; w[k] != 0 && s[i + k] == w[k]; k++ ) ;
+		if ( w[k] == 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * The test's two programs taken out of what the machine's settings keep,
+ * as it was before any run of the test, and the settings left still.
+ * Each write of the settings is applied again by their watcher a little
+ * later (uconf.c); a line of either program kept by an earlier run (the
+ * second is left at 100, not muted, as the test ends) would set it back
+ * over what the test sets while it runs, and one at 30 and muted would
+ * start the machine so.
+ */
+#define KT_PA_KEPT	"0000000000a1 "
+#define KT_PB_KEPT	"0000000000b2 "
+
+/*
+ * Until the watcher has applied a write of the machine's settings made
+ * after the console was at *pos (it says so on the console first), and
+ * a little more: up to 5 s. A fixed wait is not enough when the machine
+ * is busy, the watcher being a task of low priority, and its apply,
+ * coming in the middle of the test, would set the mixer back.
+ */
+#define WATCHED_SAID	"settings: the machine's were written"
+
+LOCAL void watcher_applied( UD pos )
+{
+	static UB	buf[2048];
+	INT		n, k, t, m = (INT)sizeof(WATCHED_SAID) - 1, i;
+
+	for ( t = 0; t < 5000; t += 50 ) {
+		while ( ( n = tm_log_read(&pos, buf, (INT)sizeof(buf)) ) > 0 ) {
+			for ( i = 0; i + m <= n; i++ ) {
+				for ( k = 0; k < m && buf[i + k] == (UB)WATCHED_SAID[k]; k++ ) ;
+				if ( k == m ) {
+					tk_dly_tsk(300);
+					return;
+				}
+			}
+			if ( n > m ) pos -= (UD)m;	/* a line cut between two reads */
+		}
+		tk_dly_tsk(50);
+	}
+}
+
+LOCAL void drop_kept_pa( void )
+{
+	char	v[CF_VAL_MAX];
+	UD	pos = ~(UD)0 >> 1;
+	UB	c;
+
+	if ( wm_dev_conf_get("SOUND_APP", v, sizeof(v)) && ( str_has(v, KT_PA_KEPT) || str_has(v, KT_PB_KEPT) ) ) {
+		(void)tm_log_read(&pos, &c, 1);		/* where the console is now */
+		KT_ASSERT_ER(wm_dev_conf_put("SOUND_APP", ""), E_OK);
+		watcher_applied(pos);			/* the watcher, which applies them again */
+	}
+}
+
 /*
  * The mixer, by the samples it gives: two channels of two programs (the
  * test's own channels of "snda" and "snda0", taken as two programs)
@@ -935,9 +1102,10 @@ LOCAL void test_mixer( void )
 	dd2 = tk_opn_dev((UB *)"snda0", TD_UPDATE);
 	a = (H *)Kmalloc(4800 * 4);
 	b = (H *)Kmalloc(4800 * 4);
-	m = (SDMix *)Kmalloc(sizeof(SDMix));
+	m = (SDMix *)Kmalloc(SND_MIX_SIZE(KT_OUTS));
 	KT_ASSERT(dd2 > 0 && a != NULL && b != NULL && m != NULL);
 	if ( dd2 <= 0 || a == NULL || b == NULL || m == NULL ) return;
+	drop_kept_pa();
 
 	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMCTL, PCM_STOP), E_OK);
 	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMENDCNT, 0), E_OK);
@@ -978,8 +1146,8 @@ LOCAL void test_mixer( void )
 	KT_ASSERT(l == 0 && r == 0);
 
 	/* what the mixer says of them */
-	KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDMIXER, m, sizeof(SDMix), &asz), E_OK);
-	KT_ASSERT_EQ(asz, sizeof(SDMix));
+	KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDMIXER, m, SND_MIX_SIZE(KT_OUTS), &asz), E_OK);
+	KT_ASSERT_EQ(asz, SND_MIX_SIZE(m->napp));
 	KT_ASSERT(m->lv == 50 && m->rv == 100 && m->mute == 1);
 	for ( k = 0; k < (INT)m->napp; k++ ) {
 		tm_printf((UB *)"  program \"%s\" pid %d: volume %d mute %d, %d channels %d playing\n",
@@ -1031,22 +1199,32 @@ LOCAL void test_mixer( void )
 			KT_ASSERT_ER(mixset(SND_MIX_ALL, NULL, 100, 100, 0), E_OK);
 			KT_ASSERT_ER(wm_dev_conf_put("SOUND_VOL", "80 60 0"), E_OK);
 			KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
-			KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDMIXER, m, sizeof(SDMix), &asz), E_OK);
+			KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDMIXER, m, SND_MIX_SIZE(KT_OUTS), &asz), E_OK);
 			KT_ASSERT(m->lv == 80 && m->rv == 60);
+			/* put back as it was: the settings first, then the program's volume */
 			KT_ASSERT_ER(wm_dev_conf_put("SOUND_VOL", had ? was_vol : "100 100 0"), E_OK);
-			KT_ASSERT_ER(mixset(SND_MIX_APP, pa, 100, 100, 0), E_OK);
 			KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
-			tk_dly_tsk(1500);
+			KT_ASSERT_ER(mixset(SND_MIX_APP, pa, 100, 100, 0), E_OK);
 		}
 	}
 	KT_ASSERT_ER(mixset(SND_MIX_ALL, NULL, 100, 100, 0), E_OK);
+	tk_dly_tsk(2500);			/* kept a second after the last change */
+	drop_kept_pa();
+	{
+		char	v[CF_VAL_MAX];
+
+		tm_printf((UB *)"  kept after: SOUND_APP %s\n",
+			  wm_dev_conf_get("SOUND_APP", v, sizeof(v)) ? v : "(none)");
+		KT_ASSERT(!wm_dev_conf_get("SOUND_APP", v, sizeof(v))
+			  || ( !str_has(v, KT_PA_KEPT) && !str_has(v, KT_PB_KEPT) ));
+	}
 	Kfree(a);
 	Kfree(b);
 	Kfree(m);
 }
 #endif /* KT_BOARD */
 
-#if !KT_BOARD
+#if KT_QEMU_DEVS
 /* Up to ms for the stream to be (on) or not be (!on) playing on some output */
 LOCAL BOOL wait_stream( BOOL on, INT ms )
 {
@@ -1082,7 +1260,7 @@ LOCAL ER sys_sound( CONST char *w )
  */
 LOCAL void test_keep( void )
 {
-	H	pcm[4800 * 2];
+	static H	pcm[4800 * 2];
 	SZ	asz = 0;
 	char	was[CF_VAL_MAX];
 	BOOL	had;
@@ -1136,6 +1314,60 @@ LOCAL void test_keep( void )
 #endif /* KT_BOARD */
 
 /* The board sound of the Raspberry Pi 5 cannot be heard here */
+#if defined(X64)
+/*
+ * Recording through Intel HDA (QEMU's intel-hda with hda-duplex, or the
+ * PC's own codec): the input path made and the stream running, the
+ * frames coming at the device's pace, the input level kept
+ */
+LOCAL void test_hda_record( void )
+{
+	static UB	buf[8192];
+	SDStat		s0, s1;
+	SDVol		v, r;
+	SZ		asz = 0;
+	ER		er;
+	INT		got = 0, i;
+
+	if ( snd_dd <= 0 ) KT_SKIP("no sound device");
+	KT_ASSERT_ER(set_mode(snd_dd, PCMST48K, PCMFmt16, 1), E_OK);
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMBUFSZ, 65536), E_OK);
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMENDCNT, 0), E_OK);
+	get_stat(snd_dd, &s0);
+	er = attr_w(snd_dd, DN_SDPCMCTL, PCM_REC);
+	if ( er == E_NOSPT ) KT_SKIP("nothing records (QEMU without -device intel-hda -device hda-duplex)");
+	KT_ASSERT_ER(er, E_OK);
+	get_stat(snd_dd, &s1);
+	if ( s1.backend != SND_BE_HDA ) {
+		(void)attr_w(snd_dd, DN_SDPCMCTL, PCM_STOP);
+		KT_SKIP("recording goes through another backend");
+	}
+	KT_ASSERT_EQ(s1.in_rate, 48000);
+	KT_ASSERT_EQ(s1.in_channels, 2);
+
+	v.lv = v.rv = 0x9000;
+	KT_ASSERT_ER(tk_swri_dev(snd_dd, DN_SDVOLMIC, &v, sizeof(v), &asz), E_OK);
+	KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDVOLMIC, &r, sizeof(r), &asz), E_OK);
+	KT_ASSERT_EQ(r.lv, 0x9000);
+
+	/* half a second: the frames recorded, and what is read of them */
+	for ( i = 0; i < 25; i++ ) {
+		tk_dly_tsk(20);
+		if ( tk_srea_dev(snd_dd, 1, buf, sizeof(buf), &asz) >= E_OK ) got += (INT)asz;
+	}
+	get_stat(snd_dd, &s1);
+	tm_printf((UB *)"  hda: %u frames recorded in 0.5 s, %d bytes read\n", s1.in_frames - s0.in_frames, got);
+	KT_ASSERT(s1.in_frames - s0.in_frames >= 12000);
+	KT_ASSERT(got >= 12000 * 4);
+	KT_ASSERT_EQ(attr_r(snd_dd, DN_SDPCMCTL), PCM_REC);
+
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMCTL, PCM_STOP), E_OK);
+	KT_ASSERT_EQ(attr_r(snd_dd, DN_SDPCMCTL), PCM_STOP);
+	v.lv = v.rv = 0xc000;
+	(void)tk_swri_dev(snd_dd, DN_SDVOLMIC, &v, sizeof(v), &asz);
+}
+#endif /* X64 */
+
 LOCAL void test_i2s( void )
 {
 	KT_SKIP("RP1 I2S: Raspberry Pi 5 only, not verified on hardware");
@@ -1151,16 +1383,20 @@ LOCAL void test_close( void )
 EXPORT void ktest_snd( void )
 {
 	KT_RUN(test_open);
-	KT_RUN_EXCEPT_RPI5(test_play, "written for the USB audio function of the QEMU machine");
-	KT_RUN_EXCEPT_RPI5(test_mix, "written for the USB audio function of the QEMU machine");
-	KT_RUN_EXCEPT_RPI5(test_underrun, "written for the USB audio function of the QEMU machine");
-	KT_RUN_EXCEPT_RPI5(test_prime, "written for the USB audio function of the QEMU machine");
-	KT_RUN_EXCEPT_RPI5(test_restart, "written for the USB audio function of the QEMU machine");
-	KT_RUN_EXCEPT_RPI5(test_switch, "written for the USB audio function of the QEMU machine");
+	KT_RUN_QEMU_DEVS(test_play, "written for the USB audio function of the QEMU machine");
+	KT_RUN_QEMU_DEVS(test_mix, "written for the USB audio function of the QEMU machine");
+	KT_RUN_QEMU_DEVS(test_channels, "written for the USB audio function of the QEMU machine");
+	KT_RUN_QEMU_DEVS(test_underrun, "written for the USB audio function of the QEMU machine");
+	KT_RUN_QEMU_DEVS(test_prime, "written for the USB audio function of the QEMU machine");
+	KT_RUN_QEMU_DEVS(test_restart, "written for the USB audio function of the QEMU machine");
+	KT_RUN_QEMU_DEVS(test_switch, "written for the USB audio function of the QEMU machine");
 	KT_RUN(test_record);
-	KT_RUN_EXCEPT_RPI5(test_outputs, "written for the USB audio functions of the QEMU machine");
-	KT_RUN_EXCEPT_RPI5(test_mixer, "written for the USB audio function of the QEMU machine");
-	KT_RUN_EXCEPT_RPI5(test_keep, "written for the USB audio function of the QEMU machine");
+#if defined(X64)
+	KT_RUN(test_hda_record);
+#endif
+	KT_RUN_QEMU_DEVS(test_outputs, "written for the USB audio functions of the QEMU machine");
+	KT_RUN_QEMU_DEVS(test_mixer, "written for the USB audio function of the QEMU machine");
+	KT_RUN_QEMU_DEVS(test_keep, "written for the USB audio function of the QEMU machine");
 	KT_RUN(test_i2s);
 	KT_RUN(test_close);
 }

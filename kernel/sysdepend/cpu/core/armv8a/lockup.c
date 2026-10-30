@@ -63,6 +63,7 @@
 #define LK_SPIN_AGAIN	6		/* a waiter for a spin lock says it again every this many periods */
 
 #define NPRC		CNF_MAX_PRCID
+#define LKB(i)		( lk[i].beats )
 
 /* The board's watchdog: none unless the board has one (kernel/sysdepend/rpi/wdog.c) */
 WEAK_FUNC EXPORT BOOL knl_wdog_hw_feed( UW ms )
@@ -321,6 +322,12 @@ LOCAL void lk_say_cpu( INT i, UD now )
 		tm_printf_urgent((UB *)"%sholds the kernel lock, taken at %lx %d ms ago\n", pre,
 				 (UD)knl_klock_pc, lk_ago(now, knl_klock_since));
 	}
+#if KLK_FINE
+	for ( k = 0; k < p->klk.n && k < KLK_HELD_N; k++ ) {
+		tm_printf_urgent((UB *)"%sholds the kernel's lock %lx (rank %d), taken at %lx\n", pre,
+				 (UD)(UBINT)p->klk.held[k].l, p->klk.held[k].rank, (UD)p->klk.held[k].pc);
+	}
+#endif
 	for ( k = 0; i < SPIN_HELD_PRC && k < SPIN_HELD_N; k++ ) {
 		T_SPHELD	*h = &knl_spin_held[i][k];
 		T_SPLOCK	*l = h->lock;
@@ -363,6 +370,28 @@ LOCAL INT lk_holder_of( T_SPLOCK *l, T_SPHELD **ph )
 		}
 	}
 	return -1;
+}
+
+/*
+ * A task named by its caller said as a stopped one is (where it runs or
+ * waits, its frames, the mutexes it waits for and who holds them), with
+ * the reason first: for a caller that finds a step of its own not done
+ * in time, before the watch of the desktop's loop would tell it
+ */
+EXPORT void knl_lockup_tell_task( ID tskid, CONST char *why )
+{
+	TCB	*t;
+	UINT	s;
+
+	if ( !CHK_TSKID(tskid) ) {
+		return;
+	}
+	t = get_tcb(tskid);
+	s = tm_urgent_begin();
+	tm_printf_urgent((UB *)"%s\n", ( why != NULL ) ? why : "");
+	lk_say_waiting_task(" ", t);
+	lk_say_chain(" ", t);
+	tm_urgent_end(s);
 }
 
 /* The same for the exception reports (exc_hdl.c) */
@@ -955,13 +984,18 @@ EXPORT INT knl_wdog_get( BOOL *p_hw )
 
 EXPORT void knl_lockup_stat( T_LKSTAT *st )
 {
-	INT	i;
-
 	*st = lk_stat;
 	st->hw = lk_hw_on;
-	for ( i = 0; i < 8; i++ ) {
-		st->beats[i] = ( i < NPRC ) ? lk[i].beats : 0;
+}
+
+EXPORT INT knl_lockup_beats( UD *beats, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i < n && i < knl_num_prc && i < NPRC; i++ ) {
+		beats[i] = LKB(i);
 	}
+	return i;
 }
 
 #if USE_KTEST

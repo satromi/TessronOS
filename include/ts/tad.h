@@ -40,13 +40,17 @@ extern "C" {
 /*
  * Limits of one parse. A real object may have been written by someone
  * else, so nothing about a document is believed until it has been
- * counted. A zero field takes the default beside it.
+ * counted. A zero field takes the default beside it. By default only
+ * the nesting is bounded: those who read the tree go down it by calling
+ * themselves, on a task's stack. How many nodes and attributes, and how
+ * long the text and its values, are as much as memory holds; a caller
+ * that wants less says so.
  */
 #define TAD_DEF_DEPTH	32		/* nesting of elements */
-#define TAD_DEF_NODES	4096		/* nodes of one document */
-#define TAD_DEF_ATTRS	64		/* attributes of one element */
-#define TAD_DEF_ATTRLEN	4096		/* bytes of one attribute value */
-#define TAD_DEF_DOCSIZE	(256 * 1024)	/* bytes of the document text */
+#define TAD_DEF_NODES	0x7FFFFFFF	/* nodes of one document: no bound */
+#define TAD_DEF_ATTRS	0x7FFFFFFF	/* attributes of one element: no bound */
+#define TAD_DEF_ATTRLEN	((SZ)0x7FFFFFFFFFFFFFFFLL)	/* bytes of one attribute value: no bound */
+#define TAD_DEF_DOCSIZE	((SZ)0x7FFFFFFFFFFFFFFFLL)	/* bytes of the document text: no bound */
 
 typedef struct {
 	INT	depth;
@@ -86,6 +90,13 @@ typedef struct t_tadnode {
 	struct t_tadnode *first;	/* first child */
 	struct t_tadnode *last;
 	struct t_tadnode *next;		/* next sibling */
+	/*
+	 * Counted up whenever the node or anything inside it is changed
+	 * (tad_touch): whoever keeps what it made of a part of the tree
+	 * -- the lines a paragraph was laid in -- knows from it whether
+	 * that part is still as it was.
+	 */
+	UW	gen;
 } T_TADNODE;
 
 typedef struct t_tad T_TAD;		/* one parsed document */
@@ -180,6 +191,14 @@ IMPORT T_TADNODE *tad_root( CONST T_TAD *doc );		/* the <tad> element */
 IMPORT T_TADNODE *tad_body( CONST T_TAD *doc );		/* <document> or <figure> */
 IMPORT T_TADNODE *tad_walk( CONST T_TAD *doc, CONST T_TADNODE *cur );
 IMPORT CONST UB *tad_attr( CONST T_TADNODE *nd, CONST char *name );
+/* A node changed: it and every node it is inside counted up (gen) */
+IMPORT void tad_touch( T_TADNODE *nd );
+/*
+ * A number no other document read since the start has had: whoever
+ * keeps nodes of a document by their addresses knows from it that a
+ * document at the same place is another one.
+ */
+IMPORT UW   tad_serial( CONST T_TAD *doc );
 /*
  * An attribute of an element set, added when it is not there. The
  * element is written from its attributes afterwards, not from the text
@@ -204,6 +223,26 @@ IMPORT ER tad_lnk_add( T_TAD *doc, CONST T_VOBJ *pk_vobj, TS_UUID *p_vobjid );
  * still comes back byte for byte.
  */
 IMPORT ER tad_lnk_set( T_TAD *doc, CONST T_VOBJ *pk_vobj );
+
+/*
+ * How tall a virtual object is when closed: the band its name is
+ * written in, which is the letters (chsz, 14 when it does not say) and
+ * eleven pixels for a line above and below them and the frame. A closed
+ * link written at fourteen point is twenty-five pixels tall in the
+ * records. 0 for a link that shows none of the picture, the name, the
+ * relationship, the kind and the date: it has no band and is a plain box.
+ *
+ * No box of a link is shorter than this: what is sized smaller, or read
+ * smaller from a record, is shown and kept at this height.
+ *
+ * tad_lnk_fit_h is the height a box asked to be h tall is given: the
+ * closed height when h is no more than TAD_OPEN_SLACK taller than it
+ * (closed, the hand having stopped a little past the band), else h,
+ * an opened object showing what it points at under its band.
+ */
+#define TAD_OPEN_SLACK	8
+IMPORT INT tad_lnk_closed_h( CONST T_VOBJ *pk_vobj );
+IMPORT INT tad_lnk_fit_h( CONST T_VOBJ *pk_vobj, INT h );
 
 /*
  * The links put in a new order, front to back as the document holds

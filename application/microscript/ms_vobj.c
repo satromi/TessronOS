@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <ts/dtreq.h>
 #include <ts/json.h>
+#include <ts/obatr.h>
 
 #define OPENED_MAX	64
 #define ANSWER_MS	5000
@@ -51,21 +52,20 @@ static BOOL uuid_zero( const TS_UUID *u )
 	return (BOOL)( memcmp(u, &zero, sizeof(zero)) == 0 );
 }
 
-/* A process's number: its object's name is "process" and the number */
+/* A process's number, as its object's metadata says it (tessronos.process.pid) */
 INT ms_pid_of( const TS_UUID *pu )
 {
-	T_OBREF		r;
-	const char	*q;
+	UB	b[16];
+	SZ	asz = 0;
+	ID	key;
+	INT	i, n = 0;
 
-	if ( ob_ref_obj(pu, &r) < E_OK ) return -1;
-	q = strchr((const char *)r.name, ' ');
-	return ( q != NULL ) ? atoi(q + 1) : -1;
-}
-
-static void pause_ms( UD ms )
-{
-	if ( rt.cur != NULL ) ms_yield(ms_now_ms() + ms);
-	else (void)tk_dly_tsk((TMO)ms);
+	key = ob_opn_obj(pu, OB_OP_ATRRD);
+	if ( key <= 0 ) return -1;
+	if ( ob_get_atv(key, (const UB *)"tessronos.process.pid", b, sizeof(b) - 1, &asz) < E_OK ) asz = 0;
+	ob_cls_obj(key);
+	for ( i = 0; i < (INT)asz && b[i] >= '0' && b[i] <= '9'; i++ ) n = n * 10 + ( b[i] - '0' );
+	return ( n > 0 ) ? n : -1;
 }
 
 /* A request to the desktop, and the process its answer names */
@@ -77,7 +77,7 @@ static ER ask( T_DTREQ *rq, TS_UUID *p_proc )
 	SZ	asz = 0;
 	ID	k;
 	ER	er;
-	UD	until;
+	UD	until, now;
 
 	memset(p_proc, 0, sizeof(*p_proc));
 	if ( ob_fnd_nam((const UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
@@ -95,14 +95,22 @@ static ER ask( T_DTREQ *rq, TS_UUID *p_proc )
 	er = ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz);
 	ob_cls_obj(k);
 	if ( er < E_OK ) return er;
+	/*
+	 * Outside a thread the answer is waited for on its channel; a thread
+	 * lets the others run and looks at the channel again soon, as nothing
+	 * tells the window's channel of the answer
+	 */
 	until = ms_now_ms() + ANSWER_MS;
-	while ( ms_now_ms() < until ) {
-		while ( ob_rea_rec(ans_key, 0, 0, &an, sizeof(an), &asz) >= E_OK ) {
+	for ( BOOL again = FALSE; ( now = ms_now_ms() ) < until; again = TRUE ) {
+		TMO	wait = ( rt.cur != NULL ) ? TMO_POL : (TMO)( until - now );
+
+		while ( ob_rea_tmo(ans_key, 0, 0, &an, sizeof(an), &asz, wait) >= E_OK ) {
+			wait = TMO_POL;
 			if ( asz != (SZ)sizeof(an) || an.seq != rq->seq ) continue;
 			*p_proc = an.proc;
 			return an.er;
 		}
-		pause_ms(20);
+		if ( rt.cur != NULL ) th_look(rt.cur, until, again);
 	}
 	return E_TMOUT;
 }
@@ -168,30 +176,58 @@ ER ms_vopen_tool( const char *name, INT *p_pid )
 	return E_OK;
 }
 
+/*
+ * Every object of a kind, however many: asked a page at a time, each
+ * page from the last object of the one before. How many, the list in
+ * *p_ids (free it).
+ */
+static INT objs_all( UINT type, UINT sub, TS_UUID **p_ids )
+{
+	TS_UUID	*ids = NULL, *ni;
+	INT	n = 0, got;
+
+	*p_ids = NULL;
+	for ( ;; ) {
+		ni = (TS_UUID *)realloc(ids, sizeof(TS_UUID) * (size_t)( n + 64 ));
+		if ( ni == NULL ) break;
+		ids = ni;
+		got = 0;
+		if ( ob_lst_obj(type, sub, ( n > 0 ) ? &ids[n - 1] : NULL, ids + n, 64, &got) < E_OK ) break;
+		n += got;
+		if ( got < 64 ) break;
+	}
+	*p_ids = ids;
+	return n;
+}
+
 /* The windows that say they show the object */
 static INT windows_showing( const TS_UUID *target, TS_UUID *out, INT max )
 {
-	TS_UUID	list[64];
-	INT	cnt = 0, i, n = 0;
-	char	j[512], want[40], got[40];
+	TS_UUID	*list;
+	INT	cnt, i, n = 0;
+	UB	*j;
+	char	want[40], got[40];
 
-	if ( ob_lst_obj(OB_T_WINDOW, OB_S_WINDOW, NULL, list, 64, &cnt) < E_OK ) return 0;
+	/* every window there is, however many */
+	cnt = objs_all(OB_T_WINDOW, OB_S_WINDOW, &list);
 	ms_uuid_str(target, want);
 	for ( i = 0; i < cnt && n < max; i++ ) {
 		ID	k = ob_opn_obj(&list[i], OB_OP_ATRRD);
-		SZ	asz = 0;
+		INT	asz;
 		T_JSON	root, tf, w;
 
 		if ( k <= 0 ) continue;
-		if ( ob_get_atr(k, (UB *)j, sizeof(j) - 1, &asz) >= E_OK
-		  && js_parse((const UB *)j, (INT)asz, &root) >= E_OK
+		asz = ob_atr_read(k, 0, &j);
+		if ( asz >= 0 && js_parse(j, asz, &root) >= E_OK
 		  && js_get(&root, "tessronos", &tf) >= E_OK && js_get(&tf, "window", &w) >= E_OK
 		  && js_get_str(&w, "shows", (UB *)got, sizeof(got)) > 0
 		  && strcasecmp(got, want) == 0 ) {
 			out[n++] = list[i];
 		}
+		free(j);
 		ob_cls_obj(k);
 	}
+	free(list);
 	return n;
 }
 

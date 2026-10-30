@@ -54,7 +54,6 @@
 #define PKG_HEAD	16
 #define PKG_ENTRY	64
 #define PKG_NAME	48
-#define PKG_MAX_OBJ	32		/* the program and what it brings */
 #define PKG_FORMAT	1
 
 typedef struct {
@@ -200,18 +199,18 @@ LOCAL void drop_records( CONST TS_UUID *u, CONST PKGENT *e, INT n )
 			last = what;
 		}
 	}
-	rec = (T_OBREC *)Kmalloc(sizeof(T_OBREC) * OM_REC_MAX);
-	if ( rec == NULL ) {
+	/* every record the object has, however many */
+	nr = om_obj_records_all(u, &rec);
+	if ( nr < 0 ) {
 		return;
 	}
-	nr = om_obj_records(u, rec, OM_REC_MAX);
 	key = 0;
 	for ( i = nr - 1; i >= 0; i-- ) {
 		if ( rec[i].recno <= last ) {
 			continue;
 		}
 		if ( key <= 0 ) {
-			key = ob_opn_obj(u, OB_OP_WRITE | OB_OP_RECORD);
+			key = ob_opn_obj(u, OB_OP_WRITE | OB_OP_RECORD | OB_O_EXCL);	/* records taken out together */
 			if ( key <= 0 ) {
 				break;
 			}
@@ -277,36 +276,56 @@ LOCAL ER put_object( CONST TS_UUID *u, CONST PKGENT *e, INT n, CONST T_OBPRT *pr
 /* An object deleted, what kept it from deletion (削除不可) taken off first */
 LOCAL ER del_object( CONST TS_UUID *u )
 {
-	T_OBPRT	prt;
+	T_OBPRT	*prt = knl_ob_prt_get(u);
 
-	if ( ob_get_prt(u, &prt) >= E_OK && ( prt.attr & ( OB_A_PERM | OB_A_RONLY ) ) ) {
-		prt.attr &= ~( OB_A_PERM | OB_A_RONLY );
-		(void)ob_set_prt(u, &prt);
+	if ( prt != NULL && ( prt->attr & ( OB_A_PERM | OB_A_RONLY ) ) ) {
+		prt->attr &= ~( OB_A_PERM | OB_A_RONLY );
+		(void)ob_set_prt(u, prt);
 	}
+	if ( prt != NULL ) Kfree(prt);
 	return ob_del_obj(u);
 }
 
 /* ---------------------------------------------------------------- installing */
 
 /*
- * What a program brought beside itself: its templates (the metadata's
- * base) and what its record 0 links to. Answers how many.
+ * What a program brought beside itself, every one: its templates (the
+ * metadata's base) and what its record 0 links to, in a table of their
+ * own (*p_out, Kfree it). Answers how many.
  */
-LOCAL INT brought( CONST TS_UUID *prog, CONST DTPROG *p, TS_UUID *out, INT max )
+LOCAL INT brought( CONST TS_UUID *prog, CONST DTPROG *p, TS_UUID **p_out )
 {
 	UB	*rec;
 	SZ	size = 0;
-	INT	n = 0, i;
+	INT	n = 0, i, nb = ( p != NULL ) ? p->nbase : 0, nl;
+	TS_UUID	*out;
 
-	for ( i = 0; p != NULL && i < p->nbase && n < max; i++ ) {
+	rec = om_obj_record(prog, 0, &size);
+	nl = ( rec != NULL ) ? om_store_links(rec, size, NULL, 0) : 0;
+	out = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( nb + nl + 1 ));
+	*p_out = out;
+	if ( out == NULL ) {
+		if ( rec != NULL ) Kfree(rec);
+		return 0;
+	}
+	for ( i = 0; i < nb; i++ ) {
 		out[n++] = p->base[i];
 	}
-	rec = om_obj_record(prog, 0, &size);
 	if ( rec != NULL ) {
-		n += om_store_links(rec, size, out + n, max - n);
+		n += om_store_links(rec, size, out + n, nl);
 		Kfree(rec);
 	}
 	return n;
+}
+
+/* The files a package holds, as its head says, or an error */
+LOCAL INT pkg_count( CONST UB *raw, SZ size )
+{
+	if ( size < PKG_HEAD || raw[0] != 'T' || raw[1] != 'S' || raw[2] != 'P' || raw[3] != 'K'
+	  || le16(raw + 4) != PKG_FORMAT ) {
+		return E_OBJ;
+	}
+	return le16(raw + 6);
 }
 
 LOCAL BOOL among( CONST TS_UUID *u, CONST TS_UUID *set, INT n )
@@ -326,12 +345,12 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT 
 	PKGENT		*e = NULL;
 	UB		*raw, id[DT_PROG_ID], ver[DT_VER_MAX], us[TS_UUID_STRLEN + 1];
 	SZ		size = 0;
-	INT		n, i, k, nobj = 0;
-	TS_UUID		prog, obj[PKG_MAX_OBJ], box;
+	INT		n, i, k, nobj = 0, room;
+	TS_UUID		prog, *obj = NULL, box;
 	T_JSON		root, list, it;
 	T_OBPRT		prt;
 	CONST DTPROG	*have;
-	TS_UUID		old, was[PKG_MAX_OBJ];
+	TS_UUID		old, *was = NULL;
 	T_OBREF		wref;
 	INT		nwas = 0, nwbase = 0;
 	BOOL		had = FALSE, moved = FALSE;
@@ -342,10 +361,13 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT 
 	}
 	raw = om_obj_record(pkg, 1, &size);
 	if ( raw == NULL ) {
-		return E_OBJ;
+		/* no file of its own: the directory of a TADjs plugin, as ファイル変換 made it */
+		return dt_plugin_install(pkg, force, p_prog, p_how);
 	}
-	e = (PKGENT *)Kmalloc(sizeof(PKGENT) * 64);
-	n = ( e != NULL ) ? pkg_entries(raw, size, e, 64) : E_NOMEM;
+	/* every file the package holds, as many as its head says (16 bits of them) */
+	n = pkg_count(raw, size);
+	e = ( n > 0 ) ? (PKGENT *)Kmalloc(sizeof(PKGENT) * (SZ)n) : NULL;
+	n = ( e != NULL ) ? pkg_entries(raw, size, e, n) : ( n > 0 ) ? E_NOMEM : E_OBJ;
 	er = ( n > 0 ) ? E_OBJ : (ER)n;
 
 	/* package.json: the program, its id and version, and the objects */
@@ -358,9 +380,19 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT 
 		  || ts_str_to_uuid((CONST char *)us, &prog) < E_OK ) {
 			break;
 		}
+		/* the program and every object it brings */
+		room = 1;
+		if ( js_get(&root, "objects", &list) >= E_OK ) {
+			for ( it.s = NULL; js_next(&list, &it); ) room++;
+		}
+		obj = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)room);
+		if ( obj == NULL ) {
+			er = E_NOMEM;
+			break;
+		}
 		obj[nobj++] = prog;
 		if ( js_get(&root, "objects", &list) >= E_OK ) {
-			for ( it.s = NULL; nobj < PKG_MAX_OBJ && js_next(&list, &it); ) {
+			for ( it.s = NULL; nobj < room && js_next(&list, &it); ) {
 				TS_UUID	u;
 
 				if ( js_str(&it, us, sizeof(us)) != TS_UUID_STRLEN
@@ -390,7 +422,7 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT 
 			goto done;
 		}
 		moved = (BOOL)( ts_uuid_cmp(&old, &prog) != 0 );
-		nwas = brought(&old, have, was, PKG_MAX_OBJ);
+		nwas = brought(&old, have, &was);
 		nwbase = have->nbase;
 	}
 
@@ -399,7 +431,7 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT 
 	for ( k = 0; er >= E_OK && k < nobj; k++ ) {
 		er = put_object(&obj[k], e, n, &prt);
 	}
-	if ( er >= E_OK && ts_str_to_uuid(SYSDEF_PROG_BOX, &box) >= E_OK ) {
+	if ( er >= E_OK && ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &box) >= E_OK ) {
 		if ( moved ) {
 			(void)om_obj_link_del(&box, &old);
 		}
@@ -440,6 +472,8 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT 
 	}
 done:
 	if ( e != NULL ) Kfree(e);
+	if ( obj != NULL ) Kfree(obj);
+	if ( was != NULL ) Kfree(was);
 	Kfree(raw);
 	return er;
 }
@@ -449,7 +483,7 @@ done:
 EXPORT ER dt_prog_remove( CONST TS_UUID *prog )
 {
 	CONST DTPROG	*p = dt_prog_of(prog);
-	TS_UUID		box, was[PKG_MAX_OBJ];
+	TS_UUID		box, *was;
 	INT		nbase, nwas, i;
 	ER		er;
 
@@ -460,8 +494,8 @@ EXPORT ER dt_prog_remove( CONST TS_UUID *prog )
 		return E_PAR;
 	}
 	nbase = p->nbase;
-	nwas = brought(prog, p, was, PKG_MAX_OBJ);
-	er = ( ts_str_to_uuid(SYSDEF_PROG_BOX, &box) >= E_OK ) ? om_obj_link_del(&box, prog) : E_SYS;
+	nwas = brought(prog, p, &was);
+	er = ( ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &box) >= E_OK ) ? om_obj_link_del(&box, prog) : E_SYS;
 	if ( er >= E_OK ) {
 		er = del_object(prog);
 		/* its templates; what its record 0 linked to once nothing else does */
@@ -471,6 +505,7 @@ EXPORT ER dt_prog_remove( CONST TS_UUID *prog )
 			}
 		}
 	}
+	if ( was != NULL ) Kfree(was);
 	dt_prog_reread();
 	return er;
 }

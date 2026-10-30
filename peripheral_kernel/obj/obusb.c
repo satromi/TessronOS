@@ -38,8 +38,6 @@
 #include <ts/hid.h>
 #include "obj.h"
 
-#define UO_MAX		32		/* devices shown at once */
-#define UO_TEXT_MAX	1024
 
 typedef struct {
 	BOOL		used;
@@ -49,7 +47,13 @@ typedef struct {
 	TS_UUID		uuid;
 } UODEV;
 
-LOCAL UODEV	uo_tbl[UO_MAX];
+/*
+ * Every USB device's object, as many as the tree has: each entry is
+ * allocated once and kept, as its device object's context; the table of
+ * them grows by a copy, the one before kept for those reading it
+ */
+LOCAL UODEV	**uo_tbl = NULL;
+LOCAL INT	uo_cap = 0;
 LOCAL ID	uo_mtx = 0;
 LOCAL ID	uo_sync_mtx = 0;
 LOCAL BOOL	uo_started = FALSE;
@@ -180,6 +184,11 @@ LOCAL INT info_text( CONST UODEV *u, UB *t, INT max )
 	return n;
 }
 
+LOCAL INT info_make( void *ctx, UB *t, INT max )
+{
+	return info_text((CONST UODEV *)ctx, t, max);
+}
+
 LOCAL INT usb_text( void *ctx, UB *t, INT n, INT max )
 {
 	UODEV		u, o;
@@ -193,8 +202,8 @@ LOCAL INT usb_text( void *ctx, UB *t, INT n, INT max )
 	if ( !entry_of((UODEV *)ctx, &u) ) {
 		return n;
 	}
-	for ( i = 0; i < UO_MAX; i++ ) {
-		if ( entry_of(&uo_tbl[i], &o) && o.d.dev == u.d.parent ) {
+	for ( i = 0; i < uo_cap; i++ ) {
+		if ( entry_of(uo_tbl[i], &o) && o.d.dev == u.d.parent ) {
 			n = knl_obdev_link(t, n, max, &o.uuid, o.name);
 		}
 	}
@@ -208,11 +217,13 @@ LOCAL INT usb_text( void *ctx, UB *t, INT n, INT max )
 	if ( u.d.role == USB_ROLE_CAMERA && knl_obdev_uuid((CONST UB *)CAM_DEVNM, &f) >= E_OK ) {
 		n = knl_obdev_link(t, n, max, &f, (CONST UB *)CAM_DEVNM);
 	}
-	h = (T_HIDINFO *)Kmalloc(sizeof(T_HIDINFO) * 16);
+	/* every keyboard and pointer there is: asked how many, then taken */
+	k = knl_hid_list(NULL, 0);
+	h = (T_HIDINFO *)Kmalloc(sizeof(T_HIDINFO) * (SZ)( ( k > 0 ) ? k : 1 ));
 	if ( h != NULL ) {
-		INT	nh = knl_hid_list(h, 16);
+		INT	room = k, nh = knl_hid_list(h, room);
 
-		for ( k = 0; k < nh && k < 16; k++ ) {
+		for ( k = 0; k < nh && k < room; k++ ) {
 			if ( h[k].usbdev == u.d.dev && knl_obinput_uuid(h[k].id, &f) >= E_OK ) {
 				n = knl_obdev_link(t, n, max, &f, (CONST UB *)( h[k].keyboard ? "keyboard"
 											       : "pointer" ));
@@ -221,8 +232,8 @@ LOCAL INT usb_text( void *ctx, UB *t, INT n, INT max )
 		Kfree(h);
 	}
 	if ( u.d.role == USB_ROLE_HUB ) {
-		for ( i = 0; i < UO_MAX; i++ ) {
-			if ( entry_of(&uo_tbl[i], &o) && o.d.parent == u.d.dev ) {
+		for ( i = 0; i < uo_cap; i++ ) {
+			if ( entry_of(uo_tbl[i], &o) && o.d.parent == u.d.dev ) {
 				n = knl_obdev_link(t, n, max, &o.uuid, o.name);
 			}
 		}
@@ -255,9 +266,6 @@ LOCAL INT usb_attr( void *ctx, UB *j, INT n, INT max )
 LOCAL ER usb_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *p_asize )
 {
 	UODEV	u;
-	UB	*t;
-	INT	len;
-	SZ	n = 0;
 
 	(void)pos;
 	if ( recno != OB_USB_INFO ) {
@@ -269,36 +277,17 @@ LOCAL ER usb_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *
 	if ( !entry_of((UODEV *)ctx, &u) ) {
 		return E_NOEXS;
 	}
-	t = (UB *)Kmalloc(UO_TEXT_MAX);
-	if ( t == NULL ) {
-		return E_NOMEM;
-	}
-	len = info_text(&u, t, UO_TEXT_MAX);
-	if ( len >= 0 && off < len ) {
-		n = (SZ)( len - off );
-		if ( n > size ) n = size;
-		knl_memcpy(buf, t + off, (INT)n);
-	}
-	Kfree(t);
-	if ( p_asize != NULL ) *p_asize = n;
-	return E_OK;
+	return knl_oj_make_rea(info_make, &u, off, buf, size, p_asize);
 }
 
 LOCAL UD usb_size( void *ctx, INT recno )
 {
 	UODEV	u;
-	UB	*t;
-	INT	len = 0;
 
 	if ( recno != OB_USB_INFO || !entry_of((UODEV *)ctx, &u) ) {
 		return 0;
 	}
-	t = (UB *)Kmalloc(UO_TEXT_MAX);
-	if ( t != NULL ) {
-		len = info_text(&u, t, UO_TEXT_MAX);
-		Kfree(t);
-	}
-	return ( len > 0 ) ? (UD)len : 0;
+	return knl_oj_make_len(info_make, &u);
 }
 
 /* Everyone reads what it is; there is nothing to write */
@@ -318,9 +307,9 @@ EXPORT ER knl_obusb_uuid( INT usbdev, TS_UUID *p_uuid )
 		return E_NOEXS;
 	}
 	LOCK();
-	for ( i = 0; i < UO_MAX; i++ ) {
-		if ( uo_tbl[i].used && uo_tbl[i].d.dev == usbdev ) {
-			*p_uuid = uo_tbl[i].uuid;
+	for ( i = 0; i < uo_cap; i++ ) {
+		if ( uo_tbl[i]->used && uo_tbl[i]->d.dev == usbdev ) {
+			*p_uuid = uo_tbl[i]->uuid;
 			er = E_OK;
 			break;
 		}
@@ -329,30 +318,69 @@ EXPORT ER knl_obusb_uuid( INT usbdev, TS_UUID *p_uuid )
 	return er;
 }
 
+/*
+ * The table made larger, with an entry of its own for each new place:
+ * the first new place, or -1 for no memory. Only sync grows it (under
+ * uo_sync_mtx); the table before is kept, as one may still walk it.
+ */
+LOCAL INT uo_grow( void )
+{
+	INT	cap = ( uo_cap > 0 ) ? uo_cap * 2 : 16, i, was = uo_cap;
+	UODEV	**t = (UODEV **)Kcalloc((SZ)cap, sizeof(UODEV *));
+
+	if ( t == NULL ) {
+		return -1;
+	}
+	for ( i = 0; i < was; i++ ) t[i] = uo_tbl[i];
+	for ( ; i < cap; i++ ) {
+		t[i] = (UODEV *)Kcalloc(1, sizeof(UODEV));
+		if ( t[i] == NULL ) break;
+	}
+	if ( i == was ) {
+		Kfree(t);
+		return -1;
+	}
+	LOCK();
+	uo_tbl = t;
+	uo_cap = i;
+	UNLOCK();
+	return was;
+}
+
 /* The USB devices now, against those shown, and then the keyboards and pointers on them */
 LOCAL void sync( void )
 {
-	T_USBDEV	*d;
-	UB		gone[UO_MAX][OB_DV_NAME];
-	INT		n, i, k, ng = 0;
+	T_USBDEV	*d = NULL;
+	UB		(*gone)[OB_DV_NAME];
+	INT		n, i, k, ng = 0, room;
 
-	d = (T_USBDEV *)Kmalloc(sizeof(T_USBDEV) * UO_MAX);
-	if ( d == NULL ) {
+	/* every device of the tree: asked how many, and asked again while more came than there was room for */
+	n = ts_usb_lst_dev(NULL, 0);
+	do {
+		room = n;
+		if ( d != NULL ) Kfree(d);
+		d = (T_USBDEV *)Kmalloc(sizeof(T_USBDEV) * (SZ)( ( room > 0 ) ? room : 1 ));
+		if ( d == NULL ) {
+			return;
+		}
+		n = ts_usb_lst_dev(d, room);
+	} while ( n > room );
+	gone = Kmalloc(sizeof(*gone) * (SZ)( ( uo_cap > 0 ) ? uo_cap : 1 ));
+	if ( gone == NULL ) {
+		Kfree(d);
 		return;
 	}
-	n = ts_usb_lst_dev(d, UO_MAX);
-	if ( n > UO_MAX ) n = UO_MAX;
 
 	LOCK();
-	for ( i = 0; i < UO_MAX; i++ ) {
-		if ( !uo_tbl[i].used ) continue;
-		for ( k = 0; k < n && d[k].dev != uo_tbl[i].d.dev; k++ ) ;
+	for ( i = 0; i < uo_cap; i++ ) {
+		if ( !uo_tbl[i]->used ) continue;
+		for ( k = 0; k < n && d[k].dev != uo_tbl[i]->d.dev; k++ ) ;
 		if ( k < n ) {
-			uo_tbl[i].d = d[k];		/* a role or a disk's name that came since */
+			uo_tbl[i]->d = d[k];		/* a role or a disk's name that came since */
 			continue;
 		}
-		knl_memcpy(gone[ng++], uo_tbl[i].name, OB_DV_NAME);
-		uo_tbl[i].used = FALSE;
+		knl_memcpy(gone[ng++], uo_tbl[i]->name, OB_DV_NAME);
+		uo_tbl[i]->used = FALSE;
 	}
 	UNLOCK();
 	for ( i = 0; i < ng; i++ ) {
@@ -366,12 +394,16 @@ LOCAL void sync( void )
 		ER	er;
 
 		LOCK();
-		for ( i = 0; i < UO_MAX; i++ ) {
-			if ( uo_tbl[i].used && uo_tbl[i].d.dev == d[k].dev ) break;
-			if ( !uo_tbl[i].used && slot < 0 ) slot = i;
+		for ( i = 0; i < uo_cap; i++ ) {
+			if ( uo_tbl[i]->used && uo_tbl[i]->d.dev == d[k].dev ) break;
+			if ( !uo_tbl[i]->used && slot < 0 ) slot = i;
 		}
 		UNLOCK();
-		if ( i < UO_MAX || slot < 0 ) continue;
+		if ( i < uo_cap ) continue;
+		if ( slot < 0 && ( slot = uo_grow() ) < 0 ) {
+			tm_printf((UB *)"usb: no memory for the object of %s\n", (CONST char *)d[k].name);
+			continue;
+		}
 		knl_memset(&e, 0, sizeof(e));
 		e.d = d[k];
 		(void)knl_obusb_path(&d[k], e.port, sizeof(e.port));
@@ -379,18 +411,19 @@ LOCAL void sync( void )
 		(void)knl_oj_put(e.name, i, OB_DV_NAME, (CONST char *)e.port);
 		e.used = TRUE;
 		LOCK();
-		uo_tbl[slot] = e;
+		*uo_tbl[slot] = e;
 		UNLOCK();
-		er = knl_obdev_add(e.name, NULL, &usb_ops, &uo_tbl[slot], &e.uuid);
+		er = knl_obdev_add(e.name, NULL, &usb_ops, uo_tbl[slot], &e.uuid);
 		LOCK();
 		if ( er >= E_OK ) {
-			uo_tbl[slot].uuid = e.uuid;
+			uo_tbl[slot]->uuid = e.uuid;
 		} else {
-			uo_tbl[slot].used = FALSE;
+			uo_tbl[slot]->used = FALSE;
 		}
 		UNLOCK();
 	}
 	Kfree(d);
+	Kfree(gone);
 	knl_obinput_sync();
 }
 
@@ -447,37 +480,36 @@ EXPORT INT knl_obusb_text( UB *t, INT max )
 	UB	*r, v[48];
 	char	us[TS_UUID_STRLEN + 1];
 	TS_UUID	*ids;
-	INT	n = 0, i, cnt = 0, depth;
-	SZ	asz;
+	INT	n = 0, i, cnt = 0, depth, asz, room;
 	ID	key;
 
 	if ( !uo_started ) {
 		return 0;
 	}
-	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * UO_MAX);
-	r = (UB *)Kmalloc(UO_TEXT_MAX);
-	if ( ids == NULL || r == NULL ) {
-		if ( ids != NULL ) Kfree(ids);
-		if ( r != NULL ) Kfree(r);
-		return -1;
+	/* the objects, parents before their children: room for every place of the table */
+	room = uo_cap;
+	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( ( room > 0 ) ? room : 1 ));
+	if ( ids == NULL ) {
+		return E_NOMEM;
 	}
-	/* the objects, parents before their children */
 	LOCK();
-	for ( depth = 0; depth <= 6; depth++ ) {
-		for ( i = 0; i < UO_MAX; i++ ) {
-			if ( uo_tbl[i].used && (INT)uo_tbl[i].d.depth == depth && cnt < UO_MAX ) {
-				ids[cnt++] = uo_tbl[i].uuid;
+	for ( depth = 0; depth <= 6; depth++ ) {		/* five hubs at most between a device and its root port (USB 2.0 4.1.1) */
+		for ( i = 0; i < uo_cap; i++ ) {
+			if ( uo_tbl[i]->used && (INT)uo_tbl[i]->d.depth == depth && cnt < room ) {
+				ids[cnt++] = uo_tbl[i]->uuid;
 			}
 		}
 	}
 	UNLOCK();
-	for ( i = 0; i < cnt; i++ ) {
-		asz = 0;
+	for ( i = 0; i < cnt && n >= 0; i++ ) {
 		key = ob_opn_obj(&ids[i], OB_OP_READ);
 		if ( key <= 0 ) continue;
-		if ( ob_rea_rec(key, OB_USB_INFO, 0, r, UO_TEXT_MAX, &asz) < E_OK ) asz = 0;
+		asz = knl_ob_rea_all(key, OB_USB_INFO, 0, &r, NULL);
 		(void)ob_cls_obj(key);
-		if ( asz <= 0 ) continue;
+		if ( asz <= 0 ) {
+			if ( asz == 0 ) Kfree(r);
+			continue;
+		}
 		/* DEVICE depth port vid:pid kind name, as before */
 		n = knl_oj_put(t, n, max, "DEVICE\t");
 		(void)field(r, (INT)asz, "DEPTH", v, sizeof(v));
@@ -501,8 +533,8 @@ EXPORT INT knl_obusb_text( UB *t, INT max )
 		(void)ts_uuid_to_str(&ids[i], us, sizeof(us));
 		n = knl_oj_put(t, n, max, us);
 		n = knl_oj_put(t, n, max, "\n");
+		Kfree(r);
 	}
 	Kfree(ids);
-	Kfree(r);
 	return n;
 }

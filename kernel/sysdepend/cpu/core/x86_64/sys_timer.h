@@ -113,7 +113,7 @@ Inline void knl_end_of_hw_timer_interrupt( void )
  */
 Inline void knl_timer_ipi_request( void )
 {
-	knl_send_ipi(1U << 0, SGI_TIMER);
+	knl_send_ipi_one(0, SGI_TIMER);
 }
 
 Inline void knl_end_of_timer_ipi( UW iar )

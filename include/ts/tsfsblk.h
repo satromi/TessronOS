@@ -66,6 +66,17 @@ extern "C" {
 #define TSFSBLK_INCOMPAT_GROWING	0x0001ULL
 
 /*
+ * XT2: a record's runs in a tree of two levels, an index of leaves
+ * (design 7.3), on a volume that has one record of more runs than one
+ * leaf holds. Set the first time one is written and kept; a kernel that
+ * does not know it (R1.110 and before) does not open the volume.
+ */
+#define TSFSBLK_INCOMPAT_XT2		0x0002ULL
+
+/* The volume marked as having trees of two levels, in the running transaction */
+IMPORT ER ts_blk_xt2( ID vol );
+
+/*
  * Superblock, as it is held in memory. Two copies sit in blocks 0 and 1;
  * each write goes to the one the last write did not touch, with the
  * generation one higher, and a volume is opened from the valid copy of
@@ -292,7 +303,26 @@ IMPORT ER ts_set_jrnl_blk( ID vol, UD start, UD blocks, UD seq );
  */
 IMPORT ER knl_tsfsblk_raw_read( ID vol, UD blk, void *buf );
 IMPORT ER knl_tsfsblk_raw_write( ID vol, UD blk, CONST void *buf );
+IMPORT ER knl_tsfsblk_raw_writes( ID vol, UD blk, UD n, CONST void *buf );
+
+/*
+ * The same, on the medium when it returns (TDN_FUAWRITE) when the device
+ * can: *p_fua says whether it was; when not, the caller empties the
+ * device's cache after.
+ */
+IMPORT ER knl_tsfsblk_raw_writes_fua( ID vol, UD blk, UD n, CONST void *buf, BOOL *p_fua );
 IMPORT ER knl_tsfsblk_raw_flush( ID vol );
+
+/* The log could not be written: the volume stops writing (called from inside the log's locks) */
+IMPORT void knl_tsfsblk_stop( ID vol, UD blk );
+
+/*
+ * Every transaction numbered below `dseq` is in the log: the runs they
+ * freed may be handed out again. Until then the allocator passes over
+ * them (a run freed by a transaction not on the medium still belongs, on
+ * the medium, to what used it).
+ */
+IMPORT void knl_tsfsblk_unbusy( ID vol, UD dseq );
 
 /*
  * For the check of a whole volume (ts/tsfsck.h). ts_blk_good looks at a

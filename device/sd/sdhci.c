@@ -2836,7 +2836,9 @@ LOCAL ER sd_attr( INT unitno, T_DEVREQ *req )
 	info->protect   = ( sd.wp != 0 );
 	info->removable = !sd.mmc;		/* a card can be taken out, an eMMC not */
 	info->blocksize = BLK_SECTOR_SIZE;
-	info->blockcont = (W)nsect;
+	/* the count in a W stops at 2^31 - 1 sectors (1TB); the whole count is in blockcont_d */
+	info->blockcont = ( nsect > 0x7FFFFFFFULL ) ? 0x7FFFFFFF : (W)nsect;
+	info->blockcont_d = (D)nsect;
 	req->asize = sizeof(DiskInfo);
 
 	return E_OK;

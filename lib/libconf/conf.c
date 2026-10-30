@@ -18,13 +18,14 @@
  */
 
 /* built into the kernel, the machine's own types; into a process, the process's */
-#if defined(_QEMU_VIRT_) || defined(_RPI5_) || defined(_RPI4_)
+#if defined(_QEMU_VIRT_) || defined(_RPI5_) || defined(_RPI4_) || defined(_X64_)
 #include <sys/machine.h>
 #include <tk/tkernel.h>
 #endif
 #include <tk/typedef.h>
 #include <ts/look.h>
 #include <ts/conf.h>
+#include <ts/uuid.h>
 
 LOCAL BOOL blank( UB c )
 {
@@ -121,7 +122,7 @@ EXPORT INT cf_put( UB *text, INT len, INT max, CONST char *key, INT nth,
 	at = line_of(text, len, key, nth, &e, &v);
 	if ( at < 0 ) {
 		/* not there: added after the last line, as many as it takes */
-		for ( i = 0; i < 64; i++ ) {
+		for ( i = 0; ; i++ ) {
 			if ( line_of(text, len, key, i, &e, &v) >= 0 ) have++;
 			else break;
 		}
@@ -160,6 +161,24 @@ EXPORT INT cf_put( UB *text, INT len, INT max, CONST char *key, INT nth,
 		for ( i = 0; i < vl; i++ ) text[at + k + 1 + i] = (UB)val[i];
 	}
 	return len;
+}
+
+EXPORT BOOL cf_wfind( CONST UB *val, INT len, INT nth, CONST UB **p_w, INT *p_wlen )
+{
+	INT	at = 0, n = 0, e;
+
+	while ( val != NULL && at < len ) {
+		while ( at < len && blank(val[at]) ) at++;
+		if ( at >= len ) break;
+		for ( e = at; e < len && !blank(val[e]); e++ ) ;
+		if ( n++ == nth ) {
+			*p_w = val + at;
+			*p_wlen = e - at;
+			return TRUE;
+		}
+		at = e;
+	}
+	return FALSE;
 }
 
 EXPORT BOOL cf_word( CONST char *val, INT nth, char *out, INT max )
@@ -548,8 +567,8 @@ EXPORT INT cf_net6_write( UB *text, INT len, INT max, CONST T_CFNET6 *net )
 
 /*
  * What ユーザ環境設定 sets. The ranges and what nothing said gives are
- * the accessory's own: times in milliseconds, sizes in dots, pitches
- * in hertz.
+ * the accessory's own: times in milliseconds, sizes in dots (a
+ * finger's in tenths of a millimetre), pitches in hertz.
  */
 EXPORT CONST CF_ITEM cf_user_items[] = {
 	{ "KANA_INPUT",		LK_KANA,	0, 1, 0 },
@@ -565,6 +584,12 @@ EXPORT CONST CF_ITEM cf_user_items[] = {
 	{ "PD_ABSOLUTE",	LK_PD_ABS,	0, 1, 1 },
 	{ "PD_MIDDLE_DOUBLE",	LK_PD_MIDDBL,	0, 1, 1 },
 	{ "PD_WHEEL",		LK_PD_WHEEL,	0, 1, 1 },
+	{ "TOUCH_ADJUST",	LK_TCH_ON,	0, 1, 1 },
+	{ "TOUCH_TOLERANCE",	LK_TCH_DBL,	10, 150, 50 },
+	{ "TOUCH_HANDLE",	LK_TCH_HIT,	0, 100, 40 },
+	{ "TOUCH_HOLD",		LK_TCH_HOLD,	300, 3000, 1000 },
+	{ "TOUCH_SCROLL",	LK_TCH_SCR,	0, 1, 1 },
+	{ "TOUCH_SCROLL_STEP",	LK_TCH_STEP,	30, 300, 100 },
 
 	{ "KEY_ON",		LK_KEY_ON,	0, 2500, 0 },
 	{ "KEY_OFF",		LK_KEY_OFF,	0, 2500, 0 },
@@ -654,4 +679,252 @@ EXPORT CONST CF_ITEM *cf_look_look( UINT look )
 		if ( cf_look_items[i].look == look ) return &cf_look_items[i];
 	}
 	return NULL;
+}
+
+/* ---------------------------------------------------------------- links in a settings object */
+
+LOCAL INT hexv( UB c )
+{
+	return ( c >= '0' && c <= '9' ) ? c - '0' : ( c >= 'a' && c <= 'f' ) ? c - 'a' + 10
+	     : ( c >= 'A' && c <= 'F' ) ? c - 'A' + 10 : -1;
+}
+
+/* A UUID as text at s (36 letters); FALSE when it is not one */
+LOCAL BOOL uuid_at( CONST UB *s, INT n, TS_UUID *u )
+{
+	INT	i, k = 0, h, l;
+
+	for ( i = 0; i < 36 && k < 16; ) {
+		if ( i >= n ) return FALSE;
+		if ( s[i] == '-' ) {
+			i++;
+			continue;
+		}
+		if ( i + 1 >= n || ( h = hexv(s[i]) ) < 0 || ( l = hexv(s[i + 1]) ) < 0 ) return FALSE;
+		u->b[k++] = (UB)( h * 16 + l );
+		i += 2;
+	}
+	return (BOOL)( k == 16 );
+}
+
+LOCAL void uuid_put( UB *o, CONST TS_UUID *u )
+{
+	CONST char	*hex = "0123456789abcdef";
+	INT		i, d = 0;
+
+	for ( i = 0; i < 16; i++ ) {
+		if ( i == 4 || i == 6 || i == 8 || i == 10 ) o[d++] = '-';
+		o[d++] = (UB)hex[u->b[i] >> 4];
+		o[d++] = (UB)hex[u->b[i] & 15];
+	}
+}
+
+/* Where the text of w (wl bytes) is at or after from, or -1 */
+LOCAL INT find_at( CONST UB *t, INT len, CONST char *w, INT from )
+{
+	INT	wl = slen(w), i, k;
+
+	for ( i = from; i + wl <= len; i++ ) {
+		for ( k = 0; k < wl && t[i + k] == (UB)w[k]; k++ ) ;
+		if ( k == wl ) return i;
+	}
+	return -1;
+}
+
+/* The value of attribute name in the tag t[a..b): where it starts, its length in *p_n; -1 none */
+LOCAL INT attr_of( CONST UB *t, INT a, INT b, CONST char *name, INT *p_n )
+{
+	INT	m = slen(name), i, k, v;
+
+	for ( i = a; i + m + 2 < b; i++ ) {
+		if ( !( blank(t[i]) || t[i] == '\n' || t[i] == '\r' ) ) continue;
+		for ( k = 0; k < m && t[i + 1 + k] == (UB)name[k]; k++ ) ;
+		if ( k < m || t[i + 1 + m] != '=' || t[i + 2 + m] != '"' ) continue;
+		v = i + 3 + m;
+		for ( k = v; k < b && t[k] != '"'; k++ ) ;
+		*p_n = k - v;
+		return v;
+	}
+	return -1;
+}
+
+/* Whether the words of t[v..v+n) have role among them */
+LOCAL BOOL has_word( CONST UB *t, INT v, INT n, CONST char *role )
+{
+	INT	rl = slen(role), i = 0, s, k;
+
+	while ( i < n ) {
+		while ( i < n && t[v + i] == ' ' ) i++;
+		s = i;
+		while ( i < n && t[v + i] != ' ' ) i++;
+		if ( i - s == rl ) {
+			for ( k = 0; k < rl && t[v + s + k] == (UB)role[k]; k++ ) ;
+			if ( k == rl ) return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+/* The link with the role: its element t[*p_a..*p_e) and the object it points at */
+LOCAL BOOL link_from( CONST UB *t, INT len, INT from, CONST char *role, INT *p_a, INT *p_e, TS_UUID *p_u )
+{
+	INT	i, j, v, n, e, sp;
+
+	for ( i = from; ( i = find_at(t, len, "<link", i) ) >= 0; i = j + 1 ) {
+		j = find_at(t, len, ">", i);
+		if ( j < 0 ) return FALSE;
+		if ( t[i + 5] != ' ' && t[i + 5] != '\n' && t[i + 5] != '\t' ) continue;
+		v = attr_of(t, i + 5, j, "relationship", &n);
+		if ( v < 0 || !has_word(t, v, n, role) ) continue;
+		v = attr_of(t, i + 5, j, "id", &n);
+		if ( v < 0 ) continue;
+		sp = ts_lnk_split(t + v, n, NULL, NULL);
+		if ( !uuid_at(t + v + sp, n - sp, p_u) ) continue;
+		if ( t[j - 1] == '/' ) {
+			e = j + 1;
+		} else {
+			e = find_at(t, len, "</link>", j);
+			if ( e < 0 ) return FALSE;
+			e += 7;
+		}
+		*p_a = i;
+		*p_e = e;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+LOCAL BOOL link_of( CONST UB *t, INT len, CONST char *role, INT *p_a, INT *p_e, TS_UUID *p_u )
+{
+	return link_from(t, len, 0, role, p_a, p_e, p_u);
+}
+
+EXPORT BOOL cf_link_get( CONST UB *text, INT len, CONST char *role, TS_UUID *p_u )
+{
+	INT	a, e;
+
+	if ( text == NULL || role == NULL || p_u == NULL ) return FALSE;
+	return link_of(text, len, role, &a, &e, p_u);
+}
+
+EXPORT BOOL cf_link_nth( CONST UB *text, INT len, CONST char *role, INT nth, TS_UUID *p_u )
+{
+	INT	a = 0, e = 0, k;
+
+	if ( text == NULL || role == NULL || p_u == NULL || nth < 0 ) return FALSE;
+	for ( k = 0; k <= nth; k++ ) {
+		if ( !link_from(text, len, e, role, &a, &e, p_u) ) return FALSE;
+	}
+	return TRUE;
+}
+
+EXPORT INT cf_link_put( UB *text, INT len, INT max, CONST char *role, CONST TS_UUID *u,
+			CONST TS_UUID *vobj, CONST char *label, TS_UUID *p_old )
+{
+	static CONST char *const part[] = {
+		"<link id=\"", "_0.xtad\" vobjid=\"", "\" relationship=\"",
+		"\" chsz=\"14\" frcol=\"#000000\" chcol=\"#000000\" tbcol=\"#ffffff\" bgcol=\"#ffffff\""
+		" pictdisp=\"true\" namedisp=\"true\" framedisp=\"true\" roledisp=\"false\""
+		" typedisp=\"false\" updatedisp=\"false\" autoopen=\"false\"/>"
+	};
+	INT	a, e, nl, i, k, shift, rl = slen(role), ll = slen(label);
+	BOOL	para = FALSE, fig = FALSE;
+	UB	el[600];
+	TS_UUID	old;
+
+	if ( p_old != NULL ) for ( i = 0; i < 16; i++ ) p_old->b[i] = 0;
+	if ( text == NULL || role == NULL || u == NULL || vobj == NULL || rl > 128 || ll > 128 ) return -1;
+
+	/* the element: in place of the one with the role, or a paragraph of its own */
+	nl = 0;
+	if ( link_of(text, len, role, &a, &e, &old) ) {
+		if ( p_old != NULL ) *p_old = old;
+	} else {
+		a = find_at(text, len, "</document>", 0);
+		if ( a >= 0 ) {
+			el[nl++] = '<';
+			el[nl++] = 'p';
+			el[nl++] = '>';
+			for ( i = 0; i < ll; i++ ) el[nl++] = (UB)label[i];
+			para = TRUE;
+		} else {
+			/* a figure (a box of links): the link alone, at its top left */
+			a = find_at(text, len, "</figure>", 0);
+			if ( a < 0 ) return -2;
+			fig = TRUE;
+		}
+		e = a;
+	}
+	for ( i = 0; part[0][i] != 0; i++ ) el[nl++] = (UB)part[0][i];
+	uuid_put(el + nl, u);
+	nl += 36;
+	for ( i = 0; part[1][i] != 0; i++ ) el[nl++] = (UB)part[1][i];
+	uuid_put(el + nl, vobj);
+	nl += 36;
+	for ( i = 0; part[2][i] != 0; i++ ) el[nl++] = (UB)part[2][i];
+	for ( i = 0; i < rl; i++ ) el[nl++] = (UB)role[i];
+	if ( fig ) {
+		CONST char	*at = "\" vobjleft=\"8\" vobjtop=\"8\" vobjright=\"248\" vobjbottom=\"33\" height=\"25";
+
+		for ( i = 0; at[i] != 0; i++ ) el[nl++] = (UB)at[i];
+	}
+	for ( i = 0; part[3][i] != 0; i++ ) el[nl++] = (UB)part[3][i];
+	if ( fig ) el[nl++] = '\n';
+	if ( para ) {
+		CONST char	*end = "</p>\n";
+
+		for ( i = 0; end[i] != 0; i++ ) el[nl++] = (UB)end[i];
+	}
+
+	/* what stood from a to e is replaced by it */
+	shift = nl - ( e - a );
+	if ( len + shift > max ) return -1;
+	if ( shift > 0 ) {
+		for ( k = len - 1; k >= e; k-- ) text[k + shift] = text[k];
+	} else if ( shift < 0 ) {
+		for ( k = e; k < len; k++ ) text[k + shift] = text[k];
+	}
+	for ( i = 0; i < nl; i++ ) text[a + i] = el[i];
+	return len + shift;
+}
+
+EXPORT INT cf_link_tag( UB *text, INT len, INT max, CONST TS_UUID *u, CONST char *role )
+{
+	INT	i, j, v, n, sp, at, add, k, rl = slen(role);
+	TS_UUID	t;
+	BOOL	has;
+
+	if ( text == NULL || u == NULL || role == NULL || rl == 0 ) return -1;
+	for ( i = 0; ( i = find_at(text, len, "<link", i) ) >= 0; i = j + 1 ) {
+		j = find_at(text, len, ">", i);
+		if ( j < 0 ) return -1;
+		v = attr_of(text, i + 5, j, "id", &n);
+		if ( v < 0 ) continue;
+		sp = ts_lnk_split(text + v, n, NULL, NULL);
+		if ( !uuid_at(text + v + sp, n - sp, &t) ) continue;
+		for ( k = 0; k < 16 && t.b[k] == u->b[k]; k++ ) ;
+		if ( k < 16 ) continue;
+
+		/* the word after the relationship's others, or the attribute put first */
+		v = attr_of(text, i + 5, j, "relationship", &n);
+		has = (BOOL)( v >= 0 );
+		if ( has && has_word(text, v, n, role) ) return len;
+		at = has ? v + n : i + 5;
+		add = has ? ( ( n > 0 ) ? 1 : 0 ) + rl : 16 + rl;
+		if ( len + add > max ) return -1;
+		for ( k = len - 1; k >= at; k-- ) text[k + add] = text[k];
+		k = at;
+		if ( has ) {
+			if ( n > 0 ) text[k++] = ' ';
+			for ( n = 0; n < rl; n++ ) text[k++] = (UB)role[n];
+		} else {
+			CONST char	*h = " relationship=\"";
+
+			for ( n = 0; h[n] != 0; n++ ) text[k++] = (UB)h[n];
+			for ( n = 0; n < rl; n++ ) text[k++] = (UB)role[n];
+			text[k++] = '"';
+		}
+		return len + add;
+	}
+	return -2;
 }

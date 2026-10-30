@@ -57,7 +57,7 @@ LOCAL BOOL cell_empty( CONST CXCELL *c )
 	if ( c->kind != CX_TEXT ) {
 		return FALSE;
 	}
-	return (BOOL)( cx_shown(c)[0] == 0 && ( c->st.has & ( CX_S_BG | CX_S_FRAME ) ) == 0 );
+	return (BOOL)( cx_shown(c)[0] == 0 && ( c->st->has & ( CX_S_BG | CX_S_FRAME ) ) == 0 );
 }
 
 EXPORT BOOL cx_print_range( CONST CXSHEET *s, CXRANGE *r )
@@ -180,7 +180,7 @@ LOCAL void side( CTBUF *b, INT x0, INT y0, INT x1, INT y1, CONST CXSIDE *sd )
 /* The letters of a cell, as a piece of text in its box */
 LOCAL void words( CTBUF *b, CONST CXCELL *c, INT l, INT t, INT r, INT bt )
 {
-	CONST CXSTYLE	*st = &c->st;
+	CONST CXSTYLE	*st = c->st;
 	CONST UB	*w = cx_shown(c);
 	INT		px = ( ( st->has & CX_S_SIZE ) && st->size > 0 ) ? CP_PX(st->size) : CP_DFLT_PX;
 	INT		top = t + ( bt - t - px - 4 ) / 2;
@@ -327,11 +327,11 @@ LOCAL void page_cells( CTBUF *b, CONST CXSHEET *s, CONST CXRANGE *rg, INT r0, IN
 			if ( c == NULL ) {
 				continue;
 			}
-			if ( ( c->st.has & CX_S_BG ) && c->st.bg[0] == '#' ) {
-				ground(b, x, y, x + w, y + h, ( c->st.has & CX_S_INVERT ) ? "#000000" : c->st.bg);
-			} else if ( c->st.has & CX_S_INVERT ) {
-				ground(b, x, y, x + w, y + h, ( c->st.has & CX_S_COLOUR ) ? c->st.colour : "#000000");
-			} else if ( c->st.has & CX_S_MESH ) {
+			if ( ( c->st->has & CX_S_BG ) && c->st->bg[0] == '#' ) {
+				ground(b, x, y, x + w, y + h, ( c->st->has & CX_S_INVERT ) ? "#000000" : c->st->bg);
+			} else if ( c->st->has & CX_S_INVERT ) {
+				ground(b, x, y, x + w, y + h, ( c->st->has & CX_S_COLOUR ) ? c->st->colour : "#000000");
+			} else if ( c->st->has & CX_S_MESH ) {
 				ground(b, x, y, x + w, y + h, "#e0e0e0");
 			}
 			if ( c->kind == CX_TEXT ) {
@@ -346,7 +346,7 @@ LOCAL void page_cells( CTBUF *b, CONST CXSHEET *s, CONST CXRANGE *rg, INT r0, IN
 		INT		l, t, r, bt, k;
 
 		if ( c->row < r0 || c->row > r1 || c->col < rg->c0 || c->col > rg->c1
-		  || ( c->st.has & CX_S_FRAME ) == 0 ) {
+		  || ( c->st->has & CX_S_FRAME ) == 0 ) {
 			continue;
 		}
 		l = x0;
@@ -358,34 +358,11 @@ LOCAL void page_cells( CTBUF *b, CONST CXSHEET *s, CONST CXRANGE *rg, INT r0, IN
 		for ( k = r0; k < c->row; k++ ) t += cx_height(s, k);
 		r = l + cx_width(s, c->col);
 		bt = t + cx_height(s, c->row);
-		if ( c->st.side[CX_TOP].on ) side(b, l, t, r, t, &c->st.side[CX_TOP]);
-		if ( c->st.side[CX_BOTTOM].on ) side(b, l, bt, r, bt, &c->st.side[CX_BOTTOM]);
-		if ( c->st.side[CX_LEFT].on ) side(b, l, t, l, bt, &c->st.side[CX_LEFT]);
-		if ( c->st.side[CX_RIGHT].on ) side(b, r, t, r, bt, &c->st.side[CX_RIGHT]);
+		if ( c->st->side[CX_TOP].on ) side(b, l, t, r, t, &c->st->side[CX_TOP]);
+		if ( c->st->side[CX_BOTTOM].on ) side(b, l, bt, r, bt, &c->st->side[CX_BOTTOM]);
+		if ( c->st->side[CX_LEFT].on ) side(b, l, t, l, bt, &c->st->side[CX_LEFT]);
+		if ( c->st->side[CX_RIGHT].on ) side(b, r, t, r, bt, &c->st->side[CX_RIGHT]);
 	}
-}
-
-/* The shapes a row of the range makes: its grounds, its words, its links, its frames' lines */
-#define CP_SHAPES	240
-
-LOCAL INT row_shapes( CONST CXSHEET *s, CONST CXRANGE *rg, INT row )
-{
-	INT	col, n = 0, k;
-
-	for ( col = rg->c0; col <= rg->c1; col++ ) {
-		CONST CXCELL	*c = cx_get(s, col, row);
-
-		if ( c == NULL ) {
-			continue;
-		}
-		n += 2;
-		for ( k = 0; k < 4; k++ ) {
-			if ( ( c->st.has & CX_S_FRAME ) && c->st.side[k].on ) {
-				n += ( c->st.side[k].type == CX_DOUBLE ) ? 2 : 1;
-			}
-		}
-	}
-	return n;
 }
 
 EXPORT INT cx_print( CONST CXSHEET *s, CONST CXPRINT *pr )
@@ -420,20 +397,18 @@ EXPORT INT cx_print( CONST CXSHEET *s, CONST CXPRINT *pr )
 		if ( r > rg.r1 ) rg.r1 = r;
 	}
 	for ( row = rg.r0; row <= rg.r1; ) {
-		INT	r1 = row, h = cx_height(s, row), top = 0, k, shapes = row_shapes(s, &rg, row);
+		INT	r1 = row, h = cx_height(s, row), top = 0, k;
 
-		/*
-		 * As many rows as fit; a row taller than the page has a page
-		 * of its own. A figure holds so many shapes (TV_MAX_SHAPE);
-		 * a page of many cells goes on to the next page before that.
-		 */
-		while ( r1 + 1 <= rg.r1 && h + cx_height(s, r1 + 1) <= bh
-		     && shapes + row_shapes(s, &rg, r1 + 1) <= CP_SHAPES ) {
+		/* as many rows as fit; a row taller than the page has a page of its own */
+		while ( r1 + 1 <= rg.r1 && h + cx_height(s, r1 + 1) <= bh ) {
 			r1++;
 			h += cx_height(s, r1);
-			shapes += row_shapes(s, &rg, r1);
 		}
-		ct_buf(&b, pr->mem, pr->max);
+		if ( pr->more != NULL ) {
+			ct_buf_grow(&b, 64 * 1024, pr->more);
+		} else {
+			ct_buf(&b, pr->mem, pr->max);
+		}
 		ct_put(&b, "<tad version=\"1.0\" encoding=\"UTF-8\">\n<paper type=\"fig\"");
 		attr_num(&b, "length", pl);
 		attr_num(&b, "width", pw);
@@ -461,11 +436,13 @@ EXPORT INT cx_print( CONST CXSHEET *s, CONST CXPRINT *pr )
 		}
 		ct_put(&b, "</figure>\n</tad>\n");
 		if ( b.fail ) {
-			return E_LIMIT;
+			if ( pr->more != NULL ) (void)pr->more(b.p, 0);
+			return ( pr->more != NULL ) ? E_NOMEM : E_LIMIT;
 		}
 		{
 			ER	er = pr->put(pr->arg, b.p, b.n);
 
+			if ( pr->more != NULL ) (void)pr->more(b.p, 0);
 			if ( er < E_OK ) {
 				return er;
 			}

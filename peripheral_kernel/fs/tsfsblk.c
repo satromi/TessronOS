@@ -115,7 +115,7 @@
 /* Features beyond what version 4 is: a volume grown, and one being grown */
 #define KNOWN_COMPAT	TSFSBLK_COMPAT_GROWN
 #define KNOWN_ROCOMPAT	0ULL
-#define KNOWN_INCOMPAT	TSFSBLK_INCOMPAT_GROWING
+#define KNOWN_INCOMPAT	( TSFSBLK_INCOMPAT_GROWING | TSFSBLK_INCOMPAT_XT2 )
 
 #define AG_RETIRED	8		/* tables of groups a grow replaced, kept until the volume closes */
 
@@ -151,6 +151,7 @@ typedef struct {
 	INT		held_n;	/* map blocks waiting for the record */
 	BOOL		sb_dirty;
 	BOOL		rdonly;		/* an error was found, or a feature is not known */
+	BOOL		nofua;		/* the device answered TDN_FUAWRITE with E_PAR */
 	UW		err_kind;	/* an error of this run, kept across a discard */
 	UD		err_first, err_last, err_blk;
 	ID		bc_mtx;		/* the block cache, below every other lock */
@@ -168,6 +169,8 @@ typedef struct {
 	UD		ag_n;		/* entries of ag */
 	TSFSAG		*ag_old[AG_RETIRED];	/* read without the lock (in_group_meta): freed at close */
 	INT		ag_nold;
+	struct busy	*busy;		/* runs freed by transactions not in the log yet (bc_mtx) */
+	INT		nbusy, maxbusy;
 } TSFSBLKVOL;
 
 /*
@@ -345,24 +348,91 @@ typedef struct {
 	UD	run;		/* blocks asked for at once (TDN_IOMAX), 0 for the default */
 } DEVIO;
 
-LOCAL DEVIO	dev_io[CNF_MAX_OPNDEV + 1];	/* by descriptor: each is one open device */
+/*
+ * By descriptor, in pieces of IO_PIECE: as many pieces as the largest
+ * descriptor opened needs (the device management has no bound on them).
+ * A larger list of the pieces is made whole and put in place with one
+ * exchange; the pieces and the lists before are never freed, so a
+ * request counts in its entry without a lock.
+ */
+#define IO_PIECE	256
+
+typedef struct {
+	INT	n;		/* pieces */
+	DEVIO	*p[];
+} IODIR;
+
+LOCAL IODIR	*io_dir = NULL;
+
+/* The entry of descriptor dd; made when make and not there yet. NULL when not there */
+LOCAL DEVIO *io_slot( ID dd, BOOL make )
+{
+	INT	pc = (INT)( dd / IO_PIECE ), i, n;
+	IODIR	*d, *nd, *was;
+	BOOL	full;
+
+	if ( dd <= 0 ) {
+		return NULL;
+	}
+	for ( ;; ) {
+		d = __atomic_load_n(&io_dir, __ATOMIC_ACQUIRE);
+		was = d;
+		if ( d != NULL && pc < d->n ) {
+			return &d->p[pc][dd % IO_PIECE];
+		}
+		if ( !make ) {
+			return NULL;
+		}
+		n = ( d != NULL ) ? d->n * 2 : 4;
+		if ( n <= pc ) {
+			n = pc + 1;
+		}
+		nd = (IODIR *)Kcalloc(1, sizeof(IODIR) + sizeof(DEVIO *) * (SZ)n);
+		if ( nd == NULL ) {
+			return NULL;
+		}
+		nd->n = n;
+		for ( i = 0; i < n; i++ ) {
+			nd->p[i] = ( d != NULL && i < d->n ) ? d->p[i] : (DEVIO *)Kcalloc(IO_PIECE, sizeof(DEVIO));
+			if ( nd->p[i] == NULL ) {
+				break;
+			}
+		}
+		full = ( i == n );
+		if ( full && __atomic_compare_exchange_n(&io_dir, &was, nd, FALSE,
+							 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ) {
+			continue;		/* in place: found the next time round */
+		}
+		/* no memory, or another put a list in first: this one goes */
+		while ( --i >= 0 ) {
+			if ( d == NULL || i >= d->n ) Kfree(nd->p[i]);
+		}
+		Kfree(nd);
+		if ( !full ) {
+			return NULL;
+		}
+	}
+}
 
 LOCAL DEVIO *io_of( ID dd )
 {
-	return ( dd > 0 && dd <= CNF_MAX_OPNDEV && dev_io[dd].dd == dd ) ? &dev_io[dd] : NULL;
+	DEVIO	*d = io_slot(dd, FALSE);
+
+	return ( d != NULL && __atomic_load_n(&d->dd, __ATOMIC_ACQUIRE) == dd ) ? d : NULL;
 }
 
 LOCAL void io_open( ID dd )
 {
 	UW	max = 0;
 	SZ	asize = 0;
+	DEVIO	*d = io_slot(dd, TRUE);
 
-	if ( dd > 0 && dd <= CNF_MAX_OPNDEV ) {
-		dev_io[dd].rd = dev_io[dd].wr = dev_io[dd].fl = 0;
+	if ( d != NULL ) {
+		d->rd = d->wr = d->fl = 0;
 		/* what the device takes best at once; a device that does not say keeps the default */
-		dev_io[dd].run = ( tk_srea_dev(dd, TDN_IOMAX, &max, sizeof(max), &asize) >= E_OK
-				   && asize == (SZ)sizeof(max) ) ? (UD)max / TSFSBLK_BLOCK_SIZE : 0;
-		__atomic_store_n(&dev_io[dd].dd, dd, __ATOMIC_RELEASE);
+		d->run = ( tk_srea_dev(dd, TDN_IOMAX, &max, sizeof(max), &asize) >= E_OK
+			   && asize == (SZ)sizeof(max) ) ? (UD)max / TSFSBLK_BLOCK_SIZE : 0;
+		__atomic_store_n(&d->dd, dd, __ATOMIC_RELEASE);
 	}
 }
 
@@ -379,7 +449,7 @@ LOCAL ER blks_read( ID dd, UD blk, UD n, void *buf )
 	SZ	asize;
 
 	if ( d != NULL ) __atomic_add_fetch(&d->rd, 1, __ATOMIC_RELAXED);
-	return tk_srea_dev(dd, (W)(blk * TSFSBLK_SECT_PER_BLK), buf,
+	return tk_srea_dev_d(dd, (D)( blk * TSFSBLK_SECT_PER_BLK ), buf,
 			   (SZ)( n * TSFSBLK_BLOCK_SIZE ), &asize);
 }
 
@@ -389,7 +459,7 @@ LOCAL ER blks_write( ID dd, UD blk, UD n, CONST void *buf )
 	SZ	asize;
 
 	if ( d != NULL ) __atomic_add_fetch(&d->wr, 1, __ATOMIC_RELAXED);
-	return tk_swri_dev(dd, (W)(blk * TSFSBLK_SECT_PER_BLK), buf,
+	return tk_swri_dev_d(dd, (D)( blk * TSFSBLK_SECT_PER_BLK ), buf,
 			   (SZ)( n * TSFSBLK_BLOCK_SIZE ), &asize);
 }
 
@@ -681,6 +751,99 @@ LOCAL ER cached_read( ID vol, ID dd, UD blk, void *buf )
 	return er;
 }
 
+/* ---------------------------------------------------------------- runs not to be taken yet */
+
+/*
+ * A run freed by a transaction is not handed out again until that
+ * transaction is in the log. Until then the medium still says the run
+ * belongs to what used it: data written into it by its next owner would
+ * be found there after a cut in the power, under the old owner's name.
+ * The runs are kept under the block cache's lock, the innermost one, so
+ * that the journal can let them go from inside its own.
+ */
+typedef struct busy {
+	UD	start, count;
+	UD	seq;			/* the transaction that freed it */
+} BUSY;
+
+LOCAL void busy_add( TSFSBLKVOL *v, UD start, UD count, UD seq )
+{
+	BUSY	*b;
+	INT	n;
+
+	tk_loc_mtx(v->bc_mtx, TMO_FEVR);
+	if ( v->nbusy >= v->maxbusy ) {
+		n = ( v->maxbusy > 0 ) ? v->maxbusy * 2 : 16;
+		b = (BUSY *)Krealloc(v->busy, sizeof(BUSY) * (SZ)n);
+		if ( b != NULL ) {
+			v->busy = b;
+			v->maxbusy = n;
+		}
+	}
+	if ( v->nbusy < v->maxbusy ) {
+		b = &v->busy[v->nbusy++];
+		b->start = start;
+		b->count = count;
+		b->seq = seq;
+	} else if ( v->nbusy > 0 ) {
+		/* no memory for one more: the last one grows over this one,
+		   which holds back more than it must and nothing it must not */
+		b = &v->busy[v->nbusy - 1];
+		if ( start < b->start ) {
+			b->count += b->start - start;
+			b->start = start;
+		}
+		if ( start + count > b->start + b->count ) {
+			b->count = start + count - b->start;
+		}
+		if ( seq > b->seq ) b->seq = seq;
+	}
+	tk_unl_mtx(v->bc_mtx);
+}
+
+/* Whether `blk` is in a run that may not be taken yet */
+LOCAL BOOL busy_has( TSFSBLKVOL *v, UD blk )
+{
+	INT	i;
+	BOOL	in = FALSE;
+
+	if ( __atomic_load_n(&v->nbusy, __ATOMIC_RELAXED) == 0 ) {
+		return FALSE;
+	}
+	tk_loc_mtx(v->bc_mtx, TMO_FEVR);
+	for ( i = 0; i < v->nbusy && !in; i++ ) {
+		in = (BOOL)( blk >= v->busy[i].start && blk < v->busy[i].start + v->busy[i].count );
+	}
+	tk_unl_mtx(v->bc_mtx);
+	return in;
+}
+
+/* The runs of transactions numbered from `lo` up to below `hi` let go */
+LOCAL void busy_drop( TSFSBLKVOL *v, UD lo, UD hi )
+{
+	INT	i;
+
+	tk_loc_mtx(v->bc_mtx, TMO_FEVR);
+	for ( i = 0; i < v->nbusy; ) {
+		if ( v->busy[i].seq >= lo && v->busy[i].seq < hi ) {
+			v->busy[i] = v->busy[--v->nbusy];
+		} else {
+			i++;
+		}
+	}
+	tk_unl_mtx(v->bc_mtx);
+}
+
+/* Every transaction numbered below `dseq` is in the log: what they freed may be taken */
+EXPORT void knl_tsfsblk_unbusy( ID vol, UD dseq )
+{
+	TSFSBLKVOL	*v = bc_vol(vol);
+
+	if ( v != NULL && v->nbusy > 0 ) {
+		busy_drop(v, 0, dseq);
+	}
+}
+
 /*
  * Whether a write goes to the device: after a pretended cut in the
  * power nothing does, and the caller is told it went.
@@ -910,6 +1073,11 @@ LOCAL void note_error( TSFSBLKVOL *v, UD blk, UW kind )
 {
 	TS_TIME	t = now_time();
 
+	if ( v->err_kind == 0 ) {
+		/* the first of the volume's errors, with where it was found (KERNEL.TXT) */
+		tm_printf((UB *)"tsfs: %s: ERROR kind %d at block %ld (found from %p): the volume stops writing\n",
+			  v->devnm, (INT)kind, (D)blk, __builtin_return_address(0));
+	}
 	v->rdonly = TRUE;
 	v->err_kind = kind;
 	v->err_blk = blk;
@@ -983,7 +1151,7 @@ EXPORT ER ts_format_blk( CONST char *devnm, CONST char *label )
 		tk_cls_dev(dd, 0);
 		return E_IO;
 	}
-	nblk = (UD)info.blockcont / TSFSBLK_SECT_PER_BLK;
+	nblk = (UD)info.blockcont_d / TSFSBLK_SECT_PER_BLK;
 	if ( layout(nblk, &jblocks, &agb, &agn) < E_OK ) {
 		tk_cls_dev(dd, 0);
 		return E_PAR;			/* too small to be a volume */
@@ -1383,6 +1551,11 @@ LOCAL ER cache_flush( TSFSBLKVOL *v )
  * before or the one written, the bits of the blocks the group had are
  * the same in both, but for the map blocks the group grows into, which
  * were free before and are taken after.
+ *
+ * A write of 2 the device refuses gives the grow up: 2 writes only past
+ * the old end, which nothing refers to, so the volume stays as it was
+ * and goes on being written; the superblock loses GROWING. A write of
+ * 3 to 5 refused is an error of the volume, which has been touched.
  */
 
 /* Groups a volume of `total` blocks has with the journal and the group size it has */
@@ -1486,12 +1659,30 @@ LOCAL BOOL grow_room( TSFSBLKVOL *v, UD total, CONST UB *old )
 }
 
 /* Steps 2 to 5, with the volume's lock held; `old` is the last group's map before */
+/*
+ * One block of a grow written in its place; a failure told with the
+ * block and what the device answered, the block kept for the error the
+ * grow records
+ */
+LOCAL ER grow_put( TSFSBLKVOL *v, UD blk, CONST void *buf, UD *p_bad )
+{
+	ER	er = meta_write(VOL_ID(v), v->dd, blk, buf);
+
+	if ( er < E_OK ) {
+		tm_printf((UB *)"tsfs: %s: the grow could not write block %ld (%d)\n", v->devnm, (D)blk, (INT)er);
+		*p_bad = blk;
+		return E_IO;
+	}
+	return E_OK;
+}
+
 LOCAL ER grow_write( TSFSBLKVOL *v, UD total, CONST UB *old )
 {
 	T_TSFSBLK_SB	ns;
 	TSFSAG		*na, was, a;
 	UB		*buf;
 	UD		agb = v->sb.ag_blocks, n0 = v->sb.ag_count, n1, end, n, k, sum = 0;
+	UD		bad = v->ag_first;
 	ER		er = E_OK;
 
 	n1 = grown_count(v->ag_first, agb, total);
@@ -1516,13 +1707,32 @@ LOCAL ER grow_write( TSFSBLKVOL *v, UD total, CONST UB *old )
 		for ( k = 0; k < a.map_blocks && er >= E_OK; k++ ) {
 			a.free += map_make(&a, k, NULL, 0, buf);
 			a.crc[k] = ts_crc32c(buf, TSFSBLK_BLOCK_SIZE);
-			if ( meta_write(VOL_ID(v), v->dd, a.map_first + k, buf) < E_OK ) er = E_IO;
+			er = grow_put(v, a.map_first + k, buf, &bad);
 		}
 		a.dirty = FALSE;
 		ag_pack_as(&v->sb.vol_uuid, v->sb.journal_seq, n, &a, buf);
-		if ( er >= E_OK && meta_write(VOL_ID(v), v->dd, a.first, buf) < E_OK ) er = E_IO;
+		if ( er >= E_OK ) er = grow_put(v, a.first, buf, &bad);
 		na[n] = a;
 		sum += a.free;
+	}
+	if ( er < E_OK ) {
+		/*
+		 * Only blocks past the volume's end were written, which nothing
+		 * of it refers to: the grow is given up and the volume stays as
+		 * it was, still written to. The superblock no longer says
+		 * GROWING, so that the next opening does not try again on its
+		 * own; the next grow asked for starts afresh.
+		 */
+		v->sb.incompat &= ~TSFSBLK_INCOMPAT_GROWING;
+		v->sb.grow_to = 0;
+		v->sb_dirty = TRUE;
+		if ( sb_write(v) < E_OK ) {
+			note_error(v, 0, TSFSBLK_ERR_IO);
+		} else {
+			tm_printf((UB *)"tsfs: %s: the grow given up at block %ld; the volume stays at %ld blocks\n",
+				  v->devnm, (D)bad, (D)v->sb.total_blocks);
+		}
+		goto out;
 	}
 
 	/* 3: the last group, longer; its map past what it had is free */
@@ -1532,11 +1742,11 @@ LOCAL ER grow_write( TSFSBLKVOL *v, UD total, CONST UB *old )
 		a.free += map_make(&a, k, ( k < was.map_blocks ) ? old + k * TSFSBLK_BLOCK_SIZE : NULL,
 				   was.len, buf);
 		a.crc[k] = ts_crc32c(buf, TSFSBLK_BLOCK_SIZE);
-		if ( meta_write(VOL_ID(v), v->dd, a.map_first + k, buf) < E_OK ) er = E_IO;
+		er = grow_put(v, a.map_first + k, buf, &bad);
 	}
 	a.dirty = FALSE;
 	ag_pack_as(&v->sb.vol_uuid, v->sb.journal_seq, n0 - 1, &a, buf);
-	if ( er >= E_OK && meta_write(VOL_ID(v), v->dd, a.first, buf) < E_OK ) er = E_IO;
+	if ( er >= E_OK ) er = grow_put(v, a.first, buf, &bad);
 	na[n0 - 1] = a;
 	sum += a.free;
 	if ( er >= E_OK ) (void)dev_flush(v->dd);
@@ -1551,10 +1761,10 @@ LOCAL ER grow_write( TSFSBLKVOL *v, UD total, CONST UB *old )
 	ns.grow_to = 0;
 	sb_pack(&ns, buf);
 	for ( n = 1; n < n1 && er >= E_OK; n++ ) {
-		if ( na[n].spare && meta_write(VOL_ID(v), v->dd, na[n].first + 1, buf) < E_OK ) er = E_IO;
+		if ( na[n].spare ) er = grow_put(v, na[n].first + 1, buf, &bad);
 	}
 	if ( er < E_OK ) {
-		note_error(v, v->ag_first, TSFSBLK_ERR_IO);
+		note_error(v, bad, TSFSBLK_ERR_IO);
 		goto out;
 	}
 	(void)dev_flush(v->dd);
@@ -1596,7 +1806,7 @@ LOCAL ER grow_finish( TSFSBLKVOL *v )
 	ER		er;
 
 	if ( tk_srea_dev(v->dd, TDN_DISKINFO, &info, sizeof(info), &asize) < E_OK
-	  || total <= v->sb.total_blocks || total > (UD)info.blockcont / TSFSBLK_SECT_PER_BLK ) {
+	  || total <= v->sb.total_blocks || total > (UD)info.blockcont_d / TSFSBLK_SECT_PER_BLK ) {
 		note_error(v, 0, TSFSBLK_ERR_IO);
 		return E_OBJ;
 	}
@@ -1694,6 +1904,10 @@ EXPORT ID ts_opn_vol_blk( CONST char *devnm )
 	if ( ( v->sb.state & TSFSBLK_ST_ERROR ) != 0
 	  || ( v->sb.ro_compat & ~KNOWN_ROCOMPAT ) != 0 ) {
 		v->rdonly = TRUE;		/* until it has been checked */
+		tm_printf((UB *)"tsfs: %s: %s (kind %d at block %ld, first %ld, last %ld): read only, its log not put back, "
+			  "until it is checked\n", v->devnm, ( v->sb.state & TSFSBLK_ST_ERROR ) ? "an error is recorded"
+			  : "a feature not known", (INT)v->sb.err_kind, (D)v->sb.err_blk, (D)v->sb.err_first,
+			  (D)v->sb.err_last);
 	}
 	/* a grow the power cut short: done again from where the medium is */
 	if ( !v->rdonly && ( v->sb.incompat & TSFSBLK_INCOMPAT_GROWING ) != 0 ) {
@@ -1745,6 +1959,9 @@ EXPORT ER ts_cls_vol_blk( ID vol )
 
 	tk_del_mtx(v->mtxid);
 	bc_fini(v);
+	if ( v->busy != NULL ) Kfree(v->busy);
+	v->busy = NULL;
+	v->nbusy = v->maxbusy = 0;
 	for ( i = 0; i < TSFSBLK_HELD_MAP; i++ ) {
 		if ( v->held_buf[i] != NULL ) Kfree(v->held_buf[i]);
 	}
@@ -1775,6 +1992,26 @@ EXPORT INT knl_tsfsblk_slots( INT *p_used, UD *p_cached )
 }
 
 /* The volume's top object: kept in the superblock, written with the next change of it */
+EXPORT ER ts_blk_xt2( ID vol )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	ER		er = E_OK;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	if ( v->rdonly ) {
+		er = E_RONLY;
+	} else if ( ( v->sb.incompat & TSFSBLK_INCOMPAT_XT2 ) == 0 ) {
+		v->sb.incompat |= TSFSBLK_INCOMPAT_XT2;
+		v->sb_dirty = TRUE;
+	}
+	tk_unl_mtx(v->mtxid);
+
+	return er;
+}
+
 EXPORT ER ts_set_top_blk( ID vol, CONST TS_UUID *uuid )
 {
 	TSFSBLKVOL	*v = vol_of(vol);
@@ -1875,9 +2112,9 @@ EXPORT ER ts_grow_vol_blk( ID vol, UD blocks, UD *p_from, UD *p_to )
 		return E_IO;
 	}
 	if ( blocks == 0 ) {
-		blocks = (UD)info.blockcont / TSFSBLK_SECT_PER_BLK;
+		blocks = (UD)info.blockcont_d / TSFSBLK_SECT_PER_BLK;
 	}
-	if ( blocks > (UD)info.blockcont / TSFSBLK_SECT_PER_BLK ) {
+	if ( blocks > (UD)info.blockcont_d / TSFSBLK_SECT_PER_BLK ) {
 		return E_PAR;
 	}
 	old = (UB *)Kcalloc(AG_MAX_MAP, TSFSBLK_BLOCK_SIZE);
@@ -1980,7 +2217,7 @@ LOCAL ER run_find( TSFSBLKVOL *v, UD n, UD from, UD to, UD want,
 		if ( er < E_OK ) {
 			return er;
 		}
-		if ( used ) {
+		if ( used || busy_has(v, blk) ) {
 			continue;
 		}
 		for ( k = 1; k < want && blk + k < to; k++ ) {
@@ -1988,7 +2225,7 @@ LOCAL ER run_find( TSFSBLKVOL *v, UD n, UD from, UD to, UD want,
 			if ( er < E_OK ) {
 				return er;
 			}
-			if ( used ) {
+			if ( used || busy_has(v, blk + k) ) {
 				break;
 			}
 		}
@@ -2015,6 +2252,7 @@ EXPORT ER ts_alloc_ext( ID vol, UD want, UD *p_start, UD *p_count )
 	TSFSBLKVOL	*v = vol_of(vol);
 	UD		start = 0, count = 0, i, n, from, lo, hi;
 	INT		h;
+	BOOL		waited = FALSE;
 	ER		er = E_NOMEM;
 
 	if ( v == NULL || p_start == NULL || p_count == NULL ) {
@@ -2028,6 +2266,7 @@ EXPORT ER ts_alloc_ext( ID vol, UD want, UD *p_start, UD *p_count )
 		er = E_RONLY;
 		goto exit;
 	}
+    again:
 	h = ag_of(v, v->hint);
 	if ( h < 0 ) {
 		h = 0;
@@ -2049,6 +2288,16 @@ EXPORT ER ts_alloc_ext( ID vol, UD want, UD *p_start, UD *p_count )
 			from = lo;
 		}
 		er = run_find(v, n, from, hi, want, &start, &count);
+	}
+	if ( er == E_NOMEM && v->nbusy > 0 && !waited ) {
+		/* only runs freed by transactions not in the log yet: those
+		   closed are written now, and the search goes again */
+		waited = TRUE;
+		tk_unl_mtx(v->mtxid);
+		(void)ts_jrnl_durable(vol, ts_jrnl_next(vol));
+		tk_loc_mtx(v->mtxid, TMO_FEVR);
+		if ( !v->rdonly ) goto again;
+		er = E_RONLY;
 	}
 	if ( er < E_OK ) {
 		goto exit;
@@ -2109,7 +2358,7 @@ EXPORT ER ts_alloc_ext_at( ID vol, UD blk, UD want, UD *p_count )
 	for ( i = 0; i < want; i++ ) {
 		er = bit_get(v, (UD)n, blk + i, &used);
 		if ( er < E_OK ) goto exit;
-		if ( used ) break;
+		if ( used || busy_has(v, blk + i) ) break;
 	}
 	if ( i == 0 ) {
 		er = E_NOMEM;			/* the block is taken */
@@ -2182,6 +2431,9 @@ EXPORT ER ts_free_ext( ID vol, UD start, UD count )
 	v->ag[n].free += count;
 	v->ag[n].dirty = TRUE;
 	v->sb.free_blocks += count;
+	if ( v->jrnl_on ) {
+		busy_add(v, start, count, knl_jrnl_running(vol));
+	}
 	knl_jrnl_revoke(vol, start, count);	/* a copy of what was here must not come back */
 	if ( start < v->hint ) {
 		v->hint = start;		/* fill the hole before going on */
@@ -2433,6 +2685,10 @@ EXPORT ER ts_blk_jrnl_discard( ID vol )
 	v->held_n = 0;
 	v->cache_dirty = FALSE;
 	v->cache_blk = ~(UD)0;
+	if ( v->nbusy > 0 ) {
+		/* the runs the thrown away transaction freed are taken again */
+		busy_drop(v, knl_jrnl_running(vol), ~(UD)0);
+	}
 
 	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
 	if ( buf != NULL ) {
@@ -2813,6 +3069,102 @@ EXPORT ER knl_tsfsblk_raw_write( ID vol, UD blk, CONST void *buf )
 		return E_RONLY;
 	}
 	return ( cached_write(vol, v->dd, blk, buf, FALSE) >= E_OK ) ? E_OK : E_IO;
+}
+
+EXPORT ER knl_tsfsblk_raw_writes_fua( ID vol, UD blk, UD n, CONST void *buf, BOOL *p_fua )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	T_DEVFUA	fw;
+	SZ		asz;
+	UD		i;
+	ER		er;
+
+	*p_fua = FALSE;
+	if ( v == NULL || buf == NULL || n == 0 || blk >= v->sb.total_blocks
+	  || n > v->sb.total_blocks - blk ) {
+		return E_PAR;
+	}
+	if ( v->rdonly ) {
+		return E_RONLY;
+	}
+	if ( v->cut || v->nofua ) {
+		return knl_tsfsblk_raw_writes(vol, blk, n, buf);	/* a pretended cut counts each write */
+	}
+	fw.start = (D)( blk * TSFSBLK_SECT_PER_BLK );
+	fw.buf = buf;
+	fw.size = (SZ)( n * TSFSBLK_BLOCK_SIZE );
+	v->writes += n;
+	er = tk_swri_dev(v->dd, TDN_FUAWRITE, &fw, sizeof(fw), &asz);
+	if ( er == E_PAR || er == E_NOSPT ) {
+		v->nofua = TRUE;		/* the device cannot: written and flushed from now on */
+		v->writes -= n;
+		return knl_tsfsblk_raw_writes(vol, blk, n, buf);
+	}
+	er = ( er >= E_OK ) ? E_OK : E_IO;
+	for ( i = 0; i < n; i++ ) {
+		bc_write(v, blk + i, (CONST UB *)buf + i * TSFSBLK_BLOCK_SIZE, (BOOL)( er >= E_OK ), FALSE);
+	}
+	if ( er < E_OK ) {
+		note_error(v, blk, TSFSBLK_ERR_IO);
+	} else {
+		*p_fua = TRUE;
+	}
+	return er;
+}
+
+/*
+ * Blocks laid out one after another, written in one request. After a
+ * pretended cut in the power the writes are counted one at a time, as
+ * the cut counts them.
+ */
+EXPORT ER knl_tsfsblk_raw_writes( ID vol, UD blk, UD n, CONST void *buf )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	CONST UB	*b = (CONST UB *)buf;
+	UD		i;
+	ER		er = E_OK;
+
+	if ( v == NULL || buf == NULL || n == 0 || blk >= v->sb.total_blocks
+	  || n > v->sb.total_blocks - blk ) {
+		return E_PAR;
+	}
+	if ( v->rdonly ) {
+		return E_RONLY;
+	}
+	if ( n == 1 || v->cut ) {
+		for ( i = 0; i < n && er >= E_OK; i++ ) {
+			er = ( cached_write(vol, v->dd, blk + i, b + i * TSFSBLK_BLOCK_SIZE, FALSE) >= E_OK )
+				? E_OK : E_IO;
+		}
+		return er;
+	}
+	v->writes += n;
+	er = ( blks_write(v->dd, blk, n, buf) >= E_OK ) ? E_OK : E_IO;
+	for ( i = 0; i < n; i++ ) {
+		bc_write(v, blk + i, b + i * TSFSBLK_BLOCK_SIZE, (BOOL)( er >= E_OK ), FALSE);
+	}
+	return er;
+}
+
+/*
+ * The log could not be written: the volume stops writing. Called from
+ * inside the log's locks, where the volume's lock may be held by the
+ * caller or by another task waiting on the log; the error is noted, and
+ * the superblock written with it when the volume closes.
+ */
+EXPORT void knl_tsfsblk_stop( ID vol, UD blk )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+
+	if ( v == NULL ) {
+		return;
+	}
+	if ( tk_loc_mtx(v->mtxid, TMO_POL) == E_OK ) {
+		note_error(v, blk, TSFSBLK_ERR_IO);
+		tk_unl_mtx(v->mtxid);
+	} else {
+		note_error(v, blk, TSFSBLK_ERR_IO);
+	}
 }
 
 EXPORT ER ts_cut_blk( ID vol, UD after, UD *p_writes )

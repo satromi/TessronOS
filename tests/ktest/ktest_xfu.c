@@ -1684,7 +1684,7 @@ LOCAL BOOL has_text( CONST UB *s, SZ n, CONST char *w )
  * A file taken in as the caller says it is: a text made full width
  * (letters, the blank, the half width katakana with its voiced mark),
  * bytes alone (record 0 only names it; given out again, the same
- * bytes), and an archive for 書庫解凍.
+ * bytes), and an archive for 書庫管理.
  */
 LOCAL void test_xfu_as( void )
 {

@@ -45,6 +45,7 @@ typedef struct messagebuffer_control_block {
 #if USE_OBJECT_NAME
 	UB	name[OBJECT_NAME_LENGTH];	/* name */
 #endif
+	KLOCK	klk;		/* its lock (klk.h, design 4.3.3) */
 } MBFCB;
 
 IMPORT MBFCB knl_mbfcb_table[];	/* Message buffer control block */

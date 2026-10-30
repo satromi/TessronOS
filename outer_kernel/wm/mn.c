@@ -46,9 +46,16 @@
 #define MN_DEPTH	6		/* definitions within definitions */
 
 /* Where the lists of menu m are kept, and what an item's command is */
-#define MN_LIST(m, k)	( 0x4000 + (m) * MN_NODE_MAX + (k) )
+/*
+ * The numbers a menu's lists go by in the data box, and the command an
+ * item is chosen with: both are INT, so a menu has at most MN_NODES
+ * lists and a list at most MN_CMD_NODE - 1 items (the command's 31 bits).
+ */
+#define MN_NODES	2048
+#define MN_LIST(m, k)	( 0x4000 + (m) * MN_NODES + (k) )
 #define MN_CMD_BASE	0x100000
-#define MN_CMD(k, i)	( MN_CMD_BASE + ( (k) << 8 ) + (i) + 1 )
+#define MN_CMD_NODE	0x80000
+#define MN_CMD(k, i)	( MN_CMD_BASE + (k) * MN_CMD_NODE + (i) + 1 )
 
 /* An item's own marks, besides its state (MN_GREY, MN_TICK, MN_HIDE) */
 #define MN_LINE		0x0100		/* a line between groups */
@@ -65,21 +72,40 @@ typedef struct {
 	D	value;
 } MNITEM;
 
+/* A list: as many items as its definition and the program's lists give */
 typedef struct {
-	INT	nitem;
-	MNITEM	item[WM_ITEM_MAX];
+	INT	nitem, cap;
+	MNITEM	*item;
 } MNNODE;
 
 typedef struct {
 	BOOL	used;
 	ID	tsk;			/* the task that made it */
+	ID	pid;			/* the process it was made for (knl_mn_owner), 0 none */
 	TS_UUID	def;			/* the definition the menu was made from */
-	INT	nnode;
-	MNNODE	*node[MN_NODE_MAX];
-	INT	row[WM_ITEM_MAX];	/* the row each root item was shown on, or -1 */
+	INT	nnode, ncap;
+	MNNODE	**node;
+	INT	*row;			/* the row each root item was shown on, or -1 */
+	INT	nrow;
 } MNMENU;
 
-LOCAL MNMENU	mn_tab[MN_MAX];
+/*
+ * The menus made, as many as there are at once: each is allocated once
+ * and never freed, so a menu's number (its place, from 1) stays; a
+ * larger table is made whole before it is put in place, the one before
+ * kept, so that menu_of reads it without a lock.
+ */
+#define MN_FIRST	8
+
+typedef struct {
+	INT	n;
+	MNMENU	*e[];
+} MNTBL;
+
+LOCAL MNTBL *volatile	mn_tbl = NULL;
+
+#define MN_N		( ( mn_tbl != NULL ) ? mn_tbl->n : 0 )
+#define MN_AT(i)	( mn_tbl->e[(i)] )
 
 /*
  * The item each menu was last left on, so that it opens with that item
@@ -90,17 +116,19 @@ typedef struct {
 	INT	cur;
 } MNLAST;
 
-LOCAL MNLAST	mn_last[MN_MAX];
-LOCAL INT	mn_nlast = 0;
+LOCAL MNLAST	*mn_last = NULL;	/* a menu each, as many as have been chosen in */
+LOCAL INT	mn_nlast = 0, mn_last_cap = 0;
 
 /* ---------------------------------------------------------------- the table */
 
 LOCAL MNMENU *menu_of( ID mid )
 {
-	if ( mid <= 0 || mid > MN_MAX || !mn_tab[mid - 1].used ) {
+	MNTBL	*t = mn_tbl;
+
+	if ( t == NULL || mid <= 0 || mid > t->n || !t->e[mid - 1]->used ) {
 		return NULL;
 	}
-	return &mn_tab[mid - 1];
+	return t->e[mid - 1];
 }
 
 /* The table of menus, taken from tasks on every processor */
@@ -108,23 +136,58 @@ LOCAL T_SPLOCK	mn_tab_lock;
 
 LOCAL ID menu_take( void )
 {
-	ID	mid = E_LIMIT;
-	INT	i;
+	ID	mid = E_NOMEM;
+	INT	i, n;
 	UINT	imask;
+	MNTBL	*t, *nt;
 
-	ISpinLock(&mn_tab_lock, &imask);
-	for ( i = 0; i < MN_MAX; i++ ) {
-		if ( !mn_tab[i].used ) {
-			knl_memset(&mn_tab[i], 0, sizeof(MNMENU));
-			mn_tab[i].used = TRUE;
-			mid = i + 1;
+	for ( ;; ) {
+		ISpinLock(&mn_tab_lock, &imask);
+		t = mn_tbl;
+		n = ( t != NULL ) ? t->n : 0;
+		for ( i = 0; i < n; i++ ) {
+			if ( !t->e[i]->used ) {
+				knl_memset(t->e[i], 0, sizeof(MNMENU));
+				t->e[i]->used = TRUE;
+				mid = i + 1;
+				break;
+			}
+		}
+		ISpinUnlock(&mn_tab_lock, &imask);
+		if ( mid > 0 ) {
 			break;
 		}
+		/* every one in use: a table twice as large, made outside the lock */
+		nt = (MNTBL *)Kcalloc(1, sizeof(MNTBL) + sizeof(MNMENU *) * (SZ)( n > 0 ? n * 2 : MN_FIRST ));
+		if ( nt == NULL ) {
+			return E_NOMEM;
+		}
+		nt->n = ( n > 0 ) ? n * 2 : MN_FIRST;
+		for ( i = n; i < nt->n; i++ ) {
+			nt->e[i] = (MNMENU *)Kcalloc(1, sizeof(MNMENU));
+			if ( nt->e[i] == NULL ) {
+				while ( --i >= n ) Kfree(nt->e[i]);
+				Kfree(nt);
+				return E_NOMEM;
+			}
+		}
+		ISpinLock(&mn_tab_lock, &imask);
+		if ( mn_tbl == t ) {
+			for ( i = 0; i < n; i++ ) {
+				nt->e[i] = t->e[i];
+			}
+			__sync_synchronize();
+			mn_tbl = nt;		/* the table before is not freed */
+			nt = NULL;
+		}
+		ISpinUnlock(&mn_tab_lock, &imask);
+		if ( nt != NULL ) {
+			/* another made one first: this one goes, and the search starts again */
+			for ( i = n; i < nt->n; i++ ) Kfree(nt->e[i]);
+			Kfree(nt);
+		}
 	}
-	ISpinUnlock(&mn_tab_lock, &imask);
-	if ( mid > 0 ) {
-		mn_tab[mid - 1].tsk = tk_get_tid();
-	}
+	MN_AT(mid - 1)->tsk = tk_get_tid();
 
 	return mid;
 }
@@ -138,12 +201,12 @@ EXPORT INT knl_mn_tsk_end( CONST ID *tids, INT n )
 {
 	INT	i, k, c = 0;
 
-	for ( i = 0; i < MN_MAX; i++ ) {
-		if ( !mn_tab[i].used ) {
+	for ( i = 0; i < MN_N; i++ ) {
+		if ( !MN_AT(i)->used ) {
 			continue;
 		}
 		for ( k = 0; k < n; k++ ) {
-			if ( mn_tab[i].tsk == tids[k] ) {
+			if ( MN_AT(i)->tsk == tids[k] ) {
 				(void)mn_del_men(i + 1);
 				c++;
 				break;
@@ -151,6 +214,33 @@ EXPORT INT knl_mn_tsk_end( CONST ID *tids, INT n )
 		}
 	}
 	return c;
+}
+
+/* The process a menu was made for, as the system call layer keeps it; 0 none */
+EXPORT ID knl_mn_owner( ID mid )
+{
+	MNMENU	*m = menu_of(mid);
+
+	return ( m != NULL ) ? m->pid : 0;
+}
+
+EXPORT void knl_mn_set_owner( ID mid, ID pid )
+{
+	MNMENU	*m = menu_of(mid);
+
+	if ( m != NULL ) m->pid = pid;
+}
+
+/* The menus made for processes that have gone, deleted */
+EXPORT void knl_mn_reap( BOOL (*gone)( ID pid ) )
+{
+	INT	i;
+
+	for ( i = 0; i < MN_N; i++ ) {
+		if ( MN_AT(i)->used && MN_AT(i)->pid > 0 && gone(MN_AT(i)->pid) ) {
+			(void)mn_del_men(i + 1);
+		}
+	}
 }
 
 LOCAL INT str_cpy( UB *dst, INT max, CONST UB *src )
@@ -254,18 +344,64 @@ LOCAL void label_of( CONST T_TADNODE *nd, UB *out, INT max )
 	out[n] = 0;
 }
 
+/* Room for want items in a list: FALSE for no memory, or more than a command holds */
+LOCAL BOOL node_room( MNNODE *n, INT want )
+{
+	MNITEM	*t;
+	INT	cap = ( n->cap > 0 ) ? n->cap : 16;
+
+	if ( want <= n->cap ) {
+		return TRUE;
+	}
+	if ( want >= MN_CMD_NODE ) {
+		return FALSE;
+	}
+	while ( cap < want ) cap *= 2;
+	if ( cap >= MN_CMD_NODE ) cap = MN_CMD_NODE - 1;
+	t = (MNITEM *)Kmalloc(sizeof(MNITEM) * (SZ)cap);
+	if ( t == NULL ) {
+		return FALSE;
+	}
+	if ( n->item != NULL ) {
+		knl_memcpy(t, n->item, sizeof(MNITEM) * (SZ)n->nitem);
+		Kfree(n->item);
+	}
+	n->item = t;
+	n->cap = cap;
+	return TRUE;
+}
+
+LOCAL void node_free( MNNODE *n )
+{
+	if ( n->item != NULL ) Kfree(n->item);
+	Kfree(n);
+}
+
 LOCAL INT node_new( MNMENU *m )
 {
 	MNNODE	*n;
 
-	if ( m->nnode >= MN_NODE_MAX ) {
+	if ( m->nnode >= MN_NODES ) {
 		return -1;
 	}
-	n = (MNNODE *)Kmalloc(sizeof(MNNODE));
+	if ( m->nnode == m->ncap ) {
+		INT	cap = ( m->ncap > 0 ) ? m->ncap * 2 : 8;
+		MNNODE	**t = (MNNODE **)Kmalloc(sizeof(MNNODE *) * (SZ)cap);
+
+		if ( t == NULL ) {
+			return -1;
+		}
+		if ( m->node != NULL ) {
+			knl_memcpy(t, m->node, sizeof(MNNODE *) * (SZ)m->nnode);
+			Kfree(m->node);
+		}
+		m->node = t;
+		m->ncap = cap;
+	}
+	n = (MNNODE *)Kcalloc(1, sizeof(MNNODE));
 	if ( n == NULL ) {
 		return -1;
 	}
-	knl_memset(n, 0, sizeof(MNNODE));
 	m->node[m->nnode] = n;
 
 	return m->nnode++;
@@ -292,8 +428,8 @@ LOCAL ER read_item( MNMENU *m, INT k, CONST TS_UUID *def, CONST T_TADNODE *it,
 	if ( !name_is(it, "item") && !name_is(it, "line") && !name_is(it, "list") ) {
 		return E_OK;			/* what this reader does not know */
 	}
-	if ( n->nitem >= WM_ITEM_MAX ) {
-		return E_LIMIT;
+	if ( !node_room(n, n->nitem + 1) ) {
+		return E_NOMEM;
 	}
 	e = &n->item[n->nitem++];
 	knl_memset(e, 0, sizeof(MNITEM));
@@ -373,7 +509,7 @@ EXPORT ER mn_cre_men( CONST TS_UUID *def, ID *p_mid )
 	if ( mid < 0 ) {
 		return (ER)mid;
 	}
-	m = &mn_tab[mid - 1];
+	m = MN_AT(mid - 1);
 	m->def = *def;
 	er = ( node_new(m) == 0 ) ? read_def(m, 0, def, 0) : E_NOMEM;
 	if ( er < E_OK ) {
@@ -395,8 +531,13 @@ EXPORT ER mn_del_men( ID mid )
 	}
 	for ( k = 0; k < m->nnode; k++ ) {
 		(void)db_del(DB_MENU, MN_LIST(mid - 1, k), 0);
-		Kfree(m->node[k]);
+		node_free(m->node[k]);
 	}
+	if ( m->node != NULL ) Kfree(m->node);
+	if ( m->row != NULL ) Kfree(m->row);
+	m->node = NULL;
+	m->row = NULL;
+	m->nnode = m->ncap = m->nrow = 0;
 	m->used = FALSE;
 
 	return E_OK;
@@ -516,8 +657,8 @@ EXPORT ER mn_set_lst( ID mid, CONST TS_UUID *def, CONST char *code,
 	}
 	nd = m->node[--k];
 	hole = nd->item[at];
-	if ( nd->nitem - 1 + n > WM_ITEM_MAX ) {
-		n = WM_ITEM_MAX - ( nd->nitem - 1 );
+	if ( !node_room(nd, nd->nitem - 1 + n) ) {
+		return E_NOMEM;
 	}
 	/* the items after the hole move to make room, the hole goes */
 	for ( j = nd->nitem - 1; j > at; j-- ) {
@@ -557,21 +698,28 @@ LOCAL BOOL node_live( MNMENU *m, INT k, INT depth )
 	return FALSE;
 }
 
-/* Node k as the window layer's list; rows, when given, gets each item's row */
-LOCAL void node_list( MNMENU *m, ID mid, INT k, T_WMMENU *w, INT *rows )
+/*
+ * Node k as the window layer's list, in a T_WMMENU of its own as large
+ * as the node needs (free it); rows, when given, gets each item's row
+ */
+LOCAL T_WMMENU *node_list( MNMENU *m, ID mid, INT k, INT *rows )
 {
-	MNNODE	*n = m->node[k];
-	INT	i;
-	BOOL	prev_line = TRUE;
+	MNNODE		*n = m->node[k];
+	T_WMMENU	*w;
+	INT		i;
+	BOOL		prev_line = TRUE;
 
-	for ( i = 0; rows != NULL && i < WM_ITEM_MAX; i++ ) {
+	for ( i = 0; rows != NULL && i < n->nitem; i++ ) {
 		rows[i] = -1;
 	}
 
-	knl_memset(w, 0, sizeof(T_WMMENU));
+	w = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(n->nitem));
+	if ( w == NULL ) {
+		return NULL;
+	}
 	w->num = MN_LIST(mid - 1, k);
 	w->owner = 0;
-	for ( i = 0; i < n->nitem && w->nitem < WM_ITEM_MAX; i++ ) {
+	for ( i = 0; i < n->nitem; i++ ) {
 		MNITEM		*e = &n->item[i];
 		T_WMITEM	*it;
 
@@ -605,6 +753,7 @@ LOCAL void node_list( MNMENU *m, ID mid, INT k, T_WMMENU *w, INT *rows )
 	if ( w->nitem > 0 && w->item[w->nitem - 1].label[0] == 0 ) {
 		w->nitem--;				/* no line at the foot */
 	}
+	return w;
 }
 
 LOCAL MNLAST *last_of( CONST TS_UUID *def, BOOL make )
@@ -619,7 +768,21 @@ LOCAL MNLAST *last_of( CONST TS_UUID *def, BOOL make )
 	if ( !make ) {
 		return NULL;
 	}
-	i = ( mn_nlast < MN_MAX ) ? mn_nlast++ : MN_MAX - 1;
+	if ( mn_nlast == mn_last_cap ) {
+		INT	cap = ( mn_last_cap > 0 ) ? mn_last_cap * 2 : 16;
+		MNLAST	*t = (MNLAST *)Kmalloc(sizeof(MNLAST) * (SZ)cap);
+
+		if ( t == NULL ) {
+			return NULL;
+		}
+		if ( mn_last != NULL ) {
+			knl_memcpy(t, mn_last, sizeof(MNLAST) * (SZ)mn_nlast);
+			Kfree(mn_last);
+		}
+		mn_last = t;
+		mn_last_cap = cap;
+	}
+	i = mn_nlast++;
 	mn_last[i].def = *def;
 	mn_last[i].cur = 0;
 	return &mn_last[i];
@@ -636,19 +799,29 @@ EXPORT INT mn_opn_men( ID mid, INT wid, INT x, INT y )
 	if ( m == NULL ) {
 		return E_ID;
 	}
-	w = (T_WMMENU *)Kmalloc(sizeof(T_WMMENU));
+	for ( k = 1; k < m->nnode && er >= E_OK; k++ ) {
+		w = node_list(m, mid, k, NULL);
+		er = ( w == NULL ) ? E_NOMEM : db_put(DB_MENU, w->num, 0, w, WM_MENU_SIZE(w->nitem));
+		if ( w != NULL ) Kfree(w);
+	}
+	if ( er < E_OK ) {
+		return er;
+	}
+	/* the row of each root item, as many as the root list has */
+	if ( m->nrow < m->node[0]->nitem ) {
+		INT	*r = (INT *)Kmalloc(sizeof(INT) * (SZ)m->node[0]->nitem);
+
+		if ( r == NULL ) {
+			return E_NOMEM;
+		}
+		if ( m->row != NULL ) Kfree(m->row);
+		m->row = r;
+		m->nrow = m->node[0]->nitem;
+	}
+	w = node_list(m, mid, 0, m->row);
 	if ( w == NULL ) {
 		return E_NOMEM;
 	}
-	for ( k = 1; k < m->nnode && er >= E_OK; k++ ) {
-		node_list(m, mid, k, w, NULL);
-		er = db_put(DB_MENU, w->num, 0, w, sizeof(T_WMMENU));
-	}
-	if ( er < E_OK ) {
-		Kfree(w);
-		return er;
-	}
-	node_list(m, mid, 0, w, m->row);
 	l = last_of(&m->def, FALSE);
 	if ( l != NULL && l->cur < w->nitem ) {
 		w->cur = l->cur;
@@ -692,8 +865,8 @@ EXPORT ER mn_get_sel( ID mid, INT cmd, T_MNSEL *sel )
 		return E_NOEXS;				/* nothing was chosen */
 	}
 	c = cmd - MN_CMD_BASE;
-	k = c >> 8;
-	i = ( c & 0xFF ) - 1;
+	k = c / MN_CMD_NODE;
+	i = c % MN_CMD_NODE - 1;
 	er = sel_of(m, k, i, sel);
 
 	/* the root's row the choice was made under, for the next time it opens */
@@ -715,7 +888,7 @@ EXPORT ER mn_get_sel( ID mid, INT cmd, T_MNSEL *sel )
 		k = pk;
 		i = pi;
 	}
-	if ( er >= E_OK && k == 0 && i < WM_ITEM_MAX && m->row[i] >= 0 ) {
+	if ( er >= E_OK && k == 0 && i >= 0 && i < m->nrow && m->row[i] >= 0 ) {
 		last_of(&m->def, TRUE)->cur = m->row[i];
 	}
 	return er;
@@ -759,10 +932,8 @@ EXPORT BOOL mn_is( CONST T_MNSEL *sel, CONST char *code )
  * The windows are the ones the list was filled with, kept here, so that
  * the one chosen is the one that was shown there.
  */
-#define MN_WIN_MAX	24
-
-LOCAL INT	mn_wins[MN_WIN_MAX];
-LOCAL INT	mn_nwin;
+LOCAL INT	*mn_wins = NULL;	/* the windows the list was filled with, every one shown */
+LOCAL INT	mn_nwin, mn_wins_cap = 0;
 
 LOCAL BOOL winlist_def( TS_UUID *u )
 {
@@ -777,9 +948,21 @@ EXPORT void mn_winlist_fill( ID mid )
 	CONST char *none = "（名前のないウインドウ）";
 
 	if ( !winlist_def(&wd) ) return;
-	names = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * MN_WIN_MAX);
+	/* every window shown: asked again with more room while there are more than the room */
+	while ( ( mn_nwin = wm_list(mn_wins, mn_wins_cap) ) >= mn_wins_cap ) {
+		INT	cap = ( mn_wins_cap > 0 ) ? mn_wins_cap * 2 : 32;
+		INT	*t = (INT *)Kmalloc(sizeof(INT) * (SZ)cap);
+
+		if ( t == NULL ) {
+			break;
+		}
+		if ( mn_wins != NULL ) Kfree(mn_wins);
+		mn_wins = t;
+		mn_wins_cap = cap;
+	}
+	if ( mn_nwin > mn_wins_cap ) mn_nwin = mn_wins_cap;
+	names = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * (SZ)( mn_nwin + 1 ));
 	if ( names == NULL ) return;
-	mn_nwin = wm_list(mn_wins, MN_WIN_MAX);
 	for ( i = 0; i < mn_nwin; i++ ) {
 		if ( wm_title(mn_wins[i], (char *)names[i], WM_LABEL_MAX) <= 0 ) {
 			for ( k = 0; none[k] != 0 && k < WM_LABEL_MAX - 1; k++ ) names[i][k] = (UB)none[k];

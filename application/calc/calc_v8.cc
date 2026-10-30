@@ -204,6 +204,14 @@ int ce_reset( void )
 	return call(ctx, "reset", 0, nullptr).IsEmpty() ? -1 : 0;
 }
 
+int ce_bulk( int on )
+{
+	ENTER();
+	v8::Local<v8::Value>	argv[1] = { v8::Boolean::New(iso, on != 0) };
+
+	return call(ctx, "bulk", 1, argv).IsEmpty() ? -1 : 0;
+}
+
 /* Records "col\x1Frow\x1Fwords" joined by \x1E */
 int ce_taken( CE_FN fn, void *arg )
 {
@@ -253,5 +261,5 @@ int ce_replace( const unsigned char *text, const unsigned char *pat, const unsig
 
 	memcpy(out, *s, (size_t)n);
 	out[n] = 0;
-	return n;
+	return s.length();		/* the whole, which may be more than was written */
 }

@@ -276,7 +276,43 @@ LOCAL ER id_of( CONST T_TADNODE *nd, T_VOBJ *pk )
 	return E_OK;
 }
 
-LOCAL ER vobj_of( CONST T_TADNODE *nd, T_VOBJ *pk )
+/*
+ * The identity a link without a vobjid has while the document is held:
+ * made the first time it is asked for, a UUID v7 as any new link's, and
+ * the same every time after. NULL for doc means none can be given.
+ */
+LOCAL ER lid_of( CONST T_TAD *doc, CONST T_TADNODE *nd, TS_UUID *p_id )
+{
+	T_TADLID	*l;
+	ER		er;
+
+	if ( doc == NULL ) {
+		return E_NOEXS;
+	}
+	for ( l = doc->lid; l != NULL; l = l->next ) {
+		if ( l->nd == nd ) {
+			*p_id = l->vobjid;
+			return E_OK;
+		}
+	}
+	/* kept with the document, not written into it */
+	l = (T_TADLID *)tad_alloc((T_TAD *)doc, sizeof(T_TADLID));
+	if ( l == NULL ) {
+		return E_NOMEM;
+	}
+	er = ts_gen_uuid(&l->vobjid);
+	if ( er < E_OK ) {
+		return er;
+	}
+	l->nd = nd;
+	l->next = doc->lid;
+	((T_TAD *)doc)->lid = l;
+	*p_id = l->vobjid;
+
+	return E_OK;
+}
+
+LOCAL ER vobj_of( CONST T_TAD *doc, CONST T_TADNODE *nd, T_VOBJ *pk )
 {
 	CONST UB	*v;
 	ER		er;
@@ -292,6 +328,17 @@ LOCAL ER vobj_of( CONST T_TADNODE *nd, T_VOBJ *pk )
 	v = tad_attr(nd, "vobjid");
 	if ( v != NULL && ts_str_to_uuid((CONST char *)v, &pk->vobjid) < E_OK ) {
 		return E_PAR;
+	}
+	if ( v == NULL ) {
+		/*
+		 * A link written without one (TADjs gives one as it reads
+		 * such a link): one is given here, the same while the
+		 * document is held, and written when the link is changed.
+		 */
+		er = lid_of(doc, nd, &pk->vobjid);
+		if ( er < E_OK ) {
+			return er;
+		}
 	}
 
 	er = cpy_attr(nd, "name", pk->name, TAD_NAME_MAX);
@@ -401,7 +448,7 @@ EXPORT ER tad_lnk_get( CONST T_TAD *doc, INT i, T_VOBJ *pk_vobj )
 		return E_NOEXS;
 	}
 
-	return vobj_of(nd, pk_vobj);
+	return vobj_of(doc, nd, pk_vobj);
 }
 
 LOCAL T_TADNODE *find_link( CONST T_TAD *doc, CONST TS_UUID *vobjid )
@@ -414,7 +461,14 @@ LOCAL T_TADNODE *find_link( CONST T_TAD *doc, CONST TS_UUID *vobjid )
 
 		if ( !is_link(nd) ) continue;
 		v = tad_attr(nd, "vobjid");
-		if ( v == NULL ) continue;
+		if ( v == NULL ) {
+			CONST T_TADLID	*l;
+
+			/* one without: the identity it was given when it was read */
+			for ( l = doc->lid; l != NULL && l->nd != nd; l = l->next ) ;
+			if ( l != NULL && ts_uuid_cmp(&l->vobjid, vobjid) == 0 ) return nd;
+			continue;
+		}
 		if ( ts_str_to_uuid((CONST char *)v, &id) < E_OK ) continue;
 		if ( ts_uuid_cmp(&id, vobjid) == 0 ) return nd;
 	}
@@ -434,7 +488,64 @@ EXPORT ER tad_lnk_find( CONST T_TAD *doc, CONST TS_UUID *vobjid, T_VOBJ *pk_vobj
 		return E_NOEXS;
 	}
 
-	return vobj_of(nd, pk_vobj);
+	return vobj_of(doc, nd, pk_vobj);
+}
+
+/* ---------------------------------------------------------------- the closed height */
+
+/* What a band shows: any of the picture, the name, the relationship, the kind and the date */
+#define LNK_D_BAND	( TAD_D_NAME | TAD_D_PICT | TAD_D_ROLE | TAD_D_TYPE | TAD_D_UPDATE )
+
+/*
+ * The letters and eleven pixels: a line above and below the name, the
+ * frame, and the room the picture beside the name needs. The number is
+ * what the records say rather than a choice made here; a band of any
+ * other height makes every closed object in a record the wrong size.
+ */
+LOCAL INT closed_of( INT chsz, UINT disp )
+{
+	if ( ( disp & LNK_D_BAND ) == 0 ) {
+		return 0;
+	}
+
+	return ( ( chsz > 0 ) ? chsz : 14 ) + 11;
+}
+
+EXPORT INT tad_lnk_closed_h( CONST T_VOBJ *pk_vobj )
+{
+	if ( pk_vobj == NULL ) {
+		return 0;
+	}
+
+	return closed_of(pk_vobj->chsz, pk_vobj->disp);
+}
+
+EXPORT INT tad_lnk_fit_h( CONST T_VOBJ *pk_vobj, INT h )
+{
+	INT	c = tad_lnk_closed_h(pk_vobj);
+
+	if ( c <= 0 ) {
+		return h;
+	}
+
+	return ( h <= c + TAD_OPEN_SLACK ) ? c : h;
+}
+
+EXPORT INT tad_node_closed_h( CONST T_TADNODE *nd )
+{
+	UINT	disp = 0;
+
+	if ( nd == NULL ) {
+		return 0;
+	}
+	/* the same defaults as reading the link (vobj_of) */
+	if ( to_bool(tad_attr(nd, "namedisp"), TRUE) )    disp |= TAD_D_NAME;
+	if ( to_bool(tad_attr(nd, "roledisp"), FALSE) )   disp |= TAD_D_ROLE;
+	if ( to_bool(tad_attr(nd, "typedisp"), FALSE) )   disp |= TAD_D_TYPE;
+	if ( to_bool(tad_attr(nd, "updatedisp"), FALSE) ) disp |= TAD_D_UPDATE;
+	if ( to_bool(tad_attr(nd, "pictdisp"), TRUE) )    disp |= TAD_D_PICT;
+
+	return closed_of(to_num(tad_attr(nd, "chsz"), 0), disp);
 }
 
 /* ---------------------------------------------------------------- editing */
@@ -813,6 +924,7 @@ EXPORT ER tad_lnk_set( T_TAD *doc, CONST T_VOBJ *pk_vobj )
 	nd->name   = fresh->name;
 	nd->raw    = NULL;			/* write it from the attributes now */
 	nd->rawlen = 0;
+	tad_touch(nd);
 
 	return E_OK;
 }
@@ -885,6 +997,7 @@ EXPORT ER tad_set_attr( T_TAD *doc, T_TADNODE *nd, CONST char *name,
 			nd->attr[i].value = v;
 			nd->raw = NULL;
 			nd->rawlen = 0;
+			tad_touch(nd);
 			return E_OK;
 		}
 	}
@@ -908,6 +1021,7 @@ EXPORT ER tad_set_attr( T_TAD *doc, T_TADNODE *nd, CONST char *name,
 	nd->nattr++;
 	nd->raw = NULL;
 	nd->rawlen = 0;
+	tad_touch(nd);
 
 	return E_OK;
 }
@@ -954,6 +1068,7 @@ LOCAL ER renumber_z( T_TAD *doc, T_TADNODE **slot, INT n )
 				}
 				nd->raw = NULL;		/* written from the attributes now */
 				nd->rawlen = 0;
+				tad_touch(nd);
 				break;
 			}
 		}

@@ -2,7 +2,7 @@
 
 ## 3.1 対象のマシン
 
-TessronOSが動くのは、Raspberry Pi 5、Raspberry Pi Compute Module 5(以下CM5)、Raspberry Pi 4 Model B、Raspberry Pi 400、Raspberry Pi Compute Module 4(以下CM4)、QEMUの`virt`マシンである。いずれもAArch64のCPUを4つ持ち、同じ`kernel/sysdepend/cpu/core/armv8a/`のコードで動く。マシンごとに異なるのはアドレスと割込み番号のテーブル、起動手順、一部のドライバだけで、`kernel/sysdepend/rpi5/`、`kernel/sysdepend/rpi4/`、`kernel/sysdepend/qemu_virt/`に分けてある。2つのRaspberry Piに共通のもの(メールボックス、ファームウェアの時計、乱数)は`kernel/sysdepend/rpi/`にある。CM5はRaspberry Pi 5と同じBCM2712とRP1を載せたモジュールで、Raspberry Pi 5と同じカーネルのイメージ(`TARGET=_RPI5_`)で動く。両者の違いは起動時にボードを見分けて吸収する(3.5)。Raspberry Pi 4、400、CM4はBCM2711を載せたボードで、命令セットの基準が違うので別のカーネルのイメージ(`TARGET=_RPI4_`)で動く(3.6)。
+TessronOSが動くのは、Raspberry Pi 5、Raspberry Pi Compute Module 5(以下CM5)、Raspberry Pi 4 Model B、Raspberry Pi 400、Raspberry Pi Compute Module 4(以下CM4)、QEMUの`virt`マシンである。いずれもAArch64のCPUを4つ持ち、同じ`kernel/sysdepend/cpu/core/armv8a/`のコードで動く。マシンごとに異なるのはアドレスと割込み番号のテーブル、起動手順、一部のドライバだけで、`kernel/sysdepend/rpi5/`、`kernel/sysdepend/rpi4/`、`kernel/sysdepend/qemu_virt/`に分けてある。2つのRaspberry Piに共通のもの(メールボックス、ファームウェアの時計、乱数)は`kernel/sysdepend/rpi/`にある。CM5はRaspberry Pi 5と同じBCM2712とRP1を載せたモジュールで、Raspberry Pi 5と同じカーネルのイメージ(`TARGET=_RPI5_`)で動く。両者の違いは起動時にボードを見分けて吸収する(3.5)。Raspberry Pi 4、400、CM4はBCM2711を載せたボードで、命令セットの基準が違うので別のカーネルのイメージ(`TARGET=_RPI4_`)で動く(3.6)。このほか、UEFIで起動するx64のPCで動く。x64は別のイメージ(`TARGET=_X64_`)で、QEMUの`q35`マシンとLenovo ThinkPad X1 Yoga 第3世代の実機でデスクトップまで起動することを確かめ、Microsoft Surface Go 2への対応を進めている(3.10)。
 
 | 項目 | Raspberry Pi 5 | Raspberry Pi 4系 | QEMU virt |
 | --- | --- | --- | --- |
@@ -83,6 +83,8 @@ Raspberry Pi 4系は実機ではまだ確かめておらず、QEMUの`raspi4b`�
 | サウンド | USBオーディオで確認済み(出力先の選択と抜き差しによる切替えを含む) | 未確認(I2SとHDMIの音は実機の試験をこれから行う) |
 
 CM5は実機ではまだ確認していない。ボードの見分けとボードごとの値はカーネル内の試験(`ktest_board`)で、eMMCの初期化と読み書きはQEMUのeMMC(`make SD_EMMC=1`)で確かめた(3.5.4)。
+
+x64のPCで確かめた範囲は3.10.5に、実機での起動は3.10.7と3.10.8に記す。
 
 ## 3.5 Raspberry Pi Compute Module 5
 
@@ -234,7 +236,7 @@ DMAの方式の検査(`sd_dma_check`)は切り替えた後の速さで行う。Q
 
 Raspberry Pi 4 Model B、Raspberry Pi 400、Compute Module 4(以下CM4)は、BCM2711を載せたボードである。CPUがARMv8.0-AのCortex-A72なので、ARMv8.2-Aで作るRaspberry Pi 5のイメージとは別に、`make TARGET=_RPI4_`でカーネルのイメージを作る。3つのボードは同じイメージで動き、ボードの違いはCM5と同じ仕組み(3.5.1)で起動時に見分けて吸収する。アドレスと割込み番号は、ファームウェアの配布物の`bcm2711-rpi-4-b.dtb`、`bcm2711-rpi-400.dtb`、`bcm2711-rpi-cm4.dtb`とBCM2711のペリフェラルの資料で確かめたもので、`include/sys/sysdepend/cpu/bcm2711/sysdef.h`にある。ボードに依存するコードは`kernel/sysdepend/rpi4/`に、Raspberry Pi 5と共通のメールボックス、時計、乱数は`kernel/sysdepend/rpi/`にある。
 
-実機ではまだ確かめていない。QEMUの`raspi4b`で確かめられる範囲は確かめ(3.6.6)、PCIe、VL805、GENET、GPIOのように実機でしか確かめられないものは、資料とデバイスツリーの値に基づいて書いた。
+実機では、Raspberry Pi 400で、起動、ボードの見分け、SDカード(EMMC2のHigh Speed)、画面(ファームウェアのフレームバッファ)、サウンドの初期化までが進むことを確かめた(2026年10月)。その先のPCIeの初期化で止まった件は3.6.4で直したが、その先はまだ確かめていない。QEMUの`raspi4b`で確かめられる範囲は確かめ(3.6.6)、PCIe、VL805、GENET、GPIOのように実機でしか確かめられないものは、資料とデバイスツリーの値に基づいて書いた。
 
 ### 3.6.1 差異
 
@@ -295,7 +297,7 @@ ARMv8.0-Aにない命令が残っていないことは`tools/chk_isa.sh`で確�
 | --- | --- | --- |
 | コンソール | `device/ser/ser.c` | UART0(PL011)。クロックはメールボックスで問い合わせ、答えがなければ48MHz |
 | メールボックス、時計、乱数 | `kernel/sysdepend/rpi/` | Raspberry Pi 5と共通。時計のタグには答えがないのでSNTPで合わせる。乱数生成器はデバイスツリーのノードが無効なら使わない |
-| 画面 | `device/disp/disp_rpi5.c` | ファームウェアが用意するフレームバッファ |
+| 画面 | `device/disp/disp_rpi5.c` | ファームウェアが用意するフレームバッファ。3.5インチの液晶は3.6.7 |
 | SDカード、eMMC | `device/sd/sdhci.c` | EMMC2。下を参照 |
 | GPIO | `device/gpio/gpio_bcm2711.c` | 58本を1つのバンク0にGPIOの番号で並べる。プルの設定は読み返せる |
 | PCIe | `kernel/sysdepend/rpi4/pcie_rc.c` | ルートコンプレックスを初期化し、`kernel/sysman/pcie.c`の走査に設定空間の読み書きを渡す。下を参照 |
@@ -306,7 +308,40 @@ EMMC2の基準クロックは能力レジスタに書かれていないので、
 
 GPIOの実身は、BCM2711のピンを3つのバンクにして見せる。`gpio-0`は40ピンヘッダのGPIO 0〜27、`gpio-1`はGPIO 28〜45、`gpio-2`はGPIO 46〜57である。ピンはGPIOの番号で書く。コンソールのUART0のピン(14、15)と、ボードの配線(EthernetのPHYのMDIOとRGMII、BluetoothのUART、Wi-FiのSDIO、オーディオのPWM、SPIフラッシュ)に使うGPIO 28〜57は、ACT LEDのGPIO 42を除いてカーネルのものとし、実身から変更しない。ACT LEDは高で点く。
 
-PCIeのルートコンプレックスはファームウェアがリセットしたまま渡すので、カーネルが次の順に初期化する。ブリッジと先のデバイスをリセットに入れてからブリッジだけを出し、SerDesの電源を入れ、存在しない機能の設定空間の読出しにエラーではなく全ビット1を返させ、内向きのアドレスウインドウ(PCIeの0から物理0へ。レジスタが2のべき乗しか取らないので4GBとし、外向きのアドレスウインドウと重なる上の1GBを除いた3GBが届く)と外向きのアドレスウインドウ(物理`0x6_0000_0000`からPCIeの`0xC000_0000`へ1GB)を設定し、先のデバイスのリセットを解いてリンクを待つ。アドレスウインドウの値はデバイスツリーの`/scb/pcie@7d500000`の`ranges`と`dma-ranges`から取る。設定空間は、ルートポートはレジスタの先頭に、その下のバスの機能は`0x8000`の4KBのウインドウに、`0x9000`の索引のレジスタに番号を書いて見る。その後は`kernel/sysman/pcie.c`の共通の走査がバスに番号を付け、BARを外向きのアドレスウインドウに割り当てる。Raspberry Pi 4 Model B(ボードのリビジョン1.4以降)とRaspberry Pi 400はVL805のプログラムをVL805自身ではなくボードのEEPROMに持つので、リセットの後でVL805の設定空間のバージョンのワード(0x50)が0なら、プロパティのタグ`NOTIFY_XHCI_RESET`(0x00030058)にVL805の設定空間のアドレスを渡し、ファームウェアに読み込ませる。CM4ではスロットに挿したカードが何かは分からないので、これをしない。汎用のxHCIのカードなら、VL805と同じ経路でUSBが使える。CM4のUSB-Cのポート(DWC2)には対応していない。
+PCIeのルートコンプレックスは、ファームウェアがブリッジをリセットしたまま渡す。EEPROMのブートローダがUSBからの起動を試したときは、VL805を使った後でもう一度リセットする(起動時のコンソールの`XHCI-STOP`と`PCI0 reset`)。ブリッジがリセットされている間にルートポートの設定空間を読むと、非同期の外部アボート(SError)になる。そこで、リセットのレジスタ(`0x9210`)のほかは、ブリッジをリセットから出してSerDesの電源を入れるまで触らないように、`kernel/sysdepend/rpi4/pcie_rc.c`は次の順に初期化する。
+
+1. デバイスツリーの`/scb/pcie@7d500000`が有効なことを確かめ、`ranges`と`dma-ranges`からアドレスウインドウの値を取る。レジスタはまだ読まない。
+2. リセットのレジスタを読み、ブリッジ(ビット1)と先のデバイスのPERST#(ビット0)をリセットに入れ、1ミリ秒待ってブリッジだけを出す。
+3. SerDesの電源を入れ(`0x4204`のIDDQのビットを落とす)、1ミリ秒待つ。
+4. ここで初めてルートポートの設定空間の先頭(ベンダとデバイスの番号)を読み、全ビット0か1ならルートコンプレックスがないとして終える。状態のレジスタ(`0x4068`)でルートコンプレックスとして動いていることも確かめる。
+5. `0x4008`でブリッジからメモリへのアクセスを許し、存在しない機能の設定空間の読出しにエラーではなく全ビット1を返させ(`CFG_READ_UR_MODE`)、バーストを128バイトにし、内向きのアドレスウインドウ(PCIeの0から物理0へ。レジスタが2のべき乗しか取らないので4GBとし、外向きのアドレスウインドウと重なる上の1GBを除いた3GBが届く)を設定する。ブリッジ自身のほかの2つのウインドウは閉じ、コントローラ自身の割込みは止めて消す。
+6. 外向きのアドレスウインドウ(物理`0x6_0000_0000`からPCIeの`0xC000_0000`へ1GB)、ルートポートのクラスコード(PCIのブリッジ)、内向きのアドレスウインドウのバイト順(リトルエンディアン)を設定する。
+7. PERST#を解き、100ミリ秒待ってから、さらに100ミリ秒まで5ミリ秒ごとにリンク(`PHYLINKUP`と`DL_ACTIVE`)を見る。上がらなければUSBなしで続ける。
+8. リンクが上がってから、ルートポートのブリッジの範囲を設定し、`kernel/sysman/pcie.c`の共通の走査がバスに番号を付けてBARを外向きのアドレスウインドウに割り当てる。リンクが上がる前と、ルートポートの下のバスのデバイス0以外は、設定空間を読まずに全ビット1を返す。
+9. Raspberry Pi 4 Model BとRaspberry Pi 400では、VL805(1106:3483)の設定空間のバージョンのワード(0x50)が0なら、プロパティのタグ`NOTIFY_XHCI_RESET`(0x00030058)にVL805の設定空間のアドレス(バス1のデバイス0なら`0x100000`)を渡してファームウェアにプログラムを読み込ませ、10ミリ秒待つ。xHCIのドライバがBARの先のレジスタを触るのはこの後である。
+
+設定空間は、ルートポートはレジスタの先頭に、その下のバスの機能は`0x8000`の4KBのウインドウに、`0x9000`の索引のレジスタに番号を書いて見る。Raspberry Pi 4 Model B(ボードのリビジョン1.4以降)とRaspberry Pi 400はVL805のプログラムをVL805自身ではなくボードのEEPROMに持つので、PCIeのリセットの後は手順9をしないとVL805のxHCIが動かない。CM4ではスロットに挿したカードが何かは分からないので、これをしない。汎用のxHCIのカードなら、VL805と同じ経路でUSBが使える。CM4のUSB-Cのポート(DWC2)には対応していない。
+
+起動時のコンソールには、手順ごとにリセットのレジスタと状態のレジスタの値を出す(`pcie as found`、`pcie bridge out of reset`、`pcie serdes on`、`pcie root port id`、`pcie windows set`、`pcie far end out of reset`、`pcie link up`、`pcie found`、`pcie VL805`)。止まったときは最後の行で手順が分かる。
+
+R1.100とR1.110のイメージは、手順1の直後、ブリッジをリセットから出す前にルートポートの設定空間を読んでいたため、Raspberry Pi 400で`> pcie`の直後にSError(ESR `0xbf000002`)で止まった。ELRとLRをそのビルドの関数に直すと、`knl_pcie_rc_init`の中の、2回目のデバイスツリーの読出しから戻った直後の`0xFD500000`の読出しの4命令後である。この読み方はボードによらないので、Raspberry Pi 4 Model BとCM4でも同じく止まる。
+
+BCM2711のPCIeの初期化の手順を、Raspberry Pi OSのカーネル(rpi-6.6.y)の手順と比べると次のとおりである。
+
+| 項目 | Raspberry Pi OS | TessronOS | 扱い |
+| --- | --- | --- | --- |
+| 最初のレジスタの読出し | ブリッジをリセットから出してSerDesの電源を入れるまで、リセットのレジスタのほかは触らない。リビジョンのレジスタは初期化の後で読む | R1.110までは、リセットの前にルートポートの設定空間を読んでいた | 手順4に移した(SErrorの原因) |
+| リセット | ブリッジをリセットに入れ、PERST#も確かにリセットに入れ、100〜200マイクロ秒の後ブリッジだけを出す | 同じ。待ちは1ミリ秒 | そのまま |
+| SerDes | IDDQを落とし、100〜200マイクロ秒待つ | 同じ。待ちは1ミリ秒 | そのまま |
+| `MISC_CTRL` | `SCB_ACCESS_EN`、`CFG_READ_UR_MODE`、バースト128バイト(BCM2711の値0)、SCB0の大きさ。`RCB_MPS_MODE`はデバイスツリーに`brcm,enable-mps-rcb`があるときだけ | 同じ。Pi 4系のデバイスツリーには`brcm,enable-mps-rcb`がない | そのまま |
+| 読み失敗の応答と待ちの時間 | UBUSの応答のエラーを止めるビット、UBUSの待ちの時間、設定空間の再試行の待ちの時間(`0x40a4`、`0x40a8`、`0x405c`)はBCM2712だけで設定する | BCM2711では設定しない(Pi 5の側`kernel/sysdepend/rpi5/pcie_rc.c`だけが設定する) | そのまま。BCM2711では`CFG_READ_UR_MODE`とリンクの確認で避ける |
+| ルートコンプレックスとしての動作の確認 | リンクの前に状態のレジスタで確かめる | リンクの後で確かめていた | 手順4に移した |
+| 外向きのアドレスウインドウ、クラスコード、バイト順 | リンクの前に設定する | リンクの後で設定していた | 手順6に移した |
+| リンクの待ち | PERST#を解いて100ミリ秒、さらに5ミリ秒ごとに100ミリ秒まで | 同じ | そのまま |
+| リンクの速さとSSC | デバイスツリーの`max-link-speed`があれば速さを制限し、`brcm,enable-ssc`があればSerDesのMDIOでSSCを有効にする(失敗しても続ける) | どちらもしない | 未対応。Pi 4系のデバイスツリーには`max-link-speed`がない |
+| 設定空間の割当て | ルートバスはデバイス0だけ。リンクが上がっていなければ下のバスは読まない。下のバスは索引のレジスタ(`0x9000`)に書いて`0x8000`から読む | 同じ。さらにルートポートの直下のバスはデバイス0だけ | そのまま |
+| 割込み | コントローラ自身のMSIの仕組みを使う | MSIは使わずINTA(SPI 143)をレベルトリガで受ける | そのまま |
+| VL805の読込み | xHCIのドライバが動き出す前に、デバイスツリーのリセットの指定(`usb@0,0`の`resets`)を通して必ず`NOTIFY_XHCI_RESET`に`0x100000`を渡し、200〜1000マイクロ秒待つ。BIOSからの引継ぎの処理はPi 4では行わない | 4Bと400で、バージョンのワードが0のときだけ、走査の後、xHCIのドライバの前に依頼し、10ミリ秒待つ | そのまま |
 
 GENETは、システム、RGMII、割込み、受信バッファ、UniMAC、受信と送信のDMAの部分からなる。DMAはそれぞれ256個の記述子(状態と長さ、アドレスの下位と上位の3ワード)と17本のリングを持ち、既定のリング(16番)だけを、受信と送信に128個ずつの記述子で使う。リングは、作る側と使う側の16ビットのカウンタの組で、受信ではコントローラがバッファを埋めて数え、ドライバがフレームを取り出して数え返す。受信したフレームはバッファの2バイト目から始まる。PHYのBCM54213PEはGENET自身のMDIO(UniMACの`0x614`、デバイスツリーの`mdio@e14`)にあり、アドレスはボードの表の値から試し、答えがなければ全アドレスを探す。デバイスツリーの`phy-mode`が`rgmii-rxid`なので、受信のクロックはPHYで、送信のクロックはGENETで遅らせる。PHYの受信の遅延はBroadcomの補助制御レジスタ(0x18)のシャドウ7、送信の遅延はシャドウレジスタ(0x1c)のシャドウ3で設定する。MACアドレスは、ファームウェアがデバイスツリーに書く`local-mac-address`、メールボックスのボードのMACアドレスの順に取る。割込みは使わず、Raspberry Pi 5のドライバと同じく、読み手が受信のリングを見る。すべてのフレームを受け取り、要らないものはプロトコルスタックが捨てる。
 
@@ -378,6 +413,31 @@ QEMUにはカーネルのイメージ`tessronos.img`を`-kernel`で、デバイ�
 | 乱数 | `objtest: random` | rng200から値が取れる |
 | 再起動と停止 | システムの終了と再起動の操作 | 再起動でファームウェアから起動し直す。終了ではファームウェアが停止状態に入る |
 | 命令セット | 全体の動作 | 未定義命令の例外が出ない(`tools/chk_isa.sh`で検査済み) |
+| 3.5インチの液晶とタッチパネル | 普通のPi 4のカード(PocketTerm35)か`make LCD=dpi35`のカード、`tpanel:`と`gt911`の行 | 640×480で出る。`Goodix GT911 ... at 14`の行が出て、指でポインタが動き、タップがクリック、長押しがメニューになる(3.6.7) |
+
+### 3.6.7 3.5インチの液晶とタッチパネル
+
+Raspberry Pi 4に載せるWaveshareの3.5インチの液晶(640×480)を使えるようにした。実機では確かめていない。仕様はWaveshareのwikiと、Waveshareが配るデバイスツリーのオーバーレイ(dtbo)を逆コンパイルした値による。
+
+| 製品 | 画面 | タッチ | オーバーレイの値 |
+| --- | --- | --- | --- |
+| PocketTerm35(Pi 4とPi 5の手持ちの端末)と、それに載る3.5inch HDMI LCD (E) | HDMI。キットにmicro HDMIのアダプタが付く | GT911。I2C1のピン(GPIO 2がSDA、3がSCL)、INTはGPIO 4(立下り)、アドレス0x14。リセットのピンはない | `3.5HDMI_E_DTBO.zip`の`waveshare-35dpi-4b.dtbo`。Pi 5用の`waveshare-35dpi-5b.dtbo`は0x14と0x5Dの両方 |
+| 3.5inch DPI LCD | DPI(RGB666)。GPIO 0〜9、12〜17、20〜25をALT2にする | GT911。ピンを動かすI2C(`i2c-gpio`)で、GPIO 10がSDA、11がSCL、待ち4マイクロ秒。INTはGPIO 27(立下り)。アドレスは0x14か0x5D。X軸を反転し、XとYを入れ替える | `3.5DPI-dtbo.zip`の`waveshare-touch-35dpi.dtbo`。バックライトはGPIO 18 |
+
+PocketTerm35のwikiの設定(`dtparam=i2c_arm=on`、`dtoverlay=waveshare-35dpi-4b`)の名前には「dpi」とあるが、中身はHDMIの液晶のタッチの設定で、DPIの液晶の同じ名前のオーバーレイ(GPIO 27、`i2c_gpio`)とは別物である。PocketTerm35の画面はHDMIなので、DPIの設定はしない。
+
+画面は、Raspberry Pi 4ではファームウェアのフレームバッファ(`device/disp/disp_rpi5.c`)を使うので、ファームウェアのconfig.txtの設定で出す。PocketTerm35の画面はHDMIなので、普通のPi 4のカードで動く。液晶のEDIDが640×480を返せば、ファームウェアはその大きさで出す。映らないときのために、`etc/boot/config-rpi4.txt`の`[pi4]`の節に、下の表の`pt35`の4行をコメントにして置いてある。先頭の`#`を消せば使えるが、ほかのHDMIのモニタも640×480に固定されるので、カードを分けずに利用者が選ぶ形にした。DPIの液晶は設定がないと映らず、シリアルのコンソールも使えなくなるので、`make LCD=dpi35`で`etc/boot/config-rpi4-lcd-dpi35.txt`を`config.txt`の後ろに足す(`$(OBJDIR)/config-rpi4.txt`を作ってカードに置く)。
+
+| LCD | 足す設定 | 由来 |
+| --- | --- | --- |
+| `pt35`(config.txtのコメント) | `hdmi_group=2`、`hdmi_mode=87`、`hdmi_cvt=640 480 75 6 0 0 0`、`hdmi_drive=2` | 3.5inch HDMI LCD (E)のwiki。wikiの`hdmi_cvt`の行は「=」が抜けているので足した。液晶のEDIDが640×480を返すなら、この設定が無くてもファームウェアはその大きさで出す |
+| `dpi35` | `gpio=0-9=a2`、`gpio=12-17=a2`、`gpio=20-25=a2`、`enable_dpi_lcd=1`、`display_default_lcd=1`、`extra_transpose_buffer=2`、`dpi_group=2`、`dpi_mode=87`、`dpi_output_format=0x6f006`、`dpi_timings=640 0 20 10 10 480 0 10 5 5 0 0 0 60 0 60000000 1`、`gpio=18=op,dh`、`enable_uart=0`、`uart_2ndstage=0` | 3.5inch DPI LCDのwikiのBusterの設定。wikiの`hdmi_timings`は、今のファームウェアでDPIに使う`dpi_timings`にした。バックライトはwikiの`pinctrl set 18 op dh`。DPIがGPIO 14、15(UART0)も使うので、シリアルのコンソールは使えなくなる |
+
+`dpi_output_format=0x6f006`は、下位4ビットが出力の形式6(RGB666)で、Waveshareの値をそのまま使う。上位のビット(同期の信号の有無と極性)の意味は資料によって位置が食い違うので、ここでは読み解かない。WaveshareのKMSのオーバーレイ(`waveshare-35dpi.dtbo`)は、25MHz、水平のフロントポーチ80・同期34・バックポーチ80、垂直8・4・8、同期は正の極性、RGB666(`MEDIA_BUS_FMT_RGB666_1X24_CPADHI`)で、wikiのBusterの値と違う。Busterの値で映らないときは、こちらを`dpi_timings=640 1 80 34 80 480 1 8 4 8 0 0 0 60 0 25000000 1`として試す。
+
+タッチパネルは、起動時にカーネルが見つける(`kernel/sysdepend/rpi4/tpanel.c`、6.4.2)。2つの配線を順に試し、その配線のピンがすべて入力か、そのピンのバスの機能(GPIO 2、3ならI2C1、10、11ならSPI0のALT0)のときだけ触る。DPIの画面ではGPIO 2、3がALT2なので、PocketTerm35の配線は試さない。どちらの配線でも、0x5Dと0x14でGT911の製品の番号(0x8140)を読み、答えたものを取る。見つけたら3本のピンをカーネルのものとし、GPIOの実身からは変更できなくする。`make TPANEL=0`でピンに触らない。
+
+PocketTerm35のキーボード(RP2040)は、wikiの設定の`dtoverlay=dwc2,dr_mode=host`のとおり、Pi 4のUSB-CのポートのDWC2につながる。TessronOSはDWC2に対応していない(3.6.4)ので、Pi 4ではキーボードは使えない。USB-Aのポートのキーボードは使える。
 
 ## 3.7 Raspberry Pi 5のファン
 
@@ -426,3 +486,368 @@ CPUのクロックの上限は、マシンの設定の行`CPU_MHZ`(MHz)で決め
 Raspberry Pi 4、400、CM4でも同じ設定が効く。ファームウェアとのやり取り(`kernel/sysdepend/rpi/mbox.c`)は共通である。Raspberry Pi 4の最大はボードのリビジョンにより1500MHzか1800MHzなので、既定の1800MHzは最大と同じになり、2000MHzや2200MHzを選んでも最大に丸められる。Raspberry Pi 4にはファンの制御がないので、ファンによる下げはない。CM5はRaspberry Pi 5と同じで、ファンの制御だけがない(3.7)。QEMUにはファームウェアがないので、上限を覚えるだけでクロックは変えない(`knl_cpu_hw_*`の弱い定義)。
 
 カーネル内の試験`ktest_devob`の`test_cpu_limit`は、求めるクロックの計算をRaspberry Pi 5とRaspberry Pi 4の範囲で確かめ、マシンの設定に`CPU_MHZ`と`WATCHDOG`を書いて読み直させ、上限とウォッチドッグの秒数がカーネルとレコード9に出ること、値がないときと数でないときに既定に戻ることを確かめる。システム環境設定の操作は`tools/tests/ui_sysenv.steps`で試験する(11章)。
+
+## 3.10 x64のPC
+
+UEFIで起動するx64のPCは、1つのカーネルのイメージ(`TARGET=_X64_`、`ARCH=x86_64`)で扱う。QEMUの`q35`マシン(ファームウェアはOVMF)と、Microsoft Surface Go 2(モデル1927)を同じイメージで動かすのが目標である。実機の試験にはLenovo ThinkPad X1 Yoga 第3世代(Kaby Lake R、Core i7-8650U、Intel UHD 620、機種の型番20LDから20LG)も使う。機種はSMBIOSの製造元と製品名で見分け(`BOARD_SURFACE_GO2`、`BOARD_X1YOGA3`)、機種ごとの差はそこで分ける。X1 Yogaの固有の部分(Wacomのペンとタッチ、ThinkPadのECのホットキー、2560×1440の画面)は、実機のHW.TXTとDSDTを見てから扱う。段階1でQEMUの`q35`の上のデスクトップまでを作り、段階2(実機での起動)では、画面とファイルによる記録(3.10.7)、起動したディスクの見分け、ACPIの解釈系(3.10.6)、USBのLANを入れた。ThinkPad X1 Yoga 第3世代はデスクトップまで起動する(3.10.7)。GPU、Wi-Fi、解像度の変更、PS/2、電池、音などの実機での確認と、Surface Go 2での起動はこれからである(3.10.8)。コア依存のコードは`kernel/sysdepend/cpu/core/x86_64/`に、マシンに依存するものは`kernel/sysdepend/x64/`に、ACPIの表の解析は`kernel/sysdepend/acpi/`に、UEFIのローダは`tools/x64/uefi/`にある。
+
+| 項目 | x64のPC(QEMU q35) |
+| --- | --- |
+| CPU | `-cpu max -smp 4`。命令セットの基準はx86-64-v2で、AVX2は実行時に調べる。ACPIのMADTで有効とされた論理CPUをすべて使う(上限1024、4.3.2) |
+| RAM | UEFIのメモリマップのうち、使ってよい種類の範囲 |
+| カーネルの配置 | 物理アドレスはローダが決める。仮想アドレスは上位2GB(`0xFFFFFFFF80200000`から) |
+| 起動 | UEFIのローダ`\EFI\BOOT\BOOTX64.EFI`。Secure Bootは使わない |
+| 割込み | Local APIC(x2APICかxAPIC)とIOAPIC。PCIeのデバイスはMSIかMSI-X。ハンドラの無いベクタに来た割込みは、Linuxと同じく、Local APICで終えて数えて捨て、ベクタごとの最初と10倍ごとにコンソールに出す(IOAPICの入力ならその入力を止める)。プロセッサは止めない。起動の設定`msiearly`は、試験のために、メッセージの割込みを有効にした直後に、ハンドラの定義の前にその割込みを1回起こす |
+| タイマ | Local APICのタイマ(TSC deadlineか単発)。周波数はCPUID 15h、HPET、ACPIのPMタイマ、PITの順で測ったTSC |
+| MMU | 4段のページテーブル。プロセッサにPCIDがあれば、プロセスの空間ごとの番号で切り替える |
+| コンソール | COM1(16550)と、フレームバッファに出す起動時の文字。COM2は2つ目のシリアルポート(`serb`) |
+| ディスク | NVMe。実機ではSATA(AHCI)とUSBメモリも |
+| ネットワーク | virtio-net(PCI)。実機ではIntelのLAN、USBのLAN、Wi-Fi(3.10.3) |
+| 画面 | UEFIのGOPが用意するフレームバッファ。Intelの内蔵グラフィックス(第9世代)では解像度を変えられる(6.9) |
+| USB | `qemu-xhci` |
+| 時計 | CMOSのRTC。ローカル時刻(既定、Windowsと同じ)かUTCかを選べる(9.5.1) |
+| 乱数 | `RDSEED`、`RDRAND`とソフトウェアの疑似乱数生成器 |
+
+### 3.10.1 起動
+
+UEFIのファームウェアは、ESP(EFIシステムパーティション)の`\EFI\BOOT\BOOTX64.EFI`を実行する。これはmingw-w64のGCCで作るPE32+のEFIアプリケーションで(`tools/x64/uefi/loader.c`)、次のことを行う。
+
+1. 自分を読み込んだボリュームから、起動の設定`cmdline.txt`の1行とカーネル`tessronos.elf`を読む。探す順は、ローダ自身のファイルのあるディレクトリ(装置パスのファイルパスの節から求める。内蔵のディスクに登録した`\EFI\TESSRON\BOOTX64.EFI`なら`\EFI\TESSRON\`)、`\EFI\TESSRON\`、根である(3.10.10)。それぞれの場所で、その名前のファイルが無ければ`.new`を付けたもの、それも無ければ`.old`を付けたものを読む。システムのバージョンアップは、この2つのファイルを`<名前>`を`<名前>.old`に、`<名前>.new`を`<名前>`に名前を変えて入れ替えるので(11.8.1)、2回の変更の間で電源が切れても、同期済みの新しいファイルで起動する。設定の`video=WxH`で、GOPの画面モードを選ぶ。書かなければ、SMBIOSの機種で決めたモード(ThinkPad X1 Yoga 第3世代は1600×1200)、それも無ければ1920×1280以下で最も大きいモードにする。
+2. ELFの`PT_LOAD`を物理アドレス(`p_paddr`)の並びのまま、ファームウェアに求めたページ(`EfiLoaderData`。3.10.7)に置く。イメージの先頭の`.khdr`の見出し(`T_KHDR`)がイメージの後ろに続けて欲しいヒープの大きさを言うので、それも合わせて取る。
+3. メモリマップ、ACPIとSMBIOSの表のアドレス、画面、乱数の種、コマンド行を`T_BOOTINFO`(`kernel/sysdepend/cpu/core/x86_64/bootinfo.h`)にまとめる。
+4. カーネルのページテーブルを作る。全物理メモリの直接の写し、デバイスの領域の先頭4GB、上位2GBのカーネルのイメージである。カーネルの半分の256個のPML4のエントリはすべてここで埋め、プロセスの空間はそれを写す。
+5. ブートサービスを抜け(`ExitBootServices`)、CR3とPATを設定し、`T_BOOTINFO`の物理アドレスを`rdi`に入れてカーネルの入口に飛ぶ。
+
+ローダは画面のモードを決めた後、自分の出す文字をGOPのフレームバッファに直接描く。幅が1600画素以上で高さが900画素以上の画面では文字を縦横2倍にし、最上行の帯に今の段階を出す。カーネルのコンソールはローダの最後の行の下から続く(3.10.7)。ブートサービスを抜ける前に、自分が読み込まれたボリュームの`\EFI\TESSRON\`に、出した文字(`LOADER.TXT`)と機械の報告(`HW.TXT`ほか)を書く(3.10.7)。ESPの区画のGPTの固有GUIDを、自分の装置パスのハードドライブの節から読んで`T_BOOTINFO`で渡す。
+
+ランタイムサービスはその後使わない。カーネルはランタイムサービスの領域を写さず、`SetVirtualAddressMap`も呼ばないので、カーネルからUEFIの変数は書けない。ファームウェアの起動の項目は、システム登録の依頼があるときにローダがブートサービスの間に書く(3.10.10)。ブートサービスを抜ける前に`GetTime`を1回呼び、ファームウェアが時計にタイムゾーンを与えていればそれを渡す(9.5.1)。時計はCMOSから読み、電源はACPIで切る。ローダの出力は、ファームウェアのコンソールと、あればCOM1に出る。カーネルは`boot.S`で自分のGDTに移り、`reset_main.c`がGSのベースをプロセッサごとの領域に向け、IDT、フレームバッファのコンソール、メモリの範囲、ACPI、ボードの判別、TSCの周波数、MMUの順に初期化して、`knl_main`に入る。ボードはSMBIOSのtype 1(製造者と製品名)で見分ける(`BOARD_QEMU_Q35`、`BOARD_SURFACE_GO2`、`BOARD_X1YOGA3`、それ以外は`BOARD_PC`)。
+
+### 3.10.2 仮想アドレスの配置
+
+| 範囲 | 中身 |
+| --- | --- |
+| `0x0000000000400000`〜`0x00007FFFF0000000` | プロセスの空間。ユーザスタックの上端は`0x00007FFFF0000000` |
+| `0xFFFF800000000000`〜 | 全物理メモリの直接の写し(`PA2VA`) |
+| `0xFFFFC00000000000`〜 | デバイスの領域(キャッシュしない)。物理アドレスの15TB未満はそのまま足した所に見え、先頭4GBはローダが写し、それより上(64ビットのBAR)は最初に触ったときにページフォールトの処理で1GBずつ写す。15TB以上のアドレス(ハイパーバイザが64ビットのBARを物理アドレスの上端近くに置くとき)は、領域の最後の1TBの1GBの枠に、求められた順に割り当てる(`knl_dev_far`) |
+| `0xFFFFD00000000000`〜 | `vmap`の領域 |
+| `0xFFFFE00000000000`〜 | プロセッサごとの領域 |
+| `0xFFFFFFFF80000000`〜 | カーネルのイメージ(`-mcmodel=kernel`) |
+
+PATは`0x0007010600070106`で、PWTのビットを立てたページが書込み結合(WC)になる。フレームバッファはWCで写す。
+
+### 3.10.3 デバイス
+
+ACPIの表は、段階1では自前の小さな解析(`kernel/sysdepend/acpi/acpi.c`)で読む。MADT(Local APICとIOAPIC、割込みの付け替え、NMIの線)、MCFG(PCIeの構成空間のECAM)、FADT(PMタイマ、リセットの方法、DSDT)、HPETである。電源を切るときは、DSDTの`\_S5`の値をPM1の制御のレジスタに書く。
+
+PCIeは、MCFGが言うECAMで構成空間を読む。バス番号とBARはファームウェアが割り当てたものをそのまま使い(`PCIE_KEEP_FW_BARS`)、ARMの`pcie.c`の割当てはしない。MSIとMSI-Xは、Local APICの宛先`0xFEE00000`とベクタ番号で送らせる(`cpu_msi.h`)。
+
+| デバイス | ドライバ | 内容 |
+| --- | --- | --- |
+| NVMe | `device/nvme/nvme.c` | 管理のキューと入出力のキュー1つ、割込みはMSI-X(なければMSI)。`nvmea`、区画は`nvmea0`、`nvmea1`…。電源を切るときと再起動のときに、記録を書いた後でFlushとシャットダウンの通知(CC.SHN)を行う。答えの無いコマンドは制御器をリセットしてから`E_IO`で失敗にする。HMPREを言う制御器にはホストメモリバッファを渡す(06章6.2.1) |
+| virtio-net | `device/vnet/vnet.c`と`device/virtio/vio_pci.c` | virtioのPCIの転送。レジスタの読み書きをvirtio-mmioの並びに読み替える |
+| xHCI | `device/usb/xhci.c`、`device/usb/x86_64/xhci_pc.c` | ARMと同じドライバ。Intelのコントローラのための手順(ファームウェアからの引き継ぎの待ち、BEIを使わない、Type-Cの口の役割の記録、USB 3のリンクの温かいリセット)をx64だけで足す(06章 6.3.3) |
+| 画面 | `device/disp/disp_gop.c` | GOPのフレームバッファ。画素の並び(RGBかBGR)はGOPの答えから決める |
+| 時計 | `kernel/sysdepend/x64/rtc.c` | CMOSのRTC。レジスタの時刻をローカル時刻かUTCとして読み書きし、その差は暦の設定に従う(9.5.1) |
+| 乱数 | `kernel/sysdepend/x64/rng_hw.c` | `RDSEED`、なければ`RDRAND` |
+| SATA | `device/ahci/ahci.c` | AHCIの先のディスク。`sataa`、区画は`sataa0`…(06章) |
+| PS/2 | `device/ps2/ps2.c` | i8042のキーボードとマウス(ThinkPadの内蔵のキーボードとTrackPoint)。実身「ps2kbd」「ps2aux」 |
+| 音 | `device/snd/x86_64/snd_hda.c` | Intel HDA。コーデックを仕様どおりに歩いて道筋を組む(06章) |
+| LAN(Intel) | `device/net/x86_64/e1k.c` | e1000eの系統。チップセットのI219の手順(06章、ULPの解除、PHYの電源、SkylakeのPCHの回避) |
+| I2C、HID over I2C | `device/i2c/x86_64/` | LPSSのI2C(DesignWare)と、その先のタッチとペン(ACPIのPNP0C50) |
+| USBのLAN | `device/usb/x86_64/cdcnet.c`、`device/net/netsel.c` | 通信クラスのCDC-ECMとCDC-NCMのアダプタ。どの構成にその機能があるかを読み、なければ別の構成を選ぶ(RTL8153などはメーカー独自の構成で立ち上がる)。virtio-netがないときに、プロトコルスタックのカード(`neta`)になる |
+| ネットワークアダプタの選択 | `device/net/netsel.c`、`netadp.c` | プロトコルスタックのカード(`neta`)にするアダプタを、利用者の選択(機器の設定の`NET_ADAPTER`)か、自動ならリンクが上がっている有線、無ければ接続しているWi-Fiから選ぶ。替えるときは`neta0`のアドレスを新しいカードのものにし、DHCPを問い合わせ直す。実身「netadp」(09章9.6.1) |
+| Wi-Fi | `peripheral_kernel/network/netbsd/rumpcomp/wifi/`、`wifi_user.c`、`device/net/wifi/wifi.c`、`wpa/` | 既定で入る(`make WIFI=0`で除く)。IntelのWireless-AC 8265などをNetBSDのiwm(4)とnet80211でrumpカーネルの中で動かし、WPA2-Personalの鍵の交換をwpa_supplicantの一部で行う。ファームウェアはシステムボリュームの実身。実身「wlan0」(09章9.6) |
+| GPU(描画) | `device/gpu/intel/`、`kernel/sysdepend/x64/igt_ggtt.c` | Intelの第9世代の内蔵GPUのレンダーとコピーのエンジン。forcewake、RC6と負荷に応じた周波数、PPGTT、論理リングコンテキストとexeclistsでの投入、エンジン単位のリセット、ウインドウの合成(レンダーのエンジンの計算シェーダ、BLTのエンジンでの写し)、プロセスのOpenGL ES(Mesaのiris)。GGTTの割当ては表示の係と、pcodeは表示の係の共有の部品で行う。実身「gpu0」。起動の設定`igt=`、`igtrc6=`、`igtrps=`、`igtrc=`(13章13.11) |
+| 内蔵カメラ | `device/cam/x86_64/`、`device/gpio/x86_64/gpio_pch.c`、`device/cam/cam_isp.c` | Surface Go 2の前面のカメラ(OV5693)。IPU3のCSI-2の受け口CIO2、ACPIのSSDBと`_DEP`からのセンサーと電源の組立て、INT3472のdiscreteの電源(PCHのGPIO)、I2Cのセンサー、ソフトウェアの現像でNV12とYUY2を作り、カメラデバイスの1台にする。TPS68470の電源の先のセンサー(背面、赤外線)は使わない。起動の設定`cam=off`、`cam=bars`、`cam_bayer=`(06章6.6.1) |
+| シリアル | `device/ser/x86_64/ser.c` | 16550のCOM1〜COM4(`sera`〜`serd`)。割込みの線はACPIのMADTの付け替えに従ってIOAPICから受ける。受信は割込みでリングに溜める。COM1はコンソールも兼ねる |
+
+デスクトップのウインドウの合成の内側のループ(`outer_kernel/wm/x86_64/compose_simd.c`)は、x86-64-v2に必ずあるSSEで4画素ずつ処理し、プロセッサにAVX2があってXCR0がそのレジスタを保つときはAVX2で8画素ずつ処理する。どちらを使うかは最初の呼出しで1度だけ調べる。どちらも`compose.c`の普通のループと同じ16ビットの幅で同じように丸めるので、結果はビット単位で同じになる(`ktest_wm`の`test_simd_same`)。このファイルだけはSIMDのレジスタを使ってよいように翻訳し(`build_make/x64.mk`)、呼ぶのは`TA_FPU`の合成のタスクだけである。
+
+プロセッサのクロックは、ファームウェアとプロセッサに任せる(`kernel/sysdepend/cpu/core/x86_64/cpuclk.c`)。カーネルは、クロックや電力に関わるレジスタ(IA32_PERF_CTL、IA32_PM_ENABLE、HWPの要求、IA32_ENERGY_PERF_BIAS、IA32_MISC_ENABLEのSpeedStepとターボのビット、パッケージの電力の上限)をどれも書かない。ACPIの`\_SB._OSC`でも何も求めない。機器の設定の`CPU_MHZ`は、保存されていても使わない(システム環境設定も選ばせない)。最初に設定を読んだときに、仮想マシンでなく(CPUID.1:ECXのビット31)、HWPがある(CPUID.6:EAXのビット7)機械では、IA32_PM_ENABLE、HWPの能力と要求を読んでコンソールに出す(`cpu: HWP on: ...`)。読むだけである。i7-8650UのようにファームウェアがHWPを有効にした機械では、プロセッサが自分でクロックを選ぶ。
+
+今のクロックは、Linuxの`/proc/cpuinfo`の「cpu MHz」(`arch/x86/kernel/cpu/aperfmperf.c`)と同じ考え方で、APERFとMPERFから求める(`knl_cpu_freq_tick`、`knl_cpu_x64_clock`)。APERFは実際のクロックで、MPERFはTSCと同じ一定の速さで数え、どちらもプロセッサが動いている間(C0)だけ進む。各プロセッサは自分のタイマの割込み(停止の検出の周期、500ミリ秒ごと)で2つを読み、前回からの増分の比にTSCの周波数を掛けて、その周期に動いていた間のクロックを覚える。読む側は待たずに、1.5秒より新しい値を持つプロセッサの平均と最も速いものを取る。システムの実身のレコード9の`CLOCK_MHZ`(平均)と`CLOCK_MOST_MHZ`がそれで、32ビットのHzでは4.29GHzを超えられないのでMHzで書く。プロセッサが名乗る基本と最大のクロック(CPUID.16h)は`BASE_MHZ`と`TURBO_MHZ`、温度は`TEMPERATURE`で、Linuxのcoretempと同じく、TjMax(MSR_TEMPERATURE_TARGETのビット23:16、0なら100度)からパッケージの温度の状態(パッケージのセンサがなければそのコアの状態)のビット22:16を引く。ビット31が立っていないときは読めないとする。温度はIntelのプロセッサだけで読む。どれもMSRを読むだけで、仮想マシンでは読まない(QEMUでは出ない)。
+
+プロセッサがPCIDを持つときは、プロセスの空間ごとに番号を付けてCR3に載せ、切り替えのたびにTLBを捨てずに済ませる。`INVLPG`は今のPCIDの分しか無効にしないので、ほかのプロセッサに頼むTLBの無効化(NMI)は、PCIDを使うときは常に全体の無効化にする。起動時のコンソールに`process-context identifiers on`か`off`が出る。
+
+### 3.10.4 ディスクのイメージ
+
+`make TARGET=_X64_ DESKTOP=1 BUILD_ID=<名前> sdimg`で`obj/_X64_<名前>/sd.img`ができる。GPTで、区画1がESP(FAT32、512MB)、区画2がシステムのボリュームである。カーネルは、ローダが渡したESPの固有GUIDを持つディスクを探し(NVMeとUSBメモリ、最大15秒待つ)、そのディスクのESPを`/boot`に、TessronOSの区画をシステムのボリューム(`CNF_OB_SYSVOL`、`kernel/sysdepend/x64/bootdisk.c`)にする。見つからなければどちらも使わない。PCの内蔵のSSDにほかのOSがあっても、起動したディスク以外には書かない。ESPには`EFI/BOOT/BOOTX64.EFI`、`tessronos.elf`、`cmdline.txt`と、Raspberry PiのSDカードの第1パーティションと同じ試験用のファイル(`init.elf`など)が入る。USBメモリかNVMeのSSDにそのまま書けば起動できる形にしてある。
+
+### 3.10.5 試験
+
+CPUの数の試験は、`tools/x64/ktest64.sh`の環境変数`SMP`でQEMUの`-smp`を与えて行う。`SMP="8,sockets=1,cores=4,threads=2"`(ThinkPad X1 Yoga 第3世代と同じ4コア8スレッド)、`SMP=16`、`SMP="64,sockets=2,cores=16,threads=2"`。起動すると「N of M CPUs online (P packages, C cores, T threads)」と出る。コアとスレッドは、CPUID 0x1F(なければ0x0B)のSMTとコアの段のビット幅と、各CPUのx2APICのIDから求める。WHPXではQEMUがCPUの段を伝えないので、どのCPUも別のパッケージに見える。QEMUは255を超えるCPUにIOMMUの割込みの付け替えを求めるので、それを超える数は試していない。ホストが混んでいるとき(他のビルドが走っているとき)のTCGの8 CPU以上やWHPXの16 CPUでは、時間を測る試験(`test_cross_wakeup`、`test_timer_other_prc`、`test_stress`、`test_many_tasks`)が時間内に終わらないことがある。ホストが空いているときは通る。
+
+試験機はWindowsのQEMU(`C:\Program Files\qemu`)と、それに付いてくるOVMF(`edk2-x86_64-code.fd`)である。`make TARGET=_X64_ BUILD_ID=<名前> qemu-x64`はESPのディレクトリをそのままFATのディスクとして見せて起動し、`qemu-x64-disk`はディスクのイメージをNVMeとして挿して起動する。x64のRTCは既定でローカル時刻として扱う(9.5.1)ので、QEMUの既定のUTCではなく`-rtc base=localtime`を付け、Windowsの入ったPCと同じ形にする(`x64.mk`、`ktest64.sh`、`ui_run64.py`はどれも付ける)。
+
+```text
+qemu-system-x86_64.exe -M q35 -cpu max -smp 4 -m 2G -rtc base=localtime
+  -drive if=pflash,format=raw,readonly=on,file=edk2-x86_64-code.fd
+  -drive file=sd.img,if=none,format=raw,id=nvd -device nvme,serial=tessronos,drive=nvd
+  -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 -serial stdio
+```
+
+段階1で確かめたこと(2026-10-18):
+
+- 4つのCPUが起動し、PCIeの列挙、NVMe(MSI-X)、virtio-net(MSI-X)、xHCIとUSBのキーボードとタブレット、GOPの1280×800の画面が動く。
+- NVMeのシステムのボリュームから実身マネージャが立ち上がり、`/boot/INIT.ELF`がプロセスとして動き、デスクトップが出る。
+- ポインタのダブルクリックで実身を開き、メニューから小物の電卓(newlibとlibmを使うプロセス)を起動して、0.1+0.2、√2、1÷7を計算できる。
+- 停止の検出(4.7)が4つのCPUで働く。
+
+カーネル内の試験(12.3)は、x64のディスクのイメージに組み込み、`tools/x64/ktest64.sh`で走らせる。AArch64のレジスタを直接見ていた試験は、x86-64ではそれに当たるもの(`syscall`の引数、SMAPとSMEP、CR2とエラーコード、Local APIC、XMMのレジスタなど)を見るように書き分けた。デバイスツリー、SDのホストコントローラ、V3Dの表とGPUで描く試験(`board`、`sd`、`gpu`、`gl`)はArmの機器だけのものなので、x64では組み込まず、飛ばしたことを出す。
+
+2026-10-19に確かめたこと:
+
+- カーネル内の試験の全部(Windowsのハイパーバイザで約6分)は、以前は698件中695〜696件が成功していた。下の直しの後は702件中701件が成功し、残る1件は外のNTPのサーバに届かなかった`test_sntp`で、`so`の群だけをもう一度走らせると成功した。失敗するのは、生きているプロセスがあることを前提にする`test_processes`と、時間に依存して時々失敗する試験(`test_perf`、`test_figtext`、`test_menu_look`)の1〜2件だった。この4つの群(`tsfsobj`、`drop`、`part`、`bt2`)をx64とQEMU virtで3回ずつ走らせて原因を見て、試験を直した。`test_perf`は、Windowsのハイパーバイザの上の仮想のNVMeでは、2MBの書込みが素の書込みの37〜54%の速さで回ごとに揺れるので、判定の下限を40%から25%にした(1ブロックずつの要求なら17%を下回る)。`test_figtext`は、実身マネージャの表示用の表(96項目の固定)が前の群の実身の名前とアイコンで埋まり、新しい実身を開けなかった(x64でもArmでも、R1.110でも起きる)。表をメモリに合わせた大きさにし、使われていない項目を手放すようにして直した(11.1)。`test_processes`は、`init`が挨拶だけをしてすぐ終わる機械(QEMU virt)ではプロセスが1つもないので、そのときは終わるまで待つプロセスを試験が自分で起こして確かめる。直した後は、x64で52件、QEMU virtで53件が、それぞれ3回とも成功した。`test_menu_look`は6回のうち一度も失敗しなかった。`NET=user`のネットワークの試験は55件すべて成功する(DHCP、IPv6の自動設定、AAAAの名前解決、SNTP、HTTPS、FTP)。
+- UIの試験(12.4)は`tools/x64/ui_run64.py`で走らせ、`ui_glgears`を含む33の台本が成功する。ディスクの並びやデバイスの名前を前提にする台本は、x64のものを`tools/x64/tests/`に分け(`ui_xfconv`、`ui_scrprint`、`ui_btcd`、`ui_sysenv_font`、`ui_vols`、`ui_diskfix`、`ui_diskfix_boot`)、すべて成功する。`ui_vols2`はそのままで成功する。パッケージ(PCM/MPEGプレーヤ)を前提にする`ui_rt`と`ui_user_apps`も、x64のイメージに既定で入れてから成功する。成功しないのは、日付で座標が変わるもの(`ui_calendar_ops`)である。
+- USBを、QEMU virtの試験機と同じ装置(1つ目のxHCIのSuperSpeedのディスク、ハブとその先のオーディオ、ディスク、マウス、USB 2だけの2つ目のxHCIのディスク3台とキーボード)をつないで、`tools/x64/ktest64.sh`の`USBQ=1`で試験した(12.3)。`usb`、`devob`、`snd`、`vols`、`grow`、`btcd`の61件中59件が成功する(USB 3とUSB 2、ハブ越し、USBのディスクの抜き差しとマウント、実身の出し入れ、26台を超えるディスク、CD-ROM、HIDの抜き差し、プログラムのUSBデバイス、オーディオの再生と出力先の切替え)。残りの2件は、WindowsのQEMUではUSBのオーディオの再生が実時間の数分の1しか進まないためで、同じQEMUのArmでも同じに失敗する。USBのカメラはQEMUに装置が無いので、実機で確かめる。
+- x64のパッケージ(.tpk)を作れるようにした。表計算は`make TARGET=_X64_ pkg PKG=basic-calc-editor`、PCM Playerは`ARCH=x86_64 build-tessron.sh`、MPEG Playerは`TS_ARCH=x86_64`の`build-ffmpeg-ts.sh`と`build-tessron.sh`(どちらもそのリポジトリ)である。x64のPCM PlayerとMPEG Playerのパッケージは`etc/pkg/x64/`に置き、x64のイメージには既定で入れる(`PKGS`の既定。Armの既定と`etc/pkg/`のパッケージは変えていない)。表計算はx64のイメージに初めから入っているので、パッケージは入れない(同じプログラムを古いパッケージで上書きしないため)。MPEG Playerのメニューの「NEONを使う」は、x64ではFFmpegのSIMDを切り替えるので「SIMDを使う」とする。イメージに入れて、PCM PlayerはWAV、MP3、ZIPを、MPEG PlayerはH.264/AAC、VP8/Vorbis、MPEG-4/MP3、HEVC/AACを4つのスレッドで復号して再生した(QEMUの変換)。
+- 4つのCPUのデスクトップで、「歯車」を描かせ続けたまま、プロセスの起動と終了(すぐ終わるもの5つ、4つのCPUを同時に使うもの、タスクを200回作って消すもの)と電卓の起動と終了を300回繰り返した(約17分、プロセス2400個)。失敗した操作、例外、権限の不足はなく、「歯車」は最後まで毎秒59〜60フレームで描いた。
+- システム環境設定の〈電源を切る〉でACPIの`\_S5`に入って電源が切れ、〈再起動〉でFADTのリセットのレジスタからリセットされ、もう一度デスクトップまで起動する(QEMUの変換で確かめた。Windowsのハイパーバイザの上では、QEMUのモニタの`system_reset`でもリセットの後のプロセッサが動かなくなるので、リセットはQEMUの変換で試験する)。
+- `make GL=1`で、Mesaをx86_64-elfのプロセス用に作り(`tools/x64/mesa/build.sh`、softpipeだけ)、小物「歯車」がsoftpipeで描く(1280×800の画面で320×280のウインドウに60フレーム/秒)。2026-10-19からはIntelのGPUのドライバ(iris)も同じライブラリに入る。GPUの無い機械ではsoftpipeで描く(13章13.11.9)。
+- NetBSDのTCP/IPスタック(`tools/x64/netbsd/build.sh`、`~/tessronos-netbsd-x64/rumpnet.o`)とMozc(`tools/x64/mozc/build.sh`、`MOZC=1`)もx86_64で作って動く。
+- ブラウザ(Chromium 153の移植、14章)も`make TARGET=_X64_ BROWSER=1 BROWSER_BLINK=1 GL=1`でx64のものを作る(14.3.1)。ARMの移植と同じソース、パッチ、移植層から、gnの`target_cpu = "x64"`、x86_64-elfのツールチェーン、NASM(12.1)で作り、V8はx64のJITとWebAssemblyで動く。WebAssemblyの範囲外の参照は、ページフォールトをプログラムに返す`ts_def_flt`(`T_TSFLT`のx86-64の形)からV8のトラップハンドラに渡る。2026-10-21(2026-10-20から作業)に、QEMUの`q35`で`https://www.tron.org/ja/`の表示と、試験グループ`v8`の86件中79件(残りはQEMU virtと同じに失敗するものと、音の装置の構成によるもの)を確かめた。IntelのGPUではirisで描く見込みで、実機ではまだ確かめていない。
+- Windowsのハイパーバイザ(`-accel whpx -cpu host,vmx=off,lmce=off,sgx=off,sgxlc=off`。OVMFが読むMSRの機能は切る)の上では、TSC deadlineのタイマとPCIDを使って動く。
+
+Windowsのハイパーバイザで走らせるときは、QEMUの引数の`-cpu max`を上の`-accel whpx -cpu host,...`に替える。デバイスの64ビットのBARは物理アドレスの上端近く(約56TB)に置かれるので、デバイスの領域の遠い枠を使う(3.10.2)。
+### 3.10.6 ACPIの解釈系
+
+AMLを実行するACPIの解釈系にはACPICAを使う。`tools/x64/acpica/build.sh`がリリース(acpica-unix-20260930、SHA-256で確かめる)を取得し、カーネルと同じ条件(x86_64-elf、浮動小数点のレジスタなし、`-mno-red-zone -mcmodel=kernel`)でコンパイルし、OSの層とカーネルの使う部分(`kernel/sysdepend/acpi/acpica/`)と合わせて`~/tessronos-acpica-x64/acpica.o`にする。デバッガ、逆アセンブラ、ASLのコンパイラは入れない。ソースは変えず、`include/platform/acenv.h`の写しで`__TESSRONOS_KERNEL__`のときに`actessronos.h`を選ばせる。カーネルが呼ぶ関数(`knl_acpica_*`)とOSの層の関数(`AcpiOs*`)のほかは局所の記号にするので、ACPICAの小さなCライブラリ(`memcpy`など)はカーネルのものとぶつからない。
+
+| 層 | ファイル | 内容 |
+| --- | --- | --- |
+| OSの層 | `kernel/sysdepend/acpi/acpica/osl.c` | メモリの写し、PCIの構成空間(ECAM)、ポート、SCI、セマフォ、スピンロック、時間、遅らせて行う処理(通知用とそれ以外の2つのタスク)、FACSのグローバルロック |
+| カーネルの側 | `kernel/sysdepend/acpi/acpi_os.c` | 上をカーネルの機能で作る。RAMは直接の写し、それ以外はデバイスの領域(キャッシュしない)。SCIはMADTの付け替えに従い、レベルトリガ |
+| 使う所 | `kernel/sysdepend/acpi/acpica/acpica.c` | 起動(表、名前空間、ACPIモード、SCI、`_INI`、メソッドのあるGPE)、電源ボタン、再起動、名前空間の装置の一覧 |
+| 使う所 | `kernel/sysdepend/acpi/acpica/acpica_off.c` | 電源断(`\_TTS`、最後の段階の予定、`\_PTS`、S5)と、起動時に出すファームウェアが残した起こしの状態 |
+
+起動の段階「ACPI interpreter」(PCI Expressの後)で名前空間を読み込む。電源ボタンは、FADTの固定のボタンと、通知で知らせるもの(`PNP0C0C`の0x80、SurfaceのボタンのデバイスMSHW0028とMSHW0040の0xC6)を受け、デスクトップの〈電源を切る〉と同じようにセッションを終えて電源を切る。すべての通知は、どの装置の何番かをコンソールに出す(実機のボタンが何を送るかを調べるため)。再起動はFADTのリセットのレジスタで行う。電源断(`kernel/sysdepend/acpi/acpica/acpica_off.c`)は次の順で行う。
+
+1. システムがまだ動いているうちに(`knl_finish_device`)、`\_TTS(5)`を実行する(再起動のときも)。続いてWi-Fiの接続を切る。
+2. どのPCIの機能もS5から起こさないように、すべての機能の電源管理の能力(PMCSR)のPME_Enを切り、立っているPME_Statusを消す。起こす設定が残っていた機能はコンソールに出す。S5から起こすことは何にも頼んでいないので、コーデックのジャックやUSBの接続、ファームウェアが起こす用にしたままのWi-FiのPMEが、電源を切った直後にPCHのPMEのGPEやPCIeのWAKE#(PM1の有効のレジスタでは止まらない)で機械を起こしてしまうのを防ぐ。
+3. 最後の段階で何をするか(PM1aとPM1bの制御のブロックか、ハードウェア縮小のときはFADTのスリープ制御のレジスタ、`\_S5`の値、`\_PTS`の有無、いま有効なGPEとS5から起こす用に残るGPE)をコンソールに出し、そのあとで記録を最後に書く。これより後はディスクに書けないので、記録に残るのはここまでである。
+4. 割込みを止め、他のプロセッサをすべて止める(SGI_STOP)。そのうえで`knl_acpi_os_alone`にする。プロセッサが止まるのは割込みが開いているところだけで、スピンロックの中では止まらないので、解釈系が待つものは止めたタスクが持っていたセマフォだけになり、それはすぐに取れたものとしてよい。
+5. `AcpiEnterSleepStatePrep`で`\_PTS(5)`と`\_SST`を実行し、すべてのGPEを止め、`AcpiEnterSleepState`でS5に入る。ACPICAはPM1の状態を消し、起こす用のGPEだけを有効にし、PM1aとPM1bにそれぞれのSLP_TYPを、まずSLP_ENなしで、次にSLP_ENを付けて書く(ハードウェア縮小のときはスリープ制御のレジスタ)。各段階は画面に出す。10秒たっても切れなければACPICAがSLP_ENをもう一度書き、そのあとはWAK_STSを待ち続けるので、画面に最後の行が残ったまま止まっていれば、SLP_ENが受け付けられなかったことになる。
+
+解釈系が動いていないときは、起動時に読んだ表だけで切る(acpi.c)。PM1の状態を消し、PM1の制御のレジスタのほかのビット(SCI_ENなど)を残したまま、SLP_TYP、SLP_ENの順に書く。ハードウェア縮小の機械はこの道では切れない。
+
+起動のときは、表を読んだあと、ACPIモードにしてGPEの状態が消える前に、ファームウェアが残したPM1の状態とGPEの状態をコンソールに出す(`acpi: as the firmware left it`)。電源を切ったはずの機械がすぐ起き直したときは、WAK_STSと並んで、起こしたもの(PWRBTN、PCIEXP_WAKE、RTC、GPEの番号)がここに出る。
+
+解釈系は寛容なモード(`AcpiGbl_EnableInterpreterSlack`)で動かす。Linuxが`acpi=strict`でないときの既定と同じで、ファームウェアのAMLが確かめられている振る舞いに合わせる。Surface Go 2のDSDTは、0x1003バイトのOperationRegion `OGNS`の0x1000に、DWordAccのフィールド(ECON、ECOK、LTES)を置いている。厳密なモードでは、アクセスの幅に切り上げた分が領域の外に出るのでAE_AML_REGION_LIMITになり、`EC0._REG`がECOKを立てられず、`ACAD._INI`、`ACAD._PSR`、`BAT1._STA`、`PWRB._STA`、`QCQU._STA`などが途中で止まっていた。寛容なモードでは、幅に切り上げた長さに収まるアクセスは通す。
+
+`cmdline.txt`に`acpi=0`と書くと解釈系を起動しない。
+
+初期化は、表の読込み、ECDTがあればその埋め込みコントローラ(EC)、ACPIモードとSCI、名前空間のオブジェクトの初期化(_STAと_INI)、`\_SB._OSC`(何も引き受けないことを伝える)、`\_PIC(1)`(割込みはIOAPIC)、ECDTがなければDSDTのEC(PNP0C09)、起こす装置のGPE(_PRW)を起こす用にとっておき、メソッドのある残りのGPEを有効にする、ボタンと通知、の順である。`_OSI`にはACPICAの既定のとおり「Windows 2000」から「Windows 2022」までのすべてに真を返す(ファームウェアはWindowsで確かめられている道筋が最も確かなので、Windowsとして振る舞う)。
+
+ECは2つのポート(データとコマンド/状態)で読み書きし、IBFが空くのとOBFが満ちるのを1回最大500ms待つ。2バイト以上はバーストモード(0x82と0x83)で囲み、ECの装置の`_GLK`が1ならファームウェアのグローバルロックを持つ。1つの読み書きは長くかかりうるので、セマフォで1つずつにする。ECの事象はGPEで来て、SCI_EVTが立っている間クエリ(0x84)で番号を得て`_Qxx`を実行する。始めに残っている事象もくみ出す。
+
+電池(PNP0C0A)、ACアダプタ(ACPI0003)、蓋(PNP0C0D)、電源ボタンはデバイスの実身「battery0」「acpower」「lid」「powerbutton」になる(`kernel/sysdepend/acpi/acpi_power.c`、`OB_S_POWER`)。レコード1が状態の「キー 値」の行で、電池は`_BIX`(なければ`_BIF`)と`_BST`から、在否(`_STA`のビット4)、単位(mWhかmAh)、設計容量、最後の満充電量、残量、率、電圧、残りの百分率(満充電量が分からなければ設計容量で割る)、型番などを作る。状態の`STATE`はLinuxの電池のドライバと同じに決め、放電のビットが立てば`discharging`、充電のビットなら`charging`、どちらでもなく残量が最後の満充電量(または設計容量)に届いていれば`full`、届いていなければ`notcharging`(充電のしきい値や温度で充電器が止めている)とする。残量が危ういというビットは`CRITICAL 1`の行で別に示す。
+
+読み直す契機もLinuxに合わせた。ACアダプタは通知(0x80など)が来ると`_PSR`を読む(Linuxの`acpi_ac_notify`)。電池は通知が来ると`_STA`、`_BIX`、`_BST`を読む(`acpi_battery_notify`。0x81は容量などの情報の変化、0x80は状態の変化)。電池の0x80ではACアダプタも読み直す。抜き差しを電池の通知でしか知らせないファームウェアがあるためで、Linuxの`acpi_ac_battery_notify`と同じである。ACアダプタの通知では、upowerと同じく電池も読み直す。充電が始まったり止まったりするからである。通知を出さない機械のために、電池はupowerと同じく30秒ごとにも読む。変わればレコード1に`OB_E_CHANGE`を通知する。ACPICAの通知は、SCIの割込みの中でなく、解釈系の通知用のタスク(`osl.c`の`AcpiOsExecute`)で呼ばれるので、メソッドの実行と通知はそのタスクで行う。システム環境設定の〈電源管理〉はこの実身を読み(11.6)、変化の通知で表示を読み直す。
+
+Surface Go 2の音量の上げる・下げるボタンと電源ボタンは、GPIOの割込みではなく、埋め込みコントローラ(EC)のクエリ(`_QD1`から`_QD6`)を通して、IntelのHIDイベントフィルタの装置(`\_SB.HIDD`、`_HID`は`INT33D5`)への通知として来る。ファームウェアは、その装置の`_DSM`(UUIDは`eeec56b3-4442-408f-a792-4edd4d758054`、リビジョン1)の機能1で「5ボタンの配列」が読み込まれるまで、どのボタンも通知しない。読み込むと、ファームウェアは`PNP0C0C`の電源ボタン(`\_SB.PWRB`)の`_STA`を0にして、電源ボタンも配列の通知で知らせる。通知の値は次のとおりで、押したときと離したときが組になる(どちらも`_OSI`の答えで決まる`OSYS`がWindows 10以上のときだけ送られる)。
+
+| 通知 | ボタン |
+| --- | --- |
+| 0xC4、0xC5 | 音量を上げる(押した、離した) |
+| 0xC6、0xC7 | 音量を下げる |
+| 0xCE、0xCF | 電源 |
+
+`acpi_power.c`は、起動の最後(電源ボタンの実身を作った後)に`INT33D5`を探し、`_DSM`の機能0で機能1があることを確かめてから、機能1で配列を読み込む。音量のボタンは、入力の層(6.4)には「acpibtn」という名前のキーボードとして渡す。キーはキーボードのページの使用法のVolume Up(0x80)とVolume Down(0x81)で、普通のキーボードの音量のキーと同じに、押している間はキーリピートの設定のとおりに繰り返し、ウインドウマネージャが全体の音量を変える(6.5.6)。離した通知がないまま押した通知が来たら、離したことにしてから押し直す。電源ボタンの0xCEは、固定の電源ボタンと同じくセッションを終えて電源を切る。同じ押し下げを固定のイベントと配列の両方で知らせるファームウェアのために、別の経路で1秒以内に来た押し下げは同じ押し下げとして1回だけ扱う(`acpi: the power button: the same press, told the other way too`)。配列のほかの通知(Windowsボタン、回転のロック、タブレットとノートの形)は、コンソールに出すだけにする。
+
+コンソールには、配列を読み込んだこと(`acpi: buttons (\_SB_.HIDD, INT33D5): the 5-button array loaded ...`)と、最初の16回の押した・離した(`acpi: buttons: Volume Up pressed (c4)`など)を出す。すべての通知を出す行(`acpi: notification c4 for \_SB_.HIDD`)もそのまま出る。QEMUにはこの装置がないので、実機で初めて動く。
+
+QEMUの`q35`で、名前空間の読込み、SCI、QEMUのモニタの`system_powerdown`(固定の電源ボタン)によるデスクトップからの電源断を確かめた。電池、ACアダプタ、蓋は、`tools/x64/tests/acpi_battery.asl`(ECを使わずに値を返し、ときどきACアダプタの通知を送る手作りのSSDT)を`iasl`(`tools/x64/acpica/build.sh`と同じリリースのもの)でAMLにし、QEMUの`-acpitable`で読ませて確かめた。ECの手順はQEMUにECがないので、実機で初めて動く。
+
+### 3.10.7 画面とファイルによる記録
+
+シリアルポートのない実機(Surface Go 2)では、画面の写真と記録のファイルで、どこまで進んでどこで止まったかを調べる。
+
+画面のコンソール(`kernel/sysdepend/x64/fbcon.c`)は、ローダと同じ倍率の文字で、ローダの最後の行の下から続ける。GOPのフレームバッファが4GBより上にある機械(ThinkPad X1 Yoga 第3世代では約190GBの所)のために、ローダはその範囲もデバイスの窓に書込み結合で写しておく。カーネルは、最初にカーネルのPML4を覚えてから(`reset_main`)画面に触れ、デバイスの窓が画面の最初と最後のバイトを写していると確かめられたときだけ画面に書く。写せなければ、記録のファイルにだけ出す。最上行の青い帯には、起動の段階の名前(`knl_fbcon_stage`)を出す。段階は、the processor、ACPI tables、the processor's clock、memory management、the kernel、PCI Express、VT-d、ACPI interpreter、serial ports、NVMe、network card、screen, drawing, windows、keyboard, sound, camera、USB、network、the disk started from、processes, objects、the first programの順である。screen, drawing, windowsの中は、screen: the GOP's framebuffer、screen: the display engine under it、screen: the GGTT as the firmware left it、screen: the panel and the plane, whether the size can change、screen: the two places in the GGTT(この3つはIntelの表示エンジンのとき)、screen: the back buffer、drawing、windows、windows: doneに分けて出す。画面のコンソールは、表示のドライバが最初に画素を送るとき、または最初に大きさを変えるとき(`knl_disp_hw_taken`から`knl_fbcon_stop`)まで、帯と行を画面に出し続ける。前はドライバの初期化(`knl_disp_hw_init`)で止めていたので、デスクトップが描くまでのあいだ帯がscreen, drawing, windowsのまま残り、その後の段階で止まっても画面からは分からなかった(ThinkPad X1 Yoga 第3世代の1回目の起動で、システムボリュームの拡張まで進んでいたのに、この段で止まったように見えた)。画面の最下行は起動の見張りに取っておく。各プロセッサのLocal APICタイマの割込み(`lockup.c`、0.5秒ごと)が、今の段階が5秒を超えて続くと、その秒数、直前の1秒にタイマの割込みを受けたプロセッサの数と全体の数、書いたプロセッサ、段階の名前を赤地で出し、1秒ごとに書き直す(`knl_fbcon_watch`)。秒数が2回の撮影のあいだで増えていなければ、どのプロセッサも割込みを受けていない。数が全体より少なければ、割込みを止めたまま動かないか、例外で止まったプロセッサがある。そのときは、そのうち最初のプロセッサの番号、例外で止まったか(stopped by an exception)割込みを受けていないだけか(silent)、最後にタイマの割込みを受けてからの秒数、そのときのRIPとタスクを出し、ほかにもあればその数を(+N)で添える。見張りは、ドライバが画面を受け取ると終わる。止まる例外のときは画面を消し、赤い帯に最後の段階を出して、例外の種類とベクタ、エラーコード、RIP、CR2、全レジスタ、タスク、呼出し元をたどったアドレスと、その直前のコンソールの行(画面に入るだけ)を出す。デスクトップが画面を使っている間に止まったときも同じである。例外の要約(種類、RIP、CR2、エラーコード、タスク、RSP、RBP、段階)の2行は、赤い帯のすぐ下に黄色で残す(`knl_fbcon_pin`)。コンソールの行は、画面の下まで来るとその要約の下から続くので、例外の後にほかのプロセッサがロックアップの報告などを長く出しても、要約は消えない。前は要約も普通の行で、画面の上に戻ってきた行に上書きされていた。
+
+止まったときは、記録のファイル(3.10.7)をその場で書く。システムのタイマと機器の割込みは最初のプロセッサが受けるので、例外を起こしたプロセッサをすぐ止めると、ほかのプロセッサも時間切れや入出力を待てなくなり、記録を書けない。そこで、タスクの中で、割込みが許され、ディスパッチが禁止されておらず、カーネルのロックを持たずに起きた例外では、報告の後にそのタスクを眠らせたままにし、プロセッサは止めない。記録の係のタスク(`bootlog.c`、0.25秒ごとに見る)がすぐに`KERNEL.TXT`などを書き、書き終えたら全プロセッサを止めて(`knl_exc_stop_all`)、画面を赤い帯、要約、コンソールの最後の行で描き直す。15秒で書き終わらなければ(ディスクが答えない)、眠らせたタスクが自分で止める。割込みの処理中の例外、二重フォールト、マシンチェック、スタックのあふれ(`!STACK!`)はその場で止め、書けるなら書く(`knl_bootlog_stopped`)。ロックアップの報告(プロセッサが割込みを受けない、カーネルのロックが離されない、ウォッチドッグが蹴られない)のときも記録を書かせる。デスクトップのループが回らないときは、戻ることもあるので2秒後に書く。
+
+ローダの最後の段階からカーネルの画面のコンソールが始まるまで(ExitBootServicesの前後、メモリマップの変換、カーネルへの飛び込み、カーネルの入口、例外の表、文字の部品)は、帯も文字も出ない。そこで段階ごとに、画面の左下に色の違う四角を左から順に描く(`bootinfo.h`の`BI_MK_*`、色と段階の対応は[x64の実機で試す手順](../x64-hw-test.md)の7章)。カーネルはローダの写したデバイスの窓を通して直接描く。画面のコンソールの前に例外が起きたときは、赤い四角に続けて、例外の番号、RIP、CR2、エラーコードを16進の点の数字で描く。段階の番号と例外は、ローダが物理アドレス0x8F000(取れなければ無し)に確保したページにも書く。温かい再起動の後、次のローダが「the last start got to mark 番号」と前回の段階を記録に出す。起動の設定は、TSLOGの`cmdline.txt`があればESPのものの代わりに使う(Windowsで書き換えられるように)。
+
+ローダは、カーネルのイメージとヒープ、T_BOOTINFO、ページテーブル、1MB未満のページ、段階の記録のページを、すべてUEFIの標準の種類EfiLoaderDataで確保する。確保した範囲を覚えておき、メモリマップを変換するときにその範囲だけをカーネルのもの(`BI_MEM_KERNEL`)として渡す。以前はOSのローダ用の独自の種類0x80000001で確保していた。その種類では、ThinkPad X1 Yoga 第3世代(LenovoのファームウェアN25ET72W)でExitBootServicesから戻らず、段階の四角が3つで止まった。EfiLoaderDataに替えると、デスクトップまで起動した。同じイメージで`memtype=custom`にすると再び止まり、原因はメモリの種類と確定した。QEMUのOVMFはどちらの種類でも動く。比べるときは、起動の設定`memtype=custom`で以前の種類に戻せる(検討書5.12)。
+
+コンソールに出たものは512KBの環に保ち(`kernel/sysdepend/x64/bootlog.c`)、起動の20秒後と、その後は1分ごとに、ESPの`/boot/EFI/TESSRON/`に書く。USBの記憶装置を詰まらせないよう、前に書いてからコンソールに何も増えていなければ書かず、`KERNEL.TXT`と`USB.TXT`はまとめて書き、`ACPI.TXT`は最初の1回だけ、`DISPLAY.TXT`は中身が変わったときだけ書く。解像度の変更やWi-Fiの接続の失敗など、残したい出来事のあとは2秒後に書く(`knl_bootlog_soon`)。電源を切るときと再起動するときは、`knl_finish_device`から、ディスクと割込みがまだ動いているうちに最後に書く(`knl_bootlog_final`)。
+
+起動したディスクが抜かれると、`/boot`と`/tslog`も去り、書けなくなる。コンソールの環はメモリにあるので、抜かれている間に出た行も残っている。同じディスクが挿し直されると、書く前に、ローダが渡したESPの区画のGUIDでディスクを探し直し(`bootdisk.c`の`knl_bootdisk_again`。挿し直すと`uda`が`udb`になるなど名前が変わることがある)、`/boot`と`/tslog`を付け直して書く(`bootlog.c`の`boot_again`、コンソールに`bootlog: /boot on udb0 again (0)`)。抜かれている間は、探しても何も出さない。カードが戻らないときのために、デスクトップは、システムのボリュームが去ったときに、コンソールの最後の40行を新しい行を上にしてウインドウに出す(11.26)。UEFIの変数と内蔵のSSDには書かない決まりなので、次の起動まで持ち越す形(メモリに残して次の起動で書く)は、ファームウェアが再起動でメモリを消さないと確かめられるまで採らない。
+
+同じ記録を、記録の区画TSLOGの`TESSRON/`にも書く。TSLOGは`tools/mksd.py --log-mb`(x64のイメージでは`SD_LOG_MB`、既定は64MB)が作るFAT32の区画である。種類は基本データ(EBD0A0A2-B9E5-4433-87C0-68B6B72699C7)、名前とボリュームのラベルはTSLOGである。
+
+- **置き場所**: Windowsは、取り外しできる装置ではESPにドライブ文字を付けない。ESPの記録はdiskpartで区画を選ばないと取り出せず、その操作も「リムーバブル メディアではサポートされていません」で断られることがある。Windows 10 バージョン1703以降は、取り外しできる装置の2つ目以降の区画にもドライブ文字を付ける。そこでTSLOGは、エクスプローラにTSLOGのドライブとして出るようにした。
+- **区画の位置と表の順**: 区画の位置はESPのすぐ後で、システムのボリュームが最後の区画のまま最初の起動で広がれるようにしてある(7.7)。GPTの表では最後の項目なので、ほかの区画の番号(`nvmea0`が`/boot`、`nvmea1`がシステムのボリューム)は変わらない。
+- **ローダの書き方**: ローダは、自分の来たディスク(デバイスパスのハードディスクの節より前が同じもの)の中から、UEFIのファイルシステムでボリュームのラベルがTSLOGのものを探して書く。見つからなければESPにだけ書く。
+- **カーネルの書き方**: カーネルは、起動したディスクのGPTから種類と名前でTSLOGを見つけ、`/tslog`に取り付けて書く(`kernel/sysdepend/x64/bootdisk.c`)。
+
+| ファイル | 書くもの | 内容 |
+| --- | --- | --- |
+| `LOADER.TXT` | ローダ | ローダが出した文字 |
+| `HW.TXT` | ローダ | ファームウェア、CPUIDの全リーフと主な機能、GOPのモードの一覧、UEFIのメモリマップ、SMBIOS(機種、ボード、メモリ)、ACPIの表の一覧とFADTの主な値、PCIの全ファンクション(ID、クラス、BAR、IRQ、ケーパビリティ)、UEFIが列挙したUSBの装置(VID、PID、文字列、全部の構成の記述子とその解析) |
+| `ACPI/*.BIN` | ローダ | ACPIの表そのもの(`DSDT.BIN`、`SSDT1.BIN`…、`FACS.BIN`) |
+| `SMBIOS.BIN` | ローダ | SMBIOSの構造の表そのもの |
+| `KERNEL.TXT` | カーネル | カーネルのコンソール(起動したディスク、各段階、デバイスの発見) |
+| `USB.TXT` | カーネル | カーネルが立ち上げたUSBの装置(VID、PID、速度、つながり方、全部の構成の記述子とその解析)。USBのディスクごとの読み、書き、キャッシュの書き出し(SYNCHRONIZE CACHE)の回数、合計の時間、一番長くかかった時間 |
+| `ACPI.TXT` | カーネル | 名前空間の装置(パス、`_HID`、`_CID`、`_UID`、`_ADR`、`_STA`、`_CRS`のメモリ、ポート、割込み、GPIO、I2C、SPI、UART) |
+| `DISPLAY.TXT` | カーネル | Intelの内蔵グラフィックス(第9世代)の表示エンジンを、ファームウェアが設定したまま読んだもの。CDCLK、DPLL、DDI、トランスコーダとそのタイミング、パイプの大きさ、パイプのスケーラ、プライマリプレーン、パネルの電源とバックライト、GGTTの先頭とプレーンの面のエントリ、BAR、スチールンメモリ、OpRegionとVBTの有無。読むだけで書かない(`kernel/sysdepend/x64/gfxdump.c`)。最後の節に、表示のドライバが解像度を変えたときの手順(計算した値、書いた値、反映、アンダーラン、書き戻し。6.9)を並べる。解像度を変えた2秒後にも書き直す。Intelの画面が無ければ作らない |
+
+`cmdline.txt`(ESPの根、1行)には、次の設定を空白で区切って書ける。ほかのPCで書き換えられるので、実機を作り直したイメージなしで試せる。
+
+| 設定 | 意味 |
+| --- | --- |
+| `video=WxH` | GOPの画面のモード。書かなければ機種で決めたモード(ThinkPad X1 Yoga 第3世代は1600×1200)、それも無ければ1920×1280以下で最も大きいもの |
+| `hwreport=0` | ローダの報告(`HW.TXT`など)を作らない |
+| `connect=0` | 報告の前にUEFIの全部のコントローラをつなぎ直さない(USBの一覧はファームウェアがつないだ分だけになる) |
+| `keepmode=1` | GOPの画面のモードを変えない |
+| `memtype=custom` | カーネルの領域を、OSのローダ用の独自のメモリの種類(0x80000001)で確保する(比べるため) |
+| `lastlog=0` | ブートサービスを抜ける直前に`LOADER.TXT`を書き直さない |
+| `tslog=0` | ローダはTSLOGに記録を書かない(TSLOGの`cmdline.txt`は読む。カーネルは書く) |
+| `acpi=0` | ACPIの解釈系を起動しない |
+| `vtd=keep` | VT-dの表とレジスタを記録に出すだけで、ファームウェアが有効のまま渡した変換、割込みの再割当て、無効化のキュー、保護範囲を切らない(3.10.9) |
+| `stopat=名前` | 名前で始まる段階で止まり、コンソールを画面に残す(例: `stopat=USB`) |
+| `faultat=名前` | その段階で無効命令の例外を起こし、止まった画面を確かめる |
+
+### 3.10.8 実機(Surface Go 2、ThinkPad X1 Yoga)で起動する
+
+実機の試験用のイメージは`make TARGET=_X64_ DESKTOP=1 BUILD_ID=hw2 X64_CMDLINE= sdimg`で作る(`build_make/obj/_X64_hw2/sd.img`、Windowsからは`C:\home\TessronOS\build_make\obj\_X64_hw2\sd.img`。作るスクリプトは`C:\tmp\mkimg_x64hw2.sh`)。`X64_CMDLINE=`を空にして、画面のモードはローダに自動で選ばせる(ThinkPad X1 Yoga 第3世代は1600×1200、Surface Go 2は1920×1280以下で最も大きいもの)。ThinkPad X1 Yoga(第3世代)の2560×1440で試すときは、`cmdline.txt`に`video=2560x1440`と書く。両方の機種での試し方は、[x64の実機で試す手順](../x64-hw-test.md)にまとめてある。
+
+USBメモリ(1GB以上。中身は消える)への書込みは、Windowsで次のどちらかで行う。
+
+- Rufus: 「デバイス」でUSBメモリを選び、「ブートの種類」の「選択」で`sd.img`を選んで「スタート」。書込みの方式を聞かれたら「DDイメージモード」を選ぶ。
+- Raspberry Pi Imager: 「OS」で「カスタムイメージを使う」を選んで`sd.img`を指定し、「ストレージ」でUSBメモリを選んで書く。OSの設定の変更は使わない。
+
+Surface Go 2の準備と起動は次のとおりである。
+
+1. Windowsでデバイスの暗号化(BitLocker)を使っているときは、回復キーを手元に控えるか、BitLockerを一時停止しておく。セキュアブートを変えると、次のWindowsの起動で回復キーを求められることがある。
+2. Surfaceの電源を切る。音量の上げるボタンを押したまま電源ボタンを押して離し、Surfaceのロゴが出たら音量のボタンを離すと、Surface UEFIの画面になる。
+3. 「Security」の「Secure Boot」を無効にする(「Disabled」、または構成の選択で「None」)。「Boot configuration」で「USB Storage」が有効であることを確かめる。「Exit」から「Restart now」で抜け、Windowsが起動したらシャットダウンする。
+4. USBメモリを挿す(USB-Cの変換やハブ経由でもよい)。Type Coverと、あればUSBのLANのアダプタもつないでおく。
+5. 音量の下げるボタンを押したまま電源ボタンを押して離し、ロゴが出たら音量のボタンを離すと、USBメモリから起動する。
+
+起動の途中で止まったときは、画面の写真を撮る。帯の段階の名前と、赤い帯の画面ならその全体が手がかりになる。動いたときも止まったときも、電源を切った後にUSBメモリをWindowsのPCに挿し、エクスプローラでTSLOGのドライブの`TESSRON`のフォルダを丸ごとコピーする(3.10.7)。
+
+TessronOSは起動したUSBメモリにだけ書く。内蔵のSSDは読んで装置として見せるが、利用者が取り付けるか、小物「システム登録」で登録する(3.10.10)のでない限り書かない。
+
+### 3.10.9 VT-d(IOMMU)
+
+TessronOSはVT-dを使わない。ドライバは装置に物理アドレスをそのまま渡し、MSIとMSI-Xのメッセージは互換の形式(アドレス0xFEExxxxxに宛先のAPIC ID、データにベクタ)で書く。ところが、起動前のDMAの保護を行うファームウェアは、VT-dの再割当ての単位(DRHD)の変換、割込みの再割当て、保護範囲(PMR)を有効のまま渡すことがある。そうした単位の下の装置は、DMAが止まるか別の所へ行き、互換の形式のメッセージは割込みの再割当てで止められる(GSTS.CFISが0のとき)。有効のまま渡されなかった単位の下の装置は普通に動く。
+
+そこで起動の段階「VT-d」(PCI Expressの走査の直後、どの装置も始める前)で、`kernel/sysdepend/x64/vtd.c`が次のことを行う。
+
+1. ACPIのDMARの表を全部コンソール(KERNEL.TXT)に出す。表のフラグ(割込みの再割当て、x2APICのオプトアウト、DMAの保護の要求)、DRHDごとのレジスタの基底と対象の装置(デバイススコープ)、RMRR(DMA用に取っておくメモリの範囲と装置)、ATSR、RHSA、ANDD。
+2. DRHDごとに、VER、CAP、ECAP、GSTS、RTADDR、FSTS、FECTL、PMENと低い保護範囲と高い保護範囲、IQA、IQH、IQT、IRTAを読んで出す。障害記録(CAPのFROとNFRの示す場所)のうち印(F)の立ったものを、要求元の装置(バス、デバイス、ファンクション)、理由の番号と意味、読みか書きか割込みか、アドレスで出す。
+3. 有効のまま渡されたものを、変換(TES)、割込みの再割当て(IRES)、無効化のキュー(QIES)、保護範囲(PMEN.EPM)の順に切る。GCMDは書くだけのレジスタなので、VT-dの仕様の手順に従い、GSTSを読んで一度きりの印(RTPS、FLS、WBFS、IRTPS)を落とし、変える印だけを落として残りをそのまま書き戻し、GSTSの印が落ちるのを最大100ms待つ。キューは頭(IQH)が尾(IQT)に追いつくのを待ってから切る。保護範囲はPMENのEPMを落とし、PRSが落ちるのを待つ。切った後のレジスタをもう一度出す。
+
+切ってよい根拠は次のとおりである。TessronOSは再割当ての表を作らず、変換のための表も持たないので、変換が有効のままではファームウェアの表のとおりにしか装置のDMAが届かず、ドライバの渡す物理アドレスとは合わない。割込みの再割当てが有効のままでは、互換の形式のメッセージは仕様上止められるか(CFIS=0)、ファームウェアの表に従って別の所へ送られる。どちらもTessronOSのドライバの前提と合わない。ExitBootServicesの後はファームウェアの装置のドライバは動いていないので、切ってもファームウェアの側で困るものはない。表示のエンジンはGGTTを通してstolenメモリを読むが、その物理アドレスは変換を切っても変わらない。
+
+`cmdline.txt`に`vtd=keep`と書くと、1と2だけを行い、何も切らない(比べるため)。後で装置が答えないときに、障害記録を出し直す関数`knl_vtd_faults`がある(Wi-Fiのカードが起動しなかったときに使う)。
+
+### 3.10.10 内蔵のディスクへの登録(システム登録)
+
+microSDカードやUSBメモリから起動したTessronOSを、PCの内蔵のディスク(NVMeかSATA)に写して、そこから起動できるようにする。対象はx64のPC(Surface Go 2、ThinkPad X1 Yoga 第3世代)だけである。デスクトップの中で動く小物「システム登録」(`application/sysinst/sysinst.c`、11.32)が画面を受け持ち、書き方の中心は`application/sysinst/si_core.c`にまとめてある。写すものは、いま動いているシステムボリュームの全体(利用者の実身、設定、入れたアプリ)と、起動したESPのTessronOSのファイル(ローダ、カーネル、起動の設定)である。写し先には、起動したディスクとUSBのディスクを出さない(候補は`nvmea`〜`nvmed`と`sataa`〜`satad`のうち、`/boot`のディスクでないもの)。セクタが512バイトのディスクだけを扱う。
+
+方法は3つある。
+
+| 方法 | 区画表 | TessronOSの区画 | ESP |
+| --- | --- | --- | --- |
+| Windowsと共存する(既定) | `knl_gpt_add`で、使っている項目の後に1項目を足す(7.7)。主と予備の表をCRCとともに書き直し、既存の項目と区画の中身は変えない | Windowsで縮めて作った未割り当ての領域のうち最も大きいもの(1MiB境界)。前に登録した区画(TessronOSの型の最初のもの)があれば、それを書き直す | 既存のESPに、FATのファイルシステムを通して`\EFI\TESSRON\`だけを足す。`\EFI\Microsoft\`と`\EFI\Boot\bootx64.efi`は変えない |
+| 区画を1つ消して使う | `knl_gpt_retype`で、選んだ区画の項目の型をTessronOSのものに、名前を「TessronOS」に、固有GUIDを新しいものに書き換え、属性を消す。項目の番号と位置は変えない。すぐ後ろに未割り当ての領域があれば、`knl_gpt_grow`でそこまで広げる。ほかの項目と区画の中身は変えない | 選んだ区画(Windowsのボリューム、Linux、TessronOSのもの) | 共存と同じ |
+| ディスク全体を消して使う | 新しいGPT(保護MBR、128項目、主と予備)を書く | ESPの後ろ、ディスクの終わりまで | ESP(ディスクが32GB未満なら260MB、それ以上なら512MB)をFAT32で作り、`\EFI\BOOT\BOOTX64.EFI`と`\EFI\TESSRON\`を置く |
+
+ESPに置くファイルは次のとおりである。ローダは、自分のファイルのあるディレクトリ、`\EFI\TESSRON\`、根の順にカーネルと設定を探す(3.10.1)ので、どちらの方法でも同じ置き方で起動できる。
+
+| ファイル | 中身 |
+| --- | --- |
+| `\EFI\TESSRON\BOOTX64.EFI` | 起動したESPのローダ(`\EFI\TESSRON\`か`\EFI\BOOT\`のうち、文字列「TessronOS loader」を含むもの。WindowsのESPの同じ名前のファイルと取り違えないため) |
+| `\EFI\TESSRON\tessronos.elf` | カーネル |
+| `\EFI\TESSRON\cmdline.txt` | 起動の設定(あれば) |
+| `\EFI\TESSRON\INSTALL.TXT` | 登録の記録(方法`coexist`・`replace`・`erase`、写し元、写し先、日時) |
+| `\EFI\BOOT\BOOTX64.EFI` | ディスク全体を使うときだけ。ローダの写し(ファームウェアの既定の起動) |
+
+システムのバージョンアップ(11.8.1)は、`INSTALL.TXT`があるESPでは、ローダ、カーネル、起動の設定を`\EFI\TESSRON\`の下で入れ替え、ESPの根には何も足さない。`\EFI\BOOT\BOOTX64.EFI`は、文字列「TessronOS loader」を含むとき(ディスク全体を使ったとき)だけ更新し、Windowsのものには書かない。
+
+区画を1つ消して使うときに選べる区画は、型が基本データ、Linux、TessronOSのいずれかで、属性のビット0(プラットフォームに要る)が立っていないものである。基本データの区画でも、属性のビット63(ドライブ文字を付けない)が立っているものは、メーカーの回復イメージのことがあるので選べない。ESP、Microsoft予約、Windows回復の区画、型の分からない区画は残す。Linuxのインストーラが既存の区画を選んで使うときと同じく、選んだ区画の場所と番号はそのままにして中身だけを書き換えるので、後ろのWindows回復の区画の番号も変わらない。Windowsのボリュームを消したときは、ESPの`\EFI\Microsoft\`は残るが、その起動の項目は起動できなくなる。
+
+ローダの記録(`LOADER.TXT`、`HW.TXT`、`ACPI\`)は、内蔵のディスクから起動したときも同じ`\EFI\TESSRON\`に書く。共存のときにESPの空きを確かめる量は、置くファイルの大きさに記録の分の4MBを足したものである。WindowsのESPが100MBで空きが足りなければ、そう示して何も書かない。
+
+#### システムボリュームの写し方
+
+動いているボリュームをそのまま写すと、写している間の書込みで中身が食い違う。Linuxのファイルシステムの凍結(`fsfreeze`)と、使っているブロックだけを写す`dump`や`xfs_copy`と同じ考え方で、次のように写す(`si_vol_copy`)。
+
+1. ジャーナルを凍結する(`knl_jrnl_freeze`。容量の拡張と同じ仕組み、7.3)。新しいトランザクションは始まらず、走っているものの終わりを最大5秒待ち、ジャーナルの中身を本来の場所に書き終える。TSFSは実身のレコードのデータもトランザクションの中で書く(順序付けの方式)ので、凍結の間はボリュームのどのブロックも変わらない。終わらないトランザクションがあるときは、0.5秒おいて6回まで試す。
+2. `ts_sync_blk`で割当て群の見出しとスーパーブロックを書き、装置のキャッシュを空にする。媒体の上のボリュームが、ある一瞬のものになる。
+3. 最初の割当て群の前(スーパーブロック2つとジャーナル)、各群の見出しと空きビットマップ、ビットマップで使用中のブロックだけを、区画の装置から読んで写し先に書く(`ts_blk_group`、`ts_blk_map`)。続いたブロックは1つの要求(装置の`TDN_IOMAX`まで、最大1MB)にまとめ、要求ごとのCRC-32を覚える。空きのブロックは読まない。
+4. 凍結を解き、写し先を読み返して、覚えたCRCと比べる。
+
+凍結の間は、システムボリュームに書く操作(ウインドウの位置の保存など)が待たされる。読むだけの操作と、写しの進み具合の表示は止まらない。写したボリュームは元と同じボリュームのUUIDを持つ。TSFSのブロックの見出しがボリュームのUUIDを持つので、変えると全ブロックを書き直すことになるためである。同じUUIDのボリュームを同時に取り付けることは実身の管理が断る(`E_OBJ`)ので、内蔵のディスクから起動したときは、元のmicroSDのボリュームは取り付けられない。スーパーブロックは使用中の印のまま写るので、次に開くときはジャーナルを読み直して(空である)開く。
+
+写し先の区画はボリュームより大きいので、ボリュームを区画の大きさに広げる(`knl_tsfs_part_grow`、7.7)。共存のときは写した直後に広げる。ディスク全体を使うときは、ドライバが起動のときに読んだ区画を持ち続ける(`knl_part_rescan`は使用中かもしれない区画が動くことを許さない)ので、新しい区画の装置はその起動の間には無い。そのときは、内蔵のディスクから最初に起動したときに、システムボリュームを区画の大きさに合わせる処理(`knl_sysvol_grow`)が広げる。ボリュームは元より小さくできないので、写し先の区画は元のボリューム(USBメモリで起動した最初に8GBまで広がっていることがある)以上の大きさが要る。
+
+#### ファームウェアの起動の項目
+
+カーネルはUEFIのランタイムサービスを使わない(3.10.1)。ランタイムサービスを使えるようにするには、その領域をカーネルの空間に写し、`SetVirtualAddressMap`を呼び、Microsoftの呼出し規約と排他を用意する必要があり、大きい。そこで、起動の項目はローダがブートサービスの間に書く。システム登録は、起動したESPに依頼のファイル`\EFI\TESSRON\BOOTREG.TXT`を置く。中身は、写し先のESPの区画の番号(表の項目の番号、1から)、開始のセクタ、セクタの数、固有GUID(表のままのバイト列の16進)、ローダのパス`\EFI\TESSRON\BOOTX64.EFI`、BootOrderの先頭に置くか(ディスク全体を使ったときと、ディスクにWindowsのボリューム(基本データの区画)が1つも残らないとき1)である。
+
+次にそのmicroSD(USBメモリ)から起動したとき、ローダは画面の準備の後で依頼を読み、すぐに消してから(ファームウェアが断っても毎回繰り返さないため)、次のことを行う(`boot_entry_request`、`tools/x64/uefi/loader.c`)。
+
+1. 起動の項目(`EFI_LOAD_OPTION`)を作る。属性は`LOAD_OPTION_ACTIVE`、名前は「TessronOS」、装置パスはハードドライブの節(GPTの署名、区画の番号、開始、大きさ)とファイルパスの節である。ハードドライブの節から始まる短い装置パスは、ファームウェアが区画のGUIDで探す(UEFIの仕様の3.1.2)。
+2. BootOrderの項目のうち同じ装置パスを持つものがあればその番号、無ければ使われていない最も小さい番号の`Boot####`に書く。
+3. BootOrderに入れる。依頼が先頭を求めるとき(ディスクにWindowsが残らないとき)は先頭に置く。そうでないときは、すでにBootOrderにある項目はその位置のままにし(前の登録や利用者が先頭にした項目を後ろへ下げない)、新しい項目だけを最後に足す(既定はWindowsのまま)。Linuxのブートローダを入れ直したときと同じく、入れ直しで起動の順が変わらないようにするためである。
+4. `BootNext`をその番号にし、記録を書いてから`ResetSystem`で起動し直す。ファームウェアは1回だけ内蔵のディスクのTessronOSを起動する。
+
+ファームウェアが変数を書けなかったときはその旨を記録に書き、そのままmicroSDのTessronOSを起動する。
+
+#### 手順と注意
+
+1. Windowsで、ディスクの管理の「ボリュームの縮小」でCドライブを縮め、未割り当ての領域を作る(共存のとき)。区画を1つ消して使うときは要らない。大きさは、TessronOSのシステムボリューム(USBメモリなら最大8GB)より大きくする。
+2. BitLockerやデバイスの暗号化を使っているときは、回復キーを控えておく。ESPにファイルを足すことや起動の項目を足すことは差し支えないが、Secure Bootを切ると(TessronOSのローダは署名が無いので、microSDから起動するにも切る必要がある)、次のWindowsの起動で回復キーを求められる。
+3. microSD(USBメモリ)から起動する(Surface Go 2は音量の上げるボタンを押したまま電源ボタンでSurface UEFIに入り、起動の設定で選ぶ。ThinkPad X1 Yogaは起動のときにF12で起動のメニュー、3.10.8)。
+4. 小物「システム登録」を開き、写し先のディスクと方法を選んで[開始]を押す。区画を1つ消して使うときは、〈消す区画〉の一覧から区画を選ぶ。区画を消すときとディスク全体を使うときは、消える区画の一覧(番号、種類、大きさ、名前、BitLockerの印)が出るので確かめる。管理者のパスワードを入れると始まる。
+5. 終わったら[再起動]を押し、もう一度microSDから起動する(3と同じ操作)。ローダが起動の項目を登録して、内蔵のディスクのTessronOSで起動し直す。
+6. その後は、ディスク全体を使ったときと、ディスクにWindowsのボリュームが残らないときは、microSDを抜けば内蔵のディスクから起動する。共存のときは、Surface Go 2はSurface UEFIの「Boot configuration」で、ThinkPad X1 YogaはF12の起動のメニューで「TessronOS」を選ぶ。
+
+起動の項目の登録が使えない機械では、ファームウェアの起動のメニューの「ファイルから起動」などで`\EFI\TESSRON\BOOTX64.EFI`を選ぶ。ディスク全体を使ったときは`\EFI\BOOT\BOOTX64.EFI`があるので、ディスクを選ぶだけで起動する。Windowsを消したとき、ファームウェアに残る「Windows Boot Manager」の項目は、その実体が無いので選んでも起動しない。
+
+内蔵のディスクから起動したカーネルは、ローダが渡すESPの固有GUIDでそのディスクを選び、そのディスクのESPを`/boot`に、最初のTessronOSの区画をシステムボリュームにする(`bootdisk.c`)。共存のときは、ESPはWindowsのもの、システムボリュームは足した区画である。microSDを挿したまま内蔵のディスクから起動しても、microSDには書かない。
+
+#### 試験
+
+`tests/ktest/x86_64/ktest_sysinst.c`(群`sysinst`)が、`tools/tests/mkwindisk.py`で作るWindowsの形のディスク(ESP 200MBにWindowsの起動のファイル、MSR 16MB、基本データ 96MB、未割り当て、回復 64MBを最後に。基本データの区画の名前`KTWIN-C`が共存、`KTWIN-E`が全消去、`KTWIN-R`が区画を消して使う写し先)を、`tools/x64/ktest64.sh`の`NVME2`、`NVME3`、`NVME4`で2台目から4台目のNVMeとして挿して確かめる。
+
+- 起動したディスクは候補に出ず、その上の計画は`SI_R_BOOTDISK`になる。
+- 全消去では、元の4区画が消えるものとして計画に並び、書いた後の表はESPとTessronOSの2項目で、主と予備の表がCRCを通り、ESPがFAT32で、TessronOSの区画のスーパーブロックがシステムボリュームのUUIDを持つ。
+- 共存では、元の4項目が同じで、MSR、基本データ、回復の区画の中身のCRCが書く前と同じであり、ESPのWindowsのファイルのCRCも同じで、5つ目の項目「TessronOS」が未割り当ての領域にでき、`\EFI\TESSRON\`のローダとカーネルが`/boot`のものと同じである。写したボリュームはシステムボリュームと同じUUIDで、区画の大きさに広がり、ディスク修復の検査(通常)で障害が無い。`/boot`に依頼のファイルがある。
+- 区画を消して使うときは、ESP、MSR、回復の区画が選べず(計画は`SI_R_KEEP`)、基本データの区画を選んだ計画は後ろの未割り当ての領域の終わりまでになる。書いた後の表は元と同じ4項目で、3つ目が同じ位置と番号のままTessronOSの型と名前、新しい固有GUIDになり、未割り当ての領域の終わりまで広がる。ほかの項目と、MSRと回復の区画の中身のCRC、ESPのWindowsのファイルのCRCは書く前と同じで、写したボリュームはディスク修復の検査で障害が無い。
+- 登録したディスクから起動したとき(ESPに`INSTALL.TXT`がある)は、`/boot`とシステムボリュームがそのディスクにあり、ボリュームが区画の大きさになっていることだけを確かめる。
+
+ホストでは`mkwindisk.py check`(共存の後のイメージ。元の区画のSHA-256、Windowsのファイル、新しい区画とTSFSの印、`\EFI\TESSRON\`)、`mkwindisk.py check-replace`(区画を消した後のイメージ)と`mkwindisk.py check-erase`で、カーネルとは別の読み手が確かめる。`ktest64.sh`の`VARS`にOVMFの変数のファイル(`edk2-i386-vars.fd`の写し)を与えると、起動の項目が次の起動に残るので、登録の依頼のあるイメージで起動し(ローダが項目を書いて起動し直し、`-no-reboot`でQEMUが終わる)、もう一度起動すると`BootNext`で共存のディスクから起動する。全消去のディスクは、そのイメージだけを挿して起動できる。
+
+手順は次のとおりである。
+
+```sh
+make TARGET=_X64_ KTEST=1 KTONLY=sysinst BUILD_ID=<名前> sdimg
+python tools/tests/mkwindisk.py make <dir>/winc.img C --free-mb 1200
+python tools/tests/mkwindisk.py make <dir>/wine.img E --free-mb 1200
+python tools/tests/mkwindisk.py make <dir>/winr.img R --free-mb 1200
+cp "C:/Program Files/qemu/share/edk2-i386-vars.fd" <dir>/vars.fd
+NVME2=<dir>/winc.img NVME3=<dir>/wine.img VARS=<dir>/vars.fd \
+  bash tools/x64/ktest64.sh build_make/obj/_X64__ktest<名前>/sd.img 900 <dir>/a.log
+python tools/tests/mkwindisk.py check <dir>/winc.img
+python tools/tests/mkwindisk.py check-erase <dir>/wine.img
+NVME2=<dir>/winc.img VARS=<dir>/vars.fd bash tools/x64/ktest64.sh build_make/obj/_X64__ktest<名前>/sd.img 300 <dir>/b.log
+NVME2=<dir>/winc.img VARS=<dir>/vars.fd bash tools/x64/ktest64.sh build_make/obj/_X64__ktest<名前>/sd.img 600 <dir>/c.log
+bash tools/x64/ktest64.sh <dir>/wine.img 600 <dir>/d.log
+```
+
+`--free-mb`は試験のイメージのシステムボリュームより大きくする。
+
+#### まだ無いもの
+
+- TessronOSの区画の大きさを選ぶこと。共存では未割り当ての領域の全体を使う。
+- 論理セクタが4096バイトのディスク(GPTの書き方が512バイトのセクタだけを扱う)。
+- 登録したTessronOSを内蔵のディスクから取り除くこと。
+- 内蔵のディスクのTSLOGの区画(Windowsから記録を取り出すには、Windowsで`\EFI\TESSRON\`を見る)。
+- Secure Bootでの起動(ローダに署名が無い)。
+
+

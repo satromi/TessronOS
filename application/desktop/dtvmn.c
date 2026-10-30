@@ -47,8 +47,6 @@
 #include <ts/tray.h>
 #include "desktop.h"
 
-#define VM_ACC_MAX	24		/* accessories shown in 小物 */
-#define VM_APP_MAX	8		/* programs shown in 実行 */
 
 LOCAL void attributes( DTWIN *d, CONST T_VOBJ *start );
 LOCAL void relationship( DTWIN *d, CONST T_VOBJ *start );
@@ -90,18 +88,61 @@ LOCAL TS_UUID sys_def( CONST char *id )
 	return u;
 }
 
-/* The accessories 小物 shows, in the order the menu lists them */
-LOCAL INT menu_accessories( CONST DTPROG **acc, INT max )
+/*
+ * The accessories 小物 shows, in the order the menu lists them: every
+ * one, in a list of its own (free it). How many; 0 with none or no memory.
+ */
+LOCAL INT menu_accessories( CONST DTPROG ***p_acc )
 {
-	CONST DTPROG	*all[VM_ACC_MAX];
-	INT		n = dt_prog_list(DT_PK_ACCESSORY, all, VM_ACC_MAX), i, k = 0;
+	INT		n = dt_prog_count(DT_PK_ACCESSORY), i, k = 0;
+	CONST DTPROG	**all = (CONST DTPROG **)Kmalloc(sizeof(DTPROG *) * (SZ)( n + 1 ));
 
-	for ( i = 0; i < n && k < max; i++ ) {
+	*p_acc = all;
+	if ( all == NULL ) {
+		return 0;
+	}
+	n = dt_prog_list(DT_PK_ACCESSORY, all, n);
+	for ( i = 0; i < n; i++ ) {
 		if ( all[i]->menu ) {
-			acc[k++] = all[i];
+			all[k++] = all[i];
 		}
 	}
 	return k;
+}
+
+/* The accessory at place i of 小物, NULL none */
+LOCAL CONST DTPROG *menu_accessory( INT i )
+{
+	CONST DTPROG	**acc, *p = NULL;
+	INT		n = menu_accessories(&acc);
+
+	if ( i >= 0 && i < n ) {
+		p = acc[i];
+	}
+	if ( acc != NULL ) Kfree(acc);
+	return p;
+}
+
+/* 小物's list: a line for each accessory */
+LOCAL void acc_fill( ID mid )
+{
+	TS_UUID		ad = sys_def(SYSDEF_MENU_ACC);
+	CONST DTPROG	**acc;
+	UB		(*names)[WM_LABEL_MAX];
+	INT		n = menu_accessories(&acc), i, k;
+
+	names = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * (SZ)( n + 1 ));
+	if ( names != NULL ) {
+		for ( i = 0; i < n; i++ ) {
+			for ( k = 0; acc[i]->name[k] != 0 && k < WM_LABEL_MAX - 1; k++ ) {
+				names[i][k] = acc[i]->name[k];
+			}
+			names[i][k] = 0;
+		}
+		(void)mn_set_lst(mid, &ad, "acc.item", (CONST UB *)names, WM_LABEL_MAX, n);
+		Kfree(names);
+	}
+	if ( acc != NULL ) Kfree(acc);
 }
 
 /* ---------------------------------------------------------------- the state */
@@ -151,29 +192,16 @@ LOCAL void tray_state( ID mid )
 EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 {
 	TS_UUID		obj = sys_def(SYSDEF_MENU_OBJECT), vd = sys_def(SYSDEF_MENU_VOBJ);
-	TS_UUID		rd = sys_def(SYSDEF_MENU_REAL), ad = sys_def(SYSDEF_MENU_ACC);
+	TS_UUID		rd = sys_def(SYSDEF_MENU_REAL);
 	TS_UUID		ed = sys_def(SYSDEF_MENU_EXEC);
-	CONST DTPROG	*acc[VM_ACC_MAX];
-	UB		(*names)[WM_LABEL_MAX];
 	UB		(*apps)[OM_APP_NAME];
 	BOOL		open, cut, locked, sealed = d->sealed;
-	INT		n, i, k;
+	INT		n, i;
 
 	tray_state(mid);
 
 	/* 小物: the accessories that show in the menu */
-	names = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * VM_ACC_MAX);
-	if ( names != NULL ) {
-		n = menu_accessories(acc, VM_ACC_MAX);
-		for ( i = 0; i < n; i++ ) {
-			for ( k = 0; acc[i]->name[k] != 0 && k < WM_LABEL_MAX - 1; k++ ) {
-				names[i][k] = acc[i]->name[k];
-			}
-			names[i][k] = 0;
-		}
-		(void)mn_set_lst(mid, &ad, "acc.item", (CONST UB *)names, WM_LABEL_MAX, n);
-		Kfree(names);
-	}
+	acc_fill(mid);
 
 	/* ウインドウ: the windows open, nearest first */
 	mn_winlist_fill(mid);
@@ -209,30 +237,32 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 	atr(mid, &rd, "real.duplicate", (BOOL)( cut || sealed ));
 	atr(mid, &rd, "real.newversion", (BOOL)( cut || sealed ));
 	(void)mn_chg_atr(mid, &rd, "real.lock",
-			 locked ? MN_HIDE : ( cut || sealed ) ? MN_GREY : 0);
+			 locked ? MN_HIDE : ( cut || sealed || !dt_app_lockable(v) ) ? MN_GREY : 0);
 	(void)mn_chg_atr(mid, &rd, "real.unlock",
 			 !locked ? MN_HIDE : ( cut || sealed ) ? MN_GREY : 0);
 
 	/*
-	 * 実行: the programs the real object's applist names, then those
-	 * that open an object of its kind (fileTypes) -- スライド and
-	 * 基本動画再生 for any record of xmlTAD
+	 * 実行: the list 付箋指定 of 管理情報 shows too (dt_app_list) -- the
+	 * programs the real object's applist names, then those that open an
+	 * object of its kind (fileTypes), スライド and MPEG Player for any
+	 * record of xmlTAD
 	 */
-	apps = (UB (*)[OM_APP_NAME])Kmalloc(sizeof(UB) * OM_APP_NAME * VM_APP_MAX * 2);
-	if ( apps != NULL ) {
-		CONST DTPROG	*by[VM_APP_MAX];
-		INT		m, q;
+	{
+		INT	room = dt_app_list(v, NULL, 0, NULL), q;
+		DTAPP	*a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
 
-		n = om_link_apps(v, apps, VM_APP_MAX);
-		if ( n < 0 ) n = 0;
-		m = dt_prog_by_type(v, by, VM_APP_MAX);
-		for ( i = 0; i < m; i++ ) {
-			for ( q = 0; by[i]->name[q] != 0 && q < OM_APP_NAME - 1; q++ ) apps[n + i][q] = by[i]->name[q];
-			apps[n + i][q] = 0;
+		apps = (UB (*)[OM_APP_NAME])Kmalloc(sizeof(UB) * OM_APP_NAME * (SZ)( room + 1 ));
+		if ( apps != NULL && a != NULL ) {
+			n = dt_app_list(v, a, room, NULL);
+			for ( i = 0; i < n; i++ ) {
+				for ( q = 0; a[i].name[q] != 0 && q < OM_APP_NAME - 1; q++ ) apps[i][q] = a[i].name[q];
+				apps[i][q] = 0;
+			}
+			(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)apps, OM_APP_NAME, n);
+			atr(mid, &ed, "exec.app", cut);
 		}
-		(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)apps, OM_APP_NAME, n + m);
-		atr(mid, &ed, "exec.app", cut);
-		Kfree(apps);
+		if ( apps != NULL ) Kfree(apps);
+		if ( a != NULL ) Kfree(a);
 	}
 }
 
@@ -251,23 +281,9 @@ LOCAL volatile INT	dt_tail_req = 0;	/* -1 the box, n + 1 the n-th accessory */
 
 EXPORT void dt_tail_fill( ID mid )
 {
-	TS_UUID		ad = sys_def(SYSDEF_MENU_ACC), td = sys_def(SYSDEF_MENU_TAIL);
-	CONST DTPROG	*acc[VM_ACC_MAX];
-	UB		(*names)[WM_LABEL_MAX];
-	INT		n, i, k;
+	TS_UUID		td = sys_def(SYSDEF_MENU_TAIL);
 
-	names = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * VM_ACC_MAX);
-	if ( names != NULL ) {
-		n = menu_accessories(acc, VM_ACC_MAX);
-		for ( i = 0; i < n; i++ ) {
-			for ( k = 0; acc[i]->name[k] != 0 && k < WM_LABEL_MAX - 1; k++ ) {
-				names[i][k] = acc[i]->name[k];
-			}
-			names[i][k] = 0;
-		}
-		(void)mn_set_lst(mid, &ad, "acc.item", (CONST UB *)names, WM_LABEL_MAX, n);
-		Kfree(names);
-	}
+	acc_fill(mid);
 	atr(mid, &td, "exec", TRUE);
 }
 
@@ -290,7 +306,7 @@ EXPORT BOOL dt_tail_do( CONST T_MNSEL *sel )
 /* An accessory chosen in a program's menu, started */
 EXPORT void dt_tail_poll( void )
 {
-	CONST DTPROG	*acc[VM_ACC_MAX];
+	CONST DTPROG	*a;
 	INT		r = dt_tail_req;
 
 	if ( r == 0 ) {
@@ -299,8 +315,8 @@ EXPORT void dt_tail_poll( void )
 	dt_tail_req = 0;
 	if ( r < 0 ) {
 		(void)dt_prog_run(NULL, dt_prog_find((CONST UB *)"accessory-box"), NULL);
-	} else if ( r - 1 < menu_accessories(acc, VM_ACC_MAX) ) {
-		(void)dt_prog_run(NULL, acc[r - 1], NULL);
+	} else if ( ( a = menu_accessory(r - 1) ) != NULL ) {
+		(void)dt_prog_run(NULL, a, NULL);
 	}
 }
 
@@ -346,7 +362,7 @@ LOCAL CONST VMOP vm_ops[] = {
 
 EXPORT BOOL dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ *v )
 {
-	CONST DTPROG	*acc[VM_ACC_MAX];
+	CONST DTPROG	*a;
 	INT		i;
 
 	if ( sel == NULL || !is_sys(&sel->def) ) {
@@ -370,8 +386,8 @@ EXPORT BOOL dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 		(void)dt_prog_run(d, dt_prog_find((CONST UB *)"accessory-box"), NULL);
 	} else if ( mn_is(sel, "acc.item") ) {
 		/* chosen on a virtual object, the accessory is started on its object */
-		if ( sel->index < menu_accessories(acc, VM_ACC_MAX) ) {
-			(void)dt_prog_run(d, acc[sel->index], on_vobj ? v : NULL);
+		if ( ( a = menu_accessory(sel->index) ) != NULL ) {
+			(void)dt_prog_run(d, a, on_vobj ? v : NULL);
 		}
 	} else if ( mn_is(sel, "disk.connect") ) {
 		dt_disk_connect(d, on_vobj ? v : NULL);
@@ -424,6 +440,24 @@ EXPORT BOOL dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 #define AT_HIDDEN	12
 #define AT_SIZE		13
 #define AT_RATIO	20		/* and the six after it */
+
+/*
+ * A link's height h once its letters or what its band shows have
+ * changed from 'was' to 'now'.
+ */
+LOCAL INT refit_h( CONST T_VOBJ *was, CONST T_VOBJ *now, INT h )
+{
+	INT	c = tad_lnk_closed_h(now);
+
+	if ( c <= 0 ) {
+		return h;			/* no band: a plain box keeps its size */
+	}
+	if ( h <= tad_lnk_closed_h(was) + TAD_OPEN_SLACK ) {
+		return c;			/* closed before, closed now */
+	}
+
+	return tad_lnk_fit_h(now, h);
+}
 
 /* The panel of 属性変更: TRUE with what was chosen in *io when it was agreed to */
 LOCAL BOOL attr_ask( DTWIN *d, T_VOBJ *io )
@@ -554,14 +588,24 @@ LOCAL BOOL attr_ask( DTWIN *d, T_VOBJ *io )
 			size = 14 * tenths[r] / 10;
 		}
 		if ( size > 0 && size != chsz ) {
-			/* the band grows with the letters */
-			INT	band = size + 11;
-
 			v.chsz = size;
-			if ( v.bottom - v.top < band ) {
-				v.bottom = v.top + band;
+		}
+		if ( v.chsz != io->chsz || v.disp != io->disp ) {
+			/*
+			 * The closed height follows the letters and what the
+			 * band shows: one that was closed stays closed at the
+			 * new height, and an opened one is never lower than
+			 * that or so little above it that it would read as
+			 * closed. A link in a text with no box of its own is
+			 * laid out at no less than that already.
+			 */
+			if ( v.right > v.left ) {
+				v.bottom = v.top + refit_h(io, &v, v.bottom - v.top);
+				v.height = v.bottom - v.top;
 			}
-			v.height = v.bottom - v.top;
+			if ( v.heightpx > 0 ) {
+				v.heightpx = refit_h(io, &v, v.heightpx);
+			}
 		}
 		dt_pn_done(d, pid);
 		*io = v;
@@ -777,37 +821,6 @@ LOCAL void new_version( DTWIN *d, CONST T_VOBJ *v )
 	place_copy(d, v, &c);
 }
 
-/*
- * 起動アプリの固定: the link's applist says of the program it opens
- * with -- the entry whose "defaultOpen" is true -- whether that stays
- * so when the object is opened with another ("defaultOpenLock"). The
- * applist is kept as the JSON it was written in, and only that one
- * value of it is changed.
- */
-
-/* The applist's entry of the program the object opens with ("defaultOpen": true) */
-LOCAL BOOL app_entry( CONST UB *s, T_JSON *entry )
-{
-	T_JSON	root, it;
-	INT	n = 0;
-
-	while ( s[n] != 0 ) {
-		n++;
-	}
-	if ( js_parse(s, n, &root) < E_OK || js_type(&root) != JS_OBJECT ) {
-		return FALSE;
-	}
-	it.s = NULL;
-	it.len = 0;
-	while ( js_next(&root, &it) ) {
-		if ( js_type(&it) == JS_OBJECT && js_get_bool(&it, "defaultOpen", FALSE) ) {
-			*entry = it;
-			return TRUE;
-		}
-	}
-	return FALSE;
-}
-
 /* Whether the object a link points at can be reached: a cut link's cannot */
 EXPORT BOOL dt_reachable( CONST T_VOBJ *v )
 {
@@ -834,70 +847,72 @@ LOCAL void reconnect( DTWIN *d, CONST T_VOBJ *v )
 	dt_draw_all();
 }
 
+/*
+ * 起動アプリの固定 (design 11.3): whether the link keeps to the program
+ * it opens with ("defaultOpenLock" on the default entry of its own
+ * applist), or opens with the one run last on its object. Fixing it
+ * gives the link the applist its object has now, so that it keeps to
+ * the program the object opens with at that moment (om_link_lock).
+ */
 EXPORT BOOL dt_app_locked( CONST T_VOBJ *v )
 {
-	T_JSON	e;
-
-	return (BOOL)( v != NULL && app_entry(v->applist, &e)
-		       && js_get_bool(&e, "defaultOpenLock", FALSE) );
+	return om_link_locked(v);
 }
 
-/* Whether the link names the program it opens with, which is what can be fixed */
+/* Whether there is a program the link opens with, which is what can be fixed */
 EXPORT BOOL dt_app_lockable( CONST T_VOBJ *v )
 {
-	T_JSON	e;
+	UB	app[OM_APP_ID];
 
-	return (BOOL)( v != NULL && app_entry(v->applist, &e) );
+	return (BOOL)( v != NULL && om_link_default_app(v, app, sizeof(app)) > 0 );
+}
+
+EXPORT void dt_keep_app( DTWIN *d, CONST T_VOBJ *v, BOOL keep )
+{
+	T_VOBJ	*c;
+
+	if ( d == NULL || v == NULL || d->sealed ) {
+		return;
+	}
+	c = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	if ( c == NULL ) {
+		return;
+	}
+	*c = *v;
+	if ( om_link_lock(c, keep) >= E_OK ) {
+		ed_set_link(d, c);
+	} else {
+		dt_tell(d, "起動アプリを持たない実身です", NULL);
+	}
+	Kfree(c);
 }
 
 EXPORT void dt_lock_app( DTWIN *d, CONST T_VOBJ *v )
 {
-	T_VOBJ		c = *v;
-	UB		*s = c.applist, ins[40];
-	CONST char	*val = dt_app_locked(v) ? "false" : "true";
-	T_JSON		e, lock;
-	INT		at, cut = 0, n = 0, len = 0, i;
-
-	if ( d->sealed || !app_entry(s, &e) ) {
-		return;
-	}
-	while ( s[len] != 0 ) {
-		len++;
-	}
-	if ( js_get(&e, "defaultOpenLock", &lock) >= E_OK ) {
-		at = (INT)( lock.s - s );
-		cut = lock.len;
-	} else {
-		CONST char	*key = ",\"defaultOpenLock\":";
-
-		/* before the entry's closing brace */
-		at = (INT)( e.s - s ) + e.len - 1;
-		for ( i = 0; key[i] != 0; i++ ) {
-			ins[n++] = (UB)key[i];
-		}
-	}
-	for ( i = 0; val[i] != 0; i++ ) {
-		ins[n++] = (UB)val[i];
-	}
-	if ( len - cut + n >= TAD_APPL_MAX ) {
-		return;
-	}
-	if ( n > cut ) {
-		for ( i = len; i >= at + cut; i-- ) {
-			s[i + n - cut] = s[i];
-		}
-	} else {
-		for ( i = at + cut; i <= len; i++ ) {
-			s[i + n - cut] = s[i];
-		}
-	}
-	for ( i = 0; i < n; i++ ) {
-		s[at + i] = ins[i];
-	}
-	ed_set_link(d, &c);
+	dt_keep_app(d, v, (BOOL)!dt_app_locked(v));
 }
 
 /* ---------------------------------------------------------------- a program's links */
+
+/*
+ * The applist a program carried of its link (DT_F_APPLIST), given to the
+ * link the desktop makes of the request: the program it opens with is
+ * then decided as for a link of the desktop's own (om_link_default_app),
+ * the one it keeps to when it is fixed (起動アプリの固定).
+ */
+EXPORT void dt_req_applist( CONST T_DTREQ *rq, T_VOBJ *v )
+{
+	INT	i;
+
+	v->applist[0] = 0;
+	if ( ( rq->flags & DT_F_APPLIST ) == 0 ) {
+		return;
+	}
+	for ( i = 0; rq->text[i] != 0 && i < TAD_APPL_MAX - 1 && i < DT_CARRY_TEXT - 1; i++ ) {
+		v->applist[i] = rq->text[i];
+	}
+	v->applist[i] = 0;
+}
 
 /* A link as a program says it looks, at the corner of a box of its size */
 LOCAL void link_of_req( CONST T_DTREQ *rq, T_VOBJ *v )
@@ -919,6 +934,7 @@ LOCAL void link_of_req( CONST T_DTREQ *rq, T_VOBJ *v )
 	v->autoopen = (BOOL)( rq->look.autoopen != 0 );
 	v->hidden = (BOOL)( ( rq->flags & DT_F_HIDDEN ) != 0 );
 	v->zoom = 100;
+	dt_req_applist(rq, v);
 	for ( i = 0; rq->name[i] != 0 && i < TAD_REL_MAX - 1 && i < (INT)sizeof(rq->name) - 1; i++ ) {
 		v->relationship[i] = rq->name[i];
 	}
@@ -933,6 +949,47 @@ LOCAL void text_out( UB *out, CONST UB *s )
 		out[i] = s[i];
 	}
 	out[i] = 0;
+}
+
+/*
+ * DT_RQ_APPS: the entry at rq->recno of the list 実行 shows for a
+ * program's link (dt_app_list), the id the applist writes for one it
+ * names (so that DT_RQ_EXEC finds it there), a tab and the name
+ */
+EXPORT ER dt_apps_req( CONST T_DTREQ *rq, T_DTANS *an )
+{
+	T_VOBJ	*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	DTAPP	*a = NULL;
+	INT	room, n = 0, k = 0, i;
+	ER	er = E_NOEXS;
+
+	if ( v == NULL ) {
+		return E_NOMEM;
+	}
+	link_of_req(rq, v);
+	room = dt_app_list(v, NULL, 0, NULL);
+	a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
+	if ( a == NULL ) {
+		Kfree(v);
+		return E_NOMEM;
+	}
+	n = dt_app_list(v, a, room, NULL);
+	an->how = (UINT)n;
+	an->flags = 0;
+	if ( rq->recno >= 0 && rq->recno < n ) {
+		CONST DTAPP	*e = &a[rq->recno];
+		CONST UB	*id = ( e->listed && e->raw[0] != 0 ) ? e->raw : e->id;
+
+		for ( i = 0; id[i] != 0 && k < DT_TEXT_MAX - 2; i++ ) an->text[k++] = id[i];
+		an->text[k++] = '\t';
+		for ( i = 0; e->name[i] != 0 && k < DT_TEXT_MAX - 1; i++ ) an->text[k++] = e->name[i];
+		an->text[k] = 0;
+		if ( !e->listed ) an->flags = DT_F_KIND;
+		er = E_OK;
+	}
+	Kfree(a);
+	Kfree(v);
+	return er;
 }
 
 EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
@@ -1012,7 +1069,11 @@ EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
 			er = E_PAR;
 			break;
 		}
-		if ( ( rq->flags & DT_F_KEEP ) == 0 ) {
+		if ( ( rq->flags & DT_F_KIND ) != 0 ) {
+			/* one offered for the object's kind: the program it opens with stays */
+		} else if ( ( rq->flags & DT_F_APPLIST ) != 0 ) {
+			(void)om_link_ran(v, name);	/* the link's applist says whether it keeps to its program */
+		} else if ( ( rq->flags & DT_F_KEEP ) == 0 ) {
 			(void)om_store_set_default_app(&v->target, name);
 		}
 		v->frcol = v->chcol = v->tbcol = v->bgcol = TAD_COL_NONE;

@@ -13,7 +13,8 @@
  *	purpose -- a processor with its interrupts masked, one whose timer
  *	is made to look stopped, a spin lock and the kernel lock held too
  *	long, two tasks waiting for each other's mutexes, the watchdog's
- *	kicks and the watched loop stopping -- each found and told. The
+ *	kicks and the watched loop stopping, also on a mutex another task
+ *	holds (told with what the holder is doing) -- each found and told. The
  *	times are shortened to a second for the run and put back after.
  *	What is told goes to the console as !LOCKUP! lines.
  */
@@ -21,6 +22,9 @@
 #include "ktest.h"
 #include "kernel.h"
 #include <ts/lockup.h>
+#if defined(X64)
+#include "../../kernel/sysdepend/cpu/core/x86_64/cpu_ufault.h"
+#endif
 
 #define STOP_MS		1000		/* what counts as stopped, for the run */
 
@@ -32,8 +36,13 @@ LOCAL UD now_ms( void )
 {
 	UD	c, f;
 
+#if defined(__x86_64__)
+	c = ReadSysCounterSync();
+	f = SysCounterFreq();
+#else
 	Asm("isb; mrs %0, cntpct_el0" : "=r"(c) :: "memory");
 	Asm("mrs %0, cntfrq_el0" : "=r"(f));
+#endif
 	return c * 1000 / f;
 }
 
@@ -56,8 +65,7 @@ LOCAL ID cre_on( FP task, ID prc, PRI pri )
 	ctsk.task    = task;
 	ctsk.itskpri = pri;
 	ctsk.stksz   = 16 * 1024;
-	ctsk.assprc  = 1U << ( prc - 1 );
-	return tk_cre_tsk(&ctsk);
+	return kt_cre_on(&ctsk, prc);
 }
 
 LOCAL void wait_done( INT ms )
@@ -72,16 +80,30 @@ LOCAL void wait_done( INT ms )
 /* every processor's timer comes */
 LOCAL void test_beats( void )
 {
-	T_LKSTAT	a, b;
-	INT		i;
+	T_LKSTAT	b;
+	UD		*ba, *bb;
+	INT		i, n;
 
-	knl_lockup_stat(&a);
-	tk_dly_tsk(1300);
-	knl_lockup_stat(&b);
-	for ( i = 0; i < knl_num_prc && i < 8; i++ ) {
-		tm_printf((UB *)"  CPU%d: %d interrupts of its timer in 1.3 s\n", i, (INT)( b.beats[i] - a.beats[i] ));
-		KT_ASSERT(b.beats[i] - a.beats[i] >= 2);
+	ba = (UD *)Kmalloc(sizeof(UD) * (SZ)knl_num_prc);
+	bb = (UD *)Kmalloc(sizeof(UD) * (SZ)knl_num_prc);
+	KT_ASSERT(ba != NULL && bb != NULL);
+	if ( ba == NULL || bb == NULL ) {
+		if ( ba != NULL ) Kfree(ba);
+		if ( bb != NULL ) Kfree(bb);
+		return;
 	}
+	KT_ASSERT_EQ(knl_lockup_beats(ba, knl_num_prc), knl_num_prc);
+	tk_dly_tsk(1300);
+	n = knl_lockup_beats(bb, knl_num_prc);
+	knl_lockup_stat(&b);
+	for ( i = 0; i < n; i++ ) {
+		if ( i < 16 || i == n - 1 ) {
+			tm_printf((UB *)"  CPU%d: %d interrupts of its timer in 1.3 s\n", i, (INT)( bb[i] - ba[i] ));
+		}
+		KT_ASSERT(bb[i] - ba[i] >= 2);
+	}
+	Kfree(ba);
+	Kfree(bb);
 	tm_printf((UB *)"  hardware watchdog: %s\n", b.hw ? "running" : "none");
 }
 
@@ -281,6 +303,63 @@ LOCAL void test_silent( void )
 	KT_ASSERT(!b.failing);			/* the machine is not reset for it */
 }
 
+/* the watched loop waits for a mutex another task holds: told, with what the holder is doing */
+LOCAL void mtx_waiter( INT stacd, void *exinf )
+{
+	knl_wdog_watch(tk_get_tid());
+	(void)tk_loc_mtx(lk_m1, TMO_FEVR);
+	knl_wdog_watch(0);
+	tk_unl_mtx(lk_m1);
+	lk_done = TRUE;
+	tk_ext_tsk();
+}
+
+LOCAL void test_silent_mutex( void )
+{
+	T_LKSTAT	a, b;
+	T_CMTX		cm;
+	ID		t;
+
+	knl_memset(&cm, 0, sizeof(cm));
+	cm.mtxatr = TA_TFIFO;
+	lk_m1 = tk_cre_mtx(&cm);
+	KT_ASSERT(lk_m1 > 0);
+	KT_ASSERT_ER(tk_loc_mtx(lk_m1, TMO_FEVR), E_OK);
+	knl_lockup_stat(&a);
+	lk_done = FALSE;
+	t = kt_cre_tsk((FP)mtx_waiter, KT_PRI_HIGH, NULL);
+	KT_ASSERT(t > 0);
+	KT_ASSERT_ER(tk_sta_tsk(t, 0), E_OK);
+	tk_dly_tsk(STOP_MS * 2);
+	knl_lockup_stat(&b);
+	KT_ASSERT(b.silent > a.silent);
+	KT_ASSERT_ER(tk_unl_mtx(lk_m1), E_OK);
+	wait_done(2000);
+	KT_ASSERT(lk_done);
+	KT_ASSERT_ER(tk_del_tsk(t), E_OK);
+	KT_ASSERT_ER(tk_del_mtx(lk_m1), E_OK);
+}
+
+IMPORT TCB	knl_tcb_table[];
+
+/* What a task waits for and where, as the lockup report says it: for another suite that finds one stuck */
+EXPORT void kt_say_task( CONST char *pre, ID tid )
+{
+	TCB	*t;
+
+	if ( tid <= 0 || tid > CNF_MAX_TSKID ) return;
+	t = &knl_tcb_table[tid - 1];
+	knl_lockup_say_task(pre, t);
+#ifdef FR_RBP
+	if ( t->runprc == 0 && t->tskctxb.ssp != NULL ) {
+		UD	*f = (UD *)t->tskctxb.ssp;
+
+		tm_printf((UB *)"%s  at %lx\n", pre, f[FR_RIP]);
+		knl_lockup_say_frames(pre, (UBINT)f[FR_RBP]);
+	}
+#endif
+}
+
 EXPORT void ktest_lockup( void )
 {
 	knl_lockup_tune(STOP_MS, STOP_MS, STOP_MS);
@@ -292,5 +371,6 @@ EXPORT void ktest_lockup( void )
 	KT_RUN(test_circle);
 	KT_RUN(test_kicks);
 	KT_RUN(test_silent);
+	KT_RUN(test_silent_mutex);
 	knl_lockup_tune(0, 0, 0);
 }

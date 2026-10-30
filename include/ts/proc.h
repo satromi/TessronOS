@@ -215,6 +215,8 @@ IMPORT INT knl_prc_list( ID *pids, INT n );
 #define TS_FLT_KPAN		3	/* the kernel, at a page of the program's it had not made sure of (PAN) */
 
 #define TS_FLT_FILE		32	/* bytes of the file name kept */
+#define TS_FLT_CODE		32	/* bytes of the program's code kept, from elr - TS_FLT_CODE_BACK */
+#define TS_FLT_CODE_BACK	16
 
 typedef struct {
 	UW	seq;			/* counted from 1, in the order they happened */
@@ -228,6 +230,14 @@ typedef struct {
 	UD	far;			/* the address it met (FAR_EL1) */
 	UD	elr;			/* where it was (ELR_EL1): the program's PC, or the kernel's */
 	UD	lr;			/* x30 at that moment */
+	/*
+	 * TS_FLT_EL0: the code around elr as the program's pages hold it
+	 * when the process ends, read through its own mapping, to be set
+	 * beside the instruction the processor took the exception at
+	 */
+	UB	code[TS_FLT_CODE];	/* from elr - TS_FLT_CODE_BACK */
+	UW	codeok;			/* bit i: code[i * 4] to code[i * 4 + 3] were read */
+	UD	codepa;			/* the physical address elr maps to, ~0 when none */
 } T_PRCFLT;
 
 /*

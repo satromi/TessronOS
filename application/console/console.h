@@ -45,6 +45,7 @@ IMPORT void con_fold( UB *s );
 
 IMPORT void box_init( void );
 IMPORT void box_where( UB *buf, INT max );	/* the path of the place from "/" */
+IMPORT void box_here_uuid( TS_UUID *p_u );	/* the object of the place */
 IMPORT CONST UB *box_here_name( void );	/* the name of the box it is in */
 IMPORT void cmd_pwd( void );
 IMPORT void cmd_ls( INT argc, UB **argv );
@@ -97,11 +98,12 @@ IMPORT void job_pty_close( void );
 /* Letters the line takes: console.c */
 IMPORT void con_insert( CONST UB *s, INT n );
 
-IMPORT BOOL ime_key( UINT key, UINT mods );	/* TRUE when the key was the converter's */
+IMPORT void job_port( ID port );		/* where the program's end and its output are told (con_job.c) */
+IMPORT BOOL ime_key( UINT key, UINT mods, UINT mode );	/* TRUE when the key was the converter's */
 IMPORT BOOL ime_busy( void );
 IMPORT void ime_commit( void );
-IMPORT BOOL ime_tick( void );			/* TRUE when a composition left in 英語 was committed */
-IMPORT BOOL ime_press( INT x, INT y );		/* TRUE when it was on the candidates */
+IMPORT void ime_press( void );			/* a press in the window: what is composed committed */
+IMPORT void ime_pick( INT row );		/* a press on the system's list of candidates (OB_WR_CAND) */
 IMPORT void ime_draw( LTWIN *w, INT x, INT y );	/* the composition with its top left at x, y */
 IMPORT void ime_end( void );
 

@@ -3,8 +3,9 @@
 # area at 166,228; a key of the Japanese keyboard's row r whose left edge is q
 # quarter-keys from the corner at 174+10q, 295+40r), letters typed into the text
 # on the picture with the text keeping the keys, the menu of the second button shown
-# and each of its choices made, a key given another and kept, every key given back,
-# and closed. The menu opens with the item last chosen under the pointer, so its rows
+# and each of its choices made, a key given another and kept and given back with
+# the panel under the keyboard, the pop-ups and the switch of the panel along the
+# top worked, and closed. The menu opens with the item last chosen under the pointer, so its rows
 # move as the steps go: 閉じる, then 20 lower after the line 英字配列, かな配列,
 # キーボードの形, 表示, then 20 lower after the line 付け替え, 付け替えをやめる,
 # 付け替えをすべて元に戻す; a submenu opens to the right with its first item level
@@ -122,41 +123,44 @@ shot km_again
 click 466 278 1
 wait 600
 shot km_menu_again
-# 付け替えをすべて元に戻す (閉じる under the pointer in the new process's menu)
-move 470 459
+move 470 279
 wait 150
-click 470 459
-expect keymap: map reset
+key 29
+wait 300
+# the panel under the keyboard: the key given another chosen in its list, given back with 〈元に戻す〉
+click 300 539
+wait 300
+click 716 539
+expect keymap: map 39 back
 wait 300
 shot km_reset
-# 付け替え, then 付け替えをやめる
-click 466 278 1
-wait 600
-move 470 239
-wait 150
-click 470 239
-wait 300
-click 466 278 1
-wait 600
-move 470 299
-wait 150
-click 470 299
+# the switch 付け替え on the panel along the top: on, then off
+click 388 279
+expect keymap: pick on
+click 388 279
 expect keymap: pick off
-# the buttons: the latin layout back to the keys as written, the kana to 親指シフト and JIS かな
-click 259 248
+# the pop-ups, each list opening with what is chosen under the pointer: the latin
+# layout back to the keys as written, the kana to 親指シフト and back to JIS かな
+click 300 247
+wait 600
+click 300 226
 expect keymap: latin 0
-click 425 248
+click 540 247
+wait 600
+click 540 268
 expect keymap: kana 2
-click 425 248
+click 540 247
+wait 600
+click 540 205
 expect keymap: kana 0
 wait 300
 shot km_buttons
-# 閉じる (付け替えをやめる under the pointer)
+# 閉じる, under the pointer as the menu opens
 click 466 278 1
 wait 600
-move 470 119
+move 470 279
 wait 150
-click 470 119
+click 470 279
 wait 800
 shot km_closed
 # nothing it did was refused for want of a right

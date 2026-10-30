@@ -13,17 +13,31 @@
  *
  *	What the machine is and how it is set:
  *	  〈機器〉〈機器情報〉 the devices; [表示] opens the page of the one
- *			      chosen -- the screen's size, the network card,
- *			      the USB devices, the disks, the video, the
+ *			      chosen -- the screen's size (one of the sizes
+ *			      it offers, or a width and height typed in, and
+ *			      on a PC's panel how a size of another shape is
+ *			      laid on it; set at once and asked about, kept
+ *			      or put back by the desktop), the network card,
+ *			      with the adapters and the one to use (自動 or
+ *			      one of them, kept as NET_ADAPTER), the USB
+ *			      devices, the disks, the video, the
  *			      keyboard, the sound: where it goes (chosen at
  *			      once and kept), what plays, its volume, and
- *			      〈試聴〉
- *	  〈機器〉〈電源管理〉 how the machine is powered, and 再起動 and
- *			      電源を切る; the limit of the processors' clock,
- *			      the clock now with the temperature, what the
- *			      firmware says of the supply, and the watchdog,
- *			      the limit and the watchdog
- *			      kept with [設定]
+ *			      〈試聴〉; and the processors (〈プロセッサ〉):
+ *			      each one's role -- 普通, 雑務 or 実時間, the
+ *			      first always the system's -- kept in the
+ *			      machine's settings with [設定], and the
+ *			      processor each device's interrupts go to, kept
+ *			      in the device's object
+ *	  〈機器〉〈電源管理〉 how the machine is powered -- on a PC the
+ *			      AC adapter and the batteries of the ACPI, read
+ *			      again as they tell of a change -- and 再起動 and
+ *			      電源を切る; the clock now with the temperature,
+ *			      what the firmware says of the supply (not on a
+ *			      PC, where nothing tells it), the limit of the
+ *			      processors' clock (not on a PC, whose firmware
+ *			      chooses it), and the watchdog, the limit and the
+ *			      watchdog kept with [設定]
  *	  〈画面〉〈背景〉	   the wallpaper, one of the wallpaper box's pictures
  *	  〈画面〉〈配色〉	   the colour scheme
  *	  〈画面〉〈ウィンドウ〉 the windows' look: how far the frame, or the
@@ -43,9 +57,10 @@
  *			   save the one chosen as an object and delete it
  *	  〈バージョン〉	   the system and the programs of the program box,
  *			   each with its version (R1.000) at the right end;
- *			   [詳細情報] shows the one chosen; a package (.tpk)
- *			   dropped on the list is installed, or updates the
- *			   program it is a newer version of; 削除 in the
+ *			   [詳細情報] shows the one chosen; a package (.tpk),
+ *			   or the object ファイル変換 made of a TADjs plugin's
+ *			   directory, dropped on the list is installed, or
+ *			   updates the program it is a newer version of; 削除 in the
  *			   menu's 操作 deletes the one chosen
  *
  *	Everything is read and changed through objects: what the machine is
@@ -67,10 +82,10 @@
 #include <ts/json.h>
 #include <ts/dtreq.h>
 #include <ts/snd.h>
+#include <ts/disp.h>
+#include <ts/wm.h>
 
 #define TICK_MS		20
-#define TEXT_MAX	4096
-#define LIST_MAX	64
 
 /* The sheets: the tags, and the devices' pages opened from 〈機器情報〉 */
 #define S_DEVS		1
@@ -87,6 +102,7 @@
 #define S_D_VIDEO	12
 #define S_D_KBD		13
 #define S_D_SOUND	14
+#define S_D_CPU		15
 
 /* The parts, by the numbers the data box (SYSDEF_BOX_SYSENV) gives them */
 #define P_DEVS		1
@@ -129,6 +145,19 @@
 #define P_SND_VOL_BOX	81
 #define P_SND_KEEP	82
 #define P_FONT_USE	83
+#define P_SCR_SIZE	84		/* the width and the height, typed */
+#define P_SCR_FIT	85		/* 比を保つ, 全体に広げる */
+#define P_SCR_SCALE	86		/* 表示の倍率: the scales the screen can take (画面's SCALES) */
+#define P_NET_LIST	120		/* 〈ネットワークアダプタ〉: 自動 and the adapters; the row chosen is the one to use */
+#define P_NET_SET	122
+
+/* 〈機器情報〉の〈プロセッサ〉: the processors' roles and the devices' interrupts (design 4.5) */
+#define P_CPU_LIST	130		/* the processors and their roles */
+#define P_CPU_ROLE	131		/* 普通, 雑務, 実時間 */
+#define P_CPU_SET	132
+#define P_IRQ_LIST	133		/* the devices whose interrupts are known */
+#define P_IRQ_CPU	134		/* the processor the chosen one's interrupts go to, 0 the system's choice */
+#define P_IRQ_SET	135
 
 /* 〈ウィンドウ〉: a volume's value is shown in the box numbered after it */
 #define P_LK_ON		50
@@ -156,12 +185,31 @@
 #define P_WD_ON		78
 #define P_WD_SEC	79
 #define P_PERF_SET	80
+#define P_CPU_NOTE	87		/* the line under the clock's limit */
+#define P_CPU_NOW_LBL	88		/* the words before the clock now, the supply, the limit */
+#define P_SUPPLY_LBL	89
+#define P_CPU_MAX_LBL	90
+
+/*
+ * On a PC the processor and its firmware choose the clock (HWP): the
+ * limit is not offered, and CPU_MHZ is neither shown as chosen nor
+ * written (the kernel does not use it there, cpuclk.c)
+ */
+#ifdef __x86_64__
+#define CPU_BY_FIRMWARE	1
+#else
+#define CPU_BY_FIRMWARE	0
+#endif
 
 #define PN_MAIN		1
 #define PN_TELL		10
 #define PN_POWER	11
 #define PN_SCREEN	12
 #define PN_PROG		13
+#define PN_SYSUP	22		/* the system being updated: what, and how far */
+#define PN_TELL2	23		/* told in two lines */
+#define PN_ASK3		24		/* asked in three lines */
+#define B_ASK3		4
 #define B_POWER		3
 #define B_RESTART	105
 
@@ -183,24 +231,25 @@
 
 LOCAL CONST char *CONST dev_names[] = {
 	"画面サイズ／色数", "ネットワークアダプタ", "ＵＳＢ接続機器", "ディスク",
-	"ビデオアダプタ", "キーボード", "サウンド",
+	"ビデオアダプタ", "キーボード", "サウンド", "プロセッサ",
 };
-LOCAL CONST INT dev_pages[] = { S_D_SCREEN, S_D_NET, S_D_USB, S_D_DISK, S_D_VIDEO, S_D_KBD, S_D_SOUND };
-#define NDEV	7
+LOCAL CONST INT dev_pages[] = { S_D_SCREEN, S_D_NET, S_D_USB, S_D_DISK, S_D_VIDEO, S_D_KBD, S_D_SOUND, S_D_CPU };
+#define NDEV	8
 
 LOCAL UI	ui;
 LOCAL BOOL	closing;
 LOCAL TS_UUID	*ask_win = NULL;	/* the window the desktop's panels go over, when not ui's */
-LOCAL UB	text[TEXT_MAX];
+LOCAL UB	*text = NULL;		/* the record last read, whole however long */
 
-/* What lists show: names kept here */
-LOCAL char	wall_name[LIST_MAX][64];
-LOCAL TS_UUID	wall_id[LIST_MAX];
+/* What lists show: names kept here, as many as there are */
+typedef char	NAME64[64];
+LOCAL NAME64	*wall_name = NULL;
+LOCAL TS_UUID	*wall_id = NULL;
 LOCAL INT	nwall, wall_cur;
-LOCAL char	scheme_name[8][32];
+LOCAL char	scheme_name[WM_SCHEME_MAX][32];
 LOCAL INT	nscheme;
-LOCAL char	prog_name[LIST_MAX][64];
-LOCAL TS_UUID	prog_id[LIST_MAX];
+LOCAL NAME64	*prog_name = NULL;
+LOCAL TS_UUID	*prog_id = NULL;
 LOCAL INT	nprog;
 
 /* What each program's metadata says (tessronos.program) */
@@ -211,38 +260,76 @@ typedef struct {
 	char	version[16];
 	BOOL	builtin;
 } PROGINFO;
-LOCAL PROGINFO	prog_info[LIST_MAX];
-LOCAL char	usb_line[LIST_MAX][80];
-LOCAL char	disk_line[LIST_MAX][80];
-LOCAL char	mode_name[16][40];
-LOCAL INT	mode_w[16], mode_h[16], nmode, mode_cur;
+LOCAL PROGINFO	*prog_info = NULL;
+LOCAL char	**usb_line = NULL;	/* a USB device's line each, whole */
+LOCAL INT	nusb = 0;
+LOCAL char	(*disk_line)[80] = NULL;
+/* The sizes the display offers, as many as it lists */
+typedef struct {
+	INT	w, h;
+	char	name[40];
+} SCRMODE;
+LOCAL SCRMODE	*modes;
+LOCAL CONST char **mode_nm;
+LOCAL INT	nmode, mode_cap, mode_cur;
 
 /* A list's names, as pointers to what is kept */
-LOCAL void names_of( INT num, char (*v)[64], INT n )
+LOCAL void names_of( INT num, NAME64 *v, INT n )
 {
-	CONST char	*p[LIST_MAX];
+	CONST char	**p = (CONST char **)malloc(sizeof(char *) * (size_t)( ( n > 0 ) ? n : 1 ));
 	INT		i;
 
-	for ( i = 0; i < n && i < LIST_MAX; i++ ) p[i] = v[i];
+	if ( p == NULL ) return;
+	for ( i = 0; i < n; i++ ) p[i] = v[i];
 	ui_names(&ui, num, p, n);
+	free((void *)p);
+}
+
+/*
+ * Every line of a key, each value copied whole into a string of its own:
+ * how many (lines_free lets them go). A line is never cut to a size.
+ */
+LOCAL INT lines_of( CONST UB *t, INT len, CONST char *key, char ***p_v )
+{
+	CONST UB	*v;
+	INT		n = 0, k, vl;
+	char		**a;
+
+	*p_v = NULL;
+	while ( len > 0 && cf_find(t, len, key, n, &v, &vl) ) n++;
+	a = (char **)calloc((size_t)( ( n > 0 ) ? n : 1 ), sizeof(char *));
+	if ( a == NULL ) return 0;
+	for ( k = 0; k < n; k++ ) {
+		(void)cf_find(t, len, key, k, &v, &vl);
+		a[k] = (char *)malloc((size_t)vl + 1);
+		if ( a[k] == NULL ) break;
+		memcpy(a[k], v, (size_t)vl);
+		a[k][vl] = 0;
+	}
+	*p_v = a;
+	return k;
+}
+
+LOCAL void lines_free( char **v, INT n )
+{
+	INT	i;
+
+	for ( i = 0; v != NULL && i < n; i++ ) free(v[i]);
+	free(v);
 }
 
 /* ---------------------------------------------------------------- objects */
 
-/* A record of an object, into text; its length or an error */
-LOCAL INT rec_of( CONST TS_UUID *u, INT recno, UB *buf, INT max )
+/* A record of an object read whole into text, however long; its length or an error */
+LOCAL INT rec_of( CONST TS_UUID *u, INT recno )
 {
-	ID	key;
-	SZ	asz = 0;
-	ER	er;
+	UB	*b;
+	INT	len = ui_rec_all(u, recno, 0, &b);
 
-	key = ob_opn_obj(u, OB_OP_R);
-	if ( key < E_OK ) return (INT)key;
-	er = ob_rea_rec(key, recno, 0, buf, max - 1, &asz);
-	ob_cls_obj(key);
-	if ( er < E_OK ) return (INT)er;
-	buf[asz] = 0;
-	return (INT)asz;
+	if ( len < 0 ) return len;
+	free(text);
+	text = b;
+	return len;
 }
 
 LOCAL INT sys_rec( INT recno )
@@ -250,7 +337,7 @@ LOCAL INT sys_rec( INT recno )
 	TS_UUID	u;
 
 	if ( ui_uuid(SYSDEF_SYSTEM, &u) < E_OK ) return E_SYS;
-	return rec_of(&u, recno, text, TEXT_MAX);
+	return rec_of(&u, recno);
 }
 
 /* The screen's mode, from the screen's own object 画面 (SIZE, BPP, DRIVER, MODES) */
@@ -258,7 +345,7 @@ LOCAL INT disp_rec( void )
 {
 	CONST TS_UUID	u = OB_UUID_DISPLAY_INIT;
 
-	return rec_of(&u, OB_DSP_MODE, text, TEXT_MAX);
+	return rec_of(&u, OB_DSP_MODE);
 }
 
 LOCAL ER sys_write( INT recno, CONST char *s )
@@ -282,18 +369,63 @@ LOCAL ER dev_put( CONST char *key, CONST char *val )
 	TS_UUID	u;
 	ID	k;
 	SZ	asz = 0;
-	INT	len;
+	UB	*t = NULL;
+	INT	len, cap = 0;
 	ER	er;
 
 	if ( ui_uuid(SYSDEF_CONF_DEV, &u) < E_OK ) return E_SYS;
-	k = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE);
+	k = ui_conf_open(&u, OB_OP_R | OB_OP_WRITE);
 	if ( k < E_OK ) return (ER)k;
-	er = ob_rea_rec(k, 1, 0, text, TEXT_MAX, &asz);
-	len = ( er >= E_OK ) ? (INT)asz : 0;
-	len = cf_put(text, len, TEXT_MAX, key, 0, val);
-	er = ( len < 0 ) ? E_LIMIT : ob_wri_rec(k, 1, 0, text, len, &asz);
-	if ( er >= E_OK ) er = ob_trn_rec(k, 1, (UD)len);
+	/* the settings whole, with room for the line however long it is */
+	len = ui_key_all(k, 1, (INT)( strlen(key) + strlen(val) ) + 4, &t, &cap);
+	if ( len < 0 ) {
+		ob_cls_obj(k);
+		return (ER)len;
+	}
+	len = cf_put(t, len, cap, key, 0, val);
+	/* replaced in one change: a cut in the power leaves the old record or the new one */
+	er = ( len < 0 ) ? E_LIMIT : ob_rpl_rec(k, 1, t, (SZ)len);
+	(void)asz;
 	ob_cls_obj(k);
+	free(t);
+	return er;
+}
+
+/*
+ * The link of 機器の設定's record 0 with the relationship role set to
+ * point at target (ts/conf.h cf_link_put); the object it pointed at
+ * before counted out, and target in, where the store does not count
+ */
+LOCAL ER dev_link_put( CONST char *role, CONST TS_UUID *target, CONST char *label )
+{
+	TS_UUID	u, vobj, old;
+	T_OBREF	r;
+	ID	k;
+	SZ	asz = 0;
+	UB	*t = NULL;
+	INT	len, cap = 0, n;
+	ER	er;
+	static CONST TS_UUID zero;
+
+	if ( ui_uuid(SYSDEF_CONF_DEV, &u) < E_OK || ts_gen_uuid(&vobj) < E_OK ) return E_SYS;
+	k = ui_conf_open(&u, OB_OP_R | OB_OP_WRITE);
+	if ( k < E_OK ) return (ER)k;
+	len = ui_key_all(k, 0, 640, &t, &cap);
+	if ( len < 0 ) {
+		ob_cls_obj(k);
+		return (ER)len;
+	}
+	n = cf_link_put(t, len, cap, role, target, &vobj, label, &old);
+	/* replaced in one change: a reader, let in meanwhile, sees the old record or the new one */
+	er = ( n == -2 ) ? E_OBJ : ( n < 0 ) ? E_LIMIT : ob_rpl_rec(k, 0, t, (SZ)n);
+	(void)asz;
+	ob_cls_obj(k);
+	free(t);
+	if ( er >= E_OK && ob_ref_obj(&u, &r) >= E_OK && ( r.flags & OB_F_AUTOREF ) == 0
+	  && memcmp(&old, target, sizeof(old)) != 0 ) {
+		(void)ob_lnk_obj(target);
+		if ( memcmp(&old, &zero, sizeof(old)) != 0 ) (void)ob_unl_obj(&old);
+	}
 	return er;
 }
 
@@ -303,32 +435,45 @@ LOCAL BOOL dev_get( CONST char *key, char *v, INT max )
 	INT	len;
 
 	if ( ui_uuid(SYSDEF_CONF_DEV, &u) < E_OK ) return FALSE;
-	len = rec_of(&u, 1, text, TEXT_MAX);
+	len = rec_of(&u, 1);
 	return (BOOL)( len > 0 && cf_get(text, len, key, 0, v, max) );
 }
 
 /*
  * The objects a box links to (ob_lst_lnk), those that are there, and
- * each one's name.
+ * each one's name, as many as there are, in buffers of their own (free
+ * them): how many.
  */
-#define BOX_LINKS_MAX	256
-
-LOCAL INT box_links( CONST char *box, TS_UUID *ids, char (*names)[64], INT max )
+LOCAL INT box_links( CONST char *box, TS_UUID **p_ids, NAME64 **p_names )
 {
-	TS_UUID	b;
+	TS_UUID	b, *lk = NULL, *ids;
+	NAME64	*names;
 	T_OBREF	r;
-	INT	all = 0, i, n = 0;
-	static TS_UUID lk[BOX_LINKS_MAX];
+	INT	all, i, n = 0;
 
+	*p_ids = NULL;
+	*p_names = NULL;
 	if ( ui_uuid(box, &b) < E_OK ) return 0;
-	if ( ob_lst_lnk(&b, NULL, lk, BOX_LINKS_MAX, &all) < E_OK ) return 0;
-	for ( i = 0; i < all && i < BOX_LINKS_MAX && n < max; i++ ) {
+	all = ui_lst_lnk(&b, &lk);
+	if ( all < 0 ) return 0;
+	ids = (TS_UUID *)malloc(sizeof(TS_UUID) * (size_t)( ( all > 0 ) ? all : 1 ));
+	names = (NAME64 *)malloc(sizeof(NAME64) * (size_t)( ( all > 0 ) ? all : 1 ));
+	if ( ids == NULL || names == NULL ) {
+		free(ids);
+		free(names);
+		free(lk);
+		return 0;
+	}
+	for ( i = 0; i < all; i++ ) {
 		if ( ob_ref_obj(&lk[i], &r) < E_OK ) continue;
 		ids[n] = lk[i];
 		strncpy(names[n], (CONST char *)r.name, 63);
 		names[n][63] = 0;
 		n++;
 	}
+	free(lk);
+	*p_ids = ids;
+	*p_names = names;
 	return n;
 }
 
@@ -368,7 +513,9 @@ LOCAL void fill_version( void )
 {
 	char	v[CF_VAL_MAX], s[CF_VAL_MAX * 2];
 	INT	len = sys_rec(OB_SYS_INFO), i;
-	static TS_UUID	ids[LIST_MAX];
+	TS_UUID	*ids;
+	NAME64	*nm;
+	PROGINFO *pi;
 	INT	n;
 
 	val_of(len, "NAME", v, sizeof(v));
@@ -387,6 +534,15 @@ LOCAL void fill_version( void )
 	snprintf(s, sizeof(s), "%s ×", v);
 	val_of(len, "CPUS", v, sizeof(v));
 	strncat(s, v, sizeof(s) - strlen(s) - 1);
+	{
+		char	c[CF_VAL_MAX], w[48];
+
+		/* the cores, where the processors are threads of fewer cores (a PC) */
+		if ( len > 0 && cf_get(text, len, "CPU_CORES", 0, c, sizeof(c)) && strcmp(c, v) != 0 && cf_num(c, 0) > 0 ) {
+			snprintf(w, sizeof(w), "（%sコア）", c);
+			strncat(s, w, sizeof(s) - strlen(s) - 1);
+		}
+	}
 	ui_set_text(&ui, P_VER_CPU, s);
 	val_of(len, "MEMORY_MB", v, sizeof(v));
 	snprintf(s, sizeof(s), "%sMB（空き ", v);
@@ -395,9 +551,17 @@ LOCAL void fill_version( void )
 	strncat(s, "MB）", sizeof(s) - strlen(s) - 1);
 	ui_set_text(&ui, P_VER_MEM, s);
 
-	n = box_links(SYSDEF_PROG_BOX, ids, prog_name, LIST_MAX);
+	/* every program of the program box, however many */
+	n = box_links(SYSDEF_PROG_BOX, &ids, &nm);
+	pi = (PROGINFO *)calloc((size_t)( ( n > 0 ) ? n : 1 ), sizeof(PROGINFO));
+	if ( pi == NULL ) n = 0;
+	free(prog_id);
+	free(prog_name);
+	free(prog_info);
+	prog_id = ids;
+	prog_name = nm;
+	prog_info = pi;
 	for ( i = 0; i < n; i++ ) {
-		prog_id[i] = ids[i];
 		prog_read(&ids[i], &prog_info[i]);
 		if ( prog_info[i].name[0] == 0 ) {
 			snprintf(prog_info[i].name, sizeof(prog_info[i].name), "%s", prog_name[i]);
@@ -413,14 +577,217 @@ LOCAL void fill_version( void )
 
 LOCAL void fill_perf( void );
 
+/*
+ * 〈電源管理〉's supply and batteries. On a PC they are the ACPI's
+ * device objects (OB_S_POWER, design 3.10.6): the AC adapter "acpower"
+ * (ONLINE) and the batteries "battery0", "battery1" (PRESENT, STATE,
+ * REMAINING, FULL, UNIT, CRITICAL), each one's record 1 read, and read
+ * again when the object tells of a change of it -- the firmware's
+ * notifications of the adapter and the batteries, and the kernel's own
+ * reading of the batteries every 30 seconds for the firmware that tells
+ * nothing. Two batteries are shown as one, their charges added. With no
+ * such objects (a Raspberry Pi) the machine runs off its supply.
+ */
+#define PW_NOBJ		6
+#define PW_NTF		30		/* the ids of the notices: PW_NTF and the object's index */
+
+typedef struct {
+	TS_UUID	u;
+	char	name[16];
+	ID	key;			/* opened for its notices: the adapter and the batteries */
+} PWOBJ;
+
+LOCAL PWOBJ	pw_obj[PW_NOBJ];
+LOCAL INT	npw = -1;		/* -1 not yet looked for */
+LOCAL char	pw_said[CF_VAL_MAX * 3];
+
+/* The power objects found, and those that tell of the supply watched */
+LOCAL void pw_find( void )
+{
+	TS_UUID		*ids = NULL;
+	T_OBREF		r;
+	T_OBNTF		req;
+	PWOBJ		*p;
+	INT		cnt, i;
+
+	npw = 0;
+	cnt = ui_lst_obj(OB_T_DEVICE, OB_S_POWER, &ids);
+	for ( i = 0; i < cnt && npw < PW_NOBJ; i++ ) {
+		if ( ob_ref_obj(&ids[i], &r) < E_OK ) continue;
+		p = &pw_obj[npw];
+		memset(p, 0, sizeof(*p));
+		p->u = ids[i];
+		snprintf(p->name, sizeof(p->name), "%s", (CONST char *)r.name);
+		if ( strcmp(p->name, "acpower") == 0 || strncmp(p->name, "battery", 7) == 0 ) {
+			p->key = ob_opn_obj(&p->u, OB_OP_ATRRD);
+			memset(&req, 0, sizeof(req));
+			req.events = OB_E_CHANGE;
+			req.id = PW_NTF + npw;
+			if ( p->key > 0 && ob_ntf_evt(p->key, OB_PW_STATE, &req, ui.port) <= 0 ) {
+				ob_cls_obj(p->key);
+				p->key = 0;
+			}
+		}
+		npw++;
+	}
+	free(ids);
+}
+
+/* An object's state, into text: its length, 0 when it cannot be read */
+LOCAL INT pw_rec( PWOBJ *p )
+{
+	INT	len = rec_of(&p->u, OB_PW_STATE);
+
+	return ( len > 0 ) ? len : 0;
+}
+
+/* A number of the state, -1 when it is not there */
+LOCAL INT pw_num( INT len, CONST char *key )
+{
+	char	v[CF_VAL_MAX];
+
+	return ( len > 0 && cf_get(text, len, key, 0, v, sizeof(v)) ) ? cf_num(v, -1) : -1;
+}
+
+/* A charge, in Wh with two places, or in mAh */
+LOCAL void charge_of( INT amount, BOOL mah, char *s, INT max )
+{
+	if ( mah ) {
+		snprintf(s, (size_t)max, "%dmAh", amount);
+	} else {
+		snprintf(s, (size_t)max, "%d.%02dWh", amount / 1000, ( amount % 1000 ) / 10);
+	}
+}
+
+LOCAL void fill_supply( void )
+{
+	char	v[CF_VAL_MAX], now[32], bat[CF_VAL_MAX * 2], a[24], b[24], said[CF_VAL_MAX * 3];
+	INT	i, len, nbat = 0, npresent = 0, online = -1, rem = 0, full = 0, pc = -1, k;
+	BOOL	mah = FALSE, unit_set = FALSE, dis = FALSE, chg = FALSE, notfull = FALSE, crit = FALSE;
+
+	if ( npw < 0 ) pw_find();
+	for ( i = 0; i < npw; i++ ) {
+		PWOBJ	*p = &pw_obj[i];
+
+		if ( strcmp(p->name, "acpower") == 0 ) {
+			len = pw_rec(p);
+			if ( len > 0 ) online = pw_num(len, "ONLINE");
+			continue;
+		}
+		if ( strncmp(p->name, "battery", 7) != 0 ) continue;
+		nbat++;
+		len = pw_rec(p);
+		if ( pw_num(len, "PRESENT") != 1 ) continue;
+		npresent++;
+		v[0] = 0;
+		(void)cf_get(text, len, "STATE", 0, v, sizeof(v));
+		if ( strcmp(v, "discharging") == 0 ) {
+			dis = TRUE;
+		} else if ( strcmp(v, "charging") == 0 ) {
+			chg = TRUE;
+		} else if ( strcmp(v, "full") != 0 ) {
+			notfull = TRUE;
+		}
+		if ( pw_num(len, "CRITICAL") == 1 ) crit = TRUE;
+		if ( pc < 0 ) pc = pw_num(len, "PERCENT");
+		(void)cf_get(text, len, "UNIT", 0, v, sizeof(v));
+		if ( !unit_set ) {
+			mah = (BOOL)( strcmp(v, "mAh") == 0 );
+			unit_set = TRUE;
+		} else if ( mah != (BOOL)( strcmp(v, "mAh") == 0 ) ) {
+			continue;			/* a charge in the other unit is not added */
+		}
+		k = pw_num(len, "FULL");
+		if ( k <= 0 ) k = pw_num(len, "DESIGN");
+		if ( k > 0 && pw_num(len, "REMAINING") >= 0 ) {
+			full += k;
+			rem += pw_num(len, "REMAINING");
+		}
+	}
+
+	/* the adapter's word, else a battery that discharges: the machine runs off it */
+	snprintf(now, sizeof(now), "%s", ( online == 0 || ( online < 0 && dis ) ) ? "バッテリ" : "ＡＣ電源");
+	if ( nbat == 0 ) {
+		snprintf(bat, sizeof(bat), "なし");
+	} else if ( npresent == 0 ) {
+		snprintf(bat, sizeof(bat), "バッテリが入っていません");
+	} else {
+		if ( full > 0 ) pc = (INT)( (D)rem * 100 / full );
+		if ( pc > 100 ) pc = 100;
+		if ( pc >= 0 ) {
+			snprintf(bat, sizeof(bat), "%d%%　", pc);
+		} else {
+			snprintf(bat, sizeof(bat), "（残量不明）　");
+		}
+		strncat(bat, dis ? "放電中" : chg ? "充電中" : notfull ? "充電していません" : "満充電",
+			sizeof(bat) - strlen(bat) - 1);
+		if ( crit ) strncat(bat, "（残りわずか）", sizeof(bat) - strlen(bat) - 1);
+		if ( full > 0 ) {
+			charge_of(rem, mah, a, sizeof(a));
+			charge_of(full, mah, b, sizeof(b));
+			snprintf(v, sizeof(v), "　残り %s（満充電 %s）", a, b);
+			strncat(bat, v, sizeof(bat) - strlen(bat) - 1);
+		}
+	}
+	ui_set_text(&ui, P_POWER_NOW, now);
+	ui_set_text(&ui, P_BATTERY, bat);
+
+	/* what the firmware tells of power, when it tells anything */
+	if ( npw > 0 ) {
+		CONST char	*nm[] = { "battery", "acpower" };
+		CONST char	*jp[] = { "バッテリ", "ＡＣアダプタ" };
+		char		pm[CF_VAL_MAX * 2];
+		INT		j, m = 0;
+
+		/* ＡＣＰＩ, and what it tells of when that fits the box: the battery and the adapter */
+		snprintf(pm, sizeof(pm), "ＡＣＰＩ");
+		for ( j = 0; j < 2; j++ ) {
+			for ( i = 0; i < npw && strncmp(pw_obj[i].name, nm[j], strlen(nm[j])) != 0; i++ ) ;
+			if ( i >= npw ) continue;
+			strncat(pm, ( m++ == 0 ) ? "（" : "、", sizeof(pm) - strlen(pm) - 1);
+			strncat(pm, jp[j], sizeof(pm) - strlen(pm) - 1);
+		}
+		if ( m > 0 ) strncat(pm, "）", sizeof(pm) - strlen(pm) - 1);
+		ui_set_text(&ui, P_PM, pm);
+	} else {
+		ui_set_text(&ui, P_PM, "対応しない");
+	}
+
+	snprintf(said, sizeof(said), "%s / %s", now, bat);
+	if ( strcmp(said, pw_said) != 0 ) {
+		/* told when it changes, for the tests of the screen */
+		snprintf(pw_said, sizeof(pw_said), "%s", said);
+		tm_putstring((CONST UB *)"sysenv: power ");
+		tm_putstring((CONST UB *)pw_said);
+		tm_putstring((CONST UB *)"\n");
+	}
+}
+
+/* A notice of the adapter or a battery: the supply read again */
+LOCAL BOOL pw_told( CONST T_OBNTM *m )
+{
+	if ( npw <= 0 || m->id < PW_NTF || m->id >= PW_NTF + npw ) return FALSE;
+	fill_supply();
+	return TRUE;
+}
+
+LOCAL void pw_close( void )
+{
+	INT	i;
+
+	for ( i = 0; i < npw; i++ ) {
+		if ( pw_obj[i].key > 0 ) ob_cls_obj(pw_obj[i].key);
+		pw_obj[i].key = 0;
+	}
+}
+
 LOCAL void fill_power( void )
 {
 	char	v[CF_VAL_MAX];
-	INT	len = sys_rec(OB_SYS_POWER);
+	INT	len;
 
-	ui_set_text(&ui, P_POWER_NOW, "ＡＣ電源");
-	ui_set_text(&ui, P_BATTERY, "なし");
-	ui_set_text(&ui, P_PM, "対応しない");
+	fill_supply();
+	len = sys_rec(OB_SYS_POWER);
 	if ( len <= 0 || !cf_get(text, len, "CAN", 0, v, sizeof(v)) || strstr(v, "RESTART") == NULL ) {
 		ui_off(&ui, P_RESTART, TRUE);
 		ui_off(&ui, P_OFF, TRUE);
@@ -437,13 +804,13 @@ LOCAL void fill_power( void )
  */
 #define CPU_DEFAULT	1800
 #define WD_DEFAULT	30
-#define PERF_TICKS	100		/* the state read again every two seconds while shown */
-#define PERF_SOON	30		/* and soon after a setting, once the system has taken it */
+#define PERF_MS		2000		/* the state read again every two seconds while shown */
+#define PERF_SOON_MS	600		/* and soon after a setting, once the system has taken it */
 
 LOCAL CONST INT	cpu_mhz_of[] = { 1500, 1800, 2000, 2200, 0 };
 #define NCPU		( (INT)( sizeof(cpu_mhz_of) / sizeof(cpu_mhz_of[0]) ) )
 
-LOCAL INT	perf_tick;
+LOCAL UD	perf_at;		/* when the state is read again */
 LOCAL char	perf_said[CF_VAL_MAX * 2];
 
 /* A rate in Hz of the record, in MHz: 2.4GHz is beyond what cf_num's INT holds; 0 when not a number */
@@ -458,16 +825,50 @@ LOCAL INT mhz_of( INT len, CONST char *key )
 	return ( i > 0 && v[i] == 0 ) ? (INT)( u / 1000000 ) : 0;
 }
 
+/*
+ * A row of words and a box shown or not, changed only when it changes:
+ * the state is read every two seconds. Only while 〈電源管理〉 is shown:
+ * the parts of a sheet not shown read as not shown, and the window
+ * manager does not take a part hidden then (part.c); one hidden while
+ * its sheet is shown stays hidden as the tags go from sheet to sheet.
+ * The page shown again (UI_EV_SHEET) sets the rows again (power_sheet).
+ */
+LOCAL INT	clock_row = -1, supply_row = -1, limit_row = -1;
+
+LOCAL void row_show( INT *was, INT label, INT box, BOOL shown )
+{
+	if ( *was == (INT)shown || ui_sheet(&ui) != S_POWER ) return;
+	*was = (INT)shown;
+	ui_show(&ui, label, shown);
+	ui_show(&ui, box, shown);
+}
+
 LOCAL void fill_perf_state( void )
 {
 	char	v[CF_VAL_MAX], s[CF_VAL_MAX * 2], w[CF_VAL_MAX + 16];
-	INT	len = sys_rec(OB_SYS_HW), hz, lim, mx;
+	INT	len = sys_rec(OB_SYS_HW), hz, lim, mx, base;
 	UINT	thr;
+	BOOL	known;
 
-	perf_tick = 0;
+	perf_at = ui_now() + PERF_MS;
 	hz = mhz_of(len, "ARM_HZ");
 	mx = mhz_of(len, "ARM_MAX_HZ");
+	base = -1;
 	lim = ( len > 0 && cf_get(text, len, "ARM_LIMIT_MHZ", 0, v, sizeof(v)) ) ? cf_num(v, -1) : -1;
+#if CPU_BY_FIRMWARE
+	/*
+	 * A PC's clock in MHz: the mean of the processors over the last half
+	 * second, from their counters (CLOCK_MHZ, as /proc/cpuinfo's cpu MHz),
+	 * and the base and turbo clocks they name; none on a virtual machine
+	 */
+	lim = -1;				/* kept but not used: no limit to show */
+	if ( len > 0 && cf_get(text, len, "CLOCK_MHZ", 0, v, sizeof(v)) ) hz = cf_num(v, 0);
+	if ( len > 0 && cf_get(text, len, "TURBO_MHZ", 0, v, sizeof(v)) ) mx = cf_num(v, 0);
+	if ( len > 0 && cf_get(text, len, "BASE_MHZ", 0, v, sizeof(v)) ) base = cf_num(v, -1);
+	row_show(&clock_row, P_CPU_NOW_LBL, P_CPU_NOW, hz > 0);
+#else
+	row_show(&clock_row, P_CPU_NOW_LBL, P_CPU_NOW, TRUE);	/* the limit is shown in it, whatever the clock */
+#endif
 	if ( hz > 0 ) {
 		snprintf(s, sizeof(s), "%dMHz", hz);
 	} else {
@@ -479,7 +880,10 @@ LOCAL void fill_perf_state( void )
 		snprintf(w, sizeof(w), "　上限 %dMHz", lim);
 		strncat(s, w, sizeof(s) - strlen(s) - 1);
 	}
-	if ( mx > 0 ) {
+	if ( base > 0 && mx > 0 ) {
+		snprintf(w, sizeof(w), "（基本 %dMHz、最大 %dMHz）", base, mx);
+		strncat(s, w, sizeof(s) - strlen(s) - 1);
+	} else if ( mx > 0 ) {
 		snprintf(w, sizeof(w), "（最大 %dMHz）", mx);
 		strncat(s, w, sizeof(s) - strlen(s) - 1);
 	}
@@ -497,7 +901,10 @@ LOCAL void fill_perf_state( void )
 	}
 
 	thr = ( len > 0 && cf_get(text, len, "THROTTLED", 0, v, sizeof(v)) ) ? (UINT)cf_num(v, 0) : 0;
-	if ( len <= 0 || !cf_get(text, len, "UNDERVOLT", 0, v, sizeof(v)) || strcmp(v, "unknown") == 0 ) {
+	/* the supply as the Raspberry Pi's firmware tells it; the row not shown where nothing tells it */
+	known = (BOOL)( len > 0 && cf_get(text, len, "UNDERVOLT", 0, v, sizeof(v)) && strcmp(v, "unknown") != 0 );
+	row_show(&supply_row, P_SUPPLY_LBL, P_SUPPLY, known);
+	if ( !known ) {
 		snprintf(s, sizeof(s), "（不明）");
 	} else if ( strcmp(v, "now") == 0 ) {
 		snprintf(s, sizeof(s), "低電圧（電源が足りません）");
@@ -522,7 +929,18 @@ LOCAL void fill_perf( void )
 		if ( mhz < 0 ) mhz = CPU_DEFAULT;
 	}
 	for ( i = 0; i < NCPU && cpu_mhz_of[i] != mhz; i++ ) ;
+#if CPU_BY_FIRMWARE
+	/* the processor and its firmware choose the clock: no limit to choose, the row not shown */
+	ui_set_value(&ui, P_CPU_MAX, 0);
+	if ( limit_row != 0 && ui_sheet(&ui) == S_POWER ) {
+		limit_row = 0;
+		ui_show(&ui, P_CPU_MAX_LBL, FALSE);
+		ui_show(&ui, P_CPU_MAX, FALSE);
+		ui_show(&ui, P_CPU_NOTE, FALSE);
+	}
+#else
 	ui_set_value(&ui, P_CPU_MAX, ( i < NCPU ) ? i + 1 : 0);
+#endif
 	if ( dev_get("WATCHDOG", v, sizeof(v)) ) {
 		wd = cf_num(v, WD_DEFAULT);
 		if ( wd < 0 ) wd = WD_DEFAULT;
@@ -540,12 +958,21 @@ LOCAL void fill_perf( void )
 	fill_perf_state();
 }
 
+/* 〈電源管理〉 shown: the rows that are not to be shown hidden now that they can be, and the state read */
+LOCAL void power_sheet( void )
+{
+	clock_row = supply_row = limit_row = -1;
+	fill_perf();
+}
+
 LOCAL void fill_walls( void )
 {
 	char	v[CF_VAL_MAX], w[48], m[8];
 	INT	i, len;
 
-	nwall = box_links(SYSDEF_WALL_BOX, wall_id, wall_name, LIST_MAX);
+	free(wall_id);
+	free(wall_name);
+	nwall = box_links(SYSDEF_WALL_BOX, &wall_id, &wall_name);
 	names_of(P_WALLS, wall_name, nwall);
 	wall_cur = 0;
 	len = sys_rec(OB_SYS_WALL);
@@ -565,11 +992,12 @@ LOCAL void fill_walls( void )
 LOCAL void fill_schemes( void )
 {
 	char	v[CF_VAL_MAX];
-	CONST char *nm[8];
+	CONST char *nm[WM_SCHEME_MAX];
 	INT	len = sys_rec(OB_SYS_SCHEME), cur;
 
+	/* the system has WM_SCHEME_MAX schemes at most (ts/wm.h) */
 	nscheme = 0;
-	while ( len > 0 && nscheme < 8 && cf_get(text, len, "NAME", nscheme, scheme_name[nscheme], 32) ) {
+	while ( len > 0 && nscheme < WM_SCHEME_MAX && cf_get(text, len, "NAME", nscheme, scheme_name[nscheme], 32) ) {
 		nm[nscheme] = scheme_name[nscheme];
 		nscheme++;
 	}
@@ -578,49 +1006,294 @@ LOCAL void fill_schemes( void )
 	ui_set_now(&ui, P_SCHEMES, cur, cur);
 }
 
-/* The screen's page: the sizes it may be started at, the one it has underlined */
+/* The screen's page: the sizes it offers, the one it has underlined, its width and height, and its shape */
+LOCAL char	scr_fit[16];			/* 画面's FIT: "" where the screen does not choose */
+LOCAL INT	scr_w, scr_h;
+
+/*
+ * 表示の倍率: the scales the screen can be drawn at at its size (画面's
+ * SCALES, those that leave a view large enough), the one it is drawn at
+ * (SCALE) chosen. Only those it can take are offered.
+ */
+#define SCALE_MAX	DISP_NSCALE	/* the scales the system has (ts/disp.h) */
+LOCAL INT	scale_of[SCALE_MAX], nscale, scale_now = 100;
+LOCAL char	scale_name[SCALE_MAX][8];
+
+LOCAL void fill_scale( INT len )
+{
+	char	v[CF_VAL_MAX], w[16];
+	CONST char *nm[SCALE_MAX];
+	CONST UB *sv, *sw;
+	INT	i, cur = 0, slen = 0, wl;
+
+	scale_now = 100;
+	if ( len > 0 && cf_get(text, len, "SCALE", 0, v, sizeof(v)) ) scale_now = cf_num(v, 100);
+	nscale = 0;
+	/* the words read where they stand in the line, however long it is */
+	if ( len > 0 && cf_find(text, len, "SCALES", 0, &sv, &slen) ) {
+		for ( i = 0; nscale < SCALE_MAX && cf_wfind(sv, slen, i, &sw, &wl); i++ ) {
+			snprintf(w, sizeof(w), "%.*s", wl, (CONST char *)sw);
+			scale_of[nscale] = cf_num(w, 100);
+			snprintf(scale_name[nscale], sizeof(scale_name[nscale]), "%d％", scale_of[nscale]);
+			nm[nscale] = scale_name[nscale];
+			if ( scale_of[nscale] == scale_now ) cur = nscale + 1;
+			nscale++;
+		}
+	}
+	if ( nscale == 0 ) {
+		scale_of[0] = 100;
+		snprintf(scale_name[0], sizeof(scale_name[0]), "100％");
+		nm[0] = scale_name[0];
+		nscale = 1;
+		cur = 1;
+	}
+	ui_names(&ui, P_SCR_SCALE, nm, nscale);
+	ui_set_value(&ui, P_SCR_SCALE, cur);
+	ui_off(&ui, P_SCR_SCALE, nscale < 2);
+	{
+		char	m[64];
+
+		snprintf(m, sizeof(m), "sysenv: screen scale %d%%, %d scales\n", scale_now, nscale);
+		tm_putstring((CONST UB *)m);
+	}
+}
+
+/* The scale chosen, as the word the desktop takes ("150%"), or "" when it stays */
+LOCAL void scale_word( char *buf, INT max )
+{
+	INT	k = ui_value(&ui, P_SCR_SCALE) - 1;
+
+	buf[0] = 0;
+	if ( k >= 0 && k < nscale && scale_of[k] != scale_now ) {
+		snprintf(buf, (size_t)max, "%d%%", scale_of[k]);
+	}
+}
+
+/* One more size on the list: FALSE when there is no room for it */
+LOCAL BOOL mode_add( INT w, INT h )
+{
+	if ( nmode == mode_cap ) {
+		INT		cap = ( mode_cap == 0 ) ? 16 : mode_cap * 2;
+		SCRMODE		*m = (SCRMODE *)realloc(modes, sizeof(SCRMODE) * (size_t)cap);
+		CONST char	**n;
+
+		if ( m == NULL ) return FALSE;
+		modes = m;
+		n = (CONST char **)realloc((void *)mode_nm, sizeof(char *) * (size_t)cap);
+		if ( n == NULL ) return FALSE;
+		mode_nm = n;
+		mode_cap = cap;
+	}
+	modes[nmode].w = w;
+	modes[nmode].h = h;
+	snprintf(modes[nmode].name, sizeof(modes[nmode].name), "%d×%d：１６７７万色", w, h);
+	nmode++;
+	return TRUE;
+}
+
 LOCAL void fill_screen( void )
 {
-	char	v[CF_VAL_MAX], w[16], cur[32] = "";
-	CONST char *nm[16];
-	INT	len = disp_rec(), i;
+	char	v[CF_VAL_MAX], cur[32] = "";
+	CONST UB *mv;
+	INT	len = disp_rec(), i, f[2], mlen = 0;
 
 	if ( len > 0 ) (void)cf_get(text, len, "SIZE", 0, cur, sizeof(cur));
 	nmode = 0;
 	mode_cur = 0;
-	if ( len > 0 && cf_get(text, len, "MODES", 0, v, sizeof(v)) ) {
-		for ( i = 0; nmode < 16 && cf_word(v, i, w, sizeof(w)); i++ ) {
-			INT	a = 0, b = 0;
-			CONST char *x = strchr(w, 'x');
+	/* the list read where it is in the record, however long it is: WIDTHxHEIGHT words parted by blanks */
+	if ( len > 0 && cf_find(text, len, "MODES", 0, &mv, &mlen) ) {
+		i = 0;
+		while ( i < mlen ) {
+			INT	at, a = 0, b = 0, k;
+			BOOL	x = FALSE, ok = TRUE;
 
-			if ( x == NULL ) continue;
-			a = cf_num(w, 0);
-			{
-				char	ww[8];
-				INT	k = (INT)( x - w );
-
-				if ( k > 7 ) continue;
-				memcpy(ww, w, k);
-				ww[k] = 0;
-				a = cf_num(ww, 0);
+			while ( i < mlen && ( mv[i] == ' ' || mv[i] == '	' ) ) i++;
+			at = i;
+			while ( i < mlen && mv[i] != ' ' && mv[i] != '	' ) i++;
+			if ( i == at ) break;
+			for ( k = at; k < i && ok; k++ ) {
+				if ( mv[k] == 'x' && !x ) {
+					x = TRUE;
+				} else if ( mv[k] >= '0' && mv[k] <= '9' && ( x ? b : a ) < 100000 ) {
+					if ( x ) b = b * 10 + ( mv[k] - '0' ); else a = a * 10 + ( mv[k] - '0' );
+				} else {
+					ok = FALSE;
+				}
 			}
-			b = cf_num(x + 1, 0);
-			mode_w[nmode] = a;
-			mode_h[nmode] = b;
-			snprintf(mode_name[nmode], sizeof(mode_name[nmode]), "%d×%d：１６７７万色", a, b);
-			nm[nmode] = mode_name[nmode];
-			if ( strcmp(w, cur) == 0 ) mode_cur = nmode + 1;
-			nmode++;
+			if ( !ok || !x || a == 0 || b == 0 || !mode_add(a, b) ) continue;
+			if ( (INT)strlen(cur) == i - at && memcmp(cur, mv + at, (size_t)( i - at )) == 0 ) {
+				mode_cur = nmode;
+			}
 		}
 	}
-	ui_names(&ui, P_SCR_LIST, nm, nmode);
+	for ( i = 0; i < nmode; i++ ) mode_nm[i] = modes[i].name;
+	ui_names(&ui, P_SCR_LIST, mode_nm, nmode);
 	ui_set_now(&ui, P_SCR_LIST, mode_cur, mode_cur);
+
+	scr_w = scr_h = 0;
+	if ( len > 0 && cf_get(text, len, "WIDTH", 0, v, sizeof(v)) ) scr_w = cf_num(v, 0);
+	if ( len > 0 && cf_get(text, len, "HEIGHT", 0, v, sizeof(v)) ) scr_h = cf_num(v, 0);
+	f[0] = scr_w;
+	f[1] = scr_h;
+	ui_set_fields(&ui, P_SCR_SIZE, f, 2);
+	scr_fit[0] = 0;
+	if ( len > 0 ) (void)cf_get(text, len, "FIT", 0, scr_fit, sizeof(scr_fit));
+	ui_set_value(&ui, P_SCR_FIT, ( strcmp(scr_fit, "stretch") == 0 ) ? 2 : 1);
+	ui_off(&ui, P_SCR_FIT, scr_fit[0] == 0);
+	fill_scale(len);
+	{
+		char	m[96];
+
+		snprintf(m, sizeof(m), "sysenv: screen page %dx%d fit \"%s\", %d sizes, %d chosen\n", scr_w, scr_h,
+			 scr_fit, nmode, mode_cur);
+		tm_putstring((CONST UB *)m);
+	}
+}
+
+/* A size chosen from the list: its width and height into the fields */
+LOCAL void screen_chosen( void )
+{
+	INT	k = ui_value(&ui, P_SCR_LIST) - 1, f[2];
+
+	if ( k < 0 || k >= nmode ) return;
+	f[0] = modes[k].w;
+	f[1] = modes[k].h;
+	ui_set_fields(&ui, P_SCR_SIZE, f, 2);
+	{
+		char	m[64];
+
+		snprintf(m, sizeof(m), "sysenv: screen size chosen %dx%d\n", f[0], f[1]);
+		tm_putstring((CONST UB *)m);
+	}
+}
+
+/*
+ * 〈ネットワークアダプタ〉: the card the stack uses, as the system object's
+ * record of the network says, and the adapters of the machine as their
+ * device object says (netadp, OB_S_NET: one line each, with its link,
+ * and the Wi-Fi's network and signal). The list's first row is 自動 (a
+ * wired card whose link is up, else the Wi-Fi that is connected); the
+ * row chosen in it (its lamp) is kept with [設定] as the machine's
+ * setting NET_ADAPTER, the row set now is underlined, and ＊ marks the
+ * adapter in use. The page is read again when the adapters' object
+ * tells that they changed (a link up or down, another card used or
+ * chosen, the Wi-Fi joined or left), and every second while it is
+ * shown for the counts of the frames and the Wi-Fi's signal, measured
+ * values that change all the time and are not told.
+ */
+LOCAL void tell( CONST char *line );
+#define NET_ADP_MAX	8
+#define NET_MS		1000		/* the measured values read again, while the page is shown */
+#define NET_NTF_ADP	11		/* the id of the notices of the adapters' object */
+#define NET_NTF_DEVS	12		/* and of the list of the devices, until that object is there */
+
+LOCAL UB	*adp_text = NULL;	/* the adapters' record, whole */
+LOCAL char	*adp_said = NULL;	/* as it was last shown */
+LOCAL char	adp_line[NET_ADP_MAX + 2][128];	/* the list's rows: 自動, then the adapters */
+LOCAL char	adp_id[NET_ADP_MAX + 2][16];	/* each row's NET_ADAPTER, "" a row not to be set */
+LOCAL INT	nadp_use = 0;		/* the rows */
+LOCAL UD	net_at;			/* when the page is read again */
+LOCAL TS_UUID	adp_u;			/* the adapters' object, once found */
+LOCAL ID	adp_kn = 0;		/* opened for its notices */
+LOCAL ID	adp_kdevs = 0;		/* the list of the devices, opened while it is not there */
+LOCAL INT	net_now = -1;		/* the row last shown as set now, -1 none yet */
+LOCAL INT	net_nadp = -1;		/* the adapters last told of on the console, -1 none yet */
+
+/* The adapters' object found among the devices, into adp_u */
+LOCAL BOOL adp_find( void )
+{
+	TS_UUID		*ids = NULL;
+	T_OBREF		r;
+	INT		cnt, i;
+	BOOL		found = FALSE;
+
+	cnt = ui_lst_obj(OB_T_DEVICE, OB_S_NET, &ids);
+	for ( i = 0; i < cnt && !found; i++ ) {
+		if ( ob_ref_obj(&ids[i], &r) >= E_OK && strcmp((CONST char *)r.name, "netadp") == 0 ) {
+			adp_u = ids[i];
+			found = TRUE;
+		}
+	}
+	free(ids);
+	return found;
+}
+
+/*
+ * The adapters' object watched: a change of its record told to the
+ * window's channel, asked before the record is read so that nothing
+ * that changes after the read goes untold. While it is not there, the
+ * list of the devices is watched for it.
+ */
+LOCAL void adp_watch( void )
+{
+	CONST TS_UUID	devlist = OB_UUID_DEVLIST_INIT;
+	T_OBNTF		req;
+
+	if ( adp_kn > 0 ) return;
+	memset(&req, 0, sizeof(req));
+	if ( adp_find() ) {
+		adp_kn = ob_opn_obj(&adp_u, OB_OP_ATRRD);
+		req.events = OB_E_CHANGE | OB_E_DELETE;
+		req.id = NET_NTF_ADP;
+		if ( adp_kn > 0 && ob_ntf_evt(adp_kn, OB_REC_ANY, &req, ui.port) <= 0 ) {
+			ob_cls_obj(adp_kn);
+			adp_kn = 0;
+		}
+		if ( adp_kn > 0 && adp_kdevs > 0 ) {
+			ob_cls_obj(adp_kdevs);
+			adp_kdevs = 0;
+		}
+	} else if ( adp_kdevs <= 0 ) {
+		adp_kdevs = ob_opn_obj(&devlist, OB_OP_ATRRD);
+		req.events = OB_E_ATTACH;
+		req.id = NET_NTF_DEVS;
+		if ( adp_kdevs > 0 && ob_ntf_evt(adp_kdevs, OB_REC_ANY, &req, ui.port) <= 0 ) {
+			ob_cls_obj(adp_kdevs);
+			adp_kdevs = 0;
+		}
+		if ( adp_find() ) adp_watch();	/* it came before the list was watched */
+	}
+}
+
+/* The adapters' object's record 1 into adp_text: its length, or 0 when there is none */
+LOCAL INT adp_rec( void )
+{
+	UB	*b;
+	INT	len;
+
+	adp_watch();
+	if ( adp_kn <= 0 ) return 0;
+	len = ui_rec_all(&adp_u, OB_NET_STATE, 0, &b);
+	if ( len <= 0 ) {
+		free(b);
+		return 0;
+	}
+	free(adp_text);
+	adp_text = b;
+	return len;
+}
+
+/* An SSID given in hexadecimal, as text (its bytes, the control characters left out) */
+LOCAL void ssid_of( CONST char *hex, char *out, INT max )
+{
+	INT	n = 0, h, l;
+
+	while ( hex[0] != 0 && hex[1] != 0 && n < max - 1 ) {
+		h = ( hex[0] <= '9' ) ? hex[0] - '0' : ( hex[0] | 0x20 ) - 'a' + 10;
+		l = ( hex[1] <= '9' ) ? hex[1] - '0' : ( hex[1] | 0x20 ) - 'a' + 10;
+		if ( h < 0 || h > 15 || l < 0 || l > 15 ) break;
+		if ( h * 16 + l >= 0x20 ) out[n++] = (char)( h * 16 + l );
+		hex += 2;
+	}
+	out[n] = 0;
 }
 
 LOCAL void fill_net( void )
 {
-	char	v[CF_VAL_MAX], s[CF_VAL_MAX * 2];
-	INT	len = sys_rec(OB_SYS_NET);
+	char	v[CF_VAL_MAX], s[CF_VAL_MAX * 2], w[6][48], using[16], sel[16], wifi[CF_VAL_MAX], ss[40];
+	char	keep[16];
+	CONST char *nm[NET_ADP_MAX + 2];
+	INT	len = sys_rec(OB_SYS_NET), alen, n, i, k, at, cur = 1, was, pick;
 
 	val_of(len, "ADAPTER", v, sizeof(v));
 	ui_set_text(&ui, P_NET_1, v);
@@ -638,35 +1311,184 @@ LOCAL void fill_net( void )
 	strncat(s, v, sizeof(s) - strlen(s) - 1);
 	strncat(s, " フレーム", sizeof(s) - strlen(s) - 1);
 	ui_set_text(&ui, ( P_NET_1 + 5 ), s);
+
+	alen = adp_rec();
+	if ( alen > 0 && adp_said != NULL && (INT)strlen(adp_said) == alen && memcmp(adp_said, adp_text, alen) == 0 ) {
+		return;			/* the adapters are as they were shown */
+	}
+	free(adp_said);
+	adp_said = (char *)malloc((size_t)alen + 1);
+	if ( adp_said != NULL ) {
+		if ( alen > 0 ) memcpy(adp_said, adp_text, (size_t)alen);
+		adp_said[alen] = 0;
+	}
+	/* the adapter of the row chosen now, to be chosen again where its row is after this */
+	was = ui_value(&ui, P_NET_LIST);
+	keep[0] = 0;
+	if ( was > 0 && was <= nadp_use ) snprintf(keep, sizeof(keep), "%s", adp_id[was - 1]);
+	using[0] = sel[0] = wifi[0] = 0;
+	if ( alen > 0 ) {
+		(void)cf_get(adp_text, alen, "USING", 0, using, sizeof(using));
+		(void)cf_get(adp_text, alen, "SELECT", 0, sel, sizeof(sel));
+		(void)cf_get(adp_text, alen, "WIFI", 0, wifi, sizeof(wifi));
+	}
+	strcpy(adp_line[0], "　自動\t有線を優先");
+	strcpy(adp_id[0], "auto");
+	nm[0] = adp_line[0];
+	n = 1;
+	for ( i = 0; alen > 0 && n <= NET_ADP_MAX && cf_get(adp_text, alen, "ADAPTER", i, v, sizeof(v)); i++ ) {
+		BOOL	isw, up, wstart = FALSE, wfail = FALSE;
+		CONST char *name, *link;
+		char	wst[16];
+
+		for ( k = 0; k < 5; k++ ) {
+			if ( !cf_word(v, k, w[k], sizeof(w[k])) ) w[k][0] = 0;
+		}
+		/* what is after the address is the adapter's name */
+		for ( k = 0, at = 0; k < 5 && v[at] != 0; k++ ) {
+			while ( v[at] != 0 && v[at] != ' ' ) at++;
+			while ( v[at] == ' ' ) at++;
+		}
+		name = v + at;
+		isw = ( strcmp(w[1], "wifi") == 0 );
+		up = ( strcmp(w[2], "up") == 0 );
+		/* the Wi-Fi's card still starting, or not started: its address is not the card's yet */
+		if ( isw && wifi[0] != 0 && cf_word(wifi, 0, wst, sizeof(wst)) ) {
+			wstart = ( strcmp(wst, "starting") == 0 || strcmp(wst, "off") == 0 );
+			wfail = ( strcmp(wst, "nofirmware") == 0 );
+		}
+		link = up ? "接続" : wstart ? "準備中" : wfail ? "起動の失敗" : "未接続";
+		/* columns (the data box's cols): in use and kind, name, link, address */
+		at = snprintf(adp_line[n], sizeof(adp_line[n]), "%s%s\t%s\t%s", ( strcmp(w[0], using) == 0 ) ? "＊" : "　",
+			      isw ? "Ｗｉ－Ｆｉ" : "有線", name, link);
+		if ( up && atoi(w[3]) > 0 && at < (INT)sizeof(adp_line[n]) ) {
+			at += snprintf(adp_line[n] + at, sizeof(adp_line[n]) - at, " %sMb/s", w[3]);
+		}
+		if ( isw && wifi[0] != 0 && at < (INT)sizeof(adp_line[n]) ) {
+			char	st[16], sg[8], hx[72];
+
+			if ( cf_word(wifi, 0, st, sizeof(st)) && strcmp(st, "connected") == 0
+			  && cf_word(wifi, 1, sg, sizeof(sg)) && cf_word(wifi, 2, hx, sizeof(hx)) ) {
+				ssid_of(hx, ss, sizeof(ss));
+				at += snprintf(adp_line[n] + at, sizeof(adp_line[n]) - at, "「%s」%sdBm", ss, sg);
+			}
+		}
+		if ( at < (INT)sizeof(adp_line[n]) ) {
+			snprintf(adp_line[n] + at, sizeof(adp_line[n]) - at, "\t%s", ( wstart || wfail ) ? "－" : w[4]);
+		}
+		snprintf(adp_id[n], sizeof(adp_id[n]), "%s", w[0]);
+		if ( strcmp(w[0], sel) == 0 ) cur = n + 1;
+		nm[n] = adp_line[n];
+		n++;
+	}
+	if ( n == 1 ) {
+		strcpy(adp_line[1], "（アダプタの情報がありません）");
+		adp_id[1][0] = 0;
+		nm[1] = adp_line[1];
+		n = 2;
+	}
+	k = ( adp_id[1][0] != 0 ) ? n - 1 : 0;	/* the adapters listed */
+	if ( k != net_nadp ) {
+		char	m[48];
+
+		snprintf(m, sizeof(m), "sysenv: adapters %d\n", k);
+		tm_putstring((CONST UB *)m);
+		net_nadp = k;
+	}
+	nadp_use = n;
+	/* the names written again do nothing to the row chosen (the part keeps its number) */
+	ui_names(&ui, P_NET_LIST, nm, n);
+	/*
+	 * the row chosen and the one set now written only when they are other
+	 * than the part holds: the adapters' record changes every second while
+	 * a Wi-Fi network is joined (its signal), and writing them then would
+	 * take back a row the person has just chosen. A row chosen stays with
+	 * its adapter when the rows move; none chosen, or its adapter gone,
+	 * the row set now is chosen.
+	 */
+	pick = 0;
+	for ( k = 0; keep[0] != 0 && k < n; k++ ) {
+		if ( strcmp(adp_id[k], keep) == 0 ) {
+			pick = k + 1;
+			break;
+		}
+	}
+	if ( pick == 0 ) pick = cur;
+	if ( pick != was || cur != net_now ) {
+		ui_set_now(&ui, P_NET_LIST, pick, cur);
+		net_now = cur;
+	}
+}
+
+/* The adapter of the row chosen, kept as the machine's setting NET_ADAPTER; the system takes it at once */
+LOCAL void net_set( void )
+{
+	INT	k = ui_value(&ui, P_NET_LIST) - 1;
+	char	m[64];
+	ER	er;
+
+	if ( k < 0 || k >= nadp_use || adp_id[k][0] == 0 ) return;
+	er = dev_put("NET_ADAPTER", adp_id[k]);
+	snprintf(m, sizeof(m), "sysenv: adapter %s: %d\n", adp_id[k], (INT)er);
+	tm_putstring((CONST UB *)m);
+	if ( er < E_OK ) {
+		tell("設定した内容が保存できません。");
+		return;
+	}
+	/* the system takes it as it reads the settings again: the adapters' object tells it then */
+	if ( adp_said != NULL ) adp_said[0] = 0;
+	fill_net();
+}
+
+/* A notice of the adapters' object or of the list of the devices: TRUE when it was one */
+LOCAL BOOL adp_told( CONST T_OBNTM *m )
+{
+	if ( m->id == NET_NTF_DEVS ) {
+		adp_watch();
+	} else if ( m->id == NET_NTF_ADP ) {
+		if ( m->event == OB_E_DELETE ) {
+			ob_cls_obj(adp_kn);
+			adp_kn = 0;
+			adp_watch();
+		}
+	} else {
+		return FALSE;
+	}
+	if ( ui_sheet(&ui) == S_D_NET ) fill_net();
+	return TRUE;
 }
 
 LOCAL void fill_usb( void )
 {
-	CONST char *nm[LIST_MAX];
-	INT	len = sys_rec(OB_SYS_USB), n = 0;
+	CONST char *none = "（接続された機器はありません）";
+	INT	len = sys_rec(OB_SYS_USB);
 
-	while ( len > 0 && n < LIST_MAX && cf_get(text, len, "DEVICE", n, usb_line[n], sizeof(usb_line[n])) ) {
-		nm[n] = usb_line[n];
-		n++;
+	/* every device's line whole, however many there are */
+	lines_free(usb_line, nusb);
+	nusb = ( len > 0 ) ? lines_of(text, len, "DEVICE", &usb_line) : 0;
+	if ( nusb == 0 ) {
+		ui_names(&ui, P_USB_LIST, &none, 1);
+	} else {
+		ui_names(&ui, P_USB_LIST, (CONST char *const *)usb_line, nusb);
 	}
-	if ( n == 0 ) {
-		strcpy(usb_line[0], "（接続された機器はありません）");
-		nm[0] = usb_line[0];
-		n = 1;
-	}
-	ui_names(&ui, P_USB_LIST, nm, n);
 	ui_set_value(&ui, P_USB_LIST, 0);
 }
 
 /* The disks: the device objects that are disks, their size and where they are mounted */
 LOCAL void fill_disks( void )
 {
-	CONST char *nm[LIST_MAX];
-	static TS_UUID	ids[64];
-	INT	cnt = 0, i, n = 0;
+	CONST char **nm;
+	TS_UUID	*ids = NULL;
+	INT	cnt, i, n = 0;
 
-	if ( ob_lst_obj(OB_T_DEVICE, OB_S_DISK, NULL, ids, 64, &cnt) < E_OK ) cnt = 0;
-	for ( i = 0; i < cnt && n < LIST_MAX; i++ ) {
+	/* every disk and partition there is, however many */
+	cnt = ui_lst_obj(OB_T_DEVICE, OB_S_DISK, &ids);
+	if ( cnt < 0 ) cnt = 0;
+	free(disk_line);
+	disk_line = malloc(sizeof(*disk_line) * (size_t)( ( cnt > 0 ) ? cnt : 1 ));
+	nm = (CONST char **)malloc(sizeof(char *) * (size_t)( ( cnt > 0 ) ? cnt : 1 ));
+	if ( disk_line == NULL || nm == NULL ) cnt = 0;
+	for ( i = 0; i < cnt; i++ ) {
 		T_OBREF	r;
 		T_OBREC	rec[2];
 		INT	nr = 0;
@@ -695,13 +1517,15 @@ LOCAL void fill_disks( void )
 			}
 			ob_cls_obj(key);
 		}
-		snprintf(disk_line[n], sizeof(disk_line[n]), "%s　%d MB　%s", (CONST char *)r.name,
+		snprintf(disk_line[n], sizeof(disk_line[n]), "%s\t%d MB\t%s", (CONST char *)r.name,
 			 (INT)( size >> 20 ), where);
 		nm[n] = disk_line[n];
 		n++;
 	}
-	ui_names(&ui, P_DISK_LIST, nm, n);
+	if ( nm != NULL ) ui_names(&ui, P_DISK_LIST, nm, n);
 	ui_set_value(&ui, P_DISK_LIST, 0);
+	free((void *)nm);
+	free(ids);
 }
 
 LOCAL void fill_video( void )
@@ -740,15 +1564,15 @@ LOCAL void fill_kbd( void )
  * the mixer (both sides together; 音量ミキサー sets them apart), the
  * same on every output.
  */
-#define SND_MAX		10
 LOCAL void tell( CONST char *line );
 LOCAL BOOL is_code( CONST T_MNSEL *sel, CONST char *code );
-#define SND_TICKS	50		/* the page read again every second */
+LOCAL ER desk_req( UINT req, CONST TS_UUID *target, INT recno, UINT flags, CONST char *text, T_DTANS *an );
 
-LOCAL char	snd_id[SND_MAX][SND_ID_MAX];
-LOCAL char	snd_line[SND_MAX][96];
-LOCAL INT	nsnd, snd_tick;
-LOCAL char	snd_said[TEXT_MAX / 4];	/* the record as last shown */
+typedef char	SNDLINE[96];
+LOCAL char	(*snd_id)[SND_ID_MAX] = NULL;	/* the outputs the system has, and one chosen not there */
+LOCAL SNDLINE	*snd_line = NULL;
+LOCAL INT	nsnd;
+LOCAL char	*snd_said = NULL;	/* the record as last shown, whole */
 LOCAL ID	snd_key = 0;		/* the sound device's object, while a tone may play */
 
 /* The sound device's object, opened once */
@@ -775,6 +1599,8 @@ LOCAL void snd_name( CONST char *id, CONST char *kind, CONST char *name, INT fla
 	} else if ( strcmp(kind, "hdmi") == 0 ) {
 		snprintf(out, max, "%s：%s", ( strcmp(id, "hdmi1") == 0 ) ? "ＨＤＭＩ１" : "ＨＤＭＩ０",
 			 ( name[0] != 0 ) ? name : "画面");
+	} else if ( strcmp(kind, "hda") == 0 ) {
+		snprintf(out, max, "内蔵のサウンド：%s", ( name[0] != 0 ) ? name : "ＨＤオーディオ");
 	} else {
 		snprintf(out, max, "ＵＳＢ：%s（%s）", ( name[0] != 0 ) ? name : "オーディオ機器",
 			 ( at != NULL ) ? at + 1 : "");
@@ -816,19 +1642,34 @@ LOCAL void snd_volume( void )
 LOCAL void fill_sound( void )
 {
 	char	v[CF_VAL_MAX], kind[16], name[CF_VAL_MAX], sel[SND_ID_MAX], now[SND_ID_MAX], fl[16];
-	CONST char *nm[SND_MAX];
-	INT	len = sys_rec(OB_SYS_SOUND), k, cur = 0, playing = 0, flags;
+	CONST char **nm;
+	INT	len = sys_rec(OB_SYS_SOUND), k, cur = 0, playing = 0, flags, room = 1;
+	CONST UB *fv;
+	INT	fl_len;
 
-	snd_tick = 0;
-	if ( len > 0 ) {
-		snprintf(snd_said, sizeof(snd_said), "%.*s", len, (CONST char *)text);
-	} else {
-		snd_said[0] = 0;
+	free(snd_said);
+	snd_said = (char *)malloc((size_t)( ( len > 0 ) ? len : 0 ) + 1);
+	if ( snd_said != NULL ) {
+		if ( len > 0 ) memcpy(snd_said, text, (size_t)len);
+		snd_said[( len > 0 ) ? len : 0] = 0;
 	}
 	if ( len <= 0 || !cf_get(text, len, "SELECT", 0, sel, sizeof(sel)) ) strcpy(sel, "auto");
 	if ( len <= 0 || !cf_get(text, len, "OUTPUT", 0, now, sizeof(now)) ) strcpy(now, "none");
+	/* a row for each output, and one for an output chosen that is not there */
+	for ( k = 0; len > 0 && cf_find(text, len, "OUT", k, &fv, &fl_len); k++ ) {
+		room++;
+	}
+	free(snd_id);
+	free(snd_line);
+	snd_id = malloc(sizeof(*snd_id) * (size_t)room);
+	snd_line = (SNDLINE *)malloc(sizeof(SNDLINE) * (size_t)room);
+	nm = (CONST char **)malloc(sizeof(char *) * (size_t)room);
 	nsnd = 0;
-	for ( k = 0; len > 0 && nsnd < SND_MAX - 1 && cf_get(text, len, "OUT", k, v, sizeof(v)); k++ ) {
+	if ( snd_id == NULL || snd_line == NULL || nm == NULL ) {
+		free(nm);
+		return;
+	}
+	for ( k = 0; len > 0 && nsnd < room - 1 && cf_get(text, len, "OUT", k, v, sizeof(v)); k++ ) {
 		if ( !cf_get(text, len, "OUT_KIND", k, kind, sizeof(kind)) ) strcpy(kind, "none");
 		if ( !cf_get(text, len, "OUT_NAME", k, name, sizeof(name)) ) name[0] = 0;
 		flags = cf_get(text, len, "OUT_FLAGS", k, fl, sizeof(fl)) ? cf_num(fl, 0) : 0;
@@ -839,7 +1680,7 @@ LOCAL void fill_sound( void )
 		nm[nsnd] = snd_line[nsnd];
 		nsnd++;
 	}
-	if ( cur == 0 && nsnd < SND_MAX ) {
+	if ( cur == 0 && nsnd < room ) {
 		/* chosen, and not there now: shown all the same */
 		snprintf(snd_id[nsnd], SND_ID_MAX, "%s", sel);
 		snprintf(snd_line[nsnd], sizeof(snd_line[nsnd]), "%s（つながっていません）",
@@ -848,6 +1689,7 @@ LOCAL void fill_sound( void )
 		cur = ++nsnd;
 	}
 	ui_names(&ui, P_SND_OUTS, nm, nsnd);
+	free(nm);
 	ui_set_now(&ui, P_SND_OUTS, cur, playing);
 	ui_set_value(&ui, P_SND_KEEP, ( len > 0 && cf_get(text, len, "KEEP", 0, v, sizeof(v)) && cf_num(v, 0) != 0 ));
 
@@ -875,14 +1717,13 @@ LOCAL void fill_sound( void )
 }
 
 /* The page read again while it shows; shown again only when the record changed */
-LOCAL void sound_tick( void )
+/* Told that what plays sound changed (OB_SYS_SOUND): the page read again when it is shown */
+LOCAL void sound_told( void )
 {
 	INT	len;
 
-	if ( ++snd_tick < SND_TICKS ) return;
-	snd_tick = 0;
 	len = sys_rec(OB_SYS_SOUND);
-	if ( len > 0 && ( (INT)strlen(snd_said) != len || memcmp(snd_said, text, len) != 0 ) ) {
+	if ( len > 0 && ( snd_said == NULL || (INT)strlen(snd_said) != len || memcmp(snd_said, text, len) != 0 ) ) {
 		fill_sound();
 	}
 }
@@ -1020,6 +1861,9 @@ LOCAL void perf_set( void )
 	char	v[16], s[80];
 	ER	er = E_OK;
 
+#if CPU_BY_FIRMWARE
+	k = -1;					/* the clock is the firmware's: nothing kept for it */
+#endif
 	if ( k >= 0 && k < NCPU ) {
 		snprintf(v, sizeof(v), "%d", cpu_mhz_of[k]);
 		er = dev_put("CPU_MHZ", v);
@@ -1038,46 +1882,386 @@ LOCAL void perf_set( void )
 	} else if ( er < E_OK ) {
 		tell("設定した内容が保存できません。");
 	}
-	perf_tick = PERF_TICKS - PERF_SOON;	/* the state read again once it is taken */
+	perf_at = ui_now() + PERF_SOON_MS;	/* the state read again once it is taken */
+}
+
+/*
+ * 〈プロセッサ〉: each processor's role and the devices' interrupts, from
+ * the system object's record of the system (CPUS, CPU_CHORE, CPU_RT, IRQ),
+ * which says what the system took. A role is kept in the machine's
+ * settings (CPU_CHORE, CPU_RT) and taken by the system as it is written;
+ * the processor of a device's interrupts is an attribute of the device's
+ * object (irq.cpu), which the system keeps for the next start.
+ */
+#define ROLE_PLAIN	1
+#define ROLE_CHORE	2
+#define ROLE_RT		3
+#define CPU_LIMIT	1024		/* the most processors the system runs (CNF_MAX_PRCID of the PC) */
+
+/* The processors and the devices' interrupts, as many as the system object names */
+LOCAL INT	ncpu_shown;
+LOCAL UB	*cpu_role = NULL;
+LOCAL char	(*cpu_line)[48] = NULL;
+LOCAL INT	nirq;
+LOCAL char	(*irq_name)[16] = NULL;
+LOCAL TS_UUID	*irq_uuid = NULL;
+LOCAL INT	*irq_want = NULL;
+LOCAL char	**irq_line = NULL;
+
+/* len bytes of "1,3-4" into the roles, however long the list is */
+LOCAL void roles_of( CONST UB *s, INT len, UB role )
+{
+	INT	i = 0, a, b;
+
+	while ( s != NULL && i < len ) {
+		while ( i < len && ( s[i] == ' ' || s[i] == ',' || s[i] == '\t' ) ) i++;
+		if ( i >= len ) break;
+		if ( s[i] < '0' || s[i] > '9' ) {
+			while ( i < len && s[i] != ',' && s[i] != ' ' ) i++;
+			continue;
+		}
+		for ( a = 0; i < len && s[i] >= '0' && s[i] <= '9'; i++ ) {
+			if ( a <= ncpu_shown ) a = a * 10 + ( s[i] - '0' );
+		}
+		b = a;
+		if ( i < len && s[i] == '-' ) {
+			for ( i++, b = 0; i < len && s[i] >= '0' && s[i] <= '9'; i++ ) {
+				if ( b <= ncpu_shown ) b = b * 10 + ( s[i] - '0' );
+			}
+		}
+		if ( b > ncpu_shown ) b = ncpu_shown;
+		for ( ; a <= b; a++ ) {
+			if ( a >= 1 ) cpu_role[a - 1] = role;
+		}
+	}
+}
+
+/*
+ * The processors of a role, as the settings write them: runs as n-m
+ * ("2,4-63"), in a string of its own (free it) as long as it needs
+ */
+LOCAL char *roles_text( UB role )
+{
+	INT	i, j, n = 0, max = 16;
+	char	*out = (char *)malloc((size_t)max), *o;
+
+	if ( out == NULL ) return NULL;
+	out[0] = 0;
+	for ( i = 0; i < ncpu_shown; i = j + 1 ) {
+		if ( cpu_role[i] != role ) {
+			j = i;
+			continue;
+		}
+		for ( j = i; j + 1 < ncpu_shown && cpu_role[j + 1] == role; j++ ) ;
+		if ( n + 24 > max ) {
+			max *= 2;
+			o = (char *)realloc(out, (size_t)max);
+			if ( o == NULL ) {
+				free(out);
+				return NULL;
+			}
+			out = o;
+		}
+		n += snprintf(out + n, (size_t)( max - n ), ( j > i ) ? "%s%d-%d" : "%s%d", ( n > 0 ) ? "," : "",
+			      i + 1, j + 1);
+	}
+	return out;
+}
+
+LOCAL void cpu_lines( void )
+{
+	CONST char	**nm = (CONST char **)malloc(sizeof(char *) * (size_t)ncpu_shown);
+	INT		i;
+
+	if ( nm == NULL ) return;
+	for ( i = 0; i < ncpu_shown; i++ ) {
+		snprintf(cpu_line[i], sizeof(cpu_line[i]), "ＰＲＣ%d\t%s", i + 1,
+			 ( i == 0 ) ? "雑務（システムタイマ）"
+			 : ( cpu_role[i] == ROLE_CHORE ) ? "雑務"
+			 : ( cpu_role[i] == ROLE_RT ) ? "実時間" : "普通");
+		nm[i] = cpu_line[i];
+	}
+	ui_names(&ui, P_CPU_LIST, nm, ncpu_shown);
+	free((void *)nm);
+}
+
+/* The arrays of the page made as large as the processors and the devices there are */
+LOCAL BOOL cpu_room( INT ncpu, INT ndev )
+{
+	free(cpu_role);
+	free(cpu_line);
+	free(irq_name);
+	free(irq_uuid);
+	free(irq_want);
+	cpu_role = (UB *)calloc((size_t)ncpu, sizeof(UB));
+	cpu_line = malloc(sizeof(*cpu_line) * (size_t)ncpu);
+	irq_name = malloc(sizeof(*irq_name) * (size_t)( ( ndev > 0 ) ? ndev : 1 ));
+	irq_uuid = (TS_UUID *)malloc(sizeof(TS_UUID) * (size_t)( ( ndev > 0 ) ? ndev : 1 ));
+	irq_want = (INT *)malloc(sizeof(INT) * (size_t)( ( ndev > 0 ) ? ndev : 1 ));
+	return (BOOL)( cpu_role != NULL && cpu_line != NULL && irq_name != NULL && irq_uuid != NULL
+		       && irq_want != NULL );
+}
+
+LOCAL void fill_cpu( void )
+{
+	char	v[CF_VAL_MAX], w[48], **lines = NULL, *c, *r;
+	CONST char **nm;
+	CONST UB *rv;
+	INT	len = sys_rec(OB_SYS_INFO), i, k, cur = ui_value(&ui, P_CPU_LIST), nl, rl;
+
+	ncpu_shown = ( len > 0 && cf_get(text, len, "CPUS", 0, v, sizeof(v)) ) ? cf_num(v, 1) : 1;
+	if ( ncpu_shown < 1 ) ncpu_shown = 1;
+	if ( ncpu_shown > CPU_LIMIT ) ncpu_shown = CPU_LIMIT;
+	/* IRQ name uuid want intno:prc,...: each line whole, however many interrupts it names */
+	lines_free(irq_line, nirq);
+	irq_line = NULL;
+	nirq = 0;
+	nl = ( len > 0 ) ? lines_of(text, len, "IRQ", &lines) : 0;
+	if ( !cpu_room(ncpu_shown, nl) ) {
+		lines_free(lines, nl);
+		ncpu_shown = 0;
+		return;
+	}
+	for ( i = 0; i < ncpu_shown; i++ ) cpu_role[i] = ROLE_PLAIN;
+	/* the roles' lists read where they stand in the record, however long */
+	if ( len > 0 && cf_find(text, len, "CPU_CHORE", 0, &rv, &rl) ) roles_of(rv, rl, ROLE_CHORE);
+	if ( len > 0 && cf_find(text, len, "CPU_RT", 0, &rv, &rl) ) roles_of(rv, rl, ROLE_RT);
+	cpu_role[0] = ROLE_CHORE;
+
+	irq_line = (char **)calloc((size_t)( ( nl > 0 ) ? nl : 1 ), sizeof(char *));
+	nm = (CONST char **)malloc(sizeof(char *) * (size_t)( ( nl > 0 ) ? nl : 1 ));
+	for ( k = 0; irq_line != NULL && nm != NULL && k < nl; k++ ) {
+		CONST UB	*at = (CONST UB *)"";
+		INT		atl = 0;
+		size_t		k2;
+		char		us[48];
+
+		if ( !cf_word(lines[k], 0, irq_name[nirq], sizeof(irq_name[nirq])) || !cf_word(lines[k], 1, us, sizeof(us))
+		  || !cf_word(lines[k], 2, w, sizeof(w)) ) continue;
+		(void)cf_wfind((CONST UB *)lines[k], (INT)strlen(lines[k]), 3, &at, &atl);
+		if ( ui_uuid(us, &irq_uuid[nirq]) < E_OK ) memset(&irq_uuid[nirq], 0, sizeof(TS_UUID));
+		irq_want[nirq] = cf_num(w, 0);
+		k2 = strlen(irq_name[nirq]) + (size_t)atl + 32;
+		irq_line[nirq] = (char *)malloc(k2);
+		if ( irq_line[nirq] == NULL ) break;
+		snprintf(irq_line[nirq], k2, "%s\t%.*s\t%s", irq_name[nirq], atl, (CONST char *)at,
+			( irq_want[nirq] > 0 ) ? "指定" : "自動");
+		nm[nirq] = irq_line[nirq];
+		nirq++;
+	}
+	lines_free(lines, nl);
+	cpu_lines();
+	if ( cur < 1 || cur > ncpu_shown ) cur = 1;
+	ui_set_value(&ui, P_CPU_LIST, cur);
+	ui_set_value(&ui, P_CPU_ROLE, cpu_role[cur - 1]);
+	ui_off(&ui, P_CPU_ROLE, cur == 1);
+	if ( nm != NULL ) ui_names(&ui, P_IRQ_LIST, nm, nirq);
+	free((void *)nm);
+	ui_set_value(&ui, P_IRQ_LIST, ( nirq > 0 ) ? 1 : 0);
+	{
+		INT	f[1];
+
+		f[0] = ( nirq > 0 ) ? irq_want[0] : 0;
+		ui_set_fields(&ui, P_IRQ_CPU, f, 1);
+	}
+	ui_off(&ui, P_IRQ_SET, nirq == 0);
+	c = roles_text(ROLE_CHORE);
+	r = roles_text(ROLE_RT);
+	{
+		char	s[96];
+
+		snprintf(s, sizeof(s), "sysenv: processors %d chores ", ncpu_shown);
+		tm_putstring((CONST UB *)s);
+		tm_putstring((CONST UB *)( ( c != NULL ) ? c : "?" ));
+		tm_putstring((CONST UB *)" real-time ");
+		tm_putstring((CONST UB *)( ( r != NULL ) ? r : "?" ));
+		snprintf(s, sizeof(s), " interrupts %d\n", nirq);
+		tm_putstring((CONST UB *)s);
+	}
+	free(c);
+	free(r);
+}
+
+LOCAL void cpu_chosen( void )
+{
+	INT	cur = ui_value(&ui, P_CPU_LIST);
+
+	if ( cur < 1 || cur > ncpu_shown ) return;
+	ui_set_value(&ui, P_CPU_ROLE, cpu_role[cur - 1]);
+	ui_off(&ui, P_CPU_ROLE, cur == 1);
+}
+
+LOCAL void irq_chosen( void )
+{
+	INT	k = ui_value(&ui, P_IRQ_LIST) - 1, f[1];
+
+	if ( k < 0 || k >= nirq ) return;
+	f[0] = irq_want[k];
+	ui_set_fields(&ui, P_IRQ_CPU, f, 1);
+}
+
+LOCAL void tell( CONST char *line );
+
+/* Whether the system object's roles are the lists c and r, as they were written */
+LOCAL BOOL roles_taken( CONST char *c, CONST char *r )
+{
+	CONST UB	*v;
+	INT		len = sys_rec(OB_SYS_INFO), vl;
+
+	if ( c == NULL || r == NULL || len <= 0 ) return FALSE;
+	if ( !cf_find(text, len, "CPU_CHORE", 0, &v, &vl) || vl != (INT)strlen(c) || memcmp(v, c, (size_t)vl) != 0 ) {
+		return FALSE;
+	}
+	return (BOOL)( cf_find(text, len, "CPU_RT", 0, &v, &vl) && vl == (INT)strlen(r)
+		       && memcmp(v, r, (size_t)vl) == 0 );
+}
+
+/* The role chosen for the processor chosen, kept in the machine's settings */
+LOCAL void cpu_set( void )
+{
+	INT	cur = ui_value(&ui, P_CPU_LIST), role = ui_value(&ui, P_CPU_ROLE), i;
+	char	*c, *r, s[48];
+	ER	er;
+
+	if ( cur < 2 || cur > ncpu_shown || role < ROLE_PLAIN || role > ROLE_RT ) return;
+	cpu_role[cur - 1] = (UB)role;
+	/* the lists as long as they need: a list cut short would lose a processor's role */
+	c = roles_text(ROLE_CHORE);
+	r = roles_text(ROLE_RT);
+	er = ( c == NULL || r == NULL ) ? E_NOMEM : dev_put("CPU_CHORE", c);
+	if ( er >= E_OK ) er = dev_put("CPU_RT", r);
+	tm_putstring((CONST UB *)"sysenv: roles CPU_CHORE ");
+	tm_putstring((CONST UB *)( ( c != NULL ) ? c : "?" ));
+	tm_putstring((CONST UB *)" CPU_RT ");
+	tm_putstring((CONST UB *)( ( r != NULL ) ? r : "?" ));
+	snprintf(s, sizeof(s), " (%d)\n", (INT)er);
+	tm_putstring((CONST UB *)s);
+	if ( er == E_OACV ) {
+		tell("機器の設定を変更する権限がありません。");
+	} else if ( er < E_OK ) {
+		tell("設定した内容が保存できません。");
+	}
+	/*
+	 * The system takes the settings as it sees them written: the page is
+	 * read again once the system object says the roles written (or after
+	 * three seconds), so that the next change starts from them and not
+	 * from the roles before
+	 */
+	for ( i = 0; er >= E_OK && i < 10; i++ ) {
+		(void)tk_dly_tsk(300);
+		if ( roles_taken(c, r) ) break;
+	}
+	free(c);
+	free(r);
+	fill_cpu();
+}
+
+/* The processor of the chosen device's interrupts, written into its object's attributes */
+LOCAL void irq_set( void )
+{
+	INT	k = ui_value(&ui, P_IRQ_LIST) - 1, f[1] = { 0 };
+	char	j[64], s[96];
+	ID	key;
+	ER	er;
+
+	if ( k < 0 || k >= nirq ) return;
+	(void)ui_fields(&ui, P_IRQ_CPU, f, 1);
+	if ( f[0] < 0 ) f[0] = 0;
+	snprintf(j, sizeof(j), "{\"irq\":{\"cpu\":%d}}", f[0]);
+	key = ob_opn_obj(&irq_uuid[k], OB_OP_ATRRD | OB_OP_ATRWR);
+	er = ( key < E_OK ) ? (ER)key : ob_set_atr(key, (CONST UB *)j, (SZ)strlen(j));
+	if ( key >= E_OK ) ob_cls_obj(key);
+	snprintf(s, sizeof(s), "sysenv: interrupts of %s to %d (%d)\n", irq_name[k], f[0], (INT)er);
+	tm_putstring((CONST UB *)s);
+	if ( er == E_OACV ) {
+		tell("この装置の設定を変更する権限がありません。");
+	} else if ( er == E_OBJ ) {
+		tell("実時間のＣＰＵには装置の割込みを向けられません。");
+	} else if ( er < E_OK ) {
+		tell("そのＣＰＵには割込みを向けられません。");
+	}
+	fill_cpu();
+	ui_set_value(&ui, P_IRQ_LIST, k + 1);
+	irq_chosen();
+}
+
+/*
+ * 機器情報's list shown again, from a device's page: said on the console,
+ * as each page is (pressed), for the tests that go on from it
+ */
+LOCAL void devs_show( void )
+{
+	ui_show_sheet(&ui, S_DEVS);
+	tm_putstring((CONST UB *)"sysenv: devices\n");
 }
 
 LOCAL void open_page( INT sheet )
 {
 	switch ( sheet ) {
 	case S_D_SCREEN:	fill_screen();	break;
-	case S_D_NET:		fill_net();	break;
+	case S_D_NET:		if ( adp_said != NULL ) adp_said[0] = 0;
+				net_at = ui_now() + NET_MS; net_now = -1; net_nadp = -1; ui_set_now(&ui, P_NET_LIST, 0, 0);
+				fill_net();
+				break;
 	case S_D_USB:		fill_usb();	break;
 	case S_D_DISK:		fill_disks();	break;
 	case S_D_VIDEO:		fill_video();	break;
 	case S_D_KBD:		fill_kbd();	break;
 	case S_D_SOUND:		fill_sound();	break;
+	case S_D_CPU:		fill_cpu();	break;
 	default:		break;
 	}
 	ui_show_sheet(&ui, sheet);
 }
 
+/*
+ * The width and height typed (or the size chosen) and the shape set now
+ * by the desktop (DT_RQ_SCREEN), which asks whether it shows right and
+ * keeps it for the next start, or puts back what there was
+ */
 LOCAL void screen_set( void )
 {
-	INT	k = ui_value(&ui, P_SCR_LIST) - 1, c = mode_cur - 1;
-	char	v[64];
+	INT	f[2] = { 0, 0 };
+	CONST char *fit = "";
+	char	v[48], sc[8];
+	T_DTANS	an;
+	TS_UUID	nil;
+	ER	er;
 
-	if ( k < 0 || k >= nmode ) return;
-	if ( k == c ) {
-		ui_show_sheet(&ui, S_DEVS);
+	(void)ui_fields(&ui, P_SCR_SIZE, f, 2);
+	if ( scr_fit[0] != 0 ) fit = ( ui_value(&ui, P_SCR_FIT) == 2 ) ? "stretch" : "aspect";
+	if ( f[0] <= 0 || f[1] <= 0 ) {
+		tell("画面の幅と高さを入れてください。");
 		return;
 	}
-	/* the size asked for, and the one there is now to go back to */
-	snprintf(v, sizeof(v), "%dx%d %dx%d", mode_w[k], mode_h[k],
-		 ( c >= 0 ) ? mode_w[c] : mode_w[k], ( c >= 0 ) ? mode_h[c] : mode_h[k]);
-	if ( dev_put("VIDEOMODE", v) < E_OK ) {
-		tell("設定した内容が保存できません。");
+	scale_word(sc, sizeof(sc));
+	if ( f[0] == scr_w && f[1] == scr_h && strcmp(fit, scr_fit) == 0 && sc[0] == 0 ) {
+		devs_show();
 		return;
 	}
-	if ( ui_ask(&ui, PN_SCREEN, NULL, 0) == B_RESTART ) {
-		power(TRUE);
-		return;
+	if ( sc[0] != 0 ) {
+		snprintf(v, sizeof(v), "%dx%d %s %s", f[0], f[1], fit, sc);
+	} else {
+		snprintf(v, sizeof(v), "%dx%d %s", f[0], f[1], fit);
 	}
-	ui_show_sheet(&ui, S_DEVS);
+	memset(&nil, 0, sizeof(nil));
+	er = desk_req(DT_RQ_SCREEN, &nil, 0, 0, v, &an);
+	{
+		char	m[80];
+
+		snprintf(m, sizeof(m), "sysenv: screen %s: %d\n", v, (INT)er);
+		tm_putstring((CONST UB *)m);
+	}
+	if ( er == E_NOSPT && sc[0] != 0 && f[0] == scr_w && f[1] == scr_h ) {
+		tell("この画面の大きさではその倍率にできません。");
+	} else if ( er == E_NOSPT ) {
+		tell("この画面はその大きさにできません。");
+	} else if ( er == E_PAR ) {
+		tell("画面の幅と高さが正しくありません。");
+	} else if ( er < E_OK && er != E_ABORT ) {
+		tell("画面の設定を変更できません。");
+	}
+	fill_screen();
 }
 
 LOCAL void kbd_set( void )
@@ -1091,7 +2275,7 @@ LOCAL void kbd_set( void )
 	}
 	snprintf(v, sizeof(v), "%d", ( ui_value(&ui, P_KBD_MODE) == 1 ) ? 0 : 1);
 	(void)dev_put("KBMODE", v);
-	ui_show_sheet(&ui, S_DEVS);
+	devs_show();
 }
 
 /* A picture of the wallpaper box laid now, and kept for the next start */
@@ -1115,6 +2299,8 @@ LOCAL void wall_set( void )
 		tell("背景画面データは不正またはサポート範囲外です。");
 		return;
 	}
+	/* the picture is the link; the line keeps how it is laid, and the picture for a system before */
+	(void)dev_link_put(CF_ROLE_WALL, &wall_id[k], "壁紙：");
 	(void)dev_put("WALLPAPER", v);
 	wall_cur = k + 1;
 	ui_set_now(&ui, P_WALLS, wall_cur, wall_cur);
@@ -1147,7 +2333,7 @@ LOCAL void scheme_set( void )
  * the shadow's darkness as percentages of their 255.
  */
 #define LK_N		24
-#define LK_KEEP_TICKS	50		/* a second with nothing changed */
+#define LK_KEEP_MS	1000		/* a second with nothing changed */
 #define WASH_ON		72		/* the strength a colour comes with */
 #define BAR_ON		110
 
@@ -1156,7 +2342,7 @@ LOCAL CONST UW	bar_col[3] = { 0x00405878U, 0x00303030U, 0x00F0F0F0U };
 
 LOCAL INT	lk_was[LK_N];		/* as the window found them, for 取り消し */
 LOCAL BOOL	lk_unkept;		/* changed since last kept */
-LOCAL INT	lk_quiet;		/* ticks since the last change */
+LOCAL UD	lk_at;			/* when it is kept, the last change a second before */
 
 LOCAL INT lk_get( UINT num )
 {
@@ -1177,7 +2363,7 @@ LOCAL void lk_put( UINT num, INT v )
 		return;
 	}
 	lk_unkept = TRUE;
-	lk_quiet = 0;
+	lk_at = ui_now() + LK_KEEP_MS;
 }
 
 LOCAL INT pct_of( INT v255 )
@@ -1308,17 +2494,24 @@ LOCAL void look_keep( void )
 	TS_UUID	u;
 	ID	k;
 	SZ	asz = 0;
-	INT	len, i;
+	UB	*t = NULL;
+	INT	len, i, cap = 0, room = 0;
 	char	v[16];
 	ER	er;
 
 	if ( !lk_unkept ) return;
 	lk_unkept = FALSE;
 	if ( ui_uuid(SYSDEF_CONF_DEV, &u) < E_OK ) return;
-	k = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE);
+	k = ui_conf_open(&u, OB_OP_R | OB_OP_WRITE);
 	if ( k < E_OK ) return;
-	er = ob_rea_rec(k, 1, 0, text, TEXT_MAX, &asz);
-	len = ( er >= E_OK ) ? (INT)asz : 0;
+	/* the settings whole, with room for every line of the look */
+	for ( i = 0; i < cf_look_nitem; i++ ) room += (INT)strlen(cf_look_items[i].key) + (INT)sizeof(v) + 2;
+	len = ui_key_all(k, 1, room, &t, &cap);
+	if ( len < 0 ) {
+		ob_cls_obj(k);
+		tell("設定した内容が保存できません。");
+		return;
+	}
 	for ( i = 0; i < cf_look_nitem && len >= 0; i++ ) {
 		CONST CF_ITEM	*it = &cf_look_items[i];
 		INT		n = lk_get(it->look);
@@ -1328,11 +2521,13 @@ LOCAL void look_keep( void )
 		} else {
 			snprintf(v, sizeof(v), "%d", n);
 		}
-		len = cf_put(text, len, TEXT_MAX, it->key, 0, v);
+		len = cf_put(t, len, cap, it->key, 0, v);
 	}
-	er = ( len < 0 ) ? E_LIMIT : ob_wri_rec(k, 1, 0, text, len, &asz);
-	if ( er >= E_OK ) er = ob_trn_rec(k, 1, (UD)len);
+	/* replaced in one change: a cut in the power leaves the old record or the new one */
+	er = ( len < 0 ) ? E_LIMIT : ob_rpl_rec(k, 1, t, (SZ)len);
+	(void)asz;
 	ob_cls_obj(k);
+	free(t);
 	if ( er < E_OK ) tell("設定した内容が保存できません。");
 }
 
@@ -1423,7 +2618,6 @@ LOCAL ER desk_req( UINT req, CONST TS_UUID *target, INT recno, UINT flags, CONST
 	TS_UUID	d, reply;
 	SZ	asz = 0;
 	ID	k, ka;
-	INT	i;
 	ER	er;
 
 	memset(an, 0, sizeof(*an));
@@ -1449,15 +2643,14 @@ LOCAL ER desk_req( UINT req, CONST TS_UUID *target, INT recno, UINT flags, CONST
 	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, &rq, sizeof(rq), &asz) : (ER)k;
 	if ( k > 0 ) ob_cls_obj(k);
 	/* long enough for the person to type the administrator's password */
-	for ( i = 0; er >= E_OK && i < 30000; i++ ) {
-		if ( ob_rea_rec(ka, 0, 0, an, sizeof(*an), &asz) >= E_OK && asz == (SZ)sizeof(*an)
-		  && an->seq == rq.seq ) {
+	/* the answer waited for on its channel, at most 600000 ms */
+	while ( er >= E_OK ) {
+		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, 600000);
+		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq.seq ) {
 			er = an->er;
 			break;
 		}
-		(void)tk_dly_tsk(20);
 	}
-	if ( i >= 30000 ) er = E_TMOUT;
 	ob_cls_obj(ka);
 	(void)ob_del_obj(&reply);
 	return er;
@@ -1477,6 +2670,28 @@ LOCAL BOOL confirm( CONST char *l1, CONST char *l2, CONST char *yes )
 	l[1] = l2;
 	l[2] = yes;
 	return (BOOL)( ui_ask(&ui, PN_POWER, l, 3) == B_POWER );
+}
+
+/* Told in two lines, for what is longer than a line of PN_TELL */
+LOCAL void tell2( CONST char *l1, CONST char *l2 )
+{
+	CONST char *l[2];
+
+	l[0] = l1;
+	l[1] = l2;
+	(void)ui_ask(&ui, PN_TELL2, l, 2);
+}
+
+/* Asked in three lines: what is so in two, and the question */
+LOCAL BOOL confirm3( CONST char *l1, CONST char *l2, CONST char *l3, CONST char *yes )
+{
+	CONST char *l[4];
+
+	l[0] = l1;
+	l[1] = l2;
+	l[2] = l3;
+	l[3] = yes;
+	return (BOOL)( ui_ask(&ui, PN_ASK3, l, 4) == B_ASK3 );
 }
 
 LOCAL void prog_detail( void )
@@ -1538,6 +2753,110 @@ LOCAL void prog_delete( void )
 	fill_version();
 }
 
+/* The machine a system's package names, as the person knows it */
+LOCAL CONST char *machine_name( CONST char *m )
+{
+	return ( strcmp(m, "rpi5") == 0 ) ? "Raspberry Pi 5"
+	     : ( strcmp(m, "rpi4") == 0 ) ? "Raspberry Pi 4、400"
+	     : ( strcmp(m, "x64") == 0 ) ? "x64のPC"
+	     : ( strcmp(m, "qemu_virt") == 0 ) ? "QEMU" : m;
+}
+
+/*
+ * A package of the system dropped on the list (design 11.8): what it is
+ * asked of the desktop, the person asked whether to go ahead, and the
+ * update done a step at a time with how far it has come shown, then a
+ * restart asked for. FALSE when it is not a system's package.
+ */
+LOCAL BOOL sys_drop( CONST TS_UUID *pkg )
+{
+	T_DTANS		an;
+	T_OBNTM		m;
+	UI		q;
+	char		pv[24], sv[24], l1[160], s[160], *tab;
+	INT		done = 0, total = 0, num = 0;
+	UINT		force = 0;
+	BOOL		shown;
+	ER		er;
+
+	er = desk_ask(DT_RQ_SYSUP, pkg, DT_SYSUP_CHECK, &an);
+	if ( er == E_OBJ || er == E_PAR ) {
+		return FALSE;
+	}
+	an.text[sizeof(an.text) - 1] = 0;
+	tab = strchr((char *)an.text, '\t');
+	if ( tab != NULL ) *tab = 0;
+	snprintf(pv, sizeof(pv), "%s", (char *)an.text);
+	snprintf(sv, sizeof(sv), "%s", ( tab != NULL ) ? tab + 1 : "");
+	snprintf(s, sizeof(s), "sysenv: system package %s (%s) %d\n", pv, sv, (INT)er);
+	tm_putstring((CONST UB *)s);
+	if ( er == E_NOSPT ) {
+		snprintf(l1, sizeof(l1), "%s用のシステムのパッケージなので、", machine_name(pv));
+		tell2(l1, "この機械には入れられません。");
+		return TRUE;
+	}
+	if ( er == E_OK ) {
+		snprintf(l1, sizeof(l1), "システムを%sから%sに更新します。", sv, pv);
+		if ( !confirm(l1, "更新が終わったら、システムを再起動します。", "更新") ) return TRUE;
+	} else if ( er == E_LIMIT ) {
+		snprintf(l1, sizeof(l1), "パッケージのバージョン%sは、", pv);
+		snprintf(s, sizeof(s), "今のシステム（%s）と同じか古いものです。", sv);
+		if ( !confirm3(l1, s, "置き換えますか？", "置き換え") ) return TRUE;
+		force = 1;
+	} else {
+		tell("システムのパッケージを読めませんでした。");
+		return TRUE;
+	}
+
+	er = desk_req(DT_RQ_SYSUP, pkg, DT_SYSUP_BEGIN, force, NULL, &an);
+	if ( er == E_ABORT ) {
+		return TRUE;			/* the administrator's password was not given */
+	}
+	if ( er < E_OK ) {
+		if ( er == E_NOMEM ) {
+			tell2("起動の区画の空きが足りないので、", "システムを更新できません。");
+		} else {
+			tell(( er == E_OACV ) ? "システムを更新する権限がありません。" : "システムの更新を始められませんでした。");
+		}
+		return TRUE;
+	}
+	total = (INT)an.how;
+	shown = (BOOL)( ui_dlg_open(&ui, PN_SYSUP, &q) >= E_OK );
+	if ( shown ) {
+		snprintf(l1, sizeof(l1), "システムを%sに更新しています。", pv);
+		ui_set_text(&q, 1, l1);
+		ui_set_text(&q, 2, "電源を切らないでください。");
+	}
+	do {
+		if ( shown ) {
+			snprintf(s, sizeof(s), "%d％（%d／%d）", ( total > 0 ) ? done * 100 / total : 0, done, total);
+			ui_set_text(&q, 3, s);
+			/* what the panel told while the desktop worked, read and let go */
+			while ( ui_wait(&ui, &m, 0) >= E_OK ) (void)ui_dlg_take(&q, &m, &num);
+		}
+		er = desk_req(DT_RQ_SYSUP, pkg, DT_SYSUP_STEP, 0, NULL, &an);
+		done = (INT)an.how;
+		total = (INT)an.flags;
+	} while ( er >= E_OK && done < total );
+	if ( shown ) ui_dlg_close(&q);
+	snprintf(s, sizeof(s), "sysenv: system update %d of %d (%d)\n", done, total, (INT)er);
+	tm_putstring((CONST UB *)s);
+	fill_version();
+	if ( er < E_OK ) {
+		tell2("システムを更新できませんでした。", "次に起動したときに続きを行います。");
+		return TRUE;
+	}
+	snprintf(l1, sizeof(l1), "システムを%sに更新しました。", pv);
+	if ( confirm(l1, "再起動すると、新しいバージョンになります。", "再起動") ) {
+		if ( sys_write(OB_SYS_POWER, "RESTART") < E_OK ) {
+			tell("再起動できません。電源を入れ直してください。");
+		} else {
+			closing = TRUE;
+		}
+	}
+	return TRUE;
+}
+
 /* A package dropped on the list: installed, or the program it is a newer version of updated */
 LOCAL void prog_drop( CONST T_OBDROP *d )
 {
@@ -1546,7 +2865,10 @@ LOCAL void prog_drop( CONST T_OBDROP *d )
 	INT		i, done = 0;
 	ER		er;
 
-	for ( i = 0; i < d->n && i < OB_DROP_MAX; i++ ) {
+	for ( i = 0; i < d->n; i++ ) {
+		if ( sys_drop(&d->v[i].target) ) {
+			continue;		/* the system's own package */
+		}
 		er = desk_ask(DT_RQ_INSTALL, &d->v[i].target, 0, &an);
 		if ( er == E_LIMIT ) {
 			if ( !confirm("同じか、より新しいバージョンがすでにあります。",
@@ -1595,8 +2917,6 @@ LOCAL void prog_drop( CONST T_OBDROP *d )
  * differ in width ('post') and whether it has forms for vertical writing
  * ('vert' of 'GSUB').
  */
-#define FACE_MAX	8		/* faces of one file worked with */
-#define FROW_MAX	32		/* lines of the list */
 #define FNAME_MAX	64
 
 typedef struct {
@@ -1623,9 +2943,8 @@ typedef struct {
 	FSET	s;
 } FROW;
 
-LOCAL FROW	frow[FROW_MAX];
+LOCAL FROW	*frow = NULL;		/* a line for each face of the box, as many as there are */
 LOCAL INT	nfrow;
-LOCAL char	font_line[FROW_MAX][FNAME_MAX + 24];
 
 /* ------------------------------------------------ a face's file, read as it is */
 
@@ -1983,19 +3302,59 @@ LOCAL UINT hex4( CONST char *s )
 }
 
 /* An object's faces' settings as its resource has them: how many, and each one's index */
+/*
+ * A resource of an object read whole, however long, into a buffer of its
+ * own (free it): read from its start into twice the room while it fills
+ * the room. Its length, or an error.
+ */
+LOCAL INT res_all( ID key, CONST char *name, UB **p_buf )
+{
+	SZ	room = 4096, asz;
+	UB	*b;
+	ER	er;
+
+	for ( ;; ) {
+		b = (UB *)malloc((size_t)room + 1);
+		if ( b == NULL ) {
+			*p_buf = NULL;
+			return E_NOMEM;
+		}
+		asz = 0;
+		er = ob_rea_res(key, (CONST UB *)name, 0, b, room, &asz);
+		if ( er < E_OK || asz < room ) break;
+		free(b);
+		room *= 2;
+	}
+	if ( er < E_OK ) {
+		free(b);
+		*p_buf = NULL;
+		return (INT)er;
+	}
+	b[asz] = 0;
+	*p_buf = b;
+	return (INT)asz;
+}
+
+/*
+ * What the object's settings say of its faces, every one of them, into
+ * fs and idx of room for max (max 0: only how many). How many there are.
+ */
 LOCAL INT faces_said( CONST TS_UUID *u, FSET *fs, INT *idx, INT max )
 {
-	static UB	raw[4096];
+	UB		*raw = NULL;
 	T_JSON		root, list, it;
-	SZ		asz = 0;
 	ID		key;
-	INT		n = 0;
+	INT		n = 0, len;
 
 	key = ob_opn_obj(u, OB_OP_R);
 	if ( key <= 0 ) return 0;
-	if ( ob_rea_res(key, (CONST UB *)DT_FONT_RES, 0, raw, sizeof(raw) - 1, &asz) >= E_OK && asz > 0
-	  && js_parse(raw, (INT)asz, &root) >= E_OK && js_get(&root, "faces", &list) >= E_OK ) {
-		for ( it.s = NULL; n < max && js_next(&list, &it); ) {
+	len = res_all(key, DT_FONT_RES, &raw);
+	if ( len > 0 && js_parse(raw, len, &root) >= E_OK && js_get(&root, "faces", &list) >= E_OK ) {
+		for ( it.s = NULL; js_next(&list, &it); ) {
+			if ( n >= max ) {
+				n++;			/* counted, not taken */
+				continue;
+			}
 			char	h[16];
 
 			memset(&fs[n], 0, sizeof(fs[n]));
@@ -2009,17 +3368,32 @@ LOCAL INT faces_said( CONST TS_UUID *u, FSET *fs, INT *idx, INT max )
 			n++;
 		}
 	}
+	free(raw);
 	ob_cls_obj(key);
 	return n;
+}
+
+/* The faces an object's settings name, every one, in arrays of their own (free them): how many */
+LOCAL INT faces_all( CONST TS_UUID *u, FSET **p_fs, INT **p_idx )
+{
+	INT	n = faces_said(u, NULL, NULL, 0);
+
+	*p_fs = (FSET *)calloc((size_t)( ( n > 0 ) ? n : 1 ), sizeof(FSET));
+	*p_idx = (INT *)calloc((size_t)( ( n > 0 ) ? n : 1 ), sizeof(INT));
+	if ( *p_fs == NULL || *p_idx == NULL ) {
+		free(*p_fs);
+		free(*p_idx);
+		*p_fs = NULL;
+		*p_idx = NULL;
+		return 0;
+	}
+	return ( n > 0 ) ? faces_said(u, *p_fs, *p_idx, n) : 0;
 }
 
 /* Whether an object has settings of its own (a face saved, 書体を保存する) */
 LOCAL BOOL has_settings( CONST TS_UUID *u )
 {
-	FSET	fs[1];
-	INT	idx[1];
-
-	return (BOOL)( faces_said(u, fs, idx, 1) > 0 );
+	return (BOOL)( faces_said(u, NULL, NULL, 0) > 0 );
 }
 
 /* A string into JSON, in its quotes */
@@ -2082,19 +3456,37 @@ LOCAL BOOL same_obj( CONST TS_UUID *a, CONST TS_UUID *b )
 
 LOCAL void fill_fonts( void )
 {
-	static TS_UUID	ids[LIST_MAX];
-	static char	nm[LIST_MAX][64];
-	FSET		said[FACE_MAX];
-	INT		idx[FACE_MAX], n, i, k, ns;
-	CONST char	*lp[FROW_MAX];
+	TS_UUID		*ids;
+	NAME64		*nm;
+	FSET		*said;
+	INT		*idx, n, i, k, ns, cap = 0;
+	char		**line = NULL;
 	SFNT		sf;
 	SFINFO		si;
 
-	n = box_links(SYSDEF_FONT_BOX, ids, nm, LIST_MAX);
+	/* a line for every face of every object of the box, however many */
+	n = box_links(SYSDEF_FONT_BOX, &ids, &nm);
 	nfrow = 0;
-	for ( i = 0; i < n && nfrow < FROW_MAX; i++ ) {
-		ns = faces_said(&ids[i], said, idx, FACE_MAX);
-		for ( k = 0; k < ( ( ns > 0 ) ? ns : 1 ) && nfrow < FROW_MAX; k++ ) {
+	for ( i = 0; i < n; i++ ) {
+		ns = faces_all(&ids[i], &said, &idx);
+		if ( nfrow + ( ( ns > 0 ) ? ns : 1 ) > cap ) {
+			INT	nc = ( cap > 0 ) ? cap * 2 : 32;
+			FROW	*nf;
+			char	**nl;
+
+			while ( nc < nfrow + ( ( ns > 0 ) ? ns : 1 ) ) nc *= 2;
+			nf = (FROW *)realloc(frow, sizeof(FROW) * (size_t)nc);
+			if ( nf != NULL ) frow = nf;
+			nl = (char **)realloc(line, sizeof(char *) * (size_t)nc);
+			if ( nl != NULL ) line = nl;
+			if ( nf == NULL || nl == NULL ) {
+				free(said);
+				free(idx);
+				break;
+			}
+			cap = nc;
+		}
+		for ( k = 0; k < ( ( ns > 0 ) ? ns : 1 ); k++ ) {
 			INT	index = ( ns > 0 ) ? idx[k] : 0;
 			FROW	*r = &frow[nfrow];
 
@@ -2107,13 +3499,18 @@ LOCAL void fill_fonts( void )
 			r->obj = ids[i];
 			r->index = index;
 			fset_of(&si, ( ns > 0 ) ? &said[k] : NULL, &r->s);
-			snprintf(font_line[nfrow], sizeof(font_line[nfrow]), "%s\t%s", r->s.name,
+			line[nfrow] = (char *)malloc(FNAME_MAX + 24);
+			if ( line[nfrow] == NULL ) break;
+			snprintf(line[nfrow], FNAME_MAX + 24, "%s\t%s", r->s.name,
 				 r->s.use ? "使用する" : "使用しない");
-			lp[nfrow] = font_line[nfrow];
 			nfrow++;
 		}
+		free(said);
+		free(idx);
 	}
-	ui_names(&ui, P_FONTS, lp, nfrow);
+	ui_names(&ui, P_FONTS, (CONST char *const *)line, nfrow);
+	for ( i = 0; i < nfrow; i++ ) free(line[i]);
+	free(line);
 	ui_set_value(&ui, P_FONTS, 0);
 	ui_set_value(&ui, P_FONT_USE, 0);
 	ui_off(&ui, P_FONT_USE, TRUE);
@@ -2123,6 +3520,8 @@ LOCAL void fill_fonts( void )
 		snprintf(s, sizeof(s), "sysenv: fonts %d\n", nfrow);
 		tm_putstring((CONST UB *)s);
 	}
+	free(ids);
+	free(nm);
 }
 
 /* A line of the list chosen: whether it is used shows */
@@ -2264,7 +3663,6 @@ LOCAL void font_delete( void )
 #define FD_BLIST	6
 #define FD_SET		8
 
-#define FAM_MAX		24
 
 typedef struct {
 	BOOL	open;
@@ -2272,27 +3670,54 @@ typedef struct {
 	BOOL	reg;			/* a file dropped, to be registered */
 	TS_UUID	obj;
 	INT	nface, cur;
-	FSET	f[FACE_MAX], was[FACE_MAX];
-	char	full[FACE_MAX][FNAME_MAX];
-	UW	lo[FACE_MAX], hi[FACE_MAX], count[FACE_MAX];
+	/* a set for each face of the file, as many as it has */
+	FSET	*f, *was;
+	char	(*full)[FNAME_MAX];
+	UW	*lo, *hi, *count;
 	UD	size;
 	BOOL	sample, note;		/* the documents shown */
 	TS_UUID	sample_obj, note_obj;
-	BOOL	tried[FACE_MAX];	/* faces opened to be looked at */
-	char	fam[FAM_MAX][FNAME_MAX];
-	UINT	fam_cls[FAM_MAX];
+	BOOL	*tried;			/* faces opened to be looked at */
+	char	(*fam)[FNAME_MAX];	/* the families there are, as many */
+	UINT	*fam_cls;
 	INT	nfam;
 } FSWIN;
 
 LOCAL FSWIN	fsw;
 
-/* The families there are: those of the box's faces, and the face's own */
+/* The face set window's arrays let go */
+LOCAL void fsw_free( void )
+{
+	free(fsw.f);
+	free(fsw.was);
+	free(fsw.full);
+	free(fsw.lo);
+	free(fsw.hi);
+	free(fsw.count);
+	free(fsw.tried);
+	free(fsw.fam);
+	free(fsw.fam_cls);
+	fsw.f = fsw.was = NULL;
+	fsw.full = NULL;
+	fsw.lo = fsw.hi = fsw.count = NULL;
+	fsw.tried = NULL;
+	fsw.fam = NULL;
+	fsw.fam_cls = NULL;
+	fsw.nfam = 0;
+}
+
+/* The families there are: those of the box's faces, and the face's own, however many */
 LOCAL void fam_collect( void )
 {
 	INT	i, k;
 
+	free(fsw.fam);
+	free(fsw.fam_cls);
 	fsw.nfam = 0;
-	for ( i = -1; i < nfrow && fsw.nfam < FAM_MAX; i++ ) {
+	fsw.fam = malloc(sizeof(*fsw.fam) * (size_t)( nfrow + 1 ));
+	fsw.fam_cls = (UINT *)malloc(sizeof(UINT) * (size_t)( nfrow + 1 ));
+	if ( fsw.fam == NULL || fsw.fam_cls == NULL ) return;
+	for ( i = -1; i < nfrow; i++ ) {
 		CONST char *nm = ( i < 0 ) ? fsw.f[fsw.cur].family : frow[i].s.family;
 		UINT	cls = ( i < 0 ) ? fsw.f[fsw.cur].cls : frow[i].s.cls;
 
@@ -2308,10 +3733,17 @@ LOCAL void fam_collect( void )
 /* The list of families, the face's chosen */
 LOCAL void fam_show( UI *u, INT num, CONST char *now )
 {
-	static char	line[FAM_MAX][FNAME_MAX + 16];
-	CONST char	*lp[FAM_MAX];
+	char		(*line)[FNAME_MAX + 16];
+	CONST char	**lp;
 	INT		k, cur = 0;
 
+	line = malloc(sizeof(*line) * (size_t)( fsw.nfam + 1 ));
+	lp = (CONST char **)malloc(sizeof(char *) * (size_t)( fsw.nfam + 1 ));
+	if ( line == NULL || lp == NULL ) {
+		free(line);
+		free((void *)lp);
+		return;
+	}
 	for ( k = 0; k < fsw.nfam; k++ ) {
 		snprintf(line[k], sizeof(line[k]), "%s\t%04X", fsw.fam[k], fsw.fam_cls[k] & 0xFFFFU);
 		lp[k] = line[k];
@@ -2319,6 +3751,8 @@ LOCAL void fam_show( UI *u, INT num, CONST char *now )
 	}
 	ui_names(u, num, lp, fsw.nfam);
 	ui_set_value(u, num, cur);
+	free(line);
+	free((void *)lp);
 }
 
 LOCAL void fs_attr_show( void )
@@ -2425,7 +3859,7 @@ LOCAL ER doc_make( CONST char *name, CONST char *xml, TS_UUID *p_u )
 	c.jsonsz = (SZ)strlen(json);
 	er = ob_cre_obj(&c, p_u);
 	if ( er < E_OK ) return er;
-	k = ob_opn_obj(p_u, OB_OP_R | OB_OP_W);
+	k = ob_opn_obj(p_u, OB_OP_R | OB_OP_W | OB_O_EXCL);	/* a new object filled: not read half made */
 	if ( k <= 0 ) {
 		(void)ob_del_obj(p_u);
 		return (ER)k;
@@ -2591,22 +4025,44 @@ LOCAL void note_show( BOOL on )
  */
 LOCAL BOOL fset_open( CONST TS_UUID *u, INT cur, BOOL reg )
 {
-	FSET		said[FACE_MAX];
-	INT		idx[FACE_MAX], ns, k, i;
+	FSET		*said;
+	INT		*idx, ns, k, i, nf;
 	SFNT		sf;
 	SFINFO		si;
-	CONST char	*lp[FACE_MAX];
-	static char	line[FACE_MAX][FNAME_MAX + 8];
+	CONST char	**lp;
+	char		(*line)[FNAME_MAX + 8];
 	char		s[160];
 
 	if ( sf_open(u, 0, &sf) < E_OK ) return FALSE;
+	fsw_free();
 	memset(&fsw, 0, sizeof(fsw));
 	fsw.obj = *u;
 	fsw.reg = reg;
 	fsw.size = sf.size;
-	fsw.nface = ( sf.nface > FACE_MAX ) ? FACE_MAX : sf.nface;
+	/* every face the file has (a collection may have many) */
+	nf = ( sf.nface > 0 ) ? sf.nface : 1;
 	sf_close(&sf);
-	ns = faces_said(u, said, idx, FACE_MAX);
+	fsw.f = (FSET *)calloc((size_t)nf, sizeof(FSET));
+	fsw.was = (FSET *)calloc((size_t)nf, sizeof(FSET));
+	fsw.full = calloc((size_t)nf, sizeof(*fsw.full));
+	fsw.lo = (UW *)calloc((size_t)nf, sizeof(UW));
+	fsw.hi = (UW *)calloc((size_t)nf, sizeof(UW));
+	fsw.count = (UW *)calloc((size_t)nf, sizeof(UW));
+	fsw.tried = (BOOL *)calloc((size_t)nf, sizeof(BOOL));
+	line = calloc((size_t)nf, sizeof(*line));
+	lp = (CONST char **)calloc((size_t)nf, sizeof(char *));
+	ns = faces_all(u, &said, &idx);
+	if ( fsw.f == NULL || fsw.was == NULL || fsw.full == NULL || fsw.lo == NULL || fsw.hi == NULL
+	  || fsw.count == NULL || fsw.tried == NULL || line == NULL || lp == NULL ) {
+		fsw_free();
+		free(line);
+		free((void *)lp);
+		free(said);
+		free(idx);
+		tell("フォント設定のウインドウを開けません。");
+		return TRUE;
+	}
+	fsw.nface = ( sf.nface > 0 ) ? sf.nface : 0;
 	for ( k = 0; k < fsw.nface; k++ ) {
 		FSET	*sd = NULL;
 
@@ -2627,15 +4083,21 @@ LOCAL BOOL fset_open( CONST TS_UUID *u, INT cur, BOOL reg )
 		snprintf(line[k], sizeof(line[k]), "%d：%s", k + 1, si.full);
 		lp[k] = line[k];
 	}
+	free(said);
+	free(idx);
 	fsw.cur = ( cur >= 0 && cur < fsw.nface ) ? cur : 0;
 	ui_icon(SYSDEF_PROG_SYSENV);
-	if ( ui_open(&fsw.w, SYSDEF_BOX_SYSENV, PN_FONTSET, 200, 110) < E_OK ) {
+	if ( ui_open_on(&fsw.w, &ui, SYSDEF_BOX_SYSENV, PN_FONTSET, 200, 110) < E_OK ) {
+		free(line);
+		free((void *)lp);
 		tell("フォント設定のウインドウを開けません。");
 		return TRUE;
 	}
 	fsw.open = TRUE;
 	ask_win = &fsw.w.win;
 	ui_names(&fsw.w, FS_FACES, lp, fsw.nface);
+	free(line);
+	free((void *)lp);
 	ui_set_value(&fsw.w, FS_FACES, fsw.cur + 1);
 	ui_off(&fsw.w, FS_HEX, TRUE);
 	fs_show();
@@ -2829,11 +4291,8 @@ LOCAL void fs_family( void )
 	fd_base_off(&q);
 	tm_putstring((CONST UB *)"sysenv: family panel\n");
 	while ( !done ) {
-		ev = ui_dlg_next(&fsw.w, &q, &m, &num);
-		if ( ev == UI_EV_NONE ) {
-			(void)tk_dly_tsk(TICK_MS);
-			continue;
-		}
+		if ( ui_wait(&fsw.w, &m, TMO_FEVR) < E_OK ) break;
+		ev = ui_dlg_take(&q, &m, &num);
 		if ( ev == UI_EV_CLOSE ) {
 			done = TRUE;
 		} else if ( ev == UI_EV_BUTTON ) {
@@ -3019,7 +4478,7 @@ LOCAL void font_drop( CONST T_OBDROP *d )
 	INT	i, a;
 	ER	er;
 
-	for ( i = 0; i < d->n && i < OB_DROP_MAX; i++ ) {
+	for ( i = 0; i < d->n; i++ ) {
 		CONST TS_UUID *u = &d->v[i].target;
 		FSET	f;
 
@@ -3073,17 +4532,17 @@ LOCAL void font_drop( CONST T_OBDROP *d )
 /* Links dropped on the window: packages on 〈バージョン〉, faces on 〈書体〉 */
 LOCAL void drop( void )
 {
-	static T_OBDROP	d;
+	T_OBDROP	*d;
 
-	if ( ui_drop(&ui, &d) < E_OK ) return;
+	if ( ( d = ui_drop(&ui) ) == NULL ) return;
 	if ( ui_sheet(&ui) == S_VERSION ) {
-		ui_drop_answer(&ui, &d, OB_DR_ACCEPT, "");
-		prog_drop(&d);
+		ui_drop_answer(&ui, d, OB_DR_ACCEPT, "");
+		prog_drop(d);
 	} else if ( ui_sheet(&ui) == S_FONT ) {
-		ui_drop_answer(&ui, &d, OB_DR_ACCEPT, "");
-		font_drop(&d);
+		ui_drop_answer(&ui, d, OB_DR_ACCEPT, "");
+		font_drop(d);
 	} else {
-		ui_drop_answer(&ui, &d, OB_DR_REFUSE, "〈書体〉か〈バージョン〉の一覧に落としてください");
+		ui_drop_answer(&ui, d, OB_DR_REFUSE, "〈書体〉か〈バージョン〉の一覧に落としてください");
 	}
 }
 
@@ -3174,6 +4633,15 @@ LOCAL void changed( INT id )
 	case P_SND_KEEP:
 		sound_keep();
 		break;
+	case P_SCR_LIST:
+		screen_chosen();
+		break;
+	case P_CPU_LIST:
+		cpu_chosen();
+		break;
+	case P_IRQ_LIST:
+		irq_chosen();
+		break;
 	default:
 		break;
 	}
@@ -3186,13 +4654,19 @@ LOCAL void pressed( INT id )
 	{
 		INT	k = ui_value(&ui, P_DEVS) - 1;
 
-		if ( k >= 0 && k < NDEV ) open_page(dev_pages[k]);
+		if ( k >= 0 && k < NDEV ) {
+			char	s[32];
+
+			open_page(dev_pages[k]);
+			snprintf(s, sizeof(s), "sysenv: page %d\n", (INT)( k + 1 ));	/* its row in the list, from 1 */
+			tm_putstring((CONST UB *)s);
+		}
 		break;
 	}
 	case P_BACK:
 	case P_SCR_CANCEL:
 	case P_KBD_CANCEL:
-		ui_show_sheet(&ui, S_DEVS);
+		devs_show();
 		break;
 	case P_SCR_SET:
 		screen_set();
@@ -3200,8 +4674,17 @@ LOCAL void pressed( INT id )
 	case P_KBD_SET:
 		kbd_set();
 		break;
+	case P_NET_SET:
+		net_set();
+		break;
 	case P_PERF_SET:
 		perf_set();
+		break;
+	case P_CPU_SET:
+		cpu_set();
+		break;
+	case P_IRQ_SET:
+		irq_set();
 		break;
 	case P_USB_AGAIN:
 		fill_usb();
@@ -3232,13 +4715,77 @@ LOCAL void pressed( INT id )
 	}
 }
 
+/* Whether a notice is of the system object, which the window's channel is told of too */
+LOCAL BOOL sys_said( CONST T_OBNTM *m )
+{
+	TS_UUID	u;
+
+	return (BOOL)( ui_uuid(SYSDEF_SYSTEM, &u) >= E_OK && memcmp(&u, &m->uuid, sizeof(u)) == 0 );
+}
+
+/* What plays sound, told to the window's channel as it changes (sound_told) */
+LOCAL ID sound_watch( void )
+{
+	TS_UUID	u;
+	T_OBNTF	req;
+	ID	k;
+
+	if ( ui_uuid(SYSDEF_SYSTEM, &u) < E_OK || ( k = ob_opn_obj(&u, OB_OP_ATRRD) ) <= 0 ) return 0;
+	memset(&req, 0, sizeof(req));
+	req.events = OB_E_CHANGE;
+	if ( ob_ntf_evt(k, OB_SYS_SOUND, &req, ui.port) <= 0 ) {
+		ob_cls_obj(k);
+		return 0;
+	}
+	return k;
+}
+
+/*
+ * Until something is told, or the first of what has a time: the look
+ * waiting to be kept, and a page of measured values read again while
+ * it is shown (電源管理: the clock and the temperature; ネットワーク
+ * アダプタ: the counts of the frames and the Wi-Fi's signal). What is
+ * told is read again as it is told: サウンド (sound_told), the adapters
+ * (adp_told), the AC adapter and the batteries of 電源管理 (pw_told), and
+ * フォント設定, whose window's notices come to the same channel.
+ */
+LOCAL TMO wait_for( void )
+{
+	INT	sh = ui_sheet(&ui);
+	UD	at = ~(UD)0;
+
+	if ( lk_unkept ) at = lk_at;
+	if ( sh == S_POWER && perf_at < at ) at = perf_at;
+	if ( sh == S_D_NET && net_at < at ) at = net_at;
+	return ( at == ~(UD)0 ) ? TMO_FEVR : ui_left(at);
+}
+
+/* What has its time come, done */
+LOCAL void due( void )
+{
+	UD	now = ui_now();
+
+	if ( lk_unkept && now >= lk_at ) look_keep();	/* the look, once the hand has stopped */
+	if ( ui_sheet(&ui) == S_POWER && now >= perf_at ) fill_perf_state();
+	if ( ui_sheet(&ui) == S_D_NET && now >= net_at ) {
+		net_at = now + NET_MS;
+		fill_net();
+	}
+}
+
 int main( void )
 {
 	T_OBNTM	m;
-	SZ	asz = 0;
 	INT	id, ev;
+	ID	ksnd;
 
 	ui_icon(SYSDEF_PROG_SYSENV);
+	/*
+	 * The bar down the right: the panel's sheets scroll in it when the
+	 * screen leaves the window shorter than the panel (scroll="true"
+	 * on its tags); the buttons at the sheets' foot stay in sight.
+	 */
+	ui_attr(WM_ATTR_RBAR);
 	if ( ui_open(&ui, SYSDEF_BOX_SYSENV, PN_MAIN, 160, 80) < E_OK ) {
 		tm_putstring((CONST UB *)"sysenv: no window\n");
 		return 1;
@@ -3253,8 +4800,20 @@ int main( void )
 	fill_version();
 	tm_putstring((CONST UB *)"sysenv: ready\n");
 
+	ksnd = sound_watch();
 	while ( !closing ) {
-		while ( !closing && ob_rea_rec(ui.port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+		for ( TMO tmo = wait_for(); !closing && ui_wait(&ui, &m, tmo) >= E_OK; tmo = TMO_POL ) {
+			if ( m.event == OB_E_CHANGE && m.recno == OB_SYS_SOUND && sys_said(&m) ) {
+				if ( ui_sheet(&ui) == S_D_SOUND ) sound_told();
+				continue;
+			}
+			if ( adp_told(&m) ) continue;
+			if ( pw_told(&m) ) continue;
+			if ( fsw.open && ui_mine(&fsw.w, &m) ) {
+				fs_event(&m);
+				continue;
+			}
+			if ( !ui_mine(&ui, &m) ) continue;	/* of a window gone: フォント設定 closed */
 			ev = ui_event(&ui, &m, &id);
 			switch ( ev ) {
 			case UI_EV_CLOSE:
@@ -3279,27 +4838,19 @@ int main( void )
 			case UI_EV_BUTTON:
 				pressed(id);
 				break;
+			case UI_EV_SHEET:
+				if ( id == S_POWER ) power_sheet();
+				break;
 			default:
 				break;
 			}
 		}
-		/* フォント設定, while it is open */
-		while ( !closing && fsw.open && ob_rea_rec(fsw.w.port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
-			fs_event(&m);
-		}
-		if ( !closing ) {
-			(void)tk_dly_tsk(TICK_MS);
-			if ( lk_unkept && ++lk_quiet >= LK_KEEP_TICKS ) {
-				look_keep();		/* the look, once the hand has stopped */
-			}
-			if ( ui_sheet(&ui) == S_POWER && ++perf_tick >= PERF_TICKS ) {
-				fill_perf_state();	/* the clock and the temperature as they go */
-			}
-			if ( ui_sheet(&ui) == S_D_SOUND ) {
-				sound_tick();		/* outputs plugged in and out */
-			}
-		}
+		if ( !closing ) due();
 	}
+	if ( ksnd > 0 ) ob_cls_obj(ksnd);
+	if ( adp_kn > 0 ) ob_cls_obj(adp_kn);
+	if ( adp_kdevs > 0 ) ob_cls_obj(adp_kdevs);
+	pw_close();
 	look_keep();
 	fset_close();
 	if ( snd_key > 0 ) ob_cls_obj(snd_key);

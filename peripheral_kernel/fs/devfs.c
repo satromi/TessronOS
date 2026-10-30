@@ -144,6 +144,7 @@ typedef struct {
 	UB		outq[PTY_OUTQ];
 	INT		outhead, outlen;
 	INT		column;			/* where the echo is, for taking a tab back */
+	T_OBEDGE	out_edge;		/* told on ptsN's record 1 (ts/ob.h): armed by a read that found nothing */
 } PTY;
 
 LOCAL PTY	*pty_tab[PTY_MAX];
@@ -225,6 +226,9 @@ LOCAL void out_put( PTY *p, CONST UB *s, INT n )
 	for ( i = 0; i < n && p->outlen < PTY_OUTQ; i++ ) {
 		p->outq[( p->outhead + p->outlen ) % PTY_OUTQ] = s[i];
 		p->outlen++;
+	}
+	if ( i > 0 ) {
+		(void)knl_obedge_came(&p->out_edge);	/* told once the lock is let go (pty_tell) */
 	}
 }
 
@@ -907,6 +911,18 @@ LOCAL INT slave_read( T_FILE *f, PTY *p, UB *d, SZ len )
 	}
 }
 
+/*
+ * What the master has to read, told to whoever watches record 1 of the
+ * slave's device object (ptsN) once the lock is let go: the edge was
+ * marked under it when the bytes were put out (out_put)
+ */
+LOCAL void pty_tell( PTY *p )
+{
+	if ( knl_obedge_take(&p->out_edge) && p->no >= 0 && p->no < PTY_MAX && pts_ok[p->no] ) {
+		knl_obdev_post(&pts_u[p->no], 1, OB_E_CHANGE, NULL);
+	}
+}
+
 LOCAL INT slave_write( T_FILE *f, PTY *p, CONST UB *s, SZ len )
 {
 	SZ	done = 0;
@@ -943,6 +959,7 @@ LOCAL INT slave_write( T_FILE *f, PTY *p, CONST UB *s, SZ len )
 			}
 			(void)dt_gettime(&p->mtime);
 			unlock();
+			pty_tell(p);
 			knl_fs_wake();
 			continue;
 		}
@@ -974,10 +991,12 @@ LOCAL INT master_read( T_FILE *f, PTY *p, UB *d, SZ len )
 			knl_fs_wake();
 			return n;
 		}
-		unlock();
 		if ( ( f->oflags & FS_O_NONBLOCK ) != 0 ) {
+			knl_obedge_arm(&p->out_edge);	/* nothing to read: told of what comes next */
+			unlock();
 			return EX_AGAIN;
 		}
+		unlock();
 		if ( !knl_fs_wait_slice(PTY_SLICE) ) {
 			return EX_INTR;
 		}
@@ -995,6 +1014,7 @@ LOCAL INT master_write( PTY *p, CONST UB *s, SZ len )
 		input_byte(p, s[i], &so);
 	}
 	unlock();
+	pty_tell(p);
 	sig_send(&so);
 	knl_fs_wake();
 	return (INT)len;

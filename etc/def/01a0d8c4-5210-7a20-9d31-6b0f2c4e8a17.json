@@ -1,5 +1,5 @@
 {
-  "name": "学習箱",
+  "name": "かな漢字変換の学習",
   "relationship": [],
   "linktype": false,
   "makeDate": "2026-09-26T00:00:00Z",
@@ -19,6 +19,11 @@
     }
   },
   "tessronos": {
+    "update": "links",
+    "names": {
+      "ja": "かな漢字変換の学習",
+      "en": "Conversion learning"
+    },
     "access": {
       "owner": "01a0d680-3aa0-75b3-bd7d-075e14217cd2",
       "group": "01a0d680-3aa1-7922-ae79-ba5cbbaa2037",

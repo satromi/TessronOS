@@ -41,6 +41,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ts/json.h>
+#include <ts/obatr.h>
 
 #define FSIDX		1		/* the file system's number in an objid */
 #define BSIZE		32768		/* the block the totals count in */
@@ -64,7 +65,8 @@ LOCAL const APPL appls[] = {
 	{ 0x0003, "basic-text-editor", "基本文章編集", 1, 0x16 },
 	{ 0x0009, "basic-calc-editor", "基本表計算", 1, 0x16 },
 	{ 0x000B, "microscript", "マイクロスクリプト", 2, 0x1E },
-	{ BPK_APPL_ARCHIVE, "unpack-file", "書庫解凍", 1, 0 },
+	{ BPK_APPL_ARCHIVE, "archive-manager", "書庫管理", 1, 0 },
+	{ BPK_APPL_ARCHIVE, "unpack-file", "書庫管理", 1, 0 },	/* 書庫管理's id before it took in 書庫解凍 */
 };
 #define NAPPL	( (INT)( sizeof(appls) / sizeof(appls[0]) ) )
 
@@ -525,12 +527,12 @@ LOCAL void xml_numbered( BKJOB *j, BPKBUF *b, const UB *xml, UINT len, const cha
  */
 LOCAL ER make_private( BKJOB *j, INT i, ID k, BPKBUF *b )
 {
-	static UB	meta[OB_ATR_MAX + 1];
+	UB		*meta = NULL;
 	BPKBUF		m, x;
 	UB		*ico = NULL, *xml = NULL, *names = NULL;
 	SZ		asz = 0, icolen = 0;
 	UINT		xlen = 0;
-	T_OBREC		r[64];
+	T_OBREC		*r;
 	INT		cnt = 0, nres = 0, q, nother = 0;
 	char		add[200];
 
@@ -554,8 +556,10 @@ LOCAL ER make_private( BKJOB *j, INT i, ID k, BPKBUF *b )
 		}
 		strcat(add, "}");
 	}
-	if ( ob_get_atr(k, meta, OB_ATR_MAX, &asz) >= E_OK ) meta_filter(&m, meta, (INT)asz, add[0] ? add : NULL);
+	asz = ob_atr_read(k, 0, &meta);
+	if ( asz >= 0 ) meta_filter(&m, meta, (INT)asz, add[0] ? add : NULL);
 	else meta_filter(&m, (const UB *)"{}", 2, add[0] ? add : NULL);
+	free(meta);
 	ico = malloc(OB_ICO_MAX);
 	if ( ico != NULL && ( ob_get_ico(k, ico, OB_ICO_MAX, &icolen) < E_OK || icolen < 0 ) ) icolen = 0;
 	xml = bk_read_rec(k, 0, &xlen);
@@ -565,12 +569,14 @@ LOCAL ER make_private( BKJOB *j, INT i, ID k, BPKBUF *b )
 		bk_uuid_str(&j->obj[i].uuid, self);
 		xml_numbered(j, &x, xml, xlen, self);
 	}
-	(void)ob_lst_rec(k, r, 64, &cnt);
-	for ( q = 0; q < cnt && q < 64; q++ ) {
+	r = ob_rec_read(k, &cnt);
+	for ( q = 0; q < cnt; q++ ) {
 		if ( r[q].recno != 0 && r[q].recno != extra[i].execrec ) nother++;
 	}
-	names = malloc(64 * OB_RES_NAME);
-	if ( names != NULL && ob_lst_res(k, names, 64 * OB_RES_NAME, &nres) < E_OK ) nres = 0;
+	/* how many resources, then room for every name */
+	if ( ob_lst_res(k, NULL, 0, &nres) < E_OK || nres < 0 ) nres = 0;
+	names = malloc((size_t)( nres + 1 ) * OB_RES_NAME);
+	if ( names == NULL || ob_lst_res(k, names, (SZ)( nres + 1 ) * OB_RES_NAME, &nres) < E_OK ) nres = 0;
 
 	bpk_buf_puts(b, BK_TS_MAGIC);
 	put32le(b, (UINT)m.n);
@@ -581,11 +587,12 @@ LOCAL ER make_private( BKJOB *j, INT i, ID k, BPKBUF *b )
 	bpk_buf_putn(b, m.s, m.n);
 	if ( icolen > 0 ) bpk_buf_putn(b, (const char *)ico, (INT)icolen);
 	bpk_buf_putn(b, x.s, x.n);
-	for ( q = 0; q < cnt && q < 64; q++ ) {
+	for ( q = 0; q < cnt; q++ ) {
 		if ( r[q].recno == 0 || r[q].recno == extra[i].execrec ) continue;
 		put16le(b, r[q].rt);
 		put16le(b, r[q].sub);
 	}
+	free(r);
 	{
 		const char *nm = (const char *)names;
 		INT	t;
@@ -668,7 +675,7 @@ LOCAL void make_exec( BKJOB *j, INT i, UB *e )
 
 EXPORT ER bk_save_walk( BKJOB *j, const BKROOT *roots, INT nroot )
 {
-	static UB	meta[OB_ATR_MAX + 1];
+	UB		*meta;
 	BK_TADW		*w;
 	WALK		wk;
 	BK_TADHOOK	hk = { walk_link, pic_image, NULL };
@@ -708,8 +715,8 @@ EXPORT ER bk_save_walk( BKJOB *j, const BKROOT *roots, INT nroot )
 		BKOBJ	*o = &j->obj[i];
 		EXTRA	*x = &extra[i];
 		T_OBREF	ref;
-		T_OBREC	r[64];
-		SZ	asz = 0;
+		T_OBREC	*r;
+		INT	asz;
 		ID	k;
 		UB	*xml;
 		UINT	xlen = 0;
@@ -728,9 +735,11 @@ EXPORT ER bk_save_walk( BKJOB *j, const BKROOT *roots, INT nroot )
 			if ( k > 0 ) ob_cls_obj(k);
 			break;
 		}
-		if ( ob_get_atr(k, meta, OB_ATR_MAX, &asz) < E_OK || !read_meta(j, i, k, meta, asz) ) {
+		asz = ob_atr_read(k, 0, &meta);
+		if ( asz < 0 || !read_meta(j, i, k, meta, asz) ) {
 			strncpy(o->name, (const char *)ref.name, sizeof(o->name) - 1);
 		}
+		free(meta);
 		if ( o->name[0] == 0 ) strncpy(o->name, (const char *)ref.name, sizeof(o->name) - 1);
 
 		/* record 0: its links, the objects they name, and its size as binary TAD */
@@ -768,10 +777,10 @@ EXPORT ER bk_save_walk( BKJOB *j, const BKROOT *roots, INT nroot )
 		}
 
 		/* the other records, and TessronOS's own */
-		(void)ob_lst_rec(k, r, 64, &cnt);
+		r = ob_rec_read(k, &cnt);
 		o->st.f_size = (INT)o->taglen;
 		o->st.f_nrec = 2 + o->nlink;			/* TAD, 実行機能付箋 */
-		for ( q = 0; q < cnt && q < 64; q++ ) {
+		for ( q = 0; q < cnt; q++ ) {
 			if ( r[q].recno == 0 ) continue;
 			if ( r[q].rt == OB_RT_MFUSEN && x->execrec < 0 ) {
 				x->execrec = r[q].recno;
@@ -781,6 +790,7 @@ EXPORT ER bk_save_walk( BKJOB *j, const BKROOT *roots, INT nroot )
 			o->st.f_size += (INT)r[q].size;
 			o->st.f_nrec++;
 		}
+		free(r);
 		if ( x->execrec < 0 ) o->st.f_size += EXEC_SIZE;
 		bpk_buf_init(&pb);
 		er = make_private(j, i, k, &pb);

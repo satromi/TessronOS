@@ -155,14 +155,14 @@ LOCAL INT links_of( CONST UB *x, INT n, TS_UUID *out, INT max )
 
 LOCAL BOOL name_of( CONST TS_UUID *u, UB *out, INT max )
 {
-	UB	*j = (UB *)Kmalloc(OB_ATR_MAX);
+	UB	*j = (UB *)Kmalloc(KT_META_ROOM);
 	SZ	asz = 0;
 	INT	p, k = 0, i;
 	ID	key = ob_opn_obj(u, OB_OP_ATRRD);
 	BOOL	ok = FALSE;
 
 	out[0] = 0;
-	if ( j != NULL && key > 0 && ob_get_atr(key, j, OB_ATR_MAX, &asz) >= E_OK ) {
+	if ( j != NULL && key > 0 && ob_get_atr(key, j, KT_META_ROOM, &asz) >= E_OK ) {
 		p = find(j, (INT)asz, "\"name\":\"", 0);
 		if ( p >= 0 ) {
 			for ( i = p + 8; i < (INT)asz && j[i] != '"' && k < max - 1; i++ ) out[k++] = j[i];
@@ -374,10 +374,32 @@ LOCAL INT reach( CONST TS_UUID *root, TS_UUID *out, INT max )
 	return n;
 }
 
+/* The links of an object given up: its xmlTAD records emptied, its link table made again on close */
+LOCAL void unlink_all( CONST TS_UUID *u )
+{
+	T_OBREC	r[32];
+	INT	cnt = 0, i;
+	ID	k = ob_opn_obj(u, OB_OP_ALL);
+
+	if ( k <= 0 ) return;
+	if ( ob_lst_rec(k, r, 32, &cnt) >= E_OK ) {
+		for ( i = 0; i < cnt && i < 32; i++ ) {
+			if ( r[i].rt == OB_RT_TAD ) (void)ob_trn_rec(k, r[i].recno, 0);
+		}
+	}
+	ob_cls_obj(k);
+}
+
+/*
+ * Objects that link to one another (a text back to its figure) keep each
+ * other's count above zero, and deleting them one by one would leave
+ * them as 隠れ屑実身 on the system volume: their links go first.
+ */
 LOCAL void unmake( TS_UUID *u, INT n )
 {
 	INT	i;
 
+	for ( i = 0; i < n; i++ ) unlink_all(&u[i]);
 	for ( i = n - 1; i >= 0; i-- ) (void)ob_del_obj(&u[i]);
 }
 
@@ -548,16 +570,19 @@ LOCAL void test_restore( void )
 	KT_ASSERT(name_of(&root2, name, sizeof(name)) && same(name, "KT保存図形"));
 	{
 		/* its metadata as it was, the dates it had kept beside the store's */
-		UB	*m = (UB *)Kmalloc(OB_ATR_MAX + 1);
+		UB	*m = (UB *)Kmalloc(KT_META_ROOM + 1);
 		SZ	asz = 0;
 		ID	k = ob_opn_obj(&root2, OB_OP_ATRRD);
 
-		KT_ASSERT(m != NULL && k > 0 && ob_get_atr(k, m, OB_ATR_MAX, &asz) >= E_OK);
+		KT_ASSERT(m != NULL && k > 0 && ob_get_atr(k, m, KT_META_ROOM, &asz) >= E_OK);
 		if ( m != NULL && asz > 0 ) {
 			KT_ASSERT(has(m, (INT)asz, "\"basic-figure-editor\""));
 			KT_ASSERT(has(m, (INT)asz, "\"height\":300"));
 			KT_ASSERT(has(m, (INT)asz, "\"btron\":{\"objid\":65537,\"atype\":2"));
 			KT_ASSERT(has(m, (INT)asz, "\"ctime\":\"20"));
+			/* put inside the "tessronos" the saved metadata had, which stays a JSON object */
+			KT_ASSERT(has(m, (INT)asz, "\"tessronos\":{\"btron\":{"));
+			KT_ASSERT(!has(m, (INT)asz, "\"tessronos\"btron\""));
 		}
 		if ( k > 0 ) ob_cls_obj(k);
 		if ( m != NULL ) Kfree(m);
@@ -770,7 +795,7 @@ LOCAL void test_btron( void )
 	KT_ASSERT(name_of(&root, name, sizeof(name)));
 	KT_ASSERT(same(name, "1018キャビネットデモ"));
 	for ( i = 0; i < n && i < 4; i++ ) {
-		UB	*m = (UB *)Kmalloc(OB_ATR_MAX);
+		UB	*m = (UB *)Kmalloc(KT_META_ROOM);
 		SZ	asz = 0;
 		ID	k = ob_opn_obj(&got[i], OB_OP_R);
 		TS_UUID	l[4];
@@ -783,7 +808,7 @@ LOCAL void test_btron( void )
 		}
 		KT_ASSERT(refcnt_of(&got[i]) >= 1);
 		/* a cabinet opens in 仮身一覧; what BTRON said of it is kept */
-		if ( m != NULL && k > 0 && ob_get_atr(k, m, OB_ATR_MAX, &asz) >= E_OK ) {
+		if ( m != NULL && k > 0 && ob_get_atr(k, m, KT_META_ROOM, &asz) >= E_OK ) {
 			KT_ASSERT(has(m, (INT)asz, "\"virtual-object-list\""));
 			KT_ASSERT(has(m, (INT)asz, "\"btron\":{\"objid\":"));
 			KT_ASSERT(has(m, (INT)asz, "\"mtime\":\"2025-10-"));
@@ -1000,7 +1025,7 @@ LOCAL void test_mcard( void )
 	if ( x != NULL ) Kfree(x);
 	n = reach(&root, got, MADE_MAX);
 	KT_ASSERT_EQ(n, 2);
-	m = (UB *)Kmalloc(OB_ATR_MAX + 1);
+	m = (UB *)Kmalloc(KT_META_ROOM + 1);
 	KT_ASSERT(m != NULL && name_of(&root, m, 128) && same(m, "KTカード"));
 
 	/* opens in マイクロカード, in the window the 実行機能付箋 gave */
@@ -1008,7 +1033,7 @@ LOCAL void test_mcard( void )
 		SZ	asz = 0;
 		ID	k = ob_opn_obj(&root, OB_OP_ATRRD);
 
-		KT_ASSERT(k > 0 && ob_get_atr(k, m, OB_ATR_MAX, &asz) >= E_OK);
+		KT_ASSERT(k > 0 && ob_get_atr(k, m, KT_META_ROOM, &asz) >= E_OK);
 		if ( asz > 0 ) {
 			KT_ASSERT(has(m, (INT)asz, "\"applist\":{\"" BPK_MC_PROG "\":{\"name\":\"" BPK_MC_NAME "\",\"defaultOpen\":true}}"));
 			KT_ASSERT(has(m, (INT)asz, "\"window\":{\"pos\":{\"x\":30,\"y\":40},\"width\":400,\"height\":300}"));
@@ -1117,6 +1142,8 @@ LOCAL INT links_at( CONST UB *x, INT n, INT l, INT t, INT r, INT b, TS_UUID *out
 LOCAL void test_roots( void )
 {
 	static T_BKARG	a;
+	static UD	rabuf[( BK_ARG_SIZE(1, 1) + 7 ) / 8];	/* an argument with a root more and one left out */
+	T_BKARG		*ra = (T_BKARG *)rabuf;
 	TS_UUID		p, r1, r2, x, y, k2, got[MADE_MAX], n1[2], n2[2];
 	char		ir1[40], ir2[40], ix[40], iy[40];
 	UB		*rec;
@@ -1150,20 +1177,20 @@ LOCAL void test_roots( void )
 
 	/* saved: the two roots and the child of the second; not what the first links to */
 	(void)fs_unlink(ROOTS_FILE);
-	knl_memset(&a, 0, sizeof(a));
-	a.magic = BK_ARG_MAGIC;
-	a.op = BK_OP_SAVE;
-	a.obj = r1;
-	a.nroot = 1;
-	a.root[0] = r2;
-	a.parent[0] = p;
-	a.parent[1] = p;
-	a.nexcl = 1;
-	a.excl[0] = x;
-	knl_strcpy((char *)a.path, "/boot");
-	knl_strcpy((char *)a.base, "KT根");
+	knl_memset(ra, 0, BK_ARG_SIZE(1, 1));
+	ra->magic = BK_ARG_MAGIC;
+	ra->op = BK_OP_SAVE;
+	ra->obj = r1;
+	ra->objparent = p;
+	ra->nroot = 1;
+	ra->nexcl = 1;
+	BK_ARG_ROOT(ra)[0] = r2;
+	BK_ARG_PARENT(ra)[0] = p;
+	BK_ARG_EXCL(ra)[0] = x;
+	knl_strcpy((char *)ra->path, "/boot");
+	knl_strcpy((char *)ra->base, "KT根");
 	(void)log_from(&logpos, logbuf, LOG_MAX);
-	KT_ASSERT_EQ(run(&a, sizeof(a), 60000), 0);
+	KT_ASSERT_EQ(run(ra, BK_ARG_SIZE(1, 1), 60000), 0);
 	KT_ASSERT(said("backup: saved 3 objects in 1 volumes"));
 	KT_ASSERT(said(", roots 2"));
 	if ( !said("backup: saved") ) show_log();
@@ -1470,6 +1497,8 @@ LOCAL BOOL wait_for( CONST char *w, INT tenths )
  * /boot; Tab to 復帰, Enter reads the volume's head, Enter again
  * restores it into the first cabinet.
  */
+LOCAL BOOL menu_choose( INT wid, CONST char *label );
+
 LOCAL void test_window( void )
 {
 	TS_UUID		prog, pu, win, root, got[MADE_MAX];
@@ -1503,9 +1532,9 @@ LOCAL void test_window( void )
 	if ( wid > 0 && pid > 0 ) {
 		press(wid, 0x28);				/* Enter: save */
 		KT_ASSERT(wait_for("backup: saved 3 objects in 1 volumes", 600));
-		press(wid, 0x2B);				/* Tab: 復帰 */
-		press(wid, 0x28);				/* the volume's head */
-		KT_ASSERT(wait_for("Enter で復帰します", 100));
+		KT_ASSERT(menu_choose(wid, "復帰"));		/* the 復帰 sheet, from the menu */
+		press(wid, 0x28);				/* the volume's head: 〈復帰〉, the emphasised button */
+		KT_ASSERT(wait_for("〈復帰〉で復帰します", 100));
 		press(wid, 0x28);				/* restore */
 		KT_ASSERT(wait_for("backup: restored 3 objects", 600));
 		if ( !said("backup: restored") ) show_log();
@@ -1552,8 +1581,8 @@ LOCAL BOOL menu_choose( INT wid, CONST char *label )
 	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) had[pid] = (BOOL)( wm_panel_wid(pid) > 0 );
 	knl_memset(&ev, 0, sizeof(ev));
 	ev.wid = wid;
-	ev.x = 60;
-	ev.y = 80;
+	ev.x = 224;				/* the panel's ground between its buttons, on either sheet */
+	ev.y = 282;
 	ev.code = 1;
 	ev.when = 1000000000ULL;
 	ev.type = HID_EV_BTN_DOWN;
@@ -1668,10 +1697,13 @@ EXPORT void ktest_bkp( void )
 	KT_RUN_SCREEN(test_window);
 	KT_RUN_SCREEN(test_menu);
 	if ( made ) {
+		TS_UUID	net[3];
+
+		net[0] = na;
+		net[1] = nb;
+		net[2] = nc;
 		(void)ob_del_obj(&kcab);
-		(void)ob_del_obj(&na);
-		(void)ob_del_obj(&nb);
-		(void)ob_del_obj(&nc);
+		unmake(net, 3);
 		made = FALSE;
 	}
 	knl_ob_make_for_person(FALSE);

@@ -112,6 +112,9 @@ extern int	ts_memfd_fcntl( int fd, int cmd, int arg );
 /* the GPU's descriptors (lib/libgl/gl_drm.c), when OpenGL ES is linked in */
 extern int	ts_gpu_fd_close( int fd ) __attribute__((weak));
 extern int	ts_gpu_fd_fcntl( int fd, int cmd, int arg ) __attribute__((weak));
+#ifdef __x86_64__
+extern int	ts_gpu_fd_fstat( int fd, struct stat *st ) __attribute__((weak));
+#endif
 #define TRON_EPOCH	473385600LL	/* 1985-01-01 as seconds since 1970-01-01 */
 
 /* ---------------------------------------------------------------- memory */
@@ -329,6 +332,12 @@ int _fstat( int fd, struct stat *st )
 	if ( ts_memfd_is(fd) ) {
 		return ts_memfd_fstat(fd, st);
 	}
+#ifdef __x86_64__
+	/* the GPU's descriptors (lib/libgl): a device node, as Intel's driver looks for one */
+	if ( ts_gpu_fd_fstat != NULL && ts_gpu_fd_fstat(fd, st) == 0 ) {
+		return 0;
+	}
+#endif
 	if ( fd < FD_BASE || fd >= SOCK_BASE || ts_rnd_is(fd) ) {
 		memset(st, 0, sizeof(*st));
 		st->st_mode = ( fd >= SOCK_BASE ) ? S_IFSOCK : S_IFCHR;
@@ -348,11 +357,6 @@ int _stat( const char *path, struct stat *st )
 	FS_STAT	f;
 	ER	er;
 
-	if ( strcmp(path, "/dev/urandom") == 0 || strcmp(path, "/dev/random") == 0 ) {
-		memset(st, 0, sizeof(*st));
-		st->st_mode = S_IFCHR | 0666;
-		return 0;
-	}
 	er = fs_stat(path, &f);
 
 	if ( er < 0 ) {
@@ -486,7 +490,7 @@ long sysconf( int name )
 	case _SC_NPROCESSORS_ONLN: {
 		T_TSCPU	c;
 
-		return ( ts_ref_cpu(&c) >= E_OK && c.ncpu > 0 ) ? c.ncpu : 1;
+		return ( ts_ref_cpu(&c, (SZ)sizeof(c)) > 0 && c.ncpu > 0 ) ? c.ncpu : 1;	/* the number alone */
 	}
 	case _SC_CLK_TCK:		return 100;
 	case _SC_OPEN_MAX:		return 16;
@@ -713,7 +717,11 @@ int uname( struct utsname *u )
 	strcpy(u->nodename, "tessronos");
 	strcpy(u->release, "1");
 	strcpy(u->version, "1");
+#if defined(__x86_64__)
+	strcpy(u->machine, "x86_64");
+#else
 	strcpy(u->machine, "aarch64");
+#endif
 	return 0;
 }
 

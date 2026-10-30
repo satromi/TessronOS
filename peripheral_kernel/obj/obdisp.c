@@ -41,19 +41,39 @@
 #include <ts/conf.h>
 #include "obj.h"
 
-#define MODE_TEXT_MAX	1024
 
 #if defined(RPI5) || defined(RPI4)
 #define DRIVER		"firmware framebuffer (HDMI)"
+#elif defined(X64)
+/*
+ * A PC: what drives the screen, the sizes it offers and how a size of
+ * another shape is laid on its panel come from the driver (disp_gop.c)
+ */
+IMPORT CONST char *knl_disp_hw_driver( void );
+IMPORT INT knl_disp_hw_modes( UH (*m)[2], INT max );
+IMPORT INT knl_disp_hw_fit( INT fit, BOOL now );
+#define DRIVER		knl_disp_hw_driver()
+#define FIT_ASPECT	0
+#define FIT_STRETCH	1
+
+LOCAL BOOL word_at( CONST UB *b, CONST char *w )
+{
+	while ( *w != '\0' ) {
+		if ( *b++ != (UB)*w++ ) return FALSE;
+	}
+	return TRUE;
+}
 #else
 #define DRIVER		"bochs-display"
 #endif
 
+#ifndef X64
 /* The sizes it can be set to */
 LOCAL CONST UH	modes[][2] = {
 	{ 640, 480 }, { 800, 600 }, { 1024, 768 }, { 1280, 720 }, { 1280, 800 }, { 1280, 1024 },
 	{ 1366, 768 }, { 1600, 900 }, { 1920, 1080 }, { 1920, 1200 }
 };
+#endif
 
 LOCAL INT put_line( UB *t, INT n, INT max, CONST char *key, D v )
 {
@@ -70,11 +90,28 @@ LOCAL INT put_size( UB *t, INT n, INT max, UINT w, UINT h )
 	return knl_oj_put_num(t, n, max, h);
 }
 
+#ifdef X64
+LOCAL UH	pc_modes[24][2];
+
+/* The sizes offered, into pc_modes: how many */
+LOCAL INT modes_now( void )
+{
+	return knl_disp_hw_modes(pc_modes, 24);
+}
+#define NMODES		modes_now()
+#define MODE_W(i)	pc_modes[i][0]
+#define MODE_H(i)	pc_modes[i][1]
+#else
+#define NMODES		(INT)( sizeof(modes) / sizeof(modes[0]) )
+#define MODE_W(i)	modes[i][0]
+#define MODE_H(i)	modes[i][1]
+#endif
+
 /* Record 1: what the screen is now */
 LOCAL INT mode_text( UB *t, INT n, INT max )
 {
 	T_DISPSPEC	s;
-	INT		i;
+	INT		i, nm;
 
 	if ( ts_disp_ref(&s) < E_OK ) {
 		return knl_oj_put(t, n, max, "SCREEN\tnone\n");
@@ -87,21 +124,67 @@ LOCAL INT mode_text( UB *t, INT n, INT max )
 	n = put_line(t, n, max, "DEPTH", s.bpp);
 	n = put_line(t, n, max, "BPP", s.fb_bpp);
 	n = put_line(t, n, max, "PITCH", s.pitch);
-	n = knl_oj_put(t, n, max, "DRIVER\t" DRIVER "\n");
+	n = knl_oj_put(t, n, max, "DRIVER\t");
+	n = knl_oj_put(t, n, max, DRIVER);
+	n = knl_oj_put(t, n, max, "\n");
 	n = knl_oj_put(t, n, max, "MODES\t");
-	for ( i = 0; i < (INT)( sizeof(modes) / sizeof(modes[0]) ); i++ ) {
+	nm = NMODES;
+	for ( i = 0; i < nm; i++ ) {
 		if ( i > 0 ) n = knl_oj_put(t, n, max, " ");
-		n = put_size(t, n, max, modes[i][0], modes[i][1]);
+		n = put_size(t, n, max, MODE_W(i), MODE_H(i));
+	}
+	n = knl_oj_put(t, n, max, "\n");
+#ifdef X64
+	i = knl_disp_hw_fit(-1, FALSE);
+	if ( i >= 0 ) {
+		n = knl_oj_put(t, n, max, ( i == FIT_STRETCH ) ? "FIT\tstretch\n" : "FIT\taspect\n");
+	}
+#endif
+	/* the scale it is drawn at, the view the windows are laid in, and the scales it can take */
+	n = put_line(t, n, max, "SCALE", ( s.scale >= 100 ) ? s.scale : 100);
+	n = knl_oj_put(t, n, max, "VIEW\t");
+	n = put_size(t, n, max, ( s.view_w > 0 ) ? s.view_w : s.width, ( s.view_h > 0 ) ? s.view_h : s.height);
+	n = knl_oj_put(t, n, max, "\nSCALES\t");
+	{
+		CONST UINT	sc[DISP_NSCALE] = DISP_SCALES;
+		INT		k, m = 0;
+
+		for ( k = 0; k < DISP_NSCALE; k++ ) {
+			if ( disp_view_len(s.width, sc[k]) >= DISP_VIEW_MIN_W
+			  && disp_view_len(s.height, sc[k]) >= DISP_VIEW_MIN_H ) {
+				if ( m++ > 0 ) n = knl_oj_put(t, n, max, " ");
+				n = knl_oj_put_num(t, n, max, sc[k]);
+			}
+		}
 	}
 	return knl_oj_put(t, n, max, "\n");
+}
+
+/* "150%": a scale written with the size or alone; 0 when none is */
+LOCAL UINT parse_scale( CONST UB *b, SZ size )
+{
+	SZ	i, j;
+
+	for ( i = 0; i < size; i++ ) {
+		if ( b[i] != '%' ) continue;
+		for ( j = i; j > 0 && b[j - 1] >= '0' && b[j - 1] <= '9'; j-- ) ;
+		if ( j < i ) {
+			UINT	v = 0;
+
+			for ( ; j < i; j++ ) v = v * 10 + (UINT)( b[j] - '0' );
+			return v;
+		}
+	}
+	return 0;
 }
 
 LOCAL INT disp_text( void *ctx, UB *t, INT n, INT max )
 {
 	(void)ctx;
 	n = knl_oj_put(t, n, max, "<p>Record 1: the mode, as key and value lines (SIZE, WIDTH, HEIGHT, "
-			  "DEPTH, BPP, PITCH, DRIVER, MODES); written WIDTHxHEIGHT, the screen is set "
-			  "to that size where the hardware can. Record 2: the pixels, rows of PITCH "
+			  "DEPTH, BPP, PITCH, DRIVER, MODES, SCALE, VIEW, SCALES); written WIDTHxHEIGHT, "
+			  "the screen is set to that size where the hardware can, and written with a scale "
+			  "(150%), alone or after the size, it is drawn at that scale. Record 2: the pixels, rows of PITCH "
 			  "bytes, four bytes a pixel (XRGB8888), read with a key that may control the "
 			  "device.</p>");
 	return knl_obdev_link(t, n, max, &ob_uuid_system, (CONST UB *)"system");
@@ -110,7 +193,7 @@ LOCAL INT disp_text( void *ctx, UB *t, INT n, INT max )
 LOCAL INT disp_attr( void *ctx, UB *j, INT n, INT max )
 {
 	T_DISPSPEC	s;
-	INT		i;
+	INT		i, nm;
 
 	(void)ctx;
 	n = knl_oj_put(j, n, max, ",\"virtual\":false");
@@ -123,10 +206,13 @@ LOCAL INT disp_attr( void *ctx, UB *j, INT n, INT max )
 	n = knl_oj_put_num(j, n, max, s.height);
 	n = knl_oj_put(j, n, max, ",\"depth\":");
 	n = knl_oj_put_num(j, n, max, s.bpp);
-	n = knl_oj_put(j, n, max, ",\"driver\":\"" DRIVER "\",\"modes\":[");
-	for ( i = 0; i < (INT)( sizeof(modes) / sizeof(modes[0]) ); i++ ) {
+	n = knl_oj_put(j, n, max, ",\"driver\":\"");
+	n = knl_oj_put(j, n, max, DRIVER);
+	n = knl_oj_put(j, n, max, "\",\"modes\":[");
+	nm = NMODES;
+	for ( i = 0; i < nm; i++ ) {
 		n = knl_oj_put(j, n, max, ( i > 0 ) ? ",\"" : "\"");
-		n = put_size(j, n, max, modes[i][0], modes[i][1]);
+		n = put_size(j, n, max, MODE_W(i), MODE_H(i));
 		n = knl_oj_put(j, n, max, "\"");
 	}
 	return knl_oj_put(j, n, max, "]");
@@ -139,10 +225,15 @@ LOCAL UD pixels_size( void )
 	return ( ts_disp_ref(&s) >= E_OK ) ? (UD)s.pitch * s.height : 0;
 }
 
+/* Record 1, made as long as the sizes and scales it lists need */
+LOCAL INT mode_make( void *ctx, UB *t, INT max )
+{
+	(void)ctx;
+	return mode_text(t, 0, max);
+}
+
 LOCAL ER disp_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *p_asize )
 {
-	UB	*t;
-	INT	len;
 	SZ	n = 0;
 
 	(void)ctx;
@@ -168,19 +259,7 @@ LOCAL ER disp_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ 
 	if ( recno != OB_DSP_MODE ) {
 		return E_NOEXS;
 	}
-	t = (UB *)Kmalloc(MODE_TEXT_MAX);
-	if ( t == NULL ) {
-		return E_NOMEM;
-	}
-	len = mode_text(t, 0, MODE_TEXT_MAX);
-	if ( len >= 0 && off < len ) {
-		n = (SZ)( len - off );
-		if ( n > size ) n = size;
-		knl_memcpy(buf, t + off, (INT)n);
-	}
-	Kfree(t);
-	if ( p_asize != NULL ) *p_asize = n;
-	return ( len < 0 ) ? E_SYS : E_OK;
+	return knl_oj_make_rea(mode_make, NULL, off, buf, size, p_asize);
 }
 
 /* "1280x800", ended by anything that is not a digit after the height */
@@ -218,11 +297,52 @@ LOCAL ER disp_wri( void *ctx, UD *pos, INT recno, D off, CONST void *buf, SZ siz
 		return E_PAR;			/* what is asked is written whole */
 	}
 	if ( !parse_size((CONST UB *)buf, size, &w, &h) ) {
-		return E_PAR;
+		UINT	sc = parse_scale((CONST UB *)buf, size);
+
+		if ( sc == 0 ) {
+			return E_PAR;
+		}
+		er = ts_disp_setscale(sc);	/* the scale alone */
+		if ( er < E_OK ) {
+			return er;
+		}
+		knl_obdisp_changed();
+		if ( p_asize != NULL ) *p_asize = size;
+		return E_OK;
 	}
+#ifdef X64
+	/*
+	 * "WIDTHxHEIGHT aspect" or "... stretch": how it is laid on the
+	 * panel, taken with the new size, or laid now when the size stays
+	 */
+	{
+		CONST UB	*b = (CONST UB *)buf;
+		T_DISPSPEC	cur;
+		BOOL		now = (BOOL)( ts_disp_ref(&cur) >= E_OK && cur.width == w && cur.height == h );
+		SZ		i;
+
+		for ( i = 0; i + 6 <= size; i++ ) {
+			if ( word_at(b + i, "aspect") ) (void)knl_disp_hw_fit(FIT_ASPECT, now);
+			if ( i + 7 <= size && word_at(b + i, "stretch") ) (void)knl_disp_hw_fit(FIT_STRETCH, now);
+		}
+	}
+#endif
 	er = ts_disp_setmode(w, h);
 	if ( er < E_OK ) {
 		return er;
+	}
+	{
+		UINT	sc = parse_scale((CONST UB *)buf, size);
+
+		/* a scale written with the size, taken at the new size */
+		if ( sc != 0 ) {
+			ER	es = ts_disp_setscale(sc);
+
+			if ( es < E_OK ) {
+				knl_obdisp_changed();
+				return es;
+			}
+		}
 	}
 	knl_obdisp_changed();
 	if ( p_asize != NULL ) *p_asize = size;
@@ -231,20 +351,11 @@ LOCAL ER disp_wri( void *ctx, UD *pos, INT recno, D off, CONST void *buf, SZ siz
 
 LOCAL UD disp_size( void *ctx, INT recno )
 {
-	UB	*t;
-	INT	len;
-
 	(void)ctx;
 	if ( recno == OB_DSP_PIXELS ) {
 		return pixels_size();
 	}
-	t = (UB *)Kmalloc(MODE_TEXT_MAX);
-	if ( t == NULL ) {
-		return 0;
-	}
-	len = mode_text(t, 0, MODE_TEXT_MAX);
-	Kfree(t);
-	return ( len > 0 ) ? (UD)len : 0;
+	return knl_oj_make_len(mode_make, NULL);
 }
 
 LOCAL CONST T_OBDVOPS disp_ops = {

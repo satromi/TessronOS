@@ -45,6 +45,7 @@ EXPORT ER knl_memorypool_initialize( void )
 	end = knl_mplcb_table + NUM_MPLID;
 	for ( mplcb = knl_mplcb_table; mplcb < end; mplcb++ ) {
 		mplcb->mplid = 0;
+		knl_klk_init(&mplcb->klk);
 		QueInsert(&mplcb->wait_queue, &knl_free_mplcb);
 	}
 
@@ -293,7 +294,12 @@ SYSCALL ID tk_cre_mpl( CONST T_CMPL *pk_cmpl )
 
 	BEGIN_CRITICAL_SECTION;
 	/* Get control block from FreeQue */
+	KLK_MISC();
 	mplcb = (MPLCB*)QueRemoveNext(&knl_free_mplcb);
+	KLK_UNMISC();
+	if ( mplcb != NULL ) {
+		KLK_LOCK(&mplcb->klk);
+	}
 	if ( mplcb == NULL ) {
 		ercd = E_LIMIT;
 	} else {
@@ -317,6 +323,9 @@ SYSCALL ID tk_cre_mpl( CONST T_CMPL *pk_cmpl )
 		init_mempool(mplcb);
 
 		ercd = mplid;
+	}
+	if ( mplcb != NULL ) {
+		KLK_UNLOCK(&mplcb->klk);
 	}
 	END_CRITICAL_SECTION;
 
@@ -346,6 +355,7 @@ SYSCALL ER tk_del_mpl( ID mplid )
 	mplcb = get_mplcb(mplid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mplcb->klk);
 	if ( mplcb->mplid == 0 ) {
 		ercd = E_NOEXS;
 	} else {
@@ -356,9 +366,12 @@ SYSCALL ER tk_del_mpl( ID mplid )
 		knl_wait_delete(&mplcb->wait_queue);
 
 		/* Return to FreeQue */
+		KLK_MISC();
 		QueInsert(&mplcb->wait_queue, &knl_free_mplcb);
+		KLK_UNMISC();
 		mplcb->mplid = 0;
 	}
+	KLK_UNLOCK(&mplcb->klk);
 	END_CRITICAL_SECTION;
 
 #if USE_IMALLOC
@@ -401,8 +414,16 @@ LOCAL void mpl_rel_wai( TCB *tcb )
 /*
  * Definition of variable size memory pool wait specification
  */
-LOCAL CONST WSPEC knl_wspec_mpl_tfifo = { TTW_MPL, NULL,        mpl_rel_wai };
-LOCAL CONST WSPEC knl_wspec_mpl_tpri  = { TTW_MPL, mpl_chg_pri, mpl_rel_wai };
+/* The lock of the wait (design 4.3.3) */
+#if KLK_FINE_OBJ
+LOCAL KLOCK *mpl_wlock( TCB *tcb )
+{
+	return &get_mplcb(tcb->wid)->klk;
+}
+#endif
+
+LOCAL CONST WSPEC knl_wspec_mpl_tfifo = { TTW_MPL, NULL,        mpl_rel_wai WSPEC_LOCK(mpl_wlock) };
+LOCAL CONST WSPEC knl_wspec_mpl_tpri  = { TTW_MPL, mpl_chg_pri, mpl_rel_wai WSPEC_LOCK(mpl_wlock) };
 
 /*
  * Get variable size memory block 
@@ -422,6 +443,7 @@ SYSCALL_U ER tk_get_mpl_u( ID mplid, SZ blksz, void **p_blk, TMO_U tmout )
 	blksz = roundSize(blksz);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mplcb->klk);
 	if ( mplcb->mplid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -449,6 +471,7 @@ SYSCALL_U ER tk_get_mpl_u( ID mplid, SZ blksz, void **p_blk, TMO_U tmout )
 	}
 
     error_exit:
+	KLK_UNLOCK(&mplcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -477,6 +500,7 @@ SYSCALL ER tk_rel_mpl( ID mplid, void *blk )
 	mplcb = get_mplcb(mplid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mplcb->klk);
 	if ( mplcb->mplid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -498,6 +522,7 @@ SYSCALL ER tk_rel_mpl( ID mplid, void *blk )
 	knl_mpl_wakeup(mplcb);
 
     error_exit:
+	KLK_UNLOCK(&mplcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -520,6 +545,7 @@ SYSCALL ER tk_ref_mpl( ID mplid, T_RMPL *pk_rmpl )
 	mplcb = get_mplcb(mplid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mplcb->klk);
 	if ( mplcb->mplid == 0 ) {
 		ercd = E_NOEXS;
 	} else {
@@ -536,6 +562,7 @@ SYSCALL ER tk_ref_mpl( ID mplid, T_RMPL *pk_rmpl )
 		pk_rmpl->frsz  = frsz;
 		pk_rmpl->maxsz = knl_MaxFreeSize(mplcb);
 	}
+	KLK_UNLOCK(&mplcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;

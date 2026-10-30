@@ -429,10 +429,11 @@ MSSEG	*st_input_seg( void );
 BOOL	st_input_kanji( void );
 
 /* かな漢字変換 for KINPUT */
-BOOL	ms_ime_key( UINT key, UINT mods );
+BOOL	ms_ime_key( UINT key, UINT mods, UINT mode );
 BOOL	ms_ime_busy( void );
 void	ms_ime_commit( void );
-BOOL	ms_ime_press( INT x, INT y );
+void	ms_ime_pick( INT row );		/* a press on the system's list of candidates */
+ID	ms_win_key( void );		/* the key the window is open on */
 void	ms_ime_draw( INT gid, INT x, INT y, INT px, INT lh );
 void	ms_ime_end( void );
 

@@ -23,6 +23,7 @@
 #include "psx_int.h"
 #include <ts/ob.h>
 #include <ts/psxid.h>
+#include <ts/sysdef.h>
 #include <ts/time.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
@@ -389,9 +390,84 @@ void endusershell( void )	{ shell_at = 0; }
 
 /* ---------------------------------------------------------------- the machine */
 
+/*
+ * What the machine is, as the system object (SYSDEF_SYSTEM) says it:
+ * its records are lines of a key, a tab and the value. The value of key
+ * in record recno into out; -1 when the object cannot be read or has no
+ * such line.
+ */
+static int hex_of( char c )
+{
+	return ( c >= '0' && c <= '9' ) ? c - '0'
+	     : ( c >= 'a' && c <= 'f' ) ? c - 'a' + 10
+	     : ( c >= 'A' && c <= 'F' ) ? c - 'A' + 10 : -1;
+}
+
+static int sys_uuid( TS_UUID *u )
+{
+	const char	*s = SYSDEF_SYSTEM;
+	int		i = 0, h, l;
+
+	while ( *s != 0 && i < 16 ) {
+		if ( *s == '-' ) {
+			s++;
+			continue;
+		}
+		h = hex_of(s[0]);
+		l = ( h >= 0 ) ? hex_of(s[1]) : -1;
+		if ( l < 0 ) return -1;
+		u->b[i++] = (UB)( h * 16 + l );
+		s += 2;
+	}
+	return ( i == 16 ) ? 0 : -1;
+}
+
+static int sys_line( int recno, const char *key, char *out, size_t max )
+{
+	TS_UUID	u;
+	ID	k;
+	char	*b = NULL, *nb, *p, *e;
+	SZ	room = 1024, got = 0;
+	size_t	kl = strlen(key), n;
+	int	found = -1;
+
+	if ( max == 0 || sys_uuid(&u) < 0 || ( k = ob_opn_obj(&u, OB_OP_READ) ) <= 0 ) return -1;
+	for ( ;; ) {
+		nb = (char *)realloc(b, (size_t)room + 1);
+		if ( nb == NULL ) break;
+		b = nb;
+		got = 0;
+		if ( ob_rea_rec(k, recno, 0, b, room, &got) < E_OK ) {
+			got = -1;
+			break;
+		}
+		if ( got < room ) break;
+		room *= 2;			/* the whole record, however long */
+	}
+	ob_cls_obj(k);
+	if ( b != NULL && got >= 0 && got <= room ) {
+		b[got] = 0;
+		for ( p = b; *p != 0 && found < 0; p = ( *e != 0 ) ? e + 1 : e ) {
+			for ( e = p; *e != 0 && *e != '\n'; e++ ) ;
+			if ( (size_t)( e - p ) > kl && strncmp(p, key, kl) == 0 && p[kl] == '\t' ) {
+				n = (size_t)( e - ( p + kl + 1 ) );
+				if ( n >= max ) n = max - 1;
+				memcpy(out, p + kl + 1, n);
+				out[n] = 0;
+				found = 0;
+			}
+		}
+	}
+	free(b);
+	return found;
+}
+
+/* The network's name for the machine; the stack's own default when the system object says none */
 int gethostname( char *name, size_t len )
 {
-	strlcpy(name, "tessronos", len);
+	if ( sys_line(OB_SYS_NET, "HOSTNAME", name, len) < 0 || name[0] == 0 ) {
+		strlcpy(name, "tessronos", len);
+	}
 	return 0;
 }
 
@@ -408,9 +484,19 @@ int uname( struct utsname *u )
 	memset(u, 0, sizeof(*u));
 	strcpy(u->sysname, "TessronOS");
 	(void)gethostname(u->nodename, sizeof(u->nodename));
-	strcpy(u->release, "1.0");
-	strcpy(u->version, "TessronOS 1.0 (T-Kernel 2.0, NetBSD 11.0 commands)");
+	{
+		char	ver[sizeof(u->release)], knl[sizeof(u->version) / 2];
+
+		if ( sys_line(OB_SYS_INFO, "VERSION", ver, sizeof(ver)) < 0 ) strcpy(ver, "unknown");
+		if ( sys_line(OB_SYS_INFO, "KERNEL", knl, sizeof(knl)) < 0 ) strcpy(knl, "microT-Kernel");
+		strlcpy(u->release, ver, sizeof(u->release));
+		snprintf(u->version, sizeof(u->version), "TessronOS %s (%s, NetBSD 11.0 commands)", ver, knl);
+	}
+#if defined(__x86_64__)
+	strcpy(u->machine, "x86_64");
+#else
 	strcpy(u->machine, "aarch64");
+#endif
 	return 0;
 }
 
@@ -432,7 +518,7 @@ long sysconf( int name )
 	  case _SC_NPROCESSORS_ONLN: {
 		T_TSCPU	c;
 
-		return ( ts_ref_cpu(&c) >= E_OK && c.ncpu > 0 ) ? c.ncpu : 1;
+		return ( ts_ref_cpu(&c, (SZ)sizeof(c)) > 0 && c.ncpu > 0 ) ? c.ncpu : 1;	/* the number alone */
 	  }
 	  case _SC_PHYS_PAGES:		return 256 * 1024;
 	  case _SC_JOB_CONTROL:		return 1;

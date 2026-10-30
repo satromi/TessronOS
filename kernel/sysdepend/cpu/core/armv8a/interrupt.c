@@ -18,6 +18,7 @@
 
 #include <kernel.h>
 #include "../../../sysdepend.h"
+#include "cpu_msi.h"
 
 /*
  * Interrupt vector tables (indexed by GIC interrupt ID)
@@ -48,6 +49,63 @@ EXPORT ER knl_define_inthdr( INT intno, ATR intatr, FP inthdr )
 		inthdr = knl_hll_inthdr;
 	}
 	knl_intvec_tbl[intno] = inthdr;
+	return E_OK;
+}
+
+/*
+ * The processor a device's interrupt goes to (inttarget.c, design 4.5):
+ * the distributor's target byte of the SPI, with the bit of that
+ * processor's CPU interface. Each processor learns its own from the
+ * first target register, which reads its own bit (knl_gic_cpuif_note).
+ */
+LOCAL UB	gic_cpuif[CNF_MAX_PRCID];
+
+EXPORT void knl_gic_cpuif_note( void )
+{
+	ID	prc = knl_pcpu()->prcid;
+
+	if ( prc >= 1 && prc <= CNF_MAX_PRCID ) {
+		gic_cpuif[prc - 1] = (UB)( in_w(GICD_ITARGETSR(0)) & 0xff );
+	}
+}
+
+EXPORT BOOL knl_int_is_dev( UINT intno )
+{
+	return ( intno >= 32 && intno < N_INTVEC );
+}
+
+EXPORT BOOL knl_int_is_msi( UINT intno )
+{
+#if KNL_HAS_MSI
+	LOCAL UINT	first = 0, num = 0;
+
+	if ( first == 0 ) {
+		knl_msi_span(&first, &num);
+	}
+	return ( intno >= first && intno < first + num );
+#else
+	(void)intno;
+	return FALSE;
+#endif
+}
+
+EXPORT BOOL knl_int_in_use( UINT intno )
+{
+	return ( intno < N_INTVEC && ( knl_intvec_tbl[intno] != NULL || knl_hll_inthdr_tbl[intno] != NULL ) );
+}
+
+EXPORT ER knl_int_route( UINT intno, INT prc )
+{
+	UB	bit;
+
+	if ( !knl_int_is_dev(intno) || prc < 1 || prc > knl_num_prc ) {
+		return E_PAR;
+	}
+	bit = gic_cpuif[prc - 1];
+	if ( bit == 0 ) {
+		return E_NOSPT;			/* its interface not known */
+	}
+	*(volatile UB *)( GICD_ITARGETSR(0) + intno ) = bit;
 	return E_OK;
 }
 

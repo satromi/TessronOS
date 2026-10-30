@@ -18,7 +18,7 @@
       "id": "window-list-viewer",
       "kind": "accessory",
       "name": "ウインドウ一覧",
-      "version": "R1.110",
+      "version": "R1.200",
       "menu": true,
       "builtin": true,
       "base": []

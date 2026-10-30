@@ -110,7 +110,22 @@ typedef struct {
 	UW		pts;
 } UVC;
 
-LOCAL UVC	uvc_pool[CAM_UNITS];
+/*
+ * The cameras attached. Each is allocated on its own and never freed:
+ * the camera device holds its T_CAMSRC, and dev->video points at it.
+ * A larger table is made whole before it is put in place.
+ */
+#define UVC_FIRST	4
+
+typedef struct {
+	INT	cap;
+	UVC	*e[];
+} UVCTBL;
+
+LOCAL UVCTBL	*uvc_tbl = NULL;
+
+#define UVC_N		( ( uvc_tbl != NULL ) ? uvc_tbl->cap : 0 )
+#define UVC_AT(i)	( uvc_tbl->e[(i)] )
 LOCAL BOOL	uvc_changed = FALSE;
 
 /* ---------------------------------------------------------------- descriptors */
@@ -747,20 +762,49 @@ LOCAL void uvc_stop( T_CAMSRC *s )
 
 /* ---------------------------------------------------------------- from the manager */
 
+LOCAL UVC *uvc_slot( void )
+{
+	UVCTBL	*t;
+	INT	i, cap;
+
+	for ( i = 0; i < UVC_N; i++ ) {
+		if ( !UVC_AT(i)->used && !UVC_AT(i)->listed ) {
+			return UVC_AT(i);
+		}
+	}
+	cap = ( UVC_N > 0 ) ? UVC_N * 2 : UVC_FIRST;
+	t = (UVCTBL *)Kcalloc(1, sizeof(UVCTBL) + sizeof(UVC *) * (SZ)cap);
+	if ( t == NULL ) {
+		return NULL;
+	}
+	for ( i = 0; i < cap; i++ ) {
+		if ( i < UVC_N ) {
+			t->e[i] = UVC_AT(i);
+			continue;
+		}
+		t->e[i] = (UVC *)Kcalloc(1, sizeof(UVC));
+		if ( t->e[i] == NULL ) break;
+	}
+	if ( i == UVC_N ) {
+		Kfree(t);
+		return NULL;
+	}
+	t->cap = i;
+	__sync_synchronize();
+	i = UVC_N;
+	uvc_tbl = t;
+	return UVC_AT(i);
+}
+
 EXPORT ER knl_uvc_attach( USBDEV *dev )
 {
-	UVC	*u = NULL;
+	UVC	*u;
 	ER	er;
 	INT	i;
 
-	for ( i = 0; i < CAM_UNITS; i++ ) {
-		if ( !uvc_pool[i].used && !uvc_pool[i].listed ) {
-			u = &uvc_pool[i];
-			break;
-		}
-	}
+	u = uvc_slot();
 	if ( u == NULL ) {
-		return E_LIMIT;
+		return E_NOMEM;
 	}
 	if ( u->asmb != NULL ) {
 		Kfree(u->asmb);
@@ -844,8 +888,8 @@ EXPORT void knl_uvc_notify( void )
 		return;
 	}
 	uvc_changed = FALSE;
-	for ( i = 0; i < CAM_UNITS; i++ ) {
-		UVC	*u = &uvc_pool[i];
+	for ( i = 0; i < UVC_N; i++ ) {
+		UVC	*u = UVC_AT(i);
 
 		if ( u->listed && !u->used ) {
 			knl_cam_detach(&u->src);
@@ -1003,8 +1047,8 @@ EXPORT BOOL knl_uvc_active( void )
 {
 	INT	i;
 
-	for ( i = 0; i < CAM_UNITS; i++ ) {
-		if ( uvc_pool[i].used && uvc_pool[i].streaming ) {
+	for ( i = 0; i < UVC_N; i++ ) {
+		if ( UVC_AT(i)->used && UVC_AT(i)->streaming ) {
 			return TRUE;
 		}
 	}

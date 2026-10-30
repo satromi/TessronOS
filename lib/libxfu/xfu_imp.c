@@ -31,7 +31,7 @@
 #include "xfu_in.h"
 
 /* What taking in does to a new object: not its deletion */
-#define IMP_OPS		( OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRWR )
+#define IMP_OPS		( OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRWR | OB_O_EXCL )	/* filled: not read half made */
 
 /* ---------------------------------------------------------------- kinds */
 
@@ -42,7 +42,7 @@
 #define K_IMAGE		5
 #define K_TEXT		6
 #define K_BINARY	7
-#define K_ARCHIVE	8		/* a BTRON archive (書庫), opened by 書庫解凍 */
+#define K_ARCHIVE	8		/* a BTRON archive (書庫), opened by 書庫管理 */
 
 typedef struct {
 	CONST char	*ext;		/* lower case, with the dot */
@@ -331,11 +331,16 @@ LOCAL ER make_obj( XFU *x, CONST UB *name, INT app, UINT kind, CONST FILEFACT *f
 	}
 	xb_put(&w, "]");
 	if ( kind == K_ELF ) {
+#if defined(__x86_64__)
+		xb_put(&w, ",\"exec\":{\"record\":1,\"type\":\"application/x-elf\","
+			   "\"arch\":\"x86_64\",\"abi\":\"tessronos-1\"}");
+#else
 		xb_put(&w, ",\"exec\":{\"record\":1,\"type\":\"application/x-elf\","
 			   "\"arch\":\"aarch64\",\"abi\":\"tessronos-1\"}");
+#endif
 	}
 	xb_put(&w, "}}");
-	if ( w.bad || w.at > OB_ATR_MAX ) {
+	if ( w.bad || w.at > OB_META_LIMIT ) {
 		xb_free(&w);
 		return w.bad ? E_NOMEM : E_LIMIT;
 	}
@@ -666,10 +671,6 @@ LOCAL ER take_tad( XFU *x, INT h, INT got, BOOL *p_eof, CONST UB *file, CONST UB
 	xb_init(&all);
 	while ( got > 0 && !all.bad ) {
 		xb_bytes(&all, x->chunk, got);
-		if ( all.at > XFU_TAD_MAX ) {
-			er = E_LIMIT;
-			break;
-		}
 		got = fill(t, h, x->chunk, XFU_CHUNK, p_eof);
 		if ( got < 0 ) er = (ER)got;
 	}
@@ -743,7 +744,7 @@ LOCAL ER imp_file( XFU *x, CONST UB *path, CONST UB *file, D mtime, UINT as, TS_
 	f.mtime = mtime;
 	f.enc = TXC_AUTO;
 	er = make_obj(x, stem, ( kind == K_TEXT ) ? XFU_APP_TEXT : ( kind == K_IMAGE ) ? XFU_APP_FIG
-			       : ( kind == K_ARCHIVE ) ? XFU_APP_UNPACK : XFU_APP_NONE, kind, &f, 2, p_uuid);
+			       : ( kind == K_ARCHIVE ) ? XFU_APP_ARCHIVE : XFU_APP_NONE, kind, &f, 2, p_uuid);
 	if ( er < E_OK ) {
 		(void)t->close(t->ctx, h);
 		return er;
@@ -1070,7 +1071,7 @@ LOCAL ER tadjs_meta( XFU *x, XBUF *in, CONST UB *jsonname, D mtime, XBUF *out, T
 	}
 	xb_bytes(out, j + from, in->at - from);
 	xb_free(&fb);
-	return out->bad ? E_NOMEM : ( out->at > OB_ATR_MAX ) ? E_LIMIT : E_OK;
+	return out->bad ? E_NOMEM : ( out->at > OB_META_LIMIT ) ? E_LIMIT : E_OK;
 }
 
 /* Each link of the sets' records marks the set it reaches as linked to */
@@ -1129,7 +1130,7 @@ LOCAL ER imp_sets( XFU *x, INT plen, DLIST *d, TSET *s, INT ns )
 		xb_init(&in);
 		xb_init(&meta);
 		er = sub_path(x, plen, DNAME(d, s[i].json));
-		if ( er >= E_OK ) er = read_all(x, x->path, &in, OB_ATR_MAX);
+		if ( er >= E_OK ) er = read_all(x, x->path, &in, OB_META_LIMIT);
 		if ( er >= E_OK ) er = tadjs_meta(x, &in, DNAME(d, s[i].json), d->e[s[i].json].mtime,
 						  &meta, &s[i]);
 		xb_free(&in);
@@ -1191,7 +1192,7 @@ LOCAL ER imp_sets( XFU *x, INT plen, DLIST *d, TSET *s, INT ns )
 			if ( e < 0 ) break;
 			xb_init(&in);
 			er = sub_path(x, plen, DNAME(d, e));
-			if ( er >= E_OK ) er = read_all(x, x->path, &in, XFU_TAD_MAX);
+			if ( er >= E_OK ) er = read_all(x, x->path, &in, XFU_WHOLE_MAX);
 			if ( er >= E_OK ) {
 				UINT	rt = tad ? OB_RT_TAD
 					   : ( pos < SET_REC && s[i].rt[pos] != 0 ) ? s[i].rt[pos]
@@ -1210,7 +1211,7 @@ LOCAL ER imp_sets( XFU *x, INT plen, DLIST *d, TSET *s, INT ns )
 			if ( d->e[k].set != i || d->e[k].part != P_RES ) continue;
 			xb_init(&in);
 			er = sub_path(x, plen, nm);
-			if ( er >= E_OK ) er = read_all(x, x->path, &in, XFU_IMG_MAX);
+			if ( er >= E_OK ) er = read_all(x, x->path, &in, XFU_WHOLE_MAX);
 			if ( er >= E_OK ) er = ob_wri_res(key, nm + 36, in.b, in.at);
 			xb_free(&in);
 		}

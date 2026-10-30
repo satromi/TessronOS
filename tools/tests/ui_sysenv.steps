@@ -2,7 +2,7 @@
 # the limit of the processors' clock and the watchdog are written to the machine's
 # settings with no question for the administrator's password, and the kernel takes them
 # at once. The window is at 160,80: the tab 電源管理 at 282,151; プロセッサの上限 1800MHz
-# at 420,383 and 最大 at 583,383; ウォッチドッグ's switch at 390,548, its seconds at
+# at 420,453 and 最大 at 583,453; ウォッチドッグ's switch at 390,548, its seconds at
 # 465,548, and 設定 at 708,548. QEMU has no firmware: the clock is unknown and only the
 # limit shows. Ctrl+E closes.
 open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
@@ -15,7 +15,7 @@ wait 500
 expect sysenv: clock （不明）　上限 1800MHz
 shot se_power
 # the most, and a minute
-click 583 383
+click 583 453
 click 465 548
 key 2a
 key 2a
@@ -31,7 +31,10 @@ shot se_most
 # opened again: as kept
 key 08 01
 expect sysenv: closed
+# its pages filled (the faces read take a while) before anything is pressed
+logmark
 open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expectsince sysenv: ready
 expect sysenv: settings CPU_MHZ 0 WATCHDOG 60
 wait 800
 click 282 151
@@ -45,7 +48,7 @@ expect sysenv: performance CPU_MHZ 0 WATCHDOG 0 (0)
 expect watchdog off
 shot se_wdoff
 # back as the machine came: 1800MHz, 30 seconds
-click 420 383
+click 420 453
 click 390 548
 wait 300
 click 465 548

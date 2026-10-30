@@ -28,6 +28,9 @@
 #include <ts/uuid.h>
 #include <ts/conf.h>
 #include <ts/sysdef.h>
+#ifdef __x86_64__
+#include <ts/dt.h>
+#endif
 
 #define TEST_PORT	17000
 #define LOOPBACK	0x7f000001UL		/* 127.0.0.1 */
@@ -478,6 +481,27 @@ LOCAL void test_sntp( void )
 	KT_ASSERT_ER(tk_get_tim(&t), E_OK);
 	tm_printf((UB *)"  set to Unix %d s; the clock now says Unix %d s\n", (INT)( ms / 1000 ),
 		  (INT)( ( ( ( (D)t.hi << 32 ) | t.lo ) + 473385600000LL ) / 1000 ));
+#ifdef __x86_64__
+	{
+		/* the PC's RTC written as it is kept (9.5.1): the local time, or UTC */
+		TS_TIME	now = 0, loc = 0;
+		TS_TM	tm;
+		D	w = 0, want;
+		INT	m = 0;
+
+		KT_ASSERT_ER(dt_getrtc(&m), E_OK);
+		KT_ASSERT_ER(knl_rtc_read_wall(&w), E_OK);
+		KT_ASSERT_ER(dt_gettime(&now), E_OK);
+		KT_ASSERT_ER(dt_localtime(&now, &tm), E_OK);
+		KT_ASSERT_ER(dt_mktime(&tm, &loc), E_OK);
+		want = ( ( ( m & ~DT_RTC_FIRMWARE ) == DT_RTC_LOCAL ) ? (D)loc : (D)now ) + 473385600LL;
+		tm_printf((UB *)"  the RTC reads Unix %d s, kept as %d: %d s from what it should\n",
+			  (INT)w, m, (INT)( w - want ));
+		if ( ( m & DT_RTC_FIRMWARE ) == 0 ) {
+			KT_ASSERT(w - want >= -3 && w - want <= 3);
+		}
+	}
+#endif
 }
 #endif
 
@@ -682,7 +706,7 @@ LOCAL void test_conf_apply( void )
 	}
 	(void)so_setdns(0, 0);
 	(void)so_setdomain("");
-	(void)so_sethostname("tessronos", 7);
+	(void)so_sethostname("tessronos", 9);
 	(void)so_setifaddr(a0, m0, g0, d0);
 	(void)so_sntp_server(CNF_NTP_SERVER);
 	Kfree(keep);
@@ -838,7 +862,8 @@ LOCAL void test_sockobj( void )
 {
 	struct sockaddr_in	me;
 	T_OBREF			r;
-	T_OBPRT			p;
+	static UD	p_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*p = (T_OBPRT *)p_b;
 	T_OBREC			rec[4];
 	T_OBNTF			req;
 	T_OBNTM			m;
@@ -849,7 +874,7 @@ LOCAL void test_sockobj( void )
 	ID			key, nk, port;
 
 	if ( !have_stack ) KT_SKIP("no stack");
-	t = (UB *)Kmalloc(OB_ATR_MAX);
+	t = (UB *)Kmalloc(KT_META_ROOM);
 	if ( t == NULL ) KT_SKIP("no memory");
 	s = so_socket(AF_INET, SOCK_DGRAM, 0);
 	c = so_socket(AF_INET, SOCK_DGRAM, 0);
@@ -872,13 +897,13 @@ LOCAL void test_sockobj( void )
 	KT_ASSERT(( r.flags & OB_F_VOLATILE ) != 0);
 	KT_ASSERT(text_has(r.name, OB_NAME_MAX, "socket "));
 	KT_ASSERT(text_has(r.name, OB_NAME_MAX, "(kernel)"));
-	KT_ASSERT_ER(ob_get_prt(&u, &p), E_OK);
-	KT_ASSERT_EQ(ts_uuid_cmp(&p.owner, &ob_user_system), 0);
-	KT_ASSERT_EQ(p.mode, 0600);
+	KT_ASSERT_ER(ob_get_prt(&u, p, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT_EQ(ts_uuid_cmp(&p->owner, &ob_user_system), 0);
+	KT_ASSERT_EQ(p->mode, 0600);
 	KT_ASSERT(listed(OB_S_SOCKET, &u));
 	KT_ASSERT(listed(0, &u));
 	KT_ASSERT(!listed(OB_S_QUEUE, &u));
-	KT_ASSERT_ER(ob_set_prt(&u, &p), E_NOSPT);		/* fixed */
+	KT_ASSERT_ER(ob_set_prt(&u, p), E_NOSPT);		/* fixed */
 
 	/* what the metadata says follows the socket */
 	addr_set(&me, LOOPBACK, TEST_PORT + 40);
@@ -886,7 +911,7 @@ LOCAL void test_sockobj( void )
 	key = ob_opn_obj(&u, OB_OP_R | OB_OP_W);
 	KT_ASSERT(key > 0);
 	if ( key <= 0 ) goto out;
-	KT_ASSERT_ER(ob_get_atr(key, t, OB_ATR_MAX, &asz), E_OK);
+	KT_ASSERT_ER(ob_get_atr(key, t, KT_META_ROOM, &asz), E_OK);
 	KT_ASSERT(text_has(t, asz, "\"socket\":{\"number\":"));
 	KT_ASSERT(text_has(t, asz, "\"process\":0"));
 	KT_ASSERT(text_has(t, asz, "\"family\":\"inet\""));
@@ -899,7 +924,7 @@ LOCAL void test_sockobj( void )
 
 	/* record 0 says what it is; record 1 is the data */
 	asz = 0;
-	KT_ASSERT_ER(ob_rea_rec(key, 0, 0, t, OB_ATR_MAX, &asz), E_OK);
+	KT_ASSERT_ER(ob_rea_rec(key, 0, 0, t, KT_META_ROOM, &asz), E_OK);
 	KT_ASSERT(text_has(t, asz, "<tad "));
 	KT_ASSERT(text_has(t, asz, "udp, datagram, 127.0.0.1:17040, bound"));
 	KT_ASSERT(!text_has(t, asz, "<link"));			/* the kernel's: no process */
@@ -941,7 +966,7 @@ LOCAL void test_sockobj( void )
 	KT_ASSERT_EQ(ts_uuid_cmp(&m.uuid, &u), 0);
 	KT_ASSERT_ER(ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz), E_TMOUT);	/* once */
 	KT_ASSERT_ER(ob_ref_obj(&u, &r), E_NOEXS);
-	KT_ASSERT_ER(ob_rea_rec(key, 0, 0, t, OB_ATR_MAX, &asz), E_NOEXS);
+	KT_ASSERT_ER(ob_rea_rec(key, 0, 0, t, KT_META_ROOM, &asz), E_NOEXS);
 	KT_ASSERT_ER(ob_opn_obj(&u, OB_OP_R), E_NOEXS);
 	KT_ASSERT(!listed(OB_S_SOCKET, &u));
 	ob_cls_obj(key);
@@ -976,7 +1001,7 @@ LOCAL void test_sockobj_tcp( void )
 	ID			ks, ka;
 
 	if ( !have_stack ) KT_SKIP("no stack");
-	t = (UB *)Kmalloc(OB_ATR_MAX);
+	t = (UB *)Kmalloc(KT_META_ROOM);
 	if ( t == NULL ) KT_SKIP("no memory");
 	srv = so_socket(AF_INET, SOCK_STREAM, 0);
 	cli = so_socket(AF_INET, SOCK_STREAM, 0);
@@ -988,7 +1013,7 @@ LOCAL void test_sockobj_tcp( void )
 	ks = ob_opn_obj(&us, OB_OP_R);
 	KT_ASSERT(ks > 0);
 	asz = 0;
-	KT_ASSERT_ER(ob_get_atr(ks, t, OB_ATR_MAX, &asz), E_OK);
+	KT_ASSERT_ER(ob_get_atr(ks, t, KT_META_ROOM, &asz), E_OK);
 	KT_ASSERT(text_has(t, asz, "\"protocol\":\"tcp\""));
 	KT_ASSERT(text_has(t, asz, "\"type\":\"stream\""));
 	KT_ASSERT(text_has(t, asz, "\"state\":\"listening\""));
@@ -1003,7 +1028,7 @@ LOCAL void test_sockobj_tcp( void )
 	KT_ASSERT(ka > 0);
 	if ( ka <= 0 ) goto out;
 	asz = 0;
-	KT_ASSERT_ER(ob_get_atr(ka, t, OB_ATR_MAX, &asz), E_OK);
+	KT_ASSERT_ER(ob_get_atr(ka, t, KT_META_ROOM, &asz), E_OK);
 	KT_ASSERT(text_has(t, asz, "\"protocol\":\"tcp\""));
 	KT_ASSERT(text_has(t, asz, "\"state\":\"connected\""));
 	KT_ASSERT(text_has(t, asz, "\"local\":{\"address\":\"127.0.0.1\",\"port\":17041}"));
@@ -1501,6 +1526,36 @@ LOCAL void test_slaac( void )
 	KT_ASSERT_ER(so_getdns6(-1, ns), E_PAR);
 }
 
+#if TS_NETSTACK_NETBSD
+IMPORT void	knl_so_slaac_relink( void );	/* so_slaac.c */
+IMPORT UINT	knl_so_slaac_solicits( void );
+
+/*
+ * The link come up again (netadp.c tells it when the Wi-Fi joined a
+ * network, a cable came back or the card changed): the routers are asked
+ * again at once, three times, and the address made from their prefix
+ * stays
+ */
+LOCAL void test_slaac_relink( void )
+{
+	UB	a[16], b[16];
+	UINT	n0, n1;
+	INT	t;
+
+	if ( !have_stack ) KT_SKIP("no stack");
+	if ( !slaac_addr(a, 1) ) KT_SKIP("no IPv6 address made");
+	n0 = knl_so_slaac_solicits();
+	knl_so_slaac_relink();
+	for ( t = 0; t < 30 && knl_so_slaac_solicits() == n0; t++ ) tk_dly_tsk(100);
+	n1 = knl_so_slaac_solicits();
+	tm_printf((UB *)"  router solicitations: %u before, %u within %d00 ms of the new link\n", n0, n1, t);
+	KT_ASSERT(n1 == n0 + 1);
+	for ( t = 0; t < 100 && knl_so_slaac_solicits() < n0 + 3; t++ ) tk_dly_tsk(100);
+	KT_ASSERT_EQ(knl_so_slaac_solicits(), n0 + 3);	/* 4 s apart */
+	KT_ASSERT(slaac_addr(b, 1) && same16(a, b));
+}
+#endif
+
 /*
  * The IPv6 addresses of a name (AAAA). Where the machine's only IPv6
  * address is of a smaller scope than the world's (QEMU's site-local
@@ -1996,6 +2051,7 @@ EXPORT void ktest_so( void )
 	KT_RUN(test_sntp);
 #if TS_NETSTACK_NETBSD
 	KT_RUN(test_slaac);
+	KT_RUN(test_slaac_relink);
 	KT_RUN(test_aaaa);
 #endif
 #endif

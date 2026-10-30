@@ -214,8 +214,8 @@ LOCAL void test_sample( void )
 	}
 	cl = cx_get(&s, 5, 7);
 	KT_ASSERT(cl != NULL && s_eq(cl->text, "A"));
-	KT_ASSERT(cl != NULL && cl->st.side[CX_TOP].on && cl->st.side[CX_LEFT].on && cl->st.side[CX_RIGHT].on
-		  && cl->st.side[CX_BOTTOM].on);
+	KT_ASSERT(cl != NULL && cl->st->side[CX_TOP].on && cl->st->side[CX_LEFT].on && cl->st->side[CX_RIGHT].on
+		  && cl->st->side[CX_BOTTOM].on);
 	cl = cx_get(&s, 7, 13);
 	KT_ASSERT(cl != NULL && s_eq(cl->text, "13"));
 	KT_ASSERT_EQ(s.nch, 2);
@@ -293,12 +293,12 @@ LOCAL void test_edit( void )
 	sd.colour[4] = '0'; sd.colour[5] = '0'; sd.colour[6] = '0'; sd.colour[7] = 0;
 	cx_frame_range(&s, &r, CX_FR_OUTLINE, &sd);
 	c = cx_get(&s, 1, 1);
-	KT_ASSERT(c->st.side[CX_TOP].on && c->st.side[CX_LEFT].on && !c->st.side[CX_RIGHT].on && !c->st.side[CX_BOTTOM].on);
+	KT_ASSERT(c->st->side[CX_TOP].on && c->st->side[CX_LEFT].on && !c->st->side[CX_RIGHT].on && !c->st->side[CX_BOTTOM].on);
 	c = cx_get(&s, 2, 2);
-	KT_ASSERT(!c->st.side[CX_TOP].on && c->st.side[CX_RIGHT].on && c->st.side[CX_BOTTOM].on);
-	KT_ASSERT_EQ(c->st.side[CX_RIGHT].type, CX_DASHED);
+	KT_ASSERT(!c->st->side[CX_TOP].on && c->st->side[CX_RIGHT].on && c->st->side[CX_BOTTOM].on);
+	KT_ASSERT_EQ(c->st->side[CX_RIGHT].type, CX_DASHED);
 	cx_frame_range(&s, &r, CX_FR_NONE, &sd);
-	KT_ASSERT(!cx_get(&s, 2, 2)->st.side[CX_RIGHT].on);
+	KT_ASSERT(!cx_get(&s, 2, 2)->st->side[CX_RIGHT].on);
 	KT_ASSERT(cx_merge_add(&s, &r));
 	KT_ASSERT_EQ(cx_merge_of(&s, 2, 2), 0);
 	KT_ASSERT_EQ(cx_merge_of(&s, 3, 2), -1);

@@ -1,0 +1,144 @@
+# 画面印刷 on the x64 PC (tools/x64/ui_run64.py): tools/tests/ui_scrprint.steps with the disks of
+# the q35 machine: /boot is nvmea0, second in the list of ファイル変換 at 182,175; the rest as there.
+# 画面印刷 (design 11.24), for tools/ui_run.py: the accessory's panel
+# (画面印刷／画面保存, 536x284 in the middle of a 1280x800 screen, its
+# corner at 372,258; a part at l,t of the panel at 380+l,266+t), worked
+# three times. First the whole screen three seconds after 実行 (the
+# seconds stepped down from five with ▼), saved as a figure object whose
+# name is asked (Enter takes 画面印刷) and whose link goes to the BTRON
+# window, where it is opened. Then the window in front, with the pointer, at PrintScreen,
+# into the tray. Then a rectangle dragged out on the screen, printed
+# (印刷設定 without 画面表示) at every press of PrintScreen, twice, and
+# that put away with 取り消し, after which PrintScreen takes nothing.
+open 01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0
+expect scrprint: panel 1
+wait 600
+shot sp_panel
+click 414 313
+click 650 343
+click 414 429
+click 716 439
+wait 150
+click 716 439
+wait 150
+shot sp_set
+click 836 511
+wait 800
+shot sp_name
+key 28
+expect scrprint: save to
+expect scrprint: armed 1: 0 0 0 0 3
+wait 400
+shot sp_count
+expect scrprint: taken 1 0 0 1280 800
+expect scrprint: saved 画面印刷
+wait 800
+shot sp_saved
+# the figure object opened from its link: the screen as a picture
+dclick 80 203
+wait 2500
+shot sp_figure
+# the window in front, the pointer in it, at PrintScreen, into the tray
+open 01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0
+expect scrprint: panel 2
+wait 600
+click 414 339
+click 650 313
+click 650 369
+click 414 455
+wait 150
+shot sp_set2
+click 836 511
+expect scrprint: armed 2: 1 1 1 1
+move 300 300
+wait 300
+key 46
+expect scrprint: taken 2
+expect scrprint: tray 1
+wait 600
+shot sp_tray
+# a rectangle, printed at every press, then put away
+open 01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0
+expect scrprint: panel 3
+wait 600
+click 414 365
+click 650 313
+click 650 395
+click 414 481
+wait 150
+shot sp_set3
+click 836 511
+wait 1500
+shot sp_print_panel
+key 28
+expect scrprint: pick 1
+wait 300
+move 120 110
+down
+move 300 250
+move 520 410
+wait 300
+shot sp_drag
+up
+expect scrprint: range 1 120 110 521 411
+expect scrprint: armed 3: 2 0 2 2
+wait 300
+key 46
+expect scrprint: taken 3 120 110 521 411
+expect scrprint: printed 1
+wait 1000
+shot sp_printed
+key 46
+expect scrprint: taken 4 120 110 521 411
+expect scrprint: printed 2
+wait 800
+open 01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0
+expect scrprint: panel 4
+wait 600
+click 444 511
+expect scrprint: cancelled 1
+wait 300
+key 46
+wait 1500
+shot sp_cancelled
+# the tray's picture (from the second time) pasted into the window of the
+# figure object: written beside its record, an image of the figure
+click 900 700
+wait 300
+key 19 01
+expect tray: picture
+wait 800
+shot sp_pasted
+# ファイル変換 started, /boot (nvmea0) opened and its list moved to the
+# right; the link of the figure object carried onto the list: the panel of
+# 実身からファイルへ (a press long after the last, or it would be a copy)
+open 01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91
+expect xfconv: ready
+wait 1000
+wins
+shot sp_xfc
+dclick 182 175
+expect xfconv: window nvmea0
+wait 600
+wins
+shot sp_xfc_files
+drag 400 144 800 144
+wait 300
+win nvmea0
+click 20 120
+wait 1000
+drag 70 203 900 450
+expect xfconv: asked how to export 1:
+wait 600
+shot sp_xfc_export
+# 画像（PNG）: the figure's picture written as 画面印刷.png in /boot
+click 840 409
+wait 300
+shot sp_xfc_png
+key 28
+expect xfconv: export as 6 flags 20
+expect xfconv: exported
+wait 1000
+shot sp_xfc_exported
+# nothing it did was refused for want of a right
+absent !OACV!

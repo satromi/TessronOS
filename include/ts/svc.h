@@ -73,7 +73,12 @@
 #define TSN_GP_SHR_BO		TSN(10, 10)
 #define TSN_GP_IMP_BO		TSN(10, 11)
 #define TSN_GP_REF_BO		TSN(10, 12)
+#ifdef __x86_64__
+#define TSN_GP_BND_BO		TSN(10, 13)	/* a BO placed where the process chooses (Intel) */
+#define TSN_GP_MAX		13
+#else
 #define TSN_GP_MAX		12
+#endif
 
 /*
  * sr_ (class 11): the serial ports for a process (include/ts/ser.h). A
@@ -155,7 +160,9 @@
 #define TSN_KM_SET		TSN(9, 34)	/* and setting them: TSN_RIGHT_CONF_DEV */
 #define TSN_KM_LABEL		TSN(9, 35)	/* the words a key is written with */
 #define TSN_WM_SCREEN		TSN(9, 36)	/* the size of the screen */
-#define TSN_WM_MAX		36
+#define TSN_WM_HIT_SLOP		TSN(9, 37)	/* how much farther a finger reaches a handle */
+#define TSN_WM_GRAB_SCREEN	TSN(9, 38)	/* a rectangle of the screen copied (a page's screen sharing) */
+#define TSN_WM_MAX		38
 
 /* fs_ (class 2): the file management of T2EX, for a process */
 #define TSN_FS_OPEN		TSN(2, 1)
@@ -187,7 +194,17 @@
 #define TSN_FS_POLL		TSN(2, 27)
 #define TSN_FS_LINK		TSN(2, 28)
 #define TSN_FS_CHMOD		TSN(2, 29)
-#define TSN_FS_MAX		29
+#define TSN_FS_OPN_VOL		TSN(2, 30)	/* a disk's root by its device object key, no path (7.2) */
+#define TSN_FS_OPENAT		TSN(2, 31)
+#define TSN_FS_STATAT		TSN(2, 32)
+#define TSN_FS_MKDIRAT		TSN(2, 33)
+#define TSN_FS_RMDIRAT		TSN(2, 34)
+#define TSN_FS_UNLINKAT		TSN(2, 35)
+#define TSN_FS_UTIMEAT		TSN(2, 36)
+#define TSN_FS_RENAMEAT		TSN(2, 37)
+#define TSN_FS_FSTATVFS		TSN(2, 38)
+#define TSN_FS_FSYNC		TSN(2, 39)
+#define TSN_FS_MAX		39
 
 /*
  * so_ (class 5): the sockets of a process, which are its own and are
@@ -299,7 +316,9 @@
 #define TSN_TK_GET_UTC		TSN(0, 76)
 #define TSN_TK_GET_PRC		TSN(0, 77)
 #define TSN_TK_CHG_SLT		TSN(0, 78)
-#define TSN_TK_MAX		78
+#define TSN_TK_SET_ASP		TSN(0, 79)	/* the processors a task may run on, of the caller's size */
+#define TSN_TK_REF_ASP		TSN(0, 80)
+#define TSN_TK_MAX		80
 
 /* class 1: TessronOS process, memory and IPC */
 #define TSN_TS_GET_MONO		TSN(1, 1)
@@ -336,7 +355,9 @@
 #define TSN_TS_GET_PPID		TSN(1, 32)
 #define TSN_TS_REF_PSX		TSN(1, 33)
 #define TSN_TS_LST_PRC		TSN(1, 34)
-#define TSN_TS_MAX		34
+#define TSN_TS_SPN_OBJ		TSN(1, 35)	/* a POSIX process of a program object (include/ts/psx.h) */
+#define TSN_TS_LKP_OBJ		TSN(1, 36)	/* the object a path of the object world names */
+#define TSN_TS_MAX		36
 
 /* class 3: calendar */
 #define TSN_DT_GETTIME		TSN(3, 1)
@@ -348,7 +369,13 @@
 #define TSN_DT_SETSYSTZ		TSN(3, 7)	/* TSN_RIGHT_ZONE */
 #define TSN_DT_GETSYSZONE	TSN(3, 8)
 #define TSN_DT_SETSYSZONE	TSN(3, 9)	/* TSN_RIGHT_ZONE */
+#ifdef __x86_64__
+#define TSN_DT_GETRTC		TSN(3, 10)	/* how the PC's RTC is kept */
+#define TSN_DT_SETRTC		TSN(3, 11)	/* TSN_RIGHT_ZONE */
+#define TSN_DT_MAX		11
+#else
 #define TSN_DT_MAX		9
+#endif
 
 /* class 7: ob_ */
 #define TSN_OB_OPN_OBJ	TSN(7, 1)
@@ -398,7 +425,13 @@
 #define TSN_OB_LST_LNK	TSN(7, 45)
 #define TSN_OB_END_ADM	TSN(7, 46)	/* the administrator's rights given back */
 #define TSN_OB_WIP_VOL	TSN(7, 47)
-#define TSN_OB_MAX		47
+#define TSN_OB_GET_ATV	TSN(7, 48)
+#define TSN_OB_RPL_REC	TSN(7, 49)
+#define TSN_OB_SYN_OBJ	TSN(7, 50)
+#define TSN_OB_REA_TMO	TSN(7, 51)	/* ob_rea_rec waited for up to a time */
+#define TSN_OB_FND_SYS	TSN(7, 52)	/* a system object, by the relationship of the root's link */
+#define TSN_OB_ACC_OBJ	TSN(7, 53)	/* whether the caller may do the operations, without opening */
+#define TSN_OB_MAX		53
 
 /* class 6: tm_ */
 #define TSN_TM_PUTSTRING	TSN(6, 1)

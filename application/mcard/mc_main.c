@@ -50,7 +50,8 @@ INT	g_field = -1;
 BOOL	g_link_on;
 UB	*g_cond[MC_FIELD_MAX];
 UB	g_out[OUT_MAX];
-char	g_meta[OB_ATR_MAX + 1];
+char	g_meta_none[1];
+char	*g_meta = g_meta_none;
 MCFIELD	g_dsf[MC_FIELD_MAX + 1];
 INT	g_dsfrom[MC_FIELD_MAX + 1];
 INT	g_dsn;
@@ -161,11 +162,13 @@ static ER win_make( MCWIN *w, CONST char *title, INT x, INT y, INT ww, INT wh, U
 	T_OBNTF		req;
 	T_OBWPOS	wp;
 	SZ		asz = 0;
-	char		json[220];
+	char		json[280];
+	char		shown[TS_UUID_STRLEN + 1];
 
-	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%d,\"icon\":\"%s\"}",
+	ts_uuid_text(&g_obj, shown);	/* what it shows, for ウインドウ一覧 */
+	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%d,\"icon\":\"%s\",\"shows\":\"%s\"}",
 		 x, y, x + ww + FRAME_W, y + wh + TITLE_H,
-		 WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE | WM_ATTR_RBAR | WM_ATTR_BBAR, SYSDEF_PROG_MCARD);
+		 WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE | WM_ATTR_RBAR | WM_ATTR_BBAR, SYSDEF_PROG_MCARD, shown);
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
 	c.sub = OB_S_WINDOW;
@@ -198,6 +201,7 @@ static ER win_make( MCWIN *w, CONST char *title, INT x, INT y, INT ww, INT wh, U
 static void win_free( MCWIN *w )
 {
 	if ( !w->open ) return;
+	if ( w == &g_cw ) card_bar_close();	/* the bar is on it */
 	w->open = FALSE;
 	if ( w->kw > 0 ) ob_cls_obj(w->kw);
 	(void)ob_del_obj(&w->win);
@@ -648,6 +652,7 @@ void event( CONST T_OBNTM *m )
 {
 	MCWIN	*w = NULL;
 
+	if ( card_bar_event(m) ) return;
 	if ( g_cw.open && memcmp(&m->uuid, &g_cw.win, sizeof(TS_UUID)) == 0 ) w = &g_cw;
 	else if ( g_lw.open && memcmp(&m->uuid, &g_lw.win, sizeof(TS_UUID)) == 0 ) w = &g_lw;
 	if ( w == NULL ) return;
@@ -669,7 +674,7 @@ void event( CONST T_OBNTM *m )
 		resized(w);
 		return;
 	case OB_E_PRESS:
-		if ( m->code == 1 ) {
+		if ( m->code == 1 && m->recno != OB_WR_CAND ) {
 			/* the second button while a row is carried makes it a copy; else the menu */
 			if ( w == &g_lw && list_holding() ) list_event(m);
 			else menu(m, w);
@@ -738,9 +743,8 @@ int main( void )
 	redraw_all();
 
 	while ( !g_closing ) {
-		while ( !g_closing && ob_rea_rec(g_port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) event(&m);
+		for ( TMO tmo = TMO_FEVR; !g_closing && ob_rea_tmo(g_port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) event(&m);
 		if ( !g_closing && ( g_cw.dirty || g_lw.dirty ) ) redraw_all();
-		if ( !g_closing ) (void)tk_dly_tsk(TICK_MS);
 	}
 	ed_end();
 	list_close();

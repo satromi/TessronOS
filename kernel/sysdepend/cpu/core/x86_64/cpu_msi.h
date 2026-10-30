@@ -17,9 +17,10 @@
  *	A message is a write to the Local APIC's window at 0xFEE00000 with
  *	the destination's APIC ID in bits 19:12; its data is the vector,
  *	delivered as a fixed interrupt on an edge. The vectors of
- *	INTVEC_MSI_FIRST on are given to messages (sysdef.h), and all of
- *	them go to the first processor, which takes the devices'
- *	interrupts as on the other architecture.
+ *	INTVEC_MSI_FIRST on are given to messages (sysdef.h). They go to the
+ *	first processor, which takes the devices' interrupts as on the
+ *	other architecture, unless the roles of the processors or a
+ *	device's setting send them elsewhere (inttarget.c).
  */
 
 #ifndef _SYSDEPEND_CPU_CORE_MSI_
@@ -44,11 +45,16 @@ Inline void knl_msi_prepare( UINT intno )
 	(void)intno;
 }
 
-/* The address a message for intno is written to, and what is written */
+/*
+ * The address a message for intno is written to, and what is written.
+ * The address names the processor the interrupt goes to (apic.c,
+ * inttarget.c): PRC 1's unless it was sent elsewhere.
+ */
+IMPORT UW	knl_msi_apic( UINT intno );
+
 Inline UD knl_msi_addr( UINT intno )
 {
-	(void)intno;
-	return (UD)( MSI_ADDR_BASE | ( ( knl_msi_dest & 0xff ) << 12 ) );
+	return (UD)( MSI_ADDR_BASE | ( ( knl_msi_apic(intno) & 0xff ) << 12 ) );
 }
 
 Inline UW knl_msi_data( UINT intno )

@@ -5,11 +5,12 @@
 # through かな漢字変換, ✕, the window carried with the panel following it,
 # the panel put away and brought back from the menu, saved, closed and
 # opened again, and the sample sheet with its links and charts shown.
-# The template's window is at 100,100 and its panel at 100,0: the panel's
-# rows are at y 21, 48 and 75, the grid's first row at y 163.
+# The template's window is at 100,100 and its panel at 100,0 (its work area
+# from 106,6): the panel's rows are at y 21, 48 and 75, the grid's first row
+# at y 163.
 open 019b54a4-6ccf-72f7-e320-c98e4a0bab4e
 expect calc: ready
-expect calc: panel at 100 0 632 96
+expect calc: panel at 100 0 712 96
 wait 800
 win 基本表計算
 shot calc_panel_open
@@ -44,16 +45,16 @@ key 28
 expect calc: set F3 shows 2
 wait 300
 shot calc_typed
-# 太字 from the panel: the button shows the cell's bold pressed in
+# 太字 from the panel: its switch shows the cell's bold
 wait 500
 drag 200 163 200 207
-click 257 21
+click 263 21
 expect calc: panel style.bold
 wait 300
 shot calc_panel_bold
 # 集合縦棒
 drag 520 163 600 207
-click 486 48
+click 514 48
 expect calc: chart bar
 key 06 01
 expect calc: chart copied
@@ -63,22 +64,22 @@ wait 500
 shot calc_chart
 # fx: the box begins with =, ✓ puts it in the cell and the cell in hand stays
 click 440 163
-click 188 75
+click 182 75
 expect calc: panel fx
 text SUM(A1:A3)
 wait 300
 shot calc_panel_fx
-click 580 75
+click 660 75
 expect calc: panel ok
 expect calc: set D1 shows 80
 wait 300
 shot calc_panel_ok
-# the box pressed: typed there through かな漢字変換
+# the box pressed: typed there through the system's かな漢字変換, Enter puts it in
 click 440 185
 click 406 75
-expect calc: panel field
 key 88
 text kana
+expect calc: panel field
 wait 300
 shot calc_panel_kana
 key 28
@@ -87,9 +88,9 @@ expect calc: set D2 shows かな
 key 39
 # ✕ leaves the cell as it was
 click 440 207
-click 188 75
+click 182 75
 text 99
-click 608 75
+click 692 75
 expect calc: panel cancel
 wait 300
 shot calc_panel_cancel
@@ -105,10 +106,10 @@ click 600 400 1
 wait 400
 move 610 461
 wait 150
-move 700 461
+move 750 461
 wait 300
 shot calc_menu_view
-click 720 461
+click 750 461
 expect calc: panel off
 wait 300
 shot calc_panel_off
@@ -116,10 +117,10 @@ click 600 400 1
 wait 400
 move 610 400
 wait 150
-move 700 400
+move 750 400
 wait 300
 shot calc_menu_view2
-click 720 400
+click 750 400
 expect calc: panel on
 wait 300
 key 16 01

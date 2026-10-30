@@ -86,8 +86,9 @@ FORM_NONE = 0
 FORM_INLINE = 1
 FORM_RUN = 2
 FORM_TREE = 3
+FORM_TREE2 = 4              # an index of leaves, each a leaf as FORM_TREE has
 FORM_NAMES = {FORM_NONE: "none", FORM_INLINE: "inline", FORM_RUN: "run",
-              FORM_TREE: "tree"}
+              FORM_TREE: "tree", FORM_TREE2: "tree of two levels"}
 
 PL_SIZE = 32
 PE_SIZE = 48
@@ -115,7 +116,11 @@ XL_ESZ = 24
 MAX_REC = 256                           # records of one object (TSFS_MAX_REC)
 MAX_RES = 64
 EXT_LEN = 16
-META_MAX = 65536
+# The metadata of one object: written in one transaction of the journal, which
+# changes at most (4096 - 32) // 16 blocks (one descriptor block); a free-map
+# block may change with each block written, and the head and segment are kept
+# room for (TSFSO_META_MAX, peripheral_kernel/fs/tsfsobj.c)
+META_MAX = ((4096 - 32) // 16 - 8) // 2 * 4096
 ICON_MAX = 65536
 
 
@@ -404,26 +409,45 @@ class ObjectBlock(object):
             out += buf[HDR_SIZE:]
         return bytes(out[:pl.nbytes])
 
+    def _xt_table(self, blk, what, check):
+        """A leaf or an index: its entries (three numbers each)."""
+        buf = self.vol.read_block(blk)
+        why = head.problem(buf, self.vol.sb.vol_uuid, MAGIC_TBL, blk,
+                           self.owner)
+        if why is not None:
+            if check is None:
+                raise TsfsError("extent %s %d of %s: %s"
+                               % (what, blk, self.uuid, why))
+            check(blk, why)
+        n = struct.unpack_from("<I", buf, XL_N)[0]
+        if n > MAX_EXTENTS:
+            raise TsfsError("extent %s %d names %d entries" % (what, blk, n))
+        return [struct.unpack_from("<QQQ", buf, XL_ENT + i * XL_ESZ)
+                for i in range(n)]
+
+    def leaves(self, pl, check=None):
+        """The leaves of a tree of two levels: (first block, leaf, runs)."""
+        if pl.form != FORM_TREE2:
+            return []
+        return self._xt_table(pl.a, "index", check)
+
     def extents(self, pl, check=None):
         """The runs (first block within the part, block, blocks) of a data
         part, in order."""
         if pl.form == FORM_RUN:
             return [(0, pl.a, pl.b)] if pl.b > 0 else []
-        if pl.form != FORM_TREE:
+        if pl.form == FORM_TREE:
+            return self._xt_table(pl.a, "leaf", check)
+        if pl.form != FORM_TREE2:
             return []
-        buf = self.vol.read_block(pl.a)
-        why = head.problem(buf, self.vol.sb.vol_uuid, MAGIC_TBL, pl.a,
-                           self.owner)
-        if why is not None:
-            if check is None:
-                raise TsfsError("extent leaf %d of %s: %s"
-                               % (pl.a, self.uuid, why))
-            check(pl.a, why)
-        n = struct.unpack_from("<I", buf, XL_N)[0]
-        if n > MAX_EXTENTS:
-            raise TsfsError("extent leaf %d names %d runs" % (pl.a, n))
-        return [struct.unpack_from("<QQQ", buf, XL_ENT + i * XL_ESZ)
-                for i in range(n)]
+        runs = []
+        for (first, leaf, cnt) in self.leaves(pl, check):
+            got = self._xt_table(leaf, "leaf", check)
+            if len(got) != cnt:
+                raise TsfsError("extent leaf %d of %s holds %d runs, its index "
+                                "says %d" % (leaf, self.uuid, len(got), cnt))
+            runs += got
+        return runs
 
     def read_data(self, pl):
         """The bytes of a data part."""

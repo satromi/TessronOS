@@ -23,9 +23,21 @@
 # The sources are not changed. The few files a kernel build generates
 # (vers.c, ioconf.c and the machine header links) are made here. One
 # function of theirs, ip_savecontrol, is wrapped at the link by one of
-# the interface component's.
+# the interface component's. if_arp.c (the probing of an IPv4 address
+# before it is used, 9.3.1) and, with the Wi-Fi, bwfm.c are compiled
+# from a copy with the patches of tools/netbsd/patches applied
+# (patched_copy below; docs/tessronos/09-network.md 9.6).
 #
-# Usage: build.sh [fetch|gen|compile|link|notices|all|clean]
+# With WIFI=1 (the Raspberry Pi 5) the object also holds the Wi-Fi: the
+# device faction of the rump kernel (librumpdev), NetBSD's SD/SDIO layer
+# (sdmmc) and SD Host Controller driver (sdhc) for the Wi-Fi's own SDIO
+# host, Broadcom's FullMAC driver bwfm(4) over them, the IEEE 802.11
+# layer (net80211) with the AES of its CCMP, and TessronOS's component
+# that attaches the host (peripheral_kernel/network/netbsd/rumpcomp/wifi).
+# Its sources are kept apart (~/netbsd/netbsd-$NB_VER-wifi) from the
+# other targets', and so is the object (~/tessronos-netbsd-wifi).
+#
+# Usage: [WIFI=1] build.sh [fetch|gen|compile|link|notices|all|clean]
 #
 set -e
 
@@ -55,8 +67,20 @@ NB_SHA512=318d451ecc83749607d5448198c02663ea5f0b7f4cc74fb565747f86eead7b66b5809a
 NB_SUB=netbsd-$NB_VER-rumpsrc.tgz
 NB_SUB_URLS="${NB_SUB_URL:+$NB_SUB_URL }https://github.com/satromi/TessronOS/releases/download/netbsd-$NB_VER-src/$NB_SUB"
 NB_SUB_SHA512=69df51784bc88696219af3a6793c780f1edc051a5c98bc8edabc88efa88766be63559dbc9eb20c8c7c9947f381530c188e8dc8835ac50ed43af2784517295ba4
-NB=${NBSRC:-$HOME/netbsd/netbsd-$NB_VER}
-OUT=${OUT:-$HOME/tessronos-netbsd}
+WIFI=${WIFI:-0}
+# WIFI_SIM=1 (with WIFI=1): the Wi-Fi simulator's two radios (rumpcomp/wifisim/tswifi_sim.c,
+# docs/tessronos/09-network.md 9.6.12) in the place of the card's driver and its bus: net80211,
+# the AES of its CCMP and TessronOS's component of the card (tswifi_if.c), with no driver
+WIFI_SIM=${WIFI_SIM:-0}
+# The whole set, kept where it was fetched to once (tools/x64/netbsd too)
+NB_DL=${NB_DL:-$HOME/netbsd/dl/syssrc.tgz}
+if [ "$WIFI" = 1 ]; then
+	NB=${NBSRC:-$HOME/netbsd/netbsd-$NB_VER-wifi}
+	OUT=${OUT:-$HOME/tessronos-netbsd-wifi}
+else
+	NB=${NBSRC:-$HOME/netbsd/netbsd-$NB_VER}
+	OUT=${OUT:-$HOME/tessronos-netbsd}
+fi
 # The instruction set the object is built for: the kernel's (common.mk).
 # The Raspberry Pi 4 family takes ARMv8.0-A with CRC32 (MARCH=armv8-a+crc,
 # OUT=~/tessronos-netbsd-v80), which has no LSE atomics
@@ -92,6 +116,13 @@ EXTRACT_DIRS="common/include/libc common/include/ppath common/include/prop
  sys/rump/net/lib/libnetinet6 sys/secmodel sys/secmodel/extensions
  sys/secmodel/suser sys/sys sys/ufs/ufs sys/uvm"
 EXTRACT_TREES="sys/arch/aarch64/include sys/arch/arm/include sys/arch/evbarm/include"
+
+# What the Wi-Fi takes besides (WIFI=1): the files of these directories,
+# and these files
+WIFI_COMP=$TOP/peripheral_kernel/network/netbsd/rumpcomp/wifi
+WIFI_EXTRACT_DIRS="sys/dev/sdmmc sys/crypto/aes sys/rump/librump/rumpdev"
+WIFI_EXTRACT_FILES="sys/dev/ic/bwfm.c sys/dev/ic/bwfmreg.h sys/dev/ic/bwfmvar.h
+ sys/dev/pcmcia/pcmciareg.h sys/dev/ic/wi_ieee.h"
 
 # The kept part of the set (NB_SUB): from this tree, else from where it is published
 fetch_sub() {
@@ -129,8 +160,13 @@ stage_fetch() {
 		return
 	fi
 	mkdir -p "$(dirname "$NB")"
-	local tgz
+	local tgz keep=0
 	tgz=$(dirname "$NB")/syssrc-$NB_VER.tgz
+	# the Wi-Fi's tree is made from the set kept in NB_DL when it is there
+	if [ "$WIFI" = 1 ] && [ -f "$NB_DL" ]; then
+		tgz=$NB_DL
+		keep=1
+	fi
 	if [ ! -f "$tgz" ]; then
 		local u got="" rc n
 		for u in $NB_URLS; do
@@ -174,8 +210,144 @@ stage_fetch() {
 	done
 	# shellcheck disable=SC2086
 	tar xzf "$tgz" -C "$NB" --strip-components=2 --exclude='*/CVS' $pats
-	rm -f "$tgz"
+	[ "$keep" = 1 ] || rm -f "$tgz"
 	echo "fetch: NetBSD $NB_VER sources in $NB"
+}
+
+# The Wi-Fi's sources (WIFI=1), from the set NB_DL or fetched into it
+stage_fetch_wifi() {
+	[ "$WIFI" = 1 ] || return 0
+	if [ -f "$S/dev/sdmmc/sdhc.c" ] && [ -f "$S/dev/ic/bwfm.c" ] \
+	   && [ -f "$S/rump/librump/rumpdev/rump_dev.c" ] && [ -f "$S/dev/ic/wi_ieee.h" ]; then
+		return 0
+	fi
+	local tgz=$NB_DL pats="" p u rc n
+	if [ ! -f "$tgz" ]; then
+		mkdir -p "$(dirname "$tgz")"
+		for u in $NB_URLS; do
+			echo "fetch: $u"
+			rm -f "$tgz.part"
+			n=0
+			while :; do
+				rc=0
+				curl -fsSL -C - -o "$tgz.part" "$u" || rc=$?
+				[ "$rc" -eq 18 ] && [ "$n" -lt 400 ] || break
+				n=$((n + 1))
+			done
+			[ "$rc" -eq 0 ] && { mv "$tgz.part" "$tgz"; break; }
+			rm -f "$tgz.part"
+		done
+		if [ ! -f "$tgz" ]; then
+			echo "fetch: the Wi-Fi's sources need NetBSD $NB_VER's syssrc.tgz in $NB_DL, which could" \
+			     "not be had (set NB_URL to a place that has it, or NB_DL to where it is)" >&2
+			exit 1
+		fi
+	fi
+	echo "$NB_SHA512  $tgz" | sha512sum -c - || { echo "fetch: $tgz is not NetBSD $NB_VER's syssrc.tgz" >&2; exit 1; }
+	for p in $WIFI_EXTRACT_DIRS; do
+		pats="$pats usr/src/$p/*"
+	done
+	for p in $WIFI_EXTRACT_FILES; do
+		pats="$pats usr/src/$p"
+	done
+	# shellcheck disable=SC2086
+	tar xzf "$tgz" -C "$NB" --strip-components=2 --exclude='*/CVS' \
+		--wildcards --no-wildcards-match-slash --no-recursion $pats
+	echo "fetch: the Wi-Fi's sources in $NB"
+}
+
+# The Wi-Fi's autoconfiguration (WIFI=1), as config(1) would make it of
+# "tssdhc* at mainbus?" (TessronOS's host, rumpcomp/wifi/tswifi_sdio.c),
+# "sdmmc* at sdmmcbus?" and "bwfm* at sdmmc?" (dev/sdmmc/files.sdmmc):
+# the root bus gets the interface attribute the host's device attaches
+# with, and the component includes the table of the three
+gen_wifi() {
+	local f=$GEN/rumpkern/ioconf.c
+	sed -i 's|^static const struct cfiattrdata \* const mainbus_attrs\[\] = {$|static const struct cfiattrdata tssdhcbuscf_iattrdata = {\n\t"tssdhcbus", 0, {\n\t\t{ NULL, NULL, 0 },\n\t}\n};\n\n&|' "$f"
+	sed -i 's|^\t&mainbuscf_iattrdata, NULL$|\t\&mainbuscf_iattrdata, \&tssdhcbuscf_iattrdata, NULL|' "$f"
+	grep -q tssdhcbuscf_iattrdata, "$f" || { echo "gen: the root bus's table did not take the SDIO host" >&2; exit 1; }
+	mkdir -p "$GEN/wifi/dev/ofw"
+	cat > "$GEN/wifi/ioconf.c" <<'EOF'
+/* The autoconfiguration data of the Wi-Fi's SDIO host, the SD/SDIO bus and the Wi-Fi under the root bus. */
+#include <sys/param.h>
+#include <sys/conf.h>
+#include <sys/device.h>
+#include <sys/mount.h>
+
+static const struct cfiattrdata sdmmcbuscf_iattrdata = {
+	"sdmmcbus", 0, {
+		{ NULL, NULL, 0 },
+	}
+};
+static const struct cfiattrdata sdmmccf_iattrdata = {
+	"sdmmc", 0, {
+		{ NULL, NULL, 0 },
+	}
+};
+
+static const struct cfiattrdata * const tssdhc_attrs[] = {
+	&sdmmcbuscf_iattrdata, NULL
+};
+static const struct cfiattrdata * const sdmmc_attrs[] = {
+	&sdmmccf_iattrdata, NULL
+};
+CFDRIVER_DECL(tssdhc, DV_DULL, tssdhc_attrs);
+CFDRIVER_DECL(sdmmc, DV_DULL, sdmmc_attrs);
+CFDRIVER_DECL(bwfm, DV_IFNET, NULL);
+
+static struct cfdriver * const cfdriver_ioconf_tssdhc[] = {
+	&tssdhc_cd,
+	&sdmmc_cd,
+	&bwfm_cd,
+	NULL
+};
+
+extern struct cfattach tssdhc_ca;
+extern struct cfattach sdmmc_ca;
+extern struct cfattach bwfm_sdio_ca;
+
+static struct cfattach * const tssdhc_cfattachinit[] = {
+	&tssdhc_ca, NULL
+};
+static struct cfattach * const sdmmc_cfattachinit[] = {
+	&sdmmc_ca, NULL
+};
+static struct cfattach * const bwfm_cfattachinit[] = {
+	&bwfm_sdio_ca, NULL
+};
+
+static const struct cfattachinit cfattach_ioconf_tssdhc[] = {
+	{ "tssdhc", tssdhc_cfattachinit },
+	{ "sdmmc", sdmmc_cfattachinit },
+	{ "bwfm", bwfm_cfattachinit },
+	{ NULL, NULL }
+};
+
+static const struct cfparent pspec_tssdhc = { "tssdhcbus", "mainbus", DVUNIT_ANY };
+static const struct cfparent pspec_sdmmc = { "sdmmcbus", "tssdhc", DVUNIT_ANY };
+static const struct cfparent pspec_bwfm = { "sdmmc", "sdmmc", DVUNIT_ANY };
+
+#define NORM FSTATE_NOTFOUND
+#define STAR FSTATE_STAR
+
+static struct cfdata cfdata_ioconf_tssdhc[] = {
+	/* driver	attachment	unit state	loc	flags	pspec */
+	{ "tssdhc",	"tssdhc",	0, STAR,	NULL,	0,	&pspec_tssdhc },
+	{ "sdmmc",	"sdmmc",	0, STAR,	NULL,	0,	&pspec_sdmmc },
+	{ "bwfm",	"bwfm_sdio",	0, STAR,	NULL,	0,	&pspec_bwfm },
+	{ NULL,		NULL,		0, 0,		NULL,	0,	NULL }
+};
+EOF
+	# the options of sdmmc and of the device tree, none of them on: the
+	# board's model is not looked up (bwfm then asks for the firmware by
+	# the chip's names alone)
+	: > "$GEN/wifi/opt_sdmmc.h"
+	: > "$GEN/wifi/opt_fdt.h"
+	# what if_bwfm_sdio.c includes of Open Firmware whether or not the
+	# device tree is there: nothing of it is used without FDT
+	cat > "$GEN/wifi/dev/ofw/openfirm.h" <<'EOF'
+/* Open Firmware, which the rump kernel of the Wi-Fi has none of. */
+EOF
 }
 
 stage_gen() {
@@ -253,6 +425,7 @@ EOF
 void	carpattach(int);
 void	mplsattach(int);
 EOF
+	[ "$WIFI" = 1 ] && [ "$WIFI_SIM" != 1 ] && gen_wifi
 	echo "gen: done"
 }
 
@@ -375,6 +548,37 @@ NET_SRCS="if.c if_loop.c if_stats.c route.c rtsock.c raw_usrreq.c
 NETA_PATH="$COMP"
 NETA_SRCS="if_tsneta.c tsnet_conf.c"
 
+# The Wi-Fi (WIFI=1). librumpdev: the device faction, which brings the
+# root bus up and attaches what is under it, and the power management
+# hooks drivers register with
+RUMPDEV_PATH="$R/librump/rumpdev $S/kern"
+RUMPDEV_SRCS="rump_dev.c kern_pmf.c"
+
+# The SD/SDIO layer and the SD Host Controller driver (dev/sdmmc/files.sdmmc)
+SDMMC_PATH="$S/dev/sdmmc"
+SDMMC_SRCS="sdmmc.c sdmmc_cis.c sdmmc_io.c sdmmc_mem.c sdhc.c"
+
+# net80211 as librumpnet_net80211 builds it (rump/net/lib/libnet80211),
+# with the AES its CCMP uses
+WLAN_PATH="$S/net80211 $S/crypto/aes"
+WLAN_SRCS="ieee80211.c ieee80211_amrr.c ieee80211_crypto.c
+ ieee80211_crypto_ccmp.c ieee80211_crypto_none.c ieee80211_crypto_tkip.c
+ ieee80211_crypto_wep.c ieee80211_input.c ieee80211_ioctl.c
+ ieee80211_netbsd.c ieee80211_node.c ieee80211_output.c ieee80211_proto.c
+ ieee80211_rssadapt.c ieee80211_xauth.c
+ aes_impl.c aes_bear.c aes_ct.c aes_ct_dec.c aes_ct_enc.c aes_ccm.c
+ aes_ccm_mbuf.c aes_selftest.c"
+
+# Broadcom's FullMAC chips and their SDIO attachment
+BWFM_PATH="$S/dev/ic $S/dev/sdmmc"
+BWFM_SRCS="bwfm.c if_bwfm_sdio.c"
+
+# TessronOS's component over them: the host's device, its bus_space and
+# bus_dma, its interrupt and the firmware (tswifi_sdio.c), and the
+# Wi-Fi's interface to the manager (tswifi_if.c, as on the x64 PC)
+TSWIFI_PATH="$WIFI_COMP"
+TSWIFI_SRCS="tswifi_sdio.c tswifi_if.c"
+
 # ---------------------------------------------------------------- flags
 
 # As the kernel is built (common.mk), without the floating point
@@ -419,6 +623,33 @@ find_src() {
 		[ -f "$d/$name" ] && { echo "$d/$name"; return; }
 	done
 	return 1
+}
+
+# A source with the patches of $PATCHES for it applied, as a copy under
+# $GEN/patched (the same path below it): "<path under $NB> <patches...>"
+# says the copy's directory. The copy is written again only when what it
+# holds changes, so that its object is not made again for nothing. A
+# patch that does not apply stops the build.
+PATCHES=$TOP/tools/netbsd/patches
+
+patched_copy() {
+	local rel=$1 dst tmp p
+	shift
+	dst=$GEN/patched/$(dirname "$rel")
+	mkdir -p "$dst"
+	tmp=$(mktemp -d)
+	mkdir -p "$tmp/$(dirname "$rel")"
+	cp "$NB/$rel" "$tmp/$rel"
+	for p in "$@"; do
+		if ! patch -s -p1 -d "$tmp" --no-backup-if-mismatch < "$p" >&2; then
+			echo "patch does not apply: $p" >&2
+			rm -rf "$tmp"
+			return 1
+		fi
+	done
+	cmp -s "$tmp/$rel" "$dst/$(basename "$rel")" || cp "$tmp/$rel" "$dst/"
+	rm -rf "$tmp"
+	echo "$dst"
 }
 
 # One compile job: "<source> <object> <extra flags...>"
@@ -467,8 +698,28 @@ stage_compile() {
 	add_jobs libkern "$LIBKERN_PATH" "$LIBKERN_SRCS" "-I$C/include/libc"
 	# net_stub.c holds tentative definitions of what if.c defines
 	add_jobs rumpnet "$RUMPNET_PATH" "$RUMPNET_SRCS" "-fcommon"
-	add_jobs net "$NET_PATH" "$NET_SRCS" "-I$GEN/net"
+	# if_arp.c from its patched copy, the rest where it is
+	local arp_path
+	arp_path=$(patched_copy sys/netinet/if_arp.c "$PATCHES"/if_arp-*.patch) || exit 1
+	add_jobs net "$arp_path $NET_PATH" "$NET_SRCS" "-I$GEN/net"
 	add_jobs neta "$NETA_PATH" "$NETA_SRCS"
+	if [ "$WIFI" = 1 ] && [ "$WIFI_SIM" = 1 ]; then
+		# the station is bwfm0, as the chip (tswifi_if.c)
+		add_jobs wlan "$WLAN_PATH" "$WLAN_SRCS" "-DIEEE80211_DEBUG"
+		add_jobs tswifi "$TSWIFI_PATH" "tswifi_if.c" "-DIEEE80211_DEBUG"
+		add_jobs wifisim "$COMP/wifisim" "tswifi_sim.c" "-DIEEE80211_DEBUG"
+	elif [ "$WIFI" = 1 ]; then
+		add_jobs rumpdev "$RUMPDEV_PATH" "$RUMPDEV_SRCS"
+		add_jobs sdmmc "$SDMMC_PATH" "$SDMMC_SRCS" "-I$GEN/wifi"
+		# what net80211 and bwfm say of each step goes to the console
+		# while the manager wants it (rump_tswifi_debug)
+		add_jobs wlan "$WLAN_PATH" "$WLAN_SRCS" "-DIEEE80211_DEBUG"
+		# bwfm.c from its patched copy, the rest of bwfm where it is
+		local bwfm_path
+		bwfm_path=$(patched_copy sys/dev/ic/bwfm.c "$PATCHES"/bwfm-*.patch) || exit 1
+		add_jobs bwfm "$bwfm_path $BWFM_PATH" "$BWFM_SRCS" "-I$GEN/wifi -DIEEE80211_DEBUG"
+		add_jobs tswifi "$TSWIFI_PATH" "$TSWIFI_SRCS" "-I$GEN/wifi -DIEEE80211_DEBUG"
+	fi
 	[ "$MISSING" = 0 ] || exit 1
 	find "$OBJ" -name '*.fail' -delete
 	xargs -P "$JOBS" -L 1 "$OUT/cc1.sh" < "$OUT/jobs.list"
@@ -579,12 +830,12 @@ stage_notices() {
 }
 
 case $STAGE in
-fetch)		stage_fetch ;;
+fetch)		stage_fetch; stage_fetch_wifi ;;
 gen)		stage_gen ;;
 compile)	stage_compile ;;
 link)		stage_link ;;
 notices)	stage_notices ;;
-all)		stage_fetch; stage_gen; stage_compile; stage_link; stage_notices ;;
+all)		stage_fetch; stage_fetch_wifi; stage_gen; stage_compile; stage_link; stage_notices ;;
 clean)		rm -rf "$OBJ" "$GEN" "$OUT/rumpnet.o" "$OUT/NOTICE-netbsd.txt" ;;
 *)		echo "usage: $0 [fetch|gen|compile|link|notices|all|clean]" >&2; exit 2 ;;
 esac

@@ -18,7 +18,7 @@
       "id": "basic-text-editor",
       "kind": "app",
       "name": "基本文章編集",
-      "version": "R1.110",
+      "version": "R1.200",
       "builtin": true,
       "base": [
         "019a1132-762b-7b02-ba2a-a918a9b37c39"

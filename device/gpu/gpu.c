@@ -357,6 +357,16 @@ EXPORT UD knl_gpu_bo_page( T_GPUBO *bo, UD i )
 }
 
 /*
+ * A process's view of a BO: uncached, but cached where the GPU sees
+ * memory through the processor's caches (it shares the last level cache)
+ */
+#ifdef __x86_64__
+#define BO_PTE	( ( gpu_ops != NULL && gpu_ops->coherent ) ? PTE_PAGE_UDATA : PTE_PAGE_UDATA_NC )
+#else
+#define BO_PTE	PTE_PAGE_UDATA_NC
+#endif
+
+/*
  * A mapping holds a reference, so that the pages cannot go while a
  * process can still reach them; unmapping gives it back.
  */
@@ -386,7 +396,7 @@ EXPORT ER knl_gpu_bo_map( T_GPUBO *bo, void *space, UBINT *p_va )
 	}
 	for ( i = 0; i < bo->npages; i++ ) {
 		if ( knl_pt_map(sp->l0_pa, va + ( i << PAGE_SHIFT ), bo->pa[i], PAGE_SIZE,
-				PTE_PAGE_UDATA_NC) != E_OK ) {
+				BO_PTE) != E_OK ) {
 			knl_pt_unmap(sp->l0_pa, va, i << PAGE_SHIFT);
 			return E_NOMEM;
 		}
@@ -566,6 +576,21 @@ EXPORT void knl_gpu_as_unbind( T_GPUAS *as, T_GPUBO *bo, UW va )
 	gpu_ops->as_unbind(gpu_priv, as->priv, va, bo->npages);
 }
 
+#ifdef __x86_64__
+EXPORT ER knl_gpu_as_bind_at( T_GPUAS *as, T_GPUBO *bo, UD va )
+{
+	if ( as == NULL || bo == NULL || va == 0 || gpu_ops == NULL ) return E_PAR;
+	if ( gpu_ops->as_bind_at == NULL ) return E_NOSPT;
+	return gpu_ops->as_bind_at(gpu_priv, as->priv, bo, bo->npages, va);
+}
+
+EXPORT void knl_gpu_as_unbind_at( T_GPUAS *as, T_GPUBO *bo, UD va )
+{
+	if ( as == NULL || bo == NULL || va == 0 || gpu_ops == NULL || gpu_ops->as_unbind_at == NULL ) return;
+	gpu_ops->as_unbind_at(gpu_priv, as->priv, va, bo->npages);
+}
+#endif
+
 /* ---------------------------------------------------------------- jobs */
 
 EXPORT D knl_gpu_submit( CONST T_GPUJOB *job, T_GPUBO *CONST *bo, INT nbo )
@@ -588,6 +613,9 @@ EXPORT D knl_gpu_submit_as( CONST T_GPUJOB *job, T_GPUBO *CONST *bo, INT nbo, T_
 	case GPU_JOB_TFU:	need = GPU_FEAT_TFU;	break;
 	case GPU_JOB_CSD:	need = GPU_FEAT_CSD;	break;
 	case GPU_JOB_CACHE:	need = GPU_FEAT_CACHE;	break;
+#ifdef __x86_64__
+	case GPU_JOB_BATCH:	need = GPU_FEAT_BATCH;	break;
+#endif
 	default:		return E_PAR;
 	}
 	if ( gpu_ops == NULL || gpu_flg <= 0 ) return E_NOEXS;

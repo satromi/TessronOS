@@ -69,6 +69,9 @@ void *pth_tls_make( void *at, PTH *owner )
 	char	*tp = (char *)at + pth_tls_tp_off(pth_tls_align(), (size_t)__tls_memsz);
 	char	*data = (char *)at + pth_tls_data_off(pth_tls_align(), (size_t)__tls_memsz);
 
+#ifdef PTH_TCB_SELF
+	((void **)tp)[PTH_TCB_SELF] = tp;
+#endif
 	((PTH **)tp)[PTH_TCB_OWNER] = owner;
 	((PTH **)tp)[PTH_TCB_EXIT] = NULL;
 	memcpy(data, __tls_start, (size_t)__tls_filesz);
@@ -222,10 +225,19 @@ int __cxa_thread_atexit( void (*fn)( void * ), void *obj, void *dso )
 /* Run fn(arg) on the stack whose top is sp, and come back (pth_stack.S) */
 extern void *__ts_call_on_stack( void *sp, void *(*fn)( void * ), void *arg );
 
+#ifdef PTH_TCB_SELF
+/* The control block of variant II: its own address first (pth_cpu.h) */
+typedef struct {
+	void	*self;
+	PTH	*p;
+	void	*pad[2];
+} TCBLOCAL;
+#else
 typedef struct {
 	PTH	*p;
 	void	*pad;
 } TCBLOCAL;
+#endif
 
 static void *thread_body( void *arg )
 {
@@ -271,7 +283,12 @@ static void thread_entry( INT stacd, void *exinf )
 	 */
 	pth_emutls_free(t);
 	local.p = t;
+#ifdef PTH_TCB_SELF
+	local.self = &local;
+	local.pad[0] = local.pad[1] = NULL;
+#else
 	local.pad = NULL;
+#endif
 	set_tp(&local);
 
 	pth_glock();

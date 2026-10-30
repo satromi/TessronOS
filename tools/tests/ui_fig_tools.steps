@@ -1,0 +1,80 @@
+# 基本図形編集の道具パネル (design 17.13), for tools/ui_run.py: its buttons and palettes
+# are parts of panels the window manager draws. The figure 画用紙 is opened: there is no room
+# for its panel under it or over it, so the panel stands whole at the top of the screen (0).
+# It is carried by its band down to 104 (outer); its buttons, 32 square, stand from 112,137
+# 34 apart, the second row from 171. The rectangle template is taken (in hand: the heavy
+# edge), taken again (drawing from the middle: the red mark), and a rectangle drawn. The
+# palettes come up under their buttons: 線色 with the red of its swatches (the rectangle's
+# lines red), 塗りつぶし with one of the fixed patterns (its inside filled with it), 角丸
+# with 10 typed into its box and Enter; each put away with Escape. Last, 塗りつぶし's
+# 〈パターン編集...〉 opens the pattern editor.
+open 019a0f91-066f-706f-93da-ffe8150d6207
+wait 2500
+win 画用紙
+drag 300 10 300 114
+wait 400
+shot ftool_panel
+# 長方形, then drawing from the middle
+click 298 187
+wait 300
+shot ftool_rect
+click 298 187
+wait 300
+shot ftool_centre
+click 298 187
+drag 450 450 600 560
+wait 400
+# 線色: red
+click 162 153
+wait 400
+shot ftool_stroke
+click 358 227
+wait 300
+key 29
+wait 300
+# 塗りつぶし: a pattern
+click 128 153
+wait 400
+shot ftool_fill
+click 168 310
+wait 300
+key 29
+wait 300
+# 角丸: 10
+click 230 153
+wait 400
+key 2a
+key 1e
+key 27
+key 28
+wait 400
+shot ftool_done
+# the other palettes come up and go
+click 196 153
+wait 400
+shot ftool_lstyle
+key 29
+wait 300
+click 332 153
+wait 400
+shot ftool_zoom
+key 29
+wait 300
+click 366 153
+wait 400
+shot ftool_grid
+key 29
+wait 300
+click 468 187
+wait 400
+shot ftool_font
+key 29
+wait 300
+# 〈パターン編集...〉 from 塗りつぶし
+click 128 153
+wait 400
+click 190 403
+expect pattern: opened
+wait 500
+win パターン編集
+shot ftool_pattern

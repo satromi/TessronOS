@@ -29,21 +29,23 @@
 
 EXPORT UB *om_obj_meta( CONST TS_UUID *id, SZ *p_size )
 {
-	UB	*buf, *fit;
-	SZ	n = 0;
+	UB	*buf = NULL, *fit;
+	SZ	n;
+	INT	len;
 	ID	key;
 
 	key = ob_opn_obj(id, OB_OP_ATRRD);
 	if ( key < E_OK ) {
 		return NULL;
 	}
-	buf = (UB *)Kmalloc(OB_ATR_MAX + 1);
-	if ( buf == NULL || ob_get_atr(key, buf, OB_ATR_MAX, &n) < E_OK || n <= 0 ) {
-		ob_cls_obj(key);
+	/* the metadata whole, however long */
+	len = knl_ob_atr_all(key, 0, &buf, NULL);
+	ob_cls_obj(key);
+	if ( len <= 0 ) {
 		if ( buf != NULL ) Kfree(buf);
 		return NULL;
 	}
-	ob_cls_obj(key);
+	n = (SZ)len;
 
 	/* no more room kept than the text takes */
 	fit = (UB *)Kmalloc(n + 1);
@@ -92,10 +94,57 @@ EXPORT INT om_obj_records( CONST TS_UUID *id, T_OBREC *buf, INT max )
 	return ( er < E_OK ) ? (INT)er : cnt;
 }
 
+/*
+ * Every record of an object open as key, however many: a list that came
+ * back full is asked for again in twice the room. How many, the table
+ * in *p_rec (Kfree it), or an error.
+ */
+EXPORT INT om_key_records_all( ID key, T_OBREC **p_rec )
+{
+	T_OBREC	*r;
+	INT	room = OM_REC_MAX, cnt;
+	ER	er;
+
+	for ( ;; ) {
+		r = (T_OBREC *)Kmalloc(sizeof(T_OBREC) * (SZ)room);
+		if ( r == NULL ) {
+			*p_rec = NULL;
+			return E_NOMEM;
+		}
+		cnt = 0;
+		er = ob_lst_rec(key, r, room, &cnt);
+		if ( er < E_OK || cnt < room ) break;
+		Kfree(r);
+		room *= 2;
+	}
+	if ( er < E_OK ) {
+		Kfree(r);
+		*p_rec = NULL;
+		return (INT)er;
+	}
+	*p_rec = r;
+	return cnt;
+}
+
+EXPORT INT om_obj_records_all( CONST TS_UUID *id, T_OBREC **p_rec )
+{
+	INT	n;
+	ID	key;
+
+	*p_rec = NULL;
+	key = ob_opn_obj(id, OB_OP_ATRRD);
+	if ( key < E_OK ) {
+		return (INT)key;
+	}
+	n = om_key_records_all(key, p_rec);
+	ob_cls_obj(key);
+	return n;
+}
+
 /* A record read whole, with a nought after it; the caller owns it */
 EXPORT UB *om_obj_record( CONST TS_UUID *id, INT recno, SZ *p_size )
 {
-	T_OBREC	rec[OM_REC_MAX];
+	T_OBREC	*rec;
 	UB	*buf;
 	SZ	size = 0, got = 0;
 	INT	cnt = 0, i;
@@ -105,16 +154,19 @@ EXPORT UB *om_obj_record( CONST TS_UUID *id, INT recno, SZ *p_size )
 	if ( key < E_OK ) {
 		return NULL;
 	}
-	if ( ob_lst_rec(key, rec, OM_REC_MAX, &cnt) < E_OK ) {
+	cnt = om_key_records_all(key, &rec);
+	if ( cnt < 0 ) {
 		ob_cls_obj(key);
 		return NULL;
 	}
 	for ( i = 0; i < cnt && rec[i].recno != recno; i++ ) ;
 	if ( i == cnt ) {
+		Kfree(rec);
 		ob_cls_obj(key);
 		return NULL;
 	}
 	size = (SZ)rec[i].size;
+	Kfree(rec);
 	buf = (UB *)Kmalloc(size + 1);
 	if ( buf == NULL ) {
 		ob_cls_obj(key);
@@ -143,31 +195,29 @@ EXPORT UB *om_obj_record( CONST TS_UUID *id, INT recno, SZ *p_size )
 EXPORT ER om_obj_record_put( CONST TS_UUID *id, INT recno, UINT rt, UINT sub,
 			     CONST UB *buf, SZ size )
 {
-	T_OBREC	rec[OM_REC_MAX];
+	T_OBREC	*rec;
 	INT	cnt = 0, n;
-	SZ	done = 0;
 	ID	key;
 	ER	er;
 
-	key = ob_opn_obj(id, OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRRD);
+	/* the records counted, one added, the record replaced: no other writer between */
+	key = ob_opn_obj(id, OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRRD | OB_O_WEXCL);
 	if ( key < E_OK ) {
 		return (ER)key;
 	}
-	er = ob_lst_rec(key, rec, OM_REC_MAX, &cnt);
+	/* how many records there are, every one counted: the next number is added */
+	cnt = om_key_records_all(key, &rec);
+	er = ( cnt < 0 ) ? (ER)cnt : E_OK;
+	if ( cnt >= 0 ) Kfree(rec);
 	if ( er >= E_OK && recno == cnt ) {
 		er = ob_apd_rec(key, rt, sub, &n);
 	} else if ( er >= E_OK && ( recno < 0 || recno > cnt ) ) {
 		er = E_PAR;
 	}
-	while ( er >= E_OK && done < size ) {
-		SZ	w = 0;
-
-		er = ob_wri_rec(key, recno, done, buf + done, size - done, &w);
-		if ( er >= E_OK && w <= 0 ) er = E_IO;
-		done += w;
-	}
+	/* the bytes replaced in one change: after a cut in the power the
+	   record is what it was or what it is now, not part of each */
 	if ( er >= E_OK ) {
-		er = ob_trn_rec(key, recno, (UD)size);	/* what was longer is cut */
+		er = ob_rpl_rec(key, recno, buf, size);
 	}
 	ob_cls_obj(key);
 
@@ -218,7 +268,7 @@ EXPORT UB *om_obj_res( CONST TS_UUID *id, CONST UB *name, SZ *p_size )
 				break;
 			}
 			if ( buf != NULL ) {
-				knl_memcpy(nb, buf, (INT)got);
+				knl_memcpy(nb, buf, got);
 				Kfree(buf);
 			}
 			buf = nb;

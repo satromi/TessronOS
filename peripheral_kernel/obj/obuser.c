@@ -114,14 +114,11 @@ EXPORT ER knl_ob_login_check( CONST TS_UUID *user, CONST UB *password, T_OBCRD *
 	if ( user == NULL || password == NULL || crd == NULL ) {
 		return E_PAR;
 	}
-	j = (UB *)Kmalloc(OB_META_MAX);
-	if ( j == NULL ) {
-		return E_NOMEM;
+	len = knl_ob_meta_all(user, 0, &j, NULL);
+	if ( len < 0 ) {
+		return (ER)len;
 	}
-	er = knl_ob_meta_read(user, j, OB_META_MAX, &len);
-	if ( er < E_OK ) {
-		goto out;
-	}
+	er = E_OK;
 	u = knl_oj_path(j, len, "tessronos", "user");
 	if ( u < 0 || j[u] != '{' ) {
 		er = E_OBJ;			/* not a user */
@@ -135,11 +132,10 @@ EXPORT ER knl_ob_login_check( CONST TS_UUID *user, CONST UB *password, T_OBCRD *
 	 */
 	{
 		CONST T_OBMGR	*m = knl_ob_mgr_of(user);
-		T_OBPRT		*prt = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+		T_OBPRT		*prt = NULL;
 		BOOL		trusted = FALSE;
 
-		if ( prt != NULL && m != NULL && m->prot != NULL
-		  && m->prot(user, prt) >= E_OK ) {
+		if ( m != NULL && m->prot != NULL && m->prot(user, &prt) >= E_OK && prt != NULL ) {
 			trusted = (BOOL)( ts_uuid_cmp(&prt->owner, &ob_user_system) == 0
 				       || ts_uuid_cmp(&prt->owner, user) == 0 );
 		}
@@ -217,12 +213,11 @@ LOCAL BOOL has_password( CONST TS_UUID *user )
 	INT	len = 0, u;
 	BOOL	has = FALSE;
 
-	j = (UB *)Kmalloc(OB_META_MAX);
-	if ( j == NULL ) {
+	len = knl_ob_meta_all(user, 0, &j, NULL);
+	if ( len < 0 ) {
 		return FALSE;
 	}
-	if ( knl_ob_meta_read(user, j, OB_META_MAX, &len) >= E_OK
-	  && ( u = knl_oj_path(j, len, "tessronos", "user") ) >= 0 && j[u] == '{' ) {
+	if ( ( u = knl_oj_path(j, len, "tessronos", "user") ) >= 0 && j[u] == '{' ) {
 		has = (BOOL)( knl_oj_str(j, len, knl_oj_member(j, len, u, "hash"), s, sizeof(s)) > 0 );
 	}
 	Kfree(j);
@@ -341,7 +336,7 @@ EXPORT ER ob_set_pwd( CONST TS_UUID *user, CONST UB *password )
 	CONST T_OBCRD	*me = knl_ob_crd_of(ts_get_pid());
 	UB		*j, salt[OBU_SALT], hash[OB_SHA256_LEN];
 	UB		hs[2 * OB_SHA256_LEN + 3], ss[2 * OBU_SALT + 3], q[2 * OB_SHA256_LEN + 3];
-	INT		len = 0, u, pwlen = 0, n;
+	INT		len = 0, u, pwlen = 0, n, cap;
 	ER		er;
 
 	if ( user == NULL || password == NULL ) {
@@ -357,14 +352,10 @@ EXPORT ER ob_set_pwd( CONST TS_UUID *user, CONST UB *password )
 	while ( password[pwlen] != 0 ) pwlen++;
 	knl_ob_pbkdf2(password, (SZ)pwlen, salt, sizeof(salt), OBU_ITER, hash);
 
-	j = (UB *)Kmalloc(OB_META_MAX);
-	if ( j == NULL ) {
-		return E_NOMEM;
-	}
-	er = knl_ob_meta_read(user, j, OB_META_MAX, &len);
-	if ( er < E_OK ) {
-		Kfree(j);
-		return er;
+	/* the metadata whole, with room for the salt, the hash and the count written */
+	len = knl_ob_meta_all(user, 512, &j, &cap);
+	if ( len < 0 ) {
+		return (ER)len;
 	}
 	u = knl_oj_path(j, len, "tessronos", "user");
 	if ( u < 0 || j[u] != '{' ) {
@@ -375,13 +366,13 @@ EXPORT ER ob_set_pwd( CONST TS_UUID *user, CONST UB *password )
 	tohex(hash, sizeof(hash), hs);
 
 	n = knl_oj_put_str(q, 0, sizeof(q), ss);
-	len = knl_oj_set(j, len, OB_META_MAX, u, "salt", q, n);
+	len = knl_oj_set(j, len, cap, u, "salt", q, n);
 	u = ( len > 0 ) ? knl_oj_path(j, len, "tessronos", "user") : -1;
 	n = knl_oj_put_str(q, 0, sizeof(q), hs);
-	len = ( u >= 0 ) ? knl_oj_set(j, len, OB_META_MAX, u, "hash", q, n) : -1;
+	len = ( u >= 0 ) ? knl_oj_set(j, len, cap, u, "hash", q, n) : -1;
 	u = ( len > 0 ) ? knl_oj_path(j, len, "tessronos", "user") : -1;
 	n = knl_oj_put_num(q, 0, sizeof(q), OBU_ITER);
-	len = ( u >= 0 ) ? knl_oj_set(j, len, OB_META_MAX, u, "iter", q, n) : -1;
+	len = ( u >= 0 ) ? knl_oj_set(j, len, cap, u, "iter", q, n) : -1;
 
 	er = ( len > 0 ) ? knl_ob_meta_write(user, j, len) : E_LIMIT;
 	Kfree(j);

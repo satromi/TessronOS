@@ -56,6 +56,22 @@ extern "C" {
 #define TDN_IOMAX		(-26)
 
 /*
+ * A write that is on the medium when it completes, past the device's
+ * own cache (Force Unit Access): written to TDN_FUAWRITE with a T_DEVFUA
+ * that says where, what and how much (whole blocks of the unit). A
+ * device that cannot answers E_PAR, and the caller writes and then
+ * empties the cache (TDN_FLUSH). The journal of TSFS writes its batch
+ * this way, which saves the second emptying of the cache (design 7.3).
+ */
+#define TDN_FUAWRITE		(-27)
+
+typedef struct {
+	D		start;		/* the first block of the unit */
+	CONST void	*buf;
+	SZ		size;		/* bytes, whole blocks */
+} T_DEVFUA;
+
+/*
  * Disk information, returned for attribute number TDN_DISKINFO
  * (T-Kernel/SM 5.3.8 disk device rules)
  */
@@ -63,7 +79,8 @@ typedef struct {
 	UINT	protect:1;	/* write protected */
 	UINT	removable:1;	/* medium can be taken out */
 	W	blocksize;	/* bytes in a logical block */
-	W	blockcont;	/* logical blocks of the unit */
+	W	blockcont;	/* logical blocks of the unit, at most 2^31 - 1 */
+	D	blockcont_d;	/* logical blocks of the unit, all of them (T-Kernel 2.0) */
 } DiskInfo;
 
 /*

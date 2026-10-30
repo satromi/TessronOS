@@ -52,4 +52,7 @@ static inline void *knl_memset( void *d, int c, SZ n ) { return memset(d, c, (si
 static inline void *knl_vmap( UD npages, UINT flags ) { (void)flags; return calloc(npages, PAGE_SIZE); }
 static inline void knl_vunmap( void *p, UD npages ) { (void)npages; free(p); }
 
+/* One task on the host, which may not use the vector loops (compose.c cp_simd_here) */
+static inline ID tk_get_tid( void ) { return 1; }
+
 #endif /* _HOSTSHIM_KERNEL_H_ */

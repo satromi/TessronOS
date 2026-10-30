@@ -2464,3 +2464,53 @@ EXPORT ER so_finish( void )
 
 	return E_OK;
 }
+
+/* ---------------------------------------------------------------- the network's lines, timed */
+
+/*
+ * What netlog.h makes of the network's tm_printf and tm_putstring: the
+ * console's lock taken (it may be taken again by the processor that
+ * holds it), and before a line that begins with "wifi:" or "net:" the
+ * milliseconds since the start; knl_net_stamp_end lets the lock go.
+ */
+IMPORT UINT	tm_out_lock( void );		/* lib/libtm/libtm.c */
+IMPORT void	tm_out_unlock( UINT intsts );
+IMPORT ER	ts_get_mono( UD *p_ns );
+
+LOCAL UINT	net_stamp_sts;
+
+LOCAL void net_stamp_now( void )
+{
+	UD	ns = 0;
+
+	(void)ts_get_mono(&ns);
+	tm_printf((CONST UB *)"%d.%03d ", (INT)( ns / 1000000000ULL ), (INT)( ( ns / 1000000ULL ) % 1000 ));
+}
+
+EXPORT void knl_net_stamp( CONST void *line )
+{
+	CONST UB	*s = (CONST UB *)line;
+	UINT		sts = tm_out_lock();
+
+	net_stamp_sts = sts;
+	if ( s != NULL && ( ( s[0] == 'w' && s[1] == 'i' && s[2] == 'f' && s[3] == 'i' && s[4] == ':' )
+			 || ( s[0] == 'n' && s[1] == 'e' && s[2] == 't' && s[3] == ':' ) ) ) {
+		net_stamp_now();
+	}
+}
+
+/* A whole line with the time before it, whatever it begins with (OpenBSD's layer's lines) */
+EXPORT void knl_net_stamp_line( CONST UB *line )
+{
+	UINT	sts = tm_out_lock();
+
+	net_stamp_now();
+	tm_putstring(line);
+	tm_out_unlock(sts);
+}
+
+EXPORT INT knl_net_stamp_end( void )
+{
+	tm_out_unlock(net_stamp_sts);
+	return 0;
+}

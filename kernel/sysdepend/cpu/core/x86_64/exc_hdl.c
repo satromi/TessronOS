@@ -25,6 +25,7 @@
 #include <ts/proc.h>
 #include <ts/lockup.h>
 #include "cpu_ufault.h"
+#include "sysman/space.h"
 
 /*
  * What is said of an exception goes to the console at once, without the
@@ -41,6 +42,7 @@
 IMPORT BOOL	knl_tlb_nmi( void );		/* mmu.c */
 IMPORT BOOL	knl_lockup_nmi( T_EXCFRAME *f );	/* lockup.c */
 IMPORT void	knl_lockup_halted( void );
+IMPORT volatile ID	knl_klock_holder;	/* smp.c: the PRC ID holding the kernel lock, 0 none */
 
 /*
  * This processor stops. The others go on; they find it taking no
@@ -55,9 +57,7 @@ LOCAL void halt( void )
 	}
 }
 
-/* A report of a stopping exception under way on each processor: one met while saying it stops at once */
-LOCAL volatile BOOL	exc_saying[CNF_MAX_PRCID];
-
+/* A report of a stopping exception under way on each processor (T_PCPU.exc_saying): one met while saying it stops at once */
 LOCAL INT exc_cpu( void )
 {
 	return knl_pcpu()->prcid - 1;
@@ -65,15 +65,15 @@ LOCAL INT exc_cpu( void )
 
 LOCAL void exc_begin( void )
 {
-	INT	c = exc_cpu();
+	T_PCPU	*p = knl_pcpu();
 
 	knl_fbcon_resume();
-	if ( c >= 0 && c < CNF_MAX_PRCID ) {
-		if ( exc_saying[c] ) {
+	if ( p != NULL ) {
+		if ( p->exc_saying ) {
 			tm_urgent_puts((UB*)"\n!EXCEPTION! another one while the last was being told: stopped\n");
 			halt();
 		}
-		exc_saying[c] = TRUE;
+		p->exc_saying = TRUE;
 	}
 }
 
@@ -107,12 +107,16 @@ Inline UD read_cr2( void )
  */
 EXPORT void knl_stack_broken( TCB *tcb )
 {
+	UB	pin[160];
+
 	disint();
 	knl_fbcon_resume();
-	tm_printf_urgent((UB*)"\n!STACK! CPU%d: task=%d ran past the foot of its %d byte stack\n",
-		exc_cpu(), (tcb != NULL) ? tcb->tskid : 0,
-		(tcb != NULL) ? (INT)tcb->sstksz : 0);
+	tm_sprintf(pin, (CONST UB *)"!STACK! CPU%d: task=%d ran past the foot of its %d byte stack",
+		   exc_cpu(), (tcb != NULL) ? tcb->tskid : 0, (tcb != NULL) ? (INT)tcb->sstksz : 0);
+	knl_fbcon_pin(pin);
+	tm_printf_urgent((UB*)"\n%s\n", pin);
 	knl_lockup_say_task(" ", tcb);
+	knl_bootlog_stopped("stopped: a task ran past its stack");
 	halt();
 }
 
@@ -126,7 +130,7 @@ EXPORT void knl_stack_overwritten( TCB *tcb, UD *at, UD was, UB prc, UD since )
 
 	disint();
 	if ( knl_num_prc > 1 ) {
-		knl_send_ipi(( ( 1U << knl_num_prc ) - 1 ) & ~( 1U << exc_cpu() ), SGI_STOP);
+		knl_send_ipi_others(SGI_STOP);
 	}
 	tm_printf_urgent((UB*)"\n!STKWATCH! CPU%d: task=%d: the return address at %lx was %lx"
 			 " when CPU%d gave its context up %d us ago, and is %lx\n",
@@ -147,13 +151,62 @@ EXPORT void knl_stack_overwritten( TCB *tcb, UD *at, UD was, UB prc, UD since )
 		}
 	}
 	for ( i = 0; i < knl_num_prc; i++ ) {
-		TCB	*t = knl_pcpu_tbl[i].ctxtsk;
+		TCB	*t = knl_pcpu_of(i)->ctxtsk;
 
 		tm_printf_urgent((UB*)"  CPU%d runs task %d\n", i, ( t != NULL ) ? t->tskid : 0);
 	}
 	halt();
 }
 #endif
+
+/*
+ * The machine stopped after the records were written (bootlog.c), when
+ * an exception in a task let the other processors go on to write them.
+ * The system timer and the devices' interrupts are the first processor's
+ * (sys_timer.h): halted at once, it would take them with it, and no
+ * record would be written. So a task that met an exception in the kernel
+ * with interrupts open, the dispatcher free and the kernel lock not its
+ * own is put to sleep for good instead, the report kept on the screen
+ * and in the console; the bootlog task writes the records and then calls
+ * knl_exc_stop_all, which stops every processor and shows the report
+ * again. When the records do not get written in EXC_WRITE_MS (the disk
+ * does not answer), the task that met the exception stops the machine
+ * itself.
+ */
+#define EXC_WRITE_MS	15000
+#define RFL_IF_BIT	0x200
+
+LOCAL volatile BOOL	exc_pending = FALSE;	/* an exception waits for the records before the stop */
+LOCAL volatile UW	exc_stopping = 0;
+
+EXPORT void knl_exc_stop_all( void )
+{
+	UINT	s;
+
+	if ( !exc_pending ) {
+		return;
+	}
+	if ( __atomic_exchange_n(&exc_stopping, 1, __ATOMIC_SEQ_CST) != 0 ) {
+		halt();
+	}
+	disint();
+	if ( knl_num_prc > 1 ) {
+		knl_send_ipi_others(SGI_STOP);
+	}
+	knl_fbcon_repaint();
+	s = tm_urgent_begin();
+	tm_printf_urgent((UB*)"!STOPPED! the machine stops after the exception kept above\n");
+	tm_urgent_end(s);
+	halt();
+}
+
+/* Whether the task that met the exception may sleep for good, the machine going on until the records are written */
+LOCAL BOOL exc_may_sleep( T_EXCFRAME *f )
+{
+	return knl_ctxtsk != NULL && knl_taskindp == 0 && ( f->rflags & RFL_IF_BIT ) != 0
+	    && !knl_dispatch_disabled && knl_klock_holder != knl_pcpu()->prcid
+	    && f->vec != 2 && f->vec != 8 && f->vec != 18;	/* not an NMI, a double fault, a machine check */
+}
 
 /*
  * An exception that stops the system: what it was and where, the
@@ -163,13 +216,24 @@ LOCAL void exc_report( T_EXCFRAME *f, UD cr2 )
 {
 	UINT	s;
 
+	UB	pin[160];
+
 	disint();
+	knl_fbcon_early_exc((UW)f->vec, f->rip, cr2, f->err);	/* before the console: drawn, and kept */
 	exc_begin();
+	/* the summary, kept under the band whatever is told after it */
+	tm_sprintf(pin, (CONST UB *)"!EXCEPTION! CPU%d %s, RIP %016lx, CR2 %lx, error %lx, task %d",
+		   exc_cpu(), exc_name((UW)f->vec), f->rip, cr2, f->err,
+		   (knl_ctxtsk != NULL) ? knl_ctxtsk->tskid : 0);
+	knl_fbcon_pin(pin);
+	tm_sprintf(pin, (CONST UB *)"  RSP %016lx, RBP %016lx, CS %04lx, RFLAGS %lx, the step: %s",
+		   f->rsp, f->rbp, f->cs, f->rflags, knl_fbcon_last_stage());
+	knl_fbcon_pin(pin);
 	s = tm_urgent_begin();
 	EXCEPTION_DBG_MSG("\n!EXCEPTION! CPU%d %s (vector %d) error %lx at %04lx:%016lx RFLAGS=%lx CR2=%lx\n",
 		exc_cpu(), exc_name((UW)f->vec), (INT)f->vec, f->err, f->cs, f->rip, f->rflags, cr2);
-	EXCEPTION_DBG_MSG(" task=%d indp=%d\n",
-		(knl_ctxtsk != NULL) ? knl_ctxtsk->tskid : 0, knl_taskindp);
+	EXCEPTION_DBG_MSG(" task=%d indp=%d; the last step of the start-up: %s\n",
+		(knl_ctxtsk != NULL) ? knl_ctxtsk->tskid : 0, knl_taskindp, knl_fbcon_last_stage());
 	knl_lockup_say_task(" ", knl_ctxtsk);
 	EXCEPTION_DBG_MSG(" rax=%016lx rbx=%016lx rcx=%016lx rdx=%016lx\n", f->rax, f->rbx, f->rcx, f->rdx);
 	EXCEPTION_DBG_MSG(" rsi=%016lx rdi=%016lx rbp=%016lx rsp=%016lx\n", f->rsi, f->rdi, f->rbp, f->rsp);
@@ -178,7 +242,21 @@ LOCAL void exc_report( T_EXCFRAME *f, UD cr2 )
 	if ( ( f->cs & SEL_RPL3 ) == 0 ) {
 		knl_lockup_say_frames(" ", (UBINT)f->rbp);	/* taken in the kernel: where it was called from */
 	}
+	if ( exc_may_sleep(f) && !exc_pending ) {
+		EXCEPTION_DBG_MSG(" the task sleeps for good; the records are written, then the machine stops\n");
+		tm_urgent_end(s);
+		knl_fbcon_tail();
+		exc_pending = TRUE;
+		knl_bootlog_stopped("met an exception");
+		knl_pcpu()->exc_saying = FALSE;
+		enaint(0);
+		(void)tk_slp_tsk(EXC_WRITE_MS);
+		knl_exc_stop_all();		/* the records not written in time */
+		halt();
+	}
 	tm_urgent_end(s);
+	knl_fbcon_tail();
+	knl_bootlog_stopped("stopped by an exception");	/* written by the other processors, if they can */
 	halt();
 }
 
@@ -312,6 +390,19 @@ EXPORT void knl_el0_fault( void *frame, UD esr, UD far )
 		halt();
 	}
 	enaint(0);		/* tk_ext_tsk is a task-context call: run it with interrupts enabled */
+	{
+		/* the words on top of its stack: after a call or a return through
+		   a bad pointer, where it came from */
+		UD	l0 = knl_ctxtsk->tskctxb.ttbr0 & PTE_ADDR_MASK, w[4];
+		UBINT	sp = (UBINT)f->rsp;
+
+		if ( sp >= USER_TEXT_VA && sp + sizeof(w) <= USER_STACK_TOP
+		  && knl_pt_lookup(l0, sp & PAGE_MASK) != ~(UD)0
+		  && knl_pt_lookup(l0, ( sp + sizeof(w) - 1 ) & PAGE_MASK) != ~(UD)0 ) {
+			knl_ua_get(w, (CONST void *)sp, sizeof(w));
+			EXCEPTION_DBG_MSG(" stack %lx %lx %lx %lx\n", w[0], w[1], w[2], w[3]);
+		}
+	}
 	knl_memset(&info, 0, sizeof(info));
 	info.kind = TS_FLT_EL0;
 	info.tskid = knl_ctxtsk->tskid;
@@ -364,15 +455,47 @@ EXPORT void knl_nmi_entry( T_EXCFRAME *f )
 	exc_report(f, read_cr2());
 }
 
+/*
+ * A vector that has no handler (vector.S). A device can raise its
+ * interrupt before its driver defines the handler: a message enabled
+ * while the function still holds an interrupt from the firmware's use
+ * of it arrives at once. Such an interrupt is ended at the Local APIC,
+ * counted and dropped, and the processor goes on; stopping here would
+ * take the processor that serves the devices' interrupts with it. An
+ * IOAPIC input is masked as well, since a level nobody clears would
+ * come again at once; its driver unmasks it with EnableInt. The first
+ * one of a vector and each tenfold are said on the console.
+ */
+IMPORT BOOL	knl_int_is_dev( UINT intno );	/* apic.c */
+IMPORT BOOL	knl_int_is_msi( UINT intno );
+
+LOCAL volatile UW	int_unhandled[N_INTVEC];
+
+/* How many interrupts of intno arrived with no handler */
+EXPORT UW knl_int_unhandled( UINT intno )
+{
+	return ( intno < N_INTVEC ) ? int_unhandled[intno] : 0;
+}
+
 WEAK_FUNC EXPORT void Default_Handler( UINT intno )
 {
-	if ( intno == INTVEC_APIC_ERROR ) {
-		knl_apic_eoi();
+	UW	n, m;
+	BOOL	line;
+
+	knl_apic_eoi();
+	if ( intno == INTVEC_APIC_ERROR || intno >= N_INTVEC ) {
 		return;
 	}
-	knl_fbcon_resume();
-	EXCEPTION_DBG_MSG("\n!Undefined interrupt! CPU%d interrupt %d\n", exc_cpu(), intno);
-	halt();
+	n = __atomic_add_fetch(&int_unhandled[intno], 1, __ATOMIC_RELAXED);
+	line = knl_int_is_dev(intno) && !knl_int_is_msi(intno);
+	if ( line ) {
+		DisableInt(intno);
+	}
+	for ( m = 1; m < n && m < 1000000000U; m *= 10 ) ;
+	if ( m == n ) {
+		tm_printf((UB *)"TessronOS: interrupt %d on CPU%d with no handler: ended and dropped%s (%u so far)\n",
+			  intno, exc_cpu(), line ? ", its IOAPIC input masked" : "", n);
+	}
 }
 
 #endif	/* CPU_CORE_X86_64 */

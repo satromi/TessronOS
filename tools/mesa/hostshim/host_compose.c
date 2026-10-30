@@ -17,6 +17,34 @@
 #include "../../../outer_kernel/wm/compose.h"
 #include "hc.h"
 
+/*
+ * compose.c's vector loops (compose_simd.c, x64's), never called on the
+ * host: no task there may use them, so the stages take the plain loops
+ */
+EXPORT void cps_copy( UW *d, CONST UW *s, INT n ) { (void)d; (void)s; (void)n; abort(); }
+EXPORT void cps_lay( UW *dst, CONST UW *src, CONST UW *und, INT n, UINT a, BOOL keyed, UW tint, UINT tstr, UW wcol,
+		     UINT wstr )
+{
+	(void)dst; (void)src; (void)und; (void)n; (void)a; (void)keyed; (void)tint; (void)tstr; (void)wcol; (void)wstr;
+	abort();
+}
+EXPORT void cps_darken( UW *row, CONST UB *a, INT n ) { (void)row; (void)a; (void)n; abort(); }
+EXPORT void cps_halve( CONST T_CPLEVEL *s, CONST T_DPRECT *d, UW *out, UH *row, UH *mid )
+{
+	(void)s; (void)d; (void)out; (void)row; (void)mid;
+	abort();
+}
+EXPORT void cps_smooth( CONST T_CPLEVEL *s, CONST T_DPRECT *d, CONST INT *wt, UW *out, UH *row, UH *mid )
+{
+	(void)s; (void)d; (void)wt; (void)out; (void)row; (void)mid;
+	abort();
+}
+EXPORT void cps_double( CONST T_CPLEVEL *s, CONST T_DPRECT *d, UW *out, UH *row, UH *mid )
+{
+	(void)s; (void)d; (void)out; (void)row; (void)mid;
+	abort();
+}
+
 /* No window of the test has an outline of its own */
 EXPORT INT dp_rgn_row( CONST T_DPRGN *rgn, INT y, CONST INT **p_spans )
 {

@@ -46,6 +46,8 @@
 
 #include "tc.h"
 #include <ts/json.h>
+#include <ts/obatr.h>
+#include <ts/obdrop.h>
 
 /* The panels of the data box */
 #define PN_FIND		1		/* 検索パネル */
@@ -76,7 +78,8 @@ INT	g_drop_w = -1, g_drop_f = -1, g_drop_x;
 UB	g_out[OUT_MAX];
 
 static TS_UUID	g_ch;
-static char	g_meta[OB_ATR_MAX + 1];
+static char	g_meta_none[1];
+static char	*g_meta = g_meta_none;	/* the metadata meta_of read last ("" when none) */
 static INT	g_last = W_SCHED;	/* the window last pressed or typed in */
 static INT	g_front = W_SCHED;	/* and of the 予定表 and 住所録 */
 
@@ -165,34 +168,33 @@ static UB *rec_read( INT *p_len )
 static ER rec_write( CONST UB *data, INT len )
 {
 	ID	k = ob_opn_obj(&g_obj, OB_OP_R | OB_OP_W);
-	INT	at = 0;
-	SZ	asz = 0;
-	ER	er = E_OK;
+	ER	er;
 
 	if ( k <= 0 ) return (ER)k;
-	while ( at < len && er >= E_OK ) {
-		SZ	n = ( len - at > CHUNK ) ? CHUNK : (SZ)( len - at );
-
-		er = ob_wri_rec(k, 0, (D)at, data + at, n, &asz);
-		if ( er >= E_OK && asz != n ) er = E_IO;
-		at += (INT)n;
-	}
-	if ( er >= E_OK ) er = ob_trn_rec(k, 0, (UD)len);
+	/* replaced in one change: a cut in the power leaves the old record or the new one */
+	er = ob_rpl_rec(k, 0, data, (SZ)len);
 	ob_cls_obj(k);
 	return er;
 }
 
 static INT meta_of( CONST TS_UUID *u )
 {
-	SZ	asz = 0;
+	UB	*m = NULL;
+	INT	n;
 	ID	k = ob_opn_obj(u, OB_OP_ATRRD);
 
-	g_meta[0] = 0;
+	/* the metadata whole, in memory of its own: the last one read let go */
+	if ( g_meta != g_meta_none ) free(g_meta);
+	g_meta = g_meta_none;
 	if ( k <= 0 ) return 0;
-	if ( ob_get_atr(k, (UB *)g_meta, OB_ATR_MAX, &asz) < E_OK || asz < 0 ) asz = 0;
+	n = ob_atr_read(k, 0, &m);
 	ob_cls_obj(k);
-	g_meta[asz] = 0;
-	return (INT)asz;
+	if ( n <= 0 ) {
+		free(m);
+		return 0;
+	}
+	g_meta = (char *)m;
+	return n;
 }
 
 static ER load( void )
@@ -430,13 +432,15 @@ static ER win_open( INT k )
 	T_OBNTF		req;
 	T_OBWPOS	wp;
 	SZ		asz = 0;
-	char		json[220], title[OB_NAME_MAX + 32];
+	char		json[280], title[OB_NAME_MAX + 32];
+	char		shown[TS_UUID_STRLEN + 1];
 
 	if ( w->open ) return E_OK;
 	snprintf(title, sizeof(title), "%s（%s）", (char *)g_name, win_title[k]);
-	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%d,\"icon\":\"%s\"}",
+	ts_uuid_text(&g_obj, shown);	/* what it shows, for ウインドウ一覧 */
+	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%d,\"icon\":\"%s\",\"shows\":\"%s\"}",
 		 w->x, w->y, w->x + win_w[k] + FRAME_W, w->y + win_h[k] + TITLE_H,
-		 WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE, SYSDEF_PROG_TECHO);
+		 WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE, SYSDEF_PROG_TECHO, shown);
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
 	c.sub = OB_S_WINDOW;
@@ -686,6 +690,8 @@ static void view( INT k )
 /* What came while the desktop was asked: what is not the person's input is heard */
 static void event( CONST T_OBNTM *m );
 
+static void told( CONST T_OBNTM *m );
+
 static void settle( void )
 {
 	T_OBNTM	m;
@@ -694,7 +700,7 @@ static void settle( void )
 	while ( !g_closing && ob_rea_rec(g_port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
 		if ( ( m.event & ( OB_E_PRESS | OB_E_RELEASE | OB_E_MOVE | OB_E_KEY | OB_E_ENTER
 				 | OB_E_LEAVE | OB_E_WHEEL ) ) != 0 ) continue;
-		event(&m);
+		told(&m);
 	}
 }
 
@@ -705,7 +711,6 @@ static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	T_OBCRE		c;
 	SZ		asz = 0;
 	ID		k, ka;
-	INT		i;
 	ER		er;
 
 	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
@@ -723,16 +728,13 @@ static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	k = ob_opn_obj(&d, OB_OP_WRITE);
 	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
 	if ( k > 0 ) ob_cls_obj(k);
-	for ( i = 0; er >= E_OK; i += 20 ) {
-		if ( ob_rea_rec(ka, 0, 0, an, sizeof(*an), &asz) >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
+	/* the answer waited for on its channel, at most wait_ms */
+	while ( er >= E_OK ) {
+		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
+		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
 			er = an->er;
 			break;
 		}
-		if ( i >= wait_ms ) {
-			er = E_TMOUT;
-			break;
-		}
-		(void)tk_dly_tsk(20);
 	}
 	ob_cls_obj(ka);
 	(void)ob_del_obj(&reply);
@@ -767,24 +769,17 @@ static INT work( UI *q )
 	T_OBNTM	m;
 	INT	num, ev;
 
+	/* the notices waited for; the windows drawn again once none is waiting */
 	for ( ;; ) {
-		ev = ui_dlg_next(&g_ui, q, &m, &num);
-		switch ( ev ) {
-		case UI_EV_BUTTON:
-			return num;
-		case UI_EV_CLOSE:
-			return 0;
-		case UI_EV_OTHER:
-			if ( m.event == OB_E_REDRAW ) event(&m);
-			break;
-		case UI_EV_NONE:
-			redraw_dirty();
-			(void)tk_dly_tsk(TICK_MS);
-			break;
-		default:
-			break;
-		}
-		if ( g_closing ) return 0;
+		if ( ui_wait(&g_ui, &m, TMO_FEVR) < E_OK ) return 0;
+		do {
+			ev = ui_dlg_take(q, &m, &num);
+			if ( ev == UI_EV_BUTTON ) return num;
+			if ( ev == UI_EV_CLOSE ) return 0;
+			if ( ev == UI_EV_OTHER && m.event == OB_E_REDRAW ) event(&m);
+			if ( g_closing ) return 0;
+		} while ( ui_wait(&g_ui, &m, TMO_POL) >= E_OK );
+		redraw_dirty();
 	}
 }
 
@@ -821,7 +816,7 @@ static void find_open( void )
 		}
 	}
 	ui_icon(SYSDEF_PROG_TECHO);
-	if ( ui_open(&g_find, SYSDEF_BOX_TECHO, PN_FIND, x, y) < E_OK ) {
+	if ( ui_open_on(&g_find, &g_ui, SYSDEF_BOX_TECHO, PN_FIND, x, y) < E_OK ) {
 		say("検索パネルを開けません");
 		return;
 	}
@@ -867,6 +862,15 @@ static void find( BOOL from_first )
 	} else {
 		say("");
 	}
+}
+
+static void find_event( CONST T_OBNTM *m );
+
+/* A notice of the channel: the find window's, or one of the pages' */
+static void told( CONST T_OBNTM *m )
+{
+	if ( g_find_open && ui_mine(&g_find, m) ) find_event(m);
+	else event(m);
 }
 
 static void find_event( CONST T_OBNTM *m )
@@ -1331,7 +1335,7 @@ static void key( CONST T_OBNTM *m, INT w )
 			return;
 		}
 	}
-	if ( ed_on() && ed_win() == w && ed_key(m->code, mods) ) return;
+	if ( ed_on() && ed_win() == w && ed_key(m->code, mods, m->imode) ) return;
 	switch ( m->code ) {
 	case K_PGUP:	page("prev", w);	break;
 	case K_PGDN:	page("next", w);	break;
@@ -1384,7 +1388,6 @@ static void press( CONST T_OBNTM *m, INT w )
 	g_hy0 = m->y;
 	g_hold_moved = FALSE;
 	g_hold_copy = FALSE;
-	if ( ed_on() && ed_win() == w && ed_ime_press(m->x, m->y) ) return;
 	if ( w == W_ADDR && g_idx_open ) {
 		INT	k = index_at(m->x, m->y);
 
@@ -1490,36 +1493,38 @@ static void released( CONST T_OBNTM *m, INT w )
 static void dropped( INT w )
 {
 	UI		u;
-	static T_OBDROP	d;
-	SZ		asz = 0;
+	T_OBDROP	*d;
 	INT		f, n;
-	char		s[OB_DROP_TEXT + 48];
+	char		s[160];
 
 	memset(&u, 0, sizeof(u));
 	u.kw = g_w[w].kw;
-	memset(&d, 0, sizeof(d));
-	if ( ob_rea_rec(g_w[w].kw, OB_WR_DROP, 0, &d, sizeof(d), &asz) < E_OK || asz <= 0 ) return;
-	if ( d.n > 0 ) {
-		ui_drop_answer(&u, &d, OB_DR_REFUSE, "記入欄には仮身を入れられません");
+	d = ob_drop_read(g_w[w].kw);		/* all the letters let go */
+	if ( d == NULL ) return;
+	if ( d->n > 0 ) {
+		ui_drop_answer(&u, d, OB_DR_REFUSE, "記入欄には仮身を入れられません");
 		note("drop refused");
+		free(d);
 		return;
 	}
-	d.text[OB_DROP_TEXT - 1] = 0;
-	n = (INT)strlen((char *)d.text);
-	f = part_at(w, d.x, d.y);
+	n = (INT)strlen((char *)OB_DROP_LETTERS(d));
+	f = part_at(w, d->x, d->y);
 	if ( n == 0 || f < 0 ) {
-		ui_drop_answer(&u, &d, OB_DR_REFUSE, "記入欄の上に置いてください");
+		ui_drop_answer(&u, d, OB_DR_REFUSE, "記入欄の上に置いてください");
 		note("drop refused");
+		free(d);
 		return;
 	}
-	ui_drop_answer(&u, &d, OB_DR_ACCEPT, "");
-	field_begin(w, f, d.x);
-	ed_insert(d.text, n);
+	ui_drop_answer(&u, d, OB_DR_ACCEPT, "");
+	field_begin(w, f, d->x);
+	ed_insert(OB_DROP_LETTERS(d), n);
 	g_last = w;
 	if ( w != W_CAL ) g_front = w;
-	snprintf(s, sizeof(s), "dropped text %s to %s %d", (char *)d.text, ( w == W_SCHED ) ? "sched" : "addr", f + 1);
+	snprintf(s, sizeof(s), "dropped text %s to %s %d", (char *)OB_DROP_LETTERS(d),
+		 ( w == W_SCHED ) ? "sched" : "addr", f + 1);
 	note(s);
 	g_w[w].dirty = TRUE;
+	free(d);
 }
 
 /*
@@ -1617,6 +1622,10 @@ static void event( CONST T_OBNTM *m )
 		g_w[w].dirty = TRUE;
 		return;
 	case OB_E_PRESS:
+		if ( m->recno == OB_WR_CAND ) {
+			if ( ed_on() && ed_win() == w ) ed_pick((INT)m->code);	/* a name on the list of candidates */
+			return;
+		}
 		if ( m->code == 1 ) {
 			/* the second button while letters are carried makes it a copy; else the menu */
 			if ( g_hold == HOLD_CARRY ) g_hold_copy = TRUE;
@@ -1716,13 +1725,13 @@ int main( void )
 	if ( !g_w[g_front].open ) g_front = g_w[W_ADDR].open ? W_ADDR : W_SCHED;
 	for ( k = 0; k < W_N; k++ ) draw(k);
 
+	/* the find window's notices come to the same channel (ui_open_on): one wait has both */
 	while ( !g_closing ) {
-		while ( !g_closing && ob_rea_rec(g_port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) event(&m);
-		while ( !g_closing && g_find_open && ob_rea_rec(g_find.port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
-			find_event(&m);
+		for ( TMO tmo = TMO_FEVR; !g_closing && ob_rea_tmo(g_port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK;
+		      tmo = TMO_POL ) {
+			told(&m);
 		}
 		if ( !g_closing ) redraw_dirty();
-		if ( !g_closing ) (void)tk_dly_tsk(TICK_MS);
 	}
 	ed_end();
 	if ( g_find_open ) ui_close(&g_find);

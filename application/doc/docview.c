@@ -217,6 +217,15 @@ typedef struct {
 	INT		want_para, want_pos;
 	BOOL		got;
 	T_DPRECT	box;
+	/*
+	 * The line that holds the place asked for (LM_CARET_BOX): its first
+	 * and last place, and the top of the piece that held it. And a
+	 * place under a point looked for in one stretch of one paragraph
+	 * only (LM_CARET_AT, 'only_para' >= 0).
+	 */
+	INT		line_a, line_e, hit_top, hits;
+	INT		only_para, only_a, only_e;
+	INT		best_dy, best_dx;
 	INT		sa_para, sa_pos, sb_para, sb_pos;
 
 	/* the face as it was last set, so as not to set it again */
@@ -342,14 +351,25 @@ EXPORT void tv_doc_detail( BOOL on )
 }
 
 /*
- * A document drawn magnified, in eighths: as a piece of text in a
- * figure is when the figure is. Every length of it grows alike.
+ * A document drawn magnified, dv_zoom / dv_zden: as a piece of text in
+ * a figure is when the figure is. Every length of it grows alike.
+ * Eighths unless whoever draws it says what else.
  */
 LOCAL INT	dv_zoom = 8;
+LOCAL INT	dv_zden = 8;
+
+EXPORT void tv_doc_zoom_by( INT z, INT den )
+{
+	if ( z <= 0 || den <= 0 ) {
+		z = den = 8;
+	}
+	dv_zoom = z;
+	dv_zden = den;
+}
 
 EXPORT void tv_doc_zoom( INT z )
 {
-	dv_zoom = ( z > 0 ) ? z : 8;
+	tv_doc_zoom_by(z, 8);
 }
 
 /*
@@ -364,7 +384,7 @@ EXPORT void tv_doc_ground( BOOL on )
 	dv_ground = on;
 }
 
-#define DZ(v)	( ( dv_zoom == 8 ) ? (v) : (v) * dv_zoom / 8 )
+#define DZ(v)	( ( dv_zoom == dv_zden ) ? (v) : (v) * dv_zoom / dv_zden )
 
 LOCAL INT num_text( INT n, UB *out );
 LOCAL INT page_no( CONST T_TVRUN *r, INT pg );
@@ -590,12 +610,18 @@ LOCAL INT text_w( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n )
 LOCAL void comb_put( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n, INT x,
 		     INT base, UW col )
 {
-	UB	buf[64];
+	UB	mem[64], *buf = mem;
 	INT	i, em = run_px(r), tw;
 	UINT	st = 0;
 	T_FNMET	met;
 
-	for ( i = 0; i < n && i < (INT)sizeof(buf) - 1; i++ ) {
+	if ( n >= (INT)sizeof(mem) ) {
+		buf = (UB *)Kmalloc((SZ)n + 1);
+		if ( buf == NULL ) {
+			return;
+		}
+	}
+	for ( i = 0; i < n; i++ ) {
 		buf[i] = s[i];
 	}
 	buf[i] = 0;
@@ -615,6 +641,9 @@ LOCAL void comb_put( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n, INT x,
 	}
 	(void)fn_draw(l->gid, l->fid, l->vr - 1 - base - tw / 2,
 		      x + em / 2 + ( met.ascent - met.descent ) / 2, buf, col);
+	if ( buf != mem ) {
+		Kfree(buf);
+	}
 }
 
 /* Text put down in the face now set: each letter, and the spacing after it */
@@ -702,7 +731,13 @@ LOCAL void piece( LAY *l, CONST T_TVRUN *r, INT pi, INT pos, INT units,
 {
 	switch ( l->mode ) {
 	case LM_CARET_AT: {
-		INT	dy = 0, dx = 0, at = pos, score;
+		INT	dy = 0, dx = 0, at = pos;
+
+		if ( l->only_para >= 0
+		  && ( pi != l->only_para || pos < l->only_a
+		    || pos + units > l->only_e ) ) {
+			break;
+		}
 
 		if ( l->ask_y < top ) {
 			dy = top - l->ask_y;
@@ -738,9 +773,12 @@ LOCAL void piece( LAY *l, CONST T_TVRUN *r, INT pi, INT pos, INT units,
 				at = pos + k;
 			}
 		}
-		score = dy * 4096 + dx;
-		if ( l->best < 0 || score < l->best ) {
-			l->best = score;
+		/* the nearest line first, then the nearest place along it */
+		if ( l->best < 0 || dy < l->best_dy
+		  || ( dy == l->best_dy && dx < l->best_dx ) ) {
+			l->best = 0;
+			l->best_dy = dy;
+			l->best_dx = dx;
 			l->best_para = pi;
 			l->best_pos = at;
 		}
@@ -765,6 +803,9 @@ LOCAL void piece( LAY *l, CONST T_TVRUN *r, INT pi, INT pos, INT units,
 			l->box.right = cx + 2;
 			l->box.bottom = top + h;
 			l->got = TRUE;
+			l->line_a = l->line_e = l->want_pos;
+			l->hit_top = top;
+			l->hits++;
 		}
 		break;
 	case LM_SELECT: {
@@ -863,8 +904,6 @@ LOCAL void thing_size( LAY *l, CONST T_TVRUN *r, INT *p_w, INT *p_h )
 		return;
 	}
 	if ( l->src != NULL && tad_lnk_get(l->src, r->link, &v) >= E_OK ) {
-		BOOL	sized = FALSE;
-
 		if ( v.hidden && !l->show_hidden ) {
 			*p_w = 0;		/* a hidden link takes no room */
 			*p_h = 0;
@@ -877,21 +916,20 @@ LOCAL void thing_size( LAY *l, CONST T_TVRUN *r, INT *p_w, INT *p_h )
 		 */
 		if ( v.width > 0 ) {
 			*p_w = v.width;
-			sized = TRUE;
 		} else if ( v.right > v.left ) {
 			*p_w = units_px(( l->doc != NULL ) ? l->doc->hunit : -72, v.right - v.left);
-			sized = TRUE;
 		}
 		if ( v.heightpx > 0 ) {
 			*p_h = v.heightpx;
-			sized = TRUE;
 		} else if ( v.bottom > v.top ) {
 			*p_h = units_px(( l->doc != NULL ) ? l->doc->vunit : -72, v.bottom - v.top);
-			sized = TRUE;
 		}
-		/* never shorter than the band its name is written in */
-		if ( sized && *p_h < om_band_h(&v) + 2 * OM_FRAME_W ) {
-			*p_h = om_band_h(&v) + 2 * OM_FRAME_W;
+		/*
+		 * Never shorter than the object closed, sized or not: the
+		 * same least height a figure gives it (tad_lnk_closed_h).
+		 */
+		if ( *p_h < tad_lnk_closed_h(&v) ) {
+			*p_h = tad_lnk_closed_h(&v);
 		}
 	}
 	*p_w = DZ(*p_w);
@@ -1356,7 +1394,7 @@ LOCAL void draw_ruby( LAY *l, CONST T_TVDOC *d, CONST ITEM *it, INT a, INT e,
 		CONST T_TVRUN	*r = &d->run[it[k].ri];
 		INT		g = r->ruby_group, j = k, x0, x1, px, rw, save_px;
 		ID		fid;
-		UB		buf[128];
+		UB		mem[128], *buf = mem;
 		INT		m;
 		T_FNMET		met;
 
@@ -1373,10 +1411,18 @@ LOCAL void draw_ruby( LAY *l, CONST T_TVDOC *d, CONST ITEM *it, INT a, INT e,
 		if ( px < 6 ) px = 6;
 		fid = l->fid;
 		save_px = l->set_px;
+		if ( r->ruby_len >= (INT)sizeof(mem) ) {
+			/* a long ruby: as long as it is */
+			buf = (UB *)Kmalloc((SZ)r->ruby_len + 1);
+			if ( buf == NULL ) {
+				k = j;
+				continue;
+			}
+		}
 		if ( fid > 0 ) {
 			fn_set_size(fid, px);
 			l->set_px = -1;			/* the face is not what it was */
-			for ( m = 0; m < r->ruby_len && m < (INT)sizeof(buf) - 1; m++ ) {
+			for ( m = 0; m < r->ruby_len; m++ ) {
 				buf[m] = r->ruby[m];
 			}
 			buf[m] = 0;
@@ -1394,6 +1440,7 @@ LOCAL void draw_ruby( LAY *l, CONST T_TVDOC *d, CONST ITEM *it, INT a, INT e,
 						     : base - ( run_px(r) - half ) - ( px - px / 2 ) - 1;
 				(void)fn_vdraw(l->gid, fid, l->vr - 1 - axis,
 					       x0 + ( ( x1 - x0 ) - rw ) / 2, buf, r->colour);
+				if ( buf != mem ) Kfree(buf);
 				k = j;
 				continue;
 			}
@@ -1405,6 +1452,7 @@ LOCAL void draw_ruby( LAY *l, CONST T_TVDOC *d, CONST ITEM *it, INT a, INT e,
 				      : base - run_px(r) - met.descent - 1,
 				      buf, r->colour);
 		}
+		if ( buf != mem ) Kfree(buf);
 		(void)save_px;
 		k = j;
 	}
@@ -1733,6 +1781,7 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 				: ( indent_x >= 0 ) ? indent_x : left;
 		INT	x = start, e = a, k, asc = 0, desc = 0, big = 0, pitch;
 		INT	top, base, width, extra, shift_x = 0, spaces = 0, col_dx = 0;
+		INT	hits0;
 		BOOL	forced = FALSE;
 
 		/* how many things go on this line */
@@ -1881,6 +1930,7 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 		}
 
 		/* drawn, or asked about */
+		hits0 = l->hits;
 		for ( k = a; k < e; k++ ) {
 			CONST T_TVRUN	*r = &d->run[it[k].ri];
 			INT		ix = shift_x + it[k].x;
@@ -1919,14 +1969,16 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 					  && top + pitch >= l->top && top <= l->bottom
 					  && r->link >= 0 && r->link < d->nfig ) {
 						T_TVFIG		*f = d->figs[r->link];
-						INT		keep = f->zoom;
+						INT		keep = f->zoom, keep_den = f->zoom_den;
 
 						/* its view, magnified as the text is */
 						f->zoom = dv_zoom;
+						f->zoom_den = dv_zden;
 						(void)tv_fig_draw_at(l->gid, f, &tb,
 								     DZ(f->view.left), DZ(f->view.top),
 								     l->src, TAD_COL_NONE, 1);
 						f->zoom = keep;
+						f->zoom_den = keep_den;
 						/* its letters set the faces afresh */
 						l->set_fid = 0;
 					}
@@ -2056,6 +2108,12 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 				      top + pitch, pitch);
 			}
 		}
+		/* the line that holds the place asked for: all of it */
+		if ( l->mode == LM_CARET_BOX && l->hits != hits0
+		  && l->hit_top == top ) {
+			l->line_a = it[a].fpos;
+			l->line_e = it[e - 1].fpos + it[e - 1].units;
+		}
 		if ( l->gid >= 0 && l->mode == LM_PLAIN
 		  && top + pitch >= l->top && top <= l->bottom ) {
 			box_ends(l, d, it, a, e, shift_x, base);
@@ -2082,17 +2140,284 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 	return y;
 }
 
+/* ---------------------------------------------------------------- the paragraphs kept */
+
+/*
+ * The paragraphs kept (tv_doc_cache) are counted in blocks of LB_N: a
+ * block's paragraphs' heights added up, and how many of them are a
+ * guess. A walk that wants nothing of a block steps over it whole, so
+ * that what it costs goes with what it wants rather than with how
+ * long the document is.
+ */
+#define LB_SHIFT	8
+#define LB_N		( 1 << LB_SHIFT )
+
+/*
+ * The settings a paragraph's lines depend on, as one number: how wide
+ * the lines are, the pages and columns, the magnification, what is
+ * shown in detail, which way the text runs. Laid at other settings, a
+ * paragraph's height is only a guess.
+ */
+LOCAL UW lay_key( CONST LAY *l )
+{
+	UW	h = 2166136261U;
+	INT	v[14], i, k;
+
+	v[0] = l->x1 - l->x0;
+	v[1] = l->full_x1 - l->x0;
+	v[2] = l->page_h;
+	v[3] = l->mtop;
+	v[4] = l->mbottom;
+	v[5] = l->cols;
+	v[6] = l->colstep;
+	v[7] = dv_zoom;
+	v[8] = l->detail ? 1 : 0;
+	v[9] = l->show_hidden ? 1 : 0;
+	v[10] = l->vert ? 1 : 0;
+	v[11] = l->x0;
+	v[12] = dv_zden;
+	v[13] = 0x5A17;
+	for ( i = 0; i < 14; i++ ) {
+		for ( k = 0; k < 4; k++ ) {
+			h ^= ( (UW)v[i] >> ( k * 8 ) ) & 0xFFU;
+			h *= 16777619U;
+		}
+	}
+
+	return h;
+}
+
+/* A paragraph's height and what it is, its block's sums kept with it */
+LOCAL void laid_set( T_TVLAYC *c, INT pi, INT h, UINT state )
+{
+	T_TVLAID	*e = &c->e[pi];
+	INT		b = pi >> LB_SHIFT;
+
+	c->bh[b] += h - e->h;
+	if ( e->state == TV_LAID_EXACT && state != TV_LAID_EXACT ) {
+		c->bx[b]++;
+	} else if ( e->state != TV_LAID_EXACT && state == TV_LAID_EXACT ) {
+		c->bx[b]--;
+	}
+	if ( e->state == TV_LAID_NONE && state != TV_LAID_NONE ) {
+		c->nnone--;
+	}
+	e->h = h;
+	e->state = state;
+}
+
+/* How tall a paragraph never laid is taken to be, from how much text it holds */
+LOCAL INT laid_guess( CONST LAY *l, CONST T_TVDOC *d, INT pi )
+{
+	CONST T_TVPARA	*p = &d->para[pi];
+	INT		size = 14, bytes = 0, breaks = 0, ri, w, lines, pitch;
+
+	for ( ri = p->first; ri < p->first + p->n && ri < d->nrun; ri++ ) {
+		CONST T_TVRUN	*r = &d->run[ri];
+
+		if ( ri == p->first && r->size > 0 ) {
+			size = r->size;
+		}
+		if ( r->kind == TV_RUN_TEXT ) {
+			bytes += r->len;
+		} else if ( r->kind == TV_RUN_BREAK ) {
+			breaks++;
+		}
+	}
+	size = DZ(size);
+	if ( size < 1 ) {
+		size = 1;
+	}
+	/* letters of three bytes, each about as wide as it is tall */
+	w = ( l->x1 - l->x0 ) - DZ(p->left) - DZ(p->right);
+	if ( w < size ) {
+		w = size;
+	}
+	lines = ( bytes / 3 * size + w - 1 ) / w + breaks;
+	if ( lines < 1 ) {
+		lines = 1;
+	}
+	pitch = p->gap_abs ? ( ( p->gap > 0 ) ? p->gap : size + size / 2 )
+			   : size + size * p->gap / 1000;
+
+	return lines * pitch + ( p->pargap_abs ? p->pargap : size * p->pargap / 1000 );
+}
+
+/*
+ * Before a walk: at other settings than last, what was laid is a guess
+ * now; a paragraph never laid is given a guess.
+ */
+LOCAL void laid_prepare( CONST LAY *l, CONST T_TVDOC *d )
+{
+	T_TVLAYC	*c = d->layc;
+	UW		key = lay_key(l);
+	INT		pi;
+
+	if ( c->key != key ) {
+		for ( pi = 0; pi < c->n; pi++ ) {
+			if ( c->e[pi].state == TV_LAID_EXACT ) {
+				laid_set(c, pi, c->e[pi].h, TV_LAID_GUESS);
+			}
+		}
+		c->key = key;
+	}
+	for ( pi = 0; c->nnone > 0 && pi < c->n; pi++ ) {
+		if ( c->e[pi].state == TV_LAID_NONE ) {
+			laid_set(c, pi, laid_guess(l, d, pi), TV_LAID_GUESS);
+		}
+	}
+}
+
+/* Whether what was kept of paragraph pi is its lines now, laid at y */
+LOCAL BOOL laid_fresh( CONST LAY *l, CONST T_TVDOC *d, INT pi, INT y )
+{
+	CONST T_TVLAID	*e = &d->layc->e[pi];
+
+	return (BOOL)( e->state == TV_LAID_EXACT && ( l->page_h <= 0 || e->y_in == y ) );
+}
+
+/* Paragraph pi as just laid, from y to y1 */
+LOCAL void laid_keep( LAY *l, CONST T_TVDOC *d, INT pi, INT y, INT y1 )
+{
+	T_TVLAYC	*c = d->layc;
+	T_TVLAID	*e = &c->e[pi];
+	CONST T_TVPARA	*p = &d->para[pi];
+
+	e->node = p->node;
+	e->gen = ( p->node != NULL ) ? p->node->gen : 0;
+	e->sig = p->sig;
+	e->y_in = y;
+	e->pitch = l->last_pitch;
+	laid_set(c, pi, y1 - y, p->nocache ? TV_LAID_GUESS : TV_LAID_EXACT);
+}
+
+/*
+ * The point a walk asks about, as a place across the lines (what its
+ * pieces' tops are measured in), when it asks about one
+ */
+LOCAL BOOL lay_point( CONST LAY *l, INT *p_y )
+{
+	INT	px;
+
+	if ( l->mode == LM_CARET_AT && l->only_para < 0 ) {
+		*p_y = l->ask_y;
+		return TRUE;
+	}
+	if ( l->mode != LM_PLAIN || ( l->thing_asking && l->thing_want >= 0 ) ) {
+		return FALSE;
+	}
+	if ( l->asking ) {
+		lg_point(l, l->ask_x, l->ask_y, &px, p_y);
+	} else if ( l->thing_asking ) {
+		lg_point(l, l->thing_x, l->thing_y, &px, p_y);
+	} else if ( l->mark_asking ) {
+		lg_point(l, l->mark_x, l->mark_y, &px, p_y);
+	} else {
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+/*
+ * Whether paragraphs a up to e (not e), from y and h tall together, are
+ * wanted for what the walk is doing: drawn where the box shows them,
+ * holding the place asked about, near the point asked about (the
+ * paragraph it is in and the ones either side, since a point between
+ * two is nearest to a line of one of them), or between the ends of a
+ * selection that shows. 'hp' and 'hn' are how tall the paragraphs
+ * just before and just after are.
+ */
+LOCAL BOOL lay_wanted( CONST LAY *l, CONST T_TVDOC *d, INT a, INT e, INT y, INT h,
+		       INT hp, INT hn )
+{
+	INT	top = l->y + y - l->scroll, bot = top + h, py;
+	BOOL	seen = (BOOL)( bot > l->top && top < l->bottom );
+
+	if ( lay_point(l, &py) ) {
+		if ( a == 0 && py < top ) {
+			return TRUE;
+		}
+		if ( e >= d->npara && py >= bot ) {
+			return TRUE;
+		}
+		return (BOOL)( py >= top - hp && py < bot + hn );
+	}
+	switch ( l->mode ) {
+	case LM_CARET_BOX:
+		return (BOOL)( l->want_para >= a && l->want_para < e );
+	case LM_CARET_AT:
+		return (BOOL)( l->only_para >= a && l->only_para < e );
+	case LM_SELECT:
+		return (BOOL)( l->sb_para >= a && l->sa_para < e && seen );
+	default:
+		if ( l->thing_asking && l->thing_want >= 0 ) {
+			return (BOOL)( l->thing_want >= d->para[a].first
+				    && l->thing_want < d->para[e - 1].first + d->para[e - 1].n );
+		}
+		return (BOOL)( l->gid >= 0 && seen );
+	}
+}
+
 /*
  * The whole of the work: walk the paragraphs, break the lines, and
  * either draw or only measure. One walk does all of it so that what is
  * measured and what is drawn cannot come apart.
+ *
+ * With the paragraphs kept (tv_doc_cache), one that is not wanted for
+ * what the walk is doing (lay_wanted) is not laid out again: it counts
+ * as tall as it was laid, or as the guess. Not laid on pages, a block
+ * of paragraphs none of which is wanted is stepped over whole. In
+ * columns, where a paragraph's place on the paper does not follow from
+ * how tall the ones before it are, every one is laid.
  */
 LOCAL INT lay_out( LAY *l, CONST T_TVDOC *d )
 {
-	INT	pi, y = 0;
+	T_TVLAYC	*c = d->layc;
+	INT		pi = 0, y = 0, n = d->npara;
+	BOOL		keep = (BOOL)( c != NULL && c->n == n
+				    && !( l->page_h > 0 && l->cols > 1 ) );
+	BOOL		blocks = (BOOL)( keep && l->page_h <= 0 );
 
-	for ( pi = 0; pi < d->npara; pi++ ) {
-		y = lay_para(l, d, pi, y);
+	if ( keep ) {
+		laid_prepare(l, d);
+	}
+	while ( pi < n ) {
+		INT	h, hp, hn, y1;
+
+		if ( !keep ) {
+			y = lay_para(l, d, pi, y);
+			pi++;
+			continue;
+		}
+		hp = ( pi > 0 ) ? c->e[pi - 1].h : 0;
+		if ( blocks && ( pi & ( LB_N - 1 ) ) == 0 ) {
+			INT	b = pi >> LB_SHIFT, e = ( pi + LB_N < n ) ? pi + LB_N : n;
+
+			hn = ( e < n ) ? c->e[e].h : 0;
+			if ( !lay_wanted(l, d, pi, e, y, c->bh[b], hp, hn) ) {
+				y += c->bh[b];
+				pi = e;
+				continue;
+			}
+		}
+		h = c->e[pi].h;
+		hn = ( pi + 1 < n ) ? c->e[pi + 1].h : 0;
+		if ( laid_fresh(l, d, pi, y) && !lay_wanted(l, d, pi, pi + 1, y, h, hp, hn) ) {
+			l->last_pitch = c->e[pi].pitch;
+			y += h;
+			pi++;
+			continue;
+		}
+		if ( !laid_fresh(l, d, pi, y) && !lay_wanted(l, d, pi, pi + 1, y, h, hp, hn) ) {
+			y += h;			/* the guess */
+			pi++;
+			continue;
+		}
+		y1 = lay_para(l, d, pi, y);
+		laid_keep(l, d, pi, y, y1);
+		y = y1;
+		pi++;
 	}
 	/* in columns, as far down as the last page goes */
 	if ( l->page_h > 0 && l->cols > 1 && y > 0 ) {
@@ -2176,6 +2501,7 @@ LOCAL void lay_init( LAY *l, INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 	l->fid = fn_system();
 	l->found = -1;
 	l->best = -1;
+	l->only_para = -1;
 	l->mode = LM_PLAIN;
 	l->set_fid = 0;
 	l->set_px = -1;
@@ -2229,6 +2555,225 @@ EXPORT ER tv_doc_caret_box( CONST T_TVDOC *d, CONST T_DPRECT *r,
 	*box = l.box;
 
 	return E_OK;
+}
+
+/*
+ * The line a place is on: where the place is drawn, and the first and
+ * the last place of the line. A place where a line is broken belongs
+ * to the line after, as tv_doc_caret_box draws it.
+ */
+EXPORT ER tv_doc_caret_line( CONST T_TVDOC *d, CONST T_DPRECT *r,
+			     INT scroll_y, CONST T_TAD *src, INT para, INT pos,
+			     T_DPRECT *box, INT *p_head, INT *p_end )
+{
+	LAY	l;
+
+	if ( d == NULL || r == NULL || box == NULL || p_head == NULL
+	  || p_end == NULL ) {
+		return E_PAR;
+	}
+	lay_init(&l, -1, d, r, scroll_y, src);
+	l.mode = LM_CARET_BOX;
+	l.want_para = para;
+	l.want_pos = pos;
+	(void)lay_out(&l, d);
+	if ( !l.got ) {
+		return E_NOEXS;
+	}
+	ph_rect(&l, &l.box);
+	*box = l.box;
+	*p_head = l.line_a;
+	*p_end = l.line_e;
+
+	return E_OK;
+}
+
+/*
+ * The place under a point, looked for only among the places from
+ * 'head' to 'end' of paragraph 'para': one line, as tv_doc_caret_line
+ * gives it.
+ */
+EXPORT ER tv_doc_caret_in( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
+			   CONST T_TAD *src, INT para, INT head, INT end,
+			   INT x, INT y, INT *p_pos )
+{
+	LAY	l;
+
+	if ( d == NULL || r == NULL || p_pos == NULL || para < 0 ) {
+		return E_PAR;
+	}
+	lay_init(&l, -1, d, r, scroll_y, src);
+	l.mode = LM_CARET_AT;
+	l.only_para = para;
+	l.only_a = head;
+	l.only_e = end;
+	lg_point(&l, x, y, &l.ask_x, &l.ask_y);
+	(void)lay_out(&l, d);
+	if ( l.best < 0 ) {
+		return E_NOEXS;
+	}
+	*p_pos = l.best_pos;
+
+	return E_OK;
+}
+
+/*
+ * The paragraphs laid out kept with d, those of 'from' still the same
+ * taken over: the two are matched by their <p>s, in order, so that a
+ * paragraph put in or taken out does not make those after it count as
+ * changed. One whose <p> has changed since, or whose settings or the
+ * look of letters at its head have, keeps its height only as a guess.
+ */
+EXPORT ER tv_doc_cache( T_TVDOC *d, CONST T_TVDOC *from )
+{
+	T_TVLAYC	*c;
+	INT		n, nb, i = 0, j = 0, on;
+	SZ		sz;
+
+	if ( d == NULL ) {
+		return E_PAR;
+	}
+	n = d->npara;
+	nb = ( n + LB_N - 1 ) >> LB_SHIFT;
+	sz = sizeof(T_TVLAYC) + sizeof(T_TVLAID) * (SZ)( ( n > 0 ) ? n : 1 )
+	   + sizeof(INT) * 2 * (SZ)( nb + 1 );
+	c = (T_TVLAYC *)Kmalloc(sz);
+	if ( c == NULL ) {
+		return E_NOMEM;			/* every paragraph laid every time, as before */
+	}
+	knl_memset(c, 0, sz);
+	c->n = n;
+	c->nb = nb;
+	c->bh = (INT *)&c->e[( n > 0 ) ? n : 1];
+	c->bx = c->bh + nb + 1;
+	if ( from != NULL && from->layc != NULL && from->layc->n == from->npara
+	  && from->serial != 0 && from->serial == d->serial ) {
+		CONST T_TVLAYC	*o = from->layc;
+
+		on = from->npara;
+		c->key = o->key;
+		while ( i < n && j < on ) {
+			CONST T_TADNODE	*a = d->para[i].node, *b = from->para[j].node;
+			INT		k;
+
+			if ( a != NULL && a == b ) {
+				c->e[i++] = o->e[j++];
+				continue;
+			}
+			/* paragraphs taken out: the old ones skipped to where this one is */
+			for ( k = 1; k <= 32 && j + k < on && from->para[j + k].node != a; k++ ) {
+			}
+			if ( a != NULL && j + k < on && k <= 32 ) {
+				j += k;
+				continue;
+			}
+			/* paragraphs put in: the new ones left to be guessed */
+			for ( k = 1; k <= 32 && i + k < n && d->para[i + k].node != b; k++ ) {
+			}
+			if ( b != NULL && i + k < n && k <= 32 ) {
+				i += k;
+				continue;
+			}
+			/* one in place of another: its height kept as the guess */
+			c->e[i] = o->e[j];
+			if ( c->e[i].state == TV_LAID_EXACT ) {
+				c->e[i].state = TV_LAID_GUESS;
+			}
+			i++;
+			j++;
+		}
+	}
+	for ( i = 0; i < n; i++ ) {
+		T_TVLAID	*e = &c->e[i];
+		CONST T_TVPARA	*p = &d->para[i];
+
+		if ( e->state == TV_LAID_EXACT
+		  && ( p->nocache || p->node == NULL || e->node != p->node
+		    || e->gen != p->node->gen || e->sig != p->sig ) ) {
+			e->state = TV_LAID_GUESS;	/* changed: its height a guess */
+		}
+		if ( e->state == TV_LAID_NONE ) {
+			e->h = 0;
+			c->nnone++;
+		}
+		c->bh[i >> LB_SHIFT] += e->h;
+		if ( e->state != TV_LAID_EXACT ) {
+			c->bx[i >> LB_SHIFT]++;
+		}
+	}
+	if ( d->layc != NULL ) {
+		Kfree(d->layc);
+	}
+	d->layc = c;
+
+	return E_OK;
+}
+
+EXPORT INT tv_doc_settle( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
+			  CONST T_TAD *src, INT budget, INT *p_shift )
+{
+	T_TVLAYC	*c;
+	LAY		l;
+	INT		pi = 0, y = 0, y_old = 0, left = 0, shift = 0, n;
+	BOOL		out = FALSE;
+	SYSTIM		t0, t;
+
+	if ( p_shift != NULL ) {
+		*p_shift = 0;
+	}
+	if ( d == NULL || r == NULL || ( c = d->layc ) == NULL || c->n != d->npara ) {
+		return 0;
+	}
+	lay_init(&l, -1, d, r, scroll_y, src);
+	if ( l.page_h > 0 && l.cols > 1 ) {
+		return 0;			/* in columns every paragraph is laid anyway */
+	}
+	laid_prepare(&l, d);
+	n = d->npara;
+	(void)tk_get_otm(&t0);
+	while ( pi < n ) {
+		T_TVLAID	*e = &c->e[pi];
+		INT		h_old;
+
+		if ( ( pi & ( LB_N - 1 ) ) == 0 ) {
+			INT	b = pi >> LB_SHIFT;
+
+			if ( c->bx[b] == 0 || out ) {
+				/* nothing in it to lay, or no time left: as tall as it is */
+				left += c->bx[b];
+				y += c->bh[b];
+				y_old += c->bh[b];
+				pi = ( pi + LB_N < n ) ? pi + LB_N : n;
+				continue;
+			}
+		}
+		h_old = e->h;
+		if ( e->state != TV_LAID_EXACT && !d->para[pi].nocache ) {
+			(void)tk_get_otm(&t);
+			if ( (INT)( t.lo - t0.lo ) < budget ) {
+				INT	y1 = lay_para(&l, d, pi, y);
+
+				laid_keep(&l, d, pi, y, y1);
+				if ( y_old + h_old <= scroll_y ) {
+					shift += ( y1 - y ) - h_old;	/* above what is shown */
+				}
+				y = y1;
+				y_old += h_old;
+				pi++;
+				continue;
+			}
+			out = TRUE;
+			left++;
+		}
+		y += h_old;
+		y_old += h_old;
+		pi++;
+	}
+	if ( p_shift != NULL ) {
+		*p_shift = shift;
+	}
+
+	return left;
 }
 
 EXPORT void tv_doc_select( INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
@@ -2329,6 +2874,7 @@ LOCAL void on_paper( CONST T_TVDOC *d, T_TVDOC *c, T_DPRECT *r )
 
 	paper_of(d, &w, &h);
 	*c = *d;
+	c->layc = NULL;			/* laid another way: none of it kept */
 	c->page_h = d->vert ? w : h;
 	r->left = 0;
 	r->top = 0;
@@ -2750,12 +3296,14 @@ LOCAL void sheets( LAY *l, CONST T_TVDOC *d, INT h )
 			}
 			for ( i = 0; i < o->nfig; i++ ) {
 				T_TVFIG	*f = o->figs[i];
-				INT	keep = f->zoom;
+				INT	keep = f->zoom, keep_den = f->zoom_den;
 
 				f->zoom = dv_zoom;
+				f->zoom_den = dv_zden;
 				(void)tv_fig_draw_at(l->gid, f, &pr, 0, 0, l->src,
 						     TAD_COL_NONE, 1);
 				f->zoom = keep;
+				f->zoom_den = keep_den;
 			}
 		}
 	}

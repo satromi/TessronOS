@@ -75,7 +75,11 @@ extern "C" {
 #define TV_ALIGN_RIGHT	2
 #define TV_ALIGN_JUSTIFY 3
 
-#define TV_MAX_TABS	16
+/* A document's tab stops, as one tab format gives them: 'n' after the head */
+typedef struct t_tvtabs {
+	struct t_tvtabs	*next;
+	INT		n;
+} T_TVTABS;
 
 typedef struct {
 	UINT		kind;		/* TV_RUN_* */
@@ -135,7 +139,7 @@ typedef struct {
 	BOOL		gap_abs, pargap_abs;
 	INT		left, right;
 	INT		ntabs;
-	INT		tabs[TV_MAX_TABS];
+	CONST INT	*tabs;		/* in one of the document's tabsets */
 	BOOL		page_before;	/* a page break stands at its head */
 
 	/*
@@ -155,7 +159,59 @@ typedef struct {
 	CONST UB	*khead, *ktail;
 	INT		khead_len, ktail_len;
 	INT		khead_kind, ktail_kind;
+
+	/*
+	 * What it is laid out from besides what is inside its <p>: its own
+	 * settings and the look of letters at its head, as one number.
+	 * With the <p>'s count of changes (T_TADNODE.gen) it says whether
+	 * the lines it was laid in last are still its lines. 'nocache'
+	 * when they may not be: a paragraph with no <p>, or one holding a
+	 * figure, a page number or a variable, which may change without it.
+	 */
+	UW		sig;
+	BOOL		nocache;
+
+	/*
+	 * For making the document again after a change (tv_doc_again):
+	 * the <p>'s count of changes, the look of letters and the settings
+	 * at its head, and whether nothing inside it changes what holds
+	 * after it ('closed'). A paragraph found the same is taken over
+	 * whole rather than read from the record again.
+	 */
+	UW		gen, insig, pssig;
+	BOOL		closed;
 } T_TVPARA;
+
+/*
+ * What laying out one paragraph came to, kept so that it is laid out
+ * again only when it has changed (docview.c): its <p>, that node's
+ * count of changes and the paragraph's 'sig' then, where it began (on
+ * pages that matters), how far below that the next one begins, and the
+ * height of its last line. A height not yet laid at the present
+ * settings is a guess, from the last time or from how much text it
+ * holds.
+ */
+typedef struct {
+	CONST void	*node;
+	UW		gen, sig;
+	INT		y_in;
+	INT		h;
+	INT		pitch;
+	UINT		state;		/* TV_LAID_* */
+} T_TVLAID;
+
+#define TV_LAID_NONE	0		/* nothing known */
+#define TV_LAID_GUESS	1		/* 'h' a guess */
+#define TV_LAID_EXACT	2		/* laid at the settings of 'key' */
+
+typedef struct t_tvlayc {
+	UW		key;		/* the settings the exact ones were laid at */
+	INT		n;		/* paragraphs */
+	INT		nnone;		/* of them with nothing known */
+	INT		nb;		/* blocks of them (docview.c) */
+	INT		*bh, *bx;	/* each block's height, and how many in it are guesses */
+	T_TVLAID	e[1];		/* n of them, then the blocks' sums */
+} T_TVLAYC;
 
 typedef struct t_tvdoc {
 	T_DPRECT	view;		/* where it is shown, when it says */
@@ -167,6 +223,16 @@ typedef struct t_tvdoc {
 	INT		nrun;
 	T_TVPARA	*para;
 	T_TVRUN		*run;
+	T_TVTABS	*tabsets;	/* the tab stops its paragraphs point into */
+
+	/*
+	 * The paragraphs as last laid out, when whoever shows it has asked
+	 * for that to be kept (tv_doc_cache); NULL lays every paragraph
+	 * every time. A copy of a document made to be laid another way
+	 * sets it NULL.
+	 */
+	T_TVLAYC	*layc;
+	UW		serial;		/* of the record it was made from (tad_serial), 0 none */
 
 	/*
 	 * The paper it is laid on, when it says, and its margins: in
@@ -240,8 +306,14 @@ typedef struct t_tvdoc {
 					   size, rad_v its kind (0 dot, 1 plus,
 					   2 star, 3 circle, 4 cross, 5 diamond) */
 
-#define TV_MAX_PT	1024		/* points of one shape */
-#define TV_PT_POOL	16384		/* points of all the shapes of a figure */
+/*
+ * A shape has as many points as it is written with, and a figure as
+ * many shapes as it holds: all in memory taken as the figure is read.
+ * The outline of a shape, or the path of a line, has at most this many
+ * points: eight for each of its own (a curve), and room for what is
+ * drawn round rather than through points (an ellipse, a rounded corner).
+ */
+#define TV_OUT_PTS(npt)	( (npt) * 8 + 8256 )
 
 /*
  * A pattern of the figure's own, as it is drawn: sixteen by sixteen
@@ -249,7 +321,6 @@ typedef struct t_tvdoc {
  * a word, the leftmost pixel in the top bit. 'colour' is its first
  * colour, for whatever needs one colour rather than a pattern.
  */
-#define TV_MAX_FPAT	64		/* a figure's own patterns that are kept */
 
 typedef struct t_tvpat {
 	INT		id;
@@ -304,10 +375,6 @@ typedef struct {
 	BOOL		hidden;		/* a link marked hidden (隠蔽仮身) */
 } T_TVSHAPE;
 
-#define TV_MAX_SHAPE	256
-#define TV_MAX_LTYPE	16		/* kinds of line a figure defines */
-#define TV_DASH_MAX	16
-#define TV_MAX_DOC	TV_MAX_SHAPE	/* each piece of text is a shape too: a page of a table's cells is one each */
 
 typedef struct t_tvfig {
 	T_DPRECT	view, draw;
@@ -324,8 +391,12 @@ typedef struct t_tvfig {
 	 * taken as 8. Whoever shows it sets this; the record does not say.
 	 * The places it is drawn at and asked about are then the figure's
 	 * multiplied by it, and a scroll is in those magnified pixels.
+	 * zoom_den, when it is not 0, is what zoom is counted in instead of
+	 * eighths: zoom / zoom_den, a magnification that is not a whole
+	 * number of eighths (a slide made as large as the screen).
 	 */
 	INT		zoom;
+	INT		zoom_den;
 
 	/* the links marked hidden are drawn and can be pressed; else neither */
 	BOOL		show_hidden;
@@ -345,11 +416,12 @@ typedef struct t_tvfig {
 	/*
 	 * The kinds of line it defines (<lineTypeDefine>): each id's
 	 * dashes, lengths on, off, on ... in pixels at a width of one, 0
-	 * ending them; lt_dash[i][0] 0 is a solid line.
+	 * ending them; lt_dash[i][0] 0 is a solid line. As many as it
+	 * defines, each as long as its mask makes it.
 	 */
 	INT		nlt;
-	INT		lt_id[TV_MAX_LTYPE];
-	UB		lt_dash[TV_MAX_LTYPE][TV_DASH_MAX];
+	INT		*lt_id;
+	UB		**lt_dash;
 
 	/*
 	 * 用紙オーバーレイ (<figoverlay>): the shapes laid on the paper
@@ -532,6 +604,19 @@ typedef struct {
 	 * link marked in its corner. NULL, or 0, for neither.
 	 */
 	UINT	(*state)( CONST T_VOBJ *v, void *arg );
+
+	/*
+	 * The drawing done with an icon that icon gave it: until then the
+	 * source keeps the pixels, whatever else it lets go meanwhile.
+	 * NULL when the source keeps its icons for good.
+	 */
+	void	(*icon_done)( CONST UW *px, void *arg );
+
+	/*
+	 * The drawing done with the pixels picture gave it, as icon_done.
+	 * NULL when the source keeps its pictures for good.
+	 */
+	void	(*picture_done)( CONST UW *px, void *arg );
 } T_TVSRC;
 
 #define TV_ST_GONE	0x0001
@@ -585,6 +670,14 @@ IMPORT ER  tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 IMPORT INT tv_open_depth;
 
 #define TV_MAX_DEPTH	3
+
+/*
+ * How many open objects deep what is inside one is drawn: TV_MAX_DEPTH
+ * on the screen. Printing with 仮身: 展開 sets it to 深さ and puts it back
+ * after; an open object past it is drawn as its frame and band, with
+ * nothing inside.
+ */
+IMPORT INT tv_open_max;
 
 /* ---------------------------------------------------------------- drawing */
 
@@ -686,14 +779,46 @@ IMPORT ER  tv_fig_size( CONST T_TVFIG *f, INT *p_w, INT *p_h );
 IMPORT void tv_doc_detail( BOOL on );
 /* What documents are drawn magnified by, in eighths, until set again */
 IMPORT void tv_doc_zoom( INT z );
+/* The same, z / den: tv_doc_zoom(z) is tv_doc_zoom_by(z, 8) */
+IMPORT void tv_doc_zoom_by( INT z, INT den );
 /* Whether documents are laid on their paper (TRUE) or over what is there, until set again */
 IMPORT void tv_doc_ground( BOOL on );
+/*
+ * The paragraphs laid out kept with the document from now on, those of
+ * 'from' (the document it was made again in place of, or NULL) that
+ * are still the same taken over. Then a paragraph is laid out again
+ * only when it has changed, or when it is to be drawn or asked about
+ * at other settings; the others count as tall as they were, or as a
+ * guess. tv_doc_settle lays those still a guess, 'budget' of them at
+ * a time, and answers how many are left; '*p_shift' is how much the
+ * text above scroll_y came to be taller (below nought shorter), for
+ * the one showing it to scroll by as much, so that what is in the
+ * window stays where it is.
+ */
+IMPORT ER  tv_doc_cache( T_TVDOC *d, CONST T_TVDOC *from );
+/*
+ * A document made again from its record after a change: the paragraphs
+ * of 'old' (made from the same record before) that have not changed
+ * taken over as they are, the others read again. The same as tv_doc,
+ * only quicker.
+ */
+IMPORT ER  tv_doc_again( CONST T_TAD *doc, CONST T_TVDOC *old, T_TVDOC **p_out );
+IMPORT INT tv_doc_settle( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
+			  CONST T_TAD *src, INT budget, INT *p_shift );
 IMPORT ER  tv_doc_caret_at( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
 			    CONST T_TAD *src, INT x, INT y, INT *p_para,
 			    INT *p_pos );
 IMPORT ER  tv_doc_caret_box( CONST T_TVDOC *d, CONST T_DPRECT *r,
 			     INT scroll_y, CONST T_TAD *src, INT para, INT pos,
 			     T_DPRECT *box );
+/* The line a place is on: its box as tv_doc_caret_box, and the line's first and last place */
+IMPORT ER  tv_doc_caret_line( CONST T_TVDOC *d, CONST T_DPRECT *r,
+			      INT scroll_y, CONST T_TAD *src, INT para, INT pos,
+			      T_DPRECT *box, INT *p_head, INT *p_end );
+/* The place under a point among the places 'head' to 'end' of one paragraph only */
+IMPORT ER  tv_doc_caret_in( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
+			    CONST T_TAD *src, INT para, INT head, INT end,
+			    INT x, INT y, INT *p_pos );
 IMPORT void tv_doc_select( INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 			   INT scroll_y, CONST T_TAD *src, INT a_para,
 			   INT a_pos, INT b_para, INT b_pos );

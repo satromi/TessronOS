@@ -455,11 +455,35 @@ LOCAL void test_setup( void )
 			  ",\"window\":{\"pos\":{\"x\":20,\"y\":80},\"width\":320,\"height\":240}", xk, &cab), E_OK);
 	made = TRUE;
 
+	/*
+	 * A system volume made before has the system's containers by their
+	 * old names: 書体 named 書体箱 again is renamed at the desktop's
+	 * start; 壁紙 given a name of its own is left so.
+	 */
+	{
+		TS_UUID	fb, wb;
+
+		KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_FONT_BOX, &fb), E_OK);
+		KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_WALL_BOX, &wb), E_OK);
+		KT_ASSERT_ER(om_store_rename(&fb, (CONST UB *)"書体箱"), E_OK);
+		KT_ASSERT_ER(om_store_rename(&wb, (CONST UB *)"KTの壁紙"), E_OK);
+	}
 	pos = log_now();
 	KT_ASSERT_ER(dt_start(), E_OK);
 	up = wait_for(pos, "TessronOS desktop: start", 100, NULL, 0);
 	KT_ASSERT(up);
 	if ( !up ) return;
+	KT_ASSERT(wait_for(pos, "TessronOS desktop: 書体箱 renamed 書体", 10, NULL, 0));
+	{
+		TS_UUID	fb, wb;
+		T_OBREF	r;
+
+		(void)ts_str_to_uuid(SYSDEF_FONT_BOX, &fb);
+		(void)ts_str_to_uuid(SYSDEF_WALL_BOX, &wb);
+		KT_ASSERT(ob_ref_obj(&fb, &r) >= E_OK && knl_strcmp((CONST char *)r.name, "書体") == 0);
+		KT_ASSERT(ob_ref_obj(&wb, &r) >= E_OK && knl_strcmp((CONST char *)r.name, "KTの壁紙") == 0);
+		(void)om_store_rename(&wb, (CONST UB *)"壁紙");
+	}
 	for ( i = 0; i < 50; i++ ) {
 		TS_UUID	d;
 
@@ -511,6 +535,41 @@ LOCAL BOOL superfloppy( char *name, INT max )
 		ob_cls_obj(k);
 	}
 	return FALSE;
+}
+
+/*
+ * The superfloppy also attached at its place in the file layer
+ * (FS_MEDIA_DIR "/" name), for this test to look at what ファイル変換
+ * wrote through the disk's root it opened (fs_opn_vol): the two share
+ * the disk's mount. Taken off again with on FALSE.
+ */
+LOCAL ID	sf_key;
+
+LOCAL void sf_attach( CONST char *name, BOOL on )
+{
+	TS_UUID	list[64];
+	T_OBREF	r;
+	INT	cnt = 0, i;
+
+	if ( !on ) {
+		if ( sf_key > 0 ) {
+			(void)fs_detach_dev(sf_key);
+			ob_cls_obj(sf_key);
+		}
+		sf_key = 0;
+		return;
+	}
+	if ( sf_key > 0 || ob_lst_obj(OB_T_DEVICE, OB_S_DISK, NULL, list, 64, &cnt) < E_OK ) return;
+	for ( i = 0; i < cnt && i < 64; i++ ) {
+		if ( ob_ref_obj(&list[i], &r) < E_OK || knl_strcmp((CONST char *)r.name, name) != 0 ) continue;
+		sf_key = ob_opn_obj(&list[i], OB_OP_R | OB_OP_WRITE);
+		if ( sf_key <= 0 || fs_attach_dev(sf_key, NULL, 0) < E_OK ) {
+			tm_printf((UB *)"  %s not attached at its place\n", name);
+			if ( sf_key > 0 ) ob_cls_obj(sf_key);
+			sf_key = 0;
+		}
+		return;
+	}
 }
 
 LOCAL INT links_to( DTWIN *d, CONST TS_UUID *u, T_VOBJ *v );
@@ -620,7 +679,7 @@ LOCAL void test_xfconv( void )
 	lpos = pos;
 	type_on(wid, sf);
 	key_on(wid, K_ENTER);
-	KT_ASSERT(wait_for(pos, "xfconv: mounted /media/", 100, NULL, 0));
+	KT_ASSERT(wait_for(pos, "xfconv: opened disk ", 100, NULL, 0));
 	KT_ASSERT(wait_for(pos, "xfconv: - SUB/", 100, NULL, 0));
 	fwid = -1;
 	for ( k = 0; k < 30 && fwid <= 0; k++ ) {
@@ -636,6 +695,7 @@ LOCAL void test_xfconv( void )
 	knl_strcpy(dir, FS_MEDIA_DIR);
 	knl_strcat(dir, "/");
 	knl_strcat(dir, sf);
+	sf_attach(sf, TRUE);
 
 	/* a link let go on it: the panel, and written into the root */
 	pos = log_now();
@@ -705,7 +765,8 @@ LOCAL void test_xfconv( void )
 	/* the file list closed: the disk taken off */
 	pos = log_now();
 	key_mods(fwid, 0x08, HID_MOD_LCTRL);		/* Ctrl+E */
-	KT_ASSERT(wait_for(pos, "xfconv: unmounted ", 100, NULL, 0));
+	KT_ASSERT(wait_for(pos, "xfconv: closed disk ", 100, NULL, 0));
+	sf_attach(sf, FALSE);
 	finish(pid, &win);
 }
 
@@ -809,6 +870,14 @@ LOCAL void test_backup( void )
 #define SP_DROP		18		/* as tests/uprog/svcprog.c */
 
 /* The object dropped on the window, as the desktop drops a link */
+/* Whether a window's title is the one given */
+LOCAL BOOL titled( INT wid, CONST char *title )
+{
+	char	b[64];
+
+	return (BOOL)( wm_title(wid, b, sizeof(b)) >= 0 && knl_strcmp(b, title) == 0 );
+}
+
 LOCAL ER drop_one( INT wid, CONST TS_UUID *target )
 {
 	T_OBDROPV	v;
@@ -861,11 +930,11 @@ LOCAL void test_grant( void )
 	KT_ASSERT_ER(ob_set_pwd(&user, (CONST UB *)"ktest-pw"), E_OK);
 
 	/* the system's, and nobody else's */
-	prt = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+	prt = (T_OBPRT *)Kmalloc(KT_PRT_SIZE);
 	m = (T_TSMSG *)Kmalloc(sizeof(T_TSMSG));
 	KT_ASSERT(prt != NULL && m != NULL);
 	if ( prt == NULL || m == NULL ) goto done0;
-	knl_memset(prt, 0, sizeof(*prt));
+	knl_memset(prt, 0, KT_PRT_SIZE);
 	prt->owner = ob_user_system;
 	prt->group = ob_group_admin;
 	prt->mode = 0600;
@@ -904,7 +973,9 @@ LOCAL void test_grant( void )
 		/* the first: granted until refused (the process opens it meanwhile) */
 		KT_ASSERT_EQ(knl_ob_granted(pid, &secret), 0);
 		KT_ASSERT_ER(drop_one(wid, &secret), E_OK);
-		for ( t = 0; t < 100 && knl_ob_granted(pid, &secret) != 0; t++ ) tk_dly_tsk(50);
+		/* refused, and the process found it may not open it: the window renamed */
+		for ( t = 0; t < 100 && !titled(wid, "ktdrop refused"); t++ ) tk_dly_tsk(50);
+		KT_ASSERT(titled(wid, "ktdrop refused"));
 		KT_ASSERT_EQ(knl_ob_granted(pid, &secret), 0);
 
 		/* the second: taken, and used */
@@ -921,7 +992,7 @@ LOCAL void test_grant( void )
 		}
 		KT_ASSERT_EQ(b[0], 'o');			/* "opened": written through the grant */
 		KT_ASSERT_EQ(knl_ob_granted(pid, &secret), OB_DROP_OPS);
-		KT_ASSERT_ER(ob_get_prt(&secret, prt), E_OK);
+		KT_ASSERT_ER(ob_get_prt(&secret, prt, KT_PRT_SIZE, NULL), E_OK);
 		KT_ASSERT_EQ(prt->mode, 0600);			/* as it was */
 	}
 	knl_memset(m, 0, sizeof(T_TSMSG));
@@ -952,8 +1023,8 @@ done0:
 #define UNP_TITLE	"20251018発表資料公開用"
 #define UNP_ROOT	"BTRON　CLUB発表公開用"
 #define UNP_NOBJ	33
-#define UNP_ROOT_X	(16 + 8)		/* in the root's link in the program's window */
-#define UNP_ROOT_Y	(30 + 26 + 26 + 14 + 6)
+#define UNP_ROOT_X	(16 + 8)		/* in the book's 付箋 in 書庫管理's window */
+#define UNP_ROOT_Y	(30 + 24 + 4 + 14 + 6)
 #define UNP_FAT		"/boot/UNPFAT"
 
 /* The program started on an archive object: its process, its window put clear of the cabinet */
@@ -1046,10 +1117,9 @@ LOCAL BOOL carry_root( INT uwid, INT twid, INT tx, INT ty, TS_UUID *root )
 	drag(x0, y0, x1, y1, 0);
 	if ( !wait_panel(np, 50) ) return FALSE;	/* the question up */
 	key_hid(K_ENTER);
-	if ( !wait_for(pos, "unpack: done 33 objects, root ", 600, line, sizeof(line)) ) return FALSE;
+	if ( !wait_for(pos, "archive: unpacked 33 objects, root ", 600, line, sizeof(line)) ) return FALSE;
 	line[TS_UUID_STRLEN] = 0;
-	if ( ts_str_to_uuid(line, root) < E_OK ) return FALSE;
-	return wait_for(pos, "unpack: root placed on the desktop", 100, NULL, 0);
+	return (BOOL)( ts_str_to_uuid(line, root) >= E_OK );
 }
 
 /* The links of a window's record to an object: how many, and the first's box */
@@ -1117,10 +1187,11 @@ LOCAL INT walk_root( CONST TS_UUID *root, TS_UUID *objs, INT *nref, INT max )
 }
 
 /*
- * 書庫解凍: the root's link, shown in the program's window, carried into
- * the cabinet and let go; asked, and answered yes, the archive is taken
- * out onto the cabinet's volume and the link to the root is put where
- * it was let go, looking as the archive says. The cabinet saved, every
+ * 書庫管理 on an archive taken in from a .bpk file: the book's 付箋,
+ * shown in the program's window, carried into the cabinet and let go;
+ * asked, and answered yes, the archive is taken out onto the cabinet's
+ * volume and the link to the root is put where it was let go, looking
+ * as the archive says. The cabinet saved, every
  * object is counted. A click on the root, or a carry let go on the
  * ground, takes nothing out.
  */
@@ -1138,7 +1209,7 @@ LOCAL void test_unpack( void )
 	if ( !up || cwid <= 0 ) KT_SKIP("no desktop");
 	KT_ASSERT_ER(ts_str_to_uuid(UNP_ARCHIVE, &arc), E_OK);
 	if ( ob_ref_obj(&arc, &r) < E_OK ) KT_SKIP("no sample archive");
-	pid = start_on(SYSDEF_PROG_UNPACK, &arc, "unpack: ready 33 objects", UNP_TITLE, &win, &wid);
+	pid = start_on(SYSDEF_PROG_ARCHIVE, &arc, "archive: ready book", UNP_TITLE, &win, &wid);
 	KT_ASSERT(pid > 0 && wid > 0);
 	if ( pid <= 0 || wid <= 0 ) return;
 
@@ -1147,7 +1218,7 @@ LOCAL void test_unpack( void )
 	if ( at_work(wid, UNP_ROOT_X, UNP_ROOT_Y, &x, &y) ) click(x, y, 0);
 	drag(x, y, 900, 700, 0);
 	tk_dly_tsk(500);
-	KT_ASSERT(!wait_for(pos, "unpack: done", 10, NULL, 0));
+	KT_ASSERT(!wait_for(pos, "archive: unpacked", 10, NULL, 0));
 
 	/* carried into the cabinet, beside its two links */
 	d = dt_win_of(cwid);
@@ -1223,7 +1294,7 @@ LOCAL void test_unpack_fat( void )
 		if ( fwid <= 0 ) tk_dly_tsk(100);
 	}
 	KT_ASSERT(fwid > 0);
-	pid = start_on(SYSDEF_PROG_UNPACK, &arc, "unpack: ready 33 objects", UNP_TITLE, &win, &wid);
+	pid = start_on(SYSDEF_PROG_ARCHIVE, &arc, "archive: ready book", UNP_TITLE, &win, &wid);
 	KT_ASSERT(pid > 0 && wid > 0);
 	if ( fwid <= 0 || pid <= 0 || wid <= 0 ) goto out;
 
@@ -1367,6 +1438,131 @@ out:
 	wm_update();
 }
 
+/*
+ * A link in the figure editor is never lower than it is closed. One
+ * whose record gives it a box lower than its letters is shown at the
+ * closed height (fourteen point: 25), the record left as it was; its
+ * foot carried up stops there; carried a little down it stays closed,
+ * and carried well down it is opened to where it was let go. All of
+ * it is done to a link that has an identity of its own (vobjid) and to
+ * one written without (as TADjs and older records have them), which is
+ * given one as it is read: the changes reach the record saved either
+ * way, and the one without has its identity written then.
+ */
+LOCAL INT link_h( DTWIN *d, T_VOBJ *v )
+{
+	if ( d == NULL || d->rec == NULL || tad_lnk_get(d->rec, 0, v) < E_OK ) return -1;
+	return v->bottom - v->top;
+}
+
+LOCAL void figlink_run( BOOL with_id )
+{
+	CONST char	*name = with_id ? "KT図形仮身" : "KT図形仮身無";
+	char		*fx, ia[40];
+	TS_UUID		fig, fwin;
+	DTWIN		*d;
+	T_DPRECT	page;
+	T_WMWIN		ww;
+	T_VOBJ		*v;
+	INT		fwid = -1, i, k = -1, z, x, yb, h;
+
+	if ( !up ) KT_SKIP("no desktop");
+	fx = (char *)Kmalloc(1024);
+	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	KT_ASSERT(fx != NULL && v != NULL);
+	if ( fx == NULL || v == NULL ) goto out0;
+	ts_uuid_to_str(&txa, ia, sizeof(ia));
+	tm_sprintf((UB *)fx, (UB *)"<tad version=\"1.0\" encoding=\"UTF-8\"><figure>"
+		   "<link id=\"%s_0.xtad\"%s vobjleft=\"20\" vobjtop=\"20\" vobjright=\"180\" vobjbottom=\"32\""
+		   " height=\"12\" chsz=\"14\" frcol=\"#000000\" chcol=\"#000000\" tbcol=\"#ffffff\""
+		   " bgcol=\"#ffffff\" zIndex=\"1\"/></figure></tad>\n", ia,
+		   with_id ? " vobjid=\"01a0d8c4-52a8-7d42-8c6f-4a2e9b7d3fb2\"" : "");
+	tm_printf((UB *)"  %s vobjid\n", with_id ? "with a" : "without a");
+	KT_ASSERT_ER(make(name, "basic-figure-editor",
+			  ",\"window\":{\"pos\":{\"x\":360,\"y\":300},\"width\":420,\"height\":300}", fx, &fig), E_OK);
+	KT_ASSERT_ER(ask_open(&fig), E_OK);
+	for ( i = 0; i < 30 && fwid <= 0; i++ ) {
+		fwid = window_showing(&fig);
+		if ( fwid <= 0 ) tk_dly_tsk(100);
+	}
+	KT_ASSERT(fwid > 0);
+	if ( fwid <= 0 ) open_windows();
+	d = ( fwid > 0 ) ? dt_win_of(fwid) : NULL;
+	KT_ASSERT(d != NULL && df_is(d) && d->fig != NULL);
+	if ( d == NULL || d->fig == NULL || wm_ref(fwid, &ww) < E_OK ) goto out;
+	for ( i = 0; i < d->fig->nsh; i++ ) {
+		if ( d->fig->sh[i].kind == TV_SH_LINK ) k = i;
+	}
+	KT_ASSERT(k >= 0);
+	if ( k < 0 ) goto out;
+
+	/* read: shown at the closed height, the record as it was */
+	tm_printf((UB *)"  shown %d high, the record %d\n",
+		  d->fig->sh[k].r.bottom - d->fig->sh[k].r.top, link_h(d, v));
+	KT_ASSERT_EQ(d->fig->sh[k].r.bottom - d->fig->sh[k].r.top, 25);
+	KT_ASSERT_EQ(link_h(d, v), 12);
+
+	/* the foot of the box on the screen, and a place along it */
+	dt_work_rect(d, &page);
+	z = ( d->fig->zoom > 0 ) ? d->fig->zoom : 8;
+	x = ww.work.left + page.left + 100 * z / 8 - d->scroll_x;
+	yb = ww.work.top + page.top + ( 20 + 25 ) * z / 8 - d->scroll_y;
+
+	/* carried up: it stops at the closed height */
+	drag(x, yb - 2, x, yb - 2 - 30, 0);
+	h = link_h(d, v);
+	tm_printf((UB *)"  carried up: %d high\n", h);
+	KT_ASSERT_EQ(h, 25);
+	tk_dly_tsk(500);
+
+	/* a little down: still closed */
+	drag(x, yb - 2, x, yb - 2 + 4, 0);
+	h = link_h(d, v);
+	tm_printf((UB *)"  a little down: %d high\n", h);
+	KT_ASSERT_EQ(h, 25);
+	tk_dly_tsk(500);
+
+	/* well down: opened, as tall as it was carried */
+	drag(x, yb - 2, x, yb - 2 + 60 * z / 8, 0);
+	h = link_h(d, v);
+	tm_printf((UB *)"  well down: %d high\n", h);
+	KT_ASSERT_EQ(h, 25 + 60);
+	KT_ASSERT_EQ(d->fig->sh[k].r.bottom - d->fig->sh[k].r.top, 25 + 60);
+	KT_ASSERT_ER(dt_save(d), E_OK);
+	{
+		/* saved: the size, and the identity it was found by */
+		SZ	len = 0;
+		UB	*rec = om_obj_record(&fig, 0, &len);
+		char	vs[40];
+
+		ts_uuid_to_str(&v->vobjid, vs, sizeof(vs));
+		KT_ASSERT(rec != NULL);
+		if ( rec != NULL ) {
+			KT_ASSERT(find(rec, (INT)len, "vobjbottom=\"105\"", 0) > 0);
+			KT_ASSERT(find(rec, (INT)len, vs, 0) > 0);
+			KT_ASSERT_EQ(count_of(rec, (INT)len, "vobjid="), 1);
+			if ( with_id ) {
+				KT_ASSERT(find(rec, (INT)len, "01a0d8c4-52a8-7d42-8c6f-4a2e9b7d3fb2", 0) > 0);
+			}
+			Kfree(rec);
+		}
+	}
+out:
+	if ( window_named(name, &fwin) > 0 ) (void)ob_del_obj(&fwin);
+	tk_dly_tsk(300);
+	(void)ob_del_obj(&fig);
+out0:
+	if ( fx != NULL ) Kfree(fx);
+	if ( v != NULL ) Kfree(v);
+	wm_update();
+}
+
+LOCAL void test_figlink( void )
+{
+	figlink_run(TRUE);
+	figlink_run(FALSE);
+}
+
 EXPORT void ktest_drop( void )
 {
 	logb = (UB *)Kmalloc(LOG_MAX);
@@ -1380,6 +1576,7 @@ EXPORT void ktest_drop( void )
 	KT_RUN(test_unpack);
 	KT_RUN(test_unpack_fat);
 	KT_RUN(test_figtext);
+	KT_RUN(test_figlink);
 	if ( up ) {
 		dt_quit();
 		up = FALSE;

@@ -21,7 +21,8 @@
  *	and so on; a '/' in a name is shown as U+FF0F. Nothing is shown that
  *	is not an object: "/" links to bin (the commands), dev (the device
  *	objects, kept in step with the devices by devdir_task), home (the
- *	cabinet the desktop opens with) and tmp (emptied at each start).
+ *	cabinet the desktop opens with) and tmp (emptied at each start, by the
+ *	object layer: the list of 機器の設定).
  *
  *	An object is a directory when one of its applications is 仮身一覧,
  *	the キャビネット or the 小物箱, as the objects of the tree are. A
@@ -62,6 +63,7 @@
 #include <ts/sysdef.h>
 #include <ts/psx.h>
 #include <ts/psxid.h>
+#include <ts/tsfs.h>
 #include "../obj/obj.h"
 
 #define OBJ_NAME	256		/* bytes of a name shown, UTF-8, with its nought */
@@ -574,14 +576,37 @@ LOCAL ER find_in_box( CONST TS_UUID *box, CONST UB *name, INT len, ONODE *nd )
 	return er;
 }
 
-/* The node of "/": the object SYSDEF_ROOT */
+/*
+ * The node of "/": the object システム links as the root of the paths
+ * (SYSDEF_ROOT by default), looked for again no sooner than what a box
+ * holds is read again (OBJ_KEEP_MS)
+ */
 LOCAL ER node_root( ONODE *nd )
 {
+	static TS_UUID	root;
+	static UD	found = 0;
+	static BOOL	known = FALSE;
 	TS_UUID	u;
 	T_OBREF	r;
 	OENT	e;
+	UD	now = now_ms();
+	BOOL	fresh;
 
-	if ( !uuid_of(SYSDEF_ROOT, &u) || ob_ref_obj(&u, &r) < E_OK ) {
+	tk_loc_mtx(ob_mtxid, TMO_FEVR);
+	u = root;
+	fresh = (BOOL)( known && now - found < OBJ_KEEP_MS );
+	tk_unl_mtx(ob_mtxid);
+	if ( !fresh ) {
+		if ( ob_fnd_sys(SYSROLE_ROOT, SYSDEF_ROOT, &u) < E_OK ) {
+			return EX_NOENT;
+		}
+		tk_loc_mtx(ob_mtxid, TMO_FEVR);
+		root = u;
+		found = now;
+		known = TRUE;
+		tk_unl_mtx(ob_mtxid);
+	}
+	if ( ob_ref_obj(&u, &r) < E_OK ) {
 		return EX_NOENT;
 	}
 	ent_of(&u, &e);
@@ -859,20 +884,12 @@ LOCAL INT of_write( T_FILE *f, CONST void *buf, SZ len )
 		return fx(key);
 	}
 	if ( f->offset > f->size ) {
-		/* past the end: the gap filled with zeroes */
-		UB	z[512];
-		UD	at = f->size;
-
-		knl_memset(z, 0, sizeof(z));
-		while ( at < f->offset ) {
-			SZ	k = ( f->offset - at > sizeof(z) ) ? (SZ)sizeof(z) : (SZ)( f->offset - at );
-
-			er = ob_wri_rec(key, of->n.rec, (D)at, z, k, &asz);
-			if ( er < E_OK ) {
-				ob_cls_obj(key);
-				return fx(er);
-			}
-			at += (UD)k;
+		/* past the end: the record lengthened to there, which reads as
+		   zeros, in one change */
+		er = ob_trn_rec(key, of->n.rec, f->offset);
+		if ( er < E_OK ) {
+			ob_cls_obj(key);
+			return fx(er);
 		}
 	}
 	er = ob_wri_rec(key, of->n.rec, (D)f->offset, buf, len, &asz);
@@ -928,8 +945,8 @@ LOCAL ER node_st( CONST ONODE *nd, T_FSXSTAT *st )
 	st->st.ino = ino_of(&nd->u);
 	st->st.mtime = (UD)( ( nd->mtime > 0 ) ? nd->mtime : ob_boot );
 	st->st.mode = ( nd->kind == K_DIR ) ? FS_IFDIR : ( nd->kind == K_DEV ) ? FS_IFCHR : FS_IFREG;
-	prt = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
-	if ( prt != NULL && ob_get_prt(&nd->u, prt) >= E_OK ) {
+	prt = knl_ob_prt_get(&nd->u);
+	if ( prt != NULL ) {
 		UINT	mode = prt->mode & 0777;
 
 		if ( nd->kind == K_DOC ) mode &= ~0222U;	/* read only here */
@@ -1216,9 +1233,9 @@ LOCAL ER of_chmod( T_MOUNT *m, CONST char *path, UINT mode )
 	er = walk(path, &nd, NULL, NULL);
 	if ( er < EX_OK ) return er;
 	if ( nd.node != N_OBJ ) return EX_PERM;
-	prt = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+	prt = knl_ob_prt_get(&nd.u);
 	if ( prt == NULL ) return EX_NOMEM;
-	er = ob_get_prt(&nd.u, prt);
+	er = E_OK;
 	if ( er >= E_OK ) {
 		prt->mode = ( prt->mode & ~0777U ) | ( mode & 0777 );
 		er = ob_set_prt(&nd.u, prt);
@@ -1264,6 +1281,24 @@ LOCAL UINT of_poll( T_FILE *f, UINT events )
 	return events & ( FS_POLL_IN | FS_POLL_OUT );
 }
 
+/* fs_sync, and with it sync and syncfs of the POSIX layer: every native volume's log on the medium */
+LOCAL ER of_sync( T_MOUNT *m )
+{
+	(void)m;
+	return ( ts_syn_all() >= E_OK ) ? EX_OK : EX_IO;
+}
+
+/*
+ * fsync and fdatasync of one file: each write of an object here opens
+ * the object, writes and closes it, and the closing waits until what it
+ * wrote is on the medium (design 7.3), so there is nothing left to wait for.
+ */
+LOCAL ER of_fsync( T_FILE *f )
+{
+	(void)f;
+	return EX_OK;
+}
+
 EXPORT CONST T_FIMP knl_fimp_obj = {
 	.name     = "objfs",
 	.mount    = of_mount,
@@ -1286,6 +1321,8 @@ EXPORT CONST T_FIMP knl_fimp_obj = {
 	.chmod    = of_chmod,
 	.ioctl    = of_ioctl,
 	.poll     = of_poll,
+	.sync     = of_sync,
+	.fsync    = of_fsync,
 };
 
 /* ---------------------------------------------------------------- for the kernel */
@@ -1315,32 +1352,43 @@ EXPORT UINT knl_fs_uid_of( CONST TS_UUID *who )
 }
 
 /*
- * The objects of the tree the kernel keeps: dev, whose links are made to
+ * The object of the tree the kernel keeps: dev, whose links are made to
  * be the device objects there are, again whenever the devices change
- * (the device manager's serial number), and tmp, emptied once at the
- * start. Done by a task of the kernel's, as the system, which owns them.
+ * (the device manager's serial number). Done by a task of the kernel's,
+ * as the system, which owns it. tmp is emptied by the object layer as
+ * its volume is attached, being in the list of 機器の設定 (include/ts/conf.h).
  */
 #define DEVDIR_TICK	1000
-#define DEVDIR_MAX	512
+#define DEVDIR_PAGE	256		/* devices asked for at a time */
 
 LOCAL void devdir_sync( CONST TS_UUID *dev )
 {
-	TS_UUID	*want;
-	INT	nw = 0;
+	TS_UUID	*want = NULL, *nw_;
+	INT	nw = 0, got, room = 0;
 
-	want = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * DEVDIR_MAX);
-	if ( want == NULL ) return;
-	if ( ob_lst_obj(OB_T_DEVICE, 0, NULL, want, DEVDIR_MAX, &nw) < E_OK ) nw = 0;
-	if ( nw > DEVDIR_MAX ) nw = DEVDIR_MAX;
+	/* every device there is, a page at a time from the last one given */
+	for ( ;; ) {
+		nw_ = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( room + DEVDIR_PAGE ));
+		if ( nw_ == NULL ) {
+			if ( want != NULL ) Kfree(want);
+			return;			/* the links as they were */
+		}
+		if ( want != NULL ) {
+			knl_memcpy(nw_, want, (INT)( sizeof(TS_UUID) * (SZ)nw ));
+			Kfree(want);
+		}
+		want = nw_;
+		room += DEVDIR_PAGE;
+		got = 0;
+		if ( ob_lst_obj(OB_T_DEVICE, 0, ( nw > 0 ) ? &want[nw - 1] : NULL, want + nw, DEVDIR_PAGE, &got) < E_OK ) {
+			break;
+		}
+		nw += got;
+		if ( got < DEVDIR_PAGE ) break;
+	}
 	(void)om_obj_links_set(dev, want, nw);
 	box_forget(dev);
 	Kfree(want);
-}
-
-LOCAL void tmp_empty( CONST TS_UUID *tmp )
-{
-	(void)om_obj_links_set(tmp, NULL, 0);
-	box_forget(tmp);
 }
 
 LOCAL ID	devdir_tid = 0;
@@ -1349,24 +1397,15 @@ LOCAL volatile BOOL devdir_force = FALSE;	/* made again now, whatever the serial
 
 LOCAL void devdir_task( INT stacd, void *exinf )
 {
-	TS_UUID	dev, tmp;
+	TS_UUID	dev;
 	UW	seen = ~(UW)0, now;
-	BOOL	first = TRUE;
 
 	(void)stacd;
 	(void)exinf;
-	if ( !uuid_of(SYSDEF_DEV, &dev) || !uuid_of(SYSDEF_TMP, &tmp) ) {
+	if ( !uuid_of(SYSDEF_DEV, &dev) ) {
 		tk_ext_tsk();
 	}
 	for ( ;; ) {
-		if ( first ) {
-			T_OBREF	r;
-
-			if ( ob_ref_obj(&tmp, &r) >= E_OK ) {
-				tmp_empty(&tmp);
-				first = FALSE;
-			}
-		}
 		now = knl_obdev_serial();
 		if ( now != seen || devdir_force ) {
 			devdir_force = FALSE;

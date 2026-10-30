@@ -1,0 +1,209 @@
+# システム環境設定 on a screen of 640x480 (design 10.2.2, 10.7, 11.6), for tools/ui_run.py and
+# tools/x64/ui_run64.py (a screen of 1280x800 whose size can be changed). The window, opened at
+# 160,80 (its outside 160,80 to 780,584), is kept on the small screen at 20,0 to 640,460: its panel
+# ends at the work area's foot 44 higher than it is defined, the row of buttons at each sheet's
+# foot (foot="true") rises with it, and the sheet above scrolls under the window's right bar.
+# On the small screen a part of the panel at (x, y) is at (26 + x, 28 + y) when it scrolls and the
+# sheet is at its top, and at (26 + x, y - 16) at the foot; the bar is at x 633, from 28 to 454.
+# The tabs: 機器 at 52,45, 画面 at 95,45, 書体 at 138,45, バージョン at 205,45; under 機器
+# 機器情報 at 68,71 and 電源管理 at 143,71, under 画面 ウィンドウ at 162,71. 機器情報's lines from
+# 101, 17 apart, 表示 at 566,104. Back on 1280x800 the window is where it was opened.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+wait 800
+win システム環境設定
+want ok 160 80 780 584
+click 206 181
+wait 300
+click 706 184
+expect sysenv: screen page 1280x800
+wait 500
+click 300 215
+expect sysenv: screen size chosen 640x480
+click 706 554
+expect wm: screen 1280 x 800 -> 640 x 480
+wait 1500
+key 28
+expect the screen of 640x480
+expect sysenv: screen page 640x480
+wait 1000
+win システム環境設定
+want ok 20 0 640 460
+shot sm_screen
+# the bar's track under the knob: a page down, to the foot of the list; the wheel back up
+click 633 446
+wait 300
+shot sm_screen_down
+move 300 200
+wheel 3
+wait 300
+# 画面サイズ／色数: 取り消し at the foot goes back to 機器情報, whose 表示 opens the page again
+click 470 430
+wait 500
+logmark
+click 566 104
+expectsince sysenv: screen page 640x480
+click 470 430
+wait 500
+# 機器情報: the sheet scrolls with the wheel away from the list, and back
+shot sm_devs
+move 566 330
+wheel -3
+wait 300
+shot sm_devs_down
+wheel 3
+wait 300
+# 電源管理: 設定 in the watchdog's row at the foot
+click 143 71
+wait 500
+shot sm_power
+move 400 200
+wheel -3
+wait 300
+shot sm_power_down
+logmark
+click 568 424
+expectsince sysenv: performance CPU_MHZ
+# 画面〈ウィンドウ〉: 初期値 and 取り消し at the foot
+click 95 45
+wait 300
+click 162 71
+wait 500
+shot sm_look
+move 300 200
+wheel -5
+wait 300
+shot sm_look_down
+# 書体: 詳細情報 at the foot opens フォント設定, kept on the screen too
+click 138 45
+wait 500
+shot sm_font
+click 300 80
+wait 300
+click 560 392
+expect sysenv: fontset open
+wait 800
+win フォント設定
+shot sm_fontset
+# its band gives it the keys; Ctrl+E closes it
+click 300 56
+wait 300
+key 08 01
+expect sysenv: fontset closed
+wait 500
+# バージョン: 詳細情報 at the foot, and the list's foot by scrolling
+click 205 45
+wait 500
+shot sm_version
+move 100 150
+wheel -3
+wait 300
+shot sm_version_down
+# the devices' pages: each one's buttons at its foot
+click 52 45
+wait 300
+click 68 71
+wait 500
+logmark
+click 232 118
+click 566 104
+expect sysenv: adapters
+wait 500
+shot sm_net
+logmark
+click 566 430
+expectsince sysenv: devices
+wait 500
+logmark
+click 232 135
+click 566 104
+expectsince sysenv: page 3
+wait 500
+shot sm_usb
+logmark
+click 566 430
+expectsince sysenv: devices
+wait 500
+logmark
+click 232 152
+click 566 104
+expectsince sysenv: page 4
+wait 500
+shot sm_disk
+logmark
+click 566 430
+expectsince sysenv: devices
+wait 500
+logmark
+click 232 169
+click 566 104
+expectsince sysenv: page 5
+wait 500
+shot sm_video
+logmark
+click 566 430
+expectsince sysenv: devices
+wait 500
+logmark
+click 232 186
+click 566 104
+expectsince sysenv: page 6
+wait 500
+shot sm_kbd
+logmark
+click 470 430
+expectsince sysenv: devices
+wait 500
+click 232 203
+click 566 104
+expect sysenv: sound
+wait 500
+shot sm_sound
+move 100 300
+wheel -3
+wait 300
+shot sm_sound_down
+logmark
+click 566 430
+expectsince sysenv: devices
+wait 500
+click 232 220
+click 566 104
+expect sysenv: processors
+wait 500
+shot sm_cpu
+move 500 330
+wheel -3
+wait 300
+shot sm_cpu_down
+logmark
+click 566 430
+expectsince sysenv: devices
+wait 500
+# back to 1280x800: the window as it was opened
+click 232 101
+click 566 104
+expect sysenv: screen page 640x480
+wait 1500
+shot sm_page_again
+click 160 203
+expect sysenv: screen size chosen 1280x800
+click 566 430
+expect wm: screen 640 x 480 -> 1280 x 800
+wait 1500
+key 28
+expect the screen of 1280x800
+expect sysenv: screen page 1280x800
+wait 1000
+win システム環境設定
+want ok 160 80 780 584
+shot sm_back
+# 取り消し where it was at first, back to 機器情報, and 表示 there
+click 610 554
+wait 500
+logmark
+click 706 184
+expectsince sysenv: screen page 1280x800
+key 08 01
+expect sysenv: closed
+absent !OACV!

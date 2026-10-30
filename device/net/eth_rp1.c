@@ -444,6 +444,7 @@ LOCAL ER phy_speed( void )
 		cfg |= NCFGR_FD;
 	}
 	out_w(GEM_NCFGR, cfg);
+	if ( !eth.up ) knl_net_link_said();
 	eth.up = TRUE;
 	tm_printf((UB *)"eth: link up %s %s\n",
 		  ( cfg & NCFGR_GBE ) ? "1000" : ( cfg & NCFGR_SPD100 ) ? "100" : "10",
@@ -472,6 +473,7 @@ LOCAL void link_check( void )
 	} else if ( eth.up ) {
 		eth.up = FALSE;
 		tm_printf((UB *)"eth: link down\n");
+		knl_net_link_said();
 	}
 }
 

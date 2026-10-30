@@ -43,6 +43,7 @@
 #include <ts/tsfsck.h>
 #include <ts/tsfsjrnl.h>
 #include <ts/uuid.h>
+#include <ts/conf.h>
 #include "obj.h"
 
 /*
@@ -65,7 +66,7 @@ typedef struct {
 	INT	h;			/* the manager's handle */
 	INT	refs;			/* keys, and operations under way */
 	TS_UUID	uuid;
-	T_OBPRT	prt;			/* the protection as it was opened */
+	T_OBPRT	*prt;			/* the protection as it was opened, the handle's own */
 } OBHND;
 
 typedef struct {
@@ -262,12 +263,23 @@ EXPORT CONST T_OBMGR *knl_ob_mgr_of( CONST TS_UUID *uuid )
 	return ( i >= 0 ) ? ob_mgr[i] : NULL;
 }
 
-/* The protection an object has; one whose manager keeps none lets all through */
-LOCAL void prot_of( CONST T_OBMGR *m, CONST TS_UUID *uuid, T_OBPRT *prt )
+/*
+ * The protection an object has, in memory of its own (Kfree it); one
+ * whose manager keeps none lets all through. NULL when there is no
+ * memory for it.
+ */
+LOCAL T_OBPRT *prot_of( CONST T_OBMGR *m, CONST TS_UUID *uuid )
 {
-	if ( m->prot == NULL || m->prot(uuid, prt) < E_OK ) {
-		knl_ob_prt_legacy(prt, TRUE, TRUE, TRUE);
+	T_OBPRT	*prt = NULL;
+
+	if ( m->prot == NULL || m->prot(uuid, &prt) < E_OK || prt == NULL ) {
+		if ( prt != NULL ) Kfree(prt);
+		prt = knl_ob_prt_new(0, 0);
+		if ( prt != NULL ) {
+			knl_ob_prt_legacy(prt, TRUE, TRUE, TRUE);
+		}
 	}
+	return prt;
 }
 
 /*
@@ -284,11 +296,9 @@ LOCAL UINT permit_on( CONST T_OBMGR *m, CONST TS_UUID *uuid, CONST T_OBCRD *crd,
 	if ( m->type != OB_T_STORAGE || m->sub != OB_S_FILE || ops == 0 ) {
 		return ops;
 	}
-	dom = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+	dom = knl_obfile_domain(uuid);
 	if ( dom != NULL ) {
-		if ( knl_obfile_domain(uuid, dom) >= E_OK ) {
-			ops &= knl_ob_permit(crd, dom, -1) | OB_OP_PROT;
-		}
+		ops &= knl_ob_permit(crd, dom, -1) | OB_OP_PROT;
 		Kfree(dom);
 	}
 	return ops;
@@ -303,9 +313,8 @@ EXPORT UINT knl_ob_permit_on( CONST TS_UUID *uuid, CONST T_OBCRD *crd )
 	if ( m == NULL || crd == NULL ) {
 		return 0;
 	}
-	prt = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+	prt = prot_of(m, uuid);
 	if ( prt != NULL ) {
-		prot_of(m, uuid, prt);
 		ops = permit_on(m, uuid, crd, prt);
 		Kfree(prt);
 	}
@@ -770,7 +779,7 @@ EXPORT ER ob_end_adm( void )
 	return E_OK;
 }
 
-LOCAL void hnd_release( INT hi );
+LOCAL ER hnd_release( INT hi );
 LOCAL void ntf_drop( ID key, ID pid );
 LOCAL void grant_drop( ID pid );
 
@@ -926,7 +935,8 @@ EXPORT ER knl_ob_set_crd( ID pid, CONST T_OBCRD *crd )
 
 /* ---------------------------------------------------------------- keys */
 
-LOCAL INT hnd_new( INT mgr, INT h, CONST TS_UUID *uuid, CONST T_OBPRT *prt )
+/* A handle made, holding prt from now on (it frees it when it closes); -1 none */
+LOCAL INT hnd_new( INT mgr, INT h, CONST TS_UUID *uuid, T_OBPRT *prt )
 {
 	INT	i;
 
@@ -952,7 +962,7 @@ LOCAL INT hnd_new( INT mgr, INT h, CONST TS_UUID *uuid, CONST T_OBPRT *prt )
 			o->h = h;
 			o->refs = 0;
 			o->uuid = *uuid;
-			o->prt = *prt;
+			o->prt = prt;
 			ob_hnd_next = i + 1;
 			return i;
 		}
@@ -1019,21 +1029,33 @@ LOCAL OBKEY *key_of( ID key )
 }
 
 /* One reference fewer to a handle; the last one closes it */
-LOCAL void hnd_release( INT hi )
+/*
+ * A hold of a handle given back; the last one closes it with its
+ * manager, whose error comes back (a store that makes sure at closing
+ * that what was written is on the medium says when it is not)
+ */
+LOCAL ER hnd_release( INT hi )
 {
 	CONST T_OBMGR	*m = NULL;
+	T_OBPRT		*prt = NULL;
 	INT		h = 0;
 
 	LOCK();
 	if ( --(*ob_hndp[hi]).refs <= 0 ) {
 		m = ob_mgr[(*ob_hndp[hi]).mgr];
 		h = (*ob_hndp[hi]).h;
+		prt = (*ob_hndp[hi]).prt;
+		(*ob_hndp[hi]).prt = NULL;
 		(*ob_hndp[hi]).used = FALSE;
 	}
 	UNLOCK();
-	if ( m != NULL && m->close != NULL ) {
-		(void)m->close(h);
+	if ( prt != NULL ) {
+		Kfree(prt);
 	}
+	if ( m != NULL && m->close != NULL ) {
+		return m->close(h);
+	}
+	return E_OK;
 }
 
 /*
@@ -1064,9 +1086,9 @@ LOCAL ER key_take( ID key, UINT need, INT recno, INT *p_hi, BOOL *p_nowait )
 	if ( recno >= 0 ) {
 		CONST UINT	onrec = OB_OP_READ | OB_OP_WRITE | OB_OP_RECORD;
 
-		for ( i = 0; i < o->prt.nrmask && i < OB_RMASK_MAX; i++ ) {
-			if ( o->prt.rmask[i].recno == recno ) {
-				UINT	lim = o->prt.rmask[i].ops;
+		for ( i = 0; o->prt != NULL && i < o->prt->nrmask; i++ ) {
+			if ( OB_PRT_RMASK(o->prt)[i].recno == recno ) {
+				UINT	lim = OB_PRT_RMASK(o->prt)[i].ops;
 
 				/* a limit that names x: only a key that may control the object */
 				if ( ( lim & OB_OP_EXEC ) != 0 && ( ops & OB_OP_EXEC ) == 0 ) lim = 0;
@@ -1180,7 +1202,7 @@ EXPORT ID ob_opn_obj( CONST TS_UUID *uuid, UINT ops )
 	CONST T_OBMGR	*m;
 	T_OBPRT		*prt;
 	BOOL		nowait = (BOOL)( ( ops & OB_O_NOWAIT ) != 0 );
-	UINT		allowed;
+	UINT		excl = ops & OB_O_EXCLS, allowed;
 	INT		mi, h, hi;
 	ID		key, pid = ts_get_pid();
 
@@ -1193,11 +1215,10 @@ EXPORT ID ob_opn_obj( CONST TS_UUID *uuid, UINT ops )
 	if ( m->open == NULL ) {
 		return E_NOSPT;
 	}
-	prt = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+	prt = prot_of(m, uuid);
 	if ( prt == NULL ) {
 		return E_NOMEM;
 	}
-	prot_of(m, uuid, prt);
 	allowed = permit_on(m, uuid, knl_ob_crd_of(pid), prt);
 	if ( ( ops & ~allowed ) != 0 && pid > 0 ) {
 		allowed |= granted(uuid, pid);
@@ -1207,7 +1228,7 @@ EXPORT ID ob_opn_obj( CONST TS_UUID *uuid, UINT ops )
 		knl_ob_deny_note("open", uuid, ops, allowed);
 		return E_OACV;
 	}
-	h = m->open(uuid, ops);
+	h = m->open(uuid, ops | excl);		/* the exclusive mode for the manager that keeps it */
 	if ( h <= 0 ) {
 		Kfree(prt);
 		return ( h < 0 ) ? (ER)h : E_SYS;
@@ -1216,10 +1237,13 @@ EXPORT ID ob_opn_obj( CONST TS_UUID *uuid, UINT ops )
 	hi = hnd_new(mi, h, uuid, prt);
 	key = ( hi >= 0 ) ? key_new(hi, pid, ops, nowait) : E_LIMIT;
 	if ( hi >= 0 && key < 0 ) {
+		(*ob_hndp[hi]).prt = NULL;
 		(*ob_hndp[hi]).used = FALSE;
 	}
 	UNLOCK();
-	Kfree(prt);
+	if ( hi < 0 || key < 0 ) {
+		Kfree(prt);			/* the handle did not take it */
+	}
 	if ( key < 0 && m->close != NULL ) {
 		(void)m->close(h);
 	}
@@ -1242,9 +1266,8 @@ EXPORT ER ob_cls_obj( ID key )
 	k->used = FALSE;
 	UNLOCK();
 	ntf_drop(key, 0);
-	hnd_release(hi);
 
-	return E_OK;
+	return hnd_release(hi);
 }
 
 EXPORT ER knl_ob_key_rec( ID key, UINT ops, INT recno, TS_UUID *p_uuid )
@@ -1322,6 +1345,32 @@ LOCAL void chg_post( CONST OBCHG *c )
 	}
 }
 
+/* How many bytes record recno of the open handle holds, from its manager's list */
+LOCAL ER rec_bytes( INT hi, INT recno, SZ *p_size )
+{
+	T_OBREC	*r;
+	INT	cnt = 0;
+	ER	er;
+
+	if ( recno < 0 || MGR(hi)->lrc == NULL ) {
+		return E_NOSPT;
+	}
+	r = (T_OBREC *)Kmalloc(sizeof(T_OBREC) * (SZ)( recno + 1 ));
+	if ( r == NULL ) {
+		return E_NOMEM;
+	}
+	er = MGR(hi)->lrc(HND(hi), r, recno + 1, &cnt);
+	if ( er >= E_OK ) {
+		if ( cnt > recno && r[recno].recno == recno ) {
+			*p_size = (SZ)r[recno].size;
+		} else {
+			er = E_NOEXS;
+		}
+	}
+	Kfree(r);
+	return er;
+}
+
 EXPORT ER ob_rea_rec( ID key, INT recno, D off, void *buf, SZ size, SZ *p_asize )
 {
 	BOOL	nowait;
@@ -1329,8 +1378,24 @@ EXPORT ER ob_rea_rec( ID key, INT recno, D off, void *buf, SZ size, SZ *p_asize 
 	ER	er = key_take(key, OB_OP_READ, recno, &hi, &nowait);
 
 	if ( er < E_OK ) return er;
-	er = ( MGR(hi)->rea != NULL )
-	   ? MGR(hi)->rea(HND(hi), recno, off, buf, size, p_asize, nowait) : E_NOSPT;
+	if ( buf == NULL && size == 0 && p_asize != NULL && MGR(hi)->type == OB_T_STORAGE ) {
+		/* the size of the record, to one who may read it */
+		er = rec_bytes(hi, recno, p_asize);
+	} else {
+		er = ( MGR(hi)->rea != NULL )
+		   ? MGR(hi)->rea(HND(hi), recno, off, buf, size, p_asize, nowait) : E_NOSPT;
+	}
+	key_done(hi);
+	return er;
+}
+
+EXPORT ER ob_rea_tmo( ID key, INT recno, D off, void *buf, SZ size, SZ *p_asize, TMO tmo )
+{
+	INT	hi;
+	ER	er = key_take(key, OB_OP_READ, recno, &hi, NULL);
+
+	if ( er < E_OK ) return er;
+	er = ( MGR(hi)->rtm != NULL ) ? MGR(hi)->rtm(HND(hi), recno, off, buf, size, p_asize, tmo) : E_NOSPT;
 	key_done(hi);
 	return er;
 }
@@ -1348,6 +1413,46 @@ EXPORT ER ob_wri_rec( ID key, INT recno, D off, CONST void *buf, SZ size, SZ *p_
 	chg_take(hi, recno, &chg);
 	key_done(hi);
 	if ( er >= E_OK ) chg_post(&chg);
+	return er;
+}
+
+EXPORT ER ob_rpl_rec( ID key, INT recno, CONST void *buf, SZ size )
+{
+	BOOL	nowait;
+	OBCHG	chg;
+	SZ	asz = 0;
+	INT	hi;
+	ER	er;
+
+	if ( size < 0 || ( buf == NULL && size > 0 ) ) {
+		return E_PAR;
+	}
+	er = key_take(key, OB_OP_WRITE, recno, &hi, &nowait);
+	if ( er < E_OK ) return er;
+	if ( MGR(hi)->type == OB_T_CHANNEL ) {
+		er = E_NOSPT;			/* a channel's record is a message */
+	} else if ( MGR(hi)->rpl != NULL ) {
+		er = MGR(hi)->rpl(HND(hi), recno, buf, size);
+	} else if ( MGR(hi)->wri == NULL || MGR(hi)->trn == NULL ) {
+		er = E_NOSPT;
+	} else {
+		er = ( size > 0 ) ? MGR(hi)->wri(HND(hi), recno, 0, buf, size, &asz, nowait) : E_OK;
+		if ( er >= E_OK ) er = MGR(hi)->trn(HND(hi), recno, (UD)size);
+	}
+	chg_take(hi, recno, &chg);
+	key_done(hi);
+	if ( er >= E_OK ) chg_post(&chg);
+	return er;
+}
+
+EXPORT ER ob_syn_obj( ID key )
+{
+	INT	hi;
+	ER	er = key_take(key, 0, -1, &hi, NULL);
+
+	if ( er < E_OK ) return er;
+	er = ( MGR(hi)->syn != NULL ) ? MGR(hi)->syn(HND(hi)) : E_OK;
+	key_done(hi);
 	return er;
 }
 
@@ -1402,6 +1507,86 @@ EXPORT ER ob_lst_rec( ID key, T_OBREC *buf, INT n, INT *p_cnt )
 	er = ( MGR(hi)->lrc != NULL ) ? MGR(hi)->lrc(HND(hi), buf, n, p_cnt) : E_NOSPT;
 	key_done(hi);
 	return er;
+}
+
+/*
+ * A record read whole, in a buffer as large as it is with room bytes
+ * more and a nought after the text. Its size is asked first when the
+ * key may list the records, and it is read once into a buffer one byte
+ * larger; one that fills it (it grew, or it is made as it is read and
+ * has no size of its own) is read again from its start into a buffer
+ * twice as large, so that it comes as one whole. Answers the length,
+ * the buffer in *p_buf (the caller Kfrees it) and what it holds in
+ * *p_cap, or an error; E_LIMIT for a record longer than the INT the
+ * length is answered in.
+ */
+#define REA_ALL_FIRST	4096
+#define REA_ALL_LIMIT	( (SZ)0x7FFFFFFF )
+
+/* What record `recno` of the object open as key holds, or 0 when it cannot be told */
+LOCAL SZ rec_size_of( ID key, INT recno )
+{
+	SZ	size = 0;
+
+	if ( ob_rea_rec(key, recno, 0, NULL, 0, &size) < E_OK || size < 0 || size >= REA_ALL_LIMIT ) {
+		return 0;
+	}
+	return size;
+}
+
+EXPORT INT knl_ob_rea_all( ID key, INT recno, INT room, UB **p_buf, INT *p_cap )
+{
+	UB	*b = NULL, *nb;
+	SZ	cap = REA_ALL_FIRST, asz;
+	ER	er;
+
+	*p_buf = NULL;
+	if ( room < 0 ) {
+		return E_PAR;
+	}
+	asz = rec_size_of(key, recno);
+	if ( asz >= cap ) {
+		cap = asz + 1;
+	}
+	for ( ;; ) {
+		b = (UB *)Kmalloc(cap + 1);
+		if ( b == NULL ) {
+			return E_NOMEM;
+		}
+		asz = 0;
+		er = ob_rea_rec(key, recno, 0, b, cap, &asz);
+		if ( er < E_OK ) {
+			Kfree(b);
+			return (INT)er;
+		}
+		if ( asz < cap ) {
+			break;
+		}
+		Kfree(b);
+		if ( cap >= REA_ALL_LIMIT / 2 ) {
+			return E_LIMIT;
+		}
+		cap *= 2;
+	}
+	if ( asz + (SZ)room >= REA_ALL_LIMIT ) {
+		Kfree(b);
+		return E_LIMIT;
+	}
+	if ( cap - asz < (SZ)room ) {
+		nb = (UB *)Kmalloc(asz + room + 1);
+		if ( nb == NULL ) {
+			Kfree(b);
+			return E_NOMEM;
+		}
+		knl_memcpy(nb, b, asz);
+		Kfree(b);
+		b = nb;
+		cap = asz + room;
+	}
+	b[asz] = 0;
+	*p_buf = b;
+	if ( p_cap != NULL ) *p_cap = (INT)cap;
+	return (INT)asz;
 }
 
 /* ".ico": the icon, which the resource calls reach as well */
@@ -1585,6 +1770,96 @@ EXPORT ER ob_lst_res( ID key, UB *buf, SZ size, INT *p_cnt )
 	return er;
 }
 
+/* A manager's gat of an open handle, for knl_meta_all */
+typedef struct {
+	CONST T_OBMGR	*m;
+	INT		h;
+} MGRMETA;
+
+LOCAL ER mgr_meta_get( void *ctx, UB *buf, SZ size, SZ *p_asize )
+{
+	MGRMETA	*g = (MGRMETA *)ctx;
+
+	return g->m->gat(g->h, buf, size, p_asize);
+}
+
+LOCAL INT mgr_meta_all( CONST T_OBMGR *m, INT h, INT room, UB **p_buf, INT *p_cap )
+{
+	MGRMETA	g;
+
+	g.m = m;
+	g.h = h;
+	return knl_meta_all(mgr_meta_get, &g, room, p_buf, p_cap);
+}
+
+LOCAL ER key_meta_get( void *ctx, UB *buf, SZ size, SZ *p_asize )
+{
+	return ob_get_atr(*(ID *)ctx, buf, size, p_asize);
+}
+
+EXPORT INT knl_ob_atr_all( ID key, INT room, UB **p_buf, INT *p_cap )
+{
+	return knl_meta_all(key_meta_get, &key, room, p_buf, p_cap);
+}
+
+EXPORT INT knl_ob_meta_all( CONST TS_UUID *uuid, INT room, UB **p_buf, INT *p_cap )
+{
+	CONST T_OBMGR	*m = knl_ob_mgr_of(uuid);
+	INT		h, n;
+
+	*p_buf = NULL;
+	if ( m == NULL ) {
+		return E_NOEXS;
+	}
+	if ( m->open == NULL || m->gat == NULL ) {
+		return E_NOSPT;
+	}
+	h = m->open(uuid, OB_OP_ATRRD);
+	if ( h <= 0 ) {
+		return ( h < 0 ) ? (INT)h : E_SYS;
+	}
+	n = mgr_meta_all(m, h, room, p_buf, p_cap);
+	if ( m->close != NULL ) (void)m->close(h);
+	return n;
+}
+
+EXPORT ER ob_get_atv( ID key, CONST UB *path, UB *buf, SZ size, SZ *p_asize )
+{
+	UB	*j = NULL, k[OB_ATV_PATH];
+	INT	len, v, e, i, n;
+	SZ	m;
+
+	if ( path == NULL || size < 0 || ( size > 0 && buf == NULL ) ) {
+		return E_PAR;
+	}
+	len = knl_ob_atr_all(key, 0, &j, NULL);
+	if ( len < 0 ) {
+		return (ER)len;
+	}
+	/* down the keys, one at a time */
+	v = knl_oj_root(j, len);
+	for ( i = 0; v >= 0 && path[i] != 0; ) {
+		for ( n = 0; path[i] != 0 && path[i] != '.' && n < OB_ATV_PATH - 1; n++, i++ ) {
+			k[n] = path[i];
+		}
+		k[n] = 0;
+		if ( path[i] == '.' ) i++;
+		v = ( j[v] == '{' ) ? knl_oj_member(j, len, v, (CONST char *)k) : -1;
+	}
+	e = ( v >= 0 ) ? knl_oj_skip(j, len, v) : -1;
+	if ( e < 0 ) {
+		Kfree(j);
+		return E_NOEXS;
+	}
+	m = (SZ)( e - v );
+	if ( p_asize != NULL ) *p_asize = m;
+	if ( size > 0 ) {
+		knl_memcpy(buf, j + v, (INT)( ( m < size ) ? m : size ));
+	}
+	Kfree(j);
+	return E_OK;
+}
+
 EXPORT ER ob_get_atr( ID key, UB *json, SZ size, SZ *p_asize )
 {
 	INT	hi;
@@ -1619,7 +1894,7 @@ EXPORT ER ob_set_atr( ID key, CONST UB *json, SZ size )
 {
 	UB	*old = NULL, *nw = NULL;
 	SZ	olen = 0;
-	INT	hi, ao, al, no, nl, len;
+	INT	hi, ao, al, no, nl, len, cap;
 	BOOL	may_prot, had, has;
 	OBKEY	*k;
 	ER	er = key_take(key, OB_OP_ATRWR, -1, &hi, NULL);
@@ -1629,7 +1904,7 @@ EXPORT ER ob_set_atr( ID key, CONST UB *json, SZ size )
 		key_done(hi);
 		return E_NOSPT;
 	}
-	if ( json == NULL || size <= 0 || size >= OB_META_MAX ) {
+	if ( json == NULL || size <= 0 || size > 0x3FFFFFFF ) {
 		key_done(hi);
 		return E_PAR;
 	}
@@ -1638,25 +1913,24 @@ EXPORT ER ob_set_atr( ID key, CONST UB *json, SZ size )
 	may_prot = (BOOL)( k != NULL && ( k->ops & OB_OP_PROT ) != 0 );
 	UNLOCK();
 
-	old = (UB *)Kmalloc(OB_META_MAX);
-	nw = (UB *)Kmalloc(OB_META_MAX);
-	if ( old == NULL || nw == NULL ) {
+	/* the metadata there is, whole, and room for the new with the old's protection put in */
+	len = mgr_meta_all(MGR(hi), HND(hi), 0, &old, NULL);
+	olen = ( len > 0 ) ? (SZ)len : 0;
+	cap = (INT)size + (INT)olen + 64;
+	nw = (UB *)Kmalloc((SZ)cap + 1);
+	if ( nw == NULL ) {
 		er = E_NOMEM;
 		goto out;
-	}
-	er = MGR(hi)->gat(HND(hi), old, OB_META_MAX - 1, &olen);
-	if ( er < E_OK ) {
-		olen = 0;
 	}
 	knl_memcpy(nw, json, (INT)size);
 	nw[size] = 0;
 	len = (INT)size;
 
-	had = access_span(old, (INT)olen, &ao, &al);
+	had = ( old != NULL && access_span(old, (INT)olen, &ao, &al) );
 	has = access_span(nw, len, &no, &nl);
 	if ( !may_prot ) {
 		if ( had ) {
-			len = knl_oj_set_path(nw, len, OB_META_MAX, "tessronos", "access",
+			len = knl_oj_set_path(nw, len, cap, "tessronos", "access",
 					      old + ao, al);
 		} else if ( has ) {
 			er = E_OACV;		/* protection added by one who may not */
@@ -1669,7 +1943,15 @@ EXPORT ER ob_set_atr( ID key, CONST UB *json, SZ size )
 	}
 	er = MGR(hi)->sat(HND(hi), nw, (SZ)len);
 	if ( er >= E_OK ) {
-		prot_of(MGR(hi), &(*ob_hndp[hi]).uuid, &(*ob_hndp[hi]).prt);
+		T_OBPRT	*np = prot_of(MGR(hi), &(*ob_hndp[hi]).uuid), *op = NULL;
+
+		if ( np != NULL ) {
+			LOCK();
+			op = (*ob_hndp[hi]).prt;
+			(*ob_hndp[hi]).prt = np;
+			UNLOCK();
+		}
+		if ( op != NULL ) Kfree(op);
 	}
     out:
 	if ( old != NULL ) Kfree(old);
@@ -1721,7 +2003,8 @@ EXPORT ER ob_cre_obj( CONST T_OBCRE *c, TS_UUID *p_uuid )
 	if ( ob_mgr[mi]->create == NULL ) {
 		return E_NOSPT;
 	}
-	prt = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+	/* the protection given, as long as it is, else one of the head alone */
+	prt = ( c->prt != NULL ) ? knl_ob_prt_dup(c->prt) : knl_ob_prt_new(0, 0);
 	if ( prt == NULL ) {
 		return E_NOMEM;
 	}
@@ -1748,16 +2031,20 @@ EXPORT ER ob_cre_obj( CONST T_OBCRE *c, TS_UUID *p_uuid )
 			Kfree(prt);
 			return E_NOEXS;
 		}
-		prot_of(pm, &c->prog, prt);
-		if ( ( permit_on(pm, &c->prog, crd, prt) & OB_OP_EXEC ) == 0 ) {
-			Kfree(prt);
-			knl_ob_deny_note("run", &c->prog, OB_OP_EXEC, 0);
-			return E_OACV;
+		{
+			T_OBPRT	*pp = prot_of(pm, &c->prog);
+			UINT	may = ( pp != NULL ) ? permit_on(pm, &c->prog, crd, pp) : 0;
+
+			if ( pp != NULL ) Kfree(pp);
+			if ( ( may & OB_OP_EXEC ) == 0 ) {
+				Kfree(prt);
+				knl_ob_deny_note("run", &c->prog, OB_OP_EXEC, 0);
+				return E_OACV;
+			}
 		}
 	}
 
 	if ( c->prt != NULL ) {
-		*prt = *c->prt;
 		if ( !knl_ob_is_admin(crd) ) {
 			prt->owner = crd->user;	/* nobody makes objects for another */
 		}
@@ -1782,13 +2069,12 @@ EXPORT ER ob_cre_obj( CONST T_OBCRE *c, TS_UUID *p_uuid )
 /* Whether the caller may do ops to an object */
 LOCAL ER allowed( CONST T_OBMGR *m, CONST TS_UUID *uuid, UINT ops )
 {
-	T_OBPRT	*prt = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+	T_OBPRT	*prt = prot_of(m, uuid);
 	UINT	may;
 
 	if ( prt == NULL ) {
 		return E_NOMEM;
 	}
-	prot_of(m, uuid, prt);
 	may = permit_on(m, uuid, knl_ob_crd_of(ts_get_pid()), prt);
 	Kfree(prt);
 	if ( ( may & ops ) != ops ) {
@@ -1841,6 +2127,41 @@ EXPORT ER ob_ref_obj( CONST TS_UUID *uuid, T_OBREF *pk_ref )
 	pk_ref->sub = m->sub;
 
 	return ( m->ref != NULL ) ? m->ref(uuid, pk_ref) : E_OK;
+}
+
+/*
+ * Whether the caller may do every one of ops to an object, answered
+ * without opening it (as access(2) answers): by the same rights
+ * ob_opn_obj opens with, the caller's credentials through the volume's
+ * domain and what it was granted. A list of objects asks this before
+ * it opens one, so that an object it may not read is shown as such and
+ * not opened to be refused. The answer is not a refusal of anything
+ * asked, so it is not noted on the console as one.
+ */
+EXPORT ER ob_acc_obj( CONST TS_UUID *uuid, UINT ops )
+{
+	CONST T_OBMGR	*m;
+	T_OBPRT		*prt;
+	UINT		may;
+	ID		pid = ts_get_pid();
+
+	if ( uuid == NULL || ( ops & ~OB_OP_ALL ) != 0 ) {
+		return E_PAR;
+	}
+	m = knl_ob_mgr_of(uuid);
+	if ( m == NULL ) {
+		return E_NOEXS;
+	}
+	prt = prot_of(m, uuid);
+	if ( prt == NULL ) {
+		return E_NOMEM;
+	}
+	may = permit_on(m, uuid, knl_ob_crd_of(pid), prt);
+	Kfree(prt);
+	if ( ( ops & ~may ) != 0 && pid > 0 ) {
+		may |= granted(uuid, pid);
+	}
+	return ( ( ops & ~may ) == 0 ) ? E_OK : E_OACV;
 }
 
 LOCAL ER lnk_by( CONST TS_UUID *uuid, INT delta )
@@ -2089,11 +2410,10 @@ LOCAL BOOL lnk_name_is( CONST UB *have, CONST UB *want )
 }
 
 /* Whether the object is named 'name': its object name, or the file name its metadata keeps */
-LOCAL BOOL lnk_named( CONST TS_UUID *u, CONST UB *name, UB *meta )
+LOCAL BOOL lnk_named( CONST TS_UUID *u, CONST UB *name )
 {
 	T_OBREF	r;
-	UB	file[256];
-	SZ	asz = 0;
+	UB	file[256], *meta = NULL;
 	INT	p, len;
 	ID	key;
 	BOOL	is = FALSE;
@@ -2105,25 +2425,29 @@ LOCAL BOOL lnk_named( CONST TS_UUID *u, CONST UB *name, UB *meta )
 	if ( lnk_name_is(r.name, name) ) {
 		return TRUE;
 	}
+	if ( ob_acc_obj(u, OB_OP_ATRRD) < E_OK ) {
+		return FALSE;			/* its metadata is not the caller's to read: not opened to be refused */
+	}
 	key = ob_opn_obj(u, OB_OP_ATRRD);
 	if ( key < E_OK ) {
 		return FALSE;
 	}
-	if ( ob_get_atr(key, meta, OB_META_MAX - 1, &asz) >= E_OK && asz > 0 ) {
-		len = (INT)asz;
+	len = knl_ob_atr_all(key, 0, &meta, NULL);
+	if ( len > 0 ) {
 		p = knl_oj_path(meta, len, "tessronos", "file");
 		p = ( p >= 0 && meta[p] == '{' ) ? knl_oj_member(meta, len, p, "name") : -1;
 		if ( p >= 0 && knl_oj_str(meta, len, p, file, sizeof(file)) > 0 ) {
 			is = lnk_name_is(file, name);
 		}
 	}
+	if ( meta != NULL ) Kfree(meta);
 	(void)ob_cls_obj(key);
 	return is;
 }
 
 EXPORT ER ob_lst_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *buf, INT n, INT *p_cnt )
 {
-	UB	*t = NULL, *meta = NULL;
+	UB	*t = NULL;
 	SZ	len = 0, at = 0;
 	TS_UUID	u;
 	INT	cnt = 0;
@@ -2137,15 +2461,8 @@ EXPORT ER ob_lst_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *buf, INT n, I
 	if ( er < E_OK ) {
 		return er;
 	}
-	if ( !all ) {
-		meta = (UB *)Kmalloc(OB_META_MAX);
-		if ( meta == NULL ) {
-			if ( t != NULL ) Kfree(t);
-			return E_NOMEM;
-		}
-	}
 	while ( t != NULL && lnk_next(t, len, &at, &u) ) {
-		if ( !all && !lnk_named(&u, name, meta) ) {
+		if ( !all && !lnk_named(&u, name) ) {
 			continue;
 		}
 		if ( cnt < n ) {
@@ -2153,7 +2470,6 @@ EXPORT ER ob_lst_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *buf, INT n, I
 		}
 		cnt++;
 	}
-	if ( meta != NULL ) Kfree(meta);
 	if ( t != NULL ) Kfree(t);
 	*p_cnt = cnt;
 	return E_OK;
@@ -2161,7 +2477,7 @@ EXPORT ER ob_lst_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *buf, INT n, I
 
 EXPORT ER ob_fnd_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *p_uuid )
 {
-	UB	*t = NULL, *meta = NULL;
+	UB	*t = NULL;
 	SZ	len = 0, at = 0;
 	TS_UUID	u;
 	BOOL	all = (BOOL)( name == NULL || name[0] == 0 );
@@ -2175,19 +2491,12 @@ EXPORT ER ob_fnd_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *p_uuid )
 		return er;
 	}
 	er = E_NOEXS;
-	if ( !all ) {
-		meta = (UB *)Kmalloc(OB_META_MAX);
-		if ( meta == NULL ) {
-			er = E_NOMEM;
-		}
-	}
 	while ( er == E_NOEXS && t != NULL && lnk_next(t, len, &at, &u) ) {
-		if ( all || lnk_named(&u, name, meta) ) {
+		if ( all || lnk_named(&u, name) ) {
 			*p_uuid = u;
 			er = E_OK;
 		}
 	}
-	if ( meta != NULL ) Kfree(meta);
 	if ( t != NULL ) Kfree(t);
 	return er;
 }
@@ -2196,7 +2505,26 @@ EXPORT ER ob_fnd_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *p_uuid )
 /* ---------------------------------------------------------------- records between objects */
 
 #define OB_REC_LIST	1024		/* records looked at in one object */
-#define OB_CHUNK	( 16 * 1024 )	/* bytes copied at a time */
+#define OB_CHUNK	( 16 * 1024 )	/* bytes of a resource read at a time, of the names of resources */
+#define OB_COPY_MAX	( 4 * 1024 * 1024 )	/* bytes of a record copied at a time */
+
+/*
+ * The buffer a record goes through from one object to another: as
+ * large as OB_COPY_MAX, each piece being one write of the target and so
+ * one change made durable; smaller when memory is short. The size is
+ * put in *p_size.
+ */
+LOCAL UB *copy_buf( SZ *p_size )
+{
+	SZ	n = OB_COPY_MAX;
+	UB	*b;
+
+	while ( ( b = (UB *)Kmalloc(n) ) == NULL && n > OB_CHUNK ) {
+		n /= 2;
+	}
+	*p_size = n;
+	return b;
+}
 
 /* The records of an open object, in a buffer the caller frees */
 LOCAL ER rec_list( CONST T_OBMGR *m, INT h, T_OBREC **p_buf, INT *p_cnt )
@@ -2269,7 +2597,7 @@ EXPORT ER ob_sch_rec( ID key, INT from, UINT rt, UINT sub, UINT mask, INT *p_rec
  * made empty (or new) by the caller, so it is written from the start.
  */
 LOCAL ER rec_copy( CONST T_OBMGR *sm, INT sh, INT srec, CONST T_OBMGR *dm, INT dh,
-		   INT drec, UB *buf )
+		   INT drec, UB *buf, SZ bsize )
 {
 	D	off = 0;
 	SZ	got, put;
@@ -2280,7 +2608,7 @@ LOCAL ER rec_copy( CONST T_OBMGR *sm, INT sh, INT srec, CONST T_OBMGR *dm, INT d
 	}
 	for ( ;; ) {
 		got = 0;
-		er = sm->rea(sh, srec, off, buf, OB_CHUNK, &got, FALSE);
+		er = sm->rea(sh, srec, off, buf, bsize, &got, FALSE);
 		if ( er < E_OK ) {
 			return ( off > 0 && er == E_PAR ) ? E_OK : er;
 		}
@@ -2293,7 +2621,7 @@ LOCAL ER rec_copy( CONST T_OBMGR *sm, INT sh, INT srec, CONST T_OBMGR *dm, INT d
 			return er;
 		}
 		off += got;
-		if ( got < OB_CHUNK ) {
+		if ( got < bsize ) {
 			return E_OK;
 		}
 	}
@@ -2320,6 +2648,7 @@ EXPORT ER ob_trs_rec( ID dst, INT drec, ID src, INT srec, INT n )
 {
 	T_OBREC	*sr = NULL, *dr = NULL;
 	UB	*buf = NULL;
+	SZ	bsize = 0;
 	OBCHG	chg;
 	INT	shi, dhi, sn = 0, dn = 0, i;
 	ER	er;
@@ -2340,7 +2669,7 @@ EXPORT ER ob_trs_rec( ID dst, INT drec, ID src, INT srec, INT n )
 	}
 	er = rec_list(MGR(shi), HND(shi), &sr, &sn);
 	if ( er >= E_OK ) er = rec_list(MGR(dhi), HND(dhi), &dr, &dn);
-	buf = (UB *)Kmalloc(OB_CHUNK);
+	buf = copy_buf(&bsize);
 	if ( er >= E_OK && buf == NULL ) er = E_NOMEM;
 
 	for ( i = 0; i < n && er >= E_OK; i++ ) {
@@ -2359,7 +2688,7 @@ EXPORT ER ob_trs_rec( ID dst, INT drec, ID src, INT srec, INT n )
 		if ( d >= dn ) {
 			dn = d + 1;
 		}
-		er = rec_copy(MGR(shi), HND(shi), r->recno, MGR(dhi), HND(dhi), d, buf);
+		er = rec_copy(MGR(shi), HND(shi), r->recno, MGR(dhi), HND(dhi), d, buf, bsize);
 	}
     out:
 	chg_take(dhi, -1, &chg);
@@ -2388,7 +2717,7 @@ LOCAL ER res_copy( CONST T_OBMGR *sm, INT sh, CONST T_OBMGR *dm, INT dh, CONST U
 				goto out;
 			}
 			if ( all != NULL ) {
-				knl_memcpy(more, all, (INT)have);
+				knl_memcpy(more, all, have);
 				Kfree(all);
 			}
 			all = more;
@@ -2411,13 +2740,13 @@ LOCAL ER res_copy( CONST T_OBMGR *sm, INT sh, CONST T_OBMGR *dm, INT dh, CONST U
 	return er;
 }
 
-/* A copy's metadata: the source's, counted by nobody yet */
-LOCAL INT meta_for_copy( UB *j, INT len )
+/* A copy's metadata: the source's, counted by nobody yet (j holds max bytes) */
+LOCAL INT meta_for_copy( UB *j, INT len, INT max )
 {
 	INT	root = knl_oj_root(j, len);
 
 	if ( root >= 0 && knl_oj_member(j, len, root, "refCount") >= 0 ) {
-		len = knl_oj_set(j, len, OB_META_MAX, root, "refCount", (CONST UB *)"0", 1);
+		len = knl_oj_set(j, len, max, root, "refCount", (CONST UB *)"0", 1);
 	}
 	return len;
 }
@@ -2429,7 +2758,7 @@ EXPORT ER ob_cpy_obj( CONST TS_UUID *uuid, CONST T_OBCRE *pk_cre, TS_UUID *p_uui
 	T_OBREF		ref;
 	T_OBREC		*sr = NULL, *dr = NULL;
 	UB		*meta = NULL, *buf = NULL, *names = NULL;
-	SZ		mlen = 0;
+	SZ		mlen = 0, bsize = 0;
 	INT		sh = 0, dh = 0, sn = 0, dn = 0, i, cnt = 0, len;
 	ER		er;
 
@@ -2455,17 +2784,21 @@ EXPORT ER ob_cpy_obj( CONST TS_UUID *uuid, CONST T_OBCRE *pk_cre, TS_UUID *p_uui
 	if ( sh <= 0 ) {
 		return ( sh < 0 ) ? (ER)sh : E_SYS;
 	}
-	meta = (UB *)Kmalloc(OB_META_MAX);
-	buf = (UB *)Kmalloc(OB_CHUNK);
-	if ( meta == NULL || buf == NULL ) {
+	buf = copy_buf(&bsize);
+	if ( buf == NULL ) {
 		er = E_NOMEM;
 		goto out;
 	}
-	if ( sm->gat == NULL || sm->gat(sh, meta, OB_META_MAX - 1, &mlen) < E_OK ) {
-		mlen = 0;
+	/* the source's metadata whole, with room for its count to be written as 0 */
+	mlen = 0;
+	if ( sm->gat != NULL ) {
+		INT	mcap = 0, k = mgr_meta_all(sm, sh, 16, &meta, &mcap);
+
+		mlen = ( k > 0 ) ? (SZ)k : 0;
+		len = ( mlen > 0 ) ? meta_for_copy(meta, (INT)mlen, mcap) : 0;
+	} else {
+		len = 0;
 	}
-	meta[mlen] = 0;
-	len = ( mlen > 0 ) ? meta_for_copy(meta, (INT)mlen) : 0;
 
 	if ( pk_cre != NULL ) {
 		cc = *pk_cre;
@@ -2507,16 +2840,18 @@ EXPORT ER ob_cpy_obj( CONST TS_UUID *uuid, CONST T_OBCRE *pk_cre, TS_UUID *p_uui
 		er = rec_target(dm, dh, i, dn, &sr[i], &d);
 		if ( er >= E_OK ) {
 			if ( d >= dn ) dn = d + 1;
-			er = rec_copy(sm, sh, sr[i].recno, dm, dh, d, buf);
+			er = rec_copy(sm, sh, sr[i].recno, dm, dh, d, buf, bsize);
 		}
 	}
 
 	/* and what is kept beside them */
 	if ( er >= E_OK && sm->lres != NULL && dm->wres != NULL && sm->rres != NULL ) {
-		names = (UB *)Kmalloc(OB_CHUNK);
+		/* the names of all of them: how many asked first */
+		if ( sm->lres(sh, NULL, 0, &cnt) < E_OK ) cnt = 0;
+		names = (UB *)Kmalloc(( cnt > 0 ? (SZ)cnt : 1 ) * OB_RES_NAME);
 		if ( names == NULL ) {
 			er = E_NOMEM;
-		} else if ( sm->lres(sh, names, OB_CHUNK, &cnt) >= E_OK ) {
+		} else if ( cnt > 0 && sm->lres(sh, names, (SZ)cnt * OB_RES_NAME, &cnt) >= E_OK ) {
 			CONST UB	*nm = names;
 
 			for ( i = 0; i < cnt && er >= E_OK; i++ ) {
@@ -2958,19 +3293,52 @@ EXPORT void knl_ob_post_as( CONST TS_UUID *watched, CONST TS_UUID *uuid, INT rec
 
 /* ---------------------------------------------------------------- protection */
 
-EXPORT ER ob_get_prt( CONST TS_UUID *uuid, T_OBPRT *pk_prt )
+/*
+ * A protection given out: its size in *p_asize; the whole of it into buf
+ * when size has room for it, nothing with a size of 0, E_LIMIT when the
+ * room given is less.
+ */
+LOCAL ER prt_give( CONST T_OBPRT *p, T_OBPRT *buf, SZ size, SZ *p_asize )
+{
+	SZ	n = (SZ)OB_PRT_LEN(p);
+
+	if ( p_asize != NULL ) *p_asize = n;
+	if ( size == 0 ) {
+		return E_OK;
+	}
+	if ( buf == NULL || size < n ) {
+		return E_LIMIT;
+	}
+	knl_memcpy(buf, p, (INT)n);
+	return E_OK;
+}
+
+EXPORT T_OBPRT *knl_ob_prt_get( CONST TS_UUID *uuid )
 {
 	CONST T_OBMGR	*m = knl_ob_mgr_of(uuid);
 
-	if ( pk_prt == NULL ) {
+	return ( m != NULL ) ? prot_of(m, uuid) : NULL;
+}
+
+EXPORT ER ob_get_prt( CONST TS_UUID *uuid, T_OBPRT *pk_prt, SZ size, SZ *p_asize )
+{
+	CONST T_OBMGR	*m = knl_ob_mgr_of(uuid);
+	T_OBPRT		*p;
+	ER		er;
+
+	if ( size < 0 || ( size > 0 && pk_prt == NULL ) ) {
 		return E_PAR;
 	}
 	if ( m == NULL ) {
 		return E_NOEXS;
 	}
-	prot_of(m, uuid, pk_prt);
-
-	return E_OK;
+	p = prot_of(m, uuid);
+	if ( p == NULL ) {
+		return E_NOMEM;
+	}
+	er = prt_give(p, pk_prt, size, p_asize);
+	Kfree(p);
+	return er;
 }
 
 /*
@@ -2985,7 +3353,7 @@ EXPORT ER ob_set_prt( CONST TS_UUID *uuid, CONST T_OBPRT *pk_prt )
 	T_OBPRT		*cur;
 	ER		er;
 
-	if ( pk_prt == NULL ) {
+	if ( pk_prt == NULL || pk_prt->nacl < 0 || pk_prt->nrmask < 0 ) {
 		return E_PAR;
 	}
 	if ( m == NULL ) {
@@ -2994,11 +3362,10 @@ EXPORT ER ob_set_prt( CONST TS_UUID *uuid, CONST T_OBPRT *pk_prt )
 	if ( m->setprot == NULL ) {
 		return E_NOSPT;
 	}
-	cur = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+	cur = prot_of(m, uuid);
 	if ( cur == NULL ) {
 		return E_NOMEM;
 	}
-	prot_of(m, uuid, cur);
 	er = E_OK;
 	if ( ( knl_ob_permit(crd, cur, -1) & OB_OP_PROT ) == 0 ) {
 		er = E_OACV;
@@ -3164,6 +3531,10 @@ EXPORT ER ob_att_vol( CONST char *path, UINT flags )
 		return E_OACV;
 	}
 	er = knl_obfile_attach(path, flags);
+	if ( er >= E_OK && !knl_obfile_again(path) ) {
+		/* what is emptied at each start, of what is on it; not again for a disk put back */
+		knl_sys_clear_start(path);
+	}
 	if ( er >= E_OK ) {
 		knl_dt_zone_load();		/* the calendar may be on it */
 	}
@@ -3179,9 +3550,21 @@ EXPORT ER ob_det_vol( CONST char *path )
 	return knl_obfile_detach(path);
 }
 
-EXPORT ER ob_get_dom( CONST char *vol, T_OBPRT *pk_prt )
+EXPORT ER ob_get_dom( CONST char *vol, T_OBPRT *pk_prt, SZ size, SZ *p_asize )
 {
-	return ( vol != NULL && pk_prt != NULL ) ? knl_obfile_get_dom(vol, pk_prt) : E_PAR;
+	T_OBPRT	*d;
+	ER	er;
+
+	if ( vol == NULL || size < 0 || ( size > 0 && pk_prt == NULL ) ) {
+		return E_PAR;
+	}
+	d = knl_obfile_get_dom(vol);
+	if ( d == NULL ) {
+		return E_NOEXS;
+	}
+	er = prt_give(d, pk_prt, size, p_asize);
+	Kfree(d);
+	return er;
 }
 
 EXPORT ER ob_set_dom( CONST char *vol, CONST T_OBPRT *pk_prt )
@@ -3236,11 +3619,12 @@ EXPORT ER knl_ob_init( void )
 	er = knl_obfile_attach(CNF_OB_SYSVOL, TSFS_STORE_BLK);
 	if ( er >= E_OK ) {
 		tm_printf((UB *)"ob: the system volume is %s\n", CNF_OB_SYSVOL);
+		knl_sys_clear_start(CNF_OB_SYSVOL);
 	}
 #endif
 #ifdef CNF_OB_STORE
-	if ( er < E_OK ) {
-		(void)knl_obfile_attach(CNF_OB_STORE, 0);
+	if ( er < E_OK && knl_obfile_attach(CNF_OB_STORE, 0) >= E_OK ) {
+		knl_sys_clear_start(CNF_OB_STORE);
 	}
 #endif
 	knl_dt_zone_load();			/* the zone the calendar keeps */

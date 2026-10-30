@@ -59,6 +59,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ts/json.h>
+#include <ts/obdrop.h>
+#include <ts/obatr.h>
 #include <ts/sysdef.h>
 #include <ts/dtreq.h>
 #include <ts/dt.h>
@@ -210,10 +212,10 @@ static ER win_open( XWIN *w, CONST char *title, INT x, INT y, INT ww, INT wh )
 		char	ps[40];
 
 		xfc_uuid_str(&prog, ps);
-		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":7,\"icon\":\"%s\"}",
+		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":15,\"icon\":\"%s\"}",
 			 x, y, x + ww + FRAME_W, y + wh + TITLE_H, ps);
 	} else {
-		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":7}", x, y, x + ww + FRAME_W, y + wh + TITLE_H);
+		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":15}", x, y, x + ww + FRAME_W, y + wh + TITLE_H);
 	}
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
@@ -226,7 +228,7 @@ static ER win_open( XWIN *w, CONST char *title, INT x, INT y, INT ww, INT wh )
 	w->gid = ( w->kw > 0 ) ? wm_obj_gid(w->kw) : E_ID;
 	memset(&req, 0, sizeof(req));
 	req.events = OB_E_CLOSE | OB_E_PRESS | OB_E_RELEASE | OB_E_MOVE | OB_E_KEY | OB_E_REDRAW
-		   | OB_E_DELETE | OB_E_DROP | OB_E_WHEEL;
+		   | OB_E_DELETE | OB_E_DROP | OB_E_WHEEL | OB_E_SCROLL;
 	if ( w->kw <= 0 || w->gid < 0 || ob_ntf_evt(w->kw, OB_REC_ANY, &req, port) <= 0 ) {
 		if ( w->kw > 0 ) ob_cls_obj(w->kw);
 		(void)ob_del_obj(&w->win);
@@ -335,6 +337,7 @@ static void tell_chosen( XWIN *w )
 	for ( i = 0; i < w->nent && at < (INT)sizeof(s) - 40; i++ ) {
 		if ( !w->ent[i].marked ) continue;
 		at += snprintf(s + at, sizeof(s) - at, "%s %s", ( n++ > 0 ) ? "," : "", w->ent[i].name);
+		if ( at >= (INT)sizeof(s) ) at = (INT)sizeof(s) - 1;	/* a long name: the line ends there */
 	}
 	xfc_log(s);
 	if ( w->kind == W_FILES ) {
@@ -383,16 +386,15 @@ static void choose_run( XWIN *w, INT i )
 static void disk_mount( ID key, XFCENT *e )
 {
 	T_JSON	root, tf, m;
-	UB	*a, fs[FS_FIMPNM_MAX];
-	SZ	len = 0;
+	UB	*a = NULL, fs[FS_FIMPNM_MAX];
+	INT	len;
 
 	e->mount[0] = 0;
 	e->ro = FALSE;
 	e->fmt[0] = 0;
 	e->nofs = FALSE;
-	a = (UB *)malloc(OB_ATR_MAX + 1);
-	if ( a == NULL ) return;
-	if ( ob_get_atr(key, a, OB_ATR_MAX, &len) >= E_OK && js_parse(a, (INT)len, &root) >= E_OK
+	len = ob_atr_read(key, 0, &a);
+	if ( len >= 0 && js_parse(a, len, &root) >= E_OK
 	  && js_get(&root, "tessronos", &tf) >= E_OK ) {
 		if ( js_get(&tf, "mount", &m) >= E_OK ) {
 			(void)js_get_str(&m, "path", e->mount, sizeof(e->mount));
@@ -555,6 +557,15 @@ static INT bt_put( void *arg, CONST UB *name, INT fid, BOOL links, D size )
 	return 0;
 }
 
+/*
+ * What the person is shown for the window's disk: the name of its device
+ * object; an FTP connection by its address
+ */
+static CONST char *shown_of( CONST XWIN *w )
+{
+	return w->label;
+}
+
 /* What the window shows, for the line at its foot: a BTRON disk's by the names of its 実身 */
 static void where_text( XWIN *w, char *out, INT max )
 {
@@ -564,7 +575,7 @@ static void where_text( XWIN *w, char *out, INT max )
 							 iso_path(w->dir));
 	else if ( w->bt != NULL ) xfc_bt_names(w, w->dir, d, sizeof(d));
 	else snprintf(d, sizeof(d), "%s", w->dir);
-	snprintf(out, max, "%s%s%s", w->label, d[0] != 0 ? "/" : "", d);
+	snprintf(out, max, "%s%s%s", shown_of(w), d[0] != 0 ? "/" : "", d);
 }
 
 /* The directory listed again; the names in keep (NUL between, NUL NUL at the end) chosen */
@@ -735,7 +746,6 @@ static void files_free( XWIN *w )
 static void files_close( XWIN *w )
 {
 	char	s[200];
-	ID	key;
 	ER	er;
 
 	if ( w->is_ftp && w->ftp != NULL ) {
@@ -753,14 +763,16 @@ static void files_close( XWIN *w )
 		}
 	}
 	if ( w->mounted ) {
-		key = ob_opn_obj(&w->disk, OB_OP_R | ( w->ro ? 0 : OB_OP_WRITE ));
-		er = ( key > 0 ) ? fs_detach_dev(key) : (ER)key;
-		if ( key > 0 ) ob_cls_obj(key);
+		/* the disk's root let go, and the device object with it: the file layer lets the disk go with the last */
+		er = fs_close(w->vd);
+		if ( w->vkey > 0 ) ob_cls_obj(w->vkey);
+		w->vkey = 0;
+		w->mounted = FALSE;
 		if ( er < 0 ) {
 			snprintf(s, sizeof(s), "%s を取り外せません（%d）", w->dev, (INT)er);
 			say(media, s, TRUE);
 		} else {
-			snprintf(s, sizeof(s), "unmounted %s", w->dev);
+			snprintf(s, sizeof(s), "closed disk %s", w->dev);
 			xfc_log(s);
 			snprintf(s, sizeof(s), w->removable ? "%s を取り外しました。媒体を取り出せます"
 				 : "%s を取り外しました", w->dev);
@@ -818,14 +830,82 @@ static void open_btron( XFCENT *e )
 	say(media, s, FALSE);
 }
 
-/* The volume of a disk, mounted when it is not, shown in a window of its own from its root */
+/* Whether a disk is one the system mounted for itself (the boot disk among them): mounted, but not under FS_MEDIA_DIR */
+static BOOL disk_held( CONST XFCENT *e )
+{
+	return (BOOL)( e->mount[0] != 0
+		    && strncmp((CONST char *)e->mount, FS_MEDIA_DIR "/", strlen(FS_MEDIA_DIR) + 1) != 0 );
+}
+
+/* The window of a disk's files, its names and what it is, once its tree is to be made */
+static XWIN *disk_window( XFCENT *e, BOOL ro )
+{
+	XWIN	*w = files_new((CONST char *)e->name);
+
+	if ( w == NULL ) return NULL;
+	w->disk = e->uuid;
+	w->ro = ro;
+	w->removable = (BOOL)( e->name[0] == 'u' || e->name[0] == 's' || e->name[0] == 'm' );
+	snprintf((char *)w->dev, sizeof(w->dev), "%s", e->name);
+	snprintf(w->label, sizeof(w->label), "%s", e->name);
+	snprintf(w->source, sizeof(w->source), "%s", ( e->name[0] == 'u' ) ? "usb"
+		 : ( e->name[0] == 's' || e->name[0] == 'm' ) ? "sd" : "fat");
+	return w;
+}
+
+/* The window shown at its root, and told */
+static void disk_shown( XWIN *w )
+{
+	char	s[200];
+
+	snprintf(s, sizeof(s), "window %s", w->dev);
+	xfc_log(s);
+	go_to(w, (CONST UB *)"");
+	snprintf(s, sizeof(s), "%s を開きました", shown_of(w));
+	say(media, s, FALSE);
+	media->sum = 0;
+	media_scan(media);
+}
+
+/*
+ * A disk the system holds is not the person's as a device: its device
+ * object gives the ordinary users its attributes only, and its blocks
+ * are the system's. Its files are reached where the system mounted them,
+ * each with the rights the file layer gives there, as any program reaches
+ * them; the window shows the disk's name, not that place.
+ */
+static void open_held( XFCENT *e )
+{
+	XWIN	*w;
+	char	s[200];
+
+	w = disk_window(e, e->ro);
+	if ( w == NULL ) return;
+	w->mounted = FALSE;
+	if ( xfu_fs_tree(w->fsx, (CONST char *)e->mount, &w->tree) < E_OK ) {
+		say(media, "ディレクトリを開けません", TRUE);
+		files_close(w);
+		return;
+	}
+	snprintf(s, sizeof(s), "opened disk %s held%s", e->name, e->ro ? " ro" : "");
+	xfc_log(s);
+	disk_shown(w);
+}
+
+/*
+ * A disk's file system shown in a window of its own from its root: opened
+ * from the disk's device object (fs_opn_vol), its files named by paths
+ * below its root only -- the place the file layer may also show it at is
+ * never named. A disk the person may not write is opened for reading;
+ * one the system holds for itself is reached as open_held says.
+ */
 static void open_disk( XFCENT *e )
 {
 	XWIN	*w;
 	char	s[200];
-	BOOL	mounted = FALSE;
+	BOOL	ro = o_ro;
 	ID	key;
-	ER	er;
+	INT	vd;
 
 	w = files_of_disk(&e->uuid);
 	if ( w != NULL ) {
@@ -841,51 +921,47 @@ static void open_disk( XFCENT *e )
 		open_btron(e);
 		return;
 	}
-	if ( e->mount[0] == 0 ) {
-		key = ob_opn_obj(&e->uuid, OB_OP_R | ( o_ro ? 0 : OB_OP_WRITE ));
-		if ( key <= 0 ) {
-			snprintf(s, sizeof(s), "%s を開けません：%s", e->name, err_text((ER)key));
-			say(media, s, TRUE);
-			return;
-		}
-		/* the file system of the kind that is on it */
-		er = fs_attach_dev(key, NULL, o_ro ? FS_MNT_RDONLY : 0);
-		ob_cls_obj(key);
-		if ( er < 0 ) {
-			mount_failed(e, er, s, sizeof(s));
-			say(media, s, TRUE);
-			snprintf(s, sizeof(s), "mount %s refused %d %s", e->name, (INT)er, e->fmt);
-			xfc_log(s);
-			return;
-		}
-		snprintf((char *)e->mount, sizeof(e->mount), "%s/%s", FS_MEDIA_DIR, e->name);
-		e->ro = o_ro;
-		mounted = TRUE;
-		snprintf(s, sizeof(s), "mounted %s%s", e->mount, o_ro ? " ro" : "");
-		xfc_log(s);
+	if ( disk_held(e) ) {
+		open_held(e);
+		return;
 	}
-	w = files_new((CONST char *)e->name);
-	if ( w == NULL ) return;
-	w->disk = e->uuid;
-	w->mounted = mounted;
-	w->ro = e->ro;
-	w->removable = (BOOL)( e->name[0] == 'u' || e->name[0] == 's' || e->name[0] == 'm' );
-	snprintf((char *)w->dev, sizeof(w->dev), "%s", e->name);
-	snprintf(w->label, sizeof(w->label), "%s", e->mount);
-	snprintf(w->source, sizeof(w->source), "%s", ( e->name[0] == 'u' ) ? "usb"
-		 : ( e->name[0] == 's' || e->name[0] == 'm' ) ? "sd" : "fat");
-	if ( xfu_fs_tree(w->fsx, (CONST char *)e->mount, &w->tree) < E_OK ) {
+	key = ob_opn_obj(&e->uuid, OB_OP_R | ( ro ? 0 : OB_OP_WRITE ));
+	if ( key == E_OACV && !ro ) {
+		ro = TRUE;
+		key = ob_opn_obj(&e->uuid, OB_OP_R);
+	}
+	if ( key <= 0 ) {
+		snprintf(s, sizeof(s), "%s を開けません：%s", e->name, err_text((ER)key));
+		say(media, s, TRUE);
+		return;
+	}
+	/* the file system of the kind that is on it */
+	vd = fs_opn_vol(key, NULL, ro ? FS_MNT_RDONLY : 0);
+	if ( vd < 0 ) {
+		ob_cls_obj(key);
+		mount_failed(e, (ER)vd, s, sizeof(s));
+		say(media, s, TRUE);
+		snprintf(s, sizeof(s), "mount %s refused %d %s", e->name, (INT)vd, e->fmt);
+		xfc_log(s);
+		return;
+	}
+	snprintf(s, sizeof(s), "opened disk %s%s", e->name, ro ? " ro" : "");
+	xfc_log(s);
+	w = disk_window(e, ro);
+	if ( w == NULL ) {
+		(void)fs_close(vd);
+		ob_cls_obj(key);
+		return;
+	}
+	w->mounted = TRUE;
+	w->vd = vd;
+	w->vkey = key;
+	if ( xfu_vol_tree(w->fsx, vd, "", &w->tree) < E_OK ) {
 		say(media, "ディレクトリを開けません", TRUE);
 		files_close(w);
 		return;
 	}
-	snprintf(s, sizeof(s), "window %s", w->dev);
-	xfc_log(s);
-	go_to(w, (CONST UB *)"");
-	snprintf(s, sizeof(s), "%s を開きました", w->label);
-	say(media, s, FALSE);
-	media->sum = 0;
-	media_scan(media);
+	disk_shown(w);
 }
 
 /* The mount of the disk under the cursor taken off, or made */
@@ -921,6 +997,10 @@ static void mount_toggle( void )
 			snprintf(s, sizeof(s), "%s をマウントしました", e->name);
 			say(media, s, FALSE);
 		}
+	} else if ( disk_held(e) ) {
+		/* the system's own mount: not the person's to take off, nor its device to open */
+		snprintf(s, sizeof(s), "%s を取り外せません：システムがマウントしたものです", e->name);
+		say(media, s, TRUE);
 	} else {
 		key = ob_opn_obj(&e->uuid, OB_OP_R | ( e->ro ? 0 : OB_OP_WRITE ));
 		er = ( key > 0 ) ? fs_detach_dev(key) : (ER)key;
@@ -1095,11 +1175,11 @@ EXPORT void xfc_meanwhile( CONST T_OBNTM *m )
 		if ( w == media ) closing = TRUE;
 		break;
 	case OB_E_DROP: {
-		T_OBDROP	*d = (T_OBDROP *)malloc(sizeof(T_OBDROP));
+		T_OBDROP	*d = ob_drop_read(w->kw);
 		T_OBDRANS	a;
 		SZ		asz = 0;
 
-		if ( d != NULL && ob_rea_rec(w->kw, OB_WR_DROP, 0, d, sizeof(*d), &asz) >= E_OK ) {
+		if ( d != NULL ) {
 			memset(&a, 0, sizeof(a));
 			a.seq = d->seq;
 			a.answer = OB_DR_REFUSE;
@@ -1179,7 +1259,6 @@ static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	T_OBCRE		c;
 	SZ		asz = 0;
 	ID		k, ka;
-	INT		i;
 	ER		er;
 
 	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
@@ -1196,16 +1275,13 @@ static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	k = ob_opn_obj(&d, OB_OP_WRITE);
 	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
 	if ( k > 0 ) ob_cls_obj(k);
-	for ( i = 0; er >= E_OK; i += 20 ) {
-		if ( ob_rea_rec(ka, 0, 0, an, sizeof(*an), &asz) >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
+	/* the answer waited for on its channel, at most wait_ms */
+	while ( er >= E_OK ) {
+		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
+		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
 			er = an->er;
 			break;
 		}
-		if ( i >= wait_ms ) {
-			er = E_TMOUT;
-			break;
-		}
-		(void)tk_dly_tsk(20);
 	}
 	ob_cls_obj(ka);
 	(void)ob_del_obj(&reply);
@@ -1271,7 +1347,7 @@ static ER import_one( XWIN *w, XFCENT *x, CONST XFCIMP *how, CONST TS_UUID *box,
 
 		if ( near != NULL ) into = *near;
 		else if ( box != NULL ) into = *box;
-		else if ( !xfc_uuid_parse(SYSDEF_XFCONV_BOX, &into) ) return E_SYS;
+		else if ( !xfc_uuid_parse(SYSDEF_CABINET, &into) ) return E_SYS;	/* the person's cabinet */
 		er = xfc_bt_import(w, fid, &into, u, &st->objects, bt_tick, err, sizeof(err));
 		snprintf(s, sizeof(s), "btron import %s %d objects %d %s", x->name, (INT)er, st->objects, err);
 		xfc_log(s);
@@ -1374,8 +1450,9 @@ static void do_import( XWIN *w )
 	job_end();
 	boxu = argobj;
 	if ( made > 0 && newbox ) {
-		snprintf((char *)bname, sizeof(bname), "取込 %s", w->label);
-		e = xfc_uuid_parse(SYSDEF_XFCONV_BOX, &home) ? xfu_make_box(bname, &home, &boxu) : E_SYS;
+		/* a box of its own, put in the person's cabinet as a new object of theirs is, and opened */
+		snprintf((char *)bname, sizeof(bname), "取込 %s", shown_of(w));
+		e = xfc_uuid_parse(SYSDEF_CABINET, &home) ? xfu_make_box(bname, &home, &boxu) : E_SYS;
 		if ( e >= E_OK ) e = xfu_box_link(&home, &boxu);
 		for ( k = 0; e >= E_OK && k < made; k++ ) e = xfu_box_link(&boxu, &tops[k]);
 		if ( e < E_OK ) {
@@ -1699,16 +1776,14 @@ static void dropped( XWIN *w )
 {
 	T_OBDROP	*d;
 	XFCEXP		how;
-	TS_UUID		src[OB_DROP_MAX];
+	TS_UUID		*src;
 	UB		dir[XFU_PATH_MAX], *names;
 	char		s[400], id[40];
-	SZ		asz = 0;
 	INT		i, row;
 
-	d = (T_OBDROP *)malloc(sizeof(T_OBDROP));
+	d = ob_drop_read(w->kw);
 	if ( d == NULL ) return;
-	memset(d, 0, sizeof(*d));
-	if ( ob_rea_rec(w->kw, OB_WR_DROP, 0, d, sizeof(*d), &asz) < E_OK || d->n <= 0 ) {
+	if ( d->n <= 0 ) {
 		free(d);
 		return;
 	}
@@ -1736,8 +1811,15 @@ static void dropped( XWIN *w )
 	if ( row >= 0 && w->ent[row].kind == E_DIR && path_join(dir, sizeof(dir), w->dir, w->ent[row].name) < E_OK ) {
 		strncpy((char *)dir, (char *)w->dir, sizeof(dir) - 1);
 	}
-	snprintf(s, sizeof(s), "%d 個の実身を %s/%s に書き出します", d->n, w->label, dir);
+	snprintf(s, sizeof(s), "%d 個の実身を %s/%s に書き出します", d->n, shown_of(w), dir);
 	drop_answer(w, d, OB_DR_ACCEPT, s);
+	/* every object let go */
+	src = (TS_UUID *)malloc(sizeof(TS_UUID) * (size_t)d->n);
+	if ( src == NULL ) {
+		drop_answer(w, d, OB_DR_REFUSE, "作業の場所がありません");
+		free(d);
+		return;
+	}
 	for ( i = 0; i < d->n; i++ ) src[i] = d->v[i].target;
 	if ( d->n == 1 ) {
 		argobj = src[0];
@@ -1755,6 +1837,7 @@ static void dropped( XWIN *w )
 		tell_chosen(w);
 		free(names);
 	}
+	free(src);
 	free(d);
 }
 
@@ -2004,23 +2087,16 @@ static void key( XWIN *w, CONST T_OBNTM *m )
 
 /* ---------------------------------------------------------------- the pointer */
 
-static BOOL on_bar( XWIN *w, INT x, INT y )
+/*
+ * The window's scroll bar (WM_ATTR_RBAR) worked: its start asked to go
+ * to x, already inside what there is
+ */
+static void scrolled( XWIN *w, CONST T_OBNTM *m )
 {
-	INT	ww, wh;
+	INT	rows = xfc_rows(w);
 
-	xfc_work_size(w, &ww, &wh);
-	return (BOOL)( x >= ww - XFC_SB_W && y < wh - XFC_STATUS_H );
-}
-
-/* The scroll bar's knob moved to where the pointer is */
-static void bar_to( XWIN *w, INT y )
-{
-	INT	ww, wh, rows = xfc_rows(w), h;
-
-	xfc_work_size(w, &ww, &wh);
-	h = wh - XFC_STATUS_H;
-	if ( h <= 0 || w->nent <= rows ) return;
-	w->top = y * w->nent / h - rows / 2;
+	if ( m->code != OB_BAR_R ) return;
+	w->top = m->x;
 	if ( w->top > w->nent - rows ) w->top = w->nent - rows;
 	if ( w->top < 0 ) w->top = 0;
 	w->dirty = TRUE;
@@ -2035,9 +2111,8 @@ static void band_drop( void )
 	INT	i;
 
 	for ( i = 0; i < XFC_WIN_MAX; i++ ) {
-		if ( xw[i].used && ( xw[i].band || xw[i].thumb ) ) {
+		if ( xw[i].used && xw[i].band ) {
 			xw[i].band = FALSE;
-			xw[i].thumb = FALSE;
 			xw[i].dirty = TRUE;
 		}
 	}
@@ -2050,11 +2125,6 @@ static void press( XWIN *w, CONST T_OBNTM *m )
 
 	if ( busy ) return;
 	band_drop();			/* a rectangle let go outside its window ends here */
-	if ( on_bar(w, m->x, m->y) ) {
-		w->thumb = TRUE;
-		bar_to(w, m->y);
-		return;
-	}
 	i = xfc_hit(w, m->x, m->y);
 	if ( i < 0 ) {
 		/* a rectangle begins: what it takes is chosen when it is let go */
@@ -2110,9 +2180,7 @@ static void band_take( XWIN *w )
 
 static void moved( XWIN *w, CONST T_OBNTM *m )
 {
-	if ( w->thumb ) {
-		bar_to(w, m->y);
-	} else if ( w->band ) {
+	if ( w->band ) {
 		w->bx1 = m->x;
 		w->by1 = m->y;
 		w->dirty = TRUE;
@@ -2121,10 +2189,6 @@ static void moved( XWIN *w, CONST T_OBNTM *m )
 
 static void released( XWIN *w, CONST T_OBNTM *m )
 {
-	if ( w->thumb ) {
-		w->thumb = FALSE;
-		return;
-	}
 	if ( w->band ) {
 		w->bx1 = m->x;
 		w->by1 = m->y;
@@ -2152,7 +2216,7 @@ static void disk_notice( CONST T_OBNTM *m )
 {
 	XWIN	*w;
 	char	s[200];
-	T_FSTAT	st;
+	T_FSSTAT vs;
 
 	if ( m->event == OB_E_ATTACH || m->event == OB_E_DETACH || m->event == OB_E_DELETE ) {
 		xfc_bt_forget(&m->uuid);	/* a medium put in or taken out: looked at again */
@@ -2160,7 +2224,7 @@ static void disk_notice( CONST T_OBNTM *m )
 	w = files_of_disk(&m->uuid);
 	if ( w != NULL && w->bt != NULL ) {
 		if ( m->event == OB_E_DETACH || m->event == OB_E_DELETE ) {
-			snprintf(s, sizeof(s), "%s が外されました", w->label);
+			snprintf(s, sizeof(s), "%s が外されました", shown_of(w));
 			files_close(w);
 			say(media, s, TRUE);
 			return;
@@ -2169,8 +2233,8 @@ static void disk_notice( CONST T_OBNTM *m )
 		return;
 	}
 	if ( w != NULL && ( m->event == OB_E_DETACH || m->event == OB_E_DELETE || m->event == OB_E_CHANGE )
-	  && fs_stat(w->label, &st) < 0 ) {
-		snprintf(s, sizeof(s), "%s が外されました", w->label);
+	  && w->mounted && fs_fstatvfs(w->vd, &vs) < 0 ) {
+		snprintf(s, sizeof(s), "%s が外されました", shown_of(w));
 		w->mounted = FALSE;
 		files_close(w);
 		say(media, s, TRUE);
@@ -2204,6 +2268,9 @@ static void event( CONST T_OBNTM *m )
 		break;
 	case OB_E_WHEEL:
 		wheel(w, m);
+		break;
+	case OB_E_SCROLL:
+		scrolled(w, m);
 		break;
 	case OB_E_KEY:
 		key(w, m);
@@ -2262,10 +2329,13 @@ int main( void )
 	say(media, "ディスクを開くと、そのファイルを仮身で示します", FALSE);
 	xfc_paint(media);
 
+	/* the window's channel waited on: the first notice of a round for as long as it takes, the rest as they are */
 	while ( !closing ) {
-		while ( !closing && ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) event(&m);
+		for ( TMO tmo = TMO_FEVR; !closing && ob_rea_tmo(port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK;
+		      tmo = TMO_POL ) {
+			event(&m);
+		}
 		paint_all();
-		if ( !closing ) (void)tk_dly_tsk(20);
 	}
 	for ( i = 1; i < XFC_WIN_MAX; i++ ) {
 		if ( xw[i].used ) files_close(&xw[i]);

@@ -1,11 +1,11 @@
 <tad version="1.0" encoding="UTF-8" filename="システム環境設定のデータボックス">
 <document>
 <p>システム環境設定のデータボックス</p>
-<p>システム環境設定のウインドウのパネルと、尋ねるパネルの定義。〈画面〉の〈ウィンドウ〉はウィンドウの見た目(透明度、色、角の丸み、影、ぼかし、開閉の動き、移動中の表示)と、ウィンドウの合成にGPUを使うかどうか(GPUで合成)を設定する。〈機器〉の〈電源管理〉は、再起動と電源の切断のほか、プロセッサのクロックの上限、今のクロックと電源の状態、ウォッチドッグを扱う。〈機器情報〉のサウンドは、音の出力先(自動、I2SのDAC、HDMI0、HDMI1、つながっているUSBオーディオ機器)を選び、試聴、音量、出力を止めずに流し続けるかどうかを扱う。〈書体〉は書体箱の書体の一覧と、それぞれを使用するかどうかを扱い、［詳細情報］でフォント設定のウインドウ(パネル14)を開く。フォント設定のファミリの詳細はパネル15、登録と更新を尋ねるのはパネル16から20、削除を尋ねるのはパネル21である。</p>
+<p>システム環境設定のウインドウのパネルと、尋ねるパネルの定義。画面が小さくてウインドウがパネルより低くなるときは、各タブの中身が右のスクロールバーでスクロールし、下の端のボタンの行(foot)はいつもウインドウの中に見える。〈画面〉の〈ウィンドウ〉はウィンドウの見た目(透明度、色、角の丸み、影、ぼかし、開閉の動き、移動中の表示)と、ウィンドウの合成にGPUを使うかどうか(GPUで合成)を設定する。〈機器情報〉の画面サイズは、一覧から選ぶか幅と高さを入れて［設定］で、再起動せずにすぐ切り換える(デスクトップが確認のパネルを出し、30秒で確かめられなければ元に戻す)。パネルと縦横の比が違う大きさを、比を保って帯を付けるか全体に広げるかも選べる(選べる画面のときだけ)。〈機器〉の〈電源管理〉は、今の電源(ACアダプタか電池か)と電池の残量と充電の状態、再起動と電源の切断のほか、今のクロックと電源の状態、プロセッサのクロックの上限、ウォッチドッグを扱う。x64のPCでは、クロックの上限と電源の状態の行は出さず、今のクロックはプロセッサから読めるときだけ出す。〈機器情報〉のネットワークアダプタは、ネットワークのカードの状態と、マシンのアダプタ(有線とWi-Fi)の一覧と接続の状態を示し、一覧で選んだ行(自動か、その中の一つ)を［設定］で使用するアダプタにする。〈機器情報〉のサウンドは、音の出力先(自動、I2SのDAC、HDMI0、HDMI1、つながっているUSBオーディオ機器)を選び、試聴、音量、出力を止めずに流し続けるかどうかを扱う。〈機器情報〉のプロセッサは、各CPUの役割(普通、雑務、実時間)と、装置の割込みを受けるCPUを扱う。〈書体〉は書体箱の書体の一覧と、それぞれを使用するかどうかを扱い、［詳細情報］でフォント設定のウインドウ(パネル14)を開く。フォント設定のファミリの詳細はパネル15、登録と更新を尋ねるのはパネル16から20、削除を尋ねるのはパネル21である。〈バージョン〉の一覧に落としたシステムのパッケージで更新している間は、パネル22に進み具合を示す。2行で知らせるのはパネル23、3行で尋ねるのはパネル24である。</p>
 </document>
 <databox>
 <panel num="1" rect="0,0,600,470" title="システム環境設定" kind="bare">
-<tags num="100" rect="0,0,600,470" inner="4,28,596,466" value="1"><tag>＠機器</tag><tag>機器情報</tag><tag>＋電源管理</tag><tag>＠画面</tag><tag>背景</tag><tag>＋配色</tag><tag>＋ウィンドウ</tag><tag>書体</tag><tag>バージョン</tag></tags>
+<tags num="100" rect="0,0,600,470" inner="4,28,596,466" value="1" scroll="true"><tag>＠機器</tag><tag>機器情報</tag><tag>＋電源管理</tag><tag>＠画面</tag><tag>背景</tag><tag>＋配色</tag><tag>＋ウィンドウ</tag><tag>書体</tag><tag>バージョン</tag></tags>
 <list num="1" sheet="1" rect="12,64,480,454"/>
 <button num="2" sheet="1" rect="496,64,584,88" emph="true">表示</button>
 <text sheet="2" x="16" y="89">現在の電源：</text>
@@ -16,17 +16,17 @@
 <box num="5" sheet="2" rect="184,138,588,164" off="true"/>
 <button num="6" sheet="2" rect="184,192,304,216">再起動</button>
 <button num="7" sheet="2" rect="320,192,440,216">電源を切る</button>
-<text sheet="2" x="16" y="255">プロセッサの上限：</text>
-<select num="75" sheet="2" rect="184,232,588,320" double="true" value="2"><name>１５００ＭＨｚ</name><name>１８００ＭＨｚ（標準）</name><name>２０００ＭＨｚ</name><name>２２００ＭＨｚ</name><name>最大</name></select>
-<text sheet="2" x="16" y="342">電源が弱いと、高いクロックでは止まりやすくなります</text>
-<text sheet="2" x="16" y="376">現在のクロック：</text>
-<box num="76" sheet="2" rect="184,357,588,383" off="true"/>
-<text sheet="2" x="16" y="406">電源の状態：</text>
-<box num="77" sheet="2" rect="184,387,588,413" off="true"/>
-<text sheet="2" x="16" y="446">ウォッチドッグ：</text>
-<switch num="78" sheet="2" rect="184,427,264,453">使う</switch>
-<serial num="79" sheet="2" rect="272,426,476,454"><f w="4" lo="5" hi="3600"/> 秒で再起動</serial>
-<button num="80" sheet="2" rect="496,428,588,452" emph="true">設定</button>
+<text num="88" sheet="2" x="16" y="251">現在のクロック：</text>
+<box num="76" sheet="2" rect="184,232,588,258" off="true"/>
+<text num="89" sheet="2" x="16" y="281">電源の状態：</text>
+<box num="77" sheet="2" rect="184,262,588,288" off="true"/>
+<text num="90" sheet="2" x="16" y="325">プロセッサの上限：</text>
+<select num="75" sheet="2" rect="184,302,588,390" double="true" value="2"><name>１５００ＭＨｚ</name><name>１８００ＭＨｚ（標準）</name><name>２０００ＭＨｚ</name><name>２２００ＭＨｚ</name><name>最大</name></select>
+<text num="87" sheet="2" x="16" y="412">電源が弱いと、高いクロックでは止まりやすくなります</text>
+<text foot="true" sheet="2" x="16" y="446">ウォッチドッグ：</text>
+<switch foot="true" num="78" sheet="2" rect="184,427,264,453">使う</switch>
+<serial foot="true" num="79" sheet="2" rect="272,426,476,454"><f w="4" lo="5" hi="3600"/> 秒で再起動</serial>
+<button foot="true" num="80" sheet="2" rect="496,428,588,452" emph="true">設定</button>
 <list num="8" sheet="3" rect="12,64,588,386"/>
 <text sheet="3" x="16" y="412">配置：</text>
 <select num="9" sheet="3" rect="104,394,434,428" across="true" value="1"><name>並べる</name><name>中央</name><name>拡大</name></select>
@@ -84,15 +84,15 @@
 <text sheet="5" x="428" y="414">長</text>
 <volume num="69" sheet="5" rect="212,397,420,419" across="true" lo="100" hi="0" value="0"/>
 <box num="70" sheet="5" rect="456,395,588,421" off="true"/>
-<text sheet="5" x="16" y="442">移動中の表示：</text>
-<select num="71" sheet="5" rect="184,422,400,450" across="true" value="1"><name>中身ごと</name><name>枠線だけ</name></select>
-<button num="72" sheet="5" rect="404,424,490,448">初期値</button>
-<button num="73" sheet="5" rect="496,424,588,448">取り消し</button>
+<text foot="true" sheet="5" x="16" y="442">移動中の表示：</text>
+<select foot="true" num="71" sheet="5" rect="184,422,400,450" across="true" value="1"><name>中身ごと</name><name>枠線だけ</name></select>
+<button foot="true" num="72" sheet="5" rect="404,424,490,448">初期値</button>
+<button foot="true" num="73" sheet="5" rect="496,424,588,448">取り消し</button>
 <list num="13" sheet="6" rect="12,40,588,384"/>
-<text sheet="6" x="16" y="414">使用：</text>
-<select num="83" sheet="6" rect="104,394,384,424" across="true" value="1"><name>使用する</name><name>使用しない</name></select>
-<button num="14" sheet="6" rect="480,396,588,420">詳細情報</button>
-<text sheet="6" x="16" y="452">書体の実身の仮身を一覧に落とすと登録</text>
+<text foot="true" sheet="6" x="16" y="414">使用：</text>
+<select foot="true" num="83" sheet="6" rect="104,394,384,424" across="true" value="1"><name>使用する</name><name>使用しない</name></select>
+<button foot="true" num="14" sheet="6" rect="480,396,588,420">詳細情報</button>
+<text foot="true" sheet="6" x="16" y="452">書体の実身の仮身を一覧に落とすと登録</text>
 <text sheet="7" x="16" y="59">システムバージョン：</text>
 <box num="15" sheet="7" rect="184,40,588,66" off="true"/>
 <text sheet="7" x="16" y="89">カーネル：</text>
@@ -106,13 +106,19 @@
 <text sheet="7" x="16" y="209">メモリ：</text>
 <box num="20" sheet="7" rect="184,190,588,216" off="true"/>
 <list num="21" sheet="7" rect="12,228,588,422"/>
-<text sheet="7" x="16" y="452">パッケージ（.tpk）を落とすとインストール・更新</text>
-<button num="46" sheet="7" rect="480,434,588,458">詳細情報</button>
+<text foot="true" sheet="7" x="16" y="452">パッケージ（.tpk）を落とすとインストール・更新</text>
+<button foot="true" num="46" sheet="7" rect="480,434,588,458">詳細情報</button>
 <text sheet="8" x="16" y="83">画面サイズ／色数</text>
 <list num="23" sheet="8" rect="12,94,380,420"/>
 <text num="24" sheet="8" x="396" y="113">色数：１６７７万色</text>
-<button num="25" sheet="8" rect="400,434,488,458">取り消し</button>
-<button num="26" sheet="8" rect="496,434,584,458" emph="true">設定</button>
+<text sheet="8" x="396" y="153">幅×高さ：</text>
+<serial num="84" sheet="8" rect="396,162,588,190"><f w="4" lo="320" hi="7680"/> × <f w="4" lo="200" hi="4320"/></serial>
+<text sheet="8" x="396" y="225">比の違う大きさ：</text>
+<select num="85" sheet="8" rect="396,234,588,290" value="1"><name>比を保つ</name><name>全体に広げる</name></select>
+<text sheet="8" x="396" y="325">表示の倍率：</text>
+<popup num="86" sheet="8" rect="396,334,588,360" value="1"><name>100％</name></popup>
+<button foot="true" num="25" sheet="8" rect="400,434,488,458">取り消し</button>
+<button foot="true" num="26" sheet="8" rect="496,434,584,458" emph="true">設定</button>
 <text sheet="9" x="16" y="89">アダプタ：</text>
 <box num="27" sheet="9" rect="184,70,588,96" off="true"/>
 <text sheet="9" x="16" y="119">ＭＡＣアドレス：</text>
@@ -125,28 +131,32 @@
 <box num="31" sheet="9" rect="184,190,588,216" off="true"/>
 <text sheet="9" x="16" y="239">送受信：</text>
 <box num="32" sheet="9" rect="184,220,588,246" off="true"/>
-<button num="22" sheet="9" rect="496,434,584,458" emph="true">確認</button>
+<text sheet="9" x="16" y="270">アダプタの一覧：</text>
+<list num="120" sheet="9" rect="12,276,588,422" cols="96,0,0,136"/>
+<text foot="true" sheet="9" x="16" y="452">＊は使用中、下線は今の設定</text>
+<button foot="true" num="122" sheet="9" rect="400,434,488,458">設定</button>
+<button foot="true" num="22" sheet="9" rect="496,434,584,458" emph="true">確認</button>
 <text sheet="10" x="16" y="83">ＵＳＢ接続機器（階層 ポート 機器ID 種別 名前）</text>
 <list num="33" sheet="10" rect="12,94,588,422"/>
-<button num="34" sheet="10" rect="12,434,132,458">表示更新</button>
-<button num="22" sheet="10" rect="496,434,584,458" emph="true">確認</button>
+<button foot="true" num="34" sheet="10" rect="12,434,132,458">表示更新</button>
+<button foot="true" num="22" sheet="10" rect="496,434,584,458" emph="true">確認</button>
 <text sheet="11" x="16" y="83">ディスク（名前 大きさ 付け先）</text>
-<list num="35" sheet="11" rect="12,94,588,422"/>
-<button num="22" sheet="11" rect="496,434,584,458" emph="true">確認</button>
+<list num="35" sheet="11" rect="12,94,588,422" cols="0,96r,160"/>
+<button foot="true" num="22" sheet="11" rect="496,434,584,458" emph="true">確認</button>
 <text sheet="12" x="16" y="89">画面：</text>
 <box num="36" sheet="12" rect="184,70,588,96" off="true"/>
 <text sheet="12" x="16" y="119">画素：</text>
 <box num="37" sheet="12" rect="184,100,588,126" off="true"/>
 <text sheet="12" x="16" y="149">ドライバ：</text>
 <box num="38" sheet="12" rect="184,130,588,156" off="true"/>
-<button num="22" sheet="12" rect="496,434,584,458" emph="true">確認</button>
+<button foot="true" num="22" sheet="12" rect="496,434,584,458" emph="true">確認</button>
 <text sheet="13" x="16" y="102">キーボード種別：</text>
 <select num="39" sheet="13" rect="184,70,520,130" value="1"><name>１０６／１０９日本語キーボード</name><name>１０１／１０４英語キーボード</name></select>
 <text sheet="13" x="16" y="165">起動時の入力モード：</text>
 <select num="40" sheet="13" rect="184,142,400,176" across="true" value="1"><name>かな</name><name>英数</name></select>
 <text sheet="13" x="16" y="209">これはかな入力／ローマ字入力の設定ではありません（ユーザ環境設定で設定します）</text>
-<button num="41" sheet="13" rect="400,434,488,458">取り消し</button>
-<button num="42" sheet="13" rect="496,434,584,458" emph="true">設定</button>
+<button foot="true" num="41" sheet="13" rect="400,434,488,458">取り消し</button>
+<button foot="true" num="42" sheet="13" rect="496,434,584,458" emph="true">設定</button>
 <text sheet="14" x="16" y="59">出力先：</text>
 <list num="47" sheet="14" rect="184,40,588,196"/>
 <text sheet="14" x="16" y="223">現在の出力：</text>
@@ -162,9 +172,23 @@
 <box num="81" sheet="14" rect="456,299,588,325" off="true"/>
 <button num="48" sheet="14" rect="184,338,304,362">試聴</button>
 <switch num="82" sheet="14" rect="184,372,480,398">出力を止めずに流し続ける</switch>
-<text sheet="14" x="16" y="422">出力先を選ぶとただちに切り替わり、次の起動にも使われます</text>
-<text sheet="14" x="16" y="444">選んだ出力先がないときは自動で選んだ先から出ます</text>
-<button num="22" sheet="14" rect="496,434,584,458" emph="true">確認</button>
+<text foot="true" sheet="14" x="16" y="422">出力先を選ぶとただちに切り替わり、次の起動にも使われます</text>
+<text foot="true" sheet="14" x="16" y="444">選んだ出力先がないときは自動で選んだ先から出ます</text>
+<button foot="true" num="22" sheet="14" rect="496,434,584,458" emph="true">確認</button>
+<text sheet="15" x="16" y="59">ＣＰＵ（番号　役割）</text>
+<list num="130" sheet="15" rect="12,68,300,262"/>
+<text sheet="15" x="316" y="87">役割：</text>
+<select num="131" sheet="15" rect="316,96,588,190" value="1"><name>普通</name><name>雑務（装置の割込み）</name><name>実時間（割込みを向けない）</name></select>
+<button num="132" sheet="15" rect="496,234,588,258" emph="true">設定</button>
+<text sheet="15" x="16" y="286">ＰＲＣ１はシステムタイマを受けるので、いつも雑務です。</text>
+<text sheet="15" x="16" y="308">実時間の層（優先度１〜１５）のタスクは、雑務でないＣＰＵに割り付けることを勧めます。</text>
+<text sheet="15" x="16" y="338">装置の割込み（装置　割込み：ＣＰＵ　決め方）</text>
+<list num="133" sheet="15" rect="12,346,380,426"/>
+<text sheet="15" x="396" y="365">受けるＣＰＵ：</text>
+<serial num="134" sheet="15" rect="396,372,480,400"><f w="4" lo="0" hi="1024"/></serial>
+<button num="135" sheet="15" rect="496,374,588,398">設定</button>
+<text sheet="15" x="396" y="424">０は自動</text>
+<button foot="true" num="22" sheet="15" rect="496,434,584,458" emph="true">確認</button>
 </panel>
 <panel num="10" rect="0,0,460,106" title="システム環境設定">
 <text num="1" x="24" y="44"> </text>
@@ -280,6 +304,23 @@
 <text num="2" x="24" y="62"> </text>
 <button num="162" rect="244,92,336,116" answer="cancel" emph="true">取消</button>
 <button num="167" rect="348,92,440,116" answer="ok">削除</button>
+</panel>
+<panel num="22" rect="0,0,520,120" title="システムの更新">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="64"> </text>
+<text num="3" x="24" y="92"> </text>
+</panel>
+<panel num="23" rect="0,0,460,128" title="システム環境設定">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="101" rect="348,92,436,116" answer="ok" emph="true">確認</button>
+</panel>
+<panel num="24" rect="0,0,460,150" title="システム環境設定">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<text num="3" x="24" y="84"> </text>
+<button num="102" rect="196,114,284,138" answer="cancel">取り消し</button>
+<button num="4" rect="296,114,436,138" answer="ok" emph="true"> </button>
 </panel>
 </databox>
 </tad>

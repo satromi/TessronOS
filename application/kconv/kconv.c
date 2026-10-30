@@ -1052,16 +1052,61 @@ EXPORT void tsmozc_host_exit( int code )
  * is renamed as a file (xf_rename); one it removes loses its link and
  * is deleted. Nothing outside the directory is a file to the engine.
  * An open file is a key to the object and a place in its record.
+ *
+ * The engine writes a file through its C++ stream, a kilobyte at a
+ * time: a learning file of 320KB made at the first start would be some
+ * three hundred writes of the record, each a change of the volume of its
+ * own that waits for the medium. What it writes one piece after another
+ * is gathered here and written as one (KC_WBUF at most); the gathered
+ * bytes go to the record before anything reads the file, asks its size,
+ * moves it or closes it.
  */
 #define KC_FD_MAX	8
+#define KC_WBUF		( 256 * 1024 )
 
 typedef struct {
 	ID	key;		/* 0: free */
 	D	at;
 	BOOL	append;
+	UB	*wbuf;		/* bytes written and not yet in the record */
+	D	wat;		/* where in the record they go */
+	SZ	wlen;
+	BOOL	werr;		/* gathered bytes could not be written */
 } KCFD;
 
 LOCAL KCFD	kc_fd[KC_FD_MAX];
+
+/* The gathered bytes of an open file into its record */
+LOCAL ER kc_wflush( KCFD *f )
+{
+	SZ	asz = 0;
+	ER	er;
+
+	if ( f->wlen <= 0 ) {
+		return E_OK;
+	}
+	er = ob_wri_rec(f->key, 1, f->wat, f->wbuf, f->wlen, &asz);
+	if ( er >= E_OK && asz != f->wlen ) {
+		er = E_IO;
+	}
+	f->wlen = 0;
+	if ( er < E_OK ) {
+		f->werr = TRUE;
+	}
+	return er;
+}
+
+/* Every open file's gathered bytes, before a file is looked up, moved or removed by name */
+LOCAL void kc_wflush_all( void )
+{
+	INT	i;
+
+	for ( i = 0; i < KC_FD_MAX; i++ ) {
+		if ( kc_fd[i].key > 0 ) {
+			(void)kc_wflush(&kc_fd[i]);
+		}
+	}
+}
 
 /* The name of a file in the profile directory; NULL for the directory itself or outside it */
 LOCAL CONST UB *kc_file( CONST char *path, BOOL *p_dir )
@@ -1089,7 +1134,7 @@ LOCAL CONST UB *kc_file( CONST char *path, BOOL *p_dir )
 
 LOCAL ER kc_box( TS_UUID *box )
 {
-	return ts_str_to_uuid(SYSDEF_LEARN_BOX, box);
+	return ob_fnd_sys(SYSROLE_LEARN, SYSDEF_LEARN_BOX, box);
 }
 
 LOCAL INT kc_nothing( void *ctx, void *buf, SZ n )
@@ -1163,19 +1208,28 @@ EXPORT int tsmozc_host_open( const char *path, int flags )
 	kc_fd[i].key = key;
 	kc_fd[i].at = 0;
 	kc_fd[i].append = (BOOL)( ( flags & TSMOZC_O_APPEND ) != 0 );
+	kc_fd[i].wlen = 0;
+	kc_fd[i].werr = FALSE;
 	return i;
 }
 
 EXPORT int tsmozc_host_close( int fd )
 {
 	KCFD	*f = kc_of(fd);
+	BOOL	bad;
 
 	if ( f == NULL ) {
 		return -1;
 	}
+	(void)kc_wflush(f);
+	bad = f->werr;
 	ob_cls_obj(f->key);
 	f->key = 0;
-	return 0;
+	if ( f->wbuf != NULL ) {
+		Kfree(f->wbuf);
+		f->wbuf = NULL;
+	}
+	return bad ? -1 : 0;
 }
 
 EXPORT int tsmozc_host_read( int fd, void *buf, int len )
@@ -1185,6 +1239,9 @@ EXPORT int tsmozc_host_read( int fd, void *buf, int len )
 	ER	er;
 
 	if ( f == NULL || len < 0 ) {
+		return -1;
+	}
+	if ( kc_wflush(f) < E_OK ) {
 		return -1;
 	}
 	er = ob_rea_rec(f->key, 1, f->at, buf, (SZ)len, &asz);
@@ -1204,13 +1261,33 @@ EXPORT int tsmozc_host_write( int fd, const void *buf, int len )
 		return -1;
 	}
 	if ( f->append ) {
+		if ( kc_wflush(f) < E_OK ) {
+			return -1;
+		}
 		f->at = kc_size(f->key);
 	}
-	if ( ob_wri_rec(f->key, 1, f->at, buf, (SZ)len, &asz) < E_OK ) {
-		return -1;
+	if ( f->wlen > 0 && ( f->at != f->wat + f->wlen || f->wlen + len > KC_WBUF ) ) {
+		if ( kc_wflush(f) < E_OK ) {
+			return -1;		/* not one after the other, or no room */
+		}
 	}
-	f->at += asz;
-	return (int)asz;
+	if ( f->wbuf == NULL && len < KC_WBUF ) {
+		f->wbuf = (UB *)Kmalloc(KC_WBUF);
+	}
+	if ( f->wbuf == NULL || len >= KC_WBUF ) {
+		if ( ob_wri_rec(f->key, 1, f->at, buf, (SZ)len, &asz) < E_OK ) {
+			return -1;
+		}
+		f->at += asz;
+		return (int)asz;
+	}
+	if ( f->wlen == 0 ) {
+		f->wat = f->at;
+	}
+	knl_memcpy(f->wbuf + f->wlen, buf, (SZ)len);
+	f->wlen += len;
+	f->at += len;
+	return len;
 }
 
 EXPORT long long tsmozc_host_lseek( int fd, long long off, int whence )
@@ -1219,6 +1296,9 @@ EXPORT long long tsmozc_host_lseek( int fd, long long off, int whence )
 	D	to;
 
 	if ( f == NULL ) {
+		return -1;
+	}
+	if ( whence == 2 && kc_wflush(f) < E_OK ) {
 		return -1;
 	}
 	to = ( whence == 1 ) ? f->at + off : ( whence == 2 ) ? kc_size(f->key) + off : off;
@@ -1244,6 +1324,7 @@ EXPORT int tsmozc_host_stat( const char *path, long long *p_size, int *p_dir,
 	if ( dir ) {
 		return 0;
 	}
+	kc_wflush_all();
 	if ( name == NULL || kc_box(&box) < E_OK || xf_find(&box, name, &u) < E_OK ) {
 		return -1;
 	}
@@ -1260,7 +1341,7 @@ EXPORT int tsmozc_host_fstat( int fd, long long *p_size, int *p_dir, long long *
 {
 	KCFD	*f = kc_of(fd);
 
-	if ( f == NULL ) {
+	if ( f == NULL || kc_wflush(f) < E_OK ) {
 		return -1;
 	}
 	*p_size = (long long)kc_size(f->key);
@@ -1276,6 +1357,7 @@ EXPORT int tsmozc_host_unlink( const char *path )
 	BOOL		dir;
 
 	name = kc_file(path, &dir);
+	kc_wflush_all();
 	if ( name == NULL || kc_box(&box) < E_OK || xf_find(&box, name, &u) < E_OK ) {
 		return -1;
 	}
@@ -1291,6 +1373,7 @@ EXPORT int tsmozc_host_rename( const char *from, const char *to )
 
 	a = kc_file(from, &dir);
 	b = kc_file(to, &dir);
+	kc_wflush_all();
 	if ( a == NULL || b == NULL || kc_box(&box) < E_OK || xf_find(&box, a, &u) < E_OK ) {
 		return -1;
 	}

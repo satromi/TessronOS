@@ -12,7 +12,7 @@ AR      := $(CROSS)ar
 
 CXXRT_DIR  := $(TOP)/lib/libcxxrt
 PTH_DIR    := $(TOP)/lib/libpthread
-CXXRT_LD   := $(TOP)/etc/linker/user/program_cxx.ld
+CXXRT_LD   := $(TOP)/etc/linker/$(USER_LD_DIR)/program_cxx.ld
 CXXRT_OUT  := $(UOBJ)/lib
 
 # 利用者のプログラムの C と C++ に共通の旗。POSIX の時計と予定の宣言を newlib から出させる
@@ -32,6 +32,14 @@ CXXRT_OBJS := $(CXXRT_OUT)/cxxrt/crt_cxx.o $(CXXRT_OUT)/cxxrt/ts_start.o $(CXXRT
 	      $(CXXRT_OUT)/cxxrt/cxx_abi.o $(CXXRT_OUT)/cxxrt/svc_stub.o $(CXXRT_OUT)/cxxrt/ts_socket.o \
 	      $(CXXRT_OUT)/cxxrt/ts_dirent.o $(CXXRT_OUT)/cxxrt/ts_face.o $(CXXRT_OUT)/cxxrt/ts_posix.o $(CXXRT_OUT)/cxxrt/ts_evfd.o \
 	      $(CXXRT_OUT)/cxxrt/ts_random.o $(CXXRT_OUT)/cxxrt/ts_urandom.o
+ifneq ($(UARCH_LIBC),)
+CXXRT_OBJS += $(CXXRT_OUT)/cxxrt/sysnames.o
+
+$(CXXRT_OUT)/cxxrt/sysnames.o: $(UARCH_LIBC)
+	@mkdir -p $(dir $@)
+	@echo 'AS  $@'
+	@$(CC) $(TSPOSIX_FLAGS) -c -o $@ $<
+endif
 PTH_OBJS   := $(CXXRT_OUT)/pth/pth_wait.o $(CXXRT_OUT)/pth/pth_sync.o $(CXXRT_OUT)/pth/pth_thread.o \
 	      $(CXXRT_OUT)/pth/pth_stack.o $(CXXRT_OUT)/pth/pth_emutls.o
 
@@ -85,12 +93,12 @@ $(CXXRT_OUT)/cxxrt/%.o: $(CXXRT_DIR)/%.cc $(CXXRT_HDRS)
 	@echo 'CXX $@'
 	@$(CXX) $(TSPOSIX_CXXFLAGS) -Wall -c -o $@ $<
 
-$(CXXRT_OUT)/cxxrt/%.o: $(CXXRT_DIR)/%.S
+$(CXXRT_OUT)/cxxrt/%.o: $(CXXRT_DIR)/$(UARCH_DIR)%.S
 	@mkdir -p $(dir $@)
 	@echo 'AS  $@'
 	@$(CC) $(TSPOSIX_FLAGS) -c -o $@ $<
 
-$(CXXRT_OUT)/cxxrt/svc_stub.o: $(TOP)/lib/libts/svc_stub.S $(TOP)/include/ts/svc.h
+$(CXXRT_OUT)/cxxrt/svc_stub.o: $(TOP)/lib/libts/$(UARCH_DIR)svc_stub.S $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'AS  $@'
 	@$(CC) $(TSPOSIX_FLAGS) -c -o $@ $<
@@ -100,7 +108,7 @@ $(CXXRT_OUT)/pth/%.o: $(PTH_DIR)/%.c $(CXXRT_HDRS) $(APP_HDRS)
 	@echo 'CC  $@'
 	@$(CC) $(TSPOSIX_CFLAGS) -Wall -c -o $@ $<
 
-$(CXXRT_OUT)/pth/%.o: $(PTH_DIR)/%.S
+$(CXXRT_OUT)/pth/%.o: $(PTH_DIR)/$(UARCH_DIR)%.S
 	@mkdir -p $(dir $@)
 	@echo 'AS  $@'
 	@$(CC) $(TSPOSIX_FLAGS) -c -o $@ $<
@@ -114,10 +122,17 @@ $(PTH_LIB): $(PTH_OBJS)
 	@$(AR) rcs $@ $^
 
 # 結び方: crti・crtbegin、プログラム、二つのライブラリ(丸ごと)、libstdc++・libm・libc・libgcc、crtend・crtn
+# (x86_64-elf のツールチェーンには crti と crtn が無く、lib/libcxxrt/x86_64 のものを使う)
+ifeq ($(ARCH),x86_64)
+CRT_I     := $(CXXRT_OUT)/cxxrt/crti.o
+CRT_N     := $(CXXRT_OUT)/cxxrt/crtn.o
+$(CXXRT_LIB): | $(CRT_I) $(CRT_N)
+else
 CRT_I     := $(shell $(CC) -print-file-name=crti.o)
+CRT_N     := $(shell $(CC) -print-file-name=crtn.o)
+endif
 CRT_BEGIN := $(shell $(CC) -print-file-name=crtbegin.o)
 CRT_END   := $(shell $(CC) -print-file-name=crtend.o)
-CRT_N     := $(shell $(CC) -print-file-name=crtn.o)
 
 # $(call CXXRT_LINK,出力,オブジェクトとソース)
 CXXRT_LINK = $(CXX) $(TSPOSIX_CXXFLAGS) -nostdlib -nostartfiles -static -T $(CXXRT_LD) \
@@ -142,8 +157,18 @@ EXTRA_BOOT_FILES += $(CXXPROG_ELF)
 BROWSER_REC   := $(UOBJ)/rec/01a0d8c4-5b20-7a10-9b31-6c2e8f4d1a57_1.bin
 BROWSER_STAMP := $(UOBJ)/browser.stamp
 $(shell mkdir -p $(UOBJ); [ -f $(BROWSER_STAMP) ] && [ "$$(cat $(BROWSER_STAMP))" = "$(BROWSER)$(BROWSER_BLINK)" ] || echo "$(BROWSER)$(BROWSER_BLINK)" > $(BROWSER_STAMP))
+# エンジンを結んだプログラム(browser.mk、v8app)の置き場と、tessron-chromium のスクリプトに渡す
+# アーキテクチャ。x86-64 では命令セットの違うものを混ぜないよう $(UOBJ) に置き、TS_ARCH=x86_64 で
+# x86-64 の目的物(~/tessronos-obj-x64)とツールチェーンを使わせる(設計書 14.3)
+ifeq ($(ARCH),x86_64)
+BROWSER_OUT      := $(UOBJ)
+BROWSER_ARCH_ENV := TS_ARCH=x86_64
+else
+BROWSER_OUT      := obj
+BROWSER_ARCH_ENV :=
+endif
 ifeq ($(BROWSER),1)
-BROWSER_BIN := obj/browser.elf
+BROWSER_BIN := $(BROWSER_OUT)/browser.elf
 else
 BROWSER_BIN := $(UOBJ)/br_stub.elf
 endif
@@ -165,7 +190,7 @@ ifeq ($(BROWSER)$(BROWSER_BLINK),11)
 BROWSER_SPEECH_REC := $(UOBJ)/rec/01a0d8c4-5b20-7a10-9b31-6c2e8f4d1a57_2.bin
 $(BROWSER_SPEECH_REC): $(BROWSER_BIN)
 	@mkdir -p $(dir $@)
-	@cp obj/browser_speech.rec $@
+	@cp $(BROWSER_OUT)/browser_speech.rec $@
 
 EXTRA_RECS += $(BROWSER_SPEECH_REC)
 else
@@ -179,10 +204,17 @@ endif
 # /boot の GLPROG.ELF)と小物「歯車」(application/glgears)を作る。Mesa のソースは
 # リポジトリに入れず、build.sh が取得して写しにパッチを当てる。ライブラリは移植層・
 # パッチ・スクリプトが変わったときだけ作り直す(build.sh は変わったものだけをコンパイルする)
+# x86-64 では tools/x64/mesa/build.sh が x86_64-elf 用のライブラリを ~/tsmesa-x64 に建てる(softpipe と iris)
+ifeq ($(ARCH),x86_64)
+GL_DIR    ?= $(HOME)/tsmesa-x64
+GL_BUILD  := $(TOP)/tools/x64/mesa/build.sh
+else
 GL_DIR    ?= $(HOME)/tsmesa
+GL_BUILD  := $(TOP)/tools/mesa/build.sh
+endif
 GL_LIB    := $(GL_DIR)/libtsgl.a
 GL_CFLAGS := $(TSPOSIX_CFLAGS) -I$(GL_DIR)/include -DEGL_NO_PLATFORM_SPECIFIC_TYPES -Wall
-GL_DEPS   := $(wildcard $(TOP)/tools/mesa/build.sh $(TOP)/tools/mesa/translate.py \
+GL_DEPS   := $(wildcard $(GL_BUILD) $(TOP)/tools/mesa/translate.py \
 		$(TOP)/tools/mesa/patches/*.patch $(TOP)/tools/mesa/shim/*.h $(TOP)/tools/mesa/shim/*/*.h \
 		$(TOP)/lib/libgl/*.c) $(shell find $(TOP)/tools/mesa/src -type f 2>/dev/null) \
 		$(TOP)/include/ts/gpuapp.h $(TOP)/include/ts/gpu.h $(TOP)/include/ts/glapp.h
@@ -199,10 +231,15 @@ $(shell mkdir -p $(UOBJ); [ -f $(GL_STAMP) ] && [ "$$(cat $(GL_STAMP))" = "$(GL)
 ifeq ($(GL),1)
 GLGEARS_BIN := $(UOBJ)/glgears.elf
 GLPROG_ELF  := $(UOBJ)/glprog.elf
+# OpenGL ES を結んだ歯車のレコードは約 19MB あり、256MB の試験用ディスクの FAT の区画に
+# 収まらないので、試験用ディスクを大きくする
+ifneq ($(BROWSER_BLINK),1)
+TEST_DISK_MB := 512
+endif
 
 $(GL_LIB): $(GL_DEPS) $(CXXRT_LIB) $(PTH_LIB)
 	@echo 'GL  $@'
-	@bash $(TOP)/tools/mesa/build.sh all
+	@bash $(GL_BUILD) all
 
 $(UOBJ)/gl/%.o: $(TOP)/application/glgears/%.c $(GL_LIB) $(APP_HDRS)
 	@mkdir -p $(dir $@)

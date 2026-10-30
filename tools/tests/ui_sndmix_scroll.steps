@@ -29,9 +29,13 @@ expect sndmix: rows 3 from 2 of 6, pid 4 first
 shot mixs_wheel
 # the first two end: the first row stays on its program
 expect sndmix: rows 3 from 0 of 4, pid 4 first
-# a new one comes, in the place of one that ended, before the first row
+# a new one comes, in the place of one that ended, before the first row. The
+# same line is said as the first two end one after the other (six, five, four):
+# only one said after the new program started tells that the mixer has it, and
+# the bar is pressed once it has (a press before it is a page of the list before)
+logmark
 run /boot/SVCPROG.ELF 38 400 20000
-expect sndmix: rows 3 from 1 of 5, pid 4 first
+expectsince sndmix: rows 3 from 1 of 5, pid 4 first
 # the bar's track pressed below its knob: a page on, as far as there is
 click 779 474
 expect sndmix: rows 3 from 2 of 5, pid 5 first

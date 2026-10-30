@@ -52,7 +52,6 @@
 
 #define FX_W		600		/* the window's panel */
 #define FX_H		476
-#define FX_DEV_MAX	256		/* volumes listed, in a list that rolls */
 #define FX_ROWS		7		/* lines of what is under way and what came of it */
 #define FX_ROW0		232
 #define FX_ROW_H	24
@@ -97,8 +96,8 @@ LOCAL FXWIN		fi = { NULL, -1, -1 };	/* 障害情報 */
 LOCAL CONST DTOWN	fx_own, fi_own;
 LOCAL INT		fi_page = 0;
 
-LOCAL T_TSFSCKDEV	fx_dev[FX_DEV_MAX];
-LOCAL INT		fx_ndev = 0;
+LOCAL T_TSFSCKDEV	*fx_dev = NULL;	/* every volume, in a list that rolls */
+LOCAL INT		fx_ndev = 0, fx_room = 0;
 LOCAL INT		fx_sel = 0;
 LOCAL BOOL		fx_repair = FALSE;
 LOCAL INT		fx_depth = 1;		/* 簡易 0, 通常 1, 完全 2 */
@@ -818,7 +817,18 @@ LOCAL BOOL ask( CONST char *l1, CONST char *l2, CONST char *l3, CONST char *yes 
 
 LOCAL void list_devices( void )
 {
-	fx_ndev = ob_chk_list(fx_dev, FX_DEV_MAX);
+	/* as many as there are: asked again with room for them while that is more than the room */
+	while ( ( fx_ndev = ob_chk_list(fx_dev, fx_room) ) > fx_room ) {
+		T_TSFSCKDEV	*n = (T_TSFSCKDEV *)Kmalloc(sizeof(T_TSFSCKDEV) * (SZ)( fx_ndev + 8 ));
+
+		if ( n == NULL ) {
+			fx_ndev = fx_room;
+			break;
+		}
+		if ( fx_dev != NULL ) Kfree(fx_dev);
+		fx_dev = n;
+		fx_room = fx_ndev + 8;
+	}
 	if ( fx_ndev < 0 ) fx_ndev = 0;
 	if ( fx_sel >= fx_ndev ) fx_sel = 0;
 }
@@ -1038,7 +1048,7 @@ LOCAL INT put_text( UB *b, INT n, INT max, CONST UB *s )
 /* The object of that name the system box links to, or a new one linked from it */
 LOCAL ER log_object( CONST TS_UUID *box, TS_UUID *p_u )
 {
-	TS_UUID	ids[64];
+	TS_UUID	*ids;
 	UB	*rec, name[64];
 	SZ	len = 0;
 	INT	n, i;
@@ -1046,15 +1056,20 @@ LOCAL ER log_object( CONST TS_UUID *box, TS_UUID *p_u )
 
 	rec = om_obj_record(box, 0, &len);
 	if ( rec != NULL ) {
-		n = om_store_links(rec, len, ids, 64);
+		/* every link of the box: asked how many, then taken */
+		n = om_store_links(rec, len, NULL, 0);
+		ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( ( n > 0 ) ? n : 1 ));
+		n = ( ids != NULL ) ? om_store_links(rec, len, ids, n) : 0;
 		Kfree(rec);
 		for ( i = 0; i < n; i++ ) {
 			if ( om_store_name(&ids[i], name, sizeof(name)) > 0
 			  && knl_strcmp((char *)name, LOG_NAME) == 0 ) {
 				*p_u = ids[i];
+				Kfree(ids);
 				return E_OK;
 			}
 		}
+		if ( ids != NULL ) Kfree(ids);
 	}
 	er = om_cre_obj(NULL, (CONST UB *)LOG_NAME, OM_BODY_DOC, p_u);
 	if ( er >= E_OK ) {

@@ -720,7 +720,7 @@ LOCAL INT obptr( void )
 	if ( ob_rea_rec(kc, 1, 0, atr, 16, KERNEL_PTR) != E_MACV ) return 635;
 	if ( ob_get_atr(kc, ro, 64, &asz) != E_MACV ) return 636;
 	if ( ob_get_crd(KERNEL_PTR) != E_MACV ) return 637;
-	if ( ob_get_prt(&clk, ro) != E_MACV ) return 638;
+	if ( ob_get_prt(&clk, ro, 64, NULL) != E_MACV ) return 638;
 	if ( ob_map_rec(kc, 0, 0, KERNEL_PTR) != E_MACV ) return 639;
 	c.type = OB_T_CHANNEL;
 	if ( ob_cre_obj(&c, KERNEL_PTR) != E_MACV ) return 640;
@@ -1390,7 +1390,8 @@ LOCAL INT tkatk( void )
 	return 0;
 }
 
-LOCAL T_OBDROP	drop;
+LOCAL UD	drop_b[( OB_DROP_SIZE(4) + 7 ) / 8];	/* a drop of the one link the test lets go, and room */
+#define drop	( *(T_OBDROP *)drop_b )
 
 /* The next drop on the window, read from its record; FALSE none within 10 s */
 LOCAL BOOL next_drop( ID port, ID kw )
@@ -1401,8 +1402,8 @@ LOCAL BOOL next_drop( ID port, ID kw )
 	for ( t = 0; t < 200; t++ ) {
 		while ( ob_rea_rec(port, 0, 0, &ntm, sizeof(ntm), &asz) == E_OK && asz == (SZ)sizeof(ntm) ) {
 			if ( ntm.event != OB_E_DROP ) continue;
-			memset(&drop, 0, sizeof(drop));
-			return (BOOL)( ob_rea_rec(kw, OB_WR_DROP, 0, &drop, sizeof(drop), &asz) == E_OK
+			memset(drop_b, 0, sizeof(drop_b));
+			return (BOOL)( ob_rea_rec(kw, OB_WR_DROP, 0, drop_b, sizeof(drop_b), &asz) == E_OK
 				       && drop.n == 1 );
 		}
 		tk_dly_tsk(50);
@@ -1424,9 +1425,11 @@ LOCAL ER drop_reply( ID kw, UINT answer )
 LOCAL INT dropped( void )
 {
 	CONST char	*j = "{\"rect\":[40,40,240,160],\"attr\":7}";
+	static CONST char rj[] = "{\"name\":\"ktdrop refused\"}";
 	T_OBCRE		c;
 	T_OBNTF		req;
-	T_OBPRT		p;
+	static UD	p_b[( OB_PRT_SIZE(16, 16) + 7 ) / 8];	/* a protection and room for its entries */
+	T_OBPRT		*p = (T_OBPRT *)p_b;
 	TS_UUID		me, win, ch, t;
 	UB		b[8];
 	SZ		asz = 0;
@@ -1464,6 +1467,8 @@ LOCAL INT dropped( void )
 	(void)ob_cls_obj(k);
 	if ( drop_reply(kw, OB_DR_REFUSE) != E_OK ) return 1810;
 	if ( ob_opn_obj(&t, OB_OP_R) != E_OACV ) return 1811;	/* its own rights give nothing */
+	/* the test drops the second only after this: its grant would open it again */
+	if ( ob_set_atr(kw, (CONST UB *)rj, (SZ)sizeof(rj) - 1) != E_OK ) return 1825;
 
 	/* the second: taken, read and written, but not deleted nor its protection changed */
 	if ( !next_drop(port, kw) || !same_uuid(&drop.v[0].target, &t) ) return 1812;
@@ -1473,9 +1478,9 @@ LOCAL INT dropped( void )
 	if ( ob_opn_obj(&t, OB_OP_DELETE) != E_OACV ) return 1815;
 	if ( ob_opn_obj(&t, OB_OP_PROT) != E_OACV ) return 1816;
 	if ( ob_del_obj(&t) != E_OACV ) return 1817;
-	if ( ob_get_prt(&t, &p) != E_OK ) return 1818;
-	p.mode = 0666;
-	if ( ob_set_prt(&t, &p) != E_OACV ) return 1819;
+	if ( ob_get_prt(&t, p, sizeof(p_b), NULL) != E_OK ) return 1818;
+	p->mode = 0666;
+	if ( ob_set_prt(&t, p) != E_OACV ) return 1819;
 	if ( drop_reply(kw, OB_DR_ACCEPT) != E_OK ) return 1820;
 	if ( ob_wri_rec(k, 0, 0, "opened", 6, &asz) != E_OK ) return 1821;	/* the test waits for this */
 	(void)ob_cls_obj(k);
@@ -1741,7 +1746,11 @@ LOCAL INT faults( void )
 		*(volatile UW *)FAULT_VA = 1;			/* データアボート */
 		break;
 	case 1:
+#if defined(__x86_64__)
+		__asm__ volatile ( "ud2" );			/* 未定義命令 */
+#else
 		__asm__ volatile ( "udf #0" );			/* 未定義命令 */
+#endif
 		break;
 	case 2:
 		( (void (*)( void ))( FAULT_VA & ~3UL ) )();	/* 命令アボート */
@@ -1754,14 +1763,22 @@ LOCAL INT faults( void )
 
 LOCAL volatile INT	flt_seen;
 LOCAL volatile UD	flt_far;
+#if defined(__x86_64__)
+LOCAL volatile UD	flt_skip;		/* bytes of the instruction that faults */
+#endif
 
 /* The entry for faults: past the access, after spoiling FP/SIMD registers the kernel puts back */
 LOCAL void flt_take( T_TSFLT *c )
 {
 	flt_seen++;
 	flt_far = c->far;
+#if defined(__x86_64__)
+	c->pc += flt_skip;
+	__asm__ volatile ( "pxor %xmm8, %xmm8\n\tpxor %xmm0, %xmm0" );	/* (the program keeps nothing in them) */
+#else
 	c->pc += 4;
 	__asm__ volatile ( "movi v8.2d, #0\n\tmovi v0.2d, #0" ::: "v0", "v8" );
+#endif
 	(void)ts_flt_ret(c);
 	for ( ;; ) ;
 }
@@ -1771,13 +1788,26 @@ LOCAL INT fltback( void )
 	UD	d8 = 0;
 
 	if ( ts_def_flt(flt_take) != E_OK ) return 3600;
+#if defined(__x86_64__)
+	/* the accesses in instructions of a known length: movl $1, (%rax) and movl (%rax), %ecx */
+	__asm__ volatile ( "movq %0, %%xmm8" :: "r"(0x4045000000000000ULL) );	/* 42.0 */
+	flt_skip = 6;
+	__asm__ volatile ( "movl $1, (%0)" :: "a"(FAULT_VA) : "memory" );
+	__asm__ volatile ( "movq %%xmm8, %0" : "=r"(d8) );
+#else
 	__asm__ volatile ( "fmov d8, %0" :: "r"(0x4045000000000000ULL) : "v8" );	/* 42.0 */
 	*(volatile UW *)FAULT_VA = 1;
 	__asm__ volatile ( "fmov %0, d8" : "=r"(d8) );
+#endif
 	if ( flt_seen != 1 ) return 3601;
 	if ( flt_far != FAULT_VA ) return 3602;
 	if ( d8 != 0x4045000000000000ULL ) return 3603;
+#if defined(__x86_64__)
+	flt_skip = 2;
+	__asm__ volatile ( "movl (%0), %%ecx" :: "a"(FAULT_VA + 0x1000) : "rcx", "memory" );
+#else
 	(void)*(volatile UW *)( FAULT_VA + 0x1000 );
+#endif
 	if ( flt_seen != 2 || flt_far != FAULT_VA + 0x1000 ) return 3604;
 	if ( ts_def_flt(NULL) != E_OK ) return 3605;
 	if ( ts_def_flt((void (*)( T_TSFLT * ))0x10) != E_PAR ) return 3606;
@@ -1934,6 +1964,15 @@ LOCAL INT clockset( void )
  */
 LOCAL ER old_get_random( void *buf, SZ len )
 {
+#if defined(__x86_64__)
+	register UD	rax __asm__("rax") = TSN_TS_GET_RANDOM;
+	register UD	rdi __asm__("rdi") = (UD)buf;
+	register UD	rsi __asm__("rsi") = (UD)len;
+
+	__asm__ volatile("syscall" : "+r"(rax), "+r"(rdi), "+r"(rsi)
+			 : : "rcx", "rdx", "r8", "r9", "r10", "r11", "memory", "cc");
+	return (ER)rax;
+#else
 	register UD	x0 __asm__("x0") = (UD)buf;
 	register UD	x1 __asm__("x1") = (UD)len;
 	register UD	x8 __asm__("x8") = TSN_TS_GET_RANDOM;
@@ -1942,6 +1981,7 @@ LOCAL ER old_get_random( void *buf, SZ len )
 			 : "x2", "x3", "x4", "x5", "x6", "x7", "x9", "x10", "x11", "x12", "x13",
 			   "x14", "x15", "x16", "x17", "x30", "memory", "cc");
 	return (ER)x0;
+#endif
 }
 
 /* A record of an object read into rbuf: its length, or an error */
@@ -2099,6 +2139,15 @@ LOCAL volatile UD	pan_word = PAN_WORD;
 /* A word of the process's read by the kernel: opened 1 once it has made sure of it, 0 straight */
 LOCAL UD pan_probe( CONST volatile void *p, UD opened )
 {
+#if defined(__x86_64__)
+	register UD	rax __asm__("rax") = TSN_TM_PAN_PROBE;
+	register UD	rdi __asm__("rdi") = (UD)p;
+	register UD	rsi __asm__("rsi") = opened;
+
+	__asm__ volatile("syscall" : "+r"(rax), "+r"(rdi), "+r"(rsi)
+			 : : "rcx", "rdx", "r8", "r9", "r10", "r11", "memory", "cc");
+	return rax;
+#else
 	register UD	x0 __asm__("x0") = (UD)p;
 	register UD	x1 __asm__("x1") = opened;
 	register UD	x8 __asm__("x8") = TSN_TM_PAN_PROBE;
@@ -2107,6 +2156,7 @@ LOCAL UD pan_probe( CONST volatile void *p, UD opened )
 			 : "x2", "x3", "x4", "x5", "x6", "x7", "x9", "x10", "x11", "x12", "x13",
 			   "x14", "x15", "x16", "x17", "x30", "memory", "cc");
 	return x0;
+#endif
 }
 
 LOCAL INT pan( void )

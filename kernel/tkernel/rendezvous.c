@@ -67,10 +67,19 @@ LOCAL void cal_chg_pri( TCB *tcb, INT oldpri )
 /*
  * Definition of rendezvous wait specification
  */
-EXPORT CONST WSPEC knl_wspec_cal_tfifo = { TTW_CAL, NULL, NULL };
-EXPORT CONST WSPEC knl_wspec_cal_tpri  = { TTW_CAL, cal_chg_pri, NULL };
+/* The lock of the wait (design 4.3.3) */
+#if KLK_FINE_OBJ
+LOCAL KLOCK *por_wlock( TCB *tcb )
+{
+	(void)tcb;
+	return &knl_por_klk;
+}
+#endif
 
-EXPORT CONST WSPEC knl_wspec_rdv       = { TTW_RDV, NULL, NULL };
+EXPORT CONST WSPEC knl_wspec_cal_tfifo = { TTW_CAL, NULL, NULL WSPEC_LOCK(por_wlock) };
+EXPORT CONST WSPEC knl_wspec_cal_tpri  = { TTW_CAL, cal_chg_pri, NULL WSPEC_LOCK(por_wlock) };
+
+EXPORT CONST WSPEC knl_wspec_rdv       = { TTW_RDV, NULL, NULL WSPEC_LOCK(por_wlock) };
 
 
 /*
@@ -96,6 +105,7 @@ SYSCALL ID tk_cre_por( CONST T_CPOR *pk_cpor )
 	CHECK_INTSK();
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_POR();
 	/* Get control block from FreeQue */
 	porcb = (PORCB*)QueRemoveNext(&knl_free_porcb);
 	if ( porcb == NULL ) {
@@ -119,6 +129,7 @@ SYSCALL ID tk_cre_por( CONST T_CPOR *pk_cpor )
 #endif
 		ercd = porid;
 	}
+	KLK_UNPOR();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -139,6 +150,7 @@ SYSCALL ER tk_del_por( ID porid )
 	porcb = get_porcb(porid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_POR();
 	if ( porcb->porid == 0 ) {
 		ercd = E_NOEXS;
 	} else {
@@ -150,6 +162,7 @@ SYSCALL ER tk_del_por( ID porid )
 		QueInsert(&porcb->call_queue, &knl_free_porcb);
 		porcb->porid = 0;
 	}
+	KLK_UNPOR();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -177,6 +190,7 @@ SYSCALL INT tk_cal_por( ID porid, UINT calptn, void *msg, INT cmsgsz, TMO tmout 
 	porcb = get_porcb(porid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_POR();
 	if ( porcb->porid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -232,13 +246,14 @@ SYSCALL INT tk_cal_por( ID porid, UINT calptn, void *msg, INT cmsgsz, TMO tmout 
 	knl_gcb_make_wait((GCB*)porcb, tmout);
 
     error_exit:
+	KLK_UNPOR();
 	END_CRITICAL_SECTION;
 
 	return ( ercd < E_OK )? ercd: rmsgsz;
 }
 
 
-LOCAL CONST WSPEC knl_wspec_acp       = { TTW_ACP, NULL, NULL };
+LOCAL CONST WSPEC knl_wspec_acp       = { TTW_ACP, NULL, NULL WSPEC_LOCK(por_wlock) };
 
 /*
  * Accept rendezvous
@@ -260,6 +275,7 @@ SYSCALL INT tk_acp_por( ID porid, UINT acpptn, RNO *p_rdvno, void *msg, TMO tmou
 	porcb = get_porcb(porid);
     
 	BEGIN_CRITICAL_SECTION;
+	KLK_POR();
 	if ( porcb->porid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -312,6 +328,7 @@ SYSCALL INT tk_acp_por( ID porid, UINT acpptn, RNO *p_rdvno, void *msg, TMO tmou
 	}
 
     error_exit:
+	KLK_UNPOR();
 	END_CRITICAL_SECTION;
 
 	return ( ercd < E_OK )? ercd: cmsgsz;
@@ -339,6 +356,7 @@ SYSCALL ER tk_fwd_por( ID porid, UINT calptn, RNO rdvno, CONST void *msg, INT cm
 	caltcb = get_tcb(knl_get_tskid_rdvno(rdvno));
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_POR();
 	if ( porcb->porid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -414,6 +432,7 @@ SYSCALL ER tk_fwd_por( ID porid, UINT calptn, RNO rdvno, CONST void *msg, INT cm
 	}
 
     error_exit:
+	KLK_UNPOR();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -435,6 +454,7 @@ SYSCALL ER tk_rpl_rdv( RNO rdvno, CONST void *msg, INT rmsgsz )
 	caltcb = get_tcb(knl_get_tskid_rdvno(rdvno));
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_POR();
 	if ( (caltcb->state & TS_WAIT) == 0
 	  || caltcb->wspec != &knl_wspec_rdv
 	  || rdvno != caltcb->winfo.rdv.rdvno ) {
@@ -456,6 +476,7 @@ SYSCALL ER tk_rpl_rdv( RNO rdvno, CONST void *msg, INT rmsgsz )
 	knl_wait_release_ok(caltcb);
 
     error_exit:
+	KLK_UNPOR();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -475,6 +496,7 @@ SYSCALL ER tk_ref_por( ID porid, T_RPOR *pk_rpor )
 	porcb = get_porcb(porid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_POR();
 	if ( porcb->porid == 0 ) {
 		ercd = E_NOEXS;
 	} else {
@@ -484,6 +506,7 @@ SYSCALL ER tk_ref_por( ID porid, T_RPOR *pk_rpor )
 		pk_rpor->maxcmsz = porcb->maxcmsz;
 		pk_rpor->maxrmsz = porcb->maxrmsz;
 	}
+	KLK_UNPOR();
 	END_CRITICAL_SECTION;
 
 	return ercd;

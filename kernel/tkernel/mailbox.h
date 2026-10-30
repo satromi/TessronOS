@@ -40,6 +40,7 @@ typedef struct mailbox_control_block {
 #if USE_OBJECT_NAME
 	UB	name[OBJECT_NAME_LENGTH];	/* name */
 #endif
+	KLOCK	klk;		/* its lock (klk.h, design 4.3.3) */
 } MBXCB;
 
 IMPORT MBXCB knl_mbxcb_table[];	/* Mailbox control block */

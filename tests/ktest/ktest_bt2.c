@@ -71,15 +71,36 @@ LOCAL BOOL is_object( CONST TS_UUID *u, UINT type )
 	return (BOOL)( ob_ref_obj(u, &r) >= E_OK && r.type == type && listed(type, u) );
 }
 
-/* every process in the process table */
+/*
+ * every process in the process table; when none is left running (init
+ * ends at once where it only says hello), one of the test's own that
+ * waits until it is ended (SVCPROG.ELF's SP_BGWAIT)
+ */
 LOCAL void test_processes( void )
 {
-	ID	pids[16];
+	ID	pids[16], own = 0;
 	TS_UUID	u;
 	INT	n, i;
 
 	n = knl_prc_list(pids, 16);
-	KT_ASSERT(n >= 1);			/* init at least */
+	if ( n < 1 ) {
+		T_CPRC	cprc;
+		UW	arg[8];
+
+		knl_memset(arg, 0, sizeof(arg));
+		arg[0] = 33;			/* SP_BGWAIT, as tests/uprog/svcprog.c */
+		cprc.pri    = KT_PRI_HIGH;
+		cprc.prcatr = 0;
+		cprc.stksz  = 0;
+		cprc.arg    = arg;
+		cprc.argsz  = sizeof(arg);
+		own = ts_cre_prc("/boot/SVCPROG.ELF", &cprc);
+		for ( i = 0; own > 0 && i < 50 && knl_own_list(TK_OWN_SEM, own, NULL, 0) < 1; i++ ) {
+			tk_dly_tsk(100);
+		}
+		n = knl_prc_list(pids, 16);
+	}
+	KT_ASSERT(n >= 1);
 	for ( i = 0; i < n && i < 16; i++ ) {
 		TS_UUID	nil;
 
@@ -92,6 +113,13 @@ LOCAL void test_processes( void )
 			continue;
 		}
 		KT_ASSERT(is_object(&u, OB_T_PROCESS));
+	}
+	if ( own > 0 ) {
+		T_PSTS	psts;
+
+		if ( ts_ter_prc(own, -1) >= E_OK ) {
+			(void)ts_wai_prc(own, &psts, 5000);
+		}
 	}
 }
 
@@ -189,7 +217,7 @@ LOCAL void test_windows( void )
 	TS_UUID	u;
 	INT	wid, n = 0;
 
-	for ( wid = 1; wid <= WM_MAX_WIN; wid++ ) {
+	for ( wid = 1; wid <= knl_wm_nwin(); wid++ ) {
 		if ( wm_ref(wid, &w) < E_OK ) {
 			continue;
 		}
@@ -261,7 +289,8 @@ LOCAL void test_system_boxes( void )
 		SYSDEF_WALL_BOX, SYSDEF_LEARN_BOX, SYSDEF_DICT_BOX
 	};
 	TS_UUID	ids[16], u;
-	T_OBPRT	prt;
+	static UD	prt_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*prt = (T_OBPRT *)prt_b;
 	INT	n, i, k;
 
 	n = links_of(SYSDEF_SYSTEM_BOX, ids, 16);
@@ -270,8 +299,8 @@ LOCAL void test_system_boxes( void )
 		KT_ASSERT_ER(ts_str_to_uuid(boxes[i], &u), E_OK);
 		for ( k = 0; k < n && ts_uuid_cmp(&ids[k], &u) != 0; k++ ) ;
 		KT_ASSERT(k < n);
-		KT_ASSERT_ER(ob_get_prt(&u, &prt), E_OK);
-		KT_ASSERT_EQ(ts_uuid_cmp(&prt.owner, &ob_user_system), 0);
+		KT_ASSERT_ER(ob_get_prt(&u, prt, KT_PRT_SIZE, NULL), E_OK);
+		KT_ASSERT_EQ(ts_uuid_cmp(&prt->owner, &ob_user_system), 0);
 	}
 }
 
@@ -325,7 +354,8 @@ LOCAL void test_programs( void )
 LOCAL void test_dictionary( void )
 {
 	TS_UUID	ids[8], u;
-	T_OBPRT	prt;
+	static UD	prt_b[KT_PRT_UD];	/* a protection with room for its entries */
+	T_OBPRT		*prt = (T_OBPRT *)prt_b;
 	T_OBREC	rec[4];
 	INT	n, k, cnt = 0;
 	ID	key;
@@ -335,8 +365,8 @@ LOCAL void test_dictionary( void )
 	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_DICT_MOZC, &u), E_OK);
 	for ( k = 0; k < n && ts_uuid_cmp(&ids[k], &u) != 0; k++ ) ;
 	KT_ASSERT(k < n);
-	KT_ASSERT_ER(ob_get_prt(&u, &prt), E_OK);
-	KT_ASSERT_EQ(ts_uuid_cmp(&prt.owner, &ob_user_system), 0);
+	KT_ASSERT_ER(ob_get_prt(&u, prt, KT_PRT_SIZE, NULL), E_OK);
+	KT_ASSERT_EQ(ts_uuid_cmp(&prt->owner, &ob_user_system), 0);
 #if USE_MOZC
 	key = ob_opn_obj(&u, OB_OP_R);
 	KT_ASSERT(key > 0);

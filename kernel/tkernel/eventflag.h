@@ -32,6 +32,7 @@ typedef struct eventflag_control_block {
 #if USE_OBJECT_NAME
 	UB	name[OBJECT_NAME_LENGTH];	/* name */
 #endif
+	KLOCK	klk;		/* its lock (klk.h, design 4.3.3) */
 } FLGCB;
 
 IMPORT FLGCB knl_flgcb_table[];	/* Event flag control block */

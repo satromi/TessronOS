@@ -145,7 +145,6 @@ typedef struct {
 	VBLK_SLOTAREA	slot[VBLK_SLOTS];
 } VBLK_SHARED;
 
-#define VBLK_MAX_DEV		4
 
 typedef struct {
 	UBINT		base;			/* virtio-mmio registers */
@@ -165,8 +164,51 @@ typedef struct {
 	UB		devnm[8];
 } VBLK_DEV;
 
-LOCAL VBLK_DEV	vblk_dev[VBLK_MAX_DEV];
-LOCAL INT	vblk_ndev = 0;
+/*
+ * The disks, one for each transport that has one: each made when it is
+ * found and kept, the table of them twice as large when it fills. An
+ * old table is not given back, so that the interrupt handler, which
+ * reads the table without a lock, never reads memory given back.
+ */
+LOCAL VBLK_DEV	**vblk_dev = NULL;
+LOCAL INT	vblk_ndev = 0, vblk_cap = 0;
+
+/* The table's next entry, made; NULL when memory is short */
+LOCAL VBLK_DEV *vblk_new( void )
+{
+	VBLK_DEV	**t;
+	INT		n;
+
+	if ( vblk_ndev >= vblk_cap ) {
+		n = ( vblk_cap > 0 ) ? vblk_cap * 2 : 4;
+		t = (VBLK_DEV **)Kcalloc((SZ)n, sizeof(VBLK_DEV *));
+		if ( t == NULL ) return NULL;
+		if ( vblk_dev != NULL ) knl_memcpy(t, vblk_dev, sizeof(VBLK_DEV *) * (SZ)vblk_cap);
+		__atomic_store_n(&vblk_dev, t, __ATOMIC_RELEASE);
+		vblk_cap = n;
+	}
+	if ( vblk_dev[vblk_ndev] == NULL ) {
+		vblk_dev[vblk_ndev] = (VBLK_DEV *)Kcalloc(1, sizeof(VBLK_DEV));
+	}
+	return vblk_dev[vblk_ndev];
+}
+
+/* The name of the n-th disk: the stem and "a" ... "z", then "aa" ... */
+LOCAL void vblk_name( UB *nm, INT n )
+{
+	INT	k = 0;
+	CONST char *stem = "vblk";
+
+	while ( stem[k] != '\0' ) { nm[k] = (UB)stem[k]; k++; }
+	if ( n < 26 ) {
+		nm[k++] = (UB)( 'a' + n );
+	} else {
+		nm[k++] = (UB)( 'a' + ( n / 26 - 1 ) % 26 );
+		nm[k++] = (UB)( 'a' + n % 26 );
+	}
+	nm[k] = '\0';
+}
+
 
 #define VBLK_FLG_DONE		0x0001
 
@@ -218,8 +260,11 @@ LOCAL void vblk_inthdr( UINT intno, UW iar )
 	UINT	done;
 	INT	i;
 
-	for ( i = 0; i < vblk_ndev; i++ ) {
-		VBLK_DEV *d = &vblk_dev[i];
+	VBLK_DEV	**t = __atomic_load_n(&vblk_dev, __ATOMIC_ACQUIRE);
+	INT		n = __atomic_load_n(&vblk_ndev, __ATOMIC_ACQUIRE);
+
+	for ( i = 0; i < n; i++ ) {
+		VBLK_DEV *d = t[i];
 
 		if ( d->intno != intno ) continue;
 		vblk_out(d, VIRTIO_MMIO_INTERRUPT_ACK, vblk_in(d, VIRTIO_MMIO_INTERRUPT_STATUS));
@@ -532,7 +577,9 @@ LOCAL ER vblk_attr( VBLK_DEV *d, INT unitno, T_DEVREQ *req )
 	info->protect   = d->readonly;
 	info->removable = FALSE;
 	info->blocksize = BLK_SECTOR_SIZE;
-	info->blockcont = (W)nsect;
+	/* the count in a W stops at 2^31 - 1 sectors (1TB); the whole count is in blockcont_d */
+	info->blockcont = ( nsect > 0x7FFFFFFFULL ) ? 0x7FFFFFFF : (W)nsect;
+	info->blockcont_d = (D)nsect;
 	req->asize = sizeof(DiskInfo);
 
 	return E_OK;
@@ -729,8 +776,20 @@ EXPORT INT knl_vblk_init( void )
 	INT	slot, i;
 	ER	er;
 
-	for ( slot = 0; slot < VIRTIO_MMIO_NUM && vblk_ndev < VBLK_MAX_DEV; slot++ ) {
-		VBLK_DEV *d = &vblk_dev[vblk_ndev];
+	for ( slot = 0; slot < VIRTIO_MMIO_NUM; slot++ ) {
+		VBLK_DEV *d = vblk_new();
+
+		if ( d == NULL ) {
+			tm_printf((UB *)"vblk: no memory for one more disk\n");
+			break;
+		}
+		if ( d->mtxid > 0 ) {
+			/* an entry a transport without a disk left: its objects made again */
+			tk_del_mtx(d->mtxid);
+			tk_del_flg(d->flgid);
+			tk_del_sem(d->semid);
+			knl_memset(d, 0, sizeof(*d));
+		}
 
 		d->base  = VIRTIO_MMIO_BASE + (UBINT)slot * VIRTIO_MMIO_STRIDE;
 		d->intno = VIRTIO_MMIO_INTNO(slot);
@@ -762,25 +821,25 @@ EXPORT INT knl_vblk_init( void )
 		/* Counted before the interrupt is enabled: the handler looks the
 		   device up in this array, and the partition scan below already
 		   needs completions. */
-		vblk_ndev++;
+		__atomic_add_fetch(&vblk_ndev, 1, __ATOMIC_RELEASE);
 
 		knl_define_inthdr((INT)d->intno, TA_HLNG, (FP)vblk_inthdr);
 		EnableInt(d->intno, INTPRI_DEVICE);
 
 		knl_read_parttbl(vblk_readfn, d, d->capacity, &d->tbl);
 
-		d->devnm[0] = 'v'; d->devnm[1] = 'b'; d->devnm[2] = 'l';
-		d->devnm[3] = 'k'; d->devnm[4] = (UB)('a' + (d - vblk_dev)); d->devnm[5] = '\0';
+		vblk_name(d->devnm, vblk_ndev - 1);
+		knl_int_owner(d->intno, d->devnm);	/* the processor its object asks for (design 4.5) */
 
 		er = vblk_define(d);
 		if ( er < E_OK ) {
 			DisableInt(d->intno);
-			vblk_ndev--;
+			__atomic_sub_fetch(&vblk_ndev, 1, __ATOMIC_RELEASE);
 			return er;
 		}
 
-		tm_printf((UB*)"TessronOS: %s %d sectors (%d MB)%s, %d partitions (%s)\n",
-			d->devnm, (UW)d->capacity, (UW)(d->capacity >> 11),
+		tm_printf((UB*)"TessronOS: %s %ld sectors (%d MB)%s, %d partitions (%s)\n",
+			d->devnm, (D)d->capacity, (UW)(d->capacity >> 11),
 			d->readonly ? ", read only" : "",
 			d->tbl.n, d->tbl.gpt ? "GPT" : "MBR");
 		for ( i = 0; i < d->tbl.n; i++ ) {

@@ -18,7 +18,7 @@
       "id": "tessronos-sndmix",
       "kind": "accessory",
       "name": "音量ミキサー",
-      "version": "R1.110",
+      "version": "R1.200",
       "menu": true,
       "builtin": false,
       "base": []

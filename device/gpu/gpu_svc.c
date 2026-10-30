@@ -54,6 +54,8 @@
 #include <ts/svc.h>
 #include <ts/proc.h>
 #include <ts/gpuapp.h>
+#include <tm/tmonitor.h>
+#include "sysman/pfalloc.h"
 #include "gpudev.h"
 
 #define GP_BO_FIRST	64		/* entries of a new context */
@@ -66,6 +68,9 @@ typedef struct {
 	T_GPUBO	*bo;			/* NULL: a free entry */
 	BOOL	mapped;			/* the process has it mapped */
 	UW	va;			/* where it is in the context's space; 0 not there */
+#ifdef __x86_64__
+	UD	va64;			/* where the process placed it (gp_bnd_bo); 0 nowhere */
+#endif
 } GPENT;
 
 typedef struct {
@@ -225,6 +230,9 @@ LOCAL INT ent_add( INT ctx, ID pid, T_GPUBO *bo, UW va )
 				c->ent[i].bo = bo;
 				c->ent[i].mapped = FALSE;
 				c->ent[i].va = va;
+#ifdef __x86_64__
+				c->ent[i].va64 = 0;
+#endif
 				ISpinUnlock(&gp_lock, &imask);
 				free_if(grown);
 				free_if(old);
@@ -313,6 +321,9 @@ LOCAL ER ctx_close( INT ctx, ID pid )
 		if ( ent[i].bo == NULL ) continue;
 		if ( ent[i].mapped ) unmap_from(pid, ent[i].bo);
 		knl_gpu_as_unbind(as, ent[i].bo, ent[i].va);
+#ifdef __x86_64__
+		knl_gpu_as_unbind_at(as, ent[i].bo, ent[i].va64);
+#endif
 		knl_gpu_bo_put(ent[i].bo);
 	}
 	for ( i = 0; i < nn; i++ ) knl_gpu_bo_put(names[i]);
@@ -435,6 +446,9 @@ LOCAL ER svc_gp_del_bo( INT ctx, UINT handle )
 	T_GPUAS	*as;
 	BOOL	mapped;
 	UW	va;
+#ifdef __x86_64__
+	UD	va64;
+#endif
 	INT	i, nn;
 	UINT	imask;
 
@@ -447,6 +461,10 @@ LOCAL ER svc_gp_del_bo( INT ctx, UINT handle )
 	bo = e->bo;
 	mapped = e->mapped;
 	va = e->va;
+#ifdef __x86_64__
+	va64 = e->va64;
+	e->va64 = 0;
+#endif
 	as = gp_ctx[ctx - 1].as;
 	if ( as != NULL ) knl_gpu_as_get(as);
 	e->bo = NULL;
@@ -458,6 +476,9 @@ LOCAL ER svc_gp_del_bo( INT ctx, UINT handle )
 	if ( mapped ) unmap_from(pid, bo);
 	/* a job of the context's still queued keeps the pages; the address it reached is gone */
 	knl_gpu_as_unbind(as, bo, va);
+#ifdef __x86_64__
+	knl_gpu_as_unbind_at(as, bo, va64);
+#endif
 	knl_gpu_as_put(as);
 	knl_gpu_bo_put(bo);
 	for ( i = 0; i < nn; i++ ) knl_gpu_bo_put(names[i]);
@@ -733,6 +754,126 @@ LOCAL ER svc_gp_imp_bo( INT ctx, INT name, T_GPBO *out )
 	return er;
 }
 
+#ifdef __x86_64__
+#define VA48_MASK	( ( 1ULL << 48 ) - 1 )
+#define EVICT_TELL	8		/* places taken over told on the console */
+
+LOCAL UINT	gp_evicted;
+
+/*
+ * Another BO of the context whose place overlaps 'va' for 'npages': taken
+ * out of its place (its entry no longer placed), with a reference the
+ * caller gives back, its number and where it was; NULL when there is none.
+ * Under the lock.
+ */
+LOCAL T_GPUBO *overlapped( GPCTX *c, UD va, UD npages, UINT *p_handle, UD *p_va )
+{
+	UD	lo = va & VA48_MASK, hi = lo + ( npages << PAGE_SHIFT );
+	INT	i;
+
+	for ( i = 0; c != NULL && i < c->nent; i++ ) {
+		GPENT	*x = &c->ent[i];
+		UD	xlo, xhi;
+
+		if ( x->bo == NULL || x->va64 == 0 ) continue;
+		xlo = x->va64 & VA48_MASK;
+		xhi = xlo + ( knl_gpu_bo_npages(x->bo) << PAGE_SHIFT );
+		if ( xlo >= hi || xhi <= lo ) continue;
+		*p_handle = (UINT)( i + 1 );
+		*p_va = x->va64;
+		x->va64 = 0;
+		knl_gpu_bo_get(x->bo);
+		return x->bo;
+	}
+	return NULL;
+}
+
+/*
+ * A BO of the context placed at an address of the process's choosing in
+ * the context's space (a user side driver that places its buffers
+ * itself), and taken from where it was. Placing it where it is already
+ * changes nothing. Two tasks of the process placing the same number at
+ * once: the last one's place holds, and the other's is taken out again.
+ *
+ * A BO of the context whose place the new one overlaps is first taken
+ * out of the space whole, and is no longer placed: a driver that keeps
+ * the BOs it no longer uses for later (Mesa's iris) may give the address
+ * of one of them to another BO before it gives the first a new one.
+ * Taking the first from its old place afterwards would otherwise clear
+ * the entries of the BO now there, which then reads the scratch page of
+ * zeroes and writes nowhere, while the process takes it for placed.
+ * Nothing of a BO that is not placed stays in the space either, so its
+ * pages, once it is deleted, are not reached through stale entries.
+ */
+LOCAL ER svc_gp_bnd_bo( INT ctx, UINT handle, UD va )
+{
+	ID	pid = ts_get_pid();
+	GPENT	*e;
+	T_GPUBO	*bo;
+	T_GPUAS	*as;
+	UD	old;
+	UINT	imask;
+	ER	er;
+
+	if ( va == 0 ) return E_PAR;
+	ISpinLock(&gp_lock, &imask);
+	e = ent_of(ctx_of(ctx, pid), handle);
+	if ( e == NULL || gp_ctx[ctx - 1].as == NULL ) {
+		ISpinUnlock(&gp_lock, &imask);
+		return ( e == NULL ) ? E_ID : E_NOSPT;
+	}
+	if ( e->va64 == va ) {
+		ISpinUnlock(&gp_lock, &imask);
+		return E_OK;
+	}
+	bo = e->bo;
+	as = gp_ctx[ctx - 1].as;
+	old = e->va64;
+	e->va64 = 0;
+	knl_gpu_bo_get(bo);
+	knl_gpu_as_get(as);
+	ISpinUnlock(&gp_lock, &imask);
+
+	knl_gpu_as_unbind_at(as, bo, old);
+	for ( ;; ) {
+		T_GPUBO	*xbo;
+		UINT	xh = 0;
+		UD	xva = 0;
+		UINT	nth = 0;
+
+		ISpinLock(&gp_lock, &imask);
+		xbo = overlapped(ctx_of(ctx, pid), va, knl_gpu_bo_npages(bo), &xh, &xva);
+		if ( xbo != NULL ) nth = ++gp_evicted;
+		ISpinUnlock(&gp_lock, &imask);
+		if ( xbo == NULL ) break;
+		knl_gpu_as_unbind_at(as, xbo, xva);
+		if ( nth <= EVICT_TELL ) {
+			tm_printf((UB *)"gpu: number %u placed at %lx (%ld pages) over number %u at %lx (%ld pages), "
+				  "which is taken out of the space (%u so far)\n", handle, (unsigned long)va,
+				  (long)knl_gpu_bo_npages(bo), xh, (unsigned long)xva, (long)knl_gpu_bo_npages(xbo),
+				  nth);
+		}
+		knl_gpu_bo_put(xbo);
+	}
+	er = knl_gpu_as_bind_at(as, bo, va);
+	if ( er >= E_OK ) {
+		ISpinLock(&gp_lock, &imask);
+		e = ent_of(ctx_of(ctx, pid), handle);
+		if ( e != NULL && e->bo == bo && e->va64 == 0 ) {
+			e->va64 = va;
+			va = 0;
+		}
+		ISpinUnlock(&gp_lock, &imask);
+		if ( va != 0 ) {
+			knl_gpu_as_unbind_at(as, bo, va);	/* deleted or placed again meanwhile */
+		}
+	}
+	knl_gpu_as_put(as);
+	knl_gpu_bo_put(bo);
+	return er;
+}
+#endif
+
 #define F(fn)	((FP)(fn))
 
 EXPORT const FP knl_gp_svc_tbl[TSN_GP_MAX + 1] = {
@@ -748,6 +889,9 @@ EXPORT const FP knl_gp_svc_tbl[TSN_GP_MAX + 1] = {
 	[TSN_NUMBER(TSN_GP_SHR_BO)]	= F(svc_gp_shr_bo),
 	[TSN_NUMBER(TSN_GP_IMP_BO)]	= F(svc_gp_imp_bo),
 	[TSN_NUMBER(TSN_GP_REF_BO)]	= F(svc_gp_ref_bo),
+#ifdef __x86_64__
+	[TSN_NUMBER(TSN_GP_BND_BO)]	= F(svc_gp_bnd_bo),
+#endif
 };
 
 /* What a process held of the GPU, let go of as it ends (proc.c) */

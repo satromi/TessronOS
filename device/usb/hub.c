@@ -45,6 +45,7 @@
 
 #define FEAT_PORT_RESET		4
 #define FEAT_PORT_POWER		8
+#define FEAT_BH_PORT_RESET	28
 #define FEAT_C_PORT_CONNECTION	16
 #define FEAT_C_PORT_ENABLE	17
 #define FEAT_C_PORT_SUSPEND	18
@@ -111,8 +112,10 @@ EXPORT ER knl_hub_attach( USBDEV *hub )
 		return ( er < E_OK ) ? er : E_IO;
 	}
 	hub->hub_ports = d[2];
-	if ( hub->hub_ports > 15 ) {
-		hub->hub_ports = 15;
+	if ( hub->hub_ports > 31 ) {
+		/* the change map is read as 32 bits (bit 0 the hub itself): a hub of more ports is said */
+		USB_LOG("usb: hub of %d ports: those past 31 are not looked at\n", hub->hub_ports);
+		hub->hub_ports = 31;
 	}
 	pwr_delay = d[5] * 2;
 	hub->role = USB_ROLE_HUB;
@@ -194,12 +197,62 @@ EXPORT void knl_hub_clear_changes( USBDEV *hub, INT port, UW st )
 	}
 }
 
+/*
+ * A port of a SuperSpeed hub warm reset (BH_PORT_RESET): a link in
+ * SS.Inactive or the compliance mode leaves only so. E_NOEXS when
+ * nothing is connected after it.
+ */
+EXPORT ER knl_hub_port_warm_reset( USBDEV *hub, INT port )
+{
+	UW	st = 0;
+	INT	i;
+	ER	er;
+
+	if ( !ss_hub(hub) ) {
+		return E_NOSPT;
+	}
+	er = knl_usb_control(hub, HUB_REQ_OUT, USB_REQ_SET_FEATURE,
+			     FEAT_BH_PORT_RESET, (UH)port, NULL, 0, NULL);
+	if ( er < E_OK ) {
+		return er;
+	}
+	for ( i = 0; i < 25; i++ ) {
+		knl_usb_wait(20);
+		er = knl_hub_port_status(hub, port, &st);
+		if ( er < E_OK ) {
+			return er;
+		}
+		if ( (st & ( HUB_PC_BH_RESET | HUB_PC_RESET )) != 0 ) {
+			break;
+		}
+	}
+	knl_hub_clear_changes(hub, port, st & ( HUB_PC_BH_RESET | HUB_PC_RESET ));
+	USB_LOG("usb: %d-%d route %05x hub port %d warm reset: wPortStatus %04x\n", hub->hc->index,
+		hub->root_port, hub->route, port, st & 0xffff);
+	return ( (st & HUB_PS_CONNECTION) != 0 ) ? E_OK : E_NOEXS;
+}
+
+/* A port's power switched on, after an over-current turned it off */
+EXPORT void knl_hub_port_power( USBDEV *hub, INT port )
+{
+	knl_usb_control(hub, HUB_REQ_OUT, USB_REQ_SET_FEATURE,
+			FEAT_PORT_POWER, (UH)port, NULL, 0, NULL);
+}
+
 EXPORT ER knl_hub_port_reset( USBDEV *hub, INT port, INT *speed )
 {
 	UW	st = 0;
 	INT	i;
 	ER	er;
 
+	if ( ss_hub(hub) && knl_hub_port_status(hub, port, &st) >= E_OK
+	  && ( HUB_PS_SS_LINK(st) == HUB_SS_LINK_INACTIVE
+	    || HUB_PS_SS_LINK(st) == HUB_SS_LINK_COMPLIANCE ) ) {
+		er = knl_hub_port_warm_reset(hub, port);
+		if ( er < E_OK ) {
+			return er;
+		}
+	}
 	er = knl_usb_control(hub, HUB_REQ_OUT, USB_REQ_SET_FEATURE,
 			     FEAT_PORT_RESET, (UH)port, NULL, 0, NULL);
 	if ( er < E_OK ) {

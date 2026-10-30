@@ -33,6 +33,11 @@
  *	clock follows the summer time of the places that keep it, and the
  *	programs with a time zone database of their own (the browser) the
  *	whole of the place's rules.
+ *
+ *	On a PC the RTC is kept in the local time, as Windows keeps it, or
+ *	in UTC (内蔵時計, dt_setrtc): set at once and kept in the calendar,
+ *	as the zone is. The choice is shown only where there is one (x64),
+ *	and not to be worked when the firmware gives the clock a zone.
  */
 
 #include <string.h>
@@ -43,6 +48,7 @@
 #include <ts/dt.h>
 #include <ts/sysdef.h>
 #include <ts/json.h>
+#include <ts/obatr.h>
 #include <ts/snd.h>
 
 #define TICK_MS		20
@@ -68,6 +74,9 @@
 #define P_CLK_HZ	13
 #define P_CLK_MS	14
 #define P_CLICK		15
+#define P_RTC_LABEL	16
+#define P_RTC		17		/* 内蔵時計: 1 the local time, 2 UTC */
+#define P_RTC_NOTE	18
 
 #define PN_MAIN		1
 #define PN_WARN		10
@@ -109,6 +118,12 @@ LOCAL CONST LKPART lkparts[] = {
 	{ LK_PD_ABS,	K_SEL },
 	{ LK_PD_MIDDBL,	K_SW },
 	{ LK_PD_WHEEL,	K_SW },
+	{ LK_TCH_ON,	K_SW },
+	{ LK_TCH_DBL,	K_VOL, NULL, 0, 5, 10, 1, "mm" },
+	{ LK_TCH_HIT,	K_VOL, NULL, 0, 5, 10, 1, "mm" },
+	{ LK_TCH_HOLD,	K_VOL, NULL, 0, 50, 1000, 2, "秒" },
+	{ LK_TCH_SCR,	K_SW },
+	{ LK_TCH_STEP,	K_VOL, NULL, 0, 5, 10, 1, "mm" },
 	{ LK_KEY_ON,	K_VOL, NULL, 0, 50, 1000, 2, "秒" },
 	{ LK_KEY_OFF,	K_VOL, NULL, 0, 50, 1000, 2, "秒" },
 	{ LK_KEY_SIM,	K_VOL, NULL, 0, 50, 1000, 2, "秒" },
@@ -199,6 +214,7 @@ LOCAL char	was_zone_name[DT_ZONE_MAX];
 LOCAL char	was_ntp[80];
 LOCAL BOOL	time_set;		/* the time was typed in */
 LOCAL INT	kana_now;		/* the input method in use when the window opened */
+LOCAL INT	was_rtc = -1;		/* how the RTC was kept (DT_RTC_*), -1 when there is no choice */
 
 /* ---------------------------------------------------------------- values in and out */
 
@@ -281,12 +297,30 @@ LOCAL void lk_show( CONST LKPART *l )
 	}
 }
 
+/*
+ * The finger's lengths are worked only with タッチ操作補正 on: off, a
+ * finger reaches the handles as the pointer does and a double tap is
+ * not brought together, so they are shown but not to be worked. The
+ * hold stays: it is the only second button a finger has. How far two
+ * fingers move for a notch is worked only with 二本指スクロール on.
+ */
+LOCAL void touch_parts( void )
+{
+	BOOL	off = ( ui_value(&ui, P_LOOK(LK_TCH_ON)) == 0 );
+
+	ui_off(&ui, P_LOOK(LK_TCH_DBL), off);
+	ui_off(&ui, P_LOOK(LK_TCH_HIT), off);
+	/* how far two fingers go for a notch: worked only while two fingers scroll */
+	ui_off(&ui, P_LOOK(LK_TCH_STEP), ui_value(&ui, P_LOOK(LK_TCH_SCR)) == 0);
+}
+
 /* The parts from what is in use now */
 LOCAL void from_system( void )
 {
 	INT	i;
 
 	for ( i = 0; i < NLK; i++ ) lk_show(&lkparts[i]);
+	touch_parts();
 }
 
 /* A part's value into the look table, used from now on */
@@ -318,6 +352,12 @@ LOCAL void to_system( CONST LKPART *l )
 		char	s[80];
 
 		snprintf(s, sizeof(s), "userenv: look %d = %d refused (%d)\n", (INT)l->look, v, (INT)er);
+		tm_putstring((CONST UB *)s);
+	} else if ( l->look >= LK_TCH_ON && l->look <= LK_TCH_STEP ) {
+		char	s[48];
+
+		/* a finger's settings said, for the tests that work the sheet */
+		snprintf(s, sizeof(s), "userenv: touch %d = %d\n", (INT)l->look, v);
 		tm_putstring((CONST UB *)s);
 	}
 }
@@ -433,9 +473,51 @@ LOCAL BOOL time_put( void )
 	return (BOOL)( er >= E_OK );
 }
 
+/* ---------------------------------------------------------------- the RTC */
+
+/* How the RTC is kept, into its selector; the selector put away where there is no choice */
+LOCAL void rtc_show( void )
+{
+#ifdef __x86_64__
+	INT	m = 0;
+
+	if ( dt_getrtc(&m) >= E_OK ) {
+		ui_set_value(&ui, P_RTC, ( ( m & ~DT_RTC_FIRMWARE ) == DT_RTC_LOCAL ) ? 1 : 2);
+		ui_off(&ui, P_RTC, ( m & DT_RTC_FIRMWARE ) != 0);
+		was_rtc = ( m & DT_RTC_FIRMWARE ) ? -1 : m;
+		return;
+	}
+#endif
+	was_rtc = -1;
+	ui_show(&ui, P_RTC_LABEL, FALSE);
+	ui_show(&ui, P_RTC, FALSE);
+	ui_show(&ui, P_RTC_NOTE, FALSE);
+}
+
+/* The RTC kept as the selector says, at once */
+LOCAL void rtc_put( INT mode )
+{
+#ifdef __x86_64__
+	char	line[64];
+	ER	er = dt_setrtc(mode);
+
+	snprintf(line, sizeof(line), "userenv: rtc %s (%d)\n", ( mode == DT_RTC_LOCAL ) ? "local" : "utc", (INT)er);
+	tm_putstring((CONST UB *)line);
+	if ( er == E_OACV ) warn("内蔵時計の設定を変える権限がありません。");
+	if ( er < E_OK ) {
+		INT	was = was_rtc;
+
+		rtc_show();			/* the selector back to how it is kept */
+		was_rtc = was;
+	}
+#else
+	(void)mode;
+#endif
+}
+
 /* ---------------------------------------------------------------- the settings objects */
 
-LOCAL ER rec_read( CONST char *uuid, UB *buf, INT max, INT *p_len )
+LOCAL ER rec_read( CONST char *role, CONST char *uuid, UB *buf, INT max, INT *p_len )
 {
 	TS_UUID	u;
 	ID	key;
@@ -443,7 +525,7 @@ LOCAL ER rec_read( CONST char *uuid, UB *buf, INT max, INT *p_len )
 	ER	er;
 
 	*p_len = 0;
-	if ( ui_uuid(uuid, &u) < E_OK ) return E_SYS;
+	if ( ob_fnd_sys(role, uuid, &u) < E_OK ) return E_SYS;
 	key = ob_opn_obj(&u, OB_OP_R);
 	if ( key < E_OK ) return (ER)key;
 	er = ob_rea_rec(key, 1, 0, buf, max, &asz);
@@ -452,18 +534,19 @@ LOCAL ER rec_read( CONST char *uuid, UB *buf, INT max, INT *p_len )
 	return er;
 }
 
-LOCAL ER rec_write( CONST char *uuid, CONST UB *buf, INT len )
+LOCAL ER rec_write( CONST char *role, CONST char *uuid, CONST UB *buf, INT len )
 {
 	TS_UUID	u;
 	ID	key;
 	SZ	asz = 0;
 	ER	er;
 
-	if ( ui_uuid(uuid, &u) < E_OK ) return E_SYS;
-	key = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE);
+	if ( ob_fnd_sys(role, uuid, &u) < E_OK ) return E_SYS;
+	key = ui_conf_open(&u, OB_OP_R | OB_OP_WRITE);
 	if ( key < E_OK ) return (ER)key;
-	er = ob_wri_rec(key, 1, 0, buf, len, &asz);
-	if ( er >= E_OK ) er = ob_trn_rec(key, 1, (UD)len);
+	/* replaced in one change: a cut in the power leaves the old record or the new one */
+	er = ob_rpl_rec(key, 1, buf, (SZ)len);
+	(void)asz;
 	ob_cls_obj(key);
 	return er;
 }
@@ -479,7 +562,7 @@ LOCAL ER user_write( void )
 	char	v[16], v80[80];
 	ER	er;
 
-	(void)rec_read(SYSDEF_CONF_USER, text, sizeof(text), &len);
+	(void)rec_read(SYSROLE_CONF_USER, SYSDEF_CONF_USER, text, sizeof(text), &len);
 	(void)ui_text(&ui, P_NAME, v80, sizeof(v80));
 	len = cf_put(text, len, sizeof(text), CF_USER_NAME, 0, v80);
 	for ( i = 0; i < cf_user_nitem && len >= 0; i++ ) {
@@ -495,7 +578,7 @@ LOCAL ER user_write( void )
 		len = cf_put(text, len, sizeof(text), it->key, 0, v);
 	}
 	if ( len < 0 ) return E_LIMIT;
-	er = rec_write(SYSDEF_CONF_USER, text, len);
+	er = rec_write(SYSROLE_CONF_USER, SYSDEF_CONF_USER, text, len);
 	return er;
 }
 
@@ -506,20 +589,20 @@ LOCAL ER ntp_write( CONST char *server )
 	INT	len = 0;
 	ER	er;
 
-	er = rec_read(SYSDEF_CONF_NET, text, sizeof(text), &len);
+	er = rec_read(SYSROLE_CONF_NET, SYSDEF_CONF_NET, text, sizeof(text), &len);
 	if ( er < E_OK ) return er;
 	cf_net_read(text, len, &n);
 	strncpy(n.ntp, server, sizeof(n.ntp) - 1);
 	n.ntp[sizeof(n.ntp) - 1] = 0;
 	len = cf_net_write(text, len, sizeof(text), &n);
 	if ( len < 0 ) return E_LIMIT;
-	er = rec_write(SYSDEF_CONF_NET, text, len);	/* the system takes it as it sees it written */
+	er = rec_write(SYSROLE_CONF_NET, SYSDEF_CONF_NET, text, len);	/* the system takes it as it sees it written */
 	if ( er == E_OACV ) {
 		/* the network's settings are the administrator's */
 		ER	adm = ts_admin_ask("時刻サーバの設定", &ui.win);
 
 		if ( adm >= E_OK ) {
-			er = rec_write(SYSDEF_CONF_NET, text, len);
+			er = rec_write(SYSROLE_CONF_NET, SYSDEF_CONF_NET, text, len);
 			(void)ob_end_adm();
 		}
 		if ( er == E_OACV && adm != E_ABORT ) warn("時刻サーバを設定する権限がありません。");
@@ -537,7 +620,7 @@ LOCAL void read_start( void )
 	was_name[0] = 0;
 	kana_now = (INT)wm_look(LK_KANA);
 	next = ( kana_now != 0 ) ? 1 : 2;
-	if ( rec_read(SYSDEF_CONF_USER, text, sizeof(text), &len) >= E_OK ) {
+	if ( rec_read(SYSROLE_CONF_USER, SYSDEF_CONF_USER, text, sizeof(text), &len) >= E_OK ) {
 		if ( cf_get(text, len, CF_USER_NAME, 0, v, sizeof(v)) ) strncpy(was_name, v, sizeof(was_name) - 1);
 		/* the method for the next start, which may not be the one in use */
 		if ( cf_get(text, len, "KANA_INPUT", 0, v, sizeof(v)) ) next = ( cf_num(v, 0) != 0 ) ? 1 : 2;
@@ -550,13 +633,14 @@ LOCAL void read_start( void )
 	z = zone_index(was_zone_name, z);
 	ui_set_fields(&ui, P_ZONE, &z, 1);
 	was_ntp[0] = 0;
-	if ( rec_read(SYSDEF_CONF_NET, text, sizeof(text), &len) >= E_OK ) {
+	if ( rec_read(SYSROLE_CONF_NET, SYSDEF_CONF_NET, text, sizeof(text), &len) >= E_OK ) {
 		cf_net_read(text, len, &n);
 		strncpy(was_ntp, n.ntp, sizeof(was_ntp) - 1);
 	}
 	ui_set_value(&ui, P_NTP_ON, was_ntp[0] != 0);
 	ui_set_text(&ui, P_NTP, ( was_ntp[0] != 0 ) ? was_ntp : "pool.ntp.org");
 	ui_off(&ui, P_NTP, was_ntp[0] == 0);
+	rtc_show();
 	from_system();
 	tones_in();
 	time_show();
@@ -572,7 +656,7 @@ LOCAL void read_start( void )
  */
 #define NSND	3
 LOCAL CONST char *CONST snd_obj[NSND] = { SYSDEF_SND_BUZZER, SYSDEF_SND_PRESS, SYSDEF_SND_RELEASE };
-LOCAL UB	snd_meta[NSND][OB_ATR_MAX];
+LOCAL UB	*snd_meta[NSND];		/* each whole, in memory of its own */
 LOCAL SZ	snd_mlen[NSND];
 LOCAL BOOL	snd_changed;
 
@@ -589,14 +673,18 @@ LOCAL void tone_read( INT i, INT *p_hz, INT *p_ms )
 	TS_UUID	u;
 	ID	key;
 	T_JSON	tone;
+	INT	n;
 
 	*p_hz = 2000;
 	*p_ms = 100;
 	snd_mlen[i] = 0;
+	free(snd_meta[i]);
+	snd_meta[i] = NULL;
 	if ( ui_uuid(snd_obj[i], &u) < E_OK ) return;
 	key = ob_opn_obj(&u, OB_OP_ATRRD);
 	if ( key < E_OK ) return;
-	if ( ob_get_atr(key, snd_meta[i], OB_ATR_MAX - 1, &snd_mlen[i]) < E_OK ) snd_mlen[i] = 0;
+	n = ob_atr_read(key, 0, &snd_meta[i]);
+	snd_mlen[i] = ( n > 0 ) ? n : 0;
 	ob_cls_obj(key);
 	if ( snd_mlen[i] > 0 && tone_span(snd_meta[i], (INT)snd_mlen[i], &tone) ) {
 		*p_hz = (INT)js_get_num(&tone, "hz", 2000);
@@ -610,7 +698,7 @@ LOCAL ER tone_write( INT i, INT hz, INT ms )
 	TS_UUID	u;
 	ID	key;
 	T_JSON	tone;
-	static UB out[OB_ATR_MAX];	/* kept off the stack */
+	UB	*out;
 	char	t[48];
 	INT	a, tl, n;
 	ER	er;
@@ -619,15 +707,19 @@ LOCAL ER tone_write( INT i, INT hz, INT ms )
 	a = (INT)( tone.s - snd_meta[i] );
 	tl = snprintf(t, sizeof(t), "{\"hz\":%d,\"ms\":%d}", hz, ms);
 	n = (INT)snd_mlen[i] - tone.len + tl;
-	if ( n >= OB_ATR_MAX ) return E_LIMIT;
+	out = malloc((size_t)n);
+	if ( out == NULL ) return E_NOMEM;
 	memcpy(out, snd_meta[i], a);
 	memcpy(out + a, t, tl);
 	memcpy(out + a + tl, snd_meta[i] + a + tone.len, snd_mlen[i] - a - tone.len);
-	if ( ui_uuid(snd_obj[i], &u) < E_OK ) return E_SYS;
-	key = ob_opn_obj(&u, OB_OP_ATRRD | OB_OP_ATRWR);
-	if ( key < E_OK ) return (ER)key;
+	key = ( ui_uuid(snd_obj[i], &u) < E_OK ) ? E_SYS : ob_opn_obj(&u, OB_OP_ATRRD | OB_OP_ATRWR);
+	if ( key < E_OK ) {
+		free(out);
+		return (ER)key;
+	}
 	er = ob_set_atr(key, out, n);
 	ob_cls_obj(key);
+	free(out);
 	if ( er >= E_OK ) snd_changed = TRUE;
 	return er;
 }
@@ -755,6 +847,11 @@ LOCAL BOOL changed_any( BOOL *p_name )
 	  || zones[zone].min != was_zone || strcmp(zones[zone].tz, was_zone_name) != 0 || kana_next != kana_now ) {
 		return TRUE;
 	}
+#ifdef __x86_64__
+	if ( was_rtc >= 0 && ( ( ui_value(&ui, P_RTC) == 1 ) ? DT_RTC_LOCAL : DT_RTC_UTC ) != was_rtc ) {
+		return TRUE;
+	}
+#endif
 	for ( i = 0; i < cf_user_nitem && i < 64; i++ ) {
 		if ( cf_user_items[i].look == LK_KANA ) continue;
 		if ( wm_look(cf_user_items[i].look) != was_look[i] ) return TRUE;
@@ -772,6 +869,11 @@ LOCAL void undo( void )
 		if ( wm_look(cf_user_items[i].look) != was_look[i] ) (void)wm_set_look(cf_user_items[i].look, was_look[i]);
 	}
 	(void)dt_setsyszone(was_zone_name, was_zone);
+#ifdef __x86_64__
+	if ( was_rtc >= 0 && ( ( ui_value(&ui, P_RTC) == 1 ) ? DT_RTC_LOCAL : DT_RTC_UTC ) != was_rtc ) {
+		(void)dt_setrtc(was_rtc);
+	}
+#endif
 	tone_undo();
 }
 
@@ -837,12 +939,13 @@ LOCAL void standard( void )
 	for ( i = 0; i < NLK; i++ ) {
 		CONST LKPART	*l = &lkparts[i];
 		CONST CF_ITEM	*it = cf_user_look(l->look);
-		INT		t = ( i < 11 ) ? 2 : ( i < 19 ) ? 3 : ( i < 29 ) ? 4 : ( i < 32 ) ? 5 : 6;
+		INT		t = ( i < 17 ) ? 2 : ( i < 25 ) ? 3 : ( i < 35 ) ? 4 : ( i < 38 ) ? 5 : 6;
 
 		if ( t != tag || it == NULL ) continue;
 		(void)wm_set_look(l->look, (UW)it->dflt);
 		lk_show(l);
 	}
+	touch_parts();
 }
 
 /* ---------------------------------------------------------------- the menu */
@@ -883,6 +986,7 @@ LOCAL void changed( INT id )
 
 	if ( l != NULL ) {
 		to_system(l);
+		if ( l->look == LK_TCH_ON || l->look == LK_TCH_SCR ) touch_parts();
 		return;
 	}
 	switch ( id ) {
@@ -909,6 +1013,9 @@ LOCAL void changed( INT id )
 	case P_NTP_ON:
 		ui_off(&ui, P_NTP, ui_value(&ui, P_NTP_ON) == 0);
 		break;
+	case P_RTC:
+		rtc_put(( ui_value(&ui, P_RTC) == 1 ) ? 1 : 0);
+		break;
 	default:
 		break;
 	}
@@ -917,8 +1024,8 @@ LOCAL void changed( INT id )
 int main( void )
 {
 	T_OBNTM	m;
-	SZ	asz = 0;
-	INT	id, ev, n = 0;
+	INT	id, ev;
+	UD	shown_s = 0;
 
 	ui_icon(SYSDEF_PROG_USERENV);
 	if ( ui_open(&ui, SYSDEF_BOX_USERENV, PN_MAIN, 180, 90) < E_OK ) {
@@ -929,7 +1036,9 @@ int main( void )
 	tm_putstring((CONST UB *)"userenv: ready\n");
 
 	while ( !closing ) {
-		while ( !closing && ob_rea_rec(ui.port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+		/* the clock on 〈使用者〉 goes on at each second; nothing else is waited for but the notices */
+		for ( TMO tmo = ( ui_sheet(&ui) == TAG_ME ) ? ui_left(( ui_now() / 1000 + 1 ) * 1000) : TMO_FEVR;
+		      !closing && ui_wait(&ui, &m, tmo) >= E_OK; tmo = TMO_POL ) {
 			ev = ui_event(&ui, &m, &id);
 			switch ( ev ) {
 			case UI_EV_CLOSE:
@@ -960,11 +1069,9 @@ int main( void )
 				break;
 			}
 		}
-		if ( !closing ) {
-			if ( ++n % 50 == 0 && ui_sheet(&ui) == TAG_ME ) {
-				time_show();			/* the clock goes on */
-			}
-			(void)tk_dly_tsk(TICK_MS);
+		if ( !closing && ui_sheet(&ui) == TAG_ME && ui_now() / 1000 != shown_s ) {
+			shown_s = ui_now() / 1000;
+			time_show();			/* the clock goes on */
 		}
 	}
 	ui_close(&ui);

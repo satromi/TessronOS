@@ -44,9 +44,8 @@
 #include "obj.h"
 
 IMPORT INT knl_obusb_path( CONST T_USBDEV *d, UB *out, INT max );	/* obusb.c: "0-4.3" */
+IMPORT BOOL knl_hid_ext_name( UINT id, UB *name, INT max );	/* hid.c: the PC's i8042, HID over I2C, a touch screen's controller */
 
-#define IN_MAX		16		/* interfaces shown at once */
-#define IN_TEXT_MAX	1024
 #define IN_EV_MAX	64		/* events copied in one call */
 
 typedef struct {
@@ -58,7 +57,13 @@ typedef struct {
 	UB		port[24];		/* "0-4.3" */
 } INDEV;
 
-LOCAL INDEV	in_tbl[IN_MAX];
+/*
+ * Every keyboard's and pointer's object, as many as there are: each
+ * entry allocated once and kept, as its device object's context; the
+ * table grows by a copy, the one before kept for those reading it
+ */
+LOCAL INDEV	**in_tbl = NULL;
+LOCAL INT	in_cap = 0;
 LOCAL ID	in_mtx = 0;
 LOCAL UINT	in_nkbd = 0, in_nptr = 0;	/* as last told on 入力 */
 
@@ -158,7 +163,12 @@ LOCAL INT state_text( INDEV *ctx, UB *t, INT max )
 	if ( ctx == NULL ) {
 		return all_state(t, 0, max);
 	}
-	return entry_of(ctx, &d) ? dev_state(&d, t, 0, max) : -1;
+	return entry_of(ctx, &d) ? dev_state(&d, t, 0, max) : E_NOEXS;
+}
+
+LOCAL INT state_make( void *ctx, UB *t, INT max )
+{
+	return state_text((INDEV *)ctx, t, max);
 }
 
 /* ---------------------------------------------------------------- the records */
@@ -179,8 +189,8 @@ LOCAL INT in_text( void *ctx, UB *t, INT n, INT max )
 	if ( ctx == NULL ) {
 		n = knl_oj_put(t, n, max, " Record 3: how the input is taken (T_HIDATTR).</p>"
 				  "<p>The keyboards and pointers that feed it:</p>");
-		for ( i = 0; i < IN_MAX; i++ ) {
-			if ( entry_of(&in_tbl[i], &d) ) {
+		for ( i = 0; i < in_cap; i++ ) {
+			if ( entry_of(in_tbl[i], &d) ) {
 				n = knl_obdev_link(t, n, max, &d.uuid, d.name);
 			}
 		}
@@ -241,10 +251,6 @@ LOCAL UINT src_of( void *ctx )
 
 LOCAL ER in_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *p_asize )
 {
-	UB	*t;
-	INT	len;
-	SZ	n = 0;
-
 	if ( off < 0 || size < 0 ) {
 		return E_PAR;
 	}
@@ -279,22 +285,7 @@ LOCAL ER in_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *p
 	if ( recno != OB_IN_STATE ) {
 		return E_NOEXS;
 	}
-	t = (UB *)Kmalloc(IN_TEXT_MAX);
-	if ( t == NULL ) {
-		return E_NOMEM;
-	}
-	len = state_text((INDEV *)ctx, t, IN_TEXT_MAX);
-	if ( len >= 0 && off < len ) {
-		n = (SZ)( len - off );
-		if ( n > size ) n = size;
-		knl_memcpy(buf, t + off, (INT)n);
-	}
-	Kfree(t);
-	if ( len < 0 ) {
-		return E_NOEXS;
-	}
-	if ( p_asize != NULL ) *p_asize = n;
-	return E_OK;
+	return knl_oj_make_rea(state_make, ctx, off, buf, size, p_asize);
 }
 
 LOCAL ER in_wri( void *ctx, UD *pos, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize )
@@ -340,22 +331,13 @@ LOCAL ER in_wri( void *ctx, UD *pos, INT recno, D off, CONST void *buf, SZ size,
 
 LOCAL UD in_size( void *ctx, INT recno )
 {
-	UB	*t;
-	INT	len;
-
 	if ( recno == OB_IN_ATTR ) {
 		return sizeof(T_HIDATTR);
 	}
 	if ( recno != OB_IN_STATE ) {
 		return 0;			/* the events are a stream */
 	}
-	t = (UB *)Kmalloc(IN_TEXT_MAX);
-	if ( t == NULL ) {
-		return 0;
-	}
-	len = state_text((INDEV *)ctx, t, IN_TEXT_MAX);
-	Kfree(t);
-	return ( len > 0 ) ? (UD)len : 0;
+	return knl_oj_make_len(state_make, ctx);
 }
 
 LOCAL void in_opened( void *ctx, UD *pos )
@@ -389,9 +371,9 @@ EXPORT ER knl_obinput_uuid( UINT hid, TS_UUID *p_uuid )
 		return E_NOEXS;
 	}
 	LOCK();
-	for ( i = 0; i < IN_MAX; i++ ) {
-		if ( in_tbl[i].used && in_tbl[i].info.id == hid ) {
-			*p_uuid = in_tbl[i].uuid;
+	for ( i = 0; i < in_cap; i++ ) {
+		if ( in_tbl[i]->used && in_tbl[i]->info.id == hid ) {
+			*p_uuid = in_tbl[i]->uuid;
 			er = E_OK;
 			break;
 		}
@@ -424,36 +406,71 @@ LOCAL void name_of( CONST T_HIDINFO *h, CONST T_USBDEV *d, UB *name, UB *port )
  * those shown: the new ones added, the gone ones taken away, and 入力
  * told when how many there are changed
  */
+/* The table made larger, a new entry for each new place: the first new place, or -1 */
+LOCAL INT in_grow( void )
+{
+	INT	cap = ( in_cap > 0 ) ? in_cap * 2 : 8, i, was = in_cap;
+	INDEV	**t = (INDEV **)Kcalloc((SZ)cap, sizeof(INDEV *));
+
+	if ( t == NULL ) {
+		return -1;
+	}
+	for ( i = 0; i < was; i++ ) t[i] = in_tbl[i];
+	for ( ; i < cap; i++ ) {
+		t[i] = (INDEV *)Kcalloc(1, sizeof(INDEV));
+		if ( t[i] == NULL ) break;
+	}
+	if ( i == was ) {
+		Kfree(t);
+		return -1;
+	}
+	LOCK();
+	in_tbl = t;
+	in_cap = i;
+	UNLOCK();
+	return was;
+}
+
 EXPORT void knl_obinput_sync( void )
 {
-	T_HIDINFO	*h;
+	T_HIDINFO	*h = NULL;
 	T_USBDEV	d;
 	T_HIDSTAT	st;
-	UB		gone[IN_MAX][OB_DV_NAME];
-	INT		n, i, k, ng = 0;
+	UB		(*gone)[OB_DV_NAME];
+	INT		n, i, k, ng = 0, room;
 	BOOL		changed = FALSE;
 
 	if ( in_mtx <= 0 ) {
 		return;
 	}
-	h = (T_HIDINFO *)Kmalloc(sizeof(T_HIDINFO) * IN_MAX);
-	if ( h == NULL ) {
+	/* every interface there is: asked how many, and again while more came than there was room for */
+	n = knl_hid_list(NULL, 0);
+	do {
+		room = n;
+		if ( h != NULL ) Kfree(h);
+		h = (T_HIDINFO *)Kmalloc(sizeof(T_HIDINFO) * (SZ)( ( room > 0 ) ? room : 1 ));
+		if ( h == NULL ) {
+			return;
+		}
+		n = knl_hid_list(h, room);
+	} while ( n > room );
+	gone = Kmalloc(sizeof(*gone) * (SZ)( ( in_cap > 0 ) ? in_cap : 1 ));
+	if ( gone == NULL ) {
+		Kfree(h);
 		return;
 	}
-	n = knl_hid_list(h, IN_MAX);
-	if ( n > IN_MAX ) n = IN_MAX;
 
 	/* the gone ones */
 	LOCK();
-	for ( i = 0; i < IN_MAX; i++ ) {
-		if ( !in_tbl[i].used ) continue;
-		for ( k = 0; k < n && h[k].id != in_tbl[i].info.id; k++ ) ;
+	for ( i = 0; i < in_cap; i++ ) {
+		if ( !in_tbl[i]->used ) continue;
+		for ( k = 0; k < n && h[k].id != in_tbl[i]->info.id; k++ ) ;
 		if ( k < n ) {
-			in_tbl[i].info.reports = h[k].reports;
+			in_tbl[i]->info.reports = h[k].reports;
 			continue;
 		}
-		knl_memcpy(gone[ng++], in_tbl[i].name, OB_DV_NAME);
-		in_tbl[i].used = FALSE;
+		knl_memcpy(gone[ng++], in_tbl[i]->name, OB_DV_NAME);
+		in_tbl[i]->used = FALSE;
 	}
 	UNLOCK();
 	for ( i = 0; i < ng; i++ ) {
@@ -468,36 +485,42 @@ EXPORT void knl_obinput_sync( void )
 		ER	er;
 
 		LOCK();
-		for ( i = 0; i < IN_MAX; i++ ) {
-			if ( in_tbl[i].used && in_tbl[i].info.id == h[k].id ) break;
-			if ( !in_tbl[i].used && slot < 0 ) slot = i;
+		for ( i = 0; i < in_cap; i++ ) {
+			if ( in_tbl[i]->used && in_tbl[i]->info.id == h[k].id ) break;
+			if ( !in_tbl[i]->used && slot < 0 ) slot = i;
 		}
 		UNLOCK();
-		if ( i < IN_MAX || slot < 0 ) continue;		/* there already, or no room */
+		if ( i < in_cap ) continue;		/* there already */
+		if ( slot < 0 && ( slot = in_grow() ) < 0 ) {
+			continue;			/* no memory: looked at again at the next change */
+		}
 		knl_memset(&e, 0, sizeof(e));
 		e.info = h[k];
 		if ( ts_usb_ref_dev(h[k].usbdev, &d) >= E_OK ) {
 			e.vendor = d.vendor;
 			e.product = d.product;
 			name_of(&h[k], &d, e.name, e.port);
+		} else if ( knl_hid_ext_name(h[k].id, e.name, OB_DV_NAME) ) {
+			;				/* named by its driver: "ps2kbd", "ps2aux", "gt911" */
 		} else {
 			(void)knl_oj_put(e.name, 0, OB_DV_NAME, "hid?");
 		}
 		e.used = TRUE;
 		LOCK();
-		in_tbl[slot] = e;
+		*in_tbl[slot] = e;
 		UNLOCK();
-		er = knl_obdev_add(e.name, NULL, h[k].keyboard ? &kbd_ops : &ptr_ops, &in_tbl[slot], &e.uuid);
+		er = knl_obdev_add(e.name, NULL, h[k].keyboard ? &kbd_ops : &ptr_ops, in_tbl[slot], &e.uuid);
 		LOCK();
 		if ( er >= E_OK ) {
-			in_tbl[slot].uuid = e.uuid;
+			in_tbl[slot]->uuid = e.uuid;
 		} else {
-			in_tbl[slot].used = FALSE;
+			in_tbl[slot]->used = FALSE;
 		}
 		UNLOCK();
 		changed = TRUE;
 	}
 	Kfree(h);
+	Kfree(gone);
 
 	if ( changed && ts_hid_stat(&st) >= E_OK
 	  && ( st.keyboards != in_nkbd || st.pointers != in_nptr ) ) {

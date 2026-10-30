@@ -4,15 +4,18 @@
 #
 #   x86_64-elf          : binutils 2.45.1 + GCC 15.2.0(C, C++) + newlib 4.5.0 + GDB 16.3
 #   x86_64-w64-mingw32  : binutils 2.45.1 + GCC 15.2.0(C) + mingw-w64 v13.0.0(UEFI のローダ用)
+#   nasm                : NASM 3.01(ブラウザの x64 の dav1d、libvpx、libjpeg-turbo、FFmpeg のアセンブリ用)
 #
 # 置き場は aarch64 の xPack と同じく $PREFIX(既定 ~/.local/xPacks)の下に
 # バージョン付きのディレクトリを作り、バージョンなしの名前のリンクを張る。
 #   $PREFIX/tessron-x86_64-elf-gcc-15.2.0-1         -> リンク x86_64-elf-gcc
 #   $PREFIX/tessron-x86_64-w64-mingw32-gcc-15.2.0-1 -> リンク x86_64-w64-mingw32-gcc
+#   $PREFIX/tessron-nasm-3.01-1                     -> リンク nasm
 # root 権限は不要。ホストには gcc、g++、make、bison、flex、m4、curl、gpg、xz、bzip2 が要る。
 #
 #   tools/x64/build_toolchain.sh             # 全部(fetch hostlibs elf gdb mingw test clean)
 #   tools/x64/build_toolchain.sh elf test    # 指定した段だけ
+#   tools/x64/build_toolchain.sh nasm        # NASM だけ(全部の段には入れない)
 #
 # 環境変数
 #   TS_XPACK_PREFIX   置き場(既定 ~/.local/xPacks)
@@ -28,6 +31,13 @@ NEWLIB_VER=4.5.0.20241231
 GDB_VER=16.3
 MINGW_VER=13.0.0
 NCURSES_VER=6.5
+# NASM は署名もハッシュの表も公開していない。リリースの git.id が Chromium の DEPS が固定する
+# NASM(third_party/nasm の README.chromium の 3.01 / 19fd1bb4…)と同じであり、tarball の
+# ソースがそのチェックアウトの同じファイルと一致する(違うのは Chromium の手直しと生成した表
+# だけ)ことを確かめた上で、tarball の SHA-256 をここに固定する
+NASM_VER=3.01
+NASM_GITID=19fd1bb434f2fed19b0eb82b1b42c5608b601134
+NASM_SHA256=b7324cbe86e767b65f26f467ed8b12ad80e124e3ccb89076855c98e43a9eddd4
 PKG_REV=1
 
 PREFIX="${TS_XPACK_PREFIX:-$HOME/.local/xPacks}"
@@ -48,6 +58,8 @@ GNU=https://ftp.gnu.org/gnu
 GCC_INFRA=https://gcc.gnu.org/pub/gcc/infrastructure
 NEWLIB_URL=https://sourceware.org/pub/newlib
 MINGW_URL=https://downloads.sourceforge.net/project/mingw-w64/mingw-w64/mingw-w64-release
+NASM_URL=https://www.nasm.us/pub/nasm/releasebuilds
+NASM_DIR="$PREFIX/tessron-nasm-${NASM_VER}-${PKG_REV}"
 
 PKGVERSION="TessronOS x86_64 GCC ${GCC_VER}-${PKG_REV}"
 # x86_64-elf の対象のライブラリ(libgcc、newlib、libstdc++)を作るときの旗
@@ -378,6 +390,32 @@ write_info() {
 	return 0
 }
 
+# ---------------------------------------------------------------- nasm
+# 取得と照合(固定した SHA-256 と git.id)、新しい空のディレクトリへの展開、構築
+step_nasm() {
+	check_space
+	mkdir -p "$CACHE" "$LOG"
+	fetch "$NASM_URL/$NASM_VER/nasm-$NASM_VER.tar.xz"
+	fetch "$NASM_URL/$NASM_VER/git.id" "nasm-$NASM_VER.git.id"
+	say "verify nasm sha256 and git id"
+	echo "$NASM_SHA256  $CACHE/nasm-$NASM_VER.tar.xz" | sha256sum -c - || die "nasm sha256 mismatch"
+	[ "$(tr -d ' \n' < "$CACHE/nasm-$NASM_VER.git.id")" = "$NASM_GITID" ] || die "nasm git id mismatch"
+	unpack "nasm-$NASM_VER.tar.xz" nasm
+	fresh_build nasm
+	(cd "$BLD/nasm" && "$SRC/nasm/configure" --prefix="$NASM_DIR" > "$LOG/nasm-configure.log" 2>&1 \
+		&& make -j"$JOBS" > "$LOG/nasm-make.log" 2>&1 && make install > "$LOG/nasm-install.log" 2>&1) \
+		|| die "nasm build failed (see $LOG)"
+	strip --strip-unneeded "$NASM_DIR/bin/nasm" "$NASM_DIR/bin/ndisasm" 2>/dev/null || true
+	{
+		echo "TessronOS nasm, built $(date '+%Y-%m-%d %H:%M') on $(uname -sr)"
+		echo "host gcc: $(gcc --version | head -1)"
+		echo "nasm: $NASM_VER (git $NASM_GITID, sha256 $NASM_SHA256)"
+	} > "$NASM_DIR/BUILD-INFO.txt"
+	ln -sfn "$NASM_DIR" "$PREFIX/nasm"
+	"$PREFIX/nasm/bin/nasm" -v | sed 's/^/   /'
+	rm -rf "${SRC:?}/nasm" "${BLD:?}/nasm"
+}
+
 # ---------------------------------------------------------------- test
 step_test() {
 	local t; t=$(mktemp -d)
@@ -496,7 +534,7 @@ steps=("$@")
 mkdir -p "$WORK" "$LOG"
 for s in "${steps[@]}"; do
 	case "$s" in
-		fetch|hostlibs|elf|gdb|mingw|test|clean) timed "$s" "step_$s" ;;
+		fetch|hostlibs|elf|gdb|mingw|nasm|test|clean) timed "$s" "step_$s" ;;
 		*) die "unknown step: $s" ;;
 	esac
 done

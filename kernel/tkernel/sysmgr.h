@@ -48,18 +48,29 @@ IMPORT FastMLock	knl_DevMgrLock;
  */
 typedef struct DeviceControlBlock {
 	QUEUE	q;
+	INT	no;			/* Its number in the table, from 1 */
 	UB	devnm[L_DEVNM+1];	/* Device name */
 	T_DDEV	ddev;			/* Registration information */
 	QUEUE	openq;			/* Open device management queue */
 } DevCB;
 
-IMPORT	DevCB		knl_DevCBtbl[];	/* Device registration information
-					   table */
+/*
+ * The device registrations, the open devices and the requests are in
+ * tables that grow: each entry is allocated once and never freed, so it
+ * stays where it is, and keeps its number (no). The table of each kind
+ * is an array of pointers to its entries, by number; a larger array is
+ * made whole before it is put in place and the one before is kept.
+ * The first entries are the static ones, as many as the configuration
+ * says (CNF_MAX_REGDEV, CNF_MAX_OPNDEV, CNF_MAX_REQDEV); there is no
+ * bound beyond what an ID holds.
+ */
+IMPORT	DevCB		**knl_DevCBdir;	/* Device registrations, by number - 1 */
+IMPORT	INT		knl_DevCBn;	/* how many there are room for */
 IMPORT	QUEUE		knl_UsedDevCB;	/* In-use queue */
 
-#define DID(devcb)		( ((devcb) - knl_DevCBtbl + 1) << 8 )
+#define DID(devcb)		( (devcb)->no << 8 )
 #define DEVID(devcb, unitno)	( DID(devcb) + (unitno) )
-#define DEVCB(devid)		( knl_DevCBtbl + (((devid) >> 8) - 1) )
+#define DEVCB(devid)		( knl_DevCBdir[((devid) >> 8) - 1] )
 #define UNITNO(devid)		( (devid) & 0xff )
 
 /*
@@ -67,6 +78,7 @@ IMPORT	QUEUE		knl_UsedDevCB;	/* In-use queue */
  */
 typedef struct OpenControlBlock {
 	QUEUE		q;
+	INT		no;		/* Its number, the descriptor */
 	QUEUE		resq;		/* For connection from resource
 					   management */
 	ID		resid;		/* Section resource ID */
@@ -92,6 +104,7 @@ typedef struct OpenControlBlock {
  */
 typedef struct RequestControlBlock {
 	QUEUE		q;
+	INT		no;		/* Its number, the request ID */
 	OpnCB		*opncb;		/* Open device */
 	ID		tskid;		/* Processing task */
 	T_DEVREQ	req;		/* Request packet */
@@ -122,7 +135,6 @@ typedef ER  (*EXCFN)( T_DEVREQ *devreq, TMO tmout, void *exinf );
 #if IMPORT_DEFINE
 /* device.c */
 IMPORT	FastMLock	knl_DevMgrLock;
-IMPORT	DevCB		knl_DevCBtbl[];
 IMPORT	QUEUE		knl_UsedDevCB;
 IMPORT	DevCB*		knl_searchDevCB( CONST UB *devnm );
 IMPORT	INT			knl_phydevnm( UB *pdevnm, CONST UB *ldevnm );

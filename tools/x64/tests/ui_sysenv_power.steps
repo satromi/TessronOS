@@ -1,0 +1,27 @@
+# システム環境設定's 〈電源管理〉 on the x64 PC (design 3.10.6, 11.6), for tools/x64/ui_run64.py
+# with UI_EXTRA="-acpitable file=acpi_battery.aml" (tools/x64/tests/acpi_battery.asl):
+# the AC adapter and the battery are read from their device objects, and read again as
+# they tell of a change. The test table plugs the adapter in or out each fifth time the
+# battery's _BST is read and notifies it (0x80), as a machine's firmware does; the kernel
+# reads the battery every 30 seconds, so the adapter changes every two minutes or so.
+# The window is at 160,80: the tab 電源管理 at 282,151. Ctrl+E closes.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+expect sysenv: power
+wait 800
+win システム環境設定
+click 282 151
+wait 500
+shot sp_first
+# the adapter out: told by its object, shown without the page being touched
+logmark
+expectsincein 330 sysenv: power バッテリ /
+wait 500
+shot sp_battery
+# and in again
+logmark
+expectsincein 330 sysenv: power ＡＣ電源 /
+wait 500
+shot sp_ac
+key 08 01
+expect sysenv: closed

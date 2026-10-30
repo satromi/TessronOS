@@ -11,9 +11,11 @@
  *	cam.h
  *	The camera device "cama" (design 10.16).
  *
- *	Units: "cama" and "cama0" are camera 0, "cama1" .. "cama3" cameras
- *	1-3, in the order the cameras came; a camera keeps its unit while it
- *	stays. A program picks a mode (a format and a frame size) from the
+ *	Units: "cama" and "cama0" are camera 0, "cama1" on the cameras after
+ *	it, in the order the cameras came; a camera keeps its unit while it
+ *	stays. The device has 4 units at first and as many more as cameras
+ *	come, up to CAM_UNITS_MAX: a unit's number is the low 8 bits of a
+ *	device ID. A program picks a mode (a format and a frame size) from the
  *	list DN_CAMMODES gives, writes it to DN_CAMMODE, starts the stream
  *	with CAM_START on DN_CAMSTREAM, and then reads data number 0
  *	(DN_CAMFRAME) for frames. A read of a frame never waits: it gives the
@@ -40,7 +42,7 @@ extern "C" {
 #endif
 
 #define CAM_DEVNM	"cama"
-#define CAM_UNITS	4
+#define CAM_UNITS_MAX	255		/* units at most: the device ID's 8 bits of unit (subunits 0-254) */
 #define TDK_CAMERA	0x00A0U		/* the kind the camera device registers as */
 
 /* Formats */

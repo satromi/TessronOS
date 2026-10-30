@@ -1144,20 +1144,47 @@ typedef struct {
 
 static DEVOPEN	devs[DEV_MAX];
 
+/*
+ * Every object of a kind, however many: asked a page at a time, each
+ * page from the last object of the one before. How many, the list in
+ * *p_ids (free it).
+ */
+static INT objs_all( UINT type, UINT sub, TS_UUID **p_ids )
+{
+	TS_UUID	*ids = NULL, *ni;
+	INT	n = 0, got;
+
+	*p_ids = NULL;
+	for ( ;; ) {
+		ni = (TS_UUID *)realloc(ids, sizeof(TS_UUID) * (size_t)( n + 64 ));
+		if ( ni == NULL ) break;
+		ids = ni;
+		got = 0;
+		if ( ob_lst_obj(type, sub, ( n > 0 ) ? &ids[n - 1] : NULL, ids + n, 64, &got) < E_OK ) break;
+		n += got;
+		if ( got < 64 ) break;
+	}
+	*p_ids = ids;
+	return n;
+}
+
 static BOOL dev_uuid( MSSTR *name, TS_UUID *u )
 {
-	TS_UUID	ids[128];
+	TS_UUID	*ids;
 	T_OBREF	r;
-	INT	cnt = 0, i;
+	INT	cnt, i;
+	BOOL	found = FALSE;
 
-	if ( ob_lst_obj(OB_T_DEVICE, 0, NULL, ids, 128, &cnt) < E_OK ) return FALSE;
-	for ( i = 0; i < cnt && i < 128; i++ ) {
+	/* every device there is, however many */
+	cnt = objs_all(OB_T_DEVICE, 0, &ids);
+	for ( i = 0; i < cnt && !found; i++ ) {
 		if ( ob_ref_obj(&ids[i], &r) >= E_OK && strcmp((const char *)r.name, name->s) == 0 ) {
 			*u = ids[i];
-			return TRUE;
+			found = TRUE;
 		}
 	}
-	return FALSE;
+	free(ids);
+	return found;
 }
 
 static UINT mode_ops( MSSTR *m )
@@ -1311,7 +1338,7 @@ static INT st_pwait( MSTH *t, MSN *s, MSSCOPE *sc )
 	if ( s->nv > 1 ) cv = place_of(t, s->v[1], sc, &st);
 	if ( s->a != NULL ) tmo = num_arg(t, s->a, sc);
 	t->waiting = TRUE;
-	while ( !th_stop(t) ) {
+	for ( BOOL again = FALSE; !th_stop(t); again = TRUE ) {
 		ER	er = ts_wai_prc(pid, &ps, TMO_POL);
 
 		if ( er >= E_OK ) {
@@ -1323,7 +1350,7 @@ static INT st_pwait( MSTH *t, MSN *s, MSSCOPE *sc )
 		if ( t->brk ) { t->brk = FALSE; rt.lasterr = 2; break; }
 		if ( tmo == 0 ) { rt.lasterr = 1; break; }
 		if ( tmo > 0 && (double)( ms_now_ms() - begin ) >= tmo * 1000 ) { rt.lasterr = 1; break; }
-		ms_yield(ms_now_ms() + 50);
+		th_look(t, th_until(begin, tmo), again);	/* the end of a process is not told here */
 	}
 	t->waiting = FALSE;
 	return FL_NONE;
@@ -1423,13 +1450,14 @@ static INT st_vwait( MSTH *t, MSN *s, MSSCOPE *sc )
 	vargs(t, s, sc, a, FALSE);
 	rt.lasterr = 0;
 	t->waiting = TRUE;
-	while ( !th_stop(t) && ms_vopen_any(a->target, a->nt, (const char (*)[64])a->name, a->nn) ) {
+	for ( BOOL again = FALSE; !th_stop(t) && ms_vopen_any(a->target, a->nt, (const char (*)[64])a->name, a->nn);
+	      again = TRUE ) {
 		if ( t->brk ) { t->brk = FALSE; rt.lasterr = 2; break; }
 		if ( tmo == 0 || ( tmo > 0 && (double)( ms_now_ms() - begin ) >= tmo * 1000 ) ) {
 			rt.lasterr = 1;
 			break;
 		}
-		ms_yield(ms_now_ms() + 100);
+		th_look(t, th_until(begin, tmo), again);	/* the windows' closing is not told here */
 	}
 	t->waiting = FALSE;
 	ms_free(a);
@@ -1474,6 +1502,7 @@ static INT st_mrecv( MSTH *t, MSN *s, MSSCOPE *sc )
 	MSVAR	*pv, *tv, *sv, *bv;
 	double	tmo = -1;
 	UD	start = ms_now_ms();
+	BOOL	again = FALSE;
 
 	if ( s->nv < 5 ) { rt.lasterr = 48; return FL_NONE; }
 	mask = ms_int32(num_arg(t, s->v[0], sc));
@@ -1507,7 +1536,8 @@ static INT st_mrecv( MSTH *t, MSN *s, MSSCOPE *sc )
 		if ( t->brk ) { t->brk = FALSE; rt.lasterr = 2; break; }
 		if ( tmo == 0 ) { rt.lasterr = 1; break; }
 		if ( tmo > 0 && (double)( ms_now_ms() - start ) >= tmo * 1000 ) { rt.lasterr = 1; break; }
-		ms_yield(ms_now_ms() + 50);
+		th_look(t, th_until(start, tmo), again);	/* a message is not told here */
+		again = TRUE;
 	}
 	t->waiting = FALSE;
 	return FL_NONE;
@@ -1520,7 +1550,6 @@ static INT st_mrecv( MSTH *t, MSN *s, MSSCOPE *sc )
  * comes in is gathered in a buffer of the program's, which RSGETN and
  * RSGETC copy into $RS and RSWAIT looks through.
  */
-#define RS_PORTS	4
 #define RS_BUF		4096
 
 typedef struct {
@@ -1530,35 +1559,40 @@ typedef struct {
 	INT	n;
 } RSPORT;
 
-static RSPORT	rsport[RS_PORTS];
+static RSPORT	**rsport = NULL;	/* every port that is not the console's, each allocated on its own */
 static INT	nrsport = -1;
 static UB	rs_data[RS_BUF];
 static INT	rs_cnt;
 
 static void rs_list( void )
 {
-	TS_UUID	ids[32];
+	TS_UUID	*ids;
 	T_OBREF	r;
 	T_SERINFO info;
-	INT	cnt = 0, i;
+	INT	cnt, i;
 	SZ	asz;
 	ID	key;
 
 	nrsport = 0;
-	if ( ob_lst_obj(OB_T_DEVICE, OB_S_CHAR, NULL, ids, 32, &cnt) < E_OK ) return;
-	for ( i = 0; i < cnt && i < 32 && nrsport < RS_PORTS; i++ ) {
+	cnt = objs_all(OB_T_DEVICE, OB_S_CHAR, &ids);
+	rsport = ( cnt > 0 ) ? (RSPORT **)calloc((size_t)cnt, sizeof(RSPORT *)) : NULL;
+	if ( rsport == NULL ) cnt = 0;
+	for ( i = 0; i < cnt; i++ ) {
 		if ( ob_ref_obj(&ids[i], &r) < E_OK || r.name[0] != 's' || r.name[1] != 'e' || r.name[2] != 'r' ) continue;
 		key = ob_opn_obj(&ids[i], OB_OP_READ);
 		if ( key <= 0 ) continue;
 		asz = 0;
 		if ( ob_rea_rec(key, 3, 0, &info, sizeof(info), &asz) >= E_OK && asz == (SZ)sizeof(info)
 		  && !info.console ) {
-			memset(&rsport[nrsport], 0, sizeof(RSPORT));
-			rsport[nrsport].dev = ids[i];
-			nrsport++;
+			rsport[nrsport] = (RSPORT *)calloc(1, sizeof(RSPORT));
+			if ( rsport[nrsport] != NULL ) {
+				rsport[nrsport]->dev = ids[i];
+				nrsport++;
+			}
 		}
 		ob_cls_obj(key);
 	}
+	free(ids);
 }
 
 static RSPORT *rs_open( INT port )
@@ -1567,7 +1601,7 @@ static RSPORT *rs_open( INT port )
 
 	if ( nrsport < 0 ) rs_list();
 	if ( port < 0 || port >= nrsport ) return NULL;
-	p = &rsport[port];
+	p = rsport[port];
 	if ( p->key <= 0 ) {
 		p->key = ob_opn_obj(&p->dev, OB_OP_READ | OB_OP_WRITE);
 		if ( p->key <= 0 ) {
@@ -1656,6 +1690,7 @@ static INT st_rs( MSTH *t, MSN *s, MSSCOPE *sc )
 	case S_RSWAIT: {
 		double	tmo = ( s->a != NULL ) ? num_arg(t, s->a, sc) : -1;
 		UD	start = ms_now_ms();
+		BOOL	again = FALSE;
 
 		n = rs_bytes(t, s, 1, sc, out, sizeof(out));
 		if ( n == 0 ) { rt.lasterr = 0; break; }
@@ -1670,7 +1705,8 @@ static INT st_rs( MSTH *t, MSN *s, MSSCOPE *sc )
 			if ( t->brk ) { t->brk = FALSE; rt.lasterr = 2; break; }
 			if ( tmo == 0 ) { rt.lasterr = 1; break; }
 			if ( tmo > 0 && (double)( ms_now_ms() - start ) >= tmo * 1000 ) { rt.lasterr = 1; break; }
-			ms_yield(ms_now_ms() + 20);
+			th_look(t, th_until(start, tmo), again);
+			again = TRUE;
 		}
 		t->waiting = FALSE;
 		break;

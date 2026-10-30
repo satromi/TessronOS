@@ -30,7 +30,6 @@ IMPORT	T_IDEV		knl_DefaultIDev;
  *	Device registration management
  */
 
-IMPORT DevCB knl_DevCBtbl[];	/* Device registration information table */
 IMPORT QUEUE knl_UsedDevCB;	/* In-use queue */
 IMPORT QUEUE knl_FreeDevCB;	/* Unused queue */
 
@@ -42,7 +41,7 @@ IMPORT QUEUE knl_FreeDevCB;	/* Unused queue */
 Inline ER knl_check_devid( ID devid )
 {
 	devid >>= 8;
-	if ( devid < 1 || devid > MAX_REGDEV ) {
+	if ( devid < 1 || devid > knl_DevCBn ) {
 		return E_ID;
 	}
 	return E_OK;
@@ -51,17 +50,19 @@ Inline ER knl_check_devid( ID devid )
 /*
  * Device Management: Input/Output
  */
-IMPORT OpnCB knl_OpnCBtbl[];	/* Open management information table */
+IMPORT OpnCB **knl_OpnCBdir;	/* Open devices, by descriptor - 1 (sysmgr.h) */
+IMPORT INT   knl_OpnCBn;
 IMPORT QUEUE knl_FreeOpnCB;	/* Unused queue */
 
-#define DD(opncb)		( (opncb) - knl_OpnCBtbl + 1 )
-#define OPNCB(dd)		( knl_OpnCBtbl + ((dd) - 1) )
+#define DD(opncb)		( (opncb)->no )
+#define OPNCB(dd)		( knl_OpnCBdir[(dd) - 1] )
 
-IMPORT ReqCB knl_ReqCBtbl[];	/* Request management information table */
+IMPORT ReqCB **knl_ReqCBdir;	/* Requests, by request ID - 1 */
+IMPORT INT   knl_ReqCBn;
 IMPORT QUEUE knl_FreeReqCB;	/* Unused queue */
 
-#define REQID(reqcb)		( (reqcb) - knl_ReqCBtbl + 1 )
-#define REQCB(reqid)		( knl_ReqCBtbl + ((reqid) - 1) )
+#define REQID(reqcb)		( (reqcb)->no )
+#define REQCB(reqid)		( knl_ReqCBdir[(reqid) - 1] )
 
 #define DEVREQ_REQCB(devreq)	((ReqCB*)((B*)(devreq) - offsetof(ReqCB, req)))
 
@@ -99,7 +100,7 @@ Inline ER knl_call_abortfn( DevCB *devcb, ID tskid, T_DEVREQ *devreq, INT nreq )
 }
 
 
-IMPORT ID knl_request( ID dd, W start, void *buf, W size, TMO tmout, INT cmd );
+IMPORT ID knl_request( ID dd, D start, void *buf, SZ size, TMO tmout, INT cmd );
 IMPORT BOOL knl_chkopen( DevCB *devcb, INT unitno );
 IMPORT void knl_delReqCB( ReqCB *reqcb );
 IMPORT ResCB* knl_GetResCB( void );

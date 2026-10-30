@@ -1,0 +1,71 @@
+# ファイル変換 and a BTRON CD-ROM on the x64 PC (tools/x64/ui_run64.py --cdrom IMAGE): tools/tests/ui_btcd.steps
+# with the q35 machine: ファイル変換 started by opening its program object (the 小物 menu of
+# the x64 image lists other programs, so its place there differs), and the drive uda after
+# nvmea, nvmea0, nvmea1 and nvmea2 (/tslog) in its list, at 200,271; the rest as there.
+# ファイル変換 and a BTRON CD-ROM (design 11.9), for tools/ui_run.py with
+# --cdrom obj/_QEMU_VIRT__ktest<id>/btcd.iso (tools/tests/mkbtcd.py):
+# the drive listed as uda with the name of its file system, opened as a
+# window of the 実身 its root links to; 資料 gone into and back; はじめに
+# carried into the BTRON window, made 実身 with the figure it links to; the
+# ISO 9660 side's folder after the 実身 gone into and back;
+# 図１ taken in with Ctrl+I into a new box, and opened.
+dclick 80 141
+wait 1500
+open 01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91
+expect xfconv: ready
+expect xfconv: media uda 2,514,944 バイト - btron 試験CD
+wait 500
+win ファイル変換
+shot btcd_media
+dclick 200 271
+expect xfconv: btron 試験CD cdrom block 2048 semi-standard extended
+expect xfconv: dir uda 7 entries
+expect xfconv: iso uda 2 entries
+wait 800
+win 試験CD
+shot btcd_root
+# 資料 gone into: the link file to another file system is left out
+dclick 260 279
+expect xfconv: dir uda/資料 4 entries
+wait 500
+shot btcd_docs
+key 2a
+expect xfconv: dir uda 7 entries
+wait 300
+# the ISO 9660 side after the 実身: the files beside the partition by their Joliet names
+dclick 260 407
+expect xfconv: dir uda/ISO 9660 2 entries
+wait 500
+shot btcd_iso
+key 2a
+expect xfconv: dir uda 7 entries
+wait 300
+# はじめに carried into the BTRON window: no panel, made 実身 with 図１, linked where let go
+hold 260 215
+wait 300
+move 150 200
+wait 100
+move 60 200
+wait 300
+up
+expect xfconv: carried 1 into
+expect xfconv: btron import はじめに 0 objects 2
+expect xfconv: placed 1 links
+wait 800
+shot btcd_placed
+# 図１ chosen and taken in with Ctrl+I: a new box the desktop opens
+win 試験CD
+click 260 247
+expect xfconv: selected 1: 図1
+key 0c 1
+expect xfconv: imported 1 of 1 objects 2 box
+wait 1500
+shot btcd_box
+# 図１ opened: 基本図形編集 shows its two rectangles and its 仮身 to はじめに
+dclick 300 200
+wait 2500
+shot btcd_figure
+# its 仮身 opened: はじめに in 基本文章編集, its text and its 仮身 back to 図１
+dclick 150 280
+wait 2500
+shot btcd_text

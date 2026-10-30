@@ -400,23 +400,23 @@ LOCAL void cut_within( DTWIN *d, INT pi, INT a, INT b )
 {
 	T_TAD		*rec = rec_of(d);
 	CONST T_TVPARA	*p = &d->doc->para[pi];
-	INT		i, acc, start[256], k = 0;
+	INT		i, acc, k;
 
 	if ( b <= a ) {
 		return;
 	}
-	/* where each run begins, then the runs from the last back */
+	/* where the runs end, then the runs from the last back */
 	acc = 0;
-	for ( i = p->first; i < p->first + p->n && i < d->doc->nrun && k < 256; i++ ) {
-		start[k++] = acc;
-		acc += run_units(&d->doc->run[i]);
+	for ( k = 0; k < p->n && p->first + k < d->doc->nrun; k++ ) {
+		acc += run_units(&d->doc->run[p->first + k]);
 	}
 	for ( i = k - 1; i >= 0; i-- ) {
 		CONST T_TVRUN	*r = &d->doc->run[p->first + i];
-		INT		lo = start[i], hi = start[i] + run_units(r);
+		INT		hi = acc, lo = acc - run_units(r);
 		INT		ca = ( a > lo ) ? a : lo;
 		INT		cb = ( b < hi ) ? b : hi;
 
+		acc = lo;
 		if ( cb <= ca ) {
 			continue;
 		}
@@ -543,14 +543,19 @@ LOCAL void insert( DTWIN *d, CONST UB *s, INT n, BOOL typing )
 			if ( put_words(d, d->cpara, d->cpos, s + from, k) ) {
 				d->cpos += k;
 			}
-			ed_model(d);
+			/* the model made again only for what follows; changed() makes it at the end */
+			if ( i < n ) {
+				ed_model(d);
+			}
 		}
 		if ( i < n ) {
 			if ( split_at(d, d->cpara, d->cpos) ) {
 				d->cpara++;
 				d->cpos = 0;
 			}
-			ed_model(d);
+			if ( i + 1 < n ) {
+				ed_model(d);
+			}
 		}
 		from = i + 1;
 	}
@@ -614,7 +619,10 @@ LOCAL void erase_fwd( DTWIN *d )
 
 /* ---------------------------------------------------------------- the selection as words */
 
-/* The selection as words: a line break between paragraphs and for a break */
+/*
+ * The selection as words: a line break between paragraphs and for a
+ * break. out NULL: only how many bytes there are, every one of them.
+ */
 LOCAL INT sel_text( DTWIN *d, UB *out, INT max )
 {
 	INT	pa, a, pb, b, pi, n = 0;
@@ -631,22 +639,25 @@ LOCAL INT sel_text( DTWIN *d, UB *out, INT max )
 			INT		u = run_units(r), k;
 
 			for ( k = 0; k < u; k++ ) {
-				if ( acc + k < lo || acc + k >= hi || n >= max - 1 ) {
+				if ( acc + k < lo || acc + k >= hi || ( out != NULL && n >= max - 1 ) ) {
 					continue;
 				}
 				if ( r->kind == TV_RUN_TEXT ) {
-					out[n++] = r->text[k];
+					if ( out != NULL ) out[n] = r->text[k];
+					n++;
 				} else if ( r->kind == TV_RUN_BREAK ) {
-					out[n++] = '\n';
+					if ( out != NULL ) out[n] = '\n';
+					n++;
 				}
 			}
 			acc += u;
 		}
-		if ( pi < pb && n < max - 1 ) {
-			out[n++] = '\n';
+		if ( pi < pb && ( out == NULL || n < max - 1 ) ) {
+			if ( out != NULL ) out[n] = '\n';
+			n++;
 		}
 	}
-	out[n] = 0;
+	if ( out != NULL ) out[n] = 0;
 
 	return n;
 }
@@ -1076,21 +1087,26 @@ LOCAL void wrap_para( DTWIN *d, INT pi, INT a, INT b, CONST char *name,
 {
 	T_TAD		*rec = rec_of(d);
 	CONST T_TVPARA	*p;
-	T_TADNODE	*nodes[128], *w;
+	T_TADNODE	**nodes, *w;
 	INT		i, acc, k = 0, j, t;
 
 	if ( b <= a ) {
 		return;
 	}
 	cut_ends(d, pi, a, b);
-	/* the runs wholly inside [a, b) */
+	/* the runs wholly inside [a, b): no more nodes than the paragraph has runs */
 	p = &d->doc->para[pi];
+	nodes = (T_TADNODE **)Kmalloc(sizeof(T_TADNODE *) * (SZ)( p->n + 1 ));
+	if ( nodes == NULL ) {
+		dt_no_memory(d);
+		return;
+	}
 	acc = 0;
 	for ( i = p->first; i < p->first + p->n && i < d->doc->nrun; i++ ) {
 		CONST T_TVRUN	*r = &d->doc->run[i];
 		INT		u = run_units(r);
 
-		if ( acc >= a && acc + u <= b && u > 0 && k < 128
+		if ( acc >= a && acc + u <= b && u > 0
 		  && ( k == 0 || nodes[k - 1] != r->node ) ) {
 			nodes[k++] = r->node;
 		}
@@ -1112,6 +1128,7 @@ LOCAL void wrap_para( DTWIN *d, INT pi, INT a, INT b, CONST char *name,
 		}
 		i = j + 1;
 	}
+	Kfree(nodes);
 	ed_model(d);
 }
 
@@ -1952,18 +1969,21 @@ LOCAL void width_sel( DTWIN *d, BOOL full )
 		CONST T_TVPARA	*p = &d->doc->para[pi];
 		INT		lo = ( pi == pa ) ? a : 0;
 		INT		hi = ( pi == pb ) ? b : para_len(d, pi);
-		INT		i, start[256], k = 0, acc = 0;
+		INT		i, k, acc = 0, at;
 
-		for ( i = p->first; i < p->first + p->n && i < d->doc->nrun && k < 256; i++ ) {
-			start[k++] = acc;
-			acc += run_units(&d->doc->run[i]);
+		for ( k = 0; k < p->n && p->first + k < d->doc->nrun; k++ ) {
+			acc += run_units(&d->doc->run[p->first + k]);
 		}
 		for ( i = k - 1; i >= 0; i-- ) {
 			CONST T_TVRUN	*r = &d->doc->run[p->first + i];
-			INT		ca = ( lo > start[i] ) ? lo : start[i];
-			INT		cb = start[i] + run_units(r);
+			INT		ca, cb;
 			UB		*buf;
 			INT		m;
+
+			at = acc - run_units(r);	/* where this run begins */
+			acc = at;
+			ca = ( lo > at ) ? lo : at;
+			cb = at + run_units(r);
 
 			if ( cb > hi ) {
 				cb = hi;
@@ -1975,8 +1995,8 @@ LOCAL void width_sel( DTWIN *d, BOOL full )
 			if ( buf == NULL ) {
 				continue;
 			}
-			m = width_conv(r->text + ( ca - start[i] ), cb - ca, buf, full);
-			(void)tad_text_splice(rec, r->node, r->noff + ( ca - start[i] ),
+			m = width_conv(r->text + ( ca - at ), cb - ca, buf, full);
+			(void)tad_text_splice(rec, r->node, r->noff + ( ca - at ),
 					      cb - ca, buf, m);
 			Kfree(buf);
 			if ( pi == pb ) {
@@ -2578,6 +2598,74 @@ EXPORT void dd_menu_state( DTWIN *d, BOOL *p_comb, BOOL *p_turned )
 	*p_turned = sel_turned(d);
 }
 
+/* ---------------------------------------------------------------- laying while idle */
+
+/*
+ * A document's paragraphs not yet laid at the window's present width
+ * count as a guess (docview.c); they are laid a few at a time while the
+ * desktop has nothing else to do, so that the scroll bar comes to say
+ * how long the text is. What the window shows was laid when it was
+ * drawn; when the paragraphs above it come out taller or shorter than
+ * the guess, the window scrolls by as much, and what it shows stays.
+ */
+#define SETTLE_MS	20		/* laying in one turn of the loop, at most */
+#define SETTLE_DRAW	25		/* turns between two drawings of the scroll bar */
+
+LOCAL INT	dd_settle_turns = 0;
+LOCAL INT	dd_settle_left[DT_MAX_WIN];
+
+EXPORT BOOL dd_settle_pending( void )
+{
+	INT	i;
+
+	for ( i = 0; i < DT_MAX_WIN; i++ ) {
+		CONST DTWIN	*d = dt_win_at(i);
+
+		if ( d->used && d->settling && d->doc != NULL && d->doc->layc != NULL ) {
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+EXPORT void dd_settle_step( void )
+{
+	INT	i;
+
+	for ( i = 0; i < DT_MAX_WIN; i++ ) {
+		DTWIN		*d = dt_win_at(i);
+		T_DPRECT	page;
+		INT		left, shift = 0, was;
+
+		if ( !d->used || !d->settling || d->doc == NULL || d->doc->layc == NULL ) {
+			continue;
+		}
+		dt_work_rect(d, &page);
+		left = tv_doc_settle(d->doc, &page, d->scroll_y, d->rec, SETTLE_MS, &shift);
+		was = dd_settle_left[i];
+		dd_settle_left[i] = left;
+		if ( shift != 0 ) {
+			d->scroll_y += shift;
+			if ( d->scroll_y < 0 ) {
+				d->scroll_y = 0;
+			}
+		}
+		if ( left == 0 ) {
+			d->settling = FALSE;
+		}
+		if ( shift != 0 || ( left == 0 && was > 0 )
+		  || ( left > 0 && ++dd_settle_turns % SETTLE_DRAW == 0 ) ) {
+			dt_draw(d);
+			wm_update();
+			if ( left == 0 ) {
+				d->settling = FALSE;	/* drawn with nothing left: done */
+			}
+		}
+		return;				/* one window a turn */
+	}
+}
+
 /* ---------------------------------------------------------------- keys */
 
 /* The caret moved; with Shift the selection follows it, without, it goes */
@@ -2596,8 +2684,8 @@ LOCAL void move_to( DTWIN *d, INT pi, INT pos, BOOL extend )
 	shown(d);
 }
 
-/* The place a line above or below the caret, or at an end of its line */
-LOCAL BOOL line_place( DTWIN *d, INT dx_mode, INT dy, INT *p_para, INT *p_pos )
+/* The place at the head (dx_mode < 0) or at the end (> 0) of the caret's line */
+LOCAL BOOL line_place( DTWIN *d, INT dx_mode, INT *p_para, INT *p_pos )
 {
 	T_DPRECT	page, box;
 	INT		x, y;
@@ -2608,21 +2696,105 @@ LOCAL BOOL line_place( DTWIN *d, INT dx_mode, INT dy, INT *p_para, INT *p_pos )
 		return FALSE;
 	}
 	if ( d->doc->vert ) {
-		/*
-		 * 縦書き: the line before is to the right, the line after to
-		 * the left, and a line's head is at the top of the page.
-		 */
-		x = ( dy < 0 ) ? box.right + 3 : ( dy > 0 ) ? box.left - 3
-					      : ( box.left + box.right ) / 2;
-		y = ( dx_mode < 0 ) ? page.top : ( dx_mode > 0 ) ? page.bottom : box.top;
+		/* 縦書き: a line's head is at the top of the page */
+		x = ( box.left + box.right ) / 2;
+		y = ( dx_mode < 0 ) ? page.top : page.bottom;
 	} else {
-		x = ( dx_mode < 0 ) ? page.left : ( dx_mode > 0 ) ? page.right : box.left;
-		y = ( dy < 0 ) ? box.top - 3 : ( dy > 0 ) ? box.bottom + 3
-					     : ( box.top + box.bottom ) / 2;
+		x = ( dx_mode < 0 ) ? page.left : page.right;
+		y = ( box.top + box.bottom ) / 2;
 	}
 
 	return (BOOL)( tv_doc_caret_at(d->doc, &page, d->scroll_y, d->rec, x, y,
 				       p_para, p_pos) >= E_OK );
+}
+
+/*
+ * Where the caret was across its line when ↑ or ↓ began to move it (縦書き:
+ * down the line), from the page's edge, and the window and the place
+ * the last ↑ or ↓ left it at. While the keys follow one another the
+ * caret keeps going back to that first place across, even through a
+ * line too short to reach it; any other move forgets it.
+ */
+LOCAL DTWIN	*ud_win;
+LOCAL INT	ud_para, ud_pos, ud_goal;
+
+/*
+ * The place on the line before (dir < 0) or after (dir > 0) the caret's,
+ * in the same paragraph or the one next to it, nearest the place across
+ * the caret started from. FALSE on the first or the last line.
+ */
+LOCAL BOOL line_step( DTWIN *d, INT dir, INT *p_para, INT *p_pos )
+{
+	T_DPRECT	page, box, tb;
+	BOOL		v = d->doc->vert;
+	INT		goal, head, end, qp, qpos, th, te, x, y, np = d->doc->npara;
+
+	dt_work_rect(d, &page);
+	if ( tv_doc_caret_line(d->doc, &page, d->scroll_y, d->rec, d->cpara,
+			       d->cpos, &box, &head, &end) < E_OK ) {
+		return FALSE;
+	}
+	if ( ud_win == d && ud_para == d->cpara && ud_pos == d->cpos ) {
+		goal = ud_goal;
+	} else {
+		goal = v ? box.top - page.top : box.left - page.left;
+	}
+
+	/* a place on the line wanted, and that line */
+	if ( dir < 0 ) {
+		if ( head > 0 ) {
+			qp = d->cpara;
+			qpos = step_back(d, qp, head);
+		} else if ( d->cpara > 0 ) {
+			qp = d->cpara - 1;
+			qpos = para_len(d, qp);
+		} else {
+			return FALSE;
+		}
+	} else {
+		/* where a line is broken, the place is the next line's */
+		qp = d->cpara;
+		qpos = end;
+	}
+	if ( tv_doc_caret_line(d->doc, &page, d->scroll_y, d->rec, qp, qpos,
+			       &tb, &th, &te) < E_OK ) {
+		return FALSE;
+	}
+	if ( dir > 0 && qp == d->cpara && th == head ) {
+		/* the last line of the paragraph: the next paragraph's first */
+		if ( d->cpara + 1 >= np ) {
+			return FALSE;
+		}
+		qp = d->cpara + 1;
+		if ( tv_doc_caret_line(d->doc, &page, d->scroll_y, d->rec, qp, 0,
+				       &tb, &th, &te) < E_OK ) {
+			return FALSE;
+		}
+	}
+
+	/* the place on it nearest the place across */
+	if ( v ) {
+		x = ( tb.left + tb.right ) / 2;
+		y = page.top + goal;
+	} else {
+		x = page.left + goal;
+		y = ( tb.top + tb.bottom ) / 2;
+	}
+	if ( tv_doc_caret_in(d->doc, &page, d->scroll_y, d->rec, qp, th, te,
+			     x, y, p_pos) < E_OK ) {
+		return FALSE;
+	}
+	/*
+	 * The end of a line that is broken is drawn at the head of the next
+	 * one: the caret stops before the line's last letter instead.
+	 */
+	if ( *p_pos == te && te > th && te < para_len(d, qp) ) {
+		*p_pos = step_back(d, qp, te);
+	}
+	*p_para = qp;
+	ud_goal = goal;
+
+	return TRUE;
 }
 
 /*
@@ -2696,7 +2868,7 @@ LOCAL void arrow_far( DTWIN *d, UINT code, BOOL alt, BOOL shift )
 
 	if ( alt ) {
 		if ( code == line_head || code == line_end ) {
-			if ( line_place(d, ( code == line_head ) ? -1 : 1, 0, &pi, &pos) ) {
+			if ( line_place(d, ( code == line_head ) ? -1 : 1, &pi, &pos) ) {
 				move_to(d, pi, pos, shift);
 			}
 		} else if ( code == text_head ) {
@@ -2730,7 +2902,7 @@ EXPORT BOOL dd_key( DTWIN *d, UINT code, UINT mods )
 		return TRUE;
 	}
 	if ( ctrl ) {
-		switch ( code ) {
+		switch ( wm_key_cmd(code) ) {		/* the letter the key types: the command's */
 		case KEY_A:	dd_command(d, DM_SELECT_ALL);	return TRUE;
 		case KEY_F:	dd_command(d, DM_FIND);		return TRUE;
 		case KEY_C:	dd_command(d, DM_COPY);		return TRUE;
@@ -2754,6 +2926,11 @@ EXPORT BOOL dd_key( DTWIN *d, UINT code, UINT mods )
 			break;			/* the head or foot of the text, below */
 		default:	return FALSE;
 		}
+	}
+	if ( !( d->doc->vert ? ( code == KEY_LEFT || code == KEY_RIGHT )
+			     : ( code == KEY_UP || code == KEY_DOWN ) ) ) {
+		/* only ↑ and ↓ (縦書き: ← and →) keep the place across */
+		ud_win = NULL;
 	}
 	/* the text input port sees the keys first (dttip.c) */
 	if ( !d->xml_view && tip_key(d, code, mods) ) {
@@ -2826,14 +3003,18 @@ EXPORT BOOL dd_key( DTWIN *d, UINT code, UINT mods )
 			}
 			return TRUE;
 		}
-		/* FALLTHROUGH */
+		if ( line_place(d, ( code == KEY_HOME ) ? -1 : 1, &pi, &pos) ) {
+			move_to(d, pi, pos, shift);
+		}
+		return TRUE;
 	case KEY_UP:
 	case KEY_DOWN:
-		if ( line_place(d, ( code == KEY_HOME ) ? -1
-				 : ( code == KEY_END ) ? 1 : 0,
-				( code == KEY_UP ) ? -1 : ( code == KEY_DOWN ) ? 1 : 0,
-				&pi, &pos) ) {
+		/* to the line before or after, into the next paragraph as well */
+		if ( line_step(d, ( code == KEY_UP ) ? -1 : 1, &pi, &pos) ) {
 			move_to(d, pi, pos, shift);
+			ud_win = d;
+			ud_para = d->cpara;
+			ud_pos = d->cpos;
 		}
 		return TRUE;
 	default:
@@ -2848,7 +3029,8 @@ EXPORT BOOL dd_key( DTWIN *d, UINT code, UINT mods )
 	return TRUE;
 }
 
-LOCAL BOOL thing_take( DTWIN *d, INT x, INT y );
+LOCAL BOOL thing_take( DTWIN *d, INT x, INT y, INT slop );
+LOCAL BOOL thing_picked( DTWIN *d, INT *p_run, T_DPRECT *p_box );
 LOCAL BOOL thing_marks( DTWIN *d, INT gid );
 LOCAL BOOL sel_carry_take( DTWIN *d, INT x, INT y, INT pi, INT pos );
 LOCAL void sel_carry_follow( INT sx, INT sy );
@@ -2862,17 +3044,23 @@ EXPORT BOOL dd_editable( CONST DTWIN *d )
 		    && d->doc->npara > 0 );
 }
 
-/* A press on the page: the caret put there, and a selection begun */
-EXPORT void dd_press( DTWIN *d, INT x, INT y, BOOL extend )
+/*
+ * A press on the page: the caret put there, and a selection begun. A
+ * finger's press (when, wm_hit_slop) just out of the right edge or the
+ * foot of the one thing picked sizes it, as its handle drawn there.
+ */
+EXPORT void dd_press( DTWIN *d, INT x, INT y, BOOL extend, UD when )
 {
 	T_DPRECT	page;
-	INT		pi, pos;
+	INT		pi, pos, slop;
 
 	if ( !dd_editable(d) ) {
 		return;
 	}
+	ud_win = NULL;
+	slop = wm_hit_slop(when);
 	/* a picture standing in the text is taken, as a link is */
-	if ( !extend && thing_take(d, x, y) ) {
+	if ( !extend && thing_take(d, x, y, slop) ) {
 		return;
 	}
 	dt_work_rect(d, &page);
@@ -3437,8 +3625,12 @@ LOCAL BOOL	lc_copy;		/* 複写ドラッグ: carried as a copy */
 LOCAL BOOL	lc_fixed;		/* a link that is 固定化 or 背景化: only copied */
 LOCAL UINT	lc_size;		/* sizing: 1 the right edge, 2 the foot */
 
-/* A thing of the text under a place taken up by the hand; FALSE if none */
-LOCAL BOOL thing_take( DTWIN *d, INT x, INT y )
+/*
+ * A thing of the text under a place taken up by the hand; FALSE if
+ * none. A finger (slop, wm_hit_slop) reaches its edges farther in, and
+ * the one thing picked by its edges from slop out of it.
+ */
+LOCAL BOOL thing_take( DTWIN *d, INT x, INT y, INT slop )
 {
 	T_DPRECT	page, box;
 	INT		run;
@@ -3448,8 +3640,38 @@ LOCAL BOOL thing_take( DTWIN *d, INT x, INT y )
 	}
 	dt_work_rect(d, &page);
 	run = tv_doc_thing(d->doc, &page, d->scroll_y, d->rec, x, y, -1, &box);
+	if ( ( run < 0 || run >= d->doc->nrun ) && slop > 0 && thing_picked(d, &run, &box)
+	  && d->doc->run[run].kind != TV_RUN_FIGURE
+	  && x >= box.left && x < box.right + slop && y >= box.top && y < box.bottom + slop
+	  && ( x >= box.right || y >= box.bottom ) ) {
+		/* by the picked one's handle: it is sized, however far out */
+		lc_win = d;
+		lc_run = run;
+		lc_kind = d->doc->run[run].kind;
+		lc_link = d->doc->run[run].link;
+		lc_box = box;
+		lc_now = box;
+		lc_x0 = x;
+		lc_y0 = y;
+		lc_moved = FALSE;
+		lc_copy = FALSE;
+		lc_fixed = run_protected(d, &d->doc->run[run]);
+		lc_size = 0;
+		if ( !lc_fixed ) {
+			if ( x >= box.right - wm_hit_in(THING_EDGE, slop, box.right - box.left) ) lc_size |= 1;
+			if ( y >= box.bottom - wm_hit_in(THING_EDGE, slop, box.bottom - box.top) ) lc_size |= 2;
+		}
+		return TRUE;
+	}
 	if ( run < 0 || run >= d->doc->nrun ) {
 		return FALSE;
+	}
+	{
+		INT		pr;
+		T_DPRECT	pb;
+
+		/* farther in only on the one picked before, whose handle is shown */
+		if ( slop > 0 && !( thing_picked(d, &pr, &pb) && pr == run ) ) slop = 0;
 	}
 	lc_win = d;
 	lc_run = run;
@@ -3464,18 +3686,18 @@ LOCAL BOOL thing_take( DTWIN *d, INT x, INT y )
 	lc_size = 0;
 	lc_fixed = run_protected(d, &d->doc->run[run]);
 	if ( lc_kind != TV_RUN_FIGURE && !lc_fixed ) {
-		if ( x >= box.right - THING_EDGE ) lc_size |= 1;
-		if ( y >= box.bottom - THING_EDGE ) lc_size |= 2;
+		if ( x >= box.right - wm_hit_in(THING_EDGE, slop, box.right - box.left) ) lc_size |= 1;
+		if ( y >= box.bottom - wm_hit_in(THING_EDGE, slop, box.bottom - box.top) ) lc_size |= 2;
 	}
 
 	return TRUE;
 }
 
-EXPORT void dd_link_take( DTWIN *d, INT which, CONST T_DPRECT *box, INT x, INT y )
+EXPORT void dd_link_take( DTWIN *d, INT which, CONST T_DPRECT *box, INT x, INT y, UD when )
 {
 	(void)which;
 	(void)box;
-	(void)thing_take(d, x, y);
+	(void)thing_take(d, x, y, wm_hit_slop(when));
 }
 
 EXPORT BOOL dd_link_carrying( void )
@@ -3525,8 +3747,19 @@ EXPORT void dd_link_follow( INT sx, INT sy )
 		if ( lc_now.right - lc_now.left < ( lc_kind == TV_RUN_LINK ? LINK_MIN_W : 8 ) ) {
 			lc_now.right = lc_now.left + ( lc_kind == TV_RUN_LINK ? LINK_MIN_W : 8 );
 		}
-		if ( lc_now.bottom - lc_now.top < 8 ) {
-			lc_now.bottom = lc_now.top + 8;
+		{
+			/* a link is never lower than it is closed */
+			T_VOBJ	v;
+			INT	least = 8;
+
+			if ( lc_kind == TV_RUN_LINK
+			  && tad_lnk_get(lc_win->rec, lc_link, &v) >= E_OK
+			  && tad_lnk_closed_h(&v) > least ) {
+				least = tad_lnk_closed_h(&v);
+			}
+			if ( lc_now.bottom - lc_now.top < least ) {
+				lc_now.bottom = lc_now.top + least;
+			}
 		}
 		r = lc_now;
 	} else {
@@ -3651,8 +3884,11 @@ EXPORT void dd_link_release( INT sx, INT sy )
 		undo_point(d, FALSE);
 		if ( lc_kind == TV_RUN_LINK && tad_lnk_get(d->rec, lc_link, &v) >= E_OK ) {
 			v.width = w;
-			v.heightpx = h;
-			(void)tad_lnk_set((T_TAD *)d->rec, &v);
+			/* closed at the closed height; opened only when well past it */
+			v.heightpx = tad_lnk_fit_h(&v, h);
+			if ( tad_lnk_set((T_TAD *)d->rec, &v) < E_OK ) {
+				tm_printf((UB *)"desktop: the link \"%s\" was not sized\n", v.name);
+			}
 		} else if ( lc_kind == TV_RUN_IMAGE && node != NULL ) {
 			T_TAD	*rec = rec_of(d);
 			UB	num[16];
@@ -3858,10 +4094,11 @@ EXPORT void dd_link_release( INT sx, INT sy )
 }
 
 /* A thing picked alone: its frame, and the handle it is sized by */
-LOCAL BOOL thing_marks( DTWIN *d, INT gid )
+/* The one thing picked (the selection is that run alone): which run, and its box; FALSE if none */
+LOCAL BOOL thing_picked( DTWIN *d, INT *p_run, T_DPRECT *p_box )
 {
 	INT		pa, a, pb, b, i, acc = 0, run = -1;
-	T_DPRECT	page, box, h;
+	T_DPRECT	page;
 	CONST T_TVPARA	*p;
 
 	sel_order(d, &pa, &a, &pb, &b);
@@ -3882,7 +4119,19 @@ LOCAL BOOL thing_marks( DTWIN *d, INT gid )
 		return FALSE;
 	}
 	dt_work_rect(d, &page);
-	if ( tv_doc_thing(d->doc, &page, d->scroll_y, d->rec, 0, 0, run, &box) < 0 ) {
+	if ( tv_doc_thing(d->doc, &page, d->scroll_y, d->rec, 0, 0, run, p_box) < 0 ) {
+		return FALSE;
+	}
+	*p_run = run;
+	return TRUE;
+}
+
+LOCAL BOOL thing_marks( DTWIN *d, INT gid )
+{
+	INT		run;
+	T_DPRECT	box, h;
+
+	if ( !thing_picked(d, &run, &box) ) {
 		return FALSE;
 	}
 	box.left -= 2;  box.top -= 2;  box.right += 2;  box.bottom += 2;
@@ -4324,7 +4573,6 @@ LOCAL BOOL plain_text_cmd( INT cmd )
  * at the caret the same way. Paragraphs end where they ended.
  */
 #define CR_PARA		100		/* a paragraph ends here */
-#define CR_MAX		2048		/* pieces kept */
 
 typedef struct {
 	UINT	kind;			/* TV_RUN_*, or CR_PARA */
@@ -4341,7 +4589,8 @@ typedef struct {
 } CRUN;
 
 LOCAL CRUN	*cr = NULL;
-LOCAL INT	ncr = 0;
+LOCAL INT	ncr = 0, maxcr = 0;
+LOCAL BOOL	cr_short = FALSE;	/* a piece could not be kept: what is kept is not all */
 
 /* The decorations, and the element each is written as */
 LOCAL CONST struct { UINT bit; CONST char *name; } cr_decos[] = {
@@ -4365,6 +4614,7 @@ LOCAL void cr_clear( void )
 		if ( cr[i].v != NULL ) Kfree(cr[i].v);
 	}
 	ncr = 0;
+	cr_short = FALSE;
 }
 
 LOCAL UB *cr_dup( CONST UB *s, INT n )
@@ -4396,14 +4646,17 @@ LOCAL CRUN *cr_add( UINT kind, CONST T_TVRUN *r )
 {
 	CRUN	*c;
 
-	if ( cr == NULL ) {
-		cr = (CRUN *)Kmalloc(sizeof(CRUN) * CR_MAX);
-		if ( cr == NULL ) {
+	if ( ncr >= maxcr ) {
+		/* as many pieces as there are */
+		INT	m = ( maxcr > 0 ) ? maxcr * 2 : 256;
+		CRUN	*n = (CRUN *)Krealloc(cr, sizeof(CRUN) * (size_t)m);
+
+		if ( n == NULL ) {
+			cr_short = TRUE;
 			return NULL;
 		}
-	}
-	if ( ncr >= CR_MAX ) {
-		return NULL;
+		cr = n;
+		maxcr = m;
 	}
 	c = &cr[ncr++];
 	knl_memset(c, 0, sizeof(*c));
@@ -4452,6 +4705,9 @@ LOCAL void cr_from( CONST T_TVDOC *doc, CONST T_TAD *rec, INT pa, INT a, INT pb,
 				if ( c != NULL ) {
 					c->text = cr_dup(r->text + ( ca - acc ), cb - ca);
 					c->len = cb - ca;
+					if ( c->text == NULL ) {
+						cr_short = TRUE;
+					}
 				}
 				break;
 			case TV_RUN_LINK:
@@ -4538,16 +4794,17 @@ LOCAL void cr_text_into( T_TAD *frag, T_TADNODE *p, CONST CRUN *c )
 }
 
 /* The pieces as a <document> fragment, to the tray as one set */
-LOCAL void cr_to_tray( void )
+LOCAL ER cr_to_tray( void )
 {
 	T_TAD		*frag = dt_frag_new("document");
-	T_TADNODE	*body, *p, *c;
+	T_TADNODE	*body, *p;
 	TS_UUID		id;
 	INT		i, nch = 0;
 	UB		name[TR_NAME_MAX];
+	ER		er;
 
 	if ( frag == NULL ) {
-		return;
+		return E_NOMEM;
 	}
 	body = tad_body(frag);
 	p = ( body != NULL ) ? tad_elem_new(frag, "p", body, NULL, FALSE) : NULL;
@@ -4563,18 +4820,24 @@ LOCAL void cr_to_tray( void )
 			nch += r->len;
 			break;
 		case TV_RUN_LINK:
-			/* the link goes at the end of the body; it is moved into the paragraph */
-			if ( r->v != NULL && tad_lnk_add(frag, r->v, &id) >= E_OK ) {
-				T_TADNODE	*nl = body->last, *lk = NULL;
+			/*
+			 * The link goes at the end of the body, a line break
+			 * after it; it is moved into the paragraph. What is
+			 * after the body's last node before it is the link.
+			 */
+			{
+				T_TADNODE	*was = body->last;
 
-				for ( c = body->first; c != NULL; c = c->next ) {
-					if ( c->next == nl ) lk = c;
-				}
-				if ( nl != NULL && nl->kind == TAD_ND_TEXT ) {
-					tad_node_remove(nl);
-				}
-				if ( lk != NULL && lk->kind == TAD_ND_ELEM ) {
-					tad_node_move(lk, p, NULL);
+				if ( r->v != NULL && tad_lnk_add(frag, r->v, &id) >= E_OK ) {
+					T_TADNODE	*lk = ( was != NULL ) ? was->next : body->first;
+					T_TADNODE	*nl = body->last;
+
+					if ( nl != NULL && nl != lk && nl->kind == TAD_ND_TEXT ) {
+						tad_node_remove(nl);
+					}
+					if ( lk != NULL && lk->kind == TAD_ND_ELEM ) {
+						tad_node_move(lk, p, NULL);
+					}
 				}
 			}
 			break;
@@ -4591,20 +4854,34 @@ LOCAL void cr_to_tray( void )
 	}
 	for ( i = 0; "文字列"[i] != 0; i++ ) name[i] = (UB)"文字列"[i];
 	name[i] = 0;
-	(void)dt_tray_put(frag, (CONST char *)name);
+	er = dt_tray_put(frag, (CONST char *)name);
 	tad_free(frag);
 	(void)nch;
+
+	return er;
 }
 
-/* The selection, with its look, to the tray */
-LOCAL void cr_copy( DTWIN *d )
+/*
+ * The selection, with its look, to the tray: TRUE when it is all there.
+ * When it is not -- no memory for all of it -- the person is told, and
+ * nothing is to be taken away from the text.
+ */
+LOCAL BOOL cr_copy( DTWIN *d )
 {
 	INT	pa, a, pb, b;
+	ER	er;
 
 	sel_order(d, &pa, &a, &pb, &b);
 	cr_from(d->doc, d->rec, pa, a, pb, b);
-	cr_to_tray();
+	er = cr_short ? E_NOMEM : cr_to_tray();
 	cr_clear();
+	if ( er < E_OK ) {
+		dt_tell(d, "トレーに入れられませんでした", ( er == E_NOMEM )
+			? "メモリが足りません。文章は元のままです" : "文章は元のままです");
+		return FALSE;
+	}
+
+	return TRUE;
 }
 
 /* The look of a piece written round the stretch [a, b) of a paragraph */
@@ -4995,14 +5272,14 @@ EXPORT void dd_sel_release( INT sx, INT sy )
 	sel_order(d, &pa, &a, &pb, &b);
 	t = dt_win_of(wid);
 	if ( t == NULL && wid > 0 ) {
-		/* a program's window: the letters as one line, a copy */
-		UB	*s = (UB *)Kmalloc(OB_DROP_TEXT);
+		/* a program's window: the letters as one line, a copy, all of them */
+		INT	n = sel_text(d, NULL, 0), i;
+		UB	*s = (UB *)Kmalloc((SZ)n + 1);
 		TS_UUID	u;
-		INT	n, i;
 		ER	er = E_NOMEM;
 
 		if ( s != NULL ) {
-			n = sel_text(d, s, OB_DROP_TEXT);
+			n = sel_text(d, s, n + 1);
 			for ( i = 0; i < n; i++ ) {
 				if ( s[i] == '\n' || s[i] == '\t' ) s[i] = ' ';
 			}
@@ -5019,13 +5296,12 @@ EXPORT void dd_sel_release( INT sx, INT sy )
 	}
 	if ( t != NULL && t != d && t->doc == NULL && df_is(t) ) {
 		/* a figure: the letters as its text, leaving here unless it was a copy */
-		UB	*s = (UB *)Kmalloc(OB_DROP_TEXT);
-		INT	n;
+		INT	n = sel_text(d, NULL, 0);
+		UB	*s = (UB *)Kmalloc((SZ)n + 1);
 		ER	er = E_NOMEM;
 
 		if ( s != NULL ) {
-			n = sel_text(d, s, OB_DROP_TEXT);
-			s[( n < OB_DROP_TEXT ) ? n : OB_DROP_TEXT - 1] = 0;
+			n = sel_text(d, s, n + 1);
 			er = ( n > 0 ) ? df_text_drop(t, cx, cy, s, n) : E_NOEXS;
 			Kfree(s);
 		}
@@ -5055,6 +5331,12 @@ EXPORT void dd_sel_release( INT sx, INT sy )
 		return;			/* onto itself: nothing moves */
 	}
 	cr_from(d->doc, d->rec, pa, a, pb, b);
+	if ( cr_short ) {
+		/* not all of it could be kept: nothing moved, nothing lost */
+		cr_clear();
+		dt_no_memory(d);
+		return;
+	}
 	if ( t == d && !sc_copy && ( pi < pa || ( pi == pa && pos < a ) ) ) {
 		/* before where they were, in the same text: taken out first, the place stays */
 		erase_back(d);
@@ -5122,8 +5404,8 @@ EXPORT BOOL dd_command( DTWIN *d, INT cmd )
 		}
 		return TRUE;
 	case DM_CUT:
-		if ( has_sel(d) ) {
-			cr_copy(d);
+		/* taken away only once it is safe in the tray */
+		if ( has_sel(d) && cr_copy(d) ) {
 			erase_back(d);
 		}
 		return TRUE;

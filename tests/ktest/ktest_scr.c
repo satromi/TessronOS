@@ -428,6 +428,7 @@ LOCAL void test_save( void )
 			tm_printf((UB *)"  the picture read back: %dx%d, %d pixels differ\n", bw, bh, bad);
 			KT_ASSERT_EQ(bad, 0);
 		}
+		om_store_picture_done(back);
 		Kfree(rec);
 	}
 	(void)ob_del_obj(&u);
@@ -529,6 +530,7 @@ LOCAL void test_tray( void )
 				}
 				KT_ASSERT_EQ(bad, 0);
 			}
+			om_store_picture_done(back);
 		}
 	}
 	if ( frag != NULL ) tad_free(frag);
@@ -610,6 +612,7 @@ LOCAL void test_tray_doc( void )
 			}
 			KT_ASSERT_EQ(bad, 0);
 		}
+		om_store_picture_done(back);
 	}
 done:
 	if ( d != NULL ) {

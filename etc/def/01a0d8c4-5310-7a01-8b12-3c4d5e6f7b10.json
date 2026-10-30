@@ -14,6 +14,7 @@
   "maker": "TessronOS",
   "applist": {},
   "tessronos": {
+    "update": "keep",
     "dictionary": {
       "engine": "user",
       "format": "tsv"

@@ -34,6 +34,9 @@
 #define TAD_KEEP	8		/* TAD records of one object */
 #define PRIV_HEAD	24
 #define CHUNK		( 64 * 1024 )
+/* bytes written to a record at a time: each write is made durable when it
+   returns, so the fewer they are the less the medium waits (design 7.3) */
+#define WCHUNK		( 4 * 1024 * 1024 )
 
 typedef struct {
 	UINT	objid;
@@ -60,9 +63,10 @@ typedef struct {
 	RSOBJ	*obj;
 	INT	nobj, maxobj;
 	BOOL	autoref;
-	BKROOT	root[BK_ROOT_MAX];	/* the roots TessronOS's records say, by their number */
-	BOOL	isroot[BK_ROOT_MAX];
-	UB	buf[CHUNK];
+	BKROOT	*root;			/* the roots TessronOS's records say, as many as there are */
+	INT	*rootno;		/* and the number each says it has */
+	INT	nroot, rootcap;
+	UB	buf[WCHUNK];
 } RSTATE;
 
 LOCAL void seterr( BKJOB *j, const char *s, ER er )
@@ -141,12 +145,14 @@ LOCAL void btron_of( BPKBUF *b, const RSOBJ *o )
  */
 LOCAL void meta_tf( BPKBUF *b, const RSOBJ *o, const char *meta, INT n )
 {
-	const char *tf = NULL;
-	INT	i, e;
+	static const char key[] = "\"tessronos\":{";
+	const INT	klen = (INT)sizeof(key) - 1;
+	const char	*tf = NULL;
+	INT		i, e;
 
-	for ( i = 0; i + 10 <= n; i++ ) {
-		if ( memcmp(meta + i, "\"tessronos\":{", 10) == 0 ) {
-			tf = meta + i + 10;
+	for ( i = 0; i + klen <= n; i++ ) {
+		if ( memcmp(meta + i, key, (size_t)klen) == 0 ) {
+			tf = meta + i + klen;
 			break;
 		}
 	}
@@ -211,7 +217,7 @@ LOCAL ER make_obj( BKJOB *j, RSTATE *r, const BK_OBJHEAD *oh, RSOBJ **p_o )
 	j->nmade++;
 	if ( j->nmade == 1 ) j->root = o->uuid;
 
-	k = ob_opn_obj(&o->uuid, OB_OP_R | OB_OP_W);
+	k = ob_opn_obj(&o->uuid, OB_OP_R | OB_OP_W | OB_O_EXCL);	/* restored record by record: not read half done */
 	if ( k <= 0 ) return ( k < 0 ) ? k : E_NOEXS;
 	bpk_buf_init(&b);
 	bpk_buf_puts(&b, "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>");
@@ -308,7 +314,7 @@ EXPORT ER bk_rest_volume( BKJOB *j, BK_SRC src, void *arg )
 		} else {
 			o = &r->obj[(UBINT)f->user - 1];
 		}
-		k = ob_opn_obj(&o->uuid, OB_OP_R | OB_OP_W);
+		k = ob_opn_obj(&o->uuid, OB_OP_R | OB_OP_W | OB_O_EXCL);
 		if ( k <= 0 ) {
 			seterr(j, "作った実身を開けません", k);
 			return ( k < 0 ) ? k : E_NOEXS;
@@ -375,7 +381,7 @@ EXPORT ER bk_rest_volume( BKJOB *j, BK_SRC src, void *arg )
 			}
 			/* the bytes of this piece */
 			what = "レコードに書けません";
-			while ( ( n = bk_rd_read(&r->rd, r->buf, CHUNK) ) > 0 ) {
+			while ( ( n = bk_rd_read(&r->rd, r->buf, WCHUNK) ) > 0 ) {
 				if ( cur >= 0 ) {
 					SZ	asz = 0;
 
@@ -582,8 +588,20 @@ LOCAL void root_take( RSTATE *r, const RSOBJ *o, char *meta, INT *p_n )
 	if ( js_parse((const UB *)meta, n, &root) < E_OK || js_get(&root, "tessronos", &tf) < E_OK
 	  || js_get(&tf, "backup", &bk) < E_OK || js_type(&bk) != JS_OBJECT ) return;
 	idx = (INT)js_get_num(&bk, "root", -1);
-	if ( idx >= 0 && idx < BK_ROOT_MAX ) {
-		BKROOT	*rt = &r->root[idx];
+	if ( idx >= 0 && r->nroot == r->rootcap ) {
+		INT	cap = ( r->rootcap > 0 ) ? r->rootcap * 2 : 16;
+		BKROOT	*nr = realloc(r->root, sizeof(BKROOT) * (size_t)cap);
+		INT	*nn;
+
+		if ( nr != NULL ) r->root = nr;
+		nn = ( nr != NULL ) ? realloc(r->rootno, sizeof(INT) * (size_t)cap) : NULL;
+		if ( nn != NULL ) {
+			r->rootno = nn;
+			r->rootcap = cap;
+		}
+	}
+	if ( idx >= 0 && r->nroot < r->rootcap ) {
+		BKROOT	*rt = &r->root[r->nroot];
 
 		memset(rt, 0, sizeof(*rt));
 		rt->uuid = o->uuid;
@@ -597,7 +615,7 @@ LOCAL void root_take( RSTATE *r, const RSOBJ *o, char *meta, INT *p_n )
 			}
 			rt->hasbox = (BOOL)( k == 4 && rt->box[2] > rt->box[0] && rt->box[3] > rt->box[1] );
 		}
-		r->isroot[idx] = TRUE;
+		r->rootno[r->nroot++] = idx;
 	}
 
 	/* "backup":{...} out, with the comma before or after it */
@@ -822,7 +840,7 @@ EXPORT ER bk_rest_end( BKJOB *j )
 			break;
 		}
 		c.o = o;
-		c.key = ob_opn_obj(&o->uuid, OB_OP_R | OB_OP_W | OB_OP_PROT);
+		c.key = ob_opn_obj(&o->uuid, OB_OP_R | OB_OP_W | OB_OP_PROT | OB_O_EXCL);
 		if ( c.key <= 0 ) {
 			er = ( c.key < 0 ) ? c.key : E_NOEXS;
 			seterr(j, "作った実身を開けません", er);
@@ -867,10 +885,28 @@ EXPORT ER bk_rest_end( BKJOB *j )
 	}
 	free(cv);
 
-	/* the roots: those TessronOS's records say, in their order; else the first object */
+	/* the roots: those TessronOS's records say, in the order of their numbers (one of a number); else the first object */
+	free(j->rroot);
+	j->rroot = malloc(sizeof(BKROOT) * (size_t)( r->nroot + 1 ));
 	j->nrroot = 0;
-	for ( i = 0; i < BK_ROOT_MAX; i++ ) {
-		if ( r->isroot[i] ) j->rroot[j->nrroot++] = r->root[i];
+	if ( j->rroot == NULL ) {
+		if ( er >= E_OK ) seterr(j, "作業の場所がありません", E_NOMEM);
+		return ( er >= E_OK ) ? E_NOMEM : er;
+	}
+	for ( i = 1; i < r->nroot; i++ ) {
+		BKROOT	t = r->root[i];
+		INT	tn = r->rootno[i], k;
+
+		for ( k = i; k > 0 && r->rootno[k - 1] > tn; k-- ) {
+			r->root[k] = r->root[k - 1];
+			r->rootno[k] = r->rootno[k - 1];
+		}
+		r->root[k] = t;
+		r->rootno[k] = tn;
+	}
+	for ( i = 0; i < r->nroot; i++ ) {
+		if ( i > 0 && r->rootno[i] == r->rootno[i - 1] ) continue;
+		j->rroot[j->nrroot++] = r->root[i];
 	}
 	if ( j->nrroot == 0 && r->nobj > 0 ) {
 		memset(&j->rroot[0], 0, sizeof(BKROOT));
@@ -905,8 +941,13 @@ EXPORT void bk_rest_free( BKJOB *j )
 	}
 	free(r->obj);
 	free(r->frag);
+	free(r->root);
+	free(r->rootno);
 	free(r);
 	j->rest = NULL;
+	free(j->rroot);
+	j->rroot = NULL;
+	j->nrroot = 0;
 }
 
 /* ---------------------------------------------------------------- looking in */

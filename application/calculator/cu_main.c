@@ -392,7 +392,7 @@ LOCAL INT selftest( void )
 int main( void )
 {
 	T_OBNTM	m;
-	SZ	asz = 0, argn;
+	SZ	argn;
 	char	arg[32];
 	INT	id, ev;
 
@@ -409,7 +409,7 @@ int main( void )
 	say("calculator: ready\n");
 
 	while ( !closing ) {
-		while ( !closing && ob_rea_rec(ui.port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+		for ( TMO tmo = TMO_FEVR; !closing && ui_wait(&ui, &m, tmo) >= E_OK; tmo = TMO_POL ) {
 			ev = ui_event(&ui, &m, &id);
 			switch ( ev ) {
 			case UI_EV_CLOSE:
@@ -427,9 +427,6 @@ int main( void )
 			default:
 				break;
 			}
-		}
-		if ( !closing ) {
-			(void)tk_dly_tsk(TICK_MS);
 		}
 	}
 	ui_close(&ui);

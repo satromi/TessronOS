@@ -37,6 +37,32 @@ IMPORT UD knl_rump_pages( void );
  * its pools grow now and then while a test runs, for nothing the test
  * did.
  */
+IMPORT BOOL knl_pt_reclaim( void );
+
+LOCAL UD free_pages( void );
+
+/*
+ * The free pages once the count stops moving: what ran before lets some
+ * go late (page tables given back after every processor has passed);
+ * taken once the count is the same three times running, a tenth of a
+ * second apart, or after five seconds
+ */
+LOCAL UD free_quiet( void )
+{
+	UD	f = 0, last = 0;
+	INT	i, k, same = 0;
+
+	for ( i = 0; i < 50; i++ ) {
+		for ( k = 0; k < 50 && knl_pt_reclaim(); k++ ) tk_dly_tsk(20);
+		f = free_pages();
+		same = ( i > 0 && f == last ) ? same + 1 : 0;
+		if ( same >= 3 ) break;
+		last = f;
+		tk_dly_tsk(100);
+	}
+	return f;
+}
+
 LOCAL UD free_pages( void )
 {
 #if TS_NETSTACK_NETBSD
@@ -77,7 +103,11 @@ LOCAL void test_program_present( void )
 	KT_ASSERT_EQ(hdr[0], 0x7f);
 	KT_ASSERT_EQ(hdr[1], (UB)'E');
 	KT_ASSERT_EQ(hdr[4], 2);			/* ELFCLASS64 */
+#if defined(__x86_64__)
+	KT_ASSERT_EQ(hdr[18], 62);			/* EM_X86_64 */
+#else
 	KT_ASSERT_EQ(hdr[18], 183);			/* EM_AARCH64 */
+#endif
 	KT_ASSERT_ER(fs_close(fd), EX_OK);
 	have_prog = TRUE;
 }
@@ -484,7 +514,7 @@ LOCAL void test_many( void )
 	cprc.arg    = arg;
 	cprc.argsz  = sizeof(arg);
 
-	before = free_pages();
+	before = free_quiet();
 	for ( n = 0; n < MANY_PRC; n++ ) {
 		pids[n] = ts_cre_prc(PROG, &cprc);
 		if ( pids[n] <= 0 ) {
@@ -523,7 +553,9 @@ LOCAL void test_many( void )
 	}
 	KT_ASSERT_EQ(codes, n);
 	after = free_pages();
-	tm_printf((UB*)"  %d processes; free pages %d -> %d\n", n, (INT)before, (INT)after);
+	tm_printf((UB*)"  %d processes; free pages %d -> %d at once", n, (INT)before, (INT)after);
+	after = free_quiet();
+	tm_printf((UB*)", %d once the count holds still\n", (INT)after);
 	KT_ASSERT_EQ(before, after);
 	Kfree(pids);
 }

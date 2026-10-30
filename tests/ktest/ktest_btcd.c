@@ -557,7 +557,7 @@ LOCAL void drop( CONST TS_UUID *u, INT depth )
 }
 
 /*
- * The box a 取込 made taken out of ファイル変換の箱 and thrown away with
+ * The box a 取込 made taken out of the person's cabinet and thrown away with
  * everything it reaches. 実身 taken in link to each other (はじめに and
  * 図１ to each other), so that none of them would ever come to no link:
  * the links of each are taken out first, then each is deleted.
@@ -573,7 +573,7 @@ LOCAL void drop_box( CONST TS_UUID *box )
 	ID	key;
 	static CONST char none[] = "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p></p></document></tad>\n";
 
-	if ( ts_str_to_uuid(SYSDEF_XFCONV_BOX, &home) >= E_OK ) (void)om_obj_link_del(&home, box);
+	if ( ts_str_to_uuid(SYSDEF_CABINET, &home) >= E_OK ) (void)om_obj_link_del(&home, box);
 	all = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * DROP_MAX);
 	if ( all == NULL ) {
 		drop(box, 6);
@@ -732,7 +732,7 @@ LOCAL void test_xfconv( void )
 
 		KT_ASSERT(in_order(pos, root));
 	}
-	KT_ASSERT(find(logb, log_from(pos, logb, LOG_MAX), "xfconv: mounted", 0) < 0);
+	KT_ASSERT(find(logb, log_from(pos, logb, LOG_MAX), "xfconv: opened disk", 0) < 0);
 	fwid = wait_window(FS_NAME, &fwin, 30);
 	KT_ASSERT(fwid > 0);
 	if ( fwid <= 0 ) {
@@ -864,7 +864,7 @@ LOCAL void test_xfconv( void )
 	pos = log_now();
 	ctrl(fwid, 'e');
 	KT_ASSERT(wait_for(pos, "xfconv: closed btron " FS_NAME, 50, NULL, 0));
-	KT_ASSERT(find(logb, log_from(pos, logb, LOG_MAX), "xfconv: unmounted", 0) < 0);
+	KT_ASSERT(find(logb, log_from(pos, logb, LOG_MAX), "xfconv: closed disk", 0) < 0);
 	finish(pid, &win);
 }
 

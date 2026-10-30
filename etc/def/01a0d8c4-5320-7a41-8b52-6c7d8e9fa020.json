@@ -18,7 +18,7 @@
       "id": "tessronos-calculator",
       "kind": "accessory",
       "name": "電卓",
-      "version": "R1.110",
+      "version": "R1.200",
       "menu": true,
       "builtin": false,
       "base": []

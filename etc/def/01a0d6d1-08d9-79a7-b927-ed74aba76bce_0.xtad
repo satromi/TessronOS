@@ -1,4 +1,4 @@
-<tad version="1.0" encoding="UTF-8" filename="部品箱">
+<tad version="1.0" encoding="UTF-8" filename="部品の定義">
 <figure>
 <link id="01a0d6d1-08da-7ef3-b6e2-e5f07d8606fb_0.xtad" vobjid="01a0d8c3-2002-763a-a9ca-eac19b3a4d07" vobjleft="8" vobjtop="8" vobjright="248" vobjbottom="33" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
 <link id="01a0d6d1-08db-7eb5-a0f1-0dc6270bf19f_0.xtad" vobjid="01a0d8c3-2002-7a66-a1aa-31cb17266f73" vobjleft="8" vobjtop="40" vobjright="248" vobjbottom="65" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>

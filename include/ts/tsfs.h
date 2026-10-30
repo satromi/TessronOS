@@ -61,6 +61,8 @@ extern "C" {
 #define TFO_WRITE	0x0002
 #define TFO_EXCL	0x0004
 #define TFO_SHARE	0x0008		/* the attributes alone: shared even with a writer */
+#define TFO_WEXCL	0x0010		/* other writers kept out, readers let in */
+#define TFO_NOEXCL	0x0020		/* nobody kept out: as with none of them */
 
 /*
  * Creation information
@@ -118,6 +120,14 @@ IMPORT ER  ts_cre_obj( ID vol, CONST T_COBJ *pk_cobj, TS_UUID *p_uuid );
 IMPORT ER  ts_del_obj( ID vol, CONST TS_UUID *uuid );
 IMPORT ID  ts_opn_obj( ID vol, CONST TS_UUID *uuid, UINT omode );
 IMPORT ER  ts_cls_obj( ID od );
+
+/*
+ * What has been changed through an opened object (od), or through any
+ * object of any native volume (ts_syn_all), made sure to be on the
+ * medium (design 7.3).
+ */
+IMPORT ER  ts_syn_obj( ID od );
+IMPORT ER  ts_syn_all( void );
 IMPORT ER  ts_od_uuid( ID od, TS_UUID *p_uuid );	/* what an open object is */
 IMPORT ER  ts_ref_obj( ID vol, CONST TS_UUID *uuid, T_ROBJ *pk_robj );
 IMPORT ER  ts_lst_obj( ID vol, CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt );
@@ -245,6 +255,13 @@ IMPORT INT knl_tsfs_exec_rec( ID vol, CONST TS_UUID *uuid );
 IMPORT ER  knl_tsfs_exists( ID vol, CONST TS_UUID *uuid );
 IMPORT ER  knl_tsfs_cre_as( ID vol, CONST TS_UUID *uuid, CONST UB *json, INT len );
 IMPORT ER  knl_tsfs_get_meta( ID vol, CONST TS_UUID *uuid, UB *buf, INT max, INT *p_len );
+/*
+ * The metadata whole, however long (knl_tsfs_get_meta read again with
+ * more room while it fills it), in a buffer to Kfree with room bytes
+ * more and a nought after the text: its length, or an error; what the
+ * buffer holds in *p_cap (NULL: not wanted). peripheral_kernel/obj/objson.c.
+ */
+IMPORT INT  knl_tsfs_meta_all( ID vol, CONST TS_UUID *uuid, INT room, UB **p_buf, INT *p_cap );
 IMPORT ER  knl_tsfs_set_meta( ID vol, CONST TS_UUID *uuid, CONST UB *buf, INT len );
 /*
  * Whether an object may be changed and deleted, as the native store keeps

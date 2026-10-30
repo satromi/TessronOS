@@ -58,6 +58,9 @@
 #include "drm-uapi/drm.h"
 #include "drm-uapi/v3d_drm.h"
 #include "ts_glport.h"
+#ifdef __x86_64__
+#include "drm-uapi/i915_drm.h"
+#endif
 
 #ifndef F_DUPFD_CLOEXEC
 #define F_DUPFD_CLOEXEC	14		/* newlib's, hidden by a strict standard */
@@ -88,6 +91,10 @@ typedef struct {
 	uint32_t	size;
 	void		*addr;		/* where it is mapped, NULL before */
 	void		*mem;		/* a pretended BO's memory (ts_gl_drm_fake) */
+#ifdef __x86_64__
+	uint64_t	va;		/* Intel: where it is placed in the context's space, 0 nowhere */
+	uint32_t	tiling, stride;	/* Intel: what the driver said of its tiling */
+#endif
 } BOENT;
 
 typedef struct {
@@ -98,6 +105,10 @@ typedef struct {
 	BOENT		*bo;		/* by number */
 	uint32_t	next_bo;	/* a pretended V3D's last BO number */
 	uint32_t	next_va;	/* and where its next BO is in the GPU's space */
+#ifdef __x86_64__
+	int		intel;		/* Intel's GPU (gl_drm_i915.c): its requests are i915's */
+	struct i915_fd	*i9;
+#endif
 } GCTX;
 
 typedef struct {
@@ -125,6 +136,17 @@ typedef struct {
 
 static int		fake_on;
 static int		fake_last;
+
+#ifdef __x86_64__
+/* Intel's GPU (gl_drm_i915.c, read in at the end of this file) */
+#define FAKE_INTEL	2		/* ts_gl_drm_fake(2): a pretended Intel GPU */
+struct i915_fd;
+static int	i915_open( GCTX *c );
+static void	i915_close( GCTX *c );
+static int	i915_ioctl( int fd, int ctx, unsigned long request, void *arg );
+static int	fd_intel( int fd );
+static int	i915_device( int fd, drmDevicePtr *device );
+#endif
 
 static const uint32_t	fake_core[3] = { 0x07443356, 0x81001441, 0xc0078101 };
 static const uint32_t	fake_hub[4] = { 0x42554856, 0x00081117, 0x00001900, 0x00000700 };
@@ -258,7 +280,11 @@ int ts_gl_drm_open( void )
 	if ( fake_on ) {
 		ctx = FAKE_CTX + ++fake_last;
 	} else {
+#ifdef __x86_64__
+		if ( ts_gl_gpu_kind() != TS_GL_GPU_V3D && ts_gl_gpu_kind() != TS_GL_GPU_INTEL ) {
+#else
 		if ( ts_gl_gpu_kind() != TS_GL_GPU_V3D ) {
+#endif
 			return -1;
 		}
 		ctx = gp_opn_gpu();
@@ -276,6 +302,14 @@ int ts_gl_drm_open( void )
 			gctx[i].bo = NULL;
 			gctx[i].next_bo = 0;
 			gctx[i].next_va = FAKE_VA;
+#ifdef __x86_64__
+			gctx[i].intel = ( fake_on == FAKE_INTEL || ( !fake_on && ts_gl_gpu_kind() == TS_GL_GPU_INTEL ) );
+			gctx[i].i9 = NULL;
+			if ( gctx[i].intel && i915_open(&gctx[i]) < 0 ) {
+				gctx[i].ctx = 0;
+				break;
+			}
+#endif
 			fd = fd_new(i);
 			if ( fd < 0 ) {
 				gctx[i].ctx = 0;
@@ -393,6 +427,9 @@ int ts_gpu_fd_close( int fd )
 		c->bo = NULL;
 		c->nbo = 0;
 		c->ctx = 0;
+#ifdef __x86_64__
+		i915_close(c);
+#endif
 	}
 	pthread_mutex_unlock(&mu);
 	if ( ctx > 0 ) {
@@ -1083,6 +1120,11 @@ int drmIoctl( int fd, unsigned long request, void *arg )
 		errno = EBADF;
 		return -1;
 	}
+#ifdef __x86_64__
+	if ( fd_intel(fd) ) {
+		return i915_ioctl(fd, ctx, request, arg);
+	}
+#endif
 	if ( fd_fake(fd) ) {
 		return fake_ioctl(fd, request, arg);
 	}
@@ -1214,6 +1256,11 @@ drmVersionPtr drmGetVersion( int fd )
 		errno = EBADF;
 		return NULL;
 	}
+#ifdef __x86_64__
+	if ( fd_intel(fd) ) {
+		name = "i915";
+	}
+#endif
 	v = calloc(1, sizeof(*v));
 	if ( v == NULL ) {
 		return NULL;
@@ -1330,6 +1377,11 @@ int drmGetDevice2( int fd, uint32_t flags, drmDevicePtr *device )
 	if ( fd_ctx(fd) <= 0 ) {
 		return -ENODEV;
 	}
+#ifdef __x86_64__
+	if ( fd_intel(fd) ) {
+		return i915_device(fd, device);
+	}
+#endif
 	d = calloc(1, sizeof(*d));
 	if ( d == NULL ) {
 		return -ENOMEM;
@@ -1377,6 +1429,12 @@ int drmDevicesEqual( drmDevicePtr a, drmDevicePtr b )
 	if ( a == b ) {
 		return 1;
 	}
+#ifdef __x86_64__
+	if ( a != NULL && b != NULL && a->bustype == DRM_BUS_PCI && b->bustype == DRM_BUS_PCI ) {
+		return a->businfo.pci->bus == b->businfo.pci->bus && a->businfo.pci->dev == b->businfo.pci->dev
+		    && a->businfo.pci->func == b->businfo.pci->func;
+	}
+#endif
 	if ( a == NULL || b == NULL || a->bustype != b->bustype || a->bustype != DRM_BUS_PLATFORM ) {
 		return 0;
 	}
@@ -1408,3 +1466,7 @@ char *drmGetRenderDeviceNameFromFd( int fd )
 {
 	return node_name(fd);
 }
+
+#ifdef __x86_64__
+#include "gl_drm_i915.c"
+#endif

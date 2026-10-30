@@ -187,6 +187,7 @@ typedef struct {
 	BOOL	system;			/* the volume the system runs on */
 } T_TSFSCKDEV;
 
+/* Every volume there is: up to max of them into buf, and how many there are (ask again with more room when more) */
 IMPORT INT ob_chk_list( T_TSFSCKDEV *buf, INT max );
 IMPORT ER  ob_chk_run( CONST char *devnm, UINT mode, T_TSFSCK *res, FP_TSFSCK fn, void *ctx );
 IMPORT ER  ob_chk_request( CONST char *devnm, UINT mode );

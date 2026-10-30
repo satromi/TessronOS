@@ -7,6 +7,10 @@
 # 差し込み into the label layout and the letter, and the found cards written out
 # in @形式. The card window is at 120,90 (its work area from 131,118), the
 # list window right of it.
+# A search's note comes before the screen is changed and the bar along the
+# top made again, so a press on the bar waits for "bar <screen> search
+# <on|off>", which the program says once the bar's buttons are in place;
+# a note said more than once is looked for after a logmark.
 open 01a0d8c4-5334-7e95-8a06-b1c2d3e4f534
 expect mcard: ready カード用紙
 wait 800
@@ -83,20 +87,26 @@ expect mcard: card 1 of 3
 wait 300
 shot mc_list
 # 検索条件画面: ねんれい < 30
+logmark
 click 605 136
-expect mcard: screen find
+expectsince mcard: screen find
+expectsince mcard: bar find search off
 click 400 195
 wait 200
 click 240 136
 key 39
 text 30
+logmark
 click 592 136
-expect mcard: search new found 2 of 3
+expectsince mcard: search new found 2 of 3
+expectsince mcard: bar card search on
 wait 300
 shot mc_found
 # narrowed: なまえ ≒ず (the kana partly, as 異形字ゆらぎ同一視 reads it)
+logmark
 click 605 136
-expect mcard: screen find
+expectsince mcard: screen find
+expectsince mcard: bar find search on
 click 400 170
 wait 200
 click 325 136
@@ -105,13 +115,19 @@ text zu
 key 28
 wait 300
 shot mc_find2
+logmark
 click 524 136
-expect mcard: search narrow found 2 of 3
+expectsince mcard: search narrow found 2 of 3
+expectsince mcard: bar card search on
+logmark
 click 537 136
-expect mcard: search off
+expectsince mcard: search off
+expectsince mcard: bar card search off
 # a regular expression on でんわ, the other conditions emptied
+logmark
 click 605 136
-expect mcard: screen find
+expectsince mcard: screen find
+expectsince mcard: bar find search off
 click 400 170
 wait 200
 key 2A
@@ -123,10 +139,14 @@ wait 200
 click 356 136
 key 39
 text 03-
+logmark
 click 592 136
-expect mcard: search new found 1 of 3
+expectsince mcard: search new found 1 of 3
+expectsince mcard: bar card search on
+logmark
 click 537 136
-expect mcard: search off
+expectsince mcard: search off
+expectsince mcard: bar card search off
 # 並べ替え from the menu: なまえ, 昇順
 click 400 250 1
 wait 400
@@ -162,12 +182,16 @@ wait 500
 wait 300
 shot mc_dups_panel
 click 290 259
+logmark
 click 530 447
-expect mcard: dups 1 found 2
+expectsince mcard: dups 1 found 2
+expectsince mcard: bar card search on
 wait 300
 shot mc_dups
+logmark
 click 537 136
-expect mcard: search off
+expectsince mcard: search off
+expectsince mcard: bar card search off
 # 表示設定: the card's letters at 14 points
 click 400 250 1
 wait 400
@@ -194,44 +218,62 @@ move 470 330
 wait 150
 move 500 530
 wait 150
+logmark
 click 500 530
-expect mcard: mark search new found 1
+expectsince mcard: mark search new found 1
+expectsince mcard: bar card search on
 wait 300
 shot mc_marked
+logmark
 click 537 136
-expect mcard: search off
+expectsince mcard: search off
+expectsince mcard: bar card search off
 # saved, closed, opened again as it was
 key 16 01
 expect mcard: saved
+logmark
 key 08 01
-expect mcard: closed
+expectsince mcard: closed
 open 01a0d8c4-5334-7e95-8a06-b1c2d3e4f534
 expect mcard: ready カード用紙 fields 3 cards 3
 wait 800
 shot mc_reopened
+# a process's window has the keys once it is pressed, not as it opens
+win カード用紙
+click 400 500
+logmark
 key 08 01
-expect mcard: closed
+expectsince mcard: closed
 # the sample 住所録: 氏名 ≒たなか finds タナカ
 open 01a0d8c4-5336-7a17-8c28-d3e4f5a6b736
 expect mcard: ready 住所録 fields 8 cards 12
 wait 800
 win 住所録
+logmark
 click 605 136
-expect mcard: screen find
+expectsince mcard: screen find
+expectsince mcard: bar find search off
 click 400 170
 wait 200
 click 325 136
 key 88
 text tanaka
 key 28
+logmark
 click 592 136
-expect mcard: search new found 1 of 12
+expectsince mcard: search new found 1 of 12
+expectsince mcard: bar card search on
 wait 300
 shot mc_sample_fold
+logmark
 click 537 136
-expect mcard: search off
+expectsince mcard: search off
+expectsince mcard: bar card search off
 # 電話 /03- : three cards
+logmark
 click 605 136
+expectsince mcard: screen find
+expectsince mcard: bar find search off
 click 400 170
 wait 200
 key 2A
@@ -240,8 +282,10 @@ wait 200
 click 356 136
 key 39
 text 03-
+logmark
 click 592 136
-expect mcard: search new found 3 of 12
+expectsince mcard: search new found 3 of 12
+expectsince mcard: bar card search on
 wait 300
 # 差し込み: the three cards found into 宛名ラベル, a figure of labels two across,
 # printed through the desktop's panel (印刷)
@@ -251,8 +295,9 @@ move 410 270
 wait 150
 move 470 270
 wait 150
+logmark
 click 500 270
-expect mcard: print panel
+expectsince mcard: print panel
 wait 500
 click 290 256
 wait 300
@@ -261,8 +306,9 @@ click 560 465
 expect mcard: print 宛名ラベル cards 3 pages 1 (0)
 wait 1500
 shot mc_merged_label
+logmark
 click 863 511
-expect mcard: print answered 0
+expectsince mcard: print answered 0
 wait 800
 click 400 500
 wait 500
@@ -292,8 +338,9 @@ move 410 370
 wait 150
 move 470 370
 wait 150
+logmark
 click 500 370
-expect mcard: print panel
+expectsince mcard: print panel
 wait 500
 click 290 273
 wait 200
@@ -304,11 +351,13 @@ click 560 465
 expect mcard: print 案内状 cards 1 pages 1 (0)
 wait 1500
 shot mc_merged_letter
+logmark
 click 863 511
-expect mcard: print answered 0
+expectsince mcard: print answered 0
 wait 800
 click 400 500
+logmark
 key 08 01
-expect mcard: closed
+expectsince mcard: closed
 # nothing it did was refused for want of a right
 absent !OACV!

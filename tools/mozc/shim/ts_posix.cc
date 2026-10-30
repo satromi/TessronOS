@@ -489,7 +489,16 @@ int btron_os_entropy(void *buf, unsigned int len)
 		unsigned long	cnt;
 		unsigned int	v;
 
+#if defined(__x86_64__)
+		{
+			unsigned int	lo, hi;
+
+			__asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+			cnt = ( static_cast<unsigned long>(hi) << 32 ) | lo;
+		}
+#else
 		__asm__ volatile("mrs %0, cntvct_el0" : "=r"(cnt));
+#endif
 		v = static_cast<unsigned int>(cnt) ^ static_cast<unsigned int>(cnt >> 32)
 		  ^ ( static_cast<unsigned int>(reinterpret_cast<unsigned long>(&cnt)) * 2246822519u )
 		  ^ ( i * 668265263u );
@@ -629,6 +638,35 @@ int _getentropy(void *buf, size_t len)
 {
 	return btron_os_entropy(buf, static_cast<unsigned int>(len));
 }
+
+#if defined(__x86_64__)
+/*
+ * newlib of x86_64-elf is built with MISSING_SYSCALL_NAMES: its reentrant
+ * calls (_read_r ...) call read, close ... rather than _read, _close ...
+ * The same calls under those names; fcntl has nothing to set here.
+ */
+__asm__(
+	"\t.globl close\n\t.set close, _close\n"
+	"\t.globl fstat\n\t.set fstat, _fstat\n"
+	"\t.globl getentropy\n\t.set getentropy, _getentropy\n"
+	"\t.globl getpid\n\t.set getpid, _getpid\n"
+	"\t.globl gettimeofday\n\t.set gettimeofday, _gettimeofday\n"
+	"\t.globl isatty\n\t.set isatty, _isatty\n"
+	"\t.globl kill\n\t.set kill, _kill\n"
+	"\t.globl lseek\n\t.set lseek, _lseek\n"
+	"\t.globl open\n\t.set open, _open\n"
+	"\t.globl read\n\t.set read, _read\n"
+	"\t.globl sbrk\n\t.set sbrk, _sbrk\n"
+	"\t.globl stat\n\t.set stat, _stat\n"
+	"\t.globl unlink\n\t.set unlink, _unlink\n"
+	"\t.globl write\n\t.set write, _write\n"
+);
+
+int fcntl(int, int, ...)
+{
+	return 0;
+}
+#endif
 
 /* ---------------------------------------------------------------- the C++ runtime's ends */
 

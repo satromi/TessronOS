@@ -26,9 +26,11 @@
 #include <ts/ob.h>
 #include <ts/om.h>
 #include <ts/disp.h>
+#include <ts/wm.h>
 #include <ts/sysdef.h>
 #include <ts/cabmenu.h>
 #include "../../application/desktop/desktop.h"
+#include "../../outer_kernel/wm/wmobj.h"
 
 LOCAL INT	wid = 0;
 
@@ -320,7 +322,8 @@ LOCAL void test_choose( void )
 IMPORT void knl_wmobj_event( CONST T_WMEV *ev );
 
 LOCAL INT	ss_pid;
-LOCAL INT	ss_kind;			/* 1 a choice, 2 a press elsewhere */
+LOCAL INT	ss_kind;			/* 1 a choice, 2 a press elsewhere, 3 the first button on the first row, 4 that and the second let go on the ground */
+LOCAL UD	ss_when;			/* when the input of 3 and 4 comes */
 
 LOCAL void ss_input( INT stacd, void *exinf )
 {
@@ -342,6 +345,25 @@ LOCAL void ss_input( INT stacd, void *exinf )
 		knl_wmobj_event(&ev);
 		ev.type = HID_EV_BTN_UP;
 		knl_wmobj_event(&ev);
+	} else if ( ss_kind == 3 || ss_kind == 4 ) {
+		mr.left = mr.top = mr.right = mr.bottom = 0;
+		(void)wm_panel_rect(ss_pid, &mr);
+		ev.when = ss_when;
+		ev.wid = wm_panel_wid(ss_pid);
+		ev.x = ( mr.left + mr.right ) / 2;
+		ev.y = mr.top + wm_menu_row_h() / 2;	/* the first row */
+		ev.type = HID_EV_MOVE;
+		knl_wmobj_event(&ev);
+		ev.type = HID_EV_BTN_DOWN;
+		knl_wmobj_event(&ev);
+		ev.type = HID_EV_BTN_UP;
+		knl_wmobj_event(&ev);
+		if ( ss_kind == 4 ) {
+			ev.wid = 0;			/* the second button, held all along, let go on the ground */
+			ev.code = 1;
+			ev.when = ss_when + 1000000000ULL;
+			knl_wmobj_event(&ev);
+		}
 	} else {
 		ev.wid = 0;				/* on the ground */
 		ev.type = HID_EV_BTN_DOWN;
@@ -370,6 +392,7 @@ LOCAL void test_session( void )
 	T_DPRECT	o;
 	T_MNSEL		sel;
 	T_OBREF		r;
+	T_WMEV		ev;
 	INT		cmd;
 	ID		mid, tid;
 
@@ -410,9 +433,144 @@ LOCAL void test_session( void )
 		KT_ASSERT_EQ(knl_wmobj_menu_run(ss_pid, 0), 0);
 		(void)wm_panel_close(ss_pid);
 	}
+
+	/*
+	 * A quick click of the second button, its press and release in one
+	 * report with the same time, let go before the menu is there: a
+	 * click, so the menu stays and the first button chooses on it.
+	 */
+	ss_pid = mn_opn_men(mid, wid, 60, 40);
+	KT_ASSERT(ss_pid > 0);
+	if ( ss_pid > 0 ) {
+		knl_memset(&ev, 0, sizeof(ev));
+		ev.code = 1;
+		ev.when = 2000000000000ULL;
+		ev.type = HID_EV_BTN_DOWN;
+		knl_wmobj_event(&ev);			/* the press that opens it, on the ground */
+		ev.type = HID_EV_BTN_UP;
+		knl_wmobj_event(&ev);			/* on the ground: only the time is kept */
+		ss_kind = 3;
+		ss_when = ev.when + 1000000000ULL;
+		tid = ss_task();
+		KT_ASSERT_ER(tk_sta_tsk(tid, 0), E_OK);
+		cmd = knl_wmobj_menu_run(ss_pid, ev.when);
+		KT_ASSERT(cmd > 0);
+		KT_ASSERT_ER(mn_get_sel(mid, cmd, &sel), E_OK);
+		KT_ASSERT(mn_is(&sel, "close"));
+		(void)wm_panel_close(ss_pid);
+	}
+
+	/*
+	 * The release of an earlier click, before this press: the second
+	 * button is held, the first does nothing on the menu, and the second
+	 * let go off it puts it away.
+	 */
+	ss_pid = mn_opn_men(mid, wid, 60, 40);
+	KT_ASSERT(ss_pid > 0);
+	if ( ss_pid > 0 ) {
+		knl_memset(&ev, 0, sizeof(ev));
+		ev.code = 1;
+		ev.when = 3000000000000ULL;
+		ev.type = HID_EV_BTN_UP;
+		knl_wmobj_event(&ev);
+		ev.type = HID_EV_BTN_DOWN;
+		ev.when += 1000000000ULL;
+		knl_wmobj_event(&ev);			/* the press that opens it: the second button, held */
+		ev.when -= 1000000000ULL;
+		ss_kind = 4;
+		ss_when = ev.when + 2000000000ULL;
+		tid = ss_task();
+		KT_ASSERT_ER(tk_sta_tsk(tid, 0), E_OK);
+		KT_ASSERT_EQ(knl_wmobj_menu_run(ss_pid, ev.when + 1000000000ULL), 0);
+		(void)wm_panel_close(ss_pid);
+	}
 	(void)mn_del_men(mid);
 	KT_ASSERT_EQ(wm_panel_self_check(), 0);
 	(void)wm_close(wid);
+}
+
+/*
+ * The candidates of a conversion, listed by the system for a plain
+ * window (OB_WR_CAND): a window of its own under the composition's box,
+ * a press on its second name told to the window as a press on
+ * OB_WR_CAND with code 1, and taken away again with n 0.
+ */
+LOCAL void test_cand( void )
+{
+	static CONST UB	names[] = "漢字\0感じ\0幹事";
+	T_DISPSPEC	spec;
+	T_OBCRE		c;
+	T_OBNTF		req;
+	T_OBNTM		m;
+	T_OBWPOS	wp;
+	T_WMEV		ev;
+	T_WMWIN		pw;
+	TS_UUID		win, ch;
+	ID		kw, port;
+	SZ		asz = 0;
+	INT		pop;
+	CONST char	*js = "{\"rect\":[100,100,500,400],\"attr\":3}";
+
+	if ( ts_disp_ref(&spec) < E_OK ) {
+		KT_SKIP("the machine has no screen");
+	}
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_WINDOW;
+	c.sub = OB_S_WINDOW;
+	c.name = (CONST UB *)"候補の試験";
+	c.json = (CONST UB *)js;
+	c.jsonsz = (SZ)knl_strlen(js);
+	KT_ASSERT_ER(ob_cre_obj(&c, &win), E_OK);
+	kw = ob_opn_obj(&win, OB_OP_R | OB_OP_W | OB_OP_PROT);
+	KT_ASSERT(kw > 0);
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	KT_ASSERT_ER(ob_cre_obj(&c, &ch), E_OK);
+	port = ob_opn_obj(&ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT);
+	KT_ASSERT(port > 0);
+	knl_memset(&req, 0, sizeof(req));
+	req.events = OB_E_PRESS;
+	KT_ASSERT(ob_ntf_evt(kw, OB_REC_ANY, &req, port) > 0);
+	KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz), E_OK);
+
+	/* listed under the box from (20, 30) to (20, 50) of the work area */
+	KT_ASSERT_ER(ob_cand_put(kw, 20, 30, 50, names, 3, 0, 0, 12), E_OK);
+	pop = wm_at(wp.wleft + 24, wp.wtop + 56);
+	KT_ASSERT(pop > 0 && wm_ref(pop, &pw) >= E_OK && ( pw.attr & WM_ATTR_POPUP ) != 0);
+	if ( pop > 0 ) {
+		KT_ASSERT_EQ(pw.outer.left, wp.wleft + 20);
+		KT_ASSERT_EQ(pw.outer.top, wp.wtop + 52);
+	}
+
+	/* the second name pressed: told to the window */
+	while ( ob_rea_tmo(port, 0, 0, &m, sizeof(m), &asz, TMO_POL) >= E_OK ) ;
+	knl_memset(&ev, 0, sizeof(ev));
+	ev.type = HID_EV_BTN_DOWN;
+	ev.code = 0;
+	ev.wid = pop;
+	ev.x = 8;
+	ev.y = 2 + 22 + 5;				/* a row is the letters' 16 and 6 */
+	knl_wmobj_event(&ev);
+	ev.type = HID_EV_BTN_UP;
+	knl_wmobj_event(&ev);
+	KT_ASSERT_ER(ob_rea_tmo(port, 0, 0, &m, sizeof(m), &asz, 1000), E_OK);
+	KT_ASSERT_EQ(m.event, OB_E_PRESS);
+	KT_ASSERT_EQ(m.recno, OB_WR_CAND);
+	KT_ASSERT_EQ(m.code, 1);
+
+	/* taken away */
+	KT_ASSERT_ER(ob_cand_put(kw, 0, 0, 0, NULL, 0, -1, 0, 0), E_OK);
+	KT_ASSERT(wm_ref(pop, &pw) < E_OK || ( pw.attr & WM_ATTR_POPUP ) == 0);
+
+	/* and with the window: put up again, the window closed */
+	KT_ASSERT_ER(ob_cand_put(kw, 20, 30, 50, names, 3, 0, 0, 3), E_OK);
+	pop = wm_at(wp.wleft + 24, wp.wtop + 56);
+	KT_ASSERT(pop > 0);
+	ob_cls_obj(kw);
+	(void)ob_del_obj(&win);
+	KT_ASSERT(pop <= 0 || wm_ref(pop, &pw) < E_OK || ( pw.attr & WM_ATTR_POPUP ) == 0);
+	ob_cls_obj(port);
+	(void)ob_del_obj(&ch);
 }
 
 EXPORT void ktest_mn( void )
@@ -423,4 +581,5 @@ EXPORT void ktest_mn( void )
 	KT_RUN(test_vmn);
 	KT_RUN(test_choose);
 	KT_RUN(test_session);
+	KT_RUN(test_cand);
 }

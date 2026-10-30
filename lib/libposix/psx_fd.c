@@ -728,10 +728,16 @@ int select( int nfds, fd_set *rd, fd_set *wr, fd_set *ex, struct timeval *tv )
 
 /* ---------------------------------------------------------------- the rest */
 
+/* The file's own writes on the medium (design 7.3); sync(2) is every volume's */
 int fsync( int fd )
 {
-	if ( __psx_fd_get(fd) == NULL ) return -1;
-	(void)fs_sync();
+	PSXFD	*e = __psx_fd_get(fd);
+
+	if ( e == NULL ) return -1;
+	if ( e->kind == PK_FS && fs_fsync(e->kfd) < 0 ) {
+		errno = EIO;
+		return -1;
+	}
 	return 0;
 }
 

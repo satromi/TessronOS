@@ -40,6 +40,12 @@
  *	processor stops, nobody feeds it, and the machine is reset without
  *	a word.
  *
+ *	The checks begin when the start-up is done (knl_lockup_arm). Before
+ *	that, the same interrupts keep the start-up's watch on the screen
+ *	(knl_fbcon_watch): a step that stands five seconds is named at the
+ *	foot of the screen with how long it has stood and how many
+ *	processors still take this interrupt.
+ *
  *	Nothing here takes a lock: what is read of the other processors and
  *	of the tasks may be changing as it is read, and is said as it was
  *	found. The checking itself is done by one processor at a time.
@@ -59,6 +65,9 @@
 #include "cpu_task.h"
 #include "cpu_ufault.h"
 
+IMPORT void	knl_bootlog_soon( void );	/* bootlog.c */
+IMPORT void	knl_fbcon_watch( UD now, UD frq, INT me, INT ticking, INT online, CONST UB *quiet );	/* fbcon.c */
+
 #define LK_PERIOD_MS	500		/* the timer of each processor */
 #define LK_STOP_MS	5000		/* no interrupt, a spin lock, the kernel lock: this long is stopped */
 #define LK_SCAN_CHUNK	2048		/* tasks looked at for circles of mutex waits, a check at a time */
@@ -66,7 +75,9 @@
 #define LK_SGI_MS	500		/* a processor sent SGI_LOCKUP has this long to answer */
 #define LK_SPIN_AGAIN	6		/* a waiter for a spin lock says it again every this many periods */
 
-#define NPRC		CNF_MAX_PRCID
+#define NPRC		knl_num_prc
+#define LKC(i)		( &knl_pcpu_of(i)->lk )
+#define LKB(i)		( LKC(i)->beats )
 
 /* The board's watchdog: none unless the board has one */
 WEAK_FUNC EXPORT BOOL knl_wdog_hw_feed( UW ms )
@@ -86,31 +97,11 @@ IMPORT volatile UD	knl_klock_count;
 
 /* ------------------------------------------------------------------------ */
 /*
- * What is kept of each processor
+ * What is kept of each processor: in its own data (T_PCPU.lk), so that
+ * only the processors found take memory
  */
-typedef struct {
-	volatile UD	beat;		/* the counter at its last timer interrupt (0: not started) */
-	volatile UD	beats;
-	/* where the last interrupt found it */
-	volatile UD	s_pc, s_lr, s_sp, s_spsr, s_at;
-	volatile ID	s_tsk;
-	/* the spin lock it waits for too long (lk_spin_stall) */
-	T_SPLOCK * volatile w_lock;
-	volatile UBINT	w_pc;
-	volatile UD	w_since;
-	UW		w_told;
-	BOOL		reported;	/* told it stopped: until it beats again */
-	UD		rep_at;
-	volatile BOOL	dump_req;	/* SGI_LOCKUP: say where you are */
-	volatile BOOL	dump_done;
-	volatile BOOL	nmi_req;	/* the same asked by NMI */
-	volatile BOOL	nmi_done;
-	volatile BOOL	halted;		/* stopped by an exception in the kernel */
-	volatile BOOL	in_hook;
-	volatile BOOL	mute;		/* the tests: looks stopped */
-} LKCPU;
+typedef T_LKCPU LKCPU;
 
-LOCAL LKCPU	lk[NPRC];
 LOCAL T_LKSTAT	lk_stat;
 
 LOCAL UD	lk_frq = 0;		/* counts a second */
@@ -138,6 +129,7 @@ LOCAL volatile ID	lk_watch_tsk = 0;
 LOCAL volatile UD	lk_alive_at = 0;
 LOCAL volatile BOOL	lk_watch_idle = FALSE;	/* the watched task waits for input */
 LOCAL BOOL	lk_silent_told = FALSE;
+LOCAL UD	lk_silent_from = 0;	/* when the loop told of had last come round */
 
 /* the circles of waits already told */
 #define LK_CIRCLES	8
@@ -149,6 +141,12 @@ LOCAL INT	lk_scan_pos = 0;
 Inline UD lk_now( void )
 {
 	return ReadSysCounterSync();
+}
+
+/* The counter these checks read, for others that note when something began (usbman.c) */
+EXPORT UD knl_lockup_now( void )
+{
+	return lk_now();
 }
 
 Inline UW lk_ms( UD cycles )
@@ -273,8 +271,61 @@ LOCAL void lk_say_waiting_task( CONST char *pre, TCB *t )
 	}
 }
 
-/* The mutex a task waits for, and who holds it, as far as it goes */
-LOCAL void lk_say_chain( CONST char *pre, TCB *t )
+/*
+ * Semaphores used as locks (a count of one), whose holder is noted as
+ * they are taken and given back (knl_lockup_sem_held): a task waiting
+ * for one is followed to the holder as for a mutex
+ */
+#define LK_SEMS		16
+
+LOCAL struct {
+	volatile ID	sem;		/* 0: a free slot */
+	volatile ID	tsk;		/* the holder, 0 none */
+	volatile UD	at;		/* since */
+} lk_sem[LK_SEMS];
+
+EXPORT void knl_lockup_sem_held( ID semid, BOOL held )
+{
+	INT	i, free = -1;
+
+	for ( i = 0; i < LK_SEMS; i++ ) {
+		if ( lk_sem[i].sem == semid ) break;
+		if ( lk_sem[i].sem == 0 && free < 0 ) free = i;
+	}
+	if ( i == LK_SEMS ) {
+		ID	none = 0;
+
+		if ( !held || free < 0 ) return;
+		if ( !__atomic_compare_exchange_n(&lk_sem[free].sem, &none, semid, FALSE,
+						  __ATOMIC_ACQ_REL, __ATOMIC_RELAXED) ) {
+			return;			/* taken meanwhile: this one is not noted */
+		}
+		i = free;
+	}
+	if ( held ) {
+		lk_sem[i].at = lk_now();
+		lk_sem[i].tsk = tk_get_tid();
+	} else {
+		lk_sem[i].tsk = 0;
+	}
+}
+
+LOCAL INT lk_sem_slot( ID semid )
+{
+	INT	i;
+
+	for ( i = 0; i < LK_SEMS; i++ ) {
+		if ( lk_sem[i].sem == semid ) return i;
+	}
+	return -1;
+}
+
+/*
+ * The mutex or noted semaphore a task waits for, and who holds it, as
+ * far as it goes; with 'holders', what each holder is doing too: its
+ * state, what it waits for, and where it stopped
+ */
+LOCAL void lk_say_chain( CONST char *pre, TCB *t, BOOL holders )
 {
 	INT	n;
 	TCB	*first = t;
@@ -284,14 +335,39 @@ LOCAL void lk_say_chain( CONST char *pre, TCB *t )
 		TCB	*o;
 
 		t = lk_tcb_ok(t);
-		if ( t == NULL || ( t->state & TS_WAIT ) == 0 || t->wspec == NULL
-		  || t->wspec->tskwait != TTW_MTX || !CHK_MTXID(t->wid) ) {
+		if ( t == NULL || ( t->state & TS_WAIT ) == 0 || t->wspec == NULL ) {
 			return;
 		}
-		m = get_mtxcb(t->wid);
-		o = lk_tcb_ok(m->mtxtsk);
-		tm_printf_urgent((UB *)"%s  task %d waits for mutex %d, held by task %d\n", pre,
-				 t->tskid, t->wid, ( o != NULL ) ? o->tskid : 0);
+		if ( t->wspec->tskwait == TTW_SEM ) {
+			INT	k = lk_sem_slot(t->wid);
+			ID	h = ( k >= 0 ) ? lk_sem[k].tsk : 0;
+
+			if ( k < 0 ) {
+				tm_printf_urgent((UB *)"%s  task %d waits for semaphore %d, not one whose holder is noted\n",
+						 pre, t->tskid, t->wid);
+				return;
+			}
+			if ( h <= 0 || !CHK_TSKID(h) ) {
+				tm_printf_urgent((UB *)"%s  task %d waits for semaphore %d, noted as free\n", pre,
+						 t->tskid, t->wid);
+				return;
+			}
+			o = get_tcb(h);
+			tm_printf_urgent((UB *)"%s  task %d waits for semaphore %d, held by task %d for %d ms\n", pre,
+					 t->tskid, t->wid, h, lk_ago(lk_now(), lk_sem[k].at));
+		} else if ( t->wspec->tskwait == TTW_MTX && CHK_MTXID(t->wid) ) {
+			m = get_mtxcb(t->wid);
+			o = lk_tcb_ok(m->mtxtsk);
+			tm_printf_urgent((UB *)"%s  task %d waits for mutex %d, held by task %d\n", pre,
+					 t->tskid, t->wid, ( o != NULL ) ? o->tskid : 0);
+		} else {
+			return;
+		}
+		if ( holders && o != NULL && o != first ) {
+			tm_printf_urgent((UB *)"%s  the holder, task %d (state %d: 1 ready, 2 waiting, 4 suspended):\n",
+					 pre, o->tskid, o->state);
+			lk_say_waiting_task(pre, o);
+		}
 		t = o;
 		if ( t == first ) {
 			return;		/* round to where it began: a circle */
@@ -299,11 +375,34 @@ LOCAL void lk_say_chain( CONST char *pre, TCB *t )
 	}
 }
 
+/* The USB manager's lock (device/usb/usbman.c): who holds it, and since when */
+IMPORT volatile ID	knl_usb_lock_tsk __attribute__((weak));
+IMPORT volatile UD	knl_usb_lock_at __attribute__((weak));
+
+LOCAL void lk_say_usb_lock( CONST char *pre, UD now )
+{
+	ID	t;
+
+	if ( &knl_usb_lock_tsk == NULL || &knl_usb_lock_at == NULL ) {
+		return;
+	}
+	t = knl_usb_lock_tsk;
+	if ( t > 0 ) {
+		tm_printf_urgent((UB *)"%sthe USB manager's lock is held by task %d, for %d ms\n", pre, t,
+				 lk_ago(now, knl_usb_lock_at));
+		if ( CHK_TSKID(t) ) {
+			lk_say_waiting_task(pre, get_tcb(t));
+		}
+	} else {
+		tm_printf_urgent((UB *)"%sthe USB manager's lock is free\n", pre);
+	}
+}
+
 /* What is known of a processor from outside it */
 LOCAL void lk_say_cpu( INT i, UD now )
 {
-	T_PCPU	*p = &knl_pcpu_tbl[i];
-	LKCPU	*c = &lk[i];
+	T_PCPU	*p = knl_pcpu_of(i);
+	LKCPU	*c = LKC(i);
 	char	pre[8];
 	INT	k;
 
@@ -326,8 +425,14 @@ LOCAL void lk_say_cpu( INT i, UD now )
 		tm_printf_urgent((UB *)"%sholds the kernel lock, taken at %lx %d ms ago\n", pre,
 				 (UD)knl_klock_pc, lk_ago(now, knl_klock_since));
 	}
-	for ( k = 0; i < SPIN_HELD_PRC && k < SPIN_HELD_N; k++ ) {
-		T_SPHELD	*h = &knl_spin_held[i][k];
+#if KLK_FINE
+	for ( k = 0; k < p->klk.n && k < KLK_HELD_N; k++ ) {
+		tm_printf_urgent((UB *)"%sholds the kernel's lock %lx (rank %d), taken at %lx\n", pre,
+				 (UD)(UBINT)p->klk.held[k].l, p->klk.held[k].rank, (UD)p->klk.held[k].pc);
+	}
+#endif
+	for ( k = 0; i < knl_spin_held_n && knl_spin_held_p[i] != NULL && k < SPIN_HELD_N; k++ ) {
+		T_SPHELD	*h = &knl_spin_held_p[i][k];
 		T_SPLOCK	*l = h->lock;
 
 		if ( l != NULL && l != &knl_klock ) {
@@ -359,15 +464,38 @@ LOCAL INT lk_holder_of( T_SPLOCK *l, T_SPHELD **ph )
 		*ph = NULL;
 		return ( knl_klock_holder > 0 ) ? knl_klock_holder - 1 : -1;
 	}
-	for ( i = 0; i < SPIN_HELD_PRC && i < NPRC; i++ ) {
+	for ( i = 0; i < knl_spin_held_n && i < NPRC; i++ ) {
+		if ( knl_spin_held_p[i] == NULL ) continue;
 		for ( k = 0; k < SPIN_HELD_N; k++ ) {
-			if ( knl_spin_held[i][k].lock == l ) {
-				*ph = &knl_spin_held[i][k];
+			if ( knl_spin_held_p[i][k].lock == l ) {
+				*ph = &knl_spin_held_p[i][k];
 				return i;
 			}
 		}
 	}
 	return -1;
+}
+
+/*
+ * A task named by its caller said as a stopped one is (where it runs or
+ * waits, its frames, the mutexes it waits for and who holds them), with
+ * the reason first: for a caller that finds a step of its own not done
+ * in time, before the watch of the desktop's loop would tell it
+ */
+EXPORT void knl_lockup_tell_task( ID tskid, CONST char *why )
+{
+	TCB	*t;
+	UINT	s;
+
+	if ( !CHK_TSKID(tskid) ) {
+		return;
+	}
+	t = get_tcb(tskid);
+	s = tm_urgent_begin();
+	tm_printf_urgent((UB *)"%s\n", ( why != NULL ) ? why : "");
+	lk_say_waiting_task(" ", t);
+	lk_say_chain(" ", t, TRUE);
+	tm_urgent_end(s);
 }
 
 /* The same for the exception reports (exc_hdl.c) */
@@ -459,7 +587,7 @@ LOCAL void lk_scan_waits( INT n )
 
 			lk_stat.deadlock++;
 			tm_printf_urgent((UB *)"\n!LOCKUP! tasks wait for each other's mutexes in a circle:\n");
-			lk_say_chain("", t);
+			lk_say_chain("", t, FALSE);
 			for ( k = 0; k < 8; k++ ) {
 				lk_say_waiting_task(" ", t);
 				if ( !CHK_MTXID(t->wid) ) break;
@@ -480,7 +608,7 @@ LOCAL void lk_scan_waits( INT n )
  */
 LOCAL void lk_report_stopped( INT i, INT me, UD now )
 {
-	LKCPU	*c = &lk[i];
+	LKCPU	*c = LKC(i);
 	UINT	s;
 	UD	t0;
 
@@ -489,9 +617,10 @@ LOCAL void lk_report_stopped( INT i, INT me, UD now )
 	s = tm_urgent_begin();
 	tm_printf_urgent((UB *)"\n!LOCKUP! CPU%d has taken no interrupt for %d ms (seen from CPU%d)%s\n",
 			 i, lk_ago(now, c->beat), me,
-			 c->halted ? ": stopped by an exception in the kernel, told above" : "");
+			 c->halted ? ": stopped by an exception in the kernel, kept under the band at the top" : "");
 	lk_say_cpu(i, now);
 	tm_urgent_end(s);
+	knl_bootlog_stopped("stopped: a processor takes no interrupt");
 	if ( c->halted ) {
 		return;
 	}
@@ -499,7 +628,7 @@ LOCAL void lk_report_stopped( INT i, INT me, UD now )
 	/* its own interrupt: taken only if its interrupts are not masked after all */
 	c->dump_done = FALSE;
 	c->dump_req = TRUE;
-	knl_send_ipi(1U << i, SGI_LOCKUP);
+	knl_send_ipi_one(i, SGI_LOCKUP);
 	t0 = lk_now();
 	while ( !c->dump_done && lk_now() - t0 < lk_cyc(LK_SGI_MS) ) {
 		;
@@ -517,7 +646,7 @@ LOCAL void lk_report_stopped( INT i, INT me, UD now )
 		/* an NMI is taken all the same */
 		c->nmi_done = FALSE;
 		c->nmi_req = TRUE;
-		knl_apic_send(knl_pcpu_tbl[i].apic_id, 0, APIC_DM_NMI);
+		knl_apic_send(knl_pcpu_of(i)->apic_id, 0, APIC_DM_NMI);
 		t0 = lk_now();
 		while ( !c->nmi_done && lk_now() - t0 < lk_cyc(LK_SGI_MS) ) {
 			;
@@ -551,7 +680,7 @@ LOCAL void lk_sgi_handler( UINT intno, UW iar )
 {
 	INT	me = lk_me();
 	T_PCPU	*p = knl_pcpu();
-	LKCPU	*c = &lk[me];
+	LKCPU	*c = LKC(me);
 
 	knl_apic_eoi();
 	if ( !c->dump_req ) {
@@ -581,10 +710,10 @@ EXPORT BOOL knl_lockup_nmi( T_EXCFRAME *f )
 	INT	me = lk_me();
 	LKCPU	*c;
 
-	if ( me < 0 || me >= NPRC || !lk[me].nmi_req ) {
+	if ( me < 0 || me >= NPRC || !LKC(me)->nmi_req ) {
 		return FALSE;
 	}
-	c = &lk[me];
+	c = LKC(me);
 	c->nmi_req = FALSE;
 	{
 		UINT	s = tm_urgent_begin();
@@ -613,7 +742,7 @@ LOCAL void lk_spin_stall( T_SPLOCK *l, UBINT pc, UD waited )
 	if ( me < 0 || me >= NPRC ) {
 		return;
 	}
-	c = &lk[me];
+	c = LKC(me);
 	if ( c->in_hook ) {
 		return;				/* the console's lock itself, waited for as this says */
 	}
@@ -679,11 +808,11 @@ LOCAL void lk_check( INT me, UD now )
 
 	/* processors that take no interrupt */
 	for ( i = 0; i < knl_num_prc && i < NPRC; i++ ) {
-		LKCPU	*c = &lk[i];
+		LKCPU	*c = LKC(i);
 
 		UD	beat = c->beat;
 
-		if ( i == me || knl_pcpu_tbl[i].state != PC_ONLINE || beat == 0 ) {
+		if ( i == me || knl_pcpu_of(i)->state != PC_ONLINE || beat == 0 ) {
 			continue;
 		}
 		if ( beat < now && now - beat >= lk_stop ) {
@@ -703,7 +832,7 @@ LOCAL void lk_check( INT me, UD now )
 			failing = TRUE;
 		}
 	}
-	if ( lk[me].halted ) {
+	if ( LKC(me)->halted ) {
 		failing = TRUE;
 	}
 
@@ -723,6 +852,7 @@ LOCAL void lk_check( INT me, UD now )
 						 h - 1, lk_ago(now, since), (UD)knl_klock_pc);
 				lk_say_all_cpus(now);
 				tm_urgent_end(s);
+				knl_bootlog_stopped("stopped: the kernel lock is not let go");
 			}
 			failing = TRUE;
 		} else if ( cnt != lk_kl_count || h == 0 ) {
@@ -743,10 +873,12 @@ LOCAL void lk_check( INT me, UD now )
 					 lk_ago(now, lk_kick_at), lk_kick_tsk);
 			if ( CHK_TSKID(lk_kick_tsk) ) {
 				lk_say_waiting_task(" ", get_tcb(lk_kick_tsk));
-				lk_say_chain(" ", get_tcb(lk_kick_tsk));
+				lk_say_chain(" ", get_tcb(lk_kick_tsk), TRUE);
 			}
+			lk_say_usb_lock(" ", now);
 			lk_say_all_cpus(now);
 			tm_urgent_end(s);
+			knl_bootlog_stopped("stopped: the watchdog is not kicked");
 		}
 		failing = TRUE;
 	} else {
@@ -770,13 +902,20 @@ LOCAL void lk_check( INT me, UD now )
 			tm_printf_urgent((UB *)"\n!LOCKUP! the desktop's loop (task %d) has not come round for %d ms\n",
 					 lk_watch_tsk, lk_ago(now, lk_alive_at));
 			lk_say_waiting_task(" ", get_tcb(lk_watch_tsk));
-			lk_say_chain(" ", get_tcb(lk_watch_tsk));
+			lk_say_chain(" ", get_tcb(lk_watch_tsk), TRUE);
+			lk_say_usb_lock(" ", now);
 			lk_say_all_cpus(now);
 			tm_printf_urgent((UB *)"!LOCKUP! Shift+Pause ends the program in front; with no program "
 					 "there, pressed twice it starts the desktop again (design 5.5.5)\n");
 			tm_urgent_end(s);
+			knl_bootlog_soon();	/* it may come round again: the records written in 2 s */
+			lk_silent_from = lk_alive_at;
 		}
 	} else {
+		if ( lk_silent_told && lk_alive_at > lk_silent_from ) {
+			tm_printf_urgent((UB *)"!LOCKUP! the desktop's loop came round again, %d ms after it last had\n",
+					 lk_ms(lk_alive_at - lk_silent_from));
+		}
 		lk_silent_told = FALSE;
 	}
 
@@ -825,12 +964,68 @@ LOCAL void lk_arm_timer( void )
 	knl_apic_lk_arm(lk_period);
 }
 
+/*
+ * The start-up's watch on the screen (fbcon.c), checked before the
+ * checks above are armed as well: the processors online, those of them
+ * whose timer's interrupt came within the last second, and the first
+ * that did not: whether an exception stopped it or how long it has
+ * taken no timer's interrupt, and where it was last seen (the
+ * instruction and the task, from its last timer's interrupt or from the
+ * interrupt it stopped in), with how many more there are like it
+ */
+LOCAL void lk_startup_watch( INT me, UD now )
+{
+	INT	i, online = 0, ticking = 0, nquiet = 0, q = -1;
+	UB	quiet[96];
+
+	for ( i = 0; i < knl_num_prc && i < NPRC; i++ ) {
+		UD	beat = LKC(i)->beat;
+
+		if ( knl_pcpu_of(i)->state != PC_ONLINE ) {
+			continue;
+		}
+		online++;
+		if ( beat != 0 && beat <= now && now - beat < lk_frq ) {
+			ticking++;
+		} else {
+			if ( q < 0 ) q = i;
+			nquiet++;
+		}
+	}
+	quiet[0] = '\0';
+	if ( q >= 0 ) {
+		LKCPU	*c = LKC(q);
+		UD	beat = c->beat;
+		INT	n;
+
+		if ( c->halted ) {
+			n = tm_sprintf(quiet, (CONST UB *)"CPU%d stopped by an exception", q);
+			if ( c->s_at != 0 ) {
+				n += tm_sprintf(quiet + n, (CONST UB *)", last at %lx task %d", c->s_pc, c->s_tsk);
+			}
+		} else if ( beat == 0 ) {
+			n = tm_sprintf(quiet, (CONST UB *)"CPU%d has not ticked", q);
+		} else if ( beat > now ) {
+			/* its counter ahead of this processor's: the two are not in step */
+			n = tm_sprintf(quiet, (CONST UB *)"CPU%d's counter %ld ms ahead of CPU%d's", q,
+				       (D)lk_ms(beat - now), me);
+		} else {
+			n = tm_sprintf(quiet, (CONST UB *)"CPU%d silent %ld s, last at %lx task %d", q,
+				       (D)( ( now - beat ) / lk_frq ), c->s_pc, c->s_tsk);
+		}
+		if ( nquiet > 1 ) {
+			(void)tm_sprintf(quiet + n, (CONST UB *)" (+%d)", nquiet - 1);
+		}
+	}
+	knl_fbcon_watch(now, lk_frq, me, ticking, online, quiet);
+}
+
 /* From the Local APIC timer's interrupt (apic.c), which ends the interrupt itself */
 LOCAL void lk_tick( void )
 {
 	INT	me = lk_me();
 	T_PCPU	*p = knl_pcpu();
-	LKCPU	*c = &lk[me];
+	LKCPU	*c = LKC(me);
 	UD	now = lk_now();
 
 	lk_arm_timer();
@@ -848,6 +1043,7 @@ LOCAL void lk_tick( void )
 		c->s_tsk = ( p->ctxtsk != NULL ) ? p->ctxtsk->tskid : 0;
 		c->s_at = now;
 	}
+	lk_startup_watch(me, now);
 	if ( lk_armed ) {
 		lk_check(me, now);
 	}
@@ -885,8 +1081,8 @@ EXPORT void knl_lockup_arm( void )
 	INT	i;
 
 	for ( i = 0; i < NPRC; i++ ) {
-		lk[i].beat = ( knl_pcpu_tbl[i].state == PC_ONLINE ) ? now : 0;
-		lk[i].reported = FALSE;
+		LKC(i)->beat = ( knl_pcpu_of(i)->state == PC_ONLINE ) ? now : 0;
+		LKC(i)->reported = FALSE;
 	}
 	knl_spin_stall_cycles = lk_stop;
 	knl_spin_stall_hook = lk_spin_stall;
@@ -911,13 +1107,32 @@ EXPORT void knl_lockup_stop( void )
 	}
 }
 
+/*
+ * This processor stops (exc_hdl.c). Stopped inside an interrupt, where
+ * that interrupt found it is kept as the last place it was seen, for the
+ * start-up's watch and the lockup reports.
+ */
 EXPORT void knl_lockup_halted( void )
 {
 	INT	me = lk_me();
+	T_PCPU	*p = knl_pcpu();
+	LKCPU	*c;
 
-	if ( me >= 0 && me < NPRC ) {
-		lk[me].halted = TRUE;
+	if ( me < 0 || me >= NPRC ) {
+		return;
 	}
+	c = LKC(me);
+	if ( p->taskindp == 1 ) {
+		UD	*f = *(UD **)( (UB *)p->irq_stack - 16 );
+
+		c->s_pc = f[FR_RIP];
+		c->s_lr = f[FR_RBP];
+		c->s_spsr = f[FR_RFLAGS];
+		c->s_sp = f[FR_SP];
+		c->s_tsk = ( p->ctxtsk != NULL ) ? p->ctxtsk->tskid : 0;
+		c->s_at = lk_now();
+	}
+	c->halted = TRUE;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1002,13 +1217,18 @@ EXPORT INT knl_wdog_get( BOOL *p_hw )
 
 EXPORT void knl_lockup_stat( T_LKSTAT *st )
 {
-	INT	i;
-
 	*st = lk_stat;
 	st->hw = lk_hw_on;
-	for ( i = 0; i < 8; i++ ) {
-		st->beats[i] = ( i < NPRC ) ? lk[i].beats : 0;
+}
+
+EXPORT INT knl_lockup_beats( UD *beats, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i < n && i < knl_num_prc && i < NPRC; i++ ) {
+		beats[i] = LKB(i);
 	}
+	return i;
 }
 
 #if USE_KTEST
@@ -1025,9 +1245,9 @@ EXPORT void knl_lockup_tune( UW stop_ms, UW kick_ms, UW silent_ms )
 EXPORT void knl_lockup_mute( ID prc, BOOL mute )
 {
 	if ( prc >= 1 && prc <= NPRC ) {
-		lk[prc - 1].mute = mute;
+		LKC(prc - 1)->mute = mute;
 		if ( !mute ) {
-			lk[prc - 1].beat = lk_now();
+			LKC(prc - 1)->beat = lk_now();
 		}
 	}
 }

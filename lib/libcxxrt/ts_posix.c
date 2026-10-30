@@ -44,6 +44,7 @@ extern int	_stat( const char *path, struct stat *st );
 extern int	_unlink( const char *path );
 extern int	fs_rmdir( const char *path );
 extern int	fs_sync( void );
+extern int	fs_fsync( int fd );
 
 int access( const char *path, int mode )
 {
@@ -72,11 +73,10 @@ int dup( int fd )
 	return -1;
 }
 
-/* The file layer writes a file's data and its size together, for all files at once */
+/* The file's own writes on the medium (design 7.3) */
 int fdatasync( int fd )
 {
-	(void)fd;
-	return ( fs_sync() < 0 ) ? ( errno = EIO, -1 ) : 0;
+	return ( fs_fsync(fd) < 0 ) ? ( errno = EIO, -1 ) : 0;
 }
 
 int openat( int dirfd, const char *path, int flags, ... )

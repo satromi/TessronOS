@@ -67,8 +67,24 @@ BOOL	g_show_hidden;
 BOOL	g_paper_frame;
 BOOL	g_full;
 
-UB	g_out[OUT_MAX];
-char	g_meta[OB_ATR_MAX + 1];
+void warn( CONST char *a, CONST char *b )
+{
+	CONST char	*l[2] = { a, ( b != NULL ) ? b : " " };
+
+	note(a);
+	(void)ui_ask(&g_ui, PN_WARN, l, 2);
+}
+
+void *ct_more( void *p, SZ size )
+{
+	if ( size == 0 ) {
+		free(p);
+		return NULL;
+	}
+	return realloc(p, (size_t)size);
+}
+char	g_meta_none[1];
+char	*g_meta = g_meta_none;
 
 static TS_UUID	g_ch;
 static T_OBWPOS	g_restore;
@@ -84,6 +100,7 @@ static BOOL	g_panel_shown = TRUE;	/* the object's window.panel */
 #define HOLD_CSIZE	6			/* a chart's corner */
 #define HOLD_LINK	7			/* a link, carried */
 #define HOLD_LSIZE	8			/* a link's edge */
+#define CHART_GRIP	8			/* how near a chart's foot corner sizes it */
 #define HOLD_COLS	9			/* columns' letters */
 #define HOLD_ROWS	10			/* rows' numbers */
 
@@ -121,6 +138,7 @@ void note( CONST char *s )
 	tm_putstring((CONST UB *)line);
 }
 
+
 void say( CONST char *s )
 {
 	(void)wm_msg_put(s);
@@ -149,7 +167,8 @@ static ER win_open( CONST char *title )
 	T_OBWPOS	wp;
 	T_JSON		root, w, pos;
 	SZ		asz = 0;
-	char		json[200];
+	char		json[260];
+	char		shown[TS_UUID_STRLEN + 1];
 	INT		x = 100, y = 80, ww = 800, wh = 600, mn = meta_of(&g_obj);
 
 	if ( mn > 0 && js_parse((CONST UB *)g_meta, mn, &root) >= E_OK && js_get(&root, "window", &w) >= E_OK ) {
@@ -176,9 +195,10 @@ static ER win_open( CONST char *title )
 	if ( wh < MIN_H ) wh = MIN_H;
 	if ( x < 0 ) x = 0;
 	if ( y < 0 ) y = 0;
-	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%d,\"icon\":\"%s\"}",
+	ts_uuid_text(&g_obj, shown);	/* what it shows, for ウインドウ一覧 */
+	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%d,\"icon\":\"%s\",\"shows\":\"%s\"}",
 		 x, y, x + ww + FRAME_W, y + wh + TITLE_H,
-		 WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE | WM_ATTR_RBAR | WM_ATTR_BBAR, SYSDEF_PROG_CALC);
+		 WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE | WM_ATTR_RBAR | WM_ATTR_BBAR, SYSDEF_PROG_CALC, shown);
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
 	c.sub = OB_S_WINDOW;
@@ -279,9 +299,13 @@ static void style_range( CONST CXSTYLE *st )
 		for ( col = r.c0; col <= r.c1; col++ ) {
 			CXCELL	*c = cx_make(&g_s, col, row);
 
-			if ( c != NULL ) cx_style_merge(&c->st, st);
+			if ( c == NULL || !cx_style_add(c, st) ) {
+				warn("書式を付けられませんでした", "メモリが足りません");
+				goto done;
+			}
 		}
 	}
+done:
 	g_changed = TRUE;
 	g_dirty = TRUE;
 }
@@ -290,7 +314,7 @@ static void style_range( CONST CXSTYLE *st )
 static void toggle( UINT bit )
 {
 	CXCELL	*c = cx_get(&g_s, g_col, g_row);
-	BOOL	on = !( c != NULL && ( c->st.has & bit ) );
+	BOOL	on = !( c != NULL && ( c->st->has & bit ) );
 	CXRANGE	r;
 	INT	col, row;
 
@@ -298,17 +322,24 @@ static void toggle( UINT bit )
 	for ( row = r.r0; row <= r.r1; row++ ) {
 		for ( col = r.c0; col <= r.c1; col++ ) {
 			CXCELL	*d = cx_make(&g_s, col, row);
+			CXSTYLE	st;
 
 			if ( d == NULL ) continue;
+			st = *d->st;
 			if ( on ) {
-				if ( bit == CX_S_SUPER ) d->st.has &= ~CX_S_SUB;
-				if ( bit == CX_S_SUB ) d->st.has &= ~CX_S_SUPER;
-				d->st.has |= bit;
+				if ( bit == CX_S_SUPER ) st.has &= ~CX_S_SUB;
+				if ( bit == CX_S_SUB ) st.has &= ~CX_S_SUPER;
+				st.has |= bit;
 			} else {
-				d->st.has &= ~bit;
+				st.has &= ~bit;
+			}
+			if ( !cx_style_put(d, &st) ) {
+				warn("書式を付けられませんでした", "メモリが足りません");
+				goto done;
 			}
 		}
 	}
+done:
 	g_changed = TRUE;
 	g_dirty = TRUE;
 }
@@ -365,19 +396,27 @@ static void copy_cell( INT sc, INT sr, INT dc, INT dr )
 		if ( cx_get(&g_s, dc, dr) != NULL ) cell_clear(dc, dr);
 		return;
 	}
-	t = malloc(TEXT_MAX * 2);
-	if ( t == NULL ) return;
-	if ( s->text[0] == '=' ) {
-		(void)cx_move_refs(s->text, (INT)strlen((char *)s->text), dc - sc, dr - sr, g_s.maxcol, g_s.maxrow, t, TEXT_MAX * 2);
-	} else {
-		snprintf((char *)t, TEXT_MAX * 2, "%s", (char *)s->text);
+	{
+		/* a reference moved may grow by a few letters, or to #REF! */
+		INT	n = (INT)strlen((char *)s->text), max = n * 2 + 64;
+
+		t = malloc((size_t)max);
+		if ( t == NULL ) {
+			warn("セルを複写できませんでした", "メモリが足りません");
+			return;
+		}
+		if ( s->text[0] == '=' ) {
+			(void)cx_move_refs(s->text, n, dc - sc, dr - sr, g_s.maxcol, g_s.maxrow, t, max);
+		} else {
+			memcpy(t, s->text, (size_t)n + 1);
+		}
 	}
 	{
-		CXSTYLE	st = s->st;
+		CONST CXSTYLE	*st = s->st;
 
 		cell_text(dc, dr, t);
 		s = cx_get(&g_s, dc, dr);
-		if ( s != NULL && st.has != 0 ) cx_style_merge(&s->st, &st);
+		if ( s != NULL && st->has != 0 ) (void)cx_style_add(s, st);
 	}
 	free(t);
 }
@@ -453,7 +492,7 @@ static void merge( void )
 			if ( col == r.c0 && row == r.r0 ) continue;
 			c = cx_make(&g_s, col, row);
 			if ( c != NULL && c->kind == CX_TEXT ) {
-				CXSTYLE	st = c->st;
+				CONST CXSTYLE	*st = c->st;
 
 				(void)cx_set_text(c, (CONST UB *)"");
 				c->st = st;
@@ -535,10 +574,24 @@ static void replace_cell( INT col, INT row, CONST UB *pat, CONST UB *rep, BOOL r
 
 	if ( c == NULL || c->kind == CX_LINK || c->text[0] == 0 ) return;
 	if ( ce_test(c->text, pat, re) <= 0 ) return;
-	out = malloc(TEXT_MAX * 4);
-	if ( out == NULL ) return;
-	if ( ce_replace(c->text, pat, rep, re, out, TEXT_MAX * 4) >= 0 ) cell_text(col, row, out);
-	free(out);
+	{
+		/* as long as the words come to: written again into room enough when they did not fit */
+		INT	max = (INT)strlen((char *)c->text) * 2 + 256, k;
+
+		for ( ;; ) {
+			out = malloc((size_t)max);
+			if ( out == NULL ) {
+				warn("置換できませんでした", "メモリが足りません");
+				return;
+			}
+			k = ce_replace(c->text, pat, rep, re, out, max);
+			if ( k < max ) break;
+			free(out);
+			max = k + 1;
+		}
+		if ( k >= 0 ) cell_text(col, row, out);
+		free(out);
+	}
 }
 
 static void find_dialog( void )
@@ -552,7 +605,8 @@ static void find_dialog( void )
 	if ( ui_dlg_open(&g_ui, PN_FIND, &q) < E_OK ) return;
 	note("find panel");
 	while ( !done && !g_closing ) {
-		ev = ui_dlg_next(&g_ui, &q, &m, &num);
+		/* asleep until the panel or the window has something */
+		ev = ( ui_wait(&g_ui, &m, TMO_FEVR) >= E_OK ) ? ui_dlg_take(&q, &m, &num) : UI_EV_CLOSE;
 		switch ( ev ) {
 		case UI_EV_BUTTON:
 			(void)ui_text(&q, CP_FIND_TEXT, pat, sizeof(pat));
@@ -597,11 +651,8 @@ static void find_dialog( void )
 				resized();
 				paint();
 			} else if ( panel_is(&m.uuid) && m.event == OB_E_REDRAW ) {
-				panel_event(&m);
+				(void)panel_event(&m);
 			}
-			break;
-		case UI_EV_NONE:
-			(void)tk_dly_tsk(TICK_MS);
 			break;
 		default:
 			break;
@@ -642,10 +693,9 @@ static void page_dialog( void )
 	ui_set_value(&q, CP_PAGE_TURN, turn + 1);
 	for ( i = 0; i < 4; i++ ) ui_set_fields(&q, CP_PAGE_MARGIN + i, &mg[i], 1);
 	while ( done == 0 ) {
-		ev = ui_dlg_next(&g_ui, &q, &m, &num);
+		ev = ( ui_wait(&g_ui, &m, TMO_FEVR) >= E_OK ) ? ui_dlg_take(&q, &m, &num) : UI_EV_CLOSE;
 		if ( ev == UI_EV_BUTTON ) done = ( num == CP_PAGE_OK ) ? 1 : -1;
 		else if ( ev == UI_EV_CLOSE ) done = -1;
-		else if ( ev == UI_EV_NONE ) (void)tk_dly_tsk(TICK_MS);
 	}
 	if ( done > 0 ) {
 		INT	pt[4];
@@ -685,11 +735,14 @@ static void close_asked( void )
 	ed_cancel();
 	a = ui_ask(&g_ui, PN_CLOSE, NULL, 0);
 	if ( a == CP_CLOSE_SAVE ) {
-		if ( save() >= E_OK ) {
+		ER	er = save();
+
+		if ( er >= E_OK ) {
 			note("saved");
 			g_closing = TRUE;
 		} else {
-			say("保存できませんでした");
+			/* the window stays, and what was changed with it */
+			warn("保存できませんでした", ( er == E_NOMEM ) ? "メモリが足りません" : "実身に書き込めませんでした");
 		}
 	} else if ( a == CP_CLOSE_DROP ) {
 		note("not saved");
@@ -710,12 +763,16 @@ void command( CONST char *code, INT index, D value )
 	memset(&st, 0, sizeof(st));
 	if ( strcmp(code, "close") == 0 ) close_asked();
 	else if ( strcmp(code, "save") == 0 ) {
+		ER	er;
+
 		ed_commit();
-		if ( save() >= E_OK ) {
+		if ( ( er = save() ) >= E_OK ) {
 			note("saved");
 			say("保存しました");
 		} else {
-			say("保存できませんでした");
+			snprintf(s, sizeof(s), "not saved %d", (int)er);
+			note(s);
+			warn("保存できませんでした", ( er == E_NOMEM ) ? "メモリが足りません" : "実身に書き込めませんでした");
 		}
 	} else if ( strcmp(code, "panel") == 0 ) {
 		if ( panel_on() ) {
@@ -738,9 +795,10 @@ void command( CONST char *code, INT index, D value )
 		if ( g_chart >= 0 ) {
 			CTBUF	b;
 			T_TRREC	r;
+			BOOL	put = FALSE;
 
-			ct_buf(&b, g_out, OUT_MAX);
-			if ( chart_frag(&b, g_chart) ) {
+			ct_buf_grow(&b, 64 * 1024, ct_more);
+			if ( !b.fail && chart_frag(&b, g_chart) && !b.fail ) {
 				memset(&r, 0, sizeof(r));
 				r.kind = TR_TAD;
 				r.data = b.p;
@@ -752,14 +810,21 @@ void command( CONST char *code, INT index, D value )
 					g_cclip.ellen = 0;
 					g_cclip_time = hand_time();
 					g_cclip_on = TRUE;
+					put = TRUE;
 				}
+			}
+			(void)ct_more(b.p, 0);
+			if ( !put ) {
+				/* not in the tray: nor taken away */
+				warn("グラフをトレーに入れられませんでした", "メモリが足りません。グラフは元のままです");
+			} else {
 				note("chart copied");
 				say("グラフをトレーへ複写しました");
-			}
-			if ( code[1] == 'u' ) {
-				cx_chart_del(&g_s, g_chart);
-				g_chart = -1;
-				g_changed = TRUE;
+				if ( code[1] == 'u' ) {
+					cx_chart_del(&g_s, g_chart);
+					g_chart = -1;
+					g_changed = TRUE;
+				}
 			}
 		} else {
 			copy_cells((BOOL)( code[1] == 'u' ));
@@ -828,9 +893,13 @@ void command( CONST char *code, INT index, D value )
 		for ( row = r.r0; row <= r.r1; row++ ) {
 			for ( col = r.c0; col <= r.c1; col++ ) {
 				CXCELL	*c = cx_get(&g_s, col, row);
+				CXSTYLE	cs;
 
-				if ( c != NULL ) c->st.has &= ~( CX_S_BOLD | CX_S_ITALIC | CX_S_UNDER | CX_S_STRIKE
-								| CX_S_SUPER | CX_S_SUB | CX_S_MESH | CX_S_INVERT );
+				if ( c == NULL ) continue;
+				cs = *c->st;
+				cs.has &= ~( CX_S_BOLD | CX_S_ITALIC | CX_S_UNDER | CX_S_STRIKE
+					     | CX_S_SUPER | CX_S_SUB | CX_S_MESH | CX_S_INVERT );
+				(void)cx_style_put(c, &cs);
 			}
 		}
 		g_changed = TRUE;
@@ -969,7 +1038,7 @@ static void key( CONST T_OBNTM *m )
 	BOOL	shift = (BOOL)( ( m->mods & M_SHIFT ) != 0 );
 	INT	page = ( g_h - grid_top() ) / CX_CELL_H - 1;
 
-	if ( ed_on() && ed_key(m->code, m->mods) ) {
+	if ( ed_on() && ed_key(m->code, m->mods, m->imode) ) {
 		return;
 	}
 	if ( ( m->mods & M_CTRL ) != 0 ) {
@@ -1036,7 +1105,7 @@ static void key( CONST T_OBNTM *m )
 	if ( c >= 0x20 && c < 0x7F ) {
 		/* a letter begins typing, through the converter like the rest */
 		ed_begin(g_col, g_row, NULL, FALSE);
-		(void)ed_key(m->code, m->mods);
+		(void)ed_key(m->code, m->mods, m->imode);
 	}
 }
 
@@ -1071,6 +1140,27 @@ static CXCELL *link_at( INT x, INT y )
 	return NULL;
 }
 
+/*
+ * The link taken (in the cell taken, g_link_on) when a place is just
+ * out of its right edge or its foot, no farther than slop: what a
+ * finger's press there is to size. NULL when it is not.
+ */
+static CXCELL *link_near( INT x, INT y, INT slop )
+{
+	INT	i;
+
+	for ( i = g_s.n - 1; i >= 0; i-- ) {
+		CXCELL		*c = g_s.c[i];
+		T_DPRECT	r;
+
+		if ( c->kind != CX_LINK || c->col != g_col || c->row != g_row ) continue;
+		link_box(c, &r);
+		if ( x >= r.left && x < r.right + slop && y >= r.top && y < r.bottom + slop
+		  && ( x >= r.right || y >= r.bottom ) ) return c;
+	}
+	return NULL;
+}
+
 static void press( CONST T_OBNTM *m )
 {
 	BOOL		shift = (BOOL)( ( m->mods & M_SHIFT ) != 0 );
@@ -1079,10 +1169,11 @@ static void press( CONST T_OBNTM *m )
 	CXRANGE		r;
 	T_DPRECT	b;
 	CXCELL		*c;
+	INT		slop, e;
 
 	if ( x < 0 || y < 0 || x >= g_w || y >= g_h ) return;	/* the band, the frame: the desktop's */
+	slop = wm_hit_slop(m->when);		/* a finger reaches the edges and handles farther */
 	if ( ed_on() ) {
-		if ( ed_press(x, y) ) return;
 		ed_commit();
 	}
 	g_hold = HOLD_NONE;
@@ -1093,10 +1184,11 @@ static void press( CONST T_OBNTM *m )
 	/* the letters and numbers: an edge sizes, the rest takes the whole column or row */
 	if ( y < grid_top() && x >= grid_left() ) {
 		col = col_at(x - grid_left() + g_sx);
-		if ( x >= grid_left() + col_x(col + 1) - g_sx - EDGE ) {
+		e = wm_hit_in(EDGE, slop, col_x(col + 1) - col_x(col));
+		if ( x >= grid_left() + col_x(col + 1) - g_sx - e ) {
 			g_hold = HOLD_COLW;
 			g_hat = col;
-		} else if ( x < grid_left() + col_x(col) - g_sx + EDGE && col > 1 ) {
+		} else if ( x < grid_left() + col_x(col) - g_sx + e && col > 1 ) {
 			g_hold = HOLD_COLW;
 			g_hat = col - 1;
 		} else {
@@ -1114,10 +1206,11 @@ static void press( CONST T_OBNTM *m )
 	}
 	if ( x < grid_left() && y >= grid_top() ) {
 		row = row_at(y - grid_top() + g_sy);
-		if ( y >= grid_top() + row_y(row + 1) - g_sy - EDGE ) {
+		e = wm_hit_in(EDGE, slop, row_y(row + 1) - row_y(row));
+		if ( y >= grid_top() + row_y(row + 1) - g_sy - e ) {
 			g_hold = HOLD_ROWH;
 			g_hat = row;
-		} else if ( y < grid_top() + row_y(row) - g_sy + EDGE && row > 1 ) {
+		} else if ( y < grid_top() + row_y(row) - g_sy + e && row > 1 ) {
 			g_hold = HOLD_ROWH;
 			g_hat = row - 1;
 		} else {
@@ -1137,7 +1230,8 @@ static void press( CONST T_OBNTM *m )
 	/* a chart: its corner sizes it, the rest moves it */
 	if ( g_chart >= 0 ) {
 		chart_box(g_chart, &b);
-		if ( x >= b.right - 8 && x <= b.right + 8 && y >= b.bottom - 8 && y <= b.bottom + 8 ) {
+		if ( x >= b.right - wm_hit_in(CHART_GRIP, slop, b.right - b.left) && x <= b.right + CHART_GRIP + slop
+		  && y >= b.bottom - wm_hit_in(CHART_GRIP, slop, b.bottom - b.top) && y <= b.bottom + CHART_GRIP + slop ) {
 			g_hold = HOLD_CSIZE;
 			return;
 		}
@@ -1160,7 +1254,8 @@ static void press( CONST T_OBNTM *m )
 	if ( g_cells_on ) {
 		range_of(&r);
 		(void)cell_box(r.c1, r.r1, &b);
-		if ( x >= b.right - FILL_BOX && x <= b.right + FILL_BOX && y >= b.bottom - FILL_BOX && y <= b.bottom + FILL_BOX ) {
+		if ( x >= b.right - wm_hit_in(FILL_BOX, slop, b.right - b.left) && x <= b.right + FILL_BOX + slop
+		  && y >= b.bottom - wm_hit_in(FILL_BOX, slop, b.bottom - b.top) && y <= b.bottom + FILL_BOX + slop ) {
 			g_fill0 = r;
 			g_hold = HOLD_FILL;
 			return;
@@ -1174,17 +1269,27 @@ static void press( CONST T_OBNTM *m )
 	g_press_col = col;
 	g_press_row = row;
 
-	/* a link in a cell */
+	/* a link in a cell; with a finger, the link taken by its edges from just out of it */
 	c = link_at(x, y);
+	if ( c == NULL && slop > 0 && g_link_on && !shift ) {
+		CXCELL	*t = link_near(x, y, slop);
+
+		if ( t != NULL ) {
+			c = t;
+			twice = FALSE;
+		}
+	}
 	if ( c != NULL && !shift ) {
 		T_DPRECT	lb;
 
 		link_box(c, &lb);
+		/* farther in only on the link taken before the press */
+		if ( !( g_link_on && c->col == g_col && c->row == g_row ) ) slop = 0;
 		take_cell(c->col, c->row, FALSE);
 		g_link_on = TRUE;
 		g_htwice = twice;
-		g_hright = (BOOL)( c->kind == CX_LINK && x >= lb.right - EDGE );
-		g_hfoot = (BOOL)( c->kind == CX_LINK && y >= lb.bottom - EDGE );
+		g_hright = (BOOL)( c->kind == CX_LINK && x >= lb.right - wm_hit_in(EDGE, slop, lb.right - lb.left) );
+		g_hfoot = (BOOL)( c->kind == CX_LINK && y >= lb.bottom - wm_hit_in(EDGE, slop, lb.bottom - lb.top) );
 		g_hold = ( ( g_hright || g_hfoot ) && !twice ) ? HOLD_LSIZE : HOLD_LINK;
 		g_press_col = c->col;
 		g_press_row = c->row;
@@ -1335,7 +1440,7 @@ static void released( CONST T_OBNTM *m )
 			INT	len;
 
 			if ( c != NULL && c->el != NULL && cx_merge_of(&g_s, col, row) < 0 ) {
-				CXSTYLE	st = c->st;
+				CONST CXSTYLE	*st = c->st;
 				INT	kind = c->kind;
 
 				len = c->ellen;
@@ -1415,7 +1520,9 @@ static void wheel( CONST T_OBNTM *m )
 {
 	INT	d = ( m->dz != 0 ) ? m->dz : 0;
 
-	if ( ( m->mods & M_SHIFT ) != 0 ) g_sx -= d * 3 * CX_CELL_W;
+	/* the wheel across goes the way it turns; the upright one with Shift held across too */
+	if ( m->code == HID_WHEEL_H ) g_sx += d * 3 * CX_CELL_W;
+	else if ( ( m->mods & M_SHIFT ) != 0 ) g_sx -= d * 3 * CX_CELL_W;
 	else g_sy -= d * 3 * CX_CELL_H;
 	if ( g_sx < 0 ) g_sx = 0;
 	if ( g_sy < 0 ) g_sy = 0;
@@ -1442,9 +1549,8 @@ static void scrolled( CONST T_OBNTM *m )
 void event( CONST T_OBNTM *m )
 {
 	if ( panel_is(&m->uuid) ) {
-		/* a key with the panel in front is the sheet's, or its box's while it is typed in */
-		if ( m->event == OB_E_KEY ) key(m);
-		else panel_event(m);
+		/* a key with the panel in front is its box's, or the sheet's when the panel leaves it */
+		if ( !panel_event(m) && m->event == OB_E_KEY ) key(m);
 		return;
 	}
 	if ( memcmp(&m->uuid, &g_win, sizeof(TS_UUID)) != 0 ) return;
@@ -1456,7 +1562,8 @@ void event( CONST T_OBNTM *m )
 		g_closing = TRUE;
 		break;
 	case OB_E_PRESS:
-		if ( m->code == 1 && g_hold == HOLD_NONE ) menu(m);
+		if ( m->recno == OB_WR_CAND ) ed_pick((INT)m->code);	/* a name on the list of candidates */
+		else if ( m->code == 1 && g_hold == HOLD_NONE ) menu(m);
 		else if ( m->code == 0 ) press(m);
 		break;
 	case OB_E_RELEASE:
@@ -1565,12 +1672,11 @@ int main( void )
 	}
 
 	while ( !g_closing ) {
-		while ( !g_closing && ob_rea_rec(g_port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) event(&m);
+		for ( TMO tmo = TMO_FEVR; !g_closing && ob_rea_tmo(g_port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) event(&m);
 		if ( g_dirty && !g_closing ) {
 			paint();
 			bars();
 		}
-		if ( !g_closing ) (void)tk_dly_tsk(TICK_MS);
 	}
 	ed_end();
 	panel_close();

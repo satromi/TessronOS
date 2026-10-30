@@ -12,12 +12,13 @@
  *	Micro Script: かな漢字変換 for KINPUT
  *
  *	The keys typed into a KINPUT segment go to a session of the system's
- *	converter (kc_hid_key), in the input mode the message line shows.
+ *	converter (kc_hid_key), in the input mode each key came in.
  *	What the converter commits goes into the segment's text as typing
  *	does; what it is still working on -- the composition -- is drawn at
  *	the caret, each clause underlined and the one being converted turned
- *	over, with the candidates listed under it while they are chosen. A
- *	number, or a press on a row, takes a candidate.
+ *	over. While candidates are chosen the system lists them under it in
+ *	a window of its own (OB_WR_CAND); a number, or a press on a name
+ *	there, takes a candidate.
  *
  *	In 英語 a letter goes in as it is when the mode is 半角, and in its
  *	full-width form otherwise. INPUT is not converted at all.
@@ -30,21 +31,19 @@
 #include <ts/hid.h>
 
 #define LIST_MAX	4096
-#define LIST_ROWS	9
 #define IME_GROUND	0x00FFFFFFU
 #define IME_INK		0x00000000U
 #define IME_TARGET	0x000050A0U
-#define IME_FRAME	0x00808080U
 #define KEY_ENTER	0x28
 
 static INT	kid;
 static T_KCOUT	out;
+static UINT	kmode = WM_MODE_ROMAN;	/* the input mode what is being composed was typed in */
 static INT	base;			/* where the composition starts in out.text */
 static BOOL	list;
 static UB	cand[LIST_MAX];
 static INT	ncand, first, total, chosen;
-static T_DPRECT	listbox;		/* where the list was drawn */
-static INT	row_h;
+static ID	listed = 0;		/* the window the system lists them for, 0 none */
 
 static BOOL ready( void )
 {
@@ -114,14 +113,21 @@ static BOOL plain( UB ch, BOOL han )
 	return TRUE;
 }
 
-/* A key typed into a KINPUT segment: TRUE when it was taken here */
-BOOL ms_ime_key( UINT key, UINT mods )
+/*
+ * A key typed into a KINPUT segment, in the input mode it came in
+ * (T_OBNTM imode): TRUE when it was taken here. A key in 英語 that comes
+ * while something is being composed -- 英数 itself, or one typed after
+ * it -- commits that first, then is 英語's.
+ */
+BOOL ms_ime_key( UINT key, UINT mods, UINT mode )
 {
-	UINT	mode = kc_mode();
 	BOOL	han = (BOOL)( ( mode & WM_MODE_HAN ) != 0 );
 	UB	ch = wm_key_char(key, mods);
 	INT	r;
 
+	if ( ( mode & WM_MODE_ALPH ) != 0 && ms_ime_busy() ) {
+		ms_ime_commit();
+	}
 	if ( ( mods & ( HID_MOD_LCTRL | HID_MOD_RCTRL ) ) != 0 ) return FALSE;
 	if ( ( mode & WM_MODE_ALPH ) != 0 ) {
 		if ( ( mode & WM_MODE_KANA ) != 0 && ( ( ch >= 'a' && ch <= 'z' ) || ( ch >= 'A' && ch <= 'Z' ) ) ) {
@@ -135,7 +141,8 @@ BOOL ms_ime_key( UINT key, UINT mods )
 		if ( r >= 0 && r != KC_NOTMINE ) take(r);
 		return TRUE;
 	}
-	r = kc_hid_key(kid, key, mods, &out);
+	kmode = mode;
+	r = kc_hid_key(kid, key, mods, mode, &out);
 	if ( r >= 0 && r != KC_NOTMINE ) {
 		take(r);
 		return TRUE;
@@ -154,32 +161,34 @@ void ms_ime_commit( void )
 		list = FALSE;
 		return;
 	}
-	r = kc_hid_key(kid, KEY_ENTER, HID_MOD_LSHIFT, &out);
+	r = kc_hid_key(kid, KEY_ENTER, HID_MOD_LSHIFT, kmode, &out);
 	if ( r >= 0 && r != KC_NOTMINE ) take(r);
 	base = out.cl[out.n_cl];
 	list = FALSE;
 	ms_dirty();
 }
 
-/* A press: on the list, that candidate; TRUE when it was the list's */
-BOOL ms_ime_press( INT x, INT y )
+/* A press on a name of the system's list (OB_WR_CAND): that candidate */
+void ms_ime_pick( INT row )
 {
-	if ( list && row_h > 0 && x >= listbox.left && x < listbox.right
-	  && y >= listbox.top && y < listbox.bottom ) {
-		INT	row = ( y - listbox.top - 2 ) / row_h, r;
+	INT	r;
 
-		if ( row >= 0 && row < ncand ) {
-			r = kc_choose(kid, first + row, &out);
-			if ( r >= 0 && r != KC_NOTMINE ) take(r);
-		}
-		return TRUE;
+	if ( list && kid > 0 && row >= 0 && row < ncand ) {
+		r = kc_choose(kid, first + row, &out);
+		if ( r >= 0 && r != KC_NOTMINE ) take(r);
 	}
-	ms_ime_commit();
-	return FALSE;
+}
+
+/* The system's list put away */
+static void unlist( void )
+{
+	if ( listed > 0 ) (void)ob_cand_put(listed, 0, 0, 0, NULL, 0, -1, 0, 0);
+	listed = 0;
 }
 
 void ms_ime_end( void )
 {
+	unlist();
 	if ( kid > 0 ) kc_close(kid);
 	kid = 0;
 	base = 0;
@@ -203,7 +212,10 @@ void ms_ime_draw( INT gid, INT x, INT y, INT px, INT lh )
 	T_DPRECT	r;
 	INT		i, cx = x, end;
 
-	if ( !ms_ime_busy() ) return;
+	if ( !ms_ime_busy() ) {
+		unlist();
+		return;
+	}
 	end = out.cl[out.n_cl];
 	piece(base, end, s, sizeof(s));
 	r.left = x;
@@ -243,42 +255,9 @@ void ms_ime_draw( INT gid, INT x, INT y, INT px, INT lh )
 		r.bottom = y + lh;
 		(void)dp_fill_rect(gid, &r, IME_INK);
 	}
-	if ( list ) {
-		/* the candidates under it, a number before each */
-		const UB	*c = cand;
-		INT		w = 0, k;
-		UB		row[TSMOZC_TEXT_MAX + 8];
-
-		row_h = lh + 2;
-		for ( k = 0; k < ncand && k < LIST_ROWS; k++ ) {
-			INT	cw;
-
-			snprintf((char *)row, sizeof(row), "%d %s", k + 1, (const char *)c);
-			cw = dp_text_width(row, px);
-			if ( cw > w ) w = cw;
-			c += strlen((const char *)c) + 1;
-		}
-		listbox.left = x;
-		listbox.top = y + lh + 2;
-		listbox.right = x + w + 8;
-		listbox.bottom = listbox.top + row_h * k + 4;
-		(void)dp_fill_rect(gid, &listbox, IME_GROUND);
-		(void)dp_frame_rect(gid, &listbox, IME_FRAME, 1);
-		c = cand;
-		for ( i = 0; i < k; i++ ) {
-			BOOL	sel = (BOOL)( first + i == chosen );
-
-			snprintf((char *)row, sizeof(row), "%d %s", i + 1, (const char *)c);
-			if ( sel ) {
-				r.left = listbox.left + 1;
-				r.right = listbox.right - 1;
-				r.top = listbox.top + 2 + i * row_h;
-				r.bottom = r.top + row_h;
-				(void)dp_fill_rect(gid, &r, IME_TARGET);
-			}
-			(void)dp_text(gid, listbox.left + 4, listbox.top + 2 + i * row_h + px, row,
-				      sel ? IME_GROUND : IME_INK, px);
-			c += strlen((const char *)c) + 1;
-		}
+	if ( !list ) {
+		unlist();
+	} else if ( ob_cand_put(ms_win_key(), x, y, y + lh, cand, ncand, chosen - first, first, total) >= E_OK ) {
+		listed = ms_win_key();		/* listed by the system under the composition */
 	}
 }

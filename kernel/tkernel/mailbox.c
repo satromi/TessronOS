@@ -44,6 +44,7 @@ EXPORT ER knl_mailbox_initialize( void )
 	end = knl_mbxcb_table + NUM_MBXID;
 	for ( mbxcb = knl_mbxcb_table; mbxcb < end; mbxcb++ ) {
 		mbxcb->mbxid = 0;
+		knl_klk_init(&mbxcb->klk);
 		QueInsert(&mbxcb->wait_queue, &knl_free_mbxcb);
 	}
 
@@ -73,7 +74,12 @@ SYSCALL ID tk_cre_mbx( CONST T_CMBX *pk_cmbx )
 
 	BEGIN_CRITICAL_SECTION;
 	/* Get control block from FreeQue */
+	KLK_MISC();
 	mbxcb = (MBXCB*)QueRemoveNext(&knl_free_mbxcb);
+	KLK_UNMISC();
+	if ( mbxcb != NULL ) {
+		KLK_LOCK(&mbxcb->klk);
+	}
 	if ( mbxcb == NULL ) {
 		ercd = E_LIMIT;
 	} else {
@@ -92,6 +98,9 @@ SYSCALL ID tk_cre_mbx( CONST T_CMBX *pk_cmbx )
 		}
 #endif
 		ercd = mbxid;
+	}
+	if ( mbxcb != NULL ) {
+		KLK_UNLOCK(&mbxcb->klk);
 	}
 	END_CRITICAL_SECTION;
 
@@ -112,6 +121,7 @@ SYSCALL ER tk_del_mbx( ID mbxid )
 	mbxcb = get_mbxcb(mbxid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mbxcb->klk);
 	if ( mbxcb->mbxid == 0 ) {
 		ercd = E_NOEXS;
 	} else {
@@ -119,9 +129,12 @@ SYSCALL ER tk_del_mbx( ID mbxid )
 		knl_wait_delete(&mbxcb->wait_queue);
 
 		/* Return to FreeQue */
+		KLK_MISC();
 		QueInsert(&mbxcb->wait_queue, &knl_free_mbxcb);
+		KLK_UNMISC();
 		mbxcb->mbxid = 0;
 	}
+	KLK_UNLOCK(&mbxcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -142,6 +155,7 @@ SYSCALL ER tk_snd_mbx( ID mbxid, T_MSG *pk_msg )
 	mbxcb = get_mbxcb(mbxid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mbxcb->klk);
 	if (mbxcb->mbxid == 0) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -178,6 +192,7 @@ SYSCALL ER tk_snd_mbx( ID mbxid, T_MSG *pk_msg )
 	}
 
     error_exit:
+	KLK_UNLOCK(&mbxcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -197,8 +212,16 @@ LOCAL void mbx_chg_pri( TCB *tcb, INT oldpri )
 /*
  * Definition of mailbox wait specification
  */
-LOCAL CONST WSPEC knl_wspec_mbx_tfifo = { TTW_MBX, NULL, NULL };
-LOCAL CONST WSPEC knl_wspec_mbx_tpri  = { TTW_MBX, mbx_chg_pri, NULL };
+/* The lock of the wait (design 4.3.3) */
+#if KLK_FINE_OBJ
+LOCAL KLOCK *mbx_wlock( TCB *tcb )
+{
+	return &get_mbxcb(tcb->wid)->klk;
+}
+#endif
+
+LOCAL CONST WSPEC knl_wspec_mbx_tfifo = { TTW_MBX, NULL, NULL WSPEC_LOCK(mbx_wlock) };
+LOCAL CONST WSPEC knl_wspec_mbx_tpri  = { TTW_MBX, mbx_chg_pri, NULL WSPEC_LOCK(mbx_wlock) };
 
 /*
  * Receive from mailbox
@@ -215,6 +238,7 @@ SYSCALL_U ER tk_rcv_mbx_u( ID mbxid, T_MSG **ppk_msg, TMO_U tmout )
 	mbxcb = get_mbxcb(mbxid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mbxcb->klk);
 	if ( mbxcb->mbxid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -234,6 +258,7 @@ SYSCALL_U ER tk_rcv_mbx_u( ID mbxid, T_MSG **ppk_msg, TMO_U tmout )
 	}
 
     error_exit:
+	KLK_UNLOCK(&mbxcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -262,6 +287,7 @@ SYSCALL ER tk_ref_mbx( ID mbxid, T_RMBX *pk_rmbx )
 	mbxcb = get_mbxcb(mbxid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mbxcb->klk);
 	if ( mbxcb->mbxid == 0 ) {
 		ercd = E_NOEXS;
 	} else {
@@ -269,6 +295,7 @@ SYSCALL ER tk_ref_mbx( ID mbxid, T_RMBX *pk_rmbx )
 		pk_rmbx->wtsk = knl_wait_tskid(&mbxcb->wait_queue);
 		pk_rmbx->pk_msg = headmsg(mbxcb);
 	}
+	KLK_UNLOCK(&mbxcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;

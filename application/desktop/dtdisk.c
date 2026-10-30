@@ -37,6 +37,14 @@
  *	volume, to have them saved when the disk is put back, or to throw
  *	them away.
  *
+ *	The disk of the system volume taken out is followed the same way,
+ *	except that the first window stays: the record it shows is taken
+ *	from the store and kept as the window's own (dt_win_keep), the
+ *	message line says the system's disk went, and what cannot be read
+ *	without it fails as it would for any disk taken out. The same disk
+ *	put back is attached again by itself, and the first window reads its
+ *	record anew, writing what was changed in it meanwhile (dt_win_back).
+ *
  *	Each step is said on the console, "disk: ...", for the tests.
  */
 
@@ -55,9 +63,6 @@
 #include <ts/gpt.h>
 #include "desktop.h"
 
-#define DK_DISKS	2048		/* disks and partitions looked at: as many as the device manager knows */
-#define DK_ROWS		16		/* partitions a panel offers */
-#define DK_KEEP		256		/* volumes remembered as attached */
 #define DK_WAIT		16		/* records waiting for their disk to be put back */
 #define DK_PATH		64		/* bytes of a volume's path kept here */
 #define DK_TO		8		/* other volumes offered to save to */
@@ -82,6 +87,9 @@ LOCAL DKWAIT	dk_wait[DK_WAIT];
 LOCAL UW	dk_volser = 0;		/* knl_obfile_serial as last followed */
 LOCAL UW	dk_devser = 0;		/* knl_obdev_serial */
 LOCAL BOOL	dk_started = FALSE;
+LOCAL TS_UUID	dk_sysvu;		/* the system volume, the first attached at the start */
+LOCAL BOOL	dk_has_sysvu = FALSE;
+LOCAL BOOL	dk_sysgone = FALSE;	/* its disk is out */
 
 /*
  * The windows, what each shows, whether that was on a volume and which,
@@ -171,13 +179,32 @@ LOCAL void keep_vol( CONST TS_UUID *vuuid, CONST TS_UUID *top, BOOL keep )
 	tm_printf((UB *)"disk: %s %s (%d)\n", keep ? "remember" : "forget", us, (INT)er);
 }
 
-/* The volumes remembered: their UUIDs, and their top objects after them; the caller frees */
-LOCAL TS_UUID *kept_vols( INT *p_n )
+/*
+ * The volumes remembered, every one: their UUIDs, and their top objects
+ * in *p_top; the caller frees what this answers (*p_top is in it)
+ */
+LOCAL TS_UUID *kept_vols( INT *p_n, TS_UUID **p_top )
 {
-	TS_UUID	*vu = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * DK_KEEP * 2);
+	INT	n = knl_obdev_vols_get(NULL, NULL, 0) + 4;
+	TS_UUID	*vu = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)n * 2);
 
-	*p_n = ( vu != NULL ) ? knl_obdev_vols_get(vu, vu + DK_KEEP, DK_KEEP) : 0;
+	*p_top = ( vu != NULL ) ? vu + n : NULL;
+	*p_n = ( vu != NULL ) ? knl_obdev_vols_get(vu, vu + n, n) : 0;
+	if ( *p_n > n ) *p_n = n;		/* more came meanwhile: they are looked at the next time */
 	return vu;
+}
+
+/*
+ * The disks and partitions the device manager knows, every one, OB_DV_NAME
+ * bytes each, in memory of their own (Kfree it): how many in *p_n
+ */
+LOCAL UB *disks_all( INT *p_n )
+{
+	INT	n = knl_obdev_disks(NULL, 0) + 8;
+	UB	*names = (UB *)Kmalloc((SZ)OB_DV_NAME * (SZ)n);
+
+	*p_n = ( names != NULL ) ? knl_obdev_disks(names, n) : 0;
+	return names;
 }
 
 LOCAL INT kept_at( CONST TS_UUID *vu, INT n, CONST TS_UUID *vuuid )
@@ -302,7 +329,9 @@ LOCAL void links_name_vol( T_TAD *doc, CONST TS_UUID *vuuid )
 			continue;		/* found elsewhere: the save says where */
 		}
 		v->tvol = *vuuid;
-		(void)tad_lnk_set(doc, v);
+		if ( tad_lnk_set(doc, v) < E_OK ) {
+			tm_printf((UB *)"desktop: the link \"%s\" was not told its volume\n", v->name);
+		}
 	}
 	Kfree(v);
 }
@@ -504,10 +533,180 @@ LOCAL void rescue( DTWIN *d, CONST TS_UUID *vuuid, CONST UB *name )
 	if ( to != NULL ) Kfree(to);
 }
 
+#ifdef X64
+/*
+ * The console's last lines in a window of their own, when the disk of the
+ * system volume went: on a PC that disk holds the records' files too
+ * (bootlog.c), so what the console said as it went -- the USB port's
+ * state among it -- is kept where it can be read off the screen until
+ * the disk is back and the files are written.
+ */
+#define CL_LINES	40
+#define CL_MAX		( 512 + CL_LINES * ( 200 * 6 + 8 ) )
+
+IMPORT UD	knl_bootlog_head( void );
+IMPORT void	knl_bootlog_tail( UD until, INT lines, void (*out)( CONST UB *s, INT n ) );
+
+LOCAL UB	*cl_xml;
+LOCAL INT	cl_at;
+LOCAL UB	(*cl_text)[200];	/* the lines as the console said them, the oldest first */
+LOCAL INT	cl_len[CL_LINES + 2];
+LOCAL INT	cl_n;
+
+LOCAL void cl_put( CONST char *s )
+{
+	while ( *s != 0 && cl_at < CL_MAX - 1 ) cl_xml[cl_at++] = (UB)*s++;
+}
+
+/*
+ * One line of the console as a paragraph, what XML gives a meaning to
+ * written out. A line is cut at a length, perhaps inside a letter of
+ * several bytes, and a record must be UTF-8 throughout: a letter not
+ * whole is a '?'.
+ */
+LOCAL void cl_para( CONST UB *s, INT n )
+{
+	INT	i, k, len;
+
+	cl_put("<p>");
+	for ( i = 0; i < n && cl_at < CL_MAX - 16; i++ ) {
+		UB	c = s[i];
+
+		if ( c >= 0x80 ) {
+			len = ( c >= 0xf0 && c < 0xf8 ) ? 4 : ( c >= 0xe0 ) ? 3 : ( c >= 0xc2 && c < 0xe0 ) ? 2 : 0;
+			for ( k = 1; len > 0 && k < len; k++ ) {
+				if ( i + k >= n || ( s[i + k] & 0xc0 ) != 0x80 ) len = 0;
+			}
+			if ( len == 0 ) {
+				cl_xml[cl_at++] = '?';
+				continue;
+			}
+			for ( k = 0; k < len; k++ ) cl_xml[cl_at++] = s[i + k];
+			i += len - 1;
+		} else if ( c == '&' ) {
+			cl_put("&amp;");
+		} else if ( c == '<' ) {
+			cl_put("&lt;");
+		} else if ( c == '>' ) {
+			cl_put("&gt;");
+		} else if ( c < 0x20 || c == 0x7f ) {
+			cl_xml[cl_at++] = ' ';		/* the console's colours and controls */
+		} else {
+			cl_xml[cl_at++] = c;
+		}
+	}
+	cl_put("</p>");
+}
+
+/* A line of the console kept, to be written out the newest first */
+LOCAL void cl_line( CONST UB *s, INT n )
+{
+	INT	i;
+
+	if ( cl_n >= CL_LINES + 2 ) {
+		return;
+	}
+	for ( i = 0; i < n && i < 200; i++ ) cl_text[cl_n][i] = s[i];
+	cl_len[cl_n++] = i;
+}
+
+LOCAL void show_console( void )
+{
+	CONST char	*title = "システムのディスクが取り外されたときのコンソール（新しい行が上）";
+	T_DPRECT	o;
+	T_TAD		*rec = NULL;
+	INT		i;
+
+	cl_xml = (UB *)Kmalloc(CL_MAX);
+	cl_text = Kmalloc(sizeof(*cl_text) * ( CL_LINES + 2 ));
+	if ( cl_xml == NULL || cl_text == NULL ) {
+		if ( cl_xml != NULL ) Kfree(cl_xml);
+		if ( cl_text != NULL ) Kfree(cl_text);
+		return;
+	}
+	cl_n = 0;
+	cl_at = 0;
+	cl_put("<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"");
+	cl_put(title);
+	cl_put("\"><document>");
+	knl_bootlog_tail(knl_bootlog_head(), CL_LINES, cl_line);
+	for ( i = cl_n - 1; i >= 0; i-- ) {
+		cl_para(cl_text[i], cl_len[i]);	/* the newest at the top, where a photograph sees it */
+	}
+	Kfree(cl_text);
+	cl_text = NULL;
+	cl_put("</document></tad>");
+	if ( tad_parse(cl_xml, (SZ)cl_at, NULL, &rec) < E_OK ) {
+		rec = NULL;
+	}
+	Kfree(cl_xml);
+	cl_xml = NULL;
+	if ( rec == NULL ) {
+		tm_printf((UB *)"disk: the console's lines not shown\n");
+		return;
+	}
+	o.left = 40;
+	o.top = 240;
+	o.right = 1000;
+	o.bottom = 740;
+	(void)dt_open_made(rec, title, DT_TOOL_NONE, &o);
+}
+#endif
+
+/*
+ * The first window, whose object's volume went: never closed, it keeps
+ * the record it shows as its own. Answers what the message line is to
+ * say after the windows closed have said theirs: that the disk went,
+ * the system's own disk said as such.
+ */
+LOCAL CONST char *keep_first( DTWIN *d, CONST TS_UUID *vuuid )
+{
+	BOOL	sys = (BOOL)( dk_has_sysvu && ts_uuid_cmp(vuuid, &dk_sysvu) == 0 );
+
+	if ( d->xml_view ) {
+		(void)dd_xml_commit(d);
+	}
+	if ( !dt_win_keep(d) ) {
+		tm_printf((UB *)"disk: the first window's record is not the store's\n");
+	}
+	if ( sys ) {
+		dk_sysgone = TRUE;
+		tm_printf((UB *)"disk: the system volume went\n");
+		return "システムのディスクが取り外されました。同じディスクを挿し直すと元に戻ります";
+	}
+	tm_printf((UB *)"disk: the first window's volume went\n");
+	return "初期ウィンドウのディスクが取り外されました。挿し直すと元に戻ります";
+}
+
+/*
+ * The windows of the parts that hold a record of the store's past
+ * drawing (a player of 実時間制御TAD, a slide show), closed when that
+ * record's object can no longer be found: the store lets go of it next.
+ */
+LOCAL void close_lost_parts( void )
+{
+	INT	i;
+
+	for ( i = 0; i < DT_MAX_WIN; i++ ) {
+		DTWIN	*d = dt_win_at(i);
+
+		if ( d == NULL || !d->used || d->own == NULL || d->own->lost == NULL
+		  || !d->own->lost(d) ) {
+			continue;
+		}
+		tm_printf((UB *)"disk: closed window of %s\n", (CONST char *)d->name);
+		dt_close(d);
+		(void)wm_msg_put("ディスクが取り外されたため、ウインドウを閉じました");
+	}
+}
+
 /* The windows of objects on a volume that went: closed, and said so */
 LOCAL void close_gone( void )
 {
-	INT	i;
+	CONST char	*said = NULL;
+	INT		i;
+
+	close_lost_parts();
 
 	for ( i = 0; i < DT_MAX_WIN; i++ ) {
 		DTWIN	*d = dt_win_at(i);
@@ -518,7 +717,12 @@ LOCAL void close_gone( void )
 		  || ts_uuid_cmp(&d->id, &dk_id[i]) != 0 ) {
 			continue;
 		}
-		if ( d == dt_first_win() || knl_obfile_vol_of(&d->id) > 0 ) {
+		if ( knl_obfile_vol_of(&d->id) > 0 ) {
+			continue;
+		}
+		if ( d == dt_first_win() ) {
+			said = keep_first(d, &dk_vu[i]);
+			dk_wid[i] = 0;
 			continue;
 		}
 		if ( om_store_name(&d->id, name, sizeof(name)) < 0 ) {
@@ -536,6 +740,14 @@ LOCAL void close_gone( void )
 		dt_close(d);
 		if ( msg[0] != 0 ) (void)wm_msg_put((CONST char *)msg);
 		dk_wid[i] = 0;
+	}
+	if ( said != NULL ) {
+#ifdef X64
+		if ( dk_sysgone ) {
+			show_console();		/* after the windows that went, in a place of the table free now */
+		}
+#endif
+		(void)wm_msg_put(said);
 	}
 }
 
@@ -571,17 +783,19 @@ LOCAL void look_disks( void )
 {
 	UB		*names;
 	T_FSPROBE	*pr;
-	TS_UUID		*kv;
+	TS_UUID		*kv, *kt;
 	UB		path[OB_DV_NAME];
-	INT		n, i, k, nk = 0;
+	INT		n = 0, i, k, nk = 0;
 
-	names = (UB *)Kmalloc((SZ)OB_DV_NAME * DK_DISKS);
 	pr = (T_FSPROBE *)Kmalloc(sizeof(T_FSPROBE));
-	kv = kept_vols(&nk);
-	if ( names == NULL || pr == NULL || kv == NULL ) {
+	kv = kept_vols(&nk, &kt);
+	names = ( nk > 0 || dk_sysgone ) ? disks_all(&n) : NULL;
+	if ( pr == NULL || kv == NULL ) {
 		goto done;
 	}
-	n = ( nk > 0 ) ? knl_obdev_disks(names, DK_DISKS) : 0;
+	if ( names == NULL ) {
+		n = 0;
+	}
 	for ( i = 0; i < n; i++ ) {
 		CONST char	*dev = (CONST char *)( names + i * OB_DV_NAME );
 
@@ -589,8 +803,12 @@ LOCAL void look_disks( void )
 			continue;		/* attached already */
 		}
 		if ( knl_fs_probe(dev, pr) < E_OK || pr->kind != FS_KIND_TSFS
-		  || kept_at(kv, nk, &pr->vuuid) < 0 || knl_obfile_vuuid_on(&pr->vuuid) ) {
+		  || knl_obfile_vuuid_on(&pr->vuuid) ) {
 			continue;
+		}
+		if ( kept_at(kv, nk, &pr->vuuid) < 0
+		  && !( dk_sysgone && ts_uuid_cmp(&pr->vuuid, &dk_sysvu) == 0 ) ) {
+			continue;		/* neither remembered nor the system's */
 		}
 		for ( k = 0; dev[k] != 0 && k < OB_DV_NAME - 1; k++ ) path[k] = (UB)dev[k];
 		path[k] = 0;
@@ -605,6 +823,28 @@ LOCAL void look_disks( void )
 	if ( kv != NULL ) Kfree(kv);
 }
 
+/* The first window kept while its disk was out: its object found again, read anew */
+LOCAL void first_back( void )
+{
+	DTWIN	*f = dt_first_win();
+	ER	er;
+
+	if ( dk_sysgone && dk_has_sysvu && knl_obfile_vuuid_on(&dk_sysvu) ) {
+		dk_sysgone = FALSE;
+		tm_printf((UB *)"disk: the system volume is back\n");
+	}
+	if ( f == NULL || !f->used || !f->kept || knl_obfile_vol_of(&f->id) <= 0 ) {
+		return;
+	}
+	er = dt_win_back(f);
+	tm_printf((UB *)"disk: the first window read again (%d)\n", (INT)er);
+	if ( er >= E_OK ) {
+		(void)wm_msg_put("ディスクが挿し直され、元に戻りました");
+	} else if ( er != E_NOEXS ) {
+		(void)wm_msg_put("ディスクが挿し直されましたが、初期ウィンドウの変更を保存できませんでした");
+	}
+}
+
 EXPORT void dt_disk_poll( void )
 {
 	UW	vs, ds;
@@ -615,6 +855,7 @@ EXPORT void dt_disk_poll( void )
 
 	if ( !dk_started ) {
 		dk_started = TRUE;
+		dk_has_sysvu = (BOOL)( knl_obfile_machine(&dk_sysvu) >= E_OK && !zero_uuid(&dk_sysvu) );
 		dk_volser = vs;
 		dk_devser = ds;
 		note_windows(TRUE);
@@ -630,6 +871,7 @@ EXPORT void dt_disk_poll( void )
 		dk_volser = vs;
 		close_gone();
 		om_store_recheck();
+		first_back();
 		note_windows(TRUE);
 		tm_printf((UB *)"disk: volumes changed\n");
 		dt_draw_all();
@@ -659,15 +901,15 @@ EXPORT void dt_disk_connect( DTWIN *d, CONST T_VOBJ *v )
 	if ( d == NULL ) {
 		return;
 	}
-	names = (UB *)Kmalloc((SZ)OB_DV_NAME * DK_DISKS);
-	rows = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * DK_ROWS);
-	kinds = (UINT *)Kmalloc(sizeof(UINT) * DK_ROWS);
+	/* a row for every disk and partition the device manager knows, as many as there are */
+	names = disks_all(&n);
+	rows = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * (SZ)( n + 1 ));
+	kinds = (UINT *)Kmalloc(sizeof(UINT) * (SZ)( n + 1 ));
 	pr = (T_FSPROBE *)Kmalloc(sizeof(T_FSPROBE));
 	if ( names == NULL || rows == NULL || kinds == NULL || pr == NULL ) {
 		goto done;
 	}
-	n = knl_obdev_disks(names, DK_DISKS);
-	for ( i = 0; i < n && m < DK_ROWS; i++ ) {
+	for ( i = 0; i < n; i++ ) {
 		CONST char	*dev = (CONST char *)( names + i * OB_DV_NAME );
 
 		if ( knl_obfile_vol_path(dev) > 0 || knl_fs_probe(dev, pr) < E_OK
@@ -882,7 +1124,7 @@ EXPORT BOOL dt_disk_on_delete( DTWIN *d, CONST T_VOBJ *v )
 {
 	UB		path[DK_PATH], name[OB_VOL_LABEL + 16], msg[OB_VOL_LABEL + 96];
 	T_OBFVREF	ref;
-	TS_UUID		*kv;
+	TS_UUID		*kv, *kt;
 	INT		nk = 0, i, k;
 
 	if ( v == NULL || d == NULL || d != dt_first_win() ) {
@@ -906,9 +1148,9 @@ EXPORT BOOL dt_disk_on_delete( DTWIN *d, CONST T_VOBJ *v )
 		return TRUE;
 	}
 	/* the link of a disk not attached now: forgotten as well */
-	kv = kept_vols(&nk);
+	kv = kept_vols(&nk, &kt);
 	for ( i = 0; kv != NULL && i < nk; i++ ) {
-		if ( ts_uuid_cmp(&kv[DK_KEEP + i], &v->target) == 0
+		if ( ts_uuid_cmp(&kt[i], &v->target) == 0
 		  || ( !zero_uuid(&v->tvol) && ts_uuid_cmp(&kv[i], &v->tvol) == 0 ) ) {
 			keep_vol(&kv[i], NULL, FALSE);
 			tm_printf((UB *)"disk: removed a disk not attached\n");
@@ -1063,10 +1305,11 @@ typedef struct {
  */
 EXPORT void dt_disk_create( DTWIN *d )
 {
-	UB		*names, (*rows)[WM_LABEL_MAX], sd[OB_DV_NAME], label[OB_VOL_LABEL];
+	UB		*names, (*rows)[WM_LABEL_MAX] = NULL, sd[OB_DV_NAME], label[OB_VOL_LABEL];
 	UB		part[OB_DV_NAME], name[OB_VOL_LABEL + 16], msg[OB_VOL_LABEL + 96];
-	DKFREE		*fr;
-	T_GPTFREE	g[8];
+	DKFREE		*fr = NULL;
+	T_GPTFREE	*g = NULL;
+	INT		groom = 0, rroom = 0;
 	T_WMPANEL	*def;
 	T_WMPART	*pt;
 	INT		n, i, j, k, m = 0, pid, w = 560, h, top, pick = -1;
@@ -1080,15 +1323,12 @@ EXPORT void dt_disk_create( DTWIN *d )
 	if ( d == NULL ) {
 		return;
 	}
-	names = (UB *)Kmalloc((SZ)OB_DV_NAME * DK_DISKS);
-	rows = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * DK_ROWS);
-	fr = (DKFREE *)Kmalloc(sizeof(DKFREE) * DK_ROWS);
-	if ( names == NULL || rows == NULL || fr == NULL ) {
+	names = disks_all(&n);
+	if ( names == NULL ) {
 		goto done;
 	}
 	sys_disk(sd, sizeof(sd));
-	n = knl_obdev_disks(names, DK_DISKS);
-	for ( i = 0; i < n && m < DK_ROWS; i++ ) {
+	for ( i = 0; i < n; i++ ) {
 		CONST char	*dev = (CONST char *)( names + i * OB_DV_NAME );
 		UD		nsect = 0;
 		BOOL		fresh = FALSE;
@@ -1098,8 +1338,51 @@ EXPORT void dt_disk_create( DTWIN *d )
 		if ( k == 0 || ( dev[k - 1] >= '0' && dev[k - 1] <= '9' ) ) {
 			continue;		/* a partition: the disks are looked at whole */
 		}
-		c = knl_gpt_free(dev, g, 8, &nsect, &fresh);
-		for ( j = 0; j < c && m < DK_ROWS; j++ ) {
+		/* every free stretch of the disk: a list that came back full is asked for again in more room */
+		for ( c = groom; ; ) {
+			if ( g == NULL || c >= groom ) {
+				T_GPTFREE	*ng;
+
+				groom = ( groom > 0 ) ? groom * 2 : 8;
+				ng = (T_GPTFREE *)Kmalloc(sizeof(T_GPTFREE) * (SZ)groom);
+				if ( ng == NULL ) {
+					c = 0;
+					break;
+				}
+				if ( g != NULL ) Kfree(g);
+				g = ng;
+			}
+			c = knl_gpt_free(dev, g, groom, &nsect, &fresh);
+			if ( c < groom ) break;
+		}
+		/* a row for each, the rows grown to hold them */
+		if ( c > 0 && m + c > rroom ) {
+			INT		nr = ( rroom > 0 ) ? rroom : 16;
+			UB		(*nrw)[WM_LABEL_MAX];
+			DKFREE		*nfr;
+
+			while ( nr < m + c ) nr *= 2;
+			nrw = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * (SZ)nr);
+			nfr = (DKFREE *)Kmalloc(sizeof(DKFREE) * (SZ)nr);
+			if ( nrw == NULL || nfr == NULL ) {
+				if ( nrw != NULL ) Kfree(nrw);
+				if ( nfr != NULL ) Kfree(nfr);
+				c = 0;
+			} else {
+				if ( rows != NULL ) {
+					knl_memcpy(nrw, rows, (INT)( sizeof(UB) * WM_LABEL_MAX * (SZ)m ));
+					Kfree(rows);
+				}
+				if ( fr != NULL ) {
+					knl_memcpy(nfr, fr, (INT)( sizeof(DKFREE) * (SZ)m ));
+					Kfree(fr);
+				}
+				rows = nrw;
+				fr = nfr;
+				rroom = nr;
+			}
+		}
+		for ( j = 0; j < c; j++ ) {
 			UD	bytes = ( g[j].last - g[j].first + 1 ) * 512;
 
 			if ( bytes < (UD)DK_MIN_MB << 20 ) continue;
@@ -1205,6 +1488,7 @@ EXPORT void dt_disk_create( DTWIN *d )
 	if ( names != NULL ) Kfree(names);
 	if ( rows != NULL ) Kfree(rows);
 	if ( fr != NULL ) Kfree(fr);
+	if ( g != NULL ) Kfree(g);
 	wm_update();
 }
 

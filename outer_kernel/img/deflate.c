@@ -94,6 +94,7 @@ typedef struct {
 
 	UW	lfreq[NLIT];
 	UW	dfreq[NDIST];
+	struct clwork	*cl;		/* code_lengths' work, 7KB */
 } DEF;
 
 /* ---------------------------------------------------------------- output */
@@ -157,11 +158,17 @@ LOCAL UW reverse( UW code, INT n )
  * length comes out too long the counts are halved (keeping every
  * symbol that was used) and the tree built again.
  */
-LOCAL void code_lengths( CONST UW *freq, INT n, INT limit, UB *len )
-{
+typedef struct clwork {
 	UW	f[2 * NLIT], cnt[NLIT];
 	INT	parent[2 * NLIT];
 	BOOL	alive[2 * NLIT];
+} CLWORK;
+
+LOCAL void code_lengths( CLWORK *cw, CONST UW *freq, INT n, INT limit, UB *len )
+{
+	UW	*f = cw->f, *cnt = cw->cnt;
+	INT	*parent = cw->parent;
+	BOOL	*alive = cw->alive;
 	INT	i, nodes, used, maxlen;
 
 	for ( i = 0; i < n; i++ ) {
@@ -361,8 +368,8 @@ LOCAL void write_block( DEF *z, BOOL last )
 			ndist_used++;
 		}
 	}
-	code_lengths(z->lfreq, NLIT, MAX_BITS, llen);
-	code_lengths(z->dfreq, NDIST, MAX_BITS, dlen);
+	code_lengths(z->cl, z->lfreq, NLIT, MAX_BITS, llen);
+	code_lengths(z->cl, z->dfreq, NDIST, MAX_BITS, dlen);
 	if ( ndist_used == 0 ) {
 		dlen[0] = 1;			/* one distance code, never used */
 	} else if ( ndist_used == 1 ) {
@@ -391,7 +398,7 @@ LOCAL void write_block( DEF *z, BOOL last )
 	for ( i = 0; i < nrl; i += 2 ) {
 		cfreq[rl[i]]++;
 	}
-	code_lengths(cfreq, NCLEN, MAX_CL_BITS, clen);
+	code_lengths(z->cl, cfreq, NCLEN, MAX_CL_BITS, clen);
 	make_codes(clen, NCLEN, ccode);
 	for ( nc = NCLEN; nc > 4 && clen[clen_order[nc - 1]] == 0; nc-- ) ;
 
@@ -535,11 +542,13 @@ EXPORT ER ts_zlib_deflate( CONST UB *in, SZ in_len, UB **p_out, SZ *p_len,
 	z.head = (INT *)Kmalloc(sizeof(INT) * HSIZE);
 	z.prev = (INT *)Kmalloc(sizeof(INT) * WSIZE);
 	z.sym = (SYM *)Kmalloc(sizeof(SYM) * ( BLOCK_SYMS + 2 ));
-	if ( z.out == NULL || z.head == NULL || z.prev == NULL || z.sym == NULL ) {
+	z.cl = (CLWORK *)Kmalloc(sizeof(CLWORK));
+	if ( z.out == NULL || z.head == NULL || z.prev == NULL || z.sym == NULL || z.cl == NULL ) {
 		if ( z.out != NULL ) Kfree(z.out);
 		if ( z.head != NULL ) Kfree(z.head);
 		if ( z.prev != NULL ) Kfree(z.prev);
 		if ( z.sym != NULL ) Kfree(z.sym);
+		if ( z.cl != NULL ) Kfree(z.cl);
 		return E_NOMEM;
 	}
 	if ( level < 1 ) level = 1;
@@ -622,6 +631,7 @@ EXPORT ER ts_zlib_deflate( CONST UB *in, SZ in_len, UB **p_out, SZ *p_len,
 	Kfree(z.head);
 	Kfree(z.prev);
 	Kfree(z.sym);
+	Kfree(z.cl);
 	if ( z.fail ) {
 		Kfree(z.out);
 		return E_NOMEM;

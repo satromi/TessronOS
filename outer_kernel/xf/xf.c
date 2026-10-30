@@ -34,17 +34,24 @@
 #include <ts/json.h>
 #include <tm/tmonitor.h>
 
-#define XF_CHUNK	( 64 * 1024 )
-#define XF_TAD_MAX	( 8 * 1024 * 1024 )	/* bytes of an xmlTAD file taken whole */
+/* bytes read or written at a time: a write of a record is made durable
+   when it returns, so the fewer they are the less the medium waits (design 7.3) */
+#define XF_CHUNK	( 4 * 1024 * 1024 )
+#define XF_TAD_FIRST	( 256 * 1024 )		/* bytes an xmlTAD file is first gathered into; it grows */
 #define XF_TEXT_MAX	( 256 * 1024 )		/* bytes of text shown line by line */
 #define XF_REC0_MAX	( XF_TEXT_MAX * 2 + 4096 )
-#define XF_JSON_MAX	OB_ATR_MAX
+/*
+ * What "tessronos.file" and the rest made here take besides the names
+ * in them: a name or a source escaped takes at most six bytes a byte.
+ */
+#define XF_META_FIXED	4096
+#define XF_FILE_ROOM(src)	( XF_META_FIXED + 6 * ( slen((src)->filename) + XF_NAME_MAX ) )
 
 /*
  * What taking in does to the new object. Not its deletion: an object
  * the system owns may forbid that.
  */
-#define XF_OPS		( OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRWR )
+#define XF_OPS		( OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRWR | OB_O_EXCL )	/* filled: not read half made */
 
 /* ---------------------------------------------------------------- kinds */
 
@@ -55,7 +62,7 @@
 #define K_IMAGE		5
 #define K_TEXT		6
 #define K_BINARY	7
-#define K_ARCHIVE	8		/* a BTRON archive (書庫), opened by 書庫解凍 */
+#define K_ARCHIVE	8		/* a BTRON archive (書庫), opened by 書庫管理 */
 
 typedef struct {
 	CONST char	*ext;		/* lower case, with the dot */
@@ -303,9 +310,9 @@ LOCAL INT meta_of( BUF *w, CONST T_XFSRC *src, UINT kind, CONST char *type, BOOL
 	put(w, "\",\"relationship\":[],\"linktype\":false,\"refCount\":1,\"recordCount\":");
 	put(w, has1 ? "2" : "1");
 	put(w, ",\"editable\":true,\"deletable\":true,\"readable\":true,\"applist\":");
-	/* an archive opens in 書庫解凍, which reads it from record 1 */
+	/* an archive opens in 書庫管理, which reads its book from record 1 */
 	put(w, ( kind == K_TAD || kind == K_TEXT ) ? "{\"basic-text-editor\":{\"defaultOpen\":true}}"
-	       : ( kind == K_ARCHIVE ) ? "{\"unpack-file\":{\"name\":\"書庫解凍\",\"defaultOpen\":true}}" : "{}");
+	       : ( kind == K_ARCHIVE ) ? "{\"archive-manager\":{\"name\":\"書庫管理\",\"defaultOpen\":true}}" : "{}");
 	put(w, ",\"tessronos\":{\"file\":");
 	put_file(w, src, type, size);
 	put(w, ",\"records\":[{\"n\":0,\"rt\":1}");
@@ -338,8 +345,10 @@ LOCAL ER make_object( CONST T_XFSRC *src, UINT kind, CONST char *type, BOOL has1
 	UB		*ico;
 	SZ		isz = 0;
 
-	w.b = (UB *)Kmalloc(XF_JSON_MAX);
-	w.max = XF_JSON_MAX;
+	/* as large as the names and the members given make it */
+	w.max = XF_FILE_ROOM(src)
+	      + ( ( src->tessronos != NULL ) ? slen((CONST UB *)src->tessronos) : 0 );
+	w.b = (UB *)Kmalloc((SZ)w.max);
 	if ( w.b == NULL ) {
 		return E_NOMEM;
 	}
@@ -354,7 +363,7 @@ LOCAL ER make_object( CONST T_XFSRC *src, UINT kind, CONST char *type, BOOL has1
 
 	/* the icon of the template of the program it opens in, as one made from that template has */
 	app = ( kind == K_TAD || kind == K_TEXT ) ? "basic-text-editor"
-	    : ( kind == K_ARCHIVE ) ? "unpack-file" : NULL;
+	    : ( kind == K_ARCHIVE ) ? "archive-manager" : NULL;
 	ico = ( app != NULL ) ? om_store_app_icon((CONST UB *)app, &isz) : NULL;
 	c.icon = ico;
 	c.iconsz = ( ico != NULL ) ? isz : 0;
@@ -380,18 +389,20 @@ LOCAL ER make_object( CONST T_XFSRC *src, UINT kind, CONST char *type, BOOL has1
 LOCAL ER meta_again( ID key, CONST T_XFSRC *src, CONST char *type, UD size )
 {
 	T_JSON	root, tf, f;
-	UB	*old;
+	UB	*old = NULL;
 	BUF	w;
 	SZ	olen = 0;
-	INT	at;
+	INT	at, n;
 	ER	er;
 
-	old = (UB *)Kmalloc(XF_JSON_MAX);
-	w.b = (UB *)Kmalloc(XF_JSON_MAX);
+	/* the metadata whole, and room for it with "tessronos.file" written again */
+	n = knl_ob_atr_all(key, 0, &old, NULL);
+	olen = ( n > 0 ) ? (SZ)n : 0;
 	w.at = 0;
-	w.max = XF_JSON_MAX;
-	er = ( old != NULL && w.b != NULL ) ? ob_get_atr(key, old, XF_JSON_MAX, &olen) : E_NOMEM;
-	if ( er >= E_OK && ( olen >= XF_JSON_MAX || js_parse(old, (INT)olen, &root) < E_OK
+	w.max = (INT)olen + XF_FILE_ROOM(src);
+	w.b = ( n >= 0 ) ? (UB *)Kmalloc((SZ)w.max) : NULL;
+	er = ( n < 0 ) ? (ER)n : ( w.b == NULL ) ? E_NOMEM : E_OK;
+	if ( er >= E_OK && ( js_parse(old, (INT)olen, &root) < E_OK
 			  || js_get(&root, "tessronos", &tf) < E_OK || js_get(&tf, "file", &f) < E_OK ) ) {
 		er = E_OBJ;
 	}
@@ -411,23 +422,38 @@ LOCAL ER meta_again( ID key, CONST T_XFSRC *src, CONST char *type, UD size )
 /* An xmlTAD file: gathered whole, and made record 0 as it is */
 LOCAL ER take_tad( CONST T_XFSRC *src, UB *first, INT nfirst, TS_UUID *p_uuid )
 {
-	UB	*all;
-	INT	n = nfirst, got, recno = -1;
-	SZ	asz = 0;
+	UB	*all, *more;
+	SZ	n = nfirst, cap = XF_TAD_FIRST, asz = 0;
+	INT	got = 0, recno = -1;
 	ID	key;
 	ER	er;
 
-	all = (UB *)Kmalloc(XF_TAD_MAX);
+	/* as long as the file is: the buffer twice as large each time it fills */
+	if ( cap < (SZ)nfirst * 2 ) cap = (SZ)nfirst * 2;
+	all = (UB *)Kmalloc(cap);
 	if ( all == NULL ) {
 		return E_NOMEM;
 	}
 	knl_memcpy(all, first, nfirst);
-	while ( n < XF_TAD_MAX && ( got = src->read(src->ctx, all + n, XF_TAD_MAX - n) ) > 0 ) {
+	for ( ;; ) {
+		if ( n == cap ) {
+			more = (UB *)Kmalloc(cap * 2);
+			if ( more == NULL ) {
+				Kfree(all);
+				return E_NOMEM;
+			}
+			knl_memcpy(more, all, n);
+			Kfree(all);
+			all = more;
+			cap *= 2;
+		}
+		got = src->read(src->ctx, all + n, cap - n);
+		if ( got <= 0 ) break;
 		n += got;
 	}
-	if ( n >= XF_TAD_MAX ) {
+	if ( got < 0 ) {
 		Kfree(all);
-		return E_LIMIT;
+		return (ER)got;
 	}
 	er = make_object(src, K_TAD, "application/x-xmltad", FALSE, (UD)n, NULL, p_uuid);
 	if ( er >= E_OK ) {
@@ -473,8 +499,8 @@ LOCAL ER write_rec0( ID key, CONST T_XFSRC *src, UINT kind, CONST UB *text, INT 
 		put(&w, "</p>");
 	}
 	put(&w, "</document></tad>");
-	er = ob_wri_rec(key, 0, 0, w.b, w.at, &asz);
-	if ( er >= E_OK ) er = ob_trn_rec(key, 0, (UD)w.at);
+	er = ob_rpl_rec(key, 0, w.b, (SZ)w.at);	/* whole: a reader sees the old record or the new one */
+	(void)asz;
 	Kfree(w.b);
 	return er;
 }
@@ -604,7 +630,7 @@ LOCAL UB *file_all( CONST char *path, SZ *p_size )
 	INT	fd, n;
 	SZ	at = 0;
 
-	if ( fs_stat(path, &st) < EX_OK || st.size > XF_TAD_MAX ) {
+	if ( fs_stat(path, &st) < EX_OK ) {
 		return NULL;
 	}
 	b = (UB *)Kmalloc((SZ)st.size + 1);
@@ -757,9 +783,10 @@ EXPORT ER xf_import_tadjs( CONST char *dir, CONST TS_UUID *uuid, CONST char *sou
 	if ( j == NULL ) {
 		return E_NOEXS;
 	}
-	meta = (UB *)Kmalloc(XF_JSON_MAX);
+	/* the TADjs metadata, however long, and "tessronos.file" put in */
+	meta = (UB *)Kmalloc(jl + XF_META_FIXED + 6 * XF_NAME_MAX);
 	ml = ( meta != NULL ) ? tadjs_meta(j, (INT)jl, us, ( source != NULL ) ? source : "",
-					   size0, meta, XF_JSON_MAX) : -1;
+					   size0, meta, (INT)jl + XF_META_FIXED + 6 * XF_NAME_MAX) : -1;
 	Kfree(j);
 	if ( ml <= 0 ) {
 		if ( meta != NULL ) Kfree(meta);
@@ -865,15 +892,20 @@ EXPORT ER xf_find( CONST TS_UUID *box, CONST UB *filename, TS_UUID *p_uuid )
 {
 	TS_UUID	*ids;
 	UB	name[XF_NAME_MAX];
-	INT	n = 0, i;
+	INT	n = 0, i, all;
 	ER	er = E_NOEXS;
 
 	if ( box == NULL || filename == NULL || p_uuid == NULL ) {
 		return E_PAR;
 	}
-	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * 256);
-	if ( ids != NULL && ob_lst_lnk(box, NULL, ids, 256, &n) >= E_OK ) {
-		for ( i = 0; i < n && i < 256 && er < E_OK; i++ ) {
+	/* every link of the box, however many: asked how many, then taken */
+	if ( ob_lst_lnk(box, NULL, NULL, 0, &n) < E_OK || n <= 0 ) {
+		return E_NOEXS;
+	}
+	all = n;
+	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)all);
+	if ( ids != NULL && ob_lst_lnk(box, NULL, ids, all, &n) >= E_OK ) {
+		for ( i = 0; i < n && i < all && er < E_OK; i++ ) {
 			if ( xf_name(&ids[i], name, sizeof(name)) >= E_OK && same_nocase(name, filename) ) {
 				*p_uuid = ids[i];
 				er = E_OK;
@@ -890,7 +922,7 @@ EXPORT ER xf_rename( CONST TS_UUID *uuid, CONST UB *filename )
 	UB	*old, stem[OB_NAME_MAX];
 	BUF	w;
 	SZ	olen = 0;
-	INT	e, i, at;
+	INT	e, i, at, n;
 	ID	key;
 	ER	er;
 
@@ -906,16 +938,18 @@ EXPORT ER xf_rename( CONST TS_UUID *uuid, CONST UB *filename )
 	}
 
 	/* "tessronos.file.name", when it was taken in from a file */
-	key = ob_opn_obj(uuid, OB_OP_ATRRD | OB_OP_ATRWR);
+	key = ob_opn_obj(uuid, OB_OP_ATRRD | OB_OP_ATRWR | OB_O_WEXCL);	/* read, changed, written back */
 	if ( key <= 0 ) {
 		return (ER)key;
 	}
-	old = (UB *)Kmalloc(XF_JSON_MAX);
-	w.b = (UB *)Kmalloc(XF_JSON_MAX);
+	old = NULL;
+	n = knl_ob_atr_all(key, 0, &old, NULL);
+	olen = ( n > 0 ) ? (SZ)n : 0;
 	w.at = 0;
-	w.max = XF_JSON_MAX;
-	er = ( old != NULL && w.b != NULL ) ? ob_get_atr(key, old, XF_JSON_MAX, &olen) : E_NOMEM;
-	if ( er >= E_OK && olen < XF_JSON_MAX && js_parse(old, (INT)olen, &root) >= E_OK
+	w.max = (INT)olen + XF_META_FIXED + 6 * slen(filename);
+	w.b = ( n >= 0 ) ? (UB *)Kmalloc((SZ)w.max) : NULL;
+	er = ( n < 0 ) ? (ER)n : ( w.b == NULL ) ? E_NOMEM : E_OK;
+	if ( er >= E_OK && js_parse(old, (INT)olen, &root) >= E_OK
 	  && js_get(&root, "tessronos", &tf) >= E_OK && js_get(&tf, "file", &f) >= E_OK
 	  && js_get(&f, "name", &nv) >= E_OK ) {
 		at = (INT)( nv.s - old );
@@ -1040,7 +1074,8 @@ EXPORT ER xf_refresh( CONST TS_UUID *uuid )
 	if ( uuid == NULL || file_name(uuid, name, sizeof(name)) <= 0 ) {
 		return E_PAR;			/* not one of the file's form */
 	}
-	key = ob_opn_obj(uuid, XF_OPS);
+	/* a file the POSIX programs wrote: its record 0 and metadata made again, others still reading it */
+	key = ob_opn_obj(uuid, ( XF_OPS & ~OB_O_EXCL ) | OB_O_WEXCL);
 	if ( key <= 0 ) {
 		return (ER)key;
 	}

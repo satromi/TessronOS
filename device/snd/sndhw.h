@@ -94,5 +94,9 @@ IMPORT ER knl_hdmi_init( void );
 IMPORT BOOL knl_i2s_pace( UW *blocks, UW *ms, UW *clk_khz );
 IMPORT INT  knl_hdmi_pace( UW *blocks, UW *ms );
 #endif
+#ifdef X64
+IMPORT CONST SNDHW	knl_hda_hw;	/* device/snd/x86_64/snd_hda.c */
+IMPORT ER knl_hda_init( void );
+#endif
 
 #endif /* __SNDHW_H__ */

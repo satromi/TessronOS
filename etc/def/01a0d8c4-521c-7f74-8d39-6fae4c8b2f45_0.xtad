@@ -1,0 +1,13 @@
+<tad version="1.0" encoding="UTF-8" filename="マイクロスクリプトのデータボックス">
+<document>
+<p>マイクロスクリプトのデータボックス</p>
+<p>マイクロスクリプトが尋ねるパネルの定義。ネットワークにつなぐ前の接続の許可。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,440,128" title="接続の許可">
+<text num="1" x="24" y="44"> </text>
+<button num="11" rect="216,88,316,112">許可</button>
+<button num="12" rect="324,88,424,112" answer="cancel" emph="true">拒否</button>
+</panel>
+</databox>
+</tad>

@@ -34,9 +34,9 @@
 
 #include "mc.h"
 #include <ts/json.h>
+#include <ts/obatr.h>
 #include <ts/txc.h>
 
-#define REC_LIST	32
 
 /* ---------------------------------------------------------------- records */
 
@@ -111,7 +111,7 @@ static void recs_free( RECS *s )
 
 static ER recs_read( CONST TS_UUID *u, RECS *s )
 {
-	T_OBREC	r[REC_LIST];
+	T_OBREC	*r;
 	INT	cnt = 0, i, len;
 	ID	k;
 
@@ -121,8 +121,8 @@ static ER recs_read( CONST TS_UUID *u, RECS *s )
 	s->r1 = -1;
 	k = ob_opn_obj(u, OB_OP_R);
 	if ( k <= 0 ) return (ER)k;
-	if ( ob_lst_rec(k, r, REC_LIST, &cnt) < E_OK ) cnt = 0;
-	for ( i = 0; i < cnt && i < REC_LIST; i++ ) {
+	r = ob_rec_read(k, &cnt);
+	for ( i = 0; i < cnt; i++ ) {
 		INT	sub = mc_sub(&r[i]);
 
 		if ( sub > 0 && s->recno[sub] < 0 ) {
@@ -140,6 +140,7 @@ static ER recs_read( CONST TS_UUID *u, RECS *s )
 			s->r1size = r[i].size;
 		}
 	}
+	free(r);
 	ob_cls_obj(k);
 	return E_OK;
 }
@@ -157,15 +158,22 @@ void name_of( CONST TS_UUID *u, UB *out )
 
 INT meta_of( CONST TS_UUID *u )
 {
-	SZ	asz = 0;
+	UB	*m = NULL;
+	INT	n;
 	ID	k = ob_opn_obj(u, OB_OP_ATRRD);
 
-	g_meta[0] = 0;
+	/* the metadata whole, in memory of its own: the last one read let go */
+	if ( g_meta != g_meta_none ) free(g_meta);
+	g_meta = g_meta_none;
 	if ( k <= 0 ) return 0;
-	if ( ob_get_atr(k, (UB *)g_meta, OB_ATR_MAX, &asz) < E_OK || asz < 0 ) asz = 0;
+	n = ob_atr_read(k, 0, &m);
 	ob_cls_obj(k);
-	g_meta[asz] = 0;
-	return (INT)asz;
+	if ( n <= 0 ) {
+		free(m);
+		return 0;
+	}
+	g_meta = (char *)m;
+	return n;
 }
 
 void new_vobjid( TS_UUID *u )
@@ -334,7 +342,7 @@ ER save( void )
 		wrecs_free(&w);
 		return er;
 	}
-	k = ob_opn_obj(&g_obj, OB_OP_R | OB_OP_W);
+	k = ob_opn_obj(&g_obj, OB_OP_R | OB_OP_W | OB_O_EXCL);	/* its records written together */
 	if ( k <= 0 ) {
 		wrecs_free(&w);
 		return (ER)k;
@@ -402,7 +410,6 @@ ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	T_OBCRE		c;
 	SZ		asz = 0;
 	ID		k, ka;
-	INT		i;
 	ER		er;
 
 	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
@@ -420,16 +427,13 @@ ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	k = ob_opn_obj(&d, OB_OP_WRITE);
 	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
 	if ( k > 0 ) ob_cls_obj(k);
-	for ( i = 0; er >= E_OK; i += 20 ) {
-		if ( ob_rea_rec(ka, 0, 0, an, sizeof(*an), &asz) >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
+	/* the answer waited for on its channel, at most wait_ms */
+	while ( er >= E_OK ) {
+		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
+		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
 			er = an->er;
 			break;
 		}
-		if ( i >= wait_ms ) {
-			er = E_TMOUT;
-			break;
-		}
-		(void)tk_dly_tsk(20);
 	}
 	ob_cls_obj(ka);
 	(void)ob_del_obj(&reply);
@@ -449,6 +453,7 @@ void link_open_el( CONST UB *el )
 	rq.req = DT_RQ_OPEN;
 	if ( !link_target(el, &rq.target) ) return;
 	rq.recno = -1;
+	ct_link_req(&rq, el, (INT)strlen((CONST char *)el));	/* the program it keeps to, when it does */
 	er = ask_desktop(&rq, &an, 3000);
 	name_of(&rq.target, nm);
 	snprintf(s, sizeof(s), "opened %s (%d)", (char *)nm, (INT)er);
@@ -529,42 +534,55 @@ static BOOL link_edit( CONST CTSET *set, INT n )
 	return ok;
 }
 
-static INT app_json( CONST UB *el, UB *out, INT max )
+static INT app_json( CONST UB *el, UB **p_out )
 {
 	T_JSON	root, al;
 	TS_UUID	u;
-	INT	n = ct_attr_text(el, (INT)strlen((CONST char *)el), "applist", out, max), k;
+	INT	len = (INT)strlen((CONST char *)el), n;
 
+	/* the link's own: no longer than the link it is written in */
+	*p_out = malloc((size_t)len + 1);
+	if ( *p_out == NULL ) return 0;
+	n = ct_attr_text(el, len, "applist", *p_out, len + 1);
 	if ( n > 0 ) return n;
 	if ( !link_target(el, &u) ) return 0;
 	n = meta_of(&u);
 	if ( n <= 0 || js_parse((CONST UB *)g_meta, n, &root) < E_OK || js_get(&root, "applist", &al) < E_OK ) {
-		out[0] = 0;
+		(*p_out)[0] = 0;
 		return 0;
 	}
-	for ( k = 0; k < al.len && k < max - 1; k++ ) out[k] = al.s[k];
-	out[k] = 0;
-	return k;
+	free(*p_out);
+	*p_out = malloc((size_t)al.len + 1);
+	if ( *p_out == NULL ) return 0;
+	memcpy(*p_out, al.s, (size_t)al.len);
+	(*p_out)[al.len] = 0;
+	return al.len;
 }
 
-#define APP_MAX		8
+#define APP_MAX		24
 static INT	g_napp;
 static UB	g_app_id[APP_MAX][CT_APP_ID], g_app_name[APP_MAX][CT_APP_NAME];
+static BOOL	g_app_kind[APP_MAX];		/* offered for the object's kind, not in its applist */
 
+/* 実行: the list the desktop's own links show (DT_RQ_APPS), asked entry by entry */
 void exec_menu( ID mid )
 {
 	static UB	rws[APP_MAX][WM_LABEL_MAX];
 	CONST UB	*el = the_link();
-	TS_UUID		ed, u;
-	T_JSON		root, al;
-	INT		n, k;
+	TS_UUID		ed;
+	T_DTREQ		rq;
+	T_DTANS		an;
+	INT		n = 1, k;
 
 	g_napp = 0;
-	if ( el != NULL && link_target(el, &u) ) {
-		n = meta_of(&u);
-		if ( n > 0 && js_parse((CONST UB *)g_meta, n, &root) >= E_OK && js_get(&root, "applist", &al) >= E_OK ) {
-			g_napp = ct_app_list(al.s, al.len, g_app_id, g_app_name, APP_MAX);
-		}
+	for ( k = 0; el != NULL && k < n && g_napp < APP_MAX; k++ ) {
+		ask_of(el, DT_RQ_APPS, &rq);
+		ct_link_req(&rq, el, (INT)strlen((CONST char *)el));
+		rq.recno = k;
+		memset(&an, 0, sizeof(an));
+		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
+		n = (INT)an.how;
+		if ( ct_app_entry(&an, g_app_id[g_napp], g_app_name[g_napp], &g_app_kind[g_napp]) ) g_napp++;
 	}
 	for ( k = 0; k < g_napp; k++ ) snprintf((char *)rws[k], WM_LABEL_MAX, "%s", (char *)g_app_name[k]);
 	if ( ui_uuid(SYSDEF_MENU_EXEC, &ed) >= E_OK ) {
@@ -576,12 +594,12 @@ void exec_menu( ID mid )
 BOOL app_kept( void )
 {
 	CONST UB	*el = the_link();
-	UB		*j = malloc(OB_ATR_MAX);
+	UB		*j = NULL;
 	INT		n;
 	BOOL		kept = FALSE;
 
-	if ( el != NULL && j != NULL ) {
-		n = app_json(el, j, OB_ATR_MAX);
+	if ( el != NULL ) {
+		n = app_json(el, &j);
 		kept = ( n > 0 ) ? ct_app_locked(j, n) : FALSE;
 	}
 	free(j);
@@ -676,14 +694,15 @@ void link_op( CONST char *code, INT index )
 			note(s);
 		}
 	} else if ( strcmp(code, "real.lock") == 0 || strcmp(code, "real.unlock") == 0 ) {
-		UB	*j = malloc(OB_ATR_MAX), *o = malloc(OB_ATR_MAX + 64);
+		UB	*j = NULL, *o = NULL;
 		CTBUF	b;
 		CTSET	set;
 		INT	n;
 
+		n = app_json(el, &j);
+		if ( j != NULL ) o = malloc((size_t)n + 64);	/* with "defaultOpenLock" put in */
 		if ( j != NULL && o != NULL ) {
-			n = app_json(el, j, OB_ATR_MAX);
-			ct_buf(&b, o, OB_ATR_MAX + 64);
+			ct_buf(&b, o, n + 64);
 			set.name = "applist";
 			set.value = b.p;
 			if ( n > 0 && ct_app_lock(&b, j, n, (BOOL)!ct_app_locked(j, n)) >= E_OK ) {
@@ -707,6 +726,7 @@ void link_op( CONST char *code, INT index )
 		ask_of(el, DT_RQ_EXEC, &rq);
 		snprintf((char *)rq.name, sizeof(rq.name), "%s", (char *)g_app_id[index]);
 		if ( app_kept() ) rq.flags |= DT_F_KEEP;
+		if ( g_app_kind[index] ) rq.flags |= DT_F_KIND;
 		er = ask_desktop(&rq, &an, 5000);
 		snprintf(s, sizeof(s), "exec %s %s (%d)", (char *)nm, (char *)g_app_id[index], (INT)er);
 		note(s);
@@ -830,15 +850,33 @@ void carry_link_out( INT x0, INT y0, BOOL twice )
 static ER obj_make( CONST char *name, CONST char *app, CONST char *appname, CONST UB *rec, INT len, TS_UUID *p_u )
 {
 	T_OBCRE	c;
-	char	json[900];
-	INT	recno = -1;
+	char	json[900], qn[600];
+	INT	recno = -1, i, q = 0;
 	ER	er;
 	ID	k;
 
+	/*
+	 * The name as a string of JSON: the person may have put " or \ or a
+	 * control in it. A character begun is ended, so that a long name is
+	 * cut between characters.
+	 */
+	for ( i = 0; name[i] != 0 && ( q < (INT)sizeof(qn) - 7 || ( (UB)name[i] & 0xC0 ) == 0x80 ); i++ ) {
+		UB	ch = (UB)name[i];
+
+		if ( ch == '"' || ch == '\\' ) {
+			qn[q++] = '\\';
+			qn[q++] = (char)ch;
+		} else if ( ch < 0x20 ) {
+			q += snprintf(qn + q, sizeof(qn) - (size_t)q, "\\u%04x", ch);
+		} else {
+			qn[q++] = (char)ch;
+		}
+	}
+	qn[q] = 0;
 	snprintf(json, sizeof(json),
 		 "{\"name\":\"%s\",\"relationship\":[],\"linktype\":false,\"refCount\":0,"
 		 "\"editable\":true,\"deletable\":true,\"readable\":true,"
-		 "\"applist\":{\"%s\":{\"name\":\"%s\",\"defaultOpen\":true}}}", name, app, appname);
+		 "\"applist\":{\"%s\":{\"name\":\"%s\",\"defaultOpen\":true}}}", qn, app, appname);
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_STORAGE;
 	c.sub = OB_S_FILE;
@@ -847,7 +885,7 @@ static ER obj_make( CONST char *name, CONST char *app, CONST char *appname, CONS
 	c.near = g_obj;
 	er = ob_cre_obj(&c, p_u);
 	if ( er < E_OK ) return er;
-	k = ob_opn_obj(p_u, OB_OP_R | OB_OP_W);
+	k = ob_opn_obj(p_u, OB_OP_R | OB_OP_W | OB_O_EXCL);
 	if ( k <= 0 ) {
 		(void)ob_del_obj(p_u);
 		return (ER)k;
@@ -1299,7 +1337,7 @@ ER export_obj( INT form, CONST UB *name )
 
 			er = wrecs_make(&w, name, TRUE);
 			if ( er >= E_OK ) er = obj_make((CONST char *)name, "tessronos-microcard", "マイクロカード", w.x, w.xn, &u);
-			if ( er >= E_OK && ( k = ob_opn_obj(&u, OB_OP_R | OB_OP_W) ) > 0 ) {
+			if ( er >= E_OK && ( k = ob_opn_obj(&u, OB_OP_R | OB_OP_W | OB_O_EXCL) ) > 0 ) {
 				for ( sub = MC_SUB_FORMAT; sub <= MC_SUB_VOBJ && er >= E_OK; sub++ ) {
 					INT	r = -1;
 

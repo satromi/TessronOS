@@ -1,0 +1,77 @@
+# ファイル変換 on the x64 PC (tools/x64/ui_run64.py): tools/tests/ui_xfconv.steps with the disks
+# of the q35 machine: nvmea (the NVMe disk), nvmea0 (/boot), nvmea1 and nvmea2 (/tslog) above ネットワーク(FTP),
+# so the FTP entry is at 182,271 and /boot at 182,175; the rest as there.
+# ファイル変換 (design 17.17), for tools/ui_run.py:
+# started by opening its program object, as a double press on its link
+# in the program box starts it, the disks and
+# ネットワーク(FTP) listed as blue 仮身; the FTP panel opened and put away;
+# nvmea0 (/boot) opened in a window of its own.
+dclick 80 141
+wait 1500
+open 01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91
+expect xfconv: ready
+wait 500
+win ファイル変換
+shot xfc_media
+dclick 182 271
+expect xfconv: asked for an FTP connection
+wait 500
+shot xfc_ftp
+key 29
+expect xfconv: ftp cancelled
+dclick 182 175
+expect xfconv: window nvmea0
+wait 500
+win nvmea0
+shot xfc_files
+# two files chosen (the click, then Shift+↓) and carried into the BTRON
+# window: the panel asks how, Enter makes them 実身 there, linked where let go
+click 242 247
+key 51 2
+expect xfconv: selected 2:
+shot xfc_chosen
+wait 600
+hold 242 247
+wait 300
+move 150 200
+wait 100
+move 60 120
+wait 300
+up
+expect xfconv: carried 2 into
+expect xfconv: asked how to import 2:
+wait 500
+shot xfc_import_panel
+key 28
+expect xfconv: placed 2 links
+wait 800
+shot xfc_placed
+wait 600
+# the file list moved to the right, 仮身サンプル brought forward, and its
+# link TADjsについて let go on the list: the panel, and the file written there
+drag 400 140 800 140
+wait 300
+win nvmea0
+click 60 241
+wait 300
+drag 400 413 900 450
+expect xfconv: asked how to export 1:
+wait 500
+shot xfc_export_panel
+key 28
+expect xfconv: exported
+wait 500
+shot xfc_exported
+# the list brought forward, Home and ↓↓ to the first file, made 実身 with Ctrl+I: a new box, opened by the desktop on white paper
+click 1100 560
+key 4a
+key 51
+key 51
+key 0c 1
+expect xfconv: asked how to import 1:
+key 28
+expect xfconv: imported 1 of 1
+wait 1500
+shot xfc_box
+# nothing it did was refused for want of a right
+absent !OACV!

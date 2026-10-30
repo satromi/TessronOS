@@ -6,7 +6,7 @@
 # apart down to ディスク操作, ウインドウ, 小物 and 実行 (the twelfth row)
 click 990 48
 wait 300
-drag 960 292 250 60
+drag 960 263 250 60
 wait 1000
 key 28
 wait 800

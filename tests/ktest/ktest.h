@@ -47,6 +47,8 @@ IMPORT void kt_skip( const char *name, const char *reason );
  * only visible to an eye.
  */
 IMPORT ER   kt_shot( const char *path );
+/* Whether a picture of need bytes may be written at path: what the suites need of its volume kept free */
+IMPORT BOOL kt_room( const char *path, UD need );
 
 /*
  * One event put in as if a keyboard or the pointer had reported it,
@@ -100,15 +102,22 @@ IMPORT UB  *kt_obj_data( const TS_UUID *uuid, SZ *p_size );
  *
  * The Raspberry Pi 4 family is a board in the same sense: KT_BOARD is 1
  * on either family and 0 under QEMU virt. The Raspberry Pi 4 image runs
- * under QEMU's raspi4b too, which then counts as the board.
+ * under QEMU's raspi4b too, which then counts as the board. The x64 PC
+ * is one as well, under QEMU's q35 too: it starts from the disk image
+ * (nvmea, make TARGET=_X64_ KTEST=1 sdimg) with the EFI system
+ * partition on /boot, the system volume and a scratch partition.
  */
-#if defined(RPI5) || defined(RPI4)
+#if defined(RPI5) || defined(RPI4) || defined(X64)
 #define KT_BOARD	1
 #else
 #define KT_BOARD	0
 #endif
 
-#if KT_BOARD
+#if defined(X64)
+#define KT_DISK		"nvmea"
+#define KT_BOOTDEV	"nvmea0"
+#define KT_DISK_PARTS	2
+#elif KT_BOARD
 #define KT_DISK		"sda"
 #define KT_BOOTDEV	"sda0"
 #define KT_DISK_PARTS	2
@@ -126,11 +135,35 @@ IMPORT CONST char *kt_scratch( void );
  * reported skipped with the reason, and the function need not exist
  * there. Everywhere else it runs as KT_RUN does.
  */
-#if KT_BOARD
+#if defined(X64)
+#define KT_RUN_EXCEPT_RPI5(fn, why) \
+	do { kt_begin(#fn); kt_skip(#fn, "not run (x64: " why ")"); kt_end(); } while (0)
+#elif KT_BOARD
 #define KT_RUN_EXCEPT_RPI5(fn, why) \
 	do { kt_begin(#fn); kt_skip(#fn, "not run (Raspberry Pi: " why ")"); kt_end(); } while (0)
 #else
 #define KT_RUN_EXCEPT_RPI5(fn, why)	KT_RUN(fn)
+#endif
+
+/*
+ * The tests written for the USB devices of the QEMU test machine (the
+ * keyboards, the disks, the hub with an audio function behind it, and
+ * the second controller, plugged and unplugged through the QEMU
+ * monitor): KT_QEMU_DEVS says whether they are built, KT_RUN_QEMU_DEVS
+ * runs one. The x64 PC builds them and runs them when it was started on
+ * that machine (tools/x64/ktest64.sh with USBQ=1: two xHCI controllers),
+ * and otherwise says they were not run.
+ */
+#if defined(X64)
+IMPORT BOOL kt_qemu_devs( void );
+#define KT_QEMU_DEVS	1
+#define KT_RUN_QEMU_DEVS(fn, why) \
+	do { if ( kt_qemu_devs() ) { KT_RUN(fn); } else { kt_begin(#fn); \
+	     kt_skip(#fn, "not run (x64 without the QEMU test machine's USB devices: " why ")"); \
+	     kt_end(); } } while (0)
+#else
+#define KT_QEMU_DEVS	(!KT_BOARD)
+#define KT_RUN_QEMU_DEVS(fn, why)	KT_RUN_EXCEPT_RPI5(fn, why)
 #endif
 
 /*
@@ -163,11 +196,18 @@ IMPORT BOOL kt_screen( void );
 
 /* Test groups */
 IMPORT void ktest_task( void );
+#ifdef X64
+IMPORT void ktest_pcdev( void );	/* x86_64/ktest_pcdev.c */
+IMPORT void ktest_igt( void );		/* x86_64/ktest_igt.c */
+IMPORT void ktest_sysinst( void );	/* x86_64/ktest_sysinst.c */
+IMPORT void ktest_camisp( void );	/* x86_64/ktest_camisp.c */
+#endif
 IMPORT void ktest_sync( void );
 IMPORT void ktest_time( void );
 IMPORT void ktest_mem( void );
 IMPORT void ktest_el0( void );
 IMPORT void ktest_smp( void );
+IMPORT void ktest_klk( void );
 IMPORT void ktest_lockup( void );
 IMPORT void ktest_blk( void );
 IMPORT void ktest_sd( void );
@@ -185,6 +225,7 @@ IMPORT void ktest_uuid( void );
 IMPORT void ktest_tsfs( void );
 IMPORT void ktest_tsfsblk( void );
 IMPORT void ktest_tsfscut( void );
+IMPORT void ktest_iob( void );
 IMPORT void ktest_tsfsbtree( void );
 IMPORT void ktest_tsfsjrnl( void );
 IMPORT void ktest_tsfsobj( void );
@@ -194,6 +235,8 @@ IMPORT void ktest_tad( void );
 IMPORT void ktest_om( void );
 IMPORT void ktest_pcie( void );
 IMPORT void ktest_usb( void );
+IMPORT void ktest_digi( void );
+IMPORT void ktest_tpanel( void );
 IMPORT void ktest_snd( void );
 IMPORT void ktest_cam( void );
 IMPORT void ktest_disp( void );
@@ -204,6 +247,7 @@ IMPORT void ktest_tv( void );
 IMPORT void ktest_vt( void );
 IMPORT void ktest_prn( void );
 IMPORT void ktest_store( void );
+IMPORT void ktest_sysup( void );
 IMPORT void ktest_part( void );
 IMPORT void ktest_mn( void );
 IMPORT void ktest_ms( void );
@@ -238,6 +282,7 @@ IMPORT void ktest_kana( void );
 IMPORT void ktest_udic( void );
 IMPORT void ktest_calcu( void );
 IMPORT void ktest_km( void );
+IMPORT void ktest_skb( void );
 IMPORT void ktest_mcard( void );
 IMPORT void ktest_techo( void );
 IMPORT void ktest_chs( void );
@@ -248,5 +293,22 @@ IMPORT void ktest_rt( void );
 /* Helpers shared by the groups */
 IMPORT ID kt_cre_tsk( FP task, PRI pri, void *exinf );	/* TA_HLNG|TA_RNG0, 4KB stack */
 IMPORT ID kt_cre_tsk_any( FP task, PRI pri, void *exinf );	/* same, not pinned to a processor */
+/* A task created as c says, run on processor prc alone (any PRC, beyond 64 too: tk_set_asp) */
+IMPORT ID kt_cre_on( T_CTSK *c, ID prc );
+
+/*
+ * Room for a protection a test reads with ob_get_prt (ts/ob.h): its head
+ * and as many entries and limits as the tests give an object, and more.
+ */
+#define KT_PRT_UD	( ( OB_PRT_SIZE(64, 64) + 7 ) / 8 )
+#define KT_PRT_SIZE	( (SZ)( KT_PRT_UD * 8 ) )
+
+/*
+ * Room for the metadata of an object a test made, read with ob_get_atr:
+ * the tests' own objects have short metadata, and a test that reads
+ * more than it has room for sees the length it is told is more than the
+ * room (the length is the whole one).
+ */
+#define KT_META_ROOM	16384
 
 #endif /* _KTEST_H_ */

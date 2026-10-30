@@ -13,63 +13,50 @@
 #
 # accessories and settings
 open 01a0d8c4-5212-7a19-8d63-e04b5c9f2a71
-wait 2000
-win 時計
+waitwin 時計 60
 open 01a0d8c4-5219-7c3e-8a41-2f6b9d0e5c11
-wait 2000
-win コンソール
+waitwin コンソール 60
 open 01a0d8c4-5320-7a41-8b52-6c7d8e9fa020
-wait 2000
-win 電卓
+waitwin 電卓 60
 open 01a0d8c4-5350-7a61-8d72-9fab0c1d5050
-wait 2000
-win 文字検索
+waitwin 文字検索 60
 open 01a0d8c4-5312-7c23-8d34-5e6f7b8c9d12
-wait 2000
-win 単語登録
+waitwin 単語登録 60
 open 01a0d8c4-52e8-7b19-9c2a-3d4e5f6a7b84
-wait 2000
-win キー配列
+waitwin キー配列 60
 open 01a0d8c4-52b5-7a41-8c61-2d7e9f0a1b31
-wait 2000
-win ネットワーク設定
+waitwin ネットワーク設定 60
 open 01a0d8c4-52b7-7c63-8e83-4f9a012c3d53
-wait 2000
-win ユーザ環境設定
+waitwin ユーザ環境設定 60
 shot ua_accessories
 # programs with their templates
 open a22ca516-a22c-7fdb-81fd-04cda3e1c8af
-wait 2500
-win マイクロスクリプト
+waitwin マイクロスクリプト 60
 open 019d6f00-1a2b-7c3d-8e4f-a1b2c3d4e5f6
-wait 2500
-win 予定表
+waitwin 予定表 60
 open 019b54a4-6ccf-72f7-e320-c98e4a0bab4e
-wait 2500
-win 基本表計算
+waitwin 基本表計算 60
 open 019c403c-bb89-7133-acc4-ddd109fb8182
-wait 2500
-win かな入力練習
+waitwin かな入力練習 60
 open 01a0d8c4-5334-7e95-8a06-b1c2d3e4f534
-wait 2500
-win カード用紙
+waitwin カード用紙 60
 open 01a0d8c4-5372-7c93-8aa4-bc1d2e3f7272
-wait 2500
-win 空書庫
+waitwin 空書庫 60
 open 01a0d8c4-53c4-7e55-8f66-7a8b9cad53c4
-wait 2500
-win 手帳用紙（予定表）
+waitwin 手帳用紙（予定表） 60
 open 01a0f5f6-b195-7135-9e60-3b5ea8ea47c8
-wait 2500
-win PCM Player
+waitwin PCM Player 60
 open 01a0f638-4c5d-767a-9436-fd682491cbe7
-wait 3000
-win MPEG Player
+waitwin MPEG Player 60
 shot ua_documents
-# システム環境設定: 画面, 背景, the wallpaper TESSRON chosen and placed in the middle
+# システム環境設定: 画面, 背景, the wallpaper TESSRON chosen and placed in the middle.
+# With some twenty programs running, each polling and calling the system
+# every 20 ms, a program that starts now takes a minute or more on TCG
+# before it has filled its panel: what is pressed before it says it is
+# ready goes to parts with nothing in them. So the presses wait for that.
 open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
-wait 3000
-win システム環境設定
+waitwin システム環境設定 60
+expectin 240 sysenv: ready
 click 235 124
 wait 1000
 click 230 185
@@ -78,24 +65,27 @@ click 410 520
 expect settings: the machine's were written
 wait 1000
 shot ua_wallpaper
-# バックアップ: 仮身サンプル chosen and saved to /boot, then read back from there
+# バックアップ: 仮身サンプル chosen and saved to the boot disk, then read back from there
 open 01a0d8c4-52b0-7d15-9a3c-4e6f8b2d1c07
-wait 3000
-win バックアップ
-click 260 283
-key 2C
+waitwin バックアップ 60
+expectin 240 backup: ready
+# the panel's list: 仮身サンプル chosen, 〈選ぶ〉 marks it, 〈保存〉 saves it
+click 300 257
 wait 300
-click 246 465
-expect backup: saved 61 objects in 1 volumes
+click 470 431
+wait 300
+click 644 505
+expectin 120 backup: saved 61 objects in 1 volumes
 wait 1000
-click 343 171
+# the 復帰 tab, the first volume's head read with 〈復帰〉, and restored with it again
+click 237 165
 wait 2000
-click 246 465
+click 644 505
 wait 1500
 shot ua_volume
-click 246 465
+click 644 505
 wait 15000
-expect backup: restored
+expectin 120 backup: restored
 wait 1000
 shot ua_backup
 wins

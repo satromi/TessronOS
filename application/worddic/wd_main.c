@@ -123,8 +123,9 @@ LOCAL ER dic_keep( INT len )
 	if ( ui_uuid(SYSDEF_DICT_USER, &u) < E_OK ) return E_SYS;
 	k = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE);
 	if ( k < E_OK ) return (ER)k;
-	er = ob_wri_rec(k, 1, 0, work, len, &asz);
-	if ( er >= E_OK ) er = ob_trn_rec(k, 1, (UD)len);
+	/* replaced in one change: a cut in the power leaves the old record or the new one */
+	er = ob_rpl_rec(k, 1, work, (SZ)len);
+	(void)asz;
 	ob_cls_obj(k);
 	if ( er >= E_OK ) {
 		memcpy(dic, work, (size_t)len);
@@ -601,14 +602,14 @@ LOCAL void taken( INT put, INT bad )
 
 LOCAL void drop( void )
 {
-	static T_OBDROP	d;
+	T_OBDROP	*d;
 	INT		i, put = 0, bad = 0, b, r;
 
-	if ( ui_drop(&ui, &d) < E_OK ) return;
-	ui_drop_answer(&ui, &d, OB_DR_ACCEPT, "");
-	for ( i = 0; i < d.n && i < OB_DROP_MAX; i++ ) {
+	if ( ( d = ui_drop(&ui) ) == NULL ) return;
+	ui_drop_answer(&ui, d, OB_DR_ACCEPT, "");
+	for ( i = 0; i < d->n; i++ ) {
 		b = 0;
-		r = take_obj(&d.v[i].target, &b);
+		r = take_obj(&d->v[i].target, &b);
 		if ( r > 0 ) put += r;
 		bad += b;
 	}
@@ -846,7 +847,6 @@ LOCAL void pressed( INT id )
 int main( void )
 {
 	T_OBNTM	m;
-	SZ	asz = 0;
 	INT	id, ev;
 
 	ui_icon(SYSDEF_PROG_WORDDIC);
@@ -863,7 +863,7 @@ int main( void )
 	say("worddic: ready %d\n", ud_count(dic, dlen));
 
 	while ( !closing ) {
-		while ( !closing && ob_rea_rec(ui.port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+		for ( TMO tmo = TMO_FEVR; !closing && ui_wait(&ui, &m, tmo) >= E_OK; tmo = TMO_POL ) {
 			ev = ui_event(&ui, &m, &id);
 			switch ( ev ) {
 			case UI_EV_CLOSE:
@@ -891,9 +891,6 @@ int main( void )
 			default:
 				break;
 			}
-		}
-		if ( !closing ) {
-			(void)tk_dly_tsk(TICK_MS);
 		}
 	}
 	ui_close(&ui);

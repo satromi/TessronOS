@@ -1,0 +1,140 @@
+# ディスク修復 on the x64 PC (tools/x64/ui_run64.py --vols DIR, DIR holding dfix.img: tools/tests/dfix_disk.py
+# run on volc.img of tools/tests/mkvoldisk.py, its first partition made the damaged volume):
+# the disk plugged into the hub at the start as uda. The list has the system volume nvmea1
+# first (214) and uda0 second (232), so uda0 is chosen first and the system volume later is
+# the first row; the rest as tools/tests/ui_diskfix.steps.
+hmp drive_add 0 if=none,id=udf,file=$VOLS/dfix.img,format=raw
+hmp device_add usb-storage,drive=udf,id=udfd,bus=xhci.0
+wait 3000
+# ディスク修復 (design 11.25), for tools/ui_run.py with the disk that
+# tools/tests/dfix_disk.py makes: its first partition (vblka0) a volume
+# damaged on purpose -- a count raised, three blocks taken that nothing
+# uses, a block of a record marked free, two documents that link only to
+# each other. The window (a window of the desktop's like the others,
+# 616x492 inside its frame, the panel's corner at 339,171; a part at l,t
+# of the panel at 339+l,171+t) lists vblka0 and the system volume vblka2
+# in a list, a row 18 pixels apart from 214. A question stands in the
+# middle of it, 取消 at 735,448 and 実行 at 838,448; 障害情報 opens down
+# and right of it, 前へ at 400,658, 次へ at 505,658, 保存 at 840,658,
+# 終了 at 945,658.
+#
+# The menus of the second button open with the item chosen last on the
+# pointer's row, the rows 20 pixels apart (a line is a row too). That of
+# ディスク修復: 閉じる, line, 開始, 障害情報, line, 検査, 修復, line,
+# 簡易, 通常, 完全, line, ドライブの一覧を更新, ウインドウ, 小物, 実行.
+# That of 障害情報: 閉じる, line, 前へ, 次へ, line, 保存, ウインドウ,
+# 小物, 実行.
+#
+# First vblka0 looked at (検査, 通常), started from the menu: seven
+# things found, shown in 障害情報, saved as ディスク修復記録 with 保存 of
+# its menu and closed with its 閉じる. Then repaired (修復, asked first):
+# the seven put right, two pages of 障害情報. Then looked at whole (検査
+# and 完全 chosen in the menu): nothing. The system volume: 修復 asks to
+# start the machine again, and is left (取消); 検査 finds nothing while
+# it runs. Last the window is carried by its band, made larger by its
+# corner, and closed with Ctrl+E, the letter of 閉じる.
+open 01a0d8c4-53e0-7a31-8c42-5d6e7f8053e0
+expect dfix: opened 2
+click 420 232
+wait 600
+shot df_open
+# 検査, 通常, vblka0: 開始 of the menu (閉じる under the pointer, 開始 two rows below)
+click 640 300 1
+expect dfix: menu 1
+wait 300
+shot df_menu
+click 648 340
+expect desktop: chosen dfix.start
+expect dfix: done 1: found 7 fixed 0 left 7 refused 0 unfixable 0 er 0
+wait 400
+shot df_checked
+# 障害情報, saved and closed from its menu
+click 410 624
+expect dfix: info 1 page 1
+wait 400
+shot df_info
+click 640 420 1
+expect dfix: menu 2
+wait 300
+shot df_info_menu
+click 648 520
+expect dfix: saved 1 0
+wait 300
+# 保存 under the pointer now, 閉じる five rows above it
+click 640 420 1
+expect dfix: menu 3
+wait 300
+click 648 320
+expect dfix: info closed 1
+# 修復: asked first
+click 750 240
+wait 200
+click 875 372
+expect dfix: ask 1 実行
+wait 400
+shot df_ask
+click 838 448
+expect dfix: answered 1 1
+expect dfix: done 2: found 7 fixed 7 left 0 refused 0 unfixable 0 er 0
+wait 400
+shot df_repaired
+click 410 624
+expect dfix: info 2 page 1
+wait 400
+shot df_info_repair
+click 505 658
+expect dfix: info 3 page 2
+wait 400
+shot df_info_repair2
+click 945 658
+expect dfix: info closed 2
+# 検査 and 完全 from the menu (開始 under the pointer, then 検査): nothing left
+click 640 300 1
+expect dfix: menu 4
+wait 300
+click 648 360
+expect desktop: chosen dfix.check
+click 640 300 1
+expect dfix: menu 5
+wait 300
+click 648 400
+expect desktop: chosen dfix.full
+wait 200
+shot df_full_chosen
+click 875 372
+expect dfix: done 3: found 0 fixed 0 left 0 refused 0 unfixable 0 er 0
+wait 400
+shot df_after
+# the system volume: 修復 asks to start again, and is left
+click 420 214
+click 750 240
+click 750 306
+wait 200
+click 875 372
+expect dfix: ask 2 実行
+wait 300
+click 838 448
+expect dfix: answered 2 1
+expect dfix: ask 3 実行
+wait 400
+shot df_sys_ask
+click 735 448
+expect dfix: answered 3 0
+# the system volume looked at while it runs
+click 750 214
+wait 200
+click 875 372
+expect dfix: done 4: found 0 fixed 0 left 0 refused 0 unfixable 0 er 0
+wait 400
+shot df_system
+# carried by its band, made larger by its corner, closed with Ctrl+E
+win ディスク修復
+drag 500 148 540 128
+wait 300
+win ディスク修復
+drag 993 641 1060 700
+wait 300
+win ディスク修復
+shot df_moved
+key 08 01
+expect dfix: closed

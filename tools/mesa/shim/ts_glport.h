@@ -48,6 +48,7 @@ int	ts_gl_win_put( const void *native_window, const int *rects, int n );
 #define TS_GL_GPU_NONE	0
 #define TS_GL_GPU_V3D	1
 #define TS_GL_GPU_VIRTIO 2
+#define TS_GL_GPU_INTEL	3	/* Intel's integrated graphics (x64) */
 int	ts_gl_gpu_kind( void );
 
 /* A descriptor of the GPU for the DRM shim (a context of gp_), or -1 */
@@ -78,6 +79,14 @@ int	ts_gl_probe_result( char *driver, int n );
 
 /* Text on the console, for the platform's own messages */
 void	ts_gl_log( const char *s );
+
+#ifdef __x86_64__
+/*
+ * What Intel's driver asked of i915 (the DRM shim's requests) and what
+ * was refused, each kind once with its errno, on the console
+ */
+void	ts_gl_drm_tell( const char *why );
+#endif
 
 #ifdef __cplusplus
 }

@@ -11,24 +11,27 @@
  *	bk_main.c
  *	バックアップ: the accessory (design 17.18)
  *
- *	Its window has two sheets, 保存 and 復帰, chosen with their tabs or
- *	Tab. 保存 lists what a cabinet links to, starting at the first
- *	cabinet (or the object it was started on): ↑↓ choose, → goes into
- *	one, ← back out; Space marks one to be saved (●), several may be,
- *	in any cabinet gone into, and X marks one to be left out (×) with
- *	what only it links to. D or a press on 保存先 goes through where the
- *	volumes may go -- objects of their own, or the disks the system has,
- *	each mounted through its device object while it is used. Enter or
- *	[保存] saves what is marked, or else the one chosen, and all they
- *	link to; each is saved with where it was linked from, for a restore
- *	to put it back there. Volumes kept as objects take no more than the
- *	store they go on has free. 復帰 lists the
- *	volumes a place has; Enter reads the chosen one's head and shows it,
- *	Enter again or [復帰] makes the objects and links the first of them
- *	into the first cabinet, and the desktop opens it. A set of several
- *	volumes asks for each next one, and takes only the one it wants.
- *	While the work goes on, Esc or [中止] stops it; what a restore had
- *	made is then taken away again.
+ *	Its window is a panel of the data box (SYSDEF_BOX_BACKUP) with two
+ *	sheets under their tags, 保存 and 復帰; every part is the panel's,
+ *	and the program only says what they hold. 保存 lists, in a list part,
+ *	what a cabinet links to, starting at the first cabinet (or the object
+ *	it was started on): 〈開く〉 (or →) goes into the one chosen, 〈戻る〉
+ *	(or ←) back out; 〈選ぶ〉 (or Space) marks one to be saved (●),
+ *	several may be, in any cabinet gone into, and 〈除く〉 (or X) marks one
+ *	to be left out (×) with what only it links to. The pop-up 保存先
+ *	chooses where the volumes go -- objects of their own, or the disks
+ *	the system has, each by its device object's name, opened while it is
+ *	used. 〈保存〉 (or Enter) saves what is marked, or else the one chosen,
+ *	and all they link to; each is saved with where it was linked from,
+ *	for a restore to put it back there. Volumes kept as objects take no
+ *	more than the store they go on has free. 復帰 lists the volumes the
+ *	place its pop-up chooses has; 〈復帰〉 (or Enter) reads the chosen
+ *	one's head and shows it, and again makes the objects and links the
+ *	first of them into the first cabinet, and the desktop opens it. A
+ *	set of several volumes asks for each next one, and takes only the one
+ *	it wants. While the work goes on, 〈中止〉 stops it; what a restore had
+ *	made is then taken away again. A set saved over several media asks,
+ *	in a panel, for each next medium.
  *
  *	Links dropped on the window from the desktop (OB_E_DROP) become the
  *	list of the 保存 sheet and are marked to be saved; dropped with
@@ -45,18 +48,35 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ts/sysdef.h>
+#include <ts/obdrop.h>
+#include <ts/obatr.h>
 #include <ts/dtreq.h>
 #include <ts/json.h>
 #include <ts/hid.h>
+#include <ts/ui.h>
 
-#define WORK_W		540
-#define WORK_H		400
-#define TITLE_H		34
-#define FRAME_W		16
-#define TEXT_PX		16
-#define ROW_H		22
-#define ROWS		8
-#define LIST_Y		84
+/* The panels of the data box, and their parts */
+#define PN_MAIN		1
+#define PN_MEDIUM	2		/* the next medium asked for */
+#define PT_TAGS		100
+#define PT_WHAT		21		/* 保存: what is listed */
+#define PT_MARKS	22
+#define PT_ITEMS	23
+#define PT_OPEN		24
+#define PT_BACK		25
+#define PT_PICK		26
+#define PT_EXCL		27
+#define PT_DEST		28
+#define PT_SAVE		29
+#define PT_SAVE_STOP	30
+#define PT_SRC		41		/* 復帰: where the volumes are */
+#define PT_VOLS		42
+#define PT_HEAD		43		/* 43..45: the volume's head */
+#define PT_REST		46
+#define PT_REST_STOP	47
+#define PT_STATUS	90
+#define PT_PROGRESS	91
+#define PT_GO_ON	11		/* PN_MEDIUM: 〈続ける〉 */
 
 #define K_ENTER		0x28
 #define K_ESC		0x29
@@ -69,16 +89,6 @@
 #define K_KPENTER	0x58
 #define M_CTRL		0x11
 
-#define C_TEXT		0x00000000
-#define C_DIM		0x00707070
-#define C_GROUND	0x00FFFFFF
-#define C_BUTTON	0x00E8E8E8
-#define C_SEL		0x00C8D8F0
-#define C_BAR		0x004070C0
-#define C_ERR		0x00C00000
-
-#define ITEM_MAX	128
-#define DEPTH_MAX	16
 
 enum { T_SAVE, T_REST };
 enum { S_IDLE, S_BUSY, S_PEEKED, S_NEXT };
@@ -95,31 +105,69 @@ typedef struct {
 LOCAL BKJOB	job;
 LOCAL TS_UUID	win, ch, argobj;
 LOCAL BOOL	argvol;		/* started on a volume */
-LOCAL ID	kw, port;
-LOCAL INT	gid = -1;
+LOCAL UI	ui;			/* the window: the panel and its channel */
+LOCAL BOOL	shown;		/* the window is up */
 LOCAL INT	tab = T_SAVE, state = S_IDLE;
-LOCAL BOOL	closing, dirty = TRUE, failed;
+LOCAL BOOL	closing, dirty = TRUE, listed = TRUE, failed;
 LOCAL char	status[256];
 LOCAL UD	prog_n, prog_total;
 
-LOCAL BKMEDIA	media[BK_MED_MAX];
+LOCAL BKMEDIA	*media = NULL;		/* every place there is (bk_media_list) */
 LOCAL INT	nmedia, dest, srcm;	/* where saving goes, where restoring reads */
 
-LOCAL ITEM	items[ITEM_MAX];
-LOCAL INT	nitem, sel, top;
-LOCAL TS_UUID	place[DEPTH_MAX];	/* the cabinets gone into */
-LOCAL INT	nplace;
+LOCAL ITEM	*items = NULL;		/* the list, as many lines as it has */
+LOCAL INT	nitem, sel, item_cap = 0;
+
+/* Room for n lines of the list: FALSE for no memory */
+LOCAL BOOL item_room( INT n )
+{
+	ITEM	*t;
+	INT	cap;
+
+	if ( n <= item_cap ) return TRUE;
+	cap = ( item_cap > 0 ) ? item_cap : 64;
+	while ( cap < n ) cap *= 2;
+	t = (ITEM *)realloc(items, sizeof(ITEM) * (size_t)cap);
+	if ( t == NULL ) return FALSE;
+	items = t;
+	item_cap = cap;
+	return TRUE;
+}
+LOCAL TS_UUID	*place = NULL;		/* the cabinets gone into, as deep as one goes */
+LOCAL INT	nplace, place_cap = 0;
 LOCAL BOOL	dropped;		/* the list is what was dropped on the window */
 
-LOCAL BKROOT	pick[BK_ROOT_MAX];	/* marked to be saved */
-LOCAL INT	npick;
-LOCAL TS_UUID	excl[BK_EXCL_MAX];	/* marked to be left out */
-LOCAL INT	nexcl;
+LOCAL BKROOT	*pick = NULL;		/* marked to be saved, as many as are marked */
+LOCAL INT	npick, pick_cap = 0;
+LOCAL TS_UUID	*excl = NULL;		/* marked to be left out */
+LOCAL INT	nexcl, excl_cap = 0;
+
+/* Room for n entries of esz bytes in *p: FALSE for no memory */
+LOCAL BOOL room_for( void **p, INT *p_cap, INT n, size_t esz )
+{
+	void	*t;
+	INT	cap = ( *p_cap > 0 ) ? *p_cap : 16;
+
+	if ( n <= *p_cap ) return TRUE;
+	while ( cap < n ) cap *= 2;
+	t = realloc(*p, esz * (size_t)cap);
+	if ( t == NULL ) return FALSE;
+	*p = t;
+	*p_cap = cap;
+	return TRUE;
+}
+
+/* The cabinet gone into at the end of the way: FALSE for no memory */
+LOCAL BOOL place_push( const TS_UUID *u )
+{
+	if ( !room_for((void **)&place, &place_cap, nplace + 1, sizeof(TS_UUID)) ) return FALSE;
+	place[nplace++] = *u;
+	return TRUE;
+}
 
 LOCAL BKVOL	vol;			/* the volume being read */
 LOCAL char	peekinfo[3][160];
 LOCAL char	expect[BK_NAME_MAX];	/* the name the next volume must have */
-LOCAL T_DPRECT	b_tab[2], b_go, b_stop, b_dest;
 
 /* ---------------------------------------------------------------- saying things */
 
@@ -149,20 +197,34 @@ LOCAL void grouped( UD v, char *out )
 
 /* ---------------------------------------------------------------- lists */
 
+/* A volume's file on a medium: below the root of its disk, or at the boot disk's place */
+LOCAL void bk_vol_at( BKVOL *v, const BKMEDIA *m, const char *file )
+{
+	if ( m->mounted ) {
+		v->ondisk = TRUE;
+		v->vd = m->vd;
+		snprintf(v->path, sizeof(v->path), "%s", file);
+	} else {
+		snprintf(v->path, sizeof(v->path), "%s/%s", m->dir, file);
+	}
+}
+
 /* The name of an object, from its metadata or else its reference */
 LOCAL void name_of( const TS_UUID *u, char *out, INT max )
 {
-	static UB	meta[OB_ATR_MAX + 1];
+	UB	*meta = NULL;
 	T_JSON	root;
-	SZ	asz = 0;
+	INT	asz;
 	T_OBREF	r;
 	ID	k = ob_opn_obj(u, OB_OP_ATRRD);
 
 	out[0] = 0;
 	if ( k > 0 ) {
-		if ( ob_get_atr(k, meta, OB_ATR_MAX, &asz) >= E_OK && js_parse(meta, (INT)asz, &root) >= E_OK ) {
+		asz = ob_atr_read(k, 0, &meta);
+		if ( asz >= 0 && js_parse(meta, asz, &root) >= E_OK ) {
 			(void)js_get_str(&root, "name", (UB *)out, max);
 		}
+		free(meta);
 		ob_cls_obj(k);
 	}
 	if ( out[0] == 0 && ob_ref_obj(u, &r) >= E_OK ) {
@@ -179,13 +241,14 @@ LOCAL void list_objects( const TS_UUID *cab )
 	const char *p;
 	ID	k;
 
-	nitem = sel = top = 0;
+	nitem = sel = 0;
+	listed = TRUE;
 	k = ob_opn_obj(cab, OB_OP_R);
 	if ( k <= 0 ) return;
 	x = bk_read_rec(k, 0, &len);
 	ob_cls_obj(k);
 	if ( x == NULL ) return;
-	for ( p = (const char *)x; nitem < ITEM_MAX && ( p = strstr(p, "<link") ) != NULL; p++ ) {
+	for ( p = (const char *)x; item_room(nitem + 1) && ( p = strstr(p, "<link") ) != NULL; p++ ) {
 		const char *id = strstr(p, " id=\"");
 		const char *end = strchr(p, '>');
 		ITEM	*it = &items[nitem];
@@ -239,7 +302,7 @@ LOCAL BOOL pick_add( const ITEM *it )
 	INT	x = excl_at(&it->uuid);
 
 	if ( pick_at(&it->uuid) >= 0 ) return TRUE;
-	if ( npick >= BK_ROOT_MAX ) return FALSE;
+	if ( !room_for((void **)&pick, &pick_cap, npick + 1, sizeof(BKROOT)) ) return FALSE;
 	if ( x >= 0 ) excl[x] = excl[--nexcl];
 	memset(&pick[npick], 0, sizeof(BKROOT));
 	pick[npick].uuid = it->uuid;
@@ -255,7 +318,7 @@ LOCAL BOOL excl_add( const TS_UUID *u )
 	INT	x = pick_at(u);
 
 	if ( excl_at(u) >= 0 ) return TRUE;
-	if ( nexcl >= BK_EXCL_MAX ) return FALSE;
+	if ( !room_for((void **)&excl, &excl_cap, nexcl + 1, sizeof(TS_UUID)) ) return FALSE;
 	if ( x >= 0 ) pick[x] = pick[--npick];
 	excl[nexcl++] = *u;
 	return TRUE;
@@ -280,7 +343,7 @@ LOCAL void pick_toggle( void )
 	if ( i >= 0 ) pick[i] = pick[--npick];
 	else if ( !pick_add(&items[sel]) ) return;
 	if ( sel + 1 < nitem ) sel++;
-	dirty = TRUE;
+	dirty = listed = TRUE;
 	marks_said();
 }
 
@@ -294,7 +357,7 @@ LOCAL void excl_toggle( void )
 	if ( i >= 0 ) excl[i] = excl[--nexcl];
 	else if ( !excl_add(&items[sel].uuid) ) return;
 	if ( sel + 1 < nitem ) sel++;
-	dirty = TRUE;
+	dirty = listed = TRUE;
 	marks_said();
 }
 
@@ -303,24 +366,30 @@ LOCAL void list_volumes( void )
 {
 	BKMEDIA	*m = &media[srcm];
 
-	nitem = sel = top = 0;
+	nitem = sel = 0;
+	listed = TRUE;
 	if ( m->kind == BK_MED_OBJECT ) {
-		static ITEM keep[ITEM_MAX];
+		ITEM	*keep;
 		TS_UUID	cab;
 		BKVOL	v;
 		INT	n = 0, i;
 
+		(void)bk_first_cabinet(&cab);
+		list_objects(&cab);
+		keep = (ITEM *)calloc((size_t)( nitem + 1 ), sizeof(ITEM));
+		if ( keep == NULL || !item_room(nitem + 1) ) {
+			free(keep);
+			nitem = 0;
+			return;
+		}
 		if ( argvol ) {
 			/* the volume it was started on comes first */
-			memset(&keep[0], 0, sizeof(keep[0]));
 			keep[0].uuid = argobj;
 			name_of(&argobj, keep[0].name, sizeof(keep[0].name));
 			n = 1;
 		}
-		(void)bk_first_cabinet(&cab);
-		list_objects(&cab);
 		/* only those that hold a volume */
-		for ( i = 0; i < nitem && n < ITEM_MAX; i++ ) {
+		for ( i = 0; i < nitem; i++ ) {
 			if ( argvol && memcmp(&items[i].uuid, &argobj, sizeof(TS_UUID)) == 0 ) continue;
 			memset(&v, 0, sizeof(v));
 			v.obj = items[i].uuid;
@@ -329,8 +398,9 @@ LOCAL void list_volumes( void )
 			keep[n++] = items[i];
 		}
 		memcpy(items, keep, sizeof(ITEM) * (size_t)n);
+		free(keep);
 		nitem = n;
-		sel = top = 0;
+		sel = 0;
 		return;
 	}
 	if ( bk_media_open(m, FALSE) < E_OK ) {
@@ -338,14 +408,24 @@ LOCAL void list_volumes( void )
 		return;
 	}
 	{
-		static char names[ITEM_MAX][FS_NAME_MAX];
-		INT	n = bk_media_files(m, names, ITEM_MAX), i, k = 0;
+		char	(*names)[FS_NAME_MAX];
+		INT	n = bk_media_files(m, NULL, 0), i, k = 0;
 		BKVOL	v;
+
+		/* every file of the medium: asked how many, then taken */
+		names = calloc((size_t)( n + 1 ), sizeof(*names));
+		if ( names == NULL || !item_room(n + 1) ) {
+			free(names);
+			nitem = 0;
+			return;
+		}
+		i = bk_media_files(m, names, n);
+		if ( i < n ) n = i;		/* fewer now; more came meanwhile are left for the next look */
 
 		/* only files that begin as a volume does */
 		for ( i = 0; i < n; i++ ) {
 			memset(&v, 0, sizeof(v));
-			snprintf(v.path, sizeof(v.path), "%s/%s", m->dir, names[i]);
+			bk_vol_at(&v, m, names[i]);
 			if ( bk_vol_open(&v) < E_OK ) continue;
 			(void)bk_vol_done(&v);
 			memset(&items[k], 0, sizeof(items[k]));
@@ -353,6 +433,7 @@ LOCAL void list_volumes( void )
 			(void)xfu_name_in((const UB *)names[i], (UB *)items[k].name, sizeof(items[k].name));
 			k++;
 		}
+		free(names);
 		nitem = k;
 	}
 }
@@ -366,141 +447,109 @@ LOCAL void drop_let_go( void )
 LOCAL void list_again( void )
 {
 	if ( tab == T_SAVE && dropped ) {
-		dirty = TRUE;
+		dirty = listed = TRUE;
 		return;				/* what was dropped stays listed */
 	}
 	if ( dropped ) drop_let_go();		/* the other sheet lists volumes instead */
 	if ( tab == T_SAVE ) list_objects(&place[nplace - 1]);
 	else list_volumes();
-	dirty = TRUE;
+	dirty = listed = TRUE;
 }
 
-/* ---------------------------------------------------------------- drawing */
+/* ---------------------------------------------------------------- what the panel shows */
 
-LOCAL void text( INT x, INT y, const char *s, UW colour )
+/* The places, as the pop-ups list them */
+LOCAL void places_named( INT num, INT which )
 {
-	(void)dp_text(gid, x, y, (const UB *)s, colour, TEXT_PX);
+	const char	**names = (const char **)calloc((size_t)( nmedia + 1 ), sizeof(char *));
+	INT		i;
+
+	if ( names == NULL ) return;
+	for ( i = 0; i < nmedia; i++ ) names[i] = media[i].label;
+	ui_names(&ui, num, names, nmedia);
+	ui_set_value(&ui, num, which + 1);
+	free(names);
 }
 
-LOCAL void button( T_DPRECT *b, INT x, INT y, INT w, const char *label, BOOL on )
+/* The list of the sheet shown: each line its mark, a tab and its name */
+LOCAL void list_shown( void )
 {
-	INT	tw;
+	char	**names = (char **)calloc((size_t)( nitem + 1 ), sizeof(char *));
+	INT	i;
 
-	b->left = x;
-	b->top = y;
-	b->right = x + w;
-	b->bottom = y + 30;
-	(void)dp_fill_rect(gid, b, on ? C_BUTTON : C_GROUND);
-	(void)dp_frame_rect(gid, b, on ? C_TEXT : C_DIM, 1);
-	tw = dp_text_width((const UB *)label, TEXT_PX);
-	text(x + ( w - tw ) / 2, y + 21, label, on ? C_TEXT : C_DIM);
+	if ( names == NULL ) return;
+	for ( i = 0; i < nitem; i++ ) {
+		const char	*mark = ( tab != T_SAVE ) ? "" : ( pick_at(&items[i].uuid) >= 0 ) ? "●"
+				      : ( excl_at(&items[i].uuid) >= 0 ) ? "×" : "";
+		size_t		n = strlen(items[i].name) + 8;
+
+		names[i] = (char *)malloc(n);
+		if ( names[i] != NULL ) snprintf(names[i], n, "%s\t%s", mark, items[i].name);
+	}
+	if ( nitem == 0 ) {
+		static const char *const none[2] = { "\t（仮身がありません）", "\t（巻がありません）" };
+
+		ui_names(&ui, ( tab == T_SAVE ) ? PT_ITEMS : PT_VOLS, &none[( tab == T_SAVE ) ? 0 : 1], 1);
+	} else {
+		ui_names(&ui, ( tab == T_SAVE ) ? PT_ITEMS : PT_VOLS, (const char *const *)names, nitem);
+	}
+	ui_set_value(&ui, ( tab == T_SAVE ) ? PT_ITEMS : PT_VOLS, ( nitem > 0 ) ? sel + 1 : 0);
+	for ( i = 0; i < nitem; i++ ) free(names[i]);
+	free(names);
 }
 
 LOCAL void draw( void )
 {
-	T_DPRECT	all, r;
-	INT		i, y;
 	char		line[300], name[BK_NAME_MAX];
-	static const char *const tabs[2] = { "保　存", "復　帰" };
 	BOOL		busy = ( state == S_BUSY );
+	INT		i;
 
-	if ( gid < 0 ) return;
-	all.left = 0;
-	all.top = 0;
-	all.right = WORK_W;
-	all.bottom = WORK_H;
-	(void)dp_fill_rect(gid, &all, C_GROUND);
-
-	for ( i = 0; i < 2; i++ ) {
-		b_tab[i].left = 16 + i * 108;
-		b_tab[i].top = 8;
-		b_tab[i].right = b_tab[i].left + 100;
-		b_tab[i].bottom = 38;
-		(void)dp_fill_rect(gid, &b_tab[i], ( tab == i ) ? C_SEL : C_BUTTON);
-		(void)dp_frame_rect(gid, &b_tab[i], C_TEXT, 1);
-		text(b_tab[i].left + 26, 29, tabs[i], C_TEXT);
-	}
-
-	if ( tab == T_SAVE && dropped ) {
-		snprintf(line, sizeof(line), "対象：置かれた実身（← 戻る）");
-	} else if ( tab == T_SAVE ) {
-		name_of(&place[nplace - 1], name, sizeof(name));
-		snprintf(line, sizeof(line), "対象：%s の中（→ 開く ← 戻る）", name);
-	} else if ( state == S_PEEKED || state == S_NEXT ) {
-		snprintf(line, sizeof(line), "巻：%s", expect[0] ? expect : "");
-	} else {
-		snprintf(line, sizeof(line), "書庫の場所：%s（Space で替えます）", media[srcm].label);
-	}
-	text(16, 66, line, C_TEXT);
+	if ( !shown ) return;
+	if ( ui_sheet(&ui) != ( ( tab == T_SAVE ) ? 1 : 2 ) ) ui_show_sheet(&ui, ( tab == T_SAVE ) ? 1 : 2);
 	if ( tab == T_SAVE ) {
-		snprintf(line, sizeof(line), "● %d　× %d", npick, nexcl);
-		text(WORK_W - 16 - dp_text_width((const UB *)line, TEXT_PX), 66, line, C_DIM);
-	}
-
-	/* the list */
-	r.left = 16;
-	r.top = LIST_Y - 4;
-	r.right = WORK_W - 16;
-	r.bottom = LIST_Y + ROWS * ROW_H;
-	(void)dp_frame_rect(gid, &r, C_DIM, 1);
-	if ( tab == T_REST && state == S_PEEKED ) {
-		for ( i = 0; i < 3; i++ ) text(24, LIST_Y + 16 + i * ROW_H, peekinfo[i], C_TEXT);
-	} else {
-		if ( sel < top ) top = sel;
-		if ( sel >= top + ROWS ) top = sel - ROWS + 1;
-		for ( i = 0; i < ROWS && top + i < nitem; i++ ) {
-			T_DPRECT row;
-
-			row.left = 17;
-			row.top = LIST_Y + i * ROW_H - 3;
-			row.right = WORK_W - 17;
-			row.bottom = row.top + ROW_H;
-			if ( top + i == sel ) (void)dp_fill_rect(gid, &row, C_SEL);
-			if ( tab == T_SAVE && pick_at(&items[top + i].uuid) >= 0 ) {
-				text(24, LIST_Y + i * ROW_H + 13, "●", C_BAR);
-			} else if ( tab == T_SAVE && excl_at(&items[top + i].uuid) >= 0 ) {
-				text(24, LIST_Y + i * ROW_H + 13, "×", C_ERR);
-			}
-			text(44, LIST_Y + i * ROW_H + 13, items[top + i].name, C_TEXT);
+		if ( dropped ) {
+			snprintf(line, sizeof(line), "対象：置かれた実身");
+		} else {
+			name_of(&place[nplace - 1], name, sizeof(name));
+			snprintf(line, sizeof(line), "対象：%s の中", name);
 		}
-		if ( nitem == 0 ) text(24, LIST_Y + 13, ( tab == T_SAVE ) ? "（仮身がありません）" : "（巻がありません）", C_DIM);
+		ui_set_text(&ui, PT_WHAT, line);
+		snprintf(line, sizeof(line), "● %d　× %d", npick, nexcl);
+		ui_set_text(&ui, PT_MARKS, line);
+		ui_off(&ui, PT_OPEN, (BOOL)( busy || dropped || nitem == 0 ));
+		ui_off(&ui, PT_BACK, (BOOL)( busy || ( !dropped && nplace <= 1 ) ));
+		ui_off(&ui, PT_PICK, (BOOL)( busy || nitem == 0 ));
+		ui_off(&ui, PT_EXCL, (BOOL)( busy || nitem == 0 ));
+		ui_off(&ui, PT_DEST, busy);
+		ui_off(&ui, PT_SAVE, (BOOL)( busy || ( nitem == 0 && npick == 0 ) ));
+		ui_off(&ui, PT_SAVE_STOP, (BOOL)!busy);
+	} else {
+		for ( i = 0; i < 3; i++ ) {
+			ui_set_text(&ui, PT_HEAD + i, ( state == S_PEEKED ) ? peekinfo[i] : " ");
+		}
+		if ( state == S_NEXT ) {
+			snprintf(line, sizeof(line), "次の巻「%s」を選んで〈復帰〉を押してください", expect);
+			ui_set_text(&ui, PT_HEAD, line);
+		}
+		ui_off(&ui, PT_SRC, (BOOL)( busy || state == S_PEEKED ));
+		ui_off(&ui, PT_VOLS, busy);
+		ui_off(&ui, PT_REST, (BOOL)( busy || ( nitem == 0 && state != S_PEEKED ) ));
+		ui_off(&ui, PT_REST_STOP, (BOOL)!busy);
 	}
-
-	y = LIST_Y + ROWS * ROW_H + 12;
-	b_dest.left = 16;
-	b_dest.top = y;
-	b_dest.right = WORK_W - 16;
-	b_dest.bottom = y + 24;
-	if ( tab == T_SAVE ) {
-		snprintf(line, sizeof(line), "保存先：%s（D で替えます。Space で選ぶ、X で除く）", media[dest].label);
-		text(16, y + 17, line, C_TEXT);
-	} else if ( state == S_NEXT ) {
-		text(16, y + 17, "次の巻を選んで Enter を押してください（Space で場所を替えます）", C_TEXT);
+	if ( listed ) {
+		list_shown();
+		listed = FALSE;
 	}
-	y += 30;
-	button(&b_go, 16, y, 120, ( tab == T_SAVE ) ? "保存" : ( state == S_PEEKED || state == S_NEXT ) ? "復帰" : "読む",
-	       (BOOL)!busy);
-	button(&b_stop, 152, y, 120, "中止", busy);
-	y += 42;
+	ui_set_text(&ui, PT_STATUS, status[0] != 0 ? status : " ");
 	if ( busy && prog_total > 0 ) {
-		r.left = 16;
-		r.top = y;
-		r.right = WORK_W - 16;
-		r.bottom = y + 10;
-		(void)dp_frame_rect(gid, &r, C_DIM, 1);
-		r.right = 16 + (INT)( (UD)( WORK_W - 32 ) * ( prog_n > prog_total ? prog_total : prog_n ) / prog_total );
-		(void)dp_fill_rect(gid, &r, C_BAR);
+		UD	n = ( prog_n > prog_total ) ? prog_total : prog_n;
+
+		snprintf(line, sizeof(line), "進み具合：%llu%%", (unsigned long long)( n * 100 / prog_total ));
+		ui_set_text(&ui, PT_PROGRESS, line);
+	} else {
+		ui_set_text(&ui, PT_PROGRESS, " ");
 	}
-	text(16, y + 36, status, failed ? C_ERR : C_TEXT);
-	(void)wm_obj_flush(kw, NULL);
 	dirty = FALSE;
-}
-
-/* ---------------------------------------------------------------- while working */
-
-LOCAL BOOL in( const T_DPRECT *b, INT x, INT y )
-{
-	return (BOOL)( x >= b->left && x < b->right && y >= b->top && y < b->bottom );
 }
 
 LOCAL void drop_in( void );
@@ -510,18 +559,18 @@ LOCAL void poll( void )
 {
 	T_OBNTM	m;
 	SZ	asz = 0;
+	INT	num = 0, ev;
 
-	while ( port > 0 && ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
-		if ( m.event == OB_E_CLOSE || m.event == OB_E_DELETE ) {
+	while ( shown && ob_rea_rec(ui.port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+		ev = ui_event(&ui, &m, &num);
+		if ( ev == UI_EV_CLOSE ) {
 			closing = TRUE;
 			job.stop = TRUE;
-		} else if ( m.event == OB_E_KEY && m.code == K_ESC ) {
+		} else if ( ev == UI_EV_KEY && m.code == K_ESC ) {
 			job.stop = TRUE;
-		} else if ( m.event == OB_E_RELEASE && in(&b_stop, m.x, m.y) ) {
+		} else if ( ev == UI_EV_BUTTON && ( num == PT_SAVE_STOP || num == PT_REST_STOP ) ) {
 			job.stop = TRUE;
-		} else if ( m.event == OB_E_REDRAW ) {
-			dirty = TRUE;
-		} else if ( m.event == OB_E_DROP ) {
+		} else if ( ev == UI_EV_DROP ) {
 			drop_in();			/* refused while the work goes on */
 		}
 	}
@@ -539,7 +588,7 @@ LOCAL void tell( BKJOB *j, const char *line, UD done, UD total )
 	status[sizeof(status) - 1] = 0;
 	poll();
 	(void)ts_get_mono(&now);
-	if ( gid >= 0 && ( now - told_at > 100000000ULL || done >= total ) ) {
+	if ( shown && ( now - told_at > 100000000ULL || done >= total ) ) {
 		(void)wm_msg_put(line);
 		draw();
 		told_at = now;
@@ -559,26 +608,18 @@ typedef struct {
 	INT	nmade;
 } DEST;
 
-/* Enter pressed (TRUE), or Esc or the window closed (FALSE) */
-LOCAL BOOL wait_enter( void )
+/* The next medium asked for in a panel: 〈続ける〉 (TRUE), or 〈中止〉, Esc or the panel closed (FALSE) */
+LOCAL BOOL ask_medium( const char *name )
 {
-	T_OBNTM	m;
-	SZ	asz = 0;
+	char		l[2][BK_NAME_MAX + 80];
+	const char	*lines[2];
 
-	for ( ;; ) {
-		while ( port > 0 && ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
-			if ( m.event == OB_E_CLOSE || m.event == OB_E_DELETE ) {
-				closing = TRUE;
-				return FALSE;
-			}
-			if ( m.event == OB_E_KEY && ( m.code == K_ENTER || m.code == K_KPENTER ) ) return TRUE;
-			if ( m.event == OB_E_KEY && m.code == K_ESC ) return FALSE;
-			if ( m.event == OB_E_RELEASE && in(&b_go, m.x, m.y) ) return TRUE;
-			if ( m.event == OB_E_RELEASE && in(&b_stop, m.x, m.y) ) return FALSE;
-			if ( m.event == OB_E_REDRAW ) draw();
-		}
-		(void)tk_dly_tsk(50);
-	}
+	snprintf(l[0], sizeof(l[0]), "次の媒体を入れて〈続ける〉を押してください。");
+	snprintf(l[1], sizeof(l[1]), "書く巻：%s", name);
+	lines[0] = l[0];
+	lines[1] = l[1];
+	tm_putstring((const UB *)"backup: asked for the next medium\n");
+	return (BOOL)( ui_ask(&ui, PN_MEDIUM, lines, 2) == PT_GO_ON );
 }
 
 LOCAL ER dest_open( void *ctx, INT volno, const char *name, BK_OUT *p_out, void **p_arg, UD *p_cap )
@@ -586,20 +627,20 @@ LOCAL ER dest_open( void *ctx, INT volno, const char *name, BK_OUT *p_out, void 
 	DEST	*d = ctx;
 	ER	er;
 
-	if ( volno > 1 && d->m->kind == BK_MED_DIR && d->m->dev[0] != 0 && gid >= 0 ) {
+	if ( volno > 1 && d->m->kind == BK_MED_DIR && d->m->dev[0] != 0 && shown ) {
 		/* a medium of its own for each volume */
-		char	s[BK_NAME_MAX + 80];
-
 		bk_media_close(d->m);
-		snprintf(s, sizeof(s), "次の媒体を入れて Enter を押してください（「%s」を書きます）", name);
-		say(s);
-		draw();
-		if ( !wait_enter() ) return E_ABORT;
+		if ( !ask_medium(name) ) return E_ABORT;
 		er = bk_media_open(d->m, TRUE);
 		if ( er < E_OK ) return er;
 	}
 	memset(&d->v, 0, sizeof(d->v));
-	if ( d->m->kind == BK_MED_DIR ) strncpy(d->v.dir, d->m->dir, sizeof(d->v.dir) - 1);
+	if ( d->m->kind == BK_MED_DIR && d->m->mounted ) {
+		d->v.ondisk = TRUE;			/* written at the disk's root */
+		d->v.vd = d->m->vd;
+	} else if ( d->m->kind == BK_MED_DIR ) {
+		strncpy(d->v.dir, d->m->dir, sizeof(d->v.dir) - 1);
+	}
 	else d->v.into = d->m->into;
 	*p_cap = bk_media_free(d->m);
 	{
@@ -731,6 +772,7 @@ LOCAL ER peek( void )
 	k = snprintf(peekinfo[2], sizeof(peekinfo[2]), "実身：");
 	for ( i = 0; i < n && k < (INT)sizeof(peekinfo[2]) - 40; i++ ) {
 		k += snprintf(peekinfo[2] + k, sizeof(peekinfo[2]) - (size_t)k, "%s%s", i ? "、" : "", names[i]);
+		if ( k >= (INT)sizeof(peekinfo[2]) ) k = (INT)sizeof(peekinfo[2]) - 1;
 	}
 	return E_OK;
 }
@@ -743,7 +785,6 @@ LOCAL ER open_on_desktop( const TS_UUID *u )
 	T_OBCRE	c;
 	SZ	asz = 0;
 	ID	k, ka;
-	INT	i;
 	ER	er;
 
 	if ( ob_fnd_nam((const UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
@@ -764,14 +805,14 @@ LOCAL ER open_on_desktop( const TS_UUID *u )
 	k = ob_opn_obj(&d, OB_OP_WRITE);
 	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, &rq, sizeof(rq), &asz) : (ER)k;
 	if ( k > 0 ) ob_cls_obj(k);
-	for ( i = 0; er >= E_OK && i < 250; i++ ) {
-		if ( ob_rea_rec(ka, 0, 0, &an, sizeof(an), &asz) >= E_OK && asz == (SZ)sizeof(an) && an.seq == rq.seq ) {
+	/* the answer waited for on its channel, at most 5000 ms */
+	while ( er >= E_OK ) {
+		er = ob_rea_tmo(ka, 0, 0, &an, sizeof(an), &asz, 5000);
+		if ( er >= E_OK && asz == (SZ)sizeof(an) && an.seq == rq.seq ) {
 			er = an.er;
 			break;
 		}
-		(void)tk_dly_tsk(20);
 	}
-	if ( i >= 250 ) er = E_TMOUT;
 	ob_cls_obj(ka);
 	(void)ob_del_obj(&c2);
 	return er;
@@ -844,25 +885,29 @@ LOCAL INT batch( const T_BKARG *a )
 	ER	er;
 
 	if ( a->op == BK_OP_SAVE ) {
-		static BKROOT	rs[BK_ARG_ROOTS + 1];
+		BKROOT		*rs = calloc((size_t)a->nroot + 1, sizeof(BKROOT));
 		BKMEDIA		m;
 		INT		n = 0, i;
 
+		if ( rs == NULL ) {
+			tm_putstring((const UB *)"backup: failed no memory\n");
+			return 1;
+		}
 		memset(&m, 0, sizeof(m));
 		m.kind = ( a->path[0] != 0 ) ? BK_MED_DIR : BK_MED_OBJECT;
 		strncpy(m.dir, (const char *)a->path, sizeof(m.dir) - 1);
 		m.into = a->into;
-		for ( i = 0; i <= a->nroot && i <= BK_ARG_ROOTS; i++ ) {
+		for ( i = 0; i <= a->nroot; i++ ) {
 			static const TS_UUID zero;
 
 			memset(&rs[n], 0, sizeof(rs[n]));
-			rs[n].uuid = ( i == 0 ) ? a->obj : a->root[i - 1];
-			rs[n].parent = a->parent[i];
+			rs[n].uuid = ( i == 0 ) ? a->obj : BK_ARG_ROOT(a)[i - 1];
+			rs[n].parent = ( i == 0 ) ? a->objparent : BK_ARG_PARENT(a)[i - 1];
 			if ( !same(&rs[n].parent, &zero) ) rs[n].hasbox = bk_link_box(&rs[n].parent, &rs[n].uuid, rs[n].box);
 			n++;
 		}
-		er = save(rs, n, a->excl, ( a->nexcl < BK_ARG_ROOTS ) ? a->nexcl : BK_ARG_ROOTS, &m,
-			  (const char *)a->base, a->capacity);
+		er = save(rs, n, BK_ARG_EXCL(a), a->nexcl, &m, (const char *)a->base, a->capacity);
+		free(rs);
 	} else {
 		TS_UUID	cab = a->obj;
 		static const TS_UUID zero;
@@ -945,7 +990,7 @@ LOCAL void go( void )
 	if ( nitem == 0 && state != S_PEEKED ) return;
 	if ( state == S_IDLE || state == S_NEXT ) {
 		memset(&vol, 0, sizeof(vol));
-		if ( items[sel].file[0] != 0 ) snprintf(vol.path, sizeof(vol.path), "%s/%s", media[srcm].dir, items[sel].file);
+		if ( items[sel].file[0] != 0 ) bk_vol_at(&vol, &media[srcm], items[sel].file);
 		else vol.obj = items[sel].uuid;
 		if ( state == S_IDLE ) {
 			er = peek();
@@ -958,7 +1003,7 @@ LOCAL void go( void )
 			bk_vol_label(&vol, expect, sizeof(expect));
 			state = S_PEEKED;
 			failed = FALSE;
-			say("Enter で復帰します");
+			say("〈復帰〉で復帰します");
 			return;
 		}
 	}
@@ -1022,6 +1067,7 @@ LOCAL void cycle_media( INT *which, BOOL restore )
 		list_volumes();
 	}
 	dirty = TRUE;
+	if ( shown ) ui_set_value(&ui, restore ? PT_SRC : PT_DEST, *which + 1);
 	snprintf(s, sizeof(s), "backup: %s %s\n", restore ? "from" : "to", media[*which].label);
 	tm_putstring((const UB *)s);
 }
@@ -1033,6 +1079,43 @@ LOCAL void next_place( void )
 	else cycle_media(&srcm, TRUE);
 }
 
+/* The sheet shown changed: to the other's work, unless the work forbids it */
+LOCAL void sheet_to( INT t )
+{
+	if ( t == tab ) return;
+	if ( state == S_BUSY || state == S_NEXT ) {
+		dirty = TRUE;			/* the tags put back */
+		return;
+	}
+	tab = t;
+	state = S_IDLE;
+	list_again();
+}
+
+/* Into the one chosen, and back out */
+LOCAL void go_in( void )
+{
+	if ( tab == T_SAVE && !dropped && nitem > 0 && state != S_BUSY && place_push(&items[sel].uuid) ) {
+		list_again();
+	}
+}
+
+LOCAL void go_out( void )
+{
+	if ( tab == T_SAVE && dropped ) {
+		drop_let_go();
+		list_again();
+	} else if ( tab == T_SAVE && nplace > 1 ) {
+		nplace--;
+		list_again();
+	}
+	if ( tab == T_REST && state == S_PEEKED ) {
+		state = S_IDLE;
+		dirty = TRUE;
+	}
+}
+
+/* A key no part took: the list's commands, as the buttons have them */
 LOCAL void key( const T_OBNTM *m )
 {
 	UB	c = wm_key_char(m->code, m->mods);
@@ -1042,38 +1125,11 @@ LOCAL void key( const T_OBNTM *m )
 		return;
 	}
 	switch ( m->code ) {
-	case K_TAB:
-		if ( state == S_BUSY || state == S_NEXT ) break;
-		tab = ( tab == T_SAVE ) ? T_REST : T_SAVE;
-		state = S_IDLE;
-		list_again();
-		break;
-	case K_UP:
-		if ( sel > 0 ) sel--;
-		dirty = TRUE;
-		break;
-	case K_DOWN:
-		if ( sel + 1 < nitem ) sel++;
-		dirty = TRUE;
-		break;
 	case K_RIGHT:
-		if ( tab == T_SAVE && !dropped && nitem > 0 && nplace < DEPTH_MAX ) {
-			place[nplace++] = items[sel].uuid;
-			list_again();
-		}
+		go_in();
 		break;
 	case K_LEFT:
-		if ( tab == T_SAVE && dropped ) {
-			drop_let_go();
-			list_again();
-		} else if ( tab == T_SAVE && nplace > 1 ) {
-			nplace--;
-			list_again();
-		}
-		if ( tab == T_REST && state == S_PEEKED ) {
-			state = S_IDLE;
-			dirty = TRUE;
-		}
+		go_out();
 		break;
 	case K_SPACE:
 		if ( tab == T_SAVE ) pick_toggle();
@@ -1090,6 +1146,48 @@ LOCAL void key( const T_OBNTM *m )
 			next_place();
 		}
 		break;
+	}
+}
+
+/* A part worked: a button pushed, or what a list or a pop-up chose */
+LOCAL void part( INT ev, INT num )
+{
+	INT	v;
+
+	if ( ev == UI_EV_BUTTON ) {
+		switch ( num ) {
+		case PT_OPEN:	go_in();						break;
+		case PT_BACK:	go_out();						break;
+		case PT_PICK:	if ( state != S_BUSY ) pick_toggle();			break;
+		case PT_EXCL:	if ( state != S_BUSY ) excl_toggle();			break;
+		case PT_SAVE:
+		case PT_REST:	go();							break;
+		default:								break;
+		}
+		return;
+	}
+	v = ui_value(&ui, num) - 1;
+	if ( ( num == PT_ITEMS || num == PT_VOLS ) && v >= 0 && v < nitem ) {
+		sel = v;
+		if ( tab == T_REST && state == S_PEEKED ) {
+			state = S_IDLE;
+			dirty = TRUE;
+		}
+	} else if ( num == PT_DEST && v >= 0 && v < nmedia && v != dest ) {
+		bk_media_close(&media[dest]);
+		dest = v;
+		tm_putstring((const UB *)"backup: to ");
+		tm_putstring((const UB *)media[dest].label);
+		tm_putstring((const UB *)"\\n");
+	} else if ( num == PT_SRC && v >= 0 && v < nmedia && v != srcm ) {
+		bk_media_close(&media[srcm]);
+		srcm = v;
+		if ( state == S_PEEKED ) state = S_IDLE;
+		list_volumes();
+		dirty = listed = TRUE;
+		tm_putstring((const UB *)"backup: from ");
+		tm_putstring((const UB *)media[srcm].label);
+		tm_putstring((const UB *)"\\n");
 	}
 }
 
@@ -1124,7 +1222,7 @@ LOCAL void menu( const T_OBNTM *m )
 	if ( state == S_BUSY ) {
 		(void)mn_chg_atr(mid, NULL, ( tab == T_SAVE ) ? "dest" : "source", MN_GREY);
 	}
-	chosen = (BOOL)( mn_pop_men(mid, kw, m->x, m->y, m->when, &msel) >= E_OK );
+	chosen = (BOOL)( mn_pop_men(mid, ui.kw, m->x, m->y, m->when, &msel) >= E_OK );
 	(void)mn_del_men(mid);
 	if ( !chosen ) return;
 	if ( strcmp((const char *)msel.code, "close") == 0 ) {
@@ -1136,9 +1234,7 @@ LOCAL void menu( const T_OBNTM *m )
 	} else if ( strcmp((const char *)msel.code, "dest") == 0 || strcmp((const char *)msel.code, "source") == 0 ) {
 		if ( state != S_BUSY ) next_place();
 	} else if ( strcmp((const char *)msel.code, "save") == 0 || strcmp((const char *)msel.code, "restore") == 0 ) {
-		tab = ( msel.code[0] == 's' ) ? T_SAVE : T_REST;
-		state = S_IDLE;
-		list_again();
+		sheet_to(( msel.code[0] == 's' ) ? T_SAVE : T_REST);
 	} else if ( strcmp((const char *)msel.code, "stop") == 0 ) {
 		/* a set of volumes given up half way: what was made goes */
 		bk_rest_undo(&job);
@@ -1162,7 +1258,7 @@ LOCAL void drop_answer( const T_OBDROP *d, UINT answer, const char *msg )
 	a.seq = d->seq;
 	a.answer = answer;
 	strncpy((char *)a.msg, msg, sizeof(a.msg) - 1);
-	(void)ob_wri_rec(kw, OB_WR_DROP, 0, &a, sizeof(a), &asz);
+	(void)ob_wri_rec(ui.kw, OB_WR_DROP, 0, &a, sizeof(a), &asz);
 	snprintf(s, sizeof(s), "backup: drop %s\n", ( answer == OB_DR_ACCEPT ) ? "taken" : "refused");
 	tm_putstring((const UB *)s);
 }
@@ -1174,93 +1270,81 @@ LOCAL void drop_answer( const T_OBDROP *d, UINT answer, const char *msg )
  */
 LOCAL void drop_in( void )
 {
-	static T_OBDROP	d;
+	T_OBDROP	*d;
 	T_OBREF		r;
-	SZ		asz = 0;
 	INT		i, n = 0;
 	char		s[160];
 
-	memset(&d, 0, sizeof(d));
-	if ( ob_rea_rec(kw, OB_WR_DROP, 0, &d, sizeof(d), &asz) < E_OK || d.n <= 0 ) return;
+	d = ui_drop(&ui);
+	if ( d == NULL ) return;
+	if ( d->n <= 0 ) {
+		free(d);
+		return;
+	}
 	if ( state == S_BUSY || state == S_NEXT ) {
-		drop_answer(&d, OB_DR_REFUSE, "バックアップは作業中です");
+		drop_answer(d, OB_DR_REFUSE, "バックアップは作業中です");
+		free(d);
 		return;
 	}
 	drop_let_go();
-	for ( i = 0; i < d.n && i < OB_DROP_MAX && n < ITEM_MAX; i++ ) {
-		if ( ob_ref_obj(&d.v[i].target, &r) < E_OK || r.type != OB_T_STORAGE ) continue;
+	for ( i = 0; i < d->n && item_room(n + 1); i++ ) {
+		if ( ob_ref_obj(&d->v[i].target, &r) < E_OK || r.type != OB_T_STORAGE ) continue;
 		memset(&items[n], 0, sizeof(items[n]));
-		items[n].uuid = d.v[i].target;
+		items[n].uuid = d->v[i].target;
 		name_of(&items[n].uuid, items[n].name, sizeof(items[n].name));
-		if ( items[n].name[0] == 0 ) strncpy(items[n].name, (const char *)d.v[i].name, sizeof(items[n].name) - 1);
-		items[n].parent = d.fromobj;		/* the record the links were in */
-		items[n].box[0] = d.v[i].left;
-		items[n].box[1] = d.v[i].top;
-		items[n].box[2] = d.v[i].right;
-		items[n].box[3] = d.v[i].bottom;
-		items[n].hasbox = (BOOL)( d.v[i].right > d.v[i].left && d.v[i].bottom > d.v[i].top );
-		if ( ( d.mods & ( HID_MOD_LSHIFT | HID_MOD_RSHIFT ) ) != 0 ) (void)excl_add(&items[n].uuid);
+		if ( items[n].name[0] == 0 ) strncpy(items[n].name, (const char *)d->v[i].name, sizeof(items[n].name) - 1);
+		items[n].parent = d->fromobj;		/* the record the links were in */
+		items[n].box[0] = d->v[i].left;
+		items[n].box[1] = d->v[i].top;
+		items[n].box[2] = d->v[i].right;
+		items[n].box[3] = d->v[i].bottom;
+		items[n].hasbox = (BOOL)( d->v[i].right > d->v[i].left && d->v[i].bottom > d->v[i].top );
+		if ( ( d->mods & ( HID_MOD_LSHIFT | HID_MOD_RSHIFT ) ) != 0 ) (void)excl_add(&items[n].uuid);
 		else (void)pick_add(&items[n]);
 		n++;
 	}
 	if ( n == 0 ) {
-		drop_answer(&d, OB_DR_REFUSE, "保存できる実身がありません");
+		drop_answer(d, OB_DR_REFUSE, "保存できる実身がありません");
 		list_again();
+		free(d);
 		return;
 	}
-	drop_answer(&d, OB_DR_ACCEPT, "置かれた実身を保存の対象にしました");
+	drop_answer(d, OB_DR_ACCEPT, "置かれた実身を保存の対象にしました");
 	dropped = TRUE;
 	tab = T_SAVE;
 	state = S_IDLE;
 	nitem = n;
-	sel = top = 0;
+	sel = 0;
+	dirty = listed = TRUE;
 	snprintf(s, sizeof(s), "backup: dropped %d picked %d left out %d\n", n, npick, nexcl);
 	tm_putstring((const UB *)s);
-	say("置かれた実身を Enter で保存します（Space で選び直し、X で除く）");
+	say("置かれた実身を〈保存〉で保存します（〈選ぶ〉で選び直し、〈除く〉で除く）");
+	free(d);
 }
 
 LOCAL void event( const T_OBNTM *m )
 {
-	INT	i;
+	INT	num = 0, ev = ui_event(&ui, m, &num);
 
-	switch ( m->event ) {
-	case OB_E_CLOSE:
-	case OB_E_DELETE:
+	switch ( ev ) {
+	case UI_EV_CLOSE:
 		closing = TRUE;
 		break;
-	case OB_E_PRESS:
-		if ( m->code == 1 ) menu(m);
+	case UI_EV_MENU:
+		menu(m);
 		break;
-	case OB_E_RELEASE:
-		if ( m->code == 1 ) break;
-		for ( i = 0; i < 2; i++ ) {
-			if ( in(&b_tab[i], m->x, m->y) && tab != i && state != S_BUSY && state != S_NEXT ) {
-				tab = i;
-				state = S_IDLE;
-				list_again();
-				return;
-			}
-		}
-		if ( in(&b_go, m->x, m->y) ) {
-			go();
-		} else if ( in(&b_dest, m->x, m->y) ) {
-			next_place();
-		} else if ( m->y >= LIST_Y - 4 && m->y < LIST_Y + ROWS * ROW_H ) {
-			i = top + ( m->y - LIST_Y + 3 ) / ROW_H;
-			if ( i >= 0 && i < nitem ) {
-				sel = i;
-				dirty = TRUE;
-			}
-		}
-		break;
-	case OB_E_KEY:
+	case UI_EV_KEY:
 		key(m);
 		break;
-	case OB_E_REDRAW:
-		dirty = TRUE;
-		break;
-	case OB_E_DROP:
+	case UI_EV_DROP:
 		drop_in();
+		break;
+	case UI_EV_SHEET:
+		sheet_to(( num == 2 ) ? T_REST : T_SAVE);
+		break;
+	case UI_EV_BUTTON:
+	case UI_EV_CHANGE:
+		part(ev, num);
 		break;
 	default:
 		break;
@@ -1269,47 +1353,18 @@ LOCAL void event( const T_OBNTM *m )
 
 LOCAL ER open_window( void )
 {
-	T_OBCRE		c;
-	T_OBNTF		req;
-	T_OBWPOS	wp;
-	SZ		asz = 0;
-	char		json[192];
-
-	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":7}",
-		 160, 120, 160 + WORK_W + FRAME_W, 120 + WORK_H + TITLE_H);
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_WINDOW;
-	c.sub = OB_S_WINDOW;
-	c.name = (const UB *)"バックアップ";
-	c.json = (const UB *)json;
-	c.jsonsz = (SZ)strlen(json);
-	if ( ob_cre_obj(&c, &win) < E_OK ) return E_OBJ;
-	kw = ob_opn_obj(&win, OB_OP_R | OB_OP_W | OB_OP_PROT);
-	gid = ( kw > 0 ) ? wm_obj_gid(kw) : E_ID;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	port = ( ob_cre_obj(&c, &ch) >= E_OK ) ? ob_opn_obj(&ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) : E_NOEXS;
-	memset(&req, 0, sizeof(req));
-	req.events = OB_E_CLOSE | OB_E_PRESS | OB_E_RELEASE | OB_E_KEY | OB_E_REDRAW | OB_E_DELETE | OB_E_DROP;
-	if ( kw <= 0 || gid < 0 || port <= 0 || ob_ntf_evt(kw, OB_REC_ANY, &req, port) <= 0 ) return E_OBJ;
-	if ( ob_rea_rec(kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) >= E_OK ) {
-		wp.right = wp.left + WORK_W + ( ( wp.right - wp.left ) - ( wp.wright - wp.wleft ) );
-		wp.bottom = wp.top + WORK_H + ( ( wp.bottom - wp.top ) - ( wp.wbottom - wp.wtop ) );
-		(void)ob_wri_rec(kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
-	}
+	ui_icon(SYSDEF_PROG_BACKUP);
+	if ( ui_open(&ui, SYSDEF_BOX_BACKUP, PN_MAIN, 160, 120) < E_OK ) return E_OBJ;
+	shown = TRUE;
+	places_named(PT_DEST, dest);
+	places_named(PT_SRC, srcm);
 	return E_OK;
 }
 
 LOCAL void close_window( void )
 {
-	if ( port > 0 ) {
-		ob_cls_obj(port);
-		(void)ob_del_obj(&ch);
-	}
-	if ( kw > 0 ) ob_cls_obj(kw);
-	(void)ob_del_obj(&win);
-	port = kw = 0;
-	gid = -1;
+	if ( shown ) ui_close(&ui);
+	shown = FALSE;
 }
 
 int main( void )
@@ -1320,11 +1375,36 @@ int main( void )
 	INT	i;
 
 	n = ts_get_arg(&a, sizeof(a));
-	if ( n == (SZ)sizeof(a) && a.magic == BK_ARG_MAGIC ) return batch(&a);
+	if ( n >= (SZ)sizeof(a) && a.magic == BK_ARG_MAGIC ) {
+		/* the work without the window: the argument whole, its lists as long as they are */
+		T_BKARG	*w;
 
-	nmedia = bk_media_list(media, BK_MED_MAX);
-	(void)bk_first_cabinet(&place[0]);
-	nplace = 1;
+		if ( a.nroot < 0 || a.nexcl < 0 || n != (SZ)BK_ARG_SIZE(a.nroot, a.nexcl) ) {
+			tm_putstring((const UB *)"backup: failed the argument is not whole\n");
+			return 1;
+		}
+		w = (T_BKARG *)malloc((size_t)n);
+		if ( w == NULL || ts_get_arg(w, n) != n ) {
+			tm_putstring((const UB *)"backup: failed no memory\n");
+			return 1;
+		}
+		i = batch(w);
+		free(w);
+		return i;
+	}
+
+	nmedia = bk_media_list(&media);
+	{
+		TS_UUID	first;
+
+		memset(&first, 0, sizeof(first));
+		(void)bk_first_cabinet(&first);
+		nplace = 0;
+		if ( !place_push(&first) || nmedia < 2 ) {
+			tm_putstring((const UB *)"backup: no memory\n");
+			return 3;
+		}
+	}
 	if ( n >= (SZ)sizeof(TS_UUID) ) {
 		/* started on an object: a volume is restored from, anything else saved */
 		BKVOL	v;
@@ -1338,7 +1418,7 @@ int main( void )
 			tab = T_REST;
 			srcm = 0;
 		} else {
-			place[nplace++] = argobj;
+			(void)place_push(&argobj);
 		}
 	}
 	for ( i = 0; i < nmedia; i++ ) {
@@ -1351,19 +1431,23 @@ int main( void )
 		return 3;
 	}
 	list_again();
+	say(( tab == T_SAVE ) ? "保存する実身を選んで〈保存〉を押してください" : "復帰する巻を選んで〈復帰〉を押してください");
+	draw();
 	{
 		char	s[80];
 
+		/* said once the list is in its part (draw): a press on a line from now on finds it there */
 		snprintf(s, sizeof(s), "backup: ready, %d listed\n", nitem);
 		tm_putstring((const UB *)s);
 	}
-	say(( tab == T_SAVE ) ? "保存する実身を選んで Enter を押してください" : "復帰する巻を選んで Enter を押してください");
-	draw();
 
+	/* the window's channel waited on: the first notice of a round for as long as it takes, the rest as they are */
 	while ( !closing ) {
-		while ( !closing && ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) event(&m);
+		for ( TMO tmo = TMO_FEVR; !closing && ob_rea_tmo(ui.port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK;
+		      tmo = TMO_POL ) {
+			event(&m);
+		}
 		if ( dirty && !closing ) draw();
-		if ( !closing ) (void)tk_dly_tsk(20);
 	}
 	if ( state == S_NEXT ) {
 		bk_rest_undo(&job);

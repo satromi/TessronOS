@@ -138,11 +138,13 @@ IMPORT void	knl_pt_prune( UD l0_pa, UBINT va, UD size );	/* tables left empty un
 IMPORT BOOL	knl_pt_reclaim( void );			/* those taken out given back once safe; TRUE: some wait */
 IMPORT UW	knl_pt_pruned( INT *p_waiting );		/* tables taken out so far (the tests) */
 IMPORT void	knl_icache_sync( UBINT va, UD size );	/* written instructions made fetchable */
+IMPORT void	knl_dcache_clean_pou( UBINT va, UD size );	/* written instructions out to where they are fetched from */
 
 /*
  * Every processor's instruction cache made to fetch what was written
  * through the linear map (the program loader, after writing a
- * program's pages)
+ * program's pages and cleaning them to the point of unification with
+ * knl_dcache_clean_pou)
  */
 Inline void knl_icache_sync_all( void )
 {
@@ -186,6 +188,16 @@ Inline UINT knl_mmu_asid_top( void )
 Inline void knl_mmu_space_init_root( UD l0_pa )
 {
 	(void)l0_pa;
+}
+
+/*
+ * A process space about to be freed, taken off every processor that
+ * still has it installed: nothing to do, a TTBR0 left behind is never
+ * walked for the kernel's own addresses
+ */
+Inline void knl_mmu_space_drop( UD ttbr0 )
+{
+	(void)ttbr0;
 }
 
 /* Every processor's TLB entries of the ASID dropped (the space's tables are gone) */
@@ -235,16 +247,39 @@ typedef struct pcpu {
 	void	*irq_stack;		/* interrupt stack (top) */
 	UD	ctxsw_cnt;		/* context switches */
 	UD	ipi_cnt;		/* SGI_DISPATCH received */
+#if KLK_FINE
+	T_KLKCPU klk;			/* the kernel's locks it holds (klk.c) */
+	UW	ipi_due;		/* the processors to be told, once the scheduler's lock is let go */
+#endif
 } T_PCPU;
 
 IMPORT T_PCPU	knl_pcpu_tbl[];
 IMPORT INT	knl_num_prc;			/* processors online */
+
+#define knl_pcpu_of(i)	( &knl_pcpu_tbl[i] )
 
 Inline T_PCPU *knl_pcpu( void )
 {
 	UD	p;
 	Asm("mrs %0, tpidr_el1" : "=r"(p));
 	return (T_PCPU *)p;
+}
+
+/*
+ * The task this processor runs, read with interrupts masked: between
+ * reading TPIDR_EL1 and reading its ctxtsk the task could otherwise be
+ * moved to another processor and read that one's task
+ */
+Inline struct task_control_block *knl_self_ctxtsk( void )
+{
+	UD	daif, p;
+	struct task_control_block *t;
+
+	Asm( "mrs %0, daif\n\tmsr daifset, #2" : "=r"(daif) :: "memory" );
+	Asm( "mrs %0, tpidr_el1" : "=r"(p) );
+	t = ((T_PCPU *)p)->ctxtsk;
+	Asm( "msr daif, %0" :: "r"(daif) : "memory" );
+	return t;
 }
 
 /* Multiprocessor support (smp.c) */
@@ -260,6 +295,7 @@ IMPORT void	knl_sync_cores( UD ttbr0 );		/* the others running in a space take a
 IMPORT void	knl_smp_init_primary( void );
 IMPORT void	knl_smp_init_interrupt( void );
 IMPORT void	knl_gic_cpu_init( void );
+IMPORT void	knl_gic_cpuif_note( void );	/* this processor's bit in the distributor's targets (interrupt.c) */
 IMPORT void	knl_smp_start_secondaries( void );
 IMPORT ER	knl_psci_cpu_on( UD mpidr, UD entry_pa, UD ctx );	/* target hw_setting.c */
 IMPORT UD	knl_psci_call( UD fid, UD a1, UD a2, UD a3 );

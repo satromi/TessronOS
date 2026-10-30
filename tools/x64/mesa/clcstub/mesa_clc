@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+#
+# tools/x64/mesa/clcstub/mesa_clc — Mesa の OpenCL C の翻訳器(mesa_clc)の代わり。
+# Intel のドライバの内部のシェーダ(src/intel/shaders と src/intel/blorp の .cl)を、LLVM と
+# clang をホストに用意せずに Mesa を建てるため、空の SPIR-V と依存のファイルだけを書く。
+# 対の vtn_bindgen2 が、blorp_check_in_bounds を NIR で直に書き、iris が使わないもの
+# (間接描画の生成など。iris-no-generation.patch)を呼ばれたら止まる関数として書く。
+#
+#   mesa_clc <入力...> -o <出力> --depfile <依存> -- <翻訳の引数...>
+#
+import sys
+
+args = sys.argv[1:]
+if '--' in args:
+    args = args[:args.index('--')]
+out = dep = None
+inputs = []
+i = 0
+while i < len(args):
+    if args[i] == '-o':
+        out = args[i + 1]
+        i += 2
+    elif args[i] == '--depfile':
+        dep = args[i + 1]
+        i += 2
+    else:
+        inputs.append(args[i])
+        i += 1
+if out is None:
+    sys.exit('mesa_clc (stub): no -o')
+open(out, 'wb').close()
+if dep is not None:
+    with open(dep, 'w') as f:
+        f.write('%s: %s\n' % (out, ' '.join(inputs)))

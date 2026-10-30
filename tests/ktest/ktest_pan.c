@@ -32,7 +32,11 @@
 #include "ktest.h"
 #include "kernel.h"
 #include "tstdlib.h"
+#if defined(__x86_64__)
+#include "sysdepend/cpu/core/x86_64/cpu_task.h"
+#else
 #include "sysdepend/cpu/core/armv8a/cpu_task.h"
+#endif
 #include "sysman/space.h"
 #include <ts/proc.h>
 #include <ts/fs.h>
@@ -65,6 +69,16 @@ IMPORT UBINT	kt_pan_user_word;
 
 /* ---------------------------------------------------------------- PAN on */
 
+#if defined(__x86_64__)
+/* What the processor says it has: SMAP, which is PAN on x86-64 (CPUID 7, EBX bit 20) */
+LOCAL BOOL cpu_has_pan( void )
+{
+	UW	a, b, c, d;
+
+	cpuid(7, 0, &a, &b, &c, &d);
+	return ( b & ( 1U << 20 ) ) != 0;
+}
+#else
 /* What the processor says it has: PAN from ARMv8.1 */
 LOCAL BOOL cpu_has_pan( void )
 {
@@ -73,6 +87,7 @@ LOCAL BOOL cpu_has_pan( void )
 	Asm("mrs %0, id_aa64mmfr1_el1" : "=r"(mmfr1));
 	return ( ( ( mmfr1 >> ID_MMFR1_PAN_SHIFT ) & 0xf ) != 0 );
 }
+#endif
 
 /*
  * PAN is on where the processor has it: SCTLR_EL1.SPAN clear, PSTATE.PAN
@@ -91,8 +106,13 @@ LOCAL void test_pan_on( void )
 		KT_ASSERT(knl_ua_is_open());		/* nothing shut without it */
 		KT_SKIP("no PAN on this processor");
 	}
+#if defined(__x86_64__)
+	Asm("mov %%cr4, %0" : "=r"(sctlr));
+	KT_ASSERT((sctlr & ( 1UL << 21 )) != 0);	/* CR4.SMAP */
+#else
 	Asm("mrs %0, sctlr_el1" : "=r"(sctlr));
 	KT_ASSERT_EQ(sctlr & SCTLR_SPAN, 0);
+#endif
 	KT_ASSERT(!knl_ua_is_open());
 	o1 = knl_ua_open();
 	KT_ASSERT(o1);
@@ -277,6 +297,18 @@ LOCAL void test_el0_only( void )
 	tcb = knl_tsk_tcb(tid);
 	ssp = (SStackFrame *)tcb->tskctxb.ssp;
 	KT_ASSERT(tcb->tskctxb.ustk != NULL);
+#if defined(__x86_64__)
+	KT_ASSERT_EQ(ssp->cs & SEL_RPL3, SEL_RPL3);
+
+	/* the level of its frame stays whatever is asked: user mode, interrupts on */
+	knl_memset(&eit, 0, sizeof(eit));
+	eit.pc = (void *)el0_task;
+	eit.rflags = RFL_ZF | RFL_AC | RFL_IOPL;
+	KT_ASSERT_ER(tk_set_reg(tid, NULL, &eit, NULL), E_OK);
+	KT_ASSERT_EQ(ssp->cs & SEL_RPL3, SEL_RPL3);
+	KT_ASSERT_EQ(ssp->rflags & ( RFL_AC | RFL_IOPL ), 0);
+	KT_ASSERT_EQ(ssp->rflags & ( RFL_ZF | RFL_IF ), RFL_ZF | RFL_IF);
+#else
 	KT_ASSERT_EQ(ssp->spsr & PSR_M_MASK, PSR_M_EL0t);
 
 	/* the level of its frame stays whatever is asked */
@@ -287,6 +319,7 @@ LOCAL void test_el0_only( void )
 	KT_ASSERT_EQ(ssp->spsr & PSR_M_MASK, PSR_M_EL0t);
 	KT_ASSERT_EQ(ssp->spsr & ( PSR_PAN | PSR_DAIF ), 0);
 	KT_ASSERT_EQ(ssp->spsr & PSR_Z, PSR_Z);
+#endif
 
 	/* its user stack gone: not started */
 	ustk = tcb->tskctxb.ustk;
@@ -304,11 +337,20 @@ LOCAL void test_el0_only( void )
 	if ( tid <= 0 ) return;
 	tcb = knl_tsk_tcb(tid);
 	ssp = (SStackFrame *)tcb->tskctxb.ssp;
+#if defined(__x86_64__)
+	/* the kernel's mode, the way to the user pages shut (AC clear) */
+	KT_ASSERT_EQ(ssp->cs & SEL_RPL3, 0);
+	KT_ASSERT_EQ(ssp->rflags & RFL_AC, 0);
+	eit.rflags = RFL_AC;				/* the way opened in what is given */
+	KT_ASSERT_ER(tk_set_reg(tid, NULL, &eit, NULL), E_OK);
+	KT_ASSERT_EQ(ssp->rflags & RFL_AC, 0);
+#else
 	KT_ASSERT_EQ(ssp->spsr & PSR_M_MASK, PSR_M_EL1h);
 	KT_ASSERT_EQ(( ssp->spsr & PSR_PAN ) != 0, knl_pan_on);
 	eit.spsr = PSR_M_EL1h;				/* PAN cleared in what is given */
 	KT_ASSERT_ER(tk_set_reg(tid, NULL, &eit, NULL), E_OK);
 	KT_ASSERT_EQ(( ssp->spsr & PSR_PAN ) != 0, knl_pan_on);
+#endif
 	KT_ASSERT_ER(tk_del_tsk(tid), E_OK);
 }
 
@@ -320,20 +362,19 @@ LOCAL ER grant( CONST char *s, CONST TS_UUID *u, UINT ops, T_OBPRT *was, BOOL ba
 	TS_UUID	o;
 	T_OBPRT	*p;
 	ER	er;
+	INT	n;
 
 	if ( ts_str_to_uuid(s, &o) < E_OK ) return E_SYS;
 	if ( back ) return ob_set_prt(&o, was);
-	er = ob_get_prt(&o, was);
+	er = ob_get_prt(&o, was, KT_PRT_SIZE, NULL);
 	if ( er < E_OK ) return er;
-	p = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+	/* an entry more, the limits kept after the entries */
+	n = was->nacl;
+	p = knl_ob_prt_room(knl_ob_prt_dup(was), n + 1, was->nrmask);
 	if ( p == NULL ) return E_NOMEM;
-	*p = *was;
-	if ( p->nacl < OB_ACL_MAX ) {
-		p->acl[p->nacl].kind = OB_ACE_USER;
-		p->acl[p->nacl].who = *u;
-		p->acl[p->nacl].ops = ops;
-		p->nacl++;
-	}
+	p->acl[n].kind = OB_ACE_USER;
+	p->acl[n].who = *u;
+	p->acl[n].ops = ops;
 	er = ob_set_prt(&o, p);
 	Kfree(p);
 	return er;
@@ -368,8 +409,8 @@ LOCAL void test_rights( void )
 	KT_ASSERT_EQ(run_svcprog(SP_RIGHTS, &user, 0), 0);
 
 	/* the calendar's attributes and the machine's settings his to write */
-	cal = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
-	dev = (T_OBPRT *)Kmalloc(sizeof(T_OBPRT));
+	cal = (T_OBPRT *)Kmalloc(KT_PRT_SIZE);
+	dev = (T_OBPRT *)Kmalloc(KT_PRT_SIZE);
 	KT_ASSERT(cal != NULL && dev != NULL);
 	if ( cal != NULL && dev != NULL ) {
 		e1 = grant(SYSDEF_CALENDAR, &user, OB_OP_ATRRD | OB_OP_ATRWR, cal, FALSE);

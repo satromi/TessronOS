@@ -18,7 +18,10 @@
       "id": "archive-manager",
       "kind": "app",
       "name": "書庫管理",
-      "version": "R1.110",
+      "version": "R1.200",
+      "aliases": [
+        "unpack-file"
+      ],
       "menu": false,
       "builtin": false,
       "base": [

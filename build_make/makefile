@@ -67,7 +67,7 @@ DEPS := $(OBJS:.o=.d)
 # 付けない(設計書 16.6)
 FT_LIB_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(SRCS_FT)) \
 	$(OBJDIR)/outer_kernel/font/port/ftsystem.o
-$(FT_LIB_OBJS): CFLAGS += -DFT2_BUILD_LIBRARY
+$(FT_LIB_OBJS): CFLAGS += -DFT2_BUILD_LIBRARY -Wno-frame-larger-than
 
 # 画面を組み立てるタスク(TA_FPU)だけが呼ぶ、ベクトル演算の内側のループ。カーネルの
 # ほかは浮動小数点・SIMD のレジスタを使わない(-mgeneral-regs-only)ので、このファイル
@@ -86,7 +86,10 @@ all: $(EXE_FILE).elf $(IMAGE_TARGETS) $(EXE_FILE).lst
 
 # 構造体オフセット(アセンブラ用)。offset.c を -S で処理して "@@name value" 行を抜き出す
 OFFSET_H := $(OBJDIR)/offset.h
-$(OFFSET_H): $(TOP)/kernel/sysdepend/cpu/core/$(ARCH_CORE)/offset.c
+# 構造体の並びを決めるヘッダが変われば作り直す(TCB、T_PCPU、T_PRCSET、T_CTSK)
+$(OFFSET_H): $(TOP)/kernel/sysdepend/cpu/core/$(ARCH_CORE)/offset.c \
+	     $(TOP)/kernel/knlinc/kernel.h $(TOP)/kernel/knlinc/prcset.h \
+	     $(TOP)/kernel/sysdepend/cpu/core/$(ARCH_CORE)/sysdepend.h $(TOP)/include/tk/syscall.h
 	@mkdir -p $(dir $@)
 	@echo 'GEN $@'
 	@$(CC) $(filter-out -MMD -MP,$(CFLAGS)) $(INCPATH) -S -o - $< | \
@@ -102,9 +105,10 @@ $(OBJS): $(NETSTACK_STAMP)
 # NetBSD のスタック(rump カーネル)。ソースを取得し、TessronOS のツールチェーンで
 # 一つのオブジェクトにする(tools/netbsd/build.sh、設計書 12.6)
 ifeq ($(NETSTACK),netbsd)
-$(NETBSD_OBJ): $(TOP)/tools/netbsd/build.sh $(wildcard $(TOP)/peripheral_kernel/network/netbsd/rumpcomp/*.c)
+NETBSD_BUILD ?= $(TOP)/tools/netbsd/build.sh
+$(NETBSD_OBJ): $(NETBSD_BUILD) $(wildcard $(TOP)/peripheral_kernel/network/netbsd/rumpcomp/*.c)
 	@echo 'NETBSD $@'
-	@OUT=$(patsubst %/,%,$(dir $(NETBSD_OBJ))) MARCH=$(ARCH_MARCH) bash $(TOP)/tools/netbsd/build.sh all
+	@OUT=$(patsubst %/,%,$(dir $(NETBSD_OBJ))) MARCH=$(ARCH_MARCH) bash $(NETBSD_BUILD) all
 endif
 
 $(EXE_FILE).elf: $(OBJS) $(EXTRA_OBJS) $(LNKFILE) $(TARGET_STAMP)
@@ -270,6 +274,9 @@ TEST_DEPS  := $(TEST_DISK) $(USB_DISK) $(USB_DISK2) $(USB_DISK3) $(USB_DISK4) $(
 BTCD_IMG   := $(OBJDIR)/btcd.iso
 TEST_DEPS  += $(BTCD_IMG)
 $(OBJDIR)/tests/ktest/ktest_btcd.o: CFLAGS += -DKT_BTCD_IMG='"$(abspath $(BTCD_IMG))"'
+# iob の群(ktest_iob.c)が使うディスクの名前と、抜き差しの試験の FAT のイメージ(-DKT_IOB_FAT=... -DKT_IOB_PULL=... など)。既定は無し
+KT_IOB_CFLAGS ?=
+$(OBJDIR)/tests/ktest/ktest_iob.o: CFLAGS += $(KT_IOB_CFLAGS)
 # 多くのディスクと区画の試験(ktest_vols、docs/tessronos 7.6)の USB ディスク 4 台(tools/tests/mkvoldisk.py)。
 # 起動時には挿さず、試験が QMP 係に頼んでハブの 4.5〜4.8 に挿し、抜き差しを繰り返して、最後に抜く
 VOL_DIR    := $(OBJDIR)/vols
@@ -312,8 +319,8 @@ endif
 # 利用者プログラム(プロセスとして起動する ELF)
 USER_DIR  := $(TOP)/application/hello
 USER_ELF  := $(UOBJ)/hello.elf
-USER_SRCS := $(USER_DIR)/crt0.S $(USER_DIR)/svc_stub.S $(USER_DIR)/hello.c
-USER_LD   := $(TOP)/etc/linker/user/program.ld
+USER_SRCS := $(USER_DIR)/$(UARCH_DIR)crt0.S $(USER_DIR)/$(UARCH_DIR)svc_stub.S $(USER_DIR)/hello.c
+USER_LD   := $(TOP)/etc/linker/$(USER_LD_DIR)/program.ld
 # 利用者のプログラムが読むヘッダ。構造体の形(依頼や事象の大きさ)が変われば、
 # 利用者のプログラムも作り直す
 APP_HDRS  := $(wildcard $(TOP)/include/ts/*.h) $(wildcard $(TOP)/include/tk/*.h)
@@ -321,7 +328,7 @@ APP_HDRS  := $(wildcard $(TOP)/include/ts/*.h) $(wildcard $(TOP)/include/tk/*.h)
 $(USER_ELF): $(APP_HDRS) $(USER_SRCS) $(USER_LD)
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
-	@$(CC) $(ARCHFLAGS) -mgeneral-regs-only -mstrict-align -fno-builtin -fno-stack-protector \
+	@$(CC) $(ARCHFLAGS) $(UARCH_NOFP) -fno-builtin -fno-stack-protector \
 	  -ffreestanding -nostdlib -nostartfiles -static -Os -g \
 	  -I$(TOP)/include -T $(USER_LD) -Wl,--build-id=none \
 	  -o $@ $(USER_SRCS)
@@ -375,7 +382,7 @@ KTEST_XTAD ?= $(wildcard $(TOP)/etc/xtad/*.xtad) $(wildcard $(TOP)/etc/xtad/*.js
 KTEST_DEF ?= $(wildcard $(TOP)/etc/def/*.json) $(wildcard $(TOP)/etc/def/*.xtad) $(wildcard $(TOP)/etc/def/*.ico)
 
 # 利用者プログラムの共通部分(lib/libts)と、それで作る小物
-LIBTS_SRCS := $(TOP)/lib/libts/crt0.S $(TOP)/lib/libts/svc_stub.S $(TOP)/lib/libts/libc.c \
+LIBTS_SRCS := $(TOP)/lib/libts/$(UARCH_DIR)crt0.S $(TOP)/lib/libts/$(UARCH_DIR)svc_stub.S $(TOP)/lib/libts/libc.c \
 	      $(TOP)/lib/libts/ts_face.c $(TOP)/lib/libts/ts_random.c $(TOP)/lib/libts/ts_admin.c
 CLOCK_ELF  := $(UOBJ)/clock.elf
 # 時計のプログラム実身のレコード1。メタデータとレコード0は etc/def にある(設計書 18.20)
@@ -384,7 +391,7 @@ CLOCK_REC  := $(UOBJ)/rec/01a0d8c4-5212-7a19-8d63-e04b5c9f2a71_1.bin
 $(CLOCK_ELF): $(APP_HDRS) $(LIBTS_SRCS) $(TOP)/application/clock/clock.c $(USER_LD) $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
-	@$(CC) $(ARCHFLAGS) -mgeneral-regs-only -mstrict-align -fno-builtin -fno-stack-protector \
+	@$(CC) $(ARCHFLAGS) $(UARCH_NOFP) -fno-builtin -fno-stack-protector \
 	  -ffreestanding -nostdlib -nostartfiles -static -Os -g \
 	  -I$(TOP)/include -I$(TOP)/config -T $(USER_LD) -Wl,--build-id=none \
 	  -o $@ $(LIBTS_SRCS) $(TOP)/application/clock/clock.c
@@ -400,14 +407,14 @@ CONSOLE_ELF := $(UOBJ)/console.elf
 CONSOLE_REC := $(UOBJ)/rec/01a0d8c4-5219-7c3e-8a41-2f6b9d0e5c11_1.bin
 SERIAL_ELF  := $(UOBJ)/serial.elf
 SERIAL_REC  := $(UOBJ)/rec/01a0d8c4-521a-7d52-9b17-4e8c2a6f0d23_1.bin
-APP_CFLAGS  := $(ARCHFLAGS) -mgeneral-regs-only -mstrict-align -fno-builtin -fno-stack-protector \
+APP_CFLAGS  := $(ARCHFLAGS) $(UARCH_NOFP) -fno-builtin -fno-stack-protector \
 	  -ffreestanding -nostdlib -nostartfiles -static -Os -g \
 	  -I$(TOP)/include -I$(TOP)/config -T $(USER_LD) -Wl,--build-id=none
 
 # コンソールは、いまいる箱と名前でのプログラムの実行(con_box.c・con_job.c)、
 # かな漢字変換の入力(con_ime.c)を持つ。実身のメタデータは lib/libjson で読む(設計書 16.5.19)
 CONSOLE_SRCS := $(addprefix $(TOP)/application/console/,console.c con_box.c con_job.c con_ime.c) \
-		$(TOP)/lib/libjson/json.c $(TOP)/lib/libposix/psx_stub.S
+		$(TOP)/lib/libjson/json.c $(TOP)/lib/libposix/$(UARCH_DIR)psx_stub.S
 
 $(CONSOLE_ELF): $(APP_HDRS) $(LIBTS_SRCS) $(LTERM_SRCS) $(CONSOLE_SRCS) $(TOP)/application/console/console.h \
 		$(TOP)/application/lterm/lterm.h $(USER_LD) $(TOP)/include/ts/svc.h
@@ -423,7 +430,7 @@ HELLO_CMD_REC := $(UOBJ)/rec/01a0d8c4-5462-7c93-8ea4-bc1d2e3f5462_1.bin
 $(HELLO_CMD_ELF): $(APP_HDRS) $(USER_SRCS) $(USER_LD)
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
-	@$(CC) $(ARCHFLAGS) -mgeneral-regs-only -mstrict-align -fno-builtin -fno-stack-protector \
+	@$(CC) $(ARCHFLAGS) $(UARCH_NOFP) -fno-builtin -fno-stack-protector \
 	  -ffreestanding -nostdlib -nostartfiles -static -Os -g -DHELLO_CMD \
 	  -I$(TOP)/include -T $(USER_LD) -Wl,--build-id=none \
 	  -o $@ $(USER_SRCS)
@@ -446,13 +453,16 @@ include tls.mk
 # マイクロスクリプト: 図形を舞台に台本を動かすアプリ。浮動小数と C ライブラリ(newlib)を使うので
 # -mgeneral-regs-only を外し、libm・libc を結ぶ。プログラム実身のレコード1(設計書 17.15)
 MS_DIR      := $(TOP)/application/microscript
-MS_SRCS     := $(MS_DIR)/ms_co.S $(MS_DIR)/ms_libc.c $(MS_DIR)/ms_xml.c $(MS_DIR)/ms_fig.c 	       $(MS_DIR)/ms_lex.c $(MS_DIR)/ms_parse.c $(MS_DIR)/ms_run.c $(MS_DIR)/ms_rtlib.c 	       $(MS_DIR)/ms_stage.c $(MS_DIR)/ms_main.c $(MS_DIR)/ms_jis.c $(MS_DIR)/ms_vobj.c $(MS_DIR)/ms_shared.c $(MS_DIR)/ms_ime.c $(MS_DIR)/ms_net.c $(TOP)/lib/libjson/json.c
+MS_SRCS     := $(MS_DIR)/$(UARCH_DIR)ms_co.S $(MS_DIR)/ms_libc.c $(MS_DIR)/ms_xml.c $(MS_DIR)/ms_fig.c 	       $(MS_DIR)/ms_lex.c $(MS_DIR)/ms_parse.c $(MS_DIR)/ms_run.c $(MS_DIR)/ms_rtlib.c 	       $(MS_DIR)/ms_stage.c $(MS_DIR)/ms_main.c $(MS_DIR)/ms_jis.c $(MS_DIR)/ms_vobj.c $(MS_DIR)/ms_shared.c $(MS_DIR)/ms_ime.c $(MS_DIR)/ms_net.c $(TOP)/lib/libjson/json.c $(TOP)/lib/libui/ui.c
 # lib/libts の libc.c は使わない: 同じ関数を newlib が持ち、最適化すると自分を呼ぶ
-MS_LIBTS    := $(TOP)/lib/libts/crt0.S $(TOP)/lib/libts/svc_stub.S $(TOP)/lib/libts/ts_random.c \
+MS_LIBTS    := $(TOP)/lib/libts/$(UARCH_DIR)crt0.S $(TOP)/lib/libts/$(UARCH_DIR)svc_stub.S $(TOP)/lib/libts/ts_random.c \
 	       $(TOP)/lib/libts/ts_admin.c
+ifneq ($(UARCH_LIBC),)
+MS_LIBTS    += $(UARCH_LIBC)
+endif
 MS_ELF      := $(UOBJ)/microscript.elf
 MS_REC      := $(UOBJ)/rec/01a0d8c4-521b-7e63-8c28-5f9d3b7a1e34_1.bin
-MS_CFLAGS   := $(ARCHFLAGS) -mstrict-align -fno-stack-protector -O2 -g -DCHK_TKERNEL_CONST 	       -nostdlib -nostartfiles -static 	       -I$(TOP)/include -I$(TOP)/config -T $(USER_LD) -Wl,--build-id=none
+MS_CFLAGS   := $(ARCHFLAGS) $(UARCH_FP) -fno-stack-protector -O2 -g -DCHK_TKERNEL_CONST 	       -nostdlib -nostartfiles -static 	       -I$(TOP)/include -I$(TOP)/config -T $(USER_LD) -Wl,--build-id=none
 
 $(MS_ELF): $(APP_HDRS) $(MS_LIBTS) $(MS_SRCS) $(MS_DIR)/ms.h $(MS_DIR)/ms_run.h $(USER_LD) $(TOP)/include/ts/svc.h $(TLS_LIB)
 	@mkdir -p $(dir $@)
@@ -464,45 +474,29 @@ $(MS_REC): $(MS_ELF)
 	@cp $< $@
 
 # 書庫(BPK)・LH5・二進 TAD を読む部分(lib/libbpk、include/ts/bpk.h)。系の呼出しをせず、
-# 書庫解凍が結ぶ。LH5 の復号(bpk_lh5.c)と二進 TAD の読み書きはカーネルの試験も結ぶ(設計書 17.16)。
+# 書庫管理が結ぶ。LH5 の復号(bpk_lh5.c)と二進 TAD の読み書きはカーネルの試験も結ぶ(設計書 17.16)。
 # 実時間制御TADの要素とセグメントの表は bpk_rt.c(設計書 15.7)
 LIBBPK_DIR  := $(TOP)/lib/libbpk
 LIBBPK_SRCS := $(LIBBPK_DIR)/bpk_arc.c $(LIBBPK_DIR)/bpk_lh5.c $(LIBBPK_DIR)/bpk_tad.c $(LIBBPK_DIR)/bpk_png.c \
 	       $(LIBBPK_DIR)/bpk_tron.c $(LIBBPK_DIR)/bpk_jis.c $(LIBBPK_DIR)/bpk_util.c $(LIBBPK_DIR)/bpk_fax.c \
 	       $(LIBBPK_DIR)/bpk_rt.c $(LIBBPK_DIR)/bpk_lh5e.c $(LIBBPK_DIR)/bpk_pack.c
 
-# 書庫解凍: BTRON の書庫の実身から中の実身を取り出すアプリ。newlib を使う。
-# プログラム実身のレコード1(設計書 17.16)
-UNP_DIR     := $(TOP)/application/unpack
-UNP_SRCS    := $(UNP_DIR)/unp_libc.c $(UNP_DIR)/unp_obj.c $(UNP_DIR)/unp_main.c $(LIBBPK_SRCS) \
-	       $(TOP)/lib/libjson/json.c
-UNP_ELF     := $(UOBJ)/unpack.elf
-UNP_REC     := $(UOBJ)/rec/01a0d8c4-52a7-7c31-9b5e-3f1d8a6c2e90_1.bin
-UNP_CFLAGS  := $(MS_CFLAGS) -Wall -Wno-unused-parameter
-
-$(UNP_ELF): $(APP_HDRS) $(MS_LIBTS) $(UNP_SRCS) $(UNP_DIR)/unp.h $(TOP)/include/ts/bpk.h $(USER_LD) $(TOP)/include/ts/svc.h
-	@mkdir -p $(dir $@)
-	@echo 'CC  $@'
-	@$(CC) $(UNP_CFLAGS) -o $@ $(MS_LIBTS) $(UNP_SRCS) -lc -lgcc
-
-$(UNP_REC): $(UNP_ELF)
-	@mkdir -p $(dir $@)
-	@cp $< $@
-
-# 書庫管理: 仮身で結ばれた実身のまとまりを BTRON の書庫の書籍にまとめ、取り出すアプリ。書庫の書き出しと
-# LH5 の符号化は lib/libbpk(bpk_pack.c、bpk_lh5e.c)、xmlTAD から二進 TAD へは lib/libbtbk/btbk_tad.c、
-# 取り出しは書庫解凍の unp_obj.c を共に使う。newlib を使う。プログラム実身のレコード1(設計書 11.20)
+# 書庫管理: 仮身で結ばれた実身のまとまりを BTRON の書庫の書籍にまとめ、取り出すアプリ。取り込んだ
+# .bpk の実身も開いて取り出す。書庫の書き出しと LH5 の符号化は lib/libbpk(bpk_pack.c、bpk_lh5e.c)、
+# xmlTAD から二進 TAD へは lib/libbtbk/btbk_tad.c、取り出しは unp_obj.c(ファイル変換も結ぶ)。
+# newlib を使う。プログラム実身のレコード1(設計書 11.20)
+ARC_CFLAGS  := $(MS_CFLAGS) -Wall -Wno-unused-parameter
 ARC_DIR     := $(TOP)/application/archive
-ARC_SRCS    := $(ARC_DIR)/arc_main.c $(ARC_DIR)/arc_pack.c $(UNP_DIR)/unp_libc.c $(UNP_DIR)/unp_obj.c \
-	       $(LIBBPK_SRCS) $(TOP)/lib/libbtbk/btbk_tad.c $(TOP)/lib/libjson/json.c
+ARC_SRCS    := $(ARC_DIR)/arc_main.c $(ARC_DIR)/arc_pack.c $(ARC_DIR)/unp_libc.c $(ARC_DIR)/unp_obj.c \
+	       $(LIBBPK_SRCS) $(TOP)/lib/libbtbk/btbk_tad.c $(TOP)/lib/libjson/json.c $(TOP)/lib/libui/ui.c
 ARC_ELF     := $(UOBJ)/archive.elf
 ARC_REC     := $(UOBJ)/rec/01a0d8c4-5370-7a71-8e82-9fab0c1d7070_1.bin
 
-$(ARC_ELF): $(APP_HDRS) $(MS_LIBTS) $(ARC_SRCS) $(ARC_DIR)/arc.h $(UNP_DIR)/unp.h $(TOP)/include/ts/bpk.h \
+$(ARC_ELF): $(APP_HDRS) $(MS_LIBTS) $(ARC_SRCS) $(ARC_DIR)/arc.h $(ARC_DIR)/unp.h $(TOP)/include/ts/bpk.h \
 	    $(TOP)/include/ts/btbk.h $(USER_LD) $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
-	@$(CC) $(UNP_CFLAGS) -o $@ $(MS_LIBTS) $(ARC_SRCS) -lc -lgcc
+	@$(CC) $(ARC_CFLAGS) -o $@ $(MS_LIBTS) $(ARC_SRCS) -lc -lgcc
 
 $(ARC_REC): $(ARC_ELF)
 	@mkdir -p $(dir $@)
@@ -518,7 +512,7 @@ BKP_DIR     := $(TOP)/application/backup
 BKP_SRCS    := $(BKP_DIR)/bk_libc.c $(BKP_DIR)/bk_util.c $(BKP_DIR)/bk_media.c $(BKP_DIR)/bk_vol.c \
 	       $(BKP_DIR)/bk_save.c $(BKP_DIR)/bk_rest.c $(BKP_DIR)/bk_main.c $(LIBBTBK_SRCS) $(LIBBPK_SRCS) \
 	       $(TOP)/lib/libjson/json.c $(TOP)/lib/libxfu/xfu_name.c $(TOP)/lib/libxfu/xfu_util.c \
-	       $(TOP)/lib/libtxc/txc.c $(TOP)/lib/libtxc/txc_tab.c
+	       $(TOP)/lib/libtxc/txc.c $(TOP)/lib/libtxc/txc_tab.c $(TOP)/lib/libui/ui.c
 BKP_ELF     := $(UOBJ)/backup.elf
 BKP_REC     := $(UOBJ)/rec/01a0d8c4-52b0-7d15-9a3c-4e6f8b2d1c07_1.bin
 BKP_CFLAGS  := $(MS_CFLAGS) -Wall -Wno-unused-parameter -Wno-stringop-truncation -Wno-format-truncation
@@ -535,7 +529,7 @@ $(BKP_REC): $(BKP_ELF)
 
 # ファイル変換: 媒体・FTP のファイルと実身の相互変換の小物。newlib を使う。
 # 変換の部品(lib/libxfu・lib/libtxc・lib/libftp)を結ぶ(設計書 17.17)。BTRON のファイルシステムの
-# ディスク(BTRON の CD-ROM)は lib/libbtfs で読み、書庫解凍の unp_obj.c で実身にする(設計書 11.9)
+# ディスク(BTRON の CD-ROM)は lib/libbtfs で読み、書庫管理の unp_obj.c で実身にする(設計書 11.9)
 LIBBTFS_SRCS := $(TOP)/lib/libbtfs/btfs.c
 XFC_DIR     := $(TOP)/application/xfconv
 XFC_SRCS    := $(XFC_DIR)/xfc_libc.c $(XFC_DIR)/xfc_net.c $(XFC_DIR)/xfc_main.c $(XFC_DIR)/xfc_draw.c 	       $(XFC_DIR)/xfc_dlg.c $(XFC_DIR)/xfc_btron.c $(TOP)/lib/libui/ui.c \
@@ -543,7 +537,7 @@ XFC_SRCS    := $(XFC_DIR)/xfc_libc.c $(XFC_DIR)/xfc_net.c $(XFC_DIR)/xfc_main.c 
 	       $(TOP)/lib/libxfu/xfu_imp.c $(TOP)/lib/libxfu/xfu_exp.c $(TOP)/lib/libxfu/xfu_fs.c \
 	       $(TOP)/lib/libxfu/xfu_ftp.c $(TOP)/lib/libxfu/xfu_prc.c \
 	       $(TOP)/lib/libtxc/txc.c $(TOP)/lib/libtxc/txc_tab.c $(TOP)/lib/libftp/ftp.c \
-	       $(LIBBPK_SRCS) $(LIBBTFS_SRCS) $(UNP_DIR)/unp_obj.c $(TOP)/lib/libjson/json.c
+	       $(LIBBPK_SRCS) $(LIBBTFS_SRCS) $(ARC_DIR)/unp_obj.c $(TOP)/lib/libjson/json.c
 XFC_ELF     := $(UOBJ)/xfconv.elf
 XFC_REC     := $(UOBJ)/rec/01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91_1.bin
 # 系の答える誤りの番号は下位の番号を持たない(sys/profile.h の TK_SUPPORT_SERCD)。
@@ -553,7 +547,7 @@ XFC_CFLAGS  := $(MS_CFLAGS) -Wall -Wno-unused-parameter -Wno-format-truncation -
 
 $(XFC_ELF): $(APP_HDRS) $(MS_LIBTS) $(XFC_SRCS) $(XFC_DIR)/xfc.h $(TOP)/lib/libxfu/xfu_in.h $(TOP)/include/ts/xfu.h 	    $(TOP)/include/ts/ui.h $(TOP)/include/ts/dtreq.h \
 	    $(TOP)/include/ts/ftp.h $(TOP)/include/ts/txc.h $(TOP)/include/ts/btfs.h $(TOP)/include/ts/bpk.h \
-	    $(UNP_DIR)/unp.h $(USER_LD) $(TOP)/include/ts/svc.h
+	    $(ARC_DIR)/unp.h $(USER_LD) $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
 	@$(CC) $(XFC_CFLAGS) -o $@ $(MS_LIBTS) $(XFC_SRCS) -lc -lgcc
@@ -702,6 +696,28 @@ $(KM_REC): $(KM_ELF)
 
 EXTRA_RECS += $(KM_REC)
 
+# ソフトウェアキーボード: ポインタやタッチパネルで押す画面のキーボードの小物。窓は入力の対象を取らず
+# (WM_ATTR_NOFOCUS)、ほかの窓より前に浮かび(WM_ATTR_FLOAT)、大きさを変えられ、キーは窓の大きさに
+# 合わせて伸び縮みする。配列は英字(QWERTY)、TRON 配列(sk_tron.c)、μTRON 配列(sk_utron.c、左右の窓)。キーの形は縁をなめらかにして描く(sk_draw.c)。キーの入力は wm_key_put、選んだ
+# 配列はユーザ情報の実身の行(lib/libconf)。newlib を使う。プログラム実身のレコード1(設計書 11.31)
+SK_DIR       := $(TOP)/application/softkb
+SK_SRCS      := $(SK_DIR)/sk_main.c $(SK_DIR)/sk_tron.c $(SK_DIR)/sk_utron.c $(SK_DIR)/sk_draw.c $(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c \
+		$(TOP)/lib/libconf/conf.c $(TOP)/lib/libjson/json.c
+SK_ELF       := $(UOBJ)/softkb.elf
+SK_REC       := $(UOBJ)/rec/01a0d8c4-54b0-7ac1-8cd2-9fab0c1d54b0_1.bin
+
+$(SK_ELF): $(APP_HDRS) $(MS_LIBTS) $(SK_SRCS) $(SK_DIR)/sk.h $(TOP)/include/ts/keymap.h $(TOP)/include/ts/wm.h \
+	   $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(SK_SRCS) -lc -lgcc
+
+$(SK_REC): $(SK_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(SK_REC)
+
 # 電卓: 四則、メモリ、関数電卓の小物。数は十進(cu_dec.c。カーネルの試験も結ぶ)で持ち、関数だけを
 # 倍精度(cu_fn.c、libm)で求める。窓の部品は lib/libui。newlib を使う。プログラム実身のレコード1(設計書 11.17)
 CU_DIR       := $(TOP)/application/calculator
@@ -812,7 +828,7 @@ RTM_SRCS     := $(RTM_DIR)/rtm_main.c $(RTM_DIR)/rtm_mix.c $(RTM_DIR)/rtm_synth.
 		$(RTM_DIR)/rtm_libc.c
 RTM_ELF      := $(UOBJ)/rtmedia.elf
 RTM_REC      := $(UOBJ)/rec/01a0d8c4-52da-7c34-9d45-be6f708192a3_1.bin
-RTM_CFLAGS   := $(ARCHFLAGS) -mstrict-align -fno-stack-protector -O2 -g -nostdlib -nostartfiles -static \
+RTM_CFLAGS   := $(ARCHFLAGS) $(UARCH_FP) -fno-stack-protector -O2 -g -nostdlib -nostartfiles -static \
 		-I$(TOP)/include -I$(TOP)/config -T $(USER_LD) -Wl,--build-id=none -Wall -Wno-unused-parameter
 
 $(RTM_ELF): $(APP_HDRS) $(MS_LIBTS) $(RTM_SRCS) $(RTM_DIR)/rtm.h $(RTM_DIR)/minimp3.h $(USER_LD) $(TOP)/include/ts/svc.h
@@ -846,12 +862,13 @@ include $(CHROMIUM)/build_make/browser.mk
 endif
 
 # コマンドの v8prog(実身 bin に仮身がある、設計書 16.5.19): browser.mk が作る obj/v8prog.elf を strip してレコード1にする。
+# (x86-64 では $(BROWSER_OUT) すなわち obj/x64 の v8prog.elf)
 # システムのボリュームだけに載せる(strip 後で約47MB)。CMD_V8=0 で外す。外すと実身は実行形式なしで残る
 CMD_V8 ?= $(BROWSER)
 ifeq ($(CMD_V8)$(filter v8prog,$(BROWSER_PROGS)),1v8prog)
 CMD_V8_REC := $(UOBJ)/rec/01a0d8c4-5464-7eb5-80c6-de3f405f5464_1.bin
 
-$(CMD_V8_REC): obj/v8prog.elf
+$(CMD_V8_REC): $(BROWSER_OUT)/v8prog.elf
 	@mkdir -p $(dir $@)
 	@$(CROSS)strip -o $@ $<
 else
@@ -915,7 +932,7 @@ endif
 $(CALC_BIN): $(CALC_COBJ) $(UOBJ)/calc/calc_js.o $(CALC_DIR)/calc_v8.cc $(CALC_DIR)/calc_eng.h $(CXXRT_LIB) $(PTH_LIB)
 	@mkdir -p $(dir $@)
 	@echo 'ENG $@'
-	@TESSRONOS=$(abspath $(TOP)) LIBDIR=$(abspath $(CXXRT_OUT)) bash $(CHROMIUM)/tools/browser/build.sh v8app \
+	@TESSRONOS=$(abspath $(TOP)) LIBDIR=$(abspath $(CXXRT_OUT)) $(BROWSER_ARCH_ENV) bash $(CHROMIUM)/tools/browser/build.sh v8app \
 		$(abspath $@) $(abspath $(CALC_DIR)/calc_v8.cc) $(abspath $(CALC_COBJ) $(UOBJ)/calc/calc_js.o)
 else
 CALC_BIN     := $(UOBJ)/calc_c.elf
@@ -969,7 +986,7 @@ TSFS_TOOLS  := $(TOP)/tools/mktsfs $(wildcard $(TOP)/tools/tsfs_py/*.py)
 # 版(R1.000 の形: R、桁数の決まらない整数、点、3桁)。プログラムの版はプログラム実身の
 # メタデータ tessronos.program.version に書く(etc/def)。TS_VERSION はシステムの版で、
 # システムの実身の OB_SYS_INFO に VERSION として出る
-TS_VERSION   ?= R1.110
+TS_VERSION   ?= R1.200
 VER_STAMP    := obj/version.stamp
 $(shell mkdir -p obj; [ -f $(VER_STAMP) ] && [ "$$(cat $(VER_STAMP))" = "$(TS_VERSION)" ] || echo "$(TS_VERSION)" > $(VER_STAMP))
 $(OBJDIR)/peripheral_kernel/obj/obsys.o: $(VER_STAMP)
@@ -978,18 +995,21 @@ $(OBJDIR)/peripheral_kernel/obj/obsys.o: CFLAGS += -DTS_VERSION='"$(TS_VERSION)"
 # アプリのパッケージ(.tpk): make pkg PKG=<プログラムの id か UUID> で $(UOBJ)/pkg/<id>.tpk。
 # 版はプログラム実身のメタデータに書いてあるもの
 PKG ?=
-pkg: $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(CAL_REC) $(RTM_REC) $(CALC_REC)
+pkg: $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(CAL_REC) $(RTM_REC) $(CALC_REC)
 	@test -n "$(PKG)" || { echo 'usage: make pkg PKG=<program id>'; exit 1; }
 	@mkdir -p $(UOBJ)/pkg
-	@python3 $(TOP)/tools/mktpk.py --from $(TOP)/etc/def --from $(UOBJ)/rec --program $(PKG) -o $(UOBJ)/pkg/$(PKG).tpk
+	@python3 $(TOP)/tools/mktpk.py --from $(TOP)/etc/def --from $(TOP)/etc/xtad --from $(UOBJ)/rec --program $(PKG) -o $(UOBJ)/pkg/$(PKG).tpk
 
 # イメージに組み込むアプリのパッケージ(.tpk)。既定は etc/pkg/ に置いたもので、
 # make PKGS="a.tpk b.tpk" で直に指定もできる。tools/pkgstage.py が実身を $(PKG_STAGE) に
 # 展開し、そのプログラムへの仮身を足したプログラム箱を作る。mktsfs の --over で、
 # そのプログラム箱が etc/def のものに代わる(システム環境設定から取り込んだときと
-# 同じ形になる)。Raspberry Pi 4 の像は ARMv8.0-A なので、既定では組み込まない
+# 同じ形になる)。Raspberry Pi 4 の像のものは rpi4.mk が決める(etc/pkg/rpi4/)
 ifeq ($(TARGET),_RPI4_)
 PKGS ?=
+else ifeq ($(ARCH),x86_64)
+# etc/pkg/ のパッケージのプログラムは AArch64 のもの。x86-64 のものは etc/pkg/x64/ に置く
+PKGS ?= $(wildcard $(TOP)/etc/pkg/x64/*.tpk)
 else
 PKGS ?= $(wildcard $(TOP)/etc/pkg/*.tpk)
 endif
@@ -1010,13 +1030,16 @@ PKG_HOLD  :=
 PKG_DONE  :=
 endif
 
-$(SYS_VOL): $(TSFS_TOOLS) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF) $(PKG_DONE) $(PKG_STAMP) $(SYS_VOL_STAMP)
+# wpa_supplicant のプロセス(WIFI=1 WPA_MODE=proc、設計書 9.6.11)
+include wpaproc.mk
+
+$(SYS_VOL): $(TSFS_TOOLS) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF) $(PKG_DONE) $(PKG_STAMP) $(SYS_VOL_STAMP)
 	@mkdir -p $(dir $@)
 	@rm -f $@
 	@python3 $(TOP)/tools/mktsfs -q -L "TessronOS system" --size $(SYS_VOL_SIZE) \
 	  $(addprefix --exclude ,$(SYS_VOL_EXCLUDE)) \
-	  $(PKG_OVER) $(CMD_OVER) --from $(TOP)/etc/def --from $(TOP)/etc/xtad --from $(UOBJ)/rec --from $(UOBJ)/rec/sys \
-	  --hold $(TOP)/etc/def --hold $(TOP)/etc/xtad $(PKG_HOLD) \
+	  $(PKG_OVER) $(CMD_OVER) $(WIFI_OVER) --from $(TOP)/etc/def --from $(TOP)/etc/xtad --from $(UOBJ)/rec --from $(UOBJ)/rec/sys \
+	  --hold $(TOP)/etc/def --hold $(TOP)/etc/xtad $(PKG_HOLD) $(WPAP_HOLD) \
 	  --sysbox 01a0d8c4-5211-7c52-9e0a-3b61d27f4c85 $@
 
 $(SYS_VOL): $(CMD_V8_REC)
@@ -1051,10 +1074,10 @@ $(SD_CARD): $(TOP)/tools/mksd.py $(TOP)/tools/mkfat.py $(SYS_VOL) $(USER_ELF)
 	@python3 $(TOP)/tools/mksd.py --sys $(SYS_VOL) --boot-mb 64 --scratch-mb 16 $@ $(USER_ELF)
 	@truncate -s $$(( $(SD_CARD_SECTORS) * 512 )) $@
 
-$(TEST_DISK): $(TOP)/tools/mkdisk.py $(TOP)/tools/mkfat.py $(SYS_VOL) $(USER_ELF) $(SVCPROG_ELF) $(EXTRA_BOOT_FILES) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF) $(TEST_DISK_STAMP)
+$(TEST_DISK): $(TOP)/tools/mkdisk.py $(TOP)/tools/mkfat.py $(SYS_VOL) $(USER_ELF) $(SVCPROG_ELF) $(EXTRA_BOOT_FILES) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF) $(TEST_DISK_STAMP)
 	@mkdir -p $(dir $@)
 	@cp $(USER_ELF) $(UOBJ)/init.elf
-	@python3 $(TOP)/tools/mkdisk.py --sys $(SYS_VOL) --sys-room $(TEST_DISK_ROOM) $@ $(TEST_DISK_MB) $(USER_ELF) $(UOBJ)/init.elf $(SVCPROG_ELF) $(EXTRA_BOOT_FILES) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) \
+	@python3 $(TOP)/tools/mkdisk.py --sys $(SYS_VOL) --sys-room $(TEST_DISK_ROOM) $@ $(TEST_DISK_MB) $(USER_ELF) $(UOBJ)/init.elf $(SVCPROG_ELF) $(EXTRA_BOOT_FILES) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) \
 	  $$(ls $(UOBJ)/rec/sys/*.bin 2>/dev/null) $(KTEST_XTAD) $(KTEST_DEF)
 
 test: $(EXE_FILE).elf $(TEST_DEPS)
@@ -1129,19 +1152,28 @@ obj/boot/disable-bt.dtbo:
 	@echo 'GET $@'
 	@curl -fsSL -o $@.part $(RPI_DTB_BASE)/overlays/$(notdir $@) && mv $@.part $@
 
-$(SD_IMG): $(EXE_FILE).img $(RPI4_FW_FILES) $(TOP)/etc/boot/config-rpi4.txt \
+# LCD=<名前>(rpi4.mk): 起動の設定に液晶の画面の設定を足したもの。LCD が変われば作り直す
+ifneq ($(LCD),)
+RPI4_LCD_STAMP := $(OBJDIR)/lcd.stamp
+$(shell mkdir -p $(OBJDIR); [ -f $(RPI4_LCD_STAMP) ] && [ "$$(cat $(RPI4_LCD_STAMP))" = "$(LCD)" ] || echo "$(LCD)" > $(RPI4_LCD_STAMP))
+$(RPI4_CONFIG): $(TOP)/etc/boot/config-rpi4.txt $(RPI4_LCD_TXT) $(RPI4_LCD_STAMP)
+	@mkdir -p $(dir $@)
+	@cat $(TOP)/etc/boot/config-rpi4.txt $(RPI4_LCD_TXT) > $@
+endif
+
+$(SD_IMG): $(EXE_FILE).img $(RPI4_FW_FILES) $(RPI4_CONFIG) \
 	   $(TOP)/tools/mksd.py $(TOP)/tools/mkdisk.py \
 	   $(TOP)/tools/mkfat.py $(SYS_VOL) $(USER_ELF) $(SVCPROG_ELF) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) \
-	   $(MS_REC) $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF)
+	   $(MS_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF)
 	@rm -rf $(SD_STAGE) && mkdir -p $(SD_STAGE)
 	@cp $(USER_ELF) $(SD_STAGE)/init.elf
 	@python3 $(TOP)/tools/mksd.py --sys $(SYS_VOL) --boot-mb $(SD_BOOT_MB) --scratch-mb $(SD_SCRATCH_MB) $@ \
-	  tessronos.img=$(EXE_FILE).img config.txt=$(TOP)/etc/boot/config-rpi4.txt \
+	  tessronos.img=$(EXE_FILE).img config.txt=$(RPI4_CONFIG) \
 	  $(RPI4_FW)/start4.elf $(RPI4_FW)/fixup4.dat \
 	  $(RPI4_FW)/bcm2711-rpi-4-b.dtb $(RPI4_FW)/bcm2711-rpi-400.dtb $(RPI4_FW)/bcm2711-rpi-cm4.dtb \
 	  overlays/disable-bt.dtbo=$(RPI4_FW)/disable-bt.dtbo \
 	  $(USER_ELF) $(SD_STAGE)/init.elf $(SVCPROG_ELF) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) \
-	  $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $$(ls $(UOBJ)/rec/sys/*.bin 2>/dev/null) $(KTEST_XTAD) $(KTEST_DEF) \
+	  $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $$(ls $(UOBJ)/rec/sys/*.bin 2>/dev/null) $(KTEST_XTAD) $(KTEST_DEF) \
 	  > $(SD_STAGE)/mksd.log || { cat $(SD_STAGE)/mksd.log; rm -f $@; exit 1; }
 	@tail -1 $(SD_STAGE)/mksd.log
 	@rm -rf $(SD_STAGE)
@@ -1149,10 +1181,10 @@ $(SD_IMG): $(EXE_FILE).img $(RPI4_FW_FILES) $(TOP)/etc/boot/config-rpi4.txt \
 sdimg: $(SD_IMG)
 
 # 書き込んだカードの区画1のカーネルと起動の設定だけを差し替える(make TARGET=_RPI4_ sd SD=/mnt/e)
-sd: $(EXE_FILE).img $(RPI4_FW_FILES)
+sd: $(EXE_FILE).img $(RPI4_FW_FILES) $(RPI4_CONFIG)
 	@test -n "$(SD)" || { echo 'usage: make TARGET=_RPI4_ sd SD=<mount point of the FAT partition>'; exit 1; }
 	cp $(EXE_FILE).img "$(SD)/tessronos.img"
-	cp $(TOP)/etc/boot/config-rpi4.txt "$(SD)/config.txt"
+	cp $(RPI4_CONFIG) "$(SD)/config.txt"
 	cp $(RPI4_FW)/start4.elf $(RPI4_FW)/fixup4.dat $(RPI4_FW)/bcm2711-rpi-4-b.dtb \
 	   $(RPI4_FW)/bcm2711-rpi-400.dtb $(RPI4_FW)/bcm2711-rpi-cm4.dtb "$(SD)/"
 	mkdir -p "$(SD)/overlays" && cp $(RPI4_FW)/disable-bt.dtbo "$(SD)/overlays/"
@@ -1180,11 +1212,37 @@ test-rpi4: $(EXE_FILE).img $(RPI4_QEMU_SD) $(RPI4_QEMU_DTB)
 	  -f "FAIL" -- $(RPI4_QEMU_ARGS)
 
 .PHONY: qemu-rpi4 test-rpi4
+else ifeq ($(ARCH),x86_64)
+# KTEST=1 では、QEMU virt の試験用ディスクと同じく、試験が起こすプログラムと見本も区画1に載せる
+X64_KT_BOOT = $(if $(filter 1,$(KTEST)),$(EXTRA_BOOT_FILES))
+# x64 の PC のディスクのイメージ(docs/tessronos/03-platform.md 3.10): make TARGET=_X64_ [DESKTOP=1] BUILD_ID=<id> sdimg で
+# $(OBJDIR)/sd.img。区画1は EFI システム区画(FAT32)で、UEFI のローダ(EFI/BOOT/BOOTX64.EFI)、カーネル(tessronos.elf)、
+# 起動の設定(cmdline.txt)と、試験用ディスクの FAT と同じファイル。区画2はシステムのボリューム(nvmea1)。
+# USB メモリか NVMe の SSD にそのまま書く。QEMU では NVMe として挿す(x64.mk の qemu-x64-disk、test)
+# 記録の区画(SD_LOG_MB、FAT32、ラベル TSLOG)を区画1の直後に置き、表の最後の項目にする。ローダとカーネルが
+# EFI/TESSRON の記録をその TESSRON にも書き、Windows のエクスプローラで取り出せる(取り外せる装置では ESP が見えないため)
+SD_LOG_MB ?= 64
+$(SD_IMG): $(EXE_FILE).elf $(OBJDIR)/BOOTX64.EFI $(TOP)/tools/mksd.py $(TOP)/tools/mkdisk.py \
+	   $(TOP)/tools/mkfat.py $(SYS_VOL) $(USER_ELF) $(SVCPROG_ELF) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) \
+	   $(MS_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF) \
+	   $(X64_KT_BOOT)
+	@rm -rf $(SD_STAGE) && mkdir -p $(SD_STAGE)
+	@cp $(USER_ELF) $(SD_STAGE)/init.elf
+	@printf '%s\n' "$(X64_CMDLINE)" > $(SD_STAGE)/cmdline.txt
+	@python3 $(TOP)/tools/mksd.py --esp --sys $(SYS_VOL) --boot-mb $(SD_BOOT_MB) --scratch-mb $(SD_SCRATCH_MB) --log-mb $(SD_LOG_MB) $@ \
+	  EFI/BOOT/BOOTX64.EFI=$(OBJDIR)/BOOTX64.EFI tessronos.elf=$(EXE_FILE).elf $(SD_STAGE)/cmdline.txt \
+	  $(USER_ELF) $(SD_STAGE)/init.elf $(SVCPROG_ELF) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) \
+	  $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $$(ls $(UOBJ)/rec/sys/*.bin 2>/dev/null) $(KTEST_XTAD) $(KTEST_DEF) \
+	  $(X64_KT_BOOT) > $(SD_STAGE)/mksd.log || { cat $(SD_STAGE)/mksd.log; rm -f $@; exit 1; }
+	@tail -1 $(SD_STAGE)/mksd.log
+	@rm -rf $(SD_STAGE)
+
+sdimg: $(SD_IMG)
 else
 $(SD_IMG): $(EXE_FILE).img $(RPI_DTB) $(CM5_DTB) $(CM5L_DTB) $(TOP)/etc/boot/config.txt $(TOP)/etc/boot/cmdline-cm5.txt \
 	   $(TOP)/tools/mksd.py $(TOP)/tools/mkdisk.py \
 	   $(TOP)/tools/mkfat.py $(SYS_VOL) $(USER_ELF) $(SVCPROG_ELF) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) \
-	   $(MS_REC) $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF)
+	   $(MS_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF)
 	@rm -rf $(SD_STAGE) && mkdir -p $(SD_STAGE)
 	@cp $(EXE_FILE).img $(SD_STAGE)/tessronos.img
 	@cp $(TOP)/etc/boot/config.txt $(SD_STAGE)/config.txt
@@ -1198,7 +1256,7 @@ $(SD_IMG): $(EXE_FILE).img $(RPI_DTB) $(CM5_DTB) $(CM5L_DTB) $(TOP)/etc/boot/con
 	  $(SD_STAGE)/tessronos.img $(SD_STAGE)/config.txt $(SD_STAGE)/cmdline-cm5.txt \
 	  $(SD_STAGE)/bcm2712-rpi-5-b.dtb $(SD_STAGE)/bcm2712-rpi-cm5-cm5io.dtb $(SD_STAGE)/bcm2712-rpi-cm5l-cm5io.dtb \
 	  $(USER_ELF) $(SD_STAGE)/init.elf $(SVCPROG_ELF) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) \
-	  $(UNP_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $$(ls $(UOBJ)/rec/sys/*.bin 2>/dev/null) $(KTEST_XTAD) $(KTEST_DEF) \
+	  $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $$(ls $(UOBJ)/rec/sys/*.bin 2>/dev/null) $(KTEST_XTAD) $(KTEST_DEF) \
 	  > $(SD_STAGE)/mksd.log || { cat $(SD_STAGE)/mksd.log; rm -f $@; exit 1; }
 	@tail -1 $(SD_STAGE)/mksd.log
 	@rm -rf $(SD_STAGE)
@@ -1215,6 +1273,56 @@ sd: $(EXE_FILE).img $(RPI_DTB) $(CM5_DTB) $(CM5L_DTB)
 	cp $(CM5_DTB) "$(SD)/bcm2712-rpi-cm5-cm5io.dtb"
 	cp $(CM5L_DTB) "$(SD)/bcm2712-rpi-cm5l-cm5io.dtb"
 endif
+
+# システムのバージョンアップ用のパッケージ(.tpk、設計書 11.8): make TARGET=<機種> [イメージと同じ指定] BUILD_ID=<id> sysup で
+# $(OBJDIR)/tessronos-<機種>-$(TS_VERSION).tpk。システムのボリュームに載る実身(mktsfs と同じ --over・--from・--exclude。
+# 組み込みのアプリのパッケージ PKGS は除く)と、etc/xtad の実身のうちプログラムが原紙として名指すもの、
+# その機種の起動のファイル(区画1・ESP に置くもの)をまとめる。〈バージョン〉の一覧に落とすと入る
+SYSUP_STAGE := $(OBJDIR)/sysupboot
+ifeq ($(TARGET),_RPI5_)
+SYSUP_MACHINE := rpi5
+SYSUP_BOOT_DEPS := $(EXE_FILE).img $(RPI_DTB) $(CM5_DTB) $(CM5L_DTB) $(TOP)/etc/boot/config.txt $(TOP)/etc/boot/cmdline-cm5.txt
+SYSUP_BOOT = --boot tessronos.img=$(EXE_FILE).img --boot config.txt=$(SYSUP_STAGE)/config.txt \
+	--boot cmdline-cm5.txt=$(TOP)/etc/boot/cmdline-cm5.txt \
+	--boot bcm2712-rpi-5-b.dtb=$(RPI_DTB) --boot bcm2712-rpi-cm5-cm5io.dtb=$(CM5_DTB) \
+	--boot bcm2712-rpi-cm5l-cm5io.dtb=$(CM5L_DTB) --boot init.elf=$(USER_ELF)
+else ifeq ($(TARGET),_RPI4_)
+SYSUP_MACHINE := rpi4
+SYSUP_BOOT_DEPS := $(EXE_FILE).img $(RPI4_FW_FILES) $(RPI4_CONFIG)
+SYSUP_BOOT = --boot tessronos.img=$(EXE_FILE).img --boot config.txt=$(RPI4_CONFIG) \
+	--boot start4.elf=$(RPI4_FW)/start4.elf --boot fixup4.dat=$(RPI4_FW)/fixup4.dat \
+	--boot bcm2711-rpi-4-b.dtb=$(RPI4_FW)/bcm2711-rpi-4-b.dtb --boot bcm2711-rpi-400.dtb=$(RPI4_FW)/bcm2711-rpi-400.dtb \
+	--boot bcm2711-rpi-cm4.dtb=$(RPI4_FW)/bcm2711-rpi-cm4.dtb \
+	--boot overlays/disable-bt.dtbo=$(RPI4_FW)/disable-bt.dtbo --boot init.elf=$(USER_ELF)
+else ifeq ($(TARGET),_X64_)
+SYSUP_MACHINE := x64
+SYSUP_BOOT_DEPS := $(EXE_FILE).elf $(OBJDIR)/BOOTX64.EFI
+SYSUP_BOOT = --boot EFI/BOOT/BOOTX64.EFI=$(OBJDIR)/BOOTX64.EFI --boot tessronos.elf=$(EXE_FILE).elf \
+	--boot init.elf=$(USER_ELF) --boot-keep cmdline.txt=$(SYSUP_STAGE)/cmdline.txt
+else
+SYSUP_MACHINE := qemu_virt
+SYSUP_BOOT_DEPS :=
+SYSUP_BOOT = --boot init.elf=$(USER_ELF)
+endif
+SYSUP_TPK := $(OBJDIR)/tessronos-$(SYSUP_MACHINE)-$(TS_VERSION).tpk
+
+$(SYSUP_TPK): $(TOP)/tools/mktpk.py $(TSFS_TOOLS) $(SYSUP_BOOT_DEPS) $(USER_ELF) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) \
+	      $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF) \
+	      $(CMD_V8_REC) $(CMD_DONE) $(WIFI_DONE) $(WPAP_DONE) $(VER_STAMP)
+	@rm -rf $(SYSUP_STAGE) && mkdir -p $(SYSUP_STAGE)
+	@cp $(TOP)/etc/boot/config.txt $(SYSUP_STAGE)/config.txt
+	@if [ "$(RP1_CONSOLE)" = 1 ] || [ "$(RP1_UART)" = 1 ]; then echo 'enable_rp1_uart=1' >> $(SYSUP_STAGE)/config.txt; fi
+	@printf '%s\n' "$(X64_CMDLINE)" > $(SYSUP_STAGE)/cmdline.txt
+	@echo 'TPK $@'
+	@python3 $(TOP)/tools/mktpk.py --system --machine $(SYSUP_MACHINE) --arch $(ARCH) --version $(TS_VERSION) \
+	  $(CMD_OVER) $(WIFI_OVER) --from $(TOP)/etc/def --from $(UOBJ)/rec --from $(UOBJ)/rec/sys --user $(TOP)/etc/xtad \
+	  $(addprefix --exclude ,$(SYS_VOL_EXCLUDE)) --keep 01a0d8c4-5481-7b92-9db3-0abc1d2e5481 \
+	  $(SYSUP_BOOT) -o $@
+	@rm -rf $(SYSUP_STAGE)
+
+sysup: $(SYSUP_TPK)
+
+.PHONY: sysup
 
 clean:
 	rm -rf obj $(EXE_FILE).elf $(EXE_FILE).img $(EXE_FILE).map $(EXE_FILE).lst

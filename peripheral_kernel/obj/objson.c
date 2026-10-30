@@ -22,6 +22,7 @@
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <ts/json.h>
+#include <ts/tsfs.h>
 #include "obj.h"
 
 LOCAL BOOL is_ws( UB c )
@@ -328,4 +329,153 @@ EXPORT INT knl_oj_put_uuid( UB *out, INT pos, INT max, CONST TS_UUID *u )
 		return -1;
 	}
 	return knl_oj_put_str(out, pos, max, (CONST UB *)s);
+}
+
+/* ---------------------------------------------------------------- a text made as large as it needs */
+
+/*
+ * The text fn makes, in a buffer as large as it needs: fn is called with
+ * OJ_MAKE_FIRST bytes, and again with twice as many each time it answers
+ * -1 (the knl_oj_put of a buffer too small), up to OJ_MAKE_LIMIT. Another
+ * negative answer is an error and is passed on. Answers the length, with
+ * the buffer in *p_buf (the caller Kfrees it), or an error.
+ */
+#define OJ_MAKE_FIRST	4096
+#define OJ_MAKE_LIMIT	( 16 * 1024 * 1024 )
+
+EXPORT INT knl_oj_make( OJ_MAKE fn, void *ctx, UB **p_buf )
+{
+	INT	max = OJ_MAKE_FIRST, n;
+	UB	*t;
+
+	*p_buf = NULL;
+	for ( ;; ) {
+		t = (UB *)Kmalloc((SZ)max);
+		if ( t == NULL ) {
+			return E_NOMEM;
+		}
+		n = fn(ctx, t, max);
+		if ( n != -1 ) {
+			break;
+		}
+		Kfree(t);
+		if ( max >= OJ_MAKE_LIMIT ) {
+			return E_LIMIT;
+		}
+		max *= 2;
+	}
+	if ( n < 0 ) {
+		Kfree(t);
+		return n;
+	}
+	*p_buf = t;
+	return n;
+}
+
+/*
+ * Metadata read whole, however long: get reads from the start, copying
+ * at most size bytes and saying how many it copied; it is asked again
+ * with twice the room while it fills what it was given. The buffer has
+ * room bytes more after the text and a nought after that. Answers the
+ * length, the buffer in *p_buf (Kfree it) and the bytes it holds in
+ * *p_cap, or an error.
+ */
+#define META_ALL_FIRST	4096
+#define META_ALL_LIMIT	OB_META_LIMIT
+
+EXPORT INT knl_meta_all( FP_META_GET get, void *ctx, INT room, UB **p_buf, INT *p_cap )
+{
+	UB	*b;
+	SZ	cap = META_ALL_FIRST, asz;
+	ER	er;
+
+	*p_buf = NULL;
+	if ( room < 0 ) {
+		return E_PAR;
+	}
+	for ( ;; ) {
+		b = (UB *)Kmalloc(cap + room + 1);
+		if ( b == NULL ) {
+			return E_NOMEM;
+		}
+		asz = 0;
+		er = get(ctx, b, cap, &asz);
+		if ( er < E_OK ) {
+			Kfree(b);
+			return (INT)er;
+		}
+		if ( asz < cap ) {
+			break;
+		}
+		Kfree(b);
+		if ( cap >= META_ALL_LIMIT ) {
+			return E_LIMIT;
+		}
+		cap *= 2;
+	}
+	b[asz] = 0;
+	*p_buf = b;
+	if ( p_cap != NULL ) *p_cap = (INT)( cap + room );
+	return (INT)asz;
+}
+
+typedef struct {
+	ID		vol;
+	CONST TS_UUID	*uuid;
+} TSMETA;
+
+LOCAL ER tsfs_meta_get( void *ctx, UB *buf, SZ size, SZ *p_asize )
+{
+	TSMETA	*t = (TSMETA *)ctx;
+	INT	n = 0;
+	ER	er = knl_tsfs_get_meta(t->vol, t->uuid, buf, (INT)size, &n);
+
+	*p_asize = ( er >= E_OK ) ? (SZ)n : 0;
+	return er;
+}
+
+EXPORT INT knl_tsfs_meta_all( ID vol, CONST TS_UUID *uuid, INT room, UB **p_buf, INT *p_cap )
+{
+	TSMETA	t;
+
+	t.vol = vol;
+	t.uuid = uuid;
+	return knl_meta_all(tsfs_meta_get, &t, room, p_buf, p_cap);
+}
+
+/* Bytes off.. of the text fn makes, as a record is read: E_OK, or the error it made */
+EXPORT ER knl_oj_make_rea( OJ_MAKE fn, void *ctx, D off, void *buf, SZ size, SZ *p_asize )
+{
+	UB	*t;
+	INT	len;
+	SZ	n = 0;
+
+	if ( off < 0 || size < 0 ) {
+		return E_PAR;
+	}
+	len = knl_oj_make(fn, ctx, &t);
+	if ( len < 0 ) {
+		return (ER)len;
+	}
+	if ( off < len ) {
+		n = (SZ)( len - off );
+		if ( n > size ) n = size;
+		knl_memcpy(buf, t + off, (INT)n);
+	}
+	Kfree(t);
+	if ( p_asize != NULL ) *p_asize = n;
+	return E_OK;
+}
+
+/* The length of the text fn makes, 0 when it cannot be made */
+EXPORT UD knl_oj_make_len( OJ_MAKE fn, void *ctx )
+{
+	UB	*t;
+	INT	len = knl_oj_make(fn, ctx, &t);
+
+	if ( len < 0 ) {
+		return 0;
+	}
+	Kfree(t);
+	return (UD)len;
 }

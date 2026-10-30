@@ -39,26 +39,99 @@
 #include <ts/uuid.h>
 #include <ts/wm.h>
 
-#define CP_MAX		32		/* objects one copy may reach */
 #define CP_ID_LEN	36		/* letters of an identity */
-#define CP_RES_LIST	4096		/* bytes of the names of one object's resources */
+#define CP_FIRST	32		/* objects the map has room for at first; it grows */
+#define CP_CHUNK	( 4 * 1024 * 1024 )	/* bytes of a record copied at a time */
 
+typedef char	CPID[CP_ID_LEN + 1];
+
+/*
+ * The objects one copy reaches, as many as there are: the tables grow
+ * twice as large when they fill (cp_room, cp_shroom).
+ */
 typedef struct {
-	INT	n;
-	TS_UUID	from[CP_MAX];
-	TS_UUID	to[CP_MAX];
-	char	from_s[CP_MAX][CP_ID_LEN + 1];
-	char	to_s[CP_MAX][CP_ID_LEN + 1];
-	INT	refs[CP_MAX];		/* links in the copy that point here */
-	BOOL	done[CP_MAX];		/* it is written */
-	BOOL	bad[CP_MAX];		/* it could not be copied */
+	INT	n, cap;
+	TS_UUID	*from;
+	TS_UUID	*to;
+	CPID	*from_s;
+	CPID	*to_s;
+	INT	*refs;			/* links in the copy that point here */
+	BOOL	*done;			/* it is written */
+	BOOL	*bad;			/* it could not be copied */
 	BOOL	deep;			/* what is linked to is copied too */
 
 	/* shared, when not deep: what the copy links to, and how often */
-	TS_UUID	shared[CP_MAX];
-	INT	nshared[CP_MAX];
-	INT	nsh;
+	TS_UUID	*shared;
+	INT	*nshared;
+	INT	nsh, shcap;
 } CPMAP;
+
+/* One table of the map made `n` entries of `esz` bytes long, what it held kept */
+LOCAL BOOL cp_grow( void **p, INT have, INT n, SZ esz )
+{
+	void	*nb = Kmalloc((SZ)n * esz);
+
+	if ( nb == NULL ) {
+		return FALSE;
+	}
+	if ( *p != NULL ) {
+		knl_memcpy(nb, *p, (SZ)have * esz);
+		Kfree(*p);
+	}
+	*p = nb;
+	return TRUE;
+}
+
+/* Room for one more object in the map */
+LOCAL BOOL cp_room( CPMAP *m )
+{
+	INT	n = ( m->cap > 0 ) ? m->cap * 2 : CP_FIRST;
+
+	if ( m->n < m->cap ) {
+		return TRUE;
+	}
+	if ( !cp_grow((void **)&m->from, m->n, n, sizeof(TS_UUID))
+	  || !cp_grow((void **)&m->to, m->n, n, sizeof(TS_UUID))
+	  || !cp_grow((void **)&m->from_s, m->n, n, sizeof(CPID))
+	  || !cp_grow((void **)&m->to_s, m->n, n, sizeof(CPID))
+	  || !cp_grow((void **)&m->refs, m->n, n, sizeof(INT))
+	  || !cp_grow((void **)&m->done, m->n, n, sizeof(BOOL))
+	  || !cp_grow((void **)&m->bad, m->n, n, sizeof(BOOL)) ) {
+		return FALSE;			/* the tables grown so far keep what they held */
+	}
+	m->cap = n;
+	return TRUE;
+}
+
+/* Room for one more shared object */
+LOCAL BOOL cp_shroom( CPMAP *m )
+{
+	INT	n = ( m->shcap > 0 ) ? m->shcap * 2 : CP_FIRST;
+
+	if ( m->nsh < m->shcap ) {
+		return TRUE;
+	}
+	if ( !cp_grow((void **)&m->shared, m->nsh, n, sizeof(TS_UUID))
+	  || !cp_grow((void **)&m->nshared, m->nsh, n, sizeof(INT)) ) {
+		return FALSE;
+	}
+	m->shcap = n;
+	return TRUE;
+}
+
+LOCAL void cp_free( CPMAP *m )
+{
+	if ( m->from != NULL ) Kfree(m->from);
+	if ( m->to != NULL ) Kfree(m->to);
+	if ( m->from_s != NULL ) Kfree(m->from_s);
+	if ( m->to_s != NULL ) Kfree(m->to_s);
+	if ( m->refs != NULL ) Kfree(m->refs);
+	if ( m->done != NULL ) Kfree(m->done);
+	if ( m->bad != NULL ) Kfree(m->bad);
+	if ( m->shared != NULL ) Kfree(m->shared);
+	if ( m->nshared != NULL ) Kfree(m->nshared);
+	Kfree(m);
+}
 
 /* ---------------------------------------------------------------- bytes */
 
@@ -588,7 +661,7 @@ LOCAL ER cp_record( CPMAP *m, INT me, INT recno, BOOL root, CONST UB *name )
 	UB	*buf;
 	SZ	len = 0, at = 0, s, e;
 	TS_UUID	id;
-	INT	i;
+	INT	i, r;
 	ER	er;
 
 	buf = om_obj_record(&m->from[me], recno, &len);
@@ -611,22 +684,31 @@ LOCAL ER cp_record( CPMAP *m, INT me, INT recno, BOOL root, CONST UB *name )
 						break;
 					}
 				}
-				if ( k == m->nsh && m->nsh < CP_MAX ) {
+				if ( k == m->nsh ) {
+					if ( !cp_shroom(m) ) {
+						Kfree(buf);
+						return E_NOMEM;
+					}
 					m->shared[k] = id;
 					m->nshared[k] = 0;
 					m->nsh++;
 				}
-				if ( k < m->nsh ) {
-					m->nshared[k]++;
-				}
+				m->nshared[k]++;
 			}
 			at = e;
 			continue;
 		}
-		if ( cp_tree(m, &id, FALSE, NULL) < 0 ) {
+		r = cp_tree(m, &id, FALSE, NULL);
+		if ( r == E_NOEXS ) {
+			/* not an object that can be copied (gone, or not kept
+			   on a volume): the link is taken out of the copy */
 			cp_drop_link(&buf, &len, s, e);
 			at = s;
 			continue;
+		}
+		if ( r < 0 ) {
+			Kfree(buf);
+			return (ER)r;		/* the copy as a whole fails */
 		}
 		at = e;
 	}
@@ -660,53 +742,114 @@ LOCAL ER cp_record( CPMAP *m, INT me, INT recno, BOOL root, CONST UB *name )
 	return er;
 }
 
-/* A record that is not xmlTAD: the same bytes, the same type */
+/*
+ * A record that is not xmlTAD: the same bytes, the same type. It goes
+ * across a piece at a time, so that a record of any size is copied
+ * without being held whole; the pieces are as large as CP_CHUNK, each
+ * one write of the copy (each made durable when it returns).
+ */
 LOCAL ER cp_bytes( CPMAP *m, INT me, CONST T_OBREC *rec )
 {
-	UB	*buf;
-	SZ	len = 0;
+	T_OBREC	*dr;
+	UB	*buf = NULL;
+	SZ	chunk = CP_CHUNK, got, put;
+	D	at = 0;
+	INT	cnt, n;
+	ID	sk, dk;
 	ER	er;
 
-	buf = om_obj_record(&m->from[me], rec->recno, &len);
-	if ( buf == NULL ) {
-		return E_NOEXS;
+	/* the original read in pieces as one version, no writer between; the copy not read half made */
+	sk = ob_opn_obj(&m->from[me], OB_OP_READ | OB_O_WEXCL);
+	if ( sk < E_OK ) {
+		return (ER)sk;
 	}
-	er = om_obj_record_put(&m->to[me], rec->recno, rec->rt, rec->sub, buf, len);
-	Kfree(buf);
+	dk = ob_opn_obj(&m->to[me], OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRRD | OB_O_EXCL);
+	if ( dk < E_OK ) {
+		ob_cls_obj(sk);
+		return (ER)dk;
+	}
+	/* the copy's record: the next one, added with the original's type,
+	   or one it has already, emptied */
+	cnt = om_key_records_all(dk, &dr);
+	er = ( cnt < 0 ) ? (ER)cnt : E_OK;
+	if ( cnt >= 0 ) Kfree(dr);
+	if ( er >= E_OK ) {
+		if ( rec->recno == cnt ) {
+			er = ob_apd_rec(dk, rec->rt, rec->sub, &n);
+		} else if ( rec->recno < cnt ) {
+			er = ob_trn_rec(dk, rec->recno, 0);
+		} else {
+			er = E_PAR;
+		}
+	}
+	if ( (UD)chunk > rec->size ) chunk = ( rec->size > 4096 ) ? (SZ)rec->size : 4096;
+	while ( er >= E_OK && ( buf = (UB *)Kmalloc(chunk) ) == NULL && chunk > 65536 ) {
+		chunk /= 2;			/* short of memory: smaller pieces */
+	}
+	if ( er >= E_OK && buf == NULL ) er = E_NOMEM;
+	while ( er >= E_OK ) {
+		got = 0;
+		er = ob_rea_rec(sk, rec->recno, at, buf, chunk, &got);
+		if ( er < E_OK || got <= 0 ) break;
+		put = 0;
+		er = ob_wri_rec(dk, rec->recno, at, buf, got, &put);
+		if ( er >= E_OK && put != got ) er = E_IO;
+		at += got;
+		if ( got < chunk ) break;
+	}
+	if ( buf != NULL ) Kfree(buf);
+	ob_cls_obj(dk);
+	ob_cls_obj(sk);
 
 	return er;
 }
 
-/* The resources beside the records, the same bytes under the copy */
-LOCAL void cp_resources( CPMAP *m, INT me )
+/*
+ * The resources beside the records, the same bytes under the copy:
+ * every one of them, the list of names asked for as long as it is.
+ */
+LOCAL ER cp_resources( CPMAP *m, INT me )
 {
-	UB	*names;
-	INT	cnt, k, at = 0;
+	UB	*names = NULL;
+	INT	cnt = 0, k, at = 0;
+	ID	key;
+	ER	er;
 
-	names = (UB *)Kmalloc(CP_RES_LIST);
-	if ( names == NULL ) {
-		return;
+	key = ob_opn_obj(&m->from[me], OB_OP_ATRRD);
+	if ( key < E_OK ) {
+		return (ER)key;
 	}
-	cnt = om_obj_res_list(&m->from[me], names, CP_RES_LIST);
-	for ( k = 0; k < cnt; k++ ) {
+	er = ob_lst_res(key, NULL, 0, &cnt);
+	if ( er >= E_OK && cnt > 0 ) {
+		names = (UB *)Kmalloc((SZ)cnt * OB_RES_NAME);
+		er = ( names == NULL ) ? E_NOMEM : ob_lst_res(key, names, (SZ)cnt * OB_RES_NAME, &cnt);
+	}
+	ob_cls_obj(key);
+	if ( er == E_NOSPT ) {
+		er = E_OK;			/* a store that keeps none */
+		cnt = 0;
+	}
+	for ( k = 0; k < cnt && er >= E_OK; k++ ) {
 		CONST UB	*nm = names + at;
 		UB		*data;
 		SZ		size = 0;
 		INT		l = 0;
 
 		while ( nm[l] != 0 ) l++;
+		at += l + 1;
 		if ( nm[0] == '.' ) {
-			at += l + 1;
 			continue;		/* the icon: made with the object (cp_make) */
 		}
 		data = om_obj_res(&m->from[me], nm, &size);
-		if ( data != NULL ) {
-			(void)om_obj_res_put(&m->to[me], nm, data, size);
-			Kfree(data);
+		if ( data == NULL ) {
+			er = E_NOMEM;
+			break;
 		}
-		at += l + 1;
+		er = om_obj_res_put(&m->to[me], nm, data, size);
+		Kfree(data);
 	}
-	Kfree(names);
+	if ( names != NULL ) Kfree(names);
+	return er;
 }
 
 /*
@@ -763,16 +906,17 @@ LOCAL ER cp_make( CPMAP *m, INT me )
  */
 LOCAL INT cp_tree( CPMAP *m, CONST TS_UUID *src, BOOL root, CONST UB *name )
 {
-	T_OBREC	rec[OM_REC_MAX];
+	T_OBREC	*rec;
 	T_OBREF	r;
 	INT	me, i, n, got = 0;
+	ER	er;
 
 	me = cp_find(m, src);
 	if ( me >= 0 ) {
 		return m->bad[me] ? E_NOEXS : me;
 	}
-	if ( m->n >= CP_MAX ) {
-		return E_LIMIT;
+	if ( !cp_room(m) ) {
+		return E_NOMEM;
 	}
 	/* only what is kept on a volume is copied */
 	if ( ob_ref_obj(src, &r) < E_OK || r.type != OB_T_STORAGE || r.sub != OB_S_FILE ) {
@@ -791,23 +935,25 @@ LOCAL INT cp_tree( CPMAP *m, CONST TS_UUID *src, BOOL root, CONST UB *name )
 	}
 	m->n++;
 
-	n = om_obj_records(src, rec, OM_REC_MAX);
-	for ( i = 0; i < n; i++ ) {
-		ER	er = ( rec[i].rt == OB_RT_TAD )
-			   ? cp_record(m, me, rec[i].recno, root, name)
-			   : cp_bytes(m, me, &rec[i]);
-
-		if ( er < E_OK ) {
-			break;			/* the records are numbered from 0 with no gap */
-		}
-		got++;
+	/* every record, however many: one that cannot be copied fails the
+	   copy, which is then taken away, rather than leaving it short */
+	n = om_obj_records_all(src, &rec);
+	er = ( n < 0 ) ? (ER)n : E_OK;
+	for ( i = 0; i < n && er >= E_OK; i++ ) {
+		er = ( rec[i].rt == OB_RT_TAD )
+		   ? cp_record(m, me, rec[i].recno, root, name)
+		   : cp_bytes(m, me, &rec[i]);
+		if ( er >= E_OK ) got++;
 	}
-	if ( got == 0 ) {
+	if ( n >= 0 ) Kfree(rec);
+	if ( er >= E_OK ) {
+		er = cp_resources(m, me);
+	}
+	if ( er < E_OK || got == 0 ) {
 		m->bad[me] = TRUE;	/* met again, it is still not there */
 		(void)ob_del_obj(&m->to[me]);
-		return E_NOEXS;
+		return ( er < E_OK && er != E_NOEXS ) ? (INT)er : E_NOEXS;
 	}
-	cp_resources(m, me);
 	m->done[me] = TRUE;
 
 	return me;
@@ -902,9 +1048,8 @@ EXPORT ER om_store_copy( CONST TS_UUID *src, CONST UB *name, BOOL deep,
 	if ( m == NULL ) {
 		return E_NOMEM;
 	}
-	m->n = 0;
+	knl_memset(m, 0, sizeof(*m));
 	m->deep = deep;
-	m->nsh = 0;
 	root = cp_tree(m, src, TRUE, name);
 	if ( root < 0 ) {
 		/* what was made on the way is taken away again */
@@ -913,7 +1058,7 @@ EXPORT ER om_store_copy( CONST TS_UUID *src, CONST UB *name, BOOL deep,
 				(void)ob_del_obj(&m->to[i]);
 			}
 		}
-		Kfree(m);
+		cp_free(m);
 		return (ER)root;
 	}
 	/* the metadata last, when every link to every object is counted */
@@ -930,7 +1075,7 @@ EXPORT ER om_store_copy( CONST TS_UUID *src, CONST UB *name, BOOL deep,
 		cp_bump(&m->shared[i], m->nshared[i]);
 	}
 	*p_new = m->to[root];
-	Kfree(m);
+	cp_free(m);
 
 	return er;
 }
@@ -1059,7 +1204,17 @@ EXPORT INT om_store_links( CONST UB *buf, SZ len, TS_UUID *ids, INT max )
 	return n;
 }
 
-#define RF_LINKS	512		/* links of one record that are counted */
+/* The links of a record's text, every one, in a table of their own (Kfree it): how many, or -1 for no memory */
+LOCAL INT links_all( CONST UB *buf, SZ len, TS_UUID **p_ids )
+{
+	INT	n = om_store_links(buf, len, NULL, 0);
+
+	*p_ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( ( n > 0 ) ? n : 1 ));
+	if ( *p_ids == NULL ) {
+		return -1;
+	}
+	return ( n > 0 ) ? om_store_links(buf, len, *p_ids, n) : 0;
+}
 
 /*
  * A record's text replaced: every object gains the links to it that
@@ -1074,15 +1229,15 @@ EXPORT void om_store_relink( CONST TS_UUID *host, CONST UB *was, SZ was_len, CON
 	INT	na, nb, i, k;
 	BOOL	known;
 
-	a = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * RF_LINKS * 2);
-	if ( a == NULL ) {
+	/* every link of both texts, however many: a count left short would let an object go */
+	na = links_all(was, was_len, &a);
+	nb = links_all(now, now_len, &b);
+	if ( na < 0 || nb < 0 ) {
+		tm_printf((UB *)"om: no memory to count the links of a record: the counts are as they were\n");
+		if ( a != NULL ) Kfree(a);
+		if ( b != NULL ) Kfree(b);
 		return;
 	}
-	b = a + RF_LINKS;
-	na = om_store_links(was, was_len, a, RF_LINKS);
-	nb = om_store_links(now, now_len, b, RF_LINKS);
-	if ( na > RF_LINKS ) na = RF_LINKS;
-	if ( nb > RF_LINKS ) nb = RF_LINKS;
 
 	/* what the two have in common cancels, one link against one */
 	for ( i = 0; i < na; i++ ) {
@@ -1118,6 +1273,7 @@ EXPORT void om_store_relink( CONST TS_UUID *host, CONST UB *was, SZ was_len, CON
 		}
 	}
 	Kfree(a);
+	Kfree(b);
 }
 
 /*
@@ -1241,14 +1397,14 @@ EXPORT INT om_store_objects( TS_UUID *ids, INT max )
  */
 EXPORT ER om_store_delete( CONST TS_UUID *id )
 {
-	T_OBREC	rec[OM_REC_MAX];
+	T_OBREC	*rec;
 	INT	n, i;
 
 	if ( id == NULL ) {
 		return E_PAR;
 	}
 	om_store_forget(id);
-	n = om_obj_records(id, rec, OM_REC_MAX);
+	n = om_obj_records_all(id, &rec);
 	if ( n < 0 ) {
 		return E_NOEXS;
 	}
@@ -1263,6 +1419,7 @@ EXPORT ER om_store_delete( CONST TS_UUID *id )
 			Kfree(buf);
 		}
 	}
+	Kfree(rec);
 	/* nothing may still count it: it is being thrown away */
 	while ( ob_unl_obj(id) >= E_OK ) ;
 
@@ -1282,17 +1439,16 @@ EXPORT ER om_store_recount( CONST TS_UUID *roots, INT nroot, INT *p_total,
 	TS_UUID	*obj, *lk;
 	INT	*cnt;
 	INT	i, k, nobj, changed = 0;
+	BOOL	missed = FALSE;		/* a record not read whole: no count is put right */
 
 	if ( p_total != NULL ) *p_total = 0;
 	if ( p_changed != NULL ) *p_changed = 0;
 	nobj = om_store_objects(NULL, 0);
 	obj = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * ( (SZ)nobj + 1 ));
 	cnt = (INT *)Kmalloc(sizeof(INT) * ( (SZ)nobj + 1 ));
-	lk = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * RF_LINKS);
-	if ( obj == NULL || cnt == NULL || lk == NULL ) {
+	if ( obj == NULL || cnt == NULL ) {
 		if ( obj != NULL ) Kfree(obj);
 		if ( cnt != NULL ) Kfree(cnt);
-		if ( lk != NULL ) Kfree(lk);
 		return E_NOMEM;
 	}
 	nobj = om_store_objects(obj, nobj);
@@ -1303,15 +1459,16 @@ EXPORT ER om_store_recount( CONST TS_UUID *roots, INT nroot, INT *p_total,
 	/* the links of every record; a store that counts them itself
 	   keeps its own counts, and fsck.tsfs puts those right */
 	for ( i = 0; i < nobj; i++ ) {
-		T_OBREC	rec[OM_REC_MAX];
+		T_OBREC	*rec;
 		INT	nr, r;
 
 		if ( om_store_counts(&obj[i]) ) {
 			continue;
 		}
-		nr = om_obj_records(&obj[i], rec, OM_REC_MAX);
+		nr = om_obj_records_all(&obj[i], &rec);
+		if ( nr == E_NOMEM ) missed = TRUE;
 
-		for ( r = 0; r < nr; r++ ) {
+		for ( r = 0; r < nr && !missed; r++ ) {
 			UB	*buf;
 			SZ	len = 0;
 			INT	n, j;
@@ -1319,9 +1476,13 @@ EXPORT ER om_store_recount( CONST TS_UUID *roots, INT nroot, INT *p_total,
 			if ( rec[r].rt != OB_RT_TAD ) continue;
 			buf = om_obj_record(&obj[i], rec[r].recno, &len);
 			if ( buf == NULL ) continue;
-			n = om_store_links(buf, len, lk, RF_LINKS);
-			if ( n > RF_LINKS ) n = RF_LINKS;
+			/* every link of the record, however many */
+			n = links_all(buf, len, &lk);
 			Kfree(buf);
+			if ( n < 0 ) {
+				missed = TRUE;
+				continue;
+			}
 			for ( j = 0; j < n; j++ ) {
 				for ( k = 0; k < nobj; k++ ) {
 					if ( ts_uuid_cmp(&lk[j], &obj[k]) == 0 ) {
@@ -1330,7 +1491,15 @@ EXPORT ER om_store_recount( CONST TS_UUID *roots, INT nroot, INT *p_total,
 					}
 				}
 			}
+			Kfree(lk);
 		}
+		if ( nr >= 0 ) Kfree(rec);
+	}
+	if ( missed ) {
+		tm_printf((UB *)"om: no memory to read every record: the counts are left as they are\n");
+		Kfree(obj);
+		Kfree(cnt);
+		return E_NOMEM;
 	}
 	for ( i = 0; roots != NULL && i < nroot; i++ ) {
 		for ( k = 0; k < nobj; k++ ) {
@@ -1359,7 +1528,6 @@ EXPORT ER om_store_recount( CONST TS_UUID *roots, INT nroot, INT *p_total,
 
 	Kfree(obj);
 	Kfree(cnt);
-	Kfree(lk);
 
 	return E_OK;
 }

@@ -77,6 +77,36 @@ IMPORT ER   knl_dt_set_clock( TS_TIME t );
 IMPORT void knl_dt_time_set( void );
 IMPORT void knl_dt_zone_load( void );
 
+#ifdef __x86_64__
+/*
+ * The RTC of a PC (9.5.1): kept in the local time, as Windows
+ * keeps it, or in UTC. The setting is the calendar object's, and setting
+ * it takes what setting the zone takes; the RTC is written again from
+ * the system clock, which stays as it is. DT_RTC_FIRMWARE is told when
+ * the firmware gave the clock a zone of its own, which is followed
+ * whatever the setting.
+ */
+#define DT_RTC_UTC		0
+#define DT_RTC_LOCAL		1
+#define DT_RTC_FIRMWARE		0x100
+
+IMPORT ER dt_getrtc( INT *p_mode );
+IMPORT ER dt_setrtc( INT mode );
+
+/*
+ * The kernel's: the RTC's wall clock (seconds from 1970-01-01 of that
+ * clock) as UTC and back (UNIX seconds), the offset looked at again, and
+ * the registers themselves (kernel/sysdepend/x64/rtc.c)
+ */
+IMPORT D    knl_dt_rtc_to_utc( D wall );
+IMPORT D    knl_dt_utc_to_rtc( D utc );
+IMPORT void knl_dt_rtc_check( void );
+IMPORT ER   knl_rtc_read_wall( D *p_wall );
+IMPORT ER   knl_rtc_write_wall( D wall );
+IMPORT BOOL knl_rtc_fw_zone( INT *p_minutes );
+IMPORT void knl_rtc_shift( D sec );
+#endif
+
 /*
  * Format: %Y %m %d %H %M %S %y %j %a %A %b %B %p %I %Z %% and %F (Y-m-d),
  * %T (H:M:S), %D (m/d/y), %c, %x, %X. Returns the length written, or

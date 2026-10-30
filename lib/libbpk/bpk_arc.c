@@ -151,10 +151,10 @@ typedef struct {
 } APPLMAP;
 
 /*
- * Of the two programs that open an archive, 書庫管理 is the one an
- * archive written here names first; either is the application 8000
- * C003 8000 to BTRON, and an archive read is opened with 書庫解凍's
- * entry, the first of the two.
+ * The application 8000 C003 8000 (書庫) is 書庫管理, which an archive
+ * read opens with. The second entry is the id 書庫管理 had before it
+ * took in 書庫解凍 (unpack-file): an object whose applist still names
+ * it is written with the archive's application all the same.
  */
 LOCAL const APPLMAP applmap[] = {
 	{ 0x0001, "virtual-object-list", "仮身一覧", 0, "仮身一覧", 6 },
@@ -162,8 +162,8 @@ LOCAL const APPLMAP applmap[] = {
 	{ 0x0003, "basic-text-editor", "基本文章編集", 0x16, "文章", 1 },
 	{ 0x0009, "basic-calc-editor", "基本表計算", 0x16, "表計算", 1 },
 	{ 0x000B, "microscript", "マイクロスクリプト", 0x1E, "図形", 2 },
-	{ BPK_APPL_ARCHIVE, "unpack-file", "書庫解凍", 0, "書庫", 1 },
 	{ BPK_APPL_ARCHIVE, "archive-manager", "書庫管理", 0, "書庫", 1 },
+	{ BPK_APPL_ARCHIVE, "unpack-file", "書庫管理", 0, "書庫", 1 },
 };
 #define NAPPL	( (INT)( sizeof(applmap) / sizeof(applmap[0]) ) )
 
@@ -375,6 +375,7 @@ LOCAL void read_exec( BPKFILE *f, const UB *p, UINT size )
  */
 #define RX_COUNT	0x00
 #define RX_ATTR		0x2E
+#define RX_APPL		0x32
 #define RX_VIEW		0x38
 #define RX_CHSZ		0x42
 #define RX_FRCOL	0x44
@@ -395,6 +396,7 @@ LOCAL void read_root( BPKARC *a )
 		a->rootcol[i] = rd32(p + RX_FRCOL + i * 4);
 	}
 	a->rootchsz = rd16(p + RX_CHSZ);
+	for ( i = 0; i < 3; i++ ) a->rootappl[i] = (UH)rd16(p + RX_APPL + i * 2);
 	a->hasroot = (BOOL)( a->rootview[2] > a->rootview[0] && a->rootview[3] > a->rootview[1] );
 }
 
@@ -464,6 +466,14 @@ EXPORT ER bpk_parse( BPKARC *a, const UB *raw, UINT rawlen, char *err, INT errma
 		f->nrec = (INT)f->head.f_nrec;
 	}
 
+	/*
+	 * The application each object opens with from a link to it: the
+	 * root's from the extension, then the first link record that names
+	 * one, in the order the records come.
+	 */
+	read_root(a);
+	if ( a->rootappl[0] != 0 ) memcpy(a->file[0].vappl, a->rootappl, sizeof(a->rootappl));
+
 	/* each object's records, one object after another */
 	for ( i = 0; i < a->nfiles; i++ ) {
 		BPKFILE	*f = &a->file[i];
@@ -490,6 +500,14 @@ EXPORT ER bpk_parse( BPKARC *a, const UB *raw, UINT rawlen, char *err, INT errma
 				INT	id = ( r->size >= BPK_LINKREC ) ? (INT)rd16(r->data + LK_F_ID) : -1;
 
 				f->link[f->nlink++] = ( id >= 0 && id < (INT)a->nfiles ) ? id : -1;
+				if ( id >= 0 && id < (INT)a->nfiles && a->file[id].vappl[0] == 0
+				  && rd16(r->data + LK_APPL) != 0 ) {
+					UH	*va = a->file[id].vappl;
+
+					va[0] = (UH)rd16(r->data + LK_APPL);
+					va[1] = (UH)rd16(r->data + LK_APPL + 2);
+					va[2] = (UH)rd16(r->data + LK_APPL + 4);
+				}
 			} else if ( r->type == BPK_RT_TAD ) {
 				f->ntad++;
 			} else if ( r->type == BPK_RT_EXEC ) {
@@ -498,7 +516,6 @@ EXPORT ER bpk_parse( BPKARC *a, const UB *raw, UINT rawlen, char *err, INT errma
 		}
 	}
 	a->root = 0;
-	read_root(a);
 	return E_OK;
 }
 

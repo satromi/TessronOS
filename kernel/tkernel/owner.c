@@ -44,8 +44,10 @@ EXPORT void knl_own_note( INT kind, ID owner, INT d )
 	if ( kind < 0 || kind >= OWN_KINDS || owner <= 0 || owner >= CNF_PID_MAX ) {
 		return;
 	}
+	KLK_MISC_DI();
 	own_cnt[kind][owner] = (UH)( own_cnt[kind][owner] + d );
 	own_all[kind] += d;
+	KLK_UNMISC();
 }
 
 LOCAL INT own_count( INT kind, ID owner )
@@ -70,6 +72,7 @@ EXPORT INT knl_own_list( INT kind, ID owner, ID *ids, INT max )
 	ID	id;
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_MISC();
 	want = all = own_count(kind, owner);
 	if ( ids == NULL || max <= 0 ) {
 		want = 0;		/* only how many */
@@ -130,6 +133,7 @@ EXPORT INT knl_own_list( INT kind, ID owner, ID *ids, INT max )
 	  default:
 		break;
 	}
+	KLK_UNMISC();
 	END_CRITICAL_SECTION;
 
 	return ( want > 0 && n < want ) ? n : all;
@@ -177,10 +181,12 @@ EXPORT void knl_tsk_set_owner( ID tskid, ID owner )
 		return;
 	}
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 	if ( tcb->state != TS_NONEXIST ) {
 		knl_own_note(TK_OWN_TSK, tcb->owner, -1);
 		tcb->owner = owner;
 		knl_own_note(TK_OWN_TSK, tcb->owner, 1);
 	}
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 }

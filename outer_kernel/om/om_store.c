@@ -41,7 +41,24 @@
 #include <ts/dt.h>
 #include <ts/sysdef.h>
 
-#define ST_MAX		96		/* objects held at once */
+/*
+ * The table of objects held (design 11.x, om_store): its entries, each
+ * an object's record with its document, or its metadata (recno -1) with
+ * what a link's band shows. The table is sized once, from the memory
+ * the machine has: ST_BUDGET_PERMILLE of it for the entries and their
+ * icons, counted at their real size (an icon is as large as it was
+ * decoded, larger on a screen of more pixels to the inch). The number
+ * of entries is what the budget holds at ST_ENTRY_ICON bytes of icon
+ * each, between ST_MIN and ST_LIMIT. When either runs out, an entry
+ * nothing is using makes room, the one asked for the longest time ago
+ * (slot_of).
+ */
+#define ST_BUDGET_PERMILLE	5	/* 0.5% of the memory */
+#define ST_ENTRY_ICON		1024	/* an icon of 16 x 16, the smallest drawn */
+#define ST_MIN			256
+#define ST_LIMIT		8192
+#define ST_ORPHANS		32	/* icons in use when their entry was let go */
+#define ST_KEEP			16	/* the entries asked for last, never made room of */
 
 typedef struct {
 	BOOL	used;
@@ -49,6 +66,7 @@ typedef struct {
 	INT	recno;			/* -1: the metadata rather than a record */
 	T_TAD	*doc;
 	UB	*xml;
+	SZ	snap;			/* how long its text came to when last written out */
 	UB	name[TAD_NAME_MAX];
 	BOOL	named;			/* the name has been looked for */
 	BOOL	has_name;		/* and was found */
@@ -67,17 +85,45 @@ typedef struct {
 	/* the volume it is on, and the volumes' number when that was looked for (0 not yet) */
 	ID	vol;
 	UW	volser;
+	UW	stamp;			/* when it was last asked for (st_clock) */
+	INT	icon_pins;		/* drawings holding its icon (store_icon to icon_done) */
+	SZ	icon_bytes;
+	INT	hnext;			/* the next in its hash chain, or in the free list */
+	INT	lprev, lnext;		/* the order of use, the latest first */
 } STENT;
 
-LOCAL STENT	st_tab[ST_MAX];
+LOCAL STENT	*st_tab = NULL;
+LOCAL INT	st_max = 0;		/* entries */
+LOCAL INT	*st_hash = NULL;	/* the first entry of each chain, -1 none */
+LOCAL UW	st_hmask = 0;
+LOCAL INT	st_free = -1;		/* unused entries, chained by hnext */
+LOCAL INT	st_lru = -1, st_lru_tail = -1;
+LOCAL SZ	st_bytes = 0;		/* entries in use and their icons */
+LOCAL INT	st_used = 0;		/* entries in use */
+LOCAL INT	st_cap = 0;		/* entries at most, for the tests (om_store_cap); 0 the table */
+LOCAL SZ	st_budget = 0;
+LOCAL UW	st_clock = 0;
+LOCAL UW	st_evicted = 0;		/* entries made room of, counted (om_store_stat) */
+LOCAL CONST UW	*st_orphan[ST_ORPHANS];	/* icons let go while drawn, freed when done */
+LOCAL INT	st_orphan_pins[ST_ORPHANS];
 
 /*
  * Pictures, by the file name the record gives them. Decoding one is the
  * whole of the cost of showing it, and the same picture is shown on
  * every screen the record is on.
  */
-#define PIC_MAX		16
-#define PIC_NAME	80
+/*
+ * The pictures are held to a budget of their own, counted at their
+ * decoded size (width x height x 4): PIC_BUDGET_PERMILLE of the memory,
+ * between PIC_BUDGET_MIN and PIC_BUDGET_MAX, in at most PIC_MAX of them.
+ * A picture a drawing holds (picture to picture_done) is never let go;
+ * of the others, the one asked for the longest time ago goes first.
+ */
+#define PIC_MAX			512
+#define PIC_NAME		80
+#define PIC_BUDGET_PERMILLE	20		/* 2% of the memory */
+#define PIC_BUDGET_MIN		( (SZ)16 * 1024 * 1024 )
+#define PIC_BUDGET_MAX		( (SZ)256 * 1024 * 1024 )
 
 typedef struct {
 	BOOL	used;
@@ -85,9 +131,17 @@ typedef struct {
 	UW	*px;
 	INT	w, h;
 	BOOL	bad;			/* looked for and not usable */
+	BOOL	stale;			/* written anew while drawn: found by no name, freed when done */
+	INT	pins;			/* drawings holding px */
+	UW	stamp;			/* when it was last asked for */
+	SZ	bytes;
 } STPIC;
 
 LOCAL STPIC	st_pic[PIC_MAX];
+LOCAL SZ	st_pic_bytes = 0;
+LOCAL SZ	st_pic_budget = 0;
+LOCAL UW	st_pic_clock = 0;
+LOCAL UW	st_pic_evicted = 0;
 
 LOCAL BOOL same_id( CONST TS_UUID *a, CONST TS_UUID *b )
 {
@@ -104,38 +158,272 @@ LOCAL BOOL same_id( CONST TS_UUID *a, CONST TS_UUID *b )
 	return TRUE;
 }
 
-LOCAL INT slot_of( CONST TS_UUID *id, INT recno )
-{
-	INT	i, free = -1;
+/*
+ * The table's lock. The desktop's task reads and draws through the store;
+ * other tasks reach it too (a process renaming an object through the
+ * file system, ファイル変換, the forced quit emptying it), on other
+ * processors. Taking an entry, making room and letting entries go are
+ * done under it. The lock may be taken again by the task holding it.
+ */
+LOCAL ID	st_mtx = 0;
+LOCAL ID	st_owner = 0;
+LOCAL INT	st_depth = 0;
+LOCAL ID	st_home = 0;		/* the task that draws through the store (om_store_files) */
 
-	for ( i = 0; i < ST_MAX; i++ ) {
-		if ( !st_tab[i].used ) {
-			if ( free < 0 ) {
-				free = i;
-			}
-			continue;
+LOCAL void st_lock( void )
+{
+	ID	me = tk_get_tid();
+
+	if ( st_mtx == 0 ) {
+		T_CMTX	c;
+		ID	id;
+
+		c.exinf = NULL;
+		c.mtxatr = TA_INHERIT;
+		c.ceilpri = 0;
+		id = tk_cre_mtx(&c);
+		/* the first to set it wins; tasks on other processors race here */
+		if ( id > 0 && atomic_cmpxchg((UW *)&st_mtx, (UW)id, 0) == 0 ) {
+			id = 0;
 		}
-		if ( st_tab[i].recno == recno && same_id(&st_tab[i].id, id) ) {
+		if ( id > 0 ) tk_del_mtx(id);
+	}
+	/* only this task ever sets st_owner to itself */
+	if ( st_owner == me ) {
+		st_depth++;
+		return;
+	}
+	(void)tk_loc_mtx(st_mtx, TMO_FEVR);
+	st_owner = me;
+	st_depth = 1;
+}
+
+LOCAL void st_unlock( void )
+{
+	if ( --st_depth == 0 ) {
+		st_owner = 0;
+		(void)tk_unl_mtx(st_mtx);
+	}
+}
+
+IMPORT UD knl_pf_total_count( INT zone );
+
+LOCAL INT	store_name( CONST T_VOBJ *v, UB *buf, INT max, void *arg );
+LOCAL INT	store_label( CONST T_VOBJ *v, UB *buf, INT max, void *arg );
+LOCAL ER	store_icon( CONST T_VOBJ *v, CONST UW **p_px, INT *p_w, INT *p_h, void *arg );
+LOCAL ER	store_paper( CONST T_VOBJ *v, UW *p_colour, void *arg );
+LOCAL UINT	store_state( CONST T_VOBJ *v, void *arg );
+LOCAL T_TAD	*store_open( CONST T_VOBJ *v, void *arg );
+LOCAL void	meta_forget( CONST TS_UUID *id );
+
+/* The table made, on first use, as large as the memory says (with the lock held) */
+LOCAL BOOL st_make( void )
+{
+	UD	mem = knl_pf_total_count(-1) * 4096;	/* pages of 4KB */
+	SZ	budget = (SZ)( mem / 1000 * ST_BUDGET_PERMILLE );
+	INT	n = (INT)( budget / (SZ)( sizeof(STENT) + ST_ENTRY_ICON ) ), i;
+	UW	nb = 1;
+
+	if ( st_tab != NULL ) {
+		return TRUE;
+	}
+	if ( n < ST_MIN ) n = ST_MIN;
+	if ( n > ST_LIMIT ) n = ST_LIMIT;
+	while ( nb < (UW)n ) nb <<= 1;
+	for ( ; n >= ST_MIN / 2; n /= 2 ) {
+		st_tab = (STENT *)Kcalloc((SZ)n, sizeof(STENT));
+		st_hash = (INT *)Kmalloc((SZ)nb * sizeof(INT));
+		if ( st_tab != NULL && st_hash != NULL ) break;
+		if ( st_tab != NULL ) Kfree(st_tab);
+		if ( st_hash != NULL ) Kfree(st_hash);
+		st_tab = NULL;
+		st_hash = NULL;
+	}
+	if ( st_tab == NULL ) {
+		return FALSE;
+	}
+	st_max = n;
+	st_hmask = nb - 1;
+	st_budget = ( budget > (SZ)n * (SZ)sizeof(STENT) ) ? budget : (SZ)n * (SZ)sizeof(STENT);
+	for ( i = 0; i < (INT)nb; i++ ) st_hash[i] = -1;
+	for ( i = 0; i < n; i++ ) st_tab[i].hnext = ( i + 1 < n ) ? i + 1 : -1;
+	st_free = 0;
+	st_lru = st_lru_tail = -1;
+	st_bytes = 0;
+	st_used = 0;
+	st_pic_budget = (SZ)( mem / 1000 * PIC_BUDGET_PERMILLE );
+	if ( st_pic_budget < PIC_BUDGET_MIN ) st_pic_budget = PIC_BUDGET_MIN;
+	if ( st_pic_budget > PIC_BUDGET_MAX ) st_pic_budget = PIC_BUDGET_MAX;
+	return TRUE;
+}
+
+LOCAL UW st_hash_of( CONST TS_UUID *id, INT recno )
+{
+	CONST UB	*b = (CONST UB *)id;
+	UW		h = 2166136261U;
+	UINT		i;
+
+	for ( i = 0; i < sizeof(TS_UUID); i++ ) {
+		h = ( h ^ b[i] ) * 16777619U;
+	}
+	return ( h ^ (UW)recno ) & st_hmask;
+}
+
+LOCAL void lru_unlink( INT i )
+{
+	STENT	*e = &st_tab[i];
+
+	if ( e->lprev >= 0 ) st_tab[e->lprev].lnext = e->lnext; else st_lru = e->lnext;
+	if ( e->lnext >= 0 ) st_tab[e->lnext].lprev = e->lprev; else st_lru_tail = e->lprev;
+	e->lprev = e->lnext = -1;
+}
+
+LOCAL void lru_front( INT i )
+{
+	STENT	*e = &st_tab[i];
+
+	e->lprev = -1;
+	e->lnext = st_lru;
+	if ( st_lru >= 0 ) st_tab[st_lru].lprev = i; else st_lru_tail = i;
+	st_lru = i;
+}
+
+/* An icon a drawing still holds, kept until it says it is done (icon_done) */
+LOCAL void icon_orphan( CONST UW *px, INT pins )
+{
+	INT	k;
+
+	for ( k = 0; k < ST_ORPHANS; k++ ) {
+		if ( st_orphan[k] == NULL ) {
+			st_orphan[k] = px;
+			st_orphan_pins[k] = pins;
+			return;
+		}
+	}
+	/* no room to remember it: left allocated rather than freed under a drawing */
+}
+
+/* Entry i let go: out of its chain and the order of use, onto the free list */
+LOCAL void st_release( INT i )
+{
+	STENT	*e = &st_tab[i];
+	UW	h = st_hash_of(&e->id, e->recno);
+	INT	*pp = &st_hash[h];
+
+	while ( *pp >= 0 && *pp != i ) pp = &st_tab[*pp].hnext;
+	if ( *pp == i ) *pp = e->hnext;
+	lru_unlink(i);
+	if ( e->doc != NULL ) tad_free(e->doc);
+	if ( e->xml != NULL ) Kfree(e->xml);
+	if ( e->icon != NULL ) {
+		if ( e->icon_pins > 0 ) {
+			icon_orphan(e->icon, e->icon_pins);
+		} else {
+			Kfree(e->icon);
+		}
+	}
+	st_bytes -= (SZ)sizeof(STENT) + e->icon_bytes;
+	st_used--;
+	e->used = FALSE;
+	e->doc = NULL;
+	e->xml = NULL;
+	e->icon = NULL;
+	e->icon_bytes = 0;
+	e->icon_pins = 0;
+	e->hnext = st_free;
+	st_free = i;
+}
+
+/*
+ * The entry asked for the longest time ago that nothing is using: no
+ * document (a window may be showing it), no drawing holding its icon,
+ * and not among the last ST_KEEP asked for. -1 if there is none.
+ */
+LOCAL INT st_victim( void )
+{
+	INT	i;
+
+	for ( i = st_lru_tail; i >= 0; i = st_tab[i].lprev ) {
+		STENT	*e = &st_tab[i];
+
+		if ( (INT)( st_clock - e->stamp ) < ST_KEEP ) {
+			return -1;		/* the rest are newer still */
+		}
+		if ( e->doc == NULL && e->xml == NULL && e->icon_pins == 0 ) {
 			return i;
 		}
 	}
-	if ( free < 0 ) {
+	return -1;
+}
+
+/* Room made for bytes more by the task that may make it; FALSE if not */
+LOCAL BOOL st_room( SZ more )
+{
+	BOOL	home = (BOOL)( st_home == 0 || tk_get_tid() == st_home );
+
+	while ( st_free < 0 || st_bytes + more > st_budget
+	     || ( st_cap > 0 && more == (SZ)sizeof(STENT) && st_used >= st_cap ) ) {
+		INT	v = home ? st_victim() : -1;
+
+		if ( v < 0 ) {
+			return (BOOL)( st_free >= 0 );	/* over the budget, but not by an entry */
+		}
+		st_release(v);
+		st_evicted++;
+	}
+	return TRUE;
+}
+
+/*
+ * The entry of an object's record (-1 its metadata), found or taken.
+ * Taking one when the table is full makes room (st_room): only the task
+ * that draws through the store does, so another task never has an entry
+ * it is using let go under it, and only of an entry nothing is using.
+ * Everything that reads or writes an entry holds the table's lock for
+ * the whole of it (the store_ hooks, the om_store_ calls), and an icon
+ * handed out stays until the drawing says it is done with it.
+ */
+LOCAL INT slot_of( CONST TS_UUID *id, INT recno )
+{
+	INT	i;
+	UW	h;
+	STENT	*e;
+
+	st_lock();
+	if ( !st_make() ) {
+		st_unlock();
 		return -1;
 	}
-	st_tab[free].used     = TRUE;
-	st_tab[free].id       = *id;
-	st_tab[free].recno    = recno;
-	st_tab[free].doc      = NULL;
-	st_tab[free].xml      = NULL;
-	st_tab[free].named     = FALSE;
-	st_tab[free].has_name  = FALSE;
-	st_tab[free].has_paper = FALSE;
-	st_tab[free].described = FALSE;
-	st_tab[free].icon_tried = FALSE;
-	st_tab[free].icon      = NULL;
-	st_tab[free].volser    = 0;
+	h = st_hash_of(id, recno);
+	for ( i = st_hash[h]; i >= 0; i = st_tab[i].hnext ) {
+		if ( st_tab[i].recno == recno && same_id(&st_tab[i].id, id) ) {
+			st_tab[i].stamp = ++st_clock;
+			lru_unlink(i);
+			lru_front(i);
+			st_unlock();
+			return i;
+		}
+	}
+	if ( !st_room((SZ)sizeof(STENT)) ) {
+		st_unlock();
+		return -1;
+	}
+	i = st_free;
+	e = &st_tab[i];
+	st_free = e->hnext;
+	knl_memset(e, 0, sizeof(*e));
+	e->used     = TRUE;
+	e->id       = *id;
+	e->recno    = recno;
+	e->stamp    = ++st_clock;
+	e->hnext    = st_hash[h];
+	st_hash[h]  = i;
+	lru_front(i);
+	st_bytes += (SZ)sizeof(STENT);
+	st_used++;
+	st_unlock();
 
-	return free;
+	return i;
 }
 
 /* ---------------------------------------------------------------- reading */
@@ -199,7 +487,7 @@ LOCAL ER hex_colour( CONST UB *p, INT n, UW *p_col )
  * keys out of a file this layer does not otherwise care about are not
  * worth a parser.
  */
-LOCAL ER store_paper( CONST T_VOBJ *v, UW *p_colour, void *arg )
+LOCAL ER store_paper_u( CONST T_VOBJ *v, UW *p_colour, void *arg )
 {
 	UB	*meta;
 	SZ	size = 0;
@@ -251,7 +539,17 @@ LOCAL ER store_paper( CONST T_VOBJ *v, UW *p_colour, void *arg )
 	return er;
 }
 
-LOCAL INT store_name( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
+LOCAL ER store_paper( CONST T_VOBJ *v, UW *p_colour, void *arg )
+{
+	ER r;
+
+	st_lock();
+	r = store_paper_u(v, p_colour, arg);
+	st_unlock();
+	return r;
+}
+
+LOCAL INT store_name_u( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
 {
 	UB	*meta;
 	SZ	size = 0;
@@ -321,7 +619,17 @@ LOCAL INT store_name( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
 	return ( n > 0 ) ? n : -1;
 }
 
-LOCAL T_TAD *store_open( CONST T_VOBJ *v, void *arg )
+LOCAL INT store_name( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
+{
+	INT r;
+
+	st_lock();
+	r = store_name_u(v, buf, max, arg);
+	st_unlock();
+	return r;
+}
+
+LOCAL T_TAD *store_open_u( CONST T_VOBJ *v, void *arg )
 {
 	UB	*xml;
 	SZ	size = 0;
@@ -349,8 +657,19 @@ LOCAL T_TAD *store_open( CONST T_VOBJ *v, void *arg )
 	}
 	st_tab[slot].doc = doc;
 	st_tab[slot].xml = xml;
+	st_tab[slot].snap = size;	/* about how long it comes to written out */
 
 	return doc;
+}
+
+LOCAL T_TAD *store_open( CONST T_VOBJ *v, void *arg )
+{
+	T_TAD *r;
+
+	st_lock();
+	r = store_open_u(v, arg);
+	st_unlock();
+	return r;
 }
 
 /*
@@ -379,8 +698,52 @@ EXPORT void om_store_self( CONST TS_UUID *id )
 	}
 }
 
-LOCAL ER store_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h,
-			void *arg )
+/* Picture i let go: its pixels freed, or kept until the last drawing holding them is done */
+LOCAL void pic_release( INT i, BOOL drop )
+{
+	STPIC	*pc = &st_pic[i];
+
+	if ( pc->pins > 0 ) {
+		pc->stale = TRUE;		/* no name finds it any more */
+		pc->name[0] = 0;
+		return;
+	}
+	if ( pc->px != NULL ) {
+		Kfree(pc->px);
+	}
+	st_pic_bytes -= pc->bytes;
+	if ( drop ) {
+		st_pic_evicted++;
+	}
+	knl_memset(pc, 0, sizeof(*pc));
+}
+
+/* Room for bytes more: pictures nothing holds let go, the longest unasked first */
+LOCAL void pic_room( SZ more, INT keep )
+{
+	for ( ;; ) {
+		INT	i, v = -1, n = 0;
+
+		for ( i = 0; i < PIC_MAX; i++ ) {
+			if ( st_pic[i].used ) n++;
+		}
+		if ( n < PIC_MAX && st_pic_bytes + more <= st_pic_budget ) {
+			return;
+		}
+		for ( i = 0; i < PIC_MAX; i++ ) {
+			STPIC	*pc = &st_pic[i];
+
+			if ( !pc->used || pc->pins > 0 || pc->stale || i == keep ) continue;
+			if ( v < 0 || (INT)( pc->stamp - st_pic[v].stamp ) < 0 ) v = i;
+		}
+		if ( v < 0 ) {
+			return;			/* every one held: over the budget until they are done */
+		}
+		pic_release(v, TRUE);
+	}
+}
+
+LOCAL ER store_picture_u( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h )
 {
 	UB	*data;
 	SZ	size = 0;
@@ -393,6 +756,7 @@ LOCAL ER store_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h,
 	if ( href == NULL || href[0] == 0 ) {
 		return E_PAR;
 	}
+	(void)st_make();
 	/* "{realId}_0_1.png": a resource of the object being drawn */
 	if ( st_has_self && href[0] == '{' && href[1] == 'r' && href[2] == 'e' && href[3] == 'a'
 	  && href[4] == 'l' && href[5] == 'I' && href[6] == 'd' && href[7] == '}' ) {
@@ -405,10 +769,7 @@ LOCAL ER store_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h,
 		}
 	}
 	for ( i = 0; i < PIC_MAX; i++ ) {
-		if ( !st_pic[i].used ) {
-			if ( free < 0 ) {
-				free = i;
-			}
+		if ( !st_pic[i].used || st_pic[i].stale ) {
 			continue;
 		}
 		for ( k = 0; k < PIC_NAME - 1 && href[k] != 0; k++ ) {
@@ -417,25 +778,29 @@ LOCAL ER store_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h,
 			}
 		}
 		if ( href[k] == 0 && st_pic[i].name[k] == 0 ) {
+			st_pic[i].stamp = ++st_pic_clock;
 			if ( st_pic[i].bad ) {
 				return E_NOEXS;
 			}
+			st_pic[i].pins++;
 			*p_px = st_pic[i].px;
 			*p_w = st_pic[i].w;
 			*p_h = st_pic[i].h;
 			return E_OK;
 		}
 	}
+	pic_room(0, -1);
+	for ( i = 0; i < PIC_MAX && free < 0; i++ ) {
+		if ( !st_pic[i].used ) free = i;
+	}
 	if ( free < 0 ) {
-		free = 0;			/* the oldest makes room */
-		if ( st_pic[0].px != NULL ) {
-			Kfree(st_pic[0].px);
-		}
+		return E_LIMIT;			/* every one held by a drawing */
 	}
 	pc = &st_pic[free];
+	knl_memset(pc, 0, sizeof(*pc));
 	pc->used = TRUE;
-	pc->px = NULL;
 	pc->bad = TRUE;
+	pc->stamp = ++st_pic_clock;
 	for ( k = 0; k < PIC_NAME - 1 && href[k] != 0; k++ ) {
 		pc->name[k] = href[k];
 	}
@@ -451,11 +816,15 @@ LOCAL ER store_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h,
 	}
 	if ( img_png_decode(data, size, &pc->px, &pc->w, &pc->h) >= E_OK ) {
 		pc->bad = FALSE;
+		pc->bytes = (SZ)pc->w * (SZ)pc->h * 4;
+		st_pic_bytes += pc->bytes;
 	}
 	Kfree(data);
 	if ( pc->bad ) {
 		return E_OBJ;
 	}
+	pc->pins = 1;
+	pic_room(0, free);		/* the others make room for it, if any can */
 	*p_px = pc->px;
 	*p_w = pc->w;
 	*p_h = pc->h;
@@ -463,13 +832,56 @@ LOCAL ER store_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h,
 	return E_OK;
 }
 
+/*
+ * A picture the record names, read from beside the record and kept. A
+ * name that could not be read or decoded is remembered as such, so that
+ * a missing picture is looked for once and not on every screen. The
+ * pixels are the caller's to read until it says it is done with them
+ * (store_picture_done, om_store_picture_done).
+ */
+LOCAL ER store_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h,
+			void *arg )
+{
+	ER	er;
+
+	st_lock();
+	er = store_picture_u(href, p_px, p_w, p_h);
+	st_unlock();
+	return er;
+}
+
+/* The drawing done with the pixels of a picture store_picture gave it */
+LOCAL void store_picture_done( CONST UW *px, void *arg )
+{
+	INT	i;
+
+	if ( px == NULL ) {
+		return;
+	}
+	st_lock();
+	for ( i = 0; i < PIC_MAX; i++ ) {
+		STPIC	*pc = &st_pic[i];
+
+		if ( pc->used && pc->px == px && pc->pins > 0 ) {
+			if ( --pc->pins == 0 && pc->stale ) {
+				pic_release(i, FALSE);
+			}
+			break;
+		}
+	}
+	st_unlock();
+}
+
 LOCAL INT store_label( CONST T_VOBJ *v, UB *buf, INT max, void *arg );
 LOCAL ER store_icon( CONST T_VOBJ *v, CONST UW **p_px, INT *p_w, INT *p_h, void *arg );
 LOCAL UINT store_state( CONST T_VOBJ *v, void *arg );
 
+LOCAL void store_icon_done( CONST UW *px, void *arg );
+
 LOCAL CONST T_TVSRC	om_files = { store_name, store_open, store_shut,
 				     store_paper, store_picture, store_label,
-				     store_icon, store_state };
+				     store_icon, store_state, store_icon_done,
+				     store_picture_done };
 
 /*
  * The volume an object is on, remembered with the rest of it and looked
@@ -499,7 +911,7 @@ LOCAL ID store_vol( CONST TS_UUID *id )
  * A link whose object cannot be found is a 虚身; one in a window whose
  * object is on another volume than its own is marked so.
  */
-LOCAL UINT store_state( CONST T_VOBJ *v, void *arg )
+LOCAL UINT store_state_u( CONST T_VOBJ *v, void *arg )
 {
 	UB	nm[8];
 	TS_UUID	host;
@@ -520,6 +932,16 @@ LOCAL UINT store_state( CONST T_VOBJ *v, void *arg )
 	return st;
 }
 
+LOCAL UINT store_state( CONST T_VOBJ *v, void *arg )
+{
+	UINT r;
+
+	st_lock();
+	r = store_state_u(v, arg);
+	st_unlock();
+	return r;
+}
+
 /*
  * What is remembered of objects that cannot be found now let go of --
  * the disk they were on went -- and of those remembered as not found,
@@ -531,7 +953,8 @@ EXPORT void om_store_recheck( void )
 	T_OBREF	*r = (T_OBREF *)Kmalloc(sizeof(T_OBREF));
 	INT	i;
 
-	for ( i = 0; i < ST_MAX; i++ ) {
+	st_lock();
+	for ( i = 0; i < st_max; i++ ) {
 		BOOL	absent;
 
 		if ( !st_tab[i].used ) {
@@ -544,13 +967,95 @@ EXPORT void om_store_recheck( void )
 			om_store_forget(&st_tab[i].id);
 		}
 	}
+	st_unlock();
 	if ( r != NULL ) Kfree(r);
+}
+
+/*
+ * Whether om_store_recheck lets go of what is held of the object: it
+ * can no longer be found, its disk taken out or the object thrown away.
+ * Whoever keeps a record of the store's past that lets go of it first.
+ */
+EXPORT BOOL om_store_lost( CONST TS_UUID *id )
+{
+	T_OBREF	*r;
+	BOOL	lost;
+
+	if ( id == NULL || ( r = (T_OBREF *)Kmalloc(sizeof(T_OBREF)) ) == NULL ) {
+		return FALSE;
+	}
+	lost = (BOOL)( ob_ref_obj(id, r) == E_NOEXS );
+	Kfree(r);
+	return lost;
+}
+
+/*
+ * A record taken out of the store: the caller's from now on, freed with
+ * tad_free, and the store keeps no document of it. For a window that
+ * stays open showing an object whose disk went, which the store lets go
+ * of at the next om_store_recheck. NULL when the store holds none.
+ */
+EXPORT T_TAD *om_store_take( CONST TS_UUID *id, INT recno )
+{
+	T_TAD	*doc = NULL;
+	INT	slot;
+
+	if ( id == NULL ) {
+		return NULL;
+	}
+	st_lock();
+	slot = slot_of(id, recno);
+	if ( slot >= 0 && st_tab[slot].doc != NULL ) {
+		doc = st_tab[slot].doc;
+		st_tab[slot].doc = NULL;
+		if ( st_tab[slot].xml != NULL ) {
+			Kfree(st_tab[slot].xml);
+			st_tab[slot].xml = NULL;
+		}
+	}
+	st_unlock();
+	return doc;
 }
 
 /* A picture beside the records: its pixels, the store's, not to be freed */
 EXPORT ER om_store_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h )
 {
 	return store_picture(href, p_px, p_w, p_h, NULL);
+}
+
+/* Done with the pixels om_store_picture gave: they may be let go from now on */
+EXPORT void om_store_picture_done( CONST UW *px )
+{
+	store_picture_done(px, NULL);
+}
+
+/* How many pictures, their bytes, the budget and how many were let go, for the tests */
+EXPORT void om_store_picture_stat( INT *p_n, SZ *p_bytes, SZ *p_budget, UW *p_evicted )
+{
+	INT	i, n = 0;
+
+	st_lock();
+	(void)st_make();
+	for ( i = 0; i < PIC_MAX; i++ ) {
+		if ( st_pic[i].used ) n++;
+	}
+	if ( p_n != NULL ) *p_n = n;
+	if ( p_bytes != NULL ) *p_bytes = st_pic_bytes;
+	if ( p_budget != NULL ) *p_budget = st_pic_budget;
+	if ( p_evicted != NULL ) *p_evicted = st_pic_evicted;
+	st_unlock();
+}
+
+/* The picture budget held to bytes (0: as made), for the tests */
+EXPORT void om_store_picture_cap( SZ bytes )
+{
+	LOCAL SZ	made = 0;
+
+	st_lock();
+	(void)st_make();
+	if ( made == 0 ) made = st_pic_budget;
+	st_pic_budget = ( bytes > 0 ) ? bytes : made;
+	st_unlock();
 }
 
 /*
@@ -579,9 +1084,13 @@ EXPORT ER om_store_put_picture( CONST UB *href, CONST UW *px, INT w, INT h )
 	}
 	er = om_obj_res_put(&id, name, png, len);
 	Kfree(png);
-	/* what was kept of it goes, and is read again as it now is */
+	/*
+	 * What was kept of it goes, and is read again as it now is. A
+	 * drawing still holding the old pixels keeps them until it is done.
+	 */
+	st_lock();
 	for ( i = 0; i < PIC_MAX; i++ ) {
-		if ( !st_pic[i].used ) {
+		if ( !st_pic[i].used || st_pic[i].stale ) {
 			continue;
 		}
 		for ( k = 0; k < PIC_NAME - 1 && href[k] != 0; k++ ) {
@@ -590,13 +1099,10 @@ EXPORT ER om_store_put_picture( CONST UB *href, CONST UW *px, INT w, INT h )
 			}
 		}
 		if ( href[k] == 0 && st_pic[i].name[k] == 0 ) {
-			if ( st_pic[i].px != NULL ) {
-				Kfree(st_pic[i].px);
-			}
-			st_pic[i].px = NULL;
-			st_pic[i].used = FALSE;
+			pic_release(i, FALSE);
 		}
 	}
+	st_unlock();
 
 	return er;
 }
@@ -942,7 +1448,7 @@ LOCAL SZ meta_quote( UB *out, SZ max, CONST UB *s )
 #define meta_read	om_obj_meta
 
 /* What the store remembers of an object's metadata, forgotten */
-LOCAL void meta_forget( CONST TS_UUID *id )
+LOCAL void meta_forget_u( CONST TS_UUID *id )
 {
 	INT	slot = slot_of(id, -1);
 
@@ -960,13 +1466,33 @@ LOCAL void meta_forget( CONST TS_UUID *id )
 	}
 }
 
+LOCAL void meta_forget( CONST TS_UUID *id )
+{
+	st_lock();
+	meta_forget_u(id);
+	st_unlock();
+}
+
 /*
  * A new name: in the metadata, and in the record's own name for itself,
  * the filename of its <tad> element. A record that is open has the
  * name set in what is open, so that saving it does not put the old
  * name back.
  */
+LOCAL ER rename_locked( CONST TS_UUID *id, CONST UB *name );
+
+/* From any task (the file system's rename too): all of it under the table's lock */
 EXPORT ER om_store_rename( CONST TS_UUID *id, CONST UB *name )
+{
+	ER	er;
+
+	st_lock();
+	er = rename_locked(id, name);
+	st_unlock();
+	return er;
+}
+
+LOCAL ER rename_locked( CONST TS_UUID *id, CONST UB *name )
 {
 	UB	*meta, val[TAD_NAME_MAX * 2 + 4];
 	SZ	size = 0, n;
@@ -1200,7 +1726,7 @@ EXPORT INT om_store_apps( CONST TS_UUID *id, UB (*names)[OM_APP_NAME],
 	return n;
 }
 
-/* The names an applist gives its programs, in its order */
+/* The names an applist gives its programs, in its order; names NULL counts them all */
 LOCAL INT names_of( CONST UB *meta, SZ size, UB (*names)[OM_APP_NAME], INT max )
 {
 	INT	a, ae, i, n = 0, depth = 0;
@@ -1208,7 +1734,7 @@ LOCAL INT names_of( CONST UB *meta, SZ size, UB (*names)[OM_APP_NAME], INT max )
 	a = json_key(meta, 0, (INT)size, "applist");
 	if ( a >= 0 && meta[a] == '{' ) {
 		ae = json_close(meta, a, (INT)size);
-		for ( i = a + 1; i < ae && n < max; i++ ) {
+		for ( i = a + 1; i < ae && ( names == NULL || n < max ); i++ ) {
 			if ( meta[i] == '{' ) {
 				INT	e = json_close(meta, i, ae);
 				INT	v = json_key(meta, i + 1, e, "name");
@@ -1216,11 +1742,11 @@ LOCAL INT names_of( CONST UB *meta, SZ size, UB (*names)[OM_APP_NAME], INT max )
 				if ( depth == 0 && v >= 0 && meta[v] == '"' ) {
 					INT	k = 0;
 
-					for ( v++; v < e && meta[v] != '"'
+					for ( v++; names != NULL && v < e && meta[v] != '"'
 						   && k < OM_APP_NAME - 1; v++ ) {
 						names[n][k++] = meta[v];
 					}
-					names[n][k] = 0;
+					if ( names != NULL ) names[n][k] = 0;
 					n++;
 				}
 				i = e - 1;
@@ -1240,6 +1766,7 @@ LOCAL INT names_of( CONST UB *meta, SZ size, UB (*names)[OM_APP_NAME], INT max )
 LOCAL INT app_key( CONST UB *meta, SZ size, INT index, BOOL dflt, UB *buf, INT max )
 {
 	INT	a, ae, i, j = 0, fs = -1, fl = 0, k;
+	BOOL	found = FALSE;
 
 	a = json_key(meta, 0, (INT)size, "applist");
 	if ( a < 0 || meta[a] != '{' ) {
@@ -1267,12 +1794,14 @@ LOCAL INT app_key( CONST UB *meta, SZ size, INT index, BOOL dflt, UB *buf, INT m
 		if ( hit ) {
 			fs = ks;
 			fl = kl;
+			found = TRUE;
 			break;
 		}
 		j++;
 		i = e;
 	}
-	if ( fs < 0 || ( !dflt && j != index ) ) {
+	/* a place past the last names none (the first is only the default's stand-in) */
+	if ( fs < 0 || ( !dflt && !found ) ) {
 		return -1;
 	}
 	for ( k = 0; k < fl && k < max - 1; k++ ) {
@@ -1506,7 +2035,6 @@ EXPORT ER om_store_set_default_app( CONST TS_UUID *id, CONST UB *app )
 	return er;
 }
 
-#define APP_PROG_MAX	32		/* programs the program box is read for */
 
 /*
  * The template a program of the program box names first in its "base",
@@ -1561,13 +2089,21 @@ EXPORT UB *om_store_app_icon( CONST UB *app, SZ *p_size )
 	INT	n = 0, i;
 
 	*p_size = 0;
-	if ( app == NULL || app[0] == 0 || ts_str_to_uuid(SYSDEF_PROG_BOX, &box) < E_OK ) {
+	if ( app == NULL || app[0] == 0 || ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &box) < E_OK ) {
 		return NULL;
 	}
-	lk = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * APP_PROG_MAX);
+	/* every program of the box: asked how many, then taken */
+	if ( ob_lst_lnk(&box, NULL, NULL, 0, &n) < E_OK || n <= 0 ) {
+		return NULL;
+	}
+	lk = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)n);
 	if ( lk != NULL ) {
-		if ( ob_lst_lnk(&box, NULL, lk, APP_PROG_MAX, &n) < E_OK ) n = 0;
-		if ( n > APP_PROG_MAX ) n = APP_PROG_MAX;
+		INT	all = 0;
+
+		if ( ob_lst_lnk(&box, NULL, lk, n, &all) < E_OK ) all = 0;
+		if ( all < n ) n = all;
+	} else {
+		n = 0;
 	}
 	for ( i = 0; i < n && ico == NULL; i++ ) {
 		if ( prog_base(&lk[i], app, &base) ) {
@@ -1624,6 +2160,25 @@ EXPORT INT om_link_apps( CONST T_VOBJ *v, UB (*names)[OM_APP_NAME], INT max )
 		return n;
 	}
 	n = names_of(j, size, names, max);
+	Kfree(j);
+	return n;
+}
+
+EXPORT INT om_link_napps( CONST T_VOBJ *v )
+{
+	UB	*j;
+	SZ	size = 0;
+	INT	n = 0;
+
+	j = meta_read(&v->target, &size);
+	if ( j != NULL ) {
+		n = names_of(j, size, NULL, 0);
+		Kfree(j);
+	}
+	if ( n > 0 || ( j = link_applist(v, &size) ) == NULL ) {
+		return n;
+	}
+	n = names_of(j, size, NULL, 0);
 	Kfree(j);
 	return n;
 }
@@ -1692,6 +2247,225 @@ EXPORT INT om_link_default_app( CONST T_VOBJ *v, UB *buf, INT max )
 		Kfree(j);
 	}
 	return n;
+}
+
+/*
+ * 起動アプリの固定 of a link (design 11.3): whether it keeps to the
+ * program it opens with, "defaultOpenLock" on the entry of the link's
+ * own applist that is marked defaultOpen. A link that does not keep to
+ * one opens with the program its object's applist marks, which 実行
+ * makes the one run last (om_link_ran).
+ */
+EXPORT BOOL om_link_locked( CONST T_VOBJ *v )
+{
+	SZ	size = 0;
+	UB	*j = ( v != NULL ) ? link_applist(v, &size) : NULL;
+	BOOL	locked;
+
+	if ( j == NULL ) {
+		return FALSE;
+	}
+	locked = app_locked(j, size);
+	Kfree(j);
+	return locked;
+}
+
+/*
+ * A program of the applist run on the object from a link (実行): unless
+ * the link keeps to its program, the object opens with that one from
+ * now, written into the object's metadata.
+ */
+EXPORT ER om_link_ran( CONST T_VOBJ *v, CONST UB *app )
+{
+	if ( v == NULL || app == NULL || app[0] == 0 ) {
+		return E_PAR;
+	}
+	if ( om_link_locked(v) ) {
+		return E_OK;
+	}
+	return om_store_set_default_app(&v->target, app);
+}
+
+/* Past the spaces, tabs and line ends between the parts of a JSON text */
+LOCAL INT lk_ws( CONST UB *b, INT i, INT to )
+{
+	while ( i < to && ( b[i] == ' ' || b[i] == '\t' || b[i] == '\r' || b[i] == '\n' ) ) {
+		i++;
+	}
+	return i;
+}
+
+/* Past the spaces and the comma before the next member */
+LOCAL INT lk_next( CONST UB *b, INT i, INT to )
+{
+	while ( i < to && ( b[i] == ' ' || b[i] == '\t' || b[i] == '\r' || b[i] == '\n' || b[i] == ',' ) ) {
+		i++;
+	}
+	return i;
+}
+
+LOCAL BOOL lk_put( UB *out, INT max, INT *n, CONST UB *s, INT len )
+{
+	if ( *n + len >= max ) {
+		return FALSE;
+	}
+	knl_memcpy(out + *n, s, (SZ)len);
+	*n += len;
+	return TRUE;
+}
+
+LOCAL BOOL lk_str( UB *out, INT max, INT *n, CONST char *s )
+{
+	INT	len = 0;
+
+	while ( s[len] != 0 ) len++;
+	return lk_put(out, max, n, (CONST UB *)s, len);
+}
+
+/*
+ * One member of an object at 'at' (its key's quote): where its key ends
+ * (*p_ke, past the quote), where its value starts (*p_vs) and ends
+ * (answered); -1 when there is no member there.
+ */
+LOCAL INT lk_member( CONST UB *b, INT at, INT to, INT *p_ke, INT *p_vs )
+{
+	INT	i;
+
+	if ( at >= to || b[at] != '"' ) {
+		return -1;
+	}
+	*p_ke = at + json_extent(b, at, to);
+	i = lk_ws(b, *p_ke, to);
+	if ( i >= to || b[i] != ':' ) {
+		return -1;
+	}
+	*p_vs = lk_ws(b, i + 1, to);
+	if ( *p_vs >= to ) {
+		return -1;
+	}
+	return *p_vs + json_extent(b, *p_vs, to);
+}
+
+/*
+ * The applist from s[0] (its brace) to s[to - 1] (its closing brace)
+ * written again into out without the spaces between its parts: the
+ * entry the object opens with -- the first marked defaultOpen, else the
+ * first -- marked so, with "defaultOpenLock" as 'keep' says, and no
+ * other entry with one. The length, -1 when the list names no program,
+ * -2 when out cannot hold it.
+ */
+LOCAL INT applist_kept( CONST UB *s, INT to, BOOL keep, UB *out, INT max )
+{
+	INT	i, e, ke, vs, d, nth = 0, dflt = -1, n = 0;
+	INT	m, me, mke, mvs;
+	BOOL	ok = TRUE, first = TRUE, mfirst;
+
+	if ( to < 2 || s[0] != '{' ) {
+		return -1;
+	}
+	for ( i = lk_next(s, 1, to - 1); ( e = lk_member(s, i, to - 1, &ke, &vs) ) >= 0;
+	      i = lk_next(s, e, to - 1) ) {
+		if ( s[vs] == '{' ) {
+			d = json_key(s, vs + 1, e, "defaultOpen");
+			if ( dflt < 0 && d >= 0 && s[d] == 't' ) {
+				dflt = nth;
+			}
+		}
+		nth++;
+	}
+	if ( nth == 0 ) {
+		return -1;
+	}
+	if ( dflt < 0 ) {
+		dflt = 0;
+	}
+	ok = lk_str(out, max, &n, "{");
+	nth = 0;
+	for ( i = lk_next(s, 1, to - 1); ok && ( e = lk_member(s, i, to - 1, &ke, &vs) ) >= 0;
+	      i = lk_next(s, e, to - 1) ) {
+		if ( !first ) ok = lk_str(out, max, &n, ",");
+		first = FALSE;
+		ok = ok && lk_put(out, max, &n, s + i, ke - i) && lk_str(out, max, &n, ":");
+		if ( s[vs] != '{' ) {
+			ok = ok && lk_put(out, max, &n, s + vs, e - vs);
+			nth++;
+			continue;
+		}
+		/* the entry's members, the marks of the default dropped and put back where they belong */
+		ok = ok && lk_str(out, max, &n, "{");
+		mfirst = TRUE;
+		for ( m = lk_next(s, vs + 1, e - 1); ok && ( me = lk_member(s, m, e - 1, &mke, &mvs) ) >= 0;
+		      m = lk_next(s, me, e - 1) ) {
+			if ( key_is(s + m + 1, mke - m - 1, "defaultOpenLock")
+			  || ( nth == dflt && key_is(s + m + 1, mke - m - 1, "defaultOpen") ) ) {
+				continue;
+			}
+			if ( !mfirst ) ok = lk_str(out, max, &n, ",");
+			mfirst = FALSE;
+			ok = ok && lk_put(out, max, &n, s + m, mke - m) && lk_str(out, max, &n, ":")
+			     && lk_put(out, max, &n, s + mvs, me - mvs);
+		}
+		if ( ok && nth == dflt ) {
+			ok = ( mfirst || lk_str(out, max, &n, ",") )
+			     && lk_str(out, max, &n, "\"defaultOpen\":true,\"defaultOpenLock\":")
+			     && lk_str(out, max, &n, keep ? "true" : "false");
+		}
+		ok = ok && lk_str(out, max, &n, "}");
+		nth++;
+	}
+	ok = ok && lk_str(out, max, &n, "}");
+	if ( !ok ) {
+		return -2;
+	}
+	out[n] = 0;
+	return n;
+}
+
+/* The applist of a JSON text (from its brace to just past its closing one) made into out */
+LOCAL INT applist_kept_of( CONST UB *j, SZ size, BOOL keep, UB *out, INT max )
+{
+	INT	a = json_key(j, 0, (INT)size, "applist");
+
+	if ( a < 0 || j[a] != '{' ) {
+		return -1;
+	}
+	return applist_kept(j + a, json_close(j, a, (INT)size) - a, keep, out, max);
+}
+
+/*
+ * 起動アプリの固定 set or let go: the link given the applist its object
+ * has now (an object with none, the link's own), with "defaultOpenLock"
+ * as 'keep' says on the entry the object opens with. A link fixed so
+ * keeps to the program the object opens with at that moment.
+ */
+EXPORT ER om_link_lock( T_VOBJ *v, BOOL keep )
+{
+	UB	*j, *out;
+	SZ	size = 0;
+	INT	n = -1;
+
+	if ( v == NULL ) {
+		return E_PAR;
+	}
+	out = (UB *)Kmalloc(TAD_APPL_MAX);
+	if ( out == NULL ) {
+		return E_NOMEM;
+	}
+	j = meta_read(&v->target, &size);
+	if ( j != NULL ) {
+		n = applist_kept_of(j, size, keep, out, TAD_APPL_MAX);
+		Kfree(j);
+	}
+	if ( n == -1 && ( j = link_applist(v, &size) ) != NULL ) {
+		n = applist_kept_of(j, size, keep, out, TAD_APPL_MAX);
+		Kfree(j);
+	}
+	if ( n >= 0 ) {
+		knl_memcpy(v->applist, out, (SZ)n + 1);
+	}
+	Kfree(out);
+
+	return ( n >= 0 ) ? E_OK : ( n == -2 ) ? E_LIMIT : E_NOEXS;
 }
 
 /* One string value of the metadata, or "" */
@@ -1891,7 +2665,7 @@ LOCAL INT link_app_name( CONST T_VOBJ *v, UB *buf, INT max )
 	return n;
 }
 
-LOCAL INT store_label( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
+LOCAL INT store_label_u( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
 {
 	STENT	*e = described(&v->target);
 	UB	nm[TAD_NAME_MAX];
@@ -1955,6 +2729,16 @@ LOCAL INT store_label( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
 	return n;
 }
 
+LOCAL INT store_label( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
+{
+	INT r;
+
+	st_lock();
+	r = store_label_u(v, buf, max, arg);
+	st_unlock();
+	return r;
+}
+
 EXPORT INT om_store_label( CONST T_VOBJ *v, UB *buf, INT max )
 {
 	if ( v == NULL || buf == NULL || max < 1 ) {
@@ -1971,6 +2755,12 @@ EXPORT ER om_store_icon( CONST T_VOBJ *v, CONST UW **p_px, INT *p_w, INT *p_h )
 	return store_icon(v, p_px, p_w, p_h, NULL);
 }
 
+/* Done with an icon om_store_icon gave: it may be let go from now on */
+EXPORT void om_store_icon_done( CONST UW *px )
+{
+	store_icon_done(px, NULL);
+}
+
 EXPORT ER om_store_set_icon( CONST TS_UUID *id, CONST UB *buf, SZ size )
 {
 	ER	er = om_obj_icon_put(id, buf, size);
@@ -1980,7 +2770,7 @@ EXPORT ER om_store_set_icon( CONST TS_UUID *id, CONST UB *buf, SZ size )
 }
 
 /* The object's icon, beside its metadata, read and decoded once */
-LOCAL ER store_icon( CONST T_VOBJ *v, CONST UW **p_px, INT *p_w, INT *p_h, void *arg )
+LOCAL ER store_icon_u( CONST T_VOBJ *v, CONST UW **p_px, INT *p_w, INT *p_h, void *arg )
 {
 	INT	slot = slot_of(&v->target, -1);
 	STENT	*e;
@@ -1996,8 +2786,20 @@ LOCAL ER store_icon( CONST T_VOBJ *v, CONST UW **p_px, INT *p_w, INT *p_h, void 
 		e->icon_tried = TRUE;
 		file = om_obj_icon(&v->target, &size);
 		if ( file != NULL ) {
-			if ( img_decode(file, size, &e->icon, &e->icon_w, &e->icon_h) < E_OK ) {
-				e->icon = NULL;
+			UW	*px = NULL;
+			INT	w = 0, h = 0;
+
+			if ( img_decode(file, size, &px, &w, &h) >= E_OK && px != NULL ) {
+				SZ	bytes = (SZ)w * (SZ)h * 4;
+
+				/* room for it made first: the entry itself is the newest and stays */
+				(void)st_room(bytes);
+				e = &st_tab[slot];
+				e->icon = px;
+				e->icon_w = w;
+				e->icon_h = h;
+				e->icon_bytes = bytes;
+				st_bytes += bytes;
 			}
 			Kfree(file);
 		}
@@ -2005,10 +2807,49 @@ LOCAL ER store_icon( CONST T_VOBJ *v, CONST UW **p_px, INT *p_w, INT *p_h, void 
 	if ( e->icon == NULL ) {
 		return E_NOEXS;
 	}
+	e->icon_pins++;
 	*p_px = e->icon;
 	*p_w = e->icon_w;
 	*p_h = e->icon_h;
 	return E_OK;
+}
+
+LOCAL ER store_icon( CONST T_VOBJ *v, CONST UW **p_px, INT *p_w, INT *p_h, void *arg )
+{
+	ER r;
+
+	st_lock();
+	r = store_icon_u(v, p_px, p_w, p_h, arg);
+	st_unlock();
+	return r;
+}
+
+/* The drawing done with an icon store_icon handed it */
+LOCAL void store_icon_done( CONST UW *px, void *arg )
+{
+	INT	i;
+
+	if ( px == NULL ) {
+		return;
+	}
+	st_lock();
+	for ( i = 0; i < st_max; i++ ) {
+		if ( st_tab[i].used && st_tab[i].icon == px ) {
+			if ( st_tab[i].icon_pins > 0 ) st_tab[i].icon_pins--;
+			st_unlock();
+			return;
+		}
+	}
+	for ( i = 0; i < ST_ORPHANS; i++ ) {
+		if ( st_orphan[i] == px ) {
+			if ( --st_orphan_pins[i] <= 0 ) {
+				Kfree((void *)st_orphan[i]);
+				st_orphan[i] = NULL;
+			}
+			break;
+		}
+	}
+	st_unlock();
 }
 
 /* ---------------------------------------------------------------- the calls */
@@ -2022,32 +2863,51 @@ EXPORT ER om_store_files( CONST char *dir )
 		er = ob_att_vol(dir, 0);
 	}
 	tv_source(&om_files, NULL);
+	st_home = tk_get_tid();
 
 	return er;
+}
+
+/* The table held to n entries, as on a machine with little memory (0: as made), for the tests */
+EXPORT void om_store_cap( INT n )
+{
+	st_lock();
+	st_cap = ( n > 0 ) ? n : 0;
+	st_unlock();
+}
+
+/* How full the table is and how often room was made in it, for the tests */
+EXPORT void om_store_stat( INT *p_used, INT *p_docs, INT *p_max, UW *p_evicted,
+			   SZ *p_bytes, SZ *p_budget )
+{
+	INT	i, u = 0, d = 0;
+
+	st_lock();
+	(void)st_make();
+	for ( i = 0; i < st_max; i++ ) {
+		if ( st_tab[i].used ) u++;
+		if ( st_tab[i].used && st_tab[i].doc != NULL ) d++;
+	}
+	if ( p_evicted != NULL ) *p_evicted = st_evicted;
+	if ( p_bytes != NULL ) *p_bytes = st_bytes;
+	if ( p_budget != NULL ) *p_budget = st_budget;
+	if ( p_max != NULL ) *p_max = st_max;
+	st_unlock();
+	if ( p_used != NULL ) *p_used = u;
+	if ( p_docs != NULL ) *p_docs = d;
 }
 
 EXPORT void om_store_empty( void )
 {
 	INT	i;
 
-	for ( i = 0; i < ST_MAX; i++ ) {
-		if ( !st_tab[i].used ) {
-			continue;
+	st_lock();
+	for ( i = 0; i < st_max; i++ ) {
+		if ( st_tab[i].used ) {
+			st_release(i);
 		}
-		if ( st_tab[i].doc != NULL ) {
-			tad_free(st_tab[i].doc);
-		}
-		if ( st_tab[i].xml != NULL ) {
-			Kfree(st_tab[i].xml);
-		}
-		if ( st_tab[i].icon != NULL ) {
-			Kfree(st_tab[i].icon);
-		}
-		st_tab[i].used = FALSE;
-		st_tab[i].doc  = NULL;
-		st_tab[i].xml  = NULL;
-		st_tab[i].icon = NULL;
 	}
+	st_unlock();
 }
 
 /*
@@ -2120,7 +2980,9 @@ LOCAL void links_fix_doc( T_TAD *doc, CONST TS_UUID *host )
 		}
 		v->tvol = same ? zero : tv;
 		v->tmach = zero;
-		(void)tad_lnk_set(doc, v);
+		if ( tad_lnk_set(doc, v) < E_OK ) {
+			tm_printf((UB *)"om: the link \"%s\" was not given its volume\n", v->name);
+		}
 	}
 	Kfree(v);
 }
@@ -2132,24 +2994,13 @@ EXPORT void om_store_forget( CONST TS_UUID *id )
 	if ( id == NULL ) {
 		return;
 	}
-	for ( i = 0; i < ST_MAX; i++ ) {
-		if ( !st_tab[i].used || !same_id(&st_tab[i].id, id) ) {
-			continue;
+	st_lock();
+	for ( i = 0; i < st_max; i++ ) {
+		if ( st_tab[i].used && same_id(&st_tab[i].id, id) ) {
+			st_release(i);
 		}
-		if ( st_tab[i].doc != NULL ) {
-			tad_free(st_tab[i].doc);
-		}
-		if ( st_tab[i].xml != NULL ) {
-			Kfree(st_tab[i].xml);
-		}
-		if ( st_tab[i].icon != NULL ) {
-			Kfree(st_tab[i].icon);
-		}
-		st_tab[i].used = FALSE;
-		st_tab[i].doc  = NULL;
-		st_tab[i].xml  = NULL;
-		st_tab[i].icon = NULL;
 	}
+	st_unlock();
 }
 
 /*
@@ -2157,7 +3008,7 @@ EXPORT void om_store_forget( CONST TS_UUID *id )
  * to now are compared, and the objects it links to more or less often
  * have their counts moved to match.
  */
-EXPORT ER om_store_save( CONST TS_UUID *id, INT recno )
+LOCAL ER om_store_save_u( CONST TS_UUID *id, INT recno )
 {
 	T_VOBJ	v;
 	INT	slot;
@@ -2208,6 +3059,16 @@ EXPORT ER om_store_save( CONST TS_UUID *id, INT recno )
 	return er;
 }
 
+EXPORT ER om_store_save( CONST TS_UUID *id, INT recno )
+{
+	ER r;
+
+	st_lock();
+	r = om_store_save_u(id, recno);
+	st_unlock();
+	return r;
+}
+
 /*
  * The record as it now stands, as text. The caller owns what comes
  * back. This is what a change is taken back to: the record is the one
@@ -2229,19 +3090,30 @@ EXPORT ER om_store_snapshot( CONST TS_UUID *id, INT recno, UB **p_xml,
 	if ( slot < 0 || st_tab[slot].doc == NULL ) {
 		return E_NOEXS;
 	}
-	(void)tad_write_mem(st_tab[slot].doc, NULL, 0, &size);
-	if ( size == 0 ) {
-		return E_OBJ;
-	}
+	/*
+	 * Written once into room for about as much as last time: a record
+	 * being edited changes little between two snapshots. Only when it
+	 * has grown past that room is it written again, into room enough.
+	 */
+	size = st_tab[slot].snap + st_tab[slot].snap / 16 + 4096;
 	buf = (UB *)Kmalloc(size + 1);
 	if ( buf == NULL ) {
 		return E_NOMEM;
 	}
 	er = tad_write_mem(st_tab[slot].doc, buf, size + 1, &size);
-	if ( er < E_OK ) {
+	if ( er == E_NOMEM && size > 0 ) {
 		Kfree(buf);
-		return er;
+		buf = (UB *)Kmalloc(size + 1);
+		if ( buf == NULL ) {
+			return E_NOMEM;
+		}
+		er = tad_write_mem(st_tab[slot].doc, buf, size + 1, &size);
 	}
+	if ( er < E_OK || size == 0 ) {
+		Kfree(buf);
+		return ( er < E_OK ) ? er : E_OBJ;
+	}
+	st_tab[slot].snap = size;
 	buf[size] = 0;
 	*p_xml = buf;
 	*p_size = size;

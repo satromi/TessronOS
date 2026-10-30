@@ -38,6 +38,7 @@
 #include <tk/typedef.h>
 #include <tk/errno.h>
 #include <ts/uuid.h>
+#include <ts/dtreq.h>
 
 /* The month's grid as the record has it */
 #define CT_BASE_W	800
@@ -68,9 +69,20 @@ typedef struct {
 	UB	*p;
 	INT	n, max;
 	BOOL	fail;			/* it did not all fit */
+	/*
+	 * Made larger as it fills (ct_buf_grow): 'more' gives the text the
+	 * room asked for, as realloc does, or NULL; NULL here keeps to 'max'.
+	 */
+	void	*(*more)( void *p, SZ size );
 } CTBUF;
 
 IMPORT void ct_buf( CTBUF *b, UB *mem, INT max );
+/*
+ * A text that grows as long as it is written, through 'more' (realloc,
+ * or one like it), from room for 'first' bytes; fail when that cannot
+ * be had. The text is the caller's to let go of then (b->p).
+ */
+IMPORT void ct_buf_grow( CTBUF *b, INT first, void *(*more)( void *p, SZ size ) );
 IMPORT void ct_put( CTBUF *b, CONST char *s );
 IMPORT void ct_putn( CTBUF *b, CONST UB *s, INT n );
 IMPORT void ct_num( CTBUF *b, INT v );
@@ -99,6 +111,7 @@ typedef struct {
 } CTEL;
 
 /* The <link> elements of a record, in order; how many */
+/* The <link> elements of a record, max at most; with out NULL how many there are */
 IMPORT INT  ct_links( CONST UB *x, INT n, CTEL *out, INT max );
 
 /* An attribute of an element, its bytes as written: its length, -1 when it has none */
@@ -226,10 +239,25 @@ IMPORT ER   ct_print_page( CTBUF *b, CONST UB *x, INT n );
 IMPORT ER   ct_app_lock( CTBUF *b, CONST UB *json, INT n, BOOL lock );
 IMPORT BOOL ct_app_locked( CONST UB *json, INT n );
 
+/*
+ * A request about the link el (n bytes) given the link's applist in
+ * text with DT_F_APPLIST, for the desktop to open it with the program
+ * it keeps to; nothing added when the link has no applist or it does
+ * not fit
+ */
+IMPORT void ct_link_req( T_DTREQ *rq, CONST UB *el, INT n );
+
 /* The entries of an applist, in order: each one's key (the program's id) and "name"; how many */
 #define CT_APP_ID	48
 #define CT_APP_NAME	64
 IMPORT INT  ct_app_list( CONST UB *json, INT n, UB (*ids)[CT_APP_ID], UB (*names)[CT_APP_NAME], INT max );
+
+/*
+ * An answer to DT_RQ_APPS, an entry of the list 実行 shows for a link
+ * (the desktop's dt_app_list): the program's id and name, and whether it
+ * is offered for the object's kind (DT_F_KIND). FALSE when it gives none.
+ */
+IMPORT BOOL ct_app_entry( CONST T_DTANS *an, UB *id, UB *name, BOOL *p_kind );
 
 /* A colour "#rrggbb" of a JSON object's member by its path ("window", "backgroundColor"), or dflt */
 IMPORT UW   ct_json_colour( CONST UB *json, INT n, CONST char *outer, CONST char *name, UW dflt );

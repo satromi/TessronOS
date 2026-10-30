@@ -1,0 +1,146 @@
+if_iwxvar.h: the device configurations the header defines are static
+(docs/tessronos/09-network.md 9.6.9).
+
+Why: the header defines the objects of the cards' configurations
+(const struct iwx_device_cfg iwx_..._cfg = { ... }), which only
+if_iwx.c uses. TessronOS's layer includes the header in a second file
+(device/net/wifi/obsd/tsw_iwx.c, for the layout of struct iwx_softc),
+and each object would then be defined twice at the link. Static, each
+file has its own, and if_iwx.c's are what it uses as before.
+
+Applied by tools/openbsd/build.sh to a copy of the header, which is
+found before OpenBSD's (-I); OpenBSD's tree is not changed.
+
+--- a/sys/dev/pci/if_iwxvar.h
++++ b/sys/dev/pci/if_iwxvar.h
+@@ -489,63 +489,63 @@
+ #define IWX_BZ_B_GF_A_FW	"iwx-bz-b0-gf-a0-100"
+ #define IWX_BZ_B_GF_A_PNVM	"iwx-bz-b0-gf-a0.pnvm"
+ 
+-const struct iwx_device_cfg iwx_9560_quz_a0_jf_b0_cfg = {
++static const struct iwx_device_cfg iwx_9560_quz_a0_jf_b0_cfg = {
+ 	.fw_name = IWX_QUZ_A_JF_B_FW,
+ };
+ 
+-const struct iwx_device_cfg iwx_9560_qu_c0_jf_b0_cfg = {
++static const struct iwx_device_cfg iwx_9560_qu_c0_jf_b0_cfg = {
+ 	.fw_name = IWX_QU_C_JF_B_FW,
+ };
+ 
+-const struct iwx_device_cfg iwx_qu_b0_hr1_b0 = {
++static const struct iwx_device_cfg iwx_qu_b0_hr1_b0 = {
+ 	.fw_name = IWX_QU_B_HR_B_FW,
+ 	.tx_with_siso_diversity = true,
+ };
+ 
+-const struct iwx_device_cfg iwx_qu_b0_hr_b0 = {
++static const struct iwx_device_cfg iwx_qu_b0_hr_b0 = {
+ 	.fw_name = IWX_QU_B_HR_B_FW,
+ };
+ 
+-const struct iwx_device_cfg iwx_ax201_cfg_qu_hr = {
++static const struct iwx_device_cfg iwx_ax201_cfg_qu_hr = {
+ 	.fw_name = IWX_QU_B_HR_B_FW,
+ };
+ 
+-const struct iwx_device_cfg iwx_qu_c0_hr1_b0 = {
++static const struct iwx_device_cfg iwx_qu_c0_hr1_b0 = {
+ 	.fw_name = IWX_QU_C_HR_B_FW,
+ 	.tx_with_siso_diversity = true,
+ };
+ 
+-const struct iwx_device_cfg iwx_qu_c0_hr_b0 = {
++static const struct iwx_device_cfg iwx_qu_c0_hr_b0 = {
+ 	.fw_name = IWX_QU_C_HR_B_FW,
+ };
+ 
+-const struct iwx_device_cfg iwx_ax201_cfg_qu_c0_hr_b0 = {
++static const struct iwx_device_cfg iwx_ax201_cfg_qu_c0_hr_b0 = {
+ 	.fw_name = IWX_QU_C_HR_B_FW,
+ };
+ 
+-const struct iwx_device_cfg iwx_quz_a0_hr1_b0 = {
++static const struct iwx_device_cfg iwx_quz_a0_hr1_b0 = {
+ 	.fw_name = IWX_QUZ_A_HR_B_FW,
+ };
+ 
+-const struct iwx_device_cfg iwx_ax201_cfg_quz_hr = {
++static const struct iwx_device_cfg iwx_ax201_cfg_quz_hr = {
+ 	.fw_name = IWX_QUZ_A_HR_B_FW,
+ };
+ 
+-const struct iwx_device_cfg iwx_cfg_so_a0_hr_b0 = {
++static const struct iwx_device_cfg iwx_cfg_so_a0_hr_b0 = {
+ 	.fw_name = IWX_SO_A_HR_B_FW,
+ };
+ 
+-const struct iwx_device_cfg iwx_cfg_quz_a0_hr_b0 = {
++static const struct iwx_device_cfg iwx_cfg_quz_a0_hr_b0 = {
+ 	.fw_name = IWX_QUZ_A_HR_B_FW,
+ };
+ 
+-const struct iwx_device_cfg iwx_2ax_cfg_so_gf_a0 = {
++static const struct iwx_device_cfg iwx_2ax_cfg_so_gf_a0 = {
+ 	.fw_name = IWX_SO_A_GF_A_FW,
+ 	.pnvm_name = IWX_SO_A_GF_A_PNVM,
+ 	.uhb_supported = 1,
+ };
+ 
+-const struct iwx_device_cfg iwx_2ax_cfg_so_gf_a0_long = {
++static const struct iwx_device_cfg iwx_2ax_cfg_so_gf_a0_long = {
+ 	.fw_name = IWX_SO_A_GF_A_FW,
+ 	.pnvm_name = IWX_SO_A_GF_A_PNVM,
+ 	.uhb_supported = 1,
+@@ -553,7 +553,7 @@
+ 	.low_latency_xtal = 1,
+ };
+ 
+-const struct iwx_device_cfg iwx_2ax_cfg_so_gf4_a0 = {
++static const struct iwx_device_cfg iwx_2ax_cfg_so_gf4_a0 = {
+ 	.fw_name = IWX_SO_A_GF4_A_FW,
+ 	.pnvm_name = IWX_SO_A_GF4_A_PNVM,
+ 	.uhb_supported = 1,
+@@ -561,36 +561,36 @@
+ 	.low_latency_xtal = 1,
+ };
+ 
+-const struct iwx_device_cfg iwx_2ax_cfg_so_gf4_a0_long = {
++static const struct iwx_device_cfg iwx_2ax_cfg_so_gf4_a0_long = {
+ 	.fw_name = IWX_SO_A_GF4_A_FW,
+ 	.pnvm_name = IWX_SO_A_GF4_A_PNVM,
+ 	.uhb_supported = 1,
+ };
+ 
+-const struct iwx_device_cfg iwx_2ax_cfg_ty_gf_a0 = {
++static const struct iwx_device_cfg iwx_2ax_cfg_ty_gf_a0 = {
+ 	.fw_name = IWX_TY_A_GF_A_FW,
+ 	.pnvm_name = IWX_TY_A_GF_A_PNVM,
+ };
+ 
+-const struct iwx_device_cfg iwx_2ax_cfg_so_jf_b0 = {
++static const struct iwx_device_cfg iwx_2ax_cfg_so_jf_b0 = {
+ 	.fw_name = IWX_SO_A_JF_B_FW,
+ };
+ 
+-const struct iwx_device_cfg iwx_cfg_ma_b0_hr_b0 = {
++static const struct iwx_device_cfg iwx_cfg_ma_b0_hr_b0 = {
+ 	.fw_name = IWX_MA_B_HR_B_FW,
+ };
+ 
+-const struct iwx_device_cfg iwx_cfg_ma_b0_gf_a0 = {
++static const struct iwx_device_cfg iwx_cfg_ma_b0_gf_a0 = {
+ 	.fw_name = IWX_MA_B_GF_A_FW,
+ 	.pnvm_name = IWX_MA_B_GF_A_PNVM,
+ };
+ 
+-const struct iwx_device_cfg iwx_cfg_ma_b0_gf4_a0 = {
++static const struct iwx_device_cfg iwx_cfg_ma_b0_gf4_a0 = {
+ 	.fw_name = IWX_MA_B_GF4_A_FW,
+ 	.pnvm_name = IWX_MA_B_GF4_A_PNVM,
+ };
+ 
+-const struct iwx_device_cfg iwx_cfg_ma_a0_fm_a0 = {
++static const struct iwx_device_cfg iwx_cfg_ma_a0_fm_a0 = {
+ 	.fw_name = IWX_MA_A_FM_A_FW,
+ 	.pnvm_name = IWX_MA_A_FM_A_PNVM,
+ };

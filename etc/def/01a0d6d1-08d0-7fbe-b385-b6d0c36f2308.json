@@ -19,6 +19,7 @@
     }
   },
   "tessronos": {
+    "update": "links",
     "access": {
       "owner": "01a0d680-3aa0-75b3-bd7d-075e14217cd2",
       "group": "01a0d680-3aa1-7922-ae79-ba5cbbaa2037",

@@ -97,7 +97,7 @@ knl_dispatch_to_schedtsk:
 	mov	%gs:PCPU_ctxtsk, %r8
 	test	%r8, %r8
 	jz	l_dispatch0
-	movb	$0, TCB_runprc(%r8)		/* context released */
+	movw	$0, TCB_runprc(%r8)		/* context released (RUNPRC, kernel.h) */
 	movq	$0, %gs:PCPU_ctxtsk		/* ctxtsk = NULL */
 	mov	%gs:PCPU_tmp_stack, %rsp	/* off the stack of the task that ended */
 	call	knl_acct_leave			/* charged before its control block may go */
@@ -129,7 +129,7 @@ knl_dispatch_entry:
 	mov	%rbx, %rdi
 	call	knl_stk_snap			/* its frames' return addresses noted (smp.c) */
 #endif
-	movb	$0, TCB_runprc(%rbx)		/* context saved: release the task */
+	movw	$0, TCB_runprc(%rbx)		/* context saved: release the task */
 	movq	$0, %gs:PCPU_ctxtsk		/* ctxtsk = NULL */
 
 l_dispatch0:

@@ -90,7 +90,6 @@
 #define FQ_IN_MAX	64	/* events kept for the window */
 #define FQ_MSG_MAX	256
 #define FQ_NAME_MAX	64
-#define FQ_ROWS_MAX	64
 #define FQ_DESK_TSK	32	/* the desktop's tasks stopped at a time */
 #define FQ_UNSAVED_MAX	160
 
@@ -112,7 +111,6 @@
 #define Q_CANCEL	102	/* 〈取消〉, the one Enter presses */
 #define Q_RESTART	103	/* 〈立ち上げ直す〉 */
 #define FW_PARTS	48
-#define FW_NAMES_MAX	4096
 #define FW_FRONT_MS	6000	/* the window kept in front after the desktop was started again */
 
 /* The desktop's code, data and zeroed data, from the linker scripts */
@@ -199,10 +197,10 @@ LOCAL ID	fw_port = 0;		/* the channel the notices come on */
 LOCAL volatile BOOL fw_up = FALSE;
 LOCAL BOOL	fw_asking = FALSE;
 LOCAL INT	fw_was_focus = 0;
-LOCAL UB	fw_names[FW_NAMES_MAX];	/* what the list was last given */
+LOCAL UB	*fw_names = NULL;	/* what the list was last given */
 LOCAL SZ	fw_names_len = 0;
-LOCAL FQROW	fq_row[FQ_ROWS_MAX];
-LOCAL INT	fq_nrow = 0;
+LOCAL FQROW	*fq_row = NULL;		/* a row for each process, as many as there are */
+LOCAL INT	fq_nrow = 0, fq_cap = 0;
 LOCAL UD	fq_refresh_at = 0;
 LOCAL UD	fw_front_until = 0;	/* ms: the window kept in front of what a desktop started again opens */
 
@@ -398,6 +396,17 @@ EXPORT BOOL knl_fq_input( CONST T_HIDEV *ev, BOOL inj )
 	return took;
 }
 
+/*
+ * Whether the window takes every event, the desktop reading none: the
+ * input layer lets go of what it would make of them itself (two fingers'
+ * wheel, hid.c), which would reach the windows behind when the desktop
+ * reads again.
+ */
+EXPORT BOOL knl_fq_grabbing( void )
+{
+	return ( fq_ready && fq_grab );
+}
+
 /* ---------------------------------------------------------------- the desktop */
 
 EXPORT void knl_fq_desktop( CONST T_FQDESK *d )
@@ -421,7 +430,7 @@ LOCAL BOOL in_desktop( FP entry )
 /*
  * The desktop's tasks: its own, and the kernel's tasks that start in its
  * code -- the one that starts programs, the check of a disk, the players
- * of 基本動画再生 -- that are not dormant. The main one first.
+ * of 実時間制御TAD -- that are not dormant. The main one first.
  */
 LOCAL INT fq_desk_tasks( ID *tids, INT max, ID *p_main )
 {
@@ -721,15 +730,39 @@ LOCAL void fq_post_end( ID pid )
 
 /* ---------------------------------------------------------------- fq_task */
 
+/*
+ * The processes there are now, in a table of their own (Kfree it): a
+ * table that came back full is asked for again in twice the room
+ */
+LOCAL INT fq_pids( ID **p_pids )
+{
+	ID	*pids;
+	INT	room = 64, n;
+
+	for ( ;; ) {
+		pids = (ID *)Kmalloc(sizeof(ID) * (SZ)room);
+		if ( pids == NULL ) {
+			*p_pids = NULL;
+			return 0;
+		}
+		n = knl_prc_list(pids, room);
+		if ( n < room ) break;
+		Kfree(pids);
+		room *= 2;
+	}
+	*p_pids = pids;
+	return n;
+}
+
 /* The list said on the console, read without locks: for when the window cannot be drawn */
 LOCAL void fq_console_list( void )
 {
-	ID		pids[FQ_ROWS_MAX];
+	ID		*pids;
 	UB		file[TS_FLT_FILE + 1];
 	T_PRCINFO	pi;
 	INT		n, i;
 
-	n = knl_prc_list(pids, FQ_ROWS_MAX);
+	n = fq_pids(&pids);
 	tm_printf((UB *)"TessronOS: 強制終了: the window cannot be drawn now; the processes are:\n");
 	for ( i = 0; i < n; i++ ) {
 		if ( knl_prc_info(pids[i], &pi) < E_OK || pi.done ) {
@@ -739,6 +772,7 @@ LOCAL void fq_console_list( void )
 		tm_printf((UB *)"  pid %d %s%s%s cpu %d ms\n", pids[i], file,
 			  pi.sys ? " (system)" : "", pi.ending ? " (ending)" : "", (INT)pi.cpu_ms);
 	}
+	if ( pids != NULL ) Kfree(pids);
 }
 
 /*
@@ -902,7 +936,7 @@ LOCAL void fw_parts_open( FWIN *f )
 {
 	TS_UUID	pu;
 	SZ	asz = 0;
-	char	j[512];
+	char	*jw = NULL;
 	INT	i;
 
 	f->np = 0;
@@ -916,10 +950,11 @@ LOCAL void fw_parts_open( FWIN *f )
 		p->num = 0;
 		p->kind = 0;
 		p->key = ob_opn_obj(&pu, OB_OP_R | OB_OP_W | OB_OP_PROT);
-		if ( p->key > 0 && ob_get_atr(p->key, (UB *)j, sizeof(j) - 1, &asz) >= E_OK ) {
-			j[( asz < (SZ)sizeof(j) ) ? asz : (SZ)sizeof(j) - 1] = 0;
-			p->num = fw_json_num(j, "part");
-			p->kind = (UINT)fw_json_num(j, "kind");
+		if ( p->key > 0 && knl_ob_atr_all(p->key, 0, (UB **)&jw, NULL) >= 0 ) {
+			p->num = fw_json_num(jw, "part");	/* read whole: the keys may come anywhere */
+			p->kind = (UINT)fw_json_num(jw, "kind");
+			Kfree(jw);
+			jw = NULL;
 		}
 		if ( p->key > 0 && p->num == 0 ) {
 			(void)ob_cls_obj(p->key);	/* words: nothing to work */
@@ -1038,7 +1073,7 @@ LOCAL ER fw_make( FWIN *f, INT num, INT x, INT y, BOOL centre, UINT attr, UINT i
 	T_OBMAP		m;
 	T_OBNTF		req;
 	SZ		asz = 0;
-	char		json[224], meta[512], title[WM_TITLE_MAX];
+	char		json[224], *meta = NULL, title[WM_TITLE_MAX];
 	INT		sw = 0, sh = 0, k;
 	CONST char	*nm;
 
@@ -1053,14 +1088,14 @@ LOCAL ER fw_make( FWIN *f, INT num, INT x, INT y, BOOL centre, UINT attr, UINT i
 	f->w = wp.right - wp.left;
 	f->h = wp.bottom - wp.top;
 	title[0] = 0;
-	if ( ob_get_atr(f->pk, (UB *)meta, sizeof(meta) - 1, &asz) >= E_OK ) {
-		meta[( asz < (SZ)sizeof(meta) ) ? asz : (SZ)sizeof(meta) - 1] = 0;
+	if ( knl_ob_atr_all(f->pk, 0, (UB **)&meta, NULL) >= 0 ) {
 		nm = fw_find(meta, "\"name\":\"");
 		if ( nm != NULL ) {
 			nm += 8;
 			for ( k = 0; nm[k] != 0 && nm[k] != '"' && k < WM_TITLE_MAX - 1; k++ ) title[k] = nm[k];
 			title[k] = 0;
 		}
+		Kfree(meta);
 	}
 	if ( centre ) {
 		wm_screen(&sw, &sh);
@@ -1146,12 +1181,27 @@ LOCAL CONST char *fq_state_text( CONST FQROW *r )
 /* The rows made again from the processes there are */
 LOCAL void fq_refresh( void )
 {
-	ID		pids[FQ_ROWS_MAX];
+	ID		*pids;
 	T_PRCINFO	pi;
 	INT		n, i, k = 0;
 
-	n = knl_prc_list(pids, FQ_ROWS_MAX);
-	for ( i = 0; i < n && k < FQ_ROWS_MAX; i++ ) {
+	/* a row for every process: the rows' room made as large as there are processes */
+	n = fq_pids(&pids);
+	if ( pids == NULL ) {
+		return;				/* the rows as they were */
+	}
+	if ( n > fq_cap ) {
+		FQROW	*t = (FQROW *)Kmalloc(sizeof(FQROW) * (SZ)n);
+
+		if ( t == NULL ) {
+			Kfree(pids);
+			return;
+		}
+		if ( fq_row != NULL ) Kfree(fq_row);
+		fq_row = t;
+		fq_cap = n;
+	}
+	for ( i = 0; i < n && k < fq_cap; i++ ) {
 		FQROW	*r = &fq_row[k];
 		INT	nw;
 
@@ -1173,6 +1223,7 @@ LOCAL void fq_refresh( void )
 	}
 	fq_nrow = k;
 	fq_refresh_at = fq_now();
+	Kfree(pids);
 }
 
 /* The row chosen in the list (0 up), -1 none */
@@ -1214,11 +1265,14 @@ LOCAL void fw_detail( void )
  */
 LOCAL void fw_list( ID keep )
 {
-	UB	*buf = (UB *)Kmalloc(FW_NAMES_MAX);
-	SZ	len = 0, asz = 0;
+	UB	*buf;
+	SZ	len = 0, asz = 0, room;
 	INT	i, v = 0;
 	FWPART	*p = fw_part(&fw_main, P_LIST);
 
+	/* room for every row's name, as long as the longest can be */
+	room = (SZ)( fq_nrow + 1 ) * ( FQ_NAME_MAX + 48 );
+	buf = (UB *)Kmalloc(room);
 	if ( buf == NULL || p == NULL ) {
 		if ( buf != NULL ) Kfree(buf);
 		return;
@@ -1230,8 +1284,8 @@ LOCAL void fw_list( ID keep )
 		(void)tm_sprintf((UB *)one, (CONST UB *)"%s (pid %d)%s", fq_row[i].name, fq_row[i].pid,
 				 fq_row[i].killed ? "　強制的に終了" : fq_row[i].ending ? "　終了の途中" : "");
 		k = (SZ)knl_strlen(one);
-		if ( len + k + 1 > FW_NAMES_MAX ) {
-			break;
+		if ( len + k + 1 > room ) {
+			break;			/* not reached: the room was made for every row */
 		}
 		knl_memcpy(buf + len, one, k + 1);
 		len += k + 1;
@@ -1239,13 +1293,15 @@ LOCAL void fw_list( ID keep )
 			v = i + 1;
 		}
 	}
-	for ( i = 0; i < (INT)len && len == fw_names_len && buf[i] == fw_names[i]; i++ ) ;
-	if ( len != fw_names_len || i < (INT)len ) {
+	for ( i = 0; fw_names != NULL && i < (INT)len && len == fw_names_len && buf[i] == fw_names[i]; i++ ) ;
+	if ( fw_names == NULL || len != fw_names_len || i < (INT)len ) {
 		(void)ob_wri_rec(p->key, OB_WR_KIND, 0, buf, len, &asz);
-		knl_memcpy(fw_names, buf, len);
+		if ( fw_names != NULL ) Kfree(fw_names);
+		fw_names = buf;			/* kept as what the list was given */
 		fw_names_len = len;
+	} else {
+		Kfree(buf);
 	}
-	Kfree(buf);
 	if ( v == 0 && fq_nrow > 0 ) {
 		v = fw_value(&fw_main, P_LIST);
 		if ( v < 1 ) v = 1;

@@ -52,17 +52,23 @@
 #define KB_M		8
 #define KB_TOP		66
 #define KB_RH		40
-#define KB_LIST		( KB_TOP + 5 * KB_RH + 14 )
+#define KB_LIST		( KB_TOP + 5 * KB_RH + 8 )		/* where panel 2 of SYSDEF_BOX_KEYMAP is */
 #define AT_A_X		( KB_M + 7 * KB_Q + 20 )		/* the A of the Japanese keyboard */
 #define AT_A_Y		( KB_TOP + 2 * KB_RH + 20 )
 #define AT_B_X		( KB_M + 25 * KB_Q + 20 )		/* and the B */
 #define AT_B_Y		( KB_TOP + 3 * KB_RH + 20 )
-#define AT_LATIN_X	( KB_M + 85 )				/* the latin layout's button */
-#define AT_PICK_X	( KB_M + 557 )				/* 付け替え */
-#define AT_BTN_Y	21
-#define AT_X1_X		( KB_M + 9 )				/* the first × of the list */
-#define AT_X1_Y		( KB_LIST + 4 + 9 )
-#define AT_MENU_X	300					/* under the buttons: room below for the menu */
+/* panel 1, along the top (etc/def, the data box SYSDEF_BOX_KEYMAP) */
+#define AT_LATIN_X	146					/* the latin layout's pop-up, 52,6,240,32 */
+#define AT_LATIN_Y	19
+#define AT_POP_ROW	21					/* a row of a pop-up's list */
+#define AT_PICK_X	222					/* the switch 付け替え, 168,39,276,63 */
+#define AT_PICK_Y	51
+/* panel 2, under the keyboard */
+#define AT_ROW1_X	144					/* the first row of the list, 8,24,480,120 */
+#define AT_ROW1_Y	( KB_LIST + 37 )
+#define AT_BACK_X	550					/* 〈元に戻す〉, 492,24,608,50 */
+#define AT_BACK_Y	( KB_LIST + 37 )
+#define AT_MENU_X	300					/* panel 1, right of the switch: room below for the menu */
 #define AT_MENU_Y	50
 
 LOCAL INT s_len( CONST char *s )
@@ -86,9 +92,17 @@ LOCAL BOOL same( CONST char *a, CONST char *b )
 LOCAL BOOL conf_is( CONST char *key, CONST char *want )
 {
 	char	v[CF_VAL_MAX];
+	INT	i;
 
-	if ( !wm_dev_conf_get(key, v, sizeof(v)) ) {
-		v[0] = 0;
+	/* the program writes the settings after the kernel takes the map: a moment later */
+	for ( i = 0; i < 60; i++ ) {
+		if ( !wm_dev_conf_get(key, v, sizeof(v)) ) {
+			v[0] = 0;
+		}
+		if ( same(v, want) ) {
+			break;
+		}
+		tk_dly_tsk(50);
 	}
 	if ( !same(v, want) ) {
 		tm_printf((UB *)"  %s is \"%s\", not \"%s\"\n", key, v, want);
@@ -360,7 +374,7 @@ LOCAL INT win_named( CONST char *title, INT ms )
 	char	t[WM_TITLE_MAX];
 
 	for ( ; ms > 0; ms -= 100 ) {
-		for ( wid = 1; wid <= WM_MAX_WIN; wid++ ) {
+		for ( wid = 1; wid <= knl_wm_nwin(); wid++ ) {
 			if ( wm_title(wid, t, sizeof(t)) < 0 ) continue;
 			for ( k = 0; title[k] != 0 && t[k] == title[k]; k++ ) ;
 			if ( title[k] == 0 && t[k] == 0 ) return wid;
@@ -427,7 +441,7 @@ LOCAL INT popups( void )
 	T_WMWIN	w;
 	INT	wid, n = 0;
 
-	for ( wid = 1; wid <= WM_MAX_WIN; wid++ ) {
+	for ( wid = 1; wid <= knl_wm_nwin(); wid++ ) {
 		if ( wm_ref(wid, &w) >= E_OK && w.visible && ( w.attr & WM_ATTR_POPUP ) != 0 ) n++;
 	}
 	return n;
@@ -493,8 +507,8 @@ LOCAL void test_program( void )
 	}
 	KT_ASSERT_EQ(i, 1);
 
-	/* 付け替え: A becomes B, kept; its × gives it back */
-	click(wid, AT_PICK_X, AT_BTN_Y, 0);
+	/* 付け替え (the switch): A becomes B, kept; chosen in the list under the keyboard, 〈元に戻す〉 gives it back */
+	click(wid, AT_PICK_X, AT_PICK_Y, 0);
 	(void)pump(400, -1);
 	click(wid, AT_A_X, AT_A_Y, 0);
 	(void)pump(400, -1);
@@ -503,16 +517,22 @@ LOCAL void test_program( void )
 	KT_ASSERT(conf_is("KBMAP", "0405"));
 	(void)pump(300, -1);
 	(void)kt_shot("/boot/KEYMAP1.PPM");
-	click(wid, AT_X1_X, AT_X1_Y, 0);
+	click(wid, AT_ROW1_X, AT_ROW1_Y, 0);
+	(void)pump(300, -1);
+	click(wid, AT_BACK_X, AT_BACK_Y, 0);
 	KT_ASSERT(map_is(0x04, 0, 3000));
 	KT_ASSERT(conf_is("KBMAP", ""));
 
-	/* the latin layout's button: the next layout, kept */
+	/* the latin layout's pop-up: its list opens with the layout in use under the pointer; the next, kept, then back */
 	latin = km_latin();
-	click(wid, AT_LATIN_X, AT_BTN_Y, 0);
+	click(wid, AT_LATIN_X, AT_LATIN_Y, 0);
+	(void)pump(600, -1);
+	click(wid, AT_LATIN_X, AT_LATIN_Y + ( ( latin + 1 ) % KM_LATIN_N - latin ) * AT_POP_ROW, 0);
 	for ( i = 0; i < 30 && km_latin() == latin; i++ ) (void)pump(100, -1);
 	KT_ASSERT_EQ(km_latin(), ( latin + 1 ) % KM_LATIN_N);
-	click(wid, AT_LATIN_X, AT_BTN_Y, 0);
+	click(wid, AT_LATIN_X, AT_LATIN_Y, 0);
+	(void)pump(600, -1);
+	click(wid, AT_LATIN_X, AT_LATIN_Y + ( latin - ( latin + 1 ) % KM_LATIN_N ) * AT_POP_ROW, 0);
 	for ( i = 0; i < 30 && km_latin() != latin; i++ ) (void)pump(100, -1);
 	KT_ASSERT_EQ(km_latin(), latin);
 

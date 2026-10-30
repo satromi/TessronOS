@@ -22,11 +22,82 @@
 
 #if USE_DEVICE
 
-Noinit(EXPORT OpnCB	knl_OpnCBtbl[MAX_OPNDEV]);	/* Open management information table */
+Noinit(LOCAL OpnCB	knl_OpnCBtbl[MAX_OPNDEV]);	/* The first open devices */
+Noinit(LOCAL OpnCB	*knl_OpnCBdir0[MAX_OPNDEV]);
+Noinit(EXPORT OpnCB	**knl_OpnCBdir);	/* Open devices, by descriptor - 1 */
+Noinit(EXPORT INT	knl_OpnCBn);
 Noinit(EXPORT QUEUE	knl_FreeOpnCB);	/* Unused queue */
 
-Noinit(EXPORT ReqCB	knl_ReqCBtbl[MAX_REQDEV]);	/* Request management information table */
+Noinit(LOCAL ReqCB	knl_ReqCBtbl[MAX_REQDEV]);	/* The first requests */
+Noinit(LOCAL ReqCB	*knl_ReqCBdir0[MAX_REQDEV]);
+Noinit(EXPORT ReqCB	**knl_ReqCBdir);	/* Requests, by request ID - 1 */
+Noinit(EXPORT INT	knl_ReqCBn);
 Noinit(EXPORT QUEUE	knl_FreeReqCB);	/* Unused queue */
+
+/*
+ * Twice as many open devices, or requests, with the device management
+ * locked (sysmgr.h): the new entries go on the unused queue. FALSE when
+ * there is no memory.
+ */
+LOCAL BOOL growOpnCB( void )
+{
+	INT	n = knl_OpnCBn, cap = ( n < INT_MAX / 2 ) ? n * 2 : INT_MAX, i;
+	OpnCB	**dir, *e;
+
+	if ( cap <= n ) {
+		return FALSE;
+	}
+	dir = (OpnCB **)Kmalloc(sizeof(OpnCB *) * (SZ)cap);
+	e = (OpnCB *)Kcalloc((SZ)( cap - n ), sizeof(OpnCB));
+	if ( dir == NULL || e == NULL ) {
+		if ( dir != NULL ) Kfree(dir);
+		if ( e != NULL ) Kfree(e);
+		return FALSE;
+	}
+	for ( i = 0; i < cap; i++ ) {
+		if ( i < n ) {
+			dir[i] = knl_OpnCBdir[i];
+			continue;
+		}
+		dir[i] = &e[i - n];
+		dir[i]->no = i + 1;
+		dir[i]->resid = 0;
+		QueInsert(&dir[i]->q, &knl_FreeOpnCB);
+	}
+	knl_OpnCBdir = dir;		/* the table before is not freed */
+	knl_OpnCBn = cap;
+	return TRUE;
+}
+
+LOCAL BOOL growReqCB( void )
+{
+	INT	n = knl_ReqCBn, cap = ( n < INT_MAX / 2 ) ? n * 2 : INT_MAX, i;
+	ReqCB	**dir, *e;
+
+	if ( cap <= n ) {
+		return FALSE;
+	}
+	dir = (ReqCB **)Kmalloc(sizeof(ReqCB *) * (SZ)cap);
+	e = (ReqCB *)Kcalloc((SZ)( cap - n ), sizeof(ReqCB));
+	if ( dir == NULL || e == NULL ) {
+		if ( dir != NULL ) Kfree(dir);
+		if ( e != NULL ) Kfree(e);
+		return FALSE;
+	}
+	for ( i = 0; i < cap; i++ ) {
+		if ( i < n ) {
+			dir[i] = knl_ReqCBdir[i];
+			continue;
+		}
+		dir[i] = &e[i - n];
+		dir[i]->no = i + 1;
+		dir[i]->opncb = NULL;
+		QueInsert(&dir[i]->q, &knl_FreeReqCB);
+	}
+	knl_ReqCBdir = dir;		/* the table before is not freed */
+	knl_ReqCBn = cap;
+	return TRUE;
+}
 
 Noinit(EXPORT ResCB knl_resource_control_block);
 
@@ -56,7 +127,7 @@ EXPORT ER knl_check_devdesc( ID dd, UINT mode, OpnCB **p_opncb )
 {
 	OpnCB	*opncb;
 
-	if ( dd < 1 || dd > MAX_OPNDEV ) {
+	if ( dd < 1 || dd > knl_OpnCBn ) {
 		return E_ID;
 	}
 	opncb = OPNCB(dd);
@@ -133,6 +204,9 @@ LOCAL OpnCB* newOpnCB( DevCB *devcb, INT unitno, UINT omode, ResCB *rescb )
 
 	/* Get space in open management block */
 	opncb = (OpnCB*)QueRemoveNext(&knl_FreeOpnCB);
+	if ( opncb == NULL && growOpnCB() ) {
+		opncb = (OpnCB*)QueRemoveNext(&knl_FreeOpnCB);
+	}
 	if ( opncb == NULL ) {
 		return NULL; /* No space */
 	}
@@ -489,6 +563,9 @@ LOCAL ReqCB* newReqCB( OpnCB *opncb )
 
 	/* Get space in request management block */
 	reqcb = (ReqCB*)QueRemoveNext(&knl_FreeReqCB);
+	if ( reqcb == NULL && growReqCB() ) {
+		reqcb = (ReqCB*)QueRemoveNext(&knl_FreeReqCB);
+	}
 	if ( reqcb == NULL ) {
 		return NULL; /* No space */
 	}
@@ -504,7 +581,7 @@ LOCAL ReqCB* newReqCB( OpnCB *opncb )
 /*
  * Request for starting input/output to device
  */
-EXPORT ID knl_request( ID dd, W start, void *buf, W size, TMO tmout, INT cmd )
+EXPORT ID knl_request( ID dd, D start, void *buf, SZ size, TMO tmout, INT cmd )
 {
 	EXCFN	execfn;
 	void	*exinf;
@@ -624,6 +701,62 @@ err_ret:
 	return ercd;
 }
 
+/* A time out in microseconds as the drivers take it, in milliseconds, not shorter */
+LOCAL TMO tmo_ms( TMO_U tmout_u )
+{
+	if ( tmout_u < 0 ) {
+		return TMO_FEVR;
+	}
+	tmout_u = ( tmout_u + 999 ) / 1000;
+	return ( tmout_u > 0x7FFFFFFF ) ? TMO_FEVR : (TMO)tmout_u;
+}
+
+/*
+ * Start reading from device, the start in 64 bits
+ */
+SYSCALL ID tk_rea_dev_du( ID dd, D start_d, void *buf, SZ size, TMO_U tmout_u )
+{
+	return knl_request(dd, start_d, buf, size, tmo_ms(tmout_u), TDC_READ);
+}
+
+/*
+ * Synchronous reading from device, the start in 64 bits
+ */
+SYSCALL ER tk_srea_dev_d( ID dd, D start_d, void *buf, SZ size, SZ *asize )
+{
+	ER	ercd, ioercd;
+
+	ercd = knl_request(dd, start_d, buf, size, TMO_FEVR, TDC_READ);
+	if ( ercd < E_OK ) {
+		return ercd;
+	}
+	ercd = tk_wai_dev(dd, ercd, asize, &ioercd, TMO_FEVR);
+	return ( ercd < E_OK ) ? ercd : ioercd;
+}
+
+/*
+ * Start writing to device, the start in 64 bits
+ */
+SYSCALL ID tk_wri_dev_du( ID dd, D start_d, CONST void *buf, SZ size, TMO_U tmout_u )
+{
+	return knl_request(dd, start_d, (void *)buf, size, tmo_ms(tmout_u), TDC_WRITE);
+}
+
+/*
+ * Synchronous writing to device, the start in 64 bits
+ */
+SYSCALL ER tk_swri_dev_d( ID dd, D start_d, CONST void *buf, SZ size, SZ *asize )
+{
+	ER	ercd, ioercd;
+
+	ercd = knl_request(dd, start_d, (void *)buf, size, TMO_FEVR, TDC_WRITE);
+	if ( ercd < E_OK ) {
+		return ercd;
+	}
+	ercd = tk_wai_dev(dd, ercd, asize, &ioercd, TMO_FEVR);
+	return ( ercd < E_OK ) ? ercd : ioercd;
+}
+
 /*
  * Start writing to device
  */
@@ -666,7 +799,7 @@ LOCAL ReqCB* knl_check_reqid( ID reqid, OpnCB *opncb )
 {
 	ReqCB	*reqcb;
 
-	if ( reqid < 1 || reqid > MAX_REQDEV ) {
+	if ( reqid < 1 || reqid > knl_ReqCBn ) {
 		return NULL;
 	}
 	reqcb = REQCB(reqid);
@@ -1027,13 +1160,21 @@ EXPORT ER knl_initDevIO( void )
 	INT	i;
 
 	QueInit(&knl_FreeOpnCB);
+	knl_OpnCBdir = knl_OpnCBdir0;
+	knl_OpnCBn = MAX_OPNDEV;
 	for ( i = 0; i < MAX_OPNDEV; ++i ) {
+		knl_OpnCBdir0[i] = &knl_OpnCBtbl[i];
+		knl_OpnCBtbl[i].no = i + 1;
 		knl_OpnCBtbl[i].resid = 0;
 		QueInsert(&knl_OpnCBtbl[i].q, &knl_FreeOpnCB);
 	}
 
 	QueInit(&knl_FreeReqCB);
+	knl_ReqCBdir = knl_ReqCBdir0;
+	knl_ReqCBn = MAX_REQDEV;
 	for ( i = 0; i < MAX_REQDEV; ++i ) {
+		knl_ReqCBdir0[i] = &knl_ReqCBtbl[i];
+		knl_ReqCBtbl[i].no = i + 1;
 		knl_ReqCBtbl[i].opncb = NULL;
 		QueInsert(&knl_ReqCBtbl[i].q, &knl_FreeReqCB);
 	}

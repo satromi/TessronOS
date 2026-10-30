@@ -30,14 +30,20 @@
 #include <tm/tmonitor.h>
 
 /*
- * Per-CPU data. The GS base of each processor points at its own element.
+ * Per-CPU data (design 8.2). The GS base of each processor points at its
+ * own T_PCPU. PRC 1's is here from the start; every other processor's,
+ * with its temporary stack and its interrupt stack, is taken from the
+ * page allocator as it is started, so that only the processors found
+ * take memory however large CNF_MAX_PRCID is. What the kernel keeps
+ * for CNF_MAX_PRCID processors is this table of pointers only.
  */
-EXPORT T_PCPU	knl_pcpu_tbl[CNF_MAX_PRCID] __attribute__((aligned(64)));
+EXPORT T_PCPU	knl_pcpu_boot __attribute__((aligned(64)));
+EXPORT T_PCPU	*knl_pcpu_p[CNF_MAX_PRCID];
 EXPORT INT	knl_num_prc = 1;		/* processors online (PRC 1..n) */
-EXPORT UD	knl_secondary_sp[CNF_MAX_PRCID];	/* initial SP of each secondary (tramp.S) */
 
-LOCAL UB	knl_pcpu_tmp_stack[CNF_MAX_PRCID][CNF_TMP_STACK_SIZE] __attribute__((aligned(16)));
-LOCAL UB	knl_pcpu_irq_stack[CNF_MAX_PRCID][CNF_EXC_STACK_SIZE] __attribute__((aligned(16)));
+LOCAL UB	knl_pcpu_boot_irq_stack[CNF_EXC_STACK_SIZE] __attribute__((aligned(16)));
+
+#define PCPU(i)		( knl_pcpu_p[i] )
 
 IMPORT UD	__tmp_stack_start;		/* linker: boot stack of the primary */
 
@@ -95,6 +101,33 @@ LOCAL UD	kl_since;		/* and when */
 Inline UD kl_now( void )
 {
 	return ReadSysCounterSync();
+}
+
+/* The bins' upper edges in ticks, worked out once (knl_cntfrq is known by the first holding) */
+LOCAL UD	kl_edge[KL_HIST_N - 1];
+
+LOCAL INT kl_bin( UD ticks )
+{
+	INT	k;
+
+	if ( kl_edge[0] == 0 ) {
+		for ( k = 0; k < KL_HIST_N - 1; k++ ) {
+			kl_edge[k] = (UD)knl_cntfrq * ( (UD)1 << k ) / 1000000U;
+			if ( kl_edge[k] == 0 ) kl_edge[k] = 1;
+		}
+	}
+	for ( k = 0; k < KL_HIST_N - 1 && ticks >= kl_edge[k]; k++ ) ;
+	return k;
+}
+
+LOCAL void kl_note_hold( T_KLSITE *s, UD held )
+{
+	INT	b = kl_bin(held);
+
+	if ( held > s->hold_max ) s->hold_max = held;
+	if ( held > kl_all.hold_max ) kl_all.hold_max = held;
+	s->hold_hist[b]++;
+	kl_all.hold_hist[b]++;
 }
 
 LOCAL T_KLSITE *kl_site_of( UBINT pc )
@@ -175,6 +208,8 @@ EXPORT UINT knl_lock_kernel( void )
 			s->wait += t1 - t0;
 			kl_all.cont++;
 			kl_all.wait += t1 - t0;
+			if ( t1 - t0 > s->wait_max ) s->wait_max = t1 - t0;
+			if ( t1 - t0 > kl_all.wait_max ) kl_all.wait_max = t1 - t0;
 		}
 		kl_held = s;
 		kl_since = t1;
@@ -196,7 +231,10 @@ EXPORT void knl_unlock_kernel_keep( void )
 #if CNF_KLOCK_STAT
 		UD	held = kl_now() - kl_since;
 
-		if ( kl_held != NULL ) kl_held->hold += held;
+		if ( kl_held != NULL ) {
+			kl_held->hold += held;
+			kl_note_hold(kl_held, held);
+		}
 		kl_all.hold += held;
 #endif
 		knl_klock_holder = 0;
@@ -220,9 +258,6 @@ EXPORT void knl_unlock_kernel_keep( void )
  * temporary stack). Only the processor itself writes its own entry,
  * with interrupts disabled.
  */
-LOCAL TCB	*acct_tsk[CNF_MAX_PRCID];
-LOCAL UD	acct_at[CNF_MAX_PRCID];
-LOCAL UD	acct_busy[CNF_MAX_PRCID];	/* each processor's counts spent running tasks */
 
 Inline UD acct_now( void )
 {
@@ -231,21 +266,18 @@ Inline UD acct_now( void )
 
 EXPORT void knl_acct_leave( void )
 {
-	INT	i = knl_pcpu()->prcid - 1;
+	T_PCPU	*p = knl_pcpu();
 	TCB	*t;
 
-	if ( i < 0 || i >= CNF_MAX_PRCID ) {
-		return;
-	}
-	t = acct_tsk[i];
+	t = p->acct_tsk;
 	if ( t != NULL ) {
 		UD	now = acct_now();
 
-		if ( now > acct_at[i] ) {
-			t->runcyc += now - acct_at[i];
-			acct_busy[i] += now - acct_at[i];
+		if ( now > p->acct_at ) {
+			t->runcyc += now - p->acct_at;
+			p->acct_busy += now - p->acct_at;
 		}
-		acct_tsk[i] = NULL;
+		p->acct_tsk = NULL;
 	}
 }
 
@@ -253,23 +285,28 @@ EXPORT void knl_acct_leave( void )
  * The processors online and the time each has run tasks (ts_ref_cpu,
  * design 7.3): a task running now is counted up to now
  */
-EXPORT ER ts_ref_cpu( T_TSCPU *pk )
+EXPORT INT ts_ref_cpu( T_TSCPU *pk, SZ size )
 {
 	UD	now = acct_now(), f = knl_cntfrq;
-	INT	i;
+	INT	i, n;
 
-	knl_memset(pk, 0, sizeof(*pk));
+	if ( size < (SZ)sizeof(T_TSCPU) ) {
+		return E_PAR;
+	}
+	n = (INT)( ( size - (SZ)sizeof(T_TSCPU) ) / (SZ)sizeof(UD) );
+	knl_memset(pk, 0, (SZ)sizeof(*pk));
 	pk->ncpu = knl_num_prc;
 	pk->freq = (UW)f;
 	pk->now = now;
-	for ( i = 0; i < CNF_MAX_PRCID && i < TS_CPU_MAX; i++ ) {
-		UD	b = __atomic_load_n(&acct_busy[i], __ATOMIC_RELAXED);
-		UD	at = __atomic_load_n(&acct_at[i], __ATOMIC_RELAXED);
+	for ( i = 0; i < knl_num_prc && i < n; i++ ) {
+		T_PCPU	*p = PCPU(i);
+		UD	b = __atomic_load_n(&p->acct_busy, __ATOMIC_RELAXED);
+		UD	at = __atomic_load_n(&p->acct_at, __ATOMIC_RELAXED);
 
-		if ( __atomic_load_n(&acct_tsk[i], __ATOMIC_RELAXED) != NULL && now > at ) b += now - at;
+		if ( __atomic_load_n(&p->acct_tsk, __ATOMIC_RELAXED) != NULL && now > at ) b += now - at;
 		pk->busy[i] = b;
 	}
-	return E_OK;
+	return knl_num_prc;
 }
 
 #if CNF_STK_WATCH
@@ -336,23 +373,31 @@ EXPORT TCB *knl_dispatch_pick( void )
 	T_PCPU	*p = knl_pcpu();
 	TCB	*tcb;
 
+	KLK_ASSERT_NONE("the dispatcher entered");
+#if KLK_FINE_SCHED
+	KLK_SCHED_DI();
+#else
 	(void)knl_lock_kernel();
+#endif
 	tcb = p->schedtsk;
 	if ( tcb != NULL ) {
 		if ( __atomic_load_n(&tcb->runprc, __ATOMIC_ACQUIRE) != 0 ) {
 			tcb = NULL;
 		} else {
-			tcb->runprc = (UB)p->prcid;
+			tcb->runprc = (RUNPRC)p->prcid;
+			knl_tlb_note(tcb->tskctxb.ttbr0);	/* before the processor loads its space */
 			p->ctxtsk = tcb;
 			p->ctxsw_cnt++;
-			if ( p->prcid >= 1 && p->prcid <= CNF_MAX_PRCID ) {
-				acct_tsk[p->prcid - 1] = tcb;
-				acct_at[p->prcid - 1] = acct_now();
-			}
+			p->acct_tsk = tcb;
+			p->acct_at = acct_now();
 			tcb->slice_at = acct_now();	/* its turn runs from here */
 		}
 	}
+#if KLK_FINE_SCHED
+	KLK_UNSCHED();
+#else
 	knl_unlock_kernel_keep();
+#endif
 
 	/*
 	 * A task that overran its stack wrote over whatever the allocator
@@ -387,16 +432,36 @@ EXPORT BOOL knl_kernel_locked( void )
 /*
  * IPI
  */
-EXPORT void knl_send_ipi( UW prcmask, UINT sgino )
+EXPORT void knl_send_ipi_one( INT i, UINT sgino )
 {
-	UW	targets = prcmask & ((1U << CNF_MAX_PRCID) - 1);
+	T_PCPU	*p;
+
+	if ( i < 0 || i >= knl_num_prc || ( p = PCPU(i) ) == NULL ) {
+		return;
+	}
+	if ( p->state != PC_ONLINE && p->state != PC_BOOTING ) {
+		return;
+	}
+	knl_apic_send(p->apic_id, INTVEC_IPI(sgino), APIC_DM_FIXED);
+}
+
+EXPORT void knl_send_ipi_others( UINT sgino )
+{
+	T_PCPU	*me = knl_pcpu();
 	INT	i;
 
-	for ( i = 0; i < CNF_MAX_PRCID && targets != 0; i++ ) {
-		if ( ( targets & ( 1U << i ) ) == 0 ) continue;
-		targets &= ~( 1U << i );
-		if ( knl_pcpu_tbl[i].state != PC_ONLINE && knl_pcpu_tbl[i].state != PC_BOOTING ) continue;
-		knl_apic_send(knl_pcpu_tbl[i].apic_id, INTVEC_IPI(sgino), APIC_DM_FIXED);
+	for ( i = 0; i < knl_num_prc; i++ ) {
+		if ( PCPU(i) != me ) knl_send_ipi_one(i, sgino);
+	}
+}
+
+/* To each processor of the set, one interrupt each */
+EXPORT void knl_send_ipi( CONST T_PRCSET *prcs, UINT sgino )
+{
+	INT	i;
+
+	for ( i = prcset_next(prcs, 0, knl_num_prc); i >= 0; i = prcset_next(prcs, i + 1, knl_num_prc) ) {
+		knl_send_ipi_one(i, sgino);
 	}
 }
 
@@ -427,29 +492,28 @@ LOCAL void knl_ipi_dispatch_handler( UINT intno, UW iar )
 
 EXPORT void knl_sync_cores( UD ttbr0 )
 {
-	T_PCPU	*me = knl_pcpu();
-	UD	seen[CNF_MAX_PRCID];
-	UW	mask = 0;
-	INT	i, n;
+	T_PCPU		*me = knl_pcpu();
+	T_PRCSET	mask;
+	INT		i, n;
 
 	Asm("mfence" ::: "memory");
+	prcset_zero(&mask);
 	for ( i = 0; i < knl_num_prc; i++ ) {
-		T_PCPU	*p = &knl_pcpu_tbl[i];
+		T_PCPU	*p = PCPU(i);
 		TCB	*t = p->ctxtsk;
 
 		if ( p == me || p->state != PC_ONLINE || t == NULL || t->tskctxb.ttbr0 != ttbr0 ) {
 			continue;
 		}
-		seen[i] = *(volatile UD *)&p->ipi_cnt;
-		mask |= 1U << i;
+		p->sync_seen = *(volatile UD *)&p->ipi_cnt;
+		prcset_add(&mask, i);
 	}
-	if ( mask == 0 ) return;
-	knl_send_ipi(mask, SGI_DISPATCH);
-	for ( n = 0; n < SYNC_SPINS && mask != 0; n++ ) {
-		for ( i = 0; i < knl_num_prc; i++ ) {
-			if ( ( mask & ( 1U << i ) ) != 0
-			  && *(volatile UD *)&knl_pcpu_tbl[i].ipi_cnt != seen[i] ) {
-				mask &= ~( 1U << i );
+	if ( prcset_empty(&mask) ) return;
+	knl_send_ipi(&mask, SGI_DISPATCH);
+	for ( n = 0; n < SYNC_SPINS && !prcset_empty(&mask); n++ ) {
+		for ( i = prcset_next(&mask, 0, knl_num_prc); i >= 0; i = prcset_next(&mask, i + 1, knl_num_prc) ) {
+			if ( *(volatile UD *)&PCPU(i)->ipi_cnt != PCPU(i)->sync_seen ) {
+				prcset_del(&mask, i);
 			}
 		}
 		CpuRelax();
@@ -484,39 +548,53 @@ LOCAL void knl_ipi_sync_handler( UINT intno, UW iar )
  *	other processors take the remaining tasks in priority order. Every
  *	processor whose schedtsk changed, except the caller, gets an IPI.
  */
-LOCAL BOOL knl_task_assigned( TCB *tcb, TCB **assign, INT n )
-{
-	INT	i;
+/*
+ * The choices of one pass of the scheduler: each processor's in
+ * T_PCPU.sch_task, and in the task chosen the number of the pass
+ * (TCB.sch_round), so that whether a task is chosen already is one look
+ * however many processors there are, not a walk of them all
+ */
+LOCAL UW	sch_round_now = 0;
 
-	for ( i = 0; i < n; i++ ) {
-		if ( assign[i] == tcb ) return TRUE;
-	}
-	return FALSE;
+LOCAL void sch_round( void )
+{
+	if ( ++sch_round_now == 0 ) sch_round_now = 1;
+}
+
+Inline void sch_choose( T_PCPU *p, TCB *t )
+{
+	p->sch_task = t;
+	if ( t != NULL ) t->sch_round = sch_round_now;
+}
+
+Inline BOOL knl_task_assigned( TCB *tcb )
+{
+	return (BOOL)( tcb->sch_round == sch_round_now );
 }
 
 /* Processors whose task has just given way at the end of its turn (slice_expire) */
-LOCAL UW	slice_yield = 0;
+LOCAL T_PRCSET	slice_yield;
 
 /*
  * A running task keeps its processor. Another takes, first, one whose
  * task has just given way, then an idle one, so that a turn moves no
  * task that keeps running to another processor.
  */
-LOCAL INT knl_pick_prc( TCB *tcb, UW cand )
+LOCAL INT knl_pick_prc( TCB *tcb, CONST T_PRCSET *free )
 {
-	INT	i;
+	INT	i, n = knl_num_prc, r = tcb->runprc - 1;
 
-	if ( tcb->runprc != 0 && (cand & (1U << (tcb->runprc - 1))) != 0 ) {
-		return tcb->runprc - 1;
+	if ( tcb->runprc != 0 && prcset_has(free, r) && prcset_may(&tcb->assprc, r) ) {
+		return r;
 	}
-	for ( i = 0; i < CNF_MAX_PRCID; i++ ) {
-		if ( ( cand & slice_yield & (1U << i) ) != 0 ) return i;
+	for ( i = prcset_next(free, 0, n); i >= 0; i = prcset_next(free, i + 1, n) ) {
+		if ( prcset_has(&slice_yield, i) && prcset_may(&tcb->assprc, i) ) return i;
 	}
-	for ( i = 0; i < CNF_MAX_PRCID; i++ ) {
-		if ( ( cand & (1U << i) ) != 0 && knl_pcpu_tbl[i].ctxtsk == NULL ) return i;
+	for ( i = prcset_next(free, 0, n); i >= 0; i = prcset_next(free, i + 1, n) ) {
+		if ( PCPU(i)->ctxtsk == NULL && prcset_may(&tcb->assprc, i) ) return i;
 	}
-	for ( i = 0; i < CNF_MAX_PRCID; i++ ) {
-		if ( cand & (1U << i) ) return i;
+	for ( i = prcset_next(free, 0, n); i >= 0; i = prcset_next(free, i + 1, n) ) {
+		if ( prcset_may(&tcb->assprc, i) ) return i;
 	}
 	return -1;
 }
@@ -573,8 +651,8 @@ Inline UD slice_cyc( UW ms )
 	return knl_cntfrq / 1000 * ms;
 }
 
-/* Whether a ready task of t's priority that has no processor in run[] could run on processor i */
-LOCAL INT slice_waiters( TCB *t, INT i, TCB **run, INT n )
+/* Whether a ready task of t's priority that is no processor's choice (sch_task) could run on processor i */
+LOCAL INT slice_waiters( TCB *t, INT i )
 {
 	QUEUE	*h = &knl_ready_queue.tskque[t->priority], *q;
 	TCB	*u;
@@ -582,8 +660,7 @@ LOCAL INT slice_waiters( TCB *t, INT i, TCB **run, INT n )
 
 	for ( q = h->next; q != h; q = q->next ) {
 		u = (TCB *)q;
-		if ( u != t && !knl_task_assigned(u, run, n)
-		  && ( u->assprc == 0 || ( u->assprc & ( 1U << i ) ) != 0 ) ) {
+		if ( u != t && !knl_task_assigned(u) && prcset_may(&u->assprc, i) ) {
 			w++;
 		}
 	}
@@ -592,39 +669,46 @@ LOCAL INT slice_waiters( TCB *t, INT i, TCB **run, INT n )
 
 LOCAL void slice_expire( void *arg )
 {
-	TCB	*run[CNF_MAX_PRCID], *t;
+	TCB	*t;
 	UB	gone[NUM_TSKPRI];
 	UD	now = acct_now();
 	INT	n = knl_num_prc, i;
 	UW	ms;
 
 	(void)arg;
+	KLK_SCHED_DI();
+	if ( knl_timer_stale(&slice_tmeb) ) {
+		KLK_UNSCHED();			/* set again or taken out meanwhile */
+		return;
+	}
 	slice_armed = FALSE;
 	for ( i = 0; i < NUM_TSKPRI; i++ ) gone[i] = 0;
+	sch_round();
 	for ( i = 0; i < n; i++ ) {
-		T_PCPU	*p = &knl_pcpu_tbl[i];
+		T_PCPU	*p = PCPU(i);
 
-		run[i] = ( p->state == PC_ONLINE && p->dispatch_disabled < DDS_DISABLE ) ? p->schedtsk : NULL;
+		sch_choose(p, ( p->state == PC_ONLINE && p->dispatch_disabled < DDS_DISABLE ) ? p->schedtsk : NULL);
 	}
-	slice_yield = 0;
+	prcset_zero(&slice_yield);
 	for ( i = 0; i < n; i++ ) {
-		t = run[i];
+		t = PCPU(i)->sch_task;
 		if ( t == NULL || t->state != TS_READY || t->runprc == 0 || ( ms = slice_ms(t) ) == 0 ) {
 			continue;
 		}
 		if ( now - t->slice_at < slice_cyc(ms) ) {
 			continue;			/* its turn is not over */
 		}
-		if ( slice_waiters(t, i, run, n) <= (INT)gone[t->priority] ) {
+		if ( slice_waiters(t, i) <= (INT)gone[t->priority] ) {
 			continue;			/* as many have given way as wait */
 		}
 		(void)knl_ready_queue_move_last(&knl_ready_queue, t);
 		gone[t->priority]++;
 		t->slice_at = now;
-		slice_yield |= 1U << i;
+		prcset_add(&slice_yield, i);
 	}
 	knl_reschedule();
-	slice_yield = 0;
+	prcset_zero(&slice_yield);
+	KLK_UNSCHED();
 }
 
 /*
@@ -632,7 +716,7 @@ LOCAL void slice_expire( void *arg )
  * takes turns runs while another of its priority waits for it, at the
  * end of the nearest such turn
  */
-LOCAL void slice_arm( TCB **assign, INT n )
+LOCAL void slice_arm( INT n )
 {
 	UD	now, left, near = 0;
 	UW	ms;
@@ -644,9 +728,9 @@ LOCAL void slice_arm( TCB **assign, INT n )
 	}
 	now = acct_now();
 	for ( i = 0; i < n; i++ ) {
-		t = assign[i];
-		if ( t == NULL || knl_pcpu_tbl[i].dispatch_disabled >= DDS_DISABLE
-		  || ( ms = slice_ms(t) ) == 0 || slice_waiters(t, i, assign, n) == 0 ) {
+		t = PCPU(i)->sch_task;
+		if ( t == NULL || PCPU(i)->dispatch_disabled >= DDS_DISABLE
+		  || ( ms = slice_ms(t) ) == 0 || slice_waiters(t, i) == 0 ) {
 			continue;
 		}
 		left = slice_cyc(ms);
@@ -666,23 +750,26 @@ LOCAL void slice_arm( TCB **assign, INT n )
 
 EXPORT void knl_reschedule( void )
 {
-	TCB	*assign[CNF_MAX_PRCID];
-	T_PCPU	*me = knl_pcpu();
-	T_PCPU	*p;
-	RDYQUE	*rq = &knl_ready_queue;
-	UW	free = 0, ipi = 0;
-	INT	n_free = 0, n = knl_num_prc, i, pri, prc;
-	QUEUE	*q;
-	TCB	*tcb;
+	T_PCPU		*me = knl_pcpu();
+	T_PCPU		*p;
+	RDYQUE		*rq = &knl_ready_queue;
+	T_PRCSET	free, ipi;
+	INT		n_free = 0, n = knl_num_prc, i, pri, prc;
+	QUEUE		*q;
+	TCB		*tcb;
 
+	KLK_ASSERT_SCHED("the scheduler");
+	prcset_zero(&free);
+	prcset_zero(&ipi);
+	sch_round();
 	for ( i = 0; i < n; i++ ) {
-		p = &knl_pcpu_tbl[i];
-		assign[i] = NULL;
+		p = PCPU(i);
+		p->sch_task = NULL;
 		if ( p->state != PC_ONLINE ) continue;
 		if ( p->dispatch_disabled >= DDS_DISABLE && p->ctxtsk != NULL ) {
-			assign[i] = p->ctxtsk;		/* held by tk_dis_dsp */
+			sch_choose(p, p->ctxtsk);	/* held by tk_dis_dsp */
 		} else {
-			free |= 1U << i;
+			prcset_add(&free, i);
 			n_free++;
 		}
 	}
@@ -690,40 +777,63 @@ EXPORT void knl_reschedule( void )
 	if ( n_free > 0 ) {
 		/* The task holding the object lock goes first */
 		tcb = rq->klocktsk;
-		if ( tcb != NULL && !knl_task_assigned(tcb, assign, n) ) {
-			prc = knl_pick_prc(tcb, ( tcb->assprc != 0 ? tcb->assprc : ~0U ) & free);
+		if ( tcb != NULL && !knl_task_assigned(tcb) ) {
+			prc = knl_pick_prc(tcb, &free);
 			if ( prc >= 0 ) {
-				assign[prc] = tcb;
-				free &= ~(1U << prc);
+				sch_choose(PCPU(prc), tcb);
+				prcset_del(&free, prc);
 				n_free--;
 			}
 		}
 		for ( pri = rq->top_priority; pri < NUM_TSKPRI && n_free > 0; pri++ ) {
 			for ( q = rq->tskque[pri].next; q != &rq->tskque[pri] && n_free > 0; q = q->next ) {
 				tcb = (TCB*)q;
-				if ( knl_task_assigned(tcb, assign, n) ) continue;
-				prc = knl_pick_prc(tcb, ( tcb->assprc != 0 ? tcb->assprc : ~0U ) & free);
+				if ( knl_task_assigned(tcb) ) continue;
+				prc = knl_pick_prc(tcb, &free);
 				if ( prc < 0 ) continue;	/* its processors are all taken */
-				assign[prc] = tcb;
-				free &= ~(1U << prc);
+				sch_choose(PCPU(prc), tcb);
+				prcset_del(&free, prc);
 				n_free--;
 			}
 		}
 	}
 
 	for ( i = 0; i < n; i++ ) {
-		p = &knl_pcpu_tbl[i];
+		p = PCPU(i);
 		if ( p->state != PC_ONLINE ) continue;
-		if ( p->schedtsk != assign[i] ) {
-			p->schedtsk = assign[i];
-			if ( p != me ) ipi |= 1U << i;
+		if ( p->schedtsk != p->sch_task ) {
+			__atomic_store_n(&p->schedtsk, p->sch_task, __ATOMIC_RELEASE);
+			if ( p != me ) prcset_add(&ipi, i);
 		}
 	}
-	slice_arm(assign, n);
-	if ( ipi != 0 ) {
-		knl_send_ipi(ipi, SGI_DISPATCH);
+	slice_arm(n);
+#if KLK_FINE_SCHED
+	/* told once the lock is let go (knl_sched_ipi_flush): not held while the interrupts are sent */
+	for ( i = 0; i < PRCSET_WORDS; i++ ) me->ipi_due.w[i] |= ipi.w[i];
+#else
+	if ( !prcset_empty(&ipi) ) {
+		knl_send_ipi(&ipi, SGI_DISPATCH);
+	}
+#endif
+}
+
+#if KLK_FINE_SCHED
+/*
+ * The processors whose task the scheduler changed, told by this one as
+ * it has let go of the scheduler's lock (klk.c); interrupts masked. A
+ * processor told late finds its schedtsk as the last pass set it.
+ */
+EXPORT void knl_sched_ipi_flush( void )
+{
+	T_PCPU		*me = knl_pcpu();
+	T_PRCSET	ipi = me->ipi_due;
+
+	if ( !prcset_empty(&ipi) ) {
+		prcset_zero(&me->ipi_due);
+		knl_send_ipi(&ipi, SGI_DISPATCH);
 	}
 }
+#endif
 
 /* ------------------------------------------------------------------------ */
 /*
@@ -750,17 +860,24 @@ LOCAL UW cpu_apic_id( void )
 }
 
 /*
- * This processor's tables and registers: its TSS (its stacks for NMI,
- * the double fault and the machine check, with the T_PCPU at the top of
- * each for knl_nmi_common) in its slot of the GDT, the IDT, the GS base,
- * SYSCALL, and the paging, x87/SSE/AVX and SMAP setup (each processor
- * as the boot processor)
+ * This processor's tables and registers: a GDT of its own (the
+ * segments, the same for every processor, and its TSS, whose stacks
+ * for NMI, the double fault and the machine check have the T_PCPU at
+ * the top of each for knl_nmi_common), the IDT, the GS base, SYSCALL,
+ * and the paging, x87/SSE/AVX and SMAP setup (each processor as the
+ * boot processor). With a GDT each, the number of processors is not
+ * held to what one GDT has room for.
  */
 EXPORT void knl_cpu_init( T_PCPU *p )
 {
-	INT	i = p->prcid - 1, k;
+	INT	k;
 	UD	base = (UD)(UBINT)&p->tss, lim = sizeof(T_TSS) - 1;
-	UH	sel = (UH)GDT_TSS_SEL(i);
+	UD	*gdt = (UD *)p->gdt;
+	UH	sel = (UH)GDT_TSS;
+	struct {
+		UH	limit;
+		UD	base;
+	} __attribute__((packed)) desc;
 
 	knl_memset(&p->tss, 0, sizeof(p->tss));
 	for ( k = 0; k < 3; k++ ) {
@@ -770,10 +887,15 @@ EXPORT void knl_cpu_init( T_PCPU *p )
 		p->tss.ist[k] = (UD)(UBINT)top;		/* IST 1, 2, 3: IST_DF, IST_NMI, IST_MC */
 	}
 	p->tss.iopb = sizeof(T_TSS);			/* no I/O permission bitmap */
-	knl_gdt[sel / 8] = ( lim & 0xffff ) | ( ( base & 0xffffff ) << 16 ) | ( (UD)0x89 << 40 )
-			 | ( ( ( lim >> 16 ) & 0xf ) << 48 ) | ( ( ( base >> 24 ) & 0xff ) << 56 );
-	knl_gdt[sel / 8 + 1] = base >> 32;
-	Asm("lgdt %0" :: "m"(*(UB (*)[10])knl_gdt_desc));
+	for ( k = 0; k < GDT_TSS / 8; k++ ) {
+		gdt[k] = knl_gdt[k];			/* the segments of boot.S's */
+	}
+	gdt[sel / 8] = ( lim & 0xffff ) | ( ( base & 0xffffff ) << 16 ) | ( (UD)0x89 << 40 )
+		     | ( ( ( lim >> 16 ) & 0xf ) << 48 ) | ( ( ( base >> 24 ) & 0xff ) << 56 );
+	gdt[sel / 8 + 1] = base >> 32;
+	desc.limit = (UH)( GDT_TSS + 16 - 1 );
+	desc.base = (UD)(UBINT)gdt;
+	Asm("lgdt %0" :: "m"(desc));
 	Asm("ltr %0" :: "r"(sel));
 	knl_idt_load();
 
@@ -787,9 +909,9 @@ EXPORT void knl_cpu_init( T_PCPU *p )
 	knl_pan_setup();
 }
 
-LOCAL void knl_pcpu_setup( INT i, void *tmp_stack_top )
+LOCAL void knl_pcpu_setup( INT i, void *tmp_stack_top, void *irq_stack_top )
 {
-	T_PCPU	*p = &knl_pcpu_tbl[i];
+	T_PCPU	*p = PCPU(i);
 
 	p->self = p;
 	p->prcid = i + 1;
@@ -802,7 +924,7 @@ LOCAL void knl_pcpu_setup( INT i, void *tmp_stack_top )
 	p->cur_ttbr0 = 0;
 	p->fpu_ctx = NULL;
 	p->tmp_stack = tmp_stack_top;
-	p->irq_stack = &knl_pcpu_irq_stack[i][CNF_EXC_STACK_SIZE];
+	p->irq_stack = irq_stack_top;
 	p->ctxsw_cnt = 0;
 	p->ipi_cnt = 0;
 	p->tlb_req = 0;
@@ -816,15 +938,16 @@ LOCAL void knl_pcpu_setup( INT i, void *tmp_stack_top )
  */
 EXPORT void knl_smp_init_primary( void )
 {
-	INT	i;
+	T_PCPU	*p = &knl_pcpu_boot;
 
-	for ( i = 0; i < CNF_MAX_PRCID; i++ ) {
-		knl_pcpu_tbl[i].self = &knl_pcpu_tbl[i];
-		knl_pcpu_tbl[i].state = PC_OFFLINE;
-		knl_pcpu_tbl[i].prcid = i + 1;
-	}
-	knl_pcpu_setup(0, &__tmp_stack_start);
-	knl_pcpu_tbl[0].state = PC_ONLINE;
+	p->self = p;
+	p->state = PC_OFFLINE;
+	p->prcid = 1;
+	knl_pcpu_p[0] = p;
+	knl_pcpu_setup(0, &__tmp_stack_start, &knl_pcpu_boot_irq_stack[CNF_EXC_STACK_SIZE]);
+	knl_spin_held_p[0] = p->spin_held;
+	knl_spin_held_n = 1;
+	p->state = PC_ONLINE;
 	knl_num_prc = 1;
 }
 
@@ -866,9 +989,9 @@ LOCAL UD	tramp_pa;
  */
 EXPORT void knl_secondary_main( INT i )
 {
-	T_PCPU	*p = &knl_pcpu_tbl[i];
+	T_PCPU	*p = PCPU(i);
 
-	knl_pcpu_setup(i, &knl_pcpu_tmp_stack[i][CNF_TMP_STACK_SIZE]);
+	knl_pcpu_setup(i, p->tmp_stack, p->irq_stack);
 
 	/* Process space: the empty table, like an idle primary */
 	Asm("mov %0, %%cr3" :: "r"(knl_mmu_root_cr3(knl_ttbr0_null)) : "memory");
@@ -881,9 +1004,15 @@ EXPORT void knl_secondary_main( INT i )
 
 	/* Pick up work that was queued before this processor came online */
 	{
+#if KLK_FINE_SCHED
+		KLK_SCHED_DI();
+		knl_reschedule();
+		KLK_UNSCHED();
+#else
 		UINT	s = knl_lock_kernel();
 		knl_reschedule();
 		knl_unlock_kernel(s);
+#endif
 	}
 
 	knl_force_dispatch();			/* idle loop / first task, no return */
@@ -934,19 +1063,120 @@ LOCAL BOOL tramp_setup( void )
 }
 
 /*
+ * A processor's data: its T_PCPU, then its temporary stack and its
+ * interrupt stack, in pages of their own (PA2VA, reachable on the
+ * trampoline's PML4, which has the kernel's half)
+ */
+#define PCPU_STK_OFF	( ( sizeof(T_PCPU) + 63 ) & ~(SZ)63 )
+#define PCPU_BLOCK	( PCPU_STK_OFF + CNF_TMP_STACK_SIZE + CNF_EXC_STACK_SIZE )
+
+LOCAL UINT pcpu_order( void )
+{
+	UINT	o = 0;
+
+	while ( ( PAGE_SIZE << o ) < PCPU_BLOCK ) o++;
+	return o;
+}
+
+LOCAL T_PCPU *pcpu_take( void )
+{
+	PFRAME	*pf = knl_alloc_pages(pcpu_order(), ZONE_NORMAL, KAF_ZERO);
+	T_PCPU	*p;
+	UB	*b;
+
+	if ( pf == NULL ) pf = knl_alloc_pages(pcpu_order(), ZONE_DMA32, KAF_ZERO);
+	if ( pf == NULL ) return NULL;
+	b = (UB *)PA2VA(knl_pf_to_pa(pf));
+	knl_memset(b, 0, (SZ)( PAGE_SIZE << pcpu_order() ));
+	p = (T_PCPU *)b;
+	p->tmp_stack = b + PCPU_STK_OFF + CNF_TMP_STACK_SIZE;
+	p->irq_stack = (UB *)p->tmp_stack + CNF_EXC_STACK_SIZE;
+	return p;
+}
+
+LOCAL void pcpu_give( T_PCPU *p )
+{
+	knl_free_pages(knl_pa_to_pf(VA2PA(p)), pcpu_order());
+}
+
+/*
+ * The topology (CPUID 0x1F, else 0x0B): the bits of the x2APIC ID that
+ * number the threads of a core and the cores of a package. Without the
+ * leaves, every processor is a core of its own.
+ */
+LOCAL void topo_shifts( UW *smt, UW *core )
+{
+	UW	a, b, c, d, max, leaf, sub, type, shift;
+
+	*smt = 0;
+	*core = 0;
+	cpuid(0, 0, &max, &b, &c, &d);
+	leaf = ( max >= 0x1f ) ? 0x1f : ( max >= 0x0b ) ? 0x0b : 0;
+	if ( leaf == 0 ) {
+		return;
+	}
+	for ( sub = 0; sub < 8; sub++ ) {
+		cpuid(leaf, sub, &a, &b, &c, &d);
+		type = ( c >> 8 ) & 0xff;
+		shift = a & 0x1f;
+		if ( type == 0 ) break;			/* no more levels */
+		if ( type == 1 ) *smt = shift;		/* SMT: the threads' bits below this */
+		*core = shift;				/* the last level read: what is above it is the package */
+	}
+}
+
+/* How many of the online processors differ in the key the topology gives */
+LOCAL INT topo_count( BOOL pkg )
+{
+	INT	i, k, n = 0;
+
+	for ( i = 0; i < knl_num_prc; i++ ) {
+		UW	key = pkg ? PCPU(i)->pkg_key : PCPU(i)->core_key;
+
+		for ( k = 0; k < i; k++ ) {
+			if ( ( pkg ? PCPU(k)->pkg_key : PCPU(k)->core_key ) == key ) break;
+		}
+		if ( k == i ) n++;
+	}
+	return n;
+}
+
+LOCAL void topo_tell( INT listed )
+{
+	UW	smt, core;
+	INT	i;
+
+	topo_shifts(&smt, &core);
+	for ( i = 0; i < knl_num_prc; i++ ) {
+		T_PCPU	*p = PCPU(i);
+
+		p->core_key = p->apic_id >> smt;
+		p->pkg_key = ( core >= 32 ) ? 0 : p->apic_id >> core;
+	}
+	tm_printf((UB*)"TessronOS: %d of %d CPUs online (%d package%s, %d cores, %d threads)\n",
+		  knl_num_prc, listed, topo_count(TRUE), ( topo_count(TRUE) == 1 ) ? "" : "s",
+		  topo_count(FALSE), knl_num_prc);
+}
+
+/*
  * Start the secondary processors (called from the kernel initialization
- * after the timer is running, interrupts disabled): the processors of
- * the MADT, the boot processor first, each with INIT, a wait of 10ms,
- * and two start-up IPIs 200us apart
+ * after the timer is running, interrupts disabled): the enabled
+ * processors of the MADT, threads included, the boot processor first.
+ * Each is sent INIT at once and given the 10ms after it together; then
+ * each in turn has its data taken, is sent two start-up IPIs 200us apart
+ * and is waited for. A processor that does not come online in 200ms is
+ * sent INIT again, which holds it until another start-up IPI, and its
+ * number is given to the next, so that PRC 1..knl_num_prc have no gap.
+ * A processor whose APIC ID needs the x2APIC is left when the x2APIC is
+ * off; more than CNF_MAX_PRCID are counted and left.
  */
 EXPORT void knl_smp_start_secondaries( void )
 {
 #if USE_SMP
-	INT	i, n = knl_acpi.ncpu;
+	INT	i, k, n = knl_acpi.ncpu, left = 0, failed = 0;
 	UD	t0;
 	UB	*t;
 
-	if ( n > CNF_MAX_PRCID ) n = CNF_MAX_PRCID;
 	if ( n <= 1 || !tramp_setup() ) {
 		tm_printf((UB*)"TessronOS: 1 of %d CPUs online\n", ( n > 0 ) ? n : 1);
 		return;
@@ -954,18 +1184,39 @@ EXPORT void knl_smp_start_secondaries( void )
 	t = (UB *)PA2VA(tramp_pa);
 
 	for ( i = 1; i < n; i++ ) {
-		T_PCPU	*p = &knl_pcpu_tbl[i];
+		if ( !knl_x2apic_on && knl_acpi.cpu[i].apic_id > 0xfe ) continue;
+		knl_apic_send(knl_acpi.cpu[i].apic_id, 0, APIC_DM_INIT);
+	}
+	WaitUsec(10000);
+
+	k = 1;
+	for ( i = 1; i < n; i++ ) {
+		T_PCPU	*p;
 		UW	id = knl_acpi.cpu[i].apic_id;
 
-		knl_secondary_sp[i] = (UD)(UBINT)&knl_pcpu_tmp_stack[i][CNF_TMP_STACK_SIZE];
-		*(UD *)( t + TRAMP_OFF(knl_tramp_stack) ) = knl_secondary_sp[i];
-		*(UD *)( t + TRAMP_OFF(knl_tramp_arg) ) = (UD)i;
+		if ( k >= CNF_MAX_PRCID ) {
+			left = n - i;
+			break;
+		}
+		if ( !knl_x2apic_on && id > 0xfe ) {
+			tm_printf((UB*)"TessronOS: CPU of APIC %d left: its ID needs the x2APIC\n", id);
+			continue;
+		}
+		p = pcpu_take();
+		if ( p == NULL ) {
+			tm_printf((UB*)"TessronOS: no memory for CPU of APIC %d\n", id);
+			break;
+		}
+		p->self = p;
+		p->prcid = k + 1;
 		p->state = PC_BOOTING;
 		p->apic_id = id;
+		knl_pcpu_p[k] = p;
+		knl_spin_held_p[k] = p->spin_held;
+		*(UD *)( t + TRAMP_OFF(knl_tramp_stack) ) = (UD)(UBINT)p->tmp_stack;
+		*(UD *)( t + TRAMP_OFF(knl_tramp_arg) ) = (UD)k;
 		Asm("mfence" ::: "memory");
 
-		knl_apic_send(id, 0, APIC_DM_INIT);
-		WaitUsec(10000);
 		knl_apic_send(id, (UW)( tramp_pa >> 12 ), APIC_DM_SIPI);
 		WaitUsec(200);
 		knl_apic_send(id, (UW)( tramp_pa >> 12 ), APIC_DM_SIPI);
@@ -976,14 +1227,61 @@ EXPORT void knl_smp_start_secondaries( void )
 			CpuRelax();
 		}
 		if ( p->state != PC_ONLINE ) {
-			tm_printf((UB*)"TessronOS: CPU%d (APIC %d) did not come online\n", i, id);
-			p->state = PC_OFFLINE;
+			tm_printf((UB*)"TessronOS: CPU of APIC %d did not come online\n", id);
+			knl_apic_send(id, 0, APIC_DM_INIT);	/* held until a start-up IPI */
+			knl_pcpu_p[k] = NULL;
+			knl_spin_held_p[k] = NULL;
+			pcpu_give(p);
+			failed++;
 			continue;
 		}
-		knl_num_prc = i + 1;
+		k++;
+		knl_spin_held_n = k;
+		knl_num_prc = k;
 	}
-	tm_printf((UB*)"TessronOS: %d of %d CPUs online\n", knl_num_prc, knl_acpi.ncpu);
+	topo_tell(n);
+	if ( left > 0 || knl_acpi.ncpu_over > 0 ) {
+		tm_printf((UB*)"TessronOS: %d CPUs beyond the %d supported (CNF_MAX_PRCID) left\n",
+			  left + knl_acpi.ncpu_over, CNF_MAX_PRCID);
+	}
+	if ( knl_acpi.ncpu_later > 0 ) {
+		tm_printf((UB*)"TessronOS: %d CPUs the firmware may bring online later not started\n",
+			  knl_acpi.ncpu_later);
+	}
+	if ( failed > 0 ) {
+		tm_printf((UB*)"TessronOS: %d CPUs did not come online\n", failed);
+	}
 #endif /* USE_SMP */
+}
+
+/*
+ * What the processors are, for the system object (obsys.c): the name
+ * CPUID gives (leaves 0x80000002 to 0x80000004, the spaces before it
+ * taken off), and how many cores and packages the online ones make
+ */
+EXPORT void knl_cpu_brand( char *b, INT max )
+{
+	UW	r[12], a, x, c, d;
+	INT	i, k = 0;
+	char	*s = (char *)r;
+
+	if ( max <= 0 ) return;
+	b[0] = '\0';
+	cpuid(0x80000000U, 0, &a, &x, &c, &d);
+	if ( a < 0x80000004U ) return;
+	for ( i = 0; i < 3; i++ ) {
+		cpuid(0x80000002U + (UW)i, 0, &r[i * 4], &r[i * 4 + 1], &r[i * 4 + 2], &r[i * 4 + 3]);
+	}
+	for ( i = 0; i < 48 && s[i] == ' '; i++ ) ;
+	for ( ; i < 48 && s[i] != '\0' && k < max - 1; i++ ) b[k++] = s[i];
+	while ( k > 0 && b[k - 1] == ' ' ) k--;
+	b[k] = '\0';
+}
+
+EXPORT INT knl_cpu_cores( INT *p_pkgs )
+{
+	if ( p_pkgs != NULL ) *p_pkgs = topo_count(TRUE);
+	return topo_count(FALSE);
 }
 
 /* ------------------------------------------------------------------------ */

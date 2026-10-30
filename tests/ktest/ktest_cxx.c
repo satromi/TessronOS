@@ -162,8 +162,15 @@ LOCAL void fault_mode( CONST char *mode, UW ec_want )
 		if ( f.pid == pid ) {
 			tm_printf((UB*)"  EC %02x FAR %08x%08x\n", (UW)( f.esr >> 26 ) & 0x3f,
 				  (UW)( f.far >> 32 ), (UW)f.far);
+#if defined(__x86_64__)
+			/* a page fault (vector 14) on a page that is there (P), of the
+			   program's (U), a write (W) or an instruction's fetch (I) */
+			KT_ASSERT_EQ((UW)( f.esr >> 32 ), 14);
+			KT_ASSERT_EQ((UW)f.esr & 0x17, ( ec_want == 0x24 ) ? 0x07 : 0x15);
+#else
 			KT_ASSERT_EQ((UW)( f.esr >> 26 ) & 0x3f, ec_want);
 			KT_ASSERT_EQ((UW)( f.esr & 0x3c ), 0x0c);	/* a permission fault */
+#endif
 			seen = TRUE;
 		}
 	}

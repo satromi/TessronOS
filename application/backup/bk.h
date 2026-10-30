@@ -31,8 +31,6 @@
 #define BK_ERR_MAX	200
 #define BK_OBJ_CAP	0x60000000ULL	/* what one volume of an object holds */
 #define BK_OBJ_KEEP	16		/* blocks of the store a volume object leaves free */
-#define BK_ROOT_MAX	64		/* roots saved together */
-#define BK_EXCL_MAX	64		/* objects left out of a save */
 
 /*
  * A root to save: the object, the one whose record links to it and
@@ -67,21 +65,23 @@ typedef struct {
  */
 #define BK_MED_OBJECT	0		/* each volume an object */
 #define BK_MED_DIR	1		/* each volume a file in a directory */
-#define BK_MED_MAX	16
 
 typedef struct {
 	INT	kind;			/* BK_MED_* */
 	char	label[40];		/* as the window shows it */
 	char	dev[FS_DEVNM_MAX];	/* the disk's name; "" for /boot */
 	TS_UUID	obj;			/* the disk's object */
-	char	dir[FS_PATH_MAX];	/* where its files are, once mounted */
-	ID	key;			/* the disk opened to mount it; 0 not */
-	BOOL	mounted;		/* mounted here, to be let go */
+	char	dir[FS_PATH_MAX];	/* the boot disk opened by no device object: its place in the file layer */
+	ID	key;			/* the disk's device object, opened while it is used; 0 not */
+	BOOL	mounted;		/* its root opened here (vd), to be let go */
+	INT	vd;			/* the disk's root, from its device object (fs_opn_vol) */
+	BOOL	boot;			/* the disk the machine started from */
 	TS_UUID	into;			/* objects: the cabinet they are linked into, and on
 					   the volume of; 0 the first cabinet */
 } BKMEDIA;
 
-IMPORT INT  bk_media_list( BKMEDIA *m, INT max );
+/* Every place there is, into an array of its own (free it): how many */
+IMPORT INT  bk_media_list( BKMEDIA **p_m );
 IMPORT ER   bk_media_open( BKMEDIA *m, BOOL write );
 IMPORT void bk_media_close( BKMEDIA *m );
 IMPORT UD   bk_media_free( BKMEDIA *m );
@@ -153,7 +153,7 @@ struct bkjob {
 	INT	nmade, nlinked, nlost, nconv;
 	TS_UUID	root;			/* the first root */
 	INT	nrroot;			/* the roots, as the archive says them */
-	BKROOT	rroot[BK_ROOT_MAX];
+	BKROOT	*rroot;			/* nrroot of them; bk_rest_free frees it */
 	void	*rest;			/* bk_rest.c's state */
 };
 

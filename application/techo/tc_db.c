@@ -156,18 +156,24 @@ LOCAL INT folded( CONST UB *s, INT n, UW *out, INT max )
 
 EXPORT BOOL tc_match( CONST UB *hay, CONST UB *needle )
 {
-	UW	h[FOLD_MAX], w[FOLD_MAX];
+	UW	*h, *w;
 	INT	nh, nw, i, k;
+	BOOL	found = FALSE;
 
 	if ( hay == NULL || needle == NULL ) return FALSE;
+	/* two folded fields are 4KB: from the heap, since this may run in a
+	   task of the kernel, whose stack is small */
+	h = (UW *)tc_alloc((INT)( sizeof(UW) * 2 * FOLD_MAX ));
+	if ( h == NULL ) return FALSE;
+	w = h + FOLD_MAX;
 	nw = folded(needle, s_len(needle), w, FOLD_MAX);
-	if ( nw == 0 ) return FALSE;
-	nh = folded(hay, s_len(hay), h, FOLD_MAX);
-	for ( i = 0; i + nw <= nh; i++ ) {
+	nh = ( nw > 0 ) ? folded(hay, s_len(hay), h, FOLD_MAX) : 0;
+	for ( i = 0; nw > 0 && i + nw <= nh && !found; i++ ) {
 		for ( k = 0; k < nw && h[i + k] == w[k]; k++ ) ;
-		if ( k == nw ) return TRUE;
+		if ( k == nw ) found = TRUE;
 	}
-	return FALSE;
+	tc_free(h);
+	return found;
 }
 
 /* Whether two names are the same as searching sees them, the spaces round them left out */

@@ -78,10 +78,11 @@ ERR_NAMES = {0: "none", ERR_CSUM: "checksum", ERR_IO: "i/o", ERR_TREE: "tree"}
 
 COMPAT_GROWN = 0x1
 INCOMPAT_GROWING = 0x1
+INCOMPAT_XT2 = 0x2          # a record's runs in a tree of two levels (design 7.3)
 
 KNOWN_COMPAT = COMPAT_GROWN
 KNOWN_ROCOMPAT = 0
-KNOWN_INCOMPAT = INCOMPAT_GROWING
+KNOWN_INCOMPAT = INCOMPAT_GROWING | INCOMPAT_XT2
 
 # Geometry
 AG_MAX_BLOCKS = 1 << 18

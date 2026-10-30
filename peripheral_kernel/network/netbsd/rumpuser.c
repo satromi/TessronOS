@@ -118,10 +118,107 @@ typedef struct {
 } RU_TR;
 
 LOCAL RU_TR		*ru_tr;
-#define TR_RA()		do { if ( ru_tr != NULL ) ru_tr[tk_get_tid()].ra = __builtin_return_address(0); } while ( 0 )
+
+/*
+ * The task's own ID, read once more with interrupts masked: a difference
+ * from what tk_get_tid gave it just before is told (a task moved to
+ * another processor while the ID was being read)
+ */
+LOCAL volatile UW	ru_tid_bad;
+
+LOCAL ID ru_tid( void )
+{
+	UINT	imask;
+	ID	got, ref;
+
+	got = tk_get_tid();
+	DI(imask);
+	ref = tk_get_tid();
+	EI(imask);
+	if ( got != ref ) {
+		UW	n = __atomic_add_fetch(&ru_tid_bad, 1, __ATOMIC_RELAXED);
+
+		if ( n <= 8 || ( n & ( n - 1 ) ) == 0 ) {
+			tm_printf((UB *)"rumpuser: CHECK tk_get_tid gave %d to task %d (%u times), from %p\n",
+				  (INT)got, (INT)ref, (UINT)n, __builtin_return_address(0));
+		}
+	}
+	return ref;
+}
+#define TR_RA()		do { if ( ru_tr != NULL ) ru_tr[ru_tid()].ra = __builtin_return_address(0); } while ( 0 )
 LOCAL void ru_trace_start( void );
+
+/*
+ * And which thread of the rump kernel each task was made, by whom and
+ * when, kept in a ring: a task that is found to be a thread other than
+ * the one the rump kernel expects, or none when it gives up or takes
+ * back a virtual processor, is told with what the ring holds of it and
+ * of the thread (ru_ev_tell)
+ */
+#define EV_SET		1	/* curlwp set */
+#define EV_CLEAR	2	/* curlwp cleared */
+#define EV_TSTART	3	/* a thread of the rump kernel's started on the task */
+#define EV_TEXIT	4	/* and ended */
+#define EV_UNSCHED	5	/* a wait of the host's began */
+#define EV_SCHED	6	/* and ended */
+#define EV_NRING	8192
+
+typedef struct {
+	UW	seq;
+	UH	tid;
+	UB	op;
+	UB	pad;
+	void	*l;
+	void	*ra0;
+	void	*ra1;
+	UD	ns;
+} RU_EV;
+
+LOCAL RU_EV		ru_ev[EV_NRING];
+LOCAL volatile UW	ru_ev_seq;
+LOCAL volatile UW	ru_ev_told;
+
+LOCAL void ru_ev_put( INT op, void *l, void *ra0, void *ra1 )
+{
+	UW	k = __atomic_fetch_add(&ru_ev_seq, 1, __ATOMIC_RELAXED);
+	RU_EV	*e = &ru_ev[k % EV_NRING];
+
+	e->seq = k;
+	e->tid = (UH)ru_tid();
+	e->op = (UB)op;
+	e->l = l;
+	e->ra0 = ra0;
+	e->ra1 = ra1;
+	(void)ts_get_mono(&e->ns);
+}
+
+LOCAL void ru_ev_tell( CONST char *what, ID tid, void *l, void *had )
+{
+	CONST char *CONST op[] = { "?", "set", "clear", "thread start", "thread exit", "unsched", "sched" };
+	UW	last = ru_ev_seq, k, n = 0;
+	RU_EV	*e;
+
+	if ( __atomic_fetch_add(&ru_ev_told, 1, __ATOMIC_RELAXED) >= 4 ) return;
+	tm_printf((UB *)"rumpuser: CHECK %s: task %d, lwp %p, the table had %p\n", what, (INT)tid, l, had);
+	for ( k = ( last > EV_NRING ) ? last - EV_NRING : 0; k < last && n < 4000; k++ ) {
+		e = &ru_ev[k % EV_NRING];
+		if ( e->seq != k ) continue;
+		if ( e->tid != (UH)tid && ( l == NULL || e->l != l ) && ( had == NULL || e->l != had ) ) continue;
+		n++;
+		tm_printf((UB *)"  #%u %lu.%06lu task %d %s lwp %p from %p %p\n", e->seq,
+			  (unsigned long)( e->ns / 1000000000 ), (unsigned long)( e->ns / 1000 % 1000000 ),
+			  (INT)e->tid, op[e->op < 7 ? e->op : 0], e->l, e->ra0, e->ra1);
+	}
+	tm_printf((UB *)"rumpuser: CHECK end (%u events looked at)\n", (UINT)n);
+}
+#define EV(op, l)	ru_ev_put((op), (l), __builtin_return_address(0), NULL)
+/* with the caller's caller too, where the task is known to be deep in the rump kernel */
+#define EV2(op, l)	ru_ev_put((op), (l), __builtin_return_address(0), __builtin_return_address(1))
 #else
+#define ru_tid()	tk_get_tid()
 #define TR_RA()		do { } while ( 0 )
+#define EV(op, l)	do { } while ( 0 )
+#define EV2(op, l)	do { } while ( 0 )
 #endif
 
 /* Give up the virtual processor (and big lock) around a wait of the host's */
@@ -129,12 +226,24 @@ EXPORT void knl_rump_unsched( INT *p_nlocks )
 {
 	int	n = 0;
 
+#if RU_TRACE
+	if ( ru_curlwp[ru_tid()] == NULL ) {
+		ru_ev_tell("no thread to give the processor up with", ru_tid(), NULL, NULL);
+	}
+#endif
+	EV(EV_UNSCHED, ru_curlwp[ru_tid()]);
 	ru_hyp->hyp_backend_unschedule(0, &n, NULL);
 	*p_nlocks = (INT)n;
 }
 
 EXPORT void knl_rump_sched( INT nlocks )
 {
+#if RU_TRACE
+	if ( ru_curlwp[ru_tid()] == NULL ) {
+		ru_ev_tell("no thread to take the processor back with", ru_tid(), NULL, NULL);
+	}
+#endif
+	EV(EV_SCHED, ru_curlwp[ru_tid()]);
 	ru_hyp->hyp_backend_schedule((int)nlocks, NULL);
 }
 
@@ -143,12 +252,19 @@ LOCAL void unsched_il( INT *p_nlocks, void *interlock )
 {
 	int	n = 0;
 
+	EV(EV_UNSCHED, ru_curlwp[ru_tid()]);
 	ru_hyp->hyp_backend_unschedule(0, &n, interlock);
 	*p_nlocks = (INT)n;
 }
 
 LOCAL void sched_il( INT nlocks, void *interlock )
 {
+#if RU_TRACE
+	if ( ru_curlwp[ru_tid()] == NULL ) {
+		ru_ev_tell("no thread to take the processor back with (interlock)", ru_tid(), NULL, NULL);
+	}
+#endif
+	EV(EV_SCHED, ru_curlwp[ru_tid()]);
 	ru_hyp->hyp_backend_schedule((int)nlocks, interlock);
 }
 
@@ -188,13 +304,21 @@ EXPORT int rumpuser_init( int version, CONST void *hyp )
 
 EXPORT void rumpuser_curlwpop( int op, void *l )
 {
-	ID	tid = tk_get_tid();
+	ID	tid = ru_tid();
 
 	switch ( op ) {
 	case 2:				/* RUMPUSER_LWP_SET */
+#if RU_TRACE
+		if ( ru_curlwp[tid] != NULL ) ru_ev_tell("set over another", tid, l, ru_curlwp[tid]);
+#endif
+		EV2(EV_SET, l);
 		ru_curlwp[tid] = l;
 		break;
 	case 3:				/* RUMPUSER_LWP_CLEAR */
+#if RU_TRACE
+		if ( ru_curlwp[tid] != l ) ru_ev_tell("cleared, not the one it is", tid, l, ru_curlwp[tid]);
+#endif
+		EV2(EV_CLEAR, l);
 		ru_curlwp[tid] = NULL;
 		break;
 	default:			/* made and destroyed: nothing kept here */
@@ -204,7 +328,7 @@ EXPORT void rumpuser_curlwpop( int op, void *l )
 
 EXPORT void *rumpuser_curlwp( void )
 {
-	return ru_curlwp[tk_get_tid()];
+	return ru_curlwp[ru_tid()];
 }
 
 /* ---------------------------------------------------------------- memory */
@@ -469,7 +593,7 @@ LOCAL ER sem_wait_( ID semid, D tmo_us )
 LOCAL ER sem_wait( ID semid, D tmo_us, INT kind, void *obj )
 {
 #if RU_TRACE
-	RU_TR	*t = ( ru_tr != NULL ) ? &ru_tr[tk_get_tid()] : NULL;
+	RU_TR	*t = ( ru_tr != NULL ) ? &ru_tr[ru_tid()] : NULL;
 	ER	er;
 
 	if ( t != NULL ) {
@@ -1096,6 +1220,7 @@ LOCAL void thread_entry( INT stacd, void *exinf )
 {
 	RU_THREAD	*t = (RU_THREAD *)exinf;
 
+	EV(EV_TSTART, (void *)t->func);
 	(void)t->func(t->arg);
 	rumpuser_thread_exit();
 }
@@ -1156,7 +1281,8 @@ EXPORT void rumpuser_thread_exit( void )
 	T_RTSK		rtsk;
 	RU_THREAD	*t = NULL;
 
-	ru_curlwp[tk_get_tid()] = NULL;
+	EV(EV_TEXIT, ru_curlwp[ru_tid()]);
+	ru_curlwp[ru_tid()] = NULL;
 	if ( tk_ref_tsk(TSK_SELF, &rtsk) >= E_OK ) {
 		t = (RU_THREAD *)rtsk.exinf;
 	}
@@ -1441,7 +1567,7 @@ LOCAL void ru_trace_task( INT stacd, void *exinf )
 			RU_TR	*t = &ru_tr[tid];
 			UD	age;
 
-			if ( t->kind == 0 || t->told ) {
+			if ( t->kind == 0 || t->told || t->since > now ) {
 				continue;
 			}
 			age = ( now - t->since ) / 1000000ULL;

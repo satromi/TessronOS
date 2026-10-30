@@ -21,12 +21,20 @@
  *	from the template. A link's attributes are set, taken off and read
  *	as text; a link sized is closed or open by its height; what is
  *	taken goes to the tray as a figure of links; an applist's program
- *	is kept to and let go.
+ *	is kept to and let go. The program itself, started on a 予定表 as
+ *	a system before wrote it, finds the 休日 object and the template by
+ *	their names, gives their links the relationships 休日 and 年月日実身,
+ *	and finds them by those once they are renamed.
  */
 
 #include "ktest.h"
 #include "tstdlib.h"
 #include "../../application/calendar/cal_tad.h"
+#include <ts/ob.h>
+#include <ts/om.h>
+#include <ts/proc.h>
+#include <ts/sysdef.h>
+#include <tm/tmonitor.h>
 
 #define OUT_MAX		( 64 * 1024 )
 
@@ -382,6 +390,166 @@ LOCAL void test_apps( void )
 	KT_ASSERT_EQ(ct_json_colour((CONST UB *)none, s_len(none), "window", "backgroundColor", 9), 9U);
 }
 
+/* ---------------------------------------------------------------- the program on a 予定表 */
+
+#define CAL_SAMPLE	"019d6f00-1a2b-7c3d-8e4f-a1b2c3d4e5f6"	/* the 予定表 of the samples (etc/xtad) */
+#define CAL_LOG_MAX	( 64 * 1024 )
+
+LOCAL UB	*cal_log;
+
+/* What the console says after pos, up to tries tenths of a second, until it says w; the line's rest */
+LOCAL BOOL cal_wait( UD pos, CONST char *w, char *line, INT max )
+{
+	INT	i, n, k, at, m = s_len(w);
+	UD	p;
+
+	for ( i = 0; i < 150; i++ ) {
+		p = pos;
+		n = tm_log_read(&p, cal_log, CAL_LOG_MAX - 1);
+		if ( n < 0 ) n = 0;
+		for ( at = 0; at + m <= n; at++ ) {
+			for ( k = 0; k < m && cal_log[at + k] == (UB)w[k]; k++ ) ;
+			if ( k < m ) continue;
+			at += m;
+			for ( k = 0; line != NULL && k < max - 1 && at + k < n && cal_log[at + k] != '\n'; k++ ) {
+				line[k] = (char)cal_log[at + k];
+			}
+			if ( line != NULL ) line[k] = 0;
+			return TRUE;
+		}
+		tk_dly_tsk(100);
+	}
+	return FALSE;
+}
+
+LOCAL UD cal_now( void )
+{
+	UD	pos = 0;
+
+	while ( tm_log_read(&pos, cal_log, CAL_LOG_MAX) > 0 ) ;
+	return pos;
+}
+
+/* The program started on the object, until it says it is ready: what it said after "ready " */
+LOCAL ID cal_start( CONST TS_UUID *obj, char *ready, INT max )
+{
+	TS_UUID	prog, pu;
+	T_OBCRE	c;
+	UD	pos = cal_now();
+	ID	pid;
+
+	if ( ts_str_to_uuid(SYSDEF_PROG_CALENDAR, &prog) < E_OK ) return E_SYS;
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_PROCESS;
+	c.prog = prog;
+	c.arg = obj;
+	c.argsz = sizeof(*obj);
+	if ( ob_cre_obj(&c, &pu) < E_OK ) return E_OBJ;
+	pid = knl_prc_of_uuid(&pu);
+	if ( pid <= 0 || !cal_wait(pos, "calendar: ready ", ready, max) ) return E_TMOUT;
+	return pid;
+}
+
+LOCAL void cal_stop( ID pid )
+{
+	T_PSTS	ps;
+
+	(void)ts_ter_prc(pid, TS_ABORT_TERM);
+	(void)ts_wai_prc(pid, &ps, 5000);
+}
+
+/* Every occurrence of w taken out of a record of n bytes: the new length */
+LOCAL INT cut_all( UB *s, INT n, CONST char *w )
+{
+	INT	m = s_len(w), i = 0, k;
+
+	while ( i + m <= n ) {
+		for ( k = 0; k < m && s[i + k] == (UB)w[k]; k++ ) ;
+		if ( k < m ) {
+			i++;
+			continue;
+		}
+		knl_memcpy(s + i, s + i + m, n - i - m);
+		n -= m;
+	}
+	return n;
+}
+
+/* The object the link with that relationship points at in a record */
+LOCAL BOOL link_with( CONST UB *x, INT n, CONST char *rel, TS_UUID *p_u )
+{
+	CTEL	el[16];
+	UB	r[64];
+	INT	k = ct_links(x, n, el, 16), i;
+
+	for ( i = 0; i < k; i++ ) {
+		INT	l = ct_attr_text(x + el[i].at, el[i].len, "relationship", r, sizeof(r));
+
+		if ( l > 0 && str_eq(r, rel) && ct_target(x + el[i].at, el[i].len, p_u) ) return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * A 予定表 as a system before wrote it, its links to the 休日 object and
+ * the template without a relationship: the program finds them by their
+ * names and gives the links the words 休日 and 年月日実身; the 休日
+ * object renamed afterwards is found all the same, by its link.
+ */
+LOCAL void test_relation( void )
+{
+	TS_UUID	src, cal, hol, tpl;
+	UB	*x;
+	SZ	size = 0;
+	INT	n;
+	char	first[160], again[160];
+	ID	pid;
+
+	cal_log = (UB *)Kmalloc(CAL_LOG_MAX);
+	KT_ASSERT(cal_log != NULL);
+	if ( cal_log == NULL ) return;
+	KT_ASSERT_ER(ts_str_to_uuid(CAL_SAMPLE, &src), E_OK);
+	/* the person's, as the desktop makes a copy, for the program to write it */
+	knl_ob_make_for_person(TRUE);
+	KT_ASSERT_ER(om_store_copy(&src, (CONST UB *)"KT予定表", TRUE, &cal), E_OK);
+	knl_ob_make_for_person(FALSE);
+	x = om_obj_record(&cal, 0, &size);
+	KT_ASSERT(x != NULL);
+	if ( x == NULL ) {
+		Kfree(cal_log);
+		return;
+	}
+	n = cut_all(x, (INT)size, " relationship=\"休日\"");
+	n = cut_all(x, n, " relationship=\"年月日実身\"");
+	KT_ASSERT(!has(x, n, "relationship=\"休日\""));
+	KT_ASSERT_ER(om_obj_record_put(&cal, 0, OB_RT_TAD, 0, x, (SZ)n), E_OK);
+	Kfree(x);
+
+	pid = cal_start(&cal, first, sizeof(first));
+	KT_ASSERT(pid > 0);
+	if ( pid > 0 ) cal_stop(pid);
+	tm_printf((UB *)"  as written before: ready %s\n", first);
+	KT_ASSERT(cal_wait(0, "calendar: relationship given", NULL, 0));
+	KT_ASSERT(has((CONST UB *)first, s_len(first), " template") && !has((CONST UB *)first, s_len(first), "holidays 0"));
+	x = om_obj_record(&cal, 0, &size);
+	KT_ASSERT(x != NULL && link_with(x, (INT)size, "休日", &hol) && link_with(x, (INT)size, "年月日実身", &tpl));
+	if ( x != NULL ) Kfree(x);
+
+	/* the 休日 object and the template renamed: found by the links' relationships */
+	KT_ASSERT_ER(om_store_rename(&hol, (CONST UB *)"KTやすみ"), E_OK);
+	KT_ASSERT_ER(om_store_rename(&tpl, (CONST UB *)"KT日の原紙"), E_OK);
+	pid = cal_start(&cal, again, sizeof(again));
+	KT_ASSERT(pid > 0);
+	if ( pid > 0 ) cal_stop(pid);
+	tm_printf((UB *)"  renamed: ready %s\n", again);
+	KT_ASSERT(has((CONST UB *)again, s_len(again), " template") && !has((CONST UB *)again, s_len(again), "holidays 0"));
+
+	(void)ob_del_obj(&hol);
+	(void)ob_del_obj(&tpl);
+	(void)ob_del_obj(&cal);
+	Kfree(cal_log);
+}
+
 EXPORT void ktest_cal( void )
 {
 	tm_printf((UB *)"\n[cal] 予定表 (design 11.10)\n");
@@ -394,4 +562,5 @@ EXPORT void ktest_cal( void )
 	KT_RUN(test_box);
 	KT_RUN(test_frag);
 	KT_RUN(test_apps);
+	KT_RUN_SCREEN(test_relation);
 }

@@ -89,23 +89,49 @@ LOCAL void test_pages( void )
 LOCAL void test_fit( void )
 {
 	T_DPRECT	r;
+	INT		den;
 
-	/* a screen 1280 by 760 above the message line: five eighths, in the middle */
-	KT_ASSERT_EQ(dt_slide_fit(1280, 760, 1920, 1080, &r), 5);
-	KT_ASSERT_EQ(r.left, 40);
-	KT_ASSERT_EQ(r.top, 42);
-	KT_ASSERT_EQ(r.right - r.left, 1200);
-	KT_ASSERT_EQ(r.bottom - r.top, 675);
+	/* a screen 1280 by 800: two thirds, as wide as the screen, the margin above and below only */
+	KT_ASSERT_EQ(dt_slide_fit(1280, 800, 1920, 1080, &r, &den), 2);
+	KT_ASSERT_EQ(den, 3);
+	KT_ASSERT_EQ(r.left, 0);
+	KT_ASSERT_EQ(r.top, 40);
+	KT_ASSERT_EQ(r.right - r.left, 1280);
+	KT_ASSERT_EQ(r.bottom - r.top, 720);
 
-	/* the narrower way decides */
-	KT_ASSERT_EQ(dt_slide_fit(800, 600, 1920, 1080, &r), 3);
-	KT_ASSERT_EQ(r.right - r.left, 720);
-	KT_ASSERT_EQ(r.top, ( 600 - 405 ) / 2);
+	/* the narrower way decides: here the height, the margin left and right only */
+	KT_ASSERT_EQ(dt_slide_fit(1280, 600, 1920, 1080, &r, &den), 5);
+	KT_ASSERT_EQ(den, 9);
+	KT_ASSERT_EQ(r.top, 0);
+	KT_ASSERT_EQ(r.bottom - r.top, 600);
+	KT_ASSERT_EQ(r.right - r.left, 1066);
+	KT_ASSERT_EQ(r.left, ( 1280 - 1066 ) / 2);
 
-	/* never smaller than an eighth, larger when the screen is */
-	KT_ASSERT_EQ(dt_slide_fit(100, 100, 1920, 1080, &r), 1);
-	KT_ASSERT_EQ(dt_slide_fit(1920, 1080, 960, 540, &r), 16);
-	KT_ASSERT_EQ(dt_slide_fit(1024, 768, 0, 0, &r), 4);
+	/* a screen of the slides' own shape is filled whole, at any size */
+	KT_ASSERT_EQ(dt_slide_fit(1366, 768, 1366, 768, &r, &den), 1);
+	KT_ASSERT_EQ(den, 1);
+	KT_ASSERT_EQ(dt_slide_fit(1600, 900, 1920, 1080, &r, &den), 5);
+	KT_ASSERT_EQ(den, 6);
+	KT_ASSERT_EQ(r.left, 0);
+	KT_ASSERT_EQ(r.top, 0);
+	KT_ASSERT_EQ(r.right, 1600);
+	KT_ASSERT_EQ(r.bottom, 900);
+
+	/* never smaller than an eighth, nor larger than four times */
+	KT_ASSERT_EQ(dt_slide_fit(100, 100, 1920, 1080, &r, &den), 1);
+	KT_ASSERT_EQ(den, 8);
+	KT_ASSERT_EQ(dt_slide_fit(1920, 1080, 960, 540, &r, &den), 2);
+	KT_ASSERT_EQ(den, 1);
+	KT_ASSERT_EQ(dt_slide_fit(3840, 2160, 480, 270, &r, &den), 4);
+	KT_ASSERT_EQ(den, 1);
+	KT_ASSERT_EQ(r.right - r.left, 1920);
+	KT_ASSERT_EQ(r.left, 960);
+
+	/* no size given: 1920 by 1080 */
+	KT_ASSERT_EQ(dt_slide_fit(1024, 768, 0, 0, &r, &den), 8);
+	KT_ASSERT_EQ(den, 15);
+	KT_ASSERT_EQ(r.right - r.left, 1024);
+	KT_ASSERT_EQ(r.bottom - r.top, 576);
 }
 
 /* the sample in the system, as it is on the disk */

@@ -30,6 +30,9 @@ typedef struct cyclic_handler_control_block {
 	UINT	cycstat;	/* Cyclic handler state */
 	UD	cyctim;		/* Cyclic time (ns) */
 	TMEB	cyctmeb;	/* Timer event block */
+#if KLK_FINE_OBJ
+	volatile ID	cycrun;	/* the processor calling the handler now, 0 none */
+#endif
 #if USE_OBJECT_NAME
 	UB	name[OBJECT_NAME_LENGTH];	/* name */
 #endif
@@ -76,6 +79,9 @@ typedef struct alarm_handler_control_block {
 	FP	almhdr;		/* Alarm handler address */
 	UINT	almstat;	/* Alarm handler state */
 	TMEB	almtmeb;	/* Timer event block */
+#if KLK_FINE_OBJ
+	volatile ID	almrun;	/* the processor calling the handler now, 0 none */
+#endif
 #if USE_OBJECT_NAME
 	UB	name[OBJECT_NAME_LENGTH];	/* name */
 #endif

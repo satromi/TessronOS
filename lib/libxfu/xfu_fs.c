@@ -14,7 +14,10 @@
  *	The file layer names a file by a path of at most FS_PATH_MAX bytes,
  *	each name at most FS_NAME_MAX (any name FAT holds); a path longer
  *	is refused with E_LIMIT. A file's time is set with fs_utime where
- *	the volume keeps one.
+ *	the volume keeps one. A tree below a disk's root opened from its
+ *	device object (fs_opn_vol) names its files by paths below that root
+ *	(fs_openat and the others of its kind): the file layer's tree of
+ *	paths is not looked at.
  */
 
 #include "xfu_in.h"
@@ -25,15 +28,36 @@ LOCAL T_XFUFS *fs_of( void *ctx )
 	return (T_XFUFS *)ctx;
 }
 
-/* The whole path of a path of the tree, in fs->path */
+/* The whole path of a path of the tree, in fs->path: below the disk's root, without a '/' first, for a vd */
 LOCAL ER full( T_XFUFS *fs, CONST UB *path )
 {
 	ER	er = xfu_join((UB *)fs->path, sizeof(fs->path), (CONST UB *)fs->root, path);
+	INT	k = 0, n, i;
 
+	if ( er >= E_OK && fs->vd >= 0 ) {
+		while ( fs->path[k] == '/' ) k++;
+		n = xfu_slen((CONST UB *)fs->path + k);
+		for ( i = 0; i <= n; i++ ) fs->path[i] = fs->path[i + k];
+		if ( fs->path[0] == 0 ) {
+			fs->path[0] = '.';
+			fs->path[1] = 0;
+		}
+	}
 	if ( er >= E_OK && xfu_slen((CONST UB *)fs->path) >= FS_PATH_MAX ) {
 		er = E_LIMIT;
 	}
 	return er;
+}
+
+/* The file layer's calls, by the path in fs->path: below the disk's root, or in the file layer's tree */
+LOCAL INT f_open( T_XFUFS *fs, UINT oflags )
+{
+	return ( fs->vd >= 0 ) ? fs_openat(fs->vd, fs->path, oflags) : fs_open(fs->path, oflags);
+}
+
+LOCAL ER f_stat( T_XFUFS *fs, T_FSTAT *st )
+{
+	return ( fs->vd >= 0 ) ? fs_statat(fs->vd, fs->path, st) : fs_stat(fs->path, st);
 }
 
 LOCAL INT t_open( void *ctx, CONST UB *path, UINT mode )
@@ -50,7 +74,7 @@ LOCAL INT t_open( void *ctx, CONST UB *path, UINT mode )
 	if ( er < E_OK ) {
 		return (INT)er;
 	}
-	fd = fs_open(fs->path, ( mode == XFU_O_WRITE ) ? ( O_WRONLY | O_CREAT | O_TRUNC ) : O_RDONLY);
+	fd = f_open(fs, ( mode == XFU_O_WRITE ) ? ( O_WRONLY | O_CREAT | O_TRUNC ) : O_RDONLY);
 	if ( fd < 0 ) {
 		return ( fd == EX_NOENT ) ? E_NOEXS : E_IO;
 	}
@@ -111,7 +135,7 @@ LOCAL ER t_stat( void *ctx, CONST UB *path, T_XFUENT *e )
 	if ( er < E_OK ) {
 		return er;
 	}
-	if ( fs_stat(fs->path, &st) < 0 ) {
+	if ( f_stat(fs, &st) < 0 ) {
 		return E_NOEXS;
 	}
 	for ( i = 0; path[i] != 0; i++ ) {
@@ -137,7 +161,7 @@ LOCAL ER t_list( void *ctx, CONST UB *path, XFU_ENTCB cb, void *arg )
 	if ( er < E_OK ) {
 		return er;
 	}
-	fd = fs_open(fs->path, O_RDONLY | O_DIRECTORY);
+	fd = f_open(fs, O_RDONLY | O_DIRECTORY);
 	if ( fd < 0 ) {
 		return E_NOEXS;
 	}
@@ -156,8 +180,9 @@ LOCAL ER t_list( void *ctx, CONST UB *path, XFU_ENTCB cb, void *arg )
 			e->size = (D)de[i].size;
 			e->mtime = 0;
 			fs->path[plen] = 0;
+			if ( fs->vd >= 0 && plen == 1 && fs->path[0] == '.' ) fs->path[0] = 0;	/* the root: names alone */
 			if ( xfu_join((UB *)fs->path, FS_PATH_MAX, (CONST UB *)fs->path, de[i].name) >= E_OK
-			  && fs_stat(fs->path, &st) >= 0 ) {
+			  && f_stat(fs, &st) >= 0 ) {
 				e->mtime = (D)st.mtime;
 			}
 			fs->path[plen] = 0;
@@ -182,7 +207,7 @@ LOCAL ER t_mkdir( void *ctx, CONST UB *path )
 	if ( er < E_OK ) {
 		return er;
 	}
-	return ( fs_mkdir(fs->path) < 0 ) ? E_IO : E_OK;
+	return ( ( ( fs->vd >= 0 ) ? fs_mkdirat(fs->vd, fs->path) : fs_mkdir(fs->path) ) < 0 ) ? E_IO : E_OK;
 }
 
 LOCAL ER t_utime( void *ctx, CONST UB *path, D mtime )
@@ -193,7 +218,7 @@ LOCAL ER t_utime( void *ctx, CONST UB *path, D mtime )
 	if ( er < E_OK ) {
 		return er;
 	}
-	er = fs_utime(fs->path, (UD)mtime);
+	er = ( fs->vd >= 0 ) ? fs_utimeat(fs->vd, fs->path, (UD)mtime) : fs_utime(fs->path, (UD)mtime);
 	return ( er >= 0 ) ? E_OK : ( er == EX_NOTSUP ) ? E_NOSPT : ( er == EX_NOENT ) ? E_NOEXS : E_IO;
 }
 
@@ -207,6 +232,7 @@ EXPORT ER xfu_fs_tree( T_XFUFS *fs, CONST char *root, T_XFUTREE *t )
 	if ( xfu_scpy((UB *)fs->root, sizeof(fs->root), (CONST UB *)root) != xfu_slen((CONST UB *)root) ) {
 		return E_LIMIT;
 	}
+	fs->vd = -1;
 	for ( i = 0; i < XFU_FS_OPEN; i++ ) fs->fd[i] = -1;
 	t->ctx = fs;
 	t->open = t_open;
@@ -219,4 +245,16 @@ EXPORT ER xfu_fs_tree( T_XFUFS *fs, CONST char *root, T_XFUTREE *t )
 	t->utime = t_utime;
 	t->namemax = FS_NAME_MAX - 1;
 	return E_OK;
+}
+
+EXPORT ER xfu_vol_tree( T_XFUFS *fs, INT vd, CONST char *root, T_XFUTREE *t )
+{
+	ER	er;
+
+	if ( vd < 0 ) {
+		return E_PAR;
+	}
+	er = xfu_fs_tree(fs, ( root != NULL ) ? root : "", t);
+	if ( er >= E_OK ) fs->vd = vd;
+	return er;
 }

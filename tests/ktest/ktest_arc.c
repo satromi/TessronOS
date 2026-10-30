@@ -27,6 +27,12 @@
  *	is stored as well as compressed, refused when the archive has one,
  *	deleted, copied from another archive, and the sample archive is
  *	copied in, taken out and packed again.
+ *
+ *	An empty archive made as the template 空書庫 makes one, filled with
+ *	a network and taken out elsewhere, gives back each object with the
+ *	programs of its applist and the one it opens with; and a book whose
+ *	links name programs of their own (VLINK.appl) gives the objects they
+ *	point at those programs to open with.
  */
 
 #include "ktest.h"
@@ -37,6 +43,7 @@
 #include <ts/sysdef.h>
 #include <ts/bpk.h>
 #include <ts/btbk.h>
+#include <ts/om.h>
 #include "../../peripheral_kernel/obj/obj.h"
 #include "../../application/archive/arc_arg.h"
 #include <stdlib.h>
@@ -181,12 +188,12 @@ LOCAL INT links_of( CONST UB *x, INT n, TS_UUID *out, INT max )
 /* The metadata of an object, to free; NULL none */
 LOCAL UB *meta_of( CONST TS_UUID *u, INT *p_len )
 {
-	UB	*j = (UB *)Kmalloc(OB_ATR_MAX + 1);
+	UB	*j = (UB *)Kmalloc(KT_META_ROOM + 1);
 	SZ	asz = 0;
 	ID	key = ob_opn_obj(u, OB_OP_ATRRD);
 
 	*p_len = 0;
-	if ( j != NULL && key > 0 && ob_get_atr(key, j, OB_ATR_MAX, &asz) >= E_OK ) {
+	if ( j != NULL && key > 0 && ob_get_atr(key, j, KT_META_ROOM, &asz) >= E_OK ) {
 		j[asz] = 0;
 		*p_len = (INT)asz;
 	} else if ( j != NULL ) {
@@ -242,10 +249,32 @@ LOCAL INT reach( CONST TS_UUID *root, TS_UUID *out, INT max )
 	return n;
 }
 
+/* The links of an object given up: its xmlTAD records emptied, its link table made again on close */
+LOCAL void unlink_all( CONST TS_UUID *u )
+{
+	T_OBREC	r[32];
+	INT	cnt = 0, i;
+	ID	k = ob_opn_obj(u, OB_OP_ALL);
+
+	if ( k <= 0 ) return;
+	if ( ob_lst_rec(k, r, 32, &cnt) >= E_OK ) {
+		for ( i = 0; i < cnt && i < 32; i++ ) {
+			if ( r[i].rt == OB_RT_TAD ) (void)ob_trn_rec(k, r[i].recno, 0);
+		}
+	}
+	ob_cls_obj(k);
+}
+
+/*
+ * Objects that link to one another (a text back to its figure, a cycle)
+ * keep each other's count above zero, and deleting them one by one would
+ * leave them as 隠れ屑実身 on the system volume: their links go first.
+ */
 LOCAL void unmake( TS_UUID *u, INT n )
 {
 	INT	i;
 
+	for ( i = 0; i < n; i++ ) unlink_all(&u[i]);
 	for ( i = n - 1; i >= 0; i-- ) (void)ob_del_obj(&u[i]);
 }
 
@@ -253,8 +282,8 @@ LOCAL void unmake( TS_UUID *u, INT n )
 
 LOCAL TS_UUID	cab0;
 
-/* An object: its name, the program that opens it, its times and window, record 0 */
-LOCAL ER make( CONST char *name, CONST char *app, CONST char *xml, TS_UUID *u )
+/* An object: its name, its applist, its times and window, record 0 */
+LOCAL ER make_apps( CONST char *name, CONST char *apps, CONST char *xml, TS_UUID *u )
 {
 	char	*json = (char *)Kmalloc(1024);
 	T_OBCRE	c;
@@ -266,9 +295,9 @@ LOCAL ER make( CONST char *name, CONST char *app, CONST char *xml, TS_UUID *u )
 	if ( json == NULL ) return E_NOMEM;
 	tm_sprintf((UB *)json, (UB *)"{\"name\":\"%s\",\"makeDate\":\"" DATE_MAKE "\",\"updateDate\":\"" DATE_UPDATE "\","
 		   "\"accessDate\":\"" DATE_UPDATE "\",\"periodDate\":null,\"editable\":true,\"deletable\":true,"
-		   "\"applist\":{\"%s\":{\"name\":\"x\",\"defaultOpen\":true}},"
+		   "\"applist\":%s,"
 		   "\"window\":{\"pos\":{\"x\":110,\"y\":90},\"width\":500,\"height\":300,\"backgroundColor\":\"#ffeecc\"}}",
-		   name, app);
+		   name, apps);
 	knl_memset(&c, 0, sizeof(c));
 	c.type = OB_T_STORAGE;
 	c.sub = OB_S_FILE;
@@ -284,6 +313,15 @@ LOCAL ER make( CONST char *name, CONST char *app, CONST char *xml, TS_UUID *u )
 	if ( er >= E_OK && xml != NULL ) er = ob_wri_rec(k, rec, 0, xml, s_len(xml), &asz);
 	ob_cls_obj(k);
 	return er;
+}
+
+/* An object the program app opens */
+LOCAL ER make( CONST char *name, CONST char *app, CONST char *xml, TS_UUID *u )
+{
+	char	apps[96];
+
+	tm_sprintf((UB *)apps, (UB *)"{\"%s\":{\"name\":\"x\",\"defaultOpen\":true}}", app);
+	return make_apps(name, apps, xml, u);
 }
 
 LOCAL ER rewrite0( CONST TS_UUID *u, CONST char *xml, INT len )
@@ -762,8 +800,10 @@ LOCAL void test_pack( void )
 	KT_ASSERT_EQ(a.file[0].head.f_ltime, 0xFFFFFFFFU);
 	KT_ASSERT_EQ(a.file[0].head.f_atype, 2);
 	KT_ASSERT(a.file[0].nexec >= 1 && a.file[0].exec[0].appl[1] == 0x0002);
-	KT_ASSERT(a.file[0].exec[0].haswin && a.file[0].exec[0].wr - a.file[0].exec[0].wl == 500);
-	KT_ASSERT(a.file[0].exec[0].hasbg && ( a.file[0].exec[0].bgraw & 0xFFFFFF ) == 0xFFEECC);
+	KT_ASSERT(a.file[0].nexec >= 1 && a.file[0].exec[0].haswin
+		  && a.file[0].exec[0].wr - a.file[0].exec[0].wl == 500);
+	KT_ASSERT(a.file[0].nexec >= 1 && a.file[0].exec[0].hasbg
+		  && ( a.file[0].exec[0].bgraw & 0xFFFFFF ) == 0xFFEECC);
 	/* record 0 as binary TAD with its picture */
 	for ( i = 0; i < a.file[0].nrec; i++ ) {
 		if ( a.file[0].rec[i].type == BPK_RT_TAD ) {
@@ -826,7 +866,7 @@ LOCAL void test_unpack( void )
 	same_meta(&nb, &got[1]);
 	same_meta(&nc, &got[2]);
 	{
-		/* taken out of a book: made by 書庫解凍's code, and it says so */
+		/* taken out of a book: made by 書庫管理, and it says so */
 		UB	*m = meta_of(&got[0], &len);
 		char	mk[64];
 
@@ -835,7 +875,7 @@ LOCAL void test_unpack( void )
 			meta_str(m, len, "maker", mk, sizeof(mk));
 			Kfree(m);
 		}
-		KT_ASSERT(knl_strcmp(mk, "書庫解凍") == 0);
+		KT_ASSERT(knl_strcmp(mk, "書庫管理") == 0);
 	}
 	KT_ASSERT(same_tad(&na, &got[0]));
 	KT_ASSERT(same_tad(&nb, &got[1]));
@@ -1061,7 +1101,7 @@ LOCAL void test_add_delete( void )
 
 	/* an archive inside a network: its book goes as it is and comes out as an archive */
 	{
-		TS_UUID	outer, root, got[4];
+		TS_UUID	outer, root, got[4], copy;
 		char	*x = (char *)Kmalloc(1024);
 		INT	n, len;
 
@@ -1072,6 +1112,7 @@ LOCAL void test_add_delete( void )
 		n += tm_sprintf((UB *)x + n, (UB *)"</figure></tad>\n");
 		KT_ASSERT_ER(rewrite0(&outer, x, n), E_OK);
 		Kfree(x);
+		copy = a3;
 		KT_ASSERT_ER(make_archive("KT書庫の書庫", &a3), E_OK);	/* a3 now a new, empty one */
 		KT_ASSERT_EQ(op(ARC_OP_PACK, &a3, &outer, BPK_LH5), 0);
 		KT_ASSERT(said("archive: packed 2 objects"));
@@ -1092,6 +1133,8 @@ LOCAL void test_add_delete( void )
 		(void)rewrite0(&kcab, "<tad version=\"1.0\" encoding=\"UTF-8\"><figure></figure></tad>\n", 61);
 		unmake(got, n);
 		(void)ob_del_obj(&outer);
+		(void)ob_del_obj(&copy);
+		(void)ob_del_obj(&a3);
 	}
 }
 
@@ -1335,6 +1378,210 @@ LOCAL void test_mcard( void )
 	(void)ob_del_obj(&am);
 }
 
+/* ---------------------------------------------------------------- the programs that open each object */
+
+#define APPS_MAX	8
+
+/* The ids of an object's applist, and the one it opens with; how many */
+LOCAL INT apps_of( CONST TS_UUID *u, UB (*ids)[OM_APP_ID], UB *dflt )
+{
+	INT	n;
+
+	for ( n = 0; n < APPS_MAX && om_store_app_id(u, n, ids[n], OM_APP_ID) > 0; n++ ) ;
+	if ( om_store_default_app(u, dflt, OM_APP_ID) <= 0 ) dflt[0] = 0;
+	return n;
+}
+
+/* Whether an object's applist names the program id */
+LOCAL BOOL names_app( UB (*ids)[OM_APP_ID], INT n, CONST UB *id )
+{
+	INT	i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( same((CONST char *)ids[i], (CONST char *)id) ) return TRUE;
+	}
+	return FALSE;
+}
+
+/* Two objects' applists name the same programs and open with the same one */
+LOCAL BOOL same_apps( CONST TS_UUID *a, CONST TS_UUID *b )
+{
+	UB	ia[APPS_MAX][OM_APP_ID], ib[APPS_MAX][OM_APP_ID], da[OM_APP_ID], db[OM_APP_ID];
+	INT	na = apps_of(a, ia, da), nb = apps_of(b, ib, db), i;
+	BOOL	ok = (BOOL)( na == nb && na > 0 && same((CONST char *)da, (CONST char *)db) );
+
+	for ( i = 0; ok && i < na; i++ ) ok = names_app(ib, nb, ia[i]);
+	if ( !ok ) {
+		tm_printf((UB *)"  applists: %d programs opening with %s, %d with %s\n", na, da, nb, db);
+		for ( i = 0; i < nb; i++ ) tm_printf((UB *)"    %s\n", ib[i]);
+	}
+	return ok;
+}
+
+/* The one an object opens with is id, and its applist has n programs */
+LOCAL BOOL opens_with( CONST TS_UUID *u, CONST char *id, INT n )
+{
+	UB	ids[APPS_MAX][OM_APP_ID], d[OM_APP_ID];
+	INT	k = apps_of(u, ids, d);
+
+	if ( k != n || !same((CONST char *)d, id) ) {
+		INT	i;
+
+		tm_printf((UB *)"  %d programs, opening with %s\n", k, d);
+		for ( i = 0; i < k; i++ ) tm_printf((UB *)"    %s\n", ids[i]);
+	}
+	return (BOOL)( k == n && same((CONST char *)d, id) );
+}
+
+LOCAL CONST char	*ap_fig = "{\"virtual-object-list\":{\"name\":\"仮身一覧\",\"defaultOpen\":false},"
+				  "\"basic-figure-editor\":{\"name\":\"基本図形編集\",\"defaultOpen\":true}}";
+LOCAL CONST char	*ap_calc = "{\"basic-calc-editor\":{\"name\":\"基本表計算\",\"defaultOpen\":true},"
+				   "\"basic-text-editor\":{\"name\":\"基本文章編集\",\"defaultOpen\":false}}";
+LOCAL CONST char	*ap_text = "{\"basic-text-editor\":{\"name\":\"基本文章編集\",\"defaultOpen\":true},"
+				   "\"basic-figure-editor\":{\"name\":\"基本図形編集\",\"defaultOpen\":false},"
+				   "\"virtual-object-list\":{\"name\":\"仮身一覧\",\"defaultOpen\":false}}";
+
+/* The application ID of a link record: 8000 mid 8000 */
+LOCAL void link_appl( BPKFILE *f, INT nth, UINT mid )
+{
+	INT	r, l = 0;
+
+	for ( r = 0; r < f->nrec; r++ ) {
+		if ( f->rec[r].type != BPK_RT_LINK ) continue;
+		if ( l++ == nth ) {
+			UB	*p = (UB *)f->rec[r].data;
+
+			put16le(p + LK_APPL, 0x8000);
+			put16le(p + LK_APPL + 2, mid);
+			put16le(p + LK_APPL + 4, 0x8000);
+		}
+	}
+}
+
+/*
+ * 空書庫 there and back: an archive object made as the template makes
+ * one, a figure that opens in 基本図形編集 (or 仮身一覧) put in with its
+ * links to a table that opens in 基本表計算 (or 基本文章編集) and a text
+ * that opens in 基本文章編集 (or the two others), packed, and taken out
+ * into a cabinet: the same names, the same record 0, the same programs
+ * opening with the same one. Then the book written again with the
+ * figure's links naming programs of their own -- 基本文章編集 for the
+ * table, which its applist has but does not open with, and 基本表計算
+ * for the text, which its applist does not have -- and taken out: each
+ * opens with what its link names, and the text has that one besides.
+ */
+LOCAL void test_apps( void )
+{
+	TS_UUID		src[3], ar, av, root, got[8], back[8];
+	BPKARC		a;
+	BPKWFILE	f[3];
+	BPKWRITE	w;
+	BPKWSTAT	st;
+	UB		*out = NULL, mk[64];
+	char		*x = (char *)Kmalloc(2048), err[160];
+	UINT		len = 0;
+	INT		n, nb = 0, i, rec = -1, ml = 0;
+	SZ		asz = 0;
+	ID		k;
+
+	if ( !made || x == NULL ) {
+		if ( x != NULL ) Kfree(x);
+		KT_SKIP("no cabinet to take out into");
+	}
+	KT_ASSERT_ER(make_apps("KT付箋の表", ap_calc,
+			       "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>表のつもりの文章</p></document></tad>\n",
+			       &src[1]), E_OK);
+	KT_ASSERT_ER(make_apps("KT付箋の文章", ap_text,
+			       "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>三つで開ける文章</p></document></tad>\n",
+			       &src[2]), E_OK);
+	n = tm_sprintf((UB *)x, (UB *)"<tad version=\"1.0\" encoding=\"UTF-8\"><figure>"
+		       "<figView left=\"0\" top=\"0\" right=\"400\" bottom=\"300\"/><figScale hunit=\"-72\" vunit=\"-72\"/>");
+	n += put_link(x + n, &src[1], 0, 21);
+	n += put_link(x + n, &src[2], 1, 22);
+	n += tm_sprintf((UB *)x + n, (UB *)"</figure></tad>\n");
+	KT_ASSERT_ER(make_apps("KT付箋の図形", ap_fig, x, &src[0]), E_OK);
+	Kfree(x);
+
+	/* in, and out */
+	KT_ASSERT_ER(make_archive("KT空書庫", &ar), E_OK);
+	KT_ASSERT_EQ(op(ARC_OP_PACK, &ar, &src[0], BPK_LH5), 0);
+	KT_ASSERT(said("archive: packed 3 objects"));
+	KT_ASSERT_EQ(op(ARC_OP_UNPACK, &ar, &kcab, 0), 0);
+	KT_ASSERT(said("archive: unpacked 3 objects"));
+	if ( !said("archive: unpacked") ) show_log();
+	KT_ASSERT(root_said(&root));
+	n = reach(&root, got, 8);
+	KT_ASSERT_EQ(n, 3);
+	for ( i = 0; i < n && i < 3; i++ ) {
+		char	na[128], nb2[128];
+		UB	*m1 = meta_of(&src[i], &ml), *m2;
+		INT	l2 = 0;
+
+		m2 = meta_of(&got[i], &l2);
+		na[0] = nb2[0] = 0;
+		if ( m1 != NULL ) meta_str(m1, ml, "name", na, sizeof(na));
+		if ( m2 != NULL ) meta_str(m2, l2, "name", nb2, sizeof(nb2));
+		KT_ASSERT(na[0] != 0 && same(na, nb2));
+		if ( m1 != NULL ) Kfree(m1);
+		if ( m2 != NULL ) Kfree(m2);
+		KT_ASSERT(same_tad(&src[i], &got[i]));
+		KT_ASSERT(same_apps(&src[i], &got[i]));
+	}
+
+	/* the figure's links naming programs of their own */
+	if ( book_of(&ar, &a) && a.nfiles == 3 ) {
+		link_appl(&a.file[0], 0, 0x0003);
+		link_appl(&a.file[0], 1, 0x0009);
+		for ( i = 0; i < 3; i++ ) {
+			f[i].head = a.file[i].head;
+			f[i].nrec = a.file[i].nrec;
+			f[i].rec = a.file[i].rec;
+		}
+		knl_memset(&w, 0, sizeof(w));
+		w.name = a.name;
+		w.time = a.head.time;
+		w.method = BPK_LH5;
+		w.nfiles = 3;
+		w.file = f;
+		w.ext = a.plain;
+		w.extlen = a.extsize;
+		KT_ASSERT_ER(bpk_write(&w, &out, &len, &st, err, sizeof(err)), E_OK);
+		bpk_free(&a);
+	}
+	KT_ASSERT(out != NULL);
+	if ( out != NULL ) {
+		KT_ASSERT_ER(make_archive("KT仮身の付箋", &av), E_OK);
+		k = ob_opn_obj(&av, OB_OP_ALL);
+		KT_ASSERT(k > 0);
+		if ( k > 0 ) {
+			KT_ASSERT_ER(ob_apd_rec(k, OB_RT_SYSDATA, 0, &rec), E_OK);
+			KT_ASSERT_ER(ob_wri_rec(k, rec, 0, out, len, &asz), E_OK);
+			ob_cls_obj(k);
+		}
+		free(out);
+		KT_ASSERT_EQ(op(ARC_OP_UNPACK, &av, &kcab, 0), 0);
+		KT_ASSERT(said("archive: unpacked 3 objects"));
+		KT_ASSERT(root_said(&root));
+		nb = reach(&root, back, 8);
+		KT_ASSERT_EQ(nb, 3);
+		if ( nb == 3 ) {
+			KT_ASSERT(same_apps(&src[0], &back[0]));
+			KT_ASSERT(opens_with(&back[1], "basic-text-editor", 2));
+			KT_ASSERT(opens_with(&back[2], "basic-calc-editor", 4));
+			mk[0] = 0;
+			(void)om_store_app_id(&back[2], 3, mk, sizeof(mk));
+			KT_ASSERT(same((CONST char *)mk, "basic-calc-editor"));	/* put after those its records name */
+		}
+		(void)ob_del_obj(&av);
+	}
+
+	(void)rewrite0(&kcab, "<tad version=\"1.0\" encoding=\"UTF-8\"><figure></figure></tad>\n", 61);
+	if ( nb > 0 ) unmake(back, nb);
+	unmake(got, n);
+	unmake(src, 3);
+	(void)ob_del_obj(&ar);
+}
+
 /* With nothing it says what it is for and ends */
 LOCAL void test_noarg( void )
 {
@@ -1378,12 +1625,16 @@ EXPORT void ktest_arc( void )
 		KT_RUN(test_broken_book);
 		KT_RUN(test_sample);
 		KT_RUN(test_mcard);
+		KT_RUN(test_apps);
 		KT_RUN(test_noarg);
 		if ( made ) {
+			TS_UUID	net[3];
+
+			net[0] = na;
+			net[1] = nb;
+			net[2] = nc;
 			(void)ob_del_obj(&arc1);
-			(void)ob_del_obj(&nc);
-			(void)ob_del_obj(&nb);
-			(void)ob_del_obj(&na);
+			unmake(net, 3);
 			(void)ob_del_obj(&kcab);
 		}
 	}

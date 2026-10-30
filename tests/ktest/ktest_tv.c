@@ -1294,7 +1294,7 @@ LOCAL void test_overlays( void )
 }
 
 /*
- * What 書庫解凍 makes of a BTRON text (design 17.16): an overlay whose
+ * What taking an archive out makes of a BTRON text (design 11.20): an overlay whose
  * text begins with a fill line, and so stands at the foot, overlay 3 put
  * on, the document's own 禁則, variables, a character kept as <tchar>,
  * and a figure's own kind of line.
@@ -1393,7 +1393,7 @@ LOCAL void test_bpk_forms( void )
 }
 
 /*
- * The forms 書庫解凍 writes that change how things are drawn: letters
+ * The forms taking an archive out writes that change how things are drawn: letters
  * turned (文字回転) and moved off the baseline (文字基準位置移動), a
  * figure's paper overlay, and a link sized the way a binary TAD sizes
  * it. Each is drawn into pixels of the test's own and looked at.
@@ -1628,8 +1628,8 @@ LOCAL void test_bpk_draw( void )
 			h = box.bottom - box.top;
 			tm_printf((UB *)"  link %d: %dx%d band %d name %d\n", k, w, h, band, tw);
 			KT_ASSERT_EQ(w, ( k == 0 ) ? ( 278 - 5 ) * 72 / 120 : 95);
-			/* the band and its frame, and the picture beside the name */
-			KT_ASSERT(h >= band + 2 * OM_FRAME_W);
+			/* the object closed, and the picture beside the name */
+			KT_ASSERT(h >= band);
 			KT_ASSERT(w - band - 7 >= tw);
 			k++;
 		}
@@ -1637,6 +1637,231 @@ LOCAL void test_bpk_draw( void )
 		tv_doc_free(model);
 	}
 	tad_free(doc);
+}
+
+/*
+ * A link's least height: the object closed, its letters and eleven
+ * pixels. A figure whose record gives a box lower than that is shown,
+ * pressed and sized at that height, and a link in a text likewise, its
+ * box given or not; the record is left as it was. An opened one, and
+ * one that shows no band, keep the height they are given.
+ */
+LOCAL CONST char least_fig[] =
+"<tad version=\"1.0\" encoding=\"UTF-8\"><figure>"
+"<link id=\"01a0d8c4-52a8-7d42-8c6f-4a2e9b7d3fa1_0.xtad\" name=\"a\" vobjleft=\"10\" vobjtop=\"10\""
+" vobjright=\"170\" vobjbottom=\"20\" chsz=\"14\" frcol=\"#000000\" chcol=\"#000000\" tbcol=\"#ffffff\" bgcol=\"#ffffff\"/>"
+"<link id=\"01a0d8c4-52a8-7d42-8c6f-4a2e9b7d3fa1_0.xtad\" name=\"b\" vobjleft=\"10\" vobjtop=\"50\""
+" vobjright=\"170\" vobjbottom=\"70\" chsz=\"28\"/>"
+"<link id=\"01a0d8c4-52a8-7d42-8c6f-4a2e9b7d3fa1_0.xtad\" name=\"c\" vobjleft=\"10\" vobjtop=\"100\""
+" vobjright=\"170\" vobjbottom=\"180\" chsz=\"14\"/>"
+"<link id=\"01a0d8c4-52a8-7d42-8c6f-4a2e9b7d3fa1_0.xtad\" name=\"d\" vobjleft=\"10\" vobjtop=\"200\""
+" vobjright=\"170\" vobjbottom=\"204\" chsz=\"14\" namedisp=\"false\" pictdisp=\"false\"/>"
+"</figure></tad>";
+
+LOCAL CONST char least_doc[] =
+"<tad version=\"1.0\" encoding=\"UTF-8\"><document>"
+"<p><link id=\"01a0d8c4-52a8-7d42-8c6f-4a2e9b7d3fa1_0.xtad\" name=\"a\" chsz=\"28\"/></p>"
+"<p><link id=\"01a0d8c4-52a8-7d42-8c6f-4a2e9b7d3fa1_0.xtad\" name=\"b\" width=\"120\" heightpx=\"10\" chsz=\"14\"/></p>"
+"</document></tad>";
+
+LOCAL void test_least( void )
+{
+	T_TAD		*doc = NULL;
+	T_TVFIG		*f = NULL;
+	T_TVDOC		*model = NULL;
+	T_VOBJ		*v;
+	T_DPRECT	r, b;
+	UW		*px;
+	INT		gid, i, k;
+	CONST INT	want_fig[] = { 25, 39, 80, 4 };
+	CONST INT	want_doc[] = { 39, 25 };
+
+	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	KT_ASSERT(v != NULL);
+	if ( v == NULL ) return;
+
+	/* the rule */
+	knl_memset(v, 0, sizeof(*v));
+	v->disp = TAD_D_DEFAULT;
+	KT_ASSERT_EQ(tad_lnk_closed_h(v), 25);		/* fourteen when it does not say */
+	v->chsz = 28;
+	KT_ASSERT_EQ(tad_lnk_closed_h(v), 39);
+	KT_ASSERT_EQ(om_band_h(v), 39);			/* the band is that height */
+	KT_ASSERT_EQ(tad_lnk_fit_h(v, 8), 39);		/* lower: brought up to it */
+	KT_ASSERT_EQ(tad_lnk_fit_h(v, 39 + TAD_OPEN_SLACK), 39);	/* a little above: closed */
+	KT_ASSERT_EQ(tad_lnk_fit_h(v, 39 + TAD_OPEN_SLACK + 1), 39 + TAD_OPEN_SLACK + 1);	/* opened */
+	v->disp = TAD_D_FRAME;
+	KT_ASSERT_EQ(tad_lnk_closed_h(v), 0);		/* no band: a plain box */
+	KT_ASSERT_EQ(tad_lnk_fit_h(v, 4), 4);
+
+	/* a figure */
+	KT_ASSERT_ER(tad_parse((CONST UB *)least_fig, s_len(least_fig), NULL, &doc), E_OK);
+	if ( doc == NULL ) { Kfree(v); return; }
+	KT_ASSERT_ER(tv_fig(doc, &f), E_OK);
+	if ( f != NULL ) {
+		for ( i = 0, k = 0; i < f->nsh; i++ ) {
+			if ( f->sh[i].kind != TV_SH_LINK ) continue;
+			KT_ASSERT(k < 4);
+			if ( k >= 4 ) break;
+			tm_printf((UB *)"  figure link %d: %d high\n", k, f->sh[i].r.bottom - f->sh[i].r.top);
+			KT_ASSERT_EQ(f->sh[i].r.bottom - f->sh[i].r.top, want_fig[k]);
+			k++;
+		}
+		KT_ASSERT_EQ(k, 4);
+		/* pressed where it is shown, under the box the record gave */
+		r.left = 0;  r.top = 0;  r.right = PX_W;  r.bottom = PX_H;
+		KT_ASSERT_ER(tv_fig_at(f, &r, 0, 0, doc, 50, 30, v, &b, &i), E_OK);
+		KT_ASSERT_EQ(b.bottom - b.top, 25);
+		/* the record says what it said */
+		KT_ASSERT_EQ(v->bottom - v->top, 10);
+
+		/*
+		 * Drawn: what is not paper above the next link is the closed
+		 * object, its frame's foot where a closed one's is (pale, as
+		 * a 虚身, when the object is not found: the same box either
+		 * way).
+		 */
+		px = px_open(&gid);
+		if ( px != NULL ) {
+			INT	x, y, top = -1, foot = -1;
+
+			KT_ASSERT_ER(tv_fig_draw(gid, f, &r, 0, 0, doc, PX_PAPER), E_OK);
+			for ( y = 0; y < 45; y++ ) {
+				for ( x = 0; x < 200; x++ ) {
+					if ( ( px[y * PX_W + x] & 0x00FFFFFFU ) != PX_PAPER ) {
+						if ( top < 0 ) top = y;
+						foot = y;
+					}
+				}
+			}
+			tm_printf((UB *)"  drawn: %d..%d\n", top, foot);
+			KT_ASSERT_EQ(top, 10);
+			KT_ASSERT_EQ(foot, 10 + 25 - 1);
+			dp_close(gid);
+			Kfree(px);
+		}
+		tv_fig_free(f);
+	}
+	tad_free(doc);
+
+	/* a text */
+	doc = NULL;
+	KT_ASSERT_ER(tad_parse((CONST UB *)least_doc, s_len(least_doc), NULL, &doc), E_OK);
+	if ( doc == NULL ) { Kfree(v); return; }
+	KT_ASSERT_ER(tv_doc(doc, &model), E_OK);
+	if ( model != NULL ) {
+		r.left = 0;  r.top = 0;  r.right = PX_W;  r.bottom = PX_H;
+		for ( i = 0, k = 0; i < model->nrun && k < 2; i++ ) {
+			if ( model->run[i].kind != TV_RUN_LINK ) continue;
+			KT_ASSERT_EQ(tv_doc_thing(model, &r, 0, doc, 0, 0, i, &b), i);
+			tm_printf((UB *)"  text link %d: %d high\n", k, b.bottom - b.top);
+			KT_ASSERT_EQ(b.bottom - b.top, want_doc[k]);
+			k++;
+		}
+		KT_ASSERT_EQ(k, 2);
+		tv_doc_free(model);
+	}
+	tad_free(doc);
+	Kfree(v);
+}
+
+/*
+ * Links written without a vobjid -- the 予定表 template the system
+ * carries (etc/xtad/019d6f00-1a2b-7c3d-8e4f-a1b2c3d4e5f6_0.xtad) has
+ * two -- are given one as they are read, as TADjs gives them: the same
+ * each time it is asked for, another for each link, and found by it.
+ * The record reads back byte for byte until a link is changed; then
+ * the change and that link's identity are written, and the other link
+ * stays as it was.
+ */
+LOCAL CONST char lid_fig[] =
+"<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"\xE4\xBA\x88\xE5\xAE\x9A\xE8\xA1\xA8\">\n"
+"<figure>\n"
+"<figView top=\"0\" left=\"0\" right=\"400\" bottom=\"400\"/>\n"
+"<figDraw top=\"0\" left=\"0\" right=\"400\" bottom=\"400\"/>\n"
+"<figScale hunit=\"-72\" vunit=\"-72\"/>\n"
+"<link id=\"019b8230-f63a-7985-b69d-20e43d55506c_0.xtad\" relationship=\"\xE4\xBC\x91\xE6\x97\xA5\" vobjleft=\"10\" vobjtop=\"10\" vobjright=\"160\" vobjbottom=\"40\" height=\"30\" chsz=\"14\" frcol=\"#000000\" chcol=\"#000000\" tbcol=\"#ffffff\" bgcol=\"#ffffff\" dlen=\"0\" pictdisp=\"true\" namedisp=\"true\" roledisp=\"false\" typedisp=\"false\" updatedisp=\"false\" framedisp=\"true\" autoopen=\"false\"/>\n"
+"<link id=\"019b9c16-5d57-7ff4-8359-5af2e5291715_0.xtad\" relationship=\"\xE5\xB9\xB4\xE6\x9C\x88\xE6\x97\xA5\xE5\xAE\x9F\xE8\xBA\xAB\" vobjleft=\"11\" vobjtop=\"52\" vobjright=\"161\" vobjbottom=\"82\" height=\"30\" chsz=\"14\" frcol=\"#000000\" chcol=\"#000000\" tbcol=\"#ffffff\" bgcol=\"#ffffff\" dlen=\"0\"/>\n"
+"</figure>\n"
+"</tad>\n";
+
+/* Where w first is in s, or -1 */
+LOCAL INT lid_find( CONST UB *s, INT n, CONST char *w )
+{
+	INT	i, k, wl = (INT)s_len(w);
+
+	for ( i = 0; i + wl <= n; i++ ) {
+		for ( k = 0; k < wl && s[i + k] == (UB)w[k]; k++ ) ;
+		if ( k == wl ) return i;
+	}
+	return -1;
+}
+
+LOCAL void test_lid( void )
+{
+	T_TAD	*doc = NULL, *back = NULL;
+	T_VOBJ	*v, *w;
+	UB	*out;
+	SZ	n = 0;
+	char	vs[TS_UUID_STRLEN + 1];
+	INT	at, second;
+	TS_UUID	zero;
+
+	knl_memset(&zero, 0, sizeof(zero));
+	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ) * 2);
+	out = (UB *)Kmalloc(4096);
+	KT_ASSERT(v != NULL && out != NULL);
+	if ( v == NULL || out == NULL ) goto done;
+	w = v + 1;
+	KT_ASSERT_ER(tad_parse((CONST UB *)lid_fig, s_len(lid_fig), NULL, &doc), E_OK);
+	if ( doc == NULL ) goto done;
+
+	/* given one, the same each time, another for the other link */
+	KT_ASSERT_ER(tad_lnk_get(doc, 0, v), E_OK);
+	KT_ASSERT(ts_uuid_cmp(&v->vobjid, &zero) != 0);
+	KT_ASSERT_ER(tad_lnk_get(doc, 0, w), E_OK);
+	KT_ASSERT_EQ(ts_uuid_cmp(&v->vobjid, &w->vobjid), 0);
+	KT_ASSERT_ER(tad_lnk_get(doc, 1, w), E_OK);
+	KT_ASSERT(ts_uuid_cmp(&w->vobjid, &zero) != 0);
+	KT_ASSERT(ts_uuid_cmp(&v->vobjid, &w->vobjid) != 0);
+	KT_ASSERT_ER(tad_lnk_find(doc, &w->vobjid, w), E_OK);
+	KT_ASSERT_EQ(w->top, 52);
+
+	/* only read: written back as it came */
+	KT_ASSERT_ER(tad_write_mem(doc, out, 4096, &n), E_OK);
+	KT_ASSERT_EQ((INT)n, (INT)s_len(lid_fig));
+	KT_ASSERT_EQ(lid_find(out, (INT)n, "vobjid="), -1);
+
+	/* moved and sized: found by the identity it was given */
+	v->left += 30;  v->right += 30;
+	v->bottom = v->top + 60;
+	v->height = 60;
+	KT_ASSERT_ER(tad_lnk_set(doc, v), E_OK);
+	KT_ASSERT_ER(tad_write_mem(doc, out, 4095, &n), E_OK);
+	out[n] = 0;
+	(void)ts_uuid_to_str(&v->vobjid, vs, sizeof(vs));
+	at = lid_find(out, (INT)n, vs);
+	second = lid_find(out, (INT)n, "019b9c16");
+	KT_ASSERT(at > 0 && second > at);			/* in the first link */
+	KT_ASSERT(lid_find(out, (INT)n, "vobjleft=\"40\"") > 0);
+	KT_ASSERT(lid_find(out, (INT)n, "vobjbottom=\"70\"") > 0);
+	/* the other link as it was written */
+	KT_ASSERT(lid_find(out, (INT)n, "<link id=\"019b9c16-5d57-7ff4-8359-5af2e5291715_0.xtad\" relationship=") > 0);
+
+	/* and read back: the same identity, the new box */
+	KT_ASSERT_ER(tad_parse(out, n, NULL, &back), E_OK);
+	if ( back != NULL ) {
+		KT_ASSERT_ER(tad_lnk_get(back, 0, w), E_OK);
+		KT_ASSERT_EQ(ts_uuid_cmp(&w->vobjid, &v->vobjid), 0);
+		KT_ASSERT_EQ(w->left, 40);
+		KT_ASSERT_EQ(w->bottom - w->top, 60);
+		tad_free(back);
+	}
+	if ( at < 0 ) tm_putstring(out);
+done:
+	if ( doc != NULL ) tad_free(doc);
+	if ( out != NULL ) Kfree(out);
+	if ( v != NULL ) Kfree(v);
 }
 
 /* 検索の正規表現: where a pattern matches, its groups, and what replaces it */
@@ -1843,6 +2068,8 @@ EXPORT void ktest_tv( void )
 	KT_RUN(test_overlays);
 	KT_RUN(test_bpk_forms);
 	KT_RUN(test_bpk_draw);
+	KT_RUN(test_least);
+	KT_RUN(test_lid);
 	KT_RUN(test_regex);
 	KT_RUN(test_kconv);
 	KT_RUN(test_done);

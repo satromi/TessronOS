@@ -30,6 +30,7 @@
 #include <tm/tmonitor.h>
 #include <ts/fn.h>
 #include <ts/dp.h>
+#include <ts/disp.h>
 #include <ts/fs.h>
 #include <ts/ob.h>
 
@@ -1644,6 +1645,136 @@ LOCAL void base_end( BASEW *w )
 	}
 }
 
+/* ---------------------------------------------------------------- drawn at a scale */
+
+/*
+ * Text drawn into an environment whose target holds the screen's pixels
+ * at a scale (dp_set_scale): the letters are made at the size times the
+ * scale, in the target's own pixels, and each is put where the pen of
+ * the text laid out at its own size stands, times the scale, to the
+ * quarter of a target pixel. The text is laid out and measured as it
+ * is unscaled -- the advances, the width answered, where it stops
+ * fitting -- so lines break, carets stand and selections run where they
+ * do at 100; only the letters themselves are finer. Unhinted, a face's
+ * advances grow with its size, so the letters made larger stand where
+ * their own advances would put them.
+ */
+
+/* The face's size in the font library set to px across xpx (0: as tall) */
+LOCAL void ft_size( FONT *f, INT xpx, INT px )
+{
+	(void)FT_Set_Pixel_Sizes(f->face, ( xpx > 0 ) ? (FT_UInt)xpx : 0, (FT_UInt)px);
+}
+
+/*
+ * One letter of f made at the scale 'sc' and put with its pen dx, dy
+ * target pixels from where view place (x, y) lies, made for the quarter
+ * 'phase'. The face is set to the larger size only when the store does
+ * not already hold the letter at it, and set back at once: the size it
+ * is set to is what everything else measures with.
+ */
+LOCAL void letter_scaled( INT gid, FONT *f, UW cp, INT x, INT y, INT dx, INT dy, INT phase,
+			  INT sc, UW colour )
+{
+	INT		opx = f->px, oxpx = f->xpx;
+	INT		px = ( opx * sc + 50 ) / 100;
+	INT		xpx = ( oxpx > 0 ) ? ( oxpx * sc + 50 ) / 100 : 0;
+	ID		fid = fn_id_of(f);
+	BOOL		loose = FALSE;
+	CONST GLYPH	*g;
+	CONST GPIX	*pix;
+	UD		t = fn_now();
+
+	if ( px > 1024 ) px = 1024;
+	if ( xpx > 1024 ) xpx = 1024;
+	f->px = px;
+	f->xpx = xpx;
+	g = cache_find(fid, px, look_of(f), cp);
+	if ( g == NULL || !g->has_adv
+	  || ( g->pix[phase] == NULL && ( g->nopix & ( 1U << phase ) ) == 0 ) ) {
+		ft_size(f, xpx, px);
+		g = glyph_of(f, fid, cp, TRUE, phase, &loose);
+		if ( loose ) {
+			CONST FT_Bitmap	*bm = &f->face->glyph->bitmap;
+
+			/* made, but not kept: from the slot, this once, before the size goes back */
+			if ( bm->buffer != NULL && bm->pixel_mode == FT_PIXEL_MODE_GRAY ) {
+				(void)dp_put_gray_dev(gid, x, y, dx + f->face->glyph->bitmap_left,
+						      dy - f->face->glyph->bitmap_top, bm->buffer,
+						      (INT)bm->pitch, (INT)bm->width, (INT)bm->rows, colour);
+			} else if ( bm->buffer != NULL && bm->pixel_mode == FT_PIXEL_MODE_MONO ) {
+				(void)dp_put_mono_dev(gid, x, y, dx + f->face->glyph->bitmap_left,
+						      dy - f->face->glyph->bitmap_top, bm->buffer,
+						      (INT)bm->pitch, (INT)bm->width, (INT)bm->rows, colour);
+			}
+			fn_count.put++;
+		}
+		ft_size(f, oxpx, opx);
+	}
+	f->px = opx;
+	f->xpx = oxpx;
+	if ( !loose && g != NULL ) {
+		pix = g->pix[phase];
+		if ( pix != NULL && pix->w > 0 && pix->h > 0 ) {
+			if ( pix->gray ) {
+				(void)dp_put_gray_dev(gid, x, y, dx + pix->left, dy - pix->top,
+						      pix->bm, pix->pitch, pix->w, pix->h, colour);
+			} else {
+				(void)dp_put_mono_dev(gid, x, y, dx + pix->left, dy - pix->top,
+						      pix->bm, pix->pitch, pix->w, pix->h, colour);
+			}
+			fn_count.put++;
+		}
+	}
+	fn_count.ms_put += fn_now() - t;
+}
+
+/* A pen of 'pen' 64ths of a view pixel, at the scale: in quarters of a target pixel */
+LOCAL INT quarter_of( INT pen, INT sc )
+{
+	D	p = (D)pen * sc;
+
+	p = ( p >= 0 ) ? p / 100 : -( ( -p + 99 ) / 100 );
+	return (INT)( ( p + ( 1 << ( FN_PHASE_SH - 1 ) ) ) >> FN_PHASE_SH );
+}
+
+/* The walk across a line (walk) when the letters are drawn at a scale */
+LOCAL INT walk_scaled( INT gid, FONT *f0, INT x, INT y, CONST UB *s, UW colour,
+		       INT limit, INT *p_fit, INT sc )
+{
+	FONT	*f;
+	BASEW	bw;
+	INT	pen = 0, i = 0;
+
+	bw.b = NULL;
+	while ( s[i] != '\0' ) {
+		UW		cp;
+		INT		n = 1, q;
+		CONST GLYPH	*g;
+
+		cp = utf8_next(s + i, &n);
+		f = letter_face(f0, cp, &bw);
+		g = glyph_of(f, fn_id_of(f), cp, FALSE, 0, NULL);
+		if ( g == NULL ) {
+			i += n;
+			continue;
+		}
+		if ( limit >= 0 && ( ( pen + g->adv + 32 ) >> 6 ) > limit ) {
+			break;
+		}
+		q = quarter_of(pen, sc);
+		letter_scaled(gid, f, cp, x, y, q >> 2, 0, q & ( FN_PHASES - 1 ), sc, colour);
+		pen += g->adv;
+		i += n;
+	}
+	base_end(&bw);
+	if ( p_fit != NULL ) {
+		*p_fit = i;
+	}
+
+	return ( pen + 32 ) >> 6;
+}
+
 /*
  * The one walk. `gid` below zero means do not draw; `limit` at or above
  * zero means stop when the pen would pass it and say how many bytes fit.
@@ -1671,7 +1802,11 @@ LOCAL INT walk( INT gid, FONT *f0, INT x, INT y, CONST UB *s, UW colour,
 	BOOL	draw = (BOOL)( gid >= 0 );
 	/* a page being recorded takes the glyphs themselves, not their pixels */
 	BOOL	rec = (BOOL)( draw && dp_is_rec(gid) );
+	INT	sc = ( draw && !rec ) ? dp_scale(gid) : 100;
 
+	if ( sc > 100 ) {
+		return walk_scaled(gid, f0, x, y, s, colour, limit, p_fit, sc);
+	}
 	bw.b = NULL;
 	while ( s[i] != '\0' ) {
 		UW		cp;
@@ -1858,6 +1993,7 @@ LOCAL INT vwalk( INT gid, FONT *f0, INT cx, INT y, CONST UB *s, UW colour )
 	INT	keep = f->angle;
 	ID	fid;
 	BOOL	rec = (BOOL)( gid >= 0 && dp_is_rec(gid) );
+	INT	sc = ( gid >= 0 && !rec ) ? dp_scale(gid) : 100;
 	BASEW	bw;
 
 	bw.b = NULL;
@@ -1889,7 +2025,12 @@ LOCAL INT vwalk( INT gid, FONT *f0, INT cx, INT y, CONST UB *s, UW colour )
 		 * The letter's box centred on the line: its left edge half its
 		 * advance left of the middle, to the quarter of a pixel.
 		 */
-		if ( gid >= 0 && !rec ) {
+		if ( sc > 100 ) {
+			g = glyph_of(f, fid, cp, FALSE, 0, NULL);
+			if ( g != NULL ) {
+				q = quarter_of(( dx << 6 ) - g->adv / 2, sc);
+			}
+		} else if ( gid >= 0 && !rec ) {
 			g = glyph_of(f, fid, cp, FALSE, 0, NULL);
 			if ( g != NULL ) {
 				q = ( ( ( cx + dx ) << 6 ) - g->adv / 2 + ( 1 << ( FN_PHASE_SH - 1 ) ) )
@@ -1913,7 +2054,11 @@ LOCAL INT vwalk( INT gid, FONT *f0, INT cx, INT y, CONST UB *s, UW colour )
 			adv = em;
 			base = y + pen + top + dy;
 		}
-		if ( rec ) {
+		if ( sc > 100 ) {
+			/* the box's middle on cx and its baseline below y, in the target's pixels */
+			letter_scaled(gid, f, cp, cx, y, q >> 2, disp_dev_of(base - y, (UINT)sc),
+				      q & ( FN_PHASES - 1 ), sc, colour);
+		} else if ( rec ) {
 			rec_letter(gid, f, cp, ( (FT_Fixed)( cx + dx ) << 16 ) - ( (FT_Fixed)g->adv << 9 ),
 				   base, colour);
 		} else if ( gid >= 0 ) {

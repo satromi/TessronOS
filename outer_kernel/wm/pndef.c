@@ -16,22 +16,35 @@
  *	(what the window showing it is called) and what it is for, and holds
  *	its parts in the order they are drawn:
  *
- *	  <tags num rect inner value><tag>＠名前</tag><tag>子名</tag>...</tags>
+ *	  <tags num rect inner value scroll><tag>＠名前</tag><tag>子名</tag>...</tags>
  *	  <text x y>words</text>			words on the base line y
  *	  <box num rect max jp ascii digits>letters</box>
  *	  <secret num rect max/>			a box whose letters are hidden
  *	  <number num rect value/>
  *	  <serial num rect zero blank><f w lo hi zero left/>.<n w><name/>..</n></serial>
  *	  <switch num rect value>name</switch>		on or off
- *	  <button num rect answer emph>name</button>	pushed
+ *	  <button num rect answer emph pict>name</button>	pushed; pict="0_N.png" its
+ *						picture, a PNG resource of the data box
+ *	  <swatch num rect group/>			a colour, chosen by pressing it
  *	  <select num rect value across nosel double><name/>...</select>
- *	  <list num rect value><name/>...</list>
- *	  <popup num rect value emph><name/>...</popup>	one name, chosen from a list
+ *	  <list num rect value cols><name/>...</list>
+ *	  <popup num rect value emph cols><name/>...</popup>	one name, chosen from a list
  *	  <volume num rect lo hi value across emph box/>	box: its number box's num
  *	  <line rect/>
  *
  *	Every part may say sheet="n", the tag it is shown under, and
  *	off="true" when it cannot be worked. A rectangle is "l,t,r,b".
+ *	Tags that say scroll="true" make their sheets scroll when the
+ *	window leaves the panel shorter than it is defined: the panel ends
+ *	at the window's foot, and the parts of the sheet shown move in what
+ *	is left of the sheet, under the window's right bar. A part that
+ *	says foot="true" -- the row of buttons along a sheet's foot, with
+ *	whatever stands in that row -- does not scroll: it rises with the
+ *	panel's foot and stays in sight, and the sheet scrolls above it.
+ *	A list, a selector or a pop-up whose names are parted into columns
+ *	by tabs may say cols="0,72r,96": each column's width in pixels from
+ *	the left, 0 for an equal share of what the others leave, and r
+ *	after a width for a column set against its right end.
  */
 
 #include <sys/machine.h>
@@ -222,8 +235,31 @@ LOCAL void serial( T_WMPANEL *def, T_WMPART *pt, CONST T_TADNODE *nd )
 	pt->sb_at = 0;
 }
 
+/* The widths a list's columns are given, cols="0,72r,96" (sbw, sbf, sb_n) */
+LOCAL void cols( T_WMPART *pt, CONST T_TADNODE *nd )
+{
+	CONST UB *v = tad_attr(nd, "cols");
+	INT	k = 0;
+
+	while ( v != NULL && *v != 0 && k < WM_SB_MAX ) {
+		INT	w = 0;
+
+		while ( *v == ' ' ) v++;
+		while ( *v >= '0' && *v <= '9' ) w = w * 10 + ( *v++ - '0' );
+		pt->sbw[k] = w;
+		pt->sbf[k] = 0;
+		while ( *v != 0 && *v != ',' ) {
+			if ( *v == 'r' || *v == 'R' ) pt->sbf[k] |= SBF_RIGHT;
+			v++;
+		}
+		k++;
+		if ( *v == ',' ) v++;
+	}
+	pt->sb_n = k;
+}
+
 /* One element of a <panel> as a part, appended; FALSE for what is not one */
-LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd )
+LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 {
 	T_WMPART	*pt;
 	UB		w[WM_LABEL_MAX];
@@ -241,6 +277,7 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd )
 	if ( yes(nd, "off") ) pt->type |= P_DISABLE;
 	if ( yes(nd, "emph") ) pt->type |= P_EMPHAS;
 	if ( yes(nd, "across") ) pt->type |= P_HALIGN;
+	if ( yes(nd, "foot") ) pt->type |= P_FOOT;
 
 	if ( is(nd, "text") ) {
 		INT	x = num(nd, "x", 0), y = num(nd, "y", 0);
@@ -255,6 +292,7 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd )
 		if ( pt->r.right <= x ) pt->r.right = x + 1;
 	} else if ( is(nd, "tags") ) {
 		pt->type |= TG_PARTS;
+		if ( yes(nd, "scroll") ) pt->type |= P_SCROLL;
 		(void)rect(nd, "inner", &pt->inner);
 		pt->count = names(def, nd, &at, "tag");
 		pt->pool = at;
@@ -281,12 +319,31 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd )
 		label(pt, w);
 	} else if ( is(nd, "button") ) {
 		CONST UB *a = tad_attr(nd, "answer");
+		CONST UB *pict = tad_attr(nd, "pict");
 
 		pt->type |= MS_PARTS;
 		(void)words(nd, w, sizeof(w));
 		label(pt, w);
 		pt->answer = ( a == NULL ) ? WM_ANS_NONE : str_same(a, "ok") ? WM_ANS_OK
 			   : str_same(a, "cancel") ? WM_ANS_CANCEL : WM_ANS_NONE;
+		if ( pict != NULL && pict[0] != 0 ) {
+			/* its picture, kept where a box keeps its letters: the resource's href */
+			char	us[TS_UUID_STRLEN + 1];
+			INT	k = 0, i;
+
+			if ( ts_uuid_to_str(box, us, sizeof(us)) >= E_OK ) {
+				for ( i = 0; us[i] != 0 && k < WM_LABEL_MAX - 2; i++ ) pt->text[k++] = (UB)us[i];
+				pt->text[k++] = '_';
+				for ( i = 0; pict[i] != 0 && k < WM_LABEL_MAX - 1; i++ ) pt->text[k++] = pict[i];
+				pt->text[k] = 0;
+				pt->label[0] = 0;
+				knl_pn_pict_load(pt->text);
+			}
+		}
+	} else if ( is(nd, "swatch") ) {
+		pt->type |= WM_PT_SWATCH;
+		pt->group = num(nd, "group", 0);
+		pt->colour = 0x00FFFFFFU;
 	} else if ( is(nd, "select") || is(nd, "list") ) {
 		pt->type |= is(nd, "select") ? WS_PARTS : SS_PARTS;
 		if ( yes(nd, "nosel") ) pt->type |= P_NOSEL;
@@ -296,6 +353,7 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd )
 		pt->value = num(nd, "value", 0);
 		pt->now = num(nd, "now", 0);
 		pt->top = 1;
+		cols(pt, nd);
 		if ( is(nd, "select") && pt->count == 0 ) {
 			return FALSE;		/* a selector with no names is nothing */
 		}
@@ -305,6 +363,7 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd )
 		pt->count = names(def, nd, &at, "name");
 		pt->pool = at;
 		pt->value = num(nd, "value", ( pt->count > 0 ) ? 1 : 0);
+		cols(pt, nd);
 	} else if ( is(nd, "volume") ) {
 		pt->type |= VL_PARTS;
 		pt->lo = num(nd, "lo", 0);
@@ -377,7 +436,7 @@ EXPORT ER knl_pn_load( CONST TS_UUID *box, INT n, T_WMPANEL *def, UB *title, INT
 			title[i] = 0;
 		}
 		for ( c = pn->first; er >= E_OK && c != NULL; c = c->next ) {
-			(void)part(def, c);
+			(void)part(def, c, box);
 		}
 	}
 	if ( doc != NULL ) tad_free(doc);

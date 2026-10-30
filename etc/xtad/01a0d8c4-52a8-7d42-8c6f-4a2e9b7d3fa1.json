@@ -13,8 +13,8 @@
   "readable": true,
   "maker": "TessronOS",
   "applist": {
-    "unpack-file": {
-      "name": "書庫解凍",
+    "archive-manager": {
+      "name": "書庫管理",
       "defaultOpen": true
     }
   },

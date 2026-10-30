@@ -384,6 +384,7 @@ LOCAL ER phy_speed( void )
 	}
 	out_w(UMAC_CMD, cmd);
 	out_w(EXT_RGMII_OOB_CTRL, in_w(EXT_RGMII_OOB_CTRL) | RGMII_LINK);
+	if ( !gen.up ) knl_net_link_said();
 	gen.up = TRUE;
 	tm_printf((UB *)"genet: link up %s %s\n", spd, fd ? "full" : "half");
 	return E_OK;
@@ -432,6 +433,7 @@ LOCAL void link_check( void )
 		gen.up = FALSE;
 		out_w(EXT_RGMII_OOB_CTRL, in_w(EXT_RGMII_OOB_CTRL) & ~RGMII_LINK);
 		tm_printf((UB *)"genet: link down\n");
+		knl_net_link_said();
 	}
 }
 

@@ -189,6 +189,21 @@ extern "C" {
 #define LK_MENU_DLY	9140	/* before a list opened from a row opens */
 #define LK_PTR_SIZE	9141	/* the pointer: 0 small, 1 middle, 2 large */
 #define LK_SCR_LIVE	9142	/* the page follows a scroll bar's knob as it is dragged: 1 */
+#define LK_SCALE	9143	/* the scale the screen is drawn at, in percent (read only:
+				   the window layer writes it; ts_disp_setscale sets the scale) */
+
+/*
+ * a finger on a touch screen (design 6.4.1, 16.5.23): the correction of
+ * where it lands, the lengths in tenths of a millimetre of the screen,
+ * which the input layer and the window layer make pixels by the size
+ * the screen says it is
+ */
+#define LK_TCH_ON	9144	/* the correction on: 1 (handles reached farther, a double tap brought together) */
+#define LK_TCH_DBL	9145	/* how far apart the taps of a double tap may be, 0.1 mm */
+#define LK_TCH_HIT	9146	/* how much farther a finger reaches a handle, 0.1 mm */
+#define LK_TCH_HOLD	9147	/* held this long, a finger is the second button (ms) */
+#define LK_TCH_SCR	9148	/* two fingers scroll: 1 (and two tapped are the second button) */
+#define LK_TCH_STEP	9149	/* how far two fingers move for a notch of the wheel, 0.1 mm */
 
 /*
  * sound: whether keys and buttons click, and the speaker. The sounds

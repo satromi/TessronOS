@@ -106,7 +106,6 @@ typedef struct {
 #define ED_DNAME	3			/* 設計画面: a name */
 #define ED_DMAX		4			/* the largest size */
 #define ED_DWIDTH	5			/* the width in the list */
-#define ED_POS		6			/* the place of the card shown */
 
 /* ---------------------------------------------------------------- state */
 
@@ -125,7 +124,8 @@ extern INT	g_field;		/* the field in hand, -1 none */
 extern BOOL	g_link_on;		/* the link in the field in hand is taken */
 extern UB	*g_cond[MC_FIELD_MAX];	/* what is written for each field to search with */
 extern UB	g_out[OUT_MAX];
-extern char	g_meta[OB_ATR_MAX + 1];
+extern char	*g_meta;		/* the metadata meta_of read last ("" when none) */
+extern char	g_meta_none[1];
 
 /* 設計画面: the fields as they are being made */
 extern MCFIELD	g_dsf[MC_FIELD_MAX + 1];
@@ -155,6 +155,8 @@ extern INT  list_px( void );
 
 extern void card_paint( void );
 extern void card_event( CONST T_OBNTM *m );
+extern BOOL card_bar_event( CONST T_OBNTM *m );	/* a notice of the bar along the top: TRUE when it was */
+extern void card_bar_close( void );
 extern void card_key( CONST T_OBNTM *m );
 extern BOOL card_box( INT kind, INT k, T_DPRECT *r );	/* where a box is in the window */
 extern void card_commit( INT kind, INT k, CONST UB *s, INT n );
@@ -181,11 +183,11 @@ extern BOOL ed_on( void );
 extern INT  ed_kind( void );
 extern INT  ed_index( void );
 extern void ed_begin( INT kind, INT k, CONST UB *text, BOOL all );
-extern BOOL ed_key( UINT key, UINT mods );		/* TRUE when it was the editor's */
+extern BOOL ed_key( UINT key, UINT mods, UINT mode );		/* TRUE when it was the editor's */
 extern void ed_commit( void );
 extern void ed_cancel( void );
 extern void ed_end( void );
-extern BOOL ed_press( INT x, INT y );
+extern void ed_pick( INT row );		/* a press on the system's list of candidates (OB_WR_CAND) */
 extern void ed_draw( void );
 extern void ed_insert( CONST UB *s, INT n );		/* letters put in at the caret */
 extern void ed_caret_at( INT x );

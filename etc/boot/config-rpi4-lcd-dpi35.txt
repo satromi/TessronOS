@@ -1,0 +1,24 @@
+
+# make LCD=dpi35: Waveshare の 3.5inch DPI LCD(640×480、RGB666)
+# (docs/tessronos/03-platform.md 3.6.7)。ファームウェアが DPI で画面を出す。値は
+# Waveshare の wiki の Buster の設定のもの(wiki の hdmi_timings は、今のファームウェアで
+# DPI に使う dpi_timings にした)。dtoverlay=dpi18 は Linux のピンの設定なので要らない。
+# DPI は GPIO 0〜9、12〜17、20〜25 を使い、ヘッダの UART0 の GPIO 14、15 もその中に
+# あるので、シリアルのコンソールは使えない(ファームウェアにも UART を使わせない)。
+# タッチパネル(GT911)は GPIO 10、11 と GPIO 27 にあり、カーネルが起動時に見つける。
+# バックライトは GPIO 18(wiki の「pinctrl set 18 op dh」で点く)
+[pi4]
+enable_uart=0
+uart_2ndstage=0
+gpio=0-9=a2
+gpio=12-17=a2
+gpio=20-25=a2
+gpio=18=op,dh
+enable_dpi_lcd=1
+display_default_lcd=1
+extra_transpose_buffer=2
+dpi_group=2
+dpi_mode=87
+dpi_output_format=0x6f006
+dpi_timings=640 0 20 10 10 480 0 10 5 5 0 0 0 60 0 60000000 1
+[all]

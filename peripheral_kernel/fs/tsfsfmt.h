@@ -122,6 +122,7 @@
 #define F_INLINE	1
 #define F_RUN		2
 #define F_TREE		3
+#define F_TREE2		4		/* an index of leaves (TSFSBLK_INCOMPAT_XT2) */
 
 /* a placement table entry */
 #define PE_SIZE		48

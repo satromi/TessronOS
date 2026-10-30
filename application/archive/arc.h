@@ -16,8 +16,8 @@
  *	archive file (lib/libbpk) kept as a record of plain data
  *	(OB_RT_SYSDATA) of the object. An archive object without that
  *	record is empty (空書庫). arc_pack.c finds the objects and writes
- *	the book; taking it out again is application/unpack's unp_obj.c,
- *	which 書庫解凍 shares.
+ *	the book; unp_obj.c takes it out again, and opens an archive object
+ *	that was taken in from a .bpk file the same way.
  */
 
 #ifndef __ARC_H__
@@ -26,7 +26,7 @@
 #include <ts/bpk.h>
 #include <ts/uapp.h>
 #include <ts/dtreq.h>
-#include "../unpack/unp.h"
+#include "unp.h"
 #include "arc_arg.h"
 
 #define ARC_NAME_MAX	128		/* bytes of a name, UTF-8 */

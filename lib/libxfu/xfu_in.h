@@ -23,8 +23,10 @@
 #include <ts/txc.h>
 #include <ts/xfu.h>
 
-#define XFU_CHUNK	( 64 * 1024 )		/* bytes read or written at a time */
-#define XFU_TAD_MAX	( 8 * 1024 * 1024 )	/* an xmlTAD file taken whole */
+/* bytes read or written at a time: a write of a record is made durable
+   when it returns, so the fewer they are the less the medium waits (design 7.3) */
+#define XFU_CHUNK	( 4 * 1024 * 1024 )
+#define XFU_WHOLE_MAX	( (SZ)0x7FFFFFFFFFFFFFFFLL )	/* a file taken whole: as long as memory holds */
 #define XFU_TEXT_MAX	( 256 * 1024 )		/* bytes of text shown in record 0 */
 #define XFU_IMG_MAX	( 16 * 1024 * 1024 )	/* a picture taken whole to show it */
 #define XFU_PIX_MAX	( 16 * 1024 * 1024 )	/* pixels of a picture made a PNG */
@@ -38,7 +40,7 @@
 #define XFU_APP_TEXT	0		/* basic-text-editor */
 #define XFU_APP_FIG	1		/* basic-figure-editor */
 #define XFU_APP_LIST	2		/* virtual-object-list */
-#define XFU_APP_UNPACK	3		/* unpack-file: a BTRON archive */
+#define XFU_APP_ARCHIVE	3		/* archive-manager: a BTRON archive */
 #define XFU_NAPP	4
 #define XFU_APP_NONE	(-1)
 

@@ -314,10 +314,13 @@ LOCAL void mount_obj( T_MOUNT *m, TS_UUID *p_uuid )
 	}
 }
 
-/* A mount whose device went, taken down once its last user is done. Under the lock */
+/*
+ * A mount whose device went, or one no path reaches (made from a disk's
+ * key), taken down once its last user is done. Under the lock
+ */
 LOCAL void mount_reap( T_MOUNT *m )
 {
-	if ( m->used && m->gone && mount_idle(m) ) {
+	if ( m->used && ( m->gone || m->pathlen == 0 ) && mount_idle(m) ) {
 		mount_free(m);
 	}
 }
@@ -425,7 +428,8 @@ LOCAL ER attach( CONST char *fimpnm, CONST char *devnm, CONST char *path, UINT f
 	ID		dd = 0;
 	ER		er;
 
-	if ( fimpnm == NULL || path == NULL || path[0] != '/' ) {
+	/* "" for a mount no path reaches, made from a disk's key (knl_fs_open_vol) */
+	if ( fimpnm == NULL || path == NULL || ( path[0] != '/' && path[0] != '\0' ) ) {
 		return EX_INVAL;
 	}
 	len = str_len(path);
@@ -451,7 +455,7 @@ LOCAL ER attach( CONST char *fimpnm, CONST char *devnm, CONST char *path, UINT f
 		T_MOUNT		*e = fs_mount[i];
 		CONST char	*d = (CONST char *)e->dev;
 
-		if ( e->used && ( str_same((CONST char *)e->path, path)
+		if ( e->used && ( ( path[0] != '\0' && str_same((CONST char *)e->path, path) )
 		  || ( devnm != NULL && ( str_same(d, devnm)
 					|| ( whole && d[0] != '\0' && dev_overlap(d, devnm) ) ) ) ) ) {
 			er = EX_BUSY;
@@ -555,6 +559,22 @@ EXPORT ER fs_detach( CONST char *path )
 /* ---------------------------------------------------------------- mounts of device objects */
 
 /* FS_MEDIA_DIR "/" devnm into buf; FALSE when that is not one name there */
+/* a descriptor that is a disk's root opened from its key (vd, knl_fs_open_vol) */
+#define FS_O_VOLUME	0x8000
+
+/* Whether a descriptor of the mount is a disk's root opened from its key (vd). Under the lock */
+LOCAL BOOL vd_open( CONST T_MOUNT *m )
+{
+	INT	i;
+
+	for ( i = 0; i < FS_MAX_FILE; i++ ) {
+		if ( fs_file[i].used && fs_file[i].mount == m && ( fs_file[i].oflags & FS_O_VOLUME ) != 0 ) {
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
 LOCAL BOOL media_path( CONST char *devnm, char *buf )
 {
 	CONST char	*dir = FS_MEDIA_DIR;
@@ -578,6 +598,20 @@ EXPORT ER knl_fs_attach_media( CONST char *fimpnm, CONST char *devnm, UINT flags
 	if ( devnm == NULL || !media_path(devnm, path) ) {
 		return EX_INVAL;
 	}
+	/* opened already from its key, with no path: the same mount takes the path */
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	{
+		T_MOUNT	*m = mount_by(NULL, devnm);
+
+		if ( m != NULL && m->pathlen == 0
+		  && ( ( flags & FS_MNT_RDONLY ) != 0 || !mount_rdonly(m) ) ) {
+			str_ncpy((char *)m->path, path, FS_PATH_MAX);
+			m->pathlen = str_len(path);
+			tk_unl_mtx(fs_mtxid);
+			return EX_OK;
+		}
+	}
+	tk_unl_mtx(fs_mtxid);
 	return attach(fimpnm, devnm, path, flags, TRUE);
 }
 
@@ -596,6 +630,11 @@ EXPORT ER knl_fs_detach_media( CONST char *devnm )
 		er = EX_NOENT;
 	} else if ( !str_same((CONST char *)m->path, path) ) {
 		er = EX_ACCES;			/* one the system made elsewhere (/boot) */
+	} else if ( vd_open(m) ) {
+		/* still open from its key: only the path goes, the mount with the last of them */
+		m->path[0] = '\0';
+		m->pathlen = 0;
+		er = EX_OK;
 	} else {
 		er = detach(m);
 	}
@@ -944,6 +983,13 @@ EXPORT BOOL knl_fs_wait_slice( TMO ms )
 /* The descriptor's mount went with its device: nothing is asked of the fimp */
 #define GONE(f)		( (f)->mount->gone )
 
+/*
+ * The most one read or write moves: what its INT answer can count,
+ * whole pages of it. A larger request moves that much and answers so;
+ * the caller goes on from there, as with any short read or write.
+ */
+#define FS_RW_MAX	( (SZ)0x7FFFF000 )
+
 EXPORT INT fs_read( INT fd, void *buf, SZ len )
 {
 	T_FILE	*f = fd_get(fd);
@@ -961,7 +1007,10 @@ EXPORT INT fs_read( INT fd, void *buf, SZ len )
 		r = EX_ISDIR;
 	} else if ( len == 0 ) {
 		r = 0;
+	} else if ( len < 0 ) {
+		r = EX_INVAL;
 	} else {
+		if ( len > FS_RW_MAX ) len = FS_RW_MAX;
 		r = ( f->mount->fimp->read != NULL ) ? f->mount->fimp->read(f, buf, len) : EX_NOTSUP;
 	}
 	fd_put(f);
@@ -985,7 +1034,10 @@ EXPORT INT fs_write( INT fd, CONST void *buf, SZ len )
 		r = EX_ISDIR;
 	} else if ( len == 0 ) {
 		r = 0;
+	} else if ( len < 0 ) {
+		r = EX_INVAL;
 	} else {
+		if ( len > FS_RW_MAX ) len = FS_RW_MAX;
 		if ( (f->oflags & O_APPEND) != 0 && f->mode == FS_IFREG ) {
 			f->offset = f->size;
 		}
@@ -1473,6 +1525,334 @@ EXPORT ER fs_sync( void )
 		mount_put(m);
 	}
 
+	return er;
+}
+
+
+/* ---------------------------------------------------------------- a disk reached through its key */
+
+/*
+ * The volume of a disk reached from its device object's key, with no
+ * path of its own (fs_opn_vol, design 7.2). The mount has an empty mount
+ * point, so no path reaches it; its root is a descriptor (vd), and the
+ * paths of the *at calls go below that root only. The mount goes when
+ * the last descriptor of it is closed.
+ */
+
+/*
+ * A path below a volume's root made plain into buf ("/a/b"): "." taken
+ * out, ".." taking out the name before it. A ".." that would leave the
+ * root is refused (EX_ACCES): nothing above the vd's root is reached,
+ * whatever the path says.
+ */
+LOCAL ER below( CONST char *path, char *buf )
+{
+	INT	n = 1, i = 0, k, j;
+
+	buf[0] = '/';
+	buf[1] = '\0';
+	if ( path == NULL ) {
+		return EX_INVAL;
+	}
+	while ( path[i] != '\0' ) {
+		while ( path[i] == '/' ) i++;
+		if ( path[i] == '\0' ) break;
+		for ( k = 0; path[i + k] != '\0' && path[i + k] != '/'; k++ ) ;
+		if ( k == 1 && path[i] == '.' ) {
+			i += k;
+			continue;
+		}
+		if ( k == 2 && path[i] == '.' && path[i + 1] == '.' ) {
+			if ( n == 1 ) {
+				return EX_ACCES;		/* above the volume's root */
+			}
+			while ( n > 1 && buf[n - 1] != '/' ) n--;
+			if ( n > 1 ) n--;
+			buf[n] = '\0';
+			i += k;
+			continue;
+		}
+		if ( n + 1 + k >= FS_PATH_MAX ) {
+			return EX_NAMETOOLONG;
+		}
+		if ( n > 1 ) buf[n++] = '/';
+		for ( j = 0; j < k; j++ ) buf[n++] = path[i + j];
+		buf[n] = '\0';
+		i += k;
+	}
+	return EX_OK;
+}
+
+/*
+ * The mount of a vd, held busy until mount_put, and its path below the
+ * root into rest. EX_BADF when vd is not one, EX_IO when the disk went,
+ * EX_ROFS when it is to change something and the vd only reads.
+ */
+LOCAL T_MOUNT *vd_mount( INT vd, CONST char *path, BOOL change, char *rest, ER *p_er )
+{
+	T_FILE	*f = fd_get(vd);
+	T_MOUNT	*m = NULL;
+	ER	er;
+
+	if ( f == NULL ) {
+		*p_er = EX_BADF;
+		return NULL;
+	}
+	er = ( ( f->oflags & FS_O_VOLUME ) == 0 ) ? EX_BADF : below(path, rest);
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	if ( er >= EX_OK ) {
+		if ( f->mount->gone ) {
+			er = EX_IO;
+		} else if ( change && ( ( f->oflags & O_ACCMODE ) == O_RDONLY || mount_rdonly(f->mount) ) ) {
+			er = EX_ROFS;
+		} else {
+			m = f->mount;
+			m->busy++;
+		}
+	}
+	tk_unl_mtx(fs_mtxid);
+	fd_put(f);
+	*p_er = er;
+	return m;
+}
+
+/* A descriptor of a file opened on mount m at rest, for owner. Called without the lock, m held busy */
+LOCAL INT open_on( T_MOUNT *m, CONST char *rest, UINT oflags, ID owner )
+{
+	T_FILE	*f = NULL;
+	INT	fd = -1;
+	ER	er;
+
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	f = file_new();
+	if ( f != NULL ) {
+		fd = slot_new(f, owner);
+		if ( fd < 0 ) f->used = FALSE;
+	}
+	if ( fd < 0 ) {
+		tk_unl_mtx(fs_mtxid);
+		return EX_MFILE;
+	}
+	f->owner  = owner;
+	f->mount  = m;
+	f->oflags = oflags & ~(UINT)FS_O_VOLUME;
+	f->busy   = 1;
+	tk_unl_mtx(fs_mtxid);
+
+	er = ( m->fimp->open != NULL ) ? m->fimp->open(m, rest, f->oflags, f) : EX_NOTSUP;
+	if ( er < EX_OK ) {
+		tk_loc_mtx(fs_mtxid, TMO_FEVR);
+		fs_slot[fd].used = FALSE;
+		fs_slot[fd].f = NULL;
+		f->owner = 0;
+		f->used = FALSE;
+		mount_reap(m);
+		tk_unl_mtx(fs_mtxid);
+		return (INT)er;
+	}
+	if ( (oflags & O_APPEND) != 0 ) {
+		f->offset = f->size;
+	}
+	fd_put(f);
+	return fd;
+}
+
+EXPORT INT knl_fs_open_vol( CONST char *fimpnm, CONST char *devnm, UINT flags, ID owner )
+{
+	T_MOUNT	*m;
+	BOOL	write = (BOOL)( ( flags & FS_MNT_RDONLY ) == 0 );
+	INT	fd;
+	ER	er = EX_OK;
+
+	if ( devnm == NULL || fimpnm == NULL ) {
+		return EX_INVAL;
+	}
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	m = mount_by(NULL, devnm);
+	if ( m != NULL && write && mount_rdonly(m) ) {
+		/* read only so far: made writable when nothing of it is open */
+		if ( !mount_idle(m) ) {
+			er = EX_BUSY;
+		} else {
+			char	path[FS_PATH_MAX];
+			UINT	mf = m->flags & ~(UINT)FS_MNT_RDONLY;
+			CONST char *fn = m->fimp->name;
+
+			str_ncpy(path, (CONST char *)m->path, FS_PATH_MAX);
+			mount_free(m);
+			tk_unl_mtx(fs_mtxid);
+			er = attach(fn, devnm, ( path[0] != '\0' ) ? path : "", mf, TRUE);
+			tk_loc_mtx(fs_mtxid, TMO_FEVR);
+			m = ( er >= EX_OK ) ? mount_by(NULL, devnm) : NULL;
+		}
+	}
+	if ( m != NULL ) m->busy++;
+	tk_unl_mtx(fs_mtxid);
+	if ( er < EX_OK ) {
+		return er;
+	}
+	if ( m == NULL ) {
+		er = attach(fimpnm, devnm, "", flags, TRUE);
+		if ( er < EX_OK ) {
+			return er;
+		}
+		tk_loc_mtx(fs_mtxid, TMO_FEVR);
+		m = mount_by(NULL, devnm);
+		if ( m != NULL ) m->busy++;
+		tk_unl_mtx(fs_mtxid);
+		if ( m == NULL ) {
+			return EX_IO;
+		}
+	}
+	fd = open_on(m, "/", O_RDONLY | O_DIRECTORY, owner);
+	if ( fd >= 0 ) {
+		T_FILE	*f = fd_get(fd);
+
+		if ( f != NULL ) {
+			f->oflags = ( write ? O_RDWR : O_RDONLY ) | O_DIRECTORY | FS_O_VOLUME;
+			fd_put(f);
+		}
+	}
+	mount_put(m);
+	return fd;
+}
+
+EXPORT INT knl_fs_openat_as( INT vd, CONST char *path, UINT oflags, ID owner )
+{
+	char	rest[FS_PATH_MAX];
+	T_MOUNT	*m;
+	INT	fd;
+	ER	er;
+
+	m = vd_mount(vd, path, (BOOL)( ( oflags & O_ACCMODE ) != O_RDONLY
+				      || ( oflags & ( O_CREAT | O_TRUNC ) ) != 0 ), rest, &er);
+	if ( m == NULL ) {
+		return er;
+	}
+	fd = open_on(m, rest, oflags, owner);
+	mount_put(m);
+	return fd;
+}
+
+EXPORT INT fs_openat( INT vd, CONST char *path, UINT oflags )
+{
+	return knl_fs_openat_as(vd, path, oflags, 0);
+}
+
+EXPORT ER fs_statat( INT vd, CONST char *path, T_FSTAT *st )
+{
+	char	rest[FS_PATH_MAX];
+	T_MOUNT	*m;
+	ER	er = EX_OK;
+
+	if ( st == NULL ) return EX_INVAL;
+	m = vd_mount(vd, path, FALSE, rest, &er);
+	if ( m == NULL ) return er;
+	er = ( m->fimp->stat != NULL ) ? m->fimp->stat(m, rest, st) : EX_NOTSUP;
+	if ( er >= EX_OK ) mount_obj(m, &st->dev);
+	mount_put(m);
+	return er;
+}
+
+/* A path operation of a vd's disk: the fimp's mkdir, rmdir or unlink on the path below the root */
+#define VD_MKDIR	0
+#define VD_RMDIR	1
+#define VD_UNLINK	2
+
+LOCAL ER vd_path_op( INT vd, CONST char *path, INT op )
+{
+	char	rest[FS_PATH_MAX];
+	T_MOUNT	*m;
+	ER	(*fn)( T_MOUNT *m, CONST char *path );
+	ER	er;
+
+	m = vd_mount(vd, path, TRUE, rest, &er);
+	if ( m == NULL ) return er;
+	fn = ( op == VD_MKDIR ) ? m->fimp->mkdir : ( op == VD_RMDIR ) ? m->fimp->rmdir : m->fimp->unlink;
+	er = ( fn != NULL ) ? fn(m, rest) : EX_NOTSUP;
+	mount_put(m);
+	return er;
+}
+
+EXPORT ER fs_mkdirat( INT vd, CONST char *path )
+{
+	return vd_path_op(vd, path, VD_MKDIR);
+}
+
+EXPORT ER fs_rmdirat( INT vd, CONST char *path )
+{
+	return vd_path_op(vd, path, VD_RMDIR);
+}
+
+EXPORT ER fs_unlinkat( INT vd, CONST char *path )
+{
+	return vd_path_op(vd, path, VD_UNLINK);
+}
+
+EXPORT ER fs_utimeat( INT vd, CONST char *path, UD mtime )
+{
+	char	rest[FS_PATH_MAX];
+	T_MOUNT	*m;
+	ER	er;
+
+	m = vd_mount(vd, path, TRUE, rest, &er);
+	if ( m == NULL ) return er;
+	er = ( m->fimp->utime != NULL ) ? m->fimp->utime(m, rest, mtime) : EX_NOTSUP;
+	mount_put(m);
+	return er;
+}
+
+/* A name changed within the vd's disk */
+EXPORT ER fs_renameat( INT vd, CONST char *from, CONST char *to )
+{
+	char	rf[FS_PATH_MAX], rt[FS_PATH_MAX];
+	T_MOUNT	*m;
+	ER	er;
+
+	m = vd_mount(vd, from, TRUE, rf, &er);
+	if ( m == NULL ) return er;
+	er = below(to, rt);
+	if ( er >= EX_OK ) {
+		er = ( m->fimp->rename != NULL ) ? m->fimp->rename(m, rf, rt) : EX_NOTSUP;
+	}
+	mount_put(m);
+	return er;
+}
+
+EXPORT ER fs_fstatvfs( INT vd, T_FSSTAT *st )
+{
+	char	rest[FS_PATH_MAX];
+	T_MOUNT	*m;
+	ER	er;
+
+	if ( st == NULL ) return EX_INVAL;
+	m = vd_mount(vd, "", FALSE, rest, &er);
+	if ( m == NULL ) return er;
+	er = ( m->fimp->statvfs != NULL ) ? m->fimp->statvfs(m, st) : EX_NOTSUP;
+	mount_put(m);
+	return er;
+}
+
+EXPORT ER fs_fsync( INT fd )
+{
+	T_FILE	*f = fd_get(fd);
+	T_MOUNT	*m;
+	ER	er;
+
+	if ( f == NULL ) {
+		return EX_BADF;
+	}
+	m = f->mount;
+	if ( GONE(f) ) {
+		er = EX_IO;
+	} else if ( m->fimp->fsync != NULL ) {
+		er = m->fimp->fsync(f);
+	} else if ( m->fimp->sync != NULL && !mount_rdonly(m) ) {
+		er = m->fimp->sync(m);
+	} else {
+		er = EX_OK;
+	}
+	fd_put(f);
 	return er;
 }
 

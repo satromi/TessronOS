@@ -122,12 +122,16 @@ static BOOL target( MSTH *t, MSN *e, MSSCOPE *sc, MSVAR **p_v, INT *p_start )
 
 /* ---------------------------------------------------------------- waiting */
 
-/* The thread's turn to the others; FALSE when it is to stop */
+/*
+ * The thread's turn to the others while the secure connection waits for
+ * the socket, looked at again soon (sockets are not told here); FALSE
+ * when it is to stop
+ */
 static BOOL wait_turn( void *arg )
 {
 	MSTH	*t = arg;
 
-	ms_yield(ms_now_ms() + 20);
+	th_look(t, MS_NEVER, FALSE);
 	return (BOOL)!th_stop(t);
 }
 
@@ -136,14 +140,15 @@ static ER sock_wait( MSTH *t, INT s, short ev, UD until )
 {
 	struct pollfd	p;
 
-	for ( ;; ) {
+	/* a socket tells nothing to the window's channel: looked at again soon */
+	for ( BOOL again = FALSE; ; again = TRUE ) {
 		p.fd = s;
 		p.events = ev;
 		p.revents = 0;
 		if ( so_poll(&p, 1, 0) > 0 ) return E_OK;
 		if ( th_stop(t) ) return E_DISWAI;
 		if ( ms_now_ms() >= until ) return E_TMOUT;
-		ms_yield(ms_now_ms() + 20);
+		th_look(t, until, again);
 	}
 }
 
@@ -566,7 +571,7 @@ static INT st_httpreq( MSTH *t, MSN *s, MSSCOPE *sc )
 			char	e[96];
 
 			ts_tls_strerror(err, e, sizeof(e));
-			snprintf(why, sizeof(why), "TLS: %s", e);
+			snprintf(why, sizeof(why), "TLS: %s (-0x%04x)", e, (UINT)-err);
 			goto done;
 		}
 	}
@@ -921,7 +926,7 @@ static INT st_tcp( MSTH *t, MSN *s, MSSCOPE *sc )
 		n = arg_bytes(t, s, 1, sc, out, sizeof(out));
 		if ( n == 0 ) { rt.lasterr = 0; break; }
 		t->waiting = TRUE;
-		while ( !th_stop(t) ) {
+		for ( BOOL again = FALSE; !th_stop(t); again = TRUE ) {
 			INT	i;
 			BOOL	found = FALSE;
 
@@ -931,7 +936,7 @@ static INT st_tcp( MSTH *t, MSN *s, MSSCOPE *sc )
 			if ( t->brk ) { t->brk = FALSE; rt.lasterr = 2; break; }
 			if ( tmo == 0 ) { rt.lasterr = 1; break; }
 			if ( tmo > 0 && (double)( ms_now_ms() - start ) >= tmo * 1000 ) { rt.lasterr = 1; break; }
-			ms_yield(ms_now_ms() + 20);
+			th_look(t, th_until(start, tmo), again);
 		}
 		t->waiting = FALSE;
 		break;

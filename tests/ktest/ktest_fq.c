@@ -140,6 +140,23 @@ LOCAL INT window_titled( CONST char *title, INT tries )
 	return 0;
 }
 
+/*
+ * Whether no window has that title within tries tenths of a second. The
+ * window of 強制終了 is opened by its own task, so taking it away asks
+ * that task to close it (a window its program opened is the program's
+ * to close): the list is said to be down before the window has gone.
+ */
+LOCAL BOOL window_gone( CONST char *title, INT tries )
+{
+	INT	t;
+
+	for ( t = 0; t < tries; t++ ) {
+		if ( window_titled(title, 0) == 0 ) return TRUE;
+		tk_dly_tsk(100);
+	}
+	return (BOOL)( window_titled(title, 0) == 0 );
+}
+
 LOCAL void put( UINT type, UINT code, UINT mods, INT x, INT y )
 {
 	T_HIDEV	e;
@@ -316,8 +333,16 @@ LOCAL BOOL choose( ID pid )
 	}
 	press(KEY_HOME, 0);
 	for ( i = 0; i < k; i++ ) press(KEY_DOWN, 0);
-	tk_dly_tsk(150);
-	knl_fq_stat(&st);
+	/*
+	 * The keys go through the window's own task, which an emulated
+	 * processor (QEMU virt) runs some hundred ms behind: looked at
+	 * until the line is chosen, for up to 2 s
+	 */
+	for ( t = 0; t < 40; t++ ) {
+		tk_dly_tsk(50);
+		knl_fq_stat(&st);
+		if ( st.sel == pid ) break;
+	}
 	return (BOOL)( st.sel == pid );
 }
 
@@ -453,7 +478,7 @@ LOCAL void test_list( void )
 
 	press(KEY_ESC, 0);
 	KT_ASSERT(list_up(FALSE, 30));
-	KT_ASSERT(window_titled("強制終了", 0) == 0);
+	KT_ASSERT(window_gone("強制終了", 30));
 	KT_ASSERT(knl_wdog_stuck(NULL, NULL));		/* all of it with the desktop stopped */
 	KT_ASSERT_ER(ts_ter_prc(c, -1), E_OK);
 	KT_ASSERT_EQ(ended(c, 5000), -1);

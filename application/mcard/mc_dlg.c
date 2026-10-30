@@ -57,7 +57,9 @@ static INT work( UI *q, void (*changed)( UI *q, INT num ) )
 	INT	num, ev;
 
 	for ( ;; ) {
-		ev = ui_dlg_next(&g_ui, q, &m, &num);
+		if ( g_cw.dirty || g_lw.dirty ) redraw_all();
+		/* asleep until the panel or the windows have something */
+		ev = ( ui_wait(&g_ui, &m, TMO_FEVR) >= E_OK ) ? ui_dlg_take(q, &m, &num) : UI_EV_CLOSE;
 		switch ( ev ) {
 		case UI_EV_BUTTON:
 			return num;
@@ -68,10 +70,6 @@ static INT work( UI *q, void (*changed)( UI *q, INT num ) )
 			return 0;
 		case UI_EV_OTHER:
 			if ( m.event == OB_E_REDRAW ) event(&m);
-			break;
-		case UI_EV_NONE:
-			if ( g_cw.dirty || g_lw.dirty ) redraw_all();
-			(void)tk_dly_tsk(TICK_MS);
 			break;
 		default:
 			break;

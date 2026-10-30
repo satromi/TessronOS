@@ -486,6 +486,7 @@ EXPORT INT knl_vnet_init( void )
 
 	knl_define_inthdr((INT)vnet.intno, TA_HLNG, (FP)vnet_inthdr);
 	EnableInt(vnet.intno, INTPRI_DEVICE);
+	knl_int_owner(vnet.intno, (CONST UB *)"neta");	/* the processor its object asks for (design 4.5) */
 
 	status |= VIRTIO_STATUS_DRIVER_OK;
 	vnet_out(VIRTIO_MMIO_STATUS, status);

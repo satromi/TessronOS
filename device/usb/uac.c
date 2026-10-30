@@ -62,7 +62,7 @@ LOCAL BOOL	uac_changed = FALSE;
 #define FU_VOLUME		0x02
 #define EP_SAMPLING_FREQ	0x01
 
-#define UAC_MAX			2
+#define UAC_FIRST		2	/* places the table starts with; it doubles when full */
 #define UAC_ALTS		8
 #define UAC_RATES		8
 #define TERM_USB_STREAMING	0x0101
@@ -102,7 +102,20 @@ typedef struct {
 	UACDIR	cap, play;
 } UAC;
 
-LOCAL UAC	uac_pool[UAC_MAX];
+/*
+ * The audio functions attached. Each is allocated on its own and never
+ * freed, so dev->audio and the stream's cap_uac and out_uac stay put when
+ * the table grows; a larger table is made whole before it is put in place.
+ */
+typedef struct {
+	INT	cap;
+	UAC	*e[];
+} UACTBL;
+
+LOCAL UACTBL	*uac_tbl = NULL;
+
+#define UAC_N		( ( uac_tbl != NULL ) ? uac_tbl->cap : 0 )
+#define UAC_AT(i)	( uac_tbl->e[(i)] )
 
 /* The format of each stream while it runs */
 typedef struct {
@@ -401,20 +414,48 @@ EXPORT BOOL knl_uac_match( USBDEV *dev )
 	return FALSE;
 }
 
-EXPORT ER knl_uac_attach( USBDEV *dev )
+LOCAL UAC *uac_slot( void )
 {
-	UAC	*u = NULL;
-	UB	*p, *end = dev->cfg + dev->cfglen;
-	INT	i;
+	UACTBL	*t;
+	INT	i, cap;
 
-	for ( i = 0; i < UAC_MAX; i++ ) {
-		if ( !uac_pool[i].used ) {
-			u = &uac_pool[i];
-			break;
+	for ( i = 0; i < UAC_N; i++ ) {
+		if ( !UAC_AT(i)->used ) {
+			return UAC_AT(i);
 		}
 	}
+	cap = ( UAC_N > 0 ) ? UAC_N * 2 : UAC_FIRST;
+	t = (UACTBL *)Kcalloc(1, sizeof(UACTBL) + sizeof(UAC *) * (SZ)cap);
+	if ( t == NULL ) {
+		return NULL;
+	}
+	for ( i = 0; i < cap; i++ ) {
+		if ( i < UAC_N ) {
+			t->e[i] = UAC_AT(i);
+			continue;
+		}
+		t->e[i] = (UAC *)Kcalloc(1, sizeof(UAC));
+		if ( t->e[i] == NULL ) break;
+	}
+	if ( i == UAC_N ) {
+		Kfree(t);
+		return NULL;
+	}
+	t->cap = i;
+	__sync_synchronize();
+	i = UAC_N;
+	uac_tbl = t;
+	return UAC_AT(i);
+}
+
+EXPORT ER knl_uac_attach( USBDEV *dev )
+{
+	UAC	*u;
+	UB	*p, *end = dev->cfg + dev->cfglen;
+
+	u = uac_slot();
 	if ( u == NULL ) {
-		return E_LIMIT;
+		return E_NOMEM;
 	}
 	knl_memset(u, 0, sizeof(*u));
 	u->dev = dev;
@@ -489,8 +530,8 @@ EXPORT void knl_uac_notify( void )
 		return;
 	}
 	uac_changed = FALSE;
-	for ( i = 0; i < UAC_MAX; i++ ) {
-		if ( uac_pool[i].used ) {
+	for ( i = 0; i < UAC_N; i++ ) {
+		if ( UAC_AT(i)->used ) {
 			any = TRUE;
 		}
 	}
@@ -501,9 +542,9 @@ LOCAL UAC *uac_capture( void )
 {
 	INT	i;
 
-	for ( i = 0; i < UAC_MAX; i++ ) {
-		if ( uac_pool[i].used && uac_pool[i].cap.nalt > 0 ) {
-			return &uac_pool[i];
+	for ( i = 0; i < UAC_N; i++ ) {
+		if ( UAC_AT(i)->used && UAC_AT(i)->cap.nalt > 0 ) {
+			return UAC_AT(i);
 		}
 	}
 
@@ -518,9 +559,9 @@ LOCAL UAC *uac_playback( void )
 	if ( out_uac != NULL && out_uac->used ) {
 		return out_uac;
 	}
-	for ( i = 0; i < UAC_MAX; i++ ) {
-		if ( uac_pool[i].used && uac_pool[i].play.nalt > 0 ) {
-			return &uac_pool[i];
+	for ( i = 0; i < UAC_N; i++ ) {
+		if ( UAC_AT(i)->used && UAC_AT(i)->play.nalt > 0 ) {
+			return UAC_AT(i);
 		}
 	}
 
@@ -563,8 +604,8 @@ LOCAL UAC *uac_of( CONST UB *id )
 	UAC	*like = NULL;
 	INT	i;
 
-	for ( i = 0; i < UAC_MAX; i++ ) {
-		UAC	*u = &uac_pool[i];
+	for ( i = 0; i < UAC_N; i++ ) {
+		UAC	*u = UAC_AT(i);
 
 		if ( !u->used || u->play.nalt == 0 ) {
 			continue;
@@ -586,8 +627,8 @@ LOCAL INT uac_outputs( SDOut *o, INT max )
 	UB	id[SND_ID_MAX];
 	INT	i, n = 0;
 
-	for ( i = 0; i < UAC_MAX && n < max; i++ ) {
-		UAC	*u = &uac_pool[i];
+	for ( i = 0; i < UAC_N && n < max; i++ ) {
+		UAC	*u = UAC_AT(i);
 
 		if ( !u->used || u->play.nalt == 0 ) {
 			continue;

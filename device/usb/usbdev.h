@@ -35,8 +35,12 @@
 
 /* ---------------------------------------------------------------- limits */
 
-#define USB_MAX_HC		4	/* controllers served */
-#define USB_MAX_DEV		192	/* devices in the tree, hubs included */
+/*
+ * The controllers and the devices of the tree have no bound of their
+ * own: their tables grow as they come. A device's number keeps its
+ * place in the table in its low 16 bits (USB_DEV_SLOTS of them).
+ */
+#define USB_DEV_SLOTS		0xffff
 #define USB_MAX_DEPTH		5	/* hubs between a device and its root port */
 #define USB_CFG_MAX		4096	/* the longest configuration taken */
 
@@ -137,7 +141,7 @@ struct usb_dev {
 	UB	devnm[8];	/* a disk: its device name */
 
 	/* a hub */
-	INT	hub_ports;
+	INT	hub_ports;	/* at most 31: the change map read is 32 bits, as the hubs' own are */
 	UW	hub_ignored;	/* bit n: port n holds a device given up on */
 	USBPIPE	*hub_pipe;	/* its status change endpoint */
 	volatile UW hub_change;	/* ports that reported a change */
@@ -185,8 +189,12 @@ typedef INT (*USB_FILLFN)( void *ctx, UB *dst, INT max );
  *
  *   nports		its root ports
  *   port_connected	something is plugged in
- *   port_changed	the connection changed since the last look (clears it)
- *   port_reset		reset the port and enable it; *speed is USB_SPEED_*
+ *   port_status	the port's state as a hub's GET_STATUS gives one of its
+ *			ports (HUB_PS_*, and the HUB_PC_* changes above them);
+ *			the changes in 'ack' are acknowledged (cleared)
+ *   port_reset		reset the port and enable it; *speed is USB_SPEED_*;
+ *			a USB 3 link in SS.Inactive or the compliance mode is
+ *			warm reset first
  *   port_state		the raw state, for the interface
  *   dev_init		the device about to be enumerated gets its address
  *   dev_mps0		the control packet size the device named
@@ -198,11 +206,14 @@ typedef INT (*USB_FILLFN)( void *ctx, UB *dst, INT max );
  *   stream_close
  *   poll		take what the controller finished, look at the ports
  *   info		what it is
+ *   port_warm_reset	a USB 3 port warm reset (E_NOEXS: nothing connected
+ *			after it); NULL when the controller has no USB 3 ports
+ *   port_power		the port's power switched on; NULL when it cannot be
  */
 typedef struct {
 	INT	(*nports)( USBHC *hc );
 	BOOL	(*port_connected)( USBHC *hc, INT port );
-	BOOL	(*port_changed)( USBHC *hc, INT port );
+	ER	(*port_status)( USBHC *hc, INT port, UW ack, UW *st );
 	ER	(*port_reset)( USBHC *hc, INT port, INT *speed );
 	ER	(*port_state)( USBHC *hc, INT port, T_USBPORT *p );
 	ER	(*dev_init)( USBHC *hc, USBDEV *dev );
@@ -221,14 +232,30 @@ typedef struct {
 	void	(*stream_close)( USBHC *hc, USBPIPE *pipe );
 	void	(*poll)( USBHC *hc );
 	void	(*info)( USBHC *hc, T_USBHC *info );
+	/*
+	 * After the device cleared an endpoint's halt: the controller's side
+	 * of the endpoint starts over too (its data toggle or sequence
+	 * number), so that both count from the same packet. NULL when the
+	 * controller needs nothing.
+	 */
+	ER	(*ep_reset)( USBHC *hc, USBDEV *dev, UB ep );
+	ER	(*port_warm_reset)( USBHC *hc, INT port );
+	void	(*port_power)( USBHC *hc, INT port );
 } USBHC_OPS;
 
 struct usb_hc {
 	CONST USBHC_OPS *ops;
 	INT	index;		/* its place among the controllers */
 	UINT	intno;		/* the interrupt it raises, 0 when polled */
+	UB	irqkind;	/* how: PCI_IRQ_* of ts_pcie_irq_alloc, 0 polled */
+	BOOL	irq_silent_told;
+	volatile UW	nirq;	/* the interrupts it raised */
+	UW	irq_mark;	/* the count said next on the console */
 	ID	flgid;		/* the manager's flag, raised on its events */
 	BOOL	lost;		/* it stopped on an error of its own */
+	BOOL	lost_told;	/* the manager let its devices go for that */
+	UB	*ignored;	/* a byte for each root port: a device given up on is there */
+	INT	nignored;
 };
 
 /* the bits of the manager's flag */
@@ -306,12 +333,22 @@ IMPORT USBDEV *knl_usb_tt_hub( USBDEV *dev, INT *port );
 /* the port status, the change bits shifted up by 16 */
 #define HUB_PS_CONNECTION	0x0001
 #define HUB_PS_ENABLE		0x0002
+#define HUB_PS_OVERCURRENT	0x0008
 #define HUB_PS_RESET		0x0010
-#define HUB_PS_POWER		0x0100
+#define HUB_PS_POWER		0x0100	/* a USB 2 port's */
 #define HUB_PS_LOW_SPEED	0x0200
 #define HUB_PS_HIGH_SPEED	0x0400
+#define HUB_PS_SS_POWER		0x0200	/* a USB 3 port's */
+#define HUB_PS_SS_LINK(st)	( ( (st) >> 5 ) & 0x0f )	/* a USB 3 port's link state */
+#define HUB_SS_LINK_INACTIVE	6	/* SS.Inactive: left only by a warm reset */
+#define HUB_SS_LINK_COMPLIANCE	10
 #define HUB_PC_CONNECTION	0x00010000
+#define HUB_PC_ENABLE		0x00020000
+#define HUB_PC_OVERCURRENT	0x00080000
 #define HUB_PC_RESET		0x00100000
+#define HUB_PC_BH_RESET		0x00200000	/* a USB 3 port's warm reset finished */
+#define HUB_PC_LINK_STATE	0x00400000
+#define HUB_PC_CONFIG_ERROR	0x00800000
 #define HUB_PC_ALL		0x00ff0000
 
 IMPORT ER   knl_hub_attach( USBDEV *hub );
@@ -319,6 +356,8 @@ IMPORT void knl_hub_detach( USBDEV *hub );
 IMPORT ER   knl_hub_port_status( USBDEV *hub, INT port, UW *st );
 IMPORT void knl_hub_clear_changes( USBDEV *hub, INT port, UW st );
 IMPORT ER   knl_hub_port_reset( USBDEV *hub, INT port, INT *speed );
+IMPORT ER   knl_hub_port_warm_reset( USBDEV *hub, INT port );
+IMPORT void knl_hub_port_power( USBDEV *hub, INT port );
 
 /* ---------------------------------------------------------------- classes */
 

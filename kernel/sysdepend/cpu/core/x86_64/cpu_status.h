@@ -40,22 +40,29 @@
 IMPORT volatile UW	knl_kt_unlock_spin;
 IMPORT volatile UW	knl_kt_release_spin;
 IMPORT volatile UW	knl_kt_exit_spin;
-#define KT_SPIN(n)	{ UW _k_ = (n); while ( _k_ != 0 ) { _k_--; Asm("pause"); } }
+#define KT_SPIN(n)	{ UW _k_ = (n); while ( _k_ != 0 ) { _k_--; Asm("nop"); } }
 #else
 #define KT_SPIN(n)
 #endif
 
-#define BEGIN_CRITICAL_SECTION	{ UINT _intsts_ = knl_lock_kernel();
+#if KLK_GIANT
+#define BEGIN_CRITICAL_SECTION	{ UINT _intsts_ = knl_lock_kernel(); KLK_ENTER_DECL
 #define END_CRITICAL_SECTION	{ BOOL _dsp_ = ( !isDI(_intsts_)	\
 				  && knl_ctxtsk != knl_schedtsk		\
 				  && !knl_isTaskIndependent()		\
 				  && !knl_dispatch_disabled );		\
+				KLK_LEAVE_CHECK				\
 				knl_unlock_kernel_keep();		\
 				KT_SPIN(knl_kt_unlock_spin)		\
 				if ( _dsp_ ) {				\
 					knl_dispatch();			\
 				}					\
 				enaint(_intsts_); } }
+#else
+/* Without the big lock: the locks of what is touched (klk.h, design 4.3.3) */
+#define BEGIN_CRITICAL_SECTION	KLK_BEGIN_CS
+#define END_CRITICAL_SECTION	KLK_END_CS
+#endif
 
 #define BEGIN_DISABLE_INTERRUPT	{ UINT _intsts_ = disint();
 #define END_DISABLE_INTERRUPT	enaint(_intsts_); }
@@ -86,8 +93,23 @@ Inline void knl_LeaveTaskIndependent( void )
 
 /*
  * Execution state queries
+ *	A task runs with interrupts enabled, and can be moved to another
+ *	processor between finding this processor's element (GS base) and
+ *	reading a field of it: it would read the other processor's task,
+ *	none, or the nesting of a handler there. The fields are read with
+ *	interrupts masked, so that they are of the processor that reads them.
  */
-#define in_indp()	( knl_isTaskIndependent() || knl_ctxtsk == NULL )
+Inline BOOL knl_in_indp( void )
+{
+	UD	fl;
+	BOOL	r;
+
+	Asm("pushfq; popq %0; cli" : "=r"(fl) :: "memory");
+	r = ( knl_isTaskIndependent() || knl_pcpu()->ctxtsk == NULL );
+	Asm("pushq %0; popfq" :: "r"(fl) : "memory", "cc");
+	return r;
+}
+#define in_indp()	knl_in_indp()
 
 Inline BOOL knl_int_masked( void )
 {
@@ -96,14 +118,23 @@ Inline BOOL knl_int_masked( void )
 	return ( fl & RFL_IF ) == 0;
 }
 
-#define in_ddsp()	( knl_dispatch_disabled		\
-			|| in_indp() 			\
-			|| knl_int_masked() )
+Inline BOOL knl_in_ddsp( void )
+{
+	UD	fl;
+	BOOL	r;
+
+	Asm("pushfq; popq %0; cli" : "=r"(fl) :: "memory");
+	r = ( knl_pcpu()->dispatch_disabled || knl_isTaskIndependent()
+	      || knl_pcpu()->ctxtsk == NULL || ( fl & RFL_IF ) == 0 );
+	Asm("pushq %0; popfq" :: "r"(fl) : "memory", "cc");
+	return r;
+}
+#define in_ddsp()	knl_in_ddsp()
 
 #define in_loc()	( knl_int_masked()		\
 			|| in_indp() )
 
-#define in_qtsk()	( knl_ctxtsk->sysmode > knl_ctxtsk->isysmode )
+#define in_qtsk()	( knl_self_ctxtsk()->sysmode > knl_self_ctxtsk()->isysmode )
 
 /*
  * Dispatcher invocation (a software interrupt into vector.S: the task's

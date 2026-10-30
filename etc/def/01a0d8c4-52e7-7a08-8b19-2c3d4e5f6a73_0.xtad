@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="基本表計算のデータボックス">
 <document>
 <p>基本表計算のデータボックス</p>
-<p>基本表計算の検索/置換、用紙設定、閉じるときに保存を尋ねるパネルの定義。操作パネルは基本表計算が自分で描く。</p>
+<p>基本表計算の検索/置換、用紙設定、閉じるときに保存を尋ねるパネル、できなかったことを知らせるパネル、操作パネル(パネル6)の定義。操作パネルの押しボタンの文字、色、入力欄の文字は基本表計算が書き換える。罫線とグラフの押しボタンの絵はレコード0の資源0〜10(PNG)。</p>
 </document>
 <databox>
 <panel num="2" rect="0,0,420,196" title="検索/置換">
@@ -37,6 +37,49 @@
 <button num="101" rect="16,72,92,98" answer="cancel">取消</button>
 <button num="103" rect="100,72,212,98">保存しない</button>
 <button num="102" rect="220,72,324,98" emph="true">保存</button>
+</panel>
+<panel num="5" rect="0,0,440,128" title="基本表計算">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<button num="101" rect="328,88,416,114" answer="ok" emph="true">了解</button>
+</panel>
+<panel num="6" rect="0,0,600,84" title="操作パネル" kind="bare">
+<button num="11" rect="6,4,78,26">ゴシック▼</button>
+<button num="12" rect="82,4,122,26">12 ▼</button>
+<switch num="13" rect="126,4,160,26">B</switch>
+<switch num="14" rect="162,4,196,26">I</switch>
+<switch num="15" rect="198,4,232,26">U</switch>
+<switch num="16" rect="234,4,268,26">S</switch>
+<switch num="17" rect="270,4,324,26">上付</switch>
+<switch num="18" rect="326,4,380,26">下付</switch>
+<button num="19" rect="384,4,432,26">文字色</button>
+<swatch num="20" rect="434,6,450,24" off="true"/>
+<button num="21" rect="454,4,504,26">地の色</button>
+<swatch num="22" rect="506,6,522,24" off="true"/>
+<button num="23" rect="526,4,562,26">左 ▼</button>
+<button num="24" rect="564,4,600,26">中 ▼</button>
+<line rect="0,29,600,30"/>
+<button num="31" rect="6,31,30,53" pict="0_0.png">格子</button>
+<button num="32" rect="34,31,58,53" pict="0_1.png">外枠</button>
+<button num="33" rect="62,31,86,53" pict="0_2.png">上</button>
+<button num="34" rect="90,31,114,53" pict="0_3.png">下</button>
+<button num="35" rect="118,31,142,53" pict="0_4.png">左</button>
+<button num="36" rect="146,31,170,53" pict="0_5.png">右</button>
+<button num="37" rect="174,31,198,53" pict="0_6.png">なし</button>
+<button num="38" rect="204,31,254,53">線の色</button>
+<swatch num="39" rect="256,33,272,51" off="true"/>
+<button num="40" rect="278,31,336,53">実線 ▼</button>
+<button num="41" rect="340,31,386,53">細 ▼</button>
+<button num="42" rect="394,30,422,54" pict="0_7.png">集合縦棒</button>
+<button num="43" rect="426,30,454,54" pict="0_8.png">積上縦棒</button>
+<button num="44" rect="458,30,486,54" pict="0_9.png">折れ線</button>
+<button num="45" rect="490,30,518,54" pict="0_10.png">積上折線</button>
+<line rect="0,56,600,57"/>
+<text num="51" x="8" y="76"> </text>
+<button num="52" rect="62,59,90,81">fx</button>
+<box num="53" rect="94,59,536,81" jp="true"></box>
+<button num="54" rect="540,59,568,81">✓</button>
+<button num="55" rect="572,59,600,81">×</button>
 </panel>
 </databox>
 </tad>

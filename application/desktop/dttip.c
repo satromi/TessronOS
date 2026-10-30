@@ -13,18 +13,11 @@
  *
  *	The keyboard is in one of two input modes, as BTRON's is: 日本語
  *	("Rあ": what is typed goes to the converter, ts/kconv.h) or 英語
- *	("Ra": letters go into the text as they are). The mode keys are
- *	the 106 keyboard's, with the 101 keyboard's combinations beside
- *	them where they do not collide:
- *
- *	  [ひらがなカタカナ] (左Ctrl+CapsLock)	日本語, in hiragana
- *	  Shift+[ひらがなカタカナ]		日本語, in katakana
- *	  Alt+[ひらがなカタカナ]		かな入力 and ローマ字入力 in turn
- *	  [英数] (CapsLock)			英語
- *	  Shift+[英数]				英語, in capitals
- *	  [半角/全角] (Alt+`)			letters half width or full
- *
- *	The mode is shown on the message line (ts/wm.h), before the clock.
+ *	("Ra": letters go into the text as they are). The mode is the
+ *	window manager's, worked as the keys come and before each is
+ *	addressed (outer_kernel/wm/msgline.c, where the mode keys are), and
+ *	shown on the message line before the clock; a key read here finds
+ *	the mode already as that key left it.
  *
  *	In 日本語 the keys are the converter's BTRON keys: 変換 (CNV),
  *	Shift+変換 (RCNV), 無変換 (CNV0, Alt+Space), Shift+無変換 (CNV1),
@@ -64,8 +57,6 @@
 #define KEY_BS		0x2A
 #define KEY_TAB		0x2B
 #define KEY_SPACE	0x2C
-#define KEY_ZENKAKU	0x35		/* 半角/全角 (101: `~) */
-#define KEY_EISU	0x39		/* 英数 (101: CapsLock) */
 #define KEY_F1		0x3A
 #define KEY_F8		0x41
 #define KEY_F9		0x42
@@ -96,13 +87,15 @@
 #define TIP_FRAME	0x00808080U
 
 /* The input mode: the keyboard's, whichever window the keys go to */
-LOCAL BOOL	tip_jp = FALSE;		/* 日本語; else 英語 */
-LOCAL BOOL	tip_kata = FALSE;	/* 日本語 in katakana */
-LOCAL BOOL	tip_roman = TRUE;	/* romaji typed; else kana keys */
-LOCAL BOOL	tip_caps = FALSE;	/* 英語 in capitals */
-LOCAL BOOL	tip_han = FALSE;	/* letters half width (full, as the system starts) */
+#define tip_mode()	wm_msg_get_mode()
+#define tip_jp		( ( tip_mode() & WM_MODE_ALPH ) == 0 )			/* 日本語; else 英語 */
+#define tip_kata	( tip_jp && ( tip_mode() & WM_MODE_KANA ) != 0 )	/* 日本語 in katakana */
+#define tip_caps	( !tip_jp && ( tip_mode() & WM_MODE_KANA ) != 0 )	/* 英語 in capitals */
+#define tip_han		( ( tip_mode() & WM_MODE_HAN ) != 0 )		/* letters half width */
+#define tip_roman	( ( tip_mode() & WM_MODE_ROMAN ) != 0 )		/* in 日本語, romaji typed */
 
 LOCAL INT	tip_kid = 0;		/* the converter's session */
+LOCAL INT	tip_said_roman = -1;	/* ローマ字入力 as the session was last told: 1, 0, or -1 not yet */
 LOCAL DTWIN	*tip_win = NULL;	/* the window composed in */
 LOCAL T_KCOUT	*tip_out = NULL;	/* the composition, as the converter gave it */
 LOCAL INT	tip_base;		/* where the composition starts in it */
@@ -132,11 +125,20 @@ LOCAL BOOL tip_ready( void )
 	}
 	if ( tip_kid <= 0 ) {
 		tip_kid = kc_open();
-		if ( tip_kid > 0 ) {
-			(void)kc_input(tip_kid, tip_roman ? TSMOZC_M_ROMAN : 0);
-		}
+		tip_said_roman = -1;
 	}
 	return (BOOL)( tip_kid > 0 );
+}
+
+/* The session told ローマ字入力 or かな入力 as the mode has it, before a letter */
+LOCAL void tip_tell_roman( void )
+{
+	INT	r = tip_roman ? 1 : 0;
+
+	if ( tip_kid > 0 && r != tip_said_roman ) {
+		(void)kc_input(tip_kid, r ? TSMOZC_M_ROMAN : 0);
+		tip_said_roman = r;
+	}
 }
 
 /* The window drawn again, with the composition over it */
@@ -219,104 +221,33 @@ EXPORT BOOL tip_japanese( void )
 	return tip_jp;
 }
 
-/* The mode, shown on the message line */
-LOCAL void tip_mode_out( void )
-{
-	UINT	m = tip_han ? WM_MODE_HAN : 0;
-
-	if ( !tip_jp ) {
-		m |= WM_MODE_ALPH | WM_MODE_ROMAN;
-		if ( tip_caps ) m |= WM_MODE_KANA;
-	} else {
-		if ( tip_kata ) m |= WM_MODE_KANA;
-		if ( tip_roman ) m |= WM_MODE_ROMAN;
-	}
-	(void)wm_msg_mode(m);
-}
-
-/*
- * かな入力 or ローマ字入力 as ユーザ環境設定 last set it (LK_KANA), taken
- * when it changes: at the start, and when the accessory sets it. Alt with
- * the kana key changes it for the time being in between.
- */
-LOCAL INT	tip_kana_seen = -1;
-
-LOCAL void tip_follow( void )
-{
-	INT	v = wm_num(LK_KANA, 0);
-
-	if ( v == tip_kana_seen ) {
-		return;
-	}
-	tip_kana_seen = v;
-	tip_roman = (BOOL)( v == 0 );
-	if ( tip_kid > 0 ) {
-		(void)kc_input(tip_kid, tip_roman ? TSMOZC_M_ROMAN : 0);
-	}
-	tip_mode_out();
-}
-
-/* The mode put on the message line as the desktop starts */
+/* The mode the machine's settings say to start in, put on the message line */
 EXPORT void tip_start( void )
 {
-	/* the mode the machine's settings say to start in (KBMODE): 0 かな, 1 英数 */
-	tip_jp = (BOOL)( wm_num(LK_KBD_MODE, 1) == 0 );
-	tip_follow();
-	tip_mode_out();
+	wm_kbmode_start();
 }
 
 /*
  * A mode key, whichever window the keys go to (d, or none): TRUE when
- * the key was one. The window is drawn again for its caret and the
- * mode shown in it.
+ * the key was one. The mode is already as the key set it; what is being
+ * composed is committed when it became 英語 or かな入力 and ローマ字入力
+ * changed, and the window is drawn again for its caret and the mode
+ * shown in it. 右Ctrl (入力終) commits what is being composed.
  */
 EXPORT BOOL tip_mode_key( DTWIN *d, UINT key, UINT mods )
 {
-	BOOL	shift = (BOOL)( ( mods & MOD_SHIFT ) != 0 );
-	BOOL	alt = (BOOL)( ( mods & MOD_ALT ) != 0 );
-
-	tip_follow();
-
-	switch ( key ) {
-	case KEY_KANA:
-		if ( alt ) {
-			/* かな入力 and ローマ字入力 in turn */
-			tip_commit();
-			tip_roman = (BOOL)!tip_roman;
-			if ( tip_kid > 0 ) {
-				(void)kc_input(tip_kid, tip_roman ? TSMOZC_M_ROMAN : 0);
-			}
-		} else {
-			tip_jp = TRUE;
-			tip_kata = shift;
-		}
-		break;
-	case KEY_EISU:
-		if ( ( mods & HID_MOD_LCTRL ) != 0 ) {
-			tip_jp = TRUE;			/* 101: 左Ctrl+CapsLock */
-			tip_kata = FALSE;
-			break;
-		}
-		if ( alt ) {
-			return FALSE;			/* 補助: a key, not a mode */
-		}
-		tip_commit();
-		tip_jp = FALSE;
-		tip_caps = shift;
-		break;
-	case KEY_ZENKAKU:
-		tip_han = (BOOL)!tip_han;
-		break;
-	case KEY_RCTRL:
-		/* 入力終: what is being composed, committed */
+	if ( key == KEY_RCTRL ) {
 		if ( tip_win != NULL ) {
 			tip_commit();
 		}
 		return TRUE;
-	default:
+	}
+	if ( !wm_kbmode_key(key, mods) ) {
 		return FALSE;
 	}
-	tip_mode_out();
+	if ( !tip_jp || ( key == KEY_KANA && ( mods & MOD_ALT ) != 0 ) ) {
+		tip_commit();
+	}
 	if ( d != NULL && d->used ) {
 		tip_show(d);			/* the caret's colour */
 	}
@@ -366,6 +297,9 @@ EXPORT BOOL tip_key( DTWIN *d, UINT key, UINT mods )
 		tip_commit();			/* the keys went elsewhere */
 	}
 	if ( !tip_jp ) {
+		if ( tip_win != NULL ) {
+			tip_commit();		/* the mode became 英語 where no mode key was seen here */
+		}
 		return tip_plain(d, ch);	/* 英語 */
 	}
 	busy = tip_busy(d);
@@ -419,6 +353,7 @@ EXPORT BOOL tip_key( DTWIN *d, UINT key, UINT mods )
 	}
 
 	/* a letter: romaji, or the kana on the key */
+	tip_tell_roman();
 	tc = tip_roman ? ( ( ch > 0x20 && ch < 0x7F ) ? ch : 0 ) : kc_kana_key_m(key, mods);
 	if ( tc != 0 ) {
 		tip_conv = FALSE;

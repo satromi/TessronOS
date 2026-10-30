@@ -155,6 +155,43 @@ IMPORT ER  dp_set_place( INT gid, void *pixels, UINT pitch, INT corner_x, INT co
 IMPORT ER   dp_set_watch( INT gid, BOOL on );
 IMPORT void dp_watch( void (*fn)( CONST T_DPRECT *r ) );
 
+/*
+ * An environment whose target holds the screen's pixels at a scale
+ * (percent, 100..400): its coordinates are view pixels, and each view
+ * pixel is drawn as the rectangle of the target's pixels it covers,
+ * floor((x - corner) * scale / 100) up to where the next begins. What is
+ * drawn there is what would be drawn at 100, made larger; letters are
+ * made at the target's own size (fn.c). The window manager sets it on
+ * the environments of the windows. dp_scale answers 100 for one that
+ * draws as it is (scale 100, or no target of its own).
+ */
+IMPORT ER   dp_set_scale( INT gid, UINT scale );
+IMPORT INT  dp_scale( INT gid );
+
+/*
+ * Pixels of the target's own size, for a scaled environment:
+ *
+ *   dp_put_gray_dev, dp_put_mono_dev  a letter made at the target's size
+ *		(shares of 255, or a bit a pixel), its corner dx, dy target
+ *		pixels from where view place (x, y) lies
+ *   dp_put_image	a picture of pw by ph laid over the view rectangle
+ *		'box', the nearest of its pixels taken for each target pixel
+ *		the box covers (an icon larger than its box shows its detail)
+ *   dp_get_dev, dp_put_dev	the target pixels a view rectangle covers,
+ *		taken (from the heap, Kfree) and put back as they were
+ *
+ * Unscaled, each is the call of the same name without _dev: the place
+ * is (x + dx, y + dy), and a picture is taken again at the box's size.
+ */
+IMPORT ER  dp_put_gray_dev( INT gid, INT x, INT y, INT dx, INT dy, CONST UB *cov, INT pitch,
+			    INT w, INT h, UW colour );
+IMPORT ER  dp_put_mono_dev( INT gid, INT x, INT y, INT dx, INT dy, CONST UB *bits, INT pitch,
+			    INT w, INT h, UW colour );
+IMPORT ER  dp_put_image( INT gid, CONST T_DPRECT *box, CONST UW *px, INT pw, INT ph,
+			 INT pitch, UW clear );
+IMPORT ER  dp_get_dev( INT gid, CONST T_DPRECT *r, UW **p_px, INT *p_w, INT *p_h );
+IMPORT ER  dp_put_dev( INT gid, CONST T_DPRECT *r, CONST UW *px, INT w, INT h );
+
 IMPORT ER  dp_set_colour( INT gid, UW fore, UW back );
 IMPORT ER  dp_set_mode( INT gid, UINT mode );
 
@@ -462,6 +499,7 @@ typedef struct {
 IMPORT ER  dp_stat( T_DPSTAT *st );
 
 IMPORT INT knl_dp_init( void );
+IMPORT void knl_dp_screen_changed( void );	/* the screen's size taken again */
 
 #ifdef __cplusplus
 }

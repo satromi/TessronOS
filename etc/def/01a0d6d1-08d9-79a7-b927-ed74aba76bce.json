@@ -1,5 +1,5 @@
 {
-  "name": "部品箱",
+  "name": "部品の定義",
   "relationship": [],
   "linktype": false,
   "makeDate": "2026-09-25T00:00:00Z",
@@ -19,6 +19,11 @@
     }
   },
   "tessronos": {
+    "update": "links",
+    "names": {
+      "ja": "部品の定義",
+      "en": "Part definitions"
+    },
     "access": {
       "owner": "01a0d680-3aa0-75b3-bd7d-075e14217cd2",
       "group": "01a0d680-3aa1-7922-ae79-ba5cbbaa2037",

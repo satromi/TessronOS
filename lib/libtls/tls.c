@@ -126,27 +126,6 @@ struct tm *mbedtls_platform_gmtime_r( const mbedtls_time_t *tt, struct tm *out )
 
 /* ---------------------------------------------------------------- the roots */
 
-/* "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", as the object's number */
-static BOOL uuid_of( const char *s, TS_UUID *u )
-{
-	UB	b[16];
-	INT	n = 0, v;
-
-	for ( ; *s != 0 && n < 32; s++ ) {
-		if ( *s == '-' ) continue;
-		if ( *s >= '0' && *s <= '9' ) v = *s - '0';
-		else if ( *s >= 'a' && *s <= 'f' ) v = *s - 'a' + 10;
-		else if ( *s >= 'A' && *s <= 'F' ) v = *s - 'A' + 10;
-		else return FALSE;
-		if ( ( n & 1 ) == 0 ) b[n / 2] = (UB)( v << 4 );
-		else b[n / 2] |= (UB)v;
-		n++;
-	}
-	if ( n != 32 ) return FALSE;
-	memcpy(u, b, sizeof(b));
-	return TRUE;
-}
-
 static INT roots_load( void )
 {
 	TS_UUID	u;
@@ -155,7 +134,7 @@ static INT roots_load( void )
 	INT	n = 0, cap = 0, r;
 	SZ	asz;
 
-	if ( !uuid_of(SYSDEF_CA_CERTS, &u) ) {
+	if ( ob_fnd_sys(SYSROLE_CERTS, SYSDEF_CA_CERTS, &u) < E_OK ) {
 		return TS_TLS_E_NOCA;
 	}
 	key = ob_opn_obj(&u, OB_OP_READ);
@@ -229,6 +208,10 @@ static int bio_send( void *ctx, const unsigned char *buf, size_t len )
 	TS_TLS	*t = ctx;
 	INT	n = so_send(t->s, buf, (SZ)len, 0);
 
+	/* a socket that does not block answers E_BUSY while its buffer is full */
+	if ( n == E_BUSY || n == E_TMOUT ) {
+		return MBEDTLS_ERR_SSL_WANT_WRITE;
+	}
 	if ( n < 0 ) {
 		return ERR_SEND;
 	}
@@ -248,21 +231,34 @@ static int bio_recv( void *ctx, unsigned char *buf, size_t len )
 		return MBEDTLS_ERR_SSL_WANT_READ;
 	}
 	n = so_recv(t->s, buf, (SZ)len, 0);
+	if ( n == E_BUSY || n == E_TMOUT ) {
+		return MBEDTLS_ERR_SSL_WANT_READ;
+	}
 	if ( n < 0 ) {
 		return ERR_RECV;
 	}
 	return n;
 }
 
-/* The caller's wait, and whether the other side has been waited for too long */
-static INT waited( TS_TLS *t, INT *p_spent )
+/*
+ * The caller's wait, and whether the other side has been waited for too
+ * long. The caller's wait may come back at once (its program has other
+ * things to do), so the time is taken from the clock, from the first
+ * wait of the call (*p_since, 0 before it).
+ */
+static INT waited( TS_TLS *t, mbedtls_ms_time_t *p_since )
 {
+	mbedtls_ms_time_t	now;
+
 	if ( t->wait != NULL && !t->wait(t->arg) ) {
 		t->stopped = TRUE;
 		return TS_TLS_E_STOPPED;
 	}
-	*p_spent += 20;
-	if ( t->tmo_ms > 0 && *p_spent >= t->tmo_ms ) {
+	now = mbedtls_ms_time();
+	if ( *p_since == 0 ) {
+		*p_since = now;
+	}
+	if ( t->tmo_ms > 0 && now - *p_since >= t->tmo_ms ) {
 		return TS_TLS_E_TIMEOUT;
 	}
 	return 0;
@@ -273,7 +269,8 @@ static INT waited( TS_TLS *t, INT *p_spent )
 TS_TLS *ts_tls_open( INT s, CONST char *host, INT tmo_ms, TS_TLS_WAIT wait, void *arg, INT *p_err )
 {
 	TS_TLS	*t;
-	INT	r, spent = 0;
+	INT	r;
+	mbedtls_ms_time_t	since = 0;
 
 	*p_err = setup();
 	if ( *p_err != 0 ) {
@@ -308,11 +305,12 @@ TS_TLS *ts_tls_open( INT s, CONST char *host, INT tmo_ms, TS_TLS_WAIT wait, void
 			if ( r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE ) {
 				break;
 			}
-			if ( ( r = waited(t, &spent) ) != 0 ) {
+			if ( ( r = waited(t, &since) ) != 0 ) {
 				break;
 			}
 		}
-		if ( r != 0 ) {
+		/* the certificate's flags only when it was the certificate that failed */
+		if ( r == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED ) {
 			UW	f = mbedtls_ssl_get_verify_result(&t->ssl);
 
 			if ( f != 0 && f != (UW)-1 ) {
@@ -334,7 +332,8 @@ TS_TLS *ts_tls_open( INT s, CONST char *host, INT tmo_ms, TS_TLS_WAIT wait, void
 
 INT ts_tls_write( TS_TLS *t, CONST void *buf, INT len )
 {
-	INT	done = 0, r, spent = 0;
+	INT	done = 0, r;
+	mbedtls_ms_time_t	since = 0;
 
 	while ( done < len ) {
 		r = mbedtls_ssl_write(&t->ssl, (const unsigned char *)buf + done, (size_t)( len - done ));
@@ -345,7 +344,7 @@ INT ts_tls_write( TS_TLS *t, CONST void *buf, INT len )
 		if ( r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE ) {
 			return r;
 		}
-		if ( ( r = waited(t, &spent) ) != 0 ) {
+		if ( ( r = waited(t, &since) ) != 0 ) {
 			return r;
 		}
 	}
@@ -354,7 +353,8 @@ INT ts_tls_write( TS_TLS *t, CONST void *buf, INT len )
 
 INT ts_tls_read( TS_TLS *t, void *buf, INT len )
 {
-	INT	r, spent = 0;
+	INT	r;
+	mbedtls_ms_time_t	since = 0;
 
 	for ( ;; ) {
 		r = mbedtls_ssl_read(&t->ssl, buf, (size_t)len);
@@ -371,7 +371,7 @@ INT ts_tls_read( TS_TLS *t, void *buf, INT len )
 		if ( r == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET ) {
 			continue;
 		}
-		if ( ( r = waited(t, &spent) ) != 0 ) {
+		if ( ( r = waited(t, &since) ) != 0 ) {
 			return r;
 		}
 	}

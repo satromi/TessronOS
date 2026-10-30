@@ -118,16 +118,34 @@ LOCAL T_TVFIG *fig_without_links( DTPRSRC *s, CONST T_TVFIG *f )
 	return c;
 }
 
+/*
+ * How deep the open links of what is printed show what they point at
+ * (pr_open_set): as on the screen, or with 仮身: 展開 as many open
+ * objects deep as 深さ says -- 1 the open links of the page, 2 those
+ * inside them as well, and so on. Each page is drawn so and the
+ * screen's depth put back.
+ */
+LOCAL INT	pr_open = TV_MAX_DEPTH;
+
+LOCAL void pr_open_set( CONST T_PRNSET *set )
+{
+	pr_open = ( set != NULL && set->expand ) ? set->depth : TV_MAX_DEPTH;
+}
+
 LOCAL ER draw_doc( void *arg, INT gid, INT page, CONST T_DPRECT *sheet )
 {
 	DTPRSRC	*s = (DTPRSRC *)arg;
+	ER	er;
 
 	tv_doc_zoom(8);
 	tv_doc_ground(TRUE);
 	tv_doc_detail(FALSE);
 	dp_fill_rect(gid, sheet, ( s->paper == TV_PAPER_LOOK ) ? wm_look(WM_LOOK_WORK) : s->paper);
 
-	return tv_doc_draw_page(gid, s->doc, page, sheet, s->src, s->paper);
+	tv_open_max = pr_open;
+	er = tv_doc_draw_page(gid, s->doc, page, sheet, s->src, s->paper);
+	tv_open_max = TV_MAX_DEPTH;
+	return er;
 }
 
 /* How far a figure's shapes reach, in its own pixels */
@@ -154,13 +172,18 @@ LOCAL ER draw_fig( void *arg, INT gid, INT page, CONST T_DPRECT *sheet )
 	INT	col = page % s->cols, row = page / s->cols;
 	UW	ground = ( s->paper == TV_PAPER_LOOK ) ? wm_look(WM_LOOK_WORK) : s->paper;
 
+	ER	er;
+
 	tv_doc_zoom(8);
 	tv_doc_ground(TRUE);
 	dp_fill_rect(gid, sheet, ground);
 	s->fig->zoom = 8;
 
-	return tv_fig_draw_at(gid, s->fig, sheet, col * s->pw, row * s->ph, s->src,
-			      TAD_COL_NONE, 0);
+	tv_open_max = pr_open;
+	er = tv_fig_draw_at(gid, s->fig, sheet, col * s->pw, row * s->ph, s->src,
+			    TAD_COL_NONE, 0);
+	tv_open_max = TV_MAX_DEPTH;
+	return er;
 }
 
 EXPORT void dt_print_src_doc( DTPRSRC *s, T_PRNJOB *job, T_TVDOC *d, CONST T_TAD *src,
@@ -339,6 +362,7 @@ LOCAL ER draw_spool( void *arg, INT gid, INT page, CONST T_DPRECT *sheet )
 {
 	SPOOL	*sp = (SPOOL *)arg;
 	INT	r;
+	ER	er;
 
 	for ( r = 0; r + 1 < sp->nrec && sp->first[r + 1] <= page; r++ ) ;
 	tv_doc_zoom(8);
@@ -347,11 +371,15 @@ LOCAL ER draw_spool( void *arg, INT gid, INT page, CONST T_DPRECT *sheet )
 	if ( !spool_at(sp, r) ) {
 		return E_NOEXS;
 	}
+	tv_open_max = pr_open;
 	if ( sp->doc != NULL ) {
-		return tv_doc_draw_page(gid, sp->doc, page - sp->first[r], sheet, sp->t, 0x00FFFFFFU);
+		er = tv_doc_draw_page(gid, sp->doc, page - sp->first[r], sheet, sp->t, 0x00FFFFFFU);
+	} else {
+		sp->fig->zoom = 8;
+		er = tv_fig_draw_at(gid, sp->fig, sheet, 0, 0, sp->t, TAD_COL_NONE, 0);
 	}
-	sp->fig->zoom = 8;
-	return tv_fig_draw_at(gid, sp->fig, sheet, 0, 0, sp->t, TAD_COL_NONE, 0);
+	tv_open_max = TV_MAX_DEPTH;
+	return er;
 }
 
 LOCAL void spool_free( SPOOL *sp )
@@ -864,6 +892,8 @@ LOCAL void preview( DTWIN *host, CONST T_PRNJOB *job, CONST T_PRNSET *set )
 	INT		sw = 1024, shh = 768, pw, ph, pct, h, wd;
 	BOOL		done = FALSE;
 
+	pr_open_set(set);
+
 	knl_memset(&v, 0, sizeof(v));
 	v.job = job;
 	v.set = set;
@@ -1259,6 +1289,7 @@ EXPORT ER dt_print_out( DTWIN *host, CONST T_PRNJOB *job, CONST T_PRNSET *set )
 	}
 	(void)wm_msg_put("印刷しています");
 	wm_update();
+	pr_open_set(set);
 	er = prn_object(job, set, NULL, &u);
 	prn_stat(&st);
 	tm_printf((UB *)"print: %d sheets, %d faces (%d glyphs), %d pictures, %d patterns, %d bytes (%d)\n",
@@ -1381,7 +1412,9 @@ EXPORT ER dt_print_spool( CONST T_DTREQ *rq, T_DTANS *an )
 	if ( sp == NULL ) {
 		return E_NOEXS;
 	}
+	wm_obj_quiet(TRUE);		/* the keys that answer the panels are theirs, not the program's */
 	er = dt_print(host, &job);
+	wm_obj_quiet(FALSE);
 	spool_free(sp);
 	(void)an;
 

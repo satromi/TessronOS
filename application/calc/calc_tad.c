@@ -348,6 +348,7 @@ EXPORT CXCELL *cx_make( CXSHEET *s, INT col, INT row )
 	m_zero(c, sizeof(*c));
 	c->col = col;
 	c->row = row;
+	c->st = &cx_plain;
 	c->text = dup_bytes((CONST UB *)"", 0);
 	if ( c->text == NULL ) {
 		cx_free(c);
@@ -368,6 +369,25 @@ EXPORT void cx_remove( CXSHEET *s, INT col, INT row )
 	cell_free(s->c[i]);
 	m_copy(&s->c[i], &s->c[i + 1], ( s->n - i - 1 ) * (INT)sizeof(CXCELL *));
 	s->n--;
+}
+
+EXPORT INT cx_remove_range( CXSHEET *s, CONST CXRANGE *r )
+{
+	INT	i, k = 0, gone = 0;
+
+	/* in one walk, the others closed up behind */
+	for ( i = 0; i < s->n; i++ ) {
+		CXCELL	*c = s->c[i];
+
+		if ( c->col >= r->c0 && c->col <= r->c1 && c->row >= r->r0 && c->row <= r->r1 ) {
+			cell_free(c);
+			gone++;
+			continue;
+		}
+		s->c[k++] = c;
+	}
+	s->n = k;
+	return gone;
 }
 
 EXPORT BOOL cx_set_text( CXCELL *c, CONST UB *text )
@@ -408,8 +428,17 @@ EXPORT BOOL cx_set_el( CXCELL *c, INT kind, CONST UB *el, INT len )
 
 EXPORT BOOL cx_set_shown( CXCELL *c, CONST UB *s, INT len )
 {
-	UB	*d = dup_bytes(s, len);
+	UB	*d;
+	INT	i;
 
+	/* what it shows is its text: nothing kept apart (a sheet of numbers keeps them once) */
+	for ( i = 0; i < len && c->text[i] == s[i]; i++ ) ;
+	if ( i == len && c->text[len] == 0 ) {
+		cx_free(c->shown);
+		c->shown = NULL;
+		return TRUE;
+	}
+	d = dup_bytes(s, len);
 	if ( d == NULL ) return FALSE;
 	cx_free(c->shown);
 	c->shown = d;
@@ -796,6 +825,8 @@ LOCAL INT cell_words( UB *w, INT n, CXSTYLE *st )
 		if ( w[i] != '\t' && w[i] != '\n' && w[i] != '\r' ) w[a++] = w[i];
 	}
 	n = a;
+	for ( i = 0; i < n && w[i] != '<' && w[i] != '&'; i++ ) ;
+	if ( i == n ) goto ends;		/* words alone, the most of a large sheet */
 	if ( font_tag(w, &n, "color", st->colour, CX_COLOUR) ) st->has |= CX_S_COLOUR;
 	if ( font_tag(w, &n, "size", t, sizeof(t)) ) {
 		st->size = int_of((CONST UB *)t, s_len((CONST UB *)t), 0);
@@ -823,6 +854,7 @@ LOCAL INT cell_words( UB *w, INT n, CXSTYLE *st )
 	subst(w, &n, "&amp;", "&");
 
 	/* the white space at the ends */
+    ends:
 	a = 0;
 	while ( a < n ) {
 		INT	u = utf8_at(w + a, n - a, &len);
@@ -864,12 +896,16 @@ LOCAL ER put_cell( CXSHEET *s, INT col, INT row, CONST UB *text, INT tn, CONST C
 	}
 	cn = cx_old_form(text, tn, conv, tn * 2 + 8);
 	conv[cn] = 0;
-	if ( !cx_set_text(c, conv) ) {
-		cx_free(conv);
-		return E_NOMEM;
-	}
-	cx_free(conv);
-	if ( st->has != 0 ) cx_style_merge(&c->st, st);
+	/* the words given to the cell as they are, without a copy between */
+	cx_free(c->text);
+	c->text = conv;
+	cx_free(c->shown);
+	c->shown = NULL;
+	cx_free(c->el);
+	c->el = NULL;
+	c->ellen = 0;
+	c->kind = CX_TEXT;
+	if ( st->has != 0 && !cx_style_add(c, st) ) return E_NOMEM;
 	return E_OK;
 }
 
@@ -965,7 +1001,8 @@ LOCAL INT cell_span( CONST UB *x, INT n, INT at )
 LOCAL ER read_cell( CXSHEET *s, INT col, INT row, CONST UB *src, INT len, INT *p_count )
 {
 	CXSTYLE	st;
-	UB	*w = (UB *)cx_alloc(len + 1);
+	UB	small[256];
+	UB	*w = ( len < (INT)sizeof(small) ) ? small : (UB *)cx_alloc(len + 1);
 	INT	n = len, at, k;
 	ER	er = E_OK;
 
@@ -973,6 +1010,17 @@ LOCAL ER read_cell( CXSHEET *s, INT col, INT row, CONST UB *src, INT len, INT *p
 	m_copy(w, src, len);
 	w[len] = 0;
 	m_zero(&st, sizeof(st));
+	for ( k = 0; k < n && w[k] != '<'; k++ ) ;
+	if ( k == n ) {
+		/* no element: words alone */
+		n = cell_words(w, n, &st);
+		if ( n > 0 ) {
+			er = put_cell(s, col, row, w, n, &st);
+			( *p_count )++;
+		}
+		if ( w != small ) cx_free(w);
+		return er;
+	}
 
 	/* <calcCell .../> */
 	at = find(w, n, 0, "<calcCell ");
@@ -995,8 +1043,8 @@ LOCAL ER read_cell( CXSHEET *s, INT col, INT row, CONST UB *src, INT len, INT *p
 
 		if ( c != NULL ) {
 			if ( !cx_set_el(c, CX_LINK, w + at, k ) ) er = E_NOMEM;
-			m_zero(&c->st, sizeof(c->st));
-			cx_style_merge(&c->st, &st);
+			c->st = &cx_plain;
+			if ( !cx_style_add(c, &st) ) er = E_NOMEM;
 			( *p_count )++;
 		}
 	} else if ( ( k = image_in(w, n, &at) ) > 0 ) {
@@ -1004,8 +1052,8 @@ LOCAL ER read_cell( CXSHEET *s, INT col, INT row, CONST UB *src, INT len, INT *p
 
 		if ( c != NULL ) {
 			if ( !cx_set_el(c, CX_IMAGE, w + at, k) ) er = E_NOMEM;
-			m_zero(&c->st, sizeof(c->st));
-			cx_style_merge(&c->st, &st);
+			c->st = &cx_plain;
+			if ( !cx_style_add(c, &st) ) er = E_NOMEM;
 			( *p_count )++;
 		}
 	} else {
@@ -1015,7 +1063,7 @@ LOCAL ER read_cell( CXSHEET *s, INT col, INT row, CONST UB *src, INT len, INT *p
 			( *p_count )++;
 		}
 	}
-	cx_free(w);
+	if ( w != small ) cx_free(w);
 	return er;
 }
 
@@ -1429,7 +1477,7 @@ EXPORT void cx_write( CTBUF *b, CONST CXSHEET *s, CONST UB *name, CX_CHARTFN fn,
 			ct_put(b, nm);
 			ct_put(b, "\"/>");
 			if ( c != NULL ) {
-				CONST CXSTYLE	*st = &c->st;
+				CONST CXSTYLE	*st = c->st;
 
 				put_calc_cell(b, st);
 				if ( ( st->has & CX_S_ALIGN ) && st->align[0] != 0 && !s_eq(st->align, "left") ) {
@@ -1636,19 +1684,128 @@ EXPORT void cx_style_merge( CXSTYLE *to, CONST CXSTYLE *from )
 	to->has |= from->has;
 }
 
+/* ---------------------------------------------------------------- the looks shared */
+
+EXPORT CONST CXSTYLE	cx_plain;
+
+/*
+ * The looks, kept once each in a table found by their bytes: a sheet of
+ * a million cells has a few looks, not a million of 340 bytes. A look
+ * is not let go while the program runs, so a cell may keep the one it
+ * has however the others change.
+ */
+LOCAL CXSTYLE	**looks = NULL;
+LOCAL INT	nlooks = 0, maxlooks = 0;	/* maxlooks a power of 2, at most half full */
+
+/* The bytes after a string's end made 0, so that a look the same is the same bytes */
+LOCAL void str_tidy( char *s, INT max )
+{
+	INT	i = 0;
+
+	while ( i < max && s[i] != 0 ) i++;
+	for ( ; i < max; i++ ) s[i] = 0;
+}
+
+LOCAL BOOL m_same( CONST void *a, CONST void *b, INT n )
+{
+	CONST UB	*p = (CONST UB *)a, *q = (CONST UB *)b;
+	INT		i;
+
+	for ( i = 0; i < n; i++ ) if ( p[i] != q[i] ) return FALSE;
+	return TRUE;
+}
+
+LOCAL UW look_hash( CONST CXSTYLE *st )
+{
+	CONST UB	*p = (CONST UB *)st;
+	UW		h = 2166136261U;
+	INT		i;
+
+	for ( i = 0; i < (INT)sizeof(*st); i++ ) h = ( h ^ p[i] ) * 16777619U;
+	return h;
+}
+
+LOCAL BOOL looks_grow( void )
+{
+	INT	m = ( maxlooks > 0 ) ? maxlooks * 2 : 64, i;
+	CXSTYLE	**t = (CXSTYLE **)cx_alloc(m * (INT)sizeof(CXSTYLE *));
+
+	if ( t == NULL ) return FALSE;
+	m_zero(t, m * (INT)sizeof(CXSTYLE *));
+	for ( i = 0; i < maxlooks; i++ ) {
+		UW	h;
+
+		if ( looks[i] == NULL ) continue;
+		for ( h = look_hash(looks[i]) & (UW)( m - 1 ); t[h] != NULL; h = ( h + 1 ) & (UW)( m - 1 ) ) ;
+		t[h] = looks[i];
+	}
+	cx_free(looks);
+	looks = t;
+	maxlooks = m;
+	return TRUE;
+}
+
+EXPORT CONST CXSTYLE *cx_style( CONST CXSTYLE *st )
+{
+	CXSTYLE	k = *st, *d;
+	UW	h;
+	INT	i;
+
+	str_tidy(k.bg, CX_COLOUR);
+	str_tidy(k.align, sizeof(k.align));
+	str_tidy(k.valign, sizeof(k.valign));
+	str_tidy(k.colour, CX_COLOUR);
+	str_tidy(k.face, CX_FACE);
+	for ( i = 0; i < 4; i++ ) {
+		if ( k.side[i].on ) str_tidy(k.side[i].colour, CX_COLOUR);
+		else m_zero(&k.side[i], sizeof(k.side[i]));
+	}
+	if ( m_same(&k, &cx_plain, sizeof(k)) ) return &cx_plain;
+	if ( ( nlooks + 1 ) * 2 > maxlooks && !looks_grow() ) return NULL;
+	for ( h = look_hash(&k) & (UW)( maxlooks - 1 ); looks[h] != NULL; h = ( h + 1 ) & (UW)( maxlooks - 1 ) ) {
+		if ( m_same(looks[h], &k, sizeof(k)) ) return looks[h];
+	}
+	d = (CXSTYLE *)cx_alloc((INT)sizeof(CXSTYLE));
+	if ( d == NULL ) return NULL;
+	*d = k;
+	looks[h] = d;
+	nlooks++;
+	return d;
+}
+
+EXPORT BOOL cx_style_put( CXCELL *c, CONST CXSTYLE *st )
+{
+	CONST CXSTYLE	*d = cx_style(st);
+
+	if ( d == NULL ) return FALSE;
+	c->st = d;
+	return TRUE;
+}
+
+EXPORT BOOL cx_style_add( CXCELL *c, CONST CXSTYLE *from )
+{
+	CXSTYLE	st = *c->st;
+
+	cx_style_merge(&st, from);
+	return cx_style_put(c, &st);
+}
+
 LOCAL void frame_cell( CXSHEET *s, INT col, INT row, UINT sides, CONST CXSIDE *sd )
 {
 	CXCELL	*c = cx_make(s, col, row);
+	CXSTYLE	st;
 	INT	i;
 
 	if ( c == NULL ) return;
+	st = *c->st;
 	for ( i = 0; i < 4; i++ ) {
 		if ( sides & ( 1U << i ) ) {
-			c->st.side[i] = *sd;
-			c->st.side[i].on = TRUE;
+			st.side[i] = *sd;
+			st.side[i].on = TRUE;
 		}
 	}
-	c->st.has |= CX_S_FRAME;
+	st.has |= CX_S_FRAME;
+	(void)cx_style_put(c, &st);
 }
 
 EXPORT void cx_frame_range( CXSHEET *s, CONST CXRANGE *r, INT how, CONST CXSIDE *side )
@@ -1689,10 +1846,13 @@ EXPORT void cx_frame_range( CXSHEET *s, CONST CXRANGE *r, INT how, CONST CXSIDE 
 		for ( row = r->r0; row <= r->r1; row++ ) {
 			for ( col = r->c0; col <= r->c1; col++ ) {
 				CXCELL	*c = cx_get(s, col, row);
+				CXSTYLE	st;
 
 				if ( c == NULL ) continue;
-				for ( i = 0; i < 4; i++ ) c->st.side[i].on = FALSE;
-				c->st.has &= ~CX_S_FRAME;
+				st = *c->st;
+				for ( i = 0; i < 4; i++ ) st.side[i].on = FALSE;
+				st.has &= ~CX_S_FRAME;
+				(void)cx_style_put(c, &st);
 			}
 		}
 		break;

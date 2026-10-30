@@ -277,9 +277,14 @@ LOCAL INT next_cp( CONST UB *s, INT n, BOOL ent, UINT *p_cp )
 	return k;
 }
 
-EXPORT INT bk_tad_attr( CONST UB *tag, INT n, CONST char *name, UB *buf, INT max )
+/*
+ * Where the value of attribute `name` lies in the tag, between its
+ * quotes and with its entities as they are: its offset, and its length
+ * in *p_len; -1 when the tag has no such attribute.
+ */
+LOCAL INT attr_span( CONST UB *tag, INT n, CONST char *name, INT *p_len )
 {
-	INT	at = 0, a, alen, v, e, k;
+	INT	at = 0, a, alen, v;
 	UB	q;
 
 	while ( at < n && !is_space(tag[at]) && tag[at] != '/' ) at++;	/* the element's name */
@@ -299,10 +304,22 @@ EXPORT INT bk_tad_attr( CONST UB *tag, INT n, CONST char *name, UB *buf, INT max
 		q = tag[at++];
 		v = at;
 		while ( at < n && tag[at] != q ) at++;
-		e = at;
 		at++;
-		if ( !same(tag + a, alen, name) ) continue;
+		if ( same(tag + a, alen, name) ) {
+			*p_len = ( at - 1 ) - v;
+			return v;
+		}
+	}
+}
 
+EXPORT INT bk_tad_attr( CONST UB *tag, INT n, CONST char *name, UB *buf, INT max )
+{
+	INT	v, e, k, len;
+
+	v = attr_span(tag, n, name, &len);
+	if ( v < 0 ) return -1;
+	e = v + len;
+	{
 		/* the value, its entities undone, as UTF-8 */
 		for ( k = 0; v < e; ) {
 			UINT	cp;
@@ -1848,27 +1865,33 @@ LOCAL void arrows( BK_TADW *w, CONST TOK *t )
 	}
 }
 
-/* "x,y x,y ...": how many, and each written when put */
+/*
+ * "x,y x,y ...": how many, and each written when put. The value is read
+ * where it stands in the tag: it is digits, signs, points and spaces,
+ * with no entities, and may be as long as the shape has points.
+ */
 LOCAL INT points( BK_TADW *w, CONST TOK *t, BOOL put )
 {
-	UB	b[4096];
-	INT	n, i = 0, cnt = 0, k, v[2];
+	CONST UB	*b;
+	INT		n, i = 0, cnt = 0, k, v[2], at;
 
-	n = bk_tad_attr(t->p, t->n, "points", b, sizeof(b));
-	if ( n < 0 || n >= (INT)sizeof(b) ) return 0;
+	at = attr_span(t->p, t->n, "points", &n);
+	if ( at < 0 ) return 0;
+	b = t->p + at;
+#define PT_AT(j)	( ( (j) < n ) ? b[j] : 0 )
 	for ( ;; ) {
 		for ( k = 0; k < 2; k++ ) {
 			INT	x = 0, sign = 1, f = -1;
 
-			while ( b[i] == ' ' || b[i] == ',' || b[i] == '\n' || b[i] == '\t' ) i++;
-			if ( b[i] == 0 ) return cnt;
-			if ( b[i] == '-' ) { sign = -1; i++; }
-			if ( b[i] < '0' || b[i] > '9' ) return cnt;
-			while ( b[i] >= '0' && b[i] <= '9' ) x = x * 10 + ( b[i++] - '0' );
-			if ( b[i] == '.' ) {
+			while ( PT_AT(i) == ' ' || PT_AT(i) == ',' || PT_AT(i) == '\n' || PT_AT(i) == '\t' ) i++;
+			if ( PT_AT(i) == 0 ) return cnt;
+			if ( PT_AT(i) == '-' ) { sign = -1; i++; }
+			if ( PT_AT(i) < '0' || PT_AT(i) > '9' ) return cnt;
+			while ( PT_AT(i) >= '0' && PT_AT(i) <= '9' ) x = x * 10 + ( b[i++] - '0' );
+			if ( PT_AT(i) == '.' ) {
 				i++;
-				f = ( b[i] >= '0' && b[i] <= '9' ) ? b[i] - '0' : 0;
-				while ( b[i] >= '0' && b[i] <= '9' ) i++;
+				f = ( PT_AT(i) >= '0' && PT_AT(i) <= '9' ) ? b[i] - '0' : 0;
+				while ( PT_AT(i) >= '0' && PT_AT(i) <= '9' ) i++;
 			}
 			if ( f >= 5 ) x++;
 			v[k] = sign * x;
@@ -1879,6 +1902,7 @@ LOCAL INT points( BK_TADW *w, CONST TOK *t, BOOL put )
 		}
 		cnt++;
 	}
+#undef PT_AT
 }
 
 LOCAL void prim_head( BK_TADW *w, UINT sub, UINT mode, INT body )

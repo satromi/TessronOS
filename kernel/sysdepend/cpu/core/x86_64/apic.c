@@ -168,50 +168,49 @@ LOCAL void timer_hw( UD tsc )
  * interrupts disabled only, on the processor itself.
  */
 EXPORT void	(*knl_apic_lk_hook)( void ) = NULL;
-LOCAL UD	sys_dl[CNF_MAX_PRCID];
-LOCAL UD	lk_dl[CNF_MAX_PRCID];
-
-LOCAL void timer_program( INT i )
+IMPORT void	knl_cpu_freq_tick( ID prcid );
+LOCAL void timer_program( T_PCPU *p )
 {
-	UD	a = sys_dl[i], b = lk_dl[i];
+	UD	a = p->apic_sys_dl, b = p->apic_lk_dl;
 
 	timer_hw( ( a == 0 ) ? b : ( b == 0 || a < b ) ? a : b );
 }
 
 EXPORT void knl_apic_timer_deadline( UD tsc )
 {
-	INT	i = knl_pcpu()->prcid - 1;
+	T_PCPU	*p = knl_pcpu();
 
-	sys_dl[i] = tsc;
-	timer_program(i);
+	p->apic_sys_dl = tsc;
+	timer_program(p);
 }
 
 EXPORT void knl_apic_lk_arm( UD period )
 {
-	INT	i = knl_pcpu()->prcid - 1;
+	T_PCPU	*p = knl_pcpu();
 
-	lk_dl[i] = ReadSysCounterSync() + period;
-	timer_program(i);
+	p->apic_lk_dl = ReadSysCounterSync() + period;
+	timer_program(p);
 }
 
 /* The timer's interrupt (INTNO_SYSTICK, interrupt.c) */
 EXPORT void knl_apic_timer_isr( UINT intno, UW iar )
 {
-	INT	i = knl_pcpu()->prcid - 1;
+	T_PCPU	*p = knl_pcpu();
 	UD	now = ReadSysCounterSync();
 
-	if ( lk_dl[i] != 0 && now >= lk_dl[i] ) {
-		lk_dl[i] = 0;
+	if ( p->apic_lk_dl != 0 && now >= p->apic_lk_dl ) {
+		p->apic_lk_dl = 0;
+		knl_cpu_freq_tick(p->prcid);		/* this processor's clock over the period (cpuclk.c) */
 		if ( knl_apic_lk_hook != NULL ) {
 			(*knl_apic_lk_hook)();		/* sets its next period */
 		}
 	}
-	if ( sys_dl[i] != 0 && now >= sys_dl[i] ) {
-		sys_dl[i] = 0;
+	if ( p->apic_sys_dl != 0 && now >= p->apic_sys_dl ) {
+		p->apic_sys_dl = 0;
 		knl_timer_handler();			/* sets the next expiry, and ends the interrupt */
 		return;
 	}
-	timer_program(i);
+	timer_program(p);
 	knl_apic_eoi();
 }
 
@@ -385,6 +384,87 @@ LOCAL void ioapic_init( void )
 			ioapic_wr(base, IOAPIC_RTE(pin), RTE_MASKED | gsi_mode(gsi) | vec);
 		}
 	}
+}
+
+/* ------------------------------------------------------------------------ */
+/*
+ * The processor a device's interrupt goes to (inttarget.c, design 4.5).
+ * An IOAPIC's input names it in its entry, a message in its address;
+ * both hold an APIC ID of 8 bits, so a processor whose ID is larger is
+ * reached only through the IOMMU's remapping, which is not used: such a
+ * processor is not given a device's interrupt.
+ */
+#define IS_GSI_VEC(v)	( (v) >= INTVEC_GSI(0) && (v) < INTVEC_GSI(INTVEC_GSI_NUM) )
+#define IS_MSI_VEC(v)	( (v) >= INTVEC_MSI_FIRST && (v) < INTVEC_MSI_FIRST + INTVEC_MSI_NUM )
+
+/* pcie.c: the message of the interrupt written again with this address (E_OK: none made yet) */
+EXPORT ER	(*knl_msi_rewrite_hook)( UINT intno, UD addr ) = NULL;
+
+EXPORT BOOL knl_int_is_dev( UINT intno )
+{
+	return IS_GSI_VEC(intno) || IS_MSI_VEC(intno);
+}
+
+EXPORT BOOL knl_int_is_msi( UINT intno )
+{
+	return IS_MSI_VEC(intno);
+}
+
+EXPORT BOOL knl_int_in_use( UINT intno )
+{
+	return ( intno < N_INTVEC && knl_intvec_tbl[intno] != NULL );
+}
+
+/* The APIC ID of PRC prc, ~0 when it cannot take a device's interrupt */
+LOCAL UW prc_apic( INT prc )
+{
+	T_PCPU	*p;
+
+	if ( prc < 1 || prc > knl_num_prc || ( p = knl_pcpu_of(prc - 1) ) == NULL || p->state != PC_ONLINE ) {
+		return ~(UW)0;
+	}
+	return ( p->apic_id <= 0xfe ) ? p->apic_id : ~(UW)0;
+}
+
+/* The APIC ID a message is to be sent to as it is made (cpu_msi.h) */
+EXPORT UW knl_msi_apic( UINT intno )
+{
+	UW	id = prc_apic(knl_int_target_of(intno));
+
+	return ( id == ~(UW)0 ) ? knl_msi_dest : id;
+}
+
+EXPORT ER knl_int_route( UINT intno, INT prc )
+{
+	UW	id = prc_apic(prc);
+	UINT	pin, imask;
+	UBINT	base;
+	UW	lo;
+
+	if ( !knl_int_is_dev(intno) || prc < 1 || prc > knl_num_prc ) {
+		return E_PAR;
+	}
+	if ( id == ~(UW)0 ) {
+		return E_NOSPT;
+	}
+	if ( IS_GSI_VEC(intno) ) {
+		base = ioapic_of(intno - INTVEC_GSI(0), &pin);
+		if ( base == 0 ) {
+			return E_PAR;
+		}
+		/* masked while the destination changes, then as it was */
+		ISpinLock(&ioapic_lock, &imask);
+		lo = ioapic_rd(base, IOAPIC_RTE(pin));
+		ioapic_wr(base, IOAPIC_RTE(pin), lo | RTE_MASKED);
+		ioapic_wr(base, IOAPIC_RTE(pin) + 1, id << 24);
+		ioapic_wr(base, IOAPIC_RTE(pin), lo);
+		ISpinUnlock(&ioapic_lock, &imask);
+		return E_OK;
+	}
+	if ( knl_msi_rewrite_hook == NULL ) {
+		return E_OK;		/* no message made yet: made with the new address */
+	}
+	return (*knl_msi_rewrite_hook)(intno, (UD)( MSI_ADDR_BASE | ( ( id & 0xff ) << 12 ) ));
 }
 
 /* The 8259s remapped out of the way of the exceptions, and masked */

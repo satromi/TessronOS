@@ -170,7 +170,7 @@ LOCAL ER ready( void )
 		if ( er < E_OK ) {
 			return er;
 		}
-		tr_key = ob_opn_obj(&u, OB_OP_ALL);
+		tr_key = ob_opn_obj(&u, OB_OP_ALL | OB_O_WEXCL);	/* the tray's only writer */
 		if ( tr_key <= 0 ) {
 			return (ER)tr_key;
 		}
@@ -179,7 +179,7 @@ LOCAL ER ready( void )
 		}
 		return er;
 	}
-	tr_key = ob_opn_obj(&u, OB_OP_ALL);
+	tr_key = ob_opn_obj(&u, OB_OP_ALL | OB_O_WEXCL);
 	return ( tr_key > 0 ) ? E_OK : (ER)tr_key;
 }
 
@@ -268,7 +268,6 @@ LOCAL void tell( void )
 	TS_TM	tm;
 	TS_TIME	t;
 	UB	*b, when[32];
-	SZ	asz = 0;
 	INT	at = 0, i, n = nlevel();
 
 	b = (UB *)Kmalloc(INDEX_MAX);
@@ -298,8 +297,7 @@ LOCAL void tell( void )
 		at = put(b, at, INDEX_MAX, ")</p>");
 	}
 	at = put(b, at, INDEX_MAX, "</document></tad>");
-	(void)ob_wri_rec(tr_key, 0, 0, b, at, &asz);
-	(void)ob_trn_rec(tr_key, 0, (UD)at);
+	(void)ob_rpl_rec(tr_key, 0, b, (SZ)at);
 
 	/* which record holds which level */
 	at = put(b, 0, INDEX_MAX, "{\"name\":\"トレー\",\"refCount\":1,\"recordCount\":13,"
@@ -387,10 +385,7 @@ LOCAL ER write_set( INT to, INT from, CONST T_TRREC *recs, INT n, CONST UB *name
 		off += recs[i].size;
 	}
 	if ( er >= E_OK ) {
-		er = ob_wri_rec(tr_key, to, 0, b, total, &asz);
-	}
-	if ( er >= E_OK ) {
-		er = ob_trn_rec(tr_key, to, (UD)total);
+		er = ob_rpl_rec(tr_key, to, b, total);
 	}
 	Kfree(b);
 

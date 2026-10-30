@@ -29,6 +29,7 @@
 #include <tk/tkernel.h>
 #include <ts/tad.h>
 #include <ts/tadview.h>
+#include "tad_local.h"
 
 #define DOC_MAX_FIG	16		/* figures standing in one text */
 #define DOC_MAX_PARA	512
@@ -198,7 +199,7 @@ typedef struct {
 	BOOL	gap_set, pargap_set;
 	INT	left, right, indent;
 	INT	ntabs;
-	INT	tabs[TV_MAX_TABS];
+	CONST INT *tabs;		/* in one of the document's tab sets */
 	UINT	align;
 	CONST UB *khead, *ktail;	/* 禁則, as T_TVPARA keeps it */
 	INT	khead_len, ktail_len;
@@ -215,7 +216,58 @@ typedef struct {
 	INT	ruby_next;		/* the next ruby group's number */
 	BOOL	page_next;		/* a page break waits for the next paragraph */
 	CONST T_TADNODE	*fmt_next;	/* a tab format waits for the next paragraph */
+	BOOL	nomem;			/* something could not be kept: no document */
+	CONST T_TVDOC	*old;		/* made before from the same record, or NULL */
+	INT	oldi;			/* where in it to look for the next <p> */
 } DOCBUILD;
+
+/*
+ * Room for n more runs, or one more paragraph: made larger when the
+ * room taken at the start, sized from the document made before, runs
+ * out. Nothing holds a run's or a paragraph's place across this.
+ */
+LOCAL BOOL runs_room( DOCBUILD *b, INT n )
+{
+	INT	m;
+	T_TVRUN	*r;
+
+	if ( b->d->nrun + n <= b->maxrun ) {
+		return TRUE;
+	}
+	m = b->maxrun * 2;
+	if ( m < b->d->nrun + n ) {
+		m = b->d->nrun + n + 1024;
+	}
+	r = (T_TVRUN *)Krealloc(b->d->run, sizeof(T_TVRUN) * (size_t)m);
+	if ( r == NULL ) {
+		b->nomem = TRUE;
+		return FALSE;
+	}
+	b->d->run = r;
+	b->maxrun = m;
+
+	return TRUE;
+}
+
+LOCAL BOOL paras_room( DOCBUILD *b )
+{
+	INT		m;
+	T_TVPARA	*p;
+
+	if ( b->d->npara < b->maxpara ) {
+		return TRUE;
+	}
+	m = b->maxpara * 2 + 16;
+	p = (T_TVPARA *)Krealloc(b->d->para, sizeof(T_TVPARA) * (size_t)m);
+	if ( p == NULL ) {
+		b->nomem = TRUE;
+		return FALSE;
+	}
+	b->d->para = p;
+	b->maxpara = m;
+
+	return TRUE;
+}
 
 LOCAL void run_add( DOCBUILD *b, UINT kind, CONST UB *text, INT len,
 		    INT link, CONST UB *href, CONST T_TADNODE *nd, INT noff )
@@ -223,7 +275,7 @@ LOCAL void run_add( DOCBUILD *b, UINT kind, CONST UB *text, INT len,
 	T_TVRUN		*r;
 	CONST FONTST	*f = &b->st[b->depth];
 
-	if ( b->d->nrun >= b->maxrun ) {
+	if ( !runs_room(b, 1) ) {
 		return;
 	}
 	r = &b->d->run[b->d->nrun];
@@ -262,9 +314,7 @@ LOCAL void run_add( DOCBUILD *b, UINT kind, CONST UB *text, INT len,
 /* The paragraph now being built takes on what holds */
 LOCAL void para_take( DOCBUILD *b, T_TVPARA *p )
 {
-	INT	i;
-
-	p->align      = b->ps.align;
+	p->align     = b->ps.align;
 	p->gap        = b->ps.gap_set ? b->ps.gap : 500;
 	p->gap_abs    = b->ps.gap_abs;
 	p->pargap     = b->ps.pargap_set ? b->ps.pargap : 1000;
@@ -273,9 +323,7 @@ LOCAL void para_take( DOCBUILD *b, T_TVPARA *p )
 	p->right      = b->ps.right;
 	p->indent     = b->ps.indent;
 	p->ntabs      = b->ps.ntabs;
-	for ( i = 0; i < b->ps.ntabs && i < TV_MAX_TABS; i++ ) {
-		p->tabs[i] = b->ps.tabs[i];
-	}
+	p->tabs       = b->ps.tabs;
 	p->khead      = b->ps.khead;
 	p->khead_len  = b->ps.khead_len;
 	p->khead_kind = b->ps.khead_kind;
@@ -284,17 +332,139 @@ LOCAL void para_take( DOCBUILD *b, T_TVPARA *p )
 	p->ktail_kind = b->ps.ktail_kind;
 }
 
+/* A number made of what a paragraph is laid out from: words, then bytes */
+LOCAL UW sig_w( UW h, UW v )
+{
+	h = ( h ^ v ) * 0x9E3779B1U;
+
+	return h ^ ( h >> 15 );
+}
+
+/*
+ * Words of the record -- a face's name, a ruby, the letters of 禁則 --
+ * by where they are: the record's values are replaced rather than
+ * written over, so the same place is the same words.
+ */
+LOCAL UW sig_s( UW h, CONST UB *s, INT n )
+{
+	h = sig_w(h, (UW)(UBINT)s);
+	h = sig_w(h, (UW)( (UBINT)s >> 32 ));
+
+	return sig_w(h, (UW)n);
+}
+
+/* The look of letters at a point, as part of a paragraph's number */
+LOCAL UW sig_font( UW h, CONST FONTST *f )
+{
+	h = sig_w(h, (UW)f->size);
+	h = sig_w(h, f->colour);
+	h = sig_w(h, f->style);
+	h = sig_s(h, f->face, -1);
+	h = sig_w(h, (UW)f->space);
+	h = sig_w(h, (UW)( f->wr_n * 65536 + f->wr_d ));
+	h = sig_w(h, (UW)( f->hr_n * 65536 + f->hr_d ));
+	h = sig_w(h, f->back);
+	h = sig_w(h, f->bouten);
+	h = sig_s(h, f->ruby, f->ruby_len);
+	h = sig_w(h, (UW)f->ruby_below);
+	h = sig_w(h, (UW)f->turn);
+	h = sig_w(h, (UW)f->lift);
+
+	return sig_w(h, (UW)f->lift_abs);
+}
+
+/* What holds from tab formats and <text> settings, as a number */
+LOCAL UW sig_ps( CONST PARAST *ps )
+{
+	UW	h = 2166136261U;
+	INT	i;
+
+	h = sig_w(h, (UW)ps->gap);
+	h = sig_w(h, (UW)ps->pargap);
+	h = sig_w(h, (UW)( ( ps->gap_abs ? 1 : 0 ) | ( ps->pargap_abs ? 2 : 0 )
+			   | ( ps->gap_set ? 4 : 0 ) | ( ps->pargap_set ? 8 : 0 ) ));
+	h = sig_w(h, (UW)ps->left);
+	h = sig_w(h, (UW)ps->right);
+	h = sig_w(h, (UW)ps->indent);
+	h = sig_w(h, (UW)ps->ntabs);
+	for ( i = 0; i < ps->ntabs; i++ ) {
+		h = sig_w(h, (UW)ps->tabs[i]);
+	}
+	h = sig_w(h, ps->align);
+	h = sig_w(h, (UW)(UBINT)ps->khead);
+	h = sig_w(h, (UW)(UBINT)ps->ktail);
+	h = sig_w(h, (UW)( ps->khead_len * 65536 + ps->ktail_len ));
+
+	return sig_w(h, (UW)( ps->khead_kind * 65536 + ps->ktail_kind ));
+}
+
+/* All that holds at a point of the walk, for a paragraph to be taken over at */
+LOCAL UW sig_state( CONST DOCBUILD *b )
+{
+	UW	h = sig_font(2166136261U, &b->st[b->depth]);
+
+	h = sig_w(h, (UW)b->depth);
+	h = sig_w(h, (UW)( b->page_next ? 1 : 0 ));
+
+	return sig_w(h, (UW)(UBINT)b->fmt_next);
+}
+
+/* A paragraph's own settings, added to its number once it is built */
+LOCAL void para_sig( CONST T_TVDOC *d, T_TVPARA *p )
+{
+	UW	h = p->sig;
+	INT	i;
+
+	h = sig_w(h, p->align);
+	h = sig_w(h, (UW)p->indent);
+	h = sig_w(h, (UW)( p->gap * 2 + ( p->gap_abs ? 1 : 0 ) ));
+	h = sig_w(h, (UW)( p->pargap * 2 + ( p->pargap_abs ? 1 : 0 ) ));
+	h = sig_w(h, (UW)p->left);
+	h = sig_w(h, (UW)p->right);
+	h = sig_w(h, (UW)p->ntabs);
+	for ( i = 0; i < p->ntabs; i++ ) {
+		h = sig_w(h, (UW)p->tabs[i]);
+	}
+	h = sig_w(h, (UW)( ( p->page_before ? 1 : 0 ) | ( ( p->fmt != NULL ) ? 2 : 0 )
+			   | ( ( p->align_at != NULL ) ? 4 : 0 ) ));
+	h = sig_w(h, (UW)p->khead_kind);
+	h = sig_s(h, p->khead, p->khead_len);
+	h = sig_w(h, (UW)p->ktail_kind);
+	h = sig_s(h, p->ktail, p->ktail_len);
+	p->sig = h;
+	for ( i = p->first; i < p->first + p->n && i < d->nrun; i++ ) {
+		UINT	k = d->run[i].kind;
+
+		if ( k == TV_RUN_FIGURE || k == TV_RUN_VAR || k == TV_RUN_PAGENO ) {
+			p->nocache = TRUE;
+		}
+	}
+}
+
+LOCAL void para_add2( DOCBUILD *b, CONST T_TADNODE *nd, UW insig, UW pssig );
+
 LOCAL void para_add( DOCBUILD *b, CONST T_TADNODE *nd )
+{
+	para_add2(b, nd, sig_state(b), sig_ps(&b->ps));
+}
+
+LOCAL void para_add2( DOCBUILD *b, CONST T_TADNODE *nd, UW insig, UW pssig )
 {
 	T_TVPARA	*p;
 
-	if ( b->d->npara >= b->maxpara ) {
+	if ( !paras_room(b) ) {
 		return;
 	}
 	p = &b->d->para[b->d->npara];
 	p->first  = b->d->nrun;
 	p->n      = 0;
 	p->node   = (T_TADNODE *)nd;
+	p->sig    = sig_font(2166136261U, &b->st[b->depth]);
+	p->nocache = (BOOL)( nd == NULL );
+	p->gen    = ( nd != NULL ) ? nd->gen : 0;
+	p->insig  = insig;
+	p->pssig  = pssig;
+	p->closed = FALSE;
 	para_take(b, p);
 	p->page_before = b->page_next;
 	b->page_next = FALSE;
@@ -516,8 +686,25 @@ LOCAL void tab_format( DOCBUILD *b, CONST T_TADNODE *nd )
 	}
 	if ( to_int(tad_attr(nd, "ntabs"), 0) >= 0
 	  && ( v = tad_attr(nd, "tabs") ) != NULL ) {
+		/* the stops, as many as it gives: a set of the document's own */
+		T_TVTABS	*ts;
+		INT		*xs, m = 1;
+		CONST UB	*q;
+
+		for ( q = v; *q != 0; q++ ) {
+			if ( *q == ',' ) m++;
+		}
+		ts = (T_TVTABS *)Kmalloc(sizeof(T_TVTABS) + sizeof(INT) * (SZ)m);
+		if ( ts == NULL ) {
+			b->nomem = TRUE;
+			return;
+		}
+		ts->next = b->d->tabsets;
+		b->d->tabsets = ts;
+		xs = (INT *)( ts + 1 );
+		ps->tabs = xs;
 		ps->ntabs = 0;
-		while ( *v != 0 && ps->ntabs < TV_MAX_TABS ) {
+		while ( *v != 0 && ps->ntabs < m ) {
 			INT	x = 0, sign = 1;
 
 			while ( *v == ',' || *v == ' ' ) v++;
@@ -527,7 +714,7 @@ LOCAL void tab_format( DOCBUILD *b, CONST T_TADNODE *nd )
 			/* a stop given below nought lines up decimal points
 			   at the place its size gives: a stop there */
 			(void)sign;
-			ps->tabs[ps->ntabs++] = hpx(b, x);
+			xs[ps->ntabs++] = hpx(b, x);
 			while ( *v != 0 && *v != ',' ) v++;
 		}
 	} else if ( to_int(tad_attr(nd, "ntabs"), 0) == 0 ) {
@@ -625,6 +812,65 @@ LOCAL CONST DECO deco_tab[] = {
 	{ "combchar", TV_ST_COMB },
 };
 
+/*
+ * A <p> made again: when the document made before has it, not changed,
+ * entered with all that holds the same, and nothing inside it changes
+ * what holds after it, its paragraph and runs are taken over as they
+ * are. The links in it are numbered again, as are its ruby groups.
+ */
+LOCAL BOOL para_again( DOCBUILD *b, CONST T_TADNODE *nd )
+{
+	CONST T_TVDOC	*o = b->old;
+	CONST T_TVPARA	*op;
+	T_TVPARA	*p;
+	INT		j, k, rg_old = -1, rg_new = -1;
+	UW		insig, pssig;
+
+	if ( o == NULL ) {
+		return FALSE;
+	}
+	for ( j = b->oldi; j < o->npara && j < b->oldi + 32 && o->para[j].node != nd; j++ ) {
+	}
+	if ( j >= o->npara || j >= b->oldi + 32 ) {
+		return FALSE;
+	}
+	op = &o->para[j];
+	if ( !op->closed || op->nocache || op->gen != nd->gen ) {
+		return FALSE;
+	}
+	insig = sig_state(b);
+	pssig = sig_ps(&b->ps);
+	if ( op->insig != insig || op->pssig != pssig ) {
+		return FALSE;
+	}
+	if ( !paras_room(b) || !runs_room(b, op->n ) ) {
+		return FALSE;
+	}
+	b->oldi = j + 1;
+	para_add2(b, nd, insig, pssig);
+	p = &b->d->para[b->d->npara - 1];
+	for ( k = 0; k < op->n; k++ ) {
+		T_TVRUN	*r = &b->d->run[b->d->nrun];
+
+		*r = o->run[op->first + k];
+		if ( r->kind == TV_RUN_LINK ) {
+			r->link = b->link_no++;
+		}
+		if ( r->ruby_group >= 0 ) {
+			if ( r->ruby_group != rg_old ) {
+				rg_old = r->ruby_group;
+				rg_new = b->ruby_next++;
+			}
+			r->ruby_group = rg_new;
+		}
+		b->d->nrun++;
+		p->n++;
+	}
+	p->closed = TRUE;
+
+	return TRUE;
+}
+
 LOCAL void doc_walk( DOCBUILD *b, CONST T_TADNODE *nd )
 {
 	UINT	i;
@@ -667,9 +913,19 @@ LOCAL void doc_walk( DOCBUILD *b, CONST T_TADNODE *nd )
 		return;
 	}
 	if ( name_is(nd, "p") ) {
+		UW	in;
+
+		if ( para_again(b, nd) ) {
+			return;
+		}
 		/* what a <font/> changes goes on into the next paragraph */
+		in = sig_state(b) ^ sig_ps(&b->ps);
 		para_add(b, nd);
 		doc_children(b, nd);
+		if ( b->d->npara > 0 && b->d->para[b->d->npara - 1].node == nd ) {
+			b->d->para[b->d->npara - 1].closed
+				= (BOOL)( ( sig_state(b) ^ sig_ps(&b->ps) ) == in );
+		}
 		return;
 	}
 	if ( name_is(nd, "br") ) {
@@ -1023,7 +1279,7 @@ LOCAL void count_nodes( CONST T_TADNODE *nd, INT *np, INT *nr )
 	}
 }
 
-LOCAL T_TVDOC *doc_build( CONST T_TADNODE *body )
+LOCAL T_TVDOC *doc_build( CONST T_TADNODE *body, CONST T_TVDOC *old )
 {
 	DOCBUILD	b;
 	T_TVDOC		*d;
@@ -1038,9 +1294,15 @@ LOCAL T_TVDOC *doc_build( CONST T_TADNODE *body )
 	d->columns = 1;
 	/*
 	 * Room for as many paragraphs and runs as the record could make:
-	 * one paragraph per <p>, and at most one run per node.
+	 * one paragraph per <p>, and at most one run per node. Made again
+	 * after a change, about as many as before, and more if wanted.
 	 */
-	count_nodes(body, &np, &nr);
+	if ( old != NULL ) {
+		np = old->npara + old->npara / 16 + 64;
+		nr = old->nrun + old->nrun / 16 + 256;
+	} else {
+		count_nodes(body, &np, &nr);
+	}
 	np = np + 2;
 	nr = nr + 2;
 	if ( np < DOC_MAX_PARA ) np = DOC_MAX_PARA;
@@ -1053,6 +1315,7 @@ LOCAL T_TVDOC *doc_build( CONST T_TADNODE *body )
 	}
 	knl_memset(&b, 0, sizeof(b));
 	b.d = d;
+	b.old = old;
 	b.maxpara = np;
 	b.maxrun = nr;
 	b.depth = 0;
@@ -1069,6 +1332,17 @@ LOCAL T_TVDOC *doc_build( CONST T_TADNODE *body )
 	b.ps.khead_kind = b.ps.ktail_kind = -1;
 
 	doc_children(&b, body);
+	if ( b.nomem ) {
+		tv_doc_free(d);
+		return NULL;
+	}
+	{
+		INT	i;
+
+		for ( i = 0; i < d->npara; i++ ) {
+			para_sig(d, &d->para[i]);
+		}
+	}
 
 	/* the paper and the margins, from the record's units into pixels */
 	if ( d->hunit < 0 && d->hunit != -72 ) {
@@ -1096,7 +1370,31 @@ EXPORT ER tv_doc( CONST T_TAD *doc, T_TVDOC **p_out )
 	if ( !name_is(body, "document") ) {
 		return E_NOEXS;
 	}
-	*p_out = doc_build(body);
+	*p_out = doc_build(body, NULL);
+	if ( *p_out != NULL ) {
+		(*p_out)->serial = tad_serial(doc);
+	}
+
+	return ( *p_out != NULL ) ? E_OK : E_NOMEM;
+}
+
+EXPORT ER tv_doc_again( CONST T_TAD *doc, CONST T_TVDOC *old, T_TVDOC **p_out )
+{
+	T_TADNODE	*body = tad_body(doc);
+
+	if ( p_out == NULL ) {
+		return E_PAR;
+	}
+	if ( !name_is(body, "document") ) {
+		return E_NOEXS;
+	}
+	if ( old != NULL && ( old->serial == 0 || old->serial != tad_serial(doc) ) ) {
+		old = NULL;			/* another record: nothing to take over */
+	}
+	*p_out = doc_build(body, old);
+	if ( *p_out != NULL ) {
+		(*p_out)->serial = tad_serial(doc);
+	}
 
 	return ( *p_out != NULL ) ? E_OK : E_NOMEM;
 }
@@ -1107,7 +1405,7 @@ EXPORT ER tv_doc_of( CONST T_TADNODE *nd, T_TVDOC **p_out )
 	if ( nd == NULL || p_out == NULL ) {
 		return E_PAR;
 	}
-	*p_out = doc_build(nd);
+	*p_out = doc_build(nd, NULL);
 
 	return ( *p_out != NULL ) ? E_OK : E_NOMEM;
 }
@@ -1138,14 +1436,21 @@ EXPORT void tv_doc_free( T_TVDOC *d )
 	if ( d->run != NULL ) {
 		Kfree(d->run);
 	}
+	while ( d->tabsets != NULL ) {
+		T_TVTABS	*t = d->tabsets;
+
+		d->tabsets = t->next;
+		Kfree(t);
+	}
+	if ( d->layc != NULL ) {
+		Kfree(d->layc);
+	}
 	Kfree(d);
 }
 
 /* ---------------------------------------------------------------- figures */
 
-#define CP_MAX		TV_MAX_FPAT	/* a figure's own patterns that are kept */
 #define CP_NCOL		8		/* colours of one of them */
-#define MK_MAX		128		/* masks */
 
 /*
  * One of the figure's own patterns as it is written: its colours, each
@@ -1193,8 +1498,18 @@ typedef struct {
 
 	/* the kinds of mark the figure defines: <markerDefine> */
 	INT	nmd;
-	INT	md_id[16], md_kind[16], md_size[16];
-	UW	md_col[16];
+	INT	*md_id, *md_kind, *md_size;
+	UW	*md_col;
+
+	/*
+	 * How many of each the figure's elements define, counted before it
+	 * is read, and how many shapes, pieces of text and points there is
+	 * room for now: those grow as they are needed. 'er' is E_NOMEM
+	 * once something could not be kept, and the figure is not made.
+	 */
+	INT	cpmax, mkmax, mdmax, ltmax;
+	INT	shmax, docmax, poolmax;
+	ER	er;
 } FIGBUILD;
 
 /*
@@ -1251,10 +1566,14 @@ LOCAL CONST T_TVPAT *pat_make( FIGBUILD *b, RAWPAT *rp )
 		return &f->pats[rp->made];
 	}
 	if ( f->pats == NULL ) {
-		f->pats = (T_TVPAT *)Kmalloc(sizeof(T_TVPAT) * TV_MAX_FPAT);
+		/* one for each pattern it defines: what a shape holds points into it */
+		f->pats = (T_TVPAT *)Kmalloc(sizeof(T_TVPAT) * (SZ)( b->cpmax + 1 ));
 		f->npats = 0;
+		if ( f->pats == NULL ) {
+			b->er = E_NOMEM;
+		}
 	}
-	if ( f->pats == NULL || f->npats >= TV_MAX_FPAT ) {
+	if ( f->pats == NULL || f->npats > b->cpmax ) {
 		return NULL;
 	}
 	p = &f->pats[f->npats];
@@ -1322,7 +1641,7 @@ LOCAL void mask_read( FIGBUILD *b, CONST T_TADNODE *nd )
 	INT		n = 0, len, k, y;
 	UW		rows[16];
 
-	if ( b->nmk >= MK_MAX || s == NULL || w <= 0 || h <= 0 ) {
+	if ( b->nmk >= b->mkmax || s == NULL || w <= 0 || h <= 0 ) {
 		return;
 	}
 	while ( n < 16 && ( s = list_next(s, &it, &len) ) != NULL ) {
@@ -1366,7 +1685,7 @@ LOCAL void pattern_read( FIGBUILD *b, CONST T_TADNODE *nd )
 	RAWPAT		*rp;
 	INT		len, i;
 
-	if ( b->ncp >= CP_MAX ) {
+	if ( b->ncp >= b->cpmax ) {
 		return;
 	}
 	rp = &b->cp[b->ncp];
@@ -1456,8 +1775,16 @@ LOCAL T_TVSHAPE *shape_add( FIGBUILD *b, UINT kind, CONST T_TADNODE *nd )
 {
 	T_TVSHAPE	*s;
 
-	if ( b->f->nsh >= TV_MAX_SHAPE ) {
-		return NULL;
+	if ( b->f->nsh >= b->shmax ) {
+		INT		m = ( b->shmax > 0 ) ? b->shmax * 2 : 64;
+		T_TVSHAPE	*n = (T_TVSHAPE *)Krealloc(b->f->sh, sizeof(T_TVSHAPE) * (size_t)m);
+
+		if ( n == NULL ) {
+			b->er = E_NOMEM;
+			return NULL;
+		}
+		b->f->sh = n;
+		b->shmax = m;
 	}
 	s = &b->f->sh[b->f->nsh];
 	s->kind = kind;
@@ -1558,7 +1885,7 @@ LOCAL T_TVSHAPE *shape_add( FIGBUILD *b, UINT kind, CONST T_TADNODE *nd )
 	return s;
 }
 
-/* "x,y x,y ..." into points */
+/* "x,y x,y ..." into points; with pt NULL, only how many there are */
 LOCAL INT points_of( CONST UB *s, T_DPPOINT *pt, INT max )
 {
 	INT	n = 0;
@@ -1597,8 +1924,10 @@ LOCAL INT points_of( CONST UB *s, T_DPPOINT *pt, INT max )
 			while ( *s >= '0' && *s <= '9' ) s++;
 		}
 		y *= sign;
-		pt[n].x = x;
-		pt[n].y = y;
+		if ( pt != NULL ) {
+			pt[n].x = x;
+			pt[n].y = y;
+		}
 		n++;
 	}
 
@@ -1613,20 +1942,34 @@ LOCAL void fig_walk( FIGBUILD *b, CONST T_TADNODE *nd );
  * over and over. It is kept as the lengths of its runs, the first one
  * drawn; one of all bits set is a solid line.
  */
-LOCAL void lkind_read( T_TVFIG *f, CONST T_TADNODE *nd )
+LOCAL void lkind_read( FIGBUILD *b, CONST T_TADNODE *nd )
 {
+	T_TVFIG		*f = b->f;
 	CONST UB	*m = tad_attr(nd, "mask");
 	INT		id = to_int(tad_attr(nd, "id"), -1), nbit = 0, i, k, n = 0, start = -1;
-	UB		bits[64];
+	UB		*bits;
 	UB		*dash;
 
-	if ( m == NULL || id < 0 || f->nlt >= TV_MAX_LTYPE ) {
+	if ( m == NULL || id < 0 || f->nlt >= b->ltmax ) {
 		return;
 	}
-	for ( i = 0; m[i] != 0 && m[i + 1] != 0 && nbit + 8 <= 64 * 8; i += 2 ) {
+	for ( i = 0; m[i] != 0; i++ ) {
+	}
+	/* the mask as long as it is written, and a dash for each bit at most */
+	bits = (UB *)Kmalloc((SZ)( i / 2 + 1 ));
+	dash = (UB *)Kmalloc((SZ)( i / 2 * 8 + 2 ));
+	if ( bits == NULL || dash == NULL ) {
+		if ( bits != NULL ) Kfree(bits);
+		if ( dash != NULL ) Kfree(dash);
+		b->er = E_NOMEM;
+		return;
+	}
+	for ( i = 0; m[i] != 0 && m[i + 1] != 0; i += 2 ) {
 		INT	hi = hex_digit(m[i]), lo = hex_digit(m[i + 1]);
 
 		if ( hi < 0 || lo < 0 ) {
+			Kfree(bits);
+			Kfree(dash);
 			return;
 		}
 		bits[nbit / 8] = (UB)( hi * 16 + lo );
@@ -1641,9 +1984,8 @@ LOCAL void lkind_read( T_TVFIG *f, CONST T_TADNODE *nd )
 			start = i;
 		}
 	}
-	dash = f->lt_dash[f->nlt];
 	if ( start >= 0 ) {
-		for ( k = 0; k < nbit && n < TV_DASH_MAX - 1; ) {
+		for ( k = 0; k < nbit; ) {
 			INT	i0 = ( start + k ) % nbit;
 			INT	v = ( bits[i0 / 8] >> ( 7 - i0 % 8 ) ) & 1, len = 0;
 
@@ -1663,6 +2005,8 @@ LOCAL void lkind_read( T_TVFIG *f, CONST T_TADNODE *nd )
 		}
 	}
 	dash[n] = 0;
+	Kfree(bits);
+	f->lt_dash[f->nlt] = dash;
 	f->lt_id[f->nlt++] = id;
 }
 
@@ -1679,16 +2023,52 @@ EXPORT CONST UB *tv_fig_dash( CONST T_TVFIG *f, UINT type )
 	return NULL;
 }
 
+/*
+ * Room in the figure's pool for n more points. The pool is made larger
+ * when it is full, and every shape's points, which are in it, follow
+ * it to where it now is.
+ */
+LOCAL BOOL pool_room( FIGBUILD *b, INT n )
+{
+	T_TVFIG		*f = b->f;
+	T_DPPOINT	*np, *op = f->pool;
+	INT		m, i;
+
+	if ( f->npool + n <= b->poolmax ) {
+		return TRUE;
+	}
+	m = ( b->poolmax > 0 ) ? b->poolmax * 2 : 1024;
+	while ( m < f->npool + n ) {
+		m *= 2;
+	}
+	np = (T_DPPOINT *)Krealloc(op, sizeof(T_DPPOINT) * (size_t)m);
+	if ( np == NULL ) {
+		b->er = E_NOMEM;
+		return FALSE;
+	}
+	for ( i = 0; i < f->nsh; i++ ) {
+		if ( f->sh[i].pt != NULL && op != NULL ) {
+			f->sh[i].pt = np + ( f->sh[i].pt - op );
+		}
+	}
+	f->pool = np;
+	b->poolmax = m;
+
+	return TRUE;
+}
+
 /* A shape's points, out of the figure's pool: as many as the attribute has */
 LOCAL INT points_take( FIGBUILD *b, T_TVSHAPE *s, CONST UB *attr )
 {
-	INT	room = TV_PT_POOL - b->f->npool;
+	INT	n = points_of(attr, NULL, 0x7FFFFFFF);
 
-	if ( room > TV_MAX_PT ) {
-		room = TV_MAX_PT;
+	s->pt = NULL;
+	s->npt = 0;
+	if ( n <= 0 || !pool_room(b, n) ) {
+		return 0;
 	}
 	s->pt = b->f->pool + b->f->npool;
-	s->npt = ( room > 0 ) ? points_of(attr, s->pt, room) : 0;
+	s->npt = points_of(attr, s->pt, n);
 	b->f->npool += s->npt;
 
 	return s->npt;
@@ -1697,7 +2077,7 @@ LOCAL INT points_take( FIGBUILD *b, T_TVSHAPE *s, CONST UB *attr )
 /* Room for n points of a shape, when they are made rather than read */
 LOCAL BOOL points_room( FIGBUILD *b, T_TVSHAPE *s, INT n )
 {
-	if ( b->f->npool + n > TV_PT_POOL ) {
+	if ( !pool_room(b, n) ) {
 		return FALSE;
 	}
 	s->pt = b->f->pool + b->f->npool;
@@ -1989,7 +2369,7 @@ LOCAL void fig_walk1( FIGBUILD *b, CONST T_TADNODE *nd )
 	}
 	if ( name_is(nd, "markerDefine") || name_is(nd, "markerdefine") ) {
 		/* a kind of mark: 0 to 4 the drawn ones, else one of a mask */
-		if ( b->nmd < 16 ) {
+		if ( b->nmd < b->mdmax ) {
 			INT	id = to_int(tad_attr(nd, "id"), 0);
 
 			b->md_id[b->nmd] = id;
@@ -2179,7 +2559,7 @@ LOCAL void fig_walk1( FIGBUILD *b, CONST T_TADNODE *nd )
 		return;
 	}
 	if ( name_is(nd, "lineTypeDefine") ) {
-		lkind_read(b->f, nd);
+		lkind_read(b, nd);
 		return;
 	}
 	if ( name_is(nd, "mask") ) {
@@ -2272,6 +2652,19 @@ LOCAL void fig_walk1( FIGBUILD *b, CONST T_TADNODE *nd )
 			s->r.top    = to_int(tad_attr(nd, "vobjtop"), 0);
 			s->r.right  = to_int(tad_attr(nd, "vobjright"), 0);
 			s->r.bottom = to_int(tad_attr(nd, "vobjbottom"), 0);
+			/*
+			 * Never shorter than the object closed: a record that
+			 * gives a box lower than its letters is shown, pressed
+			 * and sized at the closed height. The record is left
+			 * as it is until the object is changed.
+			 */
+			if ( s->r.right > s->r.left ) {
+				INT	least = tad_node_closed_h(nd);
+
+				if ( s->r.bottom - s->r.top < least ) {
+					s->r.bottom = s->r.top + least;
+				}
+			}
 			s->link = b->link_no;
 			{
 				CONST UB	*h = tad_attr(nd, "hidden");
@@ -2284,8 +2677,19 @@ LOCAL void fig_walk1( FIGBUILD *b, CONST T_TADNODE *nd )
 	}
 	if ( name_is(nd, "document") ) {
 		/* a piece of text standing in the figure: a document of its own */
-		if ( b->f->ndoc < TV_MAX_DOC ) {
-			T_TVDOC	*d = doc_build(nd);
+		if ( b->f->ndoc >= b->docmax ) {
+			INT	m = ( b->docmax > 0 ) ? b->docmax * 2 : 16;
+			T_TVDOC	**n = (T_TVDOC **)Krealloc(b->f->doc, sizeof(T_TVDOC *) * (size_t)m);
+
+			if ( n == NULL ) {
+				b->er = E_NOMEM;
+				return;
+			}
+			b->f->doc = n;
+			b->docmax = m;
+		}
+		{
+			T_TVDOC	*d = doc_build(nd, NULL);
 
 			if ( d != NULL ) {
 				s = shape_add(b, TV_SH_DOC, nd);
@@ -2323,20 +2727,75 @@ LOCAL void fig_walk1( FIGBUILD *b, CONST T_TADNODE *nd )
 	fig_children(b, nd);
 }
 
-/* Shapes in the order they are drawn: what their zIndex says */
-LOCAL void fig_sort( T_TVFIG *f )
+/*
+ * Shapes in the order they are drawn: what their zIndex says, those of
+ * the same zIndex in the order they were read. Already in order, as a
+ * figure usually is, it is one look along them; else a merge of runs,
+ * so that many shapes do not take the square of their number.
+ */
+LOCAL ER fig_sort( T_TVFIG *f )
 {
-	INT	i, j;
+	T_TVSHAPE	*t, *a = f->sh, *o;
+	INT		i, w, n = f->nsh;
 
-	for ( i = 1; i < f->nsh; i++ ) {
-		T_TVSHAPE	t = f->sh[i];
+	for ( i = 1; i < n && f->sh[i - 1].z <= f->sh[i].z; i++ ) {
+	}
+	if ( i >= n ) {
+		return E_OK;
+	}
+	t = (T_TVSHAPE *)Kmalloc(sizeof(T_TVSHAPE) * (SZ)n);
+	if ( t == NULL ) {
+		return E_NOMEM;
+	}
+	o = t;
+	for ( w = 1; w < n; w *= 2 ) {
+		INT	lo;
 
-		j = i - 1;
-		while ( j >= 0 && f->sh[j].z > t.z ) {
-			f->sh[j + 1] = f->sh[j];
-			j--;
+		for ( lo = 0; lo < n; lo += 2 * w ) {
+			INT	mid = ( lo + w < n ) ? lo + w : n;
+			INT	hi = ( lo + 2 * w < n ) ? lo + 2 * w : n;
+			INT	x = lo, y = mid, k = lo;
+
+			while ( x < mid && y < hi ) {
+				o[k++] = ( a[y].z < a[x].z ) ? a[y++] : a[x++];
+			}
+			while ( x < mid ) o[k++] = a[x++];
+			while ( y < hi ) o[k++] = a[y++];
 		}
-		f->sh[j + 1] = t;
+		{
+			T_TVSHAPE	*sw = a;
+
+			a = o;
+			o = sw;
+		}
+	}
+	if ( a != f->sh ) {
+		knl_memcpy(f->sh, a, sizeof(T_TVSHAPE) * (SZ)n);
+	}
+	Kfree(t);
+
+	return E_OK;
+}
+
+/* How many patterns, masks, kinds of mark and kinds of line a figure defines, wherever they stand */
+LOCAL void count_defs( CONST T_TADNODE *nd, FIGBUILD *b )
+{
+	CONST T_TADNODE	*c;
+
+	for ( c = nd->first; c != NULL; c = c->next ) {
+		if ( c->kind != TAD_ND_ELEM ) {
+			continue;
+		}
+		if ( name_is(c, "pattern") ) {
+			b->cpmax++;
+		} else if ( name_is(c, "mask") ) {
+			b->mkmax++;
+		} else if ( name_is(c, "markerDefine") || name_is(c, "markerdefine") ) {
+			b->mdmax++;
+		} else if ( name_is(c, "lineTypeDefine") ) {
+			b->ltmax++;
+		}
+		count_defs(c, b);
 	}
 }
 
@@ -2396,9 +2855,14 @@ LOCAL ER fig_make( CONST T_TAD *doc, CONST T_TADNODE *body, INT *p_link,
 	f->pool = NULL;
 	f->npool = 0;
 	f->zoom = 0;			/* life size, until whoever shows it says */
+	f->zoom_den = 0;		/* and counted in eighths */
 	f->pats = NULL;
 	f->npats = 0;
 	f->nlt = 0;
+	f->lt_id = NULL;
+	f->lt_dash = NULL;
+	f->sh = NULL;
+	f->doc = NULL;
 	f->paper_w = f->paper_h = 0;
 	f->pmargin[0] = f->pmargin[1] = f->pmargin[2] = f->pmargin[3] = 0;
 	/* the paper, and its margins, given ahead of the figure */
@@ -2421,19 +2885,16 @@ LOCAL ER fig_make( CONST T_TAD *doc, CONST T_TADNODE *body, INT *p_link,
 			}
 		}
 	}
-	f->sh = (T_TVSHAPE *)Kmalloc(sizeof(T_TVSHAPE) * TV_MAX_SHAPE);
-	f->doc = (T_TVDOC **)Kmalloc(sizeof(T_TVDOC *) * TV_MAX_DOC);
-	if ( f->sh == NULL || f->doc == NULL ) {
-		tv_fig_free(f);
-		return E_NOMEM;
-	}
-	f->pool = (T_DPPOINT *)Kmalloc(sizeof(T_DPPOINT) * TV_PT_POOL);
-	f->npool = 0;
-	if ( f->pool == NULL ) {
+	knl_memset(&b, 0, sizeof(b));
+	count_defs(body, &b);
+	f->lt_id = (INT *)Kmalloc(sizeof(INT) * (SZ)( b.ltmax + 1 ));
+	f->lt_dash = (UB **)Kmalloc(sizeof(UB *) * (SZ)( b.ltmax + 1 ));
+	if ( f->lt_id == NULL || f->lt_dash == NULL ) {
 		tv_fig_free(f);
 		return E_NOMEM;
 	}
 	b.f = f;
+	b.er = E_OK;
 	b.link_no = *p_link;
 	b.z_next = 1;
 	b.ncp = 0;
@@ -2442,15 +2903,17 @@ LOCAL ER fig_make( CONST T_TAD *doc, CONST T_TADNODE *body, INT *p_link,
 	b.ts_on = FALSE;
 	b.fm_arrow = -1;
 	b.nmd = 0;
-	b.cp = (RAWPAT *)Kmalloc(sizeof(RAWPAT) * CP_MAX);
-	b.mk_id = (INT *)Kmalloc(sizeof(INT) * MK_MAX);
-	b.mk_rows = (UH (*)[16])Kmalloc(sizeof(UH) * 16 * MK_MAX);
-	if ( b.cp == NULL || b.mk_id == NULL || b.mk_rows == NULL ) {
-		if ( b.cp != NULL ) Kfree(b.cp);
-		if ( b.mk_id != NULL ) Kfree(b.mk_id);
-		if ( b.mk_rows != NULL ) Kfree(b.mk_rows);
-		tv_fig_free(f);
-		return E_NOMEM;
+	b.cp = (RAWPAT *)Kmalloc(sizeof(RAWPAT) * (SZ)( b.cpmax + 1 ));
+	b.mk_id = (INT *)Kmalloc(sizeof(INT) * (SZ)( b.mkmax + 1 ));
+	b.mk_rows = (UH (*)[16])Kmalloc(sizeof(UH) * 16 * (SZ)( b.mkmax + 1 ));
+	b.md_id = (INT *)Kmalloc(sizeof(INT) * (SZ)( b.mdmax + 1 ));
+	b.md_kind = (INT *)Kmalloc(sizeof(INT) * (SZ)( b.mdmax + 1 ));
+	b.md_size = (INT *)Kmalloc(sizeof(INT) * (SZ)( b.mdmax + 1 ));
+	b.md_col = (UW *)Kmalloc(sizeof(UW) * (SZ)( b.mdmax + 1 ));
+	if ( b.cp == NULL || b.mk_id == NULL || b.mk_rows == NULL || b.md_id == NULL
+	  || b.md_kind == NULL || b.md_size == NULL || b.md_col == NULL ) {
+		b.er = E_NOMEM;
+		goto done;
 	}
 	/*
 	 * Each element of the figure has a place, counting from nought,
@@ -2478,9 +2941,11 @@ LOCAL ER fig_make( CONST T_TAD *doc, CONST T_TADNODE *body, INT *p_link,
 			fig_walk(&b, c);
 		}
 	}
-	fig_sort(f);
+	if ( b.er >= E_OK ) {
+		b.er = fig_sort(f);
+	}
 	/* every pattern of its own made, used or not, for whoever lists them */
-	{
+	if ( b.er >= E_OK ) {
 		INT	i;
 
 		for ( i = 0; i < b.ncp; i++ ) {
@@ -2489,9 +2954,19 @@ LOCAL ER fig_make( CONST T_TAD *doc, CONST T_TADNODE *body, INT *p_link,
 			}
 		}
 	}
-	Kfree(b.cp);
-	Kfree(b.mk_id);
-	Kfree(b.mk_rows);
+done:
+	if ( b.cp != NULL ) Kfree(b.cp);
+	if ( b.mk_id != NULL ) Kfree(b.mk_id);
+	if ( b.mk_rows != NULL ) Kfree(b.mk_rows);
+	if ( b.md_id != NULL ) Kfree(b.md_id);
+	if ( b.md_kind != NULL ) Kfree(b.md_kind);
+	if ( b.md_size != NULL ) Kfree(b.md_size);
+	if ( b.md_col != NULL ) Kfree(b.md_col);
+	if ( b.er < E_OK ) {
+		/* not all of it could be kept: none of it is shown as if it were */
+		tv_fig_free(f);
+		return b.er;
+	}
 	*p_link = b.link_no;
 	*p_out = f;
 
@@ -2519,6 +2994,15 @@ EXPORT void tv_fig_free( T_TVFIG *f )
 	}
 	if ( f->pats != NULL ) {
 		Kfree(f->pats);
+	}
+	if ( f->lt_dash != NULL ) {
+		for ( i = 0; i < f->nlt; i++ ) {
+			Kfree(f->lt_dash[i]);
+		}
+		Kfree(f->lt_dash);
+	}
+	if ( f->lt_id != NULL ) {
+		Kfree(f->lt_id);
 	}
 	for ( i = 0; i < TV_MAX_OVER; i++ ) {
 		tv_fig_free(f->over[i]);

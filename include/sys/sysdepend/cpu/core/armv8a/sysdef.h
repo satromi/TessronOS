@@ -153,6 +153,8 @@
 #define PTE_USER_R(e)		( ( (e) & PTE_AP_RW_ALL ) != 0 )
 #define PTE_USER_W(e)		( ( (e) & PTE_AP_MASK ) == PTE_AP_RW_ALL )
 #define PTE_USER_X(e)		( ( (e) & PTE_UXN ) == 0 )
+/* EL0 may read it, and write it when w: AP 1 read and write for all, 3 read only for all */
+#define PTE_USER_OK(e, w)	( { UD ap_ = ( (e) >> 6 ) & 3; ap_ == 1 || ( ap_ == 3 && !(w) ); } )
 
 /* Block descriptors (kernel only, EL0 never executes them). W^X: text is RO+X, everything else RW+XN */
 #define PTE_BLOCK_NORMAL	(PTE_VALID | PTE_ATTR(MAIR_IDX_NORMAL_WB) | PTE_AP_RW_EL1 | PTE_SH_INNER | PTE_AF | PTE_UXN)

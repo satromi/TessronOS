@@ -18,7 +18,7 @@
       "id": "trash-real-objects",
       "kind": "utility",
       "name": "屑実身操作",
-      "version": "R1.110",
+      "version": "R1.200",
       "builtin": true,
       "base": []
     },

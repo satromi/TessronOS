@@ -139,6 +139,17 @@ typedef struct {
 						   change */
 	void	(*rel_wai_hook)(TCB *);		/* Process at task wait
 						   release */
+#if KLK_FINE_OBJ
+	KLOCK	*(*wlock)(TCB *);		/* the lock of what the task
+						   waits on (NULL: none) */
+#endif
 } WSPEC;
+
+/* The lock of a kind of wait, in its WSPEC (design 4.3.3) */
+#if KLK_FINE_OBJ
+#define WSPEC_LOCK(fn)	, fn
+#else
+#define WSPEC_LOCK(fn)
+#endif
 
 #endif /* _WINFO_ */

@@ -41,13 +41,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ts/json.h>
+#include <ts/obatr.h>
 #include <ts/btbk.h>
 
 #define LINK_GROW	16
 #define OBJ_GROW	32
-#define REC_LIST	64
 #define NO_TIME		0xFFFFFFFFU
-#define CHUNK		( 64 * 1024 )
+/* bytes written to a record at a time: each write is made durable when it
+   returns, so the fewer they are the less the medium waits (design 7.3) */
+#define CHUNK		( 4 * 1024 * 1024 )
 #define UNCHANGED_SECS	600		/* made and its records written: not changed since */
 
 /* A figure of nothing: 管理情報, the figure's start and its end */
@@ -238,7 +240,7 @@ LOCAL BOOL opens_archive( const ARCOBJ *o )
 
 EXPORT ER arc_book_rec( const TS_UUID *archive, INT *p_recno, UB **p_raw, UINT *p_len )
 {
-	T_OBREC	r[REC_LIST];
+	T_OBREC	*r;
 	INT	cnt = 0, i;
 	ID	k;
 
@@ -247,8 +249,8 @@ EXPORT ER arc_book_rec( const TS_UUID *archive, INT *p_recno, UB **p_raw, UINT *
 	if ( p_len != NULL ) *p_len = 0;
 	k = ob_opn_obj(archive, OB_OP_R);
 	if ( k <= 0 ) return E_NOEXS;
-	(void)ob_lst_rec(k, r, REC_LIST, &cnt);
-	for ( i = 0; i < cnt && i < REC_LIST && *p_recno < 0; i++ ) {
+	r = ob_rec_read(k, &cnt);
+	for ( i = 0; i < cnt && *p_recno < 0; i++ ) {
 		UB	head[2];
 		SZ	asz = 0;
 		UINT	len = 0;
@@ -270,6 +272,7 @@ EXPORT ER arc_book_rec( const TS_UUID *archive, INT *p_recno, UB **p_raw, UINT *
 			free(raw);
 		}
 	}
+	free(r);
 	ob_cls_obj(k);
 	return E_OK;
 }
@@ -284,7 +287,8 @@ EXPORT ER arc_book_put( const TS_UUID *archive, const UB *raw, UINT len )
 
 	er = arc_book_rec(archive, &recno, NULL, NULL);
 	if ( er < E_OK ) return er;
-	k = ob_opn_obj(archive, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD);
+	/* the record written piece by piece: nobody reads it half written */
+	k = ob_opn_obj(archive, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_O_EXCL);
 	if ( k <= 0 ) return ( k < 0 ) ? (ER)k : E_NOEXS;
 	if ( raw == NULL ) {
 		er = ( recno >= 0 ) ? ob_del_rec(k, recno) : E_OK;
@@ -339,7 +343,7 @@ LOCAL ER walk_link( void *arg, CONST BK_TADLINK *lk )
 
 EXPORT ER arc_find( ARCJOB *j, const TS_UUID *archive, const TS_UUID *root )
 {
-	static UB	meta[OB_ATR_MAX + 1];
+	UB		*meta;
 	BK_TADW		*w;
 	WALK		wk;
 	BK_TADHOOK	hk = { walk_link, NULL, NULL };
@@ -365,9 +369,8 @@ EXPORT ER arc_find( ARCJOB *j, const TS_UUID *archive, const TS_UUID *root )
 	for ( i = 0; i < j->nobj && er >= E_OK; i++ ) {
 		ARCOBJ	*o = &j->obj[i];
 		T_OBREF	ref;
-		T_OBREC	r[REC_LIST];
-		SZ	asz = 0;
-		INT	cnt = 0, q, recno = -1, tlen = 0;
+		T_OBREC	*r;
+		INT	asz, cnt = 0, q, recno = -1, tlen = 0;
 		UB	*xml;
 		UINT	xlen = 0;
 		ID	k;
@@ -379,9 +382,14 @@ EXPORT ER arc_find( ARCJOB *j, const TS_UUID *archive, const TS_UUID *root )
 			if ( k > 0 ) ob_cls_obj(k);
 			break;
 		}
-		read_meta(o, ( ob_get_atr(k, meta, OB_ATR_MAX, &asz) >= E_OK ) ? meta : NULL, asz, (const char *)ref.name);
-		(void)ob_lst_rec(k, r, REC_LIST, &cnt);
-		for ( q = 0; q < cnt && q < REC_LIST; q++ ) o->size += r[q].size;
+		/* the metadata read first: the size it gives is an argument of the same call */
+		asz = ob_atr_read(k, 0, &meta);
+		read_meta(o, ( asz >= 0 ) ? meta : NULL, ( asz >= 0 ) ? asz : 0, (const char *)ref.name);
+		free(meta);
+		er = E_OK;
+		r = ob_rec_read(k, &cnt);
+		for ( q = 0; q < cnt; q++ ) o->size += r[q].size;
+		free(r);
 		j->total += o->size;
 		ob_cls_obj(k);
 
@@ -535,7 +543,7 @@ LOCAL UB *dup_bytes( const UB *p, UINT n )
 LOCAL ER object_recs( ARCJOB *j, INT i, RECS *s )
 {
 	ARCOBJ	*o = &j->obj[i];
-	T_OBREC	r[REC_LIST];
+	T_OBREC	*r;
 	INT	cnt = 0, q, l, bookrec = -1, own_exec = 0;
 	BOOL	rec0_tad = FALSE;		/* record 0 went as binary TAD */
 	ID	k;
@@ -543,8 +551,7 @@ LOCAL ER object_recs( ARCJOB *j, INT i, RECS *s )
 
 	k = ob_opn_obj(&o->uuid, OB_OP_R);
 	if ( k <= 0 ) return ( k < 0 ) ? (ER)k : E_NOEXS;
-	(void)ob_lst_rec(k, r, REC_LIST, &cnt);
-	if ( cnt > REC_LIST ) cnt = REC_LIST;
+	r = ob_rec_read(k, &cnt);
 
 	if ( o->kind == K_PLAIN ) {
 		/* the link records, then record 0 as binary TAD */
@@ -657,6 +664,7 @@ LOCAL ER object_recs( ARCJOB *j, INT i, RECS *s )
 			er = E_NOMEM;
 		}
 	}
+	free(r);
 	ob_cls_obj(k);
 	return er;
 }
@@ -815,7 +823,7 @@ EXPORT ER arc_link_into( const TS_UUID *into, const TS_UUID *target, const char 
 	INT	n, tw = dp_text_width((const UB *)name, 14) + 40;
 
 	if ( ob_ref_obj(into, &ref) < E_OK ) return E_NOEXS;
-	k = ob_opn_obj(into, OB_OP_R | OB_OP_WRITE);
+	k = ob_opn_obj(into, OB_OP_R | OB_OP_WRITE | OB_O_WEXCL);	/* read, a link added, written back */
 	if ( k <= 0 ) return ( k < 0 ) ? (ER)k : E_NOEXS;
 	x = unp_read_rec(k, 0, &len);
 	at = ( x != NULL ) ? strstr((char *)x, "</figure>") : NULL;
@@ -842,8 +850,8 @@ EXPORT ER arc_link_into( const TS_UUID *into, const TS_UUID *target, const char 
 		      " bgcol=\"#ffffff\" pictdisp=\"true\" namedisp=\"true\" framedisp=\"true\"/>", id, vid, 8 + tw);
 	memcpy(link + n, at, len - (UINT)( at - (char *)x ));
 	n += (INT)( len - (UINT)( at - (char *)x ) );
-	er = ob_wri_rec(k, 0, 0, link, n, &asz);
-	if ( er >= E_OK ) er = ob_trn_rec(k, 0, (UD)n);
+	er = ob_rpl_rec(k, 0, link, (SZ)n);	/* whole: a reader sees the old record or the new one */
+	(void)asz;
 	if ( er >= E_OK && !( ref.flags & OB_F_AUTOREF ) ) er = ob_lnk_obj(target);
 	free(link);
 	free(x);

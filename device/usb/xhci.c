@@ -85,11 +85,14 @@
 #define OP_DCBAAP		0x30
 #define OP_CONFIG		0x38
 #define OP_PORTSC(n)		(0x400 + 0x10 * (n))
+#define OP_PORTPMSC(n)		(0x404 + 0x10 * (n))	/* power management: U1/U2 timeouts, LPM */
+#define OP_PORTLI(n)		(0x408 + 0x10 * (n))	/* link info: USB 3 link errors in bits 0-15 */
 
 #define CMD_RS			0x00000001	/* run */
 #define CMD_HCRST		0x00000002	/* reset the whole controller */
 #define CMD_INTE		0x00000004
 #define CMD_HSEE		0x00000008
+#define CMD_EWE			0x00000400	/* an event when the microframe index wraps */
 
 #define STS_HCH			0x00000001	/* halted */
 #define STS_HSE			0x00000004
@@ -120,6 +123,17 @@
 #define PS_SPEED(v)		(((v) >> 10) & 0x0f)
 #define PS_CSC			0x00020000	/* the connection changed */
 #define PS_PRC			0x00200000	/* the reset finished */
+#define PS_PLS(v)		(((v) >> 5) & 0x0f)	/* the link state */
+#define PS_OCA			0x00000008	/* over-current now */
+#define PS_PEC			0x00040000	/* the port was disabled (USB 2: an error) */
+#define PS_WRC			0x00080000	/* the warm reset finished */
+#define PS_OCC			0x00100000	/* the over-current changed */
+#define PS_PLC			0x00400000	/* the link state changed */
+#define PS_CEC			0x00800000	/* the link failed its configuration */
+#define PS_CAS			0x01000000	/* cold attach: the link could not train */
+#define PLS_INACTIVE		6	/* SS.Inactive: the link gave up */
+#define PLS_COMPLIANCE		10	/* stuck in the compliance mode */
+#define PS_WPR			0x80000000	/* warm reset (USB 3 ports) */
 #define PS_CHANGES		0x00fe0000	/* every change bit */
 /*
  * Writing a port register back means keeping the bits that mean
@@ -136,6 +150,7 @@
 #define TRB_IOC			0x00000020	/* answer when this one is done */
 #define TRB_IDT			0x00000040	/* the data is in the entry */
 #define TRB_BEI			0x00000200	/* the answer raises no interrupt */
+#define TRB_TSP			0x00000200	/* Reset Endpoint: the transfer state is kept */
 #define TRB_DIR_IN		0x00010000
 #define TRB_SIA			0x80000000	/* as soon as possible */
 #define TRB_TYPE(t)		((UW)(t) << 10)
@@ -164,6 +179,7 @@
 
 /* how a command or a transfer ended */
 #define CC_SUCCESS		1
+#define CC_TRANSACTION		4		/* the packet failed CErr times on the bus */
 #define CC_STALL		6
 #define CC_SHORT		13		/* less came back than was asked */
 #define CC_UNDERRUN		14
@@ -196,11 +212,10 @@
  */
 #define EV_SEGS			8
 #define MAX_SLOTS		255		/* every slot the controller may have: one page of DCBAA holds them */
-#define MAX_ROOTPORTS		32
-#define MAX_SCRATCH		64
+#define MAX_ROOTPORTS		255		/* HCSPARAMS1's MaxPorts is 8 bits */
 #define CTRL_BUF_BYTES		(4 * USB_PAGE)
 #define BULK_BUF_BYTES		(16 * USB_PAGE)
-#define XHCI_PIPES		16
+#define XHCI_PIPES		16		/* streams a chunk of the table holds; more chunks as they are needed */
 #define STALL_MAX		8	/* recoveries before a stream is given up */
 /*
  * TDs armed on an isochronous IN ring, one per service interval. A
@@ -218,6 +233,7 @@
 #define BULK_NTD		8
 #define INTR_NTD		8	/* interrupt IN: a report each */
 #define CMD_TMO			2000
+#define SOFT_RETRY_MAX		3	/* a bulk TD taken up again after a transaction error, in a row */
 
 typedef struct {
 	volatile UW	p0, p1, st, ctl;
@@ -264,6 +280,7 @@ typedef struct xep {
 	INT	cc;
 	INT	actual;
 	BOOL	is_bulk;
+	INT	soft;		/* transaction errors taken up again since the last success */
 } XEP;
 
 struct xhci;
@@ -304,6 +321,20 @@ struct usb_pipe {
 	INT	irq_every;
 };
 
+/*
+ * The streams of a controller, in chunks of XHCI_PIPES: a chunk is
+ * added at the end when all are in use, made whole before it is
+ * linked, and never taken out while the controller runs, so the event
+ * service walks them without a lock
+ */
+typedef struct pipe_chunk {
+	USBPIPE			p[XHCI_PIPES];
+	struct pipe_chunk	*next;
+} PIPECHUNK;
+
+#define FOR_PIPES(x, pc, i) \
+	for ( pc = &(x)->pipes; pc != NULL; pc = pc->next ) for ( i = 0; i < XHCI_PIPES; i++ )
+
 typedef struct xhci {
 	USBHC	hc;
 	UD	mmio;
@@ -315,11 +346,23 @@ typedef struct xhci {
 	INT	max_slots;
 	INT	csz;		/* context size: 32 or 64 bytes */
 	UB	port_major[MAX_ROOTPORTS];	/* 2 or 3, 0 unknown */
+	/*
+	 * What the manager's scans read of each root port (its change bits
+	 * as they were before being cleared), the value before the last one
+	 * that differed, and when each was read; and the port as each Port
+	 * Status Change Event found it. Said when a device on the port is
+	 * let go (knl_xhci_port_say) and as the events come.
+	 */
+	UW	port_seen[MAX_ROOTPORTS], port_before[MAX_ROOTPORTS];
+	UW	port_seen_ms[MAX_ROOTPORTS], port_before_ms[MAX_ROOTPORTS];
+	UW	port_ev[MAX_ROOTPORTS], port_ev_ms[MAX_ROOTPORTS], port_ev_win[MAX_ROOTPORTS];
+	UB	port_ev_said[MAX_ROOTPORTS];
 	UW	*dcbaa;
 	UD	dcbaa_bus;
 	UW	*sp_array;
 	UD	sp_array_bus;
-	UB	*sp_page[MAX_SCRATCH];
+	INT	sp_order;	/* the array's pages: 2^sp_order */
+	UB	**sp_page;	/* as many as the controller asked for */
 	INT	nsp;
 	XRING	cmd;
 	TRB	*ev_seg[EV_SEGS];
@@ -337,14 +380,40 @@ typedef struct xhci {
 	INT	cmd_cc;
 	INT	cmd_slot;
 	XDEV	*slots[MAX_SLOTS + 1];
+	void	*next;		/* the next controller (XHCI *), NULL the last */
 	DMABUF	ctrl_buf, bulk_buf;
 	ID	cmd_sem, xfer_sem, ev_sem, ev_flg;
-	USBPIPE	pipes[XHCI_PIPES];
+	PIPECHUNK pipes;	/* the streams: the first chunk, and those added after it */
 	BOOL	running;
 	BOOL	dead;		/* stopped on an error: it may still read memory */
+#ifdef X64
+	BOOL	no_bei;		/* every isochronous TD interrupts (Intel) */
+#endif
 } XHCI;
 
-LOCAL XHCI	*xhci_tbl[USB_MAX_HC];
+/*
+ * The controllers, as many as there are, in a list the interrupt handler
+ * walks: one is put at its end only when it is whole, and none is taken
+ * out while the handler may look.
+ */
+LOCAL XHCI	*xhci_first = NULL;
+
+LOCAL void xhci_link( XHCI *x )
+{
+	XHCI	**pp = &xhci_first;
+
+	x->next = NULL;
+	while ( *pp != NULL ) pp = (XHCI **)&(*pp)->next;
+	*pp = x;
+}
+
+LOCAL void xhci_unlink( XHCI *x )
+{
+	XHCI	**pp = &xhci_first;
+
+	while ( *pp != NULL && *pp != x ) pp = (XHCI **)&(*pp)->next;
+	if ( *pp == x ) *pp = (XHCI *)x->next;
+}
 
 /* ---------------------------------------------------------------- access */
 
@@ -545,13 +614,12 @@ LOCAL void ring_release( XRING *r, INT idx, UW cyc )
  */
 EXPORT void knl_xhci_inthdr( UINT intno )
 {
-	INT	i;
+	XHCI	*x;
 
-	for ( i = 0; i < USB_MAX_HC; i++ ) {
-		XHCI	*x = xhci_tbl[i];
+	for ( x = xhci_first; x != NULL; x = (XHCI *)x->next ) {
 		UW	sts, iman;
 
-		if ( x == NULL || x->hc.intno != intno || !x->running ) {
+		if ( x->hc.intno != intno || !x->running ) {
 			continue;
 		}
 		sts = rd32(x->op, OP_USBSTS);
@@ -566,6 +634,7 @@ EXPORT void knl_xhci_inthdr( UINT intno )
 			wr32(x->rt, RT_IMAN, IMAN_IP | IMAN_IE);
 		}
 		knl_usb_stat.irqs++;
+		x->hc.nirq++;
 		tk_set_flg(x->ev_flg, 1);
 		tk_set_flg(x->hc.flgid, USBF_IRQ);
 	}
@@ -608,6 +677,92 @@ LOCAL void sync_event( XEP *e, INT idx, UW st )
 	}
 }
 
+/* ---------------------------------------------------------------- port records */
+
+/*
+ * The bits of a PORTSC that bear on a connection, for the console: the
+ * state bits that are set (PP when it is clear), then the change bits
+ * that are set.
+ */
+#define PS_FL_FMT	"%s%s%s%s%s%s%s%s%s%s%s%s%s"
+#define PS_FL(v)	( (v) & PS_CCS ) ? " CCS" : "", ( (v) & PS_PED ) ? " PED" : "",	\
+			( (v) & PS_PP ) ? "" : " PP=0", ( (v) & PS_OCA ) ? " OCA" : "",	\
+			( (v) & PS_PR ) ? " PR" : "", ( (v) & PS_CAS ) ? " CAS" : "",	\
+			( (v) & PS_CSC ) ? " CSC" : "", ( (v) & PS_PEC ) ? " PEC" : "",	\
+			( (v) & PS_WRC ) ? " WRC" : "", ( (v) & PS_OCC ) ? " OCC" : "",	\
+			( (v) & PS_PRC ) ? " PRC" : "", ( (v) & PS_PLC ) ? " PLC" : "",	\
+			( (v) & PS_CEC ) ? " CEC" : ""
+
+/* Port events said for a port in a window of PORT_EV_WIN_MS; the rest only kept */
+#define PORT_EV_SAY_MAX		8
+#define PORT_EV_WIN_MS		10000
+
+/* The name of a port's link state (PLS) */
+LOCAL CONST char *pls_name( UW v )
+{
+	static CONST char * CONST n[16] = {
+		"U0", "U1", "U2", "U3", "Disabled", "RxDetect", "Inactive", "Polling",
+		"Recovery", "HotReset", "Compliance", "TestMode", "PLS12", "PLS13", "PLS14", "Resume"
+	};
+
+	return n[PS_PLS(v)];
+}
+
+/*
+ * A root port as a scan of the manager read it. The value before is
+ * moved on only when the state bits differ (not the change bits), so it
+ * stays the last state the port had before its present one.
+ */
+LOCAL void port_seen_set( XHCI *x, INT p, UW v )
+{
+	if ( p < 0 || p >= x->nports || p >= MAX_ROOTPORTS ) {
+		return;
+	}
+	if ( ( ( v ^ x->port_seen[p] ) & ~PS_CHANGES ) != 0 ) {
+		x->port_before[p] = x->port_seen[p];
+		x->port_before_ms[p] = x->port_seen_ms[p];
+	}
+	x->port_seen[p] = v;
+	x->port_seen_ms[p] = knl_usb_ms();
+}
+
+/*
+ * A Port Status Change Event: the port as it is now, said when it
+ * differs from what the previous event found, at most PORT_EV_SAY_MAX
+ * times in PORT_EV_WIN_MS for a port, so a port that keeps changing
+ * does not fill the console.
+ */
+LOCAL void port_event_say( XHCI *x, INT p )
+{
+	UW	v, now;
+
+	if ( p < 0 || p >= x->nports || p >= MAX_ROOTPORTS ) {
+		return;
+	}
+	v = rd32(x->op, OP_PORTSC(p));
+	now = knl_usb_ms();
+	if ( v != x->port_ev[p] ) {
+		if ( (INT)( now - x->port_ev_win[p] ) >= PORT_EV_WIN_MS ) {
+			x->port_ev_win[p] = now;
+			x->port_ev_said[p] = 0;
+		}
+		if ( x->port_ev_said[p] < PORT_EV_SAY_MAX ) {
+			USB_LOG("usb: %d-%d port event (USB%d): PORTSC %08x link %s" PS_FL_FMT
+				", was %08x at %u ms, now %u ms\n", x->hc.index, p,
+				(INT)x->port_major[p], v, pls_name(v), PS_FL(v),
+				x->port_ev[p], x->port_ev_ms[p], now);
+		} else if ( x->port_ev_said[p] == PORT_EV_SAY_MAX ) {
+			USB_LOG("usb: %d-%d port events: the rest of %d s not said\n",
+				x->hc.index, p, PORT_EV_WIN_MS / 1000);
+		}
+		if ( x->port_ev_said[p] <= PORT_EV_SAY_MAX ) {
+			x->port_ev_said[p]++;
+		}
+	}
+	x->port_ev[p] = v;
+	x->port_ev_ms[p] = now;
+}
+
 /*
  * Take everything the controller has answered. The read pointer is
  * written back even when nothing was there: that write is what clears
@@ -615,6 +770,7 @@ LOCAL void sync_event( XEP *e, INT idx, UW st )
  */
 LOCAL void events_service( XHCI *x )
 {
+	PIPECHUNK	*pc;
 	INT	i;
 
 	sem_take(x->ev_sem);
@@ -681,6 +837,7 @@ LOCAL void events_service( XHCI *x )
 			break;
 		}
 		case T_EV_PORT:
+			port_event_say(x, (INT)((p0 >> 24) & 0xff) - 1);
 			tk_set_flg(x->hc.flgid, USBF_RESCAN);
 			break;
 		case T_EV_HC:
@@ -693,8 +850,8 @@ LOCAL void events_service( XHCI *x )
 	}
 	wr64(x->rt, RT_ERDP,
 	     (x->ev_bus[x->ev_seg_idx] + (UD)x->ev_idx * 16) | ERDP_EHB);
-	for ( i = 0; i < XHCI_PIPES; i++ ) {
-		USBPIPE	*s = &x->pipes[i];
+	FOR_PIPES(x, pc, i) {
+		USBPIPE	*s = &pc->p[i];
 
 		if ( s->open && s->ring ) {
 			s->ring = FALSE;
@@ -1203,14 +1360,15 @@ LOCAL void xhci_stream_close( USBHC *hc, USBPIPE *s );
 
 LOCAL void xhci_dev_free( USBHC *hc, USBDEV *dev )
 {
+	PIPECHUNK	*pc;
 	XHCI	*x = (XHCI *)hc;
 	XDEV	*d = (XDEV *)dev->hcpriv;
 	BOOL	gone;
 	INT	i;
 
-	for ( i = 0; i < XHCI_PIPES; i++ ) {
-		if ( x->pipes[i].open && x->pipes[i].xd == d ) {
-			xhci_stream_close(hc, &x->pipes[i]);
+	FOR_PIPES(x, pc, i) {
+		if ( pc->p[i].open && pc->p[i].xd == d ) {
+			xhci_stream_close(hc, &pc->p[i]);
 		}
 	}
 	if ( d == NULL ) {
@@ -1264,6 +1422,41 @@ LOCAL BOOL ep_recover( XDEV *d, XEP *e, BOOL halted )
 			d->slot, e->dci, cc);
 		return FALSE;
 	}
+
+	return TRUE;
+}
+
+/*
+ * A transaction error on a bulk endpoint: a packet failed on the bus as
+ * many times as the endpoint's error count lets the controller try it,
+ * while the device's side of the endpoint stayed as it was. Reset
+ * Endpoint with the transfer state kept puts the endpoint back where it
+ * stopped, and the doorbell has it go on with the same TD, so that the
+ * sequence numbers of the controller and of the device stay in step and
+ * nothing of the TD is lost. At most SOFT_RETRY_MAX in a row, and never
+ * through a transaction translator (its split transactions keep a state
+ * of their own in the hub). FALSE when the TD is to end with the error:
+ * the endpoint is then brought back as after any other.
+ */
+LOCAL BOOL soft_retry( XDEV *d, XEP *e )
+{
+	INT	tt_port;
+
+	if ( e->soft >= SOFT_RETRY_MAX || knl_usb_tt_hub(d->dev, &tt_port) != NULL ) {
+		return FALSE;
+	}
+	e->soft++;
+	e->done = FALSE;
+	e->cc = 0;
+	if ( x_cmd(d->x, 0, TRB_TYPE(T_RESET_EP) | TRB_TSP | TRB_EP(e->dci)
+		   | TRB_SLOT(d->slot), NULL) != CC_SUCCESS ) {
+		e->cc = CC_TRANSACTION;
+		e->done = TRUE;
+		return FALSE;
+	}
+	USB_LOG("usb: slot %d endpoint %02x: transaction error, the transfer taken up again (%d)\n",
+		d->slot, (INT)e->ep.addr, e->soft);
+	doorbell(d->x, d->slot, (UW)e->dci);
 
 	return TRUE;
 }
@@ -1409,7 +1602,8 @@ LOCAL ER xhci_bulk( USBHC *hc, USBDEV *dev, CONST USBEP *ep, UB *data, INT len,
 	XDEV	*d = (XDEV *)dev->hcpriv;
 	XEP	*e;
 	XRING	*r;
-	BOOL	in = ( (ep->addr & 0x80) != 0 );
+	BOOL	in = ( (ep->addr & 0x80) != 0 ), done;
+	UW	t0;
 	ER	er;
 
 	if ( actual != NULL ) {
@@ -1456,16 +1650,25 @@ LOCAL ER xhci_bulk( USBHC *hc, USBDEV *dev, CONST USBEP *ep, UB *data, INT len,
 	}
 	doorbell(x, d->slot, (UW)e->dci);
 
-	if ( !wait_for(x, &e->done, tmo) ) {
+	t0 = knl_usb_ms();
+	while ( ( done = wait_for(x, &e->done, tmo - (TMO)(INT)( knl_usb_ms() - t0 )) )
+	     && e->cc == CC_TRANSACTION && soft_retry(d, e) ) ;
+	if ( !done ) {
 		USB_LOG("usb: bulk %02x of %d bytes timed out\n", (INT)ep->addr, len);
 		e->gen++;
 		ep_recover(d, e, FALSE);
 		er = E_TMOUT;
 	} else if ( e->cc != CC_SUCCESS ) {
+		if ( e->cc != CC_STALL ) {
+			USB_LOG("usb: slot %d endpoint %02x: bulk of %d bytes ended with completion code %d"
+				" (taken up again %d times)\n", d->slot, (INT)ep->addr, len, e->cc, e->soft);
+		}
+		e->soft = 0;
 		e->gen++;
 		ep_recover(d, e, TRUE);
 		er = cc_to_er(e->cc);
 	} else {
+		e->soft = 0;
 		er = E_OK;
 		if ( in && e->actual > 0 && data != NULL ) {
 			knl_dmabuf_read(&x->bulk_buf, 0, data, e->actual);
@@ -1488,21 +1691,113 @@ LOCAL INT xhci_nports( USBHC *hc )
 
 LOCAL BOOL xhci_port_connected( USBHC *hc, INT port )
 {
-	return ( (rd32(((XHCI *)hc)->op, OP_PORTSC(port)) & PS_CCS) != 0 );
-}
-
-LOCAL BOOL xhci_port_changed( USBHC *hc, INT port )
-{
 	XHCI	*x = (XHCI *)hc;
 	UW	v = rd32(x->op, OP_PORTSC(port));
 
-	if ( (v & PS_CHANGES) == 0 ) {
-		return FALSE;
-	}
-	/* the change bits are cleared by writing them back */
-	wr32(x->op, OP_PORTSC(port), (v & PS_NEUTRAL) | (v & PS_CHANGES));
+	port_seen_set(x, port, v);
+	return ( (v & PS_CCS) != 0 );
+}
 
-	return ( (v & PS_CSC) != 0 );
+/* A root port's change bits and the hub's port change bits that say the same */
+LOCAL CONST struct { UW ps, hub; } port_chg[] = {
+	{ PS_CSC, HUB_PC_CONNECTION },
+	{ PS_PEC, HUB_PC_ENABLE },
+	{ PS_OCC, HUB_PC_OVERCURRENT },
+	{ PS_PRC, HUB_PC_RESET },
+	{ PS_WRC, HUB_PC_BH_RESET },
+	{ PS_PLC, HUB_PC_LINK_STATE },
+	{ PS_CEC, HUB_PC_CONFIG_ERROR },
+};
+
+/*
+ * A root port's PORTSC put the way a hub's GET_STATUS puts one of its
+ * ports, so that the manager treats both alike: the connection, the
+ * enable, the over-current, the reset, the power (where a USB 3 port has
+ * it) and a USB 3 port's link state, and the changes above them. The
+ * changes named in 'ack' are cleared, by writing them back.
+ */
+LOCAL ER xhci_port_status( USBHC *hc, INT port, UW ack, UW *st )
+{
+	XHCI	*x = (XHCI *)hc;
+	UW	v, s = 0, clr = 0;
+	INT	i;
+
+	if ( port < 0 || port >= x->nports ) {
+		return E_PAR;
+	}
+	v = rd32(x->op, OP_PORTSC(port));
+	port_seen_set(x, port, v);
+	if ( (v & PS_CCS) != 0 ) s |= HUB_PS_CONNECTION;
+	if ( (v & PS_PED) != 0 ) s |= HUB_PS_ENABLE;
+	if ( (v & PS_OCA) != 0 ) s |= HUB_PS_OVERCURRENT;
+	if ( (v & PS_PR) != 0 ) s |= HUB_PS_RESET;
+	if ( x->port_major[port] == 3 ) {
+		s |= PS_PLS(v) << 5;
+		if ( (v & PS_PP) != 0 ) s |= HUB_PS_SS_POWER;
+	} else {
+		if ( (v & PS_PP) != 0 ) s |= HUB_PS_POWER;
+		if ( PS_SPEED(v) == USB_SPEED_LOW ) s |= HUB_PS_LOW_SPEED;
+		if ( PS_SPEED(v) == USB_SPEED_HIGH ) s |= HUB_PS_HIGH_SPEED;
+	}
+	for ( i = 0; i < (INT)( sizeof(port_chg) / sizeof(port_chg[0]) ); i++ ) {
+		if ( (v & port_chg[i].ps) != 0 ) {
+			s |= port_chg[i].hub;
+			if ( (ack & port_chg[i].hub) != 0 ) clr |= port_chg[i].ps;
+		}
+	}
+	if ( clr != 0 ) {
+		wr32(x->op, OP_PORTSC(port), (v & PS_NEUTRAL) | clr);
+	}
+	*st = s;
+
+	return E_OK;
+}
+
+/*
+ * A USB 3 root port warm reset: a link that stopped in SS.Inactive or in
+ * the compliance mode leaves only so, then trains again and the port is
+ * enabled as after any reset. E_NOEXS when nothing is connected after it.
+ */
+LOCAL ER xhci_port_warm_reset( USBHC *hc, INT port )
+{
+	XHCI	*x = (XHCI *)hc;
+	UW	v;
+	INT	i;
+
+	if ( port < 0 || port >= x->nports || x->port_major[port] != 3 ) {
+		return E_NOSPT;
+	}
+	v = rd32(x->op, OP_PORTSC(port));
+	USB_LOG("usb: xhci%d port %d link state %d: warm reset\n", hc->index, port, (INT)PS_PLS(v));
+	wr32(x->op, OP_PORTSC(port), (v & PS_NEUTRAL) | PS_WPR);
+	for ( i = 0; i < 50; i++ ) {
+		knl_usb_wait(10);
+		events_service(x);
+		v = rd32(x->op, OP_PORTSC(port));
+		if ( (v & (PS_WRC | PS_PRC)) != 0 ) {
+			break;
+		}
+	}
+	wr32(x->op, OP_PORTSC(port), (v & PS_NEUTRAL) | (v & (PS_WRC | PS_PRC)));
+	knl_usb_wait(10);
+	v = rd32(x->op, OP_PORTSC(port));
+
+	return ( (v & PS_CCS) != 0 ) ? E_OK : E_NOEXS;
+}
+
+/* A root port's power switched on, after an over-current turned it off */
+LOCAL void xhci_port_power( USBHC *hc, INT port )
+{
+	XHCI	*x = (XHCI *)hc;
+	UW	v;
+
+	if ( port < 0 || port >= x->nports ) {
+		return;
+	}
+	v = rd32(x->op, OP_PORTSC(port));
+	if ( (v & PS_PP) == 0 ) {
+		wr32(x->op, OP_PORTSC(port), (v & PS_NEUTRAL) | PS_PP);
+	}
 }
 
 LOCAL ER xhci_port_state( USBHC *hc, INT port, T_USBPORT *p )
@@ -1537,6 +1832,14 @@ LOCAL ER xhci_port_reset( USBHC *hc, INT port, INT *speed )
 
 	if ( (v & PS_CCS) == 0 ) {
 		return E_NOEXS;
+	}
+	/* a USB 3 link in SS.Inactive or the compliance mode: a warm reset first */
+	if ( x->port_major[port] == 3
+	  && ( PS_PLS(v) == PLS_INACTIVE || PS_PLS(v) == PLS_COMPLIANCE ) ) {
+		if ( xhci_port_warm_reset(hc, port) < E_OK ) {
+			return E_NOEXS;
+		}
+		v = rd32(x->op, OP_PORTSC(port));
 	}
 	if ( !( x->port_major[port] == 3 && (v & PS_PED) != 0 ) ) {
 		wr32(x->op, OP_PORTSC(port), (v & PS_NEUTRAL) | PS_PR);
@@ -1808,6 +2111,11 @@ LOCAL ER pipe_buffers( USBPIPE *s )
 
 	trbs = (s->td_bytes + USB_PAGE - 1) / USB_PAGE;
 	s->irq_every = ISO_IRQ_EVERY;
+#ifdef X64
+	if ( s->x->no_bei ) {
+		s->irq_every = 1;
+	}
+#endif
 	if ( s->iso ) {
 		s->ntd = (ring_capacity(&s->xe->ring) - 16) / trbs;
 		if ( s->ntd > ISO_NTD_MAX ) {
@@ -1872,6 +2180,7 @@ LOCAL ER pipe_buffers( USBPIPE *s )
 LOCAL ER open_stream( USBHC *hc, USBDEV *dev, CONST USBEP *ep, INT xfer,
 		      USB_XFERFN fn, USB_FILLFN fill, void *ctx, USBPIPE **out )
 {
+	PIPECHUNK	*pc;
 	XHCI	*x = (XHCI *)hc;
 	XDEV	*d = (XDEV *)dev->hcpriv;
 	USBPIPE	*s = NULL;
@@ -1887,14 +2196,21 @@ LOCAL ER open_stream( USBHC *hc, USBDEV *dev, CONST USBEP *ep, INT xfer,
 		      : (ep->addr & 0x80) == 0 ) ) {
 		return E_NOSPT;
 	}
-	for ( i = 0; i < XHCI_PIPES; i++ ) {
-		if ( !x->pipes[i].open && x->pipes[i].xe == NULL ) {
-			s = &x->pipes[i];
-			break;
+	/* a free stream, in a chunk added at the end when every one is in use */
+	for ( pc = &x->pipes; s == NULL; pc = pc->next ) {
+		for ( i = 0; i < XHCI_PIPES && s == NULL; i++ ) {
+			if ( !pc->p[i].open && pc->p[i].xe == NULL ) {
+				s = &pc->p[i];
+			}
 		}
-	}
-	if ( s == NULL ) {
-		return E_LIMIT;
+		if ( s == NULL && pc->next == NULL ) {
+			PIPECHUNK	*nc = (PIPECHUNK *)Kcalloc(1, sizeof(PIPECHUNK));
+
+			if ( nc == NULL ) {
+				return E_NOMEM;
+			}
+			pc->next = nc;		/* whole (all zero, none open) before it is seen */
+		}
 	}
 	knl_memset(s, 0, sizeof(*s));
 	s->x    = x;
@@ -2009,6 +2325,7 @@ LOCAL void xhci_stream_close( USBHC *hc, USBPIPE *s )
  */
 LOCAL void xhci_poll( USBHC *hc )
 {
+	PIPECHUNK	*pc;
 	XHCI	*x = (XHCI *)hc;
 	INT	i;
 	UW	sts;
@@ -2045,8 +2362,8 @@ LOCAL void xhci_poll( USBHC *hc )
 	events_service(x);
 
 	/* OUT streams: the idle TDs are offered again, data may have come */
-	for ( i = 0; i < XHCI_PIPES; i++ ) {
-		USBPIPE	*s = &x->pipes[i];
+	FOR_PIPES(x, pc, i) {
+		USBPIPE	*s = &pc->p[i];
 		INT	k;
 		BOOL	ring;
 
@@ -2070,8 +2387,8 @@ LOCAL void xhci_poll( USBHC *hc )
 		}
 	}
 
-	for ( i = 0; i < XHCI_PIPES; i++ ) {
-		USBPIPE	*s = &x->pipes[i];
+	FOR_PIPES(x, pc, i) {
+		USBPIPE	*s = &pc->p[i];
 		INT	k;
 		BOOL	ok;
 
@@ -2144,9 +2461,9 @@ LOCAL void xhci_info( USBHC *hc, T_USBHC *info )
 /* ---------------------------------------------------------------- start-up */
 
 /* The extended capability id after from (NULL: the first), NULL if none */
-LOCAL UBINT xcap_find( XHCI *x, INT id, UBINT from )
+LOCAL UBINT xcap_walk( UBINT cap, UD size, UW hcc1, INT id, UBINT from )
 {
-	UW	off = HCC1_XECP(x->hcc1);
+	UW	off = HCC1_XECP(hcc1);
 	INT	guard = 0;
 
 	if ( from != 0 ) {
@@ -2155,10 +2472,10 @@ LOCAL UBINT xcap_find( XHCI *x, INT id, UBINT from )
 		if ( ((v >> 8) & 0xff) == 0 ) {
 			return 0;
 		}
-		off = (UW)(from - x->cap) + (((v >> 8) & 0xff) << 2);
+		off = (UW)(from - cap) + (((v >> 8) & 0xff) << 2);
 	}
-	while ( off != 0 && (UD)off + 16 <= x->mmio_size && guard++ < 64 ) {
-		UBINT	c = x->cap + off;
+	while ( off != 0 && (UD)off + 16 <= size && guard++ < 64 ) {
+		UBINT	c = cap + off;
 		UW	v = rd32(c, 0);
 
 		if ( (INT)(v & 0xff) == id ) {
@@ -2173,16 +2490,82 @@ LOCAL UBINT xcap_find( XHCI *x, INT id, UBINT from )
 	return 0;
 }
 
-/*
- * Take the controller from firmware that was using it, and learn which
- * root ports are USB 2 and which USB 3.
- */
-LOCAL void ext_caps( XHCI *x )
+LOCAL UBINT xcap_find( XHCI *x, INT id, UBINT from )
 {
-	UBINT	c;
+	return xcap_walk(x->cap, x->mmio_size, x->hcc1, id, from);
+}
 
-	c = xcap_find(x, XCAP_LEGACY, 0);
+/*
+ * Whether every register the controller names lies inside the window it
+ * was given, so that reading one does not reach outside what is mapped
+ */
+LOCAL BOOL regs_inside( UBINT regs, UD size )
+{
+	UW	w = rd32(regs, 0), hcs1;
+	UD	caplen = w & 0xff, nports, slots;
+
+	if ( w == 0xffffffff ) {
+		return FALSE;
+	}
+	hcs1 = rd32(regs, CAP_HCSPARAMS1);
+	nports = HCS1_PORTS(hcs1);
+	if ( nports > MAX_ROOTPORTS ) {
+		nports = MAX_ROOTPORTS;
+	}
+	slots = ( HCS1_SLOTS(hcs1) < MAX_SLOTS ) ? HCS1_SLOTS(hcs1) : MAX_SLOTS;
+	return caplen + 0x400 + 0x10 * nports <= size
+	    && (UD)(rd32(regs, CAP_RTSOFF) & ~0x1fU) + 0x40 <= size
+	    && (UD)(rd32(regs, CAP_DBOFF) & ~0x3U) + 4 * ( slots + 1 ) <= size;
+}
+
+/*
+ * The controller taken from the firmware that was using it (USB legacy
+ * support) and made quiet: halted, with its interrupts and the events
+ * that raise them off, what it latched cleared, and interrupter 0's
+ * enable and pending bits cleared. A controller the firmware left
+ * running with its interrupts on can hold one pending, which it sends
+ * the moment its function's messages are enabled, before the driver has
+ * defined the handler. So this is done before the function is given its
+ * interrupt (usbman.c, knl_xhci_quiesce), as Linux does for every xHCI
+ * as the bus is walked (the USB handoff of the PCI quirks), before the
+ * driver allocates its vectors and requests the interrupt; and again,
+ * saying nothing, as the controller is attached, for a controller that
+ * is not on PCI. The reset (HCRST) and the start come after, in
+ * xhci_start, the interrupts turned on last, once the handler is
+ * defined. Answers FALSE when the controller is still not ready (CNR)
+ * after the time allowed, in which case its operational registers are
+ * not written.
+ */
+LOCAL BOOL xhci_quiet( UBINT regs, UD size, UD mmio, BOOL say )
+{
+	UW	hcc1 = rd32(regs, CAP_HCCPARAMS1);
+	UBINT	op = regs + (rd32(regs, 0) & 0xff);
+	UBINT	rt = regs + (rd32(regs, CAP_RTSOFF) & ~0x1fU);
+	UBINT	c;
+	UW	cmd, sts, iman;
+	BOOL	ready, halted;
+
+	c = xcap_walk(regs, size, hcc1, XCAP_LEGACY, 0);
 	if ( c != 0 ) {
+#ifdef X64
+		/* a PC's firmware may take seconds to let it go (it does so in SMI) */
+		UW	leg = rd32(c, 0), ctl = rd32(c, 4);
+		BOOL	freed = TRUE;
+
+		if ( (leg & LEG_BIOS) != 0 ) {
+			wr32(c, 0, leg | LEG_OS);
+			freed = wait_reg(c, 0, LEG_BIOS, 0, 5000);
+			if ( !freed ) {
+				wr32(c, 0, rd32(c, 0) & ~LEG_BIOS);
+			}
+		}
+		wr32(c, 4, (rd32(c, 4) & LEGCTL_RSVDP) | LEGCTL_SMI_STS);
+		if ( say ) {
+			USB_LOG("usb: xhci handoff: USBLEGSUP %08x -> %08x%s, USBLEGCTLSTS %08x -> %08x\n",
+				leg, rd32(c, 0), freed ? "" : " (the firmware never let go: taken)",
+				ctl, rd32(c, 4));
+		}
+#else
 		if ( (rd32(c, 0) & LEG_BIOS) != 0 ) {
 			wr32(c, 0, rd32(c, 0) | LEG_OS);
 			if ( !wait_reg(c, 0, LEG_BIOS, 0, 1000) ) {
@@ -2191,7 +2574,59 @@ LOCAL void ext_caps( XHCI *x )
 		}
 		/* its interrupts to firmware off, what it latched cleared */
 		wr32(c, 4, (rd32(c, 4) & LEGCTL_RSVDP) | LEGCTL_SMI_STS);
+#endif
 	}
+
+	cmd = rd32(op, OP_USBCMD);
+	sts = rd32(op, OP_USBSTS);
+	iman = rd32(rt, RT_IMAN);
+#ifdef X64
+	ready = wait_reg(op, OP_USBSTS, STS_CNR, 0, 5000);
+#else
+	ready = wait_reg(op, OP_USBSTS, STS_CNR, 0, 500);
+#endif
+	halted = FALSE;
+	if ( ready ) {
+		wr32(op, OP_USBCMD, rd32(op, OP_USBCMD) & ~(CMD_RS | CMD_INTE | CMD_HSEE | CMD_EWE));
+		halted = wait_reg(op, OP_USBSTS, STS_HCH, STS_HCH, 50);
+		wr32(op, OP_USBSTS, STS_W1C);
+		wr32(rt, RT_IMAN, IMAN_IP);		/* the pending bit cleared, the enable off */
+	}
+	if ( say ) {
+		USB_LOG("usb: xhci at %lx quieted before its interrupt is set: as found USBCMD %08x USBSTS %08x"
+			" IMAN %08x%s; now USBCMD %08x USBSTS %08x IMAN %08x%s\n", mmio, cmd, sts, iman,
+			( (cmd & CMD_RS) != 0 && (cmd & CMD_INTE) != 0 && (iman & IMAN_IE) != 0 )
+			? " (left running with its interrupt on)" : "",
+			rd32(op, OP_USBCMD), rd32(op, OP_USBSTS), rd32(rt, RT_IMAN),
+			!ready ? " (still not ready: left as it was)" : !halted ? " (it did not halt)" : "");
+	}
+	return ready;
+}
+
+/*
+ * Before the function of a controller on PCI is given its interrupt
+ * (usbman.c): the controller taken from the firmware and made quiet
+ * (xhci_quiet). E_NOSPT when its registers do not fit its window, E_IO
+ * when it is not ready.
+ */
+EXPORT ER knl_xhci_quiesce( UBINT regs, UD size, UD mmio )
+{
+	if ( !regs_inside(regs, size) ) {
+		USB_LOG("usb: xhci at %08x: registers outside its window\n", (UW)mmio);
+		return E_NOSPT;
+	}
+	return xhci_quiet(regs, size, mmio, TRUE) ? E_OK : E_IO;
+}
+
+/*
+ * Take the controller from firmware that was using it, and learn which
+ * root ports are USB 2 and which USB 3.
+ */
+LOCAL void ext_caps( XHCI *x )
+{
+	UBINT	c;
+
+	(void)xhci_quiet(x->cap, x->mmio_size, x->mmio, FALSE);
 	for ( c = xcap_find(x, XCAP_PROTOCOL, 0); c != 0;
 	      c = xcap_find(x, XCAP_PROTOCOL, c) ) {
 		UW	v0 = rd32(c, 0), v2 = rd32(c, 8);
@@ -2222,17 +2657,77 @@ LOCAL void xhci_free( XHCI *x )
 	for ( i = 0; i < x->nsp; i++ ) {
 		knl_usb_page_free(x->sp_page[i]);
 	}
-	knl_usb_page_free(x->sp_array);
+	if ( x->sp_page != NULL ) {
+		Kfree(x->sp_page);
+		x->sp_page = NULL;
+	}
+	x->nsp = 0;
+	knl_usb_pages_free(x->sp_array, x->sp_order);
+	x->sp_array = NULL;
 	knl_usb_page_free(x->dcbaa);
 	knl_dmabuf_free(&x->ctrl_buf);
 	knl_dmabuf_free(&x->bulk_buf);
+	while ( x->pipes.next != NULL ) {
+		PIPECHUNK	*c = x->pipes.next;
+
+		x->pipes.next = c->next;
+		Kfree(c);
+	}
 	Kfree(x);
+}
+
+/*
+ * An endpoint's data toggle or sequence number started over, after the
+ * device cleared its halt. Reset Endpoint does it only for an endpoint
+ * that halted; one that was stopped (a transfer that timed out) is
+ * dropped and added again in one Configure Endpoint, which leaves it
+ * reading where its ring is written. An endpoint not configured yet,
+ * and one carrying a stream (whose halt was handled by Reset Endpoint),
+ * need nothing.
+ */
+LOCAL ER xhci_ep_reset( USBHC *hc, USBDEV *dev, UB addr )
+{
+	XHCI	*x = (XHCI *)hc;
+	XDEV	*d = (XDEV *)dev->hcpriv;
+	INT	dci = ( addr & 15 ) * 2 + ( ( addr & 0x80 ) != 0 ? 1 : 0 );
+	XEP	*e;
+	UW	*c;
+	UD	b;
+	INT	cc;
+
+	if ( d == NULL || !x->running ) {
+		return E_NOEXS;
+	}
+	sem_take(x->xfer_sem);
+	e = d->ep[dci];
+	if ( e == NULL || e->pipe != NULL ) {
+		sem_give(x->xfer_sem);
+		return E_OK;
+	}
+	(void)x_cmd(x, 0, TRB_TYPE(T_STOP_EP) | TRB_EP(e->dci) | TRB_SLOT(d->slot), NULL);
+	in_clear(d);
+	in_ctx(d, 0)[0] = 1UL << dci;
+	in_ctx(d, 0)[1] = 0x1 | ( 1UL << dci );
+	slot_from_output(d);
+	c = in_ctx(d, 1 + dci);
+	ep_fill(d, e, c);
+	b = ring_bus_of(&e->ring, e->ring.enq) | e->ring.pcs;
+	c[2] = (UW)b;
+	c[3] = (UW)( b >> 32 );
+	USB_MB();
+	cc = x_cmd(x, d->in_bus, TRB_TYPE(T_CONFIG_EP) | TRB_SLOT(d->slot), NULL);
+	sem_give(x->xfer_sem);
+	if ( cc != CC_SUCCESS ) {
+		USB_LOG("usb: slot %d endpoint %d: not started over (cc %d)\n", d->slot, dci, cc);
+		return E_IO;
+	}
+	return E_OK;
 }
 
 LOCAL CONST USBHC_OPS xhci_ops = {
 	xhci_nports,
 	xhci_port_connected,
-	xhci_port_changed,
+	xhci_port_status,
 	xhci_port_reset,
 	xhci_port_state,
 	xhci_dev_init,
@@ -2245,8 +2740,62 @@ LOCAL CONST USBHC_OPS xhci_ops = {
 	xhci_stream_open_out,
 	xhci_stream_close,
 	xhci_poll,
-	xhci_info
+	xhci_info,
+	xhci_ep_reset,
+	xhci_port_warm_reset,
+	xhci_port_power
 };
+
+#ifdef X64
+IMPORT BOOL	knl_xhci_pc_role( USBHC *hc, UW *cfg0, UW *cfg1, UW *cfg0_was, UW *cfg1_was, BOOL *host );	/* x86_64/xhci_pc.c */
+#endif
+
+/*
+ * The manager lets go of the device on a root port (usbman.c,
+ * port_event): the port as it was read, the state it had before and
+ * when, what decided it (conn: whether something was connected; if so,
+ * the port was not enabled or the device answered as another), and the port's
+ * registers now with the last Port Status Change Event, so that a
+ * disconnection can be told from a link that failed, an over-current
+ * or a port that lost its power. Nothing for a controller of another
+ * kind.
+ */
+EXPORT void knl_xhci_port_say( USBHC *hc, INT p, BOOL conn )
+{
+	XHCI	*x = (XHCI *)hc;
+	UW	v, b, now, pmsc, li;
+#ifdef X64
+	UW	c0, c1, c0w, c1w;
+	BOOL	host;
+#endif
+
+	if ( hc->ops != &xhci_ops || p < 0 || p >= x->nports || p >= MAX_ROOTPORTS ) {
+		return;
+	}
+	v = x->port_seen[p];
+	b = x->port_before[p];
+	USB_LOG("usb: %d-%d root port (USB%d) let go: %s; PORTSC %08x link %s" PS_FL_FMT
+		", before %08x link %s" PS_FL_FMT " (read at %u ms)\n", hc->index, p,
+		(INT)x->port_major[p],
+		!conn ? "CCS 0, nothing connected" : "connected, but not enabled or another device",
+		v, pls_name(v), PS_FL(v), b, pls_name(b), PS_FL(b), x->port_before_ms[p]);
+	now = knl_usb_ms();
+	v = rd32(x->op, OP_PORTSC(p));
+	pmsc = rd32(x->op, OP_PORTPMSC(p));
+	li = rd32(x->op, OP_PORTLI(p));
+#ifdef X64
+	if ( knl_xhci_pc_role(hc, &c0, &c1, &c0w, &c1w, &host) ) {
+		USB_LOG("usb: %d-%d   now %u ms: PORTSC %08x link %s PORTPMSC %08x PORTLI %08x,"
+			" last event %08x at %u ms; dual role CFG0 %08x CFG1 %08x (%s role), at start %08x %08x\n",
+			hc->index, p, now, v, pls_name(v), pmsc, li, x->port_ev[p], x->port_ev_ms[p],
+			c0, c1, host ? "host" : "device", c0w, c1w);
+		return;
+	}
+#endif
+	USB_LOG("usb: %d-%d   now %u ms: PORTSC %08x link %s PORTPMSC %08x PORTLI %08x,"
+		" last event %08x at %u ms\n", hc->index, p, now, v, pls_name(v), pmsc, li,
+		x->port_ev[p], x->port_ev_ms[p]);
+}
 
 LOCAL ID new_sem( void )
 {
@@ -2272,7 +2821,12 @@ LOCAL ER xhci_start( XHCI *x )
 	ER	er;
 
 	/* it may still be waking up from the reset the bus gave it */
+#ifdef X64
+	/* a PC's controller may take seconds after the firmware let it go */
+	wait_reg(x->op, OP_USBSTS, STS_CNR, 0, 5000);
+#else
 	wait_reg(x->op, OP_USBSTS, STS_CNR, 0, 500);
+#endif
 	wr32(x->op, OP_USBCMD, rd32(x->op, OP_USBCMD) & ~(CMD_RS | CMD_INTE));
 	wait_reg(x->op, OP_USBSTS, STS_HCH, STS_HCH, 50);
 	wr32(x->op, OP_USBCMD, rd32(x->op, OP_USBCMD) | CMD_HCRST);
@@ -2296,13 +2850,17 @@ LOCAL ER xhci_start( XHCI *x )
 	if ( x->dcbaa == NULL ) {
 		return E_NOMEM;
 	}
+	/*
+	 * Up to 1023 pages (the field is 10 bits): an array of 8-byte entries
+	 * that is one page up to 512 of them and two pages next to each other
+	 * beyond.
+	 */
 	n = HCS2_SPBUFS(x->hcs2);
-	if ( n > MAX_SCRATCH ) {
-		return E_NOSPT;
-	}
 	if ( n > 0 ) {
-		x->sp_array = (UW *)knl_usb_page_alloc(&x->sp_array_bus);
-		if ( x->sp_array == NULL ) {
+		x->sp_order = ( n * 8 > USB_PAGE ) ? 1 : 0;
+		x->sp_array = (UW *)knl_usb_pages_alloc(x->sp_order, &x->sp_array_bus);
+		x->sp_page = (UB **)Kcalloc((SZ)n, sizeof(UB *));
+		if ( x->sp_array == NULL || x->sp_page == NULL ) {
 			return E_NOMEM;
 		}
 		for ( i = 0; i < n; i++ ) {
@@ -2401,9 +2959,65 @@ LOCAL ER xhci_start( XHCI *x )
 		}
 		tk_dly_tsk(20);
 	}
+#ifdef X64
+	USB_LOG("usb: xhci started: version %x, %d ports, %d slots, %d scratch pages, %d event segments,"
+		" ports powered by %s\n", x->version, x->nports, x->max_slots, x->nsp, x->nevseg,
+		( (x->hcc1 & HCC1_PPC) != 0 ) ? "software" : "the controller");
+#endif
 
 	return E_OK;
 }
+
+#ifdef X64
+/*
+ * For the PC's own setup of a controller (device/usb/x86_64/xhci_pc.c):
+ * what may be asked of it, by its index among the controllers.
+ */
+LOCAL XHCI *xhci_of( INT hcidx )
+{
+	XHCI	*x;
+
+	for ( x = xhci_first; x != NULL; x = (XHCI *)x->next ) {
+		if ( (INT)x->hc.index == hcidx ) {
+			return x;
+		}
+	}
+	return NULL;
+}
+
+/* Every isochronous TD interrupts instead of one in ISO_IRQ_EVERY */
+EXPORT void knl_xhci_pc_no_bei( USBHC *hc )
+{
+	((XHCI *)hc)->no_bei = TRUE;
+}
+
+/* The address of an extended capability of the controller, 0 if none */
+EXPORT UBINT knl_xhci_pc_xcap( USBHC *hc, INT id )
+{
+	return xcap_find((XHCI *)hc, id, 0);
+}
+
+/*
+ * The root ports as they are now: PORTSC and the USB major version of
+ * each, up to max; answers the count of ports, or -1 for no controller.
+ * *version is the interface version (0x0100 for 1.0).
+ */
+EXPORT INT knl_xhci_pc_ports( INT hcidx, UW *portsc, UB *major, INT max, UH *version )
+{
+	XHCI	*x = xhci_of(hcidx);
+	INT	i;
+
+	if ( x == NULL ) {
+		return -1;
+	}
+	*version = x->version;
+	for ( i = 0; i < x->nports && i < max; i++ ) {
+		portsc[i] = rd32(x->op, OP_PORTSC(i));
+		major[i] = x->port_major[i];
+	}
+	return x->nports;
+}
+#endif
 
 EXPORT ER knl_xhci_attach( UBINT regs, UD size, UD mmio, UINT intno,
 			   ID flgid, USBHC **out )
@@ -2411,18 +3025,8 @@ EXPORT ER knl_xhci_attach( UBINT regs, UD size, UD mmio, UINT intno,
 	XHCI	*x;
 	UW	w;
 	UINT	caplen;
-	INT	i, slot = -1;
 	ER	er;
 
-	for ( i = 0; i < USB_MAX_HC; i++ ) {
-		if ( xhci_tbl[i] == NULL ) {
-			slot = i;
-			break;
-		}
-	}
-	if ( slot < 0 ) {
-		return E_LIMIT;
-	}
 	x = (XHCI *)Kcalloc(1, sizeof(XHCI));
 	if ( x == NULL ) {
 		return E_NOMEM;
@@ -2455,18 +3059,14 @@ EXPORT ER knl_xhci_attach( UBINT regs, UD size, UD mmio, UINT intno,
 	 * Every register the controller names has to be inside the window
 	 * it was given, or reading one would reach outside what is mapped.
 	 */
-	if ( w == 0xffffffff
-	  || (UD)caplen + 0x400 + 0x10 * (UD)x->nports > size
-	  || (UD)(rd32(regs, CAP_RTSOFF) & ~0x1fU) + 0x40 > size
-	  || (UD)(rd32(regs, CAP_DBOFF) & ~0x3U)
-	     + 4 * (UD)( ( HCS1_SLOTS(x->hcs1) < MAX_SLOTS ? HCS1_SLOTS(x->hcs1) : MAX_SLOTS ) + 1 ) > size ) {
+	if ( !regs_inside(regs, size) ) {
 		USB_LOG("usb: xhci at %08x: registers outside its window\n", (UW)mmio);
 		Kfree(x);
 		return E_NOSPT;
 	}
 
 	ext_caps(x);
-	xhci_tbl[slot] = x;
+	xhci_link(x);
 	er = xhci_start(x);
 	if ( er < E_OK ) {
 		USB_LOG("usb: xhci at %08x would not start (%d), sts %08x\n",
@@ -2474,7 +3074,7 @@ EXPORT ER knl_xhci_attach( UBINT regs, UD size, UD mmio, UINT intno,
 		if ( x->hc.intno != 0 ) {
 			DisableInt(x->hc.intno);
 		}
-		xhci_tbl[slot] = NULL;
+		xhci_unlink(x);
 		wr32(x->op, OP_USBCMD, rd32(x->op, OP_USBCMD) & ~(CMD_RS | CMD_INTE));
 		if ( wait_reg(x->op, OP_USBSTS, STS_HCH, STS_HCH, 100) ) {
 			xhci_free(x);

@@ -43,7 +43,7 @@
 
 /* The grid */
 #define CX_COLS_MAX	16384		/* XFD */
-#define CX_ROWS_MAX	1000000
+#define CX_ROWS_MAX	1048576		/* as xlsx has them */
 #define CX_ROWS		100		/* the grid at least */
 #define CX_COLS		26
 #define CX_CELL_W	80		/* a column's usual width */
@@ -110,7 +110,12 @@ typedef struct {
 	UB	*shown;			/* what it shows; NULL: its text */
 	UB	*el;			/* a link's or an image's element */
 	INT	ellen;
-	CXSTYLE	st;
+	/*
+	 * Its look, shared with every cell that looks the same (cx_style);
+	 * never NULL, and never written through: a cell given another look
+	 * is given another shared one (cx_style_put, cx_style_add).
+	 */
+	CONST CXSTYLE	*st;
 } CXCELL;
 
 typedef struct {
@@ -170,6 +175,8 @@ IMPORT void cx_free_all( CXSHEET *s );
 IMPORT CXCELL *cx_get( CONST CXSHEET *s, INT col, INT row );
 IMPORT CXCELL *cx_make( CXSHEET *s, INT col, INT row );	/* there, empty, when it was not */
 IMPORT void cx_remove( CXSHEET *s, INT col, INT row );
+/* Every cell of a range taken away at once; how many there were */
+IMPORT INT  cx_remove_range( CXSHEET *s, CONST CXRANGE *r );
 IMPORT BOOL cx_set_text( CXCELL *c, CONST UB *text );		/* words; a link or image let go */
 IMPORT BOOL cx_set_el( CXCELL *c, INT kind, CONST UB *el, INT len );
 IMPORT BOOL cx_set_shown( CXCELL *c, CONST UB *s, INT len );
@@ -233,6 +240,19 @@ IMPORT INT  cx_move_refs( CONST UB *in, INT n, INT cols, INT rows, INT maxcol, I
 
 IMPORT void cx_style_merge( CXSTYLE *to, CONST CXSTYLE *from );	/* what from says, over to */
 
+/*
+ * The looks the cells share. cx_plain is the look of a cell nothing was
+ * said of. cx_style gives the one shared look the same as st (made when
+ * there was none), NULL when there is no memory for it; it lasts as long
+ * as the program. cx_style_put gives a cell the look st, cx_style_add
+ * what from says over its own; FALSE (the cell as it was) for want of
+ * memory.
+ */
+IMPORT CONST CXSTYLE	cx_plain;
+IMPORT CONST CXSTYLE *cx_style( CONST CXSTYLE *st );
+IMPORT BOOL cx_style_put( CXCELL *c, CONST CXSTYLE *st );
+IMPORT BOOL cx_style_add( CXCELL *c, CONST CXSTYLE *from );
+
 /* The frames of a range: all, outline, top, bottom, left, right, none */
 #define CX_FR_ALL	0
 #define CX_FR_OUTLINE	1
@@ -258,6 +278,11 @@ typedef struct {
 	void	*carg;
 	UB	*mem;
 	INT	max;
+	/*
+	 * Or, when set, a page's text grows as long as it is (ct_buf_grow)
+	 * through 'more', which lets the text go when asked for 0 bytes
+	 */
+	void	*(*more)( void *p, SZ size );
 } CXPRINT;
 
 /* The range printed: every cell that is not empty; FALSE when there is none */

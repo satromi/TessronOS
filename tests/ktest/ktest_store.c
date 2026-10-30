@@ -27,6 +27,9 @@
 #include <ts/uuid.h>
 #include <ts/tad.h>
 #include <ts/dt.h>
+#include <ts/dtreq.h>
+#include "../../application/calendar/cal_tad.h"
+#include "../../application/desktop/desktop.h"
 
 #define ST_DOC		"019a6c96-e262-7dfd-a3bc-1e85d495d60d"	/* TADjsについて */
 #define ST_FIG		"019aaa4e-de25-72ad-8518-ab392b7ea301"	/* 基本図形編集サンプル */
@@ -138,6 +141,7 @@ LOCAL void test_label( void )
 	id_of(ST_SAMPLE, &v->target);
 	KT_ASSERT_ER(om_store_icon(v, &px, &w, &h), E_OK);
 	KT_ASSERT(px != NULL && w == 32 && h == 32);
+	om_store_icon_done(px);
 	Kfree(v);
 }
 
@@ -349,6 +353,180 @@ LOCAL void test_copy_new( void )
 	KT_ASSERT_ER(ob_del_obj(&nid), E_OK);
 }
 
+/*
+ * The program a double press opens an object with (design 11.3). A link
+ * that does not keep to its program opens with the one 実行 ran last on
+ * the object, written into the object's metadata; a link that keeps to
+ * it (起動アプリの固定) opens with the one it was fixed to, whatever is
+ * run from it or from another link.
+ */
+LOCAL BOOL opens_with( CONST T_VOBJ *v, CONST char *app )
+{
+	UB	got[OM_APP_ID];
+
+	return (BOOL)( om_link_default_app(v, got, sizeof(got)) > 0 && same_z(got, app) );
+}
+
+LOCAL void test_open_app( void )
+{
+	CONST UB	*ids[2] = { (CONST UB *)"basic-text-editor", (CONST UB *)"basic-figure-editor" };
+	CONST UB	*nms[2] = { (CONST UB *)"基本文章編集", (CONST UB *)"基本図形編集" };
+	TS_UUID		base, nid;
+	T_VOBJ		*v, *w;
+	UB		aid[OM_APP_ID];
+
+	if ( !ready ) KT_SKIP("no records on the disk");
+	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ) * 2);
+	KT_ASSERT(v != NULL);
+	if ( v == NULL ) return;
+	w = v + 1;
+	id_of(ST_TEXT_BASE, &base);
+	KT_ASSERT_ER(om_store_copy(&base, (CONST UB *)"起動の試験", FALSE, &nid), E_OK);
+	KT_ASSERT_ER(om_store_set_apps(&nid, ids, nms, 2, 0), E_OK);
+	/* two links to it with no applist of their own, as the desktop makes them */
+	knl_memset(v, 0, sizeof(T_VOBJ) * 2);
+	v->target = nid;
+	w->target = nid;
+
+	/* the one run last: 実行 with another program, and a double press opens with that */
+	KT_ASSERT(!om_link_locked(v));
+	KT_ASSERT(opens_with(v, "basic-text-editor"));
+	KT_ASSERT_ER(om_link_ran(v, (CONST UB *)"basic-figure-editor"), E_OK);
+	KT_ASSERT(opens_with(v, "basic-figure-editor"));
+	KT_ASSERT(opens_with(w, "basic-figure-editor"));
+	KT_ASSERT_ER(om_link_ran(v, (CONST UB *)"basic-text-editor"), E_OK);
+	KT_ASSERT(opens_with(v, "basic-text-editor"));
+	KT_ASSERT_ER(om_link_ran(v, (CONST UB *)"no-such-program"), E_NOEXS);
+	KT_ASSERT(opens_with(v, "basic-text-editor"));
+
+	/* fixed: to the one it opens with now, and so it stays */
+	KT_ASSERT_ER(om_link_lock(v, TRUE), E_OK);
+	KT_ASSERT(om_link_locked(v));
+	KT_ASSERT(v->applist[0] == '{');
+	KT_ASSERT(opens_with(v, "basic-text-editor"));
+	KT_ASSERT_ER(om_link_ran(v, (CONST UB *)"basic-figure-editor"), E_OK);
+	KT_ASSERT(om_store_default_app(&nid, aid, sizeof(aid)) > 0 && same_z(aid, "basic-text-editor"));
+	KT_ASSERT(opens_with(v, "basic-text-editor"));
+	/* run from the other link, which is not fixed: that one follows, the fixed one does not */
+	KT_ASSERT_ER(om_link_ran(w, (CONST UB *)"basic-figure-editor"), E_OK);
+	KT_ASSERT(opens_with(w, "basic-figure-editor"));
+	KT_ASSERT(opens_with(v, "basic-text-editor"));
+
+	/* let go: the object's again, the one run last */
+	KT_ASSERT_ER(om_link_lock(v, FALSE), E_OK);
+	KT_ASSERT(!om_link_locked(v));
+	KT_ASSERT(opens_with(v, "basic-figure-editor"));
+
+	/* a link carrying an old copy of the applist is fixed to what the object opens with now */
+	knl_strcpy((char *)w->applist,
+		   "{\"basic-text-editor\":{\"name\":\"基本文章編集\",\"defaultOpen\":true},"
+		   " \"basic-figure-editor\":{\"name\":\"基本図形編集\",\"defaultOpen\":false,\"defaultOpenLock\":true}}");
+	KT_ASSERT(!om_link_locked(w));
+	KT_ASSERT_ER(om_link_lock(w, TRUE), E_OK);
+	KT_ASSERT(om_link_locked(w));
+	KT_ASSERT(opens_with(w, "basic-figure-editor"));
+	KT_ASSERT(same_z(w->applist,
+		   "{\"basic-text-editor\":{\"name\":\"基本文章編集\",\"defaultOpen\":false},"
+		   "\"basic-figure-editor\":{\"name\":\"基本図形編集\",\"defaultOpen\":true,\"defaultOpenLock\":true}}"));
+
+	/* an object whose applist names nothing, and a link with none: nothing to fix */
+	KT_ASSERT_ER(om_store_set_apps(&nid, ids, nms, 0, -1), E_OK);
+	knl_memset(v, 0, sizeof(T_VOBJ));
+	v->target = nid;
+	KT_ASSERT_ER(om_link_lock(v, TRUE), E_NOEXS);
+	KT_ASSERT(!om_link_locked(v));
+
+	KT_ASSERT_ER(ob_del_obj(&nid), E_OK);
+	Kfree(v);
+}
+
+/*
+ * A link of a process's window (予定表, 基本表計算, マイクロカード) opened
+ * by a double press: the process carries the link's applist with its
+ * request (ct_link_req), the desktop gives it to the link it makes of
+ * the request (dt_req_applist), and the program is decided as for a
+ * link of its own -- a fixed link opens with the one it keeps to.
+ */
+LOCAL void test_proc_open( void )
+{
+	CONST UB	*ids[2] = { (CONST UB *)"basic-text-editor", (CONST UB *)"basic-figure-editor" };
+	CONST UB	*nms[2] = { (CONST UB *)"基本文章編集", (CONST UB *)"基本図形編集" };
+	CONST char	*fixed = "\" applist=\"{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,"
+				 "&quot;defaultOpen&quot;:false},&quot;basic-figure-editor&quot;:{&quot;name&quot;:"
+				 "&quot;基本図形編集&quot;,&quot;defaultOpen&quot;:true,&quot;defaultOpenLock&quot;:true}}\"/>";
+	CONST char	*free_ = "\" applist=\"{&quot;basic-figure-editor&quot;:{&quot;name&quot;:&quot;基本図形編集&quot;,"
+				 "&quot;defaultOpen&quot;:true}}\"/>";
+	TS_UUID		base, nid;
+	T_DTREQ		*rq;
+	T_VOBJ		*v;
+	UB		*el;
+	char		us[40];
+	INT		n, i;
+
+	if ( !ready ) KT_SKIP("no records on the disk");
+	rq = (T_DTREQ *)Kmalloc(sizeof(T_DTREQ));
+	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	el = (UB *)Kmalloc(1024);
+	KT_ASSERT(rq != NULL && v != NULL && el != NULL);
+	if ( rq == NULL || v == NULL || el == NULL ) goto done;
+	id_of(ST_TEXT_BASE, &base);
+	KT_ASSERT_ER(om_store_copy(&base, (CONST UB *)"プロセスの仮身の試験", FALSE, &nid), E_OK);
+	KT_ASSERT_ER(om_store_set_apps(&nid, ids, nms, 2, 0), E_OK);	/* the object opens with 基本文章編集 */
+	(void)ts_uuid_to_str(&nid, us, sizeof(us));
+
+	/* fixed to 基本図形編集 in the process's record: opened with that one */
+	n = s_copy(el, "<link id=\"");
+	n += s_copy(el + n, us);
+	n += s_copy(el + n, fixed);
+	knl_memset(rq, 0, sizeof(T_DTREQ));
+	rq->req = DT_RQ_OPEN;
+	rq->target = nid;
+	ct_link_req(rq, el, n);
+	KT_ASSERT(( rq->flags & DT_F_APPLIST ) != 0);
+	KT_ASSERT(rq->text[0] == '{' && rq->text[1] == '"');
+	knl_memset(v, 0, sizeof(T_VOBJ));
+	v->target = rq->target;
+	dt_req_applist(rq, v);
+	KT_ASSERT(om_link_locked(v));
+	KT_ASSERT(opens_with(v, "basic-figure-editor"));
+	/* 実行 from it with 基本文章編集 does not move the object's default, nor the link */
+	KT_ASSERT_ER(om_link_ran(v, (CONST UB *)"basic-text-editor"), E_OK);
+	KT_ASSERT(opens_with(v, "basic-figure-editor"));
+
+	/* not fixed: the object's own, whatever the link's copy says */
+	n = s_copy(el, "<link id=\"");
+	n += s_copy(el + n, us);
+	n += s_copy(el + n, free_);
+	knl_memset(rq, 0, sizeof(T_DTREQ));
+	ct_link_req(rq, el, n);
+	KT_ASSERT(( rq->flags & DT_F_APPLIST ) != 0);
+	knl_memset(v, 0, sizeof(T_VOBJ));
+	v->target = nid;
+	dt_req_applist(rq, v);
+	KT_ASSERT(!om_link_locked(v));
+	KT_ASSERT(opens_with(v, "basic-text-editor"));
+
+	/* a link with no applist, and a request from a program that carries none: the object's own */
+	n = s_copy(el, "<link id=\"");
+	n += s_copy(el + n, us);
+	n += s_copy(el + n, "\"/>");
+	knl_memset(rq, 0, sizeof(T_DTREQ));
+	ct_link_req(rq, el, n);
+	KT_ASSERT_EQ(rq->flags & DT_F_APPLIST, 0U);
+	knl_memset(v, 0, sizeof(T_VOBJ));
+	v->target = nid;
+	for ( i = 0; i < 8; i++ ) v->applist[i] = 'x';	/* what was there is not left */
+	dt_req_applist(rq, v);
+	KT_ASSERT_EQ(v->applist[0], 0);
+	KT_ASSERT(opens_with(v, "basic-text-editor"));
+
+	KT_ASSERT_ER(ob_del_obj(&nid), E_OK);
+done:
+	if ( rq != NULL ) Kfree(rq);
+	if ( v != NULL ) Kfree(v);
+	if ( el != NULL ) Kfree(el);
+}
+
 LOCAL void test_delete( void )
 {
 	TS_UUID	src, x, cp;
@@ -389,6 +567,235 @@ LOCAL void test_recount( void )
 	KT_ASSERT(om_store_refs(&root) >= 1);
 }
 
+/*
+ * Many objects shown, as cabinets of hundreds and of more than a
+ * thousand links would show them: every one named and given its icon,
+ * twice over (two drawings), with the time each pass takes, how many
+ * entries were made room of and the memory the table holds. Then the
+ * table held to 100 entries (om_store_cap, as on a machine with little
+ * memory) over 300 of them: entries are made room of, each object still
+ * reads back its own name (one made room of is read again, never another
+ * object's), a document asked for first stays the same throughout, an
+ * icon a drawing holds is not let go under it, and an object made after
+ * it all opens.
+ */
+IMPORT void om_store_stat( INT *p_used, INT *p_docs, INT *p_max, UW *p_evicted,
+			   SZ *p_bytes, SZ *p_budget );
+IMPORT void om_store_cap( INT n );
+
+#define MANY_N		1200
+#define MANY_SMALL	300
+
+LOCAL void many_name( UB *out, INT i )
+{
+	INT	k = s_copy(out, "多数の実身");
+
+	out[k++] = (UB)( '0' + i / 1000 % 10 );
+	out[k++] = (UB)( '0' + i / 100 % 10 );
+	out[k++] = (UB)( '0' + i / 10 % 10 );
+	out[k++] = (UB)( '0' + i % 10 );
+	out[k] = 0;
+}
+
+/* Named and given its icon, objects 0 to n - 1, twice: the time of each pass */
+LOCAL void many_passes( CONST TS_UUID *ids, INT n, CONST char *what )
+{
+	T_VOBJ		v;
+	UB		got[TAD_NAME_MAX];
+	CONST UW	*px;
+	INT		i, pass, w, h, used, docs, max;
+	UW		ev0, ev1;
+	SZ		bytes = 0, budget = 0;
+	SYSTIM		t0, t1;
+
+	for ( pass = 0; pass < 2; pass++ ) {
+		om_store_stat(&used, &docs, &max, &ev0, NULL, NULL);
+		tk_get_otm(&t0);
+		for ( i = 0; i < n; i++ ) {
+			knl_memset(&v, 0, sizeof(v));
+			v.target = ids[i];
+			(void)om_store_label(&v, got, TAD_NAME_MAX);
+			if ( om_store_icon(&v, &px, &w, &h) >= E_OK ) om_store_icon_done(px);
+		}
+		tk_get_otm(&t1);
+		om_store_stat(&used, &docs, &max, &ev1, &bytes, &budget);
+		tm_printf((UB *)"  %s, pass %d over %d objects: %d ms, %d made room of,"
+			  " %d entries of %d in use, %d KB of %d KB\n", what, pass + 1, n,
+			  (INT)( t1.lo - t0.lo ), (INT)( ev1 - ev0 ), used, max,
+			  (INT)( bytes / 1024 ), (INT)( budget / 1024 ));
+		KT_ASSERT(bytes <= budget);
+	}
+}
+
+LOCAL void test_many( void )
+{
+	TS_UUID		base, extra, doc;
+	TS_UUID		*ids;
+	T_VOBJ		v;
+	T_TAD		*held;
+	UB		want[TAD_NAME_MAX], got[TAD_NAME_MAX];
+	CONST UW	*px, *px2;
+	INT		made, i, w, h, bad = 0, used, docs, max;
+	UW		ev0, ev1;
+
+	if ( !ready ) KT_SKIP("no records on the disk");
+	ids = (TS_UUID *)Kcalloc(MANY_N, sizeof(TS_UUID));
+	KT_ASSERT(ids != NULL);
+	if ( ids == NULL ) return;
+	id_of(ST_DOC, &doc);
+	held = om_store_get(&doc, 0);
+	KT_ASSERT(held != NULL);
+	id_of(ST_TEXT_BASE, &base);
+	for ( made = 0; made < MANY_N; made++ ) {
+		many_name(want, made);
+		if ( om_store_copy(&base, want, FALSE, &ids[made]) < E_OK ) break;
+	}
+	KT_ASSERT_EQ(made, MANY_N);
+
+	/* as large as the memory makes it */
+	many_passes(ids, ( made < MANY_SMALL ) ? made : MANY_SMALL, "the whole table");
+	many_passes(ids, made, "the whole table");
+
+	/* held to 100 entries: room is made, nothing is mixed up (what was read let go first) */
+	for ( i = 0; i < made; i++ ) {
+		om_store_forget(&ids[i]);
+	}
+	om_store_cap(100);
+	om_store_stat(&used, &docs, &max, &ev0, NULL, NULL);
+	knl_memset(&v, 0, sizeof(v));
+	v.target = ids[0];
+	KT_ASSERT_ER(om_store_icon(&v, &px, &w, &h), E_OK);	/* a drawing holds the icon of the first */
+	many_passes(ids, ( made < MANY_SMALL ) ? made : MANY_SMALL, "held to 100");
+	for ( i = 0; i < made; i++ ) {
+		many_name(want, i);
+		if ( om_store_name(&ids[i], got, TAD_NAME_MAX) <= 0 || !same_z(got, (CONST char *)want) ) {
+			bad++;
+		}
+	}
+	KT_ASSERT_EQ(bad, 0);
+	om_store_stat(&used, &docs, &max, &ev1, NULL, NULL);
+	KT_ASSERT(ev1 > ev0);
+	KT_ASSERT(used <= 100 + 16);
+	/* the icon held all along is still the same pixels, given again while held */
+	KT_ASSERT_ER(om_store_icon(&v, &px2, &w, &h), E_OK);
+	KT_ASSERT(px2 == px);
+	om_store_icon_done(px2);
+	om_store_icon_done(px);
+	/* the document asked for first is the same one still */
+	KT_ASSERT(om_store_get(&doc, 0) == held);
+	/* and an object made now opens */
+	KT_ASSERT_ER(om_store_copy(&base, (CONST UB *)"多数の後の実身", FALSE, &extra), E_OK);
+	KT_ASSERT(om_store_get(&extra, 0) != NULL);
+	KT_ASSERT_ER(om_store_delete(&extra), E_OK);
+	om_store_cap(0);
+	for ( i = 0; i < made; i++ ) {
+		(void)om_store_delete(&ids[i]);
+	}
+	Kfree(ids);
+}
+
+/*
+ * Pictures beside records, more of them than the picture budget holds
+ * (held to 10 pictures' worth, om_store_picture_cap): each read back
+ * with its own colour (one let go is read again, never another's), some
+ * let go on the way, the bytes held within the budget; a picture a
+ * drawing holds keeps its pixels and colour throughout, is given again
+ * as the same pixels while held, and, written anew while held, the
+ * drawing still reads the old pixels and the next reader the new ones.
+ */
+IMPORT void om_store_picture_stat( INT *p_n, SZ *p_bytes, SZ *p_budget, UW *p_evicted );
+IMPORT void om_store_picture_cap( SZ bytes );
+
+#define PIC_N		40
+#define PIC_W		64
+
+LOCAL void pic_href( UB *out, CONST TS_UUID *id )
+{
+	char	us[40];
+	INT	k;
+
+	ts_uuid_to_str(id, us, sizeof(us));
+	k = s_copy(out, us);
+	(void)s_copy(out + k, "_0_1.png");
+}
+
+LOCAL BOOL pic_is( CONST UW *px, INT w, INT h, UW colour )
+{
+	INT	i;
+
+	if ( px == NULL || w != PIC_W || h != PIC_W ) return FALSE;
+	for ( i = 0; i < w * h; i++ ) {
+		if ( ( px[i] & 0x00ffffff ) != colour ) return FALSE;
+	}
+	return TRUE;
+}
+
+LOCAL void test_pictures( void )
+{
+	TS_UUID		base, ids[PIC_N];
+	UB		href[PIC_N][64], want[TAD_NAME_MAX];
+	UW		*fill;
+	CONST UW	*px, *held, *again;
+	INT		made, i, k, w, h, hw, hh, n, bad = 0, pass;
+	SZ		bytes = 0, budget = 0;
+	UW		ev0, ev1;
+
+	if ( !ready ) KT_SKIP("no records on the disk");
+	fill = (UW *)Kmalloc(sizeof(UW) * PIC_W * PIC_W);
+	KT_ASSERT(fill != NULL);
+	if ( fill == NULL ) return;
+	id_of(ST_TEXT_BASE, &base);
+	for ( made = 0; made < PIC_N; made++ ) {
+		many_name(want, 5000 + made);
+		if ( om_store_copy(&base, want, FALSE, &ids[made]) < E_OK ) break;
+		pic_href(href[made], &ids[made]);
+		for ( k = 0; k < PIC_W * PIC_W; k++ ) fill[k] = 0xff000000 | (UW)( made * 0x050301 + 0x102030 );
+		if ( om_store_put_picture(href[made], fill, PIC_W, PIC_W) < E_OK ) break;
+	}
+	KT_ASSERT_EQ(made, PIC_N);
+	om_store_picture_cap((SZ)PIC_W * PIC_W * 4 * 10);
+	om_store_picture_stat(&n, &bytes, &budget, &ev0);
+
+	/* the first held by a drawing all along */
+	KT_ASSERT_ER(om_store_picture(href[0], &held, &hw, &hh), E_OK);
+	KT_ASSERT(pic_is(held, hw, hh, 0x102030));
+	for ( pass = 0; pass < 2; pass++ ) {
+		for ( i = 1; i < made; i++ ) {
+			if ( om_store_picture(href[i], &px, &w, &h) < E_OK ) {
+				bad++;
+				continue;
+			}
+			if ( !pic_is(px, w, h, (UW)( i * 0x050301 + 0x102030 ) ) ) bad++;
+			om_store_picture_done(px);
+		}
+	}
+	KT_ASSERT_EQ(bad, 0);
+	om_store_picture_stat(&n, &bytes, &budget, &ev1);
+	tm_printf((UB *)"  %d pictures read twice: %d held, %d KB of %d KB, %d let go\n", made - 1, n,
+		  (INT)( bytes / 1024 ), (INT)( budget / 1024 ), (INT)( ev1 - ev0 ));
+	KT_ASSERT(ev1 > ev0);
+	KT_ASSERT(bytes <= budget);
+	KT_ASSERT(pic_is(held, hw, hh, 0x102030));
+	KT_ASSERT_ER(om_store_picture(href[0], &again, &w, &h), E_OK);
+	KT_ASSERT(again == held);
+	om_store_picture_done(again);
+
+	/* written anew while held: the drawing keeps the old, the next reader gets the new */
+	for ( k = 0; k < PIC_W * PIC_W; k++ ) fill[k] = 0xff00ff00;
+	KT_ASSERT_ER(om_store_put_picture(href[0], fill, PIC_W, PIC_W), E_OK);
+	KT_ASSERT(pic_is(held, hw, hh, 0x102030));
+	KT_ASSERT_ER(om_store_picture(href[0], &again, &w, &h), E_OK);
+	KT_ASSERT(again != held && pic_is(again, w, h, 0x00ff00));
+	om_store_picture_done(again);
+	om_store_picture_done(held);
+
+	om_store_picture_cap(0);
+	for ( i = 0; i < made; i++ ) {
+		(void)om_store_delete(&ids[i]);
+	}
+	Kfree(fill);
+}
+
 EXPORT void ktest_store( void )
 {
 	KT_RUN(test_open);
@@ -399,4 +806,8 @@ EXPORT void ktest_store( void )
 	KT_RUN(test_recount);
 	KT_RUN(test_label);
 	KT_RUN(test_copy_new);
+	KT_RUN(test_open_app);
+	KT_RUN(test_proc_open);
+	KT_RUN(test_many);
+	KT_RUN(test_pictures);
 }

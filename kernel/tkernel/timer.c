@@ -115,6 +115,10 @@ LOCAL void knl_enqueue_tmeb( TMEB *event )
 {
 	QUEUE	*q;
 
+	KLK_ASSERT_TMR("the timer queue");
+#if KLK_FINE
+	event->seq++;
+#endif
 	for ( q = knl_timer_queue.next; q != &knl_timer_queue; q = q->next ) {
 		if ( event->time < ((TMEB*)q)->time ) {
 			break;
@@ -153,28 +157,38 @@ LOCAL ABSTIM knl_timer_expiry( UD tmout_ns )
  */
 EXPORT void knl_timer_insert( TMEB *event, TMO tmout, CBACK callback, void *arg )
 {
+	KLK_TMR_DI();
 	event->callback = callback;
 	event->arg = arg;
 
 	if ( tmout == TMO_FEVR ) {
 		QueInit(&event->queue);
+#if KLK_FINE
+		event->seq++;
+#endif
 	} else {
 		event->time = knl_timer_expiry(knl_ms_to_ns((UD)(UW)tmout));
 		knl_enqueue_tmeb(event);
 	}
+	KLK_UNTMR();
 }
 
 EXPORT void knl_timer_insert_u( TMEB *event, TMO_U tmout_u, CBACK callback, void *arg )
 {
+	KLK_TMR_DI();
 	event->callback = callback;
 	event->arg = arg;
 
 	if ( tmout_u == TMO_FEVR ) {
 		QueInit(&event->queue);
+#if KLK_FINE
+		event->seq++;
+#endif
 	} else {
 		event->time = knl_timer_expiry(knl_us_to_ns((UD)tmout_u));
 		knl_enqueue_tmeb(event);
 	}
+	KLK_UNTMR();
 }
 
 EXPORT void knl_timer_insert_reltim( TMEB *event, RELTIM tmout, CBACK callback, void *arg )
@@ -189,10 +203,12 @@ EXPORT void knl_timer_insert_reltim_u( TMEB *event, RELTIM_U tmout_u, CBACK call
 
 EXPORT void knl_timer_insert_rel_ns( TMEB *event, UD tmout_ns, CBACK callback, void *arg )
 {
+	KLK_TMR_DI();
 	event->callback = callback;
 	event->arg = arg;
 	event->time = knl_timer_expiry(tmout_ns);
 	knl_enqueue_tmeb(event);
+	KLK_UNTMR();
 }
 
 /*
@@ -203,10 +219,12 @@ EXPORT void knl_timer_insert_rel_ns( TMEB *event, UD tmout_ns, CBACK callback, v
  */
 EXPORT void knl_timer_insert_abs( TMEB *evt, ABSTIM time, CBACK cback, void *arg )
 {
+	KLK_TMR_DI();
 	evt->callback = cback;
 	evt->arg = arg;
 	evt->time = time;
 	knl_enqueue_tmeb(evt);
+	KLK_UNTMR();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -221,10 +239,13 @@ EXPORT void knl_timer_handler( void )
 {
 	TMEB	*event;
 	ABSTIM	cur;
+	CBACK	cb;
+	void	*arg;
 
 	knl_timer_irq_count++;
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_TMR_DI();
 	for (;;) {
 		cur = knl_get_mono_ns();
 
@@ -235,9 +256,24 @@ EXPORT void knl_timer_handler( void )
 				break;
 			}
 
+			/*
+			 * Out of the queue, its links on itself so that taking it
+			 * out again does no harm. The callback is called with the
+			 * timer's lock let go: it takes the locks of what it acts
+			 * on, and checks that the event was not overtaken.
+			 */
 			QueRemove(&event->queue);
-			if ( event->callback != NULL ) {
-				(*event->callback)(event->arg);
+			QueInit(&event->queue);
+#if KLK_FINE
+			event->fired = event->seq;
+#endif
+			cb = event->callback;
+			arg = event->arg;
+			if ( cb != NULL ) {
+				KLK_UNTMR();
+				KLK_KT_SPIN(knl_kt_fire_spin)
+				(*cb)(arg);
+				KLK_TMR_DI();
 			}
 		}
 
@@ -253,6 +289,7 @@ EXPORT void knl_timer_handler( void )
 			break;
 		}
 	}
+	KLK_UNTMR();
 	END_CRITICAL_SECTION;
 
 	knl_end_of_hw_timer_interrupt();		/* EOI */
@@ -264,10 +301,20 @@ EXPORT void knl_timer_handler( void )
  */
 EXPORT void knl_timer_ipi_handler( UINT intno, UW iar )
 {
+#if KLK_FINE
+	UINT	s = disint();
+
+	KLK_TMR_DI();
+	knl_timer_armed = FALSE;
+	knl_timer_program();
+	KLK_UNTMR();
+	enaint(s);
+#else
 	BEGIN_CRITICAL_SECTION;
 	knl_timer_armed = FALSE;
 	knl_timer_program();
 	END_CRITICAL_SECTION;
+#endif
 
 	knl_end_of_timer_ipi(iar);
 }

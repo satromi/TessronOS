@@ -88,7 +88,25 @@ typedef struct timer_event_block {
 	ABSTIM	time;		/* Expiry (monotonic ns) */
 	CBACK	callback;	/* Callback function */
 	void	*arg;		/* Argument to be sent to callback function */
+#if KLK_FINE
+	/*
+	 * The callback is called with no lock held (design 4.3.3): seq
+	 * moves on each time the event is put in the queue or taken out,
+	 * and is copied to fired as the timer takes it out to call it. A
+	 * callback that finds the two differ, under the lock of what it
+	 * acts on, was overtaken: the event was taken out or put in again
+	 * in between.
+	 */
+	UW	seq;
+	UW	fired;
+#endif
 } TMEB;
+
+#if KLK_FINE
+#define knl_timer_stale(evt)	( (evt)->fired != (evt)->seq )
+#else
+#define knl_timer_stale(evt)	FALSE
+#endif
 
 IMPORT D	knl_real_time_ofs;	/* System time (UTC ns) - monotonic ns */
 IMPORT QUEUE	knl_timer_queue;
@@ -117,7 +135,15 @@ IMPORT void knl_timer_insert_abs( TMEB *evt, ABSTIM time, CBACK cback, void *arg
  */
 Inline void knl_timer_delete( TMEB *event )
 {
+#if KLK_FINE
+	KLK_TMR_DI();
 	QueRemove(&event->queue);
+	QueInit(&event->queue);
+	event->seq++;
+	KLK_UNTMR();
+#else
+	QueRemove(&event->queue);
+#endif
 }
 
 /*

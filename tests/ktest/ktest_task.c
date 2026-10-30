@@ -256,10 +256,18 @@ LOCAL void t_fpu( INT stacd, void *exinf )
 	UD	mine = (UD)(UBINT)exinf, got;
 	INT	i;
 
+#if defined(__x86_64__)
+	Asm("movq %0, %%xmm8" : : "r"(mine));
+#else
 	Asm("fmov d8, %0" : : "r"(mine));
+#endif
 	for ( i = 0; i < 50; i++ ) {
 		tk_dly_tsk(1);			/* the other one runs */
+#if defined(__x86_64__)
+		Asm("movq %%xmm8, %0" : "=r"(got));
+#else
 		Asm("fmov %0, d8" : "=r"(got));
+#endif
 		if ( got != mine ) {
 			fpu_bad++;
 		}
@@ -277,8 +285,7 @@ LOCAL ID fpu_task( UD value )
 	ctsk.task    = (FP)t_fpu;
 	ctsk.itskpri = KT_PRI_HIGH;
 	ctsk.stksz   = 4096;
-	ctsk.assprc  = 1U << ( tk_get_prc() - 1 );
-	return tk_cre_tsk(&ctsk);
+	return kt_cre_on(&ctsk, tk_get_prc());
 }
 
 LOCAL void test_fpu_kept( void )

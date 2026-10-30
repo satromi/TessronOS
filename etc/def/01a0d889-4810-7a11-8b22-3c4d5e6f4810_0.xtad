@@ -1,0 +1,18 @@
+<tad version="1.0" encoding="UTF-8" filename="システム登録のメニュー">
+<document>
+<p>システム登録のメニュー</p>
+<p>システム登録のウインドウのメニュー。閉じる、開始、Windowsと共存する、区画を1つ消して使う、ディスク全体を消して使う、ディスクの一覧を更新、再起動と、ウインドウ、小物、実行。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-20c1-7e01-9a10-c1d2e3f420c1"/></include>
+<item code="sysinst.start">開始</item>
+<line/>
+<item code="sysinst.coexist">Windowsと共存する</item>
+<item code="sysinst.replace">区画を1つ消して使う</item>
+<item code="sysinst.erase">ディスク全体を消して使う</item>
+<line/>
+<item code="sysinst.list">ディスクの一覧を更新</item>
+<item code="sysinst.restart">再起動</item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-20c2-7e02-9a10-c1d2e3f420c2"/></include>
+</menu>
+</tad>

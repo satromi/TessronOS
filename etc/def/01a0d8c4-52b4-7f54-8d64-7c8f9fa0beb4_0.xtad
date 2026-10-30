@@ -1,0 +1,38 @@
+<tad version="1.0" encoding="UTF-8" filename="バックアップのデータボックス">
+<document>
+<p>バックアップのデータボックス</p>
+<p>バックアップのウインドウのパネルと、次の媒体を尋ねるパネルの定義。ウインドウは〈保存〉〈復帰〉のタブを持つ。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,540,420" title="バックアップ" kind="bare">
+<tags num="100" rect="0,0,540,420" inner="4,28,536,416" value="1"><tag>保存</tag><tag>復帰</tag></tags>
+<text num="21" sheet="1" x="16" y="52"> </text>
+<text num="22" sheet="1" x="420" y="52"> </text>
+<list num="23" sheet="1" rect="16,62,524,262" cols="24,0"></list>
+<button num="24" sheet="1" rect="16,270,96,294">開く</button>
+<button num="25" sheet="1" rect="104,270,184,294">戻る</button>
+<button num="26" sheet="1" rect="264,270,344,294">選ぶ</button>
+<button num="27" sheet="1" rect="352,270,432,294">除く</button>
+<text sheet="1" x="16" y="322">保存先：</text>
+<popup num="28" sheet="1" rect="80,304,400,330"></popup>
+<button num="30" sheet="1" rect="324,344,424,368" off="true">中止</button>
+<button num="29" sheet="1" rect="432,344,524,368" emph="true">保存</button>
+<text sheet="2" x="16" y="52">書庫の場所：</text>
+<popup num="41" sheet="2" rect="112,34,432,60"></popup>
+<list num="42" sheet="2" rect="16,68,524,236" cols="24,0"></list>
+<text num="43" sheet="2" x="16" y="262"> </text>
+<text num="44" sheet="2" x="16" y="284"> </text>
+<text num="45" sheet="2" x="16" y="306"> </text>
+<button num="47" sheet="2" rect="324,344,424,368" off="true">中止</button>
+<button num="46" sheet="2" rect="432,344,524,368" emph="true">復帰</button>
+<text num="90" x="16" y="398"> </text>
+<text num="91" x="400" y="398"> </text>
+</panel>
+<panel num="2" rect="0,0,440,128" title="バックアップ">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="64"> </text>
+<button num="12" rect="216,88,316,112" answer="cancel">中止</button>
+<button num="11" rect="324,88,424,112" answer="ok" emph="true">続ける</button>
+</panel>
+</databox>
+</tad>

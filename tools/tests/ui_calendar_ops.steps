@@ -29,12 +29,12 @@ shot ops_sized
 click 720 620 1
 wait 600
 shot ops_menu
-move 740 680
+move 740 640
 wait 150
-move 760 686
+move 760 646
 wait 500
 shot ops_edit
-move 820 686
+move 820 646
 wait 150
 move 830 666
 wait 300
@@ -98,16 +98,16 @@ wait 500
 shot ops_carried
 click 780 604 1
 wait 600
-move 760 620
+move 760 640
 wait 150
-move 770 624
+move 770 644
 wait 600
 shot ops_vobj_menu
-move 870 624
+move 890 644
 wait 150
-move 890 684
+move 900 704
 wait 300
-click 890 684
+click 900 704
 wait 1000
 shot ops_attr
 key 28
@@ -120,11 +120,11 @@ wait 150
 move 800 624
 wait 600
 shot ops_real_menu
-move 870 624
+move 890 624
 wait 150
-move 900 644
+move 910 644
 wait 300
-click 900 644
+click 910 644
 wait 1000
 shot ops_dup_ask
 key 28
@@ -133,9 +133,9 @@ wait 500
 shot ops_duplicated
 click 780 604 1
 wait 600
-move 790 660
+move 790 680
 wait 150
-move 800 664
+move 800 684
 wait 600
 shot ops_exec_menu
 key 29
@@ -144,16 +144,16 @@ key 29
 wait 300
 click 400 600 1
 wait 600
-move 410 540
+move 410 520
 wait 150
-move 420 540
+move 420 520
 wait 600
 shot ops_view_menu
-move 500 540
+move 510 520
 wait 150
-move 520 680
+move 520 660
 wait 300
-click 520 680
+click 520 660
 wait 1000
 text c8e0f0
 wait 300

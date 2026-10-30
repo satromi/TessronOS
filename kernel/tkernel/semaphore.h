@@ -33,6 +33,7 @@ typedef struct semaphore_control_block {
 #if USE_OBJECT_NAME
 	UB	name[OBJECT_NAME_LENGTH];	/* name */
 #endif
+	KLOCK	klk;		/* its lock (klk.h, design 4.3.3) */
 } SEMCB;
 
 IMPORT SEMCB knl_semcb_table[];	/* Semaphore control block */

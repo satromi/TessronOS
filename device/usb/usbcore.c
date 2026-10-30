@@ -77,11 +77,23 @@ EXPORT ER knl_usb_set_interface( USBDEV *dev, INT ifno, INT alt )
 			       (UH)alt, (UH)ifno, NULL, 0, NULL);
 }
 
-/* ENDPOINT_HALT is feature 0 */
+/*
+ * ENDPOINT_HALT is feature 0. The device then counts the endpoint's
+ * packets from the start (data toggle DATA0, sequence number 0); the
+ * controller is made to as well, or the two would disagree on every
+ * packet after it.
+ */
 EXPORT ER knl_usb_clear_halt( USBDEV *dev, UB ep )
 {
-	return knl_usb_control(dev, USB_RT_ENDPOINT, USB_REQ_CLEAR_FEATURE,
-			       0, ep, NULL, 0, NULL);
+	USBHC	*hc = dev->hc;
+	ER	er;
+
+	er = knl_usb_control(dev, USB_RT_ENDPOINT, USB_REQ_CLEAR_FEATURE,
+			     0, ep, NULL, 0, NULL);
+	if ( er >= E_OK && ( ep & 0x0f ) != 0 && hc->ops->ep_reset != NULL ) {
+		er = hc->ops->ep_reset(hc, dev, ep);
+	}
+	return er;
 }
 
 /*

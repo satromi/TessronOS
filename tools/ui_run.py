@@ -31,12 +31,26 @@ where it is). A few lines are the runner's own:
 
   shot NAME        the screen, as NAME.png (or .ppm) in --out
   expect TEXT      the console must say TEXT (waits up to 20 seconds)
+  expectin S TEXT  the same, waiting up to S seconds
+  logmark          where the console's log is now: what expectsince looks after
+  expectsince TEXT the console must say TEXT after logmark (waits up to 20
+                   seconds): a line it said before as well (a state passed
+                   through on the way) does not count
+  expectsincein S TEXT  the same, waiting up to S seconds
+  hostmark         the time from which hosttime counts, on this machine's clock
+  hosttime NAME MS how long since hostmark, printed with NAME; at most MS
+  want ANSWER      the answer to the step before must be ANSWER ("want ok c 1,4 a 1,4")
+  keep NAME        the answer to the step before kept under NAME
+  same NAME        the answer to the step before must be the one kept under NAME
+  under NAME MS    the answer to the step before ("ok MS") must be at most MS;
+                   it is printed with NAME either way, for the record of times
   absent TEXT      the console must not have said TEXT so far in this run
                    ("absent !OACV!": no call of a program refused for want
                    of a right, which a UITEST kernel tells)
   hmp COMMAND      a command to the QEMU monitor, $VOLS standing for where
                    the copies of the --vols images are (drive_add, device_add
                    usb-storage on the hub and device_del plug disks in and out)
+                   and $DISK for the copy of the disk the machine runs on
   # ...            a comment
 
 Exit status: 0 when every step was answered ok and every expect was
@@ -179,12 +193,14 @@ class Driver:
         return "\n".join(out)
 
 
-def wait_for(log, text, tmo):
+def wait_for(log, text, tmo, since=0):
     end = time.time() + tmo
     while time.time() < end:
         try:
-            if text in open(log, encoding="utf-8", errors="replace").read():
-                return True
+            with open(log, "rb") as f:
+                f.seek(since)
+                if text in f.read().decode("utf-8", "replace"):
+                    return True
         except OSError:
             pass
         time.sleep(0.2)
@@ -342,6 +358,10 @@ def main():
             sys.stderr.write("ui_run: no answer from the desktop\n")
             return 2
         print("ui_run: up in %.1f s (%s)" % (time.time() - t0, "kept state" if warm else "started"))
+        last = ""
+        kept = {}
+        host_mark = time.time()
+        log_mark = 0
         for path in a.steps:
             for raw in open(path, encoding="utf-8"):
                 l = raw.strip()
@@ -350,15 +370,59 @@ def main():
                 if l.startswith("shot "):
                     print("shot", shot(mon, a.out, l[5:].strip(), tmp))
                 elif l.startswith("hmp "):
-                    cmd = l[4:].strip().replace("$VOLS", vdir.replace("\\", "/"))
+                    cmd = l[4:].strip().replace("$VOLS", vdir.replace("\\", "/")).replace("$DISK", run_img.replace("\\", "/"))
                     out = mon.cmd(cmd)
                     # the monitor echoes what is typed with its editing codes: the answer is the last line
                     lines = [x.strip() for x in out.replace("(qemu)", "").split("\n")]
                     lines = [x for x in lines if x and "\x1b" not in x]
                     print("hmp %s -> %s" % (cmd, lines[-1] if lines else "ok"))
+                elif l.startswith("expectin "):
+                    secs, text = l[9:].strip().split(" ", 1)
+                    met = wait_for(con, text.strip(), int(secs))
+                    print("expect %s: %s" % (text.strip(), "met" if met else "NOT MET"))
+                    ok = ok and met
+                elif l == "logmark":
+                    log_mark = os.path.getsize(con) if os.path.exists(con) else 0
+                elif l.startswith("expectsincein "):
+                    secs, text = l[14:].strip().split(" ", 1)
+                    met = wait_for(con, text.strip(), int(secs), log_mark)
+                    print("expect %s (since the mark): %s" % (text.strip(), "met" if met else "NOT MET"))
+                    ok = ok and met
+                elif l.startswith("expectsince "):
+                    met = wait_for(con, l[12:].strip(), 20, log_mark)
+                    print("expect %s (since the mark): %s" % (l[12:].strip(), "met" if met else "NOT MET"))
+                    ok = ok and met
+                elif l == "hostmark":
+                    host_mark = time.time()
+                elif l.startswith("hosttime "):
+                    name, lim = l[9:].split()
+                    ms = int((time.time() - host_mark) * 1000)
+                    met = ms <= int(lim)
+                    print("time %s: %d ms (%s %s)" % (name, ms, "within" if met else "OVER", lim))
+                    ok = ok and met
                 elif l.startswith("expect "):
                     met = wait_for(con, l[7:].strip(), 20)
                     print("expect %s: %s" % (l[7:].strip(), "met" if met else "NOT MET"))
+                    ok = ok and met
+                elif l.startswith("keep "):
+                    kept[l[5:].strip()] = last
+                    print("keep %s: %s" % (l[5:].strip(), last))
+                elif l.startswith("same "):
+                    met = kept.get(l[5:].strip()) == last
+                    print("same %s: %s" % (l[5:].strip(), "met" if met else "NOT MET (%s, kept %s)" % (last, kept.get(l[5:].strip()))))
+                    ok = ok and met
+                elif l.startswith("under "):
+                    name, lim = l[6:].split()
+                    try:
+                        ms = int(last.split()[1])
+                    except (IndexError, ValueError):
+                        ms = -1
+                    met = 0 <= ms <= int(lim)
+                    print("time %s: %d ms (%s %s)" % (name, ms, "within" if met else "OVER", lim))
+                    ok = ok and met
+                elif l.startswith("want "):
+                    met = last == l[5:].strip()
+                    print("want %s: %s" % (l[5:].strip(), "met" if met else "NOT MET (%s)" % last))
                     ok = ok and met
                 elif l.startswith("absent "):
                     said = [x for x in open(con, encoding="utf-8", errors="replace").read().splitlines()
@@ -368,7 +432,9 @@ def main():
                         print("    " + x.strip())
                     ok = ok and not said
                 else:
-                    ans = drv.ask(l)
+                    # what may take long: a large object made or read, a wait for the desktop
+                    ans = drv.ask(l, 900 if l.split()[0] in ("mkbig", "sum", "sync", "waitwin") else 30)
+                    last = ans.strip()
                     print("%s -> %s" % (l, ans))
                     ok = ok and ans.startswith("ok")
                     if ans == "err no answer" and os.environ.get("UI_DIAG"):

@@ -24,6 +24,7 @@
  */
 
 #include <tk/typedef.h>
+#include <tk/syscall.h>
 #include <ts/uapp.h>
 #include <ts/sysdef.h>
 
@@ -143,6 +144,20 @@ LOCAL void menu( ID kw, CONST T_OBNTM *m, BOOL *p_date, BOOL *p_done )
 }
 
 /* Drawn and shown; below E_OK when the window is no longer there */
+/*
+ * ms to the next second of the system's time, the clock's reading, a
+ * little past it so that the reading has turned over when it is read
+ */
+LOCAL TMO next_second( void )
+{
+	SYSTIM	t;
+	UD	ms;
+
+	if ( tk_get_tim(&t) < E_OK ) return TICK_MS;
+	ms = ( ( (UD)(UW)t.hi << 32 ) | (UD)(UW)t.lo ) % 1000;
+	return (TMO)( 1000 - ms ) + 5;
+}
+
 LOCAL ER draw( INT gid, ID kw, CONST UB *text )
 {
 	T_DPRECT	all = { 0, 0, 240, 80 };
@@ -205,7 +220,7 @@ int main( void )
 	while ( !done ) {
 		BOOL	again = FALSE;
 
-		while ( ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+		for ( TMO tmo = next_second(); ob_rea_tmo(port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) {
 			if ( m.event == OB_E_CLOSE || m.event == OB_E_DELETE ) {
 				done = TRUE;
 			} else if ( m.event == OB_E_PRESS && m.code == 1 ) {
@@ -229,7 +244,6 @@ int main( void )
 			}
 			memcpy(shown, text, sizeof(shown));
 		}
-		tk_dly_tsk(TICK_MS);
 	}
 
 	tm_putstring((CONST UB *)"clock: closed\n");

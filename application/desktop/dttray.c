@@ -34,7 +34,6 @@
 #include <ts/uuid.h>
 #include "desktop.h"
 
-#define FRAG_MAX	( 4 * 1024 * 1024 )	/* bytes of one fragment */
 
 EXPORT T_TAD *dt_frag_new( CONST char *body )
 {
@@ -97,7 +96,7 @@ LOCAL UB *hand_bytes( SZ *p_size )
 		if ( tr_ref_rec(TR_HAND, i, &inf) < E_OK ) {
 			return NULL;
 		}
-		if ( inf.kind == TR_TAD && inf.size > 0 && inf.size < FRAG_MAX ) {
+		if ( inf.kind == TR_TAD && inf.size > 0 ) {
 			break;
 		}
 	}

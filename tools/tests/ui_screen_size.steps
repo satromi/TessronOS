@@ -1,0 +1,64 @@
+# システム環境設定's 画面サイズ while the desktop runs (design 10.2.2), for tools/ui_run.py and
+# tools/x64/ui_run64.py (a screen of 1280x800 whose size can be changed: QEMU's bochs-display, or
+# the x64 PC's standard VGA). The window is at 160,80: the device list's first line 画面サイズ／色数
+# at 206,181 and 表示 at 706,184; on the screen's page the sizes' lines from 215, 17 apart
+# (1024x768 at 300,249, 1280x800 at 300,283), the width at 590,284 and 設定 at 706,554. The
+# desktop's question (確認, 30 seconds) is answered with Enter to keep the size and Esc to put
+# the one before back.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+wait 800
+win システム環境設定
+click 206 181
+wait 300
+click 706 184
+expect sysenv: screen page 1280x800
+wait 500
+click 300 249
+expect sysenv: screen size chosen 1024x768
+wait 300
+click 706 554
+expect wm: screen 1280 x 800 -> 1024 x 768
+wait 1500
+key 28
+expect the screen of 1024x768
+expect sysenv: screen 1024x768 : 0
+expect sysenv: screen page 1024x768
+wait 800
+shot ss_1024
+click 590 284
+key 2a
+key 2a
+key 2a
+key 2a
+text 1000
+wait 300
+click 706 554
+expect wm: screen 1024 x 768 -> 1000 x 768
+wait 1500
+key 28
+expect the screen of 1000x768
+expect sysenv: screen page 1000x768
+wait 800
+shot ss_1000
+click 300 283
+expect sysenv: screen size chosen 1280x800
+click 706 554
+expect wm: screen 1000 x 768 -> 1280 x 800
+wait 1500
+shot ss_ask2
+key 29
+expect put back to 1000 x 768
+expect sysenv: screen page 1000x768
+wait 800
+shot ss_back
+click 300 283
+click 706 554
+expect wm: screen 1000 x 768 -> 1280 x 800
+wait 1500
+key 28
+expect the screen of 1280x800
+wait 800
+shot ss_end
+key 08 01
+absent !OACV!

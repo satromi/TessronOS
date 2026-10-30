@@ -97,9 +97,20 @@ IMPORT INT pd_tb_at( CONST T_WMPART *pt, CONST T_DPRECT *r, INT x );
 IMPORT INT pd_tag_at( T_WMPART *pt, CONST UB *pool, INT x, INT y, T_DPRECT *p_tab );
 IMPORT INT pd_tag_show( T_WMPART *pt, CONST UB *pool, INT num );
 IMPORT void pd_tag_turn( INT gid, CONST T_DPRECT *tab );	/* a tag held: turned over */
+/* The sheet the parts of the tag shown stand on, in the panel's coordinates */
+IMPORT void pd_tag_sheet( T_WMPART *pt, CONST UB *pool, T_DPRECT *out );
 
 /* The candidates of a conversion, listed under the box they belong to */
 IMPORT void pd_cands( INT gid, CONST T_DPRECT *r, T_PDCONV *cv, INT h );
+
+/*
+ * A list of candidates in a window of its own (OB_WR_CAND): its size
+ * for n names (each ending in a nought), drawn filling the window, and
+ * the name (0 up) a place in it is on, -1 none
+ */
+IMPORT void pd_cand_size( CONST UB *names, INT n, INT total, INT *p_w, INT *p_h );
+IMPORT void pd_cand_draw( INT gid, INT w, INT h, CONST UB *names, INT n, INT chosen, INT first, INT total );
+IMPORT INT  pd_cand_row( INT y, INT n );
 IMPORT INT  pd_cand_at( CONST T_PDCONV *cv, INT x, INT y );
 
 #endif /* __PDRAW_H__ */

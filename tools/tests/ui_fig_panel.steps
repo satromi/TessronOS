@@ -1,6 +1,7 @@
 # 基本図形編集の道具パネル: a subordinate window of the figure's (design 10.4, 11.3),
 # for tools/ui_run.py. The figure (画用紙, 100,100 to 900,700) is opened: its 道具パネル
-# stands below it (100,704), and the two are the nearest windows, the panel in front.
+# stands whole at the top of the screen (100,0), there being no room under or over it, and
+# the two are the nearest windows, the panel in front.
 # システム環境設定 opened (160,80 to 772,584) comes in front: the panel is out of sight;
 # it is pressed later on its band (700,90), the part of it the figure does not cover.
 # The figure pressed where nothing covers it (850,650): it comes forward with the panel

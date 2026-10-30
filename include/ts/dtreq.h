@@ -69,6 +69,30 @@ extern "C" {
 #define DT_HOW_UPDATED	2		/* one it had, now the package's */
 
 /*
+ * The system updated from its package (.tpk with "kind": "system",
+ * design 11.8), dropped on the バージョン sheet; target is the package
+ * object, recno the step:
+ *   DT_SYSUP_CHECK  what the package is: E_OK when it is a newer
+ *                   version for this machine, E_LIMIT when it is the
+ *                   same version or an older one, E_NOSPT when it is
+ *                   for another machine or processor, E_OBJ when it is
+ *                   not a system package. text says the package's
+ *                   version, a tab, and the system's version now; with
+ *                   E_NOSPT, the machine the package is for.
+ *   DT_SYSUP_BEGIN  the update begun (flags 1: even when it is not
+ *                   newer); only an administrator, as DT_RQ_INSTALL.
+ *                   how is the steps there are, nothing done yet.
+ *   DT_SYSUP_STEP   the next steps done, as many as take a moment: how
+ *                   is the steps done, flags the steps there are. When
+ *                   they are all done the update is over and the system
+ *                   asks for a restart. Only the process that began it.
+ */
+#define DT_RQ_SYSUP	35
+#define DT_SYSUP_CHECK	0
+#define DT_SYSUP_BEGIN	1
+#define DT_SYSUP_STEP	2
+
+/*
  * The answer to DT_RQ_CARRY says in how whether the second button went
  * down while the outline was carried (複写ドラッグ): the program leaves
  * its own link where it is, as for a copy, rather than taking it away
@@ -244,8 +268,95 @@ extern "C" {
 #define DT_F_FONT_DONE	0x0100
 #define DT_FONT_RES	"_0_font.json"
 
+/*
+ * 画面サイズ (システム環境設定): the screen set now, while the desktop
+ * runs, to the size text says, "WIDTHxHEIGHT", and after it "aspect" or
+ * "stretch" for how a size of another shape than the panel is laid on
+ * it, where the screen chooses that (a PC's panel). The desktop draws
+ * everything again at the new size and asks, in a panel over its own
+ * window, whether it shows right: Enter or 確認 within thirty seconds
+ * keeps it, and the machine's settings take it for the next start
+ * (VIDEOMODE, VIDEOFIT); anything else, or nothing, puts back what
+ * there was. The answer is E_OK when it was kept, E_ABORT when it was
+ * put back, E_NOSPT when the screen cannot be set so, E_PAR when text
+ * is not a size.
+ */
+#define DT_RQ_SCREEN	30
+
+/*
+ * 実時間制御TAD played in the asking program's window (design 15.5.1):
+ * the scenes of such a record are documents and figures, which only the
+ * desktop draws, so a program that plays media hands the record to it.
+ * The desktop lays the scene out in the top left of win's work area,
+ * look.w by look.h, and plays it there as it plays a slide, starting the
+ * processes that sound and decode for it. win must be a window the asking
+ * process made, and only that process asks about the player afterwards.
+ *   DT_RQ_RT_OPEN	target's record recno (-1 the first) played, the
+ *			ground round it look.bgcol (0xFFFFFFFF black). E_OBJ
+ *			when the record has no <realtime>; the answer's how
+ *			is the number the others name the player by
+ *   DT_RQ_RT_DO	what recno says (DT_RT_*) done to player carry
+ *   DT_RQ_RT_CLOSE	player carry stopped, its processes ended; it also
+ *			goes by itself when win goes
+ * The answers to DT_RQ_RT_OPEN and DT_RQ_RT_DO say how the program goes:
+ * flags the DT_RTS_* bits, look.w its time in ms, look.h the media of its
+ * playlist, text the title and the artist of the one playing. E_NOEXS:
+ * there is no such player (any more).
+ */
+#define DT_RQ_RT_OPEN	31
+#define DT_RQ_RT_DO	32
+#define DT_RQ_RT_CLOSE	33
+
+#define DT_RT_STATE	0		/* nothing done: only how it goes */
+#define DT_RT_TOGGLE	1		/* 再生 / 一時停止; one waiting to be begun begins */
+#define DT_RT_STOP	2		/* back to the start, and held there */
+#define DT_RT_RESTART	3		/* 先頭から */
+#define DT_RT_SEEK	4		/* grab_x ms forward, back when less than 0 */
+#define DT_RT_TRACK	5		/* the medium of the playlist grab_x after (before) the one playing */
+#define DT_RT_AREA	6		/* the scene laid out again in look.w by look.h */
+#define DT_RT_REDRAW	7		/* the scene drawn again */
+#define DT_RT_GROUND	8		/* 背景色変更: chosen in a panel over win */
+#define DT_RT_LIST	9		/* プレイリスト表示: a panel over win, the medium chosen played */
+#define DT_RT_PRESS	10		/* the first button down at grab_x, grab_y of the work area */
+#define DT_RT_RELEASE	11		/* and up there */
+#define DT_RT_KEY	12		/* key grab_x (a HID usage) down, grab_y DT_RT_KEY_* */
+#define DT_RT_MOVE	13		/* the pointer at grab_x, grab_y of the work area (outside it: left the scene) */
+#define DT_RT_KEY_UP	0x0001		/* up, not down */
+#define DT_RT_KEY_MINE	0x0002		/* the program's own key: given only when the program takes it */
+
+#define DT_RTS_PLAYING	0x0001
+#define DT_RTS_PAUSED	0x0002
+#define DT_RTS_WAITING	0x0004		/* it waits to be begun (autoplay="false") */
+#define DT_RTS_DONE	0x0008		/* it has run to its end */
+#define DT_RTS_TAKEN	0x0010		/* DT_RT_PRESS, DT_RT_RELEASE, DT_RT_KEY: a trigger or a wait of it took it */
+
 #define DT_F_HIDDEN	0x0002		/* the link is hidden (隠蔽仮身) */
 #define DT_F_KEEP	0x0004		/* the link keeps to its program (起動アプリの固定) */
+
+/*
+ * DT_RQ_OPEN and the requests about a link with DT_F_APPLIST in flags:
+ * text holds the applist the link carries (the JSON of its applist
+ * attribute, UTF-8, ending in 0). The desktop decides the program from
+ * it as for a link of its own windows: the one the link keeps to when
+ * its default entry says "defaultOpenLock": true, else the one the
+ * object's applist marks. DT_RQ_EXEC with it records the program run
+ * unless the link keeps to its own, and DT_F_KEEP is not looked at.
+ */
+#define DT_F_APPLIST	0x0200
+
+/*
+ * 実行's list for a link in a program's window, the one the desktop's
+ * own links show (dt_app_list): the programs of the object's applist (of
+ * the applist the link carries, given with DT_F_APPLIST, when the object
+ * has none), then those that open an object of its kind. DT_RQ_APPS asks
+ * for the entry at recno (0 up) of target's list: the answer's how is
+ * how many there are, text the entry's program id, a tab and its name
+ * (UTF-8), and flags DT_F_KIND for one offered for the object's kind;
+ * E_NOEXS past the last. DT_RQ_EXEC with DT_F_KIND opens the object with
+ * such a one and leaves the program it opens with as it is.
+ */
+#define DT_RQ_APPS	34
+#define DT_F_KIND	0x0400
 
 /*
  * DT_RQ_CARRY with DT_F_TEXT in flags: what is carried is letters, the

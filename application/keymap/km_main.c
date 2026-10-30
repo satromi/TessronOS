@@ -22,16 +22,19 @@
  *	picture holds for the next key only. The keys held on the keyboard
  *	are lit, as the window is told every key (OB_N_KEYSEEN).
  *
- *	Above the keyboard the latin layout, the kana layout, the shape of
- *	the keyboard and what the keys are written with are chosen by
- *	buttons, each turning to the next; the menu of the second button
- *	chooses them by name, a mark on those in use. 付け替え gives a key
- *	another key's number: the key pressed on the picture first, then the
- *	one it is to be (the same key again gives it back its own); the keys
- *	given others are listed under the keyboard, each with a mark that
- *	gives it back. The layouts and the keys given others are the
+ *	Above the keyboard a panel of the data box (SYSDEF_BOX_KEYMAP, panel
+ *	1) chooses the latin layout, the kana layout, the shape of the
+ *	keyboard and what the keys are written with, each a pop-up, and
+ *	turns 付け替え on and off; the menu of the second button chooses them
+ *	by name as well, a mark on those in use. 付け替え gives a key another
+ *	key's number: the key pressed on the picture first, then the one it
+ *	is to be (the same key again gives it back its own). The keys given
+ *	others are listed under the keyboard in a panel of their own (panel
+ *	2), the one chosen there given back with 〈元に戻す〉, all of them
+ *	with 〈すべて元に戻す〉. The layouts and the keys given others are the
  *	machine's settings, read and set with km_get and km_set; the shape
  *	and what the keys are written with last while the window is open.
+ *	Only the keyboard is drawn here: the panels are the window manager's.
  *
  *	What is done is said on the console ("keymap: ..."), which the tests
  *	read. Started with "selftest", the program checks the calls it is
@@ -198,27 +201,22 @@ static CONST KBPLACE	kb_tron[] = {
 #define KB_M		8		/* the margin */
 #define KB_TOP		66		/* where the keyboard starts */
 #define KB_RH		40		/* a row's height */
-#define KB_LIST		( KB_TOP + 5 * KB_RH + 14 )	/* the keys given others */
-#define KB_LH		20		/* a line of the list */
+#define KB_LIST		( KB_TOP + 5 * KB_RH + 8 )	/* where the panel of the keys given others is */
 #define KB_W		( KB_M * 2 + 60 * KB_Q )
-#define KB_LCOL		3		/* the list's columns */
-#define KB_LW		( 60 * KB_Q / KB_LCOL )
-#define KB_H		( KB_LIST + ( KM_MAP_MAX / KB_LCOL ) * KB_LH + KB_M + 4 )
+#define KB_LIST_H	126		/* that panel's height (panel 2 of the data box) */
+#define KB_H		( KB_LIST + KB_LIST_H )
 
-#define KB_B_LATIN	0		/* the buttons above the keyboard */
-#define KB_B_KANA	1
-#define KB_B_SHAPE	2
-#define KB_B_VIEW	3
-#define KB_B_PICK	4
-#define KB_NB		5
-
-static CONST T_DPRECT	kb_btn[KB_NB] = {
-	{ KB_M, 8, KB_M + 170, 34 },
-	{ KB_M + 176, 8, KB_M + 326, 34 },
-	{ KB_M + 332, 8, KB_M + 422, 34 },
-	{ KB_M + 428, 8, KB_M + 508, 34 },
-	{ KB_M + 514, 8, KB_M + 600, 34 },
-};
+/* the parts of the panels (SYSDEF_BOX_KEYMAP) */
+#define P_LATIN		11		/* panel 1: pop-ups, 1 up in the order of KM_LATIN_*, ... */
+#define P_KANA		12
+#define P_SHAPE		13
+#define P_VIEW		14
+#define P_PICK		15		/* a switch */
+#define P_SAID		1		/* the line beside them */
+#define P_LHEAD		1		/* panel 2: the words over the list */
+#define P_LIST		21
+#define P_BACK		22		/* 〈元に戻す〉 */
+#define P_RESET		23		/* 〈すべて元に戻す〉 */
 
 #define C_GROUND	0x00E8E8E8U
 #define C_KEY		0x00FFFFFFU
@@ -237,6 +235,8 @@ static CONST T_DPRECT	kb_btn[KB_NB] = {
 
 static TS_UUID		g_ch, g_win;
 static ID		g_port = 0, g_kw = 0;
+static UI		g_top, g_bot;		/* the panels along the top and under the keyboard */
+static BOOL		g_panels = FALSE;
 static INT		g_gid = -1;
 static BOOL		g_closing = FALSE;
 static BOOL		g_dirty = TRUE;
@@ -459,68 +459,99 @@ static void draw_key( CONST KBKEY *k, CONST T_DPRECT *r, void *arg )
 	centre(r, s, ( k->code == 0 ) ? C_DIM : C_TEXT, px, 0);
 }
 
-static CONST char *latin_name( void )
+/*
+ * What the panels show, as last written to them. A part is written only
+ * when what it is to show differs from this: the keyboard is drawn again
+ * on every key seen, and a value written then would put back one the
+ * person has just set on the part, before the program has read its
+ * event. panels_resync forgets it, so that the next writes everything
+ * again (after a panel's event, a value the program did not take is put
+ * back to the state).
+ */
+#define P_NTOP		5
+static CONST INT	s_top_num[P_NTOP] = { P_LATIN, P_KANA, P_SHAPE, P_VIEW, P_PICK };
+static INT		s_top_shown[P_NTOP];
+static CONST char	*s_said_shown;
+static INT		s_nmap_shown;
+static UB		s_from_shown[KM_MAP_MAX], s_to_shown[KM_MAP_MAX];
+static INT		s_back_shown, s_reset_shown;
+
+static void panels_resync( void )
 {
-	return ( g_st.latin == KM_LATIN_DVORAK ) ? "英字: Dvorak" : "英字: キーの刻印どおり";
+	INT	i;
+
+	for ( i = 0; i < P_NTOP; i++ ) s_top_shown[i] = -1;
+	s_said_shown = "";
+	s_nmap_shown = -1;
+	s_back_shown = s_reset_shown = -1;
 }
 
-static CONST char *kana_name( void )
+/* What the panels show, made to agree with the state */
+static void panels_show( void )
 {
-	switch ( g_st.kana ) {
-	case KM_KANA_TRON:	return "かな: TRONかな配列";
-	case KM_KANA_NICOLA:	return "かな: 親指シフト";
-	default:		return "かな: JISかな";
+	static char	line[KM_MAP_MAX][72];
+	CONST char	*names[KM_MAP_MAX];
+	INT		want[P_NTOP];
+	INT		i, sel, off;
+
+	if ( !g_panels ) return;
+	want[0] = g_st.latin + 1;
+	want[1] = g_st.kana + 1;
+	want[2] = shape() + 1;
+	want[3] = g_kana_view ? 2 : 1;
+	want[4] = ( g_pick != 0 ) ? 1 : 0;
+	for ( i = 0; i < P_NTOP; i++ ) {
+		if ( want[i] != s_top_shown[i] ) {
+			ui_set_value(&g_top, s_top_num[i], want[i]);
+			s_top_shown[i] = want[i];
+		}
+	}
+	if ( g_said != s_said_shown ) {
+		ui_set_text(&g_top, P_SAID, ( g_said != NULL ) ? g_said : " ");
+		s_said_shown = g_said;
+	}
+	if ( g_st.nmap != s_nmap_shown || memcmp(g_st.from, s_from_shown, (size_t)g_st.nmap) != 0
+	  || memcmp(g_st.to, s_to_shown, (size_t)g_st.nmap) != 0 ) {
+		for ( i = 0; i < g_st.nmap; i++ ) {
+			char	a[32], b[32];
+
+			if ( km_label(KM_L_NAME, g_st.from[i], 0, a, sizeof(a)) <= 0 ) a[0] = 0;
+			if ( km_label(KM_L_NAME, g_st.to[i], 0, b, sizeof(b)) <= 0 ) b[0] = 0;
+			snprintf(line[i], sizeof(line[i]), "%s → %s", a, b);
+			names[i] = line[i];
+		}
+		ui_names(&g_bot, P_LIST, names, g_st.nmap);
+		ui_set_text(&g_bot, P_LHEAD, ( g_st.nmap == 0 ) ? "付け替えたキーはありません" : "付け替えたキー");
+		s_nmap_shown = g_st.nmap;
+		memcpy(s_from_shown, g_st.from, (size_t)g_st.nmap);
+		memcpy(s_to_shown, g_st.to, (size_t)g_st.nmap);
+	}
+	sel = ui_value(&g_bot, P_LIST);
+	off = ( sel < 1 || sel > g_st.nmap ) ? 1 : 0;
+	if ( off != s_back_shown ) {
+		ui_off(&g_bot, P_BACK, (BOOL)off);
+		s_back_shown = off;
+	}
+	off = ( g_st.nmap == 0 ) ? 1 : 0;
+	if ( off != s_reset_shown ) {
+		ui_off(&g_bot, P_RESET, (BOOL)off);
+		s_reset_shown = off;
 	}
 }
 
 static void paint( void )
 {
 	T_DPRECT	all;
-	CONST char	*lb[KB_NB];
-	INT		i;
 
 	if ( g_gid < 0 ) return;
 	all.left = 0;
-	all.top = 0;
+	all.top = KB_TOP;
 	all.right = KB_W;
-	all.bottom = KB_H;
+	all.bottom = KB_LIST;
 	fill(&all, C_GROUND);
-
-	lb[KB_B_LATIN] = latin_name();
-	lb[KB_B_KANA] = kana_name();
-	lb[KB_B_SHAPE] = ( shape() == KB_SHAPE_TRON ) ? "形: TRON" : ( shape() == KB_SHAPE_US ) ? "形: 英語" : "形: 日本語";
-	lb[KB_B_VIEW] = g_kana_view ? "表示: かな" : "表示: 英字";
-	lb[KB_B_PICK] = ( g_pick != 0 ) ? "付け替えをやめる" : "付け替え";
-	for ( i = 0; i < KB_NB; i++ ) {
-		fill(&kb_btn[i], ( i == KB_B_PICK && g_pick != 0 ) ? C_PICK : C_KEY);
-		frame(&kb_btn[i], C_EDGE);
-		centre(&kb_btn[i], lb[i], C_TEXT, 13, 0);
-	}
-	if ( g_said != NULL ) {
-		text(KB_M, 56, g_said, C_NOTE, 13);
-	}
-
 	kb_each(draw_key, NULL);
-
-	text(KB_M, KB_LIST - 2, ( g_st.nmap == 0 ) ? "付け替えたキーはありません"
-						   : "付け替えたキー(× で元に戻す)", C_DIM, 12);
-	for ( i = 0; i < g_st.nmap; i++ ) {
-		INT		x = KB_M + ( i % KB_LCOL ) * KB_LW, y = KB_LIST + 4 + ( i / KB_LCOL ) * KB_LH;
-		char		a[32], b[32], line[72];
-		T_DPRECT	xr;
-
-		if ( km_label(KM_L_NAME, g_st.from[i], 0, a, sizeof(a)) <= 0 ) a[0] = 0;
-		if ( km_label(KM_L_NAME, g_st.to[i], 0, b, sizeof(b)) <= 0 ) b[0] = 0;
-		snprintf(line, sizeof(line), "%s → %s", a, b);
-		xr.left = x;
-		xr.top = y;
-		xr.right = x + 18;
-		xr.bottom = y + 18;
-		frame(&xr, C_EDGE);
-		centre(&xr, "×", C_TEXT, 12, 0);
-		text(x + 24, y + 14, line, C_TEXT, 13);
-	}
 	(void)wm_obj_flush(g_kw, NULL);
+	panels_show();
 	g_dirty = FALSE;
 }
 
@@ -559,6 +590,7 @@ static void refused( ER er )
 	snprintf(s, sizeof(s), ( er == E_OACV ) ? "キー配列を変える権限がありません"
 						 : "キー配列を変えられません(エラー %d)", (INT)er);
 	g_said = s;
+	panels_resync();			/* the same line with other words; the parts back to the state */
 	say("refused %d", (INT)er);
 }
 
@@ -692,32 +724,9 @@ static void type_key( UINT code )
 
 static void press( INT x, INT y )
 {
-	INT	i;
 	UINT	code;
 
-	for ( i = 0; i < KB_NB; i++ ) {
-		CONST T_DPRECT	*r = &kb_btn[i];
-
-		if ( x < r->left || x >= r->right || y < r->top || y >= r->bottom ) continue;
-		switch ( i ) {
-		case KB_B_LATIN:	set_latin(( g_st.latin + 1 ) % KM_LATIN_N);	break;
-		case KB_B_KANA:		set_kana(( g_st.kana + 1 ) % KM_KANA_N);	break;
-		case KB_B_VIEW:		set_view((BOOL)!g_kana_view);			break;
-		case KB_B_SHAPE:	set_shape(( shape() + 1 ) % KB_NSHAPE);		break;
-		case KB_B_PICK:		set_pick((BOOL)( g_pick == 0 ));		break;
-		default:		break;
-		}
-		g_dirty = TRUE;
-		return;
-	}
-	if ( y >= KB_LIST ) {
-		i = ( ( y - KB_LIST - 4 ) / KB_LH ) * KB_LCOL + ( ( x - KB_M ) / KB_LW );
-		if ( x >= KB_M && i >= 0 && i < g_st.nmap && ( x - KB_M ) % KB_LW < 18 ) {
-			(void)map_change(g_st.from[i], g_st.from[i]);	/* × : its own number back */
-			g_dirty = TRUE;
-		}
-		return;
-	}
+	if ( y < KB_TOP || y >= KB_LIST ) return;	/* the panels' */
 	code = key_at(x, y);
 	if ( code == 0 ) return;
 	if ( g_pick == 1 ) {
@@ -811,8 +820,42 @@ static void menu( CONST T_OBNTM *m )
 
 /* ---------------------------------------------------------------- the window */
 
+/* What was done on the panels */
+static void panel_event( UI *u, CONST T_OBNTM *m )
+{
+	INT	num, v, k;
+
+	if ( ui_event(u, m, &num) == UI_EV_NONE ) return;
+	v = ui_value(u, num);
+	if ( u == &g_top ) {
+		switch ( num ) {
+		case P_LATIN:	if ( v >= 1 && v - 1 != g_st.latin ) set_latin(v - 1);	break;
+		case P_KANA:	if ( v >= 1 && v - 1 != g_st.kana ) set_kana(v - 1);	break;
+		case P_SHAPE:	if ( v >= 1 && v - 1 != shape() ) set_shape(v - 1);	break;
+		case P_VIEW:	if ( v >= 1 ) set_view((BOOL)( v == 2 ));		break;
+		case P_PICK:	set_pick((BOOL)( v != 0 ));				break;
+		default:	break;
+		}
+	} else if ( num == P_BACK ) {
+		k = ui_value(u, P_LIST) - 1;
+		if ( k >= 0 && k < g_st.nmap ) (void)map_change(g_st.from[k], g_st.from[k]);
+	} else if ( num == P_RESET ) {
+		map_reset();
+	}
+	panels_resync();
+	g_dirty = TRUE;
+}
+
 static void event( CONST T_OBNTM *m )
 {
+	if ( g_panels && same_uuid(&m->uuid, &g_top.pnl) ) {
+		panel_event(&g_top, m);
+		return;
+	}
+	if ( g_panels && same_uuid(&m->uuid, &g_bot.pnl) ) {
+		panel_event(&g_bot, m);
+		return;
+	}
 	if ( !same_uuid(&m->uuid, &g_win) ) return;
 	switch ( m->event ) {
 	case OB_E_CLOSE:
@@ -829,7 +872,7 @@ static void event( CONST T_OBNTM *m )
 	case OB_E_KEY:
 		if ( ( m->mods & OB_KEY_SEEN ) != 0 ) {
 			seen(m);
-		} else if ( ( m->mods & OB_KEY_UP ) == 0 && ( m->mods & M_CTRL ) != 0 && m->code == 0x08 ) {
+		} else if ( ( m->mods & OB_KEY_UP ) == 0 && ( m->mods & M_CTRL ) != 0 && wm_key_cmd(m->code) == 0x08 ) {
 			g_closing = TRUE;			/* Ctrl+E, if ever the keys come here */
 		}
 		break;
@@ -989,7 +1032,7 @@ int main( void )
 	T_OBNTM	m;
 	SZ	asz = 0;
 	char	arg[16];
-	INT	since = 0;
+	UD	look_at;
 
 	memset(arg, 0, sizeof(arg));
 	if ( ts_get_arg(arg, sizeof(arg) - 1) >= 8 && memcmp(arg, "selftest", 8) == 0 ) return selftest();
@@ -1004,19 +1047,35 @@ int main( void )
 		port_close();
 		return 3;
 	}
+	if ( ui_strip(&g_top, SYSDEF_BOX_KEYMAP, 1, g_kw, g_port, 0, 0) >= E_OK ) {
+		if ( ui_strip(&g_bot, SYSDEF_BOX_KEYMAP, 2, g_kw, g_port, 0, KB_LIST) >= E_OK ) {
+			g_panels = TRUE;
+		} else {
+			ui_strip_close(&g_top);
+		}
+	}
+	if ( !g_panels ) say("no panels");
+	panels_resync();
 	paint();
 	say("ready latin %d kana %d map %d", g_st.latin, g_st.kana, g_st.nmap);
 
+	look_at = ui_now() + LOOK_MS;
 	while ( !g_closing ) {
-		while ( !g_closing && ob_rea_rec(g_port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) event(&m);
+		for ( TMO tmo = ui_left(look_at);
+		      !g_closing && ob_rea_tmo(g_port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) {
+			event(&m);
+		}
 		if ( g_closing ) break;
-		since += TICK_MS;
-		if ( since >= LOOK_MS ) {
-			since = 0;
+		if ( ui_now() >= look_at ) {
+			look_at = ui_now() + LOOK_MS;
 			state_read();			/* changed elsewhere: システム環境設定, another of these */
 		}
 		if ( g_dirty ) paint();
-		(void)tk_dly_tsk(TICK_MS);
+	}
+	if ( g_panels ) {
+		ui_strip_close(&g_bot);
+		ui_strip_close(&g_top);
+		g_panels = FALSE;
 	}
 	win_close();
 	port_close();

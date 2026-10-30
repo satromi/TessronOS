@@ -37,6 +37,7 @@ SYSCALL ER tk_sus_tsk( ID tskid )
 	tcb = get_tcb(tskid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 	state = (TSTAT)tcb->state;
 	if ( state != TS_NONEXIST && knl_not_owner(tcb->owner) ) {
 		ercd = E_ID;
@@ -68,6 +69,7 @@ SYSCALL ER tk_sus_tsk( ID tskid )
 	}
 
     error_exit:
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -89,6 +91,7 @@ SYSCALL ER tk_rsm_tsk( ID tskid )
 	tcb = get_tcb(tskid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 	if ( tcb->state != TS_NONEXIST && knl_not_owner(tcb->owner) ) {
 		ercd = E_ID;
 		goto error_exit;
@@ -120,6 +123,7 @@ SYSCALL ER tk_rsm_tsk( ID tskid )
 		break;
 	}
     error_exit:
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -141,6 +145,7 @@ SYSCALL ER tk_frsm_tsk( ID tskid )
 	tcb = get_tcb(tskid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 	if ( tcb->state != TS_NONEXIST && knl_not_owner(tcb->owner) ) {
 		ercd = E_ID;
 		goto error_exit;
@@ -170,6 +175,7 @@ SYSCALL ER tk_frsm_tsk( ID tskid )
 		break;
 	}
     error_exit:
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -181,7 +187,7 @@ SYSCALL ER tk_frsm_tsk( ID tskid )
 /*
  * Definition of task wait specification
  */
-LOCAL CONST WSPEC knl_wspec_slp = { TTW_SLP, NULL, NULL };
+LOCAL CONST WSPEC knl_wspec_slp = { TTW_SLP, NULL, NULL WSPEC_LOCK(NULL) };
 
 #ifdef USE_FUNC_TK_SLP_TSK
 /*
@@ -195,6 +201,7 @@ SYSCALL_U ER tk_slp_tsk_u( TMO_U tmout )
 	CHECK_DISPATCH();
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 
 	if ( knl_ctxtsk->wupcnt > 0 ) {
 		knl_ctxtsk->wupcnt--;
@@ -209,6 +216,7 @@ SYSCALL_U ER tk_slp_tsk_u( TMO_U tmout )
 		}
 	}
 
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -240,6 +248,7 @@ SYSCALL ER tk_wup_tsk( ID tskid )
 	tcb = get_tcb(tskid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 	state = (TSTAT)tcb->state;
 	if ( state != TS_NONEXIST && knl_not_owner(tcb->owner) ) {
 		ercd = E_ID;
@@ -255,6 +264,7 @@ SYSCALL ER tk_wup_tsk( ID tskid )
 	} else {
 		++tcb->wupcnt;
 	}
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -275,6 +285,7 @@ SYSCALL INT tk_can_wup( ID tskid )
 	tcb = get_tcb_self(tskid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 	if ( tcb->state != TS_NONEXIST && knl_not_owner(tcb->owner) ) {
 		ercd = E_ID;
 		goto error_exit;
@@ -292,6 +303,7 @@ SYSCALL INT tk_can_wup( ID tskid )
 		tcb->wupcnt = 0;
 	}
     error_exit:
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -302,7 +314,7 @@ SYSCALL INT tk_can_wup( ID tskid )
 /*
  * Definition of task delay wait specification
  */
-LOCAL CONST WSPEC knl_wspec_dly = { TTW_DLY, NULL, NULL };
+LOCAL CONST WSPEC knl_wspec_dly = { TTW_DLY, NULL, NULL WSPEC_LOCK(NULL) };
 
 /*
  * Task delay
@@ -317,11 +329,13 @@ SYSCALL_U ER tk_dly_tsk_u( RELTIM_U dlytim )
 
 	if ( dlytim > 0 ) {
 		BEGIN_CRITICAL_SECTION;
+		KLK_SCHED();
 		knl_ctxtsk->wspec = &knl_wspec_dly;
 		knl_ctxtsk->wid = 0;
 		knl_ctxtsk->wercd = &ercd;
 		knl_make_wait_reltim_u(dlytim, TA_NULL);
 		QueInit(&knl_ctxtsk->tskque);
+		KLK_UNSCHED();
 		END_CRITICAL_SECTION;
 	}
 

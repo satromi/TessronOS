@@ -53,11 +53,10 @@
 #define CNF_MAX_ALMID		8	/* Alarm handler */
 
 /* Device configuration */
-#define CNF_MAX_DISK		(160)	/* TessronOS: disks at once (128 USB disks, the SD card, the machine's own) */
 #define CNF_MAX_VOL		(4096)	/* TessronOS: volumes mounted or attached at once; an entry is made only when one is */
-#define CNF_MAX_REGDEV		(192)	/* Max registered device (each disk is one, its partitions are its subunits) */
-#define CNF_MAX_OPNDEV		(4096)	/* Max open device (each mounted volume and each attached TSFS volume holds its partition open, a key on a disk's blocks one more; sound channels, serial ports, the network) */
-#define CNF_MAX_REQDEV		(256)	/* Max request device (a request at a time of each task reading or writing a device) */
+#define CNF_MAX_REGDEV		(192)	/* Registered devices the table starts with; it doubles when full (each disk is one, its partitions are its subunits) */
+#define CNF_MAX_OPNDEV		(4096)	/* Open devices the table starts with; it doubles when full (each mounted volume and each attached TSFS volume holds its partition open, a key on a disk's blocks one more; sound channels, serial ports, the network) */
+#define CNF_MAX_REQDEV		(256)	/* Device requests the table starts with; it doubles when full (a request at a time of each task reading or writing a device) */
 #define CNF_DEVT_MBFSZ0		(-1)	/* message buffer size for event notification */
 #define CNF_DEVT_MBFSZ1		(-1)	/* message max size for event notification */
 
@@ -109,6 +108,13 @@
 #ifdef CNF_OB_SYSVOL
 #elif defined(_QEMU_VIRT_)
 #define CNF_OB_SYSVOL		"vblka2"
+#elif defined(_X64_)
+/* the PC's: the TessronOS partition of the disk the loader came from, found at start
+   (kernel/sysdepend/x64/bootdisk.c); "" when there is none */
+#if !defined(__ASSEMBLER__) && !defined(_in_asm_source_)
+extern unsigned char	knl_sysvol_name[];
+#endif
+#define CNF_OB_SYSVOL		((const char *)knl_sysvol_name)
 #else
 #define CNF_OB_SYSVOL		"sda1"
 #endif
@@ -123,7 +129,24 @@
 #define CNF_SLICE_MS		(20)	/* TessronOS: the turn of such a task among others of its priority (ms) */
 #define CNF_PRC_PRI		(20)	/* TessronOS: priority of a process whose creator names none */
 #define USE_SMP			(1)	/* TessronOS: start the secondary processors (design 8) */
+#if defined(_X64_)
+/* TessronOS (x64): every logical processor the ACPI MADT lists as enabled, threads included. Only a
+   table of pointers and the sets of processors (bits) are of this size; each processor's data is taken
+   as it is found (design 4.3.2). A multiple of 64 */
+#define CNF_MAX_PRCID		(1024)
+#else
 #define CNF_MAX_PRCID		(4)	/* TessronOS: processors supported (per-CPU data) */
+#endif
+/* TessronOS: how the kernel's data is kept from two processors at once (kernel/knlinc/klk.h, design 4.3.3):
+   0 the big kernel lock, 3 the scheduler's lock and a lock for each object, 1 and 2 the steps between
+   (the tests). make KLOCK=<n> chooses another */
+#ifndef CNF_KLOCK_MODE
+#if defined(_X64_)
+#define CNF_KLOCK_MODE		(3)
+#else
+#define CNF_KLOCK_MODE		(0)
+#endif
+#endif
 #ifndef CNF_RP1_CONSOLE
 #define CNF_RP1_CONSOLE		(0)	/* TessronOS (rpi5): 1 moves the console from the 3 pin debug UART to UART0 of the RP1, on header pins 8 and 10 */
 #endif
@@ -163,6 +186,9 @@
 #endif
 #ifndef CNF_TIMEZONE_NAME
 #define CNF_TIMEZONE_NAME	"Asia/Tokyo"	/* TessronOS: and its IANA name */
+#endif
+#ifndef CNF_RTC_LOCAL
+#define CNF_RTC_LOCAL		(1)	/* TessronOS (x64): the RTC keeps the local time, as Windows keeps it, until the calendar says (0: UTC; 9.5.1) */
 #endif
 
 

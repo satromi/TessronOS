@@ -1,6 +1,0 @@
-<tad version="1.0" encoding="UTF-8" filename="基本動画再生">
-<document>
-<p>基本動画再生</p>
-<p>実時間制御xmlTADの映像・音声・アニメーションをウインドウで再生する。組込みのプログラム(basic-player)</p>
-</document>
-</tad>

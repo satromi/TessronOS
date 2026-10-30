@@ -108,7 +108,8 @@ EXPORT void dt_pn_buttons( T_WMPANEL *p, CONST char *ok )
 
 /*
  * The panel, put in the middle of the window and worked until it is
- * agreed to or abandoned. Enter agrees and Escape abandons. The panel
+ * agreed to or abandoned, or dt_quit ends the session (dt_stopping,
+ * as abandoned). Enter agrees and Escape abandons. The panel
  * is left open, so that what was put in it can be read; pn_done puts
  * it away.
  */
@@ -146,6 +147,10 @@ EXPORT UINT dt_pn_run( DTWIN *d, T_WMPANEL *def, INT *p_pid )
 	wm_update();
 
 	while ( ans == WM_ANS_NONE ) {
+		if ( dt_stopping() ) {
+			ans = WM_ANS_CANCEL;	/* dt_quit ends the session: nobody is left to answer */
+			break;
+		}
 		if ( wm_read_event(&ev, 2000) < E_OK ) {
 			continue;
 		}
@@ -382,6 +387,12 @@ EXPORT void dt_tell( DTWIN *d, CONST char *l1, CONST char *l2 )
 	}
 	(void)dt_pn_run(d, def, &pid);
 	dt_pn_done(d, pid);
+}
+
+/* An edit given up for want of memory, what was there left as it was */
+EXPORT void dt_no_memory( DTWIN *d )
+{
+	dt_tell(d, "メモリが足りないため、この操作をできませんでした", "データは操作の前のままです");
 }
 
 /* ---------------------------------------------------------------- 位置あわせ */

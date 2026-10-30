@@ -45,6 +45,7 @@ EXPORT ER knl_messagebuffer_initialize( void )
 	end = knl_mbfcb_table + NUM_MBFID;
 	for ( mbfcb = knl_mbfcb_table; mbfcb < end; mbfcb++ ) {
 		mbfcb->mbfid = 0;
+		knl_klk_init(&mbfcb->klk);
 		QueInsert(&mbfcb->send_queue, &knl_free_mbfcb);
 	}
 
@@ -169,7 +170,12 @@ SYSCALL ID tk_cre_mbf( CONST T_CMBF *pk_cmbf )
 
 	BEGIN_CRITICAL_SECTION;
 	/* Get control block from FreeQue */
+	KLK_MISC();
 	mbfcb = (MBFCB*)QueRemoveNext(&knl_free_mbfcb);
+	KLK_UNMISC();
+	if ( mbfcb != NULL ) {
+		KLK_LOCK(&mbfcb->klk);
+	}
 	if ( mbfcb == NULL ) {
 		ercd = E_LIMIT;
 	} else {
@@ -194,6 +200,9 @@ SYSCALL ID tk_cre_mbf( CONST T_CMBF *pk_cmbf )
 		}
 #endif
 		ercd = mbfid;
+	}
+	if ( mbfcb != NULL ) {
+		KLK_UNLOCK(&mbfcb->klk);
 	}
 	END_CRITICAL_SECTION;
 
@@ -221,6 +230,7 @@ SYSCALL ER tk_del_mbf( ID mbfid )
 	mbfcb = get_mbfcb(mbfid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mbfcb->klk);
 	if ( mbfcb->mbfid == 0 ) {
 		ercd = E_NOEXS;
 	} else if ( knl_not_owner(mbfcb->owner) ) {
@@ -233,10 +243,13 @@ SYSCALL ER tk_del_mbf( ID mbfid )
 		knl_wait_delete(&mbfcb->send_queue);
 
 		/* Return to FreeQue */
+		KLK_MISC();
 		QueInsert(&mbfcb->send_queue, &knl_free_mbfcb);
+		KLK_UNMISC();
 		knl_own_note(TK_OWN_MBF, mbfcb->owner, -1);
 		mbfcb->mbfid = 0;
 	}
+	KLK_UNLOCK(&mbfcb->klk);
 	END_CRITICAL_SECTION;
 
 #if USE_IMALLOC
@@ -278,8 +291,16 @@ LOCAL void knl_mbf_rel_wai( TCB *tcb )
 /*
  * Definition of message buffer wait specification
  */
-LOCAL CONST WSPEC knl_wspec_smbf_tfifo = { TTW_SMBF, NULL,	knl_mbf_rel_wai };
-LOCAL CONST WSPEC knl_wspec_smbf_tpri  = { TTW_SMBF, knl_mbf_chg_pri,	knl_mbf_rel_wai };
+/* The lock of the wait (design 4.3.3) */
+#if KLK_FINE_OBJ
+LOCAL KLOCK *mbf_wlock( TCB *tcb )
+{
+	return &get_mbfcb(tcb->wid)->klk;
+}
+#endif
+
+LOCAL CONST WSPEC knl_wspec_smbf_tfifo = { TTW_SMBF, NULL,	knl_mbf_rel_wai WSPEC_LOCK(mbf_wlock) };
+LOCAL CONST WSPEC knl_wspec_smbf_tpri  = { TTW_SMBF, knl_mbf_chg_pri,	knl_mbf_rel_wai WSPEC_LOCK(mbf_wlock) };
 
 /*
  * Send to message buffer
@@ -298,6 +319,7 @@ SYSCALL_U ER tk_snd_mbf_u( ID mbfid, CONST void *msg, INT msgsz, TMO_U tmout )
 	mbfcb = get_mbfcb(mbfid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mbfcb->klk);
 	if ( mbfcb->mbfid == 0 ) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -339,6 +361,7 @@ SYSCALL_U ER tk_snd_mbf_u( ID mbfid, CONST void *msg, INT msgsz, TMO_U tmout )
 	}
 
     error_exit:
+	KLK_UNLOCK(&mbfcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;
@@ -354,7 +377,7 @@ SYSCALL ER tk_snd_mbf( ID mbfid, CONST void *msg, INT msgsz, TMO tmout )
 }
 
 
-LOCAL CONST WSPEC knl_wspec_rmbf       = { TTW_RMBF, NULL,	NULL	    };
+LOCAL CONST WSPEC knl_wspec_rmbf       = { TTW_RMBF, NULL,	NULL WSPEC_LOCK(mbf_wlock) };
 
 /*
  * Get a message from message buffer.
@@ -409,6 +432,7 @@ SYSCALL_U INT tk_rcv_mbf_u( ID mbfid, void *msg, TMO_U tmout )
 	mbfcb = get_mbfcb(mbfid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mbfcb->klk);
 	if (mbfcb->mbfid == 0) {
 		ercd = E_NOEXS;
 		goto error_exit;
@@ -447,6 +471,7 @@ SYSCALL_U INT tk_rcv_mbf_u( ID mbfid, void *msg, TMO_U tmout )
 	}
 
     error_exit:
+	KLK_UNLOCK(&mbfcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ( ercd < E_OK )? ercd: rcvsz;
@@ -476,6 +501,7 @@ SYSCALL ER tk_ref_mbf( ID mbfid, T_RMBF *pk_rmbf )
 	mbfcb = get_mbfcb(mbfid);
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_LOCK(&mbfcb->klk);
 	if ( mbfcb->mbfid == 0 ) {
 		ercd = E_NOEXS;
 	} else if ( knl_not_owner(mbfcb->owner) ) {
@@ -497,6 +523,7 @@ SYSCALL ER tk_ref_mbf( ID mbfid, T_RMBF *pk_rmbf )
 		pk_rmbf->frbufsz = mbfcb->frbufsz;
 		pk_rmbf->maxmsz = mbfcb->maxmsz;
 	}
+	KLK_UNLOCK(&mbfcb->klk);
 	END_CRITICAL_SECTION;
 
 	return ercd;

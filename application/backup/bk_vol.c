@@ -28,7 +28,9 @@
 
 /* ---------------------------------------------------------------- writing */
 
-#define WBUF	0x10000		/* write-behind buffer */
+/* write-behind buffer: the volume is written this much at a time, each
+   write of a record made durable when it returns (design 7.3) */
+#define WBUF	( 4 * 1024 * 1024 )
 
 LOCAL ER put_out( BKVOL *v, UD off, CONST UB *buf, INT len )
 {
@@ -103,7 +105,7 @@ EXPORT ER bk_link_at( const TS_UUID *cab, const TS_UUID *u, const char *name, co
 	ER	er;
 	const char *p;
 
-	k = ob_opn_obj(cab, OB_OP_R | OB_OP_W);
+	k = ob_opn_obj(cab, OB_OP_R | OB_OP_W | OB_O_WEXCL);	/* read, a link added, written back */
 	if ( k <= 0 ) return ( k < 0 ) ? k : E_NOEXS;
 	x = bk_read_rec(k, 0, &len);
 	if ( x == NULL ) {
@@ -142,8 +144,8 @@ EXPORT ER bk_link_at( const TS_UUID *cab, const TS_UUID *u, const char *name, co
 		       ( box != NULL ) ? box[2] : 8 + wd, ( box != NULL ) ? box[3] : y + 25,
 		       ( box != NULL ) ? box[3] - box[1] : 25);
 	bpk_buf_puts(&b, end);
-	er = b.fail ? E_NOMEM : bk_write_all(k, 0, b.s, (UINT)b.n);
-	if ( er >= E_OK ) er = ob_trn_rec(k, 0, (UD)b.n);
+	/* replaced in one change: a reader sees the old record or the new one */
+	er = b.fail ? E_NOMEM : ob_rpl_rec(k, 0, b.s, (SZ)b.n);
 	if ( er >= E_OK && ob_ref_obj(cab, &ref) >= E_OK && !( ref.flags & OB_F_AUTOREF ) ) er = ob_lnk_obj(u);
 	bpk_buf_free(&b);
 	free(x);
@@ -213,7 +215,7 @@ EXPORT ER bk_link_out( const TS_UUID *cab, const TS_UUID *u )
 	ID	k;
 	ER	er = E_OK;
 
-	k = ob_opn_obj(cab, OB_OP_R | OB_OP_W);
+	k = ob_opn_obj(cab, OB_OP_R | OB_OP_W | OB_O_WEXCL);	/* read, links taken out, written back */
 	if ( k <= 0 ) return ( k < 0 ) ? k : E_NOEXS;
 	x = bk_read_rec(k, 0, &len);
 	if ( x == NULL ) {
@@ -245,8 +247,8 @@ EXPORT ER bk_link_out( const TS_UUID *cab, const TS_UUID *u )
 	}
 	bpk_buf_puts(&b, s);
 	if ( gone > 0 ) {
-		er = b.fail ? E_NOMEM : bk_write_all(k, 0, b.s, (UINT)b.n);
-		if ( er >= E_OK ) er = ob_trn_rec(k, 0, (UD)b.n);
+		/* replaced in one change: a reader sees the old record or the new one */
+		er = b.fail ? E_NOMEM : ob_rpl_rec(k, 0, b.s, (SZ)b.n);
 		if ( er >= E_OK && ob_ref_obj(cab, &ref) >= E_OK && !( ref.flags & OB_F_AUTOREF ) ) {
 			while ( gone-- > 0 ) (void)ob_unl_obj(u);
 		}
@@ -271,7 +273,15 @@ EXPORT ER bk_vol_create( BKVOL *v, const char *name, const char *memo )
 	v->key = 0;
 	v->wb = NULL;
 	v->wn = 0;
-	if ( v->dir[0] != 0 ) {
+	if ( v->ondisk ) {
+		/* a file below the disk's root: no place of the file layer's tree is named */
+		bk_vol_file(name, file, sizeof(file) - 8);
+		if ( v->dir[0] != 0 ) snprintf(v->path, sizeof(v->path), "%s/%s", v->dir, file);
+		else snprintf(v->path, sizeof(v->path), "%s", file);
+		(void)fs_unlinkat(v->vd, v->path);
+		v->fd = fs_openat(v->vd, v->path, O_RDWR | O_CREAT | O_TRUNC);
+		return ( v->fd >= 0 ) ? E_OK : v->fd;
+	} else if ( v->dir[0] != 0 ) {
 		bk_vol_file(name, file, sizeof(file) - 8);
 		snprintf(v->path, sizeof(v->path), "%s/%s", v->dir, file);
 		(void)fs_unlink(v->path);
@@ -306,7 +316,7 @@ EXPORT ER bk_vol_create( BKVOL *v, const char *name, const char *memo )
 		er = m.fail ? E_NOMEM : ob_cre_obj(&c, &v->obj);
 		bpk_buf_free(&m);
 		if ( er < E_OK ) return er;
-		v->key = ob_opn_obj(&v->obj, OB_OP_R | OB_OP_W | OB_OP_PROT);
+		v->key = ob_opn_obj(&v->obj, OB_OP_R | OB_OP_W | OB_OP_PROT | OB_O_EXCL);	/* the volume being written */
 		if ( v->key <= 0 ) return ( v->key < 0 ) ? v->key : E_NOEXS;
 		bpk_buf_init(&x);
 		bpk_buf_puts(&x, "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>");
@@ -397,7 +407,7 @@ EXPORT ER bk_vol_open( BKVOL *v )
 	if ( v->path[0] != 0 ) {
 		UB	h[16];
 
-		v->fd = fs_open(v->path, O_RDONLY);
+		v->fd = v->ondisk ? fs_openat(v->vd, v->path, O_RDONLY) : fs_open(v->path, O_RDONLY);
 		if ( v->fd < 0 ) return v->fd;
 		if ( fs_read(v->fd, h, 16) != 16 || !is_volume(h, 16) ) {
 			fs_close(v->fd);

@@ -51,7 +51,7 @@ typedef struct {
 	TS_UUID	uuid;
 	UB	name[OB_NAME_MAX];
 	BOOL	global;
-	T_OBPRT	prt;
+	T_OBPRT	*prt;			/* its own copy */
 	UB	*meta;
 	INT	metalen;
 	UB	*icon;			/* its icon, or NULL */
@@ -118,6 +118,7 @@ LOCAL void obj_free( INT i )
 	}
 	if ( o->meta != NULL ) Kfree(o->meta);
 	if ( o->icon != NULL ) Kfree(o->icon);
+	if ( o->prt != NULL ) Kfree(o->prt);
 	Kfree(o);
 	obm[i] = NULL;
 }
@@ -165,7 +166,7 @@ LOCAL ER rec_room( OBMREC *r, UD need )
 		return E_NOMEM;
 	}
 	if ( r->data != NULL ) {
-		knl_memcpy(nd, r->data, (INT)r->size);
+		knl_memcpy(nd, r->data, (SZ)r->size);
 		Kfree(r->data);
 	}
 	r->data = nd;
@@ -210,26 +211,34 @@ LOCAL ER obm_ref( CONST TS_UUID *uuid, T_OBREF *r )
 	return E_OK;
 }
 
-LOCAL ER obm_prot( CONST TS_UUID *uuid, T_OBPRT *prt )
+LOCAL ER obm_prot( CONST TS_UUID *uuid, T_OBPRT **p_prt )
 {
 	INT	i;
 
 	LOCK();
 	i = index_of(uuid);
-	if ( i >= 0 ) *prt = obm[i]->prt;
+	if ( i >= 0 ) *p_prt = knl_ob_prt_dup(obm[i]->prt);
 	UNLOCK();
 
-	return ( i >= 0 ) ? E_OK : E_NOEXS;
+	return ( i < 0 ) ? E_NOEXS : ( *p_prt == NULL ) ? E_NOMEM : E_OK;
 }
 
 LOCAL ER obm_setprot( CONST TS_UUID *uuid, CONST T_OBPRT *prt )
 {
+	T_OBPRT	*n = knl_ob_prt_dup(prt), *old = NULL;
 	INT	i;
 
+	if ( n == NULL ) {
+		return E_NOMEM;
+	}
 	LOCK();
 	i = index_of(uuid);
-	if ( i >= 0 ) obm[i]->prt = *prt;
+	if ( i >= 0 ) {
+		old = obm[i]->prt;
+		obm[i]->prt = n;
+	}
 	UNLOCK();
+	Kfree( ( i >= 0 ) ? old : n );
 
 	return ( i >= 0 ) ? E_OK : E_NOEXS;
 }
@@ -263,21 +272,27 @@ LOCAL ER obm_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 		o->name[n] = c->name[n];
 	}
 	o->global = global;
-	o->prt = *prt;
-
-	/* the metadata: as given, or just the name */
-	o->meta = (UB *)Kmalloc(OB_META_MAX);
-	if ( o->meta == NULL ) {
+	o->prt = knl_ob_prt_dup(prt);
+	if ( o->prt == NULL ) {
 		Kfree(o);
 		return E_NOMEM;
 	}
-	if ( c->json != NULL && c->jsonsz > 0 && c->jsonsz < OB_META_MAX ) {
+
+	/* the metadata: as given, however long, or just the name */
+	o->meta = (UB *)Kmalloc(( ( c->json != NULL && c->jsonsz > 0 && c->jsonsz < 0x3FFFFFFF )
+				  ? c->jsonsz : OB_NAME_MAX * 2 + 16 ) + 1);
+	if ( o->meta == NULL ) {
+		Kfree(o->prt);
+		Kfree(o);
+		return E_NOMEM;
+	}
+	if ( c->json != NULL && c->jsonsz > 0 && c->jsonsz < 0x3FFFFFFF ) {
 		knl_memcpy(o->meta, c->json, (INT)c->jsonsz);
 		o->metalen = (INT)c->jsonsz;
 	} else {
-		n = knl_oj_put(o->meta, 0, OB_META_MAX, "{\"name\":");
-		n = knl_oj_put_str(o->meta, n, OB_META_MAX, o->name);
-		n = knl_oj_put(o->meta, n, OB_META_MAX, "}");
+		n = knl_oj_put(o->meta, 0, OB_NAME_MAX * 2 + 16, "{\"name\":");
+		n = knl_oj_put_str(o->meta, n, OB_NAME_MAX * 2 + 16, o->name);
+		n = knl_oj_put(o->meta, n, OB_NAME_MAX * 2 + 16, "}");
 		o->metalen = ( n > 0 ) ? n : 0;
 	}
 
@@ -285,6 +300,7 @@ LOCAL ER obm_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 		o->icon = (UB *)Kmalloc(c->iconsz);
 		if ( o->icon == NULL ) {
 			Kfree(o->meta);
+			Kfree(o->prt);
 			Kfree(o);
 			return E_NOMEM;
 		}
@@ -295,6 +311,7 @@ LOCAL ER obm_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	/* the channels' names asked first, with no lock of ours held */
 	if ( global && knl_obchan_name_taken(o->name) ) {
 		Kfree(o->meta);
+		Kfree(o->prt);
 		Kfree(o);
 		return E_OBJ;
 	}
@@ -302,6 +319,7 @@ LOCAL ER obm_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	if ( global && name_taken(o->name) ) {
 		UNLOCK();
 		Kfree(o->meta);
+		Kfree(o->prt);
 		Kfree(o);
 		return E_OBJ;			/* the name is someone else's */
 	}
@@ -317,6 +335,7 @@ LOCAL ER obm_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	UNLOCK();
 	if ( slot < 0 ) {
 		Kfree(o->meta);
+		Kfree(o->prt);
 		Kfree(o);
 		return E_LIMIT;
 	}
@@ -391,7 +410,7 @@ LOCAL ER obm_rea( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, BOOL
 	} else if ( (UD)off < o->rec[recno].size ) {
 		n = (SZ)( o->rec[recno].size - (UD)off );
 		if ( n > size ) n = size;
-		knl_memcpy(buf, o->rec[recno].data + off, (INT)n);
+		knl_memcpy(buf, o->rec[recno].data + off, (SZ)n);
 	}
 	UNLOCK();
 	if ( er >= E_OK && p_asize != NULL ) {
@@ -419,9 +438,9 @@ LOCAL ER obm_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize
 		er = rec_room(r, (UD)off + (UD)size);
 		if ( er >= E_OK ) {
 			if ( (UD)off > r->size ) {
-				knl_memset(r->data + r->size, 0, (INT)( (UD)off - r->size ));
+				knl_memset(r->data + r->size, 0, (SZ)( (UD)off - r->size ));
 			}
-			knl_memcpy(r->data + off, buf, (INT)size);
+			knl_memcpy(r->data + off, buf, (SZ)size);
 			if ( (UD)off + (UD)size > r->size ) {
 				r->size = (UD)off + (UD)size;
 			}
@@ -474,7 +493,7 @@ LOCAL ER obm_trn( INT h, INT recno, UD size )
 		if ( size > r->size ) {
 			er = rec_room(r, size);
 			if ( er >= E_OK ) {
-				knl_memset(r->data + r->size, 0, (INT)( size - r->size ));
+				knl_memset(r->data + r->size, 0, (SZ)( size - r->size ));
 			}
 		}
 		if ( er >= E_OK ) {
@@ -602,15 +621,24 @@ LOCAL ER obm_sat( INT h, CONST UB *json, SZ size )
 	OBMOBJ	*o;
 	INT	v;
 	ER	er = E_OK;
+	UB	*nm, *was = NULL;
 
-	if ( size >= OB_META_MAX ) {
-		return E_LIMIT;
+	/* as long as it is: a buffer of its size, put in place of the one before */
+	if ( size < 0 || size >= 0x3FFFFFFF ) {
+		return E_PAR;
+	}
+	nm = (UB *)Kmalloc(size + 1);
+	if ( nm == NULL ) {
+		return E_NOMEM;
 	}
 	LOCK();
 	o = obj_of(h);
 	if ( o == NULL ) {
 		er = E_ID;
+		was = nm;
 	} else {
+		was = o->meta;
+		o->meta = nm;
 		knl_memcpy(o->meta, json, (INT)size);
 		o->metalen = (INT)size;
 		o->meta[size] = 0;
@@ -621,6 +649,7 @@ LOCAL ER obm_sat( INT h, CONST UB *json, SZ size )
 		}
 	}
 	UNLOCK();
+	if ( was != NULL ) Kfree(was);
 
 	return er;
 }
@@ -777,7 +806,7 @@ LOCAL ER obm_map( INT h, INT recno, INT target, T_OBMAP *m )
 				er = E_LIMIT;
 			} else {
 				if ( r->size > 0 ) {
-					knl_memcpy(nd, r->data, (INT)r->size);
+					knl_memcpy(nd, r->data, (SZ)r->size);
 				}
 				if ( r->data != NULL ) {
 					Kfree(r->data);
@@ -859,7 +888,10 @@ LOCAL CONST T_OBMGR obm_mgr = {
 	obm_gat, obm_sat, obm_lnk, obm_lst, obm_fndnam,
 	NULL, NULL, NULL, NULL,
 	obm_map, obm_unm,
-	obm_gic, obm_sic
+	obm_gic, obm_sic,
+	NULL,			/* records replaced by writing over them */
+	NULL,			/* nothing to wait for */
+	NULL			/* nothing comes in to wait for (ob_rea_tmo) */
 };
 
 EXPORT ER knl_obmem_init( void )

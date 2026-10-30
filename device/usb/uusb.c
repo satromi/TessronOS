@@ -242,7 +242,8 @@ LOCAL INT svc_us_lst_dev( T_USBDEV *list, INT max )
 
 	if ( max < 0 ) return E_PAR;
 	if ( max > 0 && !user_ok(list, sizeof(*list) * (SZ)max, TRUE) ) return E_MACV;
-	if ( max > USB_MAX_DEV ) max = USB_MAX_DEV;
+	n = ts_usb_lst_dev(NULL, 0);		/* no more room than there are devices */
+	if ( max > n ) max = n;
 	k = ( max > 0 ) ? (T_USBDEV *)Kmalloc(sizeof(*k) * (SZ)max) : NULL;
 	if ( max > 0 && k == NULL ) return E_NOMEM;
 	n = ts_usb_lst_dev(k, max);

@@ -18,7 +18,6 @@
 
 #include <ts/ob.h>
 
-#define OB_META_MAX	OB_ATR_MAX	/* bytes of metadata handled at a time */
 #define OB_MGR_MAX	16		/* managers */
 
 /*
@@ -37,7 +36,8 @@ typedef struct {
 	/* E_OK when the object is this manager's, E_NOEXS when it is not */
 	ER	(*find)( CONST TS_UUID *uuid );
 	ER	(*ref)( CONST TS_UUID *uuid, T_OBREF *pk_ref );
-	ER	(*prot)( CONST TS_UUID *uuid, T_OBPRT *prt );
+	/* the protection, in memory of its own (*p_prt, Kfree it) */
+	ER	(*prot)( CONST TS_UUID *uuid, T_OBPRT **p_prt );
 	ER	(*setprot)( CONST TS_UUID *uuid, CONST T_OBPRT *prt );
 	ER	(*create)( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid );
 	ER	(*remove)( CONST TS_UUID *uuid );
@@ -71,6 +71,19 @@ typedef struct {
 	/* the icon, beside the attributes: read (its size in *p_asize), replaced (0 bytes: none) */
 	ER	(*gic)( INT h, UB *buf, SZ size, SZ *p_asize );
 	ER	(*sic)( INT h, CONST UB *buf, SZ size );
+
+	/* a record's bytes replaced whole in one change (ob_rpl_rec); NULL: written over and cut */
+	ER	(*rpl)( INT h, INT recno, CONST void *buf, SZ size );
+
+	/* what was changed through the handle on the medium (ob_syn_obj); NULL: nothing waits */
+	ER	(*syn)( INT h );
+
+	/*
+	 * a record read, waited for up to tmo (ob_rea_tmo): whatever the key
+	 * says of waiting, TMO_POL not at all, TMO_FEVR until there is
+	 * something; NULL: the manager has nothing that comes in (E_NOSPT)
+	 */
+	ER	(*rtm)( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, TMO tmo );
 } T_OBMGR;
 
 /* The name manager (obname.c) */
@@ -110,8 +123,8 @@ IMPORT ER   knl_obfile_trx( CONST TS_UUID *on, BOOL begin, BOOL commit );
 IMPORT INT  knl_obfile_revoke( CONST UB *devnm );	/* a device's medium went: its volumes are gone */
 
 /* Protection domains (18.9): the one an object is under, E_NOEXS when none */
-IMPORT ER   knl_obfile_domain( CONST TS_UUID *uuid, T_OBPRT *prt );
-IMPORT ER   knl_obfile_get_dom( CONST char *path, T_OBPRT *prt );
+IMPORT T_OBPRT *knl_obfile_domain( CONST TS_UUID *uuid );	/* Kfree it; NULL none */
+IMPORT T_OBPRT *knl_obfile_get_dom( CONST char *path );
 IMPORT ER   knl_obfile_set_dom( CONST char *path, CONST T_OBPRT *prt );
 
 /* What one manager asks of another */
@@ -166,13 +179,48 @@ IMPORT INT  knl_oj_put_str( UB *out, INT pos, INT max, CONST UB *s );	/* quoted 
 IMPORT INT  knl_oj_put_num( UB *out, INT pos, INT max, D v );
 IMPORT INT  knl_oj_put_uuid( UB *out, INT pos, INT max, CONST TS_UUID *u );
 
+/*
+ * A text made as large as it needs (a record made when it is read, a
+ * list of any length): fn writes into t of max bytes with the calls
+ * above and answers the length, -1 when it did not fit -- it is then
+ * called again with a buffer twice as large -- or another error. No
+ * list is cut to fit a buffer.
+ */
+typedef INT (*OJ_MAKE)( void *ctx, UB *t, INT max );
+IMPORT INT  knl_oj_make( OJ_MAKE fn, void *ctx, UB **p_buf );	/* the length; Kfree *p_buf */
+IMPORT ER   knl_oj_make_rea( OJ_MAKE fn, void *ctx, D off, void *buf, SZ size, SZ *p_asize );
+IMPORT UD   knl_oj_make_len( OJ_MAKE fn, void *ctx );
+
+/*
+ * A record read whole, however long, into a buffer with room bytes
+ * more and a nought after the text: the length, the buffer in *p_buf
+ * (Kfree it) and the bytes it holds in *p_cap, or an error (obname.c)
+ */
+IMPORT INT  knl_ob_rea_all( ID key, INT recno, INT room, UB **p_buf, INT *p_cap );
+
+/*
+ * Metadata read whole, however long (objson.c): get copies at most size
+ * bytes from the start and says how many; the length, the buffer in
+ * *p_buf (Kfree it, room bytes more and a nought after the text) and the
+ * bytes it holds in *p_cap, or an error.
+ */
+typedef ER (*FP_META_GET)( void *ctx, UB *buf, SZ size, SZ *p_asize );
+IMPORT INT  knl_meta_all( FP_META_GET get, void *ctx, INT room, UB **p_buf, INT *p_cap );
+/* the same of a volume's object: knl_tsfs_meta_all (ts/tsfs.h) */
+
 /* ---------------------------------------------------------------- protection (obprot.c) */
 
 IMPORT void knl_ob_prt_legacy( T_OBPRT *prt, BOOL readable, BOOL editable,
 			       BOOL deletable );
 IMPORT void knl_ob_prt_default( T_OBPRT *prt, CONST T_OBCRD *crd );
-IMPORT ER   knl_ob_prt_parse( CONST UB *json, INT len, T_OBPRT *prt );
-IMPORT INT  knl_ob_prt_store( UB *json, INT len, INT max, CONST T_OBPRT *prt );
+/* the protection the metadata keeps, in memory of its own (*p_prt, Kfree it) */
+IMPORT ER   knl_ob_prt_parse( CONST UB *json, INT len, T_OBPRT **p_prt );
+/*
+ * The protection written into the metadata *p_json of len bytes, which
+ * holds *p_cap: made larger (a new buffer in *p_json and *p_cap, the old
+ * one freed) when the text does not fit. The new length, or -1.
+ */
+IMPORT INT  knl_ob_prt_store( UB **p_json, INT len, INT *p_cap, CONST T_OBPRT *prt );
 IMPORT INT  knl_ob_ops_text( UB *out, INT pos, INT max, UINT ops );
 IMPORT BOOL knl_ob_uuid_zero( CONST TS_UUID *u );
 

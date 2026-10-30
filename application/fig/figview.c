@@ -35,15 +35,36 @@
 LOCAL void tex_pat( T_DPPAT *pat, UW col, CONST UH *tex );
 LOCAL INT zs( CONST T_TVFIG *f, INT v );
 
+/* What a figure is magnified by, z / den: eighths unless it says what else */
+LOCAL void zoom_of( CONST T_TVFIG *f, INT *p_z, INT *p_den )
+{
+	if ( f->zoom > 0 && f->zoom_den > 0 ) {
+		*p_z = f->zoom;
+		*p_den = f->zoom_den;
+	} else {
+		*p_z = ( f->zoom > 0 ) ? f->zoom : 8;
+		*p_den = 8;
+	}
+}
+
 /* A length in the figure as a length on the screen, as it is magnified */
 LOCAL INT zs( CONST T_TVFIG *f, INT v )
 {
-	INT	z = ( f->zoom > 0 ) ? f->zoom : 8;
+	INT	z, den;
 
-	return ( z == 8 ) ? v : v * z / 8;
+	zoom_of(f, &z, &den);
+	return ( z == den ) ? v : v * z / den;
 }
 
 /* ------------------------------------------------- what a link points at */
+
+/* The source told the drawing is done with the pixels of a picture */
+LOCAL void picture_done( CONST UW *px )
+{
+	if ( px != NULL && knl_tv_src != NULL && knl_tv_src->picture_done != NULL ) {
+		knl_tv_src->picture_done(px, knl_tv_src_arg);
+	}
+}
 
 EXPORT void tv_draw_picture( INT gid, CONST T_DPRECT *box, CONST UB *href )
 {
@@ -73,11 +94,12 @@ EXPORT void tv_draw_picture( INT gid, CONST T_DPRECT *box, CONST UB *href )
 
 		if ( sc == NULL ) {
 			dp_frame_rect(gid, box, wm_look(WM_LOOK_SHADOW), 1);
-			return;
+		} else {
+			dp_put_argb(gid, box->left, box->top, sc, bw, bw, bh, IMG_CLEAR);
+			Kfree(sc);
 		}
-		dp_put_argb(gid, box->left, box->top, sc, bw, bw, bh, IMG_CLEAR);
-		Kfree(sc);
 	}
+	picture_done(px);
 }
 
 /*
@@ -102,6 +124,7 @@ LOCAL void picture_at( INT gid, CONST T_DPRECT *box, CONST T_TVSHAPE *s )
 		return;
 	}
 	sc = img_scale(px, w, h, bw, bh);
+	picture_done(px);		/* only the scaled copy is used from here on */
 	if ( sc == NULL ) {
 		return;
 	}
@@ -194,9 +217,18 @@ LOCAL void mark_at( INT gid, INT x, INT y, INT half, INT kind, UW col )
 	}
 }
 
+/* The source told the drawing is done with an icon it handed out */
+LOCAL void icon_done( CONST UW *px )
+{
+	if ( px != NULL && knl_tv_src != NULL && knl_tv_src->icon_done != NULL ) {
+		knl_tv_src->icon_done(px, knl_tv_src_arg);
+	}
+}
+
 
 /* How many opened objects deep what is being drawn now is: a text inside one draws its links there */
 EXPORT INT	tv_open_depth = 0;
+EXPORT INT	tv_open_max = TV_MAX_DEPTH;
 
 EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 			INT depth )
@@ -253,14 +285,21 @@ EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 	 * strip nine pixels high is both wrong and slow.
 	 */
 	if ( r->bottom - r->top <= band + OM_OPEN_SLACK
-	  || depth >= TV_MAX_DEPTH
+	  || ( depth >= TV_MAX_DEPTH && depth >= tv_open_max )
 	  || knl_tv_src == NULL || knl_tv_src->open == NULL ) {
-		return om_draw_vob_as(gid, r, &vv, &look, FALSE, NULL);
+		ER	er = om_draw_vob_as(gid, r, &vv, &look, FALSE, NULL);
+
+		icon_done(look.icon);
+		return er;
 	}
 	om_draw_vob_as(gid, r, &vv, &look, TRUE, &inner);
+	icon_done(look.icon);		/* the band is drawn: the icon is not wanted again */
 	if ( inner.right <= inner.left || inner.bottom <= inner.top
 	  || ( look.state & TV_ST_GONE ) != 0 ) {
 		return E_OK;			/* a 虚身 shows nothing inside */
+	}
+	if ( depth >= tv_open_max ) {
+		return E_OK;			/* printed without its contents (展開 off, or past 深さ) */
 	}
 	target = knl_tv_src->open(&vv, knl_tv_src_arg);
 	if ( target == NULL ) {
@@ -342,8 +381,19 @@ EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 }
 
 
-/* Points of the outline of one shape, at most */
-#define OUT_MAX		( TV_MAX_PT * 8 + 64 )
+/* Points of the outline of any shape of a figure, at most */
+LOCAL INT out_max( CONST T_TVFIG *f )
+{
+	INT	i, m = 0;
+
+	for ( i = 0; i < f->nsh; i++ ) {
+		if ( f->sh[i].npt > m ) {
+			m = f->sh[i].npt;
+		}
+	}
+
+	return TV_OUT_PTS(m);
+}
 
 /*
  * An arrow head at (tx, ty), coming from (fx, fy): two strokes back
@@ -393,17 +443,17 @@ LOCAL INT back_from( CONST T_DPPOINT *p, INT n, INT end, INT step )
  * it says, then the heads of its arrows.
  */
 LOCAL void draw_outline( INT gid, CONST T_TVFIG *f, CONST T_TVSHAPE *s,
-			 INT ox, INT oy, T_DPPOINT *pts, CONST T_DPPAT *lpat,
+			 INT ox, INT oy, T_DPPOINT *pts, INT max, CONST T_DPPAT *lpat,
 			 CONST T_DPPAT *fpat )
 {
 	INT	n, k, lw;
 	BOOL	closed = TRUE;
 
 	if ( s->kind == TV_SH_LINE ) {
-		n = tv_line_path(f, s, pts, OUT_MAX);
+		n = tv_line_path(f, s, pts, max);
 		closed = FALSE;
 	} else {
-		n = tv_shape_outline(s, pts, OUT_MAX, &closed);
+		n = tv_shape_outline(s, pts, max, &closed);
 	}
 	if ( n < 2 ) {
 		return;
@@ -485,6 +535,9 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 	T_DPENV		env;
 	BOOL		narrowed = FALSE;
 	T_DPPOINT	*pts;
+	INT		omax;
+	T_DPRECT	seen;			/* what of the box is drawn */
+	BOOL		have_seen = FALSE;
 
 	if ( f == NULL || r == NULL ) {
 		return E_PAR;
@@ -507,6 +560,8 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 		if ( cut.top < r->top )       cut.top = r->top;
 		if ( cut.right > r->right )   cut.right = r->right;
 		if ( cut.bottom > r->bottom ) cut.bottom = r->bottom;
+		seen = cut;
+		have_seen = TRUE;
 		if ( cut.right > cut.left && cut.bottom > cut.top ) {
 			dp_set_visible(gid, &cut);
 			narrowed = TRUE;
@@ -525,11 +580,13 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 			continue;
 		}
 		o->zoom = f->zoom;
+		o->zoom_den = f->zoom_den;
 		o->show_hidden = f->show_hidden;
 		(void)tv_fig_draw_at(gid, o, r, scroll_x, scroll_y, src,
 				     TAD_COL_NONE, depth);
 	}
-	pts = (T_DPPOINT *)Kmalloc(sizeof(T_DPPOINT) * OUT_MAX);
+	omax = out_max(f);
+	pts = (T_DPPOINT *)Kmalloc(sizeof(T_DPPOINT) * (SZ)omax);
 	for ( i = 0; pts != NULL && i < f->nsh; i++ ) {
 		CONST T_TVSHAPE	*s = &f->sh[i];
 		T_DPRECT	box;
@@ -541,6 +598,25 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 		box.top    = zs(f, s->r.top) + oy;
 		box.right  = zs(f, s->r.right) + ox;
 		box.bottom = zs(f, s->r.bottom) + oy;
+		/*
+		 * A shape nowhere near what is drawn is not drawn: its box
+		 * widened by its line, its arrows and how far a turn can take
+		 * a corner. A line joined to other shapes runs to them, out of
+		 * its own box, and is always drawn.
+		 */
+		if ( have_seen && !( s->kind == TV_SH_LINE
+				     && ( s->c0_shape >= 0 || s->c1_shape >= 0 ) ) ) {
+			INT	w = box.right - box.left, h = box.bottom - box.top;
+			INT	m = zs(f, s->line_w) + 24 + zs(f, 16);
+
+			if ( s->rot % 360 != 0 || s->angle != 0 ) {
+				m += ( w > h ) ? w : h;
+			}
+			if ( box.right + m < seen.left || box.left - m > seen.right
+			  || box.bottom + m < seen.top || box.top - m > seen.bottom ) {
+				continue;
+			}
+		}
 		dp_pat_colour(&lpat, s->line_col);
 		dp_pat_colour(&fpat, s->fill_col);
 		if ( s->fill_tex != NULL ) {
@@ -558,7 +634,7 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 
 		switch ( s->kind ) {
 		case TV_SH_RECT:
-			draw_outline(gid, f, s, ox, oy, pts, &lpat, &fpat);
+			draw_outline(gid, f, s, ox, oy, pts, omax, &lpat, &fpat);
 			if ( s->text != NULL && s->text_px > 0 ) {
 				/* a box of text: its letters from its top left corner */
 				ID		fid = fn_system();
@@ -579,7 +655,7 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 		case TV_SH_LINE:
 		case TV_SH_POLY:
 		case TV_SH_CURVE:
-			draw_outline(gid, f, s, ox, oy, pts, &lpat, &fpat);
+			draw_outline(gid, f, s, ox, oy, pts, omax, &lpat, &fpat);
 			break;
 
 		case TV_SH_PIXMAP:
@@ -615,7 +691,10 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 				/* a piece of text in a figure is on the
 				   figure's own paper, not on a paper of
 				   its own */
-				tv_doc_zoom(( f->zoom > 0 ) ? f->zoom : 8);
+				INT	z, den;
+
+				zoom_of(f, &z, &den);
+				tv_doc_zoom_by(z, den);
 				tv_doc_draw(gid, f->doc[s->doc], &box, 0, src,
 					    paper);
 				tv_doc_zoom(8);
@@ -767,19 +846,20 @@ EXPORT ER tv_fig_shape_at( CONST T_TVFIG *f, CONST T_DPRECT *r,
 			   INT *p_which )
 {
 	T_DPPOINT	*pts;
-	INT		i, k, n, px, py, z, reach;
+	INT		i, k, n, px, py, z, den, reach, omax;
 	ER		er = E_NOEXS;
 
 	if ( f == NULL || r == NULL ) {
 		return E_PAR;
 	}
 	/* a line is pressed where it is drawn: its ends at the shapes it joins, curved or bent as it runs */
-	pts = (T_DPPOINT *)Kmalloc(sizeof(T_DPPOINT) * OUT_MAX);
-	z = ( f->zoom > 0 ) ? f->zoom : 8;
-	px = ( x - r->left + scroll_x ) * 8 / z;
-	py = ( y - r->top + scroll_y ) * 8 / z;
+	omax = out_max(f);
+	pts = (T_DPPOINT *)Kmalloc(sizeof(T_DPPOINT) * (SZ)omax);
+	zoom_of(f, &z, &den);
+	px = ( x - r->left + scroll_x ) * den / z;
+	py = ( y - r->top + scroll_y ) * den / z;
 	/* how near a line a press takes it: a few pixels of the screen, whatever the zoom */
-	reach = ( LINE_REACH * 8 + z - 1 ) / z;
+	reach = ( LINE_REACH * den + z - 1 ) / z;
 	for ( i = f->nsh - 1; i >= 0; i-- ) {
 		CONST T_TVSHAPE	*sh = &f->sh[i];
 		BOOL		hit = FALSE;
@@ -788,7 +868,7 @@ EXPORT ER tv_fig_shape_at( CONST T_TVFIG *f, CONST T_DPRECT *r,
 			continue;
 		}
 		if ( sh->kind == TV_SH_LINE ) {
-			n = ( pts != NULL ) ? tv_line_path(f, sh, pts, OUT_MAX) : 0;
+			n = ( pts != NULL ) ? tv_line_path(f, sh, pts, omax) : 0;
 			for ( k = 0; k + 1 < n && !hit; k++ ) {
 				hit = (BOOL)( seg_near(px, py, pts[k].x, pts[k].y,
 						       pts[k + 1].x, pts[k + 1].y) <= reach );

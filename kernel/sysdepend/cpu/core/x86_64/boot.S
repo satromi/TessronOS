@@ -86,7 +86,7 @@ knl_gdt:
 	.quad	0x00cffa000000ffff		/* 0x18 user code, 32 bit (SYSRET's base) */
 	.quad	0x00cff2000000ffff		/* 0x20 user data */
 	.quad	0x00affa000000ffff		/* 0x28 user code, 64 bit */
-	.fill	CNF_MAX_PRCID * 2, 8, 0		/* 0x30 TSS of each processor */
+	.fill	2, 8, 0			/* 0x30 a TSS: each processor has a GDT of its own (smp.c) */
 knl_gdt_end:
 
 	.balign	16

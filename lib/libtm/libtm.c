@@ -20,6 +20,7 @@
 
 #if USE_TMONITOR
 #include "libtm.h"
+#include <ts/ob.h>
 
 /*
  * The console. Interrupts disabled keep out only this processor, so the
@@ -30,6 +31,16 @@
 LOCAL T_SPLOCK		tm_lock;
 LOCAL volatile UW	tm_holder = ~(UW)0;	/* affinity of the holder */
 LOCAL UW		tm_depth = 0;
+
+/*
+ * The log's edge (ts/ob.h, T_OBEDGE): armed by a read that found
+ * nothing new, marked by what is written after it under the console's
+ * lock, and kicked once the lock is let go altogether -- not with it
+ * held, as the kick may enter the kernel's critical section, inside
+ * which the console is written too.
+ */
+EXPORT T_OBEDGE		knl_tm_log_edge;
+LOCAL volatile UW	tm_kick = 0;
 
 LOCAL UW tm_cpu( void )
 {
@@ -53,11 +64,17 @@ EXPORT UINT tm_out_lock( void )
 
 EXPORT void tm_out_unlock( UINT intsts )
 {
+	BOOL	out = FALSE;
+
 	if ( --tm_depth == 0 ) {
 		tm_holder = ~(UW)0;
 		SpinUnlock(&tm_lock);
+		out = TRUE;
 	}
 	enaint(intsts);
+	if ( out && __atomic_exchange_n(&tm_kick, 0, __ATOMIC_SEQ_CST) != 0 ) {
+		knl_ob_edge_kick(&knl_tm_log_edge);
+	}
 }
 
 /*
@@ -94,9 +111,22 @@ EXPORT INT tm_log_read( UD *p_pos, UB *buf, INT max )
 		pos++;
 	}
 	*p_pos = pos;
+	if ( n == 0 ) {
+		knl_obedge_arm(&knl_tm_log_edge);	/* nothing new: told of what comes next */
+	}
 	tm_out_unlock(imask);
 
 	return n;
+}
+
+/* Bytes ever written to the console: where the log ends (OB_SYS_LOG) */
+EXPORT UD tm_log_at( void )
+{
+	UINT	imask = tm_out_lock();
+	UD	end = tm_log_end;
+
+	tm_out_unlock(imask);
+	return end;
 }
 
 /*
@@ -279,6 +309,9 @@ EXPORT INT tm_putchar( INT c )
 	tm_snd_dat(&buf, 1);
 	tm_log[tm_log_end % TM_LOG_SIZE] = buf;
 	tm_log_end++;
+	if ( knl_obedge_came(&knl_tm_log_edge) ) {
+		tm_kick = 1;
+	}
 	tm_out_unlock(imask);
 
 	return 0;

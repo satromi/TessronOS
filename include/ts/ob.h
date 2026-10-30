@@ -56,6 +56,9 @@ extern "C" {
 #define OB_S_USB	10		/* device: a device on a USB bus, hubs included */
 #define OB_S_CAMERA	11		/* device: a camera (include/ts/cam.h) */
 #define OB_S_VIDEODEC	12		/* device: a video decoder (include/ts/hevc.h) */
+#define OB_S_POWER	13		/* device: what the firmware tells of power: a battery, the AC adapter, the lid, the power button */
+#define OB_S_GPU	14		/* device: a GPU (the x64 PC: Intel's render and copy engines) */
+#define OB_S_NET	15		/* device: the network adapters (x64: the list of them, the Wi-Fi) */
 #define OB_S_QUEUE	1		/* channel: a queue of messages */
 #define OB_S_SOCKET	2		/* channel: a socket of the network */
 #define OB_S_WINDOW	1		/* window: drawn in freely */
@@ -93,6 +96,32 @@ extern "C" {
 
 /* ob_opn_obj: do not wait (a channel that is full or empty) */
 #define OB_O_NOWAIT	0x80000000
+
+/*
+ * ob_opn_obj: how a key to a stored object keeps others out while it is
+ * open (BTRON's exclusive modes):
+ *
+ *	OB_O_EXCL	no other key that reads or writes the records opens
+ *			the object; one that only reads the attributes
+ *			(OB_OP_ATRRD alone, held to be told of changes) does
+ *	OB_O_WEXCL	no other key opens it to write; keys that read open
+ *			it (they see each record as the last change left it:
+ *			ob_rpl_rec's whole, a write in place as far as it got)
+ *	OB_O_NOEXCL	nobody kept out: other keys read it and write it
+ *
+ * Without any of them it is OB_O_NOEXCL, as BTRON has it: a key keeps
+ * out only what the others' modes say. Each change of a record (a write,
+ * a cut, ob_rpl_rec) is whole whoever else has the object open; a key
+ * that makes several changes others are not to see half done asks for
+ * OB_O_EXCL, and one that reads, changes and writes back what it read
+ * asks for OB_O_WEXCL, so that no other writer comes between. A reader
+ * may ask for OB_O_WEXCL too, to read every record as one version.
+ * Keys of the other kinds of object take no notice of them.
+ */
+#define OB_O_EXCL	0x40000000
+#define OB_O_WEXCL	0x20000000
+#define OB_O_NOEXCL	0x10000000
+#define OB_O_EXCLS	( OB_O_EXCL | OB_O_WEXCL | OB_O_NOEXCL )
 
 /*
  * The records of a sound device (design 18.7): record 0 says what it
@@ -146,7 +175,8 @@ extern "C" {
 #define OB_SYS_NET	7		/* the network card and interface */
 #define OB_SYS_SOUND	8		/* what plays sound */
 #define OB_SYS_HW	9		/* the state of the hardware: temperature and clocks */
-#define OB_SYS_NREC	10
+#define OB_SYS_LOG	10		/* the console's log: where it ends (tm_log_read reads it) */
+#define OB_SYS_NREC	11
 
 /*
  * The records of an input device (OB_S_INPUT, design 18.7): each
@@ -195,6 +225,32 @@ extern "C" {
 /* The record of a device on the USB bus (OB_S_USB): "key value" text of what it is */
 #define OB_USB_INFO	1
 #define OB_USB_NREC	2
+
+/*
+ * A power device (OB_S_POWER, the x64 PC's ACPI): record 1 its state as
+ * "key value" lines, told as OB_E_CHANGE on record 1 when it changes
+ */
+#define OB_PW_STATE	1
+#define OB_PW_NREC	2
+
+/*
+ * A GPU (OB_S_GPU): record 1 its state as "key value" lines (what it is,
+ * whether it runs, its engines' jobs and resets, compositing), told as
+ * OB_E_CHANGE on record 1 when it changes
+ */
+#define OB_GP_STATE	1
+#define OB_GP_NREC	2
+
+/*
+ * The network adapters (OB_S_NET, the x64 PC): "netadp", record 1 the
+ * adapters as "key value" lines (the one in use, the one chosen, each
+ * with its link); the Wi-Fi "wlan0", record 1 its state (written: a
+ * command, SCAN, CONNECT, DISCONNECT), record 2 the networks the last
+ * scan found. A change is told as OB_E_CHANGE on the record.
+ */
+#define OB_NET_STATE	1
+#define OB_NET_SCAN	2
+#define OB_NET_NREC	3
 
 /* The random source (乱数, OB_S_CHAR): read, random bytes; written, stirred in */
 #define OB_RND_DATA	1
@@ -266,6 +322,7 @@ typedef struct {
 /* Where a window is: record OB_WR_PLACE */
 #define OB_WP_SHOWN	0x0001
 #define OB_WP_OFF	0x0002		/* a part: shown, but it cannot be worked */
+#define OB_WP_FOCUS	0x0004		/* a box: the keys go to it (written: given them; read: has them) */
 typedef struct {
 	TS_UUID	parent;			/* the window it is in; 0 the screen */
 	INT	left, top, right, bottom;	/* its outer edge */
@@ -287,23 +344,25 @@ typedef struct {
  * say, as long as it runs. What the objects link to further is opened
  * with the taker's own credentials.
  *
- * Read, the record is a T_OBDROP whose v[] holds n entries (its length
- * says so too). Written with a T_OBDRANS, it is answered: the one who
+ * Read, the record is a T_OBDROP whose v[] holds n entries, as many as
+ * were let go: OB_DROP_SIZE(n) bytes. A program reads it whole (in
+ * memory of its own: ob_drop_read, ts/obdrop.h); one that reads less has
+ * the first links. Written with a T_OBDRANS, it is answered: the one who
  * dropped is told whether it was taken, on the message line; a drop
  * refused takes its grants back.
  *
  * Letters carried out of a text and let go over a window are a drop as
- * well, with no links (n is 0) and the letters, one line of UTF-8, in
- * text. Only a window someone has asked OB_E_TEXT of (beside OB_E_DROP)
- * takes them; (x, y) is then the corner of the outline that was
- * carried, as the letters go in where it stood.
+ * well, with no links (n is 0) and the letters, one line of UTF-8 of any
+ * length and its terminator, where v[] would be (OB_DROP_LETTERS). Only
+ * a window someone has asked OB_E_TEXT of (beside OB_E_DROP) takes them;
+ * (x, y) is then the corner of the outline that was carried, as the
+ * letters go in where it stood.
  */
 #define OB_WR_DROP	4		/* a plain window: the latest drop */
 #define OB_WR_BARS	5		/* a plain window: its scroll bars, T_OBWBARS */
-#define OB_DROP_MAX	16		/* links in one drop */
+#define OB_WR_CAND	6		/* a plain window: the candidates the system lists for it, T_OBWCAND */
 #define OB_DROP_NAME	64		/* bytes of a link's name, UTF-8 */
 #define OB_DROP_MSG	128		/* bytes of what an answer says */
-#define OB_DROP_TEXT	1024		/* bytes of the letters of a drop, with their terminator */
 #define OB_DROP_OPS	( OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRWR | OB_OP_LINK )
 
 typedef struct {
@@ -325,9 +384,12 @@ typedef struct {
 	TS_UUID	from;			/* the window it came from; 0 none said */
 	TS_UUID	fromobj;		/* the object that window shows (the record the
 					   links are in); 0 none said */
-	T_OBDROPV v[OB_DROP_MAX];
-	UB	text[OB_DROP_TEXT];	/* letters dropped (n 0); "" for links */
+	T_OBDROPV v[];			/* n links; with none, the letters instead */
 } T_OBDROP;
+
+/* The bytes of a drop of n links, and the letters of a drop of letters (n 0) */
+#define OB_DROP_SIZE(n)		( sizeof(T_OBDROP) + sizeof(T_OBDROPV) * (SZ)(n) )
+#define OB_DROP_LETTERS(d)	( (UB *)(d)->v )
 
 #define OB_DR_ACCEPT	1
 #define OB_DR_REFUSE	2
@@ -370,6 +432,30 @@ typedef struct {
 	T_OBWBAR bar[OB_BAR_MAX];
 } T_OBWBARS;
 
+/*
+ * The candidates of a conversion, listed by the system in a window of
+ * their own over a plain window (its record OB_WR_CAND): the program
+ * that converts writes what to list, and the list stands under the
+ * composition -- the box from x across, top to bottom, in the window's
+ * work area -- or over it where there is no room below. n names, each
+ * ending in a nought, one after another; chosen is the one chosen of
+ * them (0 up, -1 none), first where they start among all total. n 0
+ * takes the list away; so does closing the window. A press on a name
+ * is told to the window as OB_E_PRESS on the record OB_WR_CAND (a press
+ * on the window itself is on no record), its code the name's number
+ * (0 up) on the page.
+ */
+#define OB_CAND_MAX	9		/* names on a page */
+#define OB_CAND_BYTES	1024		/* bytes of them together */
+
+typedef struct {
+	INT	x, top, bottom;
+	INT	n;
+	INT	chosen;
+	INT	first, total;
+	UB	names[OB_CAND_BYTES];
+} T_OBWCAND;
+
 /* ---------------------------------------------------------------- objects */
 
 #define OB_NAME_MAX	64		/* bytes of a name, UTF-8 */
@@ -386,9 +472,6 @@ typedef struct {
 } T_OBREF;
 
 /* ---------------------------------------------------------------- protection */
-
-#define OB_ACL_MAX	16
-#define OB_RMASK_MAX	16
 
 /* Attributes */
 #define OB_A_RONLY	0x0001		/* no writing */
@@ -418,6 +501,13 @@ typedef struct {
  * The protection of an object. The mode is Unix's nine bits, 0400 the
  * owner's r down to 0001 the others' x. An owner of all zeroes is no
  * owner, as data written by the TADjs Desktop has.
+ *
+ * The access control list and the records' own limits are as long as
+ * the protection has them: nacl entries in acl[], then nrmask limits
+ * after them (OB_PRT_RMASK), OB_PRT_SIZE bytes in all. A T_OBPRT with
+ * neither is the head alone (sizeof(T_OBPRT)). ob_get_prt says how
+ * large the protection is with a size of 0, and answers E_LIMIT, and
+ * the size, when the room given is less.
  */
 typedef struct {
 	TS_UUID	owner;
@@ -425,10 +515,14 @@ typedef struct {
 	UINT	mode;
 	UINT	attr;			/* OB_A_* */
 	INT	nacl;
-	T_OBACE	acl[OB_ACL_MAX];
 	INT	nrmask;
-	T_OBRMASK rmask[OB_RMASK_MAX];
+	T_OBACE	acl[];			/* nacl of them, then the limits */
 } T_OBPRT;
+
+#define OB_PRT_SIZE(nacl, nrmask)	( sizeof(T_OBPRT) + sizeof(T_OBACE) * (SZ)(nacl) \
+					  + sizeof(T_OBRMASK) * (SZ)(nrmask) )
+#define OB_PRT_LEN(p)			OB_PRT_SIZE((p)->nacl, (p)->nrmask)
+#define OB_PRT_RMASK(p)			( (T_OBRMASK *)( (p)->acl + (p)->nacl ) )
 
 /* ---------------------------------------------------------------- credentials */
 
@@ -588,6 +682,14 @@ typedef struct {
 	UINT	lost;			/* notices dropped before this one */
 	UD	when;			/* ms since start */
 	INT	dz;			/* a wheel: the notches it turned */
+	/*
+	 * The keyboard's input mode (WM_MODE_* of ts/wm.h) as it stood once
+	 * this happened: for a key, after the key was worked, in the order
+	 * the keys came. What a key means -- the converter's or a letter
+	 * as it is -- is taken from this, not from the mode now, which a
+	 * key typed after it may already have changed.
+	 */
+	UINT	imode;
 } T_OBNTM;
 
 /* ---------------------------------------------------------------- calls */
@@ -597,15 +699,95 @@ IMPORT ER  ob_cls_obj( ID key );
 IMPORT ER  ob_cre_obj( CONST T_OBCRE *pk_cre, TS_UUID *p_uuid );
 IMPORT ER  ob_del_obj( CONST TS_UUID *uuid );
 IMPORT ER  ob_ref_obj( CONST TS_UUID *uuid, T_OBREF *pk_ref );
+/*
+ * Whether the caller may do every one of ops (OB_OP_*) to an object,
+ * answered without opening it, as access(2) answers: E_OK when
+ * ob_opn_obj would open it with them, E_OACV when not, E_NOEXS when
+ * there is no such object. A list of objects asks this before it
+ * opens one, and shows one it may not read as such. The answer is not
+ * noted on the console as a refusal is.
+ */
+IMPORT ER  ob_acc_obj( CONST TS_UUID *uuid, UINT ops );
 IMPORT ER  ob_lst_obj( UINT type, UINT sub, CONST TS_UUID *from, TS_UUID *buf, INT n,
 			INT *p_cnt );
 IMPORT ER  ob_lnk_obj( CONST TS_UUID *uuid );
 IMPORT ER  ob_unl_obj( CONST TS_UUID *uuid );
 
+/*
+ * ob_rea_rec with buf NULL and size 0 on stored objects answers in
+ * *p_asize how many bytes the record holds, under the right to read it
+ * (OB_OP_READ): a reader that reads a record whole asks first and reads
+ * it once (knl_ob_rea_all, ui_rec_all).
+ */
 IMPORT ER  ob_rea_rec( ID key, INT recno, D off, void *buf, SZ size, SZ *p_asize );
+
+/*
+ * ob_rea_rec waited for up to tmo ms, whatever the key was opened with:
+ * TMO_POL not at all, TMO_FEVR until there is something (E_TMOUT when
+ * the time runs out). For what comes in -- a channel's messages, the
+ * notices a program waits for on its port instead of looking again and
+ * again; an object that has nothing to wait for answers E_NOSPT.
+ */
+IMPORT ER  ob_rea_tmo( ID key, INT recno, D off, void *buf, SZ size, SZ *p_asize, TMO tmo );
 IMPORT ER  ob_wri_rec( ID key, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize );
+
+/*
+ * The system's list of candidates for the plain window key is open on
+ * (OB_WR_CAND): n names one after another, each ending in a nought (n 0
+ * takes it away), under the box of the composition from x across, top
+ * to bottom in the work area; chosen the one chosen of them (0 up), first
+ * where they start among all total. What a program that converts calls
+ * each time the list changes.
+ */
+static __inline__ ER ob_cand_put( ID key, INT x, INT top, INT bottom, CONST UB *names, INT n,
+				  INT chosen, INT first, INT total )
+{
+	T_OBWCAND	c;
+	SZ		asz = 0;
+	INT		i, at = 0;
+
+	c.x = x;
+	c.top = top;
+	c.bottom = bottom;
+	c.chosen = chosen;
+	c.first = first;
+	c.total = total;
+	for ( i = 0; i < n && i < OB_CAND_MAX && names != NULL; i++ ) {
+		INT	k = 0;
+
+		while ( names[k] != 0 && at + k < OB_CAND_BYTES - 1 ) {
+			c.names[at + k] = names[k];
+			k++;
+		}
+		if ( names[k] != 0 ) break;		/* no room for it whole */
+		c.names[at + k] = 0;
+		at += k + 1;
+		names += k + 1;
+	}
+	c.n = i;
+	return ob_wri_rec(key, OB_WR_CAND, 0, &c, (SZ)( (UB *)&c.names[at] - (UB *)&c ), &asz);
+}
 IMPORT ER  ob_apd_rec( ID key, UINT rt, UINT sub, INT *p_recno );
 IMPORT ER  ob_trn_rec( ID key, INT recno, UD size );
+
+/*
+ * A record's bytes replaced whole: the new bytes are written to a new
+ * place and the record is made to be them in one change, so that after
+ * a cut in the power it holds either what it held or the new bytes,
+ * never part of each (the native store). A store that cannot keep both
+ * writes over the record and cuts it to the new size.
+ */
+IMPORT ER  ob_rpl_rec( ID key, INT recno, CONST void *buf, SZ size );
+
+/*
+ * What has been written through the key made sure to be on the medium
+ * (design 7.3). Writing, adding, cutting and taking out records may wait
+ * for the next batch of the log, at most a few seconds; closing the key
+ * waits for them, and so does this. A replacement (ob_rpl_rec), the
+ * metadata, the icon and the resources are on the medium when their
+ * call returns. fsync and fdatasync of the POSIX layer come here.
+ */
+IMPORT ER  ob_syn_obj( ID key );
 IMPORT ER  ob_del_rec( ID key, INT recno );
 IMPORT ER  ob_lst_rec( ID key, T_OBREC *buf, INT n, INT *p_cnt );
 
@@ -660,7 +842,8 @@ IMPORT ER  ob_can_evt( ID nid );
  * icon -- named by what follows the object's UUID in the file name a
  * TADjs Desktop gives them: "_0_1.png", "_0_bgm.mp3", ".ico". A record
  * or the metadata is not a resource. ob_lst_res gives the names one
- * after another, each ending in 0.
+ * after another, each ending in 0, as many as fit; with buf NULL, how
+ * many there are (room for them all: that many OB_RES_NAME).
  */
 #define OB_RES_NAME	64		/* bytes of a resource's name */
 
@@ -669,10 +852,28 @@ IMPORT ER  ob_wri_res( ID key, CONST UB *name, CONST void *buf, SZ size );
 IMPORT ER  ob_del_res( ID key, CONST UB *name );
 IMPORT ER  ob_lst_res( ID key, UB *buf, SZ size, INT *p_cnt );
 
-/* The attributes: the metadata, JSON */
-#define OB_ATR_MAX	16384		/* bytes of metadata an object may have */
+/*
+ * The attributes: the metadata, JSON, as long as the object's is. The
+ * native store keeps what one transaction of its journal holds (about
+ * 492KB, peripheral_kernel/fs/tsfsobj.c); the other managers keep any
+ * length. ob_get_atr copies at most size bytes from the start and says
+ * how many: a reader that fills its room reads again with more (ts/
+ * obatr.h, knl_ob_atr_all). OB_META_LIMIT is where such a reader stops,
+ * as a reader of a record does (knl_ob_rea_all).
+ */
+#define OB_META_LIMIT	( 64 * 1024 * 1024 )
 
 IMPORT ER  ob_get_atr( ID key, UB *json, SZ size, SZ *p_asize );
+/*
+ * One member of the metadata, named by its path (the keys parted by
+ * '.', as "tessronos.program.kind"), as its JSON text: at most size bytes
+ * of it from its start into buf, and its whole length in *p_asize (size
+ * 0 asks only that). E_NOEXS when the metadata has no such member. A
+ * program with no memory of its own to read the metadata whole into
+ * reads what it needs of it this way.
+ */
+#define OB_ATV_PATH	256		/* bytes of a path, with its terminator */
+IMPORT ER  ob_get_atv( ID key, CONST UB *path, UB *buf, SZ size, SZ *p_asize );
 IMPORT ER  ob_set_atr( ID key, CONST UB *json, SZ size );
 
 /*
@@ -691,7 +892,7 @@ IMPORT ER  ob_set_atr( ID key, CONST UB *json, SZ size );
 IMPORT ER  ob_get_ico( ID key, UB *buf, SZ size, SZ *p_asize );
 IMPORT ER  ob_set_ico( ID key, CONST UB *buf, SZ size );
 
-IMPORT ER  ob_get_prt( CONST TS_UUID *uuid, T_OBPRT *pk_prt );
+IMPORT ER  ob_get_prt( CONST TS_UUID *uuid, T_OBPRT *pk_prt, SZ size, SZ *p_asize );
 IMPORT ER  ob_set_prt( CONST TS_UUID *uuid, CONST T_OBPRT *pk_prt );
 
 /* A key with fewer operations, held by another process (0: the kernel) */
@@ -714,6 +915,16 @@ IMPORT ER  ob_fnd_nam( CONST UB *name, TS_UUID *p_uuid );
  */
 IMPORT ER  ob_fnd_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *p_uuid );
 IMPORT ER  ob_lst_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *buf, INT n, INT *p_cnt );
+
+/*
+ * A system object: the one the root システム (SYSDEF_SYSTEM_BOX) links
+ * to with the relationship role (SYSROLE_FONTS, include/ts/sysdef.h),
+ * read with the caller's rights. When the root has no such link, or the
+ * object it points at is not there, the object of the identity dflt
+ * (its UUID as text, NULL for none) is the answer, as the system was
+ * made with it; E_NOEXS when there is neither.
+ */
+IMPORT ER  ob_fnd_sys( CONST char *role, CONST char *dflt, TS_UUID *p_uuid );
 
 IMPORT ER  ob_get_crd( T_OBCRD *pk_crd );
 IMPORT ER  ob_login( CONST TS_UUID *user, CONST UB *password );
@@ -776,7 +987,7 @@ IMPORT ER  ob_det_vol( CONST char *path );
  * administrator's; NULL takes it away. It is kept on the volume, so it
  * goes where the medium goes.
  */
-IMPORT ER  ob_get_dom( CONST char *vol, T_OBPRT *pk_prt );
+IMPORT ER  ob_get_dom( CONST char *vol, T_OBPRT *pk_prt, SZ size, SZ *p_asize );
 IMPORT ER  ob_set_dom( CONST char *vol, CONST T_OBPRT *pk_prt );
 
 /* ---------------------------------------------------------------- the kernel's */
@@ -789,6 +1000,8 @@ IMPORT ER   knl_ob_init( void );
  * in buf, the first volume first. Answers how many there are, at most max.
  */
 IMPORT INT  knl_obfile_vols( UB *buf, INT stride, INT max );
+/* How many volumes are attached: room for knl_obfile_vols */
+IMPORT INT  knl_obfile_nvol( void );
 
 /*
  * A volume attached, by its path (design 7.6): whether it is the native
@@ -837,6 +1050,13 @@ IMPORT ER   knl_obfile_vol_name( CONST TS_UUID *vuuid, UB *buf, INT max );
 IMPORT ER   knl_obfile_vuuid_of( CONST TS_UUID *uuid, TS_UUID *p_vuuid );
 IMPORT BOOL knl_obfile_vuuid_on( CONST TS_UUID *vuuid );
 IMPORT ER   knl_obfile_machine( TS_UUID *p_uuid );
+
+/*
+ * Whether the volume attached with a path had been attached before since
+ * the start (its disk taken out and put back): what is emptied at each
+ * start is emptied the first time only.
+ */
+IMPORT BOOL knl_obfile_again( CONST char *path );
 
 /*
  * The volume (TSFS's number) an object is on, E_NOEXS when on none
@@ -899,6 +1119,28 @@ IMPORT void knl_ob_prc_end( ID pid );		/* it is going: its keys close */
 IMPORT void knl_ob_prc_gone( ID pid );		/* it is gone: its credentials go */
 IMPORT UINT knl_ob_permit( CONST T_OBCRD *crd, CONST T_OBPRT *prt, INT recno );
 
+/*
+ * The kernel's protections, in memory of their own (Kfree them): one of
+ * nacl entries and nrmask limits, zeroed; a copy; and an object's, as
+ * ob_get_prt reads it. NULL when there is no memory, or no such object.
+ * knl_ob_prt_room makes p (which it frees) one of nacl entries and
+ * nrmask limits, keeping those it had.
+ */
+IMPORT T_OBPRT *knl_ob_prt_new( INT nacl, INT nrmask );
+IMPORT T_OBPRT *knl_ob_prt_dup( CONST T_OBPRT *p );
+IMPORT T_OBPRT *knl_ob_prt_get( CONST TS_UUID *uuid );
+IMPORT T_OBPRT *knl_ob_prt_room( T_OBPRT *p, INT nacl, INT nrmask );
+
+/*
+ * The kernel's: the metadata read whole, however long -- of an open
+ * key, or of an object by its UUID without asking anyone's leave -- in a
+ * buffer of its own (Kfree it) with room bytes more after the text and a
+ * nought after that. The length, the bytes the buffer holds in *p_cap
+ * (NULL: not wanted), or an error.
+ */
+IMPORT INT  knl_ob_atr_all( ID key, INT room, UB **p_buf, INT *p_cap );
+IMPORT INT  knl_ob_meta_all( CONST TS_UUID *uuid, INT room, UB **p_buf, INT *p_cap );
+
 /* Who wrote the message last read from a channel (0 the kernel), and whether a process is an administrator */
 IMPORT ID   knl_obchan_last_from( CONST TS_UUID *uuid );
 IMPORT BOOL knl_ob_pid_admin( ID pid );
@@ -945,6 +1187,60 @@ IMPORT void knl_ob_deny_note( CONST char *at, CONST TS_UUID *u, UINT want, UINT 
  * desktop's tasks make as the person works.
  */
 IMPORT void knl_ob_make_for_person( BOOL on );
+
+/*
+ * An edge of what comes in to be read -- the console's log, a serial
+ * port's bytes, what a pseudo terminal has for its master -- told as
+ * OB_E_CHANGE of a record once each time something comes after a read
+ * of it found nothing.
+ *
+ * The read that finds nothing arms the edge (knl_obedge_arm), and what
+ * puts something in says so (knl_obedge_came), both under the lock of
+ * what is read: what comes after a read that found nothing always finds
+ * the edge armed, and makes the notice due. A reader that is told reads
+ * until it finds nothing again, which arms the edge once more, and then
+ * waits; what came while it read is read with the rest, and what comes
+ * after it found nothing is told again. Nothing that comes is left
+ * untold, and a notice may at most find nothing left to read.
+ *
+ * knl_obedge_came only marks the notice due. Whoever may post it -- a
+ * task, out of the lock of what is read -- takes it once with
+ * knl_obedge_take. Where nobody may post (an interrupt handler, the
+ * console's lock), knl_ob_edge_kick wakes the task that posts the due
+ * notices of the edges given it with knl_ob_edge_add, at once or, from
+ * under a lock of the kernel, as that lock is let go: the record recno
+ * of the object uuid, or of the device object of the device devnm; look,
+ * when there is one, is called each time the task comes round, for a
+ * device that says nothing of what comes in (a port without an
+ * interrupt), and answers whether it is to be looked at again soon.
+ */
+typedef struct {
+	volatile UW	armed;		/* a read found nothing */
+	volatile UW	due;		/* something came after it: to be told */
+} T_OBEDGE;
+
+static __inline__ void knl_obedge_arm( T_OBEDGE *e )
+{
+	__atomic_store_n(&e->armed, 1, __ATOMIC_SEQ_CST);
+}
+
+static __inline__ BOOL knl_obedge_came( T_OBEDGE *e )
+{
+	if ( __atomic_exchange_n(&e->armed, 0, __ATOMIC_SEQ_CST) == 0 ) {
+		return FALSE;
+	}
+	__atomic_store_n(&e->due, 1, __ATOMIC_SEQ_CST);
+	return TRUE;
+}
+
+static __inline__ BOOL knl_obedge_take( T_OBEDGE *e )
+{
+	return (BOOL)( __atomic_exchange_n(&e->due, 0, __ATOMIC_SEQ_CST) != 0 );
+}
+
+IMPORT ER   knl_ob_edge_add( T_OBEDGE *e, CONST TS_UUID *uuid, CONST UB *devnm, INT recno,
+			     BOOL (*look)( void ) );
+IMPORT void knl_ob_edge_kick( T_OBEDGE *e );
 
 /*
  * Something happened on an object: the notices asked for it are sent.

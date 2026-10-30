@@ -313,6 +313,7 @@ IMPORT INT lh5_encode( BPKLH5E *z, const UB *in, UINT inlen, UB *out, UINT outma
 #define LK_FS_NAME	0		/* TC[20] */
 #define LK_F_ID		40		/* UH, from 0 */
 #define LK_ATR		42		/* UH[5] */
+#define LK_APPL		46		/* UH[3]: the application the link opens its object with */
 
 /* An entry of a 実行機能付箋 record: 96 bytes, then its data */
 #define BPK_EXECHEAD	0x60
@@ -371,6 +372,14 @@ typedef struct {
 	INT		nexec;
 	BPKEXEC		*exec;
 	INT		ntad;			/* TAD records */
+
+	/*
+	 * The application a link to it names (VLINK.appl): the program
+	 * BTRON opens it with from that link. The root's is the one the
+	 * extension's link names, any other's the first link record of the
+	 * archive that names one. vappl[0] is 0 when none does.
+	 */
+	UH		vappl[3];
 } BPKFILE;
 
 typedef struct {
@@ -394,6 +403,7 @@ typedef struct {
 	INT		rootview[4];		/* its box: left, top, right, bottom */
 	UINT		rootchsz;		/* its CHSIZE, as written (bpk_chsize_pt) */
 	UINT		rootcol[4];		/* frcol, chcol, tbcol, bgcol: COLOR as written */
+	UH		rootappl[3];		/* the application its VLINK names, 0 0 0 none */
 
 	/*
 	 * The CRC-16 of the inflated stream against the one the global

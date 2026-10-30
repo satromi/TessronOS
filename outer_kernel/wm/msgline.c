@@ -14,7 +14,10 @@
  *	A band as high as the system's letters and a few more, laid over
  *	the windows. From the left: a program's message; the keyboard's
  *	input mode; a rule; and the day of the week with the time. A press
- *	on the clock shows the date for three seconds instead.
+ *	on the clock shows the date for three seconds instead. A note of
+ *	the system's own (the volume a key set, knl_msg_note) stands in the
+ *	message's place for two seconds, and the program's message comes
+ *	back after it.
  *
  *	The measurements come from the letters' size h (and width w, the
  *	same): the band is h + h/32 + 3 + (h/32 + 1) high and the letters
@@ -38,9 +41,12 @@
 #include <ts/disp.h>
 #include <ts/fn.h>
 #include <ts/dt.h>
+#include <ts/hid.h>
 
 #define ML_TEXT_MAX	256		/* bytes of a message */
 #define ML_DATE_HOLD	3000		/* ms the date stays after a press */
+#define ML_NOTE_MAX	64		/* bytes of a note */
+#define ML_NOTE_HOLD	2000		/* ms a note stays */
 
 LOCAL BOOL	ml_on = FALSE;
 LOCAL INT	ml_gid = -1;
@@ -48,12 +54,21 @@ LOCAL UB	*ml_pixels = NULL;
 LOCAL UD	ml_pages = 0;
 LOCAL UINT	ml_pitch;
 LOCAL INT	ml_w, ml_h, ml_top;		/* the band, on the screen */
+/*
+ * The band's own pixels, in pixels of the screen: at a scale other than
+ * 100 (T_DISPSPEC scale) the band is laid out in view pixels and its
+ * pixels are the screen's, from row ml_dtop of the screen, ml_dh rows
+ */
+LOCAL UINT	ml_scale = 100;
+LOCAL INT	ml_dtop, ml_dh;
 LOCAL INT	ml_fh = 16, ml_fw = 16;		/* the letters */
 LOCAL INT	ml_margin;			/* the rules above the letters */
 LOCAL INT	ml_x0, ml_lim;			/* where a message starts and ends */
 LOCAL INT	ml_modex, ml_sepx, ml_clkx;
 
 LOCAL char	ml_text[ML_TEXT_MAX];
+LOCAL char	ml_note[ML_NOTE_MAX];
+LOCAL UD	ml_note_at = 0;			/* when the note was put, or 0: none */
 LOCAL UINT	ml_mode = WM_MODE_ALPH | WM_MODE_ROMAN;
 LOCAL UD	ml_date_at = 0;			/* when the date was asked for, or 0 */
 LOCAL INT	ml_shown[4] = { -1, -1, -1, -1 };	/* what the clock shows */
@@ -151,18 +166,19 @@ LOCAL void ml_rules( void )
 /* The message, from the left; cut with … when it does not fit */
 LOCAL void ml_message( void )
 {
-	ID	fid = fn_system();
-	char	buf[ML_TEXT_MAX + 4];
-	INT	n, room;
+	ID		fid = fn_system();
+	char		buf[ML_TEXT_MAX + 4];
+	CONST char	*s = ( ml_note_at != 0 ) ? ml_note : ml_text;
+	INT		n, room;
 
 	ml_clip(0, ml_lim);
 	ml_fill(0, ml_margin + 2, ml_lim, ml_h, wm_look(LK_MSGGREY));
-	if ( ml_text[0] == 0 || fid <= 0 ) {
+	if ( s[0] == 0 || fid <= 0 ) {
 		return;
 	}
 	room = ml_lim - ml_x0;
-	for ( n = 0; ml_text[n] != 0; n++ ) {
-		buf[n] = ml_text[n];
+	for ( n = 0; s[n] != 0; n++ ) {
+		buf[n] = s[n];
 	}
 	buf[n] = 0;
 	if ( ml_width(buf) > room ) {
@@ -295,19 +311,30 @@ LOCAL ER ml_make( void )
 	q = ml_fh / 32;
 	ml_margin = q + 1;
 	ml_h = ml_fh + q + 3 + ml_margin;
-	ml_w = (INT)spec.width;
-	ml_top = (INT)spec.height - ml_h;
+	ml_scale = ( spec.scale >= 100 ) ? spec.scale : 100;
+	ml_w = (INT)( ( spec.view_w > 0 ) ? spec.view_w : spec.width );
+	ml_top = (INT)( ( spec.view_h > 0 ) ? spec.view_h : spec.height ) - ml_h;
 	ml_pitch = spec.pitch;
+	ml_dtop = disp_dev_of(ml_top, ml_scale);
+	ml_dh = disp_dev_of(ml_h, ml_scale);
+	if ( (UINT)disp_dev_of(ml_w, ml_scale) * 4 > ml_pitch ) {
+		ml_pitch = ( (UINT)disp_dev_of(ml_w, ml_scale) * 4 + 63 ) & ~63U;
+	}
 	ml_x0 = ml_fw / 4;
 	ml_clkx = ml_w - ( 4 * ml_fw + ml_fw / 4 );
 	ml_sepx = ml_clkx - ml_fw / 2;
 	ml_modex = ml_sepx - 2 * ml_fw;
 	ml_lim = ml_modex - 4 * ml_fw + 1;
 
+	if ( ml_pixels != NULL && ml_pages < (UD)( ( (SZ)ml_pitch * ml_dh + 4095 ) / 4096 ) ) {
+		knl_vunmap(ml_pixels, ml_pages);	/* a wider screen: rows longer than it has */
+		ml_pixels = NULL;
+	}
 	if ( ml_pixels == NULL ) {
-		ml_pages = (UD)( ( (SZ)ml_pitch * ml_h + 4095 ) / 4096 );
+		ml_pages = (UD)( ( (SZ)ml_pitch * ml_dh + 4095 ) / 4096 );
 		ml_pixels = (UB *)knl_vmap(ml_pages, 0);
 		if ( ml_pixels == NULL ) {
+			ml_on = FALSE;
 			return E_NOMEM;
 		}
 	}
@@ -318,6 +345,7 @@ LOCAL ER ml_make( void )
 		}
 	}
 	dp_set_target(ml_gid, ml_pixels, ml_pitch, 0, ml_top);
+	(void)dp_set_scale(ml_gid, ml_scale);
 	dp_set_origin(ml_gid, 0, ml_top);
 	r.left = 0;  r.top = ml_top;  r.right = ml_w;  r.bottom = ml_top + ml_h;
 	dp_set_frame(ml_gid, &r);
@@ -370,23 +398,48 @@ EXPORT ER wm_msg_put( CONST char *utf8 )
 		return E_OK;			/* nothing was there, nothing is */
 	}
 	ml_text[n] = 0;
-	if ( ml_on ) {
+	if ( ml_on && ml_note_at == 0 ) {	/* under a note: shown when the note goes */
 		ml_message();
 		ml_show(0, ml_lim);
 	}
 	return E_OK;
 }
 
-/* The message shown, "" for none: the bytes written */
-EXPORT INT wm_msg_text( char *buf, INT max )
+/*
+ * A note of the system's: shown in the message's place for ML_NOTE_HOLD,
+ * a note after it taking its place, and then the program's message
+ * again (knl_msg_tick)
+ */
+EXPORT void knl_msg_note( CONST char *utf8 )
 {
 	INT	n = 0;
+
+	while ( utf8 != NULL && utf8[n] != 0 && n < ML_NOTE_MAX - 1 ) {
+		n++;
+	}
+	while ( n > 0 && utf8[n] != 0 && ( (UB)utf8[n] & 0xC0 ) == 0x80 ) {
+		n--;
+	}
+	if ( n > 0 ) knl_memcpy(ml_note, utf8, (SZ)n);
+	ml_note[n] = 0;
+	ml_note_at = ( n > 0 ) ? ( ml_now() | 1 ) : 0;
+	if ( ml_on ) {
+		ml_message();
+		ml_show(0, ml_lim);
+	}
+}
+
+/* The message shown, "" for none: the bytes written; a note while it is up */
+EXPORT INT wm_msg_text( char *buf, INT max )
+{
+	INT		n = 0;
+	CONST char	*s = ( ml_note_at != 0 ) ? ml_note : ml_text;
 
 	if ( buf == NULL || max <= 0 ) {
 		return 0;
 	}
-	while ( n < max - 1 && ml_text[n] != 0 ) {
-		buf[n] = ml_text[n];
+	while ( n < max - 1 && s[n] != 0 ) {
+		buf[n] = s[n];
 		n++;
 	}
 	buf[n] = 0;
@@ -398,8 +451,142 @@ EXPORT UINT wm_msg_get_mode( void )
 	return ml_mode;
 }
 
+/* ---------------------------------------------------------------- the input mode */
+
+/*
+ * The keyboard's input mode is worked here, as each key comes and
+ * before it is addressed (wm_read_event, knl_msg_mode_key), so that it
+ * changes in its place among the keys. Every notice of a key carries
+ * the mode as it stands once that key has been worked (T_OBNTM imode),
+ * and a program takes what to do with a key from that: the mode now
+ * may already be one set by a key pressed after it, still on its way
+ * to the program. A key that sets the mode carries the mode it set, so
+ * a program composing when 英数 comes commits there, before the keys
+ * that follow it.
+ *
+ * The mode keys are the 106 keyboard's, with the 101 keyboard's
+ * combinations beside them where they do not collide:
+ *
+ *	[ひらがなカタカナ] (左Ctrl+CapsLock)	日本語, in hiragana
+ *	Shift+[ひらがなカタカナ]		日本語, in katakana
+ *	Alt+[ひらがなカタカナ]			かな入力 and ローマ字入力 in turn
+ *	[英数] (CapsLock)			英語
+ *	Shift+[英数]				英語, in capitals
+ *	[半角/全角] (101: `)			letters half width or full
+ *
+ * Alt+[英数] is not one: it is the converter's 補助. かな入力 or
+ * ローマ字入力 is as ユーザ環境設定 last set it (LK_KANA), taken when it
+ * changes; Alt with the kana key changes it for the time being between.
+ */
+#define ML_KEY_ZENKAKU	0x35		/* 半角/全角 (101: `~) */
+#define ML_KEY_EISU	0x39		/* 英数 (101: CapsLock) */
+#define ML_KEY_KANA	0x88		/* ひらがなカタカナ */
+#define ML_MOD_SHIFT	( HID_MOD_LSHIFT | HID_MOD_RSHIFT )
+#define ML_MOD_ALT	( HID_MOD_LALT | HID_MOD_RALT )
+
+LOCAL BOOL	ml_roman = TRUE;	/* romaji in 日本語 (else kana keys), kept through 英語 */
+LOCAL INT	ml_kana_seen = -1;	/* LK_KANA as last taken */
+
+/* The mode from its parts */
+LOCAL UINT ml_mode_of( BOOL jp, BOOL kana, BOOL han )
+{
+	UINT	m = han ? WM_MODE_HAN : 0;
+
+	if ( kana ) {
+		m |= WM_MODE_KANA;		/* katakana; in 英語, capitals */
+	}
+	if ( !jp ) {
+		m |= WM_MODE_ALPH | WM_MODE_ROMAN;
+	} else if ( ml_roman ) {
+		m |= WM_MODE_ROMAN;
+	}
+	return m;
+}
+
+/* LK_KANA taken when it has changed since last looked at */
+LOCAL void ml_follow( void )
+{
+	INT	v = wm_num(LK_KANA, 0);
+
+	if ( v == ml_kana_seen ) {
+		return;
+	}
+	ml_kana_seen = v;
+	ml_roman = (BOOL)( v == 0 );
+	if ( ( ml_mode & WM_MODE_ALPH ) == 0 ) {
+		(void)wm_msg_mode(ml_mode_of(TRUE, ( ml_mode & WM_MODE_KANA ) != 0,
+					     ( ml_mode & WM_MODE_HAN ) != 0));
+	}
+}
+
+EXPORT BOOL wm_kbmode_key( UINT key, UINT mods )
+{
+	switch ( key ) {
+	case ML_KEY_KANA:
+	case ML_KEY_ZENKAKU:
+		return TRUE;
+	case ML_KEY_EISU:
+		return (BOOL)( ( mods & HID_MOD_LCTRL ) != 0 || ( mods & ML_MOD_ALT ) == 0 );
+	default:
+		return FALSE;
+	}
+}
+
+/* The mode the machine's settings say to start in (LK_KBD_MODE: 0 かな, 1 英数) */
+EXPORT void wm_kbmode_start( void )
+{
+	ml_kana_seen = -1;
+	ml_follow();
+	(void)wm_msg_mode(ml_mode_of(wm_num(LK_KBD_MODE, 1) == 0, FALSE,
+				     ( ml_mode & WM_MODE_HAN ) != 0));
+}
+
+/*
+ * A key pressed, worked as it comes: TRUE when it set the mode. Called
+ * by the reader of the input before the key goes anywhere.
+ */
+EXPORT BOOL knl_msg_mode_key( UINT key, UINT mods )
+{
+	BOOL	jp = (BOOL)( ( ml_mode & WM_MODE_ALPH ) == 0 );
+	BOOL	kana = (BOOL)( ( ml_mode & WM_MODE_KANA ) != 0 );
+	BOOL	han = (BOOL)( ( ml_mode & WM_MODE_HAN ) != 0 );
+	BOOL	shift = (BOOL)( ( mods & ML_MOD_SHIFT ) != 0 );
+
+	ml_follow();
+	if ( !wm_kbmode_key(key, mods) ) {
+		return FALSE;
+	}
+	switch ( key ) {
+	case ML_KEY_KANA:
+		if ( ( mods & ML_MOD_ALT ) != 0 ) {
+			ml_roman = (BOOL)!ml_roman;	/* かな入力 and ローマ字入力 in turn */
+		} else {
+			jp = TRUE;
+			kana = shift;
+		}
+		break;
+	case ML_KEY_EISU:
+		if ( ( mods & HID_MOD_LCTRL ) != 0 ) {
+			jp = TRUE;			/* 101: 左Ctrl+CapsLock */
+			kana = FALSE;
+		} else {
+			jp = FALSE;
+			kana = shift;
+		}
+		break;
+	default:				/* ML_KEY_ZENKAKU */
+		han = (BOOL)!han;
+		break;
+	}
+	(void)wm_msg_mode(ml_mode_of(jp, kana, han));
+	return TRUE;
+}
+
 EXPORT ER wm_msg_mode( UINT mode )
 {
+	if ( ( mode & WM_MODE_ALPH ) == 0 ) {
+		ml_roman = (BOOL)( ( mode & WM_MODE_ROMAN ) != 0 );
+	}
 	if ( mode == ml_mode ) {
 		return E_OK;
 	}
@@ -427,15 +614,16 @@ EXPORT void knl_msg_lay( UB *back, UINT pitch, CONST T_DPRECT *box )
 	if ( !ml_on || ml_pixels == NULL ) {
 		return;
 	}
-	from = ( box->top > ml_top ) ? box->top : ml_top;
-	to = ( box->bottom < ml_top + ml_h ) ? box->bottom : ml_top + ml_h;
+	/* box is in pixels of the screen, as the band's own are */
+	from = ( box->top > ml_dtop ) ? box->top : ml_dtop;
+	to = ( box->bottom < ml_dtop + ml_dh ) ? box->bottom : ml_dtop + ml_dh;
 	wide = box->right - box->left;
 	if ( to <= from || wide <= 0 ) {
 		return;
 	}
 	for ( y = from; y < to; y++ ) {
 		knl_memcpy(back + (SZ)y * pitch + (SZ)box->left * sizeof(UW),
-			   ml_pixels + (SZ)( y - ml_top ) * ml_pitch
+			   ml_pixels + (SZ)( y - ml_dtop ) * ml_pitch
 			   + (SZ)box->left * sizeof(UW),
 			   (SZ)wide * sizeof(UW));
 	}
@@ -455,9 +643,16 @@ EXPORT void knl_msg_press( INT x, INT y )
 	ml_show(ml_sepx, ml_w);
 }
 
-/* Time going by: the clock moved on, and the date put away when due */
+/* Time going by: the clock moved on, and the date and a note put away when due */
 EXPORT void knl_msg_tick( void )
 {
+	if ( ml_note_at != 0 && ml_now() >= ml_note_at + ML_NOTE_HOLD ) {
+		ml_note_at = 0;
+		if ( ml_on ) {
+			ml_message();
+			ml_show(0, ml_lim);
+		}
+	}
 	if ( !ml_on ) {
 		return;
 	}
@@ -466,6 +661,21 @@ EXPORT void knl_msg_tick( void )
 	}
 	if ( ml_clock(FALSE) ) {
 		ml_show(ml_sepx, ml_w);
+	}
+}
+
+/*
+ * The screen came to another size: the band laid along the new bottom,
+ * as wide as the screen now is, and drawn again. Called with the window
+ * manager's lock held, so nothing lays the band meanwhile.
+ */
+EXPORT void knl_msg_screen_changed( void )
+{
+	if ( ml_pixels == NULL ) {
+		return;				/* not made yet: made when it is shown */
+	}
+	if ( ml_make() >= E_OK && ml_on ) {
+		ml_redraw();
 	}
 }
 

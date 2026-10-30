@@ -53,7 +53,6 @@
 #define LINK_W		150			/* a link's size in a cell when it says none */
 #define LINK_H		25
 
-#define OUT_MAX		( 8 * 1024 * 1024 )
 #define CHUNK		( 64 * 1024 )
 #define TEXT_MAX	4096			/* bytes of what a cell holds, typed */
 
@@ -61,6 +60,7 @@
 #define PN_FIND		2
 #define PN_PAGE		3
 #define PN_CLOSE	4
+#define PN_WARN		5			/* what could not be done, told */
 
 #define CP_FIND_TEXT	11
 #define CP_FIND_REP	12
@@ -145,8 +145,13 @@ extern BOOL	g_show_hidden;		/* 隠蔽仮身を表示 */
 extern BOOL	g_paper_frame;		/* 用紙枠表示 */
 extern BOOL	g_full;
 
-extern UB	g_out[OUT_MAX];
-extern char	g_meta[OB_ATR_MAX + 1];
+/* What could not be done told in the data box's panel, two lines */
+extern void warn( CONST char *a, CONST char *b );
+
+/* Room for a text that grows (ct_buf_grow): realloc, and 0 bytes lets it go */
+extern void *ct_more( void *p, SZ size );
+extern char	*g_meta;		/* the metadata meta_of read last ("" when none) */
+extern char	g_meta_none[1];
 
 /* ---------------------------------------------------------------- calc_main.c */
 
@@ -179,17 +184,13 @@ extern UW   colour_value( CONST char *s, UW dflt );	/* "#rrggbb" as a colour */
 
 extern BOOL ed_on( void );
 extern void ed_begin( INT col, INT row, CONST UB *first, BOOL keep );
-extern BOOL ed_key( UINT key, UINT mods );		/* TRUE when it was the editor's */
+extern BOOL ed_key( UINT key, UINT mods, UINT mode );		/* TRUE when it was the editor's */
 extern void ed_commit( void );				/* what is typed put in the cell */
 extern void ed_cancel( void );
-extern BOOL ed_press( INT x, INT y );			/* a press on the candidates */
+extern void ed_pick( INT row );			/* a press on the system's list of candidates (OB_WR_CAND) */
 extern void ed_draw( void );
 extern void ed_end( void );
-extern void ed_to_field( BOOL formula );		/* typed in the 操作パネル's box from now on */
-extern BOOL ed_in_field( void );
-extern void ed_field_caret( INT x );			/* the caret to the letter nearest x dots in */
-extern void ed_draw_field( INT gid, CONST T_DPRECT *box, BOOL caret );
-extern void ed_field_put( INT x, INT y );		/* where the candidates stand, in the window */
+extern INT  ed_text( UB *out, INT max );		/* what is typed in the cell now, for the panel's box */
 
 /* ---------------------------------------------------------------- calc_panel.c */
 
@@ -197,7 +198,7 @@ extern void panel_open( void );
 extern void panel_close( void );
 extern BOOL panel_on( void );
 extern BOOL panel_is( CONST TS_UUID *u );		/* a notice from the panel's window */
-extern void panel_event( CONST T_OBNTM *m );
+extern BOOL panel_event( CONST T_OBNTM *m );		/* FALSE: what the panel leaves to the sheet */
 extern void panel_draw( void );
 extern INT  panel_test( INT *p_all );			/* calc_test.c: the parts checked; how many passed */
 

@@ -48,8 +48,10 @@ IMPORT void knl_wait_release_tmout( TCB *tcb );
  */
 Inline void knl_wait_cancel( TCB *tcb )
 {
+	KLK_SCHED_DI();
 	knl_timer_delete(&tcb->wtmeb);
 	QueRemove(&tcb->tskque);
+	KLK_UNSCHED();
 }
 
 /*
@@ -145,11 +147,13 @@ IMPORT TCB* knl_gcb_top_of_wait_queue( GCB *gcb, TCB *tcb );
  */
 Inline void knl_make_non_wait( TCB *tcb )
 {
+	KLK_SCHED_DI();
 	if ( tcb->state == TS_WAIT ) {
 		knl_make_ready(tcb);
 	} else {
 		tcb->state = TS_SUSPEND;
 	}
+	KLK_UNSCHED();
 }
 
 /*
@@ -157,9 +161,35 @@ Inline void knl_make_non_wait( TCB *tcb )
  */
 Inline void knl_wait_release( TCB *tcb )
 {
+	KLK_SCHED_DI();
 	knl_timer_delete(&tcb->wtmeb);
 	QueRemove(&tcb->tskque);
 	knl_make_non_wait(tcb);
+	KLK_UNSCHED();
 }
+
+/*
+ * The locks of a task's wait (design 4.3.3)
+ *	knl_lock_wait_of takes the lock of what the task waits on and the
+ *	scheduler's lock, in that order, and answers the former (NULL when
+ *	the wait is on nothing, the task does not wait, or the lock is held
+ *	already by this processor); knl_unlock_wait_of lets go of them. The
+ *	task's state may be anything after the call; while the locks are
+ *	held its wait can neither end nor begin. Not to be called holding a
+ *	lock of an object or the scheduler's.
+ */
+#if KLK_FINE_OBJ
+IMPORT KLOCK *knl_lock_wait_of( TCB *tcb );
+IMPORT void knl_unlock_wait_of( KLOCK *l );
+#elif KLK_FINE_SCHED
+#define knl_lock_wait_of(tcb)	( KLK_SCHED_DI(), (KLOCK *)NULL )
+#define knl_unlock_wait_of(l)	KLK_UNSCHED()
+#else
+#define knl_lock_wait_of(tcb)	( (KLOCK *)NULL )
+#define knl_unlock_wait_of(l)	((void)(l))
+#endif
+
+/* The timer's callback for a wait's limit (wait.c) */
+IMPORT void knl_wait_tmout( TCB *tcb );
 
 #endif /* _WAIT_ */

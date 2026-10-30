@@ -60,6 +60,16 @@ IMPORT UW knl_usb_ms( void );
 #define NRESULT		12
 #define TONE_FRAMES	48000		/* a second, played over and over */
 
+/* The outputs, as many as the board can have and more: the first ST_OUTS of them */
+#define ST_OUTS		32
+
+LOCAL INT outs_of( SDOut *o )
+{
+	INT	n = knl_snd_outputs(o, ST_OUTS);
+
+	return ( n > ST_OUTS ) ? ST_OUTS : n;
+}
+
 LOCAL ID	dd = 0;
 LOCAL H		*tone = NULL;
 LOCAL INT	npass = 0, nrun = 0, nres = 0;
@@ -160,8 +170,8 @@ LOCAL BOOL wait_on( CONST UB *id, INT ms )
 /* The output of id among the outputs: its flags, or -1 when it is not there */
 LOCAL INT flags_of( CONST char *id )
 {
-	SDOut	o[SND_OUT_MAX];
-	INT	n = knl_snd_outputs(o, SND_OUT_MAX), k;
+	LOCAL SDOut	o[ST_OUTS];	/* off the stack: the checks run in one task, one at a time */
+	INT	n = outs_of(o), k;
 
 	for ( k = 0; k < n; k++ ) {
 		if ( knl_strcmp((CONST char *)o[k].id, id) == 0 ) {
@@ -176,8 +186,8 @@ LOCAL INT flags_of( CONST char *id )
 
 LOCAL void check_outputs( void )
 {
-	SDOut	o[SND_OUT_MAX];
-	INT	n = knl_snd_outputs(o, SND_OUT_MAX), k;
+	LOCAL SDOut	o[ST_OUTS];	/* off the stack, apart from flags_of's, which it calls */
+	INT	n = outs_of(o), k;
 
 	for ( k = 0; k < n; k++ ) {
 		tm_printf((UB *)"sndtest:   %s \"%s\" kind %d flags %x\n", o[k].id, o[k].name,
@@ -249,11 +259,11 @@ LOCAL void check_hdmi( INT h )
 
 LOCAL void check_usb( void )
 {
-	SDOut	o[SND_OUT_MAX];
+	SDOut	o[ST_OUTS];
 	SDStat	s0, s1;
 	SZ	asz = 0;
 	UW	t0, t1, fps;
-	INT	n = knl_snd_outputs(o, SND_OUT_MAX), k;
+	INT	n = outs_of(o), k;
 
 	for ( k = 0; k < n && o[k].kind != SND_BE_USB; k++ ) {
 		;
@@ -283,8 +293,8 @@ LOCAL void check_usb( void )
 /* The stream moved through every output that can sound while one channel plays on */
 LOCAL void check_move( void )
 {
-	SDOut	o[SND_OUT_MAX];
-	INT	n = knl_snd_outputs(o, SND_OUT_MAX), k, moved = 0, bad = 0;
+	SDOut	o[ST_OUTS];
+	INT	n = outs_of(o), k, moved = 0, bad = 0;
 	W	c0, c1;
 
 	if ( tone_start() < E_OK ) {

@@ -15,7 +15,7 @@ PSX_CRT    := $(PSX_OUT)/psx_crt.o
 
 # コマンドの翻訳の旗: 浮動小数を使い(-mgeneral-regs-only を外す)、include/posix を newlib より先に読む
 PSX_INC    := -I$(TOP)/include/posix
-PSX_CFLAGS := $(ARCHFLAGS) -mstrict-align -fno-stack-protector -O2 -g -std=gnu11 \
+PSX_CFLAGS := $(ARCHFLAGS) $(UARCH_FP) -fno-stack-protector -O2 -g -std=gnu11 \
 	      -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_POSIX_TIMERS=1 \
 	      -D_POSIX_MONOTONIC_CLOCK=200112L $(PSX_INC)
 PSX_LDFLAGS := $(ARCHFLAGS) -nostdlib -nostartfiles -static -T $(USER_LD) -Wl,--build-id=none \
@@ -32,18 +32,30 @@ PSX_OBJS   := $(patsubst $(PSX_DIR)/%.c,$(PSX_OUT)/%.o,$(PSX_SRCS)) \
 PSX_HDRS   := $(wildcard $(TOP)/include/posix/*.h) $(wildcard $(TOP)/include/posix/sys/*.h) \
 	      $(wildcard $(TOP)/include/posix/machine/*.h) $(PSX_DIR)/psx_int.h \
 	      $(TOP)/include/ts/psx.h $(TOP)/include/ts/psxid.h $(TOP)/include/ts/fs.h $(TOP)/include/ts/svc.h
+# アーキテクチャの置き場の C(x86_64/ だけにある)
+ifneq ($(UARCH_DIR),)
+PSX_ASRCS  := $(wildcard $(PSX_DIR)/$(UARCH_DIR)*.c)
+PSX_OBJS   += $(patsubst $(PSX_DIR)/$(UARCH_DIR)%.c,$(PSX_OUT)/%.o,$(PSX_ASRCS))
+# newlib の stdio が呼ぶ状態の問合せは libposix のもの(psx_nlstat.c)を先に結ぶ
+PSX_LDFLAGS += -Wl,-u,_fstat_r -Wl,-u,_stat_r
+
+$(PSX_OUT)/%.o: $(PSX_DIR)/$(UARCH_DIR)%.c $(PSX_HDRS)
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(PSX_KCFLAGS) -c -o $@ $<
+endif
 
 $(PSX_OUT)/%.o: $(PSX_DIR)/%.c $(PSX_HDRS)
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
 	@$(CC) $(PSX_KCFLAGS) -c -o $@ $<
 
-$(PSX_OUT)/%.o: $(PSX_DIR)/%.S $(TOP)/include/ts/svc.h
+$(PSX_OUT)/%.o: $(PSX_DIR)/$(UARCH_DIR)%.S $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'AS  $@'
 	@$(CC) $(ARCHFLAGS) -I$(TOP)/include -c -o $@ $<
 
-$(PSX_OUT)/svc_stub.o: $(TOP)/lib/libts/svc_stub.S $(TOP)/include/ts/svc.h
+$(PSX_OUT)/svc_stub.o: $(TOP)/lib/libts/$(UARCH_DIR)svc_stub.S $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'AS  $@'
 	@$(CC) $(ARCHFLAGS) -I$(TOP)/include -c -o $@ $<

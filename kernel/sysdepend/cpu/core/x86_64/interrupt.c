@@ -121,6 +121,7 @@ EXPORT ER knl_init_interrupt( void )
 	knl_smp_init_interrupt();
 
 	knl_apic_init();
+	knl_lockup_cpu_init();		/* this processor's period of the lockup checks (lockup.c) */
 
 	return E_OK;
 }

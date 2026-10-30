@@ -40,6 +40,7 @@ from tsfs_py import TsfsError, Volume
 from tsfs_py.check import Checker
 from tsfs_py.cli import add_volume_args, open_device
 from tsfs_py import repair
+from tsfs_py.layout import KNOWN_INCOMPAT
 
 
 def show(rep, verbose):
@@ -69,6 +70,17 @@ def main():
     writing = args.fix or args.relink
 
     try:
+        if writing:
+            # a volume with features this code does not know is read only
+            # here: replaying its journal or making its maps again could
+            # undo what a newer kernel wrote
+            with Volume.open(open_device(args.image, args, writable=False),
+                             replay=False) as probe:
+                unknown = probe.sb.incompat & ~KNOWN_INCOMPAT
+            if unknown:
+                raise TsfsError("incompatible features 0x%x that this fsck.tsfs "
+                                "does not know: not changed (check it with a "
+                                "newer one)" % unknown)
         dev = open_device(args.image, args, writable=writing)
         vol = Volume.open(dev, replay=writing)
     except (TsfsError, OSError) as e:

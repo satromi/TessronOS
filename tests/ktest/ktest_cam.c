@@ -518,6 +518,14 @@ LOCAL INT stream_for( ID dd, INT mode, UB fmt, INT ms, INT *bad )
 	return n;
 }
 
+/* The units the camera device has now */
+LOCAL INT units( void )
+{
+	T_RDEV	rd;
+
+	return ( tk_ref_dev((UB *)CAM_DEVNM, &rd) >= E_OK ) ? rd.nsub : 0;
+}
+
 LOCAL void test_uvc_board( void )
 {
 	static T_CAMMODE	modes[CAM_MAXMODES];
@@ -529,9 +537,8 @@ LOCAL void test_uvc_board( void )
 
 	if ( !KT_BOARD ) KT_SKIP("a USB camera is on the board");
 	tk_dly_tsk(2000);					/* a camera plugged in at start-up comes up */
-	for ( u = 0; u < CAM_UNITS; u++ ) {
-		knl_strcpy((char *)name, "cama0");
-		name[4] = (UB)( '0' + u );
+	for ( u = 0; u < units(); u++ ) {
+		tm_sprintf(name, (CONST UB *)"cama%d", u);
 		dd = tk_opn_dev(name, TD_UPDATE);
 		if ( dd <= 0 ) continue;
 		if ( cam_r(dd, DN_CAMINFO, &in, sizeof(in), &asz) < E_OK || in.state == CAMST_NODEV ) {

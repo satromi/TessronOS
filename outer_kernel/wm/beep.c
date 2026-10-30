@@ -36,6 +36,10 @@
  *	what ユーザ環境設定 sets); WM_BEEP_TEST is half a second of 880Hz.
  *	The channel is stopped before each sound, so a sound cut short by a
  *	later one leaves nothing that would refuse the next.
+ *
+ *	The volume keys (HID_KEY_VOLUP, HID_KEY_VOLDOWN; a machine's own
+ *	volume buttons are given as them) change the whole's volume of the
+ *	sound device's mixer here, as 音量ミキサー's 全体 does (knl_wm_volume_key).
  */
 
 #include <sys/machine.h>
@@ -44,6 +48,7 @@
 #include <ts/wm.h>
 #include <ts/look.h>
 #include <ts/snd.h>
+#include <ts/hid.h>
 #include <ts/ob.h>
 #include <ts/uuid.h>
 #include <ts/sysdef.h>
@@ -147,16 +152,15 @@ LOCAL BOOL wav_parse( CONST UB *buf, INT len, INT *p_off, INT *p_n, SDPcmMode *m
  */
 LOCAL INT tone_make( ID key, UB *buf, SDPcmMode *m, INT len_ms, INT test_hz )
 {
-	UB	*j = (UB *)Kmalloc(OB_META_MAX);
+	UB	*j = NULL;
 	SZ	asz = 0;
 	D	hz = 2000, ms = 100;
-	INT	p, n, i, half, k;
+	INT	p, n, i, half, k, len;
 	H	*pcm = (H *)buf;
 
-	if ( j == NULL ) {
-		return 0;
-	}
-	if ( key > 0 && ob_get_atr(key, j, OB_META_MAX - 1, &asz) >= E_OK ) {
+	len = ( key > 0 ) ? knl_ob_atr_all(key, 0, &j, NULL) : E_NOEXS;
+	asz = ( len > 0 ) ? (SZ)len : 0;
+	if ( len >= 0 ) {
 		p = knl_oj_path(j, (INT)asz, "tessronos", "sound");
 		p = ( p >= 0 ) ? knl_oj_member(j, (INT)asz, p, "tone") : -1;
 		if ( p >= 0 ) {
@@ -167,7 +171,7 @@ LOCAL INT tone_make( ID key, UB *buf, SDPcmMode *m, INT len_ms, INT test_hz )
 			if ( q >= 0 ) (void)knl_oj_num(j, (INT)asz, q, &ms);
 		}
 	}
-	Kfree(j);
+	if ( j != NULL ) Kfree(j);
 	if ( len_ms > 0 ) ms = len_ms;
 	if ( test_hz > 0 ) hz = test_hz;
 	if ( hz < 50 ) hz = 50;
@@ -394,4 +398,55 @@ EXPORT ER wm_beep_try( UINT what )
 	er = ( tk_wai_flg(try_flg, 1, TWF_ORW | TWF_CLR, &ptn, TRY_TMO) >= E_OK ) ? try_er : E_TMOUT;
 	tk_sig_sem(try_sem, 1);
 	return er;
+}
+
+/*
+ * A volume key pressed, or repeating while it is held (the window layer
+ * takes it before any window, wm_read_event): the whole's volume a step
+ * of VOL_STEP up or down, from the louder of left and right, within 0 ..
+ * SND_VOL_MAX, both sides set to it. A mute is let go, as the volume is
+ * set again. It is kept for the next start, as a write of DN_SDMIXSET
+ * is, and the mixer tells of it (OB_E_CHANGE of OB_SND_MIX), which is
+ * how 音量ミキサー shows it; the message line says it for a moment.
+ * Answers the volume set, or -1 for a key that is not one of them (or
+ * a mixer that took nothing).
+ */
+#define VOL_STEP	5
+
+IMPORT void knl_msg_note( CONST char *utf8 );	/* msgline.c */
+
+EXPORT INT knl_wm_volume_key( UINT code )
+{
+	SDMix		m;
+	SDMixSet	s;
+	INT		v, n;
+	char		t[32];
+
+	if ( code != HID_KEY_VOLUP && code != HID_KEY_VOLDOWN ) {
+		return -1;
+	}
+	knl_memset(&m, 0, sizeof(m));
+	(void)knl_snd_mix_get(&m, 0);
+	v = (INT)( ( m.lv > m.rv ) ? m.lv : m.rv );
+	v += ( code == HID_KEY_VOLUP ) ? VOL_STEP : -VOL_STEP;
+	if ( v < 0 ) v = 0;
+	if ( v > SND_VOL_MAX ) v = SND_VOL_MAX;
+	knl_memset(&s, 0, sizeof(s));
+	s.what = SND_MIX_ALL;
+	s.lv = s.rv = (UINT)v;
+	s.mute = 0;
+	if ( knl_snd_mix_set(&s, TRUE) < E_OK ) {
+		return -1;
+	}
+	/* 音量 45% */
+	n = 0;
+	knl_memcpy(t, "音量 ", sizeof("音量 ") - 1);
+	n += sizeof("音量 ") - 1;
+	if ( v >= 100 ) t[n++] = (char)( '0' + v / 100 );
+	if ( v >= 10 )  t[n++] = (char)( '0' + ( v / 10 ) % 10 );
+	t[n++] = (char)( '0' + v % 10 );
+	t[n++] = '%';
+	t[n] = 0;
+	knl_msg_note(t);
+	return v;
 }

@@ -212,6 +212,45 @@ static INT hold_test( void )
 	return 0;				/* ends with them all held */
 }
 
+#ifdef __x86_64__
+/*
+ * place: BOs placed where the program chooses (gp_bnd_bo), for a GPU
+ * whose user side driver chooses its addresses; the test's GPU records
+ * what was entered in the context's space and taken out. A BO placed
+ * over part of another takes the other out of the space whole, and the
+ * other, moved or deleted afterwards, leaves the new one's place be (a
+ * driver that keeps unused BOs for later gives one's address to another
+ * before it gives the first a new one). Two BOs are left placed when the
+ * program ends.
+ */
+static INT place_test( void )
+{
+	T_GPBO	a, b, c, d;
+	INT	ctx;
+
+	ctx = gp_opn_gpu();
+	if ( ctx <= 0 ) return 300;
+	if ( gp_cre_bo(ctx, 8192, 0, &a) != E_OK ) return 301;
+	if ( a.offset != 0 ) return 302;			/* nowhere until placed */
+	if ( gp_bnd_bo(ctx, a.handle, 0xffff800000123000ULL) != E_OK ) return 303;	/* canonical */
+	if ( gp_bnd_bo(ctx, a.handle, 0xffff800000123000ULL) != E_OK ) return 304;	/* there already */
+	if ( gp_bnd_bo(ctx, a.handle, 0x200000) != E_OK ) return 305;		/* moved */
+	if ( gp_bnd_bo(ctx, 999, 0x300000) != E_ID ) return 306;
+	if ( gp_bnd_bo(ctx, a.handle, 0) != E_PAR ) return 307;
+	if ( gp_cre_bo(ctx, 4096, 0, &b) != E_OK ) return 308;
+	if ( gp_bnd_bo(ctx, b.handle, 0x400000) != E_OK ) return 309;
+	if ( gp_del_bo(ctx, b.handle) != E_OK ) return 310;		/* taken out with it */
+	if ( gp_cre_bo(ctx, 8192, 0, &c) != E_OK ) return 311;
+	if ( gp_bnd_bo(ctx, c.handle, 0x600000) != E_OK ) return 312;
+	if ( gp_cre_bo(ctx, 4096, 0, &d) != E_OK ) return 313;
+	if ( gp_bnd_bo(ctx, d.handle, 0x601000) != E_OK ) return 314;		/* over c's second page */
+	if ( gp_bnd_bo(ctx, c.handle, 0x700000) != E_OK ) return 315;		/* c, no longer placed, elsewhere */
+	if ( gp_del_bo(ctx, c.handle) != E_OK ) return 316;
+	tm_putstring((CONST UB *)"gpprog: place: done, two BOs left placed\n");
+	return 0;
+}
+#endif
+
 int main( void )
 {
 	SZ	n = ts_get_arg(arg, sizeof(arg) - 1);
@@ -222,6 +261,9 @@ int main( void )
 	if ( arg[0] == 'b' )		r = bo_test();
 	else if ( arg[0] == 'j' )	r = job_test();
 	else if ( arg[0] == 'h' )	r = hold_test();
+#ifdef __x86_64__
+	else if ( arg[0] == 'p' )	r = place_test();
+#endif
 	else				r = 99;
 	return r;
 }

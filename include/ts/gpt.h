@@ -79,6 +79,15 @@ IMPORT ER knl_gpt_add( CONST char *disk, UD first, UD last, CONST UB *type, CONS
 		       UB *p_part, INT max );
 
 /*
+ * A partition made another in its place: its entry given the type and
+ * the name given (UTF-8) and a new unique GUID (to `p_uniq` unless
+ * NULL), its attributes cleared; where it lies, its entry and its
+ * number stay. What it holds is not touched. The driver reads the
+ * table again.
+ */
+IMPORT ER knl_gpt_retype( CONST char *part, CONST UB *type, CONST char *name, UB *p_uniq );
+
+/*
  * For a test: every write to a disk's table after the next `after` is
  * thrown away, as if the power went then; 0 puts it off. The writes
  * made since the last call go to p_writes.

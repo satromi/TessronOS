@@ -1,0 +1,33 @@
+<tad version="1.0" encoding="UTF-8" filename="書庫管理のデータボックス">
+<document>
+<p>書庫管理のデータボックス</p>
+<p>書庫管理が尋ねるパネルの定義。書籍を作るかの確認、書籍情報、実身名一覧。</p>
+</document>
+<databox>
+<panel num="2" rect="0,0,480,212" title="書籍の作成">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="64"> </text>
+<text num="3" x="24" y="86"> </text>
+<text num="4" x="24" y="108"> </text>
+<text num="5" x="24" y="130"> </text>
+<text num="6" x="24" y="152"> </text>
+<button num="12" rect="252,172,352,196" answer="cancel">取消し</button>
+<button num="11" rect="364,172,464,196" answer="ok" emph="true">作成</button>
+</panel>
+<panel num="3" rect="0,0,480,222" title="書籍情報">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="64"> </text>
+<text num="3" x="24" y="86"> </text>
+<text num="4" x="24" y="108"> </text>
+<text num="5" x="24" y="130"> </text>
+<text num="6" x="24" y="152"> </text>
+<text num="7" x="24" y="174"> </text>
+<button num="101" rect="364,182,464,206" answer="ok" emph="true">確認</button>
+</panel>
+<panel num="4" rect="0,0,480,320" title="実身名一覧">
+<text num="1" x="24" y="34"> </text>
+<list num="10" rect="16,46,464,268" cols="48r,0"></list>
+<button num="101" rect="364,282,464,306" answer="ok" emph="true">確認</button>
+</panel>
+</databox>
+</tad>

@@ -30,6 +30,7 @@ EXPORT void knl_LockOBJ( OBJLOCK *loc )
 
   retry:
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 	klocked = knl_ctxtsk->klocked;
 	if ( !klocked ) {
 		if ( loc->wtskq.next == NULL ) {
@@ -44,9 +45,10 @@ EXPORT void knl_LockOBJ( OBJLOCK *loc )
 			knl_ctxtsk->klockwait = TRUE;
 			QueInsert(&knl_ctxtsk->tskque, &loc->wtskq);
 
-			knl_reschedule();	/* TessronOS: processors are assigned by the SMP scheduler */
+			knl_reschedule_lazy();	/* TessronOS: processors are assigned by the SMP scheduler */
 		}
 	}
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 	/* Since wait could be freed without getting lock, 
 	   need to re-try if lock is not got */
@@ -64,6 +66,7 @@ EXPORT void knl_UnlockOBJ( OBJLOCK *loc )
 	TCB	*tcb;
 
 	BEGIN_CRITICAL_SECTION;
+	KLK_SCHED();
 	knl_ctxtsk->klocked = FALSE;
 	knl_ready_queue.klocktsk = NULL;
 
@@ -78,6 +81,7 @@ EXPORT void knl_UnlockOBJ( OBJLOCK *loc )
 		knl_ready_queue_insert_top(&knl_ready_queue, tcb);
 	}
 
-	knl_reschedule();	/* TessronOS: processors are assigned by the SMP scheduler */
+	knl_reschedule_lazy();	/* TessronOS: processors are assigned by the SMP scheduler */
+	KLK_UNSCHED();
 	END_CRITICAL_SECTION;
 }

@@ -16,6 +16,11 @@
 #include "tstdlib.h"
 #include "sysman/pfalloc.h"
 
+#if defined(__x86_64__)
+IMPORT UD	knl_kimg_pa;		/* LOAD_PA_VALUE: where the loader put the kernel image */
+#define DBG_UART_PA	0xFEC00000UL	/* a device page: the IOAPIC's registers */
+#endif
+
 /* allocate and free at several orders: free count returns to the start value */
 LOCAL void test_pages_symmetry( void )
 {

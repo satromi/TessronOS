@@ -1,0 +1,52 @@
+# The system volume pulled out while the desktop runs, and put back
+# (design 11.26), for tools/x64/ui_run64.py with UI_USBBOOT=1: the machine
+# starts from the disk in a USB card reader, as a PC started from a USB
+# card does, so the system volume is uda1. The disk is pulled out with the
+# desktop up: the desktop stays, the first window drawn from the record it
+# keeps, and the message line says the system's disk went; nothing faults.
+# The pointer moved over the first window and the window made larger make
+# it draw again with the disk gone. A window shows the console's last
+# lines, since the records' files were on the disk too. The same disk put
+# back is attached again by itself, the first window reads its record
+# anew, and /boot is mounted again on it for the records' files.
+shot sys_before
+logmark
+hmp device_del sysdisk
+expectsincein 30 disk: volumes changed
+expectsince disk: the system volume went
+wait 1500
+shot sys_said
+move 300 200
+wait 300
+move 320 220
+wait 300
+click 250 60
+wait 300
+drag 346 222 620 420
+wait 1500
+shot sys_gone
+# a pale link opened, and a link of the template box: neither can be read now
+dclick 60 49
+wait 1500
+shot sys_open
+key 28
+wait 500
+dclick 980 89
+wait 1500
+shot sys_open2
+key 28
+wait 500
+absent !EXCEPTION!
+absent !STACK!
+logmark
+hmp drive_add 0 if=none,id=usd2,file=$DISK,format=raw
+hmp device_add usb-storage,drive=usd2,id=sysdisk2,bus=xhci.0,removable=on
+expectsincein 40 disk: the system volume is back
+expectsince disk: the first window read again (0)
+wait 1500
+shot sys_back
+expectsincein 90 bootlog: /boot on udb0 again (0)
+expectsincein 30 KERNEL.TXT written
+absent !EXCEPTION!
+absent !STACK!
+ready

@@ -24,6 +24,7 @@
 
 #include <tk/typedef.h>
 #include <ts/uapp.h>
+#include <ts/wm.h>
 #include <ts/sysdef.h>
 #include <ts/ser.h>
 #include "../lterm/lterm.h"
@@ -52,7 +53,7 @@
 #define NL_LF		1
 #define NL_CRLF		2
 
-LOCAL CONST char win_json[] = "{\"rect\":[140,120,800,540],\"attr\":7}";
+LOCAL CONST char win_json[] = "{\"rect\":[140,120,800,540],\"attr\":15}";
 
 /* The ports there are */
 typedef struct {
@@ -63,9 +64,8 @@ typedef struct {
 
 LOCAL LTERM	term;
 LOCAL LTWIN	win;
-LOCAL PORT	ports[SER_MAX_PORT];
-LOCAL INT	nport = 0;
-LOCAL INT	cur = -1;		/* the port in use */
+LOCAL PORT	port;			/* the port in use */
+LOCAL INT	cur = -1;		/* its place among the ports, -1 none */
 LOCAL ID	kdev = 0;		/* its key */
 LOCAL UW	speed = 0;
 LOCAL UINT	nl = NL_CR;
@@ -88,38 +88,90 @@ LOCAL INT put_s( UB *out, INT n, CONST UB *s )
 	return n;
 }
 
-/* The serial ports: the device objects whose record 3 says what a port is */
-LOCAL void find_ports( void )
+/*
+ * The serial ports: the device objects whose record 3 says what a port
+ * is, as many as there are. The program keeps no heap, so they are not
+ * kept: the devices are read a page at a time, each port handed to fn
+ * with its place among them, and found again by its place when it is
+ * chosen. How many there are.
+ */
+#define LIST_PAGE	32
+
+LOCAL INT ports_each( void (*fn)( INT k, CONST PORT *p, void *ctx ), void *ctx )
 {
-	TS_UUID	ids[32];
+	TS_UUID	ids[LIST_PAGE], last;
 	T_OBREF	r;
+	PORT	p;
 	SZ	asz;
-	INT	cnt = 0, i, k;
+	INT	cnt, i, k, all = 0, n = 0;
 	ID	key;
 
-	nport = 0;
-	if ( ob_lst_obj(OB_T_DEVICE, OB_S_CHAR, NULL, ids, 32, &cnt) < E_OK ) {
-		return;
+	do {
+		cnt = 0;
+		if ( ob_lst_obj(OB_T_DEVICE, OB_S_CHAR, ( all > 0 ) ? &last : NULL, ids, LIST_PAGE, &cnt) < E_OK ) {
+			break;
+		}
+		for ( i = 0; i < cnt; i++ ) {
+			if ( ob_ref_obj(&ids[i], &r) < E_OK || r.name[0] != 's' || r.name[1] != 'e'
+			  || r.name[2] != 'r' ) {
+				continue;
+			}
+			key = ob_opn_obj(&ids[i], OB_OP_READ);
+			if ( key <= 0 ) {
+				continue;
+			}
+			asz = 0;
+			if ( ob_rea_rec(key, 3, 0, &p.info, sizeof(T_SERINFO), &asz) >= E_OK
+			  && asz == (SZ)sizeof(T_SERINFO) ) {
+				p.uuid = ids[i];
+				for ( k = 0; r.name[k] != 0 && k < 15; k++ ) p.name[k] = r.name[k];
+				p.name[k] = 0;
+				if ( fn != NULL ) fn(n, &p, ctx);
+				n++;
+			}
+			ob_cls_obj(key);
+		}
+		if ( cnt > 0 ) last = ids[cnt - 1];
+		all += cnt;
+	} while ( cnt == LIST_PAGE );
+	return n;
+}
+
+/* The port at place k into the PORT ctx points at */
+typedef struct {
+	INT	want;
+	PORT	*out;
+	BOOL	found;
+} PORTAT;
+
+LOCAL void port_take( INT k, CONST PORT *p, void *ctx )
+{
+	PORTAT	*a = (PORTAT *)ctx;
+
+	if ( k == a->want ) {
+		*a->out = *p;
+		a->found = TRUE;
 	}
-	for ( i = 0; i < cnt && i < 32 && nport < SER_MAX_PORT; i++ ) {
-		if ( ob_ref_obj(&ids[i], &r) < E_OK || r.name[0] != 's' || r.name[1] != 'e'
-		  || r.name[2] != 'r' ) {
-			continue;
-		}
-		key = ob_opn_obj(&ids[i], OB_OP_READ);
-		if ( key <= 0 ) {
-			continue;
-		}
-		asz = 0;
-		if ( ob_rea_rec(key, 3, 0, &ports[nport].info, sizeof(T_SERINFO), &asz) >= E_OK
-		  && asz == (SZ)sizeof(T_SERINFO) ) {
-			ports[nport].uuid = ids[i];
-			for ( k = 0; r.name[k] != 0 && k < 15; k++ ) ports[nport].name[k] = r.name[k];
-			ports[nport].name[k] = 0;
-			nport++;
-		}
-		ob_cls_obj(key);
-	}
+}
+
+LOCAL BOOL port_at( INT k, PORT *out )
+{
+	PORTAT	a;
+
+	a.want = k;
+	a.out = out;
+	a.found = FALSE;
+	(void)ports_each(port_take, &a);
+	return a.found;
+}
+
+/* The first port that is not the console's, else the first: its place, -1 none */
+LOCAL void port_first( INT k, CONST PORT *p, void *ctx )
+{
+	INT	*first = (INT *)ctx;
+
+	if ( first[0] < 0 && !p->info.console ) first[0] = k;
+	if ( first[1] < 0 ) first[1] = k;
 }
 
 /* The window's name says which port, how fast, what Enter sends */
@@ -130,7 +182,7 @@ LOCAL void title( void )
 
 	n = put_s(t, n, (CONST UB *)"{\"name\":\"シリアル通信 ");
 	if ( kdev > 0 ) {
-		n = put_s(t, n, ports[cur].name);
+		n = put_s(t, n, port.name);
 		n = put_s(t, n, (CONST UB *)" ");
 		n += lt_num(t + n, (D)speed);
 		n = put_s(t, n, (CONST UB *)( ( nl == NL_CR ) ? " CR" : ( nl == NL_LF ) ? " LF" : " CR+LF" ));
@@ -155,18 +207,27 @@ LOCAL ER connect( INT i )
 {
 	SZ	asz = 0;
 	ID	key;
+	PORT	p;
 
-	if ( i < 0 || i >= nport ) {
+	if ( i < 0 || !port_at(i, &p) ) {
 		return E_PAR;
 	}
-	key = ob_opn_obj(&ports[i].uuid, OB_OP_READ | OB_OP_WRITE);
+	key = ob_opn_obj(&p.uuid, OB_OP_READ | OB_OP_WRITE);
 	if ( key <= 0 ) {
 		return (ER)key;
 	}
 	hang_up();
 	kdev = key;
 	cur = i;
-	speed = ports[i].info.speed;
+	port = p;
+	{
+		T_OBNTF	req;
+
+		memset(&req, 0, sizeof(req));
+		req.events = OB_E_CHANGE;
+		(void)ob_ntf_evt(kdev, 1, &req, win.port);	/* what comes in, told; dropped with the key */
+	}
+	speed = p.info.speed;
 	(void)ob_rea_rec(kdev, 2, 0, &speed, sizeof(speed), &asz);
 	title();
 	return E_OK;
@@ -187,6 +248,14 @@ LOCAL void send( CONST UB *s, INT n )
 }
 
 /* What has come in on the line; TRUE when anything did */
+/*
+ * What came in, onto the screen: read until there is nothing, which asks
+ * the port to tell (OB_E_CHANGE of its record 1) of what comes next, or
+ * for 16 pieces at most, the rest left for the next round (line_more)
+ * rather than waited for
+ */
+LOCAL BOOL	line_more = FALSE;
+
 LOCAL BOOL take_line( void )
 {
 	UB	buf[READ_MAX];
@@ -194,7 +263,12 @@ LOCAL BOOL take_line( void )
 	BOOL	got = FALSE;
 	INT	guard;
 
-	for ( guard = 0; kdev > 0 && guard < 16; guard++ ) {
+	line_more = FALSE;
+	for ( guard = 0; kdev > 0; guard++ ) {
+		if ( guard >= 16 ) {
+			line_more = TRUE;
+			break;
+		}
 		asz = 0;
 		if ( ob_rea_rec(kdev, 1, 0, buf, sizeof(buf), &asz) < E_OK || asz == 0 ) {
 			break;
@@ -217,7 +291,7 @@ LOCAL void key( CONST T_OBNTM *m, BOOL *p_done )
 	UB	s[4], ch;
 	INT	n = 0;
 
-	if ( ctrl && m->code == KEY_E ) {
+	if ( ctrl && wm_key_cmd(m->code) == KEY_E ) {
 		*p_done = TRUE;			/* 閉じる, the window menu's letter */
 		return;
 	}
@@ -225,8 +299,8 @@ LOCAL void key( CONST T_OBNTM *m, BOOL *p_done )
 		lt_wind(&term, ( m->code == KEY_PGUP ) ? 10 : -10);
 		return;
 	}
-	if ( ctrl && m->code >= KEY_A && m->code <= KEY_Z ) {
-		s[n++] = (UB)( 1 + m->code - KEY_A );	/* the control code of the letter */
+	if ( ctrl && wm_key_cmd(m->code) >= KEY_A && wm_key_cmd(m->code) <= KEY_Z ) {
+		s[n++] = (UB)( 1 + wm_key_cmd(m->code) - KEY_A );	/* the control code of the letter typed */
 	} else {
 		switch ( m->code ) {
 		case KEY_ENTER:
@@ -258,9 +332,20 @@ LOCAL CONST UW speeds[] = {
 	1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600
 };
 
+/* A port's line in the menu, into the labels ctx points at */
+LOCAL void port_label( INT k, CONST PORT *p, void *ctx )
+{
+	UB	(*labels)[WM_LABEL_MAX] = (UB (*)[WM_LABEL_MAX])ctx;
+	INT	n;
+
+	n = put_s(labels[k], 0, p->name);
+	n = put_s(labels[k], n, (CONST UB *)"  ");
+	n = put_s(labels[k], n, p->info.label);
+	if ( p->info.console ) n = put_s(labels[k], n, (CONST UB *)" (コンソール)");
+}
+
 LOCAL void menu( CONST T_OBNTM *m, BOOL *p_done )
 {
-	UB	labels[SER_MAX_PORT][WM_LABEL_MAX];
 	TS_UUID	def, pdef;
 	T_MNSEL	sel;
 	UB	code[12];
@@ -274,15 +359,15 @@ LOCAL void menu( CONST T_OBNTM *m, BOOL *p_done )
 	  || mn_cre_men(&def, &mid) < E_OK ) {
 		return;
 	}
-	find_ports();
-	for ( i = 0; i < nport; i++ ) {
-		n = put_s(labels[i], 0, ports[i].name);
-		n = put_s(labels[i], n, (CONST UB *)"  ");
-		n = put_s(labels[i], n, ports[i].info.label);
-		if ( ports[i].info.console ) n = put_s(labels[i], n, (CONST UB *)" (コンソール)");
-	}
-	if ( nport > 0 ) {
-		(void)mn_set_lst(mid, &pdef, "port", labels[0], WM_LABEL_MAX, nport);
+	n = ports_each(NULL, NULL);
+	if ( n > 0 ) {
+		/* a line each, on the stack: as many as there are, read again into them */
+		UB	labels[n][WM_LABEL_MAX];
+		INT	got;
+
+		got = ports_each(port_label, labels);
+		if ( got > n ) got = n;		/* more came meanwhile: the next menu has them */
+		(void)mn_set_lst(mid, &pdef, "port", labels[0], WM_LABEL_MAX, got);
 		if ( kdev > 0 && cur >= 0 ) {
 			(void)mn_chg_idx(mid, &pdef, "port", cur, MN_TICK);
 		}
@@ -345,10 +430,13 @@ int main( void )
 		tm_putstring((CONST UB *)"serial: no window\n");
 		return 1;
 	}
-	find_ports();
-	for ( i = 0; i < nport && ports[i].info.console; i++ ) ;
-	if ( i == nport ) i = 0;
-	if ( nport == 0 || connect(i) < E_OK ) {
+	{
+		INT	first[2] = { -1, -1 };
+
+		(void)ports_each(port_first, first);
+		i = ( first[0] >= 0 ) ? first[0] : first[1];
+	}
+	if ( i < 0 || connect(i) < E_OK ) {
 		lt_puts(&term, "[シリアルポートがありません]\n");
 		title();
 	}
@@ -356,7 +444,9 @@ int main( void )
 
 	while ( !done ) {
 		again = FALSE;
-		while ( !done && ob_rea_rec(win.port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+		/* asleep until the window, or the port, has something */
+		for ( TMO tmo = line_more ? TMO_POL : TMO_FEVR;
+		      !done && ob_rea_tmo(win.port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) {
 			switch ( m.event ) {
 			case OB_E_CLOSE:
 			case OB_E_DELETE:
@@ -370,6 +460,7 @@ int main( void )
 			case OB_E_MOVE:
 			case OB_E_RELEASE:
 			case OB_E_WHEEL:
+			case OB_E_SCROLL:
 				if ( lt_pointer(&term, &m) ) again = TRUE;
 				break;
 			case OB_E_KEY:
@@ -389,7 +480,6 @@ int main( void )
 		if ( take_line() || again ) {
 			lt_draw(&term, &win, NULL, TRUE);
 		}
-		tk_dly_tsk(TICK_MS);
 	}
 	hang_up();
 	lt_close(&win);

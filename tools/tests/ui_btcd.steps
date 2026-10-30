@@ -17,9 +17,9 @@ move 1100 766
 wait 150
 move 1060 766
 wait 150
-move 1060 545
+move 1060 485
 wait 150
-click 1060 545
+click 1060 485
 expect xfconv: ready
 expect xfconv: media uda 2,514,944 バイト - btron 試験CD
 wait 500

@@ -62,7 +62,63 @@ typedef struct {
 	UINT	fb_pages;		/* screens' worth of rows from fb_pa: 1, or 2 to flip between */
 	UINT	fb_shown;		/* the one shown: its rows start fb_shown * height rows down */
 	BOOL	flipping;		/* sends go to the one not shown, which is then shown */
+	/*
+	 * The scale the screen is drawn at, in percent, and the screen as
+	 * the windows and programs see it: view pixels, each scale / 100
+	 * pixels of the screen across and down (ts_disp_setscale). At 100
+	 * the view is width by height.
+	 */
+	UINT	scale;
+	UINT	view_w;
+	UINT	view_h;
+	UINT	scale_want;		/* the scale asked for; scale is less where the view would be too small */
 } T_DISPSPEC;
+
+/*
+ * The scales a screen may be drawn at, in percent, and the least view
+ * a scale may leave: a scale that would make the view smaller than
+ * DISP_VIEW_MIN_W by DISP_VIEW_MIN_H is not used.
+ */
+#define DISP_NSCALE		7
+#define DISP_SCALES		{ 100, 125, 150, 175, 200, 250, 300 }
+#define DISP_VIEW_MIN_W		640
+#define DISP_VIEW_MIN_H		480
+
+/*
+ * A length or a place in view pixels turned into pixels of the screen
+ * at a scale: the view pixel v starts at pixel floor(v * scale / 100)
+ * and the next one at floor((v + 1) * scale / 100). disp_view_of is the
+ * other way: the view pixel the pixel u belongs to.
+ */
+static __inline__ INT disp_dev_of( INT v, UINT scale )
+{
+	D	p = (D)v * (D)scale;
+
+	return (INT)( ( p >= 0 ) ? p / 100 : -( ( -p + 99 ) / 100 ) );
+}
+
+static __inline__ INT disp_view_of( INT u, UINT scale )
+{
+	D	p = (D)u * 100 + 99;
+
+	return (INT)( ( p >= 0 ) ? p / (D)scale : -( ( -p + (D)scale - 1 ) / (D)scale ) );
+}
+
+/* The view of a screen w by h pixels at a scale: rounded up, so that no strip is left over */
+static __inline__ UINT disp_view_len( UINT px, UINT scale )
+{
+	return (UINT)( ( (UD)px * 100 + scale - 1 ) / scale );
+}
+
+/*
+ * The screen drawn at another scale (percent, one of DISP_SCALES). The
+ * windows are laid again at it, their programs asked to draw again,
+ * and the pointer kept within the new view. E_PAR for a scale not of
+ * the list, E_NOSPT when it would leave the view smaller than the
+ * least. What is asked is kept: a later size of the screen that can
+ * take it uses it.
+ */
+IMPORT ER  ts_disp_setscale( UINT scale );
 
 /* A part of the screen */
 typedef struct {
