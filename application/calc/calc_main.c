@@ -52,6 +52,8 @@ UW	g_bg = C_PAPER;
 
 TS_UUID	g_win;
 ID	g_kw, g_port;
+TS_UUID	g_lch;
+ID	g_lport;
 INT	g_gid = -1, g_w, g_h;
 UI	g_ui;
 BOOL	g_dirty, g_changed, g_closing;
@@ -1546,11 +1548,46 @@ static void scrolled( CONST T_OBNTM *m )
 	g_dirty = TRUE;
 }
 
+void links_told( void )
+{
+	T_DTANS	an;
+	SZ	asz = 0;
+
+	while ( g_lport > 0 && ob_rea_tmo(g_lport, 0, 0, &an, sizeof(an), &asz, TMO_POL) >= E_OK ) {
+		if ( asz == (SZ)sizeof(an) ) link_told(&an);
+	}
+}
+
+/* The channel the desktop says on, and a notice of it at the window's channel */
+static void links_channel( void )
+{
+	T_OBCRE	c;
+	T_OBNTF	req;
+
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	if ( ob_cre_obj(&c, &g_lch) < E_OK ) return;
+	g_lport = ob_opn_obj(&g_lch, OB_OP_READ | OB_OP_ATRRD | OB_O_NOWAIT);
+	if ( g_lport <= 0 ) {
+		g_lport = 0;
+		(void)ob_del_obj(&g_lch);
+		return;
+	}
+	memset(&req, 0, sizeof(req));
+	req.events = OB_E_CHANGE;
+	req.id = 4;
+	(void)ob_ntf_evt(g_lport, OB_REC_ANY, &req, g_port);
+}
+
 void event( CONST T_OBNTM *m )
 {
 	if ( panel_is(&m->uuid) ) {
 		/* a key with the panel in front is its box's, or the sheet's when the panel leaves it */
 		if ( !panel_event(m) && m->event == OB_E_KEY ) key(m);
+		return;
+	}
+	if ( g_lport > 0 && memcmp(&m->uuid, &g_lch, sizeof(TS_UUID)) == 0 ) {
+		links_told();
 		return;
 	}
 	if ( memcmp(&m->uuid, &g_win, sizeof(TS_UUID)) != 0 ) return;
@@ -1634,6 +1671,7 @@ int main( void )
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_CHANNEL;
 	g_port = ( ob_cre_obj(&c, &g_ch) >= E_OK ) ? ob_opn_obj(&g_ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) : E_NOEXS;
+	if ( g_port > 0 ) links_channel();
 	if ( g_port <= 0 ) {
 		note("no channel");
 		return 2;
@@ -1673,10 +1711,15 @@ int main( void )
 
 	while ( !g_closing ) {
 		for ( TMO tmo = TMO_FEVR; !g_closing && ob_rea_tmo(g_port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) event(&m);
+		links_told();		/* what a panel's wait took the notice of is read too */
 		if ( g_dirty && !g_closing ) {
 			paint();
 			bars();
 		}
+	}
+	if ( g_lport > 0 ) {
+		ob_cls_obj(g_lport);
+		(void)ob_del_obj(&g_lch);
 	}
 	ed_end();
 	panel_close();

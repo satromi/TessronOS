@@ -1,0 +1,313 @@
+# 〈新たな実身に保存〉を、カーネル内の基本図形編集・基本文章編集・仮身一覧とプロセスとで同じにする
+# (design 11.3), for tools/ui_run.py. For each of the three, a copy (mkbig) is linked into BTRON,
+# the desktop's first window (linkbig), and opened by a double press on that link, so that the
+# window has the link it came from: first with the desktop's own editor (figproc, docproc,
+# cabproc kernel), then with the process (1), each on a link of its own. One change is made
+# (a rectangle or a link carried 100 across and 200 down, abc typed into the text), then
+# 新たな実身に保存 of the menu (保存's second row), and the name the panel starts with
+# (画用紙のコピー, 基本文章編集のコピー) taken with Enter. Exactly one object is made
+# (objects new), and the link to it goes into BTRON: the last link of BTRON's record points at
+# a copy whose record 0, read as stored, and name are the same, byte for byte, whichever
+# editor saved it (sum keys link, with BTRON in front). The menu then opens with 保存 under
+# the pointer: 閉じる, two rows up, closes the window and leaves 閉じる the row chosen last.
+# The menu is opened at 500,400 with 閉じる under the pointer, the rows 20 apart (閉じる, a
+# line, 保存, 表示, ...); 保存's own opens beside it, its first row on 保存's row.
+# Keys: Enter 28.
+
+# ---------------------------------------------------------------- 基本図形編集
+figproc kernel
+mkbig fig 30 4
+click 50 14
+wait 300
+linkbig 180 45
+wait 300
+dclick 190 52
+waitwin 画用紙 600
+sync 600
+wait 800
+click 111 128
+drag 111 128 211 328
+sync 600
+objects
+click 500 400 1
+wait 800
+move 510 440
+wait 300
+move 650 440
+move 650 461
+wait 300
+click 650 461
+wait 1000
+wait 800
+shot sn_fig_k_ask
+key 28
+sync 600
+wait 800
+objects new
+want ok 1
+click 500 400 1
+wait 800
+move 510 360
+wait 300
+click 510 360
+sync 600
+wait 800
+click 50 14
+sync 600
+sum show keys link
+keep fig
+
+figproc 1
+mkbig fig 30 4
+click 50 14
+wait 300
+linkbig 180 70
+wait 300
+logmark
+dclick 190 77
+expectsincein 60 figure: opened 画用紙 shapes 32 links 0 autoref 1 parent 1
+wait 800
+logmark
+click 111 128
+drag 111 128 211 328
+expectsince figure: moved 1 by 100,200
+objects
+logmark
+click 500 400 1
+wait 800
+move 510 440
+wait 300
+move 650 440
+move 650 461
+wait 300
+click 650 461
+expectsince figure: chosen save.new
+wait 800
+shot sn_fig_p_ask
+key 28
+expectsince figure: saved as new (0)
+wait 800
+objects new
+want ok 1
+logmark
+click 500 400 1
+wait 800
+move 510 360
+wait 300
+click 510 360
+expectsince figure: chosen close
+expectsince figure: closed
+wait 800
+click 50 14
+sync 600
+sum show keys link
+same fig
+figproc 0
+
+# ---------------------------------------------------------------- 基本文章編集
+docproc kernel
+mkbig doc 5
+click 50 14
+wait 300
+linkbig 180 95
+wait 300
+dclick 190 102
+waitwin 基本文章編集 600
+sync 600
+wait 800
+click 300 170
+sync 600
+text abc
+sync 600
+objects
+click 500 400 1
+wait 800
+move 510 440
+wait 300
+move 650 440
+move 650 461
+wait 300
+click 650 461
+wait 1000
+wait 800
+shot sn_doc_k_ask
+key 28
+sync 600
+wait 800
+objects new
+want ok 1
+click 500 400 1
+wait 800
+move 510 360
+wait 300
+click 510 360
+sync 600
+wait 800
+click 50 14
+sync 600
+sum show keys link
+keep doc
+
+docproc 1
+mkbig doc 5
+click 50 14
+wait 300
+linkbig 180 120
+wait 300
+logmark
+dclick 190 127
+expectsincein 60 document: opened 基本文章編集 paragraphs 5
+wait 800
+logmark
+click 300 170
+expectsince document: drew
+logmark
+text abc
+expectsince document: key to screen
+wait 300
+objects
+logmark
+click 500 400 1
+wait 800
+move 510 440
+wait 300
+move 650 440
+move 650 461
+wait 300
+click 650 461
+expectsince document: chosen save.new
+wait 800
+shot sn_doc_p_ask
+key 28
+expectsince document: saved as new (0)
+wait 800
+objects new
+want ok 1
+logmark
+click 500 400 1
+wait 800
+move 510 360
+wait 300
+click 510 360
+expectsince document: chosen close
+expectsince document: closed
+wait 800
+click 50 14
+sync 600
+sum show keys link
+same doc
+docproc 0
+
+# ---------------------------------------------------------------- 仮身一覧
+cabproc kernel
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+click 50 14
+wait 300
+linkbig 180 145
+wait 300
+dclick 190 152
+waitwin 画用紙 600
+sync 600
+wait 800
+click 167 153
+sync 600
+wait 600
+drag 167 153 267 353
+sync 600
+objects
+click 500 400 1
+wait 800
+move 510 440
+wait 300
+move 650 440
+move 650 461
+wait 300
+click 650 461
+wait 1000
+wait 800
+shot sn_cab_k_ask
+key 28
+sync 600
+wait 800
+objects new
+want ok 1
+click 500 400 1
+wait 800
+move 510 360
+wait 300
+click 510 360
+sync 600
+wait 800
+click 50 14
+sync 600
+sum show keys link
+keep cab
+
+cabproc 1
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+click 50 14
+wait 300
+linkbig 180 170
+wait 300
+logmark
+dclick 190 177
+expectsincein 60 cabinet: opened 画用紙 shapes 2 links 2
+wait 800
+logmark
+click 167 153
+wait 600
+drag 167 153 267 353
+expectsince cabinet: moved 1 by 100,200
+objects
+logmark
+click 500 400 1
+wait 800
+move 510 440
+wait 300
+move 650 440
+move 650 461
+wait 300
+click 650 461
+expectsince cabinet: chosen save.new
+wait 800
+shot sn_cab_p_ask
+key 28
+expectsince cabinet: saved as new (0)
+wait 800
+objects new
+want ok 1
+logmark
+click 500 400 1
+wait 800
+move 510 360
+wait 300
+click 510 360
+expectsince cabinet: chosen close
+expectsince cabinet: closed
+wait 800
+click 50 14
+sync 600
+sum show keys link
+same cab
+cabproc 0
+absent !OACV!

@@ -45,6 +45,8 @@ SRCS_SYSMAN := \
 	peripheral_kernel/fs/devfs.c \
 	peripheral_kernel/fs/objfs.c \
 	peripheral_kernel/fs/fatfs.c \
+	peripheral_kernel/fs/exfatfs.c 	peripheral_kernel/fs/ntfsfs.c \
+	peripheral_kernel/fs/fsname.c \
 	peripheral_kernel/fs/fsprobe.c \
 	peripheral_kernel/fs/crc32c.c \
 	peripheral_kernel/fs/tsfs.c \
@@ -79,6 +81,7 @@ SRCS_SYSMAN := \
 	peripheral_kernel/sysman/elf.c \
 	peripheral_kernel/sysman/pcie.c \
 	peripheral_kernel/sysman/rng.c \
+	peripheral_kernel/sysman/uuidtext.c \
 	peripheral_kernel/sysman/datetime.c \
 	peripheral_kernel/sysman/svc_gate.c \
 	peripheral_kernel/sysman/svc_tk.c
@@ -105,6 +108,7 @@ SRCS_LIBTM := \
 SRCS_LIBTAD := \
 	outer_kernel/tad/tad.c \
 	outer_kernel/tad/tad_link.c \
+	outer_kernel/tad/tad_lnkvol.c \
 	outer_kernel/tad/tad_edit.c \
 	outer_kernel/tad/tad_pat.c \
 	outer_kernel/tad/tad_view.c \
@@ -112,6 +116,7 @@ SRCS_LIBTAD := \
 
 SRCS_LIBOM := \
 	outer_kernel/om/om.c \
+	outer_kernel/om/om_vdraw.c \
 	outer_kernel/om/om_store.c \
 	outer_kernel/om/om_copy.c \
 	outer_kernel/om/om_obj.c \
@@ -122,6 +127,7 @@ SRCS_LIBIMG := \
 	outer_kernel/img/inflate.c \
 	outer_kernel/img/deflate.c \
 	outer_kernel/img/png.c \
+	outer_kernel/img/img_scale.c \
 	outer_kernel/img/jpeg.c \
 	outer_kernel/img/bmp.c \
 	outer_kernel/img/gif.c
@@ -182,6 +188,7 @@ SRCS_DEVICE  := \
 SRCS_GUI := \
 	device/disp/disp.c \
 	outer_kernel/dp/dp.c \
+	outer_kernel/dp/dp_pat.c \
 	outer_kernel/dp/dp_rgn.c \
 	outer_kernel/dp/dp_shape.c \
 	outer_kernel/wm/look.c \
@@ -212,19 +219,23 @@ SRCS_DESKTOP := \
 	application/cab/cab.c \
 	application/cab/cabmenu.c \
 	application/doc/docview.c \
+	application/doc/docpaint.c \
 	application/doc/docmenu.c \
 	application/doc/docfind.c \
+	application/doc/docedit.c \
 	application/kconv/kconv.c \
 	lib/libudic/udic.c \
 	application/desktop/desktop.c \
 	application/desktop/dtedit.c \
 	application/desktop/dtcab.c \
 	application/desktop/dtform.c \
+	application/desktop/dtcolour.c \
 	application/desktop/dtprint.c \
 	application/desktop/dtvmn.c \
 	application/desktop/dtinfo.c \
 	application/desktop/dtfault.c \
 	application/desktop/dtpkg.c \
+	application/desktop/dtacc.c \
 	application/desktop/dtsysup.c \
 	application/desktop/dtuitest.c \
 	application/desktop/dtsys.c \
@@ -243,11 +254,16 @@ SRCS_DESKTOP := \
 	application/desktop/dtadmin.c \
 	application/desktop/dtdoc.c \
 	application/desktop/dtfig.c \
+	application/fig/figedit.c \
+	application/fig/figtool.c \
+	application/fig/figcanvas.c \
+	application/fig/figpat.c \
 	application/desktop/dtftool.c \
 	application/desktop/dtfcanvas.c \
 	application/desktop/dtfpat.c \
 	application/desktop/dttip.c \
 	application/desktop/dtslide.c \
+	application/slide/sl_deck.c \
 	application/desktop/dtrt.c \
 	application/desktop/dtrthost.c \
 	lib/librtad/rt_num.c \
@@ -281,6 +297,7 @@ SRCS_NET += \
 	peripheral_kernel/network/netbsd/rumpuser.c \
 	peripheral_kernel/network/netbsd/neta_user.c \
 	peripheral_kernel/network/netbsd/so_api.c \
+	peripheral_kernel/network/netbsd/so_wg.c \
 	peripheral_kernel/network/netbsd/so_dhcp.c \
 	peripheral_kernel/network/netbsd/so_slaac.c \
 	peripheral_kernel/network/netbsd/so_dns.c
@@ -288,6 +305,26 @@ endif
 
 SRCS_APP := \
 	application/app_main.c
+
+ifeq ($(TESTAGENT),1)
+SRCS_DESKTOP += application/desktop/dttagent.c
+endif
+
+# Bluetooth(設計書 6.8)。LE のペアリングの P-256 と AES は lib/mbedtls の一部をカーネルの旗で作る
+SRCS_BT := device/bt/bt.c device/bt/bt_le.c device/bt/bt_a2dp.c device/bt/bt_sdp.c device/bt/bt_avrcp.c device/bt/bt_rfcomm.c device/bt/bt_hfp.c device/bt/bt_crypto.c device/bt/sbc_enc.c device/bt/bt_intel.c \
+	device/bt/bt_h4.c device/bt/bt_bcm.c \
+	lib/mbedtls/library/aes.c lib/mbedtls/library/bignum.c lib/mbedtls/library/bignum_core.c \
+	lib/mbedtls/library/constant_time.c lib/mbedtls/library/ecp.c lib/mbedtls/library/ecp_curves.c \
+	lib/mbedtls/library/platform_util.c
+BT_MBED_FLAGS := -w '-DMBEDTLS_CONFIG_FILE="bt_mbed_config.h"' -I$(TOP)/device/bt -I$(TOP)/lib/mbedtls/include
+BT_MBED_OBJS = $(patsubst %.c,$(OBJDIR)/%.o,$(filter lib/mbedtls/%,$(SRCS_BT)) device/bt/bt_crypto.c)
+# LE Audio(設計書 6.8)。LC3 の符号化は lib/liblc3 を変更せずに使う。浮動小数点で計算するので、
+# このファイル群だけ浮動小数点のレジスタを使ってよいように翻訳する(makefile の LC3_OBJS)
+SRCS_LC3 := $(addprefix lib/liblc3/src/,attdet.c bits.c bwdet.c energy.c lc3.c ltpf.c mdct.c plc.c sns.c spec.c tables.c tns.c) \
+	device/bt/lc3_fmath.c
+SRCS_BT += device/bt/bt_iso.c device/bt/bt_bap.c device/bt/bt_lea.c $(SRCS_LC3)
+LC3_FLAGS := -w -fno-math-errno -I$(TOP)/lib/liblc3/include
+LC3_OBJS = $(patsubst %.c,$(OBJDIR)/%.o,$(SRCS_LC3))
 
 # カーネル内テスト(make KTEST=1)
 ifeq ($(KTEST),1)
@@ -311,6 +348,7 @@ SRCS_APP += \
 	tests/ktest/ktest_proc.c \
 	tests/ktest/ktest_prcobj.c \
 	tests/ktest/ktest_pan.c \
+	tests/ktest/ktest_stkg.c \
 	tests/ktest/ktest_cred.c \
 	tests/ktest/ktest_cxx.c \
 	tests/ktest/ktest_v8.c \
@@ -321,6 +359,7 @@ SRCS_APP += \
 	tests/ktest/ktest_tsfsjrnl.c \
 	tests/ktest/ktest_tsfsobj.c \
 	tests/ktest/ktest_iob.c \
+	tests/ktest/ktest_nicring.c \
 	tests/ktest/ktest_dfix.c \
 	tests/ktest/ktest_ob.c \
 	tests/ktest/ktest_tad.c \
@@ -377,6 +416,7 @@ SRCS_APP += \
 	tests/ktest/ktest_so.c \
 	tests/ktest/ktest_rump.c \
 	tests/ktest/ktest_svcio.c \
+	tests/ktest/ktest_wg.c \
 	tests/ktest/ktest_psx.c \
 	tests/ktest/ktest_disp.c \
 	tests/ktest/ktest_dp.c \
@@ -403,6 +443,9 @@ SRCS_APP += \
 	application/calc/calc_tad.c \
 	application/calc/calc_print.c \
 	tests/ktest/ktest_udic.c \
+	tests/ktest/ktest_bt.c \
+	tests/ktest/ktest_btuart.c \
+	tests/ktest/ktest_emu.c \
 	tests/ktest/ktest_kana.c \
 	application/kanatype/kp_eng.c \
 	lib/libkbmap/kbmap.c \
@@ -463,6 +506,7 @@ SRCS_CORE_x86_64 := \
 	kernel/sysdepend/cpu/core/x86_64/vector.S \
 	kernel/sysdepend/cpu/core/x86_64/dispatch.S \
 	kernel/sysdepend/cpu/core/x86_64/tramp.S \
+	kernel/sysdepend/cpu/core/x86_64/pm_ctx.S \
 	kernel/sysdepend/cpu/core/x86_64/interrupt.c \
 	kernel/sysdepend/cpu/core/x86_64/exc_hdl.c \
 	kernel/sysdepend/cpu/core/x86_64/syscall.c \

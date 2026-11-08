@@ -43,6 +43,28 @@ Noinit(EXPORT QUEUE	knl_free_tcb);	/* FreeQue */
 /*
  * TCB Initialization
  */
+/*
+ * Whether an address is in the unmapped pages below the stack of a task
+ * (knl_vmap_stack): the task has run out of its stack. A stack from
+ * Imalloc or a task's own buffer has no such pages.
+ */
+#define STK_PAGE	4096		/* the pages knl_vmap_stack maps */
+
+EXPORT BOOL knl_stack_guard_hit( TCB *tcb, UBINT addr )
+{
+	UBINT	foot;
+
+	if ( tcb == NULL || tcb->isstack == NULL ) {
+		return FALSE;
+	}
+	foot = (UBINT)tcb->isstack - (UBINT)tcb->sstksz;
+	if ( foot < (UBINT)VMAP_VA_BASE || foot >= (UBINT)VMAP_VA_BASE + CNF_VMAP_SIZE
+	  || ( foot & ( STK_PAGE - 1 ) ) != 0 ) {
+		return FALSE;
+	}
+	return (BOOL)( addr < foot && addr >= foot - ( (UBINT)TASK_STK_GUARD_PAGES * STK_PAGE ) );
+}
+
 EXPORT ER knl_task_initialize( void )
 {
 	INT	i;

@@ -65,6 +65,10 @@ TessronOS は TRON Forum の μT-Kernel 3.0 を出発点にしている。本書
 | `config/config.h` | オブジェクト数の上限(タスク 48、セマフォ 24、イベントフラグ 24、mutex 16、メールボックス 12) | カーネル自身がファイルシステム・デバイス・プロセス管理で mutex とフラグを使うため |
 | `kernel/sysdepend/cpu/core/armv8a/cpu_cntl.c`, `cpu_task.h` | EL0 タスクのユーザスタックのサイズとプロセス空間を生成時に指定できるように(`knl_ustack_size`, `knl_new_task_space`) | プロセスの主タスクはそのプロセスの空間にスタックを持つ(設計書 9.5) |
 
+## libssh2(取り込んでいない。`tools/ssh/build.sh`が取得してビルドする)
+
+SSHとSFTP(`make SSH=1`)のライブラリである。バージョン1.11.1、BSD 3条項。SHA-256 `d9ec76cbe34db98eec3539fe2c899d26b0c837cb3eb466a56b0f109cabf658f7`を検査して`~/libssh2`に展開し、変更せずにコンパイルする。`configure`の代わりに`tools/ssh/libssh2_config.h`を使う。`tools/ssh/ts_ssh_shim.h`は、Mbed TLSのファイルの関数とソケットの呼出しを塞ぐ。
+
 ## NetBSD のネットワークスタック(取り込んでいない。`tools/netbsd/build.sh`が取得してビルドする)
 
 TCP/IPスタック(docs/tessronos/09-network.md)は、NetBSDのカーネルのネットワーク部分を、rumpカーネルの部品としてTessronOSのカーネルの中で動かす。ソースはリポジトリに含めず、`tools/netbsd/build.sh`がNetBSDの配布物を取得し、スタックに必要なディレクトリだけをWSLのホームに展開して、TessronOSのツールチェーンでコンパイルする。ChromiumやMozcと同じく、リポジトリの外に置く。展開するのは約27MBで、スクリプトが検査値を確かめて取得し直せるので、リポジトリに入れる利点がない。
@@ -297,9 +301,28 @@ TessronOSのコードがMesaから参照したものは次のとおりで、生�
 - 上流と差分が出る変更(データ型、SMP 化、per-CPU 化)は設計書の該当節を参照できるようにする。
 - 上流のバグ修正を見つけたら、TessronOS に取り込むと同時に上流へ報告する。
 
+## WireGuard(`WG=1`)
+
+NetBSD 11.0の`sys/net/if_wg.c`、`sys/rump/net/lib/libwg`、`sys/external/isc/libsodium`を、`tools/netbsd/build.sh`と`tools/x64/netbsd/build.sh`がビルドのときに取得する。作業木には入れない。
+
 ## 上流を更新する手順
 
 1. `git -C <mtkernel_3> fetch --tags` で新しいタグを取り、`git worktree add <dir> <tag>` で展開する。
 2. 前回のタグとの差分(`git diff <old> <new> -- kernel include lib config`)を読み、TessronOS が改変したファイルに重なるものを洗い出す。
 3. 重ならないファイルは上書きコピー、重なるファイルは差分を手で当てる。
 4. `make TARGET=_QEMU_VIRT_ test` が通ることを確認し、本書の「取り込んだバージョン」を更新してコミットする(コミットメッセージに上流のタグを書く)。
+
+## liblc3(`lib/liblc3/`)
+
+LE Audioのイヤホンへの音のLC3の符号化に使う(`device/bt/bt_lea.c`、設計書6.8)。
+
+| 項目 | 内容 |
+| --- | --- |
+| バージョン | 1.1.3 |
+| 取得元 | `https://github.com/google/liblc3.git`のタグ`v1.1.3`(コミット`96a3af0beb5487aca3b98a4b992a539a1f6d80d1`) |
+| 取得日 | 2026-11-05 |
+| ライセンス | Apache License 2.0。`lib/liblc3/LICENSE` |
+| 取り込んだもの | `include/lc3.h`、`include/lc3_private.h`、`src/`の`.c`と`.h`、`LICENSE` |
+| 取り込まなかったもの | `include/lc3_cpp.h`、`src/meson.build`、`src/makefile.mk`、`tools`、`test`、`python`、`wasm`、`zephyr`、`fuzz`、`conformance`、`tables` |
+
+上流のファイルは変更しない。浮動小数点で計算するので、`build_make/makefile`の`LC3_OBJS`でこれらのファイルだけ`-mgeneral-regs-only`、`-ffreestanding`、`-fno-builtin`を外して翻訳し、`TA_FPU`で作った符号化のタスクだけから呼ぶ。x64で命令にならない`fmaxf`、`fminf`、`roundf`は`device/bt/lc3_fmath.c`が持つ。

@@ -18,7 +18,8 @@
  *
  *	The card's driver is the one of OpenBSD's that knows its PCI ID:
  *	iwm(4) for Intel's 7260 to 8265 (iwm0, tsw_iwm.c), iwx(4) for the
- *	Wi-Fi 6 AX200 and later (iwx0, tsw_iwx.c). What this file needs of
+ *	Wi-Fi 6 AX200 and later (iwx0, tsw_iwx.c), mwx(4) for MediaTek's
+ *	MT7921 and MT7922 (mwx0, tsw_mwx.c). What this file needs of
  *	the driver beyond net80211's interface is asked through tsw_drv.h;
  *	the rest is the same for both.
  *
@@ -79,8 +80,10 @@
 #include <machine/bus.h>
 #include <machine/intr.h>
 
+#ifndef __aarch64__
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
+#endif
 
 #include <net/bpf.h>
 #include <net/if.h>
@@ -166,6 +169,7 @@ struct tswifi_ev {
 #define TSW_AKM_PSK		0x01
 #define TSW_AKM_PSK_SHA256	0x02
 #define TSW_AKM_SAE		0x04
+#define TSW_AKM_8021X		0x08
 
 #if TSWIFI_SIM
 struct ieee80211com	*obsd_sim_attach(void);	/* device/net/wifi/sim/obsd_sim.c */
@@ -173,11 +177,14 @@ int	obsd_sim_is_ap(struct ifnet *);
 int	obsd_sim_scanning(void);
 #endif
 extern struct bus_dma_tag obsd_dma_tag;
+int	rump_tswifi_fw_keys(int, const uint8_t *, const uint8_t *, int);	/* tsw_bwfm.c */
+#ifndef __aarch64__
 pcitag_t obsd_pci_tag(int, int, int);
+#endif
 
-#if !TSWIFI_SIM
+#if !TSWIFI_SIM && !defined(__aarch64__)
 /* The drivers, in the order they are asked whether they know the card */
-static const struct tsw_drv *const tsw_drvs[] = { &tsw_iwm_drv, &tsw_iwx_drv };
+static const struct tsw_drv *const tsw_drvs[] = { &tsw_iwm_drv, &tsw_iwx_drv, &tsw_mwx_drv, &tsw_athx_drv };
 #endif
 
 struct mbuf *ieee80211_get_assoc_req(struct ieee80211com *, struct ieee80211_node *, int);
@@ -770,7 +777,7 @@ tsw_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 /* ---------------------------------------------------------------- the start */
 
 /*
- * The card found, the driver that knows its PCI ID (iwm, then iwx)
+ * The card found, the driver that knows its PCI ID (iwm, iwx, then mwx)
  * attached to it, and what the driver left until the root file system
  * was there run: the firmware read, the card started once to read its
  * NVM. 0 and the card's address, or an errno value.
@@ -792,6 +799,25 @@ rump_tswifi_start(uint8_t *mac)
 		return ENOMEM;
 	}
 	tsw_drv = NULL;
+#elif defined(__aarch64__)
+	/* the Raspberry Pi: no card on a bus, the chip on the SDIO host the hypercalls say */
+	struct ieee80211com *ic;
+
+	obsd_init();
+	obsd_lock();
+	evq = malloc(sizeof(*evq) * TSW_NEV, M_DEVBUF, M_WAITOK | M_ZERO);
+	aps = malloc(sizeof(*aps) * TSW_NAPS, M_DEVBUF, M_WAITOK | M_ZERO);
+	if (evq == NULL || aps == NULL) {
+		obsd_unlock();
+		return ENOMEM;
+	}
+	ic = (*tsw_bwfm_drv.attach)(NULL, "bwfm0");
+	if (ic == NULL) {
+		obsd_unlock();
+		return ENXIO;
+	}
+	tsw_drv = &tsw_bwfm_drv;
+	tsw_min_dbm = tsw_bwfm_drv.min_dbm;
 #else
 	struct pci_attach_args pa;
 	struct ieee80211com *ic;
@@ -824,7 +850,7 @@ rump_tswifi_start(uint8_t *mac)
 			d = tsw_drvs[i];
 	}
 	if (d == NULL) {
-		printf("obsd: neither iwm nor iwx knows the card %08x\n", id);
+		printf("obsd: none of iwm, iwx and mwx knows the card %08x\n", id);
 		obsd_unlock();
 		return ENXIO;
 	}
@@ -1576,13 +1602,16 @@ rump_tswifi_join(const uint8_t *ssid, int ssid_len, int rsn, int akms, int mfp_r
 			ic->ic_rsnakms |= IEEE80211_AKM_SHA256_PSK;
 		if (akms & TSW_AKM_SAE)
 			ic->ic_rsnakms |= IEEE80211_AKM_SAE;
+		if (akms & TSW_AKM_8021X)
+			ic->ic_rsnakms |= IEEE80211_AKM_8021X | IEEE80211_AKM_SHA256_8021X;
 		ic->ic_rsnciphers = IEEE80211_CIPHER_CCMP | IEEE80211_CIPHER_TKIP;
 		ic->ic_rsngroupcipher = IEEE80211_CIPHER_CCMP;
 		ic->ic_rsngroupmgmtcipher = IEEE80211_CIPHER_BIP;
 		if (mfp_required)
 			ic->ic_flags |= IEEE80211_F_MFPR;
 		/* the layer accepts an access point of PSK only with a key set */
-		ic->ic_flags |= IEEE80211_F_PSK;
+		if (akms & (TSW_AKM_PSK | TSW_AKM_PSK_SHA256 | TSW_AKM_SAE))
+			ic->ic_flags |= IEEE80211_F_PSK;
 		if (pmk != NULL)
 			memcpy(ic->ic_psk, pmk, IEEE80211_PMK_LEN);
 	}
@@ -1608,6 +1637,9 @@ rump_tswifi_deauth(const uint8_t *bssid, int reason)
 	ic->ic_des_esslen = 0;
 	ic->ic_flags &= ~(IEEE80211_F_RSNON | IEEE80211_F_PSK | IEEE80211_F_MFPR);
 	explicit_bzero(ic->ic_psk, sizeof(ic->ic_psk));
+#if defined(__aarch64__) && !TSWIFI_SIM
+	(void)rump_tswifi_fw_keys(0, NULL, NULL, 0);	/* the chip's supplicant's secrets too */
+#endif
 	own_ie_len = 0;
 	run_seen = 0;
 	dbg_set();

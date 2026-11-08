@@ -117,7 +117,47 @@
 #define TSN_DP_TEXT_WIDTH	TSN(8, 6)
 #define TSN_DP_DRAW_TAD		TSN(8, 7)
 #define TSN_DP_IMG_DECODE	TSN(8, 8)
-#define TSN_DP_MAX		8
+
+/*
+ * What the drawing of documents and figures linked into a process
+ * calls (include/ts/tvport.h, design 11.11): the kernel's functions of
+ * the same names, on the window's environment, and the letters of the
+ * kernel's faces with the face set as the process keeps it (fn_dra_txt,
+ * lib/libtv/tv_fn.c).
+ */
+#define TSN_DP_SET_VISIBLE	TSN(8, 9)
+#define TSN_DP_REF		TSN(8, 10)
+#define TSN_DP_SET_MODE		TSN(8, 11)
+#define TSN_DP_PUT_PIXEL	TSN(8, 12)
+#define TSN_DP_FILL_POLY	TSN(8, 13)
+#define TSN_DP_DRAW_POLY	TSN(8, 14)
+#define TSN_DP_LINE_WIDE	TSN(8, 15)
+#define TSN_DP_FRAME_OVAL	TSN(8, 16)
+#define TSN_DP_PUT_IMAGE	TSN(8, 17)
+#define TSN_DP_SCALE		TSN(8, 18)
+#define TSN_FN_SYSTEM		TSN(8, 19)
+#define TSN_FN_FIND_STYLE	TSN(8, 20)
+#define TSN_FN_DRA_TXT		TSN(8, 21)
+
+/*
+ * An environment of memory of a process (dp_open_mem, include/ts/dp.h):
+ * opened on a picture of its own, drawn into with the calls above, and
+ * closed, which writes the picture back. dp_close closes only such an
+ * environment the process opened.
+ */
+#define TSN_DP_OPEN_MEM		TSN(8, 22)
+#define TSN_DP_CLOSE		TSN(8, 23)
+
+/*
+ * The faces of the kernel's (fn_nface, fn_face_at, fn_family,
+ * include/ts/fn.h): how many are in use, the one at a place among them,
+ * and what one is called, the family it is registered as, for a
+ * program to list them
+ */
+#define TSN_FN_NFACE		TSN(8, 24)
+#define TSN_FN_FACE_AT		TSN(8, 25)
+#define TSN_FN_FAMILY		TSN(8, 26)
+#define TSN_DP_MAX		26
 
 /*
  * wm_ (class 9), and the menus of mn_ for a program running as a
@@ -162,7 +202,11 @@
 #define TSN_WM_SCREEN		TSN(9, 36)	/* the size of the screen */
 #define TSN_WM_HIT_SLOP		TSN(9, 37)	/* how much farther a finger reaches a handle */
 #define TSN_WM_GRAB_SCREEN	TSN(9, 38)	/* a rectangle of the screen copied (a page's screen sharing) */
-#define TSN_WM_MAX		38
+#define TSN_WM_SHARE_LIST	TSN(9, 39)	/* the windows that can be shared */
+#define TSN_WM_GRAB_WINDOW	TSN(9, 40)	/* and a window's work area copied */
+#define TSN_WM_PRESS_AREA	TSN(9, 41)	/* the places where a finger presses at once */
+#define TSN_WM_FILL_LOOK	TSN(9, 42)	/* a rectangle filled with an entry of the look table */
+#define TSN_WM_MAX		42
 
 /* fs_ (class 2): the file management of T2EX, for a process */
 #define TSN_FS_OPEN		TSN(2, 1)
@@ -431,7 +475,10 @@
 #define TSN_OB_REA_TMO	TSN(7, 51)	/* ob_rea_rec waited for up to a time */
 #define TSN_OB_FND_SYS	TSN(7, 52)	/* a system object, by the relationship of the root's link */
 #define TSN_OB_ACC_OBJ	TSN(7, 53)	/* whether the caller may do the operations, without opening */
-#define TSN_OB_MAX		53
+#define TSN_OB_REF_VOB	TSN(7, 54)	/* what links show, as the store has it (include/ts/tadview.h) */
+#define TSN_OB_REF_VID	TSN(7, 55)	/* the volume's UUID an object is on, and this machine's */
+#define TSN_OB_DUP_OBJ	TSN(7, 56)	/* a real object copied as the desktop copies one, under a name */
+#define TSN_OB_MAX		56
 
 /* class 6: tm_ */
 #define TSN_TM_PUTSTRING	TSN(6, 1)

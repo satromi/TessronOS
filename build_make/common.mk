@@ -153,7 +153,15 @@ ifeq ($(DESKTOP),1)
   CFLAGS_COMMON += -DUSE_DESKTOP=1
   # make DESKTOP=1 UITEST=1: 二つ目のシリアルから画面を操作できる(tools/ui_run.py)
   ifeq ($(UITEST),1)
-    CFLAGS_COMMON += -DUSE_UITEST=1 -DOB_DENY_LOG=1
+    CFLAGS_COMMON += -DUSE_UITEST=1 -DUSE_UT_SERIAL=1 -DOB_DENY_LOG=1
+  endif
+  # make DESKTOP=1 TESTAGENT=1: 同じ操作を TCP と TLS で受ける試験用の口(設計書 12.4.1)。
+  # 試験用のイメージだけ。シリアルの口は UITEST=1 を併せたときだけ開く
+  ifeq ($(TESTAGENT),1)
+    CFLAGS_COMMON += -DUSE_TESTAGENT=1
+    ifneq ($(UITEST),1)
+      CFLAGS_COMMON += -DUSE_UITEST=1 -DOB_DENY_LOG=1
+    endif
   endif
 endif
 
@@ -170,12 +178,17 @@ endif
 NETSTACK ?= netbsd
 # 命令セットの基準ごとに別の置き場に作る(Raspberry Pi 4 系は ARMv8.0-A の版)。
 # x64 は tools/x64/netbsd/build.sh が作る x86_64 の版
+# make WG=1: WireGuard in the stack, its object and its sources apart from the others'
+ifeq ($(WG),1)
+  CFLAGS_COMMON += -DUSE_WG=1
+  WG_SUFFIX := -wg
+endif
 ifeq ($(TARGET),_RPI4_)
-NETBSD_OBJ ?= $(HOME)/tessronos-netbsd-v80/rumpnet.o
+NETBSD_OBJ ?= $(HOME)/tessronos-netbsd-v80$(WG_SUFFIX)/rumpnet.o
 else ifeq ($(ARCH),x86_64)
-NETBSD_OBJ ?= $(HOME)/tessronos-netbsd-x64/rumpnet.o
+NETBSD_OBJ ?= $(HOME)/tessronos-netbsd-x64$(WG_SUFFIX)/rumpnet.o
 else
-NETBSD_OBJ ?= $(HOME)/tessronos-netbsd/rumpnet.o
+NETBSD_OBJ ?= $(HOME)/tessronos-netbsd$(WG_SUFFIX)/rumpnet.o
 endif
 ifeq ($(NETSTACK),netbsd)
   CFLAGS_COMMON += -DTS_NETSTACK_NETBSD=1

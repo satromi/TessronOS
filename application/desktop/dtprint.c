@@ -137,14 +137,22 @@ LOCAL ER draw_doc( void *arg, INT gid, INT page, CONST T_DPRECT *sheet )
 	DTPRSRC	*s = (DTPRSRC *)arg;
 	ER	er;
 
-	tv_doc_zoom(8);
-	tv_doc_ground(TRUE);
-	tv_doc_detail(FALSE);
+	INT	kz = s->doc->zoom, kd = s->doc->zoom_den, kdep = s->doc->depth, kmax = s->doc->open_max;
+	BOOL	kbare = s->doc->bare;
+
 	dp_fill_rect(gid, sheet, ( s->paper == TV_PAPER_LOOK ) ? wm_look(WM_LOOK_WORK) : s->paper);
 
-	tv_open_max = pr_open;
+	/* printed at life size, on its paper, as deep as 仮身: 展開 says */
+	s->doc->zoom = s->doc->zoom_den = 8;
+	s->doc->bare = FALSE;
+	s->doc->depth = 0;
+	s->doc->open_max = pr_open;
 	er = tv_doc_draw_page(gid, s->doc, page, sheet, s->src, s->paper);
-	tv_open_max = TV_MAX_DEPTH;
+	s->doc->zoom = kz;
+	s->doc->zoom_den = kd;
+	s->doc->bare = kbare;
+	s->doc->depth = kdep;
+	s->doc->open_max = kmax;
 	return er;
 }
 
@@ -174,15 +182,12 @@ LOCAL ER draw_fig( void *arg, INT gid, INT page, CONST T_DPRECT *sheet )
 
 	ER	er;
 
-	tv_doc_zoom(8);
-	tv_doc_ground(TRUE);
 	dp_fill_rect(gid, sheet, ground);
 	s->fig->zoom = 8;
-
-	tv_open_max = pr_open;
+	s->fig->open_max = pr_open;
 	er = tv_fig_draw_at(gid, s->fig, sheet, col * s->pw, row * s->ph, s->src,
 			    TAD_COL_NONE, 0);
-	tv_open_max = TV_MAX_DEPTH;
+	s->fig->open_max = 0;
 	return er;
 }
 
@@ -266,6 +271,11 @@ EXPORT void dt_print_src_free( DTPRSRC *s )
  * pages is drawn: a page of a table is a figure of a hundred pieces of
  * text, and a hundred pages of them held at once is more memory than
  * the drawing needs.
+ *
+ * The pages are drawn as a window of the desktop's draws its own for
+ * 印刷: on the paper the request names (white when it names none), a
+ * document as 詳細 and the hidden letters show it when it says so, and
+ * without its links when the setting last made says 仮身: 印刷 off.
  */
 #define SPOOL_MAX	PRN_PAGE_MAX
 
@@ -275,16 +285,21 @@ typedef struct {
 	INT		recno[SPOOL_MAX];
 	SZ		size[SPOOL_MAX];
 	INT		first[SPOOL_MAX + 1];	/* the first page of each record */
+	UW		paper;			/* what the pages lie on */
+	UINT		flags;			/* DT_F_PR_DETAIL, DT_F_PR_HIDDEN */
+	BOOL		links;			/* FALSE: drawn without them */
 
 	/* the record made into a model just now */
 	INT		cur;
 	T_TAD		*t;
 	T_TVDOC		*doc;
 	T_TVFIG		*fig;
+	DTPRSRC		own;			/* its copy without the links */
 } SPOOL;
 
 LOCAL void spool_drop( SPOOL *sp )
 {
+	dt_print_src_free(&sp->own);
 	if ( sp->doc != NULL ) tv_doc_free(sp->doc);
 	if ( sp->fig != NULL ) tv_fig_free(sp->fig);
 	if ( sp->t != NULL ) tad_free(sp->t);
@@ -292,6 +307,17 @@ LOCAL void spool_drop( SPOOL *sp )
 	sp->fig = NULL;
 	sp->t = NULL;
 	sp->cur = -1;
+}
+
+/* What is drawn of the model made just now: its copy without the links, or itself */
+LOCAL T_TVDOC *spool_doc( SPOOL *sp )
+{
+	return ( sp->own.own_doc != NULL ) ? sp->own.own_doc : sp->doc;
+}
+
+LOCAL T_TVFIG *spool_fig( SPOOL *sp )
+{
+	return ( sp->own.own_fig != NULL ) ? sp->own.own_fig : sp->fig;
 }
 
 /* A record read whole and made into its model: TRUE when it is a page */
@@ -334,6 +360,18 @@ LOCAL BOOL spool_load( SPOOL *sp, ID key, INT recno, SZ size )
 		spool_drop(sp);
 		return FALSE;
 	}
+	if ( sp->doc != NULL ) {
+		sp->doc->detail = (BOOL)( ( sp->flags & DT_F_PR_DETAIL ) != 0 );
+		sp->doc->show_hidden = (BOOL)( ( sp->flags & DT_F_PR_HIDDEN ) != 0 );
+	}
+	if ( sp->fig != NULL ) {
+		sp->fig->show_hidden = (BOOL)( ( sp->flags & DT_F_PR_HIDDEN ) != 0 );
+	}
+	if ( !sp->links && sp->doc != NULL ) {
+		sp->own.own_doc = doc_without_links(&sp->own, sp->doc);
+	} else if ( !sp->links ) {
+		sp->own.own_fig = fig_without_links(&sp->own, sp->fig);
+	}
 	return TRUE;
 }
 
@@ -365,20 +403,24 @@ LOCAL ER draw_spool( void *arg, INT gid, INT page, CONST T_DPRECT *sheet )
 	ER	er;
 
 	for ( r = 0; r + 1 < sp->nrec && sp->first[r + 1] <= page; r++ ) ;
-	tv_doc_zoom(8);
-	tv_doc_ground(TRUE);
-	dp_fill_rect(gid, sheet, 0x00FFFFFFU);
+	dp_fill_rect(gid, sheet, sp->paper);
 	if ( !spool_at(sp, r) ) {
 		return E_NOEXS;
 	}
-	tv_open_max = pr_open;
 	if ( sp->doc != NULL ) {
-		er = tv_doc_draw_page(gid, sp->doc, page - sp->first[r], sheet, sp->t, 0x00FFFFFFU);
+		T_TVDOC	*d = spool_doc(sp);
+
+		d->open_max = pr_open;
+		er = tv_doc_draw_page(gid, d, page - sp->first[r], sheet, sp->t, sp->paper);
+		d->open_max = 0;
 	} else {
-		sp->fig->zoom = 8;
-		er = tv_fig_draw_at(gid, sp->fig, sheet, 0, 0, sp->t, TAD_COL_NONE, 0);
+		T_TVFIG	*f = spool_fig(sp);
+
+		f->zoom = 8;
+		f->open_max = pr_open;
+		er = tv_fig_draw_at(gid, f, sheet, 0, 0, sp->t, TAD_COL_NONE, 0);
+		f->open_max = 0;
 	}
-	tv_open_max = TV_MAX_DEPTH;
 	return er;
 }
 
@@ -388,8 +430,13 @@ LOCAL void spool_free( SPOOL *sp )
 	Kfree(sp);
 }
 
-/* The records of the object counted into pages; NULL when none is a page */
-LOCAL SPOOL *spool_read( CONST TS_UUID *obj, T_PRNJOB *job, CONST UB *name )
+/*
+ * The records of the object counted into pages; NULL when none is a
+ * page. paper and flags as DT_RQ_PRINT says (DT_F_PR_*), links as
+ * 仮身: 印刷 says.
+ */
+LOCAL SPOOL *spool_read( CONST TS_UUID *obj, T_PRNJOB *job, CONST UB *name,
+			 UW paper, UINT flags, BOOL links )
 {
 	SPOOL	*sp = (SPOOL *)Kmalloc(sizeof(SPOOL));
 	T_OBREC	*rl;
@@ -403,6 +450,9 @@ LOCAL SPOOL *spool_read( CONST TS_UUID *obj, T_PRNJOB *job, CONST UB *name )
 	knl_memset(job, 0, sizeof(*job));
 	sp->obj = *obj;
 	sp->cur = -1;
+	sp->paper = paper;
+	sp->flags = flags;
+	sp->links = links;
 	rl = (T_OBREC *)Kmalloc(sizeof(T_OBREC) * SPOOL_MAX);
 	key = ( rl != NULL ) ? ob_opn_obj(obj, OB_OP_R) : E_NOMEM;
 	if ( key <= 0 ) {
@@ -437,7 +487,7 @@ LOCAL SPOOL *spool_read( CONST TS_UUID *obj, T_PRNJOB *job, CONST UB *name )
 		sp->recno[k] = rl[i].recno;
 		sp->size[k] = (SZ)rl[i].size;
 		sp->first[k] = pages;
-		pages += ( sp->fig != NULL ) ? 1 : tv_doc_pages(sp->doc, sp->t);
+		pages += ( sp->fig != NULL ) ? 1 : tv_doc_pages(spool_doc(sp), sp->t);
 		sp->cur = k;
 		sp->nrec++;
 	}
@@ -902,7 +952,7 @@ LOCAL void preview( DTWIN *host, CONST T_PRNJOB *job, CONST T_PRNSET *set )
 		dt_tell(host, "印刷するページがありません", NULL);
 		return;
 	}
-	wm_screen(&sw, &shh);
+	wm_screen_main(&sw, &shh);
 	prn_paper(job, set, &pw, &ph, &pct);
 	/* as tall as the screen allows, as wide as the sheet's sides say */
 	h = shh - 120;
@@ -1401,6 +1451,7 @@ EXPORT ER dt_print_spool( CONST T_DTREQ *rq, T_DTANS *an )
 	T_PRNJOB	job;
 	SPOOL		*sp;
 	UB		name[sizeof(rq->name) + 1];
+	UW		paper;
 	INT		k;
 	ER		er;
 
@@ -1408,7 +1459,12 @@ EXPORT ER dt_print_spool( CONST T_DTREQ *rq, T_DTANS *an )
 		name[k] = rq->name[k];
 	}
 	name[k] = 0;
-	sp = spool_read(&rq->target, &job, name);
+	paper = ( ( rq->flags & DT_F_PR_PAPER ) != 0 ) ? (UW)rq->look.bgcol : 0x00FFFFFFU;
+	if ( paper == TV_PAPER_LOOK ) {
+		paper = wm_look(WM_LOOK_WORK);		/* the paper of the scheme, as the window shows it */
+	}
+	sp = spool_read(&rq->target, &job, name, paper,
+			rq->flags & ( DT_F_PR_DETAIL | DT_F_PR_HIDDEN ), pr_last_ok ? pr_last.links : TRUE);
 	if ( sp == NULL ) {
 		return E_NOEXS;
 	}
@@ -1424,7 +1480,7 @@ EXPORT ER dt_print_spool( CONST T_DTREQ *rq, T_DTANS *an )
 /* The same pages as a job, without the panels: what the tests print */
 EXPORT void *dt_spool_open( CONST TS_UUID *obj, T_PRNJOB *job, CONST UB *name )
 {
-	return spool_read(obj, job, name);
+	return spool_read(obj, job, name, 0x00FFFFFFU, 0, TRUE);
 }
 
 EXPORT void dt_spool_close( void *sp )

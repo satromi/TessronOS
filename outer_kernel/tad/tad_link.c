@@ -23,8 +23,9 @@
  *	the record number is kept so that writing gives back the same form.
  */
 
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include "tad_local.h"
+#include <ts/tadlnk.h>
 
 #define LNK_MAX_ATTR	40		/* attributes a link built here has */
 
@@ -66,6 +67,92 @@ LOCAL ER cpy_attr( CONST T_TADNODE *nd, CONST char *name, UB *out, SZ max )
 	out[len] = '\0';
 
 	return E_OK;
+}
+
+/* Where the member of the JSON object begun at s[0] that starts at i ends: its comma or closing brace */
+LOCAL SZ applist_member_end( CONST UB *s, SZ i, SZ len )
+{
+	INT	depth = 0;
+	BOOL	str = FALSE;
+
+	for ( ; i < len; i++ ) {
+		if ( str ) {
+			if ( s[i] == '\\' ) i++;
+			else if ( s[i] == '"' ) str = FALSE;
+		} else if ( s[i] == '"' ) {
+			str = TRUE;
+		} else if ( s[i] == '{' || s[i] == '[' ) {
+			depth++;
+		} else if ( ( s[i] == '}' || s[i] == ']' ) && depth > 0 ) {
+			depth--;
+		} else if ( depth == 0 && ( s[i] == ',' || s[i] == '}' ) ) {
+			return i;
+		}
+	}
+	return len;
+}
+
+/* Whether a member of an applist says "defaultOpen": true */
+LOCAL BOOL applist_member_default( CONST UB *s, SZ from, SZ to )
+{
+	CONST char	*key = "\"defaultOpen\"";
+	SZ		i, k, n = 13;
+
+	for ( i = from; i + n < to; i++ ) {
+		for ( k = 0; k < n && s[i + k] == (UB)key[k]; k++ ) ;
+		if ( k == n ) {
+			for ( i += n; i < to && ( s[i] == ' ' || s[i] == ':' ); i++ ) ;
+			return (BOOL)( i < to && s[i] == 't' );
+		}
+	}
+	return FALSE;
+}
+
+/*
+ * The applist of a link. The list of programs is the object's: what the
+ * link's own copy is needed for is the program it opens with and whether
+ * it keeps to it. A copy too long for the field, however many programs it
+ * names, is kept as that one entry, so that the link is still a link.
+ * An object with no applist of its own then offers that one program.
+ */
+LOCAL void applist_attr( CONST T_TADNODE *nd, UB *out, SZ max )
+{
+	CONST UB	*v = tad_attr(nd, "applist");
+	SZ		len, i = 0, e, fs = 0, fe = 0;
+
+	out[0] = '\0';
+	if ( v == NULL ) {
+		return;
+	}
+	len = tad_slen((CONST char *)v);
+	if ( len < max ) {
+		cpy(out, v, len);
+		out[len] = '\0';
+		return;
+	}
+	while ( i < len && v[i] != '{' ) i++;
+	for ( i++; i < len; i = e + 1 ) {
+		while ( i < len && ( v[i] == ' ' || v[i] == '\n' || v[i] == '\r' || v[i] == '\t' ) ) i++;
+		e = applist_member_end(v, i, len);
+		if ( e <= i ) {
+			break;
+		}
+		if ( fe == 0 ) {
+			fs = i;
+			fe = e;
+		}
+		if ( applist_member_default(v, i, e) ) {
+			fs = i;
+			fe = e;
+			break;
+		}
+	}
+	if ( fe > fs && fe - fs + 3 <= max ) {
+		out[0] = '{';
+		cpy(out + 1, v + fs, fe - fs);
+		out[fe - fs + 1] = '}';
+		out[fe - fs + 2] = '\0';
+	}
 }
 
 LOCAL INT to_num( CONST UB *s, INT dflt )
@@ -344,10 +431,10 @@ LOCAL ER vobj_of( CONST T_TAD *doc, CONST T_TADNODE *nd, T_VOBJ *pk )
 	er = cpy_attr(nd, "name", pk->name, TAD_NAME_MAX);
 	if ( er >= E_OK ) er = cpy_attr(nd, "relationship", pk->relationship,
 					TAD_REL_MAX);
-	if ( er >= E_OK ) er = cpy_attr(nd, "applist", pk->applist, TAD_APPL_MAX);
 	if ( er < E_OK ) {
 		return er;
 	}
+	applist_attr(nd, pk->applist, TAD_APPL_MAX);
 	if ( pk->name[0] == '\0' && nd->first != NULL
 	  && nd->first->kind == TAD_ND_TEXT && nd->first->text != NULL ) {
 		/* with no name attribute the text of the element is the name */
@@ -497,10 +584,10 @@ EXPORT ER tad_lnk_find( CONST T_TAD *doc, CONST TS_UUID *vobjid, T_VOBJ *pk_vobj
 #define LNK_D_BAND	( TAD_D_NAME | TAD_D_PICT | TAD_D_ROLE | TAD_D_TYPE | TAD_D_UPDATE )
 
 /*
- * The letters and eleven pixels: a line above and below the name, the
- * frame, and the room the picture beside the name needs. The number is
- * what the records say rather than a choice made here; a band of any
- * other height makes every closed object in a record the wrong size.
+ * The closed height from the letters' size only (vobjsz.h). With a
+ * frame: the name one letter tall, a line above and below it and the
+ * frame's two pixels. With no frame the picture's square, c + c/4, is
+ * the tallest thing; with no picture either, the name.
  */
 LOCAL INT closed_of( INT chsz, UINT disp )
 {
@@ -508,7 +595,30 @@ LOCAL INT closed_of( INT chsz, UINT disp )
 		return 0;
 	}
 
-	return ( ( chsz > 0 ) ? chsz : 14 ) + 11;
+	return VOBJ_CLOSED_H(chsz, ( disp & TAD_D_FRAME ) != 0, ( disp & TAD_D_PICT ) != 0);
+}
+
+EXPORT INT tad_closed_h( INT chsz, UINT disp )
+{
+	return closed_of(chsz, disp);
+}
+
+EXPORT INT tad_least_w( INT chsz, UINT disp )
+{
+	return VOBJ_LEAST_W(chsz, ( disp & TAD_D_FRAME ) != 0, ( disp & TAD_D_PICT ) != 0);
+}
+
+EXPORT INT tad_closed_w( INT chsz, UINT disp, INT name_w )
+{
+	INT	c = VOBJ_CH(chsz), w = ( name_w > 0 ) ? name_w : 0;
+
+	if ( ( disp & TAD_D_FRAME ) != 0 ) {
+		w += ( ( disp & TAD_D_PICT ) != 0 ) ? VOBJ_CLOSED_EDGE_W(c) : ( c / 2 ) * 2;
+	} else if ( ( disp & TAD_D_PICT ) != 0 ) {
+		w += c + c / 4;
+	}
+
+	return ( w < tad_least_w(chsz, disp) ) ? tad_least_w(chsz, disp) : w;
 }
 
 EXPORT INT tad_lnk_closed_h( CONST T_VOBJ *pk_vobj )
@@ -518,6 +628,15 @@ EXPORT INT tad_lnk_closed_h( CONST T_VOBJ *pk_vobj )
 	}
 
 	return closed_of(pk_vobj->chsz, pk_vobj->disp);
+}
+
+EXPORT INT tad_lnk_least_w( CONST T_VOBJ *pk_vobj )
+{
+	if ( pk_vobj == NULL ) {
+		return 0;
+	}
+
+	return tad_least_w(pk_vobj->chsz, pk_vobj->disp);
 }
 
 EXPORT INT tad_lnk_fit_h( CONST T_VOBJ *pk_vobj, INT h )
@@ -544,6 +663,7 @@ EXPORT INT tad_node_closed_h( CONST T_TADNODE *nd )
 	if ( to_bool(tad_attr(nd, "typedisp"), FALSE) )   disp |= TAD_D_TYPE;
 	if ( to_bool(tad_attr(nd, "updatedisp"), FALSE) ) disp |= TAD_D_UPDATE;
 	if ( to_bool(tad_attr(nd, "pictdisp"), TRUE) )    disp |= TAD_D_PICT;
+	if ( to_bool(tad_attr(nd, "framedisp"), TRUE) )   disp |= TAD_D_FRAME;
 
 	return closed_of(to_num(tad_attr(nd, "chsz"), 0), disp);
 }
@@ -929,7 +1049,12 @@ EXPORT ER tad_lnk_set( T_TAD *doc, CONST T_VOBJ *pk_vobj )
 	return E_OK;
 }
 
-/* Take a node out of the list of children of its parent */
+/*
+ * Take a node out of the list of children of its parent. The parent and
+ * all above it are marked changed (tad_touch): a model that keeps what it
+ * made of a paragraph by its gen would otherwise keep the link taken out,
+ * and number the links after it one too low.
+ */
 LOCAL void unhook( T_TADNODE *nd )
 {
 	T_TADNODE	*parent = nd->parent, *prev;
@@ -937,6 +1062,7 @@ LOCAL void unhook( T_TADNODE *nd )
 	if ( parent == NULL ) {
 		return;
 	}
+	tad_touch(parent);
 	if ( parent->first == nd ) {
 		parent->first = nd->next;
 	} else {
@@ -1210,4 +1336,58 @@ EXPORT void tad_lnk_clr_delta( T_TAD *doc )
 	doc->delta      = NULL;
 	doc->delta_last = NULL;
 	doc->ndelta     = 0;
+}
+
+/*
+ * Each link made to say on which volume its object is, as seen from the
+ * volume hv of the object the record belongs to (ts/tadlnk.h)
+ */
+EXPORT INT tad_lnk_vol_doc( T_TAD *doc, CONST TS_UUID *hv, CONST TS_UUID *mine,
+			    TAD_VOLOF vol_of, void *arg, INT *p_failed )
+{
+	T_VOBJ	*v;
+	TS_UUID	tv;
+	INT	i, n, changed = 0, failed = 0;
+
+	if ( p_failed != NULL ) {
+		*p_failed = 0;
+	}
+	if ( doc == NULL || hv == NULL || vol_of == NULL ) {
+		return E_PAR;
+	}
+	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	if ( v == NULL ) {
+		return E_NOMEM;
+	}
+	n = tad_lnk_count(doc);
+	for ( i = 0; i < n; i++ ) {
+		BOOL	same;
+
+		if ( tad_lnk_get(doc, i, v) < E_OK || uuid_zero(&v->vobjid) ) {
+			continue;
+		}
+		if ( !uuid_zero(&v->tmach) && ( mine == NULL || ts_uuid_cmp(&v->tmach, mine) != 0 ) ) {
+			continue;			/* another machine's: as it is */
+		}
+		if ( vol_of(&v->target, &tv, arg) < E_OK ) {
+			continue;			/* on no volume attached: as it is */
+		}
+		same = (BOOL)( ts_uuid_cmp(&tv, hv) == 0 || uuid_zero(&tv) );
+		if ( uuid_zero(&v->tmach)
+		  && ( ( same && uuid_zero(&v->tvol) ) || ( !same && ts_uuid_cmp(&v->tvol, &tv) == 0 ) ) ) {
+			continue;			/* says it already */
+		}
+		v->tvol = same ? tad_uuid_zero : tv;
+		v->tmach = tad_uuid_zero;
+		if ( tad_lnk_set(doc, v) < E_OK ) {
+			failed++;
+		} else {
+			changed++;
+		}
+	}
+	Kfree(v);
+	if ( p_failed != NULL ) {
+		*p_failed = failed;
+	}
+	return changed;
 }

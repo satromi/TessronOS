@@ -238,9 +238,42 @@ LOCAL BOOL pan_fault( UD *f, UD esr, UD far )
 	return TRUE;
 }
 
+/*
+ * A task reached the unmapped pages below its stack (knl_vmap_stack).
+ * The summary of it, the rest being told as for any exception.
+ */
+EXPORT volatile UW	knl_stack_out_count = 0;	/* for the tests */
+EXPORT volatile UD	knl_stack_out_addr = 0;
+
+LOCAL void stack_out_say( UD *f, UD far, UD sp )
+{
+	knl_stack_out_addr = far;
+	tm_printf_urgent((UB*)"\n!STACK! CPU%d: task=%d ran out of its %d byte stack: %lx, at ELR %lx, LR %lx, SP %lx\n",
+		exc_cpu(), ( knl_ctxtsk != NULL ) ? knl_ctxtsk->tskid : 0,
+		( knl_ctxtsk != NULL ) ? (INT)knl_ctxtsk->sstksz : 0, far, f[21], f[20], sp);
+	__atomic_add_fetch(&knl_stack_out_count, 1, __ATOMIC_SEQ_CST);
+}
+
+/*
+ * The entry of the exception (vector.S) found no room for its frame on
+ * the stack, and came here on the interrupt stack with the stack pointer
+ * as it was. No return.
+ */
+EXPORT void knl_stack_out( void *frame, UD esr, UD far, UD sp )
+{
+	stack_out_say((UD *)frame, far, sp);
+	knl_exception_handler(frame, esr, far);
+	halt();
+}
+
 EXPORT void knl_kernel_fault( void *frame, UD esr, UD far )
 {
 	UD	dfsc = esr & 0x3f;
+
+	if ( knl_stack_guard_hit(knl_ctxtsk, (UBINT)far) ) {
+		stack_out_say((UD *)frame, far, (UD)(UBINT)( (UD *)frame + 26 ));
+		knl_exception_handler(frame, esr, far);
+	}
 
 	if ( pan_refused((UD *)frame, esr, far) ) {
 		if ( pan_fault((UD *)frame, esr, far) ) {

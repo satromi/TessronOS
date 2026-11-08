@@ -980,7 +980,7 @@ EXPORT void dt_disk_connect( DTWIN *d, CONST T_VOBJ *v )
 
 		tm_printf((UB *)"disk: connect %s\n", dev);
 		if ( kinds[k] == FS_KIND_FAT12 || kinds[k] == FS_KIND_FAT16 || kinds[k] == FS_KIND_FAT32
-		  || kinds[k] == FS_KIND_BTRON ) {
+		  || kinds[k] == FS_KIND_EXFAT || kinds[k] == FS_KIND_NTFS || kinds[k] == FS_KIND_BTRON ) {
 			/* files, not objects: ファイル変換 reads them */
 			tm_printf((UB *)"disk: %s is files, not objects\n", dev);
 			dt_tell(d, "実身のディスクではありません。", "ファイル変換で開いてください");

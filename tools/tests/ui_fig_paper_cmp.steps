@@ -1,0 +1,92 @@
+# 基本図形編集の用紙枠設定を、デスクトップの図形編集とプロセスの図形編集で同じに使う
+# (design 11.3, 17.13), for tools/ui_run.py. A figure of one rectangle and two zigzag lines
+# (mkbig fig 1 2 0) opened at 100,100 to 900,700. 用紙枠設定 is the second row of 書式/印刷's
+# own menu. The menu opens with the item chosen last on the pointer's row, the rows 20 apart,
+# an item's own menu beside it with its first row on the item's: in the desktop's figure
+# 閉じる (書式/印刷 seven rows under); in the process's, the system's menus remembering,
+# 書式/印刷. The panel (用紙, its list, 縦 横, 余白 上 下 左 右, 割付 片面 見開き, ヘッダ/フッタ,
+# 標準設定, 取消, 設定) is kept on the screen to be compared; B4 chosen from the list, 15 typed
+# after the 0 of 上, 見開き, 設定. Saved, record 0 comes out the same, byte for byte, its
+# <paper> and <docmargin> written ahead of the figure. Both put the panel in the middle of the
+# screen (397,232), its parts in the same places within it, so the presses are the same.
+# Keys: '1' 1e, '5' 22; Ctrl+S 16 01, Ctrl+E 08 01.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 1 2 0
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+click 600 400 1
+wait 500
+move 610 540
+wait 400
+move 720 540
+wait 150
+move 720 560
+wait 300
+click 720 560
+wait 1500
+shot ppc_k_panel
+click 495 310
+wait 300
+click 560 440
+wait 300
+key 1e
+wait 150
+key 22
+wait 300
+click 595 505
+wait 300
+shot ppc_k_set
+click 815 537
+wait 800
+sync 600
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 2 0
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 3
+wait 800
+logmark
+click 600 400 1
+expectsince figure: menu
+wait 500
+move 610 400
+wait 400
+move 720 400
+wait 150
+move 720 420
+wait 300
+click 720 420
+expectsince figure: paper panel open
+wait 1500
+shot ppc_p_panel
+click 495 310
+wait 300
+click 560 440
+wait 300
+key 1e
+wait 150
+key 22
+wait 300
+click 595 505
+wait 300
+shot ppc_p_set
+logmark
+click 815 537
+expectsince figure: paper panel answered 1
+wait 500
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum show
+same kernel
+key 08 01
+expect figure: closed

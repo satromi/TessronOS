@@ -461,6 +461,9 @@ static void mark_start( void )
 		if ( m->vec != 0xffffffffu ) {
 			say(", exception %u at RIP 0x%lx, CR2 0x%lx, error 0x%lx", m->vec, m->rip, m->cr2, m->err);
 		}
+		if ( m->starting != 0 ) {
+			say(", while starting the processor of APIC %u", m->starting - 1);
+		}
 		say("\n");
 		m->runs++;
 	} else {
@@ -470,6 +473,7 @@ static void mark_start( void )
 	}
 	m->last = 0;
 	m->vec = 0xffffffffu;
+	m->starting = 0;
 	mark_page = m;
 	BI->mark_pa = (UINT64)a;
 }
@@ -2181,7 +2185,16 @@ static void report( T_BOOTINFO *bi )
 
 		for ( i = 0; i < 16; i++ ) tb_fmt(&rpt, " %02x", bi->esp_guid[i]);
 	}
+#ifdef USE_TESTAGENT
+	{
+		static char	shown[BI_CMDLINE_LEN];
+
+		bi_cmdline_hide_key(bi->cmdline, shown);
+		tb_fmt(&rpt, "\n[settings] \"%s\"\n", shown);
+	}
+#else
 	tb_fmt(&rpt, "\n[settings] \"%s\"\n", bi->cmdline);
+#endif
 	stage("report: processor");
 	rpt_cpu();
 	stage("report: screen modes");
@@ -2273,9 +2286,20 @@ EFI_STATUS EFIAPI efi_main( EFI_HANDLE image, EFI_SYSTEM_TABLE *st )
 	find_tables(bi);
 	setup_screen(bi);
 	stage("the files");
+#ifdef USE_TESTAGENT
+	{
+		static char	shown[BI_CMDLINE_LEN];
+
+		bi_cmdline_hide_key(bi->cmdline, shown);
+		say("TessronOS loader: firmware \"%s\" %08x, UEFI %u.%u; partition %u%s; settings \"%s\"\n",
+		    bi->fw_vendor, st->FirmwareRevision, st->Hdr.Revision >> 16, st->Hdr.Revision & 0xffff,
+		    bi->esp_part, ( bi->flags & BI_F_ESP_GUID ) ? " (GPT)" : " (no GPT GUID)", shown);
+	}
+#else
 	say("TessronOS loader: firmware \"%s\" %08x, UEFI %u.%u; partition %u%s; settings \"%s\"\n",
 	    bi->fw_vendor, st->FirmwareRevision, st->Hdr.Revision >> 16, st->Hdr.Revision & 0xffff,
 	    bi->esp_part, ( bi->flags & BI_F_ESP_GUID ) ? " (GPT)" : " (no GPT GUID)", bi->cmdline);
+#endif
 	open_dirs();
 	if ( ts_dir == 0 ) say("TessronOS loader: \\EFI\\TESSRON cannot be made: no files will be written\n");
 	boot_entry_request();		/* システム登録 asked for the firmware's entry of an internal disk */

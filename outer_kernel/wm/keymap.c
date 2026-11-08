@@ -69,12 +69,52 @@ EXPORT INT km_kana( void )
 	return ( v >= 0 && v < KM_KANA_N ) ? v : KM_KANA_JIS;
 }
 
+EXPORT INT km_latin_of( UINT mods )
+{
+	UINT	v = ( mods >> KM_MOD_LATIN_SHIFT ) & 3U;
+
+	if ( ( mods & KM_MOD_OWN ) == 0 || v >= KM_LATIN_N ) {
+		return km_latin();
+	}
+	return (INT)v;
+}
+
+EXPORT INT km_kana_of( UINT mods )
+{
+	UINT	v = ( mods >> KM_MOD_KANA_SHIFT ) & 3U;
+
+	if ( ( mods & KM_MOD_OWN ) == 0 || v >= KM_KANA_N ) {
+		return km_kana();
+	}
+	return (INT)v;
+}
+
+/* The keypad's keys type the same in every layout */
+LOCAL UB km_pad( UINT code )
+{
+	if ( code >= 0x59 && code <= 0x61 ) return (UB)( '1' + code - 0x59 );
+	switch ( code ) {
+	case 0x54:	return '/';
+	case 0x55:	return '*';
+	case 0x56:	return '-';
+	case 0x57:	return '+';
+	case 0x62:	return '0';
+	case 0x63:	return '.';
+	case 0x67:	return '=';
+	case 0x85:	return ',';
+	default:	return 0;
+	}
+}
+
 EXPORT UB km_char( UINT code, UINT mods )
 {
 	BOOL	up = (BOOL)( ( mods & ( HID_MOD_LSHIFT | HID_MOD_RSHIFT ) ) != 0 );
 	BOOL	us = (BOOL)( wm_num(LK_KBD_US, 0) != 0 );
 
-	if ( km_latin() == KM_LATIN_DVORAK ) {
+	if ( km_pad(code) != 0 ) {
+		return km_pad(code);
+	}
+	if ( km_latin_of(mods) == KM_LATIN_DVORAK ) {
 		if ( code == 0x87 || code == 0x89 ) {
 			return (UB)( up ? '|' : '\\' );
 		}
@@ -200,14 +240,15 @@ EXPORT CONST char *km_kana_text( UINT code, UINT mods )
 	CONST char	*s;
 	BOOL		l = (BOOL)( ( mods & KM_MOD_THUMB_L ) != 0 );
 	BOOL		r = (BOOL)( ( mods & KM_MOD_THUMB_R ) != 0 );
+	INT		kana = km_kana_of(mods);
 
 	/* TRON かな: the TRON keyboard's red (left) and blue (right) Shift choose the planes too */
-	if ( km_kana() == KM_KANA_TRON ) {
+	if ( kana == KM_KANA_TRON ) {
 		l = (BOOL)( l || ( mods & HID_MOD_LSHIFT ) != 0 );
 		r = (BOOL)( r || ( mods & HID_MOD_RSHIFT ) != 0 );
 	}
 
-	switch ( km_kana() ) {
+	switch ( kana ) {
 	case KM_KANA_TRON:
 		t = km_tron;
 		n = sizeof(km_tron) / sizeof(km_tron[0]);

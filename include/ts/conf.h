@@ -229,6 +229,16 @@ IMPORT INT  cf_link_put( UB *text, INT len, INT max, CONST char *role, CONST TS_
  */
 IMPORT INT  cf_link_tag( UB *text, INT len, INT max, CONST TS_UUID *u, CONST char *role );
 
+/*
+ * A setting that is a list of objects, links with the same word: one to
+ * u added as a paragraph of its own after label (the same length when
+ * there is one already, -1 for no room), or the one to u taken out with
+ * its paragraph when it held only the link (-2 when none points at u)
+ */
+IMPORT INT  cf_link_add( UB *text, INT len, INT max, CONST char *role, CONST TS_UUID *u,
+			 CONST TS_UUID *vobj, CONST char *label );
+IMPORT INT  cf_link_drop( UB *text, INT len, CONST char *role, CONST TS_UUID *u );
+
 #define CF_ROLE_WALL	"tessronos.wallpaper"	/* 機器の設定: the picture the ground is laid with */
 #define CF_ROLE_FACE	"tessronos.systemface"	/* 機器の設定: the face the system's letters are drawn in */
 /*
@@ -247,6 +257,13 @@ IMPORT void knl_sys_clear_start( CONST char *path );
 /* In the kernel: the same on a settings object (its UUID as text), read and written whole (uconf.c) */
 IMPORT BOOL knl_conf_link_get( CONST char *uuid, CONST char *role, TS_UUID *p_u );
 IMPORT ER   knl_conf_link_put( CONST char *uuid, CONST char *role, CONST TS_UUID *target, CONST char *label );
+/* A list of objects there: every link with role (how many, up to max put in buf), one added, one taken out */
+IMPORT INT  knl_conf_links_get( CONST char *uuid, CONST char *role, TS_UUID *buf, INT max );
+IMPORT ER   knl_conf_link_add( CONST char *uuid, CONST char *role, CONST TS_UUID *target, CONST char *label );
+IMPORT ER   knl_conf_link_drop( CONST char *uuid, CONST char *role, CONST TS_UUID *target );
+
+/* 機器の設定: a Bluetooth device paired, its object holding the keys (device/bt), one link each */
+#define CF_ROLE_BTDEV	"tessronos.btdevice"
 
 /*
  * In the kernel: a system object found from the root システム by the

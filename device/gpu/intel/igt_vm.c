@@ -159,11 +159,11 @@ LOCAL void free_below( UD pa, INT lvl )
 	}
 }
 
-EXPORT void igt_vm_destroy( IGTVM *vm )
+/* A space, its contexts and its tables freed */
+LOCAL void vm_free( IGTVM *vm )
 {
 	INT	h, e;
 
-	if ( vm == NULL ) return;
 	for ( h = 0; h < GPU_HWC_MAX; h++ ) {
 		for ( e = 0; e < IGT_NENG; e++ ) {
 			if ( vm->ctx[h][e] != NULL ) igt_ctx_free(vm->ctx[h][e]);
@@ -172,6 +172,51 @@ EXPORT void igt_vm_destroy( IGTVM *vm )
 	free_below(vm->pml4_pa, 3);
 	pt_free(vm->pml4_pa);
 	Kfree(vm);
+}
+
+/*
+ * The space of a process that has ended. An engine that ran one of its
+ * contexts last still holds that context: the engine writes it back to
+ * its image as it goes on to another context, and RC6 saves it and
+ * brings it back. Freed now, its image, its ring and its tables would be
+ * pages the next process gets (a context's image or a BO of its), and
+ * the engine would write the old state over them. So such a space is
+ * kept, the kernel's context is asked for on that engine, and the space
+ * is freed once no engine holds it (igt_vm_reap, at the next job and
+ * from the power task).
+ */
+EXPORT void igt_vm_destroy( IGTVM *vm )
+{
+	BOOL	held;
+
+	if ( vm == NULL ) return;
+	held = ( !vm->kernel && igt_holds_vm(vm) );
+	if ( !held ) {
+		vm_free(vm);
+		igt_vm_reap();
+		return;
+	}
+	vm->dead_next = knl_igt.dead;
+	knl_igt.dead = vm;
+	knl_igt.n_held++;
+	igt_to_kernel();
+}
+
+EXPORT void igt_vm_reap( void )
+{
+	IGTVM	**pp = &knl_igt.dead;
+
+	while ( *pp != NULL ) {
+		IGTVM	*vm = *pp;
+
+		if ( igt_holds_vm(vm) ) {
+			pp = &vm->dead_next;
+			continue;
+		}
+		*pp = vm->dead_next;
+		vm_free(vm);
+		knl_igt.n_reaped++;
+	}
 }
 
 /*

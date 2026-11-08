@@ -18,8 +18,9 @@
  *
  *	The sensors: devices of the namespace with the IDs of the sensors
  *	(INT33BE the OV5693 in front, INT347A the OV8865 at the back and
- *	INT347E the OV7251 for the infrared, on the Surface Go 2); only the
- *	OV5693 is driven. A sensor's SSDB (a buffer of 108 bytes) gives the
+ *	INT347E the OV7251 for the infrared, on the Surface Go 2); the first
+ *	two are driven, each a camera, one streaming at a time since one DMA
+ *	channel takes the frames. A sensor's SSDB (a buffer of 108 bytes) gives the
  *	CSI-2 port of the receiver it is wired to (byte 28), its lanes (29),
  *	how it is turned in the case (84), its input clock (86, 4 bytes) and
  *	the number of its power controller (90); its _CRS its I2C address and
@@ -188,7 +189,7 @@ IMPORT void	knl_int_count_at( UINT intno, volatile UW *cnt );	/* kernel/tkernel/
 #define NLOPS			8		/* its entries for each */
 #define LOP_ENTRIES		1024
 #define NBUF			4		/* the frame buffers behind them */
-#define BUF_ORDER		9		/* 2 MB each, enough for a frame of the mode */
+#define BUF_ORDER		10		/* 4 MB each, enough for a frame of the largest mode */
 #define FBPT_VALID		0x1
 #define FBPT_IOC		0x2
 #define FBPT_IOS		0x4
@@ -205,11 +206,12 @@ LOCAL CONST struct { UB fmt; UH w, h; } offer[NMODES] = {
 };
 
 /* the sensors the namespace may name */
-LOCAL CONST struct { CONST char *hid; CONST char *model; BOOL driven; } sensors[] = {
-	{ "INT33BE", "OV5693", TRUE },
-	{ "INT347A", "OV8865", FALSE },
-	{ "INT347E", "OV7251", FALSE },
+LOCAL CONST struct { CONST char *hid; CONST char *model; CONST T_SENSOPS *ops; } sensors[] = {
+	{ "INT33BE", "OV5693", &knl_ov5693_ops },
+	{ "INT347A", "OV8865", &knl_ov8865_ops },
+	{ "INT347E", "OV7251", NULL },
 };
+#define NSENSOR		2		/* cameras at most */
 
 typedef struct {
 	char		path[48];
@@ -222,6 +224,10 @@ typedef struct {
 	char		ctrl[48];
 	T_CAMPWR	pwr;
 	T_OV5693	ov;
+	CONST T_SENSOPS	*ops;
+	T_CAMSRC	src;
+	T_CAMMODE	modes[NMODES];
+	INT		mode;
 } SENSOR;
 
 typedef struct {
@@ -229,10 +235,8 @@ typedef struct {
 	UBINT		base;
 	UINT		intno;
 	INT		irqkind;
-	SENSOR		sen;
-	T_CAMSRC	src;
-	T_CAMMODE	modes[NMODES];
-	INT		mode;
+	SENSOR		*sens[NSENSOR];
+	SENSOR		*sen;		/* the one streaming, or that last streamed */
 	BOOL		streaming;
 	ID		tsk, flg, mtx;
 	/* the DMA's memory */
@@ -341,17 +345,20 @@ LOCAL void *dma_pages( UINT order, UD *pa )
 	return PA2VA(*pa);
 }
 
-/* The memory of the ring, made the first time a stream starts and kept */
+/*
+ * The memory of the ring, made the first time a stream starts and kept;
+ * its lists of pages set for the sensor that is to stream
+ */
 LOCAL ER ring_alloc( CIO2 *c )
 {
 	INT	i, k;
 	void	*dummy;
 
-	if ( c->fbpt != NULL ) return E_OK;
-	c->bpl = cam_isp_ipu3_bpl(OV5693_WIDTH);
-	c->flen = c->bpl * OV5693_HEIGHT;
+	c->bpl = cam_isp_ipu3_bpl(c->sen->ops->w);
+	c->flen = c->bpl * c->sen->ops->h;
 	c->npages = ( c->flen + 4095 ) / 4096;
 	if ( c->npages > LOP_ENTRIES - 1 || c->flen > ( 4096 << BUF_ORDER ) ) return E_SYS;
+	if ( c->fbpt != NULL ) goto lists;
 	dummy = dma_pages(0, &c->dummy_pa);
 	c->dummy_lop = (UW *)dma_pages(0, &c->dummy_lop_pa);
 	c->fbpt = (volatile UW *)dma_pages(0, &c->fbpt_pa);
@@ -361,13 +368,16 @@ LOCAL ER ring_alloc( CIO2 *c )
 		c->buf[i] = (UB *)dma_pages(BUF_ORDER, &c->buf_pa[i]);
 		c->lop[i] = (UW *)dma_pages(0, &c->lop_pa[i]);
 		if ( c->buf[i] == NULL || c->lop[i] == NULL ) return E_NOMEM;
+	}
+	if ( ( c->isp = (T_CAMISP *)Kmalloc(sizeof(T_CAMISP)) ) == NULL ) return E_NOMEM;
+	if ( ( c->out = (UB *)Kmalloc(1280 * 960 * 2) ) == NULL ) return E_NOMEM;
+lists:
+	for ( i = 0; i < NBUF; i++ ) {
 		/* the buffer's pages, then the dummy page for whatever the hardware reaches past them */
 		for ( k = 0; k < LOP_ENTRIES; k++ ) {
 			c->lop[i][k] = (UW)( ( ( k < c->npages ) ? c->buf_pa[i] + (UD)k * 4096 : c->dummy_pa ) >> 12 );
 		}
 	}
-	if ( ( c->isp = (T_CAMISP *)Kmalloc(sizeof(T_CAMISP)) ) == NULL ) return E_NOMEM;
-	if ( ( c->out = (UB *)Kmalloc(1280 * 960 * 2) ) == NULL ) return E_NOMEM;
 	tm_printf((UB *)"cio2: ring: FBPT at %lx, %d slots over %d buffers of %d bytes (%d pages, lines of %d bytes), "
 		  "buffer 0 at %lx\n", c->fbpt_pa, NSLOT, NBUF, c->flen, c->npages, c->bpl, c->buf_pa[0]);
 	return E_OK;
@@ -404,14 +414,14 @@ LOCAL W rx_timing( W a, W b, UW hz )
 
 LOCAL void hw_init( CIO2 *c )
 {
-	UW	pb = PIPE(c->sen.port);
+	UW	pb = PIPE(c->sen->port);
 	INT	i;
-	UW	hz = OV5693_LINK_HZ;
+	UW	hz = c->sen->ops->link_hz;
 	W	clk_settle = rx_timing(95, -8, hz), dat_settle = rx_timing(85, -2, hz);
 
 	wr(c, pb + CSIRX_TERMEN(-1), (UW)rx_timing(0, 0, hz));
 	wr(c, pb + CSIRX_SETTLE(-1), (UW)clk_settle);
-	for ( i = 0; i < c->sen.lanes; i++ ) {
+	for ( i = 0; i < c->sen->lanes; i++ ) {
 		wr(c, pb + CSIRX_TERMEN(i), (UW)rx_timing(0, 0, hz));
 		wr(c, pb + CSIRX_SETTLE(i), (UW)dat_settle);
 	}
@@ -436,14 +446,14 @@ LOCAL void hw_init( CIO2 *c )
 	wr(c, INT_EN_EXT_OE, 0x8f0fffff);
 	wr(c, INT_EN, INT_IOIRQ | INT_IOC(DMA_CHAN) | INT_IOS(DMA_CHAN));
 
-	wr(c, PXM_PXF_FMT_CFG0(c->sen.port), PXF_BPP_10 | PXF_PCK_64B);
+	wr(c, PXM_PXF_FMT_CFG0(c->sen->port), PXF_BPP_10 | PXF_PCK_64B);
 	wr(c, pb + MIPIBE_LP_LUT(0), ( 0U << LP_LUT_SID_SHIFT ) | ( 0U << LP_LUT_VC_SHIFT )
 				     | ( (UW)MIPI_RAW10 << LP_LUT_TYPE_SHIFT ));
 	wr(c, pb + MIPIBE_COMP_FORMAT(0), 0);
 	wr(c, pb + MIPIBE_FORCE_RAW8, 0);
-	wr(c, PXM_SID2BID0(c->sen.port), 0);
+	wr(c, PXM_SID2BID0(c->sen->port), 0);
 
-	wr(c, pb + CSIRX_NLANES, c->sen.lanes);
+	wr(c, pb + CSIRX_NLANES, c->sen->lanes);
 	wr(c, CGC, CGC_PRIM_TGE | CGC_SIDE_TGE | CGC_XOSC_TGE | CGC_D3I3_TGE | CGC_CSI2_INTERFRAME_TGE
 		   | CGC_CSI2_PORT_DCGE | CGC_SIDE_DCGE | CGC_PRIM_DCGE | CGC_ROSC_DCGE | CGC_XOSC_DCGE
 		   | CGC_HOLDOFF | CGC_CSI_HOLDOFF);
@@ -464,7 +474,7 @@ LOCAL void hw_init( CIO2 *c )
 				| CDMAC0_DMA_HALTED);
 	wr(c, CDMAC1(DMA_CHAN), CDMAC1_LINENUMUPDATE);
 	wr(c, PBM_FOPN_ABORT, 0);
-	wr(c, PXM_FRF_CFG(c->sen.port), FRF_CRC_TH | FRF_MSK_ECC_DPHY_NR | FRF_MSK_ECC_RE | FRF_MSK_ECC_DPHY_NE);
+	wr(c, PXM_FRF_CFG(c->sen->port), FRF_CRC_TH | FRF_MSK_ECC_DPHY_NR | FRF_MSK_ECC_RE | FRF_MSK_ECC_DPHY_NE);
 
 	wr(c, pb + IRQCTRL_CLEAR, IRQCTRL_ALL);
 	wr(c, INT_STS_EXT_OE, 0xffffffff);
@@ -474,12 +484,12 @@ LOCAL void hw_init( CIO2 *c )
 	wr(c, pb + MIPIBE_ENABLE, 1);
 	wr(c, pb + CSIRX_ENABLE, 1);
 	tm_printf((UB *)"cio2: port %d, %d lanes, link %d Hz: settle clock %d data %d (1/16 ns), RAW10 to DMA %d, "
-		  "CDMAC0 %08x\n", c->sen.port, c->sen.lanes, hz, clk_settle, dat_settle, DMA_CHAN, rd(c, CDMAC0(DMA_CHAN)));
+		  "CDMAC0 %08x\n", c->sen->port, c->sen->lanes, hz, clk_settle, dat_settle, DMA_CHAN, rd(c, CDMAC0(DMA_CHAN)));
 }
 
 LOCAL void hw_exit( CIO2 *c )
 {
-	UW	pb = PIPE(c->sen.port);
+	UW	pb = PIPE(c->sen->port);
 	INT	i;
 
 	wr(c, pb + IRQCTRL_MASK, 0);
@@ -499,13 +509,13 @@ LOCAL void hw_exit( CIO2 *c )
 /* The receiver's state said: what to look at when no frame comes */
 LOCAL void say_state( CIO2 *c, CONST char *when )
 {
-	UW	pb = PIPE(c->sen.port);
+	UW	pb = PIPE(c->sen->port);
 
 	tm_printf((UB *)"cio2: %s: interrupts %d (completed %d, started %d, output errors %d, receiver errors %d); "
 		  "INT_STS %08x EXT_OE %08x EXT_IE %08x; port %d: CSIRX status %08x lanes HS %02x LP %06x, "
 		  "MIPI back end %08x, IRQ status %05x; CDMAC0 %08x CDMARI %08x FOPN %08x\n",
 		  when, c->nint, c->nioc, c->nios, c->noe, c->nie, rd(c, INT_STS), rd(c, INT_STS_EXT_OE),
-		  rd(c, INT_STS_EXT_IE), c->sen.port, rd(c, pb + CSIRX_STATUS), rd(c, pb + CSIRX_DLANE_HS),
+		  rd(c, INT_STS_EXT_IE), c->sen->port, rd(c, pb + CSIRX_STATUS), rd(c, pb + CSIRX_DLANE_HS),
 		  rd(c, pb + CSIRX_DLANE_LP), rd(c, pb + MIPIBE_STATUS), rd(c, pb + IRQCTRL_STATUS),
 		  rd(c, CDMAC0(DMA_CHAN)), rd(c, CDMARI(DMA_CHAN)), rd(c, PBM_FOPN_ABORT));
 }
@@ -515,14 +525,14 @@ LOCAL void say_state( CIO2 *c, CONST char *when )
 /* The exposure the pictures ask for: lines first, then gain (scale: 256 for as now) */
 LOCAL void exposure_to( CIO2 *c, UW scale )
 {
-	T_OV5693	*s = &c->sen.ov;
+	T_OV5693	*s = &c->sen->ov;
 	UD		total = (UD)s->exposure * s->gain * scale / 256;
-	UW		maxe = knl_ov5693_max_exposure(s), e, g;
+	UW		maxe = c->sen->ops->max_exposure(s), e, g, one = c->sen->ops->gain1x;
 
-	if ( total < 4 * 8 ) total = 4 * 8;
-	if ( total / 8 <= maxe ) {
-		e = (UW)( total / 8 );
-		g = 8;
+	if ( total < 4 * one ) total = 4 * one;
+	if ( total / one <= maxe ) {
+		e = (UW)( total / one );
+		g = one;
 	} else {
 		e = maxe;
 		g = (UW)( ( total + e - 1 ) / e );
@@ -530,7 +540,7 @@ LOCAL void exposure_to( CIO2 *c, UW scale )
 	/* a change of less than 1/32 is left, as is any while the last one may not have taken effect */
 	if ( c->ae_frames < 3 ) return;
 	if ( (UD)e * g * 32 > (UD)s->exposure * s->gain * 31 && (UD)e * g * 31 < (UD)s->exposure * s->gain * 32 ) return;
-	(void)knl_ov5693_exposure(s, e, g);
+	(void)c->sen->ops->exposure(s, e, g);
 	c->ae_frames = 0;
 }
 
@@ -550,13 +560,13 @@ LOCAL void say_frame( CIO2 *c, INT slot, UW bytes, UW fnum )
 		  "white balance %d %d %d\n", c->frames, (INT)ms, slot, bytes, c->flen, fnum,
 		  px[0], px[1], px[2], px[3], px[4], px[5], px[6], px[7],
 		  (INT)( c->isp->sum[0] / n ), (INT)( c->isp->sum[1] / n ), (INT)( c->isp->sum[2] / n ), c->isp->black,
-		  c->isp->nsat, c->isp->ncell, c->sen.ov.exposure, c->sen.ov.gain, c->isp->wb[0], c->isp->wb[1], c->isp->wb[2]);
+		  c->isp->nsat, c->isp->ncell, c->sen->ov.exposure, c->sen->ov.gain, c->isp->wb[0], c->isp->wb[1], c->isp->wb[2]);
 }
 
 /* What the interrupt kept, said when it changed (eight times at most a stream) */
 LOCAL void say_errors( CIO2 *c )
 {
-	UW		oe = c->oe, ie = c->ie, csi = c->csi[c->sen.port];
+	UW		oe = c->oe, ie = c->ie, csi = c->csi[c->sen->port];
 	INT		p;
 
 	if ( oe == 0 && ie == 0 && csi == 0 ) return;
@@ -564,11 +574,11 @@ LOCAL void say_errors( CIO2 *c )
 	for ( p = 0; p < 4; p++ ) c->csi[p] = 0;
 	if ( c->said_err++ >= 8 ) return;
 	tm_printf((UB *)"cio2: errors at frame %d: DMA output %08x, receivers %08x (port %d: ECC %d, D-PHY %d, CRC %d, "
-		  "inter-frame data %d, packet short %d long %d), port %d IRQ %05x\n", c->frames, oe, ie, c->sen.port,
-		  ( ie >> ( 8 * c->sen.port ) ) & 0x05 ? 1 : 0, ( ie >> ( 8 * c->sen.port ) ) & 0x02 ? 1 : 0,
-		  ( ie >> ( 8 * c->sen.port ) ) & 0x08 ? 1 : 0, ( ie >> ( 8 * c->sen.port ) ) & 0x10 ? 1 : 0,
-		  ( ie >> ( 8 * c->sen.port ) ) & 0x20 ? 1 : 0, ( ie >> ( 8 * c->sen.port ) ) & 0x40 ? 1 : 0,
-		  c->sen.port, csi);
+		  "inter-frame data %d, packet short %d long %d), port %d IRQ %05x\n", c->frames, oe, ie, c->sen->port,
+		  ( ie >> ( 8 * c->sen->port ) ) & 0x05 ? 1 : 0, ( ie >> ( 8 * c->sen->port ) ) & 0x02 ? 1 : 0,
+		  ( ie >> ( 8 * c->sen->port ) ) & 0x08 ? 1 : 0, ( ie >> ( 8 * c->sen->port ) ) & 0x10 ? 1 : 0,
+		  ( ie >> ( 8 * c->sen->port ) ) & 0x20 ? 1 : 0, ( ie >> ( 8 * c->sen->port ) ) & 0x40 ? 1 : 0,
+		  c->sen->port, csi);
 }
 
 /* The finished slots given back; the newest made into a picture */
@@ -590,12 +600,12 @@ LOCAL void frames_in( CIO2 *c )
 		slot_arm(c, c->first);
 		c->first = ( c->first + 1 ) % NSLOT;
 	}
-	if ( newest < 0 || c->mode < 0 ) return;
-	m = &c->modes[c->mode];
-	len = cam_isp_frame(c->isp, c->buf[newest % NBUF], c->bpl, OV5693_WIDTH, OV5693_HEIGHT, c->out, m->format,
+	if ( newest < 0 || c->sen->mode < 0 ) return;
+	m = &c->sen->modes[c->sen->mode];
+	len = cam_isp_frame(c->isp, c->buf[newest % NBUF], c->bpl, c->sen->ops->w, c->sen->ops->h, c->out, m->format,
 			    m->width, m->height);
 	if ( len > 0 ) {
-		knl_cam_frame(&c->src, c->out, len, 0);
+		knl_cam_frame(&c->sen->src, c->out, len, 0);
 		c->made++;
 	}
 	c->ae_frames++;
@@ -616,7 +626,7 @@ LOCAL void cio2_task( INT stacd, void *exinf )
 			if ( er == E_TMOUT && c->frames == 0 && c->said_none < 2 ) {
 				c->said_none++;
 				say_state(c, c->said_none == 1 ? "no frame in a second" : "still no frame");
-				knl_ov5693_say(&c->sen.ov, "no frame");
+				c->sen->ops->say(&c->sen->ov, "no frame");
 			}
 			frames_in(c);
 			say_errors(c);
@@ -629,9 +639,9 @@ LOCAL void cio2_task( INT stacd, void *exinf )
 
 LOCAL ER cio2_set_mode( T_CAMSRC *s, T_CAMSETMODE *m )
 {
-	CIO2	*c = (CIO2 *)s->priv;
+	SENSOR	*n = (SENSOR *)s->priv;
 
-	c->mode = m->mode;
+	n->mode = m->mode;
 	m->altSetting = 0;
 	m->maxPayload = s->modes[m->mode].maxBytes;
 	m->maxFrame = s->modes[m->mode].maxBytes;
@@ -640,23 +650,30 @@ LOCAL ER cio2_set_mode( T_CAMSRC *s, T_CAMSETMODE *m )
 
 LOCAL ER cio2_start( T_CAMSRC *s )
 {
-	CIO2	*c = (CIO2 *)s->priv;
+	CIO2	*c = cio2;
 	char	v[8];
 	INT	bayer = ISP_BGGR;
 	ER	er;
 
 	tk_loc_mtx(c->mtx, TMO_FEVR);
+	if ( c->streaming ) {
+		tm_printf((UB *)"cio2: %s not started: %s is streaming, and there is one DMA channel\n",
+			  ( (SENSOR *)s->priv )->model, c->sen->model);
+		tk_unl_mtx(c->mtx);
+		return E_BUSY;
+	}
+	c->sen = (SENSOR *)s->priv;
 	er = ring_alloc(c);
 	if ( er < E_OK ) {
 		tm_printf((UB *)"cio2: no memory for the ring (%d)\n", (INT)er);
 		tk_unl_mtx(c->mtx);
 		return er;
 	}
-	er = knl_campwr_on(&c->sen.pwr);
-	if ( er >= E_OK ) er = knl_ov5693_setup(&c->sen.ov);
+	er = knl_campwr_on(&c->sen->pwr);
+	if ( er >= E_OK ) er = c->sen->ops->setup(&c->sen->ov);
 	if ( er < E_OK ) {
 		tm_printf((UB *)"cio2: the sensor does not start (%d)\n", (INT)er);
-		knl_campwr_off(&c->sen.pwr);
+		knl_campwr_off(&c->sen->pwr);
 		tk_unl_mtx(c->mtx);
 		return E_IO;
 	}
@@ -664,33 +681,33 @@ LOCAL ER cio2_start( T_CAMSRC *s )
 		bayer = !knl_strcmp(v, "rggb") ? ISP_RGGB : !knl_strcmp(v, "grbg") ? ISP_GRBG
 		      : !knl_strcmp(v, "gbrg") ? ISP_GBRG : ISP_BGGR;
 	}
-	cam_isp_init(c->isp, bayer, OV5693_BLACK);
+	cam_isp_init(c->isp, bayer, c->sen->ops->black);
 	c->nint = c->nioc = c->nios = c->noe = c->nie = 0;
 	c->oe = c->ie = c->csi[0] = c->csi[1] = c->csi[2] = c->csi[3] = 0;
 	c->frames = c->made = c->said_err = c->said_none = c->ae_frames = 0;
 	(void)tk_clr_flg(c->flg, 0);
 	tk_get_tim(&c->t0);
 	hw_init(c);
-	er = knl_ov5693_stream(&c->sen.ov, TRUE);
+	er = c->sen->ops->stream(&c->sen->ov, TRUE);
 	c->streaming = TRUE;
-	knl_ov5693_say(&c->sen.ov, "streaming");
+	c->sen->ops->say(&c->sen->ov, "streaming");
 	tm_printf((UB *)"cio2: streaming %dx%d %s from the sensor's %dx%d (stream on: %d)\n",
-		  c->modes[c->mode].width, c->modes[c->mode].height,
-		  c->modes[c->mode].format == CAMFMT_NV12 ? "NV12" : "YUY2", OV5693_WIDTH, OV5693_HEIGHT, (INT)er);
+		  c->sen->modes[c->sen->mode].width, c->sen->modes[c->sen->mode].height,
+		  c->sen->modes[c->sen->mode].format == CAMFMT_NV12 ? "NV12" : "YUY2", c->sen->ops->w, c->sen->ops->h, (INT)er);
 	tk_unl_mtx(c->mtx);
 	return E_OK;
 }
 
 LOCAL void cio2_stop( T_CAMSRC *s )
 {
-	CIO2	*c = (CIO2 *)s->priv;
+	CIO2	*c = cio2;
 
 	tk_loc_mtx(c->mtx, TMO_FEVR);
-	if ( c->streaming ) {
+	if ( c->streaming && c->sen == (SENSOR *)s->priv ) {
 		c->streaming = FALSE;
-		(void)knl_ov5693_stream(&c->sen.ov, FALSE);
+		(void)c->sen->ops->stream(&c->sen->ov, FALSE);
 		hw_exit(c);
-		knl_campwr_off(&c->sen.pwr);
+		knl_campwr_off(&c->sen->pwr);
 		tm_printf((UB *)"cio2: stopped: %d frames in, %d pictures made; interrupts %d (completed %d, started %d, "
 			  "output errors %d, receiver errors %d)\n", c->frames, c->made, c->nint, c->nioc, c->nios,
 			  c->noe, c->nie);
@@ -815,25 +832,93 @@ LOCAL ER probe_sensor( SENSOR *s )
 	ER	er;
 	INT	k;
 
-	if ( s->pwr.kind != CAMPWR_DISCRETE ) {
+	if ( s->pwr.kind != CAMPWR_DISCRETE && !( s->pwr.kind == CAMPWR_TPS68470 && s->pwr.pmic_ok ) ) {
 		tm_printf((UB *)"cio2: %s: no power controller this can drive\n", s->path);
 		return E_NOSPT;
 	}
-	if ( s->mclk != OV5693_MCLK ) {
+	if ( s->mclk != s->ops->mclk ) {
 		tm_printf((UB *)"cio2: %s: an input clock of %d Hz; the sensor's settings are for %d\n", s->path, s->mclk,
-			  OV5693_MCLK);
+			  s->ops->mclk);
 	}
 	for ( k = 0; k < 2; k++ ) {
 		knl_campwr_say(&s->pwr, "before");
 		er = knl_campwr_on(&s->pwr);
 		knl_campwr_say(&s->pwr, "powered");
-		if ( er >= E_OK ) er = knl_ov5693_probe(&s->ov);
+		if ( er >= E_OK ) er = s->ops->probe(&s->ov);
 		knl_campwr_off(&s->pwr);
-		if ( er != E_IO ) break;
+		if ( er != E_IO || s->pwr.kind != CAMPWR_DISCRETE ) break;
 		if ( k == 0 ) knl_campwr_swap(&s->pwr);
 	}
-	if ( er == E_IO ) knl_campwr_swap(&s->pwr);	/* back as the _DSM says, neither answered */
+	if ( er == E_IO && s->pwr.kind == CAMPWR_DISCRETE ) knl_campwr_swap(&s->pwr);	/* back as the _DSM says, neither answered */
 	return er;
+}
+
+/* The sensor at dev made a camera; whether it became one */
+LOCAL BOOL add_camera( CIO2 *c, void *dev, CONST T_SENSOPS *ops )
+{
+	SENSOR	*n = (SENSOR *)Kcalloc(1, sizeof(SENSOR));
+	char	v[8];
+	INT	i;
+
+	if ( n == NULL ) return FALSE;
+	if ( read_sensor(n, dev, ops->model) < E_OK ) goto no;
+	n->ops = ops;
+	n->mode = -1;
+	n->ov.bars = setting_is("cam", "bars");
+	if ( n->lanes == 0 || n->lanes > 4 || n->port > 3 ) {
+		tm_printf((UB *)"cio2: %s: port %d with %d lanes cannot be\n", n->path, n->port, n->lanes);
+		goto no;
+	}
+	if ( n->lanes < ops->minlanes ) {
+		tm_printf((UB *)"cio2: %s: the SSDB says %d lanes; the sensor's settings need %d\n", n->path, n->lanes,
+			  ops->minlanes);
+		goto no;
+	}
+	if ( n->lanes > ops->maxlanes || n->lanes == 3 ) {
+		/* the sensor sends on the first lanes of those wired: the receiver takes as many as it sends */
+		tm_printf((UB *)"cio2: %s: the SSDB says %d lanes; the sensor's settings use %d\n", n->path, n->lanes,
+			  ops->minlanes);
+		n->lanes = ops->minlanes;
+	}
+	n->ov.lanes = n->lanes;
+	/* the SSDB's "turned": 1 half round; cam_turn=0 or 1 says otherwise, for looking at a picture upside down */
+	n->ov.turned = (BOOL)( n->degree == 1 );
+	if ( setting("cam_turn", v, sizeof(v)) ) n->ov.turned = (BOOL)( v[0] == '1' );
+	tm_printf((UB *)"cio2: %s: %s read %s\n", n->path, ops->model, n->ov.turned ? "half turned" : "as it stands");
+	if ( probe_sensor(n) < E_OK ) {
+		tm_printf((UB *)"cio2: %s: no %s answered: no camera\n", n->path, ops->model);
+		goto no;
+	}
+	for ( i = 0; i < NMODES; i++ ) {
+		T_CAMMODE	*m = &n->modes[i];
+
+		m->fmtIndex = (UB)( offer[i].fmt == CAMFMT_NV12 ? 1 : 2 );
+		m->frmIndex = (UB)( i / 2 + 1 );
+		m->format = offer[i].fmt;
+		m->width = offer[i].w;
+		m->height = offer[i].h;
+		m->maxBytes = (UW)offer[i].w * offer[i].h * ( offer[i].fmt == CAMFMT_NV12 ? 3 : 4 ) / 2;
+		m->defInterval = ops->interval;
+		m->nintv = 1;
+		m->interval[0] = ops->interval;
+	}
+	knl_strcpy((char *)n->src.info.product, ops->product);
+	knl_strcpy((char *)n->src.info.manufacturer, "OmniVision");
+	n->src.modes = n->modes;
+	n->src.nmodes = NMODES;
+	n->src.set_mode = cio2_set_mode;
+	n->src.start = cio2_start;
+	n->src.stop = cio2_stop;
+	n->src.priv = n;
+	n->src.unit = -1;
+	if ( knl_cam_attach(&n->src) < 0 ) goto no;
+	tm_printf((UB *)"TessronOS: cio2: %s %s on port %d (%d lanes), %d modes, unit %d\n", n->path, ops->model,
+		  n->port, n->lanes, NMODES, n->src.unit);
+	if ( c->sen == NULL ) c->sen = n;
+	return TRUE;
+no:
+	Kfree(n);
+	return FALSE;
 }
 
 EXPORT INT knl_cio2_init( void )
@@ -842,8 +927,8 @@ EXPORT INT knl_cio2_init( void )
 	T_CFLG	cf;
 	T_CMTX	cm;
 	T_CTSK	ct;
-	void	*dev = NULL;
-	INT	i, k, n = 0;
+	struct { void *dev; CONST T_SENSOPS *ops; } found[NSENSOR];
+	INT	i, k, n = 0, nf = 0;
 	char	path[48];
 
 	if ( !knl_acpica_ready() || setting_is("cam", "off") ) return 0;
@@ -855,14 +940,17 @@ EXPORT INT knl_cio2_init( void )
 			if ( d == NULL ) break;
 			(void)knl_acpica_path(d, path, sizeof(path));
 			tm_printf((UB *)"cio2: %s %s (%s)%s\n", path, sensors[i].hid, sensors[i].model,
-				  sensors[i].driven ? "" : ": not driven");
-			if ( sensors[i].driven && dev == NULL ) dev = d;
+				  sensors[i].ops != NULL ? "" : ": not driven");
+			if ( sensors[i].ops != NULL && nf < NSENSOR ) {
+				found[nf].dev = d;
+				found[nf].ops = sensors[i].ops;
+				nf++;
+			}
 		}
 	}
-	if ( dev == NULL ) return 0;
+	if ( nf == 0 ) return 0;
 	c = (CIO2 *)Kcalloc(1, sizeof(CIO2));
 	if ( c == NULL ) return 0;
-	c->mode = -1;
 	if ( !find_cio2(c) ) {
 		tm_printf((UB *)"cio2: no IPU3 CSI-2 receiver (8086:%04x)\n", CIO2_DEVICE);
 		Kfree(c);
@@ -879,47 +967,6 @@ EXPORT INT knl_cio2_init( void )
 	if ( c->flg <= 0 || c->mtx <= 0 ) return 0;
 	cio2 = c;
 
-	if ( read_sensor(&c->sen, dev, "OV5693") < E_OK ) return 0;
-	c->sen.ov.bars = setting_is("cam", "bars");
-	if ( c->sen.lanes == 0 || c->sen.lanes > 4 || c->sen.port > 3 ) {
-		tm_printf((UB *)"cio2: %s: port %d with %d lanes cannot be\n", c->sen.path, c->sen.port, c->sen.lanes);
-		return 0;
-	}
-	if ( c->sen.lanes != OV5693_LANES ) {
-		/* the sensor sends on the first lanes of those wired: the receiver takes as many as it sends */
-		tm_printf((UB *)"cio2: %s: the SSDB says %d lanes; the sensor's settings are for %d\n", c->sen.path,
-			  c->sen.lanes, OV5693_LANES);
-		if ( c->sen.lanes < OV5693_LANES ) return 0;
-		c->sen.lanes = OV5693_LANES;
-	}
-	if ( probe_sensor(&c->sen) < E_OK ) {
-		tm_printf((UB *)"cio2: %s: no OV5693 answered: no camera\n", c->sen.path);
-		return 0;
-	}
-
-	for ( i = 0; i < NMODES; i++ ) {
-		T_CAMMODE	*m = &c->modes[i];
-
-		m->fmtIndex = (UB)( offer[i].fmt == CAMFMT_NV12 ? 1 : 2 );
-		m->frmIndex = (UB)( i / 2 + 1 );
-		m->format = offer[i].fmt;
-		m->width = offer[i].w;
-		m->height = offer[i].h;
-		m->maxBytes = (UW)offer[i].w * offer[i].h * ( offer[i].fmt == CAMFMT_NV12 ? 3 : 4 ) / 2;
-		m->defInterval = OV5693_INTERVAL;
-		m->nintv = 1;
-		m->interval[0] = OV5693_INTERVAL;
-	}
-	knl_strcpy((char *)c->src.info.product, "Front camera (OV5693)");
-	knl_strcpy((char *)c->src.info.manufacturer, "OmniVision");
-	c->src.modes = c->modes;
-	c->src.nmodes = NMODES;
-	c->src.set_mode = cio2_set_mode;
-	c->src.start = cio2_start;
-	c->src.stop = cio2_stop;
-	c->src.priv = c;
-	c->src.unit = -1;
-
 	knl_memset(&ct, 0, sizeof(ct));
 	ct.exinf = c;
 	ct.tskatr = TA_HLNG | TA_RNG0;
@@ -929,9 +976,10 @@ EXPORT INT knl_cio2_init( void )
 	c->tsk = tk_cre_tsk(&ct);
 	if ( c->tsk <= 0 ) return 0;
 	tk_sta_tsk(c->tsk, 0);
-	if ( knl_cam_attach(&c->src) >= 0 ) n++;
-	tm_printf((UB *)"TessronOS: cio2: %s %s on port %d (%d lanes), %d modes, unit %d\n", c->sen.path, c->sen.model,
-		  c->sen.port, c->sen.lanes, NMODES, c->src.unit);
+	/* one that does not come up leaves the other a camera */
+	for ( i = 0; i < nf; i++ ) {
+		if ( add_camera(c, found[i].dev, found[i].ops) ) n++;
+	}
 	return n;
 }
 

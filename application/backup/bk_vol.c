@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ts/sysdef.h>
+#include <ts/vobjsz.h>
 
 /* ---------------------------------------------------------------- writing */
 
@@ -141,8 +142,8 @@ EXPORT ER bk_link_at( const TS_UUID *cab, const TS_UUID *u, const char *name, co
 		       " vobjbottom=\"%d\" height=\"%d\" chsz=\"14\" frcol=\"#000000\" chcol=\"#000000\""
 		       " tbcol=\"#ffffff\" bgcol=\"#ffffff\" pictdisp=\"true\" namedisp=\"true\" framedisp=\"true\"/>\n",
 		       id, vid, ( box != NULL ) ? box[0] : 8, ( box != NULL ) ? box[1] : y,
-		       ( box != NULL ) ? box[2] : 8 + wd, ( box != NULL ) ? box[3] : y + 25,
-		       ( box != NULL ) ? box[3] - box[1] : 25);
+		       ( box != NULL ) ? box[2] : 8 + wd, ( box != NULL ) ? box[3] : y + VOBJ_CLOSED_H(14, 1, 1),
+		       ( box != NULL ) ? box[3] - box[1] : VOBJ_CLOSED_H(14, 1, 1));	/* closed, at 14 */
 	bpk_buf_puts(&b, end);
 	/* replaced in one change: a reader sees the old record or the new one */
 	er = b.fail ? E_NOMEM : ob_rpl_rec(k, 0, b.s, (SZ)b.n);

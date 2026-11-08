@@ -49,6 +49,7 @@
 #include <tm/tmonitor.h>
 #include <ts/net.h>
 #include <ts/pcie.h>
+#include <ts/pm.h>
 #include "sysman/pfalloc.h"
 
 #define CTRL		0x0000
@@ -184,6 +185,7 @@ LOCAL volatile TXD	*tx;
 LOCAL UB	*rxbuf, *txbuf;
 LOCAL UD	rx_pa, tx_pa, rxbuf_pa, txbuf_pa;
 LOCAL UINT	rx_next = 0, tx_next = 0;
+LOCAL volatile BOOL	e1k_asleep = FALSE;	/* the machine sleeps: its registers are not to be read */
 LOCAL UINT	intno = 0;
 LOCAL INT	irq_kind = PCI_IRQ_POLL;	/* how it was had (ts_pcie_irq_alloc) */
 LOCAL volatile UW	n_irq = 0;		/* the interrupts it raised */
@@ -622,6 +624,14 @@ EXPORT INT knl_e1k_recv( void *frame, SZ size, TMO tmout )
 	if ( !e1k_ok ) return E_NOEXS;
 	if ( tk_loc_mtx(rx_mtx, tmout) < E_OK ) return E_BUSY;
 	for ( ;; ) {
+		if ( e1k_asleep ) {
+			if ( tmout == TMO_POL ) {
+				len = E_TMOUT;
+				break;
+			}
+			tk_dly_tsk(20);
+			continue;
+		}
 		irq_report();
 		if ( pch && ( rd(STATUS) & ( STATUS_LU | STATUS_SPEED_100 | STATUS_SPEED_1000 | STATUS_FD ) ) != link_was ) {
 			link_was = rd(STATUS) & ( STATUS_LU | STATUS_SPEED_100 | STATUS_SPEED_1000 | STATUS_FD );
@@ -694,26 +704,14 @@ EXPORT INT knl_e1k_speed( UH *p_device )
 
 /* ---------------------------------------------------------------- start-up */
 
-EXPORT INT knl_e1k_init( void )
+/*
+ * The card from its reset to receiving and sending, on the rings it has:
+ * at start-up and after a sleep
+ */
+LOCAL void hw_start( void )
 {
-	T_CFLG	cf;
-	T_CMTX	cm;
 	UW	ral, rah;
-	INT	i, k;
-
-	for ( k = 0; ; k++ ) {
-		if ( ts_pcie_find(0x02, 0x00, 0xff, k, &pci) != E_OK ) {
-			return 0;			/* no Intel Ethernet card */
-		}
-		if ( pci.vendor == 0x8086 ) break;
-	}
-	ts_pcie_enable(&pci);
-	base = ts_pcie_bar_base(&pci, 0);
-	if ( base == 0 ) {
-		return 0;
-	}
-	spt = in_ids(pci.device, spt_ids, (INT)( sizeof(spt_ids) / sizeof(spt_ids[0]) ));
-	pch = spt || in_ids(pci.device, later_ids, (INT)( sizeof(later_ids) / sizeof(later_ids[0]) ));
+	INT	i;
 
 	/* the address the card had: its NVM's, which the reset loads again */
 	ral = rd(RAL0);
@@ -749,13 +747,10 @@ EXPORT INT knl_e1k_init( void )
 		swflag_give();
 	}
 
-	rx = (volatile RXD *)pages(0, &rx_pa);
-	tx = (volatile TXD *)pages(0, &tx_pa);
-	rxbuf = (UB *)pages(5, &rxbuf_pa);		/* 64 buffers of 2KB */
-	txbuf = (UB *)pages(4, &txbuf_pa);		/* 32 */
-	if ( rx == NULL || tx == NULL || rxbuf == NULL || txbuf == NULL ) {
-		return E_NOMEM;
-	}
+	knl_memset((void *)rx, 0, NRX * sizeof(RXD));
+	knl_memset((void *)tx, 0, NTX * sizeof(TXD));
+	rx_next = 0;
+	tx_next = 0;
 	for ( i = 0; i < NRX; i++ ) rx[i].addr = rxbuf_pa + (UD)i * BUF;
 	wr(RDBAL, (UW)rx_pa);
 	wr(RDBAH, (UW)( rx_pa >> 32 ));
@@ -771,6 +766,71 @@ EXPORT INT knl_e1k_init( void )
 	wr(TIPG, ( pch ? 8 : 10 ) | ( 8 << 10 ) | ( 6 << 20 ));
 	wr(TCTL, TCTL_EN | TCTL_PSP | ( 15 << 4 ) | ( 63 << 12 ) | ( pch ? 0x01000000U : 0 ));	/* RTLC on the chipset's */
 	if ( spt ) spt_tx_errata();
+}
+
+/*
+ * The machine asleep: nothing sent (the lock for sending stays held by the
+ * sleep's task), the receiver and its looks at the registers stopped. On
+ * waking the card starts over from its reset.
+ */
+LOCAL ER e1k_pm_suspend( void *arg, INT how )
+{
+	if ( !e1k_ok ) return E_OK;
+	tk_loc_mtx(tx_mtx, TMO_FEVR);
+	e1k_asleep = TRUE;
+	tk_dly_tsk(30);
+	wr(IMC, ~0U);
+	wr(RCTL, 0);
+	wr(TCTL, 0);
+	return E_OK;
+}
+
+LOCAL void e1k_pm_resume( void *arg, INT how )
+{
+	if ( !e1k_ok ) return;
+	hw_start();
+	if ( intno != 0 ) {
+		wr(IMC, ~0U);
+		(void)rd(ICR);
+		wr(IMS, IM_RXT0 | IM_LSC);
+	}
+	e1k_asleep = FALSE;
+	tk_unl_mtx(tx_mtx);
+	tm_printf((UB *)"e1k: back from the sleep\n");
+}
+
+LOCAL CONST T_PMDEV	e1k_pm = { "e1k", PM_ORD_NET, e1k_pm_suspend, e1k_pm_resume, NULL };
+
+IMPORT BOOL	knl_igc_is( UH device );
+
+EXPORT INT knl_e1k_init( void )
+{
+	T_CFLG	cf;
+	T_CMTX	cm;
+	INT	i, k;
+
+	for ( k = 0; ; k++ ) {
+		if ( ts_pcie_find(0x02, 0x00, 0xff, k, &pci) != E_OK ) {
+			return 0;			/* no Intel Ethernet card */
+		}
+		if ( pci.vendor == 0x8086 && !knl_igc_is(pci.device) ) break;	/* those have another layout */
+	}
+	ts_pcie_enable(&pci);
+	base = ts_pcie_bar_base(&pci, 0);
+	if ( base == 0 ) {
+		return 0;
+	}
+	spt = in_ids(pci.device, spt_ids, (INT)( sizeof(spt_ids) / sizeof(spt_ids[0]) ));
+	pch = spt || in_ids(pci.device, later_ids, (INT)( sizeof(later_ids) / sizeof(later_ids[0]) ));
+
+	rx = (volatile RXD *)pages(0, &rx_pa);
+	tx = (volatile TXD *)pages(0, &tx_pa);
+	rxbuf = (UB *)pages(5, &rxbuf_pa);		/* 64 buffers of 2KB */
+	txbuf = (UB *)pages(4, &txbuf_pa);		/* 32 */
+	if ( rx == NULL || tx == NULL || rxbuf == NULL || txbuf == NULL ) {
+		return E_NOMEM;
+	}
+	hw_start();
 
 	cf.exinf = NULL;
 	cf.flgatr = TA_TFIFO | TA_WMUL;
@@ -798,6 +858,7 @@ EXPORT INT knl_e1k_init( void )
 	}
 	t_start = now_ms();
 	e1k_ok = TRUE;
+	(void)ts_pm_register(&e1k_pm);
 	for ( i = 0; i < 100 && ( rd(STATUS) & STATUS_LU ) == 0; i++ ) tk_dly_tsk(10);
 	if ( pch ) {
 		link_was = rd(STATUS) & ( STATUS_LU | STATUS_SPEED_100 | STATUS_SPEED_1000 | STATUS_FD );

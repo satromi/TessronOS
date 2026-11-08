@@ -1,0 +1,225 @@
+# 基本図形編集で、ドラッグで大きさを決める間の追従の速さを、カーネル内の図形編集とプロセスの図形編集で
+# 比べる (design 11.3), for tools/ui_run.py. 長方形、楕円、直線の道具で描く操作(450,450 から 650,600 へ)と、
+# 選んだ長方形(3番目)のつまみを運ぶ操作を、8 ms 間隔の 60 回の動き(125Hz のマウス)で(dragn)、
+# 図形の少ないとき(mkbig fig 30 4)と多いとき(mkbig fig 2000 200)の
+# 両方で、カーネル内とプロセスで交互に行う。
+# 離したとき、カーネル内は "desktop: drag moves N of M follow avg A max B us lag avg C max D last E us"
+# (N 受けた動き、M 入力の層に入った動き)を、プロセスは "figure: drag moves N waited W followed F follow
+# avg A max B us lag avg C max D last E us shown K kpx"(N 届いた動きの知らせ、W 一度に溜まっていた数の
+# 最大、F 追従した数、K 画面に出した千画素)を出す。follow は動き1回の追従と表示、lag は動きから表示まで。
+# 表にするのは tools/tests/fig_drag_sum.py(ui_run の console.log を渡す)。
+# 道具パネルの1段目の選択は 298,48、2段目の直線 162、長方形 298、楕円 434(y 82)。
+# ---- 図形が少ないとき: カーネル内
+figproc kernel
+mkbig fig 30 4
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+# kernel 30: rect drawn
+click 298 48
+wait 200
+click 298 82
+wait 300
+logmark
+dragn 450 450 650 600 60 8
+expectsince desktop: drag moves
+sync 600
+wait 300
+# kernel 30: ellipse drawn
+click 298 48
+wait 200
+click 434 82
+wait 300
+logmark
+dragn 450 450 650 600 60 8
+expectsince desktop: drag moves
+sync 600
+wait 300
+# kernel 30: line drawn
+click 298 48
+wait 200
+click 162 82
+wait 300
+logmark
+dragn 450 450 650 600 60 8
+expectsince desktop: drag moves
+sync 600
+wait 300
+# kernel 30: rectangle 3 sized by its handle
+click 298 48
+wait 200
+click 135 128
+wait 300
+logmark
+dragn 143 136 243 236 60 8
+expectsince desktop: drag moves
+sync 600
+wait 300
+key 16 01
+sync 600
+key 08 01
+sync 600
+wait 500
+# ---- 図形が少ないとき: プロセス
+mkbig fig 30 4
+logmark
+pfig big
+expectsincein 60 figure: opened
+wait 800
+click 500 650
+wait 1000
+# process 30: rect drawn
+click 298 48
+wait 200
+click 298 82
+wait 300
+logmark
+dragn 450 450 650 600 60 8
+expectsincein 60 figure: drag moves
+expectsincein 60 figure: drawn
+wait 300
+# process 30: ellipse drawn
+click 298 48
+wait 200
+click 434 82
+wait 300
+logmark
+dragn 450 450 650 600 60 8
+expectsincein 60 figure: drag moves
+expectsincein 60 figure: drawn
+wait 300
+# process 30: line drawn
+click 298 48
+wait 200
+click 162 82
+wait 300
+logmark
+dragn 450 450 650 600 60 8
+expectsincein 60 figure: drag moves
+expectsincein 60 figure: drawn
+wait 300
+# process 30: rectangle 3 sized by its handle
+click 298 48
+wait 200
+click 135 128
+wait 300
+logmark
+dragn 143 136 243 236 60 8
+expectsincein 60 figure: drag moves
+expectsincein 60 figure: sized
+wait 300
+logmark
+key 16 01
+expectsincein 60 figure: saved
+key 08 01
+expectsincein 60 figure: closed
+wait 500
+# ---- 図形が多いとき: カーネル内
+figproc kernel
+mkbig fig 2000 200
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+# kernel 2000: rect drawn
+click 298 48
+wait 200
+click 298 82
+wait 300
+logmark
+dragn 450 450 650 600 60 8
+expectsince desktop: drag moves
+sync 600
+wait 300
+# kernel 2000: ellipse drawn
+click 298 48
+wait 200
+click 434 82
+wait 300
+logmark
+dragn 450 450 650 600 60 8
+expectsince desktop: drag moves
+sync 600
+wait 300
+# kernel 2000: line drawn
+click 298 48
+wait 200
+click 162 82
+wait 300
+logmark
+dragn 450 450 650 600 60 8
+expectsince desktop: drag moves
+sync 600
+wait 300
+# kernel 2000: rectangle 3 sized by its handle
+click 298 48
+wait 200
+click 135 128
+wait 300
+logmark
+dragn 143 136 243 236 60 8
+expectsince desktop: drag moves
+sync 600
+wait 300
+key 16 01
+sync 600
+key 08 01
+sync 600
+wait 500
+# ---- 図形が多いとき: プロセス
+mkbig fig 2000 200
+logmark
+pfig big
+expectsincein 60 figure: opened
+wait 800
+click 500 650
+wait 1000
+# process 2000: rect drawn
+click 298 48
+wait 200
+click 298 82
+wait 300
+logmark
+dragn 450 450 650 600 60 8
+expectsincein 60 figure: drag moves
+expectsincein 60 figure: drawn
+wait 300
+# process 2000: ellipse drawn
+click 298 48
+wait 200
+click 434 82
+wait 300
+logmark
+dragn 450 450 650 600 60 8
+expectsincein 60 figure: drag moves
+expectsincein 60 figure: drawn
+wait 300
+# process 2000: line drawn
+click 298 48
+wait 200
+click 162 82
+wait 300
+logmark
+dragn 450 450 650 600 60 8
+expectsincein 60 figure: drag moves
+expectsincein 60 figure: drawn
+wait 300
+# process 2000: rectangle 3 sized by its handle
+click 298 48
+wait 200
+click 135 128
+wait 300
+logmark
+dragn 143 136 243 236 60 8
+expectsincein 60 figure: drag moves
+expectsincein 60 figure: sized
+wait 300
+logmark
+key 16 01
+expectsincein 60 figure: saved
+key 08 01
+expectsincein 60 figure: closed
+wait 500
+absent figure: line end held
+absent !OACV!

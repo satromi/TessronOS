@@ -717,4 +717,27 @@ EXPORT void knl_idisp_hash_mode( BOOL new_hash )
 	sayf("igfx: CHICKEN_PAR1_1 %08x -> %08x\n", v, rd(R_CHICKEN_PAR1_1));
 }
 
+/*
+ * The panel dark or lit for the machine's sleep: the backlight's enable in
+ * the PCH's panel power control. The link and the pipe keep running.
+ */
+#define PP_CONTROL	0xc7204
+#define PP_BL_ENABLE	( 1U << 2 )
+
+/* The registers, for what else is on the display engine (disp_ext.c); 0 without an Intel display */
+EXPORT UBINT knl_igfx_mmio( void )
+{
+	return ig_found ? ig_mmio : 0;
+}
+
+EXPORT void knl_igfx_dark( BOOL dark )
+{
+	UW	v;
+
+	if ( !ig_found || ig_mmio == 0 ) return;
+	v = rd(PP_CONTROL);
+	wr(PP_CONTROL, dark ? ( v & ~PP_BL_ENABLE ) : ( v | PP_BL_ENABLE ));
+	tm_printf((UB *)"igfx: the backlight %s: PP_CONTROL %08x -> %08x\n", dark ? "off" : "on", v, rd(PP_CONTROL));
+}
+
 #endif /* X64 */

@@ -312,7 +312,8 @@ LOCAL ER ml_make( void )
 	ml_margin = q + 1;
 	ml_h = ml_fh + q + 3 + ml_margin;
 	ml_scale = ( spec.scale >= 100 ) ? spec.scale : 100;
-	ml_w = (INT)( ( spec.view_w > 0 ) ? spec.view_w : spec.width );
+	/* on the main screen */
+	ml_w = (INT)( ( spec.view_w > 0 ) ? spec.view_w : spec.width ) / ts_disp_screens();
 	ml_top = (INT)( ( spec.view_h > 0 ) ? spec.view_h : spec.height ) - ml_h;
 	ml_pitch = spec.pitch;
 	ml_dtop = disp_dev_of(ml_top, ml_scale);

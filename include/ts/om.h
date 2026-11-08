@@ -185,6 +185,8 @@ IMPORT ER    om_store_save( CONST TS_UUID *id, INT recno );
  * says nothing of a window.
  */
 IMPORT ER    om_store_window( CONST TS_UUID *id, T_DPRECT *r );
+IMPORT ER    om_store_panelpos( CONST TS_UUID *id, INT *p_x, INT *p_y );	/* window.panelpos, as TADjs */
+IMPORT ER    om_store_set_panelpos( CONST TS_UUID *id, INT x, INT y );
 IMPORT ER    om_store_set_window( CONST TS_UUID *id, CONST T_DPRECT *r );
 
 /* Whether the object's applist makes this program the one it opens with */
@@ -281,6 +283,13 @@ IMPORT ER    om_link_lock( T_VOBJ *v, BOOL keep );
 IMPORT INT   om_store_label( CONST T_VOBJ *v, UB *buf, INT max );
 IMPORT ER    om_store_icon( CONST T_VOBJ *v, CONST UW **p_px, INT *p_w, INT *p_h );
 IMPORT void  om_store_icon_done( CONST UW *px );
+
+/*
+ * Whether a link's object can be found, and whether it is on another
+ * volume than host's (NULL: not asked), as TV_ST_* (ts/tadview.h): what
+ * T_TVSRC's state says, for the window of a process (ob_ref_vob)
+ */
+IMPORT UINT  om_store_state_on( CONST T_VOBJ *v, CONST TS_UUID *host );
 IMPORT void  om_store_picture_done( CONST UW *px );
 
 /* The icon of an object replaced (an ICO or a PNG; 0 bytes: none), and shown afresh */

@@ -23,9 +23,7 @@
  *	and the arctangent of the ratios 0 to 1 in 1024ths.
  */
 
-#include <sys/machine.h>
-#include "kernel.h"
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include <ts/dp.h>
 #include <ts/tad.h>
 #include <ts/tadview.h>

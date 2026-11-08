@@ -267,6 +267,45 @@ IMPORT ER   fn_state_get( ID fid, T_FNSTATE *st );
 IMPORT ER   fn_state_set( ID fid, CONST T_FNSTATE *st );
 IMPORT ID  fn_system( void );
 
+/*
+ * Letters drawn or measured by a program running as a process, with
+ * the kernel's faces (TSN_FN_DRA_TXT): the face set as st says while it
+ * is done -- st.px 0 the face as it is -- and put back after, all while
+ * the layer is held, so that the kernel's own drawing never finds a
+ * face as a process set it. What comes back is what the call of the
+ * kernel that op names answers: fn_draw, fn_width, fn_vdraw,
+ * fn_vwidth, fn_extent (above, below), fn_fit (width), fn_metrics
+ * (met), fn_has_vert (cp). The words are len bytes of UTF-8 at text,
+ * taken into the kernel first. A process calls the fn_ functions as
+ * the kernel does; lib/libtv/tv_fn.c keeps what they set and makes this
+ * call.
+ */
+#define FN_OP_DRAW	1
+#define FN_OP_WIDTH	2
+#define FN_OP_VDRAW	3
+#define FN_OP_VWIDTH	4
+#define FN_OP_EXTENT	5
+#define FN_OP_FIT	6
+#define FN_OP_METRICS	7
+#define FN_OP_HAS_VERT	8
+
+typedef struct {
+	UINT		op;		/* FN_OP_* */
+	INT		gid;		/* where FN_OP_DRAW and FN_OP_VDRAW draw */
+	ID		fid;
+	INT		x, y;		/* where they draw */
+	CONST UB	*text;
+	INT		len;
+	UW		colour;
+	INT		width;		/* FN_OP_FIT */
+	UW		cp;		/* FN_OP_HAS_VERT */
+	T_FNSTATE	st;
+	INT		above, below;	/* FN_OP_EXTENT, out */
+	T_FNMET		met;		/* FN_OP_METRICS, out */
+} T_FNTXT;
+
+IMPORT INT fn_dra_txt( T_FNTXT *pk );
+
 /* What making and laying letters has cost so far, printed */
 IMPORT void fn_report( void );
 

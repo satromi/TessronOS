@@ -1,0 +1,263 @@
+# 基本図形編集の折れ線の道具は、閉じない折れ線を描く (design 17.13), for tools/ui_run.py.
+# デスクトップの図形編集(figproc kernel)とプロセスの図形編集で同じ操作をし、保存したレコード0が
+# バイトで一致することを確かめる。図形は長方形1つと折れ線2本(mkbig fig 1 2 0)で、100,100 に開き、
+# 道具パネルは画面の上(折れ線 366,82、多角形 332,82、選択 298,48)。折れ線を4つ、終え方を変えて描く:
+# 260,430 340,430 300,490 は Enter で、380,430 460,430 420,490 は Esc で、500,430 580,430 540,490 は
+# その角のダブルクリックで、620,430 700,430 660,490 は始点の近く(622,431)を押して角を1つ足してから
+# Enter で。角を押す間はダブルクリックより長く空ける。どれも辺(中点 300,430 320,460)は黒く描かれ、
+# 最後の角から始点へ戻る辺(中点 280,460 400,460 520,460)は描かれない。5つ目(260,560 340,560
+# 300,620)は描いている間、ポインタを最後の角に置いた下書きで、決めた辺の中点 320,590 が反転で黒く、
+# 始点へ戻る辺の中点 280,590 が黒くないことを見てから Enter で終える。角1つ(760,430)で Enter を押すと
+# 図形はできない。続けて多角形の道具で 380,560 460,560 420,620 を Enter で終え、始点へ戻る辺の中点
+# 400,590 が黒く描かれる(多角形は今までどおり閉じる)。最後に格子点のパレット(366,48)で格子点拘束
+# (683,86)にし、折れ線の道具で格子点から外れた 525,565 603,566 700,640 を押して Enter で終える。
+# 図形の 0,0 は画面の 110,128 で格子は 16 なので、角は 416,432 496,432 592,512(画面の 526,560
+# 606,560 702,640)に合い、最初の辺は y 560 の水平の線になる(566,560 が黒く、566,565 は黒くない)。
+# 保存して閉じ、開き直しても同じに描かれる。新しい図形は折れ線が <polyline>(閉じない)6つ、多角形が
+# <polygon> 1つで、プロセスで開き直すと図形は 3+7 の 10 個(記録の中身は sum show の rec: の行)。
+# Keys: Esc 29, Enter 28;
+# Ctrl+S 16 01, Ctrl+E 08 01.
+figproc kernel
+mkbig fig 1 2 0
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+click 366 82
+wait 300
+click 260 430
+wait 700
+click 340 430
+wait 700
+click 300 490
+wait 700
+key 28
+wait 700
+click 380 430
+wait 700
+click 460 430
+wait 700
+click 420 490
+wait 700
+key 29
+wait 700
+click 500 430
+wait 700
+click 580 430
+wait 700
+dclick 540 490
+wait 700
+click 620 430
+wait 700
+click 700 430
+wait 700
+click 660 490
+wait 700
+click 622 431
+wait 700
+key 28
+wait 700
+click 260 560
+wait 700
+click 340 560
+wait 700
+click 300 620
+wait 700
+move 300 620
+wait 400
+shot pline_k_preview
+pixel 320 590 000000
+pixelnot 280 590 000000
+key 28
+wait 700
+click 760 430
+wait 700
+key 28
+wait 700
+click 332 82
+wait 300
+click 380 560
+wait 700
+click 460 560
+wait 700
+click 420 620
+wait 700
+key 28
+wait 500
+click 366 48
+wait 500
+click 683 86
+wait 400
+key 29
+wait 400
+click 366 82
+wait 300
+click 525 565
+wait 700
+click 603 566
+wait 700
+click 700 640
+wait 700
+key 28
+wait 500
+click 298 48
+wait 300
+sync 600
+shot pline_k_drawn
+pixel 566 560 000000
+pixelnot 566 565 000000
+pixel 300 430 000000
+pixel 320 460 000000
+pixelnot 280 460 000000
+pixelnot 400 460 000000
+pixelnot 520 460 000000
+pixelnot 280 590 000000
+pixel 400 590 000000
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+shot pline_k_reopened
+pixel 566 560 000000
+pixelnot 566 565 000000
+pixel 300 430 000000
+pixelnot 280 460 000000
+pixelnot 400 460 000000
+pixelnot 520 460 000000
+pixelnot 280 590 000000
+pixel 400 590 000000
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 2 0
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 3
+wait 800
+logmark
+click 366 82
+expectsince figure: tool 12
+click 260 430
+wait 700
+click 340 430
+wait 700
+click 300 490
+wait 700
+key 28
+wait 700
+click 380 430
+wait 700
+click 460 430
+wait 700
+click 420 490
+wait 700
+key 29
+wait 700
+click 500 430
+wait 700
+click 580 430
+wait 700
+dclick 540 490
+wait 700
+click 620 430
+wait 700
+click 700 430
+wait 700
+click 660 490
+wait 700
+click 622 431
+wait 700
+key 28
+wait 700
+click 260 560
+wait 700
+click 340 560
+wait 700
+click 300 620
+wait 700
+move 300 620
+wait 400
+shot pline_p_preview
+pixel 320 590 000000
+pixelnot 280 590 000000
+key 28
+wait 700
+click 760 430
+wait 700
+key 28
+wait 700
+logmark
+click 332 82
+expectsince figure: tool 8
+wait 300
+click 380 560
+wait 700
+click 460 560
+wait 700
+click 420 620
+wait 700
+key 28
+wait 500
+logmark
+click 366 48
+expectsince figure: palette 7 open
+wait 500
+click 683 86
+wait 400
+key 29
+expectsince figure: palette 7 closed
+wait 400
+logmark
+click 366 82
+expectsince figure: tool 12
+click 525 565
+wait 700
+click 603 566
+wait 700
+click 700 640
+wait 700
+key 28
+wait 500
+logmark
+click 298 48
+expectsince figure: tool 0
+wait 300
+shot pline_p_drawn
+pixel 566 560 000000
+pixelnot 566 565 000000
+pixel 300 430 000000
+pixel 320 460 000000
+pixelnot 280 460 000000
+pixelnot 400 460 000000
+pixelnot 520 460 000000
+pixelnot 280 590 000000
+pixel 400 590 000000
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum show
+same kernel
+key 08 01
+expect figure: closed
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 10
+wait 800
+shot pline_p_reopened
+pixel 566 560 000000
+pixelnot 566 565 000000
+pixel 300 430 000000
+pixelnot 280 460 000000
+pixelnot 400 460 000000
+pixelnot 520 460 000000
+pixelnot 280 590 000000
+pixel 400 590 000000
+key 08 01
+expect figure: closed

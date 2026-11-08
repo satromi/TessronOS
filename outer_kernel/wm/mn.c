@@ -660,8 +660,17 @@ EXPORT ER mn_set_lst( ID mid, CONST TS_UUID *def, CONST char *code,
 	if ( !node_room(nd, nd->nitem - 1 + n) ) {
 		return E_NOMEM;
 	}
-	/* the items after the hole move to make room, the hole goes */
-	for ( j = nd->nitem - 1; j > at; j-- ) {
+	/*
+	 * The items after the hole move to make room, the hole goes: from the
+	 * far end when they move on, from the near end when an empty list
+	 * closes the hole, so that none is written over before it has moved.
+	 */
+	if ( n == 0 ) {
+		for ( j = at + 1; j < nd->nitem; j++ ) {
+			nd->item[j - 1] = nd->item[j];
+		}
+	}
+	for ( j = nd->nitem - 1; n > 1 && j > at; j-- ) {
 		nd->item[j + n - 1] = nd->item[j];
 	}
 	for ( j = 0; j < n; j++ ) {

@@ -37,6 +37,7 @@
 #include <ts/om.h>
 #include <ts/ob.h>
 #include <ts/uuid.h>
+#include <ts/tadlnk.h>
 #include <ts/wm.h>
 
 #define CP_ID_LEN	36		/* letters of an identity */
@@ -1285,77 +1286,36 @@ EXPORT void om_store_relink( CONST TS_UUID *host, CONST UB *was, SZ was_len, CON
  * machine. The text is made again when it changes (*p_buf is then a new
  * one, the old freed). Answers how many were changed, or an error.
  */
+LOCAL ER cp_vol_of( CONST TS_UUID *obj, TS_UUID *p_vol, void *arg )
+{
+	return knl_obfile_vuuid_of(obj, p_vol);
+}
+
 EXPORT INT om_link_fix( UB **p_buf, SZ *p_len, CONST TS_UUID *host )
 {
-	UB	*buf = *p_buf, *nb;
-	SZ	len = *p_len, at = 0, s, e, a, v0, v1, nlen;
-	TS_UUID	id, hv, tv, mine;
-	INT	n = 0, k, q, vat, mat;
-	char	us[TS_UUID_STRLEN + 1];
+	UB	*nb;
+	SZ	nlen;
+	TS_UUID	hv, mine;
+	INT	n = 0;
 
-	if ( buf == NULL || host == NULL || knl_obfile_vuuid_of(host, &hv) < E_OK ) {
+	if ( *p_buf == NULL || host == NULL || knl_obfile_vuuid_of(host, &hv) < E_OK ) {
 		return 0;
 	}
 	if ( knl_obfile_machine(&mine) < E_OK ) {
 		knl_memset(&mine, 0, sizeof(mine));
 	}
-	while ( cp_next_link(buf, len, at, &s, &e, &id) ) {
-		at = e;
-		/* where the id's value is: after id=" in the tag */
-		for ( a = s + 5; a + 5 < e && !( ( buf[a] == ' ' || buf[a] == '\t' || buf[a] == '\n'
-				|| buf[a] == '\r' ) && cp_same(buf + a + 1, "id=\"", 4) ); a++ ) ;
-		if ( a + 5 >= e ) {
-			continue;
-		}
-		v0 = a + 5;
-		k = ts_lnk_split(buf + v0, (INT)( e - v0 ), &vat, &mat);
-		if ( mat >= 0 ) {
-			TS_UUID	m;
-
-			for ( q = 0; q < TS_UUID_STRLEN; q++ ) us[q] = (char)buf[v0 + (SZ)mat + (SZ)q];
-			us[TS_UUID_STRLEN] = 0;
-			if ( ts_str_to_uuid(us, &m) < E_OK || ts_uuid_cmp(&m, &mine) != 0 ) {
-				continue;		/* another machine's: as it is */
-			}
-		}
-		if ( knl_obfile_vuuid_of(&id, &tv) < E_OK ) {
-			continue;			/* on no volume attached: as it is */
-		}
-		v1 = v0 + (SZ)k;			/* where the object's UUID starts */
-		if ( ts_uuid_cmp(&tv, &hv) == 0 || cp_zero(&tv) ) {
-			if ( k == 0 ) continue;		/* bare already */
-			nlen = len - (SZ)k;
-			nb = (UB *)Kmalloc(nlen + 1);
-			if ( nb == NULL ) return E_NOMEM;
-			knl_memcpy(nb, buf, (INT)v0);
-			knl_memcpy(nb + v0, buf + v1, (INT)( len - v1 ));
-		} else {
-			if ( k == TS_LNK_PART ) {
-				TS_UUID	said;
-
-				/* it names the right volume already */
-				for ( q = 0; q < TS_UUID_STRLEN; q++ ) us[q] = (char)buf[v0 + (SZ)q];
-				us[TS_UUID_STRLEN] = 0;
-				if ( ts_str_to_uuid(us, &said) >= E_OK && ts_uuid_cmp(&said, &tv) == 0 ) continue;
-			}
-			(void)ts_uuid_to_str(&tv, us, sizeof(us));
-			nlen = len - (SZ)k + TS_LNK_PART;
-			nb = (UB *)Kmalloc(nlen + 1);
-			if ( nb == NULL ) return E_NOMEM;
-			knl_memcpy(nb, buf, (INT)v0);
-			knl_memcpy(nb + v0, us, TS_UUID_STRLEN);
-			nb[v0 + TS_UUID_STRLEN] = '/';
-			knl_memcpy(nb + v0 + TS_LNK_PART, buf + v1, (INT)( len - v1 ));
-		}
-		nb[nlen] = 0;
-		at = (SZ)( (D)e + (D)nlen - (D)len );
-		Kfree(buf);
-		buf = nb;
-		len = nlen;
-		n++;
+	nb = (UB *)Kmalloc(tad_lnk_vol_room(*p_buf, *p_len));
+	if ( nb == NULL ) {
+		return E_NOMEM;
 	}
-	*p_buf = buf;
-	*p_len = len;
+	nlen = tad_lnk_vol_fix(*p_buf, *p_len, nb, &hv, &mine, cp_vol_of, NULL, &n);
+	if ( n == 0 ) {
+		Kfree(nb);
+		return 0;
+	}
+	Kfree(*p_buf);
+	*p_buf = nb;
+	*p_len = nlen;
 	return n;
 }
 

@@ -144,9 +144,28 @@
 #define MII_BMSR	1
 #define MII_ID1		2
 #define MII_ID2		3
+#define MII_ANAR	4
 #define MII_ANLPAR	5
 #define MII_GBCR	9
 #define MII_GBSR	10
+#define MII_AUXSTS	0x19		/* Broadcom's: bits 10..8 the speed and duplex settled on */
+#define MII_ANER	6		/* auto-negotiation expansion */
+#define MII_ANLPNP	8		/* the next page the other end sent last */
+#define MII_MMD_CTRL	0x0d		/* clause 45 registers through clause 22 */
+#define MII_MMD_DATA	0x0e
+#define MII_EXTSTS	0x11		/* Broadcom's extended status */
+#define MII_AUXCTL	0x18		/* Broadcom's auxiliary control, its shadows */
+#define MII_ISR		0x1a		/* Broadcom's interrupt status, cleared as read */
+#define MII_SHADOW	0x1c		/* Broadcom's shadow registers */
+#define AUXCTL_READ_MISC	0x7007	/* the misc shadow (7) selected for reading */
+#define MISC_WIRESPEED	0x0010		/* the PHY may step a link down after failures */
+#define SHADOW_SEL(n)	( ( (n) & 0x1f ) << 10 )
+#define SHADOW_SCR2	0x04		/* spare control 2: Wirespeed's retries */
+#define EEE_ADV_100TX	0x0002
+#define EEE_ADV_1000T	0x0004
+#define MMD_AN		0x0007		/* MMD 7, auto-negotiation */
+#define MMD_DATA_NOINC	0x4000		/* the data register reads the register given */
+#define MMD_AN_EEE_ADV	60		/* EEE offered: bit 1 100BASE-TX, bit 2 1000BASE-T */
 
 #define BMCR_ANENABLE	0x1000
 #define BMCR_ANRESTART	0x0200
@@ -159,6 +178,7 @@
 #define ANLPAR_10FULL	0x0040
 
 #define GBCR_1000FULL	0x0200
+#define GBCR_1000HALF	0x0100
 #define GBSR_1000FULL	0x0800
 #define GBSR_1000HALF	0x0400
 
@@ -181,6 +201,19 @@
  */
 #define ETH_DESC_LINE	4
 #define ETH_BUF_LEN	2048		/* a whole frame, a multiple of 64 */
+
+/*
+ * A frame to send is put on the transmit ring and the controller started;
+ * the sender does not wait for it to go. The descriptors the controller
+ * has sent are taken back at the next send, oldest first, and only a
+ * full ring makes the sender wait, for one to come back. Several are then
+ * the controller's at once, with the driver writing the next while the
+ * controller writes the used bit of one before it: the transmit ring is
+ * in memory that is not cached (its own page, mapped so), so that neither
+ * write is ever carried back over the other by a line of the cache.
+ */
+#define ETH_TX_WAIT_US	50		/* a full ring looked at again after this */
+#define ETH_TX_WAIT_N	20000		/* and given up on after so many looks (1 s) */
 
 /*
  * A descriptor in the 64 bit layout: the address in two halves, with the
@@ -207,12 +240,13 @@ typedef struct {
 #define TXC_USED	0x80000000	/* set by the controller when sent */
 
 typedef struct {
-	ETH_DESC	*rxd, *txd;	/* the two rings (linear map) */
+	ETH_DESC	*rxd, *txd;	/* the two rings: rxd in the linear map, txd not cached */
 	UD		rxd_pa, txd_pa;
 	UB		*rxbuf, *txbuf;
 	UD		rxbuf_pa, txbuf_pa;
 	INT		rx_next;	/* the descriptor to look at next */
-	INT		tx_next;
+	INT		tx_next;	/* the descriptor the next frame to send goes in */
+	INT		tx_tail;	/* the oldest one given to the controller and not taken back */
 	UB		mac[NET_MAC_LEN];
 	UINT		phy;		/* its address on the MDIO bus */
 	UD		n_sent, n_recv, n_drop;
@@ -381,12 +415,31 @@ LOCAL ER phy_find( void )
  */
 LOCAL ER phy_speed( void );
 
+/*
+ * Energy efficient Ethernet not offered at 100 or at gigabit: on these
+ * boards it is broken at both (the board's device tree says so), and
+ * offered, a gigabit link fails to come up and the other end steps down.
+ */
+LOCAL void phy_eee_off( void )
+{
+	INT	v;
+
+	if ( phy_write(eth.phy, MII_MMD_CTRL, MMD_AN) < E_OK
+	  || phy_write(eth.phy, MII_MMD_DATA, MMD_AN_EEE_ADV) < E_OK
+	  || phy_write(eth.phy, MII_MMD_CTRL, MMD_AN | MMD_DATA_NOINC) < E_OK
+	  || ( v = phy_read(eth.phy, MII_MMD_DATA) ) < 0 ) {
+		return;
+	}
+	(void)phy_write(eth.phy, MII_MMD_DATA, (UINT)( v & ~( EEE_ADV_100TX | EEE_ADV_1000T ) ));
+}
+
 LOCAL ER phy_up( void )
 {
 	INT	bmsr;
 	INT	spin;
 
-	if ( phy_write(eth.phy, MII_GBCR, GBCR_1000FULL) < E_OK
+	phy_eee_off();
+	if ( phy_write(eth.phy, MII_GBCR, GBCR_1000FULL | GBCR_1000HALF) < E_OK
 	  || phy_write(eth.phy, MII_BMCR, BMCR_ANENABLE | BMCR_ANRESTART) < E_OK ) {
 		return E_IO;
 	}
@@ -418,6 +471,35 @@ LOCAL ER phy_up( void )
  * a link that settles later would otherwise carry nothing, the
  * controller still set for 10 half duplex.
  */
+/*
+ * More of what the negotiation left, for a link that came up slower than
+ * both ends can go: whether a faster one was tried and failed (the
+ * interrupt status, read and so cleared), whether the PHY may step down
+ * by itself (the misc shadow of the auxiliary control, Wirespeed), the
+ * expansion register and the last next page from the other end, and the
+ * energy efficient Ethernet offered (MMD 7, register 60).
+ */
+LOCAL void phy_link_said( void )
+{
+	INT	isr, aner, nprx, exts, misc, scr2, eee;
+
+	isr  = phy_read(eth.phy, MII_ISR);
+	aner = phy_read(eth.phy, MII_ANER);
+	nprx = phy_read(eth.phy, MII_ANLPNP);
+	exts = phy_read(eth.phy, MII_EXTSTS);
+	(void)phy_write(eth.phy, MII_AUXCTL, AUXCTL_READ_MISC);
+	misc = phy_read(eth.phy, MII_AUXCTL);
+	(void)phy_write(eth.phy, MII_SHADOW, SHADOW_SEL(SHADOW_SCR2));
+	scr2 = phy_read(eth.phy, MII_SHADOW);
+	(void)phy_write(eth.phy, MII_MMD_CTRL, MMD_AN);
+	(void)phy_write(eth.phy, MII_MMD_DATA, MMD_AN_EEE_ADV);
+	(void)phy_write(eth.phy, MII_MMD_CTRL, MMD_AN | MMD_DATA_NOINC);
+	eee = phy_read(eth.phy, MII_MMD_DATA);
+	tm_printf((UB *)"eth: negotiated, more: interrupts %04x, expansion %04x, next page in %04x, extended status %04x,"
+		  " misc %04x (Wirespeed %s), SCR2 %04x, EEE offered %04x\n",
+		  isr, aner, nprx, exts, misc, ( misc >= 0 && ( misc & MISC_WIRESPEED ) != 0 ) ? "on" : "off", scr2, eee);
+}
+
 LOCAL ER phy_speed( void )
 {
 	INT	gbsr, lpa;
@@ -449,6 +531,11 @@ LOCAL ER phy_speed( void )
 	tm_printf((UB *)"eth: link up %s %s\n",
 		  ( cfg & NCFGR_GBE ) ? "1000" : ( cfg & NCFGR_SPD100 ) ? "100" : "10",
 		  ( cfg & NCFGR_FD ) ? "full" : "half");
+	/* what each end offered and what the PHY settled on, for a link slower than both ends can go */
+	tm_printf((UB *)"eth: negotiated: offered %04x / %04x, the other end %04x / %04x, aux status %04x\n",
+		  phy_read(eth.phy, MII_ANAR), phy_read(eth.phy, MII_GBCR), lpa, gbsr,
+		  phy_read(eth.phy, MII_AUXSTS));
+	phy_link_said();
 
 	return E_OK;
 }
@@ -536,6 +623,7 @@ LOCAL void rings_init( void )
 
 	eth.rx_next = 0;
 	eth.tx_next = 0;
+	eth.tx_tail = 0;
 	dcache_flush(eth.rxd, sizeof(ETH_DESC) * ETH_RX_RING);
 	dcache_flush(eth.txd, sizeof(ETH_DESC) * ETH_TX_RING);
 }
@@ -591,13 +679,34 @@ EXPORT ER net_get_mac( UB *mac )
 	return E_OK;
 }
 
+/*
+ * The descriptors the controller has sent taken back, oldest first: each
+ * comes back with its used bit set again. A frame given up on or a bus
+ * fault is told once. Under eth.mtxid.
+ */
+LOCAL void tx_reclaim( void )
+{
+	UW	tsr;
+
+	while ( eth.tx_tail != eth.tx_next && (eth.txd[eth.tx_tail].ctrl & TXC_USED) != 0 ) {
+		eth.n_sent++;
+		eth.tx_tail = ( eth.tx_tail + 1 ) % ETH_TX_RING;
+	}
+	tsr = in_w(GEM_TSR);
+	if ( (tsr & (TSR_TFC | TSR_HRESP)) != 0 ) {
+		if ( !eth.told_tx ) {
+			eth.told_tx = TRUE;
+			eth_dump("a frame did not go", tsr);
+		}
+		out_w(GEM_TSR, tsr & (TSR_TFC | TSR_HRESP));	/* the bits clear on a write */
+	}
+}
+
 EXPORT ER net_send( CONST void *frame, SZ len )
 {
 	ETH_DESC	*d;
 	UB		*buf;
-	INT		spin;
-	UW		tsr;
-	ER		er;
+	INT		n;
 
 	if ( !eth_found ) {
 		return E_NOEXS;
@@ -607,56 +716,39 @@ EXPORT ER net_send( CONST void *frame, SZ len )
 	}
 	tk_loc_mtx(eth.mtxid, TMO_FEVR);
 
-	d = &eth.txd[eth.tx_next];
-	dcache_flush(d, sizeof(*d));
-	if ( (d->ctrl & TXC_USED) == 0 ) {
-		tk_unl_mtx(eth.mtxid);
-		return E_BUSY;			/* the ring has not drained */
+	/* a descriptor free: one is always left between the last given and the oldest not back */
+	tx_reclaim();
+	for ( n = 0; ( eth.tx_next + 1 ) % ETH_TX_RING == eth.tx_tail; n++ ) {
+		if ( n >= ETH_TX_WAIT_N ) {
+			if ( !eth.told_tx ) {
+				eth.told_tx = TRUE;
+				eth_dump("the transmit ring did not drain", eth.txd[eth.tx_tail].ctrl);
+			}
+			tk_unl_mtx(eth.mtxid);
+			return E_TMOUT;
+		}
+		tk_dly_tsk_u(ETH_TX_WAIT_US);
+		tx_reclaim();
 	}
 
+	d = &eth.txd[eth.tx_next];
 	buf = eth.txbuf + (UD)eth.tx_next * ETH_BUF_LEN;
 	knl_memcpy(buf, frame, (INT)len);
 	dcache_flush(buf, (UD)len);
 
-	/* the controller takes the descriptor when the used bit goes away */
+	/* the controller takes the descriptor when the used bit goes away; it stops at the next, still used */
 	d->ctrl = ((UW)len & TXC_LEN_MASK) | TXC_LAST
 		| (( eth.tx_next == ETH_TX_RING - 1 ) ? TXC_WRAP : 0);
-	dcache_flush(d, sizeof(*d));
+	eth.tx_next = ( eth.tx_next + 1 ) % ETH_TX_RING;
+	DeviceBarrier();		/* the descriptor in memory before the controller is started */
 
 	out_w(GEM_NCR, in_w(GEM_NCR) | NCR_TSTART);
 	(void)in_w(GEM_NCR);		/* a posted write can be lost on the way; the read brings it home */
-
-	/* it comes back with the used bit set again */
-	er = E_TMOUT;
-	for ( spin = 0; spin < 1000; spin++ ) {
-		dcache_flush(d, sizeof(*d));
-		if ( (d->ctrl & TXC_USED) != 0 ) {
-			er = E_OK;
-			break;
-		}
-		tk_dly_tsk(1);
-	}
-	if ( er >= E_OK ) {
-		tsr = in_w(GEM_TSR);
-		if ( (tsr & (TSR_TFC | TSR_HRESP)) != 0 ) {
-			er = E_IO;		/* given up on, or a bus fault */
-		}
-		out_w(GEM_TSR, tsr);		/* the bits clear on a write */
-	}
-	if ( er < E_OK && !eth.told_tx ) {
-		eth.told_tx = TRUE;
-		dcache_flush(d, sizeof(*d));
-		eth_dump("a frame did not go", d->ctrl);
-	}
-	if ( er >= E_OK ) {
-		eth.n_sent++;
-		eth.idle = 0;		/* an answer may be on its way */
-	}
-	eth.tx_next = ( eth.tx_next + 1 ) % ETH_TX_RING;
+	eth.idle = 0;			/* an answer may be on its way */
 
 	tk_unl_mtx(eth.mtxid);
 
-	return er;
+	return E_OK;
 }
 
 /*
@@ -939,15 +1031,23 @@ EXPORT INT knl_eth_rp1_init( void )
 
 	mac_read();
 
-	/* one page holds both rings */
+	/* a page for the receive ring (and the parked queues), another, not cached, for the transmit ring */
 	pf = knl_alloc_pages(0, ZONE_DMA32, KAF_ZERO | KAF_DMA32);
 	if ( pf == NULL ) {
 		return E_NOMEM;
 	}
 	eth.rxd_pa = knl_pf_to_pa(pf);
-	eth.txd_pa = eth.rxd_pa + sizeof(ETH_DESC) * ETH_RX_RING;
 	eth.rxd = (ETH_DESC *)PA2VA(eth.rxd_pa);
-	eth.txd = (ETH_DESC *)PA2VA(eth.txd_pa);
+	pf = knl_alloc_pages(0, ZONE_DMA32, KAF_ZERO | KAF_DMA32);
+	if ( pf == NULL ) {
+		return E_NOMEM;
+	}
+	eth.txd_pa = knl_pf_to_pa(pf);
+	dcache_flush(PA2VA(eth.txd_pa), PAGE_SIZE);	/* the zeroes went through the cache: out first */
+	eth.txd = (ETH_DESC *)knl_vmap_pa(eth.txd_pa, 1, VMAP_NOCACHE);
+	if ( eth.txd == NULL ) {
+		return E_NOMEM;
+	}
 
 	/* a buffer per descriptor: 136 of 2KB, which is 68 pages */
 	pf = knl_alloc_pages(ETH_BUF_ORDER, ZONE_DMA32, KAF_ZERO | KAF_DMA32);

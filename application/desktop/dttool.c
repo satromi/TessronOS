@@ -914,7 +914,7 @@ LOCAL T_TAD *nw_record( NWNET *g, UB *title, INT max )
 {
 	UB	*xml;
 	SZ	cap, at = 0;
-	INT	*row, i, e, band = NW_CHSZ + 11;
+	INT	*row, i, e, band = tad_closed_h(NW_CHSZ, TAD_D_DEFAULT);
 	T_TAD	*doc = NULL;
 	UB	nm[TAD_NAME_MAX];
 
@@ -1202,7 +1202,7 @@ LOCAL T_TAD *gr_record( NWNET *g, UB *title, INT max )
 {
 	UB	*xml;
 	SZ	cap, at = 0;
-	INT	i, e, band = NW_CHSZ + 11, *in;
+	INT	i, e, band = tad_closed_h(NW_CHSZ, TAD_D_DEFAULT), *in;
 	D	*px, *py, minx, miny;
 	T_TAD	*doc = NULL;
 	UB	nm[TAD_NAME_MAX];

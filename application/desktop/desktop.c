@@ -37,6 +37,7 @@
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
+#include <ts/proc.h>
 #include <ts/wm.h>
 #include <ts/part.h>
 #include <ts/dp.h>
@@ -53,12 +54,14 @@
 #include <ts/kconv.h>
 #include <ts/ob.h>
 #include <ts/dtreq.h>
+#include <ts/time.h>
 #include <ts/rtmedia.h>
 #include <ts/img.h>
 #include <ts/sysdef.h>
 #include <ts/so.h>
 #include <ts/lockup.h>
 #include <ts/fquit.h>
+#include <ts/tray.h>
 #include "obj/obj.h"
 #include "desktop.h"
 
@@ -116,6 +119,14 @@ LOCAL ER dt_power( INT how )
 	dt_stop = TRUE;
 	return E_OK;
 }
+#if defined(USE_TESTAGENT) || defined(USE_UITEST)
+/* The test agent's reboot and poweroff (dttagent.c), and the steps' (dtuitest.c): the same way out */
+EXPORT ER dt_tagent_power( INT how )
+{
+	return dt_power(how);
+}
+#endif
+
 LOCAL ID	dt_port = 0;	/* where requests to close the windows arrive */
 LOCAL ID	dt_req = 0;	/* where processes ask for things (DT_REQ_NAME) */
 
@@ -208,6 +219,14 @@ EXPORT BOOL dt_carry_end( INT wid )
 }
 
 LOCAL UINT	dt_up_mods = 0;	/* the keys held when the button was let go */
+
+/*
+ * The first button let go, as the loop read it: where, and whether since
+ * the last press. A carry a program asks for once the button is up is
+ * let go there (carry_start).
+ */
+LOCAL BOOL	dt_up_seen = FALSE;
+LOCAL INT	dt_up_x = 0, dt_up_y = 0;
 LOCAL ID	dt_tskid = 0;	/* the desktop's task, while it runs */
 
 /*
@@ -233,6 +252,13 @@ LOCAL volatile UW	dt_step_at = 0;		/* when, ms */
 LOCAL volatile UW	dt_loops = 0;		/* times the loop came round */
 #if USE_KTEST
 EXPORT volatile INT	dt_test_stall = 0;	/* the tests: the loop stopped (desktop.h) */
+#endif
+#if USE_KTEST || defined(USE_UITEST)
+/* The tests: how many times the loop came round, which starts only when the start's steps are over */
+EXPORT UW dt_test_loops( void )
+{
+	return dt_loops;
+}
 #endif
 
 /* ---------------------------------------------------------------- the face */
@@ -297,10 +323,12 @@ EXPORT void dt_work_rect( CONST DTWIN *d, T_DPRECT *r )
 				break;
 			}
 		}
-		tv_doc_zoom(z);
+		if ( d->doc != NULL ) {
+			d->doc->zoom = z;
+			d->doc->zoom_den = 8;
+		}
 		return;
 	}
-	tv_doc_zoom(8);
 	/*
 	 * The page reaches the frame: what is drawn runs up to its inner
 	 * edge on every side, with no strip left undrawn inside it. Lines
@@ -426,6 +454,71 @@ LOCAL void paper_frame( DTWIN *d, INT gid, CONST T_DPRECT *r )
  * bar and the page can never disagree about how long the page is.
  * What is taken is drawn last, over the page.
  */
+#ifdef USE_UITEST
+/* the tests: when the press being answered in a figure editor happened (ns), 0 none */
+LOCAL UD	dt_fig_input_at = 0;
+
+/* the tests: a window of links of the desktop's own, which 仮身一覧 as a process is measured against */
+LOCAL BOOL ut_cabinet( CONST DTWIN *d )
+{
+	return (BOOL)( d->kind == TV_KIND_FIG && !d->figed && !d->sealed
+		    && d->tool == DT_TOOL_NONE && d->tb_host == NULL );
+}
+
+/*
+ * The tests: what the moves of one drag cost, from the first move with
+ * something held to the let go. 'got' the moves read, 'put' the moves
+ * the input layer was given meanwhile (the ring merges a move into the
+ * one still waiting), 'busy' the time one move took to follow and show,
+ * 'lag' from the move to the end of that.
+ */
+LOCAL struct {
+	BOOL	on;
+	INT	got;
+	UD	put0, busy, busy_max, lag, lag_max, lag_last;
+} dt_drag;
+LOCAL UD	drag_t0;		/* when the move being followed was taken */
+LOCAL BOOL	drag_timed;		/* it moves something held */
+
+LOCAL void drag_moved( UD t0, UD when )
+{
+	UD		t1 = 0, b, l;
+	T_HIDSTAT	st;
+
+	(void)ts_get_mono(&t1);
+	if ( !dt_drag.on ) {
+		knl_memset(&dt_drag, 0, sizeof(dt_drag));
+		dt_drag.on = TRUE;
+		if ( ts_hid_stat(&st) >= E_OK ) dt_drag.put0 = st.events - 1;
+	}
+	b = t1 - t0;
+	l = ( when != 0 && t1 > when ) ? t1 - when : b;
+	dt_drag.got++;
+	dt_drag.busy += b;
+	dt_drag.lag += l;
+	dt_drag.lag_last = l;
+	if ( b > dt_drag.busy_max ) dt_drag.busy_max = b;
+	if ( l > dt_drag.lag_max ) dt_drag.lag_max = l;
+}
+
+LOCAL void drag_said( void )
+{
+	T_HIDSTAT	st;
+	INT		put = 0, n = dt_drag.got;
+
+	if ( !dt_drag.on || n <= 0 ) {
+		return;
+	}
+	/* the let go is the one event put after the last move */
+	if ( ts_hid_stat(&st) >= E_OK ) put = (INT)( st.events - dt_drag.put0 ) - 1;
+	tm_printf((UB *)"desktop: drag moves %d of %d follow avg %d max %d us lag avg %d max %d last %d us\n",
+		  n, put, (INT)( dt_drag.busy / (UD)n / 1000 ), (INT)( dt_drag.busy_max / 1000 ),
+		  (INT)( dt_drag.lag / (UD)n / 1000 ), (INT)( dt_drag.lag_max / 1000 ),
+		  (INT)( dt_drag.lag_last / 1000 ));
+	dt_drag.on = FALSE;
+}
+#endif
+
 EXPORT void dt_draw( DTWIN *d )
 {
 	T_DPRECT	r;
@@ -481,8 +574,22 @@ EXPORT void dt_draw( DTWIN *d )
 		if ( !d->sealed && d->tool == DT_TOOL_NONE ) {
 			tv_draw_host(&d->id);
 		}
+#ifdef USE_UITEST
+		/* the tests compare it with the figure editor running as a process (ui_fig_proc_cmp) */
+		UD	t0 = 0, t1 = 0;
+
+		(void)ts_get_mono(&t0);
+#endif
 		tv_fig_draw(gid, d->fig, &r, d->scroll_x, d->scroll_y, d->rec,
 			    d->paper);
+#ifdef USE_UITEST
+		(void)ts_get_mono(&t1);
+		if ( d->figed ) {
+			tm_printf((UB *)"desktop: figure drew in %d us\n", (INT)( ( t1 - t0 ) / 1000 ));
+		} else if ( ut_cabinet(d) ) {
+			tm_printf((UB *)"desktop: cabinet drew in %d us\n", (INT)( ( t1 - t0 ) / 1000 ));
+		}
+#endif
 		tv_draw_host(NULL);
 		tv_fig_size(d->fig, &d->width, &d->height);
 		if ( d->fig->zoom > 0 ) {
@@ -492,6 +599,16 @@ EXPORT void dt_draw( DTWIN *d )
 		df_overlay(d, gid, &r);
 	}
 	ed_draw_picks(d);
+#ifdef USE_UITEST
+	if ( ( d->figed || ut_cabinet(d) ) && dt_fig_input_at != 0 ) {
+		UD	t = 0;
+
+		(void)ts_get_mono(&t);
+		tm_printf((UB *)"desktop: %s input to screen %d us\n", d->figed ? "figure" : "cabinet",
+			  (INT)( ( t - dt_fig_input_at ) / 1000 ));
+		dt_fig_input_at = 0;
+	}
+#endif
 	dd_draw(d, gid);
 	if ( d->tb != NULL ) {
 		/* the box of the piece of text being edited, and its caret */
@@ -506,6 +623,9 @@ EXPORT void dt_draw( DTWIN *d )
 		dp_line_wide(gid, tr.right, tr.top - 1, tr.right, tr.bottom, 1, DP_LINE_DASH, &tp);
 		dd_draw(d->tb, gid);
 		dt_work_rect(d, &r);		/* the figure's own page, again */
+	}
+	if ( d->fig != NULL ) {
+		df_drawing_over(d);		/* a shape being drawn, inverted over all of it */
 	}
 	if ( d->doc != NULL && d->doc->vert && !d->xml_view ) {
 		/*
@@ -584,6 +704,8 @@ LOCAL UW now_ms( void )
 	return (UW)t.lo;
 }
 
+LOCAL void caret_draw( DTWIN *f );
+
 LOCAL void blink_restart( void )
 {
 	blink_at = now_ms();
@@ -592,7 +714,8 @@ LOCAL void blink_restart( void )
 		DTWIN	*f = dt_win_of(wm_focused());
 
 		dd_caret_hidden = FALSE;
-		if ( f != NULL && dd_editable(f) ) dt_draw(f);
+		/* the caret shown again: only it drawn */
+		if ( f != NULL && dd_editable(f) ) caret_draw(f);
 	}
 }
 
@@ -766,11 +889,18 @@ LOCAL SZ put_x( UB *buf, SZ at, SZ max, CONST char *s )
 EXPORT T_TAD *dt_list_record( CONST char *title, CONST TS_UUID *ids,
 			      CONST char *CONST *names, INT n )
 {
+	return dt_list_record_dim(title, ids, names, NULL, n);
+}
+
+/* The same, those 'dim' says with their frame and name in grey */
+EXPORT T_TAD *dt_list_record_dim( CONST char *title, CONST TS_UUID *ids,
+				  CONST char *CONST *names, CONST BOOL *dim, INT n )
+{
 	UB		*xml;
 	SZ		max, at = 0;
 	T_TAD		*doc = NULL;
 	INT		i;
-	INT		y = BASE_PAD + BASE_GAP, band = BASE_CHSZ + 11;
+	INT		y = BASE_PAD + BASE_GAP, band = tad_closed_h(BASE_CHSZ, TAD_D_DEFAULT);
 	INT		fid = fn_system();
 
 	max = 512 + (SZ)( n > 0 ? n : 0 ) * ( 480 + TAD_NAME_MAX * 5 );
@@ -800,7 +930,7 @@ EXPORT T_TAD *dt_list_record( CONST char *title, CONST TS_UUID *ids,
 			nm[k] = 0;
 		}
 		w = ( fid > 0 ) ? fn_width(fid, nm) : BASE_CHSZ * 6;
-		w += BASE_CHSZ + 20;		/* the pictogram and the edges */
+		w = tad_closed_w(BASE_CHSZ, TAD_D_DEFAULT, w);	/* the pictogram and the edges */
 
 		at = put_s(xml, at, max, "<link id=\"");
 		at = put_s(xml, at, max, txt);
@@ -818,8 +948,9 @@ EXPORT T_TAD *dt_list_record( CONST char *title, CONST TS_UUID *ids,
 		at = put_n(xml, at, max, band);
 		at = put_s(xml, at, max, "\" chsz=\"");
 		at = put_n(xml, at, max, BASE_CHSZ);
+		at = put_s(xml, at, max, ( dim != NULL && dim[i] )
+			   ? "\" frcol=\"#a0a0a0\" chcol=\"#808080\"" : "\" frcol=\"#000000\" chcol=\"#000000\"");
 		at = put_s(xml, at, max,
-			   "\" frcol=\"#000000\" chcol=\"#000000\""
 			   " tbcol=\"#ffffff\" bgcol=\"#ffffff\""
 			   " pictdisp=\"true\" namedisp=\"true\""
 			   " framedisp=\"true\" autoopen=\"false\"/>");
@@ -880,6 +1011,30 @@ LOCAL BOOL app_is( CONST UB *app, CONST char *id )
 		if ( app[i] != (UB)id[i] ) return FALSE;
 	}
 	return (BOOL)( app[i] == 0 && id[i] == 0 );
+}
+
+/*
+ * The program that opens the record v points at, of those that look at
+ * its kind: 仮身一覧 shows a figure's links, and the desktop's own window
+ * shows a record that is a text with the text editor whichever of them
+ * opened it. 仮身一覧 as a process opens nothing but a figure, so a text
+ * is given to the program of texts instead, as the desktop's own does.
+ */
+LOCAL CONST DTPROG *prog_for_kind( CONST DTPROG *p, CONST T_VOBJ *v )
+{
+	CONST DTPROG	*q;
+	T_TAD		*rec;
+
+	if ( p == NULL || !app_is(p->id, "virtual-object-list") ) {
+		return p;
+	}
+	rec = om_store_get(&v->target, ( v->recno >= 0 ) ? v->recno : 0);
+	if ( rec == NULL || tv_kind(rec) != TV_KIND_DOC ) {
+		return p;
+	}
+	q = dt_prog_find((CONST UB *)"basic-text-editor");
+
+	return ( q != NULL ) ? q : p;
 }
 
 /*
@@ -948,6 +1103,7 @@ LOCAL struct {
 	BOOL	on;			/* the outline follows the hand */
 	T_DTREQ	rq;
 	BOOL	pending;		/* let go where a link can go, the link not yet asked for */
+	INT	first;			/* the count of links before the first put, -1 none put yet */
 	UINT	seq;
 	INT	wid;			/* the window it was let go over */
 	TS_UUID	into;			/* and that window's object */
@@ -955,7 +1111,13 @@ LOCAL struct {
 	INT	x0, y0;			/* where the hand was when the carry began */
 	BOOL	copy;			/* the second button went down: 複写ドラッグ */
 	SZ	anssz;			/* how much of an answer the program reads */
+	ID	asker;			/* the process carrying: only it ends the carry */
+	BOOL	toprog;			/* let go over another program's window */
+	T_OBDROPV *links;		/* and the links asked for so far, dropped with the last */
+	INT	nlink;
 } carry;
+
+LOCAL void name_cut( UB *out, CONST UB *s, INT max );
 
 /*
  * The first form of a request and its answer, before a carried link
@@ -993,10 +1155,27 @@ EXPORT void dt_answer( CONST TS_UUID *reply, CONST T_DTANS *an, SZ size )
 	answer_as(reply, an, size);
 }
 
+LOCAL ER carry_place( CONST T_DTREQ *rq, BOOL more, TS_UUID *p_into, ID asker );
+
 LOCAL void carry_answer( ER er, CONST TS_UUID *into )
 {
 	T_DTANS	an;
+	TS_UUID	made;
 
+	if ( er >= E_OK && ( carry.rq.flags & DT_F_BASE ) != 0 && carry.pending ) {
+		/* a template let go where a link goes: the new object made from it, and its link put (DT_F_BASE) */
+		static T_DTREQ	r;
+
+		r = carry.rq;
+		r.flags = DT_F_DUPLICATE;
+		r.carry = carry.seq;
+		r.grab_x = r.grab_y = 0;
+		r.name[0] = 0;
+		knl_memset(&made, 0, sizeof(made));
+		er = carry_place(&r, FALSE, &made, carry.asker);
+		into = ( er >= E_OK ) ? &made : NULL;
+		tm_printf((UB *)"desktop: template carried, made from it: %d\n", (INT)er);
+	}
 	knl_memset(&an, 0, sizeof(an));
 	an.seq = carry.rq.seq;
 	an.er = er;
@@ -1004,7 +1183,49 @@ LOCAL void carry_answer( ER er, CONST TS_UUID *into )
 		an.into = *into;
 	}
 	an.how = carry.copy ? DT_HOW_COPY : 0;
+	an.flags = ( er >= E_OK && carry.toprog ) ? DT_F_TO_PROG : 0;
 	answer_as(&carry.rq.reply, &an, carry.anssz);
+}
+
+/* Let go back over the asking program's own window, at px, py: its own to do there (DT_F_BACK) */
+LOCAL void carry_back( INT px, INT py )
+{
+	T_DTANS	an;
+
+	knl_memset(&an, 0, sizeof(an));
+	an.seq = carry.rq.seq;
+	an.er = E_NOEXS;
+	an.how = carry.copy ? DT_HOW_COPY : 0;
+	an.flags = DT_F_BACK;
+	an.look.w = px;
+	an.look.h = py;
+	answer_as(&carry.rq.reply, &an, carry.anssz);
+}
+
+/*
+ * What a text carried out (DT_F_FRAG), from the tray's place of its own;
+ * NULL: none there
+ */
+LOCAL T_TAD *carry_frag( void )
+{
+	T_TRINF	inf;
+	T_TAD	*frag = NULL;
+	UB	*buf;
+	SZ	asz = 0;
+
+	if ( tr_ref_rec(TR_PUT, 0, &inf) < E_OK || inf.kind != TR_TAD || inf.size <= 0 ) {
+		return NULL;
+	}
+	buf = (UB *)Kmalloc((SZ)inf.size + 1);
+	if ( buf == NULL ) {
+		return NULL;
+	}
+	if ( tr_rea_rec(TR_PUT, 0, buf, (SZ)inf.size, &asz) >= E_OK
+	  && tad_parse(buf, (SZ)asz, NULL, &frag) < E_OK ) {
+		frag = NULL;
+	}
+	Kfree(buf);
+	return frag;
 }
 
 /* The outline where the hand is, held where it was taken */
@@ -1021,14 +1242,40 @@ LOCAL void carry_outline( INT px, INT py )
 }
 
 /*
- * A program asks its link to be carried: only while the hand is still
- * down, which it may no longer be when the request comes -- a press
- * that was a click answers at once that nothing was carried.
+ * A program asks its link to be carried while the hand is down, or as
+ * the hand carrying went out of its window -- which the button may have
+ * been let go after, before the request comes. Then it is let go where
+ * the button went up: at once when the loop has read that, else when it
+ * does. A press that was a click is let go where it was taken, and
+ * answered that nothing was carried (carry_release).
  */
-LOCAL void carry_start( CONST T_DTREQ *rq, SZ anssz )
+LOCAL void carry_links_free( void )
 {
-	INT	px = 0, py = 0;
+	if ( carry.links != NULL ) {
+		Kfree(carry.links);
+		carry.links = NULL;
+	}
+	carry.nlink = 0;
+}
+
+/* A carry let go over a program's window whose program is being asked (DT_F_ASK) */
+#define CARRY_ASK_MS	3000		/* how long an answer is waited for */
+
+LOCAL struct {
+	BOOL	on;
+	INT	wid;
+	INT	px, py;
+	UINT	seq;
+	UW	since;
+} carry_asking;
+
+LOCAL void carry_release( INT px, INT py );
+
+LOCAL void carry_start( CONST T_DTREQ *rq, SZ anssz, ID asker )
+{
+	INT	px = 0, py = 0, x0 = 0, y0 = 0;
 	UINT	btn = 0;
+	BOOL	up;
 
 	carry.rq = *rq;
 	carry.anssz = anssz;
@@ -1036,8 +1283,9 @@ LOCAL void carry_start( CONST T_DTREQ *rq, SZ anssz )
 	carry.rq.ask[0][sizeof(rq->ask[0]) - 1] = 0;
 	carry.rq.ask[1][sizeof(rq->ask[1]) - 1] = 0;
 	carry.rq.yes[sizeof(rq->yes) - 1] = 0;
-	if ( carry.on || rq->look.w <= 0 || rq->look.h <= 0
-	  || ts_hid_pointer(&px, &py, &btn) < E_OK || ( btn & 1 ) == 0 ) {
+	if ( carry.on || carry_asking.on || rq->look.w <= 0 || rq->look.h <= 0
+	  || ts_hid_pointer(&px, &py, &btn) < E_OK
+	  || ts_hid_press_at(&x0, &y0) < E_OK ) {
 		/* why nothing is carried, for the console: a click is the usual one */
 		tm_printf((UB *)"desktop: carry refused: %s, outline %dx%d, buttons 0x%x\n",
 			  carry.on ? "one carried already" : "", (INT)rq->look.w, (INT)rq->look.h, btn);
@@ -1046,14 +1294,31 @@ LOCAL void carry_start( CONST T_DTREQ *rq, SZ anssz )
 	}
 	carry.on = TRUE;
 	carry.pending = FALSE;
-	carry.x0 = px;
-	carry.y0 = py;
-	{
-		/* the link where it lies in the program's window, under the hand */
+	carry.asker = asker;
+	carry.toprog = FALSE;
+	carry_links_free();
+	carry.x0 = x0;
+	carry.y0 = y0;
+	up = (BOOL)( ( btn & 1 ) == 0 );
+	if ( up ) {
+		tm_printf((UB *)"desktop: carry asked with the button %s\n",
+			  dt_up_seen ? "let go already: let go there" : "going up");
+	}
+	if ( up && dt_up_seen ) {
+		carry_release(dt_up_x, dt_up_y);
+		return;
+	}
+	/* letters have no picture of their own on the screen: they are carried as an outline */
+	if ( ( carry.rq.flags & DT_F_TEXT ) == 0 ) {
+		/*
+		 * The link where it lies in the program's window: grab_x, grab_y
+		 * are from the press, and the hand has moved on by the time the
+		 * program has heard of it and asked.
+		 */
 		T_DPRECT	r;
 
-		r.left = px - carry.rq.grab_x;
-		r.top = py - carry.rq.grab_y;
+		r.left = x0 - carry.rq.grab_x;
+		r.top = y0 - carry.rq.grab_y;
 		r.right = r.left + carry.rq.look.w;
 		r.bottom = r.top + carry.rq.look.h;
 		dt_carry_looks(&r, 1, 0, 0);
@@ -1065,6 +1330,166 @@ LOCAL void carry_start( CONST T_DTREQ *rq, SZ anssz )
 LOCAL void carry_follow( INT px, INT py )
 {
 	carry_outline(px, py);
+}
+
+/* Why links do not go to another program's window, on the message line */
+LOCAL void carry_said_no( ER er )
+{
+	(void)wm_msg_put(( er == E_OACV ) ? "この実身を読む権利がないプログラムには渡せません"
+					  : "ここには置けません");
+}
+
+/*
+ * Let go over another program's window: told what is carried before the
+ * program goes on, so that the keys do not move for a drop that cannot be
+ * made. The links are dropped when the program asks them placed. into,
+ * when given, is the object the window shows, for a program that makes
+ * the objects there (DT_F_ASK). asked: the program said beforehand that
+ * it takes them there (carry_ask), so the carry stays a move unless the
+ * second button made it a copy; not asked, it may yet refuse them, and
+ * the asking program keeps its links (a copy).
+ */
+LOCAL void carry_to_prog( INT wid, INT px, INT py, CONST TS_UUID *into, BOOL asked )
+{
+	TS_UUID	none, win;
+	ER	er;
+
+	knl_memset(&none, 0, sizeof(none));
+	er = wm_obj_uuid(wid, &win);
+	if ( er >= E_OK ) {
+		er = wm_obj_drop_may(wid, carry.asker,
+				     ( ts_uuid_cmp(&carry.rq.target, &none) != 0 ) ? &carry.rq.target : NULL);
+	}
+	if ( er < E_OK ) {
+		carry_said_no(er);
+		carry_answer(( er == E_OACV ) ? E_OACV : E_NOEXS, NULL);
+		return;
+	}
+	if ( carry.rq.ask[0][0] != 0 ) {
+		DTWIN	*host = dt_host_of(&win);
+		BOOL	yes;
+
+		wm_obj_quiet(TRUE);	/* the keys that answer are the panel's, not the program's */
+		yes = (BOOL)( host != NULL
+			      && dt_confirm(host, (CONST char *)carry.rq.ask[0],
+					    ( carry.rq.ask[1][0] != 0 ) ? (CONST char *)carry.rq.ask[1] : NULL,
+					    "取消", ( carry.rq.yes[0] != 0 ) ? (CONST char *)carry.rq.yes : "実行") );
+		wm_obj_quiet(FALSE);
+		if ( !yes ) {
+			wm_update();
+			carry_answer(E_ABORT, NULL);
+			return;
+		}
+	}
+	carry.pending = TRUE;
+	carry.toprog = TRUE;
+	carry.seq = carry.rq.seq;
+	carry.wid = wid;
+	carry.into = win;
+	/* the outline's corner, as over a window of the desktop's: each link put at its place in it */
+	carry.sx = px - carry.rq.grab_x;
+	carry.sy = py - carry.rq.grab_y;
+	if ( !asked ) {
+		carry.copy = TRUE;	/* it may yet refuse: the link stays where it was */
+	}
+	carry_answer(E_OK, into);
+}
+
+/*
+ * Letters (DT_F_TEXT) let go over another program's window that takes
+ * letters (OB_E_TEXT): dropped on it as one line where the outline's
+ * corner is. asked: it said beforehand that it takes them there, and the
+ * carry stays a move unless the second button made it a copy; not asked,
+ * it may yet refuse them, and the asking program keeps its letters.
+ */
+LOCAL void carry_text_to_prog( INT wid, INT px, INT py, BOOL asked )
+{
+	INT	n;
+	ER	er;
+
+	carry.rq.text[DT_CARRY_TEXT - 1] = 0;
+	for ( n = 0; carry.rq.text[n] != 0; n++ ) ;
+	er = wm_obj_drop_text(wid, px - carry.rq.grab_x, py - carry.rq.grab_y, dt_up_mods,
+			      &carry.rq.win, carry.rq.text, n);
+	if ( er == E_NOSPT ) {
+		er = E_NOEXS;
+	}
+	carry.toprog = (BOOL)( er >= E_OK );
+	if ( !asked ) {
+		carry.copy = TRUE;	/* it may yet refuse: the letters stay where they were */
+	}
+	if ( er < E_OK ) {
+		(void)wm_msg_put("ここには置けません");
+	}
+	wm_update();
+	carry_answer(( er < E_OK ) ? E_NOEXS : E_OK, NULL);
+}
+
+/*
+ * The program over whose window what is carried was let go is asked
+ * first whether it would take it there, and the carry answered when it
+ * has said (carry_ask_poll): with DT_F_ASK, as the objects are only made
+ * then; for a move of links or letters, so that the asking program takes
+ * them away only once they are taken, as a window of the desktop's does
+ * (dt_drop_move). With DT_F_ASK, one that does not take the question is
+ * not asked and refuses; a move to one is offered them and they stay (a
+ * copy).
+ */
+LOCAL void carry_ask( INT wid, INT px, INT py )
+{
+	UINT	seq = 0;
+	BOOL	letters = (BOOL)( ( carry.rq.flags & DT_F_TEXT ) != 0 );
+	ER	er = letters ? wm_obj_ask_text(wid, px, py, dt_up_mods, &seq)
+			     : wm_obj_ask(wid, px, py, dt_up_mods, &seq);
+
+	tm_printf((UB *)"desktop: carry asks window %d at %d,%d%s: %d\n", wid, px, py,
+		  letters ? " of letters" : "", (INT)er);
+	if ( er == E_NOSPT && ( carry.rq.flags & DT_F_ASK ) == 0 ) {
+		if ( letters ) {
+			carry_text_to_prog(wid, px, py, FALSE);
+		} else {
+			carry_to_prog(wid, px, py, NULL, FALSE);
+		}
+		return;
+	}
+	if ( er < E_OK ) {
+		carry_said_no(E_NOEXS);
+		carry_answer(E_NOEXS, NULL);
+		return;
+	}
+	carry_asking.on = TRUE;
+	carry_asking.wid = wid;
+	carry_asking.px = px;
+	carry_asking.py = py;
+	carry_asking.seq = seq;
+	carry_asking.since = now_ms();
+}
+
+LOCAL void carry_ask_poll( void )
+{
+	TS_UUID	shown;
+	ER	er;
+
+	if ( !carry_asking.on ) {
+		return;
+	}
+	er = wm_obj_asked(carry_asking.wid, carry_asking.seq);
+	if ( er == E_TMOUT && (UW)( now_ms() - carry_asking.since ) < CARRY_ASK_MS ) {
+		return;
+	}
+	carry_asking.on = FALSE;
+	tm_printf((UB *)"desktop: carry asked window %d: %d\n", carry_asking.wid, (INT)er);
+	if ( er < E_OK || !wm_obj_shown(carry_asking.wid, &shown) ) {
+		carry_said_no(E_NOEXS);
+		carry_answer(E_NOEXS, NULL);
+		return;
+	}
+	if ( ( carry.rq.flags & DT_F_TEXT ) != 0 ) {
+		carry_text_to_prog(carry_asking.wid, carry_asking.px, carry_asking.py, TRUE);
+		return;
+	}
+	carry_to_prog(carry_asking.wid, carry_asking.px, carry_asking.py,
+		      ( ( carry.rq.flags & DT_F_ASK ) != 0 ) ? &shown : NULL, TRUE);
 }
 
 /* Let go: over a window that takes links, and when the question asked is answered yes */
@@ -1081,7 +1506,28 @@ LOCAL void carry_release( INT px, INT py )
 	}
 	t = dt_win_of(wm_at(px, py));
 	if ( t == NULL && wm_at(px, py) > 0 && wm_at(px, py) == wm_obj_wid(&carry.rq.win) ) {
-		carry_answer(E_NOEXS, NULL);	/* back over the program's own window: its own to do */
+		carry_back(px, py);		/* back over the program's own window: its own to do */
+		return;
+	}
+	if ( ( carry.rq.flags & ( DT_F_FRAG | DT_F_TEXT ) ) == DT_F_FRAG ) {
+		/* a picture or a figure out of a text: into a text or a figure of the desktop's */
+		T_TAD	*frag = carry_frag();
+		ER	er = E_NOEXS;
+
+		if ( frag != NULL && t != NULL && dd_editable(t) && !t->xml_view ) {
+			er = dd_frag_drop(t, px, py, frag);
+		} else if ( frag != NULL && t != NULL && t->fig != NULL ) {
+			er = dd_frag_into_fig(t, px, py, frag, carry.rq.look.w, carry.rq.look.h,
+					      carry.rq.grab_x, carry.rq.grab_y);
+		}
+		if ( frag != NULL ) tad_free(frag);
+		if ( er < E_OK ) {
+			(void)wm_msg_put("ここには置けません");
+		} else {
+			dt_drop_keys(t);
+		}
+		wm_update();
+		carry_answer(( er < E_OK ) ? E_NOEXS : E_OK, ( er < E_OK ) ? NULL : &t->id);
 		return;
 	}
 	if ( ( carry.rq.flags & DT_F_TEXT ) != 0 ) {
@@ -1091,22 +1537,45 @@ LOCAL void carry_release( INT px, INT py )
 
 		carry.rq.text[DT_CARRY_TEXT - 1] = 0;
 		for ( n = 0; carry.rq.text[n] != 0; n++ ) ;
-		if ( n > 0 && t != NULL && dd_editable(t) && !t->xml_view ) {
+		if ( n > 0 && t != NULL && dd_editable(t) && !t->xml_view
+		  && ( carry.rq.flags & DT_F_FRAG ) != 0 ) {
+			/* with their look, as from a text of the desktop's; else as the line */
+			T_TAD	*frag = carry_frag();
+
+			er = ( frag != NULL ) ? dd_frag_drop(t, cx, cy, frag) : E_NOEXS;
+			if ( frag != NULL ) tad_free(frag);
+			if ( er < E_OK ) {
+				er = dd_text_drop(t, cx, cy, carry.rq.text, n);
+			}
+		} else if ( n > 0 && t != NULL && dd_editable(t) && !t->xml_view ) {
 			er = dd_text_drop(t, cx, cy, carry.rq.text, n);
 		} else if ( n > 0 && t != NULL && df_is(t) ) {
 			/* a figure: as its text, in a piece of text there or a new one */
 			er = df_text_drop(t, cx, cy, carry.rq.text, n);
 		} else if ( n > 0 && t == NULL && wm_at(px, py) > 0 ) {
-			er = wm_obj_drop_text(wm_at(px, py), cx, cy, dt_up_mods, &carry.rq.win, carry.rq.text, n);
-			if ( er == E_NOSPT ) {
-				er = E_NOEXS;
+			/* another program's window: asked first for a move, offered for a copy */
+			if ( carry.copy ) {
+				carry_text_to_prog(wm_at(px, py), px, py, FALSE);
+			} else {
+				carry_ask(wm_at(px, py), px, py);
 			}
+			return;
 		}
 		if ( er < E_OK ) {
 			(void)wm_msg_put("ここには置けません");
+		} else if ( t != NULL ) {
+			dt_drop_keys(t);
 		}
 		wm_update();
 		carry_answer(( er < E_OK ) ? E_NOEXS : E_OK, NULL);
+		return;
+	}
+	if ( t == NULL && wm_at(px, py) > 0 && ( carry.rq.flags & DT_F_TO_PROG ) != 0 ) {
+		if ( ( carry.rq.flags & DT_F_ASK ) != 0 || !carry.copy ) {
+			carry_ask(wm_at(px, py), px, py);
+		} else {
+			carry_to_prog(wm_at(px, py), px, py, NULL, FALSE);
+		}
 		return;
 	}
 	if ( t == NULL || ( t->fig == NULL && t->doc == NULL ) || t->sealed || t->xml_view ) {
@@ -1122,8 +1591,9 @@ LOCAL void carry_release( INT px, INT py )
 		carry_answer(E_ABORT, NULL);
 		return;
 	}
-	wm_update();
+	dt_drop_keys(t);
 	carry.pending = TRUE;
+	carry.first = -1;
 	carry.seq = carry.rq.seq;
 	carry.wid = t->wid;
 	carry.into = t->id;
@@ -1132,50 +1602,189 @@ LOCAL void carry_release( INT px, INT py )
 	carry_answer(E_OK, &t->id);
 }
 
+/* 実身複製ドラッグ: the object copied, under a name asked for over t */
+LOCAL ER carry_duplicate( DTWIN *t, CONST TS_UUID *target, TS_UUID *copy )
+{
+	UB		start[WM_LABEL_MAX], name[WM_LABEL_MAX];
+	CONST char	*base = dt_base_name(target);
+	INT		k = 0, i;
+
+	if ( base != NULL ) {
+		for ( ; base[k] != 0 && k < WM_LABEL_MAX - 1; k++ ) start[k] = (UB)base[k];
+	} else if ( om_store_name(target, start, WM_LABEL_MAX - 16) > 0 ) {
+		while ( start[k] != 0 ) k++;
+		for ( i = 0; "のコピー"[i] != 0 && k < WM_LABEL_MAX - 1; i++ ) start[k++] = (UB)"のコピー"[i];
+	}
+	start[k] = 0;
+	if ( !dt_ask_name(t, "新しい実身の名称を入力してください", start, name, WM_LABEL_MAX) ) {
+		return E_ABORT;
+	}
+	if ( om_store_copy(target, name, TRUE, copy) < E_OK ) {
+		(void)wm_msg_put("実身を作れませんでした");
+		return E_IO;
+	}
+	if ( base != NULL ) {
+		(void)om_store_set_maker(copy);
+	}
+	return E_OK;
+}
+
+/* One link for the other program's window, among those it is to be dropped with */
+LOCAL ER carry_prog_link( CONST T_DTREQ *rq, TS_UUID *p_into )
+{
+	T_OBDROPV	*a, *e;
+	TS_UUID		target = rq->target;
+	UB		*name;
+	ER		er = wm_obj_drop_may(carry.wid, carry.asker, &target);
+
+	if ( er < E_OK ) {
+		return er;
+	}
+	if ( ( rq->flags & DT_F_DUPLICATE ) != 0 ) {
+		DTWIN	*host = dt_host_of(&carry.into);
+
+		if ( host == NULL ) {
+			return E_NOEXS;
+		}
+		wm_obj_quiet(TRUE);	/* the keys that answer are the panel's, not the program's */
+		er = carry_duplicate(host, &rq->target, &target);
+		wm_obj_quiet(FALSE);
+		if ( er < E_OK ) {
+			return er;
+		}
+		er = wm_obj_drop_may(carry.wid, carry.asker, &target);
+		if ( er < E_OK ) {
+			(void)ob_del_obj(&target);
+			return er;
+		}
+		if ( p_into != NULL ) {
+			*p_into = target;
+		}
+	}
+	a = (T_OBDROPV *)Kmalloc(sizeof(T_OBDROPV) * (SZ)( carry.nlink + 1 ));
+	name = (UB *)Kmalloc(TAD_NAME_MAX);
+	if ( a == NULL || name == NULL ) {
+		if ( a != NULL ) Kfree(a);
+		if ( name != NULL ) Kfree(name);
+		return E_NOMEM;
+	}
+	if ( carry.nlink > 0 ) {
+		knl_memcpy(a, carry.links, (INT)( sizeof(T_OBDROPV) * (SZ)carry.nlink ));
+		Kfree(carry.links);
+	}
+	carry.links = a;
+	e = &a[carry.nlink++];
+	knl_memset(e, 0, sizeof(*e));
+	e->target = target;
+	/* a link to a copy shows the copy's name, not the one the original's link had */
+	if ( rq->name[0] != 0 && ( rq->flags & DT_F_DUPLICATE ) == 0 ) {
+		name_cut(e->name, rq->name, OB_DROP_NAME);
+	} else if ( om_store_name(&target, name, TAD_NAME_MAX) >= 0 ) {
+		name_cut(e->name, name, OB_DROP_NAME);
+	}
+	Kfree(name);
+	e->left = rq->grab_x;
+	e->top = rq->grab_y;
+	e->right = rq->grab_x + rq->look.w;
+	e->bottom = rq->grab_y + rq->look.h;
+	e->frcol = rq->look.frcol;
+	e->chcol = rq->look.chcol;
+	e->tbcol = rq->look.tbcol;
+	e->bgcol = rq->look.bgcol;
+	e->chsz = rq->look.chsz;
+	e->disp = rq->look.disp;
+	if ( ( rq->flags & DT_F_DUPLICATE ) != 0 ) {
+		/* the copy is named anew: closed, its link is as wide as that name */
+		T_VOBJ	*c = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
+
+		if ( c != NULL ) {
+			c->target = target;
+			c->left = e->left;
+			c->top = e->top;
+			c->right = e->right;
+			c->bottom = e->bottom;
+			c->chsz = e->chsz;
+			c->disp = ( e->disp != 0 ) ? e->disp : TAD_D_DEFAULT;
+			ed_new_link_fit(c);
+			e->right = c->right;
+			e->bottom = c->bottom;
+			Kfree(c);
+		}
+	}
+	return E_OK;
+}
+
+/*
+ * The same over another program's window: the links gathered, and with
+ * the last all of them dropped, in the name of the process carrying.
+ */
+LOCAL ER carry_prog_place( CONST T_DTREQ *rq, BOOL more, TS_UUID *p_into )
+{
+	ER	er;
+
+	if ( wm_obj_wid(&carry.into) != carry.wid ) {
+		carry.pending = FALSE;
+		carry_links_free();
+		return E_NOEXS;			/* the window went while the program worked */
+	}
+	er = carry_prog_link(rq, p_into);
+	if ( er < E_OK && er != E_ABORT ) {
+		carry_said_no(er);
+	}
+	if ( !more && carry.nlink > 0 ) {
+		/* the window it says it came from is told only when it is the process's own */
+		INT	fw = wm_obj_wid(&carry.rq.win);
+		ER	de = wm_obj_drop_for(carry.wid, carry.sx, carry.sy, dt_up_mods,
+					     ( fw > 0 && wm_obj_maker(fw) == carry.asker ) ? &carry.rq.win : NULL,
+					     carry.asker, carry.links, carry.nlink);
+
+		if ( de < E_OK ) {
+			carry_said_no(de);
+			er = de;
+		}
+		carry_links_free();
+		wm_update();
+	}
+	return er;
+}
+
 /*
  * A link a carry ends with, put where it was let go (moved by grab_x,
  * grab_y from the outline's corner), looking as asked. With more, the
- * carry stays open for the next link of the same outline.
+ * carry stays open for the next link of the same outline. Only the
+ * process that began the carry ends it.
  */
-LOCAL ER carry_place( CONST T_DTREQ *rq, BOOL more, TS_UUID *p_into )
+LOCAL ER carry_place( CONST T_DTREQ *rq, BOOL more, TS_UUID *p_into, ID asker )
 {
 	DTWIN	*t;
 	T_VOBJ	v;
 
-	if ( !carry.pending || rq->carry != carry.seq ) {
+	if ( !carry.pending || rq->carry != carry.seq || asker != carry.asker ) {
 		return E_OBJ;
 	}
 	if ( !more ) {
 		carry.pending = FALSE;
 	}
+	if ( carry.toprog ) {
+		return carry_prog_place(rq, more, p_into);
+	}
 	t = dt_win_of(carry.wid);
 	if ( t == NULL || ts_uuid_cmp(&t->id, &carry.into) != 0 ) {
 		return E_NOEXS;			/* the window went while the program worked */
+	}
+	/* a link is a way to the object for whoever opens it: only one who may read it makes one */
+	if ( ( ( knl_ob_permit_on(&rq->target, knl_ob_crd_of(asker)) | knl_ob_granted(asker, &rq->target) ) & OB_OP_R ) != OB_OP_R ) {
+		(void)wm_msg_put("この実身を読む権利がないので、仮身を置けません");
+		return E_OACV;
 	}
 	knl_memset(&v, 0, sizeof(v));
 	v.target = rq->target;
 	if ( ( rq->flags & DT_F_DUPLICATE ) != 0 ) {
 		/* 実身複製ドラッグ: the link put is to a copy, named where it was let go */
-		UB		start[WM_LABEL_MAX], name[WM_LABEL_MAX];
-		CONST char	*base = dt_base_name(&rq->target);
-		INT		k = 0, i;
+		ER	er = carry_duplicate(t, &rq->target, &v.target);
 
-		if ( base != NULL ) {
-			for ( ; base[k] != 0 && k < WM_LABEL_MAX - 1; k++ ) start[k] = (UB)base[k];
-		} else if ( om_store_name(&rq->target, start, WM_LABEL_MAX - 16) > 0 ) {
-			while ( start[k] != 0 ) k++;
-			for ( i = 0; "のコピー"[i] != 0 && k < WM_LABEL_MAX - 1; i++ ) start[k++] = (UB)"のコピー"[i];
-		}
-		start[k] = 0;
-		if ( !dt_ask_name(t, "新しい実身の名称を入力してください", start, name, WM_LABEL_MAX) ) {
-			return E_ABORT;
-		}
-		if ( om_store_copy(&rq->target, name, TRUE, &v.target) < E_OK ) {
-			(void)wm_msg_put("実身を作れませんでした");
-			return E_IO;
-		}
-		if ( base != NULL ) {
-			(void)om_store_set_maker(&v.target);
+		if ( er < E_OK ) {
+			return er;
 		}
 		if ( p_into != NULL ) {
 			*p_into = v.target;
@@ -1192,11 +1801,297 @@ LOCAL ER carry_place( CONST T_DTREQ *rq, BOOL more, TS_UUID *p_into )
 	v.disp = ( rq->look.disp != 0 ) ? rq->look.disp : TAD_D_DEFAULT;
 	v.autoopen = (BOOL)( rq->look.autoopen != 0 );
 	v.zoom = 100;
-	if ( !ed_place_link(t, carry.sx + rq->grab_x, carry.sy + rq->grab_y, &v) ) {
+	if ( ( rq->flags & DT_F_DUPLICATE ) != 0 ) {
+		ed_new_link_fit(&v);	/* the copy is named anew: closed, as wide as that name */
+	}
+	if ( !ed_place_link_of(t, carry.sx + rq->grab_x, carry.sy + rq->grab_y, &v, &carry.first) ) {
 		return E_OBJ;
 	}
 	wm_update();
 	return E_OK;
+}
+
+/*
+ * Links of program windows that windows were opened from (DT_RQ_OPEN
+ * with DT_F_LINK): the record that holds such a link is the program's
+ * while it runs, so what a window opened from it writes into the link
+ * is sent to the program, on the channel it named, for it to put into
+ * its record itself. An entry stands until the program ends, or until
+ * the table is full and it is the oldest.
+ */
+#define PLINK_MAX	64
+
+typedef struct {
+	BOOL	used;
+	TS_UUID	parent;			/* the object whose record holds the link */
+	TS_UUID	vobjid;			/* the link there */
+	TS_UUID	target;			/* the object it points at, which was opened */
+	TS_UUID	chan;			/* where the program is told */
+	TS_UUID	proc;			/* the program's process */
+	UINT	seq;			/* of the request it was opened with */
+	UINT	age;
+} PLINK;
+
+LOCAL PLINK	plink[PLINK_MAX];
+LOCAL UINT	plink_age = 0;
+
+/* The link being opened now from a program's window, while DT_RQ_OPEN opens it */
+LOCAL BOOL	plink_opening = FALSE;
+LOCAL PLINK	plink_now;
+
+LOCAL void plink_put( CONST PLINK *e )
+{
+	INT	i, k = -1;
+
+	for ( i = 0; i < PLINK_MAX; i++ ) {
+		if ( plink[i].used && ts_uuid_cmp(&plink[i].parent, &e->parent) == 0
+		  && ts_uuid_cmp(&plink[i].vobjid, &e->vobjid) == 0 ) {
+			k = i;			/* the same link opened again: told as it asks now */
+			break;
+		}
+		if ( !plink[i].used && k < 0 ) {
+			k = i;
+		}
+	}
+	if ( k < 0 ) {
+		for ( k = 0, i = 1; i < PLINK_MAX; i++ ) {
+			if ( plink[i].age < plink[k].age ) k = i;
+		}
+	}
+	plink[k] = *e;
+	plink[k].used = TRUE;
+	plink[k].age = ++plink_age;
+}
+
+/* The entry of link vobjid of parent, pointing at target when it is given; NULL when the program has ended */
+LOCAL PLINK *plink_of( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UUID *target )
+{
+	INT	i;
+
+	for ( i = 0; i < PLINK_MAX; i++ ) {
+		PLINK	*e = &plink[i];
+
+		if ( !e->used || ts_uuid_cmp(&e->parent, parent) != 0 || ts_uuid_cmp(&e->vobjid, vobjid) != 0 ) {
+			continue;
+		}
+		if ( knl_prc_of_uuid(&e->proc) <= 0 ) {
+			e->used = FALSE;	/* it has ended, its record saved: written as the desktop's own */
+			return NULL;
+		}
+		return ( target == NULL || ts_uuid_cmp(&e->target, target) == 0 ) ? e : NULL;
+	}
+	return NULL;
+}
+
+/* What the window did to the link, sent to the program that holds it */
+LOCAL ER plink_tell( CONST PLINK *e, UINT how, CONST TS_UUID *into, CONST UB *text )
+{
+	T_DTANS	an;
+	SZ	asz = 0;
+	ID	k;
+	INT	i;
+	ER	er;
+
+	knl_memset(&an, 0, sizeof(an));
+	an.seq = e->seq;
+	an.er = E_OK;
+	an.how = how;
+	an.into = *into;
+	for ( i = 0; i < DT_TEXT_MAX - 1 && text[i] != 0; i++ ) {
+		an.text[i] = text[i];
+	}
+	k = ob_opn_obj(&e->chan, OB_OP_WRITE | OB_O_NOWAIT);
+	if ( k <= 0 ) {
+		return (ER)k;
+	}
+	er = ob_wri_rec(k, 0, 0, &an, sizeof(an), &asz);
+	(void)ob_cls_obj(k);
+	if ( er >= E_OK ) {
+		knl_ob_post(&e->chan, 0, OB_E_CHANGE, NULL);
+	}
+	return er;
+}
+
+/* A number put at the end of text, after a tab */
+LOCAL INT plink_num( UB *text, INT n, INT max, INT v )
+{
+	UB	d[12];
+	INT	k = 0;
+	UINT	u = ( v < 0 ) ? (UINT)-v : (UINT)v;
+
+	if ( n < max - 1 ) text[n++] = '\t';
+	if ( v < 0 && n < max - 1 ) text[n++] = '-';
+	do {
+		d[k++] = (UB)( '0' + u % 10 );
+		u /= 10;
+	} while ( u != 0 && k < (INT)sizeof(d) );
+	while ( k > 0 && n < max - 1 ) text[n++] = d[--k];
+	text[n] = 0;
+	return n;
+}
+
+/* The link named at the front of text: its record's object, a tab, its vobjid; the length */
+LOCAL INT plink_ids( UB *text, CONST PLINK *e )
+{
+	INT	n;
+
+	ts_uuid_text(&e->parent, (char *)text);
+	for ( n = 0; text[n] != 0; n++ ) ;
+	text[n++] = '\t';
+	ts_uuid_text(&e->vobjid, (char *)text + n);
+	for ( ; text[n] != 0; n++ ) ;
+	return n;
+}
+
+/*
+ * The view of a window opened from a program's link, sent to the
+ * program: TRUE when the link is such a one (*p_er what came of it),
+ * FALSE when it is the desktop's to write itself
+ */
+LOCAL BOOL plink_view( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UUID *target,
+		       INT sx, INT sy, CONST char *vm, INT wrap, INT zoom, ER *p_er )
+{
+	PLINK	*e = plink_of(parent, vobjid, NULL);
+	UB	text[DT_TEXT_MAX];
+	INT	n, i;
+
+	if ( e == NULL ) {
+		return FALSE;
+	}
+	if ( target != NULL && ts_uuid_cmp(&e->target, target) != 0 ) {
+		*p_er = E_NOEXS;	/* it does not point at what asks */
+		return TRUE;
+	}
+	n = plink_ids(text, e);
+	n = plink_num(text, n, DT_TEXT_MAX, sx);
+	n = plink_num(text, n, DT_TEXT_MAX, sy);
+	n = plink_num(text, n, DT_TEXT_MAX, zoom);
+	n = plink_num(text, n, DT_TEXT_MAX, wrap);
+	if ( n < DT_TEXT_MAX - 1 ) text[n++] = '\t';
+	for ( i = 0; vm != NULL && vm[i] != 0 && n < DT_TEXT_MAX - 1; i++ ) text[n++] = (UB)vm[i];
+	text[n] = 0;
+	*p_er = plink_tell(e, DT_HOW_LINK_VIEW, &e->target, text);
+	return TRUE;
+}
+
+EXPORT BOOL dt_plink_has( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UUID *target )
+{
+	return (BOOL)( plink_of(parent, vobjid, target) != NULL );
+}
+
+EXPORT ER dt_plink_add( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UUID *copy )
+{
+	PLINK	*e = plink_of(parent, vobjid, NULL);
+	UB	text[DT_TEXT_MAX];
+
+	if ( e == NULL ) {
+		return E_NOEXS;
+	}
+	(void)plink_ids(text, e);
+	return plink_tell(e, DT_HOW_LINK_ADD, copy, text);
+}
+
+EXPORT BOOL dt_plink_opening( CONST T_VOBJ *v, TS_UUID *p_parent )
+{
+	if ( !plink_opening || v == NULL || ts_uuid_cmp(&v->vobjid, &plink_now.vobjid) != 0 ) {
+		return FALSE;
+	}
+	*p_parent = plink_now.parent;
+	return TRUE;
+}
+
+/*
+ * DT_RQ_OPEN with DT_F_LINK: the link it is opened from, taken off the
+ * front of text, kept for what the window opened does to it. FALSE
+ * when text does not begin as it should.
+ */
+LOCAL BOOL plink_take( T_DTREQ *rq, ID asker, PLINK *e )
+{
+	INT	i, k, f = 0, at[3];
+
+	knl_memset(e, 0, sizeof(*e));
+	rq->text[DT_CARRY_TEXT - 1] = 0;
+	at[0] = 0;
+	for ( i = 0; rq->text[i] != 0 && rq->text[i] != '\n'; i++ ) {
+		if ( rq->text[i] == '\t' && f < 2 ) at[++f] = i + 1;
+	}
+	if ( rq->text[i] != '\n' || f != 2
+	  || ts_str_to_uuid((CONST char *)rq->text + at[0], &e->parent) < E_OK
+	  || ts_str_to_uuid((CONST char *)rq->text + at[1], &e->vobjid) < E_OK
+	  || ts_str_to_uuid((CONST char *)rq->text + at[2], &e->chan) < E_OK
+	  || knl_prc_uuid(asker, &e->proc, NULL) < E_OK ) {
+		return FALSE;
+	}
+	e->target = rq->target;
+	e->seq = rq->seq;
+	/* what follows the line, the applist, to the front */
+	for ( k = 0, i++; i < DT_CARRY_TEXT && rq->text[i] != 0; ) {
+		rq->text[k++] = rq->text[i++];
+	}
+	rq->text[k] = 0;
+	return TRUE;
+}
+
+/*
+ * DT_RQ_LET_GO: what a program carried within its window, let go outside
+ * it. Over a window of the desktop's that a figure's links are carried
+ * into, nothing goes there and nothing moves: that window takes the keys,
+ * as when links are carried there.
+ */
+LOCAL ER let_go_req( CONST T_DTREQ *rq, T_DTANS *an )
+{
+	DTWIN	*t = dt_win_of(wm_at(rq->grab_x, rq->grab_y));
+
+	if ( t == NULL || t->fig == NULL || t->sealed || t->xml_view ) {
+		return E_NOEXS;
+	}
+	dt_drop_keys(t);
+	an->into = t->id;
+	wm_update();
+	return E_OK;
+}
+
+/*
+ * DT_RQ_SAVE_NEW and DT_RQ_LINK_VIEW: what a program's window opened
+ * from a link of the desktop's does to that link. text names the link,
+ * the parent's UUID, a tab and its vobjid, and the link must point at
+ * rq->target, which the asking process must be able to read: a program
+ * acts only on the link to the object it was opened on.
+ */
+LOCAL ER link_req( CONST T_DTREQ *rq, T_DTANS *an, ID asker )
+{
+	TS_UUID	parent, vobjid;
+	UB	vm[TAD_VIEW_MAX];
+	INT	i;
+	ER	er;
+
+	if ( ts_str_to_uuid((CONST char *)rq->text, &parent) < E_OK ) {
+		return E_PAR;
+	}
+	for ( i = 0; i < DT_CARRY_TEXT - 1 && rq->text[i] != 0 && rq->text[i] != '\t'; i++ ) ;
+	if ( rq->text[i] != '\t' || ts_str_to_uuid((CONST char *)rq->text + i + 1, &vobjid) < E_OK ) {
+		return E_PAR;
+	}
+	if ( ( ( knl_ob_permit_on(&rq->target, knl_ob_crd_of(asker)) | knl_ob_granted(asker, &rq->target) )
+	       & OB_OP_R ) != OB_OP_R ) {
+		return E_OACV;
+	}
+	if ( rq->req == DT_RQ_SAVE_NEW ) {
+		DTWIN	*host = dt_host_of(&rq->win);
+
+		wm_obj_quiet(TRUE);		/* what answers the panel is its own, not the program's */
+		er = dt_save_new_of(host, &rq->target, &parent, &vobjid, &rq->target, &an->into);
+		wm_obj_quiet(FALSE);
+		return er;
+	}
+	for ( i = 0; i < TAD_VIEW_MAX - 1 && i < (INT)sizeof(rq->name) - 1 && rq->name[i] != 0; i++ ) {
+		vm[i] = rq->name[i];
+	}
+	vm[i] = 0;
+	return dt_link_view(&parent, &vobjid, &rq->target, rq->grab_x, rq->grab_y,
+			    ( vm[0] != 0 ) ? (CONST char *)vm : NULL,
+			    ( rq->look.h == TAD_WRAP_ON || rq->look.h == TAD_WRAP_OFF ) ? rq->look.h : TAD_WRAP_NONE,
+			    (INT)rq->look.w);
 }
 
 /*
@@ -1215,8 +2110,9 @@ LOCAL void process_requests( void )
 	T_DTANS		an;
 	T_VOBJ		v;
 	SZ		asz = 0;
-	INT		i, n;
+	INT		i, n, keys_were = 0;
 	SZ		anssz;
+	BOOL		quiet;
 
 	while ( dt_req > 0 && ob_rea_rec(dt_req, 0, 0, &rq, sizeof(rq), &asz) >= E_OK ) {
 		/*
@@ -1243,8 +2139,17 @@ LOCAL void process_requests( void )
 		 * for an object opened, whose answer is E_OK as a double
 		 * click's would be.
 		 */
+		quiet = FALSE;
 		if ( rq.req == DT_RQ_OPEN || rq.req == DT_RQ_TOOL ) {
+			ID	asker = knl_obchan_last_from(&dt_req_u);
+
 			dt_prog_reply(&rq.reply, rq.seq, anssz, (BOOL)( rq.req == DT_RQ_TOOL ));
+			/* a program without the keys is not being worked: what it asks for opens without them */
+			if ( asker > 0 && wm_obj_maker(wm_focused()) != asker ) {
+				quiet = TRUE;
+				dt_opens_quiet++;
+				keys_were = wm_focused();
+			}
 		}
 		if ( rq.req == DT_RQ_OPEN ) {
 			/*
@@ -1257,30 +2162,59 @@ LOCAL void process_requests( void )
 			v.target = rq.target;
 			v.recno = rq.recno;
 			v.frcol = v.chcol = v.tbcol = v.bgcol = TAD_COL_NONE;
+			/* opened from a link of the program's window: what is opened acts on that link */
+			if ( ( rq.flags & DT_F_LINK ) != 0
+			  && plink_take(&rq, knl_obchan_last_from(&dt_req_u), &plink_now) ) {
+				INT	i;
+
+				plink_put(&plink_now);
+				plink_opening = TRUE;
+				v.vobjid = plink_now.vobjid;
+				/* shown as the link says, as from a link of a window of the desktop's */
+				v.frcol = rq.look.frcol;
+				v.chcol = rq.look.chcol;
+				v.tbcol = rq.look.tbcol;
+				v.bgcol = rq.look.bgcol;
+				v.wordwrap = rq.grab_x;
+				for ( i = 0; i < TAD_VIEW_MAX - 1 && i < (INT)sizeof(rq.name) - 1 && rq.name[i] != 0; i++ ) {
+					v.viewmode[i] = rq.name[i];
+				}
+				v.viewmode[i] = 0;
+			}
 			dt_req_applist(&rq, &v);	/* the program a fixed link keeps to */
 			dt_open_vobj(NULL, &v);
+			plink_opening = FALSE;
 		} else if ( rq.req == DT_RQ_CARRY ) {
-			carry_start(&rq, anssz);	/* answered when the hand lets go */
+			carry_start(&rq, anssz, knl_obchan_last_from(&dt_req_u));	/* answered when the hand lets go */
 			continue;
 		} else if ( rq.req == DT_RQ_PLACE || rq.req == DT_RQ_PLACE_MORE ) {
-			an.er = carry_place(&rq, (BOOL)( rq.req == DT_RQ_PLACE_MORE ), &an.into);
+			an.er = carry_place(&rq, (BOOL)( rq.req == DT_RQ_PLACE_MORE ), &an.into,
+					    knl_obchan_last_from(&dt_req_u));
 		} else if ( rq.req >= DT_RQ_CLOSE && rq.req <= DT_RQ_FULL ) {
 			an.er = dt_proc_link_op(&rq, &an);	/* 仮身操作 and 実身操作 of a program's link */
+		} else if ( rq.req == DT_RQ_COLOUR ) {
+			an.er = dt_proc_link_op(&rq, &an);	/* a colour chosen for a program, over its window */
 		} else if ( rq.req == DT_RQ_APPS ) {
 			an.er = dt_apps_req(&rq, &an);		/* 実行's list for a program's link */
+		} else if ( rq.req == DT_RQ_LINK_STATE ) {
+			an.er = dt_link_state_req(&rq, &an);	/* how a program's link stands, for its menu */
+		} else if ( rq.req == DT_RQ_SAVE_NEW || rq.req == DT_RQ_LINK_VIEW ) {
+			an.er = link_req(&rq, &an, knl_obchan_last_from(&dt_req_u));	/* the link it was opened from */
+		} else if ( rq.req == DT_RQ_LET_GO ) {
+			an.er = let_go_req(&rq, &an);		/* shapes let go over another window: they stay */
 		} else if ( rq.req == DT_RQ_ADMIN ) {
 			an.er = dt_admin_req(&rq, knl_obchan_last_from(&dt_req_u));
 		} else if ( rq.req == DT_RQ_SYSUP ) {
 			/* the system updated from its package: the administrator asked at its beginning */
 			an.er = dt_sysup_req(&rq, &an, knl_obchan_last_from(&dt_req_u));
-		} else if ( ( rq.req == DT_RQ_INSTALL || rq.req == DT_RQ_REMOVE )
+		} else if ( rq.req == DT_RQ_REMOVE
 			 && !knl_ob_pid_admin(knl_obchan_last_from(&dt_req_u))
 			 && ( an.er = dt_admin_ask(knl_obchan_last_from(&dt_req_u),
-						   (CONST UB *)( ( rq.req == DT_RQ_INSTALL ) ? "プログラムの追加"
-										 : "プログラムの削除" ), &rq.win) ) < E_OK ) {
-			/* only an administrator adds or takes away programs: the password asked for */
+						   (CONST UB *)"プログラムの削除", &rq.win) ) < E_OK ) {
+			/* only an administrator takes away programs: the password asked for */
 		} else if ( rq.req == DT_RQ_INSTALL ) {
-			an.er = dt_pkg_install(&rq.target, (BOOL)( rq.recno == 1 ), &an.into, &an.how);
+			an.er = dt_pkg_install(&rq.target, (BOOL)( rq.recno == 1 ), knl_obchan_last_from(&dt_req_u),
+					       &rq.win, &an.into, &an.how);
 		} else if ( rq.req == DT_RQ_REMOVE ) {
 			an.er = dt_prog_remove(&rq.target);
 		} else if ( ( rq.req == DT_RQ_FONT_REG || rq.req == DT_RQ_FONT_SET || rq.req == DT_RQ_FONT_DEL )
@@ -1293,20 +2227,24 @@ LOCAL void process_requests( void )
 			an.er = dt_font_req(&rq, &an);		/* システム環境設定's 書体 */
 		} else if ( rq.req == DT_RQ_TOOL ) {
 			CONST DTPROG	**acc;
+			INT		kind;
 
 			rq.name[sizeof(rq.name) - 1] = 0;
-			/* every accessory, however many: room for as many as there are */
-			n = dt_prog_count(DT_PK_ACCESSORY);
-			acc = (CONST DTPROG **)Kmalloc(sizeof(DTPROG *) * (SZ)( ( n > 0 ) ? n : 1 ));
-			n = ( acc != NULL ) ? dt_prog_list(DT_PK_ACCESSORY, acc, n) : 0;
-			an.er = ( acc != NULL ) ? E_NOEXS : E_NOMEM;
-			for ( i = 0; i < n; i++ ) {
-				if ( knl_strcmp((CONST char *)acc[i]->name, (CONST char *)rq.name) == 0 ) {
-					an.er = dt_prog_run(NULL, acc[i], NULL);
-					break;
+			an.er = E_NOEXS;
+			/* every accessory, then every tool of the system's (屑実身操作 ...), however many */
+			for ( kind = DT_PK_ACCESSORY; kind <= DT_PK_UTILITY && an.er == E_NOEXS; kind++ ) {
+				n = dt_prog_count(kind);
+				acc = (CONST DTPROG **)Kmalloc(sizeof(DTPROG *) * (SZ)( ( n > 0 ) ? n : 1 ));
+				n = ( acc != NULL ) ? dt_prog_list(kind, acc, n) : 0;
+				if ( acc == NULL ) an.er = E_NOMEM;
+				for ( i = 0; i < n; i++ ) {
+					if ( knl_strcmp((CONST char *)acc[i]->name, (CONST char *)rq.name) == 0 ) {
+						an.er = dt_prog_run(NULL, acc[i], NULL);
+						break;
+					}
 				}
+				if ( acc != NULL ) Kfree((void *)acc);
 			}
-			if ( acc != NULL ) Kfree((void *)acc);
 		} else if ( rq.req == DT_RQ_TYPE ) {
 			an.er = dt_type_req(&rq, &an);	/* letters into the window the keys went to before */
 		} else if ( rq.req == DT_RQ_PRINT ) {
@@ -1320,6 +2258,10 @@ LOCAL void process_requests( void )
 			an.er = dt_rthost_req(&rq, &an, knl_obchan_last_from(&dt_req_u));
 		} else {
 			an.er = E_PAR;
+		}
+		if ( quiet ) {
+			dt_opens_quiet--;
+			if ( keys_were > 0 && wm_focused() != keys_were ) (void)wm_focus(keys_were);
 		}
 		wm_update();
 		if ( dt_prog_reply_taken() ) {
@@ -1450,17 +2392,23 @@ LOCAL INT win_open( CONST TS_UUID *id, INT recno, INT x, INT y, CONST UB *use )
 		app[0] = 0;
 	}
 	{
-		/* the 原紙箱 and the 小物箱 show what the program box holds */
+		/*
+		 * The 小物箱 shows what the program box holds. A 原紙箱 is
+		 * its own record, links to the templates it holds, which
+		 * the person adds to and takes from as in any box; what is
+		 * carried out of it is a new object made from the template.
+		 */
 		BOOL	box = app_is(app, "base-file-manager");
 		BOOL	acc = app_is(app, "accessory-box");
 
-		rec = box ? dt_prog_page(DT_PK_APP)
-		    : acc ? dt_prog_page(DT_PK_ACCESSORY) : om_store_get(id, recno);
+		rec = acc ? dt_prog_page(DT_PK_ACCESSORY) : om_store_get(id, recno);
 		if ( rec == NULL ) {
 			return E_NOEXS;
 		}
 		knl_memset(d, 0, sizeof(*d));
-		d->sealed = (BOOL)( box || acc );
+		d->sealed = acc;
+		d->accbox = acc;
+		d->basebox = box;
 	}
 	if ( om_store_name(id, name, TAD_NAME_MAX) < 0 ) {
 		name[0] = 0;
@@ -1469,6 +2417,8 @@ LOCAL INT win_open( CONST TS_UUID *id, INT recno, INT x, INT y, CONST UB *use )
 		o.left = x;  o.top = y;
 		o.right = x + 900;  o.bottom = y + 640;
 	}
+	tm_printf((UB *)"desktop: window of %s at %d,%d %dx%d\n", name, (INT)o.left, (INT)o.top,
+		  (INT)( o.right - o.left ), (INT)( o.bottom - o.top ));
 	/* kept on the screen: a window whose band is off it cannot be moved */
 	if ( o.left < 0 ) {
 		o.right -= o.left;
@@ -1684,7 +2634,6 @@ EXPORT void dt_own_ground( DTWIN *d )
 {
 	T_WMWIN		w;
 	T_DPRECT	all;
-	T_DPPAT		pat;
 	INT		gid = wm_gid(d->wid);
 
 	if ( gid < 0 || wm_ref(d->wid, &w) < E_OK ) {
@@ -1694,11 +2643,7 @@ EXPORT void dt_own_ground( DTWIN *d )
 	all.top = 0;
 	all.right = w.work.right - w.work.left;
 	all.bottom = w.work.bottom - w.work.top;
-	if ( wm_look_pat(LK_PNLGROUND, &pat) >= E_OK ) {
-		dp_fill_rect_pat(gid, &all, &pat);
-	} else {
-		dp_fill_rect(gid, &all, wm_look(WM_LOOK_WORK));
-	}
+	(void)wm_fill_look(gid, &all, LK_PNLGROUND);
 }
 
 EXPORT DTWIN *dt_own_next( CONST DTOWN *own, DTWIN *d )
@@ -1955,60 +2900,74 @@ LOCAL void str_put( UB *out, CONST char *s, INT max )
  * that link, so that the link opens the same way next time and shows
  * the same part when it is opened in place. The parent is saved when
  * it is not open; when it is, it is marked changed and saved with it.
+ * vm NULL, wrap TAD_WRAP_NONE and zoom 0 leave what the link says.
+ * E_NOEXS when the parent holds no such link, or it does not point at
+ * target (when target is given).
  */
-LOCAL void to_link( DTWIN *d )
+EXPORT ER dt_link_view( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UUID *target,
+			INT sx, INT sy, CONST char *vm, INT wrap, INT zoom )
 {
-	DTWIN	*p = dt_showing(&d->parent_id);
+	DTWIN	*p = dt_showing(parent);
 	T_TAD	*rec;
 	T_VOBJ	*v;
 	BOOL	changed = FALSE;
+	ER	er = E_OK;
 
+	/* the record is a program's while it runs: it is told, and writes it itself */
+	if ( plink_view(parent, vobjid, target, sx, sy, vm, wrap, zoom, &er) ) {
+		return ( er < E_OK ) ? er : E_OK;
+	}
 	if ( p != NULL && p->sealed ) {
-		return;
+		return E_OK;
 	}
-	rec = ( p != NULL ) ? p->rec : om_store_get(&d->parent_id, 0);
+	rec = ( p != NULL ) ? p->rec : om_store_get(parent, 0);
 	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
-	if ( rec == NULL || v == NULL || tad_lnk_find(rec, &d->parent_vobj, v) < E_OK ) {
+	if ( rec == NULL || v == NULL || tad_lnk_find(rec, vobjid, v) < E_OK
+	  || ( target != NULL && ts_uuid_cmp(&v->target, target) != 0 ) ) {
 		if ( v != NULL ) Kfree(v);
-		return;
+		return E_NOEXS;
 	}
-	if ( v->scrollx != d->scroll_x || v->scrolly != d->scroll_y ) {
-		v->scrollx = d->scroll_x;
-		v->scrolly = d->scroll_y;
+	if ( v->scrollx != sx || v->scrolly != sy ) {
+		v->scrollx = sx;
+		v->scrolly = sy;
 		changed = TRUE;
 	}
-	if ( d->kind == TV_KIND_DOC ) {
-		CONST char	*vm = d->xml_view ? "xml" : d->detail_view ? "detailed" : "formatted";
-		INT		wrap = d->nowrap ? TAD_WRAP_OFF : TAD_WRAP_ON;
-
-		if ( !str_is(v->viewmode, vm) ) {
-			str_put(v->viewmode, vm, TAD_VIEW_MAX);
-			changed = TRUE;
-		}
-		if ( v->wordwrap != wrap ) {
-			v->wordwrap = wrap;
-			changed = TRUE;
-		}
-	} else if ( d->figed ) {
-		INT	z = df_zoom() * 100 / 8;
-
-		if ( !str_is(v->viewmode, "canvas") ) {
-			str_put(v->viewmode, "canvas", TAD_VIEW_MAX);
-			changed = TRUE;
-		}
-		if ( z > 0 && v->zoom != z ) {
-			v->zoom = z;
-			changed = TRUE;
-		}
+	if ( vm != NULL && !str_is(v->viewmode, vm) ) {
+		str_put(v->viewmode, vm, TAD_VIEW_MAX);
+		changed = TRUE;
 	}
-	if ( changed && tad_lnk_set(rec, v) >= E_OK ) {
+	if ( wrap != TAD_WRAP_NONE && v->wordwrap != wrap ) {
+		v->wordwrap = wrap;
+		changed = TRUE;
+	}
+	if ( zoom > 0 && v->zoom != zoom ) {
+		v->zoom = zoom;
+		changed = TRUE;
+	}
+	if ( changed && ( er = tad_lnk_set(rec, v) ) >= E_OK ) {
 		if ( p != NULL ) {
 			p->dirty = TRUE;
 		} else {
-			(void)om_store_save(&d->parent_id, 0);
+			er = om_store_save(parent, 0);
 		}
 	}
 	Kfree(v);
+	return ( er < E_OK ) ? er : E_OK;
+}
+
+LOCAL void to_link( DTWIN *d )
+{
+	if ( d->kind == TV_KIND_DOC ) {
+		(void)dt_link_view(&d->parent_id, &d->parent_vobj, NULL, d->scroll_x, d->scroll_y,
+				   d->xml_view ? "xml" : d->detail_view ? "detailed" : "formatted",
+				   d->nowrap ? TAD_WRAP_OFF : TAD_WRAP_ON, 0);
+	} else if ( d->figed ) {
+		(void)dt_link_view(&d->parent_id, &d->parent_vobj, NULL, d->scroll_x, d->scroll_y,
+				   "canvas", TAD_WRAP_NONE, df_zoom() * 100 / 8);
+	} else {
+		(void)dt_link_view(&d->parent_id, &d->parent_vobj, NULL, d->scroll_x, d->scroll_y,
+				   NULL, TAD_WRAP_NONE, 0);
+	}
 }
 
 /*
@@ -2117,6 +3076,9 @@ LOCAL void win_close( DTWIN *d )
 		/* where it stood, so that it opens there next time */
 		if ( d->tool == DT_TOOL_NONE && wm_ref(d->wid, &w) >= E_OK ) {
 			om_store_set_window(&d->id, &w.outer);
+			tm_printf((UB *)"desktop: window of %s kept at %d,%d %dx%d\n", d->name,
+				  (INT)w.outer.left, (INT)w.outer.top, (INT)( w.outer.right - w.outer.left ),
+				  (INT)( w.outer.bottom - w.outer.top ));
 		}
 	}
 	df_text_end(d);
@@ -2188,6 +3150,31 @@ LOCAL DTWIN *win_showing( CONST T_VOBJ *v )
  * being opened: two windows onto one object are two things that can
  * disagree about it.
  */
+EXPORT INT	dt_opens_quiet;
+
+EXPORT void dt_drop_keys( DTWIN *t )
+{
+	if ( t != NULL && t->used ) {
+		wm_raise(t->wid);
+		(void)wm_focus(t->wid);
+		wm_update();
+	}
+}
+
+/* Whether a program opens the object: what 実行 of its menu would list */
+LOCAL BOOL app_any( CONST T_VOBJ *v )
+{
+	INT	room = dt_app_list(v, NULL, 0, NULL), n = 0;
+	DTAPP	*a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
+
+	if ( a == NULL ) {
+		return TRUE;
+	}
+	n = dt_app_list(v, a, room, NULL);
+	Kfree(a);
+	return (BOOL)( n > 0 );
+}
+
 EXPORT void dt_open_vobj( DTWIN *from, CONST T_VOBJ *v )
 {
 	DTWIN		*w = win_showing(v);
@@ -2220,15 +3207,36 @@ EXPORT void dt_open_vobj( DTWIN *from, CONST T_VOBJ *v )
 	/* an object a program that is a process opens: that process */
 	app[0] = 0;
 	if ( win_app == NULL && om_link_default_app(v, app, DT_PROG_ID) > 0 ) {
-		p = dt_prog_find(app);
+		p = prog_for_kind(dt_prog_find(app), v);
+#ifdef USE_UITEST
+		if ( dt_ut_as_kernel(p) ) {
+			p = NULL;		/* the desktop's own editor, below */
+		}
+#endif
 		if ( p != NULL && !p->builtin ) {
 			(void)dt_prog_run(from, p, v);
 			return;
 		}
+#ifdef USE_UITEST
+		if ( p != NULL && dt_ut_as_process(from, p, v) ) {
+			return;
+		}
+#endif
 	}
-	/* スライド: the document's links shown one at a time, in a window of its own */
+	/*
+	 * スライド: the document's links shown one at a time, in a window of
+	 * its own. The program is a process (application/slide), started
+	 * above; the desktop's own slides are shown only when the program
+	 * object says it is built in, as it did before it was a process.
+	 */
 	if ( app_is(( win_app != NULL ) ? win_app : app, "basic-slide") ) {
-		dt_slide_open(from, v);
+		CONST DTPROG	*sp = dt_prog_find((CONST UB *)"basic-slide");
+
+		if ( sp != NULL && !sp->builtin ) {
+			(void)dt_prog_run(from, sp, v);
+		} else {
+			dt_slide_open(from, v);
+		}
 		return;
 	}
 	/*
@@ -2258,6 +3266,15 @@ EXPORT void dt_open_vobj( DTWIN *from, CONST T_VOBJ *v )
 		return;
 	}
 	/*
+	 * Nothing to open it with, as 実行 of its menu shows: its records are
+	 * no text to be shown (a package, a file taken in), and the first
+	 * would be put in a window of the text editor as if it were.
+	 */
+	if ( win_app == NULL && app[0] == 0 && !app_any(v) ) {
+		(void)wm_msg_put("この実身を開くプログラムがありません");
+		return;
+	}
+	/*
 	 * A new window, stepped down and across from the last so that it
 	 * does not land exactly on the one it was opened from.
 	 */
@@ -2275,6 +3292,9 @@ EXPORT void dt_open_vobj( DTWIN *from, CONST T_VOBJ *v )
 		if ( w != NULL && from != NULL ) {
 			w->has_parent  = TRUE;
 			w->parent_id   = from->id;
+			w->parent_vobj = v->vobjid;
+		} else if ( w != NULL && dt_plink_opening(v, &w->parent_id) ) {
+			w->has_parent  = TRUE;	/* a link of a program's window: written through the program */
 			w->parent_vobj = v->vobjid;
 		}
 		from_link(w, v);
@@ -2302,7 +3322,8 @@ LOCAL INT	auto_depth;
 
 LOCAL void auto_open( DTWIN *d )
 {
-	INT	i, n;
+	INT	i, n, was;
+	BOOL	any = FALSE;
 	T_VOBJ	*v;
 
 	if ( d == NULL || d->rec == NULL || auto_depth >= AUTO_DEPTH ) {
@@ -2313,18 +3334,48 @@ LOCAL void auto_open( DTWIN *d )
 		return;
 	}
 	auto_depth++;
+	dt_opens_quiet++;
+	was = wm_focused();
 	n = tad_lnk_count(d->rec);
 	for ( i = 0; i < n; i++ ) {
 		if ( tad_lnk_get(d->rec, i, v) >= E_OK && v->autoopen
 		  && ( !v->hidden || d->show_hidden ) ) {
 			dt_open_vobj(d, v);
+			any = TRUE;
 		}
 	}
+	/* those came with it: what was opened, or what had the keys, keeps them and stays in sight */
+	if ( any && was > 0 && wm_focus(was) >= E_OK ) {
+		wm_raise(was);
+	}
+	dt_opens_quiet--;
 	auto_depth--;
 	Kfree(v);
 }
 
 /* The window showing an object, if one is */
+/* Every 小物箱 on the screen made again, each left scrolled as it was */
+EXPORT void dt_acc_boxes_remake( void )
+{
+	INT	i, sx, sy;
+	T_TAD	*rec;
+
+	for ( i = 0; i < DT_MAX_WIN; i++ ) {
+		DTWIN	*d = &dt_win[i];
+
+		if ( !d->used || !d->accbox || ( rec = dt_acc_page() ) == NULL ) {
+			continue;
+		}
+		sx = d->scroll_x;
+		sy = d->scroll_y;
+		dt_remade(d, rec);
+		d->scroll_x = sx;
+		d->scroll_y = sy;
+		dt_draw(d);
+	}
+	wm_update();
+}
+
 EXPORT DTWIN *dt_showing( CONST TS_UUID *id )
 {
 	INT	i;
@@ -2386,15 +3437,28 @@ EXPORT void dt_fullscreen( DTWIN *d )
  */
 EXPORT ER dt_open_as( DTWIN *from, CONST T_VOBJ *v, CONST UB *app )
 {
-	CONST DTPROG	*p = dt_prog_find(app);
+	CONST DTPROG	*p = prog_for_kind(dt_prog_find(app), v);
 
 	if ( app_is(app, "basic-print") ) {
 		dt_print_vobj(from, v);		/* 基本印刷: printed without being opened */
 		return E_OK;
 	}
+#ifdef USE_UITEST
+	if ( dt_ut_as_kernel(p) ) {
+		win_app = app;
+		dt_open_vobj(from, v);
+		win_app = NULL;
+		return E_OK;
+	}
+#endif
 	if ( p != NULL && ( !p->builtin || p->kind != DT_PK_APP ) ) {
 		return dt_prog_run(from, p, v);
 	}
+#ifdef USE_UITEST
+	if ( p != NULL && dt_ut_as_process(from, p, v) ) {
+		return E_OK;
+	}
+#endif
 	win_app = app;
 	dt_open_vobj(from, v);
 	win_app = NULL;
@@ -2513,8 +3577,8 @@ LOCAL ER doc_menu( DTWIN *d, ID *p_mid )
 	st.show_hidden = d->show_hidden;
 	st.paper_frame = d->paper_frame;
 	st.is_root   = (BOOL)!d->has_parent;
-	st.has_pick  = (BOOL)( d->npick > 0 || d->cpara != d->apara
-				  || d->cpos != d->apos );
+	st.has_pick  = (BOOL)( d->npick > 0 || d->dd.cpara != d->dd.apara
+				  || d->dd.cpos != d->dd.apos );
 	st.nrecent   = dd_recent_faces(st.recent, DM_RECENT_MAX);
 	st.can_paste = (BOOL)( dt_tray_kind(NULL) != DT_TRAY_NONE );
 	st.vertical  = (BOOL)( d->doc != NULL && d->doc->vert );
@@ -2596,6 +3660,31 @@ LOCAL void win_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 	wm_update();
 }
 
+/*
+ * The link that is taken, in *v: in a figure, of the links taken the
+ * one taken first; in a document, the link the selection is alone.
+ * FALSE when no link is taken.
+ */
+LOCAL BOOL picked_link( DTWIN *d, T_VOBJ *v )
+{
+	INT	i, best = -1;
+
+	if ( d->doc != NULL ) {
+		return dd_link_picked(d, v);
+	}
+	if ( d->fig == NULL || d->npick == 0 ) {
+		return FALSE;
+	}
+	for ( i = 0; i < d->fig->nsh && i < d->maxpick; i++ ) {
+		if ( d->pick[i] != 0 && d->fig->sh[i].kind == TV_SH_LINK && d->fig->sh[i].link >= 0
+		  && ( best < 0 || d->pick[i] < d->pick[best] ) ) {
+			best = i;
+		}
+	}
+
+	return (BOOL)( best >= 0 && ed_link_at(d, best, v) );
+}
+
 LOCAL void menu_at( DTWIN *d, INT x, INT y, UD when )
 {
 	T_DPRECT	page, box;
@@ -2639,6 +3728,14 @@ LOCAL void menu_at( DTWIN *d, INT x, INT y, UD when )
 		er = d->own->link_at(d, x, y, &v) ? E_OK : E_NOEXS;
 	}
 no_object:
+	/*
+	 * Away from a link, the menu is about the link that is taken:
+	 * 実行 lists its programs and 仮身操作 and 実身操作 act on it,
+	 * wherever the menu was opened
+	 */
+	if ( er < E_OK && picked_link(d, &v) ) {
+		er = E_OK;
+	}
 	on = (BOOL)( er >= E_OK );
 	if ( win_menu(d, on, &v, &mid) < E_OK ) {
 		return;
@@ -3443,6 +4540,9 @@ LOCAL void press( DTWIN *d, CONST T_WMEV *ev )
 		return;
 	}
 	/* the page: taking, carrying, sizing, opening; in a text, the caret */
+#ifdef USE_UITEST
+	if ( df_is(d) || ut_cabinet(d) ) dt_fig_input_at = ev->when;
+#endif
 	if ( !ed_press(d, ev->x, ev->y, (BOOL)( ( ev->mods & MOD_SHIFT ) != 0 ),
 		       ev->when) ) {
 		if ( dd_editable(d) ) {
@@ -3474,7 +4574,7 @@ LOCAL void obj_press( CONST T_WMEV *ev )
 	UINT	bar = 0, which = 0;
 
 	if ( ev->wid <= 0 || wm_ref(ev->wid, &w) < E_OK
-	  || ( w.attr & WM_ATTR_POPUP ) != 0 || ( ( w.attr & WM_ATTR_TITLE ) == 0 && w.parent <= 0 ) ) {
+	  || ( w.attr & WM_ATTR_POPUP ) != 0 || ( ( w.attr & WM_ATTR_OWN ) == 0 && w.parent <= 0 ) ) {
 		return;				/* a menu, a panel: not a window of its own */
 	}
 	wm_raise(ev->wid);
@@ -3586,7 +4686,31 @@ LOCAL void key( DTWIN *d, CONST T_WMEV *ev )
 		}
 		return;
 	}
+#ifdef USE_UITEST
+	UD	ut_in = 0;
+
+	(void)ts_get_mono(&ut_in);
+#endif
 	if ( dd_editable(d) && dd_key(d, ev->code, ev->mods) ) {
+#ifdef USE_UITEST
+		/*
+		 * the tests compare it with the text editor running as a process
+		 * (ui_doc_proc_perf): the screen built here, as the loop would
+		 * build it next, for the time to be to the screen as the
+		 * process's is; with when the key came to the desktop and how
+		 * long the editor took
+		 */
+		if ( d->doc != NULL ) {
+			UD	t = 0, t2 = 0;
+
+			(void)ts_get_mono(&t);
+			wm_update();
+			(void)ts_get_mono(&t2);
+			tm_printf((UB *)"desktop: document key to screen %d us came %d us edited %d us built %d us\n",
+				  (INT)( ( t2 - ev->when ) / 1000 ), (INT)( ( ut_in - ev->when ) / 1000 ),
+				  (INT)( ( t - ut_in ) / 1000 ), (INT)( ( t2 - t ) / 1000 ));
+		}
+#endif
 		return;				/* typed into the text */
 	}
 	if ( df_tool_key(d, ev->code) ) {
@@ -3639,21 +4763,24 @@ LOCAL void name_cut( UB *out, CONST UB *s, INT max )
 
 EXPORT BOOL dt_drop_links( DTWIN *d, INT sx, INT sy, CONST T_VOBJ *v, INT n )
 {
+	return dt_drop_links_at(d, sx, sy, sx, sy, v, n);
+}
+
+/* The links v of window d (NULL: none) dropped on window wid, the outline's corner at ax, ay */
+LOCAL ER drop_give( DTWIN *d, INT wid, INT ax, INT ay, UINT mods, CONST T_VOBJ *v, INT n )
+{
 	T_OBDROPV	*dv;
 	TS_UUID		from;
 	UB		*name;
-	INT		wid = wm_at(sx, sy), i;
+	INT		i;
 	ER		er;
 
-	if ( wid <= 0 || dt_win_of(wid) != NULL || n <= 0 ) {
-		return FALSE;			/* the ground, or a window of the desktop's */
-	}
 	dv = (T_OBDROPV *)Kmalloc(sizeof(T_OBDROPV) * (SZ)n);
 	name = (UB *)Kmalloc(TAD_NAME_MAX);
 	if ( dv == NULL || name == NULL ) {
 		if ( dv != NULL ) Kfree(dv);
 		if ( name != NULL ) Kfree(name);
-		return FALSE;
+		return E_NOMEM;
 	}
 	knl_memset(dv, 0, sizeof(T_OBDROPV) * (SZ)n);
 	for ( i = 0; i < n; i++ ) {
@@ -3684,13 +4811,105 @@ EXPORT BOOL dt_drop_links( DTWIN *d, INT sx, INT sy, CONST T_VOBJ *v, INT n )
 	if ( d != NULL ) {
 		(void)wm_obj_uuid(d->wid, &from);
 	}
-	er = wm_obj_drop(wid, sx, sy, dt_up_mods, &from, dv, n);
+	er = wm_obj_drop(wid, ax, ay, mods, &from, dv, n);
 	Kfree(dv);
 	Kfree(name);
+	return er;
+}
+
+EXPORT BOOL dt_drop_links_at( DTWIN *d, INT sx, INT sy, INT ax, INT ay, CONST T_VOBJ *v, INT n )
+{
+	INT	wid = wm_at(sx, sy);
+	ER	er;
+
+	if ( wid <= 0 || dt_win_of(wid) != NULL || n <= 0 ) {
+		return FALSE;			/* the ground, or a window of the desktop's */
+	}
+	er = drop_give(d, wid, ax, ay, dt_up_mods, v, n);
+	if ( er == E_NOMEM ) {
+		return FALSE;
+	}
 	if ( er < E_OK ) {
 		(void)wm_msg_put("このウインドウには置けません");
 	}
 	return TRUE;			/* over another's window, nothing here moves */
+}
+
+/* A move of links out of a window of the desktop's, waiting for the program to say it takes them */
+LOCAL struct {
+	BOOL	on;
+	INT	wid, ax, ay, n;
+	UINT	seq, mods;
+	UW	since;
+	TS_UUID	from;			/* the object of the window they leave, to find it again */
+	T_VOBJ	*v;
+	void	(*gone)( DTWIN *d, CONST T_VOBJ *v, INT n );
+} drop_asking;
+
+EXPORT BOOL dt_drop_move( DTWIN *d, INT sx, INT sy, INT ax, INT ay, CONST T_VOBJ *v, INT n,
+			  void (*gone)( DTWIN *d, CONST T_VOBJ *v, INT n ) )
+{
+	INT	wid = wm_at(sx, sy);
+	UINT	seq = 0;
+	ER	er;
+
+	if ( wid <= 0 || dt_win_of(wid) != NULL || n <= 0 ) {
+		return FALSE;			/* the ground, or a window of the desktop's */
+	}
+	if ( gone == NULL || d == NULL || drop_asking.on ) {
+		return dt_drop_links_at(d, sx, sy, ax, ay, v, n);	/* a copy: offered, and they stay */
+	}
+	er = wm_obj_ask(wid, sx, sy, dt_up_mods, &seq);
+	tm_printf((UB *)"desktop: drop asks window %d at %d,%d: %d\n", wid, sx, sy, (INT)er);
+	if ( er < E_OK ) {
+		return dt_drop_links_at(d, sx, sy, ax, ay, v, n);	/* one not asked is offered them, and they stay */
+	}
+	drop_asking.v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ) * (SZ)n);
+	if ( drop_asking.v == NULL ) {
+		return dt_drop_links_at(d, sx, sy, ax, ay, v, n);
+	}
+	knl_memcpy(drop_asking.v, v, sizeof(T_VOBJ) * (SZ)n);
+	drop_asking.on = TRUE;
+	drop_asking.wid = wid;
+	drop_asking.ax = ax;
+	drop_asking.ay = ay;
+	drop_asking.n = n;
+	drop_asking.seq = seq;
+	drop_asking.mods = dt_up_mods;
+	drop_asking.since = now_ms();
+	drop_asking.from = d->id;
+	drop_asking.gone = gone;
+	return TRUE;
+}
+
+/* The answer to the question of dt_drop_move: dropped and taken out of the window when it was yes */
+EXPORT void dt_drop_move_poll( void )
+{
+	DTWIN	*d;
+	ER	er;
+
+	if ( !drop_asking.on ) {
+		return;
+	}
+	er = wm_obj_asked(drop_asking.wid, drop_asking.seq);
+	if ( er == E_TMOUT && (UW)( now_ms() - drop_asking.since ) < CARRY_ASK_MS ) {
+		return;
+	}
+	drop_asking.on = FALSE;
+	d = dt_showing(&drop_asking.from);
+	if ( er >= E_OK ) {
+		er = drop_give(d, drop_asking.wid, drop_asking.ax, drop_asking.ay, drop_asking.mods,
+			       drop_asking.v, drop_asking.n);
+	}
+	tm_printf((UB *)"desktop: drop asked window %d: %d\n", drop_asking.wid, (INT)er);
+	if ( er >= E_OK && d != NULL ) {
+		drop_asking.gone(d, drop_asking.v, drop_asking.n);
+	} else if ( er < E_OK ) {
+		(void)wm_msg_put("このウインドウには置けません");
+	}
+	Kfree(drop_asking.v);
+	drop_asking.v = NULL;
+	wm_update();
 }
 
 /* A step of the start begun: said, and its time kept for the watch */
@@ -3765,6 +4984,195 @@ LOCAL void dt_watch( UW ms )
 	} else {
 		held_told = FALSE;
 	}
+}
+
+/*
+ * The machine going off or starting again: the programs' windows are asked to
+ * close, as their close boxes ask, and they are given time to keep what they
+ * hold. A program may ask the person whether to save, so the input goes on being
+ * read here. When a program still has its window after DT_BLOCK_MS, a panel names
+ * those that do and offers 取消, which goes back to the session with nothing
+ * lost, and 強制的に終了, which goes on without them. It goes away by itself
+ * when the last of them has closed. With no answer in DT_ASK_MS the machine is
+ * not turned off: what is not saved is not lost for want of someone there, and
+ * the session goes on. A program with no window left cannot hold the machine: it
+ * has until DT_END_MS to finish what it keeps. Then every process left is told to
+ * end and after that ended by force (knl_prc_end_all).
+ */
+#define DT_BLOCK_MS	5000		/* a window still there: its program is named */
+#define DT_END_MS	20000		/* for a program whose window has gone to finish */
+#define DT_ASK_MS	180000		/* the panel with no answer: the going off is given up */
+#define DT_TERM_MS	10000		/* for the processes told to end */
+#define DT_OFF_MS	90000		/* for a step of going off, before the machine goes off regardless */
+#define DT_STUCK_MS	60000		/* the desktop's task not coming round: what it should do is done without it */
+#define DT_BLOCK_LINES	6		/* programs named on the panel */
+
+LOCAL volatile UW	dt_end_alive = 0;	/* when programs_end last came round */
+LOCAL BOOL		dt_ended_all = FALSE;	/* knl_prc_end_all has been done */
+LOCAL INT		dt_off_pid = -1;	/* the panel naming the programs */
+LOCAL UINT		dt_off_ans = WM_ANS_NONE;
+
+LOCAL void programs_tick( void )
+{
+	T_WMEV	ev;
+	ER	er;
+
+	dt_end_alive = now_ms();
+	knl_wdog_alive();
+	close_requests();
+	process_requests();
+	dt_uitest_poll();
+	/* input for a program's window goes to it from inside this, a question of its own included */
+	er = wm_read_event(&ev, 50);
+	if ( er == E_NOEXS ) {
+		tk_dly_tsk(50);
+	} else if ( er >= E_OK && dt_off_pid >= 0 && ev.type != HID_EV_KEY_DOWN && ev.type != HID_EV_KEY_UP ) {
+		if ( wm_panel_event(dt_off_pid, &ev, &dt_off_ans) >= E_OK ) {
+			wm_update();
+		}
+	}
+}
+
+/* The panel over the first window, naming those of pids[n] that have a window: how many there are */
+LOCAL INT off_panel( CONST ID *pids, INT n )
+{
+	T_WMPANEL	*def;
+	T_WMPART	*pt;
+	DTWIN		*d = dt_win_of(dt_first_wid);
+	char		name[64], more[64];
+	INT		i, k = 0, w = 480, h, nblock = 0;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( wm_obj_program_window(pids[i]) > 0 ) nblock++;
+	}
+	h = 24 * ( ( nblock < DT_BLOCK_LINES ? nblock : DT_BLOCK_LINES + 1 ) + 2 ) + 56;
+	def = ( d != NULL ) ? dt_pn_new(w, h) : NULL;
+	if ( def == NULL ) {
+		return -1;
+	}
+	def->kind = WM_PNL_WARN;
+	dt_pn_add(def, WM_PT_LABEL, 0, 14, 10, w - 28, 22, "次のプログラムがまだ終わっていません。");
+	for ( i = 0; i < n; i++ ) {
+		INT	wid = wm_obj_program_window(pids[i]);
+
+		if ( wid <= 0 ) continue;
+		name[0] = 0;
+		(void)wm_title(wid, name, sizeof(name));
+		if ( name[0] == 0 ) (void)knl_prc_name(pids[i], (UB *)name, sizeof(name));
+		tm_printf((UB *)"shutdown: pid %d %s has not closed\n", (INT)pids[i], name);
+		if ( k < DT_BLOCK_LINES ) {
+			dt_pn_add(def, WM_PT_LABEL, 0, 30, 34 + k * 24, w - 44, 22, name);
+		} else if ( k == DT_BLOCK_LINES ) {
+			tm_sprintf((UB *)more, (UB *)"ほか%d個", nblock - DT_BLOCK_LINES);
+			dt_pn_add(def, WM_PT_LABEL, 0, 30, 34 + k * 24, w - 44, 22, more);
+		}
+		k++;
+	}
+	dt_pn_add(def, WM_PT_LABEL, 0, 14, h - 62, w - 28, 22, "強制的に終了すると、保存していない内容は失われます。");
+	pt = dt_pn_add(def, WM_PT_BUTTON | P_EMPHAS, DT_PN_CANCEL, w - 262, h - 36, 94, 26, "取消");
+	if ( pt != NULL ) pt->answer = WM_ANS_CANCEL;
+	pt = dt_pn_add(def, WM_PT_BUTTON, DT_PN_OK, w - 158, h - 36, 144, 26, "強制的に終了");
+	if ( pt != NULL ) pt->answer = WM_ANS_OK;
+	dt_off_ans = WM_ANS_NONE;
+	dt_off_pid = wm_panel_open_centre(d->wid, def);
+	Kfree(def);
+	if ( dt_off_pid < 0 ) {
+		return -1;
+	}
+	wm_panel_draw(dt_off_pid);
+	wm_update();
+	return nblock;
+}
+
+/* The panel taken away */
+LOCAL void off_panel_done( void )
+{
+	if ( dt_off_pid >= 0 ) {
+		dt_pn_done(dt_win_of(dt_first_wid), dt_off_pid);
+		dt_off_pid = -1;
+	}
+}
+
+/* Whether the machine goes on going off: FALSE when the session is to go on */
+LOCAL BOOL programs_end( void )
+{
+	ID	*pids = NULL;
+	INT	max, n, i, left = 0, shown = 0;
+	UW	t0 = now_ms(), panel_at = 0;
+	BOOL	forced = FALSE, cancel = FALSE;
+
+	max = knl_prc_list_all(&pids);
+	n = ( pids != NULL ) ? wm_obj_close_programs(pids, max) : 0;
+	wm_update();
+	for ( ;; ) {
+		UW	now = now_ms();
+		INT	block = 0;
+
+		left = 0;
+		for ( i = 0; i < n; i++ ) {
+			T_PRCINFO	pi;
+
+			if ( knl_prc_info(pids[i], &pi) >= E_OK && !pi.done ) {
+				left++;
+				if ( wm_obj_program_window(pids[i]) > 0 ) block++;
+			}
+		}
+		knl_off_limit(DT_OFF_MS, dt_restart ? -1 : 0);
+		if ( left == 0 ) {
+			break;
+		}
+		if ( block == 0 && dt_off_pid >= 0 ) {
+			off_panel_done();	/* the last of them closed: the person need not answer */
+			shown = 0;
+		} else if ( block > 0 && (UW)( now - t0 ) >= DT_BLOCK_MS && ( dt_off_pid < 0 || block != shown ) ) {
+			off_panel_done();
+			if ( panel_at == 0 ) panel_at = now;
+			shown = off_panel(pids, n);
+			if ( shown < 0 ) {
+				tm_printf((UB *)"shutdown: no panel to ask with: the going off is given up\n");
+				cancel = TRUE;
+				break;
+			}
+		}
+		if ( dt_off_pid >= 0 && dt_off_ans == WM_ANS_OK ) {
+			tm_printf((UB *)"shutdown: the person chose to end them by force\n");
+			forced = TRUE;
+			break;
+		}
+		if ( dt_off_pid >= 0 && dt_off_ans != WM_ANS_NONE ) {
+			tm_printf((UB *)"shutdown: the person cancelled the going off\n");
+			cancel = TRUE;
+			break;
+		}
+		if ( panel_at != 0 && block > 0 && (UW)( now - panel_at ) >= DT_ASK_MS ) {
+			tm_printf((UB *)"shutdown: no answer in %d ms: the going off is given up\n", DT_ASK_MS);
+			cancel = TRUE;
+			break;
+		}
+		if ( block == 0 && (UW)( now - t0 ) >= DT_END_MS ) {
+			break;
+		}
+		programs_tick();
+		wm_update();
+	}
+	off_panel_done();
+	if ( pids != NULL ) Kfree(pids);
+	if ( cancel ) {
+		knl_off_limit(0, 0);
+		(void)wm_msg_put("OSの終了を取り消しました。");
+		(void)wm_msg_show(TRUE);
+		wm_update();
+		return FALSE;
+	}
+	tm_printf((UB *)"TessronOS desktop: %d programs asked to end, %d not ended, after %d ms%s\n",
+		  n, left, (INT)( now_ms() - t0 ), forced ? " (by force)" : "");
+
+	knl_off_limit(DT_OFF_MS, dt_restart ? -1 : 0);
+	(void)knl_prc_end_all(forced ? 1000 : DT_TERM_MS, programs_tick);
+	dt_ended_all = TRUE;
+	dt_end_alive = now_ms();
+	knl_off_limit(DT_OFF_MS, dt_restart ? -1 : 0);
+	return TRUE;
 }
 
 LOCAL void desktop_run( void )
@@ -3854,6 +5262,7 @@ LOCAL void desktop_run( void )
 	dt_sysup_resume(dt_win_of(dt_first_wid));	/* a system update the last start did not end */
 	dt_begin("the loop");
 
+    the_session:
 	while ( !dt_stop ) {
 		DTWIN	*d;
 		INT	px = 0, py = 0;
@@ -3886,6 +5295,8 @@ LOCAL void desktop_run( void )
 		dt_fix_poll();			/* ディスク修復: the check followed */
 		dt_disk_poll();			/* disks attached, taken away, taken out, come back */
 		dt_type_poll();			/* where the keys went, for DT_RQ_TYPE */
+		carry_ask_poll();		/* a program asked whether it takes what was carried */
+		dt_drop_move_poll();		/* and whether it takes what a window of the desktop's carried */
 		if ( wm_layout_serial() != dt_layout ) {
 			/* the frames were measured again: every window's page with them */
 			INT	i;
@@ -3913,6 +5324,13 @@ LOCAL void desktop_run( void )
 		}
 		if ( ev.type == HID_EV_KEY_DOWN || ev.type == HID_EV_BTN_DOWN ) {
 			dt_last_input = now_ms();
+		}
+		if ( ev.code == 0 && ( ev.type == HID_EV_BTN_DOWN || ev.type == HID_EV_BTN_UP ) ) {
+			/* where the first button went up, for a carry asked after it (carry_start) */
+			UINT	b = 0;
+
+			dt_up_seen = (BOOL)( ev.type == HID_EV_BTN_UP
+					     && ts_hid_pointer(&dt_up_x, &dt_up_y, &b) >= E_OK );
 		}
 		if ( ev.type == HID_EV_BTN_DOWN || ev.type == HID_EV_KEY_DOWN ) {
 			/* what was just done shows at once, and for a whole turn */
@@ -3943,6 +5361,11 @@ LOCAL void desktop_run( void )
 			if ( ts_hid_pointer(&px, &py, &btn) < E_OK ) {
 				break;
 			}
+#ifdef USE_UITEST
+			drag_t0 = 0;
+			drag_timed = (BOOL)( !carry.on && ( ed_holding() || df_drawing_now() ) );
+			(void)ts_get_mono(&drag_t0);
+#endif
 			if ( carry.on ) {
 				carry_follow(px, py);
 			} else if ( ed_holding() ) {
@@ -4016,6 +5439,11 @@ LOCAL void desktop_run( void )
 					wm_update();
 				}
 			}
+#ifdef USE_UITEST
+			if ( drag_timed ) {
+				drag_moved(drag_t0, ev.when);
+			}
+#endif
 			if ( dt_own_held != 0 ) {
 				(void)own_give(dt_own_held, &ev);	/* the button went down in a part's window */
 			} else if ( d != NULL && d->own != NULL && dt_move_wid == 0 ) {
@@ -4034,9 +5462,15 @@ LOCAL void desktop_run( void )
 			break;
 
 		case HID_EV_BTN_UP:
+#ifdef USE_UITEST
+			if ( ev.code == 0 ) {
+				drag_said();
+			}
+#endif
 			if ( carry.on ) {
 				/* a link carried out of a program's window, let go */
 				if ( ev.code == 0 && ts_hid_pointer(&px, &py, &btn) >= E_OK ) {
+					dt_up_mods = ev.mods;
 					carry_release(px, py);
 				}
 				break;
@@ -4123,19 +5557,15 @@ LOCAL void desktop_run( void )
 			if ( df_panel_press(&ev) ) {
 				break;
 			}
-			if ( ev.code == 1 && dd_sel_carrying() ) {
-				dd_sel_copy();		/* letters carried over any window: a copy */
+			if ( ev.code == 1 && ( ed_holding() || dd_link_carrying() || dd_sel_carrying() ) ) {
+				/* 複写ドラッグ, over any window: what is carried goes as a copy */
+				ed_hold_copy();
+				dd_link_copy();
+				dd_sel_copy();
 				break;
 			}
 			if ( d == NULL ) {
 				obj_press(&ev);		/* a program's own window */
-				break;
-			}
-			if ( ev.code == 1 && ( ed_holding() || dd_link_carrying() || dd_sel_carrying() ) ) {
-				/* 複写ドラッグ: what is carried goes as a copy */
-				ed_hold_copy();
-				dd_link_copy();
-				dd_sel_copy();
 				break;
 			}
 			wm_raise(d->wid);
@@ -4172,6 +5602,13 @@ LOCAL void desktop_run( void )
 		default:
 			break;
 		}
+	}
+	if ( dt_poweroff && !programs_end() ) {
+		dt_poweroff = FALSE;
+		dt_restart = FALSE;
+		dt_stop_at = 0;
+		dt_stop = FALSE;	/* last: usermain goes back to watching on seeing this */
+		goto the_session;
 	}
 	dt_fault_close_all();
 	for ( i = 0; i < DT_MAX_WIN; i++ ) {
@@ -4334,32 +5771,53 @@ EXPORT INT ts_desktop( void )
 	 * has stopped (lockup.c), and is reset after the time set.
 	 */
 	t0 = now_ms();
+    the_watch:
 	while ( !dt_stop ) {
 		knl_wdog_kick();
 		tk_dly_tsk(1000);
 		dt_watch(now_ms() - t0);
 	}
+	/* a person may still cancel the going off: the session then goes on, and this with it */
+	if ( dt_poweroff ) {
+		dt_end_alive = now_ms();
+		knl_off_limit(DT_OFF_MS, dt_restart ? -1 : 0);
+		while ( dt_stop && dt_tskid > 0 && (UW)( now_ms() - dt_end_alive ) < DT_STUCK_MS ) {
+			knl_wdog_kick();
+			tk_dly_tsk(100);
+		}
+		if ( !dt_stop ) {
+			goto the_watch;
+		}
+	}
 	knl_wdog_kick_stop();			/* what follows takes as long as it takes */
 	t0 = ( dt_stop_at != 0 ) ? dt_stop_at : now_ms();
 	/*
 	 * Turned off from the desktop: its windows are saved and closed by
-	 * its own task on the way out, which is waited for, and what the
-	 * file systems still hold is written before usermain returns and the
-	 * machine powers off.
+	 * its own task on the way out, which is waited for, and which also
+	 * sees every process end. Only after that are the file systems
+	 * written out, each told on the console, with nothing left to write
+	 * after them. A task that stops coming round is not waited for, and
+	 * its part is done here. What could not be written is told on the
+	 * message line too; the volumes are put away as the kernel goes down
+	 * (knl_fs_finish).
 	 */
 	if ( dt_poweroff ) {
-		INT	i;
-
-		for ( i = 0; i < 100 && dt_tskid > 0; i++ ) {
-			tk_dly_tsk(100);
-		}
 		if ( dt_tskid > 0 ) {
-			knl_lockup_tell_task(dt_tskid, "TessronOS desktop: its task has not ended in 10 s:");
+			knl_lockup_tell_task(dt_tskid, "TessronOS desktop: its task is not coming round:");
 		} else {
 			tm_printf((UB *)"TessronOS desktop: its task ended %d ms after the session was asked to end\n",
 				  (INT)( now_ms() - t0 ));
 		}
-		(void)fs_sync();
+		if ( !dt_ended_all ) {
+			(void)knl_prc_end_all(DT_TERM_MS, NULL);
+		}
+		knl_off_limit(DT_OFF_MS, dt_restart ? -1 : 0);
+		if ( knl_fs_sync_report() > 0 ) {
+			(void)wm_msg_put("書き込めなかったボリュームがあります。内容を確認してください。");
+			(void)wm_msg_show(TRUE);
+			(void)wm_composite();
+			tk_dly_tsk(3000);
+		}
 		tm_printf((UB *)( dt_restart ? "TessronOS desktop: starting the machine again\n"
 					     : "TessronOS desktop: turning the machine off\n" ));
 	}

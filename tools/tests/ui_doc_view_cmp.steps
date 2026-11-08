@@ -1,0 +1,147 @@
+# 基本文章編集の表示のメニュー: the desktop's own and the process show the same page in each
+# view (design 11.3), for tools/ui_run.py. A copy of 基本文章編集 with 30 paragraphs (mkbig
+# doc 30) with the caret in its second paragraph, shown 詳細, 原稿 and 清書 again by the
+# items of 表示 in the menu opened at 300,250; the shots (doc_view_k_*, doc_view_p_*) are
+# compared afterwards inside the window, where the text is (101,125 to 682,482). Saved after,
+# record 0 of both is the same as it was. The menu opens with the item chosen last on the
+# pointer's row (表示 60 below 閉じる); 表示's own opens with its first row (原稿) on 表示's row,
+# 詳細 20 and 清書 40 below. While the desktop's menu is open the desktop answers no sync.
+# Before each shot the caret is put again where it is (300,170 in 詳細, the head of the
+# text at 111,135 in 原稿 and 清書): the caret's turn to blink is counted again from that
+# press in both, so that both show it (the desktop counts it from the press that opened
+# the menu, the process from the press that chose the item).
+# Keys: Ctrl+S 16 01, Ctrl+E 08 01.
+docproc kernel
+mkbig doc 30
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+click 300 170
+sync 600
+click 300 250 1
+wait 400
+wait 400
+move 330 310
+wait 300
+move 440 310
+wait 400
+move 440 330
+wait 300
+click 440 330
+sync 600
+click 300 170
+sync 600
+move 690 490
+sync 600
+shot doc_view_k_detail
+click 300 250 1
+wait 400
+wait 400
+move 330 250
+wait 300
+move 440 250
+wait 400
+move 440 250
+wait 300
+click 440 250
+sync 600
+click 111 135
+sync 600
+move 690 490
+sync 600
+shot doc_view_k_xml
+click 300 250 1
+wait 400
+wait 400
+move 330 250
+wait 300
+move 440 250
+wait 400
+move 440 290
+wait 300
+click 440 290
+sync 600
+click 111 135
+sync 600
+move 690 490
+sync 600
+shot doc_view_k_clean
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig doc 30
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 800
+logmark
+click 300 170
+expectsince document: drew
+logmark
+click 300 250 1
+expectsince document: menu
+wait 400
+move 330 250
+wait 300
+move 440 250
+wait 400
+move 440 270
+wait 300
+click 440 270
+expectsince document: command view.detail
+expectsince document: drew
+logmark
+click 300 170
+expectsince document: drew
+move 690 490
+wait 300
+shot doc_view_p_detail
+logmark
+click 300 250 1
+expectsince document: menu
+wait 400
+move 330 250
+wait 300
+move 440 250
+wait 400
+move 440 250
+wait 300
+click 440 250
+expectsince document: command view.xml
+expectsince document: drew
+logmark
+click 111 135
+expectsince document: drew
+move 690 490
+wait 300
+shot doc_view_p_xml
+logmark
+click 300 250 1
+expectsince document: menu
+wait 400
+move 330 250
+wait 300
+move 440 250
+wait 400
+move 440 290
+wait 300
+click 440 290
+expectsince document: command view.clean
+expectsince document: drew
+logmark
+click 111 135
+expectsince document: drew
+move 690 490
+wait 300
+shot doc_view_p_clean
+key 16 01
+wait 500
+sum show
+same kernel
+key 08 01
+expect document: closed

@@ -466,6 +466,53 @@ EXPORT UD knl_igt_ggtt_pte( UD off )
 	return *pte_at(off);
 }
 
+/*
+ * Over S3: the table lives in stolen memory, which keeps its contents in
+ * self-refresh unless the firmware's resume touches it. The entries of
+ * every range in use are copied before and compared after, and written
+ * back where they differ; how many did is said.
+ */
+LOCAL UD	*gt_pm_copy = NULL;
+LOCAL UD	gt_pm_n = 0;
+
+EXPORT void knl_igt_ggtt_pm_save( void )
+{
+	INT	i;
+	UD	k, n = 0;
+
+	if ( gt_state != 2 ) return;
+	for ( i = 0; i < gt_nrng; i++ ) n += gt_rng[i].size >> 12;
+	if ( gt_pm_copy != NULL ) Kfree(gt_pm_copy);
+	gt_pm_copy = (UD *)Kmalloc((SZ)( n * sizeof(UD) ));
+	gt_pm_n = 0;
+	if ( gt_pm_copy == NULL ) return;
+	for ( i = 0; i < gt_nrng; i++ ) {
+		for ( k = 0; k < gt_rng[i].size >> 12; k++ ) {
+			gt_pm_copy[gt_pm_n++] = *pte_at(gt_rng[i].off + ( k << 12 ));
+		}
+	}
+}
+
+EXPORT void knl_igt_ggtt_pm_restore( void )
+{
+	INT	i;
+	UD	k, n = 0, diff = 0;
+
+	if ( gt_state != 2 || gt_pm_copy == NULL ) return;
+	for ( i = 0; i < gt_nrng; i++ ) {
+		for ( k = 0; k < gt_rng[i].size >> 12 && n < gt_pm_n; k++, n++ ) {
+			volatile UD	*p = pte_at(gt_rng[i].off + ( k << 12 ));
+
+			if ( *p != gt_pm_copy[n] ) {
+				*p = gt_pm_copy[n];
+				diff++;
+			}
+		}
+	}
+	flush();
+	tm_printf((UB *)"igt: GGTT after the sleep: %ld of %ld entries had changed and were written back\n", diff, n);
+}
+
 #if USE_KTEST
 /*
  * For the tests on a machine without the device: a table over memory

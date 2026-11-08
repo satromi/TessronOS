@@ -1,0 +1,170 @@
+# 基本図形編集のキャンバスと画材を、デスクトップの図形編集とプロセスの図形編集で同じに使う
+# (design 11.3, 17.13), for tools/ui_run.py. A figure of one rectangle and two zigzag lines
+# (mkbig fig 1 2 0) opened at 100,100; its 道具パネル at the top of the screen (100,0), the
+# first row's middles at y 48, 34 apart from x 128 (キャンバス 264,48; 選択 298,48). With the
+# canvas a box is dragged out from 300,250 to 420,330 and painted in at once: a stroke of the
+# pencil. The canvas button, while it paints, brings up the 画材 palette under it: 絵筆
+# (460,95), 10px (575,211) and red (460,181) chosen, Escape. A stroke of the brush, then
+# 絵の具 (520,120) poured at 410,320. Escape ends the painting and writes the picture.
+# Pressed twice with the pointer in hand, the picture is painted on again: 消しゴム (580,95)
+# drawn across it; a press outside ends it. Saved: record 0 (its UUIDs as noughts, the
+# picture's name holding the object's) and the picture beside it come out the same, byte for
+# byte, and the screens at each step are kept to be compared. The strokes run straight across:
+# the desktop takes the moves of a drag as they come, several at once when it is busy (as a
+# hand's are), and a stroke joins the places it was given, so a slanting one would come out a
+# pixel apart from run to run on the desktop itself.
+# Keys: Esc 29; Ctrl+S 16 01, Ctrl+E 08 01.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 1 2 0
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+click 264 48
+wait 300
+drag 300 250 420 330
+wait 500
+drag 320 270 400 270
+wait 400
+shot cvc_k_paint
+click 264 48
+wait 600
+shot cvc_k_pal
+click 460 95
+wait 300
+click 575 211
+wait 300
+click 460 181
+wait 300
+key 29
+wait 400
+drag 310 300 410 300
+wait 400
+click 264 48
+wait 600
+click 520 120
+wait 300
+key 29
+wait 400
+click 410 320
+wait 400
+shot cvc_k_pour
+key 29
+wait 400
+shot cvc_k_left
+click 298 48
+wait 300
+dclick 330 320
+wait 600
+click 264 48
+wait 600
+click 580 95
+wait 300
+key 29
+wait 400
+drag 305 290 415 290
+wait 400
+shot cvc_k_erase
+click 700 500
+wait 400
+shot cvc_k_done
+sync 600
+key 16 01
+sync 600
+sum anon
+keep kernel
+sum res _0_1.png
+keep kernelpic
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 2 0
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 3
+wait 800
+logmark
+click 264 48
+expectsince figure: tool 1
+drag 300 250 420 330
+expectsince figure: drawn
+wait 300
+logmark
+drag 320 270 400 270
+expectsince figure: painted
+wait 300
+shot cvc_p_paint
+logmark
+click 264 48
+expectsince figure: palette 4 open
+wait 600
+shot cvc_p_pal
+click 460 95
+wait 300
+click 575 211
+wait 300
+click 460 181
+wait 300
+logmark
+key 29
+expectsince figure: palette 4 closed
+wait 300
+logmark
+drag 310 300 410 300
+expectsince figure: painted
+logmark
+click 264 48
+expectsince figure: palette 4 open
+wait 600
+click 520 120
+wait 300
+logmark
+key 29
+expectsince figure: palette 4 closed
+logmark
+click 410 320
+expectsince figure: painted
+wait 300
+shot cvc_p_pour
+logmark
+key 29
+expectsince figure: picture written
+expectsince figure: canvas left
+wait 300
+shot cvc_p_left
+logmark
+click 298 48
+expectsince figure: tool 0
+logmark
+dclick 330 320
+expectsince figure: canvas taken
+wait 300
+logmark
+click 264 48
+expectsince figure: palette 4 open
+wait 600
+click 580 95
+wait 300
+logmark
+key 29
+expectsince figure: palette 4 closed
+logmark
+drag 305 290 415 290
+expectsince figure: painted
+wait 300
+shot cvc_p_erase
+logmark
+click 700 500
+expectsince figure: picture written
+wait 300
+shot cvc_p_done
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum anon
+same kernel
+sum res _0_1.png
+same kernelpic
+key 08 01
+expect figure: closed

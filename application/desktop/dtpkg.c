@@ -35,9 +35,13 @@
  *	written R1.000: R, a number of any length, a point and three digits,
  *	and compares as the number times a thousand and the digits.
  *
- *	Deleting takes a program out of the box and deletes its object, its
- *	templates and what only its record 0 linked to. The programs the
- *	desktop carries in itself (builtin) are not deleted.
+ *	Deleting takes a program out of the box and gives up the holds on what
+ *	it brought, so that what nothing refers to any more is a 屑実身:
+ *	屑実身操作 deletes it for good or brings it back, and a link to the
+ *	program brought back and dropped on the list registers it again. The
+ *	programs the desktop carries in itself (builtin) are neither replaced
+ *	nor deleted; every other one, the system's programs that run as
+ *	processes among them, a package replaces and the person deletes.
  */
 
 #include <sys/machine.h>
@@ -340,7 +344,24 @@ LOCAL BOOL among( CONST TS_UUID *u, CONST TS_UUID *set, INT n )
 	return FALSE;
 }
 
-EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT *p_how )
+/*
+ * Only an administrator adds a program. The password is asked for once the
+ * version is known to go ahead, so that an install refused as not newer and
+ * asked again with force asks only once.
+ */
+EXPORT ER dt_pkg_admin( ID pid, CONST TS_UUID *win )
+{
+	if ( knl_ob_pid_admin(pid) ) {
+		return E_OK;
+	}
+	return dt_admin_ask(pid, (CONST UB *)"プログラムの追加", win);
+}
+
+LOCAL ER prog_adopt( CONST TS_UUID *u, CONST DTPROG *q, BOOL force, ID pid, CONST TS_UUID *win,
+		     TS_UUID *p_prog, UINT *p_how );
+
+EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, ID pid, CONST TS_UUID *win,
+			  TS_UUID *p_prog, UINT *p_how )
 {
 	PKGENT		*e = NULL;
 	UB		*raw, id[DT_PROG_ID], ver[DT_VER_MAX], us[TS_UUID_STRLEN + 1];
@@ -359,10 +380,24 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT 
 	if ( pkg == NULL ) {
 		return E_PAR;
 	}
+	{
+		/* a program object itself, as 屑実身操作 brought it back */
+		DTPROG	*q = (DTPROG *)Kmalloc(sizeof(DTPROG));
+
+		if ( q == NULL ) {
+			return E_NOMEM;
+		}
+		if ( dt_prog_read(pkg, q) ) {
+			er = prog_adopt(pkg, q, force, pid, win, p_prog, p_how);
+			Kfree(q);
+			return er;
+		}
+		Kfree(q);
+	}
 	raw = om_obj_record(pkg, 1, &size);
 	if ( raw == NULL ) {
 		/* no file of its own: the directory of a TADjs plugin, as ファイル変換 made it */
-		return dt_plugin_install(pkg, force, p_prog, p_how);
+		return dt_plugin_install(pkg, force, pid, win, p_prog, p_how);
 	}
 	/* every file the package holds, as many as its head says (16 bits of them) */
 	n = pkg_count(raw, size);
@@ -425,6 +460,10 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT 
 		nwas = brought(&old, have, &was);
 		nwbase = have->nbase;
 	}
+	er = dt_pkg_admin(pid, win);
+	if ( er < E_OK ) {
+		goto done;
+	}
 
 	dt_sys_prt(&prt);
 	prt.attr = 0;				/* what is installed can be deleted */
@@ -464,8 +503,17 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT 
 			(void)del_object(&old);
 		}
 	}
+	if ( er >= E_OK && had && dt_base_box(&box) ) {
+		/* the templates of the version replaced that this one does not bring */
+		for ( k = 0; k < nwbase && k < nwas; k++ ) {
+			if ( !among(&was[k], obj, nobj) ) {
+				(void)om_obj_link_del(&box, &was[k]);
+			}
+		}
+	}
 	dt_prog_reread();
 	if ( er >= E_OK ) {
+		dt_base_box_put(&prog, TRUE);	/* after the holds: the templates are not kept by these links */
 		if ( p_prog != NULL ) *p_prog = prog;
 		if ( p_how != NULL ) *p_how = had ? DT_PKG_UPDATED : DT_PKG_NEW;
 		tm_printf((UB *)"TessronOS desktop: %s %s %s\n", id, ver, had ? "updated" : "installed");
@@ -480,7 +528,143 @@ done:
 
 /* ---------------------------------------------------------------- deleting */
 
+/* What the program's metadata calls its own resources ("res"), in a table of their own: how many */
+LOCAL INT prog_res( CONST TS_UUID *prog, TS_UUID **p_out )
+{
+	T_JSON	root, tf, g, list, it;
+	UB	*meta, us[TS_UUID_STRLEN + 1];
+	SZ	size = 0;
+	INT	n = 0, room = 0;
+	TS_UUID	*out = NULL;
+
+	*p_out = NULL;
+	meta = om_obj_meta(prog, &size);
+	if ( meta == NULL ) {
+		return 0;
+	}
+	if ( js_parse(meta, (INT)size, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
+	  && js_get(&tf, "program", &g) >= E_OK && js_get(&g, "res", &list) >= E_OK ) {
+		for ( it.s = NULL; js_next(&list, &it); ) room++;
+		out = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( room + 1 ));
+		for ( it.s = NULL; out != NULL && n < room && js_next(&list, &it); ) {
+			if ( js_str(&it, us, sizeof(us)) == TS_UUID_STRLEN
+			  && ts_str_to_uuid((CONST char *)us, &out[n]) >= E_OK ) {
+				n++;
+			}
+		}
+	}
+	Kfree(meta);
+	*p_out = out;
+	return n;
+}
+
+/* Whether a program of the box other than this one names the object as its template or resource */
+LOCAL BOOL used_by_other( CONST TS_UUID *u, CONST TS_UUID *self )
+{
+	CONST DTPROG	*o;
+	TS_UUID		*res;
+	INT		i, n;
+	BOOL		used = FALSE;
+
+	for ( i = 0; !used && ( o = dt_prog_at(i) ) != NULL; i++ ) {
+		if ( o->builtin || ts_uuid_cmp(&o->uuid, self) == 0 ) continue;
+		used = among(u, o->base, o->nbase);
+		n = prog_res(&o->uuid, &res);
+		used = (BOOL)( used || among(u, res, n) );
+		if ( res != NULL ) Kfree(res);
+	}
+	return used;
+}
+
+/* What keeps an object from being deleted taken off, so that 屑実身操作 can */
+LOCAL void perm_off( CONST TS_UUID *u )
+{
+	T_OBPRT	*prt = knl_ob_prt_get(u);
+
+	if ( prt != NULL && ( prt->attr & OB_A_PERM ) != 0 ) {
+		prt->attr &= ~OB_A_PERM;
+		(void)ob_set_prt(u, prt);
+	}
+	if ( prt != NULL ) Kfree(prt);
+}
+
+/*
+ * The holds on what the program brought, given up or taken again. Its
+ * templates and resources are held because nothing links to them; what
+ * its record 0 links to is kept by that link, and goes when the program
+ * is deleted for good.
+ */
+LOCAL void release_brought( CONST TS_UUID *prog, CONST DTPROG *p, BOOL release )
+{
+	TS_UUID	*was, *res;
+	INT	nwas = brought(prog, p, &was), nres = prog_res(prog, &res), i;
+	INT	nb = p->nbase;
+
+	for ( i = 0; i < nwas + nres; i++ ) {
+		CONST TS_UUID	*u = ( i < nwas ) ? &was[i] : &res[i - nwas];
+		INT		refs;
+		BOOL		linked = (BOOL)( i >= nb && i < nwas );
+
+		if ( !linked && i >= nwas && among(u, was, nwas) ) {
+			continue;		/* a resource already seen as a template or a link */
+		}
+		refs = om_store_refs(u);
+		if ( refs < 0 ) {
+			continue;
+		}
+		if ( !release ) {
+			if ( refs == 0 && !linked ) (void)ob_lnk_obj(u);
+			continue;
+		}
+		if ( used_by_other(u, prog) ) {
+			continue;
+		}
+		if ( !linked && refs == 1 ) {
+			(void)ob_unl_obj(u);
+			refs = 0;
+		}
+		if ( refs <= 1 ) {
+			perm_off(u);
+		}
+	}
+	if ( was != NULL ) Kfree(was);
+	if ( res != NULL ) Kfree(res);
+}
+
+/*
+ * The person's 削除: out of the box, and what it comes to is a 屑実身.
+ * Nothing is deleted here. An accessory's line leaves 小物の設定.
+ */
 EXPORT ER dt_prog_remove( CONST TS_UUID *prog )
+{
+	CONST DTPROG	*p = dt_prog_of(prog);
+	TS_UUID		box;
+	ER		er;
+
+	if ( p == NULL ) {
+		return E_NOEXS;
+	}
+	if ( p->builtin ) {
+		return E_PAR;
+	}
+	perm_off(prog);
+	er = ( ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &box) >= E_OK ) ? om_obj_link_del(&box, prog) : E_SYS;
+	if ( er >= E_OK ) {
+		dt_base_box_put(prog, FALSE);	/* before the holds are counted */
+		release_brought(prog, p, TRUE);
+	}
+	dt_prog_reread();
+	dt_acc_sync();
+	dt_tool_refresh(DT_TOOL_TRASH);
+	return er;
+}
+
+/*
+ * A version replaced by another under a new UUID: it is not the person's
+ * to bring back, so it goes for good with its templates and what only
+ * its record 0 linked to.
+ */
+EXPORT ER dt_prog_drop( CONST TS_UUID *prog )
 {
 	CONST DTPROG	*p = dt_prog_of(prog);
 	TS_UUID		box, *was;
@@ -495,6 +679,7 @@ EXPORT ER dt_prog_remove( CONST TS_UUID *prog )
 	}
 	nbase = p->nbase;
 	nwas = brought(prog, p, &was);
+	dt_base_box_put(prog, FALSE);
 	er = ( ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &box) >= E_OK ) ? om_obj_link_del(&box, prog) : E_SYS;
 	if ( er >= E_OK ) {
 		er = del_object(prog);
@@ -508,4 +693,46 @@ EXPORT ER dt_prog_remove( CONST TS_UUID *prog )
 	if ( was != NULL ) Kfree(was);
 	dt_prog_reread();
 	return er;
+}
+
+/*
+ * A program object dropped on the list, as 屑実身操作 brought it back:
+ * registered again as it is. By the same object, it is there already
+ * (E_LIMIT, nothing to do when asked to go ahead); a different program
+ * has its id: refused, as it holds a version of its own.
+ */
+LOCAL ER prog_adopt( CONST TS_UUID *u, CONST DTPROG *q, BOOL force, ID pid, CONST TS_UUID *win,
+		     TS_UUID *p_prog, UINT *p_how )
+{
+	CONST DTPROG	*have = dt_prog_find(q->id);
+	TS_UUID		box;
+	ER		er;
+
+	if ( q->builtin ) {
+		return E_PAR;
+	}
+	if ( have != NULL ) {
+		if ( p_prog != NULL ) *p_prog = have->uuid;
+		if ( have->builtin ) return E_PAR;
+		if ( !force ) return E_LIMIT;
+		if ( ts_uuid_cmp(&have->uuid, u) != 0 ) return E_OBJ;
+		if ( p_how != NULL ) *p_how = DT_PKG_UPDATED;
+		return E_OK;
+	}
+	er = dt_pkg_admin(pid, win);
+	if ( er < E_OK ) {
+		return er;
+	}
+	er = ( ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &box) >= E_OK ) ? om_obj_link_add(&box, u) : E_SYS;
+	if ( er < E_OK ) {
+		return er;
+	}
+	release_brought(u, q, FALSE);
+	dt_base_box_put(u, TRUE);
+	dt_prog_reread();
+	dt_tool_refresh(DT_TOOL_TRASH);
+	if ( p_prog != NULL ) *p_prog = *u;
+	if ( p_how != NULL ) *p_how = DT_PKG_NEW;
+	tm_printf((UB *)"TessronOS desktop: %s registered again\n", q->id);
+	return E_OK;
 }

@@ -36,6 +36,7 @@ extern "C" {
 #endif
 
 #include <ts/uuid.h>
+#include <ts/vobjsz.h>
 
 /*
  * Limits of one parse. A real object may have been written by someone
@@ -105,11 +106,13 @@ typedef struct t_tad T_TAD;		/* one parsed document */
  * A virtual object: what a <link> element says (design 16.3.2, xmlTAD
  * specification 5.2). Lengths are the bytes kept here, not a limit of
  * the format; an attribute longer than its field is refused rather than
- * cut short, so that nothing is lost without being said.
+ * cut short, so that nothing is lost without being said. The applist
+ * alone is not refused: the link's copy too long to keep is kept as the
+ * entry the link opens with, the list being the object's.
  */
 #define TAD_NAME_MAX	192		/* the displayed name */
 #define TAD_REL_MAX	64		/* the relationship of this link */
-#define TAD_APPL_MAX	512		/* the applist of this link, held opaque */
+#define TAD_APPL_MAX	512		/* the applist of this link: the whole, or the entry it opens with */
 #define TAD_VIEW_MAX	16		/* viewMode */
 #define TAD_WRAP_NONE	0		/* wordWrap not said */
 #define TAD_WRAP_ON	1
@@ -225,12 +228,15 @@ IMPORT ER tad_lnk_add( T_TAD *doc, CONST T_VOBJ *pk_vobj, TS_UUID *p_vobjid );
 IMPORT ER tad_lnk_set( T_TAD *doc, CONST T_VOBJ *pk_vobj );
 
 /*
- * How tall a virtual object is when closed: the band its name is
- * written in, which is the letters (chsz, 14 when it does not say) and
- * eleven pixels for a line above and below them and the frame. A closed
- * link written at fourteen point is twenty-five pixels tall in the
- * records. 0 for a link that shows none of the picture, the name, the
- * relationship, the kind and the date: it has no band and is a plain box.
+ * How tall a virtual object is when closed, from the size of its
+ * letters alone (chsz, 14 when it does not say), whatever height the
+ * record gives the box: with a frame, the letters, a quarter more and
+ * two (a line above and below); with no frame but the picture, the
+ * letters and a quarter (the picture's square); with neither, the
+ * letters. A closed link at fourteen point is nineteen pixels tall.
+ * 0 for a link that shows none of the picture, the name, the
+ * relationship, the kind and the date: it has no band and is a plain
+ * box of the height its record gives it.
  *
  * No box of a link is shorter than this: what is sized smaller, or read
  * smaller from a record, is shown and kept at this height.
@@ -239,10 +245,21 @@ IMPORT ER tad_lnk_set( T_TAD *doc, CONST T_VOBJ *pk_vobj );
  * closed height when h is no more than TAD_OPEN_SLACK taller than it
  * (closed, the hand having stopped a little past the band), else h,
  * an opened object showing what it points at under its band.
+ *
+ * tad_lnk_least_w is the least width of a box: twice the letters with
+ * a frame, the picture's square with none, the letters with neither.
+ * tad_closed_h and tad_least_w are the same for a link not yet made.
+ * tad_closed_w is how wide a new closed box is made to hold a name
+ * name_w pixels wide beside its picture: half a letter of edge each
+ * side within a frame, the picture's square and half a letter after it.
  */
-#define TAD_OPEN_SLACK	8
+#define TAD_OPEN_SLACK	VOBJ_OPEN_SLACK
+IMPORT INT tad_closed_h( INT chsz, UINT disp );
+IMPORT INT tad_least_w( INT chsz, UINT disp );
+IMPORT INT tad_closed_w( INT chsz, UINT disp, INT name_w );
 IMPORT INT tad_lnk_closed_h( CONST T_VOBJ *pk_vobj );
 IMPORT INT tad_lnk_fit_h( CONST T_VOBJ *pk_vobj, INT h );
+IMPORT INT tad_lnk_least_w( CONST T_VOBJ *pk_vobj );
 
 /*
  * The links put in a new order, front to back as the document holds

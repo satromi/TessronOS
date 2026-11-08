@@ -1,0 +1,67 @@
+# 基本図形編集のプロセスの道具パネル: a subordinate window of the figure's (design 10.4, 11.3), the
+# process's own (ui_sub), as ui_fig_panel.steps has it with the desktop's figure editor;
+# for tools/ui_run.py. The figure (画用紙, 100,100 to 900,700) is opened: its 道具パネル
+# stands whole at the top of the screen (100,0), there being no room under or over it, and
+# the two are the nearest windows, the panel in front.
+# システム環境設定 opened (160,80 to 772,584) comes in front: the panel is out of sight;
+# it is pressed later on its band (700,90), the part of it the figure does not cover.
+# The figure pressed where nothing covers it (850,650): it comes forward with the panel
+# in front of it again. The initial window BTRON (0,0 to 350,226) pressed: the panel goes
+# again, and comes back with the figure. Pressing システム環境設定 puts it away; the
+# settings closed, the figure is in front again, and so is its panel.
+logmark
+pfig 019a0f91-066f-706f-93da-ffe8150d6207
+expectsincein 60 figure: opened 画用紙
+wait 2000
+front f1 道具パネル|画用紙
+expect ok f1: in front
+shot fp_open
+# another program's window in front: the panel is hidden
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+wait 800
+hidden h1 道具パネル
+expect ok h1: hidden
+front h1f システム環境設定|画用紙
+expect ok h1f: in front
+shot fp_other
+# the figure brought back in front: the panel comes with it, in front of it
+click 850 650
+wait 300
+front f2 道具パネル|画用紙
+expect ok f2: in front
+shot fp_back
+# another program's window pressed: hidden again
+click 700 90
+wait 300
+hidden h2 道具パネル
+expect ok h2: hidden
+front h2f システム環境設定|画用紙
+expect ok h2f: in front
+# the desktop's own window (the initial window) pressed: hidden too
+click 50 200
+wait 300
+hidden h3 道具パネル
+expect ok h3: hidden
+front h3f BTRON
+expect ok h3f: in front
+click 850 650
+wait 300
+front f3 道具パネル|画用紙
+expect ok f3: in front
+# the settings pressed and closed: the figure is the nearest again, with its panel
+click 700 90
+wait 300
+hidden h4 道具パネル
+expect ok h4: hidden
+key 08 01
+expect sysenv: closed
+wait 500
+front f4 道具パネル|画用紙
+expect ok f4: in front
+shot fp_closed
+absent !OACV!
+# the figure closed: its panel goes with it
+key 08 01
+expect figure: tool panel closed
+expect figure: closed

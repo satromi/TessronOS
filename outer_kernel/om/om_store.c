@@ -33,6 +33,7 @@
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <ts/om.h>
+#include <ts/tadlnk.h>
 #include <ts/tad.h>
 #include <ts/tadview.h>
 #include <ts/uuid.h>
@@ -911,19 +912,17 @@ LOCAL ID store_vol( CONST TS_UUID *id )
  * A link whose object cannot be found is a 虚身; one in a window whose
  * object is on another volume than its own is marked so.
  */
-LOCAL UINT store_state_u( CONST T_VOBJ *v, void *arg )
+LOCAL UINT state_on_u( CONST T_VOBJ *v, CONST TS_UUID *host )
 {
 	UB	nm[8];
-	TS_UUID	host;
 	UINT	st = 0;
 	ID	vt;
 
-	(void)arg;
 	if ( store_name(v, nm, sizeof(nm), NULL) < 0 ) {
 		return TV_ST_GONE;
 	}
-	if ( tv_host_of(&host) && ( vt = store_vol(&v->target) ) > 0 ) {
-		ID	vh = store_vol(&host);
+	if ( host != NULL && ( vt = store_vol(&v->target) ) > 0 ) {
+		ID	vh = store_vol(host);
 
 		if ( vh > 0 && vh != vt ) {
 			st |= TV_ST_OTHER;
@@ -932,12 +931,35 @@ LOCAL UINT store_state_u( CONST T_VOBJ *v, void *arg )
 	return st;
 }
 
+/* Against the object whose window the task asking is drawing (tv_draw_host) */
+LOCAL UINT store_state_u( CONST T_VOBJ *v, void *arg )
+{
+	TS_UUID	host;
+
+	(void)arg;
+	return state_on_u(v, tv_host_of(&host) ? &host : NULL);
+}
+
 LOCAL UINT store_state( CONST T_VOBJ *v, void *arg )
 {
 	UINT r;
 
 	st_lock();
 	r = store_state_u(v, arg);
+	st_unlock();
+	return r;
+}
+
+/* The same against an object named, for a process that draws the window itself (ob_ref_vob) */
+EXPORT UINT om_store_state_on( CONST T_VOBJ *v, CONST TS_UUID *host )
+{
+	UINT r;
+
+	if ( v == NULL ) {
+		return TV_ST_GONE;
+	}
+	st_lock();
+	r = state_on_u(v, host);
 	st_unlock();
 	return r;
 }
@@ -1190,8 +1212,11 @@ LOCAL BOOL json_int( CONST UB *b, INT at, INT to, INT *p_v )
 	return any;
 }
 
-/* Where the value of one key of the window object stands, or -1 */
-LOCAL INT win_key( CONST UB *b, INT size, CONST char *key, BOOL in_pos,
+/*
+ * Where the value of one key of the window object stands, or -1: of the
+ * object in it named sub ("pos", "panelpos"), or of its own when sub is NULL
+ */
+LOCAL INT win_key( CONST UB *b, INT size, CONST char *key, CONST char *sub,
 		   INT *p_end )
 {
 	INT	w, we, at, ae;
@@ -1203,8 +1228,8 @@ LOCAL INT win_key( CONST UB *b, INT size, CONST char *key, BOOL in_pos,
 	we = json_close(b, w, size);
 	at = w + 1;
 	ae = we;
-	if ( in_pos ) {
-		INT	p = json_key(b, w + 1, we, "pos");
+	if ( sub != NULL ) {
+		INT	p = json_key(b, w + 1, we, sub);
 
 		if ( p < 0 || b[p] != '{' ) {
 			return -1;
@@ -1245,13 +1270,13 @@ EXPORT ER om_store_window( CONST TS_UUID *id, T_DPRECT *r )
 	if ( meta == NULL ) {
 		return E_NOEXS;
 	}
-	at = win_key(meta, (INT)size, "x", TRUE, &end);
+	at = win_key(meta, (INT)size, "x", "pos", &end);
 	ok = ( at >= 0 && json_int(meta, at, end, &x) );
-	at = win_key(meta, (INT)size, "y", TRUE, &end);
+	at = win_key(meta, (INT)size, "y", "pos", &end);
 	ok = ok && at >= 0 && json_int(meta, at, end, &y);
-	at = win_key(meta, (INT)size, "width", FALSE, &end);
+	at = win_key(meta, (INT)size, "width", NULL, &end);
 	ok = ok && at >= 0 && json_int(meta, at, end, &w);
-	at = win_key(meta, (INT)size, "height", FALSE, &end);
+	at = win_key(meta, (INT)size, "height", NULL, &end);
 	ok = ok && at >= 0 && json_int(meta, at, end, &h);
 	Kfree(meta);
 	if ( !ok || w <= 0 || h <= 0 ) {
@@ -1266,7 +1291,7 @@ EXPORT ER om_store_window( CONST TS_UUID *id, T_DPRECT *r )
 }
 
 /* One number of the window object put in place of what was there */
-LOCAL BOOL win_put( UB **p_meta, SZ *p_size, CONST char *key, BOOL in_pos,
+LOCAL BOOL win_put( UB **p_meta, SZ *p_size, CONST char *key, CONST char *sub,
 		    INT v )
 {
 	UB	*b = *p_meta, *nb;
@@ -1275,7 +1300,7 @@ LOCAL BOOL win_put( UB **p_meta, SZ *p_size, CONST char *key, BOOL in_pos,
 	SZ	nsize;
 	UINT	u = ( v < 0 ) ? (UINT)-v : (UINT)v;
 
-	at = win_key(b, (INT)*p_size, key, in_pos, &end);
+	at = win_key(b, (INT)*p_size, key, sub, &end);
 	if ( at < 0 ) {
 		return FALSE;
 	}
@@ -1329,10 +1354,62 @@ EXPORT ER om_store_set_window( CONST TS_UUID *id, CONST T_DPRECT *r )
 	if ( meta == NULL ) {
 		return E_NOEXS;
 	}
-	win_put(&meta, &size, "x", TRUE, r->left);
-	win_put(&meta, &size, "y", TRUE, r->top);
-	win_put(&meta, &size, "width", FALSE, r->right - r->left);
-	win_put(&meta, &size, "height", FALSE, r->bottom - r->top);
+	win_put(&meta, &size, "x", "pos", r->left);
+	win_put(&meta, &size, "y", "pos", r->top);
+	win_put(&meta, &size, "width", NULL, r->right - r->left);
+	win_put(&meta, &size, "height", NULL, r->bottom - r->top);
+	er = om_obj_meta_put(id, meta, size);
+	Kfree(meta);
+
+	return er;
+}
+
+/*
+ * Where the tool panel of a window showing the object was left, kept in
+ * its metadata as TADjs keeps it ("window": {"panelpos": {"x", "y"}}, the
+ * panel window's corner on the screen): E_NOEXS when it has none.
+ */
+EXPORT ER om_store_panelpos( CONST TS_UUID *id, INT *p_x, INT *p_y )
+{
+	UB	*meta;
+	SZ	size = 0;
+	INT	at, end;
+	BOOL	ok;
+
+	if ( id == NULL || p_x == NULL || p_y == NULL ) {
+		return E_PAR;
+	}
+	meta = om_obj_meta(id, &size);
+	if ( meta == NULL ) {
+		return E_NOEXS;
+	}
+	at = win_key(meta, (INT)size, "x", "panelpos", &end);
+	ok = ( at >= 0 && json_int(meta, at, end, p_x) );
+	at = win_key(meta, (INT)size, "y", "panelpos", &end);
+	ok = ok && at >= 0 && json_int(meta, at, end, p_y);
+	Kfree(meta);
+
+	return ok ? E_OK : E_NOEXS;
+}
+
+/* The tool panel's place kept: only the two numbers change, where the metadata has them */
+EXPORT ER om_store_set_panelpos( CONST TS_UUID *id, INT x, INT y )
+{
+	UB	*meta;
+	SZ	size = 0;
+	ER	er;
+
+	if ( id == NULL ) {
+		return E_PAR;
+	}
+	meta = om_obj_meta(id, &size);
+	if ( meta == NULL ) {
+		return E_NOEXS;
+	}
+	if ( !win_put(&meta, &size, "x", "panelpos", x) || !win_put(&meta, &size, "y", "panelpos", y) ) {
+		Kfree(meta);
+		return E_NOEXS;
+	}
 	er = om_obj_meta_put(id, meta, size);
 	Kfree(meta);
 
@@ -1569,7 +1646,7 @@ EXPORT ER om_store_set_paper( CONST TS_UUID *id, UW colour )
 		val[2 + i] = (UB)hex[( colour >> ( 20 - i * 4 ) ) & 0xF];
 	}
 	val[8] = '"';
-	at = win_key(meta, (INT)size, "backgroundColor", FALSE, &end);
+	at = win_key(meta, (INT)size, "backgroundColor", NULL, &end);
 	if ( at < 0 ) {
 		Kfree(meta);
 		return E_OBJ;
@@ -2351,10 +2428,10 @@ LOCAL INT lk_member( CONST UB *b, INT at, INT to, INT *p_ke, INT *p_vs )
  * written again into out without the spaces between its parts: the
  * entry the object opens with -- the first marked defaultOpen, else the
  * first -- marked so, with "defaultOpenLock" as 'keep' says, and no
- * other entry with one. The length, -1 when the list names no program,
- * -2 when out cannot hold it.
+ * other entry with one. 'only' leaves out the other entries. The length,
+ * -1 when the list names no program, -2 when out cannot hold it.
  */
-LOCAL INT applist_kept( CONST UB *s, INT to, BOOL keep, UB *out, INT max )
+LOCAL INT applist_kept( CONST UB *s, INT to, BOOL keep, BOOL only, UB *out, INT max )
 {
 	INT	i, e, ke, vs, d, nth = 0, dflt = -1, n = 0;
 	INT	m, me, mke, mvs;
@@ -2383,6 +2460,10 @@ LOCAL INT applist_kept( CONST UB *s, INT to, BOOL keep, UB *out, INT max )
 	nth = 0;
 	for ( i = lk_next(s, 1, to - 1); ok && ( e = lk_member(s, i, to - 1, &ke, &vs) ) >= 0;
 	      i = lk_next(s, e, to - 1) ) {
+		if ( only && nth != dflt ) {
+			nth++;
+			continue;
+		}
 		if ( !first ) ok = lk_str(out, max, &n, ",");
 		first = FALSE;
 		ok = ok && lk_put(out, max, &n, s + i, ke - i) && lk_str(out, max, &n, ":");
@@ -2421,15 +2502,24 @@ LOCAL INT applist_kept( CONST UB *s, INT to, BOOL keep, UB *out, INT max )
 	return n;
 }
 
-/* The applist of a JSON text (from its brace to just past its closing one) made into out */
+/*
+ * The applist of a JSON text (from its brace to just past its closing one)
+ * made into out. A list of more programs than out holds is kept as the
+ * entry the link opens with: which programs there are is the object's to say.
+ */
 LOCAL INT applist_kept_of( CONST UB *j, SZ size, BOOL keep, UB *out, INT max )
 {
-	INT	a = json_key(j, 0, (INT)size, "applist");
+	INT	a = json_key(j, 0, (INT)size, "applist"), to, n;
 
 	if ( a < 0 || j[a] != '{' ) {
 		return -1;
 	}
-	return applist_kept(j + a, json_close(j, a, (INT)size) - a, keep, out, max);
+	to = json_close(j, a, (INT)size) - a;
+	n = applist_kept(j + a, to, keep, FALSE, out, max);
+	if ( n == -2 ) {
+		n = applist_kept(j + a, to, keep, TRUE, out, max);
+	}
+	return n;
 }
 
 /*
@@ -2947,6 +3037,12 @@ EXPORT T_TAD *om_store_get( CONST TS_UUID *id, INT recno )
  * what was remembered of its metadata. For an object that is thrown
  * away, so that nothing of it is drawn from memory afterwards.
  */
+/* The volume an object is on, as the file manager knows it */
+LOCAL ER vol_of_file( CONST TS_UUID *obj, TS_UUID *p_vol, void *arg )
+{
+	return knl_obfile_vuuid_of(obj, p_vol);
+}
+
 /*
  * The links of a record of the object 'host' made to say where their
  * objects are (design 8.3), as om_link_fix does to the text: no volume
@@ -2956,35 +3052,17 @@ EXPORT T_TAD *om_store_get( CONST TS_UUID *id, INT recno )
  */
 LOCAL void links_fix_doc( T_TAD *doc, CONST TS_UUID *host )
 {
-	T_VOBJ	*v;
-	TS_UUID	hv, tv, mine, zero;
-	INT	i, n;
+	TS_UUID	hv, mine;
+	INT	failed = 0;
 
-	if ( doc == NULL || knl_obfile_vuuid_of(host, &hv) < E_OK
-	  || ( v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ)) ) == NULL ) {
+	if ( doc == NULL || knl_obfile_vuuid_of(host, &hv) < E_OK ) {
 		return;
 	}
-	knl_memset(&zero, 0, sizeof(zero));
-	if ( knl_obfile_machine(&mine) < E_OK ) mine = zero;
-	n = tad_lnk_count(doc);
-	for ( i = 0; i < n; i++ ) {
-		BOOL	same;
-
-		if ( tad_lnk_get(doc, i, v) < E_OK || ts_uuid_cmp(&v->vobjid, &zero) == 0 ) continue;
-		if ( ts_uuid_cmp(&v->tmach, &zero) != 0 && ts_uuid_cmp(&v->tmach, &mine) != 0 ) continue;
-		if ( knl_obfile_vuuid_of(&v->target, &tv) < E_OK ) continue;
-		same = (BOOL)( ts_uuid_cmp(&tv, &hv) == 0 || ts_uuid_cmp(&tv, &zero) == 0 );
-		if ( ( same && ts_uuid_cmp(&v->tvol, &zero) == 0 && ts_uuid_cmp(&v->tmach, &zero) == 0 )
-		  || ( !same && ts_uuid_cmp(&v->tvol, &tv) == 0 && ts_uuid_cmp(&v->tmach, &zero) == 0 ) ) {
-			continue;			/* says it already */
-		}
-		v->tvol = same ? zero : tv;
-		v->tmach = zero;
-		if ( tad_lnk_set(doc, v) < E_OK ) {
-			tm_printf((UB *)"om: the link \"%s\" was not given its volume\n", v->name);
-		}
+	if ( knl_obfile_machine(&mine) < E_OK ) knl_memset(&mine, 0, sizeof(mine));
+	(void)tad_lnk_vol_doc(doc, &hv, &mine, vol_of_file, NULL, &failed);
+	if ( failed > 0 ) {
+		tm_printf((UB *)"om: %d links were not given their volume\n", failed);
 	}
-	Kfree(v);
 }
 
 EXPORT void om_store_forget( CONST TS_UUID *id )

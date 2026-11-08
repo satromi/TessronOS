@@ -309,6 +309,7 @@ LOCAL void test_setup( void )
 {
 	T_FSTAT	st;
 	UD	pos;
+	UW	turns;
 	INT	i;
 
 	lines = (UB *)Kmalloc(LINES_MAX);
@@ -316,10 +317,18 @@ LOCAL void test_setup( void )
 	if ( fs_stat(SVCPROG, &st) < EX_OK ) KT_SKIP("no " SVCPROG);
 	have_prog = TRUE;
 	pos = log_now();
+	turns = dt_test_loops();
 	KT_ASSERT_ER(dt_start(), E_OK);
 	up = said(pos, "TessronOS desktop: start", 100);
 	KT_ASSERT(up);
 	for ( i = 0; i < 30 && dt_first_win() == NULL; i++ ) tk_dly_tsk(100);
+	/*
+	 * The first window comes before the last steps of the start, which
+	 * raise it and give it the keys, and windows of ended processes go
+	 * away only in the loop: what these tests look at holds from its first turn
+	 */
+	for ( i = 0; i < 600 && dt_test_loops() == turns; i++ ) tk_dly_tsk(100);
+	KT_ASSERT(dt_test_loops() != turns);
 	tk_dly_tsk(500);
 }
 

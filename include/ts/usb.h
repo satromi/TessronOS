@@ -73,6 +73,7 @@ typedef struct {
 #define USB_ROLE_STORAGE	3
 #define USB_ROLE_AUDIO		4
 #define USB_ROLE_CAMERA		5	/* a video class camera (include/ts/cam.h) */
+#define USB_ROLE_BT		6	/* a Bluetooth adapter (device/bt/bt.c) */
 
 /* One device in the tree */
 typedef struct {

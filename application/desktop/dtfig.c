@@ -22,9 +22,8 @@
  *
  *	What is picked, carried and sized is dtedit.c's, the same code a
  *	cabinet uses; what is done to a shape that is not a virtual object
- *	is here, by changing the attributes of its element in the record.
- *	Colours are written as the fixed pattern numbers every record may
- *	use, so that what is drawn here reads back anywhere.
+ *	is the figure editor's code (application/fig/figedit.c), called here
+ *	over the window's record, model and picks.
  */
 
 #include <sys/machine.h>
@@ -43,1220 +42,187 @@
 #include <ts/sysdef.h>
 #include <ts/fn.h>
 #include <ts/look.h>
+#include <ts/figedit.h>
 #include "desktop.h"
 
 #define KEY_ENTER	0x28
 #define KEY_ESC		0x29
 
-/* ---------------------------------------------------------------- numbers */
+/* ---------------------------------------------------------------- over a window */
 
-LOCAL INT num_word( UB *buf, INT at, INT v )
+/*
+ * What the editor works on in a window, for the figure editor's code
+ * (application/fig/figedit.c): the window's record, model and picks. The
+ * window keeps them; each call of the table hands the picks the code
+ * counted back to the window first, does what the desktop does, and
+ * takes the window's as they are after.
+ */
+LOCAL CONST T_FGHOST	fe_desk;
+
+LOCAL void fe_of( DTWIN *d, T_FGED *e )
 {
-	char	t[12];
-	INT	k = 0;
-
-	if ( v < 0 ) {
-		buf[at++] = '-';
-		v = -v;
-	}
-	do {
-		t[k++] = (char)( '0' + v % 10 );
-		v /= 10;
-	} while ( v > 0 && k < 11 );
-	while ( k > 0 ) {
-		buf[at++] = (UB)t[--k];
-	}
-	buf[at] = 0;
-
-	return at;
+	e->rec = d->rec;
+	e->fig = d->fig;
+	e->pick = d->pick;
+	e->npick = d->npick;
+	e->usable = (BOOL)( d->figed && !d->sealed );
+	e->host = &fe_desk;
+	e->arg = d;
 }
 
-LOCAL void attr_put( T_TAD *rec, T_TADNODE *nd, CONST char *name, INT v )
+/* What the code counted handed back to the window */
+LOCAL void fe_back( T_FGED *e )
 {
-	UB	buf[16];
-
-	(void)num_word(buf, 0, v);
-	(void)tad_set_attr(rec, nd, name, buf);
+	( (DTWIN *)e->arg )->npick = e->npick;
 }
 
-/* "x,y x,y ..." written into an element */
-LOCAL void points_put( T_TAD *rec, T_TADNODE *nd, CONST T_DPPOINT *pt,
-		       INT n )
+LOCAL void h_before( T_FGED *e )
 {
-	UB	*buf;
-	INT	i, at = 0;
-
-	buf = (UB *)Kmalloc((SZ)n * 26 + 2);
-	if ( buf == NULL ) {
-		return;
-	}
-	buf[0] = 0;
-	for ( i = 0; i < n; i++ ) {
-		if ( i > 0 ) {
-			buf[at++] = ' ';
-		}
-		at = num_word(buf, at, pt[i].x);
-		buf[at++] = ',';
-		at = num_word(buf, at, pt[i].y);
-	}
-	(void)tad_set_attr(rec, nd, "points", buf);
-	Kfree(buf);
+	fe_back(e);
+	ed_before((DTWIN *)e->arg);
+	fe_of((DTWIN *)e->arg, e);
 }
 
-LOCAL T_TAD *rec_of( DTWIN *d )
+LOCAL void h_changed( T_FGED *e )
 {
-	return (T_TAD *)d->rec;
+	fe_back(e);
+	ed_changed((DTWIN *)e->arg);
+	fe_of((DTWIN *)e->arg, e);
+}
+
+LOCAL void h_model( T_FGED *e )
+{
+	fe_back(e);
+	ed_model((DTWIN *)e->arg);
+	fe_of((DTWIN *)e->arg, e);
+}
+
+LOCAL void h_pick_none( T_FGED *e )
+{
+	fe_back(e);
+	ed_pick_none((DTWIN *)e->arg);
+	fe_of((DTWIN *)e->arg, e);
+}
+
+LOCAL void h_pick_add( T_FGED *e, INT i )
+{
+	fe_back(e);
+	ed_pick_add((DTWIN *)e->arg, i);
+	fe_of((DTWIN *)e->arg, e);
+}
+
+LOCAL INT h_first_pick( T_FGED *e )
+{
+	fe_back(e);
+	return ed_first_pick((DTWIN *)e->arg);
+}
+
+LOCAL void h_no_memory( T_FGED *e )
+{
+	dt_no_memory((DTWIN *)e->arg);
+}
+
+LOCAL BOOL h_align_form( T_FGED *e, INT *p_h, INT *p_v )
+{
+	return dt_align_form((DTWIN *)e->arg, p_h, p_v);
+}
+
+LOCAL CONST T_FGHOST	fe_desk = {
+	h_before, h_changed, h_model, h_pick_none, h_pick_add, h_first_pick,
+	h_no_memory, h_align_form
+};
+
+/* The figure editor's state over a window, and what the code counted handed back (figtool.c's views) */
+EXPORT void df_ed_of( DTWIN *d, T_FGED *e )
+{
+	fe_of(d, e);
+}
+
+EXPORT void df_ed_back( T_FGED *e )
+{
+	fe_back(e);
 }
 
 EXPORT void df_attr_put( T_TAD *rec, T_TADNODE *nd, CONST char *name, INT v )
 {
-	attr_put(rec, nd, name, v);
+	fe_attr_put(rec, nd, name, v);
 }
 
 EXPORT void df_points_put( T_TAD *rec, T_TADNODE *nd, CONST T_DPPOINT *pt,
 			   INT n )
 {
-	points_put(rec, nd, pt, n);
+	fe_points_put(rec, nd, pt, n);
 }
-
-/* ---------------------------------------------------------------- which */
 
 EXPORT BOOL df_is( CONST DTWIN *d )
 {
 	return (BOOL)( d != NULL && d->figed && d->fig != NULL && !d->sealed );
 }
 
-/* A shape this editor works on that is not a virtual object */
 EXPORT BOOL df_takeable( CONST DTWIN *d, INT i )
 {
-	CONST T_TVSHAPE	*sh;
+	T_FGED	e;
 
-	if ( !df_is(d) || i < 0 || i >= d->fig->nsh ) {
-		return FALSE;
-	}
-	sh = &d->fig->sh[i];
-	if ( sh->node == NULL ) {
-		return FALSE;
-	}
-	switch ( sh->kind ) {
-	case TV_SH_RECT:
-	case TV_SH_ELLIPSE:
-	case TV_SH_LINE:
-	case TV_SH_POLY:
-	case TV_SH_IMAGE:
-	case TV_SH_DOC:
-	case TV_SH_ARC:
-	case TV_SH_CHORD:
-	case TV_SH_EARC:
-	case TV_SH_CURVE:
-	case TV_SH_PIXMAP:
-	case TV_SH_MARKER:
-		return TRUE;
-	default:
-		return FALSE;
-	}
+	if ( d == NULL ) return FALSE;
+	fe_of((DTWIN *)d, &e);
+	return fe_takeable(&e, i);
 }
 
-/* ---------------------------------------------------------------- groups */
+/* One call of the figure editor's code over a window, the picks handed back after */
+#define FE_OVER(d, call)	do { T_FGED e_; fe_of((d), &e_); call; fe_back(&e_); } while ( 0 )
 
-/*
- * The element a shape stands for in the figure: itself, or the group
- * it is in -- the outermost one, the child of the figure. A group is
- * taken, carried, thrown away and copied whole.
- */
-LOCAL T_TADNODE *top_of( DTWIN *d, T_TADNODE *nd )
-{
-	T_TADNODE	*body = tad_body(rec_of(d));
-
-	while ( nd != NULL && nd->parent != NULL && nd->parent != body ) {
-		nd = nd->parent;
-	}
-
-	return nd;
-}
-
-LOCAL BOOL in_group( DTWIN *d, INT i )
-{
-	return (BOOL)( d->fig->sh[i].node != NULL
-		    && top_of(d, d->fig->sh[i].node) != d->fig->sh[i].node );
-}
-
-/*
- * Nodes kept by their addresses, each with two numbers: the groups or
- * shapes a picking reaches, looked up at once rather than by going
- * through all the shapes again for each one, which with many shapes
- * takes the square of their number.
- */
-typedef struct {
-	CONST void	**key;
-	INT		*a, *b;
-	INT		n;		/* slots: a power of two, at least twice what is kept */
-} PMAP;
-
-LOCAL BOOL pm_new( PMAP *m, INT want )
-{
-	INT	n = 64;
-
-	while ( n < want * 2 + 16 ) {
-		n *= 2;
-	}
-	m->key = (CONST void **)Kmalloc(( sizeof(void *) + sizeof(INT) * 2 ) * (SZ)n);
-	if ( m->key == NULL ) {
-		return FALSE;
-	}
-	knl_memset(m->key, 0, sizeof(void *) * (SZ)n);
-	m->a = (INT *)( m->key + n );
-	m->b = m->a + n;
-	m->n = n;
-
-	return TRUE;
-}
-
-LOCAL void pm_free( PMAP *m )
-{
-	if ( m->key != NULL ) {
-		Kfree(m->key);
-		m->key = NULL;
-	}
-}
-
-/* The slot a node is in, or would go in */
-LOCAL INT pm_slot( CONST PMAP *m, CONST void *k )
-{
-	UW	h = (UW)( (UBINT)k >> 4 ) * 0x9E3779B1U;
-	INT	i = (INT)( h & (UW)( m->n - 1 ) );
-
-	while ( m->key[i] != NULL && m->key[i] != k ) {
-		i = ( i + 1 ) & ( m->n - 1 );
-	}
-
-	return i;
-}
-
-LOCAL BOOL pm_has( CONST PMAP *m, CONST void *k )
-{
-	return (BOOL)( k != NULL && m->key[pm_slot(m, k)] == k );
-}
-
-/* Kept, with its numbers; FALSE when it was kept already */
-LOCAL BOOL pm_put( PMAP *m, CONST void *k, INT a, INT b )
-{
-	INT	i = pm_slot(m, k);
-
-	if ( m->key[i] == k ) {
-		return FALSE;
-	}
-	m->key[i] = k;
-	m->a[i] = a;
-	m->b[i] = b;
-
-	return TRUE;
-}
-
-/*
- * Every shape of a group taken when any one of it is: what is taken is
- * the group. Called after any change to what is taken.
- */
-EXPORT void df_whole_groups( DTWIN *d )
-{
-	INT	i, groups = 0;
-	PMAP	m;
-
-	if ( !df_is(d) ) {
-		return;
-	}
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		if ( d->pick[i] != 0 && in_group(d, i) ) {
-			groups++;
-		}
-	}
-	if ( groups == 0 || !pm_new(&m, groups) ) {
-		return;
-	}
-	/* the groups picked, each with the order it was picked in */
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		if ( d->pick[i] != 0 && in_group(d, i) ) {
-			(void)pm_put(&m, top_of(d, d->fig->sh[i].node), (INT)d->pick[i], 0);
-		}
-	}
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		T_TADNODE	*top;
-
-		if ( d->pick[i] != 0 || d->fig->sh[i].node == NULL ) {
-			continue;
-		}
-		top = top_of(d, d->fig->sh[i].node);
-		if ( pm_has(&m, top) ) {
-			d->pick[i] = (UINT)m.a[pm_slot(&m, top)];
-			d->npick++;
-		}
-	}
-	pm_free(&m);
-}
-
-/* The picked shapes put into one group, in the place of the first */
-LOCAL void group_picked( DTWIN *d )
-{
-	T_TAD		*rec = rec_of(d);
-	T_TADNODE	*body = tad_body(rec), *g = NULL, **tops;
-	INT		i, k, n = 0;
-	PMAP		m;
-
-	tops = (T_TADNODE **)Kmalloc(sizeof(T_TADNODE *) * (SZ)( d->fig->nsh + 1 ));
-	if ( tops == NULL || !pm_new(&m, d->npick) ) {
-		if ( tops != NULL ) Kfree(tops);
-		dt_no_memory(d);
-		return;
-	}
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		T_TADNODE	*t;
-
-		if ( d->pick[i] == 0 || d->fig->sh[i].node == NULL ) {
-			continue;
-		}
-		t = top_of(d, d->fig->sh[i].node);
-		if ( pm_put(&m, t, 0, 0) ) {
-			tops[n++] = t;
-		}
-	}
-	pm_free(&m);
-	if ( n < 2 || body == NULL ) {
-		Kfree(tops);
-		return;
-	}
-	ed_before(d);
-	g = tad_elem_new(rec, "group", body, tops[0], FALSE);
-	if ( g == NULL ) {
-		Kfree(tops);
-		return;
-	}
-	for ( k = 0; k < n; k++ ) {
-		tad_node_move(tops[k], g, NULL);
-	}
-	Kfree(tops);
-	ed_pick_none(d);
-	ed_changed(d);
-}
-
-/* The groups the picked shapes are in, taken apart: their shapes go back */
-LOCAL void ungroup_picked( DTWIN *d )
-{
-	T_TAD		*rec = rec_of(d);
-	T_TADNODE	*body = tad_body(rec), *g, *c, *next;
-	INT		i;
-	BOOL		any = FALSE;
-
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		if ( d->pick[i] != 0 && in_group(d, i) ) {
-			any = TRUE;
-		}
-	}
-	if ( !any || body == NULL ) {
-		return;
-	}
-	ed_before(d);
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		if ( d->pick[i] == 0 || !in_group(d, i) ) {
-			continue;
-		}
-		g = top_of(d, d->fig->sh[i].node);
-		if ( g == NULL || g->parent != body ) {
-			continue;
-		}
-		for ( c = g->first; c != NULL; c = next ) {
-			next = c->next;
-			tad_node_move(c, body, g);
-		}
-		tad_node_remove(g);
-	}
-	ed_pick_none(d);
-	ed_changed(d);
-}
-
-/* ---------------------------------------------------------------- one shape */
-
-/* The box of a piece of text in a figure, where its record keeps it */
-LOCAL void doc_box_put( T_TAD *rec, T_TADNODE *nd, CONST T_DPRECT *r )
-{
-	T_TADNODE	*c;
-
-	for ( c = nd->first; c != NULL; c = c->next ) {
-		if ( c->kind != TAD_ND_ELEM || c->name == NULL ) {
-			continue;
-		}
-		if ( tad_attr(c, "viewleft") != NULL ) {
-			attr_put(rec, c, "viewleft", r->left);
-			attr_put(rec, c, "viewtop", r->top);
-			attr_put(rec, c, "viewright", r->right);
-			attr_put(rec, c, "viewbottom", r->bottom);
-		}
-		if ( tad_attr(c, "drawleft") != NULL ) {
-			attr_put(rec, c, "drawleft", r->left);
-			attr_put(rec, c, "drawtop", r->top);
-			attr_put(rec, c, "drawright", r->right);
-			attr_put(rec, c, "drawbottom", r->bottom);
-		}
-	}
-}
-
-/* A shape's box put into its element, as the element says boxes */
-LOCAL void box_put( T_TAD *rec, CONST T_TVSHAPE *sh, CONST T_DPRECT *r )
-{
-	T_TADNODE	*nd = sh->node;
-
-	switch ( sh->kind ) {
-	case TV_SH_ELLIPSE:
-		if ( tad_attr(nd, "frameLeft") != NULL ) {
-			attr_put(rec, nd, "frameLeft", r->left);
-			attr_put(rec, nd, "frameTop", r->top);
-			attr_put(rec, nd, "frameRight", r->right);
-			attr_put(rec, nd, "frameBottom", r->bottom);
-		} else if ( tad_attr(nd, "cx") != NULL || tad_attr(nd, "left") == NULL ) {
-			attr_put(rec, nd, "cx", ( r->left + r->right ) / 2);
-			attr_put(rec, nd, "cy", ( r->top + r->bottom ) / 2);
-			attr_put(rec, nd, "rx", ( r->right - r->left ) / 2);
-			attr_put(rec, nd, "ry", ( r->bottom - r->top ) / 2);
-		} else {
-			attr_put(rec, nd, "left", r->left);
-			attr_put(rec, nd, "top", r->top);
-			attr_put(rec, nd, "right", r->right);
-			attr_put(rec, nd, "bottom", r->bottom);
-		}
-		break;
-	case TV_SH_DOC:
-		doc_box_put(rec, nd, r);
-		break;
-	default:
-		attr_put(rec, nd, "left", r->left);
-		attr_put(rec, nd, "top", r->top);
-		attr_put(rec, nd, "right", r->right);
-		attr_put(rec, nd, "bottom", r->bottom);
-		break;
-	}
-}
-
-/* A line's points put into its element, as the element says points */
-LOCAL void pts_put( T_TAD *rec, CONST T_TVSHAPE *sh, CONST T_DPPOINT *pt, INT n )
-{
-	if ( tad_attr(sh->node, "points") == NULL && n == 2 ) {
-		attr_put(rec, sh->node, "x1", pt[0].x);
-		attr_put(rec, sh->node, "y1", pt[0].y);
-		attr_put(rec, sh->node, "x2", pt[1].x);
-		attr_put(rec, sh->node, "y2", pt[1].y);
-		return;
-	}
-	points_put(rec, sh->node, pt, n);
-}
-
-/* A number an element gives, or 'dflt' */
-LOCAL INT attr_num( CONST T_TADNODE *nd, CONST char *name, INT dflt )
-{
-	CONST UB	*v = tad_attr(nd, name);
-	INT		n = 0, sign = 1;
-
-	if ( v == NULL ) {
-		return dflt;
-	}
-	if ( *v == '-' ) {
-		sign = -1;
-		v++;
-	}
-	if ( *v < '0' || *v > '9' ) {
-		return dflt;
-	}
-	while ( *v >= '0' && *v <= '9' ) {
-		n = n * 10 + ( *v++ - '0' );
-	}
-
-	return sign * n;
-}
-
-/* Whether a shape is its points: a line, a polygon, a curve, marks */
-LOCAL BOOL of_points( CONST T_TVSHAPE *sh )
-{
-	return (BOOL)( sh->kind == TV_SH_LINE || sh->kind == TV_SH_POLY
-		    || sh->kind == TV_SH_CURVE || sh->kind == TV_SH_MARKER );
-}
-
-LOCAL BOOL of_arc( CONST T_TVSHAPE *sh )
-{
-	return (BOOL)( sh->kind == TV_SH_ARC || sh->kind == TV_SH_CHORD
-		    || sh->kind == TV_SH_EARC );
-}
-
-/* A place in one box put at the same place in another */
-LOCAL INT map_x( INT x, CONST T_DPRECT *from, CONST T_DPRECT *to )
-{
-	INT	ow = from->right - from->left, nw = to->right - to->left;
-
-	return to->left + ( ( ow > 0 ) ? ( x - from->left ) * nw / ow : 0 );
-}
-
-LOCAL INT map_y( INT y, CONST T_DPRECT *from, CONST T_DPRECT *to )
-{
-	INT	oh = from->bottom - from->top, nh = to->bottom - to->top;
-
-	return to->top + ( ( oh > 0 ) ? ( y - from->top ) * nh / oh : 0 );
-}
-
-/* An arc's ends, as its element gives them */
-LOCAL void arc_ends_of( CONST T_TVSHAPE *sh, T_DPPOINT *s, T_DPPOINT *e )
-{
-	s->x = attr_num(sh->node, "startX", sh->r.right);
-	s->y = attr_num(sh->node, "startY", sh->r.top);
-	e->x = attr_num(sh->node, "endX", sh->r.left);
-	e->y = attr_num(sh->node, "endY", sh->r.bottom);
-}
-
-/* An arc written: its frame, and where its ends are towards */
-LOCAL void arc_put( T_TAD *rec, T_TADNODE *nd, CONST T_DPRECT *r,
-		    CONST T_DPPOINT *s, CONST T_DPPOINT *e )
-{
-	attr_put(rec, nd, "frameLeft", r->left);
-	attr_put(rec, nd, "frameTop", r->top);
-	attr_put(rec, nd, "frameRight", r->right);
-	attr_put(rec, nd, "frameBottom", r->bottom);
-	attr_put(rec, nd, "startX", s->x);
-	attr_put(rec, nd, "startY", s->y);
-	attr_put(rec, nd, "endX", e->x);
-	attr_put(rec, nd, "endY", e->y);
-}
-
-/*
- * One shape taken to a new box: a box shape takes the box, a line has
- * each of its points moved to the same place in the new box as it had
- * in the old, and an arc its frame with its ends at the same places in
- * it.
- */
-LOCAL void to_box( DTWIN *d, INT i, CONST T_DPRECT *nb )
-{
-	CONST T_TVSHAPE	*sh = &d->fig->sh[i];
-
-	if ( of_arc(sh) ) {
-		T_DPPOINT	s, e;
-
-		arc_ends_of(sh, &s, &e);
-		s.x = map_x(s.x, &sh->r, nb);  s.y = map_y(s.y, &sh->r, nb);
-		e.x = map_x(e.x, &sh->r, nb);  e.y = map_y(e.y, &sh->r, nb);
-		arc_put(rec_of(d), sh->node, nb, &s, &e);
-		return;
-	}
-	if ( of_points(sh) ) {
-		T_DPPOINT	*pt = (T_DPPOINT *)Kmalloc(sizeof(T_DPPOINT) * (SZ)( sh->npt + 1 ));
-		INT		k, ow = sh->r.right - sh->r.left - 1;
-		INT		oh = sh->r.bottom - sh->r.top - 1;
-		INT		nw = nb->right - nb->left - 1;
-		INT		nh = nb->bottom - nb->top - 1;
-
-		if ( pt == NULL ) {
-			dt_no_memory(d);
-			return;
-		}
-		for ( k = 0; k < sh->npt; k++ ) {
-			pt[k].x = nb->left + ( ( ow > 0 )
-				  ? ( sh->pt[k].x - sh->r.left ) * nw / ow : 0 );
-			pt[k].y = nb->top + ( ( oh > 0 )
-				  ? ( sh->pt[k].y - sh->r.top ) * nh / oh : 0 );
-		}
-		pts_put(rec_of(d), sh, pt, sh->npt);
-		Kfree(pt);
-		return;
-	}
-	box_put(rec_of(d), sh, nb);
-}
-
-EXPORT void df_shift( DTWIN *d, INT i, INT dx, INT dy )
-{
-	T_DPRECT	nb;
-
-	if ( !df_takeable(d, i) ) {
-		return;
-	}
-	nb = d->fig->sh[i].r;
-	nb.left += dx;  nb.right += dx;
-	nb.top += dy;   nb.bottom += dy;
-	to_box(d, i, &nb);
-}
-
-EXPORT void df_resize( DTWIN *d, INT i, CONST T_DPRECT *nb )
-{
-	if ( df_takeable(d, i) && nb->right > nb->left && nb->bottom > nb->top ) {
-		to_box(d, i, nb);
-	}
-}
-
-/* ---------------------------------------------------------------- what is picked */
+EXPORT void df_whole_groups( DTWIN *d )		{ FE_OVER(d, fe_whole_groups(&e_)); }
+EXPORT void df_shift( DTWIN *d, INT i, INT dx, INT dy )	{ FE_OVER(d, fe_shift(&e_, i, dx, dy)); }
+EXPORT void df_resize( DTWIN *d, INT i, CONST T_DPRECT *nb )	{ FE_OVER(d, fe_resize(&e_, i, nb)); }
+EXPORT void df_resize_flip( DTWIN *d, INT i, CONST T_DPRECT *nb, UINT flip )	{ FE_OVER(d, fe_resize_flip(&e_, i, nb, flip)); }
+EXPORT void df_delete_picked( DTWIN *d )	{ FE_OVER(d, fe_delete_picked(&e_)); }
+EXPORT void df_turn( DTWIN *d, INT how )	{ FE_OVER(d, fe_turn(&e_, how)); }
+EXPORT void df_order( DTWIN *d, INT how )	{ FE_OVER(d, fe_order(&e_, how)); }
+EXPORT void df_dup_picked( DTWIN *d )		{ FE_OVER(d, fe_dup_picked(&e_)); }
+EXPORT void df_adopt( DTWIN *d, T_TADNODE *nd )	{ FE_OVER(d, fe_adopt(&e_, nd)); }
+EXPORT void df_pick_pasted( DTWIN *d )		{ FE_OVER(d, fe_pick_pasted(&e_)); }
+LOCAL void group_picked( DTWIN *d )		{ FE_OVER(d, fe_group(&e_)); }
+LOCAL void ungroup_picked( DTWIN *d )		{ FE_OVER(d, fe_ungroup(&e_)); }
+LOCAL void align_picked( DTWIN *d )		{ FE_OVER(d, fe_align(&e_)); }
+LOCAL void invert_picked( DTWIN *d )		{ FE_OVER(d, fe_invert(&e_)); }
 
 EXPORT INT df_picked( CONST DTWIN *d )
 {
-	INT	i, n = 0;
+	T_FGED	e;
 
-	for ( i = 0; df_is(d) && i < d->fig->nsh; i++ ) {
-		if ( d->pick[i] != 0 && df_takeable(d, i) ) {
-			n++;
-		}
-	}
-
-	return n;
+	fe_of((DTWIN *)d, &e);
+	return fe_picked(&e);
 }
 
-EXPORT void df_delete_picked( DTWIN *d )
-{
-	INT	i;
-
-	for ( i = 0; df_is(d) && i < d->fig->nsh; i++ ) {
-		if ( d->pick[i] != 0 && df_takeable(d, i) ) {
-			/* a group goes whole; taking it out twice is nothing */
-			tad_node_remove(top_of(d, d->fig->sh[i].node));
-		}
-	}
-}
-
-/*
- * Turned over, left to right or top to bottom, or turned a quarter
- * round, each shape about the middle of its own box.
- */
-#define TS_FLIP_H	1
-#define TS_FLIP_V	2
-#define TS_ROT_L	3
-#define TS_ROT_R	4
-
-LOCAL void turn( DTWIN *d, INT i, INT how )
-{
-	CONST T_TVSHAPE	*sh = &d->fig->sh[i];
-	INT		cx2 = sh->r.left + sh->r.right - 1;	/* twice the middle */
-	INT		cy2 = sh->r.top + sh->r.bottom - 1;
-
-	if ( sh->kind == TV_SH_IMAGE || sh->kind == TV_SH_PIXMAP ) {
-		/* a picture keeps its box and says how it is turned */
-		T_TAD		*rec = rec_of(d);
-		CONST UB	*f;
-		INT		rot = attr_num(sh->node, "rotation", 0);
-
-		switch ( how ) {
-		case TS_FLIP_H:
-			f = tad_attr(sh->node, "flipH");
-			(void)tad_set_attr(rec, sh->node, "flipH", (CONST UB *)
-					   ( ( f != NULL && f[0] == 't' ) ? "false" : "true" ));
-			break;
-		case TS_FLIP_V:
-			f = tad_attr(sh->node, "flipV");
-			(void)tad_set_attr(rec, sh->node, "flipV", (CONST UB *)
-					   ( ( f != NULL && f[0] == 't' ) ? "false" : "true" ));
-			break;
-		default:
-			rot = ( rot + ( ( how == TS_ROT_R ) ? 90 : 270 ) ) % 360;
-			attr_put(rec, sh->node, "rotation", rot);
-			break;
-		}
-		return;
-	}
-	if ( of_arc(sh) ) {
-		/*
-		 * An arc: its ends turned with it. Turned over, it runs the
-		 * other way round, so its ends change places.
-		 */
-		T_DPPOINT	s, e, t;
-		T_DPRECT	nb = sh->r;
-		T_DPPOINT	*p[2];
-		INT		k;
-
-		arc_ends_of(sh, &s, &e);
-		p[0] = &s;
-		p[1] = &e;
-		for ( k = 0; k < 2; k++ ) {
-			INT	x = p[k]->x, y = p[k]->y;
-
-			switch ( how ) {
-			case TS_FLIP_H:	p[k]->x = cx2 - x;  break;
-			case TS_FLIP_V:	p[k]->y = cy2 - y;  break;
-			case TS_ROT_R:
-				p[k]->x = ( cx2 - ( 2 * y - cy2 ) ) / 2;
-				p[k]->y = ( cy2 + ( 2 * x - cx2 ) ) / 2;
-				break;
-			default:
-				p[k]->x = ( cx2 + ( 2 * y - cy2 ) ) / 2;
-				p[k]->y = ( cy2 - ( 2 * x - cx2 ) ) / 2;
-				break;
-			}
-		}
-		if ( how == TS_FLIP_H || how == TS_FLIP_V ) {
-			t = s;  s = e;  e = t;
-		} else {
-			INT	w = sh->r.right - sh->r.left;
-			INT	h = sh->r.bottom - sh->r.top;
-
-			nb.left = ( cx2 + 1 - h ) / 2;
-			nb.top = ( cy2 + 1 - w ) / 2;
-			nb.right = nb.left + h;
-			nb.bottom = nb.top + w;
-		}
-		arc_put(rec_of(d), sh->node, &nb, &s, &e);
-		return;
-	}
-	if ( of_points(sh) ) {
-		T_DPPOINT	*pt = (T_DPPOINT *)Kmalloc(sizeof(T_DPPOINT) * (SZ)( sh->npt + 1 ));
-		INT		k;
-
-		if ( pt == NULL ) {
-			dt_no_memory(d);
-			return;
-		}
-		for ( k = 0; k < sh->npt; k++ ) {
-			INT	x = sh->pt[k].x, y = sh->pt[k].y;
-
-			switch ( how ) {
-			case TS_FLIP_H:	pt[k].x = cx2 - x;  pt[k].y = y;  break;
-			case TS_FLIP_V:	pt[k].x = x;  pt[k].y = cy2 - y;  break;
-			case TS_ROT_R:
-				pt[k].x = ( cx2 - ( 2 * y - cy2 ) ) / 2;
-				pt[k].y = ( cy2 + ( 2 * x - cx2 ) ) / 2;
-				break;
-			default:
-				pt[k].x = ( cx2 + ( 2 * y - cy2 ) ) / 2;
-				pt[k].y = ( cy2 - ( 2 * x - cx2 ) ) / 2;
-				break;
-			}
-		}
-		pts_put(rec_of(d), sh, pt, sh->npt);
-		Kfree(pt);
-		return;
-	}
-	if ( how == TS_ROT_L || how == TS_ROT_R ) {
-		/* a box turned a quarter round is the same box, wide for tall */
-		T_DPRECT	nb;
-		INT		w = sh->r.right - sh->r.left;
-		INT		h = sh->r.bottom - sh->r.top;
-
-		nb.left = ( cx2 + 1 - h ) / 2;
-		nb.top = ( cy2 + 1 - w ) / 2;
-		nb.right = nb.left + h;
-		nb.bottom = nb.top + w;
-		box_put(rec_of(d), sh, &nb);
-	}
-}
-
-EXPORT void df_turn( DTWIN *d, INT how )
-{
-	INT	i;
-
-	if ( df_picked(d) == 0 ) {
-		return;
-	}
-	ed_before(d);
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		if ( d->pick[i] != 0 && df_takeable(d, i) ) {
-			turn(d, i, how);
-		}
-	}
-	ed_changed(d);
-}
-
-/* ---------------------------------------------------------------- front and back */
-
-#define TO_FRONT	1
-#define TO_BACK		2
-#define TO_FORWARD	3
-#define TO_BACKWARD	4
-
-/* A link that is 背景化: it stays behind everything else */
-LOCAL BOOL is_bg( DTWIN *d, INT i )
-{
-	T_VOBJ	*v;
-	BOOL	bg = FALSE;
-
-	if ( d->fig->sh[i].kind != TV_SH_LINK || d->fig->sh[i].link < 0 ) {
-		return FALSE;
-	}
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
-	if ( v != NULL ) {
-		bg = (BOOL)( tad_lnk_get(rec_of(d), d->fig->sh[i].link, v) >= E_OK && v->background );
-		Kfree(v);
-	}
-	return bg;
-}
-
-/*
- * The order shapes are drawn in is their zIndex. To the front: each
- * picked one after the one in front of all, keeping their own order;
- * to the back, before the one behind all -- but in front of the links
- * that are 背景化, which stay behind everything and are not moved. One
- * step: a picked one changes places with the next unpicked one in front
- * of it, or behind, unless that one is 背景化.
- */
-EXPORT void df_order( DTWIN *d, INT how )
-{
-	T_TAD	*rec = rec_of(d);
-	INT	i, k, n = d->fig->nsh, top, bottom, nbg = 0;
-	BOOL	*bg;
-
-	if ( !df_is(d) || d->npick == 0 ) {
-		return;
-	}
-	bg = (BOOL *)Kmalloc(sizeof(BOOL) * (SZ)( n + 1 ));
-	if ( bg == NULL ) {
-		return;
-	}
-	for ( i = 0; i < n; i++ ) {
-		bg[i] = is_bg(d, i);
-		if ( bg[i] ) nbg++;
-	}
-	ed_before(d);
-	top = bottom = ( n > 0 ) ? d->fig->sh[0].z : 0;
-	for ( i = 0; i < n; i++ ) {
-		if ( d->fig->sh[i].z > top )    top = d->fig->sh[i].z;
-		if ( d->fig->sh[i].z < bottom ) bottom = d->fig->sh[i].z;
-	}
-	/* the shapes are in drawing order, back first */
-	switch ( how ) {
-	case TO_FRONT:
-		for ( i = 0; i < n; i++ ) {
-			if ( d->pick[i] != 0 && !bg[i] && d->fig->sh[i].node != NULL ) {
-				attr_put(rec, d->fig->sh[i].node, "zIndex", ++top);
-			}
-		}
-		break;
-	case TO_BACK:
-		if ( nbg == 0 ) {
-			for ( i = n - 1; i >= 0; i-- ) {
-				if ( d->pick[i] != 0 && d->fig->sh[i].node != NULL ) {
-					attr_put(rec, d->fig->sh[i].node, "zIndex", --bottom);
-				}
-			}
-			break;
-		}
-		/* numbered again: the 背景化 ones, then the picked, then the rest */
-		k = 0;
-		for ( i = 0; i < n; i++ ) {
-			if ( bg[i] && d->fig->sh[i].node != NULL ) {
-				attr_put(rec, d->fig->sh[i].node, "zIndex", ++k);
-			}
-		}
-		for ( i = 0; i < n; i++ ) {
-			if ( !bg[i] && d->pick[i] != 0 && d->fig->sh[i].node != NULL ) {
-				attr_put(rec, d->fig->sh[i].node, "zIndex", ++k);
-			}
-		}
-		for ( i = 0; i < n; i++ ) {
-			if ( !bg[i] && d->pick[i] == 0 && d->fig->sh[i].node != NULL ) {
-				attr_put(rec, d->fig->sh[i].node, "zIndex", ++k);
-			}
-		}
-		break;
-	case TO_FORWARD:
-		for ( i = n - 2; i >= 0; i-- ) {
-			if ( d->pick[i] == 0 || bg[i] || d->fig->sh[i].node == NULL ) {
-				continue;
-			}
-			for ( k = i + 1; k < n && d->pick[k] != 0; k++ ) {
-				;
-			}
-			if ( k < n && !bg[k] && d->fig->sh[k].node != NULL ) {
-				attr_put(rec, d->fig->sh[i].node, "zIndex",
-					 d->fig->sh[k].z);
-				attr_put(rec, d->fig->sh[k].node, "zIndex",
-					 d->fig->sh[i].z);
-				d->fig->sh[k].z = d->fig->sh[i].z;
-			}
-		}
-		break;
-	default:
-		for ( i = 1; i < n; i++ ) {
-			if ( d->pick[i] == 0 || bg[i] || d->fig->sh[i].node == NULL ) {
-				continue;
-			}
-			for ( k = i - 1; k >= 0 && d->pick[k] != 0; k-- ) {
-				;
-			}
-			if ( k >= 0 && !bg[k] && d->fig->sh[k].node != NULL ) {
-				attr_put(rec, d->fig->sh[i].node, "zIndex",
-					 d->fig->sh[k].z);
-				attr_put(rec, d->fig->sh[k].node, "zIndex",
-					 d->fig->sh[i].z);
-				d->fig->sh[k].z = d->fig->sh[i].z;
-			}
-		}
-		break;
-	}
-	Kfree(bg);
-	ed_pick_none(d);
-	ed_changed(d);
-}
-
-/* ---------------------------------------------------------------- the tray */
-
-LOCAL T_TADNODE	**df_new = NULL;	/* the elements the last paste made */
-LOCAL INT	df_nnew = 0, df_maxnew = 0;
-
-/* Room for one more element a paste made */
-LOCAL BOOL new_room( void )
-{
-	T_TADNODE	**n;
-	INT		m;
-
-	if ( df_nnew < df_maxnew ) {
-		return TRUE;
-	}
-	m = ( df_maxnew > 0 ) ? df_maxnew * 2 : 64;
-	n = (T_TADNODE **)Krealloc(df_new, sizeof(T_TADNODE *) * (size_t)m);
-	if ( n == NULL ) {
-		return FALSE;
-	}
-	df_new = n;
-	df_maxnew = m;
-
-	return TRUE;
-}
-
-/* The elements the last paste made, kept by their addresses */
-LOCAL BOOL new_map( PMAP *m )
-{
-	INT	k;
-
-	if ( !pm_new(m, df_nnew) ) {
-		return FALSE;
-	}
-	for ( k = 0; k < df_nnew; k++ ) {
-		(void)pm_put(m, df_new[k], 0, 0);
-	}
-
-	return TRUE;
-}
-
-LOCAL BOOL is_link_elem( CONST T_TADNODE *c )
-{
-	CONST UB *n = c->name;
-
-	return (BOOL)( n != NULL && n[0] == 'l' && n[1] == 'i' && n[2] == 'n'
-		       && n[3] == 'k' && n[4] == 0 );
-}
-
-/*
- * The shapes taken, copied into the <figure> of a fragment for the tray.
- * A group is copied once, with everything in it. Links are the caller's
- * to add: they are counted where they go.
- */
 EXPORT INT df_copy_into( DTWIN *d, T_TAD *frag )
 {
-	T_TADNODE	*body = tad_body(frag);
-	INT		i, n = 0;
-	PMAP		m;
+	INT	n = 0;
 
-	if ( !df_is(d) || body == NULL ) {
-		return 0;
-	}
-	if ( !pm_new(&m, d->npick) ) {
-		return -1;			/* not copied: no memory */
-	}
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		T_TADNODE	*t;
-
-		if ( d->pick[i] == 0 || !df_takeable(d, i) ) {
-			continue;
-		}
-		t = top_of(d, d->fig->sh[i].node);
-		if ( t != NULL && pm_put(&m, t, 0, 0)
-		  && tad_node_copy(frag, body, NULL, t) != NULL ) {
-			n++;
-		}
-	}
-	pm_free(&m);
+	FE_OVER(d, n = fe_copy_into(&e_, frag));
 	return n;
 }
 
-/*
- * A copy of each shape taken, left where it is just under it: the
- * shapes themselves are then carried away, and the copies are what
- * stays behind. Links are copied as links to the same objects.
- */
-EXPORT void df_dup_picked( DTWIN *d )
-{
-	T_TAD	*rec = rec_of(d);
-	INT	i;
-	PMAP	m;
-
-	if ( d->fig == NULL ) {
-		return;
-	}
-	if ( !pm_new(&m, d->npick) ) {
-		dt_no_memory(d);
-		return;
-	}
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		T_TADNODE	*t;
-
-		if ( d->pick[i] == 0 ) {
-			continue;
-		}
-		if ( d->fig->sh[i].kind == TV_SH_LINK && d->fig->sh[i].link >= 0 ) {
-			T_VOBJ	v;
-			TS_UUID	id;
-
-			if ( tad_lnk_get(d->rec, d->fig->sh[i].link, &v) >= E_OK ) {
-				knl_memset(&v.vobjid, 0, sizeof(v.vobjid));
-				(void)tad_lnk_add(rec, &v, &id);
-			}
-			continue;
-		}
-		if ( !df_is(d) || !df_takeable(d, i) || d->fig->sh[i].node == NULL ) {
-			continue;
-		}
-		t = top_of(d, d->fig->sh[i].node);
-		/* a group once, with everything in it */
-		if ( t == NULL || t->parent == NULL || !pm_put(&m, t, 0, 0) ) {
-			continue;
-		}
-		(void)tad_node_copy(rec, t->parent, t, t);	/* just under it */
-	}
-	pm_free(&m);
-}
-
-/* The shapes of a fragment from the tray put into an element of any record */
 EXPORT INT df_frag_into( T_TAD *rec, T_TADNODE *parent, CONST T_TAD *frag )
 {
-	CONST T_TADNODE	*body = tad_body(frag), *c;
-	INT		n = 0;
+	return fe_frag_into(rec, parent, frag);
+}
 
-	for ( c = ( body != NULL ) ? body->first : NULL; c != NULL; c = c->next ) {
-		if ( c->kind == TAD_ND_ELEM && !is_link_elem(c)
-		  && tad_node_copy(rec, parent, NULL, c) != NULL ) {
-			n++;
-		}
-	}
+EXPORT INT df_paste_frag( DTWIN *d, CONST T_TAD *frag, INT off )
+{
+	INT	n = 0;
+
+	FE_OVER(d, n = fe_paste_frag(&e_, frag, off));
 	return n;
 }
 
-/*
- * The shapes of a fragment from the tray put into this figure, moved
- * 'off' down and across. The model is not made again here; df_pick_pasted
- * takes what was put in once it has been.
- */
-EXPORT INT df_paste_frag( DTWIN *d, CONST T_TAD *frag, INT off )
-{
-	CONST T_TADNODE	*fb = tad_body(frag), *c;
-	T_TADNODE	*body;
-	INT		i;
-
-	df_nnew = 0;
-	if ( !df_is(d) || fb == NULL ) {
-		return 0;
-	}
-	body = tad_body(rec_of(d));
-	if ( body == NULL ) {
-		return 0;
-	}
-	for ( c = fb->first; c != NULL; c = c->next ) {
-		T_TADNODE	*nd;
-
-		if ( c->kind != TAD_ND_ELEM || is_link_elem(c) ) {
-			continue;
-		}
-		nd = tad_node_copy(rec_of(d), body, NULL, c);
-		if ( nd != NULL && new_room() ) {
-			df_new[df_nnew++] = nd;
-		}
-	}
-	if ( off != 0 && df_nnew > 0 ) {
-		PMAP	m;
-
-		ed_model(d);
-		if ( new_map(&m) ) {
-			for ( i = 0; i < d->fig->nsh; i++ ) {
-				if ( d->fig->sh[i].node != NULL
-				  && pm_has(&m, top_of(d, d->fig->sh[i].node)) ) {
-					df_shift(d, i, off, off);
-				}
-			}
-			pm_free(&m);
-		}
-	}
-
-	return df_nnew;
-}
-
-/*
- * A shape just written into the record taken up: the model made again,
- * the new shape picked and nothing else, and the window drawn.
- */
-EXPORT void df_adopt( DTWIN *d, T_TADNODE *nd )
-{
-	ed_pick_none(d);
-	df_nnew = 0;
-	if ( new_room() ) {
-		df_new[df_nnew++] = nd;
-	}
-	ed_model(d);
-	df_pick_pasted(d);
-	ed_changed(d);
-}
-
-EXPORT void df_pick_pasted( DTWIN *d )
-{
-	INT	i;
-	PMAP	m;
-
-	if ( df_is(d) && df_nnew > 0 && new_map(&m) ) {
-		for ( i = 0; i < d->fig->nsh; i++ ) {
-			if ( d->fig->sh[i].node != NULL && d->pick[i] == 0
-			  && pm_has(&m, top_of(d, d->fig->sh[i].node)) ) {
-				ed_pick_add(d, i);
-			}
-		}
-		pm_free(&m);
-		df_whole_groups(d);
-	}
-	df_nnew = 0;
-}
-
-/* ---------------------------------------------------------------- 位置あわせ, 色反転 */
-
-/*
- * The picked shapes lined up with the one picked first: each group or
- * shape moved as a whole, across to the same left edge, middle or right
- * edge, and up and down to the same top, middle or foot.
- */
-/* The box round every shape of the element a shape stands for */
-LOCAL void unit_box( DTWIN *d, T_TADNODE *top, T_DPRECT *b )
-{
-	INT	k;
-	BOOL	any = FALSE;
-
-	for ( k = 0; k < d->fig->nsh; k++ ) {
-		CONST T_DPRECT	*r = &d->fig->sh[k].r;
-
-		if ( d->fig->sh[k].node == NULL
-		  || top_of(d, d->fig->sh[k].node) != top ) {
-			continue;
-		}
-		if ( !any ) {
-			*b = *r;
-			any = TRUE;
-			continue;
-		}
-		if ( r->left < b->left )     b->left = r->left;
-		if ( r->top < b->top )       b->top = r->top;
-		if ( r->right > b->right )   b->right = r->right;
-		if ( r->bottom > b->bottom ) b->bottom = r->bottom;
-	}
-}
-
-LOCAL void align_picked( DTWIN *d )
-{
-	INT		h = 0, v = 0, i, first = ed_first_pick(d);
-	T_DPRECT	ref;
-	T_TADNODE	*ref_top;
-	PMAP		m;
-
-	if ( first < 0 || d->npick < 2 || d->fig->sh[first].node == NULL
-	  || !dt_align_form(d, &h, &v) || ( h == 0 && v == 0 ) ) {
-		return;
-	}
-	ref_top = top_of(d, d->fig->sh[first].node);
-	unit_box(d, ref_top, &ref);
-	ed_before(d);
-	/*
-	 * Each group, or shape on its own, is lined up by its whole box and
-	 * moved as one: the move is worked out once from the model as it
-	 * was, then made to every shape of it.
-	 */
-	if ( !pm_new(&m, d->npick) ) {
-		dt_no_memory(d);
-		return;
-	}
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		T_TADNODE	*top;
-		T_DPRECT	r;
-		INT		dx = 0, dy = 0;
-
-		if ( d->pick[i] == 0 || !df_takeable(d, i) ) {
-			continue;
-		}
-		top = top_of(d, d->fig->sh[i].node);
-		if ( top == ref_top || pm_has(&m, top) ) {
-			continue;		/* the first, or its group worked out already */
-		}
-		unit_box(d, top, &r);
-		switch ( h ) {
-		case 1:	dx = ref.left - r.left;					break;
-		case 2:	dx = ( ref.left + ref.right - r.left - r.right ) / 2;	break;
-		case 3:	dx = ref.right - r.right;				break;
-		default: break;
-		}
-		switch ( v ) {
-		case 1:	dy = ref.top - r.top;					break;
-		case 2:	dy = ( ref.top + ref.bottom - r.top - r.bottom ) / 2;	break;
-		case 3:	dy = ref.bottom - r.bottom;				break;
-		default: break;
-		}
-		(void)pm_put(&m, top, dx, dy);
-	}
-	/* then every shape of each, by as much */
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		T_TADNODE	*top;
-
-		if ( d->fig->sh[i].node == NULL ) {
-			continue;
-		}
-		top = top_of(d, d->fig->sh[i].node);
-		if ( pm_has(&m, top) ) {
-			INT	k = pm_slot(&m, top);
-
-			df_shift(d, i, m.a[k], m.b[k]);
-		}
-	}
-	pm_free(&m);
-	ed_changed(d);
-}
-
-/* The colour a pattern number stands for, the other way up */
-LOCAL void invert_attr( DTWIN *d, T_TADNODE *nd, CONST char *pat,
-			CONST char *col_name, UW col )
-{
-	INT	id;
-
-	if ( col == TAD_COL_NONE ) {
-		return;				/* nothing drawn stays nothing */
-	}
-	col = ( ~col ) & 0x00FFFFFFU;
-	id = tv_pattern_of(col);
-	if ( id > 0 ) {
-		attr_put(rec_of(d), nd, pat, id);
-	} else {
-		UB		w[8];
-		CONST char	*hex = "0123456789abcdef";
-		INT		k;
-
-		/* no fixed pattern is that colour: the colour written out */
-		w[0] = '#';
-		for ( k = 0; k < 6; k++ ) {
-			w[1 + k] = (UB)hex[( col >> ( 20 - k * 4 ) ) & 0xF];
-		}
-		w[7] = 0;
-		(void)tad_set_attr(rec_of(d), nd, col_name, w);
-	}
-}
-
-LOCAL void invert_picked( DTWIN *d )
-{
-	INT	i;
-
-	if ( df_picked(d) == 0 ) {
-		return;
-	}
-	ed_before(d);
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		CONST T_TVSHAPE	*sh = &d->fig->sh[i];
-
-		if ( d->pick[i] == 0 || !df_takeable(d, i) ) {
-			continue;
-		}
-		if ( sh->line_w > 0 ) {
-			invert_attr(d, sh->node, "l_pat", "lineColor", sh->line_col);
-		}
-		invert_attr(d, sh->node, "f_pat", "fillColor", sh->fill_col);
-	}
-	ed_changed(d);
-}
+#define TS_FLIP_H	FE_FLIP_H
+#define TS_FLIP_V	FE_FLIP_V
+#define TS_ROT_L	FE_ROT_L
+#define TS_ROT_R	FE_ROT_R
+#define TO_FRONT	FE_TO_FRONT
+#define TO_BACK		FE_TO_BACK
+#define TO_FORWARD	FE_TO_FORWARD
+#define TO_BACKWARD	FE_TO_BACKWARD
 
 /* ---------------------------------------------------------------- the menu */
 
@@ -1321,8 +287,7 @@ LOCAL CONST FIGCMD fig_cmds[] = {
 /* The items that act on what is taken, grey when nothing is */
 LOCAL CONST char * CONST fig_on_pick[] = {
 	"copy", "cut", "delete", "ungroup", "front", "back", "forward", "backward",
-	"transform", "invert", "burn", "flip.h", "flip.v", "rot.l", "rot.r",
-	"fix", "unfix", "bg", "unbg"
+	"transform", "invert", "burn", "flip.h", "flip.v", "rot.l", "rot.r"
 };
 
 /* The figure editor's menu (FIGMENU.DEF), set to what the window is */
@@ -1344,6 +309,12 @@ EXPORT ER df_menu_make( DTWIN *d, ID *p_mid )
 	for ( i = 0; i < (INT)( sizeof(fig_on_pick) / sizeof(fig_on_pick[0]) ); i++ ) {
 		(void)mn_chg_atr(mid, NULL, fig_on_pick[i], none ? MN_GREY : 0);
 	}
+	/* 保護: by what it can change of the links taken */
+	i = d->sealed ? 0 : (INT)fe_prot_can(d->rec, d->fig, d->pick);
+	fe_prot_grey(mid, (UINT)i);
+#ifdef USE_UITEST
+	tm_printf((UB *)"desktop: protect menu %x\n", (UINT)i);	/* for the tests */
+#endif
 	(void)mn_chg_atr(mid, NULL, "undo", ( d->nundo == 0 ) ? MN_GREY : 0);
 	(void)mn_chg_atr(mid, NULL, "group", ( d->npick < 2 ) ? MN_GREY : 0);
 	(void)mn_chg_atr(mid, NULL, "align", ( d->npick < 2 ) ? MN_GREY : 0);

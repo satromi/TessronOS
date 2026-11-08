@@ -63,6 +63,13 @@ LOCAL void who_asks( ID pid, UB *out, INT max )
 	out[n] = 0;
 }
 
+LOCAL INT	admin_panels = 0;		/* how many have been shown, for the tests */
+
+EXPORT INT dt_admin_panels( void )
+{
+	return admin_panels;
+}
+
 LOCAL void wipe( UB *s, INT n )
 {
 	volatile UB	*v = s;
@@ -97,6 +104,7 @@ LOCAL BOOL ask_password( DTWIN *host, CONST UB *who, CONST UB *what, UB *pw, INT
 	dt_pn_add(def, WM_PT_SECRET, 1, 14, top, AD_W - 28, 26, NULL);
 	dt_pn_buttons(def, "許可");
 
+	admin_panels++;
 	ans = dt_pn_run(host, def, &pid);
 	pw[0] = 0;
 	if ( ans == WM_ANS_OK && pid >= 0 ) {
@@ -146,6 +154,7 @@ LOCAL ER choose_password( DTWIN *host, CONST UB *who )
 		dt_pn_add(def, WM_PT_SECRET, 2, 190, top, AD_W - 204, 26, NULL);
 		dt_pn_buttons(def, "設定");
 
+		admin_panels++;
 		ans = dt_pn_run(host, def, &pid);
 		a[0] = b[0] = 0;
 		if ( ans == WM_ANS_OK && pid >= 0 ) {

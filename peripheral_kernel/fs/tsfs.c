@@ -1254,6 +1254,28 @@ EXPORT ER ts_syn_all( void )
 	return er;
 }
 
+/* What has been committed on one volume, on the medium. A volume kept as files has nothing of its own */
+EXPORT ER ts_syn_vol( ID vol )
+{
+	TSFSVOL	*v = vol_of(vol);
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	return ( v->bvol > 0 ) ? ts_jrnl_durable(v->bvol, ts_jrnl_next(v->bvol)) : E_OK;
+}
+
+/* The machine going off: the volume left clean and read only (ts_finish_vol_blk) */
+EXPORT ER ts_finish_vol( ID vol )
+{
+	TSFSVOL	*v = vol_of(vol);
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	return ( v->bvol > 0 ) ? ts_finish_vol_blk(v->bvol) : E_OK;
+}
+
 EXPORT ER ts_syn_obj( ID od )
 {
 	TSFSOBJ	*o = od_of(od);

@@ -1,0 +1,11 @@
+<tad version="1.0" encoding="UTF-8" filename="原紙集めのメニュー">
+<document>
+<p>原紙集めのメニュー</p>
+<p>原紙集めのウインドウのメニュー。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c4-5b94-7c55-8d66-9fab0c1d5b94"/></include>
+<item code="reread">再表示</item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c4-5b95-7c56-8d67-9fab0c1d5b95"/></include>
+</menu>
+</tad>

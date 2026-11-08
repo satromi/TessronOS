@@ -184,6 +184,29 @@ LOCAL void test_tables( void )
 	KT_ASSERT_EQ(km_label(7, 0x04, 0, b, sizeof(b)), E_PAR);
 	KT_ASSERT_EQ(km_label(KM_L_NAME, 0x100, 0, b, sizeof(b)), E_PAR);
 
+	/*
+	 * a key's own layouts, carried in its mods (a screen keyboard's): read
+	 * in them, the machine's (Dvorak, JIS かな here) left as they are; a
+	 * key without them in the machine's
+	 */
+	KT_ASSERT_EQ(km_char(0x14, KM_MOD_LAYOUT(KM_LATIN_KEYS, KM_KANA_JIS)), 'q');
+	KT_ASSERT_EQ(km_char(0x14, 0), '\'');
+	KT_ASSERT_EQ(km_char(0x07, KM_MOD_LAYOUT(KM_LATIN_KEYS, KM_KANA_TRON) | HID_MOD_LSHIFT), 'D');
+	KT_ASSERT(km_label(KM_L_CHAR, 0x14, KM_MOD_LAYOUT(KM_LATIN_KEYS, KM_KANA_JIS), b, sizeof(b)) == 1 && same(b, "q"));
+	KT_ASSERT(km_label(KM_L_KANA, 0x04, KM_MOD_LAYOUT(KM_LATIN_DVORAK, KM_KANA_TRON), b, sizeof(b)) > 0
+		  && same(b, "た"));
+	KT_ASSERT(km_label(KM_L_KANA, 0x04, KM_MOD_LAYOUT(KM_LATIN_DVORAK, KM_KANA_TRON) | HID_MOD_LSHIFT, b, sizeof(b)) > 0
+		  && same(b, "ぬ"));
+	KT_ASSERT(km_label(KM_L_KANA, 0x04, KM_MOD_LAYOUT(KM_LATIN_KEYS, KM_KANA_NICOLA) | KM_MOD_THUMB_L, b, sizeof(b)) > 0
+		  && same(b, "を"));
+	KT_ASSERT_EQ(km_label(KM_L_KANA, 0x04, 0, b, sizeof(b)), 0);
+	KT_ASSERT_EQ(km_latin_of(KM_MOD_LAYOUT(KM_LATIN_KEYS, KM_KANA_NICOLA)), KM_LATIN_KEYS);
+	KT_ASSERT_EQ(km_kana_of(KM_MOD_LAYOUT(KM_LATIN_KEYS, KM_KANA_NICOLA)), KM_KANA_NICOLA);
+	KT_ASSERT_EQ(km_latin_of(HID_MOD_LSHIFT), KM_LATIN_DVORAK);
+	KT_ASSERT_EQ(km_kana_of(0), KM_KANA_JIS);
+	KT_ASSERT_EQ(km_latin(), KM_LATIN_DVORAK);
+	KT_ASSERT_EQ(km_kana(), KM_KANA_JIS);
+
 	/* as it was */
 	KT_ASSERT_ER(km_set(&was, KM_SET_LATIN | KM_SET_KANA | KM_SET_MAP), E_OK);
 }
@@ -333,6 +356,9 @@ LOCAL void test_seen_put( void )
 	KT_ASSERT_ER(wm_obj_key_put(nwid, 0, 0), E_PAR);
 	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x100, 0), E_PAR);
 	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x04, OB_KEY_UP), E_PAR);
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x04, 1U << KM_MOD_LATIN_SHIFT), E_PAR);	/* layouts without KM_MOD_OWN */
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x04, KM_MOD_OWN | ( 3U << KM_MOD_LATIN_SHIFT )), E_PAR);
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x04, KM_MOD_OWN | ( 3U << KM_MOD_KANA_SHIFT )), E_PAR);
 	KT_ASSERT_ER(wm_obj_key_put(0, 0x04, 0), E_ID);
 
 	/* and put in as the keyboard would: pressed and let go, with what is held */
@@ -345,9 +371,43 @@ LOCAL void test_seen_put( void )
 		       && tap[0].mods == ( HID_MOD_RSHIFT | KM_MOD_THUMB_L ));
 		KT_ASSERT(tap[1].type == HID_EV_KEY_UP && tap[1].code == 0x05);
 	}
-	/* long after the press: no more */
+	/* with its own layouts: they go with the press and the let go, the modifiers with the press only */
+	pos = knl_hid_tap_now();
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x05, HID_MOD_LSHIFT | KM_MOD_LAYOUT(KM_LATIN_DVORAK, KM_KANA_TRON)), E_OK);
+	n = knl_hid_tap(&pos, 0, tap, 8, NULL);
+	KT_ASSERT_EQ(n, 2);
+	if ( n == 2 ) {
+		KT_ASSERT_EQ(tap[0].mods, HID_MOD_LSHIFT | KM_MOD_LAYOUT(KM_LATIN_DVORAK, KM_KANA_TRON));
+		KT_ASSERT_EQ(tap[1].mods, KM_MOD_LAYOUT(KM_LATIN_DVORAK, KM_KANA_TRON));
+	}
+	/* held: pressed, pressed again, and let go only when asked; another key lets the first go */
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x06, WM_KEY_PUT_UP), E_OACV);
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x06, WM_KEY_PUT_DOWN | WM_KEY_PUT_UP), E_PAR);
+	KT_ASSERT_ER(wm_obj_key_put(pwid, 0x06, WM_KEY_PUT_DOWN), E_OBJ);
+	pos = knl_hid_tap_now();
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x06, HID_MOD_LSHIFT | WM_KEY_PUT_DOWN), E_OK);
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x06, HID_MOD_LSHIFT | WM_KEY_PUT_DOWN), E_OK);
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x07, WM_KEY_PUT_UP), E_OACV);
+	n = knl_hid_tap(&pos, 0, tap, 8, NULL);
+	KT_ASSERT_EQ(n, 2);
+	if ( n == 2 ) {
+		KT_ASSERT(tap[0].type == HID_EV_KEY_DOWN && tap[1].type == HID_EV_KEY_DOWN && tap[1].code == 0x06);
+	}
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x07, WM_KEY_PUT_DOWN), E_OK);
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x06, WM_KEY_PUT_UP), E_OACV);
+	n = knl_hid_tap(&pos, 0, tap, 8, NULL);
+	KT_ASSERT_EQ(n, 2);
+	if ( n == 2 ) {
+		KT_ASSERT(tap[0].type == HID_EV_KEY_UP && tap[0].code == 0x06 && tap[0].mods == 0);
+		KT_ASSERT(tap[1].type == HID_EV_KEY_DOWN && tap[1].code == 0x07);
+	}
+	/* long after the press: no more; but the key held may repeat and be let go */
 	tk_dly_tsk(WM_KEY_PUT_MS + 300);
 	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x04, 0), E_OACV);
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x04, WM_KEY_PUT_DOWN), E_OACV);
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x07, WM_KEY_PUT_DOWN), E_OK);
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x07, WM_KEY_PUT_UP), E_OK);
+	KT_ASSERT_ER(wm_obj_key_put(nwid, 0x07, WM_KEY_PUT_UP), E_OACV);
 	{
 		T_WMEV	drain;
 
@@ -598,10 +658,170 @@ LOCAL void test_selftest( void )
 	KT_ASSERT_EQ(psts.exitcd, 0);
 }
 
+/* ---------------------------------------------------------------- thumbs together */
+
+IMPORT INT  knl_hid_ext_attach( BOOL kbd, CONST UB *rd, INT rdlen, CONST UB *name );
+IMPORT void knl_hid_ext_detach( INT hd );
+IMPORT void knl_hid_ext_report( INT hd, CONST UB *r, INT len );
+
+LOCAL INT	th_hd;
+
+/* The keys held, as a keyboard's report says */
+LOCAL void th_keys( UB k1, UB k2 )
+{
+	UB	r[8];
+
+	knl_memset(r, 0, sizeof(r));
+	r[2] = k1;
+	r[3] = k2;
+	knl_hid_ext_report(th_hd, r, 8);
+}
+
+LOCAL void th_want( UINT type, UINT code, UINT mods, TMO tmo )
+{
+	T_HIDEV	ev;
+
+	knl_memset(&ev, 0, sizeof(ev));
+	KT_ASSERT_ER(ts_hid_read(&ev, tmo), E_OK);
+	if ( ev.type != type || ev.code != code || ( ev.mods & 0x3FF ) != mods ) {
+		tm_printf((UB *)"  got type %d code %02x mods %x, wanted %d %02x %x\n",
+			  (INT)ev.type, (INT)ev.code, (INT)ev.mods, (INT)type, (INT)code, (INT)mods);
+	}
+	KT_ASSERT_EQ(ev.type, type);
+	KT_ASSERT_EQ(ev.code, code);
+	KT_ASSERT_EQ(ev.mods & 0x3FF, mods);
+}
+
+LOCAL void th_none( TMO tmo )
+{
+	T_HIDEV	ev;
+
+	KT_ASSERT_ER(ts_hid_read(&ev, tmo), E_TMOUT);
+}
+
+/*
+ * The 親指シフト layout: a thumb before the character and just after it
+ * both make the thumb's face; a character alone waits and goes on its
+ * own; of character, thumb, character the thumb goes with the nearer
+ * one; another key sends what waits; the thumb alone is the key it is.
+ */
+LOCAL void test_thumb_sim( void )
+{
+	T_HIDATTR	a, keep;
+	T_HIDEV		ev;
+	INT		was = km_kana();
+	UD		t0 = 0, t1 = 0;
+	CONST UINT	L = KM_THUMB_L_KEY, A = 0x04, B = 0x05;
+
+	KT_ASSERT_ER(ts_hid_getattr(&keep), E_OK);
+	a = keep;
+	a.key_on = a.key_off = a.key_sim = 0;
+	a.krp = 0;
+	KT_ASSERT_ER(ts_hid_setattr(&a), E_OK);
+	KT_ASSERT_ER(km_set_kana(KM_KANA_NICOLA), E_OK);
+	th_hd = knl_hid_ext_attach(TRUE, NULL, 0, (CONST UB *)"kt-thumb");
+	KT_ASSERT(th_hd > 0);
+	while ( ts_hid_read(&ev, TMO_POL) >= E_OK ) ;
+
+	/* alone: held back for the window, then without a thumb */
+	th_keys(A, 0);
+	(void)ts_get_mono(&t0);
+	KT_ASSERT_ER(ts_hid_read(&ev, 500), E_OK);
+	(void)ts_get_mono(&t1);
+	KT_ASSERT_EQ(ev.code, A);
+	KT_ASSERT_EQ(ev.mods & 0x300, 0);
+	tm_printf((UB *)"  a character alone waited %d ms\n", (INT)( ( t1 - t0 ) / 1000000 ));
+	KT_ASSERT(t1 - t0 >= 60000000ULL);
+	th_keys(0, 0);
+	th_want(HID_EV_KEY_UP, A, 0, 200);
+
+	/* thumb first, at once */
+	th_keys(L, 0);
+	th_none(120);
+	th_keys(L, A);
+	th_want(HID_EV_KEY_DOWN, A, KM_MOD_THUMB_L, 500);
+	th_keys(L, 0);
+	th_want(HID_EV_KEY_UP, A, KM_MOD_THUMB_L, 200);
+	th_keys(0, 0);
+	th_none(120);
+
+	/* the character first, the thumb within the window: its face, the thumb not a key of its own */
+	th_keys(A, 0);
+	tk_dly_tsk(20);
+	th_keys(A, L);
+	th_want(HID_EV_KEY_DOWN, A, KM_MOD_THUMB_L, 500);
+	th_keys(0, 0);
+	{
+		/* the two let go in one report */
+		KT_ASSERT_ER(ts_hid_read(&ev, 200), E_OK);
+		KT_ASSERT_EQ(ev.type, HID_EV_KEY_UP);
+		KT_ASSERT_EQ(ev.code, A);
+	}
+	th_none(120);
+
+	/* character, thumb soon after, thumb let go before its time: decided at once, with it */
+	th_keys(A, 0);
+	tk_dly_tsk(40);
+	th_keys(A, L);
+	th_keys(A, 0);
+	th_want(HID_EV_KEY_DOWN, A, KM_MOD_THUMB_L, 30);
+	th_keys(0, 0);
+	th_want(HID_EV_KEY_UP, A, 0, 200);
+
+	/* the thumb too late: the character went alone, the thumb goes with the next */
+	th_keys(A, 0);
+	th_want(HID_EV_KEY_DOWN, A, 0, 500);
+	tk_dly_tsk(100);
+	th_keys(A, L);
+	th_keys(A, L);
+	th_none(100);
+	th_keys(0, L);
+	th_want(HID_EV_KEY_UP, A, KM_MOD_THUMB_L, 200);
+	th_keys(0, 0);			/* nothing went with it: the key it is */
+	th_want(HID_EV_KEY_DOWN, L, 0, 200);
+	th_want(HID_EV_KEY_UP, L, 0, 200);
+
+	/* character, thumb, character with the thumb nearer the second */
+	th_keys(A, 0);
+	tk_dly_tsk(60);
+	th_keys(A, L);
+	tk_dly_tsk(10);
+	{
+		UB	r[8];
+
+		knl_memset(r, 0, sizeof(r));
+		r[2] = A;
+		r[3] = L;
+		r[4] = B;
+		knl_hid_ext_report(th_hd, r, 8);
+	}
+	th_want(HID_EV_KEY_DOWN, A, 0, 200);
+	th_want(HID_EV_KEY_DOWN, B, KM_MOD_THUMB_L, 200);
+	th_keys(0, 0);
+	(void)ts_hid_read(&ev, 200);
+	(void)ts_hid_read(&ev, 200);
+	th_none(120);
+
+	/* character, then Enter: the character first, no waiting for the window */
+	th_keys(A, 0);
+	th_keys(A, 0x28);
+	th_want(HID_EV_KEY_DOWN, A, 0, 30);
+	th_want(HID_EV_KEY_DOWN, 0x28, 0, 30);
+	th_keys(0, 0);
+	(void)ts_hid_read(&ev, 200);
+	(void)ts_hid_read(&ev, 200);
+
+	knl_hid_ext_detach(th_hd);
+	while ( ts_hid_read(&ev, 50) >= E_OK ) ;
+	(void)km_set_kana(was);
+	(void)ts_hid_setattr(&keep);
+}
+
 EXPORT void ktest_km( void )
 {
 	tm_printf((UB *)"\n[km] キー配列 (design 11.15)\n");
 	KT_RUN(test_tables);
+	KT_RUN(test_thumb_sim);
 	KT_RUN_SCREEN(test_nofocus);
 	KT_RUN_SCREEN(test_seen_put);
 	KT_RUN_SCREEN(test_program);

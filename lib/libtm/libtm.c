@@ -83,7 +83,11 @@ EXPORT void tm_out_unlock( UINT intsts )
  * under the console's lock; a reader names where it had got to, and is
  * moved on to the oldest byte still kept when it has fallen behind.
  */
+#ifdef USE_TESTAGENT
+#define TM_LOG_SIZE	( 1024 * 1024 )		/* the test agent reads the start-up from here too */
+#else
 #define TM_LOG_SIZE	65536
+#endif
 
 LOCAL UB	tm_log[TM_LOG_SIZE];
 LOCAL UD	tm_log_end = 0;		/* bytes ever written */

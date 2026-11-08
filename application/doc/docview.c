@@ -32,12 +32,12 @@
  *	how tall it is -- the tallest letters, the ruby over them, a picture
  *	standing in it -- and only then is anything put down, on a base line
  *	common to the whole line. Its pitch is the letters' size and the gap
- *	the paragraph's tab format asks for, half a size when it asks none.
+ *	the paragraph's tab format asks for, half a size when it asks none;
+ *	a virtual object, a picture or a figure stands on the base line and
+ *	adds to that only what it stands taller than the letters.
  */
 
-#include <sys/machine.h>
-#include "kernel.h"
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include <ts/tadview.h>
 #include <ts/dp.h>
 #include <ts/fn.h>
@@ -173,6 +173,7 @@ typedef struct {
 	INT	w;			/* how wide */
 	INT	x;			/* where it is on its line, from the left */
 	INT	asc, desc;		/* above and below the base line */
+	INT	lasc, ldesc;		/* the same for the letters where it stands */
 	INT	shift;			/* raised (below nought) or lowered */
 	UINT	flags;
 } ITEM;
@@ -281,7 +282,38 @@ typedef struct {
 	 */
 	BOOL		vert;
 	INT		vr;
+
+	/*
+	 * How the document is shown, from the document (T_TVDOC): what it
+	 * is magnified by, zoom / zden, every length of it alike; how many
+	 * opened objects deep it is, its links drawn that deep; and how
+	 * deep opened objects inside it are drawn with what is inside.
+	 */
+	INT		zoom, zden;
+	INT		depth;
+	INT		open_max;
+	BOOL		bare;
+
+	/*
+	 * Drawn: the whole box across the lines, as top and bottom are
+	 * before they are narrowed to the part being drawn again, and where
+	 * the paragraphs that show in it are put down (tv_doc_band); NULL
+	 * not kept.
+	 */
+	INT		vtop, vbottom;
+	T_TVSHOWN	*seen;
+
+	/*
+	 * How far past what is being drawn a line of letters is drawn too,
+	 * its letters reaching past its pitch: the whole box, INK_SLACK; a
+	 * part of it drawn again, only what a shadow or a bag reaches by
+	 * (BAND_EDGE), the part having been made that much larger.
+	 */
+	INT		slack;
 } LAY;
+
+#define INK_SLACK	64
+#define BAND_EDGE	4	/* past a line's own pitch: a shadow's 2, a bag's 1 */
 
 /* A rectangle of the walk's places, as it stands in the box */
 LOCAL void ph_rect( CONST LAY *l, T_DPRECT *rc )
@@ -342,49 +374,11 @@ LOCAL void lg_pixel( CONST LAY *l, INT x, INT y, UW col )
 #define LM_CARET_BOX	2		/* where a place is */
 #define LM_SELECT	3		/* a stretch turned over */
 
-/* What is not normally seen shown: the marks of breaks, tabs, pages, notes */
-LOCAL BOOL	dv_detail = FALSE;
-
-EXPORT void tv_doc_detail( BOOL on )
-{
-	dv_detail = on;
-}
-
 /*
- * A document drawn magnified, dv_zoom / dv_zden: as a piece of text in
- * a figure is when the figure is. Every length of it grows alike.
- * Eighths unless whoever draws it says what else.
+ * A length of the document as it is drawn: magnified as the document is
+ * (LAY.zoom / LAY.zden), by the walk 'l' in hand
  */
-LOCAL INT	dv_zoom = 8;
-LOCAL INT	dv_zden = 8;
-
-EXPORT void tv_doc_zoom_by( INT z, INT den )
-{
-	if ( z <= 0 || den <= 0 ) {
-		z = den = 8;
-	}
-	dv_zoom = z;
-	dv_zden = den;
-}
-
-EXPORT void tv_doc_zoom( INT z )
-{
-	tv_doc_zoom_by(z, 8);
-}
-
-/*
- * Whether a document is laid on its paper. Off, its letters go over
- * whatever is there already: a text that is drawn by itself onto a
- * picture of the rest (the player of 実時間制御TAD, design 19.5).
- */
-LOCAL BOOL	dv_ground = TRUE;
-
-EXPORT void tv_doc_ground( BOOL on )
-{
-	dv_ground = on;
-}
-
-#define DZ(v)	( ( dv_zoom == dv_zden ) ? (v) : (v) * dv_zoom / dv_zden )
+#define DZ(v)	( ( l->zoom == l->zden ) ? (v) : (v) * l->zoom / l->zden )
 
 LOCAL INT num_text( INT n, UB *out );
 LOCAL INT page_no( CONST T_TVRUN *r, INT pg );
@@ -406,7 +400,7 @@ LOCAL void sheets( LAY *l, CONST T_TVDOC *d, INT h );
 /* ---------------------------------------------------------------- the letters' face */
 
 /* How tall a run's letters are drawn */
-LOCAL INT run_px( CONST T_TVRUN *r )
+LOCAL INT run_px( CONST LAY *l, CONST T_TVRUN *r )
 {
 	INT	px = DZ(( r->size > 0 ) ? r->size : 14);
 
@@ -446,7 +440,7 @@ LOCAL void run_font( LAY *l, CONST T_TVRUN *r )
 {
 	UINT	has;
 	ID	fid = run_face(r, &has);
-	INT	px = run_px(r);
+	INT	px = run_px(l, r);
 	INT	xpx = 0;
 	UINT	st = 0;
 
@@ -482,16 +476,16 @@ LOCAL void run_font( LAY *l, CONST T_TVRUN *r )
 }
 
 /* The extra room after each letter of a run, in pixels */
-LOCAL INT run_space( CONST T_TVRUN *r )
+LOCAL INT run_space( CONST LAY *l, CONST T_TVRUN *r )
 {
-	return ( r->space > 0 ) ? run_px(r) * r->space / 1000 : 0;
+	return ( r->space > 0 ) ? run_px(l, r) * r->space / 1000 : 0;
 }
 
 /*
  * How far a run's baseline is moved up (文字基準位置移動), in pixels:
  * below nought, down.
  */
-LOCAL INT run_lift( CONST T_TVRUN *r )
+LOCAL INT run_lift( CONST LAY *l, CONST T_TVRUN *r )
 {
 	if ( r->lift_abs ) {
 		return DZ(r->lift);
@@ -532,8 +526,8 @@ LOCAL void turned_extent( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n,
 	buf[i] = 0;
 	turn_on(l, r);
 	if ( l->fid <= 0 || fn_extent(l->fid, buf, p_asc, p_desc) < E_OK ) {
-		*p_asc = run_px(r);
-		*p_desc = run_px(r) / 4;
+		*p_asc = run_px(l, r);
+		*p_desc = run_px(l, r) / 4;
 	}
 	turn_off(l, r);
 }
@@ -549,7 +543,7 @@ LOCAL INT text_w( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n )
 	}
 	/* 縦中横: whatever it holds, one box down the line */
 	if ( l->vert && ( r->style & TV_ST_COMB ) != 0 ) {
-		return run_px(r) + run_space(r);
+		return run_px(l, r) + run_space(l, r);
 	}
 	if ( n >= (INT)sizeof(buf) ) {
 		b = (UB *)Kmalloc((SZ)n + 1);
@@ -567,7 +561,7 @@ LOCAL INT text_w( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n )
 	turn_on(l, r);
 	if ( l->vert ) {
 		w = fn_vwidth(l->fid, b);
-	} else if ( run_space(r) != 0 ) {
+	} else if ( run_space(l, r) != 0 ) {
 		/*
 		 * Spaced letters are put down one at a time (text_put), each
 		 * at a whole pixel: measured the same way, letter by letter,
@@ -599,7 +593,7 @@ LOCAL INT text_w( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n )
 		w = 0;
 	}
 
-	return w + chars * run_space(r);
+	return w + chars * run_space(l, r);
 }
 
 /*
@@ -611,7 +605,7 @@ LOCAL void comb_put( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n, INT x,
 		     INT base, UW col )
 {
 	UB	mem[64], *buf = mem;
-	INT	i, em = run_px(r), tw;
+	INT	i, em = run_px(l, r), tw;
 	UINT	st = 0;
 	T_FNMET	met;
 
@@ -651,7 +645,7 @@ LOCAL void text_put( LAY *l, CONST T_TVRUN *r, CONST UB *s, INT n, INT x,
 		     INT base, UW col )
 {
 	UB	buf[64], *b = buf;
-	INT	i, sp = run_space(r);
+	INT	i, sp = run_space(l, r);
 
 	if ( n <= 0 || l->fid <= 0 || l->gid < 0 ) {
 		return;
@@ -925,11 +919,15 @@ LOCAL void thing_size( LAY *l, CONST T_TVRUN *r, INT *p_w, INT *p_h )
 			*p_h = units_px(( l->doc != NULL ) ? l->doc->vunit : -72, v.bottom - v.top);
 		}
 		/*
-		 * Never shorter than the object closed, sized or not: the
-		 * same least height a figure gives it (tad_lnk_closed_h).
+		 * The height a figure gives it (tad_lnk_fit_h): never shorter
+		 * than the object closed, and closed when it was sized only a
+		 * little past its band. The width is the record's, never less
+		 * than the least a box of it may be (tad_lnk_least_w): the
+		 * name is cut to it, not the box sized to the name.
 		 */
-		if ( *p_h < tad_lnk_closed_h(&v) ) {
-			*p_h = tad_lnk_closed_h(&v);
+		*p_h = tad_lnk_fit_h(&v, *p_h);
+		if ( *p_w < tad_lnk_least_w(&v) ) {
+			*p_w = tad_lnk_least_w(&v);
 		}
 	}
 	*p_w = DZ(*p_w);
@@ -965,10 +963,15 @@ LOCAL void put_link( LAY *l, INT idx, INT x, INT y, INT w, INT h )
 		return;
 	}
 	if ( known ) {
+		T_TVHOW	how;
+
 		if ( v.chsz > 0 ) {
 			v.chsz = DZ(v.chsz);	/* magnified with the text */
 		}
-		tv_draw_link(l->gid, &box, &v, tv_open_depth);
+		how.depth = l->depth;
+		how.open_max = l->open_max;
+		how.bare = l->bare;
+		tv_draw_link_how(l->gid, &box, &v, &how);
 		l->set_fid = 0;		/* its name set the face to its own size */
 	} else {
 		dp_frame_rect(l->gid, &box, wm_look(WM_LOOK_FRAME), 1);
@@ -1060,7 +1063,7 @@ LOCAL INT gather( LAY *l, CONST T_TVDOC *d, CONST T_TVPARA *p, ITEM *it, INT max
 	for ( ri = p->first; ri < p->first + p->n && ri < d->nrun && n < max; ri++ ) {
 		CONST T_TVRUN	*r = &d->run[ri];
 		T_FNMET		met;
-		INT		asc, desc, px = run_px(r), met_asc, met_desc;
+		INT		asc, desc, px = run_px(l, r), met_asc, met_desc;
 
 		run_font(l, r);
 		asc = px;
@@ -1097,7 +1100,7 @@ LOCAL INT gather( LAY *l, CONST T_TVDOC *d, CONST T_TVPARA *p, ITEM *it, INT max
 			} else if ( ( r->style & TV_ST_SUB ) != 0 ) {
 				shift = DZ(r->size) * 2 / 10;
 			}
-			shift -= run_lift(r);
+			shift -= run_lift(l, r);
 			while ( i < r->len && n < max ) {
 				ITEM	*t = &it[n];
 				INT	j = i + 1;
@@ -1155,7 +1158,9 @@ LOCAL INT gather( LAY *l, CONST T_TVDOC *d, CONST T_TVPARA *p, ITEM *it, INT max
 			it[n].ri = ri;  it[n].off = 0;  it[n].len = 0;
 			it[n].fpos = fpos;  it[n].units = 1;
 			it[n].w = w + 2;
+			/* across, it stands on the base line: all of it above */
 			it[n].asc = h;  it[n].desc = 0;  it[n].shift = 0;
+			it[n].lasc = asc;  it[n].ldesc = desc;
 			if ( l->vert ) {
 				/*
 				 * Down the line it stays upright, as it is
@@ -1242,7 +1247,7 @@ LOCAL INT gather( LAY *l, CONST T_TVDOC *d, CONST T_TVPARA *p, ITEM *it, INT max
 /* ---------------------------------------------------------------- one paragraph */
 
 /* The next tab stop after x, the stops counted from the line's left edge */
-LOCAL INT tab_to( CONST T_TVPARA *p, INT base, INT x, INT size )
+LOCAL INT tab_to( CONST LAY *l, CONST T_TVPARA *p, INT base, INT x, INT size )
 {
 	INT	i, step = DZ( size > 0 ? size : 14 ) * 4;
 
@@ -1262,7 +1267,7 @@ LOCAL void draw_text_item( LAY *l, CONST T_TVRUN *r, CONST ITEM *t, INT x,
 	CONST UB	*s = r->text + t->off;
 	UW		col = r->colour;
 	UINT		has = 0;
-	INT		px = run_px(r), b = base + t->shift;
+	INT		px = run_px(l, r), b = base + t->shift;
 	INT		up = l->vert ? px - px / 2 : px;	/* the letters' box over */
 	INT		dn = l->vert ? px / 2 : px / 4;		/* and under the base line */
 	T_DPRECT	rc;
@@ -1364,7 +1369,7 @@ LOCAL void box_ends( LAY *l, CONST T_TVDOC *d, CONST ITEM *it, INT a, INT e,
 
 	for ( k = a; k < e; k++ ) {
 		CONST T_TVRUN	*r = &d->run[it[k].ri];
-		INT		px = run_px(r);
+		INT		px = run_px(l, r);
 		INT		up = l->vert ? px - px / 2 : px;
 		INT		dn = l->vert ? px / 2 : px / 4;
 
@@ -1407,7 +1412,7 @@ LOCAL void draw_ruby( LAY *l, CONST T_TVDOC *d, CONST ITEM *it, INT a, INT e,
 		}
 		x0 = shift_x + it[k].x;
 		x1 = shift_x + it[j - 1].x + it[j - 1].w;
-		px = run_px(r) / 2;
+		px = run_px(l, r) / 2;
 		if ( px < 6 ) px = 6;
 		fid = l->fid;
 		save_px = l->set_px;
@@ -1432,12 +1437,12 @@ LOCAL void draw_ruby( LAY *l, CONST T_TVDOC *d, CONST ITEM *it, INT a, INT e,
 				 * (over) or its left (under), in the vertical
 				 * forms, centred along what it belongs to.
 				 */
-				INT	half = run_px(r) / 2, axis;
+				INT	half = run_px(l, r) / 2, axis;
 
 				(void)fn_set_style(fid, FN_ST_VERT, 0);
 				rw = fn_vwidth(fid, buf);
 				axis = r->ruby_below ? base + half + px / 2 + 1
-						     : base - ( run_px(r) - half ) - ( px - px / 2 ) - 1;
+						     : base - ( run_px(l, r) - half ) - ( px - px / 2 ) - 1;
 				(void)fn_vdraw(l->gid, fid, l->vr - 1 - axis,
 					       x0 + ( ( x1 - x0 ) - rw ) / 2, buf, r->colour);
 				if ( buf != mem ) Kfree(buf);
@@ -1448,8 +1453,8 @@ LOCAL void draw_ruby( LAY *l, CONST T_TVDOC *d, CONST ITEM *it, INT a, INT e,
 			(void)fn_metrics(fid, &met);
 			(void)fn_draw(l->gid, fid, x0 + ( ( x1 - x0 ) - rw ) / 2,
 				      r->ruby_below
-				      ? base + run_px(r) / 4 + met.ascent + 1
-				      : base - run_px(r) - met.descent - 1,
+				      ? base + run_px(l, r) / 4 + met.ascent + 1
+				      : base - run_px(l, r) - met.descent - 1,
 				      buf, r->colour);
 		}
 		if ( buf != mem ) Kfree(buf);
@@ -1780,6 +1785,7 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 		INT	start = ( first_line ) ? left + DZ(p->indent)
 				: ( indent_x >= 0 ) ? indent_x : left;
 		INT	x = start, e = a, k, asc = 0, desc = 0, big = 0, pitch;
+		INT	oasc = 0, odesc = 0, lasc = 0, ldesc = 0, base_off, up, down;
 		INT	top, base, width, extra, shift_x = 0, spaces = 0, col_dx = 0;
 		INT	hits0;
 		BOOL	forced = FALSE;
@@ -1790,7 +1796,7 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 			INT		w = it[k].w;
 
 			if ( ( it[k].flags & IT_TAB ) != 0 ) {
-				w = tab_to(p, left, x, r->size) - x;
+				w = tab_to(l, p, left, x, r->size) - x;
 			}
 			if ( k > a && x + w > limit && w > 0 && x <= limit
 			  && hangs(d, p, &it[k]) ) {
@@ -1835,20 +1841,32 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 			CONST T_TVRUN	*r = &d->run[it[k].ri];
 
 			if ( ( it[k].flags & IT_TAB ) != 0 ) {
-				it[k].w = tab_to(p, left, x, r->size) - x;
+				it[k].w = tab_to(l, p, left, x, r->size) - x;
 			}
 			it[k].x = x;
 			x += it[k].w;
-			if ( it[k].asc > asc )   asc = it[k].asc;
-			if ( it[k].desc > desc ) desc = it[k].desc;
+			/*
+			 * A link, a picture or a figure is not a letter: the
+			 * gap between lines is a share of the letters' size (or
+			 * so many pixels) and is not given to a box. What it
+			 * stands above and below the letters is added to the
+			 * line below (oasc, odesc).
+			 */
+			if ( r->kind == TV_RUN_LINK || r->kind == TV_RUN_IMAGE
+			  || r->kind == TV_RUN_FIGURE ) {
+				if ( it[k].asc > oasc )    oasc = it[k].asc;
+				if ( it[k].desc > odesc )  odesc = it[k].desc;
+				if ( it[k].lasc > lasc )   lasc = it[k].lasc;
+				if ( it[k].ldesc > ldesc ) ldesc = it[k].ldesc;
+			} else {
+				if ( it[k].asc > asc )   asc = it[k].asc;
+				if ( it[k].desc > desc ) desc = it[k].desc;
+			}
 			if ( r->kind == TV_RUN_TEXT || r->kind == TV_RUN_TAB ) {
 				INT	sz = DZ(r->size);
 
 				if ( r->hr_d > 0 && r->hr_n > 0 ) sz = sz * r->hr_n / r->hr_d;
 				if ( sz > big ) big = sz;
-			} else if ( r->kind == TV_RUN_LINK || r->kind == TV_RUN_IMAGE
-				 || r->kind == TV_RUN_FIGURE ) {
-				if ( it[k].asc + it[k].desc > big ) big = it[k].asc + it[k].desc;
 			}
 			if ( ( it[k].flags & IT_SPACE ) != 0 ) {
 				spaces++;
@@ -1869,19 +1887,22 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 		}
 		width = x - start;
 		if ( big <= 0 ) big = para_size;
+		if ( asc + desc <= 0 ) {
+			/* only boxes on the line: the letters they stand among */
+			asc = lasc;
+			desc = ldesc;
+		}
+		/*
+		 * The letters' line first: the pitch their size and the gap
+		 * give (a share of the size, or with abs the whole pitch in
+		 * pixels, as xmlTAD is written), the letters centred in it.
+		 */
 		pitch = p->gap_abs ? p->gap : big * ( 1000 + p->gap ) / 1000;
 		if ( pitch < asc + desc ) {
 			pitch = asc + desc;
 		}
-		y = page_fit(l, y, pitch);
-		{
-			INT	dx;
-
-			top = l->y + page_map(l, y, &dx) - l->scroll;
-			col_dx = dx;
-		}
-		base = top + ( pitch - ( asc + desc ) ) / 2 + asc;
-		if ( l->vert && p->gap_abs && asc + desc <= pitch ) {
+		base_off = ( pitch - ( asc + desc ) ) / 2 + asc;
+		if ( l->vert && p->gap_abs ) {
 			/*
 			 * Down the line with a pitch given in pixels -- the
 			 * squares of 原稿用紙 -- the letters stand on the
@@ -1889,8 +1910,27 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 			 * a ruby goes into the room between the lines rather
 			 * than moving its letters out of their squares.
 			 */
-			base = top + pitch / 2;
+			base_off = pitch / 2;
 		}
+		/*
+		 * A box taller than the letters makes the line taller by what
+		 * it stands past them, and by nothing more: across, on the
+		 * base line, it reaches up past the letters; down the line,
+		 * centred on it, either side. The gap above the letters stays
+		 * above the box, so lines of boxes alone are as far apart as
+		 * the gap, and no box reaches into the line above.
+		 */
+		up = ( oasc > asc ) ? oasc - asc : 0;
+		down = ( odesc > desc ) ? odesc - desc : 0;
+		pitch += up + down;
+		y = page_fit(l, y, pitch);
+		{
+			INT	dx;
+
+			top = l->y + page_map(l, y, &dx) - l->scroll;
+			col_dx = dx;
+		}
+		base = top + base_off + up;
 		l->last_pitch = pitch;
 
 		/* alignment */
@@ -1972,13 +2012,20 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 						INT		keep = f->zoom, keep_den = f->zoom_den;
 
 						/* its view, magnified as the text is */
-						f->zoom = dv_zoom;
-						f->zoom_den = dv_zden;
+						INT		keep_max = f->open_max;
+						BOOL		keep_bare = f->bare;
+
+						f->zoom = l->zoom;
+						f->zoom_den = l->zden;
+						f->open_max = l->open_max;
+						f->bare = l->bare;
 						(void)tv_fig_draw_at(l->gid, f, &tb,
 								     DZ(f->view.left), DZ(f->view.top),
 								     l->src, TAD_COL_NONE, 1);
 						f->zoom = keep;
 						f->zoom_den = keep_den;
+						f->open_max = keep_max;
+						f->bare = keep_bare;
 						/* its letters set the faces afresh */
 						l->set_fid = 0;
 					}
@@ -1992,7 +2039,7 @@ LOCAL INT lay_para( LAY *l, CONST T_TVDOC *d, INT pi, INT y )
 				break;
 			case TV_RUN_TEXT:
 				if ( l->gid >= 0 && l->mode == LM_PLAIN
-				  && top + pitch >= l->top - 64 && top <= l->bottom + 64 ) {
+				  && top + pitch >= l->top - l->slack && top <= l->bottom + l->slack ) {
 					draw_text_item(l, r, &it[k], ix, base, top, pitch);
 					if ( l->detail && r->space > 0 ) {
 						/* 詳細: the ends of a stretch spaced apart */
@@ -2170,12 +2217,12 @@ LOCAL UW lay_key( CONST LAY *l )
 	v[4] = l->mbottom;
 	v[5] = l->cols;
 	v[6] = l->colstep;
-	v[7] = dv_zoom;
+	v[7] = l->zoom;
 	v[8] = l->detail ? 1 : 0;
 	v[9] = l->show_hidden ? 1 : 0;
 	v[10] = l->vert ? 1 : 0;
 	v[11] = l->x0;
-	v[12] = dv_zden;
+	v[12] = l->zden;
 	v[13] = 0x5A17;
 	for ( i = 0; i < 14; i++ ) {
 		for ( k = 0; k < 4; k++ ) {
@@ -2371,6 +2418,35 @@ LOCAL BOOL lay_wanted( CONST LAY *l, CONST T_TVDOC *d, INT a, INT e, INT y, INT 
  * columns, where a paragraph's place on the paper does not follow from
  * how tall the ones before it are, every one is laid.
  */
+/* Whether what is from y and h tall shows in the whole box, across the lines */
+LOCAL BOOL in_box( CONST LAY *l, INT y, INT h )
+{
+	INT	top = l->y + y - l->scroll;
+
+	return (BOOL)( top + h > l->vtop && top < l->vbottom );
+}
+
+/* Paragraph pi, from y and h tall, put down as one that showed, when it did */
+LOCAL void seen_put( LAY *l, CONST T_TVDOC *d, INT pi, INT y, INT h )
+{
+	CONST T_TADNODE	*nd = d->para[pi].node;
+	T_TVSEEN	*e;
+
+	if ( l->seen == NULL || !in_box(l, y, h) ) {
+		return;
+	}
+	if ( l->seen->n >= TV_SEEN_MAX ) {
+		l->seen = NULL;			/* too many to keep: the next change draws it whole */
+		return;
+	}
+	e = &l->seen->e[l->seen->n++];
+	e->node = nd;
+	e->gen = ( nd != NULL ) ? nd->gen : 0;
+	e->sig = d->para[pi].sig;
+	e->y = y;
+	e->h = h;
+}
+
 LOCAL INT lay_out( LAY *l, CONST T_TVDOC *d )
 {
 	T_TVLAYC	*c = d->layc;
@@ -2391,11 +2467,13 @@ LOCAL INT lay_out( LAY *l, CONST T_TVDOC *d )
 			continue;
 		}
 		hp = ( pi > 0 ) ? c->e[pi - 1].h : 0;
+		/* a block that shows is gone through one by one when what shows is put down */
 		if ( blocks && ( pi & ( LB_N - 1 ) ) == 0 ) {
 			INT	b = pi >> LB_SHIFT, e = ( pi + LB_N < n ) ? pi + LB_N : n;
 
 			hn = ( e < n ) ? c->e[e].h : 0;
-			if ( !lay_wanted(l, d, pi, e, y, c->bh[b], hp, hn) ) {
+			if ( !lay_wanted(l, d, pi, e, y, c->bh[b], hp, hn)
+			  && !( l->seen != NULL && in_box(l, y, c->bh[b]) ) ) {
 				y += c->bh[b];
 				pi = e;
 				continue;
@@ -2405,17 +2483,20 @@ LOCAL INT lay_out( LAY *l, CONST T_TVDOC *d )
 		hn = ( pi + 1 < n ) ? c->e[pi + 1].h : 0;
 		if ( laid_fresh(l, d, pi, y) && !lay_wanted(l, d, pi, pi + 1, y, h, hp, hn) ) {
 			l->last_pitch = c->e[pi].pitch;
+			seen_put(l, d, pi, y, h);
 			y += h;
 			pi++;
 			continue;
 		}
 		if ( !laid_fresh(l, d, pi, y) && !lay_wanted(l, d, pi, pi + 1, y, h, hp, hn) ) {
+			seen_put(l, d, pi, y, h);
 			y += h;			/* the guess */
 			pi++;
 			continue;
 		}
 		y1 = lay_para(l, d, pi, y);
 		laid_keep(l, d, pi, y, y1);
+		seen_put(l, d, pi, y, y1 - y);
 		y = y1;
 		pi++;
 	}
@@ -2443,7 +2524,16 @@ LOCAL void lay_init( LAY *l, INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 	l->x0 = r->left;
 	l->x1 = r->right;
 	l->y = r->top;
-	l->detail = (BOOL)( dv_detail || d->detail );
+	l->detail = d->detail;
+	if ( d->zoom > 0 && d->zoom_den > 0 ) {
+		l->zoom = d->zoom;
+		l->zden = d->zoom_den;
+	} else {
+		l->zoom = l->zden = 8;
+	}
+	l->depth = d->depth;
+	l->open_max = ( d->open_max > 0 ) ? d->open_max : TV_MAX_DEPTH;
+	l->bare = d->bare;
 	l->show_hidden = d->show_hidden;
 	if ( d->vert ) {
 		/*
@@ -2497,6 +2587,9 @@ LOCAL void lay_init( LAY *l, INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 		l->top = 0;
 		l->bottom = r->right - r->left;
 	}
+	l->vtop = l->top;
+	l->vbottom = l->bottom;
+	l->slack = INK_SLACK;
 	l->scroll = scroll_y;
 	l->fid = fn_system();
 	l->found = -1;
@@ -2510,6 +2603,16 @@ LOCAL void lay_init( LAY *l, INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 	if ( l->full_x1 == 0 ) {
 		l->full_x1 = l->x1;
 	}
+}
+
+/* An overlay of a page shown as the page is: magnified as it is, and as deep */
+LOCAL void lay_view( LAY *m, CONST LAY *l )
+{
+	m->zoom = l->zoom;
+	m->zden = l->zden;
+	m->depth = l->depth;
+	m->open_max = l->open_max;
+	m->bare = l->bare;
 }
 
 EXPORT ER tv_doc_caret_at( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
@@ -2652,6 +2755,9 @@ EXPORT ER tv_doc_cache( T_TVDOC *d, CONST T_TVDOC *from )
 
 		on = from->npara;
 		c->key = o->key;
+		/* what the last drawing showed is the same box's still: the next drawing differs from it */
+		c->shown = from->layc->shown;
+		from->layc->shown = NULL;
 		while ( i < n && j < on ) {
 			CONST T_TADNODE	*a = d->para[i].node, *b = from->para[j].node;
 			INT		k;
@@ -2702,6 +2808,11 @@ EXPORT ER tv_doc_cache( T_TVDOC *d, CONST T_TVDOC *from )
 		}
 	}
 	if ( d->layc != NULL ) {
+		if ( d->layc->shown != NULL && c->shown == NULL ) {
+			c->shown = d->layc->shown;	/* made again in place: the same box's */
+		} else if ( d->layc->shown != NULL ) {
+			Kfree(d->layc->shown);
+		}
 		Kfree(d->layc);
 	}
 	d->layc = c;
@@ -2710,16 +2821,19 @@ EXPORT ER tv_doc_cache( T_TVDOC *d, CONST T_TVDOC *from )
 }
 
 EXPORT INT tv_doc_settle( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
-			  CONST T_TAD *src, INT budget, INT *p_shift )
+			  CONST T_TAD *src, INT budget, INT *p_shift, INT *p_laid )
 {
 	T_TVLAYC	*c;
 	LAY		l;
-	INT		pi = 0, y = 0, y_old = 0, left = 0, shift = 0, n;
+	INT		pi = 0, y = 0, y_old = 0, left = 0, shift = 0, laid = 0, n;
 	BOOL		out = FALSE;
 	SYSTIM		t0, t;
 
 	if ( p_shift != NULL ) {
 		*p_shift = 0;
+	}
+	if ( p_laid != NULL ) {
+		*p_laid = 0;
 	}
 	if ( d == NULL || r == NULL || ( c = d->layc ) == NULL || c->n != d->npara ) {
 		return 0;
@@ -2759,6 +2873,7 @@ EXPORT INT tv_doc_settle( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
 				}
 				y = y1;
 				y_old += h_old;
+				laid++;
 				pi++;
 				continue;
 			}
@@ -2771,6 +2886,9 @@ EXPORT INT tv_doc_settle( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
 	}
 	if ( p_shift != NULL ) {
 		*p_shift = shift;
+	}
+	if ( p_laid != NULL ) {
+		*p_laid = laid;
 	}
 
 	return left;
@@ -2799,7 +2917,9 @@ EXPORT INT tv_doc_draw( INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 {
 	LAY		l;
 	T_DPENV		env;
+	T_DPRECT	cut;
 	BOOL		narrowed = FALSE;
+	T_TVSHOWN	*sh = NULL;
 	INT		h;
 
 	if ( d == NULL || r == NULL ) {
@@ -2813,8 +2933,7 @@ EXPORT INT tv_doc_draw( INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 	 * frame around it. The box is the box.
 	 */
 	if ( gid >= 0 && dp_ref(gid, &env) >= E_OK ) {
-		T_DPRECT	cut = env.visible;
-
+		cut = env.visible;
 		if ( cut.left < r->left )     cut.left = r->left;
 		if ( cut.top < r->top )       cut.top = r->top;
 		if ( cut.right > r->right )   cut.right = r->right;
@@ -2833,11 +2952,40 @@ EXPORT INT tv_doc_draw( INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 	 * written here, so that a document laid on a dark scheme is laid
 	 * on that scheme's paper.
 	 */
-	if ( gid >= 0 && dv_ground ) {
+	if ( gid >= 0 && !d->bare ) {
 		dp_fill_rect(gid, r, ( paper == TV_PAPER_LOOK )
 				     ? wm_look(WM_LOOK_WORK) : paper);
 	}
 	lay_init(&l, gid, d, r, scroll_y, src);
+	/*
+	 * Only part of the box drawn again: only the lines that reach into
+	 * it are laid and drawn, across the lines (down the box written
+	 * downwards, where a place of the walk is that far left of the
+	 * box's right edge). Those outside it keep what is on the screen.
+	 */
+	if ( narrowed ) {
+		INT	a = l.vert ? l.vr - cut.right : cut.top;
+		INT	e = l.vert ? l.vr - cut.left : cut.bottom;
+
+		if ( a > l.top )    l.top = a;
+		if ( e < l.bottom ) l.bottom = e;
+		if ( l.top != l.vtop || l.bottom != l.vbottom ) {
+			l.slack = BAND_EDGE;
+		}
+	}
+	/* what shows in the box put down, for what a change makes differ (tv_doc_band) */
+	if ( gid >= 0 && d->layc != NULL && d->layc->n == d->npara
+	  && !( l.page_h > 0 && l.cols > 1 ) ) {
+		if ( d->layc->shown == NULL ) {
+			d->layc->shown = (T_TVSHOWN *)Kmalloc(sizeof(T_TVSHOWN));
+		}
+		sh = d->layc->shown;
+		if ( sh != NULL ) {
+			sh->valid = FALSE;
+			sh->n = 0;
+			l.seen = sh;
+		}
+	}
 	if ( gid >= 0 && l.page_h > 0 && tv_doc_has_sheet(d) ) {
 		/*
 		 * What is laid over the whole sheet goes under the text, on
@@ -2850,6 +2998,13 @@ EXPORT INT tv_doc_draw( INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 		sheets(&l, d, lay_out(&m, d));
 	}
 	h = lay_out(&l, d);
+	if ( sh != NULL && l.seen != NULL ) {
+		sh->valid = TRUE;
+		sh->box = *r;
+		sh->scroll = scroll_y;
+		sh->key = lay_key(&l);
+		sh->height = h;
+	}
 	if ( gid >= 0 && l.page_h > 0 && d->over_on != 0 ) {
 		overlays(&l, d, h);
 	}
@@ -2858,6 +3013,155 @@ EXPORT INT tv_doc_draw( INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 	}
 
 	return h;
+}
+
+/*
+ * Whether a paragraph shows an object opened in it -- a link taller than
+ * its band, or a figure with links in it: what is inside may be what
+ * changed, so the box is drawn whole.
+ */
+LOCAL BOOL para_opens( LAY *l, CONST T_TVDOC *d, INT pi )
+{
+	CONST T_TVPARA	*p = &d->para[pi];
+	INT		ri, w, h, k;
+	T_VOBJ		v;
+
+	for ( ri = p->first; ri < p->first + p->n && ri < d->nrun; ri++ ) {
+		CONST T_TVRUN	*r = &d->run[ri];
+
+		if ( r->kind == TV_RUN_FIGURE ) {
+			CONST T_TVFIG	*f = ( r->link >= 0 && r->link < d->nfig ) ? d->figs[r->link] : NULL;
+
+			for ( k = 0; f != NULL && k < f->nsh; k++ ) {
+				if ( f->sh[k].kind == TV_SH_LINK ) {
+					return TRUE;
+				}
+			}
+			continue;
+		}
+		if ( r->kind != TV_RUN_LINK || l->src == NULL
+		  || tad_lnk_get(l->src, r->link, &v) < E_OK ) {
+			continue;
+		}
+		thing_size(l, r, &w, &h);
+		if ( h <= 0 ) {
+			continue;		/* hidden */
+		}
+		if ( v.chsz > 0 ) {
+			v.chsz = DZ(v.chsz);
+		}
+		if ( h > om_band_h(&v) + OM_OPEN_SLACK ) {
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+EXPORT BOOL tv_doc_band( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
+			 CONST T_TAD *src, T_DPRECT *band )
+{
+	T_TVLAYC	*c;
+	CONST T_TVSHOWN	*s;
+	LAY		l;
+	INT		pi = 0, y = 0, n, j = 0, top, a = 0x7FFFFFFF, e = -0x7FFFFFFF;
+	BOOL		to_end = FALSE;
+
+	if ( d == NULL || r == NULL || band == NULL || ( c = d->layc ) == NULL
+	  || c->n != d->npara || ( s = c->shown ) == NULL || !s->valid
+	  || s->scroll != scroll_y || s->box.left != r->left || s->box.top != r->top
+	  || s->box.right != r->right || s->box.bottom != r->bottom ) {
+		return FALSE;
+	}
+	lay_init(&l, -1, d, r, scroll_y, src);
+	if ( ( l.page_h > 0 && ( l.cols > 1 || tv_doc_has_sheet(d) || d->over_on != 0 ) )
+	  || lay_key(&l) != s->key ) {
+		return FALSE;
+	}
+	laid_prepare(&l, d);
+	n = d->npara;
+	while ( pi < n ) {
+		CONST T_TADNODE	*nd;
+		CONST T_TVSEEN	*o;
+		INT		h;
+
+		top = l.y + y - l.scroll;
+		if ( top >= l.vbottom ) {
+			break;
+		}
+		if ( ( pi & ( LB_N - 1 ) ) == 0 && l.page_h <= 0
+		  && top + c->bh[pi >> LB_SHIFT] <= l.vtop ) {
+			y += c->bh[pi >> LB_SHIFT];		/* a block above the box */
+			pi = ( pi + LB_N < n ) ? pi + LB_N : n;
+			continue;
+		}
+		h = c->e[pi].h;
+		if ( top + h <= l.vtop ) {
+			y += h;
+			pi++;
+			continue;
+		}
+		/* it shows: laid now if it changed, as the drawing will lay it */
+		if ( !laid_fresh(&l, d, pi, y) ) {
+			INT	y1 = lay_para(&l, d, pi, y);
+
+			laid_keep(&l, d, pi, y, y1);
+			h = y1 - y;
+		}
+		if ( para_opens(&l, d, pi) ) {
+			return FALSE;
+		}
+		nd = d->para[pi].node;
+		o = ( j < s->n ) ? &s->e[j] : NULL;
+		if ( o != NULL && o->node == nd && o->y == y && o->h == h ) {
+			if ( o->gen != ( ( nd != NULL ) ? nd->gen : 0 ) || o->sig != d->para[pi].sig ) {
+				if ( top < a )     a = top;	/* changed in its place */
+				if ( top + h > e ) e = top + h;
+			}
+			j++;
+		} else {
+			/* moved, or another in its place: from where either was, to the end */
+			INT	ot = ( o != NULL ) ? l.y + o->y - l.scroll : top;
+
+			if ( top < a ) a = top;
+			if ( ot < a )  a = ot;
+			to_end = TRUE;
+			break;
+		}
+		y += h;
+		pi++;
+	}
+	if ( !to_end && j < s->n ) {
+		/* more showed before, below what shows now */
+		top = l.y + s->e[j].y - l.scroll;
+		if ( top < a ) a = top;
+		to_end = TRUE;
+	}
+	if ( to_end ) {
+		e = l.vbottom;
+	}
+	if ( a > e ) {
+		band->left = band->top = band->right = band->bottom = 0;	/* nothing changed that shows */
+		return TRUE;
+	}
+	a -= BAND_EDGE;
+	e += BAND_EDGE;
+	if ( a < l.vtop )    a = l.vtop;
+	if ( e > l.vbottom ) e = l.vbottom;
+	/* across the whole box, and what is beside it: whoever draws it cuts it to its window */
+	if ( l.vert ) {
+		band->left = l.vr - e;
+		band->right = l.vr - a;
+		band->top = -0x4000;
+		band->bottom = 0x4000;
+	} else {
+		band->top = a;
+		band->bottom = e;
+		band->left = -0x4000;
+		band->right = 0x4000;
+	}
+
+	return TRUE;
 }
 
 /* The paper a document names, or A4 upright when it names none */
@@ -3195,6 +3499,7 @@ LOCAL void band_draw( LAY *l, CONST T_TVDOC *o, CONST T_DPRECT *band,
 
 	for ( pi = 0; pi < o->npara; pi++ ) {
 		lay_init(&m, -1, o, &r, 0, l->src);
+		lay_view(&m, l);
 		m.y = 0;
 		(void)lay_para(&m, o, pi, 0);
 		if ( m.last_pitch > lh ) {
@@ -3210,6 +3515,7 @@ LOCAL void band_draw( LAY *l, CONST T_TVDOC *o, CONST T_DPRECT *band,
 	}
 	for ( pi = 0; pi < o->npara; pi++ ) {
 		lay_init(&m, l->gid, o, &r, 0, l->src);
+		lay_view(&m, l);
 		m.top = l->vert ? r.top - 4096 : l->top;
 		m.bottom = l->vert ? r.bottom + 4096 : l->bottom;
 		m.y = top + ( ( h > lh ) ? ( h - lh ) / 2 : 0 );
@@ -3298,12 +3604,19 @@ LOCAL void sheets( LAY *l, CONST T_TVDOC *d, INT h )
 				T_TVFIG	*f = o->figs[i];
 				INT	keep = f->zoom, keep_den = f->zoom_den;
 
-				f->zoom = dv_zoom;
-				f->zoom_den = dv_zden;
+				INT	keep_max = f->open_max;
+				BOOL	keep_bare = f->bare;
+
+				f->zoom = l->zoom;
+				f->zoom_den = l->zden;
+				f->open_max = l->open_max;
+				f->bare = l->bare;
 				(void)tv_fig_draw_at(l->gid, f, &pr, 0, 0, l->src,
 						     TAD_COL_NONE, 1);
 				f->zoom = keep;
 				f->zoom_den = keep_den;
+				f->open_max = keep_max;
+				f->bare = keep_bare;
 			}
 		}
 	}
@@ -3416,175 +3729,4 @@ EXPORT ER tv_doc_at( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
 	return E_OK;
 }
 
-EXPORT ER tv_paint( INT gid, CONST T_DPRECT *r, CONST UB *xml, SZ len )
-{
-	T_TAD	*doc;
-	UW	paper = wm_look(WM_LOOK_WORK);
-	ER	er;
-
-	if ( r == NULL ) {
-		return E_PAR;
-	}
-	dp_fill_rect(gid, r, paper);
-	if ( xml == NULL || len <= 0 ) {
-		return E_OK;
-	}
-	er = tad_parse(xml, len, NULL, &doc);
-	if ( er < E_OK ) {
-		return er;
-	}
-	switch ( tv_kind(doc) ) {
-	case TV_KIND_DOC: {
-		T_TVDOC	*d;
-
-		er = tv_doc(doc, &d);
-		if ( er >= E_OK ) {
-			(void)tv_doc_draw(gid, d, r, 0, doc, paper);
-			tv_doc_free(d);
-		}
-		break;
-	}
-	case TV_KIND_FIG: {
-		T_TVFIG	*f;
-
-		er = tv_fig(doc, &f);
-		if ( er >= E_OK ) {
-			er = tv_fig_draw(gid, f, r, 0, 0, doc, paper);
-			tv_fig_free(f);
-		}
-		break;
-	}
-	default:
-		break;
-	}
-	tad_free(doc);
-
-	return er;
-}
-
-/* The colour nothing a figure draws comes out as: what is left of it is outside */
-#define TV_SHAPE_KEY	0xFF01FE03U
-
-/*
- * The rows of a mask put into a region. A region is made from rows of
- * one span each, so the k-th span of each row is gathered while the
- * rows run on with one, and each such run is added in one piece.
- */
-LOCAL ER mask_region( CONST UW *px, INT w, INT h, T_DPRGN **p_rgn )
-{
-	INT	*x0, *x1;
-	T_DPRGN	*all = NULL, *part, *both;
-	INT	k, y, run, found;
-	ER	er = E_OK;
-
-	x0 = (INT *)Kmalloc(sizeof(INT) * (SZ)h);
-	x1 = (INT *)Kmalloc(sizeof(INT) * (SZ)h);
-	if ( x0 == NULL || x1 == NULL ) {
-		er = E_NOMEM;
-		goto out;
-	}
-	for ( k = 0, found = 1; found && er >= E_OK; k++ ) {
-		found = 0;
-		run = 0;
-		for ( y = 0; y <= h && er >= E_OK; y++ ) {
-			INT	a = -1, b = -1, n = 0, x;
-
-			/* the k-th span of this row, if it has one */
-			for ( x = 0; y < h && x < w; ) {
-				if ( px[(SZ)y * w + x] == TV_SHAPE_KEY ) { x++; continue; }
-				a = x;
-				while ( x < w && px[(SZ)y * w + x] != TV_SHAPE_KEY ) x++;
-				b = x;
-				if ( n++ == k ) break;
-				a = -1;
-			}
-			if ( a >= 0 ) {
-				x0[run] = a;
-				x1[run] = b;
-				run++;
-				found = 1;
-				continue;
-			}
-			if ( run > 0 ) {
-				er = dp_rgn_from_rows(y - run, run, x0, x1, &part);
-				if ( er >= E_OK ) {
-					if ( all == NULL ) {
-						all = part;
-					} else {
-						er = dp_rgn_or(all, part, &both);
-						dp_rgn_free(part);
-						if ( er >= E_OK ) {
-							dp_rgn_free(all);
-							all = both;
-						}
-					}
-				}
-				run = 0;
-			}
-		}
-	}
-	if ( er >= E_OK && all == NULL ) {
-		T_DPRECT	none = { 0, 0, 0, 0 };
-
-		er = dp_rgn_rect(&none, &all);
-	}
-    out:
-	if ( x0 != NULL ) Kfree(x0);
-	if ( x1 != NULL ) Kfree(x1);
-	if ( er < E_OK ) {
-		dp_rgn_free(all);
-		all = NULL;
-	}
-	*p_rgn = all;
-	return er;
-}
-
-EXPORT ER tv_shape( CONST UB *xml, SZ len, INT w, INT h, T_DPRGN **p_rgn )
-{
-	T_TAD		*doc = NULL;
-	T_TVFIG		*f = NULL;
-	T_DPRECT	r;
-	UW		*px;
-	INT		gid;
-	SZ		i;
-	ER		er;
-
-	if ( xml == NULL || len <= 0 || w <= 0 || h <= 0 || p_rgn == NULL ) {
-		return E_PAR;
-	}
-	er = tad_parse(xml, len, NULL, &doc);
-	if ( er < E_OK ) {
-		return er;
-	}
-	if ( tv_kind(doc) != TV_KIND_FIG || tv_fig(doc, &f) < E_OK ) {
-		tad_free(doc);
-		return E_PAR;			/* an outline is a figure */
-	}
-	px = (UW *)Kmalloc(sizeof(UW) * (SZ)w * h);
-	gid = ( px != NULL ) ? dp_open() : E_NOMEM;
-	if ( gid < 0 ) {
-		er = (ER)gid;
-		goto out;
-	}
-	for ( i = 0; i < (SZ)w * h; i++ ) {
-		px[i] = TV_SHAPE_KEY;
-	}
-	r.left = 0;
-	r.top = 0;
-	r.right = w;
-	r.bottom = h;
-	dp_set_target(gid, px, (UINT)( w * sizeof(UW) ), 0, 0);
-	dp_set_origin(gid, 0, 0);
-	dp_set_frame(gid, &r);
-	dp_set_visible(gid, &r);
-	er = tv_fig_draw(gid, f, &r, 0, 0, doc, TV_SHAPE_KEY);
-	dp_close(gid);
-	if ( er >= E_OK ) {
-		er = mask_region(px, w, h, p_rgn);
-	}
-    out:
-	if ( px != NULL ) Kfree(px);
-	tv_fig_free(f);
-	tad_free(doc);
-	return er;
-}
+/* tv_paint and tv_shape, which make a window's picture and its shape, are in docpaint.c */

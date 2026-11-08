@@ -469,14 +469,6 @@ EXPORT void  knl_Ifree( void *ptr )
 }
 
 
-#if USE_KTEST
-/* For the tests: whether the block ptr that knl_Imalloc gave is still taken */
-EXPORT BOOL knl_Iinuse( void *ptr )
-{
-	return chkAreaFlag((QUEUE*)ptr - 1, AREA_USE) ? TRUE : FALSE;
-}
-#endif
-
 /*
  * Bytes the areas in use hold, and how many areas they are: what the
  * tests look at for memory not given back

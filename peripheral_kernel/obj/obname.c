@@ -44,6 +44,7 @@
 #include <ts/tsfsjrnl.h>
 #include <ts/uuid.h>
 #include <ts/conf.h>
+#include <ts/om.h>
 #include "obj.h"
 
 /*
@@ -558,6 +559,40 @@ LOCAL CONST T_OBCRD *crd_base( ID pid )
 }
 
 /*
+ * A start a person asked for: while it is armed, the process the arming
+ * task makes is marked with the ticket before its first instruction can
+ * run, so that its first window, however soon, finds it.
+ */
+LOCAL ID	ob_act_tsk;
+LOCAL UINT	ob_act_arm;
+LOCAL UINT	ob_act_pid[CNF_PID_MAX];
+
+EXPORT void knl_ob_act_arm( UINT ticket )
+{
+	if ( ob_mtx <= 0 ) {
+		return;
+	}
+	LOCK();
+	ob_act_tsk = ( ticket != 0 ) ? tk_get_tid() : 0;
+	ob_act_arm = ticket;
+	UNLOCK();
+}
+
+EXPORT UINT knl_ob_act_take( ID pid )
+{
+	UINT	t = 0;
+
+	if ( ob_mtx <= 0 || pid <= 0 || pid >= CNF_PID_MAX ) {
+		return 0;
+	}
+	LOCK();
+	t = ob_act_pid[pid];
+	ob_act_pid[pid] = 0;
+	UNLOCK();
+	return t;
+}
+
+/*
  * A new process acts as its parent did, without the administrator's
  * rights the parent may have for a while: they were given for what the
  * parent was doing, not for what it starts. One the kernel starts acts
@@ -570,6 +605,7 @@ EXPORT void knl_ob_prc_start( ID pid, ID ppid, BOOL person )
 		return;
 	}
 	LOCK();
+	ob_act_pid[pid] = ( ob_act_tsk != 0 && ob_act_tsk == tk_get_tid() ) ? ob_act_arm : 0;
 	if ( ppid > 0 ) {
 		ob_crd_pid[pid] = crd_base(ppid);
 	} else if ( person ) {
@@ -2740,6 +2776,28 @@ LOCAL ER res_copy( CONST T_OBMGR *sm, INT sh, CONST T_OBMGR *dm, INT dh, CONST U
 	return er;
 }
 
+EXPORT ER ob_dup_obj( CONST TS_UUID *uuid, CONST UB *name, TS_UUID *p_uuid )
+{
+	CONST T_OBMGR	*m;
+	ER		er;
+
+	if ( uuid == NULL || p_uuid == NULL || ( name != NULL && name[0] == 0 ) ) {
+		return E_PAR;
+	}
+	m = knl_ob_mgr_of(uuid);
+	if ( m == NULL ) {
+		return E_NOEXS;
+	}
+	if ( m->type != OB_T_STORAGE || m->sub != OB_S_FILE ) {
+		return E_NOSPT;
+	}
+	er = allowed(m, uuid, OB_OP_READ | OB_OP_ATRRD);
+	if ( er < E_OK ) {
+		return er;
+	}
+	return om_store_copy(uuid, name, FALSE, p_uuid);
+}
+
 /* A copy's metadata: the source's, counted by nobody yet (j holds max bytes) */
 LOCAL INT meta_for_copy( UB *j, INT len, INT max )
 {
@@ -3161,7 +3219,8 @@ LOCAL ER ntf_deliver( CONST TS_UUID *port, CONST T_OBNTM *msg )
 		return ( h < 0 ) ? (ER)h : E_SYS;
 	}
 	if ( m->type == OB_T_CHANNEL ) {
-		er = m->wri(h, 0, 0, msg, sizeof(*msg), &asz, TRUE);
+		/* a move behind a move still waiting: that one says where the pointer is now */
+		er = knl_obchan_merge_move(port, msg) ? E_OK : m->wri(h, 0, 0, msg, sizeof(*msg), &asz, TRUE);
 	} else {
 		er = ( m->apd != NULL ) ? m->apd(h, OB_RT_SYSDATA, 0, &rec) : E_NOSPT;
 		if ( er >= E_OK ) {
@@ -3519,6 +3578,43 @@ EXPORT ER ob_ref_vol( CONST TS_UUID *near, T_OBVOL *pk_vol )
 	pk_vol->bfree = rv.bfree;
 	pk_vol->bsize = (UINT)rv.bsize;
 	pk_vol->nobj = rv.nobj;
+	return E_OK;
+}
+
+EXPORT ER ob_ref_vid( CONST TS_UUID *obj, TS_UUID *p_vol, TS_UUID *p_mach )
+{
+	CONST T_OBMGR	*m;
+	TS_UUID		v, mine;
+	ER		er;
+
+	if ( ( obj == NULL && p_vol != NULL ) || ( p_vol == NULL && p_mach == NULL ) ) {
+		return E_PAR;
+	}
+	if ( p_vol != NULL ) {
+		m = knl_ob_mgr_of(obj);
+		if ( m == NULL ) {
+			return E_NOEXS;
+		}
+		if ( m->type != OB_T_STORAGE || m->sub != OB_S_FILE ) {
+			return E_NOSPT;
+		}
+		if ( ( knl_ob_permit_on(obj, knl_ob_crd_of(ts_get_pid())) & OB_OP_ATRRD ) == 0 ) {
+			return E_OACV;
+		}
+		er = knl_obfile_vuuid_of(obj, &v);
+		if ( er < E_OK ) {
+			return er;
+		}
+	}
+	if ( p_mach != NULL && knl_obfile_machine(&mine) < E_OK ) {
+		knl_memset(&mine, 0, sizeof(mine));	/* no system volume yet: no machine to name */
+	}
+	if ( p_vol != NULL ) {
+		*p_vol = v;
+	}
+	if ( p_mach != NULL ) {
+		*p_mach = mine;
+	}
 	return E_OK;
 }
 

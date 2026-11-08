@@ -88,6 +88,10 @@ typedef struct {
 	SZ	droplen;		/* its bytes: OB_DROP_SIZE(n), or the letters and their nought */
 	ID	taker;			/* the process granted that drop's objects */
 	BOOL	answered;		/* that drop was answered */
+	BOOL	gave;			/* that drop granted its taker rights: a refusal takes them back */
+	INT	dropback;		/* the window that had the keys before that drop, 0 none */
+	UINT	askseq;			/* the last question asked it (wm_obj_ask), 0 none */
+	UINT	askans;			/* and its answer: OB_DR_*, 0 none yet */
 	ID	maker;			/* the process that made it, 0 the system */
 	ID	forpid;			/* one of the system's opened for a process's
 					   request: that process (knl_wmobj_act_for) */
@@ -98,6 +102,8 @@ typedef struct {
 					   keyboard, told every key and typing them */
 	INT	cand;			/* the window of the candidates listed for it (OB_WR_CAND), 0 none */
 	INT	ncand;			/* the names listed there */
+	UINT	hold_code;		/* the key it holds down (WM_KEY_PUT_DOWN), 0 none */
+	UINT	hold_mods;		/* the modifiers held with it */
 } WOWIN;
 
 typedef struct {
@@ -154,6 +160,7 @@ LOCAL INT		wo_nwin = 0;
 #define WOW(i)		( *wo_wtbl[(i)] )
 LOCAL WOPNL		wo_pnl[WM_PANEL_MAX + 1];	/* by panel number */
 LOCAL ID		wo_mtx = 0;
+LOCAL ER key_put_one( UINT type, UINT code, UINT mods );
 LOCAL FP_WMPAINT	wo_paint = NULL;
 LOCAL FP_WMSHAPE	wo_shape = NULL;
 LOCAL INT		wo_hover = 0;	/* the window the pointer was last over */
@@ -358,6 +365,7 @@ EXPORT void knl_wmobj_open( INT wid )
 	WOW(wid).prt = p;
 	WOW(wid).used = TRUE;
 	WOW(wid).nofocus = nofocus;
+	WOW(wid).hold_code = 0;
 	if ( wo_for_pid > 0 && wo_for_tsk == tk_get_tid() ) {
 		WOW(wid).forpid = wo_for_pid;
 	}
@@ -371,6 +379,7 @@ EXPORT void knl_wmobj_close( INT wid )
 	T_OBDROP *dr = NULL;
 	BOOL	was = FALSE;
 	INT	cpop;
+	UINT	hold_code = 0, hold_mods = 0;
 
 	if ( wo_mtx <= 0 || wid < 1 || wid > wo_nwin ) {
 		return;
@@ -384,6 +393,9 @@ EXPORT void knl_wmobj_close( INT wid )
 		WOW(wid).drop = NULL;
 		WOW(wid).used = FALSE;
 		was = TRUE;
+		hold_code = WOW(wid).hold_code;
+		hold_mods = WOW(wid).hold_mods;
+		WOW(wid).hold_code = 0;
 	}
 	cpop = WOW(wid).cand;
 	WOW(wid).cand = 0;
@@ -395,6 +407,9 @@ EXPORT void knl_wmobj_close( INT wid )
 		wo_down = 0;
 	}
 	UNLOCK();
+	if ( hold_code != 0 ) {
+		(void)key_put_one(HID_EV_KEY_UP, hold_code, hold_mods);	/* no key stays down for a window gone */
+	}
 	if ( r0 != NULL ) Kfree(r0);
 	if ( r1 != NULL ) Kfree(r1);
 	if ( dr != NULL ) Kfree(dr);
@@ -947,7 +962,13 @@ LOCAL ER cand_put( INT wid, CONST T_OBWCAND *c )
 		return E_NOEXS;
 	}
 	pd_cand_size(c->names, n, c->total, &cw, &ch);
-	wm_screen(&sw, &sh);
+	{
+		T_DPRECT	on;
+
+		wm_screen_at(w.work.left + c->x, w.work.top, &on);
+		sw = on.right;
+		sh = on.bottom;
+	}
 	o.left = w.work.left + c->x;
 	o.top = w.work.top + c->bottom + 2;
 	if ( o.top + ch > sh && w.work.top + c->top - 2 - ch >= 0 ) {
@@ -1009,6 +1030,36 @@ LOCAL BOOL cand_press( CONST T_WMEV *ev, UINT event )
 	return TRUE;				/* the list's own: no window under it hears it */
 }
 
+/*
+ * A button let go away from the window it went down on: that window is
+ * told it was let go, at the place from its own work area (outside it),
+ * so that what was begun there by the press -- shapes carried, a band
+ * pulled out -- ends where the hand let go, as it would if the program
+ * followed the pointer itself. ev->x, ev->y are from the work area of
+ * ev->wid, or of the screen for the ground.
+ */
+LOCAL void release_away( CONST T_WMEV *ev )
+{
+	T_WMWIN	w;
+	T_WMEV	up = *ev;
+	INT	sx = ev->x, sy = ev->y;
+
+	if ( ev->wid > 0 ) {
+		if ( wm_ref(ev->wid, &w) < E_OK ) {
+			return;
+		}
+		sx += w.work.left;
+		sy += w.work.top;
+	}
+	if ( wm_ref(wo_down, &w) < E_OK ) {
+		return;
+	}
+	up.x = sx - w.work.left;
+	up.y = sy - w.work.top;
+	up.wid = wo_down;
+	win_post(wo_down, OB_E_RELEASE, &up);
+}
+
 EXPORT void knl_wmobj_event( CONST T_WMEV *ev )
 {
 	UINT	event;
@@ -1059,11 +1110,29 @@ EXPORT void knl_wmobj_event( CONST T_WMEV *ev )
 	if ( ev->wid > 0 && cand_press(ev, event) ) {
 		return;
 	}
+	/*
+	 * While something is carried (its outlines on the screen), a press
+	 * is the carry's -- the second button makes it a copy -- and the
+	 * window under the pointer is not told of it: it would take it for
+	 * a press of its own and open its menu over the carry.
+	 */
+	if ( event == OB_E_PRESS && knl_wm_carrying() ) {
+		return;
+	}
 	if ( event == OB_E_PRESS ) {
 		wo_down = ev->wid;
 		wo_down_ms = now_ms();
 	}
+	if ( event == OB_E_RELEASE && wo_down > 0 && ev->wid != wo_down ) {
+		release_away(ev);
+	}
 	if ( ev->wid == 0 ) {
+		/* the window the pointer was over is left for the ground as for another window */
+		if ( event != OB_E_KEY && wo_hover != 0 ) {
+			was = wo_hover;
+			wo_hover = 0;
+			win_post(was, OB_E_LEAVE, NULL);
+		}
 		drive_menus(ev);		/* on the ground: only a menu cares */
 		return;
 	}
@@ -1076,7 +1145,8 @@ EXPORT void knl_wmobj_event( CONST T_WMEV *ev )
 	/*
 	 * A button let go over a window it did not go down on ends
 	 * something begun elsewhere -- links carried there and dropped --
-	 * and is not a click of that window's.
+	 * and is not a click of that window's; the window it went down on
+	 * was told (release_away).
 	 */
 	if ( event != OB_E_RELEASE || ev->wid == wo_down ) {
 		win_post(ev->wid, event, ev);
@@ -1142,17 +1212,81 @@ EXPORT void knl_wmobj_key_seen( CONST T_WMEV *ev )
 	}
 }
 
-/* The modifiers a key typed by a screen keyboard may be held with */
-#define WO_PUT_MODS	( 0xFFU | KM_MOD_THUMB_L | KM_MOD_THUMB_R )
+/*
+ * A button or a key pressed, wherever it goes: OB_E_PRESSED on every
+ * window made as an object, a few at a time so that the lock is not
+ * held while they are told.
+ */
+EXPORT void knl_wmobj_press_seen( CONST T_WMEV *ev )
+{
+	TS_UUID	to[WO_SEEN_MAX];
+	T_OBNTM	n;
+	INT	i, at = 1, cnt;
+
+	if ( wo_mtx <= 0 || ev == NULL
+	  || ( ev->type != HID_EV_BTN_DOWN && ev->type != HID_EV_KEY_DOWN ) ) {
+		return;
+	}
+	notice_of(ev, &n);
+	n.x = 0;
+	n.y = 0;
+	do {
+		cnt = 0;
+		LOCK();
+		for ( ; at <= wo_nwin && cnt < WO_SEEN_MAX; at++ ) {
+			if ( WOW(at).used ) to[cnt++] = WOW(at).uuid;
+		}
+		UNLOCK();
+		for ( i = 0; i < cnt; i++ ) {
+			knl_ob_post(&to[i], -1, OB_E_PRESSED, &n);
+		}
+	} while ( cnt == WO_SEEN_MAX );
+}
+
+/* The modifiers a key typed by a screen keyboard may be held with, and the layouts it may carry */
+#define WO_PUT_MODS	( 0xFFU | KM_MOD_THUMB_L | KM_MOD_THUMB_R | KM_MOD_LAYOUTS )
+
+/* The layouts a key carries, if any, as they must be: KM_MOD_OWN with numbers there are */
+LOCAL BOOL put_layouts_ok( UINT mods )
+{
+	if ( ( mods & KM_MOD_LAYOUTS ) == 0 ) {
+		return TRUE;
+	}
+	return (BOOL)( ( mods & KM_MOD_OWN ) != 0
+		       && ( ( mods >> KM_MOD_LATIN_SHIFT ) & 3U ) < KM_LATIN_N
+		       && ( ( mods >> KM_MOD_KANA_SHIFT ) & 3U ) < KM_KANA_N );
+}
+
+/*
+ * A key's press or let go, put in as if the keyboard had sent it. The
+ * modifiers go with the press only: none is held on the keyboard for it,
+ * and a let go that carried them would tell a window that follows the
+ * keys seen (OB_N_KEYSEEN) they are still down. The layouts the key is
+ * read in go with both, so that a program that reads its letter when it
+ * is let go reads the same one.
+ */
+LOCAL ER key_put_one( UINT type, UINT code, UINT mods )
+{
+	T_HIDEV	e;
+
+	knl_memset(&e, 0, sizeof(e));
+	e.type = type;
+	e.code = code;
+	e.mods = ( type == HID_EV_KEY_DOWN ) ? mods : ( mods & KM_MOD_LAYOUTS );
+	return knl_hid_inject(0, &e);
+}
 
 EXPORT ER wm_obj_key_put( INT wid, UINT code, UINT mods )
 {
-	T_HIDEV	e;
-	BOOL	nofocus, pressed;
+	BOOL	nofocus, pressed, held;
+	UINT	how = mods & ( WM_KEY_PUT_DOWN | WM_KEY_PUT_UP );
+	UINT	other = 0, other_mods = 0;
 	UD	now = now_ms();
 	ER	er;
 
-	if ( code == 0 || code > 0xFF || ( mods & ~WO_PUT_MODS ) != 0 ) {
+	mods &= ~how;
+	if ( code == 0 || code > 0xFF || ( mods & ~WO_PUT_MODS ) != 0 || !put_layouts_ok(mods)
+	  || how == ( WM_KEY_PUT_DOWN | WM_KEY_PUT_UP ) ) {
 		return E_PAR;
 	}
 	if ( wo_mtx <= 0 || wid < 1 || wid > wo_nwin ) {
@@ -1161,24 +1295,36 @@ EXPORT ER wm_obj_key_put( INT wid, UINT code, UINT mods )
 	LOCK();
 	nofocus = ( WOW(wid).used && WOW(wid).nofocus );
 	pressed = ( wo_down == wid && now - wo_down_ms <= WM_KEY_PUT_MS );
+	held = ( nofocus && WOW(wid).hold_code == code );
+	if ( nofocus && how == WM_KEY_PUT_UP && held ) {
+		mods = WOW(wid).hold_mods;
+		WOW(wid).hold_code = 0;
+	} else if ( nofocus && how == WM_KEY_PUT_DOWN && ( pressed || held ) ) {
+		if ( !held ) {
+			other = WOW(wid).hold_code;
+			other_mods = WOW(wid).hold_mods;
+		}
+		WOW(wid).hold_code = code;
+		WOW(wid).hold_mods = mods;
+	}
 	UNLOCK();
 	if ( !nofocus ) {
 		return E_OBJ;
 	}
-	if ( !pressed ) {
+	if ( how == WM_KEY_PUT_UP ) {
+		return held ? key_put_one(HID_EV_KEY_UP, code, mods) : E_OACV;
+	}
+	if ( !pressed && !( how == WM_KEY_PUT_DOWN && held ) ) {
 		return E_OACV;
 	}
-	knl_memset(&e, 0, sizeof(e));
-	e.type = HID_EV_KEY_DOWN;
-	e.code = code;
-	e.mods = mods;
-	er = knl_hid_inject(0, &e);
-	if ( er < E_OK ) {
+	if ( other != 0 ) {
+		(void)key_put_one(HID_EV_KEY_UP, other, other_mods);
+	}
+	er = key_put_one(HID_EV_KEY_DOWN, code, mods);
+	if ( er < E_OK || how == WM_KEY_PUT_DOWN ) {
 		return er;
 	}
-	e.type = HID_EV_KEY_UP;
-	e.when = 0;
-	return knl_hid_inject(0, &e);
+	return key_put_one(HID_EV_KEY_UP, code, mods);
 }
 
 LOCAL void repaint( INT wid );
@@ -1286,8 +1432,263 @@ LOCAL void drop_ungrant( CONST T_OBDROP *d, ID taker )
 	}
 }
 
-EXPORT ER wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
-		       CONST T_OBDROPV *v, INT n )
+EXPORT ID wm_obj_maker( INT wid )
+{
+	ID	m = 0;
+
+	if ( wo_mtx <= 0 || wid < 1 || wid > wo_nwin ) {
+		return 0;
+	}
+	LOCK();
+	if ( WOW(wid).used ) m = WOW(wid).maker;
+	UNLOCK();
+	return m;
+}
+
+/*
+ * Every window a program made asked to close, as its close box asks it: the
+ * programs that made them, up to 'max', in 'pids'; how many. A panel or a list
+ * over a window (WM_ATTR_POPUP) has no close box, and is not asked.
+ */
+EXPORT INT wm_obj_close_programs( ID *pids, INT max )
+{
+	INT	wid, i, n = 0, nwin = wo_nwin;
+
+	if ( wo_mtx <= 0 ) {
+		return 0;
+	}
+	for ( wid = 1; wid <= nwin; wid++ ) {
+		T_WMWIN	w;
+		ID	m = 0;
+
+		LOCK();
+		if ( WOW(wid).used ) {
+			m = WOW(wid).maker;
+		}
+		UNLOCK();
+		if ( m <= 0 || wm_ref(wid, &w) < E_OK || ( w.attr & WM_ATTR_POPUP ) != 0 ) {
+			continue;
+		}
+		win_post(wid, OB_E_CLOSE, NULL);
+		for ( i = 0; i < n && pids[i] != m; i++ ) ;
+		if ( i == n && n < max ) {
+			pids[n++] = m;
+		}
+	}
+	return n;
+}
+
+/* A window of its own the process still has, not a panel or a list over one: 0 none */
+EXPORT INT wm_obj_program_window( ID pid )
+{
+	INT	wid, nwin = wo_nwin;
+
+	if ( wo_mtx <= 0 ) {
+		return 0;
+	}
+	for ( wid = 1; wid <= nwin; wid++ ) {
+		T_WMWIN	w;
+		BOOL	his;
+
+		LOCK();
+		his = (BOOL)( WOW(wid).used && WOW(wid).maker == pid );
+		UNLOCK();
+		if ( his && wm_ref(wid, &w) >= E_OK && ( w.attr & WM_ATTR_POPUP ) == 0 ) {
+			return wid;
+		}
+	}
+	return 0;
+}
+
+/* Whether the keys are with a question that waits: nothing else takes them from it */
+LOCAL BOOL keys_asked( void )
+{
+	T_WMWIN	f;
+	INT	was = wm_focused();
+
+	return (BOOL)( was > 0 && wm_ref(was, &f) >= E_OK && ( f.attr & WM_ATTR_POPUP ) != 0 );
+}
+
+/*
+ * Something let go on a window goes on there: it comes forward with the
+ * keys, as a press on it would, before its program hears of the drop.
+ * Which window had them is kept, for a drop it refuses.
+ */
+LOCAL void drop_activate( INT wid )
+{
+	T_WMWIN	w;
+	INT	was = wm_focused();
+
+	if ( keys_asked() || wm_ref(wid, &w) < E_OK
+	  || ( w.attr & ( WM_ATTR_POPUP | WM_ATTR_NOFOCUS ) ) != 0
+	  || ( ( w.attr & WM_ATTR_OWN ) == 0 && w.parent <= 0 ) ) {
+		was = 0;
+	} else {
+		wm_raise(wid);
+		if ( was == wid || wm_focus(wid) < E_OK ) {
+			was = 0;
+		}
+		wm_update();
+	}
+	LOCK();
+	if ( WOW(wid).used ) WOW(wid).dropback = was;
+	UNLOCK();
+}
+
+/*
+ * A window a program has opened takes the keys when a person's act is
+ * why it opened: the first ordinary window of a process started at their
+ * asking, while they have not gone on to something else; or one that a
+ * program with the keys opens just after a press. Anything else opens
+ * without them: a program in the background cannot take what is being
+ * typed elsewhere. A panel, a sub-window, a floating window and a window
+ * that never has the keys leave the ticket for the window to come.
+ */
+#define OPEN_FOLLOWS_MS	2000
+
+LOCAL void open_activate( INT wid, ID maker, UINT attr, BOOL sub )
+{
+	INT	f;
+	UINT	t;
+
+	if ( maker <= 0 || sub || ( attr & WM_ATTR_OWN ) == 0
+	  || ( attr & ( WM_ATTR_POPUP | WM_ATTR_NOFOCUS | WM_ATTR_FLOAT ) ) != 0 ) {
+		return;
+	}
+	t = knl_ob_act_take(maker);
+	f = wm_focused();
+	if ( !keys_asked() && ( wm_act_good(t)
+			       || ( f != wid && wm_obj_maker(f) == maker && wm_act_age() < OPEN_FOLLOWS_MS ) ) ) {
+		(void)wm_focus(wid);
+	}
+}
+
+/* What a process may do to an object: by its credentials, and what a drop granted it */
+LOCAL UINT rights_of( ID pid, CONST TS_UUID *target )
+{
+	return knl_ob_permit_on(target, knl_ob_crd_of(pid)) | knl_ob_granted(pid, target);
+}
+
+EXPORT ER wm_obj_drop_may( INT wid, ID giver, CONST TS_UUID *target )
+{
+	TS_UUID	u;
+	ID	taker = 0;
+
+	if ( wo_mtx <= 0 || wid < 1 || wid > wo_nwin ) {
+		return E_PAR;
+	}
+	if ( wm_obj_uuid(wid, &u) < E_OK ) {
+		return E_NOEXS;
+	}
+	if ( !knl_ob_taker(&u, OB_E_DROP, &taker) ) {
+		return E_NOSPT;
+	}
+	if ( target != NULL
+	  && ( ( rights_of(giver, target) & OB_OP_R ) != OB_OP_R
+	    || ( rights_of(taker, target) & OB_OP_R ) != OB_OP_R ) ) {
+		return E_OACV;
+	}
+	return E_OK;
+}
+
+/*
+ * A question whether links would be taken: told to whoever asked
+ * OB_E_ASK of the window, numbered so that an answer to one asked before
+ * is not taken for this one's.
+ */
+LOCAL UINT	ask_count = 0;
+
+/* The question of links, or with letters of letters, asked of the one who takes them */
+LOCAL ER ask_window( INT wid, INT sx, INT sy, UINT mods, BOOL letters, UINT *p_seq )
+{
+	T_OBNTM	nt;
+	T_WMWIN	w;
+	SYSTIM	now;
+	TS_UUID	u;
+	ID	taker = 0;
+	UINT	seq;
+
+	if ( wo_mtx <= 0 || wid < 1 || wid > wo_nwin || p_seq == NULL ) {
+		return E_PAR;
+	}
+	if ( wm_obj_uuid(wid, &u) < E_OK || wm_ref(wid, &w) < E_OK ) {
+		return E_NOEXS;
+	}
+	if ( !knl_ob_taker(&u, OB_E_ASK, &taker)
+	  || !knl_ob_taker(&u, letters ? OB_E_TEXT : OB_E_DROP, &taker) ) {
+		return E_NOSPT;
+	}
+	LOCK();
+	if ( ++ask_count == 0 ) {
+		ask_count = 1;
+	}
+	seq = ask_count;
+	WOW(wid).askseq = seq;
+	WOW(wid).askans = 0;
+	UNLOCK();
+	knl_memset(&nt, 0, sizeof(nt));
+	nt.code = seq;
+	nt.mods = mods | ( letters ? OB_ASK_LETTERS : 0 );
+	nt.x = sx - w.work.left;
+	nt.y = sy - w.work.top;
+	if ( tk_get_otm(&now) >= E_OK ) {
+		nt.when = ( (UD)(UW)now.hi << 32 ) | (UD)now.lo;
+	}
+	knl_ob_post(&u, OB_WR_ASK, OB_E_ASK, &nt);
+	*p_seq = seq;
+	return E_OK;
+}
+
+EXPORT ER wm_obj_ask( INT wid, INT sx, INT sy, UINT mods, UINT *p_seq )
+{
+	return ask_window(wid, sx, sy, mods, FALSE, p_seq);
+}
+
+EXPORT ER wm_obj_ask_text( INT wid, INT sx, INT sy, UINT mods, UINT *p_seq )
+{
+	return ask_window(wid, sx, sy, mods, TRUE, p_seq);
+}
+
+EXPORT ER wm_obj_asked( INT wid, UINT seq )
+{
+	ER	er;
+
+	if ( wo_mtx <= 0 || wid < 1 || wid > wo_nwin ) {
+		return E_PAR;
+	}
+	LOCK();
+	er = ( !WOW(wid).used || WOW(wid).askseq != seq ) ? E_OBJ
+	   : ( WOW(wid).askans == OB_DR_ACCEPT ) ? E_OK
+	   : ( WOW(wid).askans == OB_DR_REFUSE ) ? E_NOEXS : E_TMOUT;
+	UNLOCK();
+	return er;
+}
+
+/* The answer to a question, written by whoever takes the window's drops */
+LOCAL ER ask_answer( INT wid, CONST T_OBDRANS *an )
+{
+	ER	er = E_OBJ;
+
+	if ( an->answer != OB_DR_ACCEPT && an->answer != OB_DR_REFUSE ) {
+		return E_PAR;
+	}
+	LOCK();
+	if ( WOW(wid).used && WOW(wid).askseq == an->seq && WOW(wid).askans == 0 ) {
+		WOW(wid).askans = an->answer;
+		er = E_OK;
+	}
+	UNLOCK();
+	return er;
+}
+
+/*
+ * byprog: the links come from the process giver, not from the person at
+ * the desktop. Each must be readable by both processes, and the taker
+ * gains nothing: ops only says what it already may do that the giver may
+ * too. Otherwise the taker is granted what the caller may do.
+ */
+LOCAL ER drop_links( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
+		     BOOL byprog, ID giver, CONST T_OBDROPV *v, INT n )
 {
 	CONST T_OBCRD	*crd;
 	T_OBDROP	*d, *old = NULL;
@@ -1307,6 +1708,13 @@ EXPORT ER wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
 	}
 	if ( !knl_ob_taker(&u, OB_E_DROP, &taker) ) {
 		return E_NOSPT;			/* nobody there takes drops */
+	}
+	if ( byprog ) {
+		for ( i = 0; i < n; i++ ) {
+			if ( wm_obj_drop_may(wid, giver, &v[i].target) == E_OACV ) {
+				return E_OACV;
+			}
+		}
 	}
 	/* every link let go */
 	d = (T_OBDROP *)Kcalloc(1, OB_DROP_SIZE(n));
@@ -1337,6 +1745,10 @@ EXPORT ER wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
 	for ( i = 0; i < n; i++ ) {
 		d->v[i] = v[i];
 		d->v[i].name[OB_DROP_NAME - 1] = 0;
+		if ( byprog ) {
+			d->v[i].ops = rights_of(giver, &v[i].target) & rights_of(taker, &v[i].target) & OB_DROP_OPS;
+			continue;
+		}
 		d->v[i].ops = knl_ob_permit_on(&v[i].target, crd) & OB_DROP_OPS;
 		if ( d->v[i].ops != 0 ) {
 			knl_ob_grant(taker, &v[i].target, d->v[i].ops);
@@ -1346,12 +1758,14 @@ EXPORT ER wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
 	LOCK();
 	if ( !WOW(wid).used || !same_uuid(&WOW(wid).uuid, &u) ) {
 		UNLOCK();
-		drop_ungrant(d, taker);
+		if ( !byprog ) {
+			drop_ungrant(d, taker);
+		}
 		Kfree(d);
 		return E_NOEXS;			/* it closed meanwhile */
 	}
 	old = WOW(wid).drop;
-	if ( old != NULL && !WOW(wid).answered ) {
+	if ( old != NULL && !WOW(wid).answered && WOW(wid).gave ) {
 		oldtaker = WOW(wid).taker;
 		revoke = TRUE;
 	}
@@ -1360,6 +1774,7 @@ EXPORT ER wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
 	WOW(wid).droplen = (SZ)OB_DROP_SIZE(n);
 	WOW(wid).taker = taker;
 	WOW(wid).answered = FALSE;
+	WOW(wid).gave = !byprog;
 	UNLOCK();
 	if ( old != NULL ) {
 		if ( revoke ) {
@@ -1384,9 +1799,22 @@ EXPORT ER wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
 	if ( tk_get_otm(&now) >= E_OK ) {
 		nt.when = ( (UD)(UW)now.hi << 32 ) | (UD)now.lo;
 	}
+	drop_activate(wid);
 	knl_ob_post(&u, OB_WR_DROP, OB_E_DROP, &nt);
 
 	return E_OK;
+}
+
+EXPORT ER wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
+		       CONST T_OBDROPV *v, INT n )
+{
+	return drop_links(wid, sx, sy, mods, from, FALSE, 0, v, n);
+}
+
+EXPORT ER wm_obj_drop_for( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
+			   ID giver, CONST T_OBDROPV *v, INT n )
+{
+	return drop_links(wid, sx, sy, mods, from, TRUE, giver, v, n);
 }
 
 EXPORT ER wm_obj_drop_text( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
@@ -1436,7 +1864,7 @@ EXPORT ER wm_obj_drop_text( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *f
 		return E_NOEXS;			/* it closed meanwhile */
 	}
 	old = WOW(wid).drop;
-	if ( old != NULL && !WOW(wid).answered ) {
+	if ( old != NULL && !WOW(wid).answered && WOW(wid).gave ) {
 		oldtaker = WOW(wid).taker;
 		revoke = TRUE;
 	}
@@ -1445,6 +1873,7 @@ EXPORT ER wm_obj_drop_text( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *f
 	WOW(wid).droplen = (SZ)sizeof(T_OBDROP) + (SZ)n + 1;
 	WOW(wid).taker = taker;
 	WOW(wid).answered = FALSE;
+	WOW(wid).gave = FALSE;
 	UNLOCK();
 	if ( old != NULL ) {
 		if ( revoke ) {
@@ -1461,6 +1890,7 @@ EXPORT ER wm_obj_drop_text( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *f
 	if ( tk_get_otm(&now) >= E_OK ) {
 		nt.when = ( (UD)(UW)now.hi << 32 ) | (UD)now.lo;
 	}
+	drop_activate(wid);
 	knl_ob_post(&u, OB_WR_DROP, OB_E_DROP, &nt);
 
 	return E_OK;
@@ -1511,6 +1941,7 @@ LOCAL ER drop_answer( INT wid, CONST T_OBDRANS *an )
 	T_OBDROP	*d, *keep = NULL;
 	ID		taker = 0;
 	BOOL		refuse;
+	INT		back;
 
 	if ( an->answer != OB_DR_ACCEPT && an->answer != OB_DR_REFUSE ) {
 		return E_PAR;
@@ -1522,7 +1953,7 @@ LOCAL ER drop_answer( INT wid, CONST T_OBDRANS *an )
 		UNLOCK();
 		return E_OBJ;			/* not the drop there is, or answered already */
 	}
-	if ( refuse ) {
+	if ( refuse && WOW(wid).gave ) {
 		/* the links it gave, kept to take their grants back outside the lock */
 		keep = (T_OBDROP *)Kmalloc(WOW(wid).droplen);
 		if ( keep == NULL ) {
@@ -1533,7 +1964,15 @@ LOCAL ER drop_answer( INT wid, CONST T_OBDRANS *an )
 	}
 	WOW(wid).answered = TRUE;
 	taker = WOW(wid).taker;
+	back = WOW(wid).dropback;
+	WOW(wid).dropback = 0;
 	UNLOCK();
+	/* refused, nothing came in: the keys go back, unless the person has moved them since */
+	if ( refuse && back > 0 && wm_focused() == wid ) {
+		wm_raise(back);
+		(void)wm_focus(back);
+		wm_update();
+	}
 	if ( keep != NULL ) {
 		drop_ungrant(keep, taker);
 		Kfree(keep);
@@ -1745,6 +2184,9 @@ LOCAL ER rec_bytes( INT h, INT recno, UB **p_buf, SZ *p_len )
 			wp->wbottom = w.work.bottom;
 			wp->z = w.z;
 			wp->flags = w.visible ? OB_WP_SHOWN : 0;
+			if ( er >= E_OK && wm_focused() == H_A(h) ) {
+				wp->flags |= OB_WP_FOCUS;	/* the keys go to it */
+			}
 		} else if ( H_KIND(h) == H_PNL ) {
 			T_DPRECT	r;
 			INT		wid = wm_panel_wid(H_A(h));
@@ -1846,7 +2288,7 @@ LOCAL ER rec_bytes( INT h, INT recno, UB **p_buf, SZ *p_len )
 		*p_len = sizeof(*bs);
 		return E_OK;
 	}
-	if ( H_KIND(h) == H_WIN && recno == OB_WR_CAND ) {
+	if ( H_KIND(h) == H_WIN && ( recno == OB_WR_CAND || recno == OB_WR_ASK ) ) {
 		return E_OK;			/* written only: nothing to read */
 	}
 	if ( H_KIND(h) == H_WIN ) {
@@ -2117,6 +2559,9 @@ LOCAL ER keep_bytes( INT wid, INT which, D off, CONST void *buf, SZ size )
 	return E_OK;
 }
 
+LOCAL BOOL panel_seen( INT pid );
+LOCAL void panels_draw_on( INT wid );
+
 LOCAL ER wo_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 		 BOOL nowait )
 {
@@ -2157,6 +2602,9 @@ LOCAL ER wo_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 		r.right = wp.right;
 		r.bottom = wp.bottom;
 		er = wm_place(H_A(h), &r);	/* on the screen; what was asked kept for a larger one */
+		if ( er >= E_OK && ( wp.flags & OB_WP_SHOWN ) != 0 ) {
+			panels_draw_on(H_A(h));	/* what a hidden window's parts were set to, drawn once */
+		}
 		if ( er >= E_OK ) er = wm_show(H_A(h), ( wp.flags & OB_WP_SHOWN ) != 0);
 		if ( er >= E_OK && wp.z == 0 ) er = wm_raise(H_A(h));
 		wm_update();
@@ -2170,6 +2618,15 @@ LOCAL ER wo_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 		knl_memcpy(&an, buf, (INT)( ( size < (SZ)sizeof(an) ) ? size : (SZ)sizeof(an) ));
 		an.msg[OB_DROP_MSG - 1] = 0;
 		er = drop_answer(H_A(h), &an);
+	} else if ( H_KIND(h) == H_WIN && recno == OB_WR_ASK ) {
+		T_OBDRANS	an;
+
+		if ( off != 0 || size < (SZ)( sizeof(UINT) * 2 ) ) {
+			return E_PAR;
+		}
+		knl_memset(&an, 0, sizeof(an));
+		knl_memcpy(&an, buf, (INT)( sizeof(UINT) * 2 ));
+		er = ask_answer(H_A(h), &an);
 	} else if ( H_KIND(h) == H_WIN && recno == OB_WR_CAND ) {
 		T_OBWCAND	*c;
 
@@ -2186,8 +2643,9 @@ LOCAL ER wo_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 		Kfree(c);
 	} else if ( H_KIND(h) == H_WIN && recno == OB_WR_BARS ) {
 		T_OBWBAR	v;
-		T_WMBAR		b;
+		T_WMBAR		b, was;
 		INT		i, n;
+		BOOL		moved = FALSE;
 
 		n = (INT)( size / (SZ)sizeof(v) );
 		if ( off != 0 || n < 1 ) {
@@ -2199,12 +2657,24 @@ LOCAL ER wo_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 			b.hi = v.hi;
 			b.clo = v.clo;
 			b.chi = v.chi;
+			if ( wm_bar(H_A(h), (UINT)i, &was) < E_OK || was.lo != b.lo || was.hi != b.hi
+			  || was.clo != b.clo || was.chi != b.chi ) {
+				moved = TRUE;
+			}
 			er = wm_set_bar(H_A(h), (UINT)i, &b);
 			if ( er < E_OK ) {
 				break;
 			}
 		}
-		wm_update();
+		/*
+		 * Built only when a bar changed: a build asked for within the
+		 * refresh of the one before waits for the next refresh, and a
+		 * program that writes its bars after each drawing would wait
+		 * that long for nothing.
+		 */
+		if ( moved ) {
+			wm_update();
+		}
 	} else if ( H_KIND(h) == H_PART && ( recno == OB_WR_STATE || recno == OB_WR_PLACE
 					      || recno == OB_WR_KIND ) ) {
 		if ( off != 0 ) {
@@ -2214,6 +2684,9 @@ LOCAL ER wo_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 			er = knl_pn_set_state(H_A(h), H_B(h), (CONST UB *)buf, (INT)size);
 		} else if ( recno == OB_WR_KIND ) {
 			er = knl_pn_set_names(H_A(h), H_B(h), (CONST UB *)buf, (INT)size);
+			if ( er >= E_OK ) {
+				er = 1;		/* the names are not compared: drawn again */
+			}
 		} else if ( size < (SZ)sizeof(T_OBWPOS) ) {
 			er = E_PAR;
 		} else {
@@ -2222,15 +2695,70 @@ LOCAL ER wo_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 			knl_memcpy(&wp, buf, sizeof(wp));
 			er = knl_pn_set_flags(H_A(h), H_B(h), wp.flags);
 		}
-		if ( er >= E_OK ) {
+		/*
+		 * A part written as it already was (the state and the flags
+		 * say: knl_pn_set_state, knl_pn_set_flags) leaves the panel as
+		 * it is: nothing is drawn or built for it.
+		 */
+		if ( er > E_OK && panel_seen(H_A(h)) ) {
+			/*
+			 * The panel drawn again and the screen asked to show it,
+			 * without the writer waiting for it to be built: a program
+			 * that changes a part and then draws its window has both
+			 * shown in one build, not one after the other. On a window
+			 * still hidden it is drawn once, as the window is shown.
+			 * The panel is drawn whole, its ground first, into the
+			 * pixels the compositor builds the screen from: what was
+			 * asked before is built first (wm_flush, which returns at
+			 * once when nothing waits), so that a build never reads the
+			 * panel with its ground laid and its parts not yet on it,
+			 * as it would while a program writes its parts one after
+			 * another.
+			 */
+			(void)wm_flush();
 			wm_panel_draw(H_A(h));
-			wm_update();
+			wm_post();
+		}
+		if ( er > E_OK ) {
+			er = E_OK;
 		}
 	}
 	if ( er >= E_OK && p_asize != NULL ) {
 		*p_asize = size;
 	}
 	return er;
+}
+
+/* The window panel pid is placed on can be seen: what is written of its parts is drawn at once */
+LOCAL BOOL panel_seen( INT pid )
+{
+	T_WMWIN	w;
+	INT	wid = wm_panel_wid(pid);
+
+	return (BOOL)( wid <= 0 || wm_ref(wid, &w) < E_OK || w.visible );
+}
+
+/* The panels placed on window wid drawn, as it comes out of hiding */
+LOCAL void panels_draw_on( INT wid )
+{
+	T_WMWIN	w;
+	INT	pids[WM_PANEL_MAX], n = 0, i;
+
+	if ( wm_ref(wid, &w) < E_OK || w.visible ) {
+		return;				/* drawn already, as each part was set */
+	}
+	LOCK();
+	for ( i = 1; i <= WM_PANEL_MAX; i++ ) {
+		if ( wo_pnl[i].used ) {
+			pids[n++] = i;
+		}
+	}
+	UNLOCK();
+	for ( i = 0; i < n; i++ ) {
+		if ( wm_panel_wid(pids[i]) == wid ) {
+			wm_panel_draw(pids[i]);
+		}
+	}
 }
 
 LOCAL ER wo_trn( INT h, INT recno, UD size )
@@ -2257,7 +2785,8 @@ LOCAL ER wo_trn( INT h, INT recno, UD size )
 	}
 	/* the place, the state, a drop and the bars are rewritten whole: nothing to cut */
 	if ( recno == OB_WR_PLACE || recno == OB_WR_STATE
-	  || ( H_KIND(h) == H_WIN && ( recno == OB_WR_DROP || recno == OB_WR_BARS || recno == OB_WR_CAND ) ) ) {
+	  || ( H_KIND(h) == H_WIN && ( recno == OB_WR_DROP || recno == OB_WR_BARS || recno == OB_WR_CAND
+				      || recno == OB_WR_ASK ) ) ) {
 		return E_OK;
 	}
 	return E_NOSPT;
@@ -2825,8 +3354,10 @@ LOCAL ER fr_map( INT h, INT target, CONST T_OBMAP *m )
 		}
 		UNLOCK();
 	}
-	wm_panel_draw(pid);
-	wm_update();
+	if ( e->sub == OB_S_MENU || panel_seen(pid) ) {
+		wm_panel_draw(pid);	/* a panel on a window still hidden: drawn once as it is shown */
+		wm_update();
+	}
 
 	return er;
 }
@@ -3317,7 +3848,9 @@ LOCAL ER wo_setprot( CONST TS_UUID *uuid, CONST T_OBPRT *prt )
  * is the name. "full":1 makes it the whole screen, "wide":1 as wide as
  * the screen, "shows":"uuid" names the object it shows, and
  * "sub":"uuid" makes it a subordinate window of that window, kept just
- * in front of it (a tool panel over the window it works). A panel, a
+ * in front of it (a tool panel over the window it works), and "hidden":1
+ * makes it hidden, to be shown once what is in it is set (OB_WR_PLACE
+ * with OB_WP_SHOWN). A panel, a
  * menu or a part is made from its definition, which comes in a later
  * stage.
  */
@@ -3328,7 +3861,7 @@ LOCAL ER wo_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	INT		wid;
 	ER		er = E_SYS;
 	TS_UUID		shows, icon, parent;
-	BOOL		has_shows = FALSE, has_icon = FALSE, has_parent = FALSE;
+	BOOL		has_shows = FALSE, has_icon = FALSE, has_parent = FALSE, hidden = FALSE;
 	UB		sh[40];
 	ID		maker;
 
@@ -3382,19 +3915,24 @@ LOCAL ER wo_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 		if ( v >= 0 && knl_oj_num(j, len, v, &d) && d != 0 ) {
 			INT	sw, sh;
 
-			wm_screen(&sw, &sh);
-			r.left = 0;
-			r.top = 0;
-			r.right = sw;
-			r.bottom = sh;
+			T_DPRECT	on;
+
+			(void)sw;
+			(void)sh;
+			wm_screen_at(( r.left + r.right ) / 2, 0, &on);
+			r = on;
 		}
 		v = ( root >= 0 ) ? knl_oj_member(j, len, root, "wide") : -1;
 		if ( v >= 0 && knl_oj_num(j, len, v, &d) && d != 0 ) {
 			INT	sw, sh;
 
-			wm_screen(&sw, &sh);
-			r.left = 0;
-			r.right = sw;
+			T_DPRECT	on;
+
+			(void)sw;
+			(void)sh;
+			wm_screen_at(( r.left + r.right ) / 2, 0, &on);
+			r.left = on.left;
+			r.right = on.right;
 		}
 		v = ( root >= 0 ) ? knl_oj_member(j, len, root, "shows") : -1;
 		if ( v >= 0 && knl_oj_str(j, len, v, sh, sizeof(sh)) > 0
@@ -3406,6 +3944,8 @@ LOCAL ER wo_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 		  && ts_str_to_uuid((CONST char *)sh, &parent) >= E_OK ) {
 			has_parent = TRUE;
 		}
+		v = ( root >= 0 ) ? knl_oj_member(j, len, root, "hidden") : -1;
+		hidden = (BOOL)( v >= 0 && knl_oj_num(j, len, v, &d) && d != 0 );
 		/* the object whose icon the window wears: the program's, for a program's own window */
 		v = ( root >= 0 ) ? knl_oj_member(j, len, root, "icon") : -1;
 		if ( v >= 0 && knl_oj_str(j, len, v, sh, sizeof(sh)) > 0
@@ -3417,6 +3957,9 @@ LOCAL ER wo_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	wid = wm_open(&r, attr, (CONST char *)c->name);
 	if ( wid < 0 ) {
 		return (ER)wid;
+	}
+	if ( hidden ) {
+		(void)wm_show(wid, FALSE);	/* before anything of it is built */
 	}
 	LOCK();
 	if ( wid <= wo_nwin && WOW(wid).used ) {
@@ -3450,6 +3993,8 @@ LOCAL ER wo_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 		if ( wid <= wo_nwin && WOW(wid).used ) WOW(wid).back = was;
 		UNLOCK();
 		(void)wm_focus(wid);
+	} else if ( er >= E_OK ) {
+		open_activate(wid, maker, attr, has_parent);
 	}
 	if ( er < E_OK ) {
 		(void)wm_close(wid);

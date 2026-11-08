@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="電子手帳のページ">
 <document>
 <p>電子手帳のページ</p>
-<p>先頭へ、前へ、次へ、最後へ、空欄にする、ページを追加、ページを削除。メニューの定義。</p>
+<p>先頭へ、前へ、次へ、最後へ、空欄にする、ページを追加、ページを削除、年月を選択。メニューの定義。</p>
 </document>
 <menu>
 <item code="page.first">先頭へ</item>
@@ -13,5 +13,7 @@
 <line/>
 <item code="page.add">ページを追加</item>
 <item code="page.del">ページを削除</item>
+<line/>
+<item code="page.month">年月を選択...</item>
 </menu>
 </tad>

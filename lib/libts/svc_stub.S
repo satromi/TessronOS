@@ -150,6 +150,7 @@
 	SVCSTUB	ob_rea_tmo,	TSN_OB_REA_TMO
 	SVCSTUB	ob_fnd_sys,	TSN_OB_FND_SYS
 	SVCSTUB	ob_acc_obj,	TSN_OB_ACC_OBJ
+	SVCSTUB	ob_ref_vob,	TSN_OB_REF_VOB
 	SVCSTUB	ob_del_rec,	TSN_OB_DEL_REC
 	SVCSTUB	ob_lst_rec,	TSN_OB_LST_REC
 	SVCSTUB	ob_get_atr,	TSN_OB_GET_ATR
@@ -157,6 +158,8 @@
 	SVCSTUB	ob_get_ico,	TSN_OB_GET_ICO
 	SVCSTUB	ob_set_ico,	TSN_OB_SET_ICO
 	SVCSTUB	ob_ref_vol,	TSN_OB_REF_VOL
+	SVCSTUB	ob_ref_vid,	TSN_OB_REF_VID
+	SVCSTUB	ob_dup_obj,	TSN_OB_DUP_OBJ
 	SVCSTUB	ob_wip_vol,	TSN_OB_WIP_VOL
 	SVCSTUB	ob_get_atv,	TSN_OB_GET_ATV
 	SVCSTUB	ob_get_prt,	TSN_OB_GET_PRT
@@ -254,6 +257,25 @@
 	SVCSTUB	dp_text_width,	TSN_DP_TEXT_WIDTH
 	SVCSTUB	dp_draw_tad,	TSN_DP_DRAW_TAD
 	SVCSTUB	dp_img_decode,	TSN_DP_IMG_DECODE
+	/* what the drawing of documents linked into a process calls (include/ts/tvport.h) */
+	SVCSTUB	dp_set_visible,	TSN_DP_SET_VISIBLE
+	SVCSTUB	dp_ref,		TSN_DP_REF
+	SVCSTUB	dp_set_mode,	TSN_DP_SET_MODE
+	SVCSTUB	dp_put_pixel,	TSN_DP_PUT_PIXEL
+	SVCSTUB	dp_fill_poly,	TSN_DP_FILL_POLY
+	SVCSTUB	dp_draw_poly,	TSN_DP_DRAW_POLY
+	SVCSTUB	dp_line_wide,	TSN_DP_LINE_WIDE
+	SVCSTUB	dp_frame_oval,	TSN_DP_FRAME_OVAL
+	SVCSTUB	dp_put_image,	TSN_DP_PUT_IMAGE
+	SVCSTUB	dp_scale,	TSN_DP_SCALE
+	SVCSTUB	fn_system,	TSN_FN_SYSTEM
+	SVCSTUB	fn_find_style,	TSN_FN_FIND_STYLE
+	SVCSTUB	fn_dra_txt,	TSN_FN_DRA_TXT
+	SVCSTUB	dp_open_mem,	TSN_DP_OPEN_MEM
+	SVCSTUB	dp_close,	TSN_DP_CLOSE
+	SVCSTUB	fn_nface,	TSN_FN_NFACE
+	SVCSTUB	fn_face_at,	TSN_FN_FACE_AT
+	SVCSTUB	fn_family,	TSN_FN_FAMILY
 
 	/* the window layer (class 9) */
 	SVCSTUB	wm_obj_gid,	TSN_WM_OBJ_GID
@@ -284,6 +306,10 @@
 	SVCSTUB	wm_screen,	TSN_WM_SCREEN
 	SVCSTUB	wm_hit_slop,	TSN_WM_HIT_SLOP
 	SVCSTUB	wm_grab_screen,	TSN_WM_GRAB_SCREEN
+	SVCSTUB	wm_share_list,	TSN_WM_SHARE_LIST
+	SVCSTUB	wm_grab_window,	TSN_WM_GRAB_WINDOW
+	SVCSTUB	wm_press_area,	TSN_WM_PRESS_AREA
+	SVCSTUB	wm_fill_look,	TSN_WM_FILL_LOOK
 
 	/* the tray (class 9) */
 	SVCSTUB	tr_psh_dat,	TSN_TR_PSH_DAT

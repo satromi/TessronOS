@@ -89,7 +89,7 @@ endif
 # tools/netbsd/mkcmdobj.py がプログラム実身にして、実身「bin」から仮身で結ぶ。mktsfs の
 # --over で、その bin が etc/def のものに代わる
 CMDS      ?= 0
-CMD_OUT   ?= $(HOME)/tessronos-netbsd-cmds
+CMD_OUT   ?= $(HOME)/tessronos-netbsd-cmds$(if $(filter x86_64,$(ARCH)),-x64)
 CMD_STAGE := $(UOBJ)/cmdstage
 CMD_DONE  := $(UOBJ)/cmdstage.done
 CMD_BOX   := $(TOP)/etc/def/01a0d8c4-5460-7a71-8c82-9fab0c1d5460_0.xtad
@@ -99,10 +99,13 @@ $(shell mkdir -p $(UOBJ); [ -f $(CMD_STAMP) ] && [ "$$(cat $(CMD_STAMP))" = "$(C
 
 ifeq ($(CMDS),1)
 CMD_OVER  := --over $(CMD_STAGE)
-$(CMD_DONE): $(PSX_LIB) $(PSX_CRT) $(USER_LD) $(TOP)/tools/netbsd/cmds.sh $(TOP)/tools/netbsd/mkcmdobj.py \
-	     $(wildcard $(TOP)/tools/netbsd/port/*.c) $(PSX_HDRS) $(CMD_BOX) $(CMD_ICO)
+$(CMD_DONE): $(if $(filter 1,$(SSH)),$(SSH_LIB) $(TLS_LIB)) $(PSX_LIB) $(PSX_CRT) $(USER_LD) $(TOP)/tools/netbsd/cmds.sh $(TOP)/tools/netbsd/mkcmdobj.py \
+	     $(wildcard $(TOP)/tools/netbsd/port/*.c) $(wildcard $(TOP)/application/tsh/*) $(wildcard $(TOP)/application/tsh/bltin/*) \
+	     $(PSX_HDRS) $(CMD_BOX) $(CMD_ICO)
 	@echo 'CMDS $(CMD_OUT)'
-	@OUT=$(CMD_OUT) PSX_LIB=$(PSX_LIB) PSX_CRT=$(PSX_CRT) USER_LD=$(USER_LD) bash $(TOP)/tools/netbsd/cmds.sh all
+	@ARCH=$(ARCH) $(if $(filter x86_64,$(ARCH)),MARCH=$(ARCH_MARCH)) OUT=$(CMD_OUT) PSX_LIB=$(PSX_LIB) PSX_CRT=$(PSX_CRT) USER_LD=$(USER_LD) bash $(TOP)/tools/netbsd/cmds.sh all
+	$(if $(filter 1,$(SSH)),@$(CC) $(PSX_KCFLAGS) $(SSH_INC) $(PSX_LDFLAGS) -o $(CMD_OUT)/bin/ssh $(PSX_CRT) 	  $(TOP)/application/ssh/ssh.c $(SFTP_SRCS) $(TOP)/lib/libui/ui.c $(TOP)/lib/libjson/json.c $(SSH_LIB) $(TLS_LIB) $(PSX_LIBS))
+	$(if $(filter 1,$(SSH)),@printf 'ssh\tlibssh2 and application/ssh\n' >> $(CMD_OUT)/origin.txt)
 	@python3 -I $(TOP)/tools/netbsd/mkcmdobj.py --bin $(CMD_OUT)/bin --box $(CMD_BOX) --ico $(CMD_ICO) \
 	  --out $(CMD_STAGE) --origin $(CMD_OUT)/origin.txt
 	@touch $@

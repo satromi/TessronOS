@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "kana-typing-trainer",
       "kind": "app",
       "name": "かな入力練習",

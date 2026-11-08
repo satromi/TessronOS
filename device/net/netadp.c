@@ -16,7 +16,7 @@
  *	chipset's Intel Ethernet, a USB LAN adapter, the Wi-Fi. The person
  *	chooses one in システム環境設定 (〈機器〉〈機器情報〉〈ネットワーク
  *	アダプタ〉), which writes the machine's setting NET_ADAPTER: auto
- *	(the default), vnet, e1k, cdcnet or wifi. Left to the system, a
+ *	(the default), vnet, e1k, cdcnet, re, rge, igc, usblan or wifi. Left to the system, a
  *	wired card whose link is up is used before the Wi-Fi that is
  *	connected, and the card in use stays while neither of those is
  *	there, so that a cable pulled for a moment does not move the stack.
@@ -108,9 +108,9 @@ IMPORT void	knl_so_slaac_relink( void ) __attribute__((weak));
 #define ADP_F_LINK	1		/* a driver said a link or a card changed */
 
 #ifdef X64
-LOCAL CONST char *CONST adp_name[NETSEL_N] = { "vnet", "e1k", "cdcnet", "wifi" };
+LOCAL CONST char *CONST adp_name[NETSEL_N] = { "vnet", "e1k", "cdcnet", "wifi", "re", "rge", "igc", "usblan" };
 #else
-LOCAL CONST char *CONST adp_name[NETSEL_N] = { "eth", "e1k", "cdcnet", "wifi" };
+LOCAL CONST char *CONST adp_name[NETSEL_N] = { "eth", "e1k", "cdcnet", "wifi", "re", "rge", "igc", "usblan" };
 #endif
 
 LOCAL ID	adp_mtx;
@@ -169,6 +169,7 @@ LOCAL INT adp_make( UB *t, BOOL measured )
 	UH		devid = 0;
 	INT		n = 0, c, speed;
 	char		num[16];
+	CONST T_NETDRV	*d;
 
 	n = knl_oj_put(t, n, ADP_TEXT, "SELECT ");
 	n = knl_oj_put(t, n, ADP_TEXT, ( adp_select < 0 ) ? "auto" : adp_name[adp_select]);
@@ -186,9 +187,12 @@ LOCAL INT adp_make( UB *t, BOOL measured )
 		knl_memset(&st, 0, sizeof(st));
 		(void)knl_netsel_stat(c, &st);
 		speed = 0;
+		d = knl_netsel_drv(c);
 		if ( c == NETSEL_E1K ) {
 			speed = knl_e1k_speed(&devid);
 			if ( speed < 0 ) speed = 0;
+		} else if ( d != NULL ) {
+			speed = d->speed(d->ctx);
 		}
 		n = knl_oj_put(t, n, ADP_TEXT, "ADAPTER ");
 		n = knl_oj_put(t, n, ADP_TEXT, adp_name[c]);
@@ -212,6 +216,10 @@ LOCAL INT adp_make( UB *t, BOOL measured )
 			num[4] = '\0';
 			n = knl_oj_put(t, n, ADP_TEXT, num);
 			n = knl_oj_put(t, n, ADP_TEXT, "\n");
+		} else if ( d != NULL ) {
+			n = knl_oj_put(t, n, ADP_TEXT, " ");
+			n += d->label(d->ctx, t + n, ADP_TEXT - n);
+			n = knl_oj_put(t, n, ADP_TEXT, "\n");
 		} else {
 			n = knl_oj_put(t, n, ADP_TEXT, " USB LAN\n");
 		}
@@ -229,8 +237,11 @@ EXPORT INT knl_netadp_label( UB *t, INT max )
 	INT	c = knl_netsel_card(), n = 0;
 	UH	devid = 0;
 	char	num[5];
+	CONST T_NETDRV *d = knl_netsel_drv(c);
 
-	if ( c == NETSEL_E1K ) {
+	if ( d != NULL ) {
+		n = d->label(d->ctx, t, max);
+	} else if ( c == NETSEL_E1K ) {
 		(void)knl_e1k_speed(&devid);
 		n = knl_oj_put(t, n, max, "Intel Ethernet 8086:");
 		num[0] = "0123456789abcdef"[( devid >> 12 ) & 15];
@@ -431,8 +442,8 @@ LOCAL INT want( INT cur )
 			  adp_name[cur]);
 	}
 #endif
-	for ( c = NETSEL_VNET; c <= NETSEL_CDC; c++ ) {
-		if ( up(c) ) return c;		/* a wired card whose link is up */
+	for ( c = NETSEL_VNET; c < NETSEL_N; c++ ) {
+		if ( c != NETSEL_WIFI && up(c) ) return c;	/* a wired card whose link is up */
 	}
 #if USE_WIFI
 	if ( knl_wifi_connected() && usable(NETSEL_WIFI, m) ) return NETSEL_WIFI;

@@ -35,7 +35,8 @@
  *	ts/udic.h) are read when the converter starts and again whenever
  *	their object is written, which 単語登録 does: the romaji converter
  *	offers them for a reading typed whole, and mozc is given them as its
- *	user dictionary (design 11.16).
+ *	user dictionary (design 11.16). While someone is logged in they are
+ *	that person's own (kw_person); else those of 利用者, SYSDEF_DICT_USER.
  */
 
 #include <sys/machine.h>
@@ -72,6 +73,195 @@ LOCAL void kw_unlock( void )
 	if ( kw_sem > 0 ) (void)tk_sig_sem(kw_sem, 1);
 }
 
+/*
+ * Whose words they are: a person logged in has a dictionary of their own,
+ * their object linked from 辞書箱, told by its owner and by what its
+ * metadata says it is (tessronos.userdic). The person cannot link from
+ * the box, so it is made here the first time they log in. It starts with
+ * the words of the dictionary there has been, so that nobody's words are
+ * lost by logging in; that one is left as it is, for 利用者.
+ */
+#define KW_META_ROOM	4096
+#define KW_NOTE		"<tad version=\"1.0\" encoding=\"UTF-8\">\n<document>\n<p>" \
+			"単語登録で登録した単語です。持ち主だけが読み書きできます。" \
+			"</p>\n</document>\n</tad>\n"
+
+LOCAL BOOL kw_same( CONST TS_UUID *a, CONST TS_UUID *b )
+{
+	return (BOOL)( a->d.hi == b->d.hi && a->d.lo == b->d.lo );
+}
+
+/* Whether the n bytes at a and b are the same */
+LOCAL BOOL kw_bytes( CONST UB *a, CONST char *b, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( a[i] != (UB)b[i] ) return FALSE;
+	}
+	return TRUE;
+}
+
+/* Whether u is user's dictionary */
+LOCAL BOOL kw_is_of( CONST TS_UUID *u, CONST TS_UUID *user )
+{
+	UB	pbuf[OB_PRT_SIZE(16, 4)];
+	T_OBPRT	*prt = (T_OBPRT *)pbuf;
+	UB	*meta;
+	SZ	asz = 0;
+	ID	key;
+	BOOL	yes = FALSE;
+
+	if ( ob_get_prt(u, prt, sizeof(pbuf), &asz) < E_OK || !kw_same(&prt->owner, user) ) {
+		return FALSE;
+	}
+	key = ob_opn_obj(u, OB_OP_ATRRD);
+	if ( key <= 0 ) {
+		return FALSE;
+	}
+	meta = (UB *)Kmalloc(KW_META_ROOM);
+	if ( meta != NULL && ob_get_atr(key, meta, KW_META_ROOM - 1, &asz) >= E_OK ) {
+		SZ	i;
+		static CONST char	mark[] = "\"userdic\"";
+		INT			n = (INT)sizeof(mark) - 1;
+
+		for ( i = 0; !yes && i + n <= asz; i++ ) {
+			yes = kw_bytes(meta + i, mark, n);
+		}
+	}
+	if ( meta != NULL ) Kfree(meta);
+	(void)ob_cls_obj(key);
+	return yes;
+}
+
+/* The words the dictionary there has been holds, put in the new one's record */
+LOCAL ER kw_copy_words( ID to, INT recno )
+{
+	TS_UUID	u;
+	UB	*t;
+	SZ	asz = 0;
+	ID	key;
+	ER	er = E_OK;
+
+	if ( ts_str_to_uuid(SYSDEF_DICT_USER, &u) < E_OK ) {
+		return E_OK;
+	}
+	key = ob_opn_obj(&u, OB_OP_R);
+	if ( key <= 0 ) {
+		return E_OK;			/* none: it starts with no words */
+	}
+	t = (UB *)Kmalloc(UD_TEXT_MAX);
+	if ( t == NULL ) {
+		er = E_NOMEM;
+	} else if ( ob_rea_rec(key, 1, 0, t, UD_TEXT_MAX, &asz) >= E_OK && asz > 0 ) {
+		SZ	wr = 0;
+
+		er = ob_wri_rec(to, recno, 0, t, ( asz > UD_TEXT_MAX ) ? UD_TEXT_MAX : asz, &wr);
+	}
+	if ( t != NULL ) Kfree(t);
+	(void)ob_cls_obj(key);
+	return er;
+}
+
+/* user's dictionary made, theirs alone, and linked from 辞書箱 */
+LOCAL ER kw_make( CONST T_OBCRD *crd, CONST TS_UUID *box, TS_UUID *p_u )
+{
+	static CONST char meta[] =
+		"{\"name\":\"ユーザ辞書(個人)\",\"relationship\":[],\"linktype\":false,\"refCount\":0,"
+		"\"recordCount\":2,\"editable\":true,\"deletable\":true,\"readable\":true,\"applist\":{},"
+		"\"tessronos\":{\"userdic\":true,"
+		"\"records\":[{\"n\":0,\"rt\":1},{\"n\":1,\"rt\":15}]}}";
+	T_OBPRT	prt;
+	T_OBCRE	cr;
+	INT	recno = -1;
+	SZ	asz = 0;
+	ID	key;
+	ER	er;
+
+	knl_memset(&prt, 0, sizeof(prt));
+	prt.owner = crd->user;
+	if ( crd->ngrp > 0 ) prt.group = crd->grp[0];
+	prt.mode = 0600;
+	knl_memset(&cr, 0, sizeof(cr));
+	cr.type = OB_T_STORAGE;
+	cr.sub = OB_S_FILE;
+	cr.json = (CONST UB *)meta;
+	cr.jsonsz = (SZ)( sizeof(meta) - 1 );
+	cr.near = *box;
+	cr.prt = &prt;
+	er = ob_cre_obj(&cr, p_u);
+	if ( er < E_OK ) {
+		return er;
+	}
+	/* a new object filled record by record: nobody reads it half made */
+	key = ob_opn_obj(p_u, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_O_EXCL);
+	er = ( key > 0 ) ? E_OK : ( key < 0 ) ? (ER)key : E_SYS;
+	if ( er >= E_OK ) er = ob_apd_rec(key, OB_RT_TAD, 0, &recno);
+	if ( er >= E_OK ) er = ob_wri_rec(key, recno, 0, KW_NOTE, (SZ)( sizeof(KW_NOTE) - 1 ), &asz);
+	if ( er >= E_OK ) er = ob_apd_rec(key, OB_RT_SYSDATA, 0, &recno);
+	if ( er >= E_OK ) er = kw_copy_words(key, recno);
+	if ( key > 0 ) (void)ob_cls_obj(key);
+	if ( er >= E_OK ) er = om_obj_link_add(box, p_u);
+	if ( er < E_OK ) {
+		tm_printf((UB *)"kconv: a person's dictionary not made (%d)\n", (INT)er);
+		(void)ob_del_obj(p_u);
+	} else {
+		tm_printf((UB *)"kconv: a person's dictionary made\n");
+	}
+	return er;
+}
+
+/*
+ * The dictionary of whoever is at the machine, into *u. Should anything
+ * keep the person's from being found or made, those of 利用者 are used:
+ * typing goes on, and the words are not lost.
+ */
+LOCAL ER kw_person( TS_UUID *u )
+{
+	CONST T_OBCRD	*crd = knl_ob_session_crd();
+	TS_UUID		box, *lk;
+	INT		cnt = 0, i;
+	ER		er = E_NOEXS;
+
+	/* the watcher and a reader may come here together: one makes it, and the other finds it */
+	kw_lock();
+	if ( crd != NULL && !kw_same(&crd->user, &ob_user_person)
+	  && ts_str_to_uuid(SYSDEF_DICT_BOX, &box) >= E_OK
+	  && ob_lst_lnk(&box, NULL, NULL, 0, &cnt) >= E_OK ) {
+		lk = ( cnt > 0 ) ? (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)cnt) : NULL;
+		if ( lk != NULL ) {
+			INT	got = 0;
+
+			if ( ob_lst_lnk(&box, NULL, lk, cnt, &got) >= E_OK ) {
+				for ( i = 0; i < got && i < cnt && er < E_OK; i++ ) {
+					if ( kw_is_of(&lk[i], &crd->user) ) {
+						*u = lk[i];
+						er = E_OK;
+					}
+				}
+			}
+			Kfree(lk);
+		}
+		if ( er < E_OK ) {
+			er = kw_make(crd, &box, u);
+		}
+		if ( er >= E_OK ) {
+			kw_unlock();
+			return E_OK;
+		}
+	}
+	kw_unlock();
+	return ts_str_to_uuid(SYSDEF_DICT_USER, u);
+}
+
+#ifdef USE_KTEST
+/* For a test: whose dictionary is in use now */
+EXPORT ER kc_words_dict( TS_UUID *u )
+{
+	return kw_person(u);
+}
+#endif
+
 /* The object's record 1, read whole into memory taken for it; NULL when there is no such object */
 LOCAL UB *kw_read( INT *p_len )
 {
@@ -84,7 +274,7 @@ LOCAL UB *kw_read( INT *p_len )
 	ID	key;
 
 	*p_len = 0;
-	if ( ts_str_to_uuid(SYSDEF_DICT_USER, &u) < E_OK ) {
+	if ( kw_person(&u) < E_OK ) {
 		return NULL;
 	}
 	key = ob_opn_obj(&u, OB_OP_R);
@@ -1511,12 +1701,13 @@ LOCAL UINT kana_code( CONST UB *s )
 
 /*
  * A kana key's character as its TRON code, in the kana layout chosen
- * (キー配列): JIS かな by Shift, or a thumb-shift layout by the thumbs
- * held (ts/keymap.h); 0 for a key with none
+ * (キー配列), or the key's own (KM_MOD_LAYOUT, a screen keyboard's): JIS
+ * かな by Shift, or a thumb-shift layout by the thumbs held
+ * (ts/keymap.h); 0 for a key with none
  */
 EXPORT UINT kc_kana_key_m( UINT key, UINT mods )
 {
-	if ( km_kana() != KM_KANA_JIS ) {
+	if ( km_kana_of(mods) != KM_KANA_JIS ) {
 		return kana_code((CONST UB *)km_kana_text(key, mods));
 	}
 	return kc_kana_key(key, (BOOL)( ( mods & MOD_SHIFT ) != 0 ));
@@ -1640,23 +1831,14 @@ LOCAL ID	kw_watch_tsk = 0;
  * writing a word, or anyone) has the words read again. A write and the
  * cut after it come as two notices close together, which are one change.
  */
-LOCAL void kw_watch( INT stacd, void *exinf )
+LOCAL ID kw_watch_on( ID port )
 {
-	TS_UUID	u, ch;
-	T_OBCRE	c;
+	TS_UUID	u;
 	T_OBNTF	req;
-	T_OBNTM	m;
-	ID	port = 0, key;
-	SZ	asz = 0;
+	ID	key;
 
-	(void)stacd;
-	(void)exinf;
-	knl_memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ts_str_to_uuid(SYSDEF_DICT_USER, &u) < E_OK || ob_cre_obj(&c, &ch) < E_OK
-	  || ( port = ob_opn_obj(&ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) ) <= 0 ) {
-		kw_watch_tsk = 0;
-		tk_exd_tsk();
+	if ( kw_person(&u) < E_OK ) {
+		return 0;
 	}
 	knl_memset(&req, 0, sizeof(req));
 	req.events = OB_E_CHANGE;
@@ -1664,12 +1846,39 @@ LOCAL void kw_watch( INT stacd, void *exinf )
 	if ( key <= 0 || ob_ntf_evt(key, 1, &req, port) <= 0 ) {
 		tm_printf((UB *)"kconv: the user dictionary cannot be watched\n");
 		if ( key > 0 ) (void)ob_cls_obj(key);
-		(void)ob_cls_obj(port);
-		(void)ob_del_obj(&ch);
+		return 0;
+	}
+	return key;
+}
+
+LOCAL void kw_watch( INT stacd, void *exinf )
+{
+	TS_UUID	ch, who;
+	T_OBCRE	c;
+	T_OBNTM	m;
+	ID	port = 0, key = 0;
+	SZ	asz = 0;
+
+	(void)stacd;
+	(void)exinf;
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	if ( ob_cre_obj(&c, &ch) < E_OK
+	  || ( port = ob_opn_obj(&ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) ) <= 0 ) {
 		kw_watch_tsk = 0;
 		tk_exd_tsk();
 	}
+	who = knl_ob_session_crd()->user;
+	key = kw_watch_on(port);
 	for ( ;; ) {
+		if ( !kw_same(&who, &knl_ob_session_crd()->user) ) {
+			/* someone else at the machine: their words, and theirs watched */
+			who = knl_ob_session_crd()->user;
+			if ( key > 0 ) (void)ob_cls_obj(key);
+			key = kw_watch_on(port);
+			(void)kc_words_reload();
+			tm_printf((UB *)"kconv: the user dictionary of the person now at the machine read\n");
+		}
 		if ( ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) < E_OK || asz == 0 ) {
 			tk_dly_tsk(100);		/* nothing yet */
 			continue;

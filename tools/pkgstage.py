@@ -9,6 +9,9 @@ kept in ({uuid}.json, {uuid}_N.xtad, {uuid}_N.bin, {uuid}.ico), and the
 program box's record 0 (BOX.xtad) is written into DIR with a virtual
 object of each package's program added after the ones it has, one row
 further down each; a program the box links already is not added again.
+The system's 原紙箱 (the object システム links to as system.templates)
+is written there likewise, with a link to each template of each
+package's application added below the ones it has.
 DIR is then given to tools/mktsfs with --over, so that its program box
 replaces the one of etc/def.
 
@@ -24,6 +27,9 @@ import struct
 import sys
 import uuid
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vobjw  # noqa: E402
+
 MAGIC = b"TSPK"
 HEAD = 16
 ENTRY = 64
@@ -31,7 +37,6 @@ NAME_MAX = 48
 FILE_RE = re.compile(r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
                      r"(\.json|\.ico|_([0-9]+)\.(xtad|bin)|_([0-9]+)_([0-9]+)\.[a-z0-9]+)$")
 LINK_RE = re.compile(r'<link\b[^>]*/>')
-ROW = 32                        # from one virtual object of the box to the next
 LINK_NS = uuid.UUID("01a0d8c4-5213-7000-8000-000000000000")
 
 
@@ -53,12 +58,51 @@ def entries(path):
     return out
 
 
-def link_xml(prog, top):
+def link_xml(prog, name, top):
+    """A closed link to the program, as wide as its name, its top at top"""
     vid = uuid.uuid5(LINK_NS, prog)
-    return ('<link id="%s_0.xtad" vobjid="%s" vobjleft="8" vobjtop="%d" vobjright="248" '
-            'vobjbottom="%d" height="25" chsz="14" frcol="#000000" chcol="#000000" '
+    h = vobjw.closed_h()
+    return ('<link id="%s_0.xtad" vobjid="%s" vobjleft="%d" vobjtop="%d" vobjright="%d" '
+            'vobjbottom="%d" height="%d" chsz="%d" frcol="#000000" chcol="#000000" '
             'tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>'
-            % (prog, vid, top, top + 25))
+            % (prog, vid, vobjw.PAD, top, vobjw.PAD + vobjw.closed_w(name), top + h, h, vobjw.CHSZ))
+
+
+SYSTEM_BOX = "01a0d8c4-5211-7c52-9e0a-3b61d27f4c85"
+ROLE_TEMPLATES = "system.templates"
+
+
+def bottom_of(rec):
+    """The lowest edge of the links of a record, 0 for none"""
+    bottom = 0
+    for l in LINK_RE.findall(rec):
+        m = re.search(r'vobjbottom="(-?[0-9]+)"', l)
+        if m:
+            bottom = max(bottom, int(m.group(1)))
+    return bottom
+
+
+def templates_box(box_path):
+    """(path, record 0) of the system's 原紙箱, the object システム links to
+    as system.templates, looked for beside the program box (etc/def) and in
+    the objects the person starts with (etc/xtad); (None, None) when there
+    is none"""
+    defdir = os.path.dirname(os.path.abspath(box_path))
+    try:
+        sysrec = open(os.path.join(defdir, SYSTEM_BOX + "_0.xtad"), encoding="utf-8").read()
+    except OSError:
+        return None, None
+    for l in LINK_RE.findall(sysrec):
+        if ('relationship="%s"' % ROLE_TEMPLATES) not in l:
+            continue
+        m = re.search(r'\bid="([0-9a-f-]{36})_0\.xtad"', l)
+        if not m:
+            continue
+        for d in (defdir, os.path.join(os.path.dirname(defdir), "xtad")):
+            path = os.path.join(d, m.group(1) + "_0.xtad")
+            if os.path.exists(path):
+                return path, open(path, encoding="utf-8").read()
+    return None, None
 
 
 def main():
@@ -73,6 +117,9 @@ def main():
         os.remove(os.path.join(a.out, name))
 
     box = open(a.box, encoding="utf-8").read()
+    tbox_path, tbox = templates_box(a.box)
+    tbottom = bottom_of(tbox) if tbox is not None else 0
+    tadded = []
     links = LINK_RE.findall(box)
     bottom = 0
     for l in links:
@@ -95,9 +142,26 @@ def main():
             sys.exit("pkgstage: %s has no package.json" % path)
         prog = meta["program"]
         if ('id="%s_0.xtad"' % prog) not in box:
-            top = bottom + ROW - 25
-            bottom = top + 25
-            added.append(link_xml(prog, top))
+            pm = [d for n, d in ent if n == prog + ".json"]
+            if not pm:
+                sys.exit("pkgstage: %s has no metadata of its program %s" % (path, prog))
+            name = json.loads(pm[0].decode("utf-8")).get("name", "")
+            top = bottom + vobjw.GAP
+            bottom = top + vobjw.closed_h()
+            added.append(link_xml(prog, name, top))
+        if tbox is not None:
+            # its templates linked from the system's 原紙箱, as installing it links them
+            pm = [d for n, d in ent if n == prog + ".json"]
+            pj = json.loads(pm[0].decode("utf-8")) if pm else {}
+            pg = pj.get("tessronos", {}).get("program", {})
+            for b in (pg.get("base", []) if pg.get("kind", "app") == "app" else []):
+                if ('id="%s_0.xtad"' % b) in tbox or any(('id="%s_0.xtad"' % b) in l for l in tadded):
+                    continue
+                bm = [d for n, d in ent if n == b + ".json"]
+                bname = json.loads(bm[0].decode("utf-8")).get("name", "") if bm else ""
+                ttop = tbottom + vobjw.GAP
+                tbottom = ttop + vobjw.closed_h()
+                tadded.append(link_xml(b, bname, ttop))
         print("pkgstage: %s %s (%s, %d objects)"
               % (meta.get("id", "?"), meta.get("version", "?"), os.path.basename(path),
                  len(meta.get("objects", []))))
@@ -107,6 +171,11 @@ def main():
         box = box[:i] + "".join(l + "\n" for l in added) + box[i:]
     with open(os.path.join(a.out, os.path.basename(a.box)), "w", encoding="utf-8", newline="\n") as f:
         f.write(box)
+    if tadded:
+        i = tbox.rindex("</figure>")
+        tbox = tbox[:i] + "".join(l + "\n" for l in tadded) + tbox[i:]
+        with open(os.path.join(a.out, os.path.basename(tbox_path)), "w", encoding="utf-8", newline="\n") as f:
+            f.write(tbox)
     return 0
 
 

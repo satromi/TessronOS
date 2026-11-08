@@ -55,6 +55,8 @@
 #include <ts/part.h>
 #include <ts/fn.h>
 #include <ts/tray.h>
+#include <ts/figedit.h>
+#include <ts/figtool.h>
 #include "desktop.h"
 
 #define ED_EDGE		5		/* how near an edge counts as on it */
@@ -80,6 +82,9 @@ LOCAL DTWIN	*hold_d = NULL;
 LOCAL UINT	hold_how = HOLD_NONE;
 LOCAL INT	hold_which = -1;	/* the shape pressed */
 LOCAL T_DPRECT	hold_box;		/* that shape's box as it is sized */
+LOCAL T_DPRECT	hold_was;		/* its box as the handle was taken */
+LOCAL INT	hold_cx, hold_cy;	/* where the handle is carried, in the window */
+LOCAL UINT	hold_flip;		/* turned over by being sized past an edge (FE_SIZE_FLIP_*) */
 LOCAL INT	hold_dx = 0, hold_dy = 0;	/* how far everything has come */
 LOCAL INT	hold_x0, hold_y0;	/* where the hand went down */
 LOCAL INT	hold_px, hold_py;	/* where it was last */
@@ -656,9 +661,12 @@ EXPORT void ed_pick_all( DTWIN *d )
 	if ( d->fig == NULL ) {
 		return;
 	}
-	/* what is protected is not taken with everything else */
+	/*
+	 * what is protected is taken too, so that its protection can be taken
+	 * off; what is done to what is taken leaves it where it is
+	 */
 	for ( i = 0; i < d->fig->nsh; i++ ) {
-		if ( takeable(d, i) && !is_protected(d, i) ) {
+		if ( takeable(d, i) ) {
 			pick_add(d, i);
 		}
 	}
@@ -1110,6 +1118,7 @@ LOCAL ER regroup( DTWIN *d, BOOL (*first)( CONST DTWIN *, INT ),
 	TS_UUID	*ids, *order;
 	INT	n, i, k = 0, pass;
 	BOOL	*placed;
+	UINT	*taken;
 	ER	er;
 
 	ids = link_ids(d, &n);
@@ -1143,7 +1152,51 @@ LOCAL ER regroup( DTWIN *d, BOOL (*first)( CONST DTWIN *, INT ),
 			}
 		}
 	}
+	/*
+	 * A pick belongs to a shape by its number, and the numbers of the
+	 * links' shapes change with their order: what is taken is kept by
+	 * the identities of its links, and taken again by them once the
+	 * model has been made again.
+	 */
+	taken = (UINT *)Kmalloc(sizeof(UINT) * (SZ)n);
+	if ( taken == NULL ) {
+		Kfree(placed);
+		Kfree(order);
+		Kfree(ids);
+		return E_NOMEM;
+	}
+	for ( i = 0; i < n; i++ ) {
+		taken[i] = 0;
+	}
+	for ( i = 0; d->fig != NULL && i < d->fig->nsh && i < d->maxpick; i++ ) {
+		if ( d->pick[i] != 0 && is_link(d, i) && d->fig->sh[i].link < n ) {
+			taken[d->fig->sh[i].link] = d->pick[i];
+		}
+	}
 	er = tad_lnk_reorder((T_TAD *)d->rec, order, n);
+	if ( er >= E_OK ) {
+		ed_model(d);
+		d->npick = 0;
+		for ( i = 0; i < d->maxpick; i++ ) {
+			d->pick[i] = 0;
+		}
+		for ( i = 0; d->fig != NULL && i < d->fig->nsh; i++ ) {
+			T_VOBJ	v;
+			INT	j;
+
+			if ( !is_link(d, i) || tad_lnk_get(d->rec, d->fig->sh[i].link, &v) < E_OK ) {
+				continue;
+			}
+			for ( j = 0; j < n; j++ ) {
+				if ( taken[j] != 0 && ts_uuid_cmp(&ids[j], &v.vobjid) == 0 ) {
+					d->pick[i] = taken[j];
+					d->npick++;
+					break;
+				}
+			}
+		}
+	}
+	Kfree(taken);
 	Kfree(placed);
 	Kfree(order);
 	Kfree(ids);
@@ -1258,286 +1311,84 @@ EXPORT INT ed_first_pick( DTWIN *d )
 
 /* ---------------------------------------------------------------- 整頓 */
 
-typedef struct {
-	T_VOBJ	v;
-	UH	seq;
-} ARITEM;
-
-LOCAL INT ar_cmp_text( CONST UB *a, CONST UB *b )
+/* What 整頓 knows of the object a link points at: the store's metadata */
+LOCAL BOOL ar_info( void *arg, CONST TS_UUID *id, T_FEARINFO *inf )
 {
-	while ( *a != 0 && *a == *b ) {
-		a++;
-		b++;
+	T_OMINFO	*mi = (T_OMINFO *)Kmalloc(sizeof(T_OMINFO));
+	UB		app[1][OM_APP_NAME];
+	INT		i;
+
+	(void)arg;
+	if ( mi != NULL ) {
+		(void)om_store_info(id, mi);
+		knl_memcpy(inf->name, mi->name, TAD_NAME_MAX);
+		for ( i = 0; i < FE_AR_INFO_TEXT - 1 && i < OM_INFO_TEXT && mi->made[i] != 0; i++ ) {
+			inf->made[i] = mi->made[i];
+		}
+		for ( i = 0; i < FE_AR_INFO_TEXT - 1 && i < OM_INFO_TEXT && mi->updated[i] != 0; i++ ) {
+			inf->updated[i] = mi->updated[i];
+		}
+		inf->bytes = mi->bytes;
+		Kfree(mi);
+	}
+	inf->has_label = (BOOL)( om_store_name(id, inf->label, TAD_NAME_MAX) >= 0 );
+	if ( om_store_relationship(id, inf->rel, TAD_NAME_MAX) <= 0 ) {
+		inf->rel[0] = 0;
+	}
+	if ( om_store_apps(id, app, 1) > 0 ) {
+		for ( i = 0; i < FE_AR_APP_NAME - 1 && i < OM_APP_NAME && app[0][i] != 0; i++ ) {
+			inf->app[i] = app[0][i];
+		}
+		inf->has_app = TRUE;
 	}
 
-	return (INT)*a - (INT)*b;
-}
-
-/* How two objects compare for 整列順 */
-LOCAL INT ar_cmp( CONST ARITEM *a, CONST ARITEM *b, INT by )
-{
-	T_OMINFO	*ia, *ib;
-	INT		c = 0;
-
-	ia = (T_OMINFO *)Kmalloc(sizeof(T_OMINFO) * 2);
-	if ( ia == NULL ) {
-		return 0;
-	}
-	ib = ia + 1;
-	om_store_info(&a->v.target, ia);
-	om_store_info(&b->v.target, ib);
-	switch ( by ) {
-	case AR_BY_NAME:	c = ar_cmp_text(ia->name, ib->name);		break;
-	case AR_BY_MADE:	c = ar_cmp_text(ia->made, ib->made);		break;
-	case AR_BY_UPDATED:	c = ar_cmp_text(ia->updated, ib->updated);	break;
-	case AR_BY_SIZE:	c = ia->bytes - ib->bytes;			break;
-	default:		break;
-	}
-	Kfree(ia);
-
-	return c;
+	return TRUE;
 }
 
 /*
- * How wide an object's frame needs to be to show what 幅調整 asks for:
- * its pictogram and name, then its relationship, then what program it
- * opens with, then the date -- each step taking in what the one before
- * it did.
+ * 整頓 of the links taken, by the figure editor's core (fe_arrange),
+ * which the process's 仮身一覧 shares. AR_W_* and AR_BY_* are numbered
+ * as FE_AR_W_* and FE_AR_BY_*.
  */
-LOCAL INT ar_width( CONST T_VOBJ *v, INT what )
-{
-	ID	fid = fn_system();
-	INT	chsz = ( v->chsz > 0 ) ? v->chsz : 14;
-	INT	w = 10 + chsz + 4;
-	UB	text[TAD_NAME_MAX + 8];
-
-	if ( fid <= 0 ) {
-		return v->right - v->left;
-	}
-	fn_set_size(fid, chsz);
-	if ( om_store_name(&v->target, text, TAD_NAME_MAX) >= 0 ) {
-		w += fn_width(fid, text);
-	}
-	if ( what != AR_W_NAME ) {
-		UB	rel[TAD_NAME_MAX];
-		INT	n, i, k = 0;
-
-		n = om_store_relationship(&v->target, rel, TAD_NAME_MAX);
-		if ( n > 0 ) {
-			text[k++] = ' ';  text[k++] = ':';  text[k++] = ' ';
-			for ( i = 0; i < n && k < TAD_NAME_MAX; i++ ) {
-				if ( rel[i] != '[' && rel[i] != ']' ) {
-					text[k++] = rel[i];
-				}
-			}
-			text[k] = 0;
-			w += fn_width(fid, text);
-		}
-	}
-	if ( what == AR_W_NODATE || what == AR_W_FULL ) {
-		UB	app[1][OM_APP_NAME];
-
-		if ( om_store_apps(&v->target, app, 1) > 0 ) {
-			INT	i, k = 0;
-
-			text[k++] = ' ';  text[k++] = '(';
-			for ( i = 0; app[0][i] != 0 && k < TAD_NAME_MAX; i++ ) {
-				text[k++] = app[0][i];
-			}
-			text[k++] = ')';
-			text[k] = 0;
-			w += fn_width(fid, text);
-		}
-	}
-	if ( what == AR_W_FULL ) {
-		w += fn_width(fid, (CONST UB *)" YYYY/MM/DD HH:MM:SS");
-	}
-	fn_set_size(fid, 14);
-
-	return w + 10;
-}
-
 EXPORT void ed_arrange( DTWIN *d, CONST T_ARRANGE *o )
 {
-	ARITEM	*it, tmp;
-	INT	n = 0, i, k, top, left, right, gap, column;
+	T_FEARITEM	*it;
+	T_FEARRANGE	a;
+	INT		n = 0, i;
 
 	if ( d->fig == NULL || d->npick == 0 || d->sealed ) {
 		return;
 	}
-	it = (ARITEM *)Kmalloc(sizeof(ARITEM) * (SZ)d->npick);
+	it = (T_FEARITEM *)Kmalloc(sizeof(T_FEARITEM) * (SZ)d->npick);
 	if ( it == NULL ) {
 		return;
 	}
 	for ( i = 0; i < d->fig->nsh && n < d->npick; i++ ) {
-		/* one that is 固定化 or 背景化 stays where it is */
-		if ( d->pick[i] != 0 && !is_protected(d, i) && ed_link_at(d, i, &it[n].v) ) {
+		if ( d->pick[i] != 0 && ed_link_at(d, i, &it[n].v) ) {
 			it[n].seq = d->pick[i];
 			n++;
 		}
 	}
-	/* in the order they were taken */
-	for ( i = 1; i < n; i++ ) {
-		for ( k = i; k > 0 && it[k - 1].seq > it[k].seq; k-- ) {
-			tmp = it[k];  it[k] = it[k - 1];  it[k - 1] = tmp;
-		}
-	}
-	if ( n == 0 ) {
-		Kfree(it);
-		return;
-	}
-	top = it[0].v.top;  left = it[0].v.left;  right = it[0].v.right;
-	for ( i = 1; i < n; i++ ) {
-		if ( it[i].v.top < top )     top = it[i].v.top;
-		if ( it[i].v.left < left )   left = it[i].v.left;
-		if ( it[i].v.right > right ) right = it[i].v.right;
-	}
-
-	/* 幅調整, before anything is sorted: 最初 is the one taken first */
-	if ( o->width != AR_NONE ) {
-		INT	first_w = it[0].v.right - it[0].v.left;
-
+	a.horizontal = ( o->horizontal == AR_LEFT ) ? FE_AR_LEFT
+		     : ( o->horizontal == AR_RIGHT ) ? FE_AR_RIGHT : FE_AR_NONE;
+	a.vertical = ( o->vertical == AR_COMPACT ) ? FE_AR_COMPACT
+		   : ( o->vertical == AR_ALIGN ) ? FE_AR_ALIGN : FE_AR_NONE;
+	a.column = ( o->column == AR_SINGLE ) ? FE_AR_SINGLE
+		 : ( o->column == AR_MULTI_H ) ? FE_AR_MULTI_H
+		 : ( o->column == AR_MULTI_V ) ? FE_AR_MULTI_V : FE_AR_NONE;
+	a.columns = o->columns;
+	a.width = o->width;
+	a.sort_by = o->sort_by;
+	a.descending = o->descending;
+	n = fe_arrange(it, n, &a, ar_info, NULL);
+	if ( n > 0 ) {
+		before(d);
 		for ( i = 0; i < n; i++ ) {
-			INT	w = ( o->width == AR_W_FIRST ) ? first_w
-				  : ar_width(&it[i].v, o->width);
-
-			it[i].v.right = it[i].v.left + w;
+			(void)link_put(d, &it[i].v);
 		}
-	}
-
-	if ( n > 1 && o->sort_by != AR_NONE ) {
-		for ( i = 1; i < n; i++ ) {
-			for ( k = i; k > 0; k-- ) {
-				INT	c = ar_cmp(&it[k - 1], &it[k], o->sort_by);
-
-				if ( o->descending ) {
-					c = -c;
-				}
-				if ( c <= 0 ) {
-					break;
-				}
-				tmp = it[k];  it[k] = it[k - 1];  it[k - 1] = tmp;
-			}
-		}
-	}
-
-	gap = ( o->vertical == AR_COMPACT ) ? 5 : 10;
-	column = o->column;
-	if ( o->sort_by != AR_NONE && column == AR_NONE
-	  && o->horizontal == AR_NONE && o->vertical == AR_NONE ) {
-		column = AR_SINGLE;	/* an order asked for is a column */
-	}
-
-	if ( n > 1 && column == AR_SINGLE ) {
-		INT	at = top;
-
-		for ( i = 0; i < n; i++ ) {
-			INT	w = it[i].v.right - it[i].v.left;
-			INT	h = it[i].v.bottom - it[i].v.top;
-
-			if ( o->horizontal == AR_RIGHT ) {
-				it[i].v.right = right;
-				it[i].v.left = right - w;
-			} else {
-				it[i].v.left = left;
-				it[i].v.right = left + w;
-			}
-			it[i].v.top = at;
-			it[i].v.bottom = at + h;
-			at = it[i].v.bottom + gap;
-		}
-	} else if ( n > 1 && ( column == AR_MULTI_H || column == AR_MULTI_V ) ) {
-		INT	cols = ( o->columns > 0 ) ? o->columns : 2;
-		INT	per = ( n + cols - 1 ) / cols;
-		INT	*colw, *coll;
-
-		colw = (INT *)Kmalloc(sizeof(INT) * (SZ)cols * 2);
-		if ( colw != NULL ) {
-			coll = colw + cols;
-			for ( k = 0; k < cols; k++ ) {
-				colw[k] = 0;
-			}
-			for ( i = 0; i < n; i++ ) {
-				INT	c = ( column == AR_MULTI_H ) ? i % cols : i / per;
-				INT	w = it[i].v.right - it[i].v.left;
-
-				if ( c < cols && w > colw[c] ) {
-					colw[c] = w;
-				}
-			}
-			coll[0] = left;
-			for ( k = 1; k < cols; k++ ) {
-				coll[k] = coll[k - 1] + colw[k - 1] + 10;
-			}
-			if ( column == AR_MULTI_H ) {
-				/* left to right, then down a row */
-				INT	row_top = top, row_bottom = top;
-
-				for ( i = 0; i < n; i++ ) {
-					INT	c = i % cols;
-					INT	w = it[i].v.right - it[i].v.left;
-					INT	h = it[i].v.bottom - it[i].v.top;
-
-					if ( c == 0 && i > 0 ) {
-						row_top = row_bottom + gap;
-					}
-					it[i].v.left = coll[c];
-					it[i].v.right = coll[c] + w;
-					it[i].v.top = row_top;
-					it[i].v.bottom = row_top + h;
-					if ( c == 0 || it[i].v.bottom > row_bottom ) {
-						row_bottom = it[i].v.bottom;
-					}
-				}
-			} else {
-				/* down a column, then the next column */
-				for ( i = 0; i < n; i++ ) {
-					INT	c = i / per;
-					INT	w = it[i].v.right - it[i].v.left;
-					INT	h = it[i].v.bottom - it[i].v.top;
-
-					it[i].v.left = coll[c];
-					it[i].v.right = coll[c] + w;
-					it[i].v.top = ( i % per == 0 ) ? top
-						    : it[i - 1].v.bottom + gap;
-					it[i].v.bottom = it[i].v.top + h;
-				}
-			}
-			Kfree(colw);
-		}
-	} else if ( n > 1 && ( o->horizontal != AR_NONE
-			    || o->vertical != AR_NONE ) ) {
-		/* only lined up: taken from the top down */
-		for ( i = 1; i < n; i++ ) {
-			for ( k = i; k > 0 && it[k - 1].v.top > it[k].v.top; k-- ) {
-				tmp = it[k];  it[k] = it[k - 1];  it[k - 1] = tmp;
-			}
-		}
-		for ( i = 0; i < n; i++ ) {
-			INT	w = it[i].v.right - it[i].v.left;
-			INT	h = it[i].v.bottom - it[i].v.top;
-
-			if ( o->horizontal == AR_LEFT ) {
-				it[i].v.left = left;
-				it[i].v.right = left + w;
-			} else if ( o->horizontal == AR_RIGHT ) {
-				it[i].v.right = right;
-				it[i].v.left = right - w;
-			}
-			if ( i > 0 && o->vertical != AR_NONE ) {
-				it[i].v.top = it[i - 1].v.bottom + gap;
-				it[i].v.bottom = it[i].v.top + h;
-			}
-		}
-	}
-
-	before(d);
-	for ( i = 0; i < n; i++ ) {
-		it[i].v.height = it[i].v.bottom - it[i].v.top;
-		(void)link_put(d, &it[i].v);
+		after(d);
 	}
 	Kfree(it);
-	after(d);
 }
 
 /* ---------------------------------------------------------------- carrying */
@@ -1843,6 +1694,31 @@ EXPORT BOOL ed_holding( void )
 	return (BOOL)( hold_d != NULL && hold_how != HOLD_NONE );
 }
 
+/*
+ * A place of the window on the grid of a figure being edited, when the
+ * grid holds (格子点拘束); a cabinet's figure has no grid.
+ */
+LOCAL void grid_snap( INT *x, INT *y )
+{
+	T_DPRECT	page;
+
+	if ( !df_is(hold_d) ) {
+		return;
+	}
+	dt_work_rect(hold_d, &page);
+	ft_snap_win(page.left - hold_d->scroll_x, page.top - hold_d->scroll_y, fig_zoom(hold_d), x, y);
+}
+
+/* What is carried brought to the pointer at (x, y), the corner of the shape pressed on the grid */
+LOCAL void carry_to( INT x, INT y )
+{
+	INT	cx = hold_box.left + x - hold_x0, cy = hold_box.top + y - hold_y0;
+
+	grid_snap(&cx, &cy);
+	hold_dx = cx - hold_box.left;
+	hold_dy = cy - hold_box.top;
+}
+
 EXPORT void ed_follow( INT sx, INT sy )
 {
 	INT	x, y, dx, dy;
@@ -1866,38 +1742,37 @@ EXPORT void ed_follow( INT sx, INT sy )
 			return;
 		}
 		hold_how = HOLD_DUP;
-		hold_dx = x - hold_x0;
-		hold_dy = y - hold_y0;
+		carry_to(x, y);
 		break;
 	case HOLD_MOVE:
 	case HOLD_DUP:
-		hold_dx += dx;
-		hold_dy += dy;
+		carry_to(x, y);
 		break;
 	case HOLD_W:
-		hold_box.right += dx;
-		break;
 	case HOLD_H:
-		hold_box.bottom += dy;
-		break;
 	case HOLD_WH:
-		hold_box.right += dx;
-		hold_box.bottom += dy;
+		/* past the edge that stays the shape goes on to the other side, turned over (fe_size_box) */
+		if ( !hold_moved ) {
+			hold_was = hold_box;
+			hold_cx = hold_box.right;
+			hold_cy = hold_box.bottom;
+			hold_flip = 0;
+		}
+		hold_cx += dx;
+		hold_cy += dy;
+		{
+			/* the height is looked into only while it is what changes */
+			INT	least = ( hold_how == HOLD_H || hold_how == HOLD_WH )
+					? least_h(hold_d, hold_which) : ED_MIN;
+			INT	cx = hold_cx, cy = hold_cy;
+
+			grid_snap(&cx, &cy);
+			fe_size_box(&hold_was, cx, cy, (BOOL)( hold_how != HOLD_H ),
+				    (BOOL)( hold_how != HOLD_W ), ED_MIN, least, &hold_box, &hold_flip);
+		}
 		break;
 	default:
 		break;
-	}
-	if ( hold_box.right < hold_box.left + ED_MIN ) {
-		hold_box.right = hold_box.left + ED_MIN;
-	}
-	{
-		/* the height is looked into only while it is what changes */
-		INT	least = ( hold_how == HOLD_H || hold_how == HOLD_WH )
-				? least_h(hold_d, hold_which) : ED_MIN;
-
-		if ( hold_box.bottom < hold_box.top + least ) {
-			hold_box.bottom = hold_box.top + least;
-		}
 	}
 	hold_px = x;
 	hold_py = y;
@@ -2022,16 +1897,97 @@ LOCAL void copy_name( CONST T_VOBJ *v, UB *out, INT max )
 }
 
 /*
+ * The size a link to a new object is put with, given the link it was
+ * made from (v, its letters and what it shows) and the height that one
+ * stood at (h). Closed -- no taller than its band and TAD_OPEN_SLACK --
+ * it is as wide as the new object's name measured in the system's face
+ * at the link's letters (14 when it does not say), with its picture and
+ * edges (tad_closed_w), and as tall as it is closed; the face is left as
+ * it was set. FALSE, nothing set, when it stood opened or shows no band:
+ * it keeps the size it had.
+ */
+LOCAL BOOL new_link_size( CONST T_VOBJ *v, INT h, CONST TS_UUID *target, INT *p_w, INT *p_h )
+{
+	UB		nm[TAD_NAME_MAX];
+	T_FNSTATE	st;
+	ID		fid;
+	INT		chsz = ( v->chsz > 0 ) ? v->chsz : 14;
+	INT		band = tad_lnk_closed_h(v), w = chsz * 6;
+
+	if ( band <= 0 || h > band + TAD_OPEN_SLACK ) {
+		return FALSE;
+	}
+	if ( om_store_name(target, nm, sizeof(nm)) > 0 ) {
+		fn_hold();
+		fid = fn_system();
+		if ( fid > 0 && fn_state_get(fid, &st) >= E_OK ) {
+			if ( fn_set_size(fid, chsz) >= E_OK ) {
+				INT	m = fn_width(fid, nm);
+
+				if ( m >= 0 ) w = m;
+			}
+			(void)fn_state_set(fid, &st);
+		}
+		fn_release();
+	}
+	*p_w = tad_closed_w(chsz, v->disp, w);
+	*p_h = band;
+	return TRUE;
+}
+
+/*
+ * A link c to a new object, made with the look of the link it was made
+ * from, sized to the new object's name when it is closed: in a text by
+ * its width and height, in a figure by its rectangle from its corner.
+ */
+EXPORT void ed_new_link_fit( T_VOBJ *c )
+{
+	BOOL	text = (BOOL)( c->right <= c->left && c->width > 0 );
+	INT	w, h;
+
+	if ( !new_link_size(c, text ? c->heightpx : c->bottom - c->top, &c->target, &w, &h) ) {
+		return;
+	}
+	if ( text ) {
+		c->width = w;
+		c->heightpx = h;
+	} else {
+		c->right = c->left + w;
+		c->bottom = c->top + h;
+		c->height = h;
+	}
+}
+
+/*
  * The same, let go over a program's window that takes links (a
  * process's): the name asked for over that window, the object copied
  * -- or made from the template carried out of the 原紙箱 -- and a link
  * to it dropped there, as links carried out of a figure are. FALSE
  * when the window takes no links.
  */
+/*
+ * The name a new object made from a template starts with: a program's
+ * template, its program's name; any object a 原紙箱 holds (a template
+ * the person put there, ユーザ原紙), the object's own name. NULL when
+ * the link is to neither, the copy being a plain copy.
+ */
+LOCAL CONST char *tmpl_name( CONST DTWIN *d, CONST T_VOBJ *v, UB *buf, INT max )
+{
+	CONST char	*base = dt_base_name(&v->target);
+
+	if ( base == NULL && d != NULL && d->basebox ) {
+		if ( om_store_name(&v->target, buf, max) < 0 ) {
+			buf[0] = 0;
+		}
+		base = (CONST char *)buf;
+	}
+	return base;
+}
+
 LOCAL BOOL copy_drop( DTWIN *d, CONST T_VOBJ *v, INT sx, INT sy )
 {
-	UB		start[WM_LABEL_MAX], name[WM_LABEL_MAX];
-	CONST char	*base = dt_base_name(&v->target);
+	UB		start[WM_LABEL_MAX], name[WM_LABEL_MAX], own[TAD_NAME_MAX];
+	CONST char	*base = tmpl_name(d, v, own, TAD_NAME_MAX);
 	TS_UUID		w, nid;
 	DTWIN		*host;
 	T_VOBJ		c;
@@ -2061,12 +2017,14 @@ LOCAL BOOL copy_drop( DTWIN *d, CONST T_VOBJ *v, INT sx, INT sy )
 	}
 	if ( base != NULL ) {
 		(void)om_store_set_maker(&nid);	/* made by the user, from the template */
+		tm_printf((UB *)"desktop: %s made from the template %s\n", name, base);
 	}
 	c = *v;
 	c.target = nid;
 	knl_memset(&c.vobjid, 0, sizeof(c.vobjid));
 	c.name[0] = 0;
 	c.dlen = 0;
+	ed_new_link_fit(&c);
 	(void)dt_drop_links(d, sx, sy, &c, 1);
 	return TRUE;
 }
@@ -2079,7 +2037,7 @@ LOCAL BOOL copy_drop( DTWIN *d, CONST T_VOBJ *v, INT sx, INT sy )
  */
 LOCAL void make_copy( DTWIN *d, DTWIN *t, CONST T_VOBJ *v )
 {
-	UB		start[WM_LABEL_MAX], name[WM_LABEL_MAX];
+	UB		start[WM_LABEL_MAX], name[WM_LABEL_MAX], own[TAD_NAME_MAX];
 	T_DPRECT	from, to;
 	T_WMWIN		wf, wt;
 	TS_UUID		nid, id;
@@ -2091,7 +2049,7 @@ LOCAL void make_copy( DTWIN *d, DTWIN *t, CONST T_VOBJ *v )
 	  || wm_ref(d->wid, &wf) < E_OK || wm_ref(t->wid, &wt) < E_OK ) {
 		return;				/* dropped where nothing takes it */
 	}
-	base = dt_base_name(&v->target);
+	base = tmpl_name(d, v, own, TAD_NAME_MAX);
 	{
 		/*
 		 * A new object from a template starts with the template's
@@ -2119,6 +2077,7 @@ LOCAL void make_copy( DTWIN *d, DTWIN *t, CONST T_VOBJ *v )
 	}
 	if ( base != NULL ) {
 		(void)om_store_set_maker(&nid);	/* made by the user, from the template */
+		tm_printf((UB *)"desktop: %s made from the template %s\n", name, base);
 	}
 	if ( t->fig == NULL ) {
 		/* into a text: where the outline's corner was let go */
@@ -2129,6 +2088,7 @@ LOCAL void make_copy( DTWIN *d, DTWIN *t, CONST T_VOBJ *v )
 		c.width = v->right - v->left;
 		c.heightpx = v->bottom - v->top;
 		c.left = c.top = c.right = c.bottom = c.height = 0;
+		ed_new_link_fit(&c);
 		(void)dd_link_drop(t, wf.work.left + hold_box.left + hold_dx + 2,
 				   wf.work.top + hold_box.top + hold_dy + 2, &c);
 		return;
@@ -2150,6 +2110,7 @@ LOCAL void make_copy( DTWIN *d, DTWIN *t, CONST T_VOBJ *v )
 	c.bottom = y + ( v->bottom - v->top );
 	c.left   = x;
 	c.top    = y;
+	ed_new_link_fit(&c);
 
 	before(t);
 	first = tad_lnk_count(t->rec);
@@ -2167,7 +2128,7 @@ LOCAL void make_copy( DTWIN *d, DTWIN *t, CONST T_VOBJ *v )
  * a figure or a cabinet at that place, in a text where the letters
  * there are. FALSE when the window takes no links.
  */
-EXPORT BOOL ed_place_link( DTWIN *t, INT sx, INT sy, CONST T_VOBJ *v )
+EXPORT BOOL ed_place_link_of( DTWIN *t, INT sx, INT sy, CONST T_VOBJ *v, INT *p_first )
 {
 	T_DPRECT	to;
 	T_WMWIN		wt;
@@ -2197,8 +2158,11 @@ EXPORT BOOL ed_place_link( DTWIN *t, INT sx, INT sy, CONST T_VOBJ *v )
 	c.right = x + w;
 	c.bottom = y + h;
 
-	before(t);
-	first = tad_lnk_count(t->rec);
+	if ( *p_first < 0 ) {
+		before(t);
+		*p_first = tad_lnk_count(t->rec);
+	}
+	first = *p_first;
 	if ( tad_lnk_add((T_TAD *)t->rec, &c, &id) < E_OK ) {
 		return FALSE;
 	}
@@ -2206,6 +2170,13 @@ EXPORT BOOL ed_place_link( DTWIN *t, INT sx, INT sy, CONST T_VOBJ *v )
 	pick_from(t, first);
 	after(t);
 	return TRUE;
+}
+
+EXPORT BOOL ed_place_link( DTWIN *t, INT sx, INT sy, CONST T_VOBJ *v )
+{
+	INT	first = -1;
+
+	return ed_place_link_of(t, sx, sy, v, &first);
 }
 
 /*
@@ -2249,19 +2220,93 @@ EXPORT void ed_drop_link( DTWIN *d, DTWIN *t, CONST T_VOBJ *v )
 }
 
 /*
- * The links taken, offered to the program whose window they were let
- * go over; they stay where they are here. FALSE when that is no such
- * window or nothing taken is a link.
+ * The links a program took out of this window: they leave its record,
+ * as one change, as they leave it carried into a window of the desktop's
+ */
+LOCAL void drop_gone( DTWIN *d, CONST T_VOBJ *v, INT n )
+{
+	INT	i;
+
+	if ( d->sealed || d->rec == NULL || d->fig == NULL ) {
+		return;
+	}
+	before(d);
+	for ( i = 0; i < n; i++ ) {
+		(void)tad_lnk_del((T_TAD *)d->rec, &v[i].vobjid);
+	}
+	ed_pick_none(d);
+	after(d);
+}
+
+/*
+ * The links taken, carried into a text of the desktop's and let go
+ * there: each put in the text where the letters under its corner are,
+ * as a link carried from a program's window is put (ed_place_link_of),
+ * and taken out of this record unless the second button went down on the
+ * way (a copy). A link that is 固定化 or 背景化, or one to the object the
+ * text shows, stays and is not carried. A text that takes no links (one
+ * shown as xmlTAD, a sealed page) takes none, and nothing leaves here.
+ */
+LOCAL void carry_into_text( DTWIN *d, DTWIN *t )
+{
+	T_VOBJ		*vs;
+	T_DPRECT	b;
+	T_WMWIN		w;
+	INT		i, n = 0, first = -1;
+
+	if ( wm_ref(d->wid, &w) < E_OK ) {
+		return;
+	}
+	vs = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ) * (SZ)( d->fig->nsh + 1 ));
+	if ( vs == NULL ) {
+		return;
+	}
+	for ( i = 0; i < d->fig->nsh; i++ ) {
+		if ( d->pick[i] == 0 || !is_link(d, i) || is_protected(d, i) || !shape_box(d, i, &b)
+		  || tad_lnk_get(d->rec, d->fig->sh[i].link, &vs[n]) < E_OK
+		  || ts_uuid_cmp(&vs[n].target, &t->id) == 0 ) {
+			continue;
+		}
+		if ( ed_place_link_of(t, b.left + hold_dx + w.work.left, b.top + hold_dy + w.work.top,
+				      &vs[n], &first) ) {
+			n++;
+		}
+	}
+	if ( n == 0 ) {
+		(void)wm_msg_put("ここには置けません");
+	} else {
+		dt_drop_keys(t);
+		if ( !hold_copy ) {
+			drop_gone(d, vs, n);
+		}
+	}
+	Kfree(vs);
+	dt_draw_all();
+	wm_update();
+}
+
+/*
+ * The links taken, carried to the program whose window they were let go
+ * over: a move, as between the desktop's windows (dt_drop_move). They
+ * leave here once that program has taken them, and stay when it would
+ * not or the second button went down on the way (a copy). A link that
+ * is 固定化 or 背景化, or one to the object the window shows, stays and
+ * is not carried. FALSE when that is no such window or nothing taken is
+ * a link that may go.
  */
 LOCAL BOOL drop_out( DTWIN *d, INT sx, INT sy )
 {
-	T_VOBJ	*vs;
-	INT	i, n = 0;
-	BOOL	done;
+	T_VOBJ		*vs;
+	T_DPRECT	b;
+	T_WMWIN		w;
+	TS_UUID		shown;
+	INT		i, n = 0, ax = sx, ay = sy;
+	BOOL		done, has_shown;
 
-	/* every link taken */
+	has_shown = (BOOL)( wm_obj_shown(wm_at(sx, sy), &shown) );
+	/* every link taken that may go */
 	for ( i = 0; i < d->fig->nsh; i++ ) {
-		if ( d->pick[i] != 0 && is_link(d, i) ) {
+		if ( d->pick[i] != 0 && is_link(d, i) && !is_protected(d, i) ) {
 			n++;
 		}
 	}
@@ -2271,12 +2316,22 @@ LOCAL BOOL drop_out( DTWIN *d, INT sx, INT sy )
 	}
 	n = 0;
 	for ( i = 0; i < d->fig->nsh; i++ ) {
-		if ( d->pick[i] != 0 && is_link(d, i)
-		  && tad_lnk_get(d->rec, d->fig->sh[i].link, &vs[n]) >= E_OK ) {
+		if ( d->pick[i] != 0 && is_link(d, i) && !is_protected(d, i)
+		  && tad_lnk_get(d->rec, d->fig->sh[i].link, &vs[n]) >= E_OK
+		  && !( has_shown && ts_uuid_cmp(&vs[n].target, &shown) == 0 ) ) {
+			/*
+			 * put where the outline of the first was let go, its
+			 * corner, as a link carried between the desktop's
+			 * windows is put, and as a program's carried is offered
+			 */
+			if ( n == 0 && shape_box(d, i, &b) && wm_ref(d->wid, &w) >= E_OK ) {
+				ax = b.left + hold_dx + w.work.left;
+				ay = b.top + hold_dy + w.work.top;
+			}
 			n++;
 		}
 	}
-	done = ( n > 0 ) ? dt_drop_links(d, sx, sy, vs, n) : FALSE;
+	done = ( n > 0 ) ? dt_drop_move(d, sx, sy, ax, ay, vs, n, hold_copy ? NULL : drop_gone) : FALSE;
 	Kfree(vs);
 
 	return done;
@@ -2319,7 +2374,7 @@ EXPORT void ed_release( INT sx, INT sy )
 		wm_update();
 		return;
 	}
-	if ( t == NULL && hold_moved && hold_how == HOLD_MOVE && !d->sealed
+	if ( t == NULL && hold_moved && hold_how == HOLD_MOVE && !d->sealed && !d->basebox
 	  && d->fig != NULL && drop_out(d, sx, sy) ) {
 		/* let go over a program's window: it was offered what was taken */
 		hold_d = NULL;
@@ -2330,11 +2385,40 @@ EXPORT void ed_release( INT sx, INT sy )
 		wm_update();
 		return;
 	}
-	if ( d->sealed ) {
+	if ( d->accbox && t == d && hold_moved && hold_how == HOLD_MOVE && !hold_copy
+	  && is_link(d, hold_which) && tad_lnk_get(d->rec, d->fig->sh[hold_which].link, &v) >= E_OK ) {
+		/* within a 小物箱: the accessory goes before the row it was let go over */
+		T_DPRECT	page;
+		T_VOBJ		b;
+		T_WMWIN		wf;
+		BOOL		has_b = FALSE;
+		INT		fy;
+
+		hold_d = NULL;
+		hold_how = HOLD_NONE;
+		hold_which = -1;
+		hold_moved = FALSE;
+		dt_work_rect(d, &page);
+		fy = ( wm_ref(d->wid, &wf) >= E_OK ) ? unz(d, sy - wf.work.top - page.top + d->scroll_y) : 0;
+		for ( i = 0; i < d->fig->nsh && !has_b; i++ ) {
+			T_DPRECT r = d->fig->sh[i].r;
+
+			if ( is_link(d, i) && fy < ( r.top + r.bottom ) / 2
+			  && tad_lnk_get(d->rec, d->fig->sh[i].link, &b) >= E_OK ) {
+				has_b = TRUE;
+			}
+		}
+		dt_acc_place(&v.target, has_b ? &b.target : NULL);
+		wm_update();
+		return;
+	}
+	if ( d->sealed || ( d->basebox && hold_moved && hold_how == HOLD_MOVE && t != d ) ) {
 		/*
-		 * Out of the 原紙箱: a new object made from the template
-		 * carried, where it is let go. Out of a tool's list: what
-		 * the tool makes of it (dttool.c). Nothing inside moves.
+		 * Out of a 原紙箱 to another window: a new object made from
+		 * the template carried, where it is let go; within it, the
+		 * link moves as in any box. Out of a tool's list: what the
+		 * tool makes of it (dttool.c). Nothing inside a sealed page
+		 * moves.
 		 */
 		if ( hold_moved && hold_how == HOLD_MOVE && t != NULL
 		  && t != d && is_link(d, hold_which)
@@ -2342,7 +2426,7 @@ EXPORT void ed_release( INT sx, INT sy )
 				 &v) >= E_OK ) {
 			hold_d = NULL;
 			hold_how = HOLD_NONE;
-			wm_update();
+			dt_drop_keys(t);
 			if ( d->tool != DT_TOOL_NONE ) {
 				dt_tool_carry(d, t, &v);
 			} else {
@@ -2360,7 +2444,11 @@ EXPORT void ed_release( INT sx, INT sy )
 		dt_draw(d);
 	} else if ( hold_moved && hold_how == HOLD_MOVE && t != NULL && t != d
 	  && t->fig != NULL && d->fig != NULL && !t->sealed ) {
+		dt_drop_keys(t);
 		carry_over(d, t, hold_copy);
+	} else if ( hold_moved && hold_how == HOLD_MOVE && t != NULL && t != d
+	  && t->doc != NULL && d->fig != NULL ) {
+		carry_into_text(d, t);
 	} else if ( hold_moved && d->fig != NULL ) {
 		T_DPRECT	page;
 		INT		ox, oy;
@@ -2434,7 +2522,7 @@ EXPORT void ed_release( INT sx, INT sy )
 				nb.right  = unz(d, hold_box.right - ox);
 				nb.bottom = unz(d, hold_box.bottom - oy);
 				before(d);
-				df_resize(d, hold_which, &nb);
+				df_resize_flip(d, hold_which, &nb, hold_moved ? hold_flip : 0);
 				after(d);
 			} else if ( is_link(d, hold_which)
 			  && tad_lnk_get(d->rec, d->fig->sh[hold_which].link,

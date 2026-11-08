@@ -1,0 +1,20 @@
+<tad version="1.0" encoding="UTF-8" filename="スライドのデータボックス">
+<document>
+<p>スライドのデータボックス</p>
+<p>スライドの〈ジャンプ〉と〈背景色変更〉で一覧から選ぶパネルの定義。一覧は部品11、ボタンは101(取消)と102(了解)。一覧の項目はスライドが書き込む。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,420,360" title="ジャンプ">
+<text x="16" y="28">ジャンプ</text>
+<list num="11" rect="12,40,408,306"/>
+<button num="101" rect="224,320,312,346" answer="cancel">取消</button>
+<button num="102" rect="320,320,408,346" emph="true">了解</button>
+</panel>
+<panel num="2" rect="0,0,300,260" title="背景色変更">
+<text x="16" y="28">背景色変更</text>
+<list num="11" rect="12,40,288,206"/>
+<button num="101" rect="104,220,192,246" answer="cancel">取消</button>
+<button num="102" rect="200,220,288,246" emph="true">了解</button>
+</panel>
+</databox>
+</tad>

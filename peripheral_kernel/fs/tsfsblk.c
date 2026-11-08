@@ -1915,6 +1915,9 @@ EXPORT ID ts_opn_vol_blk( CONST char *devnm )
 	}
 	v->hint = v->ag_first;
 	if ( !v->rdonly ) {
+		tm_printf((UB *)"tsfs: %s: %s\n", v->devnm, ( v->sb.state & TSFSBLK_ST_CLEAN ) != 0
+			  ? "taken down properly the last time"
+			  : "not taken down properly the last time: its log was put back");
 		v->sb.mount_count++;
 		v->sb.mount_time = (UD)now_time();
 		v->sb.state &= (UW)~TSFSBLK_ST_CLEAN;	/* in use */
@@ -1932,6 +1935,45 @@ EXPORT ID ts_opn_vol_blk( CONST char *devnm )
 	io_close(dd);
 	tk_cls_dev(dd, 0);
 	v->used = FALSE;
+	return er;
+}
+
+/*
+ * The machine going off with the volume still open, as the system volume
+ * is: objects of it stay open in the kernel, so it cannot be closed. What
+ * the journal holds goes in place, no transaction begins from here on,
+ * the superblock says the volume was taken down properly and it reaches
+ * the medium through the device's cache. The volume stays readable and
+ * refuses every change, so that nothing written late can undo the mark.
+ */
+EXPORT ER ts_finish_vol_blk( ID vol )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	ER		er;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	if ( v->rdonly ) {
+		return E_RONLY;
+	}
+	er = knl_jrnl_freeze(vol, TRUE);
+	if ( er < E_OK ) {
+		return er;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	if ( v->jrnl_on ) {
+		er = E_BUSY;
+	} else {
+		v->sb.state |= TSFSBLK_ST_CLEAN;
+		v->sb_dirty = TRUE;
+		er = cache_flush(v);
+		if ( er >= E_OK ) {
+			v->rdonly = TRUE;
+		}
+	}
+	tk_unl_mtx(v->mtxid);
+
 	return er;
 }
 

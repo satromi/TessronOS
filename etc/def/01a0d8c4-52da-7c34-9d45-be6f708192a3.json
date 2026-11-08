@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "trusted": true,
       "id": "rtmedia",
       "kind": "utility",

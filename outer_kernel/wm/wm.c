@@ -125,6 +125,7 @@ typedef struct {
 	UW		serial;		/* which opening of its number this is */
 	WMSURF		surf;		/* what its process draws in, if any */
 	ID		mktsk;		/* the task that opened it */
+	ID		mkpid;		/* and its process, 0 none */
 	INT		wid;		/* its number: its place in the table, from 1 */
 	/* what a change of the screen keeps of it between laying the windows and telling their programs */
 	UB		*chg_old;
@@ -296,6 +297,8 @@ LOCAL void scr_dev( CONST T_DPRECT *r, T_DPRECT *d )
 }
 LOCAL T_WMSTAT		wm_count;
 LOCAL INT		wm_focus_wid = 0;
+LOCAL INT		wm_lit_wid = 0;		/* shown as having the input (wm_lit), 0 none */
+LOCAL INT		wm_pop_from = 0;	/* the window a pop-up with the input took it from, 0 none */
 LOCAL INT		wm_sys_gid = -1;	/* what the frames are drawn through */
 /*
  * Held while wm_sys_gid is aimed somewhere and drawn through. The one
@@ -375,7 +378,7 @@ LOCAL void ground_make( void )
 {
 	UW	desk = wm_look(WM_LOOK_DESK);
 	INT	sw = (INT)wm_spec.width, sh = (INT)wm_spec.height;
-	INT	x, y, ox = 0, oy = 0;
+	INT	x, y, ox = 0, oy = 0, i, vx, vy, vw, vh;
 	SZ	want;
 
 	if ( wm_ground != NULL && wm_ground_w == sw && wm_ground_h == sh
@@ -404,47 +407,53 @@ LOCAL void ground_make( void )
 	wm_ground_gen++;
 
 	/* a picture laid as it is, or in tiles, is laid in view pixels, each as large as the scale makes it */
-	if ( wm_wall != NULL && wm_wall_mode == WM_WALL_CENTRE ) {
-		ox = (wm_vw - wm_wall_w) / 2;
-		oy = (wm_vh - wm_wall_h) / 2;
-	}
-	for ( y = 0; y < sh; y++ ) {
-		UW	*p = wm_ground + (SZ)y * sw;
+	for ( i = 0; ts_disp_screen(i, &vx, &vy, &vw, &vh) >= E_OK; i++ ) {
+		INT	dx0 = disp_dev_of(vx, wm_scale), dw = disp_dev_of(vx + vw, wm_scale) - dx0;
 
-		if ( wm_wall == NULL ) {
-			for ( x = 0; x < sw; x++ ) {
-				*p++ = desk;
-			}
-			continue;
+		ox = oy = 0;
+		if ( wm_wall != NULL && wm_wall_mode == WM_WALL_CENTRE ) {
+			ox = (vw - wm_wall_w) / 2;
+			oy = (vh - wm_wall_h) / 2;
 		}
-		for ( x = 0; x < sw; x++, p++ ) {
-			INT	wx, wy;
+		for ( y = 0; y < sh; y++ ) {
+			UW	*p = wm_ground + (SZ)y * sw + dx0;
 
-			switch ( wm_wall_mode ) {
-			case WM_WALL_CENTRE:
-				wx = disp_view_of(x, wm_scale) - ox;
-				wy = disp_view_of(y, wm_scale) - oy;
-				if ( wx < 0 || wx >= wm_wall_w
-				  || wy < 0 || wy >= wm_wall_h ) {
-					*p = desk;
-					continue;
+			if ( wm_wall == NULL ) {
+				for ( x = 0; x < dw && dx0 + x < sw; x++ ) {
+					*p++ = desk;
 				}
-				break;
-			case WM_WALL_FIT:
-				wx = ( sw > 0 ) ? x * wm_wall_w / sw : 0;
-				wy = ( sh > 0 ) ? y * wm_wall_h / sh : 0;
-				break;
-			default:
-				wx = disp_view_of(x, wm_scale) % wm_wall_w;
-				wy = disp_view_of(y, wm_scale) % wm_wall_h;
-				break;
+				continue;
 			}
-			*p = wm_wall[(SZ)wy * wm_wall_w + wx];
+			for ( x = 0; x < dw && dx0 + x < sw; x++, p++ ) {
+				INT	wx, wy;
+
+				switch ( wm_wall_mode ) {
+				case WM_WALL_CENTRE:
+					wx = disp_view_of(x, wm_scale) - ox;
+					wy = disp_view_of(y, wm_scale) - oy;
+					if ( wx < 0 || wx >= wm_wall_w
+					  || wy < 0 || wy >= wm_wall_h ) {
+						*p = desk;
+						continue;
+					}
+					break;
+				case WM_WALL_FIT:
+					wx = ( dw > 0 ) ? x * wm_wall_w / dw : 0;
+					wy = ( sh > 0 ) ? y * wm_wall_h / sh : 0;
+					break;
+				default:
+					wx = disp_view_of(x, wm_scale) % wm_wall_w;
+					wy = disp_view_of(y, wm_scale) % wm_wall_h;
+					break;
+				}
+				*p = wm_wall[(SZ)wy * wm_wall_w + wx];
+			}
 		}
 	}
 }
 
 LOCAL void draw_frame( CONST WMWIN *w );
+LOCAL void gone_add( CONST T_DPRECT *r );
 LOCAL void gone_all( void );
 LOCAL void shape_of( WMWIN *w );
 
@@ -578,6 +587,48 @@ LOCAL WMWIN *win_of( INT wid )
 	}
 
 	return &WMW(wid - 1);
+}
+
+/*
+ * The window whose band is drawn as the band of the window with the
+ * input: one lit (wm_lit); else, while a pop-up has the input -- a
+ * panel of a program's that asks something, in a window of its own
+ * with no band -- the window it took the input from, as when the
+ * system's own panel stands over its owner and the owner keeps the
+ * input; else the window with the input. Called with the lock held.
+ */
+LOCAL INT band_wid( void )
+{
+	WMWIN	*f;
+
+	if ( wm_lit_wid != 0 ) {
+		return wm_lit_wid;
+	}
+	f = win_of(wm_focus_wid);
+	if ( f != NULL && ( f->attr & WM_ATTR_POPUP ) != 0 && win_of(wm_pop_from) != NULL ) {
+		return wm_pop_from;
+	}
+	return wm_focus_wid;
+}
+
+/* The bands drawn again when band_wid changed from before. Called with the lock held. */
+LOCAL void band_redraw( INT before )
+{
+	INT	now = band_wid(), k, ids[2];
+	WMWIN	*w;
+
+	if ( now == before ) {
+		return;
+	}
+	ids[0] = before;
+	ids[1] = now;
+	for ( k = 0; k < 2; k++ ) {
+		w = win_of(ids[k]);
+		if ( w != NULL ) {
+			draw_frame(w);
+			if ( w->visible ) gone_add(&w->outer);
+		}
+	}
 }
 
 /* A length out of the look table, or what to use when it holds none */
@@ -1211,12 +1262,16 @@ LOCAL void surf_tell( CONST WMSURF *s, T_WMSURF *out )
 LOCAL void floats_front( void );
 LOCAL void subs_away( void );
 
+LOCAL void screen_win( BOOL opened );
+
 EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 {
 	WMWIN		*w;
 	INT		i, k;
 	UD		pages;
 	T_DPRECT	fit, ask;
+	T_DPRECT	on;
+	INT		base;
 
 	if ( !wm_ready ) {
 		return E_NOEXS;
@@ -1226,32 +1281,34 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 		return E_PAR;
 	}
 	ask = *outer;
-	if ( outer->right - outer->left > wm_vw
-	  || outer->bottom - outer->top > wm_vh ) {
+	wm_screen_at(( outer->left + outer->right ) / 2, ( outer->top + outer->bottom ) / 2, &on);
+	base = ( on.left == 0 ) ? wm_msg_height() : 0;
+	if ( outer->right - outer->left > on.right - on.left
+	  || outer->bottom - outer->top > on.bottom - on.top ) {
 		/*
-		 * Larger than the screen (a window kept from a larger screen,
+		 * Larger than its screen (a window kept from a larger screen,
 		 * or one drawn at a larger scale than it was kept at): made as
 		 * large as the screen above the message line, at its corner
 		 */
 		fit = *outer;
-		if ( fit.right - fit.left > wm_vw ) {
-			fit.left = 0;
-			fit.right = wm_vw;
+		if ( fit.right - fit.left > on.right - on.left ) {
+			fit.left = on.left;
+			fit.right = on.right;
 		}
-		if ( fit.bottom - fit.top > wm_vh ) {
-			fit.top = 0;
-			fit.bottom = wm_vh - wm_msg_height();
+		if ( fit.bottom - fit.top > on.bottom - on.top ) {
+			fit.top = on.top;
+			fit.bottom = on.bottom - base;
 		}
 		/* and the rest of it moved onto the screen as far as it reaches past it */
-		if ( fit.right > wm_vw ) {
-			fit.left -= fit.right - wm_vw;
-			fit.right = wm_vw;
-			if ( fit.left < 0 ) fit.left = 0;
+		if ( fit.right > on.right ) {
+			fit.left -= fit.right - on.right;
+			fit.right = on.right;
+			if ( fit.left < on.left ) fit.left = on.left;
 		}
-		if ( fit.bottom > wm_vh - wm_msg_height() && fit.top > 0 ) {
-			INT	d = fit.bottom - ( wm_vh - wm_msg_height() );
+		if ( fit.bottom > on.bottom - base && fit.top > on.top ) {
+			INT	d = fit.bottom - ( on.bottom - base );
 
-			if ( d > fit.top ) d = fit.top;
+			if ( d > fit.top - on.top ) d = fit.top - on.top;
 			fit.top -= d;
 			fit.bottom -= d;
 		}
@@ -1303,6 +1360,7 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 	w->pict = 0;
 	w->owner = 0;
 	w->mktsk = tk_get_tid();
+	w->mkpid = ( ts_get_pid() > 0 ) ? ts_get_pid() : 0;
 	for ( k = 0; k < WM_TITLE_MAX - 1 && title != NULL && title[k] != '\0'; k++ ) {
 		w->title[k] = title[k];
 	}
@@ -1393,6 +1451,9 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 	if ( w->mo_dur != 0 ) {
 		mo_wake();			/* it comes in step by step */
 	}
+	if ( ( attr & WM_ATTR_SCREEN ) != 0 ) {
+		screen_win(TRUE);
+	}
 
 	return i + 1;
 }
@@ -1445,7 +1506,7 @@ LOCAL INT front_window( INT but )
 
 		if ( w == NULL || i == but || !w->visible
 		  || ( w->attr & ( WM_ATTR_POPUP | WM_ATTR_NOFOCUS ) ) != 0
-		  || ( w->attr & WM_ATTR_TITLE ) == 0 ) {
+		  || ( w->attr & WM_ATTR_OWN ) == 0 ) {
 			continue;
 		}
 		if ( best == 0 || w->z < bz ) {
@@ -1456,12 +1517,185 @@ LOCAL INT front_window( INT but )
 	return best;
 }
 
+/* ---------------------------------------------------------------- where a finger presses at once */
+
+/*
+ * A window's places, read by the input layer without the lock, so each
+ * table is written under a count: odd while it is being written, moved on
+ * when done (wm_mtxid keeps writers apart). A reader that saw it odd or
+ * changed has seen no places.
+ */
+typedef struct {
+	volatile UW	seq;
+	volatile INT	wid;		/* 0: free */
+	volatile INT	n;
+	T_DPRECT	r[WM_PRESS_RECTS];
+} PRESSAREA;
+
+LOCAL PRESSAREA		wm_press[WM_PRESS_WINS];
+LOCAL volatile INT	wm_press_n = 0;		/* of them in use: no touch looks further while it is 0 */
+
+/* A table given a window and its places, or freed. Called with the lock held. */
+LOCAL void press_write( PRESSAREA *p, INT wid, CONST T_DPRECT *r, INT n )
+{
+	INT	i;
+
+	if ( ( p->wid != 0 ) != ( wid != 0 ) ) {
+		wm_press_n += ( wid != 0 ) ? 1 : -1;
+	}
+	p->seq++;
+	__sync_synchronize();
+	p->wid = wid;
+	p->n = n;
+	for ( i = 0; i < n; i++ ) {
+		p->r[i] = r[i];
+	}
+	__sync_synchronize();
+	p->seq++;
+	__sync_synchronize();
+}
+
+/* A window's table, 0 for its wid being free: NULL when it has none. Called with the lock held. */
+LOCAL PRESSAREA *press_of( INT wid )
+{
+	INT	i;
+
+	for ( i = 0; i < WM_PRESS_WINS; i++ ) {
+		if ( wm_press[i].wid == wid ) {
+			return &wm_press[i];
+		}
+	}
+	return NULL;
+}
+
+EXPORT ER wm_obj_press_area( INT wid, CONST T_DPRECT *r, INT n )
+{
+	PRESSAREA	*p;
+	ER		er = E_OK;
+
+	if ( n < 0 || n > WM_PRESS_RECTS || ( n > 0 && r == NULL ) ) {
+		return E_PAR;
+	}
+	if ( !wm_ready ) {
+		return E_NOEXS;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	if ( win_of(wid) == NULL ) {
+		er = E_ID;
+	} else {
+		p = press_of(wid);
+		if ( n == 0 ) {
+			if ( p != NULL ) {
+				press_write(p, 0, NULL, 0);
+			}
+		} else {
+			if ( p == NULL ) {
+				p = press_of(0);
+			}
+			if ( p == NULL ) {
+				er = E_LIMIT;
+			} else {
+				press_write(p, wid, r, n);
+			}
+		}
+	}
+	tk_unl_mtx(wm_mtxid);
+	return er;
+}
+
+/*
+ * Without the lock, so nothing is followed that a window's closing frees:
+ * a window with a shape covers all of its outer rectangle here. That errs
+ * on the side of the touch waiting to be known, as anywhere else. The
+ * tables of pointers and the windows themselves stay once made.
+ */
+EXPORT BOOL knl_wm_press_now( INT x, INT y )
+{
+	CONST WMWIN	*w, *top = NULL;
+	PRESSAREA	*p;
+	INT		cap, i, k, n, wx, wy, z, top_z = 0;
+	UW		seq;
+	BOOL		in = FALSE;
+
+	if ( !wm_ready || wm_press_n == 0 ) {
+		return FALSE;
+	}
+	cap = wm_wcap;
+	__sync_synchronize();
+	for ( i = 0; i < cap; i++ ) {
+		w = wm_wtbl[i];
+		if ( !w->used || !w->visible ) {
+			continue;
+		}
+		if ( y >= knl_msg_top() && ( w->attr & WM_ATTR_POPUP ) == 0 ) {
+			continue;
+		}
+		z = w->z;
+		if ( x >= w->outer.left && x < w->outer.right && y >= w->outer.top && y < w->outer.bottom
+		  && ( top == NULL || z < top_z ) ) {
+			top = w;
+			top_z = z;
+		}
+	}
+	if ( top == NULL || x < top->work.left || x >= top->work.right
+	  || y < top->work.top || y >= top->work.bottom ) {
+		return FALSE;
+	}
+	wx = x - top->work.left;
+	wy = y - top->work.top;
+	for ( k = 0; k < WM_PRESS_WINS; k++ ) {
+		p = &wm_press[k];
+		seq = p->seq;
+		__sync_synchronize();
+		if ( ( seq & 1 ) != 0 || p->wid != top->wid ) {
+			continue;
+		}
+		n = p->n;
+		for ( i = 0; i < n && i < WM_PRESS_RECTS; i++ ) {
+			if ( wx >= p->r[i].left && wx < p->r[i].right && wy >= p->r[i].top && wy < p->r[i].bottom ) {
+				in = TRUE;
+				break;
+			}
+		}
+		__sync_synchronize();
+		return (BOOL)( in && p->seq == seq );
+	}
+	return FALSE;
+}
+
+/*
+ * The windows over the whole screen (WM_ATTR_SCREEN): the message line
+ * taken down when the first opens, and put back when the last closes if
+ * it was up when the first came
+ */
+LOCAL INT	wm_screen_n = 0;
+LOCAL BOOL	wm_screen_took = FALSE;
+
+LOCAL void screen_win( BOOL opened )
+{
+	BOOL	down = FALSE, up = FALSE;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	if ( opened ) {
+		if ( wm_screen_n++ == 0 && wm_msg_height() > 0 ) {
+			wm_screen_took = TRUE;
+			down = TRUE;
+		}
+	} else if ( wm_screen_n > 0 && --wm_screen_n == 0 && wm_screen_took ) {
+		wm_screen_took = FALSE;
+		up = TRUE;
+	}
+	tk_unl_mtx(wm_mtxid);
+	if ( down ) (void)wm_msg_show(FALSE);
+	if ( up ) (void)wm_msg_show(TRUE);
+}
+
 EXPORT ER wm_close( INT wid )
 {
 	WMWIN	*w;
 	WMSURF	surf;
-	INT	z;
-	BOOL	ghost;
+	INT	z, band_at;
+	BOOL	ghost, screen;
 
 	knl_hid_repeat_cut();		/* a key held for the window repeats into no other */
 	tk_loc_mtx(wm_mtxid, TMO_FEVR);
@@ -1470,8 +1704,16 @@ EXPORT ER wm_close( INT wid )
 		tk_unl_mtx(wm_mtxid);
 		return E_ID;
 	}
+	{
+		PRESSAREA	*pa = press_of(wid);	/* the number may be another window's next */
+
+		if ( pa != NULL ) {
+			press_write(pa, 0, NULL, 0);
+		}
+	}
 	surf_take(w, &surf);
 	z = w->z;
+	screen = (BOOL)( ( w->attr & WM_ATTR_SCREEN ) != 0 );
 	if ( w->visible ) {
 		gone_win(w);
 	}
@@ -1514,6 +1756,13 @@ EXPORT ER wm_close( INT wid )
 			}
 		}
 	}
+	band_at = band_wid();
+	if ( wm_lit_wid == wid ) {
+		wm_lit_wid = 0;
+	}
+	if ( wm_pop_from == wid ) {
+		wm_pop_from = 0;
+	}
 	if ( wm_focus_wid == wid ) {
 		/*
 		 * The input goes on to the window that was behind: the one in
@@ -1523,11 +1772,17 @@ EXPORT ER wm_close( INT wid )
 		WMWIN	*n;
 
 		wm_focus_wid = front_window(wid);
+		wm_pop_from = 0;		/* front_window gives no pop-up */
 		n = win_of(wm_focus_wid);
 		if ( n != NULL ) {
 			draw_frame(n);
 			gone_add(&n->outer);
 		}
+	}
+	if ( band_at != wid ) {
+		band_redraw(band_at);
+	} else {
+		band_redraw(0);
 	}
 	subs_away();
 	tk_unl_mtx(wm_mtxid);
@@ -1535,6 +1790,9 @@ EXPORT ER wm_close( INT wid )
 	knl_wmobj_close(wid);
 	if ( ghost ) {
 		mo_wake();			/* it goes out step by step */
+	}
+	if ( screen ) {
+		screen_win(FALSE);
 	}
 
 	return E_OK;
@@ -1714,21 +1972,23 @@ EXPORT ER wm_place( INT wid, CONST T_DPRECT *outer )
 {
 	T_DPRECT	o;
 	INT		sh, wide, high;
+	T_DPRECT	on;
 
 	if ( outer == NULL || outer->right <= outer->left
 	  || outer->bottom <= outer->top ) {
 		return E_PAR;
 	}
 	o = *outer;
-	sh = wm_vh - wm_msg_height();
+	wm_screen_at(( o.left + o.right ) / 2, ( o.top + o.bottom ) / 2, &on);
+	sh = on.bottom - ( ( on.left == 0 ) ? wm_msg_height() : 0 );
 	wide = o.right - o.left;
 	high = o.bottom - o.top;
-	if ( wide > wm_vw ) wide = wm_vw;
-	if ( high > sh ) high = sh;
-	if ( o.left + wide > wm_vw ) o.left = wm_vw - wide;
+	if ( wide > on.right - on.left ) wide = on.right - on.left;
+	if ( high > sh - on.top ) high = sh - on.top;
+	if ( o.left + wide > on.right ) o.left = on.right - wide;
 	if ( o.top + high > sh ) o.top = sh - high;
-	if ( o.left < 0 ) o.left = 0;
-	if ( o.top < 0 ) o.top = 0;
+	if ( o.left < on.left ) o.left = on.left;
+	if ( o.top < on.top ) o.top = on.top;
 	o.right = o.left + wide;
 	o.bottom = o.top + high;
 
@@ -2090,7 +2350,7 @@ LOCAL INT active_root( void )
 
 		if ( w == NULL || !w->visible
 		  || ( w->attr & ( WM_ATTR_POPUP | WM_ATTR_NOFOCUS ) ) != 0
-		  || ( ( w->attr & WM_ATTR_TITLE ) == 0 && w->parent <= 0 )
+		  || ( ( w->attr & WM_ATTR_OWN ) == 0 && w->parent <= 0 )
 		  || ( ( w->attr & WM_ATTR_FLOAT ) != 0 && i != wm_focus_wid ) ) {
 			continue;
 		}
@@ -2745,7 +3005,7 @@ LOCAL void draw_frame( CONST WMWIN *w )
 	wr = w->work.right - w->outer.left;
 	wb = w->work.bottom - w->outer.top;
 
-	active = ( wm_focus_wid == w->wid );
+	active = ( band_wid() == w->wid );
 	edge  = wm_look(WM_LOOK_FRAME);
 	band  = active ? WM_LOOK_TITLE_ON : WM_LOOK_TITLE_OFF;
 	light = wm_look(WM_LOOK_LIGHT);
@@ -3555,6 +3815,15 @@ EXPORT ER wm_least( UINT attr, INT *p_wide, INT *p_high )
 	return E_OK;
 }
 
+EXPORT void wm_frame_of( UINT attr, INT *p_wide, INT *p_high )
+{
+	INT	l, t, r, b;
+
+	borders_of(attr, &l, &t, &r, &b);
+	*p_wide = l + r;
+	*p_high = t + b;
+}
+
 EXPORT INT wm_part_at( INT x, INT y, INT *p_wid, UINT *p_bar )
 {
 	WMWIN		*w;
@@ -3745,13 +4014,56 @@ LOCAL INT at_reach( INT x, INT y, INT slop )
 	return found;
 }
 
+/* Presses of buttons and keys, modifiers aside: never 0, which is no ticket */
+LOCAL UINT	act_seq = 1;
+LOCAL UD	act_when;		/* the press counted last: read, then handed on, it is one */
+LOCAL UD	act_ms;			/* when it was read */
+
+LOCAL UD act_now( void )
+{
+	SYSTIM	t;
+
+	if ( tk_get_otm(&t) < E_OK ) {
+		return 0;
+	}
+	return ( (UD)(UW)t.hi << 32 ) | (UD)t.lo;
+}
+
+LOCAL void act_press( UD when )
+{
+	if ( when != act_when ) {
+		act_when = when;
+		act_seq++;
+		if ( act_seq == 0 ) act_seq = 1;
+		act_ms = act_now();
+	}
+}
+
+EXPORT UINT wm_act_ticket( void )
+{
+	return act_seq;
+}
+
+EXPORT UW wm_act_age( void )
+{
+	UD	d = act_now() - act_ms;
+
+	return ( d > 0xFFFFFFFFUL ) ? 0xFFFFFFFFU : (UW)d;
+}
+
+EXPORT BOOL wm_act_good( UINT ticket )
+{
+	return (BOOL)( ticket != 0 && ticket == act_seq && wm_act_age() < WM_ACT_MS );
+}
+
 EXPORT ER wm_focus( INT wid )
 {
 	WMWIN	*w, *was;
-	INT	was_wid;
+	INT	was_wid, band_at;
 
 	tk_loc_mtx(wm_mtxid, TMO_FEVR);
 	was_wid = wm_focus_wid;
+	band_at = band_wid();
 	if ( wid == 0 ) {
 		wm_focus_wid = 0;
 	} else {
@@ -3764,7 +4076,20 @@ EXPORT ER wm_focus( INT wid )
 			tk_unl_mtx(wm_mtxid);
 			return E_OBJ;		/* a screen keyboard: the keys stay where they are */
 		}
+		/* a pop-up given the input: the window it was taken from keeps its band lit */
+		if ( ( w->attr & WM_ATTR_POPUP ) == 0 ) {
+			wm_pop_from = 0;
+		} else if ( wid != was_wid ) {
+			WMWIN	*f = win_of(was_wid);
+
+			if ( f != NULL && ( f->attr & WM_ATTR_POPUP ) == 0 ) {
+				wm_pop_from = was_wid;
+			}
+		}
 		wm_focus_wid = wid;
+	}
+	if ( wid == 0 ) {
+		wm_pop_from = 0;
 	}
 	/*
 	 * Both bars change: the one that had the input and the one that has
@@ -3781,7 +4106,39 @@ EXPORT ER wm_focus( INT wid )
 		draw_frame(w);
 		if ( w->visible ) gone_add(&w->outer);
 	}
+	band_redraw(band_at);
 	subs_away();			/* another group may be in use now */
+	tk_unl_mtx(wm_mtxid);
+
+	return E_OK;
+}
+
+EXPORT ER wm_lit( INT wid, BOOL on )
+{
+	WMWIN	*w;
+	INT	was;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	if ( !on ) {
+		if ( wm_lit_wid != wid ) {
+			tk_unl_mtx(wm_mtxid);
+			return E_OK;		/* another is lit, or none */
+		}
+		wid = 0;
+	} else {
+		w = win_of(wid);
+		if ( w == NULL ) {
+			tk_unl_mtx(wm_mtxid);
+			return E_ID;
+		}
+		if ( ( w->attr & WM_ATTR_NOFOCUS ) == 0 ) {
+			tk_unl_mtx(wm_mtxid);
+			return E_OBJ;
+		}
+	}
+	was = band_wid();
+	wm_lit_wid = wid;
+	band_redraw(was);
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
@@ -4149,6 +4506,9 @@ again:
 	if ( er < E_OK ) {
 		return er;
 	}
+	if ( h.type == HID_EV_BTN_DOWN || ( h.type == HID_EV_KEY_DOWN && h.code < 0xE0 ) ) {
+		act_press(h.when);
+	}
 	if ( h.type == HID_EV_BTN_DOWN ) {
 		knl_wm_touch_note(h.when);
 		knl_msg_press(h.x, h.y);
@@ -4176,10 +4536,11 @@ again:
 	/*
 	 * The volume keys are the system's: the whole's volume a step up
 	 * or down at each press, and at each repeat while one is held, as
-	 * any key repeats. They go to no window.
+	 * any key repeats; the mute key turns the mute over. They go to no
+	 * window.
 	 */
 	if ( ( h.type == HID_EV_KEY_DOWN || h.type == HID_EV_KEY_UP )
-	  && ( h.code == HID_KEY_VOLUP || h.code == HID_KEY_VOLDOWN ) ) {
+	  && ( h.code == HID_KEY_VOLUP || h.code == HID_KEY_VOLDOWN || h.code == HID_KEY_MUTE ) ) {
 		if ( h.type == HID_EV_KEY_DOWN ) {
 			(void)knl_wm_volume_key(h.code);
 		}
@@ -4262,6 +4623,8 @@ again:
 	if ( h.type == HID_EV_KEY_DOWN ) {
 		(void)knl_msg_mode_key(h.code, h.mods);
 	}
+	/* a press, wherever it goes, to the programs that count a turn from it (OB_E_PRESSED) */
+	knl_wmobj_press_seen(ev);
 	/* to whoever asked to be told; a press on the ground too, which puts
 	   a program's menu away */
 	knl_wmobj_event(ev);
@@ -5379,6 +5742,10 @@ LOCAL UW take_asks( PARTS *p )
 	return wm_ask_seq;
 }
 
+#if USE_UITEST
+EXPORT volatile UW	knl_wm_torn = 0;
+#endif
+
 /* One build of what was asked, and those who waited for it told */
 LOCAL void build_asked( void )
 {
@@ -5406,7 +5773,18 @@ LOCAL void build_asked( void )
 	seq = take_asks(&p);
 	tk_unl_mtx(wm_mtxid);
 
+#if USE_UITEST
+	{
+		/* a build that read the windows while a panel was being drawn, counted for pnstat */
+		IMPORT volatile UW	knl_pn_draws, knl_pn_drawing;
+		UW	d0 = knl_pn_draws, b0 = knl_pn_drawing;
+
+		(void)compose_parts(&p);
+		if ( b0 != 0 || knl_pn_drawing != 0 || knl_pn_draws != d0 ) knl_wm_torn++;
+	}
+#else
 	(void)compose_parts(&p);
+#endif
 
 	tk_loc_mtx(wm_mtxid, TMO_FEVR);
 	if ( seq_reached(seq, wm_built_seq) ) {
@@ -5656,6 +6034,20 @@ EXPORT ER wm_set_drag( CONST T_DPRECT *r, INT n )
 	wait_built(ask(0, &p));
 
 	return E_OK;
+}
+
+EXPORT BOOL knl_wm_carrying( void )
+{
+	BOOL	on;
+
+	if ( !wm_ready ) {
+		return FALSE;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	on = (BOOL)( wm_ndrag > 0 );
+	tk_unl_mtx(wm_mtxid);
+
+	return on;
 }
 
 /*
@@ -5977,6 +6369,31 @@ EXPORT void wm_screen( INT *p_w, INT *p_h )
 	*p_h = wm_ready ? wm_vh : 0;
 }
 
+/* The main screen's size: its corner is the view's, so what is centred or kept on it needs no more */
+EXPORT void wm_screen_main( INT *p_w, INT *p_h )
+{
+	INT	x, y;
+
+	*p_w = *p_h = 0;
+	(void)ts_disp_screen(0, &x, &y, p_w, p_h);
+}
+
+/* The screen a point of the view is on, or the nearest one */
+EXPORT void wm_screen_at( INT px, INT py, T_DPRECT *r )
+{
+	INT	i, x = 0, y = 0, w = 0, h = 0;
+
+	(void)py;
+	for ( i = 0; ts_disp_screen(i, &x, &y, &w, &h) >= E_OK; i++ ) {
+		if ( px < x + w ) break;
+	}
+	if ( i > 0 && i == ts_disp_screens() ) (void)ts_disp_screen(i - 1, &x, &y, &w, &h);
+	r->left = x;
+	r->top = y;
+	r->right = x + w;
+	r->bottom = y + h;
+}
+
 /*
  * The view rectangle r of the screen into dst, a pixel for each view
  * pixel, the first pixel of the screen it covers (cut to the screen);
@@ -6070,6 +6487,102 @@ EXPORT ER wm_grab_screen( UW *dst, INT pitch, CONST T_DPRECT *r, BOOL pointer )
 	}
 	if ( !pointer ) {
 		knl_pt_under(dst, pitch, r);
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	return E_OK;
+}
+
+/*
+ * The windows that can be shared, nearest the viewer first. Whose program
+ * each is of is asked after the lock is let go: the process table has its
+ * own lock.
+ */
+EXPORT INT wm_share_list( T_WMSHARE *v, INT max )
+{
+	INT	i, z, n = 0;
+	ID	me = ts_get_pid();
+	TS_UUID	mine, other;
+
+	if ( v == NULL || max <= 0 || !wm_ready ) {
+		return 0;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	for ( z = 0; z < wm_wcap && n < max; z++ ) {
+		for ( i = 0; i < wm_wcap && n < max; i++ ) {
+			WMWIN		*w = &WMW(i);
+			T_WMSHARE	*s = &v[n];
+
+			if ( !w->used || w->z != z || !w->visible || w->parent != 0
+			  || ( w->attr & WM_ATTR_POPUP ) || !( w->attr & WM_ATTR_TITLE ) ) {
+				continue;
+			}
+			s->wid = i + 1;
+			s->serial = w->serial;
+			s->gid = w->gid;
+			s->pid = w->mkpid;
+			s->w = w->work.right - w->work.left;
+			s->h = w->work.bottom - w->work.top;
+			s->flags = 0;
+			knl_memcpy(s->title, w->title, WM_TITLE_MAX);
+			s->title[WM_TITLE_MAX - 1] = 0;
+			n++;
+		}
+	}
+	tk_unl_mtx(wm_mtxid);
+	knl_memset(&mine, 0, sizeof(mine));
+	if ( me > 0 ) {
+		(void)knl_prc_uuid(me, NULL, &mine);
+	}
+	for ( i = 0; i < n; i++ ) {
+		if ( me > 0 && v[i].pid == me ) {
+			v[i].flags |= WM_SHARE_OWN | WM_SHARE_SAMEPROG;
+		} else if ( me > 0 && v[i].pid > 0 && knl_prc_uuid(v[i].pid, NULL, &other) >= E_OK
+			 && ts_uuid_cmp(&mine, &other) == 0 ) {
+			v[i].flags |= WM_SHARE_SAMEPROG;
+		}
+	}
+
+	return n;
+}
+
+EXPORT ER wm_grab_rows( INT wid, UINT serial, UW *dst, INT pitch, INT top, INT rows, INT maxw, INT *p_w, INT *p_h )
+{
+	WMWIN	*w;
+	INT	ww, wh, ox, oy, x, y;
+
+	if ( dst == NULL || top < 0 || rows <= 0 || maxw <= 0 || pitch < maxw || !wm_ready ) {
+		return E_PAR;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL || w->serial != serial ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_NOEXS;
+	}
+	if ( w->pixels == NULL ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_OBJ;
+	}
+	ww = w->work.right - w->work.left;
+	wh = w->work.bottom - w->work.top;
+	ox = w->work.left - w->outer.left;
+	oy = w->work.top - w->outer.top;
+	if ( p_w != NULL ) *p_w = ww;
+	if ( p_h != NULL ) *p_h = wh;
+	if ( maxw > ww ) maxw = ww;
+	for ( y = top; y < top + rows && y < wh; y++ ) {
+		UW		*d = dst + (SZ)( y - top ) * pitch;
+
+		if ( wm_scale != 100 ) {
+			CONST UW	*s = (CONST UW *)( w->pixels + (UD)dv(oy + y) * wm_wpitch );
+
+			for ( x = 0; x < maxw; x++ ) {
+				d[x] = s[dv(ox + x)];
+			}
+		} else {
+			row_copy(d, (CONST UW *)( w->pixels + (UD)( oy + y ) * wm_wpitch ) + ox, maxw);
+		}
 	}
 	tk_unl_mtx(wm_mtxid);
 

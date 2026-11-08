@@ -15,6 +15,6 @@
 <item code="colour.yellow">黄色</item>
 <item code="colour.white">白色</item>
 <line/>
-<item code="colour.custom">文字色指定（RGB（FFFFFF））</item>
+<item code="colour.custom">文字色指定</item>
 </menu>
 </tad>

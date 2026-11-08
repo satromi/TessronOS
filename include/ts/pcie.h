@@ -75,7 +75,8 @@ extern "C" {
 typedef struct {
 	UH	vendor;
 	UH	device;
-	UB	bus, dev, fn;
+	UH	bus;			/* on x64 with its segment above the low eight bits (PCI_BUS_IN) */
+	UB	dev, fn;
 	UB	class_code;		/* base class */
 	UB	subclass;
 	UB	prog_if;
@@ -165,6 +166,51 @@ IMPORT CONST char *ts_pcie_irq_name( INT kind );
 
 /* The kind ts_pcie_irq_alloc gave the function and its number, E_NOEXS when it was not asked */
 IMPORT INT ts_pcie_irq_kind( CONST T_PCIDEV *dev, UINT *p_intno );
+
+#ifdef __x86_64__
+/*
+ * A segment: a bus behind a host function, with its own numbering and its
+ * own configuration space. Its functions are in the same table as any
+ * other's and are used the same way; their bus numbers have the segment
+ * above the low eight bits, so that the bus of a function names the
+ * segment too. The host says how to reach the space and what a function
+ * in it has to write to raise an interrupt.
+ */
+#define PCI_BUS_SEG(b)		( (UINT)(b) >> 8 )
+#define PCI_BUS_NUM(b)		( (UINT)(b) & 0xff )
+#define PCI_BUS_IN(seg, b)	( ( (UINT)(seg) << 8 ) | (UINT)(b) )
+
+#define PCI_DOMAIN_RANGES	2
+
+typedef struct {
+	void	*arg;
+	UW	(*cfg_rd)( void *arg, UINT bus, UINT dev, UINT fn, UINT off, INT width );
+	void	(*cfg_wr)( void *arg, UINT bus, UINT dev, UINT fn, UINT off, UW val, INT width );
+	/*
+	 * A number for a function's message, and the address and data it
+	 * writes. *p_routed TRUE when the host turns that into its own
+	 * message, so that the function's entry never changes after this
+	 */
+	ER	(*msg)( void *arg, CONST T_PCIDEV *dev, UINT *p_intno, UD *p_addr, UW *p_data, BOOL *p_routed );
+	UINT	bus_first, bus_last;	/* the numbers of the segment's buses */
+	INT	nrange;			/* where its functions' windows may go */
+	UD	range_next[PCI_DOMAIN_RANGES];
+	UD	range_end[PCI_DOMAIN_RANGES];
+	UH	host_bus;		/* the function that is its host */
+	UB	host_dev, host_fn;
+	BOOL	read_before_handler;	/* see ts_pcie_irq_sync */
+} T_PCIDOMAIN;
+
+IMPORT INT  knl_pcie_domain_add( T_PCIDOMAIN *g );
+IMPORT BOOL knl_pcie_is_domain_host( CONST T_PCIDEV *dev );
+IMPORT ER   knl_pcie_msix_at( CONST T_PCIDEV *dev, UINT index, UINT *p_intno );
+IMPORT ER   knl_pcie_msg_direct( UINT *p_intno, UD *p_addr, UW *p_data );
+IMPORT void ts_pcie_irq_sync( CONST T_PCIDEV *dev );
+#ifdef USE_KTEST
+IMPORT void knl_pcie_hide( UINT bus, UINT dev, UINT fn );
+IMPORT void knl_pcie_fake_amd( void );
+#endif
+#endif
 
 /* The offset of a capability, or 0 when the function has none of it */
 IMPORT UINT ts_pcie_cap_find( CONST T_PCIDEV *dev, UINT cap_id );

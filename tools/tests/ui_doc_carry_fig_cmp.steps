@@ -1,0 +1,92 @@
+# 基本文章編集の文章の中の図形を、デスクトップの図形編集のウインドウへ運び出すのを、デスク
+# トップの文章編集とプロセスの文章編集で同じにする (design 11.3), for tools/ui_run.py. A copy of
+# 画用紙 (mkbig fig) is opened with the desktop's figure editor and moved by its name band to the
+# lower right of the screen. A copy of 基本文章編集 whose record 0 is a text with a figure standing
+# in a line (xmlbig) is opened at 100,100, and the figure carried by the hand out of the window
+# onto the figure, the button let go at once: it is put in the figure where its box is, and
+# leaves the text (the process hands it on as a fragment in the tray's place of its own,
+# DT_F_FRAG, and the desktop puts it in as from a text of its own, dd_frag_into_fig). Record 0 of
+# the text, saved, and the figure's record (sum keys: the figure has the keys once it took the
+# figure) are the same, byte for byte, whichever editor carried it; a second copy of 画用紙,
+# opened and put over the first, is the one for the process.
+# Keys: Ctrl+S 16 01, Ctrl+E 08 01.
+docproc kernel
+figproc kernel
+mkbig fig 3 1
+open big
+wait 1500
+sync 600
+drag 500 117 1000 412
+sync 600
+wait 500
+mkbig doc 3
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p>先頭の行です。</p>
+xml <p>前<bold>太字の語</bold>と<font color="#ff0000">赤い語</font>の後</p>
+xml <p>A<figure><figView left="10" top="10" right="110" bottom="50"/><figDraw left="10" top="10" right="110" bottom="50"/><rect l_pat="1" left="10" top="10" right="110" bottom="50"/></figure>B</p>
+xml <p>最後の行です。</p>
+xml </document></tad>
+xmlbig
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+hold 160 225
+move 300 300
+move 700 450
+move 1000 550
+up
+sync 600
+wait 300
+sum show keys
+keep kernel_to
+click 400 112
+sync 600
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 3 1
+open big
+wait 1500
+sync 600
+drag 500 117 1000 412
+sync 600
+wait 500
+mkbig doc 3
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p>先頭の行です。</p>
+xml <p>前<bold>太字の語</bold>と<font color="#ff0000">赤い語</font>の後</p>
+xml <p>A<figure><figView left="10" top="10" right="110" bottom="50"/><figDraw left="10" top="10" right="110" bottom="50"/><rect l_pat="1" left="10" top="10" right="110" bottom="50"/></figure>B</p>
+xml <p>最後の行です。</p>
+xml </document></tad>
+xmlbig
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 4
+wait 800
+logmark
+hold 160 225
+move 300 300
+move 700 450
+move 1000 550
+up
+expectsincein 10 document: figure carried out (0)
+wait 500
+sum show keys
+same kernel_to
+logmark
+click 400 112
+wait 300
+logmark
+key 16 01
+expectsince document: saved (0)
+sum show
+same kernel
+logmark
+key 08 01
+expectsince document: closed
+wait 500

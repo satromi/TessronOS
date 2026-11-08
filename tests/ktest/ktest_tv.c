@@ -342,27 +342,8 @@ LOCAL void start( void )
 	if ( ready ) {
 		return;
 	}
-	/*
-	 * A face to draw with. The suite that sets the system's own runs
-	 * only when the whole book is run, and a document drawn without
-	 * letters is not a document; so one is opened here when there is
-	 * none.
-	 */
-	if ( fn_system() <= 0 ) {
-		ID	fid = 0;
-		TS_UUID	u;
-		ER	er;
-
-		er = kt_sysobj(SYSDEF_FONT_BOX, "NotoSansJP-Regular.otf", &u);
-		if ( er >= E_OK ) {
-			er = fn_open_obj(&u, xf_data_rec(&u), 0, &fid);
-		}
-		tm_printf((UB *)"  face %d er %d\n", (INT)fid, (INT)er);
-		if ( er >= E_OK && fid > 0 ) {
-			fn_set_size(fid, 14);
-			fn_set_system(fid);
-		}
-	}
+	/* a face to draw with: a document drawn without letters is not a document */
+	(void)kt_face();
 	/*
 	 * The ground. A window drawn over a plain colour and a window drawn
 	 * over a picture are not the same window: what shows through a
@@ -1640,8 +1621,8 @@ LOCAL void test_bpk_draw( void )
 }
 
 /*
- * A link's least height: the object closed, its letters and eleven
- * pixels. A figure whose record gives a box lower than that is shown,
+ * A link's least height: the object closed, the height its letters
+ * give it (nineteen at fourteen point). A figure whose record gives a box lower than that is shown,
  * pressed and sized at that height, and a link in a text likewise, its
  * box given or not; the record is left as it was. An opened one, and
  * one that shows no band, keep the height they are given.
@@ -1673,8 +1654,8 @@ LOCAL void test_least( void )
 	T_DPRECT	r, b;
 	UW		*px;
 	INT		gid, i, k;
-	CONST INT	want_fig[] = { 25, 39, 80, 4 };
-	CONST INT	want_doc[] = { 39, 25 };
+	CONST INT	want_fig[] = { 19, 37, 80, 4 };
+	CONST INT	want_doc[] = { 37, 19 };
 
 	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
@@ -1683,13 +1664,20 @@ LOCAL void test_least( void )
 	/* the rule */
 	knl_memset(v, 0, sizeof(*v));
 	v->disp = TAD_D_DEFAULT;
-	KT_ASSERT_EQ(tad_lnk_closed_h(v), 25);		/* fourteen when it does not say */
+	KT_ASSERT_EQ(tad_lnk_closed_h(v), 19);		/* fourteen when it does not say */
 	v->chsz = 28;
-	KT_ASSERT_EQ(tad_lnk_closed_h(v), 39);
-	KT_ASSERT_EQ(om_band_h(v), 39);			/* the band is that height */
-	KT_ASSERT_EQ(tad_lnk_fit_h(v, 8), 39);		/* lower: brought up to it */
-	KT_ASSERT_EQ(tad_lnk_fit_h(v, 39 + TAD_OPEN_SLACK), 39);	/* a little above: closed */
-	KT_ASSERT_EQ(tad_lnk_fit_h(v, 39 + TAD_OPEN_SLACK + 1), 39 + TAD_OPEN_SLACK + 1);	/* opened */
+	KT_ASSERT_EQ(tad_lnk_closed_h(v), 37);		/* 28 + 7 + 2 */
+	KT_ASSERT_EQ(om_band_h(v), 37);			/* the band is that height */
+	KT_ASSERT_EQ(tad_lnk_fit_h(v, 8), 37);		/* lower: brought up to it */
+	KT_ASSERT_EQ(tad_lnk_fit_h(v, 37 + TAD_OPEN_SLACK), 37);	/* a little above: closed */
+	KT_ASSERT_EQ(tad_lnk_fit_h(v, 37 + TAD_OPEN_SLACK + 1), 37 + TAD_OPEN_SLACK + 1);	/* opened */
+	KT_ASSERT_EQ(tad_lnk_least_w(v), 56);		/* twice the letters with a frame */
+	v->disp = TAD_D_NAME | TAD_D_PICT;
+	KT_ASSERT_EQ(tad_lnk_closed_h(v), 35);		/* no frame: the picture's square */
+	KT_ASSERT_EQ(tad_lnk_least_w(v), 35);
+	v->disp = TAD_D_NAME;
+	KT_ASSERT_EQ(tad_lnk_closed_h(v), 28);		/* neither: the letters */
+	KT_ASSERT_EQ(tad_lnk_least_w(v), 28);
 	v->disp = TAD_D_FRAME;
 	KT_ASSERT_EQ(tad_lnk_closed_h(v), 0);		/* no band: a plain box */
 	KT_ASSERT_EQ(tad_lnk_fit_h(v, 4), 4);
@@ -1710,8 +1698,8 @@ LOCAL void test_least( void )
 		KT_ASSERT_EQ(k, 4);
 		/* pressed where it is shown, under the box the record gave */
 		r.left = 0;  r.top = 0;  r.right = PX_W;  r.bottom = PX_H;
-		KT_ASSERT_ER(tv_fig_at(f, &r, 0, 0, doc, 50, 30, v, &b, &i), E_OK);
-		KT_ASSERT_EQ(b.bottom - b.top, 25);
+		KT_ASSERT_ER(tv_fig_at(f, &r, 0, 0, doc, 50, 25, v, &b, &i), E_OK);
+		KT_ASSERT_EQ(b.bottom - b.top, 19);
 		/* the record says what it said */
 		KT_ASSERT_EQ(v->bottom - v->top, 10);
 
@@ -1736,7 +1724,7 @@ LOCAL void test_least( void )
 			}
 			tm_printf((UB *)"  drawn: %d..%d\n", top, foot);
 			KT_ASSERT_EQ(top, 10);
-			KT_ASSERT_EQ(foot, 10 + 25 - 1);
+			KT_ASSERT_EQ(foot, 10 + 19 - 1);
 			dp_close(gid);
 			Kfree(px);
 		}

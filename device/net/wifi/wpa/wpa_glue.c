@@ -54,6 +54,9 @@
 #include "utils/eloop.h"
 #include "common/defs.h"
 #include "common/eapol_common.h"
+#ifdef IEEE8021X_EAPOL
+#include "eapol_supp/eapol_supp_sm.h"
+#endif
 #include "common/ieee802_11_defs.h"
 #include "common/wpa_common.h"
 #include "crypto/sha1.h"
@@ -399,6 +402,18 @@ int knl_wpa_choose(int saved, const unsigned char *ap_rsn, int ap_rsn_len,
 	mfpc = (d.capabilities & WPA_CAPABILITY_MFPC) != 0;
 	mfpr = (d.capabilities & WPA_CAPABILITY_MFPR) != 0;
 	*h2e = 0;
+	if (saved == WPAG_SAVED_EAP) {
+		if (mfpr && !card_pmf)
+			return -1;
+		if ((d.key_mgmt & WPA_KEY_MGMT_IEEE8021X_SHA256) && card_pmf && mfpc)
+			*akm = WPAG_AKM_8021X_SHA256;
+		else if (d.key_mgmt & WPA_KEY_MGMT_IEEE8021X)
+			*akm = WPAG_AKM_8021X;
+		else
+			return -1;
+		*pmf = !(card_pmf && mfpc) ? WPAG_PMF_OFF : mfpr ? WPAG_PMF_REQUIRED : WPAG_PMF_OPTIONAL;
+		return 0;
+	}
 	/* SAE, which requires the protection of management frames on both sides */
 	if ((saved == WPAG_SAVED_WPA3 || saved == WPAG_SAVED_WPA2WPA3)
 	    && (d.key_mgmt & WPA_KEY_MGMT_SAE) && card_pmf && mfpc) {
@@ -421,6 +436,8 @@ int knl_wpa_choose(int saved, const unsigned char *ap_rsn, int ap_rsn_len,
 	return 0;
 }
 
+static void eap_tie(int on);
+
 int knl_wpa_start2(const unsigned char *own, const unsigned char *bssid,
 		   const unsigned char *ssid, int ssid_len,
 		   const unsigned char *ap_rsn, int ap_rsn_len,
@@ -439,6 +456,8 @@ int knl_wpa_start2(const unsigned char *own, const unsigned char *bssid,
 	if (ap_rsn == NULL || wpa_parse_wpa_ie_rsn(ap_rsn, ap_rsn_len, &d) != 0)
 		return -1;
 	key_mgmt = akm == WPAG_AKM_SAE ? WPA_KEY_MGMT_SAE
+		: akm == WPAG_AKM_8021X ? WPA_KEY_MGMT_IEEE8021X
+		: akm == WPAG_AKM_8021X_SHA256 ? WPA_KEY_MGMT_IEEE8021X_SHA256
 		: akm == WPAG_AKM_PSK_SHA256 ? WPA_KEY_MGMT_PSK_SHA256 : WPA_KEY_MGMT_PSK;
 	if (!(d.key_mgmt & key_mgmt))
 		return -1;
@@ -460,6 +479,7 @@ int knl_wpa_start2(const unsigned char *own, const unsigned char *bssid,
 		return -1;
 
 	wpa_sm_notify_disassoc(sm);
+	eap_tie(akm == WPAG_AKM_8021X || akm == WPAG_AKM_8021X_SHA256);
 	os_memcpy(cur_bssid, bssid, ETH_ALEN);
 	os_memcpy(ssid_kept, ssid, ssid_len);
 	os_memset(&conf, 0, sizeof(conf));
@@ -484,8 +504,9 @@ int knl_wpa_start2(const unsigned char *own, const unsigned char *bssid,
 	    || wpa_sm_set_ap_rsnxe(sm, ap_rsnxe, ap_rsnxe != NULL ? ap_rsnxe_len : 0) != 0)
 		return -1;
 	/* SAE's key with its PMKID (put in our element), or the passphrase's */
-	wpa_sm_set_pmk(sm, pmk, PMK_LEN, akm == WPAG_AKM_SAE ? pmkid : NULL,
-		       akm == WPAG_AKM_SAE ? bssid : NULL);
+	if (akm != WPAG_AKM_8021X && akm != WPAG_AKM_8021X_SHA256)
+		wpa_sm_set_pmk(sm, pmk, PMK_LEN, akm == WPAG_AKM_SAE ? pmkid : NULL,
+			       akm == WPAG_AKM_SAE ? bssid : NULL);
 	if (wpa_sm_set_assoc_wpa_ie_default(sm, ie, &len) != 0)
 		return -1;
 	if (h2e) {
@@ -498,6 +519,7 @@ int knl_wpa_start2(const unsigned char *own, const unsigned char *bssid,
 	wstate = WPA_ASSOCIATING;
 	wpa_printf(MSG_INFO, "WPA: %s, pairwise %s, group %s, PMF %s%s",
 		   akm == WPAG_AKM_SAE ? "WPA3-Personal (SAE)"
+		   : akm == WPAG_AKM_8021X || akm == WPAG_AKM_8021X_SHA256 ? "WPA2-Enterprise"
 		   : akm == WPAG_AKM_PSK_SHA256 ? "WPA2-Personal (PSK-SHA256)" : "WPA2-Personal",
 		   pairwise == WPA_CIPHER_CCMP ? "CCMP" : "TKIP", group == WPA_CIPHER_CCMP ? "CCMP" : "TKIP",
 		   mfp == MGMT_FRAME_PROTECTION_REQUIRED ? "required"
@@ -756,11 +778,14 @@ void knl_wpa_assoc(const unsigned char *bssid)
 	os_memcpy(cur_bssid, bssid, ETH_ALEN);
 	wstate = WPA_ASSOCIATED;
 	wpa_sm_notify_assoc(sm, bssid);
+	knl_wpa_eap_assoc();
 }
 
 void knl_wpa_rx(const unsigned char *src, const unsigned char *body, int len)
 {
 	if (sm == NULL || len <= 0)
+		return;
+	if (knl_wpa_eap_rx(src, body, len))
 		return;
 	(void)wpa_sm_rx_eapol(sm, src, body, (size_t)len, FRAME_ENCRYPTION_UNKNOWN);
 }
@@ -785,6 +810,45 @@ void knl_wpa_disassoc(void)
 		wpa_sm_notify_disassoc(sm);
 	wstate = WPA_DISCONNECTED;
 }
+
+#ifdef IEEE8021X_EAPOL
+/* What wps_eap.c needs of this file */
+int knl_wpa_eap_send(const unsigned char *dest, const unsigned char *buf, int len)
+{
+	return knl_wifi_eapol_tx(dest, buf, len);
+}
+
+const unsigned char *knl_wpa_cur_bssid(void)
+{
+	return cur_bssid;
+}
+
+/* The handshake takes the PMK from the supplicant: for this join, or none */
+extern struct eapol_sm *knl_wpa_eap_sm(void);
+
+static void eap_tie(int on)
+{
+	wpa_sm_set_eapol(sm, on ? knl_wpa_eap_sm() : NULL);
+}
+#else
+/* The kernel's own supplicant (WPA_MODE=kernel) has no EAP: such a network is not joined */
+int knl_wpa_eap_set(int method, const char *id, int id_len, const char *pw, int pw_len,
+		    const unsigned char *ca, int ca_len, const char *domain, int domain_len,
+		    const unsigned char *cert, int cert_len, const unsigned char *key, int key_len,
+		    const char *key_pw, int key_pw_len)
+{
+	return -1;
+}
+void knl_wpa_eap_assoc(void) {}
+int knl_wpa_eap_rx(const unsigned char *src, const unsigned char *body, int len) { return 0; }
+int knl_wpa_eap_result(void) { return WPAG_EAP_NONE; }
+void knl_wpa_eap_end(void) {}
+
+static void eap_tie(int on)
+{
+	(void)on;
+}
+#endif
 
 /* ---------------------------------------------------------------- timers */
 

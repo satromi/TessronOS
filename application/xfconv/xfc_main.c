@@ -66,6 +66,9 @@
 #include <ts/dt.h>
 #include <ts/time.h>
 #include <ts/hid.h>
+#ifdef USE_SSH
+#include <ts/sftp.h>
+#endif
 
 #define TITLE_H		34
 #define FRAME_W		16
@@ -742,6 +745,19 @@ static void files_free( XWIN *w )
 	memset(w, 0, sizeof(*w));
 }
 
+/* A server let go, by whichever way it was reached */
+static void xfc_bye( T_FTP *f )
+{
+#ifdef USE_SSH
+	if ( f->ssh != NULL ) {
+		ssh_close((T_SSH *)f->ssh);
+		f->ssh = NULL;
+		return;
+	}
+#endif
+	(void)ftp_close(f);
+}
+
 /* A file list closed: its server let go, its volume taken off when this window mounted it */
 static void files_close( XWIN *w )
 {
@@ -749,7 +765,7 @@ static void files_close( XWIN *w )
 	ER	er;
 
 	if ( w->is_ftp && w->ftp != NULL ) {
-		(void)ftp_close(w->ftp);
+		xfc_bye(w->ftp);
 		snprintf(s, sizeof(s), "disconnected %s", w->label);
 		xfc_log(s);
 	}
@@ -1048,25 +1064,101 @@ static void conn_keep( CONST XFCCONN *c )
 	if ( xfc_conf_save(conn, nconn) < E_OK ) xfc_log("settings not kept");
 }
 
+#ifdef USE_SSH
+/*
+ * A server by SSH. Nothing secret goes to it until its key is one the
+ * user has accepted: a key not seen before is shown, and the same key
+ * met again on the next 接続 is taken as accepted; a key other than the
+ * one kept for this connection ends it.
+ */
+static ER ssh_try( XFCCONN *c, UINT p, char *why, INT max )
+{
+	T_SSH	*s;
+	UB	h[SSH_HASH_BYTES];
+	char	hex[SSH_HASH_BYTES * 2 + 1];
+	INT	i;
+	ER	er;
+
+	er = ssh_connect(&s, &ssh_net_so, (CONST char *)c->host, p, h);
+	if ( er < E_OK ) {
+		snprintf(why, max, "%s に接続できません（%d）", c->host, (INT)er);
+		xfc_log(why);
+		return er;
+	}
+	for ( i = 0; i < SSH_HASH_BYTES; i++ ) snprintf(hex + i * 2, 3, "%02x", h[i]);
+	if ( c->hostkey[0] != 0 ) {
+		if ( strcmp((char *)c->hostkey, hex) != 0 ) {
+			snprintf(why, max, "サーバの鍵が前と違います。接続しません。鍵 %s", hex);
+			xfc_log("ssh: the server's key has changed");
+			ssh_close(s);
+			return E_OBJ;
+		}
+	} else if ( strcmp((char *)c->newkey, hex) != 0 ) {
+		strcpy((char *)c->newkey, hex);
+		snprintf(why, max, "初めてのサーバです。鍵 SHA-256 %s が正しければ、もう一度接続を押してください", hex);
+		xfc_log(why);
+		ssh_close(s);
+		return E_OBJ;
+	} else {
+		strcpy((char *)c->hostkey, hex);
+	}
+	/* the person's key first, when there is one; then the password */
+	{
+		static char	pem[SSH_KEY_MAX + 1];
+		INT		klen = ssh_key_load(pem, SSH_KEY_MAX);
+
+		er = ( klen > 0 ) ? ssh_login_key(s, (CONST char *)c->user, pem, klen) : E_OACV;
+		memset(pem, 0, sizeof(pem));
+	}
+	if ( er < E_OK ) er = ssh_login(s, (CONST char *)c->user, (CONST char *)c->pass);
+	if ( er < E_OK ) {
+		snprintf(why, max, "%s の名前かパスワードが違います", c->host);
+		xfc_log(why);
+		ssh_close(s);
+		return er;
+	}
+	er = sftp_start(s);
+	if ( er < E_OK ) {
+		snprintf(why, max, "%s は SFTP を受け付けません（%d）", c->host, (INT)er);
+		xfc_log(why);
+		ssh_close(s);
+		return er;
+	}
+	memset(pend->ftp, 0, sizeof(T_FTP));
+	pend->ftp->ctl = -1;
+	pend->ftp->ssh = s;
+	pend->ftp->enc = TXC_UTF8;
+	xfc_net_init(&pend->xnet, &pend->fnet, 20000, 0);
+	return E_OK;
+}
+#endif
+
 /* One 接続 of the panel: the server reached and logged in to, or why not */
 static ER ftp_try( XFCCONN *c, char *why, INT max )
 {
 	UINT	p;
 	ER	er;
 
+#ifndef USE_SSH
 	if ( c->ssh ) {
 		xfc_log("ssh not supported");
-		snprintf(why, max, "SSH（SFTP）での接続はまだ使えません。FTP なら SSH を外してください");
+		snprintf(why, max, "SSH（SFTP）での接続はこのビルドでは使えません。FTP なら SSH を外してください");
 		return E_NOSPT;
 	}
+#endif
 	p = (UINT)atoi((char *)c->port);
-	if ( p == 0 || p > 65535 ) p = FTP_PORT;
+	if ( p == 0 || p > 65535 ) p = c->ssh ? 22 : FTP_PORT;
 	er = xfc_net_up();
 	if ( er < E_OK ) {
 		snprintf(why, max, "網に繋がりません（%d）", (INT)er);
 		xfc_log(why);
 		return er;
 	}
+#ifdef USE_SSH
+	if ( c->ssh ) {
+		return ssh_try(c, p, why, max);
+	}
+#endif
 	memset(pend->ftp, 0, sizeof(T_FTP));
 	pend->ftp->ctl = -1;
 	xfc_net_init(&pend->xnet, &pend->fnet, 20000, (UINT)atoi((char *)c->lport));
@@ -1112,13 +1204,13 @@ static void open_ftp( CONST XFCCONN *from )
 	(void)dt_gettime(&pend->ftp->now);
 	conn_keep(&pconn);
 	snprintf(s, sizeof(s), "connected %s %s %s", pconn.host, ( pend->ftp->enc == TXC_UTF8 ) ? "utf-8"
-		 : txc_name(pend->ftp->enc), pend->ftp->active ? "active" : pend->ftp->pasv ? "pasv" : "epsv");
+		 : txc_name(pend->ftp->enc), pconn.ssh ? "sftp" : pend->ftp->active ? "active" : pend->ftp->pasv ? "pasv" : "epsv");
 	xfc_log(s);
 
 	conn_label(&pconn, lb, sizeof(lb));
 	w = files_new((CONST char *)lb);
 	if ( w == NULL ) {
-		(void)ftp_close(pend->ftp);
+		xfc_bye(pend->ftp);
 	} else {
 		w->ftp = pend->ftp;
 		w->ftx = pend->ftx;
@@ -1130,7 +1222,7 @@ static void open_ftp( CONST XFCCONN *from )
 		w->ftp->net = &w->fnet;
 		w->is_ftp = TRUE;
 		snprintf((char *)w->dev, sizeof(w->dev), "%s", lb);
-		snprintf(w->label, sizeof(w->label), "ftp://%s", pconn.host);
+		snprintf(w->label, sizeof(w->label), "%s://%s", pconn.ssh ? "sftp" : "ftp", pconn.host);
 		strcpy(w->source, "ftp");
 		(void)xfu_ftp_tree(w->ftx, w->ftp, (CONST UB *)"", &w->tree);
 		pend->ftp = NULL;
@@ -1138,7 +1230,7 @@ static void open_ftp( CONST XFCCONN *from )
 		snprintf(s, sizeof(s), "window %s", w->label);
 		xfc_log(s);
 		go_to(w, (CONST UB *)"");
-		snprintf(s, sizeof(s), "%s に接続しました（%s）", pconn.host, w->ftp->syst);
+		snprintf(s, sizeof(s), "%s に接続しました（%s）", pconn.host, pconn.ssh ? (CONST UB *)"SFTP" : w->ftp->syst);
 		say(w, s, FALSE);
 	}
 	free(pend->ftp);
@@ -1496,7 +1588,7 @@ static void look_of( CONST XFCENT *e, T_DTLOOK *look )
 
 	memset(look, 0, sizeof(*look));
 	look->w = ( w < 120 ) ? 120 : ( w > 400 ) ? 400 : w;
-	look->h = XFC_VOBJ_H;
+	look->h = VOBJ_CLOSED_H(0, 1, 1);	/* closed, at the letters it is given (none: 14) */
 	look->frcol = look->chcol = look->tbcol = look->bgcol = 0xFFFFFFFFU;
 }
 

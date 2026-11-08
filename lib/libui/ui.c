@@ -28,6 +28,7 @@
 #include <ts/obatr.h>
 #include <ts/time.h>
 #include <ts/hid.h>
+#include <ts/uuid.h>
 
 /* ---------------------------------------------------------------- metadata */
 
@@ -360,6 +361,7 @@ LOCAL UIPART *part( UI *u, INT num )
 LOCAL char	ui_prog[40];
 
 LOCAL UINT	ui_more_attr = 0;		/* what ui_attr asked for the next window */
+LOCAL char	ui_parent[40];			/* what ui_sub asked for the next window: its window's UUID */
 
 EXPORT void ui_attr( UINT attr )
 {
@@ -392,6 +394,15 @@ EXPORT void ui_work( UI *u, INT *p_w, INT *p_h )
 	}
 }
 
+EXPORT void ui_sub( CONST TS_UUID *parent )
+{
+	if ( parent == NULL ) {
+		ui_parent[0] = 0;
+		return;
+	}
+	ts_uuid_text(parent, ui_parent);
+}
+
 EXPORT void ui_icon( CONST char *prog )
 {
 	strncpy(ui_prog, prog, sizeof(ui_prog) - 1);
@@ -409,6 +420,18 @@ EXPORT ER ui_open_on( UI *u, CONST UI *with, CONST char *box, INT num, INT x, IN
 {
 	if ( with == NULL || with->port <= 0 ) return E_PAR;
 	return open_win(u, with->port, box, num, x, y);
+}
+
+/* A window made hidden (UI_ATTR_HIDDEN) shown, in front, its parts as they were set */
+EXPORT void ui_reveal( UI *u )
+{
+	T_OBWPOS	wp;
+	SZ		asz = 0;
+
+	if ( u->kw <= 0 || ob_rea_rec(u->kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) < E_OK ) return;
+	wp.flags |= OB_WP_SHOWN;
+	wp.z = 0;
+	(void)ob_wri_rec(u->kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
 }
 
 EXPORT BOOL ui_mine( CONST UI *u, CONST T_OBNTM *m )
@@ -453,13 +476,28 @@ LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y )
 
 	attr = ui_more_attr;
 	ui_more_attr = 0;			/* what ui_attr asked was for this window alone */
-	if ( ui_prog[0] != 0 ) {
-		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%u,\"icon\":\"%s\"}",
-			 x, y, x + u->w + 16, y + u->h + 34, 3U | attr, ui_prog);
-	} else {
-		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%u}", x, y, x + u->w + 16,
-			 y + u->h + 34, 3U | attr);
+	{
+		BOOL	hidden = (BOOL)( ( attr & UI_ATTR_HIDDEN ) != 0 );
+
+		/* framed, with a title bar unless asked not to */
+		UINT	wa = ( ( attr & UI_ATTR_UNTITLED ) != 0 ) ? WM_ATTR_FRAME : WM_ATTR_FRAME | WM_ATTR_TITLE;
+
+		attr &= ~( UI_ATTR_UNTITLED | UI_ATTR_HIDDEN );
+		if ( ui_prog[0] != 0 ) {
+			snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%u,\"icon\":\"%s\"",
+				 x, y, x + u->w + 16, y + u->h + 34, wa | attr, ui_prog);
+		} else {
+			snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%u", x, y, x + u->w + 16,
+				 y + u->h + 34, wa | attr);
+		}
+		if ( hidden ) snprintf(json + strlen(json), sizeof(json) - strlen(json), ",\"hidden\":1");
 	}
+	if ( ui_parent[0] != 0 ) {
+		/* a subordinate window of that one, as the system keeps it (wm_set_parent) */
+		snprintf(json + strlen(json), sizeof(json) - strlen(json), ",\"sub\":\"%s\"", ui_parent);
+		ui_parent[0] = 0;
+	}
+	snprintf(json + strlen(json), sizeof(json) - strlen(json), "}");
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
 	c.sub = OB_S_WINDOW;
@@ -703,6 +741,15 @@ EXPORT void ui_set_now( UI *u, INT num, INT v, INT now )
 	set_state(u, num, a, sizeof(a));
 }
 
+EXPORT void ui_set_swatch( UI *u, INT num, UW colour, BOOL chosen )
+{
+	INT	a[2];
+
+	a[0] = (INT)colour;
+	a[1] = chosen ? 1 : 0;
+	set_state(u, num, a, sizeof(a));
+}
+
 EXPORT void ui_set_range( UI *u, INT num, INT v, INT lo, INT hi )
 {
 	INT	a[3];
@@ -824,6 +871,30 @@ EXPORT void ui_show_sheet( UI *u, INT tag )
 
 /* ---------------------------------------------------------------- asking */
 
+/*
+ * Where a panel of pw x ph that asks something stands: in the middle of
+ * the main screen and kept on it, as the system's own panels that ask
+ * something stand (wm_panel_open_centre).
+ */
+LOCAL void ask_place( INT pw, INT ph, INT *p_x, INT *p_y )
+{
+	INT	sw = 0, sh = 0, x, y;
+
+	wm_screen(&sw, &sh);
+	if ( sw <= 0 || sh <= 0 ) {
+		sw = 1280;
+		sh = 800;
+	}
+	x = ( sw - pw ) / 2;
+	y = ( sh - ph ) / 2;
+	if ( x + pw > sw ) x = sw - pw;
+	if ( y + ph > sh ) y = sh - ph;
+	if ( x < 0 ) x = 0;
+	if ( y < 0 ) y = 0;
+	*p_x = x;
+	*p_y = y;
+}
+
 EXPORT INT ui_ask( UI *u, INT num, CONST char *const *lines, INT nline )
 {
 	UI		q;
@@ -833,13 +904,13 @@ EXPORT INT ui_ask( UI *u, INT num, CONST char *const *lines, INT nline )
 	INT		i, answer = -1, x, y, n;
 
 	/*
-	 * The panel in a window of its own over the middle of the
-	 * program's, so that the keys and the presses are its alone.
+	 * The panel in a window of its own in the middle of the screen,
+	 * so that the keys and the presses are its alone.
 	 */
 	memset(&q, 0, sizeof(q));
 	q.box = u->box;
 	{
-		T_OBWPOS	wp, ww;
+		T_OBWPOS	wp;
 		T_OBCRE		c;
 		char		json[96];
 		INT		pw, ph;
@@ -848,13 +919,7 @@ EXPORT INT ui_ask( UI *u, INT num, CONST char *const *lines, INT nline )
 		(void)ob_rea_rec(q.pk, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
 		pw = wp.right - wp.left;
 		ph = wp.bottom - wp.top;
-		if ( ob_rea_rec(u->kw, OB_WR_PLACE, 0, &ww, sizeof(ww), &asz) < E_OK ) {
-			ww.wleft = ww.wtop = 100;
-		}
-		x = ww.wleft + ( u->w - pw ) / 2;
-		y = ww.wtop + ( u->h - ph ) / 2;
-		if ( x < 0 ) x = 0;
-		if ( y < 0 ) y = 0;
+		ask_place(pw, ph, &x, &y);
 		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":256}", x, y, x + pw, y + ph);
 		memset(&c, 0, sizeof(c));
 		c.type = OB_T_WINDOW;
@@ -958,7 +1023,7 @@ EXPORT void ui_strip_close( UI *u )
 
 EXPORT ER ui_dlg_open( UI *u, INT num, UI *q )
 {
-	T_OBWPOS	wp, ww;
+	T_OBWPOS	wp;
 	T_OBCRE		c;
 	T_OBNTF		req;
 	T_OBMAP		m;
@@ -978,17 +1043,7 @@ EXPORT ER ui_dlg_open( UI *u, INT num, UI *q )
 		free(meta);
 	}
 
-	/* over the middle of the program's window, and on the screen */
-	if ( u->kw <= 0 || ob_rea_rec(u->kw, OB_WR_PLACE, 0, &ww, sizeof(ww), &asz) < E_OK ) {
-		memset(&ww, 0, sizeof(ww));
-		ww.wleft = ww.wtop = 100;
-	}
-	x = ww.wleft + ( u->w - pw ) / 2;
-	y = ww.wtop + ( u->h - ph ) / 2;
-	if ( ww.sw > 0 && x + pw > ww.sw ) x = ww.sw - pw;
-	if ( ww.sh > 0 && y + ph > ww.sh ) y = ww.sh - ph;
-	if ( x < 0 ) x = 0;
-	if ( y < 0 ) y = 0;
+	ask_place(pw, ph, &x, &y);
 	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":256}", x, y, x + pw, y + ph);
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;

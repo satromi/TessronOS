@@ -34,6 +34,7 @@
 #include <ts/uiprn.h>
 #include <ts/hid.h>
 #include <ts/tray.h>
+#include <ts/vobjsz.h>
 #include "calc_tad.h"
 #include "calc_eng.h"
 
@@ -51,7 +52,7 @@
 #define FILL_BOX	6			/* the fill handle */
 #define CHART_MIN	50
 #define LINK_W		150			/* a link's size in a cell when it says none */
-#define LINK_H		25
+#define LINK_H		VOBJ_CLOSED_H(0, 1, 1)		/* closed, at 14 */
 
 #define CHUNK		( 64 * 1024 )
 #define TEXT_MAX	4096			/* bytes of what a cell holds, typed */
@@ -129,6 +130,8 @@ extern UW	g_bg;			/* the object's paper (backgroundColor) */
 
 extern TS_UUID	g_win;
 extern ID	g_kw, g_port;
+extern TS_UUID	g_lch;			/* where the desktop says what windows opened from its links did to them */
+extern ID	g_lport;
 extern INT	g_gid, g_w, g_h;
 extern UI	g_ui;
 extern BOOL	g_dirty;		/* to be drawn again */
@@ -214,6 +217,7 @@ extern void name_of( CONST TS_UUID *u, UB *out );
 extern BOOL link_target( CONST CXCELL *c, TS_UUID *u );
 extern ER   ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms );
 extern void link_open( INT col, INT row );
+extern void link_told( CONST T_DTANS *an );	/* what a window opened from a link did to it (DT_F_LINK) */
 extern void link_op( CONST char *code, INT index );
 extern void exec_menu( ID mid );
 extern BOOL app_kept( void );

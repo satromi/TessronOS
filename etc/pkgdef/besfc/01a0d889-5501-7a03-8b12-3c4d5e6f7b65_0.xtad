@@ -1,0 +1,13 @@
+<tad version="1.0" encoding="UTF-8" filename="BeSFCの状態を読込">
+<document>
+<p>BeSFCの状態を読込</p>
+<p>BeSFCのメニューの下位メニュー。状態を読み込む番号。メニューの定義。</p>
+</document>
+<menu>
+<item code="emu.load.1">1</item>
+<item code="emu.load.2">2</item>
+<item code="emu.load.3">3</item>
+<item code="emu.load.4">4</item>
+<item code="emu.load.5">5</item>
+</menu>
+</tad>

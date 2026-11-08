@@ -162,9 +162,21 @@ EXPORT void reset_main( UD bi_pa )
 	knl_fbcon_mark(bi, BI_MK_KTM, 0x90, 0x50, 0x10);
 	knl_fbcon_init(bi);
 	knl_fbcon_mark(bi, BI_MK_KFB, 0xff, 0x90, 0xc0);
+#ifdef USE_TESTAGENT
+	{
+		/* the key of the test agent is not said on the console, which ends up in records */
+		char	shown[BI_CMDLINE_LEN];
+
+		bi_cmdline_hide_key(bi->cmdline, shown);
+		tm_printf((UB*)"\nTessronOS x64: kernel %x%08x at %x%08x, %d KB; firmware \"%s\"; settings \"%s\"\n",
+			(UW)(bi->kimg_va >> 32), (UW)bi->kimg_va, (UW)(bi->kimg_pa >> 32), (UW)bi->kimg_pa,
+			(UW)(bi->kimg_size >> 10), bi->fw_vendor, shown);
+	}
+#else
 	tm_printf((UB*)"\nTessronOS x64: kernel %x%08x at %x%08x, %d KB; firmware \"%s\"; settings \"%s\"\n",
 		(UW)(bi->kimg_va >> 32), (UW)bi->kimg_va, (UW)(bi->kimg_pa >> 32), (UW)bi->kimg_pa,
 		(UW)(bi->kimg_size >> 10), bi->fw_vendor, bi->cmdline);
+#endif
 	if ( bi->magic != BI_MAGIC || bi->version != BI_VERSION || bi->size != sizeof(T_BOOTINFO) ) {
 		tm_printf((UB*)"TessronOS x64: the loader is of another version (%x %d %d). Stopped.\n",
 			bi->magic, bi->version, bi->size);

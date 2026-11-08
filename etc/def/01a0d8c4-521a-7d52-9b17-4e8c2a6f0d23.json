@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "serial-terminal",
       "kind": "accessory",
       "name": "シリアル通信",

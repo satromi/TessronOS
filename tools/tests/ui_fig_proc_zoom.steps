@@ -1,0 +1,52 @@
+# 基本図形編集のプロセスの倍率を、元の仮身に書き戻す (design 11.3), for tools/ui_run.py:
+# figproc 1 makes every figure open with the process. Two figures of 30 rectangles (A, B)
+# are linked into BTRON; A is opened from its link (the process P), the link of B copied in
+# BTRON and pasted into A, and B opened from its link in A (another process). In B the
+# 倍率 palette (under the button at 332,48 of its 道具パネル) is brought up and x2 chosen:
+# the figure is drawn twice as large, scrolled home. B closed, its view goes to P, which
+# writes zoom 200 into the link in its record.
+# Keys with Ctrl (01): C 06, V 19, E 08; Esc 29.
+mkbig fig 30 4
+figproc 1
+linkbig 180 45
+mkbig fig 30 4
+linkbig 180 95
+wait 300
+click 230 104
+wait 300
+key 06 01
+wait 300
+logmark
+dclick 190 52
+expectsincein 60 figure: opened 画用紙 shapes 32 links 0 autoref 1 parent 1
+wait 800
+click 600 500
+wait 300
+logmark
+key 19 01
+expectsince figure: pasted, 33 shapes 1 picked
+click 600 500
+wait 300
+logmark
+dclick 340 221
+expectsincein 60 figure: opened 画用紙 shapes 32 links 0 autoref 1 parent 1
+wait 1200
+logmark
+click 332 48
+expectsince figure: palette 6 open
+wait 500
+shot zoom_palette
+click 704 95
+expectsince figure: zoom 200
+wait 300
+key 29
+expectsince figure: palette 6 closed
+wait 500
+shot zoom_x2
+logmark
+key 08 01
+expectsincein 30 figure: link view written back: 0,0 zoom 200
+wait 500
+key 08 01
+expect figure: closed
+figproc 0

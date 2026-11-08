@@ -378,8 +378,8 @@ LOCAL INT app_at( CONST DTAPP *a, INT n, CONST char *id )
  * The programs an object is offered with (dt_app_list), which 実行 and
  * 付箋指定 both show. An archive whose applist names unpack-file, as one
  * taken in before 書庫管理 took 書庫解凍 in: 書庫管理, under its own id
- * and name, the one it opens with. A text: its applist in its order,
- * then the programs of its kind, none twice and none of them its own.
+ * and name, the one it opens with. A text with an applist: that list in
+ * its order and nothing more. One with none: the programs of its kind.
  */
 LOCAL void test_programs( void )
 {
@@ -387,7 +387,7 @@ LOCAL void test_programs( void )
 	TS_UUID		old, txt;
 	T_VOBJ		*v;
 	DTAPP		*a;
-	INT		room, n, i, k, dflt = -1, kinds = 0;
+	INT		room, n, i, dflt = -1;
 	CONST char	*jo = "{\"name\":\"KT古い書庫\",\"applist\":{\"unpack-file\":{\"name\":\"書庫解凍\",\"defaultOpen\":true}}}";
 	CONST char	*jt = "{\"name\":\"KT実行の文章\",\"applist\":{\"basic-figure-editor\":{\"name\":\"x\",\"defaultOpen\":false},"
 			      "\"basic-text-editor\":{\"name\":\"x\",\"defaultOpen\":true}}}";
@@ -424,28 +424,36 @@ LOCAL void test_programs( void )
 	room = dt_app_list(v, NULL, 0, NULL);
 	a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
 	n = ( a != NULL ) ? dt_app_list(v, a, room, &dflt) : 0;
-	KT_ASSERT(n >= 2);
-	if ( n >= 2 ) {
+	KT_ASSERT_EQ(n, 2);
+	if ( n == 2 ) {
 		KT_ASSERT(same(a[0].id, "basic-figure-editor") && a[0].listed);
 		KT_ASSERT(same(a[1].id, "basic-text-editor") && a[1].listed);
 		KT_ASSERT(same(a[0].name, "基本図形編集"));
 		KT_ASSERT_EQ(dflt, 1);
-		for ( i = 2; i < n; i++ ) {
-			KT_ASSERT(!a[i].listed);
-			pp = dt_prog_find(a[i].id);
-			KT_ASSERT(pp != NULL && pp->types[0] != 0);
-			for ( k = 0; k < i; k++ ) KT_ASSERT(!same(a[k].id, (CONST char *)a[i].id));
-			kinds++;
-		}
-		/* スライド opens any xmlTAD: offered after the applist */
-		if ( dt_prog_find((CONST UB *)"basic-slide") != NULL ) KT_ASSERT(app_at(a, n, "basic-slide") >= 2);
-		tm_printf((UB *)"  a text is offered %d programs, %d of them for its kind\n", n, kinds);
 		same_as_asked(&txt, a, n, NULL);
 	}
 	if ( a != NULL ) Kfree(a);
 	(void)ob_del_obj(&txt);
 
-	/* an object with no applist, its link carrying one: the link's, then those of its kind */
+	/* an object with no applist and a link with none: the programs of its kind, marked so */
+	KT_ASSERT_ER(make_obj("{\"name\":\"KT機能付箋のない文章\"}",
+			      "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>KT</p></document></tad>\n", &txt), E_OK);
+	knl_memset(v, 0, sizeof(*v));
+	v->target = txt;
+	room = dt_app_list(v, NULL, 0, NULL);
+	a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
+	n = ( a != NULL ) ? dt_app_list(v, a, room, &dflt) : 0;
+	for ( i = 0; i < n; i++ ) {
+		KT_ASSERT(!a[i].listed);
+		pp = dt_prog_find(a[i].id);
+		KT_ASSERT(pp != NULL && pp->types[0] != 0);
+	}
+	if ( dt_prog_find((CONST UB *)"basic-slide") != NULL ) KT_ASSERT(app_at(a, n, "basic-slide") >= 0);
+	if ( n >= 1 ) same_as_asked(&txt, a, n, NULL);
+	if ( a != NULL ) Kfree(a);
+	(void)ob_del_obj(&txt);
+
+	/* an object with no applist, its link carrying one: the link's and nothing more */
 	KT_ASSERT_ER(make_obj("{\"name\":\"KT仮身のapplist\"}",
 			      "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>KT</p></document></tad>\n", &txt), E_OK);
 	knl_memset(v, 0, sizeof(*v));
@@ -458,7 +466,7 @@ LOCAL void test_programs( void )
 		room = dt_app_list(v, NULL, 0, NULL);
 		a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
 		n = ( a != NULL ) ? dt_app_list(v, a, room, &dflt) : 0;
-		KT_ASSERT(n >= 1 && same(a[0].id, "basic-calc-editor") && a[0].listed);
+		KT_ASSERT(n == 1 && same(a[0].id, "basic-calc-editor") && a[0].listed);
 		KT_ASSERT_EQ(dflt, 0);
 		if ( n >= 1 ) same_as_asked(&txt, a, n, la);
 		if ( a != NULL ) Kfree(a);

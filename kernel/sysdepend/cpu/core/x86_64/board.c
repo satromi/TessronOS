@@ -72,6 +72,7 @@ LOCAL CONST BOARD_DEF	board_def[] = {
 	{ BOARD_X1YOGA3, "LENOVO", "20LE", "Lenovo ThinkPad X1 Yoga (3rd)" },
 	{ BOARD_X1YOGA3, "LENOVO", "20LF", "Lenovo ThinkPad X1 Yoga (3rd)" },
 	{ BOARD_X1YOGA3, "LENOVO", "20LG", "Lenovo ThinkPad X1 Yoga (3rd)" },
+	{ BOARD_X1C_21CB, "LENOVO", "21CB", "Lenovo ThinkPad X1 Carbon (21CB)" },
 };
 #define N_BOARD_DEF	( sizeof(board_def) / sizeof(board_def[0]) )
 

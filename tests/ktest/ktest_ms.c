@@ -501,7 +501,7 @@ LOCAL void test_sample( void )
 /*
  * What the desktop knows of it: an application of the program box, not
  * carried in the desktop, whose template is in the 原紙箱; and the
- * template's execute menu names it, second after 基本図形編集.
+ * template's applist opens with it, 基本図形編集 second.
  */
 LOCAL void test_desktop( void )
 {
@@ -525,11 +525,12 @@ LOCAL void test_desktop( void )
 
 	n = om_store_apps(&base, names, 8);
 	KT_ASSERT(n >= 2);
-	KT_ASSERT(has(names[1], s_len((CONST char *)names[1]), "マイクロスクリプト"));
+	KT_ASSERT(has(names[0], s_len((CONST char *)names[0]), "マイクロスクリプト"));
+	KT_ASSERT(has(names[1], s_len((CONST char *)names[1]), "基本図形編集"));
 	KT_ASSERT(om_store_app_id(&base, 1, id, sizeof(id)) > 0);
-	KT_ASSERT(has(id, s_len((CONST char *)id), "microscript"));
-	KT_ASSERT(om_store_default_app(&base, id, sizeof(id)) > 0);
 	KT_ASSERT(has(id, s_len((CONST char *)id), "basic-figure-editor"));
+	KT_ASSERT(om_store_default_app(&base, id, sizeof(id)) > 0);
+	KT_ASSERT(has(id, s_len((CONST char *)id), "microscript"));
 }
 
 LOCAL CONST UB jpg_420[708] = {

@@ -1,0 +1,111 @@
+# BeSFC (design 11.32), installed as a package (make PKGS=besfc.tpk), for tools/ui_run.py: a ROM
+# of the tests in a document, its link carried onto the window; the key that is button A
+# changes the colour (compare the pictures); then closed, and removed from バージョン.
+emurom
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p><link id="01a0d8c4-5501-7f01-8b12-3c4d5e6f7b71_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c22"
+xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
+xml framedisp="true" namedisp="true" pictdisp="true"/></p>
+xml </document></tad>
+xmlopen ROMの文書
+wait 500
+win ROMの文書
+open 01a0d8c4-5501-7a01-8b12-3c4d5e6f7b60
+expect besfc: ready
+wait 500
+win BeSFC
+logmark
+drag 190 107 640 400
+expectsincein 30 besfc: record
+focus emu_keys BeSFC
+wait 3000
+shot sfc_run
+keydown 0x1b
+wait 800
+shot sfc_a_down
+keyup 0x1b
+wait 800
+shot sfc_a_up
+wait 3000
+shot sfc_end
+# F shows the frames a second and the registers over the picture, once for each press
+keydown 0x09
+keyup 0x09
+wait 1500
+shot sfc_fps
+keydown 0x09
+keyup 0x09
+wait 300
+# the second button's menu opens with its first item, 閉じる, under the pointer; 状態を保存
+# opens 1 to 5 beside it, and only the number saved can be read
+click 640 400 1
+wait 500
+shot sfc_menu
+move 670 480
+wait 300
+logmark
+move 722 500
+wait 150
+click 722 500
+expectsince besfc: state 2 kept
+wait 300
+shot sfc_saved2
+click 640 400 1
+wait 500
+move 670 420
+wait 300
+shot sfc_load_list
+logmark
+move 722 440
+wait 150
+click 722 440
+expectsince besfc: state read (0)
+wait 300
+click 640 400 1
+wait 500
+move 660 300
+wait 150
+click 660 300
+expectin 30 besfc: closed
+wait 500
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expectin 40 sysenv: ready
+wait 800
+win システム環境設定
+click 345 124
+wait 800
+shot sys_version
+move 400 430
+wheel -40
+wait 500
+shot sys_version_foot
+click 300 502
+wait 300
+click 640 400 1
+wait 500
+move 670 440
+wait 400
+shot sys_ops
+move 735 460
+wait 300
+shot sys_hover
+click 735 460
+wait 3000
+shot sys_confirm
+logmark
+click 602 383
+wait 1500
+# the first time a right is asked, the administrator password of this test machine is set
+click 728 376
+text tesstest
+click 728 410
+text tesstest
+click 842 504
+expectsincein 30 sysenv: remove 
+wait 6000
+shot sys_removed
+# the definitions of its numbers are kept by the menu's links until the menu is deleted for good
+refs 01a0d889-5501-7a02-8b12-3c4d5e6f7b64
+want ok 1
+refs 01a0d889-5501-7a03-8b12-3c4d5e6f7b65
+want ok 1

@@ -1,0 +1,224 @@
+# 小物箱 and 小物の設定 (design 11.2.1, 11.8), for tools/ui_run.py on a kernel built
+# with UITEST=1. The box's window stands at 144,124 and its rows at y = 176 + 23i
+# (closed links, 19 high, 4 apart).
+# The first right press at x,Y opens the menu with 小物管理 at Y+121; after an item
+# of it was chosen, with 小物管理 at Y. Its items are at x+130 from there: 一番上へ
+# +0, 一つ上へ +20, 一つ下へ +40, 一番下へ +60, the switch of the menu +100.
+# ui_accbox_after.steps then looks at the disk this one leaves (--keep-disk).
+open 01a0d6d1-08d0-7fbe-b385-b6d0c36f2308
+waitwin 小物箱 60
+wait 1500
+shot ab_open
+# The order is the one 小物の設定 brings (R1.300): ユーザ環境設定 0, システム環境設定 1,
+# ネットワーク設定 2, ファイル変換 3, 音量ミキサー 4, ソフトウェアキーボード 5, コンソール 6,
+# バックアップ 7, 時計 8, ... BeFC 21 (歯車 has no program without GL=1)
+accpos clock
+want ok 8 23 +
+accpos console
+want ok 6 23 +
+accpos befc
+want ok 22 23 +
+# コンソール (row 6): 一番下へ
+click 200 314 1
+wait 600
+move 205 400
+wait 150
+move 205 435
+wait 500
+move 330 435
+wait 150
+click 330 495
+wait 800
+accpos console
+want ok 22 23 +
+accpos befc
+want ok 21 23 +
+accpos clock
+want ok 7 23 +
+shot ab_bottom
+# 時計 (row 7): 一つ下へ, then 一つ上へ
+click 200 337 1
+wait 600
+move 205 338
+wait 500
+move 330 337
+wait 150
+click 330 377
+wait 800
+accpos clock
+want ok 8 23 +
+click 200 360 1
+wait 600
+move 205 361
+wait 500
+move 330 360
+wait 150
+click 330 380
+wait 800
+accpos clock
+want ok 7 23 +
+# バックアップ (row 6): 一番上へ
+click 200 314 1
+wait 600
+move 205 315
+wait 500
+move 330 314
+wait 150
+click 330 314
+wait 800
+accpos btron-backup
+want ok 0 23 +
+# バックアップ: 小物メニューに表示しない; the box says so, and 小物 leaves it out
+click 200 176 1
+wait 600
+move 205 177
+wait 500
+move 330 176
+wait 150
+shot ab_sub
+click 330 276
+wait 800
+accpos btron-backup
+want ok 0 23 -
+shot ab_hidden
+click 600 300 1
+wait 600
+move 605 301
+wait 150
+move 605 420
+wait 600
+shot ab_menu
+key 29
+wait 300
+key 29
+wait 300
+# 時計 (row 7) carried and let go just above the middle of row 2: before システム環境設定
+accpos clock
+want ok 7 23 +
+drag 200 337 200 215
+wait 800
+accpos clock
+want ok 2 23 +
+accpos tessronos-sysenv
+want ok 3 23 +
+accpos tessronos-userenv
+want ok 1 23 +
+shot ab_drag
+# a package (.tpk) installed: there at once, at the end, the window made again
+mkpkg
+want ok 0
+proginst 01a0d8c4-5500-7f03-8b12-3c4d5e6f7b72
+want ok 0
+wait 800
+accpos ut-acc
+want ok 23 24 +
+refs 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok 1
+shot ab_installed
+# the same version again: refused before any panel; asked to go ahead: one panel;
+# put away: nothing changes
+adminpanels
+keep panels
+proginst 01a0d8c4-5500-7f03-8b12-3c4d5e6f7b72
+adminpanels
+same panels
+proginstq 01a0d8c4-5500-7f03-8b12-3c4d5e6f7b72
+wait 1500
+progres
+want ok -1
+shot ab_panel
+key 29
+wait 1000
+progres
+adminpanels
+accpos ut-acc
+want ok 23 24 +
+# removed: gone from the box, the menu and the settings, and a 屑実身
+progrm 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok 0
+wait 800
+accpos ut-acc
+want ok -1 23 -
+refs 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok 0
+open 01a0d6d1-08d6-7896-adb0-7469517f6b4b
+waitwin 屑実身操作 30
+wait 1000
+win 屑実身操作
+shot ab_trash
+# the package once more over what is in the trash: out of it
+proginst 01a0d8c4-5500-7f03-8b12-3c4d5e6f7b72
+want ok 0
+wait 800
+refs 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok 1
+accpos ut-acc
+want ok 23 24 +
+# removed, and registered again from the program object itself
+progrm 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok 0
+proginst 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok 0
+accpos ut-acc
+want ok 23 24 +
+progrm 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok 0
+wait 1000
+shot ab_trash2
+# the desktop's own is not removed
+progrm 01a0d6d1-08d1-781f-8f58-35c45aeacef9
+want ok -17
+# BeFC of the image, whose objects were 削除不可: its menu becomes a 屑実身 with it,
+# and both come back when the program object is registered again
+progrm 01a0d8c4-5500-7a01-8b12-3c4d5e6f7b50
+want ok 0
+refs 01a0d8c4-5500-7a01-8b12-3c4d5e6f7b50
+want ok 0
+refs 01a0d889-5500-7a01-8b12-3c4d5e6f7b52
+want ok 0
+wait 800
+shot ab_trash3
+proginst 01a0d8c4-5500-7a01-8b12-3c4d5e6f7b50
+want ok 0
+refs 01a0d889-5500-7a01-8b12-3c4d5e6f7b52
+want ok 1
+accpos befc
+want ok 22 23 +
+wait 800
+# 屑実身操作: UT小物, in row 1 (y = 152 + 23i) once the list is made again without
+# BeFC and its menu, deleted for good
+wait 2000
+shot ab_trash4
+click 210 175
+wait 300
+shot ab_trash5
+key 4C
+wait 1000
+shot ab_confirm
+key 28
+wait 1500
+refs 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok -1
+# installed anew, removed, carried out of the 屑実身 to the BTRON window, saved there,
+# and its link's object registered again
+proginst 01a0d8c4-5500-7f03-8b12-3c4d5e6f7b72
+want ok 0
+progrm 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok 0
+wait 1000
+shot ab_trash6
+drag 210 175 70 195
+wait 1000
+shot ab_carried
+key 16 01
+wait 1500
+refs 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok 1
+proginst 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok 0
+refs 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok 2
+accpos ut-acc
+want ok 23 24 +
+wait 3000
+absent !OACV!

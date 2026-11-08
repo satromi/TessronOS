@@ -1,0 +1,49 @@
+# 基本図形編集のメニューの屑実身操作を、デスクトップの図形編集とプロセスの図形編集で同じに使う
+# (design 11.3), for tools/ui_run.py. A figure (mkbig fig 1 2 0) opened at 100,100 to
+# 900,700; its menu opens with the item chosen last on the pointer's row, the rows 20 apart:
+# in the desktop's figure 閉じる, 屑実身操作 ten rows under; in the process's, the system's
+# menus remembering, 屑実身操作. Either brings up the desktop's 屑実身操作 window, which is
+# closed again.
+# Keys: Ctrl+E 08 01.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 1 2 0
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+click 600 400 1
+wait 500
+move 610 600
+wait 400
+click 610 600
+wait 800
+sync 600
+win 屑実身操作
+shot trc_k
+key 08 01
+sync 600
+wait 300
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 2 0
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 3
+wait 800
+logmark
+click 600 400 1
+expectsince figure: menu
+wait 500
+move 610 400
+wait 400
+shot trc_p_menu
+click 610 400
+expectsince figure: trash asked 0
+wait 800
+sync 600
+win 屑実身操作
+shot trc_p
+key 08 01
+sync 600

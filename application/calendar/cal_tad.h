@@ -39,6 +39,7 @@
 #include <tk/errno.h>
 #include <ts/uuid.h>
 #include <ts/dtreq.h>
+#include <ts/vobjsz.h>
 
 /* The month's grid as the record has it */
 #define CT_BASE_W	800
@@ -53,7 +54,7 @@
 #define CT_ROWS		6
 #define CT_COLS		7
 
-#define CT_LINK_H	25		/* a link the program puts that is not a day's */
+#define CT_LINK_H	VOBJ_CLOSED_H(0, 1, 1)	/* a link the program puts that is not a day's: closed, at 14 */
 
 /* Colours the grid is drawn in, as the records write them */
 #define CT_COL_SUNDAY	"#ee0000"
@@ -203,8 +204,9 @@ IMPORT BOOL ct_attr_bool( CONST UB *el, INT n, CONST char *name, BOOL dflt );
 
 /*
  * A link's box when the box it is given makes it open or closed: the
- * band of a closed link is its letters and eleven pixels, and a box no
- * more than eight taller than that is closed, made the band's height.
+ * band of a closed link with its frame and picture is the height its
+ * letters give it (VOBJ_CLOSED_H), and a box no more than
+ * VOBJ_OPEN_SLACK taller than that is closed, made the band's height.
  */
 IMPORT INT  ct_band_h( INT chsz );
 IMPORT INT  ct_snap_h( INT chsz, INT h );
@@ -258,6 +260,33 @@ IMPORT INT  ct_app_list( CONST UB *json, INT n, UB (*ids)[CT_APP_ID], UB (*names
  * is offered for the object's kind (DT_F_KIND). FALSE when it gives none.
  */
 IMPORT BOOL ct_app_entry( CONST T_DTANS *an, UB *id, UB *name, BOOL *p_kind );
+
+/*
+ * DT_RQ_OPEN of the link el (n bytes) of the record of parent, with
+ * DT_F_LINK (ts/dtreq.h): what the window opened does to the link is
+ * told at chan. The link's viewMode and wordWrap go with it, and its
+ * applist as ct_link_req puts it; the caller says its colours (look).
+ * FALSE when the link has no vobjid or it does not fit, and the request
+ * is made as ct_link_req makes it.
+ */
+IMPORT BOOL ct_link_from( T_DTREQ *rq, CONST TS_UUID *parent, CONST TS_UUID *chan, CONST UB *el, INT n );
+
+/*
+ * What a window opened from a link did to it, as the desktop told it
+ * (DT_HOW_LINK_VIEW, DT_HOW_LINK_ADD): the object whose record holds the
+ * link and the link's vobjid. For DT_HOW_LINK_VIEW, the attributes to
+ * set in the link, as ct_link_edit takes them, their texts in v; how
+ * many (none for DT_HOW_LINK_ADD). -1 when the answer is not one.
+ */
+#define CT_VIEW_SET	5
+typedef struct {
+	char	sx[12], sy[12], zoom[16];
+	UB	vm[32];
+} CTVIEW;
+IMPORT INT  ct_link_told( CONST T_DTANS *an, TS_UUID *p_parent, TS_UUID *p_vobjid, CTVIEW *v, CTSET *set );
+
+/* The link of vobjid among the <link> elements of x (n bytes): its element, FALSE when there is none */
+IMPORT BOOL ct_link_of( CONST UB *x, INT n, CONST TS_UUID *vobjid, CTEL *p_el );
 
 /* A colour "#rrggbb" of a JSON object's member by its path ("window", "backgroundColor"), or dflt */
 IMPORT UW   ct_json_colour( CONST UB *json, INT n, CONST char *outer, CONST char *name, UW dflt );

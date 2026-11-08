@@ -29,7 +29,7 @@ import sys
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mkfat import fat_format, fat32_format    # noqa: E402
+from mkfat import fat_format, fat32_format, FAT32_MIN_CLUS    # noqa: E402
 
 SECTOR = 512
 ENTRIES = 128
@@ -53,6 +53,14 @@ def gpt_header(my_lba, alt_lba, first, last, entry_lba, entries_crc, disk_guid):
     return bytes(h) + b"\0" * (SECTOR - 92)
 
 
+def least_mb(sys_bytes, files):
+    """The MB a disk needs for the partitions main() lays out around its FAT32 volume."""
+    data = sum(-(-os.path.getsize(f) // SECTOR) for f in files if os.path.isfile(f))
+    clusters = max(FAT32_MIN_CLUS, data + 8 * 2048)     # room for the directories and test files
+    fat32 = 32 + 2 * (-(-(clusters + 2) * 4 // SECTOR)) + clusters
+    return 1 + 16 + -(-fat32 // 2048) + -(-sys_bytes // (1024 * 1024)) + 6 + 2 + 1
+
+
 def main():
     args = sys.argv[1:]
     sysvol = None
@@ -67,6 +75,11 @@ def main():
     out = args[0]
     size_mb = int(args[1]) if len(args) > 1 else 96
     files = args[2:]
+    if sysvol is not None:
+        # The system volume grows with what it carries. The size asked for is
+        # a least: the disk is made larger rather than leave too little for
+        # the FAT32 volume to be one, or for the files it is to hold.
+        size_mb = max(size_mb, room_mb + least_mb(len(sysvol), files))
     disk_sect = size_mb * 1024 * 1024 // SECTOR
     # where the tables end: the end of the disk, or of the image a card was written with
     nsect = disk_sect - room_mb * 2048

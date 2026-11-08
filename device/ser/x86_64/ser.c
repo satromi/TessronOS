@@ -27,6 +27,7 @@
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/ser.h>
+#include <ts/pm.h>
 #include <ts/ob.h>
 #include "../../../kernel/sysdepend/acpi/acpi.h"
 
@@ -551,6 +552,40 @@ LOCAL ER port_add( UH port, UB irq, CONST char *what )
 }
 
 /* Every port of the machine that answers, COM1 first so that the console's is "sera" */
+/*
+ * After S3 each UART is as from reset: its form, speed and receive interrupt
+ * set again. The speed is the one the ports start at; a speed a program set
+ * is its to set again.
+ */
+LOCAL ER ser_pm_suspend( void *arg, INT how )
+{
+	return E_OK;
+}
+
+LOCAL void ser_pm_resume( void *arg, INT how )
+{
+	INT	i;
+
+	if ( how != PM_S3 ) return;
+	for ( i = 0; i < ser_n; i++ ) {
+		SERPORT	*p = ser_tbl[i];
+
+		wr(p, UART_IER, 0);
+		wr(p, UART_LCR, LCR_DLAB | LCR_8N1);
+		wr(p, UART_DLL, (UB)( SER_CLOCK / 16 / 115200 ));
+		wr(p, UART_DLM, 0);
+		wr(p, UART_LCR, LCR_8N1);
+		wr(p, UART_FCR, FCR_ON);
+		wr(p, UART_MCR, MCR_DTR_RTS | MCR_OUT2);
+		(void)rd(p, UART_LSR);
+		(void)rd(p, UART_RBR);
+		(void)rd(p, UART_IIR);
+		if ( !p->info.polled ) wr(p, UART_IER, IER_RX);
+	}
+}
+
+LOCAL CONST T_PMDEV	ser_pm = { "serial", PM_ORD_INPUT, ser_pm_suspend, ser_pm_resume, NULL };
+
 EXPORT INT knl_ser_init( void )
 {
 	LOCAL CONST struct {
@@ -565,6 +600,7 @@ EXPORT INT knl_ser_init( void )
 	};
 	INT	i;
 
+	(void)ts_pm_register(&ser_pm);
 	for ( i = 0; i < 4; i++ ) {
 		if ( port_answers(com[i].port) ) {
 			(void)port_add(com[i].port, com[i].irq, com[i].name);

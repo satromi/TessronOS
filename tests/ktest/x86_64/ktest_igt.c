@@ -70,6 +70,7 @@
 #include "../../../device/gpu/intel/igt.h"
 #include "../../../device/gpu/intel/igt_cp.h"
 #include "../../../device/gpu/intel/igt_rplan.h"
+#include "../../../device/gpu/intel/igt12.h"
 
 IMPORT void	knl_igt_ggtt_fake( UBINT mmio, UD ggtt_size, UD mappable );
 IMPORT void	knl_igt_ggtt_unfake( void );
@@ -308,6 +309,63 @@ LOCAL void test_igt_ppgtt( void )
 	igt_vm_destroy(vm);
 	KT_ASSERT(knl_pf_free_count(-1) >= free0 + e + 1);	/* every table given back */
 	for ( i = 0; i < 3; i++ ) knl_free_pages(pf[i], 0);
+}
+
+/*
+ * The space of an ended process whose context an engine still holds:
+ * kept until the engine has gone on to another context and that job is
+ * over; one no engine holds, freed at once
+ */
+LOCAL void test_igt_held( void )
+{
+	IGTVM	*vm, *other;
+	IGTCTX	c, d;
+	IGTENG	*e = &knl_igt.eng[IGT_RCS];
+	UD	held0 = knl_igt.n_held, reaped0 = knl_igt.n_reaped, free0;
+
+	KT_ASSERT(vm_ready());
+	if ( knl_igt.scr_pt == 0 ) return;
+	vm = igt_vm_create(FALSE);
+	other = igt_vm_create(FALSE);
+	KT_ASSERT(vm != NULL && other != NULL);
+	if ( vm == NULL || other == NULL ) return;
+	knl_memset(&c, 0, sizeof(c));
+	knl_memset(&d, 0, sizeof(d));
+	c.vm = vm;
+	d.vm = other;
+
+	/* the engine ran one of its contexts last: kept, not freed */
+	e->last = &c;
+	e->prev = NULL;
+	e->cur = NULL;
+	free0 = knl_pf_free_count(-1);
+	igt_vm_destroy(vm);
+	KT_ASSERT(knl_igt.dead == vm);
+	KT_ASSERT_EQ(knl_igt.n_held, held0 + 1);
+	KT_ASSERT_EQ(knl_pf_free_count(-1), free0);
+	igt_vm_reap();
+	KT_ASSERT(knl_igt.dead == vm);
+
+	/* a job of another context started: the engine may still be writing it back */
+	e->prev = &c;
+	e->last = &d;
+	e->cur = &d;
+	igt_vm_reap();
+	KT_ASSERT(knl_igt.dead == vm);
+
+	/* that job over: freed */
+	e->cur = NULL;
+	igt_vm_reap();
+	KT_ASSERT(knl_igt.dead == NULL);
+	KT_ASSERT_EQ(knl_igt.n_reaped, reaped0 + 1);
+	KT_ASSERT(knl_pf_free_count(-1) > free0);
+
+	/* a space no engine holds: freed at once */
+	e->last = NULL;
+	e->prev = NULL;
+	igt_vm_destroy(other);
+	KT_ASSERT(knl_igt.dead == NULL);
+	KT_ASSERT_EQ(knl_igt.n_held, held0 + 1);
 }
 
 LOCAL void test_igt_kva( void )
@@ -969,6 +1027,20 @@ LOCAL void test_igt_pm( void )
 	igt_pm_tick();
 	KT_ASSERT(!knl_igt.parked);
 	tk_dly_tsk(20);
+	/* not while an engine holds a process's context: the kernel's asked for first */
+	{
+		IGTVM	uvm;
+		IGTCTX	uctx;
+
+		knl_memset(&uvm, 0, sizeof(uvm));
+		knl_memset(&uctx, 0, sizeof(uctx));
+		uctx.vm = &uvm;
+		knl_igt.eng[IGT_RCS].last = &uctx;
+		igt_pm_tick();
+		KT_ASSERT(!knl_igt.parked);
+		KT_ASSERT(knl_igt.fw_held);
+		knl_igt.eng[IGT_RCS].last = NULL;
+	}
 	igt_pm_tick();
 	KT_ASSERT(knl_igt.parked);
 	KT_ASSERT(!knl_igt.fw_held);
@@ -976,6 +1048,7 @@ LOCAL void test_igt_pm( void )
 	KT_ASSERT_EQ(R(FW_GT), MASK_DIS(FW_KERNEL));
 	KT_ASSERT_EQ(R(RC_CONTROL), RC_CTL_RC6_ENABLE);
 	KT_ASSERT_EQ(R(RC_STATE), RC_SW_TARGET(4));
+	KT_ASSERT_EQ(R(PG_ENABLE), RENDER_PG_EN | MEDIA_PG_EN);
 	KT_ASSERT_EQ(R(RPNSWREQ), FREQ_REQ(18));
 	KT_ASSERT_EQ(R(GT_IER(2)), 0);
 	KT_ASSERT_EQ(knl_igt.f_cur, 42);		/* not below the efficient one */
@@ -1149,6 +1222,211 @@ LOCAL void test_igt_place( void )
 	KT_ASSERT_ER(knl_gpu_unregister(), E_OK);
 }
 
+/* ---------------------------------------------------------------- the 11th generation and later */
+
+LOCAL void test_igt12_gen( void )
+{
+	CONST T_IGTGEN	*g;
+
+	/* the 9th generation's are not in the table: such a machine goes on as before */
+	KT_ASSERT(knl_igt_gen(0x5917) == NULL);
+	KT_ASSERT(knl_igt_gen(0x591c) == NULL);
+	KT_ASSERT(knl_igt_gen(0x87c0) == NULL);
+	KT_ASSERT(knl_igt_gen(0x3e9b) == NULL);
+	KT_ASSERT(knl_igt_gen(0x9b41) == NULL);
+	KT_ASSERT(knl_igt_gen(0x0000) == NULL);
+	KT_ASSERT(knl_igt_gen(0xffff) == NULL);
+
+	/* the 11th generation: named, its registers not read, whatever the first and last of each */
+	g = knl_igt_gen(0x8a50);
+	KT_ASSERT(g != NULL && g->verx10 == 110 && g->read == IGT_READ_NO && g->uc == IGT_UC_NONE && !g->discrete);
+	g = knl_igt_gen(0x8a52);
+	KT_ASSERT(g != NULL && g->verx10 == 110 && g->read == IGT_READ_NO);
+	g = knl_igt_gen(0x8a71);
+	KT_ASSERT(g != NULL && g->verx10 == 110 && g->read == IGT_READ_NO);
+	g = knl_igt_gen(0x4541);	/* Elkhart Lake */
+	KT_ASSERT(g != NULL && g->verx10 == 110 && g->read == IGT_READ_NO);
+	g = knl_igt_gen(0x4571);
+	KT_ASSERT(g != NULL && g->verx10 == 110 && g->read == IGT_READ_NO);
+	g = knl_igt_gen(0x4e51);	/* Jasper Lake */
+	KT_ASSERT(g != NULL && g->verx10 == 110 && g->read == IGT_READ_NO);
+	g = knl_igt_gen(0x4e71);
+	KT_ASSERT(g != NULL && g->verx10 == 110 && g->read == IGT_READ_NO);
+
+	g = knl_igt_gen(0x9a49);
+	KT_ASSERT(g != NULL);
+	if ( g != NULL ) {
+		KT_ASSERT_EQ(g->verx10, 120);
+		KT_ASSERT_EQ(g->uc, IGT_UC_NONE);
+		KT_ASSERT_EQ(g->read, IGT_READ_PRM);
+		KT_ASSERT(!g->discrete);
+	}
+	g = knl_igt_gen(0x4680);	/* Alder Lake-S */
+	KT_ASSERT(g != NULL && g->uc == IGT_UC_HUC && g->read == IGT_READ_SAME);
+	g = knl_igt_gen(0x46a6);	/* Alder Lake-P */
+	KT_ASSERT(g != NULL && g->uc == IGT_UC_GUC && g->read == IGT_READ_SAME);
+	g = knl_igt_gen(0x56a0);	/* DG2: its own memory, not read */
+	KT_ASSERT(g != NULL && g->discrete && g->read == IGT_READ_NO);
+	g = knl_igt_gen(0x7d55);	/* Meteor Lake: registers not confirmed */
+	KT_ASSERT(g != NULL && g->verx10 == 127 && g->read == IGT_READ_NO);
+	g = knl_igt_gen(0xb080);	/* Panther Lake */
+	KT_ASSERT(g != NULL && g->verx10 == 300);
+	g = knl_igt_gen(0x4626);
+	KT_ASSERT(g != NULL);
+	g = knl_igt_gen(0xfd81);
+	KT_ASSERT(g != NULL);
+}
+
+LOCAL BOOL same_bytes( CONST UB *a, CONST UB *b, UD n )
+{
+	UD	i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( a[i] != b[i] ) return FALSE;
+	}
+	return TRUE;
+}
+
+/* The state read from memory of the test's: the fields from their places, and not one byte written */
+LOCAL void test_igt12_read( void )
+{
+	UD		npages = 2 * MB / PAGE_SIZE;
+	UB		*mm, *copy;
+	T_IGT12STATE	s;
+
+#define R12(off)	( *(volatile UW *)( mm + (off) ) )
+	mm = (UB *)knl_vmap(npages, 0);
+	copy = (UB *)knl_vmap(npages, 0);
+	KT_ASSERT(mm != NULL && copy != NULL);
+	if ( mm == NULL || copy == NULL ) return;
+	knl_memset(mm, 0xa5, 2 * MB);
+	R12(0x09138) = 0x01;
+	R12(0x0913c) = 0x3f;
+	R12(0x09134) = 0x02;
+	R12(0x09140) = 0x000c0003;
+	R12(0x108040) = 0x1234;
+	R12(0x1080c0) = 0x80000000;
+	R12(0x1080c4) = 0x1;
+	R12(0x00d84) = 0;		/* render asleep */
+	R12(0x130044) = 0x0001;		/* the GT awake */
+	R12(0x00d88) = 0;
+	R12(0x0229c) = 0xdead0001;	/* must not be taken */
+	R12(0x2229c) = 0x00008000;
+	R12(0x22234) = 0x11;
+	R12(0x22238) = 0x22;
+	R12(0x0c000) = 0x33;
+	R12(0x0c340) = 0x44;
+	R12(0x45400) = 0x0f;
+	R12(0x45404) = 0x05;
+	R12(0x70008) = 0xc0000000;
+	R12(0x60400) = 0x87000000;
+	R12(0x70180) = 0x84000000;
+	R12(0x7019c) = 0x00100000;
+	R12(0x73008) = 0x11111111;
+	knl_memcpy(copy, mm, 2 * MB);
+
+	igt12_read((UBINT)mm, &s);
+	KT_ASSERT(same_bytes(mm, copy, 2 * MB));
+	KT_ASSERT(!s.dead);
+	KT_ASSERT_EQ(s.slice_en, 1);
+	KT_ASSERT_EQ(s.dss_en, 0x3f);
+	KT_ASSERT_EQ(s.eu_dis, 2);
+	KT_ASSERT_EQ(s.media_dis, 0x000c0003);
+	KT_ASSERT_EQ(s.ggc, 0x1234);
+	KT_ASSERT_EQ(s.dsm_hi, 1);
+	KT_ASSERT(!s.rcs_read);
+	KT_ASSERT(s.gt_read);
+	KT_ASSERT_EQ(s.bcs_mode, 0x8000);
+	KT_ASSERT_EQ(s.bcs_st_lo, 0x11);
+	KT_ASSERT_EQ(s.bcs_st_hi, 0x22);
+	KT_ASSERT_EQ(s.guc_status, 0x33);
+	KT_ASSERT_EQ(s.guc_wopcm, 0x44);
+	KT_ASSERT_EQ(s.pwr_bios, 0x0f);
+	KT_ASSERT_EQ(s.pwr_driver, 5);
+	KT_ASSERT_EQ(s.pipe[0].conf, 0xc0000000U);
+	KT_ASSERT_EQ(s.pipe[0].ddi, 0x87000000U);
+	KT_ASSERT_EQ(s.pipe[0].plane_surf, 0x00100000);
+	KT_ASSERT_EQ(s.pipe[3].conf, 0x11111111);
+
+	/* the other way round: the GT's asleep, nothing of it read */
+	R12(0x00d84) = 1;
+	R12(0x130044) = 0;
+	knl_memcpy(copy, mm, 2 * MB);
+	igt12_read((UBINT)mm, &s);
+	KT_ASSERT(same_bytes(mm, copy, 2 * MB));
+	KT_ASSERT(s.rcs_read && !s.gt_read);
+	KT_ASSERT_EQ(s.rcs_mode, 0xdead0001U);
+
+	/* a device that reads all ones: stopped at the first */
+	R12(0x09138) = 0xffffffffU;
+	igt12_read((UBINT)mm, &s);
+	KT_ASSERT(s.dead);
+#undef R12
+	knl_vunmap(mm, npages);
+	knl_vunmap(copy, npages);
+}
+
+#ifdef IGT12
+/* The formats against the published layout of the fields (IGT12=1) */
+LOCAL void test_igt12_fmt( void )
+{
+	UD		npages = 2 * MB / PAGE_SIZE, d;
+	UB		*mm;
+	T_IGT12CS	cs;
+	INT		i;
+
+	d = igt12_desc(0x00123000, 5, 2, 0x7fe, 63, 1, TRUE);
+	KT_ASSERT_EQ((UW)d, 0x00123000 | 0x100 | 0x18 | 0x4 | 0x1 | ( 1 << 9 ));
+	KT_ASSERT_EQ((UW)( d >> 32 ), ( 5U << 29 ) | ( 63U << 23 ) | ( 2U << 16 ) | ( 0x7feU << 5 ));
+	d = igt12_desc(0x1000, 0, 0, 1, 0, -1, FALSE);
+	KT_ASSERT_EQ((UW)d, 0x1000 | 0x100 | 0x18 | 0x1);		/* no priority where it is not programmed */
+	KT_ASSERT_EQ(igt12_desc(0x1001, 0, 0, 1, 0, -1, FALSE), 0);	/* not on a page */
+	KT_ASSERT_EQ(igt12_desc(0, 0, 0, 1, 0, -1, FALSE), 0);
+	KT_ASSERT_EQ(igt12_desc(0x1000, 8, 0, 1, 0, -1, FALSE), 0);
+	KT_ASSERT_EQ(igt12_desc(0x1000, 0, 64, 1, 0, -1, FALSE), 0);
+	KT_ASSERT_EQ(igt12_desc(0x1000, 0, 0, IGT12_IDLE_CTX, 0, -1, FALSE), 0);	/* stands for idle */
+	KT_ASSERT_EQ(igt12_desc(0x1000, 0, 0, 1, 64, -1, FALSE), 0);
+	KT_ASSERT_EQ(igt12_desc(0x1000, 0, 0, 1, 0, 3, FALSE), 0);
+
+#define CSQW(to, inst, cls, nq, away, det) \
+	( (UD)( ( (UW)(to) << 15 ) | ( (UW)(inst) << 6 ) | ( (UW)(cls) << 3 ) | (UW)(nq) ) \
+	  | ( (UD)( ( (UW)(away) << 15 ) | (UW)(det) ) << 32 ) )
+	igt12_cs_decode(CSQW(0xab, 1, 3, 1, IGT12_IDLE_CTX, 0), &cs);
+	KT_ASSERT_EQ(cs.kind, IGT12_CS_IDLE_TO_ACTIVE);
+	KT_ASSERT_EQ(cs.to, 0xab);
+	KT_ASSERT_EQ(cs.instance, 1);
+	KT_ASSERT_EQ(cs.eng_class, 3);
+	igt12_cs_decode(CSQW(IGT12_IDLE_CTX, 0, 0, 0, 0xab, 0), &cs);
+	KT_ASSERT_EQ(cs.kind, IGT12_CS_ACTIVE_TO_IDLE);
+	KT_ASSERT_EQ(cs.away, 0xab);
+	KT_ASSERT_EQ(cs.detail, 0);
+	igt12_cs_decode(CSQW(IGT12_IDLE_CTX, 0, 0, 1, 0xab, 5), &cs);
+	KT_ASSERT_EQ(cs.kind, IGT12_CS_PREEMPT_TO_IDLE);
+	KT_ASSERT_EQ(cs.detail, 5);
+	igt12_cs_decode(CSQW(IGT12_IDLE_CTX, 0, 0, 1, IGT12_IDLE_CTX, 0), &cs);
+	KT_ASSERT_EQ(cs.kind, IGT12_CS_IDLE_REPORT);
+	igt12_cs_decode(CSQW(0x7bc, 0, 0, 1, 0xab, 0), &cs);
+	KT_ASSERT_EQ(cs.kind, IGT12_CS_NEW_QUEUE);
+	igt12_cs_decode(CSQW(0x7ac, 0, 0, 0, 0xab, 0), &cs);
+	KT_ASSERT_EQ(cs.kind, IGT12_CS_ELEMENT);
+#undef CSQW
+
+	/* on memory of the test's: element 0, the rest invalid, the load last */
+	mm = (UB *)knl_vmap(npages, 0);
+	KT_ASSERT(mm != NULL);
+	if ( mm == NULL ) return;
+	knl_memset(mm, 0xa5, 2 * MB);
+	igt12_sq_load((UBINT)mm, 0x22000, 0x1122334455667789ULL);
+	KT_ASSERT_EQ(*(UW *)( mm + 0x22510 ), 0x55667789);
+	KT_ASSERT_EQ(*(UW *)( mm + 0x22514 ), 0x11223344);
+	for ( i = 2; i < 16; i++ ) KT_ASSERT_EQ(*(UW *)( mm + 0x22510 + i * 4 ), 0);
+	KT_ASSERT_EQ(*(UW *)( mm + 0x22550 ), 1);
+	KT_ASSERT_EQ(*(UW *)( mm + 0x2250c ), 0xa5a5a5a5U);
+	KT_ASSERT_EQ(*(UW *)( mm + 0x22554 ), 0xa5a5a5a5U);
+	knl_vunmap(mm, npages);
+}
+#endif /* IGT12 */
+
 EXPORT void ktest_igt( void )
 {
 	if ( knl_igt.ready ) {
@@ -1158,6 +1436,7 @@ EXPORT void ktest_igt( void )
 	KT_RUN(test_igt_ggtt);
 	KT_RUN(test_igt_ggtt_scattered);
 	KT_RUN(test_igt_ppgtt);
+	KT_RUN(test_igt_held);
 	KT_RUN(test_igt_kva);
 	KT_RUN(test_igt_layout);
 	KT_RUN(test_igt_emit);
@@ -1169,6 +1448,11 @@ EXPORT void ktest_igt( void )
 	KT_RUN(test_igt_rcmd);
 	KT_RUN(test_igt_rplan);
 	KT_RUN(test_igt_pm);
+	KT_RUN(test_igt12_gen);
+	KT_RUN(test_igt12_read);
+#ifdef IGT12
+	KT_RUN(test_igt12_fmt);
+#endif
 }
 
 #endif /* X64 */

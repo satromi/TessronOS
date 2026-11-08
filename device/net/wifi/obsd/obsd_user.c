@@ -8,7 +8,7 @@
  */
 
 /*
- *	obsd_user.c (x64 PC, WIFI_NET80211=obsd)
+ *	obsd_user.c (x64 PC, Raspberry Pi, WIFI_NET80211=obsd)
  *	The kernel's side of obsd_hc.h (design 9.6.9): what the layer of
  *	OpenBSD's IEEE 802.11 code and iwm(4) (tools/openbsd/build.sh,
  *	~/tessronos-obsd-x64/obsdwifi.o) has of T-Kernel: locks, semaphores,
@@ -19,17 +19,21 @@
 
 #include <sys/machine.h>
 
-#if defined(X64) && defined(WIFI_OBSD)
+#if defined(WIFI_OBSD)
 
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
+#ifdef X64
 #include <ts/pcie.h>
+#endif
 #include <ts/time.h>
 #include "tstdlib.h"
 #include "obsd_hc.h"
 
+#ifdef X64
 IMPORT BOOL	knl_wifi_pci_find( T_PCIDEV *d );	/* wifi_user.c */
+#endif
 IMPORT void	knl_wifi_kick( void );			/* wifi.c */
 IMPORT ER	ts_get_random( void *buf, SZ len );
 
@@ -179,6 +183,7 @@ EXPORT void obsd_hc_puts( const char *s )
 	knl_net_stamp_line((CONST UB *)s);
 }
 
+#ifdef X64
 /* Where the card iwm drives is, its path enabled (rumpcomp_tswifi_card); 0, or -1 */
 EXPORT int obsd_hc_card( int *bus, int *dev, int *fn, unsigned int *id )
 {
@@ -192,10 +197,11 @@ EXPORT int obsd_hc_card( int *bus, int *dev, int *fn, unsigned int *id )
 	*fn = (int)d.fn;
 	return 0;
 }
+#endif /* X64 */
 
 EXPORT void obsd_hc_kick( void )
 {
 	knl_wifi_kick();
 }
 
-#endif /* X64 && WIFI_OBSD */
+#endif /* WIFI_OBSD */

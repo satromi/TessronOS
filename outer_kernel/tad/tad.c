@@ -53,7 +53,7 @@
  *	that was built here is written out of its fields.
  */
 
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include <ts/ob.h>
 #include "tad_local.h"
 

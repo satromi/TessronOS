@@ -121,6 +121,7 @@ IMPORT ER   knl_obfile_attach( CONST char *path, UINT flags );
 IMPORT ER   knl_obfile_detach( CONST char *path );
 IMPORT ER   knl_obfile_trx( CONST TS_UUID *on, BOOL begin, BOOL commit );
 IMPORT INT  knl_obfile_revoke( CONST UB *devnm );	/* a device's medium went: its volumes are gone */
+IMPORT INT  knl_obfile_shut( BOOL finish );		/* the machine going off */
 
 /* Protection domains (18.9): the one an object is under, E_NOEXS when none */
 IMPORT T_OBPRT *knl_obfile_domain( CONST TS_UUID *uuid );	/* Kfree it; NULL none */
@@ -134,6 +135,7 @@ IMPORT ID   knl_obfile_vol_path( CONST char *path );	/* the TSFS volume attached
 IMPORT void knl_obdev_volume_up( void );	/* a volume came: the device box can be kept */
 IMPORT BOOL knl_obmem_name_taken( CONST UB *name );
 IMPORT BOOL knl_obchan_name_taken( CONST UB *name );
+IMPORT BOOL knl_obchan_merge_move( CONST TS_UUID *port, CONST T_OBNTM *msg );	/* a waiting move brought up to date */
 
 /* The devices outside the device management, each serving its own (obdev.c knl_obdev_start) */
 IMPORT void knl_obrand_start( void );		/* obrand.c */

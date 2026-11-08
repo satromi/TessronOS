@@ -144,6 +144,30 @@ IMPORT ER  dp_set_place( INT gid, void *pixels, UINT pitch, INT corner_x, INT co
 			 CONST T_DPRECT *work );
 
 /*
+ * An environment of memory: one that draws into a picture rather than
+ * onto the screen (メモリの描画環境). The picture is w by h pixels of
+ * argb, pitch bytes from the start of one row to the next; its first
+ * pixel is 0, 0, and the origin, the frame and the visible part are all
+ * of it. Nothing drawn through it reaches the screen, and what is drawn
+ * is in the picture once dp_close has closed it.
+ *
+ * Opened by a process (design A, class 8), the kernel draws into a copy
+ * of the picture taken as it is opened, and writes it back into the
+ * process's picture at dp_close; only that process draws through it,
+ * and it goes away with the process. A picture of more than
+ * DP_MEM_MAX pixels is refused (E_PAR).
+ */
+typedef struct {
+	UW	*px;
+	INT	pitch;			/* bytes */
+	INT	w, h;
+} T_DPBMP;
+
+#define DP_MEM_MAX	( 4096 * 4096 )
+
+IMPORT INT dp_open_mem( CONST T_DPBMP *bmp );
+
+/*
  * An environment that draws into pixels laid onto the screen later (a
  * window's) can say what it touches as it draws: with the watch on,
  * every rectangle drawn through it is handed, in screen coordinates and

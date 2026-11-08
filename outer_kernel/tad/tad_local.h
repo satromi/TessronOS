@@ -15,7 +15,7 @@
 #ifndef _TAD_LOCAL_H_
 #define _TAD_LOCAL_H_
 
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include <ts/tad.h>
 
 /*

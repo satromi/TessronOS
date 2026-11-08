@@ -1,0 +1,207 @@
+# 深い入れ子の文章 (design 11.3), for tools/ui_run.py: the desktop's own text editor (open,
+# docproc kernel) and the text editor running as a process (pdoc) open the same text, whose
+# elements are nested as deep as a record may be (32: tad, document, p and 29 font), with an
+# opened link to the text itself, so that what is inside the link is drawn again inside it
+# as deep as an opened link is drawn on the screen (TV_MAX_DEPTH). The window is shot in both
+# and compared inside it (101,125 to 682,482 of the screen), a letter typed into the deepest
+# run and saved: record 0 the same, byte for byte, but for the identity of each copy, which its
+# link to itself names (sum anon). The process says how much of its main
+# task's stack it used ("document: stack used N of 65536 bytes"); the desktop's stack is said
+# by stkuse. Nothing falls: no exception, no stack run over. The shots on opening (deep_*_open)
+# are the same, and so are those after the letter is typed (deep_*_typed): both draw the
+# object inside its links to itself as it is being edited (the process by tv_src_live).
+# Keys: x 1b; End 4D; Ctrl+S 16 01, Ctrl+E 08 01.
+docproc kernel
+# the deepest there may be
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>深い入れ子の文章</p>
+xml <p>
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml 入れ子32段の字
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </p>
+xml <p>自分への開いた仮身 
+xml <link id="ffffffff-ffff-ffff-ffff-ffffffffffff_0.xtad" heightpx="260" width="520" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml </p>
+xml <p>後の段落</p>
+xml </document></tad>
+xmlbig
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 1500
+move 690 490
+sync 600
+shot deep_k_open
+click 300 175
+sync 600
+key 4D
+sync 600
+key 1b
+sync 600
+shot deep_k_typed
+key 16 01
+sync 600
+sum show anon
+keep kernel
+stkuse
+key 08 01
+sync 600
+wait 500
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>深い入れ子の文章</p>
+xml <p>
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml <font color="#c00000">
+xml <font color="#0000c0">
+xml <font color="#008000">
+xml <font color="#000000">
+xml 入れ子32段の字
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </font>
+xml </p>
+xml <p>自分への開いた仮身 
+xml <link id="ffffffff-ffff-ffff-ffff-ffffffffffff_0.xtad" heightpx="260" width="520" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml </p>
+xml <p>後の段落</p>
+xml </document></tad>
+xmlbig
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs
+wait 1500
+move 690 490
+wait 300
+shot deep_p_open
+logmark
+click 300 175
+expectsince document: drew
+logmark
+key 4D
+expectsince document: drew
+logmark
+key 1b
+expectsince document: key to screen
+shot deep_p_typed
+logmark
+key 16 01
+expectsince document: saved (0)
+sum show anon
+same kernel
+logmark
+key 08 01
+expectsince document: stack used
+expectsince document: closed
+wait 500
+absent !EXCEPTION!
+absent !STACK!
+absent !USTACK!

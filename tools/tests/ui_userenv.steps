@@ -5,7 +5,7 @@
 # the administrator's password, and the panel put away leaves it as it was while the
 # rest is kept. The window is at 180,90: 使用者 at 600,175, 時刻サーバ at 600,388,
 # タイムゾーン at 500,425 (↑ the next zone east); Ctrl+E closes, and 更新して終了 of the
-# question that comes is at 625,393.
+# question that comes (in the middle of the screen) is at 790,440.
 open 01a0d8c4-52b7-7c63-8e83-4f9a012c3d53
 expect userenv: ready
 wait 800
@@ -20,9 +20,9 @@ text x
 wait 300
 key 08 01
 wait 800
-move 625 393
+move 790 440
 wait 150
-click 625 393
+click 790 440
 wait 1000
 shot ue_admin
 key 29

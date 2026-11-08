@@ -44,6 +44,9 @@ where it is). A few lines are the runner's own:
   same NAME        the answer to the step before must be the one kept under NAME
   under NAME MS    the answer to the step before ("ok MS") must be at most MS;
                    it is printed with NAME either way, for the record of times
+  pixel X Y RRGGBB the screen must be that colour at X, Y now (what is drawn
+                   checked, not only what the console says)
+  pixelnot X Y RRGGBB  it must not be
   absent TEXT      the console must not have said TEXT so far in this run
                    ("absent !OACV!": no call of a program refused for want
                    of a right, which a UITEST kernel tells)
@@ -67,6 +70,9 @@ import sys
 import time
 
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ui_steps  # noqa: E402
 
 # On Windows (with --net user: the WSL build of QEMU has no user network) the
 # Windows QEMU is run by the Windows Python; either way the monitor and the
@@ -280,6 +286,64 @@ def key_of(elf, disk):
     return h.hexdigest()
 
 
+class QemuMachine:
+    """What ui_steps.run_steps needs, on QEMU"""
+
+    def __init__(self, mon, drv, con, out, tmp, vdir, run_img):
+        self.mon, self.drv, self.con = mon, drv, con
+        self.out, self.tmp, self.vdir, self.run_img = out, tmp, vdir, run_img
+
+    def ask(self, text, tmo):
+        return self.drv.ask(text, tmo)
+
+    def shot(self, name):
+        return shot(self.mon, self.out, name, self.tmp)
+
+    def pixel(self, x, y):
+        ppm = os.path.join(self.tmp, "pixel.ppm")
+        if os.path.exists(ppm):
+            os.remove(ppm)
+        self.mon.cmd("screendump " + ppm)
+        for _ in range(50):
+            if os.path.exists(ppm) and os.path.getsize(ppm) > 0:
+                break
+            time.sleep(0.1)
+        try:
+            from PIL import Image
+            with Image.open(ppm) as im:
+                r, g, b = im.convert("RGB").getpixel((x, y))[:3]
+            os.remove(ppm)
+            return "%02X%02X%02X" % (r, g, b)
+        except Exception:
+            return None
+
+    def hmp(self, cmd):
+        cmd = cmd.replace("$VOLS", self.vdir.replace("\\", "/")).replace("$DISK", self.run_img.replace("\\", "/"))
+        out = self.mon.cmd(cmd)
+        # the monitor echoes what is typed with its editing codes: the answer is the last line
+        lines = [x.strip() for x in out.replace("(qemu)", "").split("\n")]
+        lines = [x for x in lines if x and "\x1b" not in x]
+        return "hmp %s -> %s" % (cmd, lines[-1] if lines else "ok")
+
+    def log_at(self):
+        return os.path.getsize(self.con) if os.path.exists(self.con) else 0
+
+    def wait_for(self, text, tmo, since):
+        return wait_for(self.con, text, tmo, since)
+
+    def log_lines(self):
+        return open(self.con, encoding="utf-8", errors="replace").read().splitlines()
+
+    def no_answer(self):
+        if not os.environ.get("UI_DIAG"):
+            return False
+        for _ in range(2):
+            print(self.mon.cmd("info cpus"))
+            time.sleep(1)
+        print("shot", self.shot("no_answer"))
+        return True
+
+
 def main():
     p = argparse.ArgumentParser(prog="ui_run")
     p.add_argument("--elf", default="tessronosdesk.elf")
@@ -358,91 +422,10 @@ def main():
             sys.stderr.write("ui_run: no answer from the desktop\n")
             return 2
         print("ui_run: up in %.1f s (%s)" % (time.time() - t0, "kept state" if warm else "started"))
-        last = ""
-        kept = {}
-        host_mark = time.time()
-        log_mark = 0
-        for path in a.steps:
-            for raw in open(path, encoding="utf-8"):
-                l = raw.strip()
-                if not l or l.startswith("#"):
-                    continue
-                if l.startswith("shot "):
-                    print("shot", shot(mon, a.out, l[5:].strip(), tmp))
-                elif l.startswith("hmp "):
-                    cmd = l[4:].strip().replace("$VOLS", vdir.replace("\\", "/")).replace("$DISK", run_img.replace("\\", "/"))
-                    out = mon.cmd(cmd)
-                    # the monitor echoes what is typed with its editing codes: the answer is the last line
-                    lines = [x.strip() for x in out.replace("(qemu)", "").split("\n")]
-                    lines = [x for x in lines if x and "\x1b" not in x]
-                    print("hmp %s -> %s" % (cmd, lines[-1] if lines else "ok"))
-                elif l.startswith("expectin "):
-                    secs, text = l[9:].strip().split(" ", 1)
-                    met = wait_for(con, text.strip(), int(secs))
-                    print("expect %s: %s" % (text.strip(), "met" if met else "NOT MET"))
-                    ok = ok and met
-                elif l == "logmark":
-                    log_mark = os.path.getsize(con) if os.path.exists(con) else 0
-                elif l.startswith("expectsincein "):
-                    secs, text = l[14:].strip().split(" ", 1)
-                    met = wait_for(con, text.strip(), int(secs), log_mark)
-                    print("expect %s (since the mark): %s" % (text.strip(), "met" if met else "NOT MET"))
-                    ok = ok and met
-                elif l.startswith("expectsince "):
-                    met = wait_for(con, l[12:].strip(), 20, log_mark)
-                    print("expect %s (since the mark): %s" % (l[12:].strip(), "met" if met else "NOT MET"))
-                    ok = ok and met
-                elif l == "hostmark":
-                    host_mark = time.time()
-                elif l.startswith("hosttime "):
-                    name, lim = l[9:].split()
-                    ms = int((time.time() - host_mark) * 1000)
-                    met = ms <= int(lim)
-                    print("time %s: %d ms (%s %s)" % (name, ms, "within" if met else "OVER", lim))
-                    ok = ok and met
-                elif l.startswith("expect "):
-                    met = wait_for(con, l[7:].strip(), 20)
-                    print("expect %s: %s" % (l[7:].strip(), "met" if met else "NOT MET"))
-                    ok = ok and met
-                elif l.startswith("keep "):
-                    kept[l[5:].strip()] = last
-                    print("keep %s: %s" % (l[5:].strip(), last))
-                elif l.startswith("same "):
-                    met = kept.get(l[5:].strip()) == last
-                    print("same %s: %s" % (l[5:].strip(), "met" if met else "NOT MET (%s, kept %s)" % (last, kept.get(l[5:].strip()))))
-                    ok = ok and met
-                elif l.startswith("under "):
-                    name, lim = l[6:].split()
-                    try:
-                        ms = int(last.split()[1])
-                    except (IndexError, ValueError):
-                        ms = -1
-                    met = 0 <= ms <= int(lim)
-                    print("time %s: %d ms (%s %s)" % (name, ms, "within" if met else "OVER", lim))
-                    ok = ok and met
-                elif l.startswith("want "):
-                    met = last == l[5:].strip()
-                    print("want %s: %s" % (l[5:].strip(), "met" if met else "NOT MET (%s)" % last))
-                    ok = ok and met
-                elif l.startswith("absent "):
-                    said = [x for x in open(con, encoding="utf-8", errors="replace").read().splitlines()
-                            if l[7:].strip() in x]
-                    print("absent %s: %s" % (l[7:].strip(), "met" if not said else "NOT MET"))
-                    for x in said[:20]:
-                        print("    " + x.strip())
-                    ok = ok and not said
-                else:
-                    # what may take long: a large object made or read, a wait for the desktop
-                    ans = drv.ask(l, 900 if l.split()[0] in ("mkbig", "sum", "sync", "waitwin") else 30)
-                    last = ans.strip()
-                    print("%s -> %s" % (l, ans))
-                    ok = ok and ans.startswith("ok")
-                    if ans == "err no answer" and os.environ.get("UI_DIAG"):
-                        for _ in range(2):
-                            print(mon.cmd("info cpus"))
-                            time.sleep(1)
-                        print("shot", shot(mon, a.out, "no_answer", tmp))
-                        return 1
+        mach = QemuMachine(mon, drv, con, a.out, tmp, vdir, run_img)
+        ok, stopped = ui_steps.run_steps(a.steps, mach)
+        if stopped:
+            return 1
         print("ui_run: done in %.1f s" % (time.time() - t0))
     finally:
         try:

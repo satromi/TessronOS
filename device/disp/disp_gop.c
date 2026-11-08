@@ -38,6 +38,7 @@
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/disp.h>
+#include <ts/pm.h>
 #include <ts/pcie.h>
 #include "sysman/pfalloc.h"
 #include "sysdepend/sysdepend.h"
@@ -102,8 +103,12 @@ LOCAL BOOL vbe_probe( UD fb_pa )
 	return FALSE;
 }
 
+LOCAL UINT	vbe_w = 0, vbe_h = 0;		/* the mode last set */
+
 LOCAL void vbe_mode( UINT w, UINT h )
 {
+	vbe_w = w;
+	vbe_h = h;
 	vbe_write(VBE_ENABLE, 0);
 	vbe_write(VBE_XRES, (UH)w);
 	vbe_write(VBE_YRES, (UH)h);
@@ -144,6 +149,65 @@ LOCAL INT vbe_setmode( T_DISPHW *hw, UINT w, UINT h )
 
 /* ---------------------------------------------------------------- the screen */
 
+/*
+ * The machine asleep. An Intel panel goes dark and its pipe keeps running.
+ * QEMU's adapter is reset by S3, and has its mode set again.
+ */
+IMPORT void	knl_igfx_dark( BOOL dark );	/* x86_64/disp_igfx.c */
+
+LOCAL ER gop_pm_suspend( void *arg, INT how )
+{
+	knl_igfx_dark(TRUE);
+	return E_OK;
+}
+
+LOCAL void gop_pm_resume( void *arg, INT how )
+{
+	if ( vbe_regs != 0 && how == PM_S3 ) {
+		if ( vbe_w == 0 ) {
+			vbe_w = knl_bootinfo->fb.width;
+			vbe_h = knl_bootinfo->fb.height;
+		}
+		vbe_mode(vbe_w, vbe_h);
+		tm_printf((UB *)"disp: QEMU standard VGA: %d x %d again after the sleep\n", vbe_w, vbe_h);
+	}
+	knl_igfx_dark(FALSE);
+}
+
+LOCAL CONST T_PMDEV	gop_pm = { "screen", PM_ORD_DISPLAY, gop_pm_suspend, gop_pm_resume, NULL };
+
+/*
+ * The start-up setting screens=N: the view shown as N screens side by side
+ * on the one there is, so that what is laid out by screen can be tried
+ * without a second one (10.4.8)
+ */
+LOCAL void screens_setting( void )
+{
+	CONST char	*c = knl_bootinfo->cmdline;
+	CONST char	*w = "screens=";
+	INT		k;
+
+	for ( ; *c != 0; c++ ) {
+		if ( c != knl_bootinfo->cmdline && c[-1] != ' ' ) continue;
+		for ( k = 0; w[k] != 0 && c[k] == w[k]; k++ ) ;
+		if ( w[k] == 0 ) knl_disp_screens(c[k] - '0');
+	}
+}
+
+IMPORT void	knl_disp_ext_start( void );	/* x86_64/disp_ext.c */
+
+/* The start-up setting ext=1: what is plugged into the external ports is looked at */
+LOCAL BOOL ext_wanted( void )
+{
+	CONST char	*c = knl_bootinfo->cmdline;
+
+	for ( ; *c != '\0'; c++ ) {
+		if ( ( c == knl_bootinfo->cmdline || c[-1] == ' ' )
+		  && c[0] == 'e' && c[1] == 'x' && c[2] == 't' && c[3] == '=' && c[4] == '1' ) return TRUE;
+	}
+	return FALSE;
+}
+
 EXPORT INT knl_disp_hw_init( T_DISPHW *hw )
 {
 	CONST T_BIFB	*fb;
@@ -154,6 +218,7 @@ EXPORT INT knl_disp_hw_init( T_DISPHW *hw )
 		return E_PAR;
 	}
 	knl_fbcon_stage("screen: the GOP's framebuffer");
+	(void)ts_pm_register(&gop_pm);
 	fb = &knl_bootinfo->fb;
 	if ( fb->pa == 0 || fb->format == BI_FB_NONE ) {
 		return 0;			/* the loader found no screen to draw on */
@@ -192,9 +257,11 @@ EXPORT INT knl_disp_hw_init( T_DISPHW *hw )
 	knl_fbcon_stage("screen: the display engine under it");
 	if ( hw->format == DISP_FMT_XRGB8888 && knl_igfx_probe(hw->fb_pa) ) {
 		hw_kind = HW_IGFX;
+		if ( ext_wanted() ) knl_disp_ext_start();
 	} else if ( hw->format == DISP_FMT_XRGB8888 && vbe_probe(hw->fb_pa) ) {
 		hw_kind = HW_STDVGA;
 	}
+	screens_setting();
 	knl_fbcon_stage("screen: the back buffer");
 	return 1;
 }

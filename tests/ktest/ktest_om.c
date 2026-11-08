@@ -33,6 +33,7 @@
 #include <ts/tad.h>
 #include <ts/om.h>
 #include <ts/ob.h>
+#include <ts/fn.h>
 #include "../../peripheral_kernel/obj/obj.h"
 
 #define OMDEV		kt_scratch()
@@ -368,6 +369,103 @@ LOCAL void test_register( void )
 	Kfree(v);
 }
 
+/*
+ * How wide a closed link at 14 is made to hold the name: the name
+ * measured with the system's face at 14, or six letters with no face
+ */
+LOCAL INT name_box_w( CONST UB *name )
+{
+	T_FNSTATE	st;
+	ID		fid;
+	INT		w = 14 * 6;
+
+	fn_hold();
+	fid = fn_system();
+	if ( fid > 0 && fn_state_get(fid, &st) >= E_OK ) {
+		if ( fn_set_size(fid, 14) >= E_OK ) {
+			INT	m = fn_width(fid, name);
+
+			if ( m >= 0 ) w = m;
+		}
+		(void)fn_state_set(fid, &st);
+	}
+	fn_release();
+
+	return tad_closed_w(14, TAD_D_PICT | TAD_D_NAME | TAD_D_FRAME, w);
+}
+
+/*
+ * Links a box is given while the system runs (om_obj_link_add): closed,
+ * as wide as the name of the object each points at, the first 8 from
+ * the box's left and top and the next 8 below it
+ */
+LOCAL void test_box_add( void )
+{
+	static CONST UB	short_nm[] = "仮身の幅";
+	static CONST UB	long_nm[] = "a-rather-longer-name-of-an-object";
+	TS_UUID		box, a, b;
+	T_TAD		*doc = NULL;
+	T_VOBJ		*v;
+	UINT		disp = TAD_D_PICT | TAD_D_NAME | TAD_D_FRAME;
+	INT		wa, wb;
+	ID		was = fn_system(), face;
+
+	if ( vol <= 0 ) KT_SKIP("no volume");
+	face = kt_face();		/* the system's face, put back after */
+
+	KT_ASSERT_ER(om_cre_obj(OMDEV, (CONST UB *)"box", OM_BODY_FIG, &box), E_OK);
+	KT_ASSERT_ER(om_cre_obj(OMDEV, short_nm, OM_BODY_DOC, &a), E_OK);
+	KT_ASSERT_ER(om_cre_obj(OMDEV, long_nm, OM_BODY_DOC, &b), E_OK);
+	KT_ASSERT_ER(om_obj_link_add(&box, &a), E_OK);
+	KT_ASSERT_ER(om_obj_link_add(&box, &b), E_OK);
+	KT_ASSERT_ER(om_obj_link_add(&box, &a), E_OK);	/* linked already: left */
+
+	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	KT_ASSERT(v != NULL);
+	KT_ASSERT_ER(om_rea_doc(&box, 0, NULL, &doc), E_OK);
+	if ( v == NULL || doc == NULL ) {
+		if ( v != NULL ) Kfree(v);
+		if ( doc != NULL ) tad_free(doc);
+		(void)fn_set_system(was);
+		return;
+	}
+	KT_ASSERT_EQ(tad_lnk_count(doc), 2);
+	wa = name_box_w(short_nm);
+	wb = name_box_w(long_nm);
+	tm_printf((UB *)"  closed links added: %d and %d wide, %d high\n", wa, wb,
+		  tad_closed_h(14, disp));
+
+	if ( tad_lnk_get(doc, 0, v) >= E_OK ) {
+		KT_ASSERT_EQ(ts_uuid_cmp(&v->target, &a), 0);
+		KT_ASSERT_EQ(v->left, 8);
+		KT_ASSERT_EQ(v->top, 8);
+		KT_ASSERT_EQ(v->bottom - v->top, tad_closed_h(14, disp));
+		KT_ASSERT_EQ(v->right - v->left, wa);
+		KT_ASSERT_EQ(v->chsz, 14);
+	} else {
+		KT_ASSERT(FALSE);
+	}
+	if ( tad_lnk_get(doc, 1, v) >= E_OK ) {
+		KT_ASSERT_EQ(ts_uuid_cmp(&v->target, &b), 0);
+		KT_ASSERT_EQ(v->left, 8);
+		KT_ASSERT_EQ(v->top, 8 + tad_closed_h(14, disp) + 8);
+		KT_ASSERT_EQ(v->bottom - v->top, tad_closed_h(14, disp));
+		KT_ASSERT_EQ(v->right - v->left, wb);
+	} else {
+		KT_ASSERT(FALSE);
+	}
+	/* with the system's face, each as wide as its own name */
+	if ( face > 0 ) {
+		KT_ASSERT(wa < wb);
+		KT_ASSERT(wa >= tad_least_w(14, disp));
+	} else {
+		KT_ASSERT_EQ(wa, tad_closed_w(14, disp, 14 * 6));	/* no face: six letters */
+	}
+	tad_free(doc);
+	Kfree(v);
+	(void)fn_set_system(was);
+}
+
 /* leave the volume where the host tools can read it */
 LOCAL void test_leave( void )
 {
@@ -385,6 +483,7 @@ EXPORT void ktest_om( void )
 	KT_RUN(test_missing);
 	KT_RUN(test_unlink);
 	KT_RUN(test_remount);
+	KT_RUN(test_box_add);
 	KT_RUN(test_register);
 	KT_RUN(test_leave);
 }

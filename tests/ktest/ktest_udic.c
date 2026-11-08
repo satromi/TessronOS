@@ -29,6 +29,7 @@
 
 #include "ktest.h"
 #include <ts/udic.h>
+#include <ts/om.h>
 #include <ts/kconv.h>
 #include <ts/ob.h>
 #include <ts/uuid.h>
@@ -448,6 +449,85 @@ LOCAL void test_convert( void )
 }
 
 /* what the object held, put back */
+/*
+ * A person logged in has words of their own, starting with those there
+ * were, and their object is theirs alone; those of 利用者 stay and come
+ * back when they log out.
+ */
+IMPORT ER kc_words_dict( TS_UUID *u );
+
+LOCAL void test_person( void )
+{
+	static T_OBCRD	crd;
+	static CONST char	mine[] = "こじん\t個人語\t名詞\n";
+	TS_UUID		shared, u, box;
+	UB		pbuf[OB_PRT_SIZE(16, 4)];
+	T_OBPRT		*prt = (T_OBPRT *)pbuf;
+	UB		*t = (UB *)Kmalloc(TEXT_MAX);
+	SZ		asz = 0;
+	ID		k;
+	INT		n, i;
+
+	KT_ASSERT(t != NULL);
+	if ( t == NULL ) return;
+	if ( kept == NULL ) {
+		kept = (UB *)Kmalloc(UD_TEXT_MAX);
+		kept_len = ( kept != NULL ) ? obj_read(kept, UD_TEXT_MAX) : -1;
+	}
+	KT_ASSERT_ER(kc_start(), E_OK);
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_DICT_USER, &shared), E_OK);
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_DICT_BOX, &box), E_OK);
+	KT_ASSERT_ER(obj_words("きょうつう\t共通語\t名詞\n"), E_OK);
+	KT_ASSERT_ER(kc_words_reload(), E_OK);
+	KT_ASSERT_ER(kc_words_dict(&u), E_OK);
+	KT_ASSERT(u.d.hi == shared.d.hi && u.d.lo == shared.d.lo);
+
+	crd.user.d.hi = 0x0123456789abcdefULL;
+	crd.user.d.lo = 0x1032547698badcfeULL;
+	crd.ngrp = 1;
+	crd.grp[0] = ob_group_users;
+	KT_ASSERT_ER(knl_ob_session(&crd), E_OK);
+	KT_ASSERT_ER(kc_words_dict(&u), E_OK);
+	KT_ASSERT(!( u.d.hi == shared.d.hi && u.d.lo == shared.d.lo ));
+	KT_ASSERT_ER(ob_get_prt(&u, prt, sizeof(pbuf), &asz), E_OK);
+	KT_ASSERT(prt->owner.d.hi == crd.user.d.hi && prt->owner.d.lo == crd.user.d.lo);
+	KT_ASSERT_EQ(prt->mode & 0777, 0600);
+
+	/* the words there were are in it, and writing it leaves the shared one alone */
+	k = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE);
+	KT_ASSERT(k > 0);
+	if ( k > 0 ) {
+		asz = 0;
+		KT_ASSERT_ER(ob_rea_rec(k, 1, 0, t, TEXT_MAX, &asz), E_OK);
+		KT_ASSERT(same(t, (INT)asz, "きょうつう\t共通語\t名詞\n"));
+		KT_ASSERT_ER(ob_rpl_rec(k, 1, mine, (SZ)s_len(mine)), E_OK);
+		ob_cls_obj(k);
+	}
+	n = obj_read(t, TEXT_MAX);
+	KT_ASSERT(same(t, n, "きょうつう\t共通語\t名詞\n"));
+
+	/* the same dictionary found again, not another made */
+	{
+		TS_UUID	again;
+
+		KT_ASSERT_ER(kc_words_dict(&again), E_OK);
+		KT_ASSERT(again.d.hi == u.d.hi && again.d.lo == u.d.lo);
+	}
+	/* the watcher follows who is at the machine, by itself */
+	for ( i = 0; i < 30; i++ ) tk_dly_tsk(100);
+
+	KT_ASSERT_ER(knl_ob_session(NULL), E_OK);
+	KT_ASSERT_ER(kc_words_dict(&box), E_OK);
+	KT_ASSERT(box.d.hi == shared.d.hi && box.d.lo == shared.d.lo);
+	for ( i = 0; i < 5; i++ ) tk_dly_tsk(100);
+
+	/* taken away again, as the test found it */
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_DICT_BOX, &box), E_OK);
+	KT_ASSERT_ER(om_obj_link_del(&box, &u), E_OK);
+	(void)ob_del_obj(&u);
+	Kfree(t);
+}
+
 LOCAL void test_restore( void )
 {
 	if ( kept != NULL && kept_len >= 0 ) {
@@ -467,5 +547,6 @@ EXPORT void ktest_udic( void )
 	KT_RUN(test_import);
 	KT_RUN(test_store);
 	KT_RUN(test_convert);
+	KT_RUN(test_person);
 	KT_RUN(test_restore);
 }

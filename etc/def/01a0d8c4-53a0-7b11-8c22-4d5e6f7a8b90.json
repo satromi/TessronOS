@@ -15,10 +15,11 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "basic-print",
       "kind": "utility",
       "name": "基本印刷",
-      "version": "R1.200",
+      "version": "R1.300",
       "builtin": true,
       "base": [],
       "fileTypes": [

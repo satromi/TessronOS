@@ -1,0 +1,61 @@
+# 基本図形編集をプロセスで: the menu (design 11.3), for tools/ui_run.py. A figure of 30
+# small rectangles (mkbig) opened with the figure editor running as a process (pfig), saved
+# as it is, everything taken and lined up with 位置あわせ (編集, its last row): its panel
+# (SYSDEF_BOX_FIG panel 1, selector switches as the desktop's has them) taken with Enter, the
+# left edges. Then 取消 (編集, its third row) takes it back: saved again, the record is the
+# one saved first. The menu opens with the item chosen last on the pointer's row, the rows
+# 20 apart; 編集's own menu opens beside it, its first row (トレー) on 編集's row when
+# there is room under it, 取消 40 below; low on the screen it rises, as it does for 位置あわせ.
+mkbig fig 30 4
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 32
+wait 500
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum
+keep before
+key 04 01
+wait 300
+logmark
+click 300 400 1
+expectsince figure: menu
+wait 400
+move 310 480
+wait 400
+move 420 480
+wait 150
+move 420 785
+wait 300
+click 420 785
+expectsince figure: command align
+wait 800
+shot pfig_align
+key 28
+expectsince figure: align 1,0
+wait 500
+shot pfig_aligned
+# 取消: 編集 is on the pointer's row now
+logmark
+click 300 400 1
+expectsince figure: menu
+wait 400
+move 310 400
+wait 400
+move 420 400
+wait 150
+move 420 440
+wait 300
+click 420 440
+expectsince figure: command undo
+wait 500
+shot pfig_undone
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum
+same before
+key 08 01
+expect figure: closed
+absent !OACV!

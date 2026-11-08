@@ -23,7 +23,30 @@
 #define NETSEL_E1K	1		/* Intel's e1000e family (the I219), "e1k" */
 #define NETSEL_CDC	2		/* a USB adapter of the communications class, "cdcnet" */
 #define NETSEL_WIFI	3		/* the Wi-Fi, "wifi" */
-#define NETSEL_N	4
+#define NETSEL_RE	4		/* Realtek's RTL8111/8168, "re" */
+#define NETSEL_RGE	5		/* Realtek's RTL8125, "rge" */
+#define NETSEL_IGC	6		/* Intel's I225/I226, "igc" */
+#define NETSEL_USBV	7		/* a USB adapter by its maker's protocol (RTL8152/8153, AX88179), "usblan" */
+#define NETSEL_N	8
+
+/*
+ * A card that registers itself (knl_netsel_add): the machine's other cards
+ * stay as they are, and a build or a machine without it knows nothing of it.
+ * label: what it is, for the adapters' list; its length.
+ */
+typedef struct {
+	ER	(*get_mac)( void *ctx, UB *mac );
+	ER	(*send)( void *ctx, CONST void *frame, SZ len );
+	INT	(*recv)( void *ctx, void *frame, SZ size, TMO tmout );
+	ER	(*stat)( void *ctx, T_NETSTAT *st );
+	BOOL	(*told)( void *ctx );		/* something says when its link changes */
+	INT	(*speed)( void *ctx );		/* in Mb/s, 0 while its link is down */
+	INT	(*label)( void *ctx, UB *t, INT max );
+	void	*ctx;
+} T_NETDRV;
+
+IMPORT void	knl_netsel_add( INT c, CONST T_NETDRV *d );
+IMPORT CONST T_NETDRV *knl_netsel_drv( INT c );	/* NULL when card c registered nothing */
 
 IMPORT INT	knl_netsel_first( void );		/* the first card there is */
 IMPORT INT	knl_netsel_card( void );		/* the card in use */

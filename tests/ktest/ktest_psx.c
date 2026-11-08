@@ -499,6 +499,9 @@ LOCAL void test_tsh_script( void )
 		"case abc in a*) echo case-ok;; esac; "
 		"echo \"m=$((3*4))\"; "
 		"cd /tmp && echo \"pwd=$(pwd)\"; "
+		"ls | cat; "
+		"echo \"c=$(ls | wc -l | tr -d ' ')\"; "
+		"( echo a ); "
 		"exit 7" };
 	T_FSTAT	st;
 	T_PSTS	ps;
@@ -528,9 +531,208 @@ LOCAL void test_tsh_script( void )
 	KT_ASSERT(s_has(b, n, "y=f:z:1\n"));
 	KT_ASSERT(s_has(b, n, "or-ok\ncase-ok\nm=12\n"));
 	KT_ASSERT(s_has(b, n, "pwd=/tmp\n"));
+	KT_ASSERT(s_has(b, n, "日本語の名前\n"));
+	KT_ASSERT(s_has(b, n, "c="));
+	KT_ASSERT(!s_has(b, n, "c=0\n"));
+	KT_ASSERT(s_has(b, n, "\na\n"));
 	KT_ASSERT_EQ(code, 7);
 	(void)fs_unlink("/tmp/日本語の名前");
 }
+
+#ifdef KT_SSH_PORT
+IMPORT ER  so_dhcp_start( void );
+IMPORT ER  so_getifaddr( UW *p_addr, UW *p_mask, UW *p_gw );
+
+/* What the terminal's master gives, until the text has come or the time is out */
+LOCAL BOOL pty_until( INT m, CONST char *text, UB *b, INT max, INT ms )
+{
+	INT	have = 0, waited = 0;
+
+	while ( waited < ms ) {
+		T_FSPOLL	p;
+
+		p.fd = m;
+		p.events = FS_POLL_IN;
+		p.revents = 0;
+		if ( fs_poll(&p, 1, 200) > 0 && ( p.revents & FS_POLL_IN ) != 0 ) {
+			INT	n = fs_read(m, b + have, max - have - 1);
+
+			/* the program gone: its terminal stays readable with nothing to read */
+			if ( n <= 0 ) break;
+			if ( n > 0 ) {
+				have += n;
+				if ( s_has(b, have, text) ) {
+					b[have] = 0;
+					return TRUE;
+				}
+				if ( have > max / 2 ) {
+					knl_memcpy(b, b + have - 64, 64);
+					have = 64;
+				}
+			}
+		} else {
+			waited += 200;
+		}
+	}
+	b[have] = 0;
+	tm_printf((UB *)"psx: ssh: waited in vain for [%s]; it said [%s]\n", text, b);
+	return FALSE;
+}
+
+LOCAL void pty_say( INT m, CONST char *text )
+{
+	(void)fs_write(m, text, knl_strlen(text));
+}
+
+/*
+ * make SSH=1 CMDS=1 NET=user: the command ssh, on a terminal, to the sshd
+ * on the host (tools/ssh/sshd_host.sh). The key is asked about; a shell
+ * there answers what is typed; it ends with the shell. Then one command,
+ * and a wrong password that lets nothing in. Last the person's key: made
+ * and kept in the objects, not known to the server so the password is
+ * still asked (which puts its public line in authorized_keys), then let
+ * in with no password.
+ */
+LOCAL void test_ssh( void )
+{
+	CONST char *const w[] = { "ssh", "-p", "2222", "kts@10.0.2.2" };
+	CONST char *const w2[] = { "ssh", "-p", "2222", "kts@10.0.2.2", "echo", "from-the-server" };
+	static UB	b[4096];
+	T_FSTAT		st;
+	T_PSTS		ps;
+	UW		addr = 0;
+	INT		m = -1, s, t, code = -1;
+	ID		pid;
+
+	if ( fs_stat("/bin/ssh", &st) < EX_OK ) KT_SKIP("no /bin/ssh (make SSH=1 CMDS=1)");
+	(void)so_dhcp_start();
+	for ( t = 0; t < 150 && ( so_getifaddr(&addr, NULL, NULL) < E_OK || addr == 0 ); t++ ) {
+		tk_dly_tsk(100);
+	}
+	KT_ASSERT(addr != 0);
+
+	s = pty_open(&m);
+	KT_ASSERT(s >= 0);
+	if ( s < 0 ) return;
+	pid = start_prog("/bin/ssh", w, 4, s, s);
+	fs_close(s);
+	KT_ASSERT(pid > 0);
+	KT_ASSERT(pty_until(m, "Type yes", b, sizeof(b), 60000));
+	pty_say(m, "yes\n");
+	KT_ASSERT(pty_until(m, "Password:", b, sizeof(b), 30000));
+	pty_say(m, "ktpass\n");
+	tk_dly_tsk(2000);
+	pty_say(m, "echo marker$((40+2))\n");
+	KT_ASSERT(pty_until(m, "marker42", b, sizeof(b), 30000));
+	pty_say(m, "exit\n");
+	if ( pid > 0 && ts_wai_prc(pid, &ps, 30000) >= E_OK ) code = ps.exitcd;
+	KT_ASSERT_EQ(code, 0);
+	fs_close(m);
+
+	/* the key known by now; a command, its output, and the wrong password first */
+	m = -1;
+	code = -1;
+	s = pty_open(&m);
+	KT_ASSERT(s >= 0);
+	if ( s < 0 ) return;
+	pid = start_prog("/bin/ssh", w2, 6, s, s);
+	fs_close(s);
+	KT_ASSERT(pty_until(m, "Password:", b, sizeof(b), 60000));
+	KT_ASSERT(!s_has(b, knl_strlen((char *)b), "Type yes"));
+	pty_say(m, "wrongpass\n");
+	KT_ASSERT(pty_until(m, "Not right. Password:", b, sizeof(b), 30000));
+	pty_say(m, "ktpass\n");
+	KT_ASSERT(pty_until(m, "from-the-server", b, sizeof(b), 30000));
+	if ( pid > 0 && ts_wai_prc(pid, &ps, 30000) >= E_OK ) code = ps.exitcd;
+	KT_ASSERT_EQ(code, 0);
+	fs_close(m);
+
+	{
+		CONST char *const kw[] = { "ssh", "-K", "-b", "2048", "-f" };
+		CONST char *const yw[] = { "ssh", "-Y" };
+		static char	inst[1800];
+		CONST char	*w3[] = { "ssh", "-p", "2222", "kts@10.0.2.2", inst };
+		CONST char *const w4[] = { "ssh", "-p", "2222", "kts@10.0.2.2", "echo", "by-the-key" };
+		char		*l, *e;
+
+		m = -1;
+		code = -1;
+		s = pty_open(&m);
+		KT_ASSERT(s >= 0);
+		if ( s < 0 ) return;
+		pid = start_prog("/bin/ssh", kw, 5, s, s);
+		fs_close(s);
+		KT_ASSERT(pty_until(m, "The key is kept", b, sizeof(b), 300000));
+		tm_printf((UB *)"psx: ssh: the key made and kept\n");
+		if ( pid > 0 && ts_wai_prc(pid, &ps, 30000) >= E_OK ) code = ps.exitcd;
+		KT_ASSERT_EQ(code, 0);
+		fs_close(m);
+
+		/* the line as -Y gives it from the objects, which proves them read back */
+		m = -1;
+		code = -1;
+		s = pty_open(&m);
+		KT_ASSERT(s >= 0);
+		if ( s < 0 ) return;
+		pid = start_prog("/bin/ssh", yw, 2, s, s);
+		fs_close(s);
+		b[0] = 0;
+		if ( pid > 0 && ts_wai_prc(pid, &ps, 60000) >= E_OK ) code = ps.exitcd;
+		KT_ASSERT_EQ(code, 0);
+		KT_ASSERT(pty_until(m, "ssh-rsa ", b, sizeof(b), 10000));
+		{
+			INT		have = (INT)knl_strlen((char *)b);
+			T_FSPOLL	p;
+
+			/* the rest of the line, if any: the program has ended, and nothing more comes */
+			p.fd = m;
+			p.events = FS_POLL_IN;
+			p.revents = 0;
+			if ( fs_poll(&p, 1, 500) > 0 && ( p.revents & FS_POLL_IN ) != 0 ) {
+				INT	g = fs_read(m, b + have, sizeof(b) - have - 1);
+
+				if ( g > 0 ) b[have + g] = 0;
+			}
+		}
+		fs_close(m);
+		for ( l = (char *)b; *l != 0 && ( l[0] != 's' || l[3] != '-' || l[7] != ' ' ); l++ ) {
+		}
+		for ( e = l; *e != 0 && *e != '\r' && *e != '\n'; e++ ) {
+		}
+		KT_ASSERT(e > l + 200);
+		*e = 0;
+		tm_printf((UB *)"psx: ssh: the key read back: %s\n", l);
+		tm_sprintf((UB *)inst, (UB *)"mkdir -p .ssh; echo '%s' >> .ssh/authorized_keys; echo stored-it", l);
+
+		m = -1;
+		code = -1;
+		s = pty_open(&m);
+		KT_ASSERT(s >= 0);
+		if ( s < 0 ) return;
+		pid = start_prog("/bin/ssh", w3, 5, s, s);
+		fs_close(s);
+		KT_ASSERT(pty_until(m, "Password:", b, sizeof(b), 60000));
+		pty_say(m, "ktpass\n");
+		KT_ASSERT(pty_until(m, "stored-it", b, sizeof(b), 30000));
+		if ( pid > 0 && ts_wai_prc(pid, &ps, 30000) >= E_OK ) code = ps.exitcd;
+		KT_ASSERT_EQ(code, 0);
+		fs_close(m);
+
+		m = -1;
+		code = -1;
+		s = pty_open(&m);
+		KT_ASSERT(s >= 0);
+		if ( s < 0 ) return;
+		pid = start_prog("/bin/ssh", w4, 6, s, s);
+		fs_close(s);
+		KT_ASSERT(pty_until(m, "by-the-key", b, sizeof(b), 60000));
+		KT_ASSERT(!s_has(b, knl_strlen((char *)b), "Password:"));
+		if ( pid > 0 && ts_wai_prc(pid, &ps, 30000) >= E_OK ) code = ps.exitcd;
+		KT_ASSERT_EQ(code, 0);
+		fs_close(m);
+	}
+}
+#endif
 
 EXPORT void ktest_psx( void )
 {
@@ -546,4 +748,7 @@ EXPORT void ktest_psx( void )
 	KT_RUN(test_cmd_pipeline);
 	KT_RUN(test_cmd_ps);
 	KT_RUN(test_tsh_script);
+#ifdef KT_SSH_PORT
+	KT_RUN(test_ssh);
+#endif
 }

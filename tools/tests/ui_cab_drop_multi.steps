@@ -1,0 +1,186 @@
+# 複数の仮身の運び (design 11.3), for tools/ui_run.py. Two copies of 画用紙 holding four closed
+# links (xmlbig), opened with 仮身一覧, one in the desktop's cabinet (open) and one in 仮身一覧
+# running as a process (pcab), are given the same. The cabinet is carried by its title 380 to
+# the right, clear of BTRON, the desktop's first window. The second and third links are taken
+# with a band (from 700,182 to 500,240) and carried by the second into BTRON (let go at 250,60):
+# both move, and are put there as they stood from one another. Then both are taken in BTRON with
+# a band (from 320,40 to 220,120) and carried by the first back to where it came from: a move
+# out of a window of the desktop's into the process's, the process asked first whether it takes
+# them (wm_obj_ask), and put as they stood from one another, as between the desktop's windows.
+# BTRON's ground shows again where they were (250,100). Saved: record 0 of both cabinets must be
+# the same, byte for byte but for the identities of the links put in (sum anon); the shots
+# (cabdm_k_*, cabdm_p_*) are compared afterwards.
+cabproc kernel
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="100" vobjright="180" vobjbottom="119" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="220" vobjtop="20" vobjright="380" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+move 500 114
+down
+move 600 114
+wait 300
+move 880 114
+wait 500
+up
+sync 600
+wait 700
+move 700 182
+down
+move 600 210
+wait 300
+move 500 240
+wait 300
+up
+sync 600
+wait 700
+move 560 196
+down
+move 530 190
+wait 500
+move 400 100
+wait 500
+move 250 60
+wait 1000
+up
+sync 600
+wait 800
+move 890 690
+wait 1500
+shot cabdm_k_out
+move 320 40
+down
+move 280 80
+wait 300
+move 220 120
+wait 300
+up
+wait 300
+sync 600
+wait 700
+move 250 60
+down
+move 280 70
+wait 500
+move 400 120
+wait 500
+move 560 196
+wait 1000
+up
+sync 600
+wait 800
+move 890 690
+wait 1500
+shot cabdm_k_back
+pixel 250 100 F3FFFF
+key 16 01
+sync 600
+sum show anon
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="100" vobjright="180" vobjbottom="119" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="220" vobjtop="20" vobjright="380" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+logmark
+pcab big
+expectsincein 60 cabinet: opened 画用紙 shapes 4 links 4
+wait 800
+move 500 114
+down
+move 600 114
+wait 300
+move 880 114
+wait 500
+up
+wait 700
+wait 700
+move 700 182
+down
+move 600 210
+wait 300
+move 500 240
+wait 300
+up
+wait 700
+wait 700
+logmark
+move 560 196
+down
+move 530 190
+wait 500
+move 400 100
+wait 500
+move 250 60
+wait 1000
+up
+expectsince cabinet: deleted, 2 shapes
+wait 800
+move 890 690
+wait 1500
+shot cabdm_p_out
+move 320 40
+down
+move 280 80
+wait 300
+move 220 120
+wait 300
+up
+wait 300
+sync 600
+wait 700
+logmark
+move 250 60
+down
+move 280 70
+wait 500
+move 400 120
+wait 500
+move 560 196
+wait 1000
+up
+expectsince cabinet: dropped 2
+wait 800
+move 890 690
+wait 1500
+shot cabdm_p_back
+pixel 250 100 F3FFFF
+logmark
+key 16 01
+expectsince cabinet: saved (0)
+sum show anon
+same kernel
+key 08 01
+expect cabinet: closed
+wait 500

@@ -1,0 +1,114 @@
+# 基本図形編集の道具パネルを、デスクトップの図形編集とプロセスの図形編集で同じに使う
+# (design 11.3, 17.13), for tools/ui_run.py: a figure of one rectangle and two zigzag lines
+# (mkbig fig 1 2 0) opened at 100,100 as 画用紙 is; its 道具パネル stands at the top of the
+# screen (100,0), its buttons 32 square from 112,32 34 apart, the second row from 66 (the
+# first row's middles at y 48, the second's at 82). The rectangle template taken and a
+# rectangle drawn (it is then picked); 線色 with the red of its swatches, 塗りつぶし with
+# pattern 20 of the fixed ones, 角丸 with 10 typed and Enter, 線種 with 5px, each put away
+# with Escape: what is chosen goes on the picked rectangle. Saved, record 0 comes out the
+# same, byte for byte. The palettes of the process stand where the desktop's do, framed
+# and with no title, so its presses in them are the same.
+# Keys: Esc 29, Backspace 2a, 1 1e, 0 27, Enter 28; Ctrl+S 16 01, Ctrl+E 08 01.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 1 2 0
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+click 298 82
+wait 300
+drag 450 450 600 560
+wait 400
+click 162 48
+wait 500
+click 359 125
+wait 300
+shot tcmp_k_stroke
+key 29
+wait 300
+click 128 48
+wait 500
+click 202 170
+wait 300
+shot tcmp_k_fill
+key 29
+wait 300
+click 230 48
+wait 500
+key 2a
+key 1e
+key 27
+key 28
+wait 400
+click 196 48
+wait 500
+click 509 95
+wait 300
+shot tcmp_k_lstyle
+key 29
+wait 300
+sync 600
+shot tcmp_k_done
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 2 0
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 3
+wait 800
+logmark
+click 298 82
+expectsince figure: tool 7
+drag 450 450 600 560
+expectsince figure: drawn
+logmark
+click 162 48
+expectsince figure: palette 1 open
+wait 500
+click 359 125
+wait 300
+shot tcmp_p_stroke
+key 29
+expectsince figure: palette 1 closed
+logmark
+click 128 48
+expectsince figure: palette 0 open
+wait 500
+click 202 170
+wait 300
+shot tcmp_p_fill
+key 29
+expectsince figure: palette 0 closed
+logmark
+click 230 48
+expectsince figure: palette 3 open
+wait 300
+key 2a
+key 1e
+key 27
+key 28
+expectsince figure: palette 3 closed
+logmark
+click 196 48
+expectsince figure: palette 2 open
+wait 500
+click 509 95
+wait 300
+shot tcmp_p_lstyle
+key 29
+expectsince figure: palette 2 closed
+wait 300
+shot tcmp_p_done
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum show
+same kernel
+key 08 01
+expect figure: closed

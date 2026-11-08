@@ -15,7 +15,7 @@ TessronOSは、μT-Kernel 3.0をベースに、Raspberry Pi 5(Broadcom BCM2712�
 
 ビルド、Raspberry Pi 5への書き込み、WindowsのQEMUでの試し方は[docs/build-and-run.md](docs/build-and-run.md)にまとめています。
 
-バージョンごとの変更は[CHANGELOG.md](CHANGELOG.md)にあります。最新のバージョンはR1.110です。
+バージョンごとの変更は[CHANGELOG.md](CHANGELOG.md)にあります。最新のバージョンはR1.300です。
 
 Raspberry Pi 5とQEMU用のイメージは、GitHubの[リリース](https://github.com/satromi/TessronOS/releases)で配布しています。
 

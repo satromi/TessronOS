@@ -300,6 +300,39 @@ test_crypto(void)
 	CHECK(same(out, hmac2, 20), "HMAC-SHA1 as RFC 2202");
 }
 
+/*
+ * The mbufs of a card that reaches 32 bits (obsd_mbuf_low): each below 4GB,
+ * whole, and not overlapping the next cut from the same page
+ */
+static void
+test_mbuf_low(void)
+{
+	struct mbuf *m[64];
+	int i, was = obsd_mbuf_low, low = 1;
+
+	obsd_mbuf_low = 1;
+	/* what the pool keeps from before the flag need not be low: the last, past those, is looked at */
+	for (i = 0; i < (int)nitems(m); i++) {
+		MGET(m[i], M_DONTWAIT, MT_DATA);
+		if (m[i] == NULL) {
+			low = 0;
+			break;
+		}
+		memset(mtod(m[i], void *), i, MLEN);
+	}
+	for (i = 0; low && i < (int)nitems(m); i++) {
+		if (i == (int)nitems(m) - 1 && (rumpcomp_pci_virt_to_mach(mtod(m[i], void *)) >> 32) != 0)
+			low = 0;
+		if (*mtod(m[i], uint8_t *) != (uint8_t)i)
+			low = 0;
+	}
+	CHECK(low, "the mbufs of a card that reaches 32 bits are below 4GB");
+	for (i = 0; i < (int)nitems(m); i++)
+		if (m[i] != NULL)
+			m_free(m[i]);
+	obsd_mbuf_low = was;
+}
+
 /* All of it: the failures, 0 when everything held */
 int
 rump_tswifi_selftest(void)
@@ -312,6 +345,7 @@ rump_tswifi_selftest(void)
 	test_timeout();
 	test_task();
 	test_mbuf();
+	test_mbuf_low();
 	test_ifq();
 	printf("obsd: test: %d failed\n", nfail);
 	obsd_unlock();

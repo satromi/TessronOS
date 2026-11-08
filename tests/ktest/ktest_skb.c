@@ -61,6 +61,8 @@
 #include <ts/wm.h>
 #include <ts/hid.h>
 #include <ts/keymap.h>
+#include <ts/kconv.h>
+#include <ts/part.h>
 #include <ts/conf.h>
 #include "../../outer_kernel/wm/wmobj.h"
 
@@ -69,9 +71,10 @@
 #define SK_TITLE_L	"ソフトウェアキーボード(左手)"
 #define SK_TITLE_R	"ソフトウェアキーボード(右手)"
 
-/* The program's window, as sk_main.c lays it out: five rows of 60 quarters of a key */
+/* The program's window, as sk_main.c lays it out: five rows of 60 quarters of a key, 4 left at each end */
 #define SK_M		4
-#define SK_W0		640
+#define SK_SIDE		4
+#define SK_W0		724
 #define SK_H0		232
 /* and the TRON keyboard: its plane, in tenths of a unit, as large as the work area lets it be */
 #define TR_W0		760
@@ -81,9 +84,13 @@
 
 LOCAL INT g_w = SK_W0, g_h = SK_H0;
 
+/* The layouts the screen keyboard's keys carry: the English letters' own at first, and the TRON keyboards' */
+#define OWN_QJ		KM_MOD_LAYOUT(KM_LATIN_KEYS, KM_KANA_JIS)
+#define OWN_DT		KM_MOD_LAYOUT(KM_LATIN_DVORAK, KM_KANA_TRON)
+
 LOCAL INT at_x( INT q2 )		/* q2: in halves of a quarter of a key, so that a key's middle is a whole number */
 {
-	return SK_M + q2 * ( g_w - 2 * SK_M ) / 120;
+	return SK_M + ( q2 + 2 * SK_SIDE ) * ( g_w - 2 * SK_M ) / ( 120 + 4 * SK_SIDE );
 }
 
 LOCAL INT at_y( INT r2 )		/* r2: in halves of a row */
@@ -417,17 +424,32 @@ LOCAL ID start( INT *p_wid )
 	return start_named(SK_TITLE, p_wid);
 }
 
+LOCAL BOOL menu_row( INT row, INT *x, INT *y );
+LOCAL void at_screen( UINT type, UINT button, INT x, INT y );
+LOCAL BOOL choose_item( INT wid, INT item, INT row );
+
+/*
+ * The menu opens with the item chosen last under the pointer, which is
+ * 閉じる unless another was chosen: its row pressed where it is
+ */
 LOCAL void close_by_menu( INT wid, ID pid )
 {
 	T_PSTS	psts;
-	INT	i, before = popups();
+	INT	i, x, y, before = popups();
 	ER	er;
 
 	click(wid, AT_MENU_X, AT_MENU_Y, 1);
 	for ( i = 0; i < 30 && popups() == before; i++ ) (void)pump(100, -1, NULL);
 	KT_ASSERT(popups() > before);
 	(void)pump(500, -1, NULL);
-	click(wid, AT_MENU_X, AT_MENU_Y, 0);
+	if ( menu_row(0, &x, &y) ) {
+		at_screen(HID_EV_MOVE, 0, x, y);
+		(void)pump(200, -1, NULL);
+		at_screen(HID_EV_BTN_DOWN, 0, x, y);
+		at_screen(HID_EV_BTN_UP, 0, x, y);
+	} else {
+		click(wid, AT_MENU_X, AT_MENU_Y, 0);
+	}
 	(void)pump(500, -1, NULL);
 	psts.exitcd = -1;
 	er = ts_wai_prc(pid, &psts, 10000);
@@ -540,16 +562,44 @@ LOCAL void test_program( void )
 
 	/* A: typed into the window that had the keys, which keeps them */
 	KT_ASSERT_EQ(key_on(wid, Q_A, R_A, twid, &mods), 0x04);
-	KT_ASSERT_EQ(mods, 0);
+	KT_ASSERT_EQ(mods, OWN_QJ);
 	KT_ASSERT_EQ(wm_focused(), twid);
+
+	/* held: typed again and again as the keyboard's keys are, and no more once let go */
+	{
+		T_WMWIN	kw;
+		T_HIDEV	h;
+		T_WMEV	ev;
+		INT	n = 0, t;
+
+		KT_ASSERT_ER(wm_ref(wid, &kw), E_OK);
+		knl_memset(&h, 0, sizeof(h));
+		h.type = HID_EV_MOVE;
+		h.x = kw.work.left + at_x(Q_A);
+		h.y = kw.work.top + at_y(R_A);
+		(void)kt_inject(&h);
+		h.type = HID_EV_BTN_DOWN;
+		(void)kt_inject(&h);
+		for ( t = 0; t < 2500; t += 30 ) {
+			while ( wm_read_event(&ev, 30) >= E_OK ) {
+				if ( ev.type == HID_EV_KEY_DOWN && ev.wid == twid && ev.code == 0x04 ) n++;
+			}
+		}
+		h.type = HID_EV_BTN_UP;
+		(void)kt_inject(&h);
+		(void)pump(300, -1, NULL);
+		tm_printf((UB *)"  held 2.5 s: typed %d times\n", n);
+		KT_ASSERT(n >= 3);
+		KT_ASSERT_EQ(pump(500, twid, NULL), 0);
+	}
 
 	/* Shift once: the next key only */
 	click(wid, at_x(Q_SHIFT), at_y(R_SHIFT), 0);
 	(void)pump(300, -1, NULL);
 	KT_ASSERT_EQ(key_on(wid, Q_A, R_A, twid, &mods), 0x04);
-	KT_ASSERT_EQ(mods, HID_MOD_LSHIFT);
+	KT_ASSERT_EQ(mods, HID_MOD_LSHIFT | OWN_QJ);
 	KT_ASSERT_EQ(key_on(wid, Q_A, R_A, twid, &mods), 0x04);
-	KT_ASSERT_EQ(mods, 0);
+	KT_ASSERT_EQ(mods, OWN_QJ);
 
 	/* Shift twice: until pressed again */
 	click(wid, at_x(Q_SHIFT), at_y(R_SHIFT), 0);
@@ -557,20 +607,22 @@ LOCAL void test_program( void )
 	click(wid, at_x(Q_SHIFT), at_y(R_SHIFT), 0);
 	(void)pump(300, -1, NULL);
 	KT_ASSERT_EQ(key_on(wid, Q_A, R_A, twid, &mods), 0x04);
-	KT_ASSERT_EQ(mods, HID_MOD_LSHIFT);
+	KT_ASSERT_EQ(mods, HID_MOD_LSHIFT | OWN_QJ);
 	KT_ASSERT_EQ(key_on(wid, Q_A, R_A, twid, &mods), 0x04);
-	KT_ASSERT_EQ(mods, HID_MOD_LSHIFT);
+	KT_ASSERT_EQ(mods, HID_MOD_LSHIFT | OWN_QJ);
 	click(wid, at_x(Q_SHIFT), at_y(R_SHIFT), 0);
 	(void)pump(300, -1, NULL);
 	KT_ASSERT_EQ(key_on(wid, Q_A, R_A, twid, &mods), 0x04);
-	KT_ASSERT_EQ(mods, 0);
+	KT_ASSERT_EQ(mods, OWN_QJ);
 
 	/*
-	 * Ctrl+E: the picture's Ctrl and the key written e send what the
-	 * keyboard sends for Ctrl and the key that types e -- E's place with
-	 * Ctrl in the latin layout as the keys are written, D's place with
-	 * Ctrl in Dvorak -- and the programs take both as Ctrl+E, by the
-	 * letter the key types (wm_key_cmd)
+	 * Ctrl+E: the picture's Ctrl and the key written e (E's place, the
+	 * keyboard's own QWERTY) send what the keyboard plugged in sends for
+	 * Ctrl and the key that types e in the machine's layout -- E's place
+	 * with Ctrl as the keys are written, D's place with Ctrl in Dvorak --
+	 * and the programs take both as Ctrl+E, by the letter the key types
+	 * (wm_key_cmd). Without Ctrl, the keys type their own letters whatever
+	 * the machine's layout: D's place d.
 	 */
 	{
 		UINT		kmods = 0, kcode;
@@ -599,10 +651,11 @@ LOCAL void test_program( void )
 		KT_ASSERT_EQ(wm_key_cmd(kcode), 0x08);		/* taken as E */
 		click(wid, at_x(Q_CTRL), at_y(R_CTRL), 0);
 		(void)pump(300, -1, NULL);
-		KT_ASSERT_EQ(key_on(wid, Q_D, R_D, twid, &mods), kcode);
+		KT_ASSERT_EQ(key_on(wid, Q_E, R_E, twid, &mods), kcode);
 		KT_ASSERT_EQ(mods, kmods);
-		KT_ASSERT_EQ(key_on(wid, Q_D, R_D, twid, &mods), 0x07);	/* without Ctrl: the letter e */
-		KT_ASSERT_EQ(mods, 0);
+		KT_ASSERT_EQ(key_on(wid, Q_D, R_D, twid, &mods), 0x07);	/* without Ctrl: the letter d, its own */
+		KT_ASSERT_EQ(mods, OWN_QJ);
+		KT_ASSERT_EQ(wm_key_char(0x07, mods), 'd');
 		(void)km_set(&km, KM_SET_LATIN);
 	}
 
@@ -631,7 +684,7 @@ LOCAL void test_program( void )
 	g_h = w.work.bottom - w.work.top;
 	KT_ASSERT_EQ(g_w, SK_W0 + 320);
 	KT_ASSERT_EQ(key_on(wid, Q_A, R_A, twid, &mods), 0x04);
-	KT_ASSERT_EQ(mods, 0);
+	KT_ASSERT_EQ(mods, OWN_QJ);
 
 	close_by_menu(wid, pid);
 	pid = 0;
@@ -642,6 +695,125 @@ stop:
 		(void)ts_ter_prc(pid, TS_ABORT_TERM);
 		(void)ts_wai_prc(pid, &psts, 5000);
 	}
+out:
+	(void)pump(100, -1, NULL);
+	(void)wm_msg_mode(mode_was);
+	conf_back();
+	if ( tk > 0 ) ob_cls_obj(tk);
+	(void)ob_del_obj(&tw);
+}
+
+IMPORT BOOL kt_touch_plug( void );
+IMPORT void kt_touch_at( INT id, BOOL on, INT sx, INT sy );
+IMPORT void kt_touch_unplug( void );
+
+/* A finger held down this long: what came to window want counted, and when the first came, ms */
+LOCAL INT finger_typed( INT ms, INT want, UINT code, INT *p_first, INT *p_up )
+{
+	T_WMEV	ev;
+	INT	n = 0, t;
+
+	for ( t = 0; t < ms; t += 20 ) {
+		while ( wm_read_event(&ev, 20) >= E_OK ) {
+			if ( ev.wid != want || ev.code != code ) continue;
+			if ( ev.type == HID_EV_KEY_DOWN && n++ == 0 && p_first != NULL ) *p_first = t;
+			if ( ev.type == HID_EV_KEY_UP && p_up != NULL ) ( *p_up )++;
+		}
+	}
+	return n;
+}
+
+/*
+ * A finger on the English letters: on a key it presses at once and stays
+ * pressed, repeating until it lets go or goes out of the window, and no
+ * menu comes; on the ground at a row's end and between the keys a tap types
+ * nothing and a hold opens the menu
+ */
+LOCAL void test_finger( void )
+{
+	TS_UUID		tw;
+	T_WMWIN		w;
+	T_PSTS		psts;
+	ID		pid = 0, tk = 0;
+	INT		wid = 0, twid = 0, before, first = -1, up = 0, n, i, ax, ay, gx, gy;
+	UINT		mode_was = wm_msg_get_mode();
+	BOOL		plugged = FALSE;
+
+	knl_memset(&tw, 0, sizeof(tw));
+	g_w = SK_W0;
+	g_h = SK_H0;
+	KT_ASSERT_ER(conf_layout("qwerty"), E_OK);
+	KT_ASSERT_ER(win_make("{\"rect\":[60,40,460,180],\"attr\":3}", &tw, &tk, &twid), E_OK);
+	if ( tk <= 0 ) goto out;
+	KT_ASSERT_ER(wm_focus(twid), E_OK);
+	pid = start(&wid);
+	if ( pid <= 0 ) KT_SKIP("no program object of ソフトウェアキーボード");
+	if ( wid <= 0 ) goto stop;
+	plugged = kt_touch_plug();
+	if ( !plugged ) KT_SKIP("no touch screen plugged in");
+	KT_ASSERT_ER(wm_ref(wid, &w), E_OK);
+	ax = w.work.left + at_x(Q_A);
+	ay = w.work.top + at_y(R_A);
+	gx = w.work.left + SK_M + 4;			/* the ground at the left of the rows */
+	gy = ay;
+	(void)pump(300, -1, NULL);
+	before = popups();
+
+	/* on a key: at once, repeating past a hold, no menu; let go, it stops */
+	kt_touch_at(50, TRUE, ax, ay);
+	n = finger_typed(2500, twid, 0x04, &first, NULL);
+	tm_printf((UB *)"  a finger held 2.5 s: typed %d times, the first at %d ms\n", n, first);
+	KT_ASSERT(n >= 3);
+	KT_ASSERT(first >= 0 && first <= 300);
+	KT_ASSERT_EQ(popups(), before);
+	kt_touch_at(50, FALSE, ax, ay);
+	(void)finger_typed(400, twid, 0x04, NULL, &up);
+	KT_ASSERT(up >= 1);
+	KT_ASSERT_EQ(finger_typed(1000, twid, 0x04, NULL, NULL), 0);
+
+	/* a quick tap of a key: typed once */
+	kt_touch_at(51, TRUE, ax, ay);
+	tk_dly_tsk(40);
+	kt_touch_at(51, FALSE, ax, ay);
+	KT_ASSERT_EQ(finger_typed(500, twid, 0x04, NULL, NULL), 1);
+
+	/* gone out of the window with the finger on it: let go there */
+	first = -1;
+	up = 0;
+	kt_touch_at(52, TRUE, ax, ay);
+	(void)finger_typed(200, twid, 0x04, &first, NULL);
+	KT_ASSERT(first >= 0);
+	kt_touch_at(52, TRUE, 20, 20);
+	(void)finger_typed(400, twid, 0x04, NULL, &up);
+	KT_ASSERT(up >= 1);
+	KT_ASSERT_EQ(finger_typed(1000, twid, 0x04, NULL, NULL), 0);
+	kt_touch_at(52, FALSE, 20, 20);
+	(void)pump(300, -1, NULL);
+
+	/* a tap on the ground: nothing typed, no menu */
+	kt_touch_at(53, TRUE, gx, gy);
+	tk_dly_tsk(40);
+	kt_touch_at(53, FALSE, gx, gy);
+	KT_ASSERT_EQ(pump(500, twid, NULL), 0);
+	KT_ASSERT_EQ(popups(), before);
+
+	/* a hold on it: the menu, as the right button; its first row closes the program */
+	kt_touch_at(54, TRUE, gx, gy);
+	for ( i = 0; i < 30 && popups() == before; i++ ) (void)pump(100, -1, NULL);
+	KT_ASSERT(popups() > before);
+	kt_touch_at(54, FALSE, gx, gy);
+	(void)pump(500, -1, NULL);
+	click(wid, gx - w.work.left, gy - w.work.top, 0);
+	(void)pump(500, -1, NULL);
+	psts.exitcd = -1;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 10000), E_OK);
+	pid = 0;
+stop:
+	if ( pid > 0 ) {
+		(void)ts_ter_prc(pid, TS_ABORT_TERM);
+		(void)ts_wai_prc(pid, &psts, 5000);
+	}
+	if ( plugged ) kt_touch_unplug();
 out:
 	(void)pump(100, -1, NULL);
 	(void)wm_msg_mode(mode_was);
@@ -679,13 +851,13 @@ LOCAL void test_tron( void )
 
 	/* each key the usage of its place: A, with the red Shift, with the blue */
 	KT_ASSERT_EQ(tron_on(wid, &tr_l73, twid, &mods), 0x04);
-	KT_ASSERT_EQ(mods, 0);
+	KT_ASSERT_EQ(mods, OWN_DT);
 	tron_hold(wid, &tr_l03);
 	KT_ASSERT_EQ(tron_on(wid, &tr_l73, twid, &mods), 0x04);
-	KT_ASSERT_EQ(mods, HID_MOD_LSHIFT);
+	KT_ASSERT_EQ(mods, HID_MOD_LSHIFT | OWN_DT);
 	tron_hold(wid, &tr_r03);
 	KT_ASSERT_EQ(tron_on(wid, &tr_l73, twid, &mods), 0x04);
-	KT_ASSERT_EQ(mods, HID_MOD_RSHIFT);
+	KT_ASSERT_EQ(mods, HID_MOD_RSHIFT | OWN_DT);
 
 	/* 1, and with Fn F1 */
 	KT_ASSERT_EQ(tron_on(wid, &tr_l81, twid, &mods), 0x1E);
@@ -784,8 +956,8 @@ LOCAL void ut_hold( INT wid, BOOL right, CONST TRAT *a )
 	(void)pump(300, -1, NULL);
 }
 
-/* The usage that types a letter in the latin layout set, with Shift or not, as the program looks for it */
-LOCAL BOOL latin_of( char ch, UINT *p_code, UINT *p_mods )
+/* The usage that types a letter in a latin layout (own, else the machine's), with Shift or not, as the program looks for it */
+LOCAL BOOL latin_of( char ch, UINT own, UINT *p_code, UINT *p_mods )
 {
 	char	b[8];
 	UINT	c;
@@ -794,7 +966,7 @@ LOCAL BOOL latin_of( char ch, UINT *p_code, UINT *p_mods )
 	for ( sh = 0; sh < 2; sh++ ) {
 		for ( c = 0x04; c <= 0x89; c++ ) {
 			if ( c > 0x38 && c != 0x87 && c != 0x89 ) continue;
-			if ( km_label(KM_L_CHAR, c, sh ? HID_MOD_LSHIFT : 0, b, sizeof(b)) == 1 && b[0] == ch ) {
+			if ( km_label(KM_L_CHAR, c, ( sh ? HID_MOD_LSHIFT : 0 ) | own, b, sizeof(b)) == 1 && b[0] == ch ) {
 				*p_code = c;
 				*p_mods = sh ? HID_MOD_LSHIFT : 0;
 				return TRUE;
@@ -816,8 +988,8 @@ LOCAL void test_utron( void )
 	knl_memset(&tw, 0, sizeof(tw));
 	KT_ASSERT_ER(km_get(&was), E_OK);
 	st = was;
-	st.latin = KM_LATIN_DVORAK;
-	st.kana = KM_KANA_TRON;
+	st.latin = KM_LATIN_KEYS;			/* the machine's: not the keyboard's own */
+	st.kana = KM_KANA_JIS;
 	KT_ASSERT_ER(km_set(&st, KM_SET_LATIN | KM_SET_KANA), E_OK);
 	KT_ASSERT_ER(conf_layout("utron"), E_OK);
 	KT_ASSERT_ER(win_make("{\"rect\":[400,40,800,180],\"attr\":3}", &tw, &tk, &twid), E_OK);
@@ -862,50 +1034,83 @@ LOCAL void test_utron( void )
 		KT_ASSERT_EQ(wm_self_check(), 0);
 	}
 
-	/* the letters of the faces, typed as the latin layout types them: P, the red ^ and the blue : */
+	/* NumLock, Fn on the @ key: the green faces type the keypad's keys; again, the letters */
 	(void)wm_msg_mode(WM_MODE_ALPH | WM_MODE_ROMAN);
 	tk_dly_tsk(600);
-	KT_ASSERT(latin_of('p', &code, &cmods));
+	{
+		static CONST TRAT	ut_l11 = { 685, 2083 };
+		static CONST TRAT	ut_r23 = { 5513, 2538 };
+		UINT			pl;
+
+		pl = ut_on(rw, TRUE, &ut_r23, twid, &mods);
+		KT_ASSERT(pl != 0 && pl != 0x59);
+		ut_hold(lw, FALSE, &ut_l51);
+		ut_hold(lw, FALSE, &ut_l11);
+		KT_ASSERT_EQ(ut_on(rw, TRUE, &ut_r23, twid, &mods), 0x59);
+		ut_hold(lw, FALSE, &ut_l51);
+		ut_hold(lw, FALSE, &ut_l11);
+		KT_ASSERT_EQ(ut_on(rw, TRUE, &ut_r23, twid, &mods), pl);
+	}
+
+	/*
+	 * the letters of the faces, typed as the keyboard's own latin layout
+	 * (Dvorak) types them, which the window reads them in: P, the red ^
+	 * and the blue :
+	 */
+	(void)wm_msg_mode(WM_MODE_ALPH | WM_MODE_ROMAN);
+	tk_dly_tsk(600);
+	KT_ASSERT(latin_of('p', OWN_DT, &code, &cmods));
 	KT_ASSERT_EQ(ut_on(lw, FALSE, &ut_l16, twid, &mods), code);
-	KT_ASSERT_EQ(mods, cmods);
+	KT_ASSERT_EQ(mods, cmods | OWN_DT);
+	KT_ASSERT_EQ(wm_key_char(code, mods), 'p');
 	ut_hold(lw, FALSE, &ut_l43);
-	KT_ASSERT(latin_of('^', &code, &cmods));
+	KT_ASSERT(latin_of('^', OWN_DT, &code, &cmods));
 	KT_ASSERT_EQ(ut_on(lw, FALSE, &ut_l13, twid, &mods), code);
-	KT_ASSERT_EQ(mods, cmods);
+	KT_ASSERT_EQ(mods, cmods | OWN_DT);
 	ut_hold(rw, TRUE, &ut_r42);
-	KT_ASSERT(latin_of(':', &code, &cmods));
+	KT_ASSERT(latin_of(':', OWN_DT, &code, &cmods));
 	KT_ASSERT_EQ(ut_on(lw, FALSE, &ut_l13, twid, &mods), code);
-	KT_ASSERT_EQ(mods, cmods);
-	KT_ASSERT(latin_of('a', &code, &cmods));
+	KT_ASSERT_EQ(mods, cmods | OWN_DT);
+	KT_ASSERT_EQ(wm_key_char(code, mods), ':');
+	KT_ASSERT(latin_of('a', OWN_DT, &code, &cmods));
 	KT_ASSERT_EQ(ut_on(lw, FALSE, &ut_l23, twid, &mods), code);
 
 	/* Fn and 1: F2 */
 	ut_hold(lw, FALSE, &ut_l51);
 	KT_ASSERT_EQ(ut_on(lw, FALSE, &ut_l03, twid, &mods), 0x3B);
 
-	/* Ctrl and the key written E: the key that types e with Ctrl, taken as Ctrl+E */
+	/* Ctrl and the key written E: the key that types e in the machine's layout with Ctrl, taken as Ctrl+E */
 	ut_hold(lw, FALSE, &ut_l31);
-	KT_ASSERT(latin_of('e', &code, &cmods));
+	KT_ASSERT(latin_of('e', 0, &code, &cmods));
 	KT_ASSERT_EQ(ut_on(lw, FALSE, &ut_l25, twid, &mods), code);
 	KT_ASSERT_EQ(mods, HID_MOD_LCTRL);
 	KT_ASSERT_EQ(wm_key_cmd(code), 0x08);
 
 	/*
-	 * The logical layout changed where the keyboard's is set (キー配列):
-	 * the keyboard follows. In QWERTY the key at Q's place is written q
-	 * and types it; in Dvorak it is the chart's ;
+	 * The machine's latin layout changed (キー配列): the keyboard keeps
+	 * its own, the key at Q's place the chart's ;. The logical layout
+	 * QWERTY chosen with its menu: the key at Q's place written q and
+	 * typing it, the machine's left as it is; then Dvorak again.
 	 */
-	st.latin = KM_LATIN_KEYS;
-	KT_ASSERT_ER(km_set(&st, KM_SET_LATIN), E_OK);
-	(void)pump(900, -1, NULL);
-	KT_ASSERT_EQ(ut_on(lw, FALSE, &ut_l13, twid, &mods), 0x14);
-	KT_ASSERT_EQ(mods, 0);
 	st.latin = KM_LATIN_DVORAK;
 	KT_ASSERT_ER(km_set(&st, KM_SET_LATIN), E_OK);
 	(void)pump(900, -1, NULL);
-	KT_ASSERT(latin_of(';', &code, &cmods));
+	KT_ASSERT(latin_of(';', OWN_DT, &code, &cmods));
 	KT_ASSERT_EQ(ut_on(lw, FALSE, &ut_l13, twid, &mods), code);
-	KT_ASSERT_EQ(mods, cmods);
+	KT_ASSERT_EQ(mods, cmods | OWN_DT);
+	st.latin = KM_LATIN_KEYS;
+	KT_ASSERT_ER(km_set(&st, KM_SET_LATIN), E_OK);
+	KT_ASSERT(choose_item(lw, 3, 0));
+	(void)pump(600, -1, NULL);
+	KT_ASSERT_EQ(ut_on(lw, FALSE, &ut_l13, twid, &mods), 0x14);
+	KT_ASSERT_EQ(mods, KM_MOD_LAYOUT(KM_LATIN_KEYS, KM_KANA_TRON));
+	KT_ASSERT_EQ(wm_key_char(0x14, mods), 'q');
+	KT_ASSERT_EQ(km_latin(), KM_LATIN_KEYS);
+	KT_ASSERT(choose_item(lw, 3, 1));
+	(void)pump(600, -1, NULL);
+	KT_ASSERT(latin_of(';', OWN_DT, &code, &cmods));
+	KT_ASSERT_EQ(ut_on(lw, FALSE, &ut_l13, twid, &mods), code);
+	KT_ASSERT_EQ(km_latin(), KM_LATIN_KEYS);
 
 	/* the left arrows' keys: Home as written, PrtSc under it with Fn */
 	KT_ASSERT_EQ(ut_on(lw, FALSE, &ut_l61, twid, &mods), 0x4A);
@@ -1020,6 +1225,240 @@ out:
 	conf_back();
 }
 
+/* ---------------------------------------------------------------- the layouts apart */
+
+IMPORT INT  knl_hid_ext_attach( BOOL kbd, CONST UB *rd, INT rdlen, CONST UB *name );
+IMPORT void knl_hid_ext_detach( INT hd );
+IMPORT void knl_hid_ext_report( INT hd, CONST UB *r, INT len );
+
+LOCAL CONST TRAT	tr_l43 = { 2538, 1215 };	/* D's place (0x07): e in Dvorak, d in QWERTY */
+
+/* A pointer event at a place of the screen */
+LOCAL void at_screen( UINT type, UINT button, INT x, INT y )
+{
+	T_HIDEV	h;
+
+	knl_memset(&h, 0, sizeof(h));
+	h.type = type;
+	h.code = button;
+	h.x = x;
+	h.y = y;
+	(void)kt_inject(&h);
+}
+
+/*
+ * The middle of a row of the menu that is up (the list farthest to the
+ * left), its rows counted from 0 with the lines between groups; FALSE
+ * while no list is up
+ */
+LOCAL BOOL menu_row( INT row, INT *x, INT *y )
+{
+	T_DPRECT	r;
+	T_WMWIN		w;
+	INT		pid, wid, best = 0x7fffffff;
+
+	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) {
+		if ( wm_panel_rect(pid, &r) < E_OK ) continue;
+		wid = wm_panel_wid(pid);
+		if ( wid <= 0 || wm_ref(wid, &w) < E_OK || ( w.attr & WM_ATTR_POPUP ) == 0 ) continue;
+		if ( w.work.left < best ) {
+			best = w.work.left;
+			*x = w.work.left + ( r.right - r.left ) / 2;
+			*y = w.work.top + r.top + 1 + row * wm_menu_row_h() + wm_menu_row_h() / 2;
+		}
+	}
+	return (BOOL)( best != 0x7fffffff );
+}
+
+/* The first row's middle of the list opened beside the menu (the one farthest to the right), once there are two */
+LOCAL BOOL menu_sub_row( INT *x, INT *y )
+{
+	T_DPRECT	r;
+	T_WMWIN		w;
+	INT		pid, wid, best = -1, lists = 0;
+
+	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) {
+		if ( wm_panel_rect(pid, &r) < E_OK ) continue;
+		wid = wm_panel_wid(pid);
+		if ( wid <= 0 || wm_ref(wid, &w) < E_OK || ( w.attr & WM_ATTR_POPUP ) == 0 ) continue;
+		lists++;
+		if ( w.work.left > best ) {
+			best = w.work.left;
+			*x = w.work.left + ( r.right - r.left ) / 2;
+			*y = w.work.top + r.top + 1 + wm_menu_row_h() / 2;
+		}
+	}
+	return (BOOL)( lists >= 2 );
+}
+
+/*
+ * A row of a list of the menu of the second button chosen: the menu's row
+ * item (counted with the line after 閉じる: 2 配列, 3 論理配列) held until
+ * its list opens, then the list's row
+ */
+LOCAL BOOL choose_item( INT wid, INT item, INT row )
+{
+	INT	i, x = 0, y = 0, sx = 0, sy = 0, before = popups();
+
+	click(wid, AT_MENU_X, AT_MENU_Y, 1);
+	for ( i = 0; i < 30 && popups() == before; i++ ) (void)pump(100, -1, NULL);
+	(void)pump(300, -1, NULL);
+	if ( !menu_row(item, &x, &y) ) return FALSE;
+	at_screen(HID_EV_MOVE, 0, x, y);
+	for ( i = 0; i < 40 && !menu_sub_row(&sx, &sy); i++ ) {
+		(void)pump(100, -1, NULL);
+		if ( i % 5 == 4 ) at_screen(HID_EV_MOVE, 0, x + 1 + ( i / 5 ) % 2, y);
+	}
+	if ( !menu_sub_row(&sx, &sy) || sx <= x ) return FALSE;
+	at_screen(HID_EV_MOVE, 0, sx, y);
+	(void)pump(200, -1, NULL);
+	at_screen(HID_EV_MOVE, 0, sx, sy + row * wm_menu_row_h());
+	(void)pump(200, -1, NULL);
+	at_screen(HID_EV_BTN_DOWN, 0, sx, sy + row * wm_menu_row_h());
+	at_screen(HID_EV_BTN_UP, 0, sx, sy + row * wm_menu_row_h());
+	(void)pump(300, -1, NULL);
+	return TRUE;
+}
+
+/* A layout chosen with the menu: 配列, then 0 英字, 1 TRON配列, 2 μTRON配列 */
+LOCAL BOOL choose_layout( INT wid, INT row )
+{
+	return choose_item(wid, 2, row);
+}
+
+/* The program's window once it has opened w wide (another layout chosen), its size in g_w, g_h; 0 none */
+LOCAL INT win_wide( INT w, INT ms )
+{
+	T_WMWIN	ww;
+	INT	wid;
+
+	for ( ; ms > 0; ms -= 100 ) {
+		wid = win_named(SK_TITLE, 100);
+		if ( wid > 0 && wm_ref(wid, &ww) >= E_OK && ww.work.right - ww.work.left == w ) {
+			g_w = ww.work.right - ww.work.left;
+			g_h = ww.work.bottom - ww.work.top;
+			return wid;
+		}
+		(void)pump(100, -1, NULL);
+	}
+	return 0;
+}
+
+/* A key pressed and let go on the keyboard plugged in, as its reports say: what came to window want */
+LOCAL UINT phys_key( INT hd, UB code, INT want, UINT *p_mods )
+{
+	UB	r[8];
+	UINT	got;
+
+	knl_memset(r, 0, sizeof(r));
+	r[2] = code;
+	knl_hid_ext_report(hd, r, 8);
+	*p_mods = 0xFFFFFFFFU;
+	got = pump(2000, want, p_mods);
+	r[2] = 0;
+	knl_hid_ext_report(hd, r, 8);
+	(void)pump(300, -1, NULL);
+	return got;
+}
+
+/*
+ * The screen keyboard's layouts and the machine's apart: the TRON
+ * keyboard chosen with the menu leaves the machine's layouts (QWERTY and
+ * JIS かな here) as they are, so that the keyboard plugged in still
+ * types d at D's place and ち at A's, while the screen keyboard's own
+ * keys type in Dvorak and TRON かな配列: e at D's place, た at A's. The
+ * English letters chosen again, the machine's are still as they were.
+ */
+LOCAL void test_apart( void )
+{
+	TS_UUID		tw;
+	T_KMSTATE	was, st, now;
+	ID		pid = 0, tk = 0;
+	INT		wid = 0, twid = 0, hd = 0;
+	UINT		code, mods;
+	char		b[16];
+
+	knl_memset(&tw, 0, sizeof(tw));
+	KT_ASSERT_ER(km_get(&was), E_OK);
+	st = was;
+	st.latin = KM_LATIN_KEYS;
+	st.kana = KM_KANA_JIS;
+	KT_ASSERT_ER(km_set(&st, KM_SET_LATIN | KM_SET_KANA), E_OK);
+	KT_ASSERT_ER(conf_layout("qwerty"), E_OK);
+	KT_ASSERT_ER(conf_line("SOFTKB_TRONLATIN", "1"), E_OK);
+	KT_ASSERT_ER(win_make("{\"rect\":[60,40,460,180],\"attr\":3}", &tw, &tk, &twid), E_OK);
+	if ( tk <= 0 ) goto out;
+	KT_ASSERT_ER(wm_focus(twid), E_OK);
+	(void)pump(100, -1, NULL);
+	hd = knl_hid_ext_attach(TRUE, NULL, 0, (CONST UB *)"kt-skb");
+	KT_ASSERT(hd > 0);
+	if ( hd <= 0 ) goto out;
+
+	pid = start(&wid);
+	if ( pid <= 0 ) KT_SKIP("no program object of ソフトウェアキーボード");
+	if ( wid <= 0 ) goto stop;
+	KT_ASSERT_EQ(phys_key(hd, 0x07, twid, &mods), 0x07);
+	KT_ASSERT_EQ(wm_key_char(0x07, mods), 'd');
+
+	/* the TRON keyboard chosen: the machine's layouts left as they are */
+	KT_ASSERT(choose_layout(wid, 1));
+	wid = win_wide(TR_W0, 5000);
+	KT_ASSERT(wid > 0);
+	if ( wid <= 0 ) goto stop;
+	tk_dly_tsk(800);
+	KT_ASSERT_ER(km_get(&now), E_OK);
+	tm_printf((UB *)"  the machine's layouts with the TRON keyboard: latin %d kana %d\n", now.latin, now.kana);
+	KT_ASSERT_EQ(now.latin, KM_LATIN_KEYS);
+	KT_ASSERT_EQ(now.kana, KM_KANA_JIS);
+
+	/* the keyboard plugged in: as the machine's layouts say */
+	code = phys_key(hd, 0x07, twid, &mods);
+	KT_ASSERT_EQ(code, 0x07);
+	KT_ASSERT_EQ(wm_key_char(code, mods), 'd');
+	code = phys_key(hd, 0x04, twid, &mods);
+	KT_ASSERT_EQ(code, 0x04);
+	KT_ASSERT_EQ(km_label(KM_L_KANA, code, mods, b, sizeof(b)), 0);
+	KT_ASSERT_EQ(kc_kana_key_m(code, mods), kc_kana_key(0x04, FALSE));
+
+	/* the screen keyboard's keys: in its own layouts */
+	code = tron_on(wid, &tr_l43, twid, &mods);
+	KT_ASSERT_EQ(code, 0x07);
+	KT_ASSERT_EQ(wm_key_char(code, mods), 'e');
+	code = tron_on(wid, &tr_l73, twid, &mods);
+	KT_ASSERT_EQ(code, 0x04);
+	KT_ASSERT(km_label(KM_L_KANA, code, mods, b, sizeof(b)) > 0 && b[0] == (char)0xE3 && b[1] == (char)0x81
+		  && b[2] == (char)0x9F);		/* た */
+	KT_ASSERT_EQ(kc_kana_key_m(code, mods), 0x243F);
+
+	/* the English letters again: the machine's layouts as they were all along */
+	KT_ASSERT(choose_layout(wid, 0));
+	(void)pump(1000, -1, NULL);
+	wid = win_named(SK_TITLE, 5000);
+	KT_ASSERT_ER(km_get(&now), E_OK);
+	KT_ASSERT_EQ(now.latin, KM_LATIN_KEYS);
+	KT_ASSERT_EQ(now.kana, KM_KANA_JIS);
+	KT_ASSERT_EQ(phys_key(hd, 0x07, twid, &mods), 0x07);
+	KT_ASSERT_EQ(wm_key_char(0x07, mods), 'd');
+	if ( wid > 0 ) {
+		close_by_menu(wid, pid);
+		pid = 0;
+	}
+stop:
+	if ( pid > 0 ) {
+		T_PSTS	psts;
+
+		(void)ts_ter_prc(pid, TS_ABORT_TERM);
+		(void)ts_wai_prc(pid, &psts, 5000);
+	}
+out:
+	if ( hd > 0 ) knl_hid_ext_detach(hd);
+	(void)pump(100, -1, NULL);
+	(void)km_set(&was, KM_SET_LATIN | KM_SET_KANA);
+	conf_back();
+	if ( tk > 0 ) ob_cls_obj(tk);
+	(void)ob_del_obj(&tw);
+}
+
 /* The program started with "selftest": its tables, the layout kept and the calls from a process */
 LOCAL void test_selftest( void )
 {
@@ -1066,8 +1505,10 @@ EXPORT void ktest_skb( void )
 {
 	tm_printf((UB *)"\n[skb] ソフトウェアキーボード (design 11.31)\n");
 	KT_RUN_SCREEN(test_program);
+	KT_RUN_SCREEN(test_finger);
 	KT_RUN_SCREEN(test_tron);
 	KT_RUN_SCREEN(test_utron);
+	KT_RUN_SCREEN(test_apart);
 	KT_RUN_SCREEN(test_wins);
 	KT_RUN_SCREEN(test_selftest);
 }

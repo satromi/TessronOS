@@ -38,6 +38,7 @@
 #include <ts/cpuclk.h>
 #include "kernel.h"
 #include "sysdepend.h"
+#include <ts/fs.h>
 
 /*
  * Each step of the start-up is named on the console before it runs, so
@@ -111,6 +112,8 @@ EXPORT ER knl_start_device( void )
 	STEP("file system");
 	if ( fs_main() >= E_OK ) {
 		fs_regist(&knl_fimp_fat);
+		fs_regist(&knl_fimp_exfat);
+		fs_regist(&knl_fimp_ntfs);
 		if ( fs_attach("fatfs", "sda0", "/boot", 0) < EX_OK ) {
 			fs_attach("fatfs", "sda1", "/boot", 0);
 		}
@@ -133,8 +136,13 @@ EXPORT ER knl_start_device( void )
 }
 
 #if USE_SHUTDOWN
+/* the Wi-Fi manager's (device/net/wifi/wifi.c); weak: a build without the Wi-Fi has none */
+IMPORT void	knl_wifi_shutdown( void ) __attribute__((weak));
+
 EXPORT ER knl_finish_device( void )
 {
+	if ( knl_wifi_shutdown != NULL ) knl_wifi_shutdown();	/* the network joined left first */
+	knl_fs_finish(NULL, NULL);
 	return E_OK;
 }
 #endif /* USE_SHUTDOWN */

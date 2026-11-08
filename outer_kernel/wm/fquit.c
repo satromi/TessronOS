@@ -1098,7 +1098,7 @@ LOCAL ER fw_make( FWIN *f, INT num, INT x, INT y, BOOL centre, UINT attr, UINT i
 		Kfree(meta);
 	}
 	if ( centre ) {
-		wm_screen(&sw, &sh);
+		wm_screen_main(&sw, &sh);
 		x = ( sw > f->w + 16 ) ? ( sw - f->w - 16 ) / 2 : 0;
 		y = ( sh > f->h + 34 ) ? ( sh - f->h - 34 ) / 3 : 0;
 	}

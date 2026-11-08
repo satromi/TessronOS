@@ -6,7 +6,8 @@
 # closed and opened again. Then the sample 住所録: ≒ finding katakana by hiragana,
 # 差し込み into the label layout and the letter, and the found cards written out
 # in @形式. The card window is at 120,90 (its work area from 131,118), the
-# list window right of it.
+# list window right of it. The panels it asks with (並べ替え, 重複検索, 表示設定,
+# 印刷, 書き出し) stand in the middle of the screen, as the system's do.
 # A search's note comes before the screen is changed and the bar along the
 # top made again, so a press on the bar waits for "bar <screen> search
 # <on|off>", which the program says once the bar's buttons are in place;
@@ -159,11 +160,12 @@ wait 150
 click 500 550
 expect mcard: sort panel
 wait 500
-click 290 241
-click 525 465
+click 521 303
+click 756 527
 wait 500
 shot mc_sortok
-click 534 369
+# the question that follows (ui_ask) stands in the middle of the screen too
+click 765 431
 expect mcard: sorted 1 up
 wait 300
 shot mc_sorted
@@ -181,9 +183,9 @@ expect mcard: dups panel
 wait 500
 wait 300
 shot mc_dups_panel
-click 290 259
+click 521 321
 logmark
-click 530 447
+click 761 509
 expectsince mcard: dups 1 found 2
 expectsince mcard: bar card search on
 wait 300
@@ -204,8 +206,8 @@ wait 150
 click 500 230
 expect mcard: view panel
 wait 500
-click 430 270
-click 570 440
+click 661 332
+click 801 502
 expect mcard: view card 14 list 10 names on
 wait 300
 shot mc_view
@@ -299,10 +301,10 @@ logmark
 click 500 270
 expectsince mcard: print panel
 wait 500
-click 290 256
+click 521 318
 wait 300
 shot mc_print_panel
-click 560 465
+click 791 527
 expect mcard: print 宛名ラベル cards 3 pages 1 (0)
 wait 1500
 shot mc_merged_label
@@ -324,10 +326,10 @@ wait 150
 click 500 150
 expect mcard: export panel
 wait 500
-click 348 310
+click 579 372
 wait 300
 shot mc_export_panel
-click 622 401
+click 853 463
 expect mcard: exported 1
 wait 500
 shot mc_exported
@@ -342,12 +344,12 @@ logmark
 click 500 370
 expectsince mcard: print panel
 wait 500
-click 290 273
+click 521 335
 wait 200
-click 318 390
+click 549 452
 wait 300
 shot mc_print_letter
-click 560 465
+click 791 527
 expect mcard: print 案内状 cards 1 pages 1 (0)
 wait 1500
 shot mc_merged_letter

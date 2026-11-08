@@ -45,6 +45,14 @@
  *	processing coefficients) has its place in hda_quirks(), to be filled
  *	from the machine's own report (HW.TXT, the DSDT).
  *
+ *	The controller's own class says whether the firmware left the audio
+ *	DSP on (04.01 or 04.80 rather than 04.03). The HD Audio registers are
+ *	there all the same and a codec on the link works through them, so
+ *	such a controller is taken like the others. What is wired past the
+ *	DSP (SoundWire, I2S, digital microphones) they do not reach; which
+ *	it is, is read from the ACPI table NHLT and the namespace, said in
+ *	the console and in the system object's record of sound (hda_why).
+ *
  *	Levels: DN_SDVOLMAIN and its kin set the output amplifiers on the
  *	paths (the converters' and the pins'), DN_SDVOLMIC and DN_SDGAININ
  *	the input ones, within the steps each amplifier has.
@@ -55,10 +63,12 @@
 #ifdef X64
 
 #include "kernel.h"
+#include <ts/pm.h>
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/pcie.h>
 #include "sysman/pfalloc.h"
+#include "sysdepend/acpi/acpi.h"
 #include "../sndhw.h"
 
 IMPORT UW	knl_usb_ms( void );
@@ -1155,31 +1165,14 @@ LOCAL void *pages( UINT order, UD *p_pa )
 }
 
 /* The controller found on the bus brought up, its first codec walked */
-EXPORT ER knl_hda_init( void )
+/*
+ * The controller out of reset with its command and response rings, on the
+ * memory they already have: at start-up and after a sleep. *p_st: the codecs.
+ */
+LOCAL BOOL ctrl_start( UH *p_st )
 {
-	T_PCIDEV	p;
-	UB		*pg0;
-	UH		gcap, st;
-	INT		i;
-
-	if ( ts_pcie_find(0x04, 0x03, 0xff, 0, &p) < E_OK ) {
-		return E_NOEXS;
-	}
-	ts_pcie_enable(&p);
-	base = ts_pcie_bar_base(&p, 0);
-	if ( base == 0 ) {
-		return E_NOEXS;
-	}
-	pg0 = (UB *)pages(0, &page0_pa);
-	bdl = (UB *)pages(0, &bdl_pa);
-	out_ring = (UB *)pages(1, &out_pa);		/* two pages: the ring of RING_BYTES */
-	in_ring = (UB *)pages(1, &in_pa);
-	wid = (WIDGET *)Kcalloc(MAXW, sizeof(WIDGET));
-	if ( pg0 == NULL || bdl == NULL || out_ring == NULL || in_ring == NULL || wid == NULL ) {
-		return E_NOMEM;
-	}
-	corb = (UW *)pg0;
-	rirb = (UD *)( pg0 + 1024 );
+	UH	gcap;
+	INT	i;
 
 	/* out of reset, the codecs given time to say they are there */
 	w32(GCTL, r32(GCTL) & ~(UW)GCTL_CRST);
@@ -1187,13 +1180,13 @@ EXPORT ER knl_hda_init( void )
 	w32(GCTL, r32(GCTL) | GCTL_CRST);
 	if ( !wait8(GCTL, GCTL_CRST, GCTL_CRST, 100) ) {
 		tm_printf((UB *)"TessronOS: hda: the controller does not come out of reset\n");
-		return E_IO;
+		return FALSE;
 	}
 	WaitUsec(1000);
 	gcap = r16(GCAP);
 	iss = ( gcap >> 8 ) & 0xf;
 	oss = ( gcap >> 12 ) & 0xf;
-	st = r16(STATESTS);
+	*p_st = r16(STATESTS);
 	w32(INTCTL, 0);
 	w32(GCTL, r32(GCTL) | GCTL_UNSOL);	/* the jack's plugging told through the RIRB */
 
@@ -1219,19 +1212,315 @@ EXPORT ER knl_hda_init( void )
 	w8(CORBCTL, 0x02);
 	w8(RIRBCTL, 0x03);		/* the response count noted in RIRBSTS (the interrupt stays off in INTCTL) */
 	(void)wait8(CORBCTL, 0x02, 0x02, 10);
+	return TRUE;
+}
+
+/*
+ * The machine asleep. What runs is stopped, and hda_ok kept off so that
+ * nothing starts; on waking the controller is started from reset, the
+ * codec's function group and widgets told to power up (a codec that lost
+ * power forgets every verb, and the paths are set again as a stream starts)
+ * and the streams that ran started again.
+ */
+LOCAL BOOL	pm_ok, pm_play, pm_rec;
+
+LOCAL ER hda_pm_suspend( void *arg, INT how )
+{
+	pm_ok = hda_ok;
+	pm_play = playing;
+	pm_rec = recording;
+	if ( !hda_ok ) return E_OK;
+	hda_play_stop();
+	hda_rec_stop();
+	w32(INTCTL, 0);
+	w8(CORBCTL, 0);
+	w8(RIRBCTL, 0);
+	hda_ok = FALSE;
+	return E_OK;
+}
+
+LOCAL void hda_pm_resume( void *arg, INT how )
+{
+	UH	st = 0;
+	UW	r;
+	INT	c, i;
+
+	if ( !pm_ok ) return;
+	if ( !ctrl_start(&st) ) {
+		tm_printf((UB *)"hda: the controller did not start after the sleep\n");
+		return;
+	}
+	verb(afg, V_SET_POWER, 0);
+	for ( i = 0; i < wcount; i++ ) verb(wstart + i, V_SET_POWER, 0);
+	WaitUsec(10000);
+	hda_ok = TRUE;
+	tm_printf((UB *)"hda: back from the sleep, codecs %04x\n", st);
+	if ( pm_play ) (void)hda_play_start(NULL, &r, &c);
+	if ( pm_rec ) (void)hda_rec_start(RATE, &r, &c);
+}
+
+LOCAL CONST T_PMDEV	hda_pm = { "hda", PM_ORD_SOUND, hda_pm_suspend, hda_pm_resume, NULL };
+
+/* ---------------------------------------------------------------- what the firmware left on */
+
+IMPORT int	knl_acpica_ready( void );
+IMPORT int	knl_acpica_has_hid( const char *hid );
+IMPORT int	knl_acpica_sdw( int *devs, char *path, int max );
+
+LOCAL UW	hda_note = 0;
+LOCAL UH	found_codecs = 0;
+LOCAL BOOL	found_analog = FALSE;
+LOCAL BOOL	found_ctrl = FALSE;
+
+EXPORT UW knl_hda_note( void )
+{
+	return hda_note;
+}
+
+/*
+ * The controller: the first HD Audio function, unless that is not Intel's
+ * (a graphics card's, for its screens) and the chipset has its own with the
+ * DSP on. Such a one is at 0:1f.3, or at 0:e.0 on Apollo Lake's kind; the
+ * older DSPs, elsewhere, have no HD Audio registers.
+ */
+LOCAL BOOL ctrl_find( T_PCIDEV *p )
+{
+	T_PCIDEV	d;
+	BOOL		have = ( ts_pcie_find(0x04, 0x03, 0xff, 0, p) >= E_OK );
+	INT		i;
+
+	if ( have && p->vendor == 0x8086 ) return TRUE;
+	for ( i = 0; ts_pcie_get(i, &d) == E_OK; i++ ) {
+		if ( d.vendor == 0x8086 && d.class_code == 0x04 && ( d.subclass == 0x01 || d.subclass == 0x80 )
+		  && d.bus == 0 && ( ( d.dev == 0x1f && d.fn == 3 ) || ( d.dev == 0x0e && d.fn == 0 ) ) ) {
+			*p = d;
+			return TRUE;
+		}
+	}
+	return have;
+}
+
+/* A codec that only carries sound to a screen, by its maker: Intel's graphics, AMD's and NVIDIA's */
+LOCAL BOOL display_codec( UW vendor_id )
+{
+	UINT	v = vendor_id >> 16;
+
+	return ( v == 0x8086 || v == 0x1002 || v == 0x10de );
+}
+
+/*
+ * The codec to walk: the first that is not a display's, else the first. The
+ * chipset's display codec may have the lower address, and walking it would
+ * leave the speakers silent with their codec there.
+ */
+LOCAL void codec_choose( UH st )
+{
+	UINT	c, first = 15;
+	UW	id;
+
+	found_analog = FALSE;
+	for ( c = 0; c < 15; c++ ) {
+		if ( ( st & ( 1U << c ) ) == 0 ) continue;
+		if ( first == 15 ) first = c;
+		cad = c;
+		id = param(0, P_VENDOR);
+		tm_printf((UB *)"TessronOS: hda: codec %d answers: %04x:%04x\n", c, id >> 16, id & 0xffff);
+		if ( !found_analog && id != ~0U && id != 0 && !display_codec(id) ) {
+			found_analog = TRUE;
+			first = c;
+		}
+	}
+	cad = first;
+}
+
+/*
+ * The endpoints of NHLT: after the ACPI header a count, then each endpoint
+ * with its length first and its link type next (2 digital microphones,
+ * 3 SSP, that is I2S)
+ */
+EXPORT BOOL knl_hda_nhlt( CONST UB *t, INT len, INT *dmic, INT *ssp )
+{
+	INT	off = 37, i, n;
+	UW	el;
+
+	*dmic = *ssp = 0;
+	if ( t == NULL || len < off ) return FALSE;
+	n = t[36];
+	for ( i = 0; i < n; i++ ) {
+		if ( off + 5 > len ) return FALSE;
+		el = (UW)t[off] | ( (UW)t[off + 1] << 8 ) | ( (UW)t[off + 2] << 16 ) | ( (UW)t[off + 3] << 24 );
+		if ( el < 5 || el > (UW)( len - off ) ) return FALSE;
+		if ( t[off + 4] == 2 ) (*dmic)++;
+		if ( t[off + 4] == 3 ) (*ssp)++;
+		off += (INT)el;
+	}
+	return TRUE;
+}
+
+/*
+ * What it comes to. Nothing here decides what is driven: the HD Audio path
+ * is tried whatever the firmware says, and this only tells why something
+ * stays silent. SoundWire peripherals mean the speakers are there even when
+ * a codec answers for the headphones, as on many machines since Tiger Lake;
+ * I2S counts only with no other codec, since NHLT lists SSP for Bluetooth too.
+ */
+EXPORT UW knl_hda_judge( CONST HDA_FOUND *f )
+{
+	UW	n = 0;
+
+	if ( !f->ctrl ) return 0;
+	if ( f->sdw_devs > 0 ) {
+		n |= SND_NOTE_SPK_DSP | SND_NOTE_SOUNDWIRE;
+	} else if ( !f->analog && ( f->i2s_codec || f->nhlt_ssp > 0 ) ) {
+		n |= SND_NOTE_SPK_DSP | SND_NOTE_I2S;
+	} else if ( f->codecs == 0 ) {
+		n |= SND_NOTE_NOCODEC;
+	} else if ( !f->analog ) {
+		n |= SND_NOTE_DISPLAY;
+	}
+	if ( f->nhlt_dmic > 0 && !f->int_mic ) n |= SND_NOTE_MIC_DSP;
+	return n;
+}
+
+/*
+ * The codecs that sit on I2S alone, by their ACPI names; only an aid when no
+ * codec answers on the HD Audio link, so that the log can say what is there
+ */
+LOCAL BOOL i2s_codec_find( void )
+{
+	static CONST char *CONST hid[] = {
+		"ESSX8336", "10EC5682", "RTL5682", "10EC5650", "10EC1019", "DLGS7219", "MX98357A", "MX98373",
+		"CSC3541", "INT34C2"
+	};
+	BOOL	found = FALSE;
+	INT	i;
+
+	for ( i = 0; knl_acpica_ready() && i < (INT)( sizeof(hid) / sizeof(hid[0]) ); i++ ) {
+		if ( knl_acpica_has_hid(hid[i]) > 0 ) {
+			tm_printf((UB *)"hda: the namespace has the I2S codec %s\n", hid[i]);
+			found = TRUE;
+		}
+	}
+	return found;
+}
+
+/* The firmware's account of the machine's sound read, said, and kept for the settings */
+LOCAL void hda_why( void )
+{
+	CONST UB	*t = (CONST UB *)knl_acpi_table("NHLT", 0);
+	HDA_FOUND	f;
+	char		path[64];
+	INT		sdw = 0;
+
+	knl_memset(&f, 0, sizeof(f));
+	f.ctrl = found_ctrl;
+	f.codecs = found_codecs;
+	f.analog = found_analog;
+	f.int_mic = in_have[IN_INT] && ( w_of(inp[IN_INT].nid[inp[IN_INT].n - 1])->config >> 30 ) == PORT_FIXED;
+	if ( t == NULL ) {
+		tm_printf((UB *)"hda: no NHLT table\n");
+	} else {
+		INT	len = (INT)( (UW)t[4] | ( (UW)t[5] << 8 ) | ( (UW)t[6] << 16 ) | ( (UW)t[7] << 24 ) );
+
+		if ( knl_hda_nhlt(t, len, &f.nhlt_dmic, &f.nhlt_ssp) ) {
+			tm_printf((UB *)"hda: NHLT: %d endpoints, %d on digital microphones, %d on I2S\n", t[36], f.nhlt_dmic,
+				  f.nhlt_ssp);
+		} else {
+			tm_printf((UB *)"hda: NHLT of %d bytes is not well formed (%d microphones, %d I2S before that)\n", len,
+				  f.nhlt_dmic, f.nhlt_ssp);
+		}
+	}
+	if ( knl_acpica_ready() ) {
+		sdw = knl_acpica_sdw(&f.sdw_devs, path, sizeof(path));
+		tm_printf((UB *)"hda: SoundWire in the namespace: %d controllers%s%s, %d peripherals\n", sdw,
+			  ( sdw > 0 ) ? " at " : "", path, f.sdw_devs);
+		f.i2s_codec = i2s_codec_find();
+	} else {
+		tm_printf((UB *)"hda: the namespace is not read: SoundWire and I2S codecs not looked for\n");
+	}
+	hda_note = knl_hda_judge(&f);
+	tm_printf((UB *)"hda: built-in sound: codecs %04x, %s codec other than a display's, %s fixed microphone: note %04x\n",
+		  f.codecs, f.analog ? "a" : "no", f.int_mic ? "a" : "no", hda_note);
+	if ( hda_note & SND_NOTE_SOUNDWIRE ) {
+		tm_printf((UB *)"hda: the speakers are on SoundWire behind the audio DSP, which has no driver here: silent\n");
+	}
+	if ( hda_note & SND_NOTE_I2S ) {
+		tm_printf((UB *)"hda: the speakers are on I2S behind the audio DSP, which has no driver here: silent\n");
+	}
+	if ( hda_note & SND_NOTE_NOCODEC ) {
+		tm_printf((UB *)"hda: no codec answers on the link, and nothing tells of SoundWire or I2S\n");
+	}
+	if ( hda_note & SND_NOTE_DISPLAY ) {
+		tm_printf((UB *)"hda: only a display's codec answers: sound can go to a screen alone\n");
+	}
+	if ( hda_note & SND_NOTE_MIC_DSP ) {
+		tm_printf((UB *)"hda: the built-in microphones are digital ones behind the audio DSP: they do not record\n");
+	}
+}
+
+LOCAL ER hda_start( void );
+
+EXPORT ER knl_hda_init( void )
+{
+	ER	er = hda_start();
+
+	hda_why();
+	return er;
+}
+
+LOCAL ER hda_start( void )
+{
+	T_PCIDEV	p;
+	UB		*pg0;
+	UH		st;
+
+	if ( !ctrl_find(&p) ) {
+		return E_NOEXS;
+	}
+	found_ctrl = TRUE;
+	ts_pcie_enable(&p);
+	base = ts_pcie_bar_base(&p, 0);
+	if ( base == 0 ) {
+		return E_NOEXS;
+	}
+	if ( p.subclass != 0x03 ) {
+		tm_printf((UB *)"TessronOS: hda: %04x:%04x at %d:%d.%d has the audio DSP on (class %02x.%02x, version %d.%d):"
+			  " taken through its HD Audio registers\n", p.vendor, p.device, p.bus, p.dev, p.fn, p.class_code,
+			  p.subclass, r8(VMAJ), r8(VMIN));
+		if ( r8(VMAJ) != 1 ) {
+			tm_printf((UB *)"TessronOS: hda: those are not HD Audio registers\n");
+			return E_NOEXS;
+		}
+	}
+	pg0 = (UB *)pages(0, &page0_pa);
+	bdl = (UB *)pages(0, &bdl_pa);
+	out_ring = (UB *)pages(1, &out_pa);		/* two pages: the ring of RING_BYTES */
+	in_ring = (UB *)pages(1, &in_pa);
+	wid = (WIDGET *)Kcalloc(MAXW, sizeof(WIDGET));
+	if ( pg0 == NULL || bdl == NULL || out_ring == NULL || in_ring == NULL || wid == NULL ) {
+		return E_NOMEM;
+	}
+	corb = (UW *)pg0;
+	rirb = (UD *)( pg0 + 1024 );
+
+	if ( !ctrl_start(&st) ) {
+		return E_IO;
+	}
 
 	tm_printf((UB *)"TessronOS: hda %04x:%04x at %x%08x, version %d.%d, %d input and %d output streams, "
 		  "codecs %04x\n", p.vendor, p.device, (UW)( (UD)base >> 32 ), (UW)base, r8(VMAJ), r8(VMIN),
 		  iss, oss, st);
+	found_codecs = st;
 	if ( oss == 0 || st == 0 ) {
 		return E_NOEXS;
 	}
-	for ( cad = 0; cad < 15 && ( st & ( 1U << cad ) ) == 0; cad++ ) ;
+	codec_choose(st);
 	walk_codec();
 	tm_printf((UB *)"TessronOS: hda: codec %d %04x:%04x, function group %d, widgets %d-%d, "
 		  "%d output paths, %s input\n", cad, codec_vendor >> 16, codec_vendor & 0xffff, afg, wstart,
 		  wstart + wcount - 1, nout, has_in ? "an" : "no");
 	hda_ok = ( afg != 0 );
+	if ( hda_ok ) (void)ts_pm_register(&hda_pm);
 	return hda_ok ? E_OK : E_NOEXS;
 }
 

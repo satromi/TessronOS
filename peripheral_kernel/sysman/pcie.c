@@ -37,13 +37,42 @@
 
 #if defined(PCIE_ECAM_PA) || defined(PCIE_CFG_BOARD)
 
-#define PCI_MAX_DEV	32		/* functions the table holds */
+/*
+ * The table of the functions found. How many there are is the machine's: a
+ * PC's chipset alone has more than a board's bus, and the bus is walked in
+ * order, so that a table that filled up would lose what is walked last. It
+ * starts in the kernel's data, for a board that walks its bus early, and
+ * is made twice as large from the allocator when it fills.
+ */
+#define PCI_DEV_FIRST	32
 
-LOCAL T_PCIDEV	pci_dev[PCI_MAX_DEV];
+LOCAL T_PCIDEV	pci_first[PCI_DEV_FIRST];
+LOCAL T_PCIDEV	*pci_dev = pci_first;
+LOCAL INT	pci_cap = PCI_DEV_FIRST;
 LOCAL INT	pci_ndev = 0;
+LOCAL INT	pci_left = 0;		/* functions no memory could be had for */
 LOCAL UD	mmio_next = 0;		/* the next address to hand out */
 LOCAL UD	mmio_end = 0;
 LOCAL UB	bus_next = 0;		/* the next bus number to give a bridge */
+
+#ifdef __x86_64__
+/*
+ * A segment of the bus behind a host function, which has its own
+ * numbering. The number a function gets here has the segment above the
+ * eight bits of its bus, so that everything that takes a bus number goes
+ * on working; segment 0 is the machine's own, reached as it always was.
+ */
+#define PCI_MAX_DOMAIN	4
+LOCAL T_PCIDOMAIN	*pci_domain[PCI_MAX_DOMAIN];
+LOCAL INT		pci_ndomain = 0;
+
+LOCAL T_PCIDOMAIN *domain_of( UINT bus )
+{
+	UINT	k = PCI_BUS_SEG(bus);
+
+	return ( k >= 1 && k <= (UINT)pci_ndomain ) ? pci_domain[k - 1] : NULL;
+}
+#endif
 
 /* ---------------------------------------------------------------- config */
 
@@ -67,6 +96,13 @@ LOCAL UBINT cfg_addr( UINT bus, UINT dev, UINT fn, UINT off )
  */
 EXPORT UW ts_pcie_cfg_read( UINT bus, UINT dev, UINT fn, UINT off, INT width )
 {
+#ifdef __x86_64__
+	if ( PCI_BUS_SEG(bus) != 0 ) {
+		T_PCIDOMAIN	*g = domain_of(bus);
+
+		return ( g != NULL ) ? g->cfg_rd(g->arg, PCI_BUS_NUM(bus), dev, fn, off, width) : 0xffffffffU;
+	}
+#endif
 #ifdef PCIE_CFG_BOARD
 	return knl_pcie_cfg_in(bus, dev, fn, off, width);
 #else
@@ -83,6 +119,14 @@ EXPORT UW ts_pcie_cfg_read( UINT bus, UINT dev, UINT fn, UINT off, INT width )
 EXPORT void ts_pcie_cfg_write( UINT bus, UINT dev, UINT fn, UINT off,
 			       UW val, INT width )
 {
+#ifdef __x86_64__
+	if ( PCI_BUS_SEG(bus) != 0 ) {
+		T_PCIDOMAIN	*g = domain_of(bus);
+
+		if ( g != NULL ) g->cfg_wr(g->arg, PCI_BUS_NUM(bus), dev, fn, off, val, width);
+		return;
+	}
+#endif
 #ifdef PCIE_CFG_BOARD
 	knl_pcie_cfg_out(bus, dev, fn, off, val, width);
 #else
@@ -236,6 +280,28 @@ LOCAL void bars_place( void )
 
 LOCAL void bus_scan( UINT bus );
 
+/* Room for one more function: whether there is */
+LOCAL BOOL table_room( void )
+{
+	T_PCIDEV	*n;
+
+	if ( pci_ndev < pci_cap ) {
+		return TRUE;
+	}
+	n = (T_PCIDEV *)Kmalloc((SZ)pci_cap * 2 * (SZ)sizeof(T_PCIDEV));
+	if ( n == NULL ) {
+		pci_left++;
+		return FALSE;
+	}
+	knl_memcpy(n, pci_dev, (SZ)pci_ndev * (SZ)sizeof(T_PCIDEV));
+	if ( pci_dev != pci_first ) {
+		Kfree(pci_dev);
+	}
+	pci_dev = n;
+	pci_cap *= 2;
+	return TRUE;
+}
+
 /*
  * Take in one function: what it is, where its windows are, and which
  * line it raises.
@@ -246,7 +312,7 @@ LOCAL void func_add( UINT bus, UINT dev, UINT fn, UW id )
 	UW		cls;
 	INT		i, next;
 
-	if ( pci_ndev >= PCI_MAX_DEV ) {
+	if ( !table_room() ) {
 		return;
 	}
 	d = &pci_dev[pci_ndev];
@@ -254,7 +320,7 @@ LOCAL void func_add( UINT bus, UINT dev, UINT fn, UW id )
 
 	d->vendor = (UH)(id & 0xffff);
 	d->device = (UH)(id >> 16);
-	d->bus = (UB)bus;
+	d->bus = (UH)bus;
 	d->dev = (UB)dev;
 	d->fn  = (UB)fn;
 
@@ -523,6 +589,32 @@ EXPORT UINT ts_pcie_cap_find( CONST T_PCIDEV *dev, UINT cap_id )
 LOCAL UINT msi_next = 0;		/* the next number to hand out */
 LOCAL UINT msi_end = 0;
 
+/*
+ * The next free number made ready for a message, and the address and data
+ * that raise it. A function behind a host function has its message taken
+ * in by that host: what it is to write and which number comes of it are
+ * the host's to say.
+ */
+LOCAL ER msi_range( void );
+
+LOCAL ER msg_direct( UINT *p_intno, UD *p_addr, UW *p_data )
+{
+	UINT	intno;
+
+	if ( msi_range() < E_OK ) {
+		return E_NOEXS;
+	}
+	if ( msi_next >= msi_end ) {
+		return E_LIMIT;			/* the frame has none left */
+	}
+	intno = msi_next++;
+	knl_msi_prepare(intno);			/* the interrupt readied for messages (cpu_msi.h) */
+	*p_intno = intno;
+	*p_addr = knl_msi_addr(intno);
+	*p_data = knl_msi_data(intno);
+	return E_OK;
+}
+
 LOCAL ER msi_range( void )
 {
 	UINT	first, num;
@@ -542,6 +634,17 @@ LOCAL ER msi_range( void )
 }
 
 #ifdef __x86_64__
+LOCAL ER msg_for( CONST T_PCIDEV *dev, UINT *p_intno, UD *p_addr, UW *p_data, BOOL *p_routed )
+{
+	T_PCIDOMAIN	*g = domain_of(dev->bus);
+
+	*p_routed = FALSE;
+	if ( g != NULL ) {
+		return g->msg(g->arg, dev, p_intno, p_addr, p_data, p_routed);
+	}
+	return msg_direct(p_intno, p_addr, p_data);
+}
+
 /*
  * Where each message was written, so that it can be written again with
  * another processor's address (SetIntTarget, kernel/tkernel/inttarget.c):
@@ -555,7 +658,8 @@ LOCAL ER msi_range( void )
 LOCAL struct {
 	UB	kind;
 	UB	is64;
-	UB	bus, dev, fn;
+	UH	bus;
+	UB	dev, fn;
 	UH	cap;
 	UBINT	entry;			/* MSG_MSIX: the table entry */
 } msg_at[N_INTVEC];
@@ -598,7 +702,7 @@ LOCAL void msg_note( UINT intno, UB kind, CONST T_PCIDEV *dev, UINT cap, UBINT e
 	if ( intno >= N_INTVEC ) {
 		return;
 	}
-	msg_at[intno].bus = (UB)dev->bus;
+	msg_at[intno].bus = dev->bus;
 	msg_at[intno].dev = (UB)dev->dev;
 	msg_at[intno].fn = (UB)dev->fn;
 	msg_at[intno].cap = (UH)cap;
@@ -624,8 +728,11 @@ LOCAL void msg_note( UINT intno, UB kind, CONST T_PCIDEV *dev, UINT cap, UBINT e
  */
 EXPORT ER ts_pcie_msi_plain_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 {
-	UW	ctrl, data_off;
+	UW	ctrl, data_off, data;
 	UINT	intno, cap;
+	UD	addr;
+	BOOL	routed;
+	ER	er;
 
 	if ( dev == NULL || p_intno == NULL ) {
 		return E_PAR;
@@ -637,29 +744,28 @@ EXPORT ER ts_pcie_msi_plain_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 	if ( cap == 0 ) {
 		return E_NOSPT;
 	}
-	if ( msi_next >= msi_end ) {
-		return E_LIMIT;
+	er = msg_for(dev, &intno, &addr, &data, &routed);
+	if ( er < E_OK ) {
+		return er;
 	}
 	ctrl = ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, cap + MSI_CAP_CTRL, 2);
 	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSI_CAP_CTRL,
 			  ctrl & ~( MSI_CTRL_ENABLE | MSI_CTRL_MME ), 2);
-	intno = msi_next++;
-	knl_msi_prepare(intno);
-	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSI_CAP_ADDR_LO, (UW)knl_msi_addr(intno), 4);
+	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSI_CAP_ADDR_LO, (UW)addr, 4);
 	if ( ctrl & MSI_CTRL_64 ) {
 		ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSI_CAP_ADDR_LO + 4,
-				  (UW)( knl_msi_addr(intno) >> 32 ), 4);
+				  (UW)( addr >> 32 ), 4);
 		data_off = 0x0c;
 	} else {
 		data_off = 0x08;
 	}
-	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + data_off, knl_msi_data(intno), 2);
+	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + data_off, data, 2);
 	if ( ctrl & MSI_CTRL_PVM ) {
 		ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + data_off + 4, 0, 4);	/* not masked */
 	}
 	ctrl = ( ctrl & ~MSI_CTRL_MME ) | MSI_CTRL_ENABLE;
 	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSI_CAP_CTRL, ctrl, 2);
-	msg_note(intno, MSG_PLAIN, dev, cap, 0);
+	if ( !routed ) msg_note(intno, MSG_PLAIN, dev, cap, 0);
 
 	ctrl = ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, PCI_COMMAND, 2);
 	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, PCI_COMMAND, ctrl | PCI_CMD_INTX_OFF, 2);
@@ -677,16 +783,16 @@ EXPORT ER ts_pcie_msi_plain_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
  * entry is written while it is masked, as the standard requires, and
  * unmasked once it is whole; the function is unmasked last.
  */
-EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
+LOCAL ER msix_put( CONST T_PCIDEV *dev, UINT index, UINT *p_intno, BOOL own )
 {
-	UBINT	table;
-	UINT	cap, bir;
-	UW	ctrl, off;
+	UBINT	table, ent;
+	UINT	cap, bir, n, i;
+	UW	ctrl, off, data;
 	UINT	intno;
+	UD	addr;
+	BOOL	routed = FALSE;
+	ER	er;
 
-	if ( dev == NULL || p_intno == NULL ) {
-		return E_PAR;
-	}
 	if ( msi_range() < E_OK ) {
 		return E_NOEXS;
 	}
@@ -694,10 +800,11 @@ EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 	if ( cap == 0 ) {
 		return E_NOSPT;			/* it has no messages to give */
 	}
-	if ( msi_next >= msi_end ) {
-		return E_LIMIT;			/* the frame has none left */
+	ctrl = ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, cap + MSIX_CAP_CTRL, 2);
+	n = ( ctrl & MSIX_CTRL_SIZE ) + 1;
+	if ( index >= n ) {
+		return E_PAR;
 	}
-
 	off = ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, cap + MSIX_CAP_TABLE, 4);
 	bir = MSIX_TABLE_BIR(off);
 	table = ts_pcie_bar_base(dev, (INT)bir);
@@ -705,35 +812,40 @@ EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 		return E_NOEXS;			/* the window it names is not there */
 	}
 	table += MSIX_TABLE_OFF(off);
+	ent = table + index * MSIX_ENT_SIZE;
 
-	intno = msi_next++;
-
-	/* the interrupt readied for messages (cpu_msi.h) */
-	knl_msi_prepare(intno);
+#ifdef __x86_64__
+	er = ( own ) ? msg_direct(&intno, &addr, &data) : msg_for(dev, &intno, &addr, &data, &routed);
+#else
+	(void)own;
+	er = msg_direct(&intno, &addr, &data);
+#endif
+	if ( er < E_OK ) {
+		return er;
+	}
 
 	/* the capability on, the function masked as a whole */
-	ctrl = ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, cap + MSIX_CAP_CTRL, 2);
 	ts_pcie_cfg_write(dev->bus, dev->dev, dev->fn, cap + MSIX_CAP_CTRL,
 			  ctrl | MSIX_CTRL_ENABLE | MSIX_CTRL_FUNCMASK, 2);
 	if ( ( ctrl & MSIX_CTRL_ENABLE ) == 0 ) {
-		UINT	n = ( ctrl & MSIX_CTRL_SIZE ) + 1, i;
-
-		for ( i = 1; i < n; i++ ) {
-			*(volatile UW *)(table + i * MSIX_ENT_SIZE + MSIX_ENT_CTRL) = MSIX_CTRL_MASK;
+		for ( i = 0; i < n; i++ ) {
+			if ( i != index ) {
+				*(volatile UW *)(table + i * MSIX_ENT_SIZE + MSIX_ENT_CTRL) = MSIX_CTRL_MASK;
+			}
 		}
 	}
 
 	/* the entry masked while it is written, as the standard asks */
-	*(volatile UW *)(table + MSIX_ENT_CTRL) = MSIX_CTRL_MASK;
+	*(volatile UW *)(ent + MSIX_ENT_CTRL) = MSIX_CTRL_MASK;
 	DeviceBarrier();
-	*(volatile UW *)(table + MSIX_ENT_ADDR_LO) = (UW)knl_msi_addr(intno);
-	*(volatile UW *)(table + MSIX_ENT_ADDR_HI) = (UW)( knl_msi_addr(intno) >> 32 );
-	*(volatile UW *)(table + MSIX_ENT_DATA) = knl_msi_data(intno);
+	*(volatile UW *)(ent + MSIX_ENT_ADDR_LO) = (UW)addr;
+	*(volatile UW *)(ent + MSIX_ENT_ADDR_HI) = (UW)( addr >> 32 );
+	*(volatile UW *)(ent + MSIX_ENT_DATA) = data;
 	DeviceBarrier();
-	*(volatile UW *)(table + MSIX_ENT_CTRL) = 0;
+	*(volatile UW *)(ent + MSIX_ENT_CTRL) = 0;
 	DeviceBarrier();
 #ifdef __x86_64__
-	msg_note(intno, MSG_MSIX, dev, cap, table);
+	if ( !routed ) msg_note(intno, MSG_MSIX, dev, cap, ent);
 #endif
 
 	/* and the function unmasked, with nothing held back */
@@ -750,6 +862,31 @@ EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 	return E_OK;
 }
 
+EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
+{
+	if ( dev == NULL || p_intno == NULL ) {
+		return E_PAR;
+	}
+	return msix_put(dev, 0, p_intno, FALSE);
+}
+
+#ifdef __x86_64__
+/* Entry index of a function's table given a number of its own; the host of a segment takes its messages this way */
+EXPORT ER knl_pcie_msix_at( CONST T_PCIDEV *dev, UINT index, UINT *p_intno )
+{
+	if ( dev == NULL || p_intno == NULL ) {
+		return E_PAR;
+	}
+	return msix_put(dev, index, p_intno, TRUE);
+}
+
+/* A message to a number of its own, for a segment whose functions send theirs straight to the processors */
+EXPORT ER knl_pcie_msg_direct( UINT *p_intno, UD *p_addr, UW *p_data )
+{
+	return msg_direct(p_intno, p_addr, p_data);
+}
+#endif
+
 #else /* KNL_HAS_MSI */
 
 /* No frame to send messages to: the functions use their lines */
@@ -762,12 +899,332 @@ EXPORT ER ts_pcie_msi_alloc( CONST T_PCIDEV *dev, UINT *p_intno )
 
 #endif /* KNL_HAS_MSI */
 
+/* ---------------------------------------------------------------- segments behind a host function */
+
+#ifdef __x86_64__
+
+#define MB1			U64(0x100000)
+#define BR_IO_BASE		0x1c
+#define BR_MEM_BASE		0x20
+#define BR_PREF_BASE		0x24
+#define BR_PREF_BASE_HI		0x28
+#define BR_PREF_LIMIT_HI	0x2c
+#define BR_IO_BASE_HI		0x30
+
+/* Nothing passes a bridge until its window is set, whatever the firmware left there */
+LOCAL void br_close( UINT bus, UINT dev, UINT fn )
+{
+	ts_pcie_cfg_write(bus, dev, fn, BR_IO_BASE_HI, 0, 4);
+	ts_pcie_cfg_write(bus, dev, fn, BR_IO_BASE, 0x00f0, 2);
+	ts_pcie_cfg_write(bus, dev, fn, BR_MEM_BASE, 0x0000fff0, 4);
+	ts_pcie_cfg_write(bus, dev, fn, BR_PREF_LIMIT_HI, 0, 4);
+	ts_pcie_cfg_write(bus, dev, fn, BR_PREF_BASE, 0x0000fff0, 4);
+	ts_pcie_cfg_write(bus, dev, fn, BR_PREF_BASE_HI, 0xffffffffU, 4);
+}
+
+/*
+ * What is below 4GB goes through the bridge's memory window, whose
+ * registers have no more bits. What is above can only go through the
+ * prefetchable one; a PCI Express port forwards a request on its address
+ * alone, so a function's other windows work there too.
+ */
+LOCAL void br_open( CONST T_PCIDEV *b, UD base, UD limit )
+{
+	UW	w = ( ( (UW)base >> 16 ) & 0xfff0 ) | ( (UW)limit & 0xfff00000U );
+
+	if ( ( limit >> 32 ) == 0 ) {
+		ts_pcie_cfg_write(b->bus, b->dev, b->fn, BR_MEM_BASE, w, 4);
+		return;
+	}
+	if ( ( ts_pcie_cfg_read(b->bus, b->dev, b->fn, BR_PREF_BASE, 2) & 0xf ) != 1 ) {
+		tm_printf((UB *)"pcie: bridge %x:%02x.%x has no 64 bit window for %lx\n", b->bus, b->dev, b->fn, base);
+	}
+	ts_pcie_cfg_write(b->bus, b->dev, b->fn, BR_PREF_BASE_HI, (UW)( base >> 32 ), 4);
+	ts_pcie_cfg_write(b->bus, b->dev, b->fn, BR_PREF_LIMIT_HI, (UW)( limit >> 32 ), 4);
+	ts_pcie_cfg_write(b->bus, b->dev, b->fn, BR_PREF_BASE, w, 4);
+}
+
+/* The functions of a segment's bus into the table, and the bridges' buses numbered from *p_next */
+LOCAL void seg_walk( CONST T_PCIDOMAIN *g, UINT seg, UINT bus, UINT *p_next )
+{
+	UINT	dev, fn, sub, full = PCI_BUS_IN(seg, bus);
+	UW	id;
+	T_PCIDEV *d;
+	INT	i, nx;
+
+	for ( dev = 0; dev < 32; dev++ ) {
+		for ( fn = 0; fn < 8; fn++ ) {
+			id = ts_pcie_cfg_read(full, dev, fn, PCI_VENDOR_ID, 4);
+			if ( ( id & 0xffff ) == 0xffff || id == 0 ) {
+				if ( fn == 0 ) break;
+				continue;
+			}
+			if ( !table_room() ) return;
+			d = &pci_dev[pci_ndev];
+			knl_memset(d, 0, sizeof(*d));
+			d->vendor = (UH)( id & 0xffff );
+			d->device = (UH)( id >> 16 );
+			d->bus = (UH)full;
+			d->dev = (UB)dev;
+			d->fn = (UB)fn;
+			id = ts_pcie_cfg_read(full, dev, fn, PCI_REVISION, 4);
+			d->prog_if = (UB)( id >> 8 );
+			d->subclass = (UB)( id >> 16 );
+			d->class_code = (UB)( id >> 24 );
+			d->header = (UB)( ts_pcie_cfg_read(full, dev, fn, PCI_HEADER_TYPE, 1) & PCI_HDR_TYPE_MASK );
+			if ( d->header == PCI_HDR_BRIDGE ) {
+				pci_ndev++;		/* d is not used past here: the walk below may move the table */
+				br_close(full, dev, fn);
+				if ( *p_next > g->bus_last ) {
+					tm_printf((UB *)"pcie: no bus number left for the bridge %x:%02x.%x\n", full, dev, fn);
+				} else {
+					sub = (*p_next)++;
+					ts_pcie_cfg_write(full, dev, fn, PCI_PRIMARY_BUS, bus, 1);
+					ts_pcie_cfg_write(full, dev, fn, PCI_SECONDARY_BUS, sub, 1);
+					ts_pcie_cfg_write(full, dev, fn, PCI_SUBORDINATE_BUS, g->bus_last, 1);
+					seg_walk(g, seg, sub, p_next);
+					ts_pcie_cfg_write(full, dev, fn, PCI_SUBORDINATE_BUS, *p_next - 1, 1);
+				}
+			} else {
+				for ( i = 0; i < PCI_MAX_BAR; i = nx ) {
+					bar_size(d, i, &nx);
+				}
+				/* the firmware's addresses mean nothing here: every window is placed anew */
+				for ( i = 0; i < PCI_MAX_BAR; i++ ) d->bar[i] = 0;
+				d->int_pin = (UB)ts_pcie_cfg_read(full, dev, fn, PCI_INT_PIN, 1);
+				pci_ndev++;
+			}
+			if ( fn == 0 && ( ts_pcie_cfg_read(full, dev, 0, PCI_HEADER_TYPE, 1) & PCI_HDR_MULTI ) == 0 ) {
+				break;
+			}
+		}
+	}
+}
+
+/* The most room a bus and what is behind it can take: its windows with their alignment, the bridges' to the megabyte */
+LOCAL UD seg_need( UINT full )
+{
+	UD	sum = 0;
+	UINT	sec;
+	INT	i, k;
+
+	for ( i = 0; i < pci_ndev; i++ ) {
+		T_PCIDEV	*d = &pci_dev[i];
+
+		if ( d->bus != full ) continue;
+		if ( d->header == PCI_HDR_BRIDGE ) {
+			sec = ts_pcie_cfg_read(d->bus, d->dev, d->fn, PCI_SECONDARY_BUS, 1);
+			if ( sec != 0 ) sum += seg_need(PCI_BUS_IN(PCI_BUS_SEG(full), sec)) + 2 * MB1;
+			continue;
+		}
+		for ( k = 0; k < PCI_MAX_BAR; k++ ) {
+			if ( d->bar_is_io[k] == 0 ) sum += d->bar_size[k] * 2;
+		}
+	}
+	return sum;
+}
+
+/*
+ * The windows on a bus placed from *p_next, the largest first; then each
+ * bridge's window around what is behind it. A window with no room stays
+ * unusable and is said.
+ */
+LOCAL void seg_place( UINT full, UD *p_next, UD end )
+{
+	INT		i, k, bd, bb;
+	UD		best, a, first;
+	UINT		off, sec;
+	T_PCIDEV	*d;
+
+	for (;;) {
+		best = 0;
+		bd = bb = -1;
+		for ( i = 0; i < pci_ndev; i++ ) {
+			d = &pci_dev[i];
+			if ( d->bus != full || d->header == PCI_HDR_BRIDGE ) continue;
+			for ( k = 0; k < PCI_MAX_BAR; k++ ) {
+				if ( d->bar_size[k] > best && d->bar[k] == 0 && d->bar_is_io[k] == 0 ) {
+					best = d->bar_size[k];
+					bd = i;
+					bb = k;
+				}
+			}
+		}
+		if ( bd < 0 ) break;
+		d = &pci_dev[bd];
+		off = PCI_BAR0 + (UINT)bb * 4;
+		a = ( *p_next + best - 1 ) & ~( best - 1 );
+		if ( a + best > end || ( d->bar_is_64[bb] == 0 && ( ( a + best - 1 ) >> 32 ) != 0 ) ) {
+			tm_printf((UB *)"pcie: %x:%02x.%x window %d of %ld KB has no room\n",
+				  d->bus, d->dev, d->fn, bb, (D)( best >> 10 ));
+			d->bar_size[bb] = 0;
+			continue;
+		}
+		*p_next = a + best;
+		ts_pcie_cfg_write(d->bus, d->dev, d->fn, off, (UW)a, 4);
+		if ( d->bar_is_64[bb] != 0 ) {
+			ts_pcie_cfg_write(d->bus, d->dev, d->fn, off + 4, (UW)( a >> 32 ), 4);
+		}
+		d->bar[bb] = a;
+	}
+	for ( i = 0; i < pci_ndev; i++ ) {
+		T_PCIDEV	b = pci_dev[i];
+
+		if ( b.bus != full || b.header != PCI_HDR_BRIDGE ) continue;
+		sec = ts_pcie_cfg_read(b.bus, b.dev, b.fn, PCI_SECONDARY_BUS, 1);
+		if ( sec == 0 ) continue;
+		first = *p_next = ( *p_next + MB1 - 1 ) & ~( MB1 - 1 );
+		seg_place(PCI_BUS_IN(PCI_BUS_SEG(full), sec), p_next, end);
+		*p_next = ( *p_next + MB1 - 1 ) & ~( MB1 - 1 );
+		if ( *p_next > first ) br_open(&b, first, *p_next - 1);
+	}
+}
+
+/*
+ * Take in a segment: its host's numbering walked from bus_first, its
+ * bridges and functions all given new numbers and windows from the host's
+ * ranges (nothing the firmware left is relied on). Each port on the top
+ * bus takes, with what is behind it, the first range with room for all
+ * of it. Answers how many functions are in the segment.
+ */
+EXPORT INT knl_pcie_domain_add( T_PCIDOMAIN *g )
+{
+	INT		first = pci_ndev, i, k;
+	UINT		seg, top, next, sec;
+	UD		need, base, f;
+
+	if ( pci_ndomain >= PCI_MAX_DOMAIN ) {
+		return E_LIMIT;
+	}
+	pci_domain[pci_ndomain++] = g;
+	seg = (UINT)pci_ndomain;
+	top = PCI_BUS_IN(seg, g->bus_first);
+	next = g->bus_first + 1;
+	seg_walk(g, seg, g->bus_first, &next);
+
+	for ( i = first; i < pci_ndev; i++ ) {
+		T_PCIDEV	b = pci_dev[i];
+
+		if ( b.bus != top || b.header != PCI_HDR_BRIDGE ) continue;
+		sec = ts_pcie_cfg_read(b.bus, b.dev, b.fn, PCI_SECONDARY_BUS, 1);
+		if ( sec == 0 ) continue;
+		need = seg_need(PCI_BUS_IN(seg, sec)) + 2 * MB1;
+		for ( k = 0; k < g->nrange; k++ ) {
+			f = ( g->range_next[k] + MB1 - 1 ) & ~( MB1 - 1 );
+			if ( f + need <= g->range_end[k] ) break;
+		}
+		if ( k >= g->nrange ) {
+			tm_printf((UB *)"pcie: no range of the segment has %ld KB for what is behind %x:%02x.%x\n",
+				  (D)( need >> 10 ), b.bus, b.dev, b.fn);
+			continue;
+		}
+		base = f;
+		seg_place(PCI_BUS_IN(seg, sec), &base, g->range_end[k]);
+		base = ( base + MB1 - 1 ) & ~( MB1 - 1 );
+		if ( base > f ) br_open(&b, f, base - 1);
+		g->range_next[k] = base;
+	}
+	/* functions on the top bus itself, with no port above them, from the first range */
+	if ( g->nrange > 0 ) {
+		seg_place(top, &g->range_next[0], g->range_end[0]);
+	}
+	for ( i = first; i < pci_ndev; i++ ) {
+		T_PCIDEV	*d = &pci_dev[i];
+
+		tm_printf((UB *)"TessronOS: pci %x:%d.%d %04x:%04x class %02x.%02x.%02x, first window %lx\n",
+			  d->bus, d->dev, d->fn, d->vendor, d->device,
+			  d->class_code, d->subclass, d->prog_if, d->bar[0]);
+	}
+	return pci_ndev - first;
+}
+
+/* Whether this function is the host of a segment: what is behind it needs it awake */
+EXPORT BOOL knl_pcie_is_domain_host( CONST T_PCIDEV *dev )
+{
+	INT	i;
+
+	for ( i = 0; dev != NULL && i < pci_ndomain; i++ ) {
+		if ( pci_domain[i]->host_bus == dev->bus && pci_domain[i]->host_dev == dev->dev
+		  && pci_domain[i]->host_fn == dev->fn ) {
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+/*
+ * In a function's interrupt handler, before it looks at what the function
+ * wrote to memory: a host whose messages can pass the function's writes
+ * has a register of the function read first. Nothing for any other.
+ */
+EXPORT void ts_pcie_irq_sync( CONST T_PCIDEV *dev )
+{
+	T_PCIDOMAIN	*g;
+
+	if ( dev == NULL || PCI_BUS_SEG(dev->bus) == 0 ) {
+		return;
+	}
+	g = domain_of(dev->bus);
+	if ( g != NULL && g->read_before_handler ) {
+		(void)ts_pcie_cfg_read(dev->bus, dev->dev, dev->fn, PCI_VENDOR_ID, 2);
+	}
+}
+
+#ifdef USE_KTEST
+/*
+ * For the tests (the start-up setting pcifake=amd): the table says the
+ * functions of the kinds a PC with an AMD processor has are AMD's, so
+ * that what a driver decides from the identity is gone through here
+ */
+EXPORT void knl_pcie_fake_amd( void )
+{
+	INT	i;
+
+	for ( i = 0; i < pci_ndev; i++ ) {
+		T_PCIDEV	*d = &pci_dev[i];
+		UW		c = ( (UW)d->class_code << 16 ) | ( (UW)d->subclass << 8 ) | d->prog_if;
+		UH		id = 0;
+
+		if ( c == 0x0c0330 ) id = 0x149c;		/* xHCI */
+		else if ( c == 0x010802 ) id = 0x1480;		/* an NVMe controller of its own */
+		else if ( ( c >> 8 ) == 0x0403 ) id = 0x1487;	/* HD Audio */
+		else if ( ( c >> 8 ) == 0x0805 ) id = 0x7813;	/* SD host */
+		else if ( ( c >> 8 ) == 0x0106 ) id = 0x7901;	/* AHCI */
+		else if ( ( c >> 8 ) == 0x0600 ) id = 0x1480;	/* the host bridge */
+		else if ( ( c >> 8 ) == 0x0300 ) id = 0;	/* the screen keeps its identity: GOP */
+		if ( id != 0 ) {
+			tm_printf((UB *)"pcifake: %02x:%02x.%x %04x:%04x is 1022:%04x from here\n", d->bus, d->dev, d->fn,
+				  d->vendor, d->device, id);
+			d->vendor = 0x1022;
+			d->device = id;
+		}
+	}
+}
+
+/* A function taken off the table: a test shows it again behind a segment of its own */
+EXPORT void knl_pcie_hide( UINT bus, UINT dev, UINT fn )
+{
+	INT	i;
+
+	for ( i = 0; i < pci_ndev; i++ ) {
+		if ( pci_dev[i].bus == bus && pci_dev[i].dev == dev && pci_dev[i].fn == fn ) {
+			for ( ; i < pci_ndev - 1; i++ ) pci_dev[i] = pci_dev[i + 1];
+			pci_ndev--;
+			return;
+		}
+	}
+}
+#endif
+
+#endif /* __x86_64__ */
+
 /* ---------------------------------------------------------------- the interrupt of a function */
 
 /* What each function was given, for the drivers' records and the tests */
 #define IRQ_REC_N	32
 LOCAL struct {
-	UB	used, bus, dev, fn, kind;
+	UB	used, dev, fn, kind;
+	UH	bus;
 	UINT	intno;
 } irq_rec[IRQ_REC_N];
 
@@ -839,6 +1296,10 @@ LOCAL UINT intx_line( CONST T_PCIDEV *d, char *how, INT max )
 
 	if ( d->int_pin < 1 || d->int_pin > 4 ) {
 		tm_sprintf((UB *)how, (UB *)"no line pin");
+		return 0;
+	}
+	if ( PCI_BUS_SEG(d->bus) != 0 ) {
+		tm_sprintf((UB *)how, (UB *)"no line behind its segment's host");
 		return 0;
 	}
 	if ( !knl_acpica_ready() ) {
@@ -1013,6 +1474,9 @@ EXPORT INT knl_pcie_scan( UD mmio_base, UD mmio_size )
 		tm_printf((UB *)"TessronOS: pci %d:%d.%d %04x:%04x class %02x.%02x.%02x\n",
 			  d->bus, d->dev, d->fn, d->vendor, d->device,
 			  d->class_code, d->subclass, d->prog_if);
+	}
+	if ( pci_left > 0 ) {
+		tm_printf((UB *)"TessronOS: pci: no memory for %d more functions: they are left out\n", pci_left);
 	}
 
 	return pci_ndev;

@@ -25,9 +25,7 @@
  *
  *	Addresses and ports inside the structures are in network byte order,
  *	as are the UINT addresses so_resolve and the interface calls use; the
- *	so_hton* helpers below turn a host value round. The 32 bit values
- *	are UINT rather than UW: a program built without config/config.h has
- *	a UW of 64 bits.
+ *	so_hton* helpers below turn a host value round.
  */
 
 #ifndef __TS_SOAPP_H__

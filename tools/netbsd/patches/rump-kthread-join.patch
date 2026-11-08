@@ -1,0 +1,104 @@
+rump: a kthread that must be joined stays until its joiner has come.
+
+kthread_exit released the lwp (rump_lwproc_releaselwp, then freed as
+the thread unscheduled) before anyone joined it, and kthread_join then
+read l->l_ctxlink out of the freed lwp. A thread with nothing to do
+(config_mountroot_thread with an empty queue) ends before its creator
+joins it, so the read was nearly always of freed memory: harmless while
+the memory still held the old value, an exception once it was used
+again (a Raspberry Pi 5, 2026-11-05: rump_tswifi_start,
+config_finalize_mountroot, kthread_join, rumpuser_thread_join on a
+pointer of text).
+
+The exiting thread now waits, before it releases the lwp, for the
+joiner to have taken the thread's cookie and said so in l_private, as
+the kernel's own kthread_exit and kthread_join do. The joiner does not
+touch the lwp after that. The wait has its own mutex, not a spin one: a
+thread woken in a wait takes its mutex again before its virtual
+processor, and one waiting for a spin mutex keeps its processor.
+
+Applied by tools/netbsd/build.sh to a copy of the file
+(docs/tessronos/09-network.md 9.1); NetBSD's tree is not changed.
+
+--- a/sys/rump/librump/rumpkern/threads.c
++++ b/sys/rump/librump/rumpkern/threads.c
+@@ -55,6 +55,14 @@
+ static bool threads_are_go;
+ static struct rumpuser_mtx *thrmtx;
+ static struct rumpuser_cv *thrcv;
++
++/*
++ * The joining of a kthread that must be joined. Not a spin mutex: a
++ * thread woken in the wait takes it again before its virtual processor,
++ * and one taking a spin mutex keeps its processor while it waits.
++ */
++static struct rumpuser_mtx *joinmtx;
++static struct rumpuser_cv *joincv;
+ static TAILQ_HEAD(, thrdesc) newthr;
+ 
+ static void *
+@@ -98,6 +106,8 @@
+ 
+ 	rumpuser_mutex_init(&thrmtx, RUMPUSER_MTX_SPIN);
+ 	rumpuser_cv_init(&thrcv);
++	rumpuser_mutex_init(&joinmtx, 0);
++	rumpuser_cv_init(&joincv);
+ 	TAILQ_INIT(&newthr);
+ }
+ 
+@@ -197,6 +207,8 @@
+ 	l->l_flag |= LW_SYSTEM;
+ 	if (flags & KTHREAD_MPSAFE)
+ 		l->l_pflag |= LP_MPSAFE;
++	if (flags & KTHREAD_MUSTJOIN)
++		l->l_pflag |= LP_MUSTJOIN;
+ 	if (flags & KTHREAD_INTR)
+ 		l->l_pflag |= LP_INTR;
+ 	if (ci) {
+@@ -227,8 +239,22 @@
+ kthread_exit(int ecode)
+ {
+ 
+-	if ((curlwp->l_pflag & LP_MPSAFE) == 0)
++	struct lwp *l = curlwp;
++
++	if ((l->l_pflag & LP_MPSAFE) == 0)
+ 		KERNEL_UNLOCK_LAST(NULL);
++
++	/*
++	 * Barrier for joining: the lwp is freed once released, and the
++	 * joiner reads it, so it stays until the joiner has taken what it
++	 * needs and said so in l_private.
++	 */
++	if (l->l_pflag & LP_MUSTJOIN) {
++		rumpuser_mutex_enter(joinmtx);
++		while (l->l_private == NULL)
++			rumpuser_cv_wait(joincv, joinmtx);
++		rumpuser_mutex_exit(joinmtx);
++	}
+ 	rump_lwproc_releaselwp();
+ 	/* unschedule includes membar */
+ 	rump_unschedule();
+@@ -238,10 +264,21 @@
+ int
+ kthread_join(struct lwp *l)
+ {
++	void *cookie;
+ 	int rv;
+ 
+ 	KASSERT(l->l_ctxlink != NULL);
+-	rv = rumpuser_thread_join(l->l_ctxlink);
++	KASSERT((l->l_pflag & LP_MUSTJOIN) != 0);
++
++	/* what is needed of l taken first: after the word below it may be freed */
++	cookie = l->l_ctxlink;
++	rumpuser_mutex_enter(joinmtx);
++	KASSERT(l->l_private == NULL);
++	l->l_private = (void *)1;
++	rumpuser_cv_broadcast(joincv);
++	rumpuser_mutex_exit(joinmtx);
++
++	rv = rumpuser_thread_join(cookie);
+ 	membar_consumer();
+ 
+ 	return rv;

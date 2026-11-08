@@ -1636,7 +1636,7 @@ LOCAL ER vobj( BK_TADW *w, CONST TOK *t )
 	UINT	col[4];
 	static CONST char *CONST cn[4] = { "frcol", "chcol", "tbcol", "bgcol" };
 	static CONST UINT cdef[4] = { BLACK, BLACK, WHITE, WHITE };
-	UB	id[64];
+	UB	id[TS_LNK_PART * 2 + 64];	/* a machine, a volume, the object and its record */
 	INT	n;
 
 	if ( has(t, "vobjleft") || !has(t, "width") ) {
@@ -1670,7 +1670,8 @@ LOCAL ER vobj( BK_TADW *w, CONST TOK *t )
 	lk.taglen = t->n;
 	lk.target[0] = 0;
 	n = bk_tad_attr(t->p, t->n, "id", id, sizeof(id));
-	if ( n > 0 ) {
+	/* n counts what did not fit as well: an id that long names nothing, and only id's bytes are read */
+	if ( n > 0 && n < (INT)sizeof(id) ) {
 		/* "uuid_0.xtad": the object is the part before the '_', after a volume it names */
 		INT	at = ts_lnk_split((CONST UB *)id, n, NULL, NULL);
 

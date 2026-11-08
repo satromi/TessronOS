@@ -1,0 +1,315 @@
+# 仮身一覧の〈整頓〉 (design 11.3, 17.6), for tools/ui_run.py: the desktop's cabinet and 仮身一覧
+# running as a process lay out the same and write the same record. 画用紙 holding four links of
+# different heights (xmlbig), opened with 仮身一覧 (apps): the first closed with a box of 25
+# (drawn as its band, 19), the second closed with 19, the third opened with 80, the fourth closed
+# with 22 (drawn 19), at tops 20, 70, 120 and 230. All picked (Ctrl+A) and 整頓 (Ctrl+D). Its
+# panel -- the desktop's own, or panel 1 of the cabinet's data box (SYSDEF_BOX_CAB) for the
+# process -- stands at the same place on the screen (the corner at 312,232) with its parts at the
+# same places. Three ways, each first in the desktop's cabinet (open), saved (Ctrl+S) and record
+# 0 kept, then in the process (pcab), saved and compared byte for byte (same):
+#  縦「詰める」 (430,358): each 5 below the foot of the one above as it is drawn, tops 20, 44,
+#   68 and 153;
+#  縦「上揃え」 (440,380): the room between the topmost and the next as they stand (70 - (20 +
+#   19) = 31) kept between all of them, tops 20, 70, 120 and 231;
+#  整列順「名前」 (842,284), 順序「降順」 (842,424) and 幅調整「全項目」 (652,402): each as wide
+#   as its name, relationship, program and date need, in a column by the objects' names from the
+#   last, which reads each object's metadata (the desktop's store, the process's ob_atr_read).
+# OK is at 902,537. A link's frame is drawn on the screen 128 below its top (x 200 crosses every
+# frame): the rows between two frames are white, as many as the room asked for. The shots
+# (arr_k_*, arr_p_*) are compared afterwards inside the window.
+# Keys: Ctrl+A 04 01, Ctrl+D 07 01, Ctrl+S 16 01, Ctrl+E 08 01.
+cabproc kernel
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="45" height="25" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="70" vobjright="180" vobjbottom="89" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="120" vobjright="180" vobjbottom="200" height="80" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="20" vobjtop="230" vobjright="180" vobjbottom="252" height="22" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+key 04 01
+sync 600
+key 07 01
+wait 1500
+click 430 358
+wait 300
+click 902 537
+wait 800
+sync 600
+click 700 650
+sync 600
+wait 300
+shot arr_k_compact
+pixel 200 148 000000
+pixel 200 171 FFFFFF
+pixel 200 172 000000
+pixel 200 195 FFFFFF
+pixel 200 196 000000
+pixel 200 280 FFFFFF
+pixel 200 281 000000
+key 16 01
+sync 600
+sum show
+keep compact
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="45" height="25" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="70" vobjright="180" vobjbottom="89" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="120" vobjright="180" vobjbottom="200" height="80" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="20" vobjtop="230" vobjright="180" vobjbottom="252" height="22" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+logmark
+pcab big
+expectsincein 60 cabinet: opened 画用紙 shapes 4 links 4
+wait 800
+key 04 01
+wait 300
+logmark
+key 07 01
+expectsince cabinet: arrange panel
+wait 500
+click 430 358
+wait 300
+logmark
+click 902 537
+expectsince cabinet: arranged 4
+wait 800
+click 700 650
+wait 600
+wait 300
+shot arr_p_compact
+pixel 200 148 000000
+pixel 200 171 FFFFFF
+pixel 200 172 000000
+pixel 200 195 FFFFFF
+pixel 200 196 000000
+pixel 200 280 FFFFFF
+pixel 200 281 000000
+logmark
+key 16 01
+expectsince cabinet: saved (0)
+sum show
+same compact
+key 08 01
+expect cabinet: closed
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="45" height="25" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="70" vobjright="180" vobjbottom="89" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="120" vobjright="180" vobjbottom="200" height="80" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="20" vobjtop="230" vobjright="180" vobjbottom="252" height="22" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+key 04 01
+sync 600
+key 07 01
+wait 1500
+click 440 380
+wait 300
+click 902 537
+wait 800
+sync 600
+click 700 650
+sync 600
+wait 300
+shot arr_k_align
+pixel 200 148 000000
+pixel 200 197 FFFFFF
+pixel 200 198 000000
+pixel 200 247 FFFFFF
+pixel 200 248 000000
+pixel 200 358 FFFFFF
+pixel 200 359 000000
+key 16 01
+sync 600
+sum show
+keep align
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="45" height="25" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="70" vobjright="180" vobjbottom="89" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="120" vobjright="180" vobjbottom="200" height="80" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="20" vobjtop="230" vobjright="180" vobjbottom="252" height="22" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+logmark
+pcab big
+expectsincein 60 cabinet: opened 画用紙 shapes 4 links 4
+wait 800
+key 04 01
+wait 300
+logmark
+key 07 01
+expectsince cabinet: arrange panel
+wait 500
+click 440 380
+wait 300
+logmark
+click 902 537
+expectsince cabinet: arranged 4
+wait 800
+click 700 650
+wait 600
+wait 300
+shot arr_p_align
+pixel 200 148 000000
+pixel 200 197 FFFFFF
+pixel 200 198 000000
+pixel 200 247 FFFFFF
+pixel 200 248 000000
+pixel 200 358 FFFFFF
+pixel 200 359 000000
+logmark
+key 16 01
+expectsince cabinet: saved (0)
+sum show
+same align
+key 08 01
+expect cabinet: closed
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="45" height="25" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="70" vobjright="180" vobjbottom="89" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="120" vobjright="180" vobjbottom="200" height="80" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="20" vobjtop="230" vobjright="180" vobjbottom="252" height="22" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+key 04 01
+sync 600
+key 07 01
+wait 1500
+click 842 284
+wait 300
+click 842 424
+wait 300
+click 652 402
+wait 300
+click 902 537
+wait 800
+sync 600
+click 700 650
+sync 600
+wait 300
+shot arr_k_name
+key 16 01
+sync 600
+sum show
+keep name
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="45" height="25" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="70" vobjright="180" vobjbottom="89" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="120" vobjright="180" vobjbottom="200" height="80" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="20" vobjtop="230" vobjright="180" vobjbottom="252" height="22" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+logmark
+pcab big
+expectsincein 60 cabinet: opened 画用紙 shapes 4 links 4
+wait 800
+key 04 01
+wait 300
+logmark
+key 07 01
+expectsince cabinet: arrange panel
+wait 500
+click 842 284
+wait 300
+click 842 424
+wait 300
+click 652 402
+wait 300
+logmark
+click 902 537
+expectsince cabinet: arranged 4
+wait 800
+click 700 650
+wait 600
+wait 300
+shot arr_p_name
+logmark
+key 16 01
+expectsince cabinet: saved (0)
+sum show
+same name
+key 08 01
+expect cabinet: closed
+wait 500

@@ -73,6 +73,23 @@ extern "C" {
  * floating ones, as a picture-in-picture window stays over the others.
  */
 #define WM_ATTR_FLOAT		0x0400
+/*
+ * A window that covers the whole screen, the message line too: while
+ * one such window is open the message line is taken down, and when the
+ * last of them closes -- its program closing it, or ending -- it is put
+ * back, unless it was down already before the first came. スライド
+ * shows its slides in one.
+ */
+#define WM_ATTR_SCREEN		0x0800
+
+/*
+ * A window of its own, as a person sees one: it comes forward with the
+ * keys when pressed or opened at their asking, and the keys go to it
+ * when the window in front of it closes. A window with a title bar is
+ * one, and so is one over the whole screen; a panel, a menu and a part
+ * of another window are not.
+ */
+#define WM_ATTR_OWN		( WM_ATTR_TITLE | WM_ATTR_SCREEN )
 
 #define WM_TITLE_MAX		128
 
@@ -174,6 +191,14 @@ IMPORT INT wm_num( UINT num, INT dflt );
 IMPORT ER  wm_set_look( UINT num, UW value );
 IMPORT ER  wm_set_look_tone( UINT num, INT tone, UW fore, UW back );
 IMPORT ER  wm_look_pat( UINT num, T_DPPAT *pat );
+/*
+ * A rectangle of a drawing environment filled with an entry of the look
+ * table as the system fills with it: its tone or its stripes
+ * (wm_look_pat), or the work area's colour for an entry not there. A
+ * process calls it for an environment it may draw in (class 9 of the
+ * calls), as the ground of a window of its own is drawn (LK_PNLGROUND).
+ */
+IMPORT ER  wm_fill_look( INT gid, CONST T_DPRECT *r, UINT num );
 
 /* ------------------------------------------------------- the look settings */
 
@@ -488,6 +513,29 @@ static inline INT wm_hit_in( INT in, INT slop, INT len )
 IMPORT void knl_wm_touch_note( UD when );
 
 /*
+ * The places of a window where a finger means the main button at once
+ * (design 6.4.1): rectangles of its work area, in its coordinates, that
+ * take the place of the whole list given before; none takes them away.
+ * Elsewhere a finger waits to be known for a tap, a drag or a hold, which
+ * is the second button; here it is pressed as it touches and stays
+ * pressed until it lets go, and a hold is nothing. They go with the
+ * window, moved or closed; what is sized away counts no more, and a
+ * window in front of a place takes it. E_LIMIT: too many windows have
+ * places (WM_PRESS_WINS).
+ */
+#define WM_PRESS_RECTS		256
+#define WM_PRESS_WINS		8
+IMPORT ER   wm_obj_press_area( INT wid, CONST T_DPRECT *r, INT n );
+
+/*
+ * Whether a finger touching (x, y) of the screen is on such a place. The
+ * input layer asks as it takes the touch, so this takes no lock and waits
+ * for nothing: a window being changed at that moment may be read either
+ * way, for that one touch.
+ */
+IMPORT BOOL knl_wm_press_now( INT x, INT y );
+
+/*
  * A press on a window's pictogram at (sx, sy) on the screen, at 'when'
  * (ns): TRUE when it is the second of a double press there, which is
  * what closes a window.
@@ -501,6 +549,13 @@ IMPORT BOOL wm_pict_close( INT wid, INT sx, INT sy, UD when );
  * whose parts begin to overlap.
  */
 IMPORT ER  wm_least( UINT attr, INT *p_wide, INT *p_high );
+
+/*
+ * How much wider and taller than its work area the outer edge of a
+ * window of attr is: what to add to a panel's size for the window that
+ * shows the panel whole.
+ */
+IMPORT void wm_frame_of( UINT attr, INT *p_wide, INT *p_high );
 
 /*
  * The environment that draws into this window's own pixels. Its origin
@@ -618,6 +673,30 @@ IMPORT INT wm_at( INT x, INT y );
  */
 IMPORT ER  wm_focus( INT wid );
 IMPORT INT wm_focused( void );
+
+/*
+ * A window that never has the keys shown as the one that has them, for
+ * as long as a panel it brought up stands over it (wm_panel_open_at with
+ * it as the owner: the system's colour panel under a palette of its
+ * program's). Its band is drawn as the band of the window with the
+ * input, and that window's as one without, as when a window that can
+ * take the keys brings the panel up and takes them. Put off again (on
+ * FALSE), or closed, the window with the input is shown again. A window
+ * that can take the keys is not shown so (E_OBJ): it is given them.
+ */
+IMPORT ER  wm_lit( INT wid, BOOL on );
+
+/*
+ * A window opened because of what a person did takes the keys; one that
+ * opens by itself does not (design 10). A ticket is the count of what
+ * has been pressed: it stays good until the next press, which says the
+ * person has gone on to something else, and for WM_ACT_MS at most.
+ * wm_act_age says how long ago the last press was, in milliseconds.
+ */
+#define WM_ACT_MS	60000
+IMPORT UINT wm_act_ticket( void );
+IMPORT BOOL wm_act_good( UINT ticket );
+IMPORT UW   wm_act_age( void );
 
 /*
  * Take the next thing that happened, already addressed to a window and
@@ -841,6 +920,8 @@ IMPORT ER  wm_frames( T_WMFRAMES *st );
 
 /* The size of the screen, 0 by 0 before the manager is up */
 IMPORT void wm_screen( INT *p_w, INT *p_h );
+IMPORT void wm_screen_main( INT *p_w, INT *p_h );	/* the main screen (10.4.8); wm_screen is the whole view */
+IMPORT void wm_screen_at( INT x, INT y, T_DPRECT *r );	/* the screen a point of the view is on */
 
 /*
  * The screen as last built, copied into 'dst' (width by height pixels,
@@ -855,6 +936,51 @@ IMPORT ER  wm_copy_screen( UW *dst, INT pitch );
  * lies on the screen, or without it, what it covers in its place.
  */
 IMPORT ER  wm_grab_screen( UW *dst, INT pitch, CONST T_DPRECT *r, BOOL pointer );
+
+/*
+ * The windows a person can choose to share (wm_share_list), nearest the
+ * viewer first: the shown windows with a name band that are subordinate
+ * to none. A window is known by its number and the serial of that
+ * opening, so a number used again by a later window is not taken for it.
+ */
+#define WM_SHARE_OWN		0x0001	/* a window of the caller's process */
+#define WM_SHARE_SAMEPROG	0x0002	/* of a process of the caller's program */
+
+typedef struct {
+	INT	wid;
+	UINT	serial;
+	INT	gid;			/* the environment that draws into it */
+	INT	pid;			/* the process that opened it; 0 a task of the kernel's */
+	INT	w, h;			/* its work area, in view pixels */
+	UINT	flags;			/* WM_SHARE_* */
+	char	title[WM_TITLE_MAX];
+} T_WMSHARE;
+
+IMPORT INT knl_wm_nwin( void );
+/* Up to max of them into v: how many were put there */
+IMPORT INT wm_share_list( T_WMSHARE *v, INT max );
+
+/*
+ * Rows of a window's work area as its program last drew them, whatever
+ * covers it on the screen (wm_grab_window). The window's own pixels are
+ * read, so the frame and the band are not in it, nor the pointer.
+ * rows rows from the row top, at most maxw pixels of each, go into dst,
+ * 'pitch' pixels to a row; *p_w and *p_h are told the work area's size
+ * as it is. E_NOEXS when that opening of the window has been closed.
+ */
+IMPORT ER  wm_grab_rows( INT wid, UINT serial, UW *dst, INT pitch, INT top, INT rows, INT maxw, INT *p_w, INT *p_h );
+
+/* The call for a process: the whole work area, cut to maxw by maxh */
+typedef struct {
+	INT	wid;
+	UINT	serial;
+	UW	*dst;
+	INT	pitch;
+	INT	maxw, maxh;
+	INT	w, h;			/* answered: the size copied */
+} T_WMGRAB;
+
+IMPORT ER  wm_grab_window( T_WMGRAB *g );
 
 /*
  * The window in front with the windows subordinate to it (wm_set_parent),
@@ -910,6 +1036,10 @@ IMPORT ER   wm_obj_shows( INT wid, CONST TS_UUID *obj );
  */
 IMPORT BOOL wm_obj_shown( INT wid, TS_UUID *p_obj );
 IMPORT INT  wm_obj_showing( CONST TS_UUID *obj );
+/* The process that made a window object, 0 the system's or no such window */
+IMPORT ID   wm_obj_maker( INT wid );
+IMPORT INT  wm_obj_close_programs( ID *pids, INT max );
+IMPORT INT  wm_obj_program_window( ID pid );
 IMPORT ER   knl_wmobj_init( void );		/* after the object layer is up */
 
 /*
@@ -930,6 +1060,32 @@ IMPORT void wm_obj_quiet( BOOL on );
  */
 IMPORT ER   wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
 			 CONST T_OBDROPV *v, INT n );
+
+/*
+ * The same for links carried out of the window of the process giver: the
+ * person let them go, but the rights are the two processes'. E_OACV when
+ * giver or the taker may not read one of the objects; the taker is
+ * granted nothing, and each link's ops says what both may do.
+ * wm_obj_drop_may asks beforehand, with nothing dropped and the keys left
+ * where they are: E_NOSPT nobody takes drops there, E_OACV as above;
+ * target NULL asks only whether anyone takes them.
+ */
+IMPORT ER   wm_obj_drop_for( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
+			     ID giver, CONST T_OBDROPV *v, INT n );
+IMPORT ER   wm_obj_drop_may( INT wid, ID giver, CONST TS_UUID *target );
+
+/*
+ * Whether the window would take links let go at (sx, sy) on the screen,
+ * asked of the one who takes its drops before the objects are made
+ * (OB_E_ASK, OB_WR_ASK of ts/ob.h); the question's number in *p_seq.
+ * E_NOSPT: nobody there is asked. wm_obj_asked says the answer: E_OK it
+ * would take them, E_NOEXS it would not, E_TMOUT not answered yet, E_OBJ
+ * the window has gone or been asked again since. wm_obj_ask_text asks the
+ * same of letters (OB_ASK_LETTERS, of the one who takes its letters).
+ */
+IMPORT ER   wm_obj_ask( INT wid, INT sx, INT sy, UINT mods, UINT *p_seq );
+IMPORT ER   wm_obj_ask_text( INT wid, INT sx, INT sy, UINT mods, UINT *p_seq );
+IMPORT ER   wm_obj_asked( INT wid, UINT seq );
 
 /*
  * Letters carried out of a text and let go over a window that belongs to
@@ -953,12 +1109,23 @@ IMPORT void wm_obj_scroll( INT wid, UINT which, INT pos, UINT how );
  * a screen keyboard: put in as if the keyboard had sent it, pressed and
  * let go, so that it goes to the window that has the keys. code is the
  * key's usage (1..255), mods the modifiers held with it (HID_MOD_* and
- * KM_MOD_THUMB_*). It is taken only while the last press of a button
+ * KM_MOD_THUMB_*) and the layouts the key is read in (KM_MOD_LAYOUT, the
+ * screen keyboard's own; none, the machine's), which go with its press
+ * and its let go to the window it reaches. It is taken only while the last press of a button
  * went down on that window, within WM_KEY_PUT_MS of it: a window types
  * only as a person presses on it. E_OBJ for a window that may have the
  * keys, E_OACV for no such press.
+ *
+ * With WM_KEY_PUT_DOWN in mods the key is only pressed, and stays down
+ * until WM_KEY_PUT_UP with the same code or the window goes, so that a
+ * program that reads the key's state sees it held. While it is down the
+ * press may be given again (the key repeating) however long after the
+ * press on the window. A window holds one key: pressing another lets the
+ * first go. E_OACV for letting go a key that is not down.
  */
 #define WM_KEY_PUT_MS		3000
+#define WM_KEY_PUT_DOWN		0x01000000U
+#define WM_KEY_PUT_UP		0x02000000U
 IMPORT ER   wm_obj_key_put( INT wid, UINT code, UINT mods );
 
 #ifdef __cplusplus

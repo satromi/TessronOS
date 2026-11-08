@@ -30,6 +30,7 @@
 
 #include <sys/machine.h>
 #include "kernel.h"
+#include <ts/pm.h>
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/proc.h>
@@ -46,6 +47,7 @@ typedef struct {
 	T_CAMSETMODE	setm;
 	INT		curmode;
 	BOOL		streaming;
+	BOOL		pm_ran;		/* it streamed as the machine slept */
 	UB		*buf[NBUF];
 	INT		cap;		/* each buffer's size */
 	INT		len[NBUF];
@@ -558,8 +560,47 @@ LOCAL INT cam_event( INT evttyp, void *evtinf, void *exinf )
 	return E_OK;
 }
 
+#ifdef X64
+/* The machine asleep: what streams stops at its source and starts again on waking */
+LOCAL ER cam_pm_suspend( void *arg, INT how )
+{
+	CAMTBL	*t = cam_tbl;
+	INT	i;
+
+	for ( i = 0; t != NULL && i < t->n; i++ ) {
+		CAM	*c = t->e[i];
+
+		c->pm_ran = ( c->src != NULL && c->streaming );
+		if ( c->pm_ran && c->src->stop != NULL ) c->src->stop(c->src);
+	}
+	return E_OK;
+}
+
+LOCAL void cam_pm_resume( void *arg, INT how )
+{
+	CAMTBL	*t = cam_tbl;
+	INT	i;
+
+	for ( i = 0; t != NULL && i < t->n; i++ ) {
+		CAM	*c = t->e[i];
+
+		if ( c->pm_ran && c->src->start != NULL ) {
+			ER	er = c->src->start(c->src);
+
+			tm_printf((UB *)"cam: started again after the sleep: %d\n", er);
+		}
+	}
+}
+
+LOCAL CONST T_PMDEV	cam_pm = { "camera", PM_ORD_CAMERA, cam_pm_suspend, cam_pm_resume, NULL };
+#endif /* X64 */
+
 EXPORT ER knl_cam_init( void )
 {
+#ifdef X64
+	(void)ts_pm_register(&cam_pm);
+#endif
+
 	T_DDEV	ddev;
 	T_CMTX	cm;
 	ID	id;

@@ -877,6 +877,14 @@ LOCAL void test_digi_two( void )
 	none(600);
 }
 
+/* The view pixels on the screen in 1 mm, about: 10 mm of two fingers is a notch of the wheel */
+LOCAL INT tw_px_of( void )
+{
+	INT	p = px100_want() / 100;
+
+	return ( p > 0 ) ? p : 1;
+}
+
 LOCAL void test_digi_touch( void )
 {
 	T_HIDATTR	a, keep;
@@ -1088,10 +1096,346 @@ LOCAL void test_digi_touch( void )
 }
 #endif /* KT_VHC */
 
+#if KT_VHC
+/* ---------------------------------------------------------------- consumer keys */
+
+/*
+ * A keyboard's second interface: report 3 has a bit each for volume up,
+ * down and mute; report 4 is an array of two 16-bit usages, from 0.
+ * Then a device's interface with a list of usages and no report IDs.
+ */
+LOCAL CONST UB rd_cc[] = {
+	0x05, 0x0c, 0x09, 0x01, 0xa1, 0x01,
+	0x85, 0x03, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x03,
+	0x09, 0xe9, 0x09, 0xea, 0x09, 0xe2, 0x81, 0x02,
+	0x95, 0x05, 0x81, 0x03,
+	0x85, 0x04, 0x15, 0x00, 0x26, 0x3c, 0x02, 0x19, 0x00, 0x2a, 0x3c, 0x02,
+	0x75, 0x10, 0x95, 0x02, 0x81, 0x00,
+	0xc0
+};
+LOCAL CONST UB rd_cc2[] = {
+	0x05, 0x0c, 0x09, 0x01, 0xa1, 0x01,
+	0x15, 0x01, 0x25, 0x03, 0x75, 0x08, 0x95, 0x01,
+	0x09, 0xcd, 0x09, 0xb5, 0x09, 0xe9, 0x81, 0x00,
+	0xc0
+};
+LOCAL CONST UB cc_cfg[59] = {
+	9, 2, 59, 0, 2, 1, 0, 0xa0, 50,
+	9, 4, 0, 0, 1, 3, 0, 0, 0,
+	9, 0x21, 0x11, 0x01, 0, 1, 0x22, sizeof(rd_cc), 0,
+	7, 5, 0x81, 3, 16, 0, 2,
+	9, 4, 1, 0, 1, 3, 0, 0, 0,
+	9, 0x21, 0x11, 0x01, 0, 1, 0x22, sizeof(rd_cc2), 0,
+	7, 5, 0x82, 3, 16, 0, 2
+};
+LOCAL CONST T_VHCDEV cc_dev = {
+	dg_ddesc, cc_cfg, sizeof(cc_cfg), { "TessronOS test", "Consumer keys test", NULL, NULL },
+	{ rd_cc, rd_cc2, NULL, NULL }, { sizeof(rd_cc), sizeof(rd_cc2), 0, 0 },
+	NULL, dg_klass
+};
+
+LOCAL void cc_want( UB ep, CONST UB *r, INT len, UINT type, UINT code )
+{
+	T_HIDEV	ev;
+
+	KT_ASSERT_ER(knl_vhc_in(1, ep, r, len), E_OK);
+	KT_ASSERT_ER(ts_hid_read(&ev, 1000), E_OK);
+	KT_ASSERT_EQ(ev.type, type);
+	KT_ASSERT_EQ(ev.code, code);
+}
+
+/*
+ * Keys of the consumer page in every form a descriptor gives them come
+ * out as keys, in an interface that counts as a keyboard, and what is
+ * held is let go when the device goes.
+ */
+LOCAL void test_consumer_keys( void )
+{
+	T_HIDATTR	a, keep;
+	T_HIDINFO	h[16];
+	T_HIDSTAT	st0, st1;
+	T_HIDEV		ev;
+	INT		n, i, seen;
+	UINT		last = 0;
+	CONST UB	r_up[2] = { 3, 0x01 }, r_none[2] = { 3, 0 };
+	CONST UB	r_mute[2] = { 3, 0x04 };
+	CONST UB	r_arr[5] = { 4, 0xea, 0, 0, 0 }, r_arr0[5] = { 4, 0, 0, 0, 0 };
+	CONST UB	r2_next[1] = { 2 }, r2_none[1] = { 0 }, r2_play[1] = { 1 };
+
+	KT_ASSERT_ER(ts_hid_getattr(&keep), E_OK);
+	a = keep;
+	a.key_on = a.key_off = a.key_sim = 0;
+	a.krp = 0;
+	KT_ASSERT_ER(ts_hid_setattr(&a), E_OK);
+	KT_ASSERT_ER(ts_hid_stat(&st0), E_OK);
+	n = knl_hid_list(h, 16);
+	for ( i = 0; i < n && i < 16; i++ ) {
+		if ( h[i].id > last ) last = h[i].id;
+	}
+	KT_ASSERT_ER(knl_vhc_plug(1, &cc_dev), E_OK);
+	seen = 0;
+	for ( i = 0; i < 60 && seen < 2; i++ ) {
+		INT	k;
+
+		tk_dly_tsk(50);
+		seen = 0;
+		n = knl_hid_list(h, 16);
+		for ( k = 0; k < n && k < 16; k++ ) {
+			if ( h[k].id > last && h[k].keyboard ) seen++;
+		}
+	}
+	KT_ASSERT_EQ(seen, 2);
+	KT_ASSERT_ER(ts_hid_stat(&st1), E_OK);
+	KT_ASSERT_EQ(st1.keyboards, st0.keyboards + 2);
+	KT_ASSERT_EQ(st1.pointers, st0.pointers);
+	while ( ts_hid_read(&ev, TMO_POL) >= E_OK ) ;
+
+	/* a bit each */
+	cc_want(0x81, r_up, 2, HID_EV_KEY_DOWN, HID_KEY_VOLUP);
+	cc_want(0x81, r_none, 2, HID_EV_KEY_UP, HID_KEY_VOLUP);
+	cc_want(0x81, r_mute, 2, HID_EV_KEY_DOWN, HID_KEY_MUTE);
+	cc_want(0x81, r_none, 2, HID_EV_KEY_UP, HID_KEY_MUTE);
+	/* an array from usage 0, in another report: the first report's keys are not its */
+	cc_want(0x81, r_up, 2, HID_EV_KEY_DOWN, HID_KEY_VOLUP);
+	cc_want(0x81, r_arr, 5, HID_EV_KEY_DOWN, HID_KEY_VOLDOWN);
+	cc_want(0x81, r_arr0, 5, HID_EV_KEY_UP, HID_KEY_VOLDOWN);
+	cc_want(0x81, r_none, 2, HID_EV_KEY_UP, HID_KEY_VOLUP);
+	/* an array of listed usages, no report ID, values from 1 */
+	cc_want(0x82, r2_next, 1, HID_EV_KEY_DOWN, HID_KEY_NEXT);
+	cc_want(0x82, r2_none, 1, HID_EV_KEY_UP, HID_KEY_NEXT);
+	cc_want(0x82, r2_play, 1, HID_EV_KEY_DOWN, HID_KEY_PLAYPAUSE);
+	/* held as the device goes: let go */
+	KT_ASSERT_ER(knl_vhc_unplug(1), E_OK);
+	KT_ASSERT_ER(ts_hid_read(&ev, 2000), E_OK);
+	KT_ASSERT_EQ(ev.type, HID_EV_KEY_UP);
+	KT_ASSERT_EQ(ev.code, HID_KEY_PLAYPAUSE);
+	for ( i = 0; i < 60; i++ ) {
+		KT_ASSERT_ER(ts_hid_stat(&st1), E_OK);
+		if ( st1.keyboards == st0.keyboards ) break;
+		tk_dly_tsk(50);
+	}
+	KT_ASSERT_EQ(st1.keyboards, st0.keyboards);
+	(void)ts_hid_setattr(&keep);
+}
+
+/* The next press or let go, moves passed over: FALSE when it is not this one by tmo */
+LOCAL BOOL btn_is( UINT type, UINT code, TMO tmo )
+{
+	T_HIDEV	ev;
+
+	while ( ts_hid_read(&ev, tmo) >= E_OK ) {
+		if ( ev.type == HID_EV_MOVE ) continue;
+		if ( ev.type == type && ev.code == code ) return TRUE;
+		tm_printf((UB *)"  got type %d code %d\n", (INT)ev.type, (INT)ev.code);
+		return FALSE;
+	}
+	return FALSE;
+}
+
+/* No press or let go by tmo */
+LOCAL BOOL btn_none( TMO tmo )
+{
+	T_HIDEV	ev;
+
+	while ( ts_hid_read(&ev, tmo) >= E_OK ) {
+		if ( ev.type != HID_EV_MOVE ) {
+			tm_printf((UB *)"  got type %d code %d\n", (INT)ev.type, (INT)ev.code);
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+/* A finger on (x, y): pressed as it touches, staying pressed past a hold, let go with it */
+LOCAL void press_now( INT id, INT x, INT y )
+{
+	kt_touch_at(id, TRUE, x, y);
+	KT_ASSERT(btn_is(HID_EV_BTN_DOWN, 0, 200));
+	KT_ASSERT(btn_none(1300));
+	KT_ASSERT(!holding());
+	kt_touch_at(id, FALSE, x, y);
+	KT_ASSERT(btn_is(HID_EV_BTN_UP, 0, 500));
+	KT_ASSERT(btn_none(100));
+}
+
+/* A finger on (x, y) as anywhere else: nothing as it touches, the second button after a hold */
+LOCAL void press_waits( INT id, INT x, INT y )
+{
+	kt_touch_at(id, TRUE, x, y);
+	KT_ASSERT(btn_none(200));
+	KT_ASSERT(btn_is(HID_EV_BTN_DOWN, 1, 1500));
+	kt_touch_at(id, FALSE, x, y);
+	KT_ASSERT(btn_is(HID_EV_BTN_UP, 1, 500));
+	KT_ASSERT(btn_none(100));
+}
+
+/*
+ * The places of a window where a finger presses at once: in them and out
+ * of them, the window moved, sized, covered and closed, the table's limits,
+ * and two fingers still the wheel there
+ */
+LOCAL void test_digi_press( void )
+{
+	T_DPRECT	o, r, c;
+	T_WMWIN		w;
+	GOT		g;
+	INT		a, b, x, y, i, ids[WM_PRESS_WINS + 1];
+
+	r.left = 20;  r.top = 20;  r.right = 120;  r.bottom = 100;
+	o.left = 100;  o.top = 80;  o.right = 460;  o.bottom = 360;
+	a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE, "press a");
+	KT_ASSERT(a >= 1);
+	if ( a < 1 ) return;
+	if ( !kt_touch_plug() ) {
+		(void)wm_close(a);
+		KT_SKIP("no touch screen plugged in");
+	}
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	x = w.work.left + 70;
+	y = w.work.top + 60;
+	KT_ASSERT(btn_none(300));
+
+	/* no places: as anywhere */
+	tm_printf((UB *)"  no places\n");
+	press_waits(30, x, y);
+
+	KT_ASSERT_ER(wm_obj_press_area(a, &r, 1), E_OK);
+	tm_printf((UB *)"  in a place\n");
+	press_now(31, x, y);
+	tm_printf((UB *)"  beside it, in the window\n");
+	press_waits(32, x + 100, y);
+	/* a tap beside it is a click, and in it the finger's move is a drag from the press */
+	kt_touch_at(33, TRUE, x + 100, y);
+	tk_dly_tsk(40);
+	kt_touch_at(33, FALSE, x + 100, y);
+	KT_ASSERT(btn_is(HID_EV_BTN_DOWN, 0, 500));
+	KT_ASSERT(btn_is(HID_EV_BTN_UP, 0, 500));
+	tk_dly_tsk(600);
+	kt_touch_at(34, TRUE, x, y);
+	KT_ASSERT(btn_is(HID_EV_BTN_DOWN, 0, 200));
+	kt_touch_at(34, TRUE, x + 150, y + 90);
+	KT_ASSERT(btn_none(1300));
+	kt_touch_at(34, FALSE, x + 150, y + 90);
+	KT_ASSERT(btn_is(HID_EV_BTN_UP, 0, 500));
+
+	/* moved: the place with it, and none where it was */
+	tm_printf((UB *)"  moved\n");
+	o.left += 200;  o.right += 200;  o.top += 40;  o.bottom += 40;
+	KT_ASSERT_ER(wm_place(a, &o), E_OK);
+	press_now(35, x + 200, y + 40);
+	press_waits(36, x + 260, y + 40);		/* beside it where it now is */
+
+	/* sized so that the place is out of it: out of the work area, nothing */
+	tm_printf((UB *)"  sized\n");
+	o.right = o.left + 100;
+	KT_ASSERT_ER(wm_place(a, &o), E_OK);
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	KT_ASSERT(btn_none(100));
+	kt_touch_at(37, TRUE, w.outer.right + 40, y + 40);
+	KT_ASSERT(btn_none(200));
+	kt_touch_at(37, FALSE, w.outer.right + 40, y + 40);
+	(void)btn_is(HID_EV_BTN_DOWN, 0, 300);
+	(void)btn_is(HID_EV_BTN_UP, 0, 300);
+	o.right = o.left + 360;
+	KT_ASSERT_ER(wm_place(a, &o), E_OK);
+
+	/* covered: the window in front takes it; brought forward again, it is back */
+	tm_printf((UB *)"  covered\n");
+	c.left = x + 150;  c.top = y;  c.right = x + 280;  c.bottom = y + 90;
+	b = wm_open(&c, WM_ATTR_FRAME | WM_ATTR_TITLE, "press b");
+	KT_ASSERT(b >= 1);
+	KT_ASSERT_ER(wm_raise(b), E_OK);
+	press_waits(38, x + 200, y + 40);
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+	press_now(39, x + 200, y + 40);
+
+	/* hidden: nothing there, the place gone with it */
+	KT_ASSERT_ER(wm_show(a, FALSE), E_OK);
+	KT_ASSERT_ER(wm_raise(b), E_OK);
+	kt_touch_at(40, TRUE, x + 200, y + 40);
+	KT_ASSERT(btn_none(200));
+	kt_touch_at(40, FALSE, x + 200, y + 40);
+	KT_ASSERT(btn_is(HID_EV_BTN_DOWN, 0, 500));
+	KT_ASSERT(btn_is(HID_EV_BTN_UP, 0, 500));
+	KT_ASSERT_ER(wm_show(a, TRUE), E_OK);
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+	tk_dly_tsk(600);
+
+	/* two fingers together on the place: the wheel, no button */
+	tm_printf((UB *)"  two fingers\n");
+	{
+		INT	ax = ux_of(x + 190), ay = uy_of(y + 40), bx = ux_of(x + 210), by = uy_of(y + 40);
+
+		touch(2, on_at(41, ax, ay), on_at(42, bx, by));
+		two_go(41, &ax, &ay, 42, &bx, &by, 0, uy_of(y + 40 + 40 * tw_px_of()) - uy_of(y + 40), 5, 30);
+		two_still_off(41, ax, ay, 42, bx, by);
+		g = gather(400);
+		KT_ASSERT(g.v >= 1);
+		KT_ASSERT_EQ(g.down + g.up, 0);
+	}
+	/* the first on the place, then the second: the press let go, and the wheel */
+	{
+		INT	ax = ux_of(x + 190), ay = uy_of(y + 40), bx = ux_of(x + 210), by = uy_of(y + 40);
+
+		touch(1, on_at(43, ax, ay), (CT)NOT_THERE);
+		KT_ASSERT(btn_is(HID_EV_BTN_DOWN, 0, 200));
+		touch(2, on_at(43, ax, ay), on_at(44, bx, by));
+		KT_ASSERT(btn_is(HID_EV_BTN_UP, 0, 500));
+		two_go(43, &ax, &ay, 44, &bx, &by, 0, uy_of(y + 40 + 40 * tw_px_of()) - uy_of(y + 40), 5, 30);
+		two_still_off(43, ax, ay, 44, bx, by);
+		g = gather(400);
+		KT_ASSERT(g.v >= 1);
+		KT_ASSERT_EQ(g.down + g.up, 0);
+	}
+
+	/* the list's limits, and taken away */
+	KT_ASSERT_ER(wm_obj_press_area(a, &r, WM_PRESS_RECTS + 1), E_PAR);
+	KT_ASSERT_ER(wm_obj_press_area(a, &r, -1), E_PAR);
+	KT_ASSERT_ER(wm_obj_press_area(a, NULL, 1), E_PAR);
+	KT_ASSERT_ER(wm_obj_press_area(0x7FFF, &r, 1), E_ID);
+	KT_ASSERT_ER(wm_obj_press_area(a, NULL, 0), E_OK);
+	press_waits(45, x + 200, y + 40);
+	KT_ASSERT_ER(wm_obj_press_area(a, &r, 1), E_OK);
+
+	/* too many windows with places; and each one's freed as it closes */
+	c.left = 0;  c.top = 0;  c.right = 80;  c.bottom = 60;
+	for ( i = 0; i < WM_PRESS_WINS - 1; i++ ) {
+		ids[i] = wm_open(&c, WM_ATTR_FRAME, "press n");
+		KT_ASSERT(ids[i] >= 1);
+		KT_ASSERT_ER(wm_obj_press_area(ids[i], &r, 1), E_OK);
+	}
+	ids[i] = wm_open(&c, WM_ATTR_FRAME, "press n");
+	KT_ASSERT(ids[i] >= 1);
+	KT_ASSERT_ER(wm_obj_press_area(ids[i], &r, 1), E_LIMIT);
+	for ( i = 0; i < WM_PRESS_WINS; i++ ) (void)wm_close(ids[i]);
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+
+	/* closed: nothing there; the same number given a new window has no places of the old */
+	tm_printf((UB *)"  closed\n");
+	KT_ASSERT_ER(wm_close(a), E_OK);
+	KT_ASSERT_ER(wm_close(b), E_OK);
+	kt_touch_at(46, TRUE, x + 200, y + 40);
+	KT_ASSERT(btn_none(200));
+	kt_touch_at(46, FALSE, x + 200, y + 40);
+	KT_ASSERT(btn_is(HID_EV_BTN_DOWN, 0, 500));
+	KT_ASSERT(btn_is(HID_EV_BTN_UP, 0, 500));
+	tk_dly_tsk(600);
+	a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "press c");
+	KT_ASSERT(a >= 1);
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+	press_waits(47, x + 200, y + 40);
+	(void)wm_close(a);
+	kt_touch_unplug();
+}
+#endif /* KT_VHC */
+
 EXPORT void ktest_digi( void )
 {
 	KT_RUN(test_digi_desc);
 #if KT_VHC
+	KT_RUN(test_consumer_keys);
 	KT_RUN(test_digi_touch);
+	KT_RUN_SCREEN(test_digi_press);
 #endif
 }

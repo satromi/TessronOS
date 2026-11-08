@@ -754,6 +754,11 @@ EXPORT ER unp_carry( UNPJOB *j, const T_DTLOOK *look, INT grab_x, INT grab_y, TS
 
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_CARRY;
+	/*
+	 * over a program's window too, once it says it would take the link:
+	 * the objects are made only then, and deleted when it cannot be put
+	 */
+	rq.flags = DT_F_TO_PROG | DT_F_ASK;
 	rq.look = *look;
 	rq.grab_x = grab_x;
 	rq.grab_y = grab_y;

@@ -23,6 +23,8 @@
 #include <ts/fs.h>
 #include <ts/ob.h>
 #include <ts/xf.h>
+#include <ts/fn.h>
+#include <ts/sysdef.h>
 #include <ts/blk.h>
 
 EXPORT KT_STATE	kt;
@@ -331,10 +333,16 @@ IMPORT void ktest_obsdwifi( void );	/* ktest_obsdwifi.c, built with WIFI_NET8021
 #ifdef X64
 IMPORT INT ts_usb_hc_count( void );
 
-/* Started on the QEMU test machine's USB devices: two xHCI controllers */
+/*
+ * Started on the QEMU test machine's USB devices: two xHCI controllers.
+ * Counted before the suites run, because the simulated controllers some
+ * of them register stay in the count.
+ */
+LOCAL BOOL	kt_two_hc;
+
 EXPORT BOOL kt_qemu_devs( void )
 {
-	return ( ts_usb_hc_count() >= 2 );
+	return kt_two_hc;
 }
 #endif
 
@@ -416,6 +424,28 @@ EXPORT ER kt_sysobj( const char *box, const char *file, TS_UUID *p_uuid )
 		return E_SYS;
 	}
 	return xf_find(&b, (CONST UB *)file, p_uuid);
+}
+
+EXPORT ID kt_face( void )
+{
+	ID	fid = 0;
+	TS_UUID	u;
+	ER	er;
+
+	if ( fn_system() > 0 ) {
+		return fn_system();
+	}
+	er = kt_sysobj(SYSDEF_FONT_BOX, "NotoSansJP-Regular.otf", &u);
+	if ( er >= E_OK ) {
+		er = fn_open_obj(&u, xf_data_rec(&u), 0, &fid);
+	}
+	tm_printf((UB *)"  face %d er %d\n", (INT)fid, (INT)er);
+	if ( er < E_OK || fid <= 0 ) {
+		return 0;
+	}
+	fn_set_size(fid, 14);
+	fn_set_system(fid);
+	return fid;
 }
 
 EXPORT UB *kt_obj_data( const TS_UUID *uuid, SZ *p_size )
@@ -762,6 +792,9 @@ LOCAL void kt_clock_floor( void )
 LOCAL void kt_main_task( INT stacd, void *exinf )
 {
 	tm_printf((UB*)"KTEST START\n");
+#ifdef X64
+	kt_two_hc = ( ts_usb_hc_count() >= 2 );
+#endif
 	kt_clear_shots();
 
 	/*
@@ -808,7 +841,7 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 		INT	failed = kt.total - kt.pass - kt.skipped;
 #endif
 
-		RUN_SUITE_ARM(sd, "no SD host controller");
+		RUN_SUITE(sd);
 #if KT_BOARD
 		if ( kt.total - kt.pass - kt.skipped > failed ) {
 			tm_printf((UB *)"KTEST the SD card driver failed its checks: "
@@ -835,6 +868,7 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 #ifdef KT_ONE
 	RUN_SUITE_SCRATCH(tsfscut);	/* without end: only when it is named */
 	RUN_SUITE(iob);			/* wipes a disk of its own: only when it is named */
+	RUN_SUITE(stkg);		/* stops processors for good: only when it is named */
 #endif
 #endif
 #if KT_GUI
@@ -873,6 +907,9 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE(calc);
 	RUN_SUITE(kana);
 	RUN_SUITE(udic);
+	RUN_SUITE(bt);
+	RUN_SUITE(btuart);
+	RUN_SUITE(emu);
 	RUN_SUITE(calcu);
 	RUN_SUITE(km);
 	RUN_SUITE(skb);
@@ -890,6 +927,7 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE_QEMU(pcie, "no flat PCI Express configuration space");
 	RUN_SUITE(snd);
 	RUN_SUITE(cam);
+	RUN_SUITE(nicring);
 	RUN_SUITE(usb);
 	RUN_SUITE(digi);
 	RUN_SUITE(devob);
@@ -903,6 +941,9 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE(so);
 	RUN_SUITE(rump);
 	RUN_SUITE(svcio);
+#ifdef KT_ONE
+	RUN_SUITE(wg);		/* needs tools/wg_peer.py on the host: only when it is named */
+#endif
 #endif
 #if KT_WIFINV
 	RUN_SUITE(wifinv);		/* the Raspberry Pi 5 Wi-Fi's board settings (WIFI=1) */

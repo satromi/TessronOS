@@ -39,9 +39,15 @@
  *	IOAPICs; a GPIO pad the firmware routes there is one), says when a
  *	report waits: the line is level triggered and stays asserted until
  *	the report is read, so it is masked as it comes and unmasked after
- *	the read. Without one (a GpioInt, whose GPIO controller is not
- *	driven yet), or when reports are found waiting while no interrupt
- *	came, the device is read every few milliseconds.
+ *	the read. Without one, or when reports are found waiting while no
+ *	interrupt came, the device is read every few milliseconds.
+ *
+ *	A GpioInt is not trusted at once: it is the firmware's table against
+ *	a table of pads here. The device goes on being read every few
+ *	milliseconds with the pad armed, and is read on the interrupt only
+ *	after HI_TRIAL reports came with one. If reports keep coming with
+ *	none (HI_TRIAL_NONE), or interrupts with nothing behind them
+ *	(HI_TRIAL_BOGUS), the pad is masked and the reads go on.
  *
  *	Some devices need otherwise (the quirks): an ELAN controller breaks
  *	when told to power on after its reset, and may raise its interrupt
@@ -58,13 +64,16 @@
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include "../../../kernel/sysdepend/acpi/acpi.h"
+#include "../../gpio/x86_64/gpio_pch.h"
 #include "i2c.h"
 
 IMPORT INT	knl_hid_ext_attach_dg( CONST UB *rd, INT rdlen, CONST UB *name, UB *mode, INT *p_mlen, INT *p_mrid );
 IMPORT void	knl_hid_ext_report( INT hd, CONST UB *r, INT len );
 IMPORT void	knl_usb_lock( void );
 IMPORT void	knl_usb_unlock( void );
+IMPORT UW	knl_usb_ms( void );
 IMPORT void	knl_obinput_sync( void );	/* obinput.c: the keyboards and pointers as objects */
+IMPORT UW	knl_hid_read_late( void );	/* hid.c: the longest an event waited for its reader, ms */
 
 #define HI_MAX		4
 #define HI_RD_MAX	4096
@@ -72,7 +81,12 @@ IMPORT void	knl_obinput_sync( void );	/* obinput.c: the keyboards and pointers a
 #define HI_FT_MAX	64		/* the longest feature report sent */
 #define HI_IDLE_MS	1000		/* with the interrupt: a read this long after the last one came, all the same */
 #define HI_MISSED	3		/* reports found by those reads in a row: the interrupt is not arriving */
+#define HI_TRIAL	8		/* reports that came with their interrupt before it is relied on */
+#define HI_TRIAL_NONE	64		/* reports with no interrupt ever seen: the pad's interrupt is not arriving */
+#define HI_TRIAL_BOGUS	200		/* interrupts with no report while on trial, and in a row after */
 #define HI_RESET_MS	5000		/* the longest a reset is waited for */
+#define HI_SAY_MS	10000		/* how often the times of the reports are said, while there are any */
+#define HI_GAP_MS	200		/* reports nearer than this are of one touch: the gap counts */
 
 #define OP_RESET	0x1
 #define OP_GET_REPORT	0x2
@@ -108,10 +122,20 @@ typedef struct {
 	UINT		intno;		/* its interrupt, 0 none */
 	BOOL		edge;		/* edge triggered: not masked, and read until nothing waits */
 	ID		sem;		/* signalled by it */
+	void		*pad;		/* the GPIO pad of a GpioInt, in place of intno */
+	BOOL		trial;		/* the pad armed while the device is still read every period ms */
+	INT		tr_good, tr_none, tr_bogus;
 	BOOL		polled;		/* read every period ms */
 	INT		missed;
 	UD		reports, ints;
 	UB		name[16];
+	/*
+	 * Where the time of a report goes, since it was last said: the bus,
+	 * the wait for the USB manager's lock, the gap between reports of a
+	 * touch (near the device's own period unless something held them back)
+	 */
+	UW		n_said, bus_ms, bus_max, lock_ms, lock_max, gap_max;
+	UW		last_at, said_at;
 } HIDI2C;
 
 LOCAL HIDI2C	hi[HI_MAX];
@@ -225,6 +249,67 @@ LOCAL void hi_inthdr( UINT intno )
 LOCAL void unmask( HIDI2C *h )
 {
 	if ( h->intno != 0 ) EnableInt(h->intno, INTPRI_DEVICE);
+	if ( h->pad != NULL ) knl_pchgpio_int_on(h->pad, TRUE);
+}
+
+/* From the GPIO controller's handler: the pad of a level already masked */
+LOCAL void hi_padint( void *arg )
+{
+	HIDI2C	*h = (HIDI2C *)arg;
+
+	h->ints++;
+	tk_sig_sem(h->sem, 1);
+}
+
+/* The pad masked and given up: the device is read every period ms from here on */
+LOCAL void pad_giveup( HIDI2C *h, CONST char *why )
+{
+	knl_pchgpio_int_on(h->pad, FALSE);
+	h->pad = NULL;
+	h->trial = FALSE;
+	h->polled = TRUE;
+	tm_printf((UB *)"hidi2c: %s: GPIO interrupt given up, %s (%d interrupts, %d reports): read every %d ms\n",
+		  h->name, why, (INT)h->ints, (INT)h->reports, h->period);
+}
+
+/* A round of reads on trial: got, whether a report was read */
+LOCAL void pad_trial( HIDI2C *h, BOOL got )
+{
+	BOOL	came = FALSE;
+
+	while ( tk_wai_sem(h->sem, 1, TMO_POL) >= E_OK ) came = TRUE;
+	if ( came && got ) {
+		h->tr_good++;
+	} else if ( came ) {
+		h->tr_bogus++;
+	} else if ( got ) {
+		h->tr_none++;
+	}
+	if ( h->tr_good >= HI_TRIAL ) {
+		h->trial = FALSE;
+		h->polled = FALSE;
+		tm_printf((UB *)"hidi2c: %s: GPIO interrupt confirmed (%d with a report, %d without, %d reports with none): "
+			  "read on the interrupt\n", h->name, h->tr_good, h->tr_bogus, h->tr_none);
+	} else if ( h->tr_bogus >= HI_TRIAL_BOGUS ) {
+		pad_giveup(h, "interrupts with nothing to read");
+		return;
+	} else if ( h->tr_good == 0 && h->tr_none >= HI_TRIAL_NONE ) {
+		pad_giveup(h, "reports with no interrupt");
+		return;
+	}
+	unmask(h);
+}
+
+/* The times of the reports said, every HI_SAY_MS while they come */
+LOCAL void hi_times( HIDI2C *h, UW at )
+{
+	if ( at - h->said_at < HI_SAY_MS || h->n_said == 0 ) return;
+	tm_printf((UB *)"hidi2c: %s: %d reports in %d ms: longest gap in a touch %d ms; bus %d ms, longest %d; "
+		  "USB lock %d ms, longest %d; to the reader longest %d ms\n",
+		  h->name, (INT)h->n_said, (INT)( at - h->said_at ), (INT)h->gap_max, (INT)h->bus_ms, (INT)h->bus_max,
+		  (INT)h->lock_ms, (INT)h->lock_max, (INT)knl_hid_read_late());
+	h->n_said = h->bus_ms = h->bus_max = h->lock_ms = h->lock_max = h->gap_max = 0;
+	h->said_at = at;
 }
 
 LOCAL void hi_task( INT stacd, void *exinf )
@@ -233,6 +318,7 @@ LOCAL void hi_task( INT stacd, void *exinf )
 	UB	in[HI_IN_MAX];
 	INT	len;
 	ER	er;
+	BOOL	got;
 
 	(void)stacd;
 	for ( ;; ) {
@@ -242,17 +328,47 @@ LOCAL void hi_task( INT stacd, void *exinf )
 		} else {
 			er = tk_wai_sem(h->sem, 1, HI_IDLE_MS);
 		}
+		got = FALSE;
 		do {
+			UW	t0 = knl_usb_ms(), t1, t2;
+
 			len = read_input(h, in);
 			if ( len > 2 ) {
+				t1 = knl_usb_ms();
+				got = TRUE;
 				h->reports++;
 				knl_usb_lock();
+				t2 = knl_usb_ms();
 				knl_hid_ext_report(h->hd, in + 2, len - 2);
 				knl_usb_unlock();
+				h->n_said++;
+				h->bus_ms += t1 - t0;
+				if ( t1 - t0 > h->bus_max ) h->bus_max = t1 - t0;
+				h->lock_ms += t2 - t1;
+				if ( t2 - t1 > h->lock_max ) h->lock_max = t2 - t1;
+				if ( t1 - h->last_at < HI_GAP_MS && t1 - h->last_at > h->gap_max ) {
+					h->gap_max = t1 - h->last_at;
+				}
+				h->last_at = t1;
+				hi_times(h, t2);
 			}
 		} while ( ( h->polled || h->edge ) && len > 2 );	/* more may wait */
-		if ( !h->polled ) {
+		if ( h->trial ) {
+			pad_trial(h, got);
+		} else if ( !h->polled ) {
 			h->missed = ( er == E_TMOUT && len > 2 ) ? h->missed + 1 : 0;
+			/* a line held with nothing behind it would take the whole processor */
+			if ( h->pad != NULL ) {
+				h->tr_bogus = ( er >= E_OK && !got ) ? h->tr_bogus + 1 : 0;
+				if ( h->tr_bogus >= HI_TRIAL_BOGUS ) {
+					pad_giveup(h, "interrupts with nothing to read");
+					continue;
+				}
+				if ( h->missed >= HI_MISSED ) {
+					pad_giveup(h, "reports wait with no interrupt");
+					continue;
+				}
+			}
 			if ( h->missed >= HI_MISSED ) {
 				h->polled = TRUE;
 				tm_printf((UB *)"hidi2c: %s: reports wait with no interrupt %d coming (%d so far): read every %d ms\n",
@@ -292,6 +408,26 @@ LOCAL BOOL take_int( HIDI2C *h, INT irq, INT mode )
 	return TRUE;
 }
 
+/* The pad of a GpioInt armed for its trial, when this kernel knows the controller */
+LOCAL void pad_arm( HIDI2C *h, CONST char *gctrl, INT pin, INT mode )
+{
+	T_CSEM	cs;
+
+	knl_memset(&cs, 0, sizeof(cs));
+	cs.sematr = TA_TFIFO;
+	cs.maxsem = 0x7fffffff;
+	h->sem = tk_cre_sem(&cs);
+	if ( h->sem <= 0 ) {
+		h->sem = 0;
+		return;
+	}
+	h->edge = (BOOL)( ( mode & ( PCHGPIO_EDGE | PCHGPIO_BOTH ) ) != 0 );
+	h->pad = knl_pchgpio_int_take(gctrl, (UINT)pin, (UINT)mode, hi_padint, h);
+	if ( h->pad == NULL ) return;
+	h->trial = TRUE;
+	unmask(h);
+}
+
 /* A report the interrupt tells of, or one read every 10 ms, waited for up to ms: its length, -1 none */
 LOCAL INT wait_input( HIDI2C *h, UB *in, INT ms )
 {
@@ -310,7 +446,8 @@ LOCAL INT wait_input( HIDI2C *h, UB *in, INT ms )
 	return -1;
 }
 
-LOCAL INT attach( T_I2CBUS *bus, UH addr, UH desc, CONST UB *name, INT period, INT irq, INT irq_mode )
+LOCAL INT attach( T_I2CBUS *bus, UH addr, UH desc, CONST UB *name, INT period, INT irq, INT irq_mode,
+		  CONST char *gctrl, INT pin, INT pin_mode )
 {
 	HIDI2C	*h = NULL;
 	UB	d[30], in[HI_IN_MAX], *rd, mode[64];
@@ -421,6 +558,7 @@ LOCAL INT attach( T_I2CBUS *bus, UH addr, UH desc, CONST UB *name, INT period, I
 	t = tk_cre_tsk(&ct);
 	if ( t > 0 ) tk_sta_tsk(t, 0);
 	if ( h->intno != 0 ) unmask(h);
+	if ( h->polled && pin >= 0 && pin_mode >= 0 && gctrl != NULL ) pad_arm(h, gctrl, pin, pin_mode);
 	knl_obinput_sync();			/* its object, when the object layer is up already */
 	tm_printf((UB *)"TessronOS: %s: HID over I2C %04x:%04x on %s at %02x, report descriptor %d bytes, input %d, "
 		  "quirks %x, %s %d%s\n",
@@ -431,7 +569,7 @@ LOCAL INT attach( T_I2CBUS *bus, UH addr, UH desc, CONST UB *name, INT period, I
 
 EXPORT INT knl_hidi2c_attach( T_I2CBUS *bus, UH addr, UH desc, CONST UB *name, INT period )
 {
-	return attach(bus, addr, desc, name, period, -1, 0);
+	return attach(bus, addr, desc, name, period, -1, 0, NULL, -1, -1);
 }
 
 /* 3CDFF6F7-4267-4555-AD05-B30A3D8938DE, as ACPI lays out a UUID */
@@ -449,7 +587,7 @@ EXPORT INT knl_hidi2c_init( void )
 		for ( i = 0; i < 4 && ( dev = knl_acpica_device(( k == 0 ) ? "PNP0C50" : "ACPI0C50", i) ) != NULL; i++ ) {
 			char			path[64], ctrl[64], gctrl[64];
 			unsigned int		addr = 0, hz = 0;
-			int			pin = -1, irq = -1, irq_mode = 0, ps0;
+			int			pin = -1, pin_mode = -1, irq = -1, irq_mode = 0, ps0;
 			unsigned long long	reg = 0, adr = 0;
 			UB			name[16];
 			T_I2CBUS		*bus;
@@ -474,7 +612,8 @@ EXPORT INT knl_hidi2c_init( void )
 			bus = knl_dwi2c_bus((UW)adr, knl_acpica_handle(ctrl), hz);
 			if ( bus == NULL ) continue;
 			(void)tm_sprintf(name, (UB *)"hidi2c%d", n);
-			if ( attach(bus, (UH)addr, (UH)reg, name, 8, irq, irq_mode) > 0 ) n++;
+			if ( pin >= 0 && knl_acpica_gpioint(dev, &pin_mode) != 0 ) pin_mode = -1;
+			if ( attach(bus, (UH)addr, (UH)reg, name, 8, irq, irq_mode, gctrl, pin, pin_mode) > 0 ) n++;
 		}
 	}
 	return n;

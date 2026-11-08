@@ -210,14 +210,14 @@ LOCAL ER ask_open( CONST char *us )
 
 /*
  * The menu of the second button opened at a place of the work area: a
- * popup more, and the desktop's word for it; Escape puts it away, or a
- * row 'rows' below the one on the pointer is chosen (MN_AWAY: none)
+ * popup more, and the line its program says of it ('said'); Escape puts
+ * it away, or a row 'rows' below the one on the pointer is chosen
+ * (MN_AWAY: none)
  */
-LOCAL BOOL menu_at( INT wid, INT dx, INT dy, CONST char *title, INT rows )
+LOCAL BOOL menu_at( INT wid, INT dx, INT dy, CONST char *said, INT rows )
 {
 	T_WMWIN	w;
 	INT	before = popups(), i, x, y;
-	char	said[WM_TITLE_MAX + 24];
 	UD	pos;
 
 	if ( wm_ref(wid, &w) < E_OK ) return FALSE;
@@ -227,7 +227,6 @@ LOCAL BOOL menu_at( INT wid, INT dx, INT dy, CONST char *title, INT rows )
 	click(x, y, 1);
 	for ( i = 0; i < 30 && popups() == before; i++ ) tk_dly_tsk(100);
 	KT_ASSERT(popups() > before);
-	tm_sprintf((UB *)said, (UB *)"desktop: menu %s", title);
 	KT_ASSERT(wait_for(pos, said, 30));
 	if ( rows == MN_AWAY ) {
 		key(K_ESC, 0);
@@ -299,15 +298,15 @@ LOCAL void test_diskfix( void )
 	KT_ASSERT(wid > 0);
 	if ( wid <= 0 ) return;
 	tk_dly_tsk(300);
-	(void)menu_at(wid, 300, 280, "ディスク修復", MN_AWAY);
+	(void)menu_at(wid, 300, 280, "desktop: menu ディスク修復", MN_AWAY);
 	(void)kt_shot("/boot/DTWIN0.PPM");
 	/* 完全, the tenth row below 閉じる */
 	pos = log_now();
-	(void)menu_at(wid, 300, 120, "ディスク修復", 10);
+	(void)menu_at(wid, 300, 120, "desktop: menu ディスク修復", 10);
 	KT_ASSERT(wait_for(pos, "desktop: chosen dfix.full", 30));
 	/* ドライブの一覧を更新, two rows below 完全 now on the pointer's row */
 	pos = log_now();
-	(void)menu_at(wid, 300, 120, "ディスク修復", 2);
+	(void)menu_at(wid, 300, 120, "desktop: menu ディスク修復", 2);
 	KT_ASSERT(wait_for(pos, "desktop: chosen dfix.list", 30));
 	carry_and_size(wid, TRUE);
 	pos = log_now();
@@ -346,11 +345,12 @@ LOCAL void test_slide( void )
 		KT_ASSERT_EQ(w.outer.right, sw);
 		KT_ASSERT_EQ(w.work.bottom, sh);		/* over the message line too */
 	}
-	(void)menu_at(wid, 640, 400, "実時間TADデモ", MN_AWAY);
+	/* the slides are a process (application/slide), which says its menu and choice itself */
+	(void)menu_at(wid, 640, 400, "slide: menu", MN_AWAY);
 	(void)kt_shot("/boot/DTWIN1.PPM");
 	pos = log_now();
-	(void)menu_at(wid, 640, 300, "実時間TADデモ", 2);		/* 次へ進む */
-	KT_ASSERT(wait_for(pos, "desktop: chosen slide.next", 30));
+	(void)menu_at(wid, 640, 300, "slide: menu", 2);		/* 次へ進む */
+	KT_ASSERT(wait_for(pos, "slide: chosen slide.next", 30));
 	KT_ASSERT(wait_for(pos, "slide: 2 of", 30));
 	pos = log_now();
 	key(K_RIGHT, 0);

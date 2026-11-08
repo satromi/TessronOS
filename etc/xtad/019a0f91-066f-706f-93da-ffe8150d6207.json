@@ -42,10 +42,6 @@
     "basic-figure-editor": {
       "name": "画用紙",
       "defaultOpen": true
-    },
-    "basic-text-editor": {
-      "name": "基本文章編集",
-      "defaultOpen": false
     }
   }
 }

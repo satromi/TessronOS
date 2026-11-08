@@ -290,6 +290,13 @@ knl_syscall_entry:
 	jnz	knl_int_restore
 	mov	0(%rsp), %rax
 	mov	8(%rsp), %rbx
+	/*
+	 * SS is null when this task was switched to from one that came in by
+	 * an interrupt. AMD's SYSRET loads the selector but not the descriptor
+	 * behind it, and the user would run with an unusable stack segment.
+	 */
+	mov	$GDT_KDATA, %edx
+	mov	%edx, %ss
 	mov	24(%rsp), %rdx
 	mov	32(%rsp), %rsi
 	mov	40(%rsp), %rdi

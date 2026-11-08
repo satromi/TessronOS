@@ -43,6 +43,12 @@
  * it has, kicks that stop for LK_KICK_S count as the machine stopped.
  * knl_wdog_kick_stop takes the desktop off the watch (it is ending).
  */
+/*
+ * The machine going off finishes within ms from now, or is turned off (fin
+ * 0) or started again (fin -1) as it stands. Called again, the time moves;
+ * with ms 0 the limit is taken away (the going off was cancelled).
+ */
+IMPORT void knl_off_limit( UW ms, INT fin );
 IMPORT void knl_wdog_kick( void );
 IMPORT void knl_wdog_kick_stop( void );
 

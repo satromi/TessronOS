@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="ブラウザのデータボックス">
 <document>
 <p>ブラウザのデータボックス</p>
-<p>ページが尋ねるalert・confirm・promptのパネル、ページのselectの一覧を選ぶパネル、ページが求める許可を尋ねるパネル、ページに渡すファイルの実身を選ぶパネル、Widevineを導入する前に示すパネルの定義。言葉は部品1〜6、入力欄と一覧は部品11、ボタンは101(取消、拒否)と102(了解、許可、導入)。</p>
+<p>ページが尋ねるalert・confirm・promptのパネル、ページのselectの一覧を選ぶパネル、ページが求める許可を尋ねるパネル、ページに渡すファイルの実身を選ぶパネル、Widevineを導入する前に示すパネル、〈設定〉のウインドウとパスワードの変更のパネルの定義。言葉は部品1〜6、入力欄と一覧は部品11、ボタンは101(取消、拒否)と102(了解、許可、導入)。</p>
 </document>
 <databox>
 <panel num="1" rect="0,0,460,190" title="ページからの知らせ">
@@ -59,6 +59,90 @@
 <text num="6" x="20" y="146">利用の条件は、導入する前にご自身で確かめてください。</text>
 <button num="101" rect="384,190,472,216" answer="cancel">取消</button>
 <button num="102" rect="480,190,568,216" emph="true">導入</button>
+</panel>
+<panel num="8" rect="0,0,600,470" title="ブラウザの設定" kind="bare">
+<tags num="100" rect="0,0,600,470" inner="4,28,596,466" value="1"><tag>パスワード</tag><tag>パスキー</tag><tag>閲覧データ</tag><tag>履歴</tag><tag>ダウンロード</tag><tag>住所</tag><tag>カード</tag><tag>拡張機能</tag></tags>
+<list num="1" sheet="1" rect="12,40,588,386" cols="260,160,0"/>
+<switch num="2" sheet="1" rect="12,398,212,424">パスワードを表示</switch>
+<button num="3" sheet="1" rect="392,430,484,454">変更...</button>
+<button num="4" sheet="1" rect="496,430,588,454">削除</button>
+<list num="10" sheet="2" rect="12,40,588,416" cols="300,0"/>
+<button num="11" sheet="2" rect="496,430,588,454">削除</button>
+<switch num="20" sheet="3" rect="12,40,200,66" value="1">Cookie</switch>
+<switch num="21" sheet="3" rect="208,40,396,66" value="1">キャッシュ</switch>
+<switch num="22" sheet="3" rect="404,40,588,66" value="1">localStorage</switch>
+<switch num="23" sheet="3" rect="12,70,200,96" value="1">IndexedDB</switch>
+<switch num="24" sheet="3" rect="208,70,396,96" value="1">Cache Storage</switch>
+<switch num="25" sheet="3" rect="404,70,588,96" value="1">Service Worker</switch>
+<switch num="26" sheet="3" rect="12,100,200,126" value="1">サイトのファイル</switch>
+<switch num="27" sheet="3" rect="208,100,396,126">サイトの許可</switch>
+<switch num="28" sheet="3" rect="404,100,588,126">閲覧履歴</switch>
+<switch num="29" sheet="3" rect="12,130,200,156">ダウンロードの一覧</switch>
+<text sheet="3" x="16" y="186">期間：</text>
+<select num="30" sheet="3" rect="80,166,588,194" across="true" value="5"><name>1時間</name><name>24時間</name><name>7日間</name><name>4週間</name><name>全期間</name></select>
+<text sheet="3" x="16" y="216">サイト：</text>
+<list num="31" sheet="3" rect="12,224,588,420"/>
+<text num="33" sheet="3" x="16" y="448"> </text>
+<button num="32" sheet="3" rect="496,430,588,454" emph="true">消去</button>
+<list num="40" sheet="4" rect="12,40,588,416" cols="136,200,0"/>
+<button num="41" sheet="4" rect="392,430,484,454">削除</button>
+<button num="42" sheet="4" rect="496,430,588,454">すべて削除</button>
+<list num="50" sheet="5" rect="12,40,588,416" cols="280,100,0"/>
+<button num="51" sheet="5" rect="392,430,484,454">中止</button>
+<button num="52" sheet="5" rect="496,430,588,454">一覧から削除</button>
+<list num="60" sheet="6" rect="12,40,588,150" cols="180,0"/>
+<text sheet="6" x="16" y="178">氏名：</text><box num="61" sheet="6" rect="120,158,588,186" max="100" jp="true"/>
+<text sheet="6" x="16" y="208">会社名：</text><box num="62" sheet="6" rect="120,188,588,216" max="100" jp="true"/>
+<text sheet="6" x="16" y="238">郵便番号：</text><box num="63" sheet="6" rect="120,218,588,246" max="20"/>
+<text sheet="6" x="16" y="268">都道府県：</text><box num="64" sheet="6" rect="120,248,588,276" max="40" jp="true"/>
+<text sheet="6" x="16" y="298">市区町村：</text><box num="65" sheet="6" rect="120,278,588,306" max="100" jp="true"/>
+<text sheet="6" x="16" y="328">住所1：</text><box num="66" sheet="6" rect="120,308,588,336" max="200" jp="true"/>
+<text sheet="6" x="16" y="358">住所2：</text><box num="67" sheet="6" rect="120,338,588,366" max="200" jp="true"/>
+<text sheet="6" x="16" y="388">電話：</text><box num="68" sheet="6" rect="120,368,588,396" max="40"/>
+<text sheet="6" x="16" y="418">メール：</text><box num="69" sheet="6" rect="120,398,588,426" max="120"/>
+<button num="70" sheet="6" rect="288,430,380,454">追加</button>
+<button num="71" sheet="6" rect="392,430,484,454">変更</button>
+<button num="72" sheet="6" rect="496,430,588,454">削除</button>
+<list num="80" sheet="7" rect="12,40,588,240" cols="200,200,0"/>
+<switch num="85" sheet="7" rect="12,248,212,274">カードの番号を表示</switch>
+<text sheet="7" x="16" y="306">名義：</text><box num="81" sheet="7" rect="120,286,588,314" max="100"/>
+<text sheet="7" x="16" y="340">番号：</text><secret num="82" sheet="7" rect="120,320,588,348" max="32"/>
+<text sheet="7" x="16" y="374">有効期限：</text><box num="83" sheet="7" rect="120,354,180,382" max="2"/><text sheet="7" x="190" y="374">月</text><box num="84" sheet="7" rect="220,354,300,382" max="4"/><text sheet="7" x="310" y="374">年</text>
+<text sheet="7" x="16" y="412">カードの情報は暗号化して保存します。ページへの入力は確認の後だけです。</text>
+<button num="86" sheet="7" rect="288,430,380,454">追加</button>
+<button num="87" sheet="7" rect="392,430,484,454">変更</button>
+<button num="88" sheet="7" rect="496,430,588,454">削除</button>
+<list num="90" sheet="8" rect="12,40,588,416" cols="300,90,0"/>
+<button num="91" sheet="8" rect="12,430,132,454">読み込む...</button>
+<button num="92" sheet="8" rect="360,430,484,454">有効と無効</button>
+<button num="93" sheet="8" rect="496,430,588,454">削除</button>
+</panel>
+<panel num="21" rect="0,0,520,372" title="拡張機能の権限">
+<text num="1" x="20" y="28"> </text>
+<text num="2" x="20" y="50"> </text>
+<text x="20" y="74">この拡張機能が求めていること：</text>
+<list num="11" rect="12,84,508,328"/>
+<button num="101" rect="324,336,412,362" answer="cancel" emph="true">取消</button>
+<button num="102" rect="420,336,508,362">読み込む</button>
+</panel>
+<panel num="9" rect="0,0,460,248" title="パスワードの変更">
+<text num="1" x="20" y="36"> </text>
+<text num="2" x="20" y="58"> </text>
+<text x="20" y="92">新しいパスワード：</text>
+<secret num="11" rect="170,72,444,100" max="255"/>
+<text x="20" y="130">もう一度：</text>
+<secret num="12" rect="170,110,444,138" max="255"/>
+<text num="3" x="20" y="172"> </text>
+<button num="101" rect="260,210,348,236" answer="cancel">取消</button>
+<button num="102" rect="356,210,444,236" emph="true">了解</button>
+</panel>
+<panel num="20" rect="0,0,460,372" title="画面の共有">
+<text num="1" x="20" y="28"> </text>
+<text num="2" x="20" y="50">共有するものを選んでください。</text>
+<list num="11" rect="12,64,448,296"/>
+<switch num="12" rect="12,304,220,328">音も共有する</switch>
+<button num="101" rect="264,336,352,362" answer="cancel" emph="true">取消</button>
+<button num="102" rect="360,336,448,362">共有</button>
 </panel>
 </databox>
 </tad>

@@ -78,6 +78,23 @@ extern void	knl_acpica_wake_found( void );
 /* Off (S5) and a reset (the FADT's reset register): they return only on failure */
 extern int	knl_acpica_poweroff( void );
 extern int	knl_acpica_reset( void );
+/*
+ * Asleep (acpica_sleep.c, called by kernel/sysdepend/x64/pm.c): the ways
+ * the firmware offers; the low power S0 device's list and its _DSM; the
+ * lid's and the buttons' wake; S3's steps; the RTC's alarm as an event.
+ */
+#define PMC_S3		1
+#define PMC_LOW_S0	2
+#define PMC_LPS0	4
+extern int	knl_acpica_sleep_caps( void );
+extern void	knl_acpica_lps0_constraints( void );
+extern void	knl_acpica_lps0( int fn );
+extern void	knl_acpica_wake_devices( int on, int state );
+extern int	knl_acpica_s3_prep( unsigned long long vector );
+extern int	knl_acpica_s3_enter( void );
+extern void	knl_acpica_s3_leave_prep( void );
+extern void	knl_acpica_s3_leave( void );
+extern void	knl_acpica_rtc_event( void (*fn)( void ) );
 /* Whether a device present (_STA) has the hardware or compatible ID */
 extern int	knl_acpica_has_hid( const char *hid );
 /* The index-th present device with the hardware or compatible ID, NULL when there is none */
@@ -101,6 +118,10 @@ extern int	knl_acpica_pkg( void *dev, const char *method, unsigned long long *v,
  */
 extern int	knl_acpica_i2c( void *dev, unsigned int *addr, unsigned int *hz, char *ctrl, int max,
 				int *gpio_pin, char *gpio_ctrl, int gmax, int *irq, int *irq_mode );
+/* The first GpioInt of a device's _CRS: its mode, bit 0 edge, bit 1 active low, bit 2 both edges. 0 when there is one */
+extern int	knl_acpica_gpioint( void *dev, int *mode );
+/* The first Interrupt of a device's _CRS (an input of the IOAPICs), mode as knl_acpica_i2c gives it. 0 when there is one */
+extern int	knl_acpica_irq( void *dev, int *irq, int *mode );
 /* A method of a device run with no arguments (_PS0): 0 when run, -1 when it has none, -2 when it failed */
 extern int	knl_acpica_call( void *dev, const char *method );
 /* The device of a path, NULL when there is none */

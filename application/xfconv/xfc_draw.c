@@ -11,9 +11,10 @@
  *	xfc_draw.c
  *	ファイル変換: the windows drawn (design 17.17)
  *
- *	Each entry of a list is drawn as a closed 仮身 is: a box 25 pixels
- *	tall with a frame, the pictogram at the left of its band and the
- *	name after it. What the entry is, is told by the colour of the band:
+ *	Each entry of a list is drawn as a closed 仮身 is: a box as tall as
+ *	its letters make a closed one (VOBJ_CLOSED_H) with a frame, the
+ *	pictogram half a letter in at the left of its band and the name
+ *	after it. What the entry is, is told by the colour of the band:
  *
  *	  青	a disk or a volume, or an FTP connection
  *	  水色	the directory above
@@ -32,8 +33,11 @@
 #include <stdio.h>
 #include <string.h>
 
-#define TEXT_PX		16
-#define PICT		( XFC_VOBJ_H - 4 )
+#define TEXT_PX		XFC_TEXT_PX
+#define PICT		( TEXT_PX + TEXT_PX / 4 )	/* the picture's square */
+#define PICT_X		( TEXT_PX / 2 )			/* half a letter in from the frame */
+#define NAME_X		( VOBJ_CLOSED_EDGE_W(TEXT_PX) - TEXT_PX / 2 )
+#define NAME_BASE	( 1 + TEXT_PX / 8 + TEXT_PX - TEXT_PX / 8 )	/* the name one letter tall under c/8 */
 
 #define C_INK		0x00000000
 #define C_WHITE		0x00FFFFFF
@@ -114,7 +118,7 @@ EXPORT INT xfc_vobj_w( XWIN *w, CONST XFCENT *e )
 	INT	ww, wh, v, most;
 
 	xfc_work_size(w, &ww, &wh);
-	v = 2 + PICT + 3 + dp_text_width((CONST UB *)shown_name(e), TEXT_PX) + 10;
+	v = VOBJ_CLOSED_EDGE_W(TEXT_PX) + dp_text_width((CONST UB *)shown_name(e), TEXT_PX);
 	most = ww - XFC_LEFT - 12 - ( ( e->kind == E_FILE ) ? 96 : ( e->kind == E_DISK ) ? 150 : 0 );
 	if ( most < 120 ) most = 120;
 	if ( v < 120 ) v = 120;
@@ -274,10 +278,10 @@ static void draw_vobj( XWIN *w, INT i )
 		ch ^= 0x00FFFFFF;
 	}
 	(void)dp_fill_rect(w->gid, &r, tb);
-	pictogram(w, e->kind, r.left + 2, r.top + 2, e->marked ? C_WHITE : C_INK, e->marked ? C_INK : C_WHITE);
-	tx = r.left + 2 + PICT + 3;
-	fit(shown_name(e), r.right - tx - 4, s, sizeof(s));
-	(void)dp_text(w->gid, tx, r.top + 18, (CONST UB *)s, ch, TEXT_PX);
+	pictogram(w, e->kind, r.left + PICT_X, r.top + 1, e->marked ? C_WHITE : C_INK, e->marked ? C_INK : C_WHITE);
+	tx = r.left + NAME_X;
+	fit(shown_name(e), r.right - TEXT_PX / 2 - tx, s, sizeof(s));
+	(void)dp_text(w->gid, tx, r.top + NAME_BASE, (CONST UB *)s, ch, TEXT_PX);
 	(void)dp_frame_rect(w->gid, &r, fr, 1);
 
 	/* after it: the size, and whether a disk is in use */
@@ -299,7 +303,7 @@ static void draw_vobj( XWIN *w, INT i )
 		else snprintf(sz, sizeof(sz), "%s", b);
 	}
 	if ( sz[0] != 0 ) {
-		(void)dp_text(w->gid, r.right + 8, r.top + 18, (CONST UB *)sz, e->faint ? C_FAINT : C_DIM, TEXT_PX - 2);
+		(void)dp_text(w->gid, r.right + 8, r.top + NAME_BASE, (CONST UB *)sz, e->faint ? C_FAINT : C_DIM, TEXT_PX - 2);
 	}
 }
 

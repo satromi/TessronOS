@@ -11,7 +11,9 @@
  *	tsw_drv.h (x64 PC, WIFI_NET80211=obsd)
  *	What the Wi-Fi interface (tswifi_obsd.c) asks of the driver of the
  *	card (design 9.6.9): iwm(4) for Intel's 7260 to 8265 and 9260/9560
- *	(tsw_iwm.c), iwx(4) for the Wi-Fi 6 AX200 and later (tsw_iwx.c).
+ *	(tsw_iwm.c), iwx(4) for the Wi-Fi 6 AX200 and later (tsw_iwx.c),
+ *	mwx(4) for MediaTek's MT7921 and MT7922 (tsw_mwx.c), athx for
+ *	Qualcomm's QCA6174 (tsw_athx.c, athx*.c).
  *	The driver is chosen by the card's PCI ID, each driver's own match
  *	saying whether it knows the card. Each of the files is compiled
  *	with OpenBSD's kernel headers and its driver's own; this one with
@@ -78,6 +80,9 @@ struct tsw_drv {
 
 extern const struct tsw_drv	tsw_iwm_drv;	/* tsw_iwm.c */
 extern const struct tsw_drv	tsw_iwx_drv;	/* tsw_iwx.c */
+extern const struct tsw_drv	tsw_mwx_drv;	/* tsw_mwx.c */
+extern const struct tsw_drv	tsw_athx_drv;	/* tsw_athx.c */
+extern const struct tsw_drv	tsw_bwfm_drv;	/* tsw_bwfm.c, the Raspberry Pi's */
 
 /* ---------------------------------------------------------------- what tswifi_obsd.c gives the drivers */
 

@@ -6,6 +6,8 @@
 # all of it; the figure saved by closing, opened again and found whole.
 # The times are printed ("time ...").
 # Keys: A 04, X 1B, Z 1D, E 08 with Ctrl (01).
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
 mkbig fig 10000 2000
 mark
 open big

@@ -179,12 +179,15 @@ LOCAL void test_el0_tid_rsfn( void )
 	KT_ASSERT_ER(tk_del_tsk(id), E_OK);
 }
 
+IMPORT BOOL	knl_pt_reclaim( void );
+
 LOCAL void test_el0_fault_contained( void )
 {
 	ID	id;
 	T_RTSK	rtsk;
 	volatile UD *sh = u_shared_k();
 	UD	before = knl_pf_free_count(-1);
+	INT	i;
 
 	id = cre_user_task(2, (void *)&sem_id);		/* a kernel address */
 	KT_ASSERT(id > 0);
@@ -195,7 +198,14 @@ LOCAL void test_el0_fault_contained( void )
 	KT_ASSERT_EQ(rtsk.tskstat, TTS_DMT);			/* terminated by the fault handler */
 	KT_ASSERT_EQ(sem_id, sem_id);				/* kernel data untouched */
 	KT_ASSERT_ER(tk_del_tsk(id), E_OK);
-	/* user stack released; what ended processes held may come back meanwhile too (proc.c, prc_reaper) */
+	/*
+	 * User stack released. The tables under it wait until every other
+	 * processor has passed the dispatcher (knl_pt_reclaim); what ended
+	 * processes held may come back meanwhile too (proc.c, prc_reaper).
+	 */
+	for ( i = 0; i < 250 && knl_pt_reclaim(); i++ ) {
+		tk_dly_tsk(20);
+	}
 	KT_ASSERT(knl_pf_free_count(-1) >= before);
 }
 
@@ -210,7 +220,6 @@ LOCAL void test_el0_fault_contained( void )
 IMPORT UD	knl_rump_pages( void );
 #endif
 
-IMPORT BOOL	knl_pt_reclaim( void );
 IMPORT UW	knl_pt_pruned( INT *p_waiting );
 
 LOCAL UD el0_free( void )

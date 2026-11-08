@@ -81,6 +81,7 @@ IMPORT unsigned char	knl_bootvol_name[];
 LOCAL CONST char * CONST cands[] = {
 	"nvmea", "nvmeb", "nvmec", "nvmed",
 	"sataa", "satab", "satac", "satad",
+	"sda",
 	NULL
 };
 

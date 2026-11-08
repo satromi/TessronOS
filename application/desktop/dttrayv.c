@@ -668,9 +668,8 @@ LOCAL INT draw_set( DTWIN *d, TRV *st, INT gid )
 			page.left += 4;
 			page.right -= 4;
 			if ( tv_doc(frag, &doc) >= E_OK && doc != NULL ) {
-				tv_doc_detail(st->tags);
+				doc->detail = st->tags;
 				tall = tv_doc_draw(gid, doc, &page, d->scroll_y, frag, TV_PAPER);
-				tv_doc_detail(FALSE);
 				tv_doc_free(doc);
 			}
 		} else {

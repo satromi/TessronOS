@@ -27,10 +27,7 @@
  *	be under it.
  */
 
-#include <sys/machine.h>
-#include "kernel.h"
-#include <tk/tkernel.h>
-#include <tk/smem.h>
+#include <ts/tvport.h>
 #include <ts/img.h>
 
 #define PNG_MAX_SIDE	8192		/* larger than any screen this runs on */
@@ -332,35 +329,7 @@ EXPORT ER img_png_decode( CONST UB *data, SZ size, UW **p_pixels,
 	return er;
 }
 
-/*
- * A picture scaled to fit a box, nearest pixel. The picture in a record
- * is drawn at the size of the box it was placed in, which is rarely the
- * size it was made at.
- */
-EXPORT UW *img_scale( CONST UW *src, INT sw, INT sh, INT dw, INT dh )
-{
-	UW	*dst;
-	INT	x, y;
-
-	if ( src == NULL || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0 ) {
-		return NULL;
-	}
-	dst = (UW *)Kmalloc((SZ)dw * dh * sizeof(UW));
-	if ( dst == NULL ) {
-		return NULL;
-	}
-	for ( y = 0; y < dh; y++ ) {
-		INT	sy = (INT)( (D)y * sh / dh );
-
-		for ( x = 0; x < dw; x++ ) {
-			INT	sx = (INT)( (D)x * sw / dw );
-
-			dst[(SZ)y * dw + x] = src[(SZ)sy * sw + sx];
-		}
-	}
-
-	return dst;
-}
+/* A picture scaled to fit a box (img_scale) is in img_scale.c */
 
 /* ---------------------------------------------------------------- writing */
 

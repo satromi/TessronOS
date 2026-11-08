@@ -31,6 +31,7 @@
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/pcie.h>
+#include "igt_gen.h"
 
 IMPORT INT knl_igfx_log( char *buf, INT max );		/* disp_igfx.c */
 
@@ -146,6 +147,14 @@ EXPORT INT knl_gfx_report( char *buf, INT max )
 	     ( ggc >> 8 ) & 0xff, bdsm, asls);
 	if ( bar0 == 0 || d.bar_size[0] < 16 * 1024 * 1024 ) {
 		gfmt(&b, "  the first BAR is not of the registers and the GTT: nothing more read\n");
+		return b.len;
+	}
+	/*
+	 * The places below are the 9th generation's: on a later one they are
+	 * other registers or none. What such a machine tells is igt12.c's
+	 */
+	if ( knl_igt_gen(d.device) != NULL ) {
+		gfmt(&b, "  graphics of the 11th generation or later: what is told of it is in the lines \"igt12:\"\n");
 		return b.len;
 	}
 	mmio = (UBINT)DEV_BASE(bar0);

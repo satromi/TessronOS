@@ -15,10 +15,11 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "tessronos-microcard",
       "kind": "app",
       "name": "マイクロカード",
-      "version": "R1.200",
+      "version": "R1.300",
       "menu": false,
       "builtin": false,
       "base": [

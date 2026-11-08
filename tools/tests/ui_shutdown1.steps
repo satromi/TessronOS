@@ -1,0 +1,35 @@
+# The machine going off (design 4.9), the first of two runs. A program with
+# something not saved holds it: after 5 seconds a panel names the program, and
+# 取消 goes back to the session. The program's own question is then answered. Then a
+# window that keeps something when asked to close, a process without a window,
+# and one that ignores being told to end. Run with --keep-disk and then
+# ui_shutdown2.steps on the disk kept. The buttons' places come from the panel's
+# size and the first window's (off_panel).
+open 019b54a4-6ccf-72f7-e320-c98e4a0bab4e
+expect calc: ready
+wait 800
+click 200 163
+text 77
+key 28
+wait 300
+logmark
+poweroff
+expectsincein 15 has not closed
+wait 500
+click 664 441
+expectsincein 10 the person cancelled the going off
+wait 500
+ready
+key 28
+expectsincein 30 calc: saved
+sdnstart
+win ktsdn
+logmark
+poweroff
+expectsincein 15 programs asked to end, 0 not ended
+expectsince shutdown: 2 processes told to end
+expectsincein 20 has not ended: ended by force
+expectsincein 20 shutdown: after force, 0 processes left
+expectsincein 20 TessronOS desktop: turning the machine off
+expectsincein 20 marked clean
+expectsincein 20 mounts taken down

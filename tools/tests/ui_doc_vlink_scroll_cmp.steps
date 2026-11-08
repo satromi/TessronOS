@@ -1,0 +1,245 @@
+# 基本文章編集で開いた仮身を見えている所の外へスクロールする (design 11.3), for tools/ui_run.py:
+# a text of twelve paragraphs, three paragraphs of two links each taller than closed (heightpx
+# 31: opened, their object's text shown inside, as records TADjs wrote have them) and thirty
+# paragraphs after (xml, xmlbig into a copy of 基本文章編集 made by mkbig), opened in the
+# desktop's own text editor (docproc kernel) and then in the process (pdoc), and wound down by
+# the wheel a notch at a time until the links have gone out at the top. What is inside a link
+# must stay inside its box: a part of the window drawn again that misses the box (the strip
+# a scroll brings in) must not get the link's contents. The shot after the wheel
+# (vlink_*_scrolled) is compared with the same place drawn whole again by 表示 > 再表示
+# (vlink_*_whole), inside the window where the text is (101,125 to 682,482 of the screen), and
+# the desktop's with the process's.
+# The menu opens with 閉じる on the pointer's row the first time (表示 60 below) and with the
+# item chosen last afterwards (the process's after the desktop's); 表示's own opens with its
+# first row on 表示's row, 再表示 100 below. Keys: Ctrl+E 08 01.
+docproc kernel
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>上の段落 1</p>
+xml <p>上の段落 2</p>
+xml <p>上の段落 3</p>
+xml <p>上の段落 4</p>
+xml <p>上の段落 5</p>
+xml <p>上の段落 6</p>
+xml <p>上の段落 7</p>
+xml <p>上の段落 8</p>
+xml <p>上の段落 9</p>
+xml <p>上の段落 10</p>
+xml <p>上の段落 11</p>
+xml <p>上の段落 12</p>
+xml <p>仮身 
+xml <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" heightpx="31" width="150" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml 、
+xml <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" heightpx="31" width="150" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml </p>
+xml <p>仮身 
+xml <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" heightpx="31" width="150" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml 、
+xml <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" heightpx="31" width="150" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml </p>
+xml <p>仮身 
+xml <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" heightpx="31" width="150" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml 、
+xml <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" heightpx="31" width="150" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml </p>
+xml <p>下の段落 1</p>
+xml <p>下の段落 2</p>
+xml <p>下の段落 3</p>
+xml <p>下の段落 4</p>
+xml <p>下の段落 5</p>
+xml <p>下の段落 6</p>
+xml <p>下の段落 7</p>
+xml <p>下の段落 8</p>
+xml <p>下の段落 9</p>
+xml <p>下の段落 10</p>
+xml <p>下の段落 11</p>
+xml <p>下の段落 12</p>
+xml <p>下の段落 13</p>
+xml <p>下の段落 14</p>
+xml <p>下の段落 15</p>
+xml <p>下の段落 16</p>
+xml <p>下の段落 17</p>
+xml <p>下の段落 18</p>
+xml <p>下の段落 19</p>
+xml <p>下の段落 20</p>
+xml <p>下の段落 21</p>
+xml <p>下の段落 22</p>
+xml <p>下の段落 23</p>
+xml <p>下の段落 24</p>
+xml <p>下の段落 25</p>
+xml <p>下の段落 26</p>
+xml <p>下の段落 27</p>
+xml <p>下の段落 28</p>
+xml <p>下の段落 29</p>
+xml <p>下の段落 30</p>
+xml </document></tad>
+xmlbig
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 800
+move 300 300
+wheel -1
+sync 600
+wait 200
+wheel -1
+sync 600
+wait 200
+wheel -1
+sync 600
+wait 200
+wheel -1
+sync 600
+wait 200
+wheel -1
+sync 600
+wait 200
+wheel -1
+sync 600
+wait 200
+wheel -1
+sync 600
+wait 200
+wheel -1
+sync 600
+wait 200
+wheel -1
+sync 600
+wait 200
+wheel -1
+sync 600
+wait 200
+wheel -1
+sync 600
+wait 200
+move 690 490
+sync 600
+shot vlink_k_scrolled
+click 300 250 1
+wait 400
+wait 400
+move 330 310
+wait 300
+move 440 310
+wait 400
+move 440 410
+wait 300
+click 440 410
+sync 600
+wait 300
+move 690 490
+sync 600
+shot vlink_k_whole
+key 08 01
+sync 600
+wait 500
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>上の段落 1</p>
+xml <p>上の段落 2</p>
+xml <p>上の段落 3</p>
+xml <p>上の段落 4</p>
+xml <p>上の段落 5</p>
+xml <p>上の段落 6</p>
+xml <p>上の段落 7</p>
+xml <p>上の段落 8</p>
+xml <p>上の段落 9</p>
+xml <p>上の段落 10</p>
+xml <p>上の段落 11</p>
+xml <p>上の段落 12</p>
+xml <p>仮身 
+xml <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" heightpx="31" width="150" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml 、
+xml <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" heightpx="31" width="150" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml </p>
+xml <p>仮身 
+xml <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" heightpx="31" width="150" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml 、
+xml <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" heightpx="31" width="150" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml </p>
+xml <p>仮身 
+xml <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" heightpx="31" width="150" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml 、
+xml <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" heightpx="31" width="150" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml </p>
+xml <p>下の段落 1</p>
+xml <p>下の段落 2</p>
+xml <p>下の段落 3</p>
+xml <p>下の段落 4</p>
+xml <p>下の段落 5</p>
+xml <p>下の段落 6</p>
+xml <p>下の段落 7</p>
+xml <p>下の段落 8</p>
+xml <p>下の段落 9</p>
+xml <p>下の段落 10</p>
+xml <p>下の段落 11</p>
+xml <p>下の段落 12</p>
+xml <p>下の段落 13</p>
+xml <p>下の段落 14</p>
+xml <p>下の段落 15</p>
+xml <p>下の段落 16</p>
+xml <p>下の段落 17</p>
+xml <p>下の段落 18</p>
+xml <p>下の段落 19</p>
+xml <p>下の段落 20</p>
+xml <p>下の段落 21</p>
+xml <p>下の段落 22</p>
+xml <p>下の段落 23</p>
+xml <p>下の段落 24</p>
+xml <p>下の段落 25</p>
+xml <p>下の段落 26</p>
+xml <p>下の段落 27</p>
+xml <p>下の段落 28</p>
+xml <p>下の段落 29</p>
+xml <p>下の段落 30</p>
+xml </document></tad>
+xmlbig
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 45
+wait 800
+move 300 300
+wheel -1
+wait 300
+wheel -1
+wait 300
+wheel -1
+wait 300
+wheel -1
+wait 300
+wheel -1
+wait 300
+wheel -1
+wait 300
+wheel -1
+wait 300
+wheel -1
+wait 300
+wheel -1
+wait 300
+wheel -1
+wait 300
+wheel -1
+wait 300
+move 690 490
+wait 300
+shot vlink_p_scrolled
+logmark
+click 300 250 1
+expectsince document: menu
+wait 400
+move 330 250
+wait 300
+move 440 250
+wait 400
+move 440 350
+wait 300
+click 440 350
+expectsince document: command refresh
+expectsince document: drew
+wait 300
+move 690 490
+wait 300
+shot vlink_p_whole
+key 08 01
+expect document: closed

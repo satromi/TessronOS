@@ -1,0 +1,316 @@
+# プロセスの仮身一覧・基本図形編集・基本文章編集のウインドウの間の受け渡しを、カーネル内の三つの
+# ウインドウの間と同じにする (design 11.3, 11.4), for tools/ui_run.py. Three copies are made:
+# a figure with nothing in it (画用紙), a text of three paragraphs with a link in the first
+# (基本文章編集), and a 画用紙 holding two closed links opened with 仮身一覧. They are opened
+# with the desktop's own editors (figproc, docproc, cabproc kernel; open), then again with the
+# processes (pfig, pdoc, pcab), each window at 100,100 as its object says: the figure stays
+# there, the text is moved by its name band to 680,40 and the cabinet to 100,450, so that each
+# shows where the next carry lets go. Carried by the hand, as the person does:
+#   1. the cabinet's second link into the figure (a move: it leaves the cabinet)
+#   2. that link, from the figure into the text, the second button pressed on the way (a copy:
+#      the figure keeps it)
+#   3. the text's link into the cabinet, where the cabinet shows under the figure (a move)
+#   4. letters of the text's second paragraph, picked, onto the figure where nothing is (a
+#      move: a new piece of text there, and they leave the text)
+# Each is saved where it was changed last (Ctrl+S): record 0 of the three is the same, byte for
+# byte but for the identities a link put is given (sum anon), whichever editors did it.
+# Keys: Ctrl+S 16 01, Ctrl+E 08 01.
+
+# ---------------------------------------------------------------- the desktop's own
+figproc kernel
+docproc kernel
+cabproc kernel
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml </figure></tad>
+xmlbig
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+mkbig doc 3
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>一つ目の段落 <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" vobjid="01a10000-0000-7000-8000-000000000001" width="150" heightpx="19" chsz="14"/> ここまで</p>
+xml <p>二つ目の段落の文字列</p>
+xml <p>三つ目の段落</p>
+xml </document></tad>
+xmlbig
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+drag 300 112 880 52
+sync 600
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+drag 500 112 500 462
+sync 600
+wait 800
+shot pd_k_laid
+# 1. the cabinet's second link into the figure
+click 177 547
+sync 600
+wait 600
+move 177 547
+down
+move 200 520
+wait 500
+move 260 400
+wait 500
+move 300 270
+wait 1000
+move 310 260
+wait 1000
+up
+sync 600
+wait 800
+shot pd_k_1
+# 2. that link, from the figure into the text, as a copy
+click 310 260
+sync 600
+wait 600
+move 310 260
+down
+move 400 270
+wait 500
+move 700 290
+wait 500
+move 990 300
+wait 1000
+move 1000 300
+wait 1000
+down 1
+wait 200
+up 1
+wait 200
+up
+sync 600
+wait 800
+shot pd_k_2
+# 3. the text's link into the cabinet, under the figure
+move 850 78
+down
+move 840 200
+wait 500
+move 700 600
+wait 500
+move 610 735
+wait 1000
+move 600 740
+wait 1000
+up
+sync 600
+wait 800
+shot pd_k_3
+key 16 01
+sync 600
+# 4. letters of the text's second paragraph onto the figure
+click 1000 52
+sync 600
+drag 692 118 790 118
+sync 600
+wait 300
+move 740 118
+down
+move 700 160
+wait 500
+move 500 300
+wait 500
+move 310 375
+wait 1000
+move 300 380
+wait 1000
+up
+sync 600
+wait 800
+shot pd_k_4
+key 16 01
+sync 600
+click 1000 52
+sync 600
+key 16 01
+sync 600
+sum show anon big2
+keep fig
+sum show anon big1
+keep doc
+sum show anon
+keep cab
+key 08 01
+sync 600
+click 400 112
+sync 600
+key 08 01
+sync 600
+click 500 462
+sync 600
+key 08 01
+sync 600
+wait 500
+figproc 0
+docproc 0
+cabproc 0
+
+# ---------------------------------------------------------------- the processes
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml </figure></tad>
+xmlbig
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 0
+wait 800
+mkbig doc 3
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>一つ目の段落 <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" vobjid="01a10000-0000-7000-8000-000000000001" width="150" heightpx="19" chsz="14"/> ここまで</p>
+xml <p>二つ目の段落の文字列</p>
+xml <p>三つ目の段落</p>
+xml </document></tad>
+xmlbig
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 3
+wait 800
+drag 300 112 880 52
+wait 800
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+logmark
+pcab big
+expectsincein 60 cabinet: opened 画用紙 shapes 2 links 2
+wait 800
+drag 500 112 500 462
+wait 1000
+shot pd_p_laid
+# 1. the cabinet's second link into the figure
+click 177 547
+wait 600
+logmark
+move 177 547
+down
+move 200 520
+wait 500
+move 260 400
+wait 500
+move 300 270
+wait 1000
+move 310 260
+wait 1000
+up
+expectsince cabinet: carried
+expectsince figure: dropped 1
+wait 800
+shot pd_p_1
+# 2. that link, from the figure into the text, as a copy
+click 310 260
+wait 600
+logmark
+move 310 260
+down
+move 400 270
+wait 500
+move 700 290
+wait 500
+move 990 300
+wait 1000
+move 1000 300
+wait 1000
+down 1
+wait 200
+up 1
+wait 200
+up
+expectsince figure: carried
+wait 1500
+shot pd_p_2
+# 3. the text's link into the cabinet, under the figure
+logmark
+move 850 78
+down
+move 840 200
+wait 500
+move 700 600
+wait 500
+move 610 735
+wait 1000
+move 600 740
+wait 1000
+up
+expectsince document: link carried out
+expectsince cabinet: dropped 1
+wait 800
+shot pd_p_3
+logmark
+key 16 01
+expectsince cabinet: saved (0)
+# 4. letters of the text's second paragraph onto the figure
+click 1000 52
+wait 500
+drag 692 118 790 118
+wait 800
+logmark
+move 740 118
+down
+move 700 160
+wait 500
+move 500 300
+wait 500
+move 310 375
+wait 1000
+move 300 380
+wait 1000
+up
+expectsince figure: letters dropped
+wait 800
+shot pd_p_4
+logmark
+key 16 01
+expectsince figure: saved (0)
+click 1000 52
+wait 500
+logmark
+key 16 01
+expectsince document: saved (0)
+sum show anon big2
+same fig
+sum show anon big1
+same doc
+sum show anon
+same cab
+logmark
+key 08 01
+expectsince document: closed
+click 400 112
+wait 500
+logmark
+key 08 01
+expectsince figure: closed
+click 500 462
+wait 500
+logmark
+key 08 01
+expectsince cabinet: closed
+absent !OACV!

@@ -1380,6 +1380,62 @@ LOCAL BOOL grant_live( CONST GRANT *g )
 	return (BOOL)( g->pid != 0 && wm_obj_wid(&g->win) == g->wid && wm_gid(g->wid) == g->gid );
 }
 
+/*
+ * Environments of memory a process opened (dp_open_mem): the kernel's
+ * copy of the process's picture they draw into, and where in the
+ * process it is written back as one is closed. Each is its process's
+ * alone, and goes with it (knl_dp_prc_end).
+ */
+#define MEMENV_MAX	8
+
+typedef struct {
+	BOOL	used;
+	INT	gid;
+	ID	pid;
+	UW	*px;			/* the kernel's copy, w by h */
+	UW	*user;			/* the process's picture */
+	INT	pitch, w, h;
+} MEMENV;
+
+LOCAL MEMENV	memenv[MEMENV_MAX];
+LOCAL ID	memenv_mtx;
+
+LOCAL BOOL memenv_lock( void )
+{
+	if ( memenv_mtx == 0 ) {
+		T_CMTX	c;
+		ID	id;
+
+		c.exinf = NULL;
+		c.mtxatr = TA_INHERIT;
+		c.ceilpri = 0;
+		id = tk_cre_mtx(&c);
+		if ( id <= 0 ) return FALSE;
+		/* the first to set it wins; tasks on other processors race here */
+		if ( atomic_cmpxchg((UW *)&memenv_mtx, (UW)id, 0) == 0 ) {
+			id = 0;
+		}
+		if ( id > 0 ) tk_del_mtx(id);
+	}
+	return (BOOL)( tk_loc_mtx(memenv_mtx, TMO_FEVR) >= E_OK );
+}
+
+LOCAL BOOL memenv_mine( ID pid, INT gid )
+{
+	INT	i;
+	BOOL	mine = FALSE;
+
+	if ( !memenv_lock() ) return FALSE;
+	for ( i = 0; i < MEMENV_MAX; i++ ) {
+		if ( memenv[i].used && memenv[i].gid == gid && memenv[i].pid == pid ) {
+			mine = TRUE;
+			break;
+		}
+	}
+	tk_unl_mtx(memenv_mtx);
+	return mine;
+}
+
 LOCAL BOOL granted( INT gid )
 {
 	ID	pid = ts_get_pid();
@@ -1387,6 +1443,9 @@ LOCAL BOOL granted( INT gid )
 
 	if ( pid <= 0 || gid < 0 ) {
 		return FALSE;
+	}
+	if ( memenv_mine(pid, gid) ) {
+		return TRUE;
 	}
 	for ( i = 0; i < GRANT_MAX; i++ ) {
 		if ( grants[i].pid == pid && grants[i].gid == gid && grant_live(&grants[i]) ) {
@@ -1686,6 +1745,492 @@ LOCAL ER svc_dp_img_decode( CONST UB *data, SZ size, UW *px, SZ maxpx, INT *p_w,
 	return er;
 }
 
+/* ---------------------------------------------------------------- the drawing of documents in a process */
+
+/*
+ * The calls the drawing of documents and figures makes when it is
+ * linked into a process (include/ts/tvport.h, design 11.11): each is the
+ * kernel's function of the same name on the environment of a window the
+ * process has, what it passes taken into the kernel first.
+ */
+#define SVC_PTS_ROOM	64		/* the points of a polygon kept on the stack, more taken from the heap */
+#define SVC_TEXT_ROOM	256		/* the bytes of words kept on the stack */
+#define SVC_FACES_MAX	4096		/* the bytes of a list of face names */
+
+LOCAL ER svc_dp_set_visible( INT gid, CONST T_DPRECT *r )
+{
+	T_DPRECT	k;
+
+	if ( !granted(gid) ) return E_ID;
+	if ( r == NULL ) return E_PAR;
+	if ( user_rect(r, &k) < E_OK ) return E_MACV;
+	return dp_set_visible(gid, &k);
+}
+
+LOCAL ER svc_dp_ref( INT gid, T_DPENV *env )
+{
+	T_DPENV	k;
+	ER	er;
+
+	if ( !granted(gid) ) return E_ID;
+	if ( env == NULL ) return E_PAR;
+	if ( !user_ok(env, sizeof(*env), TRUE) ) return E_MACV;
+	er = dp_ref(gid, &k);
+	if ( er >= E_OK ) knl_ua_put(env, &k, sizeof(k));
+	return er;
+}
+
+LOCAL ER svc_dp_set_mode( INT gid, UINT mode )
+{
+	if ( !granted(gid) ) return E_ID;
+	if ( mode != DP_MODE_COPY && mode != DP_MODE_XOR && mode != DP_MODE_AND ) return E_PAR;
+	return dp_set_mode(gid, mode);
+}
+
+LOCAL ER svc_dp_put_pixel( INT gid, INT x, INT y, UW colour )
+{
+	if ( !granted(gid) ) return E_ID;
+	return dp_put_pixel(gid, x, y, colour);
+}
+
+/*
+ * A pattern of the process's taken in: a tile's pixels and its mask
+ * copied into the kernel's heap, freed with pat_done
+ */
+LOCAL ER user_pat( CONST T_DPPAT *u, T_DPPAT *k )
+{
+	SZ	n, m;
+	UW	*tile = NULL, *mask = NULL;
+
+	if ( u == NULL ) return E_PAR;
+	if ( !user_ok(u, sizeof(*u), FALSE) ) return E_MACV;
+	knl_ua_get(k, u, sizeof(*k));
+	if ( k->kind != DP_PAT_TILE ) {
+		k->tile = NULL;
+		k->mask = NULL;
+		return ( k->kind == DP_PAT_TONE ) ? E_OK : E_PAR;
+	}
+	if ( k->hs <= 0 || k->vs <= 0 || k->tile == NULL ) return E_PAR;
+	n = (SZ)k->hs * k->vs;
+	m = (SZ)( ( k->hs + 31 ) / 32 ) * k->vs;
+	if ( !user_ok(k->tile, n * (SZ)sizeof(UW), FALSE)
+	  || ( k->mask != NULL && !user_ok(k->mask, m * (SZ)sizeof(UW), FALSE) ) ) return E_MACV;
+	tile = (UW *)Kmalloc(n * (SZ)sizeof(UW));
+	if ( k->mask != NULL ) mask = (UW *)Kmalloc(m * (SZ)sizeof(UW));
+	if ( tile == NULL || ( k->mask != NULL && mask == NULL ) ) {
+		if ( tile != NULL ) Kfree(tile);
+		if ( mask != NULL ) Kfree(mask);
+		return E_NOMEM;
+	}
+	knl_ua_get(tile, k->tile, n * (SZ)sizeof(UW));
+	if ( mask != NULL ) knl_ua_get(mask, k->mask, m * (SZ)sizeof(UW));
+	k->tile = tile;
+	k->mask = mask;
+	return E_OK;
+}
+
+LOCAL void pat_done( T_DPPAT *k )
+{
+	if ( k->kind == DP_PAT_TILE ) {
+		if ( k->tile != NULL ) Kfree((void *)k->tile);
+		if ( k->mask != NULL ) Kfree((void *)k->mask);
+	}
+}
+
+/* The points of a polygon taken in: into room when they fit, else the heap (freed by the caller when not room) */
+LOCAL ER user_pts( CONST T_DPPOINT *p, INT n, T_DPPOINT *room, T_DPPOINT **p_k )
+{
+	T_DPPOINT	*k = room;
+
+	if ( n <= 0 || p == NULL ) return E_PAR;
+	if ( !user_ok(p, (SZ)n * (SZ)sizeof(T_DPPOINT), FALSE) ) return E_MACV;
+	if ( n > SVC_PTS_ROOM ) {
+		k = (T_DPPOINT *)Kmalloc((SZ)n * (SZ)sizeof(T_DPPOINT));
+		if ( k == NULL ) return E_NOMEM;
+	}
+	knl_ua_get(k, p, (SZ)n * (SZ)sizeof(T_DPPOINT));
+	*p_k = k;
+	return E_OK;
+}
+
+LOCAL ER svc_dp_fill_poly( INT gid, CONST T_DPPOINT *p, INT n, UINT rule, CONST T_DPPAT *pat )
+{
+	T_DPPOINT	room[SVC_PTS_ROOM], *k = NULL;
+	T_DPPAT		kp;
+	ER		er;
+
+	if ( !granted(gid) ) return E_ID;
+	if ( ( er = user_pts(p, n, room, &k) ) < E_OK ) return er;
+	if ( ( er = user_pat(pat, &kp) ) >= E_OK ) {
+		er = dp_fill_poly(gid, k, n, rule, &kp);
+		pat_done(&kp);
+	}
+	if ( k != room ) Kfree(k);
+	return er;
+}
+
+LOCAL ER svc_dp_draw_poly( INT gid, CONST T_DPPOINT *p, INT n, BOOL closed, INT width, UINT kind,
+			   CONST T_DPPAT *pat )
+{
+	T_DPPOINT	room[SVC_PTS_ROOM], *k = NULL;
+	T_DPPAT		kp;
+	ER		er;
+
+	if ( !granted(gid) ) return E_ID;
+	if ( ( er = user_pts(p, n, room, &k) ) < E_OK ) return er;
+	if ( ( er = user_pat(pat, &kp) ) >= E_OK ) {
+		er = dp_draw_poly(gid, k, n, closed, width, kind, &kp);
+		pat_done(&kp);
+	}
+	if ( k != room ) Kfree(k);
+	return er;
+}
+
+LOCAL ER svc_dp_line_wide( INT gid, INT x0, INT y0, INT x1, INT y1, INT width, UINT kind,
+			   CONST T_DPPAT *pat )
+{
+	T_DPPAT	kp;
+	ER	er;
+
+	if ( !granted(gid) ) return E_ID;
+	if ( ( er = user_pat(pat, &kp) ) < E_OK ) return er;
+	er = dp_line_wide(gid, x0, y0, x1, y1, width, kind, &kp);
+	pat_done(&kp);
+	return er;
+}
+
+LOCAL ER svc_dp_frame_oval( INT gid, CONST T_DPRECT *r, INT width, CONST T_DPPAT *pat )
+{
+	T_DPRECT	k;
+	T_DPPAT		kp;
+	ER		er;
+
+	if ( !granted(gid) ) return E_ID;
+	if ( r == NULL ) return E_PAR;
+	if ( user_rect(r, &k) < E_OK ) return E_MACV;
+	if ( ( er = user_pat(pat, &kp) ) < E_OK ) return er;
+	er = dp_frame_oval(gid, &k, width, &kp);
+	pat_done(&kp);
+	return er;
+}
+
+LOCAL ER svc_dp_put_image( INT gid, CONST T_DPRECT *box, CONST UW *px, INT pw, INT ph, INT pitch,
+			   UW clear )
+{
+	T_DPRECT	k;
+
+	if ( !granted(gid) ) return E_ID;
+	if ( box == NULL || px == NULL || pw <= 0 || ph <= 0 || pitch < pw ) return E_PAR;
+	if ( user_rect(box, &k) < E_OK ) return E_MACV;
+	if ( !user_ok(px, (SZ)pitch * ( ph - 1 ) * 4 + (SZ)pw * 4, FALSE) ) return E_MACV;
+	return UACCESS(dp_put_image(gid, &k, px, pw, ph, pitch, clear));
+}
+
+LOCAL INT svc_dp_scale( INT gid )
+{
+	if ( !granted(gid) ) return E_ID;
+	return dp_scale(gid);
+}
+
+/*
+ * An environment of memory for a process: the picture taken into the
+ * kernel as it is, and drawn into there until dp_close writes it back
+ */
+LOCAL INT svc_dp_open_mem( CONST T_DPBMP *bmp )
+{
+	T_DPBMP	k, kb;
+	ID	pid = ts_get_pid();
+	SZ	span;
+	INT	i, y, gid, slot = -1;
+	UW	*px;
+
+	if ( pid <= 0 ) return E_OBJ;
+	if ( !user_ok(bmp, sizeof(*bmp), FALSE) ) return E_MACV;
+	knl_ua_get(&k, bmp, sizeof(k));
+	if ( k.px == NULL || k.w <= 0 || k.h <= 0 || k.w > DP_MEM_MAX / k.h
+	  || k.pitch < k.w * 4 || ( k.pitch & 3 ) != 0 ) {
+		return E_PAR;
+	}
+	span = (SZ)k.pitch * ( k.h - 1 ) + (SZ)k.w * 4;
+	if ( !user_ok(k.px, span, TRUE) ) return E_MACV;
+	px = (UW *)Kmalloc((SZ)k.w * k.h * sizeof(UW));
+	if ( px == NULL ) return E_NOMEM;
+	for ( y = 0; y < k.h; y++ ) {
+		knl_ua_get(px + (SZ)y * k.w, (CONST UB *)k.px + (SZ)y * k.pitch, (SZ)k.w * 4);
+	}
+	kb.px = px;
+	kb.pitch = k.w * 4;
+	kb.w = k.w;
+	kb.h = k.h;
+	if ( !memenv_lock() ) {
+		Kfree(px);
+		return E_SYS;
+	}
+	for ( i = 0; i < MEMENV_MAX; i++ ) {
+		if ( !memenv[i].used ) {
+			slot = i;
+			break;
+		}
+	}
+	gid = ( slot < 0 ) ? E_LIMIT : dp_open_mem(&kb);
+	if ( gid < 0 ) {
+		tk_unl_mtx(memenv_mtx);
+		Kfree(px);
+		return gid;
+	}
+	memenv[slot].used = TRUE;
+	memenv[slot].gid = gid;
+	memenv[slot].pid = pid;
+	memenv[slot].px = px;
+	memenv[slot].user = k.px;
+	memenv[slot].pitch = k.pitch;
+	memenv[slot].w = k.w;
+	memenv[slot].h = k.h;
+	tk_unl_mtx(memenv_mtx);
+	return gid;
+}
+
+/* One taken out of the table, its environment closed; the slot is the caller's to read */
+LOCAL void memenv_drop( MEMENV *m )
+{
+	(void)dp_close(m->gid);
+	m->used = FALSE;
+}
+
+/* An environment of memory of the process's closed, and its picture written back */
+LOCAL ER svc_dp_close( INT gid )
+{
+	MEMENV	m;
+	ID	pid = ts_get_pid();
+	INT	i, y;
+	ER	er = E_ID;
+
+	if ( pid <= 0 ) return E_ID;
+	if ( !memenv_lock() ) return E_SYS;
+	for ( i = 0; i < MEMENV_MAX; i++ ) {
+		if ( memenv[i].used && memenv[i].gid == gid && memenv[i].pid == pid ) {
+			m = memenv[i];
+			memenv_drop(&memenv[i]);
+			er = E_OK;
+			break;
+		}
+	}
+	tk_unl_mtx(memenv_mtx);
+	if ( er < E_OK ) return er;
+	if ( !user_ok(m.user, (SZ)m.pitch * ( m.h - 1 ) + (SZ)m.w * 4, TRUE) ) {
+		er = E_MACV;			/* its picture is not there any more */
+	} else {
+		for ( y = 0; y < m.h; y++ ) {
+			knl_ua_put((UB *)m.user + (SZ)y * m.pitch, m.px + (SZ)y * m.w, (SZ)m.w * 4);
+		}
+	}
+	Kfree(m.px);
+	return er;
+}
+
+/* The environments of memory of a process that has ended, let go of */
+EXPORT void knl_dp_prc_end( ID pid )
+{
+	UW	*gone[MEMENV_MAX];
+	INT	i, n = 0;
+
+	if ( pid <= 0 || !memenv_lock() ) return;
+	for ( i = 0; i < MEMENV_MAX; i++ ) {
+		if ( memenv[i].used && memenv[i].pid == pid ) {
+			gone[n++] = memenv[i].px;
+			memenv_drop(&memenv[i]);
+		}
+	}
+	tk_unl_mtx(memenv_mtx);
+	for ( i = 0; i < n; i++ ) {
+		Kfree(gone[i]);
+	}
+}
+
+#ifdef USE_KTEST
+/* How many environments of memory processes hold now, for the tests */
+EXPORT INT knl_dp_mem_count( void )
+{
+	INT	i, n = 0;
+
+	if ( !memenv_lock() ) return E_SYS;
+	for ( i = 0; i < MEMENV_MAX; i++ ) {
+		if ( memenv[i].used ) n++;
+	}
+	tk_unl_mtx(memenv_mtx);
+	return n;
+}
+#endif
+
+LOCAL ID svc_fn_system( void )
+{
+	ID	fid = fn_system();
+
+	return ( fid > 0 ) ? fid : E_NOEXS;
+}
+
+LOCAL ID svc_fn_find_style( CONST UB *names, UINT want, UINT *p_has )
+{
+	UB	*k;
+	UINT	has = 0;
+	ID	fid;
+
+	if ( names == NULL ) return E_PAR;
+	if ( p_has != NULL && !user_ok(p_has, sizeof(*p_has), TRUE) ) return E_MACV;
+	k = (UB *)Kmalloc(SVC_FACES_MAX);
+	if ( k == NULL ) return E_NOMEM;
+	if ( !user_str(names, k, SVC_FACES_MAX) ) {
+		Kfree(k);
+		return E_MACV;
+	}
+	fid = fn_find_style(k, want, &has);
+	Kfree(k);
+	if ( p_has != NULL ) knl_ua_put(p_has, &has, sizeof(has));
+	return fid;
+}
+
+/* The faces in use: how many, the one at a place among them, and what one is called */
+LOCAL INT svc_fn_nface( void )
+{
+	return fn_nface();
+}
+
+LOCAL ID svc_fn_face_at( INT i )
+{
+	ID	fid = fn_face_at(i);
+
+	return ( fid > 0 ) ? fid : E_NOEXS;
+}
+
+#define SVC_FAMILY_MAX	256		/* the longest name of a family given back */
+
+LOCAL INT svc_fn_family( ID fid, UB *buf, INT max )
+{
+	UB	k[SVC_FAMILY_MAX];
+	INT	n;
+
+	if ( buf == NULL || max <= 0 ) return E_PAR;
+	if ( max > SVC_FAMILY_MAX ) max = SVC_FAMILY_MAX;
+	if ( !user_ok(buf, max, TRUE) ) return E_MACV;
+	n = fn_family(fid, k, max);
+	if ( n < 0 ) return n;
+	if ( n >= max ) n = max - 1;
+	k[n] = 0;
+	knl_ua_put(buf, k, (SZ)n + 1);
+	return n;
+}
+
+#ifdef USE_UITEST
+/*
+ * Where the time of the letters of processes goes, for a measurement:
+ * taking the layer, setting the face as the process keeps it and back,
+ * and the drawing or measuring itself. Said every FNM_EVERY calls.
+ */
+#define FNM_EVERY	1000
+LOCAL UD	fnm_n, fnm_hold, fnm_set, fnm_op, fnm_back, fnm_all;
+
+LOCAL UD fnm_now( void )
+{
+	UD	t = 0;
+
+	(void)ts_get_mono(&t);
+	return t;
+}
+
+LOCAL void fnm_say( void )
+{
+	if ( ++fnm_n < FNM_EVERY ) return;
+	tm_printf((UB *)"fnsvc: %d calls all %d us hold %d set %d op %d back %d\n", (INT)fnm_n,
+		  (INT)( fnm_all / 1000 ), (INT)( fnm_hold / 1000 ), (INT)( fnm_set / 1000 ),
+		  (INT)( fnm_op / 1000 ), (INT)( fnm_back / 1000 ));
+	fnm_n = fnm_hold = fnm_set = fnm_op = fnm_back = fnm_all = 0;
+}
+#define FNM_MARK(v)	UD v = fnm_now()
+#define FNM_ADD(acc, from)	( (acc) += fnm_now() - (from) )
+#else
+#define FNM_MARK(v)
+#define FNM_ADD(acc, from)
+#endif
+
+/*
+ * Letters of a process: the face set as the process keeps it for as
+ * long as they are drawn or measured, and put back after, all while the
+ * layer is held (as text_as does for dp_text)
+ */
+LOCAL INT svc_fn_dra_txt( T_FNTXT *pk )
+{
+	T_FNTXT		k;
+	T_FNSTATE	was;
+	UB		room[SVC_TEXT_ROOM], *t = room;
+	INT		r = E_PAR;
+	BOOL		draws;
+
+	if ( pk == NULL ) return E_PAR;
+	if ( !user_ok(pk, sizeof(*pk), TRUE) ) return E_MACV;
+	knl_ua_get(&k, pk, sizeof(k));
+	if ( k.op < FN_OP_DRAW || k.op > FN_OP_HAS_VERT ) return E_PAR;
+	draws = (BOOL)( k.op == FN_OP_DRAW || k.op == FN_OP_VDRAW );
+	if ( draws && !granted(k.gid) ) return E_ID;
+	if ( k.st.px < 0 || k.st.px > 512 || k.st.xpx < 0 || k.st.xpx > 1024
+	  || k.st.angle < 0 || k.st.angle >= 360 ) return E_PAR;
+	t[0] = 0;
+	if ( k.op != FN_OP_METRICS && k.op != FN_OP_HAS_VERT ) {
+		if ( k.len < 0 || ( k.len > 0 && k.text == NULL ) ) return E_PAR;
+		if ( k.len > 0 && !user_ok(k.text, k.len, FALSE) ) return E_MACV;
+		if ( k.len >= SVC_TEXT_ROOM ) {
+			t = (UB *)Kmalloc((SZ)k.len + 1);
+			if ( t == NULL ) return E_NOMEM;
+		}
+		if ( k.len > 0 ) knl_ua_get(t, k.text, k.len);
+		t[k.len] = 0;
+	}
+	FNM_MARK(m0);
+	fn_hold();
+	FNM_ADD(fnm_hold, m0);
+	if ( fn_state_get(k.fid, &was) < E_OK ) {
+		fn_release();
+		if ( t != room ) Kfree(t);
+		return E_ID;
+	}
+	FNM_MARK(m1);
+	if ( k.st.px > 0 && fn_state_set(k.fid, &k.st) < E_OK ) {
+		(void)fn_state_set(k.fid, &was);
+		fn_release();
+		if ( t != room ) Kfree(t);
+		return E_OBJ;
+	}
+	FNM_ADD(fnm_set, m1);
+	FNM_MARK(m2);
+	switch ( k.op ) {
+	case FN_OP_DRAW:	r = fn_draw(k.gid, k.fid, k.x, k.y, t, k.colour);	break;
+	case FN_OP_WIDTH:	r = fn_width(k.fid, t);					break;
+	case FN_OP_VDRAW:	r = fn_vdraw(k.gid, k.fid, k.x, k.y, t, k.colour);	break;
+	case FN_OP_VWIDTH:	r = fn_vwidth(k.fid, t);				break;
+	case FN_OP_EXTENT:	r = fn_extent(k.fid, t, &k.above, &k.below);		break;
+	case FN_OP_FIT:		r = fn_fit(k.fid, t, k.width);				break;
+	case FN_OP_METRICS:	r = fn_metrics(k.fid, &k.met);				break;
+	case FN_OP_HAS_VERT:	r = fn_has_vert(k.fid, k.cp) ? 1 : 0;			break;
+	default:		break;
+	}
+	FNM_ADD(fnm_op, m2);
+	FNM_MARK(m3);
+	(void)fn_state_set(k.fid, &was);
+	FNM_ADD(fnm_back, m3);
+	fn_release();
+	if ( t != room ) Kfree(t);
+#ifdef USE_UITEST
+	FNM_ADD(fnm_all, m0);
+	fnm_say();
+#endif
+	if ( k.op == FN_OP_EXTENT ) {
+		knl_ua_put(&pk->above, &k.above, sizeof(k.above));
+		knl_ua_put(&pk->below, &k.below, sizeof(k.below));
+	} else if ( k.op == FN_OP_METRICS ) {
+		knl_ua_put(&pk->met, &k.met, sizeof(k.met));
+	}
+	return r;
+}
+
 LOCAL const FP dp_svc_tbl[TSN_DP_MAX + 1] = {
 	[TSN_NUMBER(TSN_DP_FILL_RECT)]	= F(svc_dp_fill_rect),
 	[TSN_NUMBER(TSN_DP_FRAME_RECT)]	= F(svc_dp_frame_rect),
@@ -1695,6 +2240,24 @@ LOCAL const FP dp_svc_tbl[TSN_DP_MAX + 1] = {
 	[TSN_NUMBER(TSN_DP_TEXT_WIDTH)]	= F(svc_dp_text_width),
 	[TSN_NUMBER(TSN_DP_DRAW_TAD)]	= F(svc_dp_draw_tad),
 	[TSN_NUMBER(TSN_DP_IMG_DECODE)]	= F(svc_dp_img_decode),
+	[TSN_NUMBER(TSN_DP_SET_VISIBLE)] = F(svc_dp_set_visible),
+	[TSN_NUMBER(TSN_DP_REF)]	= F(svc_dp_ref),
+	[TSN_NUMBER(TSN_DP_SET_MODE)]	= F(svc_dp_set_mode),
+	[TSN_NUMBER(TSN_DP_PUT_PIXEL)]	= F(svc_dp_put_pixel),
+	[TSN_NUMBER(TSN_DP_FILL_POLY)]	= F(svc_dp_fill_poly),
+	[TSN_NUMBER(TSN_DP_DRAW_POLY)]	= F(svc_dp_draw_poly),
+	[TSN_NUMBER(TSN_DP_LINE_WIDE)]	= F(svc_dp_line_wide),
+	[TSN_NUMBER(TSN_DP_FRAME_OVAL)]	= F(svc_dp_frame_oval),
+	[TSN_NUMBER(TSN_DP_PUT_IMAGE)]	= F(svc_dp_put_image),
+	[TSN_NUMBER(TSN_DP_SCALE)]	= F(svc_dp_scale),
+	[TSN_NUMBER(TSN_FN_SYSTEM)]	= F(svc_fn_system),
+	[TSN_NUMBER(TSN_FN_FIND_STYLE)]	= F(svc_fn_find_style),
+	[TSN_NUMBER(TSN_FN_DRA_TXT)]	= F(svc_fn_dra_txt),
+	[TSN_NUMBER(TSN_DP_OPEN_MEM)]	= F(svc_dp_open_mem),
+	[TSN_NUMBER(TSN_DP_CLOSE)]	= F(svc_dp_close),
+	[TSN_NUMBER(TSN_FN_NFACE)]	= F(svc_fn_nface),
+	[TSN_NUMBER(TSN_FN_FACE_AT)]	= F(svc_fn_face_at),
+	[TSN_NUMBER(TSN_FN_FAMILY)]	= F(svc_fn_family),
 };
 
 LOCAL UB svc_wm_key_char( UINT code, UINT mods )
@@ -2089,6 +2652,32 @@ LOCAL ER svc_wm_key_put( ID key, UINT code, UINT mods )
 	return wm_obj_key_put(wid, code, mods);
 }
 
+/*
+ * The places of a window where a finger presses at once, by a key that may
+ * write it. The list is copied off the process's stack room: it is large.
+ */
+LOCAL ER svc_wm_press_area( ID key, CONST T_DPRECT *r, INT n )
+{
+	TS_UUID		u;
+	T_DPRECT	*k = NULL;
+	INT		wid;
+	ER		er = knl_ob_key_uuid(key, OB_OP_WRITE, &u);
+
+	if ( er < E_OK ) return er;
+	if ( n < 0 || n > WM_PRESS_RECTS ) return E_PAR;
+	wid = wm_obj_wid(&u);
+	if ( wid <= 0 ) return E_OBJ;
+	if ( n > 0 ) {
+		if ( !user_ok(r, (SZ)n * (SZ)sizeof(T_DPRECT), FALSE) ) return E_MACV;
+		k = (T_DPRECT *)Kmalloc((SZ)n * (SZ)sizeof(T_DPRECT));
+		if ( k == NULL ) return E_NOMEM;
+		knl_ua_get(k, r, (SZ)n * (SZ)sizeof(T_DPRECT));
+	}
+	er = wm_obj_press_area(wid, k, n);
+	if ( k != NULL ) Kfree(k);
+	return er;
+}
+
 LOCAL ER svc_km_get( T_KMSTATE *st )
 {
 	T_KMSTATE	s;
@@ -2149,6 +2738,16 @@ LOCAL INT svc_km_label( UINT what, UINT code, UINT mods, char *buf, INT max )
 	return n;
 }
 
+/* A rectangle of an environment the process may draw in, filled as the system fills with an entry of the look table */
+LOCAL ER svc_wm_fill_look( INT gid, CONST T_DPRECT *r, UINT num )
+{
+	T_DPRECT	k;
+
+	if ( !granted(gid) ) return E_ID;
+	if ( user_rect(r, &k) < E_OK ) return E_MACV;
+	return wm_fill_look(gid, &k, num);
+}
+
 /* The size of the screen (a page's screen.width and height, among others) */
 LOCAL ER svc_wm_screen( INT *p_w, INT *p_h )
 {
@@ -2157,7 +2756,7 @@ LOCAL ER svc_wm_screen( INT *p_w, INT *p_h )
 	if ( !user_ok(p_w, sizeof(*p_w), TRUE) || !user_ok(p_h, sizeof(*p_h), TRUE) ) {
 		return E_MACV;
 	}
-	wm_screen(&w, &h);
+	wm_screen_main(&w, &h);		/* programs centre and keep what they open on it */
 	knl_ua_put(p_w, &w, sizeof(w));
 	knl_ua_put(p_h, &h, sizeof(h));
 	return E_OK;
@@ -2206,6 +2805,65 @@ LOCAL ER svc_wm_grab_screen( UW *dst, INT pitch, CONST T_DPRECT *r, BOOL pointer
 	}
 	Kfree(buf);
 	return er;
+}
+
+/* The windows that can be shared, into the process's memory */
+LOCAL INT svc_wm_share_list( T_WMSHARE *v, INT max )
+{
+	T_WMSHARE	*k;
+	INT		cap = knl_wm_nwin(), n;
+
+	if ( max <= 0 ) return 0;
+	if ( max > cap ) max = cap;
+	if ( !user_ok(v, (SZ)max * (SZ)sizeof(*v), TRUE) ) return E_MACV;
+	k = (T_WMSHARE *)Kmalloc((size_t)max * sizeof(*k));
+	if ( k == NULL ) return E_NOMEM;
+	n = wm_share_list(k, max);
+	if ( n > 0 ) knl_ua_put(v, k, (SZ)n * (SZ)sizeof(*k));
+	Kfree(k);
+	return n;
+}
+
+/*
+ * A window's work area copied into the process's memory, through a band
+ * of the kernel's memory as a rectangle of the screen is. The window can
+ * change size between two bands; what was copied is then no one picture,
+ * and E_BUSY says to take the next.
+ */
+LOCAL ER svc_wm_grab_window( T_WMGRAB *ug )
+{
+	T_WMGRAB	g;
+	UW		*buf;
+	INT		rows, y, i, w = 0, h = 0, ww = 0, wh = 0, cw, ch;
+	ER		er = E_OK;
+
+	if ( !user_ok(ug, sizeof(*ug), TRUE) ) return E_MACV;
+	knl_ua_get(&g, ug, sizeof(g));
+	if ( g.maxw <= 0 || g.maxh <= 0 || g.pitch < g.maxw ) return E_PAR;
+	if ( !user_ok(g.dst, ( (SZ)( g.maxh - 1 ) * g.pitch + g.maxw ) * (SZ)sizeof(UW), TRUE) ) return E_MACV;
+	rows = GRAB_BAND / g.maxw;
+	if ( rows < 1 ) rows = 1;
+	if ( rows > g.maxh ) rows = g.maxh;
+	buf = (UW *)Kmalloc((size_t)rows * (size_t)g.maxw * sizeof(UW));
+	if ( buf == NULL ) return E_NOMEM;
+	er = wm_grab_rows(g.wid, g.serial, buf, g.maxw, 0, rows, g.maxw, &ww, &wh);
+	cw = ( ww < g.maxw ) ? ww : g.maxw;
+	ch = ( wh < g.maxh ) ? wh : g.maxh;
+	for ( y = 0; er >= E_OK && y < ch; y += rows ) {
+		if ( y > 0 ) {
+			er = wm_grab_rows(g.wid, g.serial, buf, g.maxw, y, rows, g.maxw, &w, &h);
+			if ( er >= E_OK && ( w != ww || h != wh ) ) er = E_BUSY;
+		}
+		for ( i = 0; er >= E_OK && i < rows && y + i < ch; i++ ) {
+			knl_ua_put(g.dst + (SZ)( y + i ) * g.pitch, buf + (SZ)i * g.maxw, (SZ)cw * (SZ)sizeof(UW));
+		}
+	}
+	Kfree(buf);
+	if ( er < E_OK ) return er;
+	g.w = cw;
+	g.h = ch;
+	knl_ua_put(ug, &g, sizeof(g));
+	return E_OK;
 }
 
 /* A scroll bar as the windows' own are drawn, in a window of the process's */
@@ -2527,6 +3185,10 @@ LOCAL const FP wm_svc_tbl[TSN_WM_MAX + 1] = {
 	[TSN_NUMBER(TSN_WM_SCREEN)]	= F(svc_wm_screen),
 	[TSN_NUMBER(TSN_WM_HIT_SLOP)]	= F(svc_wm_hit_slop),
 	[TSN_NUMBER(TSN_WM_GRAB_SCREEN)]	= F(svc_wm_grab_screen),
+	[TSN_NUMBER(TSN_WM_SHARE_LIST)]		= F(svc_wm_share_list),
+	[TSN_NUMBER(TSN_WM_GRAB_WINDOW)]	= F(svc_wm_grab_window),
+	[TSN_NUMBER(TSN_WM_PRESS_AREA)]		= F(svc_wm_press_area),
+	[TSN_NUMBER(TSN_WM_FILL_LOOK)]		= F(svc_wm_fill_look),
 };
 
 /* What went to the console, from where the process had got to */

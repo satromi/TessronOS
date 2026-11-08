@@ -128,6 +128,7 @@ IMPORT ER ts_format_blk( CONST char *devnm, CONST char *label );
  */
 IMPORT ID ts_opn_vol_blk( CONST char *devnm );
 IMPORT ER ts_cls_vol_blk( ID vol );
+IMPORT ER ts_finish_vol_blk( ID vol );	/* the machine going off: marked clean and read only from here on */
 IMPORT ER ts_ref_vol_blk( ID vol, T_TSFSBLK_SB *pk_sb );
 
 /*

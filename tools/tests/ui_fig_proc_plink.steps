@@ -1,0 +1,142 @@
+# 基本図形編集をプロセスで開き、その中の仮身から開いたウインドウが、閉じるときに元の仮身へ
+# 書き戻すこと(DT_RQ_OPEN の DT_F_LINK、design 11.3), for tools/ui_run.py. figproc 1
+# makes every figure open with the process. Two copies of 画用紙 (A of 30 rectangles, B of
+# 2000, wider than the window) and a text (mkbig doc) are linked into BTRON, the desktop's
+# first window. A is opened from its link (the process P); the links of B and of the text are
+# copied to the tray in BTRON and pasted into A. B opened from its link in A is another
+# process, given that link of A's record: scrolled and closed, its view goes to P, which
+# writes it into its record; 新たな実身に保存 in B puts a link to the copy into A, by P. The
+# text opened from its link in A is a window of the desktop's: scrolled and closed, its view
+# goes to P the same way. A closed and opened again holds the three links; a shape of
+# it carried out over BTRON stays where it was, and one let go on the ground moves there.
+# Keys with Ctrl (01): C 06, V 19, E 08; Enter 28.
+mkbig fig 30 4
+figproc 1
+linkbig 180 45
+mkbig fig 2000 2
+linkbig 180 95
+mkbig doc 80
+linkbig 190 70
+wait 300
+click 230 104
+wait 300
+key 06 01
+wait 300
+logmark
+dclick 190 52
+expectsincein 60 figure: opened 画用紙 shapes 32 links 0 autoref 1 parent 1
+wait 800
+click 600 500
+wait 300
+logmark
+key 19 01
+expectsince figure: pasted, 33 shapes 1 picked
+click 600 500
+wait 300
+# B, from its link in A: a process given the link of A's record
+logmark
+dclick 340 221
+expectsincein 60 figure: opened 画用紙 shapes 2002 links 0 autoref 1 parent 1
+wait 1500
+shot pl_b
+# B is wider than the window: scrolled across by its bar
+drag 480 690 700 690
+wait 1000
+shot pl_b_scrolled
+# 新たな実身に保存 in B: the copy's link goes into A, by P
+logmark
+click 500 400 1
+wait 500
+move 510 440
+wait 300
+move 650 440
+move 650 461
+wait 300
+click 650 461
+expectsince figure: chosen save.new
+wait 800
+key 28
+expectsince figure: saved as new (0)
+expectsince figure: a link to the copy saved put with its link
+wait 500
+logmark
+key 08 01
+expectsince figure: link view written back:
+absent link view written back: 0,0 zoom 100
+wait 800
+shot pl_b_closed
+# the text, from its link in A: a window of the desktop's. A's 道具パネル (100,0 to 498,112)
+# stands over BTRON's links, as the desktop's own figure editor's does: BTRON is brought
+# forward by its band first, and the panel, subordinate to A, goes out of sight meanwhile
+click 50 14
+wait 300
+click 250 79
+wait 300
+key 06 01
+wait 300
+click 600 500
+wait 300
+logmark
+key 19 01
+expectsince figure: pasted, 35 shapes 1 picked
+wait 500
+click 600 500
+wait 300
+logmark
+dclick 400 211
+wait 1500
+shot pl_doc
+wheel -5
+wait 1000
+shot pl_doc_scrolled
+key 08 01
+expectsince figure: link view written back: 0,
+wait 500
+# A closed and opened again: the links of B, of its copy and of the text are there
+logmark
+click 600 500
+wait 300
+key 08 01
+expectsince figure: saved (0)
+expectsince figure: closed
+wait 800
+logmark
+dclick 190 52
+expectsincein 60 figure: opened 画用紙 shapes 35 links 3 autoref 1 parent 1
+wait 800
+shot pl_a_again
+# a shape alone carried out and let go over BTRON, a window of the desktop's that links are
+# carried into: only links leave a figure's window, so it stays where it was (DT_RQ_LET_GO),
+# and BTRON takes the keys
+logmark
+move 260 163
+down
+move 240 170
+wait 500
+move 90 190
+wait 500
+move 50 190
+wait 1000
+up
+expectsince figure: let go over another window: nothing moved
+absent figure: moved 1 by
+wait 500
+shot pl_let_go
+# let go on the ground, where no window is: it moves, as in the desktop's own figure editor
+click 600 500
+wait 300
+logmark
+move 260 163
+down
+move 240 300
+wait 500
+move 240 750
+wait 500
+up
+expectsince figure: moved 1 by -20,587
+wait 500
+click 600 500
+wait 300
+key 08 01
+expectsince figure: closed
+absent !OACV!

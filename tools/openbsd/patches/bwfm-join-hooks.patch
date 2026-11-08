@@ -1,0 +1,49 @@
+bwfm: two calls to TessronOS's functions, for the security of a join
+and for the chip's events (docs/tessronos/09-network.md 9.6.2, 9.6.8).
+
+Why: bwfm_connect writes the chip's "mfp" as 0 just before the join and
+gives the chip's own supplicant nothing (the firmware's "sup_wpa",
+"sae_password", the PMK), so a join can have neither the protection of
+management frames (IEEE 802.11w) nor WPA3-Personal (SAE). The chip's
+firmware (CYW43455 7.45.234) does both itself, as its capabilities say
+(mfp, idsup, sae), when it is set up for them before the join. The
+first call comes after bwfm_connect has written what it writes and
+before the join, so that TessronOS's function may write the rest; when
+it writes nothing the join is as before. The second gives every event
+of the chip (the supplicant's state, a roam) to TessronOS before bwfm
+takes it, for the manager and the records; bwfm's handling is not
+changed.
+
+Linux's brcmfmac sets the chip up the same way (brcmf_cfg80211_connect:
+"wpa_auth", "auth", "mfp", "sae_password" or BRCMF_C_SET_WSEC_PMK,
+"sup_wpa", then the join).
+
+--- a/sys/dev/ic/bwfm.c
++++ b/sys/dev/ic/bwfm.c
+@@ -145,6 +145,10 @@
+ void	 bwfm_delete_key_cb(struct bwfm_softc *, void *);
+ void	 bwfm_rx_event_cb(struct bwfm_softc *, struct mbuf *);
+ 
++/* TessronOS: the join's security and the chip's events (device/net/wifi/obsd/tsw_bwfm.c) */
++void	 tswifi_bwfm_join(struct bwfm_softc *);
++void	 tswifi_bwfm_event(struct bwfm_softc *, struct bwfm_event *);
++
+ struct mbuf *bwfm_newbuf(void);
+ #ifndef IEEE80211_STA_ONLY
+ void	 bwfm_rx_auth_ind(struct bwfm_softc *, struct bwfm_event *, size_t);
+@@ -2038,6 +2042,7 @@
+ 	}
+ 	bwfm_fwvar_var_set_int(sc, "auth", BWFM_AUTH_OPEN);
+ 	bwfm_fwvar_var_set_int(sc, "mfp", BWFM_MFP_NONE);
++	tswifi_bwfm_join(sc);
+ 
+ 	if (ic->ic_des_esslen && ic->ic_des_esslen <= BWFM_MAX_SSID_LEN) {
+ 		params = malloc(sizeof(*params), M_TEMP, M_WAITOK | M_ZERO);
+@@ -2556,6 +2561,7 @@
+ 	struct ieee80211com *ic = &sc->sc_ic;
+ 	struct bwfm_event *e = mtod(m, void *);
+ 
++	tswifi_bwfm_event(sc, e);
+ 	s = splnet();
+ 	switch (ntohl(e->msg.event_type)) {
+ 	case BWFM_E_AUTH:

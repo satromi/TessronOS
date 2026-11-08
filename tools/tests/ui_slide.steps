@@ -13,7 +13,7 @@ wait 300
 shot slide_2
 # the menu, put away with Escape; then ジャンプ (Ctrl+J) taken with Enter: the slide it was on
 click 640 400 1
-expect desktop: menu
+expect slide: menu
 wait 500
 shot slide_menu
 key 29
@@ -26,10 +26,10 @@ expect slide: 2 of 3
 wait 300
 # 前に戻る of the menu (閉じる under the pointer, 前に戻る three rows below)
 click 640 400 1
-expect desktop: menu
+expect slide: menu
 wait 300
 click 648 460
-expect desktop: chosen slide.prev
+expect slide: chosen slide.prev
 expect slide: 1 of 3
 wait 300
 # 次へ進む (前に戻る under the pointer, 次へ進む the row above), twice

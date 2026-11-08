@@ -22,6 +22,7 @@
 
 #include "xfu_in.h"
 #include <ts/sysdef.h>
+#include <ts/vobjsz.h>
 
 /* ---------------------------------------------------------------- whole parts */
 
@@ -307,7 +308,7 @@ EXPORT ER xfu_link_add( CONST TS_UUID *box, CONST TS_UUID *u )
 	}
 	xb_init(&w);
 	xb_bytes(&w, rec, end);
-	xfu_link_xml(&w, u, 8, low + 8, 248, low + 33, z + 1);
+	xfu_link_xml(&w, u, 8, low + 8, 248, low + 8 + VOBJ_CLOSED_H(14, 1, 1), z + 1);	/* closed, at the 14 it is written at */
 	xb_bytes(&w, rec + end, size - end);
 	xfu_sys_free(rec);
 	/* replaced in one change: a reader sees the old record or the new one */

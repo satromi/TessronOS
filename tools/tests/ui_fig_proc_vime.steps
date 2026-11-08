@@ -1,0 +1,67 @@
+# 基本図形編集のプロセスの縦書きの文字枠でかな漢字変換 (design 11.3), for tools/ui_run.py: a
+# figure of 30 small rectangles, two zigzag lines and one piece of text "ABC" written down the
+# line (mkbig fig 30 4 1 1; its box from 100,120 to 140,240 of the figure, 210,247 to 250,367
+# on the screen). With the desktop's figure editor and then with the one running as a
+# process: the text pressed twice, the caret put at the end, かな typed after ひらがなカタカナ;
+# what is being converted runs down the line from the caret, on white, each clause lined on
+# its left, the caret a red bar across under it (the shots, and the
+# pixels of the bar and of the letters); Space converts it, Escape takes the conversion back, Escape again
+# ends the editing, and the figure is saved and closed.
+# Keys: End 4D, ひらがなカタカナ 88, Space 2C, Esc 29, 英数 39; Ctrl+E 08 01.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 30 4 1 1
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+dclick 228 260
+sync 600
+key 4D
+key 88
+text kana
+sync 600
+shot vime_kernel
+pixel 232 320 D00000
+pixel 246 320 D00000
+pixelnot 240 300 FFFFFF
+key 2c
+wait 800
+shot vime_kernel_conv
+key 29
+key 29
+key 29
+key 39
+sync 600
+key 16 01
+sync 600
+key 08 01
+wait 1500
+mkbig fig 30 4 1 1
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 33
+wait 500
+logmark
+dclick 228 260
+expectsince figure: text editing begun
+key 4D
+key 88
+text kana
+wait 500
+shot vime_process
+pixel 232 320 D00000
+pixel 246 320 D00000
+pixelnot 240 300 FFFFFF
+key 2c
+wait 800
+shot vime_process_conv
+key 29
+key 29
+key 29
+key 39
+wait 300
+key 16 01
+wait 500
+key 08 01
+wait 1500

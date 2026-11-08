@@ -1,0 +1,148 @@
+# A link carried out of a text into a box, and one put into a text (design 11.3), for
+# tools/ui_run.py: the desktop's own text editor (docproc kernel) and the process (pdoc).
+# The text (xml, xmlbig into a copy of 基本文章編集 made by mkbig) has three paragraphs, a
+# link in each: 実身/仮身, 仮身一覧, 基本文章編集. The first is carried out into the
+# 原紙箱 (a move: the text keeps nothing of it), and the page then must be what the record
+# says: the shot after the move (lo_*_moved) the same as the shot of the text saved, closed
+# and opened again (lo_*_reopened), inside the window where the text is (101,125 to 682,482 of
+# the screen: the window stands at 100,100, 600 by 400). Record 0 saved by both is the same,
+# byte for byte. Then a new object is made from that link in the 原紙箱 and its link put at
+# the end of the second paragraph (lo_*_put), and the page must again be what the record
+# says (lo_*_put_reopened). Before each shot the caret is put at the end of the third
+# paragraph and the pointer on the corner of the bars.
+# Keys: Enter 28, Ctrl+S 16 01, Ctrl+E 08 01.
+waitwin 原紙箱
+# the 原紙箱 in front of the text TADjsについて, which lies over it
+click 1000 48
+wait 300
+docproc kernel
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>一つ目の段落 <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" vobjid="01a10000-0000-7000-8000-000000000001" width="150" heightpx="19" chsz="14"/> ここまで</p>
+xml <p>二つ目の段落 <link id="019aaf8c-3fb1-7c1a-b87e-748c9086b234_0.xtad" vobjid="01a10000-0000-7000-8000-000000000002" width="150" heightpx="19" chsz="14"/> ここまで</p>
+xml <p>三つ目の段落 <link id="019aaf9c-0e6a-7b17-bfb6-a0f6a6067133" vobjid="01a10000-0000-7000-8000-000000000003" width="150" heightpx="19" chsz="14"/> ここまで</p>
+xml </document></tad>
+xmlbig
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+# the first link (197,129 to 347,147) carried into the 原紙箱, under its links
+drag 270 138 1000 560
+sync 600
+wait 500
+click 500 217
+sync 600
+move 690 490
+sync 600
+shot lo_k_moved
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+open big
+waitwin 基本文章編集 600
+sync 600
+click 500 217
+sync 600
+move 690 490
+sync 600
+shot lo_k_reopened
+shotsame lo_k_moved lo_k_reopened 101 125 682 482
+# a new object from the link in the 原紙箱, its link let go at the end of the second paragraph
+linkdrag 原紙箱 実身/仮身 560 185
+wait 1000
+key 28
+expect desktop: 実身/仮身 made from the template 実身/仮身
+sync 600
+wait 500
+click 500 217
+sync 600
+move 690 490
+sync 600
+shot lo_k_put
+key 08 01
+sync 600
+wait 500
+open big
+waitwin 基本文章編集 600
+sync 600
+click 500 217
+sync 600
+move 690 490
+sync 600
+shot lo_k_put_reopened
+shotsame lo_k_put lo_k_put_reopened 101 125 682 482
+key 08 01
+sync 600
+wait 500
+# the same in the process
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>一つ目の段落 <link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" vobjid="01a10000-0000-7000-8000-000000000001" width="150" heightpx="19" chsz="14"/> ここまで</p>
+xml <p>二つ目の段落 <link id="019aaf8c-3fb1-7c1a-b87e-748c9086b234_0.xtad" vobjid="01a10000-0000-7000-8000-000000000002" width="150" heightpx="19" chsz="14"/> ここまで</p>
+xml <p>三つ目の段落 <link id="019aaf9c-0e6a-7b17-bfb6-a0f6a6067133" vobjid="01a10000-0000-7000-8000-000000000003" width="150" heightpx="19" chsz="14"/> ここまで</p>
+xml </document></tad>
+xmlbig
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 3
+wait 800
+logmark
+drag 270 138 1000 560
+expectsince document: link carried out (0)
+wait 800
+click 500 217
+wait 300
+move 690 490
+wait 300
+shot lo_p_moved
+logmark
+key 16 01
+expectsince document: saved (0)
+sum show
+same kernel
+logmark
+key 08 01
+expectsince document: closed
+wait 500
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 3
+wait 800
+click 500 217
+wait 300
+move 690 490
+wait 300
+shot lo_p_reopened
+shotsame lo_p_moved lo_p_reopened 101 125 682 482
+shotsame lo_k_moved lo_p_moved 101 125 682 482
+logmark
+linkdrag 原紙箱 実身/仮身 560 185
+wait 1000
+key 28
+expectsince desktop: 実身/仮身 made from the template 実身/仮身
+wait 1000
+click 500 217
+wait 300
+move 690 490
+wait 300
+shot lo_p_put
+logmark
+key 08 01
+expectsince document: closed
+wait 500
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 3
+wait 800
+click 500 217
+wait 300
+move 690 490
+wait 300
+shot lo_p_put_reopened
+shotsame lo_p_put lo_p_put_reopened 101 125 682 482
+absent !OACV!

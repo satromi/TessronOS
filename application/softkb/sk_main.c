@@ -22,6 +22,11 @@
  *	the window, which can be sized as the person likes, so that they are
  *	as big as a finger wants.
  *
+ *	A finger on a key presses it as it touches and holds it until it lets
+ *	go; between the keys it is a hold that asks for the menu. The window
+ *	says which is which by giving the window manager the keys' places
+ *	(wm_press_area).
+ *
  *	The layouts are tables (SKPAGE):
  *	- the English letters (QWERTY): rows of keys, each with its width in
  *	  quarters of a key, drawn with the drawing environment's boxes and
@@ -41,9 +46,17 @@
  *	it stands (kc_mode, and the mode each key seen carries). The keys
  *	held on the keyboard itself are lit (OB_N_KEYSEEN). The layout chosen
  *	is kept in the user information object (SYSDEF_CONF_USER), as the
- *	line SOFTKB_LAYOUT. Choosing a TRON keyboard switches the machine's
- *	layouts to Dvorak and TRON かな配列, as キー配列 does, and the English
- *	letters put back what there was (tron_on, tron_off).
+ *	line SOFTKB_LAYOUT.
+ *
+ *	The keyboard has layouts of its own, apart from the machine's that
+ *	the keyboard plugged in types in: a latin layout (論理配列, chosen with
+ *	the menu) and a kana layout for the English letters and another pair
+ *	for the TRON keyboards (Dvorak and TRON かな配列 at first), kept as
+ *	lines beside SOFTKB_LAYOUT. Every key it types carries them in its
+ *	modifiers (KM_MOD_LAYOUT), and the window the key reaches reads it in
+ *	them; the keys are written in them too. The machine's layouts are
+ *	never set here, but for putting back what an earlier version of the
+ *	program switched them to (legacy_back).
  *
  *	What is done is said on the console ("softkb: ..."), which the tests
  *	read. Started with "selftest", the program checks its tables and the
@@ -68,6 +81,7 @@
 
 #define SK_ROWQ		60		/* every row is this many quarters wide */
 #define SK_NROW		5
+#define SK_SIDE		4		/* the ground left at each end of a row, to hold a finger on for the menu */
 
 #define K(c, w)		{ (c), (w), SK_KEY, SKF_L, NULL }
 #define KR(c, w)	{ (c), (w), SK_KEY, SKF_R, NULL }
@@ -75,12 +89,15 @@
 #define MOD(c, w, f, s)	{ (c), (w), SK_MOD, (f), (s) }
 #define ROW		{ 0, 0, SK_ROW, 0, NULL }
 
-/* The modifiers, the thumbs' row and the arrows: the same on both keyboards */
-#define SK_BOTTOM \
-	MOD(0xE0, 5, SKF_L, "Ctrl"), MOD(0xE2, 4, SKF_L, "Alt"), N(0x8B, 5, SKF_L, "無変換"), \
-	N(0x2C, 19, SKF_L, ""), N(0x8A, 5, SKF_R, "変換"), { 0x88, 6, SK_IME, SKF_R, NULL }, \
+/* The thumbs' row and the arrows, from the space bar on; the same on both keyboards but for its width */
+#define SK_BOTTOM(space) \
+	N(0x2C, space, SKF_L, ""), N(0x8A, 5, SKF_R, "変換"), { 0x88, 6, SK_IME, SKF_R, NULL }, \
 	N(0x50, 4, SKF_R, "←"), N(0x52, 4, SKF_R, "↑"), N(0x51, 4, SKF_R, "↓"), \
 	N(0x4F, 4, SKF_R, "→"), ROW
+#define SK_BOTTOM_L \
+	MOD(0xE0, 5, SKF_L, "Ctrl"), MOD(0xE2, 4, SKF_L, "Alt")
+
+#define SK_ZENKAKU	0x35		/* 半角/全角 on the Japanese keyboard; on the English one it types ` */
 
 /* The Japanese keyboard's letters and signs, in the places Windows 11's touch keyboard has them */
 static CONST SKKEY	sk_qwerty_jp[] = {
@@ -96,7 +113,7 @@ static CONST SKKEY	sk_qwerty_jp[] = {
 	MOD(0xE1, 9, SKF_L, "Shift"), K(0x1D, 4), K(0x1B, 4), K(0x06, 4), K(0x19, 4), K(0x05, 4),
 	KR(0x11, 4), KR(0x10, 4), KR(0x36, 4), KR(0x37, 4), KR(0x38, 4), KR(0x87, 4),
 	MOD(0xE5, 7, SKF_R, "Shift"), ROW,
-	SK_BOTTOM
+	SK_BOTTOM_L, N(SK_ZENKAKU, 4, SKF_L, "半/全"), N(0x8B, 5, SKF_L, "無変換"), SK_BOTTOM(15)
 };
 
 /* The English keyboard's */
@@ -113,7 +130,7 @@ static CONST SKKEY	sk_qwerty_us[] = {
 	MOD(0xE1, 9, SKF_L, "Shift"), K(0x1D, 4), K(0x1B, 4), K(0x06, 4), K(0x19, 4), K(0x05, 4),
 	KR(0x11, 4), KR(0x10, 4), KR(0x36, 4), KR(0x37, 4), KR(0x38, 4),
 	MOD(0xE5, 11, SKF_R, "Shift"), ROW,
-	SK_BOTTOM
+	SK_BOTTOM_L, N(0x8B, 5, SKF_L, "無変換"), SK_BOTTOM(19)
 };
 
 /* How a page's keys are laid out */
@@ -130,7 +147,7 @@ typedef struct {
 	CONST char	*key;		/* its word in the line SOFTKB_LAYOUT */
 	INT		kind;		/* PK_* */
 	BOOL		split;		/* its halves in two windows at the screen's edges */
-	BOOL		tron;		/* typed in Dvorak and TRON かな配列, switched to when chosen */
+	BOOL		tron;		/* a TRON keyboard: its own layouts Dvorak and TRON かな配列 at first */
 	INT		w0, h0;		/* the work area it opens with (each window's, when split) */
 } SKPAGE;
 
@@ -138,7 +155,7 @@ typedef struct {
 #define PG_TRON		1
 #define PG_UTRON	2
 static CONST SKPAGE	sk_pages[] = {
-	{ "layout.qwerty", "qwerty", PK_ROWS, FALSE, FALSE, 640, 232 },
+	{ "layout.qwerty", "qwerty", PK_ROWS, FALSE, FALSE, 724, 232 },
 	{ "layout.tron", "tron", PK_SHAPE, FALSE, TRUE, 760, 310 },
 	{ "layout.utron", "utron", PK_CHART, TRUE, TRUE, 380, 290 },
 };
@@ -171,6 +188,7 @@ static CONST SKPAGE	sk_pages[] = {
 #define C_RED		0x00D00000U	/* the face of the left Shift */
 #define C_BLUE		0x000040D0U	/* and of the right */
 
+#define UT_NUMLOCK	23		/* L11: @ on its face, NumLock with Fn */
 #define M_SHIFT		( HID_MOD_LSHIFT | HID_MOD_RSHIFT )
 /* the modifiers that make a key a command: Ctrl, Alt, the Windows keys */
 #define M_CMD		( HID_MOD_LCTRL | HID_MOD_RCTRL | HID_MOD_LALT | HID_MOD_RALT | HID_MOD_LMETA | HID_MOD_RMETA )
@@ -198,7 +216,9 @@ static INT		g_nv = 0;
 static BOOL		g_closing = FALSE;
 static BOOL		g_dirty = TRUE;
 
-static T_KMSTATE	g_st;			/* the keyboard of the machine's settings */
+static T_KMSTATE	g_st;			/* the machine's keyboard: whether it is the English one */
+static INT		g_latin = KM_LATIN_KEYS;	/* the keyboard's own latin layout (論理配列) */
+static INT		g_kana = KM_KANA_JIS;		/* and its own kana layout */
 static INT		g_page = 0;		/* sk_pages[] */
 static UB		g_down[32];		/* the keys held on the keyboard, a bit each */
 static UINT		g_mods = 0;		/* the modifiers held there, as last told */
@@ -208,6 +228,14 @@ static INT		g_fn = 0;		/* Fn on the picture: 0 off, 1 the next key, 2 until pres
 static UINT		g_mode = 0;		/* the input mode, WM_MODE_* */
 static UINT		g_flash = 0;		/* the key just pressed on the picture, lit a moment */
 static UD		g_flash_end = 0;
+static BOOL		g_num = FALSE;		/* NumLock on the μTRON chart: its green faces are typed */
+/* a key held on the picture repeats as the keyboard's do (ユーザ環境設定) */
+static CONST SKVIEW	*g_rep_v = NULL;
+static UINT		g_rep_code, g_rep_mods;
+static UD		g_rep_due;
+/* the key the finger is on stays down until it comes off, for a program that reads the key's state */
+static ID		g_hold_kw = 0;
+static UINT		g_hold_code, g_hold_mods;
 
 /* ---------------------------------------------------------------- words */
 
@@ -233,6 +261,12 @@ static BOOL same_uuid( CONST TS_UUID *a, CONST TS_UUID *b )
 static CONST SKPAGE *page( void )
 {
 	return &sk_pages[g_page];
+}
+
+/* The keyboard's own layouts, as a key's modifiers carry them */
+static UINT own( void )
+{
+	return KM_MOD_LAYOUT(g_latin, g_kana);
 }
 
 static BOOL held( UINT code )
@@ -280,7 +314,7 @@ typedef struct {
 /* Where quarter q of a row starts, and where row r */
 static INT at_x( CONST SKVIEW *v, INT q )
 {
-	return SK_M + q * ( v->w - 2 * SK_M ) / SK_ROWQ;
+	return SK_M + ( q + SK_SIDE ) * ( v->w - 2 * SK_M ) / ( SK_ROWQ + 2 * SK_SIDE );
 }
 
 static INT at_y( CONST SKVIEW *v, INT r )
@@ -474,23 +508,23 @@ static void sk_each( CONST SKVIEW *v, SKEACH f, void *arg )
 
 /* ---------------------------------------------------------------- the letters */
 
-/* The letter a key types as it is in the latin layout set, 0 none */
+/* The letter a key types as it is in the keyboard's latin layout, 0 none */
 static char key_letter( UINT code )
 {
 	char	b[8];
 
-	if ( code == 0 || km_label(KM_L_CHAR, code, 0, b, sizeof(b)) != 1 ) return 0;
+	if ( code == 0 || km_label(KM_L_CHAR, code, own(), b, sizeof(b)) != 1 ) return 0;
 	return b[0];
 }
 
 /*
  * The logical layout (論理配列): which letter each place of the keys
- * types, the latin layout of the machine's settings (km_set), the same
- * for the keyboard itself and for every page of this one.
+ * types, the keyboard's own latin layout. The machine's (km_set), which
+ * the keyboard plugged in types in, is not this one's to change.
  */
 static BOOL logical_dvorak( void )
 {
-	return (BOOL)( g_st.latin == KM_LATIN_DVORAK );
+	return (BOOL)( g_latin == KM_LATIN_DVORAK );
 }
 
 /* The place of a key of the μTRON chart: the usage of the key under it on the keyboard of the keys as written */
@@ -533,6 +567,9 @@ static UW key_ground( CONST SKONE *k )
 		if ( k->act == SK_KEY && k->name != NULL
 		  && ( ( k->code == 0x88 && mode_jp() ) || ( k->code == 0x39 && !mode_jp() ) ) ) c = C_MODE;
 	}
+	if ( page()->kind == PK_CHART && k->idx == UT_NUMLOCK && g_num ) {
+		c = C_LOCK;
+	}
 	if ( k->act == SK_MOD ) {
 		UINT	bit = 1U << ( k->code - 0xE0 );
 
@@ -568,7 +605,7 @@ static CONST char *key_label( CONST SKONE *k, char *buf, INT max )
 	if ( k->act == SK_IME ) return mode_jp() ? "あ" : "A";
 	if ( g_fn != 0 && k->fn != 0 ) return fn_label(k->fn, buf, max);
 	if ( k->name != NULL ) return k->name;
-	if ( km_label(KM_L_CHAR, k->code, shift ? HID_MOD_LSHIFT : 0, buf, max) > 0 ) return buf;
+	if ( km_label(KM_L_CHAR, k->code, ( shift ? HID_MOD_LSHIFT : 0 ) | own(), buf, max) > 0 ) return buf;
 	if ( km_label(KM_L_NAME, k->code, 0, buf, max) <= 0 ) buf[0] = 0;
 	return buf;
 }
@@ -629,11 +666,11 @@ static void draw_shape_words( CONST SKVIEW *v, CONST SKONE *k, void *arg )
 	text_at(v, k->cx - kh * 36 / 100, k->cy - kh * 8 / 100, s, C_TEXT, px);
 	px = kh * 24 / 100;
 	if ( px < 7 ) px = 7;
-	if ( km_label(KM_L_KANA, k->code, 0, f0, sizeof(f0)) > 0 ) {
-		if ( km_label(KM_L_KANA, k->code, KM_MOD_THUMB_L, fl, sizeof(fl)) > 0 ) {
+	if ( km_label(KM_L_KANA, k->code, own(), f0, sizeof(f0)) > 0 ) {
+		if ( km_label(KM_L_KANA, k->code, KM_MOD_THUMB_L | own(), fl, sizeof(fl)) > 0 ) {
 			centre_at(v, k->cx - kh * 18 / 100, k->cy + kh * 6 / 100, fl, C_RED, px);
 		}
-		if ( km_label(KM_L_KANA, k->code, KM_MOD_THUMB_R, fr, sizeof(fr)) > 0 ) {
+		if ( km_label(KM_L_KANA, k->code, KM_MOD_THUMB_R | own(), fr, sizeof(fr)) > 0 ) {
 			centre_at(v, k->cx + kh * 18 / 100, k->cy + kh * 6 / 100, fr, C_BLUE, px);
 		}
 		centre_at(v, k->cx, k->cy + kh * 30 / 100, f0, C_TEXT, px);
@@ -864,6 +901,67 @@ static BOOL key_at( CONST SKVIEW *v, INT x, INT y, SKONE *k )
 	return h.got;
 }
 
+/* ---- where a finger presses at once */
+
+#define SK_BANDS	3		/* a key by shape told as this many rectangles from top to foot */
+
+static T_DPRECT	g_area[WM_PRESS_RECTS];
+static INT	g_narea;
+
+static void area_add( INT l, INT t, INT r, INT b )
+{
+	if ( g_narea >= WM_PRESS_RECTS || r <= l || b <= t ) return;
+	g_area[g_narea].left = l;
+	g_area[g_narea].top = t;
+	g_area[g_narea].right = r;
+	g_area[g_narea].bottom = b;
+	g_narea++;
+}
+
+/*
+ * A key's place, and no more of the window: a key in rows its box, a key
+ * by shape a band of its outline at each height, so that the ground
+ * between keys turned against each other stays the window's.
+ */
+static void area_key( CONST SKVIEW *v, CONST SKONE *k, void *arg )
+{
+	INT	b, i, j;
+
+	(void)v;
+	(void)arg;
+	if ( k->n == 4 && page()->kind == PK_ROWS ) {
+		area_add(k->box.left, k->box.top, k->box.right + 1, k->box.bottom + 1);
+		return;
+	}
+	for ( b = 0; b < SK_BANDS; b++ ) {
+		INT	h = k->box.bottom - k->box.top;
+		INT	t = k->box.top + h * b / SK_BANDS, f = k->box.top + h * ( b + 1 ) / SK_BANDS;
+		INT	y = ( t + f ) / 2, l = 0x7FFFFFFF, r = -1;
+
+		for ( i = 0, j = k->n - 1; i < k->n; j = i++ ) {
+			if ( ( k->y[i] > y ) != ( k->y[j] > y ) ) {
+				INT	x = k->x[i] + ( y - k->y[i] ) * ( k->x[j] - k->x[i] ) / ( k->y[j] - k->y[i] );
+
+				if ( x < l ) l = x;
+				if ( x > r ) r = x;
+			}
+		}
+		area_add(l, t, r + 1, f);
+	}
+}
+
+/* The window manager told where the keys are in a window, as it now stands */
+static void area_tell( CONST SKVIEW *v )
+{
+	ER	er;
+
+	if ( !v->open ) return;
+	g_narea = 0;
+	sk_each(v, area_key, NULL);
+	er = wm_press_area(v->kw, g_area, g_narea);
+	if ( er < E_OK ) say("press area not set (%d)", (INT)er);
+}
+
 /* A modifier pressed on the picture: off, for the next key, until pressed again, off */
 static void modifier( UINT code )
 {
@@ -880,19 +978,78 @@ static void modifier( UINT code )
 	say("mods once %x lock %x", g_once, g_lock);
 }
 
+/*
+ * The green faces of the μTRON chart, with NumLock on, by the key's place
+ * in sk_ut_key[]. Most type the keypad's usage, the same in every layout. # has no keypad key, and C on DEL is the key it
+ * is: 0 here leaves it as it types without NumLock.
+ */
+static CONST struct { UB idx, code; char ch; } ut_num[] = {
+	{ 7, 0x54, 0 },			/* R01 ÷ */
+	{ 8, 0x61, 0 },			/* R04 9 */
+	{ 9, 0x60, 0 },			/* R03 8 */
+	{ 10, 0x5F, 0 },		/* R02 7 */
+	{ 11, 0, '#' },			/* R18 # */
+	{ 14, 0x85, 0 },		/* R33 , */
+	{ 15, 0x63, 0 },		/* R34 . */
+	{ 19, 0, 0 },			/* R28 C */
+	{ 21, 0x55, 0 },		/* R06 * */
+	{ 31, 0x55, 0 },		/* R12 × */
+	{ 32, 0x5C, 0 },		/* R13 4 */
+	{ 33, 0x5D, 0 },		/* R14 5 */
+	{ 34, 0x5E, 0 },		/* R15 6 */
+	{ 37, 0x67, 0 },		/* R11 = */
+	{ 47, 0x56, 0 },		/* R22 - */
+	{ 48, 0x59, 0 },		/* R23 1 */
+	{ 49, 0x57, 0 },		/* R31 + */
+	{ 50, 0x62, 0 },		/* R32 0 */
+	{ 51, 0x5A, 0 },		/* R24 2 */
+	{ 52, 0x5B, 0 }			/* R25 3 */
+};
+#define UT_NNUM		( (INT)( sizeof(ut_num) / sizeof(ut_num[0]) ) )
+
+/*
+ * A key as it is put in: with the keyboard's own layouts, which the
+ * window it reaches reads it in. With Ctrl, Alt or a Windows key it is a
+ * command, which the programs take by the letter the key types in the
+ * machine's layout, from the usage alone (wm_key_cmd): it is put in as
+ * the key that types the same letter there unshifted, without the own
+ * layouts, as the keyboard plugged in sends it. A letter no such key
+ * types goes as it is.
+ */
+static void as_put( UINT code, UINT mods, UINT *p_code, UINT *p_mods )
+{
+	char	b[8], m[8];
+	UINT	c;
+
+	*p_code = code;
+	*p_mods = mods | own();
+	if ( ( mods & M_CMD ) == 0 || km_label(KM_L_CHAR, code, own(), b, sizeof(b)) != 1 ) return;
+	for ( c = 0x04; c <= 0x89; c++ ) {
+		if ( c > 0x38 && c != 0x87 && c != 0x89 ) continue;
+		if ( km_label(KM_L_CHAR, c, 0, m, sizeof(m)) == 1 && m[0] == b[0] ) {
+			*p_code = c;
+			*p_mods = mods;
+			return;
+		}
+	}
+}
+
 static void put( CONST SKVIEW *v, UINT code, UINT mods )
 {
-	ER	er = wm_key_put(v->kw, code, mods);
+	UINT	c, m;
+	ER	er;
 
-	if ( er < E_OK ) say("not typed %02x (%d)", code, (INT)er);
-	else say("typed %02x mods %x", code, mods);
+	as_put(code, mods, &c, &m);
+	er = wm_key_put(v->kw, c, m);
+	if ( er < E_OK ) say("not typed %02x (%d)", c, (INT)er);
+	else say("typed %02x mods %x", c, m);
 	g_flash = code;
 	g_flash_end = ui_now() + FLASH_MS;
 }
 
 /*
- * The usage that types a letter in the latin layout set, and whether
- * with Shift: FALSE when no key types it
+ * The usage that types a letter in the keyboard's latin layout, and
+ * whether with Shift: FALSE when no key types it
  */
 static BOOL latin_of( char ch, UINT *p_code, BOOL *p_shift )
 {
@@ -903,7 +1060,7 @@ static BOOL latin_of( char ch, UINT *p_code, BOOL *p_shift )
 	for ( s = 0; s < 2; s++ ) {
 		for ( c = 0x04; c <= 0x89; c++ ) {
 			if ( c > 0x38 && c != 0x87 && c != 0x89 ) continue;
-			if ( km_label(KM_L_CHAR, c, s ? HID_MOD_LSHIFT : 0, b, sizeof(b)) == 1 && b[0] == ch ) {
+			if ( km_label(KM_L_CHAR, c, ( s ? HID_MOD_LSHIFT : 0 ) | own(), b, sizeof(b)) == 1 && b[0] == ch ) {
 				*p_code = c;
 				*p_shift = (BOOL)( s != 0 );
 				return TRUE;
@@ -927,7 +1084,7 @@ static char shown_letter( CONST SKONE *k )
  * choosing the face. A key written by its place types its place. Else
  * the letter of the face the Shift held chooses -- the plain one, the red
  * with the left Shift, the blue with the right, a capital with either --
- * is typed as whatever key types it in the latin layout set; a key with
+ * is typed as whatever key types it in the keyboard's latin layout; a key with
  * no letter there types its usage.
  */
 static BOOL chart_send( CONST SKONE *k, UINT mods, UINT *p_code, UINT *p_mods )
@@ -938,7 +1095,7 @@ static BOOL chart_send( CONST SKONE *k, UINT mods, UINT *p_code, UINT *p_mods )
 
 	*p_mods = mods;
 	if ( mode_jp() && ( g_mode & WM_MODE_ROMAN ) == 0 && k->kan != 0
-	  && km_label(KM_L_KANA, k->kan, 0, b, sizeof(b)) > 0 ) {
+	  && km_label(KM_L_KANA, k->kan, own(), b, sizeof(b)) > 0 ) {
 		*p_code = k->kan;
 		return TRUE;
 	}
@@ -963,7 +1120,7 @@ static BOOL chart_send( CONST SKONE *k, UINT mods, UINT *p_code, UINT *p_mods )
 /*
  * What a key that types types, with the modifiers held, as the keyboard
  * sends it: the usage of its place with the modifiers, Ctrl and Alt too
- * (the programs take a command by the letter the key types, wm_key_cmd);
+ * (as_put makes a command the key of its letter in the machine's layout);
  * with Fn its Fn usage; a key of the μTRON chart as chart_send says
  */
 static BOOL send_of( CONST SKONE *k, UINT mods, UINT *p_code, UINT *p_mods )
@@ -973,16 +1130,95 @@ static BOOL send_of( CONST SKONE *k, UINT mods, UINT *p_code, UINT *p_mods )
 		*p_code = k->fn;
 		return TRUE;
 	}
+	if ( g_num && page()->kind == PK_CHART ) {
+		INT	i;
+
+		for ( i = 0; i < UT_NNUM; i++ ) {
+			BOOL	shift;
+
+			if ( ut_num[i].idx != k->idx ) continue;
+			if ( ut_num[i].code != 0 ) {
+				*p_code = ut_num[i].code;
+				*p_mods = mods & ~M_SHIFT;
+				return TRUE;
+			}
+			if ( ut_num[i].ch != 0 && latin_of(ut_num[i].ch, p_code, &shift) ) {
+				*p_mods = ( mods & ~M_SHIFT ) | ( shift ? HID_MOD_LSHIFT : 0 );
+				return TRUE;
+			}
+			break;
+		}
+	}
 	if ( page()->kind == PK_CHART && k->name == NULL ) return chart_send(k, mods, p_code, p_mods);
 	*p_code = k->code;
 	return (BOOL)( k->code != 0 );
 }
 
-static void press( CONST SKVIEW *v, INT x, INT y )
+/* The attribute the window layer reads for it, in the look table */
+static UINT rep_ms( INT look, UINT dflt )
+{
+	UINT	v = (UINT)wm_look(look);
+
+	return ( v != 0 ) ? v : dflt;
+}
+
+/* Stop repeating, and let go the key held */
+static void rep_stop( void )
+{
+	g_rep_v = NULL;
+	if ( g_hold_kw > 0 ) {
+		ER	er = wm_key_put(g_hold_kw, g_hold_code, g_hold_mods | WM_KEY_PUT_UP);
+
+		if ( er < E_OK ) say("not let go %02x (%d)", g_hold_code, (INT)er);
+		g_hold_kw = 0;
+	}
+}
+
+/* A key pressed on the picture: down, and held there */
+static void hold( CONST SKVIEW *v, UINT code, UINT mods )
+{
+	UINT	c, m;
+	ER	er;
+
+	as_put(code, mods, &c, &m);
+	er = wm_key_put(v->kw, c, m | WM_KEY_PUT_DOWN);
+	if ( er < E_OK ) {
+		say("not typed %02x (%d)", c, (INT)er);
+	} else {
+		say("typed %02x mods %x", c, m);
+		g_hold_kw = v->kw;
+		g_hold_code = c;
+		g_hold_mods = m;
+	}
+	g_flash = code;
+	g_flash_end = ui_now() + FLASH_MS;
+}
+
+/* Time for a key held to type again */
+static void rep_time( void )
+{
+	UD	now = ui_now();
+
+	if ( g_rep_v != NULL && now >= g_rep_due ) {
+		hold(g_rep_v, g_rep_code, g_rep_mods);
+		g_rep_due = now + rep_ms(LK_KRP_INT, 100);
+		g_dirty = TRUE;
+	}
+}
+
+/* The next time rep_time has something to do, 0 none */
+static UD rep_due( void )
+{
+	return ( g_rep_v != NULL ) ? g_rep_due : 0;
+}
+
+static void press( CONST SKVIEW *v, CONST T_OBNTM *m )
 {
 	SKONE	k;
 	UINT	code, mods;
+	INT	x = m->x, y = m->y;
 
+	rep_stop();
 	if ( !key_at(v, x, y, &k) ) return;
 	switch ( k.act ) {
 	case SK_MOD:
@@ -1004,8 +1240,23 @@ static void press( CONST SKVIEW *v, INT x, INT y )
 		say("ime %s", mode_jp() ? "off" : "on");
 		break;
 	default:
-		if ( send_of(&k, g_once | g_lock, &code, &mods) ) put(v, code, mods);
-		else say("nothing to type");
+		if ( page()->kind == PK_CHART && k.idx == UT_NUMLOCK && g_fn != 0 ) {
+			g_num = !g_num;
+			say("numlock %d", (INT)g_num);
+			if ( g_fn == 1 ) g_fn = 0;
+			break;
+		}
+		if ( send_of(&k, g_once | g_lock, &code, &mods) ) {
+			hold(v, code, mods);
+			if ( wm_look(LK_KRP) != 0 ) {
+				g_rep_v = v;
+				g_rep_code = code;
+				g_rep_mods = mods;
+				g_rep_due = ui_now() + rep_ms(LK_KRP_START, 800);
+			}
+		} else {
+			say("nothing to type");
+		}
 		g_once = 0;
 		if ( g_fn == 1 ) g_fn = 0;
 		break;
@@ -1043,11 +1294,11 @@ static void seen( CONST T_OBNTM *m )
 /*
  * The layout chosen, as the line SOFTKB_LAYOUT of the user information
  * object (record 1, lines of settings): read at the start, written when
- * another is chosen. The other lines are kept as they are. While a TRON
- * keyboard is chosen, two lines beside it say how the machine's layouts
- * were switched for it: SOFTKB_WAS the latin and the kana layouts there
- * were before, SOFTKB_SET those the switch set ("1 1", Dvorak and TRON
- * かな配列); both empty when nothing was switched.
+ * another is chosen. The other lines are kept as they are. Beside it the
+ * keyboard's own layouts, as numbers (KM_LATIN_*, KM_KANA_*): SOFTKB_LATIN
+ * and SOFTKB_KANA for the English letters, SOFTKB_TRONLATIN and
+ * SOFTKB_TRONKANA for the TRON keyboards; a line not there, or empty, is
+ * the page's first (QWERTY and JIS かな, Dvorak and TRON かな配列).
  */
 static UB	g_conf[CF_TEXT_MAX];
 static INT	g_conf_len;
@@ -1121,8 +1372,9 @@ static INT page_kept( void )
 }
 
 /*
- * The switch's line SOFTKB_SET read: its latin layout -1 when the person
- * has since chosen the logical layout, which is then the person's
+ * A line SOFTKB_SET of an earlier version read: the layouts it set the
+ * machine's to, its latin -1 once the person had chosen the latin layout
+ * on the keyboard, which was then the person's
  */
 static BOOL conf_set_pair( INT *p_latin, INT *p_kana )
 {
@@ -1136,100 +1388,67 @@ static BOOL conf_set_pair( INT *p_latin, INT *p_kana )
 	return TRUE;
 }
 
-/*
- * The latin layout a TRON keyboard is typed in: Dvorak, its letters'
- * own, at first; the logical layout the person last chose on a TRON
- * keyboard after that (SOFTKB_TRONLATIN)
- */
-static INT tron_latin( void )
+/* The lines of the keyboard's own layouts for a page: the English letters' or the TRON keyboards' */
+static CONST char *latin_line( CONST SKPAGE *p )
+{
+	return p->tron ? "SOFTKB_TRONLATIN" : "SOFTKB_LATIN";
+}
+
+static CONST char *kana_line( CONST SKPAGE *p )
+{
+	return p->tron ? "SOFTKB_TRONKANA" : "SOFTKB_KANA";
+}
+
+/* A number of a line of those read (conf_read), 0 to n - 1; dflt when it is not there, empty or out of range */
+static INT conf_num( CONST char *key, INT dflt, INT n )
 {
 	char	v[16];
-	INT	n;
+	INT	x;
 
-	if ( !cf_get(g_conf, g_conf_len, "SOFTKB_TRONLATIN", 0, v, sizeof(v)) ) return KM_LATIN_DVORAK;
-	n = cf_num(v, KM_LATIN_DVORAK);
-	return ( n >= 0 && n < KM_LATIN_N ) ? n : KM_LATIN_DVORAK;
+	if ( !cf_get(g_conf, g_conf_len, key, 0, v, sizeof(v)) || v[0] == 0 ) return dflt;
+	x = cf_num(v, dflt);
+	return ( x >= 0 && x < n ) ? x : dflt;
+}
+
+/* The keyboard's own layouts for the page in use, from the lines read (conf_read) */
+static void own_read( void )
+{
+	CONST SKPAGE	*p = page();
+
+	g_latin = conf_num(latin_line(p), p->tron ? KM_LATIN_DVORAK : KM_LATIN_KEYS, KM_LATIN_N);
+	g_kana = conf_num(kana_line(p), p->tron ? KM_KANA_TRON : KM_KANA_JIS, KM_KANA_N);
 }
 
 /*
- * The logical layout chosen by the person: the machine's latin layout
- * set (km_set), as キー配列 sets it. It is the person's: the English
- * letters chosen again later do not put back the one there was before a
- * TRON keyboard (SOFTKB_SET's latin made -1), and chosen on a TRON
- * keyboard, it is the one a TRON keyboard is typed in from then on.
+ * The logical layout chosen by the person: the keyboard's own latin
+ * layout for the page in use, kept for the English letters or for the
+ * TRON keyboards. The machine's is left as it is.
  */
 static void logical_set( INT latin )
 {
-	T_KMSTATE	s;
-	INT		sl, sk;
-	char		v[16];
-	ER		er;
+	char	v[16];
+	ER	er;
 
-	if ( km_get(&s) < E_OK ) return;
-	s.latin = latin;
-	er = km_set(&s, KM_SET_LATIN);
-	if ( er < E_OK ) {
-		say("latin not set (%d)", (INT)er);
-		return;
-	}
-	if ( conf_read() >= 0 ) {
-		if ( conf_set_pair(&sl, &sk) ) {
-			snprintf(v, sizeof(v), "%d %d", -1, sk);
-			(void)conf_put("SOFTKB_SET", v);
-		}
-		if ( page()->tron ) {
-			snprintf(v, sizeof(v), "%d", latin);
-			(void)conf_put("SOFTKB_TRONLATIN", v);
-		}
-		(void)conf_write();
-	}
-	(void)km_get(&g_st);
+	g_latin = latin;
+	snprintf(v, sizeof(v), "%d", latin);
+	er = ( conf_read() >= 0 && conf_put(latin_line(page()), v) ) ? conf_write() : E_LIMIT;
+	if ( er < E_OK ) say("latin not kept (%d)", (INT)er);
 	say("latin %d", latin);
 	g_dirty = TRUE;
 }
 
 /*
- * A TRON keyboard chosen: the machine's layouts switched to Dvorak and
- * TRON かな配列, as キー配列 sets them (km_set), so that its keys type
- * what they are written with, the keyboard's own keys too. What there
- * was is kept, to be put back -- but not again when it is kept already:
- * a TRON keyboard chosen a second time before the English letters keeps
- * what there was the first time.
+ * What an earlier version of the program left: it switched the machine's
+ * layouts to Dvorak and TRON かな配列 for a TRON keyboard, noting what
+ * there was as SOFTKB_WAS and what it set as SOFTKB_SET, and some
+ * machines are still so. Each of the two layouts still what it set is put
+ * back, so that the keyboard plugged in types as the person had it; one
+ * changed since (by キー配列, システム環境設定, or the latin layout chosen
+ * on the keyboard, SOFTKB_SET's latin -1) is the person's, and stays. The
+ * lines are emptied once that is done; when this user may not write the
+ * machine's settings, they are kept for one who may.
  */
-static void tron_on( void )
-{
-	T_KMSTATE	s, ns;
-	INT		wl, wk;
-	char		v[16];
-	ER		er;
-
-	if ( km_get(&s) < E_OK ) return;
-	ns = s;
-	ns.latin = tron_latin();
-	ns.kana = KM_KANA_TRON;
-	er = km_set(&ns, KM_SET_LATIN | KM_SET_KANA);
-	if ( er < E_OK ) {
-		say("layouts not set (%d)", (INT)er);	/* not the person's to set: the picture only */
-		return;
-	}
-	if ( !conf_pair("SOFTKB_WAS", &wl, &wk) ) {
-		wl = s.latin;
-		wk = s.kana;
-		snprintf(v, sizeof(v), "%d %d", wl, wk);
-		(void)conf_put("SOFTKB_WAS", v);
-	}
-	snprintf(v, sizeof(v), "%d %d", ns.latin, KM_KANA_TRON);
-	(void)conf_put("SOFTKB_SET", v);
-	say("layouts set latin %d kana %d, were %d %d", ns.latin, KM_KANA_TRON, wl, wk);
-}
-
-/*
- * The English letters chosen again: each of the two layouts put back as
- * it was before the TRON keyboard, if it is still what the switch set.
- * One changed since (by キー配列, システム環境設定) is the person's
- * choice, and stays.
- */
-static void tron_off( void )
+static void legacy_back( void )
 {
 	T_KMSTATE	s, ns;
 	INT		wl, wk, sl, sk;
@@ -1241,11 +1460,9 @@ static void tron_off( void )
 		sl = KM_LATIN_DVORAK;
 		sk = KM_KANA_TRON;
 	}
-	(void)conf_put("SOFTKB_WAS", "");
-	(void)conf_put("SOFTKB_SET", "");
 	if ( km_get(&s) < E_OK ) return;
 	ns = s;
-	if ( s.latin == sl ) {
+	if ( sl >= 0 && s.latin == sl ) {
 		ns.latin = wl;
 		what |= KM_SET_LATIN;
 	}
@@ -1254,8 +1471,15 @@ static void tron_off( void )
 		what |= KM_SET_KANA;
 	}
 	er = ( what != 0 ) ? km_set(&ns, what) : E_OK;
-	if ( er < E_OK ) say("layouts not put back (%d)", (INT)er);
-	else say("layouts back latin %d kana %d (%x put back)", ns.latin, ns.kana, what);
+	if ( er < E_OK ) {
+		say("layouts not put back (%d)", (INT)er);
+		return;
+	}
+	(void)conf_put("SOFTKB_WAS", "");
+	(void)conf_put("SOFTKB_SET", "");
+	er = conf_write();
+	say("layouts back latin %d kana %d (%x put back)%s", ns.latin, ns.kana, what, ( er < E_OK ) ? ", not kept" : "");
+	(void)km_get(&g_st);
 }
 
 /* ---------------------------------------------------------------- the windows */
@@ -1399,9 +1623,11 @@ static void resized( SKVIEW *v )
 			place_moved(o);
 			work_set(o, v->w, v->h);
 			place_fit(o);
+			area_tell(o);
 			say("other half size %d %d", o->w, o->h);
 		}
 	}
+	area_tell(v);
 	g_dirty = TRUE;
 }
 
@@ -1501,7 +1727,7 @@ static ER win_open( SKVIEW *v, INT part, BOOL plain )
 	v->kw = ob_opn_obj(&v->win, OB_OP_R | OB_OP_W | OB_OP_PROT);
 	v->gid = ( v->kw > 0 ) ? wm_obj_gid(v->kw) : E_ID;
 	memset(&req, 0, sizeof(req));
-	req.events = OB_E_CLOSE | OB_E_PRESS | OB_E_KEY | OB_E_REDRAW | OB_E_DELETE;
+	req.events = OB_E_CLOSE | OB_E_PRESS | OB_E_RELEASE | OB_E_LEAVE | OB_E_KEY | OB_E_REDRAW | OB_E_DELETE;
 	req.id = 7;
 	req.flags = OB_N_KEYSEEN;
 	if ( v->kw <= 0 || v->gid < 0 || ob_ntf_evt(v->kw, OB_REC_ANY, &req, g_port) <= 0 ) {
@@ -1513,6 +1739,7 @@ static ER win_open( SKVIEW *v, INT part, BOOL plain )
 	v->open = TRUE;
 	work_set(v, w0, h0);			/* the frame as it came out round the work area, on the screen */
 	place_fit(v);
+	area_tell(v);
 	return E_OK;
 }
 
@@ -1537,6 +1764,7 @@ static ER views_open( void )
 		if ( g_v[1].w != g_v[0].w || g_v[1].h != g_v[0].h ) {
 			work_set(&g_v[1], g_v[0].w, g_v[0].h);
 			place_fit(&g_v[1]);
+			area_tell(&g_v[1]);
 		}
 		return E_OK;
 	}
@@ -1555,10 +1783,9 @@ static void views_close( void )
 
 /*
  * Another layout: where the windows of this one stand kept, the windows
- * of the other opened where they were last, the machine's layouts
- * switched for a TRON keyboard or put back from it, and the layout kept.
- * Closing the window puts nothing back: it opens again as it was left,
- * the layouts with it.
+ * of the other opened where they were last, typed and written in the
+ * keyboard's own layouts for it, and the layout kept. The machine's
+ * layouts are left as they are.
  */
 static void page_set( INT pg )
 {
@@ -1568,9 +1795,8 @@ static void page_set( INT pg )
 	if ( pg == g_page ) return;
 	(void)conf_read();
 	wins_put();
-	if ( p->tron && !page()->tron ) tron_on();
-	else if ( !p->tron && page()->tron ) tron_off();
 	g_page = pg;
+	own_read();
 	g_fn = 0;
 	if ( g_nv > 0 ) {
 		views_close();
@@ -1579,7 +1805,7 @@ static void page_set( INT pg )
 			g_closing = TRUE;
 		}
 	}
-	say("page %s size %d %d", p->key, g_v[0].w, g_v[0].h);
+	say("page %s size %d %d latin %d kana %d", p->key, g_v[0].w, g_v[0].h, g_latin, g_kana);
 	er = conf_put(CONF_KEY, p->key) ? conf_write() : E_LIMIT;
 	if ( er < E_OK ) say("not kept (%d)", (INT)er);
 	else say("kept %s", p->key);
@@ -1646,10 +1872,15 @@ static void event( CONST T_OBNTM *m )
 		break;
 	case OB_E_PRESS:
 		if ( m->code == 1 ) {
+			rep_stop();
 			menu(v, m);
 		} else if ( m->code == 0 && m->x >= 0 && m->y >= 0 && m->x < v->w && m->y < v->h ) {
-			press(v, m->x, m->y);
+			press(v, m);
 		}
+		break;
+	case OB_E_RELEASE:
+	case OB_E_LEAVE:		/* a button let go over another window is not told here */
+		rep_stop();
 		break;
 	case OB_E_KEY:
 		/* both halves are told of every key: one is enough */
@@ -1712,7 +1943,7 @@ static BOOL st_table( CONST SKKEY *t, BOOL letters )
 		if ( t->w == 0 || t->code == 0 ) return FALSE;
 		if ( t->act == SK_MOD && ( t->code < 0xE0 || t->code > 0xE7 ) ) return FALSE;
 		if ( letters && t->act == SK_KEY && t->name == NULL
-		  && km_label(KM_L_CHAR, t->code, 0, b, sizeof(b)) <= 0 ) return FALSE;
+		  && km_label(KM_L_CHAR, t->code, own(), b, sizeof(b)) <= 0 ) return FALSE;
 		q += t->w;
 	}
 	return TRUE;
@@ -1742,6 +1973,83 @@ static INT st_hits( SKVIEW *v, INT part, INT w, INT h )
 	st_hit_i = 0;
 	sk_each(v, st_hit, NULL);
 	return st_hit_i;
+}
+
+/* Whether a place of the window would be told as a key's */
+static INT	st_ax, st_ay;
+static BOOL	st_ain;
+
+static void st_area_at( INT x, INT y )
+{
+	INT	i;
+
+	st_ain = FALSE;
+	st_ax = x;
+	st_ay = y;
+	for ( i = 0; i < g_narea; i++ ) {
+		if ( x >= g_area[i].left && x < g_area[i].right && y >= g_area[i].top && y < g_area[i].bottom ) {
+			st_ain = TRUE;
+		}
+	}
+}
+
+/* Every key's middle told as a key's place, and found: what a finger presses at once is what it types */
+static void st_area_key( CONST SKVIEW *v, CONST SKONE *k, void *arg )
+{
+	SKONE	got;
+
+	(void)arg;
+	st_area_at(k->cx, k->cy);
+	if ( !st_ain || !key_at(v, k->cx, k->cy, &got) || got.idx != k->idx ) {
+		st_hit_ok = FALSE;
+		say("selftest: key %d not told at its middle", k->idx);
+	}
+}
+
+/*
+ * The English letters: the ground at each end of a row is no key, for a
+ * tap or as a place told; the Japanese keyboard's 半角/全角 is there; and
+ * every page's keys are told within the list's room
+ */
+static void st_rows( void )
+{
+	SKVIEW	v;
+	SKONE	got;
+	INT	pg, was_pg = g_page, y, i;
+	BOOL	zen = FALSE;
+
+	memset(&v, 0, sizeof(v));
+	for ( pg = 0; pg < SK_NPAGE; pg++ ) {
+		g_page = pg;
+		v.part = PART_ALL;
+		v.w = sk_pages[pg].w0;
+		v.h = sk_pages[pg].h0;
+		g_narea = 0;
+		sk_each(&v, area_key, NULL);
+		st_hit_ok = TRUE;
+		sk_each(&v, st_area_key, NULL);
+		st_check(st_hit_ok && g_narea < WM_PRESS_RECTS, "every key's middle told, within the list's room");
+	}
+	g_page = PG_QWERTY;
+	v.w = sk_pages[PG_QWERTY].w0;
+	v.h = sk_pages[PG_QWERTY].h0;
+	g_narea = 0;
+	sk_each(&v, area_key, NULL);
+	for ( y = SK_M + 4; y < v.h - SK_M; y += 8 ) {
+		INT	mid = SK_M + SK_SIDE * ( v.w - 2 * SK_M ) / ( SK_ROWQ + 2 * SK_SIDE ) / 2;
+
+		st_area_at(mid, y);
+		st_check(!st_ain && !key_at(&v, mid, y, &got), "no key in the ground at a row's left");
+		st_area_at(v.w - 1 - mid, y);
+		st_check(!st_ain && !key_at(&v, v.w - 1 - mid, y, &got), "no key in the ground at a row's right");
+	}
+	st_check(at_x(&v, 0) - SK_M >= ( v.w - 2 * SK_M ) * 3 / 68, "about a key's ground at the left");
+	for ( i = 0, y = 0; y < SK_NROW; i++ ) {
+		if ( sk_qwerty_jp[i].act == SK_ROW ) y++;
+		else if ( sk_qwerty_jp[i].code == SK_ZENKAKU ) zen = TRUE;
+	}
+	st_check(zen, "半角/全角 on the Japanese keyboard's rows");
+	g_page = was_pg;
 }
 
 /*
@@ -1783,7 +2091,7 @@ static void st_tron( void )
 		if ( k->act == SK_MOD && ( k->code < 0xE0 || k->code > 0xE7 ) ) ok = FALSE;
 		/* its letters are the Japanese keyboard's usages: written when the machine's keyboard is one */
 		if ( !g_st.us && k->act == SK_KEY && k->name == NULL
-		  && km_label(KM_L_CHAR, k->code, 0, b, sizeof(b)) <= 0 ) letters = FALSE;
+		  && km_label(KM_L_CHAR, k->code, own(), b, sizeof(b)) <= 0 ) letters = FALSE;
 	}
 	st_check(ok, "the TRON keyboard's keys on its plane, each typing something");
 	st_check(fns == 1, "one Fn");
@@ -1799,11 +2107,42 @@ static void st_tron( void )
 	g_page = was_pg;
 }
 
+/* The right half's key in the place of the right Alt types ":", as the keyboard's latin layout has it */
+static void st_colon( void )
+{
+	INT	i, was_pg = g_page;
+	SKONE	o;
+	UINT	code, mods;
+	char	b[8];
+	BOOL	found = FALSE;
+
+	memset(&o, 0, sizeof(o));
+	g_page = PG_UTRON;
+	for ( i = 0; i < sk_ut_nkey; i++ ) {
+		CONST SKVKEY	*k = &sk_ut_key[i];
+
+		st_check(k->code != 0xE6, "no right Alt on the μTRON keyboard");
+		if ( k->pl != ':' ) continue;
+		found = TRUE;
+		o.idx = i;
+		o.act = k->act;
+		o.pl = k->pl;
+		o.red = k->red;
+		o.blue = k->blue;
+		st_check(send_of(&o, 0, &code, &mods) && km_label(KM_L_CHAR, code, ( mods & M_SHIFT ) | own(), b, sizeof(b)) == 1
+			 && b[0] == ':', "the key of : types :");
+		st_check(send_of(&o, HID_MOD_LSHIFT, &code, &mods) && km_label(KM_L_CHAR, code, ( mods & M_SHIFT ) | own(), b, sizeof(b)) == 1
+			 && b[0] == ':', "the key of : types : with Shift too");
+	}
+	st_check(found, "the key of : on the μTRON keyboard");
+	g_page = was_pg;
+}
+
 /*
  * The μTRON keyboard's table as it must be: 76 keys on the plane, 38 in
  * each half, the marks of each inside it, each
  * key found at its middle in its half's window and in one of the whole,
- * and the letters of its faces typed by some key of the latin layout set
+ * and the letters of its faces typed by some key of the keyboard's latin layout
  */
 static void st_utron( void )
 {
@@ -1846,6 +2185,7 @@ static void st_utron( void )
 	st_check(ok && nl == 38, "the μTRON keyboard's keys, 38 of them in the left half");
 	st_check(marks, "the marks of each key inside it");
 	st_check(letters, "every letter of the μTRON keyboard typed by a key of the latin layout");
+	st_colon();
 
 	g_page = PG_UTRON;
 	st_hit_ok = TRUE;
@@ -1871,117 +2211,193 @@ static void st_keep( void )
 	st_check(page_kept() == was, "the layout put back");
 }
 
+/* The user information as it was before a check, written back after it */
+static UB	st_conf[CF_TEXT_MAX];
+static INT	st_conf_len = -1;
+
+static void st_conf_keep( void )
+{
+	st_conf_len = conf_read();
+	if ( st_conf_len > 0 ) memcpy(st_conf, g_conf, (size_t)st_conf_len);
+}
+
+static void st_conf_back( void )
+{
+	if ( st_conf_len < 0 ) return;
+	memcpy(g_conf, st_conf, (size_t)st_conf_len);
+	g_conf_len = st_conf_len;
+	(void)conf_write();
+	st_conf_len = -1;
+}
+
+static BOOL st_machine( INT latin, INT kana )
+{
+	T_KMSTATE	s;
+
+	return (BOOL)( km_get(&s) >= E_OK && s.latin == latin && s.kana == kana );
+}
+
 /*
- * The machine's layouts switched with a TRON keyboard: set to Dvorak and
- * TRON かな配列, put back with the English letters, and a layout the
- * person changed in between left as the person set it; between the TRON
- * keyboard and the μTRON keyboard nothing switched; then all as it was
+ * The keyboard's own layouts: Dvorak and TRON かな配列 with a TRON
+ * keyboard, QWERTY and JIS かな with the English letters, a latin layout
+ * chosen on each kept for it, and the machine's layouts left as they are
+ * all the while. Then what an earlier version left switched put back:
+ * both layouts when both are what it set, the latin alone when the person
+ * changed the kana layout since, the kana alone when the person had
+ * chosen the latin layout on it (SOFTKB_SET's latin -1); then all as it
+ * was.
  */
-static void st_switch( void )
+static void st_own( void )
 {
 	T_KMSTATE	was, base, s;
-	INT		kept = page_kept();
+	INT		kept = g_page, wl, wk;
 
 	if ( km_get(&was) < E_OK ) {
 		st_check(FALSE, "km_get");
 		return;
 	}
+	st_conf_keep();
 	base = was;
 	base.latin = KM_LATIN_KEYS;
 	base.kana = KM_KANA_JIS;
 	st_check(km_set(&base, KM_SET_LATIN | KM_SET_KANA) == E_OK, "the layouts set to start from");
-	g_page = 0;
-	command("layout.tron");
-	st_check(km_get(&s) >= E_OK && s.latin == KM_LATIN_DVORAK && s.kana == KM_KANA_TRON,
-		 "Dvorak and TRON かな配列 with the TRON keyboard");
-	command("layout.qwerty");
-	st_check(km_get(&s) >= E_OK && s.latin == KM_LATIN_KEYS && s.kana == KM_KANA_JIS,
-		 "the layouts put back with the English letters");
-	command("layout.utron");
-	st_check(km_get(&s) >= E_OK && s.latin == KM_LATIN_DVORAK && s.kana == KM_KANA_TRON,
-		 "Dvorak and TRON かな配列 with the μTRON keyboard");
-	command("layout.tron");
-	s.latin = KM_LATIN_DVORAK;
-	s.kana = KM_KANA_NICOLA;
-	st_check(km_set(&s, KM_SET_KANA) == E_OK, "the kana layout changed by the person");
-	command("layout.utron");			/* from one TRON keyboard to the other: nothing done */
-	command("layout.qwerty");
-	st_check(km_get(&s) >= E_OK && s.latin == KM_LATIN_KEYS && s.kana == KM_KANA_NICOLA,
-		 "the latin layout put back, the person's kana layout left");
-	st_check(km_set(&was, KM_SET_LATIN | KM_SET_KANA) == E_OK, "the layouts as they were");
-	(void)conf_read();				/* the line as it was, nothing switched */
-	(void)conf_put(CONF_KEY, sk_pages[kept].key);
-	(void)conf_put("SOFTKB_WAS", "");
-	(void)conf_put("SOFTKB_SET", "");
+	(void)conf_put("SOFTKB_LATIN", "");
+	(void)conf_put("SOFTKB_KANA", "");
+	(void)conf_put("SOFTKB_TRONLATIN", "");
+	(void)conf_put("SOFTKB_TRONKANA", "");
 	(void)conf_write();
+	g_page = PG_QWERTY;
+	own_read();
+	command("layout.tron");
+	st_check(g_latin == KM_LATIN_DVORAK && g_kana == KM_KANA_TRON, "Dvorak and TRON かな配列, the TRON keyboard's own");
+	st_check(st_machine(KM_LATIN_KEYS, KM_KANA_JIS), "the machine's layouts left with the TRON keyboard");
+	command("latin.qwerty");
+	st_check(g_latin == KM_LATIN_KEYS && st_machine(KM_LATIN_KEYS, KM_KANA_JIS),
+		 "QWERTY chosen on the TRON keyboard, its own only");
+	command("layout.qwerty");
+	st_check(g_latin == KM_LATIN_KEYS && g_kana == KM_KANA_JIS, "QWERTY and JIS かな, the English letters' own");
+	command("latin.dvorak");
+	st_check(g_latin == KM_LATIN_DVORAK && st_machine(KM_LATIN_KEYS, KM_KANA_JIS),
+		 "Dvorak chosen on the English letters, its own only");
+	command("layout.utron");
+	st_check(g_latin == KM_LATIN_KEYS && g_kana == KM_KANA_TRON, "the latin layout chosen on a TRON keyboard kept for it");
+	command("layout.qwerty");
+	st_check(g_latin == KM_LATIN_DVORAK, "and the one chosen on the English letters for them");
+	st_check(st_machine(KM_LATIN_KEYS, KM_KANA_JIS), "the machine's layouts as they were all along");
+
+	/* what an earlier version left: the machine's layouts it switched put back */
+	s = base;
+	s.latin = KM_LATIN_DVORAK;
+	s.kana = KM_KANA_TRON;
+	(void)km_set(&s, KM_SET_LATIN | KM_SET_KANA);
+	(void)conf_put("SOFTKB_WAS", "0 0");
+	(void)conf_put("SOFTKB_SET", "1 1");
+	legacy_back();
+	st_check(st_machine(KM_LATIN_KEYS, KM_KANA_JIS) && !conf_pair("SOFTKB_WAS", &wl, &wk),
+		 "the layouts an earlier version switched put back, its lines emptied");
+	s.kana = KM_KANA_NICOLA;
+	(void)km_set(&s, KM_SET_LATIN | KM_SET_KANA);
+	(void)conf_put("SOFTKB_WAS", "0 0");
+	(void)conf_put("SOFTKB_SET", "1 1");
+	legacy_back();
+	st_check(st_machine(KM_LATIN_KEYS, KM_KANA_NICOLA), "the latin layout put back, the person's kana layout left");
+	s.kana = KM_KANA_TRON;
+	(void)km_set(&s, KM_SET_LATIN | KM_SET_KANA);
+	(void)conf_put("SOFTKB_WAS", "0 0");
+	(void)conf_put("SOFTKB_SET", "-1 1");
+	legacy_back();
+	st_check(st_machine(KM_LATIN_DVORAK, KM_KANA_JIS), "the kana layout put back, the latin the person chose left");
+	legacy_back();					/* nothing left to put back: nothing done */
+	st_check(st_machine(KM_LATIN_DVORAK, KM_KANA_JIS), "nothing put back twice");
+
+	st_check(km_set(&was, KM_SET_LATIN | KM_SET_KANA) == E_OK, "the layouts as they were");
+	(void)km_get(&g_st);
+	st_conf_back();
 	g_page = kept;
+	(void)conf_read();
+	own_read();
 }
 
 /*
- * Every key that is written with a letter types that letter, on every
- * page, in QWERTY and in Dvorak; with Ctrl, the command of that letter
+ * Every key that is written with a letter types that letter as the
+ * window it reaches reads it, on every page, in each of the keyboard's
+ * latin layouts whichever the machine's is; with Ctrl, the command of that
+ * letter, as the programs take it by the machine's layout (wm_key_cmd)
  */
 static INT	st_bad;
 
 static void st_same( CONST SKVIEW *v, CONST SKONE *k, void *arg )
 {
 	char	ch = shown_letter(k), b[8];
-	UINT	code, mods;
+	UINT	code, mods, c = 0, m = 0;
 
 	(void)v;
 	(void)arg;
 	if ( ch == 0 ) return;
-	if ( !send_of(k, 0, &code, &mods) || km_label(KM_L_CHAR, code, mods & M_SHIFT, b, sizeof(b)) != 1 || b[0] != ch ) {
+	if ( send_of(k, 0, &code, &mods) ) as_put(code, mods, &c, &m);
+	if ( c == 0 || ( m & KM_MOD_LAYOUTS ) != own() || km_label(KM_L_CHAR, c, m, b, sizeof(b)) != 1 || b[0] != ch ) {
 		st_bad++;
-		say("selftest: page %d key %d written %c types %02x", g_page, k->idx, ch, code);
+		say("selftest: page %d key %d written %c types %02x", g_page, k->idx, ch, c);
 	}
-	/* with Ctrl, the same key with Ctrl: the command of the letter it types (wm_key_cmd) */
-	if ( ch >= 'a' && ch <= 'z' && ( !send_of(k, HID_MOD_LCTRL, &code, &mods) || ( mods & HID_MOD_LCTRL ) == 0
-	  || wm_key_cmd(code) != 0x04 + (UINT)( ch - 'a' ) ) ) {
+	/* with Ctrl: the key that types the letter in the machine's layout, with Ctrl, and no layouts of its own */
+	c = 0;
+	if ( ch >= 'a' && ch <= 'z' && send_of(k, HID_MOD_LCTRL, &code, &mods) ) as_put(code, mods, &c, &m);
+	if ( ch >= 'a' && ch <= 'z'
+	  && ( c == 0 || ( m & HID_MOD_LCTRL ) == 0 || ( m & KM_MOD_LAYOUTS ) != 0
+	    || wm_key_cmd(c) != 0x04 + (UINT)( ch - 'a' ) ) ) {
 		st_bad++;
-		say("selftest: page %d key %d written %c commands %02x", g_page, k->idx, ch, code);
+		say("selftest: page %d key %d written %c commands %02x", g_page, k->idx, ch, c);
 	}
 }
 
+/*
+ * The logical layout chosen with the menu: the keyboard's own, the
+ * machine's left as it is; and every key typing what it is written with,
+ * in each own latin layout with each of the machine's
+ */
 static void st_logical( void )
 {
 	T_KMSTATE	was, s;
 	SKVIEW		v;
-	INT		la, pg, was_pg = g_page, kept = page_kept();
+	INT		la, ma, pg, was_pg = g_page, wl = g_latin, wk = g_kana;
 	UINT		was_mode = g_mode;
 
 	if ( km_get(&was) < E_OK ) return;
+	st_conf_keep();
 	command("latin.dvorak");
-	st_check(km_get(&s) >= E_OK && s.latin == KM_LATIN_DVORAK && g_st.latin == KM_LATIN_DVORAK,
-		 "the logical layout Dvorak, the machine's latin layout");
+	st_check(g_latin == KM_LATIN_DVORAK && st_machine(was.latin, was.kana),
+		 "the logical layout Dvorak, the keyboard's own");
 	command("latin.qwerty");
-	st_check(km_get(&s) >= E_OK && s.latin == KM_LATIN_KEYS && g_st.latin == KM_LATIN_KEYS,
-		 "the logical layout QWERTY, the machine's latin layout");
+	st_check(g_latin == KM_LATIN_KEYS && st_machine(was.latin, was.kana),
+		 "the logical layout QWERTY, the keyboard's own");
 	memset(&v, 0, sizeof(v));
 	g_mode = WM_MODE_ALPH | WM_MODE_ROMAN;
-	for ( la = 0; la < KM_LATIN_N; la++ ) {
+	for ( ma = 0; ma < KM_LATIN_N; ma++ ) {
 		s = was;
-		s.latin = la;
+		s.latin = ma;
 		(void)km_set(&s, KM_SET_LATIN);
 		(void)km_get(&g_st);
-		for ( pg = 0; pg < SK_NPAGE; pg++ ) {
-			g_page = pg;
-			st_bad = 0;
-			v.part = PART_ALL;
-			v.w = 760;
-			v.h = 300;
-			sk_each(&v, st_same, NULL);
-			st_check(st_bad == 0, "every key typing the letter it is written with");
+		for ( la = 0; la < KM_LATIN_N; la++ ) {
+			g_latin = la;
+			for ( pg = 0; pg < SK_NPAGE; pg++ ) {
+				g_page = pg;
+				g_kana = sk_pages[pg].tron ? KM_KANA_TRON : KM_KANA_JIS;
+				st_bad = 0;
+				v.part = PART_ALL;
+				v.w = 760;
+				v.h = 300;
+				sk_each(&v, st_same, NULL);
+				st_check(st_bad == 0, "every key typing the letter it is written with");
+			}
 		}
 	}
 	g_mode = was_mode;
 	g_page = was_pg;
+	g_latin = wl;
+	g_kana = wk;
 	(void)km_set(&was, KM_SET_LATIN);
 	(void)km_get(&g_st);
-	(void)conf_read();				/* the lines as they were */
-	(void)conf_put("SOFTKB_TRONLATIN", "");
-	(void)conf_put(CONF_KEY, sk_pages[kept].key);
-	(void)conf_write();
+	st_conf_back();
 }
 
 /* A shape filled with its edges smoothed: a pixel half covered, half coloured */
@@ -2009,6 +2425,52 @@ static void st_fill( void )
 	st_check(px[3 * 8 + 5] == 0x00FFFFFFU && px[1 * 8 + 3] == 0x00FFFFFFU, "the pixels outside left");
 }
 
+/*
+ * The green faces: each is on a key the chart marks green, every key so
+ * marked is in the table, NumLock itself apart. With NumLock on, a key
+ * types its face's usage; off, what it types without.
+ */
+static void st_numface( void )
+{
+	INT	i, k;
+	SKONE	one;
+	UINT	code, mods;
+	BOOL	had = g_num;
+	INT	pg = g_page;
+
+	for ( i = 0; i < UT_NNUM; i++ ) {
+		BOOL	green = FALSE;
+
+		for ( k = 0; k < sk_ut_nmark; k++ ) {
+			if ( sk_ut_mark[k].key == ut_num[i].idx && sk_ut_mark[k].rgb == 0x0CB14BU ) green = TRUE;
+		}
+		st_check(green, "numlock: a key of the table is marked green");
+	}
+	for ( k = 0; k < sk_ut_nmark; k++ ) {
+		BOOL	in = ( sk_ut_mark[k].rgb != 0x0CB14BU || sk_ut_mark[k].key == UT_NUMLOCK );
+
+		for ( i = 0; i < UT_NNUM; i++ ) {
+			if ( sk_ut_mark[k].key == ut_num[i].idx ) in = TRUE;
+		}
+		st_check(in, "numlock: a green mark's key is in the table");
+	}
+	for ( i = 0; i < SK_NPAGE; i++ ) {
+		if ( sk_pages[i].kind == PK_CHART ) g_page = i;
+	}
+	memset(&one, 0, sizeof(one));
+	one.idx = 48;
+	one.code = sk_ut_key[48].code;
+	one.kan = sk_ut_key[48].kan;
+	one.pl = sk_ut_key[48].pl;
+	one.act = SK_KEY;
+	g_num = TRUE;
+	st_check(send_of(&one, HID_MOD_LSHIFT, &code, &mods) && code == 0x59 && mods == 0, "numlock: R23 types the keypad's 1");
+	g_num = FALSE;
+	st_check(send_of(&one, 0, &code, &mods) && code != 0x59, "numlock off: R23 types its letter");
+	g_num = had;
+	g_page = pg;
+}
+
 static INT selftest( void )
 {
 	SKONE	ime;
@@ -2024,8 +2486,10 @@ static INT selftest( void )
 		st_check(st_table(sk_qwerty_jp, (BOOL)!g_st.us), "the Japanese keyboard's table");
 		st_check(st_table(sk_qwerty_us, g_st.us), "the English keyboard's table");
 	}
+	st_rows();
 	st_tron();
 	st_utron();
+	st_numface();
 	st_fill();
 
 	memset(&one, 0, sizeof(one));
@@ -2053,7 +2517,7 @@ static INT selftest( void )
 	modifier(0xE1);
 	st_check(g_once == 0 && g_lock == 0, "Shift a third time");
 	st_keep();
-	st_switch();
+	st_own();
 	st_logical();
 
 	/* a window that may have the keys types nothing; this one, only after a press */
@@ -2068,6 +2532,9 @@ static INT selftest( void )
 		if ( win_open(&g_v[0], PART_ALL, FALSE) >= E_OK ) {
 			st_check(g_v[0].w == sk_pages[0].w0 && g_v[0].h == sk_pages[0].h0, "the work area's size");
 			st_check(wm_key_put(g_v[0].kw, 0x88, 0) == E_OACV, "a key before any press");
+			st_check(wm_key_put(g_v[0].kw, 0x04, KM_MOD_OWN | ( 3U << KM_MOD_LATIN_SHIFT )) == E_PAR
+				 && wm_key_put(g_v[0].kw, 0x04, 1U << KM_MOD_KANA_SHIFT) == E_PAR,
+				 "a key with layouts there are not");
 			win_close(&g_v[0]);
 		} else {
 			st_check(FALSE, "a window that never has the keys");
@@ -2096,6 +2563,8 @@ int main( void )
 		return 2;
 	}
 	g_page = page_kept();
+	own_read();
+	legacy_back();
 	g_mode = kc_mode();
 	if ( views_open() < E_OK ) {
 		say("no window");
@@ -2104,17 +2573,19 @@ int main( void )
 		return 3;
 	}
 	paint();
-	say("ready %s %s size %d %d mode %s", page()->key, g_st.us ? "us" : "jp", g_v[0].w, g_v[0].h,
-	    mode_jp() ? "jp" : "en");
+	say("ready %s %s size %d %d mode %s latin %d kana %d", page()->key, g_st.us ? "us" : "jp", g_v[0].w,
+	    g_v[0].h, mode_jp() ? "jp" : "en", g_latin, g_kana);
 
 	look_at = ui_now() + LOOK_MS;
 	while ( !g_closing ) {
 		until = ( g_flash != 0 && g_flash_end < look_at ) ? g_flash_end : look_at;
+		if ( rep_due() != 0 && rep_due() < until ) until = rep_due();
 		for ( TMO tmo = ui_left(until);
 		      !g_closing && ob_rea_tmo(g_port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) {
 			event(&m);
 		}
 		if ( g_closing ) break;
+		rep_time();
 		if ( g_flash != 0 && ui_now() >= g_flash_end ) {
 			g_flash = 0;
 			g_dirty = TRUE;
@@ -2125,8 +2596,8 @@ int main( void )
 			look_at = ui_now() + LOOK_MS;
 			mode_read();				/* changed by a key of the keyboard while no notice came */
 			if ( km_get(&s) >= E_OK && memcmp(&s, &g_st, sizeof(s)) != 0 ) {
-				if ( s.latin != g_st.latin ) say("latin %d", s.latin);
-				g_st = s;			/* the keyboard or a layout changed: the letters and kana written anew */
+				g_st = s;			/* the machine's keyboard changed: the rows of the English letters anew */
+				if ( page()->kind == PK_ROWS ) area_tell(&g_v[0]);	/* the rows differ by keyboard */
 				g_dirty = TRUE;
 			}
 		}

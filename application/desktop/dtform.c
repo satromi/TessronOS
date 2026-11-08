@@ -88,6 +88,18 @@ EXPORT T_WMPART *dt_pn_add( T_WMPANEL *p, UW type, INT num, INT l, INT t,
 	return pt;
 }
 
+EXPORT T_WMPART *dt_pn_colour( T_WMPANEL *p, INT num, INT l, INT t, INT w, INT h, UW col )
+{
+	T_WMPART	*pt = dt_pn_add(p, WM_PT_SWATCH, num, l, t, w, h, NULL);
+
+	if ( pt != NULL ) {
+		pt->colour = col & 0x00FFFFFFU;
+		pt->answer = DT_PN_COLOUR_ANS + (UINT)num;
+	}
+
+	return pt;
+}
+
 /* The two buttons every panel here ends with, at its foot */
 
 EXPORT void dt_pn_buttons( T_WMPANEL *p, CONST char *ok )
@@ -163,6 +175,17 @@ EXPORT UINT dt_pn_run( DTWIN *d, T_WMPANEL *def, INT *p_pid )
 		}
 		if ( wm_panel_event(pid, &ev, &ans) < E_OK ) {
 			ans = WM_ANS_CANCEL;
+		}
+		if ( ans >= DT_PN_COLOUR_ANS ) {
+			INT	num = (INT)( ans - DT_PN_COLOUR_ANS );
+			UW	col = 0;
+
+			ans = WM_ANS_NONE;
+			if ( wm_panel_colour(pid, num, &col) >= E_OK && dt_pick_colour_part(d->wid, pid, num, &col) ) {
+				(void)wm_panel_set_colour(pid, num, col);
+			}
+			dt_draw(d);
+			wm_panel_draw(pid);
 		}
 		wm_update();
 	}

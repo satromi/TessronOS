@@ -7,7 +7,7 @@
   "accessDate": "2026-09-26T00:00:00Z",
   "periodDate": null,
   "refCount": 1,
-  "recordCount": 1,
+  "recordCount": 2,
   "editable": false,
   "deletable": false,
   "readable": true,
@@ -15,15 +15,33 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "basic-figure-editor",
       "kind": "app",
       "name": "基本図形編集",
-      "version": "R1.200",
-      "builtin": true,
+      "version": "R1.300",
+      "builtin": false,
+      "openArg": "link",
       "base": [
         "019a0f91-066f-706f-93da-ffe8150d6207"
       ]
     },
+    "exec": {
+      "record": 1,
+      "type": "application/x-elf",
+      "arch": "aarch64",
+      "abi": "tessronos-1"
+    },
+    "records": [
+      {
+        "n": 0,
+        "rt": 1
+      },
+      {
+        "n": 1,
+        "rt": 9
+      }
+    ],
     "access": {
       "owner": "01a0d680-3aa0-75b3-bd7d-075e14217cd2",
       "group": "01a0d680-3aa1-7922-ae79-ba5cbbaa2037",

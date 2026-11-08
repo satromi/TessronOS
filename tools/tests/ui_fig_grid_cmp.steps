@@ -1,0 +1,128 @@
+# 基本図形編集の格子点 (design 11.3), for tools/ui_run.py: the desktop's figure editor and the
+# process. A figure of one rectangle and two lines (mkbig fig 1 2 0) is opened at 100,100 as
+# 画用紙 is; the figure's 0,0 is drawn at 110,128 of the screen, so with the grid at its 16
+# a point of it is at 446,448 and none at 447,448. The 格子点 palette comes up under its
+# button (366,48) at 350,68: 表示モード なし at 499,86, 表示のみ at 579,86, 格子点拘束 at
+# 683,86. Chosen, the grid is drawn over the whole figure at once, while the palette is up
+# and after it is put away; なし takes it off the whole figure again. With 格子点拘束 a
+# rectangle drawn from 455,457 to 603,565 is put on the grid (352,336 to 496,432), carried
+# by 51,45 it goes 48,48 (its corner at 400,384), and sized by its corner by 33,21 its
+# corner goes to 576,496. Saved, record 0 is the same from both, byte for byte.
+# Keys: Esc 29; Ctrl+S 16 01, Ctrl+E 08 01.
+figproc kernel
+mkbig fig 1 2 0
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+pixel 446 448 FFFFFF
+click 366 48
+wait 500
+click 579 86
+wait 400
+pixel 446 448 808080
+pixel 447 448 FFFFFF
+pixel 798 640 808080
+key 29
+wait 400
+pixel 446 448 808080
+pixel 798 640 808080
+click 366 48
+wait 500
+click 499 86
+wait 400
+pixel 446 448 FFFFFF
+pixel 798 640 FFFFFF
+key 29
+wait 400
+pixel 446 448 FFFFFF
+click 366 48
+wait 500
+click 683 86
+wait 400
+pixel 446 448 808080
+key 29
+wait 400
+pixel 798 640 808080
+click 298 82
+wait 300
+drag 455 457 603 565
+wait 400
+click 298 48
+wait 300
+drag 520 500 571 545
+sync 600
+wait 300
+drag 654 608 687 629
+sync 600
+wait 300
+shot grid_k_done
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 2 0
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 3
+wait 800
+pixel 446 448 FFFFFF
+logmark
+click 366 48
+expectsince figure: palette 7 open
+wait 500
+click 579 86
+wait 400
+pixel 446 448 808080
+pixel 447 448 FFFFFF
+pixel 798 640 808080
+key 29
+expectsince figure: palette 7 closed
+wait 400
+pixel 446 448 808080
+pixel 798 640 808080
+logmark
+click 366 48
+expectsince figure: palette 7 open
+wait 500
+click 499 86
+wait 400
+pixel 446 448 FFFFFF
+pixel 798 640 FFFFFF
+key 29
+expectsince figure: palette 7 closed
+wait 400
+pixel 446 448 FFFFFF
+logmark
+click 366 48
+expectsince figure: palette 7 open
+wait 500
+click 683 86
+wait 400
+pixel 446 448 808080
+key 29
+expectsince figure: palette 7 closed
+wait 400
+pixel 798 640 808080
+logmark
+click 298 82
+expectsince figure: tool 7
+drag 455 457 603 565
+expectsince figure: drawn
+logmark
+click 298 48
+wait 300
+drag 520 500 571 545
+expectsince figure: moved 1 by 48,48
+logmark
+drag 654 608 687 629
+expectsince figure: sized 3 to 176x112
+wait 300
+shot grid_p_done
+key 16 01
+sync 600
+sum show
+same kernel

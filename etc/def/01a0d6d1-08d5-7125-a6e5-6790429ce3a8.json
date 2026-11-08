@@ -15,12 +15,15 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "accessory-box",
-      "kind": "utility",
+      "kind": "app",
       "name": "小物箱",
       "version": "R1.110",
       "builtin": true,
-      "base": []
+      "base": [
+        "01a0d6d1-08d0-7fbe-b385-b6d0c36f2308"
+      ]
     },
     "access": {
       "owner": "01a0d680-3aa0-75b3-bd7d-075e14217cd2",

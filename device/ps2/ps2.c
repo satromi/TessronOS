@@ -13,9 +13,12 @@
  *	built-in keyboard of a notebook PC and its pointing stick or touch
  *	pad in PS/2 mode (the ThinkPad's TrackPoint), and QEMU's.
  *
- *	The controller is taken when the ACPI namespace has its keyboard
- *	(PNP0303 and its kin) or, without the interpreter, when the FADT
- *	says there is one and its status port answers. The keyboard is set
+ *	The controller is taken when the ACPI namespace has its keyboard or
+ *	its pointer (kbd_ids, aux_ids). With neither, or without the
+ *	interpreter, it is tried directly unless the FADT says there is none
+ *	or its status port does not answer: a firmware may name the devices
+ *	with an ID not in the tables, and a controller nothing answers on is
+ *	left alone. The keyboard is set
  *	to scan code set 2 with the controller's translation off; the mouse
  *	is asked for the IntelliMouse's wheel (four byte packets). The
  *	interrupts (ISA 1 and 12, as the MADT moves them) put the bytes in a
@@ -31,6 +34,7 @@
 #ifdef X64
 
 #include "kernel.h"
+#include <ts/pm.h>
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <sys/sysdef.h>
@@ -384,18 +388,87 @@ LOCAL UINT irq_of( UB isa )
 	return ( gsi < INTVEC_GSI_NUM ) ? INTVEC_GSI(gsi) : 0;
 }
 
+/*
+ * After S3 the i8042 and what is on it may have lost what they were told:
+ * the configuration written again and scanning asked for. The interrupt
+ * lines are masked meanwhile, since the answers are read by polling.
+ */
+LOCAL INT	pm_cfg = -1;
+LOCAL BOOL	pm_mouse = FALSE;
+
+LOCAL ER ps2_pm_suspend( void *arg, INT how )
+{
+	return E_OK;
+}
+
+LOCAL void ps2_pm_resume( void *arg, INT how )
+{
+	if ( how != PM_S3 || pm_cfg < 0 ) return;
+	if ( kbd_int != 0 ) DisableInt(kbd_int);
+	if ( mou_int != 0 ) DisableInt(mou_int);
+	ctl(0xad);
+	ctl(0xa7);
+	flush();
+	ctl(0x60);
+	(void)wait_in();
+	out_port_b(DATA, (UB)pm_cfg);
+	ctl(0xae);
+	(void)dev_cmd(FALSE, 0xf5);
+	if ( dev_cmd(FALSE, 0xf0) == 0xfa ) (void)dev_cmd(FALSE, 0x02);
+	(void)dev_cmd(FALSE, 0xf4);
+	if ( pm_mouse ) {
+		ctl(0xa8);
+		(void)dev_cmd(TRUE, 0xf4);
+	}
+	flush();
+	if ( kbd_int != 0 ) EnableInt(kbd_int, INTPRI_DEVICE);
+	if ( mou_int != 0 ) EnableInt(mou_int, INTPRI_DEVICE);
+	tm_printf((UB *)"ps2: back from the sleep\n");
+}
+
+LOCAL CONST T_PMDEV	ps2_pm = { "ps2", PM_ORD_INPUT, ps2_pm_suspend, ps2_pm_resume, NULL };
+
+/* The IDs the ACPI namespace gives the keyboard and the pointer behind an i8042 */
+LOCAL CONST char * CONST kbd_ids[] = {
+	"PNP0300", "PNP0301", "PNP0302", "PNP0303", "PNP0304", "PNP0305", "PNP0306", "PNP0309",
+	"PNP030A", "PNP030B", "PNP0320", "PNP0343", "PNP0344", "PNP0345", "CPQA0D7", "LEN0071", NULL
+};
+LOCAL CONST char * CONST aux_ids[] = {
+	"PNP0F03", "PNP0F0B", "PNP0F0E", "PNP0F12", "PNP0F13", "PNP0F19", "PNP0F1C",
+	"AUI0200", "FJC6000", "FJC6001", "SYN0801", NULL
+};
+
+LOCAL BOOL acpi_has_any( CONST char * CONST *id )
+{
+	if ( !knl_acpica_ready() ) {
+		return FALSE;
+	}
+	for ( ; *id != NULL; id++ ) {
+		if ( knl_acpica_has_hid(*id) ) {
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
 EXPORT ER knl_ps2_init( void )
 {
 	T_CSEM	cs;
 	T_CTSK	ct;
 	INT	cfg, r, id = -1;
-	BOOL	acpi_kbd, acpi_mou, mouse = FALSE;
+	BOOL	acpi_kbd, acpi_mou, direct, mouse = FALSE;
 	ID	t;
 
-	acpi_kbd = knl_acpica_ready() && ( knl_acpica_has_hid("PNP0303") || knl_acpica_has_hid("PNP030B")
-					   || knl_acpica_has_hid("LEN0071") );
-	acpi_mou = knl_acpica_ready() && ( knl_acpica_has_hid("PNP0F13") || knl_acpica_has_hid("PNP0F03") );
-	if ( !acpi_kbd && ( knl_acpica_ready() || ( knl_acpi.iapc_boot & 0x0002 ) == 0 || in_port_b(STATUS) == 0xff ) ) {
+	acpi_kbd = acpi_has_any(kbd_ids);
+	acpi_mou = acpi_has_any(aux_ids);
+	direct = (BOOL)( !acpi_kbd && !acpi_mou );
+	if ( direct && ( knl_acpi.iapc_boot & 0x0002 ) == 0 ) {
+		tm_printf((UB *)"TessronOS: ps2: not in ACPI, and the FADT says there is no controller (flags %04x)\n",
+			  (UINT)knl_acpi.iapc_boot);
+		return E_NOEXS;
+	}
+	if ( direct && in_port_b(STATUS) == 0xff ) {
+		tm_printf((UB *)"TessronOS: ps2: not in ACPI, and the status port does not answer\n");
 		return E_NOEXS;
 	}
 
@@ -414,6 +487,7 @@ EXPORT ER knl_ps2_init( void )
 	ctl(0x60);
 	(void)wait_in();
 	out_port_b(DATA, (UB)cfg);
+	pm_cfg = cfg;
 
 	/* the keyboard: on, set 2, scanning */
 	ctl(0xae);
@@ -423,7 +497,7 @@ EXPORT ER knl_ps2_init( void )
 	flush();
 
 	/* the mouse, when there is one: defaults, the wheel asked for, reporting */
-	if ( acpi_mou || !knl_acpica_ready() ) {
+	if ( acpi_mou || direct ) {
 		ctl(0xa8);
 		if ( dev_cmd(TRUE, 0xf6) == 0xfa ) {
 			mouse = TRUE;
@@ -436,6 +510,12 @@ EXPORT ER knl_ps2_init( void )
 		}
 		flush();
 	}
+	if ( direct && r != 0xfa && !mouse ) {
+		tm_printf((UB *)"TessronOS: ps2: not in ACPI, and no keyboard or mouse answers on the controller (%02x)\n",
+			  r & 0xff);
+		return E_NOEXS;
+	}
+	(void)ts_pm_register(&ps2_pm);
 
 	knl_memset(&cs, 0, sizeof(cs));
 	cs.sematr = TA_TFIFO;
@@ -452,6 +532,7 @@ EXPORT ER knl_ps2_init( void )
 	}
 	kbd_hd = knl_hid_ext_attach(TRUE, NULL, 0, (CONST UB *)"ps2kbd");
 	if ( mouse ) mou_hd = knl_hid_ext_attach(FALSE, NULL, 0, (CONST UB *)"ps2aux");
+	pm_mouse = mouse;
 	tk_sta_tsk(t, 0);
 
 	/* the interrupts on: in the IOAPIC, then in the controller */
@@ -487,7 +568,7 @@ EXPORT ER knl_ps2_init( void )
 	ctl(0xae);
 	if ( mouse ) ctl(0xa8);
 	tm_printf((UB *)"TessronOS: ps2: keyboard (%s, %02x) on interrupt %d, %s\n",
-		  acpi_kbd ? "ACPI" : "FADT", r & 0xff, kbd_int,
+		  direct ? "tried directly" : acpi_kbd ? "ACPI" : "ACPI, its pointer", r & 0xff, kbd_int,
 		  mouse ? ( mou_wheel ? "a mouse with a wheel" : "a mouse" ) : "no mouse");
 	return E_OK;
 }

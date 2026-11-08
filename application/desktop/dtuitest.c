@@ -10,7 +10,9 @@
 /*
  *	dtuitest.c
  *	Driving the desktop from outside, for the tests of what it shows
- *	(make DESKTOP=1 UITEST=1; tools/ui_run.py)
+ *	(make DESKTOP=1 UITEST=1; tools/ui_run.py). The same lines come over
+ *	the network in make TESTAGENT=1 (dttagent.c), one line done at a time
+ *	whichever way it came.
  *
  *	A task reads lines from the second serial port (serb) and does
  *	what each says, answering "ok ..." or "err ..." on the console,
@@ -40,6 +42,23 @@
  *	  hidden TAG T		no window shown says T: "ok TAG: hidden"; both are
  *				looked at again for up to two seconds while the screen settles,
  *				and the TAG lets a test expect each answer apart
+ *	  accpos ID		where the program of the id stands among the
+ *				accessories, of how many, and + when 小物 lists it
+ *	  progrm UUID		the program taken out as 削除 does, without the panel
+ *	  proginst UUID		the object installed or registered as a drop on
+ *				the list does, without the panel
+ *	  proginstq UUID	the same to replace what is there, for a process
+ *				with no rights, answered at once: the password's
+ *				panel is then up, and progres tells what came of it
+ *	  progres		"ok -1" while that goes on, then its error code
+ *	  adminpanels		how many of the administrator's panels have been shown
+ *	  mkpkg			a small package (.tpk) of one accessory, as an object
+ *				of a fixed UUID (UT_PKG), made if not there
+ *	  refs UUID		the object's count of references, -1 when it has gone
+ *	  emurom		the ROMs of the tests of BeFC and BeSFC, objects of the
+ *				fixed UUIDs of a test (UT_ROM_NES, UT_ROM_SFC), made if not there
+ *	  emuromx UUID NAME KB COPIER TYPE MAP  a ROM of BeSFC's of the shape of a real
+ *				cartridge (type and map byte in hex), MAP 0: bytes that are no ROM
  *	  wait MS		nothing for so long, and then the answer
  *	  idle			the input taken and the screen made up (a short wait)
  *	  lag MS		the pointer moved to and fro for MS ms: "ok WORST MOVES LATE",
@@ -50,24 +69,69 @@
  *	  stat			what was built and sent since the last stat: "ok BUILDS PARTS
  *				KPX_BUILT MOVES MOVES_BUILT RECTS_SENT KPX_SENT", the pointer's
  *				moves and how many of them came with something built
+ *	  pnstat		since the last pnstat: "ok DRAWS TORN", the panels drawn
+ *				whole and the builds that read the windows while one was drawn
  *	  wifitest		on a machine with no Wi-Fi card, the Wi-Fi manager's card
  *				for the tests (a build with the Wi-Fi): wlan0 with a scan's
  *				networks, its saved networks changed as on a card
  *	  xml TEXT		a line of xmlTAD kept, after the lines kept before it
+ *	  focus TAG TITLE	the window of that title has the keys
  *	  xmlopen TITLE		the xmlTAD kept, a document, opened in a window titled
  *				TITLE that can be edited (no object behind it), and forgotten
+ *	  xmlbig		the xmlTAD kept written as record 0 of the large object made
+ *				last (mkbig), and forgotten: a text of the test's own made an
+ *				object, for the desktop's editor and the process alike
  *	  caret			the caret of the document in front: "ok c PARA,POS a PARA,POS",
  *				the caret and the other end of the selection
- *	  mkbig doc|fig|calc N [M]
+ *	  mkbig doc|fig|calc N [M [T [V]]]
  *				a large object for the tests of size, a copy of the
  *				template of its kind with record 0 made here: a text of N
- *				paragraphs, a figure of N rectangles and lines of M points,
- *				or a sheet of N rows and M columns: "ok UUID BYTES"
- *	  sum UUID		record 0 of the object: "ok BYTES HASH" (FNV-1a, 64 bits)
+ *				paragraphs, a figure of N rectangles and lines of M points
+ *				and T pieces of text (ABC, 120 by 40, from 100 across and
+ *				120 below the lines, 150 apart; with V 1 written down the
+ *				line, 縦書き, in boxes 40 by 120), or a sheet of N rows and M
+ *				columns: "ok UUID BYTES"
+ *	  sum [show] [anon] [link] [keys] [res NAME] UUID|big|bigN
+ *				record 0 of the object: "ok BYTES HASH" (FNV-1a, 64 bits);
+ *				with show, said on the console too, 200 bytes a line ("rec: ");
+ *				with anon, every UUID written in it counted as noughts (what
+ *				is the same but for identities made new); with link, the
+ *				record of the object its last link points at instead, its
+ *				name after the hash; with res, the resource NAME beside the
+ *				records instead ("_0_1.png", a picture the canvas painted);
+ *				with keys, the record of the desktop's window with the keys
+ *				as it is now, and with keys link the stored record 0 of the
+ *				object its last link points at. bigN is the large object
+ *				made N before the last (1 to 7), wherever big is taken
+ *	  objects [new]		how many objects the volumes keep: "ok N"; with new, how
+ *				many more there are than at the last objects without it
+ *	  paper [UUID|big|bigN]	the paper the object's metadata keeps: "ok RRGGBB", or
+ *				"ok none" when it keeps none
+ *	  ftdef			the palettes of the 道具パネル laid out as panels of a data
+ *				box, said on the console ("ftdef: "): what the data box of
+ *				基本図形編集 (SYSDEF_BOX_FIG) holds for the process's palettes
  *	  shapes		the figure in front: "ok SHAPES PICKED"
+ *	  pfig UUID|big		the object opened with 基本図形編集 as a process, whatever
+ *				its program object says
+ *	  figproc 1|kernel|0	every figure opened with 基本図形編集 as a process from now
+ *				(1), with the desktop's own figure editor even when the
+ *				program object says the process (kernel), or as the
+ *				program object says again (0)
+ *	  pdoc UUID|big		the object opened with 基本文章編集 as a process, whatever
+ *				its program object says
+ *	  docproc 1|kernel|0	the same as figproc, for documents and 基本文章編集
+ *	  pcab UUID|big		the object opened with 仮身一覧 as a process, whatever
+ *				its program object says
+ *	  cabproc 1|kernel|0	the same as figproc, for 仮身一覧
+ *	  linkbig X Y		a link to the large object made last put in the window at
+ *				X, Y of the screen
  *	  mark			the time from which the next two count
  *	  waitwin TITLE [S]	a window that says TITLE (spaces and all) shown, looked for up to S seconds
  *				(60): "ok MS" since the mark
+ *	  proginstf UUID	proginst replacing what is there whatever its version
+ *	  sysup UUID [force]	the package of the system object put on, step by step by
+ *				the desktop's loop as the panel of システム環境設定 has it:
+ *				"ok" and starting again finishes it; "err sysup N"
  *	  sync [S]		the desktop's own task come round its loop and found no
  *				input left (all that was put in before taken and done),
  *				waited for up to S seconds (60): "ok MS" since the mark
@@ -85,9 +149,14 @@
 #include <ts/uuid.h>
 #include <ts/dtreq.h>
 #include <ts/proc.h>
+#include <ts/om.h>
+#include <ts/fs.h>
+#include <ts/lockup.h>
+#include <ts/figtool.h>
 #include "desktop.h"
 
 #ifdef USE_UITEST
+#include "../befc/emu_rom.h"
 
 IMPORT void knl_wifi_test_card( void ) __attribute__((weak));	/* device/net/wifi/wifi.c, with the Wi-Fi */
 
@@ -101,6 +170,10 @@ LOCAL ID	ut_dd = 0;
 /* The large object made last: what "open big" and "sum" with no object take */
 LOCAL TS_UUID	ut_big;
 LOCAL BOOL	ut_big_have = FALSE;
+#define UT_BIG_BACK	7
+LOCAL TS_UUID	ut_big_was[UT_BIG_BACK];	/* the ones made before it, the newest first */
+LOCAL INT	ut_big_nwas = 0;
+LOCAL INT	ut_objects = 0;			/* how many objects there were at the last "objects" */
 LOCAL volatile INT ut_sync = 0;		/* 1 asked, 3 seen by the loop, 2 no input left after that */
 LOCAL INT	ut_x = 0, ut_y = 0;
 
@@ -111,6 +184,7 @@ LOCAL INT	ut_x = 0, ut_y = 0;
  */
 LOCAL char	ut_out[UT_LINE + 8];
 LOCAL INT	ut_outn = 0;
+LOCAL void	(*ut_sink)( CONST char *answer ) = NULL;	/* who else is told (dttagent.c) */
 
 /* Gathered into whole lines, each written at once so that what other tasks print cannot come between */
 LOCAL void say( CONST char *s )
@@ -124,10 +198,78 @@ LOCAL void say( CONST char *s )
 		if ( *s == '\n' ) {
 			ut_out[ut_outn] = 0;
 			tm_putstring((UB *)ut_out);
+			if ( ut_sink != NULL ) ut_sink(ut_out + 4);
 			ut_outn = 0;
 		}
 	}
 }
+
+/*
+ * A ROM of the tests, as an object: record 0 a word on what it is, record
+ * 1 the ROM, as a game's object has it
+ */
+#define UT_PKG		"01a0d8c4-5500-7f03-8b12-3c4d5e6f7b72"
+#define UT_PKG_PROG	"01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73"
+#define UT_NO_RIGHTS	9999		/* a process that does not exist has no rights */
+#define UT_ROM_NES	"01a0d8c4-5500-7f01-8b12-3c4d5e6f7b70"
+#define UT_ROM_SFC	"01a0d8c4-5501-7f01-8b12-3c4d5e6f7b71"
+
+/* An object of the given UUID holding the ROM in a record of its own, made if not there */
+LOCAL ER ut_rom_store( CONST char *id, CONST char *json, CONST UB *rom, SZ n )
+{
+	T_OBCRE	c;
+	TS_UUID	u, got;
+	INT	recno = -1;
+	SZ	asz = 0;
+	ID	key;
+	ER	er;
+	static CONST char	note[] = "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>test</p></document></tad>";
+
+	(void)ts_str_to_uuid(id, &u);
+	key = ob_opn_obj(&u, OB_OP_R);
+	if ( key > 0 ) {
+		(void)ob_cls_obj(key);
+		return E_OK;
+	}
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.uuid = u;
+	c.json = (CONST UB *)json;
+	c.jsonsz = (SZ)knl_strlen(json);
+	knl_ob_make_for_person(TRUE);
+	er = ob_cre_obj(&c, &got);
+	knl_ob_make_for_person(FALSE);
+	if ( er >= E_OK ) {
+		key = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_O_EXCL);
+		er = ( key > 0 ) ? E_OK : (ER)key;
+		if ( er >= E_OK ) er = ob_apd_rec(key, OB_RT_TAD, 0, &recno);
+		if ( er >= E_OK ) er = ob_wri_rec(key, recno, 0, note, (SZ)( sizeof(note) - 1 ), &asz);
+		if ( er >= E_OK ) er = ob_apd_rec(key, OB_RT_SYSDATA, 0, &recno);
+		if ( er >= E_OK ) er = ob_wri_rec(key, recno, 0, rom, n, &asz);
+		if ( key > 0 ) (void)ob_cls_obj(key);
+	}
+	return er;
+}
+
+LOCAL ER ut_rom_make( CONST char *id, CONST char *json, BOOL sfc )
+{
+	UB	*rom = (UB *)Kmalloc(EMU_ROM_MAX);
+	INT	n, i;
+	ER	er;
+
+	if ( rom == NULL ) return E_NOMEM;
+	for ( i = 0; i < EMU_ROM_MAX; i++ ) rom[i] = 0xea;
+	n = sfc ? emu_rom_sfc(rom) : emu_rom_nes(rom);
+	er = ut_rom_store(id, json, rom, n);
+	Kfree(rom);
+	return er;
+}
+
+LOCAL void ut_emurom( void );
+LOCAL void ut_emuromx( CONST char *s );
+LOCAL CONST char *skip( CONST char *s );
+LOCAL BOOL num( CONST char **p, INT *v, BOOL hex );
 
 LOCAL ID	ut_in_key = 0;		/* 入力, opened once to put events in */
 
@@ -142,6 +284,233 @@ LOCAL void inject( CONST T_HIDEV *e )
 		}
 	}
 	(void)ob_wri_rec(ut_in_key, OB_IN_EVENTS, 0, e, sizeof(*e), NULL);
+}
+
+LOCAL void ut_emurom( void )
+{
+	static CONST char	jn[] = "{\"name\":\"試験ROM(FC)\",\"relationship\":[],\"linktype\":false,\"refCount\":1,\"recordCount\":2,\"editable\":true,\"deletable\":true,\"readable\":true,\"applist\":{},\"tessronos\":{\"records\":[{\"n\":0,\"rt\":1},{\"n\":1,\"rt\":15}]}}";
+	static CONST char	js[] = "{\"name\":\"試験ROM(SFC)\",\"relationship\":[],\"linktype\":false,\"refCount\":1,\"recordCount\":2,\"editable\":true,\"deletable\":true,\"readable\":true,\"applist\":{},\"tessronos\":{\"records\":[{\"n\":0,\"rt\":1},{\"n\":1,\"rt\":15}]}}";
+	ER	a = ut_rom_make(UT_ROM_NES, jn, FALSE), b = ut_rom_make(UT_ROM_SFC, js, TRUE);
+	char	t[48];
+
+	(void)tm_sprintf((UB *)t, (UB *)"ok %d %d\n", (INT)a, (INT)b);
+	say(t);
+}
+
+/*
+ * A ROM of BeSFC's in the shape of a real cartridge, or (a map of 0) bytes that are
+ * no ROM: emuromx UUID NAME KB COPIER TYPE MAP
+ */
+LOCAL void ut_emuromx( CONST char *s )
+{
+	static char	id[40], name[32], js[256];
+	INT		kb = 0, cp = 0, type = 0, map = 0, i;
+	UB		*rom;
+	long		n;
+	ER		er = E_PAR;
+
+	s = skip(s);
+	for ( i = 0; i < 36 && *s != 0 && *s != ' '; i++ ) id[i] = *s++;
+	id[i] = 0;
+	s = skip(s);
+	for ( i = 0; i < 31 && *s != 0 && *s != ' '; i++ ) name[i] = *s++;
+	name[i] = 0;
+	if ( num(&s, &kb, FALSE) && num(&s, &cp, FALSE) && num(&s, &type, TRUE) && num(&s, &map, TRUE) && kb > 0 ) {
+		rom = (UB *)Kmalloc((SZ)kb * 1024 + 512);
+		er = E_NOMEM;
+		if ( rom != NULL ) {
+			if ( map != 0 ) {
+				n = emu_rom_sfc_shape(rom, (long)kb * 1024, cp, type, map);
+			} else {
+				n = (long)kb * 1024;
+				for ( i = 0; i < n; i++ ) rom[i] = (UB)( 'a' + i % 26 );
+			}
+			(void)tm_sprintf((UB *)js, (UB *)"{\"name\":\"%s\",\"relationship\":[],\"linktype\":false,\"refCount\":1,\"recordCount\":2,\"editable\":true,\"deletable\":true,\"readable\":true,\"applist\":{},\"tessronos\":{\"records\":[{\"n\":0,\"rt\":1},{\"n\":1,\"rt\":15}]}}", name);
+			er = ut_rom_store(id, js, rom, (SZ)n);
+			Kfree(rom);
+		}
+	}
+	(void)tm_sprintf((UB *)js, (UB *)"ok %d\n", (INT)er);
+	say(js);
+}
+
+/* A program taken out or put in by the desktop's own loop (dt_uitest_poll), as the requests are */
+LOCAL volatile INT	ut_prog_state = 0;	/* 1 asked, 2 done */
+LOCAL INT		ut_prog_what;
+LOCAL TS_UUID		ut_prog_u;
+LOCAL ER		ut_prog_er;
+LOCAL BOOL		ut_prog_force = FALSE;
+LOCAL ID		ut_prog_pid = 0;
+
+LOCAL void prog_ask( CONST char *us, INT what )
+{
+	char	t[48];
+	INT	tries;
+
+	if ( ts_str_to_uuid(us, &ut_prog_u) < E_OK ) {
+		say("err no uuid\n");
+		return;
+	}
+	if ( what == 2 ) {
+		(void)tm_sprintf((UB *)t, (UB *)"ok %d\n", om_store_refs(&ut_prog_u));
+		say(t);
+		return;
+	}
+	ut_prog_what = what;
+	ut_prog_force = (BOOL)( what == 3 || what == 4 );
+	ut_prog_pid = ( what == 3 ) ? UT_NO_RIGHTS : 0;
+	ut_prog_state = 1;
+	if ( what == 3 ) {
+		say("ok\n");
+		return;
+	}
+	for ( tries = 0; tries < 12000 && ut_prog_state != 2; tries++ ) {
+		tk_dly_tsk(50);
+	}
+	(void)tm_sprintf((UB *)t, (UB *)"ok %d\n", (INT)ut_prog_er);
+	say(t);
+	ut_prog_state = 0;
+}
+
+/*
+ * The system's package put on by the desktop's loop, a step each time
+ * round, so that the screen stays alive through what takes minutes
+ */
+LOCAL volatile INT	ut_su_state = 0;	/* 1 asked, 3 going, 2 done */
+LOCAL TS_UUID		ut_su_u;
+LOCAL BOOL		ut_su_force = FALSE;
+LOCAL ER		ut_su_er;
+LOCAL INT		ut_su_total = 0;
+
+LOCAL void sysup_poll( void )
+{
+	INT	done = 0, total = 0;
+
+	if ( ut_su_state == 1 ) {
+		ut_su_state = 3;
+		ut_su_er = dt_sysup_begin(&ut_su_u, ut_su_force, 0, &ut_su_total);
+		if ( ut_su_er < E_OK || ut_su_total <= 0 ) {
+			ut_su_state = 2;
+		}
+	} else if ( ut_su_state == 3 ) {
+		ut_su_er = dt_sysup_step(0, &done, &total);
+		if ( ut_su_er < E_OK || done >= total ) {
+			ut_su_state = 2;
+		}
+	}
+}
+
+LOCAL void sysup_ask( CONST char *s )
+{
+	char	t[32];
+	INT	k;
+
+	if ( ts_str_to_uuid(s, &ut_su_u) < E_OK ) {
+		say("err no uuid\n");
+		return;
+	}
+	for ( k = 0; s[k] != 0 && s[k] != ' '; k++ ) ;
+	ut_su_force = (BOOL)( s[k] == ' ' );
+	ut_su_state = 1;
+	while ( ut_su_state != 2 ) {
+		tk_dly_tsk(100);
+	}
+	ut_su_state = 0;
+	if ( ut_su_er < E_OK ) {
+		(void)tm_sprintf((UB *)t, (UB *)"err sysup %d\n", (INT)ut_su_er);
+		say(t);
+	} else {
+		say("ok\n");
+	}
+}
+
+LOCAL void progres_say( void )
+{
+	char	t[32];
+
+	(void)tm_sprintf((UB *)t, (UB *)"ok %d\n", ( ut_prog_state == 2 ) ? (INT)ut_prog_er : -1);
+	say(t);
+}
+
+LOCAL void adminpanels_say( void )
+{
+	char	t[32];
+
+	(void)tm_sprintf((UB *)t, (UB *)"ok %d\n", dt_admin_panels());
+	say(t);
+}
+
+/* One entry of a package: its name, where its bytes are, how many, and the record's type */
+LOCAL void pk_entry( UB *d, CONST char *name, UW off, UW size, UW rt )
+{
+	INT	i;
+
+	knl_memset(d, 0, 64);
+	for ( i = 0; name[i] != 0; i++ ) d[i] = (UB)name[i];
+	for ( i = 0; i < 4; i++ ) {
+		d[48 + i] = (UB)( off >> ( 8 * i ) );
+		d[52 + i] = (UB)( size >> ( 8 * i ) );
+		d[56 + i] = (UB)( rt >> ( 8 * i ) );
+	}
+}
+
+LOCAL void mkpkg_say( void )
+{
+	static CONST char	pk[] = "{\"format\":1,\"program\":\"" UT_PKG_PROG "\",\"id\":\"ut-acc\",\"name\":\"UT小物\",\"version\":\"R1.000\",\"objects\":[]}";
+	static CONST char	pm[] = "{\"name\":\"UT小物\",\"relationship\":[],\"linktype\":false,\"refCount\":1,\"recordCount\":0,\"editable\":false,\"deletable\":true,\"readable\":true,\"applist\":{},\"tessronos\":{\"program\":{\"id\":\"ut-acc\",\"kind\":\"accessory\",\"name\":\"UT小物\",\"version\":\"R1.000\",\"menu\":true,\"builtin\":false,\"base\":[]}}}";
+	static CONST char	note[] = "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>test</p></document></tad>";
+	static CONST char	om[] = "{\"name\":\"UT小物のパッケージ\",\"relationship\":[],\"linktype\":false,\"refCount\":1,\"recordCount\":2,\"editable\":true,\"deletable\":true,\"readable\":true,\"applist\":{},\"tessronos\":{\"records\":[{\"n\":0,\"rt\":1},{\"n\":1,\"rt\":15}]}}";
+	UW	pl = (UW)knl_strlen(pk), ml = (UW)knl_strlen(pm), off = 16 + 2 * 64, all = off + pl + ml;
+	UB	*b = (UB *)Kcalloc(1, (SZ)all);
+	T_OBCRE	c;
+	TS_UUID	u, got;
+	T_OBREF	r;
+	ER	er;
+	char	t[32];
+
+	(void)ts_str_to_uuid(UT_PKG, &u);
+	if ( b == NULL ) {
+		say("err no memory\n");
+		return;
+	}
+	if ( ob_ref_obj(&u, &r) >= E_OK ) {
+		Kfree(b);
+		say("ok 0\n");
+		return;
+	}
+	b[0] = 'T';  b[1] = 'S';  b[2] = 'P';  b[3] = 'K';
+	b[4] = 1;
+	b[6] = 2;
+	pk_entry(b + 16, "package.json", off, pl, 15);
+	pk_entry(b + 16 + 64, UT_PKG_PROG ".json", off + pl, ml, 15);
+	knl_memcpy(b + off, pk, pl);
+	knl_memcpy(b + off + pl, pm, ml);
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.uuid = u;
+	c.json = (CONST UB *)om;
+	c.jsonsz = (SZ)knl_strlen(om);
+	er = ob_cre_obj(&c, &got);
+	if ( er >= E_OK ) {
+		(void)ob_lnk_obj(&u);
+		er = om_obj_record_put(&u, 0, 1, 0, (CONST UB *)note, (SZ)knl_strlen(note));
+		if ( er >= E_OK ) er = om_obj_record_put(&u, 1, 15, 0, b, (SZ)all);
+	}
+	Kfree(b);
+	(void)tm_sprintf((UB *)t, (UB *)"ok %d\n", (INT)er);
+	say(t);
+}
+
+LOCAL void accpos_say( CONST char *id )
+{
+	char	t[48];
+	INT	n = 0, at;
+	BOOL	show = FALSE;
+
+	at = dt_acc_pos((CONST UB *)id, &n, &show);
+	(void)tm_sprintf((UB *)t, (UB *)"ok %d %d %c\n", at, n, show ? '+' : '-');
+	say(t);
 }
 
 LOCAL void ev( UINT type, UINT code, UINT mods )
@@ -360,6 +729,63 @@ LOCAL void find_win( CONST char *title )
 	say("err no such window\n");
 }
 
+/* A word of a line, up to the next space, into w; FALSE when there is none */
+LOCAL BOOL token( CONST char **p, char *w, INT max )
+{
+	CONST char	*s = skip(*p);
+	INT		i = 0;
+
+	while ( s[i] != 0 && s[i] != ' ' && s[i] != '\t' && i < max - 1 ) {
+		w[i] = s[i];
+		i++;
+	}
+	w[i] = 0;
+	*p = s + i;
+	return (BOOL)( i > 0 );
+}
+
+/*
+ * Where the link to an object of that name stands in the window of that
+ * name (a figure of links, as a 原紙箱 or a cabinet is), on the screen:
+ * looked for over the work area, the box of the first one found. FALSE
+ * when there is none.
+ */
+LOCAL BOOL link_named( CONST char *title, CONST char *name, T_DPRECT *p_box )
+{
+	DTWIN		*d;
+	T_WMWIN		w;
+	T_DPRECT	page, box;
+	T_VOBJ		v;
+	UB		nm[TAD_NAME_MAX];
+	INT		wid = 0, tries, x, y, which, cw, ch;
+
+	for ( tries = 0; tries < 20 && ( wid = ut_named(title) ) <= 0; tries++ ) {
+		tk_dly_tsk(100);
+	}
+	d = ( wid > 0 ) ? dt_win_of(wid) : NULL;
+	if ( d == NULL || d->fig == NULL || d->rec == NULL || wm_ref(wid, &w) < E_OK ) {
+		return FALSE;
+	}
+	dt_work_rect(d, &page);
+	cw = w.work.right - w.work.left;
+	ch = w.work.bottom - w.work.top;
+	for ( y = 0; y < ch; y += 4 ) {
+		for ( x = 0; x < cw; x += 8 ) {
+			if ( tv_fig_at(d->fig, &page, d->scroll_x, d->scroll_y, d->rec, x, y, &v, &box, &which) < E_OK ) {
+				continue;
+			}
+			if ( om_store_name(&v.target, nm, sizeof(nm)) > 0 && same_title((CONST char *)nm, name) ) {
+				p_box->left = w.work.left + box.left;
+				p_box->top = w.work.top + box.top;
+				p_box->right = w.work.left + box.right;
+				p_box->bottom = w.work.top + box.bottom;
+				return TRUE;
+			}
+		}
+	}
+	return FALSE;
+}
+
 LOCAL void all_wins( void )
 {
 	INT	n, i, k = 0;
@@ -456,6 +882,27 @@ LOCAL void front_check( CONST char *s )
 	say("err not in front\n");
 }
 
+/* Asked until the window of that title has the keys: a window of a program comes when it is ready */
+LOCAL void focus_check( CONST char *s )
+{
+	char	tag[32], t[WM_TITLE_MAX];
+	INT	tries, wid;
+
+	if ( !tag_of(&s, tag, sizeof(tag)) || *s == 0 ) {
+		say("err focus TAG TITLE\n");
+		return;
+	}
+	for ( tries = 0; tries < 20; tries++ ) {
+		wid = wm_focused();
+		if ( wid > 0 && wm_title(wid, t, sizeof(t)) >= 0 && same_title(t, s) ) {
+			say_tagged(tag, "has the keys");
+			return;
+		}
+		tk_dly_tsk(100);
+	}
+	say("err keys elsewhere\n");
+}
+
 LOCAL void hidden_check( CONST char *s )
 {
 	char	tag[32];
@@ -476,6 +923,198 @@ LOCAL void hidden_check( CONST char *s )
 }
 
 /* An object opened as a double press on a link to it opens it, asked of the desktop as a program asks */
+/*
+ * "kslide UUID": the object shown with the desktop's own slides
+ * (dtslide.c) whatever its program object says, so that a test measures
+ * them and the slides of the process (application/slide) in one run
+ */
+LOCAL void kslide( CONST char *us )
+{
+	T_VOBJ	*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+
+	if ( v == NULL ) {
+		say("err no memory\n");
+		return;
+	}
+	knl_memset(v, 0, sizeof(*v));
+	v->recno = -1;
+	if ( ts_str_to_uuid(us, &v->target) < E_OK ) {
+		Kfree(v);
+		say("err no uuid\n");
+		return;
+	}
+	dt_slide_open(NULL, v);
+	Kfree(v);
+	say("ok\n");
+}
+
+/*
+ * "pfig UUID": the object opened with 基本図形編集 as a process
+ * (application/fig, its program object's record 1) whatever the program
+ * object says, so that a test works the process while the program object
+ * still opens figures with the desktop's own figure editor, and both in
+ * one run; "pdoc UUID" likewise with 基本文章編集 (application/doc)
+ */
+/*
+ * "big" (the large object made last) or "bigN" (made N before it) at the
+ * start of us, standing alone: that object in *u and TRUE
+ */
+LOCAL BOOL big_of( CONST char *us, TS_UUID *u )
+{
+	INT	n = 0;
+
+	if ( !ut_big_have || us[0] != 'b' || us[1] != 'i' || us[2] != 'g' ) {
+		return FALSE;
+	}
+	if ( us[3] >= '1' && us[3] <= '9' ) {
+		n = us[3] - '0';
+		us++;
+	}
+	if ( us[3] != 0 && us[3] != ' ' ) {
+		return FALSE;
+	}
+	if ( n == 0 ) {
+		*u = ut_big;
+		return TRUE;
+	}
+	if ( n > ut_big_nwas ) {
+		return FALSE;
+	}
+	*u = ut_big_was[n - 1];
+	return TRUE;
+}
+
+LOCAL void pfig( CONST char *prog, CONST char *us )
+{
+	CONST DTPROG	*p = dt_prog_find((CONST UB *)prog);
+	DTPROG		*q = (DTPROG *)Kmalloc(sizeof(DTPROG));
+	T_VOBJ		*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	ER		er = E_NOEXS;
+
+	if ( q == NULL || v == NULL ) {
+		if ( q != NULL ) Kfree(q);
+		if ( v != NULL ) Kfree(v);
+		say("err no memory\n");
+		return;
+	}
+	knl_memset(v, 0, sizeof(*v));
+	v->recno = -1;
+	if ( big_of(us, &v->target) ) {
+		er = E_OK;
+	} else {
+		er = ts_str_to_uuid(us, &v->target);
+	}
+	if ( p == NULL ) er = E_NOEXS;
+	if ( er >= E_OK ) {
+		*q = *p;
+		q->builtin = FALSE;
+		er = dt_prog_run(NULL, q, v);
+	}
+	Kfree(q);
+	Kfree(v);
+	say(( er >= E_OK ) ? "ok\n" : "err not started\n");
+}
+
+/*
+ * "figproc 1": from then on every figure that would open in the
+ * desktop's own figure editor opens with 基本図形編集 as a process
+ * instead, from wherever it is opened (a link of a window, 実行, open),
+ * so that the tests of the figure editor run as they are on the process;
+ * "figproc 0" puts it back. The program object is not changed.
+ */
+LOCAL BOOL	ut_fig_proc = FALSE;
+
+/*
+ * "figproc 1": figures opened by the process even while the program
+ * object says the desktop's figure editor; "figproc kernel": by the
+ * desktop's even while it says the process, so that the two can still
+ * be compared once the program object has been switched; "figproc 0":
+ * as the program object says. "docproc 1|kernel|0" does the same for
+ * documents and 基本文章編集.
+ */
+LOCAL BOOL	ut_fig_kernel = FALSE;
+LOCAL BOOL	ut_doc_proc = FALSE;
+LOCAL BOOL	ut_doc_kernel = FALSE;
+LOCAL BOOL	ut_cab_proc = FALSE;		/* cabproc, for 仮身一覧 */
+LOCAL BOOL	ut_cab_kernel = FALSE;
+
+LOCAL void figproc( BOOL *p_proc, BOOL *p_kernel, CONST char *s )
+{
+	*p_proc = (BOOL)( s[0] == '1' );
+	*p_kernel = (BOOL)( s[0] == 'k' );
+	say("ok\n");
+}
+
+/* The program is one of those whose two editors figproc (fig), docproc (doc) or cabproc (cab) switches */
+LOCAL BOOL ut_switched( CONST DTPROG *p, BOOL fig, BOOL doc, BOOL cab )
+{
+	if ( p == NULL ) {
+		return FALSE;
+	}
+	return (BOOL)( ( fig && knl_strcmp((CONST char *)p->id, "basic-figure-editor") == 0 )
+		       || ( doc && knl_strcmp((CONST char *)p->id, "basic-text-editor") == 0 )
+		       || ( cab && knl_strcmp((CONST char *)p->id, "virtual-object-list") == 0 ) );
+}
+
+EXPORT BOOL dt_ut_as_kernel( CONST DTPROG *p )
+{
+	return (BOOL)( p != NULL && !p->builtin && ut_switched(p, ut_fig_kernel, ut_doc_kernel, ut_cab_kernel) );
+}
+
+EXPORT BOOL dt_ut_as_process( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v )
+{
+	DTPROG	*q;
+	ER	er;
+
+	if ( p == NULL || !p->builtin || !ut_switched(p, ut_fig_proc, ut_doc_proc, ut_cab_proc) ) {
+		return FALSE;
+	}
+	q = (DTPROG *)Kmalloc(sizeof(DTPROG));
+	if ( q == NULL ) {
+		return FALSE;
+	}
+	*q = *p;
+	q->builtin = FALSE;
+	er = dt_prog_run(from, q, v);
+	Kfree(q);
+	return (BOOL)( er >= E_OK );
+}
+
+/*
+ * "linkbig X Y": a link to the large object made last put in the window
+ * at X, Y of the screen, its corner there, as a link carried there is
+ * put: what a test then opens from a link of a window of the desktop's
+ */
+LOCAL void linkbig( CONST char *s )
+{
+	T_VOBJ	*v;
+	INT	x = 0, y = 0;
+	BOOL	ok;
+
+	if ( !ut_big_have || !num(&s, &x, FALSE) || !num(&s, &y, FALSE) ) {
+		say("err linkbig X Y, after mkbig\n");
+		return;
+	}
+	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	if ( v == NULL ) {
+		say("err no memory\n");
+		return;
+	}
+	knl_memset(v, 0, sizeof(*v));
+	v->target = ut_big;
+	v->recno = -1;
+	v->frcol = v->chcol = v->tbcol = v->bgcol = TAD_COL_NONE;
+	v->disp = TAD_D_DEFAULT;
+	v->zoom = 100;
+	(void)om_store_name(&ut_big, v->name, TAD_NAME_MAX);
+	v->right = tad_lnk_least_w(v) * 4;
+	v->bottom = tad_lnk_closed_h(v);
+	v->height = v->bottom;
+	ok = ed_place_link(dt_win_of(wm_at(x, y)), x, y, v);
+	Kfree(v);
+	say(ok ? "ok\n" : "err no window there takes links\n");
+}
+
 LOCAL void open_obj( CONST char *us )
 {
 	T_DTREQ	*rq = (T_DTREQ *)Kmalloc(sizeof(T_DTREQ));
@@ -491,8 +1130,7 @@ LOCAL void open_obj( CONST char *us )
 	knl_memset(rq, 0, sizeof(*rq));
 	rq->req = DT_RQ_OPEN;
 	rq->recno = -1;
-	if ( us[0] == 'b' && us[1] == 'i' && us[2] == 'g' && us[3] == 0 && ut_big_have ) {
-		rq->target = ut_big;		/* the large object made last */
+	if ( big_of(us, &rq->target) ) {
 		er = E_OK;
 	} else {
 		er = ts_str_to_uuid(us, &rq->target);
@@ -503,6 +1141,45 @@ LOCAL void open_obj( CONST char *us )
 	if ( k > 0 ) ob_cls_obj(k);
 	Kfree(rq);
 	say(( er >= E_OK ) ? "ok\n" : "err not opened\n");
+}
+
+/*
+ * The object's 機能付箋 written anew: "apps UUID|big id id ...", the program of
+ * each id under its id's name, the first the one it opens with. An object
+ * with as many programs as a test wants, without 付箋指定's panel.
+ */
+LOCAL void set_apps( CONST char *s )
+{
+	CONST UB	*ids[UT_LINE / 2];
+	char		line[UT_LINE];
+	TS_UUID		u;
+	INT		n = 0, i = 0, k = 0;
+	ER		er;
+
+	s = skip(s);
+	while ( s[i] != 0 && i < UT_LINE - 1 ) {
+		line[i] = s[i];
+		i++;
+	}
+	line[i] = 0;
+	while ( line[k] != 0 && line[k] != ' ' ) k++;
+	if ( line[k] == 0 ) {
+		say("err no programs\n");
+		return;
+	}
+	line[k++] = 0;
+	if ( big_of(line, &u) ) {
+		er = E_OK;
+	} else {
+		er = ts_str_to_uuid(line, &u);
+	}
+	while ( er >= E_OK && line[k] != 0 ) {
+		ids[n++] = (CONST UB *)&line[k];
+		while ( line[k] != 0 && line[k] != ' ' ) k++;
+		if ( line[k] != 0 ) line[k++] = 0;
+	}
+	if ( er >= E_OK ) er = om_store_set_apps(&u, ids, ids, n, 0);
+	say(( er >= E_OK ) ? "ok\n" : "err not set\n");
 }
 
 /* A program file started as a process, with up to eight numbers as its argument */
@@ -773,6 +1450,55 @@ LOCAL volatile INT ut_open_state = 0;	/* 1 asked, 2 opened, 3 not */
  * enough, nor is an answer the loop had before it saw the ask (it may
  * lay paragraphs for a while after one, with keys come meanwhile).
  */
+/*
+ * "redraw": the window typed into drawn again whole, by the desktop's
+ * task in its loop -- one of the desktop's drawn and built again, one of
+ * a process's told to draw itself again (OB_E_REDRAW, as when its size
+ * changes) -- for a test to compare with what a part drawn again left.
+ */
+IMPORT void knl_wmobj_moved( INT wid, BOOL resized );
+
+LOCAL volatile INT ut_redraw_state = 0;	/* 1 asked, 2 done */
+
+LOCAL void redraw_focused( void )
+{
+	INT		wid = wm_focused();
+	DTWIN		*d = dt_win_of(wid);
+	T_WMWIN		w;
+	T_DPRECT	all;
+
+	if ( d == NULL ) {
+		knl_wmobj_moved(wid, TRUE);
+		return;
+	}
+	dt_draw(d);
+	if ( wm_ref(d->wid, &w) >= E_OK ) {
+		all.left = 0;
+		all.top = 0;
+		all.right = w.work.right - w.work.left;
+		all.bottom = w.work.bottom - w.work.top;
+		(void)wm_damage(d->wid, &all);
+	}
+	wm_update();
+}
+
+LOCAL void redraw_ask( void )
+{
+	UW	start = ut_now();
+
+	ut_redraw_state = 1;
+	while ( ut_redraw_state == 1 && (INT)( ut_now() - start ) < 10000 ) {
+		tk_dly_tsk(10);
+	}
+	if ( ut_redraw_state != 2 ) {
+		ut_redraw_state = 0;
+		say("err desktop busy\n");
+		return;
+	}
+	ut_redraw_state = 0;
+	say("ok\n");
+}
+
 EXPORT void dt_uitest_idle( void )
 {
 	if ( ut_sync == 3 ) {
@@ -787,6 +1513,20 @@ EXPORT void dt_uitest_poll( void )
 
 	if ( ut_sync == 1 ) {
 		ut_sync = 3;
+	}
+	sysup_poll();
+	if ( ut_prog_state == 1 ) {
+		UINT	how = 0;
+
+		/* a panel keeps the loop's events going in here: not started twice */
+		ut_prog_state = 3;
+		ut_prog_er = ( ut_prog_what == 0 ) ? dt_prog_remove(&ut_prog_u)
+			   : dt_pkg_install(&ut_prog_u, ut_prog_force, ut_prog_pid, NULL, NULL, &how);
+		ut_prog_state = 2;
+	}
+	if ( ut_redraw_state == 1 ) {
+		redraw_focused();
+		ut_redraw_state = 2;
 	}
 	if ( ut_open_state != 1 ) {
 		return;
@@ -825,6 +1565,40 @@ LOCAL void xml_open( CONST char *title )
 	ut_open_state = 0;
 }
 
+/* "xmlbig": record 0 of the large object made last replaced by the xmlTAD kept, and that forgotten */
+LOCAL void xml_big( void )
+{
+	T_TAD	*rec = NULL;
+	ID	k;
+	ER	er;
+
+	if ( !ut_big_have || ut_xml == NULL || tad_parse(ut_xml, ut_xml_n, NULL, &rec) < E_OK ) {
+		ut_xml_n = 0;
+		say("err not xmlTAD, or no mkbig\n");
+		return;
+	}
+	tad_free(rec);
+	{
+		/* ffffffff-ffff-ffff-ffff-ffffffffffff stands for the object itself: a link to itself */
+		CONST char	*self = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+		char		us[TS_UUID_STRLEN + 1];
+		SZ		i, j;
+
+		ts_uuid_text(&ut_big, us);
+		for ( i = 0; i + 36 <= ut_xml_n; i++ ) {
+			for ( j = 0; j < 36 && ut_xml[i + j] == (UB)self[j]; j++ ) ;
+			if ( j < 36 ) continue;
+			for ( j = 0; j < 36; j++ ) ut_xml[i + j] = (UB)us[j];
+		}
+	}
+	k = ob_opn_obj(&ut_big, OB_OP_R | OB_OP_W);
+	er = ( k > 0 ) ? ob_rpl_rec(k, 0, ut_xml, ut_xml_n) : (ER)k;
+	if ( k > 0 ) ob_cls_obj(k);
+	if ( er >= E_OK ) om_store_forget(&ut_big);
+	ut_xml_n = 0;
+	say(( er >= E_OK ) ? "ok\n" : "err not written\n");
+}
+
 /* The caret of the document in front, or of the text being edited in the figure in front */
 /* How many shapes the figure in front has, and how many of them are picked */
 LOCAL void shapes_say( void )
@@ -860,11 +1634,11 @@ LOCAL void caret_say( void )
 		d = dt_win_of(wm_focused());
 		if ( d != NULL && d->tb != NULL ) d = d->tb;
 		if ( d == NULL || d->doc == NULL ) break;
-		if ( d->cpara == was[0] && d->cpos == was[1] && d->apara == was[2] && d->apos == was[3] ) {
+		if ( d->dd.cpara == was[0] && d->dd.cpos == was[1] && d->dd.apara == was[2] && d->dd.apos == was[3] ) {
 			same++;
 		} else {
 			same = 0;
-			was[0] = d->cpara;  was[1] = d->cpos;  was[2] = d->apara;  was[3] = d->apos;
+			was[0] = d->dd.cpara;  was[1] = d->dd.cpos;  was[2] = d->dd.apara;  was[3] = d->dd.apos;
 		}
 	}
 	d = dt_win_of(wm_focused());
@@ -876,13 +1650,13 @@ LOCAL void caret_say( void )
 		return;
 	}
 	b[k++] = 'o';  b[k++] = 'k';  b[k++] = ' ';  b[k++] = 'c';  b[k++] = ' ';
-	put_num(b, &k, d->cpara);
+	put_num(b, &k, d->dd.cpara);
 	b[k++] = ',';
-	put_num(b, &k, d->cpos);
+	put_num(b, &k, d->dd.cpos);
 	b[k++] = ' ';  b[k++] = 'a';  b[k++] = ' ';
-	put_num(b, &k, d->apara);
+	put_num(b, &k, d->dd.apara);
 	b[k++] = ',';
-	put_num(b, &k, d->apos);
+	put_num(b, &k, d->dd.apos);
 	b[k++] = '\n';
 	b[k] = 0;
 	say(b);
@@ -977,7 +1751,7 @@ LOCAL void big_doc( UTOUT *o, INT n )
 	out_str(o, "</document>\n</tad>\n");
 }
 
-LOCAL void big_fig( UTOUT *o, INT n, INT m )
+LOCAL void big_fig( UTOUT *o, INT n, INT m, INT t, BOOL vert )
 {
 	INT	i, k;
 
@@ -1010,6 +1784,32 @@ LOCAL void big_fig( UTOUT *o, INT n, INT m )
 		out_num(o, n + k);
 		out_str(o, "\"/>\n");
 	}
+	/* pieces of text, each in its box */
+	for ( k = 0; k < t && o->er >= E_OK; k++ ) {
+		INT	l = 100 + k * 150, tp = ( n / 100 ) * 12 + 120;
+		INT	bw = vert ? 40 : 120, bh = vert ? 120 : 40;
+
+		out_str(o, "<document><docView viewleft=\"");
+		out_num(o, l);
+		out_str(o, "\" viewtop=\"");
+		out_num(o, tp);
+		out_str(o, "\" viewright=\"");
+		out_num(o, l + bw);
+		out_str(o, "\" viewbottom=\"");
+		out_num(o, tp + bh);
+		out_str(o, "\"/><docDraw drawleft=\"");
+		out_num(o, l);
+		out_str(o, "\" drawtop=\"");
+		out_num(o, tp);
+		out_str(o, "\" drawright=\"");
+		out_num(o, l + bw);
+		out_str(o, "\" drawbottom=\"");
+		out_num(o, tp + bh);
+		out_str(o, vert ? "\"/><docScale hunit=\"-72\" vunit=\"-72\"/><text lang=\"0\" bpat=\"0\" direction=\"2\" zIndex=\""
+				: "\"/><docScale hunit=\"-72\" vunit=\"-72\"/><text lang=\"0\" bpat=\"0\" zIndex=\"");
+		out_num(o, n + 2 + k);
+		out_str(o, "\"/><font size=\"14\" face=\"sans-serif\" color=\"#000000\"/><p>ABC</p></document>\n");
+	}
 	out_str(o, "</figure>\n</tad>\n");
 }
 
@@ -1041,9 +1841,161 @@ LOCAL void big_calc( UTOUT *o, INT rows, INT cols )
 	out_str(o, "</document>\n</tad>\n");
 }
 
+/*
+ * The palettes of the 道具パネル as the panels of a data box would
+ * define them, laid out by the figure editor's code with the system's
+ * letters (figtool.c): what the process's figure editor's data box
+ * (SYSDEF_BOX_FIG) holds, written out once to be put there. Each line
+ * is said as "ftdef: ..." on the console.
+ */
+LOCAL void ftdef_rect( UB *b, INT *k, CONST char *name, INT l, INT t, INT r, INT bt )
+{
+	CONST char	*p;
+	INT		v[4], i;
+
+	v[0] = l;  v[1] = t;  v[2] = r;  v[3] = bt;
+	b[( *k )++] = ' ';
+	for ( p = name; *p != 0; p++ ) b[( *k )++] = (UB)*p;
+	b[( *k )++] = '=';
+	b[( *k )++] = '"';
+	for ( i = 0; i < 4; i++ ) {
+		*k = ft_put_num(b, *k, v[i]);
+		if ( i < 3 ) b[( *k )++] = ',';
+	}
+	b[( *k )++] = '"';
+	b[*k] = 0;
+}
+
+LOCAL void ftdef_str( UB *b, INT *k, CONST char *s )
+{
+	while ( *s != 0 ) b[( *k )++] = (UB)*s++;
+	b[*k] = 0;
+}
+
+LOCAL void ftdef_num( UB *b, INT *k, CONST char *name, INT v )
+{
+	ftdef_str(b, k, " ");
+	ftdef_str(b, k, name);
+	ftdef_str(b, k, "=\"");
+	*k = ft_put_num(b, *k, v);
+	ftdef_str(b, k, "\"");
+}
+
+LOCAL void ftdef_say( UB *b, INT *k )
+{
+	tm_printf((UB *)"ftdef: %s\n", b);
+	*k = 0;
+	b[0] = 0;
+}
+
+LOCAL void ftdef( void )
+{
+	static CONST INT	which[] = { FT_PAL_FILL, FT_PAL_STROKE, FT_PAL_LSTYLE, FT_PAL_CORNER,
+					    FT_PAL_PAINT, FT_PAL_ZOOM, FT_PAL_GRID, FT_PAL_FONT };
+	T_FTPOP		p;
+	T_DPRECT	c;
+	UB		b[512];
+	INT		w, i, j, k = 0, y;
+
+	b[0] = 0;
+	for ( w = 0; w < (INT)( sizeof(which) / sizeof(which[0]) ); w++ ) {
+		if ( !ft_palette(which[w], &p) ) continue;
+		ftdef_str(b, &k, "<panel kind=\"bare\"");
+		ftdef_num(b, &k, "num", 10 + which[w]);
+		ftdef_rect(b, &k, "rect", 0, 0, FT_POP_W, ft_pop_height(&p));
+		ftdef_str(b, &k, " title=\"\">");
+		ftdef_say(b, &k);
+		for ( i = 0; i < p.n; i++ ) {
+			T_FTITEM	*it = &p.it[i];
+
+			y = it->r.top;
+			if ( it->label != NULL && it->label[0] != 0 && it->type != FT_PI_CHECK
+			  && it->type != FT_PI_BUTTON ) {
+				/*
+				 * where the desktop's label part (8 from the left, its row less
+				 * 2 above and 4 below) puts its words: four in from its left,
+				 * the system's letters in its middle
+				 */
+				ftdef_str(b, &k, "<text");
+				ftdef_num(b, &k, "x", 8 + 4);
+				ftdef_num(b, &k, "y", y + FT_ROW_H - 7);
+				ftdef_str(b, &k, ">");
+				ftdef_str(b, &k, it->label);
+				ftdef_str(b, &k, "</text>");
+				ftdef_say(b, &k);
+			}
+			switch ( it->type ) {
+			case FT_PI_CHOICE:
+				for ( j = 0; j < it->n; j++ ) {
+					(void)ft_choice_at(it, j, &c);
+					ftdef_str(b, &k, "<choice");
+					ftdef_num(b, &k, "num", FT_PN_ITEM(i, j));
+					ftdef_rect(b, &k, "rect", c.left, c.top, c.right, c.bottom);
+					ftdef_num(b, &k, "group", i + 1);
+					ftdef_str(b, &k, ">");
+					ftdef_str(b, &k, it->names[j]);
+					ftdef_str(b, &k, "</choice>");
+					ftdef_say(b, &k);
+				}
+				break;
+			case FT_PI_CHECK:
+				ftdef_str(b, &k, "<switch");
+				ftdef_num(b, &k, "num", FT_PN_ITEM(i, 0));
+				ftdef_rect(b, &k, "rect", 8, y + 1, FT_POP_W - 8, y + FT_ROW_H - 3);
+				ftdef_str(b, &k, ">");
+				ftdef_str(b, &k, it->label);
+				ftdef_str(b, &k, "</switch>");
+				ftdef_say(b, &k);
+				break;
+			case FT_PI_TEXT:
+				ftdef_str(b, &k, "<box");
+				ftdef_num(b, &k, "num", FT_PN_ITEM(i, 0));
+				ftdef_rect(b, &k, "rect", FT_LABEL_W, y + 1, FT_LABEL_W + 110, y + FT_ROW_H - 3);
+				ftdef_num(b, &k, "max", it->max - 1);
+				ftdef_str(b, &k, " ascii=\"true\"></box>");
+				ftdef_say(b, &k);
+				break;
+			case FT_PI_COLOUR:
+				ftdef_str(b, &k, "<swatch");
+				ftdef_num(b, &k, "num", FT_PN_ITEM(i, 0));
+				ftdef_rect(b, &k, "rect", FT_LABEL_W, y + 1, FT_LABEL_W + 110, y + FT_ROW_H - 3);
+				ftdef_str(b, &k, "/>");
+				ftdef_say(b, &k);
+				break;
+			case FT_PI_SWATCH:
+				for ( j = 0; j < it->n; j++ ) {
+					ftdef_str(b, &k, "<swatch");
+					ftdef_num(b, &k, "num", FT_PN_ITEM(i, j));
+					ftdef_rect(b, &k, "rect", FT_LABEL_W + j * 20, y + 3,
+						   FT_LABEL_W + j * 20 + 18, y + 21);
+					ftdef_num(b, &k, "group", i + 1);
+					ftdef_str(b, &k, "/>");
+					ftdef_say(b, &k);
+				}
+				break;
+			case FT_PI_BUTTON:
+				ftdef_str(b, &k, "<button");
+				ftdef_num(b, &k, "num", FT_PN_ITEM(i, 0));
+				ftdef_rect(b, &k, "rect", 8, y + 1, 8 + ft_str_w(it->label, FT_PART_FH) + 24,
+					   y + FT_ROW_H - 3);
+				ftdef_str(b, &k, ">");
+				ftdef_str(b, &k, it->label);
+				ftdef_str(b, &k, "</button>");
+				ftdef_say(b, &k);
+				break;
+			default:
+				break;
+			}
+		}
+		ftdef_str(b, &k, "</panel>");
+		ftdef_say(b, &k);
+	}
+	say("ok\n");
+}
+
 LOCAL void make_big( CONST char *s )
 {
-	INT	kind, n = 0, m = 0, k = 0;
+	INT	kind, n = 0, m = 0, t = 0, v = 0, k = 0;
 	TS_UUID	tpl, u;
 	UTOUT	o;
 	char	b[80];
@@ -1057,6 +2009,8 @@ LOCAL void make_big( CONST char *s )
 		return;
 	}
 	(void)num(&s, &m, FALSE);
+	(void)num(&s, &t, FALSE);
+	(void)num(&s, &v, FALSE);
 	er = ts_str_to_uuid(ut_tpl[kind], &tpl);
 	/* the person's, as a copy made from a template on the desktop is, so that a program may write it */
 	knl_ob_make_for_person(TRUE);
@@ -1077,7 +2031,7 @@ LOCAL void make_big( CONST char *s )
 		return;
 	}
 	if ( kind == 0 )      big_doc(&o, n);
-	else if ( kind == 1 ) big_fig(&o, n, m);
+	else if ( kind == 1 ) big_fig(&o, n, m, t, (BOOL)( v != 0 ));
 	else                  big_calc(&o, n, m);
 	out_flush(&o);
 	if ( o.er >= E_OK ) o.er = ob_trn_rec(o.key, 0, (UD)o.at);
@@ -1087,6 +2041,14 @@ LOCAL void make_big( CONST char *s )
 		say("err not written\n");
 		return;
 	}
+	if ( ut_big_have ) {
+		for ( k = UT_BIG_BACK - 1; k > 0; k-- ) {
+			ut_big_was[k] = ut_big_was[k - 1];
+		}
+		ut_big_was[0] = ut_big;
+		if ( ut_big_nwas < UT_BIG_BACK ) ut_big_nwas++;
+	}
+	k = 0;
 	ut_big = u;
 	ut_big_have = TRUE;
 	b[k++] = 'o';  b[k++] = 'k';  b[k++] = ' ';
@@ -1100,48 +2062,333 @@ LOCAL void make_big( CONST char *s )
 }
 
 /* Record 0 of an object, as long as it is and a hash of it */
-LOCAL void rec_sum( CONST char *us )
+/* Record 0 of an object read whole: its bytes (Kfree them) and how many, or NULL */
+LOCAL UB *rec_whole_n( CONST TS_UUID *u, INT recno, SZ *p_len )
 {
-	TS_UUID	u;
 	ID	k;
-	UB	*buf;
-	SZ	at = 0, asz = 0;
-	UD	h = 0xCBF29CE484222325ULL;
-	char	b[64];
-	INT	n = 0, i;
-	ER	er = E_OK;
+	UB	*buf = NULL, *more;
+	SZ	at = 0, cap = 0, asz = 0;
+	ER	er;
 
-	us = skip(us);
-	if ( *us == 0 && ut_big_have ) {
-		u = ut_big;
-	} else if ( ts_str_to_uuid(us, &u) < E_OK ) {
-		say("err no object\n");
-		return;
+	*p_len = 0;
+	if ( ( k = ob_opn_obj(u, OB_OP_R) ) <= 0 ) {
+		return NULL;
 	}
-	if ( ( k = ob_opn_obj(&u, OB_OP_R) ) <= 0 ) {
-		say("err no object\n");
-		return;
-	}
-	buf = (UB *)Kmalloc(64 * 1024);
-	while ( buf != NULL ) {
-		er = ob_rea_rec(k, 0, (D)at, buf, 64 * 1024, &asz);
-		if ( er < E_OK || asz <= 0 ) break;
-		for ( i = 0; i < (INT)asz; i++ ) {
-			h ^= buf[i];
-			h *= 0x100000001B3ULL;
+	for ( ;; ) {
+		if ( at + 64 * 1024 > cap ) {
+			more = (UB *)Kmalloc(cap + 256 * 1024 + 1);
+			if ( more == NULL ) {
+				break;
+			}
+			if ( buf != NULL ) {
+				knl_memcpy(more, buf, at);
+				Kfree(buf);
+			}
+			buf = more;
+			cap += 256 * 1024;
+		}
+		er = ob_rea_rec(k, recno, (D)at, buf + at, 64 * 1024, &asz);
+		if ( er < E_OK || asz <= 0 ) {
+			break;
 		}
 		at += asz;
 	}
 	ob_cls_obj(k);
-	if ( buf != NULL ) Kfree(buf);
+	if ( buf != NULL ) {
+		buf[at] = 0;
+	}
+	*p_len = at;
+	return buf;
+}
+
+LOCAL UB *rec_whole( CONST TS_UUID *u, SZ *p_len )
+{
+	return rec_whole_n(u, 0, p_len);
+}
+
+/* The time a PDF file says it was made (/CreationDate (D:...)) made noughts: the same file but for when */
+LOCAL void pdf_date_blank( UB *s, SZ n )
+{
+	CONST char	*key = "/CreationDate (D:";
+	SZ		i, j, kl = 0;
+
+	while ( key[kl] != 0 ) kl++;
+	for ( i = 0; i + kl < n; i++ ) {
+		for ( j = 0; j < kl && s[i + j] == (UB)key[j]; j++ ) ;
+		if ( j < kl ) continue;
+		for ( j = i + kl; j < n && s[j] >= '0' && s[j] <= '9'; j++ ) s[j] = '0';
+		return;
+	}
+}
+
+LOCAL BOOL hex_at( CONST UB *s, SZ n )
+{
+	SZ	i;
+
+	for ( i = 0; i < n; i++ ) {
+		UB	c = s[i];
+
+		if ( !( ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ) || ( c >= 'A' && c <= 'F' ) ) ) {
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+/* Every UUID written in the text (8-4-4-4-12) made all noughts: what is the same but for new identities */
+LOCAL void uuids_blank( UB *s, SZ n )
+{
+	SZ	i, j;
+
+	for ( i = 0; i + 36 <= n; i++ ) {
+		if ( s[i + 8] == '-' && s[i + 13] == '-' && s[i + 18] == '-' && s[i + 23] == '-'
+		  && hex_at(s + i, 8) && hex_at(s + i + 9, 4) && hex_at(s + i + 14, 4)
+		  && hex_at(s + i + 19, 4) && hex_at(s + i + 24, 12) ) {
+			for ( j = 0; j < 36; j++ ) {
+				if ( s[i + j] != '-' ) s[i + j] = '0';
+			}
+			i += 35;
+		}
+	}
+}
+
+/* The object the last link of the record of u points at */
+LOCAL BOOL last_link( CONST TS_UUID *u, TS_UUID *p_to )
+{
+	UB	*x;
+	SZ	n = 0;
+	T_TAD	*doc = NULL;
+	T_VOBJ	v;
+	INT	c;
+	BOOL	got = FALSE;
+
+	x = rec_whole(u, &n);
+	if ( x == NULL ) {
+		return FALSE;
+	}
+	if ( tad_parse(x, n, NULL, &doc) >= E_OK && doc != NULL ) {
+		c = tad_lnk_count(doc);
+		if ( c > 0 && tad_lnk_get(doc, c - 1, &v) >= E_OK ) {
+			*p_to = v.target;
+			got = TRUE;
+		}
+		tad_free(doc);
+	}
+	Kfree(x);
+	return got;
+}
+
+LOCAL void sum_bytes( UD *h, CONST UB *buf, SZ n, BOOL show )
+{
+	SZ	i;
+
+	for ( i = 0; i < n; i++ ) {
+		*h ^= buf[i];
+		*h *= 0x100000001B3ULL;
+	}
+	for ( i = 0; show && i < n; i += 200 ) {
+		UB	part[201];
+		INT	j;
+
+		for ( j = 0; j < 200 && i + j < n; j++ ) {
+			part[j] = ( buf[i + j] == 0x0A ) ? (UB)' ' : buf[i + j];
+		}
+		part[j] = 0;
+		tm_printf((UB *)"rec: %s\n", part);
+	}
+}
+
+LOCAL void rec_sum( CONST char *us )
+{
+	TS_UUID	u, to;
+	ID	k;
+	UB	*buf;
+	SZ	at = 0, asz = 0;
+	UD	h = 0xCBF29CE484222325ULL;
+	char	b[64 + TAD_NAME_MAX];
+	UB	nm[TAD_NAME_MAX];
+	INT	n = 0, i;
+	ER	er = E_OK;
+	BOOL	show = FALSE, anon = FALSE, link = FALSE, res = FALSE, pdf = FALSE, keys = FALSE;
+	UB	rn[TAD_NAME_MAX];
+	T_VOBJ	lv;
+	INT	c;
+
+	for ( ;; ) {
+		if ( word(&us, "pdf") ) {
+			/*
+			 * the file 印刷 wrote last: record 1 of what the last link of
+			 * the desktop's first window points at, its time made noughts
+			 */
+			pdf = TRUE;
+			link = TRUE;
+		} else if ( word(&us, "res") ) {
+			res = TRUE;		/* a resource beside the records, by its name ("_0_1.png") */
+			us = skip(us);
+			for ( i = 0; us[i] != 0 && us[i] != ' ' && i < (INT)sizeof(rn) - 1; i++ ) rn[i] = (UB)us[i];
+			rn[i] = 0;
+			us += i;
+		} else if ( word(&us, "show") ) {
+			show = TRUE;		/* the record said on the console as well */
+		} else if ( word(&us, "anon") ) {
+			anon = TRUE;		/* the UUIDs written in it made noughts */
+		} else if ( word(&us, "link") ) {
+			link = TRUE;		/* the object its last link points at, and that one's name */
+		} else if ( word(&us, "keys") ) {
+			keys = TRUE;		/* the record of the desktop's window with the keys, as it is now */
+		} else {
+			break;
+		}
+	}
+	us = skip(us);
+	if ( keys ) {
+		/* written as xmlTAD from the window's record: a window with no object behind it too */
+		DTWIN	*f = dt_win_of(wm_focused());
+
+		buf = NULL;
+		if ( link ) {
+			/* the object the window's last link points at, as the store keeps it */
+			c = ( f != NULL && f->rec != NULL ) ? tad_lnk_count(f->rec) : 0;
+			if ( c <= 0 || tad_lnk_get(f->rec, c - 1, &lv) < E_OK ) {
+				say("err no link\n");
+				return;
+			}
+			u = lv.target;
+			goto read;
+		}
+		if ( f != NULL && f->rec != NULL && tad_write_mem(f->rec, NULL, 0, &at) >= E_OK && at > 0 ) {
+			buf = (UB *)Kmalloc(at + 1);
+			if ( buf != NULL && tad_write_mem(f->rec, buf, at + 1, &at) < E_OK ) {
+				Kfree(buf);
+				buf = NULL;
+			}
+		}
+		if ( buf == NULL ) {
+			say("err no window\n");
+			return;
+		}
+		sum_bytes(&h, buf, at, show);
+		Kfree(buf);
+		goto said;
+	}
+	if ( pdf ) {
+		if ( dt_first_win() == NULL ) {
+			say("err no window\n");
+			return;
+		}
+		u = dt_first_win()->id;
+	} else if ( *us == 0 && ut_big_have ) {
+		u = ut_big;
+	} else if ( big_of(us, &u) ) {
+		/* one of the large objects made */
+	} else if ( ts_str_to_uuid(us, &u) < E_OK ) {
+		say("err no object\n");
+		return;
+	}
+	if ( link ) {
+		if ( !last_link(&u, &to) ) {
+			say("err no link\n");
+			return;
+		}
+		u = to;
+	}
+read:
+	if ( res ) {
+		if ( ( k = ob_opn_obj(&u, OB_OP_R) ) <= 0 ) {
+			say("err no object\n");
+			return;
+		}
+		buf = (UB *)Kmalloc(64 * 1024);
+		while ( buf != NULL ) {
+			er = ob_rea_res(k, rn, (D)at, buf, 64 * 1024, &asz);
+			if ( er < E_OK || asz <= 0 ) break;
+			sum_bytes(&h, buf, asz, FALSE);
+			at += asz;
+		}
+		ob_cls_obj(k);
+		if ( buf != NULL ) Kfree(buf);
+	} else if ( anon || link ) {
+		buf = pdf ? rec_whole_n(&u, 1, &at) : rec_whole(&u, &at);
+		if ( buf == NULL ) {
+			say("err no object\n");
+			return;
+		}
+		if ( anon ) {
+			uuids_blank(buf, at);
+		}
+		if ( pdf ) {
+			pdf_date_blank(buf, at);
+		}
+		sum_bytes(&h, buf, at, show && !pdf);
+		Kfree(buf);
+	} else {
+		if ( ( k = ob_opn_obj(&u, OB_OP_R) ) <= 0 ) {
+			say("err no object\n");
+			return;
+		}
+		buf = (UB *)Kmalloc(64 * 1024);
+		while ( buf != NULL ) {
+			er = ob_rea_rec(k, 0, (D)at, buf, 64 * 1024, &asz);
+			if ( er < E_OK || asz <= 0 ) break;
+			sum_bytes(&h, buf, asz, show);
+			at += asz;
+		}
+		ob_cls_obj(k);
+		if ( buf != NULL ) Kfree(buf);
+	}
+said:
 	b[n++] = 'o';  b[n++] = 'k';  b[n++] = ' ';
 	put_num(b, &n, (INT)at);
 	b[n++] = ' ';
 	for ( i = 15; i >= 0; i-- ) {
 		b[n++] = "0123456789abcdef"[( h >> ( i * 4 ) ) & 0xF];
 	}
+	if ( link && om_store_name(&u, nm, sizeof(nm)) > 0 ) {
+		b[n++] = ' ';
+		for ( i = 0; nm[i] != 0 && n < (INT)sizeof(b) - 2; i++ ) b[n++] = (char)nm[i];
+	}
 	b[n++] = '\n';
 	b[n] = 0;
+	say(b);
+}
+
+/* "objects [new]": how many objects the volumes keep, or how many more than at the last count */
+LOCAL void objects_say( CONST char *s )
+{
+	INT	n = om_store_objects(NULL, 0), k = 0;
+	char	b[24];
+
+	b[k++] = 'o';  b[k++] = 'k';  b[k++] = ' ';
+	if ( word(&s, "new") ) {
+		put_num(b, &k, n - ut_objects);
+	} else {
+		ut_objects = n;
+		put_num(b, &k, n);
+	}
+	b[k++] = '\n';
+	b[k] = 0;
+	say(b);
+}
+
+/* "paper [UUID|big|bigN]": the paper the object's metadata keeps */
+LOCAL void paper_say( CONST char *us )
+{
+	TS_UUID	u;
+	UW	col = TV_PAPER_LOOK;
+	char	b[24];
+
+	us = skip(us);
+	if ( *us == 0 && ut_big_have ) {
+		u = ut_big;
+	} else if ( !big_of(us, &u) && ts_str_to_uuid(us, &u) < E_OK ) {
+		say("err no object\n");
+		return;
+	}
+	if ( om_store_paper(&u, &col) < E_OK || col == TV_PAPER_LOOK ) {
+		say("ok none\n");
+		return;
+	}
+	tm_sprintf((UB *)b, (UB *)"ok %06X\n", (UINT)( col & 0x00FFFFFFU ));
 	say(b);
 }
 
@@ -1218,6 +2465,56 @@ LOCAL void sync_desk( CONST char *s )
 
 /* ---------------------------------------------------------------- a line done */
 
+IMPORT ER dt_tagent_power( INT how );
+
+/* The test program's three ways of being there as the machine goes off (tests/uprog/svcprog.c) */
+LOCAL void sdn_start( void )
+{
+	static CONST UW	mode[3] = { 42, 43, 44 };	/* SP_SDNWIN, SP_SDNBG, SP_SDNSTUCK */
+	ID		pid[3];
+	INT		i;
+
+	for ( i = 0; i < 3; i++ ) {
+		T_CPRC	cprc;
+		UW	arg[8];
+
+		knl_memset(arg, 0, sizeof(arg));
+		arg[0] = mode[i];
+		cprc.pri = 5;
+		cprc.prcatr = 0;
+		cprc.stksz = 0;
+		cprc.arg = arg;
+		cprc.argsz = sizeof(arg);
+		pid[i] = ts_cre_prc("/boot/SVCPROG.ELF", &cprc);
+		if ( pid[i] <= 0 ) {
+			say("err no process\n");
+			return;
+		}
+	}
+	tk_dly_tsk(1500);
+	{
+		char	b[64];
+
+		tm_sprintf((UB *)b, (UB *)"ok %d %d %d\n", (INT)pid[0], (INT)pid[1], (INT)pid[2]);
+		say(b);
+	}
+}
+
+/* How long a file is: what an earlier start wrote, read on this one */
+LOCAL void file_has( CONST char *path )
+{
+	T_FSTAT	st;
+
+	if ( fs_stat(path, &st) < EX_OK ) {
+		say("err none\n");
+	} else {
+		char	b[32];
+
+		tm_sprintf((UB *)b, (UB *)"ok %d\n", (INT)st.size);
+		say(b);
+	}
+}
+
 LOCAL void line( CONST char *s )
 {
 	INT	x, y, x2, y2, b = 0, i, m = 0;
@@ -1232,6 +2529,14 @@ LOCAL void line( CONST char *s )
 		TS_UUID	rq;
 
 		for ( i = 0; i < 1000 && ob_fnd_nam((CONST UB *)DT_REQ_NAME, &rq) < E_OK; i++ ) {
+			tk_dly_tsk(50);
+		}
+		/*
+		 * and the steps of its start over (the first screen, the windows
+		 * it puts up): its loop has come round. A window put up by a step
+		 * after a test opened its own would stand in front of it.
+		 */
+		for ( ; i < 1000 && dt_test_loops() == 0; i++ ) {
 			tk_dly_tsk(50);
 		}
 		say(( i < 1000 ) ? "ok\n" : "err the desktop has no request channel\n");
@@ -1269,6 +2574,30 @@ LOCAL void line( CONST char *s )
 		tk_dly_tsk(UT_GAP_MS);
 		ev(HID_EV_BTN_DOWN, (UINT)b, 0);
 		say("ok\n");
+	} else if ( word(&s, "dragn") && num(&s, &x, FALSE) && num(&s, &y, FALSE)
+		 && num(&s, &x2, FALSE) && num(&s, &y2, FALSE) ) {
+		/*
+		 * dragn X Y X2 Y2 STEPS GAP [BUTTON]: a drag made of STEPS
+		 * moves GAP ms apart, as a mouse reporting at 1000 / GAP Hz
+		 * moves the pointer
+		 */
+		INT	steps = UT_STEPS, gap = UT_GAP_MS;
+
+		(void)num(&s, &steps, FALSE);
+		(void)num(&s, &gap, FALSE);
+		(void)num(&s, &b, FALSE);
+		if ( steps < 1 ) steps = 1;
+		if ( gap < 1 ) gap = 1;
+		move(x, y);
+		tk_dly_tsk(UT_GAP_MS);
+		ev(HID_EV_BTN_DOWN, (UINT)b, 0);
+		for ( i = 1; i <= steps; i++ ) {
+			tk_dly_tsk(gap);
+			move(x + ( x2 - x ) * i / steps, y + ( y2 - y ) * i / steps);
+		}
+		tk_dly_tsk(UT_GAP_MS * 4);
+		ev(HID_EV_BTN_UP, (UINT)b, 0);
+		say("ok\n");
 	} else if ( word(&s, "drag") && num(&s, &x, FALSE) && num(&s, &y, FALSE)
 		 && num(&s, &x2, FALSE) && num(&s, &y2, FALSE) ) {
 		(void)num(&s, &b, FALSE);
@@ -1282,6 +2611,36 @@ LOCAL void line( CONST char *s )
 		tk_dly_tsk(UT_GAP_MS * 4);
 		ev(HID_EV_BTN_UP, (UINT)b, 0);
 		say("ok\n");
+	} else if ( word(&s, "linkdrag") ) {
+		/*
+		 * linkdrag WINDOW NAME X Y [BUTTON]: the link to the object
+		 * NAME in the window WINDOW dragged from its middle to X, Y,
+		 * wherever it stands among the others
+		 */
+		char		title[WM_TITLE_MAX], name[TAD_NAME_MAX];
+		T_DPRECT	box;
+
+		if ( !token(&s, title, sizeof(title)) || !token(&s, name, sizeof(name))
+		  || !num(&s, &x2, FALSE) || !num(&s, &y2, FALSE) ) {
+			say("err linkdrag WINDOW NAME X Y\n");
+		} else if ( !link_named(title, name, &box) ) {
+			say("err no such link\n");
+		} else {
+			b = 0;
+			(void)num(&s, &b, FALSE);
+			x = ( box.left + box.right ) / 2;
+			y = ( box.top + box.bottom ) / 2;
+			move(x, y);
+			tk_dly_tsk(UT_GAP_MS);
+			ev(HID_EV_BTN_DOWN, (UINT)b, 0);
+			for ( i = 1; i <= UT_STEPS; i++ ) {
+				tk_dly_tsk(UT_GAP_MS);
+				move(x + ( x2 - x ) * i / UT_STEPS, y + ( y2 - y ) * i / UT_STEPS);
+			}
+			tk_dly_tsk(UT_GAP_MS * 4);
+			ev(HID_EV_BTN_UP, (UINT)b, 0);
+			say("ok\n");
+		}
 	} else if ( word(&s, "key") && num(&s, &x, TRUE) ) {
 		(void)num(&s, &m, TRUE);
 		ev(HID_EV_KEY_DOWN, (UINT)x, (UINT)m);
@@ -1321,16 +2680,73 @@ LOCAL void line( CONST char *s )
 		e.dz = x;
 		inject(&e);
 		say("ok\n");
+	} else if ( word(&s, "accpos") ) {
+		accpos_say(skip(s));
+	} else if ( word(&s, "mkpkg") ) {
+		mkpkg_say();
+	} else if ( word(&s, "proginstq") ) {
+		prog_ask(skip(s), 3);
+	} else if ( word(&s, "proginstf") ) {
+		prog_ask(skip(s), 4);
+	} else if ( word(&s, "sysup") ) {
+		sysup_ask(skip(s));
+	} else if ( word(&s, "progres") ) {
+		progres_say();
+	} else if ( word(&s, "adminpanels") ) {
+		adminpanels_say();
+	} else if ( word(&s, "progrm") ) {
+		prog_ask(skip(s), 0);
+	} else if ( word(&s, "proginst") ) {
+		prog_ask(skip(s), 1);
+	} else if ( word(&s, "refs") ) {
+		prog_ask(skip(s), 2);
+	} else if ( word(&s, "emurom") ) {
+		ut_emurom();
+	} else if ( word(&s, "emuromx") ) {
+		ut_emuromx(s);
+	} else if ( word(&s, "kslide") ) {
+		kslide(skip(s));
+	} else if ( word(&s, "linkbig") ) {
+		linkbig(s);
+	} else if ( word(&s, "figproc") ) {
+		figproc(&ut_fig_proc, &ut_fig_kernel, skip(s));
+	} else if ( word(&s, "docproc") ) {
+		figproc(&ut_doc_proc, &ut_doc_kernel, skip(s));
+	} else if ( word(&s, "pfig") ) {
+		pfig("basic-figure-editor", skip(s));
+	} else if ( word(&s, "pdoc") ) {
+		pfig("basic-text-editor", skip(s));
+	} else if ( word(&s, "cabproc") ) {
+		figproc(&ut_cab_proc, &ut_cab_kernel, skip(s));
+	} else if ( word(&s, "pcab") ) {
+		pfig("virtual-object-list", skip(s));
 	} else if ( word(&s, "open") ) {
 		open_obj(skip(s));
+	} else if ( word(&s, "apps") ) {
+		set_apps(s);
 	} else if ( word(&s, "run") ) {
 		run_prog(s);
+	} else if ( word(&s, "sdnstart") ) {
+		sdn_start();
+	} else if ( word(&s, "filehas") ) {
+		file_has(skip(s));
+	} else if ( word(&s, "poweroff") ) {
+		say("ok\n");
+		(void)dt_tagent_power(0);
+	} else if ( word(&s, "offlimit") && num(&s, &x, FALSE) ) {
+		knl_off_limit((UW)x, 0);	/* the going off not finished in time, with nothing going off */
+		say("ok\n");
+	} else if ( word(&s, "reboot") ) {
+		say("ok\n");
+		(void)dt_tagent_power(1);
 	} else if ( word(&s, "win") ) {
 		find_win(skip(s));
 	} else if ( word(&s, "wins") ) {
 		all_wins();
 	} else if ( word(&s, "front") ) {
 		front_check(s);
+	} else if ( word(&s, "focus") ) {
+		focus_check(s);
 	} else if ( word(&s, "hidden") ) {
 		hidden_check(s);
 	} else if ( word(&s, "wait") && num(&s, &x, FALSE) ) {
@@ -1353,20 +2769,46 @@ LOCAL void line( CONST char *s )
 		say("ok\n");
 	} else if ( word(&s, "waits") ) {
 		waits_say();
+	} else if ( word(&s, "pnstat") ) {
+		/* the panels drawn whole, and the builds that read the windows while one was drawn */
+		IMPORT volatile UW	knl_pn_draws, knl_wm_torn;
+		static UW		pn_was, torn_was;
+		char			b[48];
+		INT			k = 0;
+		UW			d = knl_pn_draws, t = knl_wm_torn;
+
+		b[k++] = 'o';  b[k++] = 'k';  b[k++] = ' ';
+		put_num(b, &k, (INT)( d - pn_was ));  b[k++] = ' ';
+		put_num(b, &k, (INT)( t - torn_was ));
+		b[k++] = '\n';
+		b[k] = 0;
+		pn_was = d;
+		torn_was = t;
+		say(b);
 	} else if ( word(&s, "stat") ) {
 		ut_stat();
 	} else if ( word(&s, "xmlopen") ) {
 		xml_open(skip(s));
+	} else if ( word(&s, "xmlbig") ) {
+		xml_big();
 	} else if ( word(&s, "xml") ) {
 		xml_keep(skip(s));
 	} else if ( word(&s, "shapes") ) {
 		shapes_say();
 	} else if ( word(&s, "caret") ) {
 		caret_say();
+	} else if ( word(&s, "redraw") ) {
+		redraw_ask();
 	} else if ( word(&s, "mkbig") ) {
 		make_big(s);
+	} else if ( word(&s, "ftdef") ) {
+		ftdef();
 	} else if ( word(&s, "sum") ) {
 		rec_sum(s);
+	} else if ( word(&s, "objects") ) {
+		objects_say(s);
+	} else if ( word(&s, "paper") ) {
+		paper_say(s);
 	} else if ( word(&s, "mark") ) {
 		ut_mark = ut_now();
 		say("ok\n");
@@ -1393,6 +2835,29 @@ LOCAL void line( CONST char *s )
 	}
 }
 
+/* One line at a time, whichever way it came */
+LOCAL ID	ut_one = 0;
+
+LOCAL void one_line( CONST char *s, void (*sink)( CONST char *answer ) )
+{
+	if ( ut_one > 0 ) (void)tk_wai_sem(ut_one, 1, TMO_FEVR);
+	say("> ");			/* what came, in the log beside what was answered */
+	say(s);
+	say("\n");
+	ut_sink = sink;
+	line(s);
+	ut_sink = NULL;
+	if ( ut_one > 0 ) (void)tk_sig_sem(ut_one, 1);
+}
+
+#ifdef USE_TESTAGENT
+EXPORT void dt_uitest_line( CONST char *s, void (*sink)( CONST char *answer ) )
+{
+	one_line(s, sink);
+}
+#endif
+
+#ifdef USE_UT_SERIAL
 LOCAL void ut_task( INT stacd, void *exinf )
 {
 	char	buf[UT_LINE];
@@ -1417,18 +2882,28 @@ LOCAL void ut_task( INT stacd, void *exinf )
 		}
 		buf[n] = 0;
 		n = 0;
-		say("> ");			/* what came, in the log beside what was answered */
-		say(buf);
-		say("\n");
-		line(buf);
+		one_line(buf, NULL);
 	}
 }
+#endif /* USE_UT_SERIAL */
 
 EXPORT void dt_uitest_start( void )
 {
+#ifdef USE_UT_SERIAL
 	T_CTSK	ct;
 	ID	tid;
+#endif
+	T_CSEM	cs;
 
+	knl_memset(&cs, 0, sizeof(cs));
+	cs.sematr = TA_TFIFO | TA_FIRST;
+	cs.isemcnt = 1;
+	cs.maxsem = 1;
+	ut_one = tk_cre_sem(&cs);
+#ifdef USE_TESTAGENT
+	dt_tagent_start();
+#endif
+#ifdef USE_UT_SERIAL
 	ut_dd = tk_opn_dev((UB *)"serb", TD_UPDATE);
 	if ( ut_dd <= 0 ) {
 		tm_printf((UB *)"uitest: no second serial port\n");
@@ -1438,11 +2913,12 @@ EXPORT void dt_uitest_start( void )
 	ct.tskatr = TA_HLNG | TA_RNG0;
 	ct.task = (FP)ut_task;
 	ct.itskpri = 6;		/* above the desktop, which may be busy for a while; it mostly waits on the port */
-	ct.stksz = 8192;
+	ct.stksz = 32768;	/* it draws windows (linkbig): the letters of a CFF face are made on this stack */
 	tid = tk_cre_tsk(&ct);
 	if ( tid > 0 ) {
 		(void)tk_sta_tsk(tid, 0);
 	}
+#endif /* USE_UT_SERIAL */
 }
 
 #else

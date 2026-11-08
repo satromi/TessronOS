@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "console",
       "kind": "accessory",
       "name": "コンソール",

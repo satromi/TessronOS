@@ -361,15 +361,24 @@ LOCAL BOOL stall( INT how )
 LOCAL void test_setup( void )
 {
 	T_FSTAT	st;
+	UW	turns;
 	INT	i;
 
 	knl_lockup_tune(0, 0, SILENT_MS);
 	if ( fs_stat(SVCPROG, &st) < EX_OK ) KT_SKIP("no " SVCPROG);
 	have_prog = TRUE;
+	turns = dt_test_loops();
 	KT_ASSERT_ER(dt_start(), E_OK);
 	for ( i = 0; i < 100 && dt_first_win() == NULL; i++ ) tk_dly_tsk(100);
 	up = (BOOL)( dt_first_win() != NULL );
 	KT_ASSERT(up);
+	/*
+	 * The first window comes before the last steps of the start, which
+	 * raise it and give it the keys, and windows of ended processes go
+	 * away only in the loop: what these tests look at holds from its first turn
+	 */
+	for ( i = 0; i < 600 && dt_test_loops() == turns; i++ ) tk_dly_tsk(100);
+	KT_ASSERT(dt_test_loops() != turns);
 	tk_dly_tsk(500);
 }
 

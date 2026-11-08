@@ -216,7 +216,7 @@ LOCAL void test_resources( void )
 	if ( pid <= 0 ) return;
 	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 5000), E_OK);
 
-	before = free_pages();
+	before = free_quiet();
 	for ( i = 0; i < 3; i++ ) {
 		pid = ts_cre_prc(PROG, &cprc);
 		KT_ASSERT(pid > 0);
@@ -224,7 +224,7 @@ LOCAL void test_resources( void )
 		KT_ASSERT_ER(ts_wai_prc(pid, &psts, 5000), E_OK);
 		KT_ASSERT_EQ(psts.exitcd, (INT)arg);
 	}
-	after = free_pages();
+	after = free_quiet();
 	tm_printf((UB*)"  free pages %d -> %d over three runs\n", (INT)before, (INT)after);
 	KT_ASSERT_EQ(before, after);
 }

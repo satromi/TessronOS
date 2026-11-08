@@ -43,5 +43,11 @@
 <text num="2" x="24" y="62"> </text>
 <button num="101" rect="316,76,404,102" answer="ok" emph="true">確認</button>
 </panel>
+<panel num="6" rect="0,0,300,128" title="年月を選択">
+<text x="20" y="42">年月：</text>
+<serial num="11" rect="88,20,212,50"><f w="4" lo="1990" hi="2050" value="2026"/>/<f w="2" lo="1" hi="12" value="1" zero="true"/></serial>
+<button num="101" rect="104,88,192,114" answer="cancel">取消</button>
+<button num="102" rect="200,88,288,114" answer="ok" emph="true">移動</button>
+</panel>
 </databox>
 </tad>

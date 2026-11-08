@@ -133,6 +133,11 @@ EXPORT void knl_usb_pages_free( void *page, INT order )
 	}
 }
 
+EXPORT UD knl_usb_bus_pa( UD bus )
+{
+	return bus - USB_DMA_BUS_OFFSET;
+}
+
 EXPORT void *knl_usb_page_alloc( UD *p_bus )
 {
 	return knl_usb_pages_alloc(0, p_bus);

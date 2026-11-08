@@ -1,0 +1,31 @@
+# The keys when something is let go on a window (design 10.4), for tools/ui_run.py: a
+# sheet (its grid from y 150 down) behind a document with links at 190,107 and 190,157.
+open 019b54a4-6ccf-72f7-e320-c98e4a0bab4e
+expect calc: ready
+wait 800
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p><link id="019b54a4-6ccf-72f7-e320-c98e4a0bab4e_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c31"
+xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
+xml framedisp="true" namedisp="true" pictdisp="true"/></p>
+xml <p><link id="01a0d8c4-5320-7a41-8b52-6c7d8e9fa020_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c32"
+xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
+xml framedisp="true" namedisp="true" pictdisp="true"/></p>
+xml </document></tad>
+xmlopen 開く元
+wait 500
+win 開く元
+focus fd_doc 開く元
+wins
+shot fd_open
+# refused (above the cells): the keys stay with the document
+drag 190 107 700 130
+wait 500
+focus fd_refused 開く元
+shot fd_refused
+# on a cell: the keys go to the sheet, and what is typed goes in it
+drag 190 107 700 300
+focus fd_taken 基本表計算
+shot fd_taken
+text 7
+key 28
+expect calc: set G7 shows 7

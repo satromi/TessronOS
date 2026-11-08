@@ -56,6 +56,8 @@
 #include "../obj/obj.h"
 #include "cpu_ufault.h"
 
+#define PRC_END_FORCE_MS	3000	/* the machine going off: for those ended by force to be gone */
+
 #define PRC_DEFAULT_STKSZ	(64 * 1024)
 #define PRC_TSK_STKMAX		(1024 * 1024)	/* the most user stack a task of a process asks for */
 #define PRC_ARG_VA		0x0000000000300000ULL	/* start-up argument page */
@@ -353,13 +355,17 @@ LOCAL void tk_objs_end( ID pid )
 	}
 }
 
+IMPORT void knl_dp_prc_end( ID pid );		/* svc_gate.c: its environments of memory */
+
 /*
  * What a process has open in the layers above -- its keys to objects,
- * the windows it made, its files, its sockets and its BOs of the GPU --
- * and the objects of the core it made.
+ * the windows it made, its environments of memory to draw in, its
+ * files, its sockets and its BOs of the GPU -- and the objects of the
+ * core it made.
  * Closed as it ends, on whichever path it ends by; closing twice is
  * harmless.
  */
+
 LOCAL void prc_close_all( ID pid )
 {
 	if ( pid <= 0 ) {
@@ -367,6 +373,7 @@ LOCAL void prc_close_all( ID pid )
 	}
 	knl_ob_prc_end(pid);
 	knl_wmobj_prc_end(pid);
+	knl_dp_prc_end(pid);
 	knl_fs_prc_end(pid);
 	knl_so_prc_end(pid);
 	knl_gpu_prc_end(pid);
@@ -2753,6 +2760,122 @@ EXPORT INT knl_prc_list( ID *pids, INT n )
 	tk_unl_mtx(prc_mtxid);
 
 	return k;
+}
+
+/* Every process's number, in memory of the caller's to Kfree: how many, 0 when there is no room */
+EXPORT INT knl_prc_list_all( ID **p_pids )
+{
+	INT	max = 64, n;
+	ID	*pids;
+
+	*p_pids = NULL;
+	for ( ;; ) {
+		pids = (ID *)Kmalloc(sizeof(ID) * (SZ)max);
+		if ( pids == NULL ) {
+			return 0;
+		}
+		n = knl_prc_list(pids, max);
+		if ( n < max ) {
+			*p_pids = pids;
+			return n;
+		}
+		Kfree(pids);
+		max *= 2;
+	}
+}
+
+/* Whether the machine going off still waits for the process */
+LOCAL BOOL prc_end_left( ID pid )
+{
+	T_PRCINFO	pi;
+
+	return (BOOL)( knl_prc_info(pid, &pi) >= E_OK && !pi.sys && !pi.done
+		    && pi.state != PS_ZOMBIE && pi.state != PS_NONEXIST );
+}
+
+/* Milliseconds since t0 on the clock that does not change; with 0, the clock itself */
+LOCAL UW prc_end_since( UW t0 )
+{
+	SYSTIM	t;
+
+	(void)tk_get_otm(&t);
+	return (UW)t.lo - t0;
+}
+
+/* What is left of the processes, named on the console after why: how many */
+LOCAL INT prc_end_tell( CONST char *why )
+{
+	ID	*pids;
+	UB	name[64];
+	INT	n = knl_prc_list_all(&pids), i, left = 0;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( !prc_end_left(pids[i]) ) {
+			continue;
+		}
+		left++;
+		if ( why != NULL ) {
+			name[0] = 0;
+			(void)knl_prc_name(pids[i], name, sizeof(name));
+			tm_printf((UB *)"shutdown: pid %d %s %s\n", (INT)pids[i], name, why);
+		}
+	}
+	if ( pids != NULL ) Kfree(pids);
+	return left;
+}
+
+/*
+ * The machine going off: every process the system does not need told to
+ * end (SIGTERM, which one that has not asked for it dies of), and term_ms
+ * given to them. What has not ended by then, a process that ignores the
+ * signal or is held inside a call, is ended by force. Those the system
+ * needs (TS_PRC_SYSTEM) go with the machine. 'tick' is called as this
+ * waits. The list is taken anew each time, so that a process started
+ * meanwhile, and any number of them, is not missed.
+ */
+EXPORT INT knl_prc_end_all( UW term_ms, void (*tick)( void ) )
+{
+	ID	*pids;
+	INT	n, i, told = 0, left;
+	UW	t0 = prc_end_since(0);
+
+	n = knl_prc_list_all(&pids);
+	for ( i = 0; i < n; i++ ) {
+		if ( prc_end_left(pids[i]) && knl_psx_kill(pids[i], TS_SIGTERM) >= E_OK ) {
+			told++;
+		}
+	}
+	if ( pids != NULL ) Kfree(pids);
+	tm_printf((UB *)"shutdown: %d processes told to end\n", told);
+
+	while ( ( left = prc_end_tell(NULL) ) > 0 && prc_end_since(t0) < term_ms ) {
+		if ( tick != NULL ) tick();
+		tk_dly_tsk(50);
+	}
+	if ( left == 0 ) {
+		tm_printf((UB *)"shutdown: every process ended\n");
+		return 0;
+	}
+
+	(void)prc_end_tell("has not ended: ended by force");
+	n = knl_prc_list_all(&pids);
+	for ( i = 0; i < n; i++ ) {
+		if ( prc_end_left(pids[i]) ) {
+			(void)knl_prc_kill(pids[i]);	/* a second at the most, for one held inside a call */
+			if ( tick != NULL ) tick();
+		}
+	}
+	if ( pids != NULL ) Kfree(pids);
+	t0 = prc_end_since(0);
+	while ( ( left = prc_end_tell(NULL) ) > 0 && prc_end_since(t0) < PRC_END_FORCE_MS ) {
+		if ( tick != NULL ) tick();
+		tk_dly_tsk(50);
+	}
+	if ( left > 0 ) {
+		(void)prc_end_tell("still has not ended");
+	}
+	tm_printf((UB *)"shutdown: after force, %d processes left\n", left);
+	return left;
 }
 
 /* ---------------------------------------------------------------- memory asked for */

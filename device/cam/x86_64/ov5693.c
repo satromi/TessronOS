@@ -294,4 +294,11 @@ EXPORT void knl_ov5693_say( T_OV5693 *s, CONST char *when )
 		  rd(s, R_AEC_MANUAL, 1), rd(s, R_TEST_PATTERN, 1));
 }
 
+EXPORT CONST T_SENSOPS	knl_ov5693_ops = {
+	"OV5693", "Front camera (OV5693)", OV5693_WIDTH, OV5693_HEIGHT, OV5693_LINK_HZ, OV5693_LANES, OV5693_LANES,
+	OV5693_BLACK, OV5693_INTERVAL, GAIN_1X, OV5693_MCLK,
+	knl_ov5693_probe, knl_ov5693_setup, knl_ov5693_stream, knl_ov5693_exposure, knl_ov5693_max_exposure,
+	knl_ov5693_say
+};
+
 #endif /* X64 */

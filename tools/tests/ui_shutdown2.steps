@@ -1,0 +1,15 @@
+# The machine going off, the second of two runs, on the disk the first left:
+# every volume was taken down properly, and what was kept can be read.
+expect taken down properly the last time
+absent not taken down properly
+filehas /boot/SDNWIN.TXT
+want ok 19
+filehas /boot/SDNBG.TXT
+want ok 22
+open 019b54a4-6ccf-72f7-e320-c98e4a0bab4e
+expect calc: ready
+wait 800
+logmark
+reboot
+expectsincein 40 TessronOS desktop: starting the machine again
+expectsincein 20 marked clean

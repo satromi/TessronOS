@@ -105,6 +105,18 @@ LOCAL void fsel_set( UINT pin, UW code )
 	ISpinUnlock(&gpio_lock, &imask);
 }
 
+/*
+ * A pin given to a block of the chip by a driver of the kernel (the
+ * Wi-Fi's SDIO): the value of its function select field, as the device
+ * tree's brcm,function has it.
+ */
+EXPORT void knl_gpio_func( UINT pin, UW fsel )
+{
+	if ( pin < GPIO_NPINS ) {
+		fsel_set(pin, fsel);
+	}
+}
+
 EXPORT ER gpio_set_dir( UINT bank, UINT pin, UINT dir )
 {
 	if ( !gpio_valid(bank, pin) || dir > GPIO_DIR_OUT ) {

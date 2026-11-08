@@ -94,20 +94,7 @@ LOCAL TS_UUID sys_def( CONST char *id )
  */
 LOCAL INT menu_accessories( CONST DTPROG ***p_acc )
 {
-	INT		n = dt_prog_count(DT_PK_ACCESSORY), i, k = 0;
-	CONST DTPROG	**all = (CONST DTPROG **)Kmalloc(sizeof(DTPROG *) * (SZ)( n + 1 ));
-
-	*p_acc = all;
-	if ( all == NULL ) {
-		return 0;
-	}
-	n = dt_prog_list(DT_PK_ACCESSORY, all, n);
-	for ( i = 0; i < n; i++ ) {
-		if ( all[i]->menu ) {
-			all[k++] = all[i];
-		}
-	}
-	return k;
+	return dt_acc_menu_list(p_acc);
 }
 
 /* The accessory at place i of 小物, NULL none */
@@ -200,6 +187,10 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 
 	tray_state(mid);
 
+	if ( d->accbox ) {
+		dt_acc_menu_state(mid, on_vobj, v);
+	}
+
 	/* 小物: the accessories that show in the menu */
 	acc_fill(mid);
 
@@ -219,6 +210,9 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 		atr(mid, &obj, "vobj", TRUE);
 		atr(mid, &obj, "real", TRUE);
 		atr(mid, &obj, "exec", TRUE);
+#ifdef USE_UITEST
+		tm_printf((UB *)"desktop: exec menu grey\n");	/* for the tests */
+#endif
 		return;
 	}
 	open = (BOOL)( dt_showing(&v->target) != NULL );
@@ -243,9 +237,8 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 
 	/*
 	 * 実行: the list 付箋指定 of 管理情報 shows too (dt_app_list) -- the
-	 * programs the real object's applist names, then those that open an
-	 * object of its kind (fileTypes), スライド and MPEG Player for any
-	 * record of xmlTAD
+	 * programs the real object's applist names, or, when it names none,
+	 * those that open an object of its kind (fileTypes)
 	 */
 	{
 		INT	room = dt_app_list(v, NULL, 0, NULL), q;
@@ -260,6 +253,9 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 			}
 			(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)apps, OM_APP_NAME, n);
 			atr(mid, &ed, "exec.app", cut);
+#ifdef USE_UITEST
+			tm_printf((UB *)"desktop: exec menu on %d\n", n);	/* for the tests */
+#endif
 		}
 		if ( apps != NULL ) Kfree(apps);
 		if ( a != NULL ) Kfree(a);
@@ -277,7 +273,7 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
  * An accessory chosen there is started from the desktop's own loop: the
  * choice is made in the task of whoever opened the menu.
  */
-LOCAL volatile INT	dt_tail_req = 0;	/* -1 the box, n + 1 the n-th accessory */
+LOCAL volatile INT	dt_tail_req = 0;	/* n + 1 the n-th accessory */
 
 EXPORT void dt_tail_fill( ID mid )
 {
@@ -291,10 +287,6 @@ EXPORT BOOL dt_tail_do( CONST T_MNSEL *sel )
 {
 	if ( sel == NULL || !is_sys(&sel->def) ) {
 		return FALSE;
-	}
-	if ( mn_is(sel, "acc.box") ) {
-		dt_tail_req = -1;
-		return TRUE;
 	}
 	if ( mn_is(sel, "acc.item") ) {
 		dt_tail_req = sel->index + 1;
@@ -313,9 +305,7 @@ EXPORT void dt_tail_poll( void )
 		return;
 	}
 	dt_tail_req = 0;
-	if ( r < 0 ) {
-		(void)dt_prog_run(NULL, dt_prog_find((CONST UB *)"accessory-box"), NULL);
-	} else if ( ( a = menu_accessory(r - 1) ) != NULL ) {
+	if ( ( a = menu_accessory(r - 1) ) != NULL ) {
 		(void)dt_prog_run(NULL, a, NULL);
 	}
 }
@@ -382,8 +372,6 @@ EXPORT BOOL dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 		/* the window chosen came to the front and takes the keys */
 	} else if ( mn_is(sel, "real.search") ) {
 		dt_search_open(d);
-	} else if ( mn_is(sel, "acc.box") ) {
-		(void)dt_prog_run(d, dt_prog_find((CONST UB *)"accessory-box"), NULL);
 	} else if ( mn_is(sel, "acc.item") ) {
 		/* chosen on a virtual object, the accessory is started on its object */
 		if ( ( a = menu_accessory(sel->index) ) != NULL ) {
@@ -475,6 +463,7 @@ LOCAL BOOL attr_ask( DTWIN *d, T_VOBJ *io )
 	T_WMPART	*pt;
 	T_VOBJ		v = *io;
 	CONST UW	*colp[4];
+	UW		shown[4];
 	INT		pid, i, r0 = 2, chsz = ( v.chsz > 0 ) ? v.chsz : 14;
 	UINT		ans;
 
@@ -501,14 +490,8 @@ LOCAL BOOL attr_ask( DTWIN *d, T_VOBJ *io )
 	dt_pn_add(def, WM_PT_LABEL, 0, 200, 34, 150, 20, "色：");
 	for ( i = 0; i < 4; i++ ) {
 		dt_pn_add(def, WM_PT_LABEL, 0, 200, 60 + i * 30, 110, 20, cols[i]);
-		pt = dt_pn_add(def, WM_PT_BOX, AT_FRCOL + i, 310, 58 + i * 30, 96,
-			    24, NULL);
-		if ( pt != NULL ) {
-			if ( *colp[i] != TAD_COL_NONE ) {
-				dt_colour_text(*colp[i], pt->text);
-				pt->caret = 7;
-			}
-		}
+		shown[i] = ( *colp[i] != TAD_COL_NONE ) ? *colp[i] : ( i < 2 ) ? 0x00000000U : 0x00FFFFFFU;
+		dt_pn_colour(def, AT_FRCOL + i, 310, 58 + i * 30, 96, 24, shown[i]);
 	}
 	pt = dt_pn_add(def, WM_PT_CHECK, AT_AUTO, 200, 184, 170, 22, "自動起動");
 	if ( pt != NULL ) {
@@ -551,12 +534,10 @@ LOCAL BOOL attr_ask( DTWIN *d, T_VOBJ *io )
 		pt->caret = k;
 		pt->value = chsz;
 	}
-	/* the focus goes to the colours, the first boxes to type in */
 	dt_pn_buttons(def, "設定");
 
 	ans = dt_pn_run(d, def, &pid);
 	if ( ans == WM_ANS_OK && pid >= 0 ) {
-		UB	text[WM_LABEL_MAX];
 		UW	col;
 		INT	size = chsz, r = r0;
 		UW	*colw[4];
@@ -569,9 +550,9 @@ LOCAL BOOL attr_ask( DTWIN *d, T_VOBJ *io )
 				v.disp |= bits[i];
 			}
 		}
+		/* a colour left as first shown stays unset if it was unset */
 		for ( i = 0; i < 4; i++ ) {
-			if ( wm_panel_text(pid, AT_FRCOL + i, text, WM_LABEL_MAX)
-			     >= E_OK && dt_colour_of(text, &col) ) {
+			if ( wm_panel_colour(pid, AT_FRCOL + i, &col) >= E_OK && col != shown[i] ) {
 				*colw[i] = col;
 			}
 		}
@@ -766,6 +747,7 @@ LOCAL void duplicate_real( DTWIN *d, CONST T_VOBJ *v )
 	c.dlen = 0;			/* a new object has no data appended to it yet */
 	c.left += 16;  c.right += 16;
 	c.top += 16;   c.bottom += 16;
+	ed_new_link_fit(&c);		/* named anew: closed, as wide as that name */
 	place_copy(d, v, &c);
 }
 
@@ -992,6 +974,30 @@ EXPORT ER dt_apps_req( CONST T_DTREQ *rq, T_DTANS *an )
 	return er;
 }
 
+/*
+ * DT_RQ_LINK_STATE: what the menu of a link of the desktop's looks at
+ * to grey 〈開く〉, 〈閉じる〉 and 〈開くプログラムを固定〉, for a
+ * program's link
+ */
+EXPORT ER dt_link_state_req( CONST T_DTREQ *rq, T_DTANS *an )
+{
+	T_VOBJ	*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+
+	if ( v == NULL ) {
+		return E_NOMEM;
+	}
+	link_of_req(rq, v);
+	an->flags = 0;
+	if ( dt_showing(&v->target) != NULL ) {
+		an->flags |= DT_F_OPEN;
+	}
+	if ( dt_app_lockable(v) ) {
+		an->flags |= DT_F_LOCKABLE;
+	}
+	Kfree(v);
+	return E_OK;
+}
+
 EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
 {
 	DTWIN	*host = dt_host_of(&rq->win);
@@ -1079,14 +1085,19 @@ EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
 		v->frcol = v->chcol = v->tbcol = v->bgcol = TAD_COL_NONE;
 		er = dt_open_as(NULL, v, name);
 		break;
+	case DT_RQ_COLOUR:
 	case DT_RQ_PAPER: {
-		UB	start[8];
-		UW	col;
+		UW	col = ( rq->look.bgcol == TAD_COL_NONE ) ? 0x00FFFFFFU : rq->look.bgcol;
 
-		dt_colour_text(( rq->look.bgcol == TAD_COL_NONE ) ? 0x00FFFFFFU : rq->look.bgcol, start);
-		if ( !dt_ask_text(host, "背景色を入力してください（例: #ffffff）", NULL, start,
-			       name, WM_LABEL_MAX, "設定") || !dt_colour_of(name, &col) ) {
+		if ( !( ( rq->req == DT_RQ_COLOUR && ( rq->flags & DT_F_AT ) != 0 )
+			? dt_pick_colour_at(host->wid, &col, rq->grab_x, rq->grab_y )
+			: dt_pick_colour(host->wid, &col) ) ) {
 			er = E_ABORT;
+			break;
+		}
+		dt_draw(host);
+		if ( rq->req == DT_RQ_COLOUR ) {
+			an->look.bgcol = col;
 			break;
 		}
 		(void)om_store_set_paper(&v->target, col);

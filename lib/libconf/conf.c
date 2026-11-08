@@ -26,6 +26,7 @@
 #include <ts/look.h>
 #include <ts/conf.h>
 #include <ts/uuid.h>
+#include <ts/vobjsz.h>
 
 LOCAL BOOL blank( UB c )
 {
@@ -818,8 +819,9 @@ EXPORT BOOL cf_link_nth( CONST UB *text, INT len, CONST char *role, INT nth, TS_
 	return TRUE;
 }
 
-EXPORT INT cf_link_put( UB *text, INT len, INT max, CONST char *role, CONST TS_UUID *u,
-			CONST TS_UUID *vobj, CONST char *label, TS_UUID *p_old )
+/* The link with the role written: in place of the one there, or (anew) always as a paragraph of its own */
+LOCAL INT link_set( UB *text, INT len, INT max, CONST char *role, CONST TS_UUID *u,
+		    CONST TS_UUID *vobj, CONST char *label, TS_UUID *p_old, BOOL anew )
 {
 	static CONST char *const part[] = {
 		"<link id=\"", "_0.xtad\" vobjid=\"", "\" relationship=\"",
@@ -837,7 +839,7 @@ EXPORT INT cf_link_put( UB *text, INT len, INT max, CONST char *role, CONST TS_U
 
 	/* the element: in place of the one with the role, or a paragraph of its own */
 	nl = 0;
-	if ( link_of(text, len, role, &a, &e, &old) ) {
+	if ( !anew && link_of(text, len, role, &a, &e, &old) ) {
 		if ( p_old != NULL ) *p_old = old;
 	} else {
 		a = find_at(text, len, "</document>", 0);
@@ -864,9 +866,19 @@ EXPORT INT cf_link_put( UB *text, INT len, INT max, CONST char *role, CONST TS_U
 	for ( i = 0; part[2][i] != 0; i++ ) el[nl++] = (UB)part[2][i];
 	for ( i = 0; i < rl; i++ ) el[nl++] = (UB)role[i];
 	if ( fig ) {
-		CONST char	*at = "\" vobjleft=\"8\" vobjtop=\"8\" vobjright=\"248\" vobjbottom=\"33\" height=\"25";
+		/* closed, at the size of letters it is written at (VOBJ_CLOSED_H) */
+		CONST char	*at[2] = { "\" vobjleft=\"8\" vobjtop=\"8\" vobjright=\"248\" vobjbottom=\"",
+					   "\" height=\"" };
+		INT		num[2] = { 8 + VOBJ_CLOSED_H(14, 1, 1), VOBJ_CLOSED_H(14, 1, 1) }, f;
 
-		for ( i = 0; at[i] != 0; i++ ) el[nl++] = (UB)at[i];
+		for ( f = 0; f < 2; f++ ) {
+			UB	d[12];
+			INT	nd = 0, v = num[f];
+
+			for ( i = 0; at[f][i] != 0; i++ ) el[nl++] = (UB)at[f][i];
+			do { d[nd++] = (UB)( '0' + v % 10 ); v /= 10; } while ( v > 0 );
+			while ( nd > 0 ) el[nl++] = d[--nd];
+		}
 	}
 	for ( i = 0; part[3][i] != 0; i++ ) el[nl++] = (UB)part[3][i];
 	if ( fig ) el[nl++] = '\n';
@@ -886,6 +898,56 @@ EXPORT INT cf_link_put( UB *text, INT len, INT max, CONST char *role, CONST TS_U
 	}
 	for ( i = 0; i < nl; i++ ) text[a + i] = el[i];
 	return len + shift;
+}
+
+EXPORT INT cf_link_put( UB *text, INT len, INT max, CONST char *role, CONST TS_UUID *u,
+			CONST TS_UUID *vobj, CONST char *label, TS_UUID *p_old )
+{
+	return link_set(text, len, max, role, u, vobj, label, p_old, FALSE);
+}
+
+/* The link with the role that points at u: its element t[*p_a..*p_e) */
+LOCAL BOOL link_to( CONST UB *t, INT len, CONST char *role, CONST TS_UUID *u, INT *p_a, INT *p_e )
+{
+	INT	a = 0, e = 0, k;
+	TS_UUID	o;
+
+	while ( link_from(t, len, e, role, &a, &e, &o) ) {
+		for ( k = 0; k < 16 && o.b[k] == u->b[k]; k++ ) ;
+		if ( k == 16 ) {
+			*p_a = a;
+			*p_e = e;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+EXPORT INT cf_link_add( UB *text, INT len, INT max, CONST char *role, CONST TS_UUID *u,
+			CONST TS_UUID *vobj, CONST char *label )
+{
+	INT	a, e;
+
+	if ( text == NULL || role == NULL || u == NULL ) return -1;
+	if ( link_to(text, len, role, u, &a, &e) ) return len;
+	return link_set(text, len, max, role, u, vobj, label, NULL, TRUE);
+}
+
+EXPORT INT cf_link_drop( UB *text, INT len, CONST char *role, CONST TS_UUID *u )
+{
+	INT	a, e, k;
+
+	if ( text == NULL || role == NULL || u == NULL ) return -1;
+	if ( !link_to(text, len, role, u, &a, &e) ) return -2;
+	/* a paragraph that held only the link goes with it */
+	if ( a >= 3 && text[a - 3] == '<' && text[a - 2] == 'p' && text[a - 1] == '>'
+	  && e + 4 <= len && find_at(text, e + 4, "</p>", e) == e ) {
+		a -= 3;
+		e += 4;
+		if ( e < len && text[e] == '\n' ) e++;
+	}
+	for ( k = e; k < len; k++ ) text[a + k - e] = text[k];
+	return len - ( e - a );
 }
 
 EXPORT INT cf_link_tag( UB *text, INT len, INT max, CONST TS_UUID *u, CONST char *role )

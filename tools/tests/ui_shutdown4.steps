@@ -1,0 +1,16 @@
+# The machine going off: 強制的に終了 on the panel goes on without what was not saved.
+open 019b54a4-6ccf-72f7-e320-c98e4a0bab4e
+expect calc: ready
+wait 800
+click 200 163
+text 88
+key 28
+wait 300
+logmark
+poweroff
+expectsincein 15 has not closed
+wait 500
+click 794 441
+expectsincein 10 the person chose to end them by force
+expectsincein 20 TessronOS desktop: turning the machine off
+expectsincein 20 marked clean

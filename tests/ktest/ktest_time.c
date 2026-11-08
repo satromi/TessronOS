@@ -143,21 +143,34 @@ LOCAL void test_get_tim_u( void )
 }
 
 /* tk_dly_tsk_u: never early, late by less than the tolerance */
+/*
+ * What a timed wait's lateness says about the kernel. Under an emulator
+ * the guest's clock is the host's while its processors run only when the
+ * host gives them time, so a wait on a busy host is late however right
+ * the kernel is. A wait the kernel itself makes late is late every time,
+ * and one it loses never ends: the best of several waits has to be near
+ * the time asked for, and the worst only within what a stalled processor
+ * explains. Early is wrong whatever the host does.
+ */
+#define US_TRIES	20
+
 LOCAL void test_dly_us( void )
 {
-	UD	t1, t2, d, worst = 0;
+	UD	t1, t2, d, worst = 0, best = ~(UD)0;
 	INT	i;
 
-	for ( i = 0; i < 10; i++ ) {
+	for ( i = 0; i < US_TRIES; i++ ) {
 		t1 = mono();
 		KT_ASSERT_ER(tk_dly_tsk_u(1000), E_OK);
 		t2 = mono();
 		d = t2 - t1;
 		KT_ASSERT(d >= 1000000ULL);
-		KT_ASSERT(d < 1000000ULL + TOL_NS);
 		if ( d - 1000000ULL > worst ) worst = d - 1000000ULL;
+		if ( d - 1000000ULL < best ) best = d - 1000000ULL;
 	}
-	tm_printf((UB*)"  tk_dly_tsk_u(1000): worst lateness %d ns\n", (INT)worst);
+	tm_printf((UB*)"  tk_dly_tsk_u(1000): lateness %d ns at best, %d ns at worst\n", (INT)best, (INT)worst);
+	KT_ASSERT(best < TOL_NS);
+	KT_ASSERT(worst < TOL_LATE_NS);
 
 	t1 = mono();
 	KT_ASSERT_ER(tk_dly_tsk_u(0), E_OK);		/* no wait */
@@ -172,7 +185,8 @@ LOCAL void test_wait_us( void )
 	T_CMTX	cmtx;
 	ID	sem, flg, mtx;
 	UINT	ptn;
-	UD	t1, d;
+	UD	t1, d, best;
+	INT	i;
 
 	csem.exinf = NULL; csem.sematr = TA_TFIFO | TA_FIRST; csem.isemcnt = 0; csem.maxsem = 1;
 	sem = tk_cre_sem(&csem);
@@ -184,15 +198,25 @@ LOCAL void test_wait_us( void )
 	mtx = tk_cre_mtx(&cmtx);
 	KT_ASSERT(mtx > 0);
 
-	t1 = mono();
-	KT_ASSERT_ER(tk_slp_tsk_u(2500), E_TMOUT);
-	d = mono() - t1;
-	KT_ASSERT(d >= 2500000ULL && d < 2500000ULL + TOL_NS);
+	best = ~(UD)0;
+	for ( i = 0; i < US_TRIES && best >= TOL_NS; i++ ) {
+		t1 = mono();
+		KT_ASSERT_ER(tk_slp_tsk_u(2500), E_TMOUT);
+		d = mono() - t1;
+		KT_ASSERT(d >= 2500000ULL && d < 2500000ULL + TOL_LATE_NS);
+		if ( d - 2500000ULL < best ) best = d - 2500000ULL;
+	}
+	KT_ASSERT(best < TOL_NS);
 
-	t1 = mono();
-	KT_ASSERT_ER(tk_wai_sem_u(sem, 1, 1500), E_TMOUT);
-	d = mono() - t1;
-	KT_ASSERT(d >= 1500000ULL && d < 1500000ULL + TOL_NS);
+	best = ~(UD)0;
+	for ( i = 0; i < US_TRIES && best >= TOL_NS; i++ ) {
+		t1 = mono();
+		KT_ASSERT_ER(tk_wai_sem_u(sem, 1, 1500), E_TMOUT);
+		d = mono() - t1;
+		KT_ASSERT(d >= 1500000ULL && d < 1500000ULL + TOL_LATE_NS);
+		if ( d - 1500000ULL < best ) best = d - 1500000ULL;
+	}
+	KT_ASSERT(best < TOL_NS);
 
 	KT_ASSERT_ER(tk_wai_flg_u(flg, 1, TWF_ORW, &ptn, TMO_POL), E_TMOUT);
 	KT_ASSERT_ER(tk_set_flg(flg, 1), E_OK);

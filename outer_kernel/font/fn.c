@@ -41,8 +41,10 @@
 #include FT_TRIGONOMETRY_H
 #include FT_TRUETYPE_TABLES_H
 #include FT_TRUETYPE_TAGS_H
+#include FT_SIZES_H
 
 #define VSUB_MAX	16		/* subtables of the vertical forms kept */
+#define FN_SIZES	8		/* sizes of one face kept made */
 
 typedef struct {
 	BOOL		used;
@@ -53,6 +55,21 @@ typedef struct {
 	INT		angle;			/* turned clockwise, in degrees */
 	INT		fd;			/* the file it is read from, -1 for none */
 	FT_StreamRec	stream;			/* only while fd is open */
+
+	/*
+	 * The sizes of the face made in the font library, each kept as it
+	 * was made (FT_New_Size), so that going back to one is choosing it
+	 * (FT_Activate_Size) rather than making it again: the letters of a
+	 * process are drawn with the face set to the process's size and set
+	 * back after, and making a size of an OpenType face over again costs
+	 * more than measuring the letters. 'on_px' and 'on_xpx' are the one
+	 * chosen now (xpx 0: as wide as tall); nsize 0 none yet.
+	 */
+	FT_Size		size[FN_SIZES];
+	INT		size_px[FN_SIZES], size_xpx[FN_SIZES];
+	UW		size_use[FN_SIZES];
+	INT		nsize;
+	INT		on_px, on_xpx;
 	UB		*bytes;			/* the whole file, when it was read in */
 	UD		pages;			/* how many pages that took */
 
@@ -76,6 +93,7 @@ typedef struct {
 } FONT;
 
 LOCAL FT_Library	fn_lib = NULL;
+LOCAL UW		fn_size_clock = 0;	/* when a size was last chosen, for keeping the ones in use */
 LOCAL FONT		fn_tab[FN_MAX_FONT];
 LOCAL ID		fn_mtxid = 0;
 LOCAL ID		fn_sys = 0;		/* what the system draws words with */
@@ -138,12 +156,70 @@ EXPORT ER fn_state_get( ID fid, T_FNSTATE *st )
 	return E_OK;
 }
 
+/*
+ * The face's size in the font library made px tall across xpx (0: as
+ * tall): one made before chosen again, else one made anew, in place of
+ * the one chosen longest ago when FN_SIZES are kept. A face whose sizes
+ * cannot be made apart is set as it was before, over again.
+ */
+LOCAL ER size_set( FONT *f, INT xpx, INT px )
+{
+	INT	i, k = -1;
+	FT_Size	sz;
+
+	if ( xpx == px ) {
+		xpx = 0;
+	}
+	if ( f->nsize > 0 && f->on_px == px && f->on_xpx == xpx ) {
+		return E_OK;
+	}
+	for ( i = 0; i < f->nsize; i++ ) {
+		if ( f->size_px[i] == px && f->size_xpx[i] == xpx ) {
+			if ( FT_Activate_Size(f->size[i]) != 0 ) {
+				break;
+			}
+			f->size_use[i] = ++fn_size_clock;
+			f->on_px = px;
+			f->on_xpx = xpx;
+			return E_OK;
+		}
+	}
+	if ( f->nsize < FN_SIZES ) {
+		if ( FT_New_Size(f->face, &sz) == 0 ) {
+			k = f->nsize++;
+			f->size[k] = sz;
+		}
+	} else {
+		for ( k = 0, i = 1; i < FN_SIZES; i++ ) {
+			if ( f->size_use[i] < f->size_use[k] ) {
+				k = i;
+			}
+		}
+	}
+	if ( k >= 0 && FT_Activate_Size(f->size[k]) != 0 ) {
+		k = -1;
+	}
+	if ( FT_Set_Pixel_Sizes(f->face, (FT_UInt)xpx, (FT_UInt)px) != 0 ) {
+		if ( k >= 0 ) {
+			f->size_px[k] = -1;	/* nothing that is asked for */
+		}
+		f->on_px = -1;
+		return E_OBJ;
+	}
+	if ( k >= 0 ) {
+		f->size_px[k] = px;
+		f->size_xpx[k] = xpx;
+		f->size_use[k] = ++fn_size_clock;
+	}
+	f->on_px = ( k >= 0 ) ? px : -1;	/* set over the face's own: asked again next time */
+	f->on_xpx = xpx;
+	return E_OK;
+}
+
 LOCAL ER state_put( FONT *f, CONST T_FNSTATE *st )
 {
-	if ( st->px > 0 && ( st->px != f->px || st->xpx != f->xpx ) ) {
-		if ( FT_Set_Pixel_Sizes(f->face, (FT_UInt)st->xpx, (FT_UInt)st->px) != 0 ) {
-			return E_OBJ;
-		}
+	if ( st->px > 0 && size_set(f, st->xpx, st->px) < E_OK ) {
+		return E_OBJ;
 	}
 	f->px = st->px;
 	f->style = st->style;
@@ -1017,6 +1093,8 @@ EXPORT ER fn_open_mem( CONST UB *data, SZ size, INT index, ID *p_fid )
 	f->xpx   = 0;
 	f->angle = 0;
 	f->fd    = -1;			/* the bytes are the caller's, not a file */
+	f->nsize = 0;
+	f->on_px = -1;
 	f->bytes = NULL;
 	f->pages = 0;
 	f->gsub_read = FALSE;
@@ -1277,6 +1355,8 @@ EXPORT ER fn_open_file( CONST char *path, INT index, ID *p_fid )
 	f->xpx  = 0;
 	f->angle = 0;
 	f->fd   = fd;
+	f->nsize = 0;
+	f->on_px = -1;
 	f->gsub_read = FALSE;
 	f->gsub = NULL;
 	f->gsub_len = 0;
@@ -1346,7 +1426,7 @@ LOCAL ER fn_set_size_nl( ID fid, INT px )
 	if ( px <= 0 || px > 512 ) {
 		return E_PAR;
 	}
-	if ( FT_Set_Pixel_Sizes(f->face, 0, (FT_UInt)px) != 0 ) {
+	if ( size_set(f, 0, px) < E_OK ) {
 		return E_OBJ;
 	}
 	f->px = px;
@@ -1403,8 +1483,7 @@ LOCAL ER fn_set_style_nl( ID fid, UINT style, INT xpx )
 	if ( xpx == f->px ) {
 		xpx = 0;
 	}
-	if ( xpx != f->xpx
-	  && FT_Set_Pixel_Sizes(f->face, (FT_UInt)xpx, (FT_UInt)f->px) != 0 ) {
+	if ( xpx != f->xpx && size_set(f, xpx, f->px) < E_OK ) {
 		return E_OBJ;
 	}
 	f->style = style;
@@ -1663,7 +1742,7 @@ LOCAL void base_end( BASEW *w )
 /* The face's size in the font library set to px across xpx (0: as tall) */
 LOCAL void ft_size( FONT *f, INT xpx, INT px )
 {
-	(void)FT_Set_Pixel_Sizes(f->face, ( xpx > 0 ) ? (FT_UInt)xpx : 0, (FT_UInt)px);
+	(void)size_set(f, ( xpx > 0 ) ? xpx : 0, px);
 }
 
 /*

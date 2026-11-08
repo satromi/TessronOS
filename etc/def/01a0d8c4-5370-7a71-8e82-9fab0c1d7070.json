@@ -15,10 +15,11 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "archive-manager",
       "kind": "app",
       "name": "書庫管理",
-      "version": "R1.200",
+      "version": "R1.300",
       "aliases": [
         "unpack-file"
       ],

@@ -6,6 +6,11 @@ LNKFILE := $(TOP)/etc/linker/rpi5/tkernel_map.ld
 LOAD_PA := 0x200000
 
 CFLAGS_TARGET  :=
+
+# make DWC2=0: USB-C のポートの DWC2 を調べず、使わない(設計書 3.6.7)
+ifeq ($(DWC2),0)
+CFLAGS_TARGET += -DCNF_DWC2=0
+endif
 IMAGE_TARGETS  := $(EXE_FILE).img
 
 # make DISP_SWAP_RB=1: 画面の赤と青が入れ替わって見えるとき、ファームウェアの
@@ -89,11 +94,13 @@ SRCS += kernel/sysdepend/rpi5/hw_setting.c \
 	device/gpio/gpio_rp1.c \
 	device/ser/uart_rp1.c \
 	device/ser/ser.c \
+	device/bt/bt_uart.c \
 	device/net/eth_rp1.c \
 	device/net/netdev.c \
 	device/sd/sdhci.c \
 	device/usb/usbdma.c \
 	device/usb/xhci.c \
+	device/usb/dwc2.c \
 	device/usb/usbcore.c \
 	device/usb/usbman.c \
 	device/usb/hub.c \
@@ -101,6 +108,7 @@ SRCS += kernel/sysdepend/rpi5/hw_setting.c \
 	device/usb/msc.c \
 	device/usb/uac.c \
 	device/usb/uvc.c \
+	$(SRCS_BT) \
 	device/usb/uusb.c \
 	device/snd/snd.c \
 	device/cam/cam.c \

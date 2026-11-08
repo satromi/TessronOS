@@ -1,0 +1,177 @@
+# 基本文章編集のパネル: the desktop's own and the process put up the same panels and write the
+# same record (design 11.3), for tools/ui_run.py. Two copies of 基本文章編集 with 30 paragraphs
+# (mkbig doc 30): letters picked by carrying the hand across them, then 文字サイズ > 数値指定
+# (one line asked: 14 taken back, 20 typed, Enter), 書式 > 新規タブ書式... (six labelled
+# boxes, Enter as they are) and 書式 > ルビ > ルビ（上） (one line asked: abc typed, Enter)
+# chosen from the menu opened at 300,250, and saved. Record 0 of both must be the same, byte
+# for byte; the shots of each panel up (doc_panel_k_*, doc_panel_p_*) are compared afterwards
+# where the panel stands (the window's middle: 140,160 to 660,460), and the text after
+# (101,125 to 682,482).
+# The menu opens with the item chosen last on the pointer's row, its rows 20 apart (閉じる,
+# a line, 保存, 表示, 編集, 書体, 文字修飾, 文字サイズ 140 below 閉じる, 文字色, 書式 180
+# below); a menu beside it opens with its first row on the row it hangs from (数値指定 320
+# below, 新規タブ書式... on it, ルビ 100 below and ルビ（上） on that). The desktop's first menu
+# has nothing chosen before it; the process's first one has 書式, chosen last by the
+# desktop's. While the desktop's menu or panel is up the desktop answers no sync.
+# Keys: Backspace 2A, Enter 28; Ctrl+S 16 01, Ctrl+E 08 01.
+docproc kernel
+mkbig doc 30
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+drag 160 170 420 170
+sync 600
+click 300 250 1
+wait 400
+move 330 390
+wait 300
+move 440 390
+wait 400
+move 440 710
+wait 300
+click 440 710
+wait 1000
+move 690 490
+wait 300
+shot doc_panel_k_size
+key 2A
+key 2A
+text 20
+wait 300
+key 28
+wait 500
+sync 600
+click 300 250 1
+wait 400
+move 330 290
+wait 300
+move 440 290
+wait 400
+move 440 290
+wait 300
+click 440 290
+wait 1000
+move 690 490
+wait 300
+shot doc_panel_k_tab
+key 28
+wait 500
+sync 600
+click 300 250 1
+wait 400
+move 330 250
+wait 300
+move 440 250
+wait 400
+move 440 350
+wait 400
+move 560 350
+wait 400
+click 560 350
+wait 1000
+move 690 490
+wait 300
+shot doc_panel_k_ruby
+text abc
+wait 300
+key 28
+wait 500
+sync 600
+move 690 490
+sync 600
+shot doc_panel_k_done
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig doc 30
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 800
+logmark
+drag 160 170 420 170
+expectsince document: drew
+logmark
+click 300 250 1
+expectsince document: menu
+wait 400
+move 330 210
+wait 300
+move 440 210
+wait 400
+move 440 530
+wait 300
+click 440 530
+expectsince document: text panel open
+wait 1000
+move 690 490
+wait 300
+shot doc_panel_p_size
+key 2A
+key 2A
+text 20
+wait 300
+logmark
+key 28
+expectsince document: text panel answered
+expectsince document: drew
+logmark
+click 300 250 1
+expectsince document: menu
+wait 400
+move 330 290
+wait 300
+move 440 290
+wait 400
+move 440 290
+wait 300
+click 440 290
+expectsince document: fields panel open
+wait 1000
+move 690 490
+wait 300
+shot doc_panel_p_tab
+logmark
+key 28
+expectsince document: fields panel answered
+expectsince document: drew
+logmark
+click 300 250 1
+expectsince document: menu
+wait 400
+move 330 250
+wait 300
+move 440 250
+wait 400
+move 440 350
+wait 400
+move 560 350
+wait 400
+click 560 350
+expectsince document: text panel open
+wait 1000
+move 690 490
+wait 300
+shot doc_panel_p_ruby
+text abc
+wait 300
+logmark
+key 28
+expectsince document: text panel answered
+expectsince document: drew
+wait 300
+move 690 490
+wait 300
+shot doc_panel_p_done
+logmark
+key 16 01
+expectsince document: saved (0)
+sum show
+same kernel
+key 08 01
+expect document: closed

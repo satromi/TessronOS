@@ -59,10 +59,20 @@ endif
 RPI4_CONFIG := $(OBJDIR)/config-rpi4.txt
 endif
 
+# make DWC2=0: USB-C のポートの DWC2 を調べず、使わない(設計書 3.6.7)
+ifeq ($(DWC2),0)
+CFLAGS_TARGET += -DCNF_DWC2=0
+endif
+
 # make PCIE_POLL=1: PCIe の先の xHCI を割込み(INTA)ではなく一定の間隔で見る
 ifeq ($(PCIE_POLL),1)
 CFLAGS_TARGET += -DCNF_PCIE_POLL=1
 endif
+
+# Wi-Fi(CYW43455、SDIO。設計書 09章 9.6.8)。ファームウェアを含むイメージになるので、
+# 既定は入れない。make WIFI=1 で入れる
+WIFI ?= 0
+include $(TOP)/build_make/wifi_arm.mk
 
 # ボード依存ソース(コア依存は sources.mk の SRCS_CORE)。メールボックス、時計、乱数は
 # Raspberry Pi 5 と共通(kernel/sysdepend/rpi)
@@ -82,6 +92,7 @@ SRCS += kernel/sysdepend/rpi4/hw_setting.c \
 	device/sd/sdhci.c \
 	device/usb/usbdma.c \
 	device/usb/xhci.c \
+	device/usb/dwc2.c \
 	device/usb/usbcore.c \
 	device/usb/usbman.c \
 	device/usb/hub.c \
@@ -89,6 +100,7 @@ SRCS += kernel/sysdepend/rpi4/hw_setting.c \
 	device/usb/msc.c \
 	device/usb/uac.c \
 	device/usb/uvc.c \
+	$(SRCS_BT) \
 	device/usb/uusb.c \
 	device/snd/snd.c \
 	device/cam/cam.c \
@@ -103,4 +115,7 @@ SD ?=
 # (boot.S がリンク番地 0x200000 へ写す)。デバイスツリーはファームウェアの配布物のもの
 RPI4_QEMU_DTB ?= obj/boot/bcm2711-rpi-4-b.dtb
 RPI4_QEMU_FLAGS := -M raspi4b -smp 4 -nographic -no-reboot
+# USB-C のポートの DWC2 に挿すキーボード(3.6.7)。usb_version=1 を足すとフルスピードになる
+RPI4_QEMU_USB ?= -device usb-kbd,id=dwkbd
+RPI4_QEMU_DWC2 ?=
 TEST_TMO ?= 900

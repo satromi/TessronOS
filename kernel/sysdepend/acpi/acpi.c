@@ -167,6 +167,10 @@ LOCAL void read_madt( CONST T_SDTHDR *h )
 				id = rd32(p, 4);
 				flags = rd32(p, 8);
 			}
+			/* the IDs that name no processor, for a firmware that lists a slot with one */
+			if ( ( p[0] == 0 && id == 0xff ) || id == 0xffffffffU ) {
+				break;
+			}
 			/*
 			 * Enabled (bit 0): started. Able to come online later
 			 * (bit 1 alone): counted and left, as the processors a

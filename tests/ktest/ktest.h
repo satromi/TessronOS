@@ -66,6 +66,15 @@ IMPORT ER   kt_inject( const T_HIDEV *ev );
 IMPORT ER   kt_sysobj( const char *box, const char *file, TS_UUID *p_uuid );
 IMPORT UB  *kt_obj_data( const TS_UUID *uuid, SZ *p_size );
 
+/*
+ * The system's face, as the desktop sets it when it starts: the suite
+ * that sets it (fn) runs only when the whole book is run, so a suite
+ * that draws letters, or starts a process that does, opens the face of
+ * the 書体箱 and makes it the system's when there is none yet. The
+ * system's face, or 0 when it cannot be had.
+ */
+IMPORT ID   kt_face( void );
+
 #define KT_ASSERT(cond) \
 	do { kt.asserts++; if ( !(cond) ) kt_fail(__FILE__, __LINE__, #cond, 0, 0); } while (0)
 
@@ -218,6 +227,8 @@ IMPORT void ktest_fat( void );
 IMPORT void ktest_proc( void );
 IMPORT void ktest_prcobj( void );
 IMPORT void ktest_pan( void );
+IMPORT void ktest_stkg( void );
+IMPORT void ktest_wg( void );
 IMPORT void ktest_cred( void );
 IMPORT void ktest_cxx( void );
 IMPORT void ktest_v8( void );
@@ -226,6 +237,7 @@ IMPORT void ktest_tsfs( void );
 IMPORT void ktest_tsfsblk( void );
 IMPORT void ktest_tsfscut( void );
 IMPORT void ktest_iob( void );
+IMPORT void ktest_nicring( void );
 IMPORT void ktest_tsfsbtree( void );
 IMPORT void ktest_tsfsjrnl( void );
 IMPORT void ktest_tsfsobj( void );
@@ -235,6 +247,9 @@ IMPORT void ktest_tad( void );
 IMPORT void ktest_om( void );
 IMPORT void ktest_pcie( void );
 IMPORT void ktest_usb( void );
+IMPORT void ktest_bt( void );
+IMPORT void ktest_btuart( void );
+IMPORT void ktest_emu( void );
 IMPORT void ktest_digi( void );
 IMPORT void ktest_tpanel( void );
 IMPORT void ktest_snd( void );

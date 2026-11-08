@@ -22,6 +22,7 @@
 #include <ts/mn.h>
 #include <ts/sysdef.h>
 #include <ts/cabmenu.h>
+#include <ts/figedit.h>
 
 typedef struct {
 	CONST char	*code;
@@ -52,10 +53,9 @@ LOCAL CONST CODECMD cab_cmds[] = {
 
 #define NCMD	( (INT)( sizeof(cab_cmds) / sizeof(cab_cmds[0]) ) )
 
-/* The items that act on what is taken, grey when nothing is */
+/* The items that act on what is taken, grey when nothing is; 保護 is by what it can change (st->prot) */
 LOCAL CONST char * CONST on_pick[] = {
-	"copy", "cut", "delete", "front", "back", "arrange",
-	"fix", "unfix", "bg", "unbg"
+	"copy", "cut", "delete", "front", "back", "arrange"
 };
 
 EXPORT ER cab_menu_make( CONST T_CABMENU *st, ID *p_mid )
@@ -68,7 +68,7 @@ EXPORT ER cab_menu_make( CONST T_CABMENU *st, ID *p_mid )
 	if ( st == NULL || p_mid == NULL ) {
 		return E_PAR;
 	}
-	er = ts_str_to_uuid(SYSDEF_MENU_CAB, &def);
+	er = ts_str_to_uuid(( st->def != NULL ) ? st->def : SYSDEF_MENU_CAB, &def);
 	if ( er >= E_OK ) {
 		er = mn_cre_men(&def, &mid);
 	}
@@ -78,6 +78,7 @@ EXPORT ER cab_menu_make( CONST T_CABMENU *st, ID *p_mid )
 	for ( i = 0; i < (INT)( sizeof(on_pick) / sizeof(on_pick[0]) ); i++ ) {
 		(void)mn_chg_atr(mid, NULL, on_pick[i], ( st->npick == 0 ) ? MN_GREY : 0);
 	}
+	fe_prot_grey(mid, ( st->npick == 0 ) ? 0 : st->prot);
 	(void)mn_chg_atr(mid, NULL, "save.new", st->can_save_new ? 0 : MN_GREY);
 	(void)mn_chg_atr(mid, NULL, "fullscreen", st->full ? MN_TICK : 0);
 	(void)mn_chg_atr(mid, NULL, "hidden", st->show_hidden ? MN_TICK : 0);

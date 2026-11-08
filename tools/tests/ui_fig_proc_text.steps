@@ -1,0 +1,74 @@
+# 基本図形編集のプロセスで文字枠を編集する (design 11.3), for tools/ui_run.py: a figure of
+# 30 small rectangles, two zigzag lines and one piece of text "ABC" (mkbig fig 30 4 1; its box
+# from 100,120 to 220,160 of the figure, 210,247 to 330,287 on the screen). The same is done
+# with the desktop's figure editor and with the one running as a process: the text pressed
+# twice to edit it, the caret put at the head of its line, the letter after it deleted, the
+# caret put at the end, letters typed in 英語 (in the width the input mode says), かな typed
+# after ひらがなカタカナ and committed with Enter, 英数 back to 英語, the paragraph broken,
+# Escape to end it, the figure saved. Record 0 comes out the same, byte for byte.
+# Keys: Home 4A, Delete 4C, End 4D, Enter 28, Esc 29, ひらがなカタカナ 88, 英数 39;
+# with Ctrl (01) S 16, E 08.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 30 4 1
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+dclick 215 255
+sync 600
+key 4A
+key 4C
+key 4D
+text xy
+key 88
+text kana
+sync 600
+shot text_kernel_kana
+key 28
+key 39
+key 28
+sync 600
+shot text_kernel_typing
+key 29
+sync 600
+key 16 01
+sync 600
+shot text_kernel
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 30 4 1
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 33
+wait 500
+logmark
+dclick 215 255
+expectsince figure: text editing begun
+key 4A
+key 4C
+key 4D
+text xy
+key 88
+text kana
+wait 300
+shot text_process_kana
+key 28
+key 39
+key 28
+wait 300
+shot text_process_typing
+logmark
+key 29
+expectsince figure: text editing ended
+logmark
+key 16 01
+expectsince figure: saved (0)
+shot text_process
+sum show
+same kernel
+key 08 01
+expect figure: closed

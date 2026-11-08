@@ -10,7 +10,7 @@
 # chosen, which leaves the archive empty.
 click 990 48
 wait 300
-drag 960 380 250 60
+linkdrag 原紙箱 空書庫 250 60
 wait 1000
 key 28
 wait 800
@@ -21,7 +21,7 @@ drag 500 163 800 413
 wait 500
 shot arc_empty
 # the window's work area is at 510,428 from here
-drag 315 331 760 716
+drag 315 323 760 716
 expect archive: found 1 objects
 expect archive: asked to make
 wait 500
@@ -56,7 +56,7 @@ key 28
 expect archive: unpacked 1 objects
 wait 1000
 shot arc_unpacked
-drag 315 331 760 716
+drag 315 323 760 716
 expect archive: drop refused
 click 760 716
 wait 500

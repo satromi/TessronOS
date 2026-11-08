@@ -15,10 +15,11 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "tessronos-worddic",
       "kind": "accessory",
       "name": "単語登録",
-      "version": "R1.200",
+      "version": "R1.300",
       "menu": true,
       "builtin": false,
       "base": []

@@ -27,10 +27,6 @@
     "tessronos-techo": {
       "name": "電子手帳",
       "defaultOpen": true
-    },
-    "basic-text-editor": {
-      "name": "基本文章編集",
-      "defaultOpen": false
     }
   }
 }

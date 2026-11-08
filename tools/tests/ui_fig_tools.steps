@@ -8,6 +8,8 @@
 # lines red), 塗りつぶし with one of the fixed patterns (its inside filled with it), 角丸
 # with 10 typed into its box and Enter; each put away with Escape. Last, 塗りつぶし's
 # 〈パターン編集...〉 opens the pattern editor.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
 open 019a0f91-066f-706f-93da-ffe8150d6207
 wait 2500
 win 画用紙

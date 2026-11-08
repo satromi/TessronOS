@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ts/vobjsz.h>
 #include <ts/sysdef.h>
 #include <ts/obdrop.h>
 #include <ts/obatr.h>
@@ -194,7 +195,7 @@ static void look_of_book( void )
 	w = dp_text_width((const UB *)name, 14) + 40;
 	if ( !a->hasroot || look.w < 40 || look.h < 12 ) {
 		look.w = 0;
-		look.h = 25;
+		look.h = VOBJ_CLOSED_H(14, 1, 1);	/* closed, at 14 */
 		look.chsz = 14;
 		look.frcol = look.chcol = 0x00000000;
 		look.tbcol = look.bgcol = 0x00FFFFFF;

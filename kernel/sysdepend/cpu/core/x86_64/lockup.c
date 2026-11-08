@@ -218,7 +218,7 @@ LOCAL void lk_say_frames( CONST char *pre, UBINT fp, UBINT lo, UBINT hi )
 	UBINT	next;
 
 	for ( i = 0; i < 10; i++ ) {
-		if ( fp < lo || fp + 16 > hi || ( fp & 0xf ) != 0 ) {
+		if ( fp == 0 || fp < lo || fp + 16 > hi || ( fp & 0xf ) != 0 ) {
 			break;
 		}
 		if ( ((UD *)fp)[1] == 0 ) {

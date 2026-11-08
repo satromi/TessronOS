@@ -39,6 +39,7 @@
 #include <tm/tmonitor.h>
 #include <ts/time.h>
 #include <ts/snd.h>
+#include <ts/pm.h>
 #include "sysdepend.h"
 #include "usbdev.h"
 #if defined(PCIE_ECAM_PA) || defined(PCIE_CFG_BOARD)
@@ -211,6 +212,42 @@ LOCAL USBDEV *dev_at( USBHC *hc, USBDEV *parent, INT port )
 	return NULL;
 }
 
+/*
+ * A USB 3 hub is two hubs on the bus, one SuperSpeed and one for USB 2 and
+ * slower, and each names itself. Two hubs are taken for the halves of one
+ * when they have the same vendor, one speed class each and the same place:
+ * both on root ports, or on the same port of hubs that are halves of one.
+ * The root ports of the halves differ, so that place says nothing there.
+ */
+LOCAL BOOL hub_halves( USBDEV *a, USBDEV *b )
+{
+	if ( a == NULL || b == NULL || a == b || a->hc != b->hc
+	  || a->role != USB_ROLE_HUB || b->role != USB_ROLE_HUB
+	  || ( a->speed >= USB_SPEED_SUPER ) == ( b->speed >= USB_SPEED_SUPER )
+	  || a->ddesc[8] != b->ddesc[8] || a->ddesc[9] != b->ddesc[9] ) {
+		return FALSE;
+	}
+	if ( a->parent == NULL || b->parent == NULL ) {
+		return ( a->parent == b->parent );
+	}
+
+	return ( a->port == b->port && hub_halves(a->parent, b->parent) );
+}
+
+/* The other half of a USB 3 hub, or NULL, for the log */
+EXPORT USBDEV *knl_usb_hub_other_half( USBDEV *hub )
+{
+	INT	i;
+
+	for ( i = 0; i < dev_cap; i++ ) {
+		if ( hub_halves(hub, dev_tbl[i]) ) {
+			return dev_tbl[i];
+		}
+	}
+
+	return NULL;
+}
+
 LOCAL USBDEV *dev_of_handle( INT handle )
 {
 	INT	i = (handle & USB_DEV_SLOTS) - 1;
@@ -229,6 +266,9 @@ LOCAL USBDEV *dev_of_handle( INT handle )
 IMPORT BOOL	knl_cdcnet_match( USBDEV *dev );	/* device/usb/x86_64/cdcnet.c */
 IMPORT ER	knl_cdcnet_attach( USBDEV *dev );
 IMPORT void	knl_cdcnet_detach( USBDEV *dev );
+IMPORT BOOL	knl_usbven_match( USBDEV *dev );	/* device/usb/x86_64/usbven.c */
+IMPORT ER	knl_usbven_attach( USBDEV *dev );
+IMPORT void	knl_usbven_detach( USBDEV *dev );
 #endif
 
 IMPORT void	knl_xhci_port_say( USBHC *hc, INT port, BOOL conn );	/* xhci.c */
@@ -261,8 +301,10 @@ LOCAL void detach_tree( USBDEV *dev, CONST char *why )
 	if ( dev->user != NULL ) {
 		knl_uusb_detach(dev);
 	}
+	knl_bt_detach(dev);
 #ifdef X64
 	knl_cdcnet_detach(dev);
+	knl_usbven_detach(dev);
 #endif
 	USB_LOG("usb: %d-%d route %05x addr %d gone (%s)\n", dev->hc->index,
 		dev->root_port, dev->route, dev->addr, why);
@@ -289,6 +331,9 @@ LOCAL void give_role( USBDEV *dev )
 {
 	INT	cls = knl_usb_dev_class(dev);
 	ER	er;
+#ifdef X64
+	BOOL	netven;
+#endif
 
 	if ( cls == USB_CLASS_HUB ) {
 		er = knl_hub_attach(dev);
@@ -304,6 +349,14 @@ LOCAL void give_role( USBDEV *dev )
 			dev->role = USB_ROLE_HID;
 		}
 	}
+	/* a Bluetooth adapter */
+	if ( dev->role == USB_ROLE_NONE && knl_bt_match(dev) ) {
+		ER	e = knl_bt_attach(dev);
+
+		if ( e < E_OK ) {
+			USB_LOG("bt: the adapter not usable (%d)\n", (INT)e);
+		}
+	}
 	/* a camera, its microphone taken below */
 	if ( dev->role == USB_ROLE_NONE && knl_uvc_match(dev) ) {
 		if ( knl_uvc_attach(dev) >= E_OK ) {
@@ -317,8 +370,21 @@ LOCAL void give_role( USBDEV *dev )
 		}
 	}
 #ifdef X64
+	/*
+	 * A network adapter whose numbers name a chip of usbven.c. When it cannot
+	 * use the adapter, the adapter goes on to the class driver below
+	 */
+	netven = FALSE;
+	if ( dev->role == USB_ROLE_NONE && knl_usbven_match(dev) ) {
+		ER	e = knl_usbven_attach(dev);
+
+		netven = ( e >= E_OK );
+		if ( e < E_OK ) {
+			USB_LOG("usb: lan: the maker's protocol not usable (%d)\n", (INT)e);
+		}
+	}
 	/* a network adapter of the communications class, in any of its configurations */
-	if ( dev->role == USB_ROLE_NONE && knl_cdcnet_match(dev) ) {
+	if ( !netven && dev->role == USB_ROLE_NONE && knl_cdcnet_match(dev) ) {
 		ER	e = knl_cdcnet_attach(dev);
 
 		if ( e < E_OK ) {
@@ -747,6 +813,42 @@ LOCAL void hc_lost( USBHC *hc )
 	if ( hc->ignored != NULL ) knl_memset(hc->ignored, 0, hc->nignored);
 }
 
+#ifdef X64
+/*
+ * The machine asleep: nothing talks to a device from here to the waking,
+ * the manager's lock being held by the sleep's task. A controller that
+ * lost its state has its devices let go and found again: a disk the system
+ * was on comes back as a disk put back does (11.26).
+ */
+LOCAL ER usb_pm_suspend( void *arg, INT how )
+{
+	INT	i;
+
+	knl_usb_lock();
+	for ( i = 0; i < nhc; i++ ) {
+		if ( hc_tbl[i]->ops->pm_suspend != NULL ) (void)(*hc_tbl[i]->ops->pm_suspend)(hc_tbl[i]);
+	}
+	return E_OK;
+}
+
+LOCAL void usb_pm_resume( void *arg, INT how )
+{
+	INT	i;
+	BOOL	again = FALSE;
+
+	for ( i = 0; i < nhc; i++ ) {
+		if ( hc_tbl[i]->ops->pm_resume != NULL && (*hc_tbl[i]->ops->pm_resume)(hc_tbl[i]) < E_OK ) {
+			hc_lost(hc_tbl[i]);
+			again = TRUE;
+		}
+	}
+	knl_usb_unlock();
+	if ( again ) (void)ts_usb_rescan();
+}
+
+LOCAL CONST T_PMDEV	usb_pm = { "usb", PM_ORD_USB, usb_pm_suspend, usb_pm_resume, NULL };
+#endif /* X64 */
+
 /* ---------------------------------------------------------------- task */
 
 /*
@@ -800,6 +902,8 @@ LOCAL void irq_report( void )
 	}
 }
 
+LOCAL BOOL add_hc( USBHC *hc );
+
 LOCAL void usb_task( INT stacd, void *exinf )
 {
 	UW	last_hub = 0, obj_gen = 0;
@@ -824,8 +928,30 @@ LOCAL void usb_task( INT stacd, void *exinf )
 			} else {
 				tmo = TMO_FEVR;
 			}
+#if defined(RPI4) || defined(RPI5)
+			if ( knl_dwc2_probing() && ( tmo < 0 || tmo > DWC2_PROBE_STEP_MS ) ) {
+				tmo = DWC2_PROBE_STEP_MS;
+			}
+#endif
 			tk_wai_flg(usb_flg, USBF_IRQ | USBF_RESCAN | USBF_HUB | USBF_STREAM,
 				   TWF_ORW | TWF_CLR, &ptn, tmo);
+#if defined(RPI4) || defined(RPI5)
+			/*
+			 * After the first scan, so that nothing that waits for it waits
+			 * for this, and outside the lock, so that the disks do not. The
+			 * block is the manager's own until it joins the controllers.
+			 */
+			if ( knl_dwc2_probing() ) {
+				USBHC	*dw;
+
+				if ( knl_dwc2_probe_step(&dw) ) {
+					knl_usb_lock();
+					add_hc(dw);
+					knl_usb_unlock();
+					ptn |= USBF_RESCAN;
+				}
+			}
+#endif
 		}
 		knl_usb_lock();
 		serve_controllers();
@@ -893,7 +1019,7 @@ LOCAL BOOL add_hc( USBHC *hc )
 	hc->index = nhc;
 	hc_tbl[nhc] = hc;
 	nhc++;
-	if ( hc->intno == 0 ) {
+	if ( hc->intno == 0 || hc->poll_too ) {
 		polled_hc = TRUE;
 	}
 	return TRUE;
@@ -1095,6 +1221,9 @@ EXPORT INT knl_usb_init( void )
 	if ( usb_lock_id <= 0 || first_scan_sem <= 0 || usb_flg <= 0 || knl_uusb_init() < E_OK ) {
 		return E_LIMIT;
 	}
+#ifdef X64
+	(void)ts_pm_register(&usb_pm);
+#endif
 
 #if defined(PCIE_ECAM_PA) || defined(PCIE_CFG_BOARD)
 	find_pci();
@@ -1102,13 +1231,31 @@ EXPORT INT knl_usb_init( void )
 #ifdef RPI5
 	find_rp1();
 #endif
+#if defined(RPI4) || defined(RPI5)
+	{
+		USBHC	*dw;
+
+		if ( knl_dwc2_find(usb_flg, &dw) >= E_OK ) {
+			add_hc(dw);
+		}
+	}
+#endif
+#if defined(RPI4) || defined(RPI5)
+	if ( nhc == 0 && !knl_dwc2_probing() ) {
+#else
 	if ( nhc == 0 ) {
+#endif
 		return 0;			/* the machine has no controller */
 	}
 	for ( i = 0; i < nhc; i++ ) {
 		T_USBHC	info;
 
 		hc_tbl[i]->ops->info(hc_tbl[i], &info);
+		if ( info.ctx_size == 0 ) {
+			tm_printf((UB *)"TessronOS: usb%d USB 2.0, %d port, interrupt %d\n", i,
+				  (INT)info.nports, (INT)info.intno);
+			continue;
+		}
 		tm_printf((UB *)"TessronOS: xhci%d %d.%d, %d ports, %d slots, ctx %d, "
 			  "%d scratch, interrupt %d\n", i,
 			  (INT)(info.version >> 8), (INT)((info.version >> 4) & 0xf),

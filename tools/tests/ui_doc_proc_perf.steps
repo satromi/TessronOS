@@ -1,0 +1,358 @@
+# 基本文章編集のキーから画面までの時間を、同じ実行の中で比べる (design 11.3), for
+# tools/ui_run.py: a text of 200 paragraphs (mkbig doc 200) opened by the desktop's own text
+# editor (open, docproc kernel) and by the text editor running as a process (pdoc) in turn,
+# three times each, so that both are measured under the same load of the machine. Each time
+# the caret is put in the second paragraph and ten letters are typed one at a time, each
+# waited for before the next: the desktop's with sync, the process's by its line. Compared:
+# "desktop: document key to screen US us" and "document: key to screen US us" (from the key,
+# as the keyboard told it, to the window shown; the desktop builds the screen there for the
+# line, as the process's wm_obj_flush does), with what each took of it (came, edited, built
+# or drawn from), and the process's "drew in" (letters: the calls of the letters). Closed with
+# Ctrl+E, which saves what was typed; each round makes its copy again.
+# Keys: a..j 04..0d; Ctrl+E 08 01.
+docproc kernel
+# round 1
+mkbig doc 200
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 800
+click 300 170
+sync 600
+wait 300
+logmark
+key 04
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 05
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 06
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 07
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 08
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 09
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 0a
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 0b
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 0c
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 0d
+sync 600
+expectsince desktop: document key to screen
+wait 200
+key 08 01
+sync 600
+wait 500
+mkbig doc 200
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 200
+wait 800
+logmark
+click 300 170
+expectsince document: drew
+wait 300
+logmark
+key 04
+expectsince document: key to screen
+wait 200
+logmark
+key 05
+expectsince document: key to screen
+wait 200
+logmark
+key 06
+expectsince document: key to screen
+wait 200
+logmark
+key 07
+expectsince document: key to screen
+wait 200
+logmark
+key 08
+expectsince document: key to screen
+wait 200
+logmark
+key 09
+expectsince document: key to screen
+wait 200
+logmark
+key 0a
+expectsince document: key to screen
+wait 200
+logmark
+key 0b
+expectsince document: key to screen
+wait 200
+logmark
+key 0c
+expectsince document: key to screen
+wait 200
+logmark
+key 0d
+expectsince document: key to screen
+wait 200
+logmark
+key 08 01
+expectsince document: closed
+wait 500
+# round 2
+mkbig doc 200
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 800
+click 300 170
+sync 600
+wait 300
+logmark
+key 04
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 05
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 06
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 07
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 08
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 09
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 0a
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 0b
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 0c
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 0d
+sync 600
+expectsince desktop: document key to screen
+wait 200
+key 08 01
+sync 600
+wait 500
+mkbig doc 200
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 200
+wait 800
+logmark
+click 300 170
+expectsince document: drew
+wait 300
+logmark
+key 04
+expectsince document: key to screen
+wait 200
+logmark
+key 05
+expectsince document: key to screen
+wait 200
+logmark
+key 06
+expectsince document: key to screen
+wait 200
+logmark
+key 07
+expectsince document: key to screen
+wait 200
+logmark
+key 08
+expectsince document: key to screen
+wait 200
+logmark
+key 09
+expectsince document: key to screen
+wait 200
+logmark
+key 0a
+expectsince document: key to screen
+wait 200
+logmark
+key 0b
+expectsince document: key to screen
+wait 200
+logmark
+key 0c
+expectsince document: key to screen
+wait 200
+logmark
+key 0d
+expectsince document: key to screen
+wait 200
+logmark
+key 08 01
+expectsince document: closed
+wait 500
+# round 3
+mkbig doc 200
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 800
+click 300 170
+sync 600
+wait 300
+logmark
+key 04
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 05
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 06
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 07
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 08
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 09
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 0a
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 0b
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 0c
+sync 600
+expectsince desktop: document key to screen
+wait 200
+logmark
+key 0d
+sync 600
+expectsince desktop: document key to screen
+wait 200
+key 08 01
+sync 600
+wait 500
+mkbig doc 200
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 200
+wait 800
+logmark
+click 300 170
+expectsince document: drew
+wait 300
+logmark
+key 04
+expectsince document: key to screen
+wait 200
+logmark
+key 05
+expectsince document: key to screen
+wait 200
+logmark
+key 06
+expectsince document: key to screen
+wait 200
+logmark
+key 07
+expectsince document: key to screen
+wait 200
+logmark
+key 08
+expectsince document: key to screen
+wait 200
+logmark
+key 09
+expectsince document: key to screen
+wait 200
+logmark
+key 0a
+expectsince document: key to screen
+wait 200
+logmark
+key 0b
+expectsince document: key to screen
+wait 200
+logmark
+key 0c
+expectsince document: key to screen
+wait 200
+logmark
+key 0d
+expectsince document: key to screen
+wait 200
+logmark
+key 08 01
+expectsince document: closed
+wait 500

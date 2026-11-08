@@ -172,6 +172,7 @@ SYSCALL ID tk_cre_tsk( CONST T_CTSK *pk_ctsk )
 		}
 #endif
 		sstksz  = (sstksz  + 7) / 8 * 8;	/* Align to a multiple of 8 */
+		sstksz  = knl_sstk_round(sstksz, pk_ctsk->tskatr);
 		stack = knl_sstk_alloc(sstksz, pk_ctsk->tskatr);
 		if ( stack == NULL ) {
 			return E_NOMEM;
@@ -383,6 +384,9 @@ SYSCALL ER tk_del_tsk( ID tskid )
 		}
 		CpuRelax();
 	}
+#if USE_IMALLOC
+	knl_sstk_trim();
+#endif
 
 	return ercd;
 }

@@ -1,0 +1,129 @@
+# 基本図形編集の線の端の取っ手と変形を、デスクトップの図形編集とプロセスの図形編集で同じに使う
+# (design 11.3, 17.13), for tools/ui_run.py. A figure of one rectangle and two zigzag lines
+# (mkbig fig 1 2 0) opened at 100,100; its 道具パネル at the top of the screen (100,0), the
+# first row's middles at y 48 and the second's at 82, 34 apart from x 128 (選択 298,48; 直線
+# 162,82; 多角形 332,82). A line drawn from 300,250 to 500,250 (it is then picked), the
+# pointer taken, and its end at 500,250 carried to 540,300. A polygon of three corners
+# (300,450 400,450 350,550, Enter; the corners pressed further apart in time than a double
+# press) drawn and picked; 変形 from the menu. The menu opens with the item chosen last on
+# the pointer's row: the first time 閉じる, 図形操作 five rows under it; the second time, the
+# system's menus remembering, 図形操作. Its own menu opens beside it with 取消 on its row and
+# 変形 two rows under, the line between them. Its corner at 400,450
+# carried to 430,480; Escape ends it. Saved, record 0 comes out the same, byte for byte.
+# Keys: Esc 29, Enter 28; Ctrl+S 16 01, Ctrl+E 08 01.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 1 2 0
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+click 162 82
+wait 300
+drag 300 250 500 250
+wait 400
+click 298 48
+wait 300
+drag 500 250 540 300
+wait 400
+shot scmp_k_end
+click 332 82
+wait 300
+click 300 450
+wait 700
+click 400 450
+wait 700
+click 350 550
+wait 700
+key 28
+wait 400
+click 298 48
+wait 300
+click 600 400 1
+wait 500
+move 610 500
+wait 400
+move 720 500
+wait 150
+move 720 540
+wait 300
+shot scmp_k_menu
+click 720 540
+wait 500
+shot scmp_k_transform
+drag 400 450 430 480
+wait 400
+shot scmp_k_moved
+key 29
+wait 300
+sync 600
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 2 0
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 3
+wait 800
+logmark
+click 162 82
+expectsince figure: tool 3
+drag 300 250 500 250
+expectsince figure: drawn
+logmark
+click 298 48
+expectsince figure: tool 0
+drag 500 250 540 300
+expectsince figure: line end held
+expectsince figure: line end put
+wait 300
+shot scmp_p_end
+logmark
+click 332 82
+expectsince figure: tool 8
+click 300 450
+wait 700
+click 400 450
+wait 700
+click 350 550
+wait 700
+key 28
+expectsince figure: drawn
+logmark
+click 298 48
+expectsince figure: tool 0
+logmark
+click 600 400 1
+expectsince figure: menu
+wait 500
+move 610 400
+wait 400
+move 720 400
+wait 300
+shot scmp_p_menu
+move 720 440
+wait 300
+click 720 440
+expectsince figure: transform begun
+wait 500
+shot scmp_p_transform
+logmark
+drag 400 450 430 480
+expectsince figure: transform handle held
+expectsince figure: transformed
+wait 300
+shot scmp_p_moved
+logmark
+key 29
+expectsince figure: transform ended
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum show
+same kernel
+key 08 01
+expect figure: closed

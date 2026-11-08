@@ -326,6 +326,8 @@ IMPORT BOOL	knl_acpi_power_pressed( BOOL array );	/* acpi_power.c */
  * (array, acpi_power.c). A firmware that tells of one press both ways
  * is taken once.
  */
+IMPORT BOOL	knl_pm_button( void );		/* kernel/sysdepend/x64/pm.c */
+
 LOCAL void power_button( BOOL array )
 {
 	ER	er;
@@ -334,6 +336,7 @@ LOCAL void power_button( BOOL array )
 		tm_printf((UB *)"acpi: the power button: the same press, told the other way too\n");
 		return;
 	}
+	if ( knl_pm_button() ) return;
 	tm_printf((UB *)"acpi: the power button: the session ends and the machine turns off\n");
 	er = knl_obsys_write(OB_SYS_POWER, (CONST UB *)"OFF", 3);
 	if ( er < E_OK ) {

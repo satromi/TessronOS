@@ -1,0 +1,41 @@
+# 実行 (design 11.3), for tools/ui_run.py: an object made from the template of
+# スライド offers スライド and 基本文章編集 and nothing of its kind; an object
+# with twelve 機能付箋 shows the twelve, and the last of them runs the twelfth
+# program, マイクロスクリプト, whose message says it has no script.
+wait 15000
+click 990 48
+wait 800
+click 200 15
+wait 800
+drag 960 263 200 195
+wait 1500
+key 28
+wait 1500
+click 200 195
+wait 300
+click 200 195 1
+wait 800
+move 208 435
+wait 1000
+shot exec_template
+click 800 700
+wait 800
+click 800 700
+wait 800
+apps 019a4370-3819-79a2-9758-881e1e0de90a basic-text-editor basic-figure-editor virtual-object-list basic-calc-editor basic-slide base-calendar tessronos-microcard tessronos-techo web-browser archive-manager kana-typing-trainer microscript
+click 60 131
+wait 300
+click 60 131 1
+wait 800
+move 68 372
+wait 800
+move 150 372
+wait 200
+move 220 592
+wait 500
+shot exec_many
+click 220 592
+expect desktop: chosen exec.app
+wait 3000
+shot exec_many_ran
+absent !OACV!

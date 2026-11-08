@@ -48,6 +48,7 @@
 #include "../ktest.h"
 #include "../../../device/i2c/x86_64/i2c.h"
 #include "../../../device/nvme/nvme.h"
+#include "../../../kernel/sysdepend/x64/vmd.h"
 
 #ifdef X64
 
@@ -149,9 +150,11 @@ LOCAL void test_ps2( void )
 	n = knl_hid_list(h, 16);
 	for ( i = 0; i < n && i < 16; i++ ) {
 		if ( h[i].usbdev != 0 ) continue;
-		nps2++;
 		KT_ASSERT_ER(knl_obinput_uuid(h[i].id, &u), E_OK);
 		KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
+		/* not USB is not yet the i8042: the touch panels of the group tpanel, run before, stay listed */
+		if ( r.name[0] != 'p' || r.name[1] != 's' || r.name[2] != '2' ) continue;
+		nps2++;
 		KT_ASSERT_EQ(r.sub, OB_S_INPUT);
 		KT_ASSERT(in_list(&u));
 		KT_ASSERT(h[i].keyboard ? ( r.name[3] == 'k' ) : ( r.name[3] == 'a' ));	/* ps2kbd, ps2aux */
@@ -386,6 +389,37 @@ LOCAL void test_vtd( void )
 }
 
 /*
+ * Every function bus 0 answers for is in the table, however many the machine
+ * has: read from the bus itself and from the table (more than the table's first
+ * size with tools/x64/ktest64.sh's EXTRA adding root ports, as a PC's chipset has)
+ */
+LOCAL void test_pci_all( void )
+{
+	T_PCIDEV	d;
+	INT		i, seen = 0, listed = 0;
+	UINT		dv, fn;
+
+	if ( knl_vmd_sim_on ) KT_SKIP("vmdsim took a function off the table");
+	for ( dv = 0; dv < 32; dv++ ) {
+		for ( fn = 0; fn < 8; fn++ ) {
+			UW	id = ts_pcie_cfg_read(0, dv, fn, 0, 4);
+
+			if ( ( id & 0xffff ) == 0xffff || id == 0 ) {
+				if ( fn == 0 ) break;
+				continue;
+			}
+			seen++;
+			if ( fn == 0 && ( ts_pcie_cfg_read(0, dv, 0, 0x0e, 1) & 0x80 ) == 0 ) break;
+		}
+	}
+	for ( i = 0; ts_pcie_get(i, &d) == E_OK; i++ ) {
+		if ( d.bus == 0 ) listed++;
+	}
+	tm_printf((UB *)"  bus 0 has %d functions, %d in all with the buses behind it\n", seen, i);
+	KT_ASSERT_EQ(listed, seen);
+}
+
+/*
  * Each xHCI's and Intel Ethernet card's interrupt: MSI-X when it has
  * it, else MSI, else its line through the _PRT (the run decides which:
  * a controller made with msix=off, msi=off, or the e1000 that has
@@ -474,6 +508,79 @@ LOCAL BOOL nv_same( CONST UB *b, INT n, UW seed )
  * nvme), the interrupts arrive as its reads complete, none is found by
  * the look in their place, and the device's object shows their count
  */
+/*
+ * Intel VMD. The numbers of its registers and messages; and with the
+ * start-up setting vmdsim, a real NVMe controller shown behind a made-up
+ * one: new bus numbers and windows from the host's range, through the
+ * port's window, with interrupts, and the disk read on all that.
+ */
+LOCAL void test_vmd( void )
+{
+	T_PCIDEV	d;
+	T_NVSTAT	a, b;
+	UD		addr, base, limit, bar;
+	UW		data;
+	UINT		sec, intno;
+	INT		k;
+	BOOL		found = FALSE;
+	ID		dd;
+	SZ		asz;
+	UB		*buf;
+
+	KT_ASSERT_EQ(knl_vmd_first_bus(0, 0, FALSE), 0);
+	KT_ASSERT_EQ(knl_vmd_first_bus(0, 0x200, TRUE), 0);		/* VMCAP says it cannot move */
+	KT_ASSERT_EQ(knl_vmd_first_bus(1, 0x000, TRUE), 0);
+	KT_ASSERT_EQ(knl_vmd_first_bus(1, 0x100, TRUE), 128);
+	KT_ASSERT_EQ(knl_vmd_first_bus(1, 0x200, TRUE), 224);
+	KT_ASSERT_EQ(knl_vmd_first_bus(1, 0x300, TRUE), 224);
+	knl_vmd_child_msg(5, &addr, &data);
+	KT_ASSERT(addr == 0xfee05000ULL);
+	KT_ASSERT_EQ(data, 0);
+
+	if ( !knl_vmd_sim_on ) KT_SKIP("not started with vmdsim");
+	for ( k = 0; ts_pcie_find(0x01, 0x08, 0x02, k, &d) == E_OK; k++ ) {
+		if ( PCI_BUS_SEG(d.bus) != 0 ) {
+			found = TRUE;
+			break;
+		}
+	}
+	KT_ASSERT(found);
+	knl_vmd_sim_port(&sec, &base, &limit);
+	bar = d.bar[0];
+	tm_printf((UB *)"  behind the made-up VMD: bus %x, window %lx, the port's %lx-%lx\n", d.bus, bar, base, limit);
+	KT_ASSERT_EQ(PCI_BUS_NUM(d.bus), sec);
+	KT_ASSERT(sec > 224);
+	KT_ASSERT(bar >= base && bar + d.bar_size[0] - 1 <= limit);
+	KT_ASSERT(( bar >> 38 ) != 0);
+	KT_ASSERT_EQ(ts_pcie_cfg_read(d.bus, d.dev, d.fn, PCI_BAR0 + 4, 4), (UW)( bar >> 32 ));
+	KT_ASSERT_EQ(ts_pcie_irq_kind(&d, &intno), PCI_IRQ_MSIX);
+	KT_ASSERT(intno != 0);
+
+	KT_ASSERT_ER(knl_nvme_stat((CONST UB *)"nvmeb", &a), E_OK);
+	KT_ASSERT_EQ(a.state, NV_LIVE);
+	KT_ASSERT_EQ(a.intno, intno);
+	dd = tk_opn_dev((UB *)"nvmeb", TD_READ);
+	KT_ASSERT(dd > 0);
+	buf = (UB *)Kmalloc(65536);
+	KT_ASSERT(buf != NULL);
+	for ( k = 0; k < 8 && dd > 0 && buf != NULL; k++ ) {
+		KT_ASSERT_ER(tk_srea_dev(dd, k * 128, buf, 65536, &asz), E_OK);
+	}
+	/* its interrupt moved to another processor keeps working */
+	if ( knl_num_prc >= 2 ) {
+		KT_ASSERT_ER(SetIntTarget(intno, 2), E_OK);
+		KT_ASSERT_ER(tk_srea_dev(dd, 0, buf, 65536, &asz), E_OK);
+	}
+	KT_ASSERT_ER(knl_nvme_stat((CONST UB *)"nvmeb", &b), E_OK);
+	tm_printf((UB *)"  reads: %u interrupts, %u commands, %u without their interrupt\n",
+		  b.nint - a.nint, b.ncmd - a.ncmd, b.nlate - a.nlate);
+	KT_ASSERT(b.ncmd - a.ncmd >= 8);
+	KT_ASSERT(b.nint - a.nint >= 8);
+	KT_ASSERT_EQ(b.nlate - a.nlate, 0);
+	if ( buf != NULL ) Kfree(buf);
+	if ( dd > 0 ) tk_cls_dev(dd, 0);
+}
+
 LOCAL void test_nvme( void )
 {
 	T_NVSTAT	a, b;
@@ -710,8 +817,10 @@ EXPORT void ktest_pcdev( void )
 	KT_RUN(test_sata);
 	KT_RUN(test_e1k);
 	KT_RUN(test_hid_i2c);
+	KT_RUN(test_pci_all);
 	KT_RUN(test_vtd);
 	KT_RUN(test_irq);
+	KT_RUN(test_vmd);
 	KT_RUN(test_nvme);
 	KT_RUN(test_nvme_lost);
 	KT_RUN(test_nvme_4k);

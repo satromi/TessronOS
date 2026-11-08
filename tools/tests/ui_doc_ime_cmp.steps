@@ -1,0 +1,130 @@
+# 基本文章編集のかな漢字変換 (design 11.3), for tools/ui_run.py: the desktop's own and the
+# process show the same composition and write the same record. Two copies of 基本文章編集 with
+# 30 paragraphs (mkbig doc 30) are given the same keys, one in the desktop's text editor
+# (docproc kernel) and one in the text editor running as a process (pdoc): the caret put in
+# the second paragraph, かな typed after ひらがなカタカナ (the composition shown, the shot
+# *_comp), Space converts it (*_conv), Enter commits it; then the text is written down the
+# line (書式 / 縦書き in the menu opened at 300,250) and かな typed and converted again, the
+# composition running down the line from the caret (*_vcomp, *_vconv), committed, 英数 back
+# to letters, and saved. Record 0 of both must be the same, byte for byte; the shots
+# (doc_ime_k_*, doc_ime_p_*) are compared afterwards inside the window, where the text is
+# (101,125 to 682,482). The desktop's menu opens with 閉じる on the pointer's row the first
+# time (書式 180 below) and with the item chosen last on it afterwards (the process's comes up
+# so too, after the desktop's); 書式's own opens with its first row on 書式's row, 縦書き 140
+# below.
+# Keys: ひらがなカタカナ 88, Space 2C, Enter 28, 英数 39; Ctrl+S 16 01, Ctrl+E 08 01.
+docproc kernel
+mkbig doc 30
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+click 300 170
+sync 600
+key 88
+text kana
+sync 600
+move 690 490
+sync 600
+shot doc_ime_k_comp
+key 2c
+wait 800
+sync 600
+shot doc_ime_k_conv
+key 28
+sync 600
+click 300 250 1
+wait 400
+wait 400
+move 330 430
+wait 300
+move 440 430
+wait 400
+move 440 570
+wait 300
+click 440 570
+sync 600
+text kana
+sync 600
+move 690 490
+sync 600
+shot doc_ime_k_vcomp
+key 2c
+wait 800
+sync 600
+shot doc_ime_k_vconv
+key 28
+sync 600
+key 39
+sync 600
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig doc 30
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 800
+logmark
+click 300 170
+expectsince document: drew
+key 88
+wait 300
+logmark
+text kana
+expectsince document: key to screen
+wait 500
+move 690 490
+wait 300
+shot doc_ime_p_comp
+logmark
+key 2c
+expectsince document: key to screen
+wait 800
+shot doc_ime_p_conv
+logmark
+key 28
+expectsince document: key to screen
+wait 300
+logmark
+click 300 250 1
+expectsince document: menu
+wait 400
+move 330 250
+wait 300
+move 440 250
+wait 400
+move 440 390
+wait 300
+click 440 390
+expectsince document: command dir.vert
+expectsince document: drew
+logmark
+text kana
+expectsince document: key to screen
+wait 500
+move 690 490
+wait 300
+shot doc_ime_p_vcomp
+logmark
+key 2c
+expectsince document: key to screen
+wait 800
+shot doc_ime_p_vconv
+logmark
+key 28
+expectsince document: key to screen
+wait 300
+key 39
+wait 300
+logmark
+key 16 01
+expectsince document: saved (0)
+sum show
+same kernel
+key 08 01
+expect document: closed

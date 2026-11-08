@@ -1,0 +1,142 @@
+# 基本図形編集に文字を運んで離す (design 11.3, 10.4) のを、デスクトップの図形編集とプロセスの
+# 図形編集で同じにする, for tools/ui_run.py: a figure of 30 small rectangles, two zigzag lines
+# and one piece of text "ABC" (mkbig fig 30 4 1) opened at 100,100 as 画用紙 is, the piece's
+# box from 210,247 to 330,287 on the screen. A document of two lines (青木 遥, 〒), made here
+# and opened as 運ぶ元 with no object behind it, is moved by its name band to 560,360, out of
+# the way of the piece. Its first line, picked from Home to Shift+End, is carried onto the
+# figure where nothing is (300,520): a new piece of text stands there. The document is brought
+# in front again by its band where the figure does not cover it, its second line picked and
+# carried onto the piece "ABC": the letters go into it. The letters leave the document as they
+# go into the desktop's figure, so the process is given a second document of the same lines. The figure saved, record 0 comes out
+# the same, byte for byte, whichever of the two took the letters.
+# Keys: Home 4A, End 4D (with Shift 02); Ctrl+S 16 01, Ctrl+E 08 01.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 30 4 1
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p>青木 遥</p>
+xml <p>〒</p>
+xml </document></tad>
+xmlopen 運ぶ元
+wait 500
+drag 300 75 760 375
+wait 500
+win 運ぶ元
+shot drop_start
+# the first line onto the figure where nothing is
+click 600 400
+key 4A
+key 4D 02
+wait 200
+hold 575 400
+wait 100
+move 560 420
+wait 100
+move 420 480
+wait 100
+move 300 520
+wait 300
+up
+expect figure: text dropped as a new piece (0)
+sync 600
+wait 300
+# the document brought back by its band, the second line onto the piece
+click 980 375
+wait 300
+front dk 運ぶ元
+expect ok dk: in front
+click 575 435
+key 4A
+key 4D 02
+wait 200
+hold 577 435
+wait 100
+move 560 435
+wait 100
+move 400 360
+wait 100
+move 250 262
+wait 300
+up
+expect figure: text dropped into a piece (0)
+sync 600
+wait 300
+shot drop_kernel
+win 画用紙
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+# the same with the figure editor running as a process, from a document of the same two
+# lines opened again where the first was: the letters left the first one as they went into
+# the desktop's figure
+mkbig fig 30 4 1
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 33
+wait 500
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p>青木 遥</p>
+xml <p>〒</p>
+xml </document></tad>
+xmlopen 運ぶ元２
+wait 500
+drag 550 75 1010 375
+wait 500
+win 運ぶ元２
+click 980 375
+wait 300
+front dp 運ぶ元２
+expect ok dp: in front
+click 600 400
+key 4A
+key 4D 02
+wait 200
+logmark
+hold 575 400
+wait 100
+move 560 420
+wait 100
+move 420 480
+wait 100
+move 300 520
+wait 300
+up
+expectsince figure: text dropped as a new piece (0)
+wait 600
+click 980 375
+wait 300
+front dp2 運ぶ元２
+expect ok dp2: in front
+click 575 435
+key 4A
+key 4D 02
+wait 200
+logmark
+hold 577 435
+wait 100
+move 560 435
+wait 100
+move 400 360
+wait 100
+move 250 262
+wait 300
+up
+expectsince figure: text dropped into a piece (0)
+wait 600
+shot drop_process
+win 画用紙
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum show
+same kernel
+key 08 01
+expect figure: closed

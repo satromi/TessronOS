@@ -1,0 +1,15 @@
+<tad version="1.0" encoding="UTF-8" filename="小物管理">
+<document>
+<p>小物管理</p>
+<p>押した位置の小物の順番と、小物メニューに出すかどうか。メニューの定義。</p>
+</document>
+<menu>
+<item code="acc.top">一番上へ</item>
+<item code="acc.up">一つ上へ</item>
+<item code="acc.down">一つ下へ</item>
+<item code="acc.bottom">一番下へ</item>
+<line/>
+<item code="acc.show">小物メニューに表示する</item>
+<item code="acc.hide">小物メニューに表示しない</item>
+</menu>
+</tad>

@@ -282,20 +282,20 @@ static int head_of( const char *path, char *interp, size_t imax, char *iarg, siz
 
 /* ---------------------------------------------------------------- spawning */
 
-/* The descriptor table the child is to have, the caller's with the actions done on it */
+/*
+ * The descriptor table the child is to have, the caller's with the actions
+ * done on it. Close-on-exec takes effect only after the actions: a dup2 may
+ * name a close-on-exec descriptor as its source, and the copy it makes stays
+ * open in the child.
+ */
 static int child_table( PSXFD *t, const posix_spawn_file_actions_t *fa, int *opened, int *nopened,
 			char *cwd )
 {
-	int	i;
+	int	i, n = ( fa == NULL || *fa == NULL ) ? 0 : (*fa)->n;
 
 	*nopened = 0;
-	for ( i = 0; i < PSX_FD_MAX; i++ ) {
-		t[i] = __psx_fd[i];
-		if ( t[i].cloexec ) t[i].kind = PK_NONE;
-		t[i].cloexec = 0;
-	}
-	if ( fa == NULL || *fa == NULL ) return 0;
-	for ( i = 0; i < (*fa)->n; i++ ) {
+	for ( i = 0; i < PSX_FD_MAX; i++ ) t[i] = __psx_fd[i];
+	for ( i = 0; i < n; i++ ) {
 		FACT	*a = &(*fa)->a[i];
 		int	fd;
 
@@ -348,6 +348,10 @@ static int child_table( PSXFD *t, const posix_spawn_file_actions_t *fa, int *ope
 		  default:
 			break;
 		}
+	}
+	for ( i = 0; i < PSX_FD_MAX; i++ ) {
+		if ( t[i].cloexec ) t[i].kind = PK_NONE;
+		t[i].cloexec = 0;
 	}
 	return 0;
 }

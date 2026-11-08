@@ -21,8 +21,8 @@
 # answers to when it is started with no argv[0] of its own.
 #
 # Usage: cmds.sh [fetch|compat|cmds|notices|all|clean] [name ...]
-#   make passes PSX_LIB, PSX_CRT, USER_LD and PSX_INC; OUT, NBCSRC and
-#   JOBS may be set.
+#   make passes ARCH, MARCH, PSX_LIB, PSX_CRT, USER_LD and PSX_INC; OUT, NBCSRC
+#   and JOBS may be set. ARCH is aarch64 (the default) or x86_64.
 #
 set -e
 
@@ -30,10 +30,34 @@ STAGE=${1:-all}
 shift || true
 ONLY="$*"
 TOP=$(cd "$(dirname "$0")/../.." && pwd)
-XB=${TS_XPACK_BIN:-$HOME/.local/xPacks/aarch64-none-elf-gcc/bin}
-CC=$XB/aarch64-none-elf-gcc
-AR=$XB/aarch64-none-elf-ar
-OBJCOPY=$XB/aarch64-none-elf-objcopy
+ARCH=${ARCH:-aarch64}
+case $ARCH in
+x86_64)
+	XB=${TS_X64_TOOLCHAIN:-$HOME/.local/xPacks/x86_64-elf-gcc/bin}
+	CROSS=$XB/x86_64-elf-
+	MARCH=${MARCH:-x86-64-v2}
+	OUT=${OUT:-$HOME/tessronos-netbsd-cmds-x64}
+	# char as it is on AArch64: the regular expressions of NetBSD's libc built with BCS_ONLY take
+	# bytes from char, and with a signed one no byte above 0x7f matches. newlib's stdio asks
+	# through the names libposix gives
+	ARCH_CF=-funsigned-char
+	ARCH_LD="-Wl,-u,_fstat_r -Wl,-u,_stat_r"
+	;;
+aarch64)
+	XB=${TS_XPACK_BIN:-$HOME/.local/xPacks/aarch64-none-elf-gcc/bin}
+	CROSS=$XB/aarch64-none-elf-
+	MARCH=${MARCH:-armv8.2-a}
+	ARCH_CF=-mstrict-align
+	ARCH_LD=
+	;;
+*)
+	echo "cmds: ARCH is aarch64 or x86_64, not $ARCH" >&2
+	exit 2
+	;;
+esac
+CC=${CROSS}gcc
+AR=${CROSS}ar
+OBJCOPY=${CROSS}objcopy
 JOBS=${JOBS:-8}
 
 NB_VER=11.0
@@ -55,8 +79,7 @@ OB_DIRS="usr.bin/diff"
 UOBJ=${UOBJ:-$TOP/build_make/obj}
 PSX_LIB=${PSX_LIB:-$UOBJ/psx/libposix.a}
 PSX_CRT=${PSX_CRT:-$UOBJ/psx/psx_crt.o}
-USER_LD=${USER_LD:-$TOP/etc/linker/user/program.ld}
-MARCH=${MARCH:-armv8.2-a}
+USER_LD=${USER_LD:-$TOP/etc/linker/$([ "$ARCH" = x86_64 ] && echo x64 || echo user)/program.ld}
 
 # What is kept of the two sets
 SRC_DIRS="usr/src/bin usr/src/usr.bin usr/src/include usr/src/lib/libc usr/src/lib/libutil
@@ -73,13 +96,13 @@ YACC=$OUT/host/yacc
 # The terminals libterminfo knows of itself (tools/netbsd/port/terminfo.src)
 TERMS="tessron vt100 xterm xterm-256color dumb"
 
-CFLAGS_ALL="-march=$MARCH -mstrict-align -fno-stack-protector -O2 -g -std=gnu11
+CFLAGS_ALL="-march=$MARCH $ARCH_CF -fno-stack-protector -O2 -g -std=gnu11
  -ffunction-sections -fdata-sections -D_GNU_SOURCE -D_POSIX_TIMERS=1
  -D_POSIX_MONOTONIC_CLOCK=200112L -DNO_NLS=1
  -Wno-implicit-fallthrough -Wno-unused-result -Wno-format-truncation"
 INC="-I$OUT/include -I$TOP/include/posix"
 KAPI="-DCHK_TKERNEL_CONST -DUSE_STDINC_STDINT=1 -include stdint.h -I$TOP/include/posix -I$TOP/include -I$TOP/config"
-LDFLAGS_ALL="-march=$MARCH -nostdlib -nostartfiles -static -T $USER_LD -Wl,--build-id=none -Wl,--gc-sections"
+LDFLAGS_ALL="-march=$MARCH -nostdlib -nostartfiles -static -T $USER_LD -Wl,--build-id=none -Wl,--gc-sections $ARCH_LD"
 
 fetch_set() {
 	local name=$1 sum=$2
@@ -314,6 +337,8 @@ stage_compat() {
 		*)         cp -p "$NB/$f" "$OUT/include/$(basename $f)" ;;
 		esac
 	done
+	# libterminfo includes it by its short name
+	cp -p "$NB/sys/sys/cdbr.h" "$OUT/include/cdbr.h"
 	cp -p "$NB/common/dist/zlib/zlib.h" "$NB/common/dist/zlib/zconf.h" "$OUT/include/"
 	cp -p "$NB/external/bsd/bzip2/dist/bzlib.h" "$OUT/include/"
 	# what NetBSD's libc includes of its own: its checks of arguments are not made

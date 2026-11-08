@@ -13,7 +13,7 @@ xml <p></p>
 xml <p><font size="28">ABCDEFGH</font></p>
 xml <p>0123456789<br/>abc</p>
 xml <p>01<link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" vobjid="019cf904-4417-7579-8562-bea3e6add6b3"
-xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="30" dlen="0" chsz="14"
+xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150" heightpx="19" dlen="0" chsz="14"
 xml framedisp="true" namedisp="true" pictdisp="true"/>23456789</p>
 xml <p>0123456789</p>
 xml </document></tad>

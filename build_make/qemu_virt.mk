@@ -26,6 +26,7 @@ SRCS += kernel/sysdepend/qemu_virt/hw_setting.c \
 	device/usb/msc.c \
 	device/usb/uac.c \
 	device/usb/uvc.c \
+	$(SRCS_BT) \
 	device/usb/uusb.c \
 	device/usb/vhc.c \
 	device/snd/snd.c \

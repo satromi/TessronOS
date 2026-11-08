@@ -1,0 +1,43 @@
+# 基本図形編集のプロセスから仮身をウインドウの外へ運び、待たずに離す (design 11.3), for
+# tools/ui_run.py. A copy of 画用紙 (mkbig fig) and of 基本文章編集 (mkbig doc) are linked into
+# BTRON; the figure is opened with the process from its link, the text's link is copied to the
+# tray in BTRON and pasted into the figure, and carried by the hand out of the window into BTRON,
+# the button let go on the move that leaves the window. The process asks the desktop to carry it
+# on as it hears the hand go out (DT_RQ_CARRY), which comes after the button went up: the desktop
+# lets it go where the button went up (desktop: carry asked with the button let go already), so
+# it is put in BTRON and leaves the figure, as when the hand is held there a while.
+# Keys with Ctrl (01): C 06, V 19.
+mkbig fig 30 4
+figproc 1
+linkbig 180 45
+mkbig doc 5
+linkbig 190 70
+wait 300
+logmark
+dclick 190 52
+expectsincein 60 figure: opened 画用紙 shapes 32 links 0 autoref 1 parent 1
+wait 800
+click 50 14
+wait 300
+click 230 78
+wait 300
+key 06 01
+wait 300
+click 600 500
+wait 300
+logmark
+key 19 01
+expectsince figure: pasted, 33 shapes 1 picked
+wait 500
+click 600 500
+wait 300
+logmark
+move 360 196
+down
+move 300 196
+move 150 200
+move 50 190
+up
+expectsincein 10 figure: carried 基本文章編集 (0)
+expectsince figure: deleted, 32 shapes
+wait 500

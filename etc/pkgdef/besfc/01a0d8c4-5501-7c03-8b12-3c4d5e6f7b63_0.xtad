@@ -1,0 +1,230 @@
+<tad version="1.0" encoding="UTF-8" filename="BeSFCのライセンス">
+<document>
+<p>BeSFC Copyright 2026 satromi。BeSFCは非商用のフリーウェアである。snes9xに由来するコードを含む派生物で、全体として次のsnes9xのライセンスに従う。販売、商用の同梱、商用の宣伝には使えない。再配布のときは次のライセンス文と著作権表示を改変せずに付ける。</p>
+<p>--- snes9x-LICENSE.txt ---</p>
+<p>  Snes9x - Portable Super Nintendo Entertainment System (TM) emulator.</p>
+<p></p>
+<p>  (c) Copyright 1996 - 2002  Gary Henderson (gary.henderson@ntlworld.com),</p>
+<p>                             Jerremy Koot (jkoot@snes9x.com)</p>
+<p></p>
+<p>  (c) Copyright 2002 - 2004  Matthew Kendora</p>
+<p></p>
+<p>  (c) Copyright 2002 - 2005  Peter Bortas (peter@bortas.org)</p>
+<p></p>
+<p>  (c) Copyright 2004 - 2005  Joel Yliluoma (http://iki.fi/bisqwit/)</p>
+<p></p>
+<p>  (c) Copyright 2001 - 2006  John Weidman (jweidman@slip.net)</p>
+<p></p>
+<p>  (c) Copyright 2002 - 2006  funkyass (funkyass@spam.shaw.ca),</p>
+<p>                             Kris Bleakley (codeviolation@hotmail.com)</p>
+<p></p>
+<p>  (c) Copyright 2002 - 2010  Brad Jorsch (anomie@users.sourceforge.net),</p>
+<p>                             Nach (n-a-c-h@users.sourceforge.net),</p>
+<p></p>
+<p>  (c) Copyright 2002 - 2011  zones (kasumitokoduck@yahoo.com)</p>
+<p></p>
+<p>  (c) Copyright 2006 - 2007  nitsuja</p>
+<p></p>
+<p>  (c) Copyright 2009 - 2023  BearOso,</p>
+<p>                             OV2</p>
+<p></p>
+<p>  (c) Copyright 2017         qwertymodo</p>
+<p></p>
+<p>  (c) Copyright 2011 - 2017  Hans-Kristian Arntzen,</p>
+<p>                             Daniel De Matteis</p>
+<p>                             (Under no circumstances will commercial rights be given)</p>
+<p></p>
+<p></p>
+<p>  BS-X C emulator code</p>
+<p>  (c) Copyright 2005 - 2006  Dreamer Nom,</p>
+<p>                             zones</p>
+<p></p>
+<p>  C4 x86 assembler and some C emulation code</p>
+<p>  (c) Copyright 2000 - 2003  _Demo_ (_demo_@zsnes.com),</p>
+<p>                             Nach,</p>
+<p>                             zsKnight (zsknight@zsnes.com)</p>
+<p></p>
+<p>  C4 C++ code</p>
+<p>  (c) Copyright 2003 - 2006  Brad Jorsch,</p>
+<p>                             Nach</p>
+<p></p>
+<p>  DSP-1 emulator code</p>
+<p>  (c) Copyright 1998 - 2006  _Demo_,</p>
+<p>                             Andreas Naive (andreasnaive@gmail.com),</p>
+<p>                             Gary Henderson,</p>
+<p>                             Ivar (ivar@snes9x.com),</p>
+<p>                             John Weidman,</p>
+<p>                             Kris Bleakley,</p>
+<p>                             Matthew Kendora,</p>
+<p>                             Nach,</p>
+<p>                             neviksti (neviksti@hotmail.com)</p>
+<p></p>
+<p>  DSP-2 emulator code</p>
+<p>  (c) Copyright 2003         John Weidman,</p>
+<p>                             Kris Bleakley,</p>
+<p>                             Lord Nightmare (lord_nightmare@users.sourceforge.net),</p>
+<p>                             Matthew Kendora,</p>
+<p>                             neviksti</p>
+<p></p>
+<p>  DSP-3 emulator code</p>
+<p>  (c) Copyright 2003 - 2006  John Weidman,</p>
+<p>                             Kris Bleakley,</p>
+<p>                             Lancer,</p>
+<p>                             z80 gaiden</p>
+<p></p>
+<p>  DSP-4 emulator code</p>
+<p>  (c) Copyright 2004 - 2006  Dreamer Nom,</p>
+<p>                             John Weidman,</p>
+<p>                             Kris Bleakley,</p>
+<p>                             Nach,</p>
+<p>                             z80 gaiden</p>
+<p></p>
+<p>  OBC1 emulator code</p>
+<p>  (c) Copyright 2001 - 2004  zsKnight,</p>
+<p>                             pagefault (pagefault@zsnes.com),</p>
+<p>                             Kris Bleakley</p>
+<p>                             Ported from x86 assembler to C by sanmaiwashi</p>
+<p></p>
+<p>  SPC7110 and RTC C++ emulator code used in 1.39-1.51</p>
+<p>  (c) Copyright 2002         Matthew Kendora with research by</p>
+<p>                             zsKnight,</p>
+<p>                             John Weidman,</p>
+<p>                             Dark Force</p>
+<p></p>
+<p>  SPC7110 and RTC C++ emulator code used in 1.52+</p>
+<p>  (c) Copyright 2009         byuu,</p>
+<p>                             neviksti</p>
+<p></p>
+<p>  S-DD1 C emulator code</p>
+<p>  (c) Copyright 2003         Brad Jorsch with research by</p>
+<p>                             Andreas Naive,</p>
+<p>                             John Weidman</p>
+<p></p>
+<p>  S-RTC C emulator code</p>
+<p>  (c) Copyright 2001 - 2006  byuu,</p>
+<p>                             John Weidman</p>
+<p></p>
+<p>  ST010 C++ emulator code</p>
+<p>  (c) Copyright 2003         Feather,</p>
+<p>                             John Weidman,</p>
+<p>                             Kris Bleakley,</p>
+<p>                             Matthew Kendora</p>
+<p></p>
+<p>  Super FX x86 assembler emulator code</p>
+<p>  (c) Copyright 1998 - 2003  _Demo_,</p>
+<p>                             pagefault,</p>
+<p>                             zsKnight</p>
+<p></p>
+<p>  Super FX C emulator code</p>
+<p>  (c) Copyright 1997 - 1999  Ivar,</p>
+<p>                             Gary Henderson,</p>
+<p>                             John Weidman</p>
+<p></p>
+<p>  Sound emulator code used in 1.5-1.51</p>
+<p>  (c) Copyright 1998 - 2003  Brad Martin</p>
+<p>  (c) Copyright 1998 - 2006  Charles Bilyue'</p>
+<p></p>
+<p>  Sound emulator code used in 1.52+</p>
+<p>  (c) Copyright 2004 - 2007  Shay Green (gblargg@gmail.com)</p>
+<p></p>
+<p>  S-SMP emulator code used in 1.54+</p>
+<p>  (c) Copyright 2016         byuu</p>
+<p></p>
+<p>  SH assembler code partly based on x86 assembler code</p>
+<p>  (c) Copyright 2002 - 2004  Marcus Comstedt (marcus@mc.pp.se)</p>
+<p></p>
+<p>  2xSaI filter</p>
+<p>  (c) Copyright 1999 - 2001  Derek Liauw Kie Fa</p>
+<p></p>
+<p>  HQ2x, HQ3x, HQ4x filters</p>
+<p>  (c) Copyright 2003         Maxim Stepin (maxim@hiend3d.com)</p>
+<p></p>
+<p>  NTSC filter</p>
+<p>  (c) Copyright 2006 - 2007  Shay Green</p>
+<p></p>
+<p>  GTK+ GUI code</p>
+<p>  (c) Copyright 2004 - 2023  BearOso</p>
+<p></p>
+<p>  Win32 GUI code</p>
+<p>  (c) Copyright 2003 - 2006  blip,</p>
+<p>                             funkyass,</p>
+<p>                             Matthew Kendora,</p>
+<p>                             Nach,</p>
+<p>                             nitsuja</p>
+<p>  (c) Copyright 2009 - 2023  OV2</p>
+<p></p>
+<p>  Original Mac OS GUI code</p>
+<p>  (c) Copyright 1998 - 2001  John Stiles</p>
+<p>  (c) Copyright 2001 - 2011  zones</p>
+<p>  New MacOS GUI code</p>
+<p>  (c) Copyright 2022 - 2023  Michael Donald Buckley</p>
+<p></p>
+<p>  Libretro port</p>
+<p>  (c) Copyright 2011 - 2017  Hans-Kristian Arntzen,</p>
+<p>                             Daniel De Matteis</p>
+<p>                             (Under no circumstances will commercial rights be given)</p>
+<p></p>
+<p></p>
+<p>  Specific ports contains the works of other authors. See headers in</p>
+<p>  individual files.</p>
+<p></p>
+<p></p>
+<p>  Snes9x homepage: http://www.snes9x.com/</p>
+<p>  Snes9x source code: https://github.com/snes9xgit/snes9x/</p>
+<p></p>
+<p>  Permission to use, copy, modify and/or distribute Snes9x in both binary</p>
+<p>  and source form, for non-commercial purposes, is hereby granted without</p>
+<p>  fee, providing that this license information and copyright notice appear</p>
+<p>  with all copies and any derived work.</p>
+<p></p>
+<p>  This software is provided 'as-is', without any express or implied</p>
+<p>  warranty. In no event shall the authors be held liable for any damages</p>
+<p>  arising from the use of this software or it's derivatives.</p>
+<p></p>
+<p>  Snes9x is freeware for PERSONAL USE only. Commercial users should</p>
+<p>  seek permission of the copyright holders first. Commercial use includes,</p>
+<p>  but is not limited to, charging money for Snes9x or software derived from</p>
+<p>  Snes9x, including Snes9x or derivatives in commercial game bundles, and/or</p>
+<p>  using Snes9x as a promotion for your commercial product.</p>
+<p></p>
+<p>  The copyright holders request that bug fixes and improvements to the code</p>
+<p>  should be forwarded to them so everyone can benefit from the modifications</p>
+<p>  in future versions.</p>
+<p></p>
+<p>  Super NES and Super Nintendo Entertainment System are trademarks of</p>
+<p>  Nintendo Co., Limited and its subsidiary companies.</p>
+<p></p>
+<p>-------------------------------------------------------------------------------</p>
+<p></p>
+<p>Some parts included in Snes9x are usually available under a different license,</p>
+<p>their authors have granted exception for their use in Snes9x (and/or they are</p>
+<p>licensed as LGPL):</p>
+<p> - JMA: GPL/LGPL, see jma/license.txt</p>
+<p> - snes_ntsc: LGPL, see filter/snes_ntsc-license.txt</p>
+<p> - xBRZ: GPLv3, see filter/xbrz-license.txt</p>
+<p></p>
+<p>--- LakeSnes-LICENSE.txt ---</p>
+<p>MIT License</p>
+<p></p>
+<p>Copyright (c) 2021-2023 angelo_wf and contributors</p>
+<p></p>
+<p>Permission is hereby granted, free of charge, to any person obtaining a copy</p>
+<p>of this software and associated documentation files (the "Software"), to deal</p>
+<p>in the Software without restriction, including without limitation the rights</p>
+<p>to use, copy, modify, merge, publish, distribute, sublicense, and/or sell</p>
+<p>copies of the Software, and to permit persons to whom the Software is</p>
+<p>furnished to do so, subject to the following conditions:</p>
+<p></p>
+<p>The above copyright notice and this permission notice shall be included in all</p>
+<p>copies or substantial portions of the Software.</p>
+<p></p>
+<p>THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR</p>
+<p>IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,</p>
+<p>FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE</p>
+<p>AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER</p>
+<p>LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,</p>
+<p>OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE</p>
+<p>SOFTWARE.</p>
+<p></p>
+</document>
+</tad>

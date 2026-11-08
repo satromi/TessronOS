@@ -1,0 +1,106 @@
+# 基本文章編集の文字サイズと用紙枠のメニュー: the desktop's own and the process write the same
+# record and show the same page (design 11.3), for tools/ui_run.py. Two copies of 基本文章編集
+# with 30 paragraphs (mkbig doc 30): letters of the second paragraph picked by carrying the
+# hand across them, then 文字サイズ > 21（1.5倍） and 書式 > 用紙枠表示オンオフ chosen from the
+# menu opened at 300,250, and saved. Record 0 of both must be the same, byte for byte; the
+# shots (doc_size_k_*, doc_size_p_*) are compared afterwards inside the window, where the text
+# is (101,125 to 682,482).
+# The menu opens with the item chosen last on the pointer's row, its rows 20 apart (閉じる,
+# a line, 保存, 表示, 編集, 書体, 文字修飾, 文字サイズ 140 below 閉じる, 文字色, 書式 180
+# below); a menu beside it opens with its first row on the row it hangs from (21（1.5倍） 200
+# below; 用紙枠表示オンオフ 280 below). The desktop's first menu has nothing chosen before it;
+# the process's first one has 書式, chosen last by the desktop's. While the desktop's menu is
+# open the desktop answers no sync: it is waited for instead.
+# Keys: Ctrl+S 16 01, Ctrl+E 08 01.
+docproc kernel
+mkbig doc 30
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+drag 160 170 420 170
+sync 600
+click 300 250 1
+wait 400
+move 330 390
+wait 300
+move 440 390
+wait 400
+move 440 590
+wait 300
+click 440 590
+sync 600
+wait 300
+move 690 490
+sync 600
+shot doc_size_k_size
+click 300 250 1
+wait 400
+move 330 290
+wait 300
+move 440 290
+wait 400
+move 440 570
+wait 300
+click 440 570
+sync 600
+wait 300
+move 690 490
+sync 600
+shot doc_size_k_frame
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig doc 30
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 800
+logmark
+drag 160 170 420 170
+expectsince document: drew
+logmark
+click 300 250 1
+expectsince document: menu
+wait 400
+move 330 210
+wait 300
+move 440 210
+wait 400
+move 440 410
+wait 300
+click 440 410
+expectsince document: command size
+expectsince document: drew
+wait 300
+move 690 490
+wait 300
+shot doc_size_p_size
+logmark
+click 300 250 1
+expectsince document: menu
+wait 400
+move 330 290
+wait 300
+move 440 290
+wait 400
+move 440 570
+wait 300
+click 440 570
+expectsince document: command paperframe
+expectsince document: drew
+wait 300
+move 690 490
+wait 300
+shot doc_size_p_frame
+logmark
+key 16 01
+expectsince document: saved (0)
+sum show
+same kernel
+key 08 01
+expect document: closed

@@ -1,0 +1,71 @@
+# 色の選択 (design 11.3), for tools/ui_run.py: from 仮身属性変更 of a link in TADjsについて,
+# the colour of the frame pressed and the pop-up opened under it (its corner at 630,334);
+# the plane and the hue bar pressed, the forms HSL, HEX and RGB chosen and a code typed, a
+# colour of the chart, the dropper and a press on the desktop, Enter. A press outside keeps
+# what the second colour was changed to; Escape leaves the fourth as it was.
+click 826 428
+wait 500
+click 310 332
+wait 300
+click 310 332 1
+wait 1000
+move 330 533
+wait 1200
+move 335 533
+wait 1200
+move 420 593
+wait 800
+click 420 593
+wait 1000
+click 678 320
+wait 800
+shot colour_open
+click 760 400
+wait 300
+click 780 494
+wait 400
+shot colour_rgb
+click 741 579
+wait 400
+shot colour_hsl
+click 812 579
+wait 400
+key 2a
+key 2a
+key 2a
+key 2a
+key 2a
+key 2a
+key 2a
+text 336699
+wait 300
+shot colour_hex
+click 670 579
+wait 400
+shot colour_rgb2
+click 650 650
+wait 400
+shot colour_chart
+click 649 494
+wait 500
+shot colour_drop_mode
+click 1200 760
+wait 500
+shot colour_dropped
+key 28
+wait 600
+shot colour_set
+click 678 350
+wait 600
+click 800 400
+wait 300
+click 1000 300
+wait 600
+shot colour_outside
+click 678 410
+wait 600
+click 800 500
+wait 200
+key 29
+wait 600
+shot colour_esc

@@ -99,6 +99,50 @@ EXPORT BOOL knl_obchan_name_taken( CONST UB *name )
 	return t;
 }
 
+/*
+ * A notice of a move put on the channel port (knl_ob_ntf): when the
+ * newest message still waiting on it is the same writer's notice of a
+ * move, for the same request about the same thing, that one is brought
+ * up to date instead of a second one put behind it, as the input layer
+ * does with the moves waiting in its ring (device/usb/hid.c). The one
+ * who reads takes where the pointer is now rather than every place it
+ * passed, and a pointer that moves faster than a program follows it
+ * never fills the queue, so that a press or a let go behind the moves
+ * is never refused for want of room. The notices dropped before either
+ * are counted on the one left. TRUE when it was brought up to date.
+ */
+EXPORT BOOL knl_obchan_merge_move( CONST TS_UUID *port, CONST T_OBNTM *msg )
+{
+	OBCH	*c;
+	OBCMSG	*q;
+	T_OBNTM	was, now;
+	INT	i;
+	BOOL	done = FALSE;
+
+	if ( port == NULL || msg == NULL || msg->event != OB_E_MOVE ) {
+		return FALSE;
+	}
+	LOCK();
+	i = index_of(port);
+	if ( i >= 0 && obc[i]->count > 0 ) {
+		c = obc[i];
+		q = &c->q[( c->tail + OB_CH_QLEN - 1 ) % OB_CH_QLEN];
+		if ( q->size == (SZ)sizeof(T_OBNTM) && q->from == ts_get_pid() ) {
+			knl_memcpy(&was, q->body, (INT)sizeof(was));
+			if ( was.event == OB_E_MOVE && was.nid == msg->nid && was.id == msg->id
+			  && was.recno == msg->recno && ts_uuid_cmp(&was.uuid, &msg->uuid) == 0 ) {
+				now = *msg;
+				now.lost += was.lost;
+				knl_memcpy(q->body, &now, (INT)sizeof(now));
+				done = TRUE;
+			}
+		}
+	}
+	UNLOCK();
+
+	return done;
+}
+
 LOCAL void ch_free( INT i )
 {
 	OBCH	*c = obc[i];

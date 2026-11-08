@@ -751,7 +751,7 @@ LOCAL void vol_key( UINT code )
 	KT_ASSERT_ER(kt_inject(&in), E_OK);
 	while ( wm_read_event(&ev, 100) >= E_OK ) {
 		KT_ASSERT(!( ( ev.type == HID_EV_KEY_DOWN || ev.type == HID_EV_KEY_UP )
-			  && ( ev.code == HID_KEY_VOLUP || ev.code == HID_KEY_VOLDOWN ) ));
+			  && ( ev.code == HID_KEY_VOLUP || ev.code == HID_KEY_VOLDOWN || ev.code == HID_KEY_MUTE ) ));
 	}
 }
 
@@ -812,6 +812,25 @@ LOCAL void test_volume_keys( void )
 	vol_is(100);
 	(void)wm_msg_text(t, sizeof(t));
 	KT_ASSERT(knl_strcmp(t, "音量 100%") == 0);
+
+	/* the mute key turns the mute over and keeps the volume */
+	vol_set(30, 40, 0);
+	{
+		SDMix	m;
+
+		vol_key(HID_KEY_MUTE);
+		knl_memset(&m, 0, sizeof(m));
+		(void)knl_snd_mix_get(&m, 0);
+		KT_ASSERT_EQ(m.mute, 1);
+		KT_ASSERT_EQ(m.lv, 30);
+		KT_ASSERT_EQ(m.rv, 40);
+		(void)wm_msg_text(t, sizeof(t));
+		KT_ASSERT(knl_strcmp(t, "消音") == 0);
+		vol_key(HID_KEY_MUTE);
+		knl_memset(&m, 0, sizeof(m));
+		(void)knl_snd_mix_get(&m, 0);
+		KT_ASSERT_EQ(m.mute, 0);
+	}
 
 	vol_set(3, 0, 0);
 	vol_key(HID_KEY_VOLDOWN);

@@ -15,10 +15,11 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "tessronos-userenv",
       "kind": "accessory",
       "name": "ユーザ環境設定",
-      "version": "R1.200",
+      "version": "R1.300",
       "menu": true,
       "builtin": false,
       "base": []

@@ -55,6 +55,9 @@
 #define PN_PAPER	3		/* レイアウト用紙設定 */
 #define PN_CLOSE	4		/* save before closing */
 #define PN_MSG		5		/* a message to be confirmed */
+#define PN_MONTH	6		/* a year and a month for the カレンダー */
+#define P_YM		11		/* its year and month */
+#define P_YM_OK		102		/* and 移動 */
 #define P_FIND_TEXT	11
 #define P_FIND_FIRST	101
 #define P_FIND_NEXT	102
@@ -925,6 +928,47 @@ static void paper_setup( void )
 	redraw_dirty();
 }
 
+/*
+ * 年月を選択 (the ページ menu of the カレンダー): a year and a month asked,
+ * the one shown to start from; 移動 or Enter shows it
+ */
+static void ask_month( void )
+{
+	UI	q;
+	T_OBNTM	m;
+	INT	v[2], num, ev, done = 0;
+
+	ed_commit();
+	ask_over(W_CAL);
+	if ( ui_dlg_open(&g_ui, PN_MONTH, &q) < E_OK ) return;
+	v[0] = g_cy;
+	v[1] = g_cm;
+	ui_set_fields(&q, P_YM, v, 2);
+	note("month panel");
+	while ( done == 0 ) {
+		if ( ui_wait(&g_ui, &m, TMO_FEVR) < E_OK ) break;
+		ev = ui_dlg_take(&q, &m, &num);
+		if ( ev == UI_EV_BUTTON ) {
+			done = ( num == P_YM_OK ) ? 1 : -1;
+		} else if ( ev == UI_EV_CLOSE ) {
+			done = -1;
+		} else if ( ev == UI_EV_NONE && m.id == 3 && m.event == OB_E_KEY && ( m.mods & OB_KEY_UP ) == 0
+			 && ( m.code == K_ENTER || m.code == K_KPENTER ) ) {
+			done = 1;
+		} else if ( ev == UI_EV_OTHER && m.event == OB_E_REDRAW ) {
+			event(&m);
+		}
+		if ( g_closing ) done = -1;
+	}
+	if ( done > 0 ) (void)ui_fields(&q, P_YM, v, 2);
+	ui_dlg_close(&q);
+	if ( done > 0 && v[1] >= 1 && v[1] <= 12 ) {
+		show_month(v[0], v[1]);
+		g_w[W_CAL].dirty = TRUE;
+	}
+	redraw_dirty();
+}
+
 static void print( void )
 {
 	T_UIPRN	up;
@@ -1212,6 +1256,8 @@ void command( CONST char *code, INT index )
 	else if ( strncmp(code, "page.", 5) == 0 && ( strcmp(code + 5, "first") == 0 || strcmp(code + 5, "prev") == 0
 						 || strcmp(code + 5, "next") == 0 || strcmp(code + 5, "last") == 0 ) ) {
 		page(code + 5, w);
+	} else if ( strcmp(code, "page.month") == 0 && w == W_CAL ) {
+		ask_month();
 	} else if ( strcmp(code, "page.blank") == 0 && w == W_SCHED ) {
 		ed_cancel();
 		(void)tc_set_plans(&g_db, g_day, NULL, 0);
@@ -1279,6 +1325,7 @@ static void menu( CONST T_OBNTM *m, INT w )
 	(void)mn_chg_atr(mid, NULL, "view.addr", g_w[W_ADDR].open ? MN_TICK : 0);
 	(void)mn_chg_atr(mid, NULL, "view.find", g_find_open ? MN_TICK : 0);
 	(void)mn_chg_atr(mid, NULL, "page.blank", ( w == W_SCHED ) ? 0 : MN_GREY);
+	(void)mn_chg_atr(mid, NULL, "page.month", ( w == W_CAL ) ? 0 : MN_GREY);
 	(void)mn_chg_atr(mid, NULL, "page.add", ( w == W_ADDR ) ? 0 : MN_GREY);
 	(void)mn_chg_atr(mid, NULL, "page.del", ( w == W_ADDR ) ? 0 : MN_GREY);
 	g = edit ? 0 : MN_GREY;

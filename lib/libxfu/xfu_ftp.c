@@ -30,6 +30,16 @@ LOCAL ER full( T_XFUFTP *ft, CONST UB *path )
 	return xfu_join(ft->path, sizeof(ft->path), ft->root, path);
 }
 
+/* A session of SFTP goes the same way as one of FTP: only its calls differ */
+#ifdef USE_SSH
+#include <ts/sftp.h>
+#define IS_SSH(ft)	( (ft)->ftp->ssh != NULL )
+#define SS(ft)		( (T_SSH *)(ft)->ftp->ssh )
+#define SEL(ft, sf, fp)	( IS_SSH(ft) ? (sf) : (fp) )
+#else
+#define SEL(ft, sf, fp)	(fp)
+#endif
+
 LOCAL INT t_open( void *ctx, CONST UB *path, UINT mode )
 {
 	T_XFUFTP	*ft = ft_of(ctx);
@@ -40,7 +50,8 @@ LOCAL INT t_open( void *ctx, CONST UB *path, UINT mode )
 	}
 	er = full(ft, path);
 	if ( er >= E_OK ) {
-		er = ( mode == XFU_O_WRITE ) ? ftp_put(ft->ftp, ft->path) : ftp_get(ft->ftp, ft->path);
+		er = ( mode == XFU_O_WRITE ) ? SEL(ft, sftp_put(SS(ft), ft->path), ftp_put(ft->ftp, ft->path))
+					     : SEL(ft, sftp_get(SS(ft), ft->path), ftp_get(ft->ftp, ft->path));
 	}
 	if ( er < E_OK ) {
 		return (INT)er;
@@ -62,7 +73,7 @@ LOCAL INT t_read( void *ctx, INT h, void *buf, SZ n )
 	if ( ft->eof ) {
 		return 0;
 	}
-	k = ftp_read(ft->ftp, buf, n);
+	k = SEL(ft, sftp_read(SS(ft), buf, n), ftp_read(ft->ftp, buf, n));
 	if ( k == 0 ) ft->eof = TRUE;
 	return k;
 }
@@ -71,7 +82,7 @@ LOCAL INT t_write( void *ctx, INT h, CONST void *buf, SZ n )
 {
 	T_XFUFTP	*ft = ft_of(ctx);
 
-	return ( ft->busy && h == 0 ) ? ftp_write(ft->ftp, buf, n) : E_ID;
+	return ( ft->busy && h == 0 ) ? SEL(ft, sftp_write(SS(ft), buf, n), ftp_write(ft->ftp, buf, n)) : E_ID;
 }
 
 LOCAL ER t_close( void *ctx, INT h )
@@ -82,7 +93,7 @@ LOCAL ER t_close( void *ctx, INT h )
 		return E_ID;
 	}
 	ft->busy = FALSE;
-	return ftp_end(ft->ftp);
+	return SEL(ft, sftp_end(SS(ft)), ftp_end(ft->ftp));
 }
 
 /* A listing's names handed on as entries of the tree */
@@ -140,7 +151,8 @@ LOCAL ER t_list( void *ctx, CONST UB *path, XFU_ENTCB cb, void *arg )
 	if ( l.e == NULL ) {
 		return E_NOMEM;
 	}
-	er = ftp_list(ft->ftp, ( ft->path[0] != 0 ) ? ft->path : NULL, l_each, &l);
+	er = SEL(ft, sftp_list(SS(ft), ( ft->path[0] != 0 ) ? ft->path : NULL, l_each, &l),
+		 ftp_list(ft->ftp, ( ft->path[0] != 0 ) ? ft->path : NULL, l_each, &l));
 	xfu_sys_free(l.e);
 	return er;
 }
@@ -188,7 +200,8 @@ LOCAL ER t_stat( void *ctx, CONST UB *path, T_XFUENT *e )
 	l.e = e;
 	l.ft = ft;
 	l.found = FALSE;
-	er = ftp_list(ft->ftp, ( ft->path[0] != 0 ) ? ft->path : NULL, l_find, &l);
+	er = SEL(ft, sftp_list(SS(ft), ( ft->path[0] != 0 ) ? ft->path : NULL, l_find, &l),
+		 ftp_list(ft->ftp, ( ft->path[0] != 0 ) ? ft->path : NULL, l_find, &l));
 	if ( er >= E_OK && !l.found ) {
 		er = E_NOEXS;
 	}
@@ -200,7 +213,7 @@ LOCAL ER t_mkdir( void *ctx, CONST UB *path )
 	T_XFUFTP	*ft = ft_of(ctx);
 	ER		er = full(ft, path);
 
-	return ( er >= E_OK ) ? ftp_mkd(ft->ftp, ft->path) : er;
+	return ( er >= E_OK ) ? SEL(ft, sftp_mkd(SS(ft), ft->path), ftp_mkd(ft->ftp, ft->path)) : er;
 }
 
 LOCAL ER t_utime( void *ctx, CONST UB *path, D mtime )
@@ -208,7 +221,7 @@ LOCAL ER t_utime( void *ctx, CONST UB *path, D mtime )
 	T_XFUFTP	*ft = ft_of(ctx);
 	ER		er = full(ft, path);
 
-	return ( er >= E_OK ) ? ftp_mfmt(ft->ftp, ft->path, mtime) : er;
+	return ( er >= E_OK ) ? SEL(ft, sftp_mfmt(SS(ft), ft->path, mtime), ftp_mfmt(ft->ftp, ft->path, mtime)) : er;
 }
 
 EXPORT ER xfu_ftp_tree( T_XFUFTP *ft, T_FTP *ftp, CONST UB *root, T_XFUTREE *t )

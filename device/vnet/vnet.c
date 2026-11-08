@@ -26,6 +26,7 @@
 #if defined(QEMU_VIRT) || defined(X64)
 
 #include "kernel.h"
+#include <ts/pm.h>
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/net.h>
@@ -382,6 +383,10 @@ LOCAL ER queue_setup( INT qno, VNET_QUEUE *q, UD q_pa )
 	return E_OK;
 }
 
+#ifdef X64
+LOCAL void vnet_pm_register( void );
+#endif
+
 EXPORT INT knl_vnet_init( void )
 {
 	T_CMTX	cmtx;
@@ -501,7 +506,65 @@ EXPORT INT knl_vnet_init( void )
 		vnet.mac[0], vnet.mac[1], vnet.mac[2],
 		vnet.mac[3], vnet.mac[4], vnet.mac[5]);
 
+#ifdef X64
+	vnet_pm_register();
+#endif
 	return 1;
 }
+
+#ifdef X64
+/*
+ * The machine asleep: nothing sent, the lock for sending held by the
+ * sleep's task. On waking the device is taken through its reset and
+ * announcement again, on the queues' memory, as they were at the start.
+ */
+LOCAL ER vnet_pm_suspend( void *arg, INT how )
+{
+	if ( !vnet_found ) return E_OK;
+	tk_loc_mtx(vnet.mtxid, TMO_FEVR);
+	return E_OK;
+}
+
+LOCAL void vnet_pm_resume( void *arg, INT how )
+{
+	UW	status;
+	INT	i;
+
+	if ( !vnet_found ) return;
+	vnet_out(VIRTIO_MMIO_STATUS, 0);
+	status = VIRTIO_STATUS_ACKNOWLEDGE;
+	vnet_out(VIRTIO_MMIO_STATUS, status);
+	status |= VIRTIO_STATUS_DRIVER;
+	vnet_out(VIRTIO_MMIO_STATUS, status);
+	vnet_out(VIRTIO_MMIO_DRIVER_FEATURES_SEL, 0);
+	vnet_out(VIRTIO_MMIO_DRIVER_FEATURES, 1U << VIRTIO_NET_F_MAC);
+	vnet_out(VIRTIO_MMIO_DRIVER_FEATURES_SEL, 1);
+	vnet_out(VIRTIO_MMIO_DRIVER_FEATURES, 1U << (VIRTIO_F_VERSION_1 - 32));
+	status |= VIRTIO_STATUS_FEATURES_OK;
+	vnet_out(VIRTIO_MMIO_STATUS, status);
+	knl_memset(vnet.rx, 0, PAGE_SIZE);
+	knl_memset(vnet.tx, 0, PAGE_SIZE);
+	vnet.rx_last = 0;
+	vnet.tx_last = 0;
+	if ( queue_setup(0, vnet.rx, vnet.rx_pa) >= E_OK && queue_setup(1, vnet.tx, vnet.tx_pa) >= E_OK ) {
+		status |= VIRTIO_STATUS_DRIVER_OK;
+		vnet_out(VIRTIO_MMIO_STATUS, status);
+		vnet_out(VIRTIO_MMIO_QUEUE_SEL, 0);
+		for ( i = 0; i < VNET_QSIZE; i++ ) rx_post(i);
+		tm_printf((UB *)"vnet: back from the sleep\n");
+	} else {
+		tm_printf((UB *)"vnet: its queues were not taken after the sleep\n");
+	}
+	tk_unl_mtx(vnet.mtxid);
+}
+
+LOCAL CONST T_PMDEV	vnet_pm = { "vnet", PM_ORD_NET, vnet_pm_suspend, vnet_pm_resume, NULL };
+
+/* From knl_vnet_init's end */
+LOCAL void vnet_pm_register( void )
+{
+	(void)ts_pm_register(&vnet_pm);
+}
+#endif /* X64 */
 
 #endif /* QEMU_VIRT || X64 */

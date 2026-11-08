@@ -95,6 +95,7 @@ typedef struct {
 /* One session. The caller keeps it; its fields are the client's */
 typedef struct {
 	CONST T_FTPNET	*net;
+	void		*ssh;		/* make SSH=1: the session is SFTP (T_SSH, ts/sftp.h), nothing below used */
 	INT		ctl;		/* the control connection, -1 when none */
 	INT		data;		/* the data connection of a transfer, -1 when none */
 	UINT		feat;		/* FTP_F_* */

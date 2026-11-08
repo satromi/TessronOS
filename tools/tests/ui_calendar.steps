@@ -1,10 +1,19 @@
-# 予定表 (design 11.10), for tools/ui_run.py: the template opened on 2026/10,
-# three days' plans made (a rectangle pulled out in a cell, a double press),
-# one opened, the next month and back, closed and opened again
+# 予定表 (design 11.10), for tools/ui_run.py: the template opened, and 2026/10
+# chosen in the panel that asks for a year and a month (the window opens on
+# today's month, and the cells below are those of 2026/10, whatever day the
+# test runs on); three days' plans made (a rectangle pulled out in a cell, a
+# double press), one opened and closed (its view written back into the link,
+# by the program, DT_F_LINK), the next month and back, closed and opened again
 open 019d6f00-1a2b-7c3d-8e4f-a1b2c3d4e5f6
 expect calendar: ready
 wait 800
 win 予定表
+click 425 148
+wait 500
+text 202610
+key 28
+expect calendar: month 2026/10 links
+wait 500
 shot cal_month
 drag 240 300 300 350
 expect calendar: made day 2026/10/05
@@ -17,6 +26,7 @@ expect calendar: opened 2026/10/05
 wait 800
 shot cal_events_opened
 key 08 01
+expect calendar: link view written back: 0,0
 wait 500
 click 300 148
 expect calendar: month 2026/11
@@ -29,8 +39,15 @@ shot cal_events
 click 160 690
 key 08 01
 expect calendar: closed
+logmark
 open 019d6f00-1a2b-7c3d-8e4f-a1b2c3d4e5f6
-expect calendar: month 2026/10 links 3
+expectsince calendar: ready
+wait 800
+click 425 148
+wait 500
+text 202610
+key 28
+expectsince calendar: month 2026/10 links 3
 wait 800
 shot cal_reopened
 # a link of 仮身サンプル dropped on a cell, the plans of 2026/10/15 taken out
@@ -38,6 +55,9 @@ open 019a4370-3819-79a2-9758-881e1e0de90a
 wait 1000
 drag 400 414 850 250
 expect calendar: dropped 1
+# the keys went to 予定表 with the drop (design 10.4): the text is pressed before it is closed
+click 1000 148
+wait 2000
 key 08 01
 wait 500
 wait 300

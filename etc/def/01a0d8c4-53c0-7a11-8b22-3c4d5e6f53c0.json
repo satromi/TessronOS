@@ -15,10 +15,11 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "tessronos-techo",
       "kind": "app",
       "name": "電子手帳",
-      "version": "R1.200",
+      "version": "R1.300",
       "menu": false,
       "builtin": false,
       "base": [

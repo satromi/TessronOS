@@ -28,6 +28,11 @@
 <item code="copysel">選んだ文字をトレーへ複写</item>
 <item code="edit">編集<link id="01a0d889-46d1-7a2b-8c3d-4e5f6a7b8c9d_0.xtad" vobjid="01a0d8c3-2002-7fd1-9a2b-c1d2e3f40a2b"/></item>
 <item code="isolated">このサイトを隔離されたWebアプリとして扱う</item>
+<item code="extload">拡張機能を読み込む...</item>
+<list code="ext.action"/>
+<list code="ext.ctx"/>
+<line/>
+<item code="settings">設定...</item>
 <line/>
 <item code="wvinstall">Widevineを導入...</item>
 <item code="wvremove">Widevineを外す</item>

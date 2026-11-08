@@ -1,0 +1,95 @@
+# 基本図形編集のプロセスの道具パネル (design 11.3, 17.13), for tools/ui_run.py: as
+# ui_fig_tools.steps has it with the desktop's figure editor. The figure 画用紙 is opened
+# with the process; its panel stands at the top of the screen (100,0), its buttons 32
+# square, the first row's middles at y 48 and the second's at 82, 34 apart from x 128. The
+# rectangle template is taken (in hand: emphasised), taken again (drawing from the middle:
+# the red mark), and a rectangle drawn. The palettes come up under their buttons, as
+# windows of the process subordinate to the panel, where the desktop's stand (framed, with
+# no title): 線色 with the red of its swatches, 塗りつぶし with one of the fixed
+# patterns, 角丸 with 10 typed and Enter, each put away with Escape; 線種, 倍率, 格子点 and
+# 書式 come up and go. 塗りつぶし's 〈パターン編集...〉 says it is not there yet.
+logmark
+pfig 019a0f91-066f-706f-93da-ffe8150d6207
+expectsincein 60 figure: opened 画用紙
+wait 800
+shot ptool_panel
+logmark
+click 298 82
+expectsince figure: tool 7
+wait 300
+shot ptool_rect
+logmark
+click 298 82
+expectsince figure: tool 7 centre
+wait 300
+shot ptool_centre
+logmark
+drag 450 450 600 560
+expectsince figure: drawn
+logmark
+click 162 48
+expectsince figure: palette 1 open
+wait 400
+shot ptool_stroke
+click 359 125
+wait 300
+key 29
+expectsince figure: palette 1 closed
+logmark
+click 128 48
+expectsince figure: palette 0 open
+wait 400
+shot ptool_fill
+click 202 170
+wait 300
+key 29
+expectsince figure: palette 0 closed
+logmark
+click 230 48
+expectsince figure: palette 3 open
+key 2a
+key 1e
+key 27
+key 28
+expectsince figure: palette 3 closed
+wait 300
+shot ptool_done
+logmark
+click 196 48
+expectsince figure: palette 2 open
+wait 400
+shot ptool_lstyle
+key 29
+expectsince figure: palette 2 closed
+logmark
+click 332 48
+expectsince figure: palette 6 open
+wait 400
+shot ptool_zoom
+key 29
+expectsince figure: palette 6 closed
+logmark
+click 366 48
+expectsince figure: palette 7 open
+wait 400
+shot ptool_grid
+key 29
+expectsince figure: palette 7 closed
+logmark
+click 502 82
+expectsince figure: palette 18 open
+wait 400
+shot ptool_font
+key 29
+expectsince figure: palette 18 closed
+# 〈パターン編集...〉 from 塗りつぶし
+logmark
+click 128 48
+expectsince figure: palette 0 open
+wait 400
+click 192 299
+expectsince figure: palette 0 closed (3)
+wait 500
+shot ptool_pattern
+key 28
+wait 300

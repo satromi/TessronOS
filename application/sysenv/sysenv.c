@@ -78,6 +78,8 @@
 #include <ts/ui.h>
 #include <ts/conf.h>
 #include <ts/sysdef.h>
+#include <tk/typedef.h>
+#include <ts/bt.h>
 #include <ts/look.h>
 #include <ts/json.h>
 #include <ts/dtreq.h>
@@ -103,6 +105,7 @@
 #define S_D_KBD		13
 #define S_D_SOUND	14
 #define S_D_CPU		15
+#define S_D_BT		16
 
 /* The parts, by the numbers the data box (SYSDEF_BOX_SYSENV) gives them */
 #define P_DEVS		1
@@ -112,6 +115,11 @@
 #define P_PM		5
 #define P_RESTART	6
 #define P_OFF		7
+#define P_SLEEP		168
+#define P_BTN_LBL	169
+#define P_BTN_SLEEP	170
+#define P_LID_LBL	171
+#define P_LID_SLEEP	172
 #define P_WALLS		8
 #define P_WALL_MODE	9
 #define P_SCHEMES	11
@@ -129,6 +137,12 @@
 #define P_SCR_CANCEL	25
 #define P_SCR_SET	26
 #define P_NET_1		27
+#define P_BT_LIST	173
+#define P_BT_SCAN	174
+#define P_BT_PAIR	175
+#define P_BT_FORGET	176
+#define P_BT_AGAIN	177
+#define P_SND_NOTE	178
 #define P_USB_LIST	33
 #define P_USB_AGAIN	34
 #define P_DISK_LIST	35
@@ -231,10 +245,10 @@
 
 LOCAL CONST char *CONST dev_names[] = {
 	"画面サイズ／色数", "ネットワークアダプタ", "ＵＳＢ接続機器", "ディスク",
-	"ビデオアダプタ", "キーボード", "サウンド", "プロセッサ",
+	"ビデオアダプタ", "キーボード", "サウンド", "プロセッサ", "Bluetooth",
 };
-LOCAL CONST INT dev_pages[] = { S_D_SCREEN, S_D_NET, S_D_USB, S_D_DISK, S_D_VIDEO, S_D_KBD, S_D_SOUND, S_D_CPU };
-#define NDEV	8
+LOCAL CONST INT dev_pages[] = { S_D_SCREEN, S_D_NET, S_D_USB, S_D_DISK, S_D_VIDEO, S_D_KBD, S_D_SOUND, S_D_CPU, S_D_BT };
+#define NDEV	9
 
 LOCAL UI	ui;
 LOCAL BOOL	closing;
@@ -258,7 +272,8 @@ typedef struct {
 	char	id[40];
 	char	kind[16];
 	char	version[16];
-	BOOL	builtin;
+	BOOL	builtin;	/* carried in the desktop: not deleted */
+	BOOL	system;		/* the system's own ("source": "system"): said so, and deleted all the same */
 } PROGINFO;
 LOCAL PROGINFO	*prog_info = NULL;
 LOCAL char	**usb_line = NULL;	/* a USB device's line each, whole */
@@ -499,7 +514,13 @@ LOCAL void prog_read( CONST TS_UUID *u, PROGINFO *pi )
 		(void)js_get_str(&g, "id", (UB *)pi->id, sizeof(pi->id));
 		(void)js_get_str(&g, "kind", (UB *)pi->kind, sizeof(pi->kind));
 		(void)js_get_str(&g, "version", (UB *)pi->version, sizeof(pi->version));
-		pi->builtin = js_get_bool(&g, "builtin", FALSE);
+		{
+			char	src[16];
+
+			pi->builtin = js_get_bool(&g, "builtin", FALSE);
+			pi->system = (BOOL)( js_get_str(&g, "source", (UB *)src, sizeof(src)) > 0
+					     && strcmp(src, "system") == 0 );
+		}
 	}
 	ob_cls_obj(key);
 }
@@ -781,6 +802,31 @@ LOCAL void pw_close( void )
 	}
 }
 
+/*
+ * The machine's sleep, where it has one (the system object says): the
+ * button スリープ and the rows of the power button and the lid, which
+ * stand where the row of the processors' limit stands on a machine that
+ * has that row. Shown or hidden only while 〈電源管理〉 is shown, as
+ * row_show says why; the page shown again does it again (power_sheet).
+ */
+LOCAL void sleep_rows( void )
+{
+	char	v[CF_VAL_MAX];
+	INT	len = sys_rec(OB_SYS_POWER);
+	BOOL	can = ( len > 0 && cf_get(text, len, "CAN", 0, v, sizeof(v)) && strstr(v, "SLEEP") != NULL );
+
+	if ( can ) {
+		ui_set_value(&ui, P_BTN_SLEEP, cf_get(text, len, "BUTTON_SLEEP", 0, v, sizeof(v)) && cf_num(v, 0) != 0);
+		ui_set_value(&ui, P_LID_SLEEP, cf_get(text, len, "LID_SLEEP", 0, v, sizeof(v)) && cf_num(v, 0) != 0);
+	}
+	if ( ui_sheet(&ui) != S_POWER ) return;
+	ui_show(&ui, P_SLEEP, can);
+	ui_show(&ui, P_BTN_LBL, can);
+	ui_show(&ui, P_BTN_SLEEP, can);
+	ui_show(&ui, P_LID_LBL, can);
+	ui_show(&ui, P_LID_SLEEP, can);
+}
+
 LOCAL void fill_power( void )
 {
 	char	v[CF_VAL_MAX];
@@ -792,6 +838,7 @@ LOCAL void fill_power( void )
 		ui_off(&ui, P_RESTART, TRUE);
 		ui_off(&ui, P_OFF, TRUE);
 	}
+	sleep_rows();
 	fill_perf();
 }
 
@@ -962,6 +1009,7 @@ LOCAL void fill_perf( void )
 LOCAL void power_sheet( void )
 {
 	clock_row = supply_row = limit_row = -1;
+	sleep_rows();
 	fill_perf();
 }
 
@@ -1474,6 +1522,99 @@ LOCAL void fill_usb( void )
 	ui_set_value(&ui, P_USB_LIST, 0);
 }
 
+/*
+ * Bluetooth: the devices paired and those a search found, from its device
+ * object; with no adapter, a line that says so and buttons that do nothing
+ */
+#define BT_LINES	32
+LOCAL T_BTLINE	bt_list[BT_LINES];
+LOCAL INT	nbt = 0;
+#define BT_MS		1000		/* the list read again, while a search goes */
+#define BT_START_MS	3000		/* how long a search asked for may take to show it has begun */
+LOCAL BOOL	bt_seek;		/* a search is going, or was just asked for */
+LOCAL UD	bt_at, bt_asked;
+
+LOCAL void fill_bt( void )
+{
+	static char	s[BT_LINES][96];
+	CONST char	*p[BT_LINES], *none = "（機器はありません。〈探す〉で探します）", *noadp = "（Bluetoothのアダプタがありません）";
+	TS_UUID		u;
+	SZ		asz = 0;
+	ID		k;
+	INT		i;
+
+	nbt = 0;
+	bt_seek = FALSE;
+	(void)ui_uuid(BT_DEV_UUID, &u);
+	k = ob_opn_obj(&u, OB_OP_READ);
+	if ( k <= 0 ) {
+		ui_names(&ui, P_BT_LIST, &noadp, 1);
+		ui_set_value(&ui, P_BT_LIST, 0);
+		return;
+	}
+	{
+		T_BTSTATE	st;
+		CONST char	*why = NULL;
+		static char	line[128];
+
+		memset(&st, 0, sizeof(st));
+		st.state = BT_ST_READY;
+		(void)ob_rea_rec(k, OB_BT_STATE, 0, &st, sizeof(st), &asz);
+		bt_seek = ( st.scanning != 0 || ui_now() < bt_asked + BT_START_MS );
+		if ( st.state == BT_ST_STARTING ) why = "（Bluetoothのアダプタを準備しています）";
+		if ( st.state == BT_ST_NOFIRMWARE || st.state == BT_ST_FWFAILED ) {
+			snprintf(line, sizeof(line), "（アダプタはありますが、ファームウェア%s%sので使えません）",
+				 (CONST char *)st.file, ( st.state == BT_ST_NOFIRMWARE ) ? "がシステムにない" : "を読み込めなかった");
+			why = line;
+		}
+		if ( st.state == BT_ST_NOANSWER ) why = "（アダプタはありますが、応答がないので使えません。ファームウェアが読み込まれていないのかもしれません）";
+		if ( why != NULL ) {
+			ob_cls_obj(k);
+			ui_names(&ui, P_BT_LIST, &why, 1);
+			ui_set_value(&ui, P_BT_LIST, 0);
+			return;
+		}
+	}
+	if ( ob_rea_rec(k, OB_BT_LIST, 0, bt_list, sizeof(bt_list), &asz) >= E_OK ) nbt = (INT)( asz / (SZ)sizeof(T_BTLINE) );
+	ob_cls_obj(k);
+	for ( i = 0; i < nbt; i++ ) {
+		CONST T_BTLINE	*l = &bt_list[i];
+
+		snprintf(s[i], sizeof(s[i]), "%s  %02X:%02X:%02X:%02X:%02X:%02X  %s",
+			 l->connected ? "接続中" : l->paired ? "登録済" : "未登録",
+			 l->addr[5], l->addr[4], l->addr[3], l->addr[2], l->addr[1], l->addr[0],
+			 l->name[0] != 0 ? (CONST char *)l->name : "（名前なし）");
+		p[i] = s[i];
+	}
+	if ( nbt == 0 ) {
+		ui_names(&ui, P_BT_LIST, &none, 1);
+	} else {
+		ui_names(&ui, P_BT_LIST, p, nbt);
+	}
+}
+
+/* A command for the one chosen in the list, or for no one */
+LOCAL void bt_cmd( UINT op )
+{
+	T_BTCMD	m;
+	TS_UUID	u;
+	SZ	asz = 0;
+	ID	k;
+	INT	v = ui_value(&ui, P_BT_LIST) - 1;
+
+	memset(&m, 0, sizeof(m));
+	m.op = op;
+	if ( op != BT_C_SCAN ) {
+		if ( v < 0 || v >= nbt ) return;
+		memcpy(m.addr, bt_list[v].addr, 6);
+	}
+	(void)ui_uuid(BT_DEV_UUID, &u);
+	k = ob_opn_obj(&u, OB_OP_WRITE);
+	if ( k <= 0 ) return;
+	(void)ob_wri_rec(k, OB_BT_CMD, 0, &m, sizeof(m), &asz);
+	ob_cls_obj(k);
+}
+
 /* The disks: the device objects that are disks, their size and where they are mounted */
 LOCAL void fill_disks( void )
 {
@@ -1593,7 +1734,7 @@ LOCAL void snd_name( CONST char *id, CONST char *kind, CONST char *name, INT fla
 	CONST char *at = strchr(id, '@');
 
 	if ( strcmp(id, "auto") == 0 ) {
-		snprintf(out, max, "自動（ＵＳＢ、Ｉ２Ｓ、ＨＤＭＩの順）");
+		snprintf(out, max, "自動（ＵＳＢ、Ｂｌｕｅｔｏｏｔｈ、Ｉ２Ｓ、ＨＤＭＩの順）");
 	} else if ( strcmp(kind, "i2s") == 0 ) {
 		snprintf(out, max, "Ｉ２ＳのＤＡＣ（ＧＰＩＯ１８〜２１）");
 	} else if ( strcmp(kind, "hdmi") == 0 ) {
@@ -1601,6 +1742,8 @@ LOCAL void snd_name( CONST char *id, CONST char *kind, CONST char *name, INT fla
 			 ( name[0] != 0 ) ? name : "画面");
 	} else if ( strcmp(kind, "hda") == 0 ) {
 		snprintf(out, max, "内蔵のサウンド：%s", ( name[0] != 0 ) ? name : "ＨＤオーディオ");
+	} else if ( strcmp(kind, "bt") == 0 ) {
+		snprintf(out, max, "Ｂｌｕｅｔｏｏｔｈ：%s", ( name[0] != 0 ) ? name : "イヤホン");
 	} else {
 		snprintf(out, max, "ＵＳＢ：%s（%s）", ( name[0] != 0 ) ? name : "オーディオ機器",
 			 ( at != NULL ) ? at + 1 : "");
@@ -1697,6 +1840,19 @@ LOCAL void fill_sound( void )
 		ui_set_text(&ui, P_SND_1, snd_line[playing - 1]);
 	} else {
 		ui_set_text(&ui, P_SND_1, ( strcmp(now, "none") == 0 ) ? "（いまは鳴っていません）" : now);
+	}
+	/* why the machine's own sound may stay silent: shown only when there is a reason */
+	{
+		INT	note = ( len > 0 && cf_get(text, len, "HW_NOTE", 0, v, sizeof(v)) ) ? cf_num(v, 0) : 0;
+		CONST char *say = ( ( note & SND_NOTE_SPK_DSP ) != 0 && ( note & SND_NOTE_MIC_DSP ) != 0 ) ? "内蔵の音はＤＳＰ経由で未対応"
+			: ( ( note & SND_NOTE_SPK_DSP ) != 0 ) ? "内蔵スピーカーはＤＳＰ経由で未対応"
+			: ( ( note & SND_NOTE_NOCODEC ) != 0 ) ? "内蔵の音の装置が応答しません"
+			: ( ( note & SND_NOTE_DISPLAY ) != 0 ) ? "内蔵スピーカーが見つかりません"
+			: ( ( note & SND_NOTE_MIC_DSP ) != 0 ) ? "内蔵マイクはＤＳＰ経由で未対応" : "";
+
+		ui_set_text(&ui, P_SND_NOTE, say);
+		ui_show(&ui, P_SND_NOTE, ( say[0] != 0 ));
+		printf("sysenv: sound note %x\n", note);
 	}
 	val_of(len, "RATE", v, sizeof(v));
 	if ( cf_num(v, 0) > 0 ) {
@@ -1874,6 +2030,18 @@ LOCAL void perf_set( void )
 	if ( wd > 3600 ) wd = 3600;
 	snprintf(v, sizeof(v), "%d", wd);
 	if ( er >= E_OK ) er = dev_put("WATCHDOG", v);
+#if CPU_BY_FIRMWARE
+	/* the power button and the lid: kept with the settings, and told to the system now */
+	{
+		INT	b = ui_value(&ui, P_BTN_SLEEP) != 0, l = ui_value(&ui, P_LID_SLEEP) != 0;
+		char	p[32];
+
+		if ( er >= E_OK ) er = dev_put("BUTTON_SLEEP", b ? "1" : "0");
+		if ( er >= E_OK ) er = dev_put("LID_SLEEP", l ? "1" : "0");
+		snprintf(p, sizeof(p), "POLICY %d %d", b, l);
+		(void)sys_write(OB_SYS_POWER, p);
+	}
+#endif
 	snprintf(s, sizeof(s), "sysenv: performance CPU_MHZ %d WATCHDOG %d (%d)\n",
 		 ( k >= 0 && k < NCPU ) ? cpu_mhz_of[k] : -1, wd, (INT)er);
 	tm_putstring((CONST UB *)s);
@@ -2209,6 +2377,7 @@ LOCAL void open_page( INT sheet )
 	case S_D_KBD:		fill_kbd();	break;
 	case S_D_SOUND:		fill_sound();	break;
 	case S_D_CPU:		fill_cpu();	break;
+	case S_D_BT:		fill_bt();	break;
 	default:		break;
 	}
 	ui_show_sheet(&ui, sheet);
@@ -2720,7 +2889,8 @@ LOCAL void prog_detail( void )
 		 ( strcmp(pi->kind, "accessory") == 0 ) ? "小物"
 		 : ( strcmp(pi->kind, "utility") == 0 ) ? "道具" : "アプリケーション");
 	snprintf(l[4], sizeof(l[4]), "実身：%s", us);
-	snprintf(l[5], sizeof(l[5]), "%s", pi->builtin ? "システムに組み込み（削除できません）" : "追加したもの（削除できます）");
+	snprintf(l[5], sizeof(l[5]), "%s", pi->builtin ? "システムに組み込み（削除できません）"
+					   : pi->system ? "システムのもの（削除できます）" : "追加したもの（削除できます）");
 	for ( i = 0; i < 6; i++ ) lp[i] = l[i];
 	(void)ui_ask(&ui, PN_PROG, lp, 6);
 }
@@ -2741,7 +2911,7 @@ LOCAL void prog_delete( void )
 		return;
 	}
 	snprintf(l1, sizeof(l1), "〈%s %s〉を削除します。", prog_info[k].name, prog_info[k].version);
-	if ( !confirm(l1, "削除すると元に戻せません。", "削除") ) return;
+	if ( !confirm(l1, "実身は屑実身になり、屑実身操作で取り出せます。", "削除") ) return;
 	er = desk_ask(DT_RQ_REMOVE, &prog_id[k], 0, &an);
 	snprintf(s, sizeof(s), "sysenv: remove %s %d\n", prog_info[k].id, (INT)er);
 	tm_putstring((CONST UB *)s);
@@ -4689,6 +4859,22 @@ LOCAL void pressed( INT id )
 	case P_USB_AGAIN:
 		fill_usb();
 		break;
+	case P_BT_SCAN:
+		bt_cmd(BT_C_SCAN);
+		bt_asked = ui_now();
+		bt_at = bt_asked + BT_MS;
+		fill_bt();
+		break;
+	case P_BT_PAIR:
+		bt_cmd(BT_C_PAIR);
+		break;
+	case P_BT_FORGET:
+		bt_cmd(BT_C_FORGET);
+		fill_bt();
+		break;
+	case P_BT_AGAIN:
+		fill_bt();
+		break;
 	case P_PROG_INFO:
 		prog_detail();
 		break;
@@ -4697,6 +4883,9 @@ LOCAL void pressed( INT id )
 		break;
 	case P_SND_TEST:
 		sound_test();
+		break;
+	case P_SLEEP:
+		if ( sys_write(OB_SYS_POWER, "SLEEP") < E_OK ) tell("スリープできません。");
 		break;
 	case P_RESTART:
 		power(TRUE);
@@ -4757,6 +4946,7 @@ LOCAL TMO wait_for( void )
 	if ( lk_unkept ) at = lk_at;
 	if ( sh == S_POWER && perf_at < at ) at = perf_at;
 	if ( sh == S_D_NET && net_at < at ) at = net_at;
+	if ( sh == S_D_BT && bt_seek && bt_at < at ) at = bt_at;
 	return ( at == ~(UD)0 ) ? TMO_FEVR : ui_left(at);
 }
 
@@ -4770,6 +4960,10 @@ LOCAL void due( void )
 	if ( ui_sheet(&ui) == S_D_NET && now >= net_at ) {
 		net_at = now + NET_MS;
 		fill_net();
+	}
+	if ( ui_sheet(&ui) == S_D_BT && bt_seek && now >= bt_at ) {
+		bt_at = now + BT_MS;
+		fill_bt();				/* the findings so far; the last time, all of them */
 	}
 }
 
@@ -4785,7 +4979,7 @@ int main( void )
 	 * screen leaves the window shorter than the panel (scroll="true"
 	 * on its tags); the buttons at the sheets' foot stay in sight.
 	 */
-	ui_attr(WM_ATTR_RBAR);
+	ui_attr(WM_ATTR_RBAR | UI_ATTR_HIDDEN);	/* filled hidden, and shown once (ui_reveal) */
 	if ( ui_open(&ui, SYSDEF_BOX_SYSENV, PN_MAIN, 160, 80) < E_OK ) {
 		tm_putstring((CONST UB *)"sysenv: no window\n");
 		return 1;
@@ -4798,6 +4992,7 @@ int main( void )
 	look_start();
 	fill_fonts();
 	fill_version();
+	ui_reveal(&ui);
 	tm_putstring((CONST UB *)"sysenv: ready\n");
 
 	ksnd = sound_watch();

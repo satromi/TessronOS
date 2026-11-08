@@ -197,6 +197,9 @@ LOCAL void out_name( char *out, INT max )
 	case SND_BE_HDA:
 		snprintf(out, max, "内蔵のサウンド：%s", ( nm[0] != 0 ) ? nm : "ＨＤオーディオ");
 		break;
+	case SND_BE_BT:
+		snprintf(out, max, "Ｂｌｕｅｔｏｏｔｈ：%s", ( nm[0] != 0 ) ? nm : "イヤホン");
+		break;
 	default:
 		break;
 	}

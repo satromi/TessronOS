@@ -13,7 +13,7 @@
  *
  *	The system's package (.tpk, made by tools/mktpk.py --system) is an
  *	application's package of another kind: package.json says "kind":
- *	"system", the version (TS_VERSION, R1.200), the machine and the
+ *	"system", the version (TS_VERSION, R1.300), the machine and the
  *	processor it is for, and the objects it holds, each as the files of
  *	the TADjs form, and the files of the boot partition (/boot: the Pi's
  *	FAT partition, the PC's EFI system partition) as entries

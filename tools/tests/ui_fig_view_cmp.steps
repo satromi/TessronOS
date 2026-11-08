@@ -1,0 +1,80 @@
+# 基本図形編集の実寸パネルと用紙枠を、デスクトップの図形編集とプロセスの図形編集で同じに出す
+# (design 11.3, 17.13), for tools/ui_run.py. A figure of one rectangle and two zigzag lines
+# (mkbig fig 1 2 0) opened at 100,100 to 900,700. 実寸パネル表示 (表示, its second row) puts
+# 実寸 at the foot of the figure's window against its right (632,490 to 900,700), a
+# subordinate window of the figure's; 用紙枠表示オンオフ (書式/印刷, its first row) draws the
+# paper's edges over the figure. The menu opens with the item chosen last on the pointer's
+# row, the rows 20 apart, and an item's own menu beside it with its first row on the item's:
+# in the desktop's figure first 閉じる (表示 three rows under), then 表示 (書式/印刷 four
+# under); in the process's, the system's menus remembering, first 書式/印刷 (表示 four above),
+# then 表示. The screens with 実寸 and with the paper are kept for comparing; 実寸 at 640,500,
+# where a zigzag line passes, has the line's black at its own size.
+# Keys: Ctrl+E 08 01.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 1 2 0
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+click 600 400 1
+wait 500
+move 610 460
+wait 400
+move 720 460
+wait 150
+move 720 480
+wait 300
+click 720 480
+wait 800
+sync 600
+wins
+shot vcmp_k_realsize
+click 600 400 1
+wait 500
+move 610 480
+wait 400
+move 720 480
+wait 300
+click 720 480
+wait 800
+sync 600
+shot vcmp_k_paper
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 2 0
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 3
+wait 800
+logmark
+click 600 400 1
+expectsince figure: menu
+wait 500
+move 610 320
+wait 400
+move 720 320
+wait 150
+move 720 340
+wait 300
+click 720 340
+expectsince figure: realsize open
+wait 800
+wins
+shot vcmp_p_realsize
+logmark
+click 600 400 1
+expectsince figure: menu
+wait 500
+move 610 480
+wait 400
+move 720 480
+wait 300
+click 720 480
+expectsince figure: paper frame shown
+wait 800
+shot vcmp_p_paper
+logmark
+key 08 01
+expect figure: closed

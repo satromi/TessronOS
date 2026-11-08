@@ -2,7 +2,307 @@
 <document>
 <p>基本図形編集のデータボックス</p>
 <p>図形編集の道具パネルの押しボタンの絵。レコード0の資源0〜23(PNG)で、0は選択、1はキャンバス、2は画材、3は線種、4は角の丸め、5〜7はグリッド(なし、表示、吸着)、8〜17は曲線、直線、扇形、弦、楕円弧、長方形、多角形、三角形、楕円、文字枠、18〜23は中心から描くときの直線、扇形、弦、楕円弧、長方形、楕円。</p>
+<p>パネル1は〈位置あわせ〉で横と縦のそろえ方を選ぶパネル(選択スイッチ10〜13が横のなし、左、中央、右、20〜23が縦のなし、上、中央、下、ボタン101が取消、102が実行)、パネル2はできなかったことを知らせるパネル(文字1と2を図形編集が書き換える)。パネル3は文字枠の中の〈検索/置換〉(文字1が検索文字列、2が置換文字列、スイッチ5が正規表現、ボタン101が取消、3が全置換、4が置換、102が次を検索)。パネル4は文字枠の中の〈仮身化〉で新しい実身の名前を聞くパネル(文字1が聞くこと、文字2が名前、ボタン101が取消、102が設定)。パネル7は〈パターン編集〉のウインドウの右側の部品(見本10〜25が色、ボタン30が透明、選択スイッチ31〜34が鉛筆、長方形、スポイト、展開、ボタン40〜43が左、上、下、右への移動、44〜47が右回、左回、左右、上下、スイッチ50が読込、ボタン51が入替、52が復旧。位置はデスクトップのパターン編集の部品と同じで、選択スイッチの組の枠が左右にはみ出すぶん、パネルは左右に8ずつ広い)。パネル5は道具パネル(見本1が塗りつぶし、2が線の色、押しボタンの番号は100にボタンの位置の10倍を足し、その一の位が同じ位置に重ねた見た目の違い:選んだ道具は強調、中心から描くときは印の絵、キャンバスと画材、倍率の9つ、グリッドの3つ。文字99がポインタの位置)。パネル10〜28は道具パネルの各ボタンの下に出るパレット(10に、ボタンの位置を足した番号。部品の番号は、行を i、選択肢や見本を k として (i+1)×32+k)。パレットの部品の位置は図形の道具の核 application/fig/figtool.c の並べ方のとおりで、UITEST の ftdef が出す。どれもプロセスの基本図形編集が使う。</p>
 </document>
 <databox>
+<panel num="1" rect="0,0,436,134" title="位置あわせ">
+<text x="26" y="38">横</text>
+<choice num="10" rect="78,18,158,40" group="10" value="0">なし</choice>
+<choice num="11" rect="164,18,244,40" group="10" value="1">左</choice>
+<choice num="12" rect="250,18,330,40" group="10" value="0">中央</choice>
+<choice num="13" rect="336,18,416,40" group="10" value="0">右</choice>
+<text x="26" y="72">縦</text>
+<choice num="20" rect="78,52,158,74" group="20" value="1">なし</choice>
+<choice num="21" rect="164,52,244,74" group="20" value="0">上</choice>
+<choice num="22" rect="250,52,330,74" group="20" value="0">中央</choice>
+<choice num="23" rect="336,52,416,74" group="20" value="0">下</choice>
+<button num="101" rect="232,90,318,116" answer="cancel">取消</button>
+<button num="102" rect="328,90,414,116" emph="true">実行</button>
+</panel>
+<panel num="2" rect="0,0,496,116" title="基本図形編集">
+<text num="1" x="26" y="36"> </text>
+<text num="2" x="26" y="60"> </text>
+<button num="102" rect="380,72,474,98" answer="ok" emph="true">了解</button>
+</panel>
+<panel num="3" rect="0,0,476,166" title="検索/置換">
+<text x="26" y="38">検索文字列</text>
+<box num="1" rect="118,16,454,42"></box>
+<text x="26" y="72">置換文字列</text>
+<box num="2" rect="118,50,454,76"></box>
+<switch num="5" rect="118,84,278,106" value="0">正規表現</switch>
+<button num="101" rect="22,122,102,148" answer="cancel">取消</button>
+<button num="3" rect="168,122,254,148">全置換</button>
+<button num="4" rect="264,122,350,148">置換</button>
+<button num="102" rect="360,122,454,148" emph="true">次を検索</button>
+</panel>
+<panel num="4" rect="0,0,396,128" title="仮身化">
+<text num="1" x="26" y="36"> </text>
+<box num="2" rect="22,46,374,72"></box>
+<button num="101" rect="192,84,278,110" answer="cancel">取消</button>
+<button num="102" rect="288,84,374,110" emph="true">設定</button>
+</panel>
+<panel num="6" rect="0,0,486,336" title="用紙設定">
+<text x="26" y="32">用紙:</text>
+<list num="1" rect="72,12,242,182"><name>A3</name><name>A4</name><name>A5</name><name>B4</name><name>B5</name><name>はがき</name><name>往復はがき</name><name>長形3号</name><name>寸法指定</name></list>
+<text x="262" y="32">縦:</text>
+<box num="2" rect="288,12,364,38"></box>
+<text x="372" y="32">mm</text>
+<text x="262" y="66">横:</text>
+<box num="3" rect="288,46,364,72"></box>
+<text x="372" y="66">mm</text>
+<text x="26" y="214">余白:</text>
+<text x="76" y="214">上:</text>
+<box num="4" rect="102,194,178,220"></box>
+<text x="186" y="214">mm</text>
+<text x="262" y="214">左:</text>
+<box num="6" rect="288,194,364,220"></box>
+<text x="372" y="214">mm</text>
+<text x="76" y="246">下:</text>
+<box num="5" rect="102,226,178,252"></box>
+<text x="186" y="246">mm</text>
+<text x="262" y="246">右:</text>
+<box num="7" rect="288,226,364,252"></box>
+<text x="372" y="246">mm</text>
+<text x="26" y="280">割付:</text>
+<choice num="8" rect="72,260,162,282" group="8" value="1">片面</choice>
+<choice num="9" rect="168,260,258,282" group="8" value="0">見開き</choice>
+<button num="101" rect="282,292,368,318" answer="cancel">取消</button>
+<button num="102" rect="378,292,464,318" emph="true">設定</button>
+<button num="92" rect="186,292,272,318">標準設定</button>
+<button num="93" rect="64,292,180,318">ヘッダ/フッタ</button>
+</panel>
+<panel kind="bare" num="7" rect="0,0,196,320" title="パターン編集">
+<text x="12" y="24">選択色:</text>
+<swatch num="10" rect="8,28,28,48" group="1"/>
+<swatch num="11" rect="30,28,50,48" group="1"/>
+<swatch num="12" rect="52,28,72,48" group="1"/>
+<swatch num="13" rect="74,28,94,48" group="1"/>
+<swatch num="14" rect="96,28,116,48" group="1"/>
+<swatch num="15" rect="118,28,138,48" group="1"/>
+<swatch num="16" rect="140,28,160,48" group="1"/>
+<swatch num="17" rect="162,28,182,48" group="1"/>
+<swatch num="18" rect="8,50,28,70" group="1"/>
+<swatch num="19" rect="30,50,50,70" group="1"/>
+<swatch num="20" rect="52,50,72,70" group="1"/>
+<swatch num="21" rect="74,50,94,70" group="1"/>
+<swatch num="22" rect="96,50,116,70" group="1"/>
+<swatch num="23" rect="118,50,138,70" group="1"/>
+<swatch num="24" rect="140,50,160,70" group="1"/>
+<swatch num="25" rect="162,50,182,70" group="1"/>
+<button num="30" rect="8,72,64,94">透明</button>
+<text x="12" y="124">ツール:</text>
+<choice num="31" rect="8,134,96,156" group="2" value="1">鉛筆</choice>
+<choice num="32" rect="98,134,186,156" group="2" value="0">長方形</choice>
+<choice num="33" rect="8,158,96,180" group="2" value="0">スポイト</choice>
+<choice num="34" rect="98,158,186,180" group="2" value="0">展開</choice>
+<text x="12" y="206">移動:</text>
+<button num="40" rect="8,210,50,232">左</button>
+<button num="41" rect="52,210,94,232">上</button>
+<button num="42" rect="96,210,138,232">下</button>
+<button num="43" rect="140,210,182,232">右</button>
+<text x="12" y="256">変形:</text>
+<button num="44" rect="8,260,50,282">右回</button>
+<button num="45" rect="52,260,94,282">左回</button>
+<button num="46" rect="96,260,138,282">左右</button>
+<button num="47" rect="140,260,182,282">上下</button>
+<switch num="50" rect="8,294,66,316" value="0">読込</switch>
+<button num="51" rect="68,294,124,316">入替</button>
+<button num="52" rect="128,294,184,316">復旧</button>
+</panel>
+<panel kind="bare" num="5" rect="0,0,420,78" title="道具パネル">
+<swatch num="1" rect="6,6,38,38" group="1"/>
+<swatch num="2" rect="40,6,72,38" group="2"/>
+<button num="120" rect="74,6,106,38" pict="0_3.png"></button>
+<button num="130" rect="108,6,140,38" pict="0_4.png"></button>
+<button num="140" rect="142,6,174,38" pict="0_1.png"></button>
+<button num="141" rect="142,6,174,38" emph="true" pict="0_1.png"></button>
+<button num="142" rect="142,6,174,38" pict="0_2.png"></button>
+<button num="143" rect="142,6,174,38" emph="true" pict="0_2.png"></button>
+<button num="150" rect="176,6,208,38" pict="0_0.png"></button>
+<button num="151" rect="176,6,208,38" emph="true" pict="0_0.png"></button>
+<button num="160" rect="210,6,242,38">x1</button>
+<button num="170" rect="244,6,276,38" pict="0_5.png"></button>
+<button num="171" rect="244,6,276,38" pict="0_6.png"></button>
+<button num="172" rect="244,6,276,38" pict="0_7.png"></button>
+<button num="180" rect="6,40,38,72" pict="0_8.png"></button>
+<button num="181" rect="6,40,38,72" emph="true" pict="0_8.png"></button>
+<button num="190" rect="40,40,72,72" pict="0_9.png"></button>
+<button num="191" rect="40,40,72,72" emph="true" pict="0_9.png"></button>
+<button num="192" rect="40,40,72,72" emph="true" pict="0_18.png"></button>
+<button num="200" rect="74,40,106,72" pict="0_10.png"></button>
+<button num="201" rect="74,40,106,72" emph="true" pict="0_10.png"></button>
+<button num="202" rect="74,40,106,72" emph="true" pict="0_19.png"></button>
+<button num="210" rect="108,40,140,72" pict="0_11.png"></button>
+<button num="211" rect="108,40,140,72" emph="true" pict="0_11.png"></button>
+<button num="212" rect="108,40,140,72" emph="true" pict="0_20.png"></button>
+<button num="220" rect="142,40,174,72" pict="0_12.png"></button>
+<button num="221" rect="142,40,174,72" emph="true" pict="0_12.png"></button>
+<button num="222" rect="142,40,174,72" emph="true" pict="0_21.png"></button>
+<button num="230" rect="176,40,208,72" pict="0_13.png"></button>
+<button num="231" rect="176,40,208,72" emph="true" pict="0_13.png"></button>
+<button num="232" rect="176,40,208,72" emph="true" pict="0_22.png"></button>
+<button num="240" rect="210,40,242,72" pict="0_14.png"></button>
+<button num="241" rect="210,40,242,72" emph="true" pict="0_14.png"></button>
+<button num="250" rect="244,40,276,72" pict="0_24.png"></button>
+<button num="251" rect="244,40,276,72" emph="true" pict="0_24.png"></button>
+<button num="260" rect="278,40,310,72" pict="0_15.png"></button>
+<button num="261" rect="278,40,310,72" emph="true" pict="0_15.png"></button>
+<button num="270" rect="312,40,344,72" pict="0_16.png"></button>
+<button num="271" rect="312,40,344,72" emph="true" pict="0_16.png"></button>
+<button num="272" rect="312,40,344,72" emph="true" pict="0_23.png"></button>
+<button num="280" rect="346,40,378,72" pict="0_17.png"></button>
+<button num="281" rect="346,40,378,72" emph="true" pict="0_17.png"></button>
+<button num="290" rect="380,40,412,72">書式</button>
+<text num="99" x="286" y="29"> </text>
+</panel>
+<panel kind="bare" num="10" rect="0,0,430,246" title="塗りつぶし">
+<text x="12" y="25">塗りつぶし色:</text>
+<swatch num="32" rect="118,7,228,29"/>
+<switch num="64" rect="8,37,422,59">塗りつぶし有効</switch>
+<button num="128" rect="8,211,141,233">パターン編集...</button>
+</panel>
+<panel kind="bare" num="11" rect="0,0,430,72" title="線色">
+<text x="12" y="25">線色:</text>
+<swatch num="32" rect="118,7,228,29"/>
+<swatch num="64" rect="118,39,136,57" group="2"/>
+<swatch num="65" rect="138,39,156,57" group="2"/>
+<swatch num="66" rect="158,39,176,57" group="2"/>
+<swatch num="67" rect="178,39,196,57" group="2"/>
+<swatch num="68" rect="198,39,216,57" group="2"/>
+<swatch num="69" rect="218,39,236,57" group="2"/>
+<swatch num="70" rect="238,39,256,57" group="2"/>
+<swatch num="71" rect="258,39,276,57" group="2"/>
+<swatch num="72" rect="278,39,296,57" group="2"/>
+<swatch num="73" rect="298,39,316,57" group="2"/>
+<swatch num="74" rect="318,39,336,57" group="2"/>
+<swatch num="75" rect="338,39,356,57" group="2"/>
+<swatch num="76" rect="358,39,376,57" group="2"/>
+</panel>
+<panel kind="bare" num="12" rect="0,0,430,214" title="線種">
+<text x="12" y="25">線の太さ:</text>
+<choice num="32" rect="118,7,175,29" group="1">1px</choice>
+<choice num="33" rect="177,7,234,29" group="1">2px</choice>
+<choice num="34" rect="236,7,293,29" group="1">3px</choice>
+<choice num="35" rect="295,7,352,29" group="1">5px</choice>
+<choice num="36" rect="354,7,420,29" group="1">10px</choice>
+<text x="12" y="55">線種:</text>
+<choice num="64" rect="118,37,180,59" group="2">実線</choice>
+<choice num="65" rect="182,37,244,59" group="2">破線</choice>
+<choice num="66" rect="246,37,308,59" group="2">点線</choice>
+<choice num="67" rect="310,37,404,59" group="2">一点鎖線</choice>
+<choice num="68" rect="118,63,212,85" group="2">二点鎖線</choice>
+<choice num="69" rect="214,63,292,85" group="2">長破線</choice>
+<text x="12" y="111">接続形状:</text>
+<choice num="96" rect="118,93,180,115" group="3">直線</choice>
+<choice num="97" rect="182,93,260,115" group="3">カギ線</choice>
+<choice num="98" rect="262,93,324,115" group="3">曲線</choice>
+<text x="12" y="141">矢印位置:</text>
+<choice num="128" rect="118,123,180,145" group="4">なし</choice>
+<choice num="129" rect="182,123,276,145" group="4">始点のみ</choice>
+<choice num="130" rect="278,123,372,145" group="4">終点のみ</choice>
+<choice num="131" rect="118,149,180,171" group="4">両端</choice>
+<text x="12" y="197">矢印種類:</text>
+<choice num="160" rect="118,179,196,201" group="5">線のみ</choice>
+<choice num="161" rect="198,179,308,201" group="5">塗りつぶし</choice>
+</panel>
+<panel kind="bare" num="13" rect="0,0,430,42" title="角丸">
+<text x="12" y="25">角丸半径:</text>
+<box num="32" rect="118,7,228,29" max="3" ascii="true"></box>
+</panel>
+<panel kind="bare" num="14" rect="0,0,430,184" title="画材">
+<text x="12" y="25">画材:</text>
+<choice num="32" rect="118,7,180,29" group="1">鉛筆</choice>
+<choice num="33" rect="182,7,244,29" group="1">絵筆</choice>
+<choice num="34" rect="246,7,340,29" group="1">消しゴム</choice>
+<choice num="35" rect="118,33,228,55" group="1">エアブラシ</choice>
+<choice num="36" rect="230,33,308,55" group="1">絵の具</choice>
+<choice num="37" rect="310,33,404,55" group="1">カッター</choice>
+<text x="12" y="81">描画色:</text>
+<swatch num="64" rect="118,63,228,85"/>
+<swatch num="96" rect="118,95,136,113" group="3"/>
+<swatch num="97" rect="138,95,156,113" group="3"/>
+<swatch num="98" rect="158,95,176,113" group="3"/>
+<swatch num="99" rect="178,95,196,113" group="3"/>
+<swatch num="100" rect="198,95,216,113" group="3"/>
+<swatch num="101" rect="218,95,236,113" group="3"/>
+<swatch num="102" rect="238,95,256,113" group="3"/>
+<swatch num="103" rect="258,95,276,113" group="3"/>
+<swatch num="104" rect="278,95,296,113" group="3"/>
+<swatch num="105" rect="298,95,316,113" group="3"/>
+<swatch num="106" rect="318,95,336,113" group="3"/>
+<swatch num="107" rect="338,95,356,113" group="3"/>
+<swatch num="108" rect="358,95,376,113" group="3"/>
+<text x="12" y="141">太さ:</text>
+<choice num="128" rect="118,123,175,145" group="4">1px</choice>
+<choice num="129" rect="177,123,234,145" group="4">3px</choice>
+<choice num="130" rect="236,123,293,145" group="4">5px</choice>
+<choice num="131" rect="295,123,361,145" group="4">10px</choice>
+<choice num="132" rect="118,149,184,171" group="4">20px</choice>
+</panel>
+<panel kind="bare" num="16" rect="0,0,430,68" title="倍率">
+<text x="12" y="25">倍率:</text>
+<choice num="32" rect="118,7,180,29" group="1">x1/8</choice>
+<choice num="33" rect="182,7,244,29" group="1">x1/4</choice>
+<choice num="34" rect="246,7,308,29" group="1">x1/2</choice>
+<choice num="35" rect="310,7,357,29" group="1">x1</choice>
+<choice num="36" rect="359,7,406,29" group="1">x2</choice>
+<choice num="37" rect="118,33,165,55" group="1">x3</choice>
+<choice num="38" rect="167,33,214,55" group="1">x4</choice>
+<choice num="39" rect="216,33,263,55" group="1">x5</choice>
+<choice num="40" rect="265,33,312,55" group="1">x8</choice>
+</panel>
+<panel kind="bare" num="17" rect="0,0,430,128" title="格子点">
+<text x="12" y="25">表示モード:</text>
+<choice num="32" rect="118,7,180,29" group="1">なし</choice>
+<choice num="33" rect="182,7,276,29" group="1">表示のみ</choice>
+<choice num="34" rect="278,7,388,29" group="1">格子点拘束</choice>
+<text x="12" y="55">間隔 (px):</text>
+<choice num="64" rect="118,37,157,59" group="2">4</choice>
+<choice num="65" rect="159,37,198,59" group="2">8</choice>
+<choice num="66" rect="200,37,248,59" group="2">16</choice>
+<choice num="67" rect="250,37,298,59" group="2">32</choice>
+<choice num="68" rect="300,37,348,59" group="2">64</choice>
+<choice num="69" rect="350,37,389,59" group="2">5</choice>
+<choice num="70" rect="118,63,166,85" group="2">10</choice>
+<choice num="71" rect="168,63,216,85" group="2">20</choice>
+<choice num="72" rect="218,63,266,85" group="2">25</choice>
+<choice num="73" rect="268,63,316,85" group="2">40</choice>
+<choice num="74" rect="318,63,366,85" group="2">50</choice>
+<text x="12" y="111">自由入力:</text>
+<box num="96" rect="118,93,228,115" max="3" ascii="true"></box>
+</panel>
+<panel kind="bare" num="28" rect="0,0,430,278" title="書式">
+<text x="12" y="25">サイズ:</text>
+<choice num="32" rect="118,7,166,29" group="1">10</choice>
+<choice num="33" rect="168,7,216,29" group="1">12</choice>
+<choice num="34" rect="218,7,266,29" group="1">14</choice>
+<choice num="35" rect="268,7,316,29" group="1">16</choice>
+<choice num="36" rect="318,7,366,29" group="1">18</choice>
+<choice num="37" rect="368,7,416,29" group="1">20</choice>
+<choice num="38" rect="118,33,166,55" group="1">24</choice>
+<choice num="39" rect="168,33,216,55" group="1">28</choice>
+<choice num="40" rect="218,33,266,55" group="1">32</choice>
+<choice num="41" rect="268,33,316,55" group="1">36</choice>
+<text x="12" y="81">フォント:</text>
+<choice num="64" rect="118,63,212,85" group="2">ゴシック</choice>
+<choice num="65" rect="214,63,276,85" group="2">明朝</choice>
+<choice num="66" rect="278,63,340,85" group="2">等幅</choice>
+<text x="12" y="111">文字色:</text>
+<swatch num="96" rect="118,93,228,115"/>
+<swatch num="128" rect="118,125,136,143" group="4"/>
+<swatch num="129" rect="138,125,156,143" group="4"/>
+<swatch num="130" rect="158,125,176,143" group="4"/>
+<swatch num="131" rect="178,125,196,143" group="4"/>
+<swatch num="132" rect="198,125,216,143" group="4"/>
+<swatch num="133" rect="218,125,236,143" group="4"/>
+<swatch num="134" rect="238,125,256,143" group="4"/>
+<swatch num="135" rect="258,125,276,143" group="4"/>
+<swatch num="136" rect="278,125,296,143" group="4"/>
+<swatch num="137" rect="298,125,316,143" group="4"/>
+<switch num="160" rect="8,153,422,175">太字</switch>
+<switch num="192" rect="8,183,422,205">斜体</switch>
+<switch num="224" rect="8,213,422,235">下線</switch>
+<switch num="256" rect="8,243,422,265">打ち消し線</switch>
+</panel>
 </databox>
 </tad>

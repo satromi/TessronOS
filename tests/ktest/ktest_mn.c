@@ -199,6 +199,121 @@ LOCAL void test_menu( void )
 	KT_ASSERT_ER(mn_del_men(mid), E_ID);
 }
 
+/*
+ * A list the program fills with nothing goes, and the items after it stay
+ * as they were: トレー has a line and トレーを空にする after its list, and
+ * that item must not be written over the others.
+ */
+LOCAL void test_empty_list( void )
+{
+	TS_UUID	cab = def_of(SYSDEF_MENU_CAB), td = def_of(SYSDEF_MENU_TRAY);
+	ID	mid;
+
+	if ( mn_cre_men(&cab, &mid) < E_OK ) {
+		KT_SKIP("no definitions");
+	}
+	KT_ASSERT_ER(mn_set_lst(mid, &td, "tray.level", NULL, 0, 0), E_OK);
+	KT_ASSERT_EQ(mn_chg_atr(mid, &td, "tray.clear", 0), 1);
+	KT_ASSERT_ER(mn_del_men(mid), E_OK);
+}
+
+#define KT_MANY_APPS	12
+LOCAL void test_many_apps_end( TS_UUID *u, T_VOBJ *v, DTAPP *a )
+{
+	(void)ob_del_obj(u);
+	Kfree(v);
+	Kfree(a);
+}
+
+/*
+ * 機能付箋 in any number. Twelve programs in an object's applist: all of
+ * them in the list, in the menu's list, and the link can be fixed to the
+ * one it opens with though the list does not fit a link. A link read from
+ * a record with such a list in its attribute is still a link, with that
+ * one entry.
+ */
+LOCAL void test_many_apps( void )
+{
+	CONST char	*ids[KT_MANY_APPS] = {
+		"basic-text-editor", "basic-figure-editor", "virtual-object-list", "basic-calc-editor",
+		"basic-slide", "base-calendar", "tessronos-microcard", "tessronos-techo",
+		"web-browser", "archive-manager", "kana-typing-trainer", "microscript"
+	};
+	UB		*js = (UB *)Kmalloc(4096);
+	UB		*xml = (UB *)Kmalloc(4096);
+	T_VOBJ		*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	DTAPP		*a = (DTAPP *)Kmalloc(sizeof(DTAPP) * 64);
+	T_OBCRE		c;
+	TS_UUID		u, cab = def_of(SYSDEF_MENU_CAB), ed = def_of(SYSDEF_MENU_EXEC);
+	T_TAD		*doc = NULL;
+	UB		rows[KT_MANY_APPS][WM_LABEL_MAX];
+	ID		mid;
+	INT		i, n, k, dflt = -1;
+
+	KT_ASSERT(js != NULL && xml != NULL && v != NULL && a != NULL);
+	(void)dt_prog_start();
+	k = tm_sprintf(js, (UB *)"{\"name\":\"KT機能付箋の多い実身\",\"applist\":{");
+	for ( i = 0; i < KT_MANY_APPS; i++ ) {
+		k += tm_sprintf(js + k, (UB *)"%s\"%s\":{\"name\":\"名前%d\",\"defaultOpen\":%s}",
+				( i > 0 ) ? "," : "", ids[i], i, ( i == 3 ) ? "true" : "false");
+	}
+	k += tm_sprintf(js + k, (UB *)"}}");
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.json = js;
+	c.jsonsz = k;
+	KT_ASSERT_ER(ob_cre_obj(&c, &u), E_OK);
+	knl_memset(v, 0, sizeof(*v));
+	v->target = u;
+
+	KT_ASSERT_EQ(om_link_napps(v), KT_MANY_APPS);
+	n = dt_app_list(v, a, 64, &dflt);
+	KT_ASSERT_EQ(n, KT_MANY_APPS);
+	KT_ASSERT_EQ(dflt, 3);
+	for ( i = 0; i < n && i < KT_MANY_APPS; i++ ) KT_ASSERT(a[i].listed);
+
+	/* each of them is a row of the menu's list, and is chosen as itself */
+	KT_ASSERT_ER(mn_cre_men(&cab, &mid), E_OK);
+	for ( i = 0; i < KT_MANY_APPS; i++ ) tm_sprintf(rows[i], (UB *)"行%d", i);
+	KT_ASSERT_ER(mn_set_lst(mid, &ed, "exec.app", (CONST UB *)rows, WM_LABEL_MAX, KT_MANY_APPS), E_OK);
+	for ( i = 0; i < KT_MANY_APPS; i++ ) {
+		KT_ASSERT_ER(mn_chg_idx(mid, &ed, "exec.app", i, 0), E_OK);
+	}
+	KT_ASSERT_ER(mn_chg_idx(mid, &ed, "exec.app", KT_MANY_APPS, 0), E_NOEXS);
+	KT_ASSERT_ER(mn_del_men(mid), E_OK);
+
+	/* fixed: the entry it opens with; the list is still the object's twelve */
+	KT_ASSERT_ER(om_link_lock(v, TRUE), E_OK);
+	KT_ASSERT(om_link_locked(v));
+	KT_ASSERT_EQ(dt_app_list(v, a, 64, NULL), KT_MANY_APPS);
+	KT_ASSERT_ER(om_link_lock(v, FALSE), E_OK);
+	KT_ASSERT(!om_link_locked(v));
+
+	/* a record whose link carries all twelve, as another system may have saved it */
+	k = tm_sprintf(xml, (UB *)"<tad version=\"1.0\" encoding=\"UTF-8\"><figure><link id=\"");
+	KT_ASSERT_ER(ts_uuid_to_str(&u, (char *)xml + k, 64), E_OK);
+	while ( xml[k] != 0 ) k++;
+	k += tm_sprintf(xml + k, (UB *)"_0.xtad\" name=\"KT\" applist=\"{");
+	for ( i = 0; i < KT_MANY_APPS; i++ ) {
+		k += tm_sprintf(xml + k, (UB *)"%s&quot;%s&quot;:{&quot;name&quot;:&quot;名前%d&quot;,&quot;defaultOpen&quot;:%s}",
+				( i > 0 ) ? "," : "", ids[i], i, ( i == 3 ) ? "true" : "false");
+	}
+	k += tm_sprintf(xml + k, (UB *)"}\"/></figure></tad>\n");
+	KT_ASSERT_ER(tad_parse(xml, k, NULL, &doc), E_OK);
+	if ( doc != NULL ) {
+		knl_memset(v, 0, sizeof(*v));
+		KT_ASSERT_EQ(tad_lnk_count(doc), 1);
+		KT_ASSERT_ER(tad_lnk_get(doc, 0, v), E_OK);
+		KT_ASSERT(same(v->applist, "{\"basic-calc-editor\":{\"name\":\"名前3\",\"defaultOpen\":true}}"));
+		KT_ASSERT_EQ(dt_app_list(v, a, 64, NULL), KT_MANY_APPS);
+		tad_free(doc);
+	}
+	Kfree(js);
+	Kfree(xml);
+	test_many_apps_end(&u, v, a);
+}
+
 /* The system's items set for a virtual object, and what is not theirs */
 LOCAL void test_vmn( void )
 {
@@ -239,9 +354,18 @@ LOCAL void test_vmn( void )
 	KT_ASSERT_EQ(mn_get_atr(mid, &vd, "vobj.open"), 0);
 	KT_ASSERT_EQ(mn_get_atr(mid, &vd, "vobj.close"), MN_GREY);
 	KT_ASSERT_EQ(mn_get_atr(mid, &vd, "vobj.reconnect"), MN_HIDE);
+	KT_ASSERT_EQ(mn_get_atr(mid, &rd, "real.lock"), MN_GREY);	/* its applist names no program */
+	KT_ASSERT_EQ(mn_get_atr(mid, &rd, "real.unlock"), MN_HIDE);
+	(void)mn_del_men(mid);
+
+	/* on one that opens with a program: what it opens with can be fixed */
+	v->target = def_of(SYSDEF_PROG_BOX);
+	KT_ASSERT_ER(cab_menu_make(&st, &mid), E_OK);
+	dt_get_vmn(d, mid, TRUE, v);
 	KT_ASSERT_EQ(mn_get_atr(mid, &rd, "real.lock"), 0);
 	KT_ASSERT_EQ(mn_get_atr(mid, &rd, "real.unlock"), MN_HIDE);
 	(void)mn_del_men(mid);
+	v->target = cab;
 
 	/* in a sealed window, what changes its record is grey */
 	d->sealed = TRUE;
@@ -578,6 +702,8 @@ EXPORT void ktest_mn( void )
 	KT_RUN(test_json);
 	KT_RUN(test_def);
 	KT_RUN(test_menu);
+	KT_RUN(test_empty_list);
+	KT_RUN(test_many_apps);
 	KT_RUN(test_vmn);
 	KT_RUN(test_choose);
 	KT_RUN(test_session);

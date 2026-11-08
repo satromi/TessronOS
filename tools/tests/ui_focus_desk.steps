@@ -1,0 +1,37 @@
+# The keys when a link is let go on a document of the desktop's (design 10.4), for
+# tools/ui_run.py: the target first, then the source over it at the same place, its
+# window carried down so that the target shows above it.
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p><link id="019b54a4-6ccf-72f7-e320-c98e4a0bab4e_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c31"
+xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
+xml framedisp="true" namedisp="true" pictdisp="true"/></p>
+xml <p><link id="01a0d8c4-5320-7a41-8b52-6c7d8e9fa020_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c32"
+xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
+xml framedisp="true" namedisp="true" pictdisp="true"/></p>
+xml </document></tad>
+xmlopen 置き先
+wait 500
+win 置き先
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p><link id="019b54a4-6ccf-72f7-e320-c98e4a0bab4e_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c31"
+xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
+xml framedisp="true" namedisp="true" pictdisp="true"/></p>
+xml <p><link id="01a0d8c4-5320-7a41-8b52-6c7d8e9fa020_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c32"
+xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
+xml framedisp="true" namedisp="true" pictdisp="true"/></p>
+xml </document></tad>
+xmlopen 持ち元
+wait 500
+win 持ち元
+focus fk_doc 持ち元
+shot fk_open
+drag 300 75 300 400
+win 持ち元
+focus fk_moved 持ち元
+caret
+drag 190 432 400 200
+focus fk_taken 置き先
+shot fk_taken
+caret
+key 04
+caret

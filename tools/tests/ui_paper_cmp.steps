@@ -1,0 +1,321 @@
+# 背景色変更を、カーネル内の基本図形編集・基本文章編集・仮身一覧とプロセスとで同じにする
+# (design 11.3), for tools/ui_run.py. For each of the three, a copy (mkbig) is opened with the
+# desktop's own editor (open, after figproc, docproc, cabproc kernel), then another with the
+# process (pfig, pdoc, pcab). 背景色変更 of 表示 opens the desktop's pop-up of colours at the
+# pointer: its choice HEX (182 across from the pointer, at 685 down, the pop-up being kept on
+# the screen) is pressed, what the box holds taken back and c8e0f0 typed, then Enter. Saved with
+# Ctrl+S: the paper the object's metadata keeps (paper) and record 0 (sum) are the same,
+# whichever editor changed it, and the work area shows the paper (pixel). The paper is kept in
+# the metadata when it is chosen; the process's text editor writes no record 0 on Ctrl+S when
+# its letters were not changed (no "saved"), and record 0 stays as made. The menu is opened
+# at 500,400 with 閉じる under the pointer, the rows 20 apart (閉じる, a line, 保存, 表示, ...);
+# 表示's own opens beside it, its first row on 表示's row: 背景色変更 is its sixth row in
+# 基本図形編集 (道具パネル表示, 実寸パネル表示, パターン編集, 全画面表示, 再表示, 背景色変更),
+# its seventh in 基本文章編集 (three modes, a line, 全画面表示, 再表示, 背景色変更) and its
+# third in 仮身一覧. Chosen, the menu opens with 表示 under the pointer: 閉じる, three rows up,
+# closes the window and leaves 閉じる the row chosen last.
+# Keys: Backspace 2A, Enter 28, Ctrl+S 16 01.
+
+# ---------------------------------------------------------------- 基本図形編集
+figproc kernel
+mkbig fig 30 4
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+click 500 400 1
+wait 800
+move 510 460
+wait 300
+move 650 460
+move 650 560
+wait 300
+click 650 560
+wait 1000
+wait 800
+shot pp_fig_k_pick
+click 832 685
+wait 300
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+text c8e0f0
+wait 500
+key 28
+sync 600
+wait 800
+pixel 850 650 C8E0F0
+key 16 01
+sync 600
+paper
+keep fig_paper
+sum
+keep fig
+click 500 400 1
+wait 800
+move 510 340
+wait 300
+click 510 340
+sync 600
+wait 500
+
+mkbig fig 30 4
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 32
+wait 800
+logmark
+click 500 400 1
+wait 800
+move 510 460
+wait 300
+move 650 460
+move 650 560
+wait 300
+click 650 560
+expectsince figure: chosen bgcolour
+wait 800
+shot pp_fig_p_pick
+click 832 685
+wait 300
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+text c8e0f0
+wait 500
+key 28
+wait 1000
+pixel 850 650 C8E0F0
+logmark
+key 16 01
+expectsince figure: saved (0)
+paper
+same fig_paper
+sum
+same fig
+logmark
+click 500 400 1
+wait 800
+move 510 340
+wait 300
+click 510 340
+expectsince figure: chosen close
+expectsince figure: closed
+wait 500
+figproc 0
+
+# ---------------------------------------------------------------- 基本文章編集
+docproc kernel
+mkbig doc 5
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 800
+click 500 400 1
+wait 800
+move 510 460
+wait 300
+move 650 460
+move 650 580
+wait 300
+click 650 580
+wait 1000
+wait 800
+shot pp_doc_k_pick
+click 832 685
+wait 300
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+text c8e0f0
+wait 500
+key 28
+sync 600
+wait 800
+pixel 600 450 C8E0F0
+key 16 01
+sync 600
+paper
+keep doc_paper
+sum
+keep doc
+click 500 400 1
+wait 800
+move 510 340
+wait 300
+click 510 340
+sync 600
+wait 500
+
+mkbig doc 5
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 5
+wait 800
+logmark
+click 500 400 1
+wait 800
+move 510 460
+wait 300
+move 650 460
+move 650 580
+wait 300
+click 650 580
+expectsince document: chosen bgcolour
+wait 800
+shot pp_doc_p_pick
+click 832 685
+wait 300
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+text c8e0f0
+wait 500
+key 28
+wait 1000
+pixel 600 450 C8E0F0
+logmark
+key 16 01
+expectsince document: command save
+wait 500
+paper
+same doc_paper
+sum
+same doc
+logmark
+click 500 400 1
+wait 800
+move 510 340
+wait 300
+click 510 340
+expectsince document: chosen close
+expectsince document: closed
+wait 500
+docproc 0
+
+# ---------------------------------------------------------------- 仮身一覧
+cabproc kernel
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+click 500 400 1
+wait 800
+move 510 460
+wait 300
+move 650 460
+move 650 500
+wait 300
+click 650 500
+wait 1000
+wait 800
+shot pp_cab_k_pick
+click 832 685
+wait 300
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+text c8e0f0
+wait 500
+key 28
+sync 600
+wait 800
+pixel 600 600 C8E0F0
+key 16 01
+sync 600
+paper
+keep cab_paper
+sum
+keep cab
+click 500 400 1
+wait 800
+move 510 340
+wait 300
+click 510 340
+sync 600
+wait 500
+
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+logmark
+pcab big
+expectsincein 60 cabinet: opened 画用紙 shapes 1 links 1
+wait 800
+logmark
+click 500 400 1
+wait 800
+move 510 460
+wait 300
+move 650 460
+move 650 500
+wait 300
+click 650 500
+expectsince cabinet: chosen bgcolour
+wait 800
+shot pp_cab_p_pick
+click 832 685
+wait 300
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+text c8e0f0
+wait 500
+key 28
+wait 1000
+pixel 600 600 C8E0F0
+logmark
+key 16 01
+expectsince cabinet: saved (0)
+paper
+same cab_paper
+sum
+same cab
+logmark
+click 500 400 1
+wait 800
+move 510 340
+wait 300
+click 510 340
+expectsince cabinet: chosen close
+expectsince cabinet: closed
+wait 500
+cabproc 0
+absent !OACV!

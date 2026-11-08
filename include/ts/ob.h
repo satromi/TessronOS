@@ -150,7 +150,8 @@ extern "C" {
 					   the system object's record 8 (OB_SYS_SOUND) */
 #define OB_SND_MIX	26		/* SDMix: the whole's volume and the programs' */
 #define OB_SND_MIXSET	27		/* SDMixSet written: a volume or a mute set */
-#define OB_SND_NREC	28
+#define OB_SND_MONITOR	28		/* SDMon: the channel records what is played */
+#define OB_SND_NREC	29
 
 /* A camera's records (include/ts/cam.h): record 1 its frames, the rest its attributes */
 #define OB_CAM_FRAME	1		/* data number 0: T_CAMFRAME and the frame */
@@ -322,7 +323,7 @@ typedef struct {
 /* Where a window is: record OB_WR_PLACE */
 #define OB_WP_SHOWN	0x0001
 #define OB_WP_OFF	0x0002		/* a part: shown, but it cannot be worked */
-#define OB_WP_FOCUS	0x0004		/* a box: the keys go to it (written: given them; read: has them) */
+#define OB_WP_FOCUS	0x0004		/* a box: the keys go to it (written: given them; read: has them); a window: read, has them */
 typedef struct {
 	TS_UUID	parent;			/* the window it is in; 0 the screen */
 	INT	left, top, right, bottom;	/* its outer edge */
@@ -343,6 +344,10 @@ typedef struct {
  * object by its UUID with those rights whatever its own credentials
  * say, as long as it runs. What the objects link to further is opened
  * with the taker's own credentials.
+ *
+ * Links carried out of another process's window (wm_obj_drop_for) grant
+ * nothing: both processes must be able to read the object, and ops says
+ * what both may do.
  *
  * Read, the record is a T_OBDROP whose v[] holds n entries, as many as
  * were let go: OB_DROP_SIZE(n) bytes. A program reads it whole (in
@@ -398,6 +403,26 @@ typedef struct {
 	UINT	answer;			/* OB_DR_* */
 	UB	msg[OB_DROP_MSG];	/* said on the message line; "" the usual words */
 } T_OBDRANS;
+
+/*
+ * A question before links are let go on a window (wm_obj_ask): whether
+ * it would take them where the hand is, asked of a program that makes the
+ * objects only once they would be taken. It is told OB_E_ASK on the
+ * record OB_WR_ASK of a plain window, code the question's number, x and
+ * y where the hand is in the work area, mods the keys held; it answers by
+ * writing a T_OBDRANS of that number to OB_WR_ASK (OB_DR_ACCEPT: it would
+ * take links there; OB_DR_REFUSE: not, msg is not said). Only a window
+ * someone has asked OB_E_ASK of (beside OB_E_DROP) is asked; one not
+ * answered in a while is taken to have refused. The record is written
+ * only: nothing is read from it.
+ * A question about letters (wm_obj_ask_text), before letters carried out
+ * of another program's window are let go there as a move, has
+ * OB_ASK_LETTERS in mods: whether it would take letters there
+ * (OB_E_TEXT). Only a window someone has asked OB_E_ASK of beside
+ * OB_E_TEXT is asked it.
+ */
+#define OB_WR_ASK	7
+#define OB_ASK_LETTERS	0x00040000
 
 /*
  * The scroll bars of a plain window: record OB_WR_BARS, one T_OBWBAR
@@ -639,7 +664,20 @@ typedef struct {
  * (OB_WR_DROP). Never told by itself: a drop of letters is OB_E_DROP.
  */
 #define OB_E_TEXT	0x10000
-#define OB_E_ALL	0x1FFFF
+/*
+ * A button or a key pressed anywhere -- on another window, a menu, a
+ * panel or the ground as well as on the window itself -- told to a
+ * window that asked for it, before the press itself is told; code is
+ * the button or the key, x and y are 0. A program that shows something
+ * by turns, as the frames of what is taken in a figure, counts the turn
+ * again from it, as the desktop does for its own windows at every press.
+ * A notice of its own, so that what waits for a press of the window's
+ * does not take it for one.
+ */
+#define OB_E_PRESSED	0x20000
+/* Asked whether links would be taken where the hand is (OB_WR_ASK) */
+#define OB_E_ASK	0x40000
+#define OB_E_ALL	0x7FFFF
 
 #define OB_E_INPUT	( OB_E_PRESS | OB_E_RELEASE | OB_E_MOVE | OB_E_KEY \
 			| OB_E_ENTER | OB_E_LEAVE | OB_E_REDRAW | OB_E_CLOSE | OB_E_DROP \
@@ -680,7 +718,7 @@ typedef struct {
 	UINT	mods;
 	INT	x, y;			/* in the window's work area */
 	UINT	lost;			/* notices dropped before this one */
-	UD	when;			/* ms since start */
+	UD	when;			/* ns since the machine started */
 	INT	dz;			/* a wheel: the notches it turned */
 	/*
 	 * The keyboard's input mode (WM_MODE_* of ts/wm.h) as it stood once
@@ -803,6 +841,18 @@ IMPORT ER  ob_trs_rec( ID dst, INT drec, ID src, INT srec, INT n );
  * definition becoming a window); NULL, or a type of 0, keeps the kind.
  */
 IMPORT ER  ob_cpy_obj( CONST TS_UUID *uuid, CONST T_OBCRE *pk_cre, TS_UUID *p_uuid );
+
+/*
+ * A real object copied as a new one in the way the desktop copies one
+ * (om_store_copy, not deep): the copy is named name (NULL keeps the
+ * original's), its dates are now, it is counted by no link yet, and
+ * the objects its records link to are linked to once more. What the
+ * desktop makes a new object from a template with, for a program that
+ * makes one itself (仮身化 in a figure's text). The caller needs the
+ * right to read the original's records and attributes. E_NOSPT: it is
+ * not a real object.
+ */
+IMPORT ER  ob_dup_obj( CONST TS_UUID *uuid, CONST UB *name, TS_UUID *p_uuid );
 
 /*
  * A record of one object mapped onto another (design 18.5).
@@ -966,6 +1016,19 @@ typedef struct {
 IMPORT ER  ob_ref_vol( CONST TS_UUID *near, T_OBVOL *pk_vol );
 
 /*
+ * The UUID of the volume an object of the file manager is on, and this
+ * machine's UUID (design 8.3): what the id of a link names, before the
+ * object's own UUID, when the object is on another volume than the
+ * record that holds the link. A program that writes links in its own
+ * records says with them where their objects are, as the desktop does
+ * when it saves (om_store_save). p_vol or p_mach may be NULL; obj may be
+ * NULL only when p_vol is. Asking of an object needs the right to read
+ * its attributes. E_NOEXS: there is no such object; E_NOSPT: it is on no
+ * volume (memory, a device, a window).
+ */
+IMPORT ER  ob_ref_vid( CONST TS_UUID *obj, TS_UUID *p_vol, TS_UUID *p_mach );
+
+/*
  * The journal of the volume an object is on written over with zeroes,
  * once all it holds is in place: what was written before leaves no copy
  * there (a record written again to put a secret out of it). Asking of
@@ -1115,6 +1178,8 @@ IMPORT INT  knl_obxref_list( ID vol, T_OBXREF *buf, INT max );
 /* Whether an object is on the volume attached with this path */
 IMPORT BOOL knl_obfile_on( CONST TS_UUID *uuid, CONST char *path );
 IMPORT void knl_ob_prc_start( ID pid, ID ppid, BOOL person );	/* a process was made */
+IMPORT void knl_ob_act_arm( UINT ticket );	/* what this task starts now carries wm_act_ticket's; 0 ends it */
+IMPORT UINT knl_ob_act_take( ID pid );		/* the ticket the process was started with, once; 0 none */
 IMPORT void knl_ob_prc_end( ID pid );		/* it is going: its keys close */
 IMPORT void knl_ob_prc_gone( ID pid );		/* it is gone: its credentials go */
 IMPORT UINT knl_ob_permit( CONST T_OBCRD *crd, CONST T_OBPRT *prt, INT recno );

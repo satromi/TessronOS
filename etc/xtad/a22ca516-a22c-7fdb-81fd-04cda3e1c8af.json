@@ -39,16 +39,12 @@
     "backgroundColor": "#ffffff"
   },
   "applist": {
-    "basic-figure-editor": {
-      "name": "基本図形編集",
-      "defaultOpen": true
-    },
     "microscript": {
       "name": "マイクロスクリプト",
-      "defaultOpen": false
+      "defaultOpen": true
     },
-    "basic-text-editor": {
-      "name": "基本文章編集",
+    "basic-figure-editor": {
+      "name": "基本図形編集",
       "defaultOpen": false
     }
   }

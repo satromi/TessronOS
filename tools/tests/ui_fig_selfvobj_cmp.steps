@@ -1,0 +1,70 @@
+# 自分自身を指す開いた仮身を、保存する前の編集中の記録で描く (design 11.3), for tools/ui_run.py.
+# 塗りつぶした長方形1つと、自分自身(ffffffff-...)への開いた仮身を置いた図形を、カーネル内の図形編集(figproc kernel、
+# open)とプロセスの図形編集(pfig)で開き、長方形を 100 右へ運ぶ。保存はしない。カーネル内は仮身の中に
+# 自分の図形を編集中のとおりに描く。プロセスも編集中の記録を渡しているので(tv_src_live)同じに描く。
+# 開いたとき(selffig_k_open、selffig_p_open)と運んだ後(selffig_k_moved、selffig_p_moved)の画面を、
+# ウインドウの中(108,126 から 882,682)で比べる。Ctrl+E は保存して閉じる(画面を撮った後)。
+figproc kernel
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <rect round="0" lineType="0" lineWidth="1" l_pat="1" f_pat="1" angle="0" left="20" top="20"
+xml right="80" bottom="60" zIndex="0"/>
+xml <link id="ffffffff-ffff-ffff-ffff-ffffffffffff_0.xtad" vobjleft="20" vobjtop="150"
+xml vobjright="520" vobjbottom="450" height="19" chsz="14" frcol="#000000" chcol="#000000"
+xml tbcol="#e1f2f9" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"
+xml autoopen="false"/>
+xml </figure></tad>
+xmlbig
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+move 890 690
+sync 600
+wait 300
+shot selffig_k_open
+click 150 160
+sync 600
+wait 100
+drag 150 160 250 160
+sync 600
+move 890 690
+sync 600
+wait 1500
+shot selffig_k_moved
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <rect round="0" lineType="0" lineWidth="1" l_pat="1" f_pat="1" angle="0" left="20" top="20"
+xml right="80" bottom="60" zIndex="0"/>
+xml <link id="ffffffff-ffff-ffff-ffff-ffffffffffff_0.xtad" vobjleft="20" vobjtop="150"
+xml vobjright="520" vobjbottom="450" height="19" chsz="14" frcol="#000000" chcol="#000000"
+xml tbcol="#e1f2f9" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"
+xml autoopen="false"/>
+xml </figure></tad>
+xmlbig
+logmark
+pfig big
+expectsincein 60 figure: opened
+wait 800
+move 890 690
+wait 500
+shot selffig_p_open
+logmark
+click 150 160
+expectsince figure: picked 1
+wait 100
+logmark
+drag 150 160 250 160
+expectsince figure: moved 1 by 100,0
+move 890 690
+wait 1500
+shot selffig_p_moved
+shotsame selffig_k_open selffig_p_open 108 126 882 682
+shotsame selffig_k_moved selffig_p_moved 108 126 882 682
+logmark
+key 08 01
+expectsince figure: closed
+absent !OACV!

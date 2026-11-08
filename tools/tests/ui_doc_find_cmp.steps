@@ -1,0 +1,79 @@
+# 基本文章編集の検索/置換: the desktop's own and the process put up the same panel, find the
+# same letters and write the same record (design 11.3), for tools/ui_run.py. Two copies of
+# 基本文章編集 with 30 paragraphs (mkbig doc 30): the caret put at the head of the text,
+# 検索/置換 opened with Ctrl+F, ABC typed into 検索文字列 and Enter (次を検索): the first ABC
+# is picked, and Delete throws it away; then saved. Record 0 of both must be the same, byte
+# for byte; the shots of the panel up (doc_find_k_panel, doc_find_p_panel) are compared
+# afterwards where the panel stands (140,160 to 660,460), and the text after (101,125 to
+# 682,482). While the desktop's panel is up the desktop answers no sync.
+# Keys: Enter 28, Delete 4C; Ctrl+F 09 01, Ctrl+S 16 01, Ctrl+E 08 01.
+docproc kernel
+mkbig doc 30
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+click 111 135
+sync 600
+key 09 01
+wait 1000
+move 690 490
+wait 300
+shot doc_find_k_panel
+text ABC
+wait 300
+key 28
+wait 800
+sync 600
+key 4C
+sync 600
+click 111 135
+sync 600
+move 690 490
+sync 600
+shot doc_find_k_done
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig doc 30
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 800
+logmark
+click 111 135
+expectsince document: drew
+logmark
+key 09 01
+expectsince document: find panel open
+wait 1000
+move 690 490
+wait 300
+shot doc_find_p_panel
+text ABC
+wait 300
+logmark
+key 28
+expectsince document: find panel answered
+expectsince document: drew
+wait 300
+logmark
+key 4C
+expectsince document: key to screen
+logmark
+click 111 135
+expectsince document: drew
+move 690 490
+wait 300
+shot doc_find_p_done
+logmark
+key 16 01
+expectsince document: saved (0)
+sum show
+same kernel
+key 08 01
+expect document: closed

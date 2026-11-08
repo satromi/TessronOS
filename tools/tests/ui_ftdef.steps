@@ -1,0 +1,5 @@
+# The palettes of the 道具パネル laid out as panels of a data box (UITEST ftdef), for
+# tools/ui_run.py: what etc/def/01a0d8c4-52ec-7f5d-9a6e-7b8c9daebf08_0.xtad holds for the
+# palettes of 基本図形編集 as a process, panels 10 to 28. Run when a palette is changed in
+# application/fig/figtool.c, and the "ftdef: " lines put into the data box.
+ftdef

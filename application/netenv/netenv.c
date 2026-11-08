@@ -113,6 +113,14 @@
 #define SEC_WPA2	2
 #define SEC_WPA3	3
 #define SEC_WPA2WPA3	4
+#define SEC_EAP		5		/* WPA2-Enterprise: what it joins with on 〈企業向け〉 */
+#define PW_EAP_METHOD	90		/* 〈Ｗｉ－Ｆｉ〉〈企業向け〉: 1 PEAP-MSCHAPv2, 2 EAP-TLS */
+#define PW_EAP_ID	91
+#define PW_EAP_DOMAIN	92
+#define PW_EAP_CA	93		/* a path: the CA that must have signed the network's server */
+#define PW_EAP_CERT	94		/* EAP-TLS: paths of the certificate and its key */
+#define PW_EAP_KEY	95
+#define PW_EAP_KEYPW	96
 #define PW_PASS		65
 #define PW_AUTO		66
 #define PW_SCAN		67
@@ -703,11 +711,12 @@ typedef struct {
 LOCAL CONST char *w_sec_of( INT sec )
 {
 	return ( sec == SEC_WPA2 ) ? "wpa2" : ( sec == SEC_WPA3 ) ? "wpa3"
-	     : ( sec == SEC_WPA2WPA3 ) ? "wpa2wpa3" : "open";
+	     : ( sec == SEC_WPA2WPA3 ) ? "wpa2wpa3" : ( sec == SEC_EAP ) ? "eap" : "open";
 }
 
 LOCAL INT w_sec_val( CONST char *w )
 {
+	if ( strcmp(w, "eap") == 0 || strcmp(w, "8021x") == 0 ) return SEC_EAP;
 	return ( strcmp(w, "open") == 0 ) ? SEC_NONE : ( strcmp(w, "wpa2") == 0 ) ? SEC_WPA2
 	     : ( strcmp(w, "wpa3") == 0 ) ? SEC_WPA3 : ( strcmp(w, "wpa2wpa3") == 0 ) ? SEC_WPA2WPA3 : 0;
 }
@@ -1009,7 +1018,7 @@ LOCAL CONST char *w_sec_word( CONST char *s )
 	     : ( strcmp(s, "wpa3") == 0 ) ? ( w_sae ? "WPA3" : "WPA3(未対応)" )
 	     : ( strcmp(s, "wpa2wpa3") == 0 ) ? ( w_sae ? "WPA2/WPA3" : "WPA2" )
 	     : ( strcmp(s, "wpa") == 0 ) ? "WPA(未対応)"
-	     : ( strcmp(s, "wep") == 0 ) ? "WEP(未対応)" : "802.1X(未対応)";
+	     : ( strcmp(s, "wep") == 0 ) ? "WEP(未対応)" : "802.1X";
 }
 
 /* The networks the last scan found, the strongest first, however many */
@@ -1077,7 +1086,8 @@ LOCAL void w_parts( void )
 		ui_off(&ui, PW_SCAN, TRUE);		/* nothing to scan or join with */
 		ui_off(&ui, PW_JOIN, TRUE);
 	}
-	if ( w_have ) ui_off(&ui, PW_PASS, ui_value(&ui, PW_SEC) <= SEC_NONE);
+	if ( w_have ) ui_off(&ui, PW_PASS, ui_value(&ui, PW_SEC) <= SEC_NONE
+				 || ( ui_value(&ui, PW_SEC) == SEC_EAP && ui_value(&ui, PW_EAP_METHOD) == 2 ));
 }
 
 /*
@@ -1160,11 +1170,108 @@ LOCAL ER w_change( CONST char *line )
  * they are, keep the network's key; a password typed replaces it. A
  * network joined as it was saved is only joined.
  */
+/*
+ * 〈企業向け〉: what the kernel needs to join a network of 802.1X. The CA is
+ * required: without it any network could take the password. A password of
+ * PEAP is typed on 〈接続〉 as any other; the kernel keeps it, and its marks
+ * stand for it after.
+ */
+LOCAL ER w_eap_check( CONST char *pass, BOOL kept )
+{
+	char	v[160];
+	BOOL	tls = ( ui_value(&ui, PW_EAP_METHOD) == 2 );
+
+	(void)ui_text(&ui, PW_EAP_ID, v, sizeof(v));
+	if ( v[0] == 0 ) {
+		warn("〈企業向け〉のＩＤを入れてください。");
+		return E_PAR;
+	}
+	(void)ui_text(&ui, PW_EAP_CA, v, sizeof(v));
+	if ( v[0] == 0 ) {
+		warn("〈企業向け〉のＣＡ証明書を入れてください。");
+		return E_PAR;
+	}
+	if ( tls ) {
+		(void)ui_text(&ui, PW_EAP_CERT, v, sizeof(v));
+		if ( v[0] == 0 ) {
+			warn("〈企業向け〉の証明書を入れてください。");
+			return E_PAR;
+		}
+		(void)ui_text(&ui, PW_EAP_KEY, v, sizeof(v));
+		if ( v[0] == 0 ) {
+			warn("〈企業向け〉の秘密鍵を入れてください。");
+			return E_PAR;
+		}
+	} else if ( !kept && pass[0] == 0 ) {
+		warn("パスワードを入れてください。");
+		return E_PAR;
+	}
+	return E_OK;
+}
+
+/* A word of the request: the text in hexadecimal, "-" for nothing */
+LOCAL INT w_eap_word( char *out, INT at, INT max, CONST char *s )
+{
+	static CONST char	d[] = "0123456789abcdef";
+
+	if ( at + 2 >= max ) return at;
+	out[at++] = ' ';
+	if ( s[0] == 0 ) {
+		out[at++] = '-';
+		out[at] = 0;
+		return at;
+	}
+	for ( ; *s != 0 && at + 3 < max; s++ ) {
+		out[at++] = d[(UB)*s >> 4];
+		out[at++] = d[(UB)*s & 15];
+	}
+	out[at] = 0;
+	return at;
+}
+
+LOCAL ER w_eap_send( CONST char *hex, CONST char *pass, BOOL kept )
+{
+	static char	line[1500];
+	char		v[160];
+	BOOL		tls = ( ui_value(&ui, PW_EAP_METHOD) == 2 );
+	INT		n;
+	ER		er;
+
+	n = snprintf(line, sizeof(line), "EAP %s %s", hex, tls ? "tls" : "peap");
+	(void)ui_text(&ui, PW_EAP_ID, v, sizeof(v));
+	n = w_eap_word(line, n, sizeof(line), v);
+	if ( kept && !tls ) {
+		line[n++] = ' ';
+		line[n++] = '=';
+		line[n] = 0;
+	} else {
+		n = w_eap_word(line, n, sizeof(line), tls ? "" : pass);
+	}
+	(void)ui_text(&ui, PW_EAP_DOMAIN, v, sizeof(v));
+	n = w_eap_word(line, n, sizeof(line), v);
+	(void)ui_text(&ui, PW_EAP_CA, v, sizeof(v));
+	n = w_eap_word(line, n, sizeof(line), v);
+	(void)ui_text(&ui, PW_EAP_CERT, v, sizeof(v));
+	n = w_eap_word(line, n, sizeof(line), tls ? v : "");
+	(void)ui_text(&ui, PW_EAP_KEY, v, sizeof(v));
+	n = w_eap_word(line, n, sizeof(line), tls ? v : "");
+	(void)ui_text(&ui, PW_EAP_KEYPW, v, sizeof(v));
+	n = w_eap_word(line, n, sizeof(line), tls ? v : "");
+	er = w_change(line);
+	memset(line, 0, sizeof(line));
+	memset(v, 0, sizeof(v));
+	return er;
+}
+
+#ifdef USE_WG
+#include "ne_vpn.c"
+#endif
+
 LOCAL BOOL w_save( BOOL join )
 {
 	char	ssid[CF_VAL_MAX], hex[72], pass[72], line[256], c[96];
 	INT	sec = ui_value(&ui, PW_SEC);
-	BOOL	keyed = ( sec > SEC_NONE ), autojoin = ( ui_value(&ui, PW_AUTO) != 0 );
+	BOOL	keyed = ( sec > SEC_NONE && sec != SEC_EAP ), autojoin = ( ui_value(&ui, PW_AUTO) != 0 );
 	BOOL	sae = ( sec == SEC_WPA3 || sec == SEC_WPA2WPA3 );
 	BOOL	kept, hexkey = TRUE;
 	INT	i, plen, k;
@@ -1208,7 +1315,15 @@ LOCAL BOOL w_save( BOOL join )
 	} else {
 		snprintf(line, sizeof(line), "SAVE %s %s %s%s%s", hex, w_sec_of(sec),
 			 autojoin ? "auto" : "manual", ( keyed && !kept ) ? " " : "", ( keyed && !kept ) ? pass : "");
+		if ( sec == SEC_EAP ) {
+			er = w_eap_check(pass, kept);
+			if ( er < E_OK ) {
+				memset(pass, 0, sizeof(pass));
+				return FALSE;
+			}
+		}
 		er = w_change(line);
+		if ( er >= E_OK && sec == SEC_EAP ) er = w_eap_send(hex, pass, kept);
 		memset(line, 0, sizeof(line));
 		memset(pass, 0, sizeof(pass));
 		if ( er < E_OK ) {
@@ -1225,7 +1340,8 @@ LOCAL BOOL w_save( BOOL join )
 		}
 	}
 	memset(pass, 0, sizeof(pass));
-	ui_set_text(&ui, PW_PASS, keyed ? w_standin : "");
+	ui_set_text(&ui, PW_PASS, ( keyed || ( sec == SEC_EAP && ui_value(&ui, PW_EAP_METHOD) == 1 ) ) ? w_standin : "");
+	ui_set_text(&ui, PW_EAP_KEYPW, "");
 	if ( join ) {
 		w_state();
 		if ( strcmp(w_cur_state, "connected") == 0 && strcmp(w_cur_ssid, hex) == 0 ) {
@@ -1274,6 +1390,11 @@ LOCAL void w_button( INT id )
 	case PW_JOIN:
 		(void)w_save(TRUE);
 		break;
+#ifdef USE_WG
+	case PV_GEN: case PV_SAVE: case PV_UP: case PV_DOWN:
+		(void)v_button(id);
+		break;
+#endif
 	case PW_LEAVE:
 		if ( w_cmd("DISCONNECT") < E_OK ) warn("Ｗｉ－Ｆｉの装置に切断を指示できません。");
 		break;
@@ -1388,6 +1509,7 @@ int main( void )
 	UD	link_at;
 
 	ui_icon(SYSDEF_PROG_NETENV);
+	ui_attr(UI_ATTR_HIDDEN);		/* filled hidden, and shown once (ui_reveal) */
 	if ( ui_open(&ui, SYSDEF_BOX_NETENV, PN_MAIN, 200, 120) < E_OK ) {
 		tm_putstring((CONST UB *)"netenv: no window\n");
 		return 1;
@@ -1401,11 +1523,21 @@ int main( void )
 	to_sheet6(&was6);
 	state_show();
 	state6_show();
+	#ifdef USE_WG
+	v_parts();
+#else
+	{
+		INT	i;
+
+		for ( i = 110; i <= 121; i++ ) ui_off(&ui, i, TRUE);	/* 〈ＶＰＮ〉: only with make WG=1 */
+	}
+#endif
 	w_state();
 	w_scan_show();
 	ui_set_value(&ui, PW_SEC, SEC_WPA2);
 	ui_set_value(&ui, PW_AUTO, 1);
 	w_parts();
+	ui_reveal(&ui);
 	tm_putstring((CONST UB *)"netenv: ready\n");
 
 	link_at = ui_now() + W_LINK_MS;
@@ -1452,7 +1584,7 @@ int main( void )
 					if ( ui_value(&ui, PW_SAVED) >= 2 ) tm_putstring((CONST UB *)"netenv: saved network chosen\n");
 				}
 				if ( id == PW_SCAN_LIST ) w_pick_bss();
-				if ( id == PW_SEC ) w_parts();
+				if ( id == PW_SEC || id == PW_EAP_METHOD ) w_parts();
 				break;
 			default:
 				break;

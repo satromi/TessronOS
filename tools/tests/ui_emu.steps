@@ -1,0 +1,150 @@
+# BeFC (design 11.32), for tools/ui_run.py: a ROM of the tests made as an
+# object (emurom), its link in a document; BeFC opened from its program
+# object and the link carried onto its window, which runs it; its menu
+# opened and the state saved and read back; closed, what it keeps kept.
+emurom
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p><link id="01a0d8c4-5500-7f01-8b12-3c4d5e6f7b70_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c21"
+xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
+xml framedisp="true" namedisp="true" pictdisp="true"/></p>
+xml </document></tad>
+xmlopen ROMの文書
+wait 500
+win ROMの文書
+open 01a0d8c4-5500-7a01-8b12-3c4d5e6f7b50
+expect befc: ready
+wait 500
+win BeFC
+shot emu_open
+# the link carried onto the window: the ROM runs and the message line says so.
+# The link is closed, 19 high from y 88 (its window at 100,60): pressed in its middle
+logmark
+drag 190 97 640 400
+expectsincein 30 befc: record
+focus emu_keys BeFC
+wait 800
+shot emu_run
+# X is the button A: the ROM changes its colour while it is down (compare the pictures)
+keydown 0x1b
+wait 500
+shot emu_a_down
+keyup 0x1b
+wait 500
+shot emu_a_up
+# the second button opens the menu, which also brings the window to the front; a menu
+# opens with the item chosen last under the pointer. 状態を保存 and 状態を読込 each open
+# 1 to 5 beside them, 20 apart, the first level with the item
+click 640 400 1
+wait 500
+shot emu_menu
+move 670 480
+wait 300
+shot emu_save_list
+logmark
+move 722 520
+wait 150
+click 722 520
+expectsince befc: state 3 kept
+wait 300
+shot emu_saved3
+# only the number saved can be read: the picture shows the others grey
+click 640 400 1
+wait 500
+move 670 420
+wait 300
+shot emu_load_list
+logmark
+move 722 460
+wait 150
+click 722 460
+expectsince befc: state read (0)
+wait 300
+shot emu_after_load
+# another number, and it can be read as well
+click 640 400 1
+wait 500
+move 670 380
+wait 300
+logmark
+move 722 460
+wait 150
+click 722 460
+expectsince befc: state 5 kept
+wait 300
+click 640 400 1
+wait 500
+move 670 420
+wait 300
+shot emu_load_list35
+logmark
+move 722 500
+wait 150
+click 722 500
+expectsince befc: state read (0)
+wait 300
+click 640 400 1
+wait 500
+move 660 300
+wait 150
+click 660 300
+expectsince befc: closed
+wait 300
+hidden emu_closed BeFC
+want ok emu_closed: hidden
+# opened again: no game yet, so saving says why on the message line
+win ROMの文書
+open 01a0d8c4-5500-7a01-8b12-3c4d5e6f7b50
+expect befc: ready
+wait 500
+win BeFC
+click 640 400 1
+wait 500
+move 670 480
+wait 300
+shot emu_nogame_list
+move 722 480
+wait 150
+click 722 480
+wait 300
+shot emu_nogame
+# the same game: what was saved is still there under the same numbers
+logmark
+drag 190 97 640 400
+expectsincein 30 befc: record
+wait 500
+click 640 400 1
+wait 500
+move 670 420
+wait 300
+shot emu_load_again
+logmark
+move 722 460
+wait 150
+click 722 460
+expectsince befc: state read (0)
+wait 300
+click 640 400 1
+wait 500
+move 660 300
+wait 150
+click 660 300
+expectsince befc: closed
+wait 300
+# taken out, its menu becomes a 屑実身; the menu's two lists are kept by its links until
+# it is deleted for good. Registered again, the menu comes back
+progrm 01a0d8c4-5500-7a01-8b12-3c4d5e6f7b50
+want ok 0
+refs 01a0d889-5500-7a01-8b12-3c4d5e6f7b52
+want ok 0
+refs 01a0d889-5500-7a02-8b12-3c4d5e6f7b53
+want ok 1
+refs 01a0d889-5500-7a03-8b12-3c4d5e6f7b54
+want ok 1
+proginst 01a0d8c4-5500-7a01-8b12-3c4d5e6f7b50
+want ok 0
+refs 01a0d889-5500-7a01-8b12-3c4d5e6f7b52
+want ok 1
+refs 01a0d889-5500-7a02-8b12-3c4d5e6f7b53
+want ok 1
+refs 01a0d889-5500-7a03-8b12-3c4d5e6f7b54
+want ok 1

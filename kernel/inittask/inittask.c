@@ -84,10 +84,87 @@ LOCAL ER start_system( void )
  *
  *	fin are not always supported.
  */
+#if USE_SHUTDOWN
+/*
+ * The machine going off is not left to what it waits for: a disk that no
+ * longer answers, a lock never given back. A task above the others looks
+ * at the time; past it, it says so and turns the machine off or starts it
+ * again as asked, without the steps that remain. What was committed is in
+ * the volumes' logs, and the next start puts it back as after a cut in the
+ * power.
+ */
+IMPORT void knl_bootlog_soon( void ) __attribute__((weak));
+
+LOCAL volatile UW	off_at = 0;
+LOCAL volatile INT	off_fin = 0;
+LOCAL BOOL		off_started = FALSE;
+
+LOCAL UW off_now( void )
+{
+	SYSTIM	t;
+
+	(void)tk_get_otm(&t);
+	return (UW)t.lo;
+}
+
+LOCAL void off_task( INT stacd, void *exinf )
+{
+	(void)stacd;
+	(void)exinf;
+	while ( off_at == 0 || (INT)( off_now() - off_at ) < 0 ) {
+		tk_dly_tsk(200);
+	}
+	tm_printf((UB *)"shutdown: NOT FINISHED IN TIME: %s without the steps that remain\n",
+		  ( off_fin < 0 ) ? "starting again" : "turning off");
+	if ( knl_bootlog_soon != NULL ) {
+		knl_bootlog_soon();
+		tk_dly_tsk(1000);
+	}
+	if ( off_fin < 0 ) {
+		knl_restart_hw(off_fin);
+	}
+	knl_tkernel_exit();
+}
+
+EXPORT void knl_off_limit( UW ms, INT fin )
+{
+	off_fin = fin;
+	if ( ms == 0 ) {
+		off_at = 0;		/* the going off was cancelled */
+		return;
+	}
+	off_at = off_now() + ms;
+	if ( !off_started ) {
+		T_CTSK	c;
+		ID	t;
+
+		knl_memset(&c, 0, sizeof(c));
+		c.tskatr = TA_HLNG | TA_RNG0;
+		c.task = (FP)off_task;
+		c.itskpri = 2;
+		c.stksz = 64 * 1024;
+		t = tk_cre_tsk(&c);
+		if ( t > 0 && tk_sta_tsk(t, 0) >= E_OK ) {
+			off_started = TRUE;
+		}
+	}
+}
+#else
+EXPORT void knl_off_limit( UW ms, INT fin )
+{
+	(void)ms;
+	(void)fin;
+}
+#endif /* USE_SHUTDOWN */
+
+/* From the last steps of the machine on: time for the volumes and the devices */
+#define OFF_LAST_MS	90000
+
 LOCAL void shutdown_system( INT fin )
 {
 	/* no more looking for a stopped machine, and no watchdog to reset it while it goes down */
 	knl_lockup_stop();
+	knl_off_limit(OFF_LAST_MS, fin);
 
 #if USE_SHUTDOWN
 	/* Platform dependent finalize sequence */

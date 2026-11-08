@@ -29,6 +29,7 @@
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <ts/fs.h>
+#include "fsname.h"
 #include <ts/blk.h>
 #include <ts/tsfsblk.h>
 #include <ts/crc32c.h>
@@ -204,11 +205,13 @@ LOCAL void probe_bytes( CONST UB *b, INT len, INT blksz, BOOL parted, T_FSPROBE 
 		if ( same_bytes(b + 3, "EXFAT   ", 8) ) {
 			p->kind = FS_KIND_EXFAT;
 			put_str(p->name, sizeof(p->name), "exFAT");
+			put_str(p->fimp, sizeof(p->fimp), "exfatfs");
 			return;
 		}
 		if ( same_bytes(b + 3, "NTFS    ", 8) ) {
 			p->kind = FS_KIND_NTFS;
 			put_str(p->name, sizeof(p->name), "NTFS");
+			put_str(p->fimp, sizeof(p->fimp), "ntfsfs");
 			return;
 		}
 		if ( fat_of(b, p) ) {
@@ -265,6 +268,40 @@ LOCAL void probe_bytes( CONST UB *b, INT len, INT blksz, BOOL parted, T_FSPROBE 
 	put_str(p->name, sizeof(p->name), "unknown");
 }
 
+/*
+ * An exFAT volume's label is an entry of its root directory, which lies
+ * in the cluster heap and so may be anywhere: the first sector of the
+ * root is read for it. 'buf' holds the boot sector and has room for a
+ * sector after it is used.
+ */
+LOCAL void exfat_label( ID dd, UB *buf, T_FSPROBE *p )
+{
+	UW	heap = le32(buf + 88), root = le32(buf + 96);
+	UINT	spcsh = buf[109], i;
+	SZ	asz;
+
+	if ( root < 2 || spcsh > 16 ) {
+		return;
+	}
+	if ( tk_srea_dev_d(dd, (D)heap + ( (D)( root - 2 ) << spcsh ), buf, 512, &asz) < E_OK ) {
+		return;
+	}
+	for ( i = 0; i < 512; i += 32 ) {
+		if ( buf[i] == 0 ) break;
+		if ( buf[i] == 0x83 && buf[i + 1] <= 11 ) {
+			UH	nm[11];
+			INT	j, b;
+
+			for ( j = 0; j < buf[i + 1]; j++ ) {
+				nm[j] = (UH)le16(buf + i + 2 + j * 2);
+			}
+			b = knl_fs_utf16_to_8(nm, buf[i + 1], p->label, (INT)sizeof(p->label) - 1);
+			p->label[( b > 0 ) ? b : 0] = 0;
+			return;
+		}
+	}
+}
+
 EXPORT ER knl_fs_probe( CONST char *devnm, T_FSPROBE *p )
 {
 	T_RDEV		rd;
@@ -309,8 +346,8 @@ EXPORT ER knl_fs_probe( CONST char *devnm, T_FSPROBE *p )
 		n = 4096 - 4096 % di.blocksize;
 		er = tk_srea_dev(dd, 0, buf, (SZ)n, &asz);
 	}
-	tk_cls_dev(dd, 0);
 	if ( er < E_OK ) {
+		tk_cls_dev(dd, 0);
 		Kfree(buf);
 		return er;
 	}
@@ -318,6 +355,10 @@ EXPORT ER knl_fs_probe( CONST char *devnm, T_FSPROBE *p )
 	k = str_len(devnm);
 	probe_bytes(buf, n, di.blocksize,
 		    (BOOL)( rd.nsub > 0 && k > 0 && !( devnm[k - 1] >= '0' && devnm[k - 1] <= '9' ) ), p);
+	if ( p->kind == FS_KIND_EXFAT ) {
+		exfat_label(dd, buf, p);
+	}
+	tk_cls_dev(dd, 0);
 	Kfree(buf);
 	p->bytes = (UD)di.blockcont_d * (UD)di.blocksize;
 	p->rdonly = (BOOL)di.protect;
@@ -328,5 +369,11 @@ EXPORT ER knl_fs_probe( CONST char *devnm, T_FSPROBE *p )
 /* The fimp a kind is mounted with, "" for none */
 EXPORT CONST char *knl_fs_kind_fimp( UINT kind )
 {
+	if ( kind == FS_KIND_EXFAT ) {
+		return "exfatfs";
+	}
+	if ( kind == FS_KIND_NTFS ) {
+		return "ntfsfs";
+	}
 	return ( kind == FS_KIND_FAT12 || kind == FS_KIND_FAT16 || kind == FS_KIND_FAT32 ) ? "fatfs" : "";
 }

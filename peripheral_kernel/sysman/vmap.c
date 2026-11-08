@@ -11,7 +11,9 @@
  *	vmap.c
  *	Kernel variable area (design 6.5): non-contiguous physical pages
  *	mapped at a contiguous virtual address in [VMAP_VA_BASE, +CNF_VMAP_SIZE).
- *	Each allocation is followed by one unmapped guard page.
+ *	Each allocation is followed by one unmapped guard page. A task's
+ *	stack (knl_vmap_stack) has TASK_STK_GUARD_PAGES more below it, the
+ *	side it grows towards.
  */
 
 #include <sys/machine.h>
@@ -132,15 +134,38 @@ LOCAL void vmap_failed( UD npages, CONST char *why )
 }
 
 /*
+ * Pages taken and mapped at [va, va + npages pages). On failure the ones
+ * mapped so far are given back and what went wrong is returned, and the
+ * addresses are left for the caller to give back, all of them at once:
+ * given back in two parts, another processor could take the first part
+ * before the rest followed it.
+ */
+LOCAL CONST char *vmap_fill( UBINT va, UD npages, UD attr, UINT aflags )
+{
+	UBINT	v;
+	UD	i;
+
+	for ( i = 0, v = va; i < npages; i++, v += PAGE_SIZE ) {
+		PFRAME	*pf = knl_alloc_pages(0, ZONE_NORMAL, aflags);
+		if ( pf == NULL || knl_pt_map(knl_pt_l0_k_pa, v, knl_pf_to_pa(pf), PAGE_SIZE, attr) != E_OK ) {
+			if ( pf != NULL ) knl_free_pages(pf, 0);
+			vmap_drop_pages(va, i);
+			return ( pf == NULL ) ? "no free page" : "the page table";
+		}
+	}
+	return NULL;
+}
+
+/*
  * Allocate npages and map them contiguously. NULL on failure.
  */
 EXPORT void *knl_vmap( UD npages, UINT flags )
 {
-	UBINT	va, v;
+	UBINT	va;
 	UD	attr = ( (flags & VMAP_NOCACHE) != 0 ) ? PTE_PAGE_KDATA_NC : PTE_PAGE_KDATA;
 	UINT	aflags = ( (flags & VMAP_DMA32) != 0 ) ? KAF_DMA32 : 0;
 	UINT	imask;
-	UD	i;
+	CONST char *why;
 
 	if ( npages == 0 || npages >= VMAP_PAGES ) return NULL;
 
@@ -152,25 +177,62 @@ EXPORT void *knl_vmap( UD npages, UINT flags )
 		return NULL;
 	}
 
-	for ( i = 0, v = va; i < npages; i++, v += PAGE_SIZE ) {
-		PFRAME	*pf = knl_alloc_pages(0, ZONE_NORMAL, aflags);
-		if ( pf == NULL || knl_pt_map(knl_pt_l0_k_pa, v, knl_pf_to_pa(pf), PAGE_SIZE, attr) != E_OK ) {
-			if ( pf != NULL ) knl_free_pages(pf, 0);
-			/*
-			 * The pages mapped so far given back, and the addresses
-			 * once, all of them: knl_vunmap would give back i of them
-			 * by themselves, and another processor could take those
-			 * before the rest were given back after them
-			 */
-			vmap_drop_pages(va, i);
-			ISpinLock(&vmap_lock, &imask);
-			vmap_free_va(va, npages);
-			ISpinUnlock(&vmap_lock, &imask);
-			vmap_failed(npages, ( pf == NULL ) ? "no free page" : "the page table");
-			return NULL;
-		}
+	why = vmap_fill(va, npages, attr, aflags);
+	if ( why != NULL ) {
+		ISpinLock(&vmap_lock, &imask);
+		vmap_free_va(va, npages);
+		ISpinUnlock(&vmap_lock, &imask);
+		vmap_failed(npages, why);
+		return NULL;
 	}
 	return (void *)va;
+}
+
+/*
+ * The stack of a task: npages mapped, with TASK_STK_GUARD_PAGES below
+ * them that stay unmapped. A stack that runs out then faults at the
+ * instruction that went too far, instead of writing over its neighbour.
+ * The guard is wider than one page because a frame need not touch its
+ * first page: the kernel's frames are kept to 4KB, those of the outline
+ * rasterizers reach 25KB.
+ */
+EXPORT void *knl_vmap_stack( UD npages )
+{
+	UD	need = npages + TASK_STK_GUARD_PAGES;
+	UBINT	va;
+	UINT	imask;
+	CONST char *why;
+
+	if ( npages == 0 || need >= VMAP_PAGES ) return NULL;
+
+	ISpinLock(&vmap_lock, &imask);
+	va = vmap_alloc_va(need);
+	ISpinUnlock(&vmap_lock, &imask);
+	if ( va == 0 ) {
+		vmap_failed(need, "no run of addresses that long");
+		return NULL;
+	}
+
+	why = vmap_fill(va + ( (UBINT)TASK_STK_GUARD_PAGES << PAGE_SHIFT ), npages, PTE_PAGE_KDATA, 0);
+	if ( why != NULL ) {
+		ISpinLock(&vmap_lock, &imask);
+		vmap_free_va(va, need);
+		ISpinUnlock(&vmap_lock, &imask);
+		vmap_failed(need, why);
+		return NULL;
+	}
+	return (void *)( va + ( (UBINT)TASK_STK_GUARD_PAGES << PAGE_SHIFT ) );
+}
+
+EXPORT void knl_vunmap_stack( void *stack, UD npages )
+{
+	UBINT	va = (UBINT)stack - ( (UBINT)TASK_STK_GUARD_PAGES << PAGE_SHIFT );
+	UINT	imask;
+
+	vmap_drop_pages((UBINT)stack, npages);
+	ISpinLock(&vmap_lock, &imask);
+	vmap_free_va(va, npages + TASK_STK_GUARD_PAGES);
+	ISpinUnlock(&vmap_lock, &imask);
 }
 
 /*

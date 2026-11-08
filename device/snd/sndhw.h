@@ -84,6 +84,15 @@ IMPORT void knl_snd_out_set( SDOut *o, CONST UB *id, CONST UB *name, UW kind, UW
 
 /* The backends there are */
 IMPORT CONST SNDHW	knl_uac_hw;
+IMPORT CONST SNDHW	knl_bta_hw;	/* device/bt/bt_a2dp.c */
+
+/*
+ * The output in use turns the whole's volume down itself (Bluetooth
+ * earphones told the mixer's volume): the mixer then leaves the sum at
+ * full scale, the mute still its own. Set by that backend while it plays.
+ */
+IMPORT void knl_snd_whole_outside( BOOL on );
+IMPORT CONST SNDHW	knl_lea_hw;	/* device/bt/bt_lea.c: LE Audio */
 #ifdef RPI5
 IMPORT CONST SNDHW	knl_i2s_hw;
 IMPORT ER knl_i2s_init( void );
@@ -97,6 +106,22 @@ IMPORT INT  knl_hdmi_pace( UW *blocks, UW *ms );
 #ifdef X64
 IMPORT CONST SNDHW	knl_hda_hw;	/* device/snd/x86_64/snd_hda.c */
 IMPORT ER knl_hda_init( void );
+
+/* What was found of the machine's sound at start-up, and what it comes to (SND_NOTE_*) */
+typedef struct {
+	BOOL	ctrl;		/* an audio controller was found */
+	UH	codecs;		/* the codecs that answered on its link */
+	BOOL	analog;		/* one of them is not a display's */
+	BOOL	int_mic;	/* a fixed microphone is on that codec's pins */
+	INT	nhlt_dmic;	/* endpoints of the ACPI table NHLT on digital microphones */
+	INT	nhlt_ssp;	/* and on I2S (SSP) */
+	INT	sdw_devs;	/* peripherals under SoundWire controllers in the namespace */
+	BOOL	i2s_codec;	/* the namespace has a codec of those that only sit on I2S */
+} HDA_FOUND;
+IMPORT UW   knl_hda_judge( CONST HDA_FOUND *f );
+IMPORT UW   knl_hda_note( void );
+/* The endpoints of an NHLT table (whole, with its ACPI header) by their link; FALSE when it is not well formed */
+IMPORT BOOL knl_hda_nhlt( CONST UB *t, INT len, INT *dmic, INT *ssp );
 #endif
 
 #endif /* __SNDHW_H__ */

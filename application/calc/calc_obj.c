@@ -37,6 +37,7 @@
 #include <ts/obatr.h>
 #include <ts/hid.h>
 #include <ts/tray.h>
+#include <ts/tadlnk.h>
 
 /* ---------------------------------------------------------------- records */
 
@@ -55,15 +56,42 @@ static UB *rec_read( CONST TS_UUID *u, INT recno, INT *p_len )
 	return buf;
 }
 
+static ER vol_of( CONST TS_UUID *obj, TS_UUID *p_vol, void *arg )
+{
+	return ob_ref_vid(obj, p_vol, NULL);
+}
+
+/*
+ * Record 0 of an object written whole, its links first made to say on
+ * which volume their objects are, as seen from the object's (design 8.3),
+ * as the desktop does when it saves
+ */
 static ER rec_write( CONST TS_UUID *u, CONST UB *data, INT len )
 {
-	ID	k = ob_opn_obj(u, OB_OP_R | OB_OP_W);
+	TS_UUID	hv, mine;
+	UB	*fixed = NULL;
+	INT	changed = 0;
+	ID	k;
 	ER	er;
 
-	if ( k <= 0 ) return (ER)k;
+	if ( ob_ref_vid(u, &hv, &mine) >= E_OK
+	  && ( fixed = malloc((size_t)tad_lnk_vol_room(data, (SZ)len)) ) != NULL ) {
+		SZ	n = tad_lnk_vol_fix(data, (SZ)len, fixed, &hv, &mine, vol_of, NULL, &changed);
+
+		if ( changed > 0 ) {
+			data = fixed;
+			len = (INT)n;
+		}
+	}
+	k = ob_opn_obj(u, OB_OP_R | OB_OP_W);
+	if ( k <= 0 ) {
+		free(fixed);
+		return (ER)k;
+	}
 	/* replaced in one change: a cut in the power leaves the old record or the new one */
 	er = ob_rpl_rec(k, 0, data, (SZ)len);
 	ob_cls_obj(k);
+	free(fixed);
 	return er;
 }
 
@@ -430,7 +458,13 @@ void link_open( INT col, INT row )
 	rq.req = DT_RQ_OPEN;
 	if ( !link_target(c, &rq.target) ) return;
 	rq.recno = -1;
-	ct_link_req(&rq, c->el, c->ellen);	/* the program it keeps to, when it does */
+	/* what the window opened does to the link comes back to be put in the sheet (DT_F_LINK) */
+	if ( g_lport > 0 && ct_link_from(&rq, &g_obj, &g_lch, c->el, c->ellen) ) {
+		rq.look.frcol = col_attr(c, "frcol");
+		rq.look.chcol = col_attr(c, "chcol");
+		rq.look.tbcol = col_attr(c, "tbcol");
+		rq.look.bgcol = col_attr(c, "bgcol");
+	}
 	er = ask_desktop(&rq, &an, 3000);
 	name_of(&rq.target, nm);
 	snprintf(s, sizeof(s), "opened %s (%d)", nm, (INT)er);
@@ -485,15 +519,34 @@ static INT app_json( CONST CXCELL *c, UB **p_out )
 	return al.len;
 }
 
-#define APP_MAX		24
 static INT	g_napp;
-static UB	g_app_id[APP_MAX][CT_APP_ID], g_app_name[APP_MAX][CT_APP_NAME];
-static BOOL	g_app_kind[APP_MAX];		/* offered for the object's kind, not in its applist */
+static INT	g_appcap;			/* entries the three tables have room for */
+static UB	(*g_app_id)[CT_APP_ID], (*g_app_name)[CT_APP_NAME];
+static BOOL	*g_app_kind;			/* offered for the object's kind, not in its applist */
+
+/* Room for 'want' programs, what is there kept */
+static BOOL app_room( INT want )
+{
+	UB	(*id)[CT_APP_ID], (*name)[CT_APP_NAME];
+	BOOL	*kind;
+
+	if ( want <= g_appcap ) return TRUE;
+	id = realloc(g_app_id, CT_APP_ID * (size_t)want);
+	if ( id != NULL ) g_app_id = id;
+	name = realloc(g_app_name, CT_APP_NAME * (size_t)want);
+	if ( name != NULL ) g_app_name = name;
+	kind = realloc(g_app_kind, sizeof(BOOL) * (size_t)want);
+	if ( kind != NULL ) g_app_kind = kind;
+	if ( id == NULL || name == NULL || kind == NULL ) return FALSE;
+	g_appcap = want;
+	return TRUE;
+}
+
 
 /* 実行: the list the desktop's own links show (DT_RQ_APPS), asked entry by entry */
 void exec_menu( ID mid )
 {
-	static UB	rows[APP_MAX][WM_LABEL_MAX];
+	UB		(*rows)[WM_LABEL_MAX];
 	CXCELL		*c = the_link();
 	TS_UUID		ed;
 	T_DTREQ		rq;
@@ -501,19 +554,23 @@ void exec_menu( ID mid )
 	INT		n = 1, k;
 
 	g_napp = 0;
-	for ( k = 0; c != NULL && k < n && g_napp < APP_MAX; k++ ) {
+	for ( k = 0; c != NULL && k < n; k++ ) {
 		ask_of(c, DT_RQ_APPS, &rq);
 		ct_link_req(&rq, c->el, c->ellen);
 		rq.recno = k;
 		memset(&an, 0, sizeof(an));
 		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
 		n = (INT)an.how;
+		if ( !app_room(n) ) break;
 		if ( ct_app_entry(&an, g_app_id[g_napp], g_app_name[g_napp], &g_app_kind[g_napp]) ) g_napp++;
 	}
+	rows = malloc(WM_LABEL_MAX * (size_t)( g_napp + 1 ));
+	if ( rows == NULL ) g_napp = 0;
 	for ( k = 0; k < g_napp; k++ ) snprintf((char *)rows[k], WM_LABEL_MAX, "%s", (char *)g_app_name[k]);
-	if ( ui_uuid(SYSDEF_MENU_EXEC, &ed) >= E_OK ) {
+	if ( rows != NULL && ui_uuid(SYSDEF_MENU_EXEC, &ed) >= E_OK ) {
 		(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)rows, WM_LABEL_MAX, g_napp);
 	}
+	free(rows);
 	(void)mn_chg_atr(mid, NULL, "exec", ( c == NULL || g_napp == 0 ) ? MN_GREY : 0);
 }
 
@@ -635,6 +692,39 @@ static void link_below( CXCELL *c, CONST TS_UUID *nid )
 	free(tmp);
 }
 
+/*
+ * What a window opened from a link of the sheet did to it, told by the
+ * desktop (DT_F_LINK): the view it closed with written into the link, or
+ * a link to the copy it was saved as put under it, as 新版作成 puts one
+ */
+void link_told( CONST T_DTANS *an )
+{
+	CTVIEW	v;
+	CTSET	set[CT_VIEW_SET];
+	TS_UUID	obj, vid, u;
+	UB	vs[TS_UUID_STRLEN + 1];
+	INT	n = ct_link_told(an, &obj, &vid, &v, set), i;
+	char	s[96];
+
+	if ( n < 0 || memcmp(&obj, &g_obj, sizeof(obj)) != 0 ) return;
+	for ( i = 0; i < g_s.n; i++ ) {
+		CXCELL	*c = g_s.c[i];
+
+		if ( c->kind != CX_LINK || ct_attr_text(c->el, c->ellen, "vobjid", vs, (INT)sizeof(vs)) != TS_UUID_STRLEN
+		  || !ct_uuid_parse(vs, &u) || memcmp(&u, &vid, sizeof(u)) != 0 ) continue;
+		if ( an->how == DT_HOW_LINK_ADD ) {
+			link_below(c, &an->into);
+			snprintf(s, sizeof(s), "a link to the copy saved put with its link");
+		} else {
+			(void)link_edit(c, set, n);
+			snprintf(s, sizeof(s), "link view written back: %s,%s", v.sx, v.sy);
+		}
+		note(s);
+		g_dirty = TRUE;
+		return;
+	}
+}
+
 void link_op( CONST char *code, INT index )
 {
 	CXCELL	*c = the_link();
@@ -692,16 +782,8 @@ void link_op( CONST char *code, INT index )
 		ask_of(c, dup ? DT_RQ_DUPLICATE : DT_RQ_NEWVER, &rq);
 		er = ask_desktop(&rq, &an, 30 * 60 * 1000);
 		if ( er >= E_OK ) {
+			/* the copy is linked to by nothing yet: its link is counted when the sheet is written */
 			link_below(c, &an.into);
-			/* the new object is counted already: it is one of the links written */
-			if ( !g_autoref ) {
-				TS_UUID	*w = realloc(g_was, sizeof(TS_UUID) * (size_t)( g_nwas + 1 ));
-
-				if ( w != NULL ) {
-					g_was = w;
-					g_was[g_nwas++] = an.into;
-				}
-			}
 			snprintf(s, sizeof(s), "%s %s", dup ? "duplicated" : "new version", nm);
 			note(s);
 			say(dup ? "実身を複製しました" : "新版を作成しました");
@@ -845,7 +927,7 @@ void carry_out( INT x0, INT y0, BOOL twice )
 	T_DPRECT	r;
 	UB		nm[OB_NAME_MAX];
 	TS_UUID		u;
-	BOOL		copy;
+	BOOL		copy, given;
 	char		s[120];
 	ER		er;
 	UINT		seq;
@@ -854,6 +936,7 @@ void carry_out( INT x0, INT y0, BOOL twice )
 	name_of(&u, nm);
 	link_box(c, &r);
 	ask_of(c, DT_RQ_CARRY, &rq);
+	rq.flags |= DT_F_TO_PROG;
 	rq.grab_x = x0 - r.left;
 	rq.grab_y = y0 - r.top;
 	memset(&an, 0, sizeof(an));
@@ -864,6 +947,7 @@ void carry_out( INT x0, INT y0, BOOL twice )
 	}
 	seq = rq.seq;
 	copy = (BOOL)( an.how == DT_HOW_COPY );
+	given = (BOOL)( ( an.flags & DT_F_TO_PROG ) != 0 );
 	ask_of(c, DT_RQ_PLACE, &rq);
 	rq.carry = seq;
 	if ( twice ) rq.flags |= DT_F_DUPLICATE;
@@ -875,7 +959,7 @@ void carry_out( INT x0, INT y0, BOOL twice )
 		cell_clear(g_col, g_row);
 		g_link_on = FALSE;
 		say("仮身を移動しました");
-	} else if ( er >= E_OK ) {
+	} else if ( er >= E_OK && !given ) {
 		say(twice ? "実身を複製しました" : "仮身を複写しました");
 	}
 	g_dirty = TRUE;

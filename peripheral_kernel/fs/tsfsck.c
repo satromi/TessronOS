@@ -50,6 +50,7 @@
 #include <ts/tsfsck.h>
 #include <ts/json.h>
 #include <ts/uuid.h>
+#include <ts/vobjsz.h>
 #include "tstdlib.h"
 #include "tsfsfmt.h"
 
@@ -2169,10 +2170,12 @@ LOCAL ER make_trash( CK *c, CONST TS_UUID *list, INT nlist, TS_UUID *p_u )
 		(void)ts_uuid_to_str(&vid, us, sizeof(us));
 		at = put(x, at, max, us);
 		at = put(x, at, max, "\" vobjleft=\"8\" vobjtop=\"");
-		at = put_num(x, at, max, 8 + n * 32);
+		at = put_num(x, at, max, 8 + n * ( VOBJ_CLOSED_H(14, 1, 1) + 8 ));
 		at = put(x, at, max, "\" vobjright=\"248\" vobjbottom=\"");
-		at = put_num(x, at, max, 33 + n * 32);
-		at = put(x, at, max, "\" height=\"25\" chsz=\"14\" frcol=\"#000000\" chcol=\"#000000\""
+		at = put_num(x, at, max, 8 + n * ( VOBJ_CLOSED_H(14, 1, 1) + 8 ) + VOBJ_CLOSED_H(14, 1, 1));
+		at = put(x, at, max, "\" height=\"");
+		at = put_num(x, at, max, VOBJ_CLOSED_H(14, 1, 1));	/* closed, at 14 */
+		at = put(x, at, max, "\" chsz=\"14\" frcol=\"#000000\" chcol=\"#000000\""
 				     " tbcol=\"#ffffff\" bgcol=\"#ffffff\" pictdisp=\"true\" namedisp=\"true\""
 				     " framedisp=\"true\"/>\n");
 		n++;

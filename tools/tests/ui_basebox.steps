@@ -1,0 +1,80 @@
+# 原紙箱 and 原紙集め (design 11.2.2, 11.2.3), for tools/ui_run.py. The system's
+# 原紙箱 (its window at 893,35, its work area from 903,64, the links from 8,8 of
+# it, 27 apart) is an ordinary box of links to the templates: its own template
+# is in it, and carried into the BTRON window it makes a new, empty 原紙箱. An
+# application deleted takes its template's link out of the system's 原紙箱, and
+# registered again puts it back. 原紙集め (its work area from 670,69, the links
+# laid out as in the 原紙箱) lists every template. The link of 空書庫 taken out
+# of the 原紙箱 leaves the template, and carried from 原紙集め into the 原紙箱 a
+# new object made from it is put there. A text put into the 原紙箱 is a template
+# of the person's (ユーザ原紙): carried out, a copy is made and the text stays as
+# it was.
+waitwin 原紙箱
+# the 原紙箱 in front of the text TADjsについて, which lies over it
+click 1000 48
+wait 300
+shot bb_front
+# its own template carried into the BTRON window: a new 原紙箱
+linkdrag 原紙箱 原紙箱 250 60
+wait 1000
+key 28
+expect desktop: 原紙箱 made from the template 原紙箱
+wait 800
+# opened: an empty 原紙箱 of its own, closed again (Ctrl+E)
+dclick 250 60
+wait 1500
+shot bb_new
+key 08 01
+wait 800
+# MPEG Player deleted: its template's link out of the system's 原紙箱; registered again: back
+progrm 01a0f638-4c5a-78a9-9bbd-adfbafa3466a
+want ok 0
+expect template 0 of mpeg-player taken out of the 原紙箱 (0)
+proginst 01a0f638-4c5a-78a9-9bbd-adfbafa3466a
+want ok 0
+expect template 0 of mpeg-player linked from the 原紙箱 (0)
+wait 800
+shot bb_reinst
+# 空書庫 (the 12th link, at 911,369) chosen and taken out of the 原紙箱
+click 1000 48
+wait 300
+click 940 378
+wait 300
+key 4C
+wait 800
+shot bb_deleted
+# 原紙集め from its program object: every template of the applications
+open 01a0d8c4-5b92-7c53-8d64-9fab0c1d5b92
+waitwin 原紙集め
+expect basecol: up
+expect basecol: 16 templates
+wait 1000
+shot bb_collect
+# 空書庫 (the 12th row, at 678,374) carried from 原紙集め into the 原紙箱, under its links
+drag 700 383 990 600
+wait 1000
+key 28
+expect desktop: template carried, made from it: 0
+expect basecol: carried 空書庫 (0)
+wait 800
+shot bb_back
+# the text 実身/仮身 put into the 原紙箱 (its link carried there out of the text
+# TADjsについて, at 315,323), and carried out into that text again: a copy is made, the
+# text stays as it was (the BTRON window is sealed: nothing is carried out of it or into it)
+sum 019a6c9b-e67e-7a35-a461-0d199550e4cf
+keep text
+# the text's window moved 140 left and 100 down, off the 原紙箱's links
+drag 500 148 360 248
+wait 800
+drag 175 423 1000 560
+wait 800
+shot bb_user
+linkdrag 原紙箱 実身/仮身 400 600
+wait 1000
+key 28
+expect desktop: 実身/仮身 made from the template 実身/仮身
+wait 800
+sum 019a6c9b-e67e-7a35-a461-0d199550e4cf
+same text
+shot bb_user_out
+absent !OACV!

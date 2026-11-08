@@ -368,20 +368,7 @@ LOCAL void start( void )
 	if ( ready ) {
 		return;
 	}
-	if ( fn_system() <= 0 ) {
-		ID	fid = 0;
-		TS_UUID	u;
-		ER	er;
-
-		er = kt_sysobj(SYSDEF_FONT_BOX, "NotoSansJP-Regular.otf", &u);
-		if ( er >= E_OK ) {
-			er = fn_open_obj(&u, xf_data_rec(&u), 0, &fid);
-		}
-		if ( er >= E_OK && fid > 0 ) {
-			fn_set_size(fid, 14);
-			fn_set_system(fid);
-		}
-	}
+	(void)kt_face();
 	ready = TRUE;
 }
 

@@ -20,8 +20,14 @@ Writes into --out, in the form tools/mktsfs takes (--over):
     x64 PC (tools/x64/wifi/mkobj.py): the networks saved and their
     keys, read and written only by the system and the administrators
     (rw-------); record 1 starts with "$$WIFI on";
+  - the patch of the same chip's Bluetooth (SYSDEF_FW_BCM4345C0,
+    BCM4345C0.hcd, design 6.8): a plain object like the firmware's,
+    record 1 the file as Raspberry Pi's bluez-firmware has it, given by
+    device/bt/bt_bcm.c at every power on. Only for the Raspberry Pi 5,
+    whose built-in Bluetooth the system runs (--no-bt leaves it out,
+    --bt puts it in for another board);
   - the system box (SYSDEF_SYSTEM_BOX) as etc/def has it, with a link to
-    each of the four after its others.
+    each of them after its others.
 
 What is written depends only on the inputs.
 """
@@ -35,6 +41,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nvram  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+import vobjw  # noqa: E402
 
 FW_UUID = "01a0d8c4-5484-7e95-8a06-3def40515484"
 CLM_UUID = "01a0d8c4-5485-7fa6-9b17-4ef051625485"
@@ -44,6 +52,10 @@ CLM_LINK = "01a0d8c4-5488-72d9-8e4a-712384955488"
 NV_LINK = "01a0d8c4-5489-73ea-9f5b-823495a65489"
 CONF_UUID = "01a0d8c4-5481-7b92-9db3-0abc1d2e5481"
 CONF_LINK = "01a0d8c4-5483-7d94-9fd5-2cde3f405483"
+BT_UUID = "01a0d8c4-5610-7d01-8e10-01a0c3d45610"
+BT_LINK = "01a0d8c4-5611-7d02-8e11-02a1c3d45611"
+BT_FILE = "BCM4345C0.hcd"
+BT_COMMIT = "cdf61dc691a49ff01a124752bd04194907f0f9cd"
 SYSBOX = "01a0d8c4-5211-7c52-9e0a-3b61d27f4c85"
 TAG = "20260810"
 FW_FILE = "cyfmac43455-sdio.bin"
@@ -98,24 +110,40 @@ def document(name, paras):
             % (xml(name), "".join("<p>%s</p>\n" % xml(x) for x in paras)))
 
 
-def link(uuid, vobj, y):
-    return ('<link id="%s_0.xtad" vobjid="%s" vobjleft="8" vobjtop="%d" vobjright="248" '
-            'vobjbottom="%d" height="25" chsz="14" frcol="#000000" chcol="#000000" '
+def link(uuid, vobj, name, y):
+    """A closed link as wide as its name, its top at y"""
+    h = vobjw.closed_h()
+    return ('<link id="%s_0.xtad" vobjid="%s" vobjleft="%d" vobjtop="%d" vobjright="%d" '
+            'vobjbottom="%d" height="%d" chsz="%d" frcol="#000000" chcol="#000000" '
             'tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>\n'
-            % (uuid, vobj, y, y + 25))
+            % (uuid, vobj, vobjw.PAD, y, vobjw.PAD + vobjw.closed_w(name), y + h, h, vobjw.CHSZ))
 
 
-def binary(out, uuid, fw_dir, fname, what, lic_paras):
+def links_after(box, items):
+    """The links to items, (uuid, link id, name), one below another after the box's lowest"""
+    bottoms = [int(x) for x in re.findall(r'vobjbottom="(\d+)"', box)]
+    y = (max(bottoms) + vobjw.GAP) if bottoms else vobjw.PAD
+    out = ""
+    for u, v, n in items:
+        out += link(u, v, n, y)
+        y += vobjw.closed_h() + vobjw.GAP
+    return out
+
+
+def binary(out, uuid, fw_dir, fname, what, lic_paras, source=None, origin=None):
     path = os.path.join(fw_dir, fname)
     size = os.path.getsize(path)
-    source = "linux-firmware %s cypress/%s" % (TAG, fname)
+    if source is None:
+        source = "linux-firmware %s cypress/%s" % (TAG, fname)
+    if origin is None:
+        origin = "linux-firmwareのタグ%sの%s" % (TAG, "cypress/" + fname)
     write(os.path.join(out, uuid + ".json"),
           json.dumps(meta(fname, "r--r--r--", [(0, 1), (1, 15)], "LicenseRef-Cypress", source,
                           file={"name": fname, "mediatype": "application/octet-stream",
                                 "size": size, "source": "system"}),
                      ensure_ascii=False, indent=2) + "\n")
-    paras = [fname, what + "レコード1がlinux-firmwareのタグ%sの%sそのもの(SHA-256を確かめたもの)。"
-             "Cypressの次の許諾に従って、改変せずに再配布する。" % (TAG, "cypress/" + fname)]
+    paras = [fname, what + "レコード1が%sそのもの(SHA-256を確かめたもの)。"
+             "Cypressの次の許諾に従って、改変せずに再配布する。" % origin]
     paras += lic_paras
     write(os.path.join(out, uuid + "_0.xtad"), document(fname, paras))
     shutil.copyfile(path, os.path.join(out, uuid + "_1.bin"))
@@ -124,36 +152,54 @@ def binary(out, uuid, fw_dir, fname, what, lic_paras):
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--board", default="Raspberry Pi 5")
     p.add_argument("--fw", required=True)
     p.add_argument("--box", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--bt", dest="bt", action="store_true", default=None)
+    p.add_argument("--no-bt", dest="bt", action="store_false")
     a = p.parse_args()
+    if a.bt is None:
+        a.bt = a.board == "Raspberry Pi 5"
 
-    for f in (FW_FILE, CLM_FILE, NV_FILE, LIC_CYPRESS, LIC_GPL):
+    for f in (FW_FILE, CLM_FILE, NV_FILE, LIC_CYPRESS, LIC_GPL) + ((BT_FILE,) if a.bt else ()):
         if not os.path.isfile(os.path.join(a.fw, f)):
             sys.exit("rpi5-wifi-obj: %s is not in %s (tools/rpi5/wifi/fw.sh)" % (f, a.fw))
     if os.path.isdir(a.out):
         shutil.rmtree(a.out)
     os.makedirs(a.out)
 
+    board = a.board
+    # the machine's name in full-width letters, as the object's name has it
+    wide = board.translate({c: c + 0xfee0 for c in range(0x21, 0x7f)}).replace(" ", "　")
     lic = open(os.path.join(a.fw, LIC_CYPRESS), encoding="utf-8").read()
     lic_paras = [" ".join(x.split()) for x in lic.split("\n\n") if x.strip()]
     fw = binary(a.out, FW_UUID, a.fw, FW_FILE,
-                "Raspberry Pi 5のWi-Fiのチップ(CYW43455、SDIO)のファームウェア。Wi-Fiのドライバ"
+                board + "のWi-Fiのチップ(CYW43455、SDIO)のファームウェア。Wi-Fiのドライバ"
                 "(NetBSDのbwfm)がチップを起こすときに読み込む。", lic_paras)
+    bt = 0
+    if a.bt:
+        bt = binary(a.out, BT_UUID, a.fw, BT_FILE,
+                    board + "の内蔵Bluetooth(CYW43455のBluetooth、BCM4345C0、UART)のパッチ。Bluetoothの"
+                    "ドライバ(device/bt/bt_bcm.c)が電源を入れるたびにコントローラへ送る。Raspberry Piはこのファイルを"
+                    "linux-firmwareのLICENCE.cypressと同じ許諾で配っている(bluez-firmwareのdebian/copyright)。", lic_paras,
+                    source="bluez-firmware %s debian/firmware/broadcom/%s" % (BT_COMMIT, BT_FILE),
+                    origin="Raspberry Piのbluez-firmware(github.com/RPi-Distro/bluez-firmware)のコミット%sの"
+                           "debian/firmware/broadcom/%s" % (BT_COMMIT, BT_FILE))
     clm = binary(a.out, CLM_UUID, a.fw, CLM_FILE,
-                 "Raspberry Pi 5のWi-Fiのチップ(CYW43455)の、国と地域ごとの電波の規則(CLM)。"
+                 board + "のWi-Fiのチップ(CYW43455)の、国と地域ごとの電波の規則(CLM)。"
                  "ファームウェアの後にチップに読み込む。", lic_paras)
 
     # the settings of the board: notes, then the text a line to a paragraph
-    name = "Ｗｉ－Ｆｉの基板の設定（Ｒａｓｐｂｅｒｒｙ　Ｐｉ　５）"
+    name = "Ｗｉ－Ｆｉの基板の設定（%s）" % wide
     text = open(os.path.join(a.fw, NV_FILE), encoding="ascii").read()
     notes = [
-        nvram.NOTE + "Raspberry Pi 5のWi-Fiのチップ(CYW43455)の基板の設定(NVRAM)。Wi-Fiの"
+        nvram.NOTE + board + "のWi-Fiのチップ(CYW43455)の基板の設定(NVRAM)。Wi-Fiの"
         "初期化が、この注記の段落、「#」で始まる行、空の行を除いた段落を「名前=値」の行として読み、"
         "チップに渡す。全角の英数字と記号は半角として読む。",
         nvram.NOTE + "出典: linux-firmwareのタグ%sの brcm/%s(SHA-256を確かめたもの)。"
-        "linux-firmwareでは、Raspberry Pi 5、Pi 500、Compute Module 5の名前がこのファイルへの別名になっている。"
+        "linux-firmwareでは、Raspberry Pi 4、Compute Module 4、Pi 5、Pi 500、Compute Module 5の名前が"
+        "このファイルかその別名になっている。"
         % (TAG, NV_FILE),
         nvram.NOTE + "ライセンス: GPL-2.0以降(下の最初の行のSPDX-License-Identifier: GPL-2.0+)。"
         "著作権はRaspberry Pi (Trading) Ltd.にある。この文章そのものがこの設定のソースである。"
@@ -193,15 +239,15 @@ def main():
 
     # the system box, with the four linked after the rest
     box = open(a.box, encoding="utf-8").read()
-    tops = [int(x) for x in re.findall(r'vobjtop="(\d+)"', box)]
-    y = (max(tops) + 32) if tops else 8
     if "</figure>" not in box:
         sys.exit("rpi5-wifi-obj: the system box %s is not laid out as expected" % a.box)
-    box = box.replace("</figure>", link(FW_UUID, FW_LINK, y) + link(CLM_UUID, CLM_LINK, y + 32)
-                      + link(NV_UUID, NV_LINK, y + 64) + link(CONF_UUID, CONF_LINK, y + 96) + "</figure>", 1)
+    links = links_after(box, [(FW_UUID, FW_LINK, FW_FILE), (CLM_UUID, CLM_LINK, CLM_FILE),
+                              (NV_UUID, NV_LINK, name), (CONF_UUID, CONF_LINK, cname)]
+                        + ([(BT_UUID, BT_LINK, BT_FILE)] if a.bt else []))
+    box = box.replace("</figure>", links + "</figure>", 1)
     write(os.path.join(a.out, SYSBOX + "_0.xtad"), box)
-    print("rpi5-wifi-obj: %s (firmware %d bytes, CLM %d bytes, settings %d lines, the Wi-Fi's settings, the system box)"
-          % (a.out, fw, clm, want.count("\n")))
+    print("rpi5-wifi-obj: %s (firmware %d bytes, CLM %d bytes, settings %d lines, the Wi-Fi's settings, %sthe system box)"
+          % (a.out, fw, clm, want.count("\n"), ("the Bluetooth's patch %d bytes, " % bt) if a.bt else ""))
 
 
 if __name__ == "__main__":

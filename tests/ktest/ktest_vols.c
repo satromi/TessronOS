@@ -106,7 +106,7 @@ typedef struct {
 
 LOCAL CONST VOLDEF vd[] = {
 	{ 0, 0, FS_KIND_TSFS, "VOLA1" }, { 0, 1, FS_KIND_FAT16, NULL }, { 0, 2, FS_KIND_TSFS, "VOLA3" },
-	{ 0, 3, FS_KIND_EXFAT, NULL }, { 0, 4, FS_KIND_BLANK, NULL },
+	{ 0, 3, FS_KIND_EXFAT, NULL }, { 0, 4, FS_KIND_NTFS, NULL },
 	{ 1, 0, FS_KIND_FAT16, NULL }, { 1, 1, FS_KIND_FAT12, NULL }, { 1, 2, FS_KIND_FAT12, NULL },
 	{ 1, 3, FS_KIND_FAT12, NULL }, { 1, 4, FS_KIND_FAT12, NULL }, { 1, 5, FS_KIND_FAT12, NULL },
 	{ 1, 6, FS_KIND_FAT12, NULL }, { 1, 7, FS_KIND_TSFS, "VOLB" },
@@ -561,7 +561,7 @@ LOCAL void test_probe( void )
 		if ( vd[v].label != NULL ) {
 			KT_ASSERT_EQ(knl_strcmp((CONST char *)pr.label, vd[v].label), 0);
 		}
-		KT_ASSERT_EQ(( pr.fimp[0] != 0 ), is_fat(v));
+		KT_ASSERT_EQ(( pr.fimp[0] != 0 ), is_fat(v) || vd[v].kind == FS_KIND_EXFAT || vd[v].kind == FS_KIND_NTFS);
 	}
 	/* a whole disk with a partition table says so */
 	for ( i = 0; i < 3; i++ ) {
@@ -584,8 +584,84 @@ LOCAL void test_all_on( void )
 	KT_ASSERT(c.obf_used >= base.obf_used + 4);	/* and the system's: more than four */
 	KT_ASSERT(c.fs_used >= base.fs_used + 10);		/* and /boot: more than eight */
 	for ( v = 0; v < NVOL; v++ ) {
-		if ( vd[v].kind == FS_KIND_EXFAT || vd[v].kind == FS_KIND_BLANK || vd[v].kind == FS_KIND_TSFS ) {
+		if ( vd[v].kind == FS_KIND_BLANK || vd[v].kind == FS_KIND_TSFS ) {
 			KT_ASSERT_ER(mount_auto(v, FS_MNT_RDONLY), EX_NOTSUP);
+		}
+	}
+	/* the exFAT partition: changed through its device object, the fimp chosen by what is on it */
+	for ( v = 0; v < NVOL; v++ ) {
+		if ( vd[v].kind == FS_KIND_EXFAT ) {
+			static UB	xd[3000];
+			INT		i;
+
+			for ( i = 0; i < (INT)sizeof(xd); i++ ) xd[i] = (UB)( i * 3 );
+			KT_ASSERT_ER(mount_auto(v, 0), E_OK);
+			KT_ASSERT_ER(file_put(v, "exfat test.bin", xd, sizeof(xd)), E_OK);
+			KT_ASSERT(file_same(v, "exfat test.bin", xd, sizeof(xd)));
+			KT_ASSERT_ER(unmount(v), E_OK);
+			KT_ASSERT_ER(mount_auto(v, FS_MNT_RDONLY), E_OK);
+			KT_ASSERT(file_same(v, "exfat test.bin", xd, sizeof(xd)));
+			KT_ASSERT_ER(unmount(v), E_OK);
+		}
+	}
+	/*
+	 * The NTFS partition: its file read; on a volume that is safe, its
+	 * bytes replaced where they are; what changes the structure refused
+	 */
+	for ( v = 0; v < NVOL; v++ ) {
+		if ( vd[v].kind == FS_KIND_NTFS ) {
+			static UB	nd[3000];
+			char		path[64];
+			INT		i, fd;
+
+			for ( i = 0; i < (INT)sizeof(nd); i++ ) nd[i] = (UB)( i * 3 );
+			KT_ASSERT_ER(mount_auto(v, FS_MNT_RDONLY), E_OK);
+			KT_ASSERT(file_same(v, "VOLS.BIN", nd, sizeof(nd)));
+			KT_ASSERT(file_same(v, "vols.bin", nd, sizeof(nd)));
+			KT_ASSERT_ER(unmount(v), E_OK);
+
+			KT_ASSERT_ER(mount_auto(v, 0), E_OK);
+			media_path(v, path);
+			knl_strcat(path, "/VOLS.BIN");
+			fd = fs_open(path, O_RDWR);
+			KT_ASSERT(fd >= 0);
+			if ( fd >= 0 ) {
+				for ( i = 0; i < 100; i++ ) nd[i + 700] = (UB)( 0xA5 ^ i );
+				(void)fs_lseek(fd, 700, SEEK_SET_);
+				KT_ASSERT_EQ(fs_write(fd, nd + 700, 100), 100);
+				KT_ASSERT_EQ(fs_lseek(fd, 0, SEEK_END_), 3000);
+				KT_ASSERT_ER(fs_write(fd, nd, 10), EX_NOTSUP);
+				(void)fs_close(fd);
+			}
+			KT_ASSERT(file_same(v, "VOLS.BIN", nd, sizeof(nd)));
+			media_path(v, path);
+			knl_strcat(path, "/newdir");
+			KT_ASSERT_ER(fs_mkdir(path), EX_NOTSUP);
+			KT_ASSERT_ER(unmount(v), E_OK);
+			KT_ASSERT_ER(mount_auto(v, FS_MNT_RDONLY), E_OK);
+			KT_ASSERT(file_same(v, "VOLS.BIN", nd, sizeof(nd)));
+			KT_ASSERT_ER(unmount(v), E_OK);
+
+			/*
+			 * The bytes put back as the image was made with them: the
+			 * images are made once for the build's directory and plugged
+			 * in again by every run after, which reads them as made
+			 */
+			for ( i = 0; i < 100; i++ ) nd[i + 700] = (UB)( ( i + 700 ) * 3 );
+			KT_ASSERT_ER(mount_auto(v, 0), E_OK);
+			media_path(v, path);
+			knl_strcat(path, "/VOLS.BIN");
+			fd = fs_open(path, O_RDWR);
+			KT_ASSERT(fd >= 0);
+			if ( fd >= 0 ) {
+				(void)fs_lseek(fd, 700, SEEK_SET_);
+				KT_ASSERT_EQ(fs_write(fd, nd + 700, 100), 100);
+				(void)fs_close(fd);
+			}
+			KT_ASSERT_ER(unmount(v), E_OK);
+			KT_ASSERT_ER(mount_auto(v, FS_MNT_RDONLY), E_OK);
+			KT_ASSERT(file_same(v, "VOLS.BIN", nd, sizeof(nd)));
+			KT_ASSERT_ER(unmount(v), E_OK);
 		}
 	}
 	/* a FAT partition is no volume of objects; attached already, a volume is E_OK again */

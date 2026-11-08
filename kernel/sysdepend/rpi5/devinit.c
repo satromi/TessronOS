@@ -39,6 +39,7 @@
 #include <ts/cpuclk.h>
 #include "kernel.h"
 #include "sysdepend.h"
+#include <ts/fs.h>
 
 /*
  * Each step of the start-up is named on the console before it runs, so
@@ -53,6 +54,7 @@
 IMPORT void knl_objtest_start( void );
 IMPORT void knl_sndtest_start( void );
 IMPORT void knl_hevctest_start( void );
+IMPORT void knl_btu_init( void );	/* device/bt/bt_uart.c */
 
 /* Before the kernel starts (no kernel objects available yet) */
 EXPORT ER knl_init_device( void )
@@ -120,6 +122,9 @@ EXPORT ER knl_start_device( void )
 	knl_cam_init();	/* the camera device (design 10.16) */
 	STEP("usb");
 	knl_usb_init();	/* the USB sockets, behind the RP1 (design 10.14) */
+	/* the board's own Bluetooth: its pins and power before the Wi-Fi's, which share their registers (bt_uart.c) */
+	STEP("bluetooth");
+	knl_btu_init();
 	STEP("ethernet");
 	knl_eth_rp1_init();	/* the RJ45 socket, behind the RP1 (design 10.4) */
 	STEP("netdev");
@@ -132,6 +137,8 @@ EXPORT ER knl_start_device( void )
 	STEP("file system");
 	if ( fs_main() >= E_OK ) {
 		fs_regist(&knl_fimp_fat);
+		fs_regist(&knl_fimp_exfat);
+		fs_regist(&knl_fimp_ntfs);
 		if ( fs_attach("fatfs", "sda0", "/boot", 0) < EX_OK ) {
 			fs_attach("fatfs", "sda1", "/boot", 0);
 		}
@@ -166,6 +173,7 @@ IMPORT void	knl_wifi_shutdown( void ) __attribute__((weak));
 EXPORT ER knl_finish_device( void )
 {
 	if ( knl_wifi_shutdown != NULL ) knl_wifi_shutdown();	/* the network joined left first */
+	knl_fs_finish(NULL, NULL);
 	knl_sd_finish();	/* a card at 1.8V powered off, so that the firmware finds it at 3.3V */
 	return E_OK;
 }

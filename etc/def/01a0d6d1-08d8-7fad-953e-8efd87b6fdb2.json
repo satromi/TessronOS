@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "virtual-object-network",
       "kind": "utility",
       "name": "仮身ネットワーク",

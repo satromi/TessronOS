@@ -31,6 +31,8 @@
 IMPORT ER   knl_wm_title( INT wid, char *buf, INT max );
 /* The highest window number there is room for now: the windows are 1 to this */
 IMPORT INT  knl_wm_nwin( void );
+/* Something is being carried, its outlines on the screen (wm_set_drag) */
+IMPORT BOOL knl_wm_carrying( void );
 
 /* part.c: a panel's parts, copied out */
 IMPORT INT  knl_pn_count( INT pid, BOOL *p_menu );
@@ -54,6 +56,11 @@ IMPORT void knl_wmobj_event( CONST T_WMEV *ev );
  * (WM_ATTR_NOFOCUS) and is shown, to a request with OB_N_KEYSEEN
  */
 IMPORT void knl_wmobj_key_seen( CONST T_WMEV *ev );
+/*
+ * A button or a key pressed, as the desktop reads it, wherever it goes:
+ * OB_E_PRESSED told to every window that asked for it
+ */
+IMPORT void knl_wmobj_press_seen( CONST T_WMEV *ev );
 IMPORT void knl_wmobj_panel( INT pid );
 IMPORT void knl_wmobj_panel_close( INT pid );
 IMPORT void knl_wmobj_part( INT pid, INT i, UINT event, CONST T_WMEV *ev );

@@ -96,7 +96,7 @@ expect worddic: closed
 # a text's selection to 単語登録 (編集 > 単語登録): the word box holds it
 click 600 650
 wait 300
-drag 153 597 244 597
+drag 153 577 244 577
 wait 300
 click 400 640 1
 wait 600

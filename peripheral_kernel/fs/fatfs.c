@@ -2797,8 +2797,12 @@ LOCAL ER fat_mount( T_MOUNT *m )
 		}
 		if ( check && !v->rdonly ) {
 			/* what was counted before the look over does not hold */
+			UD	t0 = now_ms();
+
 			v->free_known = FALSE;
 			er = fat_check(v);
+			tm_printf((UB *)"fat: %s was not unmounted: looked over in %d ms (%d)\n", m->dev,
+				  (INT)( now_ms() - t0 ), (INT)er);
 			if ( er < EX_OK ) goto err;
 		}
 	}

@@ -598,8 +598,8 @@ EXPORT void tip_draw( DTWIN *d, INT gid )
 		return;
 	}
 	dt_work_rect(d, &page);
-	if ( tv_doc_caret_box(d->doc, &page, d->scroll_y, d->rec, d->cpara,
-			      d->cpos, &box) < E_OK ) {
+	if ( tv_doc_caret_box(d->doc, &page, d->scroll_y, d->rec, d->dd.cpara,
+			      d->dd.cpos, &box) < E_OK ) {
 		return;
 	}
 	if ( d->doc->vert ) {

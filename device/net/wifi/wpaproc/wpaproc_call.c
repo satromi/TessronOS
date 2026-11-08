@@ -453,6 +453,79 @@ void knl_wpa_rx( const unsigned char *src, const unsigned char *body, int len )
 	(void)plain(WPP_RX, src, WPP_ADDR_LEN, body, len, 2);
 }
 
+/*
+ * What a join of 802.1X needs. A certificate may be larger than a message:
+ * it goes in pieces, and the process puts them together until the last call
+ * takes them all.
+ */
+static int eap_blob( int which, const unsigned char *d, int len )
+{
+	int	at = 0;
+
+	while ( at < len ) {
+		WPP_W		w;
+		WPP_R		r;
+		const WPP_HDR	*h;
+		int		n = len - at, ok;
+
+		if ( n > WPP_EAP_PIECE ) n = WPP_EAP_PIECE;
+		if ( !begin(&w, WPP_EAP_BLOB) ) return -1;
+		wpp_w_int(&w, which);
+		wpp_w_bytes(&w, d + at, n);
+		h = call(WPP_EAP_BLOB, wpp_w_end(&w), &r);
+		ok = ( h != 0 && h->ret == 0 );
+		done();
+		if ( !ok ) return -1;
+		at += n;
+	}
+	return 0;
+}
+
+int knl_wpa_eap_set( int method, const char *id, int id_len, const char *pw, int pw_len,
+		     const unsigned char *ca, int ca_len, const char *domain, int domain_len,
+		     const unsigned char *cert, int cert_len, const unsigned char *key, int key_len,
+		     const char *key_pw, int key_pw_len )
+{
+	WPP_W		w;
+	WPP_R		r;
+	const WPP_HDR	*h;
+	int		ret = -1;
+
+	if ( eap_blob(0, ca, ca_len) != 0 || eap_blob(1, cert, cert_len) != 0 || eap_blob(2, key, key_len) != 0 ) {
+		return -1;
+	}
+	if ( !begin(&w, WPP_EAP_SET) ) return -1;
+	wpp_w_int(&w, method);
+	wpp_w_bytes(&w, id, id_len);
+	wpp_w_bytes(&w, pw, pw_len);
+	wpp_w_bytes(&w, domain, domain_len);
+	wpp_w_bytes(&w, key_pw, key_pw_len);
+	h = call(WPP_EAP_SET, wpp_w_end(&w), &r);
+	if ( h != 0 ) ret = h->ret;
+	done();
+	return ret;
+}
+
+int knl_wpa_eap_result( void )
+{
+	return plain(WPP_EAP_RESULT, 0, 0, 0, 0, 0);
+}
+
+void knl_wpa_eap_end( void )
+{
+	(void)plain(WPP_EAP_END, 0, 0, 0, 0, 0);
+}
+
+/* In the process, as part of knl_wpa_assoc and knl_wpa_rx */
+void knl_wpa_eap_assoc( void ) {}
+int knl_wpa_eap_rx( const unsigned char *src, const unsigned char *body, int len )
+{
+	(void)src;
+	(void)body;
+	(void)len;
+	return 0;
+}
+
 int knl_wpa_state( void )
 {
 	int	r = plain(WPP_STATE, 0, 0, 0, 0, 0);

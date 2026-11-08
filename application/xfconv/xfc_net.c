@@ -368,6 +368,7 @@ LOCAL INT conf_parse( CONST T_JSON *xc, XFCCONN *c, INT max )
 		(void)js_get_str(&it, "host", k->host, sizeof(k->host));
 		(void)js_get_str(&it, "name", k->name, sizeof(k->name));
 		k->ssh = js_get_bool(&it, "ssh", FALSE);
+		(void)js_get_str(&it, "hostkey", k->hostkey, sizeof(k->hostkey));
 		snprintf((char *)k->port, sizeof(k->port), "%d", (INT)js_get_num(&it, "port", FTP_PORT));
 		(void)js_get_str(&it, "user", k->user, sizeof(k->user));
 		k->keep = js_get_bool(&it, "keep", FALSE);
@@ -452,7 +453,8 @@ LOCAL char *conf_text( CONST XFCCONN *c, INT n, INT *p_w )
 		w = jstr(v, w, vcap, c[i].host);
 		w += snprintf(v + w, vcap - w, "\",\"name\":\"");
 		w = jstr(v, w, vcap, c[i].name);
-		w += snprintf(v + w, vcap - w, "\",\"ssh\":%s", c[i].ssh ? "true" : "false");
+		w += snprintf(v + w, vcap - w, "\",\"ssh\":%s,\"hostkey\":\"%s\"", c[i].ssh ? "true" : "false",
+			      (CONST char *)c[i].hostkey);
 		w += snprintf(v + w, vcap - w, ",\"port\":%d,\"user\":\"", atoi((CONST char *)c[i].port));
 		w = jstr(v, w, vcap, c[i].user);
 		w += snprintf(v + w, vcap - w, "\",\"encoding\":\"%s\",\"pasv\":%s,\"data\":\"%s\","

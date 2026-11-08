@@ -37,6 +37,9 @@
 #include <ts/proc.h>
 #include <ts/ob.h>
 #include <ts/fs.h>
+#include <ts/tad.h>
+#include <ts/tadview.h>
+#include <ts/om.h>
 #include "obj.h"
 
 #define F(fn)		((FP)(fn))
@@ -274,6 +277,17 @@ LOCAL ER svc_ref_vol( CONST TS_UUID *uuid, T_OBVOL *pk_vol )
 	return UACCESS(ob_ref_vol(u, pk_vol));
 }
 
+LOCAL ER svc_ref_vid( CONST TS_UUID *uuid, TS_UUID *p_vol, TS_UUID *p_mach )
+{
+	CONST TS_UUID	*u;
+	TS_UUID		k;
+	ER		er = uuid_in(uuid, &k, &u);
+
+	if ( er < E_OK ) return er;
+	if ( !out_ok(p_vol, sizeof(*p_vol)) || !out_ok(p_mach, sizeof(*p_mach)) ) return E_MACV;
+	return UACCESS(ob_ref_vid(u, p_vol, p_mach));
+}
+
 LOCAL ER svc_wip_vol( CONST TS_UUID *uuid )
 {
 	CONST TS_UUID	*u;
@@ -327,6 +341,23 @@ LOCAL ER svc_cpy_obj( CONST TS_UUID *uuid, CONST T_OBCRE *pk_cre, TS_UUID *p_uui
 	er = UACCESS(ob_cpy_obj(u, ( k != NULL ) ? &k->c : NULL, p_uuid));
 	cre_free(k);
 	return er;
+}
+
+LOCAL ER svc_dup_obj( CONST TS_UUID *uuid, CONST UB *name, TS_UUID *p_uuid )
+{
+	CONST TS_UUID	*u;
+	TS_UUID		ku;
+	UB		kn[OB_NAME_MAX];
+	ER		er = uuid_in(uuid, &ku, &u);
+
+	if ( er < E_OK ) return er;
+	if ( p_uuid == NULL ) return E_PAR;
+	if ( !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
+	if ( name != NULL ) {
+		er = str_in(name, kn, sizeof(kn), FALSE);
+		if ( er < E_OK ) return er;
+	}
+	return UACCESS(ob_dup_obj(u, ( name != NULL ) ? kn : NULL, p_uuid));
 }
 
 /* ---------------------------------------------------------------- records */
@@ -768,6 +799,103 @@ LOCAL ID svc_ntf_evt( ID key, INT recno, CONST T_OBNTF *pk_ntf, ID port )
 	return ob_ntf_evt(key, recno, &n, port);
 }
 
+/* ---------------------------------------------------------------- what links show */
+
+/*
+ * The looks of n links, as the store holds them for the desktop
+ * (ob_ref_vob, ts/tadview.h): each link copied in, answered in the
+ * kernel, and copied out with its icon. A link to an object the process
+ * may not read is answered as a 虚身.
+ */
+LOCAL INT svc_ref_vob( T_OBRVOB *pk, INT n )
+{
+	T_OBRVOB	*k;
+	INT		i;
+	CONST UW	*px;
+	INT		w, h;
+	TS_UUID		zero, seen[OB_RVOB_MAX];
+	ER		seen_er[OB_RVOB_MAX];
+	INT		nseen = 0, j;
+
+	if ( pk == NULL || n <= 0 || n > OB_RVOB_MAX ) return E_PAR;
+	if ( !user_ok(pk, (SZ)n * (SZ)sizeof(T_OBRVOB), TRUE) ) return E_MACV;
+	k = (T_OBRVOB *)Kmalloc(sizeof(T_OBRVOB));
+	if ( k == NULL ) return E_NOMEM;
+	knl_memset(&zero, 0, sizeof(zero));
+	for ( i = 0; i < n; i++ ) {
+		knl_ua_get(k, &pk[i], sizeof(*k));
+		if ( k->icon != NULL && ( k->icon_max < 0
+		  || !user_ok(k->icon, (SZ)k->icon_max * (SZ)sizeof(UW), TRUE) ) ) {
+			Kfree(k);
+			return E_MACV;
+		}
+		k->er = E_OK;
+		k->state = 0;
+		k->paper = TV_PAPER_LOOK;
+		k->name_len = -1;
+		k->label_len = -1;
+		k->icon_w = k->icon_h = 0;
+		k->name[0] = 0;
+		k->label[0] = 0;
+		/*
+		 * whether it may be read, asked once a call for each object: the
+		 * links of a window are often many to few objects, and the
+		 * answer does not change within the call
+		 */
+		for ( j = 0; j < nseen && ts_uuid_cmp(&seen[j], &k->vobj.target) != 0; j++ ) {
+			;
+		}
+		if ( j < nseen ) {
+			k->er = seen_er[j];
+		} else {
+			k->er = ob_acc_obj(&k->vobj.target, OB_OP_READ);
+			seen[nseen] = k->vobj.target;
+			seen_er[nseen++] = k->er;
+		}
+		if ( k->er < E_OK ) {
+			/* not to be read by it, or not to be found: drawn as a 虚身, with what the link carries */
+			k->state = TV_ST_GONE;
+		} else {
+			if ( ( k->want & OB_VW_NAME ) != 0 ) {
+				k->name_len = om_store_name(&k->vobj.target, k->name, sizeof(k->name));
+			}
+			if ( ( k->want & OB_VW_LABEL ) != 0 ) {
+				k->label_len = om_store_label(&k->vobj, k->label, sizeof(k->label));
+			}
+			if ( ( k->want & OB_VW_PAPER ) != 0 && om_store_paper(&k->vobj.target, &k->paper) < E_OK ) {
+				k->paper = TV_PAPER_LOOK;
+			}
+			if ( ( k->want & OB_VW_STATE ) != 0 ) {
+				k->state = om_store_state_on(&k->vobj,
+					( ts_uuid_cmp(&k->host, &zero) != 0 ) ? &k->host : NULL);
+			}
+			if ( ( k->want & OB_VW_ICON ) != 0 && k->icon != NULL
+			  && om_store_icon(&k->vobj, &px, &w, &h) >= E_OK && px != NULL ) {
+				k->icon_w = w;
+				k->icon_h = h;
+				if ( (SZ)w * h <= (SZ)k->icon_max ) {
+					knl_ua_put(k->icon, px, (SZ)w * h * (SZ)sizeof(UW));
+				} else {
+					k->state |= OB_VW_SHORT;
+				}
+				om_store_icon_done(px);
+			}
+		}
+		/* the answers only: what the process gave is left as it gave it */
+		knl_ua_put(&pk[i].er, &k->er, sizeof(k->er));
+		knl_ua_put(&pk[i].state, &k->state, sizeof(k->state));
+		knl_ua_put(&pk[i].paper, &k->paper, sizeof(k->paper));
+		knl_ua_put(&pk[i].name_len, &k->name_len, sizeof(k->name_len));
+		knl_ua_put(&pk[i].label_len, &k->label_len, sizeof(k->label_len));
+		knl_ua_put(pk[i].name, k->name, sizeof(k->name));
+		knl_ua_put(pk[i].label, k->label, sizeof(k->label));
+		knl_ua_put(&pk[i].icon_w, &k->icon_w, sizeof(k->icon_w));
+		knl_ua_put(&pk[i].icon_h, &k->icon_h, sizeof(k->icon_h));
+	}
+	Kfree(k);
+	return n;
+}
+
 EXPORT const FP knl_ob_svc_tbl[TSN_OB_MAX + 1] = {
 	[TSN_NUMBER(TSN_OB_OPN_OBJ)]	= F(svc_opn_obj),
 	[TSN_NUMBER(TSN_OB_CLS_OBJ)]	= F(ob_cls_obj),
@@ -822,4 +950,7 @@ EXPORT const FP knl_ob_svc_tbl[TSN_OB_MAX + 1] = {
 	[TSN_NUMBER(TSN_OB_REA_TMO)]	= F(svc_rea_tmo),
 	[TSN_NUMBER(TSN_OB_FND_SYS)]	= F(svc_fnd_sys),
 	[TSN_NUMBER(TSN_OB_ACC_OBJ)]	= F(svc_acc_obj),
+	[TSN_NUMBER(TSN_OB_REF_VOB)]	= F(svc_ref_vob),
+	[TSN_NUMBER(TSN_OB_REF_VID)]	= F(svc_ref_vid),
+	[TSN_NUMBER(TSN_OB_DUP_OBJ)]	= F(svc_dup_obj),
 };

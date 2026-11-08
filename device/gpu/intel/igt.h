@@ -56,6 +56,7 @@ typedef struct {
 	UW		tail;		/* bytes into the ring */
 	UW		id;		/* in the descriptor, to tell its status entries */
 	BOOL		fresh;		/* made anew from the first image before it runs */
+	BOOL		force;		/* its image written here: the engine reads it whole (not a lite restore) */
 } IGTCTX;
 
 /* An address space: a four level page table of the GPU's */
@@ -64,6 +65,7 @@ struct igt_vm {
 	BOOL		kernel;
 	IGTCTX		*ctx[GPU_HWC_MAX][IGT_NENG];
 	UD		npt;		/* tables beyond the top one, for the record */
+	IGTVM		*dead_next;	/* gone with its process, kept while an engine still holds one of its contexts */
 };
 
 typedef struct {
@@ -78,6 +80,16 @@ typedef struct {
 	UB		*golden;	/* the image saved after the workarounds ran; NULL before */
 	UW		seqno;		/* of the last job handed to it */
 	IGTCTX		*cur;		/* the context of the job running, NULL when idle */
+	/*
+	 * The context it ran last. The engine keeps it after the job: it is
+	 * saved to its image again when the engine goes on to another, and
+	 * RC6 saves and restores it. Its image, its ring and its space's
+	 * tables are not freed while it is so, and the engine is given the
+	 * kernel's context before it is parked.
+	 */
+	IGTCTX		*last;
+	IGTCTX		*prev;		/* the one before: written back as the job of 'last' starts */
+	BOOL		to_kernel;	/* a job of the kernel's context asked for, to take that one's place */
 	BOOL		idle_seen;	/* its status said active to idle since the job started */
 	UINT		csb_head;
 	UD		t_kick;		/* when the job started (system counter) */
@@ -112,6 +124,12 @@ typedef struct {
 	BOOL		irq_off;
 	void		(*display_irq)( UW master );
 	UW		next_ctx_id;
+	IGTVM		*dead;		/* spaces gone with their processes, not yet freed (under 'mtx') */
+	T_GPUBO		*idle_bo;	/* a batch of nothing, for the jobs that only give an engine the kernel's context */
+	UW		idle_gpu;
+	BOOL		want_kernel;	/* the look found the GT idle on a process's context: the task asks for the kernel's */
+	UD		n_to_kernel, n_held, n_reaped;	/* those jobs; spaces kept at their process's end; freed later */
+	UD		n_force;	/* contexts handed with their image to be read whole */
 
 	/* forcewake, RC6 and RPS (igt_pm.c), under 'lock' */
 	BOOL		fw_held;	/* the three wells are asked to stay awake */
@@ -162,6 +180,15 @@ IMPORT void	igt_eng_dump( CONST char *why, IGTENG *e );
 /* Kernel jobs: a batch in the kernel's space, waited for (igt_test.c, igt_compose.c) */
 IMPORT ER	igt_kjob( INT eng, UD batch_va, UW len, T_GPUBO *CONST *bo, INT nbo );
 
+/* Whether an engine holds a context of a process's (the caller holds 'lock') */
+IMPORT BOOL	igt_holds_user( void );
+
+/* Whether an engine holds a context of space vm, or may still be writing one back (takes 'lock') */
+IMPORT BOOL	igt_holds_vm( CONST IGTVM *vm );
+
+/* The kernel's context asked for on each engine that holds a process's: queued, not waited for (a task's) */
+IMPORT void	igt_to_kernel( void );
+
 /* ---------------------------------------------------------------- igt_pm.c */
 IMPORT BOOL	igt_fw_init( void );		/* the three wells woken the first time, held by the caller */
 IMPORT void	igt_fw_get( void );		/* the GT's registers needed: awake on return (a task's) */
@@ -177,7 +204,8 @@ IMPORT INT	igt_setting( CONST char *word, INT dflt );	/* "word=N" of cmdline.txt
 /* ---------------------------------------------------------------- igt_vm.c */
 IMPORT ER	igt_vm_init( void );
 IMPORT IGTVM	*igt_vm_create( BOOL kernel );
-IMPORT void	igt_vm_destroy( IGTVM *vm );
+IMPORT void	igt_vm_destroy( IGTVM *vm );	/* freed, or kept while an engine holds it (under 'mtx') */
+IMPORT void	igt_vm_reap( void );		/* those kept freed once no engine holds them (under 'mtx') */
 IMPORT ER	igt_vm_map( IGTVM *vm, UD va, CONST UD *pa, UD npages );
 IMPORT void	igt_vm_unmap( IGTVM *vm, UD va, UD npages );
 IMPORT UD	igt_vm_lookup( IGTVM *vm, UD va );	/* the entry, for tests and the record */

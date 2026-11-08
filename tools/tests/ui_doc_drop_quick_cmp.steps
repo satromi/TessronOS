@@ -1,0 +1,89 @@
+# 基本文章編集から文字をウインドウの外へ運んで、待たずに離す (design 11.3) のを、デスクトップの
+# 文章編集とプロセスの文章編集で同じにする, for tools/ui_run.py. As ui_doc_drop_cmp, but the
+# hand goes out of the window and the button is let go at once, with no wait on the way: the
+# process hears the hand go out (OB_E_LEAVE) and asks the desktop to carry the letters on
+# (DT_RQ_CARRY with DT_F_TEXT) after the button went up, and the desktop lets them go where the
+# button went up. A document of one line, made here and opened as 受け先 with no object behind
+# it, is moved by its name band to the right of the screen. A copy of 基本文章編集 with 30
+# paragraphs (mkbig doc 30) is opened at 100,100 (600 by 400), the letters of the second line of
+# its second paragraph picked, and carried out of the window onto 受け先. Saved, record 0 of the
+# copy is the same, byte for byte, whichever editor carried them out, and so is the record of
+# the one they went into (sum keys: it has the keys once the letters are put in it), 受け先 for
+# the desktop's editor and 受け先2, made the same and put over it, for the process.
+# Keys: Ctrl+S 16 01, Ctrl+E 08 01.
+docproc kernel
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p>受け先の行</p>
+xml </document></tad>
+xmlopen 受け先
+wait 500
+drag 300 75 1000 395
+wait 500
+mkbig doc 30
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+drag 160 230 420 230
+sync 600
+move 690 490
+sync 600
+hold 300 230
+move 400 240
+move 600 300
+move 800 420
+move 900 450
+up
+sync 600
+wait 300
+sum show keys
+keep kernel_to
+click 400 112
+sync 600
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p>受け先の行</p>
+xml </document></tad>
+xmlopen 受け先2
+wait 500
+drag 300 75 1000 395
+wait 500
+mkbig doc 30
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 800
+logmark
+drag 160 230 420 230
+expectsince document: drew
+move 690 490
+wait 300
+logmark
+hold 300 230
+move 400 240
+move 600 300
+move 800 420
+move 900 450
+up
+expectsincein 10 document: letters carried out (0)
+wait 500
+sum show keys
+same kernel_to
+logmark
+click 400 112
+wait 300
+logmark
+key 16 01
+expectsince document: saved (0)
+sum show
+same kernel
+logmark
+key 08 01
+expectsince document: closed
+wait 500

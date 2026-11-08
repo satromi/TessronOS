@@ -18,7 +18,7 @@
  *	  manager	usbman.c: the controllers, the task that serves them,
  *			the tree of devices, what is plugged in and taken out;
  *			usbcore.c: enumeration and the standard requests
- *	  controller	xhci.c, behind the operations of USBHC_OPS
+ *	  controller	xhci.c, dwc2.c, behind the operations of USBHC_OPS
  *
  *	One lock, the manager's, is held by whatever talks to a device or
  *	changes what is attached: the manager's task while it serves the
@@ -241,12 +241,22 @@ typedef struct {
 	ER	(*ep_reset)( USBHC *hc, USBDEV *dev, UB ep );
 	ER	(*port_warm_reset)( USBHC *hc, INT port );
 	void	(*port_power)( USBHC *hc, INT port );
+	/*
+	 * The machine asleep (x64): the controller stopped with its state
+	 * saved, and started again. Resume answers E_OK when every device is
+	 * as it was, E_IO when the controller had to start from nothing and
+	 * the devices are to be let go and found again. NULL on a controller
+	 * of a machine that does not sleep.
+	 */
+	ER	(*pm_suspend)( USBHC *hc );
+	ER	(*pm_resume)( USBHC *hc );
 } USBHC_OPS;
 
 struct usb_hc {
 	CONST USBHC_OPS *ops;
 	INT	index;		/* its place among the controllers */
 	UINT	intno;		/* the interrupt it raises, 0 when polled */
+	BOOL	poll_too;	/* served at intervals even with an interrupt: endpoints software schedules */
 	UB	irqkind;	/* how: PCI_IRQ_* of ts_pcie_irq_alloc, 0 polled */
 	BOOL	irq_silent_told;
 	volatile UW	nirq;	/* the interrupts it raised */
@@ -281,6 +291,27 @@ IMPORT ER knl_xhci_attach( UBINT regs, UD size, UD mmio, UINT intno,
 
 /* The interrupt of a controller that has one, from the board's code */
 IMPORT void knl_xhci_inthdr( UINT intno );
+
+/* ---------------------------------------------------------------- dwc2.c */
+
+/*
+ * The controller of the Raspberry Pi's USB-C port. knl_dwc2_find answers E_OK
+ * when the command line or the device tree says to use it; otherwise, unless
+ * told not to, knl_dwc2_probing is TRUE until the manager's task, calling
+ * knl_dwc2_probe_step at intervals, has found a device there (TRUE with *out)
+ * or put the block back as it was.
+ */
+#define DWC2_PROBE_STEP_MS	50
+IMPORT ER   knl_dwc2_find( ID flgid, USBHC **out );
+IMPORT BOOL knl_dwc2_probing( void );
+IMPORT BOOL knl_dwc2_probe_step( USBHC **out );
+
+/* ---------------------------------------------------------------- usbdma.c */
+
+IMPORT void *knl_usb_pages_alloc( INT order, UD *p_bus );
+IMPORT void knl_usb_pages_free( void *page, INT order );
+/* What a bus address of these pages is physically, for a controller on another bus */
+IMPORT UD   knl_usb_bus_pa( UD bus );
 
 /* ---------------------------------------------------------------- usbman.c */
 
@@ -327,6 +358,7 @@ IMPORT void knl_usb_ep_from_desc( USBEP *ep, USBDEV *dev, CONST UB *d,
 				  CONST UB *comp );
 IMPORT INT  knl_usb_dev_class( USBDEV *dev );
 IMPORT USBDEV *knl_usb_tt_hub( USBDEV *dev, INT *port );
+IMPORT USBDEV *knl_usb_hub_other_half( USBDEV *hub );
 
 /* ---------------------------------------------------------------- hub.c */
 
@@ -387,6 +419,9 @@ IMPORT BOOL knl_uusb_active( void );
 IMPORT ER   knl_usb_reset_device( USBDEV *dev );	/* usbcore.c, with the lock held */
 
 /* ---------------------------------------------------------------- uvc.c */
+IMPORT BOOL knl_bt_match( USBDEV *dev );	/* ../bt/bt.c */
+IMPORT ER   knl_bt_attach( USBDEV *dev );
+IMPORT void knl_bt_detach( USBDEV *dev );
 IMPORT BOOL knl_uvc_match( USBDEV *dev );
 IMPORT ER   knl_uvc_attach( USBDEV *dev );
 IMPORT void knl_uvc_detach( USBDEV *dev );

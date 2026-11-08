@@ -72,6 +72,9 @@ struct ts_surface {
    int damage[TS_DAMAGE_MAX * 4]; /* x, y, w, h from the top */
    int ndamage;                   /* 0: find what changed */
    struct dri_image *back;        /* the V3D's: a window's back buffer */
+   int sent, put_er;              /* the rectangles the last frame sent, and what that answered */
+   unsigned frames, same;         /* GPU frames so far, and how many in a row read back as the one before */
+   uint32_t last_sum;
 };
 
 static struct ts_surface *
@@ -206,7 +209,9 @@ ts_put_image2(struct dri_drawable *draw, int op, int x, int y, int w, int h,
       if (top >= 0)
          ts_add_band(rects, &n, x0, x1 - x0, top, y1);
    }
-   if (n > 0 && ts_gl_win_put(ts->window, rects, n) < 0) {
+   ts->sent = n;
+   ts->put_er = 0;
+   if (n > 0 && (ts->put_er = ts_gl_win_put(ts->window, rects, n)) < 0) {
       /* a new surface since (the window changed size): taken at the next frame */
       memset(&ts->ws, 0, sizeof(ts->ws));
    }
@@ -284,11 +289,29 @@ ts_image_get_buffers(struct dri_drawable *driDrawable, unsigned int format,
          }
       }
       if (!ts->back) {
+         int fd = -1;
+
+         /*
+          * The buffer the window system is handed: made shareable, and
+          * exported once (a descriptor asked for and closed again), so
+          * that the driver takes it as a buffer of another's from now
+          * on. A buffer of the driver's own would be moved to new memory
+          * at the first swap's flush, to be made fit for sharing, while
+          * the state the frame's draws were set up with still names the
+          * old one: they would draw there from the second frame on.
+          */
          ts->back = dri_create_image(dri2_dpy->dri_screen_render_gpu,
                                      dri2_surf->base.Width, dri2_surf->base.Height,
-                                     dri2_surf->visual, NULL, 0, __DRI_IMAGE_USE_LINEAR, NULL);
+                                     dri2_surf->visual, NULL, 0,
+                                     __DRI_IMAGE_USE_SHARE | __DRI_IMAGE_USE_LINEAR |
+                                     __DRI_IMAGE_USE_BACKBUFFER, NULL);
          if (!ts->back)
             return 0;
+         if (dri2_query_image(ts->back, __DRI_IMAGE_ATTRIB_FD, &fd) && fd >= 0)
+            close(fd);
+         else
+            ts_gl_log("egl: the window's back buffer could not be exported; "
+                      "the driver may move it at the first swap\n");
       }
       if (buffer_mask & __DRI_IMAGE_BUFFER_BACK) {
          buffers->image_mask |= __DRI_IMAGE_BUFFER_BACK;
@@ -473,6 +496,42 @@ ts_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw)
  * from this one. When the window changed size, the buffer follows at
  * the next frame.
  */
+/*
+ * What the GPU's frame held, for the record: a sum of its pixels, how
+ * many are not black, the rectangles sent to the window. Told for the
+ * first frames, every 500th, and once the frame has read back the same
+ * 30 times in a row, so that a frame the GPU stopped drawing is told
+ * apart from one drawn but not shown.
+ */
+static void
+ts_frame_note(struct ts_surface *ts, const char *px, int w, int h, int stride)
+{
+   uint32_t sum = 2166136261u, first = 0;
+   int lit = 0;
+   char line[200];
+
+   for (int r = 0; r < h; r++) {
+      const uint32_t *s = (const uint32_t *)(px + (size_t)r * stride);
+      for (int i = 0; i < w; i++) {
+         uint32_t p = s[i] & 0x00ffffff;
+         sum = (sum ^ p) * 16777619u;
+         if (p != 0)
+            lit++;
+      }
+   }
+   if (w > 0 && h > 0)
+      first = *(const uint32_t *)(px + (size_t)(h / 2) * stride + (size_t)(w / 2) * 4);
+   ts->frames++;
+   ts->same = (ts->frames > 1 && sum == ts->last_sum) ? ts->same + 1 : 0;
+   ts->last_sum = sum;
+   if (ts->frames <= 8 || ts->frames % 500 == 0 || ts->same == 30) {
+      snprintf(line, sizeof(line), "egl: frame %u (%dx%d): sum %08x, %d of %d pixels not black, centre %08x, "
+               "%d rects sent (%d), the same as the one before %u times in a row\n",
+               ts->frames, w, h, sum, lit, w * h, first, ts->sent, ts->put_er, ts->same);
+      ts_gl_log(line);
+   }
+}
+
 static EGLBoolean
 ts_gpu_swap_with_damage(_EGLDisplay *disp, _EGLSurface *draw, const EGLint *rects,
                         EGLint n_rects)
@@ -504,6 +563,7 @@ ts_gpu_swap_with_damage(_EGLDisplay *disp, _EGLSurface *draw, const EGLint *rect
          ts->ndamage = n_rects;
       }
       ts_put_image2(NULL, __DRI_SWRAST_IMAGE_OP_SWAP, 0, 0, w, h, stride, px, ts);
+      ts_frame_note(ts, px, w, h, stride);
       ts->ndamage = 0;
       dri2_unmap_image(dctx->dri_context, ts->back, map_data);
    }

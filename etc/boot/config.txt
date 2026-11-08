@@ -1,7 +1,6 @@
 # TessronOS (Raspberry Pi 5, Compute Module 5) — docs/tessronos/03-platform.md 3.2・3.5
 kernel=tessronos.img
 kernel_address=0x200000
-device_tree=bcm2712-rpi-5-b.dtb
 enable_uart=1
 uart_2ndstage=1
 pciex4_reset=0

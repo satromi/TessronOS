@@ -24,6 +24,10 @@
  *	the wells again, which wakes the GT out of RC6, waits for the
  *	acknowledgements and unparks it before the registers are touched.
  *	With RC6 off (cmdline.txt "igtrc6=0") the wells are never let go.
+ *	The GT is not parked while an engine holds a process's context:
+ *	the task first queues a job of the kernel's context on that engine
+ *	(igt_to_kernel), so that what RC6 saves and brings back is never
+ *	the context of a process that may end meanwhile.
  *
  *	RC6. The timers and thresholds of RC6 and of the render and media
  *	power gating are set as the 9th generation wants them. On this
@@ -433,6 +437,18 @@ EXPORT void igt_pm_tick( void )
 		}
 	}
 	if ( knl_igt.pm_ready && !knl_igt.parked && knl_igt.fw_users == 0 && knl_igt.active < 0
+	  && igt_now_us() - knl_igt.fw_idle_since >= IDLE_US && igt_holds_user() ) {
+		/*
+		 * Not parked on a process's context: RC6 would save it and bring
+		 * it back, after its process may have ended. The task gives the
+		 * engine the kernel's context first, and the GT is parked once
+		 * that job is over and the GT idle again.
+		 */
+		if ( !knl_igt.want_kernel ) {
+			knl_igt.want_kernel = TRUE;
+			wake = TRUE;
+		}
+	} else if ( knl_igt.pm_ready && !knl_igt.parked && knl_igt.fw_users == 0 && knl_igt.active < 0
 	  && igt_now_us() - knl_igt.fw_idle_since >= IDLE_US ) {
 		park();
 		if ( !knl_igt.fw_always ) {
@@ -515,13 +531,22 @@ LOCAL void pm_task( INT stacd, void *exinf )
 		UINT	imask;
 		UW	ev, rc6;
 		UD	jobs, now;
+		BOOL	want;
 
 		(void)tk_slp_tsk(1000);
 		ISpinLock(&knl_igt.lock, &imask);
 		ev = knl_igt.pm_iir;
 		knl_igt.pm_iir = 0;
+		want = knl_igt.want_kernel;
+		knl_igt.want_kernel = FALSE;
 		ISpinUnlock(&knl_igt.lock, &imask);
 		if ( ev != 0 ) rps_step(ev);
+		if ( want ) igt_to_kernel();
+		if ( knl_igt.dead != NULL ) {
+			tk_loc_mtx(knl_igt.mtx, TMO_FEVR);
+			igt_vm_reap();
+			tk_unl_mtx(knl_igt.mtx);
+		}
 		if ( rc6_bad ) {
 			rc6_bad = FALSE;
 			tm_printf((UB *)"igt: power: the context RC6 saved was found corrupted (RC6_CTX_INFO 0): "
@@ -536,6 +561,9 @@ LOCAL void pm_task( INT stacd, void *exinf )
 				  "%ld forcewake kicks, %ld stuck\n", line, jobs - jobs_seen,
 				  (UD)(UW)( rc6 - rc6_last ) * 128 / 1000 / ( ( now - t_last ) / 1000 ),
 				  ( now - t_last ) / 1000000, knl_igt.n_pm_irq, knl_igt.n_fw_kick, knl_igt.n_fw_stuck);
+			tm_printf((UB *)"igt: contexts: %ld switches to the kernel's context; %ld spaces of ended processes "
+				  "kept while an engine held them, %ld freed after it left them; %ld images read whole\n",
+				  knl_igt.n_to_kernel, knl_igt.n_held, knl_igt.n_reaped, knl_igt.n_force);
 			rc6_last = rc6;
 			jobs_seen = jobs;
 			t_last = now;
@@ -693,6 +721,26 @@ EXPORT void igt_pm_start( void )
 		  mhz(knl_igt.f_last), ( ( igt_rd(RPSTAT1) >> 23 ) & 0x1ff ) * 50 / FREQ_SCALE, igt_rd(RPSTAT1),
 		  igt_rd(RP_CONTROL), igt_rd(PMINTRMSK), igt_rd(GT_IER(2)), igt_rd(GT_IMR(2)), knl_igt.pm_tsk);
 	knl_igt.pm_ready = TRUE;
+}
+
+/*
+ * After S3: what igt_pm_start set up, set up again; its task goes on
+ * running. The caller holds the wells by igt_fw_init's reference.
+ */
+EXPORT void igt_pm_again( void )
+{
+	UINT	imask;
+
+	if ( knl_igt.rc6_on ) rc6_start();
+	if ( knl_igt.rps_on ) rps_start();
+	ISpinLock(&knl_igt.lock, &imask);
+	if ( knl_igt.rps_on ) {
+		knl_igt.parked = FALSE;
+		unpark();
+	}
+	knl_igt.fw_always = !knl_igt.rc6_on;
+	knl_igt.fw_idle_since = igt_now_us();
+	ISpinUnlock(&knl_igt.lock, &imask);
 }
 
 #endif /* X64 */

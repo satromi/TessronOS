@@ -1,0 +1,34 @@
+{
+  "name": "原紙箱",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-11-06T00:00:00Z",
+  "updateDate": "2026-11-06T00:00:00Z",
+  "accessDate": "2026-11-06T00:00:00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 1,
+  "editable": true,
+  "deletable": true,
+  "readable": true,
+  "maker": "TessronOS",
+  "window": {
+    "pos": {
+      "x": 893,
+      "y": 35
+    },
+    "width": 200,
+    "height": 600,
+    "backgroundColor": "#ffffff"
+  },
+  "applist": {
+    "base-file-manager": {
+      "name": "原紙箱",
+      "defaultOpen": true
+    },
+    "virtual-object-list": {
+      "name": "仮身一覧",
+      "defaultOpen": false
+    }
+  }
+}

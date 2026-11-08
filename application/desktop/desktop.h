@@ -34,6 +34,7 @@
 #include <ts/tad.h>
 #include <ts/dtreq.h>
 #include <ts/tadview.h>
+#include <ts/docedit.h>
 #include <ts/mn.h>
 #include <ts/ob.h>
 #include <ts/print.h>
@@ -62,12 +63,20 @@ typedef struct dtwin {
 	BOOL		dirty;
 
 	/*
-	 * A window whose page is made here rather than read: the 原紙箱's
-	 * list of the templates this system's programs start from. Nothing
-	 * in it is changed or saved; what is carried out of it is a new
-	 * object made from the template.
+	 * A window whose page is made here rather than read: the 小物箱's
+	 * list of the accessories, or a tool's. Nothing in it is changed
+	 * or saved.
 	 */
 	BOOL		sealed;
+
+	/* a 小物箱's: its page follows the accessories, and it has 小物管理 */
+	BOOL		accbox;
+
+	/*
+	 * A 原紙箱's: an ordinary box of links, but what is carried out of
+	 * it to another window is a new object made from the template
+	 */
+	BOOL		basebox;
 
 	/*
 	 * The first window while the disk of its object is out: the record
@@ -120,7 +129,6 @@ typedef struct dtwin {
 	BOOL		paper_frame;
 	BOOL		show_hidden;
 	T_TAD		*xrec;
-	BOOL		xml_edited;
 
 	/*
 	 * A piece of text in a figure being edited where it stands. The
@@ -134,14 +142,13 @@ typedef struct dtwin {
 	T_TADNODE	*tb_node;
 
 	/*
-	 * A document's caret and the other end of its selection, each a
-	 * paragraph and a count into it (dtdoc.c); the same place when
-	 * nothing is selected. 'typing' is set while what is being done
-	 * is letters typed one after another, which are taken back as one.
+	 * What the editor of text keeps for a document (include/ts/
+	 * docedit.h): its caret and the other end of its selection, each a
+	 * paragraph and a count into it, the same place when nothing is
+	 * selected, and whether letters are being typed one after another,
+	 * which are taken back as one.
 	 */
-	INT		cpara, cpos;
-	INT		apara, apos;
-	BOOL		typing;
+	T_DDED		dd;
 
 	/*
 	 * Paragraphs of the document still laid only as a guess, to be laid
@@ -284,6 +291,8 @@ IMPORT void   dt_tray_taken( void );
 IMPORT INT    dt_tray_pictures( CONST TS_UUID *id, CONST T_TAD *rec, T_TAD *frag );
 IMPORT T_TAD *dt_list_record( CONST char *title, CONST TS_UUID *ids,
 			      CONST char *CONST *names, INT n );
+IMPORT T_TAD *dt_list_record_dim( CONST char *title, CONST TS_UUID *ids,
+				  CONST char *CONST *names, CONST BOOL *dim, INT n );
 IMPORT DTWIN *dt_open_made( T_TAD *rec, CONST char *title, UINT tool,
 			    CONST T_DPRECT *o );
 IMPORT void   dt_remade( DTWIN *d, T_TAD *rec );
@@ -294,6 +303,10 @@ IMPORT void   dt_draw( DTWIN *d );
 IMPORT void   dt_draw_all( void );
 IMPORT CONST char *dt_base_name( CONST TS_UUID *target );
 IMPORT void   dt_open_vobj( DTWIN *from, CONST T_VOBJ *v );
+/* Above 0 while what is opened is opened by no act of a person: it does not take the keys */
+IMPORT INT    dt_opens_quiet;
+/* Something was let go on a window of the desktop's: it comes forward with the keys */
+IMPORT void   dt_drop_keys( DTWIN *t );
 IMPORT ER     dt_open_as( DTWIN *from, CONST T_VOBJ *v, CONST UB *app );
 IMPORT void   dt_exec( DTWIN *from, CONST T_VOBJ *v, INT index );
 
@@ -304,6 +317,19 @@ IMPORT void   dt_exec( DTWIN *from, CONST T_VOBJ *v, INT index );
  * window, and nothing else is to be done with the links.
  */
 IMPORT BOOL   dt_drop_links( DTWIN *d, INT sx, INT sy, CONST T_VOBJ *v, INT n );
+/* the same, put at ax, ay of the screen: the corner of the outline carried, let go at sx, sy */
+IMPORT BOOL   dt_drop_links_at( DTWIN *d, INT sx, INT sy, INT ax, INT ay, CONST T_VOBJ *v, INT n );
+/*
+ * The same as a move: the program is asked first whether it takes them
+ * there (wm_obj_ask), and only when it says it does are they dropped;
+ * once the drop is given, gone(d, v, n) takes them out of d. A program
+ * that is not asked is offered them as dt_drop_links_at does, and they
+ * stay; so do they with gone NULL (a copy). dt_drop_move_poll follows
+ * the question, each turn of the loop.
+ */
+IMPORT BOOL   dt_drop_move( DTWIN *d, INT sx, INT sy, INT ax, INT ay, CONST T_VOBJ *v, INT n,
+			    void (*gone)( DTWIN *d, CONST T_VOBJ *v, INT n ) );
+IMPORT void   dt_drop_move_poll( void );
 
 /* The desktop run in a task of its own, and stopped again (the tests) */
 IMPORT ER     dt_start( void );
@@ -311,6 +337,9 @@ IMPORT void   dt_quit( void );
 #if USE_KTEST
 /* The tests stop the desktop's loop: 1 waits there, 2 runs on the spot, 0 lets it go on */
 IMPORT volatile INT dt_test_stall;
+#endif
+#if USE_KTEST || defined(USE_UITEST)
+IMPORT UW dt_test_loops( void );
 #endif
 
 
@@ -332,12 +361,13 @@ typedef struct {
 	TS_UUID	uuid;			/* the program object */
 	INT	nbase;
 	TS_UUID	base[DT_PROG_BASE];	/* its templates (原紙) */
-	BOOL	builtin;		/* carried in the desktop */
+	BOOL	builtin;		/* carried in the desktop: not replaced or deleted */
 	BOOL	menu;			/* an accessory shown in the 小物 menu */
 	UB	version[DT_VER_MAX];	/* R1.000; empty when its metadata says none */
 	UB	types[DT_TYPES_MAX];	/* the kinds of object 実行 offers it for (fileTypes): "xtad,tad" */
 	INT	nalias;
 	UB	alias[DT_PROG_ALIAS][DT_PROG_ID];	/* the ids it had before ("aliases"): an applist naming one opens it */
+	BOOL	open_link;		/* "openArg": "link": started with the link it was opened from (T_PRCOPEN) */
 } DTPROG;
 
 IMPORT ER     dt_prog_start( void );
@@ -350,11 +380,11 @@ IMPORT INT    dt_prog_list( UINT kind, CONST DTPROG **out, INT max );
 IMPORT INT    dt_prog_count( UINT kind );		/* how many dt_prog_list has to give */
 /*
  * The programs an object is offered with: one list, which 実行 of the
- * link's menu and 付箋指定 of 管理情報 both show. First those its applist
- * names (the link's own applist when the object has none), in its order,
- * then the programs that say they open an object of its kind (fileTypes:
- * "xtad" for xmlTAD, else the extension of the file it was taken in
- * from). Each program once, under the id and name the system has it by.
+ * link's menu and 付箋指定 of 管理情報 both show. Those its applist names
+ * (the link's own applist when the object has none), in its order; when
+ * neither names any, the programs that say they open an object of its
+ * kind (fileTypes: "xtad" for xmlTAD, else the extension of the file it
+ * was taken in from). Each program once, under the id and name the system has it by.
  * dt_app_list with out NULL answers how many entries are room enough;
  * else how many it gave, and *p_dflt (when not NULL) the place of the
  * one the object opens with, -1 none.
@@ -368,9 +398,13 @@ typedef struct {
 IMPORT INT    dt_app_list( CONST T_VOBJ *v, DTAPP *out, INT max, INT *p_dflt );
 /* DT_RQ_APPS: an entry of that list for a program's link, as ts/dtreq.h says */
 IMPORT ER     dt_apps_req( CONST T_DTREQ *rq, T_DTANS *an );
+/* DT_RQ_LINK_STATE: whether a program's link's object is open, and can be fixed to a program */
+IMPORT ER     dt_link_state_req( CONST T_DTREQ *rq, T_DTANS *an );
 IMPORT T_TAD *dt_prog_page( UINT kind );
 IMPORT INT    dt_prog_roots( TS_UUID *ids, INT max );
 IMPORT CONST char *dt_prog_base_name( CONST TS_UUID *target );
+IMPORT BOOL   dt_base_box( TS_UUID *p_box );
+IMPORT void   dt_base_box_put( CONST TS_UUID *prog, BOOL add );
 /*
  * A program run. One that is a process is started by a task of its own
  * (dtprog.c): E_OK means it was handed over, and the desktop goes on
@@ -400,8 +434,23 @@ IMPORT void   dt_prog_reread( void );
 IMPORT D      dt_ver_num( CONST UB *v );
 #define DT_PKG_NEW	DT_HOW_NEW
 #define DT_PKG_UPDATED	DT_HOW_UPDATED
-IMPORT ER     dt_pkg_install( CONST TS_UUID *pkg, BOOL force, TS_UUID *p_prog, UINT *p_how );
+IMPORT ER     dt_pkg_admin( ID pid, CONST TS_UUID *win );
+IMPORT INT    dt_admin_panels( void );
+IMPORT ER     dt_pkg_install( CONST TS_UUID *pkg, BOOL force, ID pid, CONST TS_UUID *win,
+			      TS_UUID *p_prog, UINT *p_how );
 IMPORT ER     dt_prog_remove( CONST TS_UUID *prog );
+IMPORT ER     dt_prog_drop( CONST TS_UUID *prog );
+IMPORT BOOL   dt_prog_read( CONST TS_UUID *uuid, DTPROG *p );
+
+/* dtacc.c: the order of the accessories and which of them 小物 lists (design 11.2.1) */
+IMPORT INT    dt_acc_menu_list( CONST DTPROG ***p_acc );
+IMPORT T_TAD *dt_acc_page( void );
+IMPORT void   dt_acc_sync( void );
+IMPORT void   dt_acc_place( CONST TS_UUID *target, CONST TS_UUID *before );
+IMPORT void   dt_acc_menu_state( ID mid, BOOL on_vobj, CONST T_VOBJ *v );
+IMPORT BOOL   dt_acc_menu_do( CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ *v );
+IMPORT void   dt_acc_boxes_remake( void );
+IMPORT INT    dt_acc_pos( CONST UB *id, INT *p_n, BOOL *p_show );
 
 /*
  * dtsysup.c: the system updated from its package (design 11.8).
@@ -426,7 +475,8 @@ IMPORT ER     dt_sysup_need( CONST TS_UUID *pkg, UD *p_need, UD *p_free );
 IMPORT void   dt_sysup_test( CONST char *root, INT cut );
 
 /* A TADjs plugin directory taken in as a program and its template (design 18.12) */
-IMPORT ER     dt_plugin_install( CONST TS_UUID *dir, BOOL force, TS_UUID *p_prog, UINT *p_how );
+IMPORT ER     dt_plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UUID *win,
+				 TS_UUID *p_prog, UINT *p_how );
 
 /* dtres.c: the faces and the pictures of the ground as objects (design 18.18) */
 IMPORT INT    dt_res_faces( void );
@@ -469,15 +519,41 @@ IMPORT void   dt_req_applist( CONST T_DTREQ *rq, T_VOBJ *v );	/* the applist a p
  * is put in the answer.
  */
 IMPORT ER     dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an );
+/* The link a window was opened from: its view written back, a copy put with it (DT_RQ_LINK_VIEW, DT_RQ_SAVE_NEW) */
+IMPORT ER     dt_link_view( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UUID *target,
+			    INT sx, INT sy, CONST char *vm, INT wrap, INT zoom );
+IMPORT ER     dt_save_new_of( DTWIN *ask, CONST TS_UUID *id, CONST TS_UUID *parent,
+			      CONST TS_UUID *parent_vobj, CONST TS_UUID *target, TS_UUID *p_new );
 IMPORT DTWIN *dt_host_of( CONST TS_UUID *win );
+/*
+ * A link of a program's window that a window was opened from (DT_RQ_OPEN
+ * with DT_F_LINK): dt_plink_opening says, while DT_RQ_OPEN opens v, the
+ * object whose record holds it; dt_plink_has whether link vobjid of
+ * parent is such a one, pointing at target when given; dt_plink_add
+ * tells the program a link to copy goes with it (新たな実身に保存).
+ */
+IMPORT BOOL   dt_plink_opening( CONST T_VOBJ *v, TS_UUID *p_parent );
+IMPORT BOOL   dt_plink_has( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UUID *target );
+IMPORT ER     dt_plink_add( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UUID *copy );
 
 /* dtinfo.c: 管理情報 of the real object a link points at */
 IMPORT void   dt_real_info( DTWIN *d, CONST T_VOBJ *v );
+
+#ifdef USE_TESTAGENT
+/* dttagent.c: the same lines taken over the network (make TESTAGENT=1) */
+IMPORT void   dt_tagent_start( void );
+IMPORT ER     dt_tagent_power( INT how );
+IMPORT void   dt_uitest_line( CONST char *s, void (*sink)( CONST char *answer ) );
+#endif
 
 /* dtuitest.c: the desktop driven over the second serial port (make UITEST=1) */
 IMPORT void   dt_uitest_start( void );
 IMPORT void   dt_uitest_poll( void );
 IMPORT void   dt_uitest_idle( void );
+#ifdef USE_UITEST
+IMPORT BOOL   dt_ut_as_process( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v );	/* figproc 1, docproc 1 */
+IMPORT BOOL   dt_ut_as_kernel( CONST DTPROG *p );					/* figproc kernel, docproc kernel */
+#endif
 
 /* dtdoc.c: the paragraphs of documents laid while the desktop has nothing else to do */
 IMPORT BOOL   dd_settle_pending( void );
@@ -599,6 +675,23 @@ IMPORT void   dt_pn_done( DTWIN *d, INT pid );
 IMPORT INT    dt_pn_value( INT pid, INT num );
 IMPORT void   dt_colour_text( UW col, UB *out );
 IMPORT BOOL   dt_colour_of( CONST UB *s, UW *p_col );
+
+/*
+ * A colour asked for: the pop-up of dtcolour.c, over 'owner', whose keys
+ * become the pop-up's, at the pointer or under part 'num' of panel 'pid'.
+ * TRUE with the colour in *io when it was kept.
+ */
+IMPORT BOOL   dt_pick_colour( INT owner, UW *io );
+IMPORT BOOL   dt_pick_colour_part( INT owner, INT pid, INT num, UW *io );
+IMPORT BOOL   dt_pick_colour_at( INT owner, UW *io, INT x, INT y );
+
+/*
+ * A part of a panel showing a colour; pressed in dt_pn_run, the colour
+ * is chosen with dt_pick_colour and the part shows what was chosen.
+ * wm_panel_colour reads it when the panel has ended.
+ */
+#define DT_PN_COLOUR_ANS	( WM_ANS_ACT + 0x1000 )
+IMPORT T_WMPART *dt_pn_colour( T_WMPANEL *p, INT num, INT l, INT t, INT w, INT h, UW col );
 IMPORT BOOL   dt_ask_name( DTWIN *d, CONST char *prompt, CONST UB *start,
 			   UB *out, INT max );
 IMPORT BOOL   dt_confirm( DTWIN *d, CONST char *l1, CONST char *l2,
@@ -609,7 +702,7 @@ IMPORT BOOL   dt_ask_text( DTWIN *d, CONST char *p1, CONST char *p2,
 			   CONST UB *start, UB *out, INT max, CONST char *ok );
 
 /* A panel of labelled boxes, what each holds coming in and going out */
-#define DT_FIELD_MAX	32
+#define DT_FIELD_MAX	DE_FIELD_MAX
 IMPORT BOOL   dt_fields_form( DTWIN *d, CONST char *title, INT n,
 			      CONST char *CONST *labels,
 			      CONST char *CONST *hints,
@@ -620,15 +713,11 @@ IMPORT INT    dt_list_form( DTWIN *d, CONST char *title,
 			    CONST char *CONST *names, INT n, INT start );
 
 /* 用紙設定: sizes in tenths of a millimetre */
-typedef struct {
-	INT	w, h;
-	INT	top, bottom, left, right;
-	INT	imposition;		/* 0 片面, 1 見開き */
-} T_DTPAPER;
-#define DT_PAPER_CANCEL	0
-#define DT_PAPER_SET	1
-#define DT_PAPER_STD	2		/* 標準設定 */
-#define DT_PAPER_HF	3		/* ヘッダ/フッタ, and back to the form after */
+typedef T_DEPAPER	T_DTPAPER;
+#define DT_PAPER_CANCEL	DE_PAPER_CANCEL
+#define DT_PAPER_SET	DE_PAPER_SET
+#define DT_PAPER_STD	DE_PAPER_STD
+#define DT_PAPER_HF	DE_PAPER_HF
 IMPORT INT    dt_paper_form( DTWIN *d, T_DTPAPER *pp );
 
 /*
@@ -688,9 +777,9 @@ typedef struct {
 IMPORT BOOL   dt_search_form( DTWIN *d, T_DTQUERY *q );
 
 /* 検索/置換: what was pressed */
-#define DT_FIND_NEXT	10
-#define DT_FIND_REPLACE	11
-#define DT_FIND_ALL	12
+#define DT_FIND_NEXT	DE_FIND_NEXT
+#define DT_FIND_REPLACE	DE_FIND_REPLACE
+#define DT_FIND_ALL	DE_FIND_ALL
 IMPORT INT    dt_find_form( DTWIN *d, UB *what, UB *with, INT max,
 			    BOOL *p_regex );
 
@@ -710,6 +799,8 @@ IMPORT void   dd_sel_copy( void );
 IMPORT void   dd_sel_release( INT sx, INT sy );
 /* Letters put into a text at a place on the screen (letters a program carried out) */
 IMPORT ER     dd_text_drop( DTWIN *t, INT sx, INT sy, CONST UB *s, INT n );
+IMPORT ER     dd_frag_drop( DTWIN *t, INT sx, INT sy, CONST T_TAD *frag );
+IMPORT ER     dd_frag_into_fig( DTWIN *t, INT sx, INT sy, CONST T_TAD *frag, INT w, INT h, INT gx, INT gy );
 
 /* The text input port: かな漢字変換 in the text windows (dttip.c) */
 IMPORT BOOL   tip_mode_key( DTWIN *d, UINT key, UINT mods );
@@ -737,6 +828,7 @@ IMPORT void   dd_link_take( DTWIN *d, INT which, CONST T_DPRECT *box, INT x, INT
 IMPORT BOOL   dd_link_carrying( void );
 IMPORT void   dd_link_follow( INT sx, INT sy );
 IMPORT void   dd_link_release( INT sx, INT sy );
+IMPORT BOOL   dd_link_picked( DTWIN *d, T_VOBJ *v );	/* the link picked alone */
 IMPORT void   dd_look( DTWIN *d, INT cmd, BOOL on );
 IMPORT void   dd_font( DTWIN *d, CONST char *attr, CONST UB *value );
 IMPORT void   dd_pick_all( DTWIN *d );
@@ -752,6 +844,7 @@ IMPORT BOOL   df_is( CONST DTWIN *d );
 IMPORT BOOL   df_takeable( CONST DTWIN *d, INT i );
 IMPORT void   df_shift( DTWIN *d, INT i, INT dx, INT dy );
 IMPORT void   df_resize( DTWIN *d, INT i, CONST T_DPRECT *nb );
+IMPORT void   df_resize_flip( DTWIN *d, INT i, CONST T_DPRECT *nb, UINT flip );	/* turned over too (FE_SIZE_FLIP_*) */
 IMPORT INT    df_picked( CONST DTWIN *d );
 IMPORT void   df_delete_picked( DTWIN *d );
 IMPORT INT    df_copy_into( DTWIN *d, T_TAD *frag );
@@ -761,6 +854,7 @@ IMPORT void   df_pick_pasted( DTWIN *d );
 IMPORT void   df_front( DTWIN *d, BOOL front );
 IMPORT BOOL   df_tool_press( DTWIN *d, INT x, INT y, UD when, UINT mods );
 IMPORT BOOL   df_drawing_now( void );
+IMPORT void   df_drawing_over( DTWIN *d );	/* a shape being drawn in d, inverted over it */
 IMPORT void   df_tool_follow( INT sx, INT sy, UINT mods );
 IMPORT void   df_tool_release( void );
 IMPORT BOOL   df_tool_key( DTWIN *d, UINT code );
@@ -778,6 +872,9 @@ IMPORT void   df_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj,
 			  CONST T_VOBJ *v );
 IMPORT void   df_whole_groups( DTWIN *d );
 IMPORT void   df_attr_put( T_TAD *rec, T_TADNODE *nd, CONST char *name, INT v );
+struct t_fged;
+IMPORT void   df_ed_of( DTWIN *d, struct t_fged *e );
+IMPORT void   df_ed_back( struct t_fged *e );
 IMPORT void   df_points_put( T_TAD *rec, T_TADNODE *nd, CONST T_DPPOINT *pt,
 			     INT n );
 IMPORT void   df_adopt( DTWIN *d, T_TADNODE *nd );
@@ -811,8 +908,19 @@ IMPORT void   df_end_follow( INT sx, INT sy );
 IMPORT void   df_end_release( void );
 IMPORT void   df_tool_select( void );
 
-/* dtfcanvas.c: the canvas, and the patterns */
-IMPORT void   df_canvas_new( DTWIN *d, INT l, INT t, INT r, INT b );
+/* A figure's window as the figure editor's code sees it (figtool.h) */
+struct t_ftview;
+IMPORT void   df_view_of( DTWIN *d, struct t_ftview *v, struct t_fged *e );
+
+/*
+ * dtfcanvas.c: the canvas in a window of the desktop's; what the figure
+ * editor's code asks of the window for it (T_FTHOST)
+ */
+IMPORT ER     df_pic_get( struct t_ftview *v, CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h );
+IMPORT void   df_pic_done( struct t_ftview *v, CONST UW *px );
+IMPORT ER     df_pic_put( struct t_ftview *v, CONST UB *href, CONST UW *px, INT w, INT h );
+IMPORT BOOL   df_self_id( struct t_ftview *v, TS_UUID *id );
+IMPORT void   df_tell_view( struct t_ftview *v, CONST char *msg );
 IMPORT BOOL   df_canvas_press( DTWIN *d, INT fx, INT fy );
 IMPORT void   df_canvas_leave( void );
 IMPORT BOOL   df_canvas_painting( void );
@@ -822,16 +930,6 @@ IMPORT BOOL   df_canvas_active( void );
 IMPORT void   df_canvas_draw( DTWIN *d, INT gid, CONST T_DPRECT *page );
 IMPORT void   df_canvas_forget( DTWIN *d );
 
-/* 画材: what the canvas paints with, from the panel */
-#define DF_PAINT_PENCIL	0		/* 鉛筆 */
-#define DF_PAINT_BRUSH	1		/* 絵筆 */
-#define DF_PAINT_ERASER	2		/* 消しゴム */
-#define DF_PAINT_AIR	3		/* エアブラシ */
-#define DF_PAINT_POUR	4		/* 絵の具 */
-#define DF_PAINT_CUTTER	5		/* カッター */
-IMPORT INT    df_paint_tool( void );
-IMPORT INT    df_paint_size( void );
-IMPORT UW     df_paint_colour( void );
 IMPORT void   df_burn( DTWIN *d );
 IMPORT void   df_pattern_edit( DTWIN *d, INT pat );
 
@@ -991,6 +1089,16 @@ IMPORT void   ed_arrange( DTWIN *d, CONST T_ARRANGE *o );
 /* a link put into a window's record where the carried outline was let go */
 IMPORT void   ed_drop_link( DTWIN *d, DTWIN *t, CONST T_VOBJ *v );
 IMPORT BOOL   ed_place_link( DTWIN *t, INT sx, INT sy, CONST T_VOBJ *v );
+/*
+ * The same for the links of one carry put one after another: *p_first
+ * less than 0 for the first, which is kept to take back to and sets it
+ * to the count of links before it; for each after it, nothing more is
+ * kept and all put since are taken, as one carry between the desktop's
+ * windows changes and takes them
+ */
+IMPORT BOOL   ed_place_link_of( DTWIN *t, INT sx, INT sy, CONST T_VOBJ *v, INT *p_first );
+/* a closed link to a new object sized to the object's name; an opened one kept as it is */
+IMPORT void   ed_new_link_fit( T_VOBJ *c );
 
 /* carrying, sizing, and drawing a band round what to pick */
 IMPORT BOOL   ed_press( DTWIN *d, INT x, INT y, BOOL add, UD when );

@@ -1,0 +1,478 @@
+# 保護のメニューの灰色 (design 11.3), for tools/ui_run.py. 画用紙 holding four closed links (xmlbig):
+# the first neither 固定化 nor 背景化, the second 固定化, the third 背景化, the fourth both. Opened in
+# turn with 仮身一覧 (the desktop's, then the process) and with 基本図形編集 (the desktop's, then the
+# process), each state is taken and the menu opened away from the links (600,500): 〈固定化〉
+# can be chosen when a link taken is not fixed, 〈固定解除〉 when one is, and 〈背景化〉〈背景解除〉
+# the same; with none taken, none of the four. What the menu set is said on the console as
+# "protect menu N" (1 固定化, 2 固定解除, 4 背景化, 8 背景解除): nothing taken 0, the first 5, the
+# second 6, the third 9, the fourth a, the second and third together (a band from 300,180 to
+# 200,250) f, all of them (Ctrl+A, which takes those 固定化 and 背景化 too) f. Esc puts the menu
+# away. Then everything is taken, the fixed link carried 100 down and across, and Delete: the
+# fixed one does not move and only the first link goes (the protection holds for what Ctrl+A
+# took); saved, record 0 of the desktop's and the process's must be the same.
+cabproc kernel
+figproc kernel
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" fixed="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="100" vobjright="180" vobjbottom="119" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" background="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="220" vobjtop="20" vobjright="380" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" fixed="true" background="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+click 700 650
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu 0
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 167 153
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu 5
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 167 193
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu 6
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 167 233
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu 9
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 357 153
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu a
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 700 650
+sync 600
+move 300 180
+down
+move 260 210
+wait 300
+move 200 250
+wait 300
+up
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu f
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 700 650
+sync 600
+key 04 01
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu f
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+key 04 01
+sync 600
+wait 700
+drag 167 193 267 293
+sync 600
+key 4C
+sync 600
+key 16 01
+sync 600
+sum show
+keep cab
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" fixed="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="100" vobjright="180" vobjbottom="119" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" background="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="220" vobjtop="20" vobjright="380" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" fixed="true" background="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+logmark
+pcab big
+expectsincein 60 cabinet: opened 画用紙
+wait 800
+click 700 650
+wait 700
+logmark
+click 600 500 1
+expectsince cabinet: protect menu 0
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 167 153
+wait 700
+logmark
+click 600 500 1
+expectsince cabinet: protect menu 5
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 167 193
+wait 700
+logmark
+click 600 500 1
+expectsince cabinet: protect menu 6
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 167 233
+wait 700
+logmark
+click 600 500 1
+expectsince cabinet: protect menu 9
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 357 153
+wait 700
+logmark
+click 600 500 1
+expectsince cabinet: protect menu a
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 700 650
+wait 700
+move 300 180
+down
+move 260 210
+wait 300
+move 200 250
+wait 300
+up
+wait 700
+logmark
+click 600 500 1
+expectsince cabinet: protect menu f
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 700 650
+wait 700
+key 04 01
+wait 700
+logmark
+click 600 500 1
+expectsince cabinet: protect menu f
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+key 04 01
+wait 700
+wait 700
+logmark
+drag 167 193 267 293
+wait 1000
+key 4C
+expectsince cabinet: deleted, 3 shapes
+logmark
+key 16 01
+expectsince cabinet: saved (0)
+sum show
+same cab
+key 08 01
+expect cabinet: closed
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" fixed="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="100" vobjright="180" vobjbottom="119" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" background="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="220" vobjtop="20" vobjright="380" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" fixed="true" background="true"/>
+xml </figure></tad>
+xmlbig
+apps big basic-figure-editor
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+click 700 650
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu 0
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 167 153
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu 5
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 167 193
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu 6
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 167 233
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu 9
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 357 153
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu a
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 700 650
+sync 600
+move 300 180
+down
+move 260 210
+wait 300
+move 200 250
+wait 300
+up
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu f
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 700 650
+sync 600
+key 04 01
+sync 600
+logmark
+click 600 500 1
+expectsince desktop: protect menu f
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+key 04 01
+sync 600
+wait 700
+drag 167 193 267 293
+sync 600
+key 4C
+sync 600
+key 16 01
+sync 600
+sum show
+keep fig
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" fixed="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="100" vobjright="180" vobjbottom="119" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" background="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="220" vobjtop="20" vobjright="380" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true" fixed="true" background="true"/>
+xml </figure></tad>
+xmlbig
+apps big basic-figure-editor
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙
+wait 800
+click 700 650
+wait 700
+logmark
+click 600 500 1
+expectsince figure: protect menu 0
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 167 153
+wait 700
+logmark
+click 600 500 1
+expectsince figure: protect menu 5
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 167 193
+wait 700
+logmark
+click 600 500 1
+expectsince figure: protect menu 6
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 167 233
+wait 700
+logmark
+click 600 500 1
+expectsince figure: protect menu 9
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 357 153
+wait 700
+logmark
+click 600 500 1
+expectsince figure: protect menu a
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 700 650
+wait 700
+move 300 180
+down
+move 260 210
+wait 300
+move 200 250
+wait 300
+up
+wait 700
+logmark
+click 600 500 1
+expectsince figure: protect menu f
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+click 700 650
+wait 700
+key 04 01
+wait 700
+logmark
+click 600 500 1
+expectsince figure: protect menu f
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+key 04 01
+wait 700
+wait 700
+logmark
+drag 167 193 267 293
+wait 1000
+key 4C
+expectsince figure: deleted, 3 shapes
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum show
+same fig
+key 08 01
+expect figure: closed
+wait 500

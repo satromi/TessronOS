@@ -1,0 +1,127 @@
+<tad version="1.0" encoding="UTF-8" filename="基本文章編集のデータボックス">
+<document>
+<p>基本文章編集のデータボックス</p>
+<p>プロセスの基本文章編集がウインドウの上に出すパネル。パネル2はできなかったことを知らせるパネル(文字1と2を文章編集が書き換える)。パネル3は〈検索/置換〉(文字1が検索文字列、2が置換文字列、スイッチ5が正規表現、ボタン101が取消、3が全置換、4が置換、102が次を検索)。パネル4は〈仮身化〉で新しい実身の名前を聞くパネル(文字1が聞くこと、文字2が名前、ボタン101が取消、102が設定)。パネル6は〈用紙設定〉(一覧1が用紙、文字2〜7が縦、横、上、下、左、右、選択スイッチ8と9が片面と見開き、ボタン92が標準設定、93がヘッダ/フッタ)。パネル8は1行の文字を聞くパネル(ルビ、文字サイズの数値指定。文字1が聞くこと、文字2が答え)。パネル9と10は名前の付いた欄を縦に並べたパネル(9は6欄でタブ書式設定、10は9欄でヘッダ/フッタ。文字61が題、文字1〜が欄、文字21〜が欄の名前、文字41〜が単位)。パネル11は名前の一覧から1つ選ぶパネル(段落間隔、書体の一覧。文字61が題、一覧1)。どれもデスクトップの文章編集のパネルと同じ部品を同じ位置に置き、プロセスの基本文章編集が使う。</p>
+</document>
+<databox>
+<panel num="2" rect="0,0,496,116" title="基本文章編集">
+<text num="1" x="26" y="36"> </text>
+<text num="2" x="26" y="60"> </text>
+<button num="102" rect="380,72,474,98" answer="ok" emph="true">了解</button>
+</panel>
+<panel num="3" rect="0,0,476,166" title="検索/置換">
+<text x="26" y="38">検索文字列</text>
+<box num="1" rect="118,16,454,42"></box>
+<text x="26" y="72">置換文字列</text>
+<box num="2" rect="118,50,454,76"></box>
+<switch num="5" rect="118,84,278,106" value="0">正規表現</switch>
+<button num="101" rect="22,122,102,148" answer="cancel">取消</button>
+<button num="3" rect="168,122,254,148">全置換</button>
+<button num="4" rect="264,122,350,148">置換</button>
+<button num="102" rect="360,122,454,148" emph="true">次を検索</button>
+</panel>
+<panel num="4" rect="0,0,396,128" title="仮身化">
+<text num="1" x="26" y="36"> </text>
+<box num="2" rect="22,46,374,72"></box>
+<button num="101" rect="192,84,278,110" answer="cancel">取消</button>
+<button num="102" rect="288,84,374,110" emph="true">設定</button>
+</panel>
+<panel num="6" rect="0,0,486,336" title="用紙設定">
+<text x="26" y="32">用紙:</text>
+<list num="1" rect="72,12,242,182"><name>A3</name><name>A4</name><name>A5</name><name>B4</name><name>B5</name><name>はがき</name><name>往復はがき</name><name>長形3号</name><name>寸法指定</name></list>
+<text x="262" y="32">縦:</text>
+<box num="2" rect="288,12,364,38"></box>
+<text x="372" y="32">mm</text>
+<text x="262" y="66">横:</text>
+<box num="3" rect="288,46,364,72"></box>
+<text x="372" y="66">mm</text>
+<text x="26" y="214">余白:</text>
+<text x="76" y="214">上:</text>
+<box num="4" rect="102,194,178,220"></box>
+<text x="186" y="214">mm</text>
+<text x="262" y="214">左:</text>
+<box num="6" rect="288,194,364,220"></box>
+<text x="372" y="214">mm</text>
+<text x="76" y="246">下:</text>
+<box num="5" rect="102,226,178,252"></box>
+<text x="186" y="246">mm</text>
+<text x="262" y="246">右:</text>
+<box num="7" rect="288,226,364,252"></box>
+<text x="372" y="246">mm</text>
+<text x="26" y="280">割付:</text>
+<choice num="8" rect="72,260,162,282" group="8" value="1">片面</choice>
+<choice num="9" rect="168,260,258,282" group="8" value="0">見開き</choice>
+<button num="101" rect="282,292,368,318" answer="cancel">取消</button>
+<button num="102" rect="378,292,464,318" emph="true">設定</button>
+<button num="92" rect="186,292,272,318">標準設定</button>
+<button num="93" rect="64,292,180,318">ヘッダ/フッタ</button>
+</panel>
+<panel num="8" rect="0,0,476,128" title="基本文章編集">
+<text num="1" x="26" y="36"> </text>
+<box num="2" rect="22,44,454,70"></box>
+<button num="101" rect="272,84,358,110" answer="cancel">取消</button>
+<button num="102" rect="368,84,454,110" emph="true">設定</button>
+</panel>
+<panel num="9" rect="0,0,456,292" title="基本文章編集">
+<text num="61" x="26" y="30"> </text>
+<text num="21" x="26" y="64"> </text>
+<box num="1" rect="158,44,268,70"></box>
+<text num="41" x="280" y="64"> </text>
+<text num="22" x="26" y="96"> </text>
+<box num="2" rect="158,76,268,102"></box>
+<text num="42" x="280" y="96"> </text>
+<text num="23" x="26" y="128"> </text>
+<box num="3" rect="158,108,268,134"></box>
+<text num="43" x="280" y="128"> </text>
+<text num="24" x="26" y="160"> </text>
+<box num="4" rect="158,140,268,166"></box>
+<text num="44" x="280" y="160"> </text>
+<text num="25" x="26" y="192"> </text>
+<box num="5" rect="158,172,268,198"></box>
+<text num="45" x="280" y="192"> </text>
+<text num="26" x="26" y="224"> </text>
+<box num="6" rect="158,204,268,230"></box>
+<text num="46" x="280" y="224"> </text>
+<button num="101" rect="252,248,338,274" answer="cancel">取消</button>
+<button num="102" rect="348,248,434,274" emph="true">設定</button>
+</panel>
+<panel num="10" rect="0,0,456,388" title="基本文章編集">
+<text num="61" x="26" y="30"> </text>
+<text num="21" x="26" y="64"> </text>
+<box num="1" rect="158,44,268,70"></box>
+<text num="41" x="280" y="64"> </text>
+<text num="22" x="26" y="96"> </text>
+<box num="2" rect="158,76,268,102"></box>
+<text num="42" x="280" y="96"> </text>
+<text num="23" x="26" y="128"> </text>
+<box num="3" rect="158,108,268,134"></box>
+<text num="43" x="280" y="128"> </text>
+<text num="24" x="26" y="160"> </text>
+<box num="4" rect="158,140,268,166"></box>
+<text num="44" x="280" y="160"> </text>
+<text num="25" x="26" y="192"> </text>
+<box num="5" rect="158,172,268,198"></box>
+<text num="45" x="280" y="192"> </text>
+<text num="26" x="26" y="224"> </text>
+<box num="6" rect="158,204,268,230"></box>
+<text num="46" x="280" y="224"> </text>
+<text num="27" x="26" y="256"> </text>
+<box num="7" rect="158,236,268,262"></box>
+<text num="47" x="280" y="256"> </text>
+<text num="28" x="26" y="288"> </text>
+<box num="8" rect="158,268,268,294"></box>
+<text num="48" x="280" y="288"> </text>
+<text num="29" x="26" y="320"> </text>
+<box num="9" rect="158,300,268,326"></box>
+<text num="49" x="280" y="320"> </text>
+<button num="101" rect="252,344,338,370" answer="cancel">取消</button>
+<button num="102" rect="348,344,434,370" emph="true">設定</button>
+</panel>
+<panel num="11" rect="0,0,396,306" title="基本文章編集">
+<text num="61" x="26" y="30"> </text>
+<list num="1" rect="22,40,374,236"></list>
+<button num="101" rect="192,262,278,288" answer="cancel">取消</button>
+<button num="102" rect="288,262,374,288" emph="true">決定</button>
+</panel>
+</databox>
+</tad>

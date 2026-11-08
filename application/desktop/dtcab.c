@@ -32,8 +32,10 @@
 #include <ts/tadview.h>
 #include <ts/uuid.h>
 #include <ts/cabmenu.h>
+#include <ts/figedit.h>
 #include <ts/mn.h>
 #include <ts/fn.h>
+#include <ts/sysdef.h>
 #include "desktop.h"
 
 LOCAL void save_as_new( DTWIN *d );
@@ -51,6 +53,11 @@ EXPORT ER dt_cab_menu_make( DTWIN *d, ID *p_mid )
 	st.can_save_new = (BOOL)( d->has_parent && !d->sealed );
 	st.full = d->full;
 	st.show_hidden = d->show_hidden;
+	st.prot = d->sealed ? 0 : fe_prot_can(d->rec, d->fig, d->pick);
+#ifdef USE_UITEST
+	tm_printf((UB *)"desktop: protect menu %x\n", ( st.npick == 0 ) ? 0 : st.prot);	/* for the tests */
+#endif
+	st.def = d->accbox ? SYSDEF_MENU_ACCBOX : NULL;
 	{
 		INT	links = 0;
 
@@ -65,6 +72,9 @@ EXPORT void dt_cab_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj,
 {
 	INT	cmd = cab_menu_cmd(sel);
 
+	if ( d->accbox && dt_acc_menu_do(sel, on_vobj, v) ) {
+		return;
+	}
 	if ( cmd != 0 ) {
 		dt_cab_command(d, cmd, on_vobj, v);
 	}
@@ -79,18 +89,44 @@ EXPORT void dt_cab_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj,
  */
 LOCAL void save_as_new( DTWIN *d )
 {
-	UB	start[WM_LABEL_MAX], name[WM_LABEL_MAX];
-	TS_UUID	nid, id;
-	T_TAD	*prec;
-	T_VOBJ	pv;
-	DTWIN	*p;
-	INT	n = 0, k;
+	TS_UUID	nid;
 
 	if ( !d->has_parent || d->sealed ) {
 		return;
 	}
 	dt_save(d);
-	if ( om_store_name(&d->id, start, WM_LABEL_MAX - 16) < 0 ) {
+	(void)dt_save_new_of(d, &d->id, &d->parent_id, &d->parent_vobj, NULL, &nid);
+}
+
+/*
+ * The copy of 新たな実身に保存 made of object id, as it is in the store,
+ * under a name asked for in a panel over ask, and a link to it put with
+ * the link parent_vobj of the record of parent: in a text, just after
+ * it. With target given, that link must point at it. The copy in
+ * *p_new; E_ABORT when the panel was put away, E_NOEXS when the parent
+ * holds no such link.
+ */
+EXPORT ER dt_save_new_of( DTWIN *ask, CONST TS_UUID *id, CONST TS_UUID *parent,
+			  CONST TS_UUID *parent_vobj, CONST TS_UUID *target, TS_UUID *p_new )
+{
+	UB	start[WM_LABEL_MAX], name[WM_LABEL_MAX];
+	TS_UUID	nid, lid;
+	T_TAD	*prec;
+	T_VOBJ	pv;
+	DTWIN	*p;
+	INT	n = 0, k;
+	BOOL	held;
+	ER	er;
+
+	/* the link it goes with, in the record that holds it: a program's, while it runs, is its own to change */
+	held = dt_plink_has(parent, parent_vobj, target);
+	p = dt_showing(parent);
+	prec = ( p != NULL ) ? p->rec : om_store_get(parent, 0);
+	if ( !held && ( prec == NULL || tad_lnk_find(prec, parent_vobj, &pv) < E_OK
+		       || ( target != NULL && ts_uuid_cmp(&pv.target, target) != 0 ) ) ) {
+		return E_NOEXS;
+	}
+	if ( om_store_name(id, start, WM_LABEL_MAX - 16) < 0 ) {
 		start[0] = 0;
 	}
 	while ( start[n] != 0 ) {
@@ -104,53 +140,56 @@ LOCAL void save_as_new( DTWIN *d )
 		}
 		start[n] = 0;
 	}
-	if ( !dt_ask_text(d, "新しい実身の名称を入力してください", NULL, start,
+	if ( !dt_ask_text(ask, "新しい実身の名称を入力してください", NULL, start,
 		       name, WM_LABEL_MAX, "設定") || name[0] == 0 ) {
-		return;
+		return E_ABORT;
 	}
-	if ( om_store_copy(&d->id, name, FALSE, &nid) < E_OK ) {
-		return;
+	er = om_store_copy(id, name, FALSE, &nid);
+	if ( er < E_OK ) {
+		return er;
 	}
+	*p_new = nid;
+	if ( held && dt_plink_add(parent, parent_vobj, &nid) >= E_OK ) {
+		return E_OK;	/* the program puts the link to the copy in, and keeps it with its record */
+	}
+	/* the program ended meanwhile, its record saved: put in as into a record of the desktop's */
 
-	/* the link it goes with, in the record that holds it */
-	p = dt_showing(&d->parent_id);
-	prec = ( p != NULL ) ? p->rec : om_store_get(&d->parent_id, 0);
-	if ( prec == NULL || tad_lnk_find(prec, &d->parent_vobj, &pv) < E_OK ) {
-		return;
+	/* the parent's record read again: the panel let the person work in the meantime */
+	p = dt_showing(parent);
+	prec = ( p != NULL ) ? p->rec : om_store_get(parent, 0);
+	if ( prec == NULL || tad_lnk_find(prec, parent_vobj, &pv) < E_OK ) {
+		return E_OK;		/* the copy stands as a 屑実身 until it is linked */
 	}
 	pv.target = nid;
 	knl_memset(&pv.vobjid, 0, sizeof(pv.vobjid));
 	pv.name[0] = 0;
 	pv.dlen = 0;			/* a new object has no data appended to it yet */
+	ed_new_link_fit(&pv);		/* named anew: closed, as wide as that name */
 	if ( p != NULL ) {
 		if ( p->sealed ) {
-			return;		/* a page no one keeps: the new object is a 屑実身 until linked */
+			return E_OK;	/* a page no one keeps: the new object is a 屑実身 until linked */
 		}
 		ed_pick_none(p);
-		if ( tad_lnk_add(prec, &pv, &id) >= E_OK && p->doc != NULL ) {
-			dd_link_after(p, &d->parent_vobj);	/* in a text, just after the one it came from */
+		if ( tad_lnk_add(prec, &pv, &lid) >= E_OK && p->doc != NULL ) {
+			dd_link_after(p, parent_vobj);	/* in a text, just after the one it came from */
 		}
 		ed_model(p);
 		p->dirty = TRUE;
 		dt_draw_all();
-	} else if ( tad_lnk_add(prec, &pv, &id) >= E_OK ) {
-		om_store_save(&d->parent_id, 0);
+	} else if ( tad_lnk_add(prec, &pv, &lid) >= E_OK ) {
+		om_store_save(parent, 0);
 	}
+	return E_OK;
 }
 
 /* ---------------------------------------------------------------- 表示 */
 
 LOCAL void bg_colour( DTWIN *d )
 {
-	UB	start[8], text[WM_LABEL_MAX];
-	UW	col;
+	UW	col = ( d->paper == TV_PAPER_LOOK ) ? 0x00FFFFFFU : d->paper;
 
-	dt_colour_text(( d->paper == TV_PAPER_LOOK ) ? 0x00FFFFFFU : d->paper, start);
-	if ( !dt_ask_text(d, "背景色を入力してください（例: #ffffff）", NULL, start,
-		       text, WM_LABEL_MAX, "設定") ) {
-		return;
-	}
-	if ( !dt_colour_of(text, &col) ) {
+	if ( !dt_pick_colour(d->wid, &col) ) {
+		dt_draw(d);
 		return;
 	}
 	d->paper = col;

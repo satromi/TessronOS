@@ -800,6 +800,7 @@ spawn_program(union node *cmd, struct arglist *varlist, char **argv, const char 
 	struct jmploc jmploc;
 	struct jmploc *volatile savehandler = handler;
 	struct localvar *volatile savelocalvars = localvars;
+	struct spawnio sv;
 	volatile int pushed = 0, redirected = 0;
 	volatile pid_t pid = -1;
 
@@ -808,14 +809,14 @@ spawn_program(union node *cmd, struct arglist *varlist, char **argv, const char 
 		if (redirected)
 			popredir(POPREDIR_UNDO);
 		if (pushed)
-			spawnio_pop();
+			spawnio_pop(&sv);
 		poplocalvars();
 		localvars = savelocalvars;
 		flushall();
 		return -1;
 	}
 	handler = &jmploc;
-	spawnio_push(in, out);
+	spawnio_push(&sv, in, out);
 	pushed = 1;
 	redirect(cmd->ncmd.redirect, REDIR_PUSH | REDIR_KEEP);
 	redirected = 1;
@@ -826,7 +827,7 @@ spawn_program(union node *cmd, struct arglist *varlist, char **argv, const char 
 	poplocalvars();
 	localvars = savelocalvars;
 	popredir(POPREDIR_UNDO);
-	spawnio_pop();
+	spawnio_pop(&sv);
 	return pid;
 }
 

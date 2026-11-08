@@ -58,13 +58,13 @@ wait 300
 click 548 265
 expect sysenv: note off
 wait 500
-# 太字 changed, then closed: 更新しないで終了
+# 太字 changed, then closed: 更新しないで終了, in the panel that asks (in the middle of the screen)
 click 366 367
 wait 300
 key 08 01
 wait 800
 shot sf_upd
-click 300 370
+click 455 440
 expect sysenv: fontset end none Noto Serif JP (0)
 expect sysenv: fontset closed
 wait 500
@@ -107,7 +107,7 @@ wait 150
 click 495 320
 wait 800
 shot sf_del
-click 630 383
+click 803 440
 wait 1000
 text ktest-admin
 key 2b
@@ -119,11 +119,11 @@ expect sysenv: font delete Noto Serif JP (0)
 wait 500
 shot sf_deleted
 # the copy saved dropped on the list: 登録
-drag 80 205 400 300
+drag 80 196 400 300
 expect sysenv: font drop saved
 wait 800
 shot sf_reg
-click 630 383
+click 803 440
 wait 1000
 text ktest-admin
 key 28
@@ -160,7 +160,7 @@ wait 800
 # with Noto Sans JP its base, and 登録して終了
 click 640 90
 wait 500
-drag 40 127 400 300
+drag 40 119 400 300
 expect sysenv: font drop file
 expect sysenv: fontset open Noto Serif JP faces 1 register range 16726
 wait 800
@@ -169,7 +169,7 @@ click 706 432
 expect sysenv: family panel
 wait 800
 shot sf_family
-click 530 213
+click 683 283
 wait 200
 key 2a
 key 2a
@@ -186,16 +186,16 @@ key 2a
 key 2a
 text Test Serif
 wait 300
-click 350 402
+click 503 472
 wait 300
 shot sf_family2
-click 660 472
+click 813 542
 expect sysenv: family Test Serif 0000 base Noto Sans JP
 wait 500
 key 08 01
 wait 800
 shot sf_regend
-click 682 370
+click 837 440
 wait 1000
 text ktest-admin
 key 28

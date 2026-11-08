@@ -32,6 +32,9 @@ import os
 import struct
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vobjw  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 XTAD = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "etc", "xtad")
 ICON = "019a0f91-066f-706f-93da-ffe8150d6207.ico"   # 画用紙's
@@ -107,7 +110,12 @@ def vdata(vobjno, linkno, left, top, right, bottom):
     return b
 
 
-def link_el(target, vobjid, box=(0, 0, 180, 25)):
+def closed_box(name, left=0, top=0):
+    """Where a closed link as wide as its name stands, its corner at left and top"""
+    return (left, top, left + vobjw.closed_w(name), top + vobjw.closed_h())
+
+
+def link_el(target, vobjid, box):
     l, t, r, b = box
     return ('<link id="%s_0.xtad" vobjid="%s" vobjleft="%d" vobjtop="%d" vobjright="%d" vobjbottom="%d" '
             'height="%d" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="0" '
@@ -207,13 +215,15 @@ def main():
               '<print layout="案内状" across="1" down="1" gapx="0" gapy="0" order="across" paper="a4" '
               'turn="false" top="25" bottom="25" left="25" right="25" head="" foot="- %P / %T -"/>']
     database(SAMPLE, "住所録", fields, cards,
-             links=[link_el(CABINET, "01a0d8c4-5338-7d40-8f51-a6b7c8d9e040")],
-             vd=vdata(1, 0, 0, 0, 180, 25), faces={"氏名": "gothic"}, prints=prints)
+             links=[link_el(CABINET, "01a0d8c4-5338-7d40-8f51-a6b7c8d9e040", closed_box("住所録の印刷書式"))],
+             vd=vdata(1, 0, *closed_box("住所録の印刷書式")), faces={"氏名": "gothic"}, prints=prints)
 
     # the layout cabinet: a figure of the layouts' links
     cab = ['<tad version="1.0" encoding="UTF-8" filename="住所録の印刷書式">', "<figure>",
-           link_el(LABEL, "01a0d8c4-5339-7e51-8a62-b7c8d9eaf151", (10, 10, 190, 35)),
-           link_el(LETTER, "01a0d8c4-533a-7f62-9b73-c8d9eafb0262", (10, 45, 190, 70)),
+           link_el(LABEL, "01a0d8c4-5339-7e51-8a62-b7c8d9eaf151",
+                   closed_box("宛名ラベル", vobjw.PAD, vobjw.PAD)),
+           link_el(LETTER, "01a0d8c4-533a-7f62-9b73-c8d9eafb0262",
+                   closed_box("案内状", vobjw.PAD, vobjw.PAD + vobjw.closed_h() + vobjw.GAP)),
            "</figure>", "</tad>", ""]
     put(CABINET, meta("住所録の印刷書式", {"virtual-object-list": {"name": "仮身一覧", "defaultOpen": True}},
                       [{"rid": 1, "rt": 1, "sub": 0}], None, "TRON User"), [(1, 0, "\n".join(cab))], False)

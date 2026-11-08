@@ -25,6 +25,7 @@
  *	password, a PMK) are wiped when the answer is made.
  */
 
+#include <string.h>
 #include <stddef.h>
 #include "wpa_glue.h"
 #include "wpaproc.h"
@@ -120,6 +121,16 @@ static unsigned char	o_pmkid[WPP_PMKID_LEN];
 static char		s_pass[128];
 
 /* A passphrase or a password as the glue takes it: its bytes, kept with a terminating zero */
+/* The certificates and the key of a join of 802.1X, until knl_wpa_eap_set has taken them */
+static unsigned char	eb[3][WPP_EAP_BLOB_MAX];
+static int		eb_len[3];
+
+static void eb_wipe( void )
+{
+	memset(eb, 0, sizeof(eb));
+	memset(eb_len, 0, sizeof(eb_len));
+}
+
 static const char *text_of( const unsigned char *p, int len )
 {
 	int	i;
@@ -279,6 +290,39 @@ int wps_serve( const unsigned char *in, int n, unsigned char *out )
 		break;
 	case WPP_STATE:
 		wpp_w_begin(&w, out, WPP_RET, h->op, knl_wpa_state());
+		break;
+	case WPP_EAP_BLOB:
+		i1 = wpp_r_int(&r);
+		a = wpp_r_bytes(&r, &la, WPP_EAP_PIECE);
+		if ( r.bad || a == NULL || i1 < 0 || i1 > 2 ) return 0;
+		ret = -1;
+		if ( eb_len[i1] + la <= WPP_EAP_BLOB_MAX ) {
+			memcpy(eb[i1] + eb_len[i1], a, la);
+			eb_len[i1] += la;
+			ret = 0;
+		}
+		wpp_w_begin(&w, out, WPP_RET, h->op, ret);
+		break;
+	case WPP_EAP_SET:
+		i1 = wpp_r_int(&r);
+		a = wpp_r_bytes(&r, &la, 256);
+		b = wpp_r_bytes(&r, &lb, 256);
+		c = wpp_r_bytes(&r, &lc, 256);
+		d = wpp_r_bytes(&r, &ld, 256);
+		if ( r.bad ) return 0;
+		ret = knl_wpa_eap_set(i1, (const char *)a, la, (const char *)b, lb, eb[0], eb_len[0],
+				      (const char *)c, lc, eb[1], eb_len[1], eb[2], eb_len[2],
+				      (const char *)d, ld);
+		eb_wipe();
+		wpp_w_begin(&w, out, WPP_RET, h->op, ret);
+		break;
+	case WPP_EAP_RESULT:
+		wpp_w_begin(&w, out, WPP_RET, h->op, knl_wpa_eap_result());
+		break;
+	case WPP_EAP_END:
+		knl_wpa_eap_end();
+		eb_wipe();
+		wpp_w_begin(&w, out, WPP_RET, h->op, 0);
 		break;
 	case WPP_DISASSOC:
 		knl_wpa_disassoc();

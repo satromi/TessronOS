@@ -2409,6 +2409,13 @@ EXPORT ER so_main( void )
 	knl_so_nb_card = ( rump_tsnet_ifindex(SO_IFNAME) > 0 );
 	tm_printf((UB *)"net: the NetBSD stack is up%s\n", knl_so_nb_card ? "" : " (no card: the loopback interface only)");
 	so_started = TRUE;
+#ifdef USE_WG
+	{
+		IMPORT void knl_wg_start( void );
+
+		knl_wg_start();
+	}
+#endif
 	if ( !knl_so_nb_card ) {
 		return E_NOEXS;		/* no card: only the loopback interface */
 	}
@@ -2513,4 +2520,33 @@ EXPORT INT knl_net_stamp_end( void )
 {
 	tm_out_unlock(net_stamp_sts);
 	return 0;
+}
+
+/*
+ * The TCP counters of the stack (net.inet.tcp.stats, TCP_STAT_* of NetBSD's
+ * tcp_var.h): the first n of them, the number of them the stack has
+ */
+#define NB_CTL_NET		4
+#define NB_PF_INET		2
+#define NB_IPPROTO_TCP		6
+#define NB_TCPCTL_STATS		30
+#define NB_TCP_NSTATS		76
+
+EXPORT INT knl_so_tcp_stats( UD *v, INT n )
+{
+	int	name[4] = { NB_CTL_NET, NB_PF_INET, NB_IPPROTO_TCP, NB_TCPCTL_STATS };
+	UD	st[NB_TCP_NSTATS];
+	UD	len = sizeof(st);
+	D	a[6];
+	INT	e, i;
+
+	a[0] = A(name); a[1] = 4; a[2] = A(st); a[3] = A(&len); a[4] = 0; a[5] = 0;
+	e = nb_call(NB_SYS___sysctl, a, 6, NULL);
+	if ( e != 0 ) {
+		return knl_so_nb_er(e);
+	}
+	for ( i = 0; i < n && (UD)i < len / sizeof(UD); i++ ) {
+		v[i] = st[i];
+	}
+	return (INT)( len / sizeof(UD) );
 }

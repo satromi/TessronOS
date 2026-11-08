@@ -34,6 +34,8 @@ typedef struct {
 	BOOL	full;			/* the window fills the screen */
 	BOOL	can_paste;		/* the set in hand in the tray holds links */
 	BOOL	show_hidden;		/* 隠蔽仮身を表示 is on */
+	UINT	prot;			/* what 保護 can change of what is taken: FE_PROT_* of ts/figedit.h */
+	CONST char	*def;		/* the definition to make it from, NULL the cabinet's */
 } T_CABMENU;
 
 /* 保存 */

@@ -151,6 +151,29 @@ extern "C" {
  */
 #define WM_PT_POPUP	16
 
+/*
+ * The plane and the bar a colour is chosen on. The plane shows, for one
+ * hue, saturation from left to right and brightness from foot to head;
+ * its value holds all three (WM_SVMAP_VALUE). The bar shows the hues
+ * from right to left, thin and with round ends; its value is the hue, 0
+ * to 359. Their marks are round. Pressing or dragging moves the mark and
+ * the value, and the caller reads the value. They belong on a sheet
+ * (WM_PNL_SHEET): the bar's rectangle is white outside what it shows.
+ */
+#define WM_PT_SVMAP	17
+#define WM_PT_HUEBAR	18
+/*
+ * A round spot of the part's colour, read and written as a swatch's is
+ * and not to be worked; and the picture of a dropper, answering when let
+ * go over it as a push button does.
+ */
+#define WM_PT_COLDOT	19
+#define WM_PT_DROPPER	20
+#define WM_SVMAP_VALUE(h, s, v)	( ( (INT)(h) << 16 ) | ( (INT)(s) << 8 ) | (INT)(v) )
+#define WM_SVMAP_H(n)	( ( (n) >> 16 ) & 0xFFFF )
+#define WM_SVMAP_S(n)	( ( (n) >> 8 ) & 0xFF )
+#define WM_SVMAP_V(n)	( (n) & 0xFF )
+
 /* And the names this system's own code says */
 #define WM_PT_BOX	TB_PARTS
 #define WM_PT_SECRET	XB_PARTS
@@ -174,6 +197,11 @@ extern "C" {
  * pressed it, and the panel goes on as though nothing had ended it.
  */
 #define WM_ANS_ACT	16
+/*
+ * A swatch with an answer does not mark itself when pressed: it is a
+ * colour shown that does something, and answers when let go over it as
+ * a push button does.
+ */
 
 typedef struct {
 	UW		type;		/* the kind, and the flags above */
@@ -274,6 +302,7 @@ typedef struct {
 #define WM_PNL_PLAIN	0
 #define WM_PNL_WARN	1
 #define WM_PNL_FATAL	2
+#define WM_PNL_SHEET	4		/* white in a thin outline: a pop-up of a few parts */
 #define WM_PNL_BARE	3		/* the ground alone: a window's own panel, framed by the window */
 
 typedef struct {
@@ -324,6 +353,9 @@ IMPORT ER  wm_panel_close( INT pid );
  */
 IMPORT INT wm_panel_open_centre( INT owner, CONST T_WMPANEL *def );
 
+/* The same, its corner at (x, y) of the screen, or as near as the screen lets it be */
+IMPORT INT wm_panel_open_at( INT owner, CONST T_WMPANEL *def, INT x, INT y );
+
 /* Draw it, in the window it was opened in */
 IMPORT ER  wm_panel_draw( INT pid );
 
@@ -339,6 +371,13 @@ IMPORT ER  wm_panel_event( INT pid, CONST T_WMEV *ev, UINT *p_answer );
 IMPORT ER  wm_panel_get( INT pid, INT num, INT *p_value );
 IMPORT ER  wm_panel_set( INT pid, INT num, INT value );
 IMPORT ER  wm_panel_colour( INT pid, INT num, UW *p_colour );
+IMPORT ER  wm_panel_set_colour( INT pid, INT num, UW colour );
+
+/* A part shown or put away; the letters move to a box still shown when theirs goes */
+IMPORT ER  wm_panel_show( INT pid, INT num, BOOL shown );
+
+/* Where a part stands on the screen */
+IMPORT ER  wm_panel_part_screen( INT pid, INT num, T_DPRECT *out );
 
 /*
  * What has been typed into a box, and setting it. The caret goes to the

@@ -28,8 +28,8 @@
  *	says the same.
  *
  *	付箋指定 is the list 実行 of the link's menu shows (dt_app_list): the
- *	programs of the applist, the object's 機能付箋, then those offered for
- *	an object of its kind, marked so. The one it opens with is the one
+ *	programs of the applist, the object's 機能付箋; for an object whose
+ *	applist names none, those offered for its kind, marked so. The one it opens with is the one
  *	chosen in the list, its lamp lit; chosen among those of its kind, it
  *	joins the applist when 適用 writes it. Those of its kind are not taken
  *	out of the list: they come with the kind. A program is added from
@@ -68,7 +68,6 @@
 
 #define IF_W		460		/* the panel, inside its frame */
 #define IF_H		420
-#define IF_APP_MAX	32		/* programs in the list */
 #define IF_TEXT		128		/* one line of a list */
 #define IF_CHSZ		14		/* a 付箋's letters */
 
@@ -125,9 +124,10 @@ typedef struct {
 	T_OBPRT		*prt, *prt0;	/* the protection as set here, and as it was read */
 
 	INT		napp, dflt;
-	UB		id[IF_APP_MAX][OM_APP_ID];
-	UB		name[IF_APP_MAX][OM_APP_NAME];
-	BOOL		listed[IF_APP_MAX];	/* in the applist; FALSE: offered for the object's kind */
+	INT		appcap;		/* entries the three tables below have room for */
+	UB		(*id)[OM_APP_ID];
+	UB		(*name)[OM_APP_NAME];
+	BOOL		*listed;	/* in the applist; FALSE: offered for the object's kind */
 	BOOL		apps_changed;
 
 	/* the indices of the parts set anew while the panel is open */
@@ -420,6 +420,42 @@ LOCAL BOOL str_eq( CONST UB *a, CONST UB *b )
 	return (BOOL)( *a == *b );
 }
 
+/* Room for 'want' programs in the list, what is there kept */
+LOCAL BOOL app_room( INFO *st, INT want )
+{
+	INT	cap = ( st->appcap > 0 ) ? st->appcap : 8;
+	UB	(*id)[OM_APP_ID];
+	UB	(*name)[OM_APP_NAME];
+	BOOL	*listed;
+
+	if ( want <= st->appcap ) {
+		return TRUE;
+	}
+	while ( cap < want ) cap *= 2;
+	id = (UB (*)[OM_APP_ID])Kmalloc(OM_APP_ID * (SZ)cap);
+	name = (UB (*)[OM_APP_NAME])Kmalloc(OM_APP_NAME * (SZ)cap);
+	listed = (BOOL *)Kmalloc(sizeof(BOOL) * (SZ)cap);
+	if ( id == NULL || name == NULL || listed == NULL ) {
+		if ( id != NULL ) Kfree(id);
+		if ( name != NULL ) Kfree(name);
+		if ( listed != NULL ) Kfree(listed);
+		return FALSE;
+	}
+	if ( st->napp > 0 ) {
+		knl_memcpy(id, st->id, OM_APP_ID * (SZ)st->napp);
+		knl_memcpy(name, st->name, OM_APP_NAME * (SZ)st->napp);
+		knl_memcpy(listed, st->listed, sizeof(BOOL) * (SZ)st->napp);
+	}
+	if ( st->id != NULL ) Kfree(st->id);
+	if ( st->name != NULL ) Kfree(st->name);
+	if ( st->listed != NULL ) Kfree(st->listed);
+	st->id = id;
+	st->name = name;
+	st->listed = listed;
+	st->appcap = cap;
+	return TRUE;
+}
+
 LOCAL void app_add( INFO *st, CONST DTPROG *p )
 {
 	INT	i;
@@ -433,7 +469,7 @@ LOCAL void app_add( INFO *st, CONST DTPROG *p )
 			return;			/* already in it */
 		}
 	}
-	if ( st->napp >= IF_APP_MAX ) {
+	if ( !app_room(st, st->napp + 1) ) {
 		return;
 	}
 	(void)put(st->id[st->napp], 0, OM_APP_ID, (CONST char *)p->id);
@@ -518,7 +554,7 @@ LOCAL void copy_tag( INFO *st, INT sel )
 	T_TAD		*frag;
 	T_VOBJ		*lv;
 	TS_UUID		id;
-	INT		fid = fn_system(), w, band = IF_CHSZ + 11, i;
+	INT		fid = fn_system(), w, band = tad_closed_h(IF_CHSZ, TAD_D_DEFAULT), i;
 
 	if ( sel < 0 || sel >= st->napp ) {
 		dt_tell(st->d, "複写する機能付箋を選んでください", NULL);
@@ -546,7 +582,7 @@ LOCAL void copy_tag( INFO *st, INT sel )
 	w = ( fid > 0 ) ? fn_width(fid, lv->name) : IF_CHSZ * 6;
 	lv->left = 0;
 	lv->top = 0;
-	lv->right = w + IF_CHSZ + 20;
+	lv->right = tad_closed_w(IF_CHSZ, TAD_D_DEFAULT, w);
 	lv->bottom = band;
 	lv->height = band;
 	lv->frcol = 0x000000;
@@ -863,7 +899,8 @@ LOCAL void load( INFO *st )
 	room = dt_app_list(st->v, NULL, 0, NULL);
 	a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
 	n = ( a != NULL ) ? dt_app_list(st->v, a, room, &dflt) : 0;
-	for ( i = 0; i < n && st->napp < IF_APP_MAX; i++ ) {
+	if ( n > 0 && !app_room(st, n) ) n = 0;
+	for ( i = 0; i < n; i++ ) {
 		(void)put(st->id[st->napp], 0, OM_APP_ID, (CONST char *)a[i].id);
 		(void)put(st->name[st->napp], 0, OM_APP_NAME, (CONST char *)a[i].name);
 		st->listed[st->napp] = a[i].listed;
@@ -918,16 +955,23 @@ LOCAL BOOL apply( INFO *st )
 	}
 	if ( st->apps_changed ) {
 		/* the applist's own, and the one it opens with when it is one of its kind */
-		CONST UB	*ids[IF_APP_MAX], *names[IF_APP_MAX];
+		CONST UB	**ids = (CONST UB **)Kmalloc(sizeof(UB *) * (SZ)( st->napp + 1 ));
+		CONST UB	**names = (CONST UB **)Kmalloc(sizeof(UB *) * (SZ)( st->napp + 1 ));
 		INT		i, n = 0, dflt = -1;
 
-		for ( i = 0; i < st->napp; i++ ) {
-			if ( !st->listed[i] && i != st->dflt ) continue;
-			if ( i == st->dflt ) dflt = n;
-			ids[n] = st->id[i];
-			names[n++] = st->name[i];
+		if ( ids == NULL || names == NULL ) {
+			ok = FALSE;
+		} else {
+			for ( i = 0; i < st->napp; i++ ) {
+				if ( !st->listed[i] && i != st->dflt ) continue;
+				if ( i == st->dflt ) dflt = n;
+				ids[n] = st->id[i];
+				names[n++] = st->name[i];
+			}
+			(void)om_store_set_apps(&st->v->target, ids, names, n, dflt);
 		}
-		(void)om_store_set_apps(&st->v->target, ids, names, n, dflt);
+		if ( ids != NULL ) Kfree((void *)ids);
+		if ( names != NULL ) Kfree((void *)names);
 	}
 	{
 		BOOL	lock = (BOOL)( dt_pn_value(st->pid, N_LOCK) != 0 );
@@ -968,6 +1012,9 @@ LOCAL void info_free( INFO *st )
 {
 	if ( st->prt != NULL ) Kfree(st->prt);
 	if ( st->prt0 != NULL ) Kfree(st->prt0);
+	if ( st->id != NULL ) Kfree(st->id);
+	if ( st->name != NULL ) Kfree(st->name);
+	if ( st->listed != NULL ) Kfree(st->listed);
 	Kfree(st);
 }
 

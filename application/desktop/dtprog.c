@@ -174,6 +174,7 @@ LOCAL BOOL read_prog( CONST TS_UUID *uuid, DTPROG *p )
 		}
 		p->builtin = js_get_bool(&g, "builtin", FALSE);
 		p->menu = js_get_bool(&g, "menu", FALSE);
+		p->open_link = (BOOL)( js_get_str(&g, "openArg", s, sizeof(s)) > 0 && same(s, "link") );
 
 		/* the kinds of object it opens from 実行: "fileTypes": ["xtad", "tad"] */
 		p->types[0] = 0;
@@ -246,7 +247,19 @@ LOCAL void read_box( void )
 				break;
 			}
 			if ( read_prog(&lk[i], prog[nprog]) ) {
-				nprog++;
+				DTPROG	*p = prog[nprog++];
+				INT	k;
+
+				/*
+				 * A template nothing links to any more -- its last
+				 * link taken out of a 原紙箱 -- held, so that it is
+				 * not a 屑実身: 原紙集め still shows it.
+				 */
+				for ( k = 0; k < p->nbase; k++ ) {
+					if ( om_store_refs(&p->base[k]) == 0 ) {
+						(void)ob_lnk_obj(&p->base[k]);
+					}
+				}
 			}
 		}
 		Kfree(lk);
@@ -334,7 +347,8 @@ LOCAL ER plugin_base( CONST TS_UUID *brought, CONST T_OBPRT *prt, TS_UUID *p_bas
 	return ob_cpy_obj(brought, &c, p_base);
 }
 
-EXPORT ER dt_plugin_install( CONST TS_UUID *dir, BOOL force, TS_UUID *p_prog, UINT *p_how )
+EXPORT ER dt_plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UUID *win,
+			     TS_UUID *p_prog, UINT *p_how )
 {
 	T_JSON		root, bf, cm, it, ft, t1;
 	UB		id[DT_PROG_ID], name[TAD_NAME_MAX], type[32], ver[32], jf[128];
@@ -423,6 +437,10 @@ EXPORT ER dt_plugin_install( CONST TS_UUID *dir, BOOL force, TS_UUID *p_prog, UI
 		had = TRUE;
 		old = have->uuid;
 	}
+	er = dt_pkg_admin(pid, win);
+	if ( er < E_OK ) {
+		return er;
+	}
 
 	dt_sys_prt(&prt);
 	if ( has_base ) {
@@ -458,18 +476,26 @@ EXPORT ER dt_plugin_install( CONST TS_UUID *dir, BOOL force, TS_UUID *p_prog, UI
 		return er;
 	}
 	if ( had ) {
-		(void)dt_prog_remove(&old);		/* the version it replaces, and its template */
+		(void)dt_prog_drop(&old);		/* the version it replaces, and its template */
 	}
-	read_box();					/* the registry sees it now */
+	dt_prog_reread();				/* the registry sees it now */
+	dt_base_box_put(&prog, TRUE);
 	if ( p_prog != NULL ) *p_prog = prog;
 	if ( p_how != NULL ) *p_how = had ? DT_HOW_UPDATED : DT_HOW_NEW;
 	tm_printf((UB *)"dtprog: the plugin %s installed\n", id);
 	return E_OK;
 }
 
+/* The box read again: what shows the accessories shows them as they are now */
 EXPORT void dt_prog_reread( void )
 {
 	read_box();
+	dt_acc_boxes_remake();
+}
+
+EXPORT BOOL dt_prog_read( CONST TS_UUID *uuid, DTPROG *p )
+{
+	return read_prog(uuid, p);
 }
 
 EXPORT ER dt_prog_start( void )
@@ -638,8 +664,12 @@ EXPORT INT dt_app_list( CONST T_VOBJ *v, DTAPP *out, INT max, INT *p_dflt )
 	}
 	if ( names != NULL ) Kfree(names);
 
-	/* then what opens an object of its kind */
-	if ( obj_type(v, t, sizeof(t)) ) {
+	/*
+	 * An object that names no program (a file taken in): what opens an
+	 * object of its kind. One that names any keeps to what it names, so
+	 * that 機能付箋 are what its template or the person chose.
+	 */
+	if ( n == 0 && obj_type(v, t, sizeof(t)) ) {
 		for ( i = 0; i < nprog; i++ ) {
 			if ( prog[i]->types[0] == 0 || !has_type(prog[i]->types, t) ) continue;
 			(void)app_put(out, max, &n, prog[i]->id, (CONST UB *)"", prog[i]->name, FALSE);
@@ -657,8 +687,10 @@ EXPORT INT dt_app_list( CONST T_VOBJ *v, DTAPP *out, INT max, INT *p_dflt )
 }
 
 /*
- * A box's page: the 原紙箱 shows the templates of the applications,
- * each under its program's name; the 小物箱 the accessories themselves.
+ * A box's page: the 原紙箱 shows the templates of the applications; the
+ * 小物箱 the accessories, as dtacc.c orders them. A template's link
+ * shows the template's own name, so its width is measured from that
+ * name, not from its program's.
  */
 EXPORT T_TAD *dt_prog_page( UINT kind )
 {
@@ -667,6 +699,9 @@ EXPORT T_TAD *dt_prog_page( UINT kind )
 	T_TAD		*t;
 	INT		i, k, n = 0;
 
+	if ( kind == DT_PK_ACCESSORY ) {
+		return dt_acc_page();
+	}
 	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( nprog * DT_PROG_BASE + 1 ));
 	names = (CONST char **)Kmalloc(sizeof(char *) * (SZ)( nprog * DT_PROG_BASE + 1 ));
 	if ( ids == NULL || names == NULL ) {
@@ -679,14 +714,14 @@ EXPORT T_TAD *dt_prog_page( UINT kind )
 		if ( kind == DT_PK_APP ) {
 			for ( k = 0; k < prog[i]->nbase; k++ ) {
 				ids[n] = prog[i]->base[k];
-				names[n++] = (CONST char *)prog[i]->name;
+				names[n++] = NULL;	/* the template's own name */
 			}
 		} else {
 			ids[n] = prog[i]->uuid;
 			names[n++] = (CONST char *)prog[i]->name;
 		}
 	}
-	t = dt_list_record(( kind == DT_PK_APP ) ? "原紙箱" : "小物箱", ids, names, n);
+	t = dt_list_record("原紙箱", ids, names, n);
 	Kfree(ids);
 	Kfree((void *)names);
 	return t;
@@ -724,6 +759,46 @@ EXPORT CONST char *dt_prog_base_name( CONST TS_UUID *target )
 	return NULL;
 }
 
+/* ---------------------------------------------------------------- the system's 原紙箱 */
+
+/* The 原紙箱 システム links to as the system's (SYSROLE_BASES): FALSE when there is none */
+EXPORT BOOL dt_base_box( TS_UUID *p_box )
+{
+	return knl_sys_find(SYSROLE_BASES, NULL, p_box);
+}
+
+/*
+ * A program's templates linked from the system's 原紙箱 (add), as
+ * installing it puts them there, or the links to them taken out of it
+ * (as it is deleted). Links to them in other boxes are the person's and
+ * stay. The templates are held by the hold installing gave them, not by
+ * these links: taking a link out of a 原紙箱 leaves the template, for
+ * 原紙集め to show.
+ */
+EXPORT void dt_base_box_put( CONST TS_UUID *prog, BOOL add )
+{
+	DTPROG	*p;
+	TS_UUID	box;
+	INT	k;
+	ER	er;
+
+	if ( prog == NULL || !dt_base_box(&box) ) {
+		return;
+	}
+	p = (DTPROG *)Kcalloc(1, sizeof(DTPROG));
+	if ( p == NULL ) {
+		return;
+	}
+	if ( read_prog(prog, p) && p->kind == DT_PK_APP ) {
+		for ( k = 0; k < p->nbase; k++ ) {
+			er = add ? om_obj_link_add(&box, &p->base[k]) : om_obj_link_del(&box, &p->base[k]);
+			tm_printf((UB *)"dtprog: template %d of %s %s the 原紙箱 (%d)\n",
+				  k, p->id, add ? "linked from" : "taken out of", (INT)er);
+		}
+	}
+	Kfree(p);
+}
+
 /* ---------------------------------------------------------------- running one */
 
 /*
@@ -743,12 +818,14 @@ EXPORT CONST char *dt_prog_base_name( CONST TS_UUID *target )
 
 typedef struct {
 	TS_UUID	prog;			/* the program object */
-	TS_UUID	arg;			/* the object to open, when has_arg */
+	T_PRCOPEN arg;			/* the object to open, when has_arg, and the link it was opened from */
 	BOOL	has_arg;
+	BOOL	link_arg;		/* the program is given all of arg (openArg "link"), not the object alone */
 	TS_UUID	reply;			/* where to answer; 0 for nobody */
 	UINT	seq;
 	SZ	anssz;			/* how much of a T_DTANS the asker reads */
 	BOOL	with_er;		/* the answer says whether the start failed */
+	UINT	ticket;			/* of the person's act that asked for it, 0 none */
 	UB	name[TAD_NAME_MAX];	/* the program, for the message line */
 } DTSTART;
 
@@ -782,19 +859,27 @@ EXPORT BOOL dt_prog_reply_taken( void )
 	return start_reply.taken;
 }
 
-/* The process object made from the program, given the object to open (its UUID as the start-up argument) */
+/*
+ * The process object made from the program, given the object to open:
+ * its UUID as the start-up argument, or, for a program that asks for it,
+ * the link it was opened from after it (T_PRCOPEN)
+ */
 LOCAL ER start_now( CONST DTSTART *s, TS_UUID *pu )
 {
 	T_OBCRE	c;
+	ER	er;
 
 	knl_memset(&c, 0, sizeof(c));
 	c.type = OB_T_PROCESS;
 	c.prog = s->prog;
 	if ( s->has_arg ) {
 		c.arg = &s->arg;
-		c.argsz = sizeof(s->arg);
+		c.argsz = s->link_arg ? sizeof(s->arg) : sizeof(s->arg.target);
 	}
-	return ob_cre_obj(&c, pu);
+	knl_ob_act_arm(s->ticket);
+	er = ob_cre_obj(&c, pu);
+	knl_ob_act_arm(0);
+	return er;
 }
 
 /*
@@ -885,8 +970,12 @@ LOCAL BOOL starter( void )
 	return TRUE;
 }
 
-/* A process started from the program: handed to the starter, or started here when there is none */
-LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg )
+/*
+ * A process started from the program: handed to the starter, or started
+ * here when there is none. from and v, when given, are the window of the
+ * desktop's and the link in it the object was opened from.
+ */
+LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg, CONST DTWIN *from, CONST T_VOBJ *v )
 {
 	DTSTART	s;
 	TS_UUID	pu;
@@ -895,9 +984,27 @@ LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg )
 
 	knl_memset(&s, 0, sizeof(s));
 	s.prog = p->uuid;
+	s.ticket = ( dt_opens_quiet > 0 ) ? 0 : wm_act_ticket();
+	s.arg.recno = -1;
 	if ( arg != NULL ) {
-		s.arg = *arg;
+		s.arg.target = *arg;
 		s.has_arg = TRUE;
+		s.link_arg = p->open_link;
+	}
+	if ( v != NULL ) {
+		s.arg.recno = v->recno;
+		s.arg.fromlink = TRUE;
+		s.arg.bgcol = (UINT)v->bgcol;
+		s.arg.wordwrap = v->wordwrap;
+		for ( i = 0; i < DT_VIEW_MAX - 1 && i < TAD_VIEW_MAX && v->viewmode[i] != 0; i++ ) {
+			s.arg.viewmode[i] = v->viewmode[i];
+		}
+		if ( from != NULL && from->used ) {
+			s.arg.parent = from->id;
+			s.arg.vobjid = v->vobjid;
+		} else if ( dt_plink_opening(v, &s.arg.parent) ) {
+			s.arg.vobjid = v->vobjid;	/* a link of a program's window, written through it */
+		}
 	}
 	for ( i = 0; i < TAD_NAME_MAX - 1 && p->name[i] != 0; i++ ) {
 		s.name[i] = p->name[i];
@@ -947,7 +1054,7 @@ EXPORT ER dt_command_run( CONST TS_UUID *target )
 	if ( !is || ts_str_to_uuid(SYSDEF_PROG_CONSOLE, &cu) < E_OK || ( con = dt_prog_of(&cu) ) == NULL ) {
 		return E_NOEXS;
 	}
-	return start_process(con, target);
+	return start_process(con, target, NULL, NULL);
 }
 
 /*
@@ -964,15 +1071,34 @@ EXPORT ER dt_prog_run( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v )
 		return dt_command_run(&p->uuid);
 	}
 	if ( !p->builtin ) {
-		return start_process(p, ( v != NULL ) ? &v->target : NULL);
+		return start_process(p, ( v != NULL ) ? &v->target : NULL, from, v);
 	}
-	if ( same(p->id, "base-file-manager") || same(p->id, "accessory-box") ) {
+	if ( same(p->id, "base-file-manager") ) {
+		/* run by itself: the system's 原紙箱 opened */
+		T_VOBJ	bv;
+
+		knl_memset(&bv, 0, sizeof(bv));
+		if ( p->kind != DT_PK_APP ) {
+			return E_OBJ;		/* dt_open_as would come back here */
+		}
+		if ( v != NULL && ts_uuid_cmp(&v->target, &p->uuid) != 0 ) {
+			bv = *v;
+		} else if ( !dt_base_box(&bv.target) ) {
+			(void)wm_msg_put("システムの原紙箱がありません");
+			return E_NOEXS;
+		}
+		return dt_open_as(from, &bv, p->id);
+	}
+	if ( same(p->id, "accessory-box") ) {
 		T_DPRECT	o;
-		UINT		kind = same(p->id, "base-file-manager") ? DT_PK_APP : DT_PK_ACCESSORY;
+		DTWIN		*w;
 
 		o.left = 120;  o.top = 90;  o.right = 520;  o.bottom = 420;
-		return ( dt_open_made(dt_prog_page(kind), (CONST char *)p->name,
-				      DT_TOOL_NONE, &o) != NULL ) ? E_OK : E_NOMEM;
+		w = dt_open_made(dt_prog_page(DT_PK_ACCESSORY), (CONST char *)p->name, DT_TOOL_NONE, &o);
+		if ( w != NULL ) {
+			w->accbox = TRUE;
+		}
+		return ( w != NULL ) ? E_OK : E_NOMEM;
 	}
 	if ( same(p->id, "trash-real-objects") ) {
 		dt_trash_open();

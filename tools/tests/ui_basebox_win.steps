@@ -1,0 +1,76 @@
+# Where the 原紙箱's window stands, opened in turn with 仮身一覧 (a process) and with
+# 原紙箱 (the desktop's), for tools/ui_run.py (design 11.2.2). Each writes where its
+# window stood into the object's metadata as it closes, and the other opens there.
+waitwin 原紙箱
+# the 原紙箱 closed (Ctrl+E): where it stood kept
+click 1000 48
+wait 300
+key 08 01
+expect desktop: window of 原紙箱 kept at 893,35 200x600
+wait 500
+# opened with 仮身一覧, moved 300 left and 100 down, closed
+apps f22289dc-a180-494c-a918-f856ea61b404 virtual-object-list base-file-manager
+open f22289dc-a180-494c-a918-f856ea61b404
+waitwin 原紙箱 60
+sync 600
+wait 800
+win 原紙箱
+want ok 893 35 1093 635
+drag 1000 48 700 148
+sync 600
+wait 500
+win 原紙箱
+want ok 593 135 793 735
+# kept by the desktop's 仮身一覧 ("window of 原紙箱 kept at ...") or by the process ("window kept ..."),
+# whichever opens 仮身一覧 by default
+logmark
+key 08 01
+expectsince 593,135 200x600
+wait 800
+# opened with 原紙箱: where 仮身一覧 left it
+apps f22289dc-a180-494c-a918-f856ea61b404 base-file-manager virtual-object-list
+open f22289dc-a180-494c-a918-f856ea61b404
+waitwin 原紙箱 60
+wait 800
+win 原紙箱
+want ok 593 135 793 735
+shot bbw_box
+# moved back, closed, opened with 仮身一覧 again: there
+drag 700 148 1000 48
+wait 500
+key 08 01
+expect desktop: window of 原紙箱 kept at 893,35 200x600
+wait 500
+apps f22289dc-a180-494c-a918-f856ea61b404 virtual-object-list base-file-manager
+open f22289dc-a180-494c-a918-f856ea61b404
+waitwin 原紙箱 60
+sync 600
+wait 800
+win 原紙箱
+want ok 893 35 1093 635
+shot bbw_list
+key 08 01
+wait 800
+# the same with 仮身一覧 running as a process
+cabproc 1
+open f22289dc-a180-494c-a918-f856ea61b404
+waitwin 原紙箱 60
+sync 600
+wait 1500
+win 原紙箱
+want ok 893 35 1093 635
+drag 1000 48 700 148
+sync 600
+wait 500
+logmark
+key 08 01
+expectsince cabinet: window kept 593,135 200x600
+wait 800
+apps f22289dc-a180-494c-a918-f856ea61b404 base-file-manager virtual-object-list
+open f22289dc-a180-494c-a918-f856ea61b404
+waitwin 原紙箱 60
+wait 800
+win 原紙箱
+want ok 593 135 793 735
+shot bbw_box2
+absent !OACV!

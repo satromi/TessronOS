@@ -95,6 +95,29 @@ typedef struct {
 #endif
 
 #define BI_CMDLINE_LEN		512
+
+#ifdef USE_TESTAGENT
+/* The settings as they may be shown: the value of testagent= replaced by stars */
+static inline void bi_cmdline_hide_key( const char *from, char *to )
+{
+	static const char	w[] = "testagent=";
+	int			i = 0, k, hide = 0;
+
+	while ( from[i] != '\0' && i < BI_CMDLINE_LEN - 1 ) {
+		if ( i == 0 || from[i - 1] == ' ' ) {
+			for ( k = 0; w[k] != '\0' && from[i + k] == w[k]; k++ ) ;
+			if ( w[k] == '\0' ) {
+				for ( k = 0; w[k] != '\0'; k++, i++ ) to[i] = from[i];
+				hide = 1;
+			}
+		}
+		if ( from[i] == ' ' ) hide = 0;
+		to[i] = hide ? '*' : from[i];
+		if ( from[i] != '\0' ) i++;
+	}
+	to[i] = '\0';
+}
+#endif
 #define BI_RNG_LEN		32
 
 #ifndef _in_asm_source_
@@ -169,6 +192,7 @@ typedef struct {
 	unsigned int		last;		/* the last mark of this start */
 	unsigned int		vec;		/* an exception's vector, ~0 none */
 	unsigned long long	rip, cr2, err;
+	unsigned int		starting;	/* the APIC ID + 1 of the processor being started, 0 none */
 } T_BIMARK;
 #endif
 

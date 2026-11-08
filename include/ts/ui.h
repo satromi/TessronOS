@@ -76,6 +76,15 @@ IMPORT ER   ui_open( UI *u, CONST char *box, INT num, INT x, INT y );
 IMPORT ER   ui_open_on( UI *u, CONST UI *with, CONST char *box, INT num, INT x, INT y );
 IMPORT BOOL ui_mine( CONST UI *u, CONST T_OBNTM *m );
 
+/*
+ * The next window ui_open or ui_open_on makes, a subordinate window of
+ * the window parent (its object's UUID): kept just in front of it,
+ * carried with it, out of sight while a window of another program is
+ * in use, and its own window again when parent closes (wm_set_parent).
+ * NULL takes back what was asked.
+ */
+IMPORT void ui_sub( CONST TS_UUID *parent );
+
 /* The program object whose icon the window wears in its band (set before ui_open) */
 IMPORT void ui_icon( CONST char *prog );
 IMPORT void ui_close( UI *u );
@@ -108,6 +117,7 @@ IMPORT INT  ui_ticks( UD *p_at, INT tick, INT max );
 IMPORT INT  ui_value( UI *u, INT num );
 IMPORT void ui_set_value( UI *u, INT num, INT v );
 IMPORT void ui_set_now( UI *u, INT num, INT v, INT now );	/* a selector: chosen, and in use now */
+IMPORT void ui_set_swatch( UI *u, INT num, UW colour, BOOL chosen );	/* a swatch: its colour, and marked */
 /* A volume: its value, and the ends it runs between (one across starts from its right) */
 IMPORT void ui_set_range( UI *u, INT num, INT v, INT lo, INT hi );
 IMPORT INT  ui_text( UI *u, INT num, char *buf, INT max );
@@ -170,7 +180,18 @@ IMPORT INT  ui_ask( UI *u, INT num, CONST char *const *lines, INT nline );
  * than the panel, the sheets scroll in it and the parts at their foot
  * (foot="true") stay in sight; the program hears nothing of the bar.
  * What ui_attr asked is for the next window ui_open makes, alone.
+ *
+ * UI_ATTR_UNTITLED with them: the window has its frame but no title
+ * bar, as a palette that comes up under a button has.
  */
+#define UI_ATTR_UNTITLED	0x80000000U
+/*
+ * UI_ATTR_HIDDEN: the window is made hidden, so that what the program
+ * sets of its parts first (ui_show, ui_set_value...) is drawn where no
+ * one sees it, and it comes up once, as it is to be, with ui_reveal.
+ */
+#define UI_ATTR_HIDDEN		0x40000000U
+IMPORT void ui_reveal( UI *u );
 #define UI_EV_WHEEL	9
 #define UI_EV_SCROLL	10
 #define UI_EV_SIZE	11

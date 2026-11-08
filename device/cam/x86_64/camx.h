@@ -12,8 +12,9 @@
  *	The notebook's own cameras behind Intel's IPU3 (the Surface Go 2):
  *	the CSI-2 receiver CIO2 and what is put together for each sensor
  *	from the ACPI namespace (cio2.c), the sensor's power controller of
- *	the ACPI device INT3472 (int3472.c) and the sensor OV5693 on I2C
- *	(ov5693.c).
+ *	the ACPI device INT3472 (int3472.c) and the sensors on I2C: the
+ *	OV5693 (ov5693.c), and the OV8865 at the back (ov8865.c). The receiver
+ *	works a sensor through its T_SENSOPS.
  */
 
 #ifndef _DEVICE_CAM_X86_64_CAMX_
@@ -58,6 +59,7 @@ typedef struct {
 	BOOL		swap_rst;	/* reset and powerdown driven the other way round (see knl_campwr_swap) */
 	T_I2CBUS	*pmic;		/* a TPS68470's bus and address */
 	UH		pmic_addr;
+	BOOL		pmic_ok;	/* it answered when it was found */
 	BOOL		on;
 } T_CAMPWR;
 
@@ -92,7 +94,39 @@ typedef struct {
 	UW		exposure;	/* lines */
 	UW		gain;		/* the analogue gain's register value, 8 for 1 */
 	BOOL		bars;		/* the colour bars of the sensor in place of the picture */
+	UB		lanes;		/* those the board wires (the OV8865's settings take either) */
+	BOOL		turned;		/* it is half turned in the case: read so that the picture stands up */
 } T_OV5693;
+
+/* What the receiver knows of a kind of sensor: its one mode, and how to work it */
+typedef struct {
+	CONST char	*model;
+	CONST char	*product;	/* the camera's name, for a person */
+	UH		w, h;
+	UW		link_hz;
+	UB		minlanes, maxlanes;
+	INT		black;		/* the black level (10 bits) its own correction keeps */
+	UW		interval;	/* 100 ns */
+	UW		gain1x;		/* its gain's value for 1x */
+	UW		mclk;		/* the input clock its settings are for */
+	ER		(*probe)( T_OV5693 *s );
+	ER		(*setup)( T_OV5693 *s );
+	ER		(*stream)( T_OV5693 *s, BOOL on );
+	ER		(*exposure)( T_OV5693 *s, UW exposure, UW gain );
+	UW		(*max_exposure)( T_OV5693 *s );
+	void		(*say)( T_OV5693 *s, CONST char *when );
+} T_SENSOPS;
+
+IMPORT CONST T_SENSOPS	knl_ov5693_ops;
+IMPORT CONST T_SENSOPS	knl_ov8865_ops;
+
+#define OV8865_WIDTH		1632
+#define OV8865_HEIGHT		1224
+#define OV8865_LINK_HZ		360000000U	/* the CSI-2 clock lane: 720 Mbit/s a data lane */
+#define OV8865_MCLK		19200000U
+#define OV8865_INTERVAL		333333U
+#define OV8865_BLACK		64
+#define OV8865_CHIP_ID		0x008865
 
 /* Its ID read (the sensor powered): E_OK when it is an OV5693 */
 IMPORT ER	knl_ov5693_probe( T_OV5693 *s );

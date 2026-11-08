@@ -56,12 +56,26 @@ extern "C" {
 
 /*
  * The keys the system takes for itself, by their usages on the keyboard
- * page: the whole's volume a step up or down (the window layer, beep.c).
+ * page: the whole's volume a step up or down, and its mute (the window
+ * layer, beep.c).
  * A machine's own volume buttons are given as them too (the 5-button
  * array of the ACPI HID event filter, kernel/sysdepend/acpi/acpi_power.c).
  */
+#define HID_KEY_MUTE	0x7F
 #define HID_KEY_VOLUP	0x80
 #define HID_KEY_VOLDOWN	0x81
+
+/*
+ * The playing keys, which the keyboard page has no usages for: numbers
+ * it leaves unused, given to the consumer page's keys (device/usb/hid.c).
+ * They do not repeat. They go to the window that has the keys, as any
+ * other key, for a program that plays something to take; a program that
+ * does not look for them makes nothing of them, as no character is typed.
+ */
+#define HID_KEY_PLAYPAUSE	0xE8
+#define HID_KEY_STOP		0xE9
+#define HID_KEY_PREV		0xEA
+#define HID_KEY_NEXT		0xEB
 
 /* One thing that happened */
 typedef struct {
@@ -87,6 +101,13 @@ IMPORT ER  ts_hid_read( T_HIDEV *ev, TMO tmout );
 
 /* Where the pointer is now, without waiting for it to move */
 IMPORT ER  ts_hid_pointer( INT *p_x, INT *p_y, UINT *p_buttons );
+
+/*
+ * Where the first button last went down. While ts_hid_pointer says it
+ * is held, this is where the hold began, however far the pointer has
+ * gone since and however late the asker heard of the press.
+ */
+IMPORT ER  ts_hid_press_at( INT *p_x, INT *p_y );
 
 /* What has been seen, for a test or a measurement */
 typedef struct {

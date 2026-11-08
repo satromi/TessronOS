@@ -51,6 +51,7 @@
 #include <tm/tmonitor.h>
 #include <ts/blk.h>
 #include <ts/pcie.h>
+#include <ts/pm.h>
 #include "sysman/pfalloc.h"
 #include "nvme.h"
 
@@ -264,6 +265,9 @@ LOCAL void nv_inthdr( UINT intno, UW iar )
 
 	for ( i = 0; i < n; i++ ) {
 		if ( t[i]->intno == intno ) {
+#ifdef __x86_64__
+			ts_pcie_irq_sync(&t[i]->pci);	/* its completions in memory before they are looked for */
+#endif
 			__atomic_add_fetch(&t[i]->nint, 1, __ATOMIC_RELAXED);
 			tk_set_flg(t[i]->flgid, NV_FLG_DONE);
 		}
@@ -1197,12 +1201,15 @@ LOCAL ER nv_setup( NV_DEV *d )
 	return er;
 }
 
+LOCAL void nv_pm_register( void );
+
 EXPORT INT knl_nvme_init( void )
 {
 	T_PCIDEV	p;
 	INT		k, i;
 	ER		er;
 
+	nv_pm_register();
 	for ( k = 0; ts_pcie_find(0x01, 0x08, 0x02, k, &p) == E_OK; k++ ) {
 		NV_DEV	*d = nv_new();
 
@@ -1333,7 +1340,7 @@ LOCAL UW nv_shn_ms( NV_DEV *d )
  * memory buffer taken back, and CC.SHN set to 01b with CC.EN left on;
  * CSTS.SHST 10b says the shutdown is complete
  */
-LOCAL void nv_shutdown_one( NV_DEV *d )
+LOCAL void nv_shutdown_held( NV_DEV *d )
 {
 	NV_SQE	c;
 	BOOL	broken = FALSE;
@@ -1390,6 +1397,10 @@ LOCAL void nv_shutdown_one( NV_DEV *d )
 			  d->shst_ms - 1, tmo, s, fl, dq, hm);
 	}
 	d->state = NV_OFF;
+}
+
+LOCAL void nv_unhold( NV_DEV *d )
+{
 	tk_unl_mtx(d->adm.mtxid);
 	tk_unl_mtx(d->io.mtxid);
 	tk_unl_mtx(d->bufmtx);
@@ -1400,8 +1411,60 @@ EXPORT void knl_nvme_shutdown( void )
 	INT	i;
 
 	for ( i = 0; i < nv_ndev; i++ ) {
-		nv_shutdown_one(nv_dev[i]);
+		nv_shutdown_held(nv_dev[i]);
+		nv_unhold(nv_dev[i]);
 	}
+}
+
+/*
+ * The machine asleep. Each controller is shut down as for turning off,
+ * which the disk needs whether or not it loses power, and its three locks
+ * stay held by the sleep's task, so that requests wait. On waking it
+ * starts as after a reset, on the same queues' memory and host memory
+ * buffer, and the waiting requests go on.
+ */
+LOCAL ER nv_pm_suspend( void *arg, INT how )
+{
+	INT	i;
+
+	for ( i = 0; i < nv_ndev; i++ ) {
+		nv_shutdown_held(nv_dev[i]);
+	}
+	return E_OK;
+}
+
+LOCAL void nv_pm_resume( void *arg, INT how )
+{
+	INT	i;
+
+	for ( i = 0; i < nv_ndev; i++ ) {
+		NV_DEV	*d = nv_dev[i];
+		ER	er;
+
+		d->closing = FALSE;
+		d->hmb_on = FALSE;
+		er = nv_start_admin(d);
+		if ( er >= E_OK ) er = nv_start_io(d, TRUE);
+		if ( er >= E_OK ) {
+			d->state = NV_LIVE;
+			tm_printf((UB *)"nvme: %s: back from the sleep%s\n", d->devnm,
+				  d->hmb_on ? ", with its host memory buffer" : "");
+		} else {
+			d->state = NV_DEAD;
+			(void)nv_disable(d);
+			tm_printf((UB *)"nvme: %s: not back from the sleep (%d); its requests fail from now on\n",
+				  d->devnm, er);
+		}
+		nv_unhold(d);
+	}
+}
+
+LOCAL CONST T_PMDEV	nv_pm = { "nvme", PM_ORD_DISK, nv_pm_suspend, nv_pm_resume, NULL };
+
+/* The driver told of a sleep (knl_nvme_init) */
+LOCAL void nv_pm_register( void )
+{
+	(void)ts_pm_register(&nv_pm);
 }
 
 #else /* PCIE_ECAM_PA || PCIE_CFG_BOARD */

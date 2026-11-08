@@ -310,13 +310,14 @@ LOCAL void test_box( void )
 {
 	INT	b1[4] = { 700, 50, 850, 75 }, b2[4] = { -5, 590, 145, 615 }, b3[4] = { 10, 100, 900, 800 };
 
-	KT_ASSERT_EQ(ct_band_h(14), 25);
-	KT_ASSERT_EQ(ct_band_h(0), 25);
-	KT_ASSERT_EQ(ct_band_h(10), 21);
-	KT_ASSERT_EQ(ct_snap_h(14, 30), 25);
-	KT_ASSERT_EQ(ct_snap_h(14, 33), 25);
-	KT_ASSERT_EQ(ct_snap_h(14, 34), 34);
-	KT_ASSERT_EQ(ct_snap_h(10, 12), 21);
+	/* the letters, a quarter more and two; closed within eight above that */
+	KT_ASSERT_EQ(ct_band_h(14), 19);
+	KT_ASSERT_EQ(ct_band_h(0), 19);
+	KT_ASSERT_EQ(ct_band_h(10), 14);
+	KT_ASSERT_EQ(ct_snap_h(14, 25), 19);
+	KT_ASSERT_EQ(ct_snap_h(14, 27), 19);
+	KT_ASSERT_EQ(ct_snap_h(14, 28), 28);
+	KT_ASSERT_EQ(ct_snap_h(10, 12), 14);
 	ct_fit_box(b1);
 	KT_ASSERT(b1[0] == 650 && b1[1] == 70 && b1[2] == 800 && b1[3] == 95);
 	ct_fit_box(b2);

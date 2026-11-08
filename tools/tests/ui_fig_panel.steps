@@ -8,6 +8,8 @@
 # in front of it again. The initial window BTRON (0,0 to 350,226) pressed: the panel goes
 # again, and comes back with the figure. Pressing システム環境設定 puts it away; the
 # settings closed, the figure is in front again, and so is its panel.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
 open 019a0f91-066f-706f-93da-ffe8150d6207
 wait 2000
 front f1 道具パネル|画用紙

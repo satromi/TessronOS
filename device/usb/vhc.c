@@ -24,7 +24,9 @@
  *	configuration, settings, halts) and the class requests of HID that
  *	need no answer (SET_IDLE, SET_PROTOCOL, SET_REPORT). A stream on an
  *	IN endpoint is given the pieces the test put, one transfer each, when
- *	the manager serves the controllers.
+ *	the manager serves the controllers. An isochronous OUT stream is asked
+ *	for one packet each time the manager serves the controllers, and what
+ *	it gives goes to the device's out as a bulk transfer's would.
  */
 
 #include <sys/machine.h>
@@ -54,6 +56,7 @@ struct usb_pipe {
 	UB		ep;
 	INT		xfer;
 	USB_XFERFN	fn;
+	USB_FILLFN	fill;		/* an OUT stream's, NULL for IN */
 	void		*ctx;
 	DMABUF		buf;
 };
@@ -185,7 +188,7 @@ LOCAL void vhc_dev_free( USBHC *hc, USBDEV *dev )
 	(void)hc;
 	for ( i = 0; i < VHC_PIPES; i++ ) {
 		if ( vhc_pipe[i].used && dev != NULL && dev->parent == NULL && vhc_pipe[i].port == dev->port ) {
-			knl_dmabuf_free(&vhc_pipe[i].buf);
+			if ( vhc_pipe[i].fill == NULL ) knl_dmabuf_free(&vhc_pipe[i].buf);
 			vhc_pipe[i].used = FALSE;
 		}
 	}
@@ -262,8 +265,8 @@ LOCAL ER vhc_control( USBHC *hc, USBDEV *dev, CONST UB *setup, UB *data, INT *ac
 	} else if ( ( rt & 0x80 ) == 0 && ( rt & 0x60 ) == 0 ) {
 		/* SET_ADDRESS, SET_CONFIGURATION, SET_INTERFACE, CLEAR_FEATURE, SET_FEATURE */
 		n = 0;
-	} else if ( ( rt & 0x60 ) == 0x20 && ( rt & 0x1f ) == 1 ) {
-		/* a class request to an interface: HID's SET_IDLE, SET_PROTOCOL, SET_REPORT, or the test's */
+	} else if ( ( rt & 0x60 ) == 0x20 && ( rt & 0x1f ) <= 1 ) {
+		/* a class request to an interface (HID's SET_IDLE, SET_PROTOCOL, SET_REPORT) or the device (HCI's commands) */
 		if ( d->klass != NULL ) {
 			n = d->klass(setup, data, len);
 			if ( n < 0 ) return E_IO;
@@ -321,6 +324,7 @@ LOCAL ER vhc_stream_open( USBHC *hc, USBDEV *dev, CONST USBEP *ep, INT xfer, USB
 	vhc_pipe[i].ep = ep->addr;
 	vhc_pipe[i].xfer = xfer;
 	vhc_pipe[i].fn = fn;
+	vhc_pipe[i].fill = NULL;
 	vhc_pipe[i].ctx = ctx;
 	*out = &vhc_pipe[i];
 	return E_OK;
@@ -328,20 +332,35 @@ LOCAL ER vhc_stream_open( USBHC *hc, USBDEV *dev, CONST USBEP *ep, INT xfer, USB
 
 LOCAL ER vhc_stream_open_out( USBHC *hc, USBDEV *dev, CONST USBEP *ep, USB_FILLFN fill, void *ctx, USBPIPE **out )
 {
+	PORT	*pt = port_of(dev);
+	INT	i;
+
 	(void)hc;
-	(void)dev;
-	(void)ep;
-	(void)fill;
-	(void)ctx;
-	(void)out;
-	return E_NOSPT;
+	if ( pt == NULL || ( ep->addr & 0x80 ) != 0 || ep->type != USB_EP_ISOC || ep->size <= 0 || ep->size > VHC_PIECE ) {
+		return E_NOSPT;
+	}
+	for ( i = 0; i < VHC_PIPES; i++ ) {
+		if ( !vhc_pipe[i].used ) break;
+	}
+	if ( i == VHC_PIPES ) {
+		return E_LIMIT;
+	}
+	vhc_pipe[i].used = TRUE;
+	vhc_pipe[i].port = (INT)( pt - vhc_port );
+	vhc_pipe[i].ep = ep->addr;
+	vhc_pipe[i].xfer = ep->size;
+	vhc_pipe[i].fn = NULL;
+	vhc_pipe[i].fill = fill;
+	vhc_pipe[i].ctx = ctx;
+	*out = &vhc_pipe[i];
+	return E_OK;
 }
 
 LOCAL void vhc_stream_close( USBHC *hc, USBPIPE *pipe )
 {
 	(void)hc;
 	if ( pipe != NULL && pipe->used ) {
-		knl_dmabuf_free(&pipe->buf);
+		if ( pipe->fill == NULL ) knl_dmabuf_free(&pipe->buf);
 		pipe->used = FALSE;
 	}
 }
@@ -352,6 +371,17 @@ LOCAL void vhc_poll( USBHC *hc )
 	INT	p, i, k;
 
 	(void)hc;
+	for ( i = 0; i < VHC_PIPES; i++ ) {
+		struct usb_pipe	*pp = &vhc_pipe[i];
+		UB		pk[VHC_PIECE];
+		INT		n;
+
+		if ( !pp->used || pp->fill == NULL ) continue;
+		n = pp->fill(pp->ctx, pk, pp->xfer);
+		if ( n > 0 && vhc_port[pp->port].dev != NULL && vhc_port[pp->port].dev->out != NULL ) {
+			vhc_port[pp->port].dev->out(pp->ep, pk, n);
+		}
+	}
 	for ( p = 0; p < VHC_PORTS; p++ ) {
 		PORT	*pt = &vhc_port[p];
 
@@ -361,7 +391,7 @@ LOCAL void vhc_poll( USBHC *hc )
 			struct usb_pipe	*pp = NULL;
 
 			for ( i = 0; i < VHC_PIPES; i++ ) {
-				if ( vhc_pipe[i].used && vhc_pipe[i].port == p && vhc_pipe[i].ep == pc->ep ) {
+				if ( vhc_pipe[i].used && vhc_pipe[i].fill == NULL && vhc_pipe[i].port == p && vhc_pipe[i].ep == pc->ep ) {
 					pp = &vhc_pipe[i];
 				}
 			}

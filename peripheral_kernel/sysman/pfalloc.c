@@ -24,6 +24,7 @@
 #include "sysdepend/sysdepend.h"
 #include "pfalloc.h"
 #include <tk/tkernel.h>
+#include <tk/smem.h>
 
 /*
  * Taken with interrupts disabled around the free lists of the page frames: disabling
@@ -358,8 +359,33 @@ EXPORT void knl_pfalloc_init( UBINT *p_kernel_end_pa, UD extra_reserve )
 /*
  * The system stack of a task (kernel.h). One of protection level 2 or 3
  * is a run of whole pages, as many as its size rounds up to in a power
- * of two; the kernel's own come from Imalloc as they always did.
+ * of two. One of the kernel's own is mapped in the variable area with
+ * unmapped pages below it (knl_vmap_stack), so that running out of it
+ * faults at once; only the tasks made before the page allocator is up
+ * have theirs from Imalloc.
+ *
+ * Such a stack is not physically contiguous and has no address in the
+ * linear map: nothing on it can be handed to a device by subtraction
+ * (ConvPhysicalAddress finds where it lies).
+ *
+ * A stack cannot be unmapped where it is given back: a task that ends
+ * has it given back by the dispatcher, with interrupts off and the
+ * kernel's lock held, and taking pages out costs a translation drop on
+ * every processor for each. Stacks given back wait on a list, kept
+ * mapped; the next task of the same size takes one as it is, and those
+ * over SSTK_KEEP go when a task is next made or deleted.
  */
+#define SSTK_KEEP	16
+
+typedef struct sstk_dead {
+	struct sstk_dead *next;
+	UD	npages;
+} SSTK_DEAD;
+
+LOCAL T_SPLOCK	sstk_lock;
+LOCAL SSTK_DEAD	*sstk_dead_list = NULL;
+LOCAL INT	sstk_dead_n = 0;
+
 LOCAL UINT sstk_order( W size )
 {
 	UINT	order = 0;
@@ -376,10 +402,114 @@ LOCAL BOOL sstk_paged( W size, ATR tskatr )
 		    && (UD)size <= ( (UD)PAGE_SIZE << PF_MAX_ORDER ) );
 }
 
+LOCAL BOOL sstk_mapped( ATR tskatr )
+{
+	return (BOOL)( ( tskatr & TA_RNG3 ) < TA_RNG2 && knl_pf_db != NULL && !in_indp() );
+}
+
+/*
+ * Whether a stack given back is one of the mapped ones. Imalloc also
+ * hands out addresses of the variable area, for a large block, but never
+ * one on a page's boundary (its head comes first).
+ */
+LOCAL BOOL sstk_is_mapped( CONST void *stack )
+{
+	UBINT	v = (UBINT)stack;
+
+	return (BOOL)( v >= (UBINT)VMAP_VA_BASE && v < (UBINT)VMAP_VA_BASE + CNF_VMAP_SIZE
+		    && ( v & ( PAGE_SIZE - 1 ) ) == 0 );
+}
+
+/*
+ * The size a stack really has: a mapped one fills its pages, so that its
+ * foot is right above the unmapped ones.
+ */
+EXPORT W knl_sstk_round( W size, ATR tskatr )
+{
+	if ( sstk_mapped(tskatr) ) {
+		return (W)( ( (UD)size + PAGE_SIZE - 1 ) & PAGE_MASK );
+	}
+	return size;
+}
+
+/* The stacks over the number kept (all of them for keep 0) unmapped and given back */
+LOCAL void sstk_let_go( INT keep )
+{
+	for ( ;; ) {
+		SSTK_DEAD	*d = NULL;
+		UINT		imask;
+
+		ISpinLock(&sstk_lock, &imask);
+		if ( sstk_dead_n > keep ) {
+			d = sstk_dead_list;
+			sstk_dead_list = d->next;
+			sstk_dead_n--;
+		}
+		ISpinUnlock(&sstk_lock, &imask);
+		if ( d == NULL ) {
+			return;
+		}
+		knl_vunmap_stack(d, d->npages);
+	}
+}
+
+EXPORT void knl_sstk_trim( void )
+{
+	sstk_let_go(SSTK_KEEP);
+}
+
+LOCAL void *sstk_map( W size )
+{
+	UD		npages = (UD)size >> PAGE_SHIFT;
+	SSTK_DEAD	*d, **pp;
+	void		*stack = NULL;
+	UINT		imask;
+
+	ISpinLock(&sstk_lock, &imask);
+	for ( pp = &sstk_dead_list; ( d = *pp ) != NULL; pp = &d->next ) {
+		if ( d->npages == npages ) {
+			*pp = d->next;
+			sstk_dead_n--;
+			stack = d;
+			break;
+		}
+	}
+	ISpinUnlock(&sstk_lock, &imask);
+	knl_sstk_trim();
+	if ( stack == NULL ) {
+		stack = knl_vmap_stack(npages);
+	}
+	if ( stack == NULL ) {
+		sstk_let_go(0);		/* the pages the stacks waiting hold */
+		stack = knl_vmap_stack(npages);
+	}
+	return stack;
+}
+
+#if USE_KTEST
+/* For the tests: whether a mapped stack has been given back and waits on the list */
+EXPORT BOOL knl_sstk_waiting( CONST void *stack )
+{
+	SSTK_DEAD	*d;
+	BOOL		found = FALSE;
+	UINT		imask;
+
+	ISpinLock(&sstk_lock, &imask);
+	for ( d = sstk_dead_list; d != NULL && !found; d = d->next ) {
+		found = (BOOL)( (CONST void *)d == stack );
+	}
+	ISpinUnlock(&sstk_lock, &imask);
+	return found;
+}
+#endif
+
 EXPORT void *knl_sstk_alloc( W size, ATR tskatr )
 {
 	PFRAME	*pf;
 
+	if ( sstk_mapped(tskatr) ) {
+		return sstk_map(size);
+	}
 	if ( !sstk_paged(size, tskatr) ) {
 		return knl_Imalloc((UW)size);
 	}
@@ -391,6 +521,18 @@ EXPORT void *knl_sstk_alloc( W size, ATR tskatr )
 EXPORT void knl_sstk_free( void *stack, W size, ATR tskatr )
 {
 	if ( stack == NULL ) {
+		return;
+	}
+	if ( sstk_is_mapped(stack) ) {
+		SSTK_DEAD	*d = (SSTK_DEAD *)stack;
+		UINT		imask;
+
+		d->npages = (UD)size >> PAGE_SHIFT;
+		ISpinLock(&sstk_lock, &imask);
+		d->next = sstk_dead_list;
+		sstk_dead_list = d;
+		sstk_dead_n++;
+		ISpinUnlock(&sstk_lock, &imask);
 		return;
 	}
 	if ( !sstk_paged(size, tskatr) ) {

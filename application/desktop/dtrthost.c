@@ -59,6 +59,9 @@ typedef struct {
 	INT		w, h;		/* the area it is laid out in */
 	INT		track;		/* the one of the playlist chosen last, -1 none */
 	BOOL		moved;		/* a move was told on the console (only the first is) */
+	BOOL		slide;		/* played as a slide: what its program asks of the slides is kept */
+	UINT		act;		/* and what it asked last, not yet handed on (RT_ACT_*, 0 none) */
+	INT		act_n;
 } RTHOST;
 
 LOCAL RTHOST	rh[RH_MAX];
@@ -121,6 +124,12 @@ LOCAL void rh_state( RTHOST *e, T_DTANS *an )
 	else if ( dtrt_paused(e->rt) ) s |= DT_RTS_PAUSED;
 	else s |= DT_RTS_PLAYING;
 	an->flags = ( an->flags & DT_RTS_TAKEN ) | s;
+	if ( e->slide && e->act != 0 ) {
+		an->flags |= DT_RTS_GO;
+		an->look.disp = e->act;
+		an->look.autoopen = (UINT)e->act_n;
+		e->act = 0;
+	}
 	an->look.w = dtrt_time(e->rt);
 	an->look.h = ( names != NULL ) ? dtrt_tracks(e->rt, names, idx, RH_TRACKS) : 0;
 	if ( names != NULL ) Kfree(names);
@@ -235,20 +244,28 @@ LOCAL ER rh_open( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 	e->ground = ( rq->look.bgcol == 0xFFFFFFFFU ) ? 0x00000000U : (UW)rq->look.bgcol;
 	e->w = ( rq->look.w > RH_MIN ) ? rq->look.w : RH_MIN;
 	e->h = ( rq->look.h > RH_MIN ) ? rq->look.h : RH_MIN;
-	if ( om_store_paper(&rq->target, &paper) < E_OK || paper == TV_PAPER_LOOK ) paper = 0x00000000U;
+	e->slide = (BOOL)( ( rq->flags & DT_F_RT_SLIDE ) != 0 );
+	if ( e->slide && rq->look.chcol != 0xFFFFFFFFU ) {
+		paper = (UW)rq->look.chcol;
+	} else if ( om_store_paper(&rq->target, &paper) < E_OK || paper == TV_PAPER_LOOK ) {
+		paper = e->slide ? 0x00FFFFFFU : 0x00000000U;
+	}
 	knl_memset(&all, 0, sizeof(all));
 	all.right = e->w;
 	all.bottom = e->h;
 	i = wm_gid(wid);
 	if ( i >= 0 ) (void)dp_fill_rect(i, &all, e->ground);
-	e->rt = dtrt_open(wid, &rq->target, recno, &all, 0, 0, paper, 0);
+	/* a slide fitted to the area as the slides are made for, as the desktop shows one */
+	e->rt = e->slide ? dtrt_open(wid, &rq->target, recno, &all, rq->grab_x, rq->grab_y, paper, (INT)rq->carry)
+			 : dtrt_open(wid, &rq->target, recno, &all, 0, 0, paper, 0);
 	if ( e->rt == NULL ) return E_NOMEM;
 	dtrt_host(e->rt, &rq->win);
 	if ( ++rh_last == 0 ) rh_last = 1;
 	e->no = rh_last;
 	e->used = TRUE;
 	wm_update();
-	tm_printf((UB *)"player: hosted %u in a window of process %d\n", e->no, (INT)pid);
+	tm_printf((UB *)"player: hosted %u in a window of process %d%s\n", e->no, (INT)pid,
+		  e->slide ? " as a slide" : "");
 	an->how = e->no;
 	rh_state(e, an);
 	return E_OK;
@@ -332,8 +349,15 @@ EXPORT void dt_rthost_poll( void )
 	INT	i, n;
 
 	for ( i = 0; i < RH_MAX; i++ ) {
+		UINT	a;
+
 		if ( !rh[i].used ) continue;
-		(void)dtrt_action(rh[i].rt, &n);	/* slide moves mean nothing here */
+		/* what a slide's program asks of the slides is kept for its window's program; elsewhere nothing */
+		a = dtrt_action(rh[i].rt, &n);
+		if ( rh[i].slide && a != 0 && a != RT_ACT_DONE ) {
+			rh[i].act = a;
+			rh[i].act_n = n;
+		}
 		if ( wm_obj_wid(&rh[i].win) != rh[i].wid ) rh_end(&rh[i], "with its window");
 	}
 }

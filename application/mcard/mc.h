@@ -34,6 +34,7 @@
 #include <ts/hid.h>
 #include <ts/tray.h>
 #include <ts/wm.h>
+#include <ts/vobjsz.h>
 #include "mc_db.h"
 
 #define TICK_MS		20
@@ -46,7 +47,7 @@
 #define OUT_MAX		( 8 * 1024 * 1024 )
 #define CHUNK		( 64 * 1024 )
 #define LINK_W		180			/* a link in a field when it says no size */
-#define LINK_H		25
+#define LINK_H		VOBJ_CLOSED_H(0, 1, 1)		/* closed, at 14 */
 
 /* The card window's screens */
 #define SCR_CARD	0			/* カード画面 */

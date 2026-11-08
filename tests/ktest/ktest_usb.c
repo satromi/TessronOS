@@ -96,14 +96,20 @@ LOCAL void test_hc( void )
 	if ( n <= 0 ) {
 		KT_SKIP("the machine has no USB controller");
 	}
-#if defined(X64)
-	KT_ASSERT(n >= 1);		/* the PC's own; the RP1 and QEMU virt's test machine have two */
+#if defined(X64) || defined(RPI4)
+	KT_ASSERT(n >= 1);		/* the machine's own; the RP1 and QEMU virt's test machine have two */
 #else
 	KT_ASSERT(n >= 2);
 #endif
 	for ( i = 0; i < n; i++ ) {
 		KT_ASSERT_ER(ts_usb_ref_hc(i, &hc), E_OK);
+		if ( hc.mmio == 0 ) continue;	/* the virtual one of the tests that ran before (vhc.c): no hardware */
 		KT_ASSERT_EQ(hc.running, 1);
+		if ( hc.ctx_size == 0 ) {
+			/* the USB-C port's controller has no contexts: see test_dwc2 */
+			KT_ASSERT_EQ(hc.nports, 1);
+			continue;
+		}
 		KT_ASSERT_EQ(hc.version >> 8, 1);	/* version 1.x */
 		KT_ASSERT(hc.nports > 0);
 		KT_ASSERT(hc.nslots > 0);
@@ -276,6 +282,109 @@ LOCAL void test_control( void )
 	KT_ASSERT_EQ(r.vendor, d->vendor);
 	KT_ASSERT_ER(ts_usb_ref_dev(0, &r), E_NOEXS);
 }
+
+#if defined(RPI4) || defined(RPI5)
+IMPORT BOOL knl_dwc2_probing( void );
+
+/*
+ * The controller of the USB-C port, which is used when a device is there
+ * (make's RPI4_QEMU_USB on QEMU's raspi4b): the device on it, a control transfer, and, where there is a QEMU monitor, a
+ * key through its interrupt endpoint and the device out and back.
+ */
+LOCAL BOOL dwc2_key( T_USBDEV *d )
+{
+	T_HIDEV	ev;
+	INT	i, got = 0;
+
+	(void)d;
+	while ( ts_hid_read(&ev, TMO_POL) >= E_OK ) {
+		;
+	}
+	tm_printf((UB*)"KTEST QMP {\"execute\":\"input-send-event\",\"arguments\":"
+		  "{\"events\":[{\"type\":\"key\",\"data\":"
+		  "{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"b\"}}}]}}\n");
+	for ( i = 0; i < 10 && !got; i++ ) {
+		if ( ts_hid_read(&ev, 500) >= E_OK && ev.type == HID_EV_KEY_DOWN && ev.code == 0x05 ) {
+			got = 1;
+		}
+	}
+	tm_printf((UB*)"KTEST QMP {\"execute\":\"input-send-event\",\"arguments\":"
+		  "{\"events\":[{\"type\":\"key\",\"data\":"
+		  "{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"b\"}}}]}}\n");
+	for ( i = 0; i < 10 && got == 1; i++ ) {
+		if ( ts_hid_read(&ev, 500) >= E_OK && ev.type == HID_EV_KEY_UP && ev.code == 0x05 ) {
+			got = 2;
+		}
+	}
+	return ( got == 2 );
+}
+
+LOCAL T_USBDEV *dwc2_find_kbd( INT hc )
+{
+	INT	i;
+
+	load_tree();
+	for ( i = 0; i < ndev; i++ ) {
+		if ( (INT)devs[i].hc == hc && devs[i].role == USB_ROLE_HID ) {
+			return &devs[i];
+		}
+	}
+	return NULL;
+}
+
+LOCAL void test_dwc2( void )
+{
+	T_USBHC		hc;
+	T_USBPORT	p;
+	T_USBDEV	*d;
+	UB		desc[18], setup[8], st[2];
+	INT		i, n = ts_usb_hc_count(), which = -1;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( ts_usb_ref_hc(i, &hc) >= E_OK && hc.ctx_size == 0 && hc.version == 0x0200 ) {
+			which = i;
+		}
+	}
+	if ( which < 0 ) KT_SKIP("nothing was found on the USB-C port: it was put back");
+	KT_ASSERT_ER(ts_usb_ref_port(which, 0, &p), E_OK);
+	KT_ASSERT_EQ(p.powered, 1);
+	KT_ASSERT_EQ(p.usb3, 0);
+	if ( !p.connected ) KT_SKIP("nothing on the USB-C port");
+	d = dwc2_find_kbd(which);
+	if ( d == NULL ) KT_SKIP("no keyboard on the USB-C port");
+	KT_ASSERT_EQ(p.speed, d->speed);
+	tm_printf((UB*)"  dwc2: controller %d, addr %d, speed %d, %04x:%04x\n", which, (INT)d->addr,
+		  (INT)d->speed, (INT)d->vendor, (INT)d->product);
+
+	KT_ASSERT_EQ(ts_usb_get_desc(d->dev, 1, 0, desc, sizeof(desc)), 18);
+	KT_ASSERT_EQ(desc[1], 1);
+	KT_ASSERT_EQ(desc[8] | (desc[9] << 8), d->vendor);
+	setup[0] = 0x80; setup[1] = 0; setup[2] = 0; setup[3] = 0;
+	setup[4] = 0; setup[5] = 0; setup[6] = 2; setup[7] = 0;
+	KT_ASSERT_EQ(ts_usb_control(d->dev, setup, st, 2), 2);
+	/* a request refused is a stall, and the endpoint goes on */
+	setup[0] = 0xc0; setup[1] = 0x55; setup[6] = 8;
+	KT_ASSERT_EQ(ts_usb_control(d->dev, setup, desc, 8), E_OBJ);
+	KT_ASSERT_EQ(ts_usb_get_desc(d->dev, 1, 0, desc, 8), 8);
+
+	if ( !dwc2_key(d) ) KT_SKIP("no QEMU monitor to press a key with");
+
+	tm_printf((UB*)"KTEST QMP {\"execute\":\"device_del\",\"arguments\":{\"id\":\"dwkbd\"}}\n");
+	for ( i = 0; i < 100 && dwc2_find_kbd(which) != NULL; i++ ) {
+		tk_dly_tsk(50);
+	}
+	KT_ASSERT(dwc2_find_kbd(which) == NULL);
+	tm_printf((UB*)"KTEST QMP {\"execute\":\"device_add\",\"arguments\":"
+		  "{\"driver\":\"usb-kbd\",\"id\":\"dwkbd\"}}\n");
+	for ( i = 0; i < 100 && dwc2_find_kbd(which) == NULL; i++ ) {
+		tk_dly_tsk(50);
+	}
+	d = dwc2_find_kbd(which);
+	KT_ASSERT(d != NULL);
+	tk_dly_tsk(100);
+	KT_ASSERT(dwc2_key(d));
+}
+#endif
 
 /* ---------------------------------------------------------------- HID */
 
@@ -1413,10 +1522,24 @@ LOCAL void test_hid_padded( void )
 
 EXPORT void ktest_usb( void )
 {
+#if defined(RPI4) || defined(RPI5)
+	{
+		/* what the USB-C port has is found behind the first scan */
+		INT	w;
+
+		for ( w = 0; w < 100 && knl_dwc2_probing(); w++ ) {
+			tk_dly_tsk(100);
+		}
+		tk_dly_tsk(1500);
+	}
+#endif
 	KT_RUN(test_hc);
 	KT_RUN_QEMU_DEVS(test_ports, "the ports the QEMU machine has in use");
 	KT_RUN_QEMU_DEVS(test_tree, "the devices the QEMU machine has");
 	KT_RUN(test_control);
+#if defined(RPI4) || defined(RPI5)
+	KT_RUN(test_dwc2);
+#endif
 	KT_RUN(test_hid_desc);
 #if KT_VHC
 	KT_RUN(test_hid_padded);

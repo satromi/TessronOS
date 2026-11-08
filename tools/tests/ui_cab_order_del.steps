@@ -1,0 +1,113 @@
+# 仮身一覧: what is taken stays taken by its link when the links are put in another order
+# (いちばん後ろへ, いちばん前へ), so that 削除 after it throws away the link taken and no other
+# (design 11.3), for tools/ui_run.py. Two copies of 画用紙 holding four closed links (xmlbig),
+# opened with 仮身一覧, one in the desktop's cabinet (open) and one in 仮身一覧 running as a
+# process (pcab): the fourth link (220,20) taken, put behind the others (Ctrl+R) and deleted;
+# the first (20,20) taken, put in front (Ctrl+F) and deleted. The second and third links must
+# be left, where they were (their frames drawn, the first and fourth links' places empty), and
+# record 0 of both the same, byte for byte (cab_k_* and cab_p_*).
+cabproc kernel
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="100" vobjright="180" vobjbottom="119" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="220" vobjtop="20" vobjright="380" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+click 357 153
+sync 600
+wait 600
+key 15 01
+sync 600
+shapes
+want ok 4 1
+key 4C
+sync 600
+click 167 153
+sync 600
+wait 600
+key 09 01
+sync 600
+key 4C
+sync 600
+move 890 690
+sync 600
+wait 1500
+shot cab_k_left
+pixel 200 148 FFFFFF
+pixel 400 148 FFFFFF
+pixel 200 188 000000
+pixel 200 228 000000
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
+xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
+xml vobjleft="20" vobjtop="100" vobjright="180" vobjbottom="119" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
+xml vobjleft="220" vobjtop="20" vobjright="380" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+logmark
+pcab big
+expectsincein 60 cabinet: opened 画用紙 shapes 4 links 4
+wait 800
+logmark
+click 357 153
+wait 600
+key 15 01
+expectsince cabinet: links to the back
+expectsince cabinet: shapes 4 picked 1
+logmark
+key 4C
+expectsince cabinet: deleted, 3 shapes
+logmark
+click 167 153
+wait 600
+key 09 01
+expectsince cabinet: links to the front
+logmark
+key 4C
+expectsince cabinet: deleted, 2 shapes
+move 890 690
+wait 1500
+shot cab_p_left
+pixel 200 148 FFFFFF
+pixel 400 148 FFFFFF
+pixel 200 188 000000
+pixel 200 228 000000
+logmark
+key 16 01
+expectsince cabinet: saved (0)
+sum show
+same kernel
+key 08 01
+expect cabinet: closed

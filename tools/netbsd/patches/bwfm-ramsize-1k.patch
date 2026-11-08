@@ -1,0 +1,29 @@
+bwfm: the size of the chip's RAM as OpenBSD and Linux read it.
+
+NetBSD masks a bank's size with 0x3f and counts every bank in units of
+8 KB. The register has a seven-bit size and a bit (0x200) for banks counted
+in units of 1 KB. OpenBSD's bwfm_chip_tcm_ramsize and Linux's
+brcmf_chip_tcm_ramsize read it so. A size read wrongly puts the NVRAM,
+which goes at the end of the RAM, somewhere other than where the firmware
+looks for it. The size found is said on the console.
+
+Applied by tools/netbsd/build.sh to a copy of the file
+(docs/tessronos/09-network.md 9.6); NetBSD's tree is not changed.
+
+--- a/sys/dev/ic/bwfm.c
++++ b/sys/dev/ic/bwfm.c
+@@ -1661,11 +1661,12 @@
+ 		    core->co_base + BWFM_ARMCR4_BANKIDX, i);
+ 		bxinfo = sc->sc_buscore_ops->bc_read(sc,
+ 		    core->co_base + BWFM_ARMCR4_BANKINFO);
+-		ramsize += ((bxinfo & BWFM_ARMCR4_BANKINFO_BSZ_MASK) + 1) *
+-		    BWFM_ARMCR4_BANKINFO_BSZ_MULT;
++		ramsize += ((bxinfo & 0x7f) + 1) *
++		    ((bxinfo & 0x200) ? 1024 : 8192);
+ 	}
+
+ 	sc->sc_chip.ch_ramsize = ramsize;
++	printf("bwfm: the chip's RAM is %u bytes, in %u banks\n", ramsize, totb);
+ }
+
+ void

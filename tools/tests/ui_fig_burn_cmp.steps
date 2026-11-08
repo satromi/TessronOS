@@ -1,0 +1,104 @@
+# 焼き付けを、デスクトップの図形編集とプロセスの図形編集で同じに使う (design 17.13), for
+# tools/ui_run.py. A figure of one rectangle and two zigzag lines (mkbig fig 1 2 0) opened at
+# 100,100; its 道具パネル at the top of the screen (100,0). With the canvas a picture is made
+# from 300,250 to 420,330 and a stroke of the pencil drawn in it, Escape writing it; with the
+# rectangle template a rectangle is drawn from 350,280 to 450,360, over a corner of the
+# picture. The picture alone picked (310,260), the menu opened at 600,600 with 図形操作 under
+# the pointer, and 図形操作 > 焼き付け chosen (720,685): the rectangle is drawn into the
+# picture's pixels, through an environment of memory (dp_open_mem), and taken out of the
+# figure. Saved: record 0 (its UUIDs as noughts) and the picture beside it come out the same,
+# byte for byte, and the screens are kept to be compared.
+# Keys: Esc 29; Ctrl+S 16 01, Ctrl+E 08 01.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 1 2 0
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+click 264 48
+wait 300
+drag 300 250 420 330
+wait 500
+drag 320 270 400 270
+wait 400
+key 29
+wait 400
+click 298 82
+wait 300
+drag 350 280 450 360
+wait 400
+click 298 48
+wait 300
+click 310 260
+wait 400
+shot bcmp_k_picked
+click 600 600 1
+wait 600
+move 620 606
+wait 150
+move 680 606
+wait 500
+move 700 606
+wait 150
+move 720 685
+wait 150
+click 720 685
+wait 600
+shot bcmp_k_burnt
+sync 600
+key 16 01
+sync 600
+sum anon
+keep kernel
+sum res _0_1.png
+keep kpng
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 2 0
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 3
+wait 800
+click 264 48
+wait 300
+drag 300 250 420 330
+wait 500
+drag 320 270 400 270
+wait 400
+key 29
+wait 400
+click 298 82
+wait 300
+drag 350 280 450 360
+wait 400
+click 298 48
+wait 300
+click 310 260
+wait 400
+shot bcmp_p_picked
+logmark
+click 600 600 1
+wait 600
+move 620 606
+wait 150
+move 680 606
+wait 500
+move 700 606
+wait 150
+move 720 685
+wait 150
+click 720 685
+expectsince figure: burnt
+wait 600
+shot bcmp_p_burnt
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum anon
+same kernel
+sum res _0_1.png
+same kpng
+key 08 01
+expect figure: closed

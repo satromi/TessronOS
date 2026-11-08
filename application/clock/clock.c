@@ -220,7 +220,8 @@ int main( void )
 	while ( !done ) {
 		BOOL	again = FALSE;
 
-		for ( TMO tmo = next_second(); ob_rea_tmo(port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) {
+		/* nothing shown yet: no wait, or the window stays empty until the next second */
+		for ( TMO tmo = ( shown[0] == 0 ) ? TMO_POL : next_second(); ob_rea_tmo(port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) {
 			if ( m.event == OB_E_CLOSE || m.event == OB_E_DELETE ) {
 				done = TRUE;
 			} else if ( m.event == OB_E_PRESS && m.code == 1 ) {

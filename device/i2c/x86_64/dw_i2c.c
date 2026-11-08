@@ -44,6 +44,7 @@
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
+#include <ts/pm.h>
 #include <ts/pcie.h>
 #include "../../../kernel/sysdepend/acpi/acpi.h"
 #include "i2c.h"
@@ -357,12 +358,47 @@ EXPORT T_I2CBUS *knl_dwi2c_bus( UW adr, void *acpi, UW hz )
 	return &d->bus;
 }
 
+/*
+ * After S3 each controller is as from reset: in D0 by its ACPI method, out
+ * of the LPSS's reset, its speed set again. Nothing to do when power stayed
+ * on (S0 idle): these functions are left out of D3hot.
+ */
+LOCAL ER dw_pm_suspend( void *arg, INT how )
+{
+	INT	i;
+
+	for ( i = 0; i < ndw; i++ ) tk_loc_mtx(dw[i].mtx, TMO_FEVR);
+	return E_OK;
+}
+
+LOCAL void dw_pm_resume( void *arg, INT how )
+{
+	INT	i;
+
+	for ( i = 0; i < ndw; i++ ) {
+		DWI2C	*d = &dw[i];
+
+		if ( how == PM_S3 ) {
+			if ( d->acpi != NULL ) (void)knl_acpica_call(d->acpi, "_PS0");
+			wr(d, LPSS_RESETS, 0);
+			WaitUsec(10);
+			wr(d, LPSS_RESETS, LPSS_RESETS_FUNC | LPSS_RESETS_IDMA);
+			WaitUsec(100);
+			set_speed(d, d->hz);
+		}
+		tk_unl_mtx(d->mtx);
+	}
+}
+
+LOCAL CONST T_PMDEV	dw_pm = { "i2c", PM_ORD_INPUT, dw_pm_suspend, dw_pm_resume, NULL };
+
 /* The functions that may be LPSS I2C controllers (what is used of them is set up when an I2C device asks) */
 EXPORT INT knl_dwi2c_init( void )
 {
 	T_PCIDEV	p;
 	INT		i, n = 0, all = ts_pcie_count();
 
+	(void)ts_pm_register(&dw_pm);
 	for ( i = 0; i < all; i++ ) {
 		if ( ts_pcie_get(i, &p) == E_OK && p.vendor == 0x8086 && p.bus == 0 && p.subclass == 0x80
 		  && ( p.class_code == 0x0c || p.class_code == 0x11 ) ) {

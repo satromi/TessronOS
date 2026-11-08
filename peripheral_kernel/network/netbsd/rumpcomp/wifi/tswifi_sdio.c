@@ -9,7 +9,7 @@
 
 /*
  *	tswifi_sdio.c
- *	The Wi-Fi's SDIO host inside the rump kernel (Raspberry Pi 5).
+ *	The Wi-Fi's SDIO host inside the rump kernel (Raspberry Pi 5, Raspberry Pi 4).
  *
  *	This file is compiled with the NetBSD kernel headers into the rump
  *	kernel when the aarch64 build has the Wi-Fi (tools/netbsd/build.sh,
@@ -75,6 +75,7 @@
 
 /* The hypercalls of the host (wifi_user_rpi5.c) */
 int	rumpcomp_tswifi_host(unsigned long *, unsigned long *, unsigned int *, unsigned int *);
+int	rumpcomp_tswifi_host_arasan(void);
 void	*rumpcomp_tswifi_map(unsigned long, unsigned long);
 int	rumpcomp_tswifi_intr_wait(unsigned int);
 void	rumpcomp_tswifi_intr_done(unsigned int);
@@ -85,6 +86,13 @@ void	rumpcomp_tswifi_dmasync(void *, size_t, int);
 int	rumpcomp_tswifi_fw_open(const char *, void **, size_t *);
 void	rumpcomp_tswifi_fw_close(void *, size_t);
 void	rumpcomp_tswifi_say(const char *);
+
+/*
+ * Set for a host that loses a register's write made within two of the
+ * card's clocks of the one before it (bus_space_write_*). The data port
+ * has no such limit, which is just as well for its speed.
+ */
+static int	tswifi_write_gap;
 
 /* The kinds of cache work rumpcomp_tswifi_dmasync is asked for */
 #define TSWIFI_SYNC_CLEAN	1	/* the CPU's writes out to memory */
@@ -193,6 +201,20 @@ tssdhc_attach(device_t parent, device_t self, void *aux)
 	sc->sc_flags = SDHC_FLAG_32BIT_ACCESS | SDHC_FLAG_NON_REMOVABLE |
 	    SDHC_FLAG_NO_CLKBASE | SDHC_FLAG_NO_1_8_V;
 	sc->sc_clkbase = ta->ta_clk_khz;
+	/*
+	 * The BCM2711's older block: 3.3V and high speed as its wiring has
+	 * them rather than its capabilities' registers, its power register
+	 * never written 0, its speed bit left alone, and each write to a
+	 * register but the data port kept apart from the next. Blocks of
+	 * 1024 bytes at most.
+	 */
+	if (rumpcomp_tswifi_host_arasan()) {
+		sc->sc_flags |= SDHC_FLAG_NO_PWR0 | SDHC_FLAG_HOSTCAPS |
+		    SDHC_FLAG_NO_HS_BIT;
+		sc->sc_caps = SDHC_VOLTAGE_SUPP_3_3V | SDHC_HIGH_SPEED_SUPP |
+		    (SDHC_MAX_BLK_LEN_1024 << SDHC_MAX_BLK_LEN_SHIFT);
+		tswifi_write_gap = 1;
+	}
 	tsc->sc_intr = ta->ta_intr;
 
 	if (bus_space_map((bus_space_tag_t)1, ta->ta_pa, ta->ta_size, 0, &bsh) != 0) {
@@ -254,7 +276,28 @@ bus_space_subregion(bus_space_tag_t bst, bus_space_handle_t bsh,
 #define TSWIFI_WR(bsh, offset, type, v) do {				\
 	__asm volatile("dmb oshst" ::: "memory");			\
 	*(volatile type *)((bsh) + (offset)) = (v);			\
+	if (tswifi_write_gap && (offset) != SDHC_DATA)			\
+		tswifi_spin_gap();					\
 } while (0)
+
+/*
+ * Two clocks at the slowest, 400 kHz, and the part of a microsecond
+ * rounded up. Spun, not slept: the caller holds the host's lock.
+ */
+#define TSWIFI_WRITE_GAP_US	6
+
+static void
+tswifi_spin_gap(void)
+{
+	uint64_t freq, start, now;
+
+	__asm volatile("dsb osh" ::: "memory");
+	__asm volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+	__asm volatile("isb; mrs %0, cntvct_el0" : "=r"(start));
+	do {
+		__asm volatile("isb; mrs %0, cntvct_el0" : "=r"(now));
+	} while (now - start < freq * TSWIFI_WRITE_GAP_US / 1000000);
+}
 
 uint8_t
 bus_space_read_1(bus_space_tag_t bst, bus_space_handle_t bsh, bus_size_t offset)
@@ -670,6 +713,7 @@ struct tswifi_fwlink {
 	int32_t		freq;		/* MHz */
 	int32_t		sup_status;	/* the chip's supplicant's last state (E_PSK_SUP), -1 none */
 	int32_t		roams;		/* how many times the chip roamed */
+	int32_t		pm;		/* BWFM_C_GET_PM: 0 awake, 1 PS-Poll, 2 fast; -1 not told */
 	uint8_t		bssid[6];
 	uint8_t		pad[2];
 };
@@ -1097,6 +1141,7 @@ rump_tswifi_fw_link(struct tswifi_fwlink *l)
 		memset(l->bssid, 0, sizeof(l->bssid));
 	if (bwfm_fwvar_cmd_get_int(sc, BWFM_C_GET_RSSI, &v) == 0)
 		l->rssi = (int32_t)v;
+	l->pm = (bwfm_fwvar_cmd_get_int(sc, BWFM_C_GET_PM, &v) == 0) ? (int32_t)v : -1;
 	if (bwfm_fwvar_cmd_get_data(sc, BWFM_C_GET_CHANNEL, ch, sizeof(ch)) == 0) {
 		c = (int)le32toh(ch[1]);		/* the network's channel */
 		l->freq = c <= 0 ? 0 : c == 14 ? 2484 : c < 14 ? 2407 + 5 * c : 5000 + 5 * c;

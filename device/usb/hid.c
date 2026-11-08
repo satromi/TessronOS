@@ -47,6 +47,15 @@
  *	(knl_hid_mt_attach, knl_hid_mt_contact, knl_hid_mt_sync), and they
  *	are taken the same way.
  *
+ *	The volume and playing keys of a keyboard are mostly on the consumer
+ *	page, in an interface or a report apart from its keys, either as a
+ *	bit each or as an array of usages held. Both are read from the report
+ *	descriptor (HIDCC) and go on as keys of the keyboard page's numbering
+ *	(cc_keys), so that what comes after does not tell them from a key's.
+ *	An interface with nothing else counts as a keyboard. A keyboard read
+ *	in the boot protocol has only its eight bytes: any consumer report it
+ *	would send in the report protocol is not read.
+ *
  *	The USB manager hands every HID interface here when the device is
  *	plugged in. The interrupt endpoint is kept armed as a stream; each
  *	report that comes in is turned into events at once and put into a
@@ -103,6 +112,7 @@
 #define USAGE_WHEEL		0x10038
 #define USAGE_PAN		0xC0238		/* the consumer page's AC Pan: a wheel across */
 #define USAGE_PAGE_BUTTON	9
+#define USAGE_PAGE_CONSUMER	0x0C
 
 /*
  * The digitizer page (HID Usage Tables, 0x0D): a pen or a touch screen
@@ -212,6 +222,40 @@ typedef struct {
 	DGAPP		a[HID_DG_APPS];
 } HIDDG;
 
+/*
+ * The consumer page's keys of one interface: those given a bit each, and
+ * those given as an array whose values are usages (from umin, or by
+ * place in us when the descriptor lists them one by one). A report
+ * holds the keys of its own report ID only, so what is held is kept
+ * with the ID it came in.
+ */
+#define HID_CC_VARS	16
+#define HID_CC_ARRAYS	4
+#define HID_CC_HELD	8
+
+typedef struct {
+	INT	rid, off, size;
+	UINT	key;
+} CCVAR;
+
+typedef struct {
+	INT	rid, off, size, count;
+	INT	lmin, lmax;
+	BOOL	range;
+	UW	umin;
+	INT	nus;
+	UW	us[16];
+} CCARRAY;
+
+typedef struct {
+	INT	nvar, narr;
+	CCVAR	v[HID_CC_VARS];
+	CCARRAY	a[HID_CC_ARRAYS];
+	INT	nheld;
+	UINT	held[HID_CC_HELD];
+	INT	hrid[HID_CC_HELD];
+} HIDCC;
+
 typedef struct {
 	BOOL	used;
 	UINT	id;		/* the interface's number while it is there, from 1 */
@@ -241,6 +285,8 @@ typedef struct {
 	INT	slot;		/* its place in the table, from 0 */
 	UB	ext_name[16];	/* not on USB: its device object's name ("ps2kbd") */
 	HIDDG	*dg;		/* its pen and touch screen, NULL none */
+	HIDCC	*cc;		/* its consumer page's keys, NULL none */
+	BOOL	cc_only;	/* it has nothing else: a keyboard of those keys, no pointer */
 	INT	tdiag10;	/* the diagonal of the touch screen its touches are on, 0.1 mm; 0 not known */
 } HIDDEV;
 
@@ -271,6 +317,7 @@ LOCAL ID		hid_semid = 0;
 
 LOCAL INT		ptr_x = 0, ptr_y = 0;
 LOCAL UINT		ptr_buttons = 0;
+LOCAL INT		ptr_press_x = 0, ptr_press_y = 0;	/* where button 0 last went down */
 LOCAL BOOL		ptr_injected = FALSE;	/* pointer events were put in without a device */
 LOCAL INT		scr_w = 0, scr_h = 0;
 
@@ -442,46 +489,6 @@ LOCAL void ring_put_as( CONST T_HIDEV *ev, BOOL inj, UINT src, UB tch, INT px )
  * a modifier made another key no longer holds its own.
  */
 LOCAL UINT	km_held = 0;		/* modifier bits held by keys made modifiers */
-LOCAL UINT	km_thumbs = 0;		/* KM_MOD_THUMB_* held, in a thumb-shift kana layout */
-LOCAL UINT	km_thumb_used = 0;	/* those of them a key was pressed with */
-
-/*
- * The thumbs of a thumb-shift kana layout: a thumb key's press kept back,
- * the keys pressed while it is held marked with it, and it let through,
- * pressed and let go, only when nothing was pressed with it.
- */
-LOCAL BOOL thumb_take( CONST HIDDEV *d, T_HIDEV *e )
-{
-	INT	k = km_kana();
-	UINT	bit;
-
-	if ( k != KM_KANA_TRON && k != KM_KANA_NICOLA ) {
-		km_thumbs = km_thumb_used = 0;
-		return FALSE;
-	}
-	if ( e->code == KM_THUMB_L_KEY || e->code == KM_THUMB_R_KEY ) {
-		bit = ( e->code == KM_THUMB_L_KEY ) ? KM_MOD_THUMB_L : KM_MOD_THUMB_R;
-		if ( e->type == HID_EV_KEY_DOWN ) {
-			km_thumbs |= bit;
-			km_thumb_used &= ~bit;
-			return TRUE;			/* kept back */
-		}
-		km_thumbs &= ~bit;
-		if ( ( km_thumb_used & bit ) == 0 ) {
-			T_HIDEV	down = *e;
-
-			down.type = HID_EV_KEY_DOWN;
-			ring_put_as(&down, FALSE, d->id, TCH_NO, 0);
-			return FALSE;			/* alone: pressed, and this let go */
-		}
-		km_thumb_used &= ~bit;
-		return TRUE;
-	}
-	if ( e->type == HID_EV_KEY_DOWN && km_thumbs != 0 ) {
-		km_thumb_used |= km_thumbs;
-	}
-	return FALSE;
-}
 
 LOCAL void ring_put( CONST HIDDEV *d, CONST T_HIDEV *ev )
 {
@@ -501,10 +508,6 @@ LOCAL void ring_put( CONST HIDDEV *d, CONST T_HIDEV *ev )
 		}
 	}
 	e.mods = ( e.mods & ~km_mods_away() ) | km_held;
-	if ( ( e.type == HID_EV_KEY_DOWN || e.type == HID_EV_KEY_UP ) && thumb_take(d, &e) ) {
-		return;
-	}
-	e.mods |= km_thumbs;
 	ring_put_as(&e, FALSE, d->id, TCH_NO, 0);
 }
 
@@ -513,9 +516,11 @@ LOCAL void ring_put_ptr( CONST HIDDEV *d, CONST T_HIDEV *ev, UB tch )
 {
 	T_HIDEV	e = *ev;
 
-	e.mods = ( e.mods & ~km_mods_away() ) | km_held | km_thumbs;
+	e.mods = ( e.mods & ~km_mods_away() ) | km_held;
 	ring_put_as(&e, FALSE, d->id, tch, ( tch != TCH_NO ) ? touch_px(d->tdiag10) : 0);
 }
+
+LOCAL volatile UW	hid_late_ms = 0;
 
 LOCAL BOOL ring_take( T_HIDEV *ev, BOOL *p_inj, UB *p_tch, INT *p_px )
 {
@@ -960,6 +965,10 @@ LOCAL void ptr_emit( HIDDEV *d, T_HIDEV *ev, BOOL moved, UINT buttons, UB tch )
 		}
 		ev->type = ( (buttons & (1U << i)) != 0 ) ? HID_EV_BTN_DOWN : HID_EV_BTN_UP;
 		ev->code = (UINT)i;
+		if ( i == 0 && ev->type == HID_EV_BTN_DOWN ) {
+			ptr_press_x = ptr_x;
+			ptr_press_y = ptr_y;
+		}
 		ring_put_ptr(d, ev, tch);
 	}
 	ptr_buttons = buttons;
@@ -967,6 +976,167 @@ LOCAL void ptr_emit( HIDDEV *d, T_HIDEV *ev, BOOL moved, UINT buttons, UB tch )
 }
 
 LOCAL BOOL dg_report( HIDDEV *d, CONST UB *r, INT len );
+
+/* ---------------------------------------------------------------- consumer keys */
+
+/*
+ * What a consumer page's usage is as a key: 0 for one that is not taken.
+ * Their numbers are of the keyboard page, so that a key of either page
+ * is the same to everything above this.
+ */
+LOCAL CONST struct { UH usage; UB key; } cc_keys[] = {
+	{ 0xE9, HID_KEY_VOLUP },	{ 0xEA, HID_KEY_VOLDOWN },	{ 0xE2, HID_KEY_MUTE },
+	{ 0xCD, HID_KEY_PLAYPAUSE },	{ 0xB0, HID_KEY_PLAYPAUSE },	{ 0xB1, HID_KEY_PLAYPAUSE },
+	{ 0xB7, HID_KEY_STOP },		{ 0xB6, HID_KEY_PREV },		{ 0xB5, HID_KEY_NEXT }
+};
+
+LOCAL UINT cc_key( UW u )
+{
+	INT	i;
+
+	if ( ( u >> 16 ) != USAGE_PAGE_CONSUMER ) {
+		return 0;
+	}
+	for ( i = 0; i < (INT)( sizeof(cc_keys) / sizeof(cc_keys[0]) ); i++ ) {
+		if ( cc_keys[i].usage == ( u & 0xffff ) ) {
+			return cc_keys[i].key;
+		}
+	}
+	return 0;
+}
+
+/* A key put among those down in this report, once */
+LOCAL void cc_note( UINT *now, INT *p_n, UINT key )
+{
+	INT	i;
+
+	if ( key == 0 ) {
+		return;
+	}
+	for ( i = 0; i < *p_n; i++ ) {
+		if ( now[i] == key ) return;
+	}
+	if ( *p_n < HID_CC_HELD ) {
+		now[(*p_n)++] = key;
+	}
+}
+
+LOCAL INT get_field( CONST UB *r, INT len, CONST HIDFIELD *f );
+
+/* The keys down in a report of ID rid, r being what comes after the ID */
+LOCAL INT cc_scan( CONST HIDCC *c, INT rid, CONST UB *r, INT len, UINT *now )
+{
+	INT		i, k, n = 0;
+	HIDFIELD	f;
+
+	knl_memset(&f, 0, sizeof(f));
+	for ( i = 0; i < c->nvar; i++ ) {
+		if ( c->v[i].rid != rid ) continue;
+		f.off = c->v[i].off;
+		f.size = c->v[i].size;
+		if ( get_field(r, len, &f) != 0 ) {
+			cc_note(now, &n, c->v[i].key);
+		}
+	}
+	for ( i = 0; i < c->narr; i++ ) {
+		CONST CCARRAY	*a = &c->a[i];
+
+		if ( a->rid != rid ) continue;
+		f.size = a->size;
+		f.sgn = ( a->lmin < 0 );
+		for ( k = 0; k < a->count; k++ ) {
+			INT	v;
+
+			f.off = a->off + k * a->size;
+			v = get_field(r, len, &f);
+			if ( v < a->lmin || v > a->lmax ) {
+				continue;	/* out of range: no key in this place */
+			}
+			v -= a->lmin;
+			if ( a->range ) {
+				cc_note(now, &n, cc_key(a->umin + (UW)v));
+			} else if ( v < a->nus ) {
+				cc_note(now, &n, cc_key(a->us[v]));
+			}
+		}
+	}
+	return n;
+}
+
+/* A key of the consumer page down or let go, as a keyboard's would be */
+LOCAL void cc_event( HIDDEV *d, UINT type, UINT key )
+{
+	T_HIDEV	ev;
+
+	knl_memset(&ev, 0, sizeof(ev));
+	ev.type = type;
+	ev.code = key;
+	ev.when = now_ns();
+	ev.x = ptr_x;
+	ev.y = ptr_y;
+	ring_put(d, &ev);
+}
+
+/* What changed among this report's keys. Keys of another report ID stay as they are. */
+LOCAL void cc_report( HIDDEV *d, CONST UB *r, INT len )
+{
+	HIDCC	*c = d->cc;
+	UINT	now[HID_CC_HELD];
+	INT	rid = 0, n, i, k;
+
+	if ( c == NULL || d->boot ) {
+		return;
+	}
+	/* a descriptor that gives one report an ID gives them all one */
+	if ( ( c->nvar > 0 ? c->v[0].rid : c->a[0].rid ) != 0 ) {
+		if ( len < 1 ) {
+			return;
+		}
+		rid = r[0];
+		r++;
+		len--;
+	}
+	n = cc_scan(c, rid, r, len, now);
+	for ( i = 0; i < c->nheld; ) {
+		BOOL	still = ( c->hrid[i] != rid );
+
+		for ( k = 0; !still && k < n; k++ ) {
+			still = ( now[k] == c->held[i] );
+		}
+		if ( still ) {
+			i++;
+			continue;
+		}
+		cc_event(d, HID_EV_KEY_UP, c->held[i]);
+		c->nheld--;
+		c->held[i] = c->held[c->nheld];
+		c->hrid[i] = c->hrid[c->nheld];
+	}
+	for ( k = 0; k < n; k++ ) {
+		BOOL	had = FALSE;
+
+		for ( i = 0; i < c->nheld; i++ ) {
+			had = had || ( c->held[i] == now[k] );
+		}
+		if ( !had && c->nheld < HID_CC_HELD ) {
+			c->held[c->nheld] = now[k];
+			c->hrid[c->nheld] = rid;
+			c->nheld++;
+			cc_event(d, HID_EV_KEY_DOWN, now[k]);
+		}
+	}
+}
+
+/* The interface went: what it held is let go */
+LOCAL void cc_let_go( HIDDEV *d )
+{
+	HIDCC	*c = d->cc;
+
+	while ( c != NULL && c->nheld > 0 ) {
+		c->nheld--;
+		cc_event(d, HID_EV_KEY_UP, c->held[c->nheld]);
+	}
+}
 
 LOCAL void ptr_report( HIDDEV *d, CONST UB *r, INT len )
 {
@@ -976,6 +1146,10 @@ LOCAL void ptr_report( HIDDEV *d, CONST UB *r, INT len )
 	BOOL	moved;
 	PTRIN	in;
 
+	cc_report(d, r, len);
+	if ( d->cc_only ) {
+		return;
+	}
 	if ( dg_report(d, r, len) ) {
 		return;				/* a pen's or a touch screen's */
 	}
@@ -1449,6 +1623,7 @@ typedef struct {
 	BOOL		wacom;		/* Wacom's pages read as the usages they stand for */
 	BOOL		digi;		/* the digitizer page is used */
 	BOOL		touchpad;	/* it has a touch pad, which is not read here */
+	HIDCC		*cc;		/* the consumer page's keys it declares */
 	UW		apps[8];	/* its application collections, for the console */
 	INT		napps;
 } HIDPARSE;
@@ -1603,6 +1778,38 @@ LOCAL INT hid_parse( CONST UB *dsc, INT n, HIDPARSE *ps )
 			if ( input ) {
 				ps->rids[g.rid >> 3] |= (UB)( 1 << ( g.rid & 7 ) );
 			}
+			/* data, an array: its values are usages, some perhaps keys */
+			if ( input && ( val & 3 ) == 0 && g.rsize >= 1 && g.rsize <= 32 && g.rcount > 0
+			  && ps->cc != NULL && ps->cc->narr < HID_CC_ARRAYS ) {
+				BOOL	any = FALSE;
+				INT	m;
+
+				if ( range ) {
+					for ( m = 0; m < (INT)( sizeof(cc_keys) / sizeof(cc_keys[0]) ); m++ ) {
+						UW	cu = ( USAGE_PAGE_CONSUMER << 16 ) | cc_keys[m].usage;
+
+						any = any || ( cu >= umin && cu <= umax );
+					}
+				} else {
+					for ( m = 0; m < nus; m++ ) {
+						any = any || ( cc_key(usages[m]) != 0 );
+					}
+				}
+				if ( any ) {
+					CCARRAY	*ca = &ps->cc->a[ps->cc->narr++];
+
+					ca->rid = g.rid;
+					ca->off = o[g.rid];
+					ca->size = g.rsize;
+					ca->count = g.rcount;
+					ca->lmin = g.lmin;
+					ca->lmax = g.lmax;
+					ca->range = range;
+					ca->umin = umin;
+					ca->nus = nus;
+					for ( m = 0; m < nus; m++ ) ca->us[m] = usages[m];
+				}
+			}
 			for ( k = 0; k < g.rcount && k < HID_ITEMS_MAX; k++ ) {
 				UW		u;
 				HIDFIELD	*f;
@@ -1616,6 +1823,17 @@ LOCAL INT hid_parse( CONST UB *dsc, INT n, HIDPARSE *ps )
 				if ( ps->wacom ) u = wacom_usage(u);
 				/* data, not constant, and variable, not an array */
 				if ( (val & 3) != 2 || g.rsize < 1 || g.rsize > 32 ) {
+					continue;
+				}
+				if ( input && ps->cc != NULL && cc_key(u) != 0 ) {
+					if ( ps->cc->nvar < HID_CC_VARS ) {
+						CCVAR	*cv = &ps->cc->v[ps->cc->nvar++];
+
+						cv->rid = g.rid;
+						cv->off = o[g.rid] + k * g.rsize;
+						cv->size = g.rsize;
+						cv->key = cc_key(u);
+					}
 					continue;
 				}
 				if ( input && pointer_usage(u) && ps->nin < ps->maxin ) {
@@ -1936,6 +2154,7 @@ LOCAL BOOL hid_read_desc( HIDDEV *h, CONST UB *rd, INT n, BOOL wacom, UB *mode, 
 {
 	HIDPARSE	ps;
 	HIDDG		*dg;
+	HIDCC		*cc;
 	BOOL		found = FALSE;
 	INT		k;
 
@@ -1946,11 +2165,13 @@ LOCAL BOOL hid_read_desc( HIDDEV *h, CONST UB *rd, INT n, BOOL wacom, UB *mode, 
 	ps.bits = (INT *)Kmalloc(sizeof(INT) * 256);
 	ps.fbits = (INT *)Kmalloc(sizeof(INT) * 256);
 	dg = (HIDDG *)Kmalloc(sizeof(HIDDG));
+	cc = (HIDCC *)Kcalloc(1, sizeof(HIDCC));
+	ps.cc = cc;
 	ps.maxin = HID_FIELDS;
 	ps.maxft = HID_FFIELDS;
 	ps.rids = h->rids;
 	ps.wacom = wacom;
-	if ( ps.in != NULL && ps.ft != NULL && ps.bits != NULL && ps.fbits != NULL && dg != NULL ) {
+	if ( ps.in != NULL && ps.ft != NULL && ps.bits != NULL && ps.fbits != NULL && dg != NULL && cc != NULL ) {
 		INT	nf = hid_parse(rd, n, &ps);
 
 		found = pick_pointer(h, ps.in, nf);
@@ -1974,6 +2195,24 @@ LOCAL BOOL hid_read_desc( HIDDEV *h, CONST UB *rd, INT n, BOOL wacom, UB *mode, 
 				*p_mlen = dg_mode_report(&ps, mode, 64, p_mrid);
 			}
 		}
+		if ( cc->nvar + cc->narr > 0 ) {
+			INT	m = 0;
+
+			USB_LOG("usb: hid: interface %d consumer keys: %d a bit each, %d arrays%s\n",
+				h->ifno, cc->nvar, cc->narr, found ? "" : ", and nothing else");
+			h->cc_only = !found;
+			for ( k = 0; k < cc->nvar; k++ ) {
+				if ( report_bytes(ps.bits, cc->v[k].rid) > m ) m = report_bytes(ps.bits, cc->v[k].rid);
+			}
+			for ( k = 0; k < cc->narr; k++ ) {
+				if ( report_bytes(ps.bits, cc->a[k].rid) > m ) m = report_bytes(ps.bits, cc->a[k].rid);
+			}
+			if ( m > h->plen ) h->plen = m;
+			if ( !found ) show_desc(h->ifno, rd, n);
+			h->cc = cc;
+			cc = NULL;
+			found = TRUE;
+		}
 		if ( ps.digi || !found ) {
 			show_desc(h->ifno, rd, n);
 		}
@@ -1986,11 +2225,12 @@ LOCAL BOOL hid_read_desc( HIDDEV *h, CONST UB *rd, INT n, BOOL wacom, UB *mode, 
 	if ( ps.bits != NULL ) Kfree(ps.bits);
 	if ( ps.fbits != NULL ) Kfree(ps.fbits);
 	if ( dg != NULL ) Kfree(dg);
+	if ( cc != NULL ) Kfree(cc);
 
 	return found;
 }
 
-/* What an interface's pens and touch screens are holding let go, and their room given back */
+/* The room of an interface's pens, touch screens and consumer keys given back */
 LOCAL void dg_forget( HIDDEV *h )
 {
 	if ( h->dg != NULL ) {
@@ -1998,6 +2238,12 @@ LOCAL void dg_forget( HIDDEV *h )
 
 		h->dg = NULL;
 		Kfree(dg);
+	}
+	if ( h->cc != NULL ) {
+		HIDCC	*cc = h->cc;
+
+		h->cc = NULL;
+		Kfree(cc);
 	}
 }
 
@@ -2128,10 +2374,10 @@ LOCAL void show_report( CONST HIDDEV *d, CONST UB *r, INT len )
 	char	line[3 * HID_REPORT_MAX + 48];
 	INT	k, m, most = ( d->dg != NULL ) ? HID_REPORT_MAX : 24;
 
-	if ( d->is_kbd || d->reports > (UD)( d->dg != NULL ? HID_SHOW_DG : HID_SHOW_REPORTS ) ) {
+	if ( d->is_kbd || d->reports >= (UD)( d->dg != NULL ? HID_SHOW_DG : HID_SHOW_REPORTS ) ) {
 		return;
 	}
-	m = tm_sprintf((UB *)line, (UB *)"usb: hid: %d report %d:", (INT)d->id, (INT)d->reports);
+	m = tm_sprintf((UB *)line, (UB *)"usb: hid: %d report %d:", (INT)d->id, (INT)d->reports + 1);
 	for ( k = 0; k < len && k < most; k++ ) {
 		m += tm_sprintf((UB *)line + m, (UB *)" %02x", (INT)r[k]);
 	}
@@ -2151,14 +2397,15 @@ LOCAL void hid_xfer( void *ctx, DMABUF *b, INT off, INT len, INT err )
 	}
 	knl_memset(r, 0, sizeof(r));
 	knl_dmabuf_read(b, off, r, len);
-	hid_count.reports++;
-	d->reports++;
 	show_report(d, r, len);
 	if ( d->is_kbd ) {
 		kbd_report(d, r);
 	} else {
 		ptr_report(d, r, len);
 	}
+	/* counted once its events are out: whoever sees the count finds them there */
+	hid_count.reports++;
+	d->reports++;
 }
 
 /*
@@ -2192,7 +2439,7 @@ LOCAL INT ext_attach( BOOL kbd, CONST UB *rd, INT rdlen, CONST UB *name, UB *mod
 	}
 	h->id = ++hid_next_id;
 	h->used = TRUE;
-	if ( kbd ) {
+	if ( kbd || h->cc_only ) {
 		hid_count.keyboards++;
 	} else {
 		hid_count.pointers++;
@@ -2217,6 +2464,47 @@ EXPORT INT knl_hid_ext_attach_dg( CONST UB *rd, INT rdlen, CONST UB *name, UB *m
 	*p_mlen = 0;
 	*p_mrid = 0;
 	return ext_attach(FALSE, rd, rdlen, name, mode, p_mlen, p_mrid);
+}
+
+/*
+ * A device not on USB gone (a Bluetooth keyboard or mouse): what it holds
+ * is let go as a USB device's is, and its slot is free for another.
+ */
+EXPORT void knl_hid_ext_detach( INT hd )
+{
+	HIDDEV	*d;
+	INT	k;
+
+	if ( hd < 1 || hd > HID_N ) {
+		return;
+	}
+	d = HID_AT(hd - 1);
+	if ( !d->used || d->dev != NULL ) {
+		return;
+	}
+	cc_let_go(d);
+	if ( d->is_kbd ) {
+		UB	none[8];
+
+		knl_memset(none, 0, sizeof(none));
+		kbd_report(d, none);
+		hid_count.keyboards--;
+	} else if ( d->cc_only ) {
+		hid_count.keyboards--;
+	} else {
+		T_HIDEV	ev;
+
+		knl_memset(&ev, 0, sizeof(ev));
+		ev.when = now_ns();
+		ptr_emit(d, &ev, FALSE, 0, TCH_NO);
+		hid_count.pointers--;
+		for ( k = 0; d->dg != NULL && k < d->dg->n; k++ ) {
+			d->dg->a[k].prim = -1;
+			d->dg->a[k].multi = FALSE;
+		}
+	}
+	d->used = FALSE;
+	dg_forget(d);
 }
 
 /* The name of a device that is not on USB, by its id (T_HIDINFO.id); FALSE when it is on USB */
@@ -2245,8 +2533,6 @@ EXPORT void knl_hid_ext_report( INT hd, CONST UB *r, INT len )
 	if ( !d->used || d->dev != NULL || len <= 0 ) {
 		return;
 	}
-	hid_count.reports++;
-	d->reports++;
 	show_report(d, r, len);
 	if ( d->is_kbd ) {
 		UB	k[8];
@@ -2257,6 +2543,8 @@ EXPORT void knl_hid_ext_report( INT hd, CONST UB *r, INT len )
 	} else {
 		ptr_report(d, r, len);
 	}
+	hid_count.reports++;
+	d->reports++;
 }
 
 /*
@@ -2364,9 +2652,9 @@ EXPORT void knl_hid_mt_sync( INT hd )
 	DGAPP	*a = mt_app(hd, &d);
 
 	if ( a != NULL ) {
+		dg_frame(d, a);
 		hid_count.reports++;
 		d->reports++;
-		dg_frame(d, a);
 	}
 }
 
@@ -2614,10 +2902,11 @@ LOCAL ER hid_interface( USBDEV *dev, UB *id, UB *end )
 			}
 			if ( rd != NULL ) Kfree(rd);
 		}
-		if ( !found ) {
+		if ( !found || ( h->cc_only && sub == 1 && proto == HID_PROTO_MOUSE ) ) {
 			if ( !( sub == 1 && proto == HID_PROTO_MOUSE ) ) {
 				return E_NOSPT;	/* neither a keyboard nor a pointer */
 			}
+			h->cc_only = FALSE;
 			boot_mouse(h);
 			h->boot = TRUE;
 			knl_usb_control(dev, HID_RT_OUT, HID_SET_PROTOCOL, 0, (UH)ifno,
@@ -2664,15 +2953,16 @@ LOCAL ER hid_interface( USBDEV *dev, UB *id, UB *end )
 		h->used = FALSE;
 		return er;
 	}
-	if ( h->is_kbd ) {
+	if ( h->is_kbd || h->cc_only ) {
 		hid_count.keyboards++;
 	} else {
 		hid_count.pointers++;
 	}
 	USB_LOG("usb: hid: %s on interface %d, endpoint %02x, %s\n",
-		h->is_kbd ? "keyboard" : "pointer", ifno, (INT)ep.addr,
-		h->is_kbd ? "boot protocol" : ( h->x.rel ? "relative" : "absolute" ));
-	if ( !h->is_kbd ) {
+		( h->is_kbd || h->cc_only ) ? "keyboard" : "pointer", ifno, (INT)ep.addr,
+		h->is_kbd ? "boot protocol" : h->cc_only ? "consumer keys"
+		: ( h->x.rel ? "relative" : "absolute" ));
+	if ( !h->is_kbd && !h->cc_only ) {
 		/* where its report says what, as read from its descriptor */
 		USB_LOG("usb: hid: %d %s, descriptor %d bytes, report id %d, report %d bytes, "
 			"packet %d, read %d, interval %d; "
@@ -2765,7 +3055,10 @@ EXPORT void knl_hid_detach( USBDEV *dev )
 			dev->hc->ops->stream_close(dev->hc, h->pipe);
 			h->pipe = NULL;
 		}
-		if ( h->is_kbd ) {
+		cc_let_go(h);
+		if ( h->cc_only ) {
+			hid_count.keyboards--;
+		} else if ( h->is_kbd ) {
 			UB	none[8];
 
 			knl_memset(none, 0, sizeof(none));
@@ -2832,7 +3125,16 @@ typedef struct {
 	T_HIDEV	ev;
 	UD	due;			/* ns: when it counts */
 	BOOL	up;			/* its let go came before it counted */
+	BOOL	sim;			/* a character waiting to see whether a thumb goes with it */
+	UINT	tent;			/* the thumb that came, KM_MOD_THUMB_*: its until due or another key */
 } SHWAIT;
+
+/*
+ * How long after a character's press a thumb still goes with it in a
+ * thumb-shift layout. Longer than most fingers are apart when they mean
+ * the two together, and short enough not to be seen while typing.
+ */
+#define SH_THUMB_SIM	75
 
 LOCAL T_HIDEV	sh_out[SH_OUT];
 
@@ -2882,6 +3184,144 @@ LOCAL UD ms_ns( UINT ms )
 	return (UD)ms * 1000000ULL;
 }
 
+/*
+ * The thumbs of a thumb-shift kana layout (design 11.x): a thumb key's
+ * press is kept back, the keys pressed while it is held are marked with
+ * it, and it is let through, pressed and let go, only when nothing went
+ * with it. In the 親指シフト layout a character pressed just before the
+ * thumb goes with it too, so each character without a thumb waits
+ * SH_THUMB_SIM to see. When a thumb comes within that, a second character
+ * may still be nearer to it (the three keys of character, thumb,
+ * character): the first waits as long again as it was before the thumb,
+ * and goes alone if the second comes in that time, which then has the
+ * thumb. Any other key sends what waits first, so the order holds.
+ */
+LOCAL UINT	km_thumbs = 0;		/* KM_MOD_THUMB_* held, in a thumb-shift kana layout */
+LOCAL UINT	km_thumb_used = 0;	/* those of them a key went with */
+
+LOCAL void key_counts( T_HIDEV *ev );
+
+/* Whether the key is a character a thumb can go with: not with Ctrl, Alt or the Windows key held */
+LOCAL BOOL sim_key( CONST T_HIDEV *ev )
+{
+	UINT	c = ev->code;
+
+	if ( km_kana() != KM_KANA_NICOLA || km_thumbs != 0 ) {
+		return FALSE;
+	}
+	if ( ( ev->mods & 0xDD ) != 0 ) {
+		return FALSE;
+	}
+	return (BOOL)( ( c >= 0x04 && c <= 0x27 ) || ( c >= 0x2D && c <= 0x38 ) );
+}
+
+/* A waiting key sent as it now stands; it leaves the table */
+LOCAL void wait_go( INT i )
+{
+	T_HIDEV	e = sh_wait[i].ev;
+	UINT	tent = sh_wait[i].tent;
+
+	sh_wait[i] = sh_wait[--sh_nwait];
+	e.mods |= tent;
+	key_counts(&e);
+}
+
+/*
+ * Before a key that is not one the waiting characters could go with:
+ * they go out as they stand, the oldest first, those with a thumb whose
+ * time is over with it, the others without it
+ */
+LOCAL void sim_flush( UD when )
+{
+	for ( ;; ) {
+		INT	i, old = -1;
+
+		for ( i = 0; i < sh_nwait; i++ ) {
+			if ( sh_wait[i].sim && ( old < 0 || sh_wait[i].ev.when < sh_wait[old].ev.when ) ) {
+				old = i;
+			}
+		}
+		if ( old < 0 ) {
+			return;
+		}
+		if ( sh_wait[old].tent != 0 && when < sh_wait[old].due ) {
+			sh_wait[old].tent = 0;		/* the newer key is nearer the thumb */
+		}
+		wait_go(old);
+	}
+}
+
+/* The thumb's press taken: the character it is near, if one waits, goes with it */
+LOCAL void sim_thumb( UINT bit, UD when )
+{
+	INT	i;
+
+	for ( i = 0; i < sh_nwait; i++ ) {
+		UD	gap = when - sh_wait[i].ev.when;
+
+		if ( !sh_wait[i].sim || sh_wait[i].tent != 0 ) {
+			continue;
+		}
+		if ( gap <= ms_ns(SH_THUMB_SIM) ) {
+			sh_wait[i].tent = bit;
+			sh_wait[i].due = when + gap;
+			km_thumb_used |= bit;
+		}
+		return;
+	}
+}
+
+/* A thumb let go: what waits for it is decided now */
+LOCAL void sim_thumb_up( UINT bit )
+{
+	INT	i;
+
+	for ( i = 0; i < sh_nwait; ) {
+		if ( sh_wait[i].sim && sh_wait[i].tent == bit ) {
+			wait_go(i);
+			continue;
+		}
+		i++;
+	}
+}
+
+/*
+ * A thumb key's press or let go in a thumb-shift layout: TRUE when it was
+ * taken as one, and goes no further as it came
+ */
+LOCAL BOOL thumb_shape( T_HIDEV *ev )
+{
+	INT	k = km_kana();
+	UINT	bit;
+
+	if ( k != KM_KANA_TRON && k != KM_KANA_NICOLA ) {
+		km_thumbs = km_thumb_used = 0;
+		return FALSE;
+	}
+	if ( ev->code != KM_THUMB_L_KEY && ev->code != KM_THUMB_R_KEY ) {
+		return FALSE;
+	}
+	bit = ( ev->code == KM_THUMB_L_KEY ) ? KM_MOD_THUMB_L : KM_MOD_THUMB_R;
+	if ( ev->type == HID_EV_KEY_DOWN ) {
+		km_thumbs |= bit;
+		km_thumb_used &= ~bit;
+		sim_thumb(bit, ev->when);
+		return TRUE;
+	}
+	km_thumbs &= ~bit;
+	sim_thumb_up(bit);
+	if ( ( km_thumb_used & bit ) == 0 ) {
+		T_HIDEV	down = *ev;
+
+		down.type = HID_EV_KEY_DOWN;
+		sh_emit(&down);			/* alone: pressed, and this let go */
+		sh_emit(ev);
+		return TRUE;
+	}
+	km_thumb_used &= ~bit;
+	return TRUE;
+}
+
 /* A key that counts: sent, with the shifts that stick, and made the one that repeats */
 LOCAL void key_counts( T_HIDEV *ev )
 {
@@ -2889,7 +3329,8 @@ LOCAL void key_counts( T_HIDEV *ev )
 		ev->mods |= sh_sticky;
 		if ( sh_sticky != 0 && !sh_locked ) sh_sticky = 0;	/* one-shot: used */
 		sh_shift_alone = FALSE;
-		if ( hid_attr.krp ) {
+		/* a key that turns something on and off is one press however long it is held */
+		if ( hid_attr.krp && ev->code != HID_KEY_MUTE && !( ev->code >= HID_KEY_PLAYPAUSE && ev->code <= HID_KEY_NEXT ) ) {
 			sh_rep_key = ev->code;
 			sh_rep_mods = ev->mods;
 			sh_rep_due = ev->when + ms_ns(hid_attr.krp_start);
@@ -2939,6 +3380,13 @@ LOCAL void shape( T_HIDEV *ev )
 			sh_drop_up[ev->code] = TRUE;	/* too soon after it was let go */
 			return;
 		}
+		if ( thumb_shape(ev) ) {
+			return;
+		}
+		if ( km_thumbs != 0 && !is_mod_key(ev->code) ) {
+			km_thumb_used |= km_thumbs;
+		}
+		ev->mods |= km_thumbs;
 		if ( is_mod_key(ev->code) ) {
 			UINT	bit = 1U << ( ev->code - 0xE0 );
 
@@ -2956,20 +3404,29 @@ LOCAL void shape( T_HIDEV *ev )
 			} else {
 				sh_shift_alone = FALSE;
 			}
+			sim_flush(ev->when);
 			sh_emit(ev);
 			return;
 		}
+		sim_flush(ev->when);
 		sh_rep_key = 0;				/* another key: the repeat stops */
-		if ( hid_attr.key_on > 0 || hid_attr.key_sim > 0 ) {
-			if ( sh_nwait < SH_WAIT ) {
-				UINT	wait = ( hid_attr.key_on > hid_attr.key_sim ) ? hid_attr.key_on : hid_attr.key_sim;
+		{
+			BOOL	sim = sim_key(ev);
 
-				sh_wait[sh_nwait].ev = *ev;
-				sh_wait[sh_nwait].due = ev->when + ms_ns(wait);
-				sh_wait[sh_nwait].up = FALSE;
-				sh_nwait++;
+			if ( hid_attr.key_on > 0 || hid_attr.key_sim > 0 || sim ) {
+				if ( sh_nwait < SH_WAIT ) {
+					UINT	wait = ( hid_attr.key_on > hid_attr.key_sim ) ? hid_attr.key_on : hid_attr.key_sim;
+
+					if ( sim && wait < SH_THUMB_SIM ) wait = SH_THUMB_SIM;
+					sh_wait[sh_nwait].ev = *ev;
+					sh_wait[sh_nwait].due = ev->when + ms_ns(wait);
+					sh_wait[sh_nwait].up = FALSE;
+					sh_wait[sh_nwait].sim = sim;
+					sh_wait[sh_nwait].tent = 0;
+					sh_nwait++;
+				}
+				return;
 			}
-			return;
 		}
 		key_counts(ev);
 		return;
@@ -2982,6 +3439,10 @@ LOCAL void shape( T_HIDEV *ev )
 				return;
 			}
 		}
+		if ( thumb_shape(ev) ) {
+			return;
+		}
+		ev->mods |= km_thumbs;
 		if ( ev->code == sh_rep_key ) sh_rep_key = 0;
 		if ( is_mod_key(ev->code) ) {
 			UINT	bit = 1U << ( ev->code - 0xE0 );
@@ -2999,8 +3460,7 @@ LOCAL void shape( T_HIDEV *ev )
 					return;
 				}
 				/* it counts now, and then goes up */
-				key_counts(&sh_wait[i].ev);
-				sh_wait[i] = sh_wait[--sh_nwait];
+				wait_go(i);
 				sh_rep_key = 0;
 				break;
 			}
@@ -3048,8 +3508,10 @@ LOCAL void shape( T_HIDEV *ev )
 
 /*
  * A touch screen's first finger as a mouse's buttons (design 6.4.1).
- * Where it touches is pointed at at once, but the press is kept back
- * until it is known what it is:
+ * Where it touches is pointed at at once. On a place a window asked for
+ * (wm_obj_press_area) the main button is pressed there and then and the
+ * finger is a drag from there until it lets go: a hold is nothing. Anywhere
+ * else the press is kept back until it is known what it is:
  *   - let go before TC_HOLD_MS without moving: a click of the main
  *     button where it touched;
  *   - moved further than TC_SLOP: the main button pressed where it
@@ -3089,6 +3551,9 @@ LOCAL INT	tc_rx, tc_ry;		/* where the finger itself touched, for whether it move
 LOCAL BOOL	tc_tapped = FALSE;	/* the last touch was a tap, at tc_tap */
 LOCAL T_HIDEV	tc_tap;
 LOCAL INT	tc_px;			/* the screen it touched: view pixels in 100 mm (touch_px) */
+
+/* Whether a touch there presses at once: read from the window manager's table, never waited for */
+IMPORT BOOL knl_wm_press_now( INT x, INT y ) __attribute__((weak));
 
 /* Whether the menu's shape is to be shown, by the pointer's layer (outer_kernel/wm/pointer.c) */
 IMPORT void knl_pt_hold( BOOL on ) __attribute__((weak));
@@ -3400,6 +3865,12 @@ LOCAL void touch_shape( CONST T_HIDEV *ev, UB tch )
 		tc_rx = ev->x;
 		tc_ry = ev->y;
 		tc_px = sh_px;
+		if ( knl_wm_press_now != NULL && knl_wm_press_now(ev->x, ev->y) ) {
+			tc_tapped = FALSE;
+			tc_button(HID_EV_BTN_DOWN, 0, ev->when);
+			tc_state = TC_DRAG;
+			return;
+		}
 		if ( tc_tapped && ev->when >= tc_tap.when && ev->when - tc_tap.when <= ms_ns(TC_DBL_MS) ) {
 			slop = tc_dbl_slop();
 			dx = ev->x - tc_tap.x;
@@ -3487,12 +3958,12 @@ LOCAL void shape_time( UD now )
 
 	for ( i = 0; i < sh_nwait; ) {
 		if ( now >= sh_wait[i].due ) {
-			T_HIDEV	e = sh_wait[i].ev;
-
-			sh_wait[i] = sh_wait[--sh_nwait];
-			if ( e.type == HID_EV_KEY_DOWN ) {
-				key_counts(&e);
+			if ( sh_wait[i].ev.type == HID_EV_KEY_DOWN ) {
+				wait_go(i);
 			} else {
+				T_HIDEV	e = sh_wait[i].ev;
+
+				sh_wait[i] = sh_wait[--sh_nwait];
 				sh_emit(&e);
 			}
 			continue;
@@ -3559,6 +4030,15 @@ EXPORT ER ts_hid_getattr( T_HIDATTR *a )
 	return E_OK;
 }
 
+/* The longest an event waited in the ring for ts_hid_read since this was last asked, ms */
+EXPORT UW knl_hid_read_late( void )
+{
+	UW	ms = hid_late_ms;
+
+	hid_late_ms = 0;
+	return ms;
+}
+
 EXPORT ER ts_hid_read( T_HIDEV *ev, TMO tmout )
 {
 	T_HIDEV	raw;
@@ -3579,6 +4059,9 @@ EXPORT ER ts_hid_read( T_HIDEV *ev, TMO tmout )
 
 		/* what came and what is due, through the attributes */
 		while ( ring_take(&raw, &inj, &tch, &px) ) {
+			UD	late = now_ns() - raw.when;
+
+			if ( !inj && late / 1000000ULL > hid_late_ms ) hid_late_ms = (UW)( late / 1000000ULL );
 			tk_wai_sem(hid_semid, 1, TMO_POL);
 			if ( inj ) {
 				sh_emit(&raw);
@@ -3644,6 +4127,17 @@ EXPORT ER ts_hid_pointer( INT *p_x, INT *p_y, UINT *p_buttons )
 	return E_OK;
 }
 
+EXPORT ER ts_hid_press_at( INT *p_x, INT *p_y )
+{
+	if ( !hid_ready || ( hid_count.pointers == 0 && !ptr_injected ) ) {
+		return E_NOEXS;
+	}
+	if ( p_x != NULL ) *p_x = ptr_press_x;
+	if ( p_y != NULL ) *p_y = ptr_press_y;
+
+	return E_OK;
+}
+
 EXPORT ER ts_hid_stat( T_HIDSTAT *st )
 {
 	if ( !hid_ready || st == NULL ) {
@@ -3671,6 +4165,10 @@ EXPORT ER knl_hid_inject( UINT src, CONST T_HIDEV *ev )
 		ptr_y = e.y;
 		ptr_injected = TRUE;
 	} else if ( e.type == HID_EV_BTN_DOWN && e.code < 32 ) {
+		if ( e.code == 0 ) {
+			ptr_press_x = ptr_x;
+			ptr_press_y = ptr_y;
+		}
 		ptr_buttons |= 1U << e.code;
 		ptr_injected = TRUE;
 	} else if ( e.type == HID_EV_BTN_UP && e.code < 32 ) {
@@ -3746,7 +4244,7 @@ EXPORT INT knl_hid_list( T_HIDINFO *buf, INT max )
 			buf[n].id = h->id;
 			buf[n].usbdev = ( h->dev != NULL ) ? h->dev->handle : 0;
 			buf[n].ifno = h->ifno;
-			buf[n].keyboard = h->is_kbd;
+			buf[n].keyboard = ( h->is_kbd || h->cc_only );
 			buf[n].absolute = ( !h->is_kbd && h->x.size > 0 && !h->x.rel );
 			buf[n].wheel = ( !h->is_kbd && h->wheel.size > 0 );
 			buf[n].buttons = (UINT)h->nbtn;

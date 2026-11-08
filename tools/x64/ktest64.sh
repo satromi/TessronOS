@@ -13,7 +13,10 @@
 #     ACCEL=whpx   Windows のハイパーバイザで速く走らせる(-cpu host。OVMF が読む MSR の
 #                  機能は切る)。既定は TCG(-cpu max)
 #     NET=user     試験用の FTP と HTTP のサーバ(tools/ftpd.py)をホストに起こし、利用者
-#                  モードの網(IPv4 と IPv6)で外へ繋ぐ。イメージの隣の ftp/ を FTP の根にする
+#                  モードの網(IPv4 と IPv6)で外へ繋ぐ。イメージの隣の ftp/ を FTP の根にする。
+#                  FTP_PORT(既定 2121)はホストのポート。ほかのプログラムが使っていたら別の番号に
+#                  し、make にも同じ FTP_PORT を渡す
+#     QCPU         TCG のときの -cpu の機種(既定 max。AMD の確認は EPYC-Rome など)
 #     SMP、MEM     プロセッサの数(既定 4)とメモリ(既定 2G)
 #     EXTRA        QEMU に足す引数(例: -audiodev none,id=a0 -device intel-hda -device hda-duplex,audiodev=a0)
 #     USBQ=1       USB の機器を QEMU virt の試験機と同じにする(xhci にキーボード、タブレット、
@@ -41,17 +44,19 @@ OVMF=${OVMF_CODE:-"C:/Program Files/qemu/share/edk2-x86_64-code.fd"}
 if [ "${ACCEL:-}" = whpx ]; then
 	CPU="-accel whpx -cpu host,vmx=off,lmce=off,sgx=off,sgxlc=off"
 else
-	CPU="-cpu max"
+	CPU="-cpu ${QCPU:-max}"
 fi
 
 SRV=""
 NETDEV="-netdev user,id=n0"
 if [ "${NET:-}" = user ]; then
-	python "$TOP/tools/ftpd.py" --port 2121 --pasv-address 10.0.2.2 --active-via 127.0.0.1:2122 \
+	python "$TOP/tools/ftpd.py" --port "${FTP_PORT:-2121}" --pasv-address 10.0.2.2 --active-via 127.0.0.1:2122 \
 		--http 2180 --echo6 2190 "$(cygpath -m "$(dirname "$IMG")/ftp")" > "$LOG.ftpd" 2>&1 &
 	SRV=$!
 	NETDEV="-netdev user,id=n0,ipv4=on,ipv6=on,hostfwd=tcp:127.0.0.1:2122-:2020"
 	sleep 2
+	# another program on the port answers the tests in its place: every test of the network would fail
+	kill -0 $SRV 2>/dev/null || echo "ktest64: the test server did not start ($LOG.ftpd); FTP_PORT names another port, with the same at make"
 fi
 
 USBDEV="-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0"

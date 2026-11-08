@@ -1,0 +1,74 @@
+# 基本図形編集の道具パネルの重なりと位置 (design 11.3), for tools/ui_run.py. カーネル内の図形編集と
+# プロセスの図形編集(figproc 1、デスクトップから開く)のどちらでも、開いた直後と図形のウインドウを
+# 押した後に、道具パネルが図形のウインドウより前にあり、初めは図形のウインドウの上(場所がなければ下、
+# どちらもなければ画面に収まる所。この図形では 100,0)に出る。道具パネルを(400,450)へ動かして閉じ、
+# 開き直すと同じ位置に出る(実身のメタデータの window.panelpos に TADjs と同じ書式で残す。図形のウインドウの
+# 題名の帯に重なる位置は使わない)。
+figproc kernel
+mkbig fig 30 4
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+front k1 道具パネル|画用紙
+want ok k1: in front
+win 道具パネル
+want ok 100 0 532 112
+click 400 400
+wait 500
+front k2 道具パネル|画用紙
+want ok k2: in front
+drag 300 13 600 463
+wait 500
+win 道具パネル
+want ok 400 450 832 562
+key 08 01
+sync 600
+wait 500
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+win 道具パネル
+want ok 400 450 832 562
+front k3 道具パネル|画用紙
+want ok k3: in front
+key 08 01
+sync 600
+wait 500
+figproc 1
+mkbig fig 30 4
+logmark
+open big
+expectsincein 60 figure: opened
+wait 1500
+front p1 道具パネル|画用紙
+want ok p1: in front
+win 道具パネル
+want ok 100 0 532 112
+click 400 400
+wait 800
+front p2 道具パネル|画用紙
+want ok p2: in front
+drag 300 13 600 463
+wait 800
+win 道具パネル
+want ok 400 450 832 562
+logmark
+key 08 01
+expectsincein 60 figure: closed
+expectsince figure: tool panel kept 400,450 (0)
+wait 500
+logmark
+open big
+expectsincein 60 figure: opened
+wait 1500
+win 道具パネル
+want ok 400 450 832 562
+front p3 道具パネル|画用紙
+want ok p3: in front
+logmark
+key 08 01
+expectsincein 60 figure: closed
+figproc 0
+absent !OACV!

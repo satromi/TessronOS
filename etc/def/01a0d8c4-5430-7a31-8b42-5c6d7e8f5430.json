@@ -15,10 +15,11 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "tray-viewer",
       "kind": "accessory",
       "name": "トレー",
-      "version": "R1.200",
+      "version": "R1.300",
       "menu": true,
       "builtin": true,
       "base": []

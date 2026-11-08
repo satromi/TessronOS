@@ -1,0 +1,25 @@
+# 小物の順番と、小物メニューに出すか(show)出さないか(hide)
+ACC	tessronos-userenv	show
+ACC	tessronos-sysenv	show
+ACC	tessronos-netenv	show
+ACC	file-convert	show
+ACC	tessronos-sndmix	show
+ACC	tessronos-softkb	show
+ACC	console	show
+ACC	btron-backup	show
+ACC	clock	show
+ACC	tray-viewer	show
+ACC	serial-terminal	show
+ACC	glgears	show
+ACC	window-list-viewer	show
+ACC	template-collector	show
+ACC	tessronos-keymap	show
+ACC	tessronos-worddic	show
+ACC	tessronos-calculator	show
+ACC	tessronos-charsearch	show
+ACC	screen-print	show
+ACC	force-quit	show
+ACC	disk-repair	hide
+ACC	system-install	hide
+ACC	besfc	show
+ACC	befc	show

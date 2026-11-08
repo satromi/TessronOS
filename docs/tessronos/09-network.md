@@ -47,6 +47,14 @@ rumpカーネルは、どのスレッドとして動いているかを、タス�
 
 RP1のEthernet(Cadence GEM、`device/net/eth_rp1.c`)は割込みを使わず、読み手が受信のリングを見る。受信の記述子は128個で、1つが16バイトなので、データキャッシュの1ライン(64バイト)に4つが入る。1つの記述子をキャッシュから書き戻すと、同じラインのほかの3つもキャッシュにあった古い値で書き戻される。その間にコントローラが埋めた記述子は空きに戻ってフレームが失われ、ドライバはコントローラが追い越した記述子を待ち続けることになる。そこで、受信の記述子は同じラインの4つを読み終えてからまとめてコントローラに返し、コントローラが書く可能性のあるラインには書き込まない。リングが満ちて受信できなかったフレーム(`RSR`のBNA)は捨てられ、コントローラは記述子が返されると受信を続ける。返した後も200ミリ秒フレームが入らないときだけ、受信を止め、1ミリ秒置いてからリング全体を先頭から返し直して再開する(`eth: receiving started again`)。
 
+送信は、フレームを送信のリング(8個)に入れてコントローラを起こしたら、送り終わるのを待たずに戻る。コントローラが送り終えた記述子(使用済みのビットが戻ったもの)は、次に送るときに古い順に回収する。待つのはリングが満ちたときだけで、50マイクロ秒ごとに見直し、1秒で諦める。コントローラが前の記述子に使用済みのビットを書くのと、ドライバが次の記述子を書くのが同時に起きるので、受信の記述子と同じ問題(同じキャッシュのラインの古い値の書き戻し)を避けるため、送信のリングだけはキャッシュしない1ページ(`knl_vmap_pa`の`VMAP_NOCACHE`)に置く。記述子を書いてからコントローラを起こすまでに`DeviceBarrier`を入れる。
+
+前は1フレームごとに送り終わるのを待ち、最初に見たときはまだなので`tk_dly_tsk(1)`で1ミリ秒寝ていた。そのため送信は毎秒約950フレームで頭打ちになり、受信もACKと窓の更新を出せずに縛られていた。2026年11月5日にRaspberry Pi 5の有線で測ると、PCからの256MBの受信が約1.9MB/s(送る側は時間の99.4%で受信の窓待ち、往復約100ms、Piが出した純ACKと窓の更新が毎秒948)、Piからの画面の送信が1.36MB/s(毎秒約940フレーム)だった。待たない作りにした後は、同じ100Mbpsのリンクで、画面の送信が7.3MB/s、PCからの64MBの受信が5.0MB/s(うち書込み3.0秒)になった。どちらも順番の飛びと重複は0である。
+
+PHY(BCM54213PE)には、自動ネゴシエーションをやり直す前に、1000BASE-Tの全二重と半二重を広告させ(GBCR)、省電力のEthernet(EEE)は広告させない(MMD 7の60番の100BASE-TXと1000BASE-Tのビットを落とす)。Raspberry Pi 5のデバイスツリーは、このボードのEEEを1000BASE-Tでも100BASE-TXでも壊れているとしている。RGMIIのクロックの遅延はPHYの既定のまま(受信の遅延は既定で入っている)にした。送信の遅延をPHYで入れると、100Mbpsで送信が約2割遅くなった。リンクが上がるたびに、両端が広告したもの、PHYが決めたもの、割込みの状態(読むと消える)、ダウンシフトの設定、最後に受けたNext Page、EEEの広告をコンソールに出す(`eth: negotiated`)。
+
+2026年11月5日の試験の場所では、2.5Gbpsのスイッチ(同じスイッチにPCは2.5Gbpsでつながる)とCat5eのケーブルで、リンクは100Mbpsの全二重になった。PHYは1000Mbpsを試してつながらず(割込みの状態のNo HCD link)、相手は1000Mbpsを広告しなくなる。こちらのダウンシフト(Wirespeed)は切れていて、EEEを消しても変わらなかった。ケーブルかポートの対の不良とみているが、確かめていない。1000Mbpsでの送受信は実機で未確認である。
+
 rumpカーネルの中では、カードは`neta0`、ループバックは`lo0`(127.0.0.1)というインタフェースになる。`neta0`が送るフレームは、リングに入れて専用のタスクがデバイスに書き込む。デバイスはフレームを受け取るまで書いたタスクを待たせるので、rumpカーネルのスレッドが自分で書くと、フレームごとにスタック全体が止まるからである。受信は`neta0`のスレッドがデバイスを読んで待ち、フレームが届くと、そのときまでに届いていたものと合わせて最大16個をまとめてスタックに渡す。リンクの状態は「不明」とし、スタックはこれを接続されているものとして扱う。
 
 ### 9.1.4 性能
@@ -304,13 +312,13 @@ rtc: read 2026-10-19 21:00:05 at the start, kept as the local time (Asia/Tokyo, 
 
 カーネルの試験`time`の群の`test_rtc_kept`(x64だけ)が、時刻の設定後のRTCの値(ローカル時刻とUTC)、設定とタイムゾーンを変えたときにシステム時刻が保たれRTCが書き直されること、走っている間と電源を切っている間の夏時間の終わり、記録の差による読み直しと規則による読み方(2度来る1時間、存在しない1時間)、暦がUTCと言う起動、ファームウェアの差を確かめる。`so`の群の`test_sntp`は、x64ではNTPで合わせた後のRTCの値が設定どおりであることも確かめる。
 
-## 9.6 ネットワークアダプタとWi-Fi(x64のPC、Raspberry Pi 5)
+## 9.6 ネットワークアダプタとWi-Fi(x64のPC、Raspberry Pi 5、Raspberry Pi 4)
 
-x64のPCは複数のネットワークアダプタを持てる。QEMUのvirtio-net、チップセットのIntelのLAN(I219、`e1k.c`)、USBのLANアダプタ(`cdcnet.c`)、Wi-Fiである。プロトコルスタックはどの場合もデバイス`neta`のインタフェース`neta0`だけを使い、その下のカードを`device/net/netsel.c`が選ぶ(9.1.3)。Wi-Fiはx64のビルドに既定で入り、`make TARGET=_X64_ WIFI=0`で除ける(12章)。
+x64のPCは複数のネットワークアダプタを持てる。QEMUのvirtio-net、チップセットのIntelのLAN(I219、`e1k.c`)、USBのLANアダプタ(`cdcnet.c`)、PCIeとUSBのそのほかの有線LAN(9.6.13)、Wi-Fiである。プロトコルスタックはどの場合もデバイス`neta`のインタフェース`neta0`だけを使い、その下のカードを`device/net/netsel.c`が選ぶ(9.1.3)。Wi-Fiはx64のビルドに既定で入り、`make TARGET=_X64_ WIFI=0`で除ける(12章)。
 
 ### 9.6.1 アダプタの選択
 
-どのアダプタを使うかは利用者が選ぶ。システム環境設定の〈機器〉〈機器情報〉〈ネットワークアダプタ〉(11.6)がアダプタの一覧とそれぞれのリンクの状態を示し、その一覧で「自動」の行かアダプタの行を選んで〈設定〉を押す。選んだものは機器の設定の`NET_ADAPTER`(`auto`、`vnet`、`e1k`、`cdcnet`、`wifi`)に書く。
+どのアダプタを使うかは利用者が選ぶ。システム環境設定の〈機器〉〈機器情報〉〈ネットワークアダプタ〉(11.6)がアダプタの一覧とそれぞれのリンクの状態を示し、その一覧で「自動」の行かアダプタの行を選んで〈設定〉を押す。選んだものは機器の設定の`NET_ADAPTER`(`auto`、`vnet`、`e1k`、`cdcnet`、`re`、`rge`、`igc`、`usblan`、`wifi`)に書く。
 
 アダプタの管理(`device/net/netadp.c`)は、起動時に最初にカードのアドレスが尋ねられたときに(`knl_netdev_init`)タスクを作り、実身の層ができるのを待ってから動く。機器の設定は2秒ごとに、読む間だけ開いて読む(Wi-Fiの設定と同じく、ボリュームを固定しないため。書込みの知らせを受けるには実身を開いたままにする必要があり、そうするとシステムボリュームを外せなくなる)。機器の設定を書く者は書込みの排他(`OB_O_WEXCL`、8.3)で開くので、書いている最中でも読める。読めなかったとき(完全な排他`OB_O_EXCL`の者が開いているとき、媒体の誤り)は選択を変えず、次の2秒後に読み直す(`net: the machine's settings not read now (誤り): the adapter chosen stays`の行を、誤りが変わったときに1回出す)。起動のときの最初の読込みは、読めるまで0.1秒ごとに5秒まで繰り返す。前は、書く者はほかのキーをすべて締め出し、読めなかったときを「自動」の選択として扱っていたので、システム環境設定やウインドウシステムが書いている瞬間に読むと有線のカードに移っていた。Wi-Fiの管理(`wifi.c`の`conf_text_`)も、Ｗｉ－Ｆｉの設定を読めなかったときは前の設定のままにする(前は空の設定として扱い、つないでいるネットワークを離れることがあった)。
 
@@ -343,21 +351,29 @@ WIFI connected -52 <SSIDの16進>
 
 ### 9.6.2 Wi-Fiの構成
 
-最初に対応したのは、ThinkPad X1 Yoga 第3世代のIntel Dual Band Wireless-AC 8265(PCI 8086:24FD)である。OpenBSDのiwm(4)が扱うIntelのカード(7260、3160、7265、3165、3168、8260、8265、9260、9560)は同じ経路で動く見込みである。Surface Go 2のWi-Fi 6 AX200(PCI 8086:2723)は世代が違うので、OpenBSDのiwx(4)を同じ層に足した(2026-10-26、9.6.9の「iwx」)。層はカードのPCIのIDでiwmかiwxを選ぶ。iwxの扱うほかのカード(AX201、AX210、AX211)は、ファームウェアを載せていないので、今は起動の途中で止まる。
+最初に対応したのは、ThinkPad X1 Yoga 第3世代のIntel Dual Band Wireless-AC 8265(PCI 8086:24FD)で、実機で接続まで確かめたのはこのカードである。Surface Go 2のWi-Fi 6 AX200(PCI 8086:2723)は世代が違うので、OpenBSDのiwx(4)を同じ層に足した(2026-10-26、9.6.9の「iwx」)。層はカードのPCIのIDでiwm、iwx、mwxの順に選ぶ。OpenBSDのmwx(4)のMediaTek MT7921、MT7922も足した(2026-11-01、9.6.9の「mwx」)。
+
+次のカードは、OpenBSDのドライバがPCIのIDで扱い、求めるファームウェアをシステムボリュームに載せた(9.6.5)が、この層で動かした実機はなく、動くかどうかは分からない。ドライバはカードの世代ごとに違う道を通り(iwmならDMAの区切り、受信の待ち行列の形、NVMの読み方など)、8265で通った道はほかの世代の道を確かめたことにならない。
+
+- iwm: 7260、3160、7265、3165、3168、8260、9260、9560。
+- iwx: AX201(無線部がjfの9462、9560を含む)、AX210、AX211のPCIのIDのカード。
+- mwx: MT7921、MT7920、MT7922。
+
+ファームウェアを載せていないカード(BZ世代、`iwx-ma-b0-*`を求めるカード、MT7925など)は、`wifi: firmware 名前: not one the system has`の行を出す。Wi-Fiの起動はそこで止まり、そのカードは使えない。
 
 x64のPCのWi-Fiは、OpenBSDの802.11の層とiwmを、rumpカーネルの外のTessronOSの層で動かす(`device/net/wifi/obsd`、9.6.9)。Raspberry Pi 5のWi-Fiは、NetBSDの802.11の層とbwfmを、TCP/IPスタックと同じrumpカーネルの中で動かす(9.6.8)。管理のタスク、WPA2とWPA3の鍵の交換、カードの選択、ネットワーク設定はどちらも同じものを使う。前はx64のPCでもNetBSDのiwmと802.11の層をrumpカーネルの中で動かしていた(`WIFI_NET80211=nbsd`)が、OpenBSDの層が802.11n、PMF、WPA3、背景の走査を持ち、実機でつながったので、その形は除いた(2026-10-23)。NetBSDのiwmでつないでいたときに見つけたこと(9.6.3、9.6.4)は、同じNetBSDの802.11の層を使うbwfmにも当てはまるので、その節に残す。
 
 | 部分 | 場所 | 内容 |
 | --- | --- | --- |
-| x64のPCの層 | `device/net/wifi/obsd/`、`~/tessronos-obsd-x64/obsdwifi.o`(`tools/openbsd/build.sh`) | OpenBSD 8.0のnet80211、iwmとiwx、その下で要るOpenBSDのカーネルの働き(9.6.9) |
+| x64のPCの層 | `device/net/wifi/obsd/`、`~/tessronos-obsd-x64/obsdwifi.o`(`tools/openbsd/build.sh`) | OpenBSD 8.0のnet80211、iwm、iwx、mwx、その下で要るOpenBSDのカーネルの働き(9.6.9) |
 | ハイパーコール(x64) | `peripheral_kernel/network/netbsd/wifi_user.c`、`device/net/wifi/obsd/obsd_user.c` | PCIの構成空間、BARの写像、DMAのメモリ、MSI(rumpの`pci_user.h`の名前の`rumpcomp_pci_*`)と、カードの検出、ファームウェアの実身の読込み、受けたフレームの受渡し |
 | rumpカーネル(Pi 5) | `~/tessronos-netbsd-wifi/rumpnet.o`(`tools/netbsd/build.sh`、`WIFI=1`) | 9.1の部品に加えて、デバイスの層、`sdhc`と`sdmmc`、bwfm、net80211とそのCCMPが使うAES(9.6.8) |
 | TessronOSの部品(Pi 5) | `peripheral_kernel/network/netbsd/rumpcomp/wifi/` | rumpカーネルの中でNetBSDのヘッダで翻訳する部分。`tswifi_sdio.c`はSDのホストとbwfmの取り付け、`tswifi_if.c`は管理のタスクの入口(`rump_tswifi_*`)と、`bwfm0`と`neta0`の間のフレームの受渡し |
 | WPA2 | `~/tessronos-wpa-x64/wpasupp.o`(`tools/wpa/build.sh`。Raspberry Pi 5は`ARCH=aarch64`の`~/tessronos-wpa-arm/wpasupp.o`)、`device/net/wifi/wpa/` | wpa_supplicant 2.11(NetBSD 11.0の`src.tgz`の`external/bsd/wpa`)の4ウェイハンドシェイクとグループ鍵のハンドシェイクの状態機械(`src/rsn_supp`)、WPA3のSAE(`src/common/sae.c`、`dragonfly.c`)。暗号はMbed TLS 3.6.7で、wpa_supplicantの`crypto.h`の下に`crypto_mbedtls.c`を置く(9.6.10)。`wpa_glue.c`がその呼出しを管理のタスクにつなぐ。外から見えるのは`knl_wpa_`の関数だけである |
 | 管理のタスク | `device/net/wifi/wifi.c` | カードの起動、走査、接続先の選択、関連付け、EAPOLの受渡し、鍵の設定、状態の実身「wlan0」、`netsel.c`のカードとしての送受信 |
-| ファームウェア(x64) | システムボリュームの実身(`tools/x64/wifi/fw.sh`、`mkobj.py`) | Intelの配布する`iwlwifi-8265-36.ucode`(8265)と`iwlwifi-cc-a0-77.ucode`(AX200)(9.6.5) |
+| ファームウェア(x64) | システムボリュームの実身(`tools/x64/wifi/fw.sh`、`mkobj.py`) | Intelの配布する`iwlwifi-8265-36.ucode`(8265)、`iwlwifi-cc-a0-77.ucode`(AX200)ほか(9.6.5の表) |
 
-取り込んだBSDのソース(NetBSDのもの、9.6.9のOpenBSDのもの)には手を入れないが、次のどちらかにあてはまるものに限って、小さなパッチで直す。1つは、誤りがコードから明らかで、FreeBSDかOpenBSD(またはその両方)がすでに同じ形に直しているもの。もう1つは、規格どおりの機能を足すのに要る最小の変更で、取り込み元に無いもの(2026-10-23のユーザの決定)。パッチは`tools/netbsd/patches/`(OpenBSDのものは`tools/openbsd/patches/`)に、ファイルごとの統一差分(`ファイル名-内容.patch`)で置き、先頭に理由と、前者ならどのBSDと同じ形か、後者ならどの規格のどの機能のためかを書く。`tools/netbsd/build.sh`の`patched_copy`が、元の木からファイルを写し、その写しにパッチを当て、写し(`$OUT/gen/patched/`の下の同じ道筋)を元の代わりに翻訳する。元の木は展開したままで変わらない。パッチが当たらなければ、ビルドを止める。今あるパッチは、NetBSDのものが`bwfm-join-hooks.patch`、OpenBSDのものが`ieee80211_output-qos-data.patch`、`if_iwxvar-static-cfg.patch`である(9.6.9。SAEとRSNXEは層の関数で足し、OpenBSDのソースを変えずに済んだ)。OpenBSDのヘッダのパッチ(`tools/openbsd/build.sh`の`HDR_PATCHED`)は、写しを`$OUT/gen/patched/sys/`に置き、OpenBSDの木より先に見つかるようにする。前のx64のNetBSDのiwmには、命令のキューの有効のビット(`SCD_EN_CTRL`をキューの番号でなくキューのビットで書く。FreeBSDとOpenBSDと同じ形)を直すパッチ`if_iwm-scd-en-ctrl.patch`があったが、その形と一緒に除いた。
+取り込んだBSDのソース(NetBSDのもの、9.6.9のOpenBSDのもの)には手を入れないが、次のどちらかにあてはまるものに限って、小さなパッチで直す。1つは、誤りがコードから明らかで、FreeBSDかOpenBSD(またはその両方)がすでに同じ形に直しているもの。もう1つは、規格どおりの機能を足すのに要る最小の変更で、取り込み元に無いもの(2026-10-23のユーザの決定)。パッチは`tools/netbsd/patches/`(OpenBSDのものは`tools/openbsd/patches/`)に、ファイルごとの統一差分(`ファイル名-内容.patch`)で置き、先頭に理由と、前者ならどのBSDと同じ形か、後者ならどの規格のどの機能のためかを書く。`tools/netbsd/build.sh`の`patched_copy`が、元の木からファイルを写し、その写しにパッチを当て、写し(`$OUT/gen/patched/`の下の同じ道筋)を元の代わりに翻訳する。元の木は展開したままで変わらない。パッチが当たらなければ、ビルドを止める。今あるパッチは、NetBSDのものが`bwfm-join-hooks.patch`、`bwfm-ramsize-1k.patch`(チップのRAMの大きさをOpenBSDとLinuxと同じ形で読む)、`if_bwfm_sdio-product-4345.patch`(Raspberry Pi 5 Model B Rev 1.0のチップはSDIOのIDが`02d0:4345`で、NetBSDの一覧に無いので付かない。OpenBSDの一覧にはある)、OpenBSDのものが`ieee80211_output-qos-data.patch`、`if_iwxvar-static-cfg.patch`である(9.6.9。SAEとRSNXEは層の関数で足し、OpenBSDのソースを変えずに済んだ)。OpenBSDのヘッダのパッチ(`tools/openbsd/build.sh`の`HDR_PATCHED`)は、写しを`$OUT/gen/patched/sys/`に置き、OpenBSDの木より先に見つかるようにする。前のx64のNetBSDのiwmには、命令のキューの有効のビット(`SCD_EN_CTRL`をキューの番号でなくキューのビットで書く。FreeBSDとOpenBSDと同じ形)を直すパッチ`if_iwm-scd-en-ctrl.patch`があったが、その形と一緒に除いた。
 
 誤りを直す当てのほかに、規格どおりの機能に要るもので、ドライバにその手段が無いときに限って、機能のための当てを置く。変更は最小にし、NetBSDのコードの動きは変えず、TessronOSの関数を呼ぶ口を足すだけにする。その関数が何もしなければ、元と同じ動きになる形にする。先頭には、何の規格の機能に要るか、なぜドライバの外ではできないか、ほかのOSではどうしているかを書く。Raspberry Pi 5のWi-Fi(bwfm)の`tools/netbsd/patches/bwfm-join-hooks.patch`がこれにあたる。bwfmは参加の直前にチップの`mfp`を0と書き、チップのsupplicantに何も渡さない。そのため、PMF(802.11w)もWPA3(SAE)も使えない。当ては、`bwfm_connect`が`mfp`を書いた直後と、チップのイベントの受け口の頭で、`tswifi_sdio.c`の関数を1つずつ呼ぶ2行である(9.6.8)。OpenBSDのbwfmも`mfp`を0と書き、SAEを持たない。Linuxのbrcmfmacは同じ設定を参加の前に書く。`bwfm.c`は当てた写しから翻訳する。当てを変えたときは、`build_make/wifi_arm.mk`の依存でrumpカーネルが作り直される。
 
@@ -432,7 +448,7 @@ x64のPCのWi-Fiは、OpenBSDの802.11の層とiwmを、rumpカーネルの外�
 26. 利用者が替わると(ログアウトとログイン)、接続中のネットワークが新しい利用者のものでなければ切断し、新しい利用者のネットワークを探す(LinuxのNetworkManagerの利用者ごとの接続、`permissions=user:…`と同じ考え方)。
 27. 設定の`$$WIFI off`は、自分からつながないことに加えて、そう書き換えた時点でつながっていたネットワークから離れる。カードの電源は切らない。
 28. 電源を切るときと再起動のとき(デスクトップの終了、電源ボタン、再起動。どれも`usermain`から戻って`knl_finish_device`を通る)は、接続しているネットワークから、理由3(離れる)の認証の解除を送って離れてから止める(`knl_wifi_shutdown`。管理のタスクが〈切断〉と同じに行い、1秒まで待ち、フレームが出る0.1秒を足す。`REASON off`)。Linuxはインタフェースを下げるとき(`cfg80211_leave`、`WLAN_REASON_DEAUTH_LEAVING`)と、NetworkManagerとwpa_supplicantが止まるときに切断を送り、Windowsも同じである。前は送らずに電源を切っていたので、アクセスポイントとメッシュは、その局が前の起動でつないでいたアクセスポイントにまだいると覚えていた。次の起動で別のアクセスポイント(同じメッシュの別の機械)につなぐと、局宛てのユニキャストが前のアクセスポイントへ流れ、届かなかった見込みが高い(hw6oとhw10oの実機。f4:d5:80:31:fc:d0につないだ間、局宛ての保護されたユニキャストが50秒から90秒以上1つも来ず、DHCPのREQUESTに答えが無かった。〈切断〉と〈接続〉の後は、すぐ届いた)。行は`wifi: the machine goes off: the network is left`と`wifi: the network left`である。
-29. TessronOSには今、システムの眠り(サスペンド)が無い。入れるときは、起きた後にカードを始め直す(iwmはファームウェアを読み直す必要がある)。23.の始め直しがそのまま使える。
+29. スリープ(3.10.11)の後はカードを始め直す(iwmはファームウェアを読み直す必要がある)。23.の始め直しを使う。
 
 WPA3(SAE)、WPA(RSNの無いもの)、WEP、802.1X(企業向け)のネットワークには接続しない(走査の一覧には暗号の種類を付けて出す)。WPA2とWPA3を両方受け付けるアクセスポイントには、WPA2で接続する。
 
@@ -447,6 +463,38 @@ WPA3(SAE)、WPA(RSNの無いもの)、WEP、802.1X(企業向け)のネットワ�
 `WIFI=1`のx64のビルドは、`tools/x64/wifi/mkobj.py`でこれを固定のUUIDのただの実身(`SYSDEF_FW_IWM8265_36`、名前`iwlwifi-8265-36.ucode`)にする。レコード1がファイルそのもの、レコード0が説明とIntelの許諾の文、所有者はシステムで誰でも読める。実身「システム」から仮身で結び、ARMのイメージには入れない(`mktsfs`の`--over`で、x64の`WIFI=1`のビルドだけ実身「システム」を差し替える)。前のNetBSDのiwm(除いた形、9.6.2)が求めたAPIの版22の`iwlwifi-8265-22.ucode`の実身(`SYSDEF_FW_IWM8265`)は、その形と一緒に除いた。
 
 Surface Go 2のWi-Fi 6 AX200のファームウェアは、OpenBSDのiwx(9.6.9)が`iwx-cc-a0-77`の名前で求めるAPIのバージョン77の`iwlwifi-cc-a0-77.ucode`(1,368,096バイト)である。`fw.sh`が、linux-firmwareのタグ20251021の`intel/iwlwifi/`から、8265と同じ手順で取る(ファイルごとにタグと木の中の場所を持つ)。このバイト列は、OpenBSD 8.0が配るiwxのファームウェア(`firmware.openbsd.org`の`iwx-firmware-20251021p0.tgz`、その`iwx-cc-a0-77`)と同じである(git.kernel.org、gitlab.com、OpenBSDのパッケージの3つで同じSHA-256。許諾の`iwx-license`も`LICENCE.iwlwifi_firmware`と同じ)。1つ前のタグ20250917の同じ名前のファイルは、大きさが同じで中身が違う。`mkobj.py`がこれを実身`SYSDEF_FW_IWXCC_77`(名前`iwlwifi-cc-a0-77.ucode`)にし、8265のものと同じ形で実身「システム」から結ぶ。AX200はPNVMのファイルを読まない。
+
+iwmの8265以外のカード、iwxのAX201とAX210、MediaTekのカードのファームウェアも、同じ形の実身にして実身「システム」から結ぶ(`include/ts/sysdef.h`の`SYSDEF_FW_*`、`mkobj.py`の`MORE`)。バイト列は、OpenBSD 8.0のパッケージの同じ名前のファイルと同じであることを確かめた(`fw.sh`のSHA-256はパッケージから取り、linux-firmwareのタグから取ったファイルで一致した。パッケージは`firmware.openbsd.org`の8.0の`SHA256`と照合した)。
+
+| カード | ドライバが求める名前 | linux-firmwareのファイル | 大きさ |
+| --- | --- | --- | --- |
+| AX201(チップQu-b0) | `iwx-Qu-b0-hr-b0-77` | タグ20251021の`intel/iwlwifi/iwlwifi-Qu-b0-hr-b0-77.ucode` | 1,406,572 |
+| AX201(チップQu-c0) | `iwx-Qu-c0-hr-b0-77` | 同じ`iwlwifi-Qu-c0-hr-b0-77.ucode` | 1,406,588 |
+| AX201(チップQuZ-a0) | `iwx-QuZ-a0-hr-b0-77` | 同じ`iwlwifi-QuZ-a0-hr-b0-77.ucode` | 1,406,716 |
+| AX210 | `iwx-ty-a0-gf-a0-77`、`iwx-ty-a0-gf-a0.pnvm` | 同じ`iwlwifi-ty-a0-gf-a0-77.ucode`、`.pnvm` | 1,594,276、55,052 |
+| AX210の一部のサブシステム、AX211 | `iwx-so-a0-gf-a0-77`、`iwx-so-a0-gf-a0.pnvm` | 同じ`iwlwifi-so-a0-gf-a0-77.ucode`、`.pnvm` | 1,641,260、55,208 |
+| AX211と同じPCIのIDで無線部がgf4(AX411など) | `iwx-so-a0-gf4-a0-77`、`iwx-so-a0-gf4-a0.pnvm` | 同じ`iwlwifi-so-a0-gf4-a0-77.ucode`、`.pnvm` | 1,669,164、27,876 |
+| 同じく無線部がhr(AX201、AX203、AX101) | `iwx-so-a0-hr-b0-77` | 同じ`iwlwifi-so-a0-hr-b0-77.ucode` | 1,500,532 |
+| 同じく無線部がjf(9560、9462、9461) | `iwx-so-a0-jf-b0-77` | 同じ`iwlwifi-so-a0-jf-b0-77.ucode` | 1,446,036 |
+| AX201のPCIのIDの9462、9560(チップQu-b0、Qu-c0、QuZ-a0) | `iwx-Qu-b0-jf-b0-77`、`iwx-Qu-c0-jf-b0-77`、`iwx-QuZ-a0-jf-b0-77` | 同じ`iwlwifi-Qu-b0-jf-b0-77.ucode`、`iwlwifi-Qu-c0-jf-b0-77.ucode`、`iwlwifi-QuZ-a0-jf-b0-77.ucode` | 1,323,292、1,323,308、1,323,376 |
+| 3160 | `iwm-3160-17` | タグ20230117の`iwlwifi-3160-17.ucode` | 918,268 |
+| 3168 | `iwm-3168-29` | 同じ`iwlwifi-3168-29.ucode` | 1,036,288 |
+| 7260 | `iwm-7260-17` | 同じ`iwlwifi-7260-17.ucode` | 1,049,340 |
+| 7265 | `iwm-7265-17` | 同じ`iwlwifi-7265-17.ucode` | 1,180,412 |
+| 3165、リビジョンDの7265 | `iwm-7265D-29` | 同じ`iwlwifi-7265D-29.ucode` | 1,036,772 |
+| 8260 | `iwm-8000C-36` | 同じ`iwlwifi-8000C-36.ucode` | 2,428,004 |
+| 9560(iwmのPCIのID) | `iwm-9000-46` | タグ20240312の`iwlwifi-9000-pu-b0-jf-b0-46.ucode` | 1,519,568 |
+| 9260 | `iwm-9260-46` | 同じ`iwlwifi-9260-th-b0-jf-b0-46.ucode` | 1,490,508 |
+| MT7921 | `mwx-mt7961_patch_mcu_1_2_hdr`、`mwx-mt7961_ram_code_1` | タグ20260309の`mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin`、`WIFI_RAM_CODE_MT7961_1.bin` | 92,192、791,908 |
+| MT7920(MT7921と同じPCIのID) | `mwx-mt7961_patch_mcu_1a_2_hdr`、`mwx-mt7961_ram_code_1a` | 同じ`WIFI_MT7961_patch_mcu_1a_2_hdr.bin`、`WIFI_RAM_CODE_MT7961_1a.bin` | 100,384、802,744 |
+| MT7922、RZ616 | `mwx-mt7922_patch_mcu_1_1_hdr`、`mwx-mt7922_ram_code_1` | 同じ`WIFI_MT7922_patch_mcu_1_1_hdr.bin`、`WIFI_RAM_CODE_MT7922_1.bin` | 137,632、1,003,092 |
+| QCA6174 hw3.0〜hw3.2(athx) | `athx-qca6174-firmware-6`、`athx-qca6174-board-2` | タグ20261019の`ath10k/QCA6174/hw3.0/firmware-6.bin`、`board-2.bin` | 706,360、740,076 |
+
+AX210は`0x2725`のサブシステムのIDでty-a0かso-a0が決まるので、両方を載せる。増えるのは合わせて約10.5MBで、ブラウザ入りのx64のイメージのシステムボリューム(768MB。R1.200相当のイメージで空きは約271MB)に収まる。AX201のPCIのIDの9462と9560の3本と、iwmの8265以外の8本で増えるのは合わせて約14.6MBである。R1.300のx64のシステムボリューム(768MB)とパッケージ(559MB)の約2〜3%で、対象のカードが多いので載せた。`iwx-ma-b0-*`、BZ世代、MT7925は載せていない。MediaTekの許諾(`LICENCE.mediatek`)は、MediaTekのチップを持つ機器のために使うことと再配布を認め、ファームウェア自身がGPLやLGPLの対象になる形を禁じる。TessronOSでは、ファームウェアはシステムボリュームの独立した実身で、カーネルにリンクしない。
+
+初代Surface GoのWi-Fiモデル(QualcommのQCA6174、PCI 168c:003e、サブシステム168c:3370、チップのhw3.2)のファイルは、athx(9.6.9)が読む`firmware-6.bin`(WLAN.RM.4.4.1-00309。WMIとHTTはTLVの形で、OTPの像と本体の像を持ち、コードスワップの像は持たない)と、基板ごとの較正のデータを集めた`board-2.bin`である。`fw.sh`が、linux-firmwareのタグ20261019の`ath10k/QCA6174/hw3.0/`から、許諾の`LICENSES/LICENSE.QualcommAtheros_ath10k`と、ファームウェアが含むソフトウェアの告知`notice_ath10k_firmware-6.txt`(53,425バイト)と一緒に、ほかのファイルと同じ手順で取る。hw3.2のチップもhw3.0の木のファイルを使う。`mkobj.py`がこれを実身`SYSDEF_FW_ATHX6174_FW`(名前`QCA6174-hw3.0-firmware-6.bin`)と`SYSDEF_FW_ATHX6174_BD`(名前`QCA6174-hw3.0-board-2.bin`)にし、ほかのファームウェアと同じ形で実身「システム」から結ぶ。レコード0は、説明、Qualcommの許諾、告知の全文の順である。
+
+athxは`board-2.bin`から、カードの名前で基板のデータを1つ選ぶ。ファームウェアのOTPの像がチップのEEPROMに基板とチップのIDを見つけたときは`bus=pci,bmi-chip-id=…,bmi-board-id=…`を、見つけないときと、その名前の項目が無いときは`bus=pci,vendor=168c,device=003e,subsystem-vendor=168c,subsystem-device=3370`(PCIの構成空間のサブシステムのID)を探す。タグ20261019の`board-2.bin`には、Wi-Fiモデルの名前の項目と、LTEモデル(サブシステム3371)の項目が1つずつある。LTEモデルは対象にしないが、選び方は同じなので、そのカードでも名前の項目は見つかる。
 
 ### 9.6.6 設定と状態
 
@@ -536,9 +584,9 @@ SAEとPMFに使う暗号とSAEそのものは、`tools/wpa/build.sh modtest`が�
 
 カードのドライバ(iwm、bwfm)とカードとのつなぎは実機でしか確かめられない。その上のWi-Fiの管理、net80211とのつなぎ、DHCPまでは、Wi-Fiのシミュレータ(9.6.12)でQEMUの中で確かめる。実機での確かめ方は`docs/x64-hw-test.md`にある。
 
-### 9.6.8 Raspberry Pi 5のWi-Fi
+### 9.6.8 Raspberry Piの内蔵のWi-Fi
 
-Raspberry Pi 5のWi-Fi(CYW43455)は、BCM2712の2つ目のSDのホスト(`sdio2`、デバイスツリーの`/axi/mmc@1100000`)にSDIOでつながる。起動のディスクのSDカードのドライバ(`device/sd/sdhci.c`)は使わず、NetBSD 11.0のSD Host Controllerのドライバ`sdhc`とSD/SDIOの層`sdmmc`をrumpカーネルの中でこのホストに付け、チップをBroadcomのFullMACのドライバbwfm(4)で動かす。`sdhci.c`は1行も変えていない。Pi 5のビルドに既定で入り(`build_make/wifi_arm.mk`)、`make TARGET=_RPI5_ WIFI=0`で除ける。Pi 4とQEMU virtの既定のビルドには入らない。走査、接続(なし、WPA2-Personal)、DHCPは、x64と同じWi-Fiの管理(`device/net/wifi/wifi.c`、9.6.4、9.6.6)とWPA2の鍵の交換(`device/net/wifi/wpa/`、`tools/wpa/build.sh`の`ARCH=aarch64`で`~/tessronos-wpa-arm/wpasupp.o`)が行い、プロトコルスタックのカードはx64と同じカードの選択(`device/net/netsel.c`)とアダプタの管理(`device/net/netadp.c`)がボードのEthernetとWi-Fiから選ぶ(9.6.1)。Ethernetは機器の設定の`NET_ADAPTER`で`eth`と書く。システム環境設定の〈ネットワークアダプタ〉とネットワーク設定の〈Ｗｉ－Ｆｉ〉はx64と同じに使える。Wi-Fiの設定の実身「Ｗｉ－Ｆｉの設定」もPi 5のシステムボリュームに入る。
+Raspberry Pi 5のWi-Fi(CYW43455)は、BCM2712の2つ目のSDのホスト(`sdio2`、デバイスツリーの`/axi/mmc@1100000`)にSDIOでつながる。起動のディスクのSDカードのドライバ(`device/sd/sdhci.c`)は使わず、NetBSD 11.0のSD Host Controllerのドライバ`sdhc`とSD/SDIOの層`sdmmc`をrumpカーネルの中でこのホストに付け、チップをBroadcomのFullMACのドライバbwfm(4)で動かす。`sdhci.c`は1行も変えていない。Pi 5のビルドに既定で入り(`build_make/wifi_arm.mk`)、`make TARGET=_RPI5_ WIFI=0`で除ける。Pi 4の系統(この節の後の「Raspberry Pi 4、Pi 400、Compute Module 4」)とQEMU virtの既定のビルドには入らない。走査、接続(なし、WPA2-Personal)、DHCPは、x64と同じWi-Fiの管理(`device/net/wifi/wifi.c`、9.6.4、9.6.6)とWPA2の鍵の交換(`device/net/wifi/wpa/`、`tools/wpa/build.sh`の`ARCH=aarch64`で`~/tessronos-wpa-arm/wpasupp.o`)が行い、プロトコルスタックのカードはx64と同じカードの選択(`device/net/netsel.c`)とアダプタの管理(`device/net/netadp.c`)がボードのEthernetとWi-Fiから選ぶ(9.6.1)。Ethernetは機器の設定の`NET_ADAPTER`で`eth`と書く。システム環境設定の〈ネットワークアダプタ〉とネットワーク設定の〈Ｗｉ－Ｆｉ〉はx64と同じに使える。Wi-Fiの設定の実身「Ｗｉ－Ｆｉの設定」もPi 5のシステムボリュームに入る。
 
 | 部分 | 置き場 | すること |
 | --- | --- | --- |
@@ -598,6 +646,59 @@ QEMUにはチップが無いので、次のことはPi 5の実機で1回にま�
 
 試験。QEMU virtは`make TARGET=_QEMU_VIRT_ WIFI=1`でWi-Fiの部分を入れて走らせられる。ホストのノードが無いので`wifi: no Wi-Fi host`の1行だけを出して何も触らず、`net`、`so`、`rump`の群が通ることを確かめる。基板の設定の取り出しは、群`wifinv`(`tests/ktest/ktest_wifinv.c`、`WIFI=1`のときだけ入る)が、注記、コメント、空の行、全角、文中の改行、設定でない行、参照(`&amp;`)の文章と、システムボリュームの実身(79の設定)で確かめ、`tools/rpi5/wifi/test_nvram.py`がホストで同じ文章と元のテキストとの突き合わせを確かめる。アダプタの選択とWi-Fiの画面は、`make TARGET=_QEMU_VIRT_ DESKTOP=1 UITEST=1 WIFI=1`のカーネルと`KTEST=1 WIFI=1`の試験のディスクで`tools/tests/ui_netadp.steps`を`tools/ui_run.py`で走らせて確かめる(x64と同じ手順で、アダプタの名前が`eth`)。ホスト、チップ、ファームウェア、走査と接続は実機でしか確かめられない。
 
+#### Raspberry Pi 4、Pi 400、Compute Module 4
+
+3つの機種のWi-Fiも、同じNetBSDのsdhc、sdmmc、bwfmで動かす。`make TARGET=_RPI4_ WIFI=1`で入る。イメージにファームウェアが入るので、既定は`WIFI=0`である。この系統はARMv8.0-Aなので、rumpカーネルと鍵の交換は`~/tessronos-netbsd-v80-wifi/rumpnet.o`と`~/tessronos-wpa-arm-v80/wpasupp.o`を結ぶ。OpenBSDの層(9.6.9)を使わないのは、SDIOのホストの部分(`tswifi_sdio.c`)と、チップのsupplicant、PMF、SAE、ローミングの手順がこちらにあり、機種で違うのが基板の部分だけだからである。Pi 5と違うところは次のとおりである。値はファームウェアの配布物のデバイスツリー(`bcm2711-rpi-4-b.dtb`、`bcm2711-rpi-400.dtb`、`bcm2711-rpi-cm4.dtb`)から確かめた。
+
+| 項目 | Pi 5 | Pi 4の系統 |
+| --- | --- | --- |
+| ホスト | BCM2712の`/axi/mmc@1100000` | BCM2711の古いEMMC(Arasan、`/soc/mmcnr@7e300000`、`0xFE300000`)。カードのスロットはEMMC2 |
+| 割込み | SPI 274 | SPI 126。カードのスロットのEMMC2と同じ線である。`sdhci.c`はポーリングで信号を切っているので、この線を上げるのはWi-Fiのホストだけである。`sdhci.c`が割込みを使うときは、線を分け合う形にする必要がある |
+| ピン | GPIO 30〜35 | GPIO 34〜39。機能とプルはデバイスツリーの`sdio_pins`の値(ALT3、34は引上げなし、ほかは引上げ)をそのまま使う |
+| チップの電源 | `wl-on-reg`(GPIO 28) | ファームウェアのGPIOの`WL_ON`の線(番号は`gpio-line-names`から探す。メールボックスでは128を足す)。Raspberry Pi OSのデバイスツリーには電源の順序のノードが無く、ファームウェアが入れたままにしている。再起動の後でもチップが初めの状態になるように、20ms切ってから入れ、Pi 5の`startup-delay-us`と同じ150ms待つ。ファームウェアが答えないときは理由を出して先へ進む |
+| アンテナ | なし | Compute Module 4だけデバイスツリーに`ant1`、`ant2`の固定の値がある。ノードがあるときだけ設定する(同じ番号の線はPi 4では`GLOBAL_RESET`である) |
+| 基準のクロック | デバイスツリーの固定のクロック | ファームウェアのクロック1(`FW_CLOCK_EMMC`)。切れていれば入れ、速さを読む。読めないときは諦める |
+| チップ | CYW43455(Pi 5、Pi 500、CM5) | Pi 4とCM4の多くはCYW43455。Pi 400と一部のCM4はCYW43456で、そのファームウェアは同梱しないのでWi-Fiなしで動く |
+
+ホストの設定は、Arasanのブロックに合わせて足す。能力のレジスタは読まず(`SDHC_FLAG_HOSTCAPS`。3.3V、高速、ブロックは1024バイトまで)、電源のレジスタに0を書かず(`SDHC_FLAG_NO_PWR0`)、高速のビットを立てない(`SDHC_FLAG_NO_HS_BIT`)。このブロックは、同じレジスタへの続けての書込みがカードのクロックの2周期より近いと、前の書込みを失う。そこでデータのポートのほかは、書くたびに6μs空ける(`tswifi_write_gap`。400kHzの2周期と端数)。Linuxの`bcm2835-mmc`も同じ間を置く。データのポートには制限がなく、ファームウェアの読込みと伝送の速さは落ちない。DMAは使わずPIOで動かす。bwfmは転送のバッファと長さを4バイトに揃えるので、32ビットでしか読み書きできないデータのポートでも端数は出ない。
+
+起動の引数`tessronos.sd=emmc`(QEMUの`raspi4b`のカード)が同じホストをSDカードのドライバに渡しているときは、`wifi: no Wi-Fi host`の行を出して何も触らない。
+
+ファームウェアの実身はPi 5と同じものである。基板の設定の文章の名前だけが「Ｗｉ－Ｆｉの基板の設定（Ｒａｓｐｂｅｒｒｙ　Ｐｉ　４）」になる。ファイルの置き場は`make WIFI_FW_DIR=...`で替えられる。SHA-256が合っていれば取りに行かない。
+
+Pi 400と一部のCM4のCYW43456は、bwfmがチップのリビジョン(9)で`brcmfmac43456-sdio`を求める。CYW43456のファームウェアはlinux-firmwareに無く、Raspberry Pi OSの`firmware-nonfree`にあるものの許諾(Synaptics)の再配布の条件が明確でないので、同梱しない(2026-11-02のユーザの判断)。システムに無いファイルを求められたら、`wifi: the system does not include the firmware of this machine's chip (...): no Wi-Fi on this machine`の行を1回出す。管理は待たずに止まり、実身`wlan0`を消し、`knl_wifi_present`も偽を返すので、ネットワーク設定とシステム環境設定にはWi-Fiのカードが無い機械と同じに見える。
+
+チップが無い機種(無線の無いCM4)では、`sdmmc0`に何も付かず、管理は30秒待って`bwfm0`を諦める。ファームウェアの実身が読めないときは、`wifi: file ...: the object ... could not be read`の行を出してbwfmが付くのをやめる。どちらのときも、SDカードとEthernetはそのまま動く。
+
+Raspberry Piにはシステムのスリープが無い(スリープの道はx64の`pm.c`だけで、`wifi_pm`もx64の中にある)。電源を切るときは`knl_finish_device`が`knl_wifi_shutdown`でネットワークから離れる。ネットワーク設定で切って入れ直すときは、インタフェースを上げるときにbwfmがファームウェアを読み直す。将来スリープを足すときは、x64と同じ`wifi_pm`の形で、復帰の後にインタフェースを上げ直せば、チップの電源が落ちていても初めから立ち上がる。
+
+Pi 4の実機では、次を1回の起動で確かめる。
+
+1. `wifi: the host's clock was on`、`wifi: SDIO host at fe300000+100, interrupt 158, clock ... kHz`
+2. `wifi: pin 34: was ..., now 5, pull 0`から39まで(`now 5`はALT3)
+3. `wifi: the chip's power ... off: 0`、`wifi: the chip's power on: 0, 150 ms waited`。CM4では`ant1`、`ant2`の行
+4. `tssdhc0 at mainbus0`、`sdmmc0 at tssdhc0`、`bwfm0 at sdmmc0`。CISのベンダと型の行
+5. `wifi: file brcmfmac43455-sdio.bin: ... bytes`、続いてCLMと基板の設定の行、`bwfm: firmware ...`、`bwfm0`のMACアドレス、ホストの割込みの数
+6. 上の「実機での確かめ方」の2以降
+7. Pi 400では、5の代わりに`wifi: the system does not include the firmware ...`の行が出て、起動が続き、ネットワーク設定にWi-Fiが出ないこと
+
+#### OpenBSDの層への統一(`WIFI_NET80211=obsd`)
+
+Raspberry PiのWi-FiもOpenBSDの802.11の層で動かす形を、`make WIFI_NET80211=obsd`で選べる(2026-11-02のユーザの決定。無線LANの層だけを統一し、有線LANとTCP/IPは変えない)。既定は実機で確かめるまで`nbsd`(この節のここまでの形)のままで、確かめた後に既定を替え、`nbsd`の部分を消す。
+
+| 部分 | 置き場 | すること |
+| --- | --- | --- |
+| 層 | `tools/openbsd/build.sh`の`ARCH=aarch64`、`~/tessronos-obsd-arm/obsdwifi.o`(Pi 4の系統は`-v80`、シミュレータは`-wifisim`) | arm64のヘッダで、9.6.9と同じnet80211と層を翻訳する |
+| ホストとドライバ | `sdhc.c`、`sdmmc.c`、`sdmmc_cis.c`、`sdmmc_io.c`、`sdmmc_mem.c`、`if_bwfm_sdio.c`、`bwfm.c`(OpenBSD 8.0) | SDカードのドライバとは別に、Wi-Fiのホストだけを動かす。DMAは使わない |
+| バス | `device/net/wifi/obsd/obsd_bus_arm.c` | レジスタ、キャッシュの操作をするDMA、ファームウェア、1本だけのデバイスの木、スレッド |
+| チップ | `device/net/wifi/obsd/tsw_bwfm.c` | ホストの起動、チップを待つこと(10秒)、チップのsupplicant、PMF、SAE、ローミング(上の節と同じ手順) |
+| 当て | `tools/openbsd/patches/bwfm-join-hooks.patch` | 参加の直前とチップのイベントで`tsw_bwfm.c`を呼ぶ2行 |
+| 基板 | `wifi_user_rpi5.c` | 今と同じ。rumpカーネルの手放しだけを`W_UNSCHED`で切り替える |
+
+bwfmはFullMACなので、9.6.9の「認証の前に止める」手順はチップには無い。管理のタスクは参加の前に`rump_tswifi_fw_keys`で鍵を渡し、net80211がRUNになったら`rump_tswifi_fw_link`で認可を待つ(`step_obsd`の`cur_fw`の枝)。層はネットワークを失うと自分で参加し直すので、鍵はネットワークを離れるまで持つ。チップがPMFを持つときは`IEEE80211_C_MFP`を立てる。立てないとnet80211がPMF必須のアクセスポイントを候補から外す。
+
+QEMUで確かめられるのは、層(群`obsdwifi`)と、管理のタスクと層のつながり(群`wifisim`)と、ホストの無い機械で諦めることだけである。ホスト、チップ、走査、参加は実機でしか確かめられない。ログは`obsd: SDIO host at ...`、`sdmmc0 at sdhc0`、`obsd: SDIO function ... CIS vendor ... product ...`、`bwfm0 at sdmmc0`、`obsd: bwfm0: chip ..., revision ...`、`wifi: file ...`、`obsd: bwfm0: the firmware runs, address ...`の順に出る。チップが10秒で見つからなければ`obsd: no chip on the SDIO host after ... ms`を出して諦める。
+
 ### 9.6.9 OpenBSDの802.11の層(`WIFI_NET80211=obsd`)
 
 NetBSD 11.0のiwmとnet80211には、802.11n、PMF(802.11w)、接続している間の走査、より強いアクセスポイントへの移動の手段が無い(9.6.2、9.6.4の20.、`docs/private/wifi_flow_review.md`の5、14、19)。R1.200の前にこれを埋めるため、2026-10-23に次の3つを比べた。
@@ -620,12 +721,12 @@ NetBSD 11.0のiwmとnet80211には、802.11n、PMF(802.11w)、接続している
 
 #### 組み方
 
-x64のPCの802.11の層とドライバは、OpenBSD 8.0のnet80211とiwmである(`WIFI_NET80211=obsd`、ただ一つの形)。前はNetBSDのもの(`WIFI_NET80211=nbsd`)が既定だったが、OpenBSDの層が実機でつながり(ThinkPad X1 Yoga 第3世代で802.11n MCS 15、144 Mb/sまで)、NetBSDの形は除いた(2026-10-23)。Raspberry Pi 5はNetBSDのbwfmのまま、PMF、SAE、ローミングをチップのファームウェアに頼む(9.6.8)。
+x64のPCの802.11の層とドライバは、OpenBSD 8.0のnet80211とiwmである(`WIFI_NET80211=obsd`、ただ一つの形)。前はNetBSDのもの(`WIFI_NET80211=nbsd`)が既定だったが、OpenBSDの層が実機でつながり(ThinkPad X1 Yoga 第3世代で802.11n MCS 15、144 Mb/sまで)、NetBSDの形は除いた(2026-10-23)。Raspberry Piの既定はNetBSDのbwfmのまま、PMF、SAE、ローミングをチップのファームウェアに頼む。OpenBSDの層の形も選べる(9.6.8)。
 
 | 部分 | 置き場 | 内容 |
 | --- | --- | --- |
 | OpenBSDのソース | `~/openbsd/src-8.0`(`tools/openbsd/build.sh fetch`) | `sys.tar.gz`をSHA-256で確かめ、要るディレクトリだけを展開する。ソースは変えない |
-| 層とオブジェクト | `device/net/wifi/obsd/`、`~/tessronos-obsd-x64/obsdwifi.o`(`tools/openbsd/build.sh`) | net80211の全部、`if_iwm.c`、`if_iwx.c`、OpenBSDのカーネルの`uipc_mbuf.c`、`uipc_mbuf2.c`、`subr_tree.c`、`if_media.c`、`lib/libkern/fls.c`、`sys/crypto`のAES、CMAC、HMAC、MD5、SHA-1、SHA-2、鍵の包み、Michael、RC4を、OpenBSDのヘッダとx86_64のカーネルの翻訳の指定で翻訳し、層のファイルと一つのオブジェクトにする。名前はすべて`obsdns_`にして隠し、外に見えるのは`rump_tswifi_`の入口だけである |
+| 層とオブジェクト | `device/net/wifi/obsd/`、`~/tessronos-obsd-x64/obsdwifi.o`(`tools/openbsd/build.sh`) | net80211の全部、`if_iwm.c`、`if_iwx.c`、`if_mwx.c`、OpenBSDのカーネルの`uipc_mbuf.c`、`uipc_mbuf2.c`、`subr_tree.c`、`if_media.c`、`lib/libkern/fls.c`、`sys/crypto`のAES、CMAC、HMAC、MD5、SHA-1、SHA-2、鍵の包み、Michael、RC4を、OpenBSDのヘッダとx86_64のカーネルの翻訳の指定で翻訳し、層のファイルとTessronOSのathx(QCA6174のドライバ、下の「athx」)と一つのオブジェクトにする。名前はすべて`obsdns_`にして隠し、外に見えるのは`rump_tswifi_`の入口だけである |
 | カーネルの側 | `device/net/wifi/obsd/obsd_user.c` | 層が使うT-Kernelの機能(ミューテックス、セマフォ、タスク、時刻、メモリ、乱数、コンソール、カードの場所、管理のタスクを起こすこと)。カードの構成空間、BARの写像、DMAのメモリ、MSI、ファームウェアは、rumpカーネルのWi-Fiと同じハイパーコール(`wifi_user.c`の`rumpcomp_*`)を使う。この形では、それらが待つときにrumpカーネルの仮想プロセッサを手放す処理をしない(`W_UNSCHED`) |
 | 管理のタスク | `device/net/wifi/wifi.c`の`#ifdef WIFI_OBSD`の枝 | 参加(`ob_join`)、認証の前の判断(`ob_auth`)、SAE(`ob_sae_step`)、層からの知らせ(`ob_events`)、状態の見回り(`step_obsd`) |
 | TCP/IP | 今のrumpカーネル | Wi-Fiを含まない形(`WIFI=0`と同じ`~/tessronos-netbsd-x64`)。`neta0`のMACアドレスを替える`rump_tswifi_setmac`は、どの形のrumpカーネルにも入る`tsnet_conf.c`に移した |
@@ -642,7 +743,7 @@ OpenBSDのコードをNetBSDのrumpカーネルの中に入れなかったのは
 - `bus_dma`。カーネルの直写像のアドレスを、ページごとに`rumpcomp_pci_virt_to_mach`で物理アドレスにし、続いたページを1つの区切りにまとめる。`bus_dmamem_alloc`は`rumpcomp_pci_dmalloc`
 - PCI。構成空間、能力のリスト、BARの写像(`pci_mapreg_map`)、MSIの割込み(1つのタスクが割込みを待ってドライバのハンドラを呼ぶ)。MSI-Xとピンの割込みは無いとする。iwxはMSI-Xが無ければMSIを使う(`iwx_intr`と割込みの原因の表)
 - ネットワークのインタフェース。`iwm0`(iwxのカードでは`iwx0`)はどのスタックにも入らない。送信の列(`ifq`、256個)、`if_start`(すぐにドライバの送信を呼ぶ)、`if_input`(受けたEthernetのフレームを`rumpcomp_tswifi_input`、つまり管理のタスクの`knl_wifi_rx`に渡す)、1秒ごとの見張り(`if_timer`と`if_watchdog`、OpenBSDの`if_slowtimo`と同じ)
-- ファームウェア(`loadfirmware`)。iwmの求める`iwm-8265-36`の名前で、システムボリュームの実身`SYSDEF_FW_IWM8265_36`を、iwxの求める`iwx-cc-a0-77`の名前で`SYSDEF_FW_IWXCC_77`を読む(9.6.5)
+- ファームウェア(`loadfirmware`)。ドライバの求める名前で、システムボリュームの実身を読む。`iwm-8265-36`は`SYSDEF_FW_IWM8265_36`、`iwx-cc-a0-77`は`SYSDEF_FW_IWXCC_77`で、ほかは9.6.5の表のとおり
 - コンソール。層の`printf`は行にまとめて出す。OpenBSDの`%b`も読む
 
 #### 管理のタスクとのつなぎ(`tswifi_obsd.c`)
@@ -704,6 +805,22 @@ Linuxのiwlwifiとmac80211は、受けたフレームを、重複の検査(`iwl_
 
 これを次の実機で確かめるために、iwmが捨てるreplayを、カードの受信のバッファの段階で先に見て分ける(`rp_look`)。送り直しの印(Retry)の有無と、そのTIDで同じシーケンス番号を受けていたかで数え、`wifi: receive: the replays as seen ahead N: with the retry bit R, the sequence received before S, neither X; too short T; allocations failed A`の行に出す。どちらにも当たらない(X)ものは、最初の16個まで`wifi: a frame to the station iwm drops as a replay: TID, sequence, retry bit, the sequence received before, PN, the last PN taken for the TID, the TID's block-ack agreement`の行に出す。Xが0に近ければ、データは失われていない。Xが多ければ、PNの扱いを直す。カードの統計の知らせの大きさがiwmの読む構造体(`IWM_STATISTICS_NTFY_API_S_VER_8`)と違うときは、`wifi: the card's statistics notification: N bytes, iwm reads M ... not to be trusted`の行に出す。そのときは、カードの統計の行(PLCP errors、beacons、missedなど)は信用しない。OpenBSDの層のプールの確保の失敗(mbufとクラスタを含む)も数える(`obsd_pool_fails`)。
 
+#### mwx(MediaTek MT7921、MT7922)
+
+OpenBSD 8.0には、MediaTekのカードのドライバmwx(4)がある(`sys/dev/pci/if_mwx.c`、`if_mwxreg.h`、6,254行と1,593行。ISC。MT7920、MT7921、MT7921K、MT7922、RZ616、MT7925を扱う)。これをiwmとiwxと同じ層に足した(`tsw_mwx.c`、`tools/openbsd/build.sh`の`DRV_SRCS`)。パッチは要らず、外から足りない関数も無かった(リンクの外の名前の一覧`undef.syms`は変わらない)。Linuxのmt76のソースは写していない。
+
+iwm、iwxと違うところは次のとおりである。
+
+- 速さ。リリースのmwxは802.11nとacを切っている(`#if NOTYET`)。802.11a、b、gだけで動くので、速さは54Mb/sまでである。ドライバの`ic_caps`のとおりで、層から足さない
+- アドレス。カードは32ビットのアドレスしか扱えない。リングとクラスタは前から4GBより下である。mbufの本体もカードが直接読むので、`tsw_mwx.c`が`obsd_mbuf_low`を立て、MSIZEのプールを、カードのDMAのメモリの1ページを切り分けて作る。iwm、iwxでは旗が立たず、今までと同じである。`wifi_user.c`の`CARD_DMA_LIMIT`はMediaTekのカードでは32ビットになり、越えるアドレスは`wifi: DMA REFUSED`の行を出す
+- 信号の強さ。mwxは負のdBmをnet80211の符号なしのバイトに入れるので、`min_dbm`は-256である
+- 記録。`wifi_user.c`のカードの記録は、Intelのレジスタ(`CSR_INT`など)をMediaTekのBARで読まないように分ける(`w_mt`)。`wifi: irq:`の行のうちMSIと割込みの数だけが出る。ドライバのsoftcはファイルの中だけの定義なので、`wifi: the card sent:`や`wifi: the card's keys:`のような行は出ない(`rx_peek`、`port_say`が無い)
+- 取り付けの失敗。`mwx_preinit`は失敗を返さないので、`ic_myaddr`が0のままなら失敗とする(`obsd: mwx0 could not read its firmware and address`)
+
+実機で見るログは、`wifi: card 14c3:7922 at ..., for mwx`、`obsd: the card 14c37922 is mwx's`、`mwx0 at pci..., msi ..., rev: MT7922.xx`、`wifi: firmware mwx-mt7922_patch_mcu_1_1_hdr: ... bytes`、`wifi: firmware mwx-mt7922_ram_code_1: ... bytes`、`obsd: mwx0: the firmware runs, address ...; 802.11a/b/g only`、`wifi: mwx0 ready, address ...`である。
+
+カードの動きは実機で未確認である(QEMUにカードが無い)。翻訳、リンク、カードの表、ファームウェアの実身の読込みだけを、群`obsdwifi`で確かめた。WPA3(SAE)はmwxで試されていない。
+
 #### iwx(Surface Go 2のWi-Fi 6 AX200)
 
 Surface Go 2のWi-Fiは、IntelのWi-Fi 6 AX200(PCI 8086:2723)である(検討書`docs/private/x64_surface_go2_study.md`の部品の表と、linux-surfaceのwikiのSurface Go 2の頁の「Intel WiFi 6 AX200 series」)。個体によって違わないかは、実機の`HW.TXT`のPCIの一覧で確かめる。AX200はiwmの次の世代で、OpenBSDではiwx(4)が扱う。OpenBSD 8.0の`if_iwx.c`、`if_iwxreg.h`、`if_iwxvar.h`をiwmと同じ層に足した。802.11axは使わず、iwxの扱う範囲(802.11nとac、VHT80、2本の流れ)で動かす。
@@ -731,9 +848,61 @@ iwmとの違いと、その扱いは次のとおりである。
 - ヘッダ。`if_iwxvar.h`はカードの設定の構造体を定義する(`static`でない)ので、2つのファイルから読むと二重の定義になる。`tools/openbsd/patches/if_iwxvar-static-cfg.patch`で`static`にした
 - そのほか、iwxが使うOpenBSDのカーネルの関数で足りなかったのは、`bus_space_unmap`(`obsd_pci.c`。窓はカーネルの直写像なので何もしない)と`fls`(`lib/libkern/fls.c`を翻訳する)だけだった
 
-ファームウェアは、iwxがAX200に求める`iwx-cc-a0-77`(APIのバージョン77)である(9.6.5)。AX200はPNVMを読まない(AX210以降だけ)。
+ファームウェアは、iwxがAX200に求める`iwx-cc-a0-77`(APIのバージョン77)である(9.6.5)。AX200はPNVMを読まない(AX210以降だけ)。AX201はチップのリビジョン、AX210はサブシステムのIDでiwxが名前を決め、`obsd: iwx0: firmware 名前, device family ...`の行に出す。AX210はファームウェアの後にPNVMを`loadfirmware`で読む。AX201とAX210の動きは実機で未確認である。
 
 実機で見るログは、iwmと同じ形である。`wifi: card 8086:2723 at ..., for iwx`、`obsd: the card 80862723 is iwx's`、`iwx0 at pci1 dev 0 function 0, msi 1`、`obsd: iwx0: firmware iwx-cc-a0-77, device family ..., HW_REV ..., RF ID ..., message (MSI) interrupt`、`iwx0: hw rev ..., fw ..., address ...`(ファームウェアとNVMが読めた)、`obsd: iwx0: firmware ... running its API (first data queue ...), the NVM read`、`wifi: iwx0 ready, address ...`、`wifi: iwx0 up (0): the runtime firmware loaded`、走査の数、`wifi: joining ...`から`wifi: DHCP in: ACK`まで(上の「ログ」)。
+
+#### athx(初代Surface Go、QualcommのQCA6174)
+
+初代Surface GoのWi-Fiモデル(1824)の無線LANは、QualcommのQCA6174(PCI 168c:003e、サブシステム168c:3370、チップのhw3.2)である。OpenBSD 8.0には、このチップのドライバが無い(athnは802.11nの前の世代、qwxはath11kの世代のチップのもの)。そこで、Linux 7.3.1のath10k(`drivers/net/wireless/ath/ath10k`、ISC)のうち、PCIとQCA6174に要る部分だけを取り、OpenBSDのnet80211の上のドライバとして書き直したathxを、TessronOSのソースとして持つ。net80211との結び方(状態の変更をタスクで行うこと、ファームウェアの走査、鍵をタスクで入れること)は、OpenBSD 8.0のqwx(ath11kをnet80211に載せたもの、ISC)の形に合わせ、LinuxからBSDへの書き換えはFreeBSDのathpを参考にした。LinuxKPIとmac80211は使わない。各ファイルのSPDXがISCであることを確かめてから写した。GPLのコードは含まない。
+
+置き場は`device/net/wifi/obsd/`である。
+
+| ファイル | 内容 |
+| --- | --- |
+| `athxreg.h` | チップと交わす定義。QCA6174のレジスタの値(ath10kの`hw.c`の`qca6174_regs`などの値をそのまま)と、CE、BMI、ファームウェアと基板のファイルの要素、HTC、WMI(TLVの形)、HTT、受信の記述子の構造体と列挙。ath10kのヘッダから宣言を名前で抜き出して作った(値と並びは原本のまま)。抜き出すのは`tools/x64/wifi/gen_athxreg.py`で、抜き出す名前の一覧は同じ場所の`athxreg.spec`にある(`gen_athxreg.py ath10kのディレクトリ athxreg.spec athxreg.h`)。生成物はリポジトリに置き、ビルドでは実行しない。先頭にath10kの著作権表示とISCの許諾 |
+| `athxregd.h` | 規制領域の表(Linuxの`drivers/net/wireless/ath/regd.h`、`regd_common.h`、`ath.h`のもの。国の番号、規制領域の対、帯ごとのCTL)。ISC |
+| `athxvar.h` | ドライバの状態(softc)と、ファイルの間の関数 |
+| `athx_pci.c` | PCIの窓、CE(Copy Engine。ホストのメモリの記述子のリングで、メッセージとフレームをすべて運ぶ)、診断の窓(チップのメモリを読み書きするCE7)、ブートローダとのやりとり(CE0とCE1)、コールドリセットとウォームリセット、MSIの割込み |
+| `athx_fw.c` | ファームウェアと基板のファイルの解釈と選択、BMIの命令、PLLの設定、OTPの実行、診断の窓でのファームウェアの書込み、HTC、起動の順序(`athx_boot`) |
+| `athx_wmi.c` | WMIの命令とイベント(service ready、ready、走査、管理フレームの受信、vdevとpeer、鍵、省電力、keepalive、echo) |
+| `athx_htt.c` | HTT(データのフレームの受信のリング、送信、送信の完了、peer mapと鍵の知らせ) |
+| `athx.c` | net80211の側(インタフェース、状態、走査、参加、鍵、フレーム)と、規制領域からのチャンネルの決め方 |
+| `tsw_athx.c` | 層とのつなぎ(`struct tsw_drv`、T-License) |
+
+置き場を`device/net/wifi/obsd/`にしたのは、athxがOpenBSDのカーネルのヘッダとnet80211のヘッダで翻訳され、層と同じオブジェクト(`obsdwifi.o`)に入って同じ名前空間(`obsdns_`)に閉じるからである。OpenBSDの`sys.tar.gz`にあるiwm、iwx、mwxは`~/openbsd/src-8.0`から翻訳する(`DRV_SRCS`)が、athxはOpenBSDに元が無いので、層のファイルと同じく`tools/openbsd/build.sh`の`COMP_SRCS`に足した。下のディレクトリを作らずに同じディレクトリに置いたのは、`build_make/x64.mk`の`obsdwifi.o`の依存(`device/net/wifi/obsd/*.[ch]`)と`build.sh`の`COMP`をそのまま使え、ビルドの構成を変えずに済むからである。ath10kから写したファイルはISCで、元の著作権表示を各ファイルの先頭に残す。層とのつなぎの`tsw_athx.c`だけがTessronOSのT-Licenseである。ARMのビルド(`tsw_bwfm.c`の系統)には入らない。
+
+起動の順序は次のとおりである。チップはドライバの取り付けで一度だけ起こし、ファームウェアはそれからずっと動かしておく。インタフェースのupはステーションのvdevを作って走査を始め、downはvdevを消す。
+
+1. PCIの窓と割込み(`athx0 at pci… , msi …`、`athx0: QCA6174 168c:003e, subsystem 168c:3370`)。CEのリングとバッファ(4GBより下のDMAのメモリ、合わせて約4MB)を取る
+2. チップを起こす(PCIE_SOC_WAKE)。コールドリセット(SOC_GLOBAL_RESET)、ターゲットの初期化を待ち(FW_INDICATORの`FW_IND_INITIALIZED`、3秒まで)、ウォームリセット(CE、CPU)。CEのリングを与え、CEの設定とサービスとパイプの対応を診断の窓でターゲットに書く(`hi_interconnect_state`の先の`pcie_state`)。L1を切り、IRAMの9バンクを早く割り当てさせ、`HI_OPTION_EARLY_CFG_DONE`を立ててターゲットのCPUを起こす
+3. BMIでターゲットの版を読む(`athx0: chip id …, target version 05030000`。hw3.0の05020000とhw3.2の05030000だけを受ける)
+4. `firmware-6.bin`と`board-2.bin`を実身から読む(`wifi: firmware athx-qca6174-firmware-6: 706360 bytes …`)。OTPを書いて基板のIDを問い(`BMI_PARAM_GET_EEPROM_BOARD_ID`)、上の名前で基板のデータを選ぶ(`athx0: board data '…', N bytes`)
+5. PLLをefuseの水晶の周波数に合わせ(176MHz)、ターゲットにHTCの版、モード、バイト順、PCIのデバイスIDを書く。基板のデータを`hi_board_data`の先に書き、OTPを実行し(結果はファームウェアの機能のビットで無視する)、ファームウェアの像(区切りの形、`SGMT`)を診断の窓で書く(だめならBMIの圧縮の流れで書く)。UARTの出力を切る
+6. HTCの制御のサービスをつなぎ、BMIを終える。HTTの受信のリングとバッファを取り、CEの割込みを入れて受信のバッファを置く。HTCのready(クレジットの数と大きさ)を待ち、HTTのサービス、WMIのサービスをつなぎ、HTCの設定の終わりを送る
+7. WMIのservice readyを待つ(5秒、だめならCEを見回ってもう5秒)。ABIの版を確かめ、チップの能力(HTとVHTの能力、RFの系統の数、EEPROMの規制領域、チャンネルの範囲)とサービスの一覧を読み、ファームウェアが求めるホストのメモリを取る。initの命令(資源の数とホストのメモリ)を送り、ready(チップのMACアドレス)を待つ。受信のフィルタを正すため、vdevを作って消し、echoで追い越しが無いことを確かめる
+8. HTTの受信のリングを満たし、HTTの版(2か3)を問い、リングの設定と、A-MPDUとA-MSDUの大きさを送る
+9. pdevの設定(PMF QoS、帯域の自動、チェーンの数、ARPのアクセスカテゴリ、ANI)、チャンネルの一覧、規制領域(`athx0: EEPROM regdomain …`、`athx0: N channels of 2 GHz, M of 5 GHz`)。`athx0: firmware WLAN.RM.4.4.1-00309- running, address …`
+
+どこかで止まると、`athx0: STOPPED at stage N (段階の名前): errno`の行と、チップのレジスタとCEの添字の行(`athx0: regs (stopped): …`)を出す。段階は`athxvar.h`の`enum athx_stage`(1がPCI、2がリセット、3がCE、4がBMI、5がファイル、6が書込み、7がHTC、8がWMI、9がHTT、10が動作)で、どの手順まで進んだかが分かる。
+
+iwm、iwx、mwxとの違いと、その扱いは次のとおりである。
+
+- アドレス。チップは32ビットのアドレスしか扱えない。チップが読み書きするものは、すべてドライバが`bus_dmamem_alloc`で取った4GBより下のメモリで、フレームはそこへ写して送り、そこから写して受ける。mbufはチップに渡さないので、`obsd_mbuf_low`は立てない。`wifi_user.c`の`CARD_DMA_LIMIT`は、MediaTekと同じく32ビットにする
+- 走査。ファームウェアが全部のチャンネルを走査し(`IEEE80211_C_SCANALL`)、ビーコンとプローブ応答はWMIの管理フレームとしてnet80211に渡る。名前を指定した参加では能動、指定が無ければ受け身で走査する。5GHzはすべて受け身(下の規制)である。走査の終わりのイベントでnet80211の走査を終える。接続している間の走査(背景の走査とローミング)は、この版では持たない。ファームウェアがビーコンを失うと(WMIのroamのイベント)、走査に戻る
+- 参加。AUTHへ移る時に、vdevをアクセスポイントのチャンネルで始め(ビーコンのHTとVHTの運用の要素から、HT20、HT40、VHT80などのPHYのモードを決める)、アクセスポイントをpeerとして作り(HTTのpeer mapを待つ)、それからnet80211が認証のフレームを送る。RUNで、アクセスポイントの能力(レート、HT、VHT、流れの数、暗号の要否)をpeer assocで渡し、スロットとプリアンブルを設定してvdevをupにする
+- 鍵。CCMPとTKIPのペアの鍵とグループの鍵をファームウェアに入れる。`ic_set_key`はEBUSYを返し、ドライバのタスクがHTTのsecurity indicationを待って入れる。ペアの鍵が入るとpeerを`AUTHORIZE`にする(それまでファームウェアはEAPOLのほかのデータを通さない)。保護の無いネットワークではRUNで`AUTHORIZE`にする。BIPとWEPはnet80211のソフトウェアの暗号に任せる。PMF(`IEEE80211_C_MFP`)とWPA3はこの版では立てない
+- 送信。データはnative Wi-Fiの形(QoSの欄を抜き、TIDはHTTの記述子に書く)で、HTTの`TX_FRM`で送る。保護のビットが立ったフレームはファームウェアがpeerの鍵で暗号にし、立っていないフレーム(鍵の前のEAPOL、保護の無いネットワーク)は`NO_ENCRYPT`で送る。管理フレームは、ファームウェアがWMIの管理フレームの送信のサービスを持てばWMIで、持たなければHTTの`TX_FRM`の管理の型で送る(`athx0: management frames go by …`の行)。速さの選び方とA-MPDUはファームウェアが行い、net80211はADDBAを送らない
+- 受信。HTTの受信のリングから、MPDUごとにMSDUを取り、記述子にある受けたままの802.11のヘッダに、native Wi-FiのヘッダのDAとSAを入れてフレームを組み直す。ファームウェアが復号したフレームは、IVを除き保護のビットを下ろして、`IEEE80211_RXI_HWDEC`の印でnet80211に渡す(リプレイの検査はファームウェアに任せる)。A-MSDUの2つ目からは`IEEE80211_RXI_SAME_SEQ`を付ける。ブロックACKの下のA-MPDUの並べ直しは、この版ではホストで行わない(ファームウェアの順のまま渡す)。管理フレームはWMIで来るので、HTTで来た分は捨てる
+- 省電力。ステーションの省電力は切り(`WMI_STA_PS_MODE_DISABLED`)、ファームウェアのkeepaliveも切る。チップは起こしたままにする
+- 信号の強さ。WMIとHTTの値に雑音の床(-95dBm)を足したdBmを、mwxと同じく符号なしのバイトに入れる(`min_dbm`は-256)
+- 記録。`wifi_user.c`のカードの記録は、Intelのレジスタを読まない(`w_qca`)。athxの数は、層が受けたフレームの数を出す時に`athx: rx: … indications, … MSDUs, … dropped …; tx: … in flight …`の行で出す
+
+規制領域は、service readyのEEPROMの値を、Linuxのath/regdと同じ表で、規制領域の対とCTLに直し、`pdev_set_regdomain`でファームウェアに戻す。チャンネルは、その値が世界共通のSKU(0x60〜0x6C)ならそのSKUの規則で、国の番号などのときは最も狭い世界共通の規則(0x64。2.4GHzは1〜11、5GHzは5150〜5350MHzと5725〜5850MHz)で決める。Linuxは国の番号のときcfg80211の規制のデータベースで国の規則を足すが、TessronOSはデータベースを持たないので、国の規則は足さない。5GHzの規則は能動の送信を許さない(NO_IR)ので、5GHzは受け身で走査し、5260〜5700MHzもレーダーの帯として受け身にする。2.4GHzの12と13は、そのSKUで許されるときだけ、受け身で使う。
+
+実機で見るログは、`wifi: card 168c:003e at …, for athx`、`obsd: the card 168c003e is athx's`、`athx0 at pci… , msi …`、上の1〜9の行、`wifi: athx0 ready, address …`、走査の後の`athx0: joining … on … MHz`、`athx0: peer … assoc: …`、`athx0: vdev 0 up: …`、`athx0: installed key …`である。
+
+カードの動きは実機で未確認である(QEMUにカードが無い)。翻訳、リンク、層とシミュレータの試験(群`obsdwifi`と`wifisim`)、ファームウェアの実身の読込み(群`obsdwifi`の`test_firmware`)だけを確かめた。
 
 #### まだ確かめていないこと
 
@@ -741,6 +910,7 @@ iwmとの違いと、その扱いは次のとおりである。
 - アクセスポイントf4:d5:80:31:fc:d0が、上の見込みのとおりにQoSの欄の無いフレームとTID 0の番号を1つの記録で持つかどうか。次の実機で、直した形でこのアクセスポイントにつないでDHCPとデータが通るかを見る。
 - iwmは認証の前に、カードがその周波数に留まるよう時間を取る(`iwm_protect_session`、ビーコンの間隔の2倍)。管理のタスクが認証を止めている時間(PSKは数ミリ秒、SAEはコミットの計算の時間)がそれを超えると、カードが周波数を離れる見込みがある。`wifi: authenticating with ...`の行で確かめる
 - SAEのアンチクロギングのトークン、グループの変更(19以外)、H2Eは、実機のアクセスポイントで確かめる
+- athx(QCA6174)は、初代Surface Goの実機で、起動の1〜9の段階、走査、参加、鍵、DHCP、送受信の速さを確かめる。A-MPDUを並べ直さないことでTCPの速さが落ちないか、管理フレームがWMIとHTTのどちらで送られるかも見る
 - iwx(AX200)は、カードの起動、ファームウェアの読込み、走査、接続、鍵、DHCP、ブロックACKの取り決め、背景の走査とローミングを、Surface Go 2の実機で確かめる。QEMUにはカードが無いので、層の共通の部分をシミュレータ(群`wifisim`)で、iwxの部分は翻訳とリンクだけを確かめた。4ウェイハンドシェイクのメッセージ2と4がACKされることは、`wifi: the card sent: ..., during the handshake`の行で見る。取り決めの後に、アクセスポイントf4:d5:80:31:fc:d0がデータを通すか(リリースの形では、QoSの欄の無いフレームの後に、取り決めの下のTID 0のQoSデータが0から始まる。上の見込みのアクセスポイントなら、iwmで見たように落ちる)は、DHCPの後に`wifi: block ack:`の行が出てからのデータで見る。落ちるなら、TIDごとの待ち行列を関連付けの時から持つ形を考える
 
 ### 9.6.10 暗号の実装
@@ -826,6 +996,27 @@ Raspberry Pi 5のチップのsupplicantの形(`FW_IDSUP`、9.6.8)では、ハン
 
 ホストのテストは、`tools/wpa/proc.sh test`と`modtest`が、`build.sh`の`test`、`modtest`と同じテスト(`test_wpa.c`、`modtest.c`、上流のmodule tests)を、OpenSSLのlibcryptoと`crypto_openssl.c`で走らせる。`test`は、テストが呼ぶ`knl_wpa_*`を`wpaproc.c`のメッセージの組立てと読取りに通し、プロセスの側の受け(`application/wpasupp/`)が同じプロセスの中でそれを読んで答える形にして、メッセージの形もあわせて確かめる。カーネルでは、群`wifikey`(9.6.7)が`WPA_MODE=proc`でも通ることと、群`wpaproc`(`tests/ktest/ktest_wpaproc.c`、`WPA_MODE=proc`のKTESTで入る)で、プロセスがIEEE 802.11の試験の値のPMK、ネットワークの種類、H2EのPTを答えること、カーネルのタスクからも「wpasup」のレコード1を読み書きできないこと(`E_OACV`)を確かめる。
 
+#### 企業向けの認証(802.1X)
+
+`WPA_MODE=proc`のビルドでは、WPA2-Enterprise(PEAP-MSCHAPv2とEAP-TLS)のネットワークにつなげる。カーネルの中のsupplicant(`WPA_MODE=kernel`)には無い。プロセスに、wpa_supplicant 2.11のEAPOLのsupplicant(`eapol_supp`)、EAPのピア(`eap_peer`)、`tls_openssl.c`を足し、OpenSSLはlibsslも使う。MSCHAPv2はMD4とDESを使うので、OpenSSLの構成から`no-legacy`を外した。つなぎの層は`application/wpasupp/wps_eap.c`である。4ウェイハンドシェイクのPMKは、EAPが成功するとwpa_supplicantの状態機械が`eapol_sm_get_key`で受け取る。
+
+カードの層は`TSW_AKM_8021X`を受け、OpenBSDの802.11の層のAKMに802.1Xを足す。今はOpenBSDの層の道(`ob_join`、`ob_auth`)だけが対応する。NetBSDの層の道(`bwfm`など)は、保存しても「対応していない」として接続しない。
+
+設定は「Ｗｉ－Ｆｉの設定」の次の行である。各語は16進で、無いものは`-`である。
+
+```text
+$$WIFINET	<SSIDの16進> eap <auto|manual> <ユーザのUUID>
+$$WIFIEAP	<番号> <peap|tls> <ID> <パスワード> <ドメイン> <CAのパス> <証明書のパス> <秘密鍵のパス> <鍵のパスワード>
+```
+
+ネットワーク設定の〈Ｗｉ－Ｆｉ〉〈企業向け〉で、認証方式、ID、ドメイン、CA証明書、証明書、秘密鍵、鍵のパスワードを入れる。PEAPのパスワードは〈接続〉の欄に入れる。依頼はwlan0への`EAP <SSIDの16進> <peap|tls> ...`の行で、パスワードの語を`=`にすると保存したものを残す。CA証明書は必須である。無いと、どのネットワークでもサーバになりすましてパスワードを受け取れるからである。ドメインを入れると、サーバの証明書の名前と比べる。
+
+証明書と秘密鍵はファイルの内容を設定に持たず、パスで指す(利用者の実身)。つなぐたびに管理のタスクが読み(16KBまで)、`WPP_EAP_BLOB`で分けてプロセスに渡す。プロセスはTLSの層にメモリのまま渡し(`blob://`)、失敗したときと`knl_wpa_eap_end`で消す。接続している間は、再認証のためプロセスに残す。パスワードと鍵のパスワードは、PSKと同じく「Ｗｉ－Ｆｉの設定」に、利用者のプロセスからは読めない形で持つ。暗号化はしていない(PMKやSAEのパスワードと同じ扱い)。
+
+EAPの間はハンドシェイクの時間切れを30秒にする(`EAP_SHAKE_MS`)。EAPが失敗すると理由を`password`にして接続をやめる。
+
+試験は次のとおりである。`tools/wpa/proc.sh eaptest`(`tools/wpa/test_eap.c`)は、`wps_eap.c`のピアを同じリリースのEAPサーバとメモリの上のEAPOLフレームでつなぎ、本物のTLSで動かす。PEAP-MSCHAPv2とEAP-TLSが成功して両側の鍵が一致すること、ドメインが合うこと、違うパスワード、CAの署名の無いサーバ、違うドメイン、信頼されないクライアント証明書がすべて失敗することを確かめる。Wi-Fiのシミュレータの`test_eap_saved`は、設定の受付けとCAの必須、パスワードが状態のレコードに出ないことを確かめる。シミュレータのアクセスポイントは802.1Xを持たないので、電波を通した接続は試験していない。
+
 ### 9.6.12 Wi-Fiのシミュレータ(`WIFI_SIM=1`)
 
 QEMUにはWi-Fiの装置が無く、Wi-Fiの管理(`wifi.c`)、カードの部品(`tswifi_if.c`)、カードの選択(`netsel.c`)、アダプタの管理(`netadp.c`)、DHCPのつなぎは、実機に載せるまで一度も動かなかった。そのため、バスマスタ、命令のキュー、接続の手順、パスワードの読み、M2の送信、切断、DHCPの誤りは、実機のテストで1つずつ見つかった。Wi-Fiのシミュレータは、LinuxのLinux mac80211_hwsimと同じ考え方で、カードの代わりに仮想の無線をrumpカーネルの中に置き、QEMUの中で走査からデータ、切断、再接続までを通しで流せるようにするものである。テストのためのビルドの変数`WIFI_SIM=1`(既定は0)のときだけ入り、既定のビルドの出力は変わらない。
@@ -894,3 +1085,139 @@ APのインタフェース`wsimap0`自身のリンク層のアドレス(02:77:73
 12. アドレスがまだ無いとき、局がブロードキャストを求めていてもACKを局だけに送る(ハードウェアのアドレスと与えるアドレス宛て、ペアの鍵で暗号化)サーバ(仮想のAPの`dhcp ackuni`)からも、アドレスが取れる。そのあとエコーが通る(アドレスを新しく置いたので、スタックがARPで重複を確かめ終わるのを待つ)。
 13. APの信号を閾値より弱くして(`rssi 75`)接続し直すと、DHCPの間と、ポートが開いてから30秒の間は背景の走査が始まらず、その後に始まる(x64のOpenBSDの層だけ。ARMでは飛ばす)。
 14. 同じ名前のなしのネットワークに接続でき、DHCPとデータが通る。
+
+### 9.6.13 PCIeとUSBの有線LAN(x64)
+
+次のチップのドライバを持つ。機器のIDが一致したときだけ動き、見つからない機械では何もしない。実機での動作は**どれも未確認**である(下の「確かめたこと」)。
+
+| `NET_ADAPTER` | チップ | ファイル | ID | 対応するリビジョン |
+| --- | --- | --- | --- | --- |
+| `re` | Realtek RTL8111/8168 | `device/net/x86_64/re.c` | 10ec:8168、10ec:8161 | 8168B(0x30000000、0x38000000、0x38400000)、C、CP、D、DP、E、E-VL、F、G、GU、H、EP、FP、8411、8411B |
+| `rge` | Realtek RTL8125 | `device/net/x86_64/rge.c` | 10ec:8125 | RTL8125(0x60900000)、RTL8125B(0x64100000)、RTL8125D(0x68800000、0x68900000) |
+| `igc` | Intel I225/I226 | `device/net/x86_64/igc.c` | 8086:15f2、15f3、15f8、15fd、0d9f、3100、3101、5502、125b、125c、125d、125f、3102、5503 | 全部 |
+| `usblan` | USBのRTL8152、RTL8153、RTL8153B | `device/usb/x86_64/usbven.c` | 表`ids` | 版数レジスタが0x4c00、4c10、5c00、5c10、5c20、5c30、6000、6010 |
+| `usblan` | USBのASIX AX88179 | `device/usb/x86_64/usbven.c` | 0b95:1790など | AX88179、AX88179A、AX88772D(`bcdDevice`で区別) |
+| `usblan` | USBのASIX AX88772、AX88772A、AX88772B(USB 2.0、100BASE-TX) | `device/usb/x86_64/usbven.c` | `axe_reg.h`の`AXE_772_DEVS`(0b95:7720など12個) | IDの表の印でAX88772(Aを含む)とAX88772Bを分ける |
+
+対応しないリビジョンは初期化せず、コンソールに`net: RTL8168 10ec:8168 link none: rev 24000000 is not a revision this driver has the settings of`の形で出して、カードに触らない。8168Bは、MACアドレスをコンフィギュレーションレジスタの先のシリアルEEPROM(93C46か93C56)から読み、大きなフレームのモードに入れず、受信の最大長をバッファの2KBにする。RTL8125Dは、MACとPHYのMCUイメージをOpenBSD 8.0の`if_rgereg.h`から`gen_hw.py`で取り出して`rge_hw.h`に持つ。ファイルから読むファームウェアは要らない。PCIeのPHYの表も要らない。
+
+PCIeの3つは`device/net/x86_64/lanpci.c`を共有する。64個の受信バッファと32個の送信バッファ(各2KB)のリング、1フレームずつのコピー、割込み、スリープからの復帰、カードの状態の取得をここでまとめ、チップごとに違うものを`T_LANOPS`で渡す。形は`e1k.c`と同じである。カードは自分を`knl_netsel_add`で`netsel.c`に登録し、スタックからは`T_NETDRV`の関数表で呼ばれる。ARMのビルドにはこれらのファイルが入らず、何も登録されない。
+
+割込みは`re`がMSI、`igc`がMSI-X(キューとリンクで1ベクタ)、`rge`は`ts_pcie_irq_alloc`の選ぶものを使う。取れないときは1ミリ秒ごとのポーリングになる。`rge`と`igc`はリンクの変化を割込みで知らせる。`re`と`usblan`はリンクの割込みを使わず、アダプタの管理が1秒ごとに読む(`T_NETDRV`の`told`)。`e1k.c`は8086の機器のうち`knl_igc_is`のIDを避ける。I225/I226は記述子とレジスタの形が違うので、前のように`e1k.c`が取ると動かないためである。それ以外のIntelの機器の扱いは変わらない。
+
+USBのアダプタは、`usbman.c`の`give_role`が`cdcnet.c`の前に`knl_usbven_match`に尋ねる。表にあるIDの機器の、メーカー独自のクラス(0xff)の構成に2つのバルクのエンドポイントがあるときだけ取る。版数が知らないもの(同じIDのドックのRTL8156など)や応答がおかしいものは`knl_usbven_attach`が失敗し、そのまま`cdcnet.c`に進む。表にないアダプタの経路は変わらない。RTL8152/8153にはCDCの構成もあり、以前はそちらで動かす形だったので、このIDの機器については経路が`usbven.c`に変わる。
+
+USBのバルクのストリームは1転送16KBまでである(`USB_STREAM_XFER_MAX`)。そのため、RTL8153のRXの集約の上限(`ure_rxbufsz`)は32KBでなく16KB、AX88179のSuperSpeedの`AXEN_RX_BULKIN_QCTRL`のバッファは24KBでなく16KBにしている。チェックサムのオフロードは使わない。TCP/IPスタックが計算するためである。IPv6のためにマルチキャストは全部受ける。
+
+チップごとの表(RTL8125のMCUイメージ、EPHYとPHYの設定、RTL8152/8153の初期化の手順、AX88179とAX88772のレジスタ番号、AX88772の機器のID)は記憶で書かず、OpenBSD 8.0の`sys.tar.gz`から`tools/x64/nic/gen_hw.py`が取り出して`device/net/x86_64/rge_hw.h`、`device/usb/x86_64/ure_hw.h`、`device/usb/x86_64/axen_reg.h`、`device/usb/x86_64/axe_reg.h`に書く。生成物はリポジトリに置き、ビルドでは実行しない。`re`のリビジョンごとの設定の表と`igc`のレジスタは、同じリリースの`re.c`、`rtl81x9reg.h`、`igc_*.h`を読んで`re.c`、`igc.c`に書いた。GPLのコードは使っていない。ライセンスは`THIRD_PARTY_NOTICES.md`に書いてある。
+
+#### AX88772、AX88772A、AX88772B
+
+AX88772はAX88179より古いASIXのプロトコルで動く(OpenBSDの`if_axe.c`の側)。I-O DATAのETX3-US2(0b95:7720、AX88772)を対象として足した。IDは、OpenBSD 8.0の`if_axe.c`の`axe_devs`のうち印に`AX772`のある12個を、`usbdevs`の番号にして`gen_hw.py`が`axe_reg.h`の`AXE_772_DEVS`に書く。
+
+| ID | OpenBSDの名前 | 印 |
+| --- | --- | --- |
+| 05ac:1402 | APPLE ETHERNET | AX772 |
+| 0b95:7720 | ASIX AX88772 | AX772 |
+| 0b95:772a | ASIX AX88772A | AX772 |
+| 0b95:772b、0b95:7e2b | ASIX AX88772B、AX88772B_1 | AX772、AX772B |
+| 13b1:0018 | CISCOLINKSYS USB200MV2 | AX772 |
+| 2001:3c05 | DLINK DUBE100B1 | AX772 |
+| 2001:1a02 | DLINK DUBE100C1 | AX772、AX772B |
+| 17ef:7203 | LENOVO ETHERNET | AX772、AX772B |
+| 066b:20f9 | LINKSYS HG20F9 | AX772、AX772B |
+| 0db0:a877 | MSI AX88772A | AX772 |
+| 1557:7720 | OQO ETHER01PLUS | AX772 |
+
+12個はどれもLinuxの`asix_devices.c`の`products[]`にもあり、AX88772の系統のドライバ(`ax88772_info`、`ax88772b_info`、`hg20f9_info`)に当たっている。Linuxだけにある07d1:3c05(DUB-E100 B1の別のID)と33f7:0004(10BASE-T1Lの機器)は受けない。AX88179の0b95:1790などとも、`ure`の表とも重ならない。
+
+手順はOpenBSD 8.0の`if_axe.c`のとおりにした。
+
+- PHY。`AXE_CMD_READ_PHYID`の2バイトのうち、先に1番目(`AXE_PHY_SEL_PRI`)、使えなければ0番目の、種類が10/100か1000のもののアドレスを使う。どちらも無ければ0。内蔵のPHY(アドレス0x10)なら、GPIO2を出力にしてEEPROMを読み直させ(0xb0)、`AXE_CMD_SW_PHY_SELECT`に1を書き、`AXE_CMD_SW_RESET_REG`にCLEAR、IPPD\|PRL、PRL、IPRL\|PRLの順に書いて電源を入れる。外のPHYなら0を書き、内蔵のPHYはIPPD\|PRLで電源を切ったままにする。MIIはソフトウェアの側に取ってから読み書きし(`AXE_CMD_MII_OPMODE_SW`)、終わると戻す(`AXE_CMD_MII_OPMODE_HW`)。
+- MACアドレスは`AXE_178_CMD_READ_NODEID`で読む。AX88772Bで全部0なら、EEPROMの0x04からの3語を送られた順に使う。それでも0のときは取らずに`cdcnet.c`に進む。
+- IPGは`AXE_CMD_READ_IPG012`で読んだものを`AXE_178_CMD_WRITE_IPG012`で書き戻す。MACアドレスも書き戻す。
+- 受信の設定は、ブロードキャスト、マルチキャストを全部(`AXE_RXCMD_ALLMULTI`、IPv6のため)、受信の開始である。AX88772Bには各フレームの前に4バイトの頭を付けさせる(`AXE_772B_RXCMD_RH1M`)。AX88772とAX88772AはHigh Speedのとき、1転送に16KBまでフレームを詰めさせる(`AXE_178_RXCMD_MFB`)。これはストリームの1転送(`USB_STREAM_XFER_MAX`)と同じ大きさである。チェックサムのオフロードは使わない。
+- 受信の枠は、頭(長さとその補数の下11ビット、`axe_sframe_hdr`)、フレーム、長さが奇数なら1バイトの詰め物、の繰り返しである。フレームの検査列は入っていない。頭の長さと補数が合わないときは、その転送の残りを捨てる。
+- 送信は、頭(長さとその補数)の後にフレームを置く。転送が512バイト(Full Speedでは64バイト)の倍数になると終わりが分からないので、長さ0の頭(0x0000、0xffff)を足す。
+- PHYはリセットしてから、BMSRの能力から作ったANARで自動ネゴシエーションをかける。MACにフロー制御を設定しないので、PAUSEは広告しない。
+- リンクはアダプタの管理が1秒ごとに読む。BMSRを2回読み(リンクの印は落ちたことを保つ)、自動ネゴシエーションが終わっていなければリンクなしとする。速度と全二重はANARとANLPARの共通の最上位から決める。リンクが上がったときと速度が変わったときに、`AXE_CMD_WRITE_MEDIA`へ`AXE_178_MEDIA_RX_EN`、`AXE_178_MEDIA_MAGIC`、全二重なら`AXE_MEDIA_FULL_DUPLEX`、100なら`AXE_178_MEDIA_100TX`を書く。
+
+OpenBSDと違うのは1か所である。OpenBSDは転送の終わりをまたぐフレームを誤りとして捨て、NetBSDは切れたまま渡す。ここでは、転送の終わりが頭の中でもフレームの中でも、続きを次の転送で受けて1つのフレームにする(`nicring.h`の`axe_rx_feed`)。続きの後の頭が次の転送の中に見えるときは、その頭が正しいことを確かめてから渡す。転送が1つ失われたときに、2つのフレームの切れ端をつながないためである。USBの転送が誤りで終わったときも、次の転送を頭から読む。
+
+照らし合わせたLinux(`asix_devices.c`、`asix_common.c`)とNetBSD 11.0(`if_axe.c`)との違いは次のとおりである。Linuxのコードは読んで比べただけで、写していない。
+
+| 項目 | OpenBSD 8.0(ここ) | Linux | NetBSD 11.0 |
+| --- | --- | --- | --- |
+| AX88772とA、Bの区別 | IDの表の印(AX772、AX772B)。AはAX88772と同じ手順 | 実行時に`AX_CMD_STATMNGSTS_REG`のチップの番号で区別 | IDの表の印(AX772、AX772A、AX772B)で、それぞれ別の手順 |
+| PHYの電源 | GPIO 0xb0、PHYの選択、CLEAR→IPPD\|PRL→PRL→IPRL\|PRL | AX88772はほぼ同じ(IPPD→CLEAR→IPRL\|PRL)。A、BはGPIOがEEPROMの読み直しだけで、PHYの選択にSSENを足し、IPPD\|IPRL→IPRL→CLEAR→IPRLの順に長く待つ | AX88772はOpenBSDと同じ。A、Bは別の起こし方(最後の待ちが600ミリ秒) |
+| AX88772Bの受信の束ね | 設定しない(チップの既定) | `AX_QCTCTRL`(0x2a)に2KBの値 | `AXE_772B_CMD_RXCTL_WRITE_CFG`(0x2a)に16KBの値 |
+| 受信の制御 | AX88772BはRH1M、それ以外はHigh SpeedでMFBの16KB | どれも0x0088(既定の2KB)、転送は2KB | AX88772BはRH1M、それ以外は常にMFBの16KB |
+| 転送をまたぐフレーム | 捨てる(ここは続きを受ける) | 続きを受ける(頭が2バイトで切れても) | 切れたまま渡す |
+| IPG | チップから読んで書き戻す | 決まった値(0x15、0x0c、0x12)を書く | AX88772A、Bは決まった値、AX88772は読んで書き戻す |
+| MACアドレス | NODEID。AX88772Bで0ならEEPROM | 一部のIDは初めからEEPROM | AX88772BはEEPROM |
+| フロー制御 | 使わない | ネゴシエーションの結果でTFC、RFCを付ける | AX88772A、BはPAUSEを広告する |
+| リンクのない間の媒体の設定 | 書かない | 0を書く | 書かない |
+| MIIをソフトウェアの側に取るとき | 確かめない | HOST_ENの印が立つまで繰り返す | 確かめない |
+
+このうち、AX88772A、Bの電源の入れ方と受信の束ねの設定は、実機で動かないときに最初に疑うところである。ETX3-US2はlsusbでAX88772、ベンダー独自のクラス(0xff)、バルクの入力0x82と出力0x03(どちらも512バイト)と出ているので、`find_eps`で取れる。
+
+#### ログ
+
+起動時とリンクが変わるたびに、次の形の1行をコンソールに出す。この行が実機の確認の第一の手がかりである。
+
+```
+net: RTL8168H/8111H 10ec:8168 link up 1000 full, rev 54000000, 00:e0:4c:xx:xx:xx, MSI 42, irqs 3
+net: RTL8153 0bda:8153 link up 1000 full, rev 5c20, 00:e0:4c:xx:xx:xx, USB speed 3
+```
+
+#### 確かめたこと
+
+QEMU(11.0.50)にはこれらのチップのモデルがない。あるのは`e1000`、`e1000e`、`igb`(82576)、`rtl8139`、`usb-net`などで、どれもここのチップとはレジスタが違う。そのため、確かめられるのは次の範囲である。
+
+- KTESTの群`nicring`(`tests/ktest/ktest_nicring.c`)が、`device/net/x86_64/nicring.h`の記述子の配置と、リングの所有権、リングの終わりの印、受信の誤りの判定、USBの転送の中のフレームの切り出し(長さが転送の外を指すものを含む)を、テスト自身がチップの役をして確かめる。AX88772では、2つのフレームのストリームをあらゆる位置で2つの転送に切っても同じ2つのフレームになること、補数の合わない頭で転送の残りを捨てて次の転送を頭から読むこと、転送が失われたときに切れ端をつながないこと、短すぎるフレームを数えて飛ばすこと、送信の頭と、512バイトと64バイトの境での長さ0の頭を見る。これはOpenBSDのソースのとおりに書けているかの確認であって、チップの動作の確認ではない。
+- x64のQEMUの`e1000e`を`e1k.c`がこれまでどおり取ること(`TessronOS: e1k 8086:10d3`の行)。`cdcnet.c`は変えていないが、`usbman.c`で前に判定が入ったので、実際のCDCのアダプタでは確かめていない。
+
+初期化の手順、MCUのロード、PHYのネゴシエーション、割込み、リンクの読み方、実際の送受信は、実機で確かめるまで未確認である。AX88772(ETX3-US2を含む)も実機では未確認である。QEMUの`usb-net`はCDCの装置で、AX88772のモデルは無い。
+
+## 9.7 VPN(WireGuard、`make WG=1`)
+
+`make WG=1`のビルドは、NetBSDのカーネルのWireGuard(`sys/net/if_wg.c`)をrumpのネットワークの中で動かす。暗号はNetBSDが同梱するlibsodiumのカーネル向けの部分である。tunを介するユーザ空間の実装は使わない。`WG=1`でないビルドには入らず、ネットワーク設定の〈ＶＰＮ〉は灰色になる。`tools/netbsd/build.sh`と`tools/x64/netbsd/build.sh`が`WG=1`で必要なソースを取り、`rumpcomp/wg/tswg.c`がrumpの中でインターフェースを作って設定する。
+
+### 9.7.1 デバイスの実身wg0
+
+カーネル(`so_wg.c`)は、ネットワークのスタックが立ち上がった後でデバイスの実身`wg0`(`OB_T_DEVICE`、`OB_S_NET`)を作る。`OB_NET_STATE`のレコードに次の行を書くとトンネルを上げ下げし、読むと状態と送受信のバイト数を返す。鍵とアドレスは16進、ポートとCIDRは10進である。
+
+```text
+UP <秘密鍵> <ポート> <アドレス> <マスク> <相手の公開鍵> <事前共有鍵または-> <エンドポイントのアドレス> <エンドポイントのポート> <アドレス/CIDR,...>
+DOWN
+```
+
+トンネルは1本である。カーネルは鍵を接続のたびに受け取り、トンネルが上がっている間だけ持つ。
+
+### 9.7.2 鍵の保存
+
+ネットワーク設定の〈ＶＰＮ〉(`application/netenv/ne_vpn.c`)は、利用者ごとに2つの実身を作る。どちらも所有者はその利用者、モードは`rw-------`、ACLはない。
+
+| 実身 | レコード1 |
+| --- | --- |
+| ＶＰＮの鍵 | 乱数の32バイト(初めて保存するときに作る) |
+| ＶＰＮの設定 | アドレス、相手の公開鍵、エンドポイント、許可IPの平文と、秘密鍵と事前共有鍵をＶＰＮの鍵でAES-256-GCMにした16進 |
+
+形は14.4.7.1のブラウザの鍵と同じである。どの仮身からも指されないので、固定(`ob_lnk_obj`)を1つ付けて屑実身にならないようにする。実身は、すべての実身(`ui_lst_obj`)の中から、所有者が自分で、メタデータの`tessronos.netenv`に印(`vpnkey`、`vpnconf`)があるものとして探す。モードが他人に開いている実身は使わず、〈保存〉は失敗する。
+
+守れるものと守れないものは次のとおりである。
+
+| 場面 | 守れるか | 理由 |
+| --- | --- | --- |
+| 他の利用者のプログラムが読む | 守れる | 2つの実身は`rw-------`である |
+| ＶＰＮの設定の実身だけが写し出された | 守れる | 鍵はＶＰＮの鍵の実身にある |
+| 同じ利用者として動くプログラムが読む | 守れない | そのプログラムは2つとも読める |
+| ディスクを抜かれた | 守れない | 2つの実身が同じディスクにあり、ディスクは暗号化していない(7.8) |
+
+パネルは保存した秘密鍵と事前共有鍵を印で表示し、平文を欄に戻さない。〈作成〉は乱数からCurve25519の秘密鍵を作り、公開鍵を表示する。公開鍵はこの欄から相手に伝える。
+
+### 9.7.3 試験
+
+`tests/ktest/ktest_wg.c`(`KTONLY=wg WG=1 NET=user`)は、wg0を上げ、ホストの`tools/wg_peer.py`と握手し、トンネルの中でUDPのエコーを往復させる。`wg_peer.py`はプロトコルの文書から書いた別の実装で、ドライバとコードを共有しない。試験はホストに応答側が要るので、`KTONLY`で名前を指定したときだけ動く。
+
+`tools/tests/ui_vpn.steps`は、パネルで鍵を作り、鍵を打ち込み、保存し、接続し、切断する。`--keep-disk`で残したディスクを`tools/tsfs-export`で開くと、2つの実身のモードとレコードを確かめられる。

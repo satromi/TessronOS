@@ -29,6 +29,9 @@ import re
 import shutil
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vobjw  # noqa: E402
+
 TOP = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 DEF = os.path.join(TOP, "etc", "def")
 STAMP = "2026-09-26T00:00:00Z"
@@ -116,11 +119,14 @@ def write(path, text):
         f.write(text)
 
 
-def link(uuid, y):
-    return ('<link id="%s_0.xtad" vobjid="%s" vobjleft="8" vobjtop="%d" vobjright="248" '
-            'vobjbottom="%d" height="25" chsz="14" frcol="#000000" chcol="#000000" '
+def link(uuid, name, y):
+    """A closed link as wide as its name, its top at y"""
+    h = vobjw.closed_h()
+    return ('<link id="%s_0.xtad" vobjid="%s" vobjleft="%d" vobjtop="%d" vobjright="%d" '
+            'vobjbottom="%d" height="%d" chsz="%d" frcol="#000000" chcol="#000000" '
             'tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>\n'
-            % (uuid, uuid_of("tessronos-sys-link:" + uuid), y, y + 25))
+            % (uuid, uuid_of("tessronos-sys-link:" + uuid), vobjw.PAD, y,
+               vobjw.PAD + vobjw.closed_w(name), y + h, h, vobjw.CHSZ))
 
 
 def cmd_def(box, files):
@@ -139,7 +145,8 @@ def cmd_def(box, files):
         write(os.path.join(DEF, u + "_0.xtad"),
               '<tad version="1.0" encoding="UTF-8" filename="%s"><document><p>%s</p>'
               '</document></tad>' % (xml(os.path.splitext(name)[0]), xml(name)))
-        links.append(link(u, 8 + i * 32))
+        links.append(link(u, os.path.splitext(name)[0],
+                          vobjw.PAD + i * (vobjw.closed_h() + vobjw.GAP)))
     write(boxrec, '<tad version="1.0" encoding="UTF-8" filename="%s">\n<figure>\n%s</figure>\n</tad>\n'
           % (xml(boxname), "".join(links)))
 

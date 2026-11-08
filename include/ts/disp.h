@@ -133,6 +133,17 @@ IMPORT INT knl_disp_init( void );
 
 IMPORT ER  ts_disp_ref( T_DISPSPEC *spec );
 
+/*
+ * The screens the view is shown on, side by side, the first being the main
+ * one (10.4.8). The view is one surface; each screen shows its column of
+ * it. How many; and the i-th one's rectangle in view coordinates, E_NOEXS
+ * past the last. knl_disp_screens sets how many, 1 to DISP_SCREENS_MAX.
+ */
+#define DISP_SCREENS_MAX	4
+IMPORT INT ts_disp_screens( void );
+IMPORT ER  ts_disp_screen( INT i, INT *p_x, INT *p_y, INT *p_w, INT *p_h );
+IMPORT void knl_disp_screens( INT n );
+
 /* Another size of screen: E_NOSPT when this one cannot be set to it */
 IMPORT ER  ts_disp_setmode( UINT w, UINT h );
 

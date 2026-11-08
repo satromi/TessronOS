@@ -601,7 +601,7 @@ LOCAL INT sound_text( UB *t, INT max )
 		SDOutSel	s;
 		SDOut		*o = NULL;
 		INT		k, m, room = 0;
-		LOCAL CONST char *CONST kind[] = { "none", "usb", "i2s", "hdmi", "hda" };
+		LOCAL CONST char *CONST kind[] = { "none", "usb", "i2s", "hdmi", "hda", "bt" };
 
 		knl_snd_arm();			/* a change after this read is told (device/snd/snd.c) */
 		dd = tk_opn_dev((UB *)SND_DEVNM, TD_READ);
@@ -613,6 +613,7 @@ LOCAL INT sound_text( UB *t, INT max )
 		n = put(t, n, max, "OUTPUT", ( s.now[0] != 0 ) ? (CONST char *)s.now : "none");
 		n = put(t, n, max, "SELECT", ( s.id[0] != 0 ) ? (CONST char *)s.id : SND_ID_AUTO);
 		n = put(t, n, max, "KEEP", knl_snd_keeping() ? "1" : "0");
+		n = put_num(t, n, max, "HW_NOTE", (D)knl_snd_note());
 		/* every output: its id, kind, flags (SND_OF_*) and name, a line of each */
 		while ( ( m = knl_snd_outputs(o, room) ) > room ) {
 			if ( o != NULL ) Kfree(o);
@@ -625,7 +626,7 @@ LOCAL INT sound_text( UB *t, INT max )
 		}
 		for ( k = 0; k < m && k < room; k++ ) {
 			n = put(t, n, max, "OUT", (CONST char *)o[k].id);
-			n = put(t, n, max, "OUT_KIND", kind[( o[k].kind <= SND_BE_HDA ) ? o[k].kind : 0]);
+			n = put(t, n, max, "OUT_KIND", kind[( o[k].kind <= SND_BE_BT ) ? o[k].kind : 0]);
 			n = put_num(t, n, max, "OUT_FLAGS", (D)o[k].flags);
 			n = put(t, n, max, "OUT_NAME", (CONST char *)o[k].name);
 		}
@@ -638,11 +639,29 @@ LOCAL INT sound_text( UB *t, INT max )
 
 IMPORT UD tm_log_at( void );			/* lib/libtm: bytes ever written to the console */
 
+IMPORT BOOL	knl_pm_can_sleep( void ) __attribute__((weak));
+IMPORT ER	knl_pm_sleep( CONST char *why ) __attribute__((weak));
+IMPORT void	knl_pm_policy( INT button_sleep, INT lid_sleep ) __attribute__((weak));
+IMPORT INT	knl_pm_policy_get( INT *p_button, INT *p_lid ) __attribute__((weak));
+
 EXPORT INT knl_obsys_text( INT recno, UB *t, INT max )
 {
 	switch ( recno ) {
 	case OB_SYS_INFO:	return info_text(t, max);
-	case OB_SYS_POWER:	return put(t, 0, max, "CAN", sys_power != NULL ? "OFF RESTART" : "");
+	case OB_SYS_POWER:
+	{
+		INT	n, b = 0, l = 0;
+
+		n = put(t, 0, max, "CAN", ( knl_pm_can_sleep != NULL && knl_pm_can_sleep() )
+			? ( sys_power != NULL ? "OFF RESTART SLEEP" : "SLEEP" )
+			: ( sys_power != NULL ? "OFF RESTART" : "" ));
+		if ( knl_pm_policy_get != NULL && knl_pm_can_sleep() ) {
+			(void)knl_pm_policy_get(&b, &l);
+			n = put(t, n, max, "BUTTON_SLEEP", b ? "1" : "0");
+			n = put(t, n, max, "LID_SLEEP", l ? "1" : "0");
+		}
+		return n;
+	}
 	case OB_SYS_DISPLAY:	return knl_obdisp_text(t, max);
 	case OB_SYS_USB:	return knl_obusb_text(t, max);
 	case OB_SYS_SCHEME:	return scheme_text(t, max);
@@ -676,6 +695,19 @@ EXPORT ER knl_obsys_write( INT recno, CONST UB *buf, SZ size )
 	first_word(buf, size, 0, w, sizeof(w));
 	switch ( recno ) {
 	case OB_SYS_POWER:
+		/* the machine asleep, and what the power button and the lid do (kernel/sysdepend/x64/pm.c) */
+		if ( knl_strcmp(w, "SLEEP") == 0 ) {
+			return ( knl_pm_sleep != NULL ) ? knl_pm_sleep("the system object") : E_NOSPT;
+		}
+		if ( knl_strcmp(w, "POLICY") == 0 ) {
+			char	b[8], l[8];
+
+			if ( knl_pm_policy == NULL ) return E_NOSPT;
+			first_word(buf, size, 1, b, sizeof(b));
+			first_word(buf, size, 2, l, sizeof(l));
+			knl_pm_policy(cf_num(b, -1), cf_num(l, -1));
+			return E_OK;
+		}
 		if ( sys_power == NULL ) return E_NOSPT;
 		if ( knl_strcmp(w, "OFF") == 0 ) return (*(ER (*)(INT))sys_power)(0);
 		if ( knl_strcmp(w, "RESTART") == 0 ) return (*(ER (*)(INT))sys_power)(1);

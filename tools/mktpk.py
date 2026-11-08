@@ -15,8 +15,9 @@ kept in ({uuid}.json, {uuid}_N.xtad, {uuid}_N.bin, {uuid}.ico,
 {uuid}_N_M.ext), spread over the --from directories.
 
 An application's package holds the program object, found by its id or
-its UUID, and the templates its metadata names
-("tessronos.program.base"). The version is the one the program's
+its UUID, the templates its metadata names ("tessronos.program.base")
+and the objects it uses that are not templates ("tessronos.program.res":
+its menu, its licence), which its record 0 links to so that they go with it. The version is the one the program's
 metadata says ("tessronos.program.version", R1.000).
 
 The system's package (--system) holds what an image of one machine is
@@ -170,7 +171,7 @@ def make(args):
     ver = prog.get("version", "")
     if not VERSION_RE.match(ver):
         sys.exit("mktpk: the program's version %r is not R1.000's form" % ver)
-    objects = [uuid] + [b for b in prog.get("base", []) if b != uuid]
+    objects = [uuid] + [b for b in prog.get("base", []) + prog.get("res", []) if b != uuid]
     entries = []
     for u in objects:
         fs = files_of(args.dirs, u)
@@ -239,6 +240,22 @@ def make_system(args):
                 continue
             if bu not in sets and bu in user:
                 sets[bu] = user[bu]
+
+    # the objects of the person's that システム links to by a role and that
+    # an update adds links to (the system's 原紙箱, "update": "links")
+    sysbox = uuidmod.UUID("01a0d8c4-5211-7c52-9e0a-3b61d27f4c85")
+    if sysbox in sets and sets[sysbox].recs:
+        text = open(sets[sysbox].recs[0][1], encoding="utf-8", errors="replace").read()
+        for m in re.finditer(r'<link\b[^>]*\bid="([0-9a-f-]{36})_0\.xtad"', text):
+            lu = uuidmod.UUID(m.group(1))
+            if lu in sets or lu not in user:
+                continue
+            try:
+                d = json.load(open(user[lu].json, encoding="utf-8"))
+            except (ValueError, OSError, TypeError):
+                continue
+            if isinstance(d, dict) and d.get("tessronos", {}).get("update") == "links":
+                sets[lu] = user[lu]
 
     keep_more = set(k.lower() for k in args.keep)
     objects, keep, links, entries, left = [], [], [], [], []

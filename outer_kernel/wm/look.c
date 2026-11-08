@@ -453,6 +453,19 @@ EXPORT ER wm_look_pat( UINT num, T_DPPAT *pat )
 	return E_OK;
 }
 
+EXPORT ER wm_fill_look( INT gid, CONST T_DPRECT *r, UINT num )
+{
+	T_DPPAT	pat;
+
+	if ( r == NULL ) {
+		return E_PAR;
+	}
+	if ( wm_look_pat(num, &pat) >= E_OK ) {
+		return dp_fill_rect_pat(gid, r, &pat);
+	}
+	return dp_fill_rect(gid, r, wm_look(WM_LOOK_WORK));
+}
+
 /* ---------------------------------------------------------------- schemes */
 
 EXPORT UINT wm_scheme( void )

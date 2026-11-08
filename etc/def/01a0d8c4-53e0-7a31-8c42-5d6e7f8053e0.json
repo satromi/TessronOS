@@ -15,10 +15,11 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "disk-repair",
       "kind": "accessory",
       "name": "ディスク修復",
-      "version": "R1.200",
+      "version": "R1.300",
       "menu": true,
       "builtin": true,
       "base": []

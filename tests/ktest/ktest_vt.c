@@ -65,20 +65,7 @@ LOCAL void start( void )
 	if ( ready ) {
 		return;
 	}
-	if ( fn_system() <= 0 ) {
-		ID	fid = 0;
-		TS_UUID	u;
-		ER	er;
-
-		er = kt_sysobj(SYSDEF_FONT_BOX, "NotoSansJP-Regular.otf", &u);
-		if ( er >= E_OK ) {
-			er = fn_open_obj(&u, xf_data_rec(&u), 0, &fid);
-		}
-		if ( er >= E_OK && fid > 0 ) {
-			fn_set_size(fid, 14);
-			fn_set_system(fid);
-		}
-	}
+	(void)kt_face();
 	o.left = 20;  o.top = 20;  o.right = 1000;  o.bottom = 740;
 	wid = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "縦書き");
 	if ( wid > 0 ) {
@@ -748,7 +735,7 @@ LOCAL void test_edit( void )
 	}
 
 	/* 縦中横 on "7", and off again */
-	w->apara = 0;  w->apos = 6;  w->cpara = 0;  w->cpos = 7;
+	w->dd.apara = 0;  w->dd.apos = 6;  w->dd.cpara = 0;  w->dd.cpos = 7;
 	KT_ASSERT(dd_command(w, DM_COMB));
 	out = written(doc, &n);
 	if ( out != NULL ) {
@@ -758,12 +745,12 @@ LOCAL void test_edit( void )
 	{
 		BOOL	comb = FALSE, turned = FALSE;
 
-		w->apara = 0;  w->apos = 6;  w->cpara = 0;  w->cpos = 7;
+		w->dd.apara = 0;  w->dd.apos = 6;  w->dd.cpara = 0;  w->dd.cpos = 7;
 		dd_menu_state(w, &comb, &turned);
 		KT_ASSERT(comb);
 		KT_ASSERT(!turned);
 	}
-	w->apara = 0;  w->apos = 6;  w->cpara = 0;  w->cpos = 7;
+	w->dd.apara = 0;  w->dd.apos = 6;  w->dd.cpara = 0;  w->dd.cpos = 7;
 	KT_ASSERT(dd_command(w, DM_COMB));
 	out = written(doc, &n);
 	if ( out != NULL ) {
@@ -772,14 +759,14 @@ LOCAL void test_edit( void )
 	}
 
 	/* 回転 on "ABC", and off again */
-	w->apara = 0;  w->apos = 10;  w->cpara = 0;  w->cpos = 13;
+	w->dd.apara = 0;  w->dd.apos = 10;  w->dd.cpara = 0;  w->dd.cpos = 13;
 	KT_ASSERT(dd_command(w, DM_TURN));
 	out = written(doc, &n);
 	if ( out != NULL ) {
 		KT_ASSERT(has_text(out, "<font rotation=\"90\" rotabs=\"0\">ABC</font>"));
 		Kfree(out);
 	}
-	w->apara = 0;  w->apos = 10;  w->cpara = 0;  w->cpos = 13;
+	w->dd.apara = 0;  w->dd.apos = 10;  w->dd.cpara = 0;  w->dd.cpos = 13;
 	KT_ASSERT(dd_command(w, DM_TURN));
 
 	/* 横書き: the record as it was */

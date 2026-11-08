@@ -29,9 +29,7 @@
  *	No floating point: the kernel is built without it.
  */
 
-#include <sys/machine.h>
-#include "kernel.h"
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include <ts/img.h>
 
 #define WSIZE		32768		/* how far back a match may reach */

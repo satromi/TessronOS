@@ -1,0 +1,4 @@
+# The machine going off has a time limit: past it the machine goes off as it stands.
+logmark
+offlimit 2000
+expectsincein 10 shutdown: NOT FINISHED IN TIME

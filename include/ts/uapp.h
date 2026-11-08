@@ -76,13 +76,24 @@ IMPORT ER  wm_obj_put( ID key, CONST T_DPRECT *r, INT n );
  * never has the keys, so the window that had them keeps them. A key
  * pressed on its picture is typed there with wm_key_put (the key of the
  * window, the key's usage, the modifiers held with it), as wm_obj_key_put
- * of include/ts/wm.h says: only just after a press on the window. The
+ * of include/ts/wm.h says: only just after a press on the window, and
+ * with WM_KEY_PUT_DOWN and WM_KEY_PUT_UP held for as long as the picture's
+ * key is. The modifiers may carry the screen keyboard's own layouts
+ * (KM_MOD_LAYOUT), which the key is read in instead of the machine's. The
  * keys pressed on the keyboard itself are told to the window when its
- * request has OB_N_KEYSEEN (include/ts/ob.h). The layouts and the keys
- * given others are read and set with km_get, km_set and km_label of
- * include/ts/keymap.h.
+ * request has OB_N_KEYSEEN (include/ts/ob.h). The machine's layouts and
+ * the keys given others are read and set with km_get, km_set and km_label
+ * of include/ts/keymap.h.
  */
 IMPORT ER  wm_key_put( ID key, UINT code, UINT mods );
+
+/*
+ * The places of the window where a finger presses the main button as it
+ * touches, a hold there being no second button: wm_obj_press_area of
+ * include/ts/wm.h. The window's program gives them again when its work
+ * area changes.
+ */
+IMPORT ER  wm_press_area( ID key, CONST T_DPRECT *r, INT n );
 
 /*
  * Letters in the system's face, px pixels tall (0: as it is), with the

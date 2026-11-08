@@ -920,6 +920,22 @@ LOCAL void test_conf( void )
 #define STR2(x)	#x
 #define STR(x)	STR2(x)
 
+IMPORT ER  so_dhcp_start( void );
+IMPORT ER  so_getifaddr( UW *p_addr, UW *p_mask, UW *p_gw );
+
+/* An address had, as a program could not get one without the administrator's password */
+LOCAL void kt_net_up( void )
+{
+	UW	addr = 0;
+	INT	t;
+
+	if ( so_getifaddr(&addr, NULL, NULL) >= E_OK && addr != 0 ) return;
+	(void)so_dhcp_start();
+	for ( t = 0; t < 150 && ( so_getifaddr(&addr, NULL, NULL) < E_OK || addr == 0 ); t++ ) {
+		tk_dly_tsk(100);
+	}
+}
+
 /* The FTP panel opened from the main window and filled in: the host, and the port the test server listens on */
 LOCAL INT ftp_panel( INT wid )
 {
@@ -937,6 +953,97 @@ LOCAL INT ftp_panel( INT wid )
 	return dwid;
 }
 
+#ifdef KT_SSH_PORT
+/*
+ * make SSH=1: a real sshd on the host (tools/ssh/sshd_host.sh), through
+ * the panel. Its key is shown and nothing sent until 接続 is pressed a
+ * second time; the wrong password is refused; then a file taken in and
+ * written back, and the key kept in the settings.
+ */
+LOCAL void test_sftp( void )
+{
+	TS_UUID	win, box, u, conf, fwin;
+	char	line[256];
+	UB	*rec, *meta;
+	SZ	size = 0;
+	UD	pos;
+	INT	wid, dwid, fwid, i;
+	ID	pid;
+
+	kt_net_up();
+	pid = start(NULL, &win, &wid);
+	KT_ASSERT(pid > 0 && wid > 0);
+	if ( pid <= 0 || wid <= 0 ) return;
+
+	pos = log_now();
+	ctrl(wid, 'f');
+	dwid = wait_window("FTP 接続", &u, 50);
+	KT_ASSERT(dwid > 0);
+	if ( dwid <= 0 ) {
+		finish(pid, &win);
+		return;
+	}
+	type(dwid, "10.0.2.2");
+	press(dwid, K_TAB, 0);
+	press(dwid, K_BS, 0);
+	press(dwid, K_BS, 0);
+	type(dwid, STR(KT_SSH_PORT));
+	tap(dwid, 300, 65, 0);			/* SSH を使う */
+	press(dwid, K_TAB, 0);
+	type(dwid, "kts");
+	press(dwid, K_TAB, 0);
+	type(dwid, "wrongpass");
+	press(dwid, K_ENTER, 0);
+	KT_ASSERT(wait_for(pos, "SHA-256", 300, NULL, 0));
+
+	/* the key accepted, the wrong password refused, the panel still there */
+	pos = log_now();
+	press(dwid, K_ENTER, 0);
+	KT_ASSERT(wait_for(pos, "の名前かパスワードが違います", 300, NULL, 0));
+
+	pos = log_now();
+	for ( i = 0; i < 9; i++ ) press(dwid, K_BS, 0);
+	type(dwid, "ktpass");
+	press(dwid, K_ENTER, 0);
+	KT_ASSERT(wait_for(pos, "xfconv: connected 10.0.2.2", 300, NULL, 0));
+	KT_ASSERT(wait_for(pos, "xfconv: - KTEST.TXT 24", 100, NULL, 0));
+	fwid = wait_window("sftp://", &fwin, 30);
+	KT_ASSERT(fwid > 0);
+	if ( fwid <= 0 ) {
+		finish(pid, &win);
+		return;
+	}
+
+	pos = log_now();
+	type(fwid, "ktest.txt");
+	ctrl(fwid, 'i');
+	KT_ASSERT(answer_panel("実身への変換"));
+	KT_ASSERT(wait_for(pos, "xfconv: imported 1 of 1 objects ", 300, line, sizeof(line)));
+	KT_ASSERT(uuid_after(line, "first ", &u) && uuid_after(line, "box ", &box));
+	rec = om_obj_record(&u, 1, &size);
+	KT_ASSERT(rec != NULL && size == 24 && bytes_cmp(rec, "TessronOS FTP test file\n", 24) == 0);
+	if ( rec != NULL ) Kfree(rec);
+
+	pos = log_now();
+	ctrl(fwid, 'o');
+	KT_ASSERT(answer_panel("ファイルへの変換"));
+	KT_ASSERT(wait_for(pos, "xfconv: exported KTEST (", 300, line, sizeof(line)));
+	KT_ASSERT(wait_for(pos, ").TXT 24", 100, NULL, 0));
+
+	KT_ASSERT(conf_obj(&conf));
+	meta = om_obj_record(&conf, 1, &size);
+	KT_ASSERT(meta != NULL && find(meta, (INT)size, "\"hostkey\":\"", 0) >= 0
+		  && find(meta, (INT)size, "\"pass\"", 0) < 0);
+	if ( meta != NULL ) Kfree(meta);
+
+	pos = log_now();
+	ctrl(fwid, 'e');
+	KT_ASSERT(wait_for(pos, "xfconv: disconnected sftp://", 50, NULL, 0));
+	drop_box(&box);
+	finish(pid, &win);
+}
+#endif
+
 /*
  * The FTP server on the host (10.0.2.2), through the panel: SSH asked
  * for and refused as not there yet; connected by FTP, a file taken in,
@@ -953,10 +1060,12 @@ LOCAL void test_ftp( void )
 	INT	wid, dwid, fwid, i;
 	ID	pid;
 
+	kt_net_up();
 	pid = start(NULL, &win, &wid);
 	KT_ASSERT(pid > 0 && wid > 0);
 	if ( pid <= 0 || wid <= 0 ) return;
 
+#ifndef KT_SSH_PORT
 	/* SSH: said not to be there yet; the panel stays, and is put away with Esc */
 	pos = log_now();
 	dwid = ftp_panel(wid);
@@ -968,6 +1077,7 @@ LOCAL void test_ftp( void )
 		press(dwid, K_ESC, 0);
 		KT_ASSERT(wait_for(pos, "xfconv: ftp cancelled", 50, NULL, 0));
 	}
+#endif
 
 	pos = log_now();
 	dwid = ftp_panel(wid);
@@ -1077,6 +1187,9 @@ EXPORT void ktest_xfc( void )
 	KT_RUN(test_conf);
 #ifdef KT_FTP_PORT
 	KT_RUN(test_ftp);
+#ifdef KT_SSH_PORT
+	KT_RUN(test_sftp);
+#endif
 #endif
 	Kfree(logb);
 }

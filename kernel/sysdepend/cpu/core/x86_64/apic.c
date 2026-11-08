@@ -467,6 +467,79 @@ EXPORT ER knl_int_route( UINT intno, INT prc )
 	return (*knl_msi_rewrite_hook)(intno, (UD)( MSI_ADDR_BASE | ( ( id & 0xff ) << 12 ) ));
 }
 
+LOCAL void pic_off( void );
+
+/*
+ * The machine asleep (kernel/sysdepend/x64/pm.c): this processor's timer
+ * stopped, both uses of it; started again from nothing after a sleep, and
+ * whether an interrupt waits in its IRR
+ */
+EXPORT void knl_apic_sleep_quiet( void )
+{
+	T_PCPU	*p = knl_pcpu();
+
+	p->apic_sys_dl = 0;
+	p->apic_lk_dl = 0;
+	timer_hw(0);
+}
+
+EXPORT void knl_apic_wake_init( void )
+{
+	T_PCPU	*p = knl_pcpu();
+
+	p->apic_sys_dl = 0;
+	p->apic_lk_dl = 0;
+	knl_apic_cpu_init();
+}
+
+EXPORT BOOL knl_apic_any_pending( void )
+{
+	UW	r;
+
+	for ( r = 0; r < 8; r++ ) {
+		if ( lapic_rd(LAPIC_IRR + r * 0x10) != 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
+/* The IOAPICs' routing entries in buf (two words each); how many words. A reset loses them */
+EXPORT INT knl_ioapic_save( UW *buf, INT max )
+{
+	INT	i, n = 0;
+	UINT	pin;
+
+	for ( i = 0; i < knl_acpi.nioapic; i++ ) {
+		T_ACPIIOAPIC	*a = &knl_acpi.ioapic[i];
+		UBINT		base = DEV_BASE(a->addr);
+
+		for ( pin = 0; pin < a->ninput && n + 2 <= max; pin++ ) {
+			buf[n++] = ioapic_rd(base, IOAPIC_RTE(pin));
+			buf[n++] = ioapic_rd(base, IOAPIC_RTE(pin) + 1);
+		}
+	}
+	return n;
+}
+
+/* The same put back, the 8259s masked again as a reset of the chipset leaves them not */
+EXPORT void knl_ioapic_restore( CONST UW *buf )
+{
+	INT	i, n = 0;
+	UINT	pin;
+
+	pic_off();
+	for ( i = 0; i < knl_acpi.nioapic; i++ ) {
+		T_ACPIIOAPIC	*a = &knl_acpi.ioapic[i];
+		UBINT		base = DEV_BASE(a->addr);
+
+		for ( pin = 0; pin < a->ninput; pin++ ) {
+			ioapic_wr(base, IOAPIC_RTE(pin), buf[n] | RTE_MASKED);
+			ioapic_wr(base, IOAPIC_RTE(pin) + 1, buf[n + 1]);
+			ioapic_wr(base, IOAPIC_RTE(pin), buf[n]);
+			n += 2;
+		}
+	}
+}
+
 /* The 8259s remapped out of the way of the exceptions, and masked */
 LOCAL void pic_off( void )
 {

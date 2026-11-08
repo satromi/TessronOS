@@ -154,6 +154,11 @@ typedef struct {
 	INT		sum_l, sum_r, nsum;
 	INT		prev_l, prev_r;
 	BOOL		have_prev;
+	/* recording what is played (DN_SDMONITOR) */
+	UINT		mon;		/* SND_MON_* */
+	ID		mon_pid;
+	UW		mon_rate;	/* the stream's rate step is for, 0 not yet */
+	D		mon_l, mon_r;	/* the frame being added up */
 } CHAN;
 
 /*
@@ -170,6 +175,7 @@ LOCAL CHAN		**chs = NULL;
 LOCAL INT		nch = 0;
 LOCAL CHAN		**mix_act = NULL;
 LOCAL INT		*mix_gain = NULL;
+LOCAL CHAN		**mix_mon = NULL;	/* the channels that monitor, as many rooms */
 LOCAL INT		mix_cap = 0;
 LOCAL CHAN *volatile	rec_ch = NULL;	/* the channel that records */
 LOCAL CONST SNDHW	*play_hw = NULL;	/* the stream that plays */
@@ -210,6 +216,7 @@ LOCAL VOLENT		**vols = NULL;	/* as many as programs have had a volume set */
 LOCAL INT		nvol = 0;
 LOCAL UW		mvol_l = SND_VOL_MAX, mvol_r = SND_VOL_MAX;
 LOCAL BOOL		mmute = FALSE;
+LOCAL volatile BOOL	whole_outside = FALSE;	/* the output turns the whole down itself (sndhw.h) */
 LOCAL UW		mpeak_l, mpeak_r;
 LOCAL void		(*mix_keep_fn)( void ) = NULL;
 LOCAL volatile BOOL	mix_unkept = FALSE;
@@ -277,6 +284,8 @@ EXPORT void knl_snd_loopback( BOOL on )
 /* The backends that play, in the order "auto" takes their outputs */
 LOCAL CONST SNDHW *CONST play_hws[] = {
 	&knl_uac_hw,
+	&knl_bta_hw,
+	&knl_lea_hw,
 #ifdef RPI5
 	&knl_i2s_hw,
 	&knl_hdmi_hw,
@@ -448,6 +457,9 @@ LOCAL CONST SNDHW *hw_record( void )
 	if ( knl_uac_hw.can_record() ) {
 		return &knl_uac_hw;
 	}
+	if ( knl_bta_hw.can_record() ) {
+		return &knl_bta_hw;		/* earphones' microphone, on the hands-free profile */
+	}
 #ifdef RPI5
 	if ( knl_i2s_hw.can_record() ) {
 		return &knl_i2s_hw;
@@ -580,8 +592,9 @@ LOCAL BOOL chan_grow( void )
 	CHAN	**t = (CHAN **)Kcalloc((SZ)cap, sizeof(CHAN *));
 	CHAN	**act = (CHAN **)Kcalloc((SZ)cap, sizeof(CHAN *));
 	INT	*gain = (INT *)Kcalloc((SZ)cap, sizeof(INT));
+	CHAN	**mon = (CHAN **)Kcalloc((SZ)cap, sizeof(CHAN *));
 
-	if ( t == NULL || act == NULL || gain == NULL ) {
+	if ( t == NULL || act == NULL || gain == NULL || mon == NULL ) {
 		goto none;
 	}
 	for ( i = 0; i < cap; i++ ) {
@@ -593,6 +606,7 @@ LOCAL BOOL chan_grow( void )
 	}
 	mix_act = act;
 	mix_gain = gain;
+	mix_mon = mon;
 	MB();
 	mix_cap = cap;
 	MB();
@@ -604,6 +618,7 @@ none:
 	if ( t != NULL ) Kfree(t);
 	if ( act != NULL ) Kfree(act);
 	if ( gain != NULL ) Kfree(gain);
+	if ( mon != NULL ) Kfree(mon);
 	return FALSE;
 }
 
@@ -742,7 +757,9 @@ LOCAL void emit( CHAN *c, INT l, INT r )
 		return;
 	}
 	if ( c->bufsz - 1 - fifo_used(c) < n ) {
-		rec_end(c, WHY_OVERRUN);
+		if ( c->mon == SND_MON_OFF ) {
+			rec_end(c, WHY_OVERRUN);
+		}
 		return;
 	}
 	for ( i = 0; i < n; i++ ) {
@@ -1080,12 +1097,32 @@ EXPORT void knl_snd_tag( INT unit, CONST UB *prog )
 }
 #endif
 
+/* Whether a channel's sound goes to a monitor */
+LOCAL BOOL mon_takes( CONST CHAN *m, CONST CHAN *c )
+{
+	return ( m->mon == SND_MON_ALL ) ? TRUE
+	     : ( m->mon == SND_MON_ONLY ) ? ( c->key == m->mon_pid ) : ( c->key != m->mon_pid );
+}
+
+/* A monitor ready for the stream's rate: frames go through it as an input's do */
+LOCAL void mon_rate( CHAN *c, UW rate )
+{
+	UW	out = rate_hz[c->mode.sampling];
+
+	c->down = ( rate >= out );
+	c->step = ratio16(rate, out);
+	c->acc = 0;
+	c->sum_l = c->sum_r = c->nsum = 0;
+	c->have_prev = FALSE;
+	c->mon_rate = rate;
+}
+
 EXPORT INT knl_snd_mix( UB *dst, INT frames, UW rate, INT channels, BOOL wait )
 {
 	INT	cap = mix_cap;
-	CHAN	**act;
+	CHAN	**act, **mon;
 	INT	*gain;
-	INT	n = 0, i, k, o = 0, gl, gr;
+	INT	n = 0, nmon = 0, i, k, m, o = 0, gl, gr;
 	BOOL	ready = FALSE;
 
 	if ( frames <= 0 || rate == 0 || channels <= 0 ) {
@@ -1094,6 +1131,7 @@ EXPORT INT knl_snd_mix( UB *dst, INT frames, UW rate, INT channels, BOOL wait )
 	MB();
 	act = mix_act;			/* at least cap entries: read after cap */
 	gain = mix_gain;
+	mon = mix_mon;
 	mix_rate = rate;
 	if ( leading ) {
 		if ( (INT)(knl_usb_ms() - lead_until) < 0 ) {
@@ -1107,6 +1145,9 @@ EXPORT INT knl_snd_mix( UB *dst, INT frames, UW rate, INT channels, BOOL wait )
 	for ( i = 0; i < nch && n < cap; i++ ) {
 		CHAN	*c = chs[i];
 
+		if ( c->used && c->ctl == PCM_REC && c->mon != SND_MON_OFF && nmon < cap ) {
+			mon[nmon++] = c;
+		}
 		if ( !c->used || !playing(c) ) {
 			continue;
 		}
@@ -1142,8 +1183,13 @@ EXPORT INT knl_snd_mix( UB *dst, INT frames, UW rate, INT channels, BOOL wait )
 	if ( !ready ) {
 		snd_stat.out_short++;
 	}
-	gl = mmute ? 0 : gain_of(mvol_l);
-	gr = mmute ? 0 : gain_of(mvol_r);
+	for ( m = 0; m < nmon; m++ ) {
+		if ( mon[m]->mon_rate != rate ) {
+			mon_rate(mon[m], rate);
+		}
+	}
+	gl = mmute ? 0 : whole_outside ? GAIN_ONE : gain_of(mvol_l);
+	gr = mmute ? 0 : whole_outside ? GAIN_ONE : gain_of(mvol_r);
 	for ( k = 0; k < n; k++ ) {
 		act[k]->peak = ( act[k]->peak > PEAK_FALL ) ? act[k]->peak - PEAK_FALL : 0;
 	}
@@ -1161,6 +1207,16 @@ EXPORT INT knl_snd_mix( UB *dst, INT frames, UW rate, INT channels, BOOL wait )
 			sr += r;
 			if ( (UW)( l < 0 ? -l : l ) > act[k]->peak ) act[k]->peak = (UW)( l < 0 ? -l : l );
 			if ( (UW)( r < 0 ? -r : r ) > act[k]->peak ) act[k]->peak = (UW)( r < 0 ? -r : r );
+			for ( m = 0; m < nmon; m++ ) {
+				if ( mon_takes(mon[m], act[k]) ) {
+					mon[m]->mon_l += l;
+					mon[m]->mon_r += r;
+				}
+			}
+		}
+		for ( m = 0; m < nmon; m++ ) {
+			input(mon[m], soft16(mon[m]->mon_l), soft16(mon[m]->mon_r));
+			mon[m]->mon_l = mon[m]->mon_r = 0;
 		}
 		/* the sum by the whole's volume, left and right apart, and held to 16 bits */
 		sl = soft16(( (D)sl * gl ) >> 16);
@@ -1209,6 +1265,22 @@ LOCAL ER start_rec( CHAN *c )
 	CONST SNDHW *hw;
 	ER	er;
 
+	if ( c->mon != SND_MON_OFF ) {
+		/* no input to start: the mixer gives it frames while the stream runs */
+		er = fifo_alloc(c);
+		if ( er < E_OK ) {
+			return er;
+		}
+		c->head = c->tail = 0;
+		c->count = 0;
+		c->stop_req = FALSE;
+		c->stop_why = 0;
+		c->mon_rate = 0;
+		c->mon_l = c->mon_r = 0;
+		MB();
+		c->ctl = PCM_REC;
+		return E_OK;
+	}
 	if ( rec_ch != NULL && rec_ch != c ) {
 		return E_BUSY;			/* another program records */
 	}
@@ -1415,7 +1487,8 @@ LOCAL BOOL id_ok( CONST UB *id )
 #ifdef X64
 	      || same_id(id, (CONST UB *)"hda")
 #endif
-	      || ( n > 5 && id[0] == 'u' && id[1] == 's' && id[2] == 'b' && id[3] == ':' ) );
+	      || ( n > 5 && id[0] == 'u' && id[1] == 's' && id[2] == 'b' && id[3] == ':' )
+	      || ( n > 3 && id[0] == 'b' && id[1] == 't' && id[2] == '-' ) );
 }
 
 LOCAL void outputs_look( void );
@@ -1650,6 +1723,11 @@ LOCAL INT mix_of( SDMix *m, INT max )
 		}
 	}
 	return (INT)m->napp + more;
+}
+
+EXPORT void knl_snd_whole_outside( BOOL on )
+{
+	whole_outside = on;
 }
 
 EXPORT INT knl_snd_mix_get( SDMix *m, INT max )
@@ -2042,6 +2120,14 @@ LOCAL ER proc_read( CHAN *c, T_DEVREQ *req )
 		Kfree(o);
 		return E_OK;
 	}
+	case DN_SDMONITOR: {
+		SDMon	mo;
+
+		mo.mode = c->mon;
+		mo.pid = c->mon_pid;
+		reply(req, &mo, (INT)sizeof(mo));
+		return E_OK;
+	}
 	case DN_SDMIXER: {
 		SDMix	*m;
 		INT	k;
@@ -2215,6 +2301,23 @@ LOCAL ER proc_write( CHAN *c, T_DEVREQ *req )
 			return E_NOSPT;
 		}
 		c->mode = m;
+		return E_OK;
+	}
+	case DN_SDMONITOR: {
+		SDMon	mo;
+
+		if ( req->size < (SZ)sizeof(mo) ) {
+			return E_PAR;
+		}
+		if ( c->ctl != PCM_STOP ) {
+			return E_BUSY;
+		}
+		knl_memcpy(&mo, req->buf, sizeof(mo));
+		if ( mo.mode > SND_MON_ONLY ) {
+			return E_PAR;
+		}
+		c->mon = mo.mode;
+		c->mon_pid = mo.pid;
 		return E_OK;
 	}
 	case DN_SDPCMCTL:
@@ -2400,6 +2503,15 @@ LOCAL INT snd_event( INT evttyp, void *evtinf, void *exinf )
 	unlock();
 
 	return E_OK;
+}
+
+EXPORT UW knl_snd_note( void )
+{
+#ifdef X64
+	return knl_hda_note();
+#else
+	return 0;
+#endif
 }
 
 EXPORT ER knl_snd_init( void )

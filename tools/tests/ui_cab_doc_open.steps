@@ -1,0 +1,36 @@
+# 仮身一覧 given a record that is a text (design 11.3), for tools/ui_run.py. The desktop's
+# own window shows a text with the text editor whichever program opened it; 仮身一覧 as a
+# process opens nothing but a figure, so the desktop gives a text to the program of texts
+# instead. A copy of 基本文章編集 (mkbig doc 5) whose applist says 仮身一覧 (apps) is opened
+# by the desktop's cabinet (cabproc kernel), and then with 仮身一覧 and 基本文章編集 both as
+# processes (cabproc 1, docproc 1): the text editor's process opens it, not 仮身一覧's, which
+# would say it cannot open it. The shots (cabdoc_k, cabdoc_p) are compared afterwards inside
+# the window, where the text is.
+cabproc kernel
+mkbig doc 5
+apps big virtual-object-list
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+move 690 490
+sync 600
+wait 500
+shot cabdoc_k
+key 08 01
+sync 600
+wait 500
+cabproc 1
+docproc 1
+logmark
+open big
+expectsincein 60 document: opened 基本文章編集 paragraphs 5
+wait 800
+move 690 490
+wait 500
+shot cabdoc_p
+key 08 01
+expect document: closed
+absent cabinet: the object cannot be read
+docproc 0
+cabproc 0

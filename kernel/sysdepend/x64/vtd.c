@@ -222,11 +222,78 @@ LOCAL void turn_off( INT i )
  * The DMAR table told, and what the firmware left on turned off unless
  * keep. Called once, before the devices are started.
  */
+LOCAL void vtd_set_keep( BOOL keep );
+
+/*
+ * The same for AMD's IOMMU, which the IVRS table lists instead (its
+ * blocks of the types 10h, 11h and 40h, each with its registers). Its one
+ * switch for translation and for the interrupt remapping is IommuEn of the
+ * control register; the queues stop with it.
+ */
+#define AMDVI_MAX		8
+#define AMDVI_CONTROL		0x18
+#define AMDVI_STATUS		0x2020
+#define AMDVI_EN		U64(0x1)
+
+LOCAL UD	amdvi_pa[AMDVI_MAX];
+LOCAL INT	amdvi_n = 0;
+
+LOCAL void amdvi_off( INT i, CONST char *when )
+{
+	UBINT	r = DEV_BASE(amdvi_pa[i]);
+	UD	ctl = in_d(r + AMDVI_CONTROL);
+
+	tm_printf((UB *)"iommu: AMD unit %d at %lx: control %lx, status %lx%s\n", i, amdvi_pa[i], ctl,
+		  in_d(r + AMDVI_STATUS), when);
+	if ( ( ctl & AMDVI_EN ) != 0 ) {
+		out_d(r + AMDVI_CONTROL, ctl & ~AMDVI_EN);
+		tm_printf((UB *)"iommu: AMD unit %d turned off: control %lx\n", i, in_d(r + AMDVI_CONTROL));
+	}
+}
+
+LOCAL void amdvi_init( BOOL keep )
+{
+	CONST UB	*t = (CONST UB *)knl_acpi_table("IVRS", 0);
+	INT		len, at, i;
+
+	if ( t == NULL ) {
+		return;
+	}
+	len = (INT)rw(t, 4);
+	tm_printf((UB *)"iommu: IVRS %d bytes, IVinfo %08x\n", len, rw(t, 36));
+	for ( at = 48; at + 4 <= len; ) {
+		UB	type = rb(t + at, 0);
+		UH	sl = rh(t + at, 2);
+
+		if ( sl < 4 || at + sl > len ) break;
+		if ( ( type == 0x10 || type == 0x11 || type == 0x40 ) && sl >= 24 && amdvi_n < AMDVI_MAX ) {
+			UD	base = (UD)rw(t + at, 8) | ( (UD)rw(t + at, 12) << 32 );
+			INT	k;
+
+			/* one unit can have a block of each type */
+			for ( k = 0; k < amdvi_n && amdvi_pa[k] != base; k++ ) ;
+			if ( k == amdvi_n && base != 0 ) amdvi_pa[amdvi_n++] = base;
+		}
+		at += sl;
+	}
+	for ( i = 0; i < amdvi_n; i++ ) {
+		if ( keep ) {
+			tm_printf((UB *)"iommu: AMD unit %d at %lx: control %lx kept (vtd=keep)\n", i, amdvi_pa[i],
+				  in_d(DEV_BASE(amdvi_pa[i]) + AMDVI_CONTROL));
+		} else {
+			amdvi_off(i, "");
+		}
+	}
+}
+
 EXPORT void knl_vtd_init( BOOL keep )
 {
 	CONST UB	*t = (CONST UB *)knl_acpi_table("DMAR", 0);
 	INT		len, at, i;
 	BOOL		any_on = FALSE;
+
+	vtd_set_keep(keep);
+	amdvi_init(keep);
 
 	if ( t == NULL ) {
 		tm_printf((UB *)"vtd: no DMAR table: no VT-d\n");
@@ -291,6 +358,33 @@ EXPORT void knl_vtd_init( BOOL keep )
 	}
 	tm_printf((UB *)"vtd: %d unit(s); %s\n", vtd_n, !any_on ? "the firmware left them all off"
 		  : keep ? "what the firmware left on is kept (vtd=keep)" : "what the firmware left on is turned off");
+}
+
+/*
+ * After a waking from S3: the firmware's resume may have turned on again
+ * what it had on at start-up; off again, as at start-up, unless vtd=keep
+ */
+LOCAL BOOL	vtd_keep = FALSE;
+
+LOCAL void vtd_set_keep( BOOL keep )
+{
+	vtd_keep = keep;
+}
+
+EXPORT void knl_vtd_again( void )
+{
+	INT	i;
+
+	if ( vtd_keep ) return;
+	for ( i = 0; i < amdvi_n; i++ ) {
+		amdvi_off(i, " after the sleep");
+	}
+	for ( i = 0; i < vtd_n; i++ ) {
+		if ( ( r32(vtd_base[i], R_GSTS) & ( ST_TE | ST_IRE | ST_QIE ) ) != 0
+		  || ( r32(vtd_base[i], R_PMEN) & PMEN_EPM ) != 0 ) {
+			turn_off(i);
+		}
+	}
 }
 
 /* The units' status and fault records again, for a device that does not answer */

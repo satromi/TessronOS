@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "tessronos-keymap",
       "kind": "accessory",
       "name": "キー配列",

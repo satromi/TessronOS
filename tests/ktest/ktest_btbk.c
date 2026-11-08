@@ -744,6 +744,43 @@ LOCAL void test_tad_fig( void )
 	Kfree(b);
 }
 
+/* What a link's id names, however many places it goes through (design 8.3) */
+#define LNK_V	"019a6c9b-e67e-7a35-a461-0d199550e4cf/"
+#define LNK_M	"019a6c9a-fbc2-76c1-b965-4ac1f7e4dcb7/"
+#define LNK_O	"019aaa4e-de25-72ad-8518-ab392b7ea301"
+#define LNK_T	"\" vobjleft=\"0\" vobjtop=\"0\" vobjright=\"10\" vobjbottom=\"10\"></link>"
+#define LNK_X10	"xxxxxxxxxx"
+#define LNK_X50	LNK_X10 LNK_X10 LNK_X10 LNK_X10 LNK_X10
+
+LOCAL void test_tad_link_id( void )
+{
+	static CONST char x[] =
+		"<tad version=\"1.0\" encoding=\"UTF-8\"><figure>"
+		"<figView top=\"0\" left=\"0\" right=\"80\" bottom=\"60\"/>"
+		"<figDraw top=\"0\" left=\"0\" right=\"80\" bottom=\"60\"/>"
+		"<figScale hunit=\"-96\" vunit=\"-96\"/>"
+		"<link id=\"" LNK_O "_0.xtad" LNK_T
+		"<link id=\"" LNK_V LNK_O "_0.xtad" LNK_T
+		"<link id=\"" LNK_M LNK_V LNK_O "_0.xtad" LNK_T
+		"<link id=\"" LNK_X50 LNK_X50 LNK_X50 "_0.xtad" LNK_T
+		"</figure></tad>";
+	BK_TADSTAT st;
+	INT	len, i;
+	UB	*b;
+
+	for ( i = 0; i < 4; i++ ) targets[i][0] = 0;
+	b = to_tad((CONST UB *)x, (INT)sizeof(x) - 1, &len, &st);
+	KT_ASSERT(b != NULL);
+	if ( b == NULL ) return;
+	for ( i = 0; i < 4; i++ ) tm_printf((UB *)"btbk: link %d names [%s]\n", i, targets[i]);
+	KT_ASSERT_EQ(nlinks, 4);
+	KT_ASSERT(str_is(targets[0], LNK_O));
+	KT_ASSERT(str_is(targets[1], LNK_O));
+	KT_ASSERT(str_is(targets[2], LNK_O));
+	KT_ASSERT(str_is(targets[3], ""));		/* no place's id is this long */
+	Kfree(b);
+}
+
 /* groups of filled rectangles with text in boxes, and a link */
 LOCAL void test_tad_box( void )
 {
@@ -810,6 +847,7 @@ EXPORT void ktest_btbk( void )
 	KT_RUN(test_rewrite);
 	KT_RUN(test_volumes);
 	KT_RUN(test_tad_fig);
+	KT_RUN(test_tad_link_id);
 	KT_RUN(test_tad_box);
 	KT_RUN(test_tad_doc);
 

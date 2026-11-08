@@ -25,6 +25,8 @@
  *	  <switch num rect value>name</switch>		on or off
  *	  <button num rect answer emph pict>name</button>	pushed; pict="0_N.png" its
  *						picture, a PNG resource of the data box
+ *	  <choice num rect group value>name</choice>	one of a group of selector switches:
+ *						the parts of one group are a choice of one
  *	  <swatch num rect group/>			a colour, chosen by pressing it
  *	  <select num rect value across nosel double><name/>...</select>
  *	  <list num rect value cols><name/>...</list>
@@ -340,6 +342,14 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 				knl_pn_pict_load(pt->text);
 			}
 		}
+	} else if ( is(nd, "choice") ) {
+		/* one of a group of selector switches, each its own part, one of them on (WM_PT_CHOICE) */
+		pt->type |= WM_PT_CHOICE;
+		pt->count = 0;
+		pt->group = num(nd, "group", 0);
+		pt->value = num(nd, "value", 0);
+		(void)words(nd, w, sizeof(w));
+		label(pt, w);
 	} else if ( is(nd, "swatch") ) {
 		pt->type |= WM_PT_SWATCH;
 		pt->group = num(nd, "group", 0);

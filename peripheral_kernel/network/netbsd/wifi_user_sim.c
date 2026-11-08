@@ -38,14 +38,14 @@ EXPORT BOOL knl_wifisim_present( void )
 	return TRUE;
 }
 
-#ifdef X64
+#if defined(X64) || WIFI_OBSD
 /* What the manager says of the card's interrupt for the records: the simulator has none */
 EXPORT void knl_wifi_irq_say( CONST char *why )
 {
 	(void)why;
 }
 
-#if WIFI_OBSD
+#if WIFI_OBSD && defined(X64)
 #include <ts/pcie.h>
 
 /* The card OpenBSD's layer would look for (obsd_user.c): none, the simulator's station is in the layer */
@@ -61,7 +61,9 @@ EXPORT int rumpcomp_tswifi_card( int *bus, unsigned int *id )
 	(void)id;
 	return -1;
 }
+#endif
 
+#if WIFI_OBSD
 /*
  * The layer's pools of large items (mbuf clusters, obsd_kern.c's
  * pool_get) take memory a card could reach by DMA: no card here, so

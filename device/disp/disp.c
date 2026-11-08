@@ -548,6 +548,32 @@ EXPORT ER ts_disp_ref( T_DISPSPEC *spec )
 	return E_OK;
 }
 
+LOCAL INT	disp_nscreens = 1;
+
+EXPORT void knl_disp_screens( INT n )
+{
+	if ( n >= 1 && n <= DISP_SCREENS_MAX ) disp_nscreens = n;
+}
+
+EXPORT INT ts_disp_screens( void )
+{
+	return disp_nscreens;
+}
+
+EXPORT ER ts_disp_screen( INT i, INT *p_x, INT *p_y, INT *p_w, INT *p_h )
+{
+	INT	vw, vh;
+
+	if ( !disp_found || i < 0 || i >= disp_nscreens ) return E_NOEXS;
+	vw = (INT)( ( disp_spec.view_w > 0 ) ? disp_spec.view_w : disp_spec.width );
+	vh = (INT)( ( disp_spec.view_h > 0 ) ? disp_spec.view_h : disp_spec.height );
+	*p_x = vw * i / disp_nscreens;
+	*p_y = 0;
+	*p_w = vw * ( i + 1 ) / disp_nscreens - *p_x;
+	*p_h = vh;
+	return E_OK;
+}
+
 EXPORT void *ts_disp_buffer( void )
 {
 	return ( disp_found ) ? disp_back : NULL;

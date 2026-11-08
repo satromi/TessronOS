@@ -37,6 +37,7 @@
 #include <tm/tmonitor.h>
 #include <ts/blk.h>
 #include <ts/pcie.h>
+#include <ts/pm.h>
 #include "sysman/pfalloc.h"
 
 #ifdef X64
@@ -518,19 +519,13 @@ LOCAL ER ah_define( AH_DEV *d )
 /* ---------------------------------------------------------------- start-up */
 
 /* A port with a disk: stopped, given its memory, started, the disk identified */
-LOCAL ER ah_port( AH_DEV *d )
+/* The port stopped, its lists given to it and started: at start-up and after a sleep */
+LOCAL ER ah_port_start( AH_DEV *d )
 {
-	UW	*w;
-	T_CMTX	cm;
-	INT	i;
-
 	aw(d, P_CMD, ar(d, P_CMD) & ~CMD_ST);
 	if ( !await(d, P_CMD, CMD_CR, 0, 500) ) return E_IO;
 	aw(d, P_CMD, ar(d, P_CMD) & ~CMD_FRE);
 	if ( !await(d, P_CMD, CMD_FR, 0, 500) ) return E_IO;
-	d->mem = (UB *)pages(0, &d->mem_pa);
-	d->buf = (UB *)pages(5, &d->buf_pa);
-	if ( d->mem == NULL || d->buf == NULL ) return E_NOMEM;
 	aw(d, P_CLB, (UW)d->mem_pa);
 	aw(d, P_CLBU, (UW)( d->mem_pa >> 32 ));
 	aw(d, P_FB, (UW)( d->mem_pa + 1024 ));
@@ -541,6 +536,21 @@ LOCAL ER ah_port( AH_DEV *d )
 	aw(d, P_CMD, ar(d, P_CMD) | CMD_FRE);
 	if ( !await(d, P_TFD, TFD_BSY | TFD_DRQ, 0, 1000) ) return E_IO;
 	aw(d, P_CMD, ar(d, P_CMD) | CMD_ST);
+	return E_OK;
+}
+
+LOCAL ER ah_port( AH_DEV *d )
+{
+	UW	*w;
+	T_CMTX	cm;
+	INT	i;
+	ER	er;
+
+	d->mem = (UB *)pages(0, &d->mem_pa);
+	d->buf = (UB *)pages(5, &d->buf_pa);
+	if ( d->mem == NULL || d->buf == NULL ) return E_NOMEM;
+	er = ah_port_start(d);
+	if ( er < E_OK ) return er;
 	cm.exinf = NULL;
 	cm.mtxatr = TA_TFIFO;
 	d->mtxid = tk_cre_mtx(&cm);
@@ -572,8 +582,47 @@ LOCAL ER ah_port( AH_DEV *d )
 	return E_OK;
 }
 
+#ifdef X64
+/*
+ * The machine asleep: each disk's cache written out and its lock held by
+ * the sleep's task, so that requests wait. On waking the controller is in
+ * AHCI mode again and each port starts on the memory it has.
+ */
+LOCAL ER ah_pm_suspend( void *arg, INT how )
+{
+	INT	i;
+
+	for ( i = 0; i < ah_ndev; i++ ) {
+		(void)ah_flush(ah_dev[i]);
+		tk_loc_mtx(ah_dev[i]->mtxid, TMO_FEVR);
+	}
+	return E_OK;
+}
+
+LOCAL void ah_pm_resume( void *arg, INT how )
+{
+	INT	i;
+
+	for ( i = 0; i < ah_ndev; i++ ) {
+		AH_DEV	*d = ah_dev[i];
+		ER	er;
+
+		out_w(d->abar + GHC, in_w(d->abar + GHC) | GHC_AE);
+		er = ah_port_start(d);
+		tm_printf((UB *)"ahci: port %d: back from the sleep: %d\n", d->port, er);
+		tk_unl_mtx(d->mtxid);
+	}
+}
+
+LOCAL CONST T_PMDEV	ah_pm = { "ahci", PM_ORD_DISK, ah_pm_suspend, ah_pm_resume, NULL };
+#endif /* X64 */
+
 EXPORT INT knl_ahci_init( void )
 {
+#ifdef X64
+	(void)ts_pm_register(&ah_pm);
+#endif
+
 	T_PCIDEV	p;
 	UBINT		abar;
 	UW		pi;

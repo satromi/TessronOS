@@ -75,7 +75,7 @@ OSSL_URL=${OSSL_URL:-https://github.com/openssl/openssl/releases/download/openss
 OSSL_DL=${OSSLDL:-$HOME/openssl/dl}
 OSRC=${OSSLSRC:-$HOME/openssl/openssl-$OSSL_VER}
 OSSL_OPTS="no-asm no-pic no-shared no-module no-dso no-engine no-threads no-sock no-dgram no-http
- no-autoload-config no-async no-ui-console no-tests no-apps no-docs no-legacy no-ktls no-afalgeng
+ no-autoload-config no-async no-ui-console no-tests no-apps no-docs no-ktls no-afalgeng
  no-devcryptoeng no-padlockeng no-capieng no-ocsp no-cms no-ts no-ct no-srp no-quic no-comp
  no-zlib no-pinshared no-atexit no-ssl-trace no-filenames --with-rand-seed=getrandom"
 # what needs a C library that has the links of files and a system log (not reached)
@@ -87,7 +87,13 @@ SRCS="rsn_supp/wpa.c rsn_supp/wpa_ie.c rsn_supp/pmksa_cache.c
  utils/common.c utils/wpabuf.c crypto/dh_groups.c crypto/crypto_openssl.c
  crypto/sha1-prf.c crypto/sha256-prf.c crypto/sha384-prf.c crypto/sha512-prf.c
  crypto/sha256-kdf.c crypto/sha384-kdf.c crypto/sha512-kdf.c"
-DEFS="-DCONFIG_NO_RANDOM_POOL -DCONFIG_NO_CONFIG_BLOBS
+# 802.1X: the EAPOL supplicant, EAP's peer with PEAP-MSCHAPv2 and EAP-TLS, and TLS by libssl
+EAPSRCS="eapol_supp/eapol_supp_sm.c eap_peer/eap.c eap_peer/eap_methods.c eap_peer/eap_tls.c
+ eap_peer/eap_tls_common.c eap_peer/eap_peap.c eap_peer/eap_mschapv2.c eap_peer/mschapv2.c
+ eap_common/eap_common.c eap_common/eap_peap_common.c eap_common/chap.c
+ crypto/ms_funcs.c crypto/tls_openssl.c utils/base64.c"
+EAPDEFS="-include $TOP/device/net/wifi/wpa/ts_eap_defs.h -DIEEE8021X_EAPOL -DEAP_TLS -DEAP_PEAP -DEAP_MSCHAPv2 -DEAP_TLS_FUNCS"
+DEFS="-DCONFIG_NO_RANDOM_POOL
  -DCONFIG_NO_VLAN -DCONFIG_SHA256 -DCONFIG_SHA384 -DCONFIG_SHA512 -DCONFIG_NO_RADIUS
  -DCONFIG_HMAC_SHA256_KDF -DCONFIG_HMAC_SHA384_KDF -DCONFIG_HMAC_SHA512_KDF
  -DCONFIG_SAE -DCONFIG_ECC -DCONFIG_NO_ACCOUNTING -DCONFIG_NO_RC4
@@ -151,21 +157,35 @@ libcrypto() {
 	echo "wpaproc: libcrypto of $(echo $list | wc -w) objects in $b"
 }
 
+# libssl.a of the configuration in $1
+libssl() {
+	local b=$1 ar=$2 objs
+	[ -f "$b/libssl-ts.a" ] && [ "$b/libssl-ts.a" -nt "$b/.tessronos" ] && return 0
+	objs=$(awk '/^libssl\.a:/ {f=1} f {print} f && !/\\$/ {exit}' "$b/Makefile" \
+		| sed 's/^libssl\.a://; s/\\$//' | tr ' ' '\n' | grep '\.o$')
+	(cd "$b" && make -j"$JOBS" $objs > build-ssl.log 2>&1) \
+		|| { grep -E "error" "$b/build-ssl.log" | head -20; echo "wpaproc: libssl could not be built" >&2; exit 1; }
+	(cd "$b" && rm -f libssl-ts.a && "$ar" rcs libssl-ts.a $objs)
+	echo "wpaproc: libssl of $(echo $objs | wc -w) objects in $b"
+}
+
 openssl() {
 	configure_openssl "$WORK/openssl" "$CC" "$UFLAGS -O2 -g -fno-stack-protector -ffunction-sections -fdata-sections \
 		-DOPENSSL_USE_SLEEP_BUSYLOOP -I$APP/include" linux-generic64
 	libcrypto "$WORK/openssl" "$AR" "$OSSL_SKIP"
+	libssl "$WORK/openssl" "$AR"
 }
 
 compile() {
 	local O=$WORK/obj s o objs=""
 	local OB=$WORK/openssl
 	mkdir -p "$O"
-	local CFLAGS="$UFLAGS -O2 -g -fno-stack-protector -ffunction-sections -fdata-sections -std=gnu11 -w $DEFS
+	local CFLAGS="$UFLAGS -O2 -g -fno-stack-protector -ffunction-sections -fdata-sections -std=gnu11 -w $DEFS $EAPDEFS
 		-I$GLUE -I$WPP -I$D -I$D/utils -I$D/crypto -I$OB/include -I$OSRC/include
 		-idirafter $GLUE/include"
-	for s in $SRCS; do echo "$D/$s"; done > "$WORK/sources.txt"
+	for s in $SRCS $EAPSRCS; do echo "$D/$s"; done > "$WORK/sources.txt"
 	echo "$GLUE/wpa_glue.c" >> "$WORK/sources.txt"
+	echo "$APP/wps_eap.c" >> "$WORK/sources.txt"
 	echo "$APP/wps_serve.c" >> "$WORK/sources.txt"
 	xargs -P "$JOBS" -n 1 -a "$WORK/sources.txt" sh -c '
 		src=$1; o='"$O"'/$(basename "$(dirname "$src")")_$(basename "$src" .c).o
@@ -176,7 +196,7 @@ compile() {
 		objs="$objs $O/$(basename "$(dirname "$s")")_$(basename "$s" .c).o"
 	done < "$WORK/sources.txt"
 	local o=$OUT/wpasupp_lib.o
-	$LD -r --gc-sections -u wps_serve -o "$o.all" $objs "$OB/libcrypto-ts.a"
+	$LD -r --gc-sections -u wps_serve -o "$o.all" $objs "$OB/libssl-ts.a" "$OB/libcrypto-ts.a"
 	$OBJCOPY --keep-global-symbol=wps_serve "$o.all" "$o"
 	rm -f "$o.all"
 	cp "$WSRC/dist/COPYING" "$OUT/COPYING-wpa_supplicant.txt"
@@ -196,7 +216,7 @@ HDEFS="-DCONFIG_NO_RANDOM_POOL -DCONFIG_SHA256 -DCONFIG_SHA384 -DCONFIG_SHA512
 # test's callbacks knl_wifi_*)
 SIDE=""
 for f in classify psk start choose start2 sae_pt sae_start sae_rx sae_resend sae_pmk sae_abort \
-	 assoc rx state disassoc tick; do SIDE="$SIDE -Dknl_wpa_$f=wps_$f"; done
+	 assoc rx state disassoc tick eap_set eap_assoc eap_rx eap_result eap_end; do SIDE="$SIDE -Dknl_wpa_$f=wps_$f"; done
 for f in eapol_tx setkey delkey deauth say; do SIDE="$SIDE -Dknl_wifi_$f=wps_cb_$f"; done
 
 host_openssl() {
@@ -233,6 +253,43 @@ MODSRCS="$D/common/gas.c $D/utils/eloop.c $D/crypto/ms_funcs.c
 	$D/crypto/fips_prf_internal.c $D/crypto/sha1-internal.c"
 MODPRE="$D/crypto/md4-internal.c $D/crypto/des-internal.c"
 
+# 802.1X on the host: the peer of wpa_eap.c against the release's EAP server (tools/wpa/test_eap.c)
+eap_certs() {
+	local c=$1
+	mkdir -p "$c"
+	[ -f "$c/client.key" ] && return 0
+	(cd "$c"
+	 mkca() { command openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout "$1.key" -out "$1.pem" -subj "/CN=$1" 2>/dev/null; }
+	 leaf() {	# name CN signer
+		command openssl req -newkey rsa:2048 -nodes -keyout "$1.key" -out "$1.csr" -subj "/CN=$2" 2>/dev/null
+		printf 'subjectAltName=DNS:%s\n' "$2" > "$1.ext"
+		command openssl x509 -req -in "$1.csr" -CA "$3.pem" -CAkey "$3.key" -CAcreateserial -days 3650 -extfile "$1.ext" -out "$1.pem" 2>/dev/null
+	 }
+	 mkca ca; mkca other_ca
+	 leaf server radius.example ca
+	 leaf client user.example ca
+	 leaf bad user.example other_ca)
+}
+
+eap_test() {
+	host_openssl
+	libssl "$HOST/openssl" ar
+	local F srcs="" s
+	F="-O1 -g -std=gnu11 -w $(echo "$HDEFS" | sed 's/-DCONFIG_NO_CONFIG_BLOBS//') $EAPDEFS -DEAP_SERVER -DEAP_SERVER_IDENTITY
+		-DEAP_SERVER_PEAP -DEAP_SERVER_TLS -DEAP_SERVER_MSCHAPV2 -I$GLUE -I$WPP -I$D -I$D/utils -I$D/crypto
+		-I$HOST/openssl/include -I$OSRC/include"
+	for s in $EAPSRCS; do srcs="$srcs $D/$s"; done
+	for s in eap_server.c eap_server_methods.c eap_server_identity.c eap_server_peap.c eap_server_tls.c \
+		 eap_server_tls_common.c eap_server_mschapv2.c; do srcs="$srcs $D/eap_server/$s"; done
+	eap_certs "$HOST/certs"
+	gcc $F -o "$HOST/test_eap" "$TOP/tools/wpa/test_eap.c" "$APP/wps_eap.c" $srcs \
+		"$D/utils/common.c" "$D/utils/wpabuf.c" "$D/utils/eloop.c" "$D/utils/os_unix.c" "$D/utils/wpa_debug.c" \
+		"$D/crypto/crypto_openssl.c" "$D/crypto/sha1-prf.c" "$D/crypto/sha1-tlsprf.c" "$D/crypto/sha256-prf.c" \
+		"$HOST/openssl/libssl-ts.a" "$HOST/openssl/libcrypto-ts.a" -lpthread 2> "$HOST/cc-eap.log" \
+		|| { grep -E "error|undefined" "$HOST/cc-eap.log" | sort -u | head -40; exit 1; }
+	"$HOST/test_eap" "$HOST/certs"
+}
+
 mod_test() {
 	host_openssl
 	local F srcs="" s
@@ -253,6 +310,7 @@ compile)	fetch; openssl; compile ;;
 all)		fetch; openssl; compile ;;
 test)		fetch; test_host ;;
 modtest)	fetch; mod_test ;;
+eaptest)	fetch; eap_test ;;
 clean)		rm -rf "$OUT" ;;
-*)		echo "usage: $0 [fetch|openssl|compile|all|test|modtest|clean]" >&2; exit 2 ;;
+*)		echo "usage: $0 [fetch|openssl|compile|all|test|modtest|eaptest|clean]" >&2; exit 2 ;;
 esac

@@ -37,23 +37,7 @@
 
 EXPORT T_TAD *dt_frag_new( CONST char *body )
 {
-	UB	text[96];
-	T_TAD	*doc = NULL;
-	INT	n = 0, i;
-	CONST char *head = "<tad version=\"1.0\" encoding=\"UTF-8\"><";
-
-	for ( i = 0; head[i] != 0; i++ ) text[n++] = (UB)head[i];
-	for ( i = 0; body[i] != 0 && n < 80; i++ ) text[n++] = (UB)body[i];
-	text[n++] = '>';
-	text[n++] = '<';
-	text[n++] = '/';
-	for ( i = 0; body[i] != 0 && n < 90; i++ ) text[n++] = (UB)body[i];
-	text[n++] = '>';
-	for ( i = 0; "</tad>"[i] != 0; i++ ) text[n++] = (UB)"</tad>"[i];
-	if ( tad_parse(text, (SZ)n, NULL, &doc) < E_OK ) {
-		return NULL;
-	}
-	return doc;
+	return de_frag_new(body);
 }
 
 EXPORT ER dt_tray_put( CONST T_TAD *frag, CONST char *name )
@@ -156,17 +140,7 @@ EXPORT UINT dt_tray_kind( INT *p_links )
 /* The shapes of a figure fragment: every element of its body but the links */
 EXPORT INT dt_frag_shapes( CONST T_TAD *frag )
 {
-	CONST T_TADNODE	*body = tad_body(frag), *c;
-	INT		n = 0;
-
-	for ( c = ( body != NULL ) ? body->first : NULL; c != NULL; c = c->next ) {
-		if ( c->kind == TAD_ND_ELEM && c->name != NULL
-		  && !( c->name[0] == 'l' && c->name[1] == 'i' && c->name[2] == 'n'
-			&& c->name[3] == 'k' && c->name[4] == 0 ) ) {
-			n++;
-		}
-	}
-	return n;
+	return de_frag_shapes(frag);
 }
 
 /* The number after the last '_' of an href of a picture beside a record ("<object>_0_<n>.png") */

@@ -1,0 +1,60 @@
+MIT License
+
+Copyright (c) 2026 satromi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+# Third-party notices
+
+BeFC is licensed under the MIT License (see `LICENSE`). It incorporates the following third-party material.
+
+## emu2413
+
+Portions of `cart.c` (the VRC7/OPLL FM synthesizer) and all of `opll_tables.h` are transcribed from emu2413 v1.5.9 (<https://github.com/digital-sound-antiques/emu2413>).
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2001-2019 Mitsutaka Okazaki
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+## Factual data
+
+- `nespal.h` — the widely used NES NTSC 64-colour palette (values generated from the standard NTSC decoding formula; close to Nestopia/FCEUX defaults).
+- The VRC7 built-in instrument table in `cart.c` (`opll_inst`) reproduces the patch ROM of the VRC7 chip itself (via emu2413).
+
+Note: the ES1371 sound driver (es1371snd, maintained in its own repository) is a separate work distributed separately under GPL-2.0 — see its `LICENSE` and the header of its `src/main.c`. It is not part of the MIT-licensed BeFC application.

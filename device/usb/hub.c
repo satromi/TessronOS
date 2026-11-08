@@ -137,6 +137,15 @@ EXPORT ER knl_hub_attach( USBDEV *hub )
 	hub_stream(hub);
 	USB_LOG("usb: hub: %s%d ports%s\n", ss ? "SuperSpeed, " : "",
 		hub->hub_ports, ( hub->hub_pipe != NULL ) ? "" : ", polled");
+	{
+		USBDEV	*half = knl_usb_hub_other_half(hub);
+
+		if ( half != NULL ) {
+			USB_LOG("usb: hub: the %s side of one USB 3 hub with %s (root port %d, route %05x)\n",
+				ss ? "SuperSpeed" : "USB 2", (char *)half->product,
+				half->root_port, (UINT)half->route);
+		}
+	}
 
 	return E_OK;
 }

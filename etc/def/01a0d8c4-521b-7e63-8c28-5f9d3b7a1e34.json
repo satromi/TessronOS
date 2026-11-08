@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "microscript",
       "kind": "app",
       "name": "マイクロスクリプト",

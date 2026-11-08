@@ -1,0 +1,247 @@
+# 実行 for the link picked (design 18.15), for tools/ui_run.py. 実行 lists the programs of the
+# link that is picked wherever in the window the menu is opened, not only when the press is on
+# the link: in 仮身一覧, 基本図形編集 and 基本文章編集, the desktop's own (cabproc, figproc,
+# docproc kernel; the console says "desktop: exec menu on|grey") and the process (pcab, pfig,
+# pdoc; "cabinet:", "figure:", "document: exec menu on|grey"). Each window holds a link to
+# プログラム箱, whose 実行 is never empty. With nothing picked, the menu opened on the empty
+# page has 実行 grey; with the link picked, the menu opened on the empty page has it on; with
+# nothing picked, a press on the link (in a figure, the link is picked by it) has it on.
+# Keys: Esc 29; Ctrl+E 08 01.
+#
+# 仮身一覧, the desktop's own
+cabproc kernel
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+logmark
+click 400 400 1
+wait 800
+expectsince desktop: exec menu grey
+key 29
+wait 500
+click 167 153
+sync 600
+logmark
+click 400 400 1
+wait 800
+shot exec_pick_cab_k
+expectsince desktop: exec menu on
+key 29
+wait 500
+click 400 400
+sync 600
+logmark
+click 167 153 1
+wait 800
+expectsince desktop: exec menu on
+key 29
+wait 500
+key 08 01
+sync 600
+wait 500
+#
+# 仮身一覧, the process
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+logmark
+pcab big
+expectsincein 60 cabinet: opened 画用紙 shapes 1 links 1
+wait 800
+logmark
+click 400 400 1
+expectsince cabinet: exec menu grey
+wait 500
+key 29
+wait 500
+click 167 153
+wait 600
+logmark
+click 400 400 1
+expectsince cabinet: exec menu on
+wait 500
+shot exec_pick_cab_p
+key 29
+wait 500
+click 400 400
+wait 600
+logmark
+click 167 153 1
+expectsince cabinet: exec menu on
+wait 500
+key 29
+wait 500
+key 08 01
+expect cabinet: closed
+wait 500
+#
+# 基本図形編集, the desktop's own
+figproc kernel
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big basic-figure-editor
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+logmark
+click 400 400 1
+wait 800
+expectsince desktop: exec menu grey
+key 29
+wait 500
+click 167 153
+sync 600
+logmark
+click 400 400 1
+wait 800
+shot exec_pick_fig_k
+expectsince desktop: exec menu on
+key 29
+wait 500
+click 400 400
+sync 600
+logmark
+click 167 153 1
+wait 800
+expectsince desktop: exec menu on
+key 29
+wait 500
+key 08 01
+sync 600
+wait 500
+#
+# 基本図形編集, the process
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙
+wait 800
+logmark
+click 400 400 1
+expectsince figure: exec menu grey
+wait 500
+key 29
+wait 500
+click 167 153
+wait 600
+logmark
+click 400 400 1
+expectsince figure: exec menu on
+wait 500
+shot exec_pick_fig_p
+key 29
+wait 500
+click 400 400
+wait 600
+logmark
+click 167 153 1
+expectsince figure: exec menu on
+wait 500
+key 29
+wait 500
+key 08 01
+expect figure: closed
+wait 500
+#
+# 基本文章編集, the desktop's own
+docproc kernel
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>仮身の前<link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" width="160" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>仮身の後</p>
+xml <p>後の段落</p>
+xml </document></tad>
+xmlbig
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 800
+logmark
+click 400 400 1
+wait 800
+expectsince desktop: exec menu grey
+key 29
+wait 500
+click 230 135
+sync 600
+logmark
+click 400 400 1
+wait 800
+shot exec_pick_doc_k
+expectsince desktop: exec menu on
+key 29
+wait 500
+click 400 400
+sync 600
+logmark
+click 230 135 1
+wait 800
+expectsince desktop: exec menu on
+key 29
+wait 500
+key 08 01
+sync 600
+wait 500
+#
+# 基本文章編集, the process
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>仮身の前<link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" width="160" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>仮身の後</p>
+xml <p>後の段落</p>
+xml </document></tad>
+xmlbig
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 2
+wait 800
+logmark
+click 400 400 1
+expectsince document: exec menu grey
+wait 500
+key 29
+wait 500
+click 230 135
+wait 600
+logmark
+click 400 400 1
+expectsince document: exec menu on
+wait 500
+shot exec_pick_doc_p
+key 29
+wait 500
+click 400 400
+wait 600
+logmark
+click 230 135 1
+expectsince document: exec menu on
+wait 500
+key 29
+wait 500
+key 08 01
+expect document: closed
+absent !OACV!

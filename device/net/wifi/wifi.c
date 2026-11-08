@@ -114,6 +114,7 @@
 #if defined(X64) || defined(USE_NETSEL)
 
 #include "kernel.h"
+#include <ts/pm.h>
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include "network/netbsd/netlog.h"	/* the lines timed */
@@ -126,6 +127,7 @@
 #include <ts/conf.h>
 #include <ts/sysdef.h>
 #include <ts/time.h>
+#include <ts/fs.h>
 #include "obj/obj.h"
 #include "../netsel.h"
 #include "wpa/wpa_glue.h"
@@ -137,6 +139,24 @@
 /* ---------------------------------------------------------------- the rump kernel's side */
 
 /* What tswifi_if.c answers (the same layouts) */
+/*
+ * A network of 802.1X, as its $$WIFIEAP line has it: the words of EAP and
+ * where the certificates are. They are objects of the person's, read
+ * with the path at each join and handed to the process for that join.
+ */
+#define EAP_STR		64
+#define EAP_PATH	160
+typedef struct {
+	INT	method;			/* WPAG_EAP_* */
+	char	id[EAP_STR];
+	char	pw[EAP_STR];
+	char	domain[EAP_STR];
+	char	ca[EAP_PATH];
+	char	cert[EAP_PATH];
+	char	key[EAP_PATH];
+	char	keypw[EAP_STR];
+} EAPCONF;
+
 typedef struct {
 	W	state;			/* 0 init, 1 scan, 2 auth, 3 assoc, 4 run */
 	W	scanning;
@@ -213,6 +233,7 @@ typedef struct {
 #define TSW_AKM_PSK		0x01
 #define TSW_AKM_PSK_SHA256	0x02
 #define TSW_AKM_SAE		0x04
+#define TSW_AKM_8021X		0x08
 
 IMPORT int	rump_tswifi_ifup( int up );
 IMPORT int	rump_tswifi_join( CONST UB *ssid, int ssid_len, int rsn, int akms, int mfp_required,
@@ -244,6 +265,7 @@ typedef struct {
 	W	freq;			/* MHz */
 	W	sup_status;		/* the card's supplicant's last state, -1 none */
 	W	roams;
+	W	pm;			/* the card's power saving: 0 off, 1 PS-Poll, 2 fast; -1 not told */
 	UB	bssid[6];
 	UB	pad[2];
 } TSWIFI_FWLINK;
@@ -262,15 +284,24 @@ IMPORT int	rump_tswifi_stats( UW *v, int n ) __attribute__((weak));	/* tswifi_if
 IMPORT BOOL	knl_wifisim_present( void );		/* wifi_user_sim.c: the simulator's station (WIFI_SIM=1) */
 IMPORT void	knl_wifisim_ap_start( void );		/* sim/wifisim_ap.c */
 #endif
-#ifdef X64
-IMPORT BOOL	knl_wifi_pci_find( T_PCIDEV *d );	/* wifi_user.c */
+#ifdef WIFI_OBSD
 IMPORT CONST char *rump_tswifi_ifname( void );	/* the layer's: iwm0 or iwx0, by the card's driver */
 #define W_IF		rump_tswifi_ifname()
+#endif
+#ifdef X64
+IMPORT BOOL	knl_wifi_pci_find( T_PCIDEV *d );	/* wifi_user.c */
 #else
 IMPORT BOOL	knl_wifi5_present( void );		/* wifi_user_rpi5.c */
+#if WIFI_SIM
+#define knl_wifi5_no_firmware()	FALSE
+#else
+IMPORT BOOL	knl_wifi5_no_firmware( void );
+#endif
+#ifndef WIFI_OBSD
 IMPORT int	rump_tswifi_take( UB *mac );
 #define W_IF		"bwfm0"
 #define W_TAKE_TRIES	60			/* a chip the SD/SDIO layer finds late: 30 s */
+#endif
 #endif
 
 #define S_INIT		0
@@ -299,12 +330,14 @@ IMPORT int	rump_tswifi_take( UB *mac );
 
 #define JOIN_MS		8000		/* authentication and association */
 #define SHAKE_MS	10000		/* the 4-way and group key handshakes */
+#define EAP_SHAKE_MS	30000		/* with EAP before them, which waits on the network's server */
 #define SCAN_MS		15000		/* a scan that does not end */
 #define SCAN_WAIT_MS	3000		/* for the scan of a card started again to be seen */
 #define RESCAN_MS	30000		/* between scans while nothing is joined */
 #define RETRY_MS	20000		/* before a network that failed is tried again */
 #define SCAN_AGAIN_MS	200		/* a scan asked again, once the card is back to INIT */
 #define ASK_MS		1000		/* between scans for a network asked for, while one cannot begin */
+#define WANT_SCANS	4		/* scans a network asked for may be missing from before that is told: one scan misses networks */
 #define DOWN_MS		1000		/* the driver took its interface down: the card is started again */
 #define STOPPED_MS	10000		/* the interface up but the card not running: started again */
 #define LINK_SAY_MS	60000		/* how often the link is told while connected */
@@ -326,6 +359,7 @@ typedef struct {
 	INT	pw_len;		/* the password for SAE (sec WPA3 or WPA2WPA3), 0 none */
 	char	pw[PW_MAX + 1];
 	TS_UUID	owner;		/* the user who saved it: theirs alone */
+	EAPCONF	eap;		/* sec WPAG_SAVED_EAP: what it joins with; method 0 not told yet */
 	UD failed_at;	/* when it last failed, 0 never */
 	INT	fails;
 	/*
@@ -357,8 +391,13 @@ LOCAL INT		nscans = 0;
 LOCAL WNET		*nets = NULL;	/* the networks saved, as many as the settings keep */
 LOCAL INT		nnet = 0;
 LOCAL BOOL		wifi_on = TRUE;
+LOCAL void card_restart( UD t, BOOL down );
+LOCAL volatile BOOL	w_asleep = FALSE;	/* the machine sleeps: the card is down on purpose */
+LOCAL volatile BOOL	pm_ack = FALSE;
+LOCAL BOOL		pm_held = FALSE;
 LOCAL BOOL		held = FALSE;	/* DISCONNECT asked: nothing joined by itself */
 LOCAL INT		want_net = -1;	/* CONNECT asked for this one */
+LOCAL INT		want_miss = 0;	/* scans that have ended without it */
 LOCAL INT		cur_net = -1;	/* the network being joined or joined */
 LOCAL TSWIFI_BSS	cur_bss;
 LOCAL BOOL		cur_wpa2;	/* the join has keys: WPA2's or WPA3's */
@@ -392,7 +431,7 @@ LOCAL INT		stlen = 0;
 #define F_CONF		0x04
 #define F_REQ		0x08
 
-#define CMD_MAX		256		/* a line written to record 1: SAVE with its passphrase fits */
+#define CMD_MAX		1536		/* a line written to record 1: SAVE with its passphrase, EAP with its words */
 
 LOCAL char		cmd[CMD_MAX];	/* the command written, until the manager takes it */
 LOCAL TS_UUID		cmd_user;	/* who wrote it */
@@ -544,6 +583,7 @@ LOCAL CONST char *saved_name( INT sec )
 	case WPAG_SAVED_WPA2:		return "wpa2";
 	case WPAG_SAVED_WPA3:		return "wpa3";
 	case WPAG_SAVED_WPA2WPA3:	return "wpa2wpa3";
+	case WPAG_SAVED_EAP:		return "eap";
 	default:			return "open";
 	}
 }
@@ -554,6 +594,7 @@ LOCAL INT saved_of( CONST char *w )
 	if ( knl_strcmp(w, "wpa2") == 0 ) return WPAG_SAVED_WPA2;
 	if ( knl_strcmp(w, "wpa3") == 0 ) return WPAG_SAVED_WPA3;
 	if ( knl_strcmp(w, "wpa2wpa3") == 0 ) return WPAG_SAVED_WPA2WPA3;
+	if ( knl_strcmp(w, "eap") == 0 ) return WPAG_SAVED_EAP;
 	return -1;
 }
 
@@ -596,6 +637,39 @@ EXPORT BOOL knl_wifi_mac_known( void )
 {
 	return wmac_known;
 }
+
+#ifdef X64
+/*
+ * The machine asleep: the network left and the card's interface taken
+ * down by the manager; on waking the interface comes up, which loads the
+ * firmware again, and the saved network is joined as after a stopped card.
+ */
+LOCAL void pm_ask( CONST char *what )
+{
+	UD	t0;
+
+	pm_ack = FALSE;
+	LOCK();
+	knl_strcpy(cmd, what);
+	UNLOCK();
+	(void)tk_set_flg(wflg, F_CMD);
+	for ( t0 = now_ms(); !pm_ack && now_ms() - t0 < 5000; ) (void)tk_dly_tsk(10);
+	tm_printf((UB *)"wifi: %s %s\n", what, pm_ack ? "done" : "not answered in time");
+}
+
+LOCAL ER wifi_pm_suspend( void *arg, INT how )
+{
+	if ( w_serving && wflg > 0 ) pm_ask("SLEEP");
+	return E_OK;
+}
+
+LOCAL void wifi_pm_resume( void *arg, INT how )
+{
+	if ( w_serving && wflg > 0 ) pm_ask("WAKE");
+}
+
+LOCAL CONST T_PMDEV	wifi_pm = { "wifi", PM_ORD_NET, wifi_pm_suspend, wifi_pm_resume, NULL };
+#endif /* X64 */
 
 /*
  * The machine going off or starting again (knl_finish_device): the
@@ -781,7 +855,8 @@ EXPORT INT knl_wifi_name( UB *t, INT n, INT max )
 #elif defined(X64)
 	UB	id[2];
 
-	n = knl_oj_put(t, n, max, "Intel Wi-Fi 8086:");
+	n = knl_oj_put(t, n, max, ( wdev.vendor == 0x14c3 ) ? "MediaTek Wi-Fi 14c3:" :
+		       ( wdev.vendor == 0x168c ) ? "Qualcomm Atheros Wi-Fi 168c:" : "Intel Wi-Fi 8086:");
 	id[0] = (UB)( wdev.device >> 8 );
 	id[1] = (UB)wdev.device;
 	n = put_hex(t, n, max, id, 2);
@@ -1160,7 +1235,7 @@ LOCAL ER w_wri( void *ctx, UD *pos, INT recno, D off, CONST void *buf, SZ size, 
 		line[i] = ((CONST char *)buf)[i];
 	}
 	line[i] = '\0';
-	if ( starts(line, "SAVE ") || starts(line, "FORGET ") ) {
+	if ( starts(line, "SAVE ") || starts(line, "FORGET ") || starts(line, "EAP ") ) {
 		er = req_pass(&crd->user, line);
 		knl_memset(line, 0, sizeof(line));	/* the passphrase is not left about */
 	} else {
@@ -1313,6 +1388,55 @@ LOCAL CONST TS_UUID *session_user( void )
 	return &knl_ob_session_crd()->user;
 }
 
+
+/* One word of a $$WIFIEAP line or an EAP request into a field: hexadecimal, "-" for nothing */
+LOCAL BOOL eap_word( CONST UB *val, INT vl, INT nth, char *out, INT max )
+{
+	CONST UB *w;
+	INT	wl, d;
+
+	out[0] = '\0';
+	if ( !cf_wfind(val, vl, nth, &w, &wl) ) return FALSE;
+	if ( wl == 1 && w[0] == '-' ) return TRUE;
+	if ( ( wl & 1 ) != 0 || wl / 2 >= max ) return FALSE;
+	for ( d = 0; d < wl; d += 2 ) {
+		INT	h = hexval((char)w[d]), l = hexval((char)w[d + 1]);
+
+		if ( h < 0 || l < 0 ) return FALSE;
+		out[d / 2] = (char)( h * 16 + l );
+	}
+	out[wl / 2] = '\0';
+	return TRUE;
+}
+
+/* The words from the nth on: the method, then the fields */
+LOCAL BOOL eap_from_words( EAPCONF *e, CONST UB *val, INT vl, INT nth )
+{
+	CONST UB *w;
+	INT	wl;
+
+	knl_memset(e, 0, sizeof(*e));
+	if ( !cf_wfind(val, vl, nth, &w, &wl) ) return FALSE;
+	if ( wl == 3 && w[0] == 't' && w[1] == 'l' && w[2] == 's' ) e->method = WPAG_EAP_TLS;
+	else if ( wl == 4 && w[0] == 'p' && w[1] == 'e' && w[2] == 'a' && w[3] == 'p' ) e->method = WPAG_EAP_PEAP;
+	else return FALSE;
+	if ( !eap_word(val, vl, nth + 1, e->id, EAP_STR) || !eap_word(val, vl, nth + 2, e->pw, EAP_STR)
+	  || !eap_word(val, vl, nth + 3, e->domain, EAP_STR) || !eap_word(val, vl, nth + 4, e->ca, EAP_PATH)
+	  || !eap_word(val, vl, nth + 5, e->cert, EAP_PATH) || !eap_word(val, vl, nth + 6, e->key, EAP_PATH)
+	  || !eap_word(val, vl, nth + 7, e->keypw, EAP_STR) ) {
+		knl_memset(e, 0, sizeof(*e));
+		return FALSE;
+	}
+	return TRUE;
+}
+
+LOCAL INT eap_put( UB *t, INT n, INT max, CONST char *s )
+{
+	n = knl_oj_put(t, n, max, " ");
+	if ( s[0] == '\0' ) return knl_oj_put(t, n, max, "-");
+	return put_hex(t, n, max, (CONST UB *)s, (INT)knl_strlen(s));
+}
+
 /*
  * The settings read: the networks saved and the key of each.
  * TRUE when they still keep a passphrase ($$WIFIPASS, as settings
@@ -1400,6 +1524,18 @@ LOCAL BOOL conf_read( void )
 		nets[k].pw_len = ( d == wl && wl / 2 >= 8 ) ? wl / 2 : 0;
 		knl_memset(nets[k].pw + nets[k].pw_len, 0, sizeof(nets[k].pw) - (SZ)nets[k].pw_len);
 	}
+	/* 802.1X: "<n> <peap|tls> <identity> <password> <domain> <CA> <certificate> <key> <key's password>", each in hexadecimal */
+	for ( i = 0; i < len; i++ ) {
+		CONST UB *val, *wd;
+		INT	vl, wl;
+
+		if ( !cf_find(text, len, "$$WIFIEAP", i, &val, &vl) ) break;
+		if ( !cf_wfind(val, vl, 0, &wd, &wl) || wl >= (INT)sizeof(v) ) continue;
+		knl_memcpy(v, wd, wl);
+		v[wl] = '\0';
+		k = cf_num(v, -1);
+		if ( k < 0 || k >= nnet || !eap_from_words(&nets[k].eap, val, vl, 1) ) continue;
+	}
 	knl_memset(w, 0, sizeof(w));
 	/* the passphrases of settings written before: "<n> <passphrase>", the passphrase being the rest of the line */
 	for ( i = 0; cf_get(text, len, "$$WIFIPASS", i, v, sizeof(v)); i++ ) {
@@ -1474,10 +1610,29 @@ LOCAL INT conf_make( void *ctx, UB *t, INT max )
 		n = put_hex(t, n, max, (CONST UB *)nets[k].pw, nets[k].pw_len);
 		n = knl_oj_put(t, n, max, "\n");
 	}
+	for ( k = 0; k < nnet; k++ ) {
+		CONST EAPCONF	*e = &nets[k].eap;
+
+		if ( nets[k].sec != WPAG_SAVED_EAP || e->method == 0 ) continue;
+		(void)cf_itoa(k, num);
+		n = knl_oj_put(t, n, max, "$$WIFIEAP\t");
+		n = knl_oj_put(t, n, max, num);
+		n = knl_oj_put(t, n, max, ( e->method == WPAG_EAP_TLS ) ? " tls" : " peap");
+		n = eap_put(t, n, max, e->id);
+		n = eap_put(t, n, max, e->pw);
+		n = eap_put(t, n, max, e->domain);
+		n = eap_put(t, n, max, e->ca);
+		n = eap_put(t, n, max, e->cert);
+		n = eap_put(t, n, max, e->key);
+		n = eap_put(t, n, max, e->keypw);
+		n = knl_oj_put(t, n, max, "\n");
+	}
 	return n;
 }
 
 /* The saved networks written to the settings, in the kernel's task: no program writes them */
+LOCAL ER eap_apply( CONST TS_UUID *user, CONST char *line );
+
 LOCAL ER conf_write( void )
 {
 	TS_UUID	u;
@@ -1546,6 +1701,9 @@ LOCAL ER req_apply( CONST TS_UUID *user, CONST char *line )
 	WNET	*p;
 	ER	er = E_OK;
 
+	if ( starts(line, "EAP ") ) {
+		return eap_apply(user, line);
+	}
 	if ( !cf_word(line, 1, w, sizeof(w)) || ( len = unhex(w, ssid, 32) ) <= 0 ) return E_PAR;
 	if ( save ) {
 		if ( !cf_word(line, 2, v, sizeof(v)) ) return E_PAR;
@@ -1632,6 +1790,55 @@ LOCAL ER req_apply( CONST TS_UUID *user, CONST char *line )
 		  ( save && sec != 0 ) ? ( ( pass != NULL ) ? ", a new key" : ", the key kept" ) : "", er,
 		  save ? " (" : "", save ? saved_name(sec) : "", save ? ")" : "");
 	conf_take();				/* as written; as it was when it could not be */
+	return er;
+}
+
+/*
+ * What a network saved as "eap" joins with:
+ *   EAP <SSID hex> <peap|tls> <identity> <password> <domain> <CA> <certificate> <key> <key's password>
+ * each in hexadecimal, "-" for nothing; "=" as the password keeps the one saved. The CA is
+ * required: without it any network could take the password.
+ */
+LOCAL ER eap_apply( CONST TS_UUID *user, CONST char *line )
+{
+	static EAPCONF	e;
+	char		w[72];
+	UB		ssid[32];
+	CONST UB	*val = (CONST UB *)line;
+	CONST UB	*pw;
+	INT		len, k, vl = (INT)knl_strlen(line), pl;
+	BOOL		keep, ok;
+	ER		er;
+
+	if ( !cf_word(line, 1, w, sizeof(w)) || ( len = unhex(w, ssid, 32) ) <= 0 ) return E_PAR;
+	keep = ( cf_wfind(val, vl, 4, &pw, &pl) && pl == 1 && pw[0] == '=' );
+	if ( keep ) {
+		/* the word stands for the saved one: read as nothing */
+		static char	l2[CMD_MAX];
+
+		knl_memcpy(l2, line, vl + 1);
+		l2[pw - val] = '-';
+		ok = eap_from_words(&e, (CONST UB *)l2, vl, 2);
+		knl_memset(l2, 0, sizeof(l2));
+	} else {
+		ok = eap_from_words(&e, val, vl, 2);
+	}
+	if ( !ok || e.id[0] == '\0' || e.ca[0] == '\0' ) {
+		knl_memset(&e, 0, sizeof(e));
+		return E_PAR;
+	}
+	conf_take();
+	k = net_find(ssid, len, user);
+	if ( k < 0 || nets[k].sec != WPAG_SAVED_EAP ) {
+		knl_memset(&e, 0, sizeof(e));
+		return E_NOEXS;
+	}
+	if ( keep ) knl_memcpy(e.pw, nets[k].eap.pw, sizeof(e.pw));
+	nets[k].eap = e;
+	knl_memset(&e, 0, sizeof(e));
+	er = conf_write();
+	tm_printf((UB *)"wifi: the enterprise settings of a network changed: %d\n", er);
+	conf_take();
 	return er;
 }
 
@@ -2007,7 +2214,8 @@ LOCAL INT ob_secret( INT k, UB *pmk, BOOL *have_pmk, UB *pt, INT *pt_len, char *
 
 LOCAL INT ob_akms( INT saved )
 {
-	return ( saved == WPAG_SAVED_WPA2 ) ? ( TSW_AKM_PSK | TSW_AKM_PSK_SHA256 )
+	return ( saved == WPAG_SAVED_EAP ) ? TSW_AKM_8021X
+	     : ( saved == WPAG_SAVED_WPA2 ) ? ( TSW_AKM_PSK | TSW_AKM_PSK_SHA256 )
 	     : ( saved == WPAG_SAVED_WPA3 ) ? TSW_AKM_SAE
 	     : ( TSW_AKM_PSK | TSW_AKM_PSK_SHA256 | TSW_AKM_SAE );
 }
@@ -2035,7 +2243,31 @@ LOCAL BOOL ob_join( INT k, CONST TSWIFI_BSS *b )
 	knl_wpa_disassoc();
 	knl_wpa_sae_abort();
 	cur_akm = 0;
+	cur_fw = FALSE;
+	if ( rump_tswifi_fw_keys != NULL ) (void)rump_tswifi_fw_keys(0, NULL, NULL, 0);
 	ob_saved = ob_secret(k, pmk, &have_pmk, NULL, &pt_len, pw, &pw_len);
+	/*
+	 * A chip whose own supplicant makes the handshakes, and with them the
+	 * protection of management frames and SAE: it is given the PMK or the
+	 * password, and the host's state machine is not used (9.6.8)
+	 */
+	if ( ob_saved != 0 && ob_saved != WPAG_SAVED_EAP && ( fw_caps & FW_IDSUP ) ) {
+		BOOL	sae = ( pw_len > 0 && ( c == WPAG_WPA3 || c == WPAG_WPA2WPA3 ) && ( fw_caps & FW_SAE ) );
+
+		if ( !sae && c == WPAG_WPA3 ) {
+			knl_memset(pmk, 0, sizeof(pmk));
+			knl_memset(pw, 0, sizeof(pw));
+			tm_printf((UB *)"wifi: \"%s\" offers WPA3 only: no password is saved for it%s\n", s,
+				  ( fw_caps & FW_SAE ) ? "" : ", and the card has no SAE");
+			reason = ( fw_caps & FW_SAE ) ? "password" : "unsupported";
+			return FALSE;
+		}
+		er = rump_tswifi_fw_keys(1, have_pmk ? pmk : NULL, sae ? (CONST UB *)pw : NULL, sae ? pw_len : 0);
+		if ( er == 0 ) {
+			cur_fw = TRUE;
+			cur_akm = sae ? WPAG_AKM_SAE : WPAG_AKM_PSK;
+		}
+	}
 	knl_memset(pw, 0, sizeof(pw));
 	if ( ob_saved == 0 ) {
 		if ( c != WPAG_OPEN ) {
@@ -2045,9 +2277,16 @@ LOCAL BOOL ob_join( INT k, CONST TSWIFI_BSS *b )
 		}
 		er = rump_tswifi_join(b->ssid, b->ssid_len, 0, 0, 0, NULL);
 	} else {
-		if ( c == WPAG_OPEN || c == WPAG_WEP || c == WPAG_WPA || c == WPAG_8021X ) {
-			tm_printf((UB *)"wifi: \"%s\" offers %s, not WPA2 or WPA3-Personal\n", s, sec_name(c));
+		if ( ( ob_saved == WPAG_SAVED_EAP ) ? ( c != WPAG_8021X )
+		     : ( c == WPAG_OPEN || c == WPAG_WEP || c == WPAG_WPA || c == WPAG_8021X ) ) {
+			tm_printf((UB *)"wifi: \"%s\" offers %s, not what it is saved as (%s)\n", s, sec_name(c),
+				  saved_name(ob_saved));
 			reason = "unsupported";
+			return FALSE;
+		}
+		if ( ob_saved == WPAG_SAVED_EAP && nets[k].eap.method == 0 ) {
+			tm_printf((UB *)"wifi: \"%s\": its enterprise settings are not set\n", s);
+			reason = "password";
 			return FALSE;
 		}
 		if ( ( ob_saved == WPAG_SAVED_WPA2 && !have_pmk ) ||
@@ -2099,6 +2338,57 @@ LOCAL void ob_mac( CONST UB *m, char *out )
  * (knl_wpa_choose), our RSN element made for the association request,
  * and the open authentication let go, or SAE begun
  */
+/* A file of the person's whole, in memory the caller frees; NULL and 0 for none named */
+LOCAL ER eap_file( CONST char *path, UB **pb, INT *plen )
+{
+	T_FSTAT	st;
+	UB	*b;
+	INT	fd, n;
+
+	*pb = NULL;
+	*plen = 0;
+	if ( path[0] == '\0' ) return E_OK;
+	if ( fs_stat(path, &st) < EX_OK || st.size == 0 || st.size > 16384 ) {
+		tm_printf((UB *)"wifi: the file %s cannot be used\n", path);
+		return E_NOEXS;
+	}
+	fd = fs_open(path, O_RDONLY);
+	if ( fd < 0 ) return (ER)fd;
+	b = (UB *)Kmalloc((SZ)st.size);
+	n = ( b != NULL ) ? fs_read(fd, b, (SZ)st.size) : -1;
+	(void)fs_close(fd);
+	if ( n != (INT)st.size ) {
+		if ( b != NULL ) Kfree(b);
+		return E_IO;
+	}
+	*pb = b;
+	*plen = n;
+	return E_OK;
+}
+
+/* What a join of 802.1X needs, handed to the process */
+LOCAL INT eap_prepare( CONST EAPCONF *e )
+{
+	UB	*ca = NULL, *cert = NULL, *key = NULL;
+	INT	cl, cel, kl, r = -1;
+
+	if ( eap_file(e->ca, &ca, &cl) >= E_OK && ca != NULL && eap_file(e->cert, &cert, &cel) >= E_OK
+	  && eap_file(e->key, &key, &kl) >= E_OK ) {
+		r = knl_wpa_eap_set(e->method, e->id, (INT)knl_strlen(e->id), e->pw, (INT)knl_strlen(e->pw),
+				    ca, cl, e->domain, (INT)knl_strlen(e->domain), cert, cel, key, kl,
+				    e->keypw, (INT)knl_strlen(e->keypw));
+	}
+	if ( key != NULL ) {
+		knl_memset(key, 0, kl);
+		Kfree(key);
+	}
+	if ( cert != NULL ) Kfree(cert);
+	if ( ca != NULL ) Kfree(ca);
+	tm_printf((UB *)"wifi: EAP %s for this join: %s\n", ( e->method == WPAG_EAP_TLS ) ? "TLS" : "PEAP-MSCHAPv2",
+		  ( r == 0 ) ? "ready" : "not ready");
+	return r;
+}
+
 LOCAL void ob_auth( CONST UB *bssid )
 {
 	UB	pmk[32], pt[WPAG_SAE_PT_MAX], ie[WPAG_IE_MAX], out[WPAG_SAE_MAX];
@@ -2157,13 +2447,21 @@ LOCAL void ob_auth( CONST UB *bssid )
 		}
 	} else {
 		cur_akm = ob_akm;
+		er = ( saved == WPAG_SAVED_EAP ) ? eap_prepare(&nets[cur_net].eap) : 0;
+		if ( er != 0 ) {
+			reason = "certificate";
+			(void)rump_tswifi_auth_fail();
+			knl_memset(pmk, 0, sizeof(pmk));
+			return;
+		}
 		er = knl_wpa_start2(wmac, bssid, cur_bss.ssid, cur_bss.ssid_len, ob_rsn_len ? ob_rsn : NULL, ob_rsn_len,
 				    ob_rsnxe_len ? ob_rsnxe : NULL, ob_rsnxe_len, ob_akm, ob_pmf, pmk, NULL, 0,
 				    ie, &ie_len);
 		if ( er == 0 ) er = rump_tswifi_optie(ie, ie_len);
 		if ( er == 0 ) er = rump_tswifi_auth_go();
 		tm_printf((UB *)"wifi: authenticating with %s: %s, PMF %s: %s (%d)\n", a,
-			  ( ob_akm == WPAG_AKM_PSK_SHA256 ) ? "PSK-SHA256" : "PSK",
+			  ( ob_akm == WPAG_AKM_8021X ) ? "802.1X" : ( ob_akm == WPAG_AKM_8021X_SHA256 ) ? "802.1X-SHA256"
+			  : ( ob_akm == WPAG_AKM_PSK_SHA256 ) ? "PSK-SHA256" : "PSK",
 			  ( ob_pmf == WPAG_PMF_REQUIRED ) ? "required" : ( ob_pmf == WPAG_PMF_OPTIONAL ) ? "if the access point can" : "off",
 			  ( er == 0 ) ? "open authentication sent" : "refused", er);
 		if ( er != 0 ) (void)rump_tswifi_auth_fail();
@@ -2259,7 +2557,7 @@ LOCAL void step_obsd( void )
 		tm_printf((UB *)"wifi: net80211: %s\n", sname[st.state]);
 	}
 	last_s = st.state;
-	if ( ws >= WS_IDLE ) {
+	if ( ws >= WS_IDLE && !w_asleep ) {
 		BOOL	down = !( st.ifflags & 1 );
 
 		if ( ( st.ifflags & 3 ) == 3 ) {
@@ -2280,11 +2578,13 @@ LOCAL void step_obsd( void )
 		if ( ws == WS_IDLE ) {
 			k = choose(&b);
 			if ( k >= 0 ) {
+				want_miss = 0;
 				if ( !ob_join(k, &b) ) fail(( reason != NULL ) ? reason : "refused");
-			} else if ( want_net >= 0 ) {
+			} else if ( want_net >= 0 && ++want_miss >= WANT_SCANS ) {
 				tm_putstring((UB *)"wifi: the network asked for was not found\n");
 				reason = "notfound";
 				want_net = -1;
+				want_miss = 0;
 			}
 		}
 	}
@@ -2300,7 +2600,12 @@ LOCAL void step_obsd( void )
 	case WS_JOINING:
 		if ( st.state == S_RUN ) {
 			knl_memcpy(cur_bss.bssid, st.bssid, 6);
-			if ( cur_wpa2 ) {
+			if ( cur_fw ) {
+				tm_putstring((UB *)"wifi: associated; the card's supplicant makes the handshakes\n");
+				ws = WS_HANDSHAKE;
+				t_state = t;
+				t_fw = 0;
+			} else if ( cur_wpa2 ) {
 				tm_putstring((UB *)"wifi: associated; the 4-way handshake begins\n");
 				shake_begin(t);
 			} else {
@@ -2315,7 +2620,31 @@ LOCAL void step_obsd( void )
 		}
 		break;
 	case WS_HANDSHAKE:
-		if ( knl_wpa_state() == WPAG_DONE ) {
+		if ( cur_fw ) {
+			/* the card's supplicant: done when the card says the access point's port is open */
+			TSWIFI_FWLINK	fl;
+
+			if ( t - t_fw >= 500 && rump_tswifi_fw_link(&fl) == 0 ) {
+				t_fw = t;
+				if ( fl.authorized ) {
+					(void)rump_tswifi_port(1);
+					ob_lost = FALSE;
+					net_clear_temp_disabled(cur_net, TRUE);
+					now_connected("wifi: the card's supplicant has the keys: connected\n");
+					fw_lk_rssi = fl.rssi;
+					fw_lk_kbps = fl.tx_kbps;
+					fw_lk_gen = link_gen;
+					break;
+				}
+			}
+			if ( st.state != S_RUN || t - t_state > SHAKE_MS ) {
+				(void)rump_tswifi_fw_link(&fl);
+				tm_printf((UB *)"wifi: the card's supplicant did not end the handshakes"
+					  " (its state %d, %s; a wrong passphrase?)\n", fl.sup_status,
+					  ( st.state != S_RUN ) ? "the association was lost" : "the time ran out");
+				fail("password");
+			}
+		} else if ( knl_wpa_state() == WPAG_DONE ) {
 			(void)rump_tswifi_port(1);
 			ob_lost = FALSE;
 			net_clear_temp_disabled(cur_net, TRUE);	/* connected: the failures counted forgotten */
@@ -2328,8 +2657,13 @@ LOCAL void step_obsd( void )
 			reason = "password";
 			ws = WS_JOINING;
 			ob_wrong_key();
-		} else if ( t - t_state > SHAKE_MS ) {
-			tm_printf((UB *)"wifi: the handshake did not end in %d s (a wrong passphrase?)\n", SHAKE_MS / 1000);
+		} else if ( ( cur_akm == WPAG_AKM_8021X || cur_akm == WPAG_AKM_8021X_SHA256 )
+			    && knl_wpa_eap_result() == WPAG_EAP_FAILED ) {
+			tm_putstring((UB *)"wifi: EAP failed (the identity, the password or a certificate)\n");
+			fail("password");
+		} else if ( t - t_state > ( ( cur_akm == WPAG_AKM_8021X || cur_akm == WPAG_AKM_8021X_SHA256 )
+					    ? EAP_SHAKE_MS : SHAKE_MS ) ) {
+			tm_printf((UB *)"wifi: the handshake did not end in time (a wrong passphrase?)\n");
 			fail("password");
 		}
 		break;
@@ -2350,6 +2684,39 @@ LOCAL void step_obsd( void )
 			ob_lost = TRUE;
 			ws = WS_JOINING;
 			t_state = t;
+		} else if ( cur_fw ) {
+			/*
+			 * A card that roams itself (9.6.8): its access point, signal
+			 * and rate as it has them, asked every 2 seconds; a roam is
+			 * told as the access point changes
+			 */
+			TSWIFI_FWLINK	fl;
+			static CONST UB	zero[6] = { 0, 0, 0, 0, 0, 0 };
+
+			if ( t - t_fw < FW_LINK_MS || rump_tswifi_fw_link(&fl) != 0 ) break;
+			t_fw = t;
+			fw_lk_rssi = fl.rssi;
+			fw_lk_kbps = fl.tx_kbps;
+			fw_lk_gen = link_gen;
+			if ( !same_bytes(fl.bssid, zero, 6) && !same_bytes(fl.bssid, cur_bss.bssid, 6) ) {
+				tm_printf((UB *)"wifi: roam: %02x:%02x:%02x:%02x:%02x:%02x -> %02x:%02x:%02x:%02x:%02x:%02x,"
+					  " %d dBm, %d MHz\n",
+					  cur_bss.bssid[0], cur_bss.bssid[1], cur_bss.bssid[2], cur_bss.bssid[3],
+					  cur_bss.bssid[4], cur_bss.bssid[5], fl.bssid[0], fl.bssid[1], fl.bssid[2],
+					  fl.bssid[3], fl.bssid[4], fl.bssid[5], fl.rssi, fl.freq);
+				knl_memcpy(cur_bss.bssid, fl.bssid, 6);
+				cur_bss.freq = (UH)fl.freq;
+				if ( knl_bootlog_soon != NULL ) knl_bootlog_soon();
+			}
+			if ( t - t_link >= LINK_SAY_MS ) {
+				t_link = t;
+				tm_printf((UB *)"wifi: link: %d dBm, %d Mb/s (received %d Mb/s, %s), %d MHz, keys %s,"
+					  " roams %d, sent %ld, received %ld, dropped %ld\n",
+					  fl.rssi, fl.tx_kbps / 1000, fl.rx_kbps / 1000,
+					  ( fl.mode == 2 ) ? "802.11ac" : ( fl.mode == 1 ) ? "802.11n" : "802.11a/b/g",
+					  fl.freq, fl.authorized ? "in" : "not in", fl.roams,
+					  (D)n_sent, (D)n_recv, (D)n_drop);
+			}
 		} else if ( t - t_link >= LINK_SAY_MS ) {
 			/* the link, for the records: the signal, the rate chosen, the frames, the scans and moves */
 			t_link = t;
@@ -2497,6 +2864,7 @@ LOCAL BOOL join( INT k, CONST TSWIFI_BSS *b )
 /* The join given up: the network rests a while before it is tried again */
 LOCAL void fail( CONST char *why )
 {
+	knl_wpa_eap_end();		/* nothing secret stays in the process */
 	if ( cur_net >= 0 && cur_net < nnet ) {
 		nets[cur_net].failed_at = now_ms();
 		nets[cur_net].fails++;
@@ -2669,6 +3037,25 @@ LOCAL void take_cmd( void )
 			else tm_putstring((UB *)"wifi: no scan while a network is joined\n");
 #endif
 		}
+#ifdef X64
+	} else if ( knl_strcmp(c, "SLEEP") == 0 ) {
+		pm_held = held;
+		held = TRUE;
+		if ( ws >= WS_JOINING ) {
+			fail("off");
+			if ( cur_net >= 0 ) nets[cur_net].failed_at = 0;
+		}
+		w_asleep = TRUE;
+		(void)rump_tsnet_ifup(W_IF, 0);
+		pm_ack = TRUE;
+	} else if ( knl_strcmp(c, "WAKE") == 0 ) {
+		w_asleep = FALSE;
+		restarts = 0;
+		t_restart = 0;
+		card_restart(now_ms(), TRUE);
+		held = pm_held;
+		pm_ack = TRUE;
+#endif
 	} else if ( knl_strcmp(c, "DISCONNECT") == 0 || knl_strcmp(c, "SHUTDOWN") == 0 ) {
 		held = TRUE;
 		want_net = -1;
@@ -2679,6 +3066,7 @@ LOCAL void take_cmd( void )
 	} else if ( c[0] == 'C' && c[1] == 'O' && c[2] == 'N' ) {
 		held = FALSE;
 		want_net = -1;
+		want_miss = 0;
 		for ( i = 0; c[i] != '\0' && c[i] != ' '; i++ ) ;
 		if ( c[i] == ' ' && ( n = unhex(c + i + 1, ssid, 32) ) > 0 ) {
 			want_net = net_find(ssid, n, &who);	/* the writer's own */
@@ -2839,7 +3227,7 @@ LOCAL void step( void )
 	}
 	last_s = st.state;
 	/* the card not running: started again once it has been so a while */
-	if ( ws >= WS_IDLE ) {
+	if ( ws >= WS_IDLE && !w_asleep ) {
 		BOOL	down = !( st.ifflags & 1 );
 
 		if ( ( st.ifflags & 3 ) == 3 ) {
@@ -2876,11 +3264,13 @@ LOCAL void step( void )
 			scan_take();
 			k = choose(&b);
 			if ( k >= 0 ) {
+				want_miss = 0;
 				if ( !join(k, &b) ) fail(( reason != NULL ) ? reason : "refused");
-			} else if ( want_net >= 0 ) {
+			} else if ( want_net >= 0 && ++want_miss >= WANT_SCANS ) {
 				tm_putstring((UB *)"wifi: the network asked for was not found\n");
 				reason = "notfound";
 				want_net = -1;
+				want_miss = 0;
 			}
 		}
 		break;
@@ -2998,6 +3388,17 @@ LOCAL void step( void )
 				  " the stack's card %d (%d is the Wi-Fi)\n",
 				  dbm(st.rssi), st.rate / 2, st.freq, (D)n_sent, (D)n_send_err, (D)n_recv, (D)n_drop,
 				  knl_netsel_card(), NETSEL_WIFI);
+			if ( rump_tswifi_fw_link != NULL ) {
+				/* net80211's rate is the rate set's; the card's own, its kind and its power saving */
+				TSWIFI_FWLINK	fl;
+
+				if ( rump_tswifi_fw_link(&fl) == 0 ) {
+					tm_printf((UB *)"wifi: link as the card has it: %d Mb/s sent, %d Mb/s received, %s,"
+						  " power saving %s\n", fl.tx_kbps / 1000, fl.rx_kbps / 1000,
+						  ( fl.mode == 2 ) ? "802.11ac" : ( fl.mode == 1 ) ? "802.11n" : "802.11a/b/g",
+						  ( fl.pm == 0 ) ? "off" : ( fl.pm == 1 ) ? "PS-Poll" : ( fl.pm == 2 ) ? "fast" : "not told");
+				}
+			}
 			if ( rump_tswifi_stats != NULL ) {
 				UW	v[18];
 
@@ -3040,7 +3441,7 @@ LOCAL void w_task( INT stacd, void *exinf )
 	INT	er;
 	UD	t_conf;
 	WSTATE	was = WS_OFF;
-#ifndef X64
+#if !defined(X64) && !defined(WIFI_OBSD)
 	INT	n_try;
 #endif
 
@@ -3050,15 +3451,27 @@ LOCAL void w_task( INT stacd, void *exinf )
 	if ( knl_obdev_add((CONST UB *)"wlan0", NULL, &w_ops, NULL, &wuuid) >= E_OK ) wobj = TRUE;
 	state_refresh();
 #ifdef X64
-	tm_printf((UB *)"wifi: starting the card %04x:%04x at %d:%d.%d (iwm or iwx by its PCI ID, firmware from the system volume)\n",
+	tm_printf((UB *)"wifi: starting the card %04x:%04x at %d:%d.%d (iwm, iwx, mwx or athx by its PCI ID, firmware from the system volume)\n",
 		  wdev.vendor, wdev.device, wdev.bus, wdev.dev, wdev.fn);
 	er = rump_tswifi_start(wmac);
 #else
 	tm_printf((UB *)"wifi: starting the chip on the SDIO host (bwfm, firmware from the system volume)\n");
 	er = rump_tswifi_start(wmac);
-	for ( n_try = 0; er == 6 && n_try < W_TAKE_TRIES; n_try++ ) {	/* ENXIO: not found yet */
+#ifndef WIFI_OBSD
+	for ( n_try = 0; er == 6 && n_try < W_TAKE_TRIES && !knl_wifi5_no_firmware(); n_try++ ) {	/* ENXIO: not found yet */
 		tk_dly_tsk(500);
 		er = rump_tswifi_take(wmac);
+	}
+#endif
+	if ( knl_wifi5_no_firmware() ) {
+		/* a chip the system has no firmware for: as a machine without the card, to the programs too */
+		present = FALSE;
+		ws = WS_OFF;
+		if ( wobj ) {
+			(void)knl_obdev_del((CONST UB *)"wlan0");
+			wobj = FALSE;
+		}
+		tk_ext_tsk();
 	}
 #endif
 	if ( er != 0 ) {
@@ -3153,6 +3566,10 @@ LOCAL BOOL req_make( void )
 /* From the adapters' manager, once the object layer is up */
 EXPORT void knl_wifi_start( void )
 {
+#ifdef X64
+	(void)ts_pm_register(&wifi_pm);
+#endif
+
 	T_CMTX	cm;
 	T_CFLG	cf;
 	T_CSEM	cs;

@@ -60,7 +60,7 @@ extern void	obsd_hc_random( void *buf, unsigned long len );
 /* A line, or part of one, to the console */
 extern void	obsd_hc_puts( const char *s );
 
-/* Where the card is: 0 with its bus, device, function, vendor and device ID, or -1 */
+/* Where the card is: 0 with its bus, device, function, vendor and device ID, or -1 (a PCI card's) */
 extern int	obsd_hc_card( int *bus, int *dev, int *fn, unsigned int *id );
 
 /* The manager (wifi.c) is told that something of the card's waits for it */

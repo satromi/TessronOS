@@ -22,9 +22,7 @@
  *	case here; they are shapes whose drawing is done elsewhere.
  */
 
-#include <sys/machine.h>
-#include "kernel.h"
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include <ts/tadview.h>
 #include <ts/dp.h>
 #include <ts/wm.h>
@@ -32,7 +30,7 @@
 #include <ts/img.h>
 #include <ts/fn.h>
 
-LOCAL void tex_pat( T_DPPAT *pat, UW col, CONST UH *tex );
+LOCAL void tex_pat( T_DPPAT *pat, T_TVTEX *room, UW col, CONST UH *tex );
 LOCAL INT zs( CONST T_TVFIG *f, INT v );
 
 /* What a figure is magnified by, z / den: eighths unless it says what else */
@@ -226,13 +224,22 @@ LOCAL void icon_done( CONST UW *px )
 }
 
 
-/* How many opened objects deep what is being drawn now is: a text inside one draws its links there */
-EXPORT INT	tv_open_depth = 0;
-EXPORT INT	tv_open_max = TV_MAX_DEPTH;
-
 EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 			INT depth )
 {
+	T_TVHOW	how;
+
+	how.depth = depth;
+	how.open_max = TV_MAX_DEPTH;
+	how.bare = FALSE;
+	return tv_draw_link_how(gid, r, v, &how);
+}
+
+EXPORT ER tv_draw_link_how( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
+			    CONST T_TVHOW *how )
+{
+	INT		depth, open_max;
+
 	T_VOBJ		vv;
 	T_DPRECT	inner;
 	INT		band;
@@ -240,9 +247,11 @@ EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 	T_OMLOOK	look;
 	UB		text[OM_LOOK_TEXT];
 
-	if ( r == NULL || v == NULL ) {
+	if ( r == NULL || v == NULL || how == NULL ) {
 		return E_PAR;
 	}
+	depth = how->depth;
+	open_max = ( how->open_max > 0 ) ? how->open_max : TV_MAX_DEPTH;
 	vv = *v;
 	look.text = NULL;
 	look.icon = NULL;
@@ -271,23 +280,34 @@ EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 	 * Open or closed is not a flag: it is the size of the box.
 	 *
 	 * A closed virtual object is a name on the page, and its box is
-	 * the band that name sits in -- twenty-five pixels at fourteen
-	 * point, in every record this system has been given. A box that
-	 * is taller than that has been opened up to show what it points
+	 * the band that name sits in -- the closed height its letters give
+	 * it (tad_lnk_closed_h), nineteen pixels at fourteen point. A box
+	 * that is taller than that has been opened up to show what it points
 	 * at, and the room past the band belongs to the object inside.
 	 * The record's own 'height' does not say which it is: it is the
 	 * height of the box either way.
 	 *
-	 * The margin matters. A closed object's box is a pixel or two
-	 * taller than its band, from rounding when it was written; asking
+	 * The margin matters. A closed object's box is often a few pixels
+	 * taller than its band, as whatever wrote it laid it out; asking
 	 * only whether the box is taller than the band would open every
 	 * name in the document, and drawing a whole other record into a
 	 * strip nine pixels high is both wrong and slow.
 	 */
 	if ( r->bottom - r->top <= band + OM_OPEN_SLACK
-	  || ( depth >= TV_MAX_DEPTH && depth >= tv_open_max )
+	  || ( depth >= TV_MAX_DEPTH && depth >= open_max )
 	  || knl_tv_src == NULL || knl_tv_src->open == NULL ) {
-		ER	er = om_draw_vob_as(gid, r, &vv, &look, FALSE, NULL);
+		/*
+		 * Closed, it is as tall as its band whatever the record says,
+		 * so that it is the same size in a figure, a cabinet and a
+		 * text (tad_lnk_fit_h); an opened one shown closed keeps its box
+		 */
+		T_DPRECT	c = *r;
+		ER		er;
+
+		if ( c.bottom - c.top <= band + OM_OPEN_SLACK ) {
+			c.bottom = c.top + band;
+		}
+		er = om_draw_vob_as(gid, &c, &vv, &look, FALSE, NULL);
 
 		icon_done(look.icon);
 		return er;
@@ -298,7 +318,7 @@ EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 	  || ( look.state & TV_ST_GONE ) != 0 ) {
 		return E_OK;			/* a 虚身 shows nothing inside */
 	}
-	if ( depth >= tv_open_max ) {
+	if ( depth >= open_max ) {
 		return E_OK;			/* printed without its contents (展開 off, or past 深さ) */
 	}
 	target = knl_tv_src->open(&vv, knl_tv_src_arg);
@@ -318,10 +338,21 @@ EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 			if ( cut.top < inner.top )       cut.top = inner.top;
 			if ( cut.right > inner.right )   cut.right = inner.right;
 			if ( cut.bottom > inner.bottom ) cut.bottom = inner.bottom;
-			if ( cut.right > cut.left && cut.bottom > cut.top ) {
-				dp_set_visible(gid, &cut);
-				narrowed = TRUE;
+			if ( cut.right <= cut.left || cut.bottom <= cut.top ) {
+				/*
+				 * none of the inside is in what is being drawn (the
+				 * link scrolled out of the window, or a part of the
+				 * window drawn again that misses it): drawing it
+				 * with the visible area left as it is would spill
+				 * the contents over the rest of the window
+				 */
+				if ( knl_tv_src->shut != NULL ) {
+					knl_tv_src->shut(target, knl_tv_src_arg);
+				}
+				return E_OK;
 			}
+			dp_set_visible(gid, &cut);
+			narrowed = TRUE;
 		}
 		/*
 		 * What is inside is laid on the link's own bgcol: the link
@@ -348,14 +379,13 @@ EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 			T_TVDOC	*d = NULL;
 
 			if ( tv_doc(target, &d) >= E_OK && d != NULL ) {
-				INT	was = tv_open_depth;
-
-				tv_open_depth = depth + 1;
-				tv_doc_zoom(z8);
+				d->zoom = z8;
+				d->zoom_den = 8;
+				d->depth = depth + 1;
+				d->open_max = open_max;
+				d->bare = how->bare;
 				tv_doc_draw(gid, d, &inner, vv.scrolly, target,
 					    paper);
-				tv_doc_zoom(8);
-				tv_open_depth = was;
 				tv_doc_free(d);
 			}
 		} else if ( kind == TV_KIND_FIG ) {
@@ -363,6 +393,8 @@ EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 
 			if ( tv_fig(target, &fg) >= E_OK && fg != NULL ) {
 				if ( z8 != 8 ) fg->zoom = z8;
+				fg->open_max = open_max;
+				fg->bare = how->bare;
 				tv_fig_draw_at(gid, fg, &inner, vv.scrollx,
 					       vv.scrolly, target, paper,
 					       depth + 1);
@@ -538,6 +570,7 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 	INT		omax;
 	T_DPRECT	seen;			/* what of the box is drawn */
 	BOOL		have_seen = FALSE;
+	T_TVTEX		*froom = NULL;		/* the pixels of a mask a shape fills with */
 
 	if ( f == NULL || r == NULL ) {
 		return E_PAR;
@@ -620,7 +653,9 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 		dp_pat_colour(&lpat, s->line_col);
 		dp_pat_colour(&fpat, s->fill_col);
 		if ( s->fill_tex != NULL ) {
-			tex_pat(&fpat, s->fill_col, s->fill_tex);
+			/* the mask's pixels, made once for this drawing when a shape first wants them */
+			if ( froom == NULL ) froom = (T_TVTEX *)Kmalloc(sizeof(T_TVTEX));
+			if ( froom != NULL ) tex_pat(&fpat, froom, s->fill_col, s->fill_tex);
 		}
 		if ( s->fill_pat != NULL ) {
 			/* a pattern of the figure's own: its pixels, as they are */
@@ -693,11 +728,16 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 				   its own */
 				INT	z, den;
 
+				T_TVDOC	*td = f->doc[s->doc];
+
 				zoom_of(f, &z, &den);
-				tv_doc_zoom_by(z, den);
-				tv_doc_draw(gid, f->doc[s->doc], &box, 0, src,
+				td->zoom = z;
+				td->zoom_den = den;
+				td->depth = depth;
+				td->open_max = f->open_max;
+				td->bare = f->bare;
+				tv_doc_draw(gid, td, &box, 0, src,
 					    paper);
-				tv_doc_zoom(8);
 			}
 			break;
 
@@ -714,7 +754,12 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 				if ( v.chsz > 0 ) {
 					v.chsz = zs(f, v.chsz);
 				}
-				tv_draw_link(gid, &box, &v, depth);
+				T_TVHOW	how;
+
+				how.depth = depth;
+				how.open_max = f->open_max;
+				how.bare = f->bare;
+				tv_draw_link_how(gid, &box, &v, &how);
 			} else {
 				dp_frame_rect(gid, &box, wm_look(WM_LOOK_FRAME), 1);
 			}
@@ -787,32 +832,31 @@ EXPORT ER tv_fig_at( CONST T_TVFIG *f, CONST T_DPRECT *r, INT scroll_x,
 
 /*
  * A fill that is a mask: sixteen rows of sixteen, drawn in the colour
- * where a bit is set and leaving what is under it where one is not.
+ * where a bit is set and leaving what is under it where one is not. Its
+ * pixels are in the caller's room, so that two drawings at once do not
+ * share them.
  */
-LOCAL UW	tex_tile[16 * 16];
-LOCAL UW	tex_mask[16];
-
-EXPORT void tv_tex_pat( T_DPPAT *pat, UW col, CONST UH *tex )
+EXPORT void tv_tex_pat( T_DPPAT *pat, T_TVTEX *room, UW col, CONST UH *tex )
 {
-	tex_pat(pat, col, tex);
+	tex_pat(pat, room, col, tex);
 }
 
-LOCAL void tex_pat( T_DPPAT *pat, UW col, CONST UH *tex )
+LOCAL void tex_pat( T_DPPAT *pat, T_TVTEX *room, UW col, CONST UH *tex )
 {
 	INT	i;
 
 	for ( i = 0; i < 16 * 16; i++ ) {
-		tex_tile[i] = ( col == TAD_COL_NONE ) ? 0 : col;
+		room->tile[i] = ( col == TAD_COL_NONE ) ? 0 : col;
 	}
 	for ( i = 0; i < 16; i++ ) {
-		tex_mask[i] = (UW)tex[i] << 16;
+		room->mask[i] = (UW)tex[i] << 16;
 	}
 	knl_memset(pat, 0, sizeof(*pat));
 	pat->kind = DP_PAT_TILE;
 	pat->hs = 16;
 	pat->vs = 16;
-	pat->tile = tex_tile;
-	pat->mask = tex_mask;
+	pat->tile = room->tile;
+	pat->mask = room->mask;
 }
 
 #define LINE_REACH	6		/* pixels of the screen a press may be off a line */

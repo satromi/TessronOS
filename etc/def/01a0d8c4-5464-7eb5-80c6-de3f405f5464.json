@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "v8prog",
       "kind": "command",
       "name": "v8prog",

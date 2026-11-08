@@ -559,15 +559,34 @@ static INT app_json( CONST UB *el, UB **p_out )
 	return al.len;
 }
 
-#define APP_MAX		24
 static INT	g_napp;
-static UB	g_app_id[APP_MAX][CT_APP_ID], g_app_name[APP_MAX][CT_APP_NAME];
-static BOOL	g_app_kind[APP_MAX];		/* offered for the object's kind, not in its applist */
+static INT	g_appcap;			/* entries the three tables have room for */
+static UB	(*g_app_id)[CT_APP_ID], (*g_app_name)[CT_APP_NAME];
+static BOOL	*g_app_kind;			/* offered for the object's kind, not in its applist */
+
+/* Room for 'want' programs, what is there kept */
+static BOOL app_room( INT want )
+{
+	UB	(*id)[CT_APP_ID], (*name)[CT_APP_NAME];
+	BOOL	*kind;
+
+	if ( want <= g_appcap ) return TRUE;
+	id = realloc(g_app_id, CT_APP_ID * (size_t)want);
+	if ( id != NULL ) g_app_id = id;
+	name = realloc(g_app_name, CT_APP_NAME * (size_t)want);
+	if ( name != NULL ) g_app_name = name;
+	kind = realloc(g_app_kind, sizeof(BOOL) * (size_t)want);
+	if ( kind != NULL ) g_app_kind = kind;
+	if ( id == NULL || name == NULL || kind == NULL ) return FALSE;
+	g_appcap = want;
+	return TRUE;
+}
+
 
 /* 実行: the list the desktop's own links show (DT_RQ_APPS), asked entry by entry */
 void exec_menu( ID mid )
 {
-	static UB	rws[APP_MAX][WM_LABEL_MAX];
+	UB		(*rws)[WM_LABEL_MAX];
 	CONST UB	*el = the_link();
 	TS_UUID		ed;
 	T_DTREQ		rq;
@@ -575,19 +594,23 @@ void exec_menu( ID mid )
 	INT		n = 1, k;
 
 	g_napp = 0;
-	for ( k = 0; el != NULL && k < n && g_napp < APP_MAX; k++ ) {
+	for ( k = 0; el != NULL && k < n; k++ ) {
 		ask_of(el, DT_RQ_APPS, &rq);
 		ct_link_req(&rq, el, (INT)strlen((CONST char *)el));
 		rq.recno = k;
 		memset(&an, 0, sizeof(an));
 		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
 		n = (INT)an.how;
+		if ( !app_room(n) ) break;
 		if ( ct_app_entry(&an, g_app_id[g_napp], g_app_name[g_napp], &g_app_kind[g_napp]) ) g_napp++;
 	}
+	rws = malloc(WM_LABEL_MAX * (size_t)( g_napp + 1 ));
+	if ( rws == NULL ) g_napp = 0;
 	for ( k = 0; k < g_napp; k++ ) snprintf((char *)rws[k], WM_LABEL_MAX, "%s", (char *)g_app_name[k]);
-	if ( ui_uuid(SYSDEF_MENU_EXEC, &ed) >= E_OK ) {
+	if ( rws != NULL && ui_uuid(SYSDEF_MENU_EXEC, &ed) >= E_OK ) {
 		(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)rws, WM_LABEL_MAX, g_napp);
 	}
+	free(rws);
 	(void)mn_chg_atr(mid, NULL, "exec", ( el == NULL || g_napp == 0 ) ? MN_GREY : 0);
 }
 
@@ -809,7 +832,7 @@ void carry_link_out( INT x0, INT y0, BOOL twice )
 	T_DPRECT	r;
 	UB		nm[OB_NAME_MAX];
 	TS_UUID		u;
-	BOOL		copy;
+	BOOL		copy, given;
 	char		s[120];
 	ER		er;
 	UINT		seq;
@@ -818,6 +841,7 @@ void carry_link_out( INT x0, INT y0, BOOL twice )
 	name_of(&u, nm);
 	link_box(g_field, &r);
 	ask_of(el, DT_RQ_CARRY, &rq);
+	rq.flags |= DT_F_TO_PROG;
 	rq.grab_x = x0 - r.left;
 	rq.grab_y = y0 - r.top;
 	memset(&an, 0, sizeof(an));
@@ -828,6 +852,7 @@ void carry_link_out( INT x0, INT y0, BOOL twice )
 	}
 	seq = rq.seq;
 	copy = (BOOL)( an.how == DT_HOW_COPY );
+	given = (BOOL)( ( an.flags & DT_F_TO_PROG ) != 0 );
 	ask_of(el, DT_RQ_PLACE, &rq);
 	rq.carry = seq;
 	if ( twice ) rq.flags |= DT_F_DUPLICATE;
@@ -840,7 +865,7 @@ void carry_link_out( INT x0, INT y0, BOOL twice )
 		g_link_on = FALSE;
 		g_changed = TRUE;
 		say("仮身を移動しました");
-	} else if ( er >= E_OK ) {
+	} else if ( er >= E_OK && !given ) {
 		say("仮身を複写しました");
 	}
 	redraw_all();

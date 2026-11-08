@@ -1073,16 +1073,14 @@ EXPORT BOOL ct_attr_bool( CONST UB *el, INT n, CONST char *name, BOOL dflt )
 
 EXPORT INT ct_band_h( INT chsz )
 {
-	return ( ( chsz > 0 ) ? chsz : 14 ) + 11;
+	return VOBJ_CLOSED_H(chsz, 1, 1);
 }
-
-#define OPEN_SLACK	8
 
 EXPORT INT ct_snap_h( INT chsz, INT h )
 {
 	INT	band = ct_band_h(chsz);
 
-	return ( h <= band + OPEN_SLACK ) ? band : h;
+	return ( h <= band + VOBJ_OPEN_SLACK ) ? band : h;
 }
 
 EXPORT void ct_fit_box( INT *box )
@@ -1187,6 +1185,134 @@ EXPORT void ct_link_req( T_DTREQ *rq, CONST UB *el, INT n )
 	} else {
 		rq->text[0] = 0;
 	}
+}
+
+EXPORT BOOL ct_link_from( T_DTREQ *rq, CONST TS_UUID *parent, CONST TS_UUID *chan, CONST UB *el, INT n )
+{
+	char	ids[3][TS_UUID_STRLEN + 1];
+	UB	w[8];
+	INT	k = 0, i, j, a = 0, f = 3 * ( TS_UUID_STRLEN + 1 );
+
+	ct_link_req(rq, el, n);
+	ct_uuid_str(parent, ids[0]);
+	if ( ct_attr_text(el, n, "vobjid", (UB *)ids[1], TS_UUID_STRLEN + 1) != TS_UUID_STRLEN ) return FALSE;
+	ct_uuid_str(chan, ids[2]);
+	if ( ( rq->flags & DT_F_APPLIST ) != 0 ) {
+		while ( rq->text[a] != 0 ) a++;
+	}
+	if ( f + a >= (INT)sizeof(rq->text) ) return FALSE;
+	/* the link in front of the applist: its record's object, its vobjid and the channel, a line */
+	for ( i = a; i >= 0; i-- ) rq->text[f + i] = rq->text[i];
+	for ( i = 0; i < 3; i++ ) {
+		for ( j = 0; j < TS_UUID_STRLEN; j++ ) rq->text[k++] = (UB)ids[i][j];
+		rq->text[k++] = (UB)( ( i < 2 ) ? '\t' : '\n' );
+	}
+	rq->flags |= DT_F_LINK;
+	(void)ct_attr_text(el, n, "viewMode", rq->name, (INT)sizeof(rq->name));
+	if ( ct_attr_text(el, n, "wordWrap", w, (INT)sizeof(w)) > 0 ) {
+		rq->grab_x = ( w[0] == 'f' ) ? 2 : 1;	/* TAD_WRAP_OFF, TAD_WRAP_ON */
+	}
+	return TRUE;
+}
+
+/* A number of text after a tab at *p, moved past it */
+static INT told_num( CONST UB *t, INT *p )
+{
+	INT	i = *p, v = 0;
+	BOOL	neg = FALSE;
+
+	if ( t[i] != '\t' ) return 0;
+	if ( t[++i] == '-' ) {
+		neg = TRUE;
+		i++;
+	}
+	while ( t[i] >= '0' && t[i] <= '9' ) v = v * 10 + ( t[i++] - '0' );
+	*p = i;
+	return neg ? -v : v;
+}
+
+static void num_text( char *out, INT v )
+{
+	char	d[12];
+	INT	k = 0, n = 0;
+	UINT	u = ( v < 0 ) ? (UINT)-v : (UINT)v;
+
+	if ( v < 0 ) out[n++] = '-';
+	do {
+		d[k++] = (char)( '0' + u % 10 );
+		u /= 10;
+	} while ( u != 0 );
+	while ( k > 0 ) out[n++] = d[--k];
+	out[n] = 0;
+}
+
+EXPORT INT ct_link_told( CONST T_DTANS *an, TS_UUID *p_parent, TS_UUID *p_vobjid, CTVIEW *v, CTSET *set )
+{
+	CONST UB	*t = an->text;
+	INT		at = 2 * TS_UUID_STRLEN + 1, n = 0, zoom, wrap, i = 0;
+
+	if ( ( an->how != DT_HOW_LINK_VIEW && an->how != DT_HOW_LINK_ADD ) || !ct_uuid_parse(t, p_parent)
+	  || t[TS_UUID_STRLEN] != '\t' || !ct_uuid_parse(t + TS_UUID_STRLEN + 1, p_vobjid) ) return -1;
+	if ( an->how == DT_HOW_LINK_ADD ) return 0;
+	num_text(v->sx, told_num(t, &at));
+	num_text(v->sy, told_num(t, &at));
+	zoom = told_num(t, &at);
+	wrap = told_num(t, &at);
+	if ( t[at] == '\t' ) {
+		for ( at++; t[at] != 0 && i < (INT)sizeof(v->vm) - 1; ) v->vm[i++] = t[at++];
+	}
+	v->vm[i] = 0;
+	set[n].name = "scrollx";
+	set[n++].value = (CONST UB *)v->sx;
+	set[n].name = "scrolly";
+	set[n++].value = (CONST UB *)v->sy;
+	if ( zoom > 0 ) {
+		/* per cent as the ratio the records write: 125 is 1.25 */
+		num_text(v->zoom, zoom / 100);
+		for ( i = 0; v->zoom[i] != 0; i++ ) ;
+		v->zoom[i++] = '.';
+		v->zoom[i++] = (char)( '0' + zoom % 100 / 10 );
+		v->zoom[i++] = (char)( '0' + zoom % 10 );
+		v->zoom[i] = 0;
+		set[n].name = "zoomratio";
+		set[n++].value = (CONST UB *)v->zoom;
+	}
+	if ( wrap == 1 || wrap == 2 ) {		/* TAD_WRAP_ON, TAD_WRAP_OFF */
+		set[n].name = "wordWrap";
+		set[n++].value = (CONST UB *)( ( wrap == 1 ) ? "true" : "false" );
+	}
+	if ( v->vm[0] != 0 ) {
+		set[n].name = "viewMode";
+		set[n++].value = v->vm;
+	}
+	return n;
+}
+
+EXPORT BOOL ct_link_of( CONST UB *x, INT n, CONST TS_UUID *vobjid, CTEL *p_el )
+{
+	CTEL	el;
+	UB	v[TS_UUID_STRLEN + 1];
+	TS_UUID	u;
+	INT	at = 0, i;
+	BOOL	same;
+
+	/* one link after another, nothing taken */
+	while ( at < n && ct_links(x + at, n - at, &el, 1) == 1 ) {
+		el.at += at;
+		if ( ct_attr_text(x + el.at, el.len, "vobjid", v, (INT)sizeof(v)) == TS_UUID_STRLEN
+		  && ct_uuid_parse(v, &u) ) {
+			same = TRUE;
+			for ( i = 0; i < (INT)sizeof(u); i++ ) {
+				if ( ((CONST UB *)&u)[i] != ((CONST UB *)vobjid)[i] ) same = FALSE;
+			}
+			if ( same ) {
+				*p_el = el;
+				return TRUE;
+			}
+		}
+		at = el.at + el.len;
+	}
+	return FALSE;
 }
 
 EXPORT ER ct_app_lock( CTBUF *b, CONST UB *json, INT n, BOOL lock )

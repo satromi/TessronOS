@@ -26,9 +26,7 @@
  *	of stack.
  */
 
-#include <sys/machine.h>
-#include "kernel.h"
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include <ts/rx.h>
 
 #define RX_MAX_NODE	256		/* nodes of one pattern */

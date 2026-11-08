@@ -1,0 +1,334 @@
+# スライドの描画の速さを、同じ実行の中で比べる (design 11.11), for tools/ui_run.py:
+# the links of 仮身サンプル shown as slides by the slides of the process (open) and
+# by the desktop's own (kslide, a UITEST command) in turn, three times each, so that
+# both are measured under the same load of the machine. Each time the pages 1 to 8
+# are turned twice; the lines slide: drew N in US us and slide: input to screen US us
+# of the second turn are what is compared. A line slide: mode ... says which is which.
+run /boot/SVCPROG.ELF 45 10000
+expectin 60 svcprog: tvrtt fn_dra_txt width ns
+apps 019a4370-3819-79a2-9758-881e1e0de90a basic-slide
+logmark
+open 019a4370-3819-79a2-9758-881e1e0de90a
+expectsincein 60 slide: drew 1 in
+logmark
+key 4F
+expectsince slide: drew 2 in
+logmark
+key 4F
+expectsince slide: drew 3 in
+logmark
+key 4F
+expectsince slide: drew 4 in
+logmark
+key 4F
+expectsince slide: drew 5 in
+logmark
+key 4F
+expectsince slide: drew 6 in
+logmark
+key 4F
+expectsince slide: drew 7 in
+logmark
+key 4F
+expectsince slide: drew 8 in
+logmark
+key 4A
+expectsince slide: drew 1 in
+logmark
+key 4F
+expectsince slide: drew 2 in
+logmark
+key 4F
+expectsince slide: drew 3 in
+logmark
+key 4F
+expectsince slide: drew 4 in
+logmark
+key 4F
+expectsince slide: drew 5 in
+logmark
+key 4F
+expectsince slide: drew 6 in
+logmark
+key 4F
+expectsince slide: drew 7 in
+logmark
+key 4F
+expectsince slide: drew 8 in
+logmark
+key 4A
+expectsince slide: drew 1 in
+key 29
+expect slide: closed
+wait 500
+logmark
+kslide 019a4370-3819-79a2-9758-881e1e0de90a
+expectsincein 60 slide: drew 1 in
+logmark
+key 4F
+expectsince slide: drew 2 in
+logmark
+key 4F
+expectsince slide: drew 3 in
+logmark
+key 4F
+expectsince slide: drew 4 in
+logmark
+key 4F
+expectsince slide: drew 5 in
+logmark
+key 4F
+expectsince slide: drew 6 in
+logmark
+key 4F
+expectsince slide: drew 7 in
+logmark
+key 4F
+expectsince slide: drew 8 in
+logmark
+key 4A
+expectsince slide: drew 1 in
+logmark
+key 4F
+expectsince slide: drew 2 in
+logmark
+key 4F
+expectsince slide: drew 3 in
+logmark
+key 4F
+expectsince slide: drew 4 in
+logmark
+key 4F
+expectsince slide: drew 5 in
+logmark
+key 4F
+expectsince slide: drew 6 in
+logmark
+key 4F
+expectsince slide: drew 7 in
+logmark
+key 4F
+expectsince slide: drew 8 in
+logmark
+key 4A
+expectsince slide: drew 1 in
+key 29
+expect slide: closed
+wait 500
+logmark
+open 019a4370-3819-79a2-9758-881e1e0de90a
+expectsincein 60 slide: drew 1 in
+logmark
+key 4F
+expectsince slide: drew 2 in
+logmark
+key 4F
+expectsince slide: drew 3 in
+logmark
+key 4F
+expectsince slide: drew 4 in
+logmark
+key 4F
+expectsince slide: drew 5 in
+logmark
+key 4F
+expectsince slide: drew 6 in
+logmark
+key 4F
+expectsince slide: drew 7 in
+logmark
+key 4F
+expectsince slide: drew 8 in
+logmark
+key 4A
+expectsince slide: drew 1 in
+logmark
+key 4F
+expectsince slide: drew 2 in
+logmark
+key 4F
+expectsince slide: drew 3 in
+logmark
+key 4F
+expectsince slide: drew 4 in
+logmark
+key 4F
+expectsince slide: drew 5 in
+logmark
+key 4F
+expectsince slide: drew 6 in
+logmark
+key 4F
+expectsince slide: drew 7 in
+logmark
+key 4F
+expectsince slide: drew 8 in
+logmark
+key 4A
+expectsince slide: drew 1 in
+key 29
+expect slide: closed
+wait 500
+logmark
+kslide 019a4370-3819-79a2-9758-881e1e0de90a
+expectsincein 60 slide: drew 1 in
+logmark
+key 4F
+expectsince slide: drew 2 in
+logmark
+key 4F
+expectsince slide: drew 3 in
+logmark
+key 4F
+expectsince slide: drew 4 in
+logmark
+key 4F
+expectsince slide: drew 5 in
+logmark
+key 4F
+expectsince slide: drew 6 in
+logmark
+key 4F
+expectsince slide: drew 7 in
+logmark
+key 4F
+expectsince slide: drew 8 in
+logmark
+key 4A
+expectsince slide: drew 1 in
+logmark
+key 4F
+expectsince slide: drew 2 in
+logmark
+key 4F
+expectsince slide: drew 3 in
+logmark
+key 4F
+expectsince slide: drew 4 in
+logmark
+key 4F
+expectsince slide: drew 5 in
+logmark
+key 4F
+expectsince slide: drew 6 in
+logmark
+key 4F
+expectsince slide: drew 7 in
+logmark
+key 4F
+expectsince slide: drew 8 in
+logmark
+key 4A
+expectsince slide: drew 1 in
+key 29
+expect slide: closed
+wait 500
+logmark
+open 019a4370-3819-79a2-9758-881e1e0de90a
+expectsincein 60 slide: drew 1 in
+logmark
+key 4F
+expectsince slide: drew 2 in
+logmark
+key 4F
+expectsince slide: drew 3 in
+logmark
+key 4F
+expectsince slide: drew 4 in
+logmark
+key 4F
+expectsince slide: drew 5 in
+logmark
+key 4F
+expectsince slide: drew 6 in
+logmark
+key 4F
+expectsince slide: drew 7 in
+logmark
+key 4F
+expectsince slide: drew 8 in
+logmark
+key 4A
+expectsince slide: drew 1 in
+logmark
+key 4F
+expectsince slide: drew 2 in
+logmark
+key 4F
+expectsince slide: drew 3 in
+logmark
+key 4F
+expectsince slide: drew 4 in
+logmark
+key 4F
+expectsince slide: drew 5 in
+logmark
+key 4F
+expectsince slide: drew 6 in
+logmark
+key 4F
+expectsince slide: drew 7 in
+logmark
+key 4F
+expectsince slide: drew 8 in
+logmark
+key 4A
+expectsince slide: drew 1 in
+key 29
+expect slide: closed
+wait 500
+logmark
+kslide 019a4370-3819-79a2-9758-881e1e0de90a
+expectsincein 60 slide: drew 1 in
+logmark
+key 4F
+expectsince slide: drew 2 in
+logmark
+key 4F
+expectsince slide: drew 3 in
+logmark
+key 4F
+expectsince slide: drew 4 in
+logmark
+key 4F
+expectsince slide: drew 5 in
+logmark
+key 4F
+expectsince slide: drew 6 in
+logmark
+key 4F
+expectsince slide: drew 7 in
+logmark
+key 4F
+expectsince slide: drew 8 in
+logmark
+key 4A
+expectsince slide: drew 1 in
+logmark
+key 4F
+expectsince slide: drew 2 in
+logmark
+key 4F
+expectsince slide: drew 3 in
+logmark
+key 4F
+expectsince slide: drew 4 in
+logmark
+key 4F
+expectsince slide: drew 5 in
+logmark
+key 4F
+expectsince slide: drew 6 in
+logmark
+key 4F
+expectsince slide: drew 7 in
+logmark
+key 4F
+expectsince slide: drew 8 in
+logmark
+key 4A
+expectsince slide: drew 1 in
+key 29
+expect slide: closed
+wait 500
+absent !OACV!

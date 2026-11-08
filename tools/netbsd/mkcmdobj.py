@@ -32,6 +32,9 @@ import shutil
 import sys
 import uuid
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import vobjw  # noqa: E402
+
 STAMP = "2026-10-10T00:00:00Z"
 ACCESS = {
     "owner": "01a0d680-3aa0-75b3-bd7d-075e14217cd2",
@@ -45,8 +48,6 @@ LINK_NS = uuid.UUID("01a0d8c4-5480-7000-8000-000000000000")
 LINK_RE = re.compile(r'<link\b[^>]*/>')
 UUID_RE = re.compile(r'id="([0-9a-f-]{36})_0\.xtad"')
 COLS = 4
-COL_W = 248
-ROW = 32
 
 
 def cmd_uuid(name):
@@ -62,15 +63,17 @@ def xml(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def link_xml(target, left, top):
+def link_xml(target, name, left, top):
+    """A closed link as wide as its name, at left and top"""
     vid = uuid.uuid5(LINK_NS, target)
+    h = vobjw.closed_h()
     return ('<link id="%s_0.xtad" vobjid="%s" vobjleft="%d" vobjtop="%d" vobjright="%d" '
-            'vobjbottom="%d" height="25" chsz="14" frcol="#000000" chcol="#000000" '
+            'vobjbottom="%d" height="%d" chsz="%d" frcol="#000000" chcol="#000000" '
             'tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>'
-            % (target, vid, left, top, left + COL_W - 8, top + 25))
+            % (target, vid, left, top, left + vobjw.closed_w(name), top + h, h, vobjw.CHSZ))
 
 
-def meta(name):
+def meta(name, arch):
     return {
         "name": name,
         "relationship": [],
@@ -88,6 +91,7 @@ def meta(name):
         "applist": {},
         "tessronos": {
             "program": {
+                "source": "system",
                 "id": "cmd-" + name,
                 "kind": "command",
                 "name": name,
@@ -100,7 +104,7 @@ def meta(name):
             "exec": {
                 "record": 1,
                 "type": "application/x-elf",
-                "arch": "aarch64",
+                "arch": arch,
                 "abi": "tessronos-1",
             },
             "records": [{"n": 0, "rt": 1}, {"n": 1, "rt": 9}],
@@ -120,6 +124,7 @@ def main():
     p.add_argument("--box", required=True, help="record 0 of the object bin")
     p.add_argument("--ico", required=True, help="icon of a command")
     p.add_argument("--out", required=True, help="directory to write the objects into")
+    p.add_argument("--arch", default="aarch64", help="the machine the commands are built for")
     p.add_argument("--origin", help="lines of name, a tab, where the command comes from")
     a = p.parse_args()
 
@@ -142,7 +147,7 @@ def main():
     for n in names:
         u = cmd_uuid(n)
         write(os.path.join(a.out, u + ".json"),
-              json.dumps(meta(n), ensure_ascii=False, indent=2) + "\n")
+              json.dumps(meta(n, a.arch), ensure_ascii=False, indent=2) + "\n")
         text = origin.get(n, "")
         write(os.path.join(a.out, u + "_0.xtad"),
               '<tad version="1.0" encoding="UTF-8" filename="%s">\n<document>\n<p>%s</p>\n'
@@ -155,16 +160,15 @@ def main():
     with open(a.box, encoding="utf-8") as f:
         box = f.read()
     have = set(UUID_RE.findall(box))
-    nold = len(LINK_RE.findall(box))
-    top0 = 8 + ROW * ((nold + COLS - 1) // COLS)
+    bottoms = [int(m) for l in LINK_RE.findall(box) for m in re.findall(r'vobjbottom="(-?\d+)"', l)]
+    top0 = (max(bottoms) + vobjw.GAP) if bottoms else vobjw.PAD
+    new = [n for n in names if cmd_uuid(n) not in have]
+    # the columns as wide as the widest of the new names, one GAP apart
+    col_w = max([vobjw.closed_w(n) for n in new] or [0]) + vobjw.GAP
+    row = vobjw.closed_h() + vobjw.GAP
     add = []
-    k = 0
-    for n in names:
-        u = cmd_uuid(n)
-        if u in have:
-            continue
-        add.append(link_xml(u, 8 + COL_W * (k % COLS), top0 + ROW * (k // COLS)))
-        k += 1
+    for k, n in enumerate(new):
+        add.append(link_xml(cmd_uuid(n), n, vobjw.PAD + col_w * (k % COLS), top0 + row * (k // COLS)))
     end = box.rfind("</figure>")
     if end < 0:
         sys.exit("mkcmdobj: %s has no figure" % a.box)

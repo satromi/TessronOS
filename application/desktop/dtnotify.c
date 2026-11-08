@@ -225,7 +225,7 @@ LOCAL void stack( void )
 	INT	sw = 0, sh = 0, top = NT_TOP, i;
 	T_WMWIN	w;
 
-	wm_screen(&sw, &sh);
+	wm_screen_main(&sw, &sh);
 	for ( i = 0; i < NT_MAX; i++ ) {
 		NOTE		*n = notes[i];
 		T_DPRECT	o;
@@ -471,7 +471,7 @@ EXPORT ER dt_note_req( CONST T_DTREQ *rq, T_DTANS *an )
 	n->pid = -1;
 	take(n, rq);
 	band(n, title, sizeof(title));
-	wm_screen(&sw, &sh);
+	wm_screen_main(&sw, &sh);
 	o.left = sw - NT_EDGE - NT_W - 40;
 	o.top = NT_TOP;
 	o.right = o.left + NT_W + 40;

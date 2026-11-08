@@ -10,7 +10,7 @@
 /*
  *	psx_nlstat.c (x86-64)
  *	The status calls of newlib's own stdio, to the narrow struct stat of
- *	newlib's header (_fstat and _stat, psx_fd.c).
+ *	newlib's header (_fstat and _stat, psx_fd.c), and its clock.
  *
  *	newlib of x86_64-elf is built with MISSING_SYSCALL_NAMES: its
  *	_fstat_r and _stat_r call fstat and stat, which here are the POSIX
@@ -22,6 +22,7 @@
 
 #include <errno.h>
 #include <sys/reent.h>
+#include <sys/time.h>
 
 extern int	_fstat( int fd, void *st );
 extern int	_stat( const char *path, void *st );
@@ -48,4 +49,15 @@ int _stat_r( struct _reent *r, const char *path, void *st )
 		r->_errno = errno;
 	}
 	return ret;
+}
+
+/*
+ * gettimeofday, which the same newlib reaches by its plain name and libposix
+ * gives by the underscored one (psx_time.c).
+ */
+extern int	_gettimeofday( struct timeval *tv, void *tz );
+
+int gettimeofday( struct timeval *tv, void *tz )
+{
+	return _gettimeofday(tv, tz);
 }

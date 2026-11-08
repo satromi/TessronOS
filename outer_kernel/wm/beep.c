@@ -401,6 +401,9 @@ EXPORT ER wm_beep_try( UINT what )
 }
 
 /*
+ * The mute key turns the whole's mute over, at each press only, and keeps
+ * the volume; the message line says which it now is.
+ *
  * A volume key pressed, or repeating while it is held (the window layer
  * takes it before any window, wm_read_event): the whole's volume a step
  * of VOL_STEP up or down, from the louder of left and right, within 0 ..
@@ -422,11 +425,24 @@ EXPORT INT knl_wm_volume_key( UINT code )
 	INT		v, n;
 	char		t[32];
 
-	if ( code != HID_KEY_VOLUP && code != HID_KEY_VOLDOWN ) {
+	if ( code != HID_KEY_VOLUP && code != HID_KEY_VOLDOWN && code != HID_KEY_MUTE ) {
 		return -1;
 	}
 	knl_memset(&m, 0, sizeof(m));
 	(void)knl_snd_mix_get(&m, 0);
+	if ( code == HID_KEY_MUTE ) {
+		/* the mute turned over; the volume stays as it was, to come back to */
+		knl_memset(&s, 0, sizeof(s));
+		s.what = SND_MIX_ALL;
+		s.lv = m.lv;
+		s.rv = m.rv;
+		s.mute = ( m.mute != 0 ) ? 0 : 1;
+		if ( knl_snd_mix_set(&s, TRUE) < E_OK ) {
+			return -1;
+		}
+		knl_msg_note(( s.mute != 0 ) ? "消音" : "消音を解除");
+		return (INT)( ( m.lv > m.rv ) ? m.lv : m.rv );
+	}
 	v = (INT)( ( m.lv > m.rv ) ? m.lv : m.rv );
 	v += ( code == HID_KEY_VOLUP ) ? VOL_STEP : -VOL_STEP;
 	if ( v < 0 ) v = 0;

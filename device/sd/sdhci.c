@@ -79,6 +79,12 @@
  *	as subunits, the same shape the virtio block driver uses, so the
  *	file system layer above does not know which one it is talking to.
  *
+ *	On a PC the controller is a PCI function (class 08 05), with one or
+ *	more slots behind its windows; the first slot with a card is served,
+ *	as "sda" like any other (sd_next_slot), its supply the highest its
+ *	capabilities list. Nothing there switches to UHS-I or HS200: the
+ *	board-specific voltage regulators of a slot are not known on a PC.
+ *
  *	The same driver runs under QEMU on the SD host controller the
  *	machine offers as a PCI function (sdhci-pci, class 08 05), whose
  *	registers are the same standard ones behind the function's first
@@ -92,7 +98,7 @@
 
 #include <sys/machine.h>
 
-#if defined(RPI5) || defined(RPI4) || defined(QEMU_VIRT)
+#if defined(RPI5) || defined(RPI4) || defined(QEMU_VIRT) || defined(X64)
 
 #include "kernel.h"
 #include <tk/tkernel.h>
@@ -101,8 +107,11 @@
 #include <ts/board.h>
 #if defined(RPI5)
 #include <ts/gpio.h>
-#elif defined(QEMU_VIRT)
+#else
 #include <ts/pcie.h>
+#endif
+#ifdef X64
+#include <ts/pm.h>
 #endif
 #include "sysman/pfalloc.h"
 #include "sysdepend.h"
@@ -110,7 +119,8 @@
 #include "sysdepend/sysdepend.h"
 #endif
 
-#ifdef QEMU_VIRT
+#if defined(QEMU_VIRT) || defined(X64)
+#define SD_ON_PCI		1
 /* the registers are wherever the bus walk put the function's window */
 LOCAL UBINT	sd_base;
 #define SDHCI_BASE		sd_base
@@ -1893,7 +1903,9 @@ LOCAL ER sd_init_card( BOOL s18r, INT *p_vs, CONST char **p_why )
 #elif defined(RPI4)
 	/* the Raspberry Pi 4 family: no detect line the controller uses (broken-cd) */
 #else
-	if ( (in_w(SDHCI_PRESENT_STATE) & STATE_CARD_INSERTED) == 0 ) {
+	/* a soldered eMMC's slot (slot type 01b in the capabilities) need not say a card is in */
+	if ( (in_w(SDHCI_PRESENT_STATE) & STATE_CARD_INSERTED) == 0
+	  && ( ( in_w(SDHCI_CAPABILITIES) >> 30 ) & 3 ) != 1 ) {
 		return E_NOEXS;
 	}
 #endif
@@ -1904,8 +1916,25 @@ LOCAL ER sd_init_card( BOOL s18r, INT *p_vs, CONST char **p_why )
 		sd_out8(SDHCI_HOST_CONTROL, sd_in8(SDHCI_HOST_CONTROL) | CTRL_CD_TEST);
 	}
 
+#ifdef SD_ON_PCI
+	{
+		/*
+		 * What the capabilities offer, the highest first: a PC's eMMC slot
+		 * may have only 1.8V, and a voltage it does not have stops
+		 * the bus power from coming on. Its lines are told the same.
+		 */
+		UW	cap = in_w(SDHCI_CAPABILITIES);
+		UB	v = ( cap & ( 1U << 24 ) ) ? 0x0e : ( cap & ( 1U << 25 ) ) ? 0x0c
+			  : ( cap & ( 1U << 26 ) ) ? 0x0a : 0x0e;
+
+		knl_board.sd_1v8 = ( v == 0x0a );
+		sd_out8(SDHCI_POWER_CONTROL, v);
+		sd_out8(SDHCI_POWER_CONTROL, v | 1);
+	}
+#else
 	sd_out8(SDHCI_POWER_CONTROL, 0x0e);		/* 3.3 volts */
 	sd_out8(SDHCI_POWER_CONTROL, 0x0f);		/* and on */
+#endif
 	/*
 	 * The Compute Module 5's eMMC lines are held at 1.8V by the module
 	 * itself (its supply is 3.3V all the same); the controller is told
@@ -3097,6 +3126,80 @@ EXPORT void knl_sd_finish( void )
 #endif
 }
 
+#ifdef SD_ON_PCI
+/*
+ * The next slot of the machine's SD host functions (class 08 05). A
+ * function says in its register 40h how many it has and which window is
+ * the first's. FALSE when there is no other.
+ */
+LOCAL BOOL sd_next_slot( void )
+{
+	static T_PCIDEV	d;
+	static INT	k = 0;
+	static UINT	slot = 0, nslot = 0, first = 0;
+	UW		v;
+
+	for (;;) {
+		while ( slot < nslot ) {
+			UINT	bar = first + slot++;
+
+			sd_base = ( bar < PCI_MAX_BAR ) ? ts_pcie_bar_base(&d, (INT)bar) : 0;
+			if ( sd_base != 0 ) {
+				tm_printf((UB *)"sd: %04x:%04x at %x:%02x.%x slot %d: version %04x, capabilities %08x %08x, state %08x\n",
+					  d.vendor, d.device, d.bus, d.dev, d.fn, slot - 1, sd_in16(SDHCI_HOST_VERSION),
+					  in_w(SDHCI_CAPABILITIES), in_w(SDHCI_CAPABILITIES1), in_w(SDHCI_PRESENT_STATE));
+				return TRUE;
+			}
+		}
+		if ( ts_pcie_find(PCI_CLASS_SDHCI, PCI_SUBCLASS_SDHCI, 0xff, k++, &d) < E_OK ) {
+			return FALSE;		/* the machine has no more */
+		}
+		ts_pcie_enable(&d);
+		v = ts_pcie_cfg_read(d.bus, d.dev, d.fn, 0x40, 1);
+		nslot = ( ( v >> 4 ) & 7 ) + 1;
+		first = v & 7;
+		slot = 0;
+	}
+}
+#endif
+
+#ifdef X64
+/*
+ * A sleep: no transfer in flight, the mutex held across it. The card has
+ * lost its power and its address by the waking, so it is brought up from
+ * the start, whichever way it slept.
+ */
+LOCAL ER sd_pm_suspend( void *arg, INT how )
+{
+	(void)arg;
+	(void)how;
+	tk_loc_mtx(sd.mtxid, TMO_FEVR);
+	(void)sd_wait_idle();
+	return E_OK;
+}
+
+LOCAL void sd_pm_resume( void *arg, INT how )
+{
+	CONST char	*uhs_why = NULL, *hs_why = NULL;
+	ER		er;
+
+	(void)arg;
+	(void)how;
+	er = sd_bringup(TRUE, &uhs_why, &hs_why);
+	if ( er < E_OK ) {
+		sd.present = FALSE;
+		tm_printf((UB *)"sd: not back from the sleep (%d at step %d); its requests fail from now on\n", er, sd_step);
+	} else {
+		sd_speed_note(uhs_why, hs_why);
+		sd_dma_select();
+		tm_printf((UB *)"sd: back from the sleep\n");
+	}
+	tk_unl_mtx(sd.mtxid);
+}
+
+LOCAL CONST T_PMDEV	sd_pm = { "sd", PM_ORD_DISK, sd_pm_suspend, sd_pm_resume, NULL };
+#endif
+
 EXPORT INT knl_sd_init( void )
 {
 	T_CMTX	cmtx;
@@ -3107,19 +3210,9 @@ EXPORT INT knl_sd_init( void )
 	knl_memset(&sd, 0, sizeof(sd));
 	sd.cmd23_force = -1;
 
-#ifdef QEMU_VIRT
-	{
-		T_PCIDEV	d;
-
-		if ( ts_pcie_find(PCI_CLASS_SDHCI, PCI_SUBCLASS_SDHCI, 0xff, 0, &d) < E_OK
-		  || d.bar[0] == 0 ) {
-			return 0;		/* the machine has no SD slot */
-		}
-		ts_pcie_enable(&d);
-		sd_base = ts_pcie_bar_base(&d, 0);
-		if ( sd_base == 0 ) {
-			return 0;
-		}
+#ifdef SD_ON_PCI
+	if ( !sd_next_slot() ) {
+		return 0;			/* the machine has no SD slot */
 	}
 #endif
 #ifdef RPI4
@@ -3188,6 +3281,17 @@ EXPORT INT knl_sd_init( void )
 	}
 #endif
 	er = sd_bringup(TRUE, &uhs_why, &hs_why);
+#ifdef SD_ON_PCI
+	/* one card is served: the first slot, of all the machine's, that has one */
+	while ( er < E_OK ) {
+		tm_printf((UB*)"TessronOS: no SD card here (%d at step %d, state %08x)\n",
+			  er, sd_step, in_w(SDHCI_PRESENT_STATE));
+		if ( !sd_next_slot() ) {
+			return 0;
+		}
+		er = sd_bringup(TRUE, &uhs_why, &hs_why);
+	}
+#endif
 	if ( er < E_OK ) {
 		tm_printf((UB*)"TessronOS: no SD card (%d at step %d, state %08x, caps %08x)\n",
 			  er, sd_step, in_w(SDHCI_PRESENT_STATE), in_w(SDHCI_CAPABILITIES));
@@ -3209,6 +3313,9 @@ EXPORT INT knl_sd_init( void )
 	if ( er < E_OK ) {
 		return er;
 	}
+#ifdef X64
+	(void)ts_pm_register(&sd_pm);
+#endif
 
 	tm_printf((UB*)"TessronOS: sda %s %d sectors (%d MB)%s, %d data lines, %d partitions (%s), %s, %s, SCR %02x%02x%02x%02x\n",
 		sd.mmc ? "eMMC" : "SD card",
@@ -3223,4 +3330,4 @@ EXPORT INT knl_sd_init( void )
 	return 1;
 }
 
-#endif /* RPI5 || RPI4 || QEMU_VIRT */
+#endif /* RPI5 || RPI4 || QEMU_VIRT || X64 */

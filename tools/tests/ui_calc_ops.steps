@@ -72,19 +72,20 @@ wait 150
 click 750 461
 wait 800
 shot calc_page
-click 640 519
+# the panels it asks with (用紙設定, 検索) stand in the middle of the screen, as the system's do
+click 770 491
 expect calc: paper set
 wait 300
 shot calc_paper
 key 09 01
 wait 800
-click 540 365
+click 670 337
 text 2
-click 360 501
+click 490 473
 expect calc: find 2 found
 wait 300
 shot calc_find
-click 660 501
+click 790 473
 wait 300
 # the panel: 右揃え from the menu of 横の配置, 格子, 太字
 drag 200 163 330 273
@@ -103,6 +104,9 @@ open 019a4370-3819-79a2-9758-881e1e0de90a
 wait 1000
 drag 400 414 820 240
 expect calc: dropped 1
+# the keys went to the sheet with the drop (design 10.4): the text is pressed before it is closed
+click 1000 148
+wait 2000
 key 08 01
 wait 500
 click 820 390
@@ -112,12 +116,15 @@ dclick 830 252
 expect calc: opened TADjsについて
 wait 1000
 key 08 01
+# closed, the text's view goes back into the cell's link, by the program (DT_F_LINK)
+expect calc: link view written back: 0,0
 wait 500
 click 820 390
 key 08 01
 wait 800
 shot calc_close_ask
-click 612 457
+# 保存 of the panel that asks, in the middle of the screen
+click 742 429
 expect calc: saved
 expect calc: closed
 # nothing it did was refused for want of a right

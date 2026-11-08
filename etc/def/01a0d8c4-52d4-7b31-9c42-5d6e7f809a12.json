@@ -15,10 +15,11 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "base-calendar",
       "kind": "app",
       "name": "予定表",
-      "version": "R1.200",
+      "version": "R1.300",
       "menu": false,
       "builtin": false,
       "base": [

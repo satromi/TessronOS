@@ -1,0 +1,12 @@
+<tad version="1.0" encoding="UTF-8" filename="BeSFCの音量のメニュー">
+<document>
+<p>BeSFCの音量のメニュー</p>
+<p>BeSFCの音量を選ぶメニューの定義。</p>
+</document>
+<menu>
+<item code="emu.volmax">最大</item>
+<item code="emu.volmid">中</item>
+<item code="emu.vollow">小</item>
+<item code="emu.volmute">消音</item>
+</menu>
+</tad>

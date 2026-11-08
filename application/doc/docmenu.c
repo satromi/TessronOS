@@ -19,10 +19,9 @@
  *	made up here.
  */
 
-#include <sys/machine.h>
-#include "kernel.h"
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include <ts/mn.h>
+#include <ts/uuid.h>
 #include <ts/sysdef.h>
 #include <ts/docmenu.h>
 
@@ -104,6 +103,12 @@ LOCAL CONST CODECMD doc_cmds[] = {
 
 #define NCMD	( (INT)( sizeof(doc_cmds) / sizeof(doc_cmds[0]) ) )
 
+/* Whether the item chosen has the code: a program has no call of the window manager's for it */
+LOCAL BOOL dm_is( CONST T_MNSEL *sel, CONST char *code )
+{
+	return (BOOL)( sel != NULL && code != NULL && knl_strcmp((CONST char *)sel->code, code) == 0 );
+}
+
 #define DM_SPACE_STEPS	( DM_SPACE_3_4 - DM_SPACE_0 + 1 )
 
 EXPORT ER doc_menu_make( CONST T_DOCMENU *st, ID *p_mid )
@@ -168,18 +173,18 @@ EXPORT INT doc_menu_cmd( CONST T_MNSEL *sel )
 {
 	INT	i;
 
-	if ( mn_is(sel, "size") ) {
+	if ( dm_is(sel, "size") ) {
 		return ( sel->value > 0 ) ? DM_SIZE((INT)sel->value) : 0;
 	}
-	if ( mn_is(sel, "space") ) {
+	if ( dm_is(sel, "space") ) {
 		return ( sel->value >= 0 && sel->value < DM_SPACE_STEPS )
 		       ? DM_SPACE_0 + (INT)sel->value : 0;
 	}
-	if ( mn_is(sel, "font.recent") ) {
+	if ( dm_is(sel, "font.recent") ) {
 		return ( sel->index < DM_RECENT_MAX ) ? DM_FONT_RECENT + sel->index : 0;
 	}
 	for ( i = 0; i < NCMD; i++ ) {
-		if ( mn_is(sel, doc_cmds[i].code) ) {
+		if ( dm_is(sel, doc_cmds[i].code) ) {
 			return doc_cmds[i].cmd;
 		}
 	}

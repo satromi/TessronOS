@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "tessronos-calculator",
       "kind": "accessory",
       "name": "電卓",

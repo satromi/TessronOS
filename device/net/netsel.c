@@ -16,7 +16,9 @@
  *	x64.mk), Intel's e1000e family (the I219 of a notebook's chipset,
  *	e1k.c), a USB adapter of the communications class
  *	(device/usb/x86_64/cdcnet.c), and the Wi-Fi (wifi.c, when the build
- *	has it).
+ *	has it). The other wired cards (x86_64/re.c, rge.c, igc.c and
+ *	device/usb/x86_64/usbven.c) register themselves when their device is
+ *	found (knl_netsel_add) and are reached through what they gave.
  *
  *	Until the adapters' manager (netadp.c) has chosen, the first there is
  *	of virtio-net, the Intel card, the USB adapter and the Wi-Fi is taken.
@@ -92,6 +94,25 @@ IMPORT ER	knl_wifi_stat( T_NETSTAT *st );
 
 LOCAL volatile INT	chosen = -1;	/* the manager's choice, NETSEL_*; -1 none yet */
 LOCAL BOOL		mgr_started = FALSE;
+LOCAL CONST T_NETDRV	*drv[NETSEL_N];	/* the cards that registered themselves */
+
+EXPORT void knl_netsel_add( INT c, CONST T_NETDRV *d )
+{
+	if ( c >= 0 && c < NETSEL_N ) drv[c] = d;
+}
+
+EXPORT CONST T_NETDRV *knl_netsel_drv( INT c )
+{
+	return ( c >= 0 && c < NETSEL_N ) ? drv[c] : NULL;
+}
+
+/* A registered card with its address: it is there now */
+LOCAL BOOL drv_there( INT c )
+{
+	UB	m[NET_MAC_LEN];
+
+	return drv[c] != NULL && drv[c]->get_mac(drv[c]->ctx, m) >= E_OK;
+}
 
 /* The first card there is: what is used before the manager has chosen */
 EXPORT INT knl_netsel_first( void )
@@ -100,7 +121,11 @@ EXPORT INT knl_netsel_first( void )
 
 	if ( knl_vnet_get_mac(m) >= E_OK ) return NETSEL_VNET;
 	if ( knl_e1k_get_mac(m) >= E_OK ) return NETSEL_E1K;
+	if ( drv_there(NETSEL_RE) ) return NETSEL_RE;
+	if ( drv_there(NETSEL_RGE) ) return NETSEL_RGE;
+	if ( drv_there(NETSEL_IGC) ) return NETSEL_IGC;
 	if ( knl_cdcnet_present() ) return NETSEL_CDC;
+	if ( drv_there(NETSEL_USBV) ) return NETSEL_USBV;
 #if USE_WIFI
 	if ( knl_wifi_present() ) return NETSEL_WIFI;
 #endif
@@ -134,7 +159,8 @@ EXPORT ER knl_netsel_mac( INT c, UB *mac )
 #if USE_WIFI
 	case NETSEL_WIFI:	return knl_wifi_get_mac(mac);
 #endif
-	default:		return E_NOEXS;
+	default:		return ( c >= 0 && c < NETSEL_N && drv[c] != NULL )
+					? drv[c]->get_mac(drv[c]->ctx, mac) : E_NOEXS;
 	}
 }
 
@@ -147,7 +173,8 @@ EXPORT ER knl_netsel_stat( INT c, T_NETSTAT *st )
 #if USE_WIFI
 	case NETSEL_WIFI:	return knl_wifi_stat(st);
 #endif
-	default:		return E_NOEXS;
+	default:		return ( c >= 0 && c < NETSEL_N && drv[c] != NULL )
+					? drv[c]->stat(drv[c]->ctx, st) : E_NOEXS;
 	}
 }
 
@@ -156,6 +183,11 @@ EXPORT BOOL knl_netsel_silent( void )
 	UB	m[NET_MAC_LEN];
 
 #ifdef X64
+	INT	c;
+
+	for ( c = NETSEL_RE; c < NETSEL_N; c++ ) {
+		if ( drv_there(c) && !drv[c]->told(drv[c]->ctx) ) return TRUE;
+	}
 	return knl_e1k_get_mac(m) >= E_OK && !knl_e1k_told();
 #else
 	return knl_vnet_get_mac(m) >= E_OK;	/* the board's Ethernet */
@@ -174,7 +206,10 @@ EXPORT ER net_get_mac( UB *mac )
 
 EXPORT ER net_send( CONST void *frame, SZ len )
 {
-	switch ( card() ) {
+	INT	c = card();
+
+	if ( c >= NETSEL_RE && drv[c] != NULL ) return drv[c]->send(drv[c]->ctx, frame, len);
+	switch ( c ) {
 	case NETSEL_VNET:	return knl_vnet_send(frame, len);
 	case NETSEL_E1K:	return knl_e1k_send(frame, len);
 #if USE_WIFI
@@ -186,6 +221,7 @@ EXPORT ER net_send( CONST void *frame, SZ len )
 
 LOCAL INT recv_on( INT c, void *frame, SZ size, TMO tmout )
 {
+	if ( c >= NETSEL_RE && drv[c] != NULL ) return drv[c]->recv(drv[c]->ctx, frame, size, tmout);
 	switch ( c ) {
 	case NETSEL_VNET:	return knl_vnet_recv(frame, size, tmout);
 	case NETSEL_E1K:	return knl_e1k_recv(frame, size, tmout);

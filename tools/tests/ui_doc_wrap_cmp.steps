@@ -1,0 +1,105 @@
+# 基本文章編集の〈ウインドウ幅で折り返し〉と、開いた元の仮身への書き戻し (design 11.3), for
+# tools/ui_run.py. A copy of 基本文章編集 with 30 paragraphs (mkbig doc 30) is linked into
+# BTRON (linkbig) and opened by a double press on its link, once in the desktop's own text
+# editor (docproc kernel) and once in the text editor running as a process (docproc 1). The
+# wrapping to the window is turned off from 表示 in the menu opened at 300,250 and the window
+# closed: the view goes back into the link, its wordWrap with it (the process asks
+# DT_RQ_LINK_VIEW with look.h). Opened again from the same link by the same editor -- the
+# process is given the link as BTRON's record holds it, not yet saved (T_PRCOPEN) -- the
+# window shows the text wrapped to its paper, as the link now says. The shots (doc_wrap_k_*, doc_wrap_p_*) are
+# compared afterwards inside the window, where the text is (101,125 to 682,482); record 0 of
+# the text is the same in both (nothing in it changed).
+# The desktop's menu opens with 閉じる on the pointer's row the first time (表示 60 below),
+# and with the item chosen last on it afterwards; 表示's own opens with its first row (原稿)
+# on 表示's row, 〈ウインドウ幅で折り返し〉 180 below.
+# Keys: Ctrl+E 08 01.
+docproc kernel
+mkbig doc 30
+linkbig 190 70
+wait 300
+dclick 200 79
+waitwin 基本文章編集 600
+sync 600
+wait 500
+move 690 490
+sync 600
+shot doc_wrap_k_open
+click 300 250 1
+wait 400
+wait 400
+move 330 310
+wait 300
+move 440 310
+wait 400
+move 440 490
+wait 300
+click 440 490
+sync 600
+click 111 135
+sync 600
+move 690 490
+sync 600
+shot doc_wrap_k_off
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+dclick 200 79
+waitwin 基本文章編集 600
+sync 600
+wait 500
+move 690 490
+sync 600
+shot doc_wrap_k_again
+key 08 01
+sync 600
+wait 500
+docproc 1
+mkbig doc 30
+linkbig 190 100
+wait 300
+logmark
+dclick 200 109
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 800
+move 690 490
+wait 300
+shot doc_wrap_p_open
+logmark
+click 300 250 1
+expectsince document: menu
+wait 400
+move 330 250
+wait 300
+move 440 250
+wait 400
+move 440 430
+wait 300
+click 440 430
+expectsince document: command wrap
+expectsince document: drew
+logmark
+click 111 135
+expectsince document: drew
+move 690 490
+wait 300
+shot doc_wrap_p_off
+sum show
+same kernel
+logmark
+key 08 01
+expectsince document: link view 0,0 0% (0) nowrap
+expectsince document: closed
+wait 500
+logmark
+dclick 200 109
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 800
+move 690 490
+wait 300
+shot doc_wrap_p_again
+logmark
+key 08 01
+expectsince document: closed
+wait 500

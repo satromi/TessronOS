@@ -558,6 +558,46 @@ LOCAL void test_lost( void )
 	counts_say("after the network came back");
 }
 
+/*
+ * A network saved as 802.1X. The radio's access point offers WPA2-Personal, so this does not
+ * join (EAP itself is tools/wpa/proc.sh eaptest): the words are taken, kept over a read of the
+ * settings, kept out of what a program can read; no CA, no network; another network's security
+ * is not joined.
+ */
+LOCAL void test_eap_saved( void )
+{
+	static char	line[512], hx[72];
+
+	hex_of("enterprise-test", hx);
+	knl_strcpy(line, "SAVE ");
+	knl_strcat(line, hx);
+	knl_strcat(line, " eap manual");
+	KT_ASSERT_ER(wl_cmd(line), E_OK);
+
+	/* no CA: refused */
+	knl_strcpy(line, "EAP ");
+	knl_strcat(line, hx);
+	knl_strcat(line, " peap 7573 736563726574 - - - - -");
+	KT_ASSERT_ER(wl_cmd(line), E_PAR);
+
+	knl_strcpy(line, "EAP ");
+	knl_strcat(line, hx);
+	knl_strcat(line, " peap 7573 736563726574 - 2f63612e70656d - - -");	/* us, secret, /ca.pem */
+	KT_ASSERT_ER(wl_cmd(line), E_OK);
+	KT_ASSERT(!rec1_holds("736563726574"));
+
+	/* "=" keeps the password; a network not saved is told so */
+	knl_strcpy(line, "EAP ");
+	knl_strcat(line, hx);
+	knl_strcat(line, " peap 7573 = - 2f63612e70656d - - -");
+	KT_ASSERT_ER(wl_cmd(line), E_OK);
+	KT_ASSERT_ER(wl_cmd("EAP 6e6f6e65 peap 7573 = - 2f63612e70656d - - -"), E_NOEXS);
+
+	knl_strcpy(line, "FORGET ");
+	knl_strcat(line, hx);
+	KT_ASSERT_ER(wl_cmd(line), E_OK);
+}
+
 LOCAL void test_password( void )
 {
 	KT_ASSERT_ER(knl_wifisim_ctl("pass not-the-saved-one"), E_OK);
@@ -877,6 +917,7 @@ EXPORT void ktest_wifisim( void )
 	KT_RUN(test_agg);
 	KT_RUN(test_lost);
 	KT_RUN(test_password);
+	KT_RUN(test_eap_saved);
 	KT_RUN(test_bcast);
 	KT_RUN(test_ackuni);
 	KT_RUN(test_bgscan);

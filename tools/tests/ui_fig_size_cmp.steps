@@ -1,0 +1,74 @@
+# 基本図形編集: つまみを図形の上端・左端の先へ運ぶと、図形はその先へ広がって裏返り、カーネル内の
+# 図形編集とプロセスの図形編集が同じレコードを書く (design 11.3), for tools/ui_run.py. 長方形30個の
+# 図形(mkbig fig 30 4)の3番目のつまみ(143,136)を左上の先(120,115)へ、5番目のつまみ(167,136)を
+# ウインドウの左上の外(60,60)へ運ぶ。円弧の道具で 450,450 から 550,520 へ円弧を描き、そのつまみ
+# (554,524)を 400,400 へ運ぶ(円弧の両端が左右と上下に裏返る)。直線はつまみでなく端を運ぶので、
+# 曲線は描く間の動きの数で点が変わるので含めない。保存したレコード0がバイトで一致する。
+figproc kernel
+mkbig fig 30 4
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+click 135 128
+wait 100
+drag 143 136 120 115
+sync 600
+click 159 128
+wait 100
+drag 167 136 60 60
+sync 600
+click 196 82
+sync 600
+wait 300
+dragn 450 450 550 520 12 15
+sync 600
+click 298 48
+sync 600
+wait 300
+drag 554 524 400 400
+sync 600
+wait 300
+key 16 01
+sync 600
+sum
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 30 4
+logmark
+pfig big
+expectsincein 60 figure: opened
+wait 800
+click 500 650
+wait 1000
+logmark
+click 135 128
+wait 100
+drag 143 136 120 115
+expectsince figure: sized 2 to
+logmark
+click 159 128
+wait 100
+drag 167 136 60 60
+expectsince figure: sized 4 to
+logmark
+click 196 82
+wait 300
+dragn 450 450 550 520 12 15
+expectsince figure: drawn
+logmark
+click 298 48
+expectsince figure: tool 0
+drag 554 524 400 400
+expectsince figure: sized
+wait 300
+logmark
+key 16 01
+expectsince figure: saved
+sum
+same kernel
+key 08 01
+expect figure: closed
+absent !OACV!

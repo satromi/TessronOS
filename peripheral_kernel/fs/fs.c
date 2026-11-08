@@ -35,6 +35,8 @@
 #include <ts/psx.h>
 #include <ts/time.h>
 
+IMPORT INT knl_obfile_shut( BOOL finish );	/* obfile.c: the volumes of objects, the machine going off */
+
 #define FS_MAX_FIMP	16
 
 LOCAL CONST T_FIMP	*fs_fimp[FS_MAX_FIMP];
@@ -289,8 +291,16 @@ LOCAL BOOL mount_idle( CONST T_MOUNT *m )
 /* A mount taken down: the fimp lets go of it and the device is closed. Under the lock */
 LOCAL void mount_free( T_MOUNT *m )
 {
+	SZ	asz;
+
 	if ( m->fimp->unmount != NULL ) m->fimp->unmount(m);
-	if ( m->dd > 0 ) tk_cls_dev(m->dd, 0);
+	if ( m->dd > 0 ) {
+		/* what the unmount wrote last, its mark, out of the device's cache as well */
+		if ( !m->gone && ( m->flags & FS_MNT_RDONLY ) == 0 ) {
+			(void)tk_swri_dev(m->dd, TDN_FLUSH, NULL, 0, &asz);
+		}
+		tk_cls_dev(m->dd, 0);
+	}
 	m->dd = 0;
 	m->gone = FALSE;
 	m->objok = FALSE;
@@ -1526,6 +1536,125 @@ EXPORT ER fs_sync( void )
 	}
 
 	return er;
+}
+
+
+/* ---------------------------------------------------------------- the machine going off */
+
+/* What a mount is called on the console */
+LOCAL CONST char *mount_said( CONST T_MOUNT *m )
+{
+	return ( m->pathlen > 0 ) ? (CONST char *)m->path : (CONST char *)m->dev;
+}
+
+/* One mount written, and out of the device's cache. A device with no cache says E_PAR, which is no failure */
+LOCAL ER mount_write( T_MOUNT *m )
+{
+	SZ	asz;
+	ER	er, e;
+
+	er = m->fimp->sync(m);
+	if ( er >= EX_OK && m->dd > 0 ) {
+		e = tk_swri_dev(m->dd, TDN_FLUSH, NULL, 0, &asz);
+		if ( e < E_OK && e != E_PAR && e != E_NOSPT ) {
+			er = EX_IO;
+		}
+	}
+	return er;
+}
+
+/*
+ * fs_sync as the machine goes off, where it matters what became of each
+ * volume: each is told on the console, also one whose disk has gone and
+ * one that is only read, and a failure is tried once more. How many
+ * could not be written.
+ */
+EXPORT INT knl_fs_sync_report( void )
+{
+	INT	i, bad = 0;
+
+	for ( i = 0; ; i++ ) {
+		T_MOUNT	*m;
+		BOOL	go = FALSE;
+		ER	er;
+
+		tk_loc_mtx(fs_mtxid, TMO_FEVR);
+		if ( i >= fs_nmount ) {
+			tk_unl_mtx(fs_mtxid);
+			break;
+		}
+		m = fs_mount[i];
+		if ( m->used ) {
+			if ( m->gone ) {
+				tm_printf((UB *)"shutdown: %s (%s): its disk has gone, nothing written\n", mount_said(m), m->fimp->name);
+			} else if ( m->fimp->sync != NULL && !mount_rdonly(m) ) {
+				go = TRUE;
+				m->busy++;
+			}
+		}
+		tk_unl_mtx(fs_mtxid);
+		if ( !go ) continue;
+
+		er = mount_write(m);
+		if ( er < EX_OK ) {
+			tm_printf((UB *)"shutdown: %s (%s): not written (%d), once more\n", mount_said(m), m->fimp->name, (INT)er);
+			er = mount_write(m);
+		}
+		tm_printf((UB *)"shutdown: %s (%s): %s (%d)\n", mount_said(m), m->fimp->name,
+			  ( er >= EX_OK ) ? "written" : "COULD NOT BE WRITTEN", (INT)er);
+		if ( er < EX_OK ) bad++;
+		mount_put(m);
+	}
+	return bad + knl_obfile_shut(FALSE);
+}
+
+/*
+ * The last of the file systems, every machine alike: the volumes of
+ * objects left clean and read only (the system volume cannot be closed,
+ * the kernel keeps objects of it open), then every other mount that can
+ * be written taken down, which takes the in-use mark off it and leaves it
+ * out of the device's cache. One with a file still open is written and
+ * left, and told; the next start looks it over. 'keep1' and 'keep2' are
+ * paths left for the caller, who has something still to write there; this
+ * is called again for them. Called with the devices still working.
+ */
+EXPORT void knl_fs_finish( CONST char *keep1, CONST char *keep2 )
+{
+	INT	i, k, open, down = 0, left = 0;
+	ER	er;
+
+	if ( fs_mtxid <= 0 ) {
+		return;
+	}
+	(void)knl_obfile_shut(TRUE);
+
+	tk_loc_mtx(fs_mtxid, TMO_FEVR);
+	for ( i = 0; i < fs_nmount; i++ ) {
+		T_MOUNT	*m = fs_mount[i];
+
+		if ( !m->used || m->gone || m->dd <= 0 || mount_rdonly(m) ) {
+			continue;
+		}
+		if ( ( keep1 != NULL && str_same((CONST char *)m->path, keep1) )
+		  || ( keep2 != NULL && str_same((CONST char *)m->path, keep2) ) ) {
+			continue;
+		}
+		if ( mount_idle(m) ) {
+			tm_printf((UB *)"shutdown: %s (%s): taken down\n", mount_said(m), m->fimp->name);
+			mount_free(m);
+			down++;
+			continue;
+		}
+		for ( k = 0, open = 0; k < FS_MAX_FILE; k++ ) {
+			if ( fs_file[k].used && fs_file[k].mount == m ) open++;
+		}
+		er = ( m->fimp->sync != NULL ) ? mount_write(m) : EX_OK;
+		tm_printf((UB *)"shutdown: %s (%s): %d files still open, written (%d) and left marked in use\n",
+			  mount_said(m), m->fimp->name, open, (INT)er);
+		left++;
+	}
+	tk_unl_mtx(fs_mtxid);
+	tm_printf((UB *)"shutdown: %d mounts taken down, %d left\n", down, left);
 }
 
 

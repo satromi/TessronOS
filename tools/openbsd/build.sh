@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# build.sh -- OpenBSD's IEEE 802.11 layer, iwm(4) and iwx(4) for the x64 PC's Wi-Fi
+# build.sh -- OpenBSD's IEEE 802.11 layer, iwm(4), iwx(4), mwx(4) and TessronOS's athx for the x64 PC's Wi-Fi
 #
 # Copyright (C) 2026 satromi
 # This software is distributed under the T-License 2.2.
@@ -44,17 +44,31 @@
 # rumpcomp_*, peripheral_kernel/network/netbsd/wifi_user.c) and the
 # compiler's run-time library.
 #
+# With ARCH=aarch64 (the Raspberry Pi's, make WIFI_NET80211=obsd, build_make/wifi_arm.mk) the same
+# layer is built by the bare aarch64 toolchain with arm64's headers, MARCH for the machine
+# (armv8-a+crc for the Pi 4 family, ~/tessronos-obsd-arm-v80), and the drivers are in the
+# place of the PCI cards: sdhc(4), sdmmc(4) and bwfm(4) with its SDIO attachment.
+#
 # Usage: build.sh [fetch|compile|link|notices|all|clean]
 #
 set -e
 
 STAGE=${1:-all}
 TOP=$(cd "$(dirname "$0")/../.." && pwd)
-XB=${TS_X64_TOOLCHAIN:-$HOME/.local/xPacks/x86_64-elf-gcc/bin}
-CC=$XB/x86_64-elf-gcc
-LD=$XB/x86_64-elf-ld
-OBJCOPY=$XB/x86_64-elf-objcopy
-NM=$XB/x86_64-elf-nm
+ARCH=${ARCH:-x86_64}
+if [ "$ARCH" = aarch64 ]; then
+	XB=${TS_XPACK_BIN:-$HOME/.local/xPacks/aarch64-none-elf-gcc/bin}
+	TP=aarch64-none-elf
+	OB_MACHINE=arm64
+else
+	XB=${TS_X64_TOOLCHAIN:-$HOME/.local/xPacks/x86_64-elf-gcc/bin}
+	TP=x86_64-elf
+	OB_MACHINE=amd64
+fi
+CC=$XB/$TP-gcc
+LD=$XB/$TP-ld
+OBJCOPY=$XB/$TP-objcopy
+NM=$XB/$TP-nm
 JOBS=${JOBS:-12}
 
 # The release, where it is fetched from, and the SHA-256 of its sys.tar.gz
@@ -66,8 +80,13 @@ OB_SHA256=964b1aed7839b86f4e010a0fdd03dcd409e6f569e69fe85f95e5fceb740c2aaf
 OB_DL=${OB_DL:-$HOME/openbsd/dl/$OB_VER/sys.tar.gz}
 OB=${OBSRC:-$HOME/openbsd/src-$OB_VER}
 S=$OB/sys
-OUT=${OUT:-$HOME/tessronos-obsd-x64}
-MARCH=${MARCH:-x86-64-v2}
+if [ "$ARCH" = aarch64 ]; then
+	OUT=${OUT:-$HOME/tessronos-obsd-arm}
+	MARCH=${MARCH:-armv8.2-a}
+else
+	OUT=${OUT:-$HOME/tessronos-obsd-x64}
+	MARCH=${MARCH:-x86-64-v2}
+fi
 COMP=$TOP/device/net/wifi/obsd
 PATCHES=$TOP/tools/openbsd/patches
 GEN=$OUT/gen
@@ -76,34 +95,50 @@ OBJ=$OUT/obj
 # The directories of sys.tar.gz that are unpacked (their files, not what is below them),
 # and the machine's headers whole
 EXTRACT_DIRS="sys/net80211 sys/sys sys/net sys/netinet sys/netinet6 sys/crypto
- sys/kern sys/uvm sys/lib/libkern sys/dev/pci sys/dev/ic sys/ddb"
-EXTRACT_TREES="sys/arch/amd64/include sys/arch/x86/include"
+ sys/kern sys/uvm sys/lib/libkern sys/dev/pci sys/dev/ic sys/ddb sys/dev/sdmmc sys/scsi sys/dev/ofw"
+EXTRACT_TREES="sys/arch/amd64/include sys/arch/x86/include sys/arch/arm64/include"
 
-# The sources: net80211 whole, iwm and iwx, and of OpenBSD's kernel what they use
+# The sources: net80211 whole, iwm, iwx and mwx, and of OpenBSD's kernel what they use
 NET80211_SRCS="ieee80211.c ieee80211_amrr.c ieee80211_crypto.c ieee80211_crypto_bip.c
  ieee80211_crypto_ccmp.c ieee80211_crypto_tkip.c ieee80211_crypto_wep.c
  ieee80211_input.c ieee80211_ioctl.c ieee80211_node.c ieee80211_output.c
  ieee80211_pae_input.c ieee80211_pae_output.c ieee80211_proto.c ieee80211_ra.c
  ieee80211_ra_vht.c ieee80211_regdomain.c ieee80211_rssadapt.c"
-DRV_SRCS="if_iwm.c if_iwx.c"
+DRV_SRCS="if_iwm.c if_iwx.c if_mwx.c"
 KERN_SRCS="kern/uipc_mbuf.c kern/uipc_mbuf2.c kern/subr_tree.c net/if_media.c
  crypto/aes.c crypto/cmac.c crypto/hmac.c crypto/md5.c crypto/sha1.c crypto/sha2.c
  crypto/key_wrap.c crypto/michael.c crypto/arc4.c lib/libkern/fls.c"
-COMP_SRCS="obsd_kern.c obsd_net.c obsd_pci.c tswifi_obsd.c tsw_iwm.c tsw_iwx.c obsd_test.c"
+COMP_SRCS="obsd_kern.c obsd_net.c obsd_pci.c tswifi_obsd.c tsw_iwm.c tsw_iwx.c tsw_mwx.c obsd_test.c
+ tsw_athx.c athx.c athx_pci.c athx_fw.c athx_wmi.c athx_htt.c"
 # OpenBSD's headers that have patches (tools/openbsd/patches/<name>-*.patch)
 HDR_PATCHED="dev/pci/if_iwxvar.h"
+# The Raspberry Pi: no PCI card, the chip on its SDIO host (obsd_bus_arm.c, tsw_bwfm.c)
+SDIO_SRCS=""
+if [ "$ARCH" = aarch64 ]; then
+	DRV_SRCS=""
+	SDIO_SRCS="dev/sdmmc/sdhc.c dev/sdmmc/sdmmc.c dev/sdmmc/sdmmc_cis.c dev/sdmmc/sdmmc_io.c
+	 dev/sdmmc/sdmmc_mem.c dev/sdmmc/if_bwfm_sdio.c dev/ic/bwfm.c"
+	COMP_SRCS="obsd_kern.c obsd_net.c obsd_bus_arm.c tswifi_obsd.c tsw_bwfm.c obsd_test.c"
+fi
 # WIFI_SIM=1: the Wi-Fi simulator's two radios (device/net/wifi/sim/obsd_sim.c, docs/tessronos/
 # 09-network.md 9.6.12) in the place of the drivers and their PCI bus, into another place (OUT)
 WIFI_SIM=${WIFI_SIM:-0}
 if [ "$WIFI_SIM" = 1 ]; then
 	DRV_SRCS=""
+	SDIO_SRCS=""
 	COMP_SRCS="obsd_kern.c obsd_net.c tswifi_obsd.c"
+	[ "$ARCH" = aarch64 ] && COMP_SRCS="obsd_kern.c obsd_net.c tswifi_obsd.c"
 fi
 
 # As the kernel is built (common.mk), without the floating point registers;
 # a uniprocessor kernel's headers (no MULTIPROCESSOR), with the steps of
 # the drivers and net80211 said while the manager wants them (rump_tswifi_debug)
-CFLAGS="-march=$MARCH -mgeneral-regs-only -mno-red-zone -mcmodel=kernel -O2 -g
+if [ "$ARCH" = aarch64 ]; then
+	ARCH_CFLAGS="-march=$MARCH -mgeneral-regs-only -mno-outline-atomics"
+else
+	ARCH_CFLAGS="-march=$MARCH -mgeneral-regs-only -mno-red-zone -mcmodel=kernel"
+fi
+CFLAGS="$ARCH_CFLAGS -O2 -g
  -ffreestanding -fno-builtin -fno-strict-aliasing -fno-delete-null-pointer-checks
  -fno-common -fno-pic -fno-stack-protector -fno-omit-frame-pointer
  -ffunction-sections -fdata-sections -std=gnu11
@@ -119,7 +154,8 @@ CPPFLAGS="-nostdinc -D_KERNEL -DIEEE80211_DEBUG -DIWM_DEBUG -DIWX_DEBUG
 stage_fetch() {
 	if [ -f "$S/net80211/ieee80211.c" ] && [ -f "$S/dev/pci/if_iwm.c" ] \
 	   && [ -f "$S/dev/pci/if_iwx.c" ] && [ -f "$S/lib/libkern/fls.c" ] \
-	   && [ -d "$S/arch/amd64/include" ]; then
+	   && [ -d "$S/arch/$OB_MACHINE/include" ] && [ -f "$S/dev/sdmmc/sdhc.c" ] \
+	   && [ -f "$S/dev/ic/bwfm.c" ] && [ -d "$S/scsi" ]; then
 		echo "fetch: $OB is there"
 		return
 	fi
@@ -161,12 +197,12 @@ stage_fetch() {
 }
 
 # The headers a kernel build would generate: the counts of the pseudo-devices,
-# none of which is here; <machine/...> is amd64's
+# none of which is here; <machine/...> is the machine's
 stage_gen() {
 	local n
 	mkdir -p "$GEN/include"
-	ln -sfn "$S/arch/amd64/include" "$GEN/include/machine"
-	for n in bpfilter bridge vlan carp pf pfsync trunk; do
+	ln -sfn "$S/arch/$OB_MACHINE/include" "$GEN/include/machine"
+	for n in bpfilter bridge vlan carp pf pfsync trunk bwfm_sdio sdmmc; do
 		echo "#define N$(echo $n | tr a-z A-Z) 0" > "$GEN/include/$n.h.tmp"
 		cmp -s "$GEN/include/$n.h.tmp" "$GEN/include/$n.h" && rm -f "$GEN/include/$n.h.tmp" \
 			|| mv "$GEN/include/$n.h.tmp" "$GEN/include/$n.h"
@@ -242,6 +278,10 @@ stage_compile() {
 	for f in $DRV_SRCS; do
 		src=$(src_of "dev/pci/$f") || exit 1
 		echo "$src $OBJ/drv/${f%.c}.o" >> "$OUT/jobs.list"
+	done
+	for f in $SDIO_SRCS; do
+		src=$(src_of "$f") || exit 1
+		echo "$src $OBJ/drv/$(basename "${f%.c}").o" >> "$OUT/jobs.list"
 	done
 	for f in $KERN_SRCS; do
 		src=$(src_of "$f") || exit 1

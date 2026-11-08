@@ -532,6 +532,16 @@ LOCAL void knl_ipi_stop_handler( UINT intno, UW iar )
 	}
 }
 
+/* SGI_CALL: the machine goes to sleep, this processor parks (kernel/sysdepend/x64/pm.c) */
+IMPORT void	knl_pm_park_here( void );
+
+LOCAL void knl_ipi_park_handler( UINT intno, UW iar )
+{
+	knl_apic_eoi();
+	disint();
+	knl_pm_park_here();
+}
+
 /* SGI_SYNC: an interrupt taken is all that is asked (knl_sync_cores) */
 LOCAL void knl_ipi_sync_handler( UINT intno, UW iar )
 {
@@ -909,6 +919,39 @@ EXPORT void knl_cpu_init( T_PCPU *p )
 	knl_pan_setup();
 }
 
+/*
+ * What this processor says of itself. CPUID answers for the processor that
+ * runs it, and the two kinds of core of a hybrid processor may differ in
+ * what they answer, so each asks for itself; topo_tell says them together.
+ */
+LOCAL void cpu_note( T_PCPU *p )
+{
+	UW	a, b, c, d, max;
+
+	cpuid(0, 0, &max, &b, &c, &d);
+	cpuid(1, 0, &a, &b, &c, &d);
+	p->id_sig = a;
+	if ( max >= 7 ) {
+		cpuid(7, 0, &a, &b, &c, &d);
+		p->id_7b = b;
+		p->id_7c = c;
+		p->id_7d = d;
+		if ( max >= 0x1a && ( d & ( 1U << 15 ) ) != 0 ) {
+			cpuid(0x1a, 0, &a, &b, &c, &d);
+			p->id_kind = (UB)( a >> 24 );
+		}
+	}
+	if ( max >= 0xd && knl_xsave_on ) {
+		cpuid(0xd, 0, &a, &b, &c, &d);
+		p->id_xsave = b;
+	}
+	cpuid(0x80000000U, 0, &a, &b, &c, &d);
+	if ( a >= 0x80000008U ) {
+		cpuid(0x80000008U, 0, &a, &b, &c, &d);
+		p->id_addr = a;
+	}
+}
+
 LOCAL void knl_pcpu_setup( INT i, void *tmp_stack_top, void *irq_stack_top )
 {
 	T_PCPU	*p = PCPU(i);
@@ -931,6 +974,7 @@ LOCAL void knl_pcpu_setup( INT i, void *tmp_stack_top, void *irq_stack_top )
 	p->tlb_ack = 0;
 	p->kstack = (UD)(UBINT)tmp_stack_top;
 	knl_cpu_init(p);
+	cpu_note(p);
 }
 
 /*
@@ -960,6 +1004,7 @@ EXPORT void knl_smp_init_interrupt( void )
 	knl_define_inthdr(INTVEC_IPI(SGI_STOP), TA_HLNG, (FP)knl_ipi_stop_handler);
 	knl_define_inthdr(INTVEC_IPI(SGI_TIMER), TA_HLNG, (FP)knl_timer_ipi_handler);
 	knl_define_inthdr(INTVEC_IPI(SGI_SYNC), TA_HLNG, (FP)knl_ipi_sync_handler);
+	knl_define_inthdr(INTVEC_IPI(SGI_CALL), TA_HLNG, (FP)knl_ipi_park_handler);
 	knl_lockup_init_interrupt();
 }
 
@@ -1063,6 +1108,71 @@ LOCAL BOOL tramp_setup( void )
 }
 
 /*
+ * The machine waking from S3 (kernel/sysdepend/x64/pm.c): the trampoline
+ * made again, with entry in place of knl_secondary_main; the physical
+ * address the firmware is to start at, its IP 0 in real mode as the
+ * FACS's vector gives it. The boot processor comes first. Each comes in
+ * on a stack kept for this (knl_pm_wake_stack), not on its temporary stack:
+ * an idle processor was interrupted on that one, and the frame to return
+ * to is near its top.
+ */
+IMPORT void	*knl_pm_wake_stack( INT i );	/* kernel/sysdepend/x64/pm.c */
+
+EXPORT UD knl_smp_wake_vector( void (*entry)( INT ) )
+{
+	UB	*t;
+
+	if ( !tramp_setup() ) return 0;
+	t = (UB *)PA2VA(tramp_pa);
+	*(UD *)( t + TRAMP_OFF(knl_tramp_entry) ) = (UD)(UBINT)entry;
+	*(UD *)( t + TRAMP_OFF(knl_tramp_stack) ) = (UD)(UBINT)knl_pm_wake_stack(0);
+	*(UD *)( t + TRAMP_OFF(knl_tramp_arg) ) = 0;
+	return tramp_pa;
+}
+
+IMPORT UW	knl_pm_back_count( void );	/* kernel/sysdepend/x64/pm.c */
+IMPORT void	knl_pm_cpu_lost( void );
+
+/*
+ * The other processors started as at start-up, one by one, each going on
+ * through entry where it stood. One that does not come back is held by
+ * INIT and marked stopped.
+ */
+EXPORT void knl_smp_wake_others( void )
+{
+	INT	i;
+	UB	*t = (UB *)PA2VA(tramp_pa);
+
+	for ( i = 1; i < knl_num_prc; i++ ) {
+		knl_apic_send(PCPU(i)->apic_id, 0, APIC_DM_INIT);
+	}
+	WaitUsec(10000);
+	for ( i = 1; i < knl_num_prc; i++ ) {
+		T_PCPU	*p = PCPU(i);
+		UW	back = knl_pm_back_count();
+		UD	t0;
+
+		*(UD *)( t + TRAMP_OFF(knl_tramp_stack) ) = (UD)(UBINT)knl_pm_wake_stack(i);
+		*(UD *)( t + TRAMP_OFF(knl_tramp_arg) ) = (UD)i;
+		Asm("mfence" ::: "memory");
+		knl_apic_send(p->apic_id, (UW)( tramp_pa >> 12 ), APIC_DM_SIPI);
+		WaitUsec(200);
+		knl_apic_send(p->apic_id, (UW)( tramp_pa >> 12 ), APIC_DM_SIPI);
+		t0 = knl_get_mono_ns();
+		while ( knl_pm_back_count() == back ) {
+			if ( knl_get_mono_ns() - t0 > 500000000ULL ) {
+				tm_printf((UB *)"TessronOS: CPU of APIC %d did not come back from S3\n", p->apic_id);
+				knl_apic_send(p->apic_id, 0, APIC_DM_INIT);
+				p->state = PC_STOPPED;
+				knl_pm_cpu_lost();
+				break;
+			}
+			CpuRelax();
+		}
+	}
+}
+
+/*
  * A processor's data: its T_PCPU, then its temporary stack and its
  * interrupt stack, in pages of their own (PA2VA, reachable on the
  * trampoline's PML4, which has the kernel's half)
@@ -1144,7 +1254,7 @@ LOCAL INT topo_count( BOOL pkg )
 LOCAL void topo_tell( INT listed )
 {
 	UW	smt, core;
-	INT	i;
+	INT	i, nperf = 0, neff = 0;
 
 	topo_shifts(&smt, &core);
 	for ( i = 0; i < knl_num_prc; i++ ) {
@@ -1152,10 +1262,31 @@ LOCAL void topo_tell( INT listed )
 
 		p->core_key = p->apic_id >> smt;
 		p->pkg_key = ( core >= 32 ) ? 0 : p->apic_id >> core;
+		tm_printf((UB *)"cpu: PRC %d APIC %d: %s, signature %08x, CPUID 7 %08x %08x %08x, address bits %d/%d, XSAVE %d\n",
+			  p->prcid, p->apic_id, ( p->id_kind == 0x40 ) ? "performance core" :
+			  ( p->id_kind == 0x20 ) ? "efficient core" : ( p->id_kind == 0 ) ? "one kind" : "other kind",
+			  p->id_sig, p->id_7b, p->id_7c, p->id_7d, ( p->id_addr >> 8 ) & 0xff, p->id_addr & 0xff, p->id_xsave);
+		if ( p->id_kind == 0x40 ) nperf++;
+		if ( p->id_kind == 0x20 ) neff++;
+	}
+	if ( nperf + neff > 0 ) {
+		tm_printf((UB *)"TessronOS: a hybrid processor: %d threads of performance cores, %d of efficient cores\n", nperf, neff);
 	}
 	tm_printf((UB*)"TessronOS: %d of %d CPUs online (%d package%s, %d cores, %d threads)\n",
 		  knl_num_prc, listed, topo_count(TRUE), ( topo_count(TRUE) == 1 ) ? "" : "s",
 		  topo_count(FALSE), knl_num_prc);
+}
+
+/*
+ * The processor being started, in the page of marks: one that faults past
+ * what it can report resets the machine, and the next start's loader tells
+ * which it was (T_BIMARK)
+ */
+LOCAL void mark_starting( UW apic_plus_1 )
+{
+	if ( knl_bootinfo->mark_pa != 0 ) {
+		((T_BIMARK *)PA2VA(knl_bootinfo->mark_pa))->starting = apic_plus_1;
+	}
 }
 
 /*
@@ -1176,6 +1307,7 @@ EXPORT void knl_smp_start_secondaries( void )
 	INT	i, k, n = knl_acpi.ncpu, left = 0, failed = 0;
 	UD	t0;
 	UB	*t;
+	UB	stage[48];
 
 	if ( n <= 1 || !tramp_setup() ) {
 		tm_printf((UB*)"TessronOS: 1 of %d CPUs online\n", ( n > 0 ) ? n : 1);
@@ -1215,6 +1347,9 @@ EXPORT void knl_smp_start_secondaries( void )
 		knl_spin_held_p[k] = p->spin_held;
 		*(UD *)( t + TRAMP_OFF(knl_tramp_stack) ) = (UD)(UBINT)p->tmp_stack;
 		*(UD *)( t + TRAMP_OFF(knl_tramp_arg) ) = (UD)k;
+		tm_sprintf(stage, (UB *)"the kernel: starting CPU of APIC %d", id);
+		knl_fbcon_stage((CONST char *)stage);
+		mark_starting(id + 1);
 		Asm("mfence" ::: "memory");
 
 		knl_apic_send(id, (UW)( tramp_pa >> 12 ), APIC_DM_SIPI);
@@ -1239,6 +1374,8 @@ EXPORT void knl_smp_start_secondaries( void )
 		knl_spin_held_n = k;
 		knl_num_prc = k;
 	}
+	mark_starting(0);
+	knl_fbcon_stage("the kernel: the other CPUs started");
 	topo_tell(n);
 	if ( left > 0 || knl_acpi.ncpu_over > 0 ) {
 		tm_printf((UB*)"TessronOS: %d CPUs beyond the %d supported (CNF_MAX_PRCID) left\n",

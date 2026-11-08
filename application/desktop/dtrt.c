@@ -1057,6 +1057,7 @@ LOCAL void item_draw( DTRT *p, INT gid, CONST ITEM *it, INT dx, INT dy )
 		sub.nsh = 1;
 		sub.zoom = p->z;
 		sub.zoom_den = p->zd;
+		sub.bare = TRUE;		/* its pieces of text over the picture of the rest */
 		sub.over_on = 0;
 		for ( k = 0; k < TV_MAX_OVER; k++ ) sub.over[k] = NULL;
 		{
@@ -1082,9 +1083,11 @@ LOCAL void item_draw( DTRT *p, INT gid, CONST ITEM *it, INT dx, INT dy )
 			box.top += pad;
 			box.right -= pad;
 		}
-		tv_doc_zoom_by(p->z, p->zd);
+		/* the text by itself onto the picture of the rest, magnified as the scene is */
+		it->doc->zoom = p->z;
+		it->doc->zoom_den = p->zd;
+		it->doc->bare = TRUE;
 		(void)tv_doc_draw(gid, it->doc, &box, 0, p->rec, TAD_COL_NONE);
-		tv_doc_zoom(8);
 		break;
 	case IT_OBJ: {
 		RT_OBJ	*o = rt_obj(p->rt, it->obj);
@@ -1236,7 +1239,6 @@ LOCAL BOOL layers_make( DTRT *p )
 	for ( k = 0; k < np; k++ ) p->base[k] = p->paper & 0x00FFFFFFU;
 
 	om_store_self(&p->obj);
-	tv_doc_ground(FALSE);
 	/* the ground: what stays and is under everything that moves, drawn straight */
 	gid = env_on(p->base, &all);
 	while ( i < p->nitem && p->item[i].obj < 0 ) {
@@ -1315,7 +1317,6 @@ LOCAL BOOL layers_make( DTRT *p )
 		}
 		p->nlayer++;
 	}
-	tv_doc_ground(TRUE);
 	om_store_self(NULL);
 	return TRUE;
 }

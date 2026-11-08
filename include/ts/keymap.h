@@ -55,13 +55,35 @@ extern "C" {
 #define KM_MOD_THUMB_L	0x100
 #define KM_MOD_THUMB_R	0x200
 
+/*
+ * A key's own layouts. A key put in by a screen keyboard (wm_obj_key_put)
+ * carries in its modifiers the latin and the kana layout it is to be read
+ * in: KM_MOD_OWN with the two numbers (KM_MOD_LAYOUT). The marks go with
+ * the key wherever it goes, in the events and the notices' mods, and
+ * everything that makes a letter or a kana of a key from its mods
+ * (km_char, km_kana_text, km_label, wm_key_char, kc_kana_key_m) reads the
+ * key in them. A key of the keyboard plugged in carries none, and is read
+ * in the machine's layouts. So the screen keyboard's layouts are its own
+ * and never the keyboard's.
+ */
+#define KM_MOD_OWN		0x00040000U
+#define KM_MOD_LATIN_SHIFT	20		/* 2 bits: KM_LATIN_* */
+#define KM_MOD_KANA_SHIFT	22		/* 2 bits: KM_KANA_* */
+#define KM_MOD_LAYOUTS		( KM_MOD_OWN | 0x00F00000U )
+#define KM_MOD_LAYOUT(latin, kana) \
+	( KM_MOD_OWN | ( (UINT)(latin) << KM_MOD_LATIN_SHIFT ) | ( (UINT)(kana) << KM_MOD_KANA_SHIFT ) )
+
+/* The layouts a key is read in: its own when its mods carry them, else the machine's */
+IMPORT INT  km_latin_of( UINT mods );
+IMPORT INT  km_kana_of( UINT mods );
+
 /* The kana a key types in a thumb-shift layout, UTF-8, by the thumbs held; NULL none or JIS かな */
 IMPORT CONST char *km_kana_text( UINT code, UINT mods );
 
 /* Whether a key is under the left hand (the thumb on its own side is the same-hand shift) */
 IMPORT BOOL km_left_hand( UINT code );
 
-/* The letter a key types in the latin layout, with what is held; 0 none */
+/* The letter a key types in the latin layout (km_latin_of), with what is held; 0 none */
 IMPORT UB   km_char( UINT code, UINT mods );
 
 /* The latin layout and the kana one in use */
@@ -121,7 +143,9 @@ IMPORT ER   km_set( CONST T_KMSTATE *st, UINT what );
 
 /*
  * The words a key is written with, UTF-8 into buf (at most max bytes
- * with the 0 after them); how many bytes, 0 when there are none.
+ * with the 0 after them); how many bytes, 0 when there are none. The
+ * letter and the kana in the layouts mods carries (KM_MOD_LAYOUT), else
+ * in the machine's.
  */
 #define KM_L_NAME	0		/* its name (km_key_name) */
 #define KM_L_CHAR	1		/* the letter it types in the latin layout, with mods (km_char) */

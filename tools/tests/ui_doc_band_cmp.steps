@@ -1,0 +1,272 @@
+# 基本文章編集で変わった所だけを描き直す (design 11.3), for tools/ui_run.py. After a change the
+# window draws again only the paragraphs that changed or moved and the lines of the caret
+# (tv_doc_band, docedit.c changed()); what that leaves on the screen must be what drawing the
+# whole window again gives. In the desktop's own text editor (docproc kernel, open) and in the
+# process (pdoc), each on a copy of 基本文章編集 of 30 paragraphs (mkbig doc 30): letters typed,
+# one taken back, a new paragraph, letters typed till the lines of the paragraph break
+# elsewhere, taken back till they break as before, and, wound down by the wheel, letters
+# typed. After each the window is shot (band_*_N), drawn again whole (redraw) and shot again
+# (band_*_N_whole), and the two compared inside the window, where the text is (101,125 to
+# 682,482 of the screen: the window stands at 100,100, 600 by 400). The last of the desktop's
+# and of the process's are compared too. The caret is kept from blinking (LK_BLINK 306 very
+# slow) so that both shots have it alike.
+# Keys: Backspace 2A, Enter 28; Ctrl+E 08 01.
+docproc kernel
+look 306 3600000
+mkbig doc 30
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+move 690 490
+sync 600
+click 300 170
+sync 600
+move 690 490
+sync 600
+# typed
+text ab
+sync 600
+wait 300
+shot band_k_1
+redraw
+sync 600
+wait 300
+shot band_k_1_whole
+shotsame band_k_1 band_k_1_whole 101 125 682 482
+# taken back
+key 2A
+sync 600
+wait 300
+shot band_k_2
+redraw
+sync 600
+wait 300
+shot band_k_2_whole
+shotsame band_k_2 band_k_2_whole 101 125 682 482
+# a new paragraph
+key 28
+sync 600
+wait 300
+shot band_k_3
+redraw
+sync 600
+wait 300
+shot band_k_3_whole
+shotsame band_k_3 band_k_3_whole 101 125 682 482
+# the lines broken elsewhere
+text abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz
+sync 600
+wait 300
+shot band_k_4
+redraw
+sync 600
+wait 300
+shot band_k_4_whole
+shotsame band_k_4 band_k_4_whole 101 125 682 482
+# and back
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+key 2A
+sync 600
+wait 300
+shot band_k_5
+redraw
+sync 600
+wait 300
+shot band_k_5_whole
+shotsame band_k_5 band_k_5_whole 101 125 682 482
+# wound down, then typed
+move 300 300
+wheel -1
+sync 600
+wheel -1
+sync 600
+wheel -1
+sync 600
+wait 300
+click 300 300
+sync 600
+move 690 490
+sync 600
+text cd
+sync 600
+wait 300
+shot band_k_6
+redraw
+sync 600
+wait 300
+shot band_k_6_whole
+shotsame band_k_6 band_k_6_whole 101 125 682 482
+key 08 01
+sync 600
+wait 500
+# the process
+mkbig doc 30
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 800
+move 690 490
+wait 300
+logmark
+click 300 170
+expectsince document: drew
+wait 300
+move 690 490
+wait 300
+logmark
+text ab
+expectsince document: key to screen
+wait 800
+shot band_p_1
+logmark
+redraw
+expectsince document: drew
+wait 300
+shot band_p_1_whole
+shotsame band_p_1 band_p_1_whole 101 125 682 482
+logmark
+key 2A
+expectsince document: key to screen
+wait 500
+shot band_p_2
+logmark
+redraw
+expectsince document: drew
+wait 300
+shot band_p_2_whole
+shotsame band_p_2 band_p_2_whole 101 125 682 482
+logmark
+key 28
+expectsince document: key to screen
+wait 500
+shot band_p_3
+logmark
+redraw
+expectsince document: drew
+wait 300
+shot band_p_3_whole
+shotsame band_p_3 band_p_3_whole 101 125 682 482
+logmark
+text abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz
+expectsince document: key to screen
+wait 4000
+shot band_p_4
+logmark
+redraw
+expectsince document: drew
+wait 300
+shot band_p_4_whole
+shotsame band_p_4 band_p_4_whole 101 125 682 482
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 200
+key 2A
+wait 1000
+shot band_p_5
+logmark
+redraw
+expectsince document: drew
+wait 300
+shot band_p_5_whole
+shotsame band_p_5 band_p_5_whole 101 125 682 482
+move 300 300
+wheel -1
+wait 300
+wheel -1
+wait 300
+wheel -1
+wait 500
+logmark
+click 300 300
+expectsince document: drew
+wait 300
+move 690 490
+wait 300
+logmark
+text cd
+expectsince document: key to screen
+wait 800
+shot band_p_6
+logmark
+redraw
+expectsince document: drew
+wait 300
+shot band_p_6_whole
+shotsame band_p_6 band_p_6_whole 101 125 682 482
+shotsame band_k_6_whole band_p_6_whole 101 125 682 482
+logmark
+key 08 01
+expectsince document: closed

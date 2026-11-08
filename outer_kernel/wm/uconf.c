@@ -168,6 +168,69 @@ EXPORT ER knl_conf_link_put( CONST char *uuid, CONST char *role, CONST TS_UUID *
 	return er;
 }
 
+/* Every link with role there: how many, up to max of them put in buf */
+EXPORT INT knl_conf_links_get( CONST char *uuid, CONST char *role, TS_UUID *buf, INT max )
+{
+	TS_UUID	u, one;
+	ID	key;
+	UB	*text = NULL;
+	INT	len, n = 0;
+
+	if ( ts_str_to_uuid(uuid, &u) < E_OK ) return 0;
+	key = conf_open(&u, OB_OP_READ);
+	if ( key < E_OK ) return 0;
+	len = knl_ob_rea_all(key, 0, 0, &text, NULL);
+	ob_cls_obj(key);
+	while ( len > 0 && cf_link_nth(text, len, role, n, &one) ) {
+		if ( buf != NULL && n < max ) buf[n] = one;
+		n++;
+	}
+	if ( text != NULL ) Kfree(text);
+	return n;
+}
+
+/*
+ * A link with role to target added, or taken out, of a list of objects
+ * there; counted in or out where the store does not count, as
+ * knl_conf_link_put does
+ */
+LOCAL ER conf_list_change( CONST char *uuid, CONST char *role, CONST TS_UUID *target, CONST char *label, BOOL add )
+{
+	TS_UUID	u, vobj;
+	T_OBREF	r;
+	ID	key;
+	UB	*text = NULL;
+	INT	len, cap = 0, n;
+	ER	er;
+
+	if ( ts_str_to_uuid(uuid, &u) < E_OK || ts_gen_uuid(&vobj) < E_OK ) return E_SYS;
+	key = conf_open(&u, OB_OP_READ | OB_OP_WRITE);
+	if ( key < E_OK ) return (ER)key;
+	len = knl_ob_rea_all(key, 0, 640, &text, &cap);
+	if ( len < 0 ) {
+		ob_cls_obj(key);
+		return (ER)len;
+	}
+	n = add ? cf_link_add(text, len, cap, role, target, &vobj, label) : cf_link_drop(text, len, role, target);
+	er = ( n == -2 ) ? E_NOEXS : ( n == -1 ) ? E_LIMIT : ( n == len ) ? E_OK : ob_rpl_rec(key, 0, text, (SZ)n);
+	ob_cls_obj(key);
+	Kfree(text);
+	if ( er >= E_OK && n != len && ob_ref_obj(&u, &r) >= E_OK && ( r.flags & OB_F_AUTOREF ) == 0 ) {
+		(void)( add ? ob_lnk_obj(target) : ob_unl_obj(target) );
+	}
+	return er;
+}
+
+EXPORT ER knl_conf_link_add( CONST char *uuid, CONST char *role, CONST TS_UUID *target, CONST char *label )
+{
+	return conf_list_change(uuid, role, target, label, TRUE);
+}
+
+EXPORT ER knl_conf_link_drop( CONST char *uuid, CONST char *role, CONST TS_UUID *target )
+{
+	return conf_list_change(uuid, role, target, "", FALSE);
+}
+
 /*
  * The system's objects, found from the root システム (SYSDEF_SYSTEM_BOX,
  * the one identity the code is sure of) by the relationships of its
@@ -372,6 +435,8 @@ EXPORT ER wm_conf_apply( void )
 	tm_printf((UB *)"user: %d settings taken, the user is \"%s\"\n", got, user_name);
 	return E_OK;
 }
+
+IMPORT void	knl_pm_policy( INT button_sleep, INT lid_sleep ) __attribute__((weak));
 
 /*
  * The processors' clock: at most CPU_MHZ MHz, 0 the most the firmware
@@ -664,6 +729,13 @@ LOCAL ER dev_conf_apply( BOOL watched )
 	knl_wdog_set(cf_get(text, len, "WATCHDOG", 0, v, sizeof(v)) ? cf_num(v, LK_RESET_S_DEFAULT)
 								 : LK_RESET_S_DEFAULT);
 	cpu_conf(text, len);
+	/* what the power button and the lid do, where the machine sleeps (kernel/sysdepend/x64/pm.c) */
+	if ( knl_pm_policy != NULL ) {
+		INT	b = cf_get(text, len, "BUTTON_SLEEP", 0, v, sizeof(v)) ? cf_num(v, -1) : -1;
+		INT	l = cf_get(text, len, "LID_SLEEP", 0, v, sizeof(v)) ? cf_num(v, -1) : -1;
+
+		if ( b >= 0 || l >= 0 ) knl_pm_policy(b, l);
+	}
 	/* the output the sound plays on (include/ts/snd.h); no line leaves it as it is */
 	if ( cf_get(text, len, "SOUND_OUT", 0, v, sizeof(v)) && v[0] != 0 ) {
 		(void)knl_snd_select((CONST UB *)v);

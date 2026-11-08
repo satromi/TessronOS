@@ -120,6 +120,26 @@ EXPORT void knl_stack_broken( TCB *tcb )
 	halt();
 }
 
+/*
+ * A task reached the unmapped pages below its stack (knl_vmap_stack).
+ * The summary of it, the rest being told as for any exception
+ */
+EXPORT volatile UW	knl_stack_out_count = 0;	/* for the tests */
+EXPORT volatile UD	knl_stack_out_addr = 0;
+
+LOCAL void stack_out_say( UD addr, T_EXCFRAME *f )
+{
+	UB	pin[160];
+
+	knl_stack_out_addr = addr;
+	knl_fbcon_resume();
+	tm_sprintf(pin, (CONST UB *)"!STACK! CPU%d: task=%d ran out of its %d byte stack: %lx, at RIP %lx, RSP %lx",
+		   exc_cpu(), knl_ctxtsk->tskid, (INT)knl_ctxtsk->sstksz, addr, f->rip, f->rsp);
+	knl_fbcon_pin(pin);
+	tm_printf_urgent((UB*)"\n%s\n", pin);
+	__atomic_add_fetch(&knl_stack_out_count, 1, __ATOMIC_SEQ_CST);
+}
+
 #if CNF_STK_WATCH
 IMPORT TCB	knl_tcb_table[];
 
@@ -326,6 +346,10 @@ EXPORT void knl_kernel_fault( void *frame, UD esr, UD far )
 	T_EXCFRAME	*f = (T_EXCFRAME *)frame;
 
 	if ( f->vec == VEC_PF ) {
+		if ( knl_stack_guard_hit(knl_ctxtsk, (UBINT)far) ) {
+			stack_out_say(far, f);
+			exc_report(f, far);
+		}
 		if ( knl_dev_fault((UBINT)far) ) {
 			return;
 		}
@@ -451,6 +475,14 @@ EXPORT void knl_nmi_entry( T_EXCFRAME *f )
 		}
 		tm_printf_urgent((UB*)"\n!NMI! CPU%d at %lx (none was asked for)\n", exc_cpu(), f->rip);
 		return;
+	}
+	/*
+	 * The usual way a task runs out of its stack: the processor could
+	 * not push the page fault's frame either, and came here on a stack
+	 * of its own, with CR2 still saying where
+	 */
+	if ( f->vec == 8 && knl_stack_guard_hit(knl_ctxtsk, (UBINT)read_cr2()) ) {
+		stack_out_say(read_cr2(), f);
 	}
 	exc_report(f, read_cr2());
 }

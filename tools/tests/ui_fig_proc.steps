@@ -1,0 +1,84 @@
+# 基本図形編集をプロセスで (design 11.3), for tools/ui_run.py: a figure of 30 small
+# rectangles (8 square, 12 apart along the top) and two zigzag lines, made as a copy of
+# 画用紙 (mkbig), opened with the figure editor running as a process (pfig) whatever the
+# program object says. Its window stands where 画用紙 says (100,100 to 900,700), the work
+# area from 110,127. A rectangle is taken and carried, a band pulled out, the tray copied
+# to and pasted from, everything cut and moved back, the menu opened and put away, the
+# figure saved, closed and opened again and found the same.
+# Keys with Ctrl (01): A 04, C 06, V 19, X 1B, Z 1D, S 16, E 08; Delete 4C, Esc 29.
+mkbig fig 30 4
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 32
+wait 800
+shot pfig_open
+# the first rectangle taken by its upper left (its right edge and foot size it), and
+# carried 100 across and 200 down
+logmark
+click 111 128
+expectsince figure: picked 1
+logmark
+drag 111 128 211 328
+expectsince figure: moved 1 by 100,200
+wait 300
+shot pfig_moved
+# a band from the empty page over the rectangles on the right
+logmark
+drag 700 330 300 129
+expectsince figure: picked
+wait 300
+shot pfig_band
+# the one carried taken again, copied to the tray and pasted: a shape more
+logmark
+click 212 329
+expectsince figure: picked 1
+logmark
+key 06 01
+expectsince figure: copied to the tray 1
+logmark
+key 19 01
+expectsince figure: pasted, 33 shapes 1 picked
+wait 300
+shot pfig_pasted
+# the pasted one deleted
+logmark
+key 4C
+expectsince figure: deleted, 32 shapes
+# everything cut, and moved back from the tray
+logmark
+key 04 01
+expectsince figure: command selectall
+logmark
+key 1B 01
+expectsince figure: deleted, 0 shapes
+logmark
+key 1D 01
+expectsince figure: pasted, 32 shapes 32 picked
+wait 300
+shot pfig_back
+# the menu, put away with Escape
+logmark
+click 600 500 1
+expectsince figure: menu
+wait 500
+shot pfig_menu
+key 29
+wait 300
+# saved, closed, opened again: the same record
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum
+keep saved
+logmark
+key 08 01
+expectsince figure: closed
+wait 500
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 32
+sum
+same saved
+key 08 01
+expect figure: closed
+absent !OACV!

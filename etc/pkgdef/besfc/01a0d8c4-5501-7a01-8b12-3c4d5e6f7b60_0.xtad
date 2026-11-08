@@ -1,0 +1,8 @@
+<tad version="1.0" encoding="UTF-8" filename="BeSFC">
+<document>
+<p>BeSFC</p>
+<p>スーパーファミコンのエミュレータ。ゲームのROMを持つ実身の仮身をウインドウへドロップして遊ぶ。拡張チップを持つゲームは動かない。</p>
+<p><link id="01a0d889-5501-7a01-8b12-3c4d5e6f7b62_0.xtad" vobjid="01a0d8c3-2501-7011-9a10-c1d2e3f40c11"/></p>
+<p><link id="01a0d8c4-5501-7c03-8b12-3c4d5e6f7b63_0.xtad" vobjid="01a0d8c3-2501-7012-9a10-c1d2e3f40c12"/></p>
+</document>
+</tad>

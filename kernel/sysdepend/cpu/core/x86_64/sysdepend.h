@@ -292,6 +292,11 @@ typedef struct pcpu {
 	volatile BOOL exc_saying;	/* telling an exception (exc_hdl.c) */
 	UW	core_key;		/* the APIC ID above the threads' bits: same for the threads of a core */
 	UW	pkg_key;		/* above the cores' bits: same for one package */
+	UW	id_sig;			/* what it says of itself (cpu_note, smp.c): CPUID 1 EAX */
+	UW	id_7b, id_7c, id_7d;	/* CPUID 7 */
+	UW	id_addr;		/* CPUID 80000008h EAX: virtual and physical address bits */
+	UW	id_xsave;		/* CPUID 0Dh EBX: the bytes its XSAVE takes */
+	UB	id_kind;		/* CPUID 1Ah: 0x40 a performance core, 0x20 an efficient one, 0 not hybrid */
 	T_LKCPU	lk;
 	T_SPHELD spin_held[SPIN_HELD_N];	/* the spin locks it holds, for the lockup report */
 #if KLK_FINE

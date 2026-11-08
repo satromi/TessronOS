@@ -1,0 +1,24 @@
+# A 仮身 of ファイル変換 carried with the pointer moved straight after the press,
+# before the program has asked the desktop to carry it (design 10.4), for
+# tools/ui_run.py. In the shot, what follows the pointer must be the 仮身
+# pressed (the row of .ico, turned over), held where it was pressed, and not
+# what lay further along the way the pointer went.
+dclick 80 141
+wait 1500
+open 01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91
+expect xfconv: ready
+wait 500
+dclick 182 207
+expect xfconv: window vblka1
+wait 800
+win vblka1
+hold 300 343
+move 330 353
+move 360 363
+move 420 383
+wait 400
+move 800 620
+wait 300
+shot xfc_carry
+up
+wait 800

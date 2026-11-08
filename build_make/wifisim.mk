@@ -9,7 +9,8 @@
 #   - x64: OpenBSD の 802.11 の層の中(device/net/wifi/sim/obsd_sim.c、tools/openbsd/build.sh の
 #     WIFI_SIM=1、~/tessronos-obsd-x64-wifisim/obsdwifi.o。iwm と PCI は入れない)。AP の WPA2 の
 #     認証は層の HOSTAP が持つものを使う。rump カーネルは Wi-Fi の無いもの
-#   - ARM: rump カーネルの中の NetBSD の 802.11 の層の上(rumpcomp/wifisim/tswifi_sim.c、
+#   - ARM の WIFI_NET80211=obsd: x64 と同じ OpenBSD の層の中(~/tessronos-obsd-arm-wifisim/obsdwifi.o)
+#   - ARM の WIFI_NET80211=nbsd: rump カーネルの中の NetBSD の 802.11 の層の上(rumpcomp/wifisim/tswifi_sim.c、
 #     ~/tessronos-netbsd-wifisim。sdhc・sdmmc・bwfm は入れない)。AP の WPA2 の認証は hostapd の
 #     認証側(tools/wpa/build.sh ap、~/tessronos-wpaap-arm/wpaap.o)
 #   - ハイパーコールは wifi_user_sim.c(wifi_user.c、wifi_user_rpi5.c の代わり)
@@ -17,7 +18,12 @@
 # 生成物は BUILD_ID を分けて作る(例 make TARGET=_X64_ KTEST=1 KTONLY=wifisim WIFI_SIM=1 BUILD_ID=simob
 # sdimg、make TARGET=_QEMU_VIRT_ KTEST=1 KTONLY=wifisim WIFI=1 WIFI_SIM=1 BUILD_ID=simka test)。
 #
-ifeq ($(ARCH),x86_64)
+ifeq ($(ARCH)$(WIFI_NET80211),aarch64nbsd)
+WIFISIM_ON_OBSD :=
+else
+WIFISIM_ON_OBSD := 1
+endif
+ifeq ($(WIFISIM_ON_OBSD),1)
 WIFISIM_LAYER_AUTH := 1
 $(OBSD_OBJ): $(TOP)/device/net/wifi/sim/obsd_sim.c
 else
@@ -33,12 +39,12 @@ SRCS += peripheral_kernel/network/netbsd/wifi_user_sim.c device/net/wifi/sim/wif
 WIFISIM_OBJS := $(OBJDIR)/peripheral_kernel/network/netbsd/wifi_user_sim.o \
 	$(OBJDIR)/device/net/wifi/sim/wifisim_ap.o
 # ARM では wifi_arm.mk の WIFI5_OBJS(USE_WIFI、USE_NETSEL)にも入れる
-WIFI5_OBJS := $(WIFISIM_OBJS)
+WIFI5_OBJS += $(WIFISIM_OBJS)
 WIFISIM_STAMP := $(OBJDIR)/wifisim.stamp
 $(shell mkdir -p $(OBJDIR); [ -f $(WIFISIM_STAMP) ] || echo 1 > $(WIFISIM_STAMP))
 $(WIFISIM_OBJS) $(OBJDIR)/device/net/wifi/wifi.o $(OBJDIR)/device/net/netadp.o: CFLAGS += -DWIFI_SIM=1
 $(OBJDIR)/device/net/wifi/sim/wifisim_ap.o: CFLAGS += -DWIFISIM_LAYER_AUTH=$(WIFISIM_LAYER_AUTH)
-$(OBJDIR)/peripheral_kernel/network/netbsd/wifi_user_sim.o: CFLAGS += $(if $(filter x86_64,$(ARCH)),-DWIFI_OBSD=1)
+$(OBJDIR)/peripheral_kernel/network/netbsd/wifi_user_sim.o: CFLAGS += $(if $(WIFISIM_ON_OBSD),-DWIFI_OBSD=1)
 $(WIFISIM_OBJS) $(OBJDIR)/device/net/wifi/wifi.o $(OBJDIR)/device/net/netadp.o: \
 	$(WIFISIM_STAMP) $(TOP)/build_make/wifisim.mk
 $(OBJDIR)/device/net/wifi/sim/wifisim_ap.o: $(wildcard $(TOP)/device/net/wifi/sim/*.h)

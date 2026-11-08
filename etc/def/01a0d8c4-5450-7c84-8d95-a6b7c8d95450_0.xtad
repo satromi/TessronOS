@@ -1,0 +1,44 @@
+<tad version="1.0" encoding="UTF-8" filename="仮身一覧のデータボックス">
+<document>
+<p>仮身一覧のデータボックス</p>
+<p>パネル1は〈整頓〉のパネルで、部品と位置はデスクトップの仮身一覧の整頓のパネル(application/desktop/dtcab.c)と同じ。文字2が選んだ仮身の数(仮身一覧が書き換える)、選択スイッチ10〜12が横の左揃え、右揃え、なし、20〜22が縦の詰める、上揃え、なし、30〜33が段組の1段、左右、上下、なし、40〜45が幅調整の最初、全項目、名前まで、続柄まで、日付除く、なし、50〜54が整列順の名前、作成日、更新日、サイズ、なし、60と61が順序の昇順と降順、数値1が段組数、ボタン101が取消、102がOK。仮身を1つだけ選んでいるときは、仮身一覧が幅調整のほかの組の「なし」以外と段組数と順序を灰色にする。プロセスの仮身一覧が使う。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,656,336" title="整頓">
+<text num="2" x="26" y="34">選択: 0個</text>
+<text x="26" y="60">横</text>
+<choice num="10" rect="92,42,212,62" group="10" value="0">左揃え</choice>
+<choice num="11" rect="92,64,212,84" group="10" value="0">右揃え</choice>
+<choice num="12" rect="92,86,212,106" group="10" value="1">なし</choice>
+<text x="26" y="134">縦</text>
+<choice num="20" rect="92,116,212,136" group="20" value="0">詰める</choice>
+<choice num="21" rect="92,138,212,158" group="20" value="0">上揃え</choice>
+<choice num="22" rect="92,160,212,180" group="20" value="1">なし</choice>
+<text x="26" y="208">段組数</text>
+<number num="1" rect="92,188,152,212" value="1"/>
+<text x="232" y="60">段組</text>
+<choice num="30" rect="298,42,418,62" group="30" value="0">1段</choice>
+<choice num="31" rect="298,64,418,84" group="30" value="0">左右</choice>
+<choice num="32" rect="298,86,418,106" group="30" value="0">上下</choice>
+<choice num="33" rect="298,108,418,128" group="30" value="1">なし</choice>
+<text x="232" y="156">幅調整</text>
+<choice num="40" rect="298,138,418,158" group="40" value="0">最初</choice>
+<choice num="41" rect="298,160,418,180" group="40" value="0">全項目</choice>
+<choice num="42" rect="298,182,418,202" group="40" value="0">名前まで</choice>
+<choice num="43" rect="298,204,418,224" group="40" value="0">続柄まで</choice>
+<choice num="44" rect="298,226,418,246" group="40" value="0">日付除く</choice>
+<choice num="45" rect="298,248,418,268" group="40" value="1">なし</choice>
+<text x="442" y="60">整列順</text>
+<choice num="50" rect="508,42,628,62" group="50" value="0">名前</choice>
+<choice num="51" rect="508,64,628,84" group="50" value="0">作成日</choice>
+<choice num="52" rect="508,86,628,106" group="50" value="0">更新日</choice>
+<choice num="53" rect="508,108,628,128" group="50" value="0">サイズ</choice>
+<choice num="54" rect="508,130,628,150" group="50" value="1">なし</choice>
+<text x="442" y="178">順序</text>
+<choice num="60" rect="508,160,628,180" group="60" value="1">昇順</choice>
+<choice num="61" rect="508,182,628,202" group="60" value="0">降順</choice>
+<button num="101" rect="452,292,538,318" answer="cancel">取消</button>
+<button num="102" rect="548,292,634,318" emph="true">OK</button>
+</panel>
+</databox>
+</tad>

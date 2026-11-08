@@ -33,6 +33,7 @@
 #include <ts/ser.h>
 #include "kernel.h"
 #include "sysdepend.h"
+#include <ts/fs.h>
 
 /* Before the kernel starts (no kernel objects available yet) */
 EXPORT ER knl_init_device( void )
@@ -61,6 +62,8 @@ EXPORT ER knl_start_device( void )
 	/* File management and the mount table (design 12.2.3) */
 	if ( fs_main() >= E_OK ) {
 		fs_regist(&knl_fimp_fat);
+		fs_regist(&knl_fimp_exfat);
+		fs_regist(&knl_fimp_ntfs);
 		fs_attach("fatfs", "vblka1", "/boot", 0);
 	}
 
@@ -76,6 +79,7 @@ EXPORT ER knl_start_device( void )
 #if USE_SHUTDOWN
 EXPORT ER knl_finish_device( void )
 {
+	knl_fs_finish(NULL, NULL);
 	return E_OK;
 }
 #endif /* USE_SHUTDOWN */

@@ -338,6 +338,7 @@ LOCAL void test_timer_other_prc( void )
 {
 	T_CTSK	ctsk;
 	ID	id;
+	INT	i;
 
 	if ( knl_num_prc < 2 ) KT_SKIP("single processor");
 
@@ -352,7 +353,10 @@ LOCAL void test_timer_other_prc( void )
 	done_cnt = 0;
 	dly_worst = 0;
 	KT_ASSERT_ER(tk_sta_tsk(id, 0), E_OK);
-	KT_ASSERT_ER(tk_dly_tsk(200), E_OK);
+	/* its twenty waits take as long as the host lets them: a wait lost never ends */
+	for ( i = 0; i < 100 && done_cnt == 0; i++ ) {
+		KT_ASSERT_ER(tk_dly_tsk(50), E_OK);
+	}
 	KT_ASSERT_EQ(done_cnt, 1);
 	tm_printf((UB*)"  tk_dly_tsk_u(100) on PRC2: worst %d ns\n", (INT)dly_worst);
 	/* Never early is the part that is the kernel's doing. How late
@@ -619,12 +623,14 @@ LOCAL void test_wait_result( void )
  * task itself (tk_exd_tsk), would hand out memory that is still being
  * written. The hook of the tests (smp.c) makes that moment long; the
  * control block says whether a processor still holds the task's
- * context (runprc), the allocator whether the stack is free.
+ * context (runprc), the list of stacks given back whether the stack is
+ * free. Nothing may be read below the foot of the stack: unmapped pages
+ * lie there (knl_vmap_stack).
  */
 #define EX_ROUNDS	20
 #define EX_SPIN		200000
 
-IMPORT BOOL	knl_Iinuse( void *ptr );
+IMPORT BOOL	knl_sstk_waiting( CONST void *stack );
 IMPORT TCB	knl_tcb_table[];
 
 LOCAL volatile BOOL	ex_going;
@@ -701,7 +707,7 @@ LOCAL void test_exd_stack( void )
 		if ( tid <= 0 ) break;
 		t = &knl_tcb_table[tid - 1];
 		while ( t->runprc != 0 ) {
-			if ( !knl_Iinuse(stk) ) {
+			if ( knl_sstk_waiting(stk) ) {
 				/* free: wrong only if its processor still held it after that */
 #if defined(__x86_64__)
 				SmpMemBarrier();

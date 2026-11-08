@@ -178,6 +178,10 @@
  *	SP_TCHURN a task of its own made, run and deleted arg[1] times;
  *		each one's user stack is where the one before had it
  *		(ktest_prcobj).
+ *	SP_SDNWIN a window "ktsdn" that, asked to close, writes /boot/SDNWIN.TXT
+ *		and ends: what a program keeps as the machine goes off
+ *	SP_SDNBG no window: writes /boot/SDNBG.TXT and sleeps until it is ended
+ *	SP_SDNSTUCK no window: ignores being told to end, and has to be forced
  *	SP_SLICE arg[1] 0: five tasks of its priority spin for arg[2] ms
  *		beside one more that notes the longest it went without
  *		running, which is the exit code (ms). arg[1] 1: one task
@@ -191,6 +195,7 @@
 #include <tk/syscall.h>
 #include <ts/uapp.h>
 #include <ts/proc.h>
+#include <ts/psx.h>
 #include <ts/dt.h>
 #include <ts/hid.h>
 #include <ts/usb.h>
@@ -201,6 +206,11 @@
 #include <ts/keymap.h>
 #include <ts/sysdef.h>
 #include <ts/snd.h>
+#include <ts/dtreq.h>
+#include <ts/fn.h>
+#include <ts/time.h>
+#include <ts/tad.h>
+#include <ts/tadview.h>
 
 IMPORT ER ts_get_mono( UD *p_ns );
 
@@ -244,6 +254,14 @@ IMPORT ER ts_get_mono( UD *p_ns );
 #define SP_TONE		38
 #define SP_TCHURN	39
 #define SP_SLICE	40
+#define SP_PLACE	41
+#define SP_SDNWIN	42
+#define SP_SDNBG	43
+#define SP_SDNSTUCK	44
+#define SP_TVRTT	45
+#define SP_TVSVC	46
+#define SP_DPMEM	47
+#define SP_FNFACE	48
 #define LIST_MAX	128
 #define MNT_MAX		32		/* mounts looked at: the system's few and a test's */
 #define BIG_SZ		( 160 * 1024 )
@@ -1497,6 +1515,75 @@ LOCAL INT dropped( void )
 	return 0;
 }
 
+/* A request to the desktop, the answer waited for */
+LOCAL ER ask_dt( T_DTREQ *rq, UINT seq )
+{
+	static T_DTANS	an;
+	T_OBCRE		c;
+	TS_UUID		d, reply;
+	SZ		asz = 0;
+	ID		k, ka;
+	ER		er;
+
+	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) != E_OK ) return E_NOEXS;
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	if ( ob_cre_obj(&c, &reply) != E_OK ) return E_NOMEM;
+	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
+	if ( ka <= 0 ) return ka;
+	rq->seq = seq;
+	rq->reply = reply;
+	k = ob_opn_obj(&d, OB_OP_WRITE);
+	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
+	if ( k > 0 ) (void)ob_cls_obj(k);
+	if ( er >= E_OK ) {
+		er = ob_rea_tmo(ka, 0, 0, &an, sizeof(an), &asz, 20000);
+		if ( er >= E_OK ) er = an.er;
+	}
+	(void)ob_cls_obj(ka);
+	(void)ob_del_obj(&reply);
+	return er;
+}
+
+/*
+ * A link carried to a window of the desktop's and asked placed, for each
+ * object the test sends while the hand is down: the first one this user
+ * may not read, the second one it may.
+ */
+LOCAL INT placed( void )
+{
+	static T_DTREQ	rq;
+	TS_UUID		me;
+	INT		i;
+
+	memcpy(&me, &arg[1], sizeof(me));
+	if ( ob_login(&me, (CONST UB *)"ktest-pw") != E_OK ) return 4100;
+	for ( i = 0; i < 2; i++ ) {
+		UINT	seq = 10 + (UINT)i;
+		ER	er;
+
+		if ( ts_rcv_msg(&msg, 30000) != E_OK ) return 4101 + i;
+		memset(&rq, 0, sizeof(rq));
+		rq.req = DT_RQ_CARRY;
+		rq.recno = -1;
+		rq.look.w = 100;
+		rq.look.h = 20;
+		rq.look.frcol = rq.look.chcol = rq.look.tbcol = rq.look.bgcol = 0xFFFFFFFFU;
+		if ( ask_dt(&rq, seq) != E_OK ) return 4103 + i;
+		memset(&rq, 0, sizeof(rq));
+		rq.req = DT_RQ_PLACE;
+		memcpy(&rq.target, msg.body, sizeof(rq.target));
+		rq.recno = -1;
+		rq.look.w = 100;
+		rq.look.h = 20;
+		rq.look.frcol = rq.look.chcol = rq.look.tbcol = rq.look.bgcol = 0xFFFFFFFFU;
+		rq.carry = seq;
+		er = ask_dt(&rq, seq + 100);
+		if ( er != ( ( i == 0 ) ? E_OACV : E_OK ) ) return 4105 + i;
+	}
+	return 0;
+}
+
 /* A window of the process's named "ktkill", its key, and its drawing environment */
 LOCAL INT kill_window( ID *p_kw )
 {
@@ -2355,6 +2442,76 @@ LOCAL INT bgwait( void )
 	return 3301;
 }
 
+/* A short file, closed, as a program keeps what it has */
+LOCAL BOOL sdn_write( CONST char *path, CONST char *text )
+{
+	INT	fd = fs_open(path, O_WRONLY | O_CREAT | O_TRUNC), n;
+
+	if ( fd < 0 ) return FALSE;
+	for ( n = 0; text[n] != '\0'; n++ ) ;
+	(void)fs_write(fd, text, n);
+	(void)fs_close(fd);
+	return TRUE;
+}
+
+LOCAL INT sdnwin( void )
+{
+	CONST char	*j = "{\"rect\":[360,280,660,460],\"attr\":7}";
+	T_OBCRE		c;
+	T_OBNTF		req;
+	T_OBNTM		m;
+	TS_UUID		win, ch;
+	SZ		asz = 0;
+	ID		kw, port;
+
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_WINDOW;
+	c.sub = OB_S_WINDOW;
+	c.name = (CONST UB *)"ktsdn";
+	c.json = (CONST UB *)j;
+	for ( c.jsonsz = 0; j[c.jsonsz] != '\0'; c.jsonsz++ ) ;
+	if ( ob_cre_obj(&c, &win) != E_OK ) return 4200;
+	kw = ob_opn_obj(&win, OB_OP_R | OB_OP_W | OB_OP_PROT);
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	port = ( ob_cre_obj(&c, &ch) >= E_OK ) ? ob_opn_obj(&ch, OB_OP_READ | OB_OP_WRITE) : E_NOEXS;
+	memset(&req, 0, sizeof(req));
+	req.events = OB_E_CLOSE | OB_E_DELETE;
+	if ( kw <= 0 || port <= 0 || ob_ntf_evt(kw, OB_REC_ANY, &req, port) <= 0 ) return 4201;
+	if ( !ready() ) return 4202;
+	while ( ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) < E_OK || m.event != OB_E_CLOSE ) {
+		tk_dly_tsk(10);
+	}
+	/* as a program with something to keep: it takes its time, after the window has been asked */
+	tk_dly_tsk(1000);
+	if ( !sdn_write("/boot/SDNWIN.TXT", "kept by the window\n") ) return 4203;
+	return 0;
+}
+
+LOCAL INT sdnbg( void )
+{
+	if ( !sdn_write("/boot/SDNBG.TXT", "kept without a window\n") ) return 4300;
+	if ( !ready() ) return 4301;
+	for ( ;; ) {
+		(void)tk_slp_tsk(TMO_FEVR);
+	}
+	return 4302;
+}
+
+LOCAL INT sdnstuck( void )
+{
+	T_TSSIG	s;
+
+	memset(&s, 0, sizeof(s));
+	s.ign = 1ULL << TS_SIGTERM;
+	if ( ts_sig_set(TS_SS_IGN, &s, NULL) < E_OK ) return 4400;
+	if ( !ready() ) return 4401;
+	for ( ;; ) {
+		(void)tk_dly_tsk(1000);
+	}
+	return 4402;
+}
+
 LOCAL INT obstuck( void )
 {
 	CONST TS_UUID	devlist = OB_UUID_DEVLIST_INIT;
@@ -2572,6 +2729,330 @@ LOCAL INT tone( void )
 	return 0;
 }
 
+/*
+ * SP_TVRTT: the time of one round trip into the kernel and back, as the
+ * drawing of documents in a process makes them (design 11.11): arg[1]
+ * calls (10000 when 0) of the lightest, fn_system, then as many measures
+ * of five letters with fn_dra_txt, the face at 14 pixels. The nanoseconds
+ * each took are said on the console.
+ */
+LOCAL INT tvrtt( void )
+{
+	INT	n = ( arg[1] > 0 ) ? (INT)arg[1] : 10000, i;
+	UD	t0 = 0, t1 = 0;
+	ID	fid = fn_system();
+	T_FNTXT	pk;
+	static CONST UB	five[] = "あいうえお";
+
+	if ( fid <= 0 ) return 4501;
+	(void)ts_get_mono(&t0);
+	for ( i = 0; i < n; i++ ) (void)fn_system();
+	(void)ts_get_mono(&t1);
+	say("  svcprog: tvrtt fn_system ns ", (INT)( ( t1 - t0 ) / (UD)n ));
+	pk.op = FN_OP_WIDTH;
+	pk.gid = -1;
+	pk.fid = fid;
+	pk.x = pk.y = 0;
+	pk.text = five;
+	pk.len = (INT)( sizeof(five) - 1 );
+	pk.colour = 0;
+	pk.width = 0;
+	pk.cp = 0;
+	pk.st.px = 14;
+	pk.st.style = 0;
+	pk.st.xpx = 0;
+	pk.st.angle = 0;
+	if ( fn_dra_txt(&pk) <= 0 ) return 4502;
+	(void)ts_get_mono(&t0);
+	for ( i = 0; i < n; i++ ) (void)fn_dra_txt(&pk);
+	(void)ts_get_mono(&t1);
+	say("  svcprog: tvrtt fn_dra_txt width ns ", (INT)( ( t1 - t0 ) / (UD)n ));
+	return 0;
+}
+
+/* A UUID written as text, read */
+LOCAL BOOL uuid_of( CONST char *t, TS_UUID *u )
+{
+	INT	i, k = 0, h, l;
+
+	for ( i = 0; i < 16; i++ ) {
+		while ( t[k] == '-' ) k++;
+		h = ( t[k] >= '0' && t[k] <= '9' ) ? t[k] - '0' : ( t[k] >= 'a' && t[k] <= 'f' ) ? t[k] - 'a' + 10 : -1;
+		l = ( t[k + 1] >= '0' && t[k + 1] <= '9' ) ? t[k + 1] - '0'
+		  : ( t[k + 1] >= 'a' && t[k + 1] <= 'f' ) ? t[k + 1] - 'a' + 10 : -1;
+		if ( h < 0 || l < 0 ) return FALSE;
+		u->b[i] = (UB)( h * 16 + l );
+		k += 2;
+	}
+	return TRUE;
+}
+
+LOCAL BOOL bytes_same( CONST UB *a, CONST char *b, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( a[i] != (UB)b[i] ) return FALSE;
+	}
+	return TRUE;
+}
+
+/*
+ * SP_FNFACE: the faces of the kernel's listed by a process (fn_nface,
+ * fn_face_at, fn_family). As many are in use as the kernel says
+ * (arg[1]), the first is the one it says (arg[2]), each has a family
+ * name, which a short room cuts; a place past them is none, and what
+ * is wrong is refused.
+ */
+LOCAL INT fnface( UW n_k, UW first_k )
+{
+	UB	name[64], cut[4];
+	INT	n = fn_nface(), i, len;
+	ID	fid;
+
+	say("  svcprog: fnface faces ", n);
+	if ( n <= 0 ) return 4801;
+	if ( (UW)n != n_k ) return 4802;
+	if ( (UW)fn_face_at(0) != first_k ) return 4803;
+	if ( fn_face_at(-1) != E_NOEXS ) return 4804;
+	if ( fn_face_at(n) != E_NOEXS ) return 4805;
+	for ( i = 0; i < n; i++ ) {
+		fid = fn_face_at(i);
+		if ( fid <= 0 ) return 4806;
+		len = fn_family(fid, name, sizeof(name));
+		if ( len <= 0 || len >= (INT)sizeof(name) || name[len] != 0 ) return 4807;
+	}
+	fid = fn_face_at(0);
+	len = fn_family(fid, name, sizeof(name));
+	cut[2] = cut[3] = 0x55;
+	if ( len >= 3 && ( fn_family(fid, cut, 3) != 2 || cut[2] != 0 || cut[3] != 0x55
+			   || cut[0] != name[0] || cut[1] != name[1] ) ) return 4808;
+	if ( fn_family(fid, NULL, 64) != E_PAR ) return 4809;
+	if ( fn_family(fid, name, 0) != E_PAR ) return 4810;
+	if ( fn_family(fid, (UB *)0x10, 64) != E_MACV ) return 4811;
+	if ( fn_family(0, name, sizeof(name)) != E_PAR ) return 4812;
+	return 0;
+}
+
+/*
+ * SP_TVSVC: the calls the drawing of documents in a process makes
+ * (design 11.11). ob_ref_vob answers the look of a link to an object
+ * there is (the program object of スライド) as the store has it, a link
+ * to none as a 虚身, and refuses what is wrong; fn_dra_txt measures at
+ * the size handed to it and leaves the kernel's face as it was, and
+ * refuses what is wrong. ob_ref_vid answers the volume an object is on
+ * and this machine, and refuses what is wrong. ob_dup_obj copies the
+ * template of a document under a name, and refuses what is wrong.
+ */
+LOCAL INT tvsvc( void )
+{
+	static T_OBRVOB	q[2];
+	static UW	icon[64 * 64];
+	static CONST UB	three[] = "あいう";
+	T_FNTXT		pk;
+	ID		fid = fn_system();
+	INT		a, b, c, i;
+
+	if ( ob_ref_vob(NULL, 1) != E_PAR ) return 4601;
+	if ( ob_ref_vob(q, 0) != E_PAR ) return 4602;
+	if ( ob_ref_vob(q, OB_RVOB_MAX + 1) != E_PAR ) return 4603;
+	if ( ob_ref_vob((T_OBRVOB *)0x10, 1) != E_MACV ) return 4604;
+	if ( !uuid_of(SYSDEF_PROG_SLIDE, &q[0].vobj.target) ) return 4605;
+	q[0].vobj.disp = TAD_D_DEFAULT;
+	q[0].want = OB_VW_NAME | OB_VW_LABEL | OB_VW_ICON | OB_VW_PAPER | OB_VW_STATE;
+	q[0].icon = icon;
+	q[0].icon_max = 64 * 64;
+	for ( i = 0; i < 16; i++ ) q[1].vobj.target.b[i] = (UB)( 0xA0 + i );	/* no such object */
+	q[1].want = OB_VW_NAME | OB_VW_STATE;
+	if ( ob_ref_vob(q, 2) != 2 ) return 4606;
+	say("  svcprog: tvsvc name bytes ", q[0].name_len);
+	say("  svcprog: tvsvc label bytes ", q[0].label_len);
+	say("  svcprog: tvsvc icon width ", q[0].icon_w);
+	if ( q[0].er != E_OK || q[0].name_len <= 0 ) return 4607;
+	if ( ( q[0].state & TV_ST_GONE ) != 0 ) return 4608;
+	if ( ( q[1].state & TV_ST_GONE ) == 0 || q[1].er >= E_OK ) return 4609;
+
+	if ( fid <= 0 ) return 4610;
+	pk.op = FN_OP_WIDTH;
+	pk.gid = -1;
+	pk.fid = fid;
+	pk.x = pk.y = 0;
+	pk.text = three;
+	pk.len = (INT)( sizeof(three) - 1 );
+	pk.colour = 0;
+	pk.width = 0;
+	pk.cp = 0;
+	pk.st.px = 0;
+	pk.st.style = 0;
+	pk.st.xpx = 0;
+	pk.st.angle = 0;
+	a = fn_dra_txt(&pk);			/* the face as the kernel has it */
+	pk.st.px = 14;
+	b = fn_dra_txt(&pk);
+	pk.st.px = 28;
+	c = fn_dra_txt(&pk);
+	say("  svcprog: tvsvc width at 14 ", b);
+	say("  svcprog: tvsvc width at 28 ", c);
+	if ( b <= 0 || c < b * 2 - 4 || c > b * 2 + 4 ) return 4611;
+	pk.st.px = 0;
+	if ( fn_dra_txt(&pk) != a ) return 4612;	/* the kernel's face left as it was */
+	pk.op = 99;
+	if ( fn_dra_txt(&pk) != E_PAR ) return 4613;
+	pk.op = FN_OP_WIDTH;
+	pk.len = -1;
+	if ( fn_dra_txt(&pk) != E_PAR ) return 4614;
+	pk.len = 3;
+	pk.st.px = 600;
+	if ( fn_dra_txt(&pk) != E_PAR ) return 4615;
+	pk.st.px = 14;
+	pk.op = FN_OP_DRAW;
+	pk.gid = 1;				/* not a window of its own */
+	if ( fn_dra_txt(&pk) != E_ID ) return 4616;
+	if ( fn_dra_txt((T_FNTXT *)0x10) != E_MACV ) return 4617;
+
+	/* ob_ref_vid: the volume the program object is on and this machine, and what it refuses */
+	{
+		TS_UUID	vol, mach;
+
+		if ( ob_ref_vid(&q[0].vobj.target, &vol, &mach) != E_OK ) return 4618;
+		if ( ob_ref_vid(NULL, &vol, NULL) != E_PAR ) return 4619;
+		if ( ob_ref_vid(&q[0].vobj.target, NULL, NULL) != E_PAR ) return 4620;
+		if ( ob_ref_vid(NULL, NULL, &mach) != E_OK ) return 4621;
+		if ( ob_ref_vid(&q[1].vobj.target, &vol, NULL) != E_NOEXS ) return 4622;
+		if ( ob_ref_vid(&q[0].vobj.target, (TS_UUID *)0x10, NULL) != E_MACV ) return 4623;
+	}
+
+	/*
+	 * ob_dup_obj: the template of a document copied under a name, as
+	 * the desktop copies one -- the copy has the name, is counted by no
+	 * link and has its record 0 -- and thrown away again; and what it
+	 * refuses
+	 */
+	{
+		TS_UUID	tpl, cp;
+		UB	nm[64];
+		SZ	asz = 0;
+		ID	k;
+
+		if ( !uuid_of("019a1132-762b-7b02-ba2a-a918a9b37c39", &tpl) ) return 4624;
+		if ( ob_dup_obj(&tpl, (CONST UB *)"svcprog copy", &cp) != E_OK ) return 4625;
+		k = ob_opn_obj(&cp, OB_OP_READ | OB_OP_ATRRD);
+		if ( k <= 0 ) return 4626;
+		if ( ob_get_atv(k, (CONST UB *)"name", nm, sizeof(nm) - 1, &asz) != E_OK
+		  || asz != 14 || !bytes_same(nm, "\"svcprog copy\"", 14) ) {
+			ob_cls_obj(k);
+			return 4627;
+		}
+		if ( ob_get_atv(k, (CONST UB *)"refCount", nm, sizeof(nm) - 1, &asz) != E_OK
+		  || asz != 1 || nm[0] != '0' ) {
+			ob_cls_obj(k);
+			return 4628;
+		}
+		if ( ob_rea_rec(k, 0, 0, nm, 4, &asz) != E_OK || asz != 4 || !bytes_same(nm, "<tad", 4) ) {
+			ob_cls_obj(k);
+			return 4629;
+		}
+		ob_cls_obj(k);
+		if ( ob_del_obj(&cp) != E_OK ) return 4630;
+		if ( ob_dup_obj(&tpl, (CONST UB *)"", &cp) != E_PAR ) return 4631;
+		if ( ob_dup_obj(&tpl, NULL, NULL) != E_PAR ) return 4632;
+		if ( ob_dup_obj(&q[1].vobj.target, NULL, &cp) != E_NOEXS ) return 4633;
+		if ( ob_dup_obj(&tpl, NULL, (TS_UUID *)0x10) != E_MACV ) return 4634;
+		if ( ob_dup_obj(&tpl, (CONST UB *)0x10, &cp) != E_MACV ) return 4635;
+	}
+	return 0;
+}
+
+/*
+ * SP_DPMEM: an environment of memory (dp_open_mem, design A class 8).
+ * arg[1] 0: a picture of DPM_W by DPM_H, its rows DPM_PITCH pixels
+ * apart, drawn into with the calls a window is drawn with and closed;
+ * what it holds then, summed, must be arg[2], the sum of the same drawn
+ * by the kernel (tests/ktest/ktest_slide.c), and what is past each row
+ * left alone; what is wrong is refused. arg[1] 1: one opened and the
+ * process ended with it open, for the kernel to see it let go of.
+ */
+#define DPM_W		64
+#define DPM_H		48
+#define DPM_PITCH	( DPM_W + 3 )
+#define DPM_PAST	0x00ABCDEFU
+
+LOCAL UW	dpm_px[DPM_H * DPM_PITCH];
+
+LOCAL void dpm_fill( UW *px )
+{
+	INT	x, y;
+
+	for ( y = 0; y < DPM_H; y++ ) {
+		for ( x = 0; x < DPM_PITCH; x++ ) {
+			px[y * DPM_PITCH + x] = ( x < DPM_W ) ? (UW)( 0x00102030U + x * 3 + y * 0x100 ) : DPM_PAST;
+		}
+	}
+}
+
+LOCAL UW dpm_sum( CONST UW *px )
+{
+	UW	h = 2166136261U;
+	INT	x, y;
+
+	for ( y = 0; y < DPM_H; y++ ) {
+		for ( x = 0; x < DPM_W; x++ ) {
+			h = ( h ^ px[y * DPM_PITCH + x] ) * 16777619U;
+		}
+	}
+	return h;
+}
+
+LOCAL INT dpmem( void )
+{
+	static UW	img[8 * 6];
+	T_DPBMP		b, w;
+	T_DPRECT	r;
+	INT		gid, i;
+	UW		sum;
+
+	dpm_fill(dpm_px);
+	b.px = dpm_px;
+	b.pitch = DPM_PITCH * 4;
+	b.w = DPM_W;
+	b.h = DPM_H;
+	if ( arg[1] == 1 ) {
+		return ( dp_open_mem(&b) >= 0 ) ? 0 : 4701;
+	}
+	if ( dp_open_mem((CONST T_DPBMP *)0x10) != E_MACV ) return 4702;
+	w = b;  w.w = 0;
+	if ( dp_open_mem(&w) != E_PAR ) return 4703;
+	w = b;  w.pitch = DPM_W * 4 - 4;
+	if ( dp_open_mem(&w) != E_PAR ) return 4704;
+	w = b;  w.px = (UW *)0x10;
+	if ( dp_open_mem(&w) != E_MACV ) return 4705;
+	r.left = 0;  r.top = 0;  r.right = 4;  r.bottom = 4;
+	if ( dp_fill_rect(1234, &r, 0) != E_ID ) return 4706;
+	gid = dp_open_mem(&b);
+	if ( gid < 0 ) return 4707;
+	for ( i = 0; i < 8 * 6; i++ ) img[i] = (UW)( 0x00010203U * (UW)i );
+	r.left = 4;  r.top = 4;  r.right = 30;  r.bottom = 20;
+	(void)dp_fill_rect(gid, &r, 0x00FF0000U);
+	r.left = 10;  r.top = 10;  r.right = 50;  r.bottom = 40;
+	(void)dp_frame_rect(gid, &r, 0x0000FF00U, 2);
+	(void)dp_line(gid, 0, DPM_H - 1, DPM_W - 1, 0, 0x000000FFU);
+	(void)dp_put_argb(gid, 40, 30, img, 8, 8, 6, 0x00010203U);
+	(void)dp_put_pixel(gid, 1, 1, 0x00FFFFFFU);
+	r.left = -10;  r.top = -10;  r.right = DPM_W + 10;  r.bottom = 2;	/* cut to the picture */
+	(void)dp_fill_rect(gid, &r, 0x00808080U);
+	if ( dp_close(gid) != E_OK ) return 4708;
+	if ( dp_close(gid) != E_ID ) return 4709;
+	r.left = 0;  r.top = 0;  r.right = 4;  r.bottom = 4;
+	if ( dp_fill_rect(gid, &r, 0) != E_ID ) return 4710;
+	sum = dpm_sum(dpm_px);
+	say("  svcprog: dpmem sum ", (INT)sum);
+	if ( sum != (UW)arg[2] ) return 4711;
+	for ( i = 0; i < DPM_H; i++ ) {
+		if ( dpm_px[i * DPM_PITCH + DPM_W] != DPM_PAST ) return 4712;
+	}
+	return 0;
+}
+
 int main( void )
 {
 	SZ	n = ts_get_arg(arg, sizeof(arg));
@@ -2599,6 +3080,7 @@ int main( void )
 	  case SP_TKATK: return tkatk();
 	  case SP_KILLSUB: return killsub();
 	  case SP_DROP:	return dropped();
+	  case SP_PLACE: return placed();
 	  case SP_KILLDRAW: return killdraw();
 	  case SP_KILLMENU: return killmenu();
 	  case SP_DTPTR: return dtptr();
@@ -2621,6 +3103,13 @@ int main( void )
 	  case SP_TONE:	return tone();
 	  case SP_TCHURN: return tchurn();
 	  case SP_SLICE: return slice();
+	  case SP_SDNWIN: return sdnwin();
+	  case SP_SDNBG: return sdnbg();
+	  case SP_SDNSTUCK: return sdnstuck();
+	  case SP_TVRTT: return tvrtt();
+	  case SP_TVSVC: return tvsvc();
+	  case SP_DPMEM: return dpmem();
+	  case SP_FNFACE: return fnface(arg[1], arg[2]);
 	  default:	return 101;
 	}
 }

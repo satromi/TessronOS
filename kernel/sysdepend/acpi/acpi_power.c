@@ -438,6 +438,8 @@ LOCAL void ba_start( void )
 /* ---------------------------------------------------------------- the firmware's word */
 
 /* From the interpreter's task for notifications */
+IMPORT void	knl_pm_lid( BOOL open );	/* kernel/sysdepend/x64/pm.c */
+
 EXPORT void knl_acpi_os_notify( void *dev, unsigned int value )
 {
 	INT	i;
@@ -448,6 +450,12 @@ EXPORT void knl_acpi_os_notify( void *dev, unsigned int value )
 		return;
 	}
 	for ( i = 0; i < PW_MAX; i++ ) {
+		if ( pw[i].used && pw[i].dev == dev && pw[i].kind == K_LID ) {
+			unsigned long long	v = 1;
+
+			(void)knl_acpica_int(dev, "_LID", &v);
+			knl_pm_lid(v != 0);
+		}
 		if ( pw[i].used && pw[i].dev == dev && pw[i].kind != K_BUTTON ) {
 			tell(&pw[i]);
 			if ( pw[i].kind == K_BATTERY ) battery = TRUE;

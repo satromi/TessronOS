@@ -153,48 +153,43 @@ sr_alloc(struct shrd *r, size_t n)
 
 /* ---------------------------------------------------------------- descriptors 0 and 1 for a while */
 
-static int saved_fd[2] = { -1, -1 };
-static int saved_had[2];
-
 static void
-io_put(int which, int fd)
+io_put(struct spawnio *sv, int which, int fd)
 {
-	saved_had[which] = 0;
-	saved_fd[which] = -1;
 	if (fd < 0 || fd == which)
 		return;
-	saved_fd[which] = fcntl(which, F_DUPFD_CLOEXEC, 10);
-	saved_had[which] = 1;		/* -1 there: it was closed */
+	sv->fd[which] = fcntl(which, F_DUPFD_CLOEXEC, 10);
+	sv->had[which] = 1;		/* -1 there: it was closed */
 	if (dup2(fd, which) < 0)
 		error("cannot make descriptor %d: %s", which, strerror(errno));
 }
 
 static void
-io_back(int which)
+io_back(struct spawnio *sv, int which)
 {
-	if (!saved_had[which])
+	if (!sv->had[which])
 		return;
-	if (saved_fd[which] >= 0) {
-		(void)dup2(saved_fd[which], which);
-		(void)close(saved_fd[which]);
+	if (sv->fd[which] >= 0) {
+		(void)dup2(sv->fd[which], which);
+		(void)close(sv->fd[which]);
 	} else
 		(void)close(which);
-	saved_fd[which] = -1;
-	saved_had[which] = 0;
+	sv->had[which] = 0;
 }
 
 void
-spawnio_push(int in, int out)
+spawnio_push(struct spawnio *sv, int in, int out)
 {
-	io_put(0, in);
-	io_put(1, out);
+	sv->had[0] = sv->had[1] = 0;
+	io_put(sv, 0, in);
+	io_put(sv, 1, out);
 }
 
 void
-spawnio_pop(void)
+spawnio_pop(struct spawnio *sv)
 {
-	io_back(1);
-	io_back(0);
+	io_back(sv, 1);
+	io_back(sv, 0);
 }
 
 /* ---------------------------------------------------------------- starting */
@@ -268,6 +263,7 @@ spawn_command(char **argv, char **envp, const char *path, int idx, struct job *j
 	      union node *n, int mode, int in, int out)
 {
 	posix_spawnattr_t at;
+	struct spawnio sv;
 	pid_t pid = -1;
 	char *cmdname;
 	int e = ENOENT, nullfd;
@@ -275,7 +271,7 @@ spawn_command(char **argv, char **envp, const char *path, int idx, struct job *j
 	nullfd = bg_stdin(jp, mode, in);
 	child_attr(&at, jp, mode);
 	INTOFF;
-	spawnio_push(nullfd, out);
+	spawnio_push(&sv, nullfd, out);
 	if (strchr(argv[0], '/') != NULL) {
 		e = try_spawn(&pid, argv[0], argv, envp, &at);
 	} else {
@@ -289,7 +285,7 @@ spawn_command(char **argv, char **envp, const char *path, int idx, struct job *j
 				stunalloc(cmdname);
 		}
 	}
-	spawnio_pop();
+	spawnio_pop(&sv);
 	posix_spawnattr_destroy(&at);
 	if (nullfd >= 0 && nullfd != in)
 		(void)close(nullfd);

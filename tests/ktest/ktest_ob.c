@@ -2763,9 +2763,11 @@ LOCAL void test_plugin( void )
 	CONST char	*bj = "{\"name\":\"試験の原紙\",\"refCount\":1,\"recordCount\":1}";
 	CONST char	*bx = "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>base</p></document></tad>";
 	CONST char	*fj =
+		"{\"id\":\"trash-real-objects\",\"name\":\"屑実身操作\",\"type\":\"base\"}";
+	CONST char	*gj =
 		"{\"id\":\"basic-figure-editor\",\"name\":\"基本図形編集\",\"type\":\"base\"}";
 	CONST DTPROG	*pp;
-	TS_UUID		prog, again, base, brought, dir, fdir;
+	TS_UUID		prog, again, base, brought, dir, fdir, gdir, fig;
 	T_OBREF		r;
 	T_XFUFS		*fs;
 	T_XFUTREE	t;
@@ -2778,11 +2780,13 @@ LOCAL void test_plugin( void )
 	if ( fs_open("/boot/HELLO.ELF", O_RDONLY) < 0 ) KT_SKIP("no file system");
 	(void)fs_mkdir("/boot/PLUGTEST");
 	(void)fs_mkdir("/boot/PLUGFIG");
+	(void)fs_mkdir("/boot/PLUGSYS");
 	KT_ASSERT_ER(put_file("/boot/PLUGTEST/plugin.json", pj, s_len(pj)), E_OK);
 	KT_ASSERT_ER(put_file("/boot/PLUGTEST/" PLUG_BASE ".json", bj, s_len(bj)), E_OK);
 	KT_ASSERT_ER(put_file("/boot/PLUGTEST/" PLUG_BASE "_0.xtad", bx, s_len(bx)), E_OK);
 	KT_ASSERT_ER(put_file("/boot/PLUGTEST/" PLUG_BASE ".ico", "\0\0\1\0\1\0ICONICONIC", 16), E_OK);
 	KT_ASSERT_ER(put_file("/boot/PLUGFIG/plugin.json", fj, s_len(fj)), E_OK);
+	KT_ASSERT_ER(put_file("/boot/PLUGSYS/plugin.json", gj, s_len(gj)), E_OK);
 
 	(void)dt_prog_start();			/* the program box it goes into */
 	KT_ASSERT(dt_prog_find((CONST UB *)"ktest-plugin") == NULL);	/* nothing taken in by itself */
@@ -2794,10 +2798,11 @@ LOCAL void test_plugin( void )
 	KT_ASSERT_ER(xfu_fs_tree(fs, "/boot", &t), E_OK);
 	KT_ASSERT_ER(xfu_import(&t, (CONST UB *)"PLUGTEST", NULL, NULL, &dir), E_OK);
 	KT_ASSERT_ER(xfu_import(&t, (CONST UB *)"PLUGFIG", NULL, NULL, &fdir), E_OK);
+	KT_ASSERT_ER(xfu_import(&t, (CONST UB *)"PLUGSYS", NULL, NULL, &gdir), E_OK);
 	Kfree(fs);
 
 	/* installed: a program the registry knows by its id, with a template of the system's */
-	KT_ASSERT_ER(dt_pkg_install(&dir, FALSE, &prog, &how), E_OK);
+	KT_ASSERT_ER(dt_pkg_install(&dir, FALSE, 0, NULL, &prog, &how), E_OK);
 	KT_ASSERT_EQ(how, DT_HOW_NEW);
 	KT_ASSERT_ER(ts_str_to_uuid(PLUG_BASE, &brought), E_OK);
 	pp = dt_prog_find((CONST UB *)"ktest-plugin");
@@ -2823,17 +2828,45 @@ LOCAL void test_plugin( void )
 	}
 
 	/* installed again: refused unless asked to all the same, then the program replaced */
-	KT_ASSERT_ER(dt_pkg_install(&dir, FALSE, &again, &how), E_LIMIT);
+	KT_ASSERT_ER(dt_pkg_install(&dir, FALSE, 0, NULL, &again, &how), E_LIMIT);
 	KT_ASSERT_EQ(ts_uuid_cmp(&again, &prog), 0);
-	KT_ASSERT_ER(dt_pkg_install(&dir, TRUE, &again, &how), E_OK);
+	KT_ASSERT_ER(dt_pkg_install(&dir, TRUE, 0, NULL, &again, &how), E_OK);
 	KT_ASSERT_EQ(how, DT_HOW_UPDATED);
 	KT_ASSERT(ts_uuid_cmp(&again, &prog) != 0);
 	KT_ASSERT(ob_ref_obj(&prog, &r) < E_OK);			/* the one it replaced, gone */
 	KT_ASSERT(ob_ref_obj(&base, &r) < E_OK);			/* and its template */
 
 	/* one the desktop carries itself is not replaced; an object that is no plugin is refused */
-	KT_ASSERT_ER(dt_pkg_install(&fdir, TRUE, &prog, &how), E_PAR);
-	KT_ASSERT_ER(dt_pkg_install(&brought, FALSE, &prog, &how), E_OBJ);
+	KT_ASSERT_ER(dt_pkg_install(&fdir, TRUE, 0, NULL, &prog, &how), E_PAR);
+	pp = dt_prog_find((CONST UB *)"trash-real-objects");
+	KT_ASSERT(pp != NULL && pp->builtin);
+	/*
+	 * one of the system's that runs as a process (not builtin) is the
+	 * person's to replace and delete: a plugin of its id is refused only
+	 * as not asked to go ahead, and 削除 takes it out of the box. It is
+	 * registered again as 屑実身操作 brings it back, with the protection
+	 * it had, as the tests after open figures with it.
+	 */
+	pp = dt_prog_find((CONST UB *)"basic-figure-editor");
+	KT_ASSERT(pp != NULL && !pp->builtin);
+	if ( pp == NULL ) return;
+	fig = pp->uuid;
+	{
+		static UD	fprt_b[KT_PRT_UD];
+		T_OBPRT		*fprt = (T_OBPRT *)fprt_b;
+
+		KT_ASSERT_ER(ob_get_prt(&fig, fprt, KT_PRT_SIZE, NULL), E_OK);
+		KT_ASSERT_ER(dt_pkg_install(&gdir, FALSE, 0, NULL, &prog, &how), E_LIMIT);
+		KT_ASSERT_EQ(ts_uuid_cmp(&prog, &fig), 0);
+		KT_ASSERT_ER(dt_prog_remove(&fig), E_OK);
+		KT_ASSERT(dt_prog_find((CONST UB *)"basic-figure-editor") == NULL);
+		KT_ASSERT_ER(dt_pkg_install(&fig, FALSE, 0, NULL, &prog, &how), E_OK);
+		KT_ASSERT_EQ(how, DT_PKG_NEW);
+		KT_ASSERT_ER(ob_set_prt(&fig, fprt), E_OK);
+	}
+	pp = dt_prog_find((CONST UB *)"basic-figure-editor");
+	KT_ASSERT(pp != NULL && ts_uuid_cmp(&pp->uuid, &fig) == 0);
+	KT_ASSERT_ER(dt_pkg_install(&brought, FALSE, 0, NULL, &prog, &how), E_OBJ);
 	KT_ASSERT_ER(dt_prog_remove(&again), E_OK);
 	KT_ASSERT(dt_prog_find((CONST UB *)"ktest-plugin") == NULL);
 }
@@ -3281,7 +3314,10 @@ LOCAL void test_system_object( void )
 	v[0] = (char)( '0' + was );
 	KT_ASSERT_ER(ob_wri_rec(key, OB_SYS_SCHEME, 0, v, 1, &asz), E_OK);
 	KT_ASSERT_EQ((INT)wm_scheme(), was);
-	KT_ASSERT_ER(ob_wri_rec(key, OB_SYS_POWER, 0, "SOON", 4, &asz), ( ob_rea_rec(key, OB_SYS_POWER, 0, t, 4096, &asz) >= E_OK && asz > 5 ) ? E_PAR : E_NOSPT);
+	/* a word not known is refused where the machine can be powered off; a machine that can only sleep says SLEEP */
+	KT_ASSERT_ER(ob_wri_rec(key, OB_SYS_POWER, 0, "SOON", 4, &asz),
+		     ( ob_rea_rec(key, OB_SYS_POWER, 0, t, 4096, &asz) >= E_OK && cf_get(t, (INT)asz, "CAN", 0, v, sizeof(v))
+		       && v[0] == 'O' ) ? E_PAR : E_NOSPT);
 	KT_ASSERT_ER(ob_wri_rec(key, 0, 0, "x", 1, &asz), E_RONLY);
 	KT_ASSERT_ER(ob_rea_rec(key, OB_SYS_NREC, 0, t, 4096, &asz), E_NOEXS);
 	KT_ASSERT_ER(ob_rea_rec(key, OB_SYS_NET, 0, t, 4096, &asz), E_OK);
@@ -3421,12 +3457,12 @@ LOCAL void test_package( void )
 	if ( raw == NULL ) goto out;
 	KT_ASSERT_ER(pk_object(raw, len, &pkg), E_OK);
 	Kfree(raw);
-	KT_ASSERT_ER(dt_pkg_install(&pkg, TRUE, &got, &how), E_OK);
+	KT_ASSERT_ER(dt_pkg_install(&pkg, TRUE, 0, NULL, &got, &how), E_OK);
 	KT_ASSERT_EQ((INT)how, DT_PKG_UPDATED);
 	KT_ASSERT(ts_uuid_cmp(&got, &clk) == 0);
 	pp = dt_prog_find((CONST UB *)"clock");
 	KT_ASSERT(pp != NULL && dt_ver_num(pp->version) == 1000);
-	KT_ASSERT_ER(dt_pkg_install(&pkg, FALSE, &got, &how), E_LIMIT);
+	KT_ASSERT_ER(dt_pkg_install(&pkg, FALSE, 0, NULL, &got, &how), E_LIMIT);
 	(void)ob_del_obj(&pkg);
 
 	/* a record the next version does not bring, left by this one */
@@ -3447,7 +3483,7 @@ LOCAL void test_package( void )
 	if ( raw == NULL ) goto out;
 	KT_ASSERT_ER(pk_object(raw, len, &pkg), E_OK);
 	Kfree(raw);
-	KT_ASSERT_ER(dt_pkg_install(&pkg, FALSE, &got, &how), E_OK);
+	KT_ASSERT_ER(dt_pkg_install(&pkg, FALSE, 0, NULL, &got, &how), E_OK);
 	KT_ASSERT_EQ((INT)how, DT_PKG_UPDATED);
 	pp = dt_prog_find((CONST UB *)"clock");
 	KT_ASSERT(pp != NULL && dt_ver_num(pp->version) == 1001);
@@ -3458,16 +3494,18 @@ LOCAL void test_package( void )
 		KT_ASSERT_EQ(om_obj_records(&clk, recs, 8), 2);
 	}
 
-	/* deleted: the registry does not know it, and its object is gone */
+	/* deleted: the registry does not know it, and its object is a 屑実身 */
 	KT_ASSERT_ER(dt_prog_remove(&clk), E_OK);
 	KT_ASSERT(dt_prog_find((CONST UB *)"clock") == NULL);
-	KT_ASSERT_ER(ob_ref_obj(&clk, &r), E_NOEXS);
+	KT_ASSERT_ER(ob_ref_obj(&clk, &r), E_OK);
+	KT_ASSERT_EQ(om_store_refs(&clk), 0);
 
 	/* from the package again: new, at R1.001, and it runs */
-	KT_ASSERT_ER(dt_pkg_install(&pkg, FALSE, &got, &how), E_OK);
+	KT_ASSERT_ER(dt_pkg_install(&pkg, FALSE, 0, NULL, &got, &how), E_OK);
 	KT_ASSERT_EQ((INT)how, DT_PKG_NEW);
 	pp = dt_prog_find((CONST UB *)"clock");
 	KT_ASSERT(pp != NULL && dt_ver_num(pp->version) == 1001 && !pp->builtin);
+	KT_ASSERT_EQ(om_store_refs(&clk), 1);			/* out of the 屑実身, the box's link alone */
 	if ( pp != NULL ) {
 		KT_ASSERT_ER(dt_prog_run(NULL, pp, NULL), E_OK);
 		KT_ASSERT(wait_window("時計", &sp, 5000));
@@ -3478,7 +3516,7 @@ LOCAL void test_package( void )
 
 	/* not a package; the desktop's own */
 	KT_ASSERT_ER(pk_object((CONST UB *)"not a package at all", 20, &bad), E_OK);
-	KT_ASSERT_ER(dt_pkg_install(&bad, FALSE, &got, &how), E_OBJ);
+	KT_ASSERT_ER(dt_pkg_install(&bad, FALSE, 0, NULL, &got, &how), E_OBJ);
 	(void)ob_del_obj(&bad);
 	pp = dt_prog_find((CONST UB *)"basic-text-editor");
 	KT_ASSERT(pp != NULL && pp->builtin);

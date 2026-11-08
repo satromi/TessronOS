@@ -1,0 +1,111 @@
+# スライドの描画の速さ (design 11.11), for tools/ui_run.py: the links of 仮身サンプル
+# shown as slides (their 機能付箋 set to スライド), each page turned with → and timed:
+# the slide says how long the page took to draw (slide: drew N in US us), svcstat how
+# many calls processes made meanwhile, hosttime how long from the key to the line.
+# Twice over, the second time with what was read kept. No pass or fail but the lines.
+# The slide of a process says too how many calls of the system each page took.
+# the time of one round trip into the kernel, as the drawing in a process makes them
+run /boot/SVCPROG.ELF 45 10000
+expectin 60 svcprog: tvrtt fn_dra_txt width ns
+apps 019a4370-3819-79a2-9758-881e1e0de90a basic-slide
+hostmark
+open 019a4370-3819-79a2-9758-881e1e0de90a
+expectin 60 slide: drew 1 in
+hosttime open 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 2 in
+hosttime key1_2 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 3 in
+hosttime key1_3 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 4 in
+hosttime key1_4 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 5 in
+hosttime key1_5 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 6 in
+hosttime key1_6 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 7 in
+hosttime key1_7 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 8 in
+hosttime key1_8 60000
+svcstat
+logmark
+key 4A
+expectsince slide: drew 1 in
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 2 in
+hosttime key2_2 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 3 in
+hosttime key2_3 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 4 in
+hosttime key2_4 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 5 in
+hosttime key2_5 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 6 in
+hosttime key2_6 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 7 in
+hosttime key2_7 60000
+svcstat
+logmark
+hostmark
+key 4F
+expectsince slide: drew 8 in
+hosttime key2_8 60000
+svcstat
+logmark
+key 4A
+expectsince slide: drew 1 in
+svcstat
+shot slide_perf_1
+key 29
+expect slide: closed
+absent !OACV!

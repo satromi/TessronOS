@@ -60,6 +60,7 @@
 #ifdef X64
 
 #include "kernel.h"
+#include <ts/pm.h>
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/pcie.h>
@@ -68,6 +69,7 @@
 #include <ts/ob.h>
 #include "obj/obj.h"
 #include "igt.h"
+#include "igt12.h"
 
 #define SEQ_IDLE_MS	20		/* the number written, and no word of idle: over all the same */
 #define DIRECT_MS	500		/* a job run before the common layer has it */
@@ -369,6 +371,11 @@ LOCAL void ctx_fresh( IGTCTX *c )
 	knl_memset(c->ring, 0, IGT_RING_BYTES);
 	igt_clflush(c->kva, c->img_bytes + IGT_RING_BYTES);
 	c->fresh = FALSE;
+	/*
+	 * The engine may still hold a context at this address (this one
+	 * before a reset, or another freed since): told to read the image
+	 */
+	c->force = TRUE;
 }
 
 /* A context of an engine in a space; under the mutex */
@@ -537,9 +544,19 @@ LOCAL void submit( IGTENG *e, IGTCTX *c )
 
 	r[CTX_RING_TAIL] = c->tail;
 	igt_clflush(&r[CTX_RING_TAIL], 4);
+	if ( c->force ) {
+		lo |= CTX_DESC_FORCE_RESTORE;
+		c->force = FALSE;
+		knl_igt.n_force++;
+	}
 
 	ISpinLock(&knl_igt.lock, &imask);
 	e->cur = c;
+	if ( e->last != c ) {
+		e->prev = e->last;
+		e->last = c;
+	}
+	e->to_kernel = FALSE;			/* asked again after this one, should it be a process's */
 	e->idle_seen = FALSE;
 	e->t_seq = 0;
 	e->t_kick = igt_now_us();
@@ -858,6 +875,39 @@ LOCAL ER igt_info( void *priv, T_GPUINFO *info )
 	return E_OK;
 }
 
+/*
+ * For the record, as a process's context is first used: the registers of
+ * the GT that no context keeps (PAT, MOCS, the L3's and the GAM's, the
+ * render engine's mode and its registers a batch may write), and some a
+ * context keeps, as the engine has them now; and what the kernel holds
+ * of the contexts. Told for every new one, so that what one process
+ * left behind can be seen against the start.
+ */
+LOCAL void regs_note( IGTENG *e, IGTCTX *c, UINT hwc )
+{
+	IGTENG	*r = &knl_igt.eng[IGT_RCS];
+	INT	k, np = 0;
+
+	for ( k = 0; k < NONPRIV_SLOTS; k++ ) {
+		if ( igt_erd(r, RING_FORCE_TO_NONPRIV(k)) != r->base + RING_NOPID ) np++;
+	}
+	tm_printf((UB *)"igt: %s context %d (hardware context %d of a process's space) at GGTT %lx; "
+		  "%ld spaces kept, %ld switches to the kernel's, %ld images read whole; power gating %08x\n",
+		  e->name, c->id, hwc, c->ggtt, knl_igt.n_held - knl_igt.n_reaped, knl_igt.n_to_kernel,
+		  knl_igt.n_force, igt_rd(PG_ENABLE));
+	tm_printf((UB *)"igt:   PAT %08x %08x MOCS %08x %08x %08x %08x LNCF %08x %08x L3SQC4 %08x GAM %08x %08x %08x\n",
+		  igt_rd(PPAT_LO), igt_rd(PPAT_HI), igt_rd(GFX_MOCS(0)), igt_rd(GFX_MOCS(1)), igt_rd(GFX_MOCS(2)),
+		  igt_rd(GFX_MOCS(3)), igt_rd(LNCFCMOCS(0)), igt_rd(LNCFCMOCS(1)), igt_rd(L3SQCREG4),
+		  igt_rd(GAM_ECOCHK), igt_rd(GAMT_ECO_REG_RW_IA), igt_rd(GAMT_CHKN_BIT_REG));
+	tm_printf((UB *)"igt:   rcs MODE %08x MI_MODE %08x nonpriv %d (%08x %08x %08x %08x); 7034 %08x 20d8 %08x "
+		  "7004 %08x 7008 %08x 7014 %08x 7300 %08x 2580 %08x e194 %08x e4f0 %08x\n",
+		  igt_erd(r, RING_MODE), igt_erd(r, RING_MI_MODE), np, igt_erd(r, RING_FORCE_TO_NONPRIV(0)),
+		  igt_erd(r, RING_FORCE_TO_NONPRIV(1)), igt_erd(r, RING_FORCE_TO_NONPRIV(2)),
+		  igt_erd(r, RING_FORCE_TO_NONPRIV(3)), igt_rd(0x7034), igt_rd(0x20d8), igt_rd(CACHE_MODE_1),
+		  igt_rd(0x7008), igt_rd(COMMON_SLICE_CHICKEN2), igt_rd(HDC_CHICKEN0), igt_rd(CS_CHICKEN1),
+		  igt_rd(HALF_SLICE_CHICKEN7), igt_rd(ROW_CHICKEN));
+}
+
 LOCAL ER igt_kick( void *priv, CONST T_GPUJOB *job, void *as )
 {
 	CONST T_GPUBATCH	*b = &job->u.batch;
@@ -865,6 +915,7 @@ LOCAL ER igt_kick( void *priv, CONST T_GPUJOB *job, void *as )
 	IGTENG	*e;
 	IGTCTX	*c;
 	UD	start;
+	BOOL	made = FALSE;
 
 	(void)priv;
 	if ( job->kind != GPU_JOB_BATCH ) return E_NOSPT;
@@ -898,10 +949,13 @@ LOCAL ER igt_kick( void *priv, CONST T_GPUJOB *job, void *as )
 	}
 
 	tk_loc_mtx(knl_igt.mtx, TMO_FEVR);
+	/* the job before is over: the spaces of ended processes the engines have left, freed */
+	igt_vm_reap();
 	c = vm->ctx[b->hwc][b->engine];
 	if ( c == NULL ) {
 		c = ctx_new(vm, (INT)b->engine);
 		vm->ctx[b->hwc][b->engine] = c;
+		made = ( c != NULL && vm != knl_igt.kvm );
 	}
 	if ( c != NULL && ( c->fresh || ( b->flags & GPU_BATCH_FRESH ) != 0 ) ) ctx_fresh(c);
 	tk_unl_mtx(knl_igt.mtx);
@@ -909,6 +963,7 @@ LOCAL ER igt_kick( void *priv, CONST T_GPUJOB *job, void *as )
 
 	/* the GT woken (out of RC6) and kept so until the job is over */
 	igt_fw_get();
+	if ( made ) regs_note(e, c, b->hwc);
 	job_error = FALSE;
 	(void)emit(e, c, start, FALSE);
 	submit(e, c);
@@ -1005,6 +1060,101 @@ EXPORT ER igt_kjob( INT eng, UD batch_va, UW len, T_GPUBO *CONST *bo, INT nbo )
 	f = knl_gpu_submit(&j, bo, nbo);
 	if ( f < 0 ) return (ER)f;
 	return knl_gpu_wait(f, 4 * 1000 * 1000);
+}
+
+/* ---------------------------------------------------------------- the context an engine keeps */
+
+EXPORT BOOL igt_holds_user( void )
+{
+	INT	k;
+
+	for ( k = 0; k < IGT_NENG; k++ ) {
+		CONST IGTCTX	*c = knl_igt.eng[k].last;
+
+		if ( c != NULL && c->vm != knl_igt.kvm ) return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * The engine holds the context it ran last; the one before it is written
+ * back as the engine switches to that one, which is over at the latest
+ * when that job is
+ */
+EXPORT BOOL igt_holds_vm( CONST IGTVM *vm )
+{
+	INT	k;
+	UINT	imask;
+	BOOL	held = FALSE;
+
+	ISpinLock(&knl_igt.lock, &imask);
+	for ( k = 0; k < IGT_NENG && !held; k++ ) {
+		CONST IGTENG	*e = &knl_igt.eng[k];
+
+		held = ( ( e->last != NULL && e->last->vm == vm ) || ( e->cur != NULL && e->cur->vm == vm )
+		      || ( e->cur != NULL && e->prev != NULL && e->prev->vm == vm ) );
+	}
+	ISpinUnlock(&knl_igt.lock, &imask);
+	return held;
+}
+
+/*
+ * A job of the kernel's context, of a batch of nothing, queued for each
+ * engine that holds a process's context and has none asked for yet: as
+ * the engine switches to it, the process's context is written back and
+ * the engine holds it no more
+ */
+EXPORT void igt_to_kernel( void )
+{
+	INT		k;
+	UINT		imask;
+	BOOL		ask;
+	T_GPUJOB	j;
+	D		f;
+
+	if ( !knl_igt.ready || knl_igt.idle_bo == NULL ) return;
+	for ( k = 0; k < IGT_NENG; k++ ) {
+		IGTENG	*e = &knl_igt.eng[k];
+
+		ISpinLock(&knl_igt.lock, &imask);
+		ask = ( e->last != NULL && e->last->vm != knl_igt.kvm && !e->to_kernel );
+		if ( ask ) e->to_kernel = TRUE;
+		ISpinUnlock(&knl_igt.lock, &imask);
+		if ( !ask ) continue;
+
+		knl_memset(&j, 0, sizeof(j));
+		j.kind = GPU_JOB_BATCH;
+		j.u.batch.start_lo = knl_igt.idle_gpu;
+		j.u.batch.len = 8;
+		j.u.batch.engine = (UW)k;
+		j.u.batch.hwc = 0;
+		f = knl_gpu_submit(&j, &knl_igt.idle_bo, 1);
+		if ( f < 0 ) {
+			ISpinLock(&knl_igt.lock, &imask);
+			e->to_kernel = FALSE;
+			ISpinUnlock(&knl_igt.lock, &imask);
+		} else {
+			knl_igt.n_to_kernel++;
+		}
+	}
+}
+
+/* The batch of nothing those jobs run, in the kernel's space */
+LOCAL ER idle_batch( void )
+{
+	T_GPUBOINFO	bi;
+	UW		*b;
+	ER		er;
+
+	knl_igt.idle_bo = knl_gpu_bo_create(PAGE_SIZE, 0, &er);
+	if ( knl_igt.idle_bo == NULL ) return er;
+	b = (UW *)PA2VA(knl_gpu_bo_page(knl_igt.idle_bo, 0));
+	b[0] = MI_BATCH_BUFFER_END;
+	b[1] = MI_NOOP;
+	igt_clflush(b, 8);
+	(void)knl_gpu_bo_ref(knl_igt.idle_bo, &bi);
+	knl_igt.idle_gpu = bi.offset;
+	return E_OK;
 }
 
 #if USE_KTEST
@@ -1269,10 +1419,96 @@ LOCAL ER bring_up( void )
 		knl_igt.ready = FALSE;
 		return er;
 	}
+	if ( ( er = idle_batch() ) < E_OK ) {
+		/* without it a process's space is kept until another job takes the engine */
+		tm_printf((UB *)"igt: no batch for the switch to the kernel's context (%d)\n", er);
+	}
 	knl_igt_ggtt_report();
 	keep();
 	igt_fw_put();				/* the start-up's: the GT may sleep from now on */
 	return E_OK;
+}
+
+/*
+ * The machine asleep. New jobs wait at the engines' lock, held by the
+ * sleep's task, and the job in hand is waited for; the look every
+ * millisecond stops. With S0 idle the function stays in D0 and the GT as it
+ * is. S3 loses the GT: it comes back as in bring_up, on the memory it has
+ * (the contexts' images, the page tables, the status pages).
+ */
+IMPORT void	igt_pm_again( void );			/* igt_pm.c */
+IMPORT void	knl_igt_ggtt_pm_save( void );		/* kernel/sysdepend/x64/igt_ggtt.c */
+IMPORT void	knl_igt_ggtt_pm_restore( void );
+
+LOCAL BOOL	igt_pm_up = FALSE;
+
+LOCAL ER igt_pm_suspend( void *arg, INT how )
+{
+	INT	i;
+
+	igt_pm_up = ( knl_igt.kvm != NULL && knl_igt.pm_ready );
+	if ( !igt_pm_up ) {
+		if ( knl_igt.kvm != NULL ) tm_printf((UB *)"igt: still starting as the machine sleeps\n");
+		return E_OK;
+	}
+	tk_loc_mtx(knl_igt.mtx, TMO_FEVR);
+	for ( i = 0; i < 2000 && knl_igt.fw_users != 0; i++ ) tk_dly_tsk(1);
+	if ( knl_igt.fw_users != 0 ) tm_printf((UB *)"igt: %d users of the GT still at the sleep\n", knl_igt.fw_users);
+	if ( knl_igt.cyc > 0 ) (void)tk_stp_cyc(knl_igt.cyc);
+	if ( how == PM_S3 ) {
+		knl_igt_ggtt_pm_save();
+		if ( knl_igt.intno != 0 ) igt_wr(MASTER_IRQ, 0);
+	}
+	return E_OK;
+}
+
+LOCAL void igt_pm_resume( void *arg, INT how )
+{
+	INT	k;
+
+	if ( !igt_pm_up ) return;
+	if ( how == PM_S3 ) {
+		knl_igt_ggtt_pm_restore();
+		if ( !igt_fw_init() ) {
+			tm_printf((UB *)"igt: the GT did not wake after the sleep\n");
+		}
+		gt_workarounds();
+		ppat();
+		knl_igt.active = -1;
+		igt_wr(MASTER_IRQ, 0);
+		for ( k = 0; k < IGT_NENG; k++ ) eng_resume(&knl_igt.eng[k]);
+		{
+			UW	want = ( ( GT_USER | GT_CTX_SWITCH | GT_CS_ERROR ) << GT_RCS_SHIFT )
+				     | ( ( GT_USER | GT_CTX_SWITCH | GT_CS_ERROR ) << GT_BCS_SHIFT );
+
+			igt_wr(GT_IMR(0), ~want);
+			igt_wr(GT_IER(0), want);
+			igt_wr(GT_IIR(0), 0xffffffff);
+			igt_wr(GT_IIR(0), 0xffffffff);
+		}
+		if ( knl_igt.intno != 0 ) igt_wr(MASTER_IRQ, MASTER_IRQ_CONTROL);
+		igt_pm_again();
+		igt_fw_put();
+		tm_printf((UB *)"igt: the engines set up again after the sleep\n");
+	}
+	if ( knl_igt.cyc > 0 ) (void)tk_sta_cyc(knl_igt.cyc);
+	tk_unl_mtx(knl_igt.mtx);
+}
+
+LOCAL CONST T_PMDEV	igt_pm_dev = { "igt", PM_ORD_GPU, igt_pm_suspend, igt_pm_resume, NULL };
+
+/*
+ * The video engine as it stands, for the records: nothing drives it yet
+ * (docs/tessronos/13-gpu.md 13.12). Read with the media well awake, these
+ * say that the engine answers before anything is asked of it.
+ */
+LOCAL void vcs_report( void )
+{
+	igt_fw_get();
+	tm_printf((UB *)"igt: video engine: RING_MODE %08x, MI_MODE %08x, HWS_PGA %08x, media forcewake ack %08x\n",
+		  igt_rd(VCS_BASE + RING_MODE), igt_rd(VCS_BASE + RING_MI_MODE), igt_rd(VCS_BASE + RING_HWS_PGA),
+		  igt_rd(0x0d88));
+	igt_fw_put();
 }
 
 LOCAL void start_task( INT stacd, void *exinf )
@@ -1307,6 +1543,7 @@ LOCAL void start_task( INT stacd, void *exinf )
 	if ( igt_mode == 2 ) {
 		igt_test_start();
 	}
+	vcs_report();
 	if ( igt_compose_init() >= E_OK ) {
 		(void)igt_compose_check();
 		gob.compose = igt_compose_used();
@@ -1337,7 +1574,10 @@ EXPORT ER knl_igt_init( void )
 	igt_mode = igt_setting("igt", 2);
 	if ( igt_mode == 0 ) return E_NOSPT;
 	er = knl_igt_dev(&knl_igt.dev);
-	if ( er < E_OK ) return er;
+	if ( er < E_OK ) {
+		knl_igt12_look();	/* not of the 9th generation: a later one is told, only read */
+		return er;
+	}
 	knl_igt.mmio = knl_igt.dev.mmio;
 	knl_igt.devid = knl_igt.dev.pci.device;
 	knl_igt.rev = (UB)ts_pcie_cfg_read(knl_igt.dev.pci.bus, knl_igt.dev.pci.dev, knl_igt.dev.pci.fn, 0x08, 1);
@@ -1356,6 +1596,7 @@ EXPORT ER knl_igt_init( void )
 	cm.mtxatr = TA_TFIFO;
 	knl_igt.mtx = tk_cre_mtx(&cm);
 	if ( knl_igt.mtx <= 0 ) return E_LIMIT;
+	(void)ts_pm_register(&igt_pm_dev);
 	ct.exinf = NULL;
 	ct.tskatr = TA_HLNG | TA_RNG0;
 	ct.task = (FP)start_task;

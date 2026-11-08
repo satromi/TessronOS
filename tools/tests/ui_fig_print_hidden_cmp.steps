@@ -1,0 +1,100 @@
+# 基本図形編集で隠蔽仮身を表示しているときの印刷を、カーネル内の図形編集とプロセスの図形編集で同じに
+# する (design 11.3, 11.22), for tools/ui_run.py. 長方形1つと隠蔽仮身(hidden="true")1つの図形を、
+# 表示の〈隠蔽仮身を表示〉(その7行目)で隠蔽仮身を見せてから Ctrl+P、Enter で印刷する。PDF は作った時刻を
+# 除いてバイトで一致する(sum pdf)。隠蔽仮身を見せていない印刷とは違う(仮身が出る)。メニューは前に
+# 選んだ項目をポインタの行に開き、行は 20 おき、項目のメニューはその項目の行から並ぶ。カーネル内は
+# 初め〈閉じる〉が行に来て〈表示〉は3行下、プロセスはその後なので〈表示〉が行に来る。
+# Keys: Ctrl+P 13 01, Enter 28, Ctrl+E 08 01.
+figproc kernel
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <rect round="0" lineType="0" lineWidth="1" l_pat="1" f_pat="0" angle="0" left="20" top="20"
+xml right="80" bottom="60" zIndex="0"/>
+xml <link id="019a0f91-066f-706f-93da-ffe8150d6207_0.xtad" vobjleft="120" vobjtop="40"
+xml vobjright="260" vobjbottom="59" height="19" chsz="14" frcol="#000000" chcol="#000000"
+xml tbcol="#ffcb63" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"
+xml autoopen="false" hidden="true"/>
+xml </figure></tad>
+xmlbig
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+move 690 490
+sync 600
+key 13 01
+wait 2000
+logmark
+key 28
+expectsince print: 
+wait 1500
+sync 600
+sum pdf
+keep plain
+click 600 400 1
+wait 400
+move 610 460
+wait 300
+move 720 460
+wait 400
+move 720 580
+wait 300
+click 720 580
+sync 600
+move 690 490
+sync 600
+key 13 01
+wait 2000
+logmark
+key 28
+expectsince print: 
+wait 1500
+sync 600
+sum pdf
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <rect round="0" lineType="0" lineWidth="1" l_pat="1" f_pat="0" angle="0" left="20" top="20"
+xml right="80" bottom="60" zIndex="0"/>
+xml <link id="019a0f91-066f-706f-93da-ffe8150d6207_0.xtad" vobjleft="120" vobjtop="40"
+xml vobjright="260" vobjbottom="59" height="19" chsz="14" frcol="#000000" chcol="#000000"
+xml tbcol="#ffcb63" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"
+xml autoopen="false" hidden="true"/>
+xml </figure></tad>
+xmlbig
+logmark
+pfig big
+expectsincein 60 figure: opened
+wait 800
+click 500 650
+wait 1000
+logmark
+click 600 400 1
+expectsince figure: menu
+wait 400
+move 610 400
+wait 300
+move 720 400
+wait 400
+move 720 520
+wait 300
+click 720 520
+expectsince figure: command hidden
+move 690 490
+wait 300
+logmark
+key 13 01
+wait 2000
+key 28
+expectsince figure: print (0)
+wait 500
+sync 600
+sum pdf
+same kernel
+logmark
+key 08 01
+expectsince figure: closed
+absent !OACV!

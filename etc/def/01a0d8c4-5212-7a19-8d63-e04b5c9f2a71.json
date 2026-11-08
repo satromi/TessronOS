@@ -15,10 +15,11 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "clock",
       "kind": "accessory",
       "name": "時計",
-      "version": "R1.200",
+      "version": "R1.300",
       "menu": true,
       "builtin": false,
       "base": []

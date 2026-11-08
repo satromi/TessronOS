@@ -202,6 +202,10 @@ IMPORT ID  knl_prc_of_uuid( CONST TS_UUID *uuid );
 /* The calling process: its number, main task and base priority; 0 when the caller is not one */
 IMPORT ID  knl_prc_self( ID *p_main, PRI *p_base );
 IMPORT INT knl_prc_list( ID *pids, INT n );
+/* All of them, however many, in memory to Kfree: how many */
+IMPORT INT knl_prc_list_all( ID **p_pids );
+/* The machine going off: every process but the system's told to end, then ended by force: how many are left */
+IMPORT INT knl_prc_end_all( UW term_ms, void (*tick)( void ) );
 
 /*
  * A process ended by a processor exception (design 9.11), as the

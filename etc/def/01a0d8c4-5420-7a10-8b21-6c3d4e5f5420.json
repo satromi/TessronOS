@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "force-quit",
       "kind": "accessory",
       "name": "強制終了",

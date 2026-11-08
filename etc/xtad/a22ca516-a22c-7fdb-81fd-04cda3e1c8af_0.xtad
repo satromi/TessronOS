@@ -12,6 +12,6 @@
 <rect left="60" top="300" right="220" bottom="340" fillColor="#c0c0c0" strokeColor="#000000" lineWidth="1"/>
 <rect left="60" top="340" right="220" bottom="370" fontSize="14" textColor="#000000" fillColor="transparent" strokeColor="transparent">@ボタン押して</rect>
 </group>
-<link id="7256a561-7256-77df-a322-351100bfa8b4_0.xtad" vobjid="e9f6a586-e9f6-72af-8370-a465d123a20e" vobjleft="450" vobjtop="50" vobjright="650" vobjbottom="81" height="31" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="0" pictdisp="true" namedisp="true" roledisp="false" typedisp="false" updatedisp="false" framedisp="true" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true}}"/>
+<link id="7256a561-7256-77df-a322-351100bfa8b4_0.xtad" vobjid="e9f6a586-e9f6-72af-8370-a465d123a20e" vobjleft="450" vobjtop="50" vobjright="603" vobjbottom="69" height="19" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="0" pictdisp="true" namedisp="true" roledisp="false" typedisp="false" updatedisp="false" framedisp="true" autoopen="false" scrollx="0" scrolly="0" zoomratio="1" applist="{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true}}"/>
 </figure>
 </tad>

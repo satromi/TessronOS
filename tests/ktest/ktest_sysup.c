@@ -24,6 +24,9 @@
  *	the start as after a cut in the power, it comes out the same. A
  *	package for another machine or processor, one that is not newer
  *	without being told, and one that is not a system's, are refused.
+ *	A program of the system's, the clock, packed with a newer version
+ *	in its metadata and a record more, is updated in place: the
+ *	registry knows it by the new version under the same object.
  */
 
 #include "ktest.h"
@@ -100,6 +103,18 @@ LOCAL void ent( CONST char *uuid, CONST char *tail, CONST char *data, UW rt )
 	knl_strcat(ename[nent], tail);
 	edata[nent] = (CONST UB *)data;
 	esize[nent] = s_len(data);
+	ert[nent] = rt;
+	nent++;
+}
+
+/* An entry of bytes that may hold zeros, as a program's executable does */
+LOCAL void ent_bytes( CONST char *uuid, CONST char *tail, CONST UB *data, SZ size, UW rt )
+{
+	if ( nent >= NENT_MAX ) return;
+	knl_strcpy(ename[nent], uuid);
+	knl_strcat(ename[nent], tail);
+	edata[nent] = data;
+	esize[nent] = size;
 	ert[nent] = rt;
 	nent++;
 }
@@ -491,6 +506,92 @@ LOCAL void test_sysup( void )
 	clean();
 }
 
+/*
+ * A program of the system's in the system's package: its metadata, with
+ * the version made R9 of it, and its records as they are with one more.
+ * Put on, the registry knows the program by the new version, under the
+ * same object, and its executable is as it was. Put back after.
+ */
+LOCAL void test_sysup_program( void )
+{
+	static char	man[512];
+	TS_UUID		clk, pkg;
+	CONST DTPROG	*pp;
+	T_OBREF		r;
+	UB		*meta = NULL, *nmeta = NULL, *r0 = NULL, *r1 = NULL;
+	SZ		msz = 0, n0 = 0, n1 = 0;
+	INT		k;
+	BOOL		bumped = FALSE;
+
+	if ( ts_str_to_uuid(SYSDEF_PROG_CLOCK, &clk) < E_OK || ob_ref_obj(&clk, &r) < E_OK ) {
+		KT_SKIP("no clock program");
+	}
+	(void)dt_prog_start();
+	pp = dt_prog_find((CONST UB *)"clock");
+	KT_ASSERT(pp != NULL && !pp->builtin);
+	if ( pp == NULL ) return;
+	meta = om_obj_meta(&clk, &msz);
+	r0 = om_obj_record(&clk, 0, &n0);
+	r1 = om_obj_record(&clk, 1, &n1);
+	nmeta = ( meta != NULL ) ? (UB *)Kmalloc(msz) : NULL;
+	KT_ASSERT(meta != NULL && r0 != NULL && r1 != NULL && nmeta != NULL);
+	if ( meta == NULL || r0 == NULL || r1 == NULL || nmeta == NULL ) goto out;
+	knl_memcpy(nmeta, meta, msz);
+	for ( k = 0; k + 6 <= (INT)msz; k++ ) {
+		if ( nmeta[k] == '"' && nmeta[k + 1] == 'R' && nmeta[k + 2] >= '0' && nmeta[k + 2] <= '8'
+		  && nmeta[k + 3] == '.' ) {
+			nmeta[k + 2] = '9';
+			bumped = TRUE;
+		}
+	}
+	KT_ASSERT(bumped);
+
+	nent = 0;
+	ent_bytes(SYSDEF_PROG_CLOCK, ".json", nmeta, msz, OB_RT_SYSDATA);
+	ent_bytes(SYSDEF_PROG_CLOCK, "_0.xtad", r0, n0, OB_RT_TAD);
+	ent_bytes(SYSDEF_PROG_CLOCK, "_1.bin", r1, n1, OB_RT_PROG);
+	ent(SYSDEF_PROG_CLOCK, "_2.bin", "SYSUP-CLOCK-RECORD", OB_RT_SYSDATA);
+	knl_strcpy(man, "{\"format\":1,\"kind\":\"system\",\"id\":\"tessronos\",\"name\":\"TessronOS\","
+		   "\"version\":\"R9.999\",\"machine\":\"" SU_MACH "\",\"arch\":\"" SU_ARCH "\","
+		   "\"objects\":[\"" SYSDEF_PROG_CLOCK "\"],\"keep\":[],\"links\":[],\"boot\":[],\"bootkeep\":[]}");
+	KT_ASSERT_ER(pk_object(man, &pkg), E_OK);
+	KT_ASSERT_ER(dt_sysup_run(&pkg, FALSE), E_OK);
+	(void)ob_del_obj(&pkg);
+
+	pp = dt_prog_find((CONST UB *)"clock");
+	KT_ASSERT(pp != NULL && pp->version[1] == '9' && ts_uuid_cmp(&pp->uuid, &clk) == 0);
+	if ( pp != NULL ) tm_printf((UB *)"ktest sysup: the clock is %s\n", pp->version);
+	KT_ASSERT(rec_is(SYSDEF_PROG_CLOCK, 2, "SYSUP-CLOCK-RECORD"));
+	{
+		SZ	nn = 0;
+		UB	*now = om_obj_record(&clk, 1, &nn);
+
+		KT_ASSERT(now != NULL && nn == n1);
+		for ( k = 0; now != NULL && nn == n1 && k < (INT)n1 && now[k] == r1[k]; k++ ) ;
+		KT_ASSERT_EQ(k, (INT)n1);
+		if ( now != NULL ) Kfree(now);
+	}
+
+	/* put back: the metadata it had, the record more taken out */
+	{
+		ID	key;
+
+		KT_ASSERT_ER(om_obj_meta_put(&clk, meta, msz), E_OK);
+		key = ob_opn_obj(&clk, OB_OP_WRITE | OB_OP_RECORD | OB_O_EXCL);
+		KT_ASSERT(key > 0);
+		if ( key > 0 ) {
+			KT_ASSERT_ER(ob_del_rec(key, 2), E_OK);
+			ob_cls_obj(key);
+		}
+		dt_prog_reread();
+	}
+out:
+	if ( meta != NULL ) Kfree(meta);
+	if ( nmeta != NULL ) Kfree(nmeta);
+	if ( r0 != NULL ) Kfree(r0);
+	if ( r1 != NULL ) Kfree(r1);
+}
+
 /* ---------------------------------------------------------------- the PC's boot files */
 
 /*
@@ -798,6 +899,7 @@ LOCAL void test_sysup_room( void )
 EXPORT void ktest_sysup( void )
 {
 	KT_RUN(test_sysup);
+	KT_RUN(test_sysup_program);
 	KT_RUN(test_sysup_installed);
 	KT_RUN(test_sysup_cut);
 	KT_RUN(test_sysup_room);

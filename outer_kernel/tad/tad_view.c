@@ -24,9 +24,7 @@
  *	document of its own.
  */
 
-#include <sys/machine.h>
-#include "kernel.h"
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include <ts/tad.h>
 #include <ts/tadview.h>
 #include "tad_local.h"
@@ -307,7 +305,18 @@ LOCAL void run_add( DOCBUILD *b, UINT kind, CONST UB *text, INT len,
 	r->noff   = noff;
 	b->d->nrun++;
 	if ( b->d->npara > 0 ) {
-		b->d->para[b->d->npara - 1].n++;
+		T_TVPARA	*p = &b->d->para[b->d->npara - 1];
+
+		p->n++;
+		/*
+		 * A run after the paragraph's <p> was closed -- a link the
+		 * document holds after its last paragraph, as one just added
+		 * stands until it is moved into the text -- is not the <p>'s:
+		 * the paragraph is not taken over as it is when the model is
+		 * made again (para_again), or the run would stay in it after
+		 * the node has gone elsewhere.
+		 */
+		p->closed = FALSE;
 	}
 }
 
@@ -1443,6 +1452,9 @@ EXPORT void tv_doc_free( T_TVDOC *d )
 		Kfree(t);
 	}
 	if ( d->layc != NULL ) {
+		if ( d->layc->shown != NULL ) {
+			Kfree(d->layc->shown);
+		}
 		Kfree(d->layc);
 	}
 	Kfree(d);
@@ -2653,15 +2665,16 @@ LOCAL void fig_walk1( FIGBUILD *b, CONST T_TADNODE *nd )
 			s->r.right  = to_int(tad_attr(nd, "vobjright"), 0);
 			s->r.bottom = to_int(tad_attr(nd, "vobjbottom"), 0);
 			/*
-			 * Never shorter than the object closed: a record that
-			 * gives a box lower than its letters is shown, pressed
-			 * and sized at the closed height. The record is left
-			 * as it is until the object is changed.
+			 * Never shorter than the object closed, and closed when
+			 * no more than TAD_OPEN_SLACK above that (tad_lnk_fit_h):
+			 * such a box is shown, pressed and sized at the closed
+			 * height. The record is left as it is until the object
+			 * is changed.
 			 */
 			if ( s->r.right > s->r.left ) {
 				INT	least = tad_node_closed_h(nd);
 
-				if ( s->r.bottom - s->r.top < least ) {
+				if ( least > 0 && s->r.bottom - s->r.top <= least + TAD_OPEN_SLACK ) {
 					s->r.bottom = s->r.top + least;
 				}
 			}

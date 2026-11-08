@@ -29,6 +29,7 @@
  */
 
 #include "xfu_in.h"
+#include <ts/vobjsz.h>
 
 /* What taking in does to a new object: not its deletion */
 #define IMP_OPS		( OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRWR | OB_O_EXCL )	/* filled: not read half made */
@@ -1249,7 +1250,7 @@ LOCAL ER imp_entry( XFU *x, CONST UB *name, UINT kind, D mtime, INT level, TS_UU
 
 #define DIR_ROWS	20		/* links in a column of a directory's figure */
 #define DIR_W		256
-#define DIR_H		33
+#define DIR_H		( VOBJ_CLOSED_H(14, 1, 1) + 8 )	/* a closed link and the gap under it */
 
 LOCAL ER imp_dir( XFU *x, CONST UB *file, D mtime, INT level, TS_UUID *p_uuid )
 {
@@ -1364,7 +1365,7 @@ LOCAL ER imp_dir( XFU *x, CONST UB *file, D mtime, INT level, TS_UUID *p_uuid )
 			INT	l = 8 + ( i / DIR_ROWS ) * DIR_W, tp = 8 + ( i % DIR_ROWS ) * DIR_H;
 
 			xfu_mcpy(&t, kids.b + i * sizeof(TS_UUID), sizeof(TS_UUID));
-			xfu_link_xml(&r0, &t, l, tp, l + DIR_W - 16, tp + 25, i + 1);
+			xfu_link_xml(&r0, &t, l, tp, l + DIR_W - 16, tp + VOBJ_CLOSED_H(14, 1, 1), i + 1);
 		}
 		xb_put(&r0, "</figure>\n</tad>\n");
 		if ( r0.bad ) er = E_NOMEM;

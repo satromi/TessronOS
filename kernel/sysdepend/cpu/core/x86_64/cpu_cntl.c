@@ -32,10 +32,28 @@
  * area of a task is as large as CPUID 0Dh says they take. Without it,
  * the 512 bytes of FXSAVE. The kernel's code uses none of the registers
  * (-mgeneral-regs-only), so only TA_FPU tasks keep a copy.
+ *
+ * The boot processor decides; the areas are made to that size and a task
+ * moves between processors with its area. CPUID answers for the processor
+ * that runs it, and the kinds of core of a hybrid processor need not answer
+ * alike, so each other processor takes the same XCR0 after checking that it
+ * has those components in the same room. One that has not does not come
+ * online (knl_smp_start_secondaries says so) rather than run tasks it would
+ * save short.
  */
 EXPORT UW	knl_xsave_size = 512;
 EXPORT BOOL	knl_xsave_on = FALSE;
 EXPORT UD	knl_xcr0 = 0;
+
+/* Not the boot processor's state: said, and this processor stays out */
+LOCAL void fpu_differs( UW comps, UW size )
+{
+	tm_printf((UB *)"TessronOS: this CPU's XSAVE differs (components %x of %x, %d bytes of %d): it stays out\n",
+		  comps, (UW)knl_xcr0, size, knl_xsave_size);
+	for ( ;; ) {
+		Asm("cli; hlt");
+	}
+}
 
 EXPORT void knl_fpu_cpu_init( void )
 {
@@ -53,11 +71,21 @@ EXPORT void knl_fpu_cpu_init( void )
 		cr4 |= CR4_OSXSAVE;
 		Asm("mov %0, %%cr4" :: "r"(cr4));
 		cpuid(0xd, 0, &a, &b, &c, &d);
-		knl_xcr0 = ( (UD)d << 32 | a ) & ( XCR0_X87 | XCR0_SSE | XCR0_AVX );
+		if ( !knl_xsave_on ) {
+			knl_xcr0 = ( (UD)d << 32 | a ) & ( XCR0_X87 | XCR0_SSE | XCR0_AVX );
+		} else if ( ( knl_xcr0 & ~( (UD)d << 32 | a ) ) != 0 ) {
+			fpu_differs(a, 0);
+		}
 		Asm("xsetbv" :: "c"(0), "a"((UW)knl_xcr0), "d"((UW)( knl_xcr0 >> 32 )));
 		cpuid(0xd, 0, &a, &b, &c, &d);	/* ebx: the size for what XCR0 now enables */
-		knl_xsave_size = ( b + 63 ) & ~63U;
-		knl_xsave_on = TRUE;
+		if ( !knl_xsave_on ) {
+			knl_xsave_size = ( b + 63 ) & ~63U;
+			knl_xsave_on = TRUE;
+		} else if ( b > knl_xsave_size ) {
+			fpu_differs((UW)knl_xcr0, b);
+		}
+	} else if ( knl_xsave_on ) {
+		fpu_differs(0, 0);
 	} else {
 		Asm("mov %0, %%cr4" :: "r"(cr4));
 	}

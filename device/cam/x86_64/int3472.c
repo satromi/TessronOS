@@ -38,8 +38,15 @@
  *	the clock running). Off is the other way: reset and powerdown held,
  *	the power, the clock and the light off.
  *
- *	A TPS68470 is found and its revision read, and said; its regulators
- *	and clock are not driven here, so a sensor behind one is not powered.
+ *	A TPS68470 on I2C has regulators, a clock and outputs for its sensor.
+ *	The values of the rear camera of the Surface Go 2: the core supply at
+ *	1.2 V (the sensor's digital), the analogue at 2.8152 V, the sensor's
+ *	I/O at 1.8006 V and that of the chip itself at 1.8006 V, a clock of
+ *	19.2 MHz made from its 20 MHz crystal, the sensor's powerdown on its
+ *	output 7 and its reset on output 9, both low while held. The lens's
+ *	supply is left off: the focus is not moved. It is powered in the order
+ *	the sensor asks: held, I/O, analogue, the clock, digital, let go, and
+ *	10 ms before it is spoken to. Each step's answer goes to the console.
  */
 
 #include <sys/machine.h>
@@ -54,6 +61,40 @@
 #include "camx.h"
 
 #define TPS68470_REVID		0xff
+
+/* Its registers */
+#define TPS_POSTDIV2		0x06
+#define TPS_BOOSTDIV		0x07
+#define TPS_BUCKDIV		0x08
+#define TPS_PLLSWR		0x09
+#define TPS_XTALDIV		0x0a
+#define TPS_PLLDIV		0x0b
+#define TPS_POSTDIV		0x0c
+#define TPS_PLLCTL		0x0d
+#define TPS_CLKCFG1		0x0f
+#define TPS_CLKCFG2		0x10
+#define TPS_SGPO		0x22
+#define TPS_VCMVAL		0x3c
+#define TPS_VIOVAL		0x3f
+#define TPS_VSIOVAL		0x40
+#define TPS_VAVAL		0x41
+#define TPS_VDVAL		0x42
+#define TPS_S_I2C_CTL		0x43
+#define TPS_VACTL		0x47
+#define TPS_VDCTL		0x48
+
+/* The voltages: 0.9 V + n x 25 mV for the core, 0.875 V + n x 17.8 mV for the others */
+#define VOLT_CORE(uv)		( ( (uv) - 900000 ) / 25000 )
+#define VOLT_LDO(uv)		( ( (uv) - 875000 ) / 17800 )
+
+/* hclk = 20 MHz x ( PLLDIV x 2 + 320 ) / ( XTALDIV + 30 ) / 2^POSTDIV = 19.2 MHz */
+#define PLLCTL_XTAL		0xd0		/* the crystal, with its load capacitors as they are set by default */
+#define PLLCTL_ON		0x01
+#define CLK_OUT_AB		0x0a		/* the PLL's output on both clock pins */
+#define CLK_DRIVE_2MA		0x05
+
+#define SGPO_POWERDOWN		0x01		/* output 7 */
+#define SGPO_RESET		0x04		/* output 9 */
 
 /* 79234640-9E10-4FEA-A5C1-B5AA8B19756F, as ACPI lays out a UUID */
 LOCAL CONST UB	gpio_dsm[16] = {
@@ -94,10 +135,80 @@ LOCAL ER find_pmic( T_CAMPWR *p )
 	p->pmic_addr = (UH)addr;
 	if ( p->pmic == NULL ) return E_NOEXS;
 	er = p->pmic->xfer(p->pmic->ctx, p->pmic_addr, &reg, 1, &rev, 1);
-	tm_printf((UB *)"campwr: %s: TPS68470 at %02x on %s (%d Hz): revision %02x (%d); "
-		  "its regulators and clock are not driven: the sensor behind it is not powered\n",
+	tm_printf((UB *)"campwr: %s: TPS68470 at %02x on %s (%d Hz): revision %02x (%d)\n",
 		  p->path, addr, ctrl, hz, rev, (INT)er);
-	return E_NOSPT;
+	p->pmic_ok = (BOOL)( er >= E_OK );
+	return p->pmic_ok ? E_OK : E_IO;
+}
+
+LOCAL ER tps_wr( T_CAMPWR *p, UB reg, UB v )
+{
+	UB	b[2];
+	ER	er;
+
+	b[0] = reg;
+	b[1] = v;
+	er = p->pmic->xfer(p->pmic->ctx, p->pmic_addr, b, 2, NULL, 0);
+	if ( er < E_OK ) tm_printf((UB *)"campwr: %s: TPS68470 register %02x not written (%d)\n", p->path, reg, (INT)er);
+	return er;
+}
+
+LOCAL INT tps_rd( T_CAMPWR *p, UB reg )
+{
+	UB	v = 0;
+
+	return ( p->pmic->xfer(p->pmic->ctx, p->pmic_addr, &reg, 1, &v, 1) >= E_OK ) ? (INT)v : -1;
+}
+
+LOCAL ER tps_on( T_CAMPWR *p )
+{
+	static CONST struct { UB reg, v; } prep[] = {
+		/* the sensor held, then the voltages set before any supply is on */
+		{ TPS_SGPO, 0 },
+		{ TPS_VIOVAL, VOLT_LDO(1800600) }, { TPS_VSIOVAL, VOLT_LDO(1800600) },
+		{ TPS_VAVAL, VOLT_LDO(2815200) }, { TPS_VDVAL, VOLT_CORE(1200000) },
+		{ TPS_VCMVAL, VOLT_LDO(2815200) },
+		/* the clock's dividers: its buck and boost converters run from them too */
+		{ TPS_BOOSTDIV, 3 }, { TPS_BUCKDIV, 2 }, { TPS_PLLSWR, 3 }, { TPS_XTALDIV, 170 },
+		{ TPS_PLLDIV, 32 }, { TPS_POSTDIV, 1 }, { TPS_POSTDIV2, 1 }, { TPS_CLKCFG2, CLK_DRIVE_2MA },
+		{ TPS_PLLCTL, PLLCTL_XTAL },
+	};
+	INT	i;
+	ER	er = E_OK;
+
+	for ( i = 0; i < (INT)( sizeof(prep) / sizeof(prep[0]) ) && er >= E_OK; i++ ) {
+		er = tps_wr(p, prep[i].reg, prep[i].v);
+	}
+	/* the sensor's I/O, with the bus behind the chip that goes with it */
+	if ( er >= E_OK ) er = tps_wr(p, TPS_S_I2C_CTL, 0x03);
+	if ( er >= E_OK ) er = tps_wr(p, TPS_VACTL, 0x01);
+	tk_dly_tsk(2);
+	/* the clock: the lock bit tells nothing, so a time is waited */
+	if ( er >= E_OK ) er = tps_wr(p, TPS_CLKCFG1, CLK_OUT_AB);
+	if ( er >= E_OK ) er = tps_wr(p, TPS_PLLCTL, PLLCTL_XTAL | PLLCTL_ON);
+	tk_dly_tsk(5);
+	if ( er >= E_OK ) er = tps_wr(p, TPS_VDCTL, 0x01);
+	tk_dly_tsk(2);
+	if ( er >= E_OK ) er = tps_wr(p, TPS_SGPO, SGPO_POWERDOWN | SGPO_RESET);
+	tk_dly_tsk(12);
+	tm_printf((UB *)"campwr: %s: TPS68470 on (%d): PLLCTL %02x CLKCFG1 %02x VA %02x/%02x VD %02x/%02x VSIO %02x/%02x "
+		  "VIO %02x SGPO %02x\n", p->path, (INT)er, tps_rd(p, TPS_PLLCTL), tps_rd(p, TPS_CLKCFG1),
+		  tps_rd(p, TPS_VAVAL), tps_rd(p, TPS_VACTL), tps_rd(p, TPS_VDVAL), tps_rd(p, TPS_VDCTL),
+		  tps_rd(p, TPS_VSIOVAL), tps_rd(p, TPS_S_I2C_CTL), tps_rd(p, TPS_VIOVAL), tps_rd(p, TPS_SGPO));
+	if ( er < E_OK ) return er;
+	p->on = TRUE;
+	return E_OK;
+}
+
+LOCAL void tps_off( T_CAMPWR *p )
+{
+	(void)tps_wr(p, TPS_SGPO, 0);
+	(void)tps_wr(p, TPS_PLLCTL, PLLCTL_XTAL);
+	(void)tps_wr(p, TPS_CLKCFG1, 0);
+	(void)tps_wr(p, TPS_VDCTL, 0);
+	(void)tps_wr(p, TPS_VACTL, 0);
+	(void)tps_wr(p, TPS_S_I2C_CTL, 0);
+	p->on = FALSE;
 }
 
 EXPORT ER knl_campwr_find( T_CAMPWR *p, CONST char *path )
@@ -173,6 +284,7 @@ LOCAL BOOL drive( T_CAMPWR *p, UB type, BOOL on )
 
 EXPORT ER knl_campwr_on( T_CAMPWR *p )
 {
+	if ( p->kind == CAMPWR_TPS68470 && p->pmic_ok ) return tps_on(p);
 	if ( p->kind != CAMPWR_DISCRETE ) return E_NOSPT;
 	(void)drive(p, CAMGP_RESET, FALSE);
 	(void)drive(p, CAMGP_POWERDOWN, FALSE);
@@ -193,6 +305,10 @@ EXPORT ER knl_campwr_on( T_CAMPWR *p )
 
 EXPORT void knl_campwr_off( T_CAMPWR *p )
 {
+	if ( p->kind == CAMPWR_TPS68470 && p->pmic_ok ) {
+		tps_off(p);
+		return;
+	}
 	if ( p->kind != CAMPWR_DISCRETE ) return;
 	(void)drive(p, CAMGP_RESET, FALSE);
 	(void)drive(p, CAMGP_POWERDOWN, FALSE);

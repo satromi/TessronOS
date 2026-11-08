@@ -36,6 +36,9 @@
 #include <ts/ob.h>
 #include <ts/wm.h>
 #include <ts/conf.h>
+#if defined(X64)
+#include "../../device/snd/sndhw.h"
+#endif
 
 LOCAL ID	snd_dd = 0;
 
@@ -1258,6 +1261,113 @@ LOCAL ER sys_sound( CONST char *w )
  * settings' SOUND_KEEP): it starts with nothing to play, goes on in
  * silence after a sound, and stops again once let ("KEEP 0").
  */
+/* What a monitor took in the last while: the mean of its frames, stereo, and how many */
+LOCAL INT mon_heard( ID dd, INT ms, INT *l, INT *r )
+{
+	static H	got[9600 * 2];
+	SZ		asz = 0;
+	D		sl = 0, sr = 0;
+	INT		i, n;
+
+	(void)tk_srea_dev(dd, 0, got, sizeof(got), &asz);	/* what came before */
+	tk_dly_tsk(ms);
+	KT_ASSERT_ER(tk_srea_dev(dd, 0, got, sizeof(got), &asz), E_OK);
+	n = (INT)( asz / 4 );
+	for ( i = 0; i < n; i++ ) {
+		sl += got[i * 2];
+		sr += got[i * 2 + 1];
+	}
+	*l = ( n > 0 ) ? (INT)( sl / n ) : 0;
+	*r = ( n > 0 ) ? (INT)( sr / n ) : 0;
+	return n;
+}
+
+/*
+ * A channel that monitors takes what the programs play, by the process it
+ * is told to take or leave out, before the whole's volume, without
+ * disturbing the input's recording. Its rate is its own.
+ */
+LOCAL void test_monitor( void )
+{
+	SDMon	mo;
+	H	*a;
+	ID	dd;
+	SZ	asz = 0;
+	INT	l = 0, r = 0, n, me = -tk_get_tid();
+
+	if ( snd_dd <= 0 ) KT_SKIP("no sound device");
+	dd = tk_opn_dev((UB *)"snda1", TD_UPDATE);
+	a = (H *)Kmalloc(4800 * 4);
+	KT_ASSERT(dd > 0 && a != NULL);
+	if ( dd <= 0 || a == NULL ) return;
+
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMCTL, PCM_STOP), E_OK);
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMENDCNT, 0), E_OK);
+	KT_ASSERT_ER(set_mode(snd_dd, PCMST48K, PCMFmt16, 1), E_OK);
+	KT_ASSERT_ER(set_mode(dd, PCMST48K, PCMFmt16, 1), E_OK);
+	KT_ASSERT_ER(attr_w(dd, DN_SDPCMBUFSZ, 32768), E_OK);
+	KT_ASSERT_ER(attr_w(dd, DN_SDPCMENDCNT, PCM_COUNT_NONE), E_OK);
+	dc16(a, 4800, 4000, -2000);
+	KT_ASSERT_ER(tk_swri_dev(snd_dd, 0, a, 4800 * 4, &asz), E_OK);
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMCTL, PCM_REPPLAY), E_OK);
+
+	/* every program */
+	mo.mode = SND_MON_ALL;
+	mo.pid = 0;
+	KT_ASSERT_ER(tk_swri_dev(dd, DN_SDMONITOR, &mo, sizeof(mo), &asz), E_OK);
+	KT_ASSERT_ER(attr_w(dd, DN_SDPCMCTL, PCM_REC), E_OK);
+	/* while it records, it is not told otherwise */
+	KT_ASSERT_ER(tk_swri_dev(dd, DN_SDMONITOR, &mo, sizeof(mo), &asz), E_BUSY);
+	n = mon_heard(dd, 300, &l, &r);
+	tm_printf((UB *)"  every program: %d frames, %d %d\n", n, l, r);
+	KT_ASSERT(n > 4800);
+	KT_ASSERT(NEAR(l, 4000) && NEAR(r, -2000));
+
+	/* the whole's mute does not reach it, though it reaches what is heard */
+	KT_ASSERT_ER(mixset(SND_MIX_ALL, NULL, SND_VOL_MAX, SND_VOL_MAX, 1), E_OK);
+	n = mon_heard(dd, 200, &l, &r);
+	KT_ASSERT(n > 0 && NEAR(l, 4000));
+	heard(100, &l, &r);
+	KT_ASSERT(NEAR(l, 0));
+	KT_ASSERT_ER(mixset(SND_MIX_ALL, NULL, SND_VOL_MAX, SND_VOL_MAX, 0), E_OK);
+	KT_ASSERT_ER(attr_w(dd, DN_SDPCMCTL, PCM_STOP), E_OK);
+
+	/* by the process: this task's channel is taken or left out by its number */
+	mo.mode = SND_MON_ONLY;
+	mo.pid = me;
+	KT_ASSERT_ER(tk_swri_dev(dd, DN_SDMONITOR, &mo, sizeof(mo), &asz), E_OK);
+	KT_ASSERT_ER(attr_w(dd, DN_SDPCMCTL, PCM_REC), E_OK);
+	n = mon_heard(dd, 200, &l, &r);
+	KT_ASSERT(n > 0 && NEAR(l, 4000));
+	KT_ASSERT_ER(attr_w(dd, DN_SDPCMCTL, PCM_STOP), E_OK);
+	mo.mode = SND_MON_EXCEPT;
+	KT_ASSERT_ER(tk_swri_dev(dd, DN_SDMONITOR, &mo, sizeof(mo), &asz), E_OK);
+	KT_ASSERT_ER(attr_w(dd, DN_SDPCMCTL, PCM_REC), E_OK);
+	n = mon_heard(dd, 200, &l, &r);
+	KT_ASSERT(n > 0 && NEAR(l, 0) && NEAR(r, 0));
+	KT_ASSERT_ER(attr_w(dd, DN_SDPCMCTL, PCM_STOP), E_OK);
+
+	/* a rate of its own: 16 kHz, mono is the mean of the two sides */
+	KT_ASSERT_ER(set_mode(dd, PCMST16K, PCMFmt16, 0), E_OK);
+	mo.mode = SND_MON_ALL;
+	KT_ASSERT_ER(tk_swri_dev(dd, DN_SDMONITOR, &mo, sizeof(mo), &asz), E_OK);
+	KT_ASSERT_ER(attr_w(dd, DN_SDPCMCTL, PCM_REC), E_OK);
+	tk_dly_tsk(500);
+	n = attr_r(dd, DN_SDPCMCNT);
+	tm_printf((UB *)"  16 kHz mono: %d bytes in half a second\n", n);
+	KT_ASSERT(n > 8000 && n < 24000);
+	KT_ASSERT_ER(attr_w(dd, DN_SDPCMCTL, PCM_STOP), E_OK);
+
+	/* back to an input */
+	mo.mode = SND_MON_OFF;
+	KT_ASSERT_ER(tk_swri_dev(dd, DN_SDMONITOR, &mo, sizeof(mo), &asz), E_OK);
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMCTL, PCM_STOP), E_OK);
+	KT_ASSERT_ER(set_mode(snd_dd, PCMST48K, PCMFmt16, 1), E_OK);
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMENDCNT, PCM_COUNT_NONE), E_OK);
+	Kfree(a);
+	tk_cls_dev(dd, 0);
+}
+
 LOCAL void test_keep( void )
 {
 	static H	pcm[4800 * 2];
@@ -1315,6 +1425,66 @@ LOCAL void test_keep( void )
 
 /* The board sound of the Raspberry Pi 5 cannot be heard here */
 #if defined(X64)
+#if defined(X64)
+/* What the firmware's account comes to, for the machines there are not here to try */
+LOCAL void test_hda_judge( void )
+{
+	static CONST UB	nhlt[] = {
+		'N', 'H', 'L', 'T', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		3,				/* three endpoints: */
+		6, 0, 0, 0, 2, 0,		/* digital microphones */
+		6, 0, 0, 0, 3, 0,		/* I2S */
+		5, 0, 0, 0, 0			/* HD Audio */
+	};
+	HDA_FOUND	f;
+	INT		dmic, ssp;
+
+	KT_ASSERT(knl_hda_nhlt(nhlt, sizeof(nhlt), &dmic, &ssp));
+	KT_ASSERT_EQ(dmic, 1);
+	KT_ASSERT_EQ(ssp, 1);
+	KT_ASSERT(!knl_hda_nhlt(nhlt, sizeof(nhlt) - 1, &dmic, &ssp));	/* cut short */
+	KT_ASSERT(!knl_hda_nhlt(NULL, 0, &dmic, &ssp));
+
+	knl_memset(&f, 0, sizeof(f));
+	KT_ASSERT_EQ(knl_hda_judge(&f), 0);		/* no controller: nothing to say */
+
+	/* a codec for the speakers on HD Audio, with its own microphone: nothing to say, as the Surface Go 2 */
+	f.ctrl = TRUE;
+	f.codecs = 0x0005;
+	f.analog = TRUE;
+	f.int_mic = TRUE;
+	KT_ASSERT_EQ(knl_hda_judge(&f), 0);
+	/* NHLT lists I2S for Bluetooth beside a working codec: not the speakers */
+	f.nhlt_ssp = 2;
+	KT_ASSERT_EQ(knl_hda_judge(&f), 0);
+	/* digital microphones on the chipset: the speakers work, the microphones do not */
+	f.int_mic = FALSE;
+	f.nhlt_dmic = 1;
+	KT_ASSERT_EQ(knl_hda_judge(&f), SND_NOTE_MIC_DSP);
+	/* a codec with a microphone of its own: those are the ones it records */
+	f.int_mic = TRUE;
+	KT_ASSERT_EQ(knl_hda_judge(&f), 0);
+	/* SoundWire's peripherals: the speakers there, whatever else answers */
+	f.int_mic = FALSE;
+	f.sdw_devs = 3;
+	KT_ASSERT_EQ(knl_hda_judge(&f), SND_NOTE_SPK_DSP | SND_NOTE_SOUNDWIRE | SND_NOTE_MIC_DSP);
+	/* a SoundWire controller declared with nothing on it counts for nothing */
+	f.sdw_devs = 0;
+	f.nhlt_dmic = 0;
+	f.nhlt_ssp = 0;
+	/* the display's codec alone */
+	f.codecs = 0x0004;
+	f.analog = FALSE;
+	KT_ASSERT_EQ(knl_hda_judge(&f), SND_NOTE_DISPLAY);
+	/* the same with an I2S codec named: that is where the speakers are */
+	f.i2s_codec = TRUE;
+	KT_ASSERT_EQ(knl_hda_judge(&f), SND_NOTE_SPK_DSP | SND_NOTE_I2S);
+	f.i2s_codec = FALSE;
+	f.codecs = 0;
+	KT_ASSERT_EQ(knl_hda_judge(&f), SND_NOTE_NOCODEC);
+}
+#endif
+
 /*
  * Recording through Intel HDA (QEMU's intel-hda with hda-duplex, or the
  * PC's own codec): the input path made and the stream running, the
@@ -1393,9 +1563,11 @@ EXPORT void ktest_snd( void )
 	KT_RUN(test_record);
 #if defined(X64)
 	KT_RUN(test_hda_record);
+	KT_RUN(test_hda_judge);
 #endif
 	KT_RUN_QEMU_DEVS(test_outputs, "written for the USB audio functions of the QEMU machine");
 	KT_RUN_QEMU_DEVS(test_mixer, "written for the USB audio function of the QEMU machine");
+	KT_RUN_QEMU_DEVS(test_monitor, "written for the USB audio function of the QEMU machine");
 	KT_RUN_QEMU_DEVS(test_keep, "written for the USB audio function of the QEMU machine");
 	KT_RUN(test_i2s);
 	KT_RUN(test_close);

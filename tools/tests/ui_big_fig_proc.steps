@@ -1,0 +1,48 @@
+# ui_big_fig.steps with 基本図形編集 running as a process (design 11.3), for tools/ui_run.py:
+# a figure of 10000 rectangles and two lines of 2000 points (mkbig fig 10000 2000) opened with
+# pfig, all picked, cut to the tray, moved back, closed (saved), the record's sum kept, opened
+# again and closed: the record is the same. The process says how many shapes there are and how
+# many are picked after each command ("figure: shapes N picked M"), what the desktop's figure
+# editor answers to the step shapes; the times are the host's, from the key to that line.
+# Keys with Ctrl (01): A 04, X 1B, Z 1D, E 08.
+mkbig fig 10000 2000
+logmark
+hostmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 10002
+hosttime open 30000
+shot big_fig_proc_open
+logmark
+hostmark
+key 04 01
+expectsincein 60 figure: shapes 10002 picked 10002
+hosttime pickall 10000
+logmark
+hostmark
+key 1B 01
+expectsincein 60 figure: shapes 0 picked 0
+hosttime cut 30000
+logmark
+hostmark
+key 1D 01
+expectsincein 90 figure: shapes 10002 picked 10002
+hosttime moveback 60000
+shot big_fig_proc_back
+logmark
+hostmark
+key 08 01
+expectsincein 60 figure: closed
+hosttime closed 30000
+sum
+keep saved
+logmark
+hostmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 10002
+hosttime reopen 30000
+logmark
+key 08 01
+expectsincein 60 figure: closed
+sum
+same saved
+absent !OACV!

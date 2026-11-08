@@ -128,6 +128,8 @@ IMPORT ER  ts_cls_obj( ID od );
  */
 IMPORT ER  ts_syn_obj( ID od );
 IMPORT ER  ts_syn_all( void );
+IMPORT ER  ts_syn_vol( ID vol );
+IMPORT ER  ts_finish_vol( ID vol );
 IMPORT ER  ts_od_uuid( ID od, TS_UUID *p_uuid );	/* what an open object is */
 IMPORT ER  ts_ref_obj( ID vol, CONST TS_UUID *uuid, T_ROBJ *pk_robj );
 IMPORT ER  ts_lst_obj( ID vol, CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt );

@@ -459,7 +459,7 @@ LOCAL void show( CONST T_PRCFLT *f, UW others )
 	pw = def->r.right - def->r.left;
 	ph = def->r.bottom - def->r.top;
 	if ( fresh ) {
-		wm_screen(&sw, &sh);
+		wm_screen_main(&sw, &sh);
 		o.left = ( sw - pw ) / 2 - 8;
 		o.top = ( sh - ph ) / 2 - 20;
 		if ( o.left < 0 ) o.left = 0;

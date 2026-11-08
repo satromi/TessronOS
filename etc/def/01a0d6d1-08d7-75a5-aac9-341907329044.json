@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "real-object-search",
       "kind": "utility",
       "name": "実身/仮身検索",

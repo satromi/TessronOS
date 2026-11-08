@@ -53,6 +53,8 @@ else
   $(error unknown TARGET "$(TARGET)" (use _QEMU_VIRT_, _RPI5_, _RPI4_ or _X64_))
 endif
 
+include testagent.mk
+
 CFLAGS  := $(CFLAGS_COMMON) $(CFLAGS_TARGET) -D$(TARGET) -DLOAD_PA_VALUE=$(LOAD_PA)
 ASFLAGS := $(ASFLAGS_COMMON) -D$(TARGET)
 LDFLAGS := $(LDFLAGS_COMMON) -T $(LNKFILE) -Wl,--defsym,LOAD_PA=$(LOAD_PA) \
@@ -68,6 +70,7 @@ DEPS := $(OBJS:.o=.d)
 FT_LIB_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(SRCS_FT)) \
 	$(OBJDIR)/outer_kernel/font/port/ftsystem.o
 $(FT_LIB_OBJS): CFLAGS += -DFT2_BUILD_LIBRARY -Wno-frame-larger-than
+$(BT_MBED_OBJS): CFLAGS += $(BT_MBED_FLAGS)
 
 # 画面を組み立てるタスク(TA_FPU)だけが呼ぶ、ベクトル演算の内側のループ。カーネルの
 # ほかは浮動小数点・SIMD のレジスタを使わない(-mgeneral-regs-only)ので、このファイル
@@ -75,6 +78,12 @@ $(FT_LIB_OBJS): CFLAGS += -DFT2_BUILD_LIBRARY -Wno-frame-larger-than
 # (SCTLR_EL1.A)も切ってあるので、16 バイトのロード・ストアを 4 バイトずつに分けさせる
 # -mstrict-align も外す(docs/tessronos/10-display.md)
 $(OBJDIR)/outer_kernel/wm/compose_simd.o: CFLAGS := $(filter-out -mgeneral-regs-only -mstrict-align,$(CFLAGS))
+
+# LC3 の符号化(lib/liblc3)は浮動小数点で計算する。呼ぶのは TA_FPU で作った符号化のタスクだけ
+# (device/bt/bt_lea.c、docs/tessronos/06-device.md 6.8)なので、このファイル群だけ
+# -mgeneral-regs-only を外す。-ffreestanding と -fno-builtin も外し、fabsf・sqrtf・floorf などを
+# 命令にさせる。数学の関数のライブラリは結ばず、命令にならないものは device/bt/lc3_fmath.c が持つ
+$(LC3_OBJS): CFLAGS := $(filter-out -mgeneral-regs-only -ffreestanding -fno-builtin,$(CFLAGS)) $(LC3_FLAGS)
 
 # TARGET を切り替えたら再リンクする(成果物名が共通のため)
 TARGET_STAMP := obj/target.stamp
@@ -106,9 +115,9 @@ $(OBJS): $(NETSTACK_STAMP)
 # 一つのオブジェクトにする(tools/netbsd/build.sh、設計書 12.6)
 ifeq ($(NETSTACK),netbsd)
 NETBSD_BUILD ?= $(TOP)/tools/netbsd/build.sh
-$(NETBSD_OBJ): $(NETBSD_BUILD) $(wildcard $(TOP)/peripheral_kernel/network/netbsd/rumpcomp/*.c)
+$(NETBSD_OBJ): $(NETBSD_BUILD) $(wildcard $(TOP)/peripheral_kernel/network/netbsd/rumpcomp/*.c) $(wildcard $(TOP)/peripheral_kernel/network/netbsd/rumpcomp/wg/*.c)
 	@echo 'NETBSD $@'
-	@OUT=$(patsubst %/,%,$(dir $(NETBSD_OBJ))) MARCH=$(ARCH_MARCH) bash $(NETBSD_BUILD) all
+	@OUT=$(patsubst %/,%,$(dir $(NETBSD_OBJ))) MARCH=$(ARCH_MARCH) $(if $(filter 1,$(WG)),WG=1 NBSRC=$(HOME)/netbsd/netbsd-11.0-wg$(if $(filter x86_64,$(ARCH)),-x64)) bash $(NETBSD_BUILD) all
 endif
 
 $(EXE_FILE).elf: $(OBJS) $(EXTRA_OBJS) $(LNKFILE) $(TARGET_STAMP)
@@ -213,6 +222,11 @@ TEST_SERVER := -s "$(or $(HOST_PY),python3) $(TOP)/tools/ftpd.py --exit-on-eof -
 $(OBJDIR)/tests/ktest/ktest_svcio.o: CFLAGS += -DKT_FTP_PORT=$(FTP_PORT)
 $(OBJDIR)/tests/ktest/ktest_ms.o: CFLAGS += -DKT_HTTP_PORT=$(HTTP_PORT)
 $(OBJDIR)/tests/ktest/ktest_xfc.o: CFLAGS += -DKT_FTP_PORT=$(FTP_PORT) -DKT_FTP_ACT_PORT=$(FTP_ACT_PORT)
+# the sshd on the host the test of SFTP goes to (tools/ssh/sshd_host.sh)
+ifeq ($(SSH),1)
+$(OBJDIR)/tests/ktest/ktest_xfc.o: CFLAGS += -DKT_SSH_PORT=2222
+$(OBJDIR)/tests/ktest/ktest_psx.o: CFLAGS += -DKT_SSH_PORT=2222
+endif
 $(OBJDIR)/tests/ktest/ktest_v8.o: CFLAGS += -DKT_NET_USER=1
 # ktest_so は利用者モードの網があれば、DHCP と名前の問い合わせと時刻合わせ、IPv6 のアドレスの自動設定と
 # AAAA とホストへの IPv6 の接続も確かめる
@@ -282,8 +296,10 @@ $(OBJDIR)/tests/ktest/ktest_iob.o: CFLAGS += $(KT_IOB_CFLAGS)
 VOL_DIR    := $(OBJDIR)/vols
 VOL_STAMP  := $(VOL_DIR)/vola.img
 TEST_DEPS  += $(VOL_STAMP)
-$(OBJDIR)/tests/ktest/ktest_vols.o: CFLAGS += -DKT_VOL_DIR='"$(abspath $(VOL_DIR))"'
-$(OBJDIR)/tests/ktest/ktest_grow.o: CFLAGS += -DKT_VOL_DIR='"$(abspath $(VOL_DIR))"'
+# KT_VOL_DIR: where the QEMU that runs the test finds them, when not where they were built (a copy on C:)
+KT_VOL_DIR ?= $(abspath $(VOL_DIR))
+$(OBJDIR)/tests/ktest/ktest_vols.o: CFLAGS += -DKT_VOL_DIR='"$(KT_VOL_DIR)"'
+$(OBJDIR)/tests/ktest/ktest_grow.o: CFLAGS += -DKT_VOL_DIR='"$(KT_VOL_DIR)"'
 ifeq ($(TARGET),_QEMU_VIRT_)
 $(OBJDIR)/tests/ktest/ktest_sd.o: CFLAGS += -DKT_SD_SECTORS=$(SD_CARD_SECTORS) -DKT_SD_EMMC=$(if $(filter 1,$(SD_EMMC)),1,0)
 # SD_EMMC が変われば、それを見る ktest_sd を作り直す
@@ -539,18 +555,38 @@ XFC_SRCS    := $(XFC_DIR)/xfc_libc.c $(XFC_DIR)/xfc_net.c $(XFC_DIR)/xfc_main.c 
 	       $(TOP)/lib/libtxc/txc.c $(TOP)/lib/libtxc/txc_tab.c $(TOP)/lib/libftp/ftp.c \
 	       $(LIBBPK_SRCS) $(LIBBTFS_SRCS) $(ARC_DIR)/unp_obj.c $(TOP)/lib/libjson/json.c
 XFC_ELF     := $(UOBJ)/xfconv.elf
+# make SSH=1: SFTP in ファイル変換 and the command ssh, on libssh2 (tools/ssh/build.sh) and
+# lib/libtls. libssh2 is fetched and built for this build's flags, outside the repository.
+ifeq ($(SSH),1)
+SSH_OUT     := $(UOBJ)/ssh
+SSH_LIB     := $(SSH_OUT)/libssh2.a
+SSH_INC     := -I$(HOME)/libssh2/libssh2-1.11.1/include -I$(TOP)/lib/libtls -I$(TOP)/lib/mbedtls/include \
+	       '-DMBEDTLS_CONFIG_FILE="ts_tls_config.h"'
+SFTP_SRCS   := $(TOP)/lib/libsftp/sftp.c $(TOP)/lib/libsftp/sftp_so.c $(TOP)/lib/libsftp/sftp_key.c
+XFC_SSH_LIBS := $(SSH_LIB) $(TLS_LIB)
+XFC_SRCS    += $(SFTP_SRCS)
+$(SSH_LIB): $(TOP)/tools/ssh/build.sh $(TOP)/tools/ssh/libssh2_config.h $(TOP)/tools/ssh/ts_ssh_shim.h
+	@mkdir -p $(dir $@)
+	@ARCH=$(if $(filter x86_64,$(ARCH)),x86_64,aarch64) UFLAGS="$(ARCHFLAGS) $(UARCH_FP)" OUT=$(SSH_OUT) bash $(TOP)/tools/ssh/build.sh all
+else
+XFC_SSH_LIBS :=
+endif
 XFC_REC     := $(UOBJ)/rec/01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91_1.bin
 # 系の答える誤りの番号は下位の番号を持たない(sys/profile.h の TK_SUPPORT_SERCD)。
 # プログラムの側でも E_OBJ などを同じ値にするため、どのファイルでも tk/errno.h が
 # そう読むように言っておく(TRUE は tk/typedef.h と同じ値)
-XFC_CFLAGS  := $(MS_CFLAGS) -Wall -Wno-unused-parameter -Wno-format-truncation -Wno-stringop-truncation 	       -DTK_SUPPORT_SERCD=0 -DTRUE=1
+XFC_CFLAGS  := $(MS_CFLAGS) -Wall -Wno-unused-parameter -Wno-format-truncation -Wno-stringop-truncation 	       -DTK_SUPPORT_SERCD=0 -DTRUE=1 $(if $(filter 1,$(SSH)),-DUSE_SSH $(SSH_INC))
 
-$(XFC_ELF): $(APP_HDRS) $(MS_LIBTS) $(XFC_SRCS) $(XFC_DIR)/xfc.h $(TOP)/lib/libxfu/xfu_in.h $(TOP)/include/ts/xfu.h 	    $(TOP)/include/ts/ui.h $(TOP)/include/ts/dtreq.h \
+# whether SSH=1 is built in follows the flag, not the age of the file
+XFC_SSH_STAMP := $(UOBJ)/xfc_ssh.stamp
+$(shell mkdir -p $(UOBJ); [ -f $(XFC_SSH_STAMP) ] && [ "$$(cat $(XFC_SSH_STAMP))" = "$(SSH)" ] || echo "$(SSH)" > $(XFC_SSH_STAMP))
+
+$(XFC_ELF): $(XFC_SSH_STAMP) $(XFC_SSH_LIBS) $(APP_HDRS) $(MS_LIBTS) $(XFC_SRCS) $(XFC_DIR)/xfc.h $(TOP)/lib/libxfu/xfu_in.h $(TOP)/include/ts/xfu.h 	    $(TOP)/include/ts/ui.h $(TOP)/include/ts/dtreq.h \
 	    $(TOP)/include/ts/ftp.h $(TOP)/include/ts/txc.h $(TOP)/include/ts/btfs.h $(TOP)/include/ts/bpk.h \
 	    $(ARC_DIR)/unp.h $(USER_LD) $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
-	@$(CC) $(XFC_CFLAGS) -o $@ $(MS_LIBTS) $(XFC_SRCS) -lc -lgcc
+	@$(CC) $(XFC_CFLAGS) -o $@ $(MS_LIBTS) $(XFC_SRCS) $(XFC_SSH_LIBS) -lc -lgcc
 
 $(XFC_REC): $(XFC_ELF)
 	@mkdir -p $(dir $@)
@@ -566,10 +602,18 @@ ENV_HDRS     := $(APP_HDRS) $(MS_LIBTS) $(UI_SRCS) $(TOP)/include/ts/ui.h $(TOP)
 NETENV_ELF   := $(UOBJ)/netenv.elf
 NETENV_REC   := $(UOBJ)/rec/01a0d8c4-52b5-7a41-8c61-2d7e9f0a1b31_1.bin
 
-$(NETENV_ELF): $(ENV_HDRS) $(TOP)/application/netenv/netenv.c
+# make WG=1: 〈ＶＰＮ〉, with the sealing of its keys by Mbed TLS
+ifeq ($(WG),1)
+NETENV_WG_FLAGS := -DUSE_WG=1 '-DMBEDTLS_CONFIG_FILE="ts_tls_config.h"' -I$(TOP)/lib/libtls -I$(TOP)/lib/mbedtls/include
+NETENV_WG_LIBS  := $(TOP)/lib/libposix/$(if $(UARCH_DIR),$(UARCH_DIR),)psx_stub.S $(TLS_LIB)
+endif
+NETENV_WG_STAMP := $(UOBJ)/netenv_wg.stamp
+$(shell mkdir -p $(UOBJ); [ -f $(NETENV_WG_STAMP) ] && [ "$$(cat $(NETENV_WG_STAMP))" = "$(WG)" ] || echo "$(WG)" > $(NETENV_WG_STAMP))
+
+$(NETENV_ELF): $(NETENV_WG_STAMP) $(NETENV_WG_LIBS) $(TOP)/application/netenv/ne_vpn.c $(ENV_HDRS) $(TOP)/application/netenv/netenv.c
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
-	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(UI_SRCS) $(TOP)/application/netenv/netenv.c -lc -lgcc
+	@$(CC) $(ENV_CFLAGS) $(NETENV_WG_FLAGS) -o $@ $(MS_LIBTS) $(UI_SRCS) $(TOP)/application/netenv/netenv.c $(NETENV_WG_LIBS) -lc -lgcc
 
 $(NETENV_REC): $(NETENV_ELF)
 	@mkdir -p $(dir $@)
@@ -619,11 +663,12 @@ ENV_RECS     := $(NETENV_REC) $(USERENV_REC) $(SYSENV_REC) $(SNDMIX_REC)
 # プログラム実身のレコード1(設計書 11.10)
 CAL_DIR      := $(TOP)/application/calendar
 CAL_SRCS     := $(CAL_DIR)/cal_tad.c $(CAL_DIR)/cal_main.c $(TOP)/lib/libui/ui_libc.c \
-		$(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c
+		$(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c \
+		$(TOP)/outer_kernel/tad/tad_lnkvol.c $(TOP)/peripheral_kernel/sysman/uuidtext.c
 CAL_ELF      := $(UOBJ)/calendar.elf
 CAL_REC      := $(UOBJ)/rec/01a0d8c4-52d4-7b31-9c42-5d6e7f809a12_1.bin
 
-$(CAL_ELF): $(APP_HDRS) $(MS_LIBTS) $(CAL_SRCS) $(CAL_DIR)/cal_tad.h $(TOP)/include/ts/ui.h \
+$(CAL_ELF): $(APP_HDRS) $(MS_LIBTS) $(CAL_SRCS) $(CAL_DIR)/cal_tad.h $(TOP)/include/ts/ui.h $(TOP)/include/ts/tadlnk.h \
 	    $(TOP)/include/ts/sysdef.h $(TOP)/include/ts/dtreq.h $(USER_LD) $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
@@ -634,6 +679,124 @@ $(CAL_REC): $(CAL_ELF)
 	@cp $< $@
 
 EXTRA_RECS += $(CAL_REC)
+
+# スライド: 文章の仮身が指す実身を1枚ずつ画面いっぱいに映すアプリ。文章と図形の組版と描画は
+# カーネルと同じソースを TV_USER で結び(include/ts/tvport.h)、描画と書体はカーネルの
+# SVC で行う。実時間制御TADはデスクトップの再生部に頼む(lib/librtad は数の読み取りだけを結ぶ)。
+# パネルは lib/libui。newlib を使う。
+# プログラム実身のレコード1(設計書 11.11)
+SL_DIR       := $(TOP)/application/slide
+TV_LIB_SRCS  := $(TOP)/outer_kernel/tad/tad.c $(TOP)/outer_kernel/tad/tad_link.c \
+		$(TOP)/outer_kernel/tad/tad_edit.c $(TOP)/outer_kernel/tad/tad_pat.c \
+		$(TOP)/outer_kernel/tad/tad_view.c $(TOP)/application/doc/docview.c \
+		$(TOP)/application/fig/figview.c $(TOP)/application/fig/figgeom.c \
+		$(TOP)/outer_kernel/om/om_vdraw.c $(TOP)/outer_kernel/dp/dp_pat.c \
+		$(TOP)/outer_kernel/img/img_scale.c $(TOP)/peripheral_kernel/sysman/uuidtext.c \
+		$(TOP)/lib/libtv/tv_fn.c $(TOP)/lib/libtv/tv_src.c
+SL_SRCS      := $(SL_DIR)/sl_deck.c $(SL_DIR)/sl_main.c $(TV_LIB_SRCS) \
+		$(TOP)/lib/librtad/rt_num.c \
+		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c
+SL_ELF       := $(UOBJ)/slide.elf
+SL_REC       := $(UOBJ)/rec/01a0d8c4-52d5-7c42-8d53-6e7f8091ab23_1.bin
+
+$(SL_ELF): $(APP_HDRS) $(MS_LIBTS) $(SL_SRCS) $(TOP)/outer_kernel/tad/tad_local.h \
+	    $(TOP)/lib/librtad/rt_local.h $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(SL_SRCS) -lc -lgcc
+
+$(SL_REC): $(SL_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(SL_REC)
+
+# 基本図形編集: 図形の実身を普通のウインドウで編集するアプリ。表示はスライドと同じく
+# カーネルと同じソースを TV_USER で結び、図形の編集の核は application/fig/figedit.c(デスクトップの
+# 図形編集も結ぶ)、文字枠の編集は文章の編集の核 application/doc/docedit.c(デスクトップの基本文章編集も
+# 結ぶ)。パネルは lib/libui。newlib を使う。プログラム実身のレコード1(設計書 11.3)
+FG_DIR       := $(TOP)/application/fig
+FG_SRCS      := $(FG_DIR)/fg_main.c $(FG_DIR)/fg_edit.c $(FG_DIR)/fg_link.c $(FG_DIR)/fg_text.c $(FG_DIR)/fg_tool.c $(FG_DIR)/figedit.c $(FG_DIR)/figtool.c $(FG_DIR)/figcanvas.c $(FG_DIR)/figpat.c $(FG_DIR)/fg_pat.c \
+		$(TOP)/outer_kernel/img/png.c $(TOP)/outer_kernel/img/deflate.c $(TOP)/outer_kernel/img/inflate.c \
+		$(TOP)/application/doc/docedit.c $(TOP)/application/doc/docfind.c $(TV_LIB_SRCS) $(TOP)/lib/libtv/tv_app.c 		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c
+FG_ELF       := $(UOBJ)/figedit.elf
+FG_REC       := $(UOBJ)/rec/01a0d6d1-08d2-7344-a6e2-6cede408d684_1.bin
+
+$(FG_ELF): $(APP_HDRS) $(MS_LIBTS) $(FG_SRCS) $(FG_DIR)/fg.h $(TOP)/include/ts/figedit.h $(TOP)/include/ts/figtool.h $(TOP)/include/ts/docedit.h $(TOP)/include/ts/tadlnk.h $(TOP)/include/ts/tvapp.h 	    $(TOP)/outer_kernel/tad/tad_local.h $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(FG_SRCS) -lc -lgcc
+
+$(FG_REC): $(FG_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(FG_REC)
+
+# 基本文章編集: 文章の実身を普通のウインドウで編集するアプリ。編集の核は application/doc/docedit.c
+# (デスクトップの基本文章編集も結ぶ)、メニューは docmenu.c、図形編集と共通の部分は lib/libtv/tv_app.c。
+# 表示は TV_USER で結ぶ。パネルは lib/libui。newlib を使う。プログラム実身のレコード1(設計書 11.3)
+DC_DIR       := $(TOP)/application/doc
+DC_SRCS      := $(DC_DIR)/dc_main.c $(DC_DIR)/dc_host.c $(DC_DIR)/docedit.c $(DC_DIR)/docfind.c $(DC_DIR)/docmenu.c $(TOP)/application/fig/figedit.c \
+		$(TOP)/outer_kernel/img/png.c $(TOP)/outer_kernel/img/deflate.c $(TOP)/outer_kernel/img/inflate.c \
+		$(TV_LIB_SRCS) $(TOP)/lib/libtv/tv_app.c \
+		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c
+DC_ELF       := $(UOBJ)/docedit.elf
+DC_REC       := $(UOBJ)/rec/01a0d6d1-08d1-781f-8f58-35c45aeacef9_1.bin
+
+$(DC_ELF): $(APP_HDRS) $(MS_LIBTS) $(DC_SRCS) $(DC_DIR)/dc.h $(TOP)/include/ts/docedit.h $(TOP)/include/ts/docmenu.h $(TOP)/include/ts/tadlnk.h $(TOP)/include/ts/tvapp.h \
+	    $(TOP)/outer_kernel/tad/tad_local.h $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(DC_SRCS) -lc -lgcc
+
+$(DC_REC): $(DC_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(DC_REC)
+
+# 仮身一覧: 実身の仮身を並べたウインドウを普通のウインドウで扱うアプリ。基本図形編集のソースに
+# application/cab/cb_main.c(仮身一覧であることを示す)を結んだもので、図形は編集せず仮身だけを扱い、
+# メニューは仮身一覧のもの。表示は TV_USER で結ぶ。パネルは lib/libui。newlib を使う。
+# プログラム実身のレコード1(設計書 11.3)
+CB_DIR       := $(TOP)/application/cab
+CB_SRCS      := $(CB_DIR)/cb_main.c $(FG_SRCS)
+CB_ELF       := $(UOBJ)/vobjlist.elf
+CB_REC       := $(UOBJ)/rec/01a0d6d1-08d3-72ef-ad1e-323b44cc2172_1.bin
+
+$(CB_ELF): $(APP_HDRS) $(MS_LIBTS) $(CB_SRCS) $(FG_DIR)/fg.h $(TOP)/include/ts/figedit.h $(TOP)/include/ts/figtool.h $(TOP)/include/ts/docedit.h $(TOP)/include/ts/tadlnk.h $(TOP)/include/ts/tvapp.h \
+	    $(TOP)/outer_kernel/tad/tad_local.h $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(CB_SRCS) -lc -lgcc
+
+$(CB_REC): $(CB_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(CB_REC)
+
+# 原紙集め: すべてのアプリの原紙を原紙箱と同じ形の一覧で見せる小物。一覧は図形として作り、
+# 表示は TV_USER で結ぶ。newlib を使う。プログラム実身のレコード1(設計書 11.2.3)
+BC_DIR       := $(TOP)/application/basecol
+BC_SRCS      := $(BC_DIR)/bc_main.c \
+		$(TOP)/outer_kernel/img/png.c $(TOP)/outer_kernel/img/deflate.c $(TOP)/outer_kernel/img/inflate.c \
+		$(TV_LIB_SRCS) $(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libjson/json.c
+BC_ELF      := $(UOBJ)/basecol.elf
+BC_REC       := $(UOBJ)/rec/01a0d8c4-5b92-7c53-8d64-9fab0c1d5b92_1.bin
+
+$(BC_ELF): $(APP_HDRS) $(MS_LIBTS) $(BC_SRCS) $(TOP)/include/ts/tadview.h $(TOP)/include/ts/dtreq.h \
+	    $(TOP)/outer_kernel/tad/tad_local.h $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(BC_SRCS) -lc -lgcc
+
+$(BC_REC): $(BC_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(BC_REC)
 
 # かな入力練習: 問題文を打ち、次に打つキーをキーボードの図に示すアプリ。キーボードとかなの
 # 配列の表は lib/libkbmap、判定と成績は application/kanatype/kp_eng.c(どちらもカーネルの試験も
@@ -655,6 +818,61 @@ $(KANA_REC): $(KANA_ELF)
 	@cp $< $@
 
 EXTRA_RECS += $(KANA_REC)
+
+# BeFC、BeSFC: ゲーム機のエミュレータ。ウインドウは application/befc/emu_main.c を2度翻訳する
+# (後者は EMU_SFC)。コアはこのOSのヘッダを見ない。newlib を使う(設計書 11.32)
+BEFC_DIR     := $(TOP)/application/befc
+BEFC_SRCS    := $(BEFC_DIR)/emu_main.c $(BEFC_DIR)/cpu.c $(BEFC_DIR)/ppu.c $(BEFC_DIR)/apu.c $(BEFC_DIR)/cart.c \
+		$(BEFC_DIR)/nes.c $(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libjson/json.c
+BEFC_ELF     := $(UOBJ)/befc.elf
+BEFC_REC     := $(UOBJ)/rec/01a0d8c4-5500-7a01-8b12-3c4d5e6f7b50_1.bin
+
+$(BEFC_ELF): $(APP_HDRS) $(MS_LIBTS) $(BEFC_SRCS) $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -O2 -Wno-unused-variable -Wno-unused-function -I$(BEFC_DIR) -o $@ $(MS_LIBTS) $(BEFC_SRCS) -lc -lgcc
+
+$(BEFC_REC): $(BEFC_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(BEFC_REC)
+
+# BeSFCのコアは非商用のライセンスのコードを含むので、このリポジトリに置かない。make besfcpkg の
+# ときだけ BESFC_EXT のリポジトリのソースを結ぶ。ウインドウは emu_main.c を EMU_SFC で翻訳する(設計書 11.32)
+BESFC_EXT    ?= $(abspath $(TOP)/../besfc)
+BESFC_CORE   := cpu65816 sa1cpu sa1 ppu spc700 dsp dsp1 dsp2 dsp3 dsp4 superfx cx4 sdd1 srtc st010 obc1 cart snes
+BESFC_SRCS   := $(BEFC_DIR)/emu_main.c $(addprefix $(BESFC_EXT)/,$(addsuffix .c,$(BESFC_CORE))) \
+		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libjson/json.c
+BESFC_ELF    := $(UOBJ)/besfc.elf
+BESFC_REC    := $(UOBJ)/besfcrec/01a0d8c4-5501-7a01-8b12-3c4d5e6f7b60_1.bin
+
+$(BESFC_ELF): $(APP_HDRS) $(MS_LIBTS) $(BESFC_SRCS) $(BEFC_DIR)/emu_pad.h $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -O2 -fno-strict-aliasing -Wno-unused-variable -Wno-unused-function -DEMU_SFC -I$(BEFC_DIR) -I$(BESFC_EXT) -o $@ $(MS_LIBTS) $(BESFC_SRCS) -lc -lgcc
+
+$(BESFC_REC): $(BESFC_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+# BeFCはイメージに入るが、更新用に単独でも配布できる。make befcpkg で $(UOBJ)/pkg/befc.tpk を作る
+befcpkg: $(BEFC_REC)
+	@mkdir -p $(UOBJ)/pkg
+	@python3 $(TOP)/tools/mktpk.py --from $(TOP)/etc/def --from $(UOBJ)/rec --program befc -o $(UOBJ)/pkg/befc.tpk
+
+# BeSFCはイメージとシステムの.tpkに入れない。make besfcpkg で $(UOBJ)/pkg/besfc.tpk を作る(設計書 11.32)
+ifeq ($(wildcard $(BESFC_EXT)/superfx.c),)
+besfcpkg:
+	@echo 'besfcpkg: BeSFCのソースがありません: $(BESFC_EXT)。BESFC_EXT=<BeSFCのリポジトリ> で指定してください'
+	@exit 1
+else
+besfcpkg: $(BESFC_REC)
+	@mkdir -p $(UOBJ)/pkg
+	@python3 $(TOP)/tools/mktpk.py --from $(TOP)/etc/pkgdef/besfc --from $(UOBJ)/besfcrec --program besfc -o $(UOBJ)/pkg/besfc.tpk
+	@mkdir -p $(UOBJ)/pkg/besfc-LICENSES
+	@cp $(BESFC_EXT)/LICENSES/* $(UOBJ)/pkg/besfc-LICENSES/
+endif
 
 # 単語登録: かな漢字変換のユーザ辞書に単語を登録する小物。辞書の行の読み書きは lib/libudic
 # (カーネルの変換器と試験も結ぶ)、窓の部品は lib/libui。newlib を使う。プログラム実身の
@@ -777,7 +995,7 @@ $(TC_ELF): $(APP_HDRS) $(MS_LIBTS) $(TC_SRCS) $(TC_DIR)/tc.h $(TC_DIR)/tc_db.h \
 	   $(TOP)/application/calendar/cal_tad.h $(USER_LD) $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
-	@$(CC) $(ENV_CFLAGS) -DUI_ARENA_SIZE='(16*1024*1024)' -o $@ $(MS_LIBTS) $(TC_SRCS) -lc -lgcc
+	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(TC_SRCS) -lc -lgcc
 
 $(TC_REC): $(TC_ELF)
 	@mkdir -p $(dir $@)
@@ -884,9 +1102,9 @@ endif
 CALC_V8      ?= $(BROWSER)
 CALC_DIR     := $(TOP)/application/calc
 CALC_COBJ    := $(patsubst %,$(UOBJ)/calc/%.o,calc_main calc_draw calc_edit calc_panel calc_obj calc_chart calc_test \
-		calc_print calc_tad cal_tad ui ui_prn json)
+		calc_print calc_tad cal_tad ui ui_prn json tad_lnkvol uuidtext)
 CALC_HDRS    := $(CALC_DIR)/calc.h $(CALC_DIR)/calc_tad.h $(CALC_DIR)/calc_eng.h $(CALC_DIR)/calc_cases.h \
-		$(TOP)/application/calendar/cal_tad.h $(APP_HDRS)
+		$(TOP)/application/calendar/cal_tad.h $(TOP)/include/ts/tadlnk.h $(APP_HDRS)
 CALC_CFLAGS  := $(TSPOSIX_CFLAGS) -Wall -Wno-unused-parameter -Wno-format-truncation -Wno-stringop-truncation
 CALC_REC     := $(UOBJ)/rec/01a0d8c4-52e5-7e86-8f97-0a1b2c3d4e51_1.bin
 CALC_STAMP   := $(UOBJ)/calc.stamp
@@ -913,6 +1131,16 @@ $(UOBJ)/calc/ui_prn.o: $(TOP)/lib/libui/ui_prn.c $(TOP)/include/ts/uiprn.h $(APP
 	@$(CC) $(CALC_CFLAGS) -c -o $@ $<
 
 $(UOBJ)/calc/json.o: $(TOP)/lib/libjson/json.c $(APP_HDRS)
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(CALC_CFLAGS) -c -o $@ $<
+
+$(UOBJ)/calc/tad_lnkvol.o: $(TOP)/outer_kernel/tad/tad_lnkvol.c $(TOP)/include/ts/tadlnk.h $(APP_HDRS)
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(CALC_CFLAGS) -c -o $@ $<
+
+$(UOBJ)/calc/uuidtext.o: $(TOP)/peripheral_kernel/sysman/uuidtext.c $(APP_HDRS)
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
 	@$(CC) $(CALC_CFLAGS) -c -o $@ $<
@@ -966,7 +1194,7 @@ endif
 
 $(DICT_REC): $(MOZC_DATA)
 	@mkdir -p $(dir $@)
-	@cp $< $@
+	@cp -f $< $@
 
 # システムのボリューム: 定義実身と試験用の記録、書体・壁紙・時計・辞書のレコードを
 # tools/mktsfs で TSFS の版数4のボリュームにしたもの。試験用ディスクの区画3になり、
@@ -986,7 +1214,7 @@ TSFS_TOOLS  := $(TOP)/tools/mktsfs $(wildcard $(TOP)/tools/tsfs_py/*.py)
 # 版(R1.000 の形: R、桁数の決まらない整数、点、3桁)。プログラムの版はプログラム実身の
 # メタデータ tessronos.program.version に書く(etc/def)。TS_VERSION はシステムの版で、
 # システムの実身の OB_SYS_INFO に VERSION として出る
-TS_VERSION   ?= R1.200
+TS_VERSION   ?= R1.300
 VER_STAMP    := obj/version.stamp
 $(shell mkdir -p obj; [ -f $(VER_STAMP) ] && [ "$$(cat $(VER_STAMP))" = "$(TS_VERSION)" ] || echo "$(TS_VERSION)" > $(VER_STAMP))
 $(OBJDIR)/peripheral_kernel/obj/obsys.o: $(VER_STAMP)
@@ -1052,7 +1280,7 @@ $(SVCPROG_ELF): $(APP_HDRS) $(LIBTS_SRCS) $(TOP)/tests/uprog/svcprog.c $(USER_LD
 		$(TOP)/include/ts/uapp.h $(TOP)/include/ts/soapp.h $(TOP)/include/ts/fs.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
-	@$(CC) $(APP_CFLAGS) -o $@ $(LIBTS_SRCS) $(TOP)/tests/uprog/svcprog.c
+	@$(CC) $(APP_CFLAGS) -o $@ $(LIBTS_SRCS) $(TOP)/lib/libposix/$(UARCH_DIR)psx_stub.S $(TOP)/tests/uprog/svcprog.c
 
 # 試験が起こすプロセス(tests/uprog/gpprog.c)。/boot に GPPROG.ELF として載り、ktest_gl が
 # GPU の SVC(クラス10、include/ts/gpuapp.h)を EL0 から通す
@@ -1107,6 +1335,8 @@ docs-check:
 # リポジトリには置かない)。RPI_DTB=...、CM5_DTB=...、CM5L_DTB=... で手元のものを指してもよい
 RPI_DTB_BASE ?= https://github.com/raspberrypi/firmware/raw/master/boot
 RPI_DTB     ?= obj/boot/bcm2712-rpi-5-b.dtb
+RPI_D0_DTB  ?= obj/boot/bcm2712d0-rpi-5-b.dtb
+RPI500_DTB  ?= obj/boot/bcm2712-rpi-500.dtb
 CM5_DTB     ?= obj/boot/bcm2712-rpi-cm5-cm5io.dtb
 CM5L_DTB    ?= obj/boot/bcm2712-rpi-cm5l-cm5io.dtb
 SD_IMG      := $(OBJDIR)/sd.img
@@ -1119,7 +1349,7 @@ endif
 # 区画1(FAT32)。Blink 入りのブラウザと V8 入りの表計算のレコードで 256MB を超える
 SD_BOOT_MB  ?= 512
 
-obj/boot/bcm2712-%.dtb:
+obj/boot/bcm2712-%.dtb obj/boot/bcm2712d0-%.dtb:
 	@mkdir -p $(dir $@)
 	@echo 'GET $@'
 	@curl -fsSL -o $@.part $(RPI_DTB_BASE)/$(notdir $@) && mv $@.part $@
@@ -1202,14 +1432,14 @@ $(RPI4_QEMU_SD): $(SD_IMG)
 
 # QEMU の raspi4b はカードを EMMC2 ではなく古い EMMC に繋ぐので、起動引数でそちらを使わせる
 RPI4_QEMU_ARGS = $(RPI4_QEMU_FLAGS) -kernel $(EXE_FILE).img -dtb $(RPI4_QEMU_DTB) \
-	-drive file=$(RPI4_QEMU_SD),if=sd,format=raw -append "tessronos.sd=emmc"
+	-drive file=$(RPI4_QEMU_SD),if=sd,format=raw -append "tessronos.sd=emmc $(RPI4_QEMU_DWC2)" $(RPI4_QEMU_USB)
 
 qemu-rpi4: $(EXE_FILE).img $(RPI4_QEMU_SD) $(RPI4_QEMU_DTB)
 	$(QEMU) $(RPI4_QEMU_ARGS) -serial mon:stdio
 
 test-rpi4: $(EXE_FILE).img $(RPI4_QEMU_SD) $(RPI4_QEMU_DTB)
 	QEMU="$(QEMU)" $(TOP)/tools/qemu_run.sh -t $(TEST_TMO) -e "$(if $(filter 1,$(KTEST)),KTEST SUMMARY,TessronOS: > init)" \
-	  -f "FAIL" -- $(RPI4_QEMU_ARGS)
+	  -f "FAIL" -q $(TOP)/tools/qemu_qmp.py -- $(RPI4_QEMU_ARGS)
 
 .PHONY: qemu-rpi4 test-rpi4
 else ifeq ($(ARCH),x86_64)
@@ -1248,13 +1478,16 @@ $(SD_IMG): $(EXE_FILE).img $(RPI_DTB) $(CM5_DTB) $(CM5L_DTB) $(TOP)/etc/boot/con
 	@cp $(TOP)/etc/boot/config.txt $(SD_STAGE)/config.txt
 	@if [ "$(RP1_CONSOLE)" = 1 ] || [ "$(RP1_UART)" = 1 ]; then echo 'enable_rp1_uart=1' >> $(SD_STAGE)/config.txt; fi
 	@cp $(TOP)/etc/boot/cmdline-cm5.txt $(SD_STAGE)/cmdline-cm5.txt
+	@$(if $(RPI_CMDLINE),printf '%s\n' "$(RPI_CMDLINE)" > $(SD_STAGE)/cmdline.txt,:)
 	@cp $(RPI_DTB) $(SD_STAGE)/bcm2712-rpi-5-b.dtb
+	@cp $(RPI_D0_DTB) $(SD_STAGE)/bcm2712d0-rpi-5-b.dtb
+	@cp $(RPI500_DTB) $(SD_STAGE)/bcm2712-rpi-500.dtb
 	@cp $(CM5_DTB) $(SD_STAGE)/bcm2712-rpi-cm5-cm5io.dtb
 	@cp $(CM5L_DTB) $(SD_STAGE)/bcm2712-rpi-cm5l-cm5io.dtb
 	@cp $(USER_ELF) $(SD_STAGE)/init.elf
 	@python3 $(TOP)/tools/mksd.py --sys $(SYS_VOL) --boot-mb $(SD_BOOT_MB) --scratch-mb $(SD_SCRATCH_MB) $@ \
-	  $(SD_STAGE)/tessronos.img $(SD_STAGE)/config.txt $(SD_STAGE)/cmdline-cm5.txt \
-	  $(SD_STAGE)/bcm2712-rpi-5-b.dtb $(SD_STAGE)/bcm2712-rpi-cm5-cm5io.dtb $(SD_STAGE)/bcm2712-rpi-cm5l-cm5io.dtb \
+	  $(SD_STAGE)/tessronos.img $(SD_STAGE)/config.txt $(SD_STAGE)/cmdline-cm5.txt $(if $(RPI_CMDLINE),$(SD_STAGE)/cmdline.txt) \
+	  $(SD_STAGE)/bcm2712-rpi-5-b.dtb $(SD_STAGE)/bcm2712d0-rpi-5-b.dtb $(SD_STAGE)/bcm2712-rpi-500.dtb $(SD_STAGE)/bcm2712-rpi-cm5-cm5io.dtb $(SD_STAGE)/bcm2712-rpi-cm5l-cm5io.dtb \
 	  $(USER_ELF) $(SD_STAGE)/init.elf $(SVCPROG_ELF) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) \
 	  $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $$(ls $(UOBJ)/rec/sys/*.bin 2>/dev/null) $(KTEST_XTAD) $(KTEST_DEF) \
 	  > $(SD_STAGE)/mksd.log || { cat $(SD_STAGE)/mksd.log; rm -f $@; exit 1; }
@@ -1264,12 +1497,14 @@ $(SD_IMG): $(EXE_FILE).img $(RPI_DTB) $(CM5_DTB) $(CM5L_DTB) $(TOP)/etc/boot/con
 sdimg: $(SD_IMG)
 
 # 書き込んだカードの区画1のカーネルと起動の設定だけを差し替える(make TARGET=_RPI5_ sd SD=/mnt/e)
-sd: $(EXE_FILE).img $(RPI_DTB) $(CM5_DTB) $(CM5L_DTB)
+sd: $(EXE_FILE).img $(RPI_DTB) $(RPI_D0_DTB) $(RPI500_DTB) $(CM5_DTB) $(CM5L_DTB)
 	@test -n "$(SD)" || { echo 'usage: make TARGET=_RPI5_ sd SD=<mount point of the FAT partition>'; exit 1; }
 	cp $(EXE_FILE).img "$(SD)/tessronos.img"
 	cp $(TOP)/etc/boot/config.txt "$(SD)/config.txt"
 	cp $(TOP)/etc/boot/cmdline-cm5.txt "$(SD)/cmdline-cm5.txt"
 	cp $(RPI_DTB) "$(SD)/bcm2712-rpi-5-b.dtb"
+	cp $(RPI_D0_DTB) "$(SD)/bcm2712d0-rpi-5-b.dtb"
+	cp $(RPI500_DTB) "$(SD)/bcm2712-rpi-500.dtb"
 	cp $(CM5_DTB) "$(SD)/bcm2712-rpi-cm5-cm5io.dtb"
 	cp $(CM5L_DTB) "$(SD)/bcm2712-rpi-cm5l-cm5io.dtb"
 endif
@@ -1281,10 +1516,10 @@ endif
 SYSUP_STAGE := $(OBJDIR)/sysupboot
 ifeq ($(TARGET),_RPI5_)
 SYSUP_MACHINE := rpi5
-SYSUP_BOOT_DEPS := $(EXE_FILE).img $(RPI_DTB) $(CM5_DTB) $(CM5L_DTB) $(TOP)/etc/boot/config.txt $(TOP)/etc/boot/cmdline-cm5.txt
+SYSUP_BOOT_DEPS := $(EXE_FILE).img $(RPI_DTB) $(RPI_D0_DTB) $(RPI500_DTB) $(CM5_DTB) $(CM5L_DTB) $(TOP)/etc/boot/config.txt $(TOP)/etc/boot/cmdline-cm5.txt
 SYSUP_BOOT = --boot tessronos.img=$(EXE_FILE).img --boot config.txt=$(SYSUP_STAGE)/config.txt \
 	--boot cmdline-cm5.txt=$(TOP)/etc/boot/cmdline-cm5.txt \
-	--boot bcm2712-rpi-5-b.dtb=$(RPI_DTB) --boot bcm2712-rpi-cm5-cm5io.dtb=$(CM5_DTB) \
+	--boot bcm2712-rpi-5-b.dtb=$(RPI_DTB) --boot bcm2712d0-rpi-5-b.dtb=$(RPI_D0_DTB) --boot bcm2712-rpi-500.dtb=$(RPI500_DTB) --boot bcm2712-rpi-cm5-cm5io.dtb=$(CM5_DTB) \
 	--boot bcm2712-rpi-cm5l-cm5io.dtb=$(CM5L_DTB) --boot init.elf=$(USER_ELF)
 else ifeq ($(TARGET),_RPI4_)
 SYSUP_MACHINE := rpi4

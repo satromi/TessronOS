@@ -1,0 +1,57 @@
+# 基本図形編集: the desktop's own and the process write the same record (design 11.3),
+# for tools/ui_run.py. Two copies of 画用紙 with 30 small rectangles (mkbig) are given
+# the same changes, one in the desktop's figure editor (open) and one in the figure
+# editor running as a process (pfig): the first rectangle carried 100 across and 200
+# down, the third sized by its handle, the fifth thrown away, then saved. Record 0 of
+# both must be the same, byte for byte.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 30 4
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+click 111 128
+drag 111 128 211 328
+sync 600
+click 135 128
+wait 100
+drag 143 136 183 166
+sync 600
+click 159 128
+key 4C
+sync 600
+key 16 01
+sync 600
+shot cmp_kernel
+sum
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 30 4
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 32
+wait 500
+logmark
+click 111 128
+drag 111 128 211 328
+expectsince figure: moved 1 by 100,200
+logmark
+click 135 128
+wait 100
+drag 143 136 183 166
+expectsince figure: sized
+logmark
+click 159 128
+key 4C
+expectsince figure: deleted, 31 shapes
+logmark
+key 16 01
+expectsince figure: saved (0)
+shot cmp_process
+sum
+same kernel
+key 08 01
+expect figure: closed

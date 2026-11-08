@@ -47,6 +47,7 @@ extern "C" {
 #define BOARD_QEMU_Q35		9	/* QEMU q35 with OVMF */
 #define BOARD_SURFACE_GO2	10	/* Microsoft Surface Go 2 (model 1927) */
 #define BOARD_X1YOGA3		11	/* Lenovo ThinkPad X1 Yoga, 3rd generation (machine types 20LD to 20LG) */
+#define BOARD_X1C_21CB		12	/* Lenovo ThinkPad X1 Carbon, machine type 21CB (Alder Lake-P) */
 
 /* What the SD host controller of the board has on it */
 #define BOARD_SD_CD		0	/* a card slot with its detect switch on always-on pin 5 */

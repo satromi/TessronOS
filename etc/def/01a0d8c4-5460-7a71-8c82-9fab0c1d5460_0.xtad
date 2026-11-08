@@ -1,6 +1,6 @@
 <tad version="1.0" encoding="UTF-8" filename="bin">
 <figure>
-<link id="01a0d8c4-5462-7c93-8ea4-bc1d2e3f5462_0.xtad" vobjid="01a0d8c4-5463-7da4-9fb5-cd2e3f405463" vobjleft="8" vobjtop="8" vobjright="248" vobjbottom="33" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-<link id="01a0d8c4-5464-7eb5-80c6-de3f405f5464_0.xtad" vobjid="01a0d8c4-5465-7fc6-81d7-ef4051605465" vobjleft="8" vobjtop="40" vobjright="248" vobjbottom="65" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d8c4-5462-7c93-8ea4-bc1d2e3f5462_0.xtad" vobjid="01a0d8c4-5463-7da4-9fb5-cd2e3f405463" vobjleft="8" vobjtop="8" vobjright="77" vobjbottom="27" height="19" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d8c4-5464-7eb5-80c6-de3f405f5464_0.xtad" vobjid="01a0d8c4-5465-7fc6-81d7-ef4051605465" vobjleft="8" vobjtop="35" vobjright="91" vobjbottom="54" height="19" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
 </figure>
 </tad>

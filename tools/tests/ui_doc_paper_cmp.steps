@@ -1,0 +1,123 @@
+# 基本文章編集の印刷を、デスクトップの文章編集とプロセスの文章編集で同じにする (design 11.3,
+# 11.22), for tools/ui_run.py. Two copies of 基本文章編集 with 120 paragraphs (mkbig doc 120)
+# are printed with the same setting, one from the desktop's text editor (open) and one from
+# the text editor running as a process (pdoc, the pages handed over by DT_RQ_PRINT): Ctrl+P
+# brings up the desktop's 印刷設定 over the window (the windows stand at the same place, so
+# the panel does too), its shot is kept, and Enter prints. The PDF files must be the same,
+# byte for byte, but for the time each says it was made (sum pdf), and the desktop says the
+# same of both ("print: N sheets, ..."). Then the same with 詳細 shown (its marks printed, as
+# the desktop's window prints what it shows), chosen from 表示 in the menu opened at 300,250:
+# the desktop's menu the first time opens with 閉じる on the pointer's row (表示 60 below), the
+# process's after it with 表示 there; 表示's own opens with 原稿 on its row, 詳細 20 below.
+# The panel is the desktop's and holds it until it is answered: sync is not answered meanwhile.
+# Keys: Ctrl+P 13 01, Enter 28, Ctrl+E 08 01.
+docproc kernel
+mkbig doc 120
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 800
+move 690 490
+sync 600
+key 13 01
+wait 2000
+shot prn_k_panel
+logmark
+key 28
+expectsince print: 
+wait 1500
+sync 600
+sum pdf
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig doc 120
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 120
+wait 800
+move 690 490
+wait 300
+logmark
+key 13 01
+wait 2000
+shot prn_p_panel
+key 28
+expectsince document: print (0)
+wait 500
+sync 600
+sum pdf
+same kernel
+logmark
+key 08 01
+expectsince document: closed
+wait 500
+# 詳細
+mkbig doc 120
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+click 300 170
+sync 600
+click 300 250 1
+wait 400
+wait 400
+move 330 310
+wait 300
+move 440 310
+wait 400
+move 440 330
+wait 300
+click 440 330
+sync 600
+move 690 490
+sync 600
+key 13 01
+wait 2000
+logmark
+key 28
+expectsince print: 
+wait 1500
+sync 600
+sum pdf
+keep detail
+key 08 01
+sync 600
+wait 500
+mkbig doc 120
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 120
+wait 800
+logmark
+click 300 170
+expectsince document: drew
+logmark
+click 300 250 1
+expectsince document: menu
+wait 400
+move 330 250
+wait 300
+move 440 250
+wait 400
+move 440 270
+wait 300
+click 440 270
+expectsince document: command view.detail
+expectsince document: drew
+move 690 490
+wait 300
+logmark
+key 13 01
+wait 2000
+key 28
+expectsince document: print (0)
+wait 500
+sync 600
+sum pdf
+same detail
+logmark
+key 08 01
+expectsince document: closed

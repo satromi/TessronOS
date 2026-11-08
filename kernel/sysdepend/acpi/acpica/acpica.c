@@ -191,6 +191,8 @@ int knl_acpica_has_hid( const char *hid )
 
 /* ---------------------------------------------------------------- devices and their methods */
 
+int knl_acpica_int( void *dev, const char *method, unsigned long long *v );
+
 typedef struct {
 	int		want, seen;
 	ACPI_HANDLE	h;
@@ -220,6 +222,54 @@ void *knl_acpica_device( const char *hid, int index )
 	if ( !ready ) return NULL;
 	(void)AcpiGetDevices((char *)hid, pick, &p, NULL);
 	return p.h;
+}
+
+/*
+ * The SoundWire controllers the namespace has: a device whose _ADR has link
+ * type 4 in bits 28-31 (a PCI function's _ADR, device << 16 | function, never
+ * does), not turned off by its _STA. A firmware may declare one with nothing
+ * on it, so the devices below are counted too: a peripheral has an _ADR of
+ * its own.
+ */
+typedef struct {
+	int	ctrls, devs;
+	char	*path;
+	int	max;
+} SDW;
+
+static ACPI_STATUS sdw_look( ACPI_HANDLE h, UINT32 Level, void *Context, void **ReturnValue )
+{
+	SDW			*s = (SDW *)Context;
+	unsigned long long	adr = 0, a;
+	UINT32			sta = ACPI_UINT32_MAX;
+	ACPI_HANDLE		c = NULL;
+
+	(void)Level;
+	(void)ReturnValue;
+	if ( knl_acpica_int(h, "_ADR", &adr) != 0 || adr > 0xffffffffULL || ( ( adr >> 28 ) & 0xf ) != 4 ) {
+		return AE_OK;
+	}
+	if ( ACPI_SUCCESS(AcpiUtExecute_STA((ACPI_NAMESPACE_NODE *)h, &sta)) && ( sta & 1 ) == 0 ) {
+		return AE_OK;
+	}
+	if ( s->ctrls++ == 0 ) (void)knl_acpica_path(h, s->path, s->max);
+	while ( ACPI_SUCCESS(AcpiGetNextObject(ACPI_TYPE_DEVICE, h, c, &c)) ) {
+		a = 0;
+		if ( knl_acpica_int(c, "_ADR", &a) == 0 && a != 0 ) s->devs++;
+	}
+	return AE_OK;
+}
+
+int knl_acpica_sdw( int *devs, char *path, int max )
+{
+	SDW	s = { 0, 0, path, max };
+
+	if ( max > 0 ) path[0] = '\0';
+	if ( ready ) {
+		(void)AcpiWalkNamespace(ACPI_TYPE_DEVICE, ACPI_ROOT_OBJECT, ACPI_UINT32_MAX, sdw_look, NULL, &s, NULL);
+	}
+	*devs = s.devs;
+	return s.ctrls;
 }
 
 int knl_acpica_path( void *dev, char *buf, int max )
@@ -348,6 +398,45 @@ int knl_acpica_i2c( void *dev, unsigned int *addr, unsigned int *hz, char *ctrl,
 	if ( irq != NULL ) *irq = q.irq;
 	if ( irq_mode != NULL ) *irq_mode = q.irq_mode;
 	return q.found ? 0 : -1;
+}
+
+static ACPI_STATUS gpioint_res( ACPI_RESOURCE *r, void *Context )
+{
+	int	*mode = (int *)Context;
+
+	if ( *mode < 0 && r->Type == ACPI_RESOURCE_TYPE_GPIO && r->Data.Gpio.ConnectionType == ACPI_RESOURCE_GPIO_TYPE_INT ) {
+		*mode = ( r->Data.Gpio.Triggering == ACPI_EDGE_SENSITIVE ? 1 : 0 )
+		      | ( r->Data.Gpio.Polarity == ACPI_ACTIVE_LOW ? 2 : 0 )
+		      | ( r->Data.Gpio.Polarity == ACPI_ACTIVE_BOTH ? 4 : 0 );
+	}
+	return AE_OK;
+}
+
+int knl_acpica_gpioint( void *dev, int *mode )
+{
+	int	m = -1;
+
+	if ( dev == NULL ) return -1;
+	(void)AcpiWalkResources(dev, METHOD_NAME__CRS, gpioint_res, &m);
+	if ( m < 0 ) return -1;
+	*mode = m;
+	return 0;
+}
+
+int knl_acpica_irq( void *dev, int *irq, int *mode )
+{
+	I2CRES	q;
+
+	if ( dev == NULL ) return -1;
+	memset(&q, 0, sizeof(q));
+	q.pin = -1;
+	q.irq = -1;
+	q.found = 1;		/* no I2C connection is looked at, nor its strings written */
+	(void)AcpiWalkResources(dev, METHOD_NAME__CRS, i2c_res, &q);
+	if ( q.irq < 0 ) return -1;
+	*irq = q.irq;
+	*mode = q.irq_mode;
+	return 0;
 }
 
 int knl_acpica_call( void *dev, const char *method )

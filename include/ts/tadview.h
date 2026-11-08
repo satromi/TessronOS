@@ -204,12 +204,39 @@ typedef struct {
 #define TV_LAID_GUESS	1		/* 'h' a guess */
 #define TV_LAID_EXACT	2		/* laid at the settings of 'key' */
 
+/*
+ * What the last drawing of the document put in its box (docview.c): the
+ * box, the scroll, the settings it was laid at and how tall the whole
+ * came to, and each paragraph that showed in the box -- its <p>, that
+ * node's count of changes and the paragraph's 'sig', where it began and
+ * how far below that the next one began. After a change, what differs
+ * from it is all of the box that has to be drawn again (tv_doc_band).
+ */
+#define TV_SEEN_MAX	256		/* paragraphs in one box; more: drawn whole */
+
+typedef struct {
+	CONST void	*node;
+	UW		gen, sig;
+	INT		y, h;
+} T_TVSEEN;
+
+typedef struct t_tvshown {
+	BOOL		valid;
+	T_DPRECT	box;
+	INT		scroll;
+	UW		key;
+	INT		height;
+	INT		n;
+	T_TVSEEN	e[TV_SEEN_MAX];
+} T_TVSHOWN;
+
 typedef struct t_tvlayc {
 	UW		key;		/* the settings the exact ones were laid at */
 	INT		n;		/* paragraphs */
 	INT		nnone;		/* of them with nothing known */
 	INT		nb;		/* blocks of them (docview.c) */
 	INT		*bh, *bx;	/* each block's height, and how many in it are guesses */
+	T_TVSHOWN	*shown;		/* what the last drawing showed; NULL none yet */
 	T_TVLAID	e[1];		/* n of them, then the blocks' sums */
 } T_TVLAYC;
 
@@ -263,6 +290,24 @@ typedef struct t_tvdoc {
 	INT		page_h;
 	BOOL		detail;
 	BOOL		show_hidden;
+
+	/*
+	 * Also whoever shows it says, and the record does not: what it is
+	 * magnified by, zoom / zoom_den (0 in either is life size, 8 / 8),
+	 * every length of it alike, as a piece of text in a figure is when
+	 * the figure is; 'bare' lays its letters over whatever is there
+	 * already rather than on its paper (a text drawn by itself onto a
+	 * picture of the rest, the player of 実時間制御TAD); 'depth' how
+	 * many opened objects deep it is drawn, its links drawn that deep;
+	 * 'open_max' how deep opened objects inside it are drawn with what
+	 * is inside them (0 TV_MAX_DEPTH, 印刷 with 仮身: 展開 its 深さ).
+	 * Each drawing of it and each question about it takes these from
+	 * it, so two that show it differently at once do not meet.
+	 */
+	INT		zoom, zoom_den;
+	BOOL		bare;
+	INT		depth;
+	INT		open_max;
 
 	/* the figures standing in the text, made when it is read */
 	INT		nfig;
@@ -401,6 +446,15 @@ typedef struct t_tvfig {
 	/* the links marked hidden are drawn and can be pressed; else neither */
 	BOOL		show_hidden;
 
+	/*
+	 * How deep opened objects inside it are drawn with what is inside
+	 * them, as T_TVDOC.open_max (0 TV_MAX_DEPTH), and whether its pieces
+	 * of text and what is inside its opened objects are laid over what
+	 * is there rather than on their paper (T_TVDOC.bare)
+	 */
+	INT		open_max;
+	BOOL		bare;
+
 	/* the patterns it defines for itself, as they are used */
 	T_TVPAT		*pats;
 	INT		npats;
@@ -534,9 +588,14 @@ IMPORT INT  tv_pattern_of( UW col );
 
 /*
  * A fill that is a sixteen by sixteen mask drawn in a colour. The
- * pattern lives in one buffer, so it holds until the next is made.
+ * pattern points into 'room', so it holds for as long as room does.
  */
-IMPORT void tv_tex_pat( T_DPPAT *pat, UW col, CONST UH *tex );
+typedef struct {
+	UW	tile[16 * 16];
+	UW	mask[16];
+} T_TVTEX;
+
+IMPORT void tv_tex_pat( T_DPPAT *pat, T_TVTEX *room, UW col, CONST UH *tex );
 
 /* A colour written the way the records write them, "#rrggbb" */
 IMPORT UW  tv_colour( CONST UB *s, UW dflt );
@@ -623,6 +682,50 @@ typedef struct {
 #define TV_ST_OTHER	0x0002
 
 /*
+ * What links show, for a program running as a process that draws them
+ * itself (TSN_OB_REF_VOB, design 11.11): the store's answers to what
+ * T_TVSRC asks, for n links at once (at most OB_RVOB_MAX), each as the
+ * store gives it to the desktop -- the object's name, the words of the
+ * band as the link asks for them, its icon, its paper and its state.
+ * Whether a link is on another volume (TV_ST_OTHER) is said against
+ * 'host', the object of the window it is drawn in (all zero: none). A
+ * link to an object the process may not read is answered as a 虚身:
+ * er E_OACV and TV_ST_GONE. An icon larger than icon_max pixels is not
+ * given: icon_w and icon_h say its size and OB_VW_SHORT is set in
+ * state. Answers how many of the links were answered, or E_PAR, E_MACV.
+ * A change to an object is told as OB_E_CHANGE to whoever asked for its
+ * notices (ob_ntf_evt); the looks are asked again after it.
+ */
+#define OB_RVOB_MAX	16
+#define OB_VW_LABEL_MAX	( TAD_NAME_MAX + TAD_REL_MAX * 2 + 96 )
+
+#define OB_VW_NAME	0x0001
+#define OB_VW_LABEL	0x0002
+#define OB_VW_ICON	0x0004
+#define OB_VW_PAPER	0x0008
+#define OB_VW_STATE	0x0010
+
+#define OB_VW_SHORT	0x0100		/* state: the icon did not fit */
+
+typedef struct {
+	T_VOBJ	vobj;			/* the link */
+	TS_UUID	host;
+	UINT	want;			/* OB_VW_* */
+	ER	er;			/* E_OK, or why the object is not read */
+	UINT	state;			/* TV_ST_*, OB_VW_SHORT */
+	UW	paper;			/* the object's paper; TV_PAPER_LOOK the system's */
+	INT	name_len;		/* below nought: no name */
+	INT	label_len;		/* below nought: the link's own name is drawn */
+	UB	name[TAD_NAME_MAX];
+	UB	label[OB_VW_LABEL_MAX];
+	UW	*icon;			/* room for icon_max pixels, NULL none wanted */
+	INT	icon_max;
+	INT	icon_w, icon_h;		/* 0 when the object has no icon */
+} T_OBRVOB;
+
+IMPORT INT ob_ref_vob( T_OBRVOB *pk, INT n );
+
+/*
  * The object whose window is being drawn, by the task drawing it: the
  * links in it to objects of other volumes are marked. NULL when done.
  * Another task drawing meanwhile is not taken for it.
@@ -666,18 +769,25 @@ IMPORT void		*knl_tv_src_arg;
 IMPORT ER  tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 			 INT depth );
 
-/* The depth of the opened object a text is being drawn inside: its links are drawn that deep */
-IMPORT INT tv_open_depth;
-
 #define TV_MAX_DEPTH	3
 
 /*
- * How many open objects deep what is inside one is drawn: TV_MAX_DEPTH
- * on the screen. Printing with 仮身: 展開 sets it to 深さ and puts it back
- * after; an open object past it is drawn as its frame and band, with
- * nothing inside.
+ * The same, drawn as what it stands in is drawn: 'depth' as above;
+ * 'open_max' how many open objects deep what is inside one is drawn,
+ * TV_MAX_DEPTH on the screen (and 0 says that too), printing with 仮身:
+ * 展開 its 深さ -- an open object past it is drawn as its frame and band,
+ * with nothing inside; 'bare' what is inside laid over what is there
+ * rather than on its paper (T_TVDOC.bare). What is inside is drawn so
+ * too.
  */
-IMPORT INT tv_open_max;
+typedef struct {
+	INT	depth;
+	INT	open_max;
+	BOOL	bare;
+} T_TVHOW;
+
+IMPORT ER  tv_draw_link_how( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
+			     CONST T_TVHOW *how );
 
 /* ---------------------------------------------------------------- drawing */
 
@@ -696,6 +806,24 @@ IMPORT INT tv_open_max;
  */
 IMPORT INT tv_doc_draw( INT gid, CONST T_TVDOC *d, CONST T_DPRECT *r,
 			INT scroll_y, CONST T_TAD *src, UW paper );
+
+/*
+ * Drawn again only in part. tv_doc_draw lays and draws only the lines
+ * that reach into the part of the box the environment's visible area
+ * leaves (dp_set_visible); the rest of the box keeps what is there.
+ * tv_doc_band says which part that has to be after a change, for a
+ * document kept laid out (tv_doc_cache) and drawn into the same box at
+ * the same scroll before: the paragraphs that changed or moved since,
+ * the old place and the new of each, as a band across the box (down it,
+ * written downwards) -- to the end of the box when one moved, or when
+ * the whole came to another height. The paragraphs changed are laid
+ * here. FALSE: the box is to be drawn whole (no drawing before to go
+ * by, another box or scroll, a paragraph showing an object opened in
+ * it, whose contents may have changed with it, or what is laid over
+ * whole pages); TRUE with an empty band: nothing in the box changed.
+ */
+IMPORT BOOL tv_doc_band( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
+			 CONST T_TAD *src, T_DPRECT *band );
 
 /*
  * A document written downwards (T_TVDOC.vert) is drawn into the same
@@ -775,14 +903,7 @@ IMPORT ER  tv_fig_size( CONST T_TVFIG *f, INT *p_w, INT *p_h );
  * where a place is drawn (a box two pixels wide, as tall as its line),
  * and a stretch between two places turned over.
  */
-/* Whether the marks of breaks, tabs, pages and notes are drawn too */
-IMPORT void tv_doc_detail( BOOL on );
-/* What documents are drawn magnified by, in eighths, until set again */
-IMPORT void tv_doc_zoom( INT z );
-/* The same, z / den: tv_doc_zoom(z) is tv_doc_zoom_by(z, 8) */
-IMPORT void tv_doc_zoom_by( INT z, INT den );
-/* Whether documents are laid on their paper (TRUE) or over what is there, until set again */
-IMPORT void tv_doc_ground( BOOL on );
+/* The marks of breaks, tabs, pages and notes are drawn too when T_TVDOC.detail is set */
 /*
  * The paragraphs laid out kept with the document from now on, those of
  * 'from' (the document it was made again in place of, or NULL) that
@@ -793,7 +914,9 @@ IMPORT void tv_doc_ground( BOOL on );
  * a time, and answers how many are left; '*p_shift' is how much the
  * text above scroll_y came to be taller (below nought shorter), for
  * the one showing it to scroll by as much, so that what is in the
- * window stays where it is.
+ * window stays where it is, and '*p_laid' how many it laid this time
+ * (none: the heights drawn last are the heights still, and nothing
+ * needs drawing again for it).
  */
 IMPORT ER  tv_doc_cache( T_TVDOC *d, CONST T_TVDOC *from );
 /*
@@ -804,7 +927,7 @@ IMPORT ER  tv_doc_cache( T_TVDOC *d, CONST T_TVDOC *from );
  */
 IMPORT ER  tv_doc_again( CONST T_TAD *doc, CONST T_TVDOC *old, T_TVDOC **p_out );
 IMPORT INT tv_doc_settle( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
-			  CONST T_TAD *src, INT budget, INT *p_shift );
+			  CONST T_TAD *src, INT budget, INT *p_shift, INT *p_laid );
 IMPORT ER  tv_doc_caret_at( CONST T_TVDOC *d, CONST T_DPRECT *r, INT scroll_y,
 			    CONST T_TAD *src, INT x, INT y, INT *p_para,
 			    INT *p_pos );

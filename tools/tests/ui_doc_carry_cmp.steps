@@ -1,0 +1,168 @@
+# 基本文章編集から運び出したものを、デスクトップの文章編集とプロセスの文章編集で同じにする
+# (design 11.3), for tools/ui_run.py. A document of one line, opened as 受け先 with no object
+# behind it, is moved by its name band to the right of the screen. A copy of 基本文章編集 whose
+# record 0 is the text below (xmlbig) is opened at 100,100: a line, a line with a bold word and a
+# red word, a figure standing in a line, and a last line. Carried by the hand, the button let go
+# at once each time:
+#   1. 太字の語と赤い語, picked, out of the window onto 受け先: they go in there as they looked
+#      (the process hands them on as a fragment in the tray's place of its own, DT_F_FRAG)
+#   2. 先頭, picked, out of the window and back onto the end of the last line: they move there
+#      (the desktop answers the process DT_F_BACK, and it moves them within its text)
+#   3. the figure, out of the window and back onto the end of the last line: it moves there
+#   4. the figure, from there onto 受け先: it goes in there where the hand let go, and leaves
+#      the copy (DT_F_FRAG without DT_F_TEXT)
+# Record 0 of the copy, saved, and the record of the one the letters went into (sum keys) are the
+# same, byte for byte, whichever editor carried them; 受け先2, made as 受け先 and put over it, is
+# the one for the process.
+# Keys: Ctrl+S 16 01, Ctrl+E 08 01.
+docproc kernel
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p>受け先の行</p>
+xml </document></tad>
+xmlopen 受け先
+wait 500
+drag 300 75 1000 395
+wait 500
+mkbig doc 3
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p>先頭の行です。</p>
+xml <p>前<bold>太字の語</bold>と<font color="#ff0000">赤い語</font>の後</p>
+xml <p>A<figure><figView left="10" top="10" right="110" bottom="50"/><figDraw left="10" top="10" right="110" bottom="50"/><rect l_pat="1" left="10" top="10" right="110" bottom="50"/></figure>B</p>
+xml <p>最後の行です。</p>
+xml </document></tad>
+xmlbig
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+drag 125 175 240 175
+sync 600
+hold 160 175
+move 300 200
+move 600 300
+move 800 420
+move 900 450
+up
+sync 600
+wait 300
+sum show keys
+keep kernel_to
+click 400 112
+sync 600
+drag 111 139 140 139
+sync 600
+hold 120 139
+move 300 200
+move 750 200
+move 400 260
+move 300 270
+up
+sync 600
+wait 300
+hold 160 225
+move 300 260
+move 750 300
+move 400 280
+move 300 272
+up
+sync 600
+wait 300
+hold 280 255
+move 400 300
+move 750 400
+move 1000 500
+up
+sync 600
+wait 300
+sum show keys
+keep kernel_to2
+click 400 112
+sync 600
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p>受け先の行</p>
+xml </document></tad>
+xmlopen 受け先2
+wait 500
+drag 300 75 1000 395
+wait 500
+mkbig doc 3
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p>先頭の行です。</p>
+xml <p>前<bold>太字の語</bold>と<font color="#ff0000">赤い語</font>の後</p>
+xml <p>A<figure><figView left="10" top="10" right="110" bottom="50"/><figDraw left="10" top="10" right="110" bottom="50"/><rect l_pat="1" left="10" top="10" right="110" bottom="50"/></figure>B</p>
+xml <p>最後の行です。</p>
+xml </document></tad>
+xmlbig
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 4
+wait 800
+logmark
+drag 125 175 240 175
+expectsince document: drew
+wait 300
+logmark
+hold 160 175
+move 300 200
+move 600 300
+move 800 420
+move 900 450
+up
+expectsincein 10 document: letters carried out (0)
+wait 500
+sum show keys
+same kernel_to
+logmark
+click 400 112
+wait 300
+logmark
+drag 111 139 140 139
+expectsince document: drew
+wait 300
+logmark
+hold 120 139
+move 300 200
+move 750 200
+move 400 260
+move 300 270
+up
+expectsincein 10 back here
+wait 500
+logmark
+hold 160 225
+move 300 260
+move 750 300
+move 400 280
+move 300 272
+up
+expectsincein 10 document: figure carried out
+wait 500
+logmark
+hold 280 255
+move 400 300
+move 750 400
+move 1000 500
+up
+expectsincein 10 document: figure carried out (0)
+wait 500
+sum show keys
+same kernel_to2
+logmark
+click 400 112
+wait 300
+logmark
+key 16 01
+expectsince document: saved (0)
+sum show
+same kernel
+logmark
+key 08 01
+expectsince document: closed
+wait 500

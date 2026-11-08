@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "trash-real-objects",
       "kind": "utility",
       "name": "屑実身操作",

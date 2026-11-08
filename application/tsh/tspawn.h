@@ -83,7 +83,17 @@ void	spawn_heredoc(const char *, int);
 void	subshell_main(int) __attribute__((__noreturn__));
 
 /* Descriptors 0 and 1 made in and out for a while, and put back */
-void	spawnio_push(int, int);
-void	spawnio_pop(void);
+/*
+ * Descriptors 0 and 1 as they were before a spawnio_push. The caller keeps
+ * it, because the pushes nest: a program of a pipeline has its pipe ends
+ * pushed around the push of the spawn itself.
+ */
+struct spawnio {
+	int fd[2];
+	int had[2];
+};
+
+void	spawnio_push(struct spawnio *, int, int);
+void	spawnio_pop(struct spawnio *);
 
 #endif /* TSH_SPAWN_H */

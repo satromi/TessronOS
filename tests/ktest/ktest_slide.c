@@ -23,6 +23,9 @@
 #include <ts/tad.h>
 #include <ts/tadview.h>
 #include <ts/om.h>
+#include <ts/proc.h>
+#include <ts/dp.h>
+#include <ts/fn.h>
 #include "../../application/desktop/desktop.h"
 
 #define DECK		"72c584f2-af6c-45cb-8dfc-3f181d13cd0a"
@@ -161,10 +164,166 @@ LOCAL void test_sample( void )
 	KT_ASSERT_EQ(ts_uuid_cmp(&ids[2], &u), 0);
 }
 
+/*
+ * The calls the slide of a process draws with (tests/uprog/svcprog.c,
+ * SP_TVSVC): ob_ref_vob and fn_dra_txt answer as the kernel's store and
+ * faces do, and refuse what is wrong
+ */
+#define SVCPROG		"/boot/SVCPROG.ELF"
+#define SP_TVSVC	46		/* as tests/uprog/svcprog.c */
+
+LOCAL void test_process_svc( void )
+{
+	T_CPRC	cprc;
+	T_PSTS	psts;
+	UW	arg[8];
+	ID	pid;
+
+	/* what the process measures and draws letters with: the system's face, as on the desktop */
+	if ( kt_face() <= 0 ) KT_SKIP("no face in the 書体箱");
+	knl_memset(arg, 0, sizeof(arg));
+	arg[0] = SP_TVSVC;
+	cprc.pri    = KT_PRI_HIGH;
+	cprc.prcatr = 0;
+	cprc.stksz  = 0;
+	cprc.arg    = arg;
+	cprc.argsz  = sizeof(arg);
+	pid = ts_cre_prc(SVCPROG, &cprc);
+	if ( pid <= 0 ) KT_SKIP("no SVCPROG.ELF");
+	psts.exitcd = -1;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 30000), E_OK);
+	tm_printf((UB *)"  the calls of the slide of a process: exit %d\n", psts.exitcd);
+	KT_ASSERT_EQ(psts.exitcd, 0);
+}
+
+/*
+ * An environment of memory of a process (dp_open_mem, svc_gate.c;
+ * tests/uprog/svcprog.c, SP_DPMEM): what a process draws into its
+ * picture through one comes back to it as the kernel draws the same,
+ * pixel for pixel, its picture written back as it is closed; what is
+ * wrong is refused; and one a process leaves open goes with it.
+ */
+#define SP_DPMEM	47		/* as tests/uprog/svcprog.c */
+#define DPM_W		64
+#define DPM_H		48
+#define DPM_PITCH	( DPM_W + 3 )
+
+IMPORT INT knl_dp_mem_count( void );
+
+LOCAL ID dpm_run( UW mode, UW sum, T_PSTS *psts )
+{
+	T_CPRC	cprc;
+	UW	arg[8];
+	ID	pid;
+
+	knl_memset(arg, 0, sizeof(arg));
+	arg[0] = SP_DPMEM;
+	arg[1] = mode;
+	arg[2] = sum;
+	cprc.pri    = KT_PRI_HIGH;
+	cprc.prcatr = 0;
+	cprc.stksz  = 0;
+	cprc.arg    = arg;
+	cprc.argsz  = sizeof(arg);
+	pid = ts_cre_prc(SVCPROG, &cprc);
+	if ( pid <= 0 ) {
+		return pid;
+	}
+	psts->exitcd = -1;
+	(void)ts_wai_prc(pid, psts, 30000);
+	return pid;
+}
+
+LOCAL void test_process_dpmem( void )
+{
+	static UW	px[DPM_H * DPM_PITCH], img[8 * 6];
+	T_DPBMP		b;
+	T_DPRECT	r;
+	T_PSTS		psts;
+	INT		gid, i, x, y;
+	UW		h = 2166136261U;
+
+	/* the picture the process starts from, drawn into by the kernel */
+	for ( y = 0; y < DPM_H; y++ ) {
+		for ( x = 0; x < DPM_PITCH; x++ ) {
+			px[y * DPM_PITCH + x] = ( x < DPM_W ) ? (UW)( 0x00102030U + x * 3 + y * 0x100 ) : 0x00ABCDEFU;
+		}
+	}
+	b.px = px;
+	b.pitch = DPM_PITCH * 4;
+	b.w = DPM_W;
+	b.h = DPM_H;
+	gid = dp_open_mem(&b);
+	KT_ASSERT(gid >= 0);
+	for ( i = 0; i < 8 * 6; i++ ) img[i] = (UW)( 0x00010203U * (UW)i );
+	r.left = 4;  r.top = 4;  r.right = 30;  r.bottom = 20;
+	(void)dp_fill_rect(gid, &r, 0x00FF0000U);
+	r.left = 10;  r.top = 10;  r.right = 50;  r.bottom = 40;
+	(void)dp_frame_rect(gid, &r, 0x0000FF00U, 2);
+	(void)dp_line(gid, 0, DPM_H - 1, DPM_W - 1, 0, 0x000000FFU);
+	(void)dp_put_argb(gid, 40, 30, img, 8, 8, 6, 0x00010203U);
+	(void)dp_put_pixel(gid, 1, 1, 0x00FFFFFFU);
+	r.left = -10;  r.top = -10;  r.right = DPM_W + 10;  r.bottom = 2;
+	(void)dp_fill_rect(gid, &r, 0x00808080U);
+	KT_ASSERT_ER(dp_close(gid), E_OK);
+	for ( y = 0; y < DPM_H; y++ ) {
+		for ( x = 0; x < DPM_W; x++ ) {
+			h = ( h ^ px[y * DPM_PITCH + x] ) * 16777619U;
+		}
+		KT_ASSERT_EQ(px[y * DPM_PITCH + DPM_W], 0x00ABCDEFU);
+	}
+	tm_printf((UB *)"  the kernel's picture: sum %d\n", (INT)h);
+
+	if ( dpm_run(0, h, &psts) <= 0 ) KT_SKIP("no SVCPROG.ELF");
+	tm_printf((UB *)"  an environment of memory of a process: exit %d\n", psts.exitcd);
+	KT_ASSERT_EQ(psts.exitcd, 0);
+	KT_ASSERT_EQ(knl_dp_mem_count(), 0);
+
+	/* one left open as the process ends: let go of with it */
+	KT_ASSERT(dpm_run(1, 0, &psts) > 0);
+	KT_ASSERT_EQ(psts.exitcd, 0);
+	KT_ASSERT_EQ(knl_dp_mem_count(), 0);
+}
+
+/*
+ * The faces of the kernel's listed by a process (fn_nface, fn_face_at,
+ * fn_family, svc_gate.c; tests/uprog/svcprog.c, SP_FNFACE), as the
+ * kernel lists them for 書体の一覧 of 基本文章編集
+ */
+#define SP_FNFACE	48		/* as tests/uprog/svcprog.c */
+
+LOCAL void test_process_faces( void )
+{
+	T_CPRC	cprc;
+	T_PSTS	psts;
+	UW	arg[8];
+	ID	pid;
+
+	if ( kt_face() <= 0 || fn_nface() <= 0 ) KT_SKIP("no face in the 書体箱");
+	knl_memset(arg, 0, sizeof(arg));
+	arg[0] = SP_FNFACE;
+	arg[1] = (UW)fn_nface();
+	arg[2] = (UW)fn_face_at(0);
+	cprc.pri    = KT_PRI_HIGH;
+	cprc.prcatr = 0;
+	cprc.stksz  = 0;
+	cprc.arg    = arg;
+	cprc.argsz  = sizeof(arg);
+	pid = ts_cre_prc(SVCPROG, &cprc);
+	if ( pid <= 0 ) KT_SKIP("no SVCPROG.ELF");
+	psts.exitcd = -1;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 30000), E_OK);
+	tm_printf((UB *)"  the faces listed by a process: %d faces, exit %d\n", (INT)arg[1], psts.exitcd);
+	KT_ASSERT_EQ(psts.exitcd, 0);
+}
+
 EXPORT void ktest_slide( void )
 {
 	tm_printf((UB *)"\n[slide] スライド (design 11.11)\n");
 	KT_RUN(test_pages);
 	KT_RUN(test_fit);
 	KT_RUN(test_sample);
+	KT_RUN(test_process_svc);
+	KT_RUN(test_process_dpmem);
+	KT_RUN(test_process_faces);
 }

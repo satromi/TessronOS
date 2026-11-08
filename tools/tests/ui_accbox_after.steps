@@ -1,0 +1,21 @@
+# What ui_accbox.steps left on its disk (--keep-disk), after the machine has started
+# again: the order and the switch of the menu as they were set. Then the 小物箱's
+# program as an application: its template in the 原紙箱.
+accpos btron-backup
+want ok 0 24 -
+accpos tessronos-userenv
+want ok 1 24 +
+accpos console
+want ok 21 24 +
+accpos ut-acc
+want ok 23 24 +
+refs 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
+want ok 2
+# the 原紙箱's program run: the system's 原紙箱, with the 小物箱's template in its last row
+open 01a0d6d1-08d4-7809-bc38-c7d99aa28f29
+wait 2000
+win 原紙箱
+want ok 893 35 1093 635
+wait 800
+shot ab_genshi
+absent !OACV!

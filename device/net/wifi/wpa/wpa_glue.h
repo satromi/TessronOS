@@ -63,6 +63,30 @@ extern int	knl_wpa_start( const unsigned char *own, const unsigned char *bssid,
 #define WPAG_SAVED_WPA3		2
 #define WPAG_SAVED_WPA2WPA3	3
 
+/*
+ * 802.1X, WPA_MODE=proc only (application/wpasupp/wps_eap.c). A join of a network saved as
+ * WPAG_SAVED_EAP: knl_wpa_eap_set hands what it needs, always with the CA
+ * that must have signed the server's certificate; knl_wpa_eap_assoc starts
+ * EAP once associated; EAP's frames go through knl_wpa_rx as the others do.
+ * knl_wpa_eap_end leaves nothing secret in the process.
+ */
+#define WPAG_SAVED_EAP		4
+#define WPAG_AKM_8021X		1	/* 00-0F-AC:1 */
+#define WPAG_AKM_8021X_SHA256	5	/* 00-0F-AC:5 */
+#define WPAG_EAP_PEAP		1	/* PEAP with MSCHAPv2 inside */
+#define WPAG_EAP_TLS		2
+#define WPAG_EAP_NONE		0	/* knl_wpa_eap_result */
+#define WPAG_EAP_OK		1
+#define WPAG_EAP_FAILED		2
+int knl_wpa_eap_set(int method, const char *id, int id_len, const char *pw, int pw_len,
+		    const unsigned char *ca, int ca_len, const char *domain, int domain_len,
+		    const unsigned char *cert, int cert_len, const unsigned char *key, int key_len,
+		    const char *key_pw, int key_pw_len);
+void knl_wpa_eap_assoc(void);
+int  knl_wpa_eap_rx(const unsigned char *src, const unsigned char *body, int len);
+int  knl_wpa_eap_result(void);
+void knl_wpa_eap_end(void);
+
 /* WPAG_* of knl_wpa_classify for an access point offering both PSK and SAE (WPA3 transition mode) */
 #define WPAG_WPA2WPA3	6
 

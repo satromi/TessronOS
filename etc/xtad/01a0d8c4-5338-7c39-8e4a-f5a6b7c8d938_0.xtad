@@ -1,6 +1,6 @@
 <tad version="1.0" encoding="UTF-8" filename="住所録の印刷書式">
 <figure>
-<link id="01a0d8c4-5339-7d4a-9f5b-a6b7c8d9ea39_0.xtad" vobjid="01a0d8c4-5339-7e51-8a62-b7c8d9eaf151" vobjleft="10" vobjtop="10" vobjright="190" vobjbottom="35" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="0" pictdisp="true" namedisp="true" framedisp="true"/>
-<link id="01a0d8c4-533a-7e5b-8a6c-b7c8d9eafb3a_0.xtad" vobjid="01a0d8c4-533a-7f62-9b73-c8d9eafb0262" vobjleft="10" vobjtop="45" vobjright="190" vobjbottom="70" height="25" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="0" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d8c4-5339-7d4a-9f5b-a6b7c8d9ea39_0.xtad" vobjid="01a0d8c4-5339-7e51-8a62-b7c8d9eaf151" vobjleft="8" vobjtop="8" vobjright="113" vobjbottom="27" height="19" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="0" pictdisp="true" namedisp="true" framedisp="true"/>
+<link id="01a0d8c4-533a-7e5b-8a6c-b7c8d9eafb3a_0.xtad" vobjid="01a0d8c4-533a-7f62-9b73-c8d9eafb0262" vobjleft="8" vobjtop="35" vobjright="85" vobjbottom="54" height="19" chsz="14" frcol="#000000" chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" dlen="0" pictdisp="true" namedisp="true" framedisp="true"/>
 </figure>
 </tad>

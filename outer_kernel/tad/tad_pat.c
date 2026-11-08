@@ -20,9 +20,7 @@
  *	pixel in the top bit.
  */
 
-#include <sys/machine.h>
-#include "kernel.h"
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include <ts/tad.h>
 #include <ts/tadview.h>
 

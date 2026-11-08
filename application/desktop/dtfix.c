@@ -731,7 +731,7 @@ LOCAL DTWIN *open_framed( CONST DTOWN *own, INT pw, INT ph, INT dx, INT dy, CONS
 	DTWIN		*d;
 	INT		sw = 0, sh = 0, wl;
 
-	wm_screen(&sw, &sh);
+	wm_screen_main(&sw, &sh);
 	wl = ( sw - pw ) / 2 - 2 + dx;
 	o.left = wl - 10;
 	o.top = ( sh - ph ) / 2 - 20 + dy;

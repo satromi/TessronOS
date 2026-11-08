@@ -213,6 +213,7 @@ LOCAL T_WMCLICK	ls_click;		/* the press that opened it, to its release */
 
 LOCAL void pop_open( INT pid, INT i, CONST T_WMEV *ev );
 LOCAL void pop_close( BOOL draw );
+LOCAL INT  tlen( CONST UB *t );
 
 /*
  * The caret of the box with the keys blinks, and one conversion at a
@@ -756,8 +757,15 @@ LOCAL INT wm_panel_open_u( INT wid, CONST T_WMPANEL *def )
 
 		p->beside = FALSE;
 		for ( k = 0; k < p->def.npart; k++ ) {
-			if ( pn_takes_keys(p, &p->def.part[k]) ) {
+			T_WMPART	*pt = &p->def.part[k];
+
+			if ( pn_takes_keys(p, pt) ) {
 				p->focus = k;
+				/* a box with all its letters chosen, what is typed first taking their place */
+				if ( WM_PT_KIND(pt->type) == TB_PARTS ) {
+					pt->caret = tlen(pt->text);
+					pt->sb_at = 0;
+				}
 				break;
 			}
 		}
@@ -958,6 +966,9 @@ LOCAL ER wm_panel_close_u( INT pid )
 	}
 	/* a list goes with its own window: nothing under it to lay back */
 	if ( p->popup > 0 ) {
+		if ( !p->is_menu && p->owner_wid > 0 ) {
+			(void)wm_lit(p->owner_wid, FALSE);	/* the band of the window with the input again */
+		}
 		if ( p->under != NULL ) {
 			Kfree(p->under);
 			p->under = NULL;
@@ -1105,6 +1116,11 @@ LOCAL void panel_body( PANEL *p, INT gid )
 	INT		l = q.left, t = q.top, r = q.right, b = q.bottom;
 	UINT		fno;
 
+	if ( p->def.kind == WM_PNL_SHEET ) {
+		dp_fill_rect(gid, &q, 0x00FFFFFFU);
+		dp_frame_rect(gid, &q, wm_look(WM_LOOK_FRAME), 1);
+		return;
+	}
 	if ( p->def.kind == WM_PNL_BARE ) {
 		wm_look_pat(LK_PNLGROUND, &pat);
 		dp_fill_rect_pat(gid, &q, &pat);
@@ -1399,6 +1415,158 @@ LOCAL void draw_part_at( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margin 
 	dp_set_visible(gid, &env.visible);
 }
 
+
+/* ---------------------------------------------------------------- choosing a colour */
+
+#define CHOOSER_ROW	512		/* pixels of a row laid at once */
+
+LOCAL UW chooser_rgb( INT h, INT s, INT v )
+{
+	INT	f = h % 60;
+	INT	p = v * ( 255 - s ) / 255;
+	INT	q = v * ( 255 - s * f / 60 ) / 255;
+	INT	t = v * ( 255 - s * ( 60 - f ) / 60 ) / 255;
+	INT	r, g, b;
+
+	switch ( h / 60 ) {
+	case 0:		r = v; g = t; b = p;	break;
+	case 1:		r = q; g = v; b = p;	break;
+	case 2:		r = p; g = v; b = t;	break;
+	case 3:		r = p; g = q; b = v;	break;
+	case 4:		r = t; g = p; b = v;	break;
+	default:	r = v; g = p; b = q;	break;
+	}
+
+	return ( (UW)r << 16 ) | ( (UW)g << 8 ) | (UW)b;
+}
+
+#define HUE_MARK	16		/* across the hue bar's mark, and how high its rectangle should be */
+#define HUE_BAR_H	10
+
+LOCAL void chooser_oval( INT gid, INT x, INT y, INT d, UW colour, INT frame )
+{
+	T_DPRECT	m;
+	T_DPPAT		pat;
+
+	m.left = x - d / 2;  m.top = y - d / 2;
+	m.right = m.left + d;  m.bottom = m.top + d;
+	dp_pat_colour(&pat, colour);
+	if ( frame > 0 ) {
+		dp_frame_oval(gid, &m, frame, &pat);
+	} else {
+		dp_fill_oval(gid, &m, &pat);
+	}
+}
+
+LOCAL void svmap_draw( INT gid, CONST T_DPRECT *r, INT value )
+{
+	UW	row[CHOOSER_ROW];
+	INT	w = r->right - r->left, h = r->bottom - r->top, x, y, hue = WM_SVMAP_H(value);
+	INT	s = WM_SVMAP_S(value), v = WM_SVMAP_V(value);
+	UW	c;
+
+	if ( w <= 1 || h <= 1 || w > CHOOSER_ROW || hue >= 360 ) {
+		return;
+	}
+	for ( y = 0; y < h; y++ ) {
+		INT	vy = 255 - y * 255 / ( h - 1 );
+
+		for ( x = 0; x < w; x++ ) {
+			row[x] = chooser_rgb(hue, x * 255 / ( w - 1 ), vy);
+		}
+		dp_put_argb(gid, r->left, r->top + y, row, w, w, 1, 0xFFFFFFFFU);
+	}
+	/* the ring dark on what is light and light on what is dark */
+	c = chooser_rgb(hue, s, v);
+	x = (INT)( ( c >> 16 ) & 0xFF ) * 3 + (INT)( ( c >> 8 ) & 0xFF ) * 6 + (INT)( c & 0xFF );
+	chooser_oval(gid, r->left + s * ( w - 1 ) / 255, r->top + ( 255 - v ) * ( h - 1 ) / 255,
+		     14, ( x > 1280 ) ? 0x00000000U : 0x00FFFFFFU, 2);
+}
+
+/* The bar lies this far in from its rectangle's ends, so that the mark stays inside at either */
+LOCAL void huebar_draw( INT gid, CONST T_DPRECT *r, INT value )
+{
+	UW	row[CHOOSER_ROW];
+	INT	w = r->right - r->left - HUE_MARK, h = HUE_BAR_H, x, y, k;
+	INT	l = r->left + HUE_MARK / 2, t = r->top + ( r->bottom - r->top - h ) / 2;
+
+	dp_fill_rect(gid, r, 0x00FFFFFFU);
+	if ( w <= 1 || w > CHOOSER_ROW ) {
+		return;
+	}
+	for ( x = 0; x < w; x++ ) {
+		row[x] = chooser_rgb(359 - x * 359 / ( w - 1 ), 255, 255);
+	}
+	for ( y = 0; y < h; y++ ) {
+		/* the ends round: what a row leaves out at each end */
+		INT	dy = 2 * y + 1 - h, in = 0;
+
+		for ( k = 0; k < h / 2; k++ ) {
+			INT	dx = h - 2 * k - 1;
+
+			if ( dx * dx + dy * dy <= h * h ) {
+				break;
+			}
+			in = k + 1;
+		}
+		dp_put_argb(gid, l + in, t + y, row + in, w, w - 2 * in, 1, 0xFFFFFFFFU);
+	}
+	x = l + ( 359 - value ) * ( w - 1 ) / 359;
+	y = t + h / 2;
+	chooser_oval(gid, x, y, HUE_MARK, 0x00FFFFFFU, 0);
+	chooser_oval(gid, x, y, HUE_MARK - 4, chooser_rgb(value, 255, 255), 0);
+	chooser_oval(gid, x, y, HUE_MARK, 0x00808080U, 1);
+}
+
+LOCAL void coldot_draw( INT gid, CONST T_DPRECT *r, UW colour )
+{
+	T_DPPAT	pat;
+
+	dp_pat_colour(&pat, colour);
+	dp_fill_oval(gid, r, &pat);
+	dp_pat_colour(&pat, 0x00A0A0A0U);
+	dp_frame_oval(gid, r, 1, &pat);
+}
+
+/* A dropper leaning to the right: its stem, the collar across it, and the bulb */
+LOCAL void dropper_draw( INT gid, CONST T_DPRECT *r )
+{
+	T_DPPAT	pat;
+	INT	x = r->left + ( r->right - r->left - 18 ) / 2, y = r->top + ( r->bottom - r->top - 18 ) / 2;
+
+	dp_pat_colour(&pat, 0x00000000U);
+	dp_line_wide(gid, x + 1, y + 16, x + 9, y + 8, 2, 0, &pat);
+	dp_line_wide(gid, x + 7, y + 4, x + 13, y + 10, 2, 0, &pat);
+	dp_line_wide(gid, x + 10, y + 7, x + 15, y + 2, 5, 0, &pat);
+}
+
+/* Where the pointer stands, held to the part's ends, taken into its value */
+LOCAL void chooser_at( T_WMPART *pt, CONST T_DPRECT *r, INT px, INT py )
+{
+	INT	w = r->right - r->left - 1, h = r->bottom - r->top - 1;
+	INT	x = px - r->left, y = py - r->top;
+
+	if ( WM_PT_KIND(pt->type) == WM_PT_HUEBAR ) {
+		w -= HUE_MARK;
+		x -= HUE_MARK / 2;
+		if ( w <= 0 ) {
+			return;
+		}
+		if ( x < 0 ) x = 0;
+		if ( x > w ) x = w;
+		pt->value = 359 - x * 359 / w;
+		return;
+	}
+	if ( w <= 0 || h <= 0 ) {
+		return;
+	}
+	if ( x < 0 ) x = 0;
+	if ( x > w ) x = w;
+	if ( y < 0 ) y = 0;
+	if ( y > h ) y = h;
+	pt->value = WM_SVMAP_VALUE(WM_SVMAP_H(pt->value), x * 255 / w, 255 - y * 255 / h);
+}
+
 LOCAL void draw_part_body( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margin )
 {
 	T_WMPART	*pt = &p->def.part[i];
@@ -1418,6 +1586,22 @@ LOCAL void draw_part_body( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margi
 	switch ( kind ) {
 	case WM_PT_ICON:
 		icon_draw(gid, &r, pt->label);
+		break;
+
+	case WM_PT_SVMAP:
+		svmap_draw(gid, &r, pt->value);
+		break;
+
+	case WM_PT_HUEBAR:
+		huebar_draw(gid, &r, pt->value);
+		break;
+
+	case WM_PT_COLDOT:
+		coldot_draw(gid, &r, pt->colour);
+		break;
+
+	case WM_PT_DROPPER:
+		dropper_draw(gid, &r);
 		break;
 
 	case WM_PT_SWATCH:
@@ -1480,12 +1664,25 @@ LOCAL void draw_part_body( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margi
 
 LOCAL ER panel_draw( INT pid );
 
+#if USE_UITEST
+/* The panels drawn whole, and one being drawn now: read by the UI tests' pnstat (dtuitest.c) */
+EXPORT volatile UW	knl_pn_draws = 0;
+EXPORT volatile UW	knl_pn_drawing = 0;
+#endif
+
 EXPORT ER wm_panel_draw( INT pid )
 {
 	ER	er;
 
 	pn_lock();
+#if USE_UITEST
+	knl_pn_draws++;
+	knl_pn_drawing = 1;
+#endif
 	er = panel_draw(pid);
+#if USE_UITEST
+	knl_pn_drawing = 0;
+#endif
 	pn_unlock();
 	return er;
 }
@@ -2650,7 +2847,13 @@ LOCAL void pn_press( PANEL *p, INT pid, CONST T_WMEV *ev )
 		pop_open(pid, i, ev);
 		return;
 	case WM_PT_SWATCH:
-		take_press(p, i);
+		if ( pt->answer == WM_ANS_NONE ) {
+			take_press(p, i);
+		}
+		break;
+	case WM_PT_SVMAP:
+	case WM_PT_HUEBAR:
+		chooser_at(pt, &r, ev->x, ev->y);
 		break;
 	default:
 		break;
@@ -2674,6 +2877,15 @@ LOCAL void pn_move( PANEL *p, INT pid, CONST T_WMEV *ev )
 	part_rect(p, pt, &r);
 	in = rect_has(&r, ev->x, ev->y);
 	switch ( WM_PT_KIND(pt->type) ) {
+	case WM_PT_SVMAP:
+	case WM_PT_HUEBAR:
+		k = pt->value;
+		chooser_at(pt, &r, ev->x, ev->y);
+		if ( k != pt->value ) {
+			wm_panel_draw(pid);	/* a ring may stand over its rectangle's edge */
+			knl_wmobj_part(pid, i, OB_E_CHANGE, ev);
+		}
+		return;
 	case VL_PARTS:
 		k = pd_vl_at(pt, &r, ev->x, ev->y);
 		if ( k != pt->value ) {
@@ -2740,6 +2952,13 @@ LOCAL void pn_release( PANEL *p, INT pid, CONST T_WMEV *ev )
 	switch ( WM_PT_KIND(pt->type) ) {
 	case AS_PARTS:
 		if ( in ) pt->value = ( pt->value != 0 ) ? 0 : 1;
+		break;
+	case WM_PT_DROPPER:
+	case WM_PT_SWATCH:
+		if ( in && pt->answer != WM_ANS_NONE ) {
+			pushed = TRUE;
+			p->answer = pt->answer;
+		}
 		break;
 	case MS_PARTS:
 		if ( in ) {
@@ -3069,12 +3288,66 @@ LOCAL INT knl_pn_state_u( INT pid, INT i, UB *buf, INT max )
 
 LOCAL ER knl_pn_set_state_u( INT pid, INT i, CONST UB *buf, INT len );
 
+/*
+ * What a part was before it is written, to tell whether the write changed
+ * anything drawn: the part whole, which part has the keys, and whether a
+ * conversion is under way in it (its letters are committed by the write).
+ * knl_pn_set_state and knl_pn_set_flags return 1 when the part changed
+ * and E_OK when it is as it was, so that a program that writes again
+ * what a part already holds -- a page read again every second, a window
+ * filled as it opens -- does not have the panel drawn again and built.
+ */
+typedef struct {
+	T_WMPART	part;
+	INT		focus;
+	BOOL		conv;
+	BOOL		ok;
+} PNWAS;
+
+LOCAL void pn_was_take( INT pid, INT i, PNWAS *w )
+{
+	PANEL	*p = pn_of(pid);
+
+	w->ok = (BOOL)( p != NULL && i >= 0 && i < p->def.npart );
+	if ( !w->ok ) {
+		return;
+	}
+	knl_memcpy(&w->part, &p->def.part[i], sizeof(w->part));
+	w->focus = p->focus;
+	w->conv = (BOOL)( pn_conv_pid == pid && pn_conv_i == i );
+}
+
+LOCAL ER pn_was_res( INT pid, INT i, CONST PNWAS *w, ER res )
+{
+	PANEL		*p = pn_of(pid);
+	CONST UB	*a, *b;
+	SZ		k;
+
+	if ( res < E_OK ) {
+		return res;
+	}
+	if ( !w->ok || p == NULL || w->conv || p->focus != w->focus ) {
+		return 1;
+	}
+	a = (CONST UB *)&w->part;
+	b = (CONST UB *)&p->def.part[i];
+	for ( k = 0; k < (SZ)sizeof(w->part); k++ ) {
+		if ( a[k] != b[k] ) {
+			return 1;
+		}
+	}
+	return E_OK;
+}
+
 EXPORT ER knl_pn_set_state( INT pid, INT i, CONST UB *buf, INT len )
 {
+	PNWAS	was;
 	ER	res;
 
 	pn_lock();
+	pn_was_take(pid, i, &was);
 	res = knl_pn_set_state_u(pid, i, buf, len);
+	res = pn_was_res(pid, i, &was, res);
 	pn_unlock();
 	return res;
 }
@@ -3090,9 +3363,12 @@ LOCAL ER knl_pn_set_state_u( INT pid, INT i, CONST UB *buf, INT len )
 	pt = &p->def.part[i];
 	k = WM_PT_KIND(pt->type);
 	if ( k == WM_PT_SWATCH && len >= (INT)sizeof(INT) ) {
-		/* a swatch: the colour it shows */
-		knl_memcpy(v, buf, sizeof(INT));
+		/* a swatch: the colour it shows, and with a second INT whether it is marked as chosen */
+		knl_memcpy(v, buf, ( len >= 2 * (INT)sizeof(INT) ) ? 2 * (INT)sizeof(INT) : (INT)sizeof(INT));
 		pt->colour = (UW)v[0] & 0x00FFFFFFU;
+		if ( len >= 2 * (INT)sizeof(INT) ) {
+			pt->value = ( v[1] != 0 ) ? 1 : 0;
+		}
 		return E_OK;
 	}
 	if ( k == VL_PARTS && len >= (INT)sizeof(v) ) {
@@ -3106,6 +3382,12 @@ LOCAL ER knl_pn_set_state_u( INT pid, INT i, CONST UB *buf, INT len )
 	}
 	if ( k == TB_PARTS || k == XB_PARTS || k == WM_PT_LABEL || k == MS_PARTS || k == WM_PT_ICON ) {
 		UB	*t = ( k == TB_PARTS || k == XB_PARTS ) ? pt->text : pt->label;
+		/*
+		 * a box that has the keys with all of its letters chosen, as one
+		 * has when the panel comes up, keeps the letters it is given chosen
+		 */
+		BOOL	whole = (BOOL)( k == TB_PARTS && p->focus == i && pt->sb_at == 0
+				     && pt->caret == tlen(pt->text) );
 
 		n = ( len < WM_LABEL_MAX - 1 ) ? len : WM_LABEL_MAX - 1;
 		knl_memcpy(t, buf, n);
@@ -3116,7 +3398,7 @@ LOCAL ER knl_pn_set_state_u( INT pid, INT i, CONST UB *buf, INT len )
 		}
 		if ( t == pt->text ) {
 			pt->caret = n;
-			pt->sb_at = -1;
+			pt->sb_at = whole ? 0 : -1;
 			if ( pn_conv_pid == pid && pn_conv_i == i ) pn_commit();
 		}
 		return E_OK;
@@ -3176,10 +3458,13 @@ LOCAL ER knl_pn_set_flags_u( INT pid, INT i, UINT f );
 
 EXPORT ER knl_pn_set_flags( INT pid, INT i, UINT f )
 {
+	PNWAS	was;
 	ER	res;
 
 	pn_lock();
+	pn_was_take(pid, i, &was);
 	res = knl_pn_set_flags_u(pid, i, f);
+	res = pn_was_res(pid, i, &was, res);
 	pn_unlock();
 	return res;
 }
@@ -3409,6 +3694,70 @@ LOCAL ER wm_panel_set_u( INT pid, INT num, INT value )
 	return E_OK;
 }
 
+EXPORT ER wm_panel_show( INT pid, INT num, BOOL shown )
+{
+	PANEL		*p;
+	T_WMPART	*pt;
+	ER		er = E_NOEXS;
+
+	pn_lock();
+	p = pn_of(pid);
+	if ( p == NULL ) {
+		er = E_ID;
+	} else if ( ( pt = part_of(p, num) ) != NULL ) {
+		pt->type = shown ? ( pt->type & ~P_GONE ) : ( pt->type | P_GONE );
+		if ( p->focus < 0 || ( p->def.part[p->focus].type & P_GONE ) != 0 ) {
+			pn_focus_first(p);
+		}
+		er = E_OK;
+	}
+	pn_unlock();
+
+	return er;
+}
+
+EXPORT ER wm_panel_part_screen( INT pid, INT num, T_DPRECT *out )
+{
+	PANEL		*p = pn_of(pid);
+	T_WMPART	*pt;
+	T_WMWIN		w;
+	T_DPRECT	r;
+
+	if ( p == NULL ) {
+		return E_ID;
+	}
+	pt = part_of(p, num);
+	if ( pt == NULL || wm_ref(p->wid, &w) < E_OK ) {
+		return E_NOEXS;
+	}
+	part_rect(p, pt, &r);
+	out->left = w.work.left + r.left;
+	out->top = w.work.top + r.top;
+	out->right = w.work.left + r.right;
+	out->bottom = w.work.top + r.bottom;
+
+	return E_OK;
+}
+
+EXPORT ER wm_panel_set_colour( INT pid, INT num, UW colour )
+{
+	PANEL		*p;
+	T_WMPART	*pt;
+	ER		er = E_NOEXS;
+
+	pn_lock();
+	p = pn_of(pid);
+	if ( p == NULL ) {
+		er = E_ID;
+	} else if ( ( pt = part_of(p, num) ) != NULL ) {
+		pt->colour = colour & 0x00FFFFFFU;
+		er = E_OK;
+	}
+	pn_unlock();
+
+	return er;
+}
+
 EXPORT ER wm_panel_colour( INT pid, INT num, UW *p_colour )
 {
 	PANEL		*p = pn_of(pid);
@@ -3526,7 +3875,7 @@ LOCAL void mn_screen( INT *p_w, INT *p_h )
 	*p_h = 800;
 	if ( ts_disp_ref(&spec) >= E_OK ) {
 		/* the view the windows are laid in */
-		*p_w = (INT)( ( spec.view_w > 0 ) ? spec.view_w : spec.width );
+		*p_w = (INT)( ( spec.view_w > 0 ) ? spec.view_w : spec.width ) / ts_disp_screens();
 		*p_h = (INT)( ( spec.view_h > 0 ) ? spec.view_h : spec.height );
 	}
 }
@@ -3534,15 +3883,17 @@ LOCAL void mn_screen( INT *p_w, INT *p_h )
 /* A list's body moved back onto the screen, frame, padding and shadow */
 LOCAL void mn_keep_on( T_DPRECT *b, CONST MNMET *m )
 {
-	INT	sw, sh, d;
-	INT	gx = MN_FRAME + m->hpad, gy = MN_FRAME + m->vpad;
+	INT		d;
+	INT		gx = MN_FRAME + m->hpad, gy = MN_FRAME + m->vpad;
+	T_DPRECT	on;
 
-	mn_screen(&sw, &sh);
-	d = sw - ( b->right + gx + MN_SHADOW );
+	/* on the screen where it opens, not across two */
+	wm_screen_at(( b->left + b->right ) / 2, ( b->top + b->bottom ) / 2, &on);
+	d = on.right - ( b->right + gx + MN_SHADOW );
 	if ( d < 0 ) { b->left += d;  b->right += d; }
-	d = sh - ( b->bottom + gy + MN_SHADOW );
+	d = on.bottom - ( b->bottom + gy + MN_SHADOW );
 	if ( d < 0 ) { b->top += d;  b->bottom += d; }
-	d = 0 - ( b->left - gx );
+	d = on.left - ( b->left - gx );
 	if ( d > 0 ) { b->left += d;  b->right += d; }
 	d = 0 - ( b->top - gy );
 	if ( d > 0 ) { b->top += d;  b->bottom += d; }
@@ -4482,6 +4833,19 @@ LOCAL BOOL knl_pn_list_event_u( CONST T_WMEV *ev )
  */
 EXPORT INT wm_panel_open_centre( INT owner, CONST T_WMPANEL *def )
 {
+	INT	sw = 0, sh = 0;
+
+	if ( def == NULL ) {
+		return E_PAR;
+	}
+	mn_screen(&sw, &sh);
+
+	return wm_panel_open_at(owner, def, ( sw - ( def->r.right - def->r.left ) ) / 2,
+				( sh - ( def->r.bottom - def->r.top ) ) / 2);
+}
+
+EXPORT INT wm_panel_open_at( INT owner, CONST T_WMPANEL *def, INT x, INT y )
+{
 	T_WMPANEL	*pn;
 	PANEL		*p;
 	T_DPRECT	o;
@@ -4496,8 +4860,8 @@ EXPORT INT wm_panel_open_centre( INT owner, CONST T_WMPANEL *def )
 		return E_PAR;
 	}
 	mn_screen(&sw, &sh);
-	o.left = ( sw - w ) / 2;
-	o.top = ( sh - h ) / 2;
+	o.left = ( x + w > sw ) ? sw - w : x;
+	o.top = ( y + h > sh ) ? sh - h : y;
 	if ( o.left < 0 ) o.left = 0;
 	if ( o.top < 0 )  o.top = 0;
 	o.right = o.left + w;
@@ -4526,6 +4890,10 @@ EXPORT INT wm_panel_open_centre( INT owner, CONST T_WMPANEL *def )
 	if ( p != NULL ) {
 		p->popup = pop;
 		p->owner_wid = owner;
+	}
+	/* a window that never has the keys shows as having them while it is up (E_OBJ for one that can) */
+	if ( owner > 0 ) {
+		(void)wm_lit(owner, TRUE);
 	}
 
 	return pid;

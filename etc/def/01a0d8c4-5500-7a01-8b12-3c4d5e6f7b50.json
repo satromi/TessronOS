@@ -1,0 +1,59 @@
+{
+  "name": "BeFC",
+  "relationship": [],
+  "linktype": false,
+  "makeDate": "2026-10-03T00:00:00Z",
+  "updateDate": "2026-10-03T00:00:00Z",
+  "accessDate": "2026-10-03T00:00:00Z",
+  "periodDate": null,
+  "refCount": 1,
+  "recordCount": 2,
+  "editable": false,
+  "deletable": false,
+  "readable": true,
+  "maker": "TessronOS",
+  "applist": {},
+  "tessronos": {
+    "program": {
+      "source": "system",
+      "id": "befc",
+      "kind": "accessory",
+      "name": "BeFC",
+      "version": "R1.300",
+      "menu": true,
+      "builtin": false,
+      "base": [],
+      "res": [
+        "01a0d889-5500-7a01-8b12-3c4d5e6f7b52",
+        "01a0d889-5500-7a02-8b12-3c4d5e6f7b53",
+        "01a0d889-5500-7a03-8b12-3c4d5e6f7b54"
+      ]
+    },
+    "exec": {
+      "record": 1,
+      "type": "application/x-elf",
+      "arch": "aarch64",
+      "abi": "tessronos-1"
+    },
+    "records": [
+      {
+        "n": 0,
+        "rt": 1
+      },
+      {
+        "n": 1,
+        "rt": 9
+      }
+    ],
+    "access": {
+      "owner": "01a0d680-3aa0-75b3-bd7d-075e14217cd2",
+      "group": "01a0d680-3aa1-7922-ae79-ba5cbbaa2037",
+      "mode": "rwxr-xr-x",
+      "attr": [
+        "perm"
+      ],
+      "acl": [],
+      "records": []
+    }
+  }
+}

@@ -1,0 +1,18 @@
+<tad version="1.0" encoding="UTF-8" filename="BeSFCのメニュー">
+<document>
+<p>BeSFCのメニュー</p>
+<p>BeSFCのウインドウのメニュー。閉じる、ゲームの操作と、ウインドウ、小物、実行。メニューの定義。</p>
+</document>
+<menu>
+<include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2501-7001-9a10-c1d2e3f40c01"/></include>
+<item code="emu.reset">リセット</item>
+<item code="emu.pause">一時停止</item>
+<item>状態を保存<link id="01a0d889-5501-7a02-8b12-3c4d5e6f7b64_0.xtad" vobjid="01a0d8c3-2501-7003-9a10-c1d2e3f40c03"/></item>
+<item>状態を読込<link id="01a0d889-5501-7a03-8b12-3c4d5e6f7b65_0.xtad" vobjid="01a0d8c3-2501-7004-9a10-c1d2e3f40c04"/></item>
+<item>速度<link id="01a0d889-5501-7a04-8b12-3c4d5e6f7b66_0.xtad" vobjid="01a0d8c3-2501-7005-9a10-c1d2e3f40c05"/></item>
+<item>音量<link id="01a0d889-5501-7a05-8b12-3c4d5e6f7b67_0.xtad" vobjid="01a0d8c3-2501-7006-9a10-c1d2e3f40c06"/></item>
+<item code="emu.noflick">スプライトの数の制限なし</item>
+<item code="emu.fps">FPSの表示</item>
+<include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2501-7002-9a10-c1d2e3f40c02"/></include>
+</menu>
+</tad>

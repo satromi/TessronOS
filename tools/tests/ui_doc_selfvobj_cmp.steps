@@ -1,0 +1,84 @@
+# 自分自身を指す開いた仮身を編集中の記録で描く (design 11.3), for tools/ui_run.py. A text with an
+# opened link to itself (xml, xmlbig: ffffffff-... stands for the object itself) is opened in
+# the desktop's own text editor (docproc kernel, open) and in the process (pdoc), and letters
+# are typed into its first paragraph without saving. The desktop draws its own object inside
+# the link as it is being edited (the record of its window is the store's); the process,
+# given its record as the one being edited (tv_src_live), must draw the same: the shots after
+# the letters (self_k_typed, self_p_typed) are compared inside the window (101,125 to 682,482
+# of the screen), as are those on opening. Neither is saved before the shots: Ctrl+E, which
+# saves, closes each after them.
+# Keys: x 1b; Ctrl+E 08 01.
+docproc kernel
+look 306 3600000
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>自分への開いた仮身の前の段落</p>
+xml <p>自分への開いた仮身
+xml <link id="ffffffff-ffff-ffff-ffff-ffffffffffff_0.xtad" heightpx="200" width="520" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml </p>
+xml <p>後の段落</p>
+xml </document></tad>
+xmlbig
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 800
+move 690 490
+sync 600
+wait 300
+shot self_k_open
+click 300 135
+sync 600
+move 690 490
+sync 600
+key 1b
+sync 600
+key 1b
+sync 600
+key 1b
+sync 600
+wait 500
+shot self_k_typed
+key 08 01
+sync 600
+wait 500
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>自分への開いた仮身の前の段落</p>
+xml <p>自分への開いた仮身
+xml <link id="ffffffff-ffff-ffff-ffff-ffffffffffff_0.xtad" heightpx="200" width="520" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
+xml </p>
+xml <p>後の段落</p>
+xml </document></tad>
+xmlbig
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 3
+wait 800
+move 690 490
+wait 500
+shot self_p_open
+logmark
+click 300 135
+expectsince document: drew
+wait 300
+move 690 490
+wait 300
+logmark
+key 1b
+expectsince document: key to screen
+wait 300
+logmark
+key 1b
+expectsince document: key to screen
+wait 300
+logmark
+key 1b
+expectsince document: key to screen
+wait 800
+shot self_p_typed
+shotsame self_k_open self_p_open 101 125 682 482
+shotsame self_k_typed self_p_typed 101 125 682 482
+logmark
+key 08 01
+expectsince document: closed

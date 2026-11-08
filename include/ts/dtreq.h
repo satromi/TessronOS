@@ -28,7 +28,7 @@ extern "C" {
 #define DT_REQ_NAME	"tessronos.desktop"
 
 #define DT_RQ_OPEN	1		/* the object opened as a double click opens it */
-#define DT_RQ_TOOL	2		/* the accessory of this name (小物) started */
+#define DT_RQ_TOOL	2		/* the accessory (小物), or the system's tool (屑実身操作 ...), of this name started */
 
 /*
  * A link carried out of the asking program's window: asked while the
@@ -40,6 +40,7 @@ extern "C" {
  * anywhere else, or answered no, it is E_NOEXS or E_ABORT. The program
  * then makes what the link is to point at and asks DT_RQ_PLACE with
  * the carry's seq: the link is put where the hand let go.
+ * E_OACV: the asking process may not read target, and no link is made.
  */
 #define DT_RQ_CARRY	3
 #define DT_RQ_PLACE	4		/* a link to target put where a carry (carry) was let go */
@@ -179,8 +180,17 @@ extern "C" {
  * the desktop; the answer is E_OK when it was written, E_ABORT when the
  * panel was put away. The object is the process's to throw away after
  * the answer.
+ *
+ * The pages lie on white unless flags has DT_F_PR_PAPER: then on
+ * look.bgcol, the colour the window shows the paper in, as a window of
+ * the desktop's prints its own. A document's pages are laid as 詳細
+ * shows them with DT_F_PR_DETAIL, and with its hidden letters with
+ * DT_F_PR_HIDDEN, as the window shows them.
  */
 #define DT_RQ_PRINT	21
+#define DT_F_PR_PAPER	0x8000
+#define DT_F_PR_DETAIL	0x10000
+#define DT_F_PR_HIDDEN	0x20000
 
 /*
  * The administrator's rights for one operation (design 8.7): name says
@@ -302,6 +312,17 @@ extern "C" {
  * flags the DT_RTS_* bits, look.w its time in ms, look.h the media of its
  * playlist, text the title and the artist of the one playing. E_NOEXS:
  * there is no such player (any more).
+ *
+ * A slide (スライド, design 11.11) is opened with DT_F_RT_SLIDE in flags:
+ * grab_x by grab_y is the screen the slides are made for, carry the
+ * slide's number (from 1), look.chcol the slide's paper (0xFFFFFFFF its
+ * object's, else white). The scene is then fitted to the work area,
+ * look.w by look.h, its shape kept, in the middle, as the desktop shows
+ * a slide. What the slide's program asks of the slides (slide:next,
+ * slide:prev, slide:index:N) is kept and handed on in the next answer:
+ * DT_RTS_GO in flags, look.disp what it asked (RT_ACT_NEXT, RT_ACT_PREV,
+ * RT_ACT_INDEX of ts/rtad.h), look.autoopen the slide's index for
+ * RT_ACT_INDEX.
  */
 #define DT_RQ_RT_OPEN	31
 #define DT_RQ_RT_DO	32
@@ -329,6 +350,9 @@ extern "C" {
 #define DT_RTS_WAITING	0x0004		/* it waits to be begun (autoplay="false") */
 #define DT_RTS_DONE	0x0008		/* it has run to its end */
 #define DT_RTS_TAKEN	0x0010		/* DT_RT_PRESS, DT_RT_RELEASE, DT_RT_KEY: a trigger or a wait of it took it */
+#define DT_RTS_GO	0x0020		/* a slide's program asked for another slide */
+
+#define DT_F_RT_SLIDE	0x1000		/* DT_RQ_RT_OPEN: played as a slide */
 
 #define DT_F_HIDDEN	0x0002		/* the link is hidden (隠蔽仮身) */
 #define DT_F_KEEP	0x0004		/* the link keeps to its program (起動アプリの固定) */
@@ -348,7 +372,8 @@ extern "C" {
  * 実行's list for a link in a program's window, the one the desktop's
  * own links show (dt_app_list): the programs of the object's applist (of
  * the applist the link carries, given with DT_F_APPLIST, when the object
- * has none), then those that open an object of its kind. DT_RQ_APPS asks
+ * has none), or, when neither names any, those that open an object of
+ * its kind. DT_RQ_APPS asks
  * for the entry at recno (0 up) of target's list: the answer's how is
  * how many there are, text the entry's program id, a tab and its name
  * (UTF-8), and flags DT_F_KIND for one offered for the object's kind;
@@ -356,20 +381,224 @@ extern "C" {
  * such a one and leaves the program it opens with as it is.
  */
 #define DT_RQ_APPS	34
+
+/*
+ * DT_RQ_COLOUR: a colour chosen with the system's panel over the window
+ * rq->win, starting from look.bgcol. Answers the colour in look.bgcol, or
+ * E_ABORT when it was abandoned. Nothing is written anywhere. With
+ * DT_F_AT in flags the panel comes up with its corner at (grab_x,
+ * grab_y) of the screen -- under the part that showed the colour, as
+ * the system's own parts bring it up -- and otherwise at the pointer.
+ */
+#define DT_RQ_COLOUR	36
+#define DT_F_AT		0x4000
 #define DT_F_KIND	0x0400
 
 /*
  * DT_RQ_CARRY with DT_F_TEXT in flags: what is carried is letters, the
  * line of UTF-8 in text, not a link. Let go over a text of the desktop's
  * they go in where the outline's corner stood (E_OK); over the window of
- * another program that takes letters (OB_E_TEXT) they are dropped on it
- * (E_OK); anywhere else E_NOEXS, and over the asking program's own window
- * E_NOEXS and nothing said, as for a link. how says DT_HOW_COPY when the
- * second button went down on the way: the program keeps its letters;
- * else it takes them away (a move).
+ * another program that takes letters (OB_E_TEXT) they are dropped on it,
+ * with DT_F_TO_PROG in the answer's flags. Unless the second button went
+ * down on the way, that program is first asked whether it takes letters
+ * there (wm_obj_ask_text): E_OK with how 0 when it said yes (a move),
+ * E_NOEXS when it said no or did not answer; one that does not take the
+ * question is offered them, E_OK with how DT_HOW_COPY, since it may yet
+ * refuse them and the asking one keeps its letters; anywhere else
+ * E_NOEXS, and over the asking program's
+ * own window E_NOEXS and nothing said, as for a link. how says
+ * DT_HOW_COPY when the second button went down on the way: the program
+ * keeps its letters; else it takes them away (a move).
+ * Links let go over another program's window (DT_F_TO_PROG) are dropped
+ * with the outline's corner as the drop's x, y, each link at its place in
+ * the outline, as they are put in a window of the desktop's.
  */
 #define DT_F_TEXT	0x0008
 #define DT_CARRY_TEXT	512		/* bytes of the letters carried, with their terminator */
+
+/*
+ * DT_RQ_CARRY with DT_F_TO_PROG in flags: the links carried may also be
+ * let go over the window of another program that takes links (OB_E_DROP).
+ * The answer's flags say DT_F_TO_PROG when it went there: the other
+ * program speaks on the message line, and the asking one says nothing of
+ * its own about the link having gone.
+ * A program sets it when the objects stand by themselves whatever the
+ * other program answers: links it already shows, not objects it would
+ * make for the carry, which nothing would link to when the drop is
+ * refused. target names the object when there is one link, 0 when there
+ * are several. Unless the second button went down on the way, the other
+ * program is first asked whether it takes them there (wm_obj_ask): the
+ * answer is E_OK with how 0 when it said yes (a move: the program takes
+ * its links away once they are placed), E_NOEXS when it said no or did
+ * not answer. One that does not take the question is not asked, and the
+ * answer is E_OK with how DT_HOW_COPY, since it may yet refuse (the
+ * program keeps its link); into is 0. The
+ * program then asks DT_RQ_PLACE as usual, and the last DT_RQ_PLACE drops
+ * all the links on that window (wm_obj_drop_for). E_OACV, with the reason
+ * on the message line: the asking process or the taker may not read the
+ * object, and nothing was dropped.
+ */
+#define DT_F_TO_PROG	0x0800
+
+/*
+ * DT_RQ_CARRY with DT_F_ASK beside DT_F_TO_PROG: the program makes the
+ * objects only once they would be taken (書庫管理's 取り出し). Let go over
+ * another program's window, the desktop first asks that program whether
+ * it would take links there (wm_obj_ask, OB_E_ASK) and answers only when
+ * it has said: E_OK with DT_F_TO_PROG and into the object the window
+ * shows when it would, E_NOEXS when it would not or does not answer in a
+ * while, or does not take the question. Over a window of the desktop's
+ * the desktop answers for it as without DT_F_ASK. Once answered E_OK the
+ * program makes the objects and asks DT_RQ_PLACE; when that fails, it
+ * deletes what it made, so that nothing is left that no link reaches.
+ */
+#define DT_F_ASK	0x40000
+
+/*
+ * DT_RQ_CARRY with DT_F_FRAG in flags: what is carried out of a text is
+ * also in the tray's place of its own (TR_PUT, one record of TR_TAD) as
+ * a <document> fragment, with its look: letters (with DT_F_TEXT, their
+ * line in text as well), or a picture or a figure standing in the text
+ * alone (no DT_F_TEXT; look.w, look.h its box and grab_x, grab_y where
+ * the hand took it in that box). Let go over a text of the desktop's,
+ * the fragment goes in as it looked: letters where the outline's corner
+ * is, a picture or a figure where the hand is. A picture or a figure let
+ * go over a figure of the desktop's is put there where its box is, as
+ * from a text of the desktop's; anywhere else it is not taken (E_NOEXS).
+ * Letters elsewhere go as without DT_F_FRAG. The asking program empties
+ * TR_PUT once answered.
+ *
+ * Let go back over the asking program's own window, a carry is answered
+ * E_NOEXS with DT_F_BACK in the answer's flags and look.w, look.h the
+ * place on the screen where the hand let go: the program moves (or, with
+ * how DT_HOW_COPY, copies) what it carried within its window there, as
+ * when it had not gone out.
+ */
+#define DT_F_FRAG	0x80000
+#define DT_F_BACK	0x100000
+
+/*
+ * DT_RQ_CARRY with DT_F_BASE in flags: target is a template, carried
+ * out of a list of templates (原紙集め). Let go where a link can go --
+ * a window of the desktop's that takes links, or with DT_F_TO_PROG the
+ * window of another program that takes them -- the desktop makes the
+ * new object from the template there, as for one carried out of a
+ * 原紙箱 (the name asked for, starting with the template's), and puts
+ * the link to it where the hand let go, looking as look. The answer is
+ * E_OK with the new object in into, E_ABORT when the name was not given;
+ * the program asks no DT_RQ_PLACE.
+ */
+#define DT_F_BASE	0x200000
+
+/*
+ * A program window opened from a link of a window of the desktop's acts
+ * on that link as the desktop's own windows do. The program learns the
+ * link from its start-up argument (T_PRCOPEN); what it asks names it in
+ * text, the UUID of the object whose record holds the link, a tab, and
+ * the link's vobjid (both as ts_uuid_text writes them). target is the
+ * object the program opened, and the link must point at it.
+ *
+ *   DT_RQ_SAVE_NEW	新たな実身に保存: the object (saved by the program
+ *			first) copied under a name asked for in a panel over
+ *			win, and a link to the copy put with the link, in a
+ *			text just after it. into names the copy; E_ABORT when
+ *			the panel was put away
+ *   DT_RQ_LINK_VIEW	the window closing: where it was scrolled to
+ *			(grab_x, grab_y), how large (look.w, per cent; 0
+ *			leaves it), whether its lines wrapped (look.h, the
+ *			wordWrap: TAD_WRAP_ON or TAD_WRAP_OFF; TAD_WRAP_NONE
+ *			leaves it) and how it was shown (name, the viewMode;
+ *			empty leaves it) written into the link, as a window
+ *			of the desktop's does when it closes
+ */
+#define DT_RQ_SAVE_NEW	37
+#define DT_RQ_LINK_VIEW	38
+
+/*
+ * DT_RQ_OPEN with DT_F_LINK in flags: the object opened from a link of
+ * the asking program's own window. text begins with the UUID of the
+ * object whose record holds the link (the one the program has open), a
+ * tab, the link's vobjid, a tab, and a channel the program reads, then
+ * a line feed; with DT_F_APPLIST the applist comes after it. look says
+ * the link's colours, name its viewMode and grab_x its wordWrap
+ * (TAD_WRAP_*): the window opened is shown as from a link of a window of
+ * the desktop's (its paper the link's bgcol when it has none of its own,
+ * a text as the link says it is to be shown). The window
+ * opened acts on that link as on one of a window of the desktop's
+ * (DT_RQ_SAVE_NEW, DT_RQ_LINK_VIEW, a window of the desktop's closing),
+ * but what would be written into the record, which the program holds
+ * while it runs, is written to that channel as a T_DTANS with the
+ * request's seq, for the program to put into its record itself; then
+ * the channel is told OB_E_CHANGE on record 0 (to whoever asked
+ * notices of it, ob_ntf_evt). text begins with the UUID of the object
+ * whose record holds the link and a tab, as it was asked; how says what
+ * it is:
+ *   DT_HOW_LINK_VIEW	into is the object the link points at; text goes
+ *			on with the link's vobjid, then, each after a tab, scrollx,
+ *			scrolly, the zoom (per cent, 0 leaves it), the
+ *			wordWrap (TAD_WRAP_*, TAD_WRAP_NONE leaves it) and
+ *			the viewMode (empty leaves it)
+ *   DT_HOW_LINK_ADD	新たな実身に保存: into is the copy; text goes on
+ *			with the vobjid of the link a link to the copy goes with, made like
+ *			it, just after it in a text. Nothing links to the
+ *			copy yet: the link counts when the record is saved,
+ *			as every link does
+ * Once the program has ended, the desktop writes into the record as for
+ * a window of its own. A program that does not ask so is not told, and
+ * a window opened from its links does not act on them.
+ */
+#define DT_F_LINK	0x2000
+#define DT_HOW_LINK_VIEW 10
+#define DT_HOW_LINK_ADD	11
+
+/*
+ * DT_RQ_LET_GO: what was carried within the asking program's window was
+ * let go outside it, at (grab_x, grab_y) on the screen, and only links
+ * may leave a window. Over a window of the desktop's that a figure's
+ * links are carried into (a figure or a cabinet that is not sealed),
+ * that window takes the keys and the answer is E_OK with into its
+ * object: the program leaves what it carried where it was and lets it
+ * go, as when nothing is carried there. Anywhere else E_NOEXS, and
+ * nothing is done.
+ */
+#define DT_RQ_LET_GO	39
+
+/*
+ * DT_RQ_LINK_STATE: how a program's link stands, for its 仮身操作 and
+ * 実身操作 to be greyed as the desktop greys them for a link of its own.
+ * Asked as DT_RQ_ATTR is (DT_F_APPLIST with the link's applist). The
+ * answer's flags: DT_F_OPEN when the object is shown in a window of the
+ * desktop's (〈開く〉 grey, 〈閉じる〉 not), DT_F_LOCKABLE when there is
+ * a program the link opens with, which 起動アプリの固定 fixes.
+ */
+#define DT_RQ_LINK_STATE 40
+#define DT_F_OPEN	0x400000
+#define DT_F_LOCKABLE	0x800000
+
+/*
+ * The start-up argument of a program whose program object says
+ * "openArg": "link" in tessronos.program (ts_get_arg): the object to
+ * open first, as every program is given it, and after it the link it
+ * was opened from. A program without "openArg" is given the object's
+ * UUID alone, sizeof(TS_UUID) bytes.
+ * Opened from a link, fromlink is set and bgcol, wordwrap and viewmode
+ * are the link's as it is when the object is opened -- with what a
+ * window that closed wrote back into it, before its record is saved --
+ * for the window to be shown as the link asks, as a window of the
+ * desktop's is.
+ */
+#define DT_VIEW_MAX	16		/* bytes of a viewMode, with its terminator (TAD_VIEW_MAX) */
+
+typedef struct {
+	TS_UUID	target;			/* the object to open */
+	TS_UUID	parent;			/* the object whose record holds the link; 0 none */
+	TS_UUID	vobjid;			/* the link's vobjid there */
+	INT	recno;			/* the record to open, -1 the first */
+	BOOL	fromlink;		/* opened from a link: the three below are its */
+	UINT	bgcol;			/* 0x00rrggbb, 0xFFFFFFFF none (TAD_COL_NONE) */
+	INT	wordwrap;		/* TAD_WRAP_* */
+	UB	viewmode[DT_VIEW_MAX];	/* empty when it says none */
+} T_PRCOPEN;
 
 #define DT_TEXT_MAX	192		/* bytes of an answer's text, with its terminator */
 
@@ -390,7 +619,7 @@ typedef struct {
 	TS_UUID	reply;			/* a channel to answer at; 0 none */
 	UB	name[64];		/* DT_RQ_TOOL: the accessory's name, UTF-8 */
 	T_DTLOOK look;			/* DT_RQ_CARRY, DT_RQ_PLACE */
-	INT	grab_x, grab_y;		/* DT_RQ_CARRY: where the hand holds the outline, from its corner */
+	INT	grab_x, grab_y;		/* DT_RQ_CARRY: where the press held the outline, from its corner */
 	UB	ask[2][96];		/* DT_RQ_CARRY: the question where it is let go, UTF-8; empty: none */
 	UB	yes[16];		/* and the word on the button that goes ahead; empty: 「実行」 */
 	UINT	carry;			/* DT_RQ_PLACE: the seq of the DT_RQ_CARRY it ends */

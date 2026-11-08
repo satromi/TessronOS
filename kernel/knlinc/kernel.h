@@ -194,6 +194,15 @@ struct task_control_block {
 #define TASK_STK_MAGIC		0x5354414b47554152ULL
 #define TaskStackFoot(tcb)	( (UD *)((VB *)(tcb)->isstack - (tcb)->sstksz) )
 
+/*
+ * The stack of one of the kernel's tasks has this many unmapped pages
+ * under it (knl_vmap_stack), so that running out of it faults there and
+ * then. The value at the foot still catches a foot written over from
+ * above, by whatever means.
+ */
+#define TASK_STK_GUARD_PAGES	8
+IMPORT BOOL knl_stack_guard_hit( TCB *tcb, UBINT addr );
+
 IMPORT void knl_stack_broken( TCB *tcb );
 
 #if CNF_STK_USAGE
@@ -279,10 +288,15 @@ IMPORT INT  knl_own_list( INT kind, ID owner, ID *ids, INT max );	/* how many th
  * The system stack of a task: a task at protection level 2 or 3 has its
  * own pages from the page allocator, so that as many tasks as memory
  * holds can be made rather than as many as the Imalloc area holds; the
- * kernel's tasks take theirs from Imalloc.
+ * kernel's tasks have theirs mapped in the variable area, with unmapped
+ * pages below it. knl_sstk_round says how large a stack of that size
+ * really is. The stacks given back are unmapped later (knl_sstk_trim),
+ * outside the critical section.
  */
+IMPORT W knl_sstk_round( W size, ATR tskatr );
 IMPORT void *knl_sstk_alloc( W size, ATR tskatr );
 IMPORT void knl_sstk_free( void *stack, W size, ATR tskatr );
+IMPORT void knl_sstk_trim( void );
 IMPORT void knl_own_note( INT kind, ID owner, INT d );	/* one more (d 1) or one fewer (-1) is owner's; in the critical section */
 IMPORT void knl_svc_own( ID owner );		/* svcown of the running task */
 IMPORT TCB  *knl_tsk_tcb( ID tskid );		/* NULL for no such number */

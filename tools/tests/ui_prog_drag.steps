@@ -1,0 +1,80 @@
+# A link carried from one process's window to another's (design 11.4), for
+# tools/ui_run.py: a link of 予定表 (window at 100,100, in front of it to x 920)
+# let go over 基本表計算 moved to x 600 (its grid from y 150 down). Refused above
+# the cells and where no program takes links, the keys stay with 予定表; taken on
+# a cell, the keys go to the sheet, what is typed goes in it, and the link stays
+# in 予定表. That a process may not pass on what either side may not read is
+# the kernel test's (drop, test_grant).
+# A drop is at the corner of the outline carried, not where the hand is (design
+# 11.4): the link of TADjsについて (324,403 to 454,422 in 仮身サンプル, pressed at
+# 400,414) let go with the hand at 820,520 stands in 予定表 at 744,509 to 876,528.
+# Moved 520 left by a press near its left end (224,509 to 356,528), it is carried
+# from 230,518, so that the outline's corner is 6 left of and 9 above the hand: let
+# go with the hand at 1000,300, the corner is in the column E (980 to 1060) of row 7.
+open 019d6f00-1a2b-7c3d-8e4f-a1b2c3d4e5f6
+expect calendar: ready
+wait 800
+open 019a4370-3819-79a2-9758-881e1e0de90a
+wait 1000
+drag 400 414 820 520
+expect calendar: dropped 1
+wait 500
+drag 750 518 230 518
+expect calendar: moved 1
+wait 300
+open 019b54a4-6ccf-72f7-e320-c98e4a0bab4e
+expect calc: ready
+wait 800
+drag 500 108 1000 108
+wait 500
+win 基本表計算
+# refused by the sheet, above its cells: the keys come back to 予定表
+wait 3000
+move 230 518
+down
+wait 4000
+move 960 130
+wait 4000
+move 1000 130
+wait 500
+shot pd_carrying
+up
+expect calendar: carried
+wait 800
+focus pd_refused 予定表
+shot pd_refused
+# over the background, above 基本表計算 and right of the 原紙箱 (a box that takes links):
+# no program takes them, the desktop says no, and nothing moves
+wait 3000
+move 230 518
+down
+wait 4000
+move 1160 60
+wait 4000
+move 1200 60
+wait 500
+up
+wait 800
+focus pd_notaker 予定表
+shot pd_notaker
+absent calc: dropped
+# on a cell: the keys go to the sheet
+wait 3000
+move 230 518
+down
+wait 4000
+move 960 300
+wait 4000
+move 1000 300
+wait 500
+up
+expect calc: dropped 1
+expect calendar: carried
+absent calendar: moved out
+focus pd_taken 基本表計算
+shot pd_taken
+text 7
+key 28
+expect calc: set E7 shows 7
+win 予定表
+shot pd_end

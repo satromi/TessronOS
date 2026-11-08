@@ -571,8 +571,36 @@ LOCAL void bootlog_task( INT stacd, void *exinf )
 EXPORT void knl_bootlog_final( CONST char *why )
 {
 	if ( !started ) return;
+	/*
+	 * A disk that went and came back has to be looked over before it is
+	 * mounted again, for as long as tens of seconds on a card, and every
+	 * file call waits for that: it is left for the next writing of the
+	 * bootlog task, not done on the way to the machine going off or asleep.
+	 */
+	if ( knl_bootvol_name[0] != '\0' && !knl_fs_mount_of((CONST char *)knl_bootvol_name, NULL) ) {
+		tm_printf((UB *)"bootlog: the machine %s: /boot is not mounted, these records not written\n", why);
+		return;
+	}
 	tm_printf((UB *)"bootlog: the machine %s: the records written last\n", why);
 	write_all(secs_now, TRUE, TMO_FEVR);
+}
+
+/*
+ * After the last writing, the machine going off or starting again: /boot
+ * and /tslog unmounted, which takes the in-use mark off them, so that the
+ * next start does not look them over. The bootlog task stays out: w_sem is
+ * not given back, and a writing that does not end in time leaves them
+ * marked, as a machine that lost its power does.
+ */
+EXPORT void knl_bootlog_unmount( void )
+{
+	ER	a, b = E_OK;
+
+	if ( !started ) return;
+	if ( w_sem > 0 && tk_wai_sem(w_sem, 1, 2000) < E_OK ) return;
+	if ( knl_logvol_name[0] != '\0' ) b = fs_detach("/tslog");
+	a = fs_detach("/boot");
+	tm_printf((UB *)"bootlog: /boot unmounted (%d), /tslog (%d)\n", (INT)a, (INT)b);
 }
 
 /* Started once /boot is mounted */

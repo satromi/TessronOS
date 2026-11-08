@@ -24,6 +24,7 @@
 #define	_in_asm_source_
 #include <config.h>
 #include <sys/knldef.h>
+#include "offset.h"
 #include "frame.h"
 
 	.text
@@ -77,6 +78,24 @@ knl_vector_table:
  */
 	.type	knl_exc_sync, %function
 knl_exc_sync:
+	/*
+	 * A data abort on a stack with no room left for the frame would
+	 * abort again at the first store, for ever. So for a data abort
+	 * the room is asked of the translation first. CONTEXTIDR_EL1 holds
+	 * x0 meanwhile: nothing else here reads it, and EL0 cannot.
+	 */
+	msr	contextidr_el1, x0
+	mrs	x0, esr_el1
+	lsr	x0, x0, #26
+	cmp	x0, #0x25			/* data abort from EL1 */
+	b.ne	3f
+	mov	x0, sp
+	sub	x0, x0, #SSF_EXC_SIZE
+	at	s1e1w, x0
+	isb
+	mrs	x0, par_el1
+	tbnz	x0, #0, knl_exc_stack_out	/* PAR_EL1.F: it would fault */
+3:	mrs	x0, contextidr_el1
 	SAVE_EXC_FRAME
 	mrs	x0, esr_el1
 	lsr	x1, x0, #26			/* EC */
@@ -98,6 +117,33 @@ knl_exc_sync:
 	bl	knl_kernel_fault		/* returns only when the fault is put right */
 	RESTORE_EXC_FRAME_ERET			/* and the access is made again */
 	.size	knl_exc_sync, . - knl_exc_sync
+
+/*
+ * The task has run out of its stack (only a task's stack has nothing
+ * mapped below it). This processor's interrupt stack is not in use then,
+ * since an interrupt handler would be on it and not on the task's: the
+ * frame goes there, and the processor stops after telling. The two words
+ * under the top are left alone; the lockup report reads them.
+ */
+	.type	knl_exc_stack_out, %function
+knl_exc_stack_out:
+	mrs	x0, tpidr_el1
+	ldr	x0, [x0, #PCPU_irq_stack]
+	sub	x0, x0, #32
+	str	x1, [x0, #0]
+	mov	x1, sp
+	str	x1, [x0, #8]			/* the stack pointer as it was */
+	ldr	x1, [x0, #0]
+	mov	sp, x0
+	mrs	x0, contextidr_el1
+	SAVE_EXC_FRAME
+	mov	x0, sp
+	mrs	x1, esr_el1
+	mrs	x2, far_el1
+	ldr	x3, [sp, #(SSF_EXC_SIZE + 8)]
+	bl	knl_stack_out			/* no return */
+	b	.
+	.size	knl_exc_stack_out, . - knl_exc_stack_out
 
 /*
  * Synchronous exception from EL0: system call (svc #0, x8 = function code)

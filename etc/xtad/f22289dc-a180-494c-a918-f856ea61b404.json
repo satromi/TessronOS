@@ -45,5 +45,8 @@
       "name": "仮身一覧",
       "defaultOpen": false
     }
+  },
+  "tessronos": {
+    "update": "links"
   }
 }

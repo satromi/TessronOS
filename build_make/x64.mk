@@ -24,7 +24,7 @@ SRCS := $(filter-out device/gpu/v3d/v3d_mmu.c outer_kernel/wm/compose_simd.c per
 	peripheral_kernel/libc/x86_64/setjmp.S
 # Arm の機器だけの試験(デバイスツリー、SD のホストコントローラ、V3D の表)は建てない。
 # ktest_main.c が飛ばしたと言う
-SRCS := $(filter-out tests/ktest/ktest_board.c tests/ktest/ktest_sd.c tests/ktest/ktest_gpu.c tests/ktest/ktest_gl.c,$(SRCS))
+SRCS := $(filter-out tests/ktest/ktest_board.c tests/ktest/ktest_gpu.c tests/ktest/ktest_gl.c,$(SRCS))
 
 # x64 の PC だけの装置の試験(USB でないキーボード、ACPI の電源、SATA、Intel の LAN)
 ifeq ($(KTEST),1)
@@ -34,6 +34,7 @@ endif
 
 # ボード依存ソース(コア依存は sources.mk の SRCS_CORE)
 SRCS += kernel/sysdepend/x64/hw_setting.c \
+	kernel/sysdepend/x64/pm.c \
 	kernel/sysdepend/x64/devinit.c \
 	kernel/sysdepend/x64/rtc.c \
 	kernel/sysdepend/x64/rng_hw.c \
@@ -43,13 +44,16 @@ SRCS += kernel/sysdepend/x64/hw_setting.c \
 	kernel/sysdepend/x64/gfxdump.c \
 	kernel/sysdepend/x64/igt_ggtt.c \
 	kernel/sysdepend/x64/igt_pcode.c \
+	kernel/sysdepend/x64/igt_gen.c \
 	kernel/sysdepend/x64/vtd.c \
+	kernel/sysdepend/x64/vmd.c \
 	kernel/sysdepend/acpi/acpi.c \
 	kernel/sysdepend/acpi/acpi_os.c \
 	kernel/sysdepend/acpi/acpi_power.c \
 	outer_kernel/wm/x86_64/compose_simd.c \
 	device/disp/disp_gop.c \
 	device/disp/x86_64/disp_igfx.c \
+	device/disp/x86_64/disp_ext.c \
 	device/gpu/intel/igt.c \
 	device/gpu/intel/igt_vm.c \
 	device/gpu/intel/igt_pm.c \
@@ -57,7 +61,9 @@ SRCS += kernel/sysdepend/x64/hw_setting.c \
 	device/gpu/intel/igt_compose.c \
 	device/gpu/intel/igt_rcompose.c \
 	device/gpu/intel/igt_rplan.c \
+	device/gpu/intel/igt12.c \
 	device/nvme/nvme.c \
+	device/sd/sdhci.c \
 	device/ps2/ps2.c \
 	device/ahci/ahci.c \
 	device/i2c/x86_64/dw_i2c.c \
@@ -68,6 +74,10 @@ SRCS += kernel/sysdepend/x64/hw_setting.c \
 	device/net/netsel.c \
 	device/net/netadp.c \
 	device/net/x86_64/e1k.c \
+	device/net/x86_64/lanpci.c \
+	device/net/x86_64/re.c \
+	device/net/x86_64/rge.c \
+	device/net/x86_64/igc.c \
 	device/net/netdev.c \
 	device/usb/usbdma.c \
 	device/usb/xhci.c \
@@ -78,8 +88,10 @@ SRCS += kernel/sysdepend/x64/hw_setting.c \
 	device/usb/msc.c \
 	device/usb/uac.c \
 	device/usb/uvc.c \
+	$(SRCS_BT) \
 	device/usb/uusb.c \
 	device/usb/x86_64/cdcnet.c \
+	device/usb/x86_64/usbven.c \
 	device/usb/x86_64/xhci_pc.c \
 	device/usb/vhc.c \
 	device/snd/snd.c \
@@ -89,6 +101,7 @@ SRCS += kernel/sysdepend/x64/hw_setting.c \
 	device/cam/x86_64/cio2.c \
 	device/cam/x86_64/int3472.c \
 	device/cam/x86_64/ov5693.c \
+	device/cam/x86_64/ov8865.c \
 	device/gpio/x86_64/gpio_pch.c
 
 # UEFI のローダ(tools/x64/uefi)。mingw-w64 の GCC で PE32+ の EFI アプリにする
@@ -100,6 +113,11 @@ EFI_HDRS  := $(TOP)/tools/x64/uefi/efi.h $(TOP)/kernel/sysdepend/cpu/core/x86_64
 EFI_CFLAGS := -O2 -g0 -ffreestanding -fno-builtin -fshort-wchar -mno-red-zone -fno-stack-protector \
 	-fno-asynchronous-unwind-tables -Wall -Wextra -Wno-unused-parameter \
 	-nostdlib -Wl,--subsystem,10 -Wl,-e,efi_main -Wl,--image-base,0x10000000
+
+# 試験用の口の鍵を、ローダの記録に出さない
+ifeq ($(TESTAGENT),1)
+EFI_CFLAGS += -DUSE_TESTAGENT=1
+endif
 
 $(OBJDIR)/BOOTX64.EFI: $(EFI_SRCS) $(EFI_HDRS)
 	@mkdir -p $(dir $@)
@@ -178,6 +196,13 @@ $(error x64 の Wi-Fi は OpenBSD の層(WIFI_NET80211=obsd)だけ。"$(WIFI_NET
 endif
 # make WIFI_SIM=1 で、カードの代わりに Wi-Fi のシミュレータ(仮想の無線と AP、設計書 9.6.12、
 # build_make/wifisim.mk)を入れる。テストのためのもので、既定は 0(何も足さない)
+# Intel の第12世代の実行リストの形(docs/tessronos/13-gpu.md 13.11.16)。既定は無効で、エンジンはまだ起こさない
+ifeq ($(IGT12),1)
+SRCS += device/gpu/intel/igt12_fmt.c
+$(OBJDIR)/device/gpu/intel/igt12.o $(OBJDIR)/device/gpu/intel/igt12_fmt.o \
+$(OBJDIR)/tests/ktest/x86_64/ktest_igt.o: CFLAGS += -DIGT12=1
+endif
+
 WIFI_SIM ?= 0
 export WIFI_SIM
 ifeq ($(WIFI),1)

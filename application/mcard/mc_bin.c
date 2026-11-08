@@ -44,6 +44,7 @@
 
 #include "mc_db.h"
 #include <ts/bpk.h>
+#include <ts/vobjsz.h>
 
 #define FMT_HEAD	32		/* the format record before its items */
 #define IFMT_SIZE	24
@@ -637,9 +638,12 @@ LOCAL void vdata_put( CTBUF *b, UINT vobjno, UINT linkno, CONST UB *el, INT n )
 	v[0] = ct_attr_int(el, n, "vobjleft", 0);
 	v[1] = ct_attr_int(el, n, "vobjtop", 0);
 	v[2] = ct_attr_int(el, n, "vobjright", v[0] + ct_attr_int(el, n, "width", 150));
-	v[3] = ct_attr_int(el, n, "vobjbottom", v[1] + ct_attr_int(el, n, "height", 25));
-	h = v[3] - v[1];
 	chsz = ct_attr_int(el, n, "chsz", 0);
+	/* with no height of its own, closed: the height its letters give it */
+	v[3] = ct_attr_int(el, n, "vobjbottom", v[1] + ct_attr_int(el, n, "height",
+			   VOBJ_CLOSED_H(chsz, ct_attr_bool(el, n, "framedisp", TRUE),
+					 ct_attr_bool(el, n, "pictdisp", TRUE))));
+	h = v[3] - v[1];
 	if ( !ct_attr_bool(el, n, "namedisp", TRUE) ) attr |= V_NONAME;
 	if ( !ct_attr_bool(el, n, "roledisp", FALSE) ) attr |= V_NORELN;
 	if ( !ct_attr_bool(el, n, "typedisp", FALSE) ) attr |= V_NOTYPE;

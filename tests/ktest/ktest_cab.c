@@ -856,11 +856,11 @@ LOCAL void test_look( void )
 	KT_ASSERT_EQ(c.r.bottom - c.r.top, h0 + 10);
 	KT_ASSERT_EQ(cab_self_check(), 0);
 
-	/* it does not close up to nothing, nor lower than the object closed (14 point: 25) */
+	/* it does not close up to nothing, nor lower than the object closed (14 point: 19) */
 	KT_ASSERT_ER(cab_resize(-10000, -10000), E_OK);
 	KT_ASSERT_ER(cab_ref(0, &c), E_OK);
 	KT_ASSERT_EQ(c.r.right - c.r.left, CAB_MIN_W);
-	KT_ASSERT_EQ(c.r.bottom - c.r.top, 14 + 11);
+	KT_ASSERT_EQ(c.r.bottom - c.r.top, tad_closed_h(14, TAD_D_DEFAULT));
 
 	KT_ASSERT_ER(cab_undo(), E_OK);
 	KT_ASSERT_ER(cab_ref(0, &c), E_OK);

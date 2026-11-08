@@ -35,7 +35,9 @@
 #include <sys/stdarg.h>
 #include <uvm/uvm_extern.h>
 #include <machine/cpu.h>
+#ifdef __amd64__
 #include <machine/cpu_full.h>
+#endif
 
 #include "obsd_glue.h"
 
@@ -88,6 +90,20 @@ obsd_lock_take(int depth)
 }
 
 /* The levels of the interrupts: nothing runs without the lock */
+#ifdef __aarch64__
+static int
+spl_none(int ipl)
+{
+	return 0;
+}
+
+static void
+spl_x(int ipl)
+{
+}
+
+struct arm_intr_func arm_intr_func = { spl_none, spl_none, spl_x };
+#else
 int
 splraise(int ipl)
 {
@@ -99,6 +115,7 @@ spllower(int ipl)
 {
 	return 0;
 }
+#endif
 
 /* Mutexes guard what the lock guards already */
 void
@@ -692,7 +709,9 @@ free(void *addr, int type, size_t freedsize)
  * Items of a cluster's size or more (the mbufs' clusters, which the card
  * reaches by DMA as one piece) are whole pages, physically contiguous,
  * below 4GB, from the hypercalls of the card's DMA memory; the rest come
- * from the kernel's heap.
+ * from the kernel's heap. For a card that reaches 32 bits of address only
+ * (obsd_mbuf_low) the mbufs too come from that memory, a page cut into
+ * as many as it holds.
  */
 struct pool_item {
 	struct pool_item	*next;
@@ -754,6 +773,7 @@ pool_destroy(struct pool *pp)
 }
 
 unsigned int	obsd_pool_fails;
+int		obsd_mbuf_low;
 
 void *
 pool_get(struct pool *pp, int flags)
@@ -772,6 +792,20 @@ pool_get(struct pool *pp, int flags)
 			return NULL;
 		}
 		v = (void *)va;
+	} else if (obsd_mbuf_low && pp->pr_size == MSIZE) {
+		unsigned int off;
+
+		if (rumpcomp_pci_dmalloc(PAGE_SIZE, PAGE_SIZE, &pa, &va) != 0) {
+			obsd_pool_fails++;
+			return NULL;
+		}
+		v = (void *)va;
+		for (off = MSIZE; off + MSIZE <= PAGE_SIZE; off += MSIZE) {
+			it = (struct pool_item *)(va + off);
+			it->next = (struct pool_item *)pp->pr_cache;
+			pp->pr_cache = (struct cpumem *)it;
+			pp->pr_nitems++;
+		}
 	} else {
 		v = obsd_hc_malloc(pp->pr_size);
 		if (v == NULL) {
@@ -926,7 +960,11 @@ obsd_delay(int us)
 void	(*delay_func)(int) = obsd_delay;
 
 /* The processor's structure, of which the layer reads nothing that matters */
+#ifdef __amd64__
 struct cpu_info_full cpu_info_full_primary;
+#else
+struct cpu_info cpu_info_primary;
+#endif
 
 int	cold = 0;
 
@@ -1400,6 +1438,13 @@ config_mountroot(struct device *dev, void (*fn)(struct device *))
 {
 	mr_dev = dev;
 	mr_fn = fn;
+}
+
+/* The driver has left its hook: it attached, and waits for the firmware to be read */
+int
+obsd_mountroot_pending(void)
+{
+	return mr_fn != NULL;
 }
 
 void

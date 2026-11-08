@@ -1,0 +1,78 @@
+# 基本図形編集の線色のパレットで、色の部品を押して色を選ぶ (design 11.3, 17.13), for
+# tools/ui_run.py: the desktop's figure editor and the process the same. A figure of one
+# rectangle and two zigzag lines (mkbig fig 1 2 0) opened at 100,100; its 道具パネル at the
+# top of the screen (100,0). The rectangle template taken and a rectangle drawn (it is then
+# picked); 線色 (under 162,48) brought up: its window stands at 146,70, framed with no title,
+# its work area from 152,76. Its 線色 part (270,83 to 380,105) pressed: the system's panel
+# of colours comes up under it with its corner at 270,107; the ready colour of the chart's
+# second row, third column (345,393) pressed and Enter: the rectangle takes it, the part
+# shows it, and the swatches below mark it only if one of them has it. Escape puts the
+# palette away. Saved, record 0 comes out the same, byte for byte; the screens of the
+# palette after the choice are kept for comparing.
+# Keys: Esc 29, Enter 28; Ctrl+S 16 01, Ctrl+E 08 01.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 1 2 0
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+click 298 82
+wait 300
+drag 450 450 600 560
+wait 400
+click 162 48
+wait 500
+shot ccmp_k_palette
+click 320 94
+wait 800
+shot ccmp_k_pick
+click 345 393
+wait 300
+key 28
+wait 500
+shot ccmp_k_chosen
+key 29
+wait 300
+sync 600
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 1 2 0
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 3
+wait 800
+logmark
+click 298 82
+expectsince figure: tool 7
+drag 450 450 600 560
+expectsince figure: drawn
+logmark
+click 162 48
+expectsince figure: palette 1 open
+wait 500
+shot ccmp_p_palette
+click 320 94
+wait 800
+shot ccmp_p_pick
+click 345 393
+wait 300
+key 28
+expectsince figure: colour chosen
+wait 500
+shot ccmp_p_chosen
+key 29
+expectsince figure: palette 1 closed
+wait 300
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum show
+same kernel
+key 08 01
+expect figure: closed

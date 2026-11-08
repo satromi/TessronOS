@@ -41,6 +41,7 @@ IMPORT CONST UB	knl_tsfs_type_guid[16];
 LOCAL CONST char * CONST cands[] = {
 	"nvmea", "nvmeb", "nvmec", "nvmed",
 	"sataa", "satab", "satac", "satad",
+	"sda",
 	"uda", "udb", "udc", "udd", "ude", "udf", "udg", "udh",
 	NULL
 };

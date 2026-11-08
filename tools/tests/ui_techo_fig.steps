@@ -3,9 +3,11 @@
 # The figure (画用紙, 100,100 to 900,700) is opened first; the 手帳's three
 # windows come in front of it, the figure showing below the 予定表. The
 # 氏名 of the 住所録 is carried onto the figure: a new piece of text stands
-# where the outline's corner was; then the 〒 is carried onto that piece
-# and goes into it. The カレンダー moved, the 手帳 closed and opened
-# again: its windows come back where they were left.
+# where the outline's corner was, and the figure comes in front with the
+# keys, as a window dropped on does; the 住所録 is pressed on its band to
+# come back, then the 〒 is carried onto that piece and goes into it.
+# The カレンダー moved, the 手帳 closed and opened again: its windows come
+# back where they were left.
 open 019a0f91-066f-706f-93da-ffe8150d6207
 wait 2000
 open 01a0d8c4-53c6-7a77-8b88-9cadbecf53c6
@@ -32,6 +34,12 @@ expect techo: carried text 青木 遥 (0)
 expect figure: text dropped as a new piece (0)
 wait 600
 shot tf_dropped
+# the figure the letters were dropped on came in front with the keys (design 10.4,
+# dt_drop_keys): the 住所録 brought back by its band where the figure does not cover it
+click 940 347
+wait 300
+front tf2 私の手帳（住所録）
+expect ok tf2: in front
 click 640 375
 key 4A
 key 4D 02

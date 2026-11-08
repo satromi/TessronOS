@@ -44,12 +44,19 @@ void	obsd_net_init( void );
 
 /* The hook iwm left until the root file system was there (config_mountroot): run once */
 void	obsd_mountroot_run( void );
+int	obsd_mountroot_pending( void );
 
 /* The console */
 int	printf( const char *, ... );
 
 /* The pools' allocations that failed (obsd_kern.c: mbufs and clusters among them; a frame lost) */
 extern unsigned int	obsd_pool_fails;
+
+/*
+ * The card reaches 32 bits of address only: the mbufs themselves below 4GB
+ * too (obsd_kern.c), set before the driver makes any
+ */
+extern int	obsd_mbuf_low;
 
 /* The priorities of the layer's tasks (T-Kernel's: smaller is sooner); the manager's is 26 */
 #define OBSD_PRI_INTR	20

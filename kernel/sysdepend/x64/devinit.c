@@ -35,20 +35,27 @@
 #include <ts/gpu.h>
 #include "sysdepend.h"
 #include "../acpi/acpi.h"
+#include "vmd.h"
 
 IMPORT INT	knl_nvme_init( void );		/* device/nvme/nvme.c */
 IMPORT void	knl_nvme_report( void );	/* device/nvme/nvme.c */
 IMPORT void	knl_nvme_shutdown( void );	/* device/nvme/nvme.c */
 IMPORT ER	knl_ps2_init( void );		/* device/ps2/ps2.c */
 IMPORT INT	knl_ahci_init( void );		/* device/ahci/ahci.c */
+IMPORT INT	knl_sd_init( void );		/* device/sd/sdhci.c */
 IMPORT INT	knl_e1k_init( void );		/* device/net/x86_64/e1k.c */
+IMPORT INT	knl_re_init( void );		/* device/net/x86_64/re.c */
+IMPORT INT	knl_rge_init( void );		/* device/net/x86_64/rge.c */
+IMPORT INT	knl_igc_init( void );		/* device/net/x86_64/igc.c */
 IMPORT void	knl_acpi_power_start( void );	/* kernel/sysdepend/acpi/acpi_power.c */
+IMPORT void	knl_pm_init( void );		/* pm.c */
 IMPORT INT	knl_dwi2c_init( void );		/* device/i2c/x86_64/dw_i2c.c */
 IMPORT INT	knl_hidi2c_init( void );	/* device/i2c/x86_64/hid_i2c.c */
 IMPORT INT	knl_cio2_init( void );		/* device/cam/x86_64/cio2.c */
 IMPORT BOOL	knl_bootdisk_find( CONST T_BOOTINFO *bi, TMO tmo );	/* bootdisk.c */
 IMPORT void	knl_bootlog_start( void );	/* bootlog.c */
 IMPORT void	knl_bootlog_final( CONST char *why );	/* bootlog.c */
+IMPORT void	knl_bootlog_unmount( void );		/* bootlog.c */
 IMPORT void	knl_vtd_init( BOOL keep );	/* vtd.c */
 IMPORT unsigned char	knl_bootvol_name[];
 IMPORT unsigned char	knl_logvol_name[];
@@ -112,6 +119,11 @@ EXPORT ER knl_start_device( void )
 
 	knl_fbcon_stage("PCI Express");
 	knl_pcie_init();	/* the PCI Express bus (design 10.4) */
+	knl_vmd_init(setting("vmd=off"));	/* the disks behind an Intel VMD among its functions (06-device 6.2.2) */
+#ifdef USE_KTEST
+	if ( setting("vmdsim") ) knl_vmd_sim();
+	if ( setting("pcifake=amd") ) knl_pcie_fake_amd();
+#endif
 	knl_fbcon_stage("VT-d");
 	knl_vtd_init(setting("vtd=keep"));	/* the IOMMU as the firmware left it, off before any device starts (3.10.9) */
 	if ( !setting("acpi=0") ) {
@@ -124,9 +136,14 @@ EXPORT ER knl_start_device( void )
 	knl_nvme_init();	/* the NVMe disks (design 10.4) */
 	knl_fbcon_stage("SATA");
 	knl_ahci_init();	/* the SATA disks behind AHCI */
+	knl_fbcon_stage("SD and eMMC");
+	knl_sd_init();		/* the first SD or eMMC slot with a card (06-device 6.2.3) */
 	knl_fbcon_stage("network card");
 	knl_vnet_init();	/* virtio-net on the bus (design 10.4) */
 	knl_e1k_init();		/* Intel's e1000e family (the I219) */
+	knl_re_init();		/* Realtek's RTL8111/8168 */
+	knl_rge_init();		/* Realtek's RTL8125 */
+	knl_igc_init();		/* Intel's I225/I226 */
 	card = knl_netdev_init();	/* and the same card as the device "neta" */
 	knl_fbcon_stage("screen, drawing, windows");
 	knl_disp_init();	/* the screen (design 16.5) */
@@ -164,6 +181,8 @@ EXPORT ER knl_start_device( void )
 	knl_fbcon_stage("the disk started from");
 	if ( fs_main() >= E_OK ) {
 		fs_regist(&knl_fimp_fat);
+		fs_regist(&knl_fimp_exfat);
+		fs_regist(&knl_fimp_ntfs);
 		if ( knl_bootdisk_find(knl_bootinfo, 15000) ) {
 			/* the records' partition TSLOG of the same disk, a copy of the records for Windows */
 			if ( knl_logvol_name[0] != '\0'
@@ -181,6 +200,7 @@ EXPORT ER knl_start_device( void )
 	knl_proc_init();	/* process management (design 9.4) */
 	knl_ob_init();		/* real objects of every kind (design 18) */
 	knl_acpi_power_start();	/* the batteries, the adapter, the lid, the power button as objects */
+	knl_pm_init();		/* sleep: which way the firmware offers (03-platform 3.10.11) */
 	knl_wmobj_init();	/* and windows among them (design 18.13) */
 	knl_fs_posix_mounts();	/* "/", /dev and /tmp for the POSIX programs (design 5.8.1) */
 	knl_fbcon_stage("the first program");
@@ -236,7 +256,8 @@ LOCAL void pci_wake_off( void )
  * station at once); no PCI function left able to wake the machine; what
  * the last step will do said, and the NVMe controllers' counts; then the
  * records written last, while the disks still work, so that they hold
- * all of the above. The NVMe controllers are shut down after that, the
+ * all of the above, and the volumes they are on unmounted, so that the
+ * next start need not look them over. The NVMe controllers are shut down after that, the
  * last writing done: their caches flushed and the shutdown told, so that
  * the power going off is not one they count as unsafe.
  */
@@ -247,7 +268,10 @@ EXPORT ER knl_finish_device( void )
 	pci_wake_off();
 	knl_acpica_off_plan();
 	knl_nvme_report();
+	knl_fs_finish("/boot", "/tslog");	/* the records of this go there, last */
 	knl_bootlog_final("goes off or starts again");
+	knl_bootlog_unmount();
+	knl_fs_finish(NULL, NULL);		/* those two, when there are no records */
 	knl_nvme_shutdown();
 	return E_OK;
 }

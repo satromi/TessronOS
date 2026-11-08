@@ -1,0 +1,44 @@
+# 基本文章編集をプロセスで (design 11.3), for tools/ui_run.py: a copy of 基本文章編集 with
+# 30 paragraphs (mkbig doc 30) opened with the text editor running as a process (pdoc), the
+# caret put in the second paragraph, abc typed and saved with Ctrl+S; closed with Ctrl+E
+# and opened again, the record read back is the one saved, and the caret goes where it is
+# put again. The wheel winds it.
+# Keys: Ctrl+S 16 01, Ctrl+E 08 01, ↓ 51.
+mkbig doc 30
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 500
+logmark
+click 300 170
+expectsince document: drew
+logmark
+text abc
+expectsince document: key to screen
+wait 300
+logmark
+key 16 01
+expectsince document: saved (0)
+sum
+keep saved
+logmark
+key 08 01
+expectsince document: window kept 100,100 600x400
+expectsince document: closed
+wait 500
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 500
+sum
+same saved
+logmark
+move 400 300
+wheel -3
+expectsince document: drew
+logmark
+key 51
+expectsince document: key to screen
+logmark
+key 08 01
+expectsince document: closed

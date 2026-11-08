@@ -59,6 +59,7 @@
 #include <ts/uiprn.h>
 #include <ts/hid.h>
 #include <ts/tray.h>
+#include <ts/tadlnk.h>
 #include "cal_tad.h"
 
 #define TICK_MS		20
@@ -81,7 +82,6 @@
 #define OUT_MAX		( 512 * 1024 )
 #define CHUNK		( 64 * 1024 )
 #define UNDO_MAX	16			/* changes that can be taken back */
-#define APP_MAX		24			/* programs 実行 lists */
 
 /* The strip and the panel that asks for a month (the data box) */
 #define PN_STRIP	1
@@ -169,6 +169,8 @@ static INT	g_pasted;		/* pastes since the last copy: each is put a step further 
 
 static TS_UUID	g_win, g_ch;
 static ID	g_kw, g_port;
+static TS_UUID	g_lch;			/* where the desktop says what windows opened from its links did to them */
+static ID	g_lport;
 static INT	g_gid, g_w, g_h;
 static UI	g_ui;
 static BOOL	g_strip;
@@ -280,15 +282,42 @@ static ER write_all( ID k, INT recno, CONST UB *data, INT len )
 }
 
 /* Record 0 of an object written whole */
+static ER vol_of( CONST TS_UUID *obj, TS_UUID *p_vol, void *arg )
+{
+	return ob_ref_vid(obj, p_vol, NULL);
+}
+
+/*
+ * Record 0 of an object written whole, its links first made to say on
+ * which volume their objects are, as seen from the object's (design 8.3),
+ * as the desktop does when it saves
+ */
 static ER rec_write( CONST TS_UUID *u, CONST UB *data, INT len )
 {
-	ID	k = ob_opn_obj(u, OB_OP_R | OB_OP_W);
+	TS_UUID	hv, mine;
+	UB	*fixed = NULL;
+	INT	changed = 0;
+	ID	k;
 	ER	er;
 
-	if ( k <= 0 ) return (ER)k;
+	if ( ob_ref_vid(u, &hv, &mine) >= E_OK
+	  && ( fixed = malloc((size_t)tad_lnk_vol_room(data, (SZ)len)) ) != NULL ) {
+		SZ	n = tad_lnk_vol_fix(data, (SZ)len, fixed, &hv, &mine, vol_of, NULL, &changed);
+
+		if ( changed > 0 ) {
+			data = fixed;
+			len = (INT)n;
+		}
+	}
+	k = ob_opn_obj(u, OB_OP_R | OB_OP_W);
+	if ( k <= 0 ) {
+		free(fixed);
+		return (ER)k;
+	}
 	/* replaced in one change: a cut in the power leaves the old record or the new one */
 	er = ob_rpl_rec(k, 0, data, (SZ)len);
 	ob_cls_obj(k);
+	free(fixed);
 	return er;
 }
 
@@ -1101,7 +1130,16 @@ static void link_open( INT i )
 	rq.req = DT_RQ_OPEN;
 	rq.target = g_l[i].target;
 	rq.recno = -1;
-	ct_link_req(&rq, g_l[i].el, g_l[i].len);	/* the program it keeps to, when it does */
+	/* what the window opened does to the link comes back to be put in the month (DT_F_LINK) */
+	if ( g_lport > 0 && g_has_month && ct_link_from(&rq, &g_month, &g_lch, g_l[i].el, g_l[i].len) ) {
+		T_DTLOOK	k;
+
+		look_of(&g_l[i], &k);
+		rq.look.frcol = k.frcol;
+		rq.look.chcol = k.chcol;
+		rq.look.tbcol = k.tbcol;
+		rq.look.bgcol = k.bgcol;
+	}
 	er = ask_desktop(&rq, &an, 3000);
 	snprintf(s, sizeof(s), "opened %s (%d)", g_l[i].name, (INT)er);
 	note(s);
@@ -2151,7 +2189,7 @@ static void carry_out( void )
 	T_DTANS		an;
 	T_DPRECT	o;
 	INT		i, k, n = 0, last = -1, done = 0;
-	BOOL		twice = g_hold_twice, copy;
+	BOOL		twice = g_hold_twice, copy, given;
 	ER		er;
 	UINT		seq;
 	char		s[120];
@@ -2178,8 +2216,10 @@ static void carry_out( void )
 	} else {
 		memset(&rq, 0, sizeof(rq));
 		rq.req = DT_RQ_CARRY;
+		rq.win = g_win;
 		rq.look.frcol = rq.look.chcol = rq.look.tbcol = rq.look.bgcol = 0xFFFFFFFFU;
 	}
+	rq.flags |= DT_F_TO_PROG;
 	rq.look.w = o.right - o.left;
 	rq.look.h = o.bottom - o.top;
 	rq.grab_x = g_hx0 - o.left;
@@ -2192,6 +2232,7 @@ static void carry_out( void )
 	}
 	seq = rq.seq;
 	copy = (BOOL)( an.how == DT_HOW_COPY );
+	given = (BOOL)( ( an.flags & DT_F_TO_PROG ) != 0 );
 	for ( i = 0, k = 0; i < g_nl; i++ ) {
 		if ( !g_l[i].pick || !g_l[i].shown ) continue;
 		ask_of(i, ( ++k < n ) ? DT_RQ_PLACE_MORE : DT_RQ_PLACE, &rq);
@@ -2211,7 +2252,7 @@ static void carry_out( void )
 		(void)delete_picked("moved out");
 		snprintf(s, sizeof(s), "%d個の仮身を移動しました", done);
 		say(s);
-	} else if ( done > 0 ) {
+	} else if ( done > 0 && !given ) {
 		snprintf(s, sizeof(s), "%d個の仮身を%s", done, twice ? "実身複製しました" : "複写しました");
 		say(s);
 	}
@@ -2305,8 +2346,11 @@ static BOOL link_attr( INT i, CONST char *name, CONST UB *value )
 	return TRUE;
 }
 
-/* A link to a new object (a copy, a new version) put a step down and across from link i */
-static void link_copy_put( INT i, CONST TS_UUID *nid, INT step )
+/*
+ * A link to a new object (a copy, a new version) put a step down and
+ * across from link i; kept to be taken back to when undo says so
+ */
+static void link_copy_put_as( INT i, CONST TS_UUID *nid, INT step, BOOL undo )
 {
 	INT	box[4];
 	static UB	tmp[16384];
@@ -2326,15 +2370,151 @@ static void link_copy_put( INT i, CONST TS_UUID *nid, INT step )
 	ct_buf(&b, tmp, sizeof(tmp));
 	ct_link_edit(&b, g_l[i].el, g_l[i].len, set, 2);
 	if ( b.fail ) return;
-	undo_push();
+	if ( undo ) undo_push();
 	pick_none();
 	if ( !link_put(b.p, b.n, nid, box) ) {
-		snap_free(g_undo[--g_nundo]);
+		if ( undo ) snap_free(g_undo[--g_nundo]);
 		return;
 	}
 	g_l[g_nl - 1].pick = TRUE;
 	(void)month_save();
 	layout();
+}
+
+static void link_copy_put( INT i, CONST TS_UUID *nid, INT step )
+{
+	link_copy_put_as(i, nid, step, TRUE);
+}
+
+/* The link of the month shown with vobjid; -1 none */
+static INT link_with( CONST TS_UUID *vobjid )
+{
+	UB	vs[TS_UUID_STRLEN + 1];
+	TS_UUID	u;
+	INT	i;
+
+	for ( i = 0; i < g_nl; i++ ) {
+		if ( ct_attr_text(g_l[i].el, g_l[i].len, "vobjid", vs, (INT)sizeof(vs)) == TS_UUID_STRLEN
+		  && ct_uuid_parse(vs, &u) && same_uuid(&u, vobjid) ) return i;
+	}
+	return -1;
+}
+
+/*
+ * A link of a month that is not shown, changed in the month's record as
+ * it is kept: its element with set, or, with nid, a link to nid made like
+ * it put in after the others (its object counted once more)
+ */
+static void month_link_told( CONST TS_UUID *month, CONST TS_UUID *vobjid, CONST CTSET *set, INT n,
+			     CONST TS_UUID *nid )
+{
+	char	vs[TS_UUID_STRLEN + 1], ids[TS_UUID_STRLEN + 8];
+	CTSET	add[4];
+	CTEL	el;
+	CTBUF	b, e;
+	UB	*x, *y = NULL;
+	INT	len = 0, max;
+	TS_UUID	vid;
+
+	x = rec_read(month, 0, &len);
+	if ( x == NULL || !ct_link_of(x, len, vobjid, &el) ) {
+		free(x);
+		return;
+	}
+	max = len + el.len + 1024;
+	y = malloc((size_t)max);
+	if ( y == NULL ) {
+		free(x);
+		return;
+	}
+	if ( nid == NULL ) {
+		ct_buf(&b, y, max);
+		ct_putn(&b, x, el.at);
+		ct_link_edit(&b, x + el.at, el.len, set, n);
+		ct_putn(&b, x + el.at + el.len, len - el.at - el.len);
+	} else {
+		static UB	tmp[16384];
+
+		new_vobjid(&vid);
+		ct_uuid_str(&vid, vs);
+		ct_uuid_str(nid, ids);
+		strcat(ids, "_0.xtad");
+		add[0].name = "id";	add[0].value = (CONST UB *)ids;
+		add[1].name = "vobjid";	add[1].value = (CONST UB *)vs;
+		add[2].name = "name";	add[2].value = NULL;
+		add[3].name = "dlen";	add[3].value = (CONST UB *)"0";
+		ct_buf(&e, tmp, sizeof(tmp));
+		ct_link_edit(&e, x + el.at, el.len, add, 4);
+		ct_buf(&b, y, max);
+		if ( !e.fail ) (void)ct_insert(&b, x, len, e.p, e.n);
+		else b.fail = TRUE;
+	}
+	if ( !b.fail && rec_write(month, b.p, b.n) >= E_OK && nid != NULL && !g_autoref ) (void)ob_lnk_obj(nid);
+	free(y);
+	free(x);
+}
+
+/*
+ * What a window opened from a link of a month did to it, told by the
+ * desktop (DT_F_LINK): the view it closed with written into the link, or
+ * a link to the copy it was saved as put with it, as a window of the
+ * desktop's changes its own; nothing to take back
+ */
+static void link_told( CONST T_DTANS *an )
+{
+	static UB	tmp[16384];
+	CTVIEW	v;
+	CTSET	set[CT_VIEW_SET];
+	CTBUF	b;
+	TS_UUID	month, vid;
+	INT	n = ct_link_told(an, &month, &vid, &v, set), i;
+	char	s[96];
+
+	if ( n < 0 ) return;
+	if ( !g_has_month || !same_uuid(&month, &g_month) ) {
+		month_link_told(&month, &vid, set, n, ( an->how == DT_HOW_LINK_ADD ) ? &an->into : NULL);
+	} else if ( ( i = link_with(&vid) ) >= 0 && an->how == DT_HOW_LINK_ADD ) {
+		link_copy_put_as(i, &an->into, 0, FALSE);
+	} else if ( i >= 0 ) {
+		ct_buf(&b, tmp, sizeof(tmp));
+		ct_link_edit(&b, g_l[i].el, g_l[i].len, set, n);
+		if ( link_set(i, &b) ) (void)month_save();
+	}
+	if ( an->how == DT_HOW_LINK_VIEW ) snprintf(s, sizeof(s), "link view written back: %s,%s", v.sx, v.sy);
+	else snprintf(s, sizeof(s), "a link to the copy saved put with its link");
+	note(s);
+	g_dirty = TRUE;
+}
+
+static void links_told( void )
+{
+	T_DTANS	an;
+	SZ	asz = 0;
+
+	while ( g_lport > 0 && ob_rea_tmo(g_lport, 0, 0, &an, sizeof(an), &asz, TMO_POL) >= E_OK ) {
+		if ( asz == (SZ)sizeof(an) ) link_told(&an);
+	}
+}
+
+/* The channel the desktop says on, and a notice of it at the window's channel */
+static void links_channel( void )
+{
+	T_OBCRE	c;
+	T_OBNTF	req;
+
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	if ( ob_cre_obj(&c, &g_lch) < E_OK ) return;
+	g_lport = ob_opn_obj(&g_lch, OB_OP_READ | OB_OP_ATRRD | OB_O_NOWAIT);
+	if ( g_lport <= 0 ) {
+		g_lport = 0;
+		(void)ob_del_obj(&g_lch);
+		return;
+	}
+	memset(&req, 0, sizeof(req));
+	req.events = OB_E_CHANGE;
+	req.id = 4;
+	(void)ob_ntf_evt(g_lport, OB_REC_ANY, &req, g_port);
 }
 
 /* The applist of a link: its own when it has one, its object's when not; its length */
@@ -2363,33 +2543,57 @@ static INT app_json( INT i, UB **p_out )
 
 /* The programs 実行 lists for link i: the list the desktop's own links show (DT_RQ_APPS) */
 static INT g_napp;
-static UB g_app_id[APP_MAX][CT_APP_ID], g_app_name[APP_MAX][CT_APP_NAME];
-static BOOL g_app_kind[APP_MAX];		/* offered for the object's kind, not in its applist */
+static INT	g_appcap;			/* entries the three tables have room for */
+static UB	(*g_app_id)[CT_APP_ID], (*g_app_name)[CT_APP_NAME];
+static BOOL	*g_app_kind;			/* offered for the object's kind, not in its applist */
+
+/* Room for 'want' programs, what is there kept */
+static BOOL app_room( INT want )
+{
+	UB	(*id)[CT_APP_ID], (*name)[CT_APP_NAME];
+	BOOL	*kind;
+
+	if ( want <= g_appcap ) return TRUE;
+	id = realloc(g_app_id, CT_APP_ID * (size_t)want);
+	if ( id != NULL ) g_app_id = id;
+	name = realloc(g_app_name, CT_APP_NAME * (size_t)want);
+	if ( name != NULL ) g_app_name = name;
+	kind = realloc(g_app_kind, sizeof(BOOL) * (size_t)want);
+	if ( kind != NULL ) g_app_kind = kind;
+	if ( id == NULL || name == NULL || kind == NULL ) return FALSE;
+	g_appcap = want;
+	return TRUE;
+}
+
 
 static void exec_menu( ID mid, INT i )
 {
-	static UB	rows[APP_MAX][WM_LABEL_MAX];
+	UB		(*rows)[WM_LABEL_MAX];
 	TS_UUID		ed;
 	T_DTREQ		rq;
 	T_DTANS		an;
 	INT		n = 1, k;
 
 	g_napp = 0;
-	for ( k = 0; k < n && g_napp < APP_MAX; k++ ) {
+	for ( k = 0; k < n; k++ ) {
 		ask_of(i, DT_RQ_APPS, &rq);
 		ct_link_req(&rq, g_l[i].el, g_l[i].len);
 		rq.recno = k;
 		memset(&an, 0, sizeof(an));
 		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
 		n = (INT)an.how;
+		if ( !app_room(n) ) break;
 		if ( ct_app_entry(&an, g_app_id[g_napp], g_app_name[g_napp], &g_app_kind[g_napp]) ) g_napp++;
 	}
+	rows = malloc(WM_LABEL_MAX * (size_t)( g_napp + 1 ));
+	if ( rows == NULL ) g_napp = 0;
 	for ( k = 0; k < g_napp; k++ ) {
 		snprintf((char *)rows[k], WM_LABEL_MAX, "%s", (char *)g_app_name[k]);
 	}
-	if ( ui_uuid(SYSDEF_MENU_EXEC, &ed) >= E_OK ) {
+	if ( rows != NULL && ui_uuid(SYSDEF_MENU_EXEC, &ed) >= E_OK ) {
 		(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)rows, WM_LABEL_MAX, g_napp);
 	}
+	free(rows);
 }
 
 /* Whether link i keeps to the program it opens with (起動アプリの固定) */
@@ -2891,6 +3095,10 @@ static void event( CONST T_OBNTM *m )
 		strip_event(m);
 		return;
 	}
+	if ( g_lport > 0 && same_uuid(&m->uuid, &g_lch) ) {
+		links_told();
+		return;
+	}
 	if ( !same_uuid(&m->uuid, &g_win) ) return;
 	switch ( m->event ) {
 	case OB_E_CLOSE:
@@ -2944,6 +3152,7 @@ int main( void )
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_CHANNEL;
 	g_port = ( ob_cre_obj(&c, &g_ch) >= E_OK ) ? ob_opn_obj(&g_ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) : E_NOEXS;
+	if ( g_port > 0 ) links_channel();
 	if ( g_port <= 0 ) {
 		note("no channel");
 		return 2;
@@ -2975,7 +3184,12 @@ int main( void )
 
 	while ( !g_closing ) {
 		for ( TMO tmo = TMO_FEVR; !g_closing && ob_rea_tmo(g_port, 0, 0, &m, sizeof(m), &asz, tmo) >= E_OK; tmo = TMO_POL ) event(&m);
+		links_told();		/* what a panel's wait took the notice of is read too */
 		if ( g_dirty && !g_closing ) paint();
+	}
+	if ( g_lport > 0 ) {
+		ob_cls_obj(g_lport);
+		(void)ob_del_obj(&g_lch);
 	}
 	links_free();
 	undo_clear();

@@ -868,6 +868,7 @@ LOCAL void test_backup( void )
 
 #define SVCPROG		"/boot/SVCPROG.ELF"
 #define SP_DROP		18		/* as tests/uprog/svcprog.c */
+#define SP_PLACE	41
 
 /* The object dropped on the window, as the desktop drops a link */
 /* Whether a window's title is the one given */
@@ -970,6 +971,24 @@ LOCAL void test_grant( void )
 	KT_ASSERT(wid > 0);
 	KT_ASSERT_EQ(taker, pid);
 	if ( wid > 0 && taker == pid ) {
+		T_OBDROPV	dv;
+		T_WMWIN		ww;
+
+		/*
+		 * Carried out of a process's window: the system may read it,
+		 * the process that would take it may not; nor may the process
+		 * give what it may not read. No drop, and nothing granted.
+		 */
+		KT_ASSERT_ER(wm_obj_drop_may(wid, 0, &secret), E_OACV);
+		KT_ASSERT_ER(wm_obj_drop_may(wid, pid, &secret), E_OACV);
+		KT_ASSERT_ER(wm_obj_drop_may(wid, 0, NULL), E_OK);
+		knl_memset(&dv, 0, sizeof(dv));
+		dv.target = secret;
+		KT_ASSERT_ER(wm_ref(wid, &ww), E_OK);
+		KT_ASSERT_ER(wm_obj_drop_for(wid, ww.work.left + 20, ww.work.top + 20, 0, NULL, 0, &dv, 1), E_OACV);
+		KT_ASSERT_ER(wm_obj_drop_for(wid, ww.work.left + 20, ww.work.top + 20, 0, NULL, pid, &dv, 1), E_OACV);
+		KT_ASSERT_EQ(knl_ob_granted(pid, &secret), 0);
+
 		/* the first: granted until refused (the process opens it meanwhile) */
 		KT_ASSERT_EQ(knl_ob_granted(pid, &secret), 0);
 		KT_ASSERT_ER(drop_one(wid, &secret), E_OK);
@@ -1010,6 +1029,138 @@ LOCAL void test_grant( void )
 	}
 done1:
 	KT_ASSERT_ER(ob_del_obj(&secret), E_OK);
+done0:
+	if ( prt != NULL ) Kfree(prt);
+	if ( m != NULL ) Kfree(m);
+	KT_ASSERT_ER(ob_del_obj(&user), E_OK);
+	wm_update();
+}
+
+/* The links of a window's record to an object: how many, and the first's box */
+LOCAL INT links_to( DTWIN *d, CONST TS_UUID *u, T_VOBJ *v )
+{
+	INT	i, n = 0, cnt = ( d != NULL && d->rec != NULL ) ? tad_lnk_count(d->rec) : 0;
+	T_VOBJ	w;
+
+	for ( i = 0; i < cnt; i++ ) {
+		if ( tad_lnk_get(d->rec, i, &w) >= E_OK && ts_uuid_cmp(&w.target, u) == 0 ) {
+			if ( n++ == 0 && v != NULL ) *v = w;
+		}
+	}
+	return n;
+}
+
+/*
+ * A process carries a link to a figure of the desktop's and asks it put
+ * there: of an object its user may not read it is refused and no link is
+ * made; of one the user may read it is put. What programs make and place
+ * themselves goes the same way (test_unpack and the file conversion here).
+ */
+LOCAL void test_place( void )
+{
+	CONST char	*uj = "{\"name\":\"ktplaceuser\",\"tessronos\":{\"user\":{\"name\":\"ktplaceuser\",\"groups\":[]}}}";
+	CONST TS_UUID	*which[2];
+	T_OBCRE		c;
+	T_OBPRT		*prt;
+	T_FSTAT		st;
+	T_CPRC		cprc;
+	T_PSTS		psts;
+	T_TSMSG		*m;
+	TS_UUID		user, secret, open_u, fig;
+	UW		arg[8];
+	INT		twid = -1, i, k, x0 = 900, y0 = 700, x1 = 0, y1 = 0;
+	ID		pid;
+	ER		er;
+	DTWIN		*d;
+
+	if ( !up ) KT_SKIP("no desktop");
+	if ( fs_stat(SVCPROG, &st) < EX_OK ) KT_SKIP("no " SVCPROG);
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.json = (CONST UB *)uj;
+	c.jsonsz = s_len(uj);
+	knl_ob_make_for_person(FALSE);
+	er = ob_cre_obj(&c, &user);
+	knl_ob_make_for_person(TRUE);
+	if ( er < E_OK ) KT_SKIP("no store for a user object");
+	KT_ASSERT_ER(ob_set_pwd(&user, (CONST UB *)"ktest-pw"), E_OK);
+	prt = (T_OBPRT *)Kmalloc(KT_PRT_SIZE);
+	m = (T_TSMSG *)Kmalloc(sizeof(T_TSMSG));
+	KT_ASSERT(prt != NULL && m != NULL);
+	if ( prt == NULL || m == NULL ) goto done0;
+	knl_memset(prt, 0, KT_PRT_SIZE);
+	prt->owner = ob_user_system;
+	prt->group = ob_group_admin;
+	prt->mode = 0600;
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_MEMORY;
+	c.name = (CONST UB *)"ktplace-secret";
+	c.prt = prt;
+	KT_ASSERT_ER(ob_cre_obj(&c, &secret), E_OK);
+	prt->mode = 0644;
+	c.name = (CONST UB *)"ktplace-open";
+	KT_ASSERT_ER(ob_cre_obj(&c, &open_u), E_OK);
+	KT_ASSERT_ER(make("KT置き先", "virtual-object-list",
+			  ",\"window\":{\"pos\":{\"x\":20,\"y\":360},\"width\":320,\"height\":200}",
+			  "<tad version=\"1.0\" encoding=\"UTF-8\"><figure></figure></tad>\n", &fig), E_OK);
+	KT_ASSERT_ER(ask_open(&fig), E_OK);
+	for ( k = 0; k < 30 && twid <= 0; k++ ) {
+		twid = window_showing(&fig);
+		if ( twid <= 0 ) tk_dly_tsk(100);
+	}
+	KT_ASSERT(twid > 0);
+	if ( twid <= 0 ) goto done1;
+	(void)at_work(twid, 60, 60, &x1, &y1);
+
+	knl_memset(arg, 0, sizeof(arg));
+	arg[0] = SP_PLACE;
+	knl_memcpy(&arg[1], &user, sizeof(user));
+	cprc.pri    = KT_PRI_HIGH;
+	cprc.prcatr = 0;
+	cprc.stksz  = 0;
+	cprc.arg    = arg;
+	cprc.argsz  = sizeof(arg);
+	pid = ts_cre_prc(SVCPROG, &cprc);
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) goto done1;
+	tk_dly_tsk(500);			/* logged in */
+	which[0] = &secret;
+	which[1] = &open_u;
+	for ( i = 0; i < 2; i++ ) {
+		hid(HID_EV_MOVE, x0, y0, 0);
+		hid(HID_EV_BTN_DOWN, x0, y0, 0);
+		knl_memset(m, 0, sizeof(T_TSMSG));
+		m->type = 1;
+		m->size = sizeof(TS_UUID);
+		knl_memcpy(m->body, which[i], sizeof(TS_UUID));
+		KT_ASSERT_ER(ts_snd_msg(pid, m, 1000), E_OK);
+		tk_dly_tsk(800);		/* the outline up */
+		for ( k = 1; k <= 8; k++ ) {
+			hid(HID_EV_MOVE, x0 + ( x1 - x0 ) * k / 8, y0 + ( y1 - y0 ) * k / 8, 0);
+		}
+		hid(HID_EV_BTN_UP, x1, y1, 0);
+		tk_dly_tsk(800);
+	}
+	psts.exitcd = -1;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 20000), E_OK);
+	if ( psts.exitcd != 0 ) tm_printf((UB *)"  the program stopped at step %d\n", psts.exitcd);
+	KT_ASSERT_EQ(psts.exitcd, 0);
+	d = dt_win_of(twid);
+	KT_ASSERT_EQ(links_to(d, &secret, NULL), 0);
+	KT_ASSERT_EQ(links_to(d, &open_u, NULL), 1);
+	if ( d != NULL ) d->dirty = FALSE;	/* closed without a question */
+done1:
+	if ( twid > 0 ) {
+		TS_UUID	w;
+
+		if ( wm_obj_uuid(twid, &w) >= E_OK ) (void)ob_del_obj(&w);
+		tk_dly_tsk(300);
+	}
+	(void)ob_del_obj(&fig);
+	(void)ob_del_obj(&secret);
+	(void)ob_del_obj(&open_u);
 done0:
 	if ( prt != NULL ) Kfree(prt);
 	if ( m != NULL ) Kfree(m);
@@ -1120,20 +1271,6 @@ LOCAL BOOL carry_root( INT uwid, INT twid, INT tx, INT ty, TS_UUID *root )
 	if ( !wait_for(pos, "archive: unpacked 33 objects, root ", 600, line, sizeof(line)) ) return FALSE;
 	line[TS_UUID_STRLEN] = 0;
 	return (BOOL)( ts_str_to_uuid(line, root) >= E_OK );
-}
-
-/* The links of a window's record to an object: how many, and the first's box */
-LOCAL INT links_to( DTWIN *d, CONST TS_UUID *u, T_VOBJ *v )
-{
-	INT	i, n = 0, cnt = ( d != NULL && d->rec != NULL ) ? tad_lnk_count(d->rec) : 0;
-	T_VOBJ	w;
-
-	for ( i = 0; i < cnt; i++ ) {
-		if ( tad_lnk_get(d->rec, i, &w) >= E_OK && ts_uuid_cmp(&w.target, u) == 0 ) {
-			if ( n++ == 0 && v != NULL ) *v = w;
-		}
-	}
-	return n;
 }
 
 /*
@@ -1248,24 +1385,80 @@ LOCAL void test_unpack( void )
 
 /*
  * The same onto a store that does not count the links of its records (a
- * FAT directory): a figure there opened on the desktop, the root carried
- * into it. Saved, every object's count is the number of links to it --
- * from the others, and the root's from the figure. Then all of it let
- * go of and deleted, and nothing is left.
+ * FAT directory): a figure there opened with 基本図形編集 (a process), the
+ * root carried into it. Saved, every object's count is the number of
+ * links to it -- from the others, and the root's from the figure. Then
+ * all of it let go of and deleted, and nothing is left.
  */
+
+/* Ctrl+S in a program's window, as the person saves; whether the program then said 'said' */
+LOCAL BOOL save_key( INT wid, CONST char *said )
+{
+	T_WMEV	ev;
+	UD	pos = log_now();
+
+	knl_memset(&ev, 0, sizeof(ev));
+	ev.type = HID_EV_KEY_DOWN;
+	ev.wid = wid;
+	ev.code = 0x16;			/* S */
+	ev.mods = HID_MOD_LCTRL;
+	knl_wmobj_event(&ev);
+	return wait_for(pos, said, 100, NULL, 0);
+}
+
+/* The window of that name closed, and the figure editor's word that it closed */
+LOCAL void fig_close( CONST char *name )
+{
+	TS_UUID	fwin;
+	UD	pos = log_now();
+
+	if ( window_named(name, &fwin) > 0 ) {
+		(void)ob_del_obj(&fwin);
+		(void)wait_for(pos, "figure: closed", 50, NULL, 0);
+	}
+}
+
+/*
+ * The same with a text opened with 基本文章編集 running as a process: the
+ * question whether its window would take the link is answered by the
+ * process (OB_E_ASK) before 書庫管理 makes the objects, and the root's
+ * link goes into the text where it was let go.
+ */
+#define DOC_PROG	"01a0d6d1-08d1-781f-8f58-35c45aeacef9"	/* 基本文章編集 */
+
+LOCAL void unpack_fat( BOOL doc );
+
 LOCAL void test_unpack_fat( void )
 {
-	TS_UUID	arc, win, fig, fwin, root, list[64], objs[UNP_NOBJ + 8];
+	unpack_fat(FALSE);
+}
+
+LOCAL void test_unpack_fat_doc( void )
+{
+	unpack_fat(TRUE);
+}
+
+LOCAL void unpack_fat( BOOL doc )
+{
+	TS_UUID	arc, win, fig, root, list[64], objs[UNP_NOBJ + 8], dwin;
 	INT	nref[UNP_NOBJ + 8];
 	T_OBCRE	c;
 	T_OBREF	r;
-	CONST char *j = "{\"name\":\"KT解凍先\",\"applist\":{\"basic-figure-editor\":{\"name\":\"x\",\"defaultOpen\":true}},"
-			"\"window\":{\"pos\":{\"x\":20,\"y\":380},\"width\":320,\"height\":200}}";
-	CONST char *fx = "<tad version=\"1.0\" encoding=\"UTF-8\"><figure></figure></tad>\n";
+	CONST char *j = doc
+			? "{\"name\":\"KT解凍先\",\"applist\":{\"basic-text-editor\":{\"name\":\"x\",\"defaultOpen\":true}},"
+			  "\"window\":{\"pos\":{\"x\":20,\"y\":380},\"width\":320,\"height\":200}}"
+			: "{\"name\":\"KT解凍先\",\"applist\":{\"basic-figure-editor\":{\"name\":\"x\",\"defaultOpen\":true}},"
+			  "\"window\":{\"pos\":{\"x\":20,\"y\":380},\"width\":320,\"height\":200}}";
+	CONST char *fx = doc
+			 ? "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>解凍先</p></document></tad>\n"
+			 : "<tad version=\"1.0\" encoding=\"UTF-8\"><figure></figure></tad>\n";
+	CONST char *who = doc ? "document" : "figure";
+	char	said[48];
 	UB	*x;
 	SZ	asz = 0, len = 0;
 	INT	wid = -1, fwid = -1, nobj, i, k, nl, rec = -1;
-	ID	pid, key;
+	ID	pid, key, dpid = 0;	/* the text editor's process, when doc */
+	UD	pos;
 	BOOL	att = FALSE;
 
 	if ( !up ) KT_SKIP("no desktop");
@@ -1288,18 +1481,46 @@ LOCAL void test_unpack_fat( void )
 		KT_ASSERT_ER(ob_wri_rec(key, rec, 0, fx, s_len(fx), &asz), E_OK);
 		ob_cls_obj(key);
 	}
-	KT_ASSERT_ER(ask_open(&fig), E_OK);
-	for ( i = 0; i < 30 && fwid <= 0; i++ ) {
-		fwid = window_showing(&fig);
-		if ( fwid <= 0 ) tk_dly_tsk(100);
+	if ( doc ) {
+		/* the text editor as a process, whatever its program object says */
+		dpid = start_on(DOC_PROG, &fig, "document: opened KT解凍先", "KT解凍先", &dwin, &fwid);
+		KT_ASSERT(dpid > 0);
+		if ( fwid > 0 ) {
+			/* back where its metadata says, out from under 書庫管理's window, which start_on puts there too */
+			T_OBWPOS	wp;
+			ID		wk = ob_opn_obj(&dwin, OB_OP_ALL);
+
+			if ( wk > 0 && ob_rea_rec(wk, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) >= E_OK ) {
+				wp.right = 20 + ( wp.right - wp.left );
+				wp.bottom = 380 + ( wp.bottom - wp.top );
+				wp.left = 20;
+				wp.top = 380;
+				wp.flags = OB_WP_SHOWN;
+				(void)ob_wri_rec(wk, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
+			}
+			if ( wk > 0 ) ob_cls_obj(wk);
+			tk_dly_tsk(200);
+		}
+	} else {
+		KT_ASSERT_ER(ask_open(&fig), E_OK);
+		for ( i = 0; i < 30 && fwid <= 0; i++ ) {
+			fwid = window_showing(&fig);
+			if ( fwid <= 0 ) tk_dly_tsk(100);
+		}
 	}
 	KT_ASSERT(fwid > 0);
 	pid = start_on(SYSDEF_PROG_ARCHIVE, &arc, "archive: ready book", UNP_TITLE, &win, &wid);
 	KT_ASSERT(pid > 0 && wid > 0);
 	if ( fwid <= 0 || pid <= 0 || wid <= 0 ) goto out;
 
+	pos = log_now();
 	KT_ASSERT(carry_root(wid, fwid, DT_MARGIN + 20, DT_MARGIN + 20, &root));
-	KT_ASSERT_ER(dt_save(dt_win_of(fwid)), E_OK);
+	tm_sprintf((UB *)said, (UB *)"%s: asked to take links at ", who);
+	KT_ASSERT(wait_for(pos, said, 100, NULL, 0));			/* asked before the objects were made */
+	tm_sprintf((UB *)said, (UB *)"%s: dropped 1", who);
+	KT_ASSERT(wait_for(pos, said, 100, NULL, 0));			/* the link put before it is saved */
+	tm_sprintf((UB *)said, (UB *)"%s: saved (0)", who);
+	KT_ASSERT(save_key(fwid, said));
 	finish(pid, &win);
 
 	/* the counts: the root's from the figure, the rest from each other */
@@ -1314,7 +1535,13 @@ LOCAL void test_unpack_fat( void )
 	}
 
 	/* the figure's window closed; every link let go of, then each object deleted */
-	if ( window_named("KT解凍先", &fwin) > 0 ) (void)ob_del_obj(&fwin);
+	if ( doc ) {
+		pos = log_now();
+		(void)ob_del_obj(&dwin);
+		(void)wait_for(pos, "document: closed", 50, NULL, 0);
+	} else {
+		fig_close("KT解凍先");
+	}
 	tk_dly_tsk(300);
 	for ( i = -1; i < nobj; i++ ) {
 		x = om_obj_record(( i < 0 ) ? &fig : &objs[i], 0, &len);
@@ -1332,36 +1559,59 @@ out:
 }
 
 /*
- * Letters let go over a figure (df_text_drop, where a carry of letters
- * ends over a figure's window): on the ground, a new piece of text whose
- * corner is where the outline's was, holding them; over a piece of text,
- * into that piece. The record written then has both.
+ * Letters let go over a figure opened with 基本図形編集 (a process), as a
+ * carry of letters ends over its window (wm_obj_drop_text): on the
+ * ground, a new piece of text whose corner is where the outline's was,
+ * holding them; over a piece of text, into that piece. The record
+ * saved then has both.
  */
-#define FT_MAX		( 16 * 1024 )
 
-LOCAL INT fig_text( DTWIN *d, UB *buf )
+/* The figure opened as the desktop opens it, and its window; -1 when it did not open */
+LOCAL INT fig_open( CONST TS_UUID *fig, CONST char *name )
 {
-	SZ	n = 0;
+	char	w[64];
+	UD	pos = log_now();
+	INT	fwid = -1, i;
 
-	if ( d == NULL || tad_write_mem((T_TAD *)d->rec, buf, FT_MAX - 1, &n) < E_OK ) return 0;
-	buf[n] = 0;
-	return (INT)n;
+	if ( ask_open(fig) < E_OK ) return -1;
+	tm_sprintf((UB *)w, (UB *)"figure: opened %s ", name);
+	if ( !wait_for(pos, w, 100, NULL, 0) ) return -1;
+	for ( i = 0; i < 30 && fwid <= 0; i++ ) {
+		fwid = window_showing(fig);
+		if ( fwid <= 0 ) tk_dly_tsk(100);
+	}
+	return fwid;
 }
 
-/* The desktop's windows, said when one asked for did not open */
-LOCAL void open_windows( void )
+/* Record 0 of the object as saved, with a nought after it; its length into *n */
+LOCAL UB *saved_rec( CONST TS_UUID *u, INT *n )
 {
-	UB	t[64];
-	INT	k, n = 0;
+	SZ	len = 0;
+	UB	*x = om_obj_record(u, 0, &len), *b;
 
-	for ( k = 0; k < DT_MAX_WIN; k++ ) {
-		if ( !dt_win_at(k)->used ) continue;
-		n++;
-		t[0] = 0;
-		(void)knl_wm_title(dt_win_at(k)->wid, (char *)t, sizeof(t));
-		tm_printf((UB *)"  the desktop's window %d: %s\n", dt_win_at(k)->wid, t);
+	*n = 0;
+	if ( x == NULL ) return NULL;
+	b = (UB *)Kmalloc(len + 1);
+	if ( b != NULL ) {
+		knl_memcpy(b, x, len);
+		b[len] = 0;
+		*n = (INT)len;
 	}
-	tm_printf((UB *)"  %d of the desktop's %d windows open\n", n, DT_MAX_WIN);
+	Kfree(x);
+	return b;
+}
+
+/* Letters let go at (dx, dy) of the window's work area; whether the figure editor took them */
+LOCAL BOOL text_drop( INT fwid, INT dx, INT dy, CONST char *s )
+{
+	char	w[64];
+	UD	pos = log_now();
+	INT	x, y;
+
+	if ( !at_work(fwid, dx, dy, &x, &y)
+	  || wm_obj_drop_text(fwid, x, y, 0, NULL, (CONST UB *)s, s_len(s)) < E_OK ) return FALSE;
+	tm_sprintf((UB *)w, (UB *)"figure: letters dropped at %d,%d (0)", dx, dy);
+	return wait_for(pos, w, 50, NULL, 0);
 }
 
 LOCAL void test_figtext( void )
@@ -1375,102 +1625,108 @@ LOCAL void test_figtext( void )
 			 "<docDraw drawleft=\"20\" drawtop=\"20\" drawright=\"260\" drawbottom=\"70\"/>"
 			 "<docScale hunit=\"-72\" vunit=\"-72\"/><text lang=\"0\" bpat=\"0\" zIndex=\"2\"/>"
 			 "<p>既存の文</p></document></figure></tad>\n";
-	TS_UUID		fig, fwin;
-	DTWIN		*d;
-	T_DPRECT	page;
-	T_WMWIN		ww;
-	UB		*b = NULL;
-	INT		fwid = -1, i, n, e, at;
+	TS_UUID		fig;
+	UB		*b;
+	INT		fwid, n, e, at, x = 0, y = 0;
 
 	if ( !up ) KT_SKIP("no desktop");
 	KT_ASSERT_ER(make("KT図形文字", "basic-figure-editor",
 			  ",\"window\":{\"pos\":{\"x\":360,\"y\":300},\"width\":420,\"height\":300}", fx, &fig), E_OK);
-	KT_ASSERT_ER(ask_open(&fig), E_OK);
-	for ( i = 0; i < 30 && fwid <= 0; i++ ) {
-		fwid = window_showing(&fig);
-		if ( fwid <= 0 ) tk_dly_tsk(100);
-	}
+	fwid = fig_open(&fig, "KT図形文字");
 	KT_ASSERT(fwid > 0);
-	if ( fwid <= 0 ) open_windows();
-	d = ( fwid > 0 ) ? dt_win_of(fwid) : NULL;
-	b = (UB *)Kmalloc(FT_MAX);
-	KT_ASSERT(d != NULL && b != NULL && df_is(d));
-	if ( d == NULL || b == NULL || wm_ref(fwid, &ww) < E_OK ) goto out;
-	dt_work_rect(d, &page);
-	/* the page on the screen */
-	page.left += ww.work.left;
-	page.top += ww.work.top;
+	if ( fwid <= 0 ) goto out;
 
 	/* on the ground: a new piece of text there */
-	KT_ASSERT_ER(df_text_drop(d, page.left + 200, page.top + 150, (CONST UB *)a1, s_len(a1)), E_OK);
-	n = fig_text(d, b);
+	KT_ASSERT(text_drop(fwid, 200, 150, a1));
+	KT_ASSERT(save_key(fwid, "figure: saved (0)"));
+	b = saved_rec(&fig, &n);
+	KT_ASSERT(b != NULL);
+	if ( b == NULL ) goto out;
 	KT_ASSERT_EQ(count_of(b, n, "<document>"), 2);
 	at = find(b, n, a1, 0);
 	KT_ASSERT(at > 0);
 	e = find(b, n, "<docView viewleft=\"200\" viewtop=\"150\"", 0);
 	KT_ASSERT(e > 0 && e < at);
 	if ( e < 0 ) tm_putstring(b);
+	Kfree(b);
 
 	/* over the piece that was there: into it, with what it had */
-	KT_ASSERT_ER(df_text_drop(d, page.left + 30, page.top + 24, (CONST UB *)a2, s_len(a2)), E_OK);
-	n = fig_text(d, b);
+	KT_ASSERT(text_drop(fwid, 30, 24, a2));
+	KT_ASSERT(save_key(fwid, "figure: saved (0)"));
+	b = saved_rec(&fig, &n);
+	KT_ASSERT(b != NULL);
+	if ( b == NULL ) goto out;
 	KT_ASSERT_EQ(count_of(b, n, "<document>"), 2);
 	at = find(b, n, a2, 0);
 	e = find(b, n, "</document>", 0);
 	KT_ASSERT(at > 0 && at < e && find(b, n, "既存", 0) < e);
+	KT_ASSERT(find(b, n, a1, 0) > 0);
 	if ( at < 0 || at > e ) tm_putstring(b);
+	Kfree(b);
 
-	/* nothing for an empty carry, or a figure that cannot be changed */
-	KT_ASSERT_ER(df_text_drop(d, page.left + 200, page.top + 150, (CONST UB *)a1, 0), E_PAR);
-	KT_ASSERT_ER(dt_save(d), E_OK);
-	{
-		SZ	len = 0;
-		UB	*x = om_obj_record(&fig, 0, &len);
-
-		KT_ASSERT(x != NULL && find(x, (INT)len, a1, 0) > 0 && find(x, (INT)len, a2, 0) > 0);
-		if ( x != NULL ) Kfree(x);
-	}
+	/* nothing for an empty carry */
+	KT_ASSERT(at_work(fwid, 200, 150, &x, &y));
+	KT_ASSERT_ER(wm_obj_drop_text(fwid, x, y, 0, NULL, (CONST UB *)a1, 0), E_PAR);
 out:
-	if ( window_named("KT図形文字", &fwin) > 0 ) (void)ob_del_obj(&fwin);
+	fig_close("KT図形文字");
 	tk_dly_tsk(300);
 	(void)ob_del_obj(&fig);
-	if ( b != NULL ) Kfree(b);
 	wm_update();
 }
 
 /*
  * A link in the figure editor is never lower than it is closed. One
  * whose record gives it a box lower than its letters is shown at the
- * closed height (fourteen point: 25), the record left as it was; its
+ * closed height (fourteen point: 19), the record left as it was; its
  * foot carried up stops there; carried a little down it stays closed,
  * and carried well down it is opened to where it was let go. All of
  * it is done to a link that has an identity of its own (vobjid) and to
  * one written without (as TADjs and older records have them), which is
  * given one as it is read: the changes reach the record saved either
- * way, and the one without has its identity written then.
+ * way, and the one without has its identity written then. The figure
+ * is 基本図形編集 as a process: saved after each carry, at 100% (z 8)
+ * and not scrolled, its page from the work area's corner.
  */
-LOCAL INT link_h( DTWIN *d, T_VOBJ *v )
+
+/* The decimal number written at s */
+LOCAL INT num_at( CONST UB *s )
 {
-	if ( d == NULL || d->rec == NULL || tad_lnk_get(d->rec, 0, v) < E_OK ) return -1;
-	return v->bottom - v->top;
+	INT	v = 0;
+
+	while ( *s >= '0' && *s <= '9' ) v = v * 10 + ( *s++ - '0' );
+	return v;
+}
+
+/* Saved with Ctrl+S; the height of the link of the record then, -1 when it has none */
+LOCAL INT saved_link_h( INT fwid, CONST TS_UUID *fig, UB **rec, INT *len )
+{
+	INT	at, t = -1, b = -1;
+
+	*rec = NULL;
+	*len = 0;
+	if ( !save_key(fwid, "figure: saved (0)") ) return -1;
+	*rec = saved_rec(fig, len);
+	if ( *rec == NULL ) return -1;
+	at = find(*rec, *len, "vobjtop=\"", 0);
+	if ( at >= 0 ) t = num_at(*rec + at + 9);
+	at = find(*rec, *len, "vobjbottom=\"", 0);
+	if ( at >= 0 ) b = num_at(*rec + at + 12);
+	return ( t >= 0 && b >= 0 ) ? b - t : -1;
 }
 
 LOCAL void figlink_run( BOOL with_id )
 {
 	CONST char	*name = with_id ? "KT図形仮身" : "KT図形仮身無";
 	char		*fx, ia[40];
-	TS_UUID		fig, fwin;
-	DTWIN		*d;
-	T_DPRECT	page;
-	T_WMWIN		ww;
-	T_VOBJ		*v;
-	INT		fwid = -1, i, k = -1, z, x, yb, h;
+	TS_UUID		fig;
+	UB		*rec = NULL;
+	INT		fwid = -1, x = 0, yb = 0, h, len = 0;
+	CONST INT	ch = tad_closed_h(14, TAD_D_DEFAULT);	/* 19 */
 
 	if ( !up ) KT_SKIP("no desktop");
 	fx = (char *)Kmalloc(1024);
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
-	KT_ASSERT(fx != NULL && v != NULL);
-	if ( fx == NULL || v == NULL ) goto out0;
+	KT_ASSERT(fx != NULL);
+	if ( fx == NULL ) return;
 	ts_uuid_to_str(&txa, ia, sizeof(ia));
 	tm_sprintf((UB *)fx, (UB *)"<tad version=\"1.0\" encoding=\"UTF-8\"><figure>"
 		   "<link id=\"%s_0.xtad\"%s vobjleft=\"20\" vobjtop=\"20\" vobjright=\"180\" vobjbottom=\"32\""
@@ -1480,80 +1736,55 @@ LOCAL void figlink_run( BOOL with_id )
 	tm_printf((UB *)"  %s vobjid\n", with_id ? "with a" : "without a");
 	KT_ASSERT_ER(make(name, "basic-figure-editor",
 			  ",\"window\":{\"pos\":{\"x\":360,\"y\":300},\"width\":420,\"height\":300}", fx, &fig), E_OK);
-	KT_ASSERT_ER(ask_open(&fig), E_OK);
-	for ( i = 0; i < 30 && fwid <= 0; i++ ) {
-		fwid = window_showing(&fig);
-		if ( fwid <= 0 ) tk_dly_tsk(100);
-	}
+	fwid = fig_open(&fig, name);
 	KT_ASSERT(fwid > 0);
-	if ( fwid <= 0 ) open_windows();
-	d = ( fwid > 0 ) ? dt_win_of(fwid) : NULL;
-	KT_ASSERT(d != NULL && df_is(d) && d->fig != NULL);
-	if ( d == NULL || d->fig == NULL || wm_ref(fwid, &ww) < E_OK ) goto out;
-	for ( i = 0; i < d->fig->nsh; i++ ) {
-		if ( d->fig->sh[i].kind == TV_SH_LINK ) k = i;
-	}
-	KT_ASSERT(k >= 0);
-	if ( k < 0 ) goto out;
+	if ( fwid <= 0 ) goto out;
+	tk_dly_tsk(500);
 
-	/* read: shown at the closed height, the record as it was */
-	tm_printf((UB *)"  shown %d high, the record %d\n",
-		  d->fig->sh[k].r.bottom - d->fig->sh[k].r.top, link_h(d, v));
-	KT_ASSERT_EQ(d->fig->sh[k].r.bottom - d->fig->sh[k].r.top, 25);
-	KT_ASSERT_EQ(link_h(d, v), 12);
+	/* read: the record as it was */
+	h = saved_link_h(fwid, &fig, &rec, &len);
+	tm_printf((UB *)"  the record %d\n", h);
+	KT_ASSERT_EQ(h, 12);
+	if ( rec != NULL ) Kfree(rec);
 
-	/* the foot of the box on the screen, and a place along it */
-	dt_work_rect(d, &page);
-	z = ( d->fig->zoom > 0 ) ? d->fig->zoom : 8;
-	x = ww.work.left + page.left + 100 * z / 8 - d->scroll_x;
-	yb = ww.work.top + page.top + ( 20 + 25 ) * z / 8 - d->scroll_y;
+	/* the foot of the box as it is shown, closed, and a place along it */
+	KT_ASSERT(at_work(fwid, 100, 20 + ch, &x, &yb));
 
 	/* carried up: it stops at the closed height */
 	drag(x, yb - 2, x, yb - 2 - 30, 0);
-	h = link_h(d, v);
+	h = saved_link_h(fwid, &fig, &rec, &len);
 	tm_printf((UB *)"  carried up: %d high\n", h);
-	KT_ASSERT_EQ(h, 25);
+	KT_ASSERT_EQ(h, ch);
+	if ( rec != NULL ) Kfree(rec);
 	tk_dly_tsk(500);
 
 	/* a little down: still closed */
 	drag(x, yb - 2, x, yb - 2 + 4, 0);
-	h = link_h(d, v);
+	h = saved_link_h(fwid, &fig, &rec, &len);
 	tm_printf((UB *)"  a little down: %d high\n", h);
-	KT_ASSERT_EQ(h, 25);
+	KT_ASSERT_EQ(h, ch);
+	if ( rec != NULL ) Kfree(rec);
 	tk_dly_tsk(500);
 
 	/* well down: opened, as tall as it was carried */
-	drag(x, yb - 2, x, yb - 2 + 60 * z / 8, 0);
-	h = link_h(d, v);
+	drag(x, yb - 2, x, yb - 2 + 60, 0);
+	h = saved_link_h(fwid, &fig, &rec, &len);
 	tm_printf((UB *)"  well down: %d high\n", h);
-	KT_ASSERT_EQ(h, 25 + 60);
-	KT_ASSERT_EQ(d->fig->sh[k].r.bottom - d->fig->sh[k].r.top, 25 + 60);
-	KT_ASSERT_ER(dt_save(d), E_OK);
-	{
-		/* saved: the size, and the identity it was found by */
-		SZ	len = 0;
-		UB	*rec = om_obj_record(&fig, 0, &len);
-		char	vs[40];
-
-		ts_uuid_to_str(&v->vobjid, vs, sizeof(vs));
-		KT_ASSERT(rec != NULL);
-		if ( rec != NULL ) {
-			KT_ASSERT(find(rec, (INT)len, "vobjbottom=\"105\"", 0) > 0);
-			KT_ASSERT(find(rec, (INT)len, vs, 0) > 0);
-			KT_ASSERT_EQ(count_of(rec, (INT)len, "vobjid="), 1);
-			if ( with_id ) {
-				KT_ASSERT(find(rec, (INT)len, "01a0d8c4-52a8-7d42-8c6f-4a2e9b7d3fb2", 0) > 0);
-			}
-			Kfree(rec);
+	KT_ASSERT_EQ(h, ch + 60);
+	KT_ASSERT(rec != NULL);
+	if ( rec != NULL ) {
+		/* saved: one identity, the one it had when it had one */
+		KT_ASSERT_EQ(count_of(rec, len, "vobjid="), 1);
+		if ( with_id ) {
+			KT_ASSERT(find(rec, len, "01a0d8c4-52a8-7d42-8c6f-4a2e9b7d3fb2", 0) > 0);
 		}
+		Kfree(rec);
 	}
 out:
-	if ( window_named(name, &fwin) > 0 ) (void)ob_del_obj(&fwin);
+	fig_close(name);
 	tk_dly_tsk(300);
 	(void)ob_del_obj(&fig);
-out0:
-	if ( fx != NULL ) Kfree(fx);
-	if ( v != NULL ) Kfree(v);
+	Kfree(fx);
 	wm_update();
 }
 
@@ -1561,6 +1792,256 @@ LOCAL void test_figlink( void )
 {
 	figlink_run(TRUE);
 	figlink_run(FALSE);
+}
+
+/*
+ * 新版作成 in 基本図形編集 running as a process, on a store that does not
+ * count the links of a record itself (a FAT store): the copy is linked
+ * to by nothing when the desktop makes it, and the link the figure puts
+ * to it is counted when the figure is saved, as every link is. Y, a text
+ * that links to nothing, keeps the one link of the figure to it.
+ */
+#define FC_LEFT		40		/* the link to Y in the figure */
+#define FC_TOP		40
+
+/* The panels open now, those that were not in had */
+LOCAL INT panel_new( CONST BOOL *had )
+{
+	INT	pid;
+
+	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) {
+		if ( !had[pid] && wm_panel_wid(pid) > 0 ) return pid;
+	}
+	return 0;
+}
+
+LOCAL void panels_had( BOOL *had )
+{
+	INT	pid;
+
+	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) had[pid] = (BOOL)( wm_panel_wid(pid) > 0 );
+}
+
+/* The row of panel mp whose words begin with label pressed and let go; FALSE when there is none */
+LOCAL BOOL panel_row( INT mp, CONST char *label, UD when )
+{
+	T_WMPART	pt;
+	T_WMEV		ev;
+	INT		i;
+
+	for ( i = 0; knl_pn_part(mp, i, &pt) >= E_OK; i++ ) {
+		if ( find(pt.label, s_len((CONST char *)pt.label), label, 0) != 0 ) continue;
+		knl_memset(&ev, 0, sizeof(ev));
+		ev.wid = wm_panel_wid(mp);
+		ev.x = ( pt.r.left + pt.r.right ) / 2;
+		ev.y = ( pt.r.top + pt.r.bottom ) / 2;
+		ev.when = when;
+		ev.type = HID_EV_MOVE;
+		knl_wmobj_event(&ev);
+		ev.type = HID_EV_BTN_DOWN;
+		knl_wmobj_event(&ev);
+		ev.type = HID_EV_BTN_UP;
+		knl_wmobj_event(&ev);
+		tk_dly_tsk(300);
+		return TRUE;
+	}
+	tm_printf((UB *)"  no row %s in the menu\n", label);
+	return FALSE;
+}
+
+/* The menu of the second button at (x, y) of the window's work area, a row of one of its lists chosen */
+LOCAL BOOL menu_pick( INT wid, INT x, INT y, CONST char *row, CONST char *sub )
+{
+	BOOL	had[WM_PANEL_MAX + 1];
+	T_WMEV	ev;
+	INT	mp = 0, cp = 0, i;
+
+	panels_had(had);
+	knl_memset(&ev, 0, sizeof(ev));
+	ev.wid = wid;
+	ev.x = x;
+	ev.y = y;
+	ev.code = 1;
+	ev.when = 1000000000ULL;
+	ev.type = HID_EV_BTN_DOWN;
+	knl_wmobj_event(&ev);
+	ev.type = HID_EV_BTN_UP;
+	knl_wmobj_event(&ev);
+	for ( i = 0; i < 30 && mp == 0; i++ ) {
+		tk_dly_tsk(100);
+		mp = panel_new(had);
+	}
+	if ( mp == 0 ) return FALSE;
+	tk_dly_tsk(200);			/* the program waits on it by now */
+	panels_had(had);
+	if ( !panel_row(mp, row, 9000000000ULL) ) return FALSE;
+	if ( sub == NULL ) return TRUE;
+	/* a row with a list under it: the list opens at once on the click */
+	for ( i = 0; i < 30 && cp == 0; i++ ) {
+		cp = panel_new(had);
+		if ( cp == 0 ) tk_dly_tsk(100);
+	}
+	if ( cp == 0 ) return FALSE;
+	return panel_row(cp, sub, 9500000000ULL);
+}
+
+LOCAL INT refs_of( CONST TS_UUID *u )
+{
+	T_OBREF	r;
+
+	return ( ob_ref_obj(u, &r) >= E_OK ) ? r.refcnt : -1;
+}
+
+LOCAL void test_figcopy( void )
+{
+	CONST char	*jy = "{\"name\":\"KT新版の元\",\"applist\":{\"basic-text-editor\":{\"name\":\"x\",\"defaultOpen\":true}}}";
+	CONST char	*xy = "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>新版の元</p></document></tad>\n";
+	CONST char	*jf = "{\"name\":\"KT新版の図形\",\"applist\":{\"basic-figure-editor\":{\"name\":\"x\",\"defaultOpen\":true}},"
+			      "\"window\":{\"pos\":{\"x\":360,\"y\":300},\"width\":420,\"height\":300}}";
+	CONST DTPROG	*p;
+	DTPROG		*q = NULL;
+	T_VOBJ		*v = NULL;
+	TS_UUID		y, fig, cp, list[8], fwin;
+	T_OBCRE		c;
+	T_OBREF		r;
+	UD		pos;
+	UB		*x;
+	SZ		asz = 0, len = 0;
+	INT		rec, fwid = -1, i, nl;
+	char		*fx = NULL, iy[40];
+	BOOL		att = FALSE, have_y = FALSE, have_f = FALSE, have_cp = FALSE;
+	ID		key;
+
+	if ( !up ) KT_SKIP("no desktop");
+	p = dt_prog_find((CONST UB *)"basic-figure-editor");
+	if ( p == NULL ) KT_SKIP("no figure editor");
+	if ( ob_att_vol(UNP_FAT, TSFS_STORE_FAT) < E_OK ) KT_SKIP("no FAT store");
+	att = TRUE;
+	fx = (char *)Kmalloc(1024);
+	q = (DTPROG *)Kmalloc(sizeof(DTPROG));
+	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	KT_ASSERT(fx != NULL && q != NULL && v != NULL);
+	if ( fx == NULL || q == NULL || v == NULL ) goto out;
+
+	/* Y, and the figure of one link to it: the store does not count it, so it is counted here */
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.json = (CONST UB *)jy;
+	c.jsonsz = s_len(jy);
+	c.vol = UNP_FAT;
+	KT_ASSERT_ER(ob_cre_obj(&c, &y), E_OK);
+	have_y = TRUE;
+	key = ob_opn_obj(&y, OB_OP_ALL);
+	KT_ASSERT(key > 0);
+	if ( key > 0 ) {
+		rec = -1;
+		KT_ASSERT_ER(ob_apd_rec(key, OB_RT_TAD, 0, &rec), E_OK);
+		KT_ASSERT_ER(ob_wri_rec(key, rec, 0, xy, s_len(xy), &asz), E_OK);
+		ob_cls_obj(key);
+	}
+	ts_uuid_to_str(&y, iy, sizeof(iy));
+	tm_sprintf((UB *)fx, (UB *)"<tad version=\"1.0\" encoding=\"UTF-8\"><figure>"
+		   "<link id=\"%s_0.xtad\" vobjid=\"01a0d8c4-0000-7000-8000-00000000fc01\" vobjleft=\"%d\" vobjtop=\"%d\""
+		   " vobjright=\"%d\" vobjbottom=\"%d\" height=\"25\" chsz=\"14\" zIndex=\"1\"/></figure></tad>\n",
+		   iy, FC_LEFT, FC_TOP, FC_LEFT + L_W, FC_TOP + L_H);
+	c.json = (CONST UB *)jf;
+	c.jsonsz = s_len(jf);
+	KT_ASSERT_ER(ob_cre_obj(&c, &fig), E_OK);
+	have_f = TRUE;
+	key = ob_opn_obj(&fig, OB_OP_ALL);
+	KT_ASSERT(key > 0);
+	if ( key > 0 ) {
+		rec = -1;
+		KT_ASSERT_ER(ob_apd_rec(key, OB_RT_TAD, 0, &rec), E_OK);
+		KT_ASSERT_ER(ob_wri_rec(key, rec, 0, fx, s_len(fx), &asz), E_OK);
+		ob_cls_obj(key);
+	}
+	KT_ASSERT_ER(ob_lnk_obj(&y), E_OK);
+	KT_ASSERT(ob_ref_obj(&fig, &r) >= E_OK && ( r.flags & OB_F_AUTOREF ) == 0);
+	KT_ASSERT_EQ(refs_of(&y), 1);
+
+	/* opened with 基本図形編集 as a process, whatever its program object says */
+	pos = log_now();
+	*q = *p;
+	q->builtin = FALSE;
+	knl_memset(v, 0, sizeof(*v));
+	v->target = fig;
+	v->recno = -1;
+	KT_ASSERT_ER(dt_prog_run(NULL, q, v), E_OK);
+	{
+		char	line[96];
+
+		line[0] = 0;
+		KT_ASSERT(wait_for(pos, "figure: opened KT新版の図形 ", 100, line, sizeof(line)));
+		KT_ASSERT(find((CONST UB *)line, s_len(line), "links 1 autoref 0", 0) >= 0);
+	}
+	for ( i = 0; i < 30 && fwid <= 0; i++ ) {
+		fwid = window_showing(&fig);
+		if ( fwid <= 0 ) tk_dly_tsk(100);
+	}
+	KT_ASSERT(fwid > 0);
+	if ( fwid <= 0 ) goto out;
+	tk_dly_tsk(500);
+
+	/* 実身操作 / 新版作成 on the link, then saved with Ctrl+S */
+	pos = log_now();
+	KT_ASSERT(menu_pick(fwid, FC_LEFT + 60, FC_TOP + L_H / 2, "実身操作", "新版作成"));
+	KT_ASSERT(wait_for(pos, "figure: chosen real.newversion", 50, NULL, 0));
+	KT_ASSERT(wait_for(pos, "figure: new version", 100, NULL, 0));
+	pos = log_now();
+	{
+		T_WMEV	ev;
+
+		knl_memset(&ev, 0, sizeof(ev));
+		ev.type = HID_EV_KEY_DOWN;
+		ev.wid = fwid;
+		ev.code = 0x16;			/* S */
+		ev.mods = HID_MOD_LCTRL;
+		knl_wmobj_event(&ev);
+	}
+	KT_ASSERT(wait_for(pos, "figure: saved (0)", 100, NULL, 0));
+
+	/* the copy, the link of the record that is not Y's */
+	x = om_obj_record(&fig, 0, &len);
+	KT_ASSERT(x != NULL);
+	nl = ( x != NULL ) ? om_store_links(x, len, list, 8) : 0;
+	if ( x != NULL ) Kfree(x);
+	KT_ASSERT_EQ(nl, 2);
+	for ( i = 0; i < nl && i < 8; i++ ) {
+		if ( ts_uuid_cmp(&list[i], &y) != 0 ) {
+			cp = list[i];
+			have_cp = TRUE;
+		}
+	}
+	KT_ASSERT(have_cp);
+	if ( have_cp ) {
+		tm_printf((UB *)"  the copy: refcnt %d, the original's target %d\n", refs_of(&cp), refs_of(&y));
+		KT_ASSERT_EQ(refs_of(&cp), 1);		/* the figure's link to it */
+	}
+	KT_ASSERT_EQ(refs_of(&y), 1);			/* the figure's link to it, as before */
+
+out:
+	if ( fwid > 0 ) {
+		pos = log_now();
+		if ( window_named("KT新版の図形", &fwin) > 0 ) (void)ob_del_obj(&fwin);
+		(void)wait_for(pos, "figure: closed", 50, NULL, 0);
+	}
+	tk_dly_tsk(300);
+	if ( have_cp ) {
+		x = om_obj_record(&cp, 0, &len);
+		nl = ( x != NULL ) ? om_store_links(x, len, list, 8) : 0;
+		for ( i = 0; i < nl && i < 8; i++ ) (void)ob_unl_obj(&list[i]);
+		if ( x != NULL ) Kfree(x);
+		(void)ob_del_obj(&cp);
+	}
+	if ( have_f ) (void)ob_del_obj(&fig);
+	if ( have_y ) (void)ob_del_obj(&y);
+	if ( att ) KT_ASSERT_ER(ob_det_vol(UNP_FAT), E_OK);
+	if ( fx != NULL ) Kfree(fx);
+	if ( q != NULL ) Kfree(q);
+	if ( v != NULL ) Kfree(v);
+	wm_update();
 }
 
 EXPORT void ktest_drop( void )
@@ -1573,10 +2054,13 @@ EXPORT void ktest_drop( void )
 	KT_RUN(test_xfconv);
 	KT_RUN(test_backup);
 	KT_RUN(test_grant);
+	KT_RUN(test_place);
 	KT_RUN(test_unpack);
 	KT_RUN(test_unpack_fat);
+	KT_RUN(test_unpack_fat_doc);
 	KT_RUN(test_figtext);
 	KT_RUN(test_figlink);
+	KT_RUN(test_figcopy);
 	if ( up ) {
 		dt_quit();
 		up = FALSE;

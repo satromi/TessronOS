@@ -43,9 +43,18 @@ EXPORT ER knl_hwrng_read( UW *p_val )
 		} else {
 			Asm("rdrand %0; setc %1" : "=r"(v), "=qm"(ok));
 		}
-		if ( ok ) {
+		/*
+		 * All ones or all zeros with success said is a fault of the
+		 * instruction, known on some of AMD's processors: taken as no value.
+		 */
+		if ( ok && v != 0 && v != 0xffffffffU ) {
 			*p_val = v;
 			return E_OK;
+		}
+		if ( i == 4 && rng_kind == 2 ) {
+			/* its seed gives nothing: the generator, if it has one */
+			cpuid(1, 0, &a, &b, &c, &d);
+			rng_kind = ( c & ( 1U << 30 ) ) ? 1 : 0;
 		}
 	}
 	return E_NOSPT;

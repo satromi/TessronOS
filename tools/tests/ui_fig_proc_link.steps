@@ -1,0 +1,125 @@
+# 基本図形編集をプロセスで、デスクトップのウインドウの仮身から開く (design 11.3), for
+# tools/ui_run.py. figproc 1 makes every figure open with the process. A copy of 画用紙
+# (mkbig fig) and of 基本文章編集 (mkbig doc) are linked into BTRON, the desktop's first
+# window (linkbig); the figure is opened by a double press on its link, so the process is
+# given that link (T_PRCOPEN): closed, it writes its view back into the link and its place
+# into the metadata. Opened again: 新たな実身に保存 (the desktop's panel asks the name, a
+# link to the copy goes into BTRON). The text's link is copied to the tray in BTRON and
+# pasted into the figure; its 属性変更 asked of the desktop; pressed twice and carried
+# within the window, a copy of its object is linked where it is let go; carried out of the
+# window into BTRON, it is put there and leaves the figure. The copy's link is looked for on
+# the screen: a drawing of part of the window must not leave the next whole drawing cut to it.
+# Keys with Ctrl (01): C 06, V 19, E 08; Enter 28.
+mkbig fig 30 4
+figproc 1
+linkbig 180 45
+mkbig doc 5
+linkbig 190 70
+wait 300
+logmark
+dclick 190 52
+expectsincein 60 figure: opened 画用紙 shapes 32 links 0 autoref 1 parent 1
+wait 800
+logmark
+key 08 01
+expectsince figure: link view 0,0 100% (0)
+expectsince figure: window kept 100,100 800x600 (0)
+expectsince figure: closed
+wait 500
+logmark
+dclick 190 52
+expectsincein 60 figure: opened 画用紙 shapes 32 links 0 autoref 1 parent 1
+wait 800
+# 新たな実身に保存
+logmark
+click 500 400 1
+wait 500
+move 510 440
+wait 300
+move 650 440
+move 650 461
+wait 300
+click 650 461
+expectsince figure: chosen save.new
+wait 800
+shot pl_savenew_ask
+key 28
+expectsince figure: saved as new (0)
+wait 800
+shot pl_savenew
+# the figure's 道具パネル (100,0 to 498,112) stands over BTRON's links, as the desktop's own
+# figure editor's does: BTRON is brought forward by its band first, and the panel, a
+# subordinate window of the figure's, goes out of sight while BTRON is the window in use
+click 50 14
+wait 300
+click 230 78
+wait 300
+key 06 01
+wait 300
+click 600 500
+wait 300
+logmark
+key 19 01
+expectsince figure: pasted, 33 shapes 1 picked
+wait 500
+shot t2_pasted
+click 600 500
+wait 300
+logmark
+click 360 196 1
+expectsince figure: menu
+wait 1500
+# the menu comes up with 保存, chosen last, under the pointer: 仮身操作 six rows down
+move 380 316
+wait 300
+move 480 316
+move 485 376
+wait 300
+click 485 376
+expectsince figure: chosen vobj.attr
+wait 800
+shot t2_attr
+key 28
+expectsince figure: attr 基本文章編集
+wait 500
+# 実身複製ドラッグ within the window: pressed twice, carried, let go: a copy linked there
+click 600 500
+wait 300
+logmark
+click 360 196
+hold 360 196
+wait 100
+move 460 300
+wait 100
+move 560 396
+wait 300
+up
+wait 800
+shot t2_dupask
+key 28
+expectsince figure: duplicated 基本文章編集 here (0)
+expectsince figure: drew in
+wait 500
+shot t2_dup
+# the copy's link drawn where it was let go (396,258 of the figure): its band, not the paper
+pixel 612 400 E1F2F9
+# the link carried out of the window into BTRON: it leaves the figure
+click 600 500
+wait 300
+logmark
+move 360 196
+down
+move 300 196
+wait 500
+move 150 200
+wait 500
+move 90 200
+wait 1000
+move 50 190
+wait 1000
+shot t2_carry
+up
+expectsince figure: carried 基本文章編集 (0)
+expectsince figure: deleted, 33 shapes
+wait 500
+shot t2_carried

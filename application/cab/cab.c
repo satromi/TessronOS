@@ -281,10 +281,12 @@ EXPORT ER cab_open( CONST TS_UUID *uuid, INT recno, INT wid )
 		if ( rect_empty(&e->r) ) {
 			auto_place(i, &e->r);
 		}
-		/* a box lower than the object closed is shown at the closed height */
-		if ( e->r.bottom - e->r.top < tad_lnk_closed_h(&e->v) ) {
-			e->r.bottom = e->r.top + tad_lnk_closed_h(&e->v);
-		}
+		/*
+		 * Closed, it is shown at the closed height, lower or a little
+		 * taller as the record had it: the same size as in a figure and
+		 * a text (tad_lnk_fit_h)
+		 */
+		e->r.bottom = e->r.top + tad_lnk_fit_h(&e->v, e->r.bottom - e->r.top);
 		e->saved = e->r;
 		e->pick  = -1;
 		e->dirty = TRUE;

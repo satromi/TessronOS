@@ -18,7 +18,9 @@
  *	reading or by letters in them. A word picked in the list is put in
  *	the boxes above, to be changed or deleted.
  *
- *	The words are the user dictionary object's (SYSDEF_DICT_USER), as
+ *	The words are the user dictionary object's (the person's own when
+ *	they are logged in, which the converter makes; SYSDEF_DICT_USER for
+ *	利用者; dic_uuid), as
  *	lines of text (ts/udic.h). Each change is written at once: the
  *	converter watches the object and takes the words again, so a word
  *	registered is converted to from the next key on.
@@ -42,6 +44,7 @@
 #include <ts/tray.h>
 #include <ts/sysdef.h>
 #include <ts/udic.h>
+#include <ts/obatr.h>
 
 #define TICK_MS		20
 
@@ -93,6 +96,48 @@ LOCAL char	key[UD_YOMI_MAX * 2];	/* what is looked for; "" all */
 LOCAL BOOL	picked;
 LOCAL ROW	pick;
 
+/*
+ * The dictionary of whoever runs this: a person logged in has their own,
+ * linked from 辞書箱 and told by its owner and its metadata
+ * (tessronos.userdic). The converter makes it when they log in; until
+ * there is one, it is the one 利用者 has.
+ */
+LOCAL ER dic_uuid( TS_UUID *u )
+{
+	T_OBCRD	me;
+	TS_UUID	box, *lk = NULL;
+	INT	n, i;
+
+	if ( ob_get_crd(&me) >= E_OK && ui_uuid(SYSDEF_DICT_BOX, &box) >= E_OK ) {
+		n = ui_lst_lnk(&box, &lk);
+		for ( i = 0; i < n; i++ ) {
+			UB	pbuf[OB_PRT_SIZE(16, 4)];
+			T_OBPRT	*prt = (T_OBPRT *)pbuf;
+			UB	*meta = NULL;
+			SZ	asz = 0;
+			ID	key;
+			BOOL	yes = FALSE;
+
+			if ( ob_get_prt(&lk[i], prt, sizeof(pbuf), &asz) < E_OK
+			  || memcmp(&prt->owner, &me.user, sizeof(TS_UUID)) != 0 ) continue;
+			key = ob_opn_obj(&lk[i], OB_OP_ATRRD);
+			if ( key <= 0 ) continue;
+			if ( ob_atr_read(key, 0, &meta) >= 0 ) {
+				yes = (BOOL)( strstr((CONST char *)meta, "\"userdic\"") != NULL );
+			}
+			free(meta);
+			ob_cls_obj(key);
+			if ( yes ) {
+				*u = lk[i];
+				free(lk);
+				return E_OK;
+			}
+		}
+		free(lk);
+	}
+	return ui_uuid(SYSDEF_DICT_USER, u);
+}
+
 /* ---------------------------------------------------------------- the dictionary object */
 
 LOCAL ER dic_read( void )
@@ -103,7 +148,7 @@ LOCAL ER dic_read( void )
 	ER	er;
 
 	dlen = 0;
-	if ( ui_uuid(SYSDEF_DICT_USER, &u) < E_OK ) return E_SYS;
+	if ( dic_uuid(&u) < E_OK ) return E_SYS;
 	k = ob_opn_obj(&u, OB_OP_R);
 	if ( k < E_OK ) return (ER)k;
 	er = ob_rea_rec(k, 1, 0, dic, sizeof(dic), &asz);
@@ -120,7 +165,7 @@ LOCAL ER dic_keep( INT len )
 	SZ	asz = 0;
 	ER	er;
 
-	if ( ui_uuid(SYSDEF_DICT_USER, &u) < E_OK ) return E_SYS;
+	if ( dic_uuid(&u) < E_OK ) return E_SYS;
 	k = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE);
 	if ( k < E_OK ) return (ER)k;
 	/* replaced in one change: a cut in the power leaves the old record or the new one */

@@ -1,0 +1,68 @@
+# 基本図形編集のプロセスの文字枠で検索/置換のパネルを使う (design 11.3), for tools/ui_run.py:
+# a figure of 30 small rectangles, two zigzag lines and one piece of text "ABC" (mkbig fig 30 4 1;
+# the text 210,247 to 330,287 on the screen). The same is done with the desktop's figure editor and
+# with the one running as a process: the text pressed twice to edit it, Ctrl+F for 検索/置換, "B"
+# typed into 検索文字列, Enter for 次を検索 (the B found and picked), a letter typed over it,
+# Escape, the figure saved. Record 0 comes out the same, byte for byte.
+# The desktop's panel is worked in a loop of its own, so no sync is asked while it is up.
+# Keys: Enter 28, Esc 29; with Ctrl (01) F 09, S 16, E 08.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 30 4 1
+open big
+waitwin 画用紙 600
+sync 600
+wait 500
+dclick 215 255
+sync 600
+key 09 01
+wait 800
+text B
+wait 300
+shot find_kernel_panel
+key 28
+sync 600
+text z
+sync 600
+shot find_kernel_replaced
+key 29
+sync 600
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig fig 30 4 1
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 33
+wait 500
+logmark
+dclick 215 255
+expectsince figure: text editing begun
+logmark
+key 09 01
+expectsince figure: find panel open
+wait 300
+text B
+wait 300
+shot find_process_panel
+logmark
+key 28
+expectsince figure: find panel answered 10
+wait 300
+text z
+wait 300
+shot find_process_replaced
+logmark
+key 29
+expectsince figure: text editing ended
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum show
+same kernel
+key 08 01
+expect figure: closed

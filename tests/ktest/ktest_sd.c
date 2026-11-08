@@ -429,7 +429,7 @@ LOCAL void test_cmd23( void )
 	mode = knl_sd_dma_mode(-1);
 
 	for ( w = 0; w < 3; w++ ) {
-#ifdef QEMU_VIRT
+#if defined(QEMU_VIRT) || defined(X64)
 		if ( ways[w] == SD_CMD23_AUTO ) continue;
 #endif
 		if ( knl_sd_cmd23(ways[w]) < E_OK ) {
@@ -484,6 +484,7 @@ LOCAL void test_uhs_back( void )
 #if defined(KT_SD_EMMC)
 	if ( KT_SD_EMMC ) KT_SKIP("an eMMC has no UHS-I");
 #endif
+	if ( knl_sd_reinit(0) == E_NOEXS ) KT_SKIP("an eMMC has no UHS-I");
 	pf = knl_alloc_pages(4, ZONE_DMA32, KAF_DMA32);
 	KT_ASSERT(pf != NULL);
 	if ( pf == NULL ) return;

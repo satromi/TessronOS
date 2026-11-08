@@ -24,9 +24,7 @@
  *	the machine.
  */
 
-#include <sys/machine.h>
-#include "kernel.h"
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include <ts/img.h>
 
 #define MAX_BITS	15

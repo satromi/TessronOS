@@ -118,6 +118,8 @@
 
 #define PS_CCS			0x00000001	/* something is connected */
 #define PS_PED			0x00000002	/* and the port is enabled */
+#define PS_PLS_MASK		0x000001e0	/* the link state, as written */
+#define PS_LWS			0x00010000	/* the link state written is to be taken */
 #define PS_PR			0x00000010	/* reset in progress */
 #define PS_PP			0x00000200	/* powered */
 #define PS_SPEED(v)		(((v) >> 10) & 0x0f)
@@ -131,6 +133,9 @@
 #define PS_PLC			0x00400000	/* the link state changed */
 #define PS_CEC			0x00800000	/* the link failed its configuration */
 #define PS_CAS			0x01000000	/* cold attach: the link could not train */
+#define PLS_U0			0
+#define PLS_U3			3
+#define PLS_RESUME		15
 #define PLS_INACTIVE		6	/* SS.Inactive: the link gave up */
 #define PLS_COMPLIANCE		10	/* stuck in the compliance mode */
 #define PS_WPR			0x80000000	/* warm reset (USB 3 ports) */
@@ -2724,6 +2729,207 @@ LOCAL ER xhci_ep_reset( USBHC *hc, USBDEV *dev, UB addr )
 	return E_OK;
 }
 
+#ifdef X64
+/*
+ * The machine asleep (kernel/sysdepend/x64/pm.c, through usbman.c). The
+ * controller is halted and told to save its state (USBCMD CSS). On waking
+ * its operational and runtime registers are written back and it is told
+ * to restore (CRS); if it says it could (no SRE) the root ports found
+ * suspended are woken and every endpoint's doorbell is rung, the devices
+ * keeping their addresses: a controller whose power stayed on. If the state is lost it starts from
+ * the reset on the memory it has, and the manager finds the devices again.
+ */
+#define CMD_CSS		( 1U << 8 )
+#define CMD_CRS		( 1U << 9 )
+#define STS_SSS		( 1U << 8 )
+#define STS_RSS		( 1U << 9 )
+#define STS_SRE		( 1U << 10 )
+
+LOCAL UW	xpm_cmd, xpm_config, xpm_erstsz, xpm_iman, xpm_imod;
+LOCAL UD	xpm_erdp;
+
+LOCAL ER xhci_pm_suspend( USBHC *hc )
+{
+	XHCI	*x = (XHCI *)hc;
+
+	if ( !x->running || x->dead ) return E_OK;
+	xpm_cmd = rd32(x->op, OP_USBCMD);
+	wr32(x->op, OP_USBCMD, xpm_cmd & ~(CMD_RS | CMD_INTE));
+	if ( !wait_reg(x->op, OP_USBSTS, STS_HCH, STS_HCH, 100) ) {
+		tm_printf((UB *)"usb: xhci %d did not halt for the sleep\n", hc->index);
+	}
+	if ( x->hc.intno != 0 ) DisableInt(x->hc.intno);
+	xpm_config = rd32(x->op, OP_CONFIG);
+	xpm_erstsz = rd32(x->rt, RT_ERSTSZ);
+	xpm_iman = rd32(x->rt, RT_IMAN);
+	xpm_imod = rd32(x->rt, RT_IMOD);
+	xpm_erdp = (UD)rd32(x->rt, RT_ERDP) | ( (UD)rd32(x->rt, RT_ERDP + 4) << 32 );
+	wr32(x->op, OP_USBCMD, ( xpm_cmd & ~(CMD_RS | CMD_INTE) ) | CMD_CSS);
+	if ( !wait_reg(x->op, OP_USBSTS, STS_SSS, 0, 1000) ) {
+		tm_printf((UB *)"usb: xhci %d: the state was not saved (USBSTS %08x)\n", hc->index,
+			  rd32(x->op, OP_USBSTS));
+	}
+	return E_OK;
+}
+
+/* Every slot's every endpoint with a ring: what was stopped goes on */
+LOCAL void xhci_ring_all( XHCI *x )
+{
+	INT	s, e;
+
+	for ( s = 1; s <= MAX_SLOTS; s++ ) {
+		XDEV	*d = x->slots[s];
+
+		if ( d == NULL ) continue;
+		for ( e = 1; e < 32; e++ ) {
+			if ( d->ep[e] != NULL ) doorbell(x, s, (UW)e);
+		}
+	}
+}
+
+/*
+ * A root port the sleep left suspended (link U3): the firmware or the
+ * controller may put them there while it is in D3, and no transfer gets
+ * through until they are woken: each ends in a transaction error, and a
+ * hub's port reset behind one fails the same way. Before any doorbell,
+ * a USB 2 port signals resume for 20 ms and then goes to U0, which the hub
+ * and what is behind it follow; a USB 3 port is told U0. Then the 10 ms a
+ * device has to recover from a resume. Ports not in U3 are left as they are.
+ */
+LOCAL void xhci_ports_wake( XHCI *x )
+{
+	INT	p, n2 = 0, n = 0;
+	UW	v, t0;
+
+	for ( p = 0; p < x->nports; p++ ) {
+		v = rd32(x->op, OP_PORTSC(p));
+		if ( ( v & PS_CCS ) == 0 || PS_PLS(v) != PLS_U3 ) continue;
+		v = ( v & PS_NEUTRAL & ~PS_PLS_MASK ) | PS_LWS;
+		if ( x->port_major[p] == 3 ) {
+			wr32(x->op, OP_PORTSC(p), v | ( PLS_U0 << 5 ));
+		} else {
+			wr32(x->op, OP_PORTSC(p), v | ( PLS_RESUME << 5 ));
+			n2++;
+		}
+		n++;
+	}
+	if ( n == 0 ) return;
+	if ( n2 > 0 ) {
+		tk_dly_tsk(20);
+		for ( p = 0; p < x->nports; p++ ) {
+			v = rd32(x->op, OP_PORTSC(p));
+			if ( x->port_major[p] != 3 && ( v & PS_CCS ) != 0 && PS_PLS(v) == PLS_RESUME ) {
+				wr32(x->op, OP_PORTSC(p), ( v & PS_NEUTRAL & ~PS_PLS_MASK ) | PS_LWS | ( PLS_U0 << 5 ));
+			}
+		}
+	}
+	for ( t0 = knl_usb_ms(); knl_usb_ms() - t0 < 100; ) {
+		BOOL	waiting = FALSE;
+
+		for ( p = 0; p < x->nports; p++ ) {
+			v = rd32(x->op, OP_PORTSC(p));
+			if ( ( v & PS_CCS ) != 0 && ( PS_PLS(v) == PLS_U3 || PS_PLS(v) == PLS_RESUME ) ) waiting = TRUE;
+		}
+		if ( !waiting ) break;
+		tk_dly_tsk(1);
+	}
+	tk_dly_tsk(10);
+	for ( p = 0; p < x->nports; p++ ) {
+		v = rd32(x->op, OP_PORTSC(p));
+		if ( ( v & PS_PLC ) != 0 && ( v & PS_CCS ) != 0 ) {
+			wr32(x->op, OP_PORTSC(p), ( v & PS_NEUTRAL ) | PS_PLC);
+		}
+		if ( ( v & PS_CCS ) != 0 ) {
+			tm_printf((UB *)"usb: xhci %d: port %d after the wake: PORTSC %08x link %s\n", x->hc.index, p, v,
+				  pls_name(v));
+		}
+	}
+	tm_printf((UB *)"usb: xhci %d: %d root ports woken from U3\n", x->hc.index, n);
+}
+
+/* From the reset, on the memory the controller already has */
+LOCAL ER xhci_restart( XHCI *x )
+{
+	INT	i;
+
+	wr32(x->op, OP_USBCMD, rd32(x->op, OP_USBCMD) & ~(CMD_RS | CMD_INTE));
+	(void)wait_reg(x->op, OP_USBSTS, STS_HCH, STS_HCH, 50);
+	wr32(x->op, OP_USBCMD, rd32(x->op, OP_USBCMD) | CMD_HCRST);
+	tk_dly_tsk(2);
+	if ( !wait_reg(x->op, OP_USBCMD, CMD_HCRST, 0, 1000) || !wait_reg(x->op, OP_USBSTS, STS_CNR, 0, 1000) ) {
+		return E_IO;
+	}
+	wr32(x->op, OP_CONFIG, (rd32(x->op, OP_CONFIG) & ~0xffU) | (UW)x->max_slots);
+	wr64(x->op, OP_DCBAAP, x->dcbaa_bus);
+	cmd_ring_reset(x);
+	for ( i = 0; i < x->nevseg; i++ ) {
+		knl_memset(x->ev_seg[i], 0, USB_PAGE);
+	}
+	USB_MB();
+	x->ev_seg_idx = 0;
+	x->ev_idx = 0;
+	x->ccs = 1;
+	wr32(x->rt, RT_ERSTSZ, (UW)x->nevseg);
+	wr64(x->rt, RT_ERDP, x->ev_bus[0]);
+	wr64(x->rt, RT_ERSTBA, x->erst_bus);
+	wr32(x->rt, RT_IMOD, 1000);
+	wr32(x->rt, RT_IMAN, IMAN_IP | (( x->hc.intno != 0 ) ? IMAN_IE : 0));
+	wr32(x->op, OP_USBSTS, STS_W1C);
+	wr32(x->op, OP_USBCMD, CMD_RS | CMD_HSEE | (( x->hc.intno != 0 ) ? CMD_INTE : 0));
+	if ( !wait_reg(x->op, OP_USBSTS, STS_HCH, 0, 100) ) return E_IO;
+	if ( (x->hcc1 & HCC1_PPC) != 0 ) {
+		for ( i = 0; i < x->nports; i++ ) {
+			UW	v = rd32(x->op, OP_PORTSC(i));
+
+			if ( (v & PS_PP) == 0 ) wr32(x->op, OP_PORTSC(i), (v & PS_NEUTRAL) | PS_PP);
+		}
+		tk_dly_tsk(20);
+	}
+	return E_OK;
+}
+
+LOCAL ER xhci_pm_resume( USBHC *hc )
+{
+	XHCI	*x = (XHCI *)hc;
+	UW	st;
+	BOOL	lost = FALSE;
+
+	if ( !x->running || x->dead ) return E_OK;
+	(void)wait_reg(x->op, OP_USBSTS, STS_CNR, 0, 5000);
+	wr32(x->op, OP_USBCMD, rd32(x->op, OP_USBCMD) & ~(UW)CMD_RS);
+	(void)wait_reg(x->op, OP_USBSTS, STS_HCH, STS_HCH, 100);
+	wr32(x->op, OP_CONFIG, xpm_config);
+	wr64(x->op, OP_DCBAAP, x->dcbaa_bus);
+	wr32(x->rt, RT_ERSTSZ, xpm_erstsz);
+	wr64(x->rt, RT_ERSTBA, x->erst_bus);
+	wr64(x->rt, RT_ERDP, xpm_erdp);
+	wr32(x->rt, RT_IMOD, xpm_imod);
+	wr32(x->op, OP_USBCMD, rd32(x->op, OP_USBCMD) | CMD_CRS);
+	if ( !wait_reg(x->op, OP_USBSTS, STS_RSS, 0, 1000) ) lost = TRUE;
+	st = rd32(x->op, OP_USBSTS);
+	if ( ( st & STS_SRE ) != 0 ) lost = TRUE;
+	tm_printf((UB *)"usb: xhci %d: the state %s (USBSTS %08x)\n", hc->index, lost ? "is lost" : "restored", st);
+	if ( x->hc.intno != 0 ) EnableInt(x->hc.intno, INTPRI_DEVICE);
+	if ( !lost ) {
+		wr32(x->rt, RT_IMAN, xpm_iman | IMAN_IP);
+		wr32(x->op, OP_USBSTS, STS_W1C);
+		wr32(x->op, OP_USBCMD, xpm_cmd | CMD_RS);
+		if ( wait_reg(x->op, OP_USBSTS, STS_HCH, 0, 100) ) {
+			xhci_ports_wake(x);
+			xhci_ring_all(x);
+			return E_OK;
+		}
+		tm_printf((UB *)"usb: xhci %d would not run after the restore\n", hc->index);
+	}
+	if ( xhci_restart(x) < E_OK ) {
+		tm_printf((UB *)"usb: xhci %d did not start again after the sleep\n", hc->index);
+		x->dead = TRUE;
+		hc->lost = TRUE;
+	}
+	return E_IO;
+}
+#endif /* X64 */
+
 LOCAL CONST USBHC_OPS xhci_ops = {
 	xhci_nports,
 	xhci_port_connected,
@@ -2743,7 +2949,11 @@ LOCAL CONST USBHC_OPS xhci_ops = {
 	xhci_info,
 	xhci_ep_reset,
 	xhci_port_warm_reset,
-	xhci_port_power
+	xhci_port_power,
+#ifdef X64
+	xhci_pm_suspend,
+	xhci_pm_resume,
+#endif
 };
 
 #ifdef X64

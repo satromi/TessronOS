@@ -236,4 +236,39 @@ EXPORT void knl_rtc_shift( D sec )
 	END_CRITICAL_SECTION;
 }
 
+/*
+ * The alarm, in sec seconds from the clock now (under a day): written in
+ * the form register B says, with the alarm's interrupt enabled. The ACPI
+ * RTC event (PM1's RTC_STS and RTC_EN) takes it from there.
+ */
+EXPORT ER knl_rtc_alarm_in( UINT sec )
+{
+	D	wall;
+	ER	er = knl_rtc_read_wall(&wall);
+	UB	regb;
+	INT	s, m, h, t;
+
+	if ( er < E_OK ) return er;
+	t = (INT)( ( wall + (D)sec ) % 86400 );
+	s = t % 60;
+	m = t / 60 % 60;
+	h = t / 3600;
+	regb = cmos_rd(0x0b);
+	if ( ( regb & 0x02 ) == 0 ) {
+		return E_NOSPT;			/* a 12 hour clock: nothing here keeps one */
+	}
+	if ( ( regb & 0x04 ) == 0 ) {		/* BCD */
+		s = ( s / 10 ) << 4 | ( s % 10 );
+		m = ( m / 10 ) << 4 | ( m % 10 );
+		h = ( h / 10 ) << 4 | ( h % 10 );
+	}
+	cmos_wr(0x0b, regb & (UB)~0x20);
+	cmos_wr(0x01, (UB)s);
+	cmos_wr(0x03, (UB)m);
+	cmos_wr(0x05, (UB)h);
+	(void)cmos_rd(0x0c);			/* the alarm's flag cleared */
+	cmos_wr(0x0b, regb | 0x20);
+	return E_OK;
+}
+
 #endif /* X64 */

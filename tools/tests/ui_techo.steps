@@ -12,10 +12,31 @@
 # 手帳用紙, with its one empty page and the holidays in bold. Last, letters
 # carried out of the 手帳 into a text of the desktop's, from one of its
 # windows to another, and out of the text into the 手帳. The dates are
-# those of October 2026, the month the machine's clock says.
+# those of October 2026: the カレンダー opens on the month the machine's
+# clock says, and 2026/10 is chosen first from its ページ menu (年月を選択,
+# the year and month typed into the panel), whatever day the test runs on.
+# The menu opens with the item chosen last on the pointer's row: ページ
+# from then on.
 open 01a0d8c4-53c6-7a77-8b88-9cadbecf53c6
 expect techo: ready 私の手帳
 wait 800
+click 700 300 1
+wait 500
+move 720 381
+wait 150
+move 740 381
+wait 150
+move 830 381
+wait 150
+move 830 581
+wait 150
+click 830 581
+expect techo: month panel
+wait 500
+text 202610
+key 28
+expect techo: month 2026/10
+wait 300
 shot techo_open
 # カレンダー: the next month, back, and a date into the 予定表
 click 790 114
@@ -104,15 +125,15 @@ expect techo: person 6 of 9 は 1/1
 # ページを追加 from the menu, its よみ typed: sorted to あ at once
 click 560 440 1
 wait 500
-move 580 521
+move 580 440
 wait 150
-move 600 521
+move 600 440
 wait 150
-move 690 521
+move 690 440
 wait 150
-move 690 661
+move 690 580
 wait 150
-click 690 661
+click 690 580
 expect techo: page added
 wait 300
 click 815 387
@@ -151,16 +172,17 @@ wait 150
 click 690 480
 expect techo: paper panel
 wait 500
-click 630 455
-click 700 494
-click 680 535
+# the panel stands in the middle of the screen, as the system's do
+click 522 335
+click 592 374
+click 572 415
 key 2A
 key 2A
 key 39
 text 10
 wait 200
 shot techo_paper
-click 908 615
+click 800 495
 expect techo: paper 1 turned 10 20 20 20
 wait 300
 # the カレンダー put away from 表示, and shown again
@@ -232,8 +254,27 @@ open 01a0d8c4-53c6-7a77-8b88-9cadbecf53c6
 expect techo: read plans 12 people 9
 expect techo: ready 私の手帳
 wait 800
+# 2026/10 chosen again from the カレンダー's ページ menu, which opens with ページ under the pointer
+click 700 300 1
+wait 500
+move 720 300
+wait 150
+move 740 300
+wait 150
+move 830 300
+wait 150
+move 830 500
+wait 150
+click 830 500
+expect techo: month panel
+wait 500
+text 202610
+key 28
+logmark
+expectsince techo: month 2026/10
+wait 300
 click 634 244
-expect techo: day 2026/10/20
+expectsince techo: day 2026/10/20
 wait 300
 shot techo_reopened
 # a change, and closing asks
@@ -256,40 +297,42 @@ shot techo_template
 key 08 01
 expect techo: closed
 wait 800
-# letters carried between windows: from the 住所録 into the text TADjsについて
-# behind (a move), from the 予定表 into the 住所録's メモ2 (another window of
-# the 手帳's, a move), and from the text into the 予定表 (a copy: the text
-# keeps its letters), then within the text (a move)
+# letters carried between windows: from the 予定表 into the 住所録's メモ2
+# (another window of the 手帳's, a move), from the 住所録 into the text
+# TADjsについて behind (a move), and from the text into the 予定表 (a copy:
+# the text keeps its letters), then within the text (a move). A window
+# letters are dropped on comes to the front and takes the keys (design
+# 10.4): after the text has taken them it covers the 住所録, so what goes
+# between the 手帳's own windows is done first.
 open 019a6c96-e262-7dfd-a3bc-1e85d495d60d
 wait 1500
 win TADjsについて
 open 01a0d8c4-53c6-7a77-8b88-9cadbecf53c6
 expect techo: ready 私の手帳
 wait 800
-click 700 503
-expect techo: field addr 6
-key 4A
-key 4D 02
-wait 200
-hold 640 503
-wait 100
-move 620 503
-wait 100
-move 560 503
-wait 100
-move 500 560
-wait 400
-move 420 600
-wait 300
-shot techo_carry_out
-up
-expect techo: carried text 青木 遥 (0)
+# 2026/10 chosen again from the カレンダー's ページ menu, which opens with ページ under the pointer
+click 700 300 1
 wait 500
-shot techo_carried_out
+move 720 300
+wait 150
+move 740 300
+wait 150
+move 830 300
+wait 150
+move 830 500
+wait 150
+click 830 500
+expect techo: month panel
+wait 500
+text 202610
+key 28
+logmark
+expectsince techo: month 2026/10
+wait 300
 # the 予定表 on 10/1, made empty above: the day shown at the start is the
 # machine's today, whose rows are not known
 click 706 163
-expect techo: day 2026/10/1
+expectsince techo: day 2026/10/1
 wait 300
 click 300 153
 key 39
@@ -312,11 +355,32 @@ expect techo: dropped text abc-123 to addr 10
 expect techo: carried text abc-123 (0)
 wait 500
 shot techo_carried_between
-drag 160 470 260 470
-wait 300
-hold 200 470
+click 700 503
+expect techo: field addr 6
+key 4A
+key 4D 02
+wait 200
+hold 640 503
 wait 100
-move 210 470
+move 620 503
+wait 100
+move 560 503
+wait 100
+move 500 560
+wait 400
+move 420 600
+wait 300
+shot techo_carry_out
+up
+expect techo: carried text 青木 遥 (0)
+wait 500
+shot techo_carried_out
+# the words of the text's line "この柔軟性をElectronアプリとして..." (at 450)
+drag 160 450 260 450
+wait 300
+hold 200 450
+wait 100
+move 210 450
 wait 100
 move 170 400
 wait 100
@@ -327,9 +391,9 @@ up
 expect techo: dropped text の柔軟性をElec to sched 6
 wait 500
 shot techo_carried_in
-hold 200 470
+hold 200 450
 wait 100
-move 210 470
+move 210 450
 wait 100
 move 400 560
 wait 100

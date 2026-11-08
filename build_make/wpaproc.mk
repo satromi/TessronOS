@@ -15,7 +15,7 @@
 ifeq ($(WIFI)$(WPA_MODE),1proc)
 WPAP_DIR    := $(TOP)/application/wpasupp
 WPAP_UUID   := 01a0d8c4-5a61-7b02-8c13-5e3f70819a61
-WPAP_OUT    := $(HOME)/tessronos-wpaproc-$(if $(filter x86_64,$(ARCH)),x64,arm)
+WPAP_OUT    ?= $(HOME)/tessronos-wpaproc-$(if $(filter x86_64,$(ARCH)),x64,arm)
 WPAP_LIB    := $(WPAP_OUT)/wpasupp_lib.o
 WPAP_ELF    := $(UOBJ)/wpasupp.elf
 WPAP_STAGE  := $(UOBJ)/wpapstage
@@ -23,7 +23,7 @@ WPAP_DONE   := $(WPAP_STAGE)/.done
 WPAP_HOLD   := --hold $(WPAP_STAGE)
 WPAP_HDRS   := $(TOP)/device/net/wifi/wpaproc/wpaproc.h $(TOP)/device/net/wifi/wpa/wpa_glue.h
 
-$(WPAP_LIB): $(TOP)/tools/wpa/proc.sh $(WPAP_HDRS) $(TOP)/device/net/wifi/wpa/wpa_glue.c \
+$(WPAP_LIB): $(TOP)/tools/wpa/proc.sh $(WPAP_HDRS) $(TOP)/device/net/wifi/wpa/wpa_glue.c $(WPAP_DIR)/wps_eap.c \
 	     $(WPAP_DIR)/wps_serve.c $(WPAP_DIR)/include/dirent.h
 	@echo 'WPAP $@'
 	@ARCH=$(ARCH) UFLAGS="$(ARCHFLAGS) $(UARCH_FP)" OUT=$(WPAP_OUT) bash $(TOP)/tools/wpa/proc.sh all

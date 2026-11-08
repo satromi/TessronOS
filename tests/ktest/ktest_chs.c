@@ -497,7 +497,7 @@ LOCAL void test_program( void )
 	T_OBCRE	c;
 	T_PSTS	psts;
 	ID	pid;
-	INT	wid;
+	INT	wid, i;
 	ER	er = E_SYS;
 
 	if ( !need(CD_SRC_KANJIVG | CD_SRC_KRAD) ) KT_SKIP("the dictionary has no elements");
@@ -517,10 +517,10 @@ LOCAL void test_program( void )
 	KT_ASSERT(pid > 0 && wid > 0);
 	if ( pid <= 0 || wid <= 0 ) goto stop;
 	(void)wm_focus(wid);
-	tk_dly_tsk(800);
 
-	/* the conditions put into the box that has the keys, and Enter: 號 */
-	KT_ASSERT(wm_panel_type(wid, (CONST UB *)"虎 号 .", (INT)knl_strlen("虎 号 .")));
+	/* the conditions put into the box that has the keys, and Enter: 號. The window comes before its panel */
+	for ( i = 0; i < 100 && !wm_panel_type(wid, (CONST UB *)"虎 号 .", (INT)knl_strlen("虎 号 .")); i++ ) tk_dly_tsk(100);
+	KT_ASSERT(i < 100);
 	tk_dly_tsk(200);
 	key_to(wid, 0x28, 0);					/* Enter: 検索 */
 	tk_dly_tsk(500);

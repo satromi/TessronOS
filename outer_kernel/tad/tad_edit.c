@@ -22,9 +22,7 @@
  *	the document's arena and goes back when the document is freed.
  */
 
-#include <sys/machine.h>
-#include "kernel.h"
-#include <tk/tkernel.h>
+#include <ts/tvport.h>
 #include "tad_local.h"
 
 /* A node taken out of the list of its parent's children */

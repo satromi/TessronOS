@@ -16,6 +16,12 @@
 # were had from git.kernel.org and from the project's mirror on gitlab.com when the sums were
 # written; FW_URL may name another place with the same tree (FW_URL/<path>).
 #
+# The same chip's Bluetooth patch (BCM4345C0.hcd, design 6.8) is not in linux-firmware: it is
+# taken from Raspberry Pi's bluez-firmware (github.com/RPi-Distro/bluez-firmware) at a fixed
+# commit, where Raspberry Pi OS has it, checked the same way. Raspberry Pi gives it under the same
+# LICENCE.cypress as linux-firmware's (the package's debian/copyright). BT_URL may name another
+# place with the same tree.
+#
 set -e
 
 STAGE=${1:-fetch}
@@ -31,20 +37,24 @@ brcm/brcmfmac43455-sdio.raspberrypi,4-model-b.txt edb6f4e4fb19e18940004124feb4ff
 LICENSES/LICENCE.cypress ae0db6cc4db33941148df0f67de53e76a77b1b5a46b3165edb7040aa2750015f 8914
 LICENSES/GPL-2.0 edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6 17984"
 
+BT_COMMIT=cdf61dc691a49ff01a124752bd04194907f0f9cd
+BT_URLS="${BT_URL:+$BT_URL }https://raw.githubusercontent.com/RPi-Distro/bluez-firmware/$BT_COMMIT"
+BT_FILES="debian/firmware/broadcom/BCM4345C0.hcd 51c45e77ddad91a19e96dc8fb75295b2087c279940df2634b23baf71b6dea42c 63806"
+
 ok() {
 	[ -f "$1" ] && [ "$(stat -c %s "$1")" = "$3" ] && echo "$2  $1" | sha256sum -c --status
 }
 
-fetch() {
+# fetch_list LIST URLS WHAT: each of LIST (path, SHA-256, size) from the first of URLS that has it right
+fetch_list() {
 	local path f sum size u got tmp
-	mkdir -p "$OUT"
-	echo "$FILES" | while read -r path sum size; do
+	echo "$1" | while read -r path sum size; do
 		f=$(basename "$path")
 		ok "$OUT/$f" "$sum" "$size" && continue
 		# each file is fetched into a new empty directory and moved in only once its sum is right
 		tmp=$(mktemp -d "$OUT/.dl.XXXXXX")
 		got=""
-		for u in $URLS; do
+		for u in $2; do
 			case $u in
 			*git.kernel.org*)	u="$u/$path?h=$TAG" ;;
 			*)			u="$u/$path" ;;
@@ -57,13 +67,19 @@ fetch() {
 		done
 		if [ -z "$got" ]; then
 			rm -rf "$tmp"
-			echo "rpi5-wifi-fw: $path (linux-firmware $TAG) could not be had with the right SHA-256" >&2
+			echo "rpi5-wifi-fw: $path ($3) could not be had with the right SHA-256" >&2
 			exit 1
 		fi
 		mv "$tmp/$f" "$OUT/$f"
 		rm -rf "$tmp"
 		echo "rpi5-wifi-fw: $f from $got"
 	done
+}
+
+fetch() {
+	mkdir -p "$OUT"
+	fetch_list "$FILES" "$URLS" "linux-firmware $TAG"
+	fetch_list "$BT_FILES" "$BT_URLS" "bluez-firmware $BT_COMMIT"
 	echo "rpi5-wifi-fw: $OUT"
 }
 

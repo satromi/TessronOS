@@ -1,0 +1,12 @@
+<tad version="1.0" encoding="UTF-8" filename="BeSFCの速度のメニュー">
+<document>
+<p>BeSFCの速度のメニュー</p>
+<p>BeSFCの速度を選ぶメニューの定義。</p>
+</document>
+<menu>
+<item code="emu.sp4">4倍速</item>
+<item code="emu.sp2">2倍速</item>
+<item code="emu.sp15">1.5倍速</item>
+<item code="emu.sp1">1倍速</item>
+</menu>
+</tad>

@@ -1,0 +1,37 @@
+# The keys when a link is opened (design 10.4), for tools/ui_run.py: a document with
+# links to a sheet at 190,107 and to the calculator at 190,157.
+xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
+xml <p><link id="019b54a4-6ccf-72f7-e320-c98e4a0bab4e_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c31"
+xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
+xml framedisp="true" namedisp="true" pictdisp="true"/></p>
+xml <p><link id="01a0d8c4-5320-7a41-8b52-6c7d8e9fa020_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c32"
+xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
+xml framedisp="true" namedisp="true" pictdisp="true"/></p>
+xml </document></tad>
+xmlopen 開く元
+wait 500
+win 開く元
+focus fo_doc 開く元
+# an accessory opened by its link takes the keys: a digit reaches the calculator
+dclick 190 157
+expect calculator: ready
+focus fo_tool 電卓
+key 1E
+expect calculator: shown 1 []
+# the person goes on typing before the window comes: it opens without the keys
+click 300 300
+focus fo_back 開く元
+logmark
+dclick 190 157
+key 04
+expectsincein 30 calculator: ready
+wait 800
+focus fo_kept 開く元
+# an object opened by its link in a program: what is typed goes in its first cell
+click 300 300
+dclick 190 107
+expect calc: ready
+focus fo_sheet 基本表計算
+text 10
+key 28
+expect calc: set A1 shows 10

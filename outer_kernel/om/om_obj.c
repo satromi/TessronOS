@@ -24,6 +24,7 @@
 #include <ts/om.h>
 #include <ts/ob.h>
 #include <ts/tad.h>
+#include <ts/fn.h>
 
 /* ---------------------------------------------------------------- the metadata */
 
@@ -400,10 +401,66 @@ LOCAL ER box_write( CONST TS_UUID *box, T_TAD *doc )
 	return er;
 }
 
+/* How a link a box is given is laid out: its letters, and its place */
+#define LINK_CHSZ	14
+#define LINK_DISP	( TAD_D_PICT | TAD_D_NAME | TAD_D_FRAME )
+#define LINK_PAD	8		/* from the box's left and top */
+#define LINK_GAP	8		/* below the link before it */
+
 /*
- * A link to an object added to a box, a figure of links: below the
- * lowest link there, as wide as the box's links usually are. A box that
- * links to it already is left as it is.
+ * How wide a new closed link to the object is made: its name measured
+ * with the system's face at the link's letters (tad_closed_w). The
+ * face is left as it was set. With no face yet, or no name, the name
+ * is taken to be six letters wide.
+ */
+LOCAL INT link_w( CONST TS_UUID *uuid )
+{
+	UB		nm[TAD_NAME_MAX];
+	T_FNSTATE	st;
+	ID		fid;
+	INT		w = LINK_CHSZ * 6;
+
+	if ( om_store_name(uuid, nm, sizeof(nm)) > 0 ) {
+		fn_hold();
+		fid = fn_system();
+		if ( fid > 0 && fn_state_get(fid, &st) >= E_OK ) {
+			if ( fn_set_size(fid, LINK_CHSZ) >= E_OK ) {
+				INT	m = fn_width(fid, nm);
+
+				if ( m >= 0 ) w = m;
+			}
+			(void)fn_state_set(fid, &st);
+		}
+		fn_release();
+	}
+
+	return tad_closed_w(LINK_CHSZ, LINK_DISP, w);
+}
+
+/* A new closed link to the object, its top at top */
+LOCAL void link_new( T_VOBJ *v, CONST TS_UUID *uuid, INT top )
+{
+	knl_memset(v, 0, sizeof(*v));
+	v->target = *uuid;
+	v->left = LINK_PAD;
+	v->top = top;
+	v->right = v->left + link_w(uuid);
+	v->chsz = LINK_CHSZ;
+	v->disp = LINK_DISP;
+	v->bottom = v->top + tad_lnk_closed_h(v);
+	v->frcol = 0x000000;
+	v->chcol = 0x000000;
+	v->tbcol = 0xffffff;
+	v->bgcol = 0xffffff;
+	v->height = v->bottom - v->top;
+	v->zoom = 100;
+}
+
+/*
+ * A link to an object added to a box, a figure of links: closed and as
+ * wide as the object's name, LINK_GAP below the lowest link there (at
+ * LINK_PAD in an empty box). A box that links to it already is left as
+ * it is.
  */
 EXPORT ER om_obj_link_add( CONST TS_UUID *box, CONST TS_UUID *uuid )
 {
@@ -426,20 +483,7 @@ EXPORT ER om_obj_link_add( CONST TS_UUID *box, CONST TS_UUID *uuid )
 		}
 		if ( v.bottom > low ) low = v.bottom;
 	}
-	knl_memset(&v, 0, sizeof(v));
-	v.target = *uuid;
-	v.left = 8;
-	v.top = low + 8;
-	v.right = 248;
-	v.bottom = v.top + 25;
-	v.chsz = 14;
-	v.frcol = 0x000000;
-	v.chcol = 0x000000;
-	v.tbcol = 0xffffff;
-	v.bgcol = 0xffffff;
-	v.height = 25;
-	v.zoom = 100;
-	v.disp = TAD_D_PICT | TAD_D_NAME | TAD_D_FRAME;
+	link_new(&v, uuid, low + LINK_GAP);	/* LINK_PAD in an empty box */
 	er = tad_lnk_add(doc, &v, &id);
 	if ( er < E_OK ) {
 		tad_free(doc);
@@ -509,21 +553,8 @@ EXPORT ER om_obj_links_set( CONST TS_UUID *box, CONST TS_UUID *uuids, INT n )
 	}
 	for ( j = 0; j < n; j++ ) {
 		if ( have[j] ) continue;
-		knl_memset(&v, 0, sizeof(v));
-		v.target = uuids[j];
-		v.left = 8;
-		v.top = low + 8;
-		v.right = 248;
-		v.bottom = v.top + 25;
+		link_new(&v, &uuids[j], low + LINK_GAP);
 		low = v.bottom;
-		v.chsz = 14;
-		v.frcol = 0x000000;
-		v.chcol = 0x000000;
-		v.tbcol = 0xffffff;
-		v.bgcol = 0xffffff;
-		v.height = 25;
-		v.zoom = 100;
-		v.disp = TAD_D_PICT | TAD_D_NAME | TAD_D_FRAME;
 		if ( tad_lnk_add(doc, &v, &id) >= E_OK ) changed++;
 	}
 	Kfree(have);

@@ -15,6 +15,7 @@
   "applist": {},
   "tessronos": {
     "program": {
+      "source": "system",
       "id": "screen-print",
       "kind": "accessory",
       "name": "画面印刷",

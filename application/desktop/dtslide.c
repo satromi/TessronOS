@@ -56,14 +56,12 @@
 #include <ts/mn.h>
 #include <ts/rtad.h>
 #include <ts/sysdef.h>
+#include <ts/time.h>
+#include <ts/slide.h>
 #include "desktop.h"
 
 #define SL_WIN_MAX	4		/* slide shows open at once */
-#define SL_W		1920		/* the screen slides are made for, unless they say */
-#define SL_H		1080
 #define SL_PAD		16		/* round a document on the slide, at life size */
-#define SL_ZOOM_MAX	4		/* times life size */
-#define SL_APP_MAX	8		/* programs a link in a slide may be run with (実行) */
 
 #define KEY_ENTER	0x28
 #define KEY_ESC		0x29
@@ -102,172 +100,26 @@ typedef struct {
 
 LOCAL CONST DTOWN	sl_own;
 LOCAL BOOL	sl_took_msg;		/* the message line was up and the slides took it down */
+#ifdef USE_UITEST
+LOCAL UD	sl_input_at;		/* when the key or press being answered happened, 0 none */
+#endif
 
 /* ---------------------------------------------------------------- what the document says */
 
-/* The words directly or deeper inside an element, put after what out holds */
-LOCAL INT words( CONST T_TADNODE *nd, UB *out, INT n, INT max )
-{
-	CONST T_TADNODE	*c;
-	CONST UB	*t;
-
-	for ( c = nd->first; c != NULL && n < max - 1; c = c->next ) {
-		if ( c->kind == TAD_ND_TEXT && c->text != NULL ) {
-			for ( t = c->text; *t != 0 && n < max - 1; t++ ) out[n++] = *t;
-		} else if ( c->kind == TAD_ND_ELEM ) {
-			n = words(c, out, n, max);
-		}
-	}
-	out[n] = 0;
-	return n;
-}
-
-LOCAL BOOL is_elem( CONST T_TADNODE *nd, CONST char *name )
-{
-	INT	i;
-
-	if ( nd == NULL || nd->kind != TAD_ND_ELEM || nd->name == NULL ) return FALSE;
-	for ( i = 0; name[i] != 0; i++ ) {
-		if ( nd->name[i] != (UB)name[i] ) return FALSE;
-	}
-	return (BOOL)( nd->name[i] == 0 );
-}
-
-/* A number at s[*p_i], and *p_i past it; -1 when there is none */
-LOCAL INT number( CONST UB *s, INT *p_i )
-{
-	INT	i = *p_i, v = 0;
-
-	if ( s[i] < '0' || s[i] > '9' ) return -1;
-	while ( s[i] >= '0' && s[i] <= '9' && v < 100000 ) v = v * 10 + ( s[i++] - '0' );
-	*p_i = i;
-	return v;
-}
-
-/*
- * "%size:W:H", the whole of a paragraph but the spaces round it: the
- * size the slides are made for. W and H may also stand either side of
- * "*", "x", "＊" or "×".
- */
-LOCAL BOOL size_line( CONST UB *s, INT *p_w, INT *p_h )
-{
-	INT	i = 0, w, h;
-
-	while ( s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n' ) i++;
-	if ( s[i] != '%' || s[i + 1] != 's' || s[i + 2] != 'i' || s[i + 3] != 'z' || s[i + 4] != 'e'
-	  || s[i + 5] != ':' ) {
-		return FALSE;
-	}
-	i += 6;
-	w = number(s, &i);
-	if ( w <= 0 ) return FALSE;
-	if ( s[i] == ':' || s[i] == '*' || s[i] == 'x' ) {
-		i++;
-	} else if ( s[i] == 0xEF && s[i + 1] == 0xBC && s[i + 2] == 0x8A ) {
-		i += 3;				/* ＊ */
-	} else if ( s[i] == 0xC3 && s[i + 1] == 0x97 ) {
-		i += 2;				/* × */
-	} else {
-		return FALSE;
-	}
-	h = number(s, &i);
-	if ( h <= 0 ) return FALSE;
-	while ( s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n' ) i++;
-	if ( s[i] != 0 ) return FALSE;
-	*p_w = w;
-	*p_h = h;
-	return TRUE;
-}
-
+/* The rules of the slides are the program's of the slides (application/slide/sl_deck.c) */
 EXPORT INT dt_slide_pages( CONST T_TAD *rec, TS_UUID *ids, INT max, INT *p_w, INT *p_h )
 {
-	CONST T_TADNODE	*nd;
-	T_VOBJ		*v;
-	UB		*s;
-	INT		n, i, k = 0;
-
-	*p_w = SL_W;
-	*p_h = SL_H;
-	if ( rec == NULL ) return 0;
-
-	/* the first paragraph: the size, when it says one */
-	for ( nd = tad_walk(rec, NULL); nd != NULL && !is_elem(nd, "p"); nd = tad_walk(rec, nd) ) ;
-	s = (UB *)Kmalloc(256);
-	if ( nd != NULL && s != NULL ) {
-		(void)words(nd, s, 0, 256);
-		(void)size_line(s, p_w, p_h);
-	}
-	if ( s != NULL ) Kfree(s);
-
-	/* the links, in the order they stand */
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
-	if ( v == NULL ) return 0;
-	n = tad_lnk_count(rec);
-	for ( i = 0; i < n && k < max; i++ ) {
-		if ( tad_lnk_get(rec, i, v) >= E_OK ) ids[k++] = v->target;
-	}
-	Kfree(v);
-	return k;
+	return sl_pages(rec, ids, max, p_w, p_h);
 }
 
-/* Whether a record is shown as slides: it links to some, or it is a program of its own */
 EXPORT BOOL dt_slide_takes( CONST T_TAD *rec )
 {
-	return (BOOL)( rec != NULL && ( tad_lnk_count(rec) > 0 || dtrt_has(rec) ) );
+	return sl_takes(rec);
 }
 
-LOCAL INT gcd( INT a, INT b )
-{
-	while ( b != 0 ) {
-		INT	t = a % b;
-
-		a = b;
-		b = t;
-	}
-	return a;
-}
-
-/*
- * The magnification z / *p_den that makes the slide as large as the
- * window lets it be with its shape kept: the narrower way decides and
- * the slide meets the window's edges that way exactly, so that the
- * margin is only along the other way. Not smaller than an eighth, nor
- * larger than SL_ZOOM_MAX times.
- */
 EXPORT INT dt_slide_fit( INT ww, INT wh, INT tw, INT th, T_DPRECT *out, INT *p_den )
 {
-	INT	z, den, w, h, g;
-
-	if ( tw <= 0 ) tw = SL_W;
-	if ( th <= 0 ) th = SL_H;
-	if ( ww < 0 ) ww = 0;
-	if ( wh < 0 ) wh = 0;
-	/* ww / tw against wh / th, without dividing */
-	if ( (D)ww * th <= (D)wh * tw ) {
-		z = ww;
-		den = tw;
-	} else {
-		z = wh;
-		den = th;
-	}
-	if ( z * 8 < den ) {
-		z = 1;
-		den = 8;
-	} else if ( z > den * SL_ZOOM_MAX ) {
-		z = SL_ZOOM_MAX;
-		den = 1;
-	}
-	g = gcd(z, den);
-	z /= g;
-	den /= g;
-	w = (INT)( (D)tw * z / den );
-	h = (INT)( (D)th * z / den );
-	out->left = ( ww - w ) / 2;
-	out->top = ( wh - h ) / 2;
-	out->right = out->left + w;
-	out->bottom = out->top + h;
-	*p_den = den;
-	return z;
+	return sl_fit(ww, wh, tw, th, out, p_den);
 }
 
 /* ---------------------------------------------------------------- drawing */
@@ -297,40 +149,10 @@ LOCAL void centre( INT gid, INT ww, INT wh, CONST char *s, UW col, INT px )
 	(void)text(gid, ( ww - w ) / 2, wh / 2 + px / 3, s, col, px, FALSE);
 }
 
-/* The part of a record a slide is drawn from, when it is not the body itself (<realtime>) */
-LOCAL CONST T_TADNODE *inner( CONST T_TAD *rec, BOOL *p_fig )
-{
-	CONST T_TADNODE	*b = tad_body(rec), *c;
-
-	for ( c = ( b != NULL ) ? b->first : NULL; c != NULL; c = c->next ) {
-		if ( is_elem(c, "figure") || is_elem(c, "document") ) {
-			*p_fig = is_elem(c, "figure");
-			return c;
-		}
-	}
-	return NULL;
-}
-
 /* A slide's model: its document or its figure */
 LOCAL BOOL page_model( T_TAD *rec, T_TVDOC **p_d, T_TVFIG **p_f )
 {
-	CONST T_TADNODE	*nd;
-	UINT		kind;
-	BOOL		fig = FALSE;
-
-	*p_d = NULL;
-	*p_f = NULL;
-	if ( rec == NULL ) return FALSE;
-	kind = tv_kind(rec);
-	if ( kind == TV_KIND_DOC ) {
-		(void)tv_doc(rec, p_d);
-	} else if ( kind == TV_KIND_FIG ) {
-		(void)tv_fig(rec, p_f);
-	} else if ( ( nd = inner(rec, &fig) ) != NULL ) {
-		if ( fig ) (void)tv_fig_of(nd, p_f);
-		else (void)tv_doc_of(nd, p_d);
-	}
-	return (BOOL)( *p_d != NULL || *p_f != NULL );
+	return sl_model(rec, p_d, p_f);
 }
 
 /* One slide drawn into area, magnified z / den; FALSE when there was nothing to draw */
@@ -354,9 +176,9 @@ LOCAL BOOL draw_page( INT gid, CONST TS_UUID *page, CONST T_DPRECT *area, INT z,
 		r.left += pad;
 		r.top += pad;
 		r.right -= pad;
-		tv_doc_zoom_by(z, den);
+		d->zoom = z;
+		d->zoom_den = den;
 		(void)tv_doc_draw(gid, d, &r, 0, rec, paper);
-		tv_doc_zoom(8);
 		tv_doc_free(d);
 	}
 	om_store_self(NULL);
@@ -390,9 +212,9 @@ LOCAL BOOL link_at( SLIDE *s, INT x, INT y, T_VOBJ *v )
 		r.left += pad;
 		r.top += pad;
 		r.right -= pad;
-		tv_doc_zoom_by(z, den);
+		d->zoom = z;
+		d->zoom_den = den;
 		er = tv_doc_at(d, &r, 0, rec, x, y, v, NULL, NULL);
-		tv_doc_zoom(8);
 		tv_doc_free(d);
 	}
 	return (BOOL)( er >= E_OK );
@@ -426,8 +248,14 @@ LOCAL void sl_draw( SLIDE *s )
 	UB		name[TAD_NAME_MAX];
 	char		msg[TAD_NAME_MAX + 64];
 	T_TAD		*rec;
+#ifdef USE_UITEST
+	UD		t0 = 0;
+#endif
 
 	if ( gid < 0 || wm_ref(s->wid, &w) < E_OK ) return;
+#ifdef USE_UITEST
+	(void)ts_get_mono(&t0);
+#endif
 	ww = w.work.right - w.work.left;
 	wh = w.work.bottom - w.work.top;
 	all.left = all.top = 0;
@@ -495,6 +323,20 @@ LOCAL void sl_draw( SLIDE *s )
 		  area.left, area.top, area.right - area.left, area.bottom - area.top,
 		  ( s->rt != NULL ) ? " playing" : "");
 	wm_update();
+#ifdef USE_UITEST
+	/* how long the page took to be drawn and shown, for comparing with the slide of a process */
+	{
+		UD	t1 = 0;
+
+		(void)ts_get_mono(&t1);
+		tm_printf((UB *)"slide: drew %d in %d us\n", s->cur + 1, (INT)( ( t1 - t0 ) / 1000 ));
+		if ( sl_input_at != 0 ) {
+			/* from the key or the press, as the keyboard or the pointer told it, to the page shown */
+			tm_printf((UB *)"slide: input to screen %d us\n", (INT)( ( t1 - sl_input_at ) / 1000 ));
+			sl_input_at = 0;
+		}
+	}
+#endif
 }
 
 /* ---------------------------------------------------------------- the windows */
@@ -786,6 +628,10 @@ LOCAL BOOL sl_input( DTWIN *d, CONST T_WMEV *ev )
 	BOOL	ctrl = (BOOL)( ( ev->mods & MOD_CTRL ) != 0 );
 
 	if ( s == NULL ) return FALSE;
+#ifdef USE_UITEST
+	sl_input_at = ( ev->type == HID_EV_KEY_DOWN || ( ev->type == HID_EV_BTN_DOWN && ev->code == 0 ) )
+		      ? ev->when : 0;
+#endif
 	switch ( ev->type ) {
 	case HID_EV_BTN_DOWN:
 		if ( ev->code == 0 ) {

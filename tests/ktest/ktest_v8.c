@@ -283,7 +283,7 @@ LOCAL void test_skia( void )
 #define BRREADY		"/boot/BROWSER.RDY"
 #define BRTITLE		"/boot/BRTITLE.TXT"	/* the page's title, written by the browser as it ends */
 #define LOOPBACK	0x7f000001UL
-#define SEEN_MAX	12
+#define SEEN_MAX	64
 #define BIG_ROWS	3000		/* rows of the large page of test_blink_mem */
 
 LOCAL volatile INT	srv_sock = -1;
@@ -419,6 +419,7 @@ LOCAL CONST struct {
 LOCAL UB	big_row[BIG_W * 3];
 
 LOCAL void srv_put( INT s, CONST char *t );
+LOCAL volatile BOOL	srv_stop_slow;
 LOCAL void srv_num( char *b, UW v, INT base );
 
 LOCAL void put_le( UB *p, UW v, INT n )
@@ -4694,6 +4695,68 @@ LOCAL CONST char page_serial[] =
 	"</script></body></html>";
 
 /*
+ * The page of test_blink_caret: a field and a text area at known places;
+ * a press on the field leaves its caret at its end, and every key let up
+ * says in the title what the two hold and where their carets are.
+ */
+LOCAL CONST char page_caret[] =
+	"<!doctype html><title>caret</title><body style='margin:0'>"
+	"<input id=i value=abcd style='position:absolute;left:10px;top:10px;width:300px;height:30px'>"
+	"<textarea id=t style='position:absolute;left:10px;top:60px;width:300px;height:80px'>one\ntwo</textarea>"
+	"<script>var i = document.getElementById('i'), t = document.getElementById('t');"
+	"i.onmouseup = function () { setTimeout(function () { i.setSelectionRange(4, 4); }, 0); };"
+	"t.onfocus = function () { setTimeout(function () { t.setSelectionRange(0, 0); say(); }, 0); };"
+	"function say() { document.title = 'i=' + i.value + ':' + i.selectionStart + '-' + i.selectionEnd"
+	" + ' t=' + t.value.replace('\\n', '/') + ':' + t.selectionStart + ' keys=' + n; }"
+	"var n = 0; addEventListener('keyup', function () { n++; say(); });"
+	"</script>";
+
+/*
+ * The pages of the tests of what the browser keeps for the user: "/clr"
+ * leaves something of every kind, "/clrchk" says in its title what is
+ * there; "/hi1" and "/hi2" are pages to have visited; "/dlgo" downloads
+ * "/dlslow", which comes slowly; "/dlok" downloads "/dlfile"; "/aff" is a
+ * form with an address's and "/cff" a card's fields.
+ */
+LOCAL CONST char page_clr[] =
+	"<!doctype html><title>clr</title><script>(async function () {"
+	" document.cookie = 'cl=1; max-age=3600; path=/'; localStorage.setItem('cl', '1');"
+	" await new Promise(function (ok) { var o = indexedDB.open('cl', 1);"
+	"  o.onupgradeneeded = function () { o.result.createObjectStore('s'); };"
+	"  o.onsuccess = function () { o.result.close(); ok(); }; o.onerror = ok; });"
+	" var c = await caches.open('cl'); await c.put('/clr', new Response('x'));"
+	" await navigator.serviceWorker.register('/sw.js');"
+	" var d = await navigator.storage.getDirectory(); await d.getFileHandle('cl', { create: true });"
+	" document.title = 'set done'; })();</script>";
+LOCAL CONST char page_clrchk[] =
+	"<!doctype html><title>chk</title><script>(async function () {"
+	" var r = 'c=' + ( document.cookie.indexOf('cl=1') >= 0 ? 1 : 0 ) + ' l=' + ( localStorage.getItem('cl') ? 1 : 0 );"
+	" r += ' i=' + (await indexedDB.databases()).filter(function (x) { return x.name == 'cl'; }).length;"
+	" r += ' k=' + (await caches.keys()).length;"
+	" r += ' w=' + (await navigator.serviceWorker.getRegistrations()).length;"
+	" var d = await navigator.storage.getDirectory(), n = 0; for await (var e of d.keys()) n++;"
+	" r += ' f=' + n; document.title = 'chk ' + r; })();</script>";
+LOCAL CONST char page_hi[] = "<!doctype html><title>visited page</title>";
+LOCAL CONST char page_dlgo[] =
+	"<!doctype html><title>dl</title><a id=a href='/dlslow' download='slow.bin'>x</a>"
+	"<script>document.getElementById('a').click();</script>";
+LOCAL CONST char page_dlok[] =
+	"<!doctype html><title>dl</title><a id=a href='/dlfile' download='done.txt'>x</a>"
+	"<script>document.getElementById('a').click();</script>";
+LOCAL CONST char page_aff[] =
+	"<!doctype html><title>aff</title><body style='margin:0'><form>"
+	"<input id=n autocomplete=name style='position:absolute;left:10px;top:10px;width:300px;height:30px'>"
+	"<input id=z autocomplete=postal-code style='position:absolute;left:10px;top:60px'>"
+	"<input id=e name=email style='position:absolute;left:10px;top:100px'></form><script>"
+	"setInterval(function () { document.title = 'af n=' + n.value + ' z=' + z.value + ' e=' + e.value; }, 200);</script>";
+LOCAL CONST char page_cff[] =
+	"<!doctype html><title>cff</title><body style='margin:0'><form>"
+	"<input id=c autocomplete=cc-number style='position:absolute;left:10px;top:10px;width:300px;height:30px'>"
+	"<input id=m autocomplete=cc-exp-month style='position:absolute;left:10px;top:60px'>"
+	"<input id=y autocomplete=cc-exp-year style='position:absolute;left:10px;top:100px'></form><script>"
+	"setInterval(function () { document.title = 'cf c=' + c.value + ' m=' + m.value + ' y=' + y.value; }, 200);</script>";
+
+/*
  * The page of test_blink_cookie: cookieStore beside document.cookie -- a
  * cookie set by document.cookie read with get(), one set with set() seen
  * in document.cookie, the change event of a set, and a delete. The
@@ -4759,6 +4822,220 @@ LOCAL CONST char page_rtc[] =
 	"run();"
 	"</script></body></html>";
 
+
+/*
+ * The page of test_blink_share. Each click on the button is one request of
+ * getDisplayMedia, answered on the panel by the test: refused; a window,
+ * whose picture and name are read and whose closing ends the track; the
+ * browser's own window with its sound, an oscillator being played.
+ */
+LOCAL CONST char page_share[] =
+	"<!DOCTYPE html><html><head><title>share</title></head><body style=\"margin:0;background:#00a000\">"
+	"<button id=\"b\" style=\"position:absolute;left:0;top:0;width:300px;height:100px\">go</button>"
+	"<script>var r = [], n = 0;"
+	"function done() { document.title = 'share ' + r.join(' ') + ' end'; }"
+	"function wait(ms) { return new Promise(function (ok) { setTimeout(ok, ms); }); }"
+	"async function look(st, tag) { var t = st.getVideoTracks()[0], set = t.getSettings();"
+	" var rd = new MediaStreamTrackProcessor({ track: t }).readable.getReader();"
+	" var f = (await rd.read()).value, w = f.displayWidth, h = f.displayHeight;"
+	" var c = new OffscreenCanvas(w, h), x = c.getContext('2d'); x.drawImage(f, 0, 0);"
+	" var p = x.getImageData(w >> 1, h >> 1, 1, 1).data; f.close(); rd.releaseLock();"
+	" r.push(tag + '=' + set.displaySurface + ',' + w + 'x' + h + ',audio' + st.getAudioTracks().length);"
+	" r.push(tag + 'label=' + t.label.replace(/ /g, '_')); r.push(tag + 'rgb=' + p[0] + ',' + p[1] + ',' + p[2]);"
+	" r.push(tag + 'red=' + (p[0] > 150 && p[1] < 90 && p[2] < 120)); return t; }"
+	"document.getElementById('b').onclick = async function () { n++; try {"
+	" if (n === 1) { try { await navigator.mediaDevices.getDisplayMedia({ video: true }); r.push('cancel=none'); }"
+	"  catch (e) { r.push('cancel=' + e.name); } return; }"
+	" if (n === 2) { var st = await navigator.mediaDevices.getDisplayMedia({ video: true, selfBrowserSurface: 'exclude' });"
+	"  var t = await look(st, 'win');"
+	"  var ended = new Promise(function (ok) { t.onended = function () { ok(true); }; setTimeout(function () { ok(false); }, 9000); });"
+	"  r.push('ended=' + await ended); return; }"
+	" var ac = new AudioContext(), o = ac.createOscillator(), g = ac.createGain(); g.gain.value = 0.5;"
+	" o.frequency.value = 440; o.connect(g); g.connect(ac.destination); o.start(); await ac.resume();"
+	" var st = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true, selfBrowserSurface: 'include' });"
+	" var t = await look(st, 'self'); var at = st.getAudioTracks()[0];"
+	" if (at) { var an = ac.createAnalyser(), z = ac.createGain(); z.gain.value = 0;"
+	"  ac.createMediaStreamSource(new MediaStream([at])).connect(an); an.connect(z); z.connect(ac.destination);"
+	"  var b = new Float32Array(2048), top = 0, i, k;"
+	"  for (k = 0; k < 40; k++) { await wait(100); an.getFloatTimeDomainData(b);"
+	"   for (i = 0; i < b.length; i++) top = Math.max(top, Math.abs(b[i])); }"
+	"  r.push('level=' + (top > 0.05 ? 'some' : 'none') + ',' + top.toFixed(3)); }"
+	" st.getTracks().forEach(function (q) { q.stop(); }); o.stop();"
+	" } catch (e) { r.push('err' + n + '=' + e.name + ':' + e.message.replace(/ /g, '_')); } if (n >= 3) done(); };"
+	"</script></body></html>";
+
+/*
+ * The page of test_blink_ext: what extensions made of it shows. Their
+ * content scripts write their findings in elements; a blocked image, a
+ * redirected fetch and a file the extension gives pages are the page's
+ * own to see, and so are what the rules did to documents, WebSockets and
+ * headers.
+ */
+LOCAL CONST char page_ext[] =
+	"<!DOCTYPE html><html><head><title>ext</title></head><body><p id=\"cssme\">x</p><script>var pagevar = 1, r = [];"
+	"function wait(ms) { return new Promise(function (ok) { setTimeout(ok, ms); }); }"
+	"function img(u) { var im = new Image(); var p = new Promise(function (ok) { im.onload = function () { ok('loaded'); }; im.onerror = function () { ok('blocked'); }; }); im.src = u; return p; }"
+	"function ws(p) { return new Promise(function (ok) { var w; try { w = new WebSocket('ws://' + location.host + p); } catch (e) { ok('throw'); return; }"
+	" w.onopen = function () { ok('open'); w.close(); }; w.onerror = function () { ok('failed'); }; setTimeout(function () { ok('none'); }, 8000); }); }"
+	"function frame(u) { return new Promise(function (ok) { var f = document.createElement('iframe'); f.src = u;"
+	" f.onload = function () { var t = 'empty'; try { var d = f.contentDocument, x = d && d.getElementById('x'); t = x ? x.textContent : 'nodoc'; } catch (e) { t = 'noaccess'; } ok(t); };"
+	" document.body.appendChild(f); setTimeout(function () { ok('none'); }, 8000); }); }"
+	"async function run() {"
+	" r.push('mainchrome=' + (window.chrome && chrome.storage ? 'has' : 'none'));"
+	" r.push('ad=' + await img('/ad.png'));"
+	" try { r.push('rd=' + await (await fetch('/rd.txt')).text()); } catch (e) { r.push('rd=' + e.name); }"
+	" try { var m = await fetch('/moved.txt'); r.push('mv=' + m.redirected + ',' + m.url.split('/').pop() + ',' + await m.text()); } catch (e) { r.push('mv=' + e.name); }"
+	" try { var h = await fetch('/hdr'); r.push('hdr=' + await h.text() + ',' + h.headers.get('X-Kt-Resp') + ',' + h.headers.get('X-Drop')); } catch (e) { r.push('hdr=' + e.name); }"
+	" try { var h2 = await fetch('/hdr2'); r.push('limhdr=' + await h2.text()); } catch (e) { r.push('limhdr=' + e.name); }"
+	" r.push('re=' + await img('/re12.png'));"
+	" r.push('dyn=' + await img('/dyn.png'));"
+	" r.push('limb=' + await img('/limb.png'));"
+	" try { r.push('limr=' + await (await fetch('/limr.txt')).text()); } catch (e) { r.push('limr=' + e.name); }"
+	" r.push('wsb=' + await ws('/wsb'));"
+	" r.push('wsr=' + await ws('/wsr'));"
+	" r.push('fb=' + await frame('/fb.html'));"
+	" r.push('fr=' + await frame('/fr.html'));"
+	" for (var i = 0; i < 200 && !(document.getElementById('ext') && document.getElementById('lim')); i++) await wait(100);"
+	" var d = document.getElementById('ext'), l = document.getElementById('lim');"
+	" r.push(d ? d.textContent : 'content=none');"
+	" r.push(l ? l.textContent : 'lim=none');"
+	" r.push('css=' + getComputedStyle(document.getElementById('cssme')).color.replace(/ /g, ''));"
+	" r.push('inj=' + document.documentElement.dataset.inj);"
+	" document.title = 'ext ' + r.join(' ') + ' end'; }"
+	"run();"
+	"</script></body></html>";
+
+/* A file of test_blink_ext's extensions; 'comp' its bytes as raw deflate, 'text' what they come to */
+typedef struct {
+	CONST char	*name, *text;
+	CONST UB	*comp;
+	UW		compn;
+} EXT_FILE;
+
+#define EXT_BIG_LEN	840
+#define EXT_BIG_LENS	"840"
+/* ("deflate-check " 60 times, by zlib) */
+LOCAL CONST UB ext_big[] = { 0x4b, 0x49, 0x4d, 0xcb, 0x49, 0x2c, 0x49, 0xd5, 0x4d, 0xce, 0x48, 0x4d, 0xce, 0x56, 0x48, 0x19, 0xe5, 0x8d, 0xf2, 0x46, 0x79, 0x64, 0xf0, 0x00 };
+
+/* The extension of test_blink_ext that may do things, a ZIP with one file really compressed */
+LOCAL CONST EXT_FILE ext_files[] = {
+	{ "manifest.json",
+	  "{\"manifest_version\":3,\"name\":\"__MSG_nm__\",\"version\":\"1.2\",\"default_locale\":\"en\","
+	  "\"permissions\":[\"storage\",\"declarativeNetRequest\",\"scripting\",\"alarms\",\"contextMenus\",\"webRequest\",\"tabs\"],"
+	  "\"host_permissions\":[\"http://127.0.0.1/*\"],"
+	  "\"action\":{\"default_title\":\"ktbutton\"},"
+	  "\"content_scripts\":[{\"matches\":[\"http://127.0.0.1/extp\"],\"js\":[\"c.js\"],\"run_at\":\"document_end\"}],"
+	  "\"background\":{\"service_worker\":\"/w.js\"},"
+	  "\"web_accessible_resources\":[{\"resources\":[\"/pub.txt\",\"big.txt\"],\"matches\":[\"<all_urls>\"]}],"
+	  "\"declarative_net_request\":{\"rule_resources\":[{\"id\":\"r\",\"enabled\":true,\"path\":\"/r.json\"},{\"id\":\"off\",\"enabled\":false,\"path\":\"off.json\"}]}}", NULL, 0 },
+	{ "_locales/en/messages.json", "{\"nm\":{\"message\":\"english\"},\"hi\":{\"message\":\"en\"},\"only\":{\"message\":\"onlyen\"}}", NULL, 0 },
+	{ "_locales/ja/messages.json",
+	  "{\"nm\":{\"message\":\"ktext\"},\"hi\":{\"message\":\"hi$WHO$\",\"placeholders\":{\"who\":{\"content\":\"$1\"}}}}", NULL, 0 },
+	{ "off.json", "[{\"id\":1,\"action\":{\"type\":\"block\"},\"condition\":{\"urlFilter\":\"/never\"}}]", NULL, 0 },
+	{ "r.json",
+	  "[{\"id\":1,\"action\":{\"type\":\"block\"},\"condition\":{\"urlFilter\":\"||127.0.0.1^*ad.png\",\"resourceTypes\":[\"image\"]}},"
+	  "{\"id\":2,\"action\":{\"type\":\"redirect\",\"redirect\":{\"extensionPath\":\"/pub.txt\"}},\"condition\":{\"urlFilter\":\"/rd.txt\"}},"
+	  "{\"id\":3,\"action\":{\"type\":\"redirect\",\"redirect\":{\"regexSubstitution\":\"/target.txt\"}},\"condition\":{\"regexFilter\":\"/moved\\\\.txt$\"}},"
+	  "{\"id\":4,\"action\":{\"type\":\"block\"},\"condition\":{\"urlFilter\":\"/fb.html\",\"resourceTypes\":[\"sub_frame\"]}},"
+	  "{\"id\":5,\"action\":{\"type\":\"redirect\",\"redirect\":{\"transform\":{\"path\":\"/frt.html\"}}},\"condition\":{\"urlFilter\":\"/fr.html\",\"resourceTypes\":[\"sub_frame\"]}},"
+	  "{\"id\":6,\"action\":{\"type\":\"block\"},\"condition\":{\"urlFilter\":\"/mb.html\",\"resourceTypes\":[\"main_frame\"]}},"
+	  "{\"id\":7,\"action\":{\"type\":\"redirect\",\"redirect\":{\"url\":\"http://127.0.0.1:18180/mt.html\"}},\"condition\":{\"urlFilter\":\"/mr.html\",\"resourceTypes\":[\"main_frame\"]}},"
+	  "{\"id\":8,\"action\":{\"type\":\"block\"},\"condition\":{\"urlFilter\":\"/wsb\",\"resourceTypes\":[\"websocket\"]}},"
+	  "{\"id\":9,\"action\":{\"type\":\"redirect\",\"redirect\":{\"url\":\"ws://127.0.0.1:18180/ws\"}},\"condition\":{\"urlFilter\":\"/wsr\",\"resourceTypes\":[\"websocket\"]}},"
+	  "{\"id\":10,\"action\":{\"type\":\"block\"},\"condition\":{\"regexFilter\":\"/re[0-9]+\\\\.png$\",\"resourceTypes\":[\"image\"]}},"
+	  "{\"id\":11,\"action\":{\"type\":\"modifyHeaders\",\"requestHeaders\":[{\"header\":\"X-Kt\",\"operation\":\"set\",\"value\":\"hello\"}],"
+	  "\"responseHeaders\":[{\"header\":\"X-Kt-Resp\",\"operation\":\"set\",\"value\":\"yes\"},{\"header\":\"X-Drop\",\"operation\":\"remove\"}]},\"condition\":{\"urlFilter\":\"/hdr|\"}}]" , NULL, 0 },
+	{ "pub.txt", "pubfile", NULL, 0 },
+	{ "big.txt", NULL, ext_big, sizeof(ext_big) },
+	{ "pop.html", "<!DOCTYPE html><html><body><script src=\"pop.js\"></script></body></html>", NULL, 0 },
+	{ "pop.js",
+	  "chrome.runtime.sendMessage({ fromPage: 1 }).then(function (a) { fetch('http://127.0.0.1:18180/popseen' + a.ok); });" },
+	{ "w.js",
+	  "var seen = [], alarmed = 'none', fromPage = 0;"
+	  "function wait(ms) { return new Promise(function (ok) { setTimeout(ok, ms); }); }"
+	  "chrome.webRequest.onBeforeRequest.addListener(function (d) { seen.push(d.type + ':' + new URL(d.url).pathname); }, { urls: ['<all_urls>'] });"
+	  "chrome.alarms.onAlarm.addListener(function (a) { alarmed = a.name; });"
+	  "chrome.action.onClicked.addListener(function () { fetch('http://127.0.0.1:18180/actclick'); });"
+	  "chrome.contextMenus.onClicked.addListener(function (i) { fetch('http://127.0.0.1:18180/menuclick' + i.menuItemId); });"
+	  "chrome.contextMenus.create({ id: 'm1', title: 'ktmenu', contexts: ['page'] });"
+	  "chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [50], addRules: [{ id: 50, action: { type: 'block' }, condition: { urlFilter: '/dyn.png' } }] });"
+	  "async function apis() { var r = [];"
+	  " r.push('i18n=' + chrome.i18n.getMessage('hi', ['X']) + ',' + chrome.i18n.getMessage('only'));"
+	  " await chrome.alarms.create('al', { when: Date.now() + 300 }); await wait(1000); r.push('alarm=' + alarmed);"
+	  " var t = (await chrome.tabs.query({}))[0]; r.push('taburl=' + (t.url || '').split('/').pop());"
+	  " var x = await chrome.scripting.executeScript({ target: { tabId: t.id }, func: function (a) { document.documentElement.dataset.inj = '' + a; return a + 1; }, args: [41] }); r.push('exec=' + x[0].result);"
+	  " x = await chrome.scripting.executeScript({ target: { tabId: t.id }, func: function () { return Promise.resolve('pr'); } }); r.push('execp=' + x[0].result);"
+	  " x = await chrome.scripting.executeScript({ target: { tabId: t.id }, world: 'MAIN', func: function () { return typeof pagevar; } }); r.push('execm=' + x[0].result);"
+	  " await chrome.scripting.insertCSS({ target: { tabId: t.id }, css: '#cssme { color: rgb(1, 2, 3) }' });"
+	  " var s = await chrome.tabs.sendMessage(t.id, { q: 1 }); r.push('tabmsg=' + s.a);"
+	  " try { chrome.webRequest.onCompleted.addListener(function () {}, { urls: ['<all_urls>'] }, ['blocking']); r.push('blocking=taken'); } catch (e) { r.push('blocking=refused'); }"
+	  " await wait(300); r.push('web=' + (seen.indexOf('xmlhttprequest:/webseen') >= 0));"
+	  " r.push('dynlist=' + (await chrome.declarativeNetRequest.getDynamicRules()).length);"
+	  " try { await chrome.declarativeNetRequest.updateDynamicRules({ addRules: [{ id: 99, action: { type: 'nosuch' }, condition: {} }] }); r.push('badrule=taken'); } catch (e) { r.push('badrule=refused'); }"
+	  " await chrome.declarativeNetRequest.updateEnabledRulesets({ enableRulesetIds: ['off'], disableRulesetIds: [] });"
+	  " r.push('sets=' + (await chrome.declarativeNetRequest.getEnabledRulesets()).length);"
+	  " await chrome.declarativeNetRequest.updateEnabledRulesets({ disableRulesetIds: ['off'] });"
+	  " await chrome.action.setBadgeText({ text: '3' }); r.push('badge=' + await chrome.action.getBadgeText({}));"
+	  " r.push('cors=' + await fetch('http://127.0.0.1:18180/nocors').then(function (a) { return a.text(); }, function (e) { return e.name; }));"
+	  " await chrome.tabs.create({ url: 'http://127.0.0.1:18180/tabc' });"
+	  " await chrome.tabs.create({ url: 'pop.html' });"
+	  " return r.join(' '); }"
+	  "chrome.runtime.onMessage.addListener(function (m, s, send) {"
+	  " if (m.apis) { apis().then(function (t) { send({ t: t }); }, function (e) { send({ t: 'apis=' + e.message.replace(/ /g, '_') }); }); return true; }"
+	  " if (m.fromPage) { fromPage = 1; send({ ok: 1 }); return; }"
+	  " chrome.tabs.query({}).then(function (t) { send({ pong: m.ping + 1, tab: t.length, seen: s.tab ? s.tab.id : 0 }); }); return true; });"
+	  "chrome.runtime.onInstalled.addListener(function () { chrome.storage.local.set({ inst: 7 }); });" },
+	{ "c.js",
+	  "chrome.runtime.onMessage.addListener(function (m, s, send) { if (m.q) send({ a: 'fromtab' }); });"
+	  "(async function () { var r = []; r.push('iso=' + typeof pagevar);"
+	  " r.push('old=' + (await chrome.storage.local.get('a')).a);"
+	  " await chrome.storage.local.set({ a: 5 }); r.push('st=' + (await chrome.storage.local.get('a')).a);"
+	  " try { var p = await chrome.runtime.sendMessage({ ping: 1 }); r.push('bg=' + p.pong + ',' + p.tab + ',' + p.seen); } catch (e) { r.push('bg=' + e.message.replace(/ /g, '_')); }"
+	  " r.push('inst=' + (await chrome.storage.local.get('inst')).inst);"
+	  " r.push('mf=' + chrome.runtime.getManifest().name);"
+	  " r.push('ctabs=' + typeof chrome.tabs + ',' + typeof chrome.alarms);"
+	  " try { var b = await fetch(chrome.runtime.getURL('big.txt')); var bt = await b.text(); r.push('big=' + bt.length + ',' + bt.substring(0, 7)); } catch (e) { r.push('big=' + e.name); }"
+	  " fetch('/webseen');"
+	  " try { var a = await chrome.runtime.sendMessage({ apis: 1 }); r.push(a.t); } catch (e) { r.push('apis=' + e.message.replace(/ /g, '_')); }"
+	  " var d = document.createElement('div'); d.id = 'ext'; d.textContent = r.join(' ');"
+	  " document.documentElement.appendChild(d); })();" },
+};
+
+/*
+ * The extension that declares little, a CRX. A block needs only its
+ * permission; a redirect and modifyHeaders need the host, which it does not
+ * have; the names it did not declare are not there, and asked for all the
+ * same they are refused.
+ */
+LOCAL CONST EXT_FILE lim_files[] = {
+	{ "manifest.json",
+	  "{\"manifest_version\":3,\"name\":\"ktlim\",\"version\":\"0.9\","
+	  "\"permissions\":[\"declarativeNetRequest\",\"scripting\",\"nosuchthing\"],"
+	  "\"content_scripts\":[{\"matches\":[\"http://127.0.0.1/extp\"],\"js\":[\"c.js\"]}],"
+	  "\"background\":{\"service_worker\":\"w.js\",\"type\":\"module\"},"
+	  "\"declarative_net_request\":{\"rule_resources\":[{\"id\":\"l\",\"enabled\":true,\"path\":\"l.json\"}]}}", NULL, 0 },
+	{ "l.json",
+	  "[{\"id\":1,\"action\":{\"type\":\"block\"},\"condition\":{\"urlFilter\":\"/limb.png\"}},"
+	  "{\"id\":2,\"action\":{\"type\":\"redirect\",\"redirect\":{\"url\":\"http://127.0.0.1:18180/target.txt\"}},\"condition\":{\"urlFilter\":\"/limr.txt\"}},"
+	  "{\"id\":3,\"action\":{\"type\":\"modifyHeaders\",\"requestHeaders\":[{\"header\":\"X-Kt\",\"operation\":\"set\",\"value\":\"lim\"}]},\"condition\":{\"urlFilter\":\"/hdr2\"}}]", NULL, 0 },
+	{ "m.js", "export const part = 'mod';", NULL, 0 },
+	{ "w.js",
+	  "import { part } from './m.js';"
+	  "chrome.runtime.onMessage.addListener(function (m, s, send) { (async function () { var r = [];"
+	  " r.push('limmod=' + part);"
+	  " r.push('limapi=' + typeof chrome.alarms + ',' + typeof chrome.contextMenus + ',' + typeof chrome.webRequest + ',' + typeof chrome.storage);"
+	  " var t = (await chrome.tabs.query({}))[0]; r.push('limurl=' + typeof t.url);"
+	  " try { await chrome.scripting.executeScript({ target: { tabId: t.id }, func: function () {} }); r.push('limexec=ran'); } catch (e) { r.push('limexec=refused'); }"
+	  " var o = await (await fetch('/__brext/alarms.getAll', { method: 'POST' })).text(); r.push('limnative=' + (o.indexOf('__err') >= 0 ? 'refused' : 'ran'));"
+	  " r.push('limcors=' + await fetch('http://127.0.0.1:18180/nocors').then(function (a) { return a.text(); }, function (e) { return e.name; }));"
+	  " send({ t: r.join(' ') }); })(); return true; });" },
+	{ "c.js",
+	  "fetch('/limonce');"
+	  "(async function () { var r = ['limstore=' + typeof chrome.storage];"
+	  " try { var a = await chrome.runtime.sendMessage({ go: 1 }); r.push(a.t); } catch (e) { r.push('limbg=' + e.message.replace(/ /g, '_')); }"
+	  " var d = document.createElement('div'); d.id = 'lim'; d.textContent = r.join(' ');"
+	  " document.documentElement.appendChild(d); })();" },
+};
 
 /*
  * The page of test_blink_meet: what a video meeting's page in a browser
@@ -8819,12 +9096,195 @@ LOCAL void srv_one( INT s )
 		srv_put(s, num);
 		srv_put(s, "\r\nConnection: close\r\n\r\n");
 		srv_put(s, page_serial);
+	} else if ( knl_strcmp(path, "/clr") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_clr), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_clr);
+	} else if ( knl_strcmp(path, "/clrchk") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_clrchk), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_clrchk);
+	} else if ( knl_strcmp(path, "/hi1") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_hi), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_hi);
+	} else if ( knl_strcmp(path, "/hi2") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_hi), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_hi);
+	} else if ( knl_strcmp(path, "/dlgo") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_dlgo), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_dlgo);
+	} else if ( knl_strcmp(path, "/dlok") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_dlok), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_dlok);
+	} else if ( knl_strcmp(path, "/aff") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_aff), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_aff);
+	} else if ( knl_strcmp(path, "/cff") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_cff), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_cff);
+	} else if ( knl_strcmp(path, "/dlfile") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+	} else if ( knl_strcmp(path, "/dlslow") == 0 ) {
+		/* half a megabyte in pieces, for a minute: long enough to be seen going and stopped */
+		INT	k;
+
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 512000\r\nConnection: close\r\n\r\n");
+		for ( k = 0; k < 120 && !srv_stop_slow; k++ ) {
+			static char	piece[4267];
+
+			knl_memset(piece, 'd', sizeof(piece) - 1);
+			srv_put(s, piece);
+			tk_dly_tsk(500);
+		}
+	} else if ( knl_strcmp(path, "/caret") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_caret), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_caret);
 	} else if ( knl_strcmp(path, "/ck") == 0 ) {
 		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
 		srv_num(num, knl_strlen(page_cookie), 10);
 		srv_put(s, num);
 		srv_put(s, "\r\nConnection: close\r\n\r\n");
 		srv_put(s, page_cookie);
+	} else if ( knl_strcmp(path, "/target.txt") == 0 || knl_strcmp(path, "/limr.txt") == 0 ) {
+		/* test_blink_ext: where a rule's redirect leads, and what no rule changes */
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\nConnection: close\r\n\r\n");
+		srv_put(s, path[1] == 't' ? "tgt" : "lim");
+	} else if ( knl_strcmp(path, "/nocors") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nopen");
+	} else if ( knl_strcmp(path, "/hdr") == 0 || knl_strcmp(path, "/hdr2") == 0 ) {
+		/* what came of the rule's header, and one for it to take away */
+		BOOL hello = find_text(req, n, "X-Kt: hello") >= 0, lim = find_text(req, n, "X-Kt: lim") >= 0;
+
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Drop: 1\r\nAccess-Control-Expose-Headers: *\r\nContent-Length: 5\r\nConnection: close\r\n\r\n");
+		srv_put(s, hello ? "hello" : lim ? "lim  " : "none ");
+	} else if ( knl_strcmp(path, "/frt.html") == 0 || knl_strcmp(path, "/fb.html") == 0 || knl_strcmp(path, "/fr.html") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 21\r\nConnection: close\r\n\r\n<p id=\"x\">frt</p>\n\n\n\n");
+	} else if ( knl_strcmp(path, "/mt.html") == 0 || knl_strcmp(path, "/mr.html") == 0 || knl_strcmp(path, "/mb.html") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 18\r\nConnection: close\r\n\r\n<title>mt</title>\n");
+	} else if ( knl_strcmp(path, "/sko") == 0 || knl_strcmp(path, "/skr") == 0 ) {
+		/* test_blink_storebusy: a cookie for an hour; one more, and what the page has */
+		CONST char *body = path[3] == 'o'
+			? "<!DOCTYPE html><title>o</title><script>document.cookie='zz=old; max-age=3600';</script>\n"
+			: "<!DOCTYPE html><title>r</title><script>document.title='ck '+document.cookie;document.cookie='yy=new; max-age=3600';</script>\n";
+
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ");
+		srv_num(num, knl_strlen(body), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, body);
+	} else if ( knl_strcmp(path, "/cka") == 0 || knl_strcmp(path, "/ckb") == 0 || knl_strcmp(path, "/ckc") == 0 ) {
+		/*
+		 * test_blink_cookieshare: "/cka" changes a cookie every second, as an
+		 * open page of a site does; "/ckb" is the sign-in, a long-lived
+		 * cookie and a session cookie in its response; "/ckc" says what it has
+		 */
+		CONST char *body = path[3] == 'a'
+			? "<!DOCTYPE html><title>a</title><script>let n=0;setInterval(()=>{document.cookie='tick='+(++n)+'; max-age=3600';document.title='a '+document.cookie},1000);</script>\n"
+			: path[3] == 'b' ? "<!DOCTYPE html><title>b</title>\n"
+			: "<!DOCTYPE html><title>c</title><script>document.title='c '+document.cookie;</script>\n";
+
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n");
+		if ( path[3] == 'b' ) {
+			srv_put(s, "Set-Cookie: SID=login; Max-Age=86400; Path=/; HttpOnly\r\n"
+				   "Set-Cookie: SIDJS=login; Max-Age=86400; Path=/\r\n"
+				   "Set-Cookie: SS=sess; Path=/\r\n");
+		}
+		srv_put(s, "Content-Length: ");
+		srv_num(num, knl_strlen(body), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, body);
+	} else if ( knl_strcmp(path, "/sba") == 0 || knl_strcmp(path, "/sbb") == 0 || knl_strcmp(path, "/sbe") == 0 ) {
+		/* test_blink_subaddr: the opener, the window it opens which moves itself by pushState, where the field goes */
+		CONST char *body = path[3] == 'a'
+			? "<!DOCTYPE html><title>a</title><script>document.onclick=()=>window.open('/sbb','w','width=420,height=260');</script>\n"
+			: path[3] == 'b' ? "<!DOCTYPE html><title>b</title><script>history.pushState({},'','/sbb2');</script>\n"
+			: "<!DOCTYPE html><title>e</title><p>e\n";
+
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ");
+		srv_num(num, knl_strlen(body), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, body);
+	} else if ( knl_strcmp(path, "/ubt") == 0 ) {
+		/* test_blink_ubol: what a list of advertisements' hosts names, which nothing here could answer */
+		CONST char *body = "<!DOCTYPE html><html><head><title>ubt</title></head><body><p>ubt</p>"
+			"<script src=\"http://doubleclick.net/x.js\"></script><img src=\"http://googlesyndication.com/a.png\">"
+			"<script src=\"http://google-analytics.com/analytics.js\"></script></body></html>";
+
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ");
+		srv_num(num, knl_strlen(body), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, body);
+	} else if ( path[0] == '/' && path[1] == 's' && path[2] == 'h' && path[3] != '\0' && path[4] == '\0' ) {
+		/*
+		 * test_blink_storeshare: "/sha" stays open, changing an item every
+		 * second and saying what came from elsewhere; "/shb" leaves an item, a
+		 * record and a service worker; "/shc" says what it has; "/shw" the worker
+		 */
+		CONST char *body = path[3] == 'a'
+			? "<!DOCTYPE html><title>a</title><script>let n=0,ev='none',idb='none';onstorage=e=>{if(e.key=='sb')ev=e.newValue};"
+			  "setInterval(async()=>{localStorage.tick=++n;"
+			  "if(idb=='none'&&(await indexedDB.databases()).some(d=>d.name=='d')){const r=indexedDB.open('d');"
+			  "r.onsuccess=()=>{const q=r.result.transaction('s').objectStore('s').get('k');q.onsuccess=()=>{idb=q.result;r.result.close()}}}"
+			  "document.title='a ev='+ev+' sb='+localStorage.sb+' idb='+idb},1000);</script>\n"
+			: path[3] == 'b'
+			? "<!DOCTYPE html><title>b</title><script>localStorage.sb='1';const r=indexedDB.open('d',1);"
+			  "r.onupgradeneeded=()=>r.result.createObjectStore('s');"
+			  "r.onsuccess=()=>{const t=r.result.transaction('s','readwrite');t.objectStore('s').put('v1','k');"
+			  "t.oncomplete=()=>{r.result.close();navigator.serviceWorker.register('/shw').then(()=>document.title='b ok',e=>document.title='b '+e)}};</script>\n"
+			: path[3] == 'c'
+			? "<!DOCTYPE html><title>c</title><script>const r=indexedDB.open('d');r.onsuccess=()=>{"
+			  "const q=r.result.transaction('s').objectStore('s').get('k');q.onsuccess=async()=>{"
+			  "const g=await navigator.serviceWorker.getRegistrations();"
+			  "document.title='c sb='+localStorage.sb+' tick='+(localStorage.tick?'yes':'no')+' idb='+q.result+' sw='+g.length}};</script>\n"
+			: "self.onfetch=()=>{};\n";
+
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: ");
+		srv_put(s, path[3] == 'w' ? "text/javascript" : "text/html");
+		srv_put(s, "\r\nContent-Length: ");
+		srv_num(num, knl_strlen(body), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, body);
+	} else if ( knl_strcmp(path, "/extp") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_ext), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_ext);
+	} else if ( knl_strcmp(path, "/share") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_share), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_share);
 	} else if ( knl_strcmp(path, "/meet") == 0 ) {
 		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
 		srv_num(num, knl_strlen(page_meet), 10);
@@ -10826,6 +11286,152 @@ LOCAL void test_blink_input( void )
 }
 
 /*
+ * The caret moved by the keys (BROWSER_BLINK=1), as the keyboard gives
+ * them (kt_inject, through 入力). In a page's field and text area, in 英語
+ * and again in 日本語 with nothing being composed: Left, Home, End, Up,
+ * Down, Delete and Shift+Left do what they do in any browser, and a
+ * letter typed goes in at the caret. In the address field: Ctrl+L takes
+ * the address, Left and Home move the caret, and what is typed and
+ * deleted there is at the caret, so that Enter asks for the address
+ * edited in the middle.
+ */
+#define KC_RIGHT	0x4F
+#define KC_LEFT		0x50
+#define KC_DOWN		0x51
+#define KC_UP		0x52
+#define KC_HOME		0x4A
+#define KC_END		0x4D
+#define KC_DEL		0x4C
+
+LOCAL BOOL	caret_addr;
+
+LOCAL void caret_press( CONST TS_UUID *page )
+{
+	TS_UUID		win;
+	T_OBWPOS	wp;
+	SZ		asz = 0;
+	ID		k;
+	INT		fx, fy;
+
+	if ( !window_of(page, &win) ) return;
+	k = ob_opn_obj(&win, OB_OP_READ);
+	if ( k <= 0 ) return;
+	knl_memset(&wp, 0, sizeof(wp));
+	(void)ob_rea_rec(k, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
+	ob_cls_obj(k);
+	fx = wp.wleft + 100;
+	fy = wp.wtop + BAR_H + 25;
+	hid_ev(HID_EV_MOVE, 0, fx, fy, 0, 0);
+	tk_dly_tsk(300);
+	hid_ev(HID_EV_BTN_DOWN, 0, fx, fy, 0, 0);
+	hid_ev(HID_EV_BTN_UP, 0, fx, fy, 0, 0);
+	tk_dly_tsk(500);
+}
+
+/* abcd: X before c, Y at the start, Z at the end, d gone by Left and Delete; then the text area */
+LOCAL void caret_field( CONST TS_UUID *page )
+{
+	(void)wm_msg_mode(WM_MODE_ALPH | WM_MODE_ROMAN);
+	tk_dly_tsk(100);
+	caret_press(page);
+	type_key(KC_LEFT, 0);
+	type_key(KC_LEFT, 0);
+	type_key(0x1B, 0);		/* x: abxcd */
+	type_key(KC_HOME, 0);
+	type_key(0x1C, 0);		/* y: yabxcd */
+	type_key(KC_END, 0);
+	type_key(KC_LEFT, 0);
+	type_key(KC_DEL, 0);		/* yabxc */
+	type_key(KC_RIGHT, 0);
+	type_key(0x1D, 0);		/* z: yabxcz */
+	type_key(KC_LEFT, HID_MOD_LSHIFT);	/* z chosen: 5-6 */
+	tk_dly_tsk(300);
+	type_key(0x2B, 0);		/* Tab: the text area, its caret at its start */
+	tk_dly_tsk(300);
+	type_key(KC_DOWN, 0);		/* the second line */
+	type_key(0x1B, 0);		/* x */
+	type_key(KC_UP, 0);
+	type_key(0x1C, 0);		/* y on the first */
+	tk_dly_tsk(500);
+}
+
+/* The same keys in 日本語, nothing being composed: the keys are still the page's */
+LOCAL void caret_kana( CONST TS_UUID *page )
+{
+	caret_press(page);
+	(void)wm_msg_mode(WM_MODE_ROMAN);
+	tk_dly_tsk(200);
+	type_key(KC_LEFT, 0);
+	type_key(KC_LEFT, 0);
+	type_key(KC_HOME, 0);
+	type_key(KC_RIGHT, 0);
+	type_key(KC_END, 0);
+	type_key(KC_LEFT, 0);
+	tk_dly_tsk(500);
+	(void)wm_msg_mode(WM_MODE_ALPH | WM_MODE_ROMAN);
+}
+
+/* http://127.0.0.1:18260/caret: Ctrl+L, End, Left 5 times, x; Delete takes c; Home and End move; Enter */
+LOCAL void caret_address( CONST TS_UUID *page )
+{
+	INT	i;
+
+	(void)wm_msg_mode(WM_MODE_ALPH | WM_MODE_ROMAN);
+	caret_press(page);
+	type_key(0x0F, HID_MOD_LCTRL);		/* Ctrl+L */
+	tk_dly_tsk(300);
+	type_key(KC_END, 0);
+	for ( i = 0; i < 5; i++ ) type_key(KC_LEFT, 0);
+	type_key(0x1B, 0);			/* x */
+	type_key(KC_DEL, 0);			/* the c */
+	type_key(KC_HOME, 0);
+	type_key(KC_END, 0);
+	type_key(0x28, 0);			/* Enter */
+	caret_addr = asked_for("/xaret", 8000);
+}
+
+LOCAL void test_blink_caret( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page, d;
+	INT	i, n;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18260/caret", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 180) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	KT_ASSERT_ER(dt_start(), E_OK);
+	for ( i = 0; i < 100 && ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK; i++ ) {
+		tk_dly_tsk(100);
+	}
+	KT_ASSERT(i < 100);
+	tk_dly_tsk(1000);
+	KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=20000\n", NULL, caret_field), 0);
+	n = read_title();
+	tm_printf((UB *)"  in 英語: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "i=yabxcz:5-6") > 0);
+	/* Up keeps the place across, in letters of other widths: either side of the "o"; no Tab went in */
+	KT_ASSERT(find_text(brmeta, n, "t=oyne/xtwo") > 0 || find_text(brmeta, n, "t=yone/xtwo") > 0);
+	KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=14000\n", NULL, caret_kana), 0);
+	n = read_title();
+	tm_printf((UB *)"  in 日本語: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "i=abcd:3-3") > 0);
+	KT_ASSERT(find_text(brmeta, n, "keys=6") > 0);
+	caret_addr = FALSE;
+	KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=18000\n", NULL, caret_address), 0);
+	tm_printf((UB *)"  the address edited: %s\n", caret_addr ? "/xaret" : "(not asked for)");
+	KT_ASSERT(caret_addr);
+	dt_quit();
+	wm_update();
+	srv_end();
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
  * The wheel across (BROWSER_BLINK=1): over "/hw" (see page_wide), the
  * wheel across turned 3 notches to the right (HID_WHEEL_H, dz > 0, as two
  * fingers moved to the left turn it) is a wheel event to the right and
@@ -10979,6 +11585,264 @@ LOCAL void test_blink_keep( void )
 	KT_ASSERT(find_text(brmeta, n, "\"title\": \"kept pk=kept yes\"") > 0);
 	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
 	KT_ASSERT_ER(ob_del_obj(&page2), E_OK);
+}
+
+/*
+ * Browsers of separate windows share the jar. While one browser stays open
+ * on a page that keeps changing a cookie, a second signs in and ends: what
+ * the second was given must reach the first, must not be lost to the first's
+ * saves, and must be there for a browser started later. A session cookie
+ * lives as long as the machine's session: the same to every window, and gone
+ * after a restart ("newboot"), where the long-lived cookie stays.
+ */
+#define BRTCK1	"/boot/BRCK1.TXT"
+#define BRTCK2	"/boot/BRCK2.TXT"
+
+LOCAL void ck_start( CONST char *arg )
+{
+	T_OBCRE	c;
+	TS_UUID	prog, pu;
+
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_PROG_BROWSER, &prog), E_OK);
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_PROCESS;
+	c.prog = prog;
+	c.arg = arg;
+	c.argsz = (SZ)knl_strlen(arg) + 1;
+	KT_ASSERT_ER(ob_cre_obj(&c, &pu), E_OK);
+}
+
+/* What a browser started by ck_start wrote as it ended, in brmeta */
+LOCAL INT ck_read( CONST char *path )
+{
+	T_FSTAT	st;
+	INT	i, fd, n = 0;
+
+	for ( i = 0; i < 400 && fs_stat(path, &st) < EX_OK; i++ ) tk_dly_tsk(100);
+	brmeta[0] = '\0';
+	fd = fs_open(path, O_RDONLY);
+	KT_ASSERT(fd >= 0);
+	if ( fd >= 0 ) {
+		n = fs_read(fd, brmeta, 512);
+		(void)fs_close(fd);
+	}
+	if ( n < 0 ) n = 0;
+	brmeta[n] = '\0';
+	tm_printf((UB *)"  %s: %s\n", path, brmeta);
+	return n;
+}
+
+LOCAL void ck_during( CONST TS_UUID *page )
+{
+	INT	n;
+
+	(void)page;
+	/* the sign-in, in a browser of its own that ends */
+	ck_start("http://127.0.0.1:18201/ckb\nquit=5000\ntitle=" BRTCK1 "\n");
+	(void)ck_read(BRTCK1);
+	tk_dly_tsk(6000);		/* the first has changed its cookie and saved since */
+	/* another window while the first is still open: everything the sign-in left */
+	ck_start("http://127.0.0.1:18201/ckc\nquit=5000\ntitle=" BRTCK2 "\n");
+	n = ck_read(BRTCK2);
+	KT_ASSERT(find_text(brmeta, n, "SIDJS=login") > 0);
+	KT_ASSERT(find_text(brmeta, n, "SS=sess") > 0);
+	KT_ASSERT(find_text(brmeta, n, "tick=") > 0);
+	(void)fs_unlink(BRTCK1);
+	(void)fs_unlink(BRTCK2);
+}
+
+LOCAL void test_blink_cookieshare( void )
+{
+	T_FSTAT	st;
+	TS_UUID	a, c;
+	INT	n;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18201/cka", &a) ) return;
+	if ( !make_page("http://127.0.0.1:18201/ckc", &c) ) {
+		(void)ob_del_obj(&a);
+		return;
+	}
+	if ( !srv_start(18201) ) {
+		(void)ob_del_obj(&a);
+		(void)ob_del_obj(&c);
+		KT_SKIP("no network stack");
+	}
+	(void)fs_unlink(BRTCK1);
+	(void)fs_unlink(BRTCK2);
+	KT_ASSERT_EQ(run_browser(&a, "ready=" BRREADY "\nquit=45000\n", NULL, ck_during), 0);
+	/* the page left open has had the sign-in brought to it */
+	n = read_title();
+	tm_printf((UB *)"  the first: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "SIDJS=login") > 0);
+
+	/* a browser started later, in the same session */
+	KT_ASSERT_EQ(run_browser(&c, "ready=" BRREADY "\nquit=3000\n", NULL, NULL), 0);
+	n = read_title();
+	tm_printf((UB *)"  later: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "SIDJS=login") > 0);
+	KT_ASSERT(find_text(brmeta, n, "SS=sess") > 0);
+
+	/* and after the machine started again */
+	KT_ASSERT_EQ(run_browser(&c, "ready=" BRREADY "\nquit=3000\nnewboot\n", NULL, NULL), 0);
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  restarted: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "SIDJS=login") > 0);
+	KT_ASSERT(find_text(brmeta, n, "SS=sess") < 0);
+	KT_ASSERT_ER(ob_del_obj(&a), E_OK);
+	KT_ASSERT_ER(ob_del_obj(&c), E_OK);
+}
+
+/*
+ * The rest of what a browser keeps is shared as the cookies are: with one
+ * browser left open and changing its own, a second leaves an item of
+ * localStorage, a record of IndexedDB and a service worker. The first is told
+ * by the storage event and finds the record; a third started then has them all,
+ * and the first's saves have not taken them away from a fourth started after.
+ */
+LOCAL void sh_during( CONST TS_UUID *page )
+{
+	INT	n;
+
+	(void)page;
+	ck_start("http://127.0.0.1:18203/shb\nquit=7000\ntitle=" BRTCK1 "\n");
+	n = ck_read(BRTCK1);
+	KT_ASSERT(find_text(brmeta, n, "b ok") >= 0);
+	tk_dly_tsk(6000);
+	ck_start("http://127.0.0.1:18203/shc\nquit=6000\ntitle=" BRTCK2 "\n");
+	n = ck_read(BRTCK2);
+	KT_ASSERT(find_text(brmeta, n, "sb=1") > 0);
+	KT_ASSERT(find_text(brmeta, n, "tick=yes") > 0);
+	KT_ASSERT(find_text(brmeta, n, "idb=v1") > 0);
+	KT_ASSERT(find_text(brmeta, n, "sw=1") > 0);
+	(void)fs_unlink(BRTCK1);
+	(void)fs_unlink(BRTCK2);
+}
+
+LOCAL void test_blink_storeshare( void )
+{
+	T_FSTAT	st;
+	TS_UUID	a, c;
+	INT	n;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18203/sha", &a) ) return;
+	if ( !make_page("http://127.0.0.1:18203/shc", &c) ) {
+		(void)ob_del_obj(&a);
+		return;
+	}
+	if ( !srv_start(18203) ) {
+		(void)ob_del_obj(&a);
+		(void)ob_del_obj(&c);
+		KT_SKIP("no network stack");
+	}
+	(void)fs_unlink(BRTCK1);
+	(void)fs_unlink(BRTCK2);
+	KT_ASSERT_EQ(run_browser(&a, "ready=" BRREADY "\nquit=60000\n", NULL, sh_during), 0);
+	n = read_title();
+	tm_printf((UB *)"  the first: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "ev=1") > 0);
+	KT_ASSERT(find_text(brmeta, n, "sb=1") > 0);
+	KT_ASSERT(find_text(brmeta, n, "idb=v1") > 0);
+	KT_ASSERT_EQ(run_browser(&c, "ready=" BRREADY "\nquit=6000\nnewboot\n", NULL, NULL), 0);
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  later: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "sb=1") > 0);
+	KT_ASSERT(find_text(brmeta, n, "tick=yes") > 0);
+	KT_ASSERT(find_text(brmeta, n, "idb=v1") > 0);
+	KT_ASSERT(find_text(brmeta, n, "sw=1") > 0);
+	KT_ASSERT_ER(ob_del_obj(&a), E_OK);
+	KT_ASSERT_ER(ob_del_obj(&c), E_OK);
+}
+
+/*
+ * What is kept, when it cannot be read as the browser starts (another
+ * browser in the same object for long, a disk gone and back): the jar starts
+ * empty, and what is saved then must not replace what was there. The user's
+ * own object is held by this task while a browser starts and sets a cookie;
+ * the next start has the old cookie and the new.
+ */
+LOCAL ID	store_held;
+
+LOCAL void store_hold_end( CONST TS_UUID *page )
+{
+	(void)page;
+	tk_dly_tsk(38000);
+	if ( store_held > 0 ) ob_cls_obj(store_held);
+	store_held = 0;
+}
+
+LOCAL void test_blink_storebusy( void )
+{
+	static UB	dir[1024];
+	T_FSTAT		st;
+	TS_UUID		a, b, store, mine;
+	T_OBCRD		*crd;
+	SZ		asz = 0;
+	ID		k;
+	INT		n, at;
+	BOOL		found = FALSE;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18087/sko", &a) ) return;
+	if ( !make_page("http://127.0.0.1:18087/skr", &b) ) {
+		(void)ob_del_obj(&a);
+		return;
+	}
+	if ( !srv_start(HTTP_PORT + 7) ) {
+		(void)ob_del_obj(&a);
+		(void)ob_del_obj(&b);
+		KT_SKIP("no network stack");
+	}
+	KT_ASSERT_EQ(run_browser(&a, "ready=" BRREADY "\nquit=6000\n", NULL, NULL), 0);
+
+	/* where this user's things are: the list in record 13 */
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_BROWSER_STORAGE, &store), E_OK);
+	crd = (T_OBCRD *)Kmalloc(sizeof(T_OBCRD));
+	k = ob_opn_obj(&store, OB_OP_R);
+	if ( k > 0 && crd != NULL && ob_get_crd(crd) >= E_OK && ob_rea_rec(k, 13, 0, dir, sizeof(dir), &asz) >= E_OK ) {
+		/* the first row unless this task is itself listed: a browser the test starts acts as the first user */
+		if ( asz >= 48 ) {
+			knl_memcpy(&mine, dir + 32, 16);
+			found = TRUE;
+		}
+		for ( at = 16; at + 32 <= asz; at += 32 ) {
+			INT j = 0;
+
+			while ( j < 16 && dir[at + j] == ((UB *)&crd->user)[j] ) j++;
+			if ( j == 16 ) {
+				knl_memcpy(&mine, dir + at + 16, 16);
+				found = TRUE;
+			}
+		}
+	}
+	if ( k > 0 ) ob_cls_obj(k);
+	if ( crd != NULL ) Kfree(crd);
+	KT_ASSERT(found);
+	if ( found ) {
+		store_held = ob_opn_obj(&mine, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_O_EXCL);
+		KT_ASSERT(store_held > 0);
+		/* the browser sets a cookie of its own with the jar empty, and the object comes free while it runs */
+		KT_ASSERT_EQ(run_browser(&b, "ready=" BRREADY "\nquit=60000\n", NULL, store_hold_end), 0);
+		if ( store_held > 0 ) ob_cls_obj(store_held);
+		store_held = 0;
+		KT_ASSERT_EQ(run_browser(&b, "ready=" BRREADY "\nquit=8000\n", NULL, NULL), 0);
+		n = read_title();
+		tm_printf((UB *)"  %s\n", brmeta);
+		KT_ASSERT(find_text(brmeta, n, "zz=old") > 0);
+		KT_ASSERT(find_text(brmeta, n, "yy=new") > 0);
+	}
+	srv_end();
+	KT_ASSERT_ER(ob_del_obj(&a), E_OK);
+	KT_ASSERT_ER(ob_del_obj(&b), E_OK);
 }
 
 /*
@@ -13752,6 +14616,34 @@ LOCAL void test_blink_rtc( void )
  * with Enter. The rates and sizes are printed for the record: on QEMU
  * the machine is far slower than the board.
  */
+/*
+ * The panel of what to share, worked with the pointer as a person would:
+ * the row (0 as it comes up, 1 clicked), the sound's switch, and its
+ * button. A panel has no name band to be found by: it stands in the middle
+ * of the page's window, and the page has had time to ask for it.
+ */
+#define SHARE_PN_W	460
+#define SHARE_PN_H	372
+
+LOCAL void share_press( INT x, INT y )
+{
+	hid_ev(HID_EV_MOVE, 0, x, y, 0, 0);
+	hid_ev(HID_EV_BTN_DOWN, 0, x, y, 0, 0);
+	hid_ev(HID_EV_BTN_UP, 0, x, y, 0, 0);
+	tk_dly_tsk(200);
+}
+
+LOCAL void share_answer( CONST T_OBWPOS *wp, INT row, BOOL sound, BOOL ok )
+{
+	INT	x = wp->wleft + ( wp->wright - wp->wleft - SHARE_PN_W ) / 2;
+	INT	y = wp->wtop + ( wp->wbottom - wp->wtop - SHARE_PN_H ) / 2;
+
+	tk_dly_tsk(2000);
+	if ( row > 0 ) share_press(x + 100, y + 64 + 28);
+	if ( sound ) share_press(x + 30, y + 316);
+	share_press(x + ( ok ? 404 : 308 ), y + 349);
+}
+
 LOCAL void meet_check( CONST TS_UUID *page )
 {
 	TS_UUID		win;
@@ -13773,7 +14665,7 @@ LOCAL void meet_check( CONST TS_UUID *page )
 	hid_ev(HID_EV_BTN_DOWN, 0, x, y, 0, 0);
 	hid_ev(HID_EV_BTN_UP, 0, x, y, 0, 0);
 	tk_dly_tsk(3500);
-	type_key(0x28, 0);		/* 許可: the screen */
+	share_answer(&wp, 0, FALSE, TRUE);	/* the whole screen, as it comes up */
 	tk_dly_tsk(3000);
 }
 
@@ -13809,6 +14701,505 @@ LOCAL void test_blink_meet( void )
 	KT_ASSERT(find_text(brmeta, n, "rtcaudio=some") > 0);
 	KT_ASSERT(find_text(brmeta, n, "share=monitor,") > 0);
 	KT_ASSERT(find_text(brmeta, n, ",audio0") > 0);
+	KT_ASSERT(find_text(brmeta, n, " end") > 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/* A little-endian number into a ZIP being made */
+LOCAL UB *zip_le( UB *p, UW v, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i < n; i++ ) {
+		*p++ = (UB)( v >> ( 8 * i ) );
+	}
+	return p;
+}
+
+LOCAL void share_press( INT x, INT y );
+
+/*
+ * An extension's files as a ZIP, as the file conversion takes one in: stored
+ * but for what comes compressed; with 'crx' a CRX's header in front (version
+ * 3, whose ZIP's offsets count from the ZIP's start). Its bytes go in record 1
+ * of an object of its own.
+ */
+LOCAL BOOL make_ext_of( CONST EXT_FILE *files, INT n, BOOL crx, CONST char *name, TS_UUID *u )
+{
+	static UB	raw[32768];
+	static UW	off[16];
+	UB		*zip = raw + ( crx ? 32 : 0 );
+	UB		*p = zip, *cd;
+	INT		i, recno = -1;
+	ID		k;
+	SZ		asz = 0;
+	BOOL		ok;
+	char		para[32];
+
+	for ( i = 0; i < n; i++ ) {
+		UW	nl = (UW)knl_strlen(files[i].name);
+		UW	usz = files[i].comp != NULL ? (UW)EXT_BIG_LEN : (UW)knl_strlen(files[i].text);
+		UW	csz = files[i].comp != NULL ? files[i].compn : usz;
+
+		off[i] = (UW)( p - zip );
+		p = zip_le(p, 0x04034b50, 4);
+		p = zip_le(p, 20, 2);  p = zip_le(p, 0, 2);  p = zip_le(p, files[i].comp != NULL ? 8 : 0, 2);
+		p = zip_le(p, 0, 4);  p = zip_le(p, 0, 4);
+		p = zip_le(p, csz, 4);  p = zip_le(p, usz, 4);
+		p = zip_le(p, nl, 2);  p = zip_le(p, 0, 2);
+		knl_memcpy(p, files[i].name, nl);  p += nl;
+		knl_memcpy(p, files[i].comp != NULL ? (CONST void *)files[i].comp : (CONST void *)files[i].text, csz);  p += csz;
+	}
+	cd = p;
+	for ( i = 0; i < n; i++ ) {
+		UW	nl = (UW)knl_strlen(files[i].name);
+		UW	usz = files[i].comp != NULL ? (UW)EXT_BIG_LEN : (UW)knl_strlen(files[i].text);
+		UW	csz = files[i].comp != NULL ? files[i].compn : usz;
+
+		p = zip_le(p, 0x02014b50, 4);
+		p = zip_le(p, 20, 2);  p = zip_le(p, 20, 2);  p = zip_le(p, 0, 2);  p = zip_le(p, files[i].comp != NULL ? 8 : 0, 2);
+		p = zip_le(p, 0, 4);  p = zip_le(p, 0, 4);
+		p = zip_le(p, csz, 4);  p = zip_le(p, usz, 4);
+		p = zip_le(p, nl, 2);  p = zip_le(p, 0, 2);  p = zip_le(p, 0, 2);
+		p = zip_le(p, 0, 2);  p = zip_le(p, 0, 2);  p = zip_le(p, 0, 4);
+		p = zip_le(p, off[i], 4);
+		knl_memcpy(p, files[i].name, nl);  p += nl;
+	}
+	{
+		UW	cds = (UW)( p - cd ), cdo = (UW)( cd - zip );
+
+		p = zip_le(p, 0x06054b50, 4);
+		p = zip_le(p, 0, 2);  p = zip_le(p, 0, 2);
+		p = zip_le(p, (UW)n, 2);  p = zip_le(p, (UW)n, 2);
+		p = zip_le(p, cds, 4);  p = zip_le(p, cdo, 4);
+		p = zip_le(p, 0, 2);
+	}
+	if ( crx ) {
+		UB *h = raw;
+
+		knl_memset(raw, 0, 32);
+		knl_memcpy(h, "Cr24", 4);
+		h = zip_le(h + 4, 3, 4);
+		(void)zip_le(h, 20, 4);		/* a header of 20 bytes, whose signatures are not read */
+	}
+	tm_sprintf((UB *)para, (UB *)"<p>%s</p>", name);
+	if ( !make_page_text(para, u) ) return FALSE;
+	k = ob_opn_obj(u, OB_OP_R | OB_OP_W);
+	if ( k <= 0 ) return FALSE;
+	ok = ob_apd_rec(k, OB_RT_SYSDATA, 0, &recno) >= E_OK && recno == 1
+	  && ob_wri_rec(k, 1, 0, raw, (SZ)( p - raw ), &asz) >= E_OK;
+	ob_cls_obj(k);
+	return ok;
+}
+
+LOCAL BOOL make_ext( TS_UUID *u )
+{
+	return make_ext_of(ext_files, sizeof(ext_files) / sizeof(ext_files[0]), FALSE, "ktext", u);
+}
+
+/* The panel of what an extension declares, over the browser's window */
+#define EXT_PN_W	520
+#define EXT_PN_H	372
+
+LOCAL BOOL ext_panel_ok;	/* the press this run's panel is answered with */
+
+LOCAL void ext_panel_check( CONST TS_UUID *page )
+{
+	TS_UUID		win;
+	T_OBWPOS	wp;
+	SZ		asz = 0;
+	ID		k;
+	INT		x, y;
+
+	if ( !window_of(page, &win) ) return;
+	k = ob_opn_obj(&win, OB_OP_READ);
+	if ( k <= 0 ) return;
+	knl_memset(&wp, 0, sizeof(wp));
+	(void)ob_rea_rec(k, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
+	ob_cls_obj(k);
+	tk_dly_tsk(6000);
+	if ( kt_screen() ) (void)kt_shot("/boot/BEXTP.PPM");
+	x = wp.wleft + ( wp.wright - wp.wleft - EXT_PN_W ) / 2;
+	y = wp.wtop + ( wp.wbottom - wp.wtop - EXT_PN_H ) / 2;
+	share_press(x + ( ext_panel_ok ? 464 : 368 ), y + 349);
+	if ( ext_panel_ok ) {
+		tk_dly_tsk(6000);
+		if ( kt_screen() ) (void)kt_shot("/boot/BEXTS.PPM");
+	}
+}
+
+/*
+ * Extensions (BROWSER_BLINK=1, design 14.12), from their objects. One may do
+ * what it declared: its content script in its isolated world, chrome.storage,
+ * a message to the background worker and its answer, onInstalled; its rules
+ * on images, fetches, frames, the window's own documents and WebSockets, with
+ * real redirects and headers changed both ways, a regexFilter and a dynamic
+ * rule; chrome.scripting, alarms, i18n, webRequest that only watches, action,
+ * contextMenus, tabs.sendMessage, tabs.create and a page of its own. The other,
+ * a CRX with a module worker, declares little and is refused the rest. A
+ * second start has them from the list's links, with what they stored. The
+ * panel of what is declared, its 〈取消〉 and its 〈読み込む〉; on 〈設定〉's
+ * sheet one is made not to work and one removed.
+ */
+LOCAL INT set_read( char *out, INT max );
+
+LOCAL void test_blink_ext( void )
+{
+	static char	line[320], tad0[4096], got[1024];
+	T_FSTAT		st;
+	TS_UUID		page, ext, lim, list, mr, mb, plain;
+	char		us[TS_UUID_STRLEN + 1], ls[TS_UUID_STRLEN + 1];
+	SZ		tadn = 0;
+	ID		k;
+	INT		n;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_BROWSER_EXT, &list), E_OK);
+	k = ob_opn_obj(&list, OB_OP_R);
+	KT_ASSERT(k > 0);
+	if ( k <= 0 ) return;
+	(void)ob_rea_rec(k, 0, 0, tad0, sizeof(tad0), &tadn);
+	ob_cls_obj(k);
+	if ( !make_ext(&ext) || !make_ext_of(lim_files, sizeof(lim_files) / sizeof(lim_files[0]), TRUE, "ktlim", &lim)
+	     || !make_page("http://127.0.0.1:18180/extp", &page) || !make_page("http://127.0.0.1:18180/mr.html", &mr)
+	     || !make_page("http://127.0.0.1:18180/mb.html", &mb) || !make_page("http://127.0.0.1:18180/frt.html", &plain) ) {
+		KT_ASSERT(FALSE);
+		return;
+	}
+	if ( !srv_start(HTTP_PORT + 100) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	ts_uuid_text(&ext, us);
+	ts_uuid_text(&lim, ls);
+	if ( desk_up() ) {
+		/* the panel says what the CRX declares: 〈取消〉 leaves it out, 〈読み込む〉 brings it in */
+		ext_panel_ok = FALSE;
+		tm_sprintf((UB *)line, (UB *)"ready=" BRREADY "\nquit=25000\nlater=extask %s\nlater=settings\nsetstep=sheet:8\nsetstep=dump:/boot/BRSET.TXT\n", ls);
+		KT_ASSERT_EQ(run_browser(&plain, line, NULL, ext_panel_check), 0);
+		n = set_read(got, sizeof(got));
+		KT_ASSERT(find_text(got, n, "ktlim") < 0);
+		ext_panel_ok = TRUE;
+		KT_ASSERT_EQ(run_browser(&plain, line, NULL, ext_panel_check), 0);
+		n = set_read(got, sizeof(got));
+		KT_ASSERT(find_text(got, n, "ktlim") >= 0);
+		KT_ASSERT(find_text(got, n, "0.9") >= 0);
+
+		srv_seen = 0;
+		tm_sprintf((UB *)line, (UB *)"ready=" BRREADY "\nquit=90000\nextadd=%s\n", us);
+		KT_ASSERT_EQ(run_browser(&page, line, NULL, NULL), 0);
+		n = read_title();
+		tm_printf((UB *)"  %s\n", brmeta);
+		KT_ASSERT(find_text(brmeta, n, "mainchrome=none") > 0);
+		KT_ASSERT(find_text(brmeta, n, "ad=blocked") > 0);
+		KT_ASSERT(find_text(brmeta, n, "rd=pubfile") > 0);
+		/* redirects are redirects to whoever asked; the rules' headers both ways */
+		KT_ASSERT(find_text(brmeta, n, "mv=true,target.txt,tgt") > 0);
+		KT_ASSERT(find_text(brmeta, n, "hdr=hello,yes,null") > 0);
+		KT_ASSERT(find_text(brmeta, n, "re=blocked") > 0);
+		KT_ASSERT(find_text(brmeta, n, "dyn=blocked") > 0);
+		KT_ASSERT(find_text(brmeta, n, "wsb=failed") > 0);
+		KT_ASSERT(find_text(brmeta, n, "wsr=open") > 0);
+		KT_ASSERT(find_text(brmeta, n, "fr=frt") > 0);
+		KT_ASSERT(find_text(brmeta, n, "fb=frt") < 0);
+		KT_ASSERT(!asked_for("/ad.png", 100));
+		KT_ASSERT(!asked_for("/moved.txt", 100));
+		KT_ASSERT(!asked_for("/re12.png", 100));
+		KT_ASSERT(!asked_for("/dyn.png", 100));
+		KT_ASSERT(!asked_for("/fb.html", 100));
+		KT_ASSERT(!asked_for("/fr.html", 100));
+		KT_ASSERT(!asked_for("/wsb", 100));
+		/* a block needs no host; a redirect and modifyHeaders do, and it has none */
+		KT_ASSERT(find_text(brmeta, n, "limb=blocked") > 0);
+		KT_ASSERT(!asked_for("/limb.png", 100));
+		KT_ASSERT(find_text(brmeta, n, "limr=tgt") < 0);
+		KT_ASSERT(find_text(brmeta, n, "limhdr=none") > 0);
+		/* what may do it */
+		KT_ASSERT(find_text(brmeta, n, "iso=undefined") > 0);
+		KT_ASSERT(find_text(brmeta, n, "old=undefined") > 0);
+		KT_ASSERT(find_text(brmeta, n, "st=5") > 0);
+		KT_ASSERT(find_text(brmeta, n, "bg=2,1,1") > 0);
+		KT_ASSERT(find_text(brmeta, n, "inst=7") > 0);
+		KT_ASSERT(find_text(brmeta, n, "mf=ktext") > 0);
+		KT_ASSERT(find_text(brmeta, n, "ctabs=undefined,undefined") > 0);
+		KT_ASSERT(find_text(brmeta, n, "big=" EXT_BIG_LENS ",deflate") > 0);
+		KT_ASSERT(find_text(brmeta, n, "i18n=hiX,onlyen") > 0);
+		KT_ASSERT(find_text(brmeta, n, "alarm=al") > 0);
+		KT_ASSERT(find_text(brmeta, n, "taburl=extp") > 0);
+		KT_ASSERT(find_text(brmeta, n, "exec=42") > 0);
+		KT_ASSERT(find_text(brmeta, n, "execp=pr") > 0);
+		KT_ASSERT(find_text(brmeta, n, "execm=number") > 0);
+		KT_ASSERT(find_text(brmeta, n, "tabmsg=fromtab") > 0);
+		KT_ASSERT(find_text(brmeta, n, "blocking=refused") > 0);
+		KT_ASSERT(find_text(brmeta, n, "web=true") > 0);
+		KT_ASSERT(find_text(brmeta, n, "dynlist=1") > 0);
+		KT_ASSERT(find_text(brmeta, n, "badrule=refused") > 0);
+		KT_ASSERT(find_text(brmeta, n, "sets=2") > 0);
+		KT_ASSERT(find_text(brmeta, n, "badge=3") > 0);
+		KT_ASSERT(find_text(brmeta, n, "cors=open") > 0);
+		KT_ASSERT(find_text(brmeta, n, "css=rgb(1,2,3)") > 0);
+		KT_ASSERT(find_text(brmeta, n, "inj=41") > 0);
+		KT_ASSERT(asked_for("/tabc", 15000));
+		KT_ASSERT(asked_for("/popseen1", 15000));
+		/* what declares little */
+		KT_ASSERT(find_text(brmeta, n, "limstore=undefined") > 0);
+		KT_ASSERT(find_text(brmeta, n, "limmod=mod") > 0);
+		KT_ASSERT(find_text(brmeta, n, "limapi=undefined,undefined,undefined,undefined") > 0);
+		KT_ASSERT(find_text(brmeta, n, "limurl=undefined") > 0);
+		KT_ASSERT(find_text(brmeta, n, "limexec=refused") > 0);
+		KT_ASSERT(find_text(brmeta, n, "limnative=refused") > 0);
+		KT_ASSERT(find_text(brmeta, n, "limcors=TypeError") > 0);
+		{
+			INT i, once = 0;
+
+			/* a script of the moment the engine says more than once */
+			for ( i = 0; i < srv_seen && i < SEEN_MAX; i++ ) {
+				if ( knl_strcmp(srv_path[i], "/limonce") == 0 ) once++;
+			}
+			KT_ASSERT_EQ(once, 1);
+		}
+
+		/* again, from the list's links alone */
+		srv_seen = 0;
+		KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=90000\n", NULL, NULL), 0);
+		n = read_title();
+		tm_printf((UB *)"  %s\n", brmeta);
+		KT_ASSERT(find_text(brmeta, n, "old=5") > 0);
+		KT_ASSERT(find_text(brmeta, n, "ad=blocked") > 0);
+		KT_ASSERT(find_text(brmeta, n, "dyn=blocked") > 0);
+		KT_ASSERT(!asked_for("/ad.png", 100));
+
+		/* the window's own documents */
+		srv_seen = 0;
+		KT_ASSERT_EQ(run_browser(&mr, "ready=" BRREADY "\nquit=25000\n", NULL, NULL), 0);
+		n = read_title();
+		tm_printf((UB *)"  %s\n", brmeta);
+		KT_ASSERT(find_text(brmeta, n, "mt") >= 0);
+		KT_ASSERT(!asked_for("/mr.html", 100));
+		/* a page that fails is what a run says in its answer */
+		KT_ASSERT_EQ(run_browser(&mb, "ready=" BRREADY "\nquit=25000\n", NULL, NULL), 4);
+		KT_ASSERT(!asked_for("/mb.html", 100));
+
+		/* the button and what it added to the menu, chosen as a person does */
+		srv_seen = 0;
+		KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=30000\nmenu=ext.action:0\nmenu=ext.ctx:0\n", NULL, NULL), 0);
+		KT_ASSERT(asked_for("/actclick", 15000));
+		KT_ASSERT(asked_for("/menuclickm1", 15000));
+
+		/* on 〈設定〉's sheet, as it looks, and made not to work there: the next run's image reaches the server */
+		KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=40000\nmenu=settings\nsetstep=sheet:8\n"
+					 "setstep=pick:90:2\nsetstep=press:92\nsetstep=dump:/boot/BRSET.TXT\n", NULL, NULL), 0);
+		n = set_read(got, sizeof(got));
+		KT_ASSERT(find_text(got, n, "ktext") >= 0);
+		KT_ASSERT(find_text(got, n, "無効") >= 0);
+		srv_seen = 0;
+		KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=30000\n", NULL, NULL), 0);
+		n = read_title();
+		tm_printf((UB *)"  %s\n", brmeta);
+		KT_ASSERT(find_text(brmeta, n, "content=none") > 0);
+		KT_ASSERT(asked_for("/ad.png", 100));
+
+		/* 〈削除〉, its question answered: gone from the sheet and from the next start */
+		KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=40000\nmenu=settings\nsetstep=sheet:8\nsetstep=answer:102\n"
+					 "setstep=pick:90:1\nsetstep=press:93\nsetstep=dump:/boot/BRSET.TXT\n", NULL, NULL), 0);
+		n = set_read(got, sizeof(got));
+		KT_ASSERT(find_text(got, n, "ktlim") < 0);
+		KT_ASSERT(find_text(got, n, "ktext") >= 0);
+		desk_down();
+	}
+	srv_end();
+	/* the list as it was, so that the tests after this one have no extension */
+	k = ob_opn_obj(&list, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_O_WEXCL);
+	KT_ASSERT(k > 0);
+	if ( k > 0 ) {
+		KT_ASSERT_ER(ob_rpl_rec(k, 0, tad0, tadn), E_OK);
+		KT_ASSERT_ER(ob_rpl_rec(k, 1, NULL, 0), E_OK);
+		ob_cls_obj(k);
+	}
+	(void)ob_unl_obj(&ext);
+	KT_ASSERT_ER(ob_del_obj(&ext), E_OK);
+	(void)ob_del_obj(&lim);
+	KT_ASSERT_ER(ob_del_obj(&mr), E_OK);
+	KT_ASSERT_ER(ob_del_obj(&mb), E_OK);
+	KT_ASSERT_ER(ob_del_obj(&plain), E_OK);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * A real extension, when the development machine was given one for the test
+ * disk (make EXT_TEST=<a ZIP>): it comes in, its rules are read and its worker
+ * runs, and what it does on a page and in its button's page is left in the
+ * console to be read. Nothing here knows which extension it is.
+ */
+LOCAL void ubol_look( CONST TS_UUID *page )
+{
+	(void)page;
+	tk_dly_tsk(45000);
+	if ( kt_screen() ) (void)kt_shot("/boot/BUBOL.PPM");
+}
+
+LOCAL void test_blink_ubol( void )
+{
+	static char	line[160], tad0[4096];
+	T_FSTAT		st;
+	TS_UUID		page, ext, list;
+	char		us[TS_UUID_STRLEN + 1];
+	SZ		tadn = 0, asz = 0;
+	ID		k;
+	INT		fd = -1, recno = -1;
+	UB		*buf;
+	SZ		n;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( fs_stat("/boot/extest.zip", &st) < EX_OK ) {
+		KT_SKIP("no extension given (make EXT_TEST=<a ZIP>)");
+	}
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_BROWSER_EXT, &list), E_OK);
+	k = ob_opn_obj(&list, OB_OP_R);
+	if ( k <= 0 ) return;
+	(void)ob_rea_rec(k, 0, 0, tad0, sizeof(tad0), &tadn);
+	ob_cls_obj(k);
+	buf = (UB *)Kmalloc(st.size);
+	fd = fs_open("/boot/extest.zip", O_RDONLY);
+	KT_ASSERT(buf != NULL && fd >= 0);
+	if ( buf == NULL || fd < 0 ) return;
+	n = fs_read(fd, buf, st.size);
+	(void)fs_close(fd);
+	KT_ASSERT(n == (SZ)st.size);
+	if ( !make_page_text("<p>extest</p>", &ext) || !make_page("http://127.0.0.1:18180/ubt", &page) ) {
+		KT_ASSERT(FALSE);
+		return;
+	}
+	k = ob_opn_obj(&ext, OB_OP_R | OB_OP_W);
+	KT_ASSERT(k > 0 && ob_apd_rec(k, OB_RT_SYSDATA, 0, &recno) >= E_OK && recno == 1
+		  && ob_wri_rec(k, 1, 0, buf, n, &asz) >= E_OK);
+	if ( k > 0 ) ob_cls_obj(k);
+	Kfree(buf);
+	if ( !srv_start(HTTP_PORT + 100) ) {
+		KT_SKIP("no network stack");
+	}
+	ts_uuid_text(&ext, us);
+	if ( desk_up() ) {
+		tm_sprintf((UB *)line, (UB *)"ready=" BRREADY "\nquit=70000\nextadd=%s\n", us);
+		KT_ASSERT_EQ(run_browser(&page, line, NULL, NULL), 0);
+		/* its button: its page in a window of this browser, seen on the screen */
+		KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=60000\nlater=ext.action:0\n", NULL, ubol_look), 0);
+		desk_down();
+	}
+	srv_end();
+	k = ob_opn_obj(&list, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_O_WEXCL);
+	if ( k > 0 ) {
+		(void)ob_rpl_rec(k, 0, tad0, tadn);
+		(void)ob_rpl_rec(k, 1, NULL, 0);
+		ob_cls_obj(k);
+	}
+	(void)ob_unl_obj(&ext);
+	(void)ob_del_obj(&ext);
+	(void)ob_del_obj(&page);
+}
+
+/*
+ * Sharing a window and sound (BROWSER_BLINK=1, design 14.4.18). A window
+ * of this task's, painted red, lies behind the browser's when it is shared:
+ * red is its own pixels and not the screen's, which there show the page's
+ * green. Closing it ends the page's track. The browser's own window is
+ * shared with the sound its process plays, through the sound device's
+ * monitor.
+ */
+LOCAL void share_click( INT x, INT y )
+{
+	hid_ev(HID_EV_MOVE, 0, x, y, 0, 0);
+	hid_ev(HID_EV_BTN_DOWN, 0, x, y, 0, 0);
+	hid_ev(HID_EV_BTN_UP, 0, x, y, 0, 0);
+}
+
+LOCAL void share_check( CONST TS_UUID *page )
+{
+	TS_UUID		win;
+	T_OBWPOS	wp;
+	T_DPRECT	o, r;
+	T_WMWIN		w;
+	SZ		asz = 0;
+	ID		k;
+	INT		x, y, wid, gid;
+
+	if ( !window_of(page, &win) ) return;
+	k = ob_opn_obj(&win, OB_OP_READ);
+	if ( k <= 0 ) return;
+	knl_memset(&wp, 0, sizeof(wp));
+	(void)ob_rea_rec(k, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
+	ob_cls_obj(k);
+	tk_dly_tsk(2000);
+	x = wp.wleft + 100;
+	y = wp.wtop + BAR_H + 50;
+
+	/* refused */
+	share_click(x, y);
+	share_answer(&wp, 0, FALSE, FALSE);
+	tk_dly_tsk(1500);
+
+	/* a window, under the browser's once the click has brought that to the front */
+	o.left = wp.wleft + 40;
+	o.top = wp.wtop + BAR_H + 130;
+	o.right = o.left + 301;
+	o.bottom = o.top + 201;
+	wid = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "ktshare");
+	KT_ASSERT(wid > 0);
+	if ( wid <= 0 ) return;
+	gid = wm_gid(wid);
+	KT_ASSERT_ER(wm_ref(wid, &w), E_OK);
+	r.left = 0;
+	r.top = 0;
+	r.right = w.work.right - w.work.left;
+	r.bottom = w.work.bottom - w.work.top;
+	KT_ASSERT_ER(dp_fill_rect(gid, &r, 0x00E02020), E_OK);
+	(void)wm_show(wid, TRUE);
+	(void)wm_update();
+	tk_dly_tsk(500);
+	share_click(x, y);
+	share_answer(&wp, 1, FALSE, TRUE);
+	tk_dly_tsk(5000);
+	(void)wm_close(wid);
+	tk_dly_tsk(3000);
+
+	/* the browser's own window, nearest the viewer, with its sound */
+	share_click(x, y);
+	share_answer(&wp, 1, TRUE, TRUE);
+}
+
+LOCAL void test_blink_share( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18180/share", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 100) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	if ( desk_up() ) {
+		KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=60000\n", NULL, share_check), 0);
+		desk_down();
+	}
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "cancel=NotAllowedError") > 0);
+	KT_ASSERT(find_text(brmeta, n, "win=window,") > 0);
+	KT_ASSERT(find_text(brmeta, n, "winlabel=ktshare") > 0);
+	KT_ASSERT(find_text(brmeta, n, "winred=true") > 0);
+	KT_ASSERT(find_text(brmeta, n, "ended=true") > 0);
+	KT_ASSERT(find_text(brmeta, n, "self=browser,") > 0);
+	KT_ASSERT(find_text(brmeta, n, ",audio1") > 0);
+	KT_ASSERT(find_text(brmeta, n, "level=some") > 0);
 	KT_ASSERT(find_text(brmeta, n, " end") > 0);
 	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
 }
@@ -14118,6 +15509,78 @@ LOCAL void test_blink_windows( void )
 	tm_printf((UB*)"  the browser of its own: title %s\n", t);
 	KT_ASSERT(knl_strcmp(t, "apart") == 0);
 	(void)fs_unlink(BRTAPART);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * A window a page opened has an address field of its own: it says where the
+ * window really is, follows pushState, and Ctrl+L, an address and Enter go
+ * there, in that window.
+ */
+#define BRTADDR	"/boot/BRADDR.TXT"
+
+LOCAL void subaddr_check( CONST TS_UUID *page )
+{
+	TS_UUID		win;
+	T_OBWPOS	wp;
+	SZ		asz = 0;
+	ID		k;
+	INT		x, y;
+
+	if ( !window_of(page, &win) ) return;
+	k = ob_opn_obj(&win, OB_OP_READ);
+	if ( k <= 0 ) return;
+	knl_memset(&wp, 0, sizeof(wp));
+	(void)ob_rea_rec(k, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
+	ob_cls_obj(k);
+	tk_dly_tsk(1500);
+	x = wp.wleft + 200;
+	y = wp.wtop + BAR_H + 100;
+	hid_ev(HID_EV_MOVE, 0, x, y, 0, 0);
+	hid_ev(HID_EV_BTN_DOWN, 0, x, y, 0, 0);
+	hid_ev(HID_EV_BTN_UP, 0, x, y, 0, 0);
+	tk_dly_tsk(5000);		/* the window opened, its page shown */
+	type_key(0x0F, HID_MOD_LCTRL);	/* Ctrl+L */
+	tk_dly_tsk(300);
+	type_text("http://127.0.0.1:18202/sbe");
+	tk_dly_tsk(300);
+	type_key(0x28, 0);
+	tk_dly_tsk(3000);
+}
+
+LOCAL void test_blink_subaddr( void )
+{
+	static char	got[1024];
+	T_FSTAT		st;
+	TS_UUID		page;
+	INT		fd, n = 0;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18202/sba", &page) ) return;
+	if ( !srv_start(18202) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	(void)fs_unlink(BRTADDR);
+	if ( desk_up() ) {
+		KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=14000\naddr=" BRTADDR "\n", "/boot/BSUBADDR.PPM", subaddr_check), 0);
+		desk_down();
+	}
+	srv_end();
+	fd = fs_open(BRTADDR, O_RDONLY);
+	KT_ASSERT(fd >= 0);
+	if ( fd >= 0 ) {
+		n = fs_read(fd, got, sizeof(got) - 1);
+		(void)fs_close(fd);
+	}
+	if ( n < 0 ) n = 0;
+	got[n] = '\0';
+	tm_printf((UB *)"  the addresses shown: %s\n", got);
+	KT_ASSERT(find_text(got, n, "/sbb2") > 0);
+	KT_ASSERT(find_text(got, n, "/sbe") > 0);
+	(void)fs_unlink(BRTADDR);
 	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
 }
 
@@ -14760,6 +16223,550 @@ LOCAL void test_blink_pw( void )
 	pw_verify();
 	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
 	KT_ASSERT_ER(ob_del_obj(&page2), E_OK);
+}
+
+/*
+ * 〈設定〉 (BROWSER_BLINK=1): the run of test_blink_pw leaves two passwords
+ * and more kept and a passkey; the window opened from the menu's item
+ * lists them, the passwords hidden until the switch is on; one changed
+ * and one removed, and the passkey removed, are so in the next run too.
+ */
+#define BRSET		"/boot/BRSET.TXT"
+
+LOCAL INT set_read( char *out, INT max )
+{
+	INT	fd = fs_open(BRSET, O_RDONLY), n = 0;
+
+	out[0] = '\0';
+	if ( fd < 0 ) return 0;
+	n = fs_read(fd, out, max - 1);
+	(void)fs_close(fd);
+	if ( n < 0 ) n = 0;
+	out[n] = '\0';
+	return n;
+}
+
+LOCAL void test_blink_settings( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page, blank;
+	static char	got[4096];
+	char		pw[16];
+	INT	n, rows;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18261/pw1", &page) ) return;
+	if ( !make_page("about:blank", &blank) ) {
+		(void)ob_del_obj(&page);
+		return;
+	}
+	if ( !srv_start(HTTP_PORT + 181) ) {
+		(void)ob_del_obj(&page);
+		(void)ob_del_obj(&blank);
+		KT_SKIP("no network stack");
+	}
+	KT_ASSERT(pw_prepare());
+	if ( desk_up() ) {
+		pw_panels = 4;
+		KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=17000\n", NULL, pw_check), 0);
+		/* hidden at first: the first row's password is not to be read in what the list shows */
+		pw_word(0, pw);
+		KT_ASSERT_EQ(run_browser(&blank, "ready=" BRREADY "\nquit=9000\nmenu=settings\nsetstep=dump:" BRSET "\n",
+					 NULL, NULL), 0);
+		n = set_read(got, sizeof(got));
+		tm_printf((UB *)"  listed %d bytes\n", n);
+		KT_ASSERT(find_text(got, n, "1:http://127.0.0.1") >= 0);
+		KT_ASSERT(find_text(got, n, "dave") >= 0);
+		KT_ASSERT(find_text(got, n, pw) < 0);
+		/* the switch on: the password is there */
+		KT_ASSERT_EQ(run_browser(&blank, "ready=" BRREADY "\nquit=9000\nmenu=settings\nsetstep=set:2:1\nsetstep=dump:" BRSET "\n",
+					 NULL, NULL), 0);
+		n = set_read(got, sizeof(got));
+		KT_ASSERT(find_text(got, n, pw) >= 0);
+		/* the first changed, the second removed, the passkey removed */
+		KT_ASSERT_EQ(run_browser(&blank, "ready=" BRREADY "\nquit=12000\nmenu=settings\nsetstep=answer:102\nsetstep=pw:Zq7Newpass\n"
+					 "setstep=set:2:1\nsetstep=pick:1:1\nsetstep=press:3\nsetstep=pick:1:2\nsetstep=press:4\n"
+					 "setstep=sheet:2\nsetstep=pick:10:1\nsetstep=press:11\nsetstep=dump:" BRSET "\n",
+					 NULL, NULL), 0);
+		/* the next run: what was done is kept */
+		KT_ASSERT_EQ(run_browser(&blank, "ready=" BRREADY "\nquit=9000\nmenu=settings\nsetstep=set:2:1\n"
+					 "setstep=sheet:2\nsetstep=sheet:1\nsetstep=set:2:1\nsetstep=dump:" BRSET "\n", NULL, NULL), 0);
+		n = set_read(got, sizeof(got));
+		tm_printf((UB *)"  after: %s\n", "(rows)");
+		KT_ASSERT(find_text(got, n, "Zq7Newpass") >= 0);
+		KT_ASSERT(find_text(got, n, pw) < 0);
+		KT_ASSERT(find_text(got, n, "10:") < 0);	/* no passkey */
+		for ( rows = 0, n = find_text(got, n, "1:http"); n >= 0 && got[n] != '\0'; ) {
+			INT	m = find_text(got + n, (INT)knl_strlen(got + n), "1:http");
+
+			if ( m < 0 ) break;
+			rows++;
+			n += m + 1;
+		}
+		tm_printf((UB *)"  %d passwords left\n", rows);
+		KT_ASSERT(rows >= 1);
+		/* the window as it looks, for a person to read */
+		shot_later = "/boot/BSET3B.PPM";
+		shot_wait = 3000;
+		(void)run_browser(&blank, "ready=" BRREADY "\nquit=8000\nmenu=settings\nsetstep=sheet:3\n", "/boot/BSET3.PPM", NULL);
+		shot_later = NULL;
+		(void)run_browser(&blank, "ready=" BRREADY "\nquit=6000\nmenu=settings\nsetstep=sheet:7\n", "/boot/BSET7.PPM", NULL);
+		desk_down();
+	}
+	srv_end();
+	knl_memset(got, 0, sizeof(got));
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+	KT_ASSERT_ER(ob_del_obj(&blank), E_OK);
+}
+
+/* ---------------------------------------------------------------- what the browser keeps for the user */
+
+IMPORT INT  knl_oj_put( UB *out, INT pos, INT max, CONST char *s );
+IMPORT INT  knl_oj_put_uuid( UB *out, INT pos, INT max, CONST TS_UUID *u );
+IMPORT ER   knl_ob_login_check( CONST TS_UUID *user, CONST UB *password, T_OBCRD *crd );
+
+/* A browser on 'page' with these lines and a test's time; the title as read_title gives it, in brmeta */
+LOCAL INT keep_run( CONST TS_UUID *page, CONST char *lines, void (*check)( CONST TS_UUID *page ) )
+{
+	static char	l[1024];
+
+	knl_strcpy(l, "ready=" BRREADY "\n");
+	knl_strcat(l, lines);
+	KT_ASSERT_EQ(run_browser(page, l, NULL, check), 0);
+	return read_title();
+}
+
+#define SET_OPEN	"menu=settings\nsetstep=answer:102\n"
+
+/*
+ * 閲覧データの消去: "/clr" leaves a cookie, localStorage, a database, a
+ * cache, a service worker and a file; "/clrchk" sees them in a later run.
+ * A clearing from a time still to come takes nothing; one of the other
+ * site takes nothing of this; all of the site takes it all, and the next
+ * run finds nothing.
+ */
+LOCAL void test_blink_clear( void )
+{
+	T_FSTAT	st;
+	TS_UUID	set, chk, blank;
+	INT	n;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18262/clr", &set) ) return;
+	if ( !make_page("http://127.0.0.1:18262/clrchk", &chk) ) return;
+	if ( !make_page("about:blank", &blank) ) return;
+	if ( !srv_start(HTTP_PORT + 182) ) KT_SKIP("no network stack");
+	n = keep_run(&set, "quit=9000\n", NULL);
+	KT_ASSERT(find_text(brmeta, n, "set done") > 0);
+	n = keep_run(&chk, "quit=6000\n", NULL);
+	tm_printf((UB *)"  kept: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "chk c=1 l=1 i=1 k=1 w=1 f=1") > 0);
+	/* from a time to come: nothing is that new */
+	n = keep_run(&blank, "quit=7000\n" SET_OPEN "setstep=sheet:3\nsetstep=future:1\nsetstep=press:32\n", NULL);
+	n = keep_run(&chk, "quit=6000\n", NULL);
+	tm_printf((UB *)"  after a clearing from later: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "chk c=1 l=1 i=1 k=1 w=1 f=1") > 0);
+	/* another site's: nothing of this */
+	n = keep_run(&blank, "quit=7000\n" SET_OPEN "setstep=sheet:3\nsetstep=site:example.org\nsetstep=press:32\n", NULL);
+	n = keep_run(&chk, "quit=6000\n", NULL);
+	tm_printf((UB *)"  after another site's clearing: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "chk c=1 l=1 i=1 k=1 w=1 f=1") > 0);
+	/* this site's: all of it, off the disk */
+	n = keep_run(&blank, "quit=8000\n" SET_OPEN "setstep=sheet:3\nsetstep=site:127.0.0.1\nsetstep=press:32\n", NULL);
+	n = keep_run(&chk, "quit=6000\n", NULL);
+	tm_printf((UB *)"  after this site's clearing: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "chk c=0 l=0 i=0 k=0 w=0 f=0") > 0);
+	/* left again, and everything cleared: the default of the sheet */
+	n = keep_run(&set, "quit=9000\n", NULL);
+	n = keep_run(&blank, "quit=8000\n" SET_OPEN "setstep=sheet:3\nsetstep=press:32\n", NULL);
+	n = keep_run(&chk, "quit=6000\n", NULL);
+	tm_printf((UB *)"  after clearing everything: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "chk c=0 l=0 i=0 k=0 w=0 f=0") > 0);
+	srv_end();
+	(void)ob_del_obj(&set);
+	(void)ob_del_obj(&chk);
+	(void)ob_del_obj(&blank);
+}
+
+/*
+ * Cookies and site data are the user's own. What an older browser left in
+ * the shared record ("BRLS" of an origin, in the older form) is found by
+ * the first user, and is gone from the shared record; another user finds
+ * neither that nor what the first left, and the user's object is the
+ * user's alone.
+ */
+LOCAL void put_shared_local( CONST char *origin )
+{
+	static UB	r[512];
+	TS_UUID		u;
+	INT		n = 12, len, k;
+	SZ		asz = 0;
+	ID		key;
+	CONST char	*key1 = "cl", *val = "1";
+
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_BROWSER_STORAGE, &u), E_OK);
+	knl_memcpy(r + n, "BRLS", 4);
+	n += 4;
+	pw_put32(r + n, 1);
+	n += 4;
+	pw_put32(r + n, 1);
+	n += 4;
+	len = (INT)knl_strlen(origin);
+	pw_put32(r + n, (UW)len);
+	n += 4;
+	knl_memcpy(r + n, origin, len);
+	n += len;
+	pw_put32(r + n, 1);
+	n += 4;
+	for ( k = 0; k < 2; k++ ) {
+		CONST char *t = k == 0 ? key1 : val;
+		len = (INT)knl_strlen(t);
+		pw_put32(r + n, (UW)len);
+		n += 4;
+		knl_memcpy(r + n, t, len);
+		n += len;
+	}
+	knl_memcpy(r, "BRS1", 4);
+	pw_put32(r + 4, (UW)( n - 12 ));
+	pw_put32(r + 8, pw_crc32(r + 12, n - 12));
+	key = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD);
+	KT_ASSERT(key > 0);
+	if ( key <= 0 ) return;
+	KT_ASSERT_ER(ob_wri_rec(key, 1, 0, r, n, &asz), E_OK);
+	KT_ASSERT_ER(ob_trn_rec(key, 1, (UD)n), E_OK);
+	(void)ob_trn_rec(key, 17, 0);
+	ob_cls_obj(key);
+}
+
+LOCAL INT shared_local_size( void )
+{
+	TS_UUID	u;
+	T_OBREC	r[32];
+	INT	cnt = 0, i;
+	ID	key;
+	INT	size = -1;
+
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_BROWSER_STORAGE, &u), E_OK);
+	key = ob_opn_obj(&u, OB_OP_R);
+	if ( key <= 0 ) return -1;
+	if ( ob_lst_rec(key, r, 32, &cnt) >= E_OK ) {
+		for ( i = 0; i < cnt && i < 32; i++ ) {
+			if ( r[i].recno == 1 ) size = (INT)r[i].size;
+		}
+	}
+	ob_cls_obj(key);
+	return size;
+}
+
+LOCAL void test_blink_users( void )
+{
+	static CONST char *names[2] = { "ktbrowser1", "ktbrowser2" };
+	T_FSTAT	st;
+	TS_UUID	set, chk, user[2];
+	T_OBCRD	*crd[2];
+	UB	meta[256];
+	T_OBCRE	oc;
+	INT	i, n;
+	CONST char	*pw = "ktest-pw";
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	for ( i = 0; i < 2; i++ ) {
+		n = knl_oj_put(meta, 0, sizeof(meta), "{\"name\":\"");
+		n = knl_oj_put(meta, n, sizeof(meta), names[i]);
+		n = knl_oj_put(meta, n, sizeof(meta), "\",\"tessronos\":{\"user\":{\"name\":\"");
+		n = knl_oj_put(meta, n, sizeof(meta), names[i]);
+		n = knl_oj_put(meta, n, sizeof(meta), "\",\"groups\":[");
+		n = knl_oj_put_uuid(meta, n, sizeof(meta), &ob_group_users);
+		n = knl_oj_put(meta, n, sizeof(meta), "]}}}");
+		knl_memset(&oc, 0, sizeof(oc));
+		oc.type = OB_T_STORAGE;
+		oc.sub = OB_S_FILE;
+		oc.json = meta;
+		oc.jsonsz = n;
+		if ( ob_cre_obj(&oc, &user[i]) < E_OK ) KT_SKIP("no store for a user object");
+		KT_ASSERT_ER(ob_set_pwd(&user[i], (CONST UB *)pw), E_OK);
+		crd[i] = (T_OBCRD *)Kmalloc(sizeof(T_OBCRD));
+		KT_ASSERT_ER(knl_ob_login_check(&user[i], (CONST UB *)pw, crd[i]), E_OK);
+	}
+	if ( !make_page("http://127.0.0.1:18263/clr", &set) ) return;
+	if ( !make_page("http://127.0.0.1:18263/clrchk", &chk) ) return;
+	if ( !srv_start(HTTP_PORT + 183) ) KT_SKIP("no network stack");
+
+	/* the first user: what the older browser left is theirs, and the shared record gives it up */
+	put_shared_local("http://127.0.0.1:18263");
+	KT_ASSERT_ER(knl_ob_session(crd[0]), E_OK);
+	n = keep_run(&chk, "quit=6000\n", NULL);
+	tm_printf((UB *)"  the first user finds: %s; the shared record %d bytes\n", brmeta, shared_local_size());
+	KT_ASSERT(find_text(brmeta, n, "l=1") > 0);
+	KT_ASSERT(shared_local_size() < 12);
+	n = keep_run(&set, "quit=9000\n", NULL);
+	n = keep_run(&chk, "quit=6000\n", NULL);
+	KT_ASSERT(find_text(brmeta, n, "chk c=1 l=1 i=1 k=1 w=1 f=1") > 0);
+
+	/* the second: nothing of the first's */
+	KT_ASSERT_ER(knl_ob_session(crd[1]), E_OK);
+	n = keep_run(&chk, "quit=6000\n", NULL);
+	tm_printf((UB *)"  the second user finds: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "chk c=0 l=0 i=0 k=0 w=0 f=0") > 0);
+
+	/* and the first still has theirs */
+	KT_ASSERT_ER(knl_ob_session(crd[0]), E_OK);
+	n = keep_run(&chk, "quit=6000\n", NULL);
+	KT_ASSERT(find_text(brmeta, n, "chk c=1 l=1 i=1 k=1 w=1 f=1") > 0);
+
+	KT_ASSERT_ER(knl_ob_session(NULL), E_OK);
+	srv_end();
+	for ( i = 0; i < 2; i++ ) Kfree(crd[i]);
+	(void)ob_del_obj(&set);
+	(void)ob_del_obj(&chk);
+}
+
+/*
+ * History: pages visited in one run are listed in the next, with their
+ * titles; one is removed; letters typed in the address field complete to
+ * the page that is left, and Enter goes to it.
+ */
+LOCAL BOOL hist_went;
+
+LOCAL void hist_type( CONST TS_UUID *page )
+{
+	static CONST UB	keys[] = { 0x1E, 0x1F, 0x24 };	/* 1 2 7: the start of 127.0.0.1 */
+	INT		i;
+
+	(void)wm_msg_mode(WM_MODE_ALPH | WM_MODE_ROMAN);
+	caret_press(page);
+	type_key(0x0F, HID_MOD_LCTRL);
+	tk_dly_tsk(300);
+	for ( i = 0; i < 3; i++ ) type_key(keys[i], 0);
+	tk_dly_tsk(300);
+	type_key(0x28, 0);
+	hist_went = asked_for("/hi2", 8000);
+}
+
+LOCAL void test_blink_history( void )
+{
+	T_FSTAT	st;
+	TS_UUID	hi1, blank, d;
+	static char	got[4096];
+	INT	n, i;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18264/hi1", &hi1) ) return;
+	if ( !make_page("about:blank", &blank) ) return;
+	if ( !srv_start(HTTP_PORT + 184) ) KT_SKIP("no network stack");
+	KT_ASSERT_ER(dt_start(), E_OK);
+	for ( i = 0; i < 100 && ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK; i++ ) tk_dly_tsk(100);
+	/* everything of earlier tests out, then the two visited */
+	n = keep_run(&blank, "quit=7000\n" SET_OPEN "setstep=sheet:3\nsetstep=set:28:1\nsetstep=press:32\n", NULL);
+	n = keep_run(&hi1, "quit=6000\nthen=http://127.0.0.1:18264/hi2\n", NULL);
+	n = keep_run(&blank, "quit=6000\n" SET_OPEN "setstep=sheet:4\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	tm_printf((UB *)"  listed: %d bytes\n", n);
+	KT_ASSERT(find_text(got, n, "/hi1") > 0);
+	KT_ASSERT(find_text(got, n, "/hi2") > 0);
+	KT_ASSERT(find_text(got, n, "visited page") > 0);
+	/* the first row is the last visited, /hi2: the one before it removed */
+	n = keep_run(&blank, "quit=6000\n" SET_OPEN "setstep=sheet:4\nsetstep=pick:40:2\nsetstep=press:41\n", NULL);
+	n = keep_run(&blank, "quit=6000\n" SET_OPEN "setstep=sheet:4\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	KT_ASSERT(find_text(got, n, "/hi1") < 0);
+	KT_ASSERT(find_text(got, n, "/hi2") > 0);
+	hist_went = FALSE;
+	(void)keep_run(&blank, "quit=16000\n", hist_type);
+	tm_printf((UB *)"  completed to /hi2: %d\n", hist_went);
+	KT_ASSERT(hist_went);
+	dt_quit();
+	wm_update();
+	srv_end();
+	(void)ob_del_obj(&hi1);
+	(void)ob_del_obj(&blank);
+}
+
+/* HTTPS rules: a host's kept to the next run, and gone with the history (the rule added by a test's line; no TLS server here) */
+LOCAL void test_blink_hsts( void )
+{
+	T_FSTAT	st;
+	TS_UUID	blank;
+	static char	got[512];
+	INT	n;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("about:blank", &blank) ) return;
+	n = keep_run(&blank, "quit=5000\nmenu=settings\nsetstep=hsts:hsts.example\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	KT_ASSERT(find_text(got, n, "hsts=0") >= 0);
+	n = keep_run(&blank, "quit=4000\nhstsadd=hsts.example\n", NULL);
+	n = keep_run(&blank, "quit=5000\nmenu=settings\nsetstep=hsts:hsts.example\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	tm_printf((UB *)"  in the next run: %s\n", got);
+	KT_ASSERT(find_text(got, n, "hsts=1") >= 0);
+	n = keep_run(&blank, "quit=7000\n" SET_OPEN "setstep=sheet:3\nsetstep=set:28:1\nsetstep=press:32\n", NULL);
+	n = keep_run(&blank, "quit=5000\nmenu=settings\nsetstep=hsts:hsts.example\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	KT_ASSERT(find_text(got, n, "hsts=0") >= 0);
+	(void)ob_del_obj(&blank);
+}
+
+/*
+ * Downloads: "/dlslow" is seen going, its count moving; 中止 stops it and
+ * the server is not read to its end; "/dlfile" is done; the list is the
+ * same in the next run, and a row taken off it stays off.
+ */
+LOCAL void test_blink_dl( void )
+{
+	T_FSTAT	st;
+	TS_UUID	go, ok, blank;
+	static char	got[4096];
+	INT	n;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18265/dlgo", &go) ) return;
+	if ( !make_page("http://127.0.0.1:18265/dlok", &ok) ) return;
+	if ( !make_page("about:blank", &blank) ) return;
+	if ( !srv_start(HTTP_PORT + 185) ) KT_SKIP("no network stack");
+	srv_stop_slow = FALSE;
+	n = keep_run(&blank, "quit=7000\n" SET_OPEN "setstep=sheet:3\nsetstep=set:29:1\nsetstep=press:32\n", NULL);
+	n = keep_run(&go, "quit=14000\nmenu=settings\nsetstep=sheet:5\nsetstep=wait:4000\nsetstep=dump:" BRSET "\n"
+		     "setstep=pick:50:1\nsetstep=press:51\nsetstep=wait:2000\nsetstep=sheet:5\nsetstep=dump:/boot/BRSET2.TXT\n", NULL);
+	srv_stop_slow = TRUE;
+	n = set_read(got, sizeof(got));
+	tm_printf((UB *)"  while going: %s\n", got);
+	KT_ASSERT(find_text(got, n, "slow.bin\t受信中") >= 0);
+	(void)fs_unlink(BRSET);
+	{
+		INT fd = fs_open("/boot/BRSET2.TXT", O_RDONLY);
+		n = fd >= 0 ? fs_read(fd, got, sizeof(got) - 1) : 0;
+		if ( fd >= 0 ) (void)fs_close(fd);
+		if ( n < 0 ) n = 0;
+		got[n] = '\0';
+	}
+	tm_printf((UB *)"  stopped: %s\n", got);
+	KT_ASSERT(find_text(got, n, "slow.bin\t中止") >= 0);
+	n = keep_run(&ok, "quit=6000\n", NULL);
+	n = keep_run(&blank, "quit=6000\nmenu=settings\nsetstep=sheet:5\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	tm_printf((UB *)"  the next run: %s\n", got);
+	KT_ASSERT(find_text(got, n, "done.txt\t完了") >= 0);
+	KT_ASSERT(find_text(got, n, "slow.bin\t中止") >= 0);
+	/* the newest row, done.txt, off the list */
+	n = keep_run(&blank, "quit=6000\nmenu=settings\nsetstep=sheet:5\nsetstep=pick:50:1\nsetstep=press:52\n", NULL);
+	n = keep_run(&blank, "quit=6000\nmenu=settings\nsetstep=sheet:5\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	KT_ASSERT(find_text(got, n, "done.txt") < 0);
+	srv_end();
+	(void)ob_del_obj(&go);
+	(void)ob_del_obj(&ok);
+	(void)ob_del_obj(&blank);
+}
+
+/*
+ * Addresses and cards: entered in the window and there in the next run,
+ * the card's number hidden but for its end until the switch is on, and in
+ * no record of the shared object in the clear. A form's field taking the
+ * focus offers them on the panel: Esc leaves the form empty, Enter fills
+ * it.
+ */
+LOCAL BOOL	af_esc;
+
+LOCAL void af_press( CONST TS_UUID *page )
+{
+	(void)wm_msg_mode(WM_MODE_ALPH | WM_MODE_ROMAN);
+	caret_press(page);
+	tk_dly_tsk(2000);
+	type_key(af_esc ? 0x29 : 0x28, 0);
+	tk_dly_tsk(1500);
+}
+
+LOCAL void test_blink_autofill( void )
+{
+	T_FSTAT	st;
+	TS_UUID	aff, cff, blank, u, d;
+	static char	got[4096];
+	static UB	rec[8192];
+	SZ	asz = 0;
+	INT	n, i;
+	ID	k;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18266/aff", &aff) ) return;
+	if ( !make_page("http://127.0.0.1:18266/cff", &cff) ) return;
+	if ( !make_page("about:blank", &blank) ) return;
+	if ( !srv_start(HTTP_PORT + 186) ) KT_SKIP("no network stack");
+	KT_ASSERT_ER(dt_start(), E_OK);
+	for ( i = 0; i < 100 && ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK; i++ ) tk_dly_tsk(100);
+	n = keep_run(&blank, "quit=8000\n" SET_OPEN "setstep=sheet:6\nsetstep=text:61:Yamada\nsetstep=text:63:100-0001\n"
+		     "setstep=text:69:y@example.jp\nsetstep=press:70\nsetstep=sheet:7\nsetstep=text:81:YAMADA\n"
+		     "setstep=text:82:4111111111119876\nsetstep=text:83:12\nsetstep=text:84:2031\nsetstep=press:86\n", NULL);
+	/* the next run: listed, the number hidden */
+	n = keep_run(&blank, "quit=6000\nmenu=settings\nsetstep=sheet:6\nsetstep=sheet:7\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	tm_printf((UB *)"  listed: %s\n", got);
+	KT_ASSERT(find_text(got, n, "60:Yamada") >= 0);
+	KT_ASSERT(find_text(got, n, "****9876") >= 0);
+	KT_ASSERT(find_text(got, n, "4111111111119876") < 0);
+	/* the switch on: the number */
+	n = keep_run(&blank, "quit=6000\nmenu=settings\nsetstep=sheet:7\nsetstep=set:85:1\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	KT_ASSERT(find_text(got, n, "4111111111119876") >= 0);
+	(void)fs_unlink(BRSET);
+	/* sealed in its record */
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_BROWSER_STORAGE, &u), E_OK);
+	k = ob_opn_obj(&u, OB_OP_R);
+	KT_ASSERT(k > 0);
+	if ( k > 0 ) {
+		KT_ASSERT(ob_rea_rec(k, 12, 0, rec, sizeof(rec), &asz) >= E_OK);
+		ob_cls_obj(k);
+		tm_printf((UB *)"  record 12: %d bytes\n", (INT)asz);
+		KT_ASSERT(asz > 16 && rec[12] == 'B' && rec[13] == 'R' && rec[14] == 'K' && rec[15] == '1');
+		KT_ASSERT(find_text((CONST char *)rec, (INT)asz, "4111111111119876") < 0);
+		KT_ASSERT(find_text((CONST char *)rec, (INT)asz, "Yamada") < 0);
+	}
+	/* Esc on the panel: nothing goes in */
+	af_esc = TRUE;
+	n = keep_run(&aff, "quit=12000\n", af_press);
+	tm_printf((UB *)"  refused: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "af n= z= e=") > 0);
+	/* chosen: the address */
+	af_esc = FALSE;
+	n = keep_run(&aff, "quit=12000\n", af_press);
+	tm_printf((UB *)"  filled: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "af n=Yamada z=100-0001 e=y@example.jp") > 0);
+	/* the card, refused and chosen */
+	af_esc = TRUE;
+	n = keep_run(&cff, "quit=12000\n", af_press);
+	KT_ASSERT(find_text(brmeta, n, "cf c= m= y=") > 0);
+	af_esc = FALSE;
+	n = keep_run(&cff, "quit=12000\n", af_press);
+	tm_printf((UB *)"  the card filled: %d\n", find_text(brmeta, n, "cf c=4111111111119876 m=12 y=2031") > 0);
+	KT_ASSERT(find_text(brmeta, n, "cf c=4111111111119876 m=12 y=2031") > 0);
+	/* changed and removed */
+	n = keep_run(&blank, "quit=7000\n" SET_OPEN "setstep=sheet:7\nsetstep=pick:80:1\nsetstep=press:88\nsetstep=sheet:6\n"
+		     "setstep=pick:60:1\nsetstep=text:61:Suzuki\nsetstep=press:71\n", NULL);
+	n = keep_run(&blank, "quit=6000\nmenu=settings\nsetstep=sheet:7\nsetstep=sheet:6\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	KT_ASSERT(find_text(got, n, "60:Suzuki") >= 0);
+	KT_ASSERT(find_text(got, n, "80:") < 0);
+	dt_quit();
+	wm_update();
+	srv_end();
+	knl_memset(got, 0, sizeof(got));
+	(void)ob_del_obj(&aff);
+	(void)ob_del_obj(&cff);
+	(void)ob_del_obj(&blank);
 }
 
 /*
@@ -16955,6 +18962,41 @@ LOCAL void test_blink_meet( void )
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
 }
 
+LOCAL void test_blink_share( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_ext( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_cookieshare( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_subaddr( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_storeshare( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_storebusy( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_ubol( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
 LOCAL void test_blink_coi( void )
 {
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
@@ -17041,6 +19083,46 @@ LOCAL void test_blink_av1( void )
 }
 
 LOCAL void test_blink_mseav1( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_settings( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_clear( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_users( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_history( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_hsts( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_dl( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_autofill( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_caret( void )
 {
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
 }
@@ -17225,6 +19307,7 @@ EXPORT void ktest_v8( void )
 	V8_RUN(test_blink);
 	V8_RUN(test_blink_image);
 	V8_RUN(test_blink_input);
+	V8_RUN(test_blink_caret);
 	V8_RUN(test_blink_hwheel);
 	V8_RUN(test_blink_mem);
 	V8_RUN(test_blink_keep);
@@ -17261,6 +19344,13 @@ EXPORT void ktest_v8( void )
 	V8_RUN(test_blink_cookie);
 	V8_RUN(test_blink_rtc);
 	V8_RUN(test_blink_meet);
+	V8_RUN(test_blink_share);
+	V8_RUN(test_blink_ext);
+	V8_RUN(test_blink_storebusy);
+	V8_RUN(test_blink_cookieshare);
+	V8_RUN(test_blink_storeshare);
+	V8_RUN(test_blink_subaddr);
+	V8_RUN(test_blink_ubol);
 	V8_RUN(test_blink_coi);
 	V8_RUN(test_blink_api3);
 	V8_RUN(test_blink_webgpu);
@@ -17280,6 +19370,13 @@ EXPORT void ktest_v8( void )
 	V8_RUN(test_blink_av1);
 	V8_RUN(test_blink_mseav1);
 	V8_RUN(test_blink_pw);
+	V8_RUN(test_blink_settings);
+	V8_RUN(test_blink_clear);
+	V8_RUN(test_blink_users);
+	V8_RUN(test_blink_history);
+	V8_RUN(test_blink_hsts);
+	V8_RUN(test_blink_dl);
+	V8_RUN(test_blink_autofill);
 	V8_RUN(test_blink_pdf);
 	V8_RUN(test_blink_mchunk);
 	V8_RUN(test_blink_ai);

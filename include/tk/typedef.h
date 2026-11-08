@@ -48,16 +48,28 @@ typedef int64_t			VD;		/* Nonuniform type 64 bit data */
 
 typedef signed char		B;		/* Signed 8 bit integer */
 typedef signed short		H;		/* Signed 16 bit integer */
+#ifdef __LP64__
+typedef signed int		W;		/* Signed 32 bit integer: long is 64 bits here */
+#else
 typedef signed long		W;		/* Signed 32 bit integer */
+#endif
 typedef signed long long	D;		/* Signed 64 bit integer */
 typedef unsigned char		UB;		/* Unsigned 8 bit integer */
 typedef unsigned short  	UH;		/* Unsigned 16 bit integer */
+#ifdef __LP64__
+typedef unsigned int		UW;		/* Unsigned 32 bit integer: long is 64 bits here */
+#else
 typedef unsigned long		UW;		/* Unsigned 32 bit integer */
+#endif
 typedef unsigned long long	UD;		/* Unsigned 64 bit integer */
 
 typedef signed char		VB;		/* Nonuniform type 8 bit data */
 typedef signed short		VH;		/* Nonuniform type 16 bit data */
+#ifdef __LP64__
+typedef signed int		VW;		/* Nonuniform type 32 bit data */
+#else
 typedef signed long		VW;		/* Nonuniform type 32 bit data */
+#endif
 typedef signed long long	VD;		/* Nonuniform type 64 bit data */
 
 #endif	/* USE_STDINC_STDINT */

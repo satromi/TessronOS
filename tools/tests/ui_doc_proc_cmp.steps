@@ -1,0 +1,78 @@
+# 基本文章編集: the desktop's own and the process write the same record and show the same
+# page (design 11.3), for tools/ui_run.py. Two copies of 基本文章編集 with 30 paragraphs
+# (mkbig doc 30) are given the same changes, one in the desktop's text editor (open) and one
+# in the text editor running as a process (pdoc): the caret put in the second paragraph,
+# abc typed (in the width the input mode says), one letter taken back with Backspace, a new
+# paragraph with Enter, letters picked by carrying the hand across the fourth line and thrown
+# away with Delete, then saved. Record 0 of both must be the same, byte for byte; the shots
+# (doc_cmp_k_*, doc_cmp_p_*) are compared afterwards inside the window, where the text is
+# (101,125 to 682,482 of the screen: the window stands at 100,100, 600 by 400). The pointer
+# is put on the corner of the bars before the first shot of each.
+# Keys: Backspace 2A, Enter 28, Delete 4C; Ctrl+S 16 01, Ctrl+E 08 01.
+# the desktop's text editor opened by open, whatever the program object says (docproc kernel)
+docproc kernel
+mkbig doc 30
+open big
+waitwin 基本文章編集 600
+sync 600
+wait 500
+move 690 490
+sync 600
+shot doc_cmp_k_open
+click 300 170
+sync 600
+text abc
+sync 600
+key 2A
+sync 600
+key 28
+sync 600
+shot doc_cmp_k_typed
+drag 160 230 420 230
+sync 600
+key 4C
+sync 600
+shot doc_cmp_k_done
+key 16 01
+sync 600
+sum show
+keep kernel
+key 08 01
+sync 600
+wait 500
+mkbig doc 30
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 800
+move 690 490
+wait 300
+shot doc_cmp_p_open
+logmark
+click 300 170
+expectsince document: drew
+logmark
+text abc
+expectsince document: key to screen
+wait 300
+logmark
+key 2A
+expectsince document: key to screen
+logmark
+key 28
+expectsince document: key to screen
+shot doc_cmp_p_typed
+logmark
+drag 160 230 420 230
+expectsince document: drew
+logmark
+key 4C
+expectsince document: key to screen
+shot doc_cmp_p_done
+logmark
+key 16 01
+expectsince document: saved (0)
+sum show
+same kernel
+key 08 01
+expect document: closed

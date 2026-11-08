@@ -1,0 +1,21 @@
+The SDIO product table has the CYW43455 only under 0xa9bf. The chip on a
+Raspberry Pi 5 Model B Rev 1.0 (d04170) reports 02d0:4345 in its CIS, so
+sdmmc leaves all three functions "not configured" and there is no bwfm0.
+The firmware is chosen afterwards by the chip's ID and revision, not by
+this number. OpenBSD's if_bwfm_sdio.c matches SDMMC_PRODUCT_BROADCOM_BCM4345
+in the same way.
+
+--- a/sys/dev/sdmmc/if_bwfm_sdio.c
++++ b/sys/dev/sdmmc/if_bwfm_sdio.c
+@@ -305,6 +305,11 @@
+ 		SDMMC_PRODUCT_BROADCOM_BCM43455,
+ 		SDMMC_CIS_BROADCOM_BCM43455
+ 	},
++	{
++		SDMMC_VENDOR_BROADCOM,
++		SDMMC_PRODUCT_BROADCOM_BCM4345,
++		SDMMC_CIS_BROADCOM_BCM4345
++	},
+ 	{
+ 		SDMMC_VENDOR_BROADCOM,
+ 		SDMMC_PRODUCT_BROADCOM_BCM43362,

@@ -21,6 +21,7 @@
 #include <ts/ftp.h>
 #include <ts/xfu.h>
 #include <ts/ui.h>
+#include <ts/vobjsz.h>
 
 #define XFC_ENT_MAX	2048		/* entries a list holds */
 #define XFC_DISKS	2048		/* disks listed: every disk and partition the device manager knows */
@@ -73,6 +74,8 @@ typedef struct {
 	UB	lport[8];		/* the active way: the port listened on, "" any */
 	BOOL	keep;			/* the password is kept with the settings */
 	BOOL	ssh;			/* by SSH (SFTP) */
+	UB	hostkey[65];		/* SSH: the SHA-256 of the server's key once accepted, in hex */
+	UB	newkey[65];		/* one shown to the user and not yet accepted */
 } XFCCONN;
 
 /* How the data of FTP goes */
@@ -161,7 +164,8 @@ IMPORT BOOL xfc_uuid_parse( CONST char *s, TS_UUID *u );
 /* ---------------------------------------------------------------- drawing (xfc_draw.c) */
 
 #define XFC_ROW_H	32		/* a row of the list */
-#define XFC_VOBJ_H	25		/* a 仮身 in it: a closed one at 14 points */
+#define XFC_TEXT_PX	16		/* the letters of an entry */
+#define XFC_VOBJ_H	VOBJ_CLOSED_H(XFC_TEXT_PX, 1, 1)	/* a 仮身 in it: closed, at those letters */
 #define XFC_TOP		10		/* above the first row */
 #define XFC_LEFT	12		/* left of the 仮身 */
 #define XFC_SB_W	14		/* the scroll bar */

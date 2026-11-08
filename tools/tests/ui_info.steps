@@ -5,6 +5,8 @@
 # line, 編集 (コピー, 貼り付け), ウインドウ, 小物, 実行. On 付箋指定 a 機能付箋
 # is chosen and copied to the tray with 編集 > コピー; the window is carried
 # by its band, made larger by its corner, and closed with 閉じる of its menu.
+# The first click waits for the first window to be drawn: it is to land on a link.
+wait 1000
 click 110 100
 click 110 100 1
 wait 500

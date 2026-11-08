@@ -52,6 +52,7 @@ typedef struct {
 	BOOL	native;
 	TS_UUID	vuuid;			/* the native volume's own UUID */
 	BOOL	again;			/* attached before since the start: its disk taken out and put back */
+	BOOL	finished;		/* the machine going off: left clean (knl_obfile_finish) */
 } OBFVOL;
 
 typedef struct {
@@ -344,6 +345,7 @@ EXPORT ER knl_obfile_attach( CONST char *path, UINT flags )
 		v->vuuid = inf->vuuid;
 		v->again = known_has(&inf->vuuid);
 		v->gone = FALSE;
+		v->finished = FALSE;
 		v->used = TRUE;
 		obf_serial++;
 		known_note(&inf->vuuid, inf->label, path);
@@ -525,6 +527,70 @@ EXPORT ER knl_obfile_detach( CONST char *path )
 	UNLOCK();
 
 	return er;
+}
+
+/*
+ * The machine going off: each volume of objects, one by one, told on the
+ * console. The volume's lock is not held over the writing, which takes
+ * time and the device. 'finish' FALSE: what is committed made sure to be
+ * on the medium, once more when that fails; how many failed. TRUE: each
+ * left clean and read only; how many could not be.
+ */
+EXPORT INT knl_obfile_shut( BOOL finish )
+{
+	INT	i, n, bad = 0;
+
+	if ( obf_mtx <= 0 ) {
+		return 0;
+	}
+	n = __atomic_load_n(&obf_nvol, __ATOMIC_ACQUIRE);
+	for ( i = 0; i < n; i++ ) {
+		OBFVOL	*v = obf_vol[i];
+		UB	path[FS_PATH_MAX];
+		BOOL	used, gone, native, done;
+		ID	vol;
+		ER	er;
+
+		LOCK();
+		used = v->used;
+		gone = v->gone;
+		native = v->native;
+		done = v->finished;
+		vol = v->vol;
+		knl_strcpy((char *)path, (CONST char *)v->path);
+		UNLOCK();
+		if ( !used || done ) {
+			continue;
+		}
+		if ( gone ) {
+			tm_printf((UB *)"shutdown: volume %s: its disk has gone, nothing written\n", path);
+			continue;
+		}
+		if ( !finish ) {
+			er = ts_syn_vol(vol);
+			if ( er < E_OK ) {
+				tm_printf((UB *)"shutdown: volume %s: not written (%d), once more\n", path, (INT)er);
+				er = ts_syn_vol(vol);
+			}
+			tm_printf((UB *)"shutdown: volume %s: %s (%d)\n", path, ( er >= E_OK ) ? "written" : "COULD NOT BE WRITTEN", (INT)er);
+			if ( er < E_OK ) bad++;
+			continue;
+		}
+		if ( !native ) {
+			continue;
+		}
+		er = ts_finish_vol(vol);
+		if ( er == E_RONLY ) {
+			tm_printf((UB *)"shutdown: volume %s: read only, left as it was\n", path);
+		} else {
+			tm_printf((UB *)"shutdown: volume %s: %s (%d)\n", path, ( er >= E_OK ) ? "marked clean" : "NOT MARKED CLEAN", (INT)er);
+			if ( er < E_OK ) bad++;
+		}
+		LOCK();
+		v->finished = TRUE;
+		UNLOCK();
+	}
+	return bad;
 }
 
 /* Whether a volume's path is the device's own, or a store on its mount ("/media/uda0/...") */

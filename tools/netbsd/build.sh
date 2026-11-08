@@ -688,12 +688,55 @@ add_jobs() {
 	done
 }
 
+# WG=1: WireGuard (sys/net/if_wg.c, the kernel's form, not the one over a tun of the host), with
+# the parts of libsodium (ISC) it takes through sys/crypto/sodium, BLAKE2s and ChaCha. The
+# object goes to its own place (build_make), for a build without it stays as it was.
+WG=${WG:-0}
+SODIUM=external/isc/libsodium
+SD=$SODIUM/dist/src/libsodium
+WG_EXTRACT_DIRS="sys/crypto/sodium sys/rump/net/lib/libwg sys/$SODIUM/src sys/$SODIUM/include
+ sys/$SD/include/sodium sys/$SD/include/sodium/private
+ sys/$SD/crypto_scalarmult sys/$SD/crypto_scalarmult/curve25519 sys/$SD/crypto_scalarmult/curve25519/ref10
+ sys/$SD/crypto_onetimeauth sys/$SD/crypto_onetimeauth/poly1305 sys/$SD/crypto_onetimeauth/poly1305/donna
+ sys/$SD/crypto_stream/chacha20 sys/$SD/crypto_stream/chacha20/ref
+ sys/$SD/crypto_aead/xchacha20poly1305/sodium sys/$SD/crypto_aead/chacha20poly1305/sodium
+ sys/$SD/crypto_core/hchacha20 sys/$SD/crypto_core/ed25519/ref10
+ sys/$SD/crypto_core/ed25519/ref10/fe_25_5 sys/$SD/crypto_core/ed25519/ref10/fe_51"
+WG_PATH="$S/net $R/net/lib/libwg $COMP/wg"
+WG_SRCS="if_wg.c wg_component.c tswg.c"
+SD_DIR=$S/$SD
+SODIUM_PATH="$SD_DIR/crypto_scalarmult/curve25519/ref10 $SD_DIR/crypto_scalarmult/curve25519
+ $SD_DIR/crypto_scalarmult $SD_DIR/crypto_onetimeauth/poly1305/donna $SD_DIR/crypto_onetimeauth/poly1305
+ $SD_DIR/crypto_onetimeauth $SD_DIR/crypto_stream/chacha20/ref $SD_DIR/crypto_stream/chacha20
+ $SD_DIR/crypto_aead/xchacha20poly1305/sodium $SD_DIR/crypto_aead/chacha20poly1305/sodium
+ $SD_DIR/crypto_core/hchacha20 $SD_DIR/crypto_core/ed25519/ref10 $S/$SODIUM/src"
+SODIUM_SRCS="x25519_ref10.c scalarmult_curve25519.c crypto_scalarmult.c poly1305_donna.c
+ onetimeauth_poly1305.c crypto_onetimeauth.c chacha20_ref.c stream_chacha20.c
+ aead_xchacha20poly1305.c aead_chacha20poly1305.c core_hchacha20.c ed25519_ref10.c
+ sodium_module.c sodium_selftest.c"
+
+stage_fetch_wg() {
+	[ "$WG" = 1 ] || return 0
+	[ -f "$S/net/if_wg.c" ] && [ -f "$S/$SODIUM/src/sodium_module.c" ] && [ -f "$R/net/lib/libwg/wg_component.c" ] && return 0
+	local pats="" p
+	[ -f "$NB_DL" ] || { echo "fetch: WireGuard's sources need syssrc.tgz in $NB_DL" >&2; exit 1; }
+	echo "$NB_SHA512  $NB_DL" | sha512sum -c - || exit 1
+	for p in $WG_EXTRACT_DIRS; do pats="$pats usr/src/$p/*"; done
+	# shellcheck disable=SC2086
+	tar xzf "$NB_DL" -C "$NB" --strip-components=2 --exclude='*/CVS' \
+		--wildcards --no-wildcards-match-slash --no-recursion $pats
+	cp "$S/$SODIUM/dist/LICENSE" "$OUT/LICENSE-libsodium.txt" 2>/dev/null || true
+}
+
 stage_compile() {
 	write_cc1
 	export OUT
 	: > "$OUT/jobs.list"
 	MISSING=0
-	add_jobs rumpkern "$RUMPKERN_PATH" "$RUMPKERN_SRCS $RUMPKERN_NORENAME" "-I$GEN/rumpkern"
+	# threads.c from its patched copy, the rest where it is
+	local threads_path
+	threads_path=$(patched_copy sys/rump/librump/rumpkern/threads.c "$PATCHES"/rump-*.patch) || exit 1
+	add_jobs rumpkern "$threads_path $RUMPKERN_PATH" "$RUMPKERN_SRCS $RUMPKERN_NORENAME" "-I$GEN/rumpkern"
 	# the C library's internal declarations, which libkern's sources share
 	add_jobs libkern "$LIBKERN_PATH" "$LIBKERN_SRCS" "-I$C/include/libc"
 	# net_stub.c holds tentative definitions of what if.c defines
@@ -703,6 +746,12 @@ stage_compile() {
 	arp_path=$(patched_copy sys/netinet/if_arp.c "$PATCHES"/if_arp-*.patch) || exit 1
 	add_jobs net "$arp_path $NET_PATH" "$NET_SRCS" "-I$GEN/net"
 	add_jobs neta "$NETA_PATH" "$NETA_SRCS"
+	if [ "$WG" = 1 ]; then
+		mkdir -p "$GEN/wg"
+		echo "void	wgattach(int);" > "$GEN/wg/ioconf.h"
+		add_jobs wg "$WG_PATH" "$WG_SRCS" "-I$S/crypto/chacha -I$GEN/wg"
+		add_jobs sodium "$SODIUM_PATH" "$SODIUM_SRCS" "-I$S/$SODIUM/include -I$SD_DIR/include/sodium"
+	fi
 	if [ "$WIFI" = 1 ] && [ "$WIFI_SIM" = 1 ]; then
 		# the station is bwfm0, as the chip (tswifi_if.c)
 		add_jobs wlan "$WLAN_PATH" "$WLAN_SRCS" "-DIEEE80211_DEBUG"
@@ -714,10 +763,11 @@ stage_compile() {
 		# what net80211 and bwfm say of each step goes to the console
 		# while the manager wants it (rump_tswifi_debug)
 		add_jobs wlan "$WLAN_PATH" "$WLAN_SRCS" "-DIEEE80211_DEBUG"
-		# bwfm.c from its patched copy, the rest of bwfm where it is
-		local bwfm_path
+		# bwfm.c and if_bwfm_sdio.c from their patched copies
+		local bwfm_path bwfm_sdio_path
 		bwfm_path=$(patched_copy sys/dev/ic/bwfm.c "$PATCHES"/bwfm-*.patch) || exit 1
-		add_jobs bwfm "$bwfm_path $BWFM_PATH" "$BWFM_SRCS" "-I$GEN/wifi -DIEEE80211_DEBUG"
+		bwfm_sdio_path=$(patched_copy sys/dev/sdmmc/if_bwfm_sdio.c "$PATCHES"/if_bwfm_sdio-*.patch) || exit 1
+		add_jobs bwfm "$bwfm_path $bwfm_sdio_path $BWFM_PATH" "$BWFM_SRCS" "-I$GEN/wifi -DIEEE80211_DEBUG"
 		add_jobs tswifi "$TSWIFI_PATH" "$TSWIFI_SRCS" "-I$GEN/wifi -DIEEE80211_DEBUG"
 	fi
 	[ "$MISSING" = 0 ] || exit 1
@@ -830,12 +880,12 @@ stage_notices() {
 }
 
 case $STAGE in
-fetch)		stage_fetch; stage_fetch_wifi ;;
+fetch)		stage_fetch; stage_fetch_wifi; stage_fetch_wg ;;
 gen)		stage_gen ;;
 compile)	stage_compile ;;
 link)		stage_link ;;
 notices)	stage_notices ;;
-all)		stage_fetch; stage_fetch_wifi; stage_gen; stage_compile; stage_link; stage_notices ;;
+all)		stage_fetch; stage_fetch_wifi; stage_fetch_wg; stage_gen; stage_compile; stage_link; stage_notices ;;
 clean)		rm -rf "$OBJ" "$GEN" "$OUT/rumpnet.o" "$OUT/NOTICE-netbsd.txt" ;;
 *)		echo "usage: $0 [fetch|gen|compile|link|notices|all|clean]" >&2; exit 2 ;;
 esac

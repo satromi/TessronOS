@@ -61,10 +61,13 @@ IMPORT void	knl_wifi_rx( CONST UB *frame, INT len );
 /*
  * The cards OpenBSD's drivers know: iwm(4) (its iwm_devices[]: Intel's
  * 3160 to 8265) and iwx(4) (its iwx_devices[]: the Wi-Fi 6 AX200 and
- * later, whose registers and rings are of the next generation). Which
- * of the two drives the card is decided again by the layer from the
- * drivers' own tables (tswifi_obsd.c); here it says only which
- * registers the records of the card read.
+ * later, whose registers and rings are of the next generation), and
+ * mwx(4) (its mwx_devices[]: MediaTek's), and TessronOS's athx
+ * (Qualcomm's QCA6174 hw3.x). Which of them drives the card is decided
+ * again by the layer from the drivers' own match (tswifi_obsd.c); here it
+ * says only which registers the records of the card read: none of
+ * Intel's on MediaTek's or Qualcomm's, whose windows have other things at
+ * those offsets.
  */
 typedef struct {
 	UH	device;
@@ -85,7 +88,17 @@ LOCAL CONST WIFI_ID	wifi_ids[] = {
 	{ 0x7f70, 1 }, { 0x54f0, 1 }, { 0x51f1, 1 }, { 0x7740, 1 }
 };
 
+/* MT7920, MT7921, MT7921K, MT7922 and the AMD RZ616 that is one; not the MT7925, whose firmware is not on the volume */
+LOCAL CONST UH	wifi_mt_ids[] = { 0x7920, 0x7961, 0x0608, 0x7922, 0x0616 };
+
+/* Qualcomm's QCA6174 (athx; the first Surface Go's Wi-Fi model) */
+#define WIFI_QCA_VENDOR		0x168c
+#define WIFI_QCA6174		0x003e
+
 LOCAL BOOL	w_iwx = FALSE;		/* the card found is one of iwx's */
+LOCAL BOOL	w_mt = FALSE;		/* the card found is one of mwx's */
+LOCAL BOOL	w_qca = FALSE;		/* the card found is athx's */
+#define W_NOT_INTEL	( w_mt || w_qca )	/* the card has none of Intel's registers */
 
 /* The firmware a card asks for by name, and the object that holds it */
 typedef struct {
@@ -96,6 +109,36 @@ typedef struct {
 LOCAL CONST WIFI_FW	wifi_fw[] = {
 	{ "iwm-8265-36",		SYSDEF_FW_IWM8265_36 },	/* OpenBSD's iwm: API 36 */
 	{ "iwx-cc-a0-77",		SYSDEF_FW_IWXCC_77 },	/* OpenBSD's iwx: the AX200's, API 77 */
+	{ "iwx-Qu-b0-hr-b0-77",		SYSDEF_FW_IWXQUB_77 },	/* the AX201's, by the chip's revision */
+	{ "iwx-Qu-c0-hr-b0-77",		SYSDEF_FW_IWXQUC_77 },
+	{ "iwx-QuZ-a0-hr-b0-77",	SYSDEF_FW_IWXQUZ_77 },
+	{ "iwx-ty-a0-gf-a0-77",		SYSDEF_FW_IWXTY_77 },	/* the AX210's */
+	{ "iwx-ty-a0-gf-a0.pnvm",	SYSDEF_FW_IWXTY_PNVM },
+	{ "iwx-so-a0-gf-a0-77",		SYSDEF_FW_IWXSO_77 },	/* the AX210 of other subsystems, the AX211 */
+	{ "iwx-so-a0-gf-a0.pnvm",	SYSDEF_FW_IWXSO_PNVM },
+	{ "iwx-so-a0-gf4-a0-77",	SYSDEF_FW_IWXSOGF4_77 },	/* on the AX211's PCI IDs, by the card's radio */
+	{ "iwx-so-a0-gf4-a0.pnvm",	SYSDEF_FW_IWXSOGF4_PNVM },
+	{ "iwx-so-a0-hr-b0-77",		SYSDEF_FW_IWXSOHR_77 },
+	{ "iwx-so-a0-jf-b0-77",		SYSDEF_FW_IWXSOJF_77 },
+	{ "iwx-Qu-b0-jf-b0-77",	SYSDEF_FW_IWXQUBJF_77 },
+	{ "iwx-Qu-c0-jf-b0-77",	SYSDEF_FW_IWXQUCJF_77 },
+	{ "iwx-QuZ-a0-jf-b0-77",	SYSDEF_FW_IWXQUZJF_77 },
+	{ "iwm-3160-17",		SYSDEF_FW_IWM3160_17 },
+	{ "iwm-3168-29",		SYSDEF_FW_IWM3168_29 },
+	{ "iwm-7260-17",		SYSDEF_FW_IWM7260_17 },
+	{ "iwm-7265-17",		SYSDEF_FW_IWM7265_17 },
+	{ "iwm-7265D-29",		SYSDEF_FW_IWM7265D_29 },
+	{ "iwm-8000C-36",		SYSDEF_FW_IWM8000C_36 },
+	{ "iwm-9000-46",		SYSDEF_FW_IWM9000_46 },
+	{ "iwm-9260-46",		SYSDEF_FW_IWM9260_46 },
+	{ "mwx-mt7961_patch_mcu_1_2_hdr", SYSDEF_FW_MWX7961_PATCH },	/* OpenBSD's mwx: the MT7921's */
+	{ "mwx-mt7961_ram_code_1",	SYSDEF_FW_MWX7961_RAM },
+	{ "mwx-mt7961_patch_mcu_1a_2_hdr", SYSDEF_FW_MWX7920_PATCH },	/* the MT7920's, which has the MT7921's PCI ID */
+	{ "mwx-mt7961_ram_code_1a",	SYSDEF_FW_MWX7920_RAM },
+	{ "mwx-mt7922_patch_mcu_1_1_hdr", SYSDEF_FW_MWX7922_PATCH },	/* the MT7922's */
+	{ "mwx-mt7922_ram_code_1",	SYSDEF_FW_MWX7922_RAM },
+	{ "athx-qca6174-firmware-6",	SYSDEF_FW_ATHX6174_FW },	/* athx: the QCA6174's firmware-6.bin */
+	{ "athx-qca6174-board-2",	SYSDEF_FW_ATHX6174_BD },	/* and its boards' data, board-2.bin */
 };
 
 /*
@@ -114,13 +157,31 @@ LOCAL CONST WIFI_FW	wifi_fw[] = {
 
 /* ---------------------------------------------------------------- the card */
 
-/* The first card on the bus that iwm or iwx drives (the Wi-Fi manager asks too, before the rump kernel is up) */
+/* The first card on the bus that iwm, iwx, mwx or athx drives (the Wi-Fi manager asks too, before the rump kernel is up) */
 EXPORT BOOL knl_wifi_pci_find( T_PCIDEV *out )
 {
 	T_PCIDEV	d;
 	INT		i, k;
 
 	for ( i = 0; ts_pcie_get(i, &d) == E_OK; i++ ) {
+		if ( d.vendor == WIFI_QCA_VENDOR ) {
+			if ( d.device == WIFI_QCA6174 ) {
+				w_qca = TRUE;
+				*out = d;
+				return TRUE;
+			}
+			continue;
+		}
+		if ( d.vendor == 0x14c3 ) {
+			for ( k = 0; k < (INT)( sizeof(wifi_mt_ids) / sizeof(wifi_mt_ids[0]) ); k++ ) {
+				if ( d.device == wifi_mt_ids[k] ) {
+					w_mt = TRUE;
+					*out = d;
+					return TRUE;
+				}
+			}
+			continue;
+		}
 		if ( d.vendor != 0x8086 ) continue;
 		for ( k = 0; k < (INT)( sizeof(wifi_ids) / sizeof(wifi_ids[0]) ); k++ ) {
 			if ( d.device == wifi_ids[k].device ) {
@@ -137,7 +198,7 @@ LOCAL UD	w_sink_pa = 0;		/* the page an address the card may not reach is turned
 LOCAL UW	w_refused = 0;		/* how many such addresses there were */
 LOCAL void	sink_take( void );
 
-/* The card iwm or iwx will drive: its bus, and vendor and device in one word; 0 or ENXIO */
+/* The card iwm, iwx, mwx or athx will drive: its bus, and vendor and device in one word; 0 or ENXIO */
 EXPORT int rumpcomp_tswifi_card( int *bus, unsigned int *id )
 {
 	T_PCIDEV	d;
@@ -149,7 +210,8 @@ EXPORT int rumpcomp_tswifi_card( int *bus, unsigned int *id )
 	*bus = (int)d.bus;
 	*id = ( (UW)d.vendor << 16 ) | d.device;
 	tm_printf((UB *)"wifi: card %04x:%04x at %d:%d.%d, BAR0 %lx, for %s\n",
-		  d.vendor, d.device, d.bus, d.dev, d.fn, (unsigned long)d.bar[0], w_iwx ? "iwx" : "iwm");
+		  d.vendor, d.device, d.bus, d.dev, d.fn, (unsigned long)d.bar[0],
+		  w_qca ? "athx" : w_mt ? "mwx" : w_iwx ? "iwx" : "iwm");
 	return 0;
 }
 
@@ -341,6 +403,7 @@ LOCAL void cmdq_say( void )
 	UH		in, ifirst;
 	UW		ival;
 
+	if ( W_NOT_INTEL ) return;
 	if ( wregs == 0 ) return;
 	awake = card_wake(&mine);
 	tm_printf((UB *)"wifi: cmdq: card %s; HW_REV %08x RESET %08x GIO %08x GP_CNTRL %08x\n",
@@ -417,10 +480,12 @@ LOCAL void wifi_inthdr( UINT n )
 	WIFI_SEEN *s = &w_seen[k % WIFI_SEEN_N];
 
 	s->at = knl_lockup_now();
-	s->cause = wreg(CSR_INT);
-	s->mask = wreg(CSR_INT_MASK);
-	s->fh = wreg(CSR_FH_INT);
-	ict_look(&s->ict_n, &s->ict_first, &s->ict_val);
+	if ( !W_NOT_INTEL ) {
+		s->cause = wreg(CSR_INT);
+		s->mask = wreg(CSR_INT_MASK);
+		s->fh = wreg(CSR_FH_INT);
+		ict_look(&s->ict_n, &s->ict_first, &s->ict_val);
+	}
 	for ( i = 0; i < nirq; i++ ) {
 		if ( irqs[i].intno == n ) {
 			(void)tk_sig_sem(irqs[i].sem, 1);
@@ -478,7 +543,9 @@ EXPORT void knl_wifi_irq_say( CONST char *why )
 				  ts_pcie_cfg_read(b, d, f, pe + 0x28, 2));
 		}
 	}
-	if ( w_iwx ) {
+	if ( W_NOT_INTEL ) {
+		/* the interrupts counted above and the driver's own lines are what there is of MediaTek's and Qualcomm's */
+	} else if ( w_iwx ) {
 		tm_printf((UB *)"wifi: irq: card CSR_INT %08x INT_MASK %08x FH_INT %08x GP_CNTRL %08x ICT %08x\n",
 			  wreg(CSR_INT), wreg(CSR_INT_MASK), wreg(CSR_FH_INT), wreg(CSR_GP_CNTRL), wreg(CSR_ICT));
 	} else {
@@ -491,7 +558,7 @@ EXPORT void knl_wifi_irq_say( CONST char *why )
 	knl_vtd_faults(why);
 	cmdq_say();
 	cnt = ( w_nint < WIFI_SEEN_N ) ? (SZ)w_nint : WIFI_SEEN_N;
-	for ( i = 0; i < (INT)cnt; i++ ) {
+	for ( i = 0; !W_NOT_INTEL && i < (INT)cnt; i++ ) {
 		k = (INT)( ( w_nint - cnt + (UW)i ) % WIFI_SEEN_N );
 		tm_printf((UB *)"wifi: irq:   #%u %ld ms ago: CSR_INT %08x INT_MASK %08x FH_INT %08x; ICT %d not 0, "
 			  "first #%d = %08x\n", (UINT)( w_nint - cnt + (UW)i ), (D)( ( now - w_seen[k].at ) * 1000 / frq ),
@@ -661,11 +728,11 @@ EXPORT int rumpcomp_pci_dmamem_map( RC_DMASEG *dss, unsigned long nseg, unsigned
  * allocator, Kmalloc) and the kernel's image. Anything else (a mapping
  * of scattered pages, a device's window, a bad pointer) has no physical
  * address that way; nor has an address outside RAM or beyond what the
- * card reaches (36 bits). Such a one is not given to the card: it is
+ * card reaches (36 bits for Intel's, 32 for MediaTek's and Qualcomm's). Such a one is not given to the card: it is
  * told, counted, and the card is given the page set aside for it
  * instead, where whatever the card writes does no harm.
  */
-#define CARD_DMA_LIMIT	( 1ULL << 36 )
+#define CARD_DMA_LIMIT	( W_NOT_INTEL ? ( 1ULL << 32 ) : ( 1ULL << 36 ) )
 
 LOCAL BOOL ram_has( UD pa )
 {

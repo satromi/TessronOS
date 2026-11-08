@@ -7,11 +7,11 @@ docs/tessronos 7.6).
 Four images go into OUTDIR. ktest_vols plugs them into the machine through
 the QEMU monitor, each a USB disk of its own, so that there are seventeen
 volumes at once besides the machine's own: TSFS volumes of objects, FAT
-volumes of three kinds, an exFAT one no file system here mounts, and a
+volumes of three kinds, an exFAT one, and a
 partition with nothing on it. The sizes, none of them that of a disk the test machine has, tell the disks apart.
 
   vola.img  50MB  GPT:  1 TSFS "VOLA1" 6MB, 2 FAT16 8MB, 3 TSFS "VOLA3" 6MB,
-                        4 exFAT (only its boot sector) 1MB, 5 blank 1MB
+                        4 exFAT 1MB, 5 NTFS 4MB
   volb.img  44MB  MBR:  1 FAT16 8MB, 2 extended holding six FAT12 of 2MB
                         and a TSFS "VOLB" of 6MB (MBR type 0xDA), as
                         logical partitions linked one after another
@@ -98,12 +98,77 @@ def fill(img, placed):
         elif kind == "fat12":
             fat_format(img, start, n, 12, spc=1, root_ents=32)
         elif kind == "exfat":
-            # the boot sector of exFAT says what it is; nothing here reads further
-            bs = bytearray(SECTOR)
-            bs[0:3] = b"\xeb\x76\x90"
-            bs[3:11] = b"EXFAT   "
-            struct.pack_into("<H", bs, 510, 0xAA55)
-            img[start * SECTOR:(start + 1) * SECTOR] = bs
+            exfat_format(img, start, n, label)
+        elif kind == "ntfs":
+            ntfs_format(img, start, n, label)
+
+
+def ntfs_format(img, start, n, label):
+    """An NTFS volume by mkfs.ntfs, with one file the tests know: VOLS.BIN, 3000 bytes"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        vol = os.path.join(d, "n.img")
+        data = os.path.join(d, "f")
+        with open(vol, "wb") as f:
+            f.truncate(n * SECTOR)
+        with open(data, "wb") as f:
+            f.write(bytes((i * 3) & 0xFF for i in range(3000)))
+        subprocess.run(["/usr/sbin/mkfs.ntfs", "-F", "-f", "-q", "-L", label, vol], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["/usr/sbin/ntfscp", "-f", vol, data, "VOLS.BIN"], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(vol, "rb") as f:
+            img[start * SECTOR:(start + n) * SECTOR] = f.read()
+
+
+def exfat_format(img, start, n, label):
+    """An exFAT volume, clusters of 4KB: bitmap, up-case table and root in the
+    first three. The up-case table says only that every code is itself."""
+    fat_off, fat_len, heap_off, spc_sh = 24, 8, 64, 3
+    clusters = (n - heap_off) >> spc_sh
+    base = start * SECTOR
+    clus = lambda c: base + (heap_off + ((c - 2) << spc_sh)) * SECTOR
+
+    boot = bytearray(12 * SECTOR)
+    boot[0:3] = b"\xeb\x76\x90"
+    boot[3:11] = b"EXFAT   "
+    struct.pack_into("<QQIIIIIIHHBBBBB", boot, 64, start, n, fat_off, fat_len, heap_off, clusters,
+                     4, 0x12345678, 0x100, 0, 9, spc_sh, 1, 0x80, 0)
+    struct.pack_into("<H", boot, 510, 0xAA55)
+    for s in range(1, 9):
+        struct.pack_into("<H", boot, s * SECTOR + 510, 0xAA55)
+    total = 0
+    for i, b in enumerate(boot[:11 * SECTOR]):
+        if i in (106, 107, 112):
+            continue
+        total = (((total >> 1) | (total << 31)) + b) & 0xFFFFFFFF
+    for off in range(11 * SECTOR, 12 * SECTOR, 4):
+        struct.pack_into("<I", boot, off, total)
+    img[base:base + 12 * SECTOR] = boot
+    img[base + 12 * SECTOR:base + 24 * SECTOR] = boot
+
+    fat = bytearray(16 * 4)
+    struct.pack_into("<IIIII", fat, 0, 0xFFFFFFF8, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF)
+    img[base + fat_off * SECTOR:base + fat_off * SECTOR + len(fat)] = fat
+
+    img[clus(2)] = 0x07				# the first three clusters taken
+    upcase = struct.pack("<HH", 0xFFFF, 0xFFFF) + struct.pack("<HH", 0xFFFF, 0x0001)
+    upsum = 0
+    for b in upcase:
+        upsum = (((upsum >> 1) | (upsum << 31)) + b) & 0xFFFFFFFF
+    img[clus(3):clus(3) + len(upcase)] = upcase
+
+    root = bytearray(3 * 32)
+    name = (label or "").encode("utf-16-le")[:22]
+    root[0] = 0x83 if name else 0x03
+    root[1] = len(name) // 2
+    root[2:2 + len(name)] = name
+    root[32] = 0x81
+    struct.pack_into("<IQ", root, 32 + 20, 2, (clusters + 7) // 8)
+    root[64] = 0x82
+    struct.pack_into("<I", root, 64 + 4, upsum)
+    struct.pack_into("<IQ", root, 64 + 20, 3, len(upcase))
+    img[clus(4):clus(4) + len(root)] = root
 
 
 def mbr_entry(boot, kind, start, n):
@@ -158,7 +223,7 @@ def main():
     os.makedirs(out, exist_ok=True)
     gpt_disk(os.path.join(out, "vola.img"), 50,
              [("tsfs", 6 * MB, "VOLA1"), ("fat16", 8 * MB, "FAT A"), ("tsfs", 6 * MB, "VOLA3"),
-              ("exfat", 1 * MB, "EXFAT"), ("blank", 1 * MB, "BLANK")])
+              ("exfat", 1 * MB, "EXFAT"), ("ntfs", 4 * MB, "NTFS")])
     mbr_disk(os.path.join(out, "volb.img"), 44)
     gpt_disk(os.path.join(out, "volc.img"), 26,
              [("tsfs", 6 * MB, "VOLC1"), ("blank", 6 * MB, "COPY"), ("fat16", 8 * MB, "FAT C")])

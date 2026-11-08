@@ -188,6 +188,7 @@ typedef struct {
 #define SND_BE_I2S		2	/* the RP1's I2S (Raspberry Pi 5) */
 #define SND_BE_HDMI		3	/* an HDMI socket (Raspberry Pi 5) */
 #define SND_BE_HDA		4	/* Intel High Definition Audio (the x64 PC) */
+#define SND_BE_BT		5	/* earphones over Bluetooth (A2DP) */
 
 /*
  * The outputs (DN_SDOUTS, DN_SDOUTSEL). An output is named by an id
@@ -226,6 +227,18 @@ typedef struct {
 	UINT	channels;
 } SDOut;
 
+/*
+ * Why the machine's own sound may not be heard (the x64 PC; the system
+ * object's sound record, HW_NOTE): what is wired through the audio DSP has no
+ * driver here, and the HD Audio registers do not reach it (design 6.5.8)
+ */
+#define SND_NOTE_SPK_DSP	0x0001	/* the speakers are on SoundWire or I2S behind the DSP */
+#define SND_NOTE_MIC_DSP	0x0002	/* the built-in microphones are digital ones behind the DSP */
+#define SND_NOTE_NOCODEC	0x0004	/* the controller is there and no codec answers on its link */
+#define SND_NOTE_DISPLAY	0x0008	/* only the display's codec answers: sound goes to a screen alone */
+#define SND_NOTE_SOUNDWIRE	0x0010	/* with SPK_DSP: on SoundWire */
+#define SND_NOTE_I2S		0x0020	/* with SPK_DSP: on I2S */
+
 #define SND_OF_CHOSEN		0x0001	/* the one chosen */
 #define SND_OF_PLAYING		0x0002	/* the one the stream plays on now */
 #define SND_OF_NOSOUND		0x0004	/* there, but cannot sound now (a screen that
@@ -255,6 +268,8 @@ typedef struct {
  */
 #define DN_SDMIXER		(-143)	/* R : SDMix, the whole and the programs that use the device */
 #define DN_SDMIXSET		(-144)	/* W : SDMixSet, a volume and mute set */
+/* TessronOS: RW: SDMon, what a channel's recording takes from what is played */
+#define DN_SDMONITOR		(-145)
 
 #define SND_VOL_MAX		100
 
@@ -294,6 +309,27 @@ typedef struct {
 	UINT	lv, rv;
 	UINT	mute;
 } SDMixSet;
+
+/*
+ * The monitor (DN_SDMONITOR): a channel set to it, while stopped, records
+ * what the programs play instead of an input, as long as PCM_REC runs.
+ * The samples are taken after each program's volume and before the whole's
+ * volume, so that turning the machine's sound down or muting it changes
+ * what is heard here and not what is taken. Any number of channels can
+ * monitor at once, beside the one that records an input, and a monitor
+ * neither keeps the stream going nor starts it: while nothing is played on
+ * an output, it has nothing to read. A reader too slow for it loses the
+ * newest frames; the recording does not stop for that.
+ */
+#define SND_MON_OFF		0	/* an input, as usual */
+#define SND_MON_ALL		1	/* every program */
+#define SND_MON_EXCEPT		2	/* every program but the process pid */
+#define SND_MON_ONLY		3	/* the process pid alone */
+
+typedef struct {
+	UINT	mode;			/* SND_MON_* */
+	INT	pid;
+} SDMon;
 
 /*
  * The mixer from inside the kernel: set (keep: and kept for the next
@@ -367,6 +403,8 @@ IMPORT ER   knl_snd_select( CONST UB *id );
  */
 IMPORT ER   knl_snd_keep( BOOL on );
 IMPORT BOOL knl_snd_keeping( void );
+/* SND_NOTE_* as found at start-up; 0 on the machines where it does not arise */
+IMPORT UW   knl_snd_note( void );
 
 /*
  * The outputs as DN_SDOUTS has them: up to max of them into o, and how

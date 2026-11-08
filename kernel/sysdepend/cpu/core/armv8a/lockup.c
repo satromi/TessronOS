@@ -218,7 +218,7 @@ LOCAL void lk_say_frames( CONST char *pre, UBINT fp, UBINT lo, UBINT hi )
 	UBINT	next;
 
 	for ( i = 0; i < 10; i++ ) {
-		if ( fp < lo || fp + 16 > hi || ( fp & 0xf ) != 0 ) {
+		if ( fp == 0 || fp < lo || fp + 16 > hi || ( fp & 0xf ) != 0 ) {
 			break;
 		}
 		if ( ((UD *)fp)[1] == 0 ) {
@@ -233,7 +233,7 @@ LOCAL void lk_say_frames( CONST char *pre, UBINT fp, UBINT lo, UBINT hi )
 	}
 }
 
-/* The kernel stacks are in the linear map: a frame is followed within 64KB steps of the last */
+/* A frame is followed within 64KB steps of the last */
 LOCAL void lk_say_own_frames( CONST char *pre, UBINT fp )
 {
 	lk_say_frames(pre, fp, ( fp > 0x10000 ) ? fp - 0x10 : 0, fp + 0x10000);

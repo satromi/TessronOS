@@ -43,6 +43,7 @@
 #include <ts/json.h>
 #include <ts/obatr.h>
 #include <ts/btbk.h>
+#include <ts/vobjsz.h>
 
 #define LINK_GROW	16
 #define OBJ_GROW	32
@@ -747,7 +748,7 @@ EXPORT ER arc_pack( ARCJOB *j, INT method, const ARCLOOK *look )
 			w.rootview[0] = 0;
 			w.rootview[1] = 0;
 			w.rootview[2] = ( tw < 120 ) ? 120 : ( tw > 480 ) ? 480 : tw;
-			w.rootview[3] = 25;
+			w.rootview[3] = VOBJ_CLOSED_H(14, 1, 1);	/* closed, at 14 */
 			w.rootcol[0] = w.rootcol[1] = 0x10000000U;
 			w.rootcol[2] = w.rootcol[3] = 0x10FFFFFFU;
 			w.rootattr = BPK_V_NORELN | BPK_V_NOTYPE | BPK_V_NOTIME;
@@ -846,8 +847,9 @@ EXPORT ER arc_link_into( const TS_UUID *into, const TS_UUID *target, const char 
 	n = (INT)( at - (char *)x );
 	memcpy(link, x, (size_t)n);
 	n += snprintf(link + n, 512, "<link id=\"%s_0.xtad\" vobjid=\"%s\" vobjleft=\"8\" vobjtop=\"8\" vobjright=\"%d\""
-		      " vobjbottom=\"33\" height=\"25\" chsz=\"14\" frcol=\"#000000\" chcol=\"#000000\" tbcol=\"#ffffff\""
-		      " bgcol=\"#ffffff\" pictdisp=\"true\" namedisp=\"true\" framedisp=\"true\"/>", id, vid, 8 + tw);
+		      " vobjbottom=\"%d\" height=\"%d\" chsz=\"14\" frcol=\"#000000\" chcol=\"#000000\" tbcol=\"#ffffff\""
+		      " bgcol=\"#ffffff\" pictdisp=\"true\" namedisp=\"true\" framedisp=\"true\"/>", id, vid, 8 + tw,
+		      8 + VOBJ_CLOSED_H(14, 1, 1), VOBJ_CLOSED_H(14, 1, 1));	/* closed at 14 */
 	memcpy(link + n, at, len - (UINT)( at - (char *)x ));
 	n += (INT)( len - (UINT)( at - (char *)x ) );
 	er = ob_rpl_rec(k, 0, link, (SZ)n);	/* whole: a reader sees the old record or the new one */

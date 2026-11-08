@@ -342,8 +342,15 @@ LOCAL void test_many_tasks( void )
 	for ( i = 0; i < n; i++ ) {
 		KT_ASSERT_ER(tk_sta_tsk(ids[i], i), E_OK);
 	}
+	/*
+	 * How long they take is the host's business; a task lost is one that
+	 * never runs, and then the count stops moving
+	 */
 	for ( i = 0; i < 500 && step < n; i++ ) {
+		INT	was = step;
+
 		tk_dly_tsk(10);
+		if ( step != was ) i = 0;
 	}
 	KT_ASSERT_EQ(step, n);
 	for ( i = 0; i < n; i++ ) {

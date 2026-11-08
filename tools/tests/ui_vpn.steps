@@ -1,0 +1,211 @@
+# 〈ＶＰＮ〉 and 〈企業向け〉 of ネットワーク設定 (docs/tessronos/09-network.md), for tools/ui_run.py with
+# the kernel of make TARGET=_QEMU_VIRT_ DESKTOP=1 UITEST=1 WG=1 and the test disk of a KTEST=1 WG=1
+# build. A key is made, the settings saved and read back: the private key's marks and its public
+# half shown; a tunnel asked for and left.
+open 01a0d8c4-52b5-7a41-8c61-2d7e9f0a1b31
+expect netenv: ready
+wait 1000
+click 515 165
+wait 800
+# 作成 fills the private key and its public half
+click 673 221
+wait 800
+shot vp_gen
+# a key typed in takes its place when the box is emptied
+click 480 222
+wait 200
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+key 2A
+wait 150
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 14
+key 06
+key 2D 02
+wait 150
+click 460 290
+wait 200
+key 1E
+key 27
+key 37
+key 26
+key 37
+key 27
+key 37
+key 1F
+key 38
+key 1F
+key 21
+wait 150
+click 527 323
+wait 200
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 04
+key 06
+key 2D 02
+wait 150
+click 527 391
+wait 200
+key 1E
+key 27
+key 37
+key 27
+key 37
+key 1F
+key 37
+key 1F
+key 34
+key 22
+key 1E
+key 25
+key 1F
+key 27
+wait 150
+click 527 425
+wait 200
+key 1E
+key 27
+key 37
+key 26
+key 37
+key 27
+key 37
+key 27
+key 38
+key 1F
+key 21
+wait 150
+shot vp_filled
+click 385 460
+wait 1500
+shot vp_saved
+click 482 460
+wait 3000
+shot vp_up
+click 578 460
+wait 2000
+shot vp_down
+expect netenv: vpn saved
+expect netenv: vpn up
+expect netenv: vpn down

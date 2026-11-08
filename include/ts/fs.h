@@ -294,6 +294,9 @@ IMPORT ER  fs_rename( CONST char *from, CONST char *to );
 IMPORT ER  fs_utime( CONST char *path, UD mtime );
 IMPORT ER  fs_statvfs( CONST char *path, T_FSSTAT *st );
 IMPORT ER  fs_sync( void );
+/* The machine going off: fs_sync with each volume told, how many failed; then the volumes put away */
+IMPORT INT  knl_fs_sync_report( void );
+IMPORT void knl_fs_finish( CONST char *keep1, CONST char *keep2 );
 
 /*
  * What was written to one open file made sure to be on the medium:
@@ -468,8 +471,8 @@ IMPORT INT knl_fs_opn_vol_as( ID devkey, CONST char *fimpnm, UINT flags, ID owne
  * What is on a disk or a partition (design 7.6), as its first blocks
  * say. fs_attach_dev with no fimp (NULL) mounts with the fimp of the
  * kind found, and answers EX_NOTSUP for a kind no fimp mounts: TSFS,
- * which is attached as a volume of objects instead (ob_att_vol), exFAT,
- * NTFS, ext2/3/4, ISO 9660 and the BTRON file system, which file
+ * which is attached as a volume of objects instead (ob_att_vol),
+ * ext2/3/4, ISO 9660 and the BTRON file system, which file
  * conversion reads without mounting. The device object of a disk tells
  * the kind among its attributes (tessronos.format).
  */
@@ -545,6 +548,19 @@ IMPORT CONST char *knl_fs_kind_fimp( UINT kind );
  * FAT file system (kernel/fs/fatfs.c)
  */
 IMPORT CONST T_FIMP knl_fimp_fat;
+
+/*
+ * exFAT file system (kernel/fs/exfatfs.c): served for reading alone when
+ * the volume is not safe to change (exfatfs.c says when)
+ */
+IMPORT CONST T_FIMP knl_fimp_exfat;
+
+/*
+ * NTFS file system (kernel/fs/ntfsfs.c): read, and the bytes of files
+ * replaced where they are on a volume that is safe. Whatever changes the
+ * volume's structure is refused with EX_NOTSUP (ntfsfs.c says why).
+ */
+IMPORT CONST T_FIMP knl_fimp_ntfs;
 
 #ifdef USE_KTEST
 /*

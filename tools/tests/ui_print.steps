@@ -36,29 +36,28 @@ wait 1500
 shot print_done
 # 基本印刷: the link to the same text taken in the BTRON window, and 実行
 # from its menu (opened with the right button, the item pressed): printed
-# without being opened
+# without being opened. 基本印刷 is in 実行 once it is one of the object's
+# 機能付箋: the second row of the list, under 基本文章編集
+apps 019a6c96-e262-7dfd-a3bc-1e85d495d60d basic-text-editor basic-print
 click 60 90
 wait 300
 click 60 90 1
 wait 800
-move 70 290
+move 70 310
 wait 150
-move 75 311
+move 75 331
 wait 600
-move 150 311
+move 150 331
 wait 150
-move 180 330
-wait 150
-move 180 370
-wait 150
-move 180 411
+move 180 351
 wait 300
 shot print_basic_menu
-click 180 411
+click 180 351
 wait 1500
 shot print_basic_panel
+logmark
 key 28
-expect print: 4 sheets
+expectsince print: 4 sheets
 wait 1500
 shot print_basic_done
 # nothing it did was refused for want of a right

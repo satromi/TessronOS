@@ -1,0 +1,272 @@
+# 基本図形編集の描画の速さを、同じ実行の中で比べる (design 11.3), for tools/ui_run.py:
+# a figure of 2000 small rectangles and two zigzag lines (mkbig) opened by the desktop's
+# figure editor (open) and by the figure editor running as a process (pfig) in turn, three
+# times each, so that both are measured under the same load of the machine. Each time a
+# rectangle is taken and then the empty page pressed, five times: each press changes what
+# is taken. Compared: "desktop: figure input to screen US us" and "figure: input to screen
+# US us" (from the press, as the pointer told it, to the window drawn), and the times of the
+# drawing ("desktop: figure drew in", "figure: drew part ... in").
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
+mkbig fig 2000 200
+# round 1
+logmark
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+click 123 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+click 135 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+click 147 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+click 159 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+click 171 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+key 08 01
+sync 600
+wait 500
+logmark
+pfig big
+expectsincein 60 figure: opened
+wait 800
+logmark
+click 123 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+click 135 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+click 147 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+click 159 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+click 171 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+key 08 01
+expectsince figure: closed
+wait 500
+# round 2
+logmark
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+click 123 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+click 135 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+click 147 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+click 159 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+click 171 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+key 08 01
+sync 600
+wait 500
+logmark
+pfig big
+expectsincein 60 figure: opened
+wait 800
+logmark
+click 123 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+click 135 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+click 147 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+click 159 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+click 171 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+key 08 01
+expectsince figure: closed
+wait 500
+# round 3
+logmark
+open big
+waitwin 画用紙 600
+sync 600
+wait 800
+click 123 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+click 135 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+click 147 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+click 159 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+click 171 152
+sync 600
+wait 300
+click 600 600
+sync 600
+wait 300
+key 08 01
+sync 600
+wait 500
+logmark
+pfig big
+expectsincein 60 figure: opened
+wait 800
+logmark
+click 123 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+click 135 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+click 147 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+click 159 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+click 171 152
+expectsince figure: input to screen
+wait 300
+logmark
+click 600 600
+expectsince figure: input to screen
+wait 300
+logmark
+key 08 01
+expectsince figure: closed
+wait 500

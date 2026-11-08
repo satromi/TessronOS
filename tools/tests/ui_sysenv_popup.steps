@@ -67,6 +67,6 @@ wait 300
 key 08 01
 wait 800
 shot pop_end
-click 300 370
+click 455 440
 expect sysenv: fontset closed
 absent !OACV!

@@ -1,0 +1,44 @@
+# 基本図形編集のプロセスで、図形を描き終えた直後(プロセスが描き直している間)に道具パネルの
+# 押しボタンを続けて押しても、押した道具に替わる (design 11.3), for tools/ui_run.py. 図形が多い
+# とき(mkbig fig 2000 200)に長方形を描き、待たずに選択(298,48)と直線(162,82)を押してすぐ描く。
+# 直線の道具で描けて("figure: tool 3"、"figure: drawn")、選んだ図形の端を運ぶことにならない。
+# 続けて楕円(434,82)、長方形(298,82)でも同じにする。初めに図形の何もない所(500,650)を押し、
+# 図形のウインドウと道具パネルを前に出しておく。
+mkbig fig 2000 200
+logmark
+pfig big
+expectsincein 60 figure: opened
+wait 800
+click 500 650
+wait 1500
+logmark
+click 298 82
+expectsincein 60 figure: tool 7
+dragn 450 450 650 600 12 15
+expectsincein 60 figure: drawn
+logmark
+click 298 48
+click 162 82
+dragn 450 450 650 600 12 15
+expectsincein 60 figure: tool 3
+expectsincein 60 figure: drawn
+logmark
+click 298 48
+click 434 82
+dragn 460 460 640 590 12 15
+expectsincein 60 figure: tool 10
+expectsincein 60 figure: drawn
+logmark
+click 298 48
+click 298 82
+dragn 470 470 630 580 12 15
+expectsincein 60 figure: tool 7
+expectsincein 60 figure: drawn
+logmark
+key 16 01
+expectsincein 60 figure: saved
+key 08 01
+expectsincein 60 figure: closed
+absent figure: line end held
+absent figure: transform handle held
+absent !OACV!

@@ -5,6 +5,8 @@
 # 362,218. A colour chosen from the panel's swatches, a dot drawn, the rectangle
 # tool chosen and a rectangle drawn, the pattern turned and the turn taken back,
 # put into the figure with 入替, and the window closed from its menu.
+# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
+figproc kernel
 open 019a0f91-066f-706f-93da-ffe8150d6207
 wait 2000
 win 画用紙
