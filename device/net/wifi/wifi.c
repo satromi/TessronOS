@@ -60,8 +60,9 @@
  *					each network the reader saved (never
  *					its key; the others' are not shown)
  *
- *	and in record 2 the networks the last scan found, the strongest
- *	first: "BSS <bssid> <MHz> <dBm> <open|wep|wpa|wpa2|wpa3|wpa2wpa3|
+ *	and in record 2 the networks seen lately (the scans' merged: one
+ *	goes out after 180 s unseen, or two full scans without it, the one
+ *	joined never), the strongest first: "BSS <bssid> <MHz> <dBm> <open|wep|wpa|wpa2|wpa3|wpa2wpa3|
  *	8021x> <SSID in hexadecimal>" (wpa2wpa3: both PSK and SAE offered). Writing record 1 asks for something: SCAN,
  *	CONNECT <SSID in hexadecimal> (a network the writer saved), CONNECT
  *	(the saved ones again), DISCONNECT (until a CONNECT, or the settings
@@ -79,7 +80,7 @@
  *	answered once the settings are written.
  *
  *	A change of record 1 is told as OB_E_CHANGE of it, and of record 2
- *	as each scan ends, by the manager's task as the state moves: the
+ *	as each scan ends and as networks go out of it, by the manager's task as the state moves: the
  *	record is in place before the notice goes, so a reader told reads
  *	what made it. SIGNAL and RATE are measured values that change all
  *	the time: they are written as they are but not told, and a reader
@@ -324,6 +325,22 @@ IMPORT int	rump_tswifi_take( UB *mac );
 #define W_STKSZ		(32 * 1024)
 #define W_TICK_MS	50
 #define W_NBSS		32		/* networks of a scan room is made for at first; more, more room */
+/*
+ * How long a network stays in the list unseen (bss_expire): 180 s and 2
+ * scans, wpa_supplicant's bss_expiration_age and
+ * bss_expiration_scan_count. The list is the one the person chooses
+ * from, as wpa_supplicant's is (the layer's table of nodes stands where
+ * cfg80211's 30 s cache does). Only full scans count as missing a
+ * network: a background scan while joined is a short look (iwx: 100 TU
+ * on a channel at most, at most 120 ms off the access point's channel
+ * at a time, probe requests for the network joined only) that misses
+ * most others, as wpa_supplicant counts a miss only for a scan that
+ * covered the network's channel. The ages are looked at every 10 s,
+ * as wpa_supplicant's WPA_BSS_EXPIRATION_PERIOD.
+ */
+#define W_BSS_AGE_MS	180000
+#define W_BSS_MISS	2
+#define W_BSS_TICK_MS	10000
 #define RX_SLOTS	128
 #define EQ_SLOTS	8
 #define ETH_PAE		0x888e
@@ -384,10 +401,35 @@ LOCAL TS_UUID	wuuid;
 LOCAL BOOL	wobj = FALSE;
 
 LOCAL TSWIFI_STATUS	st;		/* as last read */
-LOCAL TSWIFI_BSS	*bss = NULL;	/* the last scan's networks, as many as it found */
-LOCAL INT		bss_cap = 0;
-LOCAL INT		nbss = 0;
+
+/*
+ * The networks seen lately: each scan's networks are merged into this
+ * table rather than put in its place, and a network goes out of it only
+ * when it has not been seen for W_BSS_AGE_MS, or full scans W_BSS_MISS
+ * times in a row have not had it (bss_merge, bss_expire). The access
+ * point joined stays however long it has not been seen.
+ */
+typedef struct {
+	TSWIFI_BSS	b;
+	UD		seen;		/* ms: when a scan last had it */
+	UW		scan;		/* the table's number of that scan */
+	UW		missed;		/* full scans in a row since then without it */
+} WBSS;
+
+typedef struct {
+	WBSS		*e;		/* the strongest first */
+	INT		n, cap;
+	UW		scan;		/* the number of the last scan merged */
+} WBSSTAB;
+
+LOCAL WBSSTAB		btab;		/* the list record 2 shows and joins are chosen from */
+LOCAL TSWIFI_BSS	*got = NULL;	/* the layer's answer, as many as it has */
+LOCAL INT		got_cap = 0;
 LOCAL INT		nscans = 0;
+LOCAL UD		t_btick = 0;	/* when the ages were last looked at */
+#ifdef WIFI_OBSD
+LOCAL BOOL		scan_asked = FALSE;	/* a background scan asked for (SCAN): the list said on the console as it ends */
+#endif
 LOCAL WNET		*nets = NULL;	/* the networks saved, as many as the settings keep */
 LOCAL INT		nnet = 0;
 LOCAL BOOL		wifi_on = TRUE;
@@ -463,6 +505,8 @@ LOCAL RXSLOT		*eq;
 LOCAL UINT		eq_head, eq_tail;
 LOCAL RXSLOT		eapol_pend;		/* one that came before the association was seen */
 LOCAL BOOL		eapol_pending = FALSE;
+/* the handshakes done, the port waiting for the card to have the keys (OpenBSD's layer): since when */
+LOCAL UD		t_keys = 0;
 
 #define LOCK()		tk_loc_mtx(wmtx, TMO_FEVR)
 #define UNLOCK()	tk_unl_mtx(wmtx)
@@ -713,6 +757,28 @@ EXPORT BOOL knl_wifi_connected( void )
 EXPORT UW knl_wifi_link_gen( void )
 {
 	return link_gen;
+}
+
+/*
+ * The SSID of the network joined, when the card whose address is mac is
+ * the Wi-Fi's and is connected: its length, 0 otherwise (another card,
+ * or no network). DHCP keeps a lease for each network by it (so_dhcp.c).
+ * Read without the manager's lock, so read again when a join came
+ * meanwhile (link_gen).
+ */
+EXPORT INT knl_wifi_ssid_of( CONST UB *mac, UB *ssid )
+{
+	UW	g;
+	INT	n, tries;
+
+	for ( tries = 0; tries < 3; tries++ ) {
+		g = link_gen;
+		if ( ws != WS_CONNECTED || !same_bytes(mac, wmac, NET_MAC_LEN) ) return 0;
+		n = ( cur_bss.ssid_len > 32 ) ? 32 : cur_bss.ssid_len;
+		knl_memcpy(ssid, cur_bss.ssid, (SZ)n);
+		if ( g == link_gen && ws == WS_CONNECTED ) return n;
+	}
+	return 0;
 }
 
 /*
@@ -2020,78 +2086,137 @@ EXPORT INT knl_wifi_state_text( CONST T_OBCRD *crd, UB **p_text )
 
 /* ---------------------------------------------------------------- scanning */
 
-/* The scan's networks, the strongest first, into record 2 and onto the console */
-/* Record 2: a line for each network the scan found, however many */
+/* Record 2: a line for each network of the list, the strongest first, however many */
 LOCAL INT scan_make( void *ctx, UB *t, INT max )
 {
 	INT	i, n = 0;
+	TSWIFI_BSS	*b;
 
 	(void)ctx;
-	for ( i = 0; i < nbss && n >= 0; i++ ) {
+	for ( i = 0; i < btab.n && n >= 0; i++ ) {
+		b = &btab.e[i].b;
 		n = knl_oj_put(t, n, max, "BSS ");
-		n = put_mac(t, n, max, bss[i].bssid);
+		n = put_mac(t, n, max, b->bssid);
 		n = knl_oj_put(t, n, max, " ");
-		n = put_num(t, n, max, bss[i].freq);
+		n = put_num(t, n, max, b->freq);
 		n = knl_oj_put(t, n, max, " ");
-		n = put_num(t, n, max, dbm(bss[i].rssi));
+		n = put_num(t, n, max, dbm(b->rssi));
 		n = knl_oj_put(t, n, max, " ");
-		n = knl_oj_put(t, n, max, sec_name(sec_of(&bss[i])));
+		n = knl_oj_put(t, n, max, sec_name(sec_of(b)));
 		n = knl_oj_put(t, n, max, " ");
-		n = put_hex(t, n, max, bss[i].ssid, bss[i].ssid_len);
+		n = put_hex(t, n, max, b->ssid, b->ssid_len);
 		n = knl_oj_put(t, n, max, "\n");
 	}
 	return n;
 }
 
-LOCAL void scan_take( void )
+/* Room in the table for n networks */
+LOCAL BOOL bss_room( WBSSTAB *tb, INT n )
 {
-	TSWIFI_BSS	t;
-	UB		*st2, *old;
-	INT		i, k, n;
-	char		s[33];
-	BOOL		say = ( nscans < 4 );
+	WBSS	*ne;
+	INT	cap;
 
-	/*
-	 * every network the scan found: the answer counts those that did not
-	 * fit too, and the room is made that large and the list asked again
-	 */
-	if ( bss == NULL ) {
-		bss = (TSWIFI_BSS *)Kmalloc(sizeof(TSWIFI_BSS) * W_NBSS);
-		bss_cap = ( bss != NULL ) ? W_NBSS : 0;
+	if ( n <= tb->cap ) return TRUE;
+	cap = ( tb->cap > 0 ) ? tb->cap : W_NBSS;
+	while ( cap < n ) cap *= 2;
+	ne = (WBSS *)Kmalloc(sizeof(WBSS) * (SZ)cap);
+	if ( ne == NULL ) return FALSE;
+	if ( tb->n > 0 ) knl_memcpy(ne, tb->e, sizeof(WBSS) * (SZ)tb->n);
+	if ( tb->e != NULL ) Kfree(tb->e);
+	tb->e = ne;
+	tb->cap = cap;
+	return TRUE;
+}
+
+LOCAL INT bss_find( CONST WBSSTAB *tb, CONST UB *bssid )
+{
+	INT	i;
+
+	for ( i = 0; i < tb->n; i++ ) {
+		if ( same_bytes(tb->e[i].b.bssid, bssid, 6) ) return i;
 	}
-	n = ( bss != NULL ) ? rump_tswifi_results(bss, bss_cap) : 0;
-	while ( n > bss_cap ) {
-		TSWIFI_BSS	*nb = (TSWIFI_BSS *)Kmalloc(sizeof(TSWIFI_BSS) * (SZ)n);
+	return -1;
+}
 
-		if ( nb == NULL ) {
-			n = bss_cap;		/* those that fit: the console says no more room */
-			tm_putstring((UB *)"wifi: no room for every network the scan found\n");
-			break;
-		}
-		Kfree(bss);
-		bss = nb;
-		bss_cap = n;
-		n = rump_tswifi_results(bss, bss_cap);
-	}
-	nbss = ( n > 0 ) ? n : 0;
-	/* an entry with no BSSID (all zero) is no network: net80211's node of its own, not an access point */
-	for ( i = 0, k = 0; i < nbss; i++ ) {
-		static CONST UB	zero[6] = { 0, 0, 0, 0, 0, 0 };
+/*
+ * The networks not seen for W_BSS_AGE_MS at t, or missing from the last
+ * W_BSS_MISS full scans, out of the table; keep (the access point joined,
+ * NULL none) stays. Whether any went out.
+ */
+LOCAL BOOL bss_expire( WBSSTAB *tb, UD t, CONST UB *keep )
+{
+	INT	i, k;
+	WBSS	*e;
 
-		if ( same_bytes(bss[i].bssid, zero, 6) ) continue;
-		if ( k != i ) bss[k] = bss[i];
+	for ( i = 0, k = 0; i < tb->n; i++ ) {
+		e = &tb->e[i];
+		if ( ( keep == NULL || !same_bytes(e->b.bssid, keep, 6) )
+		  && ( e->missed >= W_BSS_MISS || t - e->seen >= (UD)W_BSS_AGE_MS ) ) continue;
+		if ( k != i ) tb->e[k] = *e;
 		k++;
 	}
-	nbss = k;
-	for ( i = 1; i < nbss; i++ ) {
-		for ( k = i; k > 0 && dbm(bss[k].rssi) > dbm(bss[k - 1].rssi); k-- ) {
-			t = bss[k];
-			bss[k] = bss[k - 1];
-			bss[k - 1] = t;
+	if ( k == tb->n ) return FALSE;
+	tb->n = k;
+	return TRUE;
+}
+
+/*
+ * A scan's networks (ng of g) merged into the table at t: each is put in
+ * (a network of the same BSSID made what the scan says), seen now; when
+ * the scan is a full one, each of the table it did not have has missed
+ * one more. Then those too old go out (bss_expire), and the rest is put
+ * in order, the strongest first. An entry with no BSSID (all zero) is no
+ * network: net80211's node of its own, not an access point.
+ */
+LOCAL void bss_merge( WBSSTAB *tb, CONST TSWIFI_BSS *g, INT ng, UD t, BOOL full, CONST UB *keep )
+{
+	static CONST UB	zero[6] = { 0, 0, 0, 0, 0, 0 };
+	INT	i, k;
+	WBSS	w;
+
+	tb->scan++;
+	for ( i = 0; i < ng; i++ ) {
+		if ( same_bytes(g[i].bssid, zero, 6) ) continue;
+		k = bss_find(tb, g[i].bssid);
+		if ( k < 0 ) {
+			if ( !bss_room(tb, tb->n + 1) ) {
+				tm_putstring((UB *)"wifi: no room for every network the scan found\n");
+				break;
+			}
+			k = tb->n++;
+		}
+		tb->e[k].b = g[i];
+		tb->e[k].seen = t;
+		tb->e[k].scan = tb->scan;
+		tb->e[k].missed = 0;
+	}
+	if ( full ) {
+		for ( i = 0; i < tb->n; i++ ) {
+			if ( tb->e[i].scan != tb->scan ) tb->e[i].missed++;
 		}
 	}
-	nscans++;
-	tm_printf((UB *)"wifi: scan %d: %d network%s\n", nscans, nbss, ( nbss == 1 ) ? "" : "s");
+	(void)bss_expire(tb, t, keep);
+	for ( i = 1; i < tb->n; i++ ) {
+		for ( k = i; k > 0 && dbm(tb->e[k].b.rssi) > dbm(tb->e[k - 1].b.rssi); k-- ) {
+			w = tb->e[k];
+			tb->e[k] = tb->e[k - 1];
+			tb->e[k - 1] = w;
+		}
+	}
+}
+
+/* The access point the list keeps however long unseen: the one joined or being joined */
+LOCAL CONST UB *bss_keep( void )
+{
+	return ( ws >= WS_JOINING ) ? cur_bss.bssid : NULL;
+}
+
+/* The list into record 2, and its change told */
+LOCAL void bss_told( void )
+{
+	UB	*st2, *old;
+	INT	k;
+
 	k = knl_oj_make(scan_make, NULL, &st2);
 	if ( k >= 0 ) {
 		LOCK();
@@ -2101,17 +2226,134 @@ LOCAL void scan_take( void )
 		UNLOCK();
 		if ( old != NULL ) Kfree(old);
 	}
-	if ( say ) {
-		for ( i = 0; i < nbss && i < 20; i++ ) {
-			ssid_str(bss[i].ssid, bss[i].ssid_len, s);
-			tm_printf((UB *)"wifi:   %02x:%02x:%02x:%02x:%02x:%02x %4d MHz %4d dBm %-5s \"%s\"\n",
-				  bss[i].bssid[0], bss[i].bssid[1], bss[i].bssid[2], bss[i].bssid[3],
-				  bss[i].bssid[4], bss[i].bssid[5], bss[i].freq, dbm(bss[i].rssi),
-				  sec_name(sec_of(&bss[i])), s);
-		}
-	}
 	if ( wobj ) knl_obdev_post(&wuuid, OB_NET_SCAN, OB_E_CHANGE, NULL);
 }
+
+/* Every W_BSS_TICK_MS: the networks of the list too old taken out of it */
+LOCAL void bss_tick( void )
+{
+	UD	t = now_ms();
+
+	if ( t - t_btick < (UD)W_BSS_TICK_MS ) return;
+	t_btick = t;
+	if ( bss_expire(&btab, t, bss_keep()) ) bss_told();
+}
+
+/*
+ * A scan ended: every network the layer has merged into the list. full:
+ * the scan was a full one (not a background scan while joined, nor one
+ * that did not end), whose misses count. say: the list onto the console.
+ */
+LOCAL void scan_take( BOOL full, BOOL say )
+{
+	INT	i, n;
+	char	s[33], r[48];
+	WBSS	*e;
+
+	/*
+	 * every network the layer has: the answer counts those that did not
+	 * fit too, and the room is made that large and the list asked again
+	 */
+	if ( got == NULL ) {
+		got = (TSWIFI_BSS *)Kmalloc(sizeof(TSWIFI_BSS) * W_NBSS);
+		got_cap = ( got != NULL ) ? W_NBSS : 0;
+	}
+	n = ( got != NULL ) ? rump_tswifi_results(got, got_cap) : 0;
+	while ( n > got_cap ) {
+		TSWIFI_BSS	*nb = (TSWIFI_BSS *)Kmalloc(sizeof(TSWIFI_BSS) * (SZ)n);
+
+		if ( nb == NULL ) {
+			n = got_cap;		/* those that fit: the console says no more room */
+			tm_putstring((UB *)"wifi: no room for every network the scan found\n");
+			break;
+		}
+		Kfree(got);
+		got = nb;
+		got_cap = n;
+		n = rump_tswifi_results(got, got_cap);
+	}
+	if ( n < 0 ) n = 0;
+	bss_merge(&btab, got, n, now_ms(), full, bss_keep());
+	t_btick = now_ms();
+	nscans++;
+	tm_printf((UB *)"wifi: scan %d%s: %d network%s, %d in the list\n", nscans, full ? "" : " (background)",
+		  n, ( n == 1 ) ? "" : "s", btab.n);
+	bss_told();
+	if ( say ) {
+		for ( i = 0; i < btab.n && i < 40; i++ ) {
+			e = &btab.e[i];
+			ssid_str(e->b.ssid, e->b.ssid_len, s);
+			if ( e->scan == btab.scan ) {
+				r[0] = '\0';
+			} else {
+				(void)tm_sprintf((UB *)r, (CONST UB *)" (seen %d s ago, missed by %d)",
+						 (INT)( ( now_ms() - e->seen ) / 1000 ), (INT)e->missed);
+			}
+			tm_printf((UB *)"wifi:   %02x:%02x:%02x:%02x:%02x:%02x %4d MHz %4d dBm %-5s \"%s\"%s\n",
+				  e->b.bssid[0], e->b.bssid[1], e->b.bssid[2], e->b.bssid[3],
+				  e->b.bssid[4], e->b.bssid[5], e->b.freq, dbm(e->b.rssi),
+				  sec_name(sec_of(&e->b)), s, r);
+		}
+	}
+}
+
+#ifdef USE_KTEST
+/*
+ * The list's rules on a table of the test's own (ktest_wifikey.c, the
+ * group bsslist): the manager's is not touched. A scan is given as the
+ * BSSIDs it found.
+ */
+EXPORT void *knl_wifi_bss_new( void )
+{
+	WBSSTAB	*tb = (WBSSTAB *)Kmalloc(sizeof(WBSSTAB));
+
+	if ( tb != NULL ) knl_memset(tb, 0, sizeof(*tb));
+	return tb;
+}
+
+EXPORT void knl_wifi_bss_free( void *h )
+{
+	WBSSTAB	*tb = (WBSSTAB *)h;
+
+	if ( tb == NULL ) return;
+	if ( tb->e != NULL ) Kfree(tb->e);
+	Kfree(tb);
+}
+
+EXPORT void knl_wifi_bss_scan( void *h, CONST UB (*bssid)[6], INT n, UD t, BOOL full, CONST UB *keep )
+{
+	TSWIFI_BSS	*g = ( n > 0 ) ? (TSWIFI_BSS *)Kmalloc(sizeof(TSWIFI_BSS) * (SZ)n) : NULL;
+	INT		i;
+
+	if ( n > 0 && g == NULL ) return;
+	for ( i = 0; i < n; i++ ) {
+		knl_memset(&g[i], 0, sizeof(g[i]));
+		knl_memcpy(g[i].bssid, bssid[i], 6);
+		g[i].ssid_len = 2;
+		g[i].ssid[0] = 'k';
+		g[i].ssid[1] = (UB)( '0' + bssid[i][5] % 10 );
+		g[i].freq = 2412;
+		g[i].rssi = -40 - i;
+	}
+	bss_merge((WBSSTAB *)h, g, n, t, full, keep);
+	if ( g != NULL ) Kfree(g);
+}
+
+EXPORT BOOL knl_wifi_bss_expire( void *h, UD t, CONST UB *keep )
+{
+	return bss_expire((WBSSTAB *)h, t, keep);
+}
+
+EXPORT BOOL knl_wifi_bss_has( void *h, CONST UB *bssid )
+{
+	return (BOOL)( bss_find((WBSSTAB *)h, bssid) >= 0 );
+}
+
+EXPORT INT knl_wifi_bss_count( void *h )
+{
+	return ((WBSSTAB *)h)->n;
+}
+#endif
 
 /*
  * A scan begun. The card is first put back to INIT when it is not there
@@ -2157,6 +2399,7 @@ LOCAL CONST UB *find_ie( CONST UB *ie, INT len, UB id )
 #define OB_JOIN_MS	20000		/* the layer's scan, authentication and association */
 #define OB_LOST_MS	30000		/* a network lost, looked for again by the layer */
 #define OB_SAE_MS	1000		/* an SAE frame unanswered: sent again */
+#define OB_KEYS_MS	5000		/* the card's keys set by its driver's task, after the handshakes */
 
 LOCAL void	shake_begin( UD t );
 LOCAL void	now_connected( CONST char *how );
@@ -2164,6 +2407,7 @@ LOCAL void	card_restart( UD t, BOOL down );
 LOCAL INT	choose( TSWIFI_BSS *out );
 
 LOCAL UW	ob_scans = 0;		/* the layer's count of ended scans, as last seen */
+LOCAL UW	ob_bgscans = 0;		/* and of the background ones among them */
 LOCAL UW	ob_roams = 0;
 LOCAL INT	ob_saved = 0;		/* WPAG_SAVED_* of the network being joined, 0 open */
 LOCAL INT	ob_akm = 0, ob_pmf = 0, ob_h2e = 0;
@@ -2570,10 +2814,22 @@ LOCAL void step_obsd( void )
 			}
 		}
 	}
-	/* the layer scans on while nothing is joined: each scan's networks taken as it ends */
+	/*
+	 * Each scan's networks merged into the list as it ends: those the
+	 * layer scans on while nothing is joined, and while joined the
+	 * background ones, the layer's own (to roam) and the one asked for
+	 * (SCAN). A background scan begins by emptying the layer's table of
+	 * nodes but the access point joined (ieee80211_begin_bgscan), and
+	 * finds few of the others; it adds to the list and makes none of it
+	 * older (bss_merge, full FALSE).
+	 */
 	if ( st.scans != ob_scans ) {
+		BOOL	full = ( st.scans - ob_scans > st.bgscans - ob_bgscans );
+
 		ob_scans = st.scans;
-		if ( ws <= WS_SCANNING || nscans < 4 ) scan_take();
+		ob_bgscans = st.bgscans;
+		scan_take(full, nscans < 4 || scan_asked);
+		scan_asked = FALSE;
 		if ( ws == WS_SCANNING ) ws = WS_IDLE;
 		if ( ws == WS_IDLE ) {
 			k = choose(&b);
@@ -2644,11 +2900,32 @@ LOCAL void step_obsd( void )
 					  ( st.state != S_RUN ) ? "the association was lost" : "the time ran out");
 				fail("password");
 			}
-		} else if ( knl_wpa_state() == WPAG_DONE ) {
-			(void)rump_tswifi_port(1);
-			ob_lost = FALSE;
-			net_clear_temp_disabled(cur_net, TRUE);	/* connected: the failures counted forgotten */
-			now_connected("wifi: the 4-way and group key handshakes are done: connected\n");
+		} else if ( knl_wpa_state() == WPAG_DONE && st.state == S_RUN ) {
+			/*
+			 * The port opened, and the network told it is connected,
+			 * only once the card has the keys: what is sent before
+			 * them (DHCP's first message) would not reach the access
+			 * point. The driver's task sets them, waiting for the
+			 * card's answer to each; the layer wakes the manager as
+			 * the driver says it has them all
+			 */
+			if ( rump_tswifi_port(1) == 0 ) {
+				if ( t_keys != 0 ) {
+					tm_printf((UB *)"wifi: the card has the keys %d ms after the handshakes were done\n",
+						  (INT)( t - t_keys ));
+				}
+				t_keys = 0;
+				ob_lost = FALSE;
+				net_clear_temp_disabled(cur_net, TRUE);	/* connected: the failures counted forgotten */
+				now_connected("wifi: the 4-way and group key handshakes are done: connected\n");
+			} else if ( t_keys == 0 ) {
+				t_keys = t;
+			} else if ( t - t_keys > OB_KEYS_MS ) {
+				tm_printf((UB *)"wifi: the card did not have the keys %d s after the handshakes\n",
+					  OB_KEYS_MS / 1000);
+				t_keys = 0;
+				fail("timeout");
+			}
 		} else if ( st.state != S_RUN ) {
 			/* the layer left the access point during the handshake: it tries again, or another */
 			tm_putstring((UB *)"wifi: the association was lost during the handshake\n");
@@ -2982,11 +3259,14 @@ LOCAL INT choose( TSWIFI_BSS *out )
 	CONST char	*w, *why = NULL;
 	char		s[33];
 
-	for ( i = 0; i < nbss; i++ ) {
+	for ( i = 0; i < btab.n; i++ ) {
+		TSWIFI_BSS	*b = &btab.e[i].b;
+
+		if ( btab.e[i].scan != btab.scan ) continue;	/* not in the last scan: it may be gone */
 		for ( k = 0; k < nnet; k++ ) {
 			WNET	*p = &nets[k];
 
-			if ( p->ssid_len != bss[i].ssid_len || !same_bytes(p->ssid, bss[i].ssid, p->ssid_len) ) continue;
+			if ( p->ssid_len != b->ssid_len || !same_bytes(p->ssid, b->ssid, p->ssid_len) ) continue;
 			if ( net_temp_disabled(k, t) > 0 ) continue;	/* left a while (net_auth_failed) */
 			if ( want_net >= 0 ) {
 				if ( k != want_net ) continue;
@@ -2994,11 +3274,11 @@ LOCAL INT choose( TSWIFI_BSS *out )
 				if ( held || !wifi_on || !p->autojoin || !net_auto(k) ) continue;	/* the person logged in's only */
 				if ( p->failed_at != 0 && t - p->failed_at < (UD)RETRY_MS * ( p->fails > 3 ? 6 : 1 ) ) continue;
 			}
-			if ( ( w = net_unjoinable(k, &bss[i]) ) != NULL ) {
+			if ( ( w = net_unjoinable(k, b) ) != NULL ) {
 				if ( k == want_net && why == NULL ) why = w;
 				continue;		/* another access point of it, or another network */
 			}
-			*out = bss[i];
+			*out = *b;
 			return k;
 		}
 	}
@@ -3032,7 +3312,7 @@ LOCAL void take_cmd( void )
 		if ( ws == WS_IDLE || ws == WS_CONNECTED ) {
 			if ( ws == WS_IDLE ) scan_start();
 #ifdef WIFI_OBSD
-			else (void)rump_tswifi_scan();		/* a background scan, the network kept */
+			else if ( rump_tswifi_scan() == 0 ) scan_asked = TRUE;	/* a background scan, the network kept */
 #else
 			else tm_putstring((UB *)"wifi: no scan while a network is joined\n");
 #endif
@@ -3094,6 +3374,7 @@ LOCAL void shake_begin( UD t )
 {
 	ws = WS_HANDSHAKE;
 	t_state = t;
+	t_keys = 0;
 	knl_wpa_assoc(cur_bss.bssid);
 	if ( eapol_pending ) {
 		eapol_pending = FALSE;
@@ -3261,7 +3542,7 @@ LOCAL void step( void )
 			if ( st.scanning ) tm_putstring((UB *)"wifi: the scan did not end; taking what it found\n");
 			ws = WS_IDLE;
 			t_state = t;
-			scan_take();
+			scan_take(!st.scanning, nscans < 4);	/* one that did not end looked at only some channels */
 			k = choose(&b);
 			if ( k >= 0 ) {
 				want_miss = 0;
@@ -3540,6 +3821,7 @@ LOCAL void w_task( INT stacd, void *exinf )
 		ob_events();
 #endif
 		step();
+		bss_tick();
 		if ( ws != was ) {
 			tm_printf((UB *)"wifi: %s -> %s\n", ws_name[was], ws_name[ws]);
 			was = ws;

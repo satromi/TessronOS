@@ -7,7 +7,8 @@ Writes into --out, in the form tools/mktsfs takes (--over):
 
   - the firmware of Intel's 8265 (SYSDEF_FW_IWM8265_36), of the Wi-Fi 6
     AX200 (SYSDEF_FW_IWXCC_77), and of the other cards of iwm and iwx and
-    MediaTek's MT7921 and MT7922 (MORE below): each a plain object whose record 1 is the
+    MediaTek's MT7921 and MT7922, and the display's DMC program for Kaby Lake
+    (SYSDEF_FW_DMC_KBL) (MORE below): each a plain object whose record 1 is the
     file as its maker publishes it (DIR, tools/x64/wifi/fw.sh), the
     version OpenBSD's iwm, iwx or mwx asks for (design 9.6.9), and whose
     record 0 says what it is with the maker's licence for it; owned by
@@ -137,6 +138,11 @@ MORE = [
      "MediaTekのMT7922のROMパッチ。" + MWX_WHAT),
     ("01a0d8c4-54a8-7a19-8b28-19a8a2b354a8", "01a0d8c4-54a9-7a1a-8b29-1aa9a2b354a9", "WIFI_RAM_CODE_MT7922_1.bin", LICENCE_MT,
      "MediaTekのMT7922のファームウェア。" + MWX_WHAT),
+    ("01a0d8c4-55b0-7c11-8d20-11b0b2c355b0", "01a0d8c4-55b1-7c12-8d21-12b1b2c355b1", "kbl_dmc_ver1_04.bin", "LICENSE.i915",
+     "IntelのKaby LakeとAmber Lakeの表示のDMCのプログラム(バージョン1.04)。画面のドライバ(device/disp/x86_64/disp_igfx_psr.c)が"
+     "起動のたびに表示のエンジンへ書き、表示のエンジンが省電力の状態(DC5、DC6)に出入りするときに動かす。"
+     "レコード1がIntelの配布するファイルそのもの(linux-firmwareのタグ20251021のi915/から取得し、SHA-256を確かめたもの)。"
+     "Intelの次の許諾に従って再配布する。"),
 ]
 # Qualcomm's QCA6174 hw3.x (168c:003e), read by TessronOS's athx (include/ts/sysdef.h
 # SYSDEF_FW_ATHX6174_*): the object, the link to it, its name, the file in DIR, what it is

@@ -48,6 +48,8 @@ IMPORT INT	knl_re_init( void );		/* device/net/x86_64/re.c */
 IMPORT INT	knl_rge_init( void );		/* device/net/x86_64/rge.c */
 IMPORT INT	knl_igc_init( void );		/* device/net/x86_64/igc.c */
 IMPORT void	knl_acpi_power_start( void );	/* kernel/sysdepend/acpi/acpi_power.c */
+IMPORT void	knl_acpi_therm_start( void );	/* kernel/sysdepend/acpi/acpi_therm.c */
+IMPORT void	knl_cpu_pm_start( void );	/* cpuidle.c */
 IMPORT void	knl_pm_init( void );		/* pm.c */
 IMPORT INT	knl_dwi2c_init( void );		/* device/i2c/x86_64/dw_i2c.c */
 IMPORT INT	knl_hidi2c_init( void );	/* device/i2c/x86_64/hid_i2c.c */
@@ -200,6 +202,8 @@ EXPORT ER knl_start_device( void )
 	knl_proc_init();	/* process management (design 9.4) */
 	knl_ob_init();		/* real objects of every kind (design 18) */
 	knl_acpi_power_start();	/* the batteries, the adapter, the lid, the power button as objects */
+	knl_cpu_pm_start();	/* the idle states and HWP, applied by each processor (03-platform 3.10.14) */
+	knl_acpi_therm_start();	/* the record of what holds the processors down, and the DPTF passive table (Intel, not a virtual machine) */
 	knl_pm_init();		/* sleep: which way the firmware offers (03-platform 3.10.11) */
 	knl_wmobj_init();	/* and windows among them (design 18.13) */
 	knl_fs_posix_mounts();	/* "/", /dev and /tmp for the POSIX programs (design 5.8.1) */

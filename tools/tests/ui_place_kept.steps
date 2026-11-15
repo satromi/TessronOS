@@ -1,0 +1,37 @@
+# A window's kept place with the main screen away from the view's corner (docs/tessronos 10.4.8), for
+# tools/ui_run.py with UI_SCREENS=2: the second display put left of the main one on システム環境設定's
+# 画面サイズ page (as ui_screens_left.steps does), then a figure made with its window kept 100,60 from
+# the main screen's corner and opened with 仮身一覧. The desktop keeps the place from the main screen's
+# corner (wm_place_keep) and 仮身一覧 opens it there (wm_place_open): at 1124,60 of the view, on the
+# main screen, not on the screen left of it.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+wait 800
+win システム環境設定
+click 206 181
+wait 300
+click 706 184
+expect sysenv: screen page 1280x800
+wait 500
+click 290 157
+wait 300
+click 290 177
+expect output 2 of 2
+wait 500
+logmark
+click 670 157
+wait 300
+click 670 197
+wait 300
+click 706 554
+wait 1500
+key 28
+expectsincein 30 left 0
+wait 800
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml </figure></tad>
+xmlopen 置き場の試し
+wait 1500
+win 置き場の試し
+want ok 1124 60 1624 460
+shot pk_main

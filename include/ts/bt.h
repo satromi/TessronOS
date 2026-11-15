@@ -33,11 +33,32 @@ extern "C" {
 #define BT_C_PAIR	2		/* the device connected, paired and kept */
 #define BT_C_FORGET	3		/* disconnected, and its object deleted */
 
+/* What a device's connection is doing (T_BTLINE.use) */
+#define BT_USE_NONE	0		/* not connected */
+#define BT_USE_SETUP	1		/* connected, its services still being found or set up */
+#define BT_USE_INPUT	2		/* its keys or pointer taken */
+#define BT_USE_SOUND	3		/* a sound output */
+
+/* What became of a try with a device found (T_BTLINE.note) */
+#define BT_NOTE_NONE	0
+#define BT_NOTE_LEA	1		/* LE Audio, which this adapter cannot carry, and no BR/EDR side known */
+#define BT_NOTE_NOUSE	2		/* nothing it serves is used here: let go */
+#define BT_NOTE_BREDR	3		/* its BR/EDR side paired in its place */
+
+/* Where a device was found (T_BTLINE.bearer) */
+#define BT_BEARER_LE	0x01
+#define BT_BEARER_BREDR	0x02
+
 typedef struct {
 	UB	addr[6];
-	UB	paired, connected;
+	UB	paired;
+	UB	connected;		/* in use: BT_USE_INPUT or BT_USE_SOUND */
 	UW	cod;
 	UB	name[32];
+	UB	bearer;			/* BT_BEARER_*, 0 for a paired device not seen in this search */
+	UB	use;			/* BT_USE_* */
+	UB	note;			/* BT_NOTE_* */
+	UB	pad;
 } T_BTLINE;
 
 #define BT_ST_STARTING	0		/* the commands of the start are going */
@@ -74,6 +95,7 @@ typedef struct {
 IMPORT BOOL knl_bt_ready( void );
 IMPORT ER   knl_bt_scan( INT seconds );		/* found devices are listed by knl_bt_found as they come */
 IMPORT INT  knl_bt_found( T_BTFOUND *buf, INT max );
+IMPORT INT  knl_bt_lines( T_BTLINE *buf, INT max );	/* what OB_BT_LIST reads */
 IMPORT ER   knl_bt_pair( CONST UB *addr );	/* connected, paired and kept, its keys or buttons taken */
 
 #ifdef __cplusplus

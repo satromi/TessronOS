@@ -459,11 +459,9 @@ LOCAL void show( CONST T_PRCFLT *f, UW others )
 	pw = def->r.right - def->r.left;
 	ph = def->r.bottom - def->r.top;
 	if ( fresh ) {
-		wm_screen_main(&sw, &sh);
-		o.left = ( sw - pw ) / 2 - 8;
-		o.top = ( sh - ph ) / 2 - 20;
-		if ( o.left < 0 ) o.left = 0;
-		if ( o.top < 0 ) o.top = 0;
+		(void)sw;
+		(void)sh;
+		wm_main_centre(pw + 16, ph + 40, &o.left, &o.top);	/* the frame round it, on the main screen */
 		o.right = o.left + pw + 16;
 		o.bottom = o.top + ph + 40;
 		ft->wid = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "プログラムの異常終了");

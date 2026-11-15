@@ -272,8 +272,8 @@ static void place_new( INT *x, INT *y )
 	for ( i = 1; i < XFC_WIN_MAX; i++ ) {
 		if ( xw[i].used ) n++;
 	}
-	*x = 160 + n * 26;
-	*y = 110 + n * 26;
+	*x = wm_new_x(160 + n * 26);	/* from the corner of the screen new windows open on */
+	*y = wm_new_y(110 + n * 26);
 	if ( media->kw > 0 && ob_rea_rec(media->kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) >= E_OK ) {
 		*x = wp.left + 60 + n * 26;
 		*y = wp.top + 40 + n * 26;
@@ -463,9 +463,10 @@ static void media_scan( XWIN *w )
 	UINT	sum = 0;
 
 	w->nent = 0;
-	list = (TS_UUID *)malloc(sizeof(TS_UUID) * XFC_DISKS);
-	if ( list != NULL && ob_lst_obj(OB_T_DEVICE, OB_S_DISK, NULL, list, XFC_DISKS, &cnt) >= E_OK ) {
-		for ( i = 0; i < cnt && i < XFC_DISKS; i++ ) {
+	/* every disk and partition, a page at a time (ui_lst_obj) */
+	cnt = ui_lst_obj(OB_T_DEVICE, OB_S_DISK, &list);
+	if ( cnt > 0 ) {
+		for ( i = 0; i < cnt; i++ ) {
 			if ( ob_ref_obj(&list[i], &r) < E_OK || r.sub != OB_S_DISK ) continue;
 			e = ent_add(w, E_DISK, r.name);
 			if ( e == NULL ) break;
@@ -515,6 +516,8 @@ static void media_scan( XWIN *w )
 			 w->ent[i].btron[0] != 0 ? " btron " : "", w->ent[i].btron);
 		xfc_log(s);
 	}
+	snprintf(s, sizeof(s), "connections %d", nconn);
+	xfc_log(s);
 }
 
 /* The names of the directory shown */
@@ -626,6 +629,16 @@ static ER files_scan( XWIN *w, CONST UB *keep )
 	where_text(w, where, sizeof(where));
 	snprintf(s, sizeof(s), "dir %s %d entries", where, w->nent - n0);
 	xfc_log(s);
+	if ( er < E_OK ) {
+		/* what went wrong, and for a server its last reply and how its data went */
+		if ( w->is_ftp && w->ftp != NULL && w->ftp->ssh == NULL ) {
+			snprintf(s, sizeof(s), "dir failed %d reply %d %s data %s", (INT)er, w->ftp->code, w->ftp->text,
+				 w->ftp->active ? ( w->ftp->port ? "port" : "eprt" ) : w->ftp->pasv ? "pasv" : "epsv");
+		} else {
+			snprintf(s, sizeof(s), "dir failed %d", (INT)er);
+		}
+		xfc_log(s);
+	}
 	for ( i = n0; i < w->nent && i < n0 + 64; i++ ) {
 		snprintf(s, sizeof(s), "- %s%s %d", w->ent[i].name, ( w->ent[i].kind == E_DIR ) ? "/" : "",
 			 (INT)w->ent[i].size);
@@ -980,57 +993,122 @@ static void open_disk( XFCENT *e )
 	disk_shown(w);
 }
 
-/* The mount of the disk under the cursor taken off, or made */
-static void mount_toggle( void )
+static void conn_drop( INT i );
+static void open_ftp( CONST XFCCONN *from );
+
+/* The entry of the main window under the cursor, NULL when there is none */
+static XFCENT *media_cur( void )
 {
-	XFCENT	*e;
+	return ( media->cur >= 0 && media->cur < media->nent ) ? &media->ent[media->cur] : NULL;
+}
+
+/*
+ * What 〈マウント〉 can do with an entry: a disk mounted nowhere and not
+ * opened by a window, or a kept FTP connection, connected to
+ */
+static BOOL can_mount( CONST XFCENT *e )
+{
+	XWIN	*w;
+
+	if ( e == NULL ) return FALSE;
+	if ( e->kind == E_FTP ) return TRUE;
+	if ( e->kind != E_DISK || e->mount[0] != 0 ) return FALSE;
+	w = files_of_disk(&e->uuid);
+	return (BOOL)( w == NULL || !w->mounted );
+}
+
+/*
+ * What 〈取り外し〉 can do with an entry: a disk mounted by the person or
+ * opened by a window of its own; the system's own mounts are not the
+ * person's to take off. A kept FTP connection is let go and forgotten.
+ */
+static BOOL can_unmount( CONST XFCENT *e )
+{
+	XWIN	*w;
+
+	if ( e == NULL ) return FALSE;
+	if ( e->kind == E_FTP ) return TRUE;
+	if ( e->kind != E_DISK ) return FALSE;
+	w = files_of_disk(&e->uuid);
+	if ( w != NULL && w->mounted ) return TRUE;
+	return (BOOL)( e->mount[0] != 0 && !disk_held(e) );
+}
+
+/* 〈マウント〉: the disk under the cursor mounted, or the kept connection connected to */
+static void mount_cur( void )
+{
+	XFCENT	*e = media_cur();
 	XWIN	*w;
 	char	s[200];
 	ID	key;
 	ER	er;
 
-	if ( media->cur >= media->nent || media->ent[media->cur].kind != E_DISK ) {
+	if ( !can_mount(e) ) {
 		say(media, "マウントするディスクを選んでください", TRUE);
 		return;
 	}
-	e = &media->ent[media->cur];
+	if ( e->kind == E_FTP ) {
+		open_ftp(&conn[e->conn]);
+		return;
+	}
+	w = files_of_disk(&e->uuid);
+	if ( w != NULL ) files_free(w);
+	key = ob_opn_obj(&e->uuid, OB_OP_R | ( o_ro ? 0 : OB_OP_WRITE ));
+	er = ( key > 0 ) ? fs_attach_dev(key, NULL, o_ro ? FS_MNT_RDONLY : 0) : (ER)key;
+	if ( key > 0 ) ob_cls_obj(key);
+	if ( er < 0 ) {
+		mount_failed(e, er, s, sizeof(s));
+		say(media, s, TRUE);
+	} else {
+		snprintf(s, sizeof(s), "mounted %s/%s%s", FS_MEDIA_DIR, e->name, o_ro ? " ro" : "");
+		xfc_log(s);
+		snprintf(s, sizeof(s), "%s をマウントしました", e->name);
+		say(media, s, FALSE);
+	}
+	media->sum = 0;
+	media_scan(media);
+}
+
+/* 〈取り外し〉: the disk under the cursor taken off, or the kept connection let go and forgotten */
+static void unmount_cur( void )
+{
+	XFCENT	*e = media_cur();
+	XWIN	*w;
+	char	s[200];
+	ID	key;
+	ER	er;
+
+	if ( e != NULL && e->kind == E_DISK && disk_held(e) ) {
+		/* the system's own mount: not the person's to take off, nor its device to open */
+		snprintf(s, sizeof(s), "%s を取り外せません：システムがマウントしたものです", e->name);
+		say(media, s, TRUE);
+		return;
+	}
+	if ( !can_unmount(e) ) {
+		say(media, "取り外すディスクか FTP の接続を選んでください", TRUE);
+		return;
+	}
+	if ( e->kind == E_FTP ) {
+		conn_drop(e->conn);
+		return;
+	}
 	w = files_of_disk(&e->uuid);
 	if ( w != NULL && w->mounted ) {
 		files_close(w);			/* its window goes, and the volume with it */
 		return;
 	}
-	if ( w != NULL ) files_free(w);
-	if ( e->mount[0] == 0 ) {
-		key = ob_opn_obj(&e->uuid, OB_OP_R | ( o_ro ? 0 : OB_OP_WRITE ));
-		er = ( key > 0 ) ? fs_attach_dev(key, NULL, o_ro ? FS_MNT_RDONLY : 0) : (ER)key;
-		if ( key > 0 ) ob_cls_obj(key);
-		if ( er < 0 ) {
-			mount_failed(e, er, s, sizeof(s));
-			say(media, s, TRUE);
-		} else {
-			snprintf(s, sizeof(s), "mounted %s/%s%s", FS_MEDIA_DIR, e->name, o_ro ? " ro" : "");
-			xfc_log(s);
-			snprintf(s, sizeof(s), "%s をマウントしました", e->name);
-			say(media, s, FALSE);
-		}
-	} else if ( disk_held(e) ) {
-		/* the system's own mount: not the person's to take off, nor its device to open */
-		snprintf(s, sizeof(s), "%s を取り外せません：システムがマウントしたものです", e->name);
+	key = ob_opn_obj(&e->uuid, OB_OP_R | ( e->ro ? 0 : OB_OP_WRITE ));
+	er = ( key > 0 ) ? fs_detach_dev(key) : (ER)key;
+	if ( key > 0 ) ob_cls_obj(key);
+	if ( er < 0 ) {
+		snprintf(s, sizeof(s), "%s を取り外せません（%d）%s", e->name, (INT)er,
+			 ( er == EX_ACCES ) ? "：システムがマウントしたものです" : "");
 		say(media, s, TRUE);
 	} else {
-		key = ob_opn_obj(&e->uuid, OB_OP_R | ( e->ro ? 0 : OB_OP_WRITE ));
-		er = ( key > 0 ) ? fs_detach_dev(key) : (ER)key;
-		if ( key > 0 ) ob_cls_obj(key);
-		if ( er < 0 ) {
-			snprintf(s, sizeof(s), "%s を取り外せません（%d）%s", e->name, (INT)er,
-				 ( er == EX_ACCES ) ? "：システムがマウントしたものです" : "");
-			say(media, s, TRUE);
-		} else {
-			snprintf(s, sizeof(s), "unmounted %s", e->name);
-			xfc_log(s);
-			snprintf(s, sizeof(s), "%s を取り外しました", e->name);
-			say(media, s, FALSE);
-		}
+		snprintf(s, sizeof(s), "unmounted %s", e->name);
+		xfc_log(s);
+		snprintf(s, sizeof(s), "%s を取り外しました", e->name);
+		say(media, s, FALSE);
 	}
 	media->sum = 0;
 	media_scan(media);
@@ -1041,15 +1119,22 @@ static void mount_toggle( void )
 static XWIN	*pend;			/* the window an FTP connection is being made for */
 static XFCCONN	pconn;
 
+/* Whether two connections are the same one: the same server, port and user */
+static BOOL conn_same( CONST XFCCONN *a, CONST XFCCONN *b )
+{
+	return (BOOL)( strcmp((CONST char *)a->host, (CONST char *)b->host) == 0
+		    && strcmp((CONST char *)a->port, (CONST char *)b->port) == 0
+		    && strcmp((CONST char *)a->user, (CONST char *)b->user) == 0
+		    && a->ssh == b->ssh );
+}
+
 /* The connection kept with the others, the same one replaced */
 static void conn_keep( CONST XFCCONN *c )
 {
 	INT	i;
 
 	for ( i = 0; i < nconn; i++ ) {
-		if ( strcmp((char *)conn[i].host, (char *)c->host) == 0
-		  && strcmp((char *)conn[i].port, (char *)c->port) == 0
-		  && strcmp((char *)conn[i].user, (char *)c->user) == 0 ) break;
+		if ( conn_same(&conn[i], c) ) break;
 	}
 	if ( i == nconn ) {
 		if ( nconn == XFC_CONN_MAX ) {
@@ -1062,6 +1147,41 @@ static void conn_keep( CONST XFCCONN *c )
 	conn[i] = *c;
 	if ( !c->keep ) conn[i].pass[0] = 0;
 	if ( xfc_conf_save(conn, nconn) < E_OK ) xfc_log("settings not kept");
+}
+
+/*
+ * A kept connection taken off: the windows it is open in closed, the
+ * server let go, and the connection gone from the list and from the
+ * person's settings
+ */
+static void conn_drop( INT i )
+{
+	XFCCONN	c;
+	UB	lb[XFC_FIELD + 32];
+	char	s[XFC_FIELD + 96];
+	INT	k;
+
+	if ( i < 0 || i >= nconn ) return;
+	c = conn[i];
+	conn_label(&c, lb, sizeof(lb));
+	for ( k = 1; k < XFC_WIN_MAX; k++ ) {
+		if ( xw[k].used && xw[k].is_ftp && conn_same(&xw[k].fc, &c) ) files_close(&xw[k]);
+	}
+	memmove(&conn[i], &conn[i + 1], sizeof(XFCCONN) * (size_t)( nconn - i - 1 ));
+	nconn--;
+	memset(&conn[nconn], 0, sizeof(XFCCONN));
+	if ( xfc_conf_save(conn, nconn) < E_OK ) {
+		xfc_log("settings not kept");
+		snprintf(s, sizeof(s), "%s の接続を設定から消せません", lb);
+		say(media, s, TRUE);
+	} else {
+		snprintf(s, sizeof(s), "dropped ftp %s", lb);
+		xfc_log(s);
+		snprintf(s, sizeof(s), "%s の接続を取り外しました", lb);
+		say(media, s, FALSE);
+	}
+	media->sum = 0;
+	media_scan(media);
 }
 
 #ifdef USE_SSH
@@ -1221,6 +1341,8 @@ static void open_ftp( CONST XFCCONN *from )
 		memcpy(w->xnet.addr, pend->xnet.addr, sizeof(w->xnet.addr));
 		w->ftp->net = &w->fnet;
 		w->is_ftp = TRUE;
+		w->fc = pconn;
+		w->fc.pass[0] = 0;
 		snprintf((char *)w->dev, sizeof(w->dev), "%s", lb);
 		snprintf(w->label, sizeof(w->label), "%s://%s", pconn.ssh ? "sftp" : "ftp", pconn.host);
 		strcpy(w->source, "ftp");
@@ -1595,9 +1717,13 @@ static void look_of( CONST XFCENT *e, T_DTLOOK *look )
 /*
  * The 仮身 chosen carried out, held where the press was: the desktop
  * follows the pointer with their outline and says where they were let
- * go. Over a window of the desktop's that takes links, a panel asks how
- * the files are made 実身; they are made on that window's volume and a
- * link to each is put where it was let go, as they lay in the list.
+ * go. Over a window that takes links -- a 仮身一覧 and the first window
+ * of BTRON are programs' windows, each asked first whether it takes
+ * them there (DT_F_TO_PROG with DT_F_ASK) -- a panel asks how the files
+ * are made 実身; only then are they made, on the volume of the object
+ * that window shows, and a link to each is put where it was let go, as
+ * they lay in the list. What was made and could not be put is deleted,
+ * as nothing would link to it.
  */
 static void carry_out( XWIN *w, INT px, INT py )
 {
@@ -1628,6 +1754,7 @@ static void carry_out( XWIN *w, INT px, INT py )
 	if ( n == 0 || bb.right < 0 ) return;
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_CARRY;
+	rq.flags = DT_F_TO_PROG | DT_F_ASK;
 	rq.look.w = bb.right - bb.left;
 	rq.look.h = bb.bottom - bb.top;
 	rq.look.frcol = rq.look.chcol = rq.look.tbcol = rq.look.bgcol = 0xFFFFFFFFU;
@@ -2015,9 +2142,10 @@ static void command( XWIN *w, CONST char *code, INT index )
 	else if ( strcmp(code, "open") == 0 ) open_entry(w, w->cur);
 	else if ( strcmp(code, "import") == 0 ) do_import(w);
 	else if ( strcmp(code, "export") == 0 ) do_export(w);
-	else if ( strcmp(code, "mount") == 0 ) {
-		if ( w == media ) mount_toggle();
-		else say(w, "マウント・取外しは、ファイル変換のウインドウでディスクを選んで行います", TRUE);
+	else if ( strcmp(code, "mount") == 0 || strcmp(code, "unmount") == 0 ) {
+		if ( w != media ) say(w, "マウント・取り外しは、ファイル変換のウインドウでディスクを選んで行います", TRUE);
+		else if ( code[0] == 'm' ) mount_cur();
+		else unmount_cur();
 	} else if ( strcmp(code, "ftp") == 0 ) open_ftp(NULL);
 	else if ( strcmp(code, "up") == 0 ) go_up(w);
 	else if ( strcmp(code, "root") == 0 && w->kind == W_FILES ) go_to(w, (CONST UB *)"");
@@ -2050,7 +2178,7 @@ static CONST struct {
 	UB		key;
 	CONST char	*code;
 } ctrl_key[] = {
-	{ 'e', "close" }, { 'i', "import" }, { 'o', "export" }, { 'm', "mount" }, { 'f', "ftp" },
+	{ 'e', "close" }, { 'i', "import" }, { 'o', "export" }, { 'm', "mount" }, { 'd', "unmount" }, { 'f', "ftp" },
 	{ 'u', "up" }, { 'r', "refresh" }, { 't', "tadjs" }, { 'l', "layout" }, { 'j', "sjis" },
 	{ 'w', "ro" }, { 'b', "argbox" }, { 'a', "all" },
 };
@@ -2076,7 +2204,12 @@ static void menu( XWIN *w, CONST T_OBNTM *m )
 		(void)mn_chg_atr(mid, NULL, "all", MN_GREY);
 	} else {
 		(void)mn_chg_atr(mid, NULL, "mount", MN_GREY);
+		(void)mn_chg_atr(mid, NULL, "unmount", MN_GREY);
 		(void)mn_chg_atr(mid, NULL, "ro", MN_GREY);
+	}
+	if ( !files ) {
+		if ( !can_mount(media_cur()) ) (void)mn_chg_atr(mid, NULL, "mount", MN_GREY);
+		if ( !can_unmount(media_cur()) ) (void)mn_chg_atr(mid, NULL, "unmount", MN_GREY);
 	}
 	if ( files && xfc_uuid_parse(SYSDEF_MENU_XFC_DIR, &dirdef) && w->nhist > 0 ) {
 		UB	*lb = (UB *)malloc((size_t)XFC_HIST * WM_LABEL_MAX);

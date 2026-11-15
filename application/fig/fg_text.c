@@ -132,13 +132,16 @@ static INT h_look( T_DDED *e, UINT num, INT dflt )
 	return ( v > 0 || dflt <= 1 ) ? v : dflt;
 }
 
+/* The outline last followed in the window: its size is the one carried on outside it */
+static T_DPRECT	drag_box;
+
 static void h_drag( T_DDED *e, CONST T_DPRECT *r, BOOL first, INT dx, INT dy )
 {
 	(void)e;
-	(void)r;
 	(void)first;
 	(void)dx;
 	(void)dy;
+	if ( r != NULL ) drag_box = *r;
 }
 
 static void h_note( T_DDED *e, CONST char *s )
@@ -267,7 +270,8 @@ static T_TAD *h_tray_frag( T_DDED *e )
 
 static void h_tray_pictures( T_DDED *e, T_TAD *frag )
 {
-	(void)e; (void)frag;
+	(void)e;
+	(void)ta_tray_pictures(frag);	/* a picture of 画面印刷 in the tray goes beside the record */
 }
 
 static void h_tray_taken( T_DDED *e )
@@ -276,17 +280,25 @@ static void h_tray_taken( T_DDED *e )
 	(void)tr_del_dat(TR_HAND);
 }
 
-/* Only the text itself is a place to let something go in */
+/*
+ * In the window, only the text itself is a place to let something go
+ * in; anywhere outside the window is something else, where the desktop
+ * carries it on (the window hears the hand go out of it while it
+ * carries: fg_text_left)
+ */
 static UINT h_at( T_DDED *e, INT sx, INT sy, T_DDED **p_t )
 {
 	T_DPRECT	page;
 
+	*p_t = NULL;
+	if ( sx < 0 || sy < 0 || sx >= g_w || sy >= g_h ) {
+		return DE_AT_OTHER;
+	}
 	h_work_rect(e, &page);
 	if ( sx >= page.left && sx < page.right && sy >= page.top && sy < page.bottom ) {
 		*p_t = e;
 		return DE_AT_TEXT;
 	}
-	*p_t = NULL;
 	return DE_AT_NONE;
 }
 
@@ -295,10 +307,23 @@ static void h_focus( T_DDED *e, T_DDED *t )
 	(void)e; (void)t;
 }
 
+/*
+ * Letters carried out of the window (ta_text_away): the desktop follows
+ * the hand on, as large an outline as was followed here, and puts them
+ * where they are let go; they leave the text unless they were copied
+ */
 static ER h_text_away( T_DDED *e, INT sx, INT sy, INT cx, INT cy, UB *s, INT n )
 {
-	(void)e; (void)sx; (void)sy; (void)cx; (void)cy; (void)s; (void)n;
-	return E_PAR;
+	T_DTREQ	rq;
+
+	memset(&rq, 0, sizeof(rq));
+	rq.look.w = ( drag_box.right > drag_box.left ) ? drag_box.right - drag_box.left : 120;
+	rq.look.h = ( drag_box.bottom > drag_box.top ) ? drag_box.bottom - drag_box.top : 20;
+	rq.grab_x = sx - cx;
+	rq.grab_y = sy - cy;
+	rq.win = g_win;
+	memset(&drag_box, 0, sizeof(drag_box));
+	return ta_text_away(e, &rq, s, n);
 }
 
 static BOOL h_thing_away( T_DDED *e, INT sx, INT sy, CONST T_DDTHING *th )
@@ -578,6 +603,27 @@ void fg_text_released( INT x, INT y )
 	de_mark_release();
 	if ( de_link_carrying() ) de_link_release(x, y);
 	g_dirty = TRUE;
+}
+
+/* Where the hand is let go of as outside the window: lower than any place in it */
+#define FGT_OUTSIDE	(-30000)
+
+/*
+ * The hand went out of the window carrying letters: let go of here as
+ * outside the window, where the desktop follows it on and puts them where
+ * they are let go (h_text_away). Out of the window, the hand has moved,
+ * even when no move was told before it left: the input layer merges a
+ * move into the one still waiting, and the move out may be the first
+ * heard. So the move out is followed first; letters pressed and let go
+ * without a move stay a click, which puts the caret.
+ */
+void fg_text_left( void )
+{
+	if ( tb == NULL || !de_sel_held() ) return;
+	de_follow(FGT_OUTSIDE, FGT_OUTSIDE);
+	if ( !de_sel_carrying() ) return;
+	note("left the window carrying letters");
+	fg_text_released(FGT_OUTSIDE, FGT_OUTSIDE);
 }
 
 /* A key typed into the text being edited; Escape ends it. TRUE when it was the text's */

@@ -292,19 +292,21 @@ LOCAL void test_foreign( void )
 /* A window by its name; FALSE when there is none */
 LOCAL BOOL window_named( CONST char *name, TS_UUID *out )
 {
-	TS_UUID	list[64];
+	TS_UUID	*list;
 	T_OBREF	r;
-	INT	cnt = 0, i;
+	INT	cnt, i;
+	BOOL	found = FALSE;
 
-	if ( ob_lst_obj(OB_T_WINDOW, 0, NULL, list, 64, &cnt) < E_OK ) return FALSE;
-	for ( i = 0; i < cnt && i < 64; i++ ) {
+	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return FALSE;
+	for ( i = 0; i < cnt && !found; i++ ) {
 		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_WINDOW
 		  && knl_strcmp((CONST char *)r.name, name) == 0 ) {
 			*out = list[i];
-			return TRUE;
+			found = TRUE;
 		}
 	}
-	return FALSE;
+	Kfree(list);
+	return found;
 }
 
 /* Panels open now: a menu is one */
@@ -325,20 +327,22 @@ LOCAL INT panels( void )
  */
 LOCAL void screen_whole( INT wid, UW colour )
 {
-	TS_UUID		list[64];
+	TS_UUID		*list;
 	T_OBREF		r;
 	T_DPRECT	box;
 	UW		px = 0;
-	INT		cnt = 0, i, gid = wm_gid(wid);
+	INT		cnt, i, gid = wm_gid(wid);
 
 	KT_ASSERT_EQ(wm_self_check(), 0);
 	KT_ASSERT_EQ(wm_panel_self_check(), 0);
-	KT_ASSERT_ER(ob_lst_obj(OB_T_WINDOW, 0, NULL, list, 64, &cnt), E_OK);
-	for ( i = 0; i < cnt && i < 64; i++ ) {
+	cnt = kt_lst_obj(OB_T_WINDOW, 0, &list);
+	KT_ASSERT(cnt >= 0);
+	for ( i = 0; i < cnt; i++ ) {
 		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_WINDOW ) {
 			KT_ASSERT(wm_obj_wid(&list[i]) > 0);
 		}
 	}
+	if ( cnt >= 0 ) Kfree(list);
 	KT_ASSERT(gid >= 0);
 	if ( gid < 0 ) return;
 	box.left = 10;

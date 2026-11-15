@@ -26,6 +26,7 @@
 #include <ts/proc.h>
 #include <ts/dp.h>
 #include <ts/fn.h>
+#include <ts/slide.h>
 #include "../../application/desktop/desktop.h"
 
 #define DECK		"72c584f2-af6c-45cb-8dfc-3f181d13cd0a"
@@ -45,7 +46,7 @@ LOCAL INT pages_of( CONST char *xml, TS_UUID *ids, INT max, INT *p_w, INT *p_h )
 	INT	n;
 
 	if ( tad_parse((CONST UB *)xml, s_len(xml), NULL, &doc) < E_OK || doc == NULL ) return -1;
-	n = dt_slide_pages(doc, ids, max, p_w, p_h);
+	n = sl_pages(doc, ids, max, p_w, p_h);
 	tad_free(doc);
 	return n;
 }
@@ -95,7 +96,7 @@ LOCAL void test_fit( void )
 	INT		den;
 
 	/* a screen 1280 by 800: two thirds, as wide as the screen, the margin above and below only */
-	KT_ASSERT_EQ(dt_slide_fit(1280, 800, 1920, 1080, &r, &den), 2);
+	KT_ASSERT_EQ(sl_fit(1280, 800, 1920, 1080, &r, &den), 2);
 	KT_ASSERT_EQ(den, 3);
 	KT_ASSERT_EQ(r.left, 0);
 	KT_ASSERT_EQ(r.top, 40);
@@ -103,7 +104,7 @@ LOCAL void test_fit( void )
 	KT_ASSERT_EQ(r.bottom - r.top, 720);
 
 	/* the narrower way decides: here the height, the margin left and right only */
-	KT_ASSERT_EQ(dt_slide_fit(1280, 600, 1920, 1080, &r, &den), 5);
+	KT_ASSERT_EQ(sl_fit(1280, 600, 1920, 1080, &r, &den), 5);
 	KT_ASSERT_EQ(den, 9);
 	KT_ASSERT_EQ(r.top, 0);
 	KT_ASSERT_EQ(r.bottom - r.top, 600);
@@ -111,9 +112,9 @@ LOCAL void test_fit( void )
 	KT_ASSERT_EQ(r.left, ( 1280 - 1066 ) / 2);
 
 	/* a screen of the slides' own shape is filled whole, at any size */
-	KT_ASSERT_EQ(dt_slide_fit(1366, 768, 1366, 768, &r, &den), 1);
+	KT_ASSERT_EQ(sl_fit(1366, 768, 1366, 768, &r, &den), 1);
 	KT_ASSERT_EQ(den, 1);
-	KT_ASSERT_EQ(dt_slide_fit(1600, 900, 1920, 1080, &r, &den), 5);
+	KT_ASSERT_EQ(sl_fit(1600, 900, 1920, 1080, &r, &den), 5);
 	KT_ASSERT_EQ(den, 6);
 	KT_ASSERT_EQ(r.left, 0);
 	KT_ASSERT_EQ(r.top, 0);
@@ -121,17 +122,17 @@ LOCAL void test_fit( void )
 	KT_ASSERT_EQ(r.bottom, 900);
 
 	/* never smaller than an eighth, nor larger than four times */
-	KT_ASSERT_EQ(dt_slide_fit(100, 100, 1920, 1080, &r, &den), 1);
+	KT_ASSERT_EQ(sl_fit(100, 100, 1920, 1080, &r, &den), 1);
 	KT_ASSERT_EQ(den, 8);
-	KT_ASSERT_EQ(dt_slide_fit(1920, 1080, 960, 540, &r, &den), 2);
+	KT_ASSERT_EQ(sl_fit(1920, 1080, 960, 540, &r, &den), 2);
 	KT_ASSERT_EQ(den, 1);
-	KT_ASSERT_EQ(dt_slide_fit(3840, 2160, 480, 270, &r, &den), 4);
+	KT_ASSERT_EQ(sl_fit(3840, 2160, 480, 270, &r, &den), 4);
 	KT_ASSERT_EQ(den, 1);
 	KT_ASSERT_EQ(r.right - r.left, 1920);
 	KT_ASSERT_EQ(r.left, 960);
 
 	/* no size given: 1920 by 1080 */
-	KT_ASSERT_EQ(dt_slide_fit(1024, 768, 0, 0, &r, &den), 8);
+	KT_ASSERT_EQ(sl_fit(1024, 768, 0, 0, &r, &den), 8);
 	KT_ASSERT_EQ(den, 15);
 	KT_ASSERT_EQ(r.right - r.left, 1024);
 	KT_ASSERT_EQ(r.bottom - r.top, 576);
@@ -152,7 +153,7 @@ LOCAL void test_sample( void )
 	KT_ASSERT_ER(tad_parse(rec, size, NULL, &doc), E_OK);
 	Kfree(rec);
 	if ( doc == NULL ) return;
-	n = dt_slide_pages(doc, ids, 8, &w, &h);
+	n = sl_pages(doc, ids, 8, &w, &h);
 	tad_free(doc);
 	tm_printf((UB *)"  sample: %d slides, %d x %d\n", n, w, h);
 	KT_ASSERT_EQ(n, 3);

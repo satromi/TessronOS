@@ -131,6 +131,9 @@ LOCAL INT		ip6_plen = 0;
 LOCAL UB		ip6_gw[16];		/* fixed: the default router, all zero none */
 LOCAL UB		ns6_fixed[2][16];	/* IPv6 name servers the settings name */
 
+/* The programs told that the network's configuration changed (so_prc.c, so_netwait) */
+IMPORT void	knl_so_netchg( void );
+
 /* ---------------------------------------------------------------- errors */
 
 /*
@@ -149,7 +152,8 @@ EXPORT ER knl_so_errcode( INT e )
 	case EACCES:		return E_OACV;
 	case ENOMEM:		return E_NOMEM;
 	case ENOBUFS:		return E_NOMEM;
-	case EMFILE:		return E_LIMIT;
+	case EMFILE:		return E_LIMIT;	/* the stack's own limits: the table's, as far as a caller knows */
+	case ENFILE:		return E_LIMIT;
 	case EAGAIN:		return E_TMOUT;
 	case ETIMEDOUT:		return E_TMOUT;
 	case EINPROGRESS:	return E_BUSY;
@@ -277,22 +281,139 @@ LOCAL INT so_fd( INT s )
 	return so_tab[s].fdp1 - 1;
 }
 
-/* A number for a new descriptor: the lowest free one, or E_LIMIT */
+IMPORT ER	ts_get_mono( UD *p_ns );
+
+/*
+ * The two limits (include/ts/so.h, design 9.2). The last SO_KERNEL_RESERVE
+ * numbers are the kernel's own: a process is not given one of them, so
+ * that the system's work -- its name lookups (two sockets each), DHCP,
+ * SLAAC, the clock -- goes on when the programs have taken all the rest.
+ * Linux and NetBSD keep the last entries of the system's file table for
+ * the privileged in the same way. And a process is given no more than
+ * its own soft limit (knl_prc_so_cur), as RLIMIT_NOFILE limits a process's
+ * descriptors there, so that no one program takes the table from the
+ * others. The owner's count is taken in the same walk of the table that
+ * finds the free number, under the same lock, so that tasks of one
+ * process making sockets at once never take it past its limit.
+ *
+ * Either refusal is said on the console, at most every five seconds:
+ * the table full with who holds it (the kernel, and the three processes
+ * with the most), a process at its limit with its pid, so that a program
+ * that keeps more than its share is seen.
+ */
+#define FULL_SAY_NS	5000000000ULL
+#define FULL_SAY_PRC	3		/* processes named with the most sockets */
+
+LOCAL BOOL say_now( UD *p_last )
+{
+	UD	now;
+
+	(void)ts_get_mono(&now);
+	if ( *p_last != 0 && now - *p_last < FULL_SAY_NS ) {
+		return FALSE;
+	}
+	*p_last = now;
+	return TRUE;
+}
+
+LOCAL void said_full( ID owner )
+{
+	static UD	last;
+	ID		*who;
+	INT		*cnt, n = 0, kern = 0, i, j, k, best, at;
+	UINT		imask;
+	char		line[128];
+
+	if ( !say_now(&last) ) {
+		return;
+	}
+	/* the owners counted into memory of their own: as many as the table has numbers at most */
+	who = (ID *)Kmalloc(sizeof(ID) * SO_MAX);
+	cnt = (INT *)Kmalloc(sizeof(INT) * SO_MAX);
+	ISpinLock(&so_lock, &imask);
+	for ( i = 0; i < SO_MAX; i++ ) {
+		if ( so_tab[i].fdp1 == 0 ) continue;
+		if ( so_tab[i].owner <= 0 ) {
+			kern++;
+			continue;
+		}
+		if ( who == NULL || cnt == NULL ) continue;
+		for ( j = 0; j < n && who[j] != so_tab[i].owner; j++ ) ;
+		if ( j == n ) {
+			who[n] = so_tab[i].owner;
+			cnt[n++] = 0;
+		}
+		cnt[j]++;
+	}
+	ISpinUnlock(&so_lock, &imask);
+	at = 0;
+	line[0] = '\0';
+	for ( k = 0; k < FULL_SAY_PRC && n > 0; k++ ) {
+		best = 0;
+		for ( j = 1; j < n; j++ ) {
+			if ( cnt[j] > cnt[best] ) best = j;
+		}
+		if ( cnt[best] == 0 ) break;
+		at += tm_sprintf((UB *)line + at, (UB *)", pid %d %d", (INT)who[best], cnt[best]);
+		cnt[best] = 0;
+	}
+	if ( who != NULL ) Kfree(who);
+	if ( cnt != NULL ) Kfree(cnt);
+	if ( owner > 0 ) {
+		tm_printf((UB *)"net: all %d sockets are in use for the processes (%d more kept for the kernel): the kernel %d%s\n",
+			  SO_MAX - SO_KERNEL_RESERVE, SO_KERNEL_RESERVE, kern, line);
+	} else {
+		tm_printf((UB *)"net: all %d sockets are in use: the kernel %d%s\n", SO_MAX, kern, line);
+	}
+}
+
+LOCAL void said_limit( ID owner, INT lim )
+{
+	static UD	last;
+
+	if ( say_now(&last) ) {
+		tm_printf((UB *)"net: pid %d holds the %d sockets its limit allows\n", (INT)owner, lim);
+	}
+}
+
+/*
+ * A number for a new descriptor: the lowest free one; E_LIMIT when none
+ * is free, or, for a process, when only the kernel's are; EX_MFILE when
+ * the process holds as many as its limit allows
+ */
 LOCAL INT so_slot( INT fd, ID owner )
 {
 	UINT	imask;
-	INT	s;
+	INT	s, at = SO_MAX, nfree = 0, held = 0, lim = 0;
+	ER	er = E_OK;
 
+	if ( owner > 0 ) {
+		lim = knl_prc_so_cur(owner);
+	}
 	ISpinLock(&so_lock, &imask);
 	for ( s = 0; s < SO_MAX; s++ ) {
 		if ( so_tab[s].fdp1 == 0 ) {
-			so_tab[s].fdp1 = fd + 1;
-			so_tab[s].owner = owner;
-			break;
+			if ( at == SO_MAX ) at = s;
+			nfree++;
+		} else if ( owner > 0 && so_tab[s].owner == owner ) {
+			held++;
 		}
 	}
+	if ( owner > 0 && held >= lim ) {
+		er = EX_MFILE;
+	} else if ( at >= SO_MAX || ( owner > 0 && nfree <= SO_KERNEL_RESERVE ) ) {
+		er = E_LIMIT;
+	} else {
+		so_tab[at].fdp1 = fd + 1;
+		so_tab[at].owner = owner;
+	}
 	ISpinUnlock(&so_lock, &imask);
-	return ( s < SO_MAX ) ? s : E_LIMIT;
+	if ( er == EX_MFILE ) {
+		said_limit(owner, lim);
+	} else if ( er == E_LIMIT ) {
+		said_full(owner);
+	}
+	return ( er < E_OK ) ? (INT)er : at;
 }
 
 LOCAL void nb_close( INT fd )
@@ -925,13 +1046,27 @@ EXPORT INT so_poll( struct pollfd *fds, INT nfds, TMO tmout )
 /*
  * The timeout is the kernel's, so TMO_FEVR is no limit at all and
  * TMO_POL is a look without waiting. The answer is how many of the bits
- * asked for are set.
+ * asked for are set. The sets are as wide as the table (FD_SETSIZE); the
+ * wait is over the sockets asked for alone, a few on the stack and more
+ * in memory of their own for the call.
  */
+#define SEL_LOCAL	16
+
+LOCAL INT sel_bits( INT s, fd_set *readset, fd_set *writeset, fd_set *exceptset )
+{
+	INT	ev = 0;
+
+	if ( readset != NULL && FD_ISSET(s, readset) ) ev |= POLLIN;
+	if ( writeset != NULL && FD_ISSET(s, writeset) ) ev |= POLLOUT;
+	if ( exceptset != NULL && FD_ISSET(s, exceptset) ) ev |= POLLPRI;
+	return ev;
+}
+
 EXPORT INT so_select( INT maxfdp1, fd_set *readset, fd_set *writeset,
 		      fd_set *exceptset, TMO tmout )
 {
-	struct pollfd	p[SO_MAX];
-	INT		s, n = 0, k, ms;
+	struct pollfd	local[SEL_LOCAL], *p = local;
+	INT		s, n = 0, k, ms, ev;
 
 	if ( tmout == TMO_FEVR ) {
 		ms = -1;
@@ -946,43 +1081,51 @@ EXPORT INT so_select( INT maxfdp1, fd_set *readset, fd_set *writeset,
 		return E_PAR;
 	}
 	for ( s = 0; s < maxfdp1; s++ ) {
-		INT	ev = 0;
-
-		if ( readset != NULL && FD_ISSET(s, readset) ) ev |= POLLIN;
-		if ( writeset != NULL && FD_ISSET(s, writeset) ) ev |= POLLOUT;
-		if ( exceptset != NULL && FD_ISSET(s, exceptset) ) ev |= POLLPRI;
-		if ( ev == 0 ) continue;
+		if ( sel_bits(s, readset, writeset, exceptset) == 0 ) continue;
 		if ( so_fd(s) < 0 ) {
 			return E_ID;
 		}
+		n++;
+	}
+	if ( n > SEL_LOCAL ) {
+		p = (struct pollfd *)Kmalloc(sizeof(*p) * (SZ)n);
+		if ( p == NULL ) {
+			return E_NOMEM;
+		}
+	}
+	for ( s = 0, n = 0; s < maxfdp1; s++ ) {
+		ev = sel_bits(s, readset, writeset, exceptset);
+		if ( ev == 0 ) continue;
 		p[n].fd = s;
 		p[n].events = (short)ev;
 		p[n].revents = 0;
 		n++;
 	}
 	k = nb_poll(p, n, ms);
-	if ( k < 0 ) {
-		return k;
-	}
-	if ( readset != NULL ) FD_ZERO(readset);
-	if ( writeset != NULL ) FD_ZERO(writeset);
-	if ( exceptset != NULL ) FD_ZERO(exceptset);
-	k = 0;
-	for ( s = 0; s < n; s++ ) {
-		INT	r = p[s].revents;
+	if ( k >= 0 ) {
+		if ( readset != NULL ) FD_ZERO(readset);
+		if ( writeset != NULL ) FD_ZERO(writeset);
+		if ( exceptset != NULL ) FD_ZERO(exceptset);
+		k = 0;
+		for ( s = 0; s < n; s++ ) {
+			INT	r = p[s].revents;
 
-		if ( readset != NULL && ( p[s].events & POLLIN ) && ( r & ( POLLIN | POLLHUP | POLLERR ) ) ) {
-			FD_SET(p[s].fd, readset);
-			k++;
+			if ( readset != NULL && ( p[s].events & POLLIN ) && ( r & ( POLLIN | POLLHUP | POLLERR ) ) ) {
+				FD_SET(p[s].fd, readset);
+				k++;
+			}
+			if ( writeset != NULL && ( p[s].events & POLLOUT ) && ( r & ( POLLOUT | POLLHUP | POLLERR ) ) ) {
+				FD_SET(p[s].fd, writeset);
+				k++;
+			}
+			if ( exceptset != NULL && ( p[s].events & POLLPRI ) && ( r & POLLPRI ) ) {
+				FD_SET(p[s].fd, exceptset);
+				k++;
+			}
 		}
-		if ( writeset != NULL && ( p[s].events & POLLOUT ) && ( r & ( POLLOUT | POLLHUP | POLLERR ) ) ) {
-			FD_SET(p[s].fd, writeset);
-			k++;
-		}
-		if ( exceptset != NULL && ( p[s].events & POLLPRI ) && ( r & POLLPRI ) ) {
-			FD_SET(p[s].fd, exceptset);
-			k++;
-		}
+	}
+	if ( p != local ) {
+		Kfree(p);
 	}
 	return k;
 }
@@ -2119,13 +2262,18 @@ EXPORT ER knl_so_nb_ifaddr( UW addr, UW mask, UW gw, BOOL dhcp )
 	}
 	e = rump_tsnet_defroute4(( addr != 0 ) ? gw : 0);
 	so_gw = ( addr != 0 && e == 0 ) ? gw : 0;
+	knl_so_netchg();		/* another address, or another gateway */
 	return ( e != 0 ) ? knl_so_nb_er(e) : E_OK;
 }
 
 EXPORT void knl_so_nb_ifdns( UW dns0, UW dns1 )
 {
+	if ( ns_iface[0] == dns0 && ns_iface[1] == dns1 ) {
+		return;
+	}
 	ns_iface[0] = dns0;
 	ns_iface[1] = dns1;
+	knl_so_netchg();
 }
 
 /* The name server to ask: the one the settings name, else the interface's */
@@ -2228,11 +2376,15 @@ EXPORT ER so_setdns6( INT n, CONST UB *addr )
 	if ( n < 0 || n > 1 ) {
 		return E_PAR;
 	}
+	if ( addr == NULL ? zero16(ns6_fixed[n]) : same16(addr, ns6_fixed[n]) ) {
+		return E_OK;
+	}
 	if ( addr == NULL ) {
 		knl_memset(ns6_fixed[n], 0, 16);
 	} else {
 		knl_memcpy(ns6_fixed[n], addr, 16);
 	}
+	knl_so_netchg();
 	return E_OK;
 }
 
@@ -2298,6 +2450,7 @@ EXPORT ER so_setip6( UINT mode, CONST UB *addr, INT plen, CONST UB *gw )
 	}
 	ip6_mode = mode;
 	knl_memset(ip6_gw, 0, 16);
+	knl_so_netchg();		/* what was put there for the old settings is gone */
 
 	/* the new */
 	switch ( how ) {
@@ -2316,6 +2469,7 @@ EXPORT ER so_setip6( UINT mode, CONST UB *addr, INT plen, CONST UB *gw )
 			}
 			knl_memcpy(ip6_gw, g, 16);
 		}
+		knl_so_netchg();
 		break;
 	case SO_IP6_AUTO:
 		knl_so_slaac_temp(temp);
@@ -2345,8 +2499,9 @@ EXPORT ER so_setifaddr( UW addr, UW mask, UW gw, UW dns )
 	}
 	knl_so_dhcp_stop();
 	so_asking = FALSE;
-	if ( dns != 0 ) {
+	if ( dns != 0 && dns != ns_iface[0] ) {
 		ns_iface[0] = dns;
+		knl_so_netchg();
 	}
 	return knl_so_nb_ifaddr(addr, mask, gw, FALSE);
 }
@@ -2360,7 +2515,10 @@ EXPORT ER so_setdns( INT n, UW addr )
 	if ( n < 0 || n > 1 ) {
 		return E_PAR;
 	}
-	ns_fixed[n] = addr;
+	if ( ns_fixed[n] != addr ) {
+		ns_fixed[n] = addr;
+		knl_so_netchg();
+	}
 	return E_OK;
 }
 
@@ -2381,6 +2539,40 @@ EXPORT BOOL so_dhcp_on( void )
 }
 
 /* ---------------------------------------------------------------- start-up */
+
+/*
+ * The rump kernel's own limit on the descriptors of the process that
+ * holds every socket (RLIMIT_NOFILE), raised to the table's size: NetBSD
+ * starts a process at OPEN_MAX (128) soft, with the system's maxfiles as
+ * the hard limit, and the table has more numbers than that. Said once
+ * with what the stack had, so that a stack built with a smaller maxfiles
+ * is seen.
+ */
+#define NB_RLIMIT_NOFILE	8
+#define NB_FD_SPARE		16		/* descriptors past the table's: none is made, a margin */
+
+LOCAL void nb_nofile( void )
+{
+	UD	rl[2];				/* NetBSD's struct rlimit: soft, hard */
+	UD	was, want = (UD)SO_MAX + NB_FD_SPARE;
+	D	a[2];
+	INT	e;
+
+	a[0] = NB_RLIMIT_NOFILE; a[1] = A(rl);
+	e = nb_call(NB_SYS_getrlimit, a, 2, NULL);
+	if ( e != 0 ) {
+		tm_printf((UB *)"net: the stack's limit on descriptors not read (%d)\n", e);
+		return;
+	}
+	was = rl[0];
+	rl[0] = ( want < rl[1] ) ? want : rl[1];
+	e = ( rl[0] > was ) ? nb_call(NB_SYS_setrlimit, a, 2, NULL) : 0;
+	tm_printf((UB *)"net: %d sockets, %d of them kept for the kernel, %d a process may hold (%d at most);"
+		  " the stack's descriptors %d (was %d, the most %d)%s\n",
+		  SO_MAX, SO_KERNEL_RESERVE, SO_PRC_SOFT, SO_PRC_HARD,
+		  (INT)( ( e == 0 ) ? rl[0] : was ), (INT)was, (INT)rl[1],
+		  ( rl[1] < (UD)SO_MAX ) ? ": fewer than the table" : "");
+}
 
 #define RUMP_SIGMODEL_IGNORE	1
 
@@ -2405,6 +2597,7 @@ EXPORT ER so_main( void )
 		return E_SYS;
 	}
 	rump_tsnet_host();
+	nb_nofile();
 
 	knl_so_nb_card = ( rump_tsnet_ifindex(SO_IFNAME) > 0 );
 	tm_printf((UB *)"net: the NetBSD stack is up%s\n", knl_so_nb_card ? "" : " (no card: the loopback interface only)");

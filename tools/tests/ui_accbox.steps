@@ -1,6 +1,8 @@
 # 小物箱 and 小物の設定 (design 11.2.1, 11.8), for tools/ui_run.py on a kernel built
 # with UITEST=1. The box's window stands at 144,124 and its rows at y = 176 + 23i
-# (closed links, 19 high, 4 apart).
+# (closed links, 19 high, 4 apart), as the 小物箱's metadata says ("window"). The 小物箱 is
+# a program of its own running as a process (design 11.2.1): each menu is waited
+# for until the process says it is up ("accbox: menu").
 # The first right press at x,Y opens the menu with 小物管理 at Y+121; after an item
 # of it was chosen, with 小物管理 at Y. Its items are at x+130 from there: 一番上へ
 # +0, 一つ上へ +20, 一つ下へ +40, 一番下へ +60, the switch of the menu +100.
@@ -19,7 +21,9 @@ want ok 6 23 +
 accpos befc
 want ok 22 23 +
 # コンソール (row 6): 一番下へ
+logmark
 click 200 314 1
+expectsince accbox: menu
 wait 600
 move 205 400
 wait 150
@@ -37,7 +41,9 @@ accpos clock
 want ok 7 23 +
 shot ab_bottom
 # 時計 (row 7): 一つ下へ, then 一つ上へ
+logmark
 click 200 337 1
+expectsince accbox: menu
 wait 600
 move 205 338
 wait 500
@@ -47,7 +53,9 @@ click 330 377
 wait 800
 accpos clock
 want ok 8 23 +
+logmark
 click 200 360 1
+expectsince accbox: menu
 wait 600
 move 205 361
 wait 500
@@ -58,7 +66,9 @@ wait 800
 accpos clock
 want ok 7 23 +
 # バックアップ (row 6): 一番上へ
+logmark
 click 200 314 1
+expectsince accbox: menu
 wait 600
 move 205 315
 wait 500
@@ -69,7 +79,9 @@ wait 800
 accpos btron-backup
 want ok 0 23 +
 # バックアップ: 小物メニューに表示しない; the box says so, and 小物 leaves it out
+logmark
 click 200 176 1
+expectsince accbox: menu
 wait 600
 move 205 177
 wait 500
@@ -81,7 +93,9 @@ wait 800
 accpos btron-backup
 want ok 0 23 -
 shot ab_hidden
+logmark
 click 600 300 1
+expectsince accbox: menu
 wait 600
 move 605 301
 wait 150
@@ -165,9 +179,23 @@ progrm 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
 want ok 0
 wait 1000
 shot ab_trash2
-# the desktop's own is not removed
-progrm 01a0d6d1-08d1-781f-8f58-35c45aeacef9
+# the programs of the system's 原紙箱 and 小物箱, which the system needs (SYSDEF_PROGS_KEPT), are not removed,
+# though they run as processes, and stay as they were; neither are the system's tools (屑実身操作,
+# a process kept as they are, SYSDEF_PROGS_KEPT); 基本文章編集 runs as a process and could be (design 11.8)
+refs 01a0d6d1-08d4-7809-bc38-c7d99aa28f29
+keep bbrefs
+progrm 01a0d6d1-08d4-7809-bc38-c7d99aa28f29
 want ok -17
+refs 01a0d6d1-08d4-7809-bc38-c7d99aa28f29
+same bbrefs
+progrm 01a0d6d1-08d5-7125-a6e5-6790429ce3a8
+want ok -17
+refs 01a0d6d1-08d6-7896-adb0-7469517f6b4b
+keep trrefs
+progrm 01a0d6d1-08d6-7896-adb0-7469517f6b4b
+want ok -17
+refs 01a0d6d1-08d6-7896-adb0-7469517f6b4b
+same trrefs
 # BeFC of the image, whose objects were 削除不可: its menu becomes a 屑実身 with it,
 # and both come back when the program object is registered again
 progrm 01a0d8c4-5500-7a01-8b12-3c4d5e6f7b50
@@ -185,17 +213,26 @@ want ok 1
 accpos befc
 want ok 22 23 +
 wait 800
-# 屑実身操作: UT小物, in row 1 (y = 152 + 23i) once the list is made again without
-# BeFC and its menu, deleted for good
+# 屑実身操作: UT小物, in row 0 (y = 152 + 23i; the templates of the programs are the
+# system's, never 屑実身) once the list is made again without BeFC and its menu, deleted for good
 wait 2000
 shot ab_trash4
-click 210 175
+click 210 152
 wait 300
 shot ab_trash5
 key 4C
 wait 1000
 shot ab_confirm
 key 28
+# UT小物 was installed by the administrator: throwing it away asks for the administrator's
+# password, which this disk does not have yet (chosen, typed twice; Tab to the second box)
+wait 1000
+text ktest-admin
+key 2b
+text ktest-admin
+wait 300
+key 28
+expect the administrator's password was set
 wait 1500
 refs 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
 want ok -1
@@ -207,7 +244,7 @@ progrm 01a0d8c4-5500-7f04-8b12-3c4d5e6f7b73
 want ok 0
 wait 1000
 shot ab_trash6
-drag 210 175 70 195
+drag 210 152 70 195
 wait 1000
 shot ab_carried
 key 16 01

@@ -159,6 +159,7 @@ IMPORT ID  ts_get_ppid( void );
 #define TS_SPN_PGID	0x0001		/* put it in group pgid (0: a group of its own) */
 #define TS_SPN_SETSID	0x0002		/* a session of its own */
 #define TS_SPN_SIGDEF	0x0004		/* sigdef: those back to what they do by default */
+#define TS_SPN_WITHPARENT 0x0008	/* it ends when the caller does (TS_PRC_WITHPARENT) */
 
 typedef struct {
 	CONST void *arg;		/* the start-up argument, at most TS_SPN_ARG_MAX */

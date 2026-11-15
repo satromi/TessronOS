@@ -462,32 +462,40 @@ LOCAL void link_new( T_VOBJ *v, CONST TS_UUID *uuid, INT top )
  * LINK_PAD in an empty box). A box that links to it already is left as
  * it is.
  */
-EXPORT ER om_obj_link_add( CONST TS_UUID *box, CONST TS_UUID *uuid )
+EXPORT INT om_tad_link_add( T_TAD *doc, CONST TS_UUID *uuid )
 {
-	T_TAD	*doc;
 	T_VOBJ	v;
 	TS_UUID	id;
 	INT	i, n, low = 0;
+	ER	er;
+
+	n = tad_lnk_count(doc);
+	for ( i = 0; i < n; i++ ) {
+		if ( tad_lnk_get(doc, i, &v) < E_OK ) continue;
+		if ( ts_uuid_cmp(&v.target, uuid) == 0 ) {
+			return 0;
+		}
+		if ( v.bottom > low ) low = v.bottom;
+	}
+	link_new(&v, uuid, low + LINK_GAP);	/* LINK_PAD in an empty box */
+	er = tad_lnk_add(doc, &v, &id);
+	return ( er < E_OK ) ? (INT)er : 1;
+}
+
+EXPORT ER om_obj_link_add( CONST TS_UUID *box, CONST TS_UUID *uuid )
+{
+	T_TAD	*doc;
+	INT	added;
 	ER	er;
 
 	doc = box_read(box, &er);
 	if ( doc == NULL ) {
 		return er;
 	}
-	n = tad_lnk_count(doc);
-	for ( i = 0; i < n; i++ ) {
-		if ( tad_lnk_get(doc, i, &v) < E_OK ) continue;
-		if ( ts_uuid_cmp(&v.target, uuid) == 0 ) {
-			tad_free(doc);
-			return E_OK;
-		}
-		if ( v.bottom > low ) low = v.bottom;
-	}
-	link_new(&v, uuid, low + LINK_GAP);	/* LINK_PAD in an empty box */
-	er = tad_lnk_add(doc, &v, &id);
-	if ( er < E_OK ) {
+	added = om_tad_link_add(doc, uuid);
+	if ( added <= 0 ) {
 		tad_free(doc);
-		return er;
+		return ( added < 0 ) ? (ER)added : E_OK;
 	}
 	return box_write(box, doc);
 }

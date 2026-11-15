@@ -1,0 +1,33 @@
+# The templates of the 原紙箱 stay where they were laid out (design 11.2.2), for tools/ui_run.py.
+# The system's 原紙箱 (its window at 893,35, its work area from 903,64): its first link from
+# 8,8 to 127,27 of the page, so 911,72 to 1030,91 on the screen. Carried within the window, it
+# does not move; pulled by its right edge, its foot or its corner, it is carried instead of
+# sized, and does not move either (sized taller, it would become an open link). Closed (Ctrl+E),
+# record 0 of the 原紙箱 is as it was. Carrying a template out still makes a new object
+# (ui_basebox.steps).
+waitwin 原紙箱
+sum f22289dc-a180-494c-a918-f856ea61b404
+keep before
+click 1000 48
+wait 300
+# carried within the window
+drag 960 80 1000 300
+wait 500
+# its corner, its right edge and its foot pulled
+click 960 80
+wait 300
+drag 1028 89 1080 160
+wait 500
+click 960 80
+wait 300
+drag 1028 80 1080 80
+wait 500
+click 960 80
+wait 300
+drag 960 89 960 200
+wait 500
+shot bbf_after
+key 08 01
+wait 800
+sum f22289dc-a180-494c-a918-f856ea61b404
+same before

@@ -9,37 +9,8 @@
 # (101,125 to 682,482 of the screen: the window stands at 100,100, 600 by 400). The pointer
 # is put on the corner of the bars before the first shot of each.
 # Keys: Backspace 2A, Enter 28, Delete 4C; Ctrl+S 16 01, Ctrl+E 08 01.
-# the desktop's text editor opened by open, whatever the program object says (docproc kernel)
-docproc kernel
-mkbig doc 30
-open big
-waitwin 基本文章編集 600
-sync 600
-wait 500
-move 690 490
-sync 600
-shot doc_cmp_k_open
-click 300 170
-sync 600
-text abc
-sync 600
-key 2A
-sync 600
-key 28
-sync 600
-shot doc_cmp_k_typed
-drag 160 230 420 230
-sync 600
-key 4C
-sync 600
-shot doc_cmp_k_done
-key 16 01
-sync 600
-sum show
-keep kernel
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig doc 30
 logmark
 pdoc big
@@ -73,6 +44,6 @@ logmark
 key 16 01
 expectsince document: saved (0)
 sum show
-same kernel
+want ok 5472 c026ab4e5a75d5ff
 key 08 01
 expect document: closed

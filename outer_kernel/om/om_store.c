@@ -41,6 +41,7 @@
 #include <ts/img.h>
 #include <ts/dt.h>
 #include <ts/sysdef.h>
+#include <ts/wm.h>
 
 /*
  * The table of objects held (design 11.x, om_store): its entries, each
@@ -1256,12 +1257,84 @@ LOCAL INT win_key( CONST UB *b, INT size, CONST char *key, CONST char *sub,
 	return json_key(b, at, ae, key);
 }
 
+/*
+ * The screen a kept place is from ("window": {"screen": "8 hex digits"},
+ * T_WMPLACE): 0, the main screen, when it names none
+ */
+LOCAL UW win_screen( CONST UB *b, INT size )
+{
+	INT	at, end, k;
+	char	s[9];
+
+	at = win_key(b, size, "screen", NULL, &end);
+	if ( at < 0 || b[at] != '"' ) {
+		return 0;
+	}
+	for ( k = 0; k < 8 && at + 1 + k < end && b[at + 1 + k] != '"'; k++ ) {
+		s[k] = (char)b[at + 1 + k];
+	}
+	s[k] = 0;
+	return wm_place_screen_of(s);
+}
+
+/*
+ * The screen of a kept place written: in place of the one named, or put
+ * last among the window's members where there is none and the place is
+ * not the main screen's (a place of the main screen is kept as before)
+ */
+LOCAL BOOL win_screen_put( UB **p_meta, SZ *p_size, UW screen )
+{
+	UB	*b = *p_meta, *nb;
+	INT	at, end, e, w, we, k, n;
+	char	txt[24];
+	SZ	nsize;
+
+	at = win_key(b, (INT)*p_size, "screen", NULL, &end);
+	if ( at >= 0 && b[at] == '"' ) {
+		for ( e = at + 1; e < end && b[e] != '"'; e++ ) ;
+		if ( e < end ) e++;
+		n = ( screen != 0 ) ? tm_sprintf((UB *)txt, (UB *)"\"%08x\"", (UINT)screen) : tm_sprintf((UB *)txt, (UB *)"\"\"");
+	} else {
+		if ( screen == 0 ) {
+			return TRUE;
+		}
+		w = json_key(b, 0, (INT)*p_size, "window");
+		if ( w < 0 || b[w] != '{' ) {
+			return FALSE;
+		}
+		we = json_close(b, w, (INT)*p_size) - 1;	/* the window's closing brace */
+		for ( k = we - 1; k > w && ( b[k] == ' ' || b[k] == '\n' || b[k] == '\r' || b[k] == '\t' ); k-- ) ;
+		n = tm_sprintf((UB *)txt, (UB *)"%s\"screen\":\"%08x\"", ( k > w ) ? "," : "", (UINT)screen);
+		at = we;
+		e = we;
+	}
+	nsize = *p_size - (SZ)( e - at ) + (SZ)n;
+	nb = (UB *)Kmalloc(nsize + 1);
+	if ( nb == NULL ) {
+		return FALSE;
+	}
+	knl_memcpy(nb, b, (SZ)at);
+	knl_memcpy(nb + at, txt, (SZ)n);
+	knl_memcpy(nb + at + n, b + e, *p_size - (SZ)e);
+	nb[nsize] = 0;
+	Kfree(b);
+	*p_meta = nb;
+	*p_size = nsize;
+	return TRUE;
+}
+
+/*
+ * Where a window showing the object stood, as a rectangle of the view now:
+ * the kept place is from the corner of the screen it names, the main
+ * screen's when it names none (wm_place_open)
+ */
 EXPORT ER om_store_window( CONST TS_UUID *id, T_DPRECT *r )
 {
-	UB	*meta;
-	SZ	size = 0;
-	INT	x = 0, y = 0, w = 0, h = 0, at, end;
-	BOOL	ok;
+	UB		*meta;
+	SZ		size = 0;
+	INT		x = 0, y = 0, w = 0, h = 0, at, end;
+	BOOL		ok;
+	T_WMPLACE	p;
 
 	if ( id == NULL || r == NULL ) {
 		return E_PAR;
@@ -1278,16 +1351,53 @@ EXPORT ER om_store_window( CONST TS_UUID *id, T_DPRECT *r )
 	ok = ok && at >= 0 && json_int(meta, at, end, &w);
 	at = win_key(meta, (INT)size, "height", NULL, &end);
 	ok = ok && at >= 0 && json_int(meta, at, end, &h);
+	p.screen = win_screen(meta, (INT)size);
 	Kfree(meta);
 	if ( !ok || w <= 0 || h <= 0 ) {
 		return E_NOEXS;
 	}
-	r->left = x;
-	r->top = y;
-	r->right = x + w;
-	r->bottom = y + h;
+	p.r.left = x;
+	p.r.top = y;
+	p.r.right = x + w;
+	p.r.bottom = y + h;
+	(void)wm_place_open(&p, r);
 
 	return E_OK;
+}
+
+/*
+ * The window object put into metadata that has none (an object made
+ * without one): before the closing brace of the whole, as TADjs writes
+ * it. FALSE when there is no room or the metadata is no object.
+ */
+LOCAL BOOL win_add( UB **p_meta, SZ *p_size, CONST T_DPRECT *r )
+{
+	UB	*b = *p_meta, *nb;
+	char	txt[96];
+	INT	end = (INT)*p_size, n, k, comma;
+
+	while ( end > 0 && b[end - 1] != '}' ) end--;
+	if ( end <= 0 ) {
+		return FALSE;
+	}
+	end--;				/* the closing brace */
+	for ( k = end - 1; k >= 0 && ( b[k] == ' ' || b[k] == '\n' || b[k] == '\r' || b[k] == '\t' ); k-- ) ;
+	comma = ( k >= 0 && b[k] != '{' ) ? 1 : 0;
+	(void)tm_sprintf((UB *)txt, (UB *)"%s\"window\":{\"pos\":{\"x\":%d,\"y\":%d},\"width\":%d,\"height\":%d}",
+		       comma ? "," : "", (INT)r->left, (INT)r->top, (INT)( r->right - r->left ), (INT)( r->bottom - r->top ));
+	for ( n = 0; txt[n] != 0; n++ ) ;
+	nb = (UB *)Kmalloc(*p_size + (SZ)n + 1);
+	if ( nb == NULL ) {
+		return FALSE;
+	}
+	knl_memcpy(nb, b, (SZ)end);
+	knl_memcpy(nb + end, txt, (SZ)n);
+	knl_memcpy(nb + end + n, b + end, *p_size - (SZ)end);
+	nb[*p_size + (SZ)n] = 0;
+	Kfree(b);
+	*p_meta = nb;
+	*p_size += (SZ)n;
+	return TRUE;
 }
 
 /* One number of the window object put in place of what was there */
@@ -1341,23 +1451,34 @@ LOCAL BOOL win_put( UB **p_meta, SZ *p_size, CONST char *key, CONST char *sub,
  * that it opens there next time. Only the numbers change; every other
  * byte of the file is written back as it was read.
  */
-EXPORT ER om_store_set_window( CONST TS_UUID *id, CONST T_DPRECT *r )
+EXPORT ER om_store_set_window( CONST TS_UUID *id, CONST T_DPRECT *view )
 {
-	UB	*meta;
-	SZ	size = 0;
-	ER	er;
+	UB		*meta;
+	SZ		size = 0;
+	ER		er;
+	T_WMPLACE	p;
+	CONST T_DPRECT	*r = &p.r;
 
-	if ( id == NULL || r == NULL ) {
+	if ( id == NULL || view == NULL ) {
 		return E_PAR;
+	}
+	/* kept from the corner of the screen it stands on (wm_place_keep) */
+	if ( wm_place_keep(view, &p) < E_OK ) {
+		p.r = *view;
+		p.screen = 0;
 	}
 	meta = om_obj_meta(id, &size);
 	if ( meta == NULL ) {
 		return E_NOEXS;
 	}
-	win_put(&meta, &size, "x", "pos", r->left);
+	if ( !win_put(&meta, &size, "x", "pos", r->left) && !win_add(&meta, &size, r) ) {
+		Kfree(meta);
+		return E_NOMEM;
+	}
 	win_put(&meta, &size, "y", "pos", r->top);
 	win_put(&meta, &size, "width", NULL, r->right - r->left);
 	win_put(&meta, &size, "height", NULL, r->bottom - r->top);
+	(void)win_screen_put(&meta, &size, p.screen);
 	er = om_obj_meta_put(id, meta, size);
 	Kfree(meta);
 
@@ -1624,7 +1745,12 @@ LOCAL ER rename_locked( CONST TS_UUID *id, CONST UB *name )
 	return er;
 }
 
-/* What the object is written on, set, in the metadata's window */
+/*
+ * What the object is written on, set, in the metadata's window. With
+ * TAD_COL_NONE the object has no paper of its own any more: the colour
+ * is left empty (""), which reads as none (TV_PAPER_LOOK), and what
+ * shows it lays it on the link's 表示領域背景 or the system's look.
+ */
 EXPORT ER om_store_set_paper( CONST TS_UUID *id, UW colour )
 {
 	UB	*meta, val[12];
@@ -1649,9 +1775,12 @@ EXPORT ER om_store_set_paper( CONST TS_UUID *id, UW colour )
 	at = win_key(meta, (INT)size, "backgroundColor", NULL, &end);
 	if ( at < 0 ) {
 		Kfree(meta);
-		return E_OBJ;
+		return ( colour == TAD_COL_NONE ) ? E_OK : E_OBJ;	/* none, as asked */
 	}
-	if ( !meta_splice(&meta, &size, at, json_extent(meta, at, end), val, 9) ) {
+	if ( colour == TAD_COL_NONE ) {
+		val[1] = '"';
+	}
+	if ( !meta_splice(&meta, &size, at, json_extent(meta, at, end), val, ( colour == TAD_COL_NONE ) ? 2 : 9) ) {
 		Kfree(meta);
 		return E_NOMEM;
 	}

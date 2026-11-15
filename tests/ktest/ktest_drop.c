@@ -58,6 +58,7 @@
 #include "../../application/backup/bk_arg.h"
 
 #define LOG_MAX		( 128 * 1024 )
+#define PAGE_IN		10		/* a place inside a cabinet's page, clear of its corner */
 #define SF_BYTES	( (UD)34816 * 1024 )	/* the superfloppy's size */
 
 #define K_ENTER		0x28
@@ -188,18 +189,18 @@ LOCAL char	xk[1024];
 /* The window whose attributes say it shows u, and its number */
 LOCAL INT window_showing( CONST TS_UUID *u )
 {
-	TS_UUID	list[64];
+	TS_UUID	*list;
 	char	us[40], want[64];
 	UB	j[512];
-	INT	cnt = 0, i, p, wid = -1;
+	INT	cnt, i, p, wid = -1;
 	SZ	asz = 0;
 	D	d = 0;
 	ID	kw;
 
 	ts_uuid_to_str(u, us, sizeof(us));
 	tm_sprintf((UB *)want, (UB *)"\"shows\":\"%s\"", us);
-	if ( ob_lst_obj(OB_T_WINDOW, 0, NULL, list, 64, &cnt) < E_OK ) return -1;
-	for ( i = 0; i < cnt && i < 64 && wid < 0; i++ ) {
+	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return -1;
+	for ( i = 0; i < cnt && wid < 0; i++ ) {
 		kw = ob_opn_obj(&list[i], OB_OP_ATRRD);
 		if ( kw <= 0 ) continue;
 		if ( ob_get_atr(kw, j, sizeof(j) - 1, &asz) >= E_OK && find(j, (INT)asz, want, 0) >= 0 ) {
@@ -209,22 +210,23 @@ LOCAL INT window_showing( CONST TS_UUID *u )
 		}
 		ob_cls_obj(kw);
 	}
+	Kfree(list);
 	return wid;
 }
 
 /* The window of that name, and its number */
 LOCAL INT window_named( CONST char *name, TS_UUID *out )
 {
-	TS_UUID	list[64];
+	TS_UUID	*list;
 	T_OBREF	r;
 	UB	j[256];
-	INT	cnt = 0, i, p, wid = -1;
+	INT	cnt, i, p, wid = -1;
 	SZ	asz = 0;
 	D	d = 0;
 	ID	kw;
 
-	if ( ob_lst_obj(OB_T_WINDOW, 0, NULL, list, 64, &cnt) < E_OK ) return -1;
-	for ( i = 0; i < cnt && i < 64; i++ ) {
+	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return -1;
+	for ( i = 0; i < cnt; i++ ) {
 		if ( ob_ref_obj(&list[i], &r) < E_OK || r.sub != OB_S_WINDOW
 		  || find(r.name, s_len((CONST char *)r.name), name, 0) < 0 ) continue;
 		*out = list[i];
@@ -238,6 +240,7 @@ LOCAL INT window_named( CONST char *name, TS_UUID *out )
 			ob_cls_obj(kw);
 		}
 	}
+	Kfree(list);
 	return wid;
 }
 
@@ -572,7 +575,8 @@ LOCAL void sf_attach( CONST char *name, BOOL on )
 	}
 }
 
-LOCAL INT links_to( DTWIN *d, CONST TS_UUID *u, T_VOBJ *v );
+LOCAL INT links_to( CONST T_TAD *rec, CONST TS_UUID *u, T_VOBJ *v );
+LOCAL T_TAD *win_rec( INT wid );
 
 /* A key pressed on a window with the keys held */
 LOCAL void key_mods( INT wid, UINT code, UINT mods )
@@ -727,14 +731,14 @@ LOCAL void test_xfconv( void )
 	/* DATA.BIN and HELLO.TXT chosen and carried there */
 	if ( twid > 0 ) {
 		TS_UUID	made[2];
-		DTWIN	*d;
+		T_TAD	*d;
 
 		pos = log_now();
 		type_on(fwid, "data");
 		key_mods(fwid, K_DOWN, HID_MOD_LSHIFT);
 		KT_ASSERT(wait_for(pos, "xfconv: selected 2: DATA.BIN, HELLO.TXT", 30, NULL, 0));
 		KT_ASSERT(at_work(fwid, XF_ROW_X, XF_ROW_Y(row_of(lpos, "DATA.BIN")), &x0, &y0));
-		KT_ASSERT(at_work(twid, DT_MARGIN + 60, DT_MARGIN + 40, &x1, &y1));
+		KT_ASSERT(at_work(twid, PAGE_IN + 60, PAGE_IN + 40, &x1, &y1));
 		pos = log_now();
 		drag(x0, y0, x1, y1, 0);
 		ts_uuid_to_str(&fig2, fs, sizeof(fs));
@@ -745,20 +749,21 @@ LOCAL void test_xfconv( void )
 		KT_ASSERT(wait_for(pos, "xfconv: imported 2 of 2 objects 2 into ", 300, line, sizeof(line)));
 		KT_ASSERT(wait_for(pos, "xfconv: placed 2 links", 100, NULL, 0));
 		tk_dly_tsk(300);
-		d = dt_win_of(twid);
-		KT_ASSERT(d != NULL && d->rec != NULL && tad_lnk_count(d->rec) == 2);
-		for ( k = 0; d != NULL && d->rec != NULL && k < 2 && k < tad_lnk_count(d->rec); k++ ) {
+		d = win_rec(twid);		/* as the window's program saves it */
+		KT_ASSERT(d != NULL && tad_lnk_count(d) == 2);
+		for ( k = 0; d != NULL && k < 2 && k < tad_lnk_count(d); k++ ) {
 			T_VOBJ	v;
 			UB	*rec;
 			SZ	size = 0;
 
-			if ( tad_lnk_get(d->rec, k, &v) < E_OK ) continue;
+			if ( tad_lnk_get(d, k, &v) < E_OK ) continue;
 			made[k] = v.target;
 			rec = om_obj_record(&made[k], 1, &size);
 			KT_ASSERT(rec != NULL && ( size == 4608 || ( size == 25 && find(rec, 25, "TessronOS FAT test file.", 0) == 0 ) ));
 			if ( rec != NULL ) Kfree(rec);
 			KT_ASSERT_EQ(links_to(d, &made[k], NULL), 1);
 		}
+		if ( d != NULL ) tad_free(d);
 		(void)u;
 	}
 
@@ -1036,14 +1041,43 @@ done0:
 	wm_update();
 }
 
-/* The links of a window's record to an object: how many, and the first's box */
-LOCAL INT links_to( DTWIN *d, CONST TS_UUID *u, T_VOBJ *v )
+/*
+ * The record of the object a program's window shows, as its program
+ * saves it (Ctrl+S to the window first): NULL when it shows none. The
+ * caller frees it.
+ */
+LOCAL T_TAD *win_rec( INT wid )
 {
-	INT	i, n = 0, cnt = ( d != NULL && d->rec != NULL ) ? tad_lnk_count(d->rec) : 0;
+	TS_UUID	u;
+	UB	*x;
+	SZ	len = 0;
+	T_TAD	*rec = NULL;
+	T_WMEV	ev;
+	UD	pos = log_now();
+
+	if ( wid <= 0 || !wm_obj_shown(wid, &u) ) return NULL;
+	knl_memset(&ev, 0, sizeof(ev));
+	ev.type = HID_EV_KEY_DOWN;
+	ev.wid = wid;
+	ev.code = 0x16;			/* S */
+	ev.mods = HID_MOD_LCTRL;
+	knl_wmobj_event(&ev);
+	(void)wait_for(pos, "saved (", 50, NULL, 0);
+	om_store_forget(&u);
+	x = om_obj_record(&u, 0, &len);
+	if ( x != NULL && tad_parse(x, len, NULL, &rec) < E_OK ) rec = NULL;
+	if ( x != NULL ) Kfree(x);
+	return rec;
+}
+
+/* The links of a record to an object: how many, and the first's box */
+LOCAL INT links_to( CONST T_TAD *rec, CONST TS_UUID *u, T_VOBJ *v )
+{
+	INT	i, n = 0, cnt = ( rec != NULL ) ? tad_lnk_count(rec) : 0;
 	T_VOBJ	w;
 
 	for ( i = 0; i < cnt; i++ ) {
-		if ( tad_lnk_get(d->rec, i, &w) >= E_OK && ts_uuid_cmp(&w.target, u) == 0 ) {
+		if ( tad_lnk_get(rec, i, &w) >= E_OK && ts_uuid_cmp(&w.target, u) == 0 ) {
 			if ( n++ == 0 && v != NULL ) *v = w;
 		}
 	}
@@ -1071,7 +1105,7 @@ LOCAL void test_place( void )
 	INT		twid = -1, i, k, x0 = 900, y0 = 700, x1 = 0, y1 = 0;
 	ID		pid;
 	ER		er;
-	DTWIN		*d;
+	T_TAD		*d;
 
 	if ( !up ) KT_SKIP("no desktop");
 	if ( fs_stat(SVCPROG, &st) < EX_OK ) KT_SKIP("no " SVCPROG);
@@ -1147,10 +1181,10 @@ LOCAL void test_place( void )
 	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 20000), E_OK);
 	if ( psts.exitcd != 0 ) tm_printf((UB *)"  the program stopped at step %d\n", psts.exitcd);
 	KT_ASSERT_EQ(psts.exitcd, 0);
-	d = dt_win_of(twid);
+	d = win_rec(twid);		/* as the window's program saves it */
 	KT_ASSERT_EQ(links_to(d, &secret, NULL), 0);
 	KT_ASSERT_EQ(links_to(d, &open_u, NULL), 1);
-	if ( d != NULL ) d->dirty = FALSE;	/* closed without a question */
+	if ( d != NULL ) tad_free(d);
 done1:
 	if ( twid > 0 ) {
 		TS_UUID	w;
@@ -1338,7 +1372,7 @@ LOCAL void test_unpack( void )
 	INT	nref[UNP_NOBJ + 8];
 	T_OBREF	r;
 	T_VOBJ	v;
-	DTWIN	*d;
+	T_TAD	*d;
 	UD	pos;
 	INT	wid = -1, nobj, i, x, y;
 	ID	pid;
@@ -1349,6 +1383,7 @@ LOCAL void test_unpack( void )
 	pid = start_on(SYSDEF_PROG_ARCHIVE, &arc, "archive: ready book", UNP_TITLE, &win, &wid);
 	KT_ASSERT(pid > 0 && wid > 0);
 	if ( pid <= 0 || wid <= 0 ) return;
+	d = NULL;
 
 	/* a click is no carry, and let go on the ground takes nothing out */
 	pos = log_now();
@@ -1357,13 +1392,11 @@ LOCAL void test_unpack( void )
 	tk_dly_tsk(500);
 	KT_ASSERT(!wait_for(pos, "archive: unpacked", 10, NULL, 0));
 
-	/* carried into the cabinet, beside its two links */
-	d = dt_win_of(cwid);
-	KT_ASSERT(carry_root(wid, cwid, DT_MARGIN + 200, DT_MARGIN + 100, &root));
+	/* carried into the cabinet, beside its two links, and saved by its program */
+	KT_ASSERT(carry_root(wid, cwid, PAGE_IN + 200, PAGE_IN + 100, &root));
+	d = win_rec(cwid);
 	KT_ASSERT_EQ(links_to(d, &root, &v), 1);
 	KT_ASSERT(v.left >= 150 && v.right - v.left > 40);	/* where it was let go, as wide as the archive says */
-	KT_ASSERT(d != NULL && d->dirty);
-	if ( d != NULL ) KT_ASSERT_ER(dt_save(d), E_OK);
 
 	nobj = walk_root(&root, objs, nref, UNP_NOBJ + 8);
 	KT_ASSERT_EQ(nobj, UNP_NOBJ);
@@ -1375,9 +1408,18 @@ LOCAL void test_unpack( void )
 	/* the program ends when its window is asked to close; what it made taken away */
 	finish(pid, &win);
 	if ( d != NULL ) {
-		(void)tad_lnk_del((T_TAD *)d->rec, &v.vobjid);
-		ed_model(d);
-		(void)dt_save(d);
+		/* the link taken out of the cabinet again, as the person would: taken, Delete, saved */
+		T_WMWIN	cw;
+		T_TAD	*after;
+
+		if ( links_to(d, &root, &v) == 1 && wm_ref(cwid, &cw) >= E_OK ) {
+			click(cw.work.left + ( v.left + v.right ) / 2, cw.work.top + ( v.top + v.bottom ) / 2, 0);
+			key_mods(cwid, 0x4C, 0);		/* Delete */
+			after = win_rec(cwid);
+			KT_ASSERT_EQ(links_to(after, &root, NULL), 0);
+			if ( after != NULL ) tad_free(after);
+		}
+		tad_free(d);
 	}
 	for ( i = nobj - 1; i >= 0; i-- ) (void)ob_del_obj(&objs[i]);
 	wm_update();
@@ -1514,7 +1556,7 @@ LOCAL void unpack_fat( BOOL doc )
 	if ( fwid <= 0 || pid <= 0 || wid <= 0 ) goto out;
 
 	pos = log_now();
-	KT_ASSERT(carry_root(wid, fwid, DT_MARGIN + 20, DT_MARGIN + 20, &root));
+	KT_ASSERT(carry_root(wid, fwid, PAGE_IN + 20, PAGE_IN + 20, &root));
 	tm_sprintf((UB *)said, (UB *)"%s: asked to take links at ", who);
 	KT_ASSERT(wait_for(pos, said, 100, NULL, 0));			/* asked before the objects were made */
 	tm_sprintf((UB *)said, (UB *)"%s: dropped 1", who);

@@ -19,6 +19,10 @@
  *	nothing but links is taken, and there is no 道具パネル, no text
  *	edited where it stands and no パターン編集. What it does is said on
  *	the console for the tests ("cabinet: ...").
+ *
+ *	The 原紙箱 (application/basebox), the 小物箱 (application/accbox)
+ *	and 原紙集め (application/basecol) are programs of their own, each
+ *	the same code linked with a file that says what it is.
  */
 
 #include "../fig/fg.h"

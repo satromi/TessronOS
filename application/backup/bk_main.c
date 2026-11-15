@@ -1354,7 +1354,7 @@ LOCAL void event( const T_OBNTM *m )
 LOCAL ER open_window( void )
 {
 	ui_icon(SYSDEF_PROG_BACKUP);
-	if ( ui_open(&ui, SYSDEF_BOX_BACKUP, PN_MAIN, 160, 120) < E_OK ) return E_OBJ;
+	if ( ui_open(&ui, SYSDEF_BOX_BACKUP, PN_MAIN, wm_new_x(160), wm_new_y(120)) < E_OK ) return E_OBJ;
 	shown = TRUE;
 	places_named(PT_DEST, dest);
 	places_named(PT_SRC, srcm);

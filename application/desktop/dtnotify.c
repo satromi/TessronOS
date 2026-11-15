@@ -38,6 +38,7 @@
 #include <ts/hid.h>
 #include <ts/mn.h>
 #include <ts/fn.h>
+#include <ts/kinsoku.h>
 #include <ts/dtreq.h>
 #include <ts/sysdef.h>
 #include <ts/uuid.h>
@@ -113,7 +114,8 @@ LOCAL INT letter_len( CONST UB *s )
 
 /*
  * What it says broken into lines as wide as the panel holds, at its line
- * feeds and where a line is full; what does not fit ends with "…"
+ * feeds and where a line is full, as 禁則 lets it (kin_break); what does
+ * not fit ends with "…"
  */
 LOCAL void wrap( NOTE *n, CONST UB *s, INT width )
 {
@@ -143,11 +145,16 @@ LOCAL void wrap( NOTE *n, CONST UB *s, INT width )
 			b[k + l] = 0;
 			full = ( fid > 0 && fn_width(fid, b) > width );
 		}
-		if ( full ) {
-			b[k] = 0;
-			copy(n->line[n->nline++], WM_LABEL_MAX, b, k);
+		if ( full && k > 0 ) {
+			/* broken where 禁則 lets it: the letters after the break start the next line */
+			INT	brk = kin_break(s - k, k);
+
+			b[brk] = 0;
+			copy(n->line[n->nline++], WM_LABEL_MAX, b, brk);
+			s -= k - brk;
+			while ( *s == ' ' ) s++;
 			k = 0;
-			continue;		/* the letter starts the next line */
+			continue;
 		}
 		k += l;
 		s += l;
@@ -222,10 +229,12 @@ LOCAL void build( NOTE *n )
 /* The notices stood one under another from the screen's top right */
 LOCAL void stack( void )
 {
-	INT	sw = 0, sh = 0, top = NT_TOP, i;
-	T_WMWIN	w;
+	INT		top, i;
+	T_WMWIN		w;
+	T_DPRECT	m;
 
-	wm_screen_main(&sw, &sh);
+	wm_screen_main_rect(&m);	/* the main screen's top right, wherever it is in the view */
+	top = m.top + NT_TOP;
 	for ( i = 0; i < NT_MAX; i++ ) {
 		NOTE		*n = notes[i];
 		T_DPRECT	o;
@@ -237,7 +246,7 @@ LOCAL void stack( void )
 		/* the frame measured: the work area NT_W by the panel's height */
 		ow = ( w.outer.right - w.outer.left ) + NT_W - ( w.work.right - w.work.left );
 		oh = ( w.outer.bottom - w.outer.top ) + n->h - ( w.work.bottom - w.work.top );
-		o.left = sw - NT_EDGE - ow;
+		o.left = m.right - NT_EDGE - ow;
 		o.top = top;
 		o.right = o.left + ow;
 		o.bottom = o.top + oh;
@@ -433,9 +442,9 @@ EXPORT ER dt_note_req( CONST T_DTREQ *rq, T_DTANS *an )
 {
 	NOTE		*n = find(&rq->reply, rq->recno);
 	DTWIN		*w;
-	T_DPRECT	o;
+	T_DPRECT	o, m;
 	UB		title[WM_TITLE_MAX];
-	INT		sw = 0, sh = 0, i;
+	INT		i;
 
 	if ( ( rq->flags & DT_F_NOTE_CLOSE ) != 0 ) {
 		if ( n == NULL ) {
@@ -471,9 +480,9 @@ EXPORT ER dt_note_req( CONST T_DTREQ *rq, T_DTANS *an )
 	n->pid = -1;
 	take(n, rq);
 	band(n, title, sizeof(title));
-	wm_screen_main(&sw, &sh);
-	o.left = sw - NT_EDGE - NT_W - 40;
-	o.top = NT_TOP;
+	wm_screen_main_rect(&m);
+	o.left = m.right - NT_EDGE - NT_W - 40;
+	o.top = m.top + NT_TOP;
 	o.right = o.left + NT_W + 40;
 	o.bottom = o.top + 120;
 	w = dt_own_open(&nt_own, n, &o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_NOFOCUS, (CONST char *)title, NULL);

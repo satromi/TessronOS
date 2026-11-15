@@ -26,7 +26,10 @@
  *	earphones of two sink ASEs that are one of a set of two, set up by
  *	BAP and fed LC3 SDUs on two CISes; LC3 itself in a task of TA_FPU;
  *	the functions of CSIS against the specification's sample data; and
- *	the same earphones on a controller without CISes, asked nothing of it.
+ *	the same earphones on a controller without CISes, asked nothing of it,
+ *	let go and not connected to again; and earphones of both LE and BR/EDR
+ *	there, their BR/EDR side named by a Remote Name Request and paired in
+ *	place of LE, for A2DP.
  */
 
 #include <sys/machine.h>
@@ -47,6 +50,7 @@
 #include "../../device/usb/vhc.h"
 #include "../../device/bt/bt_crypto.h"
 #include "../../device/bt/sbc_enc.h"
+#include "../../device/bt/bt_msbc.h"
 #include "../../device/bt/btint.h"
 #include "../../device/bt/btaudio.h"
 #include "../../device/snd/sndhw.h"
@@ -54,11 +58,15 @@
 
 /* The frames a host made of this same input, and another decoder took back to it */
 #define SBC_KAT_HASH	0xFC455807U
+/* The mSBC frames of the tone below, which another decoder took back to it */
+#define MSBC_KAT_HASH	0xA90A8675U
 
 #define EP_EV		0x81
 #define EP_ACL		0x82
 #define EP_OUT		0x02
 #define H_LE_C		6
+
+IMPORT BOOL knl_bth_wbs_any;
 
 LOCAL BOOL same_bytes( CONST void *a, CONST void *b, INT n )
 {
@@ -76,16 +84,19 @@ LOCAL CONST UB bt_ddesc[18] = {
 };
 #define EP_SCO_IN	0x83
 #define EP_SCO_OUT	0x03
-LOCAL CONST UB bt_cfg[85] = {
-	9, 2, 85, 0, 2, 1, 0, 0xa0, 50,
+LOCAL CONST UB bt_cfg[108] = {
+	9, 2, 108, 0, 2, 1, 0, 0xa0, 50,
 	9, 4, 0, 0, 3, 0xe0, 1, 1, 0,
 	7, 5, EP_EV, 3, 16, 0, 1,
 	7, 5, EP_ACL, 2, 64, 0, 0,
 	7, 5, EP_OUT, 2, 64, 0, 0,
-	/* the voice: nothing in setting 0, one channel of 16-bit samples in setting 2 */
+	/* the voice: nothing in setting 0, packets of 9 bytes in setting 1, one channel of 16-bit samples in setting 2 */
 	9, 4, 1, 0, 2, 0xe0, 1, 1, 0,
 	7, 5, EP_SCO_IN, 1, 0, 0, 1,
 	7, 5, EP_SCO_OUT, 1, 0, 0, 1,
+	9, 4, 1, 1, 2, 0xe0, 1, 1, 0,
+	7, 5, EP_SCO_IN, 1, 9, 0, 1,
+	7, 5, EP_SCO_OUT, 1, 9, 0, 1,
 	9, 4, 1, 2, 2, 0xe0, 1, 1, 0,
 	7, 5, EP_SCO_IN, 1, 17, 0, 1,
 	7, 5, EP_SCO_OUT, 1, 17, 0, 1
@@ -208,6 +219,9 @@ LOCAL BOOL	fw_booted;
 LOCAL UW	fw_boot_seen;
 LOCAL INT	n_ddc;
 LOCAL UW	mock_cod = 0x000540;
+LOCAL BOOL	mock_eir_noname;	/* its inquiry result tells no name: it is asked for */
+LOCAL CONST char *mock_name = "Mock";	/* what a Remote Name Request of it answers */
+LOCAL INT	n_name_req;
 LOCAL UB	mock_evmask[8] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0, 0 };	/* a controller's mask after a reset */
 LOCAL INT	mock_inq_mode = 0;	/* standard results until the host asks for another form */
 LOCAL INT	n_ext_inq;		/* inquiry results sent in the extended form */
@@ -514,9 +528,11 @@ LOCAL void serve_cmd( UH op, CONST UB *p )
 				big[11] = (UB)mock_cod;
 				big[12] = (UB)( mock_cod >> 8 );
 				big[13] = (UB)( mock_cod >> 16 );
-				big[17] = 5;		/* its name in what it tells: "Mock" */
-				big[18] = 0x09;
-				knl_memcpy(big + 19, "Mock", 4);
+				if ( !mock_eir_noname ) {
+					big[17] = 5;		/* its name in what it tells: "Mock" */
+					big[18] = 0x09;
+					knl_memcpy(big + 19, "Mock", 4);
+				}
 				ev(big, sizeof(big));
 				n_ext_inq++;
 			}
@@ -553,8 +569,22 @@ LOCAL void serve_cmd( UH op, CONST UB *p )
 		e[12] = 0;
 		ev(e, 13);
 		break;
-	case 0x0419:				/* its name */
+	case 0x0419: {				/* its name, as Remote Name Request Complete says it */
+		INT	k;
+
+		n_name_req++;
 		cmd_status(op);
+		knl_memset(big, 0, sizeof(big));
+		big[0] = 0x07;
+		big[1] = 255;
+		big[2] = 0;
+		knl_memcpy(big + 3, p, 6);
+		for ( k = 0; mock_name[k] != 0 && k < 247; k++ ) big[9 + k] = (UB)mock_name[k];
+		ev(big, sizeof(big));
+		break;
+	}
+	case 0x0402: case 0x041a:		/* the inquiry or a name stopped: nothing was going here */
+		cmd_done(op, NULL, 0);
 		break;
 	case 0x0411:				/* authentication: it has no key yet, so it asks */
 		n_authreq++;
@@ -1050,7 +1080,15 @@ LOCAL void test_bt_report_bits( void )
 }
 
 /* The device's object: kept, and taken away for those that come after; the controller gone */
+LOCAL void bt_finish( CONST T_HIDSTAT *s0, BOOL kept );
+
 LOCAL void bt_end( CONST T_HIDSTAT *s0 )
+{
+	bt_finish(s0, TRUE);
+}
+
+/* The test's device forgotten and the controller taken away; kept says whether one should have been kept */
+LOCAL void bt_finish( CONST T_HIDSTAT *s0, BOOL kept )
 {
 	T_HIDEV		e;
 	T_HIDSTAT	s1;
@@ -1063,7 +1101,7 @@ LOCAL void bt_end( CONST T_HIDSTAT *s0 )
 	n = knl_conf_links_get(conf, CF_ROLE_BTDEV, NULL, 0);
 	tm_printf((UB *)"  機器の設定 has %d devices kept\n", n);
 	if ( n > 0 ) ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)n);
-	KT_ASSERT(ids != NULL);
+	if ( kept ) KT_ASSERT(ids != NULL);
 	if ( ids != NULL ) n = knl_conf_links_get(conf, CF_ROLE_BTDEV, ids, n);
 	{
 		BOOL	found = FALSE;
@@ -1092,7 +1130,7 @@ LOCAL void bt_end( CONST T_HIDSTAT *s0 )
 				break;
 			}
 		}
-		KT_ASSERT(found);
+		KT_ASSERT(found == kept);
 		if ( ids != NULL ) Kfree(ids);
 	}
 	KT_ASSERT_ER(knl_vhc_unplug(1), E_OK);
@@ -1239,6 +1277,139 @@ LOCAL void test_bt_sbc( void )
 	Kfree(e);
 }
 
+/* ---------------------------------------------------------------- mSBC */
+
+/* A tone of 1 kHz and a quieter one of 5 kHz at 16 kHz */
+LOCAL CONST H	tone16[16] = { 0, 3827, 7071, 9239, 10000, 9239, 7071, 3827, 0, -3827, -7071, -9239, -10000, -9239, -7071, -3827 };
+
+LOCAL H tone( INT t )
+{
+	return (H)( tone16[t & 15] + ( tone16[( t * 5 ) & 15] >> 2 ) );
+}
+
+#define MO_MAX	( MSBC_SAMPLES * 100 )
+LOCAL struct {
+	H	pcm[MO_MAX];
+	INT	n;
+} mo;
+
+LOCAL void mo_out( void *ctx, CONST H *pcm, INT n )
+{
+	(void)ctx;
+	if ( mo.n + n <= MO_MAX ) knl_memcpy(mo.pcm + mo.n, pcm, n * 2);
+	mo.n += n;
+}
+
+/*
+ * mSBC: the encoder's frames of the tone against what a host's decoder
+ * took back to it, and this decoder's own taking them back; then the H2
+ * frames made, found in a stream cut anywhere, and those lost made up.
+ */
+LOCAL void test_bt_msbc( void )
+{
+	SBC_ENC		*e = (SBC_ENC *)Kmalloc(sizeof(SBC_ENC));
+	SBC_DEC		*d = (SBC_DEC *)Kmalloc(sizeof(SBC_DEC));
+	MSBC_TX		*tx = (MSBC_TX *)Kmalloc(sizeof(MSBC_TX));
+	MSBC_RX		*rx = (MSBC_RX *)Kmalloc(sizeof(MSBC_RX));
+	static UB	s[5 + H2_LEN * 12];
+	UB		f[64];
+	H		pcm[MSBC_SAMPLES], o[MSBC_SAMPLES];
+	UW		h = 2166136261U;
+	long long	sig = 0, err = 0;
+	INT		i, k, n, nch = 0, len = 0, t = 0;
+
+	KT_ASSERT(e != NULL && d != NULL && tx != NULL && rx != NULL);
+	if ( e == NULL || d == NULL || tx == NULL || rx == NULL ) goto out;
+	for ( k = 0; k < 4; k++ ) KT_ASSERT_EQ(knl_msbc_h2_sn(knl_msbc_h2_byte(k)), k);
+	KT_ASSERT_EQ(knl_msbc_h2_byte(1), 0x38);
+	KT_ASSERT_EQ(knl_msbc_h2_sn(0x18), -1);
+
+	/* the round trip: the tone, 73 samples late, within 30 dB */
+	sbc_enc_init_msbc(e);
+	sbc_dec_init(d);
+	KT_ASSERT_EQ(sbc_enc_frame_len(e), MSBC_LEN);
+	mo.n = 0;
+	for ( k = 0; k < 100; k++ ) {
+		for ( i = 0; i < MSBC_SAMPLES; i++, t++ ) pcm[i] = tone(t);
+		n = sbc_enc_frame(e, (CONST short *)pcm, f);
+		KT_ASSERT_EQ(n, MSBC_LEN);
+		KT_ASSERT(f[0] == 0xad && f[1] == 0 && f[2] == 0);
+		for ( i = 0; i < n; i++ ) h = ( h ^ f[i] ) * 16777619U;
+		KT_ASSERT_EQ(sbc_dec_frame(d, f, n, (short *)o, &nch, &len), MSBC_SAMPLES);
+		mo_out(NULL, o, MSBC_SAMPLES);
+	}
+	KT_ASSERT_EQ(nch, 1);
+	KT_ASSERT_EQ(len, MSBC_LEN);
+	tm_printf((UB *)"  100 mSBC frames hash to %08x\n", h);
+	KT_ASSERT_EQ(h, MSBC_KAT_HASH);
+	for ( i = 1000; i < mo.n && i < MO_MAX; i++ ) {
+		long long	a = tone(i - 73), b = mo.pcm[i];
+
+		sig += a * a;
+		err += ( a - b ) * ( a - b );
+	}
+	tm_printf((UB *)"  round trip: the error is 1/%d of the tone's energy\n", (INT)( ( err > 0 ) ? sig / err : -1 ));
+	KT_ASSERT(err * 1000 < sig);
+	/* what is not a whole frame */
+	KT_ASSERT_EQ(sbc_dec_frame(d, f, MSBC_LEN - 1, (short *)o, &nch, &len), SBC_DEC_SHORT);
+	f[5] ^= 0x10;
+	KT_ASSERT_EQ(sbc_dec_frame(d, f, MSBC_LEN, (short *)o, &nch, &len), SBC_DEC_CRC);
+	f[0] = 0x55;
+	KT_ASSERT_EQ(sbc_dec_frame(d, f, MSBC_LEN, (short *)o, &nch, &len), SBC_DEC_SYNC);
+
+	/* H2 frames: their headers, their sequence numbers and the padding */
+	knl_msbc_tx_init(tx);
+	s[0] = 0x01;			/* what is not a header before the first */
+	s[1] = 0x08;
+	s[2] = 0x00;
+	s[3] = 0x55;
+	s[4] = 0x01;
+	for ( k = 0; k < 12; k++ ) {
+		UB	*b = s + 5 + H2_LEN * k;
+
+		for ( i = 0; i < MSBC_SAMPLES; i++, t++ ) pcm[i] = tone(t);
+		knl_msbc_tx_frame(tx, pcm, b);
+		KT_ASSERT(b[0] == 0x01 && b[1] == knl_msbc_h2_byte(k) && b[2] == 0xad && b[59] == 0);
+	}
+	/* frames 0 to 5 in pieces of 17, the bytes before the first passed over */
+	knl_msbc_rx_init(rx);
+	mo.n = 0;
+	for ( i = 0; i < 5 + 6 * H2_LEN; i += 17 ) {
+		knl_msbc_rx_feed(rx, s + i, ( 5 + 6 * H2_LEN - i < 17 ) ? 5 + 6 * H2_LEN - i : 17, TRUE, mo_out, NULL);
+	}
+	KT_ASSERT_EQ(rx->frames, 6);
+	KT_ASSERT_EQ(rx->filled, 0);
+	KT_ASSERT_EQ(rx->skipped, 5);
+	KT_ASSERT_EQ(mo.n, 6 * MSBC_SAMPLES);
+	/* frame 6 never came: made up when frame 7 says its number, from frame 5, quieter */
+	knl_msbc_rx_feed(rx, s + 5 + 7 * H2_LEN, 2 * H2_LEN, TRUE, mo_out, NULL);
+	KT_ASSERT_EQ(rx->frames, 8);
+	KT_ASSERT_EQ(rx->filled, 1);
+	KT_ASSERT_EQ(mo.n, 9 * MSBC_SAMPLES);
+	KT_ASSERT_EQ(mo.pcm[6 * MSBC_SAMPLES + 10], (H)( mo.pcm[5 * MSBC_SAMPLES + 10] * 3 / 4 ));
+	/* frame 9 in a packet that came broken */
+	knl_msbc_rx_feed(rx, s + 5 + 9 * H2_LEN, H2_LEN, FALSE, mo_out, NULL);
+	KT_ASSERT_EQ(rx->filled, 2);
+	KT_ASSERT_EQ(mo.n, 10 * MSBC_SAMPLES);
+	/* frame 10 broken in its scale factors: its check fails */
+	knl_memcpy(f, s + 5 + 10 * H2_LEN, H2_LEN);
+	f[2 + 5] ^= 0x22;
+	knl_msbc_rx_feed(rx, f, H2_LEN, TRUE, mo_out, NULL);
+	KT_ASSERT_EQ(rx->bad, 1);
+	KT_ASSERT_EQ(rx->filled, 3);
+	/* frame 11 follows in sequence: nothing more made up */
+	knl_msbc_rx_feed(rx, s + 5 + 11 * H2_LEN, H2_LEN, TRUE, mo_out, NULL);
+	KT_ASSERT_EQ(rx->frames, 9);
+	KT_ASSERT_EQ(rx->filled, 3);
+	KT_ASSERT_EQ(rx->skipped, 5);
+	KT_ASSERT_EQ(mo.n, 12 * MSBC_SAMPLES);
+out:
+	if ( e != NULL ) Kfree(e);
+	if ( d != NULL ) Kfree(d);
+	if ( tx != NULL ) Kfree(tx);
+	if ( rx != NULL ) Kfree(rx);
+}
+
 /* ---------------------------------------------------------------- an LE keyboard and mouse */
 
 #define H_LE		6
@@ -1246,6 +1417,7 @@ LOCAL void test_bt_sbc( void )
 LOCAL CONST UB	le_addr[6] = { 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6 };	/* random, static */
 LOCAL CONST UB	beacon_addr[6] = { 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xc6 };	/* a device not for input */
 LOCAL CONST UB	le_id[6] = { 0x21, 0x22, 0x23, 0x24, 0x25, 0x26 };	/* its identity, public */
+LOCAL CONST UB	*mock_id = le_id;	/* the identity address it gives */
 LOCAL CONST UB	le_irk[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
 LOCAL CONST UB	le_ltk[16] = { 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60 };
 LOCAL CONST UB	le_rnd[8] = { 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8 };
@@ -1332,7 +1504,7 @@ LOCAL void smp_key_dist( void )
 	le_send(6, b, 17);
 	b[0] = 0x09;
 	b[1] = 0;
-	knl_memcpy(b + 2, le_id, 6);
+	knl_memcpy(b + 2, mock_id, 6);
 	le_send(6, b, 8);
 }
 
@@ -2486,6 +2658,7 @@ LOCAL CONST UB	lea_addr[6] = { 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6 };		/* random,
 LOCAL CONST UB	lea_mate[6] = { 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6 };		/* the other of the set */
 LOCAL CONST UB	lea_sirk[16] = { 0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef };
 LOCAL CONST UB	lea_prand[3] = { 0x11, 0x22, 0x45 };	/* its two top bits 0 and 1, as an RSI's random part has */
+LOCAL UB	la_flags = 0x06;	/* what its flags say: LE general discoverable, BR/EDR not supported */
 
 #define LA_PAC		0x22
 #define LA_PAC_CCC	0x23
@@ -2555,6 +2728,7 @@ LOCAL INT la_ad( UB *ad, BOOL rsi )
 	INT		n = sizeof(head);
 
 	knl_memcpy(ad, head, n);
+	ad[2] = la_flags;
 	if ( rsi ) {
 		ad[n++] = 7;
 		ad[n++] = 0x2e;
@@ -3141,15 +3315,17 @@ LOCAL void la_start( BOOL chip )
 	KT_ASSERT(knl_bt_ready());
 }
 
-LOCAL void la_end( void )
+LOCAL void la_end( BOOL kept )
 {
 	T_HIDSTAT	s0;
 
 	if ( m.connected ) le_gone();
 	pump(300);
 	KT_ASSERT_ER(ts_hid_stat(&s0), E_OK);
-	bt_end(&s0);
+	bt_finish(&s0, kept);
 	lea_chip = lea_dev = FALSE;
+	la_flags = 0x06;
+	mock_id = le_id;
 }
 
 LOCAL INT la_find( void )
@@ -3262,12 +3438,49 @@ LOCAL void test_lea_stream( void )
 		KT_ASSERT(la.ase[0].state == 2 && la.ase[1].state == 2);
 	}
 	la_lc3_check();
-	la_end();
+	la_end(TRUE);
 }
 
-/* A controller without CISes: the same earphones by the legacy scan, and nothing of LE Audio asked */
+/* The list's line of a device, by its address: FALSE when it is not listed */
+LOCAL BOOL la_line( CONST UB *a, T_BTLINE *out )
+{
+	T_BTLINE	l[16];
+	INT		i, n = knl_bt_lines(l, 16);
+
+	for ( i = 0; i < n && i < 16; i++ ) {
+		if ( same_bytes(l[i].addr, a, 6) ) {
+			*out = l[i];
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+/* Until the line of a device says note: the LE link let go, with what became of it */
+LOCAL BOOL la_noted( CONST UB *a, UB note )
+{
+	T_BTLINE	l;
+	INT		i;
+
+	for ( i = 0; i < 60; i++ ) {
+		if ( la_line(a, &l) && l.note == note ) return TRUE;
+		pump(50);
+	}
+	return FALSE;
+}
+
+/*
+ * A controller without CISes: the same earphones, of LE alone (their flags
+ * say BR/EDR is not supported), by the legacy scan, and nothing of LE
+ * Audio asked. Listed as LE Audio this adapter cannot carry; paired, their
+ * services read, let go, not kept, and not connected to again however
+ * long they advertise.
+ */
 LOCAL void test_lea_nocis( void )
 {
+	T_BTLINE	l;
+	INT		i;
+
 	la_start(FALSE);
 	KT_ASSERT_EQ(la.n_feat, 1);
 	KT_ASSERT_EQ(la.n_bufv2, 0);
@@ -3276,14 +3489,134 @@ LOCAL void test_lea_nocis( void )
 	(void)la_find();
 	KT_ASSERT_EQ(la.n_ext_scan, 0);
 	KT_ASSERT(la.n_legacy_scan >= 1);
+	KT_ASSERT(la_line(lea_addr, &l));
+	KT_ASSERT_EQ(l.note, BT_NOTE_LEA);
+	KT_ASSERT_EQ(l.bearer, BT_BEARER_LE);
+	KT_ASSERT_EQ(l.connected, 0);
+	saw_conn = FALSE;
 	KT_ASSERT_ER(knl_bt_pair(lea_addr), E_OK);
-	pump(2000);
+	/* the note was there from the scan: the link, its pairing and its services, then let go */
+	for ( i = 0; i < 60 && !m.enc_ok; i++ ) pump(50);
+	pump(1000);
+	KT_ASSERT(la_noted(lea_addr, BT_NOTE_LEA));
 	KT_ASSERT_EQ(m.n_conn, 1);
 	KT_ASSERT(m.enc_ok);
 	KT_ASSERT_EQ(la.n_ccc, 0);
 	KT_ASSERT_EQ(la.n_cp, 0);
 	KT_ASSERT_EQ(la.n_cig, 0);
-	la_end();
+	/* the link let go: it advertises on, and nothing listens for it */
+	if ( m.connected ) le_gone();
+	pump(2000);
+	KT_ASSERT_EQ(m.n_conn, 1);
+	KT_ASSERT(!saw_conn);
+	KT_ASSERT(la_line(lea_addr, &l));
+	KT_ASSERT_EQ(l.paired, 0);
+	KT_ASSERT_EQ(l.use, BT_USE_NONE);
+	la_end(FALSE);
+}
+
+/*
+ * Earphones of both LE and BR/EDR on a controller without CISes. The
+ * inquiry finds their BR/EDR side without its name, which is asked of it.
+ * Chosen on LE: paired there, found to be LE Audio this controller cannot
+ * carry, let go and not kept; their identity address is public and their
+ * flags do not say BR/EDR is not supported, so that address is paired on
+ * BR/EDR once the LE link has gone, and A2DP makes them a sound output.
+ * The LE side is not connected to again. With the same name on both sides
+ * (twin), the choice of the LE side goes to the BR/EDR side at once.
+ */
+LOCAL void lea_dual_run( BOOL twin )
+{
+	T_HIDSTAT	s0;
+	T_BTFOUND	f[4];
+	T_BTLINE	l;
+	SDOut		o[8];
+	INT		i, n, at = -1;
+
+	KT_ASSERT_ER(ts_hid_stat(&s0), E_OK);
+	la_flags = 0x1a;			/* LE general discoverable, LE and BR/EDR at once */
+	mock_id = kb_addr;			/* its one public address, that of its BR/EDR side */
+	mock_cod = 0x240404;			/* audio, a wearable headset */
+	mock_eir_noname = TRUE;
+	mock_name = twin ? "LEbuds" : "Mock phones";
+	mock_acl_len = 1021;
+	av_mode = TRUE;
+	knl_memset(mch, 0, sizeof(mch));
+	av_discover = av_caps = av_config = av_open = av_start = av_suspend = av_media = av_bad = 0;
+	n_enc = n_name_req = 0;
+	la_start(FALSE);
+	dev_rd = rd_bitmap;			/* the records of a sink: what the BR/EDR side answers */
+	dev_rdlen = sizeof(rd_bitmap);
+	sdp_make();
+	saw_conn = FALSE;
+	(void)la_find();
+	n = knl_bt_found(f, 4);
+	for ( i = 0; i < n && i < 4; i++ ) {
+		if ( same_bytes(f[i].addr, kb_addr, 6) ) at = i;
+	}
+	KT_ASSERT(at >= 0);
+	KT_ASSERT(n_name_req >= 1);
+	if ( at >= 0 ) {
+		tm_printf((UB *)"  its BR/EDR side: \"%s\"\n", f[at].name);
+		KT_ASSERT(same_bytes(f[at].name, mock_name, 6));
+	}
+	KT_ASSERT(la_line(kb_addr, &l));
+	KT_ASSERT_EQ(l.bearer, BT_BEARER_BREDR);
+	KT_ASSERT_ER(knl_bt_pair(lea_addr), E_OK);
+	if ( !twin ) {
+		KT_ASSERT(la_noted(lea_addr, BT_NOTE_BREDR));
+		KT_ASSERT_EQ(m.n_conn, 1);
+		KT_ASSERT(!saw_conn);			/* nothing on BR/EDR while the LE link is up */
+		if ( m.connected ) le_gone();
+	}
+	for ( i = 0; i < 60 && av_open == 0; i++ ) pump(50);
+	pump(300);
+	KT_ASSERT(saw_conn);
+	KT_ASSERT_EQ(n_enc, 1);
+	KT_ASSERT_EQ(av_discover, 1);
+	KT_ASSERT_EQ(av_config, 1);
+	KT_ASSERT_EQ(av_open, 1);
+	KT_ASSERT_EQ(m.n_conn, twin ? 0 : 1);
+	at = -1;
+	n = knl_snd_outputs(o, 8);
+	for ( i = 0; i < n && i < 8; i++ ) {
+		if ( o[i].kind == SND_BE_BT && o[i].id[0] == 'b' ) at = i;
+	}
+	KT_ASSERT(at >= 0);
+	KT_ASSERT(la_line(kb_addr, &l));
+	KT_ASSERT_EQ(l.paired, 1);
+	KT_ASSERT_EQ(l.use, BT_USE_SOUND);
+	KT_ASSERT_EQ(l.connected, 1);
+	KT_ASSERT_EQ(l.bearer, BT_BEARER_BREDR);
+	KT_ASSERT(la_line(lea_addr, &l));
+	KT_ASSERT_EQ(l.paired, 0);
+	KT_ASSERT_EQ(l.note, BT_NOTE_BREDR);
+	/* the LE side advertises on: not connected to again */
+	pump(1500);
+	KT_ASSERT_EQ(m.n_conn, twin ? 0 : 1);
+	if ( m.connected ) le_gone();
+	pump(200);
+	bt_finish(&s0, TRUE);			/* the BR/EDR side kept, the LE one not */
+	lea_chip = lea_dev = FALSE;
+	la_flags = 0x06;
+	mock_id = le_id;
+	mock_cod = 0x000540;
+	mock_eir_noname = FALSE;
+	mock_name = "Mock";
+	mock_acl_len = 64;
+	av_mode = FALSE;
+	dev_rd = NULL;
+	knl_memset(mch, 0, sizeof(mch));
+}
+
+LOCAL void test_lea_dual( void )
+{
+	lea_dual_run(FALSE);
+}
+
+LOCAL void test_lea_twin( void )
+{
+	lea_dual_run(TRUE);
 }
 
 /* ---------------------------------------------------------------- the remote control */
@@ -3401,6 +3734,10 @@ LOCAL char	hfm_got[600];
 LOCAL INT	hfm_n;
 LOCAL UB	hfm_ch;			/* their channel in their records, 0 none */
 LOCAL INT	hfm_sdp_asks;
+LOCAL BOOL	hfm_codecs;		/* they negotiate codecs and list CVSD and mSBC */
+LOCAL INT	hfm_bcs[4];		/* the codecs this end offered, in order */
+LOCAL INT	hfm_nbcs;
+LOCAL INT	hfm_bcs_say[4];		/* what they say back to each: 0 the same, -1 nothing, else that */
 
 LOCAL UB hfm_fcs( CONST UB *b, INT n )
 {
@@ -3457,8 +3794,10 @@ LOCAL void hfm_at( CONST char *t )
 LOCAL void hfm_next( void )
 {
 	static CONST char *CONST seq[] = { "AT+BRSF=16\r", "AT+CIND=?\r", "AT+CIND?\r", "AT+CMER=3,0,0,1\r" };
+	static CONST char *CONST seq_c[] = { "AT+BRSF=144\r", "AT+BAC=1,2\r", "AT+CIND=?\r", "AT+CIND?\r", "AT+CMER=3,0,0,1\r" };
 
-	if ( hfm_step < 4 ) hfm_at(seq[hfm_step++]);
+	if ( hfm_codecs && hfm_step < 5 ) hfm_at(seq_c[hfm_step++]);
+	else if ( !hfm_codecs && hfm_step < 4 ) hfm_at(seq[hfm_step++]);
 	else hfm_slc = TRUE;
 }
 
@@ -3547,6 +3886,17 @@ LOCAL void hfm_in( CONST UB *f, INT n )
 				hfm_next();
 			} else if ( len == 9 && same_bytes(f, "\r\nERROR\r\n", 9) ) {
 				hfm_err++;
+			} else if ( len == 11 && same_bytes(f, "\r\n+BCS: ", 8) ) {
+				/* a codec offered: said back as the test says */
+				INT	k = f[8] - '0', say = ( hfm_nbcs < 4 ) ? hfm_bcs_say[hfm_nbcs] : 0;
+				char	t[16];
+
+				if ( hfm_nbcs < 4 ) hfm_bcs[hfm_nbcs] = k;
+				hfm_nbcs++;
+				if ( say >= 0 ) {
+					(void)tm_sprintf((UB *)t, (UB *)"AT+BCS=%d\r", ( say == 0 ) ? k : say);
+					hfm_at(t);
+				}
 			}
 		}
 		break;
@@ -3590,9 +3940,11 @@ LOCAL void hfm_sdp_in( CONST UB *q, INT n )
 
 #define H_SCO		7
 LOCAL INT	sco_setups, sco_refuse, sco_disc, sco_tx, sco_tx_bad, sco_accepts;
-LOCAL UH	sco_lat[4];
-LOCAL UB	sco_buf[64];
+LOCAL UH	sco_lat[4], sco_voice[4];
+LOCAL UB	sco_buf[80];
 LOCAL INT	sco_have;
+LOCAL volatile UH sco_vs_up;		/* the voice setting of the link up */
+LOCAL INT	sco_h2_bad, sco_h2_sn;	/* the H2 frames this end sent: headers wrong, and the last number */
 
 /* The controller's side of the voice link: asked, refused as the test says, and taken down */
 LOCAL BOOL sco_cmd( UH op, CONST UB *p )
@@ -3601,13 +3953,24 @@ LOCAL BOOL sco_cmd( UH op, CONST UB *p )
 
 	if ( op == 0x0428 || op == 0x0429 ) {
 		BOOL	fail = (BOOL)( op == 0x0428 && sco_refuse > 0 );
+		UH	vs;
 
 		if ( op == 0x0428 ) {
-			if ( sco_setups < 4 ) sco_lat[sco_setups] = (UH)( p[10] | ( p[11] << 8 ) );
+			vs = (UH)( p[12] | ( p[13] << 8 ) );
+			if ( sco_setups < 4 ) {
+				sco_lat[sco_setups] = (UH)( p[10] | ( p[11] << 8 ) );
+				sco_voice[sco_setups] = vs;
+			}
 			sco_setups++;
-			if ( p[12] != 0x60 || p[13] != 0x00 || p[2] != 0x40 || p[3] != 0x1f ) sco_tx_bad++;
+			if ( ( vs != 0x0060 && vs != 0x0003 ) || p[2] != 0x40 || p[3] != 0x1f ) sco_tx_bad++;
 		} else {
+			vs = (UH)( p[16] | ( p[17] << 8 ) );
 			sco_accepts++;
+		}
+		if ( !fail ) {
+			sco_vs_up = vs;
+			sco_have = 0;
+			sco_h2_sn = -1;
 		}
 		if ( fail ) sco_refuse--;
 		cmd_status(op);
@@ -3623,7 +3986,7 @@ LOCAL BOOL sco_cmd( UH op, CONST UB *p )
 		e[13] = 2;
 		e[14] = 60;
 		e[16] = 60;
-		e[18] = 0x02;
+		e[18] = (UB)( ( vs == 0x0003 ) ? 0x03 : 0x02 );	/* transparent, or CVSD */
 		ev(e, 19);
 		return TRUE;
 	}
@@ -3642,22 +4005,58 @@ LOCAL BOOL sco_cmd( UH op, CONST UB *p )
 	return FALSE;
 }
 
-/* What this end sends of the voice: SCO packets of 48 bytes in USB packets of 17 */
+/* An H2 frame this end sent: its header, the frame's sync, the padding, the next number */
+LOCAL void sco_h2_check( CONST UB *f )
+{
+	INT	sn = knl_msbc_h2_sn(f[1]);
+
+	if ( f[0] != 0x01 || sn < 0 || f[2] != 0xad || f[59] != 0 ) {
+		sco_h2_bad++;
+		return;
+	}
+	if ( sco_h2_sn >= 0 && sn != ( ( sco_h2_sn + 1 ) & 3 ) ) sco_h2_bad++;
+	sco_h2_sn = sn;
+}
+
+/*
+ * What this end sends of the voice: CVSD's SCO packets of 48 bytes in
+ * USB packets of 17, mSBC's of one H2 frame of 60 bytes in USB packets of 9
+ */
 LOCAL void sco_out( CONST UB *d, INT n )
 {
-	INT	i;
+	BOOL	t = (BOOL)( sco_vs_up == 0x0003 );
+	INT	plen = t ? 60 : 48, i;
 
-	if ( n != 17 ) sco_tx_bad++;
+	if ( n != ( t ? 9 : 17 ) ) sco_tx_bad++;
 	for ( i = 0; i < n; i++ ) {
 		if ( sco_have < (INT)sizeof(sco_buf) ) sco_buf[sco_have++] = d[i];
-		if ( sco_have == 3 && ( sco_buf[0] != H_SCO || ( sco_buf[1] & 0x0f ) != 0 || sco_buf[2] != 48 ) ) {
+		if ( sco_have == 3 && ( sco_buf[0] != H_SCO || ( sco_buf[1] & 0x0f ) != 0 || sco_buf[2] != plen ) ) {
 			sco_tx_bad++;
 			sco_have = 0;
-		} else if ( sco_have == 51 ) {
+		} else if ( sco_have == 3 + plen ) {
+			if ( t ) sco_h2_check(sco_buf + 3);
 			sco_tx++;
 			sco_have = 0;
 		}
 	}
+}
+
+LOCAL MSBC_TX	hfm_tx;			/* the earphones' microphone in mSBC */
+LOCAL INT	hfm_tx_t;
+
+/* An SCO packet of the microphone's in mSBC, one H2 frame of the tone in USB packets of 9; its status as given */
+LOCAL void sco_in_msbc( UB status )
+{
+	UB	b[63];
+	H	pcm[MSBC_SAMPLES];
+	INT	i;
+
+	for ( i = 0; i < MSBC_SAMPLES; i++, hfm_tx_t++ ) pcm[i] = tone(hfm_tx_t);
+	b[0] = H_SCO;
+	b[1] = (UB)( status << 4 );
+	b[2] = 60;
+	knl_msbc_tx_frame(&hfm_tx, pcm, b + 3);
+	for ( i = 0; i < 7; i++ ) KT_ASSERT_ER(knl_vhc_in(1, EP_SCO_IN, b + 9 * i, 9), E_OK);
 }
 
 /* An SCO packet of the microphone's, in the USB packets it comes in */
@@ -3688,6 +4087,13 @@ LOCAL void hfm_clear( void )
 	hfm_sdp_asks = 0;
 	sco_setups = sco_disc = sco_tx = sco_tx_bad = sco_accepts = sco_have = 0;
 	sco_refuse = 0;
+	sco_vs_up = 0;
+	sco_h2_bad = 0;
+	sco_h2_sn = -1;
+	hfm_codecs = FALSE;
+	hfm_nbcs = 0;
+	knl_memset(hfm_bcs, 0, sizeof(hfm_bcs));
+	knl_memset(hfm_bcs_say, 0, sizeof(hfm_bcs_say));
 	avm_caps = avm_reg = avm_vol_n = avm_bad = 0;
 	avm_vol = -1;
 }
@@ -3829,6 +4235,47 @@ LOCAL void hfp_voice( void )
 	pump(100);
 	(void)knl_snd_mix_get(&m, 0);
 	KT_ASSERT_EQ(m.lv, ( 7 * 100 + 7 ) / 15);
+	/*
+	 * the microphone's gain, the earphones taking remote volume (AT+BRSF=16):
+	 * the volume set told them by +VGM in their 16 steps, and the gain they
+	 * say taken as the microphone's volume, not sent back
+	 */
+	{
+		SDMixSet	ms;
+		SDMixIn		mi;
+		INT		was;
+
+		knl_snd_mic_get(&mi);
+		KT_ASSERT(mi.have && mi.kind == SND_BE_BT);
+		knl_memset(&ms, 0, sizeof(ms));
+		ms.what = SND_MIX_IN;
+		ms.pid = SND_BE_BT;
+		ms.lv = ms.rv = 70;
+		KT_ASSERT_ER(knl_snd_mix_set(&ms, FALSE), E_OK);
+		pump(100);
+		/* 70: the level 0xb332, of 15 steps the tenth */
+		KT_ASSERT(has_text(hfm_got, "+VGM: 10"));
+		knl_snd_mic_get(&mi);
+		KT_ASSERT(mi.vol == 70 && mi.how == SND_MIC_HW && mi.gain == 0x10000);
+		was = hfm_n;
+		hfm_at("AT+VGM=5\r");
+		pump(100);
+		knl_snd_mic_get(&mi);
+		tm_printf((UB *)"  the earphones' microphone at 5: the volume %d, how %d\n", mi.vol, mi.how);
+		KT_ASSERT_EQ(mi.vol, 33);		/* 5 of 15: the level 0x5555 */
+		KT_ASSERT(!has_text(hfm_got + was, "+VGM:"));
+		/* muted: the sound device's, the earphones' gain left as it is */
+		ms.lv = ms.rv = 33;
+		ms.mute = 1;
+		KT_ASSERT_ER(knl_snd_mix_set(&ms, FALSE), E_OK);
+		knl_snd_mic_get(&mi);
+		KT_ASSERT(mi.mute == 1 && mi.gain == 0);
+		ms.lv = ms.rv = SND_MIC_UNITY;
+		ms.mute = 0;
+		KT_ASSERT_ER(knl_snd_mix_set(&ms, FALSE), E_OK);
+		pump(100);
+		KT_ASSERT(has_text(hfm_got + was, "+VGM: 8"));
+	}
 	/* the microphone: the link asked, the first set refused and the next taken */
 	sco_refuse = 1;
 	knl_usb_lock();
@@ -3901,6 +4348,304 @@ LOCAL void test_hfp( void )
 		KT_ASSERT(sdpc_has(chan, 5));
 		for ( i = 0; i < 40 && !hfm_slc; i++ ) pump(50);
 		hfp_voice();
+		av_unpair();
+	}
+	rfc_dev_first = FALSE;
+	knl_memset(&s, 0, sizeof(s));
+	s.what = SND_MIX_ALL;
+	s.lv = m0.lv;
+	s.rv = m0.rv;
+	s.mute = m0.mute;
+	(void)knl_snd_mix_set(&s, FALSE);
+}
+
+/* The voice stopped, and the link taken down a while after */
+LOCAL void hfp_stop( void )
+{
+	knl_usb_lock();
+	knl_bta_hw.play_stop();
+	knl_bta_hw.rec_stop();
+	knl_usb_unlock();
+	pump(2200);
+}
+
+/* The voice of an mSBC link both ways, with a packet that came broken */
+LOCAL void hfp_msbc_voice( void )
+{
+	T_BTHSTAT	st;
+	UW		t0;
+	INT		i, most;
+
+	knl_msbc_tx_init(&hfm_tx);
+	hfm_tx_t = 0;
+	sco_tx = 0;
+	t0 = knl_usb_ms();
+	for ( i = 0; i < 40; i++ ) {
+		if ( i % 2 == 0 ) sco_in_msbc(( i == 10 ) ? 3 : 0);
+		knl_usb_kick();
+		tk_dly_tsk(4);
+	}
+	pump(50);
+	most = (INT)( knl_usb_ms() - t0 ) * 2 / 15 + 4;
+	knl_bth_stat(&st);
+	tm_printf((UB *)"  mSBC: %d SCO packets out, %d in, %d samples to the sound device, %d frames made up, %d failed\n",
+		  sco_tx, st.rx_packets, st.rx_frames, st.filled, st.bad);
+	KT_ASSERT(sco_tx >= 5);
+	/* paced: no more than one a 7.5 ms, with what may go ahead */
+	KT_ASSERT(sco_tx <= most);
+	KT_ASSERT_EQ(sco_tx_bad, 0);
+	KT_ASSERT_EQ(sco_h2_bad, 0);
+	KT_ASSERT_EQ(st.rx_packets, 20);
+	KT_ASSERT_EQ(st.filled, 1);
+	KT_ASSERT_EQ(st.bad, 0);
+	KT_ASSERT_EQ(st.rx_frames, 20 * MSBC_SAMPLES);
+}
+
+/*
+ * Earphones that negotiate codecs, on a controller that carries mSBC:
+ * mSBC agreed and the link asked in transparent mode with T2, its voice
+ * both ways; then mSBC refused by the controller, and CVSD agreed and
+ * set up in its place.
+ */
+LOCAL void test_hfp_msbc( void )
+{
+	T_BTHSTAT	st;
+	SDMix		m0;
+	SDMixSet	s;
+	UW		rate = 0;
+	INT		ch = 0, i;
+
+	hfm_clear();
+	hfm_ch = 0;
+	hfm_init = TRUE;
+	hfm_codecs = TRUE;
+	rfc_dev_first = TRUE;
+	knl_bth_wbs_any = TRUE;
+	(void)knl_snd_mix_get(&m0, 0);
+	if ( av_pair() ) {
+		for ( i = 0; i < 40 && !hfm_slc; i++ ) pump(50);
+		KT_ASSERT(hfm_slc);
+		KT_ASSERT(has_text(hfm_got, "+BRSF: 512"));
+		KT_ASSERT_EQ(hfm_err, 0);
+		knl_usb_lock();
+		KT_ASSERT_ER(knl_bta_hw.rec_start(16000, &rate, &ch), E_OK);
+		knl_usb_unlock();
+		KT_ASSERT_EQ(rate, 16000);
+		pump(300);
+		KT_ASSERT_EQ(hfm_nbcs, 1);
+		KT_ASSERT_EQ(hfm_bcs[0], 2);
+		KT_ASSERT_EQ(sco_setups, 1);
+		KT_ASSERT_EQ(sco_voice[0], 0x0003);
+		KT_ASSERT_EQ(sco_lat[0], 0x000d);	/* T2 */
+		knl_bth_stat(&st);
+		KT_ASSERT_EQ(st.codec, 2);
+		KT_ASSERT_EQ(st.alt, 1);
+		hfp_msbc_voice();
+		hfp_stop();
+		KT_ASSERT_EQ(sco_disc, 1);
+
+		/* T2 and T1 refused: CVSD agreed and asked next, at once */
+		sco_setups = sco_disc = sco_tx = sco_tx_bad = 0;
+		sco_refuse = 2;
+		knl_usb_lock();
+		KT_ASSERT_ER(knl_bta_hw.rec_start(16000, &rate, &ch), E_OK);
+		knl_usb_unlock();
+		pump(400);
+		KT_ASSERT_EQ(hfm_nbcs, 3);
+		KT_ASSERT_EQ(hfm_bcs[1], 2);
+		KT_ASSERT_EQ(hfm_bcs[2], 1);
+		KT_ASSERT_EQ(sco_setups, 3);
+		KT_ASSERT_EQ(sco_lat[1], 0x0008);	/* T1 */
+		KT_ASSERT_EQ(sco_voice[2], 0x0060);
+		KT_ASSERT_EQ(sco_lat[2], 0x000a);	/* S3 */
+		knl_bth_stat(&st);
+		KT_ASSERT_EQ(st.codec, 1);
+		KT_ASSERT_EQ(st.alt, 2);
+		for ( i = 0; i < 12; i++ ) {
+			if ( i % 3 == 0 ) sco_in(i);
+			knl_usb_kick();
+			tk_dly_tsk(4);
+		}
+		pump(50);
+		KT_ASSERT(sco_tx >= 3);
+		KT_ASSERT_EQ(sco_tx_bad, 0);
+		hfp_stop();
+		KT_ASSERT_EQ(sco_disc, 1);
+		av_unpair();
+	}
+	knl_bth_wbs_any = FALSE;
+	rfc_dev_first = FALSE;
+	knl_memset(&s, 0, sizeof(s));
+	s.what = SND_MIX_ALL;
+	s.lv = m0.lv;
+	s.rv = m0.rv;
+	s.mute = m0.mute;
+	(void)knl_snd_mix_set(&s, FALSE);
+}
+
+/*
+ * The codec not agreed: the earphones say CVSD back to mSBC, which is
+ * answered ERROR and CVSD offered; then, on a controller not known to
+ * carry mSBC, this end does not negotiate at all.
+ */
+LOCAL void test_hfp_codec_back( void )
+{
+	SDMix		m0;
+	SDMixSet	s;
+	UW		rate = 0;
+	INT		ch = 0, i;
+
+	hfm_clear();
+	hfm_ch = 0;
+	hfm_init = TRUE;
+	hfm_codecs = TRUE;
+	hfm_bcs_say[0] = 1;
+	rfc_dev_first = TRUE;
+	knl_bth_wbs_any = TRUE;
+	(void)knl_snd_mix_get(&m0, 0);
+	if ( av_pair() ) {
+		for ( i = 0; i < 40 && !hfm_slc; i++ ) pump(50);
+		KT_ASSERT(hfm_slc);
+		knl_usb_lock();
+		KT_ASSERT_ER(knl_bta_hw.rec_start(16000, &rate, &ch), E_OK);
+		knl_usb_unlock();
+		pump(400);
+		KT_ASSERT_EQ(hfm_err, 1);
+		KT_ASSERT_EQ(hfm_nbcs, 2);
+		KT_ASSERT_EQ(hfm_bcs[0], 2);
+		KT_ASSERT_EQ(hfm_bcs[1], 1);
+		KT_ASSERT_EQ(sco_setups, 1);
+		KT_ASSERT_EQ(sco_voice[0], 0x0060);
+		hfp_stop();
+		KT_ASSERT_EQ(sco_disc, 1);
+		av_unpair();
+	}
+	/* the controller of the test is not Intel's: no codec negotiation, CVSD as before */
+	hfm_clear();
+	hfm_ch = 0;
+	hfm_init = TRUE;
+	hfm_codecs = TRUE;
+	knl_bth_wbs_any = FALSE;
+	if ( av_pair() ) {
+		for ( i = 0; i < 40 && !hfm_slc; i++ ) pump(50);
+		KT_ASSERT(hfm_slc);
+		KT_ASSERT(has_text(hfm_got, "+BRSF: 0"));
+		knl_usb_lock();
+		KT_ASSERT_ER(knl_bta_hw.rec_start(16000, &rate, &ch), E_OK);
+		knl_usb_unlock();
+		KT_ASSERT_EQ(rate, 8000);
+		pump(300);
+		KT_ASSERT_EQ(hfm_nbcs, 0);
+		KT_ASSERT_EQ(sco_setups, 1);
+		KT_ASSERT_EQ(sco_voice[0], 0x0060);
+		hfp_stop();
+		av_unpair();
+	}
+	rfc_dev_first = FALSE;
+	knl_memset(&s, 0, sizeof(s));
+	s.what = SND_MIX_ALL;
+	s.lv = m0.lv;
+	s.rv = m0.rv;
+	s.mute = m0.mute;
+	(void)knl_snd_mix_set(&s, FALSE);
+}
+
+/* ---------------------------------------------------------------- the voice on the HCI */
+
+LOCAL BTTRANS	hci_tr;
+LOCAL INT	hci_tx, hci_tx_bad;
+
+/* An SCO packet this end sends on the HCI: the handle of the link, as long as the one that came */
+LOCAL ER hci_sco( BTC *c, UB *b, INT n )
+{
+	(void)c;
+	if ( n != 3 + 48 || ( ( b[0] | ( b[1] << 8 ) ) & 0x0fff ) != H_SCO || b[2] != 48 ) hci_tx_bad++;
+	else hci_tx++;
+	return E_OK;
+}
+
+/* An SCO packet that came on the HCI, into the controller's ring as a UART's handler puts it */
+LOCAL void hci_in( UH h, INT k )
+{
+	UB	b[51];
+	INT	i;
+
+	b[0] = (UB)h;
+	b[1] = (UB)( h >> 8 );
+	b[2] = 48;
+	for ( i = 0; i < 24; i++ ) {
+		b[3 + 2 * i] = (UB)( k + i );
+		b[4 + 2 * i] = 0x10;
+	}
+	knl_usb_lock();			/* the ring has one writer at a time */
+	knl_btx_ring_in(knl_btx_ctl(), 2, b, 51);
+	knl_usb_unlock();
+}
+
+/*
+ * A controller whose SCO goes on the HCI, as the board's own on a UART:
+ * the way chosen by what it has, the link set up as on USB, and each
+ * SCO packet that comes answered with one as long, the microphone's
+ * samples to the sound device.
+ */
+LOCAL void test_hfp_hci( void )
+{
+	T_BTHSTAT	st;
+	SDMix		m0;
+	SDMixSet	s;
+	CONST BTTRANS	*keep;
+	BTC		*c;
+	UW		rate = 0;
+	INT		ch = 0, i;
+
+	hfm_clear();
+	hfm_ch = 0;
+	hfm_init = TRUE;
+	rfc_dev_first = TRUE;
+	hci_tx = hci_tx_bad = 0;
+	(void)knl_snd_mix_get(&m0, 0);
+	if ( av_pair() ) {
+		for ( i = 0; i < 40 && !hfm_slc; i++ ) pump(50);
+		KT_ASSERT(hfm_slc);
+		c = knl_btx_ctl();
+		KT_ASSERT(c != NULL);
+		if ( c != NULL ) {
+			keep = c->tr;
+			hci_tr = *keep;
+			KT_ASSERT_EQ(knl_bth_way(c), VW_USB);
+			c->sco_hci = TRUE;
+			KT_ASSERT_EQ(knl_bth_way(c), VW_USB);	/* the transport has no SCO */
+			hci_tr.sco = hci_sco;
+			c->tr = &hci_tr;
+			KT_ASSERT_EQ(knl_bth_way(c), VW_HCI);
+			KT_ASSERT_EQ(c->sco_mtu, 64);
+			knl_usb_lock();
+			KT_ASSERT_ER(knl_bta_hw.rec_start(16000, &rate, &ch), E_OK);
+			knl_usb_unlock();
+			KT_ASSERT_EQ(rate, 8000);
+			pump(300);
+			KT_ASSERT_EQ(sco_setups, 1);
+			knl_bth_stat(&st);
+			KT_ASSERT_EQ(st.alt, 0);		/* nothing set on USB */
+			for ( i = 0; i < 6; i++ ) {
+				hci_in(H_SCO, i);
+				pump(10);
+			}
+			hci_in(H_SCO + 1, 0);			/* another link's: let be */
+			pump(50);
+			knl_bth_stat(&st);
+			tm_printf((UB *)"  the HCI: %d SCO packets in, %d out, %d samples to the sound device\n",
+				  st.rx_packets, hci_tx, st.rx_frames);
+			KT_ASSERT_EQ(st.rx_packets, 6);
+			KT_ASSERT_EQ(hci_tx, 6);
+			KT_ASSERT_EQ(hci_tx_bad, 0);
+			KT_ASSERT_EQ(st.rx_frames, 6 * 24);
+			KT_ASSERT_EQ(sco_tx, 0);		/* nothing on the isochronous endpoints */
+			hfp_stop();
+			KT_ASSERT_EQ(sco_disc, 1);
+			c->tr = keep;
+			c->sco_hci = FALSE;
+		}
 		av_unpair();
 	}
 	rfc_dev_first = FALSE;
@@ -4258,6 +5003,7 @@ EXPORT void ktest_bt( void )
 	KT_RUN(test_bt_report_bits);
 	KT_RUN(test_bt_crypto);
 	KT_RUN(test_bt_sbc);
+	KT_RUN(test_bt_msbc);
 	KT_RUN(test_le_legacy);
 	KT_RUN(test_le_sc);
 	KT_RUN(test_le_refused);
@@ -4268,9 +5014,14 @@ EXPORT void ktest_bt( void )
 	KT_RUN(test_avrcp);
 	KT_RUN(test_hfp);
 	KT_RUN(test_hfp_ag_first);
+	KT_RUN(test_hfp_msbc);
+	KT_RUN(test_hfp_codec_back);
+	KT_RUN(test_hfp_hci);
 	KT_RUN(test_lea_crypto);
 	KT_RUN(test_lea_stream);
 	KT_RUN(test_lea_nocis);
+	KT_RUN(test_lea_dual);
+	KT_RUN(test_lea_twin);
 	KT_RUN(test_bt_intel);
 	KT_RUN(test_bt_fwload);
 	KT_RUN(test_bt_stuck);

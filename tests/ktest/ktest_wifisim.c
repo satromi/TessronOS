@@ -29,6 +29,19 @@
  *	- again: CONNECT joins it again, and DHCP answers again: the
  *	  address still held is asked for at once (INIT-REBOOT), with no
  *	  DISCOVER.
+ *	- keydelay: the station's card sets each key 300 ms after it is
+ *	  asked, as a driver whose task sets them (iwx): the port opens,
+ *	  and the network is told connected, only after the card has the
+ *	  keys; no protected frame goes before them, and DHCP's first
+ *	  REQUEST is answered, with none sent again (before, it went before
+ *	  the keys and the address came 4 s later, from the second).
+ *	- switch: another network joined (another SSID and addresses, as a
+ *	  phone's tethering after the network at home) whose server leaves
+ *	  a REQUEST for an address of another network unanswered: DHCP
+ *	  asks from a DISCOVER at once, with no REQUEST for the address of
+ *	  the network left (INIT-REBOOT); back on the first network, the
+ *	  lease kept for it is asked for at once and the same address
+ *	  comes, with no DISCOVER.
  *	- reqagain: a server that leaves a REQUEST coming soon after its
  *	  OFFER unanswered: the REQUEST is sent again with the same
  *	  transaction a few seconds later and answered, with no DISCOVER
@@ -85,6 +98,7 @@ IMPORT INT  knl_wifi_state_text( CONST T_OBCRD *crd, UB **p_text );
 IMPORT BOOL knl_wifi_connected( void );
 IMPORT void knl_wifi_shutdown( void );
 IMPORT ER   knl_so_nb_ifaddr( UW addr, UW mask, UW gw, BOOL dhcp );
+IMPORT void knl_so_dhcp_forget( void );
 
 #define T_JOIN_MS	60000
 #define T_DHCP_MS	40000
@@ -541,6 +555,158 @@ LOCAL void test_again( void )
 	if ( addressed ) KT_ASSERT_EQ(echo_round(5), 5);
 }
 
+/*
+ * Another network joined, and back. The access point is made another
+ * network: another SSID (saved as 利用者's, with the same passphrase)
+ * and the addresses 192.168.78.0/24, whose server, not authoritative,
+ * leaves a REQUEST for an address of another network unanswered. Its
+ * address must come within T_SWITCH_MS of the join, from a DISCOVER
+ * and one REQUEST: with the lease of the network left asked for first
+ * (INIT-REBOOT), the answer was waited for 3 to 5 s before the DISCOVER.
+ * Then the first network again: the address it gave comes back as
+ * soon, from the lease kept for it, with no DISCOVER.
+ */
+#define WSIM_SSID2	"TessronOS-Sim-Phone"
+#define WSIM_NET2	78			/* 192.168.78.0/24 */
+#define T_SWITCH_MS	3000
+
+/* The stack's address on 192.168.net.0/24 within ms: the address, 0 none */
+LOCAL UW wait_net( UW net, INT ms )
+{
+	UW	a = 0, m = 0, g = 0;
+	INT	i;
+
+	for ( i = 0; i < ms / 50; i++ ) {
+		if ( so_getifaddr(&a, &m, &g) >= E_OK && ( lwip_ntohl(a) & 0xffffff00UL ) == ( 0xc0a80000UL | ( net << 8 ) ) ) {
+			return a;
+		}
+		tk_dly_tsk(50);
+	}
+	return 0;
+}
+
+LOCAL UD ms_now( void )
+{
+	SYSTIM	t;
+
+	(void)tk_get_otm(&t);
+	return ( (UD)(UW)t.hi << 32 ) | (UW)t.lo;
+}
+
+LOCAL void test_switch( void )
+{
+	WIFISIM_COUNTS	c0, c;
+	char		hex2[72], line[160];
+	UW		home = 0, a, m, g;
+	UD		t0;
+	INT		ms;
+
+	if ( !joined || !addressed ) KT_SKIP("not joined");
+	KT_ASSERT_ER(so_getifaddr(&home, &m, &g), E_OK);
+	hex_of(WSIM_SSID2, hex2);
+
+	/* the phone's network: never joined, no lease kept for it */
+	KT_ASSERT_ER(wl_cmd("DISCONNECT"), E_OK);
+	KT_ASSERT(wait_left(T_LEAVE_MS));
+	KT_ASSERT_ER(knl_wifisim_ctl("ssid " WSIM_SSID2), E_OK);
+	KT_ASSERT_ER(knl_wifisim_ctl("net 78"), E_OK);
+	knl_wifisim_counts(&c0);
+	tm_sprintf((UB *)line, (CONST UB *)"SAVE %s wpa2 auto %s", hex2, WIFISIM_PASS);
+	KT_ASSERT_ER(knl_wifi_request(me, line), E_OK);
+	KT_ASSERT_ER(wl_cmd("CONNECT"), E_OK);
+	joined = wait_connected(T_JOIN_MS);
+	KT_ASSERT(joined);
+	t0 = ms_now();
+	a = wait_net(WSIM_NET2, T_DHCP_MS);
+	ms = (INT)( ms_now() - t0 );
+	knl_wifisim_counts(&c);
+	counts_say("on another network");
+	tm_printf((UB *)"  another network: address %08x %d ms after the join\n", (UINT)lwip_ntohl(a), ms);
+	KT_ASSERT(a != 0);
+	KT_ASSERT(c.dhcp_discover > c0.dhcp_discover);
+	KT_ASSERT_EQ(c.dhcp_request, c0.dhcp_request + 1);	/* no INIT-REBOOT for the network left */
+	KT_ASSERT(ms < T_SWITCH_MS);
+
+	/* the network at home again: its lease, kept, asked for at once */
+	KT_ASSERT_ER(wl_cmd("DISCONNECT"), E_OK);
+	KT_ASSERT(wait_left(T_LEAVE_MS));
+	KT_ASSERT_ER(knl_wifisim_ctl("ssid " WIFISIM_SSID), E_OK);
+	KT_ASSERT_ER(knl_wifisim_ctl("net 77"), E_OK);
+	tm_sprintf((UB *)line, (CONST UB *)"FORGET %s", hex2);
+	KT_ASSERT_ER(knl_wifi_request(me, line), E_OK);
+	knl_wifisim_counts(&c0);
+	KT_ASSERT_ER(wl_cmd("CONNECT"), E_OK);
+	joined = wait_connected(T_JOIN_MS);
+	KT_ASSERT(joined);
+	t0 = ms_now();
+	a = wait_net(77, T_DHCP_MS);
+	ms = (INT)( ms_now() - t0 );
+	knl_wifisim_counts(&c);
+	counts_say("back on the first network");
+	tm_printf((UB *)"  the first network again: address %08x %d ms after the join (it had %08x)\n",
+		  (UINT)lwip_ntohl(a), ms, (UINT)lwip_ntohl(home));
+	addressed = ( a != 0 );
+	KT_ASSERT_EQ(a, home);
+	KT_ASSERT_EQ(c.dhcp_discover, c0.dhcp_discover);	/* INIT-REBOOT */
+	KT_ASSERT(c.dhcp_ack > c0.dhcp_ack);
+	KT_ASSERT(ms < T_SWITCH_MS);
+	if ( a != 0 ) {
+		tk_dly_tsk(1000);
+		KT_ASSERT_EQ(echo_round(3), 3);
+	}
+}
+
+/*
+ * The card's keys set 300 ms after they are asked, as by a driver's
+ * task: the port is to open after the card has them, and the first
+ * DHCP message to reach the access point
+ */
+LOCAL void test_keydelay( void )
+{
+	WIFISIM_COUNTS	c0, c;
+	UD		t0;
+	INT		ms;
+	UW		rel;
+
+	if ( !joined || !addressed ) KT_SKIP("not joined");
+	KT_ASSERT_ER(wl_cmd("DISCONNECT"), E_OK);
+	KT_ASSERT(wait_left(T_LEAVE_MS));
+	if ( knl_wifisim_ctl("keydelay 300") == E_NOSPT ) {
+		(void)wl_cmd("CONNECT");
+		joined = wait_connected(T_JOIN_MS);
+		KT_SKIP("the layer's simulator does not delay the keys (NetBSD's)");
+	}
+	knl_wifisim_counts(&c0);
+	KT_ASSERT_ER(wl_cmd("CONNECT"), E_OK);
+	joined = wait_connected(T_JOIN_MS);
+	t0 = ms_now();
+	KT_ASSERT(joined);
+	KT_ASSERT(wait_ack(c0.dhcp_ack, T_DHCP_MS));
+	ms = (INT)( ms_now() - t0 );
+	addressed = wait_addr(T_DHCP_MS);
+	knl_wifisim_counts(&c);
+	counts_say("the card's keys late");
+	rel = c.air[WSIM_AIR_PORT_REL];
+	tm_printf((UB *)"  keys set late: %d, the port opened %d ms after the card had them%s;"
+		  " protected frames before the keys: sent %d, received %d; the address %d ms after the join\n",
+		  (INT)c.air[WSIM_AIR_LATE_KEYS], ( rel != 0 && rel != ~0U ) ? (INT)rel - 1 : -1,
+		  ( rel == ~0U ) ? " (before them)" : ( rel == 0 ) ? " (not seen)" : "",
+		  (INT)c.air[WSIM_AIR_STA_NOKEY], (INT)c.air[WSIM_AIR_STA_NOKEY_RX], ms);
+	(void)knl_wifisim_ctl("keydelay 0");
+	KT_ASSERT(c.air[WSIM_AIR_LATE_KEYS] >= 2);		/* the pairwise and the group key, late */
+	KT_ASSERT(rel != 0 && rel != ~0U);			/* the port opened after the card had them */
+	KT_ASSERT_EQ(c.air[WSIM_AIR_STA_NOKEY], 0);
+	KT_ASSERT_EQ(c.air[WSIM_AIR_STA_NOKEY_RX], 0);
+	KT_ASSERT_EQ(c.dhcp_discover, c0.dhcp_discover);	/* the address held asked for (INIT-REBOOT) */
+	KT_ASSERT_EQ(c.dhcp_request, c0.dhcp_request + 1);	/* the first REQUEST reached it */
+	KT_ASSERT(ms < T_SWITCH_MS);
+	KT_ASSERT(addressed);
+	if ( addressed ) {
+		tk_dly_tsk(1000);
+		KT_ASSERT_EQ(echo_round(3), 3);
+	}
+}
+
 LOCAL void test_lost( void )
 {
 	UW	before;
@@ -667,8 +833,12 @@ LOCAL void test_reqagain( void )
 	KT_ASSERT_ER(knl_wifisim_ctl("dhcp slowreq 1500"), E_OK);
 	KT_ASSERT_ER(wl_cmd("DISCONNECT"), E_OK);
 	KT_ASSERT(wait_left(T_LEAVE_MS));
-	/* no address: the asking begins from a DISCOVER */
+	/*
+	 * No address and no lease kept for the network, as on a machine
+	 * never on it: the asking begins from a DISCOVER
+	 */
 	KT_ASSERT_ER(knl_so_nb_ifaddr(0, 0, 0, TRUE), E_OK);
+	knl_so_dhcp_forget();
 	before = acks();
 	knl_wifisim_counts(&c0);
 	KT_ASSERT_ER(wl_cmd("CONNECT"), E_OK);
@@ -911,6 +1081,8 @@ EXPORT void ktest_wifisim( void )
 	KT_RUN(test_data);
 	KT_RUN(test_leave);
 	KT_RUN(test_again);
+	KT_RUN(test_keydelay);
+	KT_RUN(test_switch);
 	KT_RUN(test_reqagain);
 	KT_RUN(test_declined);
 	KT_RUN(test_off);

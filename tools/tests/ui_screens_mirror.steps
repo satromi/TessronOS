@@ -1,0 +1,47 @@
+# The second output mirroring the main screen, chosen on システム環境設定's 画面サイズ page (docs/tessronos
+# 10.4.8, 10.4.10), for tools/ui_run.py with UI_SCREENS=2 (QEMU's second bochs-display, right of the
+# first at start). The parts are where ui_screens_out.steps says; the side's pop-up opens with the
+# row chosen over the part, a row 20 high (右, 下, 左, 上, 複製). 複製 puts the size it mirrors in
+# into the fields; the view is then the main screen's alone, and the second display shows the
+# main screen's picture (scaled into its own size where the sizes differ). Then right of the main
+# screen again.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+wait 800
+win システム環境設定
+click 206 181
+wait 300
+click 706 184
+expect sysenv: screen page 1280x800
+wait 500
+click 290 157
+wait 300
+click 290 177
+expect output 2 of 2
+wait 500
+logmark
+click 670 157
+wait 300
+click 670 237
+wait 500
+shot sm_chosen
+click 706 554
+wait 1500
+key 28
+expectsincein 30 mirror 0
+wait 1500
+win システム環境設定
+want ok 160 80 780 584
+shot sm_main
+# right of the main screen again
+logmark
+click 670 157
+wait 300
+click 670 77
+wait 300
+click 706 554
+wait 1500
+key 28
+expectsincein 30 right 0
+wait 800
+shot sm_right

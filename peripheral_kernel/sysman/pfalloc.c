@@ -25,6 +25,8 @@
 #include "pfalloc.h"
 #include <tk/tkernel.h>
 #include <tk/smem.h>
+#include <tm/tmonitor.h>
+#include <ts/proc.h>
 
 /*
  * Taken with interrupts disabled around the free lists of the page frames: disabling
@@ -142,6 +144,261 @@ LOCAL PFRAME *alloc_block( ZONE *z, UINT order )
 	return pf;
 }
 
+#ifdef PF_FREE_CHECK
+/*
+ * Pages written after they were given back (make PGCHECK=1). Each page
+ * given back is filled with a pattern of its own frame number, and the
+ * address the free was called from is kept for it; a page handed out
+ * again is first compared with its pattern. A difference is a write
+ * into a page that was free -- through a mapping or a translation left
+ * behind, by a device, or by code that still held it -- and a page given
+ * back while it is free is a second free, which is kept out of the
+ * lists. The first ones are kept and said by knl_pf_check_tell, outside
+ * the lock: for a page written, with the process and address it was
+ * given up from (knl_pf_check_owner), how long it had been free, and
+ * who took it. What it costs is a write of each page given back and a
+ * read of each page handed out.
+ */
+#define PFC_BLK_ENT	( ( (UD)PAGE_SIZE << PF_MAX_ORDER ) / sizeof(UD) )
+#define PFC_BLKS	16
+#define PFC_PAT(pfn)	( 0xF1EEF1EE00000000ULL | ( (UD)(pfn) & 0xFFFFFFFFULL ) )
+#define PFC_REC		24		/* pages written while free said one by one */
+
+/*
+ * For each page watched, three words: where it was freed from (0 while
+ * it is in use), whose it was (the process and its address, when a
+ * process gave it up: knl_pf_check_owner), and when it was freed
+ */
+LOCAL UD	*pfc_blk[PFC_BLKS], *pfc_own[PFC_BLKS], *pfc_tim[PFC_BLKS];
+LOCAL UD	pfc_npages = 0;		/* pages watched, from frame 0 */
+LOCAL UW	pfc_written = 0, pfc_twice = 0, pfc_told_w = 0, pfc_told_t = 0;
+LOCAL struct {
+	UD	pa, off, nbad, freer, taker, own, age_us, taker_pid, cpu;
+	UD	word[8];
+}		pfc_w[PFC_REC];
+LOCAL struct {
+	UD	pa, freer, again;
+}		pfc_t1;
+
+IMPORT UD knl_get_mono_ns( void );
+
+/* The owner word: the process (16 bits), the processor that freed it (8), the page's address in the process */
+#define PFC_OWN(pid, cpu, va)	( ( (UD)(pid) << 48 ) | ( ( (UD)(cpu) & 0xFF ) << 40 ) \
+				| ( ( (UD)(va) >> PAGE_SHIFT ) & 0xFFFFFFFFFFULL ) )
+#define PFC_OWN_PID(o)		( (UD)(o) >> 48 )
+#define PFC_OWN_VA(o)		( ( (UD)(o) & 0xFFFFFFFFFFULL ) << PAGE_SHIFT )
+
+LOCAL UD *pfc_ent( UD idx )
+{
+	return &pfc_blk[idx / PFC_BLK_ENT][idx % PFC_BLK_ENT];
+}
+
+LOCAL UD *pfc_owner( UD idx )
+{
+	return &pfc_own[idx / PFC_BLK_ENT][idx % PFC_BLK_ENT];
+}
+
+LOCAL UD *pfc_time( UD idx )
+{
+	return &pfc_tim[idx / PFC_BLK_ENT][idx % PFC_BLK_ENT];
+}
+
+/* The processor running the caller (0 when it cannot be told) */
+LOCAL UD pfc_cpu( void )
+{
+	return (UD)knl_pcpu()->prcid;
+}
+
+/* The pages of a block given back filled with their pattern, when they are watched */
+LOCAL void pfc_fill( PFRAME *pf, UINT order )
+{
+	UD	idx = PF_INDEX(pf), n = (UD)1 << order, k, i;
+
+	if ( idx + n > __atomic_load_n(&pfc_npages, __ATOMIC_ACQUIRE) ) return;
+	for ( k = 0; k < n; k++ ) {
+		UD	*w = (UD *)PA2VA(knl_pf_base + ( ( idx + k ) << PAGE_SHIFT ));
+		UD	pat = PFC_PAT(idx + k);
+
+		for ( i = 0; i < PAGE_SIZE / sizeof(UD); i++ ) w[i] = pat;
+	}
+}
+
+/* Under pf_lock: the block noted free, or TRUE when a page of it is free already */
+LOCAL BOOL pfc_mark( PFRAME *pf, UINT order, UD freer )
+{
+	UD	idx = PF_INDEX(pf), n = (UD)1 << order, k;
+
+	if ( idx + n > pfc_npages ) return FALSE;
+	for ( k = 0; k < n; k++ ) {
+		UD	was = *pfc_ent(idx + k);
+
+		if ( was != 0 ) {
+			if ( pfc_twice++ == 0 ) {
+				pfc_t1.pa = knl_pf_base + ( ( idx + k ) << PAGE_SHIFT );
+				pfc_t1.freer = was;
+				pfc_t1.again = freer;
+			}
+			return TRUE;
+		}
+	}
+	{
+		UD	now = knl_get_mono_ns();
+
+		for ( k = 0; k < n; k++ ) {
+			*pfc_ent(idx + k) = freer;
+			*pfc_time(idx + k) = now;
+		}
+	}
+	return FALSE;
+}
+
+/* The pages of a block just handed out compared with their pattern, and noted in use */
+LOCAL void pfc_check( PFRAME *pf, UINT order, UD taker )
+{
+	UD	idx = PF_INDEX(pf), n = (UD)1 << order, k, i;
+	UINT	imask;
+
+	if ( idx + n > __atomic_load_n(&pfc_npages, __ATOMIC_ACQUIRE) ) return;
+	for ( k = 0; k < n; k++ ) {
+		UD	*e = pfc_ent(idx + k), freer = *e, pat = PFC_PAT(idx + k), bad = 0, first = 0;
+		UD	*w = (UD *)PA2VA(knl_pf_base + ( ( idx + k ) << PAGE_SHIFT ));
+		UD	own = *pfc_owner(idx + k), at = *pfc_time(idx + k);
+
+		*pfc_owner(idx + k) = 0;
+		if ( freer == 0 ) continue;
+		__atomic_store_n(e, 0, __ATOMIC_RELAXED);
+		for ( i = 0; i < PAGE_SIZE / sizeof(UD); i++ ) {
+			if ( w[i] != pat && bad++ == 0 ) first = i;
+		}
+		if ( bad == 0 ) continue;
+		ISpinLock(&pf_lock, &imask);
+		if ( pfc_written < PFC_REC ) {
+			UD	r = pfc_written;
+
+			pfc_w[r].off = first * sizeof(UD);
+			if ( first > PAGE_SIZE / sizeof(UD) - 8 ) first = PAGE_SIZE / sizeof(UD) - 8;
+			pfc_w[r].pa = knl_pf_base + ( ( idx + k ) << PAGE_SHIFT );
+			pfc_w[r].nbad = bad;
+			pfc_w[r].freer = freer;
+			pfc_w[r].taker = taker;
+			pfc_w[r].own = own;
+			pfc_w[r].age_us = ( knl_get_mono_ns() - at ) / 1000;
+			pfc_w[r].taker_pid = (UD)ts_get_pid();
+			pfc_w[r].cpu = pfc_cpu();
+			for ( i = 0; i < 8; i++ ) pfc_w[r].word[i] = w[first + i];
+		}
+		pfc_written++;
+		ISpinUnlock(&pf_lock, &imask);
+	}
+}
+
+/* The table of the pages watched, made once the allocator is up and every page is in the linear map */
+LOCAL void pfc_init( void )
+{
+	UD	need = knl_pf_npages, have = 0;
+	INT	i;
+
+	for ( i = 0; i < PFC_BLKS && have < need; i++ ) {
+		PFRAME	*pf = knl_alloc_pages(PF_MAX_ORDER, ZONE_NORMAL, KAF_ZERO);
+		PFRAME	*po = knl_alloc_pages(PF_MAX_ORDER, ZONE_NORMAL, KAF_ZERO);
+		PFRAME	*pt = knl_alloc_pages(PF_MAX_ORDER, ZONE_NORMAL, KAF_ZERO);
+
+		if ( pf == NULL || po == NULL || pt == NULL ) {
+			if ( pf != NULL ) knl_free_pages(pf, PF_MAX_ORDER);
+			if ( po != NULL ) knl_free_pages(po, PF_MAX_ORDER);
+			if ( pt != NULL ) knl_free_pages(pt, PF_MAX_ORDER);
+			break;
+		}
+		pfc_blk[i] = (UD *)knl_pf_to_va(pf);
+		pfc_own[i] = (UD *)knl_pf_to_va(po);
+		pfc_tim[i] = (UD *)knl_pf_to_va(pt);
+		have += PFC_BLK_ENT;
+	}
+	if ( have > need ) have = need;
+	__atomic_store_n(&pfc_npages, have, __ATOMIC_RELEASE);
+	tm_printf((UB *)"pgcheck: on, %ld of %ld pages watched\n", (long)have, (long)need);
+}
+#endif
+
+/*
+ * A page a process gives up (umem.c): whose it was and where, said with
+ * it should it be written after it is freed. Its frame is the process's
+ * until then, so the word is the caller's alone.
+ */
+EXPORT void knl_pf_check_owner( UD pa, UBINT va )
+{
+#ifdef PF_FREE_CHECK
+	UD	idx;
+
+	if ( pa < knl_pf_base ) return;
+	idx = ( pa - knl_pf_base ) >> PAGE_SHIFT;
+	if ( idx >= __atomic_load_n(&pfc_npages, __ATOMIC_ACQUIRE) ) return;
+	*pfc_owner(idx) = PFC_OWN(ts_get_pid(), pfc_cpu(), va);
+#else
+	(void)pa;
+	(void)va;
+#endif
+}
+
+/* Pages written while free and pages given back twice, so far (the tests); FALSE when not watched */
+EXPORT BOOL knl_pf_check_counts( UW *p_written, UW *p_twice )
+{
+#ifdef PF_FREE_CHECK
+	if ( p_written != NULL ) *p_written = __atomic_load_n(&pfc_written, __ATOMIC_RELAXED);
+	if ( p_twice != NULL ) *p_twice = __atomic_load_n(&pfc_twice, __ATOMIC_RELAXED);
+	return (BOOL)( __atomic_load_n(&pfc_npages, __ATOMIC_ACQUIRE) != 0 );
+#else
+	if ( p_written != NULL ) *p_written = 0;
+	if ( p_twice != NULL ) *p_twice = 0;
+	return FALSE;
+#endif
+}
+
+/*
+ * What PF_FREE_CHECK found since it was last said; the first call makes
+ * its table. Called by the process reaper (proc.c), as processes end.
+ */
+EXPORT void knl_pf_check_tell( void )
+{
+#ifdef PF_FREE_CHECK
+	static BOOL	up = FALSE;
+	UW		w, t;
+	UINT		imask;
+
+	if ( !up ) {
+		up = TRUE;
+		pfc_init();
+		return;
+	}
+	ISpinLock(&pf_lock, &imask);
+	w = pfc_written;
+	t = pfc_twice;
+	ISpinUnlock(&pf_lock, &imask);
+	if ( w != pfc_told_w ) {
+		UW	r;
+
+		tm_printf((UB *)"pgcheck: %d pages written while free (%d said before)\n", (int)w, (int)pfc_told_w);
+		for ( r = pfc_told_w; r < w && r < PFC_REC; r++ ) {
+			tm_printf((UB *)"pgcheck:   %lx offset %lx, %ld words; freed from %lx %ld us before by pid %ld "
+				  "(its %lx, processor %ld); taken by %lx for pid %ld on processor %ld:\n",
+				  pfc_w[r].pa, pfc_w[r].off, (long)pfc_w[r].nbad, pfc_w[r].freer, (long)pfc_w[r].age_us,
+				  (long)PFC_OWN_PID(pfc_w[r].own), PFC_OWN_VA(pfc_w[r].own),
+				  (long)( ( pfc_w[r].own >> 40 ) & 0xFF ), pfc_w[r].taker, (long)pfc_w[r].taker_pid,
+				  (long)pfc_w[r].cpu);
+			tm_printf((UB *)"pgcheck:     %016lx %016lx %016lx %016lx %016lx %016lx %016lx %016lx\n",
+				  pfc_w[r].word[0], pfc_w[r].word[1], pfc_w[r].word[2], pfc_w[r].word[3],
+				  pfc_w[r].word[4], pfc_w[r].word[5], pfc_w[r].word[6], pfc_w[r].word[7]);
+		}
+		pfc_told_w = w;
+	}
+	if ( t != pfc_told_t ) {
+		pfc_told_t = t;
+		tm_printf((UB *)"pgcheck: %d pages given back while free; the first at %lx, freed from %lx, again from %lx\n",
+			  (int)t, pfc_t1.pa, pfc_t1.freer, pfc_t1.again);
+	}
+#endif
+}
+
 EXPORT PFRAME *knl_alloc_pages( UINT order, UINT zone, UINT flags )
 {
 	PFRAME	*pf = NULL;
@@ -168,6 +425,9 @@ EXPORT PFRAME *knl_alloc_pages( UINT order, UINT zone, UINT flags )
 	}
 	ISpinUnlock(&pf_lock, &imask);
 
+#ifdef PF_FREE_CHECK
+	if ( pf != NULL ) pfc_check(pf, order, (UD)(UBINT)__builtin_return_address(0));
+#endif
 	if ( pf != NULL && (flags & KAF_ZERO) != 0 ) {
 		knl_memset(knl_pf_to_va(pf), 0, (SZ)(PAGE_SIZE << order));
 	}
@@ -181,7 +441,16 @@ EXPORT void knl_free_pages( PFRAME *pf, UINT order )
 	if ( pf == NULL || order > PF_MAX_ORDER ) return;
 	if ( (pf->flags & (PF_FREE | PF_RESERVED)) != 0 ) return;	/* double free or reserved */
 
+#ifdef PF_FREE_CHECK
+	pfc_fill(pf, order);
 	ISpinLock(&pf_lock, &imask);
+	if ( pfc_mark(pf, order, (UD)(UBINT)__builtin_return_address(0)) ) {
+		ISpinUnlock(&pf_lock, &imask);
+		return;			/* free already: kept out of the lists */
+	}
+#else
+	ISpinLock(&pf_lock, &imask);
+#endif
 	zones[pf->zone].nfree += (UD)1 << order;
 	free_block(pf, order);
 	ISpinUnlock(&pf_lock, &imask);

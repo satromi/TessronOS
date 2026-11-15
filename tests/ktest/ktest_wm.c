@@ -22,6 +22,7 @@
 #include "ktest.h"
 #include "tstdlib.h"
 #include <ts/wm.h>
+#include <ts/part.h>
 #include <ts/fn.h>
 #include <ts/dp.h>
 #include <ts/disp.h>
@@ -33,6 +34,9 @@
 #include "../../outer_kernel/wm/wmobj.h"
 #include "../../outer_kernel/wm/compose.h"
 #include "../../device/disp/disp_hw.h"
+#include <ts/dispout.h>
+#include <ts/json.h>
+#include <ts/ob.h>
 
 IMPORT ID knl_wm_compositor( void );
 
@@ -3627,6 +3631,8 @@ LOCAL void test_screen_size( void )
 	ER		er;
 
 	if ( !have_wm ) KT_SKIP("no windows");
+	(void)ts_disp_ref(&spec);
+	if ( ts_disp_screens() > 1 && spec.width != spec.main_w ) KT_SKIP("more than one output: a test of one screen");
 	KT_ASSERT_ER(ts_disp_ref(&s0), E_OK);
 	w0 = s0.width;
 	h0 = s0.height;
@@ -3815,6 +3821,8 @@ LOCAL void test_scale( void )
 	ER		er;
 
 	if ( !have_wm ) KT_SKIP("no windows");
+	(void)ts_disp_ref(&spec);
+	if ( ts_disp_screens() > 1 && spec.width != spec.main_w ) KT_SKIP("more than one output: a test of one screen");
 	KT_ASSERT_ER(ts_disp_ref(&s0), E_OK);
 	KT_ASSERT_EQ(s0.scale, 100);
 	KT_ASSERT(s0.view_w == s0.width && s0.view_h == s0.height);
@@ -3979,6 +3987,1266 @@ done:
 	(void)ts_disp_ref(&spec);
 }
 
+/*
+ * A window in full screen (wm_full, OB_WP_FULL; design 10): its work
+ * area is the whole screen, over the message line, with no frame; a
+ * panel of its own stands in front of it and shows; another window in
+ * front gives the message line back; the keys stay with it; out of full
+ * screen it has its frame, place and size again.
+ */
+/*
+ * Windows on a screen of another size (10.4.8): a framebuffer in memory
+ * put right of the main screen, then one below it, as an output a driver
+ * found would be. A window made full screen there fills that screen and
+ * not the message line's; the message line stays on the main screen; a
+ * menu's screen is found by both coordinates; when the screen is taken
+ * away its windows come back into the view.
+ */
+#define SO_W		480
+#define SO_H		360
+
+IMPORT void knl_hid_screen_changed( void );
+IMPORT BOOL knl_msg_band( T_DPRECT *r );
+
+LOCAL UW *so_mem( T_DISPHW *hw )
+{
+	UBINT	pages = ( (UBINT)SO_W * SO_H * 4 + 4095 ) / 4096;
+	UW	*m = (UW *)knl_vmap(pages, 0);
+
+	if ( m == NULL ) return NULL;
+	knl_memset(m, 0, (SZ)( pages * 4096 ));
+	knl_memset(hw, 0, sizeof(*hw));
+	hw->width = SO_W;
+	hw->height = SO_H;
+	hw->bpp = 32;
+	hw->pitch = SO_W * 4;
+	hw->format = DISP_FMT_XRGB8888;
+	hw->alpha = DISP_ALPHA_ANY;
+	hw->fb_va = (UBINT)m;
+	hw->via = "memory (test)";
+	hw->pages = 1;
+	return m;
+}
+
+LOCAL void test_screens_out( void )
+{
+	T_DISPHW	hw;
+	T_DISPSPEC	was;
+	T_DPRECT	o, r, on;
+	T_WMWIN		w;
+	UW		*m;
+	INT		n0, sc, a, mw = 0, mh = 0, sw = 0, sh = 0, x, y, sx, sy, sww, shh, msg;
+
+	if ( !have_wm ) KT_SKIP("no windows");
+	KT_ASSERT_ER(ts_disp_ref(&was), E_OK);
+	n0 = ts_disp_screens();
+	if ( n0 > 1 && was.width == was.main_w ) KT_SKIP("the screen is shown as columns (screens=N)");
+	if ( n0 + 1 > DISP_SCREENS_MAX ) KT_SKIP("no room for another screen");
+	if ( was.scale != 100 ) KT_SKIP("drawn at a scale");
+	m = so_mem(&hw);
+	KT_ASSERT(m != NULL);
+	if ( m == NULL ) return;
+	msg = wm_msg_height();
+	wm_screen_main(&mw, &mh);
+
+	sc = knl_disp_out_attach(&hw, DISP_SIDE_RIGHT, 0);
+	KT_ASSERT_EQ(sc, n0);
+	KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+	KT_ASSERT_ER(ts_disp_screen(sc, &sx, &sy, &sww, &shh), E_OK);
+	wm_screen(&sw, &sh);
+	KT_ASSERT_EQ(sw, (INT)spec.view_w);
+	KT_ASSERT_EQ(sww, SO_W);
+	KT_ASSERT_EQ(shh, SO_H);
+	wm_screen_main(&x, &y);
+	KT_ASSERT_EQ(x, mw);				/* the main screen as it was */
+	KT_ASSERT_EQ(y, mh);
+	KT_ASSERT_EQ(wm_msg_height(), msg);
+
+	/* a window there, made full screen: that screen, the message line not taken off */
+	rect(&o, sx + 40, sy + 40, sx + 300, sy + 250);
+	a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE, "on the other screen");
+	KT_ASSERT(a >= 1);
+	if ( a >= 1 ) {
+		KT_ASSERT_ER(wm_raise(a), E_OK);
+		KT_ASSERT_ER(wm_full(a, TRUE), E_OK);
+		KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+		tm_printf((UB *)"  full on screen %d: work %d,%d-%d,%d; the screen %d,%d %dx%d\n", sc,
+			  w.work.left, w.work.top, w.work.right, w.work.bottom, sx, sy, sww, shh);
+		KT_ASSERT_EQ(w.work.left, sx);
+		KT_ASSERT_EQ(w.work.top, sy);
+		KT_ASSERT_EQ(w.work.right, sx + sww);
+		KT_ASSERT_EQ(w.work.bottom, sy + shh);
+		rect(&r, 0, 0, sww, shh);
+		KT_ASSERT_ER(dp_fill_rect(wm_gid(a), &r, 0x00246813), E_OK);
+		KT_ASSERT_ER(wm_composite(), E_OK);
+		KT_ASSERT_EQ(at(sx + 1, sy + 1), 0x246813);
+		KT_ASSERT_EQ(at(sx + sww - 1, sy + shh - 1), 0x246813);
+		/* and it reached the screen's framebuffer */
+		KT_ASSERT_EQ(m[( SO_H - 1 ) * SO_W + SO_W - 1] & 0x00FFFFFF, 0x246813U);
+		KT_ASSERT_EQ(m[0] & 0x00FFFFFF, 0x246813U);
+		KT_ASSERT_EQ(wm_at(sx + 10, sy + shh - 2), a);	/* no message line there */
+		KT_ASSERT_ER(wm_full(a, FALSE), E_OK);
+
+		/* a window kept on its screen: moved off its right edge, it comes back onto that screen */
+		rect(&o, sx + sww - 100, sy + 50, sx + sww + 200, sy + 200);
+		KT_ASSERT_ER(wm_place(a, &o), E_OK);
+		KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+		KT_ASSERT(w.outer.right <= sx + sww);
+		KT_ASSERT(w.outer.left >= sx);
+	}
+
+	/*
+	 * The pointer is kept on a screen: put where no screen is (below the
+	 * shorter one), it goes to the nearest point of the nearest screen
+	 * when the input layer next keeps it there
+	 */
+	if ( mh > shh ) {
+		T_HIDEV	e;
+		INT	px = 0, py = 0;
+		UINT	b;
+
+		knl_memset(&e, 0, sizeof(e));
+		e.type = HID_EV_MOVE;
+		e.x = sx + 100;
+		e.y = shh + 5;
+		KT_ASSERT_ER(knl_hid_inject(0, &e), E_OK);
+		knl_hid_screen_changed();
+		KT_ASSERT_ER(ts_hid_pointer(&px, &py, &b), E_OK);
+		KT_ASSERT_EQ(px, sx + 100);	/* nearer the screen above than the main one's edge */
+		KT_ASSERT_EQ(py, shh - 1);
+		e.x = mw / 2;
+		e.y = mh / 2;
+		KT_ASSERT_ER(knl_hid_inject(0, &e), E_OK);
+		tk_dly_tsk(30);
+	}
+
+	/* the message line is the main screen's: as wide as it, at its bottom */
+	if ( msg > 0 ) {
+		KT_ASSERT(wm_at(mw / 2, mh - msg / 2) != a || a < 1);
+	}
+
+	/* the screen taken away: the window comes back into the view */
+	KT_ASSERT_ER(knl_disp_out_detach(sc), E_OK);
+	KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+	KT_ASSERT_EQ(spec.width, was.width);
+	wm_screen(&sw, &sh);
+	if ( a >= 1 ) {
+		KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+		tm_printf((UB *)"  after: outer %d,%d-%d,%d in a view of %d x %d\n",
+			  w.outer.left, w.outer.top, w.outer.right, w.outer.bottom, sw, sh);
+		KT_ASSERT(w.outer.right <= sw);
+		KT_ASSERT(w.outer.left >= 0);
+		KT_ASSERT_ER(wm_close(a), E_OK);
+	}
+
+	/* one below: a point's screen goes by its height too */
+	sc = knl_disp_out_attach(&hw, DISP_SIDE_BELOW, 0);
+	KT_ASSERT_EQ(sc, n0);
+	KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+	KT_ASSERT_ER(ts_disp_screen(sc, &sx, &sy, &sww, &shh), E_OK);
+	KT_ASSERT_EQ(sx, 0);
+	KT_ASSERT_EQ(sy, (INT)was.height);
+	wm_screen_at(10, sy + 10, &on);
+	KT_ASSERT_EQ(on.top, sy);
+	wm_screen_at(10, 10, &on);
+	KT_ASSERT_EQ(on.top, 0);
+	rect(&o, 20, sy + 20, 300, sy + 200);
+	a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE, "below");
+	KT_ASSERT(a >= 1);
+	if ( a >= 1 ) {
+		KT_ASSERT_ER(wm_full(a, TRUE), E_OK);
+		KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+		KT_ASSERT_EQ(w.work.top, sy);
+		KT_ASSERT_EQ(w.work.bottom, sy + shh);
+		KT_ASSERT_ER(wm_close(a), E_OK);
+	}
+	KT_ASSERT_ER(knl_disp_out_detach(sc), E_OK);
+	KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+	KT_ASSERT_EQ(spec.height, was.height);
+	knl_vunmap((UB *)m, ( SO_W * SO_H * 4 + 4095 ) / 4096);
+
+	/*
+	 * A screen as tall as the main one: the message line's band is the
+	 * main screen's only, so a window there shows down to its bottom and
+	 * a press there is the window's
+	 */
+	if ( msg > 0 ) {
+		UBINT	pages = ( (UBINT)SO_W * mh * 4 + 4095 ) / 4096;
+		UW	*m2 = (UW *)knl_vmap(pages, 0);
+
+		KT_ASSERT(m2 != NULL);
+		if ( m2 != NULL ) {
+			knl_memset(m2, 0, (SZ)( pages * 4096 ));
+			hw.height = (UINT)mh;
+			hw.fb_va = (UBINT)m2;
+			sc = knl_disp_out_attach(&hw, DISP_SIDE_RIGHT, 0);
+			KT_ASSERT_EQ(sc, n0);
+			KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+			KT_ASSERT_ER(ts_disp_screen(sc, &sx, &sy, &sww, &shh), E_OK);
+			rect(&o, sx + 20, sy + 20, sx + 200, sy + 200);
+			a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE, "as tall");
+			KT_ASSERT(a >= 1);
+			if ( a >= 1 ) {
+				KT_ASSERT_ER(wm_raise(a), E_OK);
+				KT_ASSERT_ER(wm_full(a, TRUE), E_OK);
+				rect(&r, 0, 0, sww, shh);
+				KT_ASSERT_ER(dp_fill_rect(wm_gid(a), &r, 0x00135724), E_OK);
+				KT_ASSERT_ER(wm_composite(), E_OK);
+				KT_ASSERT_EQ(at(sx + 10, sy + shh - msg / 2), 0x135724);
+				KT_ASSERT_EQ(m2[( shh - msg / 2 ) * SO_W + 10] & 0x00FFFFFF, 0x135724U);
+				KT_ASSERT_EQ(wm_at(sx + 10, sy + shh - msg / 2), a);
+				KT_ASSERT_ER(wm_close(a), E_OK);
+			}
+			KT_ASSERT_ER(knl_disp_out_detach(sc), E_OK);
+			KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+			knl_vunmap((UB *)m2, pages);
+		}
+	}
+	KT_ASSERT_ER(wm_composite(), E_OK);
+}
+
+/*
+ * Screens left of and above the main one (10.4.8): the main screen moves
+ * away from the view's corner, and its windows and the pointer go with
+ * it; a window across the edge of two screens shows on both; the message
+ * line stays at the main screen's bottom; the screen taken away, what was
+ * on it comes to the main screen, and what was on the main screen goes
+ * back with it to the corner.
+ */
+LOCAL void test_screens_left_wm( void )
+{
+	T_DISPHW	hw;
+	T_DISPSPEC	was;
+	T_DPRECT	o, r, mr, band;
+	T_WMWIN		w;
+	T_HIDEV		e;
+	UW		*m;
+	INT		n0, sc, a, b, c, mw = 0, mh = 0, sx, sy, sww, shh, msg, ax, ay, px = 0, py = 0;
+	UINT		btn;
+	BOOL		ptr;
+
+	if ( !have_wm ) KT_SKIP("no windows");
+	KT_ASSERT_ER(ts_disp_ref(&was), E_OK);
+	n0 = ts_disp_screens();
+	if ( n0 > 1 && was.width == was.main_w ) KT_SKIP("the screen is shown as columns (screens=N)");
+	if ( n0 + 1 > DISP_SCREENS_MAX ) KT_SKIP("no room for another screen");
+	if ( was.scale != 100 ) KT_SKIP("drawn at a scale");
+	m = so_mem(&hw);
+	KT_ASSERT(m != NULL);
+	if ( m == NULL ) return;
+	msg = wm_msg_height();
+	wm_screen_main(&mw, &mh);
+
+	/* a window on the main screen, and the pointer in its middle */
+	rect(&o, 100, 100, 400, 300);
+	a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE, "main");
+	KT_ASSERT(a >= 1);
+	if ( a < 1 ) goto out;
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	ax = w.outer.left;
+	ay = w.outer.top;
+	knl_memset(&e, 0, sizeof(e));
+	e.type = HID_EV_MOVE;
+	e.x = mw / 2;
+	e.y = mh / 2;
+	ptr = (BOOL)( knl_hid_inject(0, &e) >= E_OK );
+
+	/* left: the main screen, its window, the pointer and the message line go right by its width */
+	sc = knl_disp_out_attach(&hw, DISP_SIDE_LEFT, 0);
+	KT_ASSERT_EQ(sc, n0);
+	KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+	KT_ASSERT_EQ(spec.main_x, SO_W);
+	KT_ASSERT_ER(ts_disp_screen(sc, &sx, &sy, &sww, &shh), E_OK);
+	KT_ASSERT_EQ(sx, 0);
+	KT_ASSERT_EQ(sy, 0);
+	wm_screen_main_rect(&mr);
+	KT_ASSERT_EQ(mr.left, SO_W);
+	KT_ASSERT_EQ(mr.top, 0);
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	tm_printf((UB *)"  a screen put left: the main one at %d,%d; its window %d,%d (was %d,%d)\n",
+		  mr.left, mr.top, w.outer.left, w.outer.top, ax, ay);
+	KT_ASSERT_EQ(w.outer.left, ax + SO_W);
+	KT_ASSERT_EQ(w.outer.top, ay);
+	if ( ptr ) {
+		KT_ASSERT_ER(ts_hid_pointer(&px, &py, &btn), E_OK);
+		KT_ASSERT_EQ(px, mw / 2 + SO_W);
+		KT_ASSERT_EQ(py, mh / 2);
+	}
+	if ( msg > 0 ) {
+		KT_ASSERT(wm_screen_is_main(&mr));
+		KT_ASSERT(wm_at(mr.left + mw / 2, mh - msg / 2) != a);
+	}
+
+	/* a window on the left screen in full screen: down to its bottom, no message line there */
+	rect(&o, sx + 20, sy + 20, sx + 200, sy + 200);
+	b = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE, "left");
+	KT_ASSERT(b >= 1);
+	if ( b >= 1 ) {
+		KT_ASSERT_ER(wm_raise(b), E_OK);
+		KT_ASSERT_ER(wm_full(b, TRUE), E_OK);
+		KT_ASSERT_ER(wm_ref(b, &w), E_OK);
+		KT_ASSERT_EQ(w.work.left, sx);
+		KT_ASSERT_EQ(w.work.right, sx + sww);
+		KT_ASSERT_EQ(w.work.bottom, sy + shh);
+		rect(&r, 0, 0, sww, shh);
+		KT_ASSERT_ER(dp_fill_rect(wm_gid(b), &r, 0x00314159), E_OK);
+		KT_ASSERT_ER(wm_composite(), E_OK);
+		KT_ASSERT_EQ(m[( SO_H - 1 ) * SO_W + 10] & 0x00FFFFFF, 0x314159U);
+		KT_ASSERT_EQ(wm_at(sx + 10, sy + shh - 2), b);
+		KT_ASSERT_ER(wm_full(b, FALSE), E_OK);
+	}
+
+	/* a window across the edge between them: on both screens, and on the left one's framebuffer */
+	rect(&o, SO_W - 100, 60, SO_W + 100, 160);
+	c = wm_open(&o, WM_ATTR_POPUP, NULL);
+	KT_ASSERT(c >= 1);
+	if ( c >= 1 ) {
+		KT_ASSERT_ER(wm_raise(c), E_OK);
+		KT_ASSERT_ER(wm_ref(c, &w), E_OK);
+		KT_ASSERT_EQ(w.outer.left, SO_W - 100);
+		rect(&r, 0, 0, w.work.right - w.work.left, w.work.bottom - w.work.top);
+		KT_ASSERT_ER(dp_fill_rect(wm_gid(c), &r, 0x00271828), E_OK);
+		KT_ASSERT_ER(wm_composite(), E_OK);
+		KT_ASSERT_EQ(at(SO_W - 50, 100), 0x271828);
+		KT_ASSERT_EQ(at(SO_W + 50, 100), 0x271828);
+		KT_ASSERT_EQ(m[100 * SO_W + SO_W - 50] & 0x00FFFFFF, 0x271828U);
+		KT_ASSERT_ER(wm_close(c), E_OK);
+	}
+
+	/* the pointer on the left screen */
+	if ( ptr ) {
+		e.x = sx + 50;
+		e.y = sy + 70;
+		KT_ASSERT_ER(knl_hid_inject(0, &e), E_OK);
+	}
+
+	/* taken away: the main screen at the corner again with its window; the left one's window and the pointer on it */
+	KT_ASSERT_ER(knl_disp_out_detach(sc), E_OK);
+	KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+	KT_ASSERT_EQ(spec.main_x, 0);
+	KT_ASSERT_EQ(spec.width, was.width);
+	wm_screen_main_rect(&mr);
+	KT_ASSERT_EQ(mr.left, 0);
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	KT_ASSERT_EQ(w.outer.left, ax);
+	KT_ASSERT_EQ(w.outer.top, ay);
+	if ( b >= 1 ) {
+		KT_ASSERT_ER(wm_ref(b, &w), E_OK);
+		tm_printf((UB *)"  taken away: the left screen's window at %d,%d-%d,%d\n",
+			  w.outer.left, w.outer.top, w.outer.right, w.outer.bottom);
+		KT_ASSERT(w.outer.left >= mr.left && w.outer.right <= mr.right);
+		KT_ASSERT(w.outer.top >= mr.top && w.outer.bottom <= mr.bottom - msg);
+		KT_ASSERT_ER(wm_close(b), E_OK);
+	}
+	if ( ptr ) {
+		KT_ASSERT_ER(ts_hid_pointer(&px, &py, &btn), E_OK);
+		KT_ASSERT_EQ(px, mr.left + 50);
+		KT_ASSERT_EQ(py, mr.top + 70);
+	}
+	if ( msg > 0 && knl_msg_band(&band) ) {
+		KT_ASSERT_EQ(band.left, 0);
+	}
+
+	/* above: the main screen, its window and the message line go down by its height */
+	sc = knl_disp_out_attach(&hw, DISP_SIDE_ABOVE, 0);
+	KT_ASSERT_EQ(sc, n0);
+	KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+	KT_ASSERT_EQ(spec.main_x, 0);
+	KT_ASSERT_EQ(spec.main_y, SO_H);
+	KT_ASSERT_ER(ts_disp_screen(sc, &sx, &sy, &sww, &shh), E_OK);
+	KT_ASSERT_EQ(sy, 0);
+	wm_screen_main_rect(&mr);
+	KT_ASSERT_EQ(mr.top, SO_H);
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	KT_ASSERT_EQ(w.outer.left, ax);
+	KT_ASSERT_EQ(w.outer.top, ay + SO_H);
+	if ( msg > 0 && knl_msg_band(&band) ) {
+		KT_ASSERT_EQ(band.bottom, mr.bottom);
+		KT_ASSERT_EQ(band.left, mr.left);
+		KT_ASSERT(wm_at(mr.left + 10, mr.bottom - msg / 2) != a);
+	}
+	if ( ptr ) {
+		KT_ASSERT_ER(ts_hid_pointer(&px, &py, &btn), E_OK);
+		KT_ASSERT_EQ(py, 70 + SO_H);
+	}
+	KT_ASSERT_ER(knl_disp_out_detach(sc), E_OK);
+	KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+	KT_ASSERT_EQ(spec.main_y, 0);
+	KT_ASSERT_EQ(spec.height, was.height);
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	KT_ASSERT_EQ(w.outer.top, ay);
+	KT_ASSERT_ER(wm_close(a), E_OK);
+	if ( ptr ) {
+		e.x = mw / 2;
+		e.y = mh / 2;
+		(void)knl_hid_inject(0, &e);
+		tk_dly_tsk(30);
+	}
+out:
+	knl_vunmap((UB *)m, ( SO_W * SO_H * 4 + 4095 ) / 4096);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+}
+
+/*
+ * Kept places of windows (T_WMPLACE, 10.4.8): from the corner of the
+ * screen the window's top left is on, and which screen by the identity
+ * of its display. With a screen left of the main one, a window of the
+ * main screen is kept from the main screen's corner and opens there
+ * again; a place kept without a screen (as every place was before) is
+ * the main screen's; a window on a screen of a display with an identity
+ * opens on that screen again, and on the main screen, inside it, when
+ * that display is off. The text of a kept place takes the screen as one
+ * more member (js_set_str).
+ */
+LOCAL void test_place_kept( void )
+{
+	T_DISPHW	hw;
+	T_DISPSPEC	was;
+	T_DPRECT	o, v, mr;
+	T_WMPLACE	p;
+	UW		*m;
+	INT		n0, sc, sx, sy, sww, shh;
+	ER		er;
+
+	if ( !have_wm ) KT_SKIP("no windows");
+	KT_ASSERT_ER(ts_disp_ref(&was), E_OK);
+	n0 = ts_disp_screens();
+	if ( n0 > 1 && was.width == was.main_w ) KT_SKIP("the screen is shown as columns (screens=N)");
+	if ( n0 + 1 > DISP_SCREENS_MAX ) KT_SKIP("no room for another screen");
+	if ( was.scale != 100 ) KT_SKIP("drawn at a scale");
+
+	/* the text of a kept place: the screen put last, then in place of the one there */
+	{
+		static CONST char	txt[] = "{\"name\":\"a\",\"window\":{\"pos\":{\"x\":10,\"y\":20},\"width\":300,\"height\":200}}";
+		UB			out[160], out2[160];
+		T_JSON			root, w;
+		INT			n;
+
+		KT_ASSERT_ER(js_parse((CONST UB *)txt, (INT)sizeof(txt) - 1, &root), E_OK);
+		KT_ASSERT_ER(js_get(&root, "window", &w), E_OK);
+		n = js_set_str((CONST UB *)txt, (INT)sizeof(txt) - 1, &w, "screen", "1234abcd", out, sizeof(out));
+		KT_ASSERT(n > 0);
+		KT_ASSERT(knl_strcmp((CONST char *)out, "{\"name\":\"a\",\"window\":{\"pos\":{\"x\":10,\"y\":20},\"width\":300,"
+				 "\"height\":200,\"screen\":\"1234abcd\"}}") == 0);
+		KT_ASSERT_ER(js_parse(out, n, &root), E_OK);
+		KT_ASSERT_ER(js_get(&root, "window", &w), E_OK);
+		n = js_set_str(out, n, &w, "screen", "", out2, sizeof(out2));
+		KT_ASSERT(n > 0);
+		KT_ASSERT(knl_strcmp((CONST char *)out2, "{\"name\":\"a\",\"window\":{\"pos\":{\"x\":10,\"y\":20},\"width\":300,"
+				 "\"height\":200,\"screen\":\"\"}}") == 0);
+		KT_ASSERT_EQ(js_set_str((CONST UB *)txt, (INT)sizeof(txt) - 1, &w, "screen", "1", out, 8), E_LIMIT);
+		KT_ASSERT_EQ(wm_place_screen_of("1234abcd"), 0x1234abcdU);
+		KT_ASSERT_EQ(wm_place_screen_of(""), 0U);
+	}
+
+	m = so_mem(&hw);
+	KT_ASSERT(m != NULL);
+	if ( m == NULL ) return;
+
+	/* a screen left of the main one: the main screen's window kept from its corner, and opened there again */
+	sc = knl_disp_out_attach(&hw, DISP_SIDE_LEFT, 0);
+	KT_ASSERT_EQ(sc, n0);
+	wm_screen_main_rect(&mr);
+	KT_ASSERT_EQ(mr.left, SO_W);
+	rect(&o, mr.left + 100, mr.top + 120, mr.left + 500, mr.top + 420);
+	KT_ASSERT_ER(wm_place_keep(&o, &p), E_OK);
+	KT_ASSERT_EQ(p.screen, 0U);
+	KT_ASSERT_EQ(p.r.left, 100);
+	KT_ASSERT_EQ(p.r.top, 120);
+	KT_ASSERT_EQ(p.r.right, 500);
+	KT_ASSERT_ER(wm_place_open(&p, &v), 0);
+	KT_ASSERT_EQ(v.left, o.left);
+	KT_ASSERT_EQ(v.top, o.top);
+	KT_ASSERT_EQ(v.right, o.right);
+	KT_ASSERT_EQ(v.bottom, o.bottom);
+	/* a place kept before screens were named: the main screen's, the same numbers as with it at the corner */
+	p.screen = 0;
+	rect(&p.r, 100, 120, 500, 420);
+	KT_ASSERT_ER(wm_place_open(&p, &v), 0);
+	KT_ASSERT_EQ(v.left, mr.left + 100);
+	KT_ASSERT_EQ(v.top, mr.top + 120);
+	/* a window across the edge of the two: the screen of its top left, the left one, a display not known: from the main screen */
+	ts_disp_screen(sc, &sx, &sy, &sww, &shh);
+	rect(&o, sx + sww - 50, 40, sx + sww + 150, 240);
+	KT_ASSERT_ER(wm_place_keep(&o, &p), E_OK);
+	KT_ASSERT_EQ(p.screen, 0U);
+	KT_ASSERT_EQ(p.r.left, o.left - mr.left);
+	/* a screen named that is not on: on the main screen, inside it */
+	p.screen = 0x7e57ab1eU;
+	rect(&p.r, 2000, 3000, 2300, 3200);
+	KT_ASSERT_ER(wm_place_open(&p, &v), 0);
+	KT_ASSERT(v.left >= mr.left && v.right <= mr.right);
+	KT_ASSERT(v.top >= mr.top && v.bottom <= mr.bottom - wm_msg_height());
+	KT_ASSERT_EQ(v.right - v.left, 300);
+	/* a program's window asked to stand where no screen is (OB_WR_PLACE): kept on the nearest one */
+	{
+		T_WMWIN	w;
+		INT	a, vw = 0, vh = 0;
+
+		rect(&o, mr.left + 50, mr.top + 50, mr.left + 350, mr.top + 250);
+		a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "kept off");
+		KT_ASSERT(a >= 1);
+		if ( a >= 1 ) {
+			wm_screen(&vw, &vh);
+			T_DPRECT	near;
+
+			rect(&o, vw + 100, 60, vw + 400, 260);
+			wm_screen_at(vw + 250, 160, &near);
+			KT_ASSERT_ER(wm_place(a, &o), E_OK);
+			KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+			KT_ASSERT(w.outer.left >= near.left && w.outer.right <= near.right);
+			KT_ASSERT_ER(wm_close(a), E_OK);
+		}
+	}
+	KT_ASSERT_ER(knl_disp_out_detach(sc), E_OK);
+	knl_vunmap((UB *)m, ( SO_W * SO_H * 4 + 4095 ) / 4096);
+
+	/*
+	 * With a second display that has an identity (QEMU's second
+	 * bochs-display or secondary-vga): put left, a window there kept by
+	 * its identity and opened there again; that display off, on the main
+	 * screen; put back as it was
+	 */
+	{
+		T_DISPSTATE	st, keep;
+		T_DISPOUTINFO	oi;
+		INT		i, out = -1;
+
+		for ( i = 1; i < ts_disp_outputs(); i++ ) {
+			if ( ts_disp_output(i, &oi) >= E_OK && oi.screen > 0 && oi.ident != 0 ) {
+				out = i;
+				break;
+			}
+		}
+		if ( out < 0 || ts_disp_state(&st) < E_OK ) {
+			tm_printf((UB *)"  no second display with an identity: the rest is for two displays\n");
+			return;
+		}
+		keep = st;
+		st.out[out].side = DISP_SIDE_LEFT;
+		st.out[out].offset = 0;
+		er = ts_disp_commit(&st);
+		KT_ASSERT_ER(er, E_OK);
+		if ( er < E_OK ) return;
+		(void)ts_disp_output(out, &oi);
+		KT_ASSERT_ER(ts_disp_screen(oi.screen, &sx, &sy, &sww, &shh), E_OK);
+		wm_screen_main_rect(&mr);
+		KT_ASSERT_EQ(sx, 0);
+		KT_ASSERT(mr.left > 0);
+		rect(&o, sx + 30, sy + 40, sx + 330, sy + 240);
+		KT_ASSERT_ER(wm_place_keep(&o, &p), E_OK);
+		KT_ASSERT_EQ(p.screen, oi.ident);
+		KT_ASSERT_EQ(p.r.left, 30);
+		KT_ASSERT_EQ(p.r.top, 40);
+		KT_ASSERT_ER(wm_place_open(&p, &v), 1);
+		KT_ASSERT_EQ(v.left, o.left);
+		KT_ASSERT_EQ(v.top, o.top);
+		tm_printf((UB *)"  kept on %s (%08x) at %d,%d; the main screen at %d,%d\n", oi.name, (UINT)p.screen,
+			  p.r.left, p.r.top, mr.left, mr.top);
+		/* the display off: on the main screen */
+		st.out[out].on = FALSE;
+		KT_ASSERT_ER(ts_disp_commit(&st), E_OK);
+		wm_screen_main_rect(&mr);
+		KT_ASSERT_ER(wm_place_open(&p, &v), 0);
+		KT_ASSERT_EQ(v.left, mr.left + 30);
+		KT_ASSERT_EQ(v.top, mr.top + 40);
+		KT_ASSERT_ER(ts_disp_commit(&keep), E_OK);
+	}
+}
+
+/* Whether a text (ended with 0) holds the words w */
+LOCAL BOOL has_text( CONST UB *t, CONST char *w )
+{
+	INT	i, k;
+
+	for ( i = 0; t[i] != 0; i++ ) {
+		for ( k = 0; w[k] != 0 && t[i + k] == (UB)w[k]; k++ ) ;
+		if ( w[k] == 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * Where a window with no place kept opens (10.4.8): on the screen the
+ * pointer is on, with a screen right of, left of and above the main one
+ * and the pointer on either; a place kept on the main screen (a place
+ * with no screen named) there whatever the pointer; a point on no screen
+ * (between screens of different sizes, past the view) the main screen,
+ * never the nearest nor the one at the view's corner; what the system
+ * says (wm_main_centre: a question with no window of its own) on the
+ * main screen with the pointer elsewhere.
+ */
+LOCAL void test_new_place( void )
+{
+	CONST INT	sides[3] = { DISP_SIDE_RIGHT, DISP_SIDE_LEFT, DISP_SIDE_ABOVE };
+	T_DISPHW	hw;
+	T_DISPSPEC	was;
+	T_DPRECT	mr, nr, er_, v;
+	T_WMPLACE	p;
+	T_HIDEV		e;
+	UW		*m;
+	INT		n0, sc, k, sx, sy, sww, shh, x, y, vw = 0, vh = 0;
+	BOOL		ptr;
+
+	if ( !have_wm ) KT_SKIP("no windows");
+	KT_ASSERT_ER(ts_disp_ref(&was), E_OK);
+	n0 = ts_disp_screens();
+	if ( n0 > 1 && was.width == was.main_w ) KT_SKIP("the screen is shown as columns (screens=N)");
+	if ( knl_disp_out_count() + 1 >= DISP_SCREENS_MAX ) KT_SKIP("no room for another output");
+	if ( was.scale != 100 ) KT_SKIP("drawn at a scale");
+	m = so_mem(&hw);
+	KT_ASSERT(m != NULL);
+	if ( m == NULL ) return;
+	knl_memset(&e, 0, sizeof(e));
+	e.type = HID_EV_MOVE;
+
+	for ( k = 0; k < 3; k++ ) {
+		sc = knl_disp_out_attach(&hw, sides[k], 0);
+		KT_ASSERT(sc >= 1);
+		if ( sc < 1 ) break;
+		KT_ASSERT_ER(ts_disp_screen(knl_disp_out_screen(sc), &sx, &sy, &sww, &shh), E_OK);
+		wm_screen_main_rect(&mr);
+
+		/* the pointer on the main screen: new windows there */
+		e.x = mr.left + 30;
+		e.y = mr.top + 40;
+		ptr = (BOOL)( knl_hid_inject(0, &e) >= E_OK );
+		if ( ptr ) {
+			wm_screen_new_rect(&nr);
+			KT_ASSERT(nr.left == mr.left && nr.top == mr.top && nr.right == mr.right);
+			KT_ASSERT_EQ(wm_new_x(100), mr.left + 100);
+			KT_ASSERT_EQ(wm_new_y(80), mr.top + 80);
+		}
+
+		/* the pointer on the other: new windows there, the kept place and what the system says still the main screen's */
+		e.x = sx + 20;
+		e.y = sy + 20;
+		if ( ptr && knl_hid_inject(0, &e) >= E_OK ) {
+			wm_screen_new_rect(&nr);
+			KT_ASSERT_EQ(nr.left, sx);
+			KT_ASSERT_EQ(nr.top, sy);
+			KT_ASSERT_EQ(nr.right, sx + sww);
+			KT_ASSERT_EQ(wm_new_x(100), sx + 100);
+			KT_ASSERT_EQ(wm_new_y(80), sy + 80);
+			wm_new_centre(200, 100, &x, &y);
+			KT_ASSERT(x >= sx && x + 200 <= sx + sww && y >= sy);
+			p.screen = 0;
+			rect(&p.r, 100, 120, 400, 320);
+			KT_ASSERT_ER(wm_place_open(&p, &v), 0);
+			KT_ASSERT_EQ(v.left, mr.left + 100);
+			KT_ASSERT_EQ(v.top, mr.top + 120);
+			wm_main_centre(200, 100, &x, &y);
+			KT_ASSERT(x >= mr.left && x + 200 <= mr.right && y >= mr.top && y + 100 <= mr.bottom);
+			tm_printf((UB *)"  a screen %s: the pointer on it, new windows at %d,%d; the main screen at %d,%d\n",
+				  ( k == 0 ) ? "right" : ( k == 1 ) ? "left" : "above", nr.left, nr.top, mr.left, mr.top);
+		}
+
+		/* a point on no screen: the main screen, not the nearest nor the one at the corner */
+		wm_screen(&vw, &vh);
+		wm_screen_of(-5, -5, &er_);
+		KT_ASSERT(er_.left == mr.left && er_.top == mr.top);
+		wm_screen_of(vw + 100, vh + 100, &er_);
+		KT_ASSERT(er_.left == mr.left && er_.top == mr.top);
+		if ( sides[k] == DISP_SIDE_ABOVE && sww < mr.right - mr.left ) {
+			wm_screen_of(mr.right - 5, 5, &er_);		/* above the main screen, right of the narrower one */
+			KT_ASSERT(er_.left == mr.left && er_.top == mr.top);
+		}
+		wm_screen_of(sx + 1, sy + 1, &er_);
+		KT_ASSERT_EQ(er_.left, sx);
+		KT_ASSERT_ER(knl_disp_out_detach(sc), E_OK);
+	}
+	knl_vunmap((UB *)m, ( SO_W * SO_H * 4 + 4095 ) / 4096);
+	e.x = (INT)was.main_w / 2;
+	e.y = (INT)was.main_h / 2;
+	(void)knl_hid_inject(0, &e);
+	/* one screen: the main one, wherever the pointer is */
+	wm_screen_new_rect(&nr);
+	wm_screen_main_rect(&mr);
+	KT_ASSERT(nr.left == mr.left && nr.top == mr.top);
+}
+
+/*
+ * An output turned from a screen of its own to a mirror of the main one,
+ * as the output layer does it (taken away, put again with
+ * DISP_SIDE_MIRROR): the windows and the pointer on it come to the main
+ * screen, the view is the main screen's alone, the message line and the
+ * main screen's windows at the corner again; turned back to a screen of
+ * its own left of the main one, the main screen and its windows go right
+ * again. With a second display of QEMU's, the same through the screen
+ * object's lines ("OUT1 on WxH mirror 0"), read back, and an old line
+ * ("right") putting it back.
+ */
+LOCAL void test_mirror_wm( void )
+{
+	T_DISPHW	hw;
+	T_DISPSPEC	was;
+	T_DPRECT	o, mr, band;
+	T_WMWIN		w;
+	T_HIDEV		e;
+	UW		*m;
+	INT		n0, sc, a, b, sx, sy, sww, shh, px = 0, py = 0, vw = 0, vh = 0, msg;
+	UINT		btn;
+	BOOL		ptr;
+
+	if ( !have_wm ) KT_SKIP("no windows");
+	KT_ASSERT_ER(ts_disp_ref(&was), E_OK);
+	n0 = ts_disp_screens();
+	if ( n0 > 1 && was.width == was.main_w ) KT_SKIP("the screen is shown as columns (screens=N)");
+	if ( knl_disp_out_count() + 1 >= DISP_SCREENS_MAX ) KT_SKIP("no room for another output");
+	if ( was.scale != 100 ) KT_SKIP("drawn at a scale");
+	m = so_mem(&hw);
+	KT_ASSERT(m != NULL);
+	if ( m == NULL ) return;
+	msg = wm_msg_height();
+
+	/* a screen left of the main one, a window on each, the pointer on the left one */
+	sc = knl_disp_out_attach(&hw, DISP_SIDE_LEFT, 0);
+	KT_ASSERT(sc >= 1);
+	KT_ASSERT_ER(ts_disp_screen(n0, &sx, &sy, &sww, &shh), E_OK);
+	wm_screen_main_rect(&mr);
+	rect(&o, mr.left + 100, mr.top + 100, mr.left + 400, mr.top + 300);
+	a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "main");
+	rect(&o, sx + 20, sy + 20, sx + 220, sy + 200);
+	b = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "left");
+	KT_ASSERT(a >= 1 && b >= 1);
+	knl_memset(&e, 0, sizeof(e));
+	e.type = HID_EV_MOVE;
+	e.x = sx + 50;
+	e.y = sy + 70;
+	ptr = (BOOL)( knl_hid_inject(0, &e) >= E_OK );
+
+	/* mirroring instead */
+	KT_ASSERT_ER(knl_disp_out_detach(sc), E_OK);
+	sc = knl_disp_out_attach(&hw, DISP_SIDE_MIRROR, 0);
+	KT_ASSERT(sc >= 1);
+	KT_ASSERT_EQ(ts_disp_screens(), n0);
+	KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+	KT_ASSERT_EQ(spec.width, was.width);
+	KT_ASSERT_EQ(spec.main_x, 0);
+	wm_screen(&vw, &vh);
+	KT_ASSERT_EQ(vw, (INT)was.view_w);
+	wm_screen_main_rect(&mr);
+	KT_ASSERT_EQ(mr.left, 0);
+	if ( a >= 1 ) {
+		KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+		KT_ASSERT_EQ(w.outer.left, 100);
+		KT_ASSERT_EQ(w.outer.top, 100);
+	}
+	if ( b >= 1 ) {
+		KT_ASSERT_ER(wm_ref(b, &w), E_OK);
+		tm_printf((UB *)"  mirroring: the left screen's window at %d,%d-%d,%d\n", w.outer.left, w.outer.top,
+			  w.outer.right, w.outer.bottom);
+		KT_ASSERT(w.outer.left >= mr.left && w.outer.right <= mr.right);
+		KT_ASSERT(w.outer.bottom <= mr.bottom - msg);
+	}
+	if ( ptr ) {
+		KT_ASSERT_ER(ts_hid_pointer(&px, &py, &btn), E_OK);
+		KT_ASSERT_EQ(px, 50);
+		KT_ASSERT_EQ(py, 70);
+	}
+	if ( msg > 0 && knl_msg_band(&band) ) {
+		KT_ASSERT_EQ(band.left, 0);
+		KT_ASSERT_EQ(band.bottom, mr.bottom);
+	}
+	/* what the main screen shows reaches the mirror, scaled into its 480 x 360 */
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	{
+		T_DISPRECT	f;
+		UD		stx, sty;
+		INT		cx, cy, fx, fy;
+
+		knl_disp_fit(was.main_w, was.main_h, SO_W, SO_H, &f);
+		stx = ( (UD)was.main_w << 16 ) / (UD)( f.right - f.left );
+		sty = ( (UD)was.main_h << 16 ) / (UD)( f.bottom - f.top );
+		cx = ( f.left + f.right ) / 2;
+		cy = ( f.top + f.bottom ) / 2;
+		fx = (INT)( ( (UD)( cx - f.left ) * stx + ( stx >> 1 ) ) >> 16 );
+		fy = (INT)( ( (UD)( cy - f.top ) * sty + ( sty >> 1 ) ) >> 16 );
+		KT_ASSERT_EQ(m[cy * SO_W + cx] & 0x00FFFFFF, at(fx, fy) & 0x00FFFFFF);
+		if ( f.top > 0 ) KT_ASSERT_EQ(m[0], 0U);
+	}
+
+	/* a screen of its own again, left of the main one: the main screen and its window 480 right */
+	KT_ASSERT_ER(knl_disp_out_detach(sc), E_OK);
+	sc = knl_disp_out_attach(&hw, DISP_SIDE_LEFT, 0);
+	KT_ASSERT(sc >= 1);
+	KT_ASSERT_EQ(ts_disp_screens(), n0 + 1);
+	wm_screen_main_rect(&mr);
+	KT_ASSERT_EQ(mr.left, SO_W);
+	if ( a >= 1 ) {
+		KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+		KT_ASSERT_EQ(w.outer.left, SO_W + 100);
+	}
+	KT_ASSERT_ER(knl_disp_out_detach(sc), E_OK);
+	if ( a >= 1 ) KT_ASSERT_ER(wm_close(a), E_OK);
+	if ( b >= 1 ) KT_ASSERT_ER(wm_close(b), E_OK);
+	knl_vunmap((UB *)m, ( SO_W * SO_H * 4 + 4095 ) / 4096);
+	if ( ptr ) {
+		e.x = (INT)was.main_w / 2;
+		e.y = (INT)was.main_h / 2;
+		(void)knl_hid_inject(0, &e);
+	}
+
+	/* through the screen object, with a second display that has an identity */
+	{
+		T_DISPOUTINFO	oi;
+		T_DISPSTATE	st;
+		INT		i, out = -1, n;
+		UINT		mw2 = 0, mh2 = 0;
+		ID		k;
+		SZ		asz = 0;
+		char		line[64];
+		static UB	txt[4096];
+
+		for ( i = 1; i < ts_disp_outputs(); i++ ) {
+			if ( ts_disp_output(i, &oi) >= E_OK && oi.screen > 0 && oi.ident != 0 ) {
+				out = i;
+				break;
+			}
+		}
+		if ( out < 0 || ts_disp_state(&st) < E_OK ) {
+			tm_printf((UB *)"  no second display with an identity: the screen object's part is for two displays\n");
+			return;
+		}
+		KT_ASSERT(ts_disp_mirror_mode(out, &mw2, &mh2) >= E_OK);
+		k = ob_opn_obj(&ob_uuid_display, OB_OP_R | OB_OP_WRITE);
+		KT_ASSERT(k > 0);
+		if ( k <= 0 ) return;
+		tm_sprintf((UB *)line, (UB *)"OUT%d on %dx%d mirror 0", out, (INT)mw2, (INT)mh2);
+		KT_ASSERT_ER(ob_wri_rec(k, OB_DSP_MODE, 0, line, (SZ)knl_strlen(line), &asz), E_OK);
+		KT_ASSERT_EQ(ts_disp_screens(), 1);
+		KT_ASSERT_ER(ts_disp_output(out, &oi), E_OK);
+		KT_ASSERT_EQ(oi.screen, -1);
+		KT_ASSERT_EQ((INT)oi.mode.hdisp, (INT)mw2);
+		KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+		KT_ASSERT_EQ(spec.width, spec.main_w);
+		n = 0;
+		if ( ob_rea_rec(k, OB_DSP_MODE, 0, txt, sizeof(txt) - 1, &asz) >= E_OK ) n = (INT)asz;
+		txt[( n > 0 ) ? n : 0] = 0;
+		KT_ASSERT(n > 0 && has_text(txt, " mirror 0 "));
+		KT_ASSERT(has_text(txt, "OUTMIRROR"));
+		tm_printf((UB *)"  %s mirroring the main screen in %d x %d, read back\n", oi.name, (INT)mw2, (INT)mh2);
+		/*
+		 * The main screen set to another size while mirrored: the mirror's
+		 * mode chosen again for it (the output offers 800 x 600: no
+		 * scaling then), and back with the main screen's own size
+		 */
+		if ( ts_disp_setmode(800, 600) >= E_OK ) {
+			KT_ASSERT_ER(ts_disp_output(out, &oi), E_OK);
+			KT_ASSERT_EQ(oi.screen, -1);
+			KT_ASSERT_ER(ts_disp_mirror_mode(out, &mw2, &mh2), E_OK);
+			KT_ASSERT_EQ((INT)oi.mode.hdisp, (INT)mw2);
+			KT_ASSERT_EQ((INT)oi.mode.vdisp, (INT)mh2);
+			tm_printf((UB *)"  the main screen 800 x 600: %s mirroring it in %d x %d\n", oi.name,
+				  (INT)oi.mode.hdisp, (INT)oi.mode.vdisp);
+			KT_ASSERT_ER(ts_disp_setmode(was.main_w, was.main_h), E_OK);
+			KT_ASSERT_ER(ts_disp_output(out, &oi), E_OK);
+			KT_ASSERT_ER(ts_disp_mirror_mode(out, &mw2, &mh2), E_OK);
+			KT_ASSERT_EQ((INT)oi.mode.hdisp, (INT)mw2);
+		}
+		/* a line as kept before mirroring was known: a screen right of the main one again */
+		tm_sprintf((UB *)line, (UB *)"OUT%d on %dx%d right 0", out, (INT)st.out[out].w, (INT)st.out[out].h);
+		KT_ASSERT_ER(ob_wri_rec(k, OB_DSP_MODE, 0, line, (SZ)knl_strlen(line), &asz), E_OK);
+		KT_ASSERT_EQ(ts_disp_screens(), 2);
+		KT_ASSERT_ER(ts_disp_output(out, &oi), E_OK);
+		KT_ASSERT(oi.screen > 0);
+		(void)ob_cls_obj(k);
+		KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
+	}
+}
+
+LOCAL void test_full( void )
+{
+	T_DPRECT	o, r;
+	T_WMWIN		w;
+	INT		a, pn, other, sw = 0, sh = 0, mh;
+
+	if ( !have_wm ) KT_SKIP("no windows");
+	(void)ts_disp_ref(&spec);
+	if ( ts_disp_screens() > 1 && spec.width != spec.main_w ) KT_SKIP("more than one output: a test of one screen");
+
+	wm_screen(&sw, &sh);
+	mh = wm_msg_height();
+	rect(&o, 100, 100, 500, 400);
+	a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE | WM_ATTR_RBAR | WM_ATTR_BBAR, "full");
+	KT_ASSERT(a >= 1);
+	if ( a < 1 ) return;
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+	KT_ASSERT_ER(wm_focus(a), E_OK);
+	KT_ASSERT(!wm_full_is(a));
+
+	KT_ASSERT_ER(wm_full(a, TRUE), E_OK);
+	KT_ASSERT(wm_full_is(a));
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	tm_printf((UB *)"  full: outer %d,%d-%d,%d work %d,%d-%d,%d, screen %dx%d, message line %d\n",
+		  w.outer.left, w.outer.top, w.outer.right, w.outer.bottom, w.work.left, w.work.top, w.work.right,
+		  w.work.bottom, sw, sh, mh);
+	KT_ASSERT_EQ(w.work.left, 0);
+	KT_ASSERT_EQ(w.work.top, 0);
+	KT_ASSERT_EQ(w.work.right, sw);
+	KT_ASSERT_EQ(w.work.bottom, sh);
+	KT_ASSERT_EQ(w.outer.right - w.outer.left, sw);
+	KT_ASSERT_EQ(wm_focused(), a);			/* the keys stay with it */
+	rect(&r, 0, 0, sw, sh);
+	KT_ASSERT_ER(dp_fill_rect(wm_gid(a), &r, 0x00123456), E_OK);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	KT_ASSERT_EQ(at(0, 0), 0x123456);		/* no frame */
+	KT_ASSERT_EQ(at(sw - 1, sh - 1), 0x123456);	/* over the message line */
+	if ( mh > 0 ) {
+		KT_ASSERT_EQ(at(sw / 2, sh - mh / 2), 0x123456);
+		KT_ASSERT_EQ(wm_at(10, sh - mh / 2), a);	/* a press there is the window's */
+	}
+
+	/* a panel of its own: in front of it, and seen */
+	rect(&o, sw / 2 - 100, sh / 2 - 60, sw / 2 + 100, sh / 2 + 60);
+	pn = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "full's panel");
+	KT_ASSERT(pn >= 1);
+	if ( pn >= 1 ) {
+		KT_ASSERT_ER(wm_set_parent(pn, a), E_OK);
+		KT_ASSERT_ER(wm_raise(pn), E_OK);
+		KT_ASSERT_ER(wm_focus(pn), E_OK);
+		rect(&r, 0, 0, 400, 300);
+		KT_ASSERT_ER(dp_fill_rect(wm_gid(pn), &r, 0x00654321), E_OK);
+		KT_ASSERT_ER(wm_composite(), E_OK);
+		KT_ASSERT_EQ(at(sw / 2, sh / 2), 0x654321);
+		if ( mh > 0 ) KT_ASSERT_EQ(at(sw / 2, sh - mh / 2), 0x123456);	/* the message line still under it */
+		KT_ASSERT_ER(wm_close(pn), E_OK);
+		KT_ASSERT_ER(wm_focus(a), E_OK);
+	}
+
+	/* another window in front: the message line over it again, as over any window */
+	rect(&o, 200, 200, 400, 300);
+	other = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "in front");
+	KT_ASSERT(other >= 1);
+	if ( other >= 1 ) {
+		KT_ASSERT_ER(wm_raise(other), E_OK);
+		KT_ASSERT_ER(wm_composite(), E_OK);
+		if ( mh > 0 ) {
+			KT_ASSERT(at(sw / 2, sh - mh / 2) != 0x123456);
+			KT_ASSERT(wm_at(10, sh - mh / 2) != a);
+		}
+		KT_ASSERT_ER(wm_close(other), E_OK);
+	}
+	KT_ASSERT_ER(wm_raise(a), E_OK);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	if ( mh > 0 ) KT_ASSERT_EQ(at(sw / 2, sh - mh / 2), 0x123456);
+
+	/* out of full screen: its frame, place and size back, the message line over the foot */
+	KT_ASSERT_ER(wm_full(a, FALSE), E_OK);
+	KT_ASSERT(!wm_full_is(a));
+	KT_ASSERT_ER(wm_ref(a, &w), E_OK);
+	KT_ASSERT_EQ(w.outer.left, 100);
+	KT_ASSERT_EQ(w.outer.top, 100);
+	KT_ASSERT_EQ(w.outer.right, 500);
+	KT_ASSERT_EQ(w.outer.bottom, 400);
+	KT_ASSERT(w.work.left > w.outer.left && w.work.top > w.outer.top);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	if ( mh > 0 ) KT_ASSERT(at(sw / 2, sh - mh / 2) != 0x123456);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+	KT_ASSERT_ER(wm_close(a), E_OK);
+}
+
+#define LY_SUB		0x3E20		/* the lists the layers' menu opens, in the data box */
+#define LY_SUB2		0x3E21
+
+/* A window's place in the order, -1 when it is not there */
+LOCAL INT ly_z( INT wid )
+{
+	T_WMWIN	w;
+
+	return ( wid > 0 && wm_ref(wid, &w) >= E_OK ) ? w.z : -1;
+}
+
+/* Whether n windows stand in this order, the first nearest, all in front of 'behind' (0: none) */
+LOCAL BOOL ly_order( CONST INT *wids, INT n, INT behind )
+{
+	INT	k;
+
+	for ( k = 0; k < n; k++ ) {
+		if ( ly_z(wids[k]) < 0 ) return FALSE;
+		if ( k > 0 && ly_z(wids[k - 1]) >= ly_z(wids[k]) ) return FALSE;
+	}
+	return (BOOL)( behind <= 0 || ly_z(wids[n - 1]) < ly_z(behind) );
+}
+
+/* A press and release on a row of the list in window lw of menu pid */
+LOCAL void ly_click_row( INT pid, INT lw, INT row )
+{
+	T_WMEV		ev;
+	T_DPRECT	mr;
+	INT		cmd = 0, k, lp = 0;
+
+	for ( k = 1; k <= WM_PANEL_MAX; k++ ) {
+		if ( wm_panel_wid(k) == lw ) lp = k;
+	}
+	mr.left = mr.top = mr.right = mr.bottom = 0;
+	(void)wm_panel_rect(lp, &mr);
+	knl_memset(&ev, 0, sizeof(ev));
+	ev.x = ( mr.left + mr.right ) / 2;
+	ev.y = mr.top + row * wm_menu_row_h() + wm_menu_row_h() / 2;
+	ev.wid = lw;
+	ev.type = HID_EV_BTN_DOWN;
+	(void)wm_menu_event(pid, &ev, &cmd);
+	ev.type = HID_EV_BTN_UP;
+	(void)wm_menu_event(pid, &ev, &cmd);
+}
+
+/* A list of menu pid shown in a window other than the n given; 0 none */
+LOCAL INT ly_new_list( INT pid, CONST INT *had, INT n )
+{
+	INT	k, j, w;
+
+	for ( k = 1; k <= WM_PANEL_MAX; k++ ) {
+		w = wm_panel_wid(k);
+		if ( w <= 0 || !wm_menu_has(pid, w) ) continue;
+		for ( j = 0; j < n && had[j] != w; j++ ) ;
+		if ( j == n ) return w;
+	}
+	return 0;
+}
+
+/* The point inside both windows' outer rectangles nearest a's corner, short of b's shadow; FALSE when none */
+LOCAL BOOL ly_overlap( INT a, INT b, INT *x, INT *y )
+{
+	T_WMWIN	wa, wb;
+	INT	l, t, rr, bb;
+
+	if ( wm_ref(a, &wa) < E_OK || wm_ref(b, &wb) < E_OK ) return FALSE;
+	l = ( wa.outer.left > wb.outer.left ) ? wa.outer.left : wb.outer.left;
+	t = ( wa.outer.top > wb.outer.top ) ? wa.outer.top : wb.outer.top;
+	rr = ( wa.outer.right < wb.outer.right - 8 ) ? wa.outer.right : wb.outer.right - 8;
+	bb = ( wa.outer.bottom < wb.outer.bottom - 8 ) ? wa.outer.bottom : wb.outer.bottom - 8;
+	if ( rr <= l || bb <= t ) return FALSE;
+	*x = l + 1;
+	*y = ( t + bb ) / 2;
+	return TRUE;
+}
+
+/*
+ * Lists that open one from another (a menu's lists below it), with the
+ * screen keyboard kb up or not (0): each opened later is in front of the
+ * one it opened from, both in the order and on the screen, and stays so
+ * while a panel, the keyboard or a window is brought forward, another
+ * window opens, or the first list is sent back.
+ */
+LOCAL void ly_lists( INT own, INT pan, INT kb )
+{
+	T_DPRECT	o, r;
+	T_WMMENU	*m, *s;
+	INT		w3[3], pid, i, x, y, other;
+
+	/* windows opened as a menu's lists are, each overlapping the one before */
+	for ( i = 0; i < 3; i++ ) {
+		rect(&o, 200 + i * 100, 250 + i * 10, 320 + i * 100, 350 + i * 10);
+		w3[2 - i] = wm_open(&o, WM_ATTR_POPUP | WM_ATTR_MENU, NULL);
+		KT_ASSERT(w3[2 - i] >= 1);
+		if ( w3[2 - i] < 1 ) return;
+		rect(&r, 0, 0, 120, 100);
+		KT_ASSERT_ER(dp_fill_rect(wm_gid(w3[2 - i]), &r, 0x00777777 + 0x00111111 * i), E_OK);
+		KT_ASSERT(ly_order(&w3[2 - i], i + 1, kb));
+	}
+	KT_ASSERT_EQ(wm_self_check(), 0);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	KT_ASSERT_EQ(at(310, 300), 0x888888);		/* the second over the first */
+	KT_ASSERT_EQ(wm_at(310, 300), w3[1]);
+	KT_ASSERT_EQ(at(410, 310), 0x999999);		/* the third over the second */
+	KT_ASSERT_EQ(wm_at(410, 310), w3[0]);
+
+	/* what is brought forward, sent back or opened leaves their order as it is */
+	KT_ASSERT_ER(wm_raise(pan), E_OK);
+	KT_ASSERT(ly_order(w3, 3, kb));
+	if ( kb > 0 ) {
+		KT_ASSERT_ER(wm_raise(kb), E_OK);
+		KT_ASSERT(ly_order(w3, 3, kb));
+	}
+	KT_ASSERT_ER(wm_raise(own), E_OK);
+	KT_ASSERT(ly_order(w3, 3, kb));
+	KT_ASSERT_ER(wm_lower(w3[2]), E_OK);
+	KT_ASSERT(ly_order(w3, 3, kb));
+	rect(&o, 120, 120, 300, 300);
+	other = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "layers other");
+	KT_ASSERT(other >= 1);
+	KT_ASSERT(ly_order(w3, 3, kb));
+	if ( other >= 1 ) KT_ASSERT_ER(wm_close(other), E_OK);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	KT_ASSERT_EQ(at(310, 300), 0x888888);
+	KT_ASSERT_EQ(at(410, 310), 0x999999);
+	for ( i = 0; i < 3; i++ ) KT_ASSERT_ER(wm_close(w3[i]), E_OK);
+
+	/* the menu machinery's own lists: a list opened from a row, and one from a row of that */
+	s = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(3));
+	m = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(3));
+	KT_ASSERT(s != NULL && m != NULL);
+	if ( s == NULL || m == NULL ) {
+		if ( s != NULL ) Kfree(s);
+		if ( m != NULL ) Kfree(m);
+		return;
+	}
+	s->num = LY_SUB2;  s->owner = 0;  s->nitem = 2;
+	for ( i = 0; i < 2; i++ ) {
+		s->item[i].cmd = 70 + i;
+		s->item[i].label[0] = (UB)( 'p' + i );
+	}
+	KT_ASSERT_ER(db_put(DB_MENU, LY_SUB2, 0, s, WM_MENU_SIZE(2)), E_OK);
+	s->num = LY_SUB;  s->nitem = 3;
+	for ( i = 0; i < 3; i++ ) {
+		s->item[i].cmd = 60 + i;
+		s->item[i].label[0] = (UB)( 'a' + i );
+		s->item[i].sub = ( i == 1 ) ? LY_SUB2 : 0;
+	}
+	KT_ASSERT_ER(db_put(DB_MENU, LY_SUB, 0, s, WM_MENU_SIZE(3)), E_OK);
+	Kfree(s);
+	m->num = 1;  m->owner = 0;  m->nitem = 3;
+	for ( i = 0; i < 3; i++ ) {
+		m->item[i].cmd = 50 + i;
+		m->item[i].label[0] = (UB)( 'A' + i );
+		m->item[i].label[1] = 'b';
+		m->item[i].sub = ( i == 1 ) ? LY_SUB : 0;
+	}
+	pid = wm_menu_open(own, m, 150, 200);
+	Kfree(m);
+	KT_ASSERT(pid > 0);
+	if ( pid > 0 ) {
+		(void)wm_panel_draw(pid);
+		w3[2] = wm_panel_wid(pid);
+		ly_click_row(pid, w3[2], 1);
+		w3[1] = ly_new_list(pid, &w3[2], 1);
+		KT_ASSERT(w3[1] > 0);
+		if ( w3[1] > 0 ) {
+			KT_ASSERT(ly_order(&w3[1], 2, kb));
+			if ( ly_overlap(w3[1], w3[2], &x, &y) ) {
+				KT_ASSERT_EQ(wm_at(x, y), w3[1]);
+			}
+			ly_click_row(pid, w3[1], 1);
+			w3[0] = ly_new_list(pid, &w3[1], 2);
+			KT_ASSERT(w3[0] > 0);
+		}
+		if ( w3[1] > 0 && w3[0] > 0 ) {
+			KT_ASSERT(ly_order(w3, 3, kb));
+			if ( ly_overlap(w3[0], w3[1], &x, &y) ) {
+				KT_ASSERT_EQ(wm_at(x, y), w3[0]);
+			}
+			KT_ASSERT_ER(wm_raise(pan), E_OK);
+			if ( kb > 0 ) KT_ASSERT_ER(wm_raise(kb), E_OK);
+			KT_ASSERT_ER(wm_raise(own), E_OK);
+			KT_ASSERT(ly_order(w3, 3, kb));
+			KT_ASSERT_EQ(wm_self_check(), 0);
+		}
+		(void)wm_panel_close(pid);
+	}
+	(void)db_del(DB_MENU, LY_SUB, 0);
+	(void)db_del(DB_MENU, LY_SUB2, 0);
+}
+
+/*
+ * The layers, from the back: ordinary windows, floating ones, pop-ups
+ * (a panel), input aids (a screen keyboard), menus. A screen keyboard
+ * stays over a panel, brought forward or not, and a menu stays over the
+ * screen keyboard, the keyboard brought forward after it too. In each
+ * layer the one opened or brought forward later is in front: a menu's
+ * list opened from another is in front of it, keyboard or none.
+ */
+LOCAL void test_layers( void )
+{
+	T_DPRECT	o, r;
+	T_WMWIN		wk, wp, wn, wm;
+	T_WMMENU	*m;
+	INT		own, pan, kb, mn, pid, mw, i, cx, cy;
+
+	if ( !have_wm ) KT_SKIP("no windows");
+
+	ts_disp_clear(0x00000000);
+	rect(&o, 100, 100, 500, 400);
+	own = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "layers owner");
+	rect(&o, 300, 300, 400, 360);
+	pan = wm_open(&o, WM_ATTR_POPUP, NULL);
+	rect(&o, 150, 200, 650, 500);
+	kb = wm_open(&o, WM_ATTR_AID, "layers keyboard");
+	KT_ASSERT(own >= 1 && pan >= 1 && kb >= 1);
+	if ( own < 1 || pan < 1 || kb < 1 ) return;
+	rect(&r, 0, 0, 500, 300);
+	KT_ASSERT_ER(dp_fill_rect(wm_gid(pan), &r, 0x00555555), E_OK);
+	KT_ASSERT_ER(dp_fill_rect(wm_gid(kb), &r, 0x00333333), E_OK);
+
+	/* the keyboard over the panel, the panel brought forward too */
+	KT_ASSERT_ER(wm_raise(pan), E_OK);
+	KT_ASSERT_ER(wm_ref(pan, &wp), E_OK);
+	KT_ASSERT_ER(wm_ref(kb, &wk), E_OK);
+	KT_ASSERT(wk.z < wp.z);
+	KT_ASSERT_ER(wm_composite(), E_OK);
+	KT_ASSERT_EQ(at(350, 330), 0x333333);
+
+	/* a window that is a menu, opened before the keyboard is pressed: over it */
+	rect(&o, 250, 380, 330, 420);
+	mn = wm_open(&o, WM_ATTR_POPUP | WM_ATTR_MENU, NULL);
+	KT_ASSERT(mn >= 1);
+	if ( mn >= 1 ) {
+		rect(&r, 0, 0, 80, 40);
+		KT_ASSERT_ER(dp_fill_rect(wm_gid(mn), &r, 0x00777777), E_OK);
+		KT_ASSERT_ER(wm_raise(kb), E_OK);
+		KT_ASSERT_ER(wm_ref(mn, &wn), E_OK);
+		KT_ASSERT_ER(wm_ref(kb, &wk), E_OK);
+		KT_ASSERT_EQ(wn.z, 0);
+		KT_ASSERT(wn.z < wk.z);
+		KT_ASSERT_EQ(wm_self_check(), 0);
+		KT_ASSERT_ER(wm_composite(), E_OK);
+		KT_ASSERT_EQ(at(290, 400), 0x777777);
+		KT_ASSERT_EQ(at(450, 450), 0x333333);
+		KT_ASSERT_EQ(wm_at(290, 400), mn);
+		/* sent back, a menu stays in front */
+		KT_ASSERT_ER(wm_lower(mn), E_OK);
+		KT_ASSERT_ER(wm_ref(mn, &wn), E_OK);
+		KT_ASSERT_EQ(wn.z, 0);
+		KT_ASSERT_ER(wm_close(mn), E_OK);
+	}
+
+	/* a menu opened from the window's menu machinery, over the keyboard */
+	m = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(4));
+	KT_ASSERT(m != NULL);
+	if ( m != NULL ) {
+		m->num = 1;  m->owner = 0;  m->nitem = 4;
+		for ( i = 0; i < 4; i++ ) {
+			m->item[i].cmd = 30 + i;
+			m->item[i].label[0] = (UB)( 'A' + i );
+			m->item[i].label[1] = 'b';
+			m->item[i].label[2] = 'c';
+		}
+		pid = wm_menu_open(own, m, 150, 200);
+		Kfree(m);
+		KT_ASSERT(pid > 0);
+		if ( pid > 0 ) {
+			(void)wm_panel_draw(pid);
+			mw = wm_panel_wid(pid);
+			KT_ASSERT(mw > 0);
+			KT_ASSERT_ER(wm_ref(mw, &wm), E_OK);
+			KT_ASSERT(( wm.attr & ( WM_ATTR_POPUP | WM_ATTR_MENU ) ) == ( WM_ATTR_POPUP | WM_ATTR_MENU ));
+			cx = ( wm.work.left + wm.work.right ) / 2;
+			cy = ( wm.work.top + wm.work.bottom ) / 2;
+			/* where it stands over the keyboard */
+			KT_ASSERT(cx >= 150 && cx < 650 && cy >= 200 && cy < 500);
+			KT_ASSERT_ER(wm_raise(kb), E_OK);
+			KT_ASSERT_ER(wm_ref(mw, &wm), E_OK);
+			KT_ASSERT_ER(wm_ref(kb, &wk), E_OK);
+			KT_ASSERT(wm.z < wk.z);
+			KT_ASSERT_EQ(wm_at(cx, cy), mw);
+			KT_ASSERT_ER(wm_composite(), E_OK);
+			KT_ASSERT(at(cx, cy) != 0x333333);
+			KT_ASSERT_EQ(wm_self_check(), 0);
+			KT_ASSERT_ER(wm_panel_close(pid), E_OK);
+		}
+	}
+
+	/* lists opened one from another, over the keyboard, then with no keyboard */
+	ly_lists(own, pan, kb);
+	KT_ASSERT_ER(wm_close(kb), E_OK);
+	ly_lists(own, pan, 0);
+
+	KT_ASSERT_ER(wm_close(pan), E_OK);
+	KT_ASSERT_ER(wm_close(own), E_OK);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+}
+
 EXPORT void ktest_wm( void )
 {
 	KT_RUN(test_open);
@@ -3987,6 +5255,7 @@ EXPORT void ktest_wm( void )
 	KT_RUN(test_draw);
 	KT_RUN(test_order);
 	KT_RUN(test_float);
+	KT_RUN(test_layers);
 	KT_RUN(test_subs_away);
 	KT_RUN(test_skip);
 	KT_RUN(test_damage);
@@ -4024,4 +5293,10 @@ EXPORT void ktest_wm( void )
 	KT_RUN(test_pace);
 	KT_RUN(test_screen_size);
 	KT_RUN(test_scale);
+	KT_RUN(test_full);
+	KT_RUN(test_screens_out);
+	KT_RUN(test_screens_left_wm);
+	KT_RUN(test_place_kept);
+	KT_RUN(test_mirror_wm);
+	KT_RUN(test_new_place);
 }

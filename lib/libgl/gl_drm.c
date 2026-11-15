@@ -31,7 +31,11 @@
  *	stays while the BO does, so munmap of it does nothing. A BO is
  *	handed to another process as a "PRIME" descriptor (PRIMEFD_BASE up)
  *	that carries the name of gp_shr_bo, or by that name itself
- *	(DRM_IOCTL_GEM_FLINK, DRM_IOCTL_GEM_OPEN).
+ *	(DRM_IOCTL_GEM_FLINK, DRM_IOCTL_GEM_OPEN). A PRIME descriptor sent
+ *	over a local socket (SCM_RIGHTS, lib/libcxxrt/ts_chan.c) goes as the
+ *	key of a BO object (OB_S_GPUBO, include/ts/gpuapp.h), made from its
+ *	name the first time (ts_gpu_fd_key); the one received holds the key
+ *	(ts_gpu_fd_from_key) and takes the BO in by reading the object.
  *
  *	There is no device to enumerate: drmGetDevices2 finds none, so the
  *	EGL platforms of Linux find nothing, and the platform tessronos
@@ -54,6 +58,7 @@
 #include <tk/typedef.h>
 #include <tk/errno.h>
 #include <ts/gpuapp.h>
+#include <ts/ob.h>
 #include "xf86drm.h"
 #include "drm-uapi/drm.h"
 #include "drm-uapi/v3d_drm.h"
@@ -154,7 +159,8 @@ static const uint32_t	fake_hub[4] = { 0x42554856, 0x00081117, 0x00001900, 0x0000
 static pthread_mutex_t	mu = PTHREAD_MUTEX_INITIALIZER;
 static int		gfd[GPUFD_MAX];		/* the GCTX index + 1; 0: free */
 static GCTX		gctx[GPUFD_MAX];
-static int		pfd[PRIMEFD_MAX];	/* the name a PRIME descriptor carries; 0: free */
+static int		pfd[PRIMEFD_MAX];	/* the name a PRIME descriptor carries; -1 a key only; 0: free */
+static ID		pkey[PRIMEFD_MAX];	/* the key of its BO object, 0 none yet */
 static SYNC		sync_tab[SYNC_MAX];
 static SYNCFD		sfd_tab[SYNCFD_MAX];
 
@@ -401,8 +407,12 @@ int ts_gpu_fd_close( int fd )
 
 	pthread_mutex_lock(&mu);
 	if ( i >= 0 && i < PRIMEFD_MAX && pfd[i] != 0 ) {
+		ID	k = pkey[i];
+
 		pfd[i] = 0;
+		pkey[i] = 0;
 		pthread_mutex_unlock(&mu);
+		if ( k > 0 ) (void)ob_cls_obj(k);
 		return 0;
 	}
 	if ( sfd_of(fd) != NULL ) {
@@ -1318,24 +1328,101 @@ int drmPrimeFDToHandle( int fd, int prime_fd, uint32_t *handle )
 {
 	int	ctx = fd_ctx(fd), i = prime_fd - PRIMEFD_BASE, name = 0;
 	T_GPBO	b;
+	ID	key = 0;
 	ER	er;
 
 	pthread_mutex_lock(&mu);
 	if ( i >= 0 && i < PRIMEFD_MAX ) {
 		name = pfd[i];
+		key = pkey[i];
 	}
 	pthread_mutex_unlock(&mu);
-	if ( ctx <= 0 || name <= 0 ) {
+	if ( ctx <= 0 || ( name <= 0 && key <= 0 ) ) {
 		errno = EBADF;
 		return -1;
 	}
-	er = gp_imp_bo(ctx, name, &b);
+	if ( name > 0 ) {
+		er = gp_imp_bo(ctx, name, &b);
+	} else {
+		T_OBGBIMP	imp;
+		SZ		asz = 0;
+
+		memset(&imp, 0, sizeof(imp));
+		imp.ctx = ctx;
+		er = ob_rea_rec(key, OB_GB_IMPORT, 0, &imp, sizeof(imp), &asz);
+		b = imp.bo;
+	}
 	if ( er < E_OK ) {
 		return set_errno(er);
 	}
 	bo_note(fd, &b);
 	*handle = b.handle;
 	return 0;
+}
+
+/*
+ * A PRIME descriptor as the key of a BO object, to be carried by a local
+ * socket (lib/libcxxrt/ts_chan.c): made from its name the first time,
+ * and kept with the descriptor; -1 when fd is not a PRIME descriptor
+ */
+ID ts_gpu_fd_key( int fd )
+{
+	T_OBGBMAKE	mk;
+	T_OBCRE		c;
+	TS_UUID		u;
+	int		i = fd - PRIMEFD_BASE, name = 0;
+	ID		k = 0;
+
+	pthread_mutex_lock(&mu);
+	if ( i >= 0 && i < PRIMEFD_MAX && pfd[i] != 0 ) {
+		name = pfd[i];
+		k = pkey[i];
+	}
+	pthread_mutex_unlock(&mu);
+	if ( name == 0 ) return -1;
+	if ( k > 0 ) return k;
+	memset(&mk, 0, sizeof(mk));
+	mk.name = name;
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_GPUBO;
+	c.arg = &mk;
+	c.argsz = sizeof(mk);
+	if ( ob_cre_obj(&c, &u) < E_OK ) return -1;
+	k = ob_opn_obj(&u, OB_OP_R);
+	if ( k <= 0 ) {
+		(void)ob_del_obj(&u);
+		return -1;
+	}
+	pthread_mutex_lock(&mu);
+	if ( pfd[i] == name && pkey[i] == 0 ) {
+		pkey[i] = k;
+		k = 0;
+	}
+	pthread_mutex_unlock(&mu);
+	if ( k > 0 ) {
+		(void)ob_cls_obj(k);			/* another thread made one meanwhile */
+	}
+	return pkey[i];
+}
+
+/* A PRIME descriptor holding a key received (ts_chan.c); -1 when there is no room */
+int ts_gpu_fd_from_key( ID key )
+{
+	int	i;
+
+	pthread_mutex_lock(&mu);
+	for ( i = 0; i < PRIMEFD_MAX; i++ ) {
+		if ( pfd[i] == 0 ) {
+			pfd[i] = -1;
+			pkey[i] = key;
+			pthread_mutex_unlock(&mu);
+			return PRIMEFD_BASE + i;
+		}
+	}
+	pthread_mutex_unlock(&mu);
+	errno = EMFILE;
+	return -1;
 }
 
 /* ---------------------------------------------------------------- devices */

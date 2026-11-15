@@ -562,6 +562,7 @@ LOCAL void submit( IGTENG *e, IGTCTX *c )
 	e->t_kick = igt_now_us();
 	e->jobs++;
 	knl_igt.active = (INT)( e - knl_igt.eng );
+	igt_look_set(TRUE);			/* a job on an engine is looked at, whatever parked it before */
 	/* the second port empty, then the first; the last write submits */
 	igt_ewr(e, RING_ELSP, 0);
 	igt_ewr(e, RING_ELSP, 0);
@@ -697,9 +698,12 @@ LOCAL void isr( UINT intno, UW iar )
 			/*
 			 * The display asks for interrupts nobody takes, and only
 			 * its driver may quiet them: the engines are looked at
-			 * every millisecond from now on instead
+			 * every millisecond from now on instead, parked or not
 			 */
 			knl_igt.irq_off = TRUE;
+			ISpinLock(&knl_igt.lock, &imask);
+			igt_look_set(TRUE);
+			ISpinUnlock(&knl_igt.lock, &imask);
 		}
 	}
 	if ( ( master & ( MASTER_GT0 | MASTER_GT2 | MASTER_DISPLAY ) ) == 0 ) knl_igt.irq_spurious++;
@@ -1041,7 +1045,9 @@ LOCAL CONST T_GPUOPS	igt_ops = {
 	igt_as_unbind,
 	igt_as_bind_at,
 	igt_as_unbind_at,
-	TRUE
+	TRUE,
+	igt_pm_boost,
+	igt_pm_interactive
 };
 
 /* A batch of the kernel's (in its space) on an engine, waited for */
@@ -1190,16 +1196,14 @@ EXPORT UW igt_test_emit( INT eng, BOOL first, UD start, UB *ring, UW tail, UW hw
 /* ---------------------------------------------------------------- the device object */
 
 /*
- * The GPU as a device object "gpu0" (OB_S_GPU) in the list of the
- * devices: record 1 tells what it is and how it does, as "key value"
- * lines, made again and told as a change when the start-up has gone
- * through a step
+ * What the GPU is and how it does, as "key value" lines for record 1 of
+ * the GPU's device object ("gpu0", device/gpu/gpu_obj.c, made by the
+ * common layer): made again and handed over, which tells the change,
+ * when the start-up has gone through a step
  */
 #define OBJ_TEXT	768
 
 LOCAL struct {
-	BOOL	added;
-	TS_UUID	uuid;
 	UB	text[OBJ_TEXT];
 	INT	len;
 	CONST char *state;
@@ -1250,54 +1254,12 @@ LOCAL void obj_text( void )
 	knl_memcpy(gob.text, t, n);
 }
 
-LOCAL INT ob_text( void *ctx, UB *t, INT n, INT max )
-{
-	(void)ctx;
-	n = knl_oj_put(t, n, max, "<p>The GPU: Intel's integrated graphics, its render and copy engines "
-		       "(OpenGL ES of the processes, compositing the windows). Record 1: its state as key value "
-		       "lines; a change is told on it.</p>");
-	return n;
-}
-
-LOCAL INT ob_attr( void *ctx, UB *j, INT n, INT max )
-{
-	(void)ctx;
-	n = knl_oj_put(j, n, max, ",\"pci\":");
-	return knl_oj_put_str(j, n, max, (CONST UB *)"00:02.0");
-}
-
-LOCAL ER ob_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *p_asize )
-{
-	SZ	k;
-
-	(void)ctx;
-	(void)pos;
-	if ( recno != OB_GP_STATE ) return E_NOEXS;
-	k = ( off < gob.len ) ? gob.len - off : 0;
-	if ( size >= 0 && k > size ) k = size;
-	if ( size > 0 && k > 0 ) knl_memcpy(buf, gob.text + off, (INT)k);
-	if ( p_asize != NULL ) *p_asize = ( size == 0 ) ? gob.len : k;
-	return E_OK;
-}
-
-LOCAL UD ob_size( void *ctx, INT recno )
-{
-	(void)ctx;
-	return ( recno == OB_GP_STATE ) ? (UD)gob.len : 0;
-}
-
-LOCAL CONST T_OBDVOPS	gpu_ops = { OB_S_GPU, "gpu", OB_GP_NREC, 0644, 0, 0, ob_text, ob_attr, ob_rea, NULL, ob_size, NULL };
-
-/* The state told: the object made the first time, the change told after */
+/* The state told: the lines handed to the object, which tells the change */
 LOCAL void obj_state( CONST char *state )
 {
 	if ( state != NULL ) gob.state = state;
 	obj_text();
-	if ( !gob.added ) {
-		if ( knl_obdev_add((CONST UB *)"gpu0", NULL, &gpu_ops, NULL, &gob.uuid) >= E_OK ) gob.added = TRUE;
-		return;
-	}
-	knl_obdev_post(&gob.uuid, OB_GP_STATE, OB_E_CHANGE, NULL);
+	knl_gpu_obj_detail(gob.text, gob.len);
 }
 
 /* ---------------------------------------------------------------- start-up */
@@ -1355,13 +1317,14 @@ LOCAL ER bring_up( void )
 		if ( er < E_OK ) return er;
 	}
 
-	/* a look every millisecond, whether or not interrupts come */
+	/* a look every millisecond while the GT is unparked (igt_look_set) */
 	cc.exinf = NULL;
 	cc.cycatr = TA_HLNG | TA_STA;
 	cc.cychdr = (FP)look;
 	cc.cyctim = 1;
 	cc.cycphs = 1;
 	knl_igt.cyc = tk_cre_cyc(&cc);
+	knl_igt.look_on = ( knl_igt.cyc > 0 );
 
 	step("interrupts");
 	tm_printf((UB *)"igt: before: master %08x, GT IER %08x %08x %08x %08x, display IER pipes %08x %08x %08x "
@@ -1454,7 +1417,13 @@ LOCAL ER igt_pm_suspend( void *arg, INT how )
 	tk_loc_mtx(knl_igt.mtx, TMO_FEVR);
 	for ( i = 0; i < 2000 && knl_igt.fw_users != 0; i++ ) tk_dly_tsk(1);
 	if ( knl_igt.fw_users != 0 ) tm_printf((UB *)"igt: %d users of the GT still at the sleep\n", knl_igt.fw_users);
-	if ( knl_igt.cyc > 0 ) (void)tk_stp_cyc(knl_igt.cyc);
+	{
+		UINT	imask;
+
+		ISpinLock(&knl_igt.lock, &imask);
+		igt_look_set(FALSE);
+		ISpinUnlock(&knl_igt.lock, &imask);
+	}
 	if ( how == PM_S3 ) {
 		knl_igt_ggtt_pm_save();
 		if ( knl_igt.intno != 0 ) igt_wr(MASTER_IRQ, 0);
@@ -1491,7 +1460,14 @@ LOCAL void igt_pm_resume( void *arg, INT how )
 		igt_fw_put();
 		tm_printf((UB *)"igt: the engines set up again after the sleep\n");
 	}
-	if ( knl_igt.cyc > 0 ) (void)tk_sta_cyc(knl_igt.cyc);
+	{
+		UINT	imask;
+
+		/* running again: the look stops itself once the GT is parked and idle */
+		ISpinLock(&knl_igt.lock, &imask);
+		igt_look_set(TRUE);
+		ISpinUnlock(&knl_igt.lock, &imask);
+	}
 	tk_unl_mtx(knl_igt.mtx);
 }
 
@@ -1545,7 +1521,14 @@ LOCAL void start_task( INT stacd, void *exinf )
 	}
 	vcs_report();
 	if ( igt_compose_init() >= E_OK ) {
+		/*
+		 * The engines are timed against the processor at one known
+		 * frequency, the one they run at under load, not wherever the
+		 * GT's own measure has got to since it started at the lowest
+		 */
+		igt_pm_pin(TRUE);
 		(void)igt_compose_check();
+		igt_pm_pin(FALSE);
 		gob.compose = igt_compose_used();
 	}
 	obj_state(NULL);

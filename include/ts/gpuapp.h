@@ -59,6 +59,29 @@ IMPORT ER  gp_cls_gpu( INT ctx );
 /* What the GPU is; E_NOEXS when the machine has none */
 IMPORT ER  gp_ref_gpu( T_GPUINFO *info );
 
+/*
+ * Knowing that a GPU has been registered, when it comes after the
+ * program started (the Intel GPU of an x64 PC is ready some time after
+ * the boot). The GPU is a device object, "gpu0" (OB_S_GPU), found at
+ * OB_UUID_GPU_INIT on every machine, GPU or not; its record OB_GP_STATE
+ * (include/ts/ob.h) is "key value" lines whose first, BACKEND, is
+ * "registered" or "none". OB_E_CHANGE of that record is told whenever
+ * the backend comes or goes and as the backend's own lines change, so a
+ * notice means "look again", not "registered". In an order that loses
+ * nothing:
+ *
+ *	key = ob_opn_obj(&gpu, OB_OP_ATRRD);
+ *	ob_ntf_evt(key, OB_GP_STATE, &req, port);	req.events = OB_E_CHANGE
+ *	if ( gp_ref_gpu(&info) >= E_OK ) -> the GPU is there
+ *	else wait for a notice at port, and ask gp_ref_gpu again
+ *
+ * (a program that opens it after the registration need not wait: the
+ * first gp_ref_gpu already answers).
+ */
+#define GPU_OBJ_NAME		"gpu0"
+#define OB_UUID_GPU_INIT	{ { 0x01, 0xa0, 0xd6, 0x80, 0x3a, 0xad, 0x7e, 0x2b, \
+				    0x91, 0x4c, 0x07, 0xd5, 0xa3, 0x68, 0xf1, 0x2c } }
+
 /* A BO of at least size bytes, zeroed, in the context (flags: GPU_BO_*) */
 IMPORT ER  gp_cre_bo( INT ctx, SZ size, UINT flags, T_GPBO *bo );
 IMPORT ER  gp_del_bo( INT ctx, UINT handle );
@@ -83,6 +106,31 @@ IMPORT ER  gp_wai_bo( INT ctx, UINT handle, TMO_U tmout );
  */
 IMPORT INT gp_shr_bo( INT ctx, UINT handle );
 IMPORT ER  gp_imp_bo( INT ctx, INT name, T_GPBO *bo );
+
+/*
+ * A BO as a real object (OB_T_STORAGE, OB_S_GPUBO of include/ts/ob.h):
+ * ob_cre_obj with arg a T_OBGBMAKE, which names a BO of the caller's by
+ * its context and number, or by a name of gp_shr_bo (name above 0). The
+ * object holds the BO for as long as a key to it is open, whoever holds
+ * the key, so a key carried by a stream (OB_ST_MSG) takes the BO to
+ * another process without a name. Never opened, it goes when the process
+ * that made it ends. Record OB_GB_IMPORT read with a T_OBGBIMP enters the
+ * BO in the reader's context ctx under a number of its own, as gp_imp_bo
+ * does, and answers it in bo. The protection is the maker's, rw-------.
+ */
+#define OB_GB_IMPORT	1
+#define OB_GB_NREC	2
+
+typedef struct {
+	INT	ctx;
+	UINT	handle;
+	INT	name;			/* above 0: the BO of this name instead */
+} T_OBGBMAKE;
+
+typedef struct {
+	INT	ctx;			/* the reader's context */
+	T_GPBO	bo;			/* out */
+} T_OBGBIMP;
 
 #ifdef __x86_64__
 /*

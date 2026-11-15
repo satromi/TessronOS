@@ -1,0 +1,68 @@
+# 原紙集め (design 11.2.3), for tools/ui_run.py. Its window (660,40 to 880,528, the work
+# area from 670,69, a scroll bar down the right and along the foot, its sizing corner at
+# 870,518) is the cabinet's, as the 原紙箱's: the templates of the applications of the
+# program box laid out in rows from the left as far as the work area is wide. Made
+# narrower, every template is on a row of its own and the widest is wider than the work
+# area: the list is scrolled down and across by the bars. Made wider, more are on a row.
+# MPEG Player deleted takes its template out of the list at once, registered again
+# puts it back at the end. 空書庫 carried into the BTRON window makes a new object
+# from it there, and the list stays as it was.
+waitwin 原紙箱
+open 01a0d8c4-5b92-7c53-8d64-9fab0c1d5b92
+waitwin 原紙集め
+expect basecol: up
+expect basecol: 16 templates in 13 rows
+wait 1000
+shot bc_open
+# narrower and lower by the sizing corner: one to a row, the bars to scroll by
+logmark
+drag 870 518 760 300
+expectsince basecol: 16 templates in 16 rows
+wait 1000
+win 原紙集め
+want ok 660 40 770 310
+shot bc_small
+# down by the wheel, and across by the bar along the foot (its knob from the left end)
+wheel -3
+wait 800
+shot bc_down
+drag 676 300 750 300
+wait 800
+shot bc_across
+# wider: three and four to a row
+logmark
+drag 760 300 1060 400
+expectsince basecol: 16 templates in
+wait 1000
+win 原紙集め
+want ok 660 40 1070 410
+shot bc_wide
+# MPEG Player deleted: out of the list at once; registered again: back, at the end
+logmark
+progrm 01a0f638-4c5a-78a9-9bbd-adfbafa3466a
+want ok 0
+expectsince basecol: 15 templates
+proginst 01a0f638-4c5a-78a9-9bbd-adfbafa3466a
+want ok 0
+expectsince basecol: 16 templates
+wait 800
+shot bc_reinst
+# 再表示 from the menu (the second button over the list: 閉じる under the pointer, 再表示
+# under the line, at 1015,421)
+logmark
+click 1000 380 1
+expectsince basecol: menu
+wait 600
+shot bc_menu
+move 1015 421
+wait 150
+click 1015 421
+expectsince basecol: command reread
+expectsince basecol: 16 templates
+# closed (Ctrl+E): nothing of it is kept, and nothing is asked of the program object it
+# stands for but reading it (no write of its attributes refused)
+logmark
+key 08 01
+expectsince basecol: closed
+wait 500
+absent !OACV!

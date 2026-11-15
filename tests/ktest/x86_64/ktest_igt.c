@@ -1067,6 +1067,61 @@ LOCAL void test_igt_pm( void )
 	KT_ASSERT_EQ(R(RPNSWREQ), FREQ_REQ(42));
 	KT_ASSERT_EQ(R(GT_IER(2)), PM_RP_UP_THRESHOLD | PM_RP_DOWN_THRESHOLD);
 
+	/*
+	 * frames of the screen: the high mode at once (up over 85% of 10 ms,
+	 * down under 60% of 32 ms), whatever the frequency; let go 100 ms
+	 * after the last, the mode left until the next step chooses it
+	 */
+	KT_ASSERT_EQ(knl_igt.power_mode, 0);
+	igt_pm_interactive(NULL);
+	KT_ASSERT(knl_igt.inter_on);
+	KT_ASSERT_EQ(knl_igt.power_mode, 2);
+	KT_ASSERT_EQ(R(RP_UP_EI), 7500);
+	KT_ASSERT_EQ(R(RP_UP_THRESHOLD), 6375);
+	KT_ASSERT_EQ(R(RP_DOWN_EI), 24000);
+	KT_ASSERT_EQ(R(RP_DOWN_THRESHOLD), 14400);
+	igt_pm_interactive(NULL);
+	KT_ASSERT_EQ(knl_igt.n_inter, 1);
+	igt_pm_tick();
+	KT_ASSERT(knl_igt.inter_on);
+	tk_dly_tsk(110);
+	igt_pm_tick();
+	KT_ASSERT(!knl_igt.inter_on);
+	KT_ASSERT_EQ(knl_igt.power_mode, 2);
+	KT_ASSERT(!knl_igt.parked);
+
+	/* a wait on a job not started: RP0 at once, the word to go down not taken until it is over */
+	igt_pm_boost(NULL, 1);
+	tk_dly_tsk(30);
+	KT_ASSERT_EQ(knl_igt.f_cur, 66);
+	KT_ASSERT_EQ(R(RPNSWREQ), FREQ_REQ(66));
+	KT_ASSERT_EQ(knl_igt.n_boost, 1);
+	for ( ev = 0; ev < 2; ev++ ) {
+		ISpinLock(&knl_igt.lock, &imask);
+		wake = igt_pm_irq(PM_RP_DOWN_THRESHOLD);
+		ISpinUnlock(&knl_igt.lock, &imask);
+		KT_ASSERT(wake);
+		igt_pm_wake();
+		tk_dly_tsk(30);
+		KT_ASSERT_EQ(knl_igt.f_cur, ( ev == 0 ) ? 66 : 65);
+		if ( ev == 0 ) igt_pm_boost(NULL, -1);
+	}
+	/* held at RP0 for the check: the word not taken; let go, back where it was */
+	igt_pm_pin(TRUE);
+	KT_ASSERT(knl_igt.pinned);
+	KT_ASSERT_EQ(R(RPNSWREQ), FREQ_REQ(66));
+	ISpinLock(&knl_igt.lock, &imask);
+	wake = igt_pm_irq(PM_RP_DOWN_THRESHOLD);
+	ISpinUnlock(&knl_igt.lock, &imask);
+	igt_pm_wake();
+	tk_dly_tsk(30);
+	KT_ASSERT_EQ(knl_igt.f_cur, 66);
+	igt_pm_pin(FALSE);
+	KT_ASSERT(!knl_igt.pinned);
+	KT_ASSERT_EQ(knl_igt.f_cur, 65);
+	KT_ASSERT_EQ(R(RPNSWREQ), FREQ_REQ(65));
+	KT_ASSERT(knl_igt.st_awake > 0);		/* the look's samples while awake */
+
 	/* the context RC6 saves found corrupted at the next park: RC6 off for good, the wells kept */
 	R(RC6_CTX_INFO) = 0;
 	igt_fw_put();
@@ -1076,6 +1131,15 @@ LOCAL void test_igt_pm( void )
 	KT_ASSERT_EQ(R(RC_CONTROL), 0);
 	KT_ASSERT_EQ(R(PG_ENABLE), 0);
 	KT_ASSERT_EQ(R(FW_RENDER), MASK_EN(FW_KERNEL));
+	/* a job waited for while parked: unparked straight at RP0 */
+	KT_ASSERT(knl_igt.f_cur < 66);
+	igt_pm_boost(NULL, 1);
+	igt_fw_get();
+	KT_ASSERT(!knl_igt.parked);
+	KT_ASSERT_EQ(knl_igt.f_cur, 66);
+	KT_ASSERT_EQ(R(RPNSWREQ), FREQ_REQ(66));
+	igt_pm_boost(NULL, -1);
+	igt_fw_put();
 	tk_dly_tsk(1100);				/* the task tells it */
 
 	(void)tk_ter_tsk(knl_igt.pm_tsk);
@@ -1164,7 +1228,7 @@ LOCAL void pl_as_unbind_at( void *priv, void *as, UD va, UD npages )
 
 LOCAL CONST T_GPUOPS	pl_ops = {
 	GPU_KIND_TEST, GPU_FEAT_BATCH, 0, pl_info, pl_bo_bind, pl_bo_unbind, pl_kick, pl_reset,
-	pl_as_create, pl_as_destroy, pl_as_bind, pl_as_unbind, pl_as_bind_at, pl_as_unbind_at, TRUE
+	pl_as_create, pl_as_destroy, pl_as_bind, pl_as_unbind, pl_as_bind_at, pl_as_unbind_at, TRUE, NULL, NULL
 };
 
 LOCAL void test_igt_place( void )

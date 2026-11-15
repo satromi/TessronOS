@@ -243,18 +243,29 @@ static ER card_open( CONST char *title )
 {
 	T_JSON	root, w, pos;
 	INT	ww = 560, wh = 440, mn = meta_of(&g_obj);
+	UB	scr[12] = "";
+	BOOL	kept = FALSE;
 	ER	er;
 
 	if ( mn > 0 && js_parse((CONST UB *)g_meta, mn, &root) >= E_OK && js_get(&root, "window", &w) >= E_OK ) {
 		ww = (INT)js_get_num(&w, "width", ww);
 		wh = (INT)js_get_num(&w, "height", wh);
+		(void)js_get_str(&w, "screen", scr, sizeof(scr));
 		if ( js_get(&w, "pos", &pos) >= E_OK ) {
+			kept = TRUE;
 			g_cx = (INT)js_get_num(&pos, "x", g_cx);
 			g_cy = (INT)js_get_num(&pos, "y", g_cy);
 		}
 	}
 	if ( ww < MIN_W ) ww = MIN_W;
 	if ( wh < MIN_H ) wh = MIN_H;
+	/* kept from the corner of its screen, the main one's when it names none (wm_place_open) */
+	if ( kept ) {
+		wm_place_xywh(&g_cx, &g_cy, ww, wh, (CONST char *)scr);
+	} else {
+		g_cx = wm_new_x(g_cx);	/* none kept: from the corner of the screen new windows open on */
+		g_cy = wm_new_y(g_cy);
+	}
 	if ( g_cx < 0 ) g_cx = 0;
 	if ( g_cy < 0 ) g_cy = 0;
 	er = win_make(&g_cw, title, g_cx, g_cy, ww, wh, WIN_EVENTS);

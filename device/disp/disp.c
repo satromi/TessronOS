@@ -121,6 +121,62 @@ typedef struct {
 
 LOCAL RECTS		disp_new;	/* what changed and is not sent */
 
+/*
+ * The outputs besides the main one (10.4.8), in the order they were put:
+ * each shows the rectangle of the back buffer at x, y of its own size.
+ * The main one, disp_hw, shows the rectangle at disp_spec.main_x, main_y:
+ * the corner, unless an output is left of it or above it.
+ *
+ * An output that has two pages and can be told which to show keeps its
+ * own frames: what changed on it gathers in pend, and goes to the page
+ * not shown, with what that page lacks (old), once the output's last
+ * flip has been taken; then that page is shown. A send never waits for
+ * another output's flip: while one is not yet taken, what changed waits
+ * in pend, and the output task (out_task) sends it as soon as the flip is
+ * taken, at that output's own refresh.
+ */
+#define DISP_OUTS	( DISP_SCREENS_MAX - 1 )
+
+typedef struct {
+	T_DISPHW	hw;
+	INT		id;		/* which it is, as long as it is on a screen: 1 or more */
+	INT		side;		/* DISP_SIDE_*: which edge of the screens before it it is put past, or MIRROR */
+	INT		offset;		/* how far along that edge */
+	INT		x, y;		/* where its rectangle of the back buffer is */
+	UINT		sw, sh;		/* and how large: its framebuffer's, or the main screen's when it mirrors it */
+	BOOL		scaled;		/* that rectangle is shown scaled, into fit of its framebuffer */
+	T_DISPRECT	fit;
+	BOOL		flipping;	/* two pages, the one not shown sent to and then shown */
+	UINT		shown;		/* the page shown */
+	RECTS		pend;		/* what changed and has not been sent to it */
+	RECTS		old;		/* sent to the page shown and not to the other */
+	BOOL		due;		/* a flip that may not have been taken yet */
+	UD		due_at;		/* when it was made, ns */
+	UD		flips;		/* how many it took */
+	UD		deferred;	/* sends that waited for its flip, not for the compositor */
+	UD		pixels;		/* pixels copied to it, with what a page lacked */
+	UD		send_us;	/* the time that took */
+} DISPOUT;
+
+LOCAL DISPOUT		disp_out[DISP_OUTS];
+LOCAL INT		disp_nout = 0;
+LOCAL INT		disp_next_id = 1;
+
+/*
+ * The screens as they were before the last change of their sizes, places
+ * or scale, in view pixels, each with the id of its output (0: the main
+ * one), so that a point of the old view can be told where it is now
+ * (knl_disp_follow)
+ */
+typedef struct {
+	INT	id;
+	INT	x, y, w, h;
+} DISPWAS;
+
+LOCAL DISPWAS		disp_was[DISP_SCREENS_MAX];
+LOCAL INT		disp_nwas = 0;
+LOCAL ID		disp_out_tsk = 0;	/* sends what waited for an output's flip */
+
 /* Two pages: which is shown, and what the other lacks of it */
 LOCAL BOOL		disp_flipping = FALSE;
 LOCAL UINT		disp_shown = 0;
@@ -147,24 +203,24 @@ LOCAL UB *page_of( UINT page )
 	if ( page == 1 && disp_fb2 != NULL ) {
 		return disp_fb2;
 	}
-	return disp_fb + (UBINT)page * disp_spec.fb_pitch * disp_spec.height;
+	return disp_fb + (UBINT)page * disp_spec.fb_pitch * disp_hw.height;
 }
 
-/* One row of pixels converted to what the screen takes */
-LOCAL void send_row( UW *d, CONST UW *s, INT n )
+/* One row of pixels converted to what a screen of that format and alpha takes */
+LOCAL void send_row( UW *d, CONST UW *s, INT n, UINT format, UINT alpha )
 {
-	UW	keep = ( disp_alpha == DISP_ALPHA_ANY ) ? 0xFFFFFFFFU : 0x00FFFFFFU;
-	UW	set = ( disp_alpha == DISP_ALPHA_FF ) ? 0xFF000000U : 0;
+	UW	keep = ( alpha == DISP_ALPHA_ANY ) ? 0xFFFFFFFFU : 0x00FFFFFFU;
+	UW	set = ( alpha == DISP_ALPHA_FF ) ? 0xFF000000U : 0;
 	INT	x;
 
-	if ( disp_spec.fb_format == DISP_FMT_XBGR8888 ) {
+	if ( format == DISP_FMT_XBGR8888 ) {
 		for ( x = 0; x < n; x++ ) {
 			UW	v = s[x];
 
 			d[x] = ( ( ( v & 0xFF00FF00U ) | ( ( v >> 16 ) & 0xFFU )
 				   | ( ( v & 0xFFU ) << 16 ) ) & keep ) | set;
 		}
-	} else if ( disp_spec.fb_format == DISP_FMT_RGB565 ) {
+	} else if ( format == DISP_FMT_RGB565 ) {
 		UH	*h = (UH *)d;
 
 		for ( x = 0; x < n; x++ ) {
@@ -181,27 +237,29 @@ LOCAL void send_row( UW *d, CONST UW *s, INT n )
 }
 
 /*
- * Send one run of rows to a page. When the screen is laid out as the
- * back buffer is, each row is one straight copy. The caller makes the
- * writes go out (dsb) once all of what is outstanding is sent.
+ * Send one run of rows of the back buffer, inside the main screen's
+ * rectangle of it, to a page of the main screen, which shows that
+ * rectangle from main_x, main_y. When the screen is laid out as the back
+ * buffer is, each row is one straight copy. The caller makes the writes
+ * go out (dsb) once all of what is outstanding is sent.
  */
 LOCAL void send_rows( UB *fb, INT top, INT bottom, INT left, INT right )
 {
 	UINT	bytes = (UINT)(right - left) * 4;
 	UINT	off = (UINT)left * 4;
-	UINT	fb_off = (UINT)left * ( disp_spec.fb_bpp / 8 );
+	UINT	fb_off = (UINT)( left - disp_spec.main_x ) * ( disp_spec.fb_bpp / 8 );
 	BOOL	same = ( disp_spec.fb_format == DISP_FMT_XRGB8888
 			 && disp_alpha == DISP_ALPHA_ANY );
 	INT	y;
 
 	for ( y = top; y < bottom; y++ ) {
-		UB	*d = fb + (UBINT)y * disp_spec.fb_pitch + fb_off;
+		UB	*d = fb + (UBINT)( y - disp_spec.main_y ) * disp_spec.fb_pitch + fb_off;
 		CONST UB *s = disp_back + (UBINT)y * disp_spec.pitch + off;
 
 		if ( same ) {
 			knl_memcpy(d, s, (SZ)bytes);
 		} else {
-			send_row((UW *)d, (CONST UW *)s, right - left);
+			send_row((UW *)d, (CONST UW *)s, right - left, disp_spec.fb_format, disp_alpha);
 		}
 	}
 	disp_stat.rects++;
@@ -225,6 +283,16 @@ LOCAL BOOL clip( T_DISPRECT *r )
 		r->bottom = (INT)disp_spec.height;
 	}
 
+	return ( r->left < r->right && r->top < r->bottom );
+}
+
+/* The rectangle cut to left, top, right, bottom, and whether anything is left */
+LOCAL BOOL clip_to( T_DISPRECT *r, INT left, INT top, INT right, INT bottom )
+{
+	if ( r->left < left ) r->left = left;
+	if ( r->top < top ) r->top = top;
+	if ( r->right > right ) r->right = right;
+	if ( r->bottom > bottom ) r->bottom = bottom;
 	return ( r->left < r->right && r->top < r->bottom );
 }
 
@@ -325,6 +393,47 @@ LOCAL void taken( void )
 	}
 }
 
+/*
+ * The main output told that what it shows changed (front buffer tracking,
+ * a panel's self refresh made to leave): after each send and each flip,
+ * the driver's dirty and its output's flushed with each rectangle
+ */
+/*
+ * A rectangle of the back buffer as the part of the main screen it
+ * covers, in the screen's own pixels, and whether it covers any
+ */
+LOCAL BOOL on_main( CONST T_DISPRECT *r0, T_DISPRECT *m )
+{
+	T_DISPRECT	r = *r0;
+
+	if ( !clip_to(&r, disp_spec.main_x, disp_spec.main_y, disp_spec.main_x + (INT)disp_hw.width,
+		      disp_spec.main_y + (INT)disp_hw.height) ) {
+		return FALSE;
+	}
+	m->left = r.left - disp_spec.main_x;
+	m->right = r.right - disp_spec.main_x;
+	m->top = r.top - disp_spec.main_y;
+	m->bottom = r.bottom - disp_spec.main_y;
+	return TRUE;
+}
+
+LOCAL void main_told( CONST RECTS *l )
+{
+	T_DISPRECT	m;
+	INT		i;
+
+	if ( disp_hw.dirty != NULL ) {
+		disp_hw.dirty();
+	}
+	if ( disp_hw.out != NULL && disp_hw.out->flushed != NULL ) {
+		for ( i = 0; i < l->n; i++ ) {
+			if ( on_main(&l->r[i], &m) ) {
+				disp_hw.out->flushed(disp_hw.out->ctx, &m);
+			}
+		}
+	}
+}
+
 /* Each rectangle of a list sent to a page, and the writes made to go out */
 LOCAL void send_list( CONST RECTS *l, UINT page )
 {
@@ -335,15 +444,315 @@ LOCAL void send_list( CONST RECTS *l, UINT page )
 	taken();
 	(void)ts_get_mono(&t0);
 	for ( i = 0; i < l->n; i++ ) {
-		T_DISPRECT	r = l->r[i];
+		T_DISPRECT	r = l->r[i], m;
 
-		if ( clip(&r) ) {	/* the screen may have changed size since */
-			send_rows(fb, r.top, r.bottom, r.left, r.right);
+		/* the screen may have changed size since; only the main screen's rectangle of the back buffer */
+		if ( clip(&r) && on_main(&r, &m) ) {
+			if ( disp_hw.out != NULL && disp_hw.out->invalidate != NULL && page == disp_shown ) {
+				disp_hw.out->invalidate(disp_hw.out->ctx, &m);
+			}
+			send_rows(fb, m.top + disp_spec.main_y, m.bottom + disp_spec.main_y,
+				  m.left + disp_spec.main_x, m.right + disp_spec.main_x);
 		}
 	}
 	DeviceBarrier();
 	(void)ts_get_mono(&t1);
 	disp_stat.send_us += ( t1 - t0 ) / 1000;
+}
+
+/* The first byte of an output's page */
+LOCAL UB *out_page( CONST DISPOUT *o, UINT page )
+{
+	if ( page == 1 && o->hw.page2_va != 0 ) {
+		return (UB *)o->hw.page2_va;
+	}
+	return (UB *)o->hw.fb_va + (UBINT)page * o->hw.pitch * o->hw.height;
+}
+
+/*
+ * A rectangle r of the back buffer, inside an output's rectangle of it,
+ * sent scaled to a page of the output (fb): every pixel of the part of
+ * fit it covers takes the nearest pixel of the rectangle, a row at a time
+ * through send_row in pieces of OS_RUN, as the straight send converts
+ * them. The bars round fit are left as they were made (black).
+ */
+#define OS_RUN		256
+
+LOCAL void out_send_scaled( DISPOUT *o, UB *fb, CONST T_DISPRECT *r )
+{
+	CONST T_DISPRECT *f = &o->fit;
+	INT	fw = f->right - f->left, fh = f->bottom - f->top;
+	INT	l, t, rr, b, dx, dy, n, k;
+	UINT	px = o->hw.bpp / 8;
+	UW	run[OS_RUN];
+	UD	stepx, stepy;
+
+	if ( fw <= 0 || fh <= 0 || o->sw == 0 || o->sh == 0 ) {
+		return;
+	}
+	/* the part of fit r covers: rounded out, so that nothing it reaches is left */
+	l = f->left + (INT)( (UD)( r->left - o->x ) * (UD)fw / o->sw );
+	t = f->top + (INT)( (UD)( r->top - o->y ) * (UD)fh / o->sh );
+	rr = f->left + (INT)( ( (UD)( r->right - o->x ) * (UD)fw + o->sw - 1 ) / o->sw );
+	b = f->top + (INT)( ( (UD)( r->bottom - o->y ) * (UD)fh + o->sh - 1 ) / o->sh );
+	if ( rr > f->right ) rr = f->right;
+	if ( b > f->bottom ) b = f->bottom;
+	stepx = ( (UD)o->sw << 16 ) / (UD)fw;
+	stepy = ( (UD)o->sh << 16 ) / (UD)fh;
+	for ( dy = t; dy < b; dy++ ) {
+		/* the source row of the middle of this one */
+		UD		sy = ( (UD)( dy - f->top ) * stepy + ( stepy >> 1 ) ) >> 16;
+		CONST UW	*s = (CONST UW *)( disp_back + (UBINT)( o->y + (INT)( ( sy < o->sh ) ? sy : o->sh - 1 ) ) * disp_spec.pitch )
+				     + o->x;
+		UB		*d = fb + (UBINT)dy * o->hw.pitch;
+
+		for ( dx = l; dx < rr; dx += n ) {
+			n = ( rr - dx < OS_RUN ) ? rr - dx : OS_RUN;
+			for ( k = 0; k < n; k++ ) {
+				UD	sx = ( (UD)( dx + k - f->left ) * stepx + ( stepx >> 1 ) ) >> 16;
+
+				run[k] = s[( sx < o->sw ) ? sx : o->sw - 1];
+			}
+			send_row((UW *)( d + (UBINT)dx * px ), run, n, o->hw.format, o->hw.alpha);
+		}
+	}
+	o->pixels += (UD)( b - t ) * (UD)( rr - l );
+}
+
+/* An output's framebuffer, every page, made black: the bars round a scaled picture */
+LOCAL void out_black( DISPOUT *o )
+{
+	UINT	p, pages = o->flipping ? 2 : 1;
+
+	for ( p = 0; p < pages; p++ ) {
+		knl_memset(out_page(o, p), 0, (SZ)( (UBINT)o->hw.pitch * o->hw.height ));
+	}
+}
+
+/* Each rectangle of a list sent to a page of an output, the part of it the output shows */
+LOCAL void out_send( DISPOUT *o, CONST RECTS *l, UINT page )
+{
+	UB	*fb = out_page(o, page);
+	UINT	px = o->hw.bpp / 8;
+	BOOL	same = ( o->hw.format == DISP_FMT_XRGB8888 && o->hw.alpha == DISP_ALPHA_ANY );
+	INT	i, y;
+
+	for ( i = 0; i < l->n; i++ ) {
+		T_DISPRECT	r = l->r[i];
+
+		if ( !clip(&r) || !clip_to(&r, o->x, o->y, o->x + (INT)o->sw, o->y + (INT)o->sh) ) {
+			continue;
+		}
+		if ( o->hw.out != NULL && o->hw.out->invalidate != NULL && page == o->shown ) {
+			o->hw.out->invalidate(o->hw.out->ctx, &r);
+		}
+		if ( o->scaled ) {
+			out_send_scaled(o, fb, &r);
+			if ( o->hw.out != NULL && o->hw.out->flushed != NULL && page == o->shown ) {
+				o->hw.out->flushed(o->hw.out->ctx, &r);
+			}
+			continue;
+		}
+		for ( y = r.top; y < r.bottom; y++ ) {
+			UB	*d = fb + (UBINT)( y - o->y ) * o->hw.pitch + (UBINT)( r.left - o->x ) * px;
+			CONST UB *s = disp_back + (UBINT)y * disp_spec.pitch + (UBINT)r.left * 4;
+
+			if ( same ) {
+				knl_memcpy(d, s, (SZ)( r.right - r.left ) * 4);
+			} else {
+				send_row((UW *)d, (CONST UW *)s, r.right - r.left, o->hw.format, o->hw.alpha);
+			}
+		}
+		o->pixels += (UD)( r.bottom - r.top ) * (UD)( r.right - r.left );
+		if ( o->hw.out != NULL && o->hw.out->flushed != NULL && page == o->shown ) {
+			o->hw.out->flushed(o->hw.out->ctx, &r);
+		}
+	}
+}
+
+/*
+ * What changed on an output, counted with the sends (disp_stat) when it
+ * is sent: what a page lacked, sent again to the other page, is counted
+ * only in the output's own pixels
+ */
+LOCAL void out_count( CONST DISPOUT *o )
+{
+	INT	i;
+
+	for ( i = 0; i < o->pend.n; i++ ) {
+		disp_stat.rects++;
+		disp_stat.rows += (UD)( o->pend.r[i].bottom - o->pend.r[i].top );
+		disp_stat.pixels += (UD)( o->pend.r[i].bottom - o->pend.r[i].top )
+				    * (UD)( o->pend.r[i].right - o->pend.r[i].left );
+	}
+}
+
+/*
+ * What waits for an output sent, as far as it can be now: straight to
+ * the page shown where it does not flip; with two pages, to the page not
+ * shown with what that page lacks, then shown, once the last flip has
+ * surely been taken (latch_us after it, or a vertical blank seen since,
+ * blanked TRUE). Answers whether something still waits for a flip. The
+ * caller holds the lock.
+ */
+LOCAL BOOL out_step( DISPOUT *o, BOOL blanked )
+{
+	RECTS	all;
+	UINT	to;
+	UD	now;
+	INT	i;
+
+	if ( o->pend.n == 0 ) {
+		return FALSE;
+	}
+	if ( !o->flipping ) {
+		out_count(o);
+		out_send(o, &o->pend, o->shown);
+		o->pend.n = 0;
+		return FALSE;
+	}
+	(void)ts_get_mono(&now);
+	if ( o->due && !blanked && now - o->due_at < (UD)o->hw.latch_us * 1000 ) {
+		return TRUE;			/* the page it put away may still be read out */
+	}
+	o->due = FALSE;
+	out_count(o);
+	all = o->pend;
+	for ( i = 0; i < o->old.n; i++ ) {
+		gather(&all, &o->old.r[i]);
+	}
+	to = 1 - o->shown;
+	out_send(o, &all, to);
+	DeviceBarrier();
+	if ( o->hw.flip(to) < E_OK ) {
+		/* not taken: the page shown brought up to date, and sent to from now on */
+		out_send(o, &all, o->shown);
+		o->flipping = FALSE;
+		o->old.n = 0;
+	} else {
+		(void)ts_get_mono(&o->due_at);
+		o->shown = to;
+		o->due = TRUE;
+		if ( o->hw.out != NULL && o->hw.out->flushed != NULL ) {
+			T_DISPRECT	w;
+
+			w.left = o->x;  w.top = o->y;
+			w.right = o->x + (INT)o->sw;  w.bottom = o->y + (INT)o->sh;
+			o->hw.out->flushed(o->hw.out->ctx, &w);
+		}
+		o->old = o->pend;
+		o->flips++;
+	}
+	o->pend.n = 0;
+	return FALSE;
+}
+
+/*
+ * Each rectangle of a list for the outputs besides the main one: each
+ * gathers what is on it, and is sent what it can be sent now. What waits
+ * for an output's flip is left to the output task.
+ */
+LOCAL void send_outs( CONST RECTS *l )
+{
+	UD	t0, t1;
+	INT	i, k;
+	BOOL	later = FALSE;
+
+	if ( disp_nout == 0 ) {
+		return;
+	}
+	for ( k = 0; k < disp_nout; k++ ) {
+		DISPOUT	*o = &disp_out[k];
+
+		(void)ts_get_mono(&t0);
+
+		for ( i = 0; i < l->n; i++ ) {
+			T_DISPRECT	r = l->r[i];
+
+			if ( clip_to(&r, o->x, o->y, o->x + (INT)o->sw, o->y + (INT)o->sh) ) {
+				gather(&o->pend, &r);
+			}
+		}
+		if ( out_step(o, FALSE) ) {
+			o->deferred++;
+			later = TRUE;
+		}
+		(void)ts_get_mono(&t1);
+		o->send_us += ( t1 - t0 ) / 1000;
+	}
+	DeviceBarrier();
+	if ( later && disp_out_tsk > 0 ) {
+		(void)tk_wup_tsk(disp_out_tsk);
+	}
+}
+
+/*
+ * The output task: what waits for an output's flip is sent once that
+ * flip is taken. An output that can wait for its vertical blank is
+ * waited for there, outside the lock; one that cannot is looked at every
+ * millisecond until latch_us has passed since its flip.
+ */
+LOCAL void out_task( INT stacd, void *exinf )
+{
+	INT	k;
+	BOOL	waiting;
+	ER	(*vsync)( void );
+
+	(void)stacd;
+	(void)exinf;
+	for ( ;; ) {
+		(void)tk_slp_tsk(TMO_FEVR);
+		do {
+			waiting = FALSE;
+			tk_loc_mtx(disp_mtxid, TMO_FEVR);
+			for ( k = 0; k < disp_nout; k++ ) {
+				DISPOUT	*o = &disp_out[k];
+				BOOL	blanked = FALSE;
+
+				if ( o->pend.n == 0 ) continue;
+				vsync = o->hw.vsync;
+				if ( o->due && vsync != NULL ) {
+					tk_unl_mtx(disp_mtxid);
+					blanked = (BOOL)( vsync() >= E_OK );
+					tk_loc_mtx(disp_mtxid, TMO_FEVR);
+					if ( k >= disp_nout ) break;	/* taken away meanwhile */
+				}
+				if ( out_step(&disp_out[k], blanked) ) {
+					waiting = TRUE;
+				}
+			}
+			DeviceBarrier();
+			tk_unl_mtx(disp_mtxid);
+			if ( waiting ) {
+				tk_dly_tsk(1);
+			}
+		} while ( waiting );
+	}
+}
+
+/* The output task started, the first time an output that flips is put */
+LOCAL void out_task_start( void )
+{
+	T_CTSK	ctsk;
+
+	if ( disp_out_tsk > 0 ) {
+		return;
+	}
+	knl_memset(&ctsk, 0, sizeof(ctsk));
+	ctsk.exinf = NULL;
+	ctsk.tskatr = TA_HLNG | TA_RNG0;
+	ctsk.task = (FP)out_task;
+	ctsk.itskpri = 10;
+	ctsk.stksz = 4096;
+	disp_out_tsk = tk_cre_tsk(&ctsk);
+	if ( disp_out_tsk > 0 && tk_sta_tsk(disp_out_tsk, 0) < E_OK ) {
+		(void)tk_del_tsk(disp_out_tsk);
+		disp_out_tsk = 0;
+	}
+	if ( disp_out_tsk <= 0 ) {
+		disp_out_tsk = 0;
+		tm_printf((UB *)"disp: no task for the outputs' flips: they are sent to the page shown\n");
+	}
 }
 
 /* So many microseconds, asleep where the caller is a task */
@@ -499,6 +908,8 @@ LOCAL void flush_locked( void )
 	}
 	if ( !disp_flipping ) {
 		send_list(&disp_new, disp_shown);
+		main_told(&disp_new);
+		send_outs(&disp_new);
 		disp_new.n = 0;
 		disp_stat.sends++;
 		return;
@@ -529,6 +940,8 @@ LOCAL void flush_locked( void )
 		disp_stat.flips++;
 		flip_note(t1);
 	}
+	main_told(&all);
+	send_outs(&disp_new);
 	disp_new.n = 0;
 	disp_stat.sends++;
 }
@@ -555,15 +968,84 @@ EXPORT void knl_disp_screens( INT n )
 	if ( n >= 1 && n <= DISP_SCREENS_MAX ) disp_nscreens = n;
 }
 
+/* The outputs besides the main one that are screens of their own: those that do not mirror it */
+LOCAL INT ext_count( void )
+{
+	INT	k, n = 0;
+
+	for ( k = 0; k < disp_nout; k++ ) {
+		if ( disp_out[k].side != DISP_SIDE_MIRROR ) n++;
+	}
+	return n;
+}
+
+/* The output (of disp_out) that shows screen s (1 or more), or -1 */
+LOCAL INT screen_out( INT s )
+{
+	INT	k, n = 0;
+
+	for ( k = 0; k < disp_nout; k++ ) {
+		if ( disp_out[k].side != DISP_SIDE_MIRROR && ++n == s ) return k;
+	}
+	return -1;
+}
+
 EXPORT INT ts_disp_screens( void )
 {
-	return disp_nscreens;
+	INT	n = ext_count();
+
+	return ( n > 0 ) ? 1 + n : disp_nscreens;
+}
+
+EXPORT INT knl_disp_out_count( void )
+{
+	return disp_nout;
+}
+
+EXPORT INT knl_disp_out_screen( INT out )
+{
+	INT	k, n = 0;
+
+	if ( out == 0 ) return 0;
+	if ( out < 0 || out > disp_nout || disp_out[out - 1].side == DISP_SIDE_MIRROR ) return -1;
+	for ( k = 0; k < out; k++ ) {
+		if ( disp_out[k].side != DISP_SIDE_MIRROR ) n++;
+	}
+	return n;
+}
+
+/* A place or a length in pixels of the back buffer as view pixels, rounded up as the view is */
+LOCAL INT view_at( INT px )
+{
+	UINT	sc = ( disp_spec.scale >= 100 ) ? disp_spec.scale : 100;
+
+	return ( px <= 0 ) ? 0 : (INT)disp_view_len((UINT)px, sc);
 }
 
 EXPORT ER ts_disp_screen( INT i, INT *p_x, INT *p_y, INT *p_w, INT *p_h )
 {
 	INT	vw, vh;
 
+	if ( disp_found && ext_count() > 0 ) {
+		/* each output a screen of its own size and place; one that mirrors the main screen is none */
+		INT	px = disp_spec.main_x, py = disp_spec.main_y;
+		INT	pw = (INT)disp_hw.width, ph = (INT)disp_hw.height;
+
+		if ( i < 0 || i > ext_count() ) return E_NOEXS;
+		if ( i > 0 ) {
+			CONST DISPOUT	*o = &disp_out[screen_out(i)];
+
+			px = o->x;
+			py = o->y;
+			pw = (INT)o->hw.width;
+			ph = (INT)o->hw.height;
+		}
+		*p_x = view_at(px);
+		*p_y = view_at(py);
+		*p_w = view_at(px + pw) - *p_x;
+		*p_h = view_at(py + ph) - *p_y;
+		return E_OK;
+	}
 	if ( !disp_found || i < 0 || i >= disp_nscreens ) return E_NOEXS;
 	vw = (INT)( ( disp_spec.view_w > 0 ) ? disp_spec.view_w : disp_spec.width );
 	vh = (INT)( ( disp_spec.view_h > 0 ) ? disp_spec.view_h : disp_spec.height );
@@ -572,6 +1054,102 @@ EXPORT ER ts_disp_screen( INT i, INT *p_x, INT *p_y, INT *p_w, INT *p_h )
 	*p_w = vw * ( i + 1 ) / disp_nscreens - *p_x;
 	*p_h = vh;
 	return E_OK;
+}
+
+/*
+ * The screens as they are now kept as those before a change (disp_was):
+ * with one output, the whole view as the main screen. The caller holds
+ * the lock, before it changes anything.
+ */
+LOCAL void was_take( void )
+{
+	INT	i, x, y, w, h;
+
+	disp_nwas = 0;
+	if ( ext_count() == 0 ) {
+		disp_was[0].id = 0;
+		disp_was[0].x = disp_was[0].y = 0;
+		disp_was[0].w = (INT)( ( disp_spec.view_w > 0 ) ? disp_spec.view_w : disp_spec.width );
+		disp_was[0].h = (INT)( ( disp_spec.view_h > 0 ) ? disp_spec.view_h : disp_spec.height );
+		disp_nwas = 1;
+		return;
+	}
+	for ( i = 0; i <= ext_count() && i < DISP_SCREENS_MAX; i++ ) {
+		if ( ts_disp_screen(i, &x, &y, &w, &h) < E_OK ) break;
+		disp_was[i].id = ( i == 0 ) ? 0 : disp_out[screen_out(i)].id;
+		disp_was[i].x = x;
+		disp_was[i].y = y;
+		disp_was[i].w = w;
+		disp_was[i].h = h;
+		disp_nwas = i + 1;
+	}
+}
+
+/* Which screen now shows the output of an id (0: the main one), or -1: none, or it mirrors the main screen */
+LOCAL INT screen_of_id( INT id )
+{
+	INT	k;
+
+	if ( id == 0 ) return 0;
+	for ( k = 0; k < disp_nout; k++ ) {
+		if ( disp_out[k].id == id ) return knl_disp_out_screen(k + 1);
+	}
+	return -1;
+}
+
+EXPORT BOOL knl_disp_follow( INT *p_x, INT *p_y, T_DISPRECT *on )
+{
+	INT	i, best = 0, s, x, y, w, h, px, py, dx, dy;
+	D	d, bd = -1;
+	BOOL	to_main = FALSE;
+
+	if ( !disp_found || p_x == NULL || p_y == NULL ) {
+		return FALSE;
+	}
+	tk_loc_mtx(disp_mtxid, TMO_FEVR);
+	px = *p_x;
+	py = *p_y;
+	/* the screen it was on, or the nearest */
+	for ( i = 0; i < disp_nwas; i++ ) {
+		CONST DISPWAS	*v = &disp_was[i];
+
+		dx = ( px < v->x ) ? v->x - px : ( px >= v->x + v->w ) ? px - ( v->x + v->w - 1 ) : 0;
+		dy = ( py < v->y ) ? v->y - py : ( py >= v->y + v->h ) ? py - ( v->y + v->h - 1 ) : 0;
+		d = (D)dx * dx + (D)dy * dy;
+		if ( bd < 0 || d < bd ) {
+			bd = d;
+			best = i;
+			if ( d == 0 ) break;
+		}
+	}
+	s = ( disp_nwas > 0 ) ? screen_of_id(disp_was[best].id) : 0;
+	if ( s < 0 ) {
+		s = 0;
+		to_main = TRUE;
+	}
+	if ( ts_disp_screen(s, &x, &y, &w, &h) >= E_OK ) {
+		if ( disp_nwas > 0 ) {
+			/* as far from the corner of the screen it goes with as it was from its own */
+			px = x + ( px - disp_was[best].x );
+			py = y + ( py - disp_was[best].y );
+		}
+		if ( to_main ) {
+			if ( px >= x + w ) px = x + w - 1;
+			if ( py >= y + h ) py = y + h - 1;
+			if ( px < x ) px = x;
+			if ( py < y ) py = y;
+		}
+		if ( on != NULL ) {
+			on->left = x;
+			on->top = y;
+			on->right = x + w;
+			on->bottom = y + h;
+		}
+	}
+	tk_unl_mtx(disp_mtxid);
+	*p_x = px;
+	*p_y = py;
+	return to_main;
 }
 
 EXPORT void *ts_disp_buffer( void )
@@ -850,18 +1428,213 @@ IMPORT void knl_wm_screen_changing( void ) __attribute__((weak));
 IMPORT void knl_wm_screen_kept( void ) __attribute__((weak));
 IMPORT void knl_wm_screen_changed( void ) __attribute__((weak));
 IMPORT void knl_hid_screen_changed( void ) __attribute__((weak));
+IMPORT void knl_disp_out_main_changed( void ) __attribute__((weak));	/* dispout.c: outputs that mirror the main screen made again */
+
+/* The rectangle a picture is shown in, its ratio kept (disp_hw.h) */
+EXPORT void knl_disp_fit( UINT src_w, UINT src_h, UINT dst_w, UINT dst_h, T_DISPRECT *r )
+{
+	UINT	w = dst_w, h = dst_h;
+
+	if ( src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 ) {
+		r->left = r->top = 0;
+		r->right = (INT)dst_w;
+		r->bottom = (INT)dst_h;
+		return;
+	}
+	/* the side that fills first decides the scale: the other is made as long as the ratio says */
+	if ( (UD)src_w * dst_h > (UD)src_h * dst_w ) {
+		h = (UINT)( ( (UD)src_h * dst_w + src_w / 2 ) / src_w );	/* wider: bars above and below */
+	} else if ( (UD)src_w * dst_h < (UD)src_h * dst_w ) {
+		w = (UINT)( ( (UD)src_w * dst_h + src_h / 2 ) / src_h );	/* taller: bars left and right */
+	}
+	if ( w == 0 ) w = 1;
+	if ( h == 0 ) h = 1;
+	r->left = (INT)( ( dst_w - w ) / 2 );
+	r->top = (INT)( ( dst_h - h ) / 2 );
+	r->right = r->left + (INT)w;
+	r->bottom = r->top + (INT)h;
+}
+
+/*
+ * Where each output besides the main one goes, from the main screen's
+ * size and the side each was put at, in order: past the right edge, the
+ * bottom, the left edge or the top of the rectangle round the screens
+ * before it, along that edge from the main screen's corner. The places
+ * are worked out with the main screen at 0, 0, then all of them moved so
+ * that the rectangle round them starts at 0, 0, which the back buffer
+ * and the view are: its size into *p_w, *p_h, and where the main screen
+ * is in it into *p_mx, *p_my (0, 0 unless a screen is left of it or
+ * above it). One that mirrors the main screen takes no room of its own:
+ * its rectangle is the main screen's.
+ */
+LOCAL void outs_place( UINT mw, UINT mh, UINT *p_w, UINT *p_h, INT *p_mx, INT *p_my )
+{
+	INT	l = 0, t = 0, r = (INT)mw, b = (INT)mh;
+	INT	k;
+
+	for ( k = 0; k < disp_nout; k++ ) {
+		DISPOUT	*o = &disp_out[k];
+		INT	ow = (INT)o->hw.width, oh = (INT)o->hw.height;
+
+		o->sw = o->hw.width;
+		o->sh = o->hw.height;
+		o->scaled = FALSE;
+		if ( o->side == DISP_SIDE_MIRROR ) {
+			/* the main screen's rectangle, scaled into its framebuffer where the sizes differ */
+			o->x = 0;
+			o->y = 0;
+			o->sw = mw;
+			o->sh = mh;
+			o->scaled = (BOOL)( mw != o->hw.width || mh != o->hw.height );
+			knl_disp_fit(mw, mh, o->hw.width, o->hw.height, &o->fit);
+			continue;
+		}
+		switch ( o->side ) {
+		case DISP_SIDE_BELOW:
+			o->x = o->offset;
+			o->y = b;
+			break;
+		case DISP_SIDE_LEFT:
+			o->x = l - ow;
+			o->y = o->offset;
+			break;
+		case DISP_SIDE_ABOVE:
+			o->x = o->offset;
+			o->y = t - oh;
+			break;
+		default:
+			o->x = r;
+			o->y = o->offset;
+			break;
+		}
+		if ( o->x < l ) l = o->x;
+		if ( o->y < t ) t = o->y;
+		if ( o->x + ow > r ) r = o->x + ow;
+		if ( o->y + oh > b ) b = o->y + oh;
+	}
+	for ( k = 0; k < disp_nout; k++ ) {
+		disp_out[k].x -= l;		/* one that mirrors comes to the main screen's corner */
+		disp_out[k].y -= t;
+	}
+	*p_w = (UINT)( r - l );
+	*p_h = (UINT)( b - t );
+	*p_mx = -l;
+	*p_my = -t;
+}
+
+/*
+ * The row stride of a back buffer w pixels wide whose corner is the
+ * main screen m: the screen's own where there is one screen of four
+ * byte pixels, so that a row is sent as one straight copy
+ */
+LOCAL UINT back_pitch( CONST T_DISPHW *m, UINT w )
+{
+	if ( disp_nout == 0 ) {
+		return ( m->format == DISP_FMT_XRGB8888 ) ? m->pitch : m->width * 4;
+	}
+	return ( w * 4 + 63 ) & ~63U;
+}
+
+/* Whether the framebuffer described can be sent to */
+LOCAL BOOL sendable( CONST T_DISPHW *hw )
+{
+	return ( ( hw->bpp == 32 && ( hw->format == DISP_FMT_XRGB8888 || hw->format == DISP_FMT_XBGR8888 ) )
+		 || ( hw->bpp == 16 && hw->format == DISP_FMT_RGB565 ) )
+		&& hw->width != 0 && hw->height != 0 && hw->pitch >= hw->width * ( hw->bpp / 8 );
+}
+
+/*
+ * A new back buffer round the main screen m and the outputs besides it,
+ * in place of the one there was: E_NOMEM keeps the one there was (the
+ * outputs are placed again round the main screen there was). With
+ * new_mode the main screen has just been set to its size and shows its
+ * first page; otherwise it goes on showing the page it shows, and with
+ * two pages the other is sent the whole screen by the next send, as the
+ * page shown is. The caller holds the lock and has settled the last flip.
+ */
+LOCAL ER lay_locked( CONST T_DISPHW *m, BOOL new_mode )
+{
+	T_DISPHW	main = *m;
+	UINT		w, h, pitch;
+	INT		mx, my;
+	UBINT		pages, was_pages;
+	UB		*back;
+
+	outs_place(main.width, main.height, &w, &h, &mx, &my);
+	pitch = back_pitch(&main, w);
+	pages = ( (UBINT)pitch * h + PAGE_SIZE - 1 ) / PAGE_SIZE;
+	back = (UB *)knl_vmap(pages, 0);
+	if ( back == NULL ) {
+		outs_place(disp_hw.width, disp_hw.height, &w, &h, &mx, &my);
+		return E_NOMEM;
+	}
+	knl_memset(back, 0, (SZ)( (UBINT)pitch * h ));
+	if ( disp_back != NULL ) {
+		was_pages = ( (UBINT)disp_spec.pitch * disp_spec.height + PAGE_SIZE - 1 ) / PAGE_SIZE;
+		knl_vunmap(disp_back, was_pages);
+	}
+	disp_back = back;
+	disp_hw = main;
+	disp_spec.width = w;
+	disp_spec.height = h;
+	disp_spec.pitch = pitch;
+	disp_spec.main_w = main.width;
+	disp_spec.main_h = main.height;
+	disp_spec.main_x = mx;
+	disp_spec.main_y = my;
+	disp_spec.fb_pa = main.fb_pa;
+	disp_spec.fb_pitch = main.pitch;
+	disp_spec.fb_bpp = main.bpp;
+	disp_spec.fb_format = main.format;
+	disp_spec.fb_pages = ( main.pages >= 2 && main.flip != NULL ) ? 2 : 1;
+	view_set();
+	disp_fb = (UB *)main.fb_va;
+	disp_fb2 = (UB *)main.page2_va;
+	disp_new.n = 0;			/* of the old screen; the new one is laid whole */
+	disp_old.n = 0;
+	if ( new_mode ) {
+		disp_shown = 0;
+		disp_due = FALSE;
+	}
+	if ( disp_flipping && disp_spec.fb_pages < 2 ) {
+		disp_flipping = FALSE;
+	}
+	if ( disp_flipping ) {
+		whole_of(&disp_old);
+	}
+	/* the outputs' pages hold nothing of the new back buffer: the next sends bring both up to date */
+	{
+		INT	k;
+
+		for ( k = 0; k < disp_nout; k++ ) {
+			DISPOUT	*o = &disp_out[k];
+
+			o->pend.n = 0;
+			o->old.n = 0;
+			if ( o->scaled ) {
+				out_black(o);		/* the bars round the picture */
+			}
+			if ( o->flipping ) {
+				o->old.r[0].left = o->x;
+				o->old.r[0].top = o->y;
+				o->old.r[0].right = o->x + (INT)o->sw;
+				o->old.r[0].bottom = o->y + (INT)o->sh;
+				o->old.n = 1;
+			}
+		}
+	}
+	return E_OK;
+}
 
 EXPORT ER ts_disp_setmode( UINT w, UINT h )
 {
-	T_DISPHW	hw;
-	UB		*back;
-	UBINT		pages, was_pages;
-	UINT		pitch;
+	T_DISPHW	hw, was;
+	ER		er;
 
 	if ( !disp_found ) {
 		return E_NOEXS;
 	}
-	if ( w == disp_spec.width && h == disp_spec.height ) {
+	if ( w == disp_hw.width && h == disp_hw.height ) {
 		return E_OK;
 	}
 	/* nothing builds the screen in the back buffer while it is replaced */
@@ -869,51 +1642,174 @@ EXPORT ER ts_disp_setmode( UINT w, UINT h )
 	tk_loc_mtx(disp_mtxid, TMO_FEVR);
 	settle();
 	taken();
+	was_take();
 	hw = disp_hw;
+	was = disp_hw;
 	if ( knl_disp_hw_setmode(&hw, w, h) <= 0 ) {
 		tk_unl_mtx(disp_mtxid);
 		if ( knl_wm_screen_kept != NULL ) knl_wm_screen_kept();
 		return E_NOSPT;
 	}
-	pitch = ( hw.format == DISP_FMT_XRGB8888 ) ? hw.pitch : hw.width * 4;
-	pages = ( (UBINT)pitch * hw.height + PAGE_SIZE - 1 ) / PAGE_SIZE;
-	back = (UB *)knl_vmap(pages, 0);
-	if ( back == NULL ) {
-		hw = disp_hw;
-		(void)knl_disp_hw_setmode(&hw, disp_spec.width, disp_spec.height);
+	er = lay_locked(&hw, TRUE);
+	if ( er < E_OK ) {
+		hw = was;
+		(void)knl_disp_hw_setmode(&hw, was.width, was.height);
 		tk_unl_mtx(disp_mtxid);
 		if ( knl_wm_screen_kept != NULL ) knl_wm_screen_kept();
-		return E_NOMEM;
-	}
-	knl_memset(back, 0, (SZ)( (UBINT)pitch * hw.height ));
-	was_pages = ( (UBINT)disp_spec.pitch * disp_spec.height + PAGE_SIZE - 1 ) / PAGE_SIZE;
-	knl_vunmap(disp_back, was_pages);
-	disp_back = back;
-	disp_hw = hw;
-	disp_spec.width = hw.width;
-	disp_spec.height = hw.height;
-	disp_spec.pitch = pitch;
-	disp_spec.fb_pa = hw.fb_pa;
-	disp_spec.fb_pitch = hw.pitch;
-	disp_spec.fb_bpp = hw.bpp;
-	disp_spec.fb_format = hw.format;
-	disp_spec.fb_pages = ( hw.pages >= 2 && hw.flip != NULL ) ? 2 : 1;
-	view_set();
-	disp_fb = (UB *)hw.fb_va;
-	disp_fb2 = (UB *)hw.page2_va;
-	disp_new.n = 0;			/* of the old screen; the new one is laid whole */
-	disp_shown = 0;
-	disp_due = FALSE;
-	disp_old.n = 0;
-	if ( disp_flipping && disp_spec.fb_pages < 2 ) {
-		disp_flipping = FALSE;
-	}
-	if ( disp_flipping ) {
-		whole_of(&disp_old);
+		return er;
 	}
 	tk_unl_mtx(disp_mtxid);
 	tm_printf((UB *)"TessronOS: display now %d x %d%s\n", (INT)hw.width, (INT)hw.height,
 		  disp_flipping ? ", two pages" : "");
+	if ( knl_wm_screen_changed != NULL ) knl_wm_screen_changed();
+	if ( knl_hid_screen_changed != NULL ) knl_hid_screen_changed();
+	/* an output that mirrors the main screen: its mode chosen again for the new size, and put on again */
+	if ( knl_disp_out_main_changed != NULL ) knl_disp_out_main_changed();
+	return E_OK;
+}
+
+/* An output besides the main one put in the list, or why it cannot be */
+LOCAL ER out_put( CONST T_DISPHW *hw, INT side, INT offset )
+{
+	DISPOUT	*o;
+
+	if ( hw == NULL || !sendable(hw) || hw->fb_va == 0
+	  || ( side != DISP_SIDE_RIGHT && side != DISP_SIDE_BELOW
+	       && side != DISP_SIDE_LEFT && side != DISP_SIDE_ABOVE && side != DISP_SIDE_MIRROR ) ) {
+		return E_PAR;
+	}
+	if ( offset < 0 ) {
+		return E_NOSPT;			/* before the main screen's corner along the edge: not taken */
+	}
+	if ( disp_nout >= DISP_OUTS ) {
+		return E_LIMIT;
+	}
+	o = &disp_out[disp_nout++];
+	knl_memset(o, 0, sizeof(*o));
+	o->hw = *hw;
+	o->id = disp_next_id++;
+	if ( disp_next_id <= 0 ) disp_next_id = 1;
+	o->side = side;
+	o->offset = offset;
+	o->flipping = (BOOL)( hw->pages >= 2 && hw->flip != NULL );
+	if ( o->flipping ) {
+		out_task_start();
+		if ( disp_out_tsk == 0 ) o->flipping = FALSE;
+	}
+	return E_OK;
+}
+
+/* What a screen besides the main one shows, for the console */
+LOCAL void out_tell( INT screen, CONST char *what )
+{
+	CONST DISPOUT	*o = &disp_out[screen - 1];
+
+	if ( o->side == DISP_SIDE_MIRROR ) {
+		tm_printf((UB *)"disp: output %d %s: %d x %d, %d bpp, the main screen's %d x %d at %d, %d%s, via %s%s\n",
+			  screen, what, (INT)o->hw.width, (INT)o->hw.height, (INT)o->hw.bpp, (INT)o->sw, (INT)o->sh,
+			  o->x, o->y, o->scaled ? " scaled in the send" : "", ( o->hw.via != NULL ) ? o->hw.via : "?",
+			  o->flipping ? ", two pages flipped at its own refresh" : "");
+		return;
+	}
+	tm_printf((UB *)"disp: screen %d %s: %d x %d, %d bpp, at %d, %d of the back buffer (%d x %d), via %s%s\n",
+		  screen, what, (INT)o->hw.width, (INT)o->hw.height, (INT)o->hw.bpp, o->x, o->y,
+		  (INT)disp_spec.width, (INT)disp_spec.height, ( o->hw.via != NULL ) ? o->hw.via : "?",
+		  o->flipping ? ", two pages flipped at its own refresh" : "");
+}
+
+EXPORT ER knl_disp_screen_hw( INT screen, T_DISPHW *hw, INT *p_side, INT *p_offset )
+{
+	if ( !disp_found || hw == NULL ) {
+		return E_NOEXS;
+	}
+	tk_loc_mtx(disp_mtxid, TMO_FEVR);
+	if ( screen < 0 || screen > disp_nout ) {
+		tk_unl_mtx(disp_mtxid);
+		return E_NOEXS;
+	}
+	*hw = ( screen == 0 ) ? disp_hw : disp_out[screen - 1].hw;
+	if ( p_side != NULL ) *p_side = ( screen == 0 ) ? DISP_SIDE_RIGHT : disp_out[screen - 1].side;
+	if ( p_offset != NULL ) *p_offset = ( screen == 0 ) ? 0 : disp_out[screen - 1].offset;
+	tk_unl_mtx(disp_mtxid);
+	return E_OK;
+}
+
+EXPORT INT knl_disp_out_attach( CONST T_DISPHW *hw, INT side, INT offset )
+{
+	ER	er;
+	INT	screen;
+
+	if ( !disp_found ) {
+		return E_NOEXS;
+	}
+	if ( knl_wm_screen_changing != NULL ) knl_wm_screen_changing();
+	tk_loc_mtx(disp_mtxid, TMO_FEVR);
+	settle();
+	was_take();
+	er = out_put(hw, side, offset);
+	if ( er >= E_OK ) {
+		er = lay_locked(&disp_hw, FALSE);
+		if ( er < E_OK ) {
+			disp_nout--;
+		}
+	}
+	if ( er < E_OK ) {
+		tk_unl_mtx(disp_mtxid);
+		if ( knl_wm_screen_kept != NULL ) knl_wm_screen_kept();
+		return er;
+	}
+	screen = disp_nout;
+	out_tell(screen, "added");
+	tk_unl_mtx(disp_mtxid);
+	if ( knl_wm_screen_changed != NULL ) knl_wm_screen_changed();
+	if ( knl_hid_screen_changed != NULL ) knl_hid_screen_changed();
+	return screen;
+}
+
+EXPORT ER knl_disp_out_detach( INT screen )
+{
+	DISPOUT	gone;
+	INT	k;
+	ER	er;
+
+	if ( !disp_found ) {
+		return E_NOEXS;
+	}
+	if ( knl_wm_screen_changing != NULL ) knl_wm_screen_changing();
+	tk_loc_mtx(disp_mtxid, TMO_FEVR);
+	if ( screen < 1 || screen > disp_nout ) {
+		tk_unl_mtx(disp_mtxid);
+		if ( knl_wm_screen_kept != NULL ) knl_wm_screen_kept();
+		return E_NOEXS;
+	}
+	settle();
+	was_take();
+	gone = disp_out[screen - 1];
+	for ( k = screen - 1; k + 1 < disp_nout; k++ ) {
+		disp_out[k] = disp_out[k + 1];
+	}
+	disp_nout--;
+	er = lay_locked(&disp_hw, FALSE);
+	if ( er < E_OK ) {
+		/* no room for the smaller back buffer: the output stays */
+		for ( k = disp_nout; k > screen - 1; k-- ) {
+			disp_out[k] = disp_out[k - 1];
+		}
+		disp_out[screen - 1] = gone;
+		disp_nout++;
+		{
+			UINT	w, h;
+			INT	mx, my;
+
+			outs_place(disp_hw.width, disp_hw.height, &w, &h, &mx, &my);
+		}
+		tk_unl_mtx(disp_mtxid);
+		if ( knl_wm_screen_kept != NULL ) knl_wm_screen_kept();
+		return er;
+	}
+	tm_printf((UB *)"disp: screen %d taken away: the back buffer is %d x %d\n",
+		  screen, (INT)disp_spec.width, (INT)disp_spec.height);
+	tk_unl_mtx(disp_mtxid);
 	if ( knl_wm_screen_changed != NULL ) knl_wm_screen_changed();
 	if ( knl_hid_screen_changed != NULL ) knl_hid_screen_changed();
 	return E_OK;
@@ -942,6 +1838,7 @@ EXPORT ER ts_disp_setscale( UINT scale )
 	}
 	if ( knl_wm_screen_changing != NULL ) knl_wm_screen_changing();
 	tk_loc_mtx(disp_mtxid, TMO_FEVR);
+	was_take();
 	was = disp_spec.scale;
 	disp_spec.scale_want = scale;
 	view_set();
@@ -1010,7 +1907,7 @@ LOCAL BOOL page_same( UINT page, CONST T_DISPRECT *r0, FCBAD *b )
 		CONST UB	*d = fb + (UBINT)y * disp_spec.fb_pitch;
 
 		for ( x = r.left; x < r.right; x++ ) {
-			send_row(&want, &s[x], 1);
+			send_row(&want, &s[x], 1, disp_spec.fb_format, disp_alpha);
 			if ( bytes == 2 ) {
 				want &= 0xFFFFU;
 				got = *(volatile CONST UH *)( d + (UBINT)x * 2 );
@@ -1180,6 +2077,48 @@ bad:
 
 /* ---------------------------------------------------------------- start-up */
 
+/*
+ * The outputs besides the main one that the driver found (knl_disp_hw_more),
+ * put beside it before anything is drawn. One that cannot be sent to is
+ * said and left out.
+ */
+IMPORT INT knl_disp_hw_more( INT i, UINT main_w, UINT main_h, T_DISPHW *hw, INT *p_side, INT *p_offset )
+	__attribute__((weak));
+
+LOCAL void outs_found( void )
+{
+	T_DISPHW	hw;
+	INT		i, side, offset, n, k;
+	ER		er;
+
+	if ( knl_disp_hw_more == NULL ) {
+		return;
+	}
+	tk_loc_mtx(disp_mtxid, TMO_FEVR);
+	for ( i = 0; i < DISP_OUTS; i++ ) {
+		knl_memset(&hw, 0, sizeof(hw));
+		side = DISP_SIDE_RIGHT;
+		offset = 0;
+		if ( knl_disp_hw_more(i, disp_hw.width, disp_hw.height, &hw, &side, &offset) <= 0 ) {
+			break;
+		}
+		er = out_put(&hw, side, offset);
+		if ( er < E_OK ) {
+			tm_printf((UB *)"disp: a further screen of %d x %d, %d bpp, via %s, cannot be used (%d)\n",
+				  (INT)hw.width, (INT)hw.height, (INT)hw.bpp, ( hw.via != NULL ) ? hw.via : "?", (INT)er);
+		}
+	}
+	n = disp_nout;
+	if ( n > 0 && lay_locked(&disp_hw, FALSE) < E_OK ) {
+		disp_nout = 0;
+		tm_printf((UB *)"disp: no room for a back buffer round %d screens: the main one only\n", n + 1);
+	}
+	for ( k = 1; k <= disp_nout; k++ ) {
+		out_tell(k, "found");
+	}
+	tk_unl_mtx(disp_mtxid);
+}
+
 EXPORT INT knl_disp_init( void )
 {
 	T_CMTX	cmtx;
@@ -1219,6 +2158,10 @@ EXPORT INT knl_disp_init( void )
 	disp_spec.fb_bpp    = hw.bpp;
 	disp_spec.fb_format = hw.format;
 	disp_spec.fb_pages  = ( hw.pages >= 2 && hw.flip != NULL ) ? 2 : 1;
+	disp_spec.main_w = hw.width;
+	disp_spec.main_h = hw.height;
+	disp_spec.main_x = 0;
+	disp_spec.main_y = 0;
 	view_set();
 	disp_alpha = hw.alpha;
 	disp_fb = (UB *)hw.fb_va;
@@ -1258,11 +2201,18 @@ EXPORT INT knl_disp_init( void )
 	if ( disp_spec.fb_pages >= 2 && hw.flip_start ) {
 		tk_loc_mtx(disp_mtxid, TMO_FEVR);
 		(void)flip_check();
+		{
+			RECTS	w;
+
+			whole_of(&w);
+			main_told(&w);
+		}
 		tk_unl_mtx(disp_mtxid);
 		tm_printf((UB *)"disp: flip: %s\n", disp_flipping
 			  ? "on: each send goes to the page not shown, which is then shown"
 			  : "off: each send goes to the page shown");
 	}
+	outs_found();
 
 	return 1;
 }

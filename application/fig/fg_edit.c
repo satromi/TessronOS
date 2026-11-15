@@ -1090,7 +1090,7 @@ void fg_press( CONST T_OBNTM *m )
 		}
 	}
 	/* a finger by the edge of what is taken, on nothing: that edge, to size it */
-	if ( er < E_OK && !add && ( which = edge_near(x, y, slop, &box) ) >= 0 ) {
+	if ( er < E_OK && !add && !FG_TEMPLATES && ( which = edge_near(x, y, slop, &box) ) >= 0 ) {
 		hold(hold_kind(&box, x, y, slop), which, &box, x, y);
 		return;
 	}
@@ -1110,8 +1110,14 @@ void fg_press( CONST T_OBNTM *m )
 		if ( g_pick[which] == 0 ) slop = 0;
 		if ( add ) pick_toggle(which);
 		else if ( g_pick[which] == 0 ) pick_only(which);
-		/* sizing is for one; with several taken, a press on an edge carries them all */
-		hold(( g_npick == 1 ) ? hold_kind(&box, x, y, slop) : HOLD_MOVE, which, &box, x, y);
+		/*
+		 * sizing is for one; with several taken, a press on an edge
+		 * carries them all. A template of the 原紙箱 is never sized
+		 * (sized taller, a link would become an open one): its edges
+		 * carry it as its middle does
+		 */
+		hold(( g_npick == 1 && !( FG_TEMPLATES && fg_is_link(which) ) ) ? hold_kind(&box, x, y, slop) : HOLD_MOVE,
+		     which, &box, x, y);
 		if ( g_pick[which] == 0 || is_protected(which) ) hold_how = HOLD_NONE;
 		if ( pick_gen != gen0 ) {
 			fg_damage(&was);
@@ -1237,6 +1243,8 @@ static void let_go( void )
  * before it was carried, the one link put is to a copy of its object and
  * nothing here changes. Shapes that are not links stay in the figure.
  */
+static void base_out( void );
+
 static void carry_out( BOOL twice )
 {
 	T_DTREQ		rq;
@@ -1249,6 +1257,13 @@ static void carry_out( BOOL twice )
 	ER		er;
 	char		s[TAD_NAME_MAX + 64];
 
+	/* out of the 原紙箱 or 原紙集め: a new object made of the template where it is let go */
+	if ( FG_TEMPLATES ) {
+		base_out();
+		return;
+	}
+	/* out of the 小物箱: the accessory pressed copied there, as a 実身複製 of it; the list keeps it */
+	if ( FG_ACCBOX ) twice = TRUE;
 	memset(&o, 0, sizeof(o));
 	if ( twice ) {
 		/* the one pressed, alone */
@@ -1284,7 +1299,8 @@ static void carry_out( BOOL twice )
 		return;
 	}
 	seq = rq.seq;
-	copy = (BOOL)( an.how == DT_HOW_COPY || hold_copy );
+	/* out of a tool's list: put there as a copy, for the list is the store's as it is */
+	copy = (BOOL)( an.how == DT_HOW_COPY || hold_copy || FG_TOOL );
 	given = (BOOL)( ( an.flags & DT_F_TO_PROG ) != 0 );
 	for ( i = 0, k = 0; g_fig != NULL && i < g_fig->nsh; i++ ) {
 		if ( g_pick[i] == 0 || !fg_is_link(i) || is_protected(i) || !shape_box(i, &b)
@@ -1318,6 +1334,66 @@ static void carry_out( BOOL twice )
 		say(s);
 	}
 	g_dirty = TRUE;
+}
+
+/*
+ * The template pressed in the 原紙箱, carried out of the window as the
+ * desktop's outline with DT_F_BASE: where a link can go, the desktop asks
+ * the name and makes the new object from the template, and puts the link
+ * to it there. The template stays where it is in the box, whatever else
+ * was taken.
+ */
+static void base_out( void )
+{
+	T_DTREQ		rq;
+	T_DTANS		an;
+	T_DPRECT	b;
+	T_VOBJ		v;
+	ER		er;
+	char		s[TAD_NAME_MAX + 64];
+
+	if ( g_fig == NULL || hold_which < 0 || !fg_is_link(hold_which) || !shape_box(hold_which, &b)
+	  || tad_lnk_get(g_rec, g_fig->sh[hold_which].link, &v) < E_OK ) return;
+	fg_ask_of(&v, DT_RQ_CARRY, &rq);
+	rq.flags |= DT_F_BASE | DT_F_TO_PROG;
+	rq.look.w = b.right - b.left;
+	rq.look.h = b.bottom - b.top;
+	rq.grab_x = hold_x0 - b.left;
+	rq.grab_y = hold_y0 - b.top;
+	memset(&an, 0, sizeof(an));
+	er = ask_desktop(&rq, &an, 30 * 60 * 1000);
+	snprintf(s, sizeof(s), "carried %s (%d) as a new object", fg_link_name(&v), (INT)er);
+	note(s);
+	g_dirty = TRUE;
+}
+
+/*
+ * Let go within the window, the links carried there. A template of the
+ * 原紙箱 stays where it was laid out, whether carried or copied by the
+ * second button. An accessory of the 小物箱 carried (not copied) goes
+ * before the row it was let go over -- above the middle of that row --
+ * or after them all below the middle of the last: the desktop changes
+ * the order (dt_acc_place) and the list is made again when it says so.
+ */
+static void box_let_go( INT y )
+{
+	T_VOBJ	v, b;
+	INT	i, fy = unz(y + g_sy);
+	BOOL	has_b = FALSE;
+
+	if ( !FG_ACCBOX || hold_copy || g_fig == NULL || hold_which < 0 || !fg_is_link(hold_which)
+	  || tad_lnk_get(g_rec, g_fig->sh[hold_which].link, &v) < E_OK ) {
+		note("let go within the box: nothing moved");
+		return;
+	}
+	for ( i = 0; i < g_fig->nsh && !has_b; i++ ) {
+		T_DPRECT	r = g_fig->sh[i].r;
+
+		if ( fg_is_link(i) && fy < ( r.top + r.bottom ) / 2 && tad_lnk_get(g_rec, g_fig->sh[i].link, &b) >= E_OK ) {
+			has_b = TRUE;
+		}
+	}
+	fg_box->place(&v.target, has_b ? &b.target : NULL);
 }
 
 /* The pointer went out of the window with the hand down: links carried on by the desktop */
@@ -1547,9 +1623,9 @@ void fg_released( INT x, INT y )
 	out_n = 0;
 	hold_how = HOLD_NONE;
 	if ( how == HOLD_TWICE ) {
-		link_open(&hold_v);
+		fg_open(&hold_v);
 	} else if ( how == HOLD_DUP ) {
-		dup_here();
+		if ( !FG_MADE ) dup_here();	/* nothing is put in a list made */
 	} else if ( hold_moved && how == HOLD_MOVE && let_go_over_other(x, y) ) {
 		T_DPRECT	was;
 
@@ -1557,10 +1633,14 @@ void fg_released( INT x, INT y )
 		fg_pick_none();
 		fg_damage(&was);
 		note("let go over another window: nothing moved");
+	} else if ( hold_moved && how == HOLD_MOVE && ( FG_TEMPLATES || FG_ACCBOX ) ) {
+		box_let_go(y);
+	} else if ( hold_moved && how == HOLD_MOVE && FG_TOOL ) {
+		note("let go within a tool's list: nothing moved");	/* its list is laid out by the tool */
 	} else if ( hold_moved && how == HOLD_MOVE ) {
 		moved_picked();
 	} else if ( hold_moved && ( how == HOLD_W || how == HOLD_H || how == HOLD_WH ) ) {
-		sized_picked();
+		if ( !FG_MADE ) sized_picked();	/* nothing of a list made changes size */
 	} else if ( how == HOLD_BAND ) {
 		if ( hold_moved ) banded();
 	} else {
@@ -1574,6 +1654,8 @@ void fg_released( INT x, INT y )
 /* ---------------------------------------------------------------- changes */
 
 /* The links and shapes taken, deleted; what is protected stays */
+BOOL	(*fg_link_going)( CONST T_VOBJ *v ) = NULL;
+
 void fg_delete( void )
 {
 	TS_UUID	*gone;
@@ -1587,7 +1669,14 @@ void fg_delete( void )
 	/* the identities first: deleting one moves the others' numbers */
 	for ( i = 0; i < g_fig->nsh && n < g_npick; i++ ) {
 		if ( g_pick[i] != 0 && fg_is_link(i) && !is_protected(i)
-		  && tad_lnk_get(g_rec, g_fig->sh[i].link, &v) >= E_OK ) gone[n++] = v.vobjid;
+		  && tad_lnk_get(g_rec, g_fig->sh[i].link, &v) >= E_OK ) {
+			if ( fg_link_going != NULL && !fg_link_going(&v) ) {
+				g_pick[i] = 0;		/* it stays, and is no longer taken */
+				g_npick--;
+				continue;
+			}
+			gone[n++] = v.vobjid;
+		}
 	}
 	fg_sync();
 	if ( n > 0 || fe_picked(&g_ed) > 0 ) {
@@ -1693,7 +1782,14 @@ void fg_cut( void )
 		}
 	}
 	fg_sync();
-	if ( fg_copy() ) fg_delete();
+	if ( fg_copy() ) {
+		/* cut, a disk's link goes to the tray and leaves the disk as it is */
+		BOOL	(*going)( CONST T_VOBJ *v ) = fg_link_going;
+
+		fg_link_going = NULL;
+		fg_delete();
+		fg_link_going = going;
+	}
 }
 
 /* The first xmlTAD fragment of the set in hand, parsed; NULL none */
@@ -1753,81 +1849,6 @@ INT fg_tray_links( void )
 	return n;
 }
 
-/* The number after the last '_' of a picture beside a record ("<object>_0_<n>.png") */
-static INT pic_number( CONST UB *h )
-{
-	INT	j, v = 0, under = 0;
-
-	for ( j = 0; h != NULL && h[j] != 0 && h[j] != '.'; j++ ) {
-		if ( h[j] == '_' ) {
-			under++;
-			v = 0;
-		} else if ( under == 2 && h[j] >= '0' && h[j] <= '9' ) {
-			v = v * 10 + ( h[j] - '0' );
-		}
-	}
-	return ( under == 2 ) ? v : 0;
-}
-
-static INT pic_top( CONST T_TAD *frag )
-{
-	CONST T_TAD	*docs[2];
-	T_TADNODE	*n;
-	INT		top = 0, k, v;
-
-	docs[0] = g_rec;
-	docs[1] = frag;
-	for ( k = 0; k < 2; k++ ) {
-		for ( n = tad_walk(docs[k], NULL); n != NULL; n = tad_walk(docs[k], n) ) {
-			if ( n->kind != TAD_ND_ELEM ) continue;
-			v = pic_number(tad_attr(n, "href"));
-			if ( v > top ) top = v;
-		}
-	}
-	return top;
-}
-
-/*
- * The pictures a fragment from the tray names by its set ("tray:N"),
- * written beside this object's record under names of their own past
- * every number used, and the fragment made to name them so
- */
-static void tray_pictures( T_TAD *frag )
-{
-	T_TADNODE	*n;
-	T_TRINF		inf;
-	CONST UB	*h;
-	char		us[TS_UUID_STRLEN + 1];
-	UB		name[TS_UUID_STRLEN + 24], *png;
-	SZ		asz = 0;
-	INT		rn, i;
-	ID		k;
-
-	ts_uuid_text(&g_obj, us);
-	for ( n = tad_walk(frag, NULL); n != NULL; n = tad_walk(frag, n) ) {
-		h = ( n->kind == TAD_ND_ELEM ) ? tad_attr(n, "href") : NULL;
-		if ( h == NULL || strncmp((CONST char *)h, "tray:", 5) != 0 ) continue;
-		for ( rn = 0, i = 5; h[i] >= '0' && h[i] <= '9'; i++ ) rn = rn * 10 + ( h[i] - '0' );
-		if ( tr_ref_rec(TR_HAND, rn, &inf) < E_OK || inf.kind != TR_PNG || inf.size <= 0 ) continue;
-		png = malloc((size_t)inf.size);
-		if ( png == NULL ) continue;
-		k = ob_opn_obj(&g_obj, OB_OP_R | OB_OP_W);
-		if ( k > 0 && tr_rea_rec(TR_HAND, rn, png, inf.size, &asz) >= E_OK ) {
-			snprintf((char *)name, sizeof(name), "%s_0_%d.png", us, pic_top(frag) + 1);
-			if ( ob_wri_res(k, name + TS_UUID_STRLEN, png, asz) >= E_OK
-			  && tad_set_attr(frag, n, "href", name) >= E_OK ) {
-				char	s[TS_UUID_STRLEN + 40];
-
-				snprintf(s, sizeof(s), "tray picture %s", (char *)name);
-				note(s);
-				tv_src_forget(&g_obj);
-			}
-		}
-		if ( k > 0 ) ob_cls_obj(k);
-		free(png);
-	}
-}
-
 /*
  * The set in hand put into the figure, each time a step further down
  * and across than the last. A pasted link is a new link to the same
@@ -1851,7 +1872,7 @@ void fg_paste( BOOL take )
 	nlinks = tad_lnk_count(frag);
 	pasted++;
 	off = ED_STEP * pasted;
-	tray_pictures(frag);
+	(void)ta_tray_pictures(frag);
 	fg_sync();
 	(void)fe_paste_frag(&g_ed, frag, off);
 	for ( i = 0; i < nlinks; i++ ) {
@@ -2072,4 +2093,32 @@ void fg_dropped( CONST T_OBDROP *dr )
 	fg_after();
 	snprintf(s, sizeof(s), "dropped %d", n);
 	note(s);
+}
+
+/*
+ * A list the program made (FG_MADE) shown in place of the one shown,
+ * scrolled as it was within what it is now. What the hand holds within
+ * the window is let go first, for the shapes it holds are the old
+ * list's; a link carried out is the desktop's until it is let go.
+ */
+void fg_list_set( T_TAD *rec )
+{
+	INT	sx = g_sx, sy = g_sy, w = 0, h = 0;
+
+	if ( rec == NULL ) return;
+	if ( fg_holding() ) fg_hold_cancel();
+	fg_pick_none();
+	if ( g_rec != NULL ) tad_free(g_rec);
+	g_rec = rec;
+	ta_was();
+	fg_model();
+	/* its size known before it is drawn, for it to be scrolled within it */
+	if ( g_fig != NULL && tv_fig_size(g_fig, &w, &h) >= E_OK ) {
+		g_fw = w * g_zoom / 8;
+		g_fh = h * g_zoom / 8;
+	}
+	g_sx = g_sy = 0;
+	fg_scroll_to(sx, sy);
+	ta_watch_links();
+	g_dirty = TRUE;
 }

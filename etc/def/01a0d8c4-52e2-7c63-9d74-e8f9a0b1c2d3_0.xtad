@@ -1,6 +1,6 @@
 <tad version="1.0" encoding="UTF-8" filename="ウインドウ一覧">
 <document>
 <p>ウインドウ一覧</p>
-<p>組込みのプログラム(window-list-viewer)</p>
+<p>画面のウインドウを手前から順に、それぞれが見せる実身の仮身として、ウインドウの題名で一覧する小物。仮身を開くと、そのウインドウが前に出る。プロセスとして動く(application/systool/wl_main.c)。</p>
 </document>
 </tad>

@@ -1545,16 +1545,17 @@ static void place_shift( CONST SKVIEW *v, T_OBWPOS *wp, INT dx, INT dy )
 static void place_fit( SKVIEW *v )
 {
 	T_OBWPOS	wp;
-	INT		sw = 0, sh = 0, dx = 0, dy = 0;
+	T_DPRECT	m;
+	INT		dx = 0, dy = 0;
 
 	if ( !place_get(v, &wp) ) return;
-	wm_screen(&sw, &sh);
-	if ( v->edge && v->part == PART_R ) dx = sw - wp.right;
-	else if ( v->edge && v->part == PART_L ) dx = -wp.left;
-	else if ( wp.right > sw ) dx = sw - wp.right;
-	if ( wp.left + dx < 0 ) dx = -wp.left;
-	if ( wp.bottom > sh - MSG_ROOM ) dy = sh - MSG_ROOM - wp.bottom;
-	if ( wp.top + dy < 0 ) dy = -wp.top;
+	wm_screen_main_rect(&m);	/* the main screen, wherever it is in the view */
+	if ( v->edge && v->part == PART_R ) dx = m.right - wp.right;
+	else if ( v->edge && v->part == PART_L ) dx = m.left - wp.left;
+	else if ( wp.right > m.right ) dx = m.right - wp.right;
+	if ( wp.left + dx < m.left ) dx = m.left - wp.left;
+	if ( wp.bottom > m.bottom - MSG_ROOM ) dy = m.bottom - MSG_ROOM - wp.bottom;
+	if ( wp.top + dy < m.top ) dy = m.top - wp.top;
 	if ( dx != 0 || dy != 0 ) place_shift(v, &wp, dx, dy);
 	place_note(v);
 }
@@ -1644,7 +1645,7 @@ static void win_key( INT pg, INT part, char *buf, INT max )
 
 static BOOL win_kept( INT pg, INT part, INT *p )
 {
-	char	key[40], v[64], w[16];
+	char	key[40], v[80], w[16];
 	INT	i;
 
 	win_key(pg, part, key, sizeof(key));
@@ -1653,6 +1654,9 @@ static BOOL win_kept( INT pg, INT part, INT *p )
 		if ( !cf_word(v, i, w, sizeof(w)) ) return FALSE;
 		p[i] = cf_num(w, -1);
 	}
+	/* from the corner of the screen the sixth word names, the main one's without it (wm_place_open) */
+	if ( !cf_word(v, 5, w, sizeof(w)) ) w[0] = 0;
+	wm_place_xywh(&p[0], &p[1], p[2] + 16, p[3] + 34, w);
 	return (BOOL)( p[2] > 0 && p[3] > 0 );
 }
 
@@ -1660,7 +1664,9 @@ static BOOL win_kept( INT pg, INT part, INT *p )
 static void wins_put( void )
 {
 	T_OBWPOS	wp;
-	char		key[40], v[64];
+	T_DPRECT	view;
+	T_WMPLACE	p;
+	char		key[40], v[80];
 	INT		i;
 
 	for ( i = 0; i < g_nv; i++ ) {
@@ -1669,8 +1675,22 @@ static void wins_put( void )
 		if ( !s->open || !place_get(s, &wp) ) continue;
 		place_moved(s);
 		win_key(g_page, s->part, key, sizeof(key));
-		snprintf(v, sizeof(v), "%d %d %d %d %d", wp.left, wp.top, wp.wright - wp.wleft,
-			 wp.wbottom - wp.wtop, s->edge ? 1 : 0);
+		/* from the corner of the screen it stands on, and which screen after the rest (wm_place_keep) */
+		view.left = wp.left;
+		view.top = wp.top;
+		view.right = wp.right;
+		view.bottom = wp.bottom;
+		if ( wm_place_keep(&view, &p) < E_OK ) {
+			p.r = view;
+			p.screen = 0;
+		}
+		if ( p.screen != 0 ) {
+			snprintf(v, sizeof(v), "%d %d %d %d %d %08x", p.r.left, p.r.top, wp.wright - wp.wleft,
+				 wp.wbottom - wp.wtop, s->edge ? 1 : 0, (UINT)p.screen);
+		} else {
+			snprintf(v, sizeof(v), "%d %d %d %d %d", p.r.left, p.r.top, wp.wright - wp.wleft,
+				 wp.wbottom - wp.wtop, s->edge ? 1 : 0);
+		}
 		(void)conf_put(key, v);
 		say("window %s %s", key, v);
 	}
@@ -1688,14 +1708,17 @@ static ER win_open( SKVIEW *v, INT part, BOOL plain )
 {
 	T_OBCRE		c;
 	T_OBNTF		req;
-	INT		sw = 0, sh = 0, x, y, w0 = page()->w0, h0 = page()->h0, kept[5];
+	T_DPRECT	m;
+	INT		sw, sh, x, y, w0 = page()->w0, h0 = page()->h0, kept[5];
 	char		json[200];
 
 	memset(v, 0, sizeof(*v));
 	v->part = part;
 	v->gid = -1;
 	v->edge = (BOOL)( part != PART_ALL );
-	wm_screen(&sw, &sh);
+	wm_screen_main_rect(&m);	/* at the main screen's foot or edges, wherever it is in the view */
+	sw = m.right - m.left;
+	sh = m.bottom - m.top;
 	if ( part == PART_L ) {
 		x = 0;
 	} else if ( part == PART_R ) {
@@ -1704,6 +1727,8 @@ static ER win_open( SKVIEW *v, INT part, BOOL plain )
 		x = ( sw > w0 + 16 ) ? ( sw - w0 - 16 ) / 2 : 0;
 	}
 	y = ( sh > h0 + 120 ) ? sh - h0 - 120 : 0;
+	x += m.left;
+	y += m.top;
 	if ( !plain && win_kept(g_page, part, kept) ) {
 		x = kept[0];
 		y = kept[1];

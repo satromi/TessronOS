@@ -129,13 +129,14 @@ EXPORT int rumpcomp_neta_open( UB *mac, int *mtu )
 
 /*
  * One frame out, into the ring; 0. A full ring makes the sender wait
- * for room, outside the rump kernel.
+ * for room; a thread of the rump kernel (in_rump) gives up its virtual
+ * processor while it waits.
  */
-EXPORT int rumpcomp_neta_send( CONST void *frame, UD len )
+LOCAL int tx_put( CONST void *frame, UD len, BOOL in_rump )
 {
 	NETA_SLOT	*sl;
 	UINT		imask;
-	INT		n;
+	INT		n = 0;
 	BOOL		put;
 
 	if ( len > NET_FRAME_MAX ) {
@@ -157,10 +158,32 @@ EXPORT int rumpcomp_neta_send( CONST void *frame, UD len )
 			(void)tk_sig_sem(tx_sem, 1);
 			return 0;
 		}
-		knl_rump_unsched(&n);
+		if ( in_rump ) knl_rump_unsched(&n);
 		(void)tk_wai_sem(tx_room, 1, 100);
-		knl_rump_sched(n);
+		if ( in_rump ) knl_rump_sched(n);
 	}
+}
+
+/* The stack's frames out (rumpcomp/if_tsneta.c) */
+EXPORT int rumpcomp_neta_send( CONST void *frame, UD len )
+{
+	return tx_put(frame, len, TRUE);
+}
+
+/*
+ * A whole Ethernet frame out from a task of the system's own, past the
+ * stack, in the same ring as the stack's: what BSD's DHCP clients write
+ * to BPF and Linux's to a packet socket. The DHCP client's broadcasts
+ * go this way, so that they leave from 0.0.0.0 to 255.255.255.255
+ * whatever address the interface holds (so_dhcp.c). 0, or ENXIO (6)
+ * while there is no card.
+ */
+EXPORT int knl_neta_send_frame( CONST void *frame, UD len )
+{
+	if ( neta_dd <= 0 || tx_ring == NULL ) {
+		return 6;
+	}
+	return tx_put(frame, len, FALSE);
 }
 
 /*

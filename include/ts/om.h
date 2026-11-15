@@ -198,6 +198,7 @@ IMPORT BOOL  om_store_opens_with( CONST TS_UUID *id, CONST char *app );
  * read as "[tag] [tag]".
  */
 IMPORT ER    om_store_rename( CONST TS_UUID *id, CONST UB *name );
+/* colour TAD_COL_NONE: no paper of its own any more (om_store_paper says E_NOEXS) */
 IMPORT ER    om_store_set_paper( CONST TS_UUID *id, UW colour );
 IMPORT INT   om_store_relationship( CONST TS_UUID *id, UB *buf, INT max );
 IMPORT ER    om_store_set_relationship( CONST TS_UUID *id, CONST UB *tags );
@@ -323,6 +324,9 @@ IMPORT INT   om_obj_res_list( CONST TS_UUID *id, UB *buf, SZ size );
 
 /* A link to an object added to a box (a figure of links), when it has none to it */
 IMPORT ER    om_obj_link_add( CONST TS_UUID *box, CONST TS_UUID *uuid );
+
+/* The same in a box's record 0 parsed: 1 when the link was added, 0 when it has one, or an error */
+IMPORT INT   om_tad_link_add( T_TAD *doc, CONST TS_UUID *uuid );
 
 /* Every link of a box to an object taken out */
 IMPORT ER    om_obj_link_del( CONST TS_UUID *box, CONST TS_UUID *uuid );

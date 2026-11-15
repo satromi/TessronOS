@@ -24,7 +24,6 @@
 #include <ts/vobjsz.h>
 
 #define XFC_ENT_MAX	2048		/* entries a list holds */
-#define XFC_DISKS	2048		/* disks listed: every disk and partition the device manager knows */
 #define XFC_CONN_MAX	8		/* FTP connections kept */
 #define XFC_FIELD	128		/* bytes of a field of the FTP form */
 #define XFC_WIN_MAX	8		/* windows at once: the media and the file lists */
@@ -132,6 +131,7 @@ typedef struct {
 	XFCNET		xnet;
 	T_FTPNET	fnet;
 	BOOL		is_ftp;
+	XFCCONN		fc;			/* is_ftp: the connection it was opened by, without the password */
 	TS_UUID		disk;			/* the disk shown */
 	BOOL		mounted;		/* its disk opened by this window (vd): let go when it closes */
 	INT		vd;			/* the disk's root, from its device object (fs_opn_vol) */

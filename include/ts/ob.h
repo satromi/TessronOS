@@ -44,6 +44,7 @@ extern "C" {
 /* Subtypes */
 #define OB_S_FILE	1		/* storage on a volume (TSFS) */
 #define OB_S_MEMORY	2		/* storage in memory: shared memory, global names */
+#define OB_S_GPUBO	3		/* storage: a BO of the GPU held as an object (include/ts/gpuapp.h) */
 #define OB_S_DISK	1		/* device: blocks */
 #define OB_S_CHAR	2		/* device: a stream */
 #define OB_S_CLOCK	3		/* device: the clock */
@@ -61,6 +62,8 @@ extern "C" {
 #define OB_S_NET	15		/* device: the network adapters (x64: the list of them, the Wi-Fi) */
 #define OB_S_QUEUE	1		/* channel: a queue of messages */
 #define OB_S_SOCKET	2		/* channel: a socket of the network */
+#define OB_S_STREAM	3		/* channel: one end of a pair of streams between processes */
+#define OB_S_POLL	4		/* channel: keys waited on together (a poll set) */
 #define OB_S_WINDOW	1		/* window: drawn in freely */
 #define OB_S_PANEL	2		/* window: holds parts */
 #define OB_S_MENU	3		/* window: a column of items */
@@ -71,6 +74,13 @@ extern "C" {
 #define OB_F_VIRTUAL	0x0002		/* a device the manager makes itself */
 #define OB_F_GLOBAL	0x0004		/* found by its name (ob_fnd_nam) */
 #define OB_F_AUTOREF	0x0008		/* its store counts the links of its records */
+/*
+ * Memory: no name, not listed, reached only by a key handed on
+ * (ob_dup_key), and gone by itself when no key is open on it, no
+ * process has it mapped and nothing links to it -- shared memory
+ * between processes (memfd_create of lib/libcxxrt, design 18.6)
+ */
+#define OB_F_TRANSIENT	0x0010
 
 /* ---------------------------------------------------------------- operations */
 
@@ -151,7 +161,8 @@ extern "C" {
 #define OB_SND_MIX	26		/* SDMix: the whole's volume and the programs' */
 #define OB_SND_MIXSET	27		/* SDMixSet written: a volume or a mute set */
 #define OB_SND_MONITOR	28		/* SDMon: the channel records what is played */
-#define OB_SND_NREC	29
+#define OB_SND_MIXIN	29		/* SDMixIn: the microphone's volume, how it takes it, its level */
+#define OB_SND_NREC	30
 
 /* A camera's records (include/ts/cam.h): record 1 its frames, the rest its attributes */
 #define OB_CAM_FRAME	1		/* data number 0: T_CAMFRAME and the frame */
@@ -235,9 +246,12 @@ extern "C" {
 #define OB_PW_NREC	2
 
 /*
- * A GPU (OB_S_GPU): record 1 its state as "key value" lines (what it is,
- * whether it runs, its engines' jobs and resets, compositing), told as
- * OB_E_CHANGE on record 1 when it changes
+ * A GPU (OB_S_GPU, "gpu0", the fixed UUID of gpuapp.h): record 1 its
+ * state as "key value" lines (BACKEND registered or none, KIND, FEATURE,
+ * then what the backend adds: what it is, whether it runs, its engines'
+ * jobs and resets, compositing), told as OB_E_CHANGE on record 1 when a
+ * backend registers or goes and when the backend's lines change. There
+ * on every machine, with BACKEND none while no GPU is registered.
  */
 #define OB_GP_STATE	1
 #define OB_GP_NREC	2
@@ -275,6 +289,153 @@ extern "C" {
  */
 #define OB_SK_DATA	1
 #define OB_SK_NREC	2
+
+/*
+ * A stream (OB_S_STREAM, design 18.8): one end of a pair. ob_cre_obj of
+ * OB_T_CHANNEL with sub OB_S_STREAM makes both ends and answers the
+ * first; the state of an end names the other (OB_ST_STATE). What one end
+ * writes the other reads, bytes in order, as a socket of AF_UNIX and
+ * SOCK_STREAM carries them. Neither end has a name, and no box links to
+ * it: the processes that hold keys to it show it in their record 0.
+ *
+ * Record 1 (OB_ST_DATA) is the bytes. Read, those that came, at most
+ * what was asked; 0 bytes once the other end is closed, or writes no
+ * more, and everything is read. Written, they go to the other end;
+ * E_IO when it is closed or this end said it writes no more. Each waits
+ * unless the key was opened with OB_O_NOWAIT (E_TMOUT: nothing there, or
+ * no room at all); a write that does not wait puts in what there is room
+ * for. ob_rea_tmo waits up to its time.
+ *
+ * Record 2 (OB_ST_STATE): read, a T_OBSTSTAT; written, an INT: OB_SHUT_WR,
+ * this end writes no more and the other end reads the end after what is
+ * there.
+ *
+ * Record 3 (OB_ST_MSG): the bytes with keys carried beside them, as
+ * SCM_RIGHTS carries descriptors. The buffer is a T_OBSTMSG with room
+ * entries of key[], the bytes after them (OB_STM_DATA); *p_asize is the
+ * bytes moved, the head not counted. Written, nkey keys go with the first
+ * of the bytes (at least one byte): each must be the writer's, and the
+ * reader is given a key of its own to the same opened object, with the
+ * same operations and never more. A key of the pair itself is refused
+ * (E_PAR). Read, the keys that came with the bytes read become the
+ * reader's (nkey of them, with what they are keys of), and those beyond
+ * room are let go (lost). A read stops before bytes that came with keys
+ * of their own, so that keys never come later than their bytes. Keys
+ * never read -- the end closed first, or the bytes read as record 1 --
+ * are let go, and what they held open with them. flags say whether to
+ * wait (OB_STM_WAIT, OB_STM_NOWAIT); 0 waits as the key says.
+ *
+ * When bytes come to be read, room comes to be written or the other end
+ * goes, OB_E_CHANGE is told on record OB_ST_DATA.
+ *
+ * An end goes when its last key is closed, and also, never opened, when
+ * the process that made the pair ends; the end of a process closes its
+ * keys. The protection is the maker's, rw------- unless one was given.
+ */
+#define OB_ST_DATA	1
+#define OB_ST_STATE	2
+#define OB_ST_MSG	3
+#define OB_ST_NREC	4
+
+#define OB_ST_BUF	( 128 * 1024 )	/* bytes an end holds for its reader */
+#define OB_ST_KEY_MAX	253		/* keys one write carries */
+#define OB_ST_KEY_HELD	1024		/* keys waiting in one end */
+
+#define OB_SHUT_WR	1
+
+#define OB_SS_PEER	0x0001		/* the other end is there */
+#define OB_SS_EOF	0x0002		/* nothing more will come: the other end is gone or writes no more */
+#define OB_SS_SHUT	0x0004		/* this end writes no more */
+
+typedef struct {
+	TS_UUID	peer;			/* the other end; 0 once it is gone */
+	UINT	flags;			/* OB_SS_* */
+	INT	nkey;			/* keys waiting to be read */
+	UD	ready;			/* bytes there to be read */
+	UD	room;			/* bytes that may be written now */
+} T_OBSTSTAT;
+
+#define OB_STM_WAIT	0x0001
+#define OB_STM_NOWAIT	0x0002
+
+typedef struct {
+	ID	key;
+	UINT	type;			/* read: what it is a key of, OB_T_* */
+	UINT	sub;			/* and OB_S_* (0: the manager takes any) */
+} T_OBSTKEY;
+
+typedef struct {
+	UINT	flags;			/* OB_STM_* */
+	INT	room;			/* entries of key[] */
+	INT	nkey;			/* written: keys carried; read: keys that came */
+	INT	lost;			/* read: keys that came without room, let go */
+	T_OBSTKEY key[];
+} T_OBSTMSG;
+
+#define OB_STM_HEAD(room)	( sizeof(T_OBSTMSG) + sizeof(T_OBSTKEY) * (SZ)(room) )
+#define OB_STM_DATA(m)		( (UB *)(m) + OB_STM_HEAD((m)->room) )
+
+/*
+ * A poll set (OB_S_POLL, design 18.8): keys of the process's watched
+ * together, and a wait for those of them that are ready, as epoll waits
+ * for descriptors. It has no name and a process makes it with
+ * ob_cre_key; it goes with its last key. Only a key to an object whose
+ * manager can say what holds for it is taken:
+ * an end of a stream for now (E_NOSPT otherwise), and only one that may
+ * read or write.
+ *
+ * Record 1 (OB_PL_REC) written: T_OBPLCTL entries, done in turn up to
+ * the first that fails, whose error comes back (*p_asize the bytes of
+ * those done). OB_PL_ADD puts a key in, with the events asked and a
+ * value of the caller's (E_OBJ when it is there already), OB_PL_MOD
+ * changes them, OB_PL_DEL takes it out (E_NOEXS when it is not there).
+ * A key is named by itself: a key closed is out of the set once its
+ * object goes, and a key of the same number that opens another object
+ * is another key. OB_PL_CLEAR takes every key out; OB_PL_WAKE makes the
+ * wait under way, or the next one, come back at once with nothing.
+ *
+ * Record 1 read: T_OBPLEV entries, one for each key ready, as many as
+ * there is room for up to OB_PL_MAXEV, with what holds of what was
+ * asked (OB_PL_ERR and OB_PL_HUP always) and the caller's value. ob_rea_tmo waits up to its
+ * time for one (E_TMOUT); a read that may not wait does not wait.
+ * After OB_PL_WAKE it comes back E_OK with none (*p_asize 0).
+ *
+ * A key is told again and again while it stays ready (level), unless
+ * OB_PL_ET asks it once each time it changes (edge); with OB_PL_ONESHOT
+ * it is told once and then not until OB_PL_MOD asks again. The bits
+ * are those of epoll.
+ */
+#define OB_PL_REC	1
+#define OB_PL_NREC	2
+#define OB_PL_MAXEV	32		/* keys one read gives at most */
+
+#define OB_PL_IN	0x0001		/* there is something to read, or the end */
+#define OB_PL_OUT	0x0004		/* there is room to write */
+#define OB_PL_ERR	0x0008
+#define OB_PL_HUP	0x0010		/* the other end is gone, or both directions are shut */
+#define OB_PL_RDHUP	0x2000		/* nothing more will come */
+#define OB_PL_ONESHOT	0x40000000
+#define OB_PL_ET	0x80000000
+
+#define OB_PL_ADD	1
+#define OB_PL_DEL	2
+#define OB_PL_MOD	3
+#define OB_PL_CLEAR	4
+#define OB_PL_WAKE	5
+
+typedef struct {
+	INT	op;			/* OB_PL_ADD ... */
+	ID	key;
+	UINT	events;			/* OB_PL_* asked */
+	UINT	resv;
+	UD	data;			/* given back with the key when it is ready */
+} T_OBPLCTL;
+
+typedef struct {
+	UINT	events;			/* OB_PL_* that hold */
+	UINT	resv;
+	UD	data;
+} T_OBPLEV;
 
 /* ---------------------------------------------------------------- records */
 
@@ -324,6 +485,7 @@ typedef struct {
 #define OB_WP_SHOWN	0x0001
 #define OB_WP_OFF	0x0002		/* a part: shown, but it cannot be worked */
 #define OB_WP_FOCUS	0x0004		/* a box: the keys go to it (written: given them; read: has them); a window: read, has them */
+#define OB_WP_FULL	0x0008		/* a window: in full screen (wm_full); written: put in it, or out of it when not set, the rectangle not looked at */
 typedef struct {
 	TS_UUID	parent;			/* the window it is in; 0 the screen */
 	INT	left, top, right, bottom;	/* its outer edge */
@@ -423,6 +585,75 @@ typedef struct {
  */
 #define OB_WR_ASK	7
 #define OB_ASK_LETTERS	0x00040000
+
+/*
+ * Buffers of the GPU a plain window's work area is shown from (record
+ * OB_WR_GSURF; docs/tessronos/10-display.md 10.2.4): a program whose
+ * pictures are drawn by the GPU into BOs gives the window two of them,
+ * by keys to their objects (OB_S_GPUBO of include/ts/gpuapp.h), and says
+ * which to show each time one is drawn. The window then shows that
+ * BO's pixels over its work area from its corner, as far as both reach,
+ * instead of its own; nothing is copied when the window is solid and
+ * the screen's scale is 100, and the processor copies the BO into the
+ * window when not.
+ *
+ * Written with a T_OBWGSURF, by a key that may write the window:
+ *   OB_GS_SET	the two BOs, by keys of the writer's own that may read
+ *		them (E_OACV not, E_OBJ a key to something else), w by h
+ *		pixels, rows 'pitch' bytes (a multiple of OB_GS_PITCH, at
+ *		least w * 4; each BO at least pitch * h bytes), in
+ *		OB_GS_XRGB8888. The keys may be closed after: the window
+ *		holds the BOs. Two given before are let go of, the one
+ *		shown copied into the window first. None is shown until one
+ *		is asked for.
+ *   OB_GS_SHOW	BO idx (0 or 1) to be shown, under the writer's serial,
+ *		changed in nrect rectangles of the work area (0: all of
+ *		it). It is shown at the first build of the screen after no
+ *		job of the GPU that uses it is left, and the window is then
+ *		told OB_E_CHANGE on this record, code idx, x the serial. The
+ *		write returns at once. The BO shown before is not read once
+ *		this one is. A later SHOW before the one waiting is shown
+ *		takes its place, its rectangles with it.
+ *   OB_GS_DROP	the BOs let go of, the one shown copied into the window.
+ * The process that set them is the only one that may show or drop
+ * them. They go as well when the window closes and when that process
+ * ends, the one shown copied into the window first.
+ *
+ * Read, it is a T_OBWGSTAT.
+ */
+#define OB_WR_GSURF	8
+#define OB_GS_SET	1
+#define OB_GS_SHOW	2
+#define OB_GS_DROP	3
+#define OB_GS_BUFS	2
+#define OB_GS_RECTS	16
+#define OB_GS_PITCH	256
+#define OB_GS_XRGB8888	1		/* 0x00RRGGBB in a word, as a window's own pixels */
+
+typedef struct {
+	INT	left, top, right, bottom;	/* the right and bottom edges past the end, as T_DPRECT */
+} T_OBGSRECT;
+
+typedef struct {
+	UINT	op;			/* OB_GS_* */
+	ID	bo[OB_GS_BUFS];		/* SET: keys to the BOs' objects */
+	INT	w, h;			/* SET: pixels */
+	UINT	pitch;			/* SET: bytes from one row to the next */
+	UINT	format;			/* SET: OB_GS_XRGB8888 */
+	INT	idx;			/* SHOW: the BO to show */
+	UW	serial;			/* SHOW: the writer's, told back when it is shown */
+	INT	nrect;			/* SHOW: rectangles changed, 0 all of it */
+	T_OBGSRECT rect[OB_GS_RECTS];	/* SHOW: in the work area */
+} T_OBWGSURF;
+
+typedef struct {
+	BOOL	set;			/* two BOs are given */
+	INT	shown;			/* the BO shown, -1 none */
+	UW	shown_serial;		/* and the serial it was asked under */
+	INT	waiting;		/* the BO to be shown once its jobs are over, -1 none */
+	UW	waiting_serial;
+	BOOL	laid;			/* the last build laid the BO itself over the work area */
+} T_OBWGSTAT;
 
 /*
  * The scroll bars of a plain window: record OB_WR_BARS, one T_OBWBAR
@@ -735,6 +966,17 @@ typedef struct {
 IMPORT ID  ob_opn_obj( CONST TS_UUID *uuid, UINT ops );
 IMPORT ER  ob_cls_obj( ID key );
 IMPORT ER  ob_cre_obj( CONST T_OBCRE *pk_cre, TS_UUID *p_uuid );
+/*
+ * An object without a name made and opened at once, as memfd_create and
+ * socketpair give descriptors and no names: a queue or a pair of
+ * streams (OB_T_CHANNEL), or memory that goes with its last key
+ * (OB_T_STORAGE, OB_S_MEMORY, OB_F_TRANSIENT), with nothing else said
+ * of it (E_PAR otherwise). Its keys, opened with ops, come back in
+ * keys: one, or both ends of a pair; its UUID in p_uuid when that is
+ * not NULL. A restricted process (include/ts/sbx.h), which opens
+ * nothing by its UUID, makes them so.
+ */
+IMPORT ER  ob_cre_key( CONST T_OBCRE *pk_cre, UINT ops, ID *keys, TS_UUID *p_uuid );
 IMPORT ER  ob_del_obj( CONST TS_UUID *uuid );
 IMPORT ER  ob_ref_obj( CONST TS_UUID *uuid, T_OBREF *pk_ref );
 /*
@@ -1180,6 +1422,8 @@ IMPORT BOOL knl_obfile_on( CONST TS_UUID *uuid, CONST char *path );
 IMPORT void knl_ob_prc_start( ID pid, ID ppid, BOOL person );	/* a process was made */
 IMPORT void knl_ob_act_arm( UINT ticket );	/* what this task starts now carries wm_act_ticket's; 0 ends it */
 IMPORT UINT knl_ob_act_take( ID pid );		/* the ticket the process was started with, once; 0 none */
+IMPORT void knl_ob_rank_arm( UINT group, UINT rank );	/* what this task starts now is of a group opened together (wm_set_rank); 0 ends it */
+IMPORT UINT knl_ob_rank_take( ID pid, UINT *p_rank );	/* the group the process was started in and its place, once; 0 none */
 IMPORT void knl_ob_prc_end( ID pid );		/* it is going: its keys close */
 IMPORT void knl_ob_prc_gone( ID pid );		/* it is gone: its credentials go */
 IMPORT UINT knl_ob_permit( CONST T_OBCRD *crd, CONST T_OBPRT *prt, INT recno );

@@ -14,71 +14,8 @@
 # hand's are), and a stroke joins the places it was given, so a slanting one would come out a
 # pixel apart from run to run on the desktop itself.
 # Keys: Esc 29; Ctrl+S 16 01, Ctrl+E 08 01.
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
-mkbig fig 1 2 0
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-click 264 48
-wait 300
-drag 300 250 420 330
-wait 500
-drag 320 270 400 270
-wait 400
-shot cvc_k_paint
-click 264 48
-wait 600
-shot cvc_k_pal
-click 460 95
-wait 300
-click 575 211
-wait 300
-click 460 181
-wait 300
-key 29
-wait 400
-drag 310 300 410 300
-wait 400
-click 264 48
-wait 600
-click 520 120
-wait 300
-key 29
-wait 400
-click 410 320
-wait 400
-shot cvc_k_pour
-key 29
-wait 400
-shot cvc_k_left
-click 298 48
-wait 300
-dclick 330 320
-wait 600
-click 264 48
-wait 600
-click 580 95
-wait 300
-key 29
-wait 400
-drag 305 290 415 290
-wait 400
-shot cvc_k_erase
-click 700 500
-wait 400
-shot cvc_k_done
-sync 600
-key 16 01
-sync 600
-sum anon
-keep kernel
-sum res _0_1.png
-keep kernelpic
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 2 0
 logmark
 pfig big
@@ -163,8 +100,8 @@ logmark
 key 16 01
 expectsince figure: saved (0)
 sum anon
-same kernel
+want ok 548 530bfaaf8a30c39c
 sum res _0_1.png
-same kernelpic
+want ok 287 486d1acde350a21f
 key 08 01
 expect figure: closed

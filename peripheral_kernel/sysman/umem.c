@@ -16,6 +16,18 @@
  *	intervals that do not touch (two that meet are one). A page exists
  *	only where the process asked for one; a reserved address with no
  *	page behind it faults like any address the process does not have.
+ *
+ *	Pages asked for writable (TS_MEM_RW, by ts_map_mem or ts_ctl_mem)
+ *	are not made then: the stretch is kept in a list of its own, and
+ *	each page of it is made, zero filled, the first time the process
+ *	touches it (knl_umem_fault) or hands it to a call of the system
+ *	(knl_umem_touch, from knl_prc_user_ok), as Linux makes the pages of
+ *	an anonymous mapping on demand. A program that reserves much and
+ *	uses little (a heap of 64GB of addresses, an allocator's pools, the
+ *	buffers of a memory object) takes only the pages it uses. A page of
+ *	such a stretch given up (TS_MEM_DISCARD, madvise MADV_DONTNEED) is
+ *	taken away and freed, to be made again, zero filled, when touched:
+ *	that is how an allocator gives memory back and keeps the addresses.
  *	The pages are the space's, so taking the space down frees them with
  *	the rest; the lists are freed with the process (knl_umem_free).
  *
@@ -36,13 +48,15 @@
  *	compiler to machine code that writes into the pages it runs needs,
  *	while each page stays one or the other.
  *
- *	A page taken away while a task of the process is inside a call of
- *	the file layer, the sockets, the objects, drawing or the windows is
- *	held back rather than freed: such a call may hand the kernel's view
- *	of the process's pages to a disk (knl_prc_dma), which would go on
- *	moving data into a page given to someone else. The page is no
- *	longer mapped for the process, and is freed once no call of the
- *	process is under way (knl_umem_flush).
+ *	A page taken away while a call of the process has lent the kernel's
+ *	view of the process's pages to a disk (knl_prc_dma) is held back
+ *	rather than freed: the disk would go on moving data into a page
+ *	given to someone else. The page is no longer mapped for the
+ *	process, and is freed once no such call is under way
+ *	(knl_umem_flush). Any other call reaches the process's memory
+ *	through the process's own mapping, and a page gone from it is met
+ *	as an address the process does not have; a call that waits (a poll
+ *	of the sockets, a wait for an event) keeps no page back.
  *
  *	The caller (proc.c) holds the process table's lock, which keeps the
  *	space and the lists while they are used here.
@@ -79,6 +93,7 @@ typedef struct {
 struct umem {
 	UMLIST	res;			/* the reservations */
 	UMLIST	jit;			/* stretches written and run by turns */
+	UMLIST	lazy;			/* writable stretches, pages made when first touched */
 	UD	pages;			/* pages made and still mapped */
 	UD	held;			/* first page held back (its PA), 0 for none */
 	UD	nheld;
@@ -116,6 +131,12 @@ LOCAL T_UMEM *um_get( T_UMEM **pp )
 			return NULL;
 		}
 		if ( ls_init(&um->jit) < E_OK ) {
+			Kfree(um->res.r);
+			Kfree(um);
+			return NULL;
+		}
+		if ( ls_init(&um->lazy) < E_OK ) {
+			Kfree(um->jit.r);
 			Kfree(um->res.r);
 			Kfree(um);
 			return NULL;
@@ -380,6 +401,58 @@ LOCAL ER pages_jit( T_SPACE *sp, UBINT s, UBINT e )
 	return E_OK;
 }
 
+/*
+ * The pages of [s, e) that are there made writable (and not
+ * executable); the others are made when first touched.
+ */
+LOCAL ER pages_rw( T_SPACE *sp, UBINT s, UBINT e )
+{
+	UBINT	va;
+
+	for ( va = knl_pt_next(sp->l0_pa, s, e); va < e;
+	      va = knl_pt_next(sp->l0_pa, va + PAGE_SIZE, e) ) {
+		UD	ent = knl_pt_entry(sp->l0_pa, va);
+
+		if ( ent == 0 || ( ent & ~PTE_ADDR_MASK ) == PTE_PAGE_UDATA ) continue;
+		if ( knl_pt_map(sp->l0_pa, va, ent & PTE_ADDR_MASK, PAGE_SIZE, PTE_PAGE_UDATA) != E_OK ) {
+			return E_NOMEM;
+		}
+	}
+	return E_OK;
+}
+
+/*
+ * A page made at 'va', where there is none, zero filled, with the entry
+ * bits 'attr'; FALSE when memory runs out
+ */
+LOCAL BOOL page_new( T_UMEM *um, T_SPACE *sp, UBINT va, UD attr )
+{
+	PFRAME	*pf;
+	UD	pa;
+
+	if ( UMEM_FLOOR >= knl_pf_free_count(-1) ) {
+		return FALSE;
+	}
+	pf = knl_alloc_pages(0, ZONE_NORMAL, KAF_ZERO);
+	if ( pf == NULL ) {
+		return FALSE;
+	}
+	pa = knl_pf_to_pa(pf);
+	if ( ENT_EL0_X(attr) ) {
+		knl_icache_sync((UBINT)PA2VA(pa), PAGE_SIZE);
+	}
+	if ( knl_pt_map(sp->l0_pa, va, pa, PAGE_SIZE, attr) != E_OK ) {
+		knl_free_pages(pf, 0);
+		return FALSE;
+	}
+	um->pages++;
+	return TRUE;
+}
+
+#ifdef PF_FREE_CHECK
+IMPORT void knl_pf_check_owner( UD pa, UBINT va );	/* pfalloc.c: whose a page given up was */
+#endif
+
 /* The pages of [s, e) taken away */
 LOCAL void pages_drop( T_UMEM *um, T_SPACE *sp, UBINT s, UBINT e, BOOL hold )
 {
@@ -390,6 +463,9 @@ LOCAL void pages_drop( T_UMEM *um, T_SPACE *sp, UBINT s, UBINT e, BOOL hold )
 		UD	pa = knl_pt_lookup(sp->l0_pa, va);
 
 		if ( pa == ~(UD)0 ) continue;
+#ifdef PF_FREE_CHECK
+		knl_pf_check_owner(pa & PTE_ADDR_MASK, va);
+#endif
 		(void)knl_pt_unmap(sp->l0_pa, va, PAGE_SIZE);
 		page_gone(um, pa & PTE_ADDR_MASK, hold);
 		if ( um->pages > 0 ) um->pages--;
@@ -442,6 +518,8 @@ EXPORT ER knl_umem_map( T_UMEM **pp, T_SPACE *sp, UBINT *p_va, UD size, UD align
 	}
 	if ( IS_JIT(prot) ) {
 		er = ls_add(&um->jit, va, va + size);
+	} else if ( prot == TS_MEM_RW ) {
+		er = ls_add(&um->lazy, va, va + size);	/* the pages made when touched */
 	} else if ( prot != TS_MEM_NONE ) {
 		er = pages_make(um, sp, va, va + size, prot);
 		if ( er < E_OK ) {
@@ -471,6 +549,7 @@ EXPORT ER knl_umem_unmap( T_UMEM **pp, T_SPACE *sp, UBINT va, UD size, BOOL hold
 		return E_PAR;
 	}
 	er = ls_sub(&um->jit, va, va + size);
+	if ( er == E_OK ) er = ls_sub(&um->lazy, va, va + size);
 	if ( er < E_OK ) return er;
 	er = ls_cut(&um->res, i, va, va + size);
 	if ( er < E_OK ) return er;
@@ -480,9 +559,10 @@ EXPORT ER knl_umem_unmap( T_UMEM **pp, T_SPACE *sp, UBINT va, UD size, BOOL hold
 
 /*
  * What the pages of [s, e) hold given up, what they allow kept: a page
- * of a stretch run by turns is taken away (made again when touched),
- * any other is zero filled where it is; one that is executable has its
- * zeros made fetchable.
+ * of a stretch run by turns or of a writable one is taken away and
+ * freed (made again, zero filled, when touched), any other is zero
+ * filled where it is; one that is executable has its zeros made
+ * fetchable.
  */
 LOCAL void pages_discard( T_UMEM *um, T_SPACE *sp, UBINT s, UBINT e, BOOL hold )
 {
@@ -495,7 +575,7 @@ LOCAL void pages_discard( T_UMEM *um, T_SPACE *sp, UBINT s, UBINT e, BOOL hold )
 		UBINT	kva;
 
 		if ( ent == 0 ) continue;
-		if ( ls_has(&um->jit, va) ) {
+		if ( ls_has(&um->jit, va) || ls_has(&um->lazy, va) ) {
 			pages_drop(um, sp, va, va + PAGE_SIZE, hold);
 			continue;
 		}
@@ -530,13 +610,21 @@ EXPORT ER knl_umem_ctl( T_UMEM **pp, T_SPACE *sp, UBINT va, UD size, UINT prot, 
 		return E_OK;
 	}
 	if ( IS_JIT(prot) ) {
-		er = ls_sub(&um->jit, va, va + size);
+		er = ls_sub(&um->lazy, va, va + size);
+		if ( er == E_OK ) er = ls_sub(&um->jit, va, va + size);
 		if ( er == E_OK ) er = ls_add(&um->jit, va, va + size);
 		if ( er < E_OK ) return er;
 		return pages_jit(sp, va, va + size);
 	}
 	er = ls_sub(&um->jit, va, va + size);
+	if ( er == E_OK ) er = ls_sub(&um->lazy, va, va + size);
 	if ( er < E_OK ) return er;
+	if ( prot == TS_MEM_RW ) {
+		/* the pages there kept and made writable, the others made when touched */
+		er = ls_add(&um->lazy, va, va + size);
+		if ( er < E_OK ) return er;
+		return pages_rw(sp, va, va + size);
+	}
 	if ( prot == TS_MEM_NONE ) {
 		pages_drop(um, sp, va, va + size, hold);
 		return E_OK;
@@ -546,7 +634,9 @@ EXPORT ER knl_umem_ctl( T_UMEM **pp, T_SPACE *sp, UBINT va, UD size, UINT prot, 
 
 /*
  * A fault of the process at 'va' in its space: 'acc' is the access
- * (UM_ACC_*). In a stretch written and run by turns, a page that is not
+ * (UM_ACC_*). In a writable stretch, a page that is not there is made,
+ * zero filled and writable, for a read or a write; running it is the
+ * process's own fault. In a stretch written and run by turns, a page that is not
  * there is made for the access, writable unless it is run; a write to
  * an executable page makes it writable, and running a writable one
  * makes it executable, its instructions made fetchable first. TRUE when
@@ -556,32 +646,21 @@ EXPORT ER knl_umem_ctl( T_UMEM **pp, T_SPACE *sp, UBINT va, UD size, UINT prot, 
 EXPORT BOOL knl_umem_fault( T_UMEM *um, T_SPACE *sp, UBINT va, UINT acc )
 {
 	UD	ent, pa;
-	PFRAME	*pf;
 
 	va &= ~(UBINT)( PAGE_SIZE - 1 );
-	if ( um == NULL || !ls_has(&um->jit, va) ) {
+	if ( um == NULL ) {
 		return FALSE;
+	}
+	if ( !ls_has(&um->jit, va) ) {
+		if ( acc == UM_ACC_EXEC || !ls_has(&um->lazy, va)
+		  || knl_pt_entry(sp->l0_pa, va) != 0 ) {
+			return FALSE;
+		}
+		return page_new(um, sp, va, PTE_PAGE_UDATA);
 	}
 	ent = knl_pt_entry(sp->l0_pa, va);
 	if ( ent == 0 ) {
-		if ( UMEM_FLOOR >= knl_pf_free_count(-1) ) {
-			return FALSE;
-		}
-		pf = knl_alloc_pages(0, ZONE_NORMAL, KAF_ZERO);
-		if ( pf == NULL ) {
-			return FALSE;
-		}
-		pa = knl_pf_to_pa(pf);
-		if ( acc == UM_ACC_EXEC ) {
-			knl_icache_sync((UBINT)PA2VA(pa), PAGE_SIZE);
-		}
-		if ( knl_pt_map(sp->l0_pa, va, pa, PAGE_SIZE,
-				( acc == UM_ACC_EXEC ) ? PTE_PAGE_UTEXT : PTE_PAGE_UDATA) != E_OK ) {
-			knl_free_pages(pf, 0);
-			return FALSE;
-		}
-		um->pages++;
-		return TRUE;
+		return page_new(um, sp, va, ( acc == UM_ACC_EXEC ) ? PTE_PAGE_UTEXT : PTE_PAGE_UDATA);
 	}
 	pa = ent & PTE_ADDR_MASK;
 	if ( acc == UM_ACC_EXEC && !ENT_EL0_X(ent) ) {
@@ -598,6 +677,44 @@ EXPORT BOOL knl_umem_fault( T_UMEM *um, T_SPACE *sp, UBINT va, UINT acc )
 		um->to_write++;
 	}
 	return TRUE;
+}
+
+/*
+ * The pages of [s, e) of the writable stretches that are not there
+ * made, zero filled, before the kernel reaches them for a call of the
+ * process (knl_prc_user_ok): the kernel's own accesses do not fault
+ * pages in. FALSE at the first page that is neither there nor of a
+ * writable stretch -- the range is then not the process's, however long
+ * it was said to be, and the walk goes no further -- or when memory runs
+ * out.
+ */
+EXPORT BOOL knl_umem_touch( T_UMEM *um, T_SPACE *sp, UBINT s, UBINT e )
+{
+	UBINT	va;
+
+	if ( um == NULL || um->lazy.n == 0 ) {
+		return FALSE;
+	}
+	for ( va = s & ~(UBINT)( PAGE_SIZE - 1 ); va < e; va += PAGE_SIZE ) {
+		if ( knl_pt_entry(sp->l0_pa, va) != 0 ) continue;
+		if ( !ls_has(&um->lazy, va) || !page_new(um, sp, va, PTE_PAGE_UDATA) ) {
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+/* The bytes of the writable stretches, their pages made or not */
+EXPORT UD knl_umem_lazy_bytes( T_UMEM *um )
+{
+	UD	n = 0;
+	INT	i;
+
+	if ( um == NULL ) return 0;
+	for ( i = 0; i < um->lazy.n; i++ ) {
+		n += um->lazy.r[i].e - um->lazy.r[i].s;
+	}
+	return n;
 }
 
 /*
@@ -632,8 +749,8 @@ EXPORT void knl_umem_wx( T_UMEM *um, T_SPACE *sp, UD out[6] )
 
 /*
  * Whether pages are held back: read without the lock by the last call
- * of the process to come out (knl_prc_call_leave), which then gives
- * them back under it
+ * of the process with pages lent to a device to come out
+ * (knl_prc_call_leave), which then gives them back under it
  */
 EXPORT BOOL knl_umem_held( T_UMEM *um )
 {
@@ -657,6 +774,12 @@ EXPORT UD knl_umem_bytes( T_UMEM *um )
 	return ( um != NULL ) ? um->pages * PAGE_SIZE : 0;
 }
 
+/* The bytes of the pages held back, no longer the process's but not yet free */
+EXPORT UD knl_umem_held_bytes( T_UMEM *um )
+{
+	return ( um != NULL ) ? __atomic_load_n(&um->nheld, __ATOMIC_SEQ_CST) * PAGE_SIZE : 0;
+}
+
 EXPORT void knl_umem_free( T_UMEM **pp )
 {
 	T_UMEM	*um = *pp;
@@ -665,6 +788,7 @@ EXPORT void knl_umem_free( T_UMEM **pp )
 	knl_umem_flush(um);
 	Kfree(um->res.r);
 	Kfree(um->jit.r);
+	Kfree(um->lazy.r);
 	Kfree(um);
 	*pp = NULL;
 }

@@ -10,38 +10,8 @@
 # palette away. Saved, record 0 comes out the same, byte for byte; the screens of the
 # palette after the choice are kept for comparing.
 # Keys: Esc 29, Enter 28; Ctrl+S 16 01, Ctrl+E 08 01.
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
-mkbig fig 1 2 0
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-click 298 82
-wait 300
-drag 450 450 600 560
-wait 400
-click 162 48
-wait 500
-shot ccmp_k_palette
-click 320 94
-wait 800
-shot ccmp_k_pick
-click 345 393
-wait 300
-key 28
-wait 500
-shot ccmp_k_chosen
-key 29
-wait 300
-sync 600
-key 16 01
-sync 600
-sum show
-keep kernel
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 2 0
 logmark
 pfig big
@@ -73,6 +43,6 @@ logmark
 key 16 01
 expectsince figure: saved (0)
 sum show
-same kernel
+want ok 804 c053c597b67f7069
 key 08 01
 expect figure: closed

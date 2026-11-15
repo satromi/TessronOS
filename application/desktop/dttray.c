@@ -32,6 +32,7 @@
 #include <ts/tray.h>
 #include <ts/om.h>
 #include <ts/uuid.h>
+#include <ts/docedit.h>
 #include "desktop.h"
 
 

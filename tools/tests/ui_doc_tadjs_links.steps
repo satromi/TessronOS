@@ -1,0 +1,49 @@
+# The links in the sample text TADjsについて (etc/xtad/019a6c96-e262-7dfd-a3bc-1e85d495d60d_0.xtad),
+# for tools/ui_run.py: each is closed, as tall as a closed link at 14 (19) and as wide as its
+# object's name with the picture and edges (tad_closed_w), as the record now says (width, heightpx).
+# The text is open at the start, its window at 142,135; its link 実身/仮身 on the paragraph
+# "BTRONでは、" stands at 241,313 to 336,331 (96 by 19): the frame there, paper just past it
+# (the name, 61 wide, is not cut). The text is closed and opened again first, so that its page
+# is the one the record makes now, drawn in front.
+# tadjs_links_* are the pages scrolled down by the bar, for the eye.
+waitwin TADjsについて
+# as the system starts (design 11, 自動起動で開くウインドウの重なり): BTRON keeps the keys and
+# stands behind what it opened, so the band of TADjsについて (250,140) and its paper (250,170)
+# are not under BTRON's paper (F3FFFF)
+wait 2000
+focus st_keys BTRON
+pixel 250 140 E0E0E0
+pixel 250 170 FFFFFF
+win TADjsについて
+want ok 142 135 1059 696
+click 600 400
+wait 300
+logmark
+key 08 01
+expectsince document: closed
+wait 1000
+logmark
+open 019a6c96-e262-7dfd-a3bc-1e85d495d60d
+expectsincein 60 document: opened TADjsについて
+wait 2000
+win TADjsについて
+want ok 142 135 1059 696
+shot tadjs_links_1
+pixel 241 320 000000
+pixel 336 320 000000
+pixel 337 320 ffffff
+pixel 300 313 000000
+pixel 300 312 ffffff
+pixel 300 331 000000
+pixel 300 332 ffffff
+pixel 330 320 e1f2f9
+click 1049 660
+wait 1200
+shot tadjs_links_2
+click 1049 660
+wait 1200
+shot tadjs_links_3
+click 1049 660
+wait 1200
+shot tadjs_links_4
+absent !OACV!

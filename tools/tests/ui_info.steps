@@ -1,34 +1,35 @@
-# 管理情報 (design 11.3), for tools/ui_run.py: the window opened from the menu
-# of a link in the first window (実身操作 > 管理情報), a window of the
-# desktop's like the others. Its menu of the second button opens with the
+# 管理情報 (design 11.3, 18.15), for tools/ui_run.py: the window opened from the menu
+# of a link in the first window (実身操作 > 管理情報), a process of its own
+# (application/realinfo) for the object. Its menu of the second button opens with the
 # item chosen last on the pointer's row, the rows 20 pixels apart: 閉じる,
 # line, 編集 (コピー, 貼り付け), ウインドウ, 小物, 実行. On 付箋指定 a 機能付箋
 # is chosen and copied to the tray with 編集 > コピー; the window is carried
 # by its band, made larger by its corner, and closed with 閉じる of its menu.
 # The first click waits for the first window to be drawn: it is to land on a link.
 wait 1000
-click 110 100
-click 110 100 1
+click 80 87
+click 80 87 1
 wait 500
-move 140 240
+move 100 227
 wait 150
-move 230 240
+move 160 227
+wait 300
+move 200 227
 wait 150
-move 230 321
+move 210 307
 wait 150
-click 230 321
+click 210 307
 expect info: opened TADjsについての管理情報
 win TADjsについての管理情報
 shot info_window
 # 付箋指定, its first 機能付箋 chosen
 click 262 93
 wait 200
-click 200 168
+click 200 183
 wait 200
 shot info_apps
 # the menu: 編集 two rows below 閉じる, its list to the right, コピー level with it
 click 300 300 1
-expect desktop: menu TADjsについての管理情報
 wait 300
 shot info_menu
 move 310 340
@@ -41,7 +42,8 @@ move 420 340
 wait 150
 shot info_menu_edit
 click 420 340
-expect desktop: chosen info.copy
+expect info: chosen info.copy
+expect info: copied
 wait 300
 # carried by its band and made larger by its corner
 drag 200 52 300 152
@@ -53,10 +55,9 @@ win TADjsについての管理情報
 shot info_moved
 # 閉じる: 編集 under the pointer, 閉じる two rows above
 click 400 400 1
-expect desktop: menu
 wait 300
 click 408 360
-expect desktop: chosen close
+expect info: chosen close
 expect info: closed
 wins
 # nothing it did was refused for want of a right

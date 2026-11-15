@@ -193,6 +193,32 @@ IMPORT ER  ob_chk_run( CONST char *devnm, UINT mode, T_TSFSCK *res, FP_TSFSCK fn
 IMPORT ER  ob_chk_request( CONST char *devnm, UINT mode );
 IMPORT INT ob_chk_boot_result( UB *devnm, INT nmax, T_TSFSCK *res, T_TSFSCKEV *ev, INT max );
 
+/*
+ * For a program, through the SVC: ob_chk_list, ob_chk_request and
+ * ob_chk_boot_result as above, and ob_chk_vol in place of ob_chk_run,
+ * whose function the kernel cannot call in a program. ob_chk_vol checks
+ * as ob_chk_run does, in the task that calls it, putting each event
+ * told into ev (up to max of them) and how many have been told, kept or
+ * not, into *p_told as it goes: another task of the program follows the
+ * check by *p_told while this one waits for it, and reads an event only
+ * after *p_told says it is there. *res is written at the end. A check
+ * and a repair asked for the next start are an administrator's (design
+ * 8.7). Through the SVC, ob_chk_boot_result gives what the repair at
+ * start did to the first program that asks, and 0 after it.
+ */
+IMPORT ER  ob_chk_vol( CONST char *devnm, UINT mode, T_TSFSCK *res, T_TSFSCKEV *ev, INT max, INT *p_told );
+
+/*
+ * A volume being attached, detached or made larger is not checked
+ * meanwhile, and one being checked is not attached, detached or made
+ * larger: knl_ob_chk_hold(dev, TRUE) before such a change, FALSE when it
+ * cannot be made now (the volume is being checked), and
+ * knl_ob_chk_hold(dev, FALSE) after it. ob_chk_run answers E_BUSY while
+ * any is held. knl_ob_chk_boot_once is TRUE the first time it is asked.
+ */
+IMPORT BOOL knl_ob_chk_hold( CONST char *devnm, BOOL on );
+IMPORT BOOL knl_ob_chk_boot_once( void );
+
 /* Where the request waits for the next start, on the boot volume */
 #define TSFSCK_REQUEST	"/boot/DISKFIX.REQ"
 

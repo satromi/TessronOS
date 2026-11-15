@@ -8,6 +8,8 @@ to be installed by dropping it on the list of the バージョン sheet of
                  [--over DIR ...] --from DIR [--from DIR ...] [--user DIR ...]
                  [--exclude NAME ...] [--keep UUID ...]
                  [--boot PATH=FILE ...] [--boot-keep PATH=FILE ...] -o OUT.tpk
+  tools/mktpk.py --system --machine M --arch A --version R1.200
+                 [--over, --from, --user, --exclude, --keep as above] --manifest DIR
   tools/mktpk.py --list PKG.tpk
 
 The objects are taken in the TADjs form the system's definitions are
@@ -37,6 +39,14 @@ how an update treats it, in its metadata ("tessronos.update"):
              the system box): made when missing; otherwise kept as it
              is, with a link added to each object the package's box
              links to and the system's does not
+
+The system volume keeps the same list (package.json's "objects", "keep"
+and "links", with the version, the machine and the processor, but not
+the boot files) as record 1 of the system box (システム): --manifest DIR
+writes it as {uuid}_1.bin for tools/mktsfs to take with --from, and an
+update writes the package's there. システム登録 reads it to put the
+system's objects on a disk the system was put on before, as an update
+would, leaving the rest there as it is.
 
 --keep names one more object to be kept (one a build step makes, whose
 metadata the build does not write: the Wi-Fi settings). The files the
@@ -96,6 +106,8 @@ FILE_RE = re.compile(r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 MACHINES = ("rpi5", "rpi4", "x64", "qemu_virt")
 ARCHS = ("aarch64", "x86_64")
 UPDATES = ("keep", "links")
+SYSTEM_BOX = "01a0d8c4-5211-7c52-9e0a-3b61d27f4c85"     # システム (SYSDEF_SYSTEM_BOX)
+MANIFEST_REC = 1        # its record that lists the system's objects (dtsysup.c SU_MAN_REC)
 U32 = 0xFFFFFFFF
 
 
@@ -205,9 +217,13 @@ def boot_pairs(specs, what):
     return out
 
 
-def make_system(args):
+def system_objects(args):
+    """The objects of the system as the image has them, each with how an
+    update treats it: [(UUID text, its set, None | "keep" | "links")] in
+    UUID order, and those left out with why. The package (make_system)
+    and the list the system volume keeps (make_manifest) both take
+    theirs from here, so that the two say the same."""
     from tsfs_py import transfer
-    from tsfs_py import meta as metamod
 
     if args.machine not in MACHINES:
         sys.exit("mktpk: --machine is one of %s" % ", ".join(MACHINES))
@@ -243,7 +259,7 @@ def make_system(args):
 
     # the objects of the person's that システム links to by a role and that
     # an update adds links to (the system's 原紙箱, "update": "links")
-    sysbox = uuidmod.UUID("01a0d8c4-5211-7c52-9e0a-3b61d27f4c85")
+    sysbox = uuidmod.UUID(SYSTEM_BOX)
     if sysbox in sets and sets[sysbox].recs:
         text = open(sets[sysbox].recs[0][1], encoding="utf-8", errors="replace").read()
         for m in re.finditer(r'<link\b[^>]*\bid="([0-9a-f-]{36})_0\.xtad"', text):
@@ -258,7 +274,7 @@ def make_system(args):
                 sets[lu] = user[lu]
 
     keep_more = set(k.lower() for k in args.keep)
-    objects, keep, links, entries, left = [], [], [], [], []
+    picked, left = [], []
     for u in sorted(sets, key=str):
         s = sets[u]
         transfer.prepare(s)
@@ -273,11 +289,46 @@ def make_system(args):
                      % (s.json, how, ", ".join(UPDATES)))
         if us in keep_more:
             how = "keep"
-        objects.append(us)
-        if how == "keep":
-            keep.append(us)
-        elif how == "links":
-            links.append(us)
+        picked.append((us, s, how))
+    return picked, left
+
+
+def system_manifest(args, picked):
+    """What the system is: package.json of its package without the boot
+    files, as the record MANIFEST_REC of the system box holds it too"""
+    return {"format": FORMAT, "kind": "system", "id": "tessronos", "name": "TessronOS",
+            "version": args.version, "machine": args.machine, "arch": args.arch,
+            "objects": [us for us, _s, _h in picked],
+            "keep": [us for us, _s, h in picked if h == "keep"],
+            "links": [us for us, _s, h in picked if h == "links"]}
+
+
+def make_manifest(args):
+    """The list of the system's objects, as the record the system volume
+    keeps it in: {SYSTEM_BOX}_{MANIFEST_REC}.bin in the directory given,
+    which tools/mktsfs takes with --from"""
+    picked, left = system_objects(args)
+    man = system_manifest(args, picked)
+    os.makedirs(args.manifest, exist_ok=True)
+    path = os.path.join(args.manifest, "%s_%d.bin" % (SYSTEM_BOX, MANIFEST_REC))
+    data = json.dumps(man, ensure_ascii=False).encode("utf-8")
+    with open(path + ".tmp", "wb") as f:
+        f.write(data)
+    os.replace(path + ".tmp", path)
+    for u, why in left:
+        sys.stderr.write("mktpk: %s left out: %s\n" % (u, why))
+    print("%s: TessronOS %s (%s, %s), %d objects (%d kept, %d boxes added to)"
+          % (path, args.version, args.machine, args.arch, len(man["objects"]),
+             len(man["keep"]), len(man["links"])))
+    return 0                    # what is left out is said; the image goes on without it, as mktsfs does
+
+
+def make_system(args):
+    from tsfs_py import meta as metamod
+
+    picked, left = system_objects(args)
+    entries = []
+    for us, s, _how in picked:
         entries.append((us + ".json", s.json, RT_SYSDATA, 0))
         if s.icon is not None:
             entries.append((us + ".ico", bytes(s.icon), RT_SYSDATA, 0))
@@ -300,10 +351,9 @@ def make_system(args):
     if len(set(boot + bootkeep)) != len(boot + bootkeep):
         sys.exit("mktpk: a boot file is named twice")
 
-    manifest = {"format": FORMAT, "kind": "system", "id": "tessronos", "name": "TessronOS",
-                "version": args.version, "machine": args.machine, "arch": args.arch,
-                "objects": objects, "keep": keep, "links": links,
-                "boot": boot, "bootkeep": bootkeep}
+    manifest = system_manifest(args, picked)
+    manifest["boot"] = boot
+    manifest["bootkeep"] = bootkeep
     entries.insert(0, ("package.json",
                        json.dumps(manifest, ensure_ascii=False).encode("utf-8"), RT_SYSDATA, 0))
     size = write_package(args.output, entries)
@@ -311,8 +361,8 @@ def make_system(args):
         sys.stderr.write("mktpk: %s left out: %s\n" % (u, why))
     print("%s: TessronOS %s (%s, %s), %d objects (%d kept, %d boxes added to), "
           "%d boot files, %d bytes"
-          % (args.output, args.version, args.machine, args.arch, len(objects), len(keep),
-             len(links), len(boot) + len(bootkeep), size))
+          % (args.output, args.version, args.machine, args.arch, len(manifest["objects"]),
+             len(manifest["keep"]), len(manifest["links"]), len(boot) + len(bootkeep), size))
     return 1 if left else 0
 
 
@@ -346,11 +396,16 @@ def main():
     p.add_argument("--arch")
     p.add_argument("--version")
     p.add_argument("-o", "--output")
+    p.add_argument("--manifest")
     p.add_argument("--list")
     a = p.parse_args()
     if a.list:
         show(a.list)
         return 0
+    if a.system and a.manifest:
+        if not a.dirs:
+            p.error("--system --manifest needs --from")
+        return make_manifest(a)
     if a.system:
         if not a.dirs or not a.output:
             p.error("--system needs --from and -o")

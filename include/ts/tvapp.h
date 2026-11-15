@@ -53,6 +53,10 @@ typedef struct {
 	/* the record changed by what the desktop told of a link: the model made again */
 	void		(*remade)( void );
 	void		(*picks_none)( void );	/* before a link is added to the record */
+	/* what else the desktop says at the channel of the links (DT_HOW_ACC); NULL none */
+	void		(*told)( CONST T_DTANS *an );
+	/* where its window opens when the object keeps no place of it; at_w 0: 60,40, 900 by 640 */
+	INT		at_x, at_y, at_w, at_h;
 } T_TAHOST;
 
 IMPORT CONST T_TAHOST	*ta_host;
@@ -84,6 +88,8 @@ IMPORT UD	g_input_at;		/* when the key or press being answered happened (ns), 0 
 
 /* The object the program was started on (T_PRCOPEN): E_NOEXS when there is none */
 IMPORT ER   ta_start( CONST T_TAHOST *host, T_OBREF *p_ref );
+/* The window stands for obj, whatever the start-up argument says: E_NOEXS when it is not there */
+IMPORT ER   ta_start_on( CONST T_TAHOST *host, CONST TS_UUID *obj, T_OBREF *p_ref );
 IMPORT ER   ta_channel( void );			/* the window's channel, and the desktop's on links */
 IMPORT ER   ta_win_open( UW events );		/* the window, where it stood last */
 IMPORT void ta_end( void );			/* the window let go of */
@@ -105,6 +111,8 @@ IMPORT void say( CONST char *s );		/* on the desktop's message line */
 
 IMPORT ER   ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms );
 IMPORT void link_open( CONST T_VOBJ *v );
+IMPORT void ta_link_open( CONST T_VOBJ *v, UINT flags, INT rank );	/* DT_F_AUTO: 自動起動, at place rank */
+IMPORT BOOL ta_link_named( T_DTREQ *rq, CONST TS_UUID *vobjid );	/* DT_RQ_ATTR of that link: DT_F_LINK */
 
 /* ---------------------------------------------------------------- the record */
 
@@ -112,18 +120,32 @@ IMPORT ER   ta_read( UB **p_x, SZ *p_len );	/* record g_recno, as it is stored *
 IMPORT void ta_was( void );			/* what g_rec links to now, as read */
 IMPORT ER   ta_save( void );			/* 元の実身に保存 */
 IMPORT ER   ta_rec_put( CONST TS_UUID *id, T_TAD *rec );	/* record 0 of another object written */
+IMPORT BOOL ta_disk_gone( BOOL figure );	/* closing, the disk of the object out: what changed handed over */
 IMPORT void ta_watch( CONST TS_UUID *id );	/* notices of its changes, at the window's channel */
 IMPORT void ta_watch_links( void );		/* of every object g_rec links to */
 IMPORT BOOL ta_links_event( CONST T_OBNTM *m );	/* the desktop told of a link: TRUE when it was that */
+IMPORT BOOL ta_told_channel( TS_UUID *p );	/* that channel, for the desktop to say other things at */
 IMPORT void ta_links_told( void );		/* what is waiting of it, read */
+IMPORT void ta_listen( CONST char *prog_id );	/* told there of the program run again, and of its list (DT_RQ_TELL) */
+IMPORT void ta_title( CONST char *title );	/* the window's title, for a list made */
 /* Asked whether links would be taken where the hand is (OB_E_ASK): answered takes */
 IMPORT void ta_ask_answer( CONST T_OBNTM *m, BOOL takes );
-IMPORT void ta_paper_read( void );
+
+/* Carried out of the window: the desktop follows the hand on (DT_RQ_CARRY) */
+IMPORT INT  ta_tray_pictures( T_TAD *frag );	/* the tray's pictures it names, written beside the record */
+IMPORT BOOL ta_frag_put( CONST T_TAD *frag );	/* the fragment, in the tray's place for it (DT_F_FRAG) */
+IMPORT BOOL ta_back_at( CONST T_DTANS *an, INT *p_x, INT *p_y );	/* let go back here (DT_F_BACK) */
+IMPORT ER   ta_text_away( T_DDED *e, T_DTREQ *rq, CONST UB *s, INT n );	/* letters of e: T_DDHOST text_away */
+IMPORT void ta_paper_read( void );		/* the paper, the object's own read again */
+IMPORT void ta_paper_open( void );		/* as the window opens, the link's watched */
+IMPORT void ta_paper_refresh( void );		/* 再表示: and the link's as it is now */
+IMPORT BOOL ta_paper_changed( CONST TS_UUID *u );	/* OB_E_CHANGE of u: TRUE when the paper is not as it was */
 
 /* ---------------------------------------------------------------- the window */
 
 IMPORT void ta_work_size( void );
 IMPORT void ta_fullscreen( void );
+IMPORT BOOL ta_full_shown( void );		/* the window the screen's size by 全画面表示, as the desktop says */
 IMPORT void ta_paper_ask( void );		/* 背景色変更 */
 IMPORT ER   ta_print( CONST T_TAD *rec, UINT flags );	/* 印刷 of rec; flags DT_F_PR_DETAIL, _HIDDEN */
 IMPORT void ta_save_new( void );		/* 新たな実身に保存 */
@@ -172,6 +194,21 @@ IMPORT INT  ta_list_form( CONST char *title, CONST char *CONST *names, INT n, IN
 IMPORT INT  ta_find_form( UB *what, UB *with, INT max, BOOL *p_regex );	/* DE_FIND_*, 0 put away */
 IMPORT INT  ta_paper_form( T_DEPAPER *pp );	/* DE_PAPER_* */
 IMPORT BOOL ta_pick_colour( UW *io );		/* the system's panel (DT_RQ_COLOUR) */
+
+/*
+ * Any panel of a data box (box, NULL the program's), before the window
+ * is open too: opened, worked until a button (its number, 'enter' for
+ * Enter, 0 for 取消 and for one put away) and put away. ta_tell_in and
+ * ta_ask_in work a panel of two lines and 了解, or two lines, 取消
+ * (button 101, its words 'no') and the button that goes ahead (102,
+ * 'yes'): TRUE for that one.
+ */
+IMPORT ER   ta_dlg_open( CONST char *box, INT num, UI *q );
+IMPORT INT  ta_dlg_run( UI *q, INT enter );
+IMPORT void ta_dlg_close( UI *q );
+IMPORT void ta_tell_in( CONST char *box, INT num, CONST char *l1, CONST char *l2 );
+IMPORT BOOL ta_ask_in( CONST char *box, INT num, CONST char *l1, CONST char *l2,
+		       CONST char *no, CONST char *yes );
 
 #ifdef __cplusplus
 }

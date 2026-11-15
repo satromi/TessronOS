@@ -1,56 +1,55 @@
 # 大きな図形 (docs/private/fixed-buffer-audit.md 10), for tools/ui_run.py:
 # a figure of 10000 rectangles and two lines of 2000 points each (more than
 # the 256 shapes and 1024 points a shape the figure editor took before),
-# made as a copy of 画用紙 (mkbig) and opened; everything picked and moved
-# to the tray (トレーへ移動) and back (トレーから移動), the tray holding
-# all of it; the figure saved by closing, opened again and found whole.
-# The times are printed ("time ...").
+# made as a copy of 画用紙 (mkbig) and opened by 基本図形編集 (a process);
+# everything picked and moved to the tray (トレーへ移動) and back
+# (トレーから移動), the tray holding all of it; the figure saved by closing,
+# opened again and found whole. What the process says after each command
+# ("figure: shapes N picked M") tells how many shapes there are and how many
+# are picked; the times are taken on the host from the key to that line
+# ("time ...").
 # Keys: A 04, X 1B, Z 1D, E 08 with Ctrl (01).
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
 mkbig fig 10000 2000
-mark
+logmark
+hostmark
 open big
-waitwin 画用紙 600
-sync 600
-under open 30000
+expectsincein 120 figure: opened 画用紙 shapes 10002
+hosttime open 30000
+wait 1000
 shot big_fig_open
-shapes
-want ok 10002 0
-mark
+logmark
+hostmark
 key 04 01
-sync 600
-under pickall 10000
-shapes
-want ok 10002 10002
-mark
+expectsincein 60 figure: shapes 10002 picked 10002
+hosttime pickall 10000
+logmark
+hostmark
 key 1B 01
-sync 600
-under cut 30000
-shapes
-want ok 0 0
-mark
+expectsincein 120 figure: shapes 0 picked 0
+hosttime cut 30000
+logmark
+hostmark
 key 1D 01
-sync 600
-under moveback 60000
-shapes
-want ok 10002 10002
+expectsincein 120 figure: shapes 10002 picked 10002
+hosttime moveback 60000
+wait 1000
 shot big_fig_back
-mark
+logmark
+hostmark
 key 08 01
-sync 600
-under closed 30000
+expectsincein 120 figure: closed
+hosttime closed 30000
 sum
 keep saved
-mark
+logmark
+hostmark
 open big
-waitwin 画用紙 600
-sync 600
-under reopen 30000
-shapes
-want ok 10002 0
+expectsincein 120 figure: opened 画用紙 shapes 10002
+hosttime reopen 30000
+wait 1000
+logmark
 key 08 01
-sync 600
+expectsincein 60 figure: closed
 sum
 same saved
 absent !OACV!

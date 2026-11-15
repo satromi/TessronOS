@@ -6,48 +6,11 @@
 # is taken. Compared: "desktop: figure input to screen US us" and "figure: input to screen
 # US us" (from the press, as the pointer told it, to the window drawn), and the times of the
 # drawing ("desktop: figure drew in", "figure: drew part ... in").
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 2000 200
 # round 1
 logmark
-open big
-waitwin 画用紙 600
-sync 600
-wait 800
-click 123 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-click 135 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-click 147 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-click 159 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-click 171 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-key 08 01
-sync 600
-wait 500
 logmark
 pfig big
 expectsincein 60 figure: opened
@@ -98,43 +61,6 @@ expectsince figure: closed
 wait 500
 # round 2
 logmark
-open big
-waitwin 画用紙 600
-sync 600
-wait 800
-click 123 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-click 135 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-click 147 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-click 159 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-click 171 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-key 08 01
-sync 600
-wait 500
 logmark
 pfig big
 expectsincein 60 figure: opened
@@ -185,43 +111,6 @@ expectsince figure: closed
 wait 500
 # round 3
 logmark
-open big
-waitwin 画用紙 600
-sync 600
-wait 800
-click 123 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-click 135 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-click 147 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-click 159 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-click 171 152
-sync 600
-wait 300
-click 600 600
-sync 600
-wait 300
-key 08 01
-sync 600
-wait 500
 logmark
 pfig big
 expectsincein 60 figure: opened

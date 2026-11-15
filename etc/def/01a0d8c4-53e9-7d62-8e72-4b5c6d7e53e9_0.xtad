@@ -1,0 +1,58 @@
+<tad version="1.0" encoding="UTF-8" filename="ディスク操作のデータボックス">
+<document>
+<p>ディスク操作のデータボックス</p>
+<p>ディスク操作のパネルの定義。接続するディスクを選ぶパネル、ディスクの状態を示すパネル、区画を作る空き領域と大きさとラベルを決めるパネル、ボリュームを広げる大きさを決めるパネルと、できないことを知らせるパネル。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,480,230" title="接続">
+<text x="14" y="22">接続するディスク：</text>
+<list num="10" rect="24,30,456,186" value="1"/>
+<button num="102" rect="284,194,370,220" answer="cancel">取消</button>
+<button num="101" rect="380,194,466,220" answer="ok" emph="true">接続</button>
+</panel>
+<panel num="2" rect="0,0,360,230" title="状態表示">
+<text num="1" x="14" y="22"> </text>
+<text x="24" y="50">全体容量：</text>
+<text num="11" x="150" y="50"> </text>
+<text x="24" y="74">使用容量：</text>
+<text num="12" x="150" y="74"> </text>
+<text x="24" y="98">空き容量：</text>
+<text num="13" x="150" y="98"> </text>
+<text x="24" y="122">使用比率：</text>
+<text num="14" x="150" y="122"> </text>
+<text x="24" y="146">使用実身数：</text>
+<text num="15" x="150" y="146"> </text>
+<text x="24" y="170">くず実身数：</text>
+<text num="16" x="150" y="170"> </text>
+<button num="101" rect="244,194,344,220" answer="ok" emph="true">終了</button>
+</panel>
+<panel num="3" rect="0,0,560,302" title="区画作成">
+<text x="14" y="22">区画を作る空き領域：</text>
+<list num="10" rect="24,30,536,186" value="1"/>
+<text x="14" y="214">大きさ：</text>
+<number num="20" rect="104,194,214,220" value="0"/>
+<text x="222" y="214">MB(0は空き領域の全体)</text>
+<text x="14" y="248">ラベル：</text>
+<box num="21" rect="104,228,542,254" max="31" jp="true"/>
+<button num="102" rect="364,266,450,292" answer="cancel">取消</button>
+<button num="101" rect="460,266,546,292" answer="ok" emph="true">作成</button>
+</panel>
+<panel num="4" rect="0,0,480,206" title="拡張">
+<text num="1" x="14" y="22"> </text>
+<text x="24" y="50">今の大きさ：</text>
+<text num="2" x="180" y="50"> </text>
+<text x="24" y="76">広げられる大きさ：</text>
+<text num="3" x="180" y="76"> </text>
+<text x="24" y="112">新しい大きさ：</text>
+<number num="20" rect="180,92,300,118" value="0"/>
+<text x="308" y="112">MB</text>
+<button num="102" rect="284,170,370,196" answer="cancel">取消</button>
+<button num="101" rect="380,170,466,196" answer="ok" emph="true">拡張</button>
+</panel>
+<panel num="10" rect="0,0,480,110" title="ディスク操作" kind="warn">
+<text num="1" x="14" y="28"> </text>
+<text num="2" x="14" y="52"> </text>
+<button num="101" rect="372,74,466,100" answer="ok" emph="true">了解</button>
+</panel>
+</databox>
+</tad>

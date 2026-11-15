@@ -657,6 +657,117 @@ LOCAL void connect_change( USBHC *hc, USBDEV *hub, INT port, UW st, USBDEV *dev 
  * connected and not yet brought up. E_OK unless the port could not be
  * read (the hub itself went).
  */
+/*
+ * Suspending a device that is idle, for its driver: on a root port of a
+ * controller that can, its remote wakeup turned on first when it is
+ * asked for (and the device says it has it, bmAttributes bit 5), then the
+ * link put in U3. Resumed when the driver has something to send, or when
+ * the device signalled resume (port_event): the link back in U0, then its
+ * remote wakeup turned off again. A device that did not suspend, or did
+ * not come back, is not suspended again: the latter is let go and found
+ * anew on its port. With the manager's lock held.
+ */
+#define NOSUSP_HC	8
+LOCAL UW	nosusp[NOSUSP_HC];	/* by controller, bit n: root port n's device is not suspended again */
+
+LOCAL BOOL nosusp_of( USBDEV *dev )
+{
+	return (BOOL)( dev->hc->index < NOSUSP_HC && dev->port < 32
+		       && ( nosusp[dev->hc->index] & ( 1U << dev->port ) ) != 0 );
+}
+
+LOCAL void nosusp_set( USBDEV *dev )
+{
+	if ( dev->hc->index < NOSUSP_HC && dev->port < 32 ) nosusp[dev->hc->index] |= 1U << dev->port;
+}
+
+#define USB_FEAT_REMOTE_WAKEUP	1
+#define USB_CFG_ATTR_WAKEUP	0x20
+
+EXPORT ER knl_usb_dev_suspend( USBDEV *dev, BOOL wake )
+{
+	USBHC	*hc = dev->hc;
+	ER	er;
+
+	if ( dev->suspended ) return E_OK;
+	if ( hc->ops->dev_suspend == NULL || dev->parent != NULL || nosusp_of(dev) ) return E_NOSPT;
+	if ( wake ) {
+		if ( dev->cfg == NULL || dev->cfglen < 9 || ( dev->cfg[7] & USB_CFG_ATTR_WAKEUP ) == 0 ) return E_NOSPT;
+		er = knl_usb_control(dev, 0, USB_REQ_SET_FEATURE, USB_FEAT_REMOTE_WAKEUP, 0, NULL, 0, NULL);
+		if ( er < E_OK ) {
+			dev->n_suspend_fail++;
+			nosusp_set(dev);
+			USB_LOG("usb: %d-%d addr %d: remote wakeup not taken (%d): not suspended from now on\n",
+				hc->index, dev->root_port, dev->addr, (INT)er);
+			return er;
+		}
+	}
+	dev->wake_on = wake;
+	er = hc->ops->dev_suspend(hc, dev);
+	if ( er < E_OK ) {
+		if ( wake ) (void)knl_usb_control(dev, 0, USB_REQ_CLEAR_FEATURE, USB_FEAT_REMOTE_WAKEUP, 0, NULL, 0, NULL);
+		dev->n_suspend_fail++;
+		nosusp_set(dev);
+		USB_LOG("usb: %d-%d addr %d: did not suspend (%d): not suspended from now on\n",
+			hc->index, dev->root_port, dev->addr, (INT)er);
+		return er;
+	}
+	dev->suspended = TRUE;
+	dev->n_suspend++;
+	return E_OK;
+}
+
+EXPORT ER knl_usb_dev_resume( USBDEV *dev )
+{
+	USBHC	*hc = dev->hc;
+	ER	er;
+
+	if ( !dev->suspended ) return E_OK;
+	er = hc->ops->dev_resume(hc, dev);
+	if ( er < E_OK ) er = hc->ops->dev_resume(hc, dev);
+	dev->suspended = FALSE;
+	if ( er < E_OK ) {
+		dev->n_suspend_fail++;
+		nosusp_set(dev);
+		USB_LOG("usb: %d-%d addr %d: not back from the suspend (%d): let go, found again, not suspended from now on\n",
+			hc->index, dev->root_port, dev->addr, (INT)er);
+		detach_tree(dev, "not back from the suspend");
+		knl_usb_kick();
+		return er;
+	}
+	dev->n_resume++;
+	if ( dev->wake_on ) {
+		(void)knl_usb_control(dev, 0, USB_REQ_CLEAR_FEATURE, USB_FEAT_REMOTE_WAKEUP, 0, NULL, 0, NULL);
+		dev->wake_on = FALSE;
+	}
+	return E_OK;
+}
+
+#if USE_KTEST
+/* The tests': a device by the handle the interface gives it */
+EXPORT USBDEV *knl_usb_test_dev( INT handle )
+{
+	return dev_of_handle(handle);
+}
+#endif
+
+/* The devices suspended by their drivers: how often each was suspended, resumed, woke itself, failed */
+EXPORT INT knl_usb_pm_text( char *t )
+{
+	INT	i, n = 0;
+
+	for ( i = 0; i < dev_cap; i++ ) {
+		USBDEV	*d = dev_tbl[i];
+
+		if ( d == NULL || ( d->n_suspend | d->n_suspend_fail ) == 0 ) continue;
+		n += tm_sprintf((UB *)t + n, (CONST UB *)"; usb %d-%d %04x:%04x %s suspended %d resumed %d woke itself %d failed %d",
+				d->hc->index, d->root_port, GET16(d->ddesc + 8), GET16(d->ddesc + 10),
+				d->suspended ? "asleep" : "awake", (INT)d->n_suspend, (INT)d->n_resume,
+				(INT)d->n_remote_wake, (INT)d->n_suspend_fail);
+	}
+	return n;
+}
+
 LOCAL ER port_event( USBHC *hc, USBDEV *hub, INT port )
 {
 	USBDEV	*dev = dev_at(hc, hub, port);
@@ -665,6 +776,12 @@ LOCAL ER port_event( USBHC *hc, USBDEV *hub, INT port )
 	INT	i;
 	ER	er;
 
+	/* a suspended device that signalled resume: the link brought back, its driver's transfers go on */
+	if ( hub == NULL && dev != NULL && dev->suspended && hc->ops->dev_woke != NULL && hc->ops->dev_woke(hc, dev) ) {
+		dev->n_remote_wake++;
+		(void)knl_usb_dev_resume(dev);
+		dev = dev_at(hc, hub, port);
+	}
 	er = port_read(hc, hub, port, HUB_PC_ALL, &st);
 	if ( er < E_OK ) {
 		return er;

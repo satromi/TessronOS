@@ -443,3 +443,48 @@ EXPORT BOOL js_get_bool( CONST T_JSON *obj, CONST char *name, BOOL dflt )
 	}
 	return js_bool(&v, dflt);
 }
+
+EXPORT INT js_set_str( CONST UB *text, INT len, CONST T_JSON *obj, CONST char *name, CONST char *val,
+		       UB *out, INT max )
+{
+	T_JSON	v;
+	INT	a, e, k, n, nl, vl, at;
+	BOOL	add, comma = FALSE;
+
+	if ( text == NULL || obj == NULL || name == NULL || val == NULL || js_type(obj) != JS_OBJECT ) {
+		return E_PAR;
+	}
+	for ( nl = 0; name[nl] != 0; nl++ ) ;
+	for ( vl = 0; val[vl] != 0; vl++ ) ;
+	add = (BOOL)( js_get(obj, name, &v) < E_OK );
+	if ( !add ) {
+		a = (INT)( v.s - text );
+		e = a + v.len;
+	} else {
+		/* before the object's closing brace, after a comma when it has members */
+		e = (INT)( obj->s - text ) + obj->len - 1;
+		for ( k = e - 1; k > (INT)( obj->s - text ) && ( text[k] == ' ' || text[k] == '\t'
+							       || text[k] == '\r' || text[k] == '\n' ); k-- ) ;
+		comma = (BOOL)( k > (INT)( obj->s - text ) );
+		a = e;
+	}
+	n = len - ( e - a ) + vl + 2 + ( add ? nl + 3 + ( comma ? 1 : 0 ) : 0 );
+	if ( out == NULL || n + 1 > max ) {
+		return E_LIMIT;
+	}
+	for ( k = 0; k < a; k++ ) out[k] = text[k];
+	at = a;
+	if ( add ) {
+		if ( comma ) out[at++] = ',';
+		out[at++] = '"';
+		for ( k = 0; k < nl; k++ ) out[at++] = (UB)name[k];
+		out[at++] = '"';
+		out[at++] = ':';
+	}
+	out[at++] = '"';
+	for ( k = 0; k < vl; k++ ) out[at++] = (UB)val[k];
+	out[at++] = '"';
+	for ( k = e; k < len; k++ ) out[at++] = text[k];
+	out[at] = 0;
+	return at;
+}

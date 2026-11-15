@@ -88,6 +88,13 @@ Inline BOOL knl_ufault_is_data( UD esr )
 #define UFLT_PC_MASK	0
 #define UFLT_SP_MASK	7
 
+/*
+ * The bytes below the stack pointer a function may use without moving
+ * it (the System V ABI's red zone): the picture goes below them, as a
+ * signal frame does
+ */
+#define UFLT_RED_ZONE	128
+
 /* The task's stack pointer in the frame */
 #define knl_uframe_sp(f)	( (f)[FR_SP] )
 

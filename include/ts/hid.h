@@ -98,6 +98,7 @@ IMPORT INT knl_hid_init( void );
  * E_TMOUT when nothing came, E_NOEXS when there is no such device.
  */
 IMPORT ER  ts_hid_read( T_HIDEV *ev, TMO tmout );
+IMPORT void ts_hid_wake( void );	/* the reader's ts_hid_read answers E_TMOUT at once */
 
 /* Where the pointer is now, without waiting for it to move */
 IMPORT ER  ts_hid_pointer( INT *p_x, INT *p_y, UINT *p_buttons );

@@ -16,6 +16,18 @@
  *	a reference count -- with the records in memory, gone when the
  *	system stops. Shared memory is such an object's records; a global
  *	name is such an object made with OB_F_GLOBAL, found by its name.
+ *
+ *	A record is a list of pages, each wherever the page allocator had
+ *	one, so a record of any size up to OBM_REC_BIG is made of single
+ *	pages and does not need a run of them. Mapped into a process, it
+ *	takes a stretch of the shared window, the same in every process it
+ *	is mapped into, and keeps to the pages it had then; the stretch goes
+ *	back to the window when the last process lets it go.
+ *
+ *	An object made with OB_F_TRANSIENT has no name and is not listed: it
+ *	is reached only by a key handed on (ob_dup_key). It goes by itself
+ *	when nothing holds it any more -- no key open, no process it is
+ *	mapped into, no link -- as an anonymous memory file does on Linux.
  */
 
 #include <sys/machine.h>
@@ -26,31 +38,67 @@
 #include "sysman/space.h"
 #include "obj.h"
 
-#define OBM_MAX		4096		/* objects */
+/*
+ * The table of objects grows by OBM_GROW as it fills, up to OBM_MAX.
+ * An object without a name is alive only while a key or a mapping
+ * holds it, and a mapping is made through a key, so the name manager's
+ * keys (OB_KEY_MAX, 65536) bound the objects alive at once; the named
+ * ones, global names, are few.
+ */
+#define OBM_MAX		65536
+#define OBM_GROW	256
+#define OBM_HASH	1024		/* chains of objects, by UUID */
 #define OBM_REC_MAX	16		/* records of one */
-#define OBM_REC_BIG	( 64 * 1024 * 1024 )	/* the most one record may hold */
-#define OBM_MAP_MAX	16		/* processes one record is mapped into */
 
 /*
- * A record. Once it is mapped into a process it lives in pages of its
- * own (pf, order), at one address of the shared window (va) for every
- * process it is mapped into (mpid), and keeps to their size.
+ * The most one record holds: 2GB, the largest region Chromium makes
+ * (base::PlatformSharedMemoryRegion refuses one over INT_MAX bytes),
+ * rounded up to a page. Each page has its own entry in the list, so
+ * this is a bound on the list (a top of 1024 leaves), not on runs of
+ * memory. What the machine has free bounds it before this does.
+ */
+#define OBM_REC_BIG	( 2048ULL * 1024 * 1024 )
+#define OBM_LEAF	( PAGE_SIZE / sizeof(UD) )	/* page addresses in a leaf of the list */
+
+/*
+ * The part of the machine's memory records do not take: the kernel's
+ * own needs -- page tables, the stacks of new tasks, its allocations
+ * -- must still be met when the programs share all they can.
+ */
+#define OBM_KEEP_DIV	64
+
+/* A process a record is mapped into: at most once, at the record's address */
+typedef struct {
+	ID	pid;
+	BOOL	write;
+} OBMMAP;
+
+/*
+ * A record: its pages (leaf[i / OBM_LEAF][i % OBM_LEAF] the physical
+ * address of page i), its size, and, while it is mapped, the stretch of
+ * the shared window it is at (va, vlen bytes, every page of it mapped)
+ * and the processes it is mapped into. There are as many processes in
+ * the list as there are processes it is mapped into: each maps it once.
  */
 typedef struct {
-	UB	*data;
-	UD	size, cap;
+	UD	**leaf;
+	UD	nleaf;			/* room in the top */
+	UD	npg;			/* pages it has */
+	UD	size;
 	UINT	rt, sub;
-	PFRAME	*pf;
-	UINT	order;
 	UBINT	va;
-	INT	nmap;
-	ID	mpid[OBM_MAP_MAX];
+	UD	vlen;
+	OBMMAP	*map;
+	INT	nmap, mcap;
 } OBMREC;
 
 typedef struct {
 	TS_UUID	uuid;
 	UB	name[OB_NAME_MAX];
 	BOOL	global;
+	BOOL	transient;		/* goes when nothing holds it (OB_F_TRANSIENT) */
+	BOOL	opened;			/* a key has been opened on it */
+	ID	maker;			/* the process that made it, 0 the kernel */
 	T_OBPRT	*prt;			/* its own copy */
 	UB	*meta;
 	INT	metalen;
@@ -61,13 +109,20 @@ typedef struct {
 	INT	refcnt;
 	INT	opens;
 	BOOL	doomed;			/* deleted while open: goes at the last close */
+	INT	hnext;			/* the next on its chain, as index + 1; 0 at the end */
 } OBMOBJ;
 
-LOCAL OBMOBJ	*obm[OBM_MAX];
+LOCAL OBMOBJ	**obm = NULL;		/* obm_cap entries, NULL where free */
+LOCAL INT	obm_cap = 0;
+LOCAL INT	obm_count = 0;
+LOCAL INT	obm_chain[OBM_HASH];	/* the first of each chain, as index + 1 */
+LOCAL UD	obm_pages = 0;		/* pages the records hold */
 LOCAL ID	obm_mtx = 0;
 
 #define LOCK()		tk_loc_mtx(obm_mtx, TMO_FEVR)
 #define UNLOCK()	tk_unl_mtx(obm_mtx)
+
+#define PAGES(b)	( ( (UD)(b) + PAGE_SIZE - 1 ) >> PAGE_SHIFT )
 
 LOCAL BOOL same_name( CONST UB *a, CONST UB *b )
 {
@@ -79,32 +134,263 @@ LOCAL BOOL same_name( CONST UB *a, CONST UB *b )
 	return (BOOL)( a[i] == b[i] );
 }
 
+LOCAL INT hash_of( CONST TS_UUID *u )
+{
+	UD	x = u->d.hi ^ u->d.lo;
+
+	x ^= x >> 29;
+	x ^= x >> 17;
+	return (INT)( x & ( OBM_HASH - 1 ) );
+}
+
 LOCAL INT index_of( CONST TS_UUID *uuid )
 {
 	INT	i;
 
-	for ( i = 0; i < OBM_MAX; i++ ) {
-		if ( obm[i] != NULL && !obm[i]->doomed
-		  && ts_uuid_cmp(&obm[i]->uuid, uuid) == 0 ) {
+	for ( i = obm_chain[hash_of(uuid)] - 1; i >= 0; i = obm[i]->hnext - 1 ) {
+		if ( !obm[i]->doomed && ts_uuid_cmp(&obm[i]->uuid, uuid) == 0 ) {
 			return i;
 		}
 	}
 	return -1;
 }
 
+LOCAL void hash_del( INT i )
+{
+	INT	*p = &obm_chain[hash_of(&obm[i]->uuid)];
+
+	while ( *p != 0 && *p != i + 1 ) {
+		p = &obm[*p - 1]->hnext;
+	}
+	if ( *p == i + 1 ) {
+		*p = obm[i]->hnext;
+	}
+}
+
+/* A free slot of the table, made larger when there is none; -1 when it is at its most */
+LOCAL INT slot_new( void )
+{
+	OBMOBJ	**nt;
+	INT	i, ncap;
+
+	for ( i = 0; i < obm_cap; i++ ) {
+		if ( obm[i] == NULL ) return i;
+	}
+	if ( obm_cap >= OBM_MAX ) {
+		return -1;
+	}
+	ncap = obm_cap + OBM_GROW;
+	nt = (OBMOBJ **)Kmalloc(sizeof(OBMOBJ *) * (SZ)ncap);
+	if ( nt == NULL ) {
+		return -1;
+	}
+	for ( i = 0; i < ncap; i++ ) {
+		nt[i] = ( i < obm_cap ) ? obm[i] : NULL;
+	}
+	if ( obm != NULL ) Kfree(obm);
+	obm = nt;
+	i = obm_cap;
+	obm_cap = ncap;
+	return i;
+}
+
+/* ---------------------------------------------------------------- pages of a record */
+
+LOCAL UD pg_pa( CONST OBMREC *r, UD i )
+{
+	return r->leaf[i / OBM_LEAF][i % OBM_LEAF];
+}
+
+/* The pages from 'keep' on given back, and the leaves no longer needed */
+LOCAL void rec_trim( OBMREC *r, UD keep )
+{
+	UD	i, nl;
+
+	for ( i = keep; i < r->npg; i++ ) {
+		knl_free_pages(knl_pa_to_pf(pg_pa(r, i)), 0);
+	}
+	if ( r->npg > keep ) {
+		obm_pages -= r->npg - keep;
+		r->npg = keep;
+	}
+	nl = ( keep + OBM_LEAF - 1 ) / OBM_LEAF;
+	for ( i = nl; i < r->nleaf; i++ ) {
+		if ( r->leaf[i] != NULL ) {
+			Kfree(r->leaf[i]);
+			r->leaf[i] = NULL;
+		}
+	}
+	if ( keep == 0 && r->leaf != NULL ) {
+		Kfree(r->leaf);
+		r->leaf = NULL;
+		r->nleaf = 0;
+	}
+}
+
+/*
+ * The record given pages up to npg, zero filled. Not past what the
+ * machine can give without going under its share for the kernel; on
+ * failure it has the pages it had.
+ */
+LOCAL ER rec_pages( OBMREC *r, UD npg )
+{
+	UD	had = r->npg, nl, i, freec, keep;
+
+	if ( npg <= r->npg ) {
+		return E_OK;
+	}
+	if ( npg > PAGES(OBM_REC_BIG) ) {
+		return E_LIMIT;
+	}
+	freec = knl_pf_free_count(-1);
+	keep = knl_pf_total_count(-1) / OBM_KEEP_DIV;
+	if ( npg - had > freec || freec - ( npg - had ) < keep ) {
+		return E_NOMEM;
+	}
+	nl = ( npg + OBM_LEAF - 1 ) / OBM_LEAF;
+	if ( nl > r->nleaf ) {
+		UD	ncap = ( nl < 4 ) ? 4 : nl * 2, k;
+		UD	**nt;
+
+		if ( ncap > ( PAGES(OBM_REC_BIG) + OBM_LEAF - 1 ) / OBM_LEAF ) {
+			ncap = ( PAGES(OBM_REC_BIG) + OBM_LEAF - 1 ) / OBM_LEAF;
+		}
+		nt = (UD **)Kmalloc(sizeof(UD *) * (SZ)ncap);
+		if ( nt == NULL ) {
+			return E_NOMEM;
+		}
+		for ( k = 0; k < ncap; k++ ) {
+			nt[k] = ( k < r->nleaf ) ? r->leaf[k] : NULL;
+		}
+		if ( r->leaf != NULL ) Kfree(r->leaf);
+		r->leaf = nt;
+		r->nleaf = ncap;
+	}
+	for ( i = had; i < npg; i++ ) {
+		PFRAME	*pf;
+
+		if ( r->leaf[i / OBM_LEAF] == NULL ) {
+			r->leaf[i / OBM_LEAF] = (UD *)Kmalloc(PAGE_SIZE);
+			if ( r->leaf[i / OBM_LEAF] == NULL ) break;
+		}
+		pf = knl_alloc_pages(0, ZONE_NORMAL, KAF_ZERO);
+		if ( pf == NULL ) break;
+		r->leaf[i / OBM_LEAF][i % OBM_LEAF] = knl_pf_to_pa(pf);
+		r->npg = i + 1;
+		obm_pages++;
+	}
+	if ( r->npg < npg ) {
+		rec_trim(r, had);
+		return E_NOMEM;
+	}
+	return E_OK;
+}
+
+/* Bytes of a record copied out (into != FALSE: in), through the kernel's view of its pages */
+LOCAL void rec_copy( OBMREC *r, UD off, void *buf, UD n, BOOL in )
+{
+	UB	*b = (UB *)buf;
+
+	while ( n > 0 ) {
+		UD	pg = off >> PAGE_SHIFT, at = off & ( PAGE_SIZE - 1 );
+		UD	k = PAGE_SIZE - at;
+		UB	*p;
+
+		if ( k > n ) k = n;
+		p = (UB *)PA2VA(pg_pa(r, pg)) + at;
+		if ( in ) {
+			if ( b != NULL ) {
+				knl_memcpy(p, b, (SZ)k);
+			} else {
+				knl_memset(p, 0, (SZ)k);
+			}
+		} else {
+			knl_memcpy(b, p, (SZ)k);
+		}
+		if ( b != NULL ) b += k;
+		off += k;
+		n -= k;
+	}
+}
+
+/*
+ * The record made 'size' bytes: pages added for more (not while it is
+ * mapped: it keeps to the pages it is mapped with), pages past it given
+ * back for less when it is not mapped, and the bytes past the size
+ * zero, so that what grows again reads as zeros.
+ */
+LOCAL ER rec_resize( OBMREC *r, UD size )
+{
+	UD	npg = PAGES(size);
+	ER	er;
+
+	if ( size > OBM_REC_BIG ) {
+		return E_LIMIT;
+	}
+	if ( npg > r->npg ) {
+		if ( r->va != 0 ) {
+			return E_LIMIT;
+		}
+		er = rec_pages(r, npg);
+		if ( er < E_OK ) return er;
+	}
+	if ( size < r->size ) {
+		UD	end = ( r->va == 0 ) ? npg << PAGE_SHIFT : r->size;
+
+		if ( r->va == 0 ) rec_trim(r, npg);
+		if ( end > r->size ) end = r->size;
+		if ( end > size ) rec_copy(r, size, NULL, end - size, TRUE);
+	}
+	r->size = size;
+
+	return E_OK;
+}
+
+/* ---------------------------------------------------------------- mappings */
+
+typedef struct {
+	OBMREC	*r;
+	BOOL	write;
+} OBMSPC;
+
+/* Every page of the record's stretch mapped into a space (under the process table's lock) */
+LOCAL ER spc_map( void *space, void *arg )
+{
+	T_SPACE	*sp = (T_SPACE *)space;
+	OBMSPC	*a = (OBMSPC *)arg;
+	UD	i, n = a->r->vlen >> PAGE_SHIFT;
+	ER	er = E_OK;
+
+	for ( i = 0; i < n && er >= E_OK; i++ ) {
+		er = knl_pt_map(sp->l0_pa, a->r->va + ( i << PAGE_SHIFT ), pg_pa(a->r, i), PAGE_SIZE,
+				a->write ? PTE_PAGE_UDATA : PTE_PAGE_URO);
+	}
+	if ( er < E_OK ) {
+		(void)knl_pt_unmap(sp->l0_pa, a->r->va, a->r->vlen);
+	}
+	return er;
+}
+
+/* The k-th process of the record's list taken off, and the stretch given back after the last */
+LOCAL void map_drop( OBMREC *r, INT k )
+{
+	(void)knl_prc_unmap_shared(r->map[k].pid, r->va, r->vlen);
+	r->map[k] = r->map[--r->nmap];
+	if ( r->nmap == 0 ) {
+		knl_shm_va_free(r->va, r->vlen);
+		r->va = 0;
+		r->vlen = 0;
+	}
+}
+
 /* A record's memory given back: first taken out of every space it is in */
 LOCAL void rec_free( OBMREC *r )
 {
-	INT	k;
-
-	for ( k = 0; k < r->nmap; k++ ) {
-		(void)knl_prc_unmap_shared(r->mpid[k], r->va, r->cap);
+	while ( r->nmap > 0 ) {
+		map_drop(r, r->nmap - 1);
 	}
-	if ( r->pf != NULL ) {
-		knl_free_pages(r->pf, r->order);
-	} else if ( r->data != NULL ) {
-		Kfree(r->data);
-	}
+	rec_trim(r, 0);
+	if ( r->map != NULL ) Kfree(r->map);
 	knl_memset(r, 0, sizeof(*r));
 }
 
@@ -116,18 +402,45 @@ LOCAL void obj_free( INT i )
 	for ( r = 0; r < o->nrec; r++ ) {
 		rec_free(&o->rec[r]);
 	}
+	hash_del(i);
 	if ( o->meta != NULL ) Kfree(o->meta);
 	if ( o->icon != NULL ) Kfree(o->icon);
 	if ( o->prt != NULL ) Kfree(o->prt);
 	Kfree(o);
 	obm[i] = NULL;
+	obm_count--;
+}
+
+LOCAL BOOL obj_mapped( CONST OBMOBJ *o )
+{
+	INT	r;
+
+	for ( r = 0; r < o->nrec; r++ ) {
+		if ( o->rec[r].nmap > 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * An object without a name that nothing holds any more, gone: no key
+ * open, no process it is mapped into, no link to it. One never opened
+ * is held by its maker until the maker ends.
+ */
+LOCAL void obj_settle( INT i )
+{
+	OBMOBJ	*o = obm[i];
+
+	if ( o != NULL && o->transient && o->opens <= 0 && o->refcnt <= 0 && o->opened
+	  && !obj_mapped(o) ) {
+		obj_free(i);
+	}
 }
 
 LOCAL BOOL name_taken( CONST UB *name )
 {
 	INT	i;
 
-	for ( i = 0; i < OBM_MAX; i++ ) {
+	for ( i = 0; i < obm_cap; i++ ) {
 		if ( obm[i] != NULL && !obm[i]->doomed && obm[i]->global
 		  && same_name(obm[i]->name, name) ) {
 			return TRUE;
@@ -145,34 +458,6 @@ EXPORT BOOL knl_obmem_name_taken( CONST UB *name )
 	UNLOCK();
 
 	return t;
-}
-
-/* A record made big enough for 'need' bytes */
-LOCAL ER rec_room( OBMREC *r, UD need )
-{
-	UB	*nd;
-	UD	cap;
-
-	if ( need <= r->cap ) {
-		return E_OK;
-	}
-	if ( need > OBM_REC_BIG || r->pf != NULL ) {
-		return E_LIMIT;			/* mapped: it keeps to its pages */
-	}
-	cap = ( r->cap < 256 ) ? 256 : r->cap;
-	while ( cap < need ) cap *= 2;
-	nd = (UB *)Kmalloc((SZ)cap);
-	if ( nd == NULL ) {
-		return E_NOMEM;
-	}
-	if ( r->data != NULL ) {
-		knl_memcpy(nd, r->data, (SZ)r->size);
-		Kfree(r->data);
-	}
-	r->data = nd;
-	r->cap = cap;
-
-	return E_OK;
 }
 
 /* ---------------------------------------------------------------- the manager */
@@ -199,7 +484,8 @@ LOCAL ER obm_ref( CONST TS_UUID *uuid, T_OBREF *r )
 		return E_NOEXS;
 	}
 	knl_memcpy(r->name, obm[i]->name, OB_NAME_MAX);
-	r->flags = OB_F_VOLATILE | ( obm[i]->global ? OB_F_GLOBAL : 0 );
+	r->flags = OB_F_VOLATILE | ( obm[i]->global ? OB_F_GLOBAL : 0 )
+		 | ( obm[i]->transient ? OB_F_TRANSIENT : 0 );
 	r->refcnt = obm[i]->refcnt;
 	r->nrec = obm[i]->nrec;
 	r->size = 0;
@@ -243,15 +529,26 @@ LOCAL ER obm_setprot( CONST TS_UUID *uuid, CONST T_OBPRT *prt )
 	return ( i >= 0 ) ? E_OK : E_NOEXS;
 }
 
+LOCAL void obj_drop_new( OBMOBJ *o )
+{
+	if ( o->meta != NULL ) Kfree(o->meta);
+	if ( o->icon != NULL ) Kfree(o->icon);
+	if ( o->prt != NULL ) Kfree(o->prt);
+	Kfree(o);
+}
+
 LOCAL ER obm_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 {
 	OBMOBJ	*o;
-	INT	i, slot = -1, n;
+	INT	slot = -1, n, h;
 	BOOL	global = (BOOL)( ( c->flags & OB_F_GLOBAL ) != 0 );
 	ER	er;
 
 	if ( global && ( c->name == NULL || c->name[0] == 0 ) ) {
 		return E_PAR;			/* a global name needs a name */
+	}
+	if ( global && ( c->flags & OB_F_TRANSIENT ) != 0 ) {
+		return E_PAR;			/* one found by its name is not one without */
 	}
 	o = (OBMOBJ *)Kmalloc(sizeof(OBMOBJ));
 	if ( o == NULL ) {
@@ -272,6 +569,8 @@ LOCAL ER obm_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 		o->name[n] = c->name[n];
 	}
 	o->global = global;
+	o->transient = (BOOL)( ( c->flags & OB_F_TRANSIENT ) != 0 );
+	o->maker = ts_get_pid();
 	o->prt = knl_ob_prt_dup(prt);
 	if ( o->prt == NULL ) {
 		Kfree(o);
@@ -282,8 +581,7 @@ LOCAL ER obm_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	o->meta = (UB *)Kmalloc(( ( c->json != NULL && c->jsonsz > 0 && c->jsonsz < 0x3FFFFFFF )
 				  ? c->jsonsz : OB_NAME_MAX * 2 + 16 ) + 1);
 	if ( o->meta == NULL ) {
-		Kfree(o->prt);
-		Kfree(o);
+		obj_drop_new(o);
 		return E_NOMEM;
 	}
 	if ( c->json != NULL && c->jsonsz > 0 && c->jsonsz < 0x3FFFFFFF ) {
@@ -299,9 +597,7 @@ LOCAL ER obm_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	if ( c->icon != NULL && c->iconsz > 0 && c->iconsz <= OB_ICO_MAX ) {
 		o->icon = (UB *)Kmalloc(c->iconsz);
 		if ( o->icon == NULL ) {
-			Kfree(o->meta);
-			Kfree(o->prt);
-			Kfree(o);
+			obj_drop_new(o);
 			return E_NOMEM;
 		}
 		knl_memcpy(o->icon, c->icon, (INT)c->iconsz);
@@ -310,33 +606,26 @@ LOCAL ER obm_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 
 	/* the channels' names asked first, with no lock of ours held */
 	if ( global && knl_obchan_name_taken(o->name) ) {
-		Kfree(o->meta);
-		Kfree(o->prt);
-		Kfree(o);
+		obj_drop_new(o);
 		return E_OBJ;
 	}
 	LOCK();
 	if ( global && name_taken(o->name) ) {
 		UNLOCK();
-		Kfree(o->meta);
-		Kfree(o->prt);
-		Kfree(o);
+		obj_drop_new(o);
 		return E_OBJ;			/* the name is someone else's */
 	}
-	for ( i = 0; i < OBM_MAX; i++ ) {
-		if ( obm[i] == NULL ) {
-			slot = i;
-			break;
-		}
-	}
+	slot = slot_new();
 	if ( slot >= 0 ) {
 		obm[slot] = o;
+		h = hash_of(&o->uuid);
+		o->hnext = obm_chain[h];
+		obm_chain[h] = slot + 1;
+		obm_count++;
 	}
 	UNLOCK();
 	if ( slot < 0 ) {
-		Kfree(o->meta);
-		Kfree(o->prt);
-		Kfree(o);
+		obj_drop_new(o);
 		return E_LIMIT;
 	}
 	*p_uuid = o->uuid;
@@ -369,7 +658,10 @@ LOCAL INT obm_open( CONST TS_UUID *uuid, UINT ops )
 	(void)ops;
 	LOCK();
 	i = index_of(uuid);
-	if ( i >= 0 ) obm[i]->opens++;
+	if ( i >= 0 ) {
+		obm[i]->opens++;
+		obm[i]->opened = TRUE;
+	}
 	UNLOCK();
 
 	return ( i >= 0 ) ? i + 1 : E_NOEXS;
@@ -377,7 +669,7 @@ LOCAL INT obm_open( CONST TS_UUID *uuid, UINT ops )
 
 LOCAL OBMOBJ *obj_of( INT h )
 {
-	return ( h >= 1 && h <= OBM_MAX ) ? obm[h - 1] : NULL;
+	return ( h >= 1 && h <= obm_cap ) ? obm[h - 1] : NULL;
 }
 
 LOCAL ER obm_close( INT h )
@@ -386,8 +678,12 @@ LOCAL ER obm_close( INT h )
 
 	LOCK();
 	o = obj_of(h);
-	if ( o != NULL && --o->opens <= 0 && o->doomed ) {
-		obj_free(h - 1);
+	if ( o != NULL ) {
+		if ( --o->opens <= 0 && o->doomed ) {
+			obj_free(h - 1);
+		} else {
+			obj_settle(h - 1);
+		}
 	}
 	UNLOCK();
 
@@ -405,12 +701,12 @@ LOCAL ER obm_rea( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, BOOL
 	o = obj_of(h);
 	if ( o == NULL || recno < 0 || recno >= o->nrec ) {
 		er = ( o == NULL ) ? E_ID : E_NOEXS;
-	} else if ( off < 0 ) {
+	} else if ( off < 0 || size < 0 ) {
 		er = E_PAR;
 	} else if ( (UD)off < o->rec[recno].size ) {
 		n = (SZ)( o->rec[recno].size - (UD)off );
 		if ( n > size ) n = size;
-		knl_memcpy(buf, o->rec[recno].data + off, (SZ)n);
+		if ( n > 0 ) rec_copy(&o->rec[recno], (UD)off, buf, (UD)n, FALSE);
 	}
 	UNLOCK();
 	if ( er >= E_OK && p_asize != NULL ) {
@@ -431,19 +727,15 @@ LOCAL ER obm_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize
 	o = obj_of(h);
 	if ( o == NULL || recno < 0 || recno >= o->nrec ) {
 		er = ( o == NULL ) ? E_ID : E_NOEXS;
-	} else if ( off < 0 || size < 0 ) {
-		er = E_PAR;
+	} else if ( off < 0 || size < 0 || (UD)off + (UD)size > OBM_REC_BIG ) {
+		er = ( off < 0 || size < 0 ) ? E_PAR : E_LIMIT;
 	} else {
 		r = &o->rec[recno];
-		er = rec_room(r, (UD)off + (UD)size);
-		if ( er >= E_OK ) {
-			if ( (UD)off > r->size ) {
-				knl_memset(r->data + r->size, 0, (SZ)( (UD)off - r->size ));
-			}
-			knl_memcpy(r->data + off, buf, (SZ)size);
-			if ( (UD)off + (UD)size > r->size ) {
-				r->size = (UD)off + (UD)size;
-			}
+		if ( (UD)off + (UD)size > r->size ) {
+			er = rec_resize(r, (UD)off + (UD)size);
+		}
+		if ( er >= E_OK && size > 0 ) {
+			rec_copy(r, (UD)off, (void *)buf, (UD)size, TRUE);
 		}
 	}
 	UNLOCK();
@@ -481,24 +773,14 @@ LOCAL ER obm_apd( INT h, UINT rt, UINT sub, INT *p_recno )
 LOCAL ER obm_trn( INT h, INT recno, UD size )
 {
 	OBMOBJ	*o;
-	OBMREC	*r;
-	ER	er = E_OK;
+	ER	er;
 
 	LOCK();
 	o = obj_of(h);
 	if ( o == NULL || recno < 0 || recno >= o->nrec ) {
 		er = ( o == NULL ) ? E_ID : E_NOEXS;
 	} else {
-		r = &o->rec[recno];
-		if ( size > r->size ) {
-			er = rec_room(r, size);
-			if ( er >= E_OK ) {
-				knl_memset(r->data + r->size, 0, (SZ)( size - r->size ));
-			}
-		}
-		if ( er >= E_OK ) {
-			r->size = size;
-		}
+		er = rec_resize(&o->rec[recno], size);
 	}
 	UNLOCK();
 
@@ -667,13 +949,14 @@ LOCAL ER obm_lnk( CONST TS_UUID *uuid, INT delta )
 		er = E_OBJ;
 	} else {
 		obm[i]->refcnt += delta;
+		obj_settle(i);
 	}
 	UNLOCK();
 
 	return er;
 }
 
-/* In UUID order: the smallest n after 'from', picked one at a time */
+/* In UUID order: the smallest n after 'from', picked one at a time; those without a name are not listed */
 LOCAL ER obm_lst( CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt )
 {
 	INT	cnt = 0, i;
@@ -682,8 +965,8 @@ LOCAL ER obm_lst( CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt )
 	while ( cnt < n ) {
 		INT	best = -1;
 
-		for ( i = 0; i < OBM_MAX; i++ ) {
-			if ( obm[i] == NULL || obm[i]->doomed ) continue;
+		for ( i = 0; i < obm_cap; i++ ) {
+			if ( obm[i] == NULL || obm[i]->doomed || obm[i]->transient ) continue;
 			if ( cnt > 0 && ts_uuid_cmp(&obm[i]->uuid, &buf[cnt - 1]) <= 0 ) continue;
 			if ( cnt == 0 && from != NULL && ts_uuid_cmp(&obm[i]->uuid, from) <= 0 ) continue;
 			if ( best < 0 || ts_uuid_cmp(&obm[i]->uuid, &obm[best]->uuid) < 0 ) {
@@ -705,7 +988,7 @@ LOCAL ER obm_fndnam( CONST UB *name, TS_UUID *p_uuid )
 	ER	er = E_NOEXS;
 
 	LOCK();
-	for ( i = 0; i < OBM_MAX; i++ ) {
+	for ( i = 0; i < obm_cap; i++ ) {
 		if ( obm[i] != NULL && !obm[i]->doomed && obm[i]->global
 		  && same_name(obm[i]->name, name) ) {
 			*p_uuid = obm[i]->uuid;
@@ -719,66 +1002,31 @@ LOCAL ER obm_fndnam( CONST UB *name, TS_UUID *p_uuid )
 }
 
 /*
- * The processes a record is mapped into that have ended without taking
- * it off: struck out when the list is full, to make room.
- */
-LOCAL void prune_maps( INT h, INT recno )
-{
-	OBMOBJ	*o;
-	ID	pids[OBM_MAP_MAX], dead[OBM_MAP_MAX];
-	INT	n = 0, nd = 0, i, k;
-
-	LOCK();
-	o = obj_of(h);
-	if ( o != NULL && recno >= 0 && recno < o->nrec && o->rec[recno].nmap == OBM_MAP_MAX ) {
-		n = o->rec[recno].nmap;
-		knl_memcpy(pids, o->rec[recno].mpid, (INT)sizeof(ID) * n);
-	}
-	UNLOCK();
-	for ( i = 0; i < n; i++ ) {
-		if ( knl_prc_uuid(pids[i], NULL, NULL) < E_OK ) {
-			dead[nd++] = pids[i];
-		}
-	}
-	if ( nd == 0 ) {
-		return;
-	}
-	LOCK();
-	o = obj_of(h);
-	if ( o != NULL && recno >= 0 && recno < o->nrec ) {
-		OBMREC	*r = &o->rec[recno];
-
-		for ( i = 0; i < nd; i++ ) {
-			for ( k = 0; k < r->nmap; k++ ) {
-				if ( r->mpid[k] == dead[i] ) {
-					r->mpid[k] = r->mpid[--r->nmap];
-					break;
-				}
-			}
-		}
-	}
-	UNLOCK();
-}
-
-/*
  * A record mapped into a process (target is -pid). The first time, it
- * moves into pages of its own and takes an address in the shared
- * window; every process it is mapped into sees it there.
+ * is given pages for at least m->size bytes and takes a stretch of the
+ * shared window; every process it is mapped into sees it there, until
+ * the last one lets it go. A process it is mapped into already keeps
+ * its mapping, made writable when this one is; one mapped writable is
+ * not made read-only by a mapping that is not.
  */
 LOCAL ER obm_map( INT h, INT recno, INT target, T_OBMAP *m )
 {
 	OBMOBJ	*o;
 	OBMREC	*r;
+	OBMSPC	a;
 	ID	pid = -target;
-	UD	pa = 0, cap = 0;
-	UBINT	va = 0;
+	UD	want;
+	BOOL	write;
 	ER	er = E_OK;
 	INT	k;
 
 	if ( target >= 0 || m == NULL ) {
 		return E_NOSPT;			/* storage maps into a process only */
 	}
-	prune_maps(h, recno);
+	if ( m->size < 0 ) {
+		return E_PAR;
+	}
+	write = (BOOL)( ( m->flags & OB_M_WRITE ) != 0 );
 	LOCK();
 	o = obj_of(h);
 	if ( o == NULL || recno < 0 || recno >= o->nrec ) {
@@ -786,60 +1034,72 @@ LOCAL ER obm_map( INT h, INT recno, INT target, T_OBMAP *m )
 		return ( o == NULL ) ? E_ID : E_NOEXS;
 	}
 	r = &o->rec[recno];
-	if ( r->pf == NULL ) {
-		UD	want = ( (UD)m->size > r->size ) ? (UD)m->size : r->size;
-		UINT	order = 0;
-		PFRAME	*pf;
+	want = ( (UD)m->size > r->size ) ? (UD)m->size : r->size;
+	want = PAGES(( want > 0 ) ? want : 1);
+	if ( r->va == 0 ) {
+		UBINT	va;
 
-		while ( ( (UD)PAGE_SIZE << order ) < want && order < PF_MAX_ORDER ) order++;
-		if ( ( (UD)PAGE_SIZE << order ) < want ) {
-			er = E_LIMIT;		/* more than one block of pages holds */
-		} else if ( ( pf = knl_alloc_pages(order, ZONE_NORMAL, KAF_ZERO) ) == NULL ) {
-			er = E_NOMEM;
-		} else {
-			UD	bytes = (UD)PAGE_SIZE << order;
-			UB	*nd = (UB *)PA2VA(knl_pf_to_pa(pf));
-
-			va = knl_shm_va_alloc(bytes);
+		if ( want < r->npg ) want = r->npg;
+		er = rec_pages(r, want);
+		if ( er >= E_OK ) {
+			va = knl_shm_va_alloc(want << PAGE_SHIFT);
 			if ( va == 0 ) {
-				knl_free_pages(pf, order);
 				er = E_LIMIT;
 			} else {
-				if ( r->size > 0 ) {
-					knl_memcpy(nd, r->data, (SZ)r->size);
-				}
-				if ( r->data != NULL ) {
-					Kfree(r->data);
-				}
-				r->data = nd;
-				r->cap = bytes;
-				r->pf = pf;
-				r->order = order;
 				r->va = va;
+				r->vlen = want << PAGE_SHIFT;
 			}
+		}
+	} else if ( ( want << PAGE_SHIFT ) > r->vlen ) {
+		er = E_LIMIT;			/* mapped: it keeps to its pages */
+	}
+	for ( k = 0; er >= E_OK && k < r->nmap && r->map[k].pid != pid; k++ ) ;
+	if ( er >= E_OK && k == r->nmap ) {
+		if ( r->nmap == r->mcap ) {
+			INT	ncap = ( r->mcap < 4 ) ? 4 : r->mcap * 2;
+			OBMMAP	*nm = (OBMMAP *)Kmalloc(sizeof(OBMMAP) * (SZ)ncap);
+
+			if ( nm == NULL ) {
+				er = E_NOMEM;
+			} else {
+				if ( r->map != NULL ) {
+					knl_memcpy(nm, r->map, (INT)sizeof(OBMMAP) * r->nmap);
+					Kfree(r->map);
+				}
+				r->map = nm;
+				r->mcap = ncap;
+			}
+		}
+		if ( er >= E_OK ) {
+			r->map[k].pid = pid;
+			r->map[k].write = write;
+			r->nmap++;
+			a.r = r;
+			a.write = write;
+			er = knl_prc_space_call(pid, spc_map, &a);
+			if ( er < E_OK ) {
+				r->map[k] = r->map[--r->nmap];
+			}
+		}
+	} else if ( er >= E_OK && write && !r->map[k].write ) {
+		a.r = r;
+		a.write = TRUE;
+		er = knl_prc_space_call(pid, spc_map, &a);
+		if ( er >= E_OK ) {
+			r->map[k].write = TRUE;
 		}
 	}
+	if ( er < E_OK && r->nmap == 0 && r->va != 0 ) {
+		knl_shm_va_free(r->va, r->vlen);
+		r->va = 0;
+		r->vlen = 0;
+	}
 	if ( er >= E_OK ) {
-		pa = knl_pf_to_pa(r->pf);
-		cap = r->cap;
-		va = r->va;
-		for ( k = 0; k < r->nmap && r->mpid[k] != pid; k++ ) ;
-		if ( k == r->nmap ) {
-			if ( r->nmap < OBM_MAP_MAX ) {
-				r->mpid[r->nmap++] = pid;
-			} else {
-				er = E_LIMIT;
-			}
-		}
+		m->addr = (void *)r->va;
+		m->size = (SZ)r->vlen;
 	}
 	UNLOCK();
-	if ( er >= E_OK ) {
-		er = knl_prc_map_shared(pid, va, pa, cap, ( m->flags & OB_M_WRITE ) != 0);
-	}
-	if ( er >= E_OK ) {
-		m->addr = (void *)va;
-		m->size = (SZ)cap;
-	}
+
 	return er;
 }
 
@@ -848,9 +1108,7 @@ LOCAL ER obm_unm( INT h, INT recno, INT target )
 	OBMOBJ	*o;
 	OBMREC	*r;
 	ID	pid = -target;
-	UBINT	va = 0;
-	UD	cap = 0;
-	BOOL	was = FALSE;
+	ER	er = E_OBJ;			/* not mapped there */
 	INT	k;
 
 	if ( target >= 0 ) {
@@ -864,21 +1122,87 @@ LOCAL ER obm_unm( INT h, INT recno, INT target )
 	}
 	r = &o->rec[recno];
 	for ( k = 0; k < r->nmap; k++ ) {
-		if ( r->mpid[k] == pid ) {
-			r->mpid[k] = r->mpid[--r->nmap];
-			was = TRUE;
+		if ( r->map[k].pid == pid ) {
+			map_drop(r, k);
+			er = E_OK;
 			break;
 		}
 	}
-	va = r->va;
-	cap = r->cap;
 	UNLOCK();
-	if ( !was ) {
-		return E_OBJ;			/* not mapped there */
-	}
-	(void)knl_prc_unmap_shared(pid, va, cap);
 
-	return E_OK;
+	return er;
+}
+
+/* ---------------------------------------------------------------- processes */
+
+/*
+ * A process is ending (prc_close_all, after its keys are closed and
+ * while its space is still there): it is taken off every record it is
+ * mapped into, and what it made and never opened goes. Then whatever
+ * without a name nothing holds any more goes too.
+ */
+EXPORT void knl_obmem_prc_end( ID pid )
+{
+	OBMOBJ	*o;
+	INT	i, r, k;
+
+	if ( obm_mtx <= 0 || pid <= 0 ) {
+		return;
+	}
+	LOCK();
+	for ( i = 0; i < obm_cap; i++ ) {
+		o = obm[i];
+		if ( o == NULL ) continue;
+		for ( r = 0; r < o->nrec; r++ ) {
+			for ( k = 0; k < o->rec[r].nmap; k++ ) {
+				if ( o->rec[r].map[k].pid == pid ) {
+					map_drop(&o->rec[r], k);
+					break;
+				}
+			}
+		}
+		if ( o->transient && !o->opened && o->maker == pid ) {
+			o->opened = TRUE;	/* its maker can no longer open it */
+		}
+		obj_settle(i);
+	}
+	UNLOCK();
+}
+
+/*
+ * What the records hold: the objects, the pages of all their records,
+ * and of those the pages mapped into some process; with pid above 0,
+ * the pages mapped into that one (*p_pid_pages)
+ */
+EXPORT INT knl_obmem_stat( UD *p_pages, UD *p_mapped, ID pid, UD *p_pid_pages )
+{
+	OBMOBJ	*o;
+	UD	mapped = 0, mine = 0;
+	INT	i, r, k, n;
+
+	if ( obm_mtx <= 0 ) {
+		return 0;
+	}
+	LOCK();
+	for ( i = 0; i < obm_cap; i++ ) {
+		o = obm[i];
+		if ( o == NULL ) continue;
+		for ( r = 0; r < o->nrec; r++ ) {
+			if ( o->rec[r].nmap == 0 ) continue;
+			mapped += o->rec[r].npg;
+			for ( k = 0; pid > 0 && k < o->rec[r].nmap; k++ ) {
+				if ( o->rec[r].map[k].pid == pid ) {
+					mine += o->rec[r].vlen >> PAGE_SHIFT;
+				}
+			}
+		}
+	}
+	n = obm_count;
+	if ( p_pages != NULL ) *p_pages = obm_pages;
+	UNLOCK();
+	if ( p_mapped != NULL ) *p_mapped = mapped;
+	if ( p_pid_pages != NULL ) *p_pid_pages = mine;
+	return n;
 }
 
 LOCAL CONST T_OBMGR obm_mgr = {

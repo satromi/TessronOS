@@ -10,7 +10,9 @@
 /*
  *	ts_socket.c
  *	BSD sockets on the so_ calls (include/tsposix/sys/socket.h,
- *	include/ts/soapp.h, design 12.6).
+ *	include/ts/soapp.h, design 12.6). A local socket (AF_UNIX) is an end
+ *	of a stream between processes, which ts_chan.c serves; the calls here
+ *	hand its descriptors there.
  *
  *	A socket is descriptor TS_SOCK_FD_BASE + its so_ number, so that
  *	read, write and close (ts_syscalls.c) and poll reach it. The
@@ -20,7 +22,10 @@
  *	Errors of the stack become errno values: E_TMOUT is EAGAIN (a socket
  *	that may not block) or ETIMEDOUT, E_IO is ECONNREFUSED on connect
  *	and ECONNRESET after, E_BUSY EINPROGRESS or EAGAIN, E_NOMEM (the
- *	stack short of buffers for the moment) ENOBUFS.
+ *	stack short of buffers for the moment) ENOBUFS, E_LIMIT (the
+ *	system's sockets all taken, or all but those the kernel keeps for
+ *	itself) ENFILE, and EX_MFILE (the process holding as many as its
+ *	limit allows, so_getlimit) EMFILE.
  *
  *	getaddrinfo asks the system's resolver (so_resolveall) for the
  *	addresses of a name of both families, in the order to try them.
@@ -40,6 +45,21 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
+#include <tschan.h>
+
+/* ts_chan.c: the ends of streams between processes (AF_UNIX) */
+extern int	ts_chan_pair( int type, int sv[2] );
+extern int	ts_chan_close( int fd );
+extern long	ts_chan_read( int fd, void *buf, size_t n, int flags );
+extern long	ts_chan_write( int fd, const void *buf, size_t n, int flags );
+extern long	ts_chan_sendmsg( int fd, const struct msghdr *msg, int flags );
+extern long	ts_chan_recvmsg( int fd, struct msghdr *msg, int flags );
+extern int	ts_chan_shutdown( int fd, int how );
+extern int	ts_chan_fcntl( int fd, int cmd, int arg );
+
+/* ts_evfd.c: poll over descriptors that are not all network sockets */
+extern int	ts_wait_fds( struct pollfd *fds, nfds_t nfds, int timeout );
+extern int	ts_evfd_is( int fd );
 
 /* The stack's side (include/ts/soapp.h), with names of their own here */
 typedef struct {
@@ -142,12 +162,51 @@ extern int so_resolveall( const char *name, int family, int flags, SO_ADDR *addr
 #define E_PAR_		(-17)
 #define E_NOSPT_	(-9)
 #define E_NOMEM_	(-33)
+#define E_OACV_		(-27)
+#define E_LIMIT_	(-34)
+#define EX_MFILE_	(-24)
 
-#define MAXSOCK		64
 #define ADDRS_MAX	16		/* addresses of a name getaddrinfo takes */
 
-static unsigned char	sock_nb[MAXSOCK];	/* made not to block */
-static unsigned char	sock_conn[MAXSOCK];	/* connected (a failure after is a reset) */
+/*
+ * Whether each socket was made not to block, by its number. The numbers
+ * are those of the system's table, which the process's own sockets may
+ * have any of; the flags are kept in blocks of SOCK_BLK numbers, each
+ * made when a number in it first comes into use and kept from then on,
+ * so that a thread looking at one never meets a block moved or freed
+ * under it. The blocks reach far past the table's size (SO_MAX of
+ * include/ts/sodef.h).
+ */
+#define SOCK_BLK	64
+#define SOCK_BLKS	256
+
+static unsigned char	*sock_blk[SOCK_BLKS];
+
+/* The flag of socket s; NULL past the blocks, or, with make, when there is no memory for one */
+static unsigned char *sock_nb( int s, int make )
+{
+	unsigned char	*b, *none = NULL;
+
+	if ( s < 0 || s / SOCK_BLK >= SOCK_BLKS ) return NULL;
+	b = __atomic_load_n(&sock_blk[s / SOCK_BLK], __ATOMIC_ACQUIRE);
+	if ( b == NULL && make ) {
+		b = (unsigned char *)calloc(SOCK_BLK, 1);
+		if ( b == NULL ) return NULL;
+		if ( !__atomic_compare_exchange_n(&sock_blk[s / SOCK_BLK], &none, b, 0,
+						  __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ) {
+			free(b);		/* another thread made it first */
+			b = none;
+		}
+	}
+	return ( b != NULL ) ? &b[s % SOCK_BLK] : NULL;
+}
+
+static int nonblocking( int s )
+{
+	unsigned char	*nb = sock_nb(s, 0);
+
+	return ( nb != NULL && *nb != 0 );
+}
 
 int ts_sock_so( int fd )
 {
@@ -167,13 +226,16 @@ static int so_of( int fd )
 static int set_err( int er, int connecting, int s )
 {
 	switch ( er ) {
-	case E_TMOUT_:	errno = ( s >= 0 && s < MAXSOCK && sock_nb[s] ) ? EAGAIN : ETIMEDOUT; break;
+	case E_TMOUT_:	errno = nonblocking(s) ? EAGAIN : ETIMEDOUT; break;
 	case E_IO_:	errno = connecting ? ECONNREFUSED : ECONNRESET; break;
 	case E_BUSY_:	errno = connecting ? EINPROGRESS : EAGAIN; break;
 	case E_ID_:	errno = EBADF; break;
 	case E_PAR_:	errno = EINVAL; break;
 	case E_NOSPT_:	errno = EAFNOSUPPORT; break;
 	case E_NOMEM_:	errno = ENOBUFS; break;
+	case E_OACV_:	errno = EPERM; break;
+	case E_LIMIT_:	errno = ENFILE; break;
+	case EX_MFILE_:	errno = EMFILE; break;
 	default:	errno = EIO; break;
 	}
 	return -1;
@@ -246,6 +308,24 @@ static int to_so_flags( int flags )
 	return f;
 }
 
+/* A socket the stack gave number s, as a descriptor; closed again when its flag has no room */
+static int made( int s, int nonblock )
+{
+	unsigned char	*nb = sock_nb(s, 1);
+
+	if ( nb == NULL ) {
+		(void)so_close(s);
+		errno = ( s / SOCK_BLK >= SOCK_BLKS ) ? EMFILE : ENOMEM;
+		return -1;
+	}
+	*nb = 0;
+	if ( nonblock ) {
+		(void)so_fcntl(s, SO_F_SETFL, SO_O_NONBLOCK);
+		*nb = 1;
+	}
+	return TS_SOCK_FD_BASE + s;
+}
+
 int socket( int domain, int type, int protocol )
 {
 	int	base = type & 0xf, s;
@@ -262,32 +342,30 @@ int socket( int domain, int type, int protocol )
 	if ( s < 0 ) {
 		return set_err(s, 0, -1);
 	}
-	if ( s >= MAXSOCK ) {
-		(void)so_close(s);
-		errno = EMFILE;
-		return -1;
-	}
-	sock_nb[s] = 0;
-	sock_conn[s] = 0;
-	if ( type & SOCK_NONBLOCK ) {
-		(void)so_fcntl(s, SO_F_SETFL, SO_O_NONBLOCK);
-		sock_nb[s] = 1;
-	}
-	return TS_SOCK_FD_BASE + s;
+	return made(s, ( type & SOCK_NONBLOCK ) != 0);
 }
 
+/* A pair of local sockets: two ends of a stream between processes (ts_chan.c) */
 int socketpair( int domain, int type, int protocol, int sv[2] )
 {
-	(void)domain; (void)type; (void)protocol; (void)sv;
-	errno = EAFNOSUPPORT;
-	return -1;
+	if ( domain != AF_UNIX ) {
+		errno = EAFNOSUPPORT;
+		return -1;
+	}
+	if ( protocol != 0 ) {
+		errno = EPROTONOSUPPORT;
+		return -1;
+	}
+	return ts_chan_pair(type, sv);
 }
 
 /* Closing a socket (ts_syscalls.c's close) */
 int ts_sock_close( int fd )
 {
-	int	s = so_of(fd), er;
+	int	s, er;
 
+	if ( ts_chan_is(fd) ) return ts_chan_close(fd);
+	s = so_of(fd);
 	if ( s < 0 ) return -1;
 	er = so_close(s);
 	return ( er < 0 ) ? set_err(er, 0, s) : 0;
@@ -317,7 +395,6 @@ int connect( int fd, const struct sockaddr *addr, socklen_t len )
 	if ( er < 0 ) {
 		return set_err(er, 1, s);
 	}
-	if ( s < MAXSOCK ) sock_conn[s] = 1;
 	return 0;
 }
 
@@ -342,19 +419,11 @@ int accept4( int fd, struct sockaddr *addr, socklen_t *len, int flags )
 	if ( n < 0 ) {
 		return set_err(n, 0, s);
 	}
-	if ( n >= MAXSOCK ) {
-		(void)so_close(n);
-		errno = EMFILE;
-		return -1;
+	n = made(n, ( flags & SOCK_NONBLOCK ) != 0);
+	if ( n >= 0 ) {
+		from_so_addr(&a, addr, len);
 	}
-	sock_nb[n] = 0;
-	sock_conn[n] = 1;
-	if ( flags & SOCK_NONBLOCK ) {
-		(void)so_fcntl(n, SO_F_SETFL, SO_O_NONBLOCK);
-		sock_nb[n] = 1;
-	}
-	from_so_addr(&a, addr, len);
-	return TS_SOCK_FD_BASE + n;
+	return n;
 }
 
 int accept( int fd, struct sockaddr *addr, socklen_t *len )
@@ -364,8 +433,10 @@ int accept( int fd, struct sockaddr *addr, socklen_t *len )
 
 int shutdown( int fd, int how )
 {
-	int	s = so_of(fd), er;
+	int	s, er;
 
+	if ( ts_chan_is(fd) ) return ts_chan_shutdown(fd, how);
+	s = so_of(fd);
 	if ( s < 0 ) return -1;
 	er = so_shutdown(s, how);
 	return ( er < 0 ) ? set_err(er, 0, s) : 0;
@@ -373,8 +444,10 @@ int shutdown( int fd, int how )
 
 ssize_t send( int fd, const void *buf, size_t len, int flags )
 {
-	int	s = so_of(fd), n;
+	int	s, n;
 
+	if ( ts_chan_is(fd) ) return ts_chan_write(fd, buf, len, flags);
+	s = so_of(fd);
 	if ( s < 0 ) return -1;
 	n = so_send(s, buf, (long)len, to_so_flags(flags));
 	return ( n < 0 ) ? set_err(n, 0, s) : n;
@@ -382,8 +455,10 @@ ssize_t send( int fd, const void *buf, size_t len, int flags )
 
 ssize_t recv( int fd, void *buf, size_t len, int flags )
 {
-	int	s = so_of(fd), n;
+	int	s, n;
 
+	if ( ts_chan_is(fd) ) return ts_chan_read(fd, buf, len, flags);
+	s = so_of(fd);
 	if ( s < 0 ) return -1;
 	n = so_recv(s, buf, (long)len, to_so_flags(flags));
 	return ( n < 0 ) ? set_err(n, 0, s) : n;
@@ -422,6 +497,7 @@ ssize_t sendmsg( int fd, const struct msghdr *msg, int flags )
 	ssize_t	done = 0;
 	size_t	i;
 
+	if ( ts_chan_is(fd) ) return ts_chan_sendmsg(fd, msg, flags);
 	for ( i = 0; i < msg->msg_iovlen; i++ ) {
 		ssize_t n = sendto(fd, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len, flags,
 				   (const struct sockaddr *)msg->msg_name, msg->msg_namelen);
@@ -445,8 +521,10 @@ ssize_t recvmsg( int fd, struct msghdr *msg, int flags )
 	socklen_t	nl = msg->msg_namelen;
 	size_t		room = msg->msg_controllen;
 	struct cmsghdr	*c = (struct cmsghdr *)msg->msg_control;
-	int		s = so_of(fd), n, tos = -1;
+	int		s, n, tos = -1;
 
+	if ( ts_chan_is(fd) ) return ts_chan_recvmsg(fd, msg, flags);
+	s = so_of(fd);
 	msg->msg_controllen = 0;
 	msg->msg_flags = 0;
 	if ( s < 0 ) return -1;
@@ -486,8 +564,10 @@ ssize_t recvmsg( int fd, struct msghdr *msg, int flags )
 
 int setsockopt( int fd, int level, int name, const void *val, socklen_t len )
 {
-	int	s = so_of(fd), er = 0, sl = SO_SOL_SOCKET, sn = -1;
+	int	s, er = 0, sl = SO_SOL_SOCKET, sn = -1;
 
+	if ( ts_chan_is(fd) ) return 0;		/* nothing of an end is set: taken as set */
+	s = so_of(fd);
 	if ( s < 0 ) return -1;
 	if ( level == SOL_SOCKET ) {
 		switch ( name ) {
@@ -532,8 +612,18 @@ int setsockopt( int fd, int level, int name, const void *val, socklen_t len )
 
 int getsockopt( int fd, int level, int name, void *val, socklen_t *len )
 {
-	int	s = so_of(fd), er;
+	int	s, er;
 
+	if ( ts_chan_is(fd) ) {
+		int	v = 0;
+
+		if ( level == SOL_SOCKET && name == SO_TYPE ) v = SOCK_STREAM;
+		else if ( level == SOL_SOCKET && ( name == SO_SNDBUF || name == SO_RCVBUF ) ) v = 128 * 1024;
+		if ( *len >= sizeof(int) ) *(int *)val = v;
+		*len = sizeof(int);
+		return 0;
+	}
+	s = so_of(fd);
 	if ( s < 0 ) return -1;
 	if ( ( level == SOL_SOCKET && name == SO_ERROR ) || ( level == IPPROTO_IPV6 && name == IPV6_V6ONLY ) ) {
 		unsigned	l = sizeof(int);
@@ -608,15 +698,19 @@ int getpeername( int fd, struct sockaddr *addr, socklen_t *len )
 /* fcntl on a socket (ts_syscalls.c): only whether it blocks */
 int ts_sock_fcntl( int fd, int cmd, int val )
 {
-	int	s = so_of(fd);
+	unsigned char	*nb;
+	int		s;
 
-	if ( s < 0 || s >= MAXSOCK ) return -1;
+	if ( ts_chan_is(fd) ) return ts_chan_fcntl(fd, cmd, val);
+	s = so_of(fd);
+	nb = ( s >= 0 ) ? sock_nb(s, 1) : NULL;
+	if ( nb == NULL ) return -1;
 	if ( cmd == F_GETFL ) {
-		return O_RDWR | ( sock_nb[s] ? O_NONBLOCK : 0 );
+		return O_RDWR | ( *nb ? O_NONBLOCK : 0 );
 	}
 	if ( cmd == F_SETFL ) {
-		sock_nb[s] = ( val & O_NONBLOCK ) ? 1 : 0;
-		(void)so_fcntl(s, SO_F_SETFL, sock_nb[s] ? SO_O_NONBLOCK : 0);
+		*nb = ( val & O_NONBLOCK ) ? 1 : 0;
+		(void)so_fcntl(s, SO_F_SETFL, *nb ? SO_O_NONBLOCK : 0);
 		return 0;
 	}
 	return 0;
@@ -624,16 +718,100 @@ int ts_sock_fcntl( int fd, int cmd, int val )
 
 /* ---------------------------------------------------------------- poll */
 
-/* as many as there can be sockets (SO_MAX, include/ts/sodef.h) */
-#define POLL_MAX	64
+/*
+ * A list for the stack's poll: on the stack up to POLL_LOCAL, in memory
+ * of its own past that, as long as the caller's. The stack takes as many
+ * as the process may hold (so_getlimit) and refuses more (EINVAL).
+ */
+#define POLL_LOCAL	64
+
+static int poll_room( SO_POLLFD **pp, int **pmap, SO_POLLFD *p, int *map, size_t n )
+{
+	*pp = p;
+	if ( pmap != NULL ) *pmap = map;
+	if ( n <= POLL_LOCAL ) return 0;
+	*pp = (SO_POLLFD *)malloc(sizeof(SO_POLLFD) * n);
+	if ( pmap != NULL ) *pmap = (int *)malloc(sizeof(int) * n);
+	if ( *pp == NULL || ( pmap != NULL && *pmap == NULL ) ) {
+		if ( *pp != NULL ) free(*pp);
+		if ( pmap != NULL && *pmap != NULL ) free(*pmap);
+		errno = ENOMEM;
+		return -1;
+	}
+	return 0;
+}
+
+static void poll_free( SO_POLLFD *p, int *map, SO_POLLFD *lp, int *lmap )
+{
+	if ( p != lp ) free(p);
+	if ( map != NULL && map != lmap ) free(map);
+}
+
+static short revents_of( short so )
+{
+	short	rv = 0;
+
+	if ( so & SO_POLLIN )	rv |= POLLIN | POLLRDNORM;
+	if ( so & SO_POLLOUT )	rv |= POLLOUT | POLLWRNORM;
+	if ( so & SO_POLLERR )	rv |= POLLERR;
+	if ( so & SO_POLLHUP )	rv |= POLLHUP;
+	if ( so & SO_POLLNVAL )	rv |= POLLNVAL;
+	return rv;
+}
+
+static short so_events_of( short ev )
+{
+	return (short)( ( ( ev & ( POLLIN | POLLRDNORM ) ) ? SO_POLLIN : 0 )
+		      | ( ( ev & ( POLLOUT | POLLWRNORM ) ) ? SO_POLLOUT : 0 ) );
+}
+
+/*
+ * Network sockets alone, waited for in the stack up to ms (-1 no end):
+ * their revents as poll has them; how many are ready, or -1
+ */
+int ts_sock_poll( const int *fds, const short *events, short *revents, int n, int ms )
+{
+	SO_POLLFD	lp[POLL_LOCAL], *p;
+	int		i, r, ready = 0;
+
+	if ( n < 0 ) {
+		errno = EINVAL;
+		return -1;
+	}
+	if ( poll_room(&p, NULL, lp, NULL, (size_t)n) < 0 ) return -1;
+	for ( i = 0; i < n; i++ ) {
+		p[i].fd = ts_sock_so(fds[i]);
+		p[i].events = so_events_of(events[i]);
+		p[i].revents = 0;
+	}
+	r = so_poll(p, n, ( ms < 0 ) ? -1 : ms);
+	if ( r < 0 && r != E_TMOUT_ ) {
+		poll_free(p, NULL, lp, NULL);
+		return set_err(r, 0, -1);
+	}
+	for ( i = 0; i < n; i++ ) {
+		revents[i] = revents_of(p[i].revents);
+		if ( revents[i] ) ready++;
+	}
+	poll_free(p, NULL, lp, NULL);
+	return ready;
+}
 
 int poll( struct pollfd *fds, nfds_t nfds, int timeout )
 {
-	SO_POLLFD	p[POLL_MAX];
-	int		map[POLL_MAX];
+	SO_POLLFD	lp[POLL_LOCAL], *p;
+	int		lmap[POLL_LOCAL], *map;
 	nfds_t		i;
 	int		n = 0, ready = 0, r;
 
+	/* an end of a stream, an eventfd or a pipe: the wait that knows them all */
+	for ( i = 0; i < nfds; i++ ) {
+		if ( fds[i].fd >= 0 && ts_sock_so(fds[i].fd) < 0
+		  && ( ts_chan_is(fds[i].fd) || ts_evfd_is(fds[i].fd) ) ) {
+			return ts_wait_fds(fds, nfds, timeout);
+		}
+	}
+	if ( poll_room(&p, &map, lp, lmap, (size_t)nfds) < 0 ) return -1;
 	for ( i = 0; i < nfds; i++ ) {
 		int	s = ts_sock_so(fds[i].fd);
 
@@ -645,34 +823,27 @@ int poll( struct pollfd *fds, nfds_t nfds, int timeout )
 			if ( fds[i].revents ) ready++;
 			continue;
 		}
-		if ( n == POLL_MAX ) {
-			errno = EINVAL;
-			return -1;
-		}
 		p[n].fd = s;
-		p[n].events = (short)( ( ( fds[i].events & ( POLLIN | POLLRDNORM ) ) ? SO_POLLIN : 0 )
-				     | ( ( fds[i].events & ( POLLOUT | POLLWRNORM ) ) ? SO_POLLOUT : 0 ) );
+		p[n].events = so_events_of(fds[i].events);
 		p[n].revents = 0;
 		map[n++] = (int)i;
 	}
 	if ( n == 0 ) {
+		poll_free(p, map, lp, lmap);
 		return ready;
 	}
 	r = so_poll(p, n, ( ready > 0 ) ? 0 : ( timeout < 0 ) ? -1 : timeout);
 	if ( r < 0 && r != E_TMOUT_ ) {
+		poll_free(p, map, lp, lmap);
 		return set_err(r, 0, -1);
 	}
 	for ( i = 0; i < (nfds_t)n; i++ ) {
-		short	rv = 0;
+		short	rv = revents_of(p[i].revents);
 
-		if ( p[i].revents & SO_POLLIN )		rv |= POLLIN | POLLRDNORM;
-		if ( p[i].revents & SO_POLLOUT )	rv |= POLLOUT | POLLWRNORM;
-		if ( p[i].revents & SO_POLLERR )	rv |= POLLERR;
-		if ( p[i].revents & SO_POLLHUP )	rv |= POLLHUP;
-		if ( p[i].revents & SO_POLLNVAL )	rv |= POLLNVAL;
 		fds[map[i]].revents = rv;
 		if ( rv ) ready++;
 	}
+	poll_free(p, map, lp, lmap);
 	return ready;
 }
 

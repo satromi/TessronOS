@@ -146,6 +146,10 @@ LOCAL volatile BOOL	sl_temp_want = FALSE;	/* temporary addresses asked for */
 LOCAL BOOL		sl_temp_on = FALSE;	/* and being made */
 LOCAL UW		sl_desync;		/* seconds taken off a temporary address's preferred lifetime */
 LOCAL UB		sl_msg[1500];
+LOCAL UW		sl_shape = 0;		/* what the programs were last told of (shape) */
+
+/* The programs told that the network's configuration changed (so_prc.c, so_netwait) */
+IMPORT void	knl_so_netchg( void );
 
 LOCAL UD now_ns( void )
 {
@@ -747,6 +751,52 @@ LOCAL INT listen_socket( UINT ifindex )
 	return s;
 }
 
+/*
+ * What of the IPv6 configuration the programs see -- the addresses made,
+ * the default router, the name servers -- as one number (FNV-1a over
+ * them, their lifetimes left out): when it moves, the programs are told
+ */
+LOCAL UW fnv( UW h, CONST UB *p, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i < n; i++ ) {
+		h = ( h ^ p[i] ) * 16777619U;
+	}
+	return h;
+}
+
+LOCAL UW shape( void )
+{
+	UINT	imask;
+	UW	h = 2166136261U;
+	INT	i;
+
+	for ( i = 0; i < PREFIXES; i++ ) {
+		if ( sl_made[i].used ) h = fnv(h, sl_made[i].addr, 16);
+	}
+	for ( i = 0; i < TEMPS; i++ ) {
+		if ( sl_temp[i].used ) h = fnv(h, sl_temp[i].addr, 16);
+	}
+	ISpinLock(&sl_lock, &imask);
+	if ( sl_have_gw ) h = fnv(h, sl_gw, 16);
+	for ( i = 0; i < SERVERS; i++ ) {
+		if ( sl_ns[i].used ) h = fnv(h, sl_ns[i].addr, 16);
+	}
+	ISpinUnlock(&sl_lock, &imask);
+	return h;
+}
+
+LOCAL void tell_shape( void )
+{
+	UW	h = shape();
+
+	if ( h != sl_shape ) {
+		sl_shape = h;
+		knl_so_netchg();
+	}
+}
+
 LOCAL void sl_client( UINT gen )
 {
 	struct sockaddr_in6	from;
@@ -806,6 +856,7 @@ LOCAL void sl_client( UINT gen )
 			next_rs = now + (UD)RS_INTERVAL_MS * 1000000ULL;
 		}
 		expire(now);
+		tell_shape();
 
 		p.fd = s;
 		p.events = POLLIN;
@@ -818,6 +869,7 @@ LOCAL void sl_client( UINT gen )
 		n = knl_so_nb_recv_hlim(s, sl_msg, sizeof(sl_msg), (struct sockaddr *)&from, &flen, &hlim);
 		if ( n > 0 && flen >= sizeof(from) && from.sin6_family == AF_INET6 && sl_gen == gen ) {
 			take_ra(sl_msg, n, from.sin6_addr.s6_addr, hlim);
+			tell_shape();
 		}
 	}
 	so_close(s);
@@ -901,6 +953,7 @@ EXPORT void knl_so_slaac_stop( BOOL forget_all )
 	}
 	if ( forget_all ) {
 		forget();
+		knl_so_netchg();
 	}
 }
 

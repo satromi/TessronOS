@@ -750,6 +750,7 @@ LOCAL BOOL check_scenes( void )
 	static CONST T_DPRECT	all = { 0, 0, CK_W, CK_H }, part = { 37, 21, 611, 433 };
 	T_CPWIN		w[24];
 	UD		g64, c64, gall, call;
+	char		now[160];
 	INT		i;
 	BOOL		ok = TRUE;
 
@@ -802,8 +803,9 @@ LOCAL BOOL check_scenes( void )
 		cg.thr = ( dc - dg > 0 ) ? px0 + (UD)( ( (D)g64 - (D)c64 ) * (D)( px1 - px0 ) / ( dc - dg ) ) : (UD)-1;
 	}
 	cg.passed = TRUE;
-	tm_printf((UB *)"igt compose: time: 64x64 copy engine %ld us / processor %ld us, %dx%d %ld / %ld us\n",
-		  g64, c64, CK_W, CK_H, gall, call);
+	(void)igt_pm_now_text(now);
+	tm_printf((UB *)"igt compose: time: 64x64 copy engine %ld us / processor %ld us, %dx%d %ld / %ld us%s\n",
+		  g64, c64, CK_W, CK_H, gall, call, now);
 	tm_printf((UB *)"igt compose: check passed (%d/%d%s): %s\n", ck.npass, ck.nscene,
 		  cg.flush ? ", the caches flushed" : "",
 		  ( cg.thr == (UD)-1 ) ? "the processor is quicker than the copy engine" : "the copy engine may be used");
@@ -863,6 +865,7 @@ LOCAL UD rk_threshold( CONST char *what, CONST T_CPWIN *w, INT n )
 	static CONST T_DPRECT	part[2] = { { 256, 192, 320, 256 }, { 0, 0, CK_W, CK_H } };
 	UD	g[2], c[2], a[2], thr;
 	INT	i;
+	char	now[160];
 
 	for ( i = 0; i < 2; i++ ) {
 		rk_time(&part[i], w, n, &g[i], &c[i]);
@@ -875,8 +878,9 @@ LOCAL UD rk_threshold( CONST char *what, CONST T_CPWIN *w, INT n )
 	} else {
 		thr = a[0] + ( g[0] - c[0] ) * ( a[1] - a[0] ) / ( ( c[1] - g[1] ) + ( g[0] - c[0] ) );
 	}
-	tm_printf((UB *)"igt compose: time %s: 64x64 render engine %ld us / processor %ld us, %dx%d %ld / %ld us; %s",
-		  what, g[0], c[0], CK_W, CK_H, g[1], c[1], ( thr == (UD)-1 ) ? "the processor at every size\n" : "");
+	(void)igt_pm_now_text(now);
+	tm_printf((UB *)"igt compose: time %s: 64x64 render engine %ld us / processor %ld us, %dx%d %ld / %ld us%s; %s",
+		  what, g[0], c[0], CK_W, CK_H, g[1], c[1], now, ( thr == (UD)-1 ) ? "the processor at every size\n" : "");
 	if ( thr != (UD)-1 ) tm_printf((UB *)"the render engine from %ld pixels\n", thr);
 	return thr;
 }

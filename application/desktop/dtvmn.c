@@ -48,12 +48,7 @@
 #include "desktop.h"
 
 
-LOCAL void attributes( DTWIN *d, CONST T_VOBJ *start );
-LOCAL void relationship( DTWIN *d, CONST T_VOBJ *start );
 LOCAL void rename_real( DTWIN *d, CONST T_VOBJ *v );
-LOCAL void duplicate_real( DTWIN *d, CONST T_VOBJ *v );
-LOCAL void new_version( DTWIN *d, CONST T_VOBJ *v );
-LOCAL void reconnect( DTWIN *d, CONST T_VOBJ *v );
 
 /* ---------------------------------------------------------------- the system's definitions */
 
@@ -182,14 +177,10 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 	TS_UUID		rd = sys_def(SYSDEF_MENU_REAL);
 	TS_UUID		ed = sys_def(SYSDEF_MENU_EXEC);
 	UB		(*apps)[OM_APP_NAME];
-	BOOL		open, cut, locked, sealed = d->sealed;
+	BOOL		open, cut, locked, sealed = TRUE;	/* a part's window keeps no record: nothing of a link is changed in it */
 	INT		n, i;
 
 	tray_state(mid);
-
-	if ( d->accbox ) {
-		dt_acc_menu_state(mid, on_vobj, v);
-	}
 
 	/* 小物: the accessories that show in the menu */
 	acc_fill(mid);
@@ -215,7 +206,7 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 #endif
 		return;
 	}
-	open = (BOOL)( dt_showing(&v->target) != NULL );
+	open = dt_obj_open(v, NULL);	/* in any window, or one being started on it */
 	cut = (BOOL)!dt_reachable(v);
 	locked = dt_app_locked(v);
 
@@ -238,8 +229,18 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 	/*
 	 * 実行: the list 付箋指定 of 管理情報 shows too (dt_app_list) -- the
 	 * programs the real object's applist names, or, when it names none,
-	 * those that open an object of its kind (fileTypes)
+	 * those that open an object of its kind (fileTypes). Grey while the
+	 * object is open: it is open in one window only, and opening it
+	 * again brings that one forward whatever program is chosen.
 	 */
+	atr(mid, &obj, "exec", open);
+	if ( open ) {
+		atr(mid, &ed, "exec.app", TRUE);
+#ifdef USE_UITEST
+		tm_printf((UB *)"desktop: exec menu open\n");	/* for the tests */
+#endif
+		return;
+	}
 	{
 		INT	room = dt_app_list(v, NULL, 0, NULL), q;
 		DTAPP	*a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
@@ -326,26 +327,22 @@ LOCAL void do_open( DTWIN *d, CONST T_VOBJ *v )		{ dt_open_vobj(d, v); }
 LOCAL void do_close( DTWIN *d, CONST T_VOBJ *v )	{ (void)d; dt_close_vobj(v); }
 LOCAL void do_network( DTWIN *d, CONST T_VOBJ *v )	{ dt_network_open(d, v); }
 
-/* The items that act on the virtual object the menu was opened on */
+/*
+ * The items that act on the virtual object the menu was opened on, in
+ * a window of a part's (a part shows links it holds no record of: what
+ * would change the link is the program's that holds it, dt_proc_link_op)
+ */
 typedef struct {
 	CONST char	*code;
 	void		(*fn)( DTWIN *d, CONST T_VOBJ *v );
-	BOOL		writes;		/* changes the window's record */
 } VMOP;
 
 LOCAL CONST VMOP vm_ops[] = {
-	{ "vobj.open",		do_open,	FALSE },
-	{ "vobj.close",		do_close,	FALSE },
-	{ "vobj.attr",		attributes,	TRUE },
-	{ "vobj.relation",	relationship,	TRUE },
-	{ "vobj.reconnect",	reconnect,	TRUE },
-	{ "real.rename",	rename_real,	FALSE },
-	{ "real.duplicate",	duplicate_real,	TRUE },
-	{ "real.newversion",	new_version,	TRUE },
-	{ "real.lock",		dt_lock_app,	TRUE },
-	{ "real.unlock",	dt_lock_app,	TRUE },
-	{ "real.info",		dt_real_info,	FALSE },
-	{ "real.network",	do_network,	FALSE },
+	{ "vobj.open",		do_open },
+	{ "vobj.close",		do_close },
+	{ "real.rename",	rename_real },
+	{ "real.info",		dt_real_info },
+	{ "real.network",	do_network },
 };
 
 #define NVMOP	( (INT)( sizeof(vm_ops) / sizeof(vm_ops[0]) ) )
@@ -377,18 +374,10 @@ EXPORT BOOL dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 		if ( ( a = menu_accessory(sel->index) ) != NULL ) {
 			(void)dt_prog_run(d, a, on_vobj ? v : NULL);
 		}
-	} else if ( mn_is(sel, "disk.connect") ) {
-		dt_disk_connect(d, on_vobj ? v : NULL);
-	} else if ( mn_is(sel, "disk.detach") ) {
-		if ( on_vobj ) {
-			dt_disk_detach(d, v);
-		}
-	} else if ( mn_is(sel, "disk.status") ) {
-		dt_disk_status(d, on_vobj ? v : NULL);
-	} else if ( mn_is(sel, "disk.create") ) {
-		dt_disk_create(d);
-	} else if ( mn_is(sel, "disk.grow") ) {
-		dt_disk_grow(d, on_vobj ? v : NULL);
+	} else if ( mn_is(sel, "disk.connect") || mn_is(sel, "disk.status") || mn_is(sel, "disk.create")
+		 || mn_is(sel, "disk.grow") || ( mn_is(sel, "disk.detach") && on_vobj ) ) {
+		/* ディスク操作: the program does it, told the item and the link */
+		dt_disk_menu(d, (CONST char *)sel->code, on_vobj ? v : NULL);
 	} else if ( mn_is(sel, "tray.level") ) {
 		(void)tr_sel_dat(sel->index + 1);
 	} else if ( mn_is(sel, "tray.clear") ) {
@@ -400,7 +389,7 @@ EXPORT BOOL dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 	} else {
 		for ( i = 0; i < NVMOP; i++ ) {
 			if ( mn_is(sel, vm_ops[i].code) ) {
-				if ( on_vobj && !( vm_ops[i].writes && d->sealed ) ) {
+				if ( on_vobj ) {
 					vm_ops[i].fn(d, v);
 				}
 				break;
@@ -596,15 +585,6 @@ LOCAL BOOL attr_ask( DTWIN *d, T_VOBJ *io )
 	return FALSE;
 }
 
-LOCAL void attributes( DTWIN *d, CONST T_VOBJ *start )
-{
-	T_VOBJ	v = *start;
-
-	if ( attr_ask(d, &v) ) {
-		ed_set_link(d, &v);
-	}
-}
-
 /* ---------------------------------------------------------------- 続柄 */
 
 /*
@@ -664,21 +644,12 @@ LOCAL BOOL rel_ask( DTWIN *d, T_VOBJ *io )
 	return TRUE;
 }
 
-LOCAL void relationship( DTWIN *d, CONST T_VOBJ *start )
-{
-	T_VOBJ	v = *start;
-
-	if ( rel_ask(d, &v) ) {
-		ed_set_link(d, &v);
-	}
-}
-
 /* ---------------------------------------------------------------- 実身操作 */
 
 LOCAL void rename_real( DTWIN *d, CONST T_VOBJ *v )
 {
 	UB	start[WM_LABEL_MAX], name[WM_LABEL_MAX];
-	DTWIN	*w;
+	INT	wid;
 
 	if ( om_store_name(&v->target, start, WM_LABEL_MAX) < 0 ) {
 		start[0] = 0;
@@ -691,19 +662,10 @@ LOCAL void rename_real( DTWIN *d, CONST T_VOBJ *v )
 		return;
 	}
 	/* a window showing it is called by the new name too */
-	w = dt_showing(&v->target);
-	if ( w != NULL ) {
-		wm_set_title(w->wid, (CONST char *)name);
+	if ( ( wid = wm_obj_showing(&v->target) ) > 0 ) {
+		wm_set_title(wid, (CONST char *)name);
 	}
-	dt_draw_all();
 }
-
-/*
- * 実身複製 from the menu: the object copied with all it holds, and a
- * link to the copy put a step down and across from the one it was
- * copied from.
- */
-LOCAL void place_copy( DTWIN *d, CONST T_VOBJ *orig, CONST T_VOBJ *c );
 
 /* The object copied under a name asked for, the copy in *p_nid; FALSE when it was not */
 LOCAL BOOL dup_ask( DTWIN *d, CONST T_VOBJ *v, TS_UUID *p_nid )
@@ -732,101 +694,12 @@ LOCAL BOOL dup_ask( DTWIN *d, CONST T_VOBJ *v, TS_UUID *p_nid )
 	return (BOOL)( om_store_copy(&v->target, name, TRUE, p_nid) >= E_OK );
 }
 
-LOCAL void duplicate_real( DTWIN *d, CONST T_VOBJ *v )
-{
-	TS_UUID	nid;
-	T_VOBJ	c;
-
-	if ( d->sealed || !dup_ask(d, v, &nid) ) {
-		return;
-	}
-	c = *v;
-	c.target = nid;
-	knl_memset(&c.vobjid, 0, sizeof(c.vobjid));
-	c.name[0] = 0;
-	c.dlen = 0;			/* a new object has no data appended to it yet */
-	c.left += 16;  c.right += 16;
-	c.top += 16;   c.bottom += 16;
-	ed_new_link_fit(&c);		/* named anew: closed, as wide as that name */
-	place_copy(d, v, &c);
-}
-
-/*
- * A link to a new object put where it belongs: in a figure where it
- * says, and in a document in the text right after the link it was
- * made from.
- */
-LOCAL void place_copy( DTWIN *d, CONST T_VOBJ *orig, CONST T_VOBJ *c )
-{
-	TS_UUID	id;
-
-	ed_before(d);
-	ed_pick_none(d);
-	if ( tad_lnk_add((T_TAD *)d->rec, c, &id) < E_OK ) {
-		return;
-	}
-	if ( d->doc != NULL ) {
-		dd_link_after(d, &orig->vobjid);
-	}
-	ed_model(d);
-	d->dirty = TRUE;
-	dt_draw_all();
-}
-
-/*
- * 新版作成: the object copied under the same name, the copy's links
- * pointing at the same objects as the original's, and a link to the
- * copy laid over the old one a step down and across, so that the old
- * one's edge shows behind it.
- */
-#define NEW_VERSION_STEP	8
-
-LOCAL void new_version( DTWIN *d, CONST T_VOBJ *v )
-{
-	UB	name[WM_LABEL_MAX];
-	TS_UUID	nid;
-	T_VOBJ	c;
-
-	if ( d->sealed || om_store_name(&v->target, name, WM_LABEL_MAX) < 0 ) {
-		return;
-	}
-	if ( om_store_copy(&v->target, name, FALSE, &nid) < E_OK ) {
-		return;
-	}
-	c = *v;
-	c.target = nid;
-	knl_memset(&c.vobjid, 0, sizeof(c.vobjid));
-	c.name[0] = 0;
-	c.dlen = 0;			/* a new object has no data appended to it yet */
-	c.left += NEW_VERSION_STEP;  c.right += NEW_VERSION_STEP;
-	c.top += NEW_VERSION_STEP;   c.bottom += NEW_VERSION_STEP;
-	place_copy(d, v, &c);
-}
-
 /* Whether the object a link points at can be reached: a cut link's cannot */
 EXPORT BOOL dt_reachable( CONST T_VOBJ *v )
 {
 	UB	nm[8];
 
 	return (BOOL)( v != NULL && om_store_name(&v->target, nm, sizeof(nm)) >= 0 );
-}
-
-/*
- * 接続: a cut link tried again. What was remembered of its object --
- * that it was not there -- is let go and it is looked for afresh; the
- * link is drawn as it now stands, or the person is told it is still
- * cut.
- */
-LOCAL void reconnect( DTWIN *d, CONST T_VOBJ *v )
-{
-	if ( !dt_reachable(v) ) {
-		om_store_forget(&v->target);
-	}
-	if ( !dt_reachable(v) ) {
-		dt_tell(d, "実身に接続できませんでした", NULL);
-		return;
-	}
-	dt_draw_all();
 }
 
 /*
@@ -847,31 +720,6 @@ EXPORT BOOL dt_app_lockable( CONST T_VOBJ *v )
 	UB	app[OM_APP_ID];
 
 	return (BOOL)( v != NULL && om_link_default_app(v, app, sizeof(app)) > 0 );
-}
-
-EXPORT void dt_keep_app( DTWIN *d, CONST T_VOBJ *v, BOOL keep )
-{
-	T_VOBJ	*c;
-
-	if ( d == NULL || v == NULL || d->sealed ) {
-		return;
-	}
-	c = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
-	if ( c == NULL ) {
-		return;
-	}
-	*c = *v;
-	if ( om_link_lock(c, keep) >= E_OK ) {
-		ed_set_link(d, c);
-	} else {
-		dt_tell(d, "起動アプリを持たない実身です", NULL);
-	}
-	Kfree(c);
-}
-
-EXPORT void dt_lock_app( DTWIN *d, CONST T_VOBJ *v )
-{
-	dt_keep_app(d, v, (BOOL)!dt_app_locked(v));
 }
 
 /* ---------------------------------------------------------------- a program's links */
@@ -936,7 +784,9 @@ LOCAL void text_out( UB *out, CONST UB *s )
 /*
  * DT_RQ_APPS: the entry at rq->recno of the list 実行 shows for a
  * program's link (dt_app_list), the id the applist writes for one it
- * names (so that DT_RQ_EXEC finds it there), a tab and the name
+ * names (so that DT_RQ_EXEC finds it there), a tab and the name. For an
+ * object open already the list is empty and flags say DT_F_OPEN, so
+ * that every program greys 実行 as the desktop does.
  */
 EXPORT ER dt_apps_req( CONST T_DTREQ *rq, T_DTANS *an )
 {
@@ -949,6 +799,13 @@ EXPORT ER dt_apps_req( CONST T_DTREQ *rq, T_DTANS *an )
 		return E_NOMEM;
 	}
 	link_of_req(rq, v);
+	/* open already: 実行 of the program's menu is grey, as the desktop's is (dt_get_vmn) */
+	if ( dt_obj_open(v, NULL) ) {
+		an->how = 0;
+		an->flags = DT_F_OPEN;
+		Kfree(v);
+		return E_NOEXS;
+	}
 	room = dt_app_list(v, NULL, 0, NULL);
 	a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
 	if ( a == NULL ) {
@@ -988,11 +845,17 @@ EXPORT ER dt_link_state_req( CONST T_DTREQ *rq, T_DTANS *an )
 	}
 	link_of_req(rq, v);
 	an->flags = 0;
-	if ( dt_showing(&v->target) != NULL ) {
+	if ( dt_obj_open(v, NULL) ) {
 		an->flags |= DT_F_OPEN;
 	}
 	if ( dt_app_lockable(v) ) {
 		an->flags |= DT_F_LOCKABLE;
+	}
+	if ( dt_disk_detachable(v) ) {
+		an->flags |= DT_F_DETACHABLE;	/* ディスク操作's 切り離し */
+	}
+	if ( dt_disk_growable(v) ) {
+		an->flags |= DT_F_GROWABLE;	/* and its 拡張 */
 	}
 	Kfree(v);
 	return E_OK;
@@ -1085,39 +948,54 @@ EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
 		v->frcol = v->chcol = v->tbcol = v->bgcol = TAD_COL_NONE;
 		er = dt_open_as(NULL, v, name);
 		break;
-	case DT_RQ_COLOUR:
-	case DT_RQ_PAPER: {
+	case DT_RQ_COLOUR: {
 		UW	col = ( rq->look.bgcol == TAD_COL_NONE ) ? 0x00FFFFFFU : rq->look.bgcol;
 
-		if ( !( ( rq->req == DT_RQ_COLOUR && ( rq->flags & DT_F_AT ) != 0 )
+		if ( !( ( ( rq->flags & DT_F_AT ) != 0 )
 			? dt_pick_colour_at(host->wid, &col, rq->grab_x, rq->grab_y )
 			: dt_pick_colour(host->wid, &col) ) ) {
 			er = E_ABORT;
 			break;
 		}
 		dt_draw(host);
-		if ( rq->req == DT_RQ_COLOUR ) {
-			an->look.bgcol = col;
+		an->look.bgcol = col;
+		break;
+	}
+	case DT_RQ_PAPER: {
+		/*
+		 * 仮身属性と同じ starts on when the object's metadata gives it
+		 * no paper of its own, showing the colour the program asked
+		 * with; kept on, the paper is taken away (TAD_COL_NONE)
+		 */
+		UW	col = TAD_COL_NONE;
+		BOOL	same = (BOOL)( om_store_paper(&v->target, &col) < E_OK || col == TAD_COL_NONE );
+		ER	put;
+
+		if ( same ) {
+			col = ( rq->look.bgcol != TAD_COL_NONE ) ? rq->look.bgcol : 0x00FFFFFFU;
+		}
+		tm_printf((UB *)"desktop: paper asked, same %s\n", same ? "on" : "off");
+		if ( !dt_pick_paper(host->wid, &col, &same) ) {
+			er = E_ABORT;
 			break;
 		}
-		(void)om_store_set_paper(&v->target, col);
+		dt_draw(host);
+		if ( same ) {
+			col = TAD_COL_NONE;
+		}
+		put = om_store_set_paper(&v->target, col);
 		an->look.bgcol = col;
-		dt_draw_all();
+		tm_printf((UB *)"desktop: paper %s %06x (%d)\n", same ? "same" : "own", (UINT)( col & 0x00FFFFFFU ), (INT)put);
 		break;
 	}
 	case DT_RQ_FULL: {
-		INT		wid = wm_obj_wid(&rq->win);
-		UINT		sw, sh;
-		T_DPRECT	o;
+		/* 全画面表示 or back, kept here as a double press on the window's corner keeps it */
+		BOOL	full = FALSE;
 
-		if ( wid <= 0 || dt_screen_size(&sw, &sh) < E_OK ) {
-			er = E_NOEXS;
-			break;
+		er = dt_obj_fullscreen(wm_obj_wid(&rq->win), (BOOL)( ( rq->flags & DT_F_ASK ) == 0 ), &full);
+		if ( er >= E_OK && full ) {
+			an->flags |= DT_F_FULL;
 		}
-		o.left = 0;  o.top = 0;
-		o.right = (INT)sw;
-		o.bottom = (INT)sh - wm_msg_height();	/* above the message line */
-		er = wm_move(wid, &o);
 		break;
 	}
 	default:
@@ -1130,3 +1008,136 @@ EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
 	return er;
 }
 
+/* ---------------------------------------------------------------- links to new objects */
+
+/*
+ * The size a link to a new object is put with, given the link it was
+ * made from (v, its letters and what it shows) and the height that one
+ * stood at (h). Closed -- no taller than its band and TAD_OPEN_SLACK --
+ * it is as wide as the new object's name measured in the system's face
+ * at the link's letters (14 when it does not say), with its picture and
+ * edges (tad_closed_w), and as tall as it is closed; the face is left as
+ * it was set. FALSE, nothing set, when it stood opened or shows no band:
+ * it keeps the size it had.
+ */
+LOCAL BOOL new_link_size( CONST T_VOBJ *v, INT h, CONST TS_UUID *target, INT *p_w, INT *p_h )
+{
+	UB		nm[TAD_NAME_MAX];
+	T_FNSTATE	st;
+	ID		fid;
+	INT		chsz = ( v->chsz > 0 ) ? v->chsz : 14;
+	INT		band = tad_lnk_closed_h(v), w = chsz * 6;
+
+	if ( band <= 0 || h > band + TAD_OPEN_SLACK ) {
+		return FALSE;
+	}
+	if ( om_store_name(target, nm, sizeof(nm)) > 0 ) {
+		fn_hold();
+		fid = fn_system();
+		if ( fid > 0 && fn_state_get(fid, &st) >= E_OK ) {
+			if ( fn_set_size(fid, chsz) >= E_OK ) {
+				INT	m = fn_width(fid, nm);
+
+				if ( m >= 0 ) w = m;
+			}
+			(void)fn_state_set(fid, &st);
+		}
+		fn_release();
+	}
+	*p_w = tad_closed_w(chsz, v->disp, w);
+	*p_h = band;
+	return TRUE;
+}
+
+/*
+ * A link c to a new object, made with the look of the link it was made
+ * from, sized to the new object's name when it is closed: in a text by
+ * its width and height, in a figure by its rectangle from its corner.
+ */
+EXPORT void dt_link_fit( T_VOBJ *c )
+{
+	BOOL	text = (BOOL)( c->right <= c->left && c->width > 0 );
+	INT	w, h;
+
+	if ( !new_link_size(c, text ? c->heightpx : c->bottom - c->top, &c->target, &w, &h) ) {
+		return;
+	}
+	if ( text ) {
+		c->width = w;
+		c->heightpx = h;
+	} else {
+		c->right = c->left + w;
+		c->bottom = c->top + h;
+		c->height = h;
+	}
+}
+
+/*
+ * The copy of 新たな実身に保存 made of object id, as it is in the store,
+ * under a name asked for in a panel over ask, and a link to it put with
+ * the link parent_vobj of the record of parent: in a text, just after
+ * it. With target given, that link must point at it. The copy in
+ * *p_new; E_ABORT when the panel was put away, E_NOEXS when the parent
+ * holds no such link.
+ */
+EXPORT ER dt_save_new_of( DTWIN *ask, CONST TS_UUID *id, CONST TS_UUID *parent,
+			  CONST TS_UUID *parent_vobj, CONST TS_UUID *target, TS_UUID *p_new )
+{
+	UB	start[WM_LABEL_MAX], name[WM_LABEL_MAX];
+	TS_UUID	nid, lid;
+	T_TAD	*prec;
+	T_VOBJ	pv;
+	INT	n = 0, k;
+	BOOL	held;
+	ER	er;
+
+	/* the link it goes with, in the record that holds it: a program's, while it runs, is its own to change */
+	held = dt_plink_has(parent, parent_vobj, target);
+	prec = om_store_get(parent, 0);
+	if ( !held && ( prec == NULL || tad_lnk_find(prec, parent_vobj, &pv) < E_OK
+		       || ( target != NULL && ts_uuid_cmp(&pv.target, target) != 0 ) ) ) {
+		return E_NOEXS;
+	}
+	if ( om_store_name(id, start, WM_LABEL_MAX - 16) < 0 ) {
+		start[0] = 0;
+	}
+	while ( start[n] != 0 ) {
+		n++;
+	}
+	{
+		CONST UB	*tail = (CONST UB *)"のコピー";
+
+		for ( k = 0; tail[k] != 0 && n < WM_LABEL_MAX - 1; k++ ) {
+			start[n++] = tail[k];
+		}
+		start[n] = 0;
+	}
+	if ( !dt_ask_text(ask, "新しい実身の名称を入力してください", NULL, start,
+		       name, WM_LABEL_MAX, "設定") || name[0] == 0 ) {
+		return E_ABORT;
+	}
+	er = om_store_copy(id, name, FALSE, &nid);
+	if ( er < E_OK ) {
+		return er;
+	}
+	*p_new = nid;
+	if ( held && dt_plink_add(parent, parent_vobj, &nid) >= E_OK ) {
+		return E_OK;	/* the program puts the link to the copy in, and keeps it with its record */
+	}
+	/* the program ended meanwhile, its record saved: put in as the store keeps it */
+
+	/* the parent's record read again: the panel let the person work in the meantime */
+	prec = om_store_get(parent, 0);
+	if ( prec == NULL || tad_lnk_find(prec, parent_vobj, &pv) < E_OK ) {
+		return E_OK;		/* the copy stands as a 屑実身 until it is linked */
+	}
+	pv.target = nid;
+	knl_memset(&pv.vobjid, 0, sizeof(pv.vobjid));
+	pv.name[0] = 0;
+	pv.dlen = 0;			/* a new object has no data appended to it yet */
+	dt_link_fit(&pv);		/* named anew: closed, as wide as that name */
+	if ( tad_lnk_add(prec, &pv, &lid) >= E_OK ) {
+		om_store_save(parent, 0);
+	}
+	return E_OK;
+}

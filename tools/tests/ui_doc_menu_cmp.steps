@@ -12,57 +12,8 @@
 # before it; the process's first one has 文字修飾, chosen last by the desktop's. While the
 # desktop's menu is open the desktop answers no sync: it is waited for instead.
 # Keys: Ctrl+S 16 01, Ctrl+E 08 01.
-docproc kernel
-mkbig doc 30
-open big
-waitwin 基本文章編集 600
-sync 600
-wait 500
-drag 160 170 420 170
-sync 600
-click 300 250 1
-wait 400
-move 330 370
-wait 300
-move 440 370
-wait 400
-move 440 390
-wait 300
-click 440 390
-sync 600
-wait 300
-click 300 250 1
-wait 400
-move 330 290
-wait 300
-move 440 290
-wait 400
-move 440 330
-wait 300
-click 440 330
-sync 600
-wait 300
-click 300 250 1
-wait 400
-move 330 210
-wait 300
-move 440 210
-wait 400
-move 440 350
-wait 300
-click 440 350
-sync 600
-wait 300
-move 690 490
-sync 600
-shot doc_menu_k_done
-key 16 01
-sync 600
-sum show
-keep kernel
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig doc 30
 logmark
 pdoc big
@@ -75,13 +26,13 @@ logmark
 click 300 250 1
 expectsince document: menu
 wait 400
-move 330 250
+move 330 370
 wait 300
-move 440 250
+move 440 370
 wait 400
-move 440 270
+move 440 390
 wait 300
-click 440 270
+click 440 390
 expectsince document: command style.bold
 wait 300
 logmark
@@ -117,6 +68,6 @@ logmark
 key 16 01
 expectsince document: saved (0)
 sum show
-same kernel
+want ok 5578 2960192aba093a59
 key 08 01
 expect document: closed

@@ -95,6 +95,10 @@ IMPORT void	knl_int_count_at( UINT intno, volatile UW *cnt );	/* kernel/tkernel/
 #define ADM_CREATE_CQ		0x05
 #define ADM_IDENTIFY		0x06
 #define ADM_SET_FEATURES	0x09
+#define ADM_GET_FEATURES	0x0a
+#define NV_PS_N			32		/* power state descriptors */
+#define FEAT_POWER_MGMT		0x02
+#define FEAT_APST		0x0c
 #define FEAT_HMB		0x0d		/* host memory buffer */
 #define IO_FLUSH		0x00
 #define IO_WRITE		0x01
@@ -161,6 +165,11 @@ typedef struct {
 	UW		blksz;		/* bytes of a logical block */
 	UW		max_sect;	/* blocks of one command through the buffer */
 	UW		max_dsect;	/* blocks of one command straight from the caller's memory */
+	UB		apsta, npss;	/* Identify: autonomous power state transitions supported, the last power state */
+	UB		ps_flags[NV_PS_N];	/* each power state's flags (bit 1: not operational), its entry and exit latency (us) */
+	UW		ps_enlat[NV_PS_N], ps_exlat[NV_PS_N];
+	UW		quirks;		/* NV_Q_* */
+	INT		apst_max;	/* the deepest state the autonomous transitions go to, -1 none; -2 not set */
 	UW		rtd3e;		/* microseconds the controller says its shutdown takes, 0 not said */
 	ID		devid;
 	T_PARTTBL	tbl;
@@ -413,6 +422,7 @@ LOCAL ER nv_admin( NV_DEV *d, NV_SQE *c, UW *p_dw0, UW tmo )
 }
 
 LOCAL void nv_recover( NV_DEV *d );
+LOCAL ER nv_apst( NV_DEV *d );
 
 /*
  * A command on the I/O queue: its error, E_IO when it was not answered,
@@ -997,6 +1007,7 @@ LOCAL void nv_recover( NV_DEV *d )
 				er = nv_start_io(d, TRUE);
 			}
 			if ( er >= E_OK ) {
+				(void)nv_apst(d);
 				d->state = NV_LIVE;
 				tm_printf((UB *)"nvme: %s: back after the reset%s\n", d->devnm,
 					  d->hmb_on ? ", with its host memory buffer" : "");
@@ -1032,6 +1043,130 @@ LOCAL void nv_ident_str( UB *to, CONST UB *from, INT n )
  * memory buffer it would have; then namespace 1, its size and its
  * blocks. The admin queue's lock held.
  */
+/*
+ * Autonomous power state transitions (APST): the controller goes down
+ * to a non-operational power state on its own after a time idle. The
+ * table, from the lowest power state up: each state the deepest
+ * non-operational state below it whose exit latency is within
+ * NV_PS_MAX_LAT_US, after an idle time of NV_APST_PRIMARY_MS when that
+ * state's entry and exit latency together are within
+ * NV_APST_PRIMARY_TOL_US, else NV_APST_SECONDARY_MS when within
+ * NV_APST_SECONDARY_TOL_US, a state of each kind taken once, the
+ * deepest first. Not where the controller has no APST, nor on the
+ * controllers known to fail with it (NV_Q_NO_APST); the deepest state
+ * left out on those known to fail in it (NV_Q_NO_DEEPEST_PS).
+ */
+#define FEAT_APST_ID		0x0c
+#define NV_PS_NOPS		0x02		/* the state is not operational */
+#define NV_PS_MAX_LAT_US	100000
+#define NV_APST_PRIMARY_MS	100
+#define NV_APST_SECONDARY_MS	2000
+#define NV_APST_PRIMARY_TOL_US	15000
+#define NV_APST_SECONDARY_TOL_US 100000
+#define NV_Q_NO_APST		0x01
+#define NV_Q_NO_DEEPEST_PS	0x02
+
+LOCAL CONST struct {
+	UH	vendor, device;
+	UW	quirks;
+} nv_pci_quirks[] = {
+	{ 0x8086, 0xf1a5, NV_Q_NO_DEEPEST_PS },		/* Intel 600P/P3100 */
+	{ 0x126f, 0x1001, NV_Q_NO_DEEPEST_PS },		/* Silicon Motion */
+	{ 0x126f, 0x2262, NV_Q_NO_DEEPEST_PS },
+	{ 0x15b7, 0x5009, NV_Q_NO_DEEPEST_PS },		/* Sandisk SN550 */
+	{ 0x1cc1, 0x8201, NV_Q_NO_DEEPEST_PS },		/* ADATA SX8200PNP */
+	{ 0x2646, 0x2262, NV_Q_NO_DEEPEST_PS },		/* Kingston SKC2000 */
+	{ 0x2646, 0x2263, NV_Q_NO_DEEPEST_PS },		/* Kingston A2000 */
+	{ 0x1e49, 0x0021, NV_Q_NO_DEEPEST_PS },		/* ZHITAI TiPro5000 */
+	{ 0x1e49, 0x0041, NV_Q_NO_DEEPEST_PS },		/* ZHITAI TiPro7000 */
+	{ 0x025e, 0xf1ac, NV_Q_NO_DEEPEST_PS },		/* Solidigm P44 Pro */
+};
+
+LOCAL CONST struct {
+	UH		vid;		/* Identify's VID */
+	CONST char	*mn;		/* the model, from its start */
+	UW		quirks;
+} nv_model_quirks[] = {
+	{ 0x1179, "THNSF5256GPUK TOSHIBA", NV_Q_NO_APST },
+	{ 0x1e0f, "KCD6XVUL6T40", NV_Q_NO_APST },
+	{ 0x144d, "Samsung Portable SSD X5", NV_Q_NO_DEEPEST_PS },
+};
+
+LOCAL UW nv_quirks( NV_DEV *d, UH vid, CONST UB *mn )
+{
+	UW	q = 0;
+	INT	i, k;
+
+	for ( i = 0; i < (INT)( sizeof(nv_pci_quirks) / sizeof(nv_pci_quirks[0]) ); i++ ) {
+		if ( d->pci.vendor == nv_pci_quirks[i].vendor && d->pci.device == nv_pci_quirks[i].device ) {
+			q |= nv_pci_quirks[i].quirks;
+		}
+	}
+	for ( i = 0; i < (INT)( sizeof(nv_model_quirks) / sizeof(nv_model_quirks[0]) ); i++ ) {
+		CONST char	*m = nv_model_quirks[i].mn;
+
+		if ( vid != nv_model_quirks[i].vid ) continue;
+		for ( k = 0; k < 40 && m[k] != '\0' && mn[k] == (UB)m[k]; k++ ) ;
+		if ( m[k] != '\0' ) continue;
+		/* the rest of the field spaces */
+		for ( ; k < 40 && mn[k] == ' '; k++ ) ;
+		if ( k == 40 ) q |= nv_model_quirks[i].quirks;
+	}
+	return q;
+}
+
+/* The table written (Set Features 0Ch), the admin queue's lock held and no transfer under way */
+LOCAL ER nv_apst( NV_DEV *d )
+{
+	UD	*tab = (UD *)d->buf, target = 0, tr;
+	UW	apste = 0, last = 0xffffffffU;
+	INT	st, max_ps = -1;
+	NV_SQE	c;
+	ER	er;
+
+	if ( !d->apsta ) return E_OK;
+	if ( d->npss > 31 ) {
+		tm_printf((UB *)"nvme: %s: NPSS %d not valid: APST not used\n", d->devnm, d->npss);
+		return E_OK;
+	}
+	knl_memset(tab, 0, NV_PS_N * sizeof(UD));
+	if ( ( d->quirks & NV_Q_NO_APST ) == 0 ) {
+		for ( st = d->npss; st >= 0; st-- ) {
+			UD	total;
+
+			if ( target != 0 ) tab[st] = target;
+			if ( st == d->npss && ( d->quirks & NV_Q_NO_DEEPEST_PS ) ) continue;
+			if ( ( d->ps_flags[st] & NV_PS_NOPS ) == 0 ) continue;
+			if ( d->ps_exlat[st] > NV_PS_MAX_LAT_US ) continue;
+			total = (UD)d->ps_exlat[st] + d->ps_enlat[st];
+			if ( total <= NV_APST_PRIMARY_TOL_US ) {
+				if ( last == 1 ) continue;
+				last = 1;
+				tr = NV_APST_PRIMARY_MS;
+			} else if ( total <= NV_APST_SECONDARY_TOL_US ) {
+				if ( last <= 2 ) continue;
+				last = 2;
+				tr = NV_APST_SECONDARY_MS;
+			} else {
+				continue;
+			}
+			target = ( (UD)st << 3 ) | ( tr << 8 );
+			if ( max_ps < 0 ) max_ps = st;
+		}
+		apste = 1;
+	}
+	knl_memset(&c, 0, sizeof(c));
+	c.cdw0 = ADM_SET_FEATURES;
+	c.prp1 = d->buf_pa;
+	c.cdw10 = FEAT_APST_ID;
+	c.cdw11 = apste;
+	er = nv_admin(d, &c, NULL, NV_TMO_MS);
+	d->apst_max = ( er >= E_OK && apste ) ? max_ps : -2;
+	tm_printf((UB *)"nvme: %s: APST %s (%d power states, quirks %x), deepest state %d: %d\n", d->devnm,
+		  apste ? "on" : "off", d->npss + 1, d->quirks, max_ps, er);
+	return er;
+}
+
 LOCAL ER nv_identify( NV_DEV *d, UW *p_hm )
 {
 	UB	*id = d->buf, *ns = d->buf, *lbaf, model[41], fw[9];
@@ -1052,6 +1187,20 @@ LOCAL ER nv_identify( NV_DEV *d, UW *p_hm )
 	nv_ident_str(fw, id + 64, 8);
 	mdts = id[77];
 	d->rtd3e = nv_le32(id + 88);
+	d->npss = id[263];
+	d->apsta = id[265] & 1;
+	{
+		INT	k;
+
+		for ( k = 0; k < NV_PS_N; k++ ) {
+			CONST UB	*ps = id + 2048 + 32 * k;
+
+			d->ps_flags[k] = ps[3];
+			d->ps_enlat[k] = nv_le32(ps + 4);
+			d->ps_exlat[k] = nv_le32(ps + 8);
+		}
+		d->quirks = nv_quirks(d, (UH)( id[0] | ( id[1] << 8 ) ), id + 24);
+	}
 	nn = nv_le32(id + 516);
 	vwc = id[525] & 1;
 	p_hm[0] = nv_le32(id + 272);			/* HMPRE, pages */
@@ -1195,6 +1344,7 @@ LOCAL ER nv_setup( NV_DEV *d )
 		er = nv_start_io(d, FALSE);
 	}
 	if ( er >= E_OK ) {
+		(void)nv_apst(d);
 		d->state = NV_LIVE;
 	}
 	tk_unl_mtx(d->adm.mtxid);
@@ -1308,6 +1458,48 @@ EXPORT ER knl_nvme_test_drop( CONST UB *devnm )
 	return E_OK;
 }
 #endif
+
+/*
+ * Each controller's power for the records, read only: whether it can
+ * move between power states on its own (APSTA) and the last state
+ * (NPSS), whether that is turned on (Get Features 0Ch: APSTE) and the
+ * state it is in (Get Features 02h). The table APST writes goes to the
+ * controller's buffer, with the I/O queue's lock held so that no
+ * transfer uses it meanwhile.
+ */
+EXPORT INT knl_nvme_power_text( char *t )
+{
+	INT	i, n = 0;
+
+	for ( i = 0; i < nv_ndev; i++ ) {
+		NV_DEV	*d = nv_dev[i];
+		NV_SQE	c;
+		UW	apst = 0, ps = 0;
+		ER	e1 = E_IO, e2 = E_IO;
+
+		tk_loc_mtx(d->io.mtxid, TMO_FEVR);
+		tk_loc_mtx(d->adm.mtxid, TMO_FEVR);
+		if ( d->state == NV_LIVE ) {
+			knl_memset(&c, 0, sizeof(c));
+			c.cdw0 = ADM_GET_FEATURES;
+			c.prp1 = d->buf_pa;
+			c.cdw10 = FEAT_APST;
+			e1 = nv_admin(d, &c, &apst, NV_TMO_MS);
+			knl_memset(&c, 0, sizeof(c));
+			c.cdw0 = ADM_GET_FEATURES;
+			c.cdw10 = FEAT_POWER_MGMT;
+			e2 = nv_admin(d, &c, &ps, NV_TMO_MS);
+		}
+		tk_unl_mtx(d->adm.mtxid);
+		tk_unl_mtx(d->io.mtxid);
+		n += tm_sprintf((UB *)t + n, (CONST UB *)"; %s APSTA %d NPSS %d", d->devnm, (INT)d->apsta, (INT)d->npss);
+		n += ( e1 >= E_OK ) ? tm_sprintf((UB *)t + n, (CONST UB *)" APSTE %d", (INT)( apst & 1 ))
+				    : tm_sprintf((UB *)t + n, (CONST UB *)" APSTE ? (%d)", (INT)e1);
+		n += ( e2 >= E_OK ) ? tm_sprintf((UB *)t + n, (CONST UB *)" PS %d", (INT)( ps & 0x1f ))
+				    : tm_sprintf((UB *)t + n, (CONST UB *)" PS ? (%d)", (INT)e2);
+	}
+	return n;
+}
 
 EXPORT void knl_nvme_report( void )
 {
@@ -1446,6 +1638,7 @@ LOCAL void nv_pm_resume( void *arg, INT how )
 		er = nv_start_admin(d);
 		if ( er >= E_OK ) er = nv_start_io(d, TRUE);
 		if ( er >= E_OK ) {
+			(void)nv_apst(d);
 			d->state = NV_LIVE;
 			tm_printf((UB *)"nvme: %s: back from the sleep%s\n", d->devnm,
 				  d->hmb_on ? ", with its host memory buffer" : "");
@@ -1468,6 +1661,12 @@ LOCAL void nv_pm_register( void )
 }
 
 #else /* PCIE_ECAM_PA || PCIE_CFG_BOARD */
+
+EXPORT INT knl_nvme_power_text( char *t )
+{
+	(void)t;
+	return 0;
+}
 
 EXPORT void knl_nvme_report( void )
 {

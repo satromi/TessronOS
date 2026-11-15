@@ -13,10 +13,14 @@
  *	lib/libcxxrt (design 9.13, 17.19).
  *
  *	The heap (_sbrk) is one reservation of TS_HEAP_MAX bytes of
- *	addresses made on first use; pages are made in steps of HEAP_STEP as
- *	the break goes up. Descriptors 0 to 2 are the console: what is
+ *	addresses made on first use; it is made writable in steps of
+ *	HEAP_STEP as the break goes up, and each page is made when it is
+ *	first touched. When the break comes down (malloc_trim), the whole
+ *	pages above it are given up (TS_MEM_DISCARD) and go back to the
+ *	system, as brk gives them back on Linux. Descriptors 0 to 2 are the console: what is
  *	written there goes out with tm_putstring, reading gives end of file.
- *	Sockets have descriptors of their own range (ts_socket.c). Any
+ *	Sockets have descriptors of their own range (ts_socket.c), and so
+ *	have the ends of streams between processes (ts_chan.c). Any
  *	other descriptor is a file of the file layer (fs_), numbered
  *	FD_BASE above the layer's own. Time comes from the monotonic clock
  *	(ts_get_mono) and the calendar (tk_get_utc).
@@ -30,6 +34,8 @@
 #include <tk/syscall.h>
 #include <ts/umem.h>
 #include <ts/time.h>
+#include <ts/proc.h>
+#include <ts/sbx.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -44,6 +50,8 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <malloc.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 IMPORT void ts_ext_prc( INT exitcd );
 IMPORT ID   ts_get_pid( void );
@@ -95,6 +103,14 @@ extern int	ts_sock_fcntl( int fd, int cmd, int val );
 extern long	send( int fd, const void *buf, size_t len, int flags );
 extern long	recv( int fd, void *buf, size_t len, int flags );
 
+/* ts_chan.c: the ends of streams between processes, and keys held as descriptors */
+extern int	ts_chan_is( int fd );
+extern long	ts_chan_read( int fd, void *buf, size_t n, int flags );
+extern long	ts_chan_write( int fd, const void *buf, size_t n, int flags );
+extern int	ts_chan_close( int fd );
+extern int	ts_chan_fcntl( int fd, int cmd, int arg );
+extern int	ts_chan_fstat( int fd, struct stat *st );
+
 /* ts_urandom.c: /dev/urandom and /dev/random, the random source object */
 extern int	ts_rnd_open( const char *path );
 extern int	ts_rnd_is( int fd );
@@ -144,6 +160,12 @@ void *_sbrk( ptrdiff_t incr )
 			return (void *)-1;
 		}
 		heap_brk += incr;
+		{
+			/* the whole pages above the break given back; made again when touched */
+			char	*from = (char *)( ( (uintptr_t)heap_brk + 4095 ) & ~(uintptr_t)4095 );
+
+			if ( from < heap_made ) (void)ts_ctl_mem(from, (SZ)( heap_made - from ), TS_MEM_DISCARD);
+		}
 		return old;
 	}
 	if ( (size_t)incr > (size_t)( heap_base + TS_HEAP_MAX - heap_brk ) ) {
@@ -200,6 +222,9 @@ int _write( int fd, const void *buf, size_t n )
 	if ( ts_evfd_is(fd) ) {
 		return (int)ts_evfd_write(fd, buf, n);
 	}
+	if ( ts_chan_is(fd) ) {
+		return (int)ts_chan_write(fd, buf, n, 0);
+	}
 	if ( ts_rnd_is(fd) ) {
 		return (int)ts_rnd_write(fd, buf, n);
 	}
@@ -227,6 +252,9 @@ int _read( int fd, void *buf, size_t n )
 	}
 	if ( ts_evfd_is(fd) ) {
 		return (int)ts_evfd_read(fd, buf, n);
+	}
+	if ( ts_chan_is(fd) ) {
+		return (int)ts_chan_read(fd, buf, n, 0);
 	}
 	if ( ts_rnd_is(fd) ) {
 		return (int)ts_rnd_read(fd, buf, n);
@@ -277,6 +305,9 @@ int _close( int fd )
 	}
 	if ( ts_evfd_is(fd) ) {
 		return ts_evfd_close(fd);
+	}
+	if ( ts_chan_is(fd) ) {
+		return ts_chan_close(fd);
 	}
 	if ( ts_rnd_is(fd) ) {
 		return ts_rnd_close(fd);
@@ -332,6 +363,9 @@ int _fstat( int fd, struct stat *st )
 	if ( ts_memfd_is(fd) ) {
 		return ts_memfd_fstat(fd, st);
 	}
+	if ( ts_chan_is(fd) ) {
+		return ts_chan_fstat(fd, st);
+	}
 #ifdef __x86_64__
 	/* the GPU's descriptors (lib/libgl): a device node, as Intel's driver looks for one */
 	if ( ts_gpu_fd_fstat != NULL && ts_gpu_fd_fstat(fd, st) == 0 ) {
@@ -381,6 +415,9 @@ int _fcntl( int fd, int cmd, int arg )
 	}
 	if ( ts_memfd_is(fd) ) {
 		return ts_memfd_fcntl(fd, cmd, arg);
+	}
+	if ( ts_chan_is(fd) ) {
+		return ts_chan_fcntl(fd, cmd, arg);
 	}
 	if ( ts_gpu_fd_fcntl != NULL ) {
 		int r = ts_gpu_fd_fcntl(fd, cmd, arg);
@@ -598,13 +635,108 @@ void _exit( int code )
 	for ( ;; ) ;
 }
 
+/*
+ * A signal that ends a process ends it as ts_ter_prc does (its waits
+ * are cut and it is collected with TS_ABORT_TERM, read as SIGKILL);
+ * signal 0 asks whether it is there. The caller ends another only when
+ * it may delete its process object, or is its parent. No other signal
+ * is carried between these programs.
+ */
 int _kill( int pid, int sig )
 {
-	if ( pid == (int)ts_get_pid() ) {
+	T_RPRC	r;
+	ER	er;
+
+	if ( pid == (int)ts_get_pid() && sig != 0 ) {
 		_exit(128 + sig);
 	}
-	errno = EINVAL;
+	if ( pid <= 0 ) {
+		errno = EINVAL;
+		return -1;
+	}
+	if ( sig == 0 ) {
+		if ( ts_ref_prc((ID)pid, &r) >= E_OK ) return 0;
+		errno = ESRCH;
+		return -1;
+	}
+	if ( sig != SIGKILL && sig != SIGTERM && sig != SIGINT && sig != SIGHUP
+	  && sig != SIGQUIT && sig != SIGABRT ) {
+		errno = EINVAL;
+		return -1;
+	}
+	er = ts_ter_prc((ID)pid, TS_ABORT_TERM);
+	if ( er >= E_OK || er == E_OBJ ) {
+		return 0;			/* ending already counts as ended */
+	}
+	errno = ( er == E_OACV ) ? EPERM : ESRCH;
 	return -1;
+}
+
+extern ID	ts_random_key( void );
+
+/*
+ * The caller restricted (include/ts/sbx.h, design 5.9). What this
+ * library opens by name the first time it is used is opened first: the
+ * key of 乱数 that getrandom reads. The rest it makes without a name
+ * (ob_cre_key: memfd_create, socketpair, the port of epoll), which a
+ * restricted process may.
+ */
+int ts_sandbox_enter( unsigned groups, unsigned how )
+{
+	ER	er;
+
+	(void)ts_random_key();
+	er = ts_set_sbx((UINT)groups, (UINT)how);
+	if ( er < E_OK ) {
+		errno = ( er == E_PAR ) ? EINVAL : EPERM;
+		return -1;
+	}
+	return 0;
+}
+
+/* How a process ended, as POSIX's macros read it */
+static int wait_status( INT code )
+{
+	switch ( code ) {
+	case TS_ABORT_FAULT:	return SIGSEGV;
+	case TS_ABORT_ILL:	return SIGILL;
+	case TS_ABORT_SBX:	return SIGSYS;	/* a call its restriction shuts out (include/ts/sbx.h) */
+	default:		return ( code < 0 ) ? SIGKILL : ( code & 0xff ) << 8;
+	}
+}
+
+/*
+ * A child waited for by its number (ts_wai_prc), and collected, as
+ * base::Process waits for each it started. WNOHANG answers 0 while it
+ * runs. Any child (-1) and groups are not waited for: ts_wai_prc does
+ * not say which child it was (EINVAL).
+ */
+pid_t waitpid( pid_t pid, int *status, int options )
+{
+	T_PSTS	ps;
+	ER	er;
+
+	if ( pid <= 0 ) {
+		errno = EINVAL;
+		return -1;
+	}
+	er = ts_wai_prc((ID)pid, &ps, ( options & WNOHANG ) ? TMO_POL : TMO_FEVR);
+	if ( er == E_TMOUT ) {
+		return 0;
+	}
+	if ( er < E_OK ) {
+		errno = ( er == E_RLWAI ) ? EINTR : ECHILD;
+		return -1;
+	}
+	if ( status != NULL ) *status = wait_status(ps.exitcd);
+	return pid;
+}
+
+pid_t getppid( void )
+{
+	T_RPRC	r;
+
+	return ( ts_ref_prc(ts_get_pid(), &r) >= E_OK ) ? (pid_t)r.ppid : 0;
 }
 
 int _getpid( void )

@@ -40,6 +40,8 @@
 #include <ts/tad.h>
 #include <ts/tadview.h>
 #include <ts/om.h>
+#include <ts/tsfsck.h>
+#include <ts/sbx.h>
 #include "obj.h"
 
 #define F(fn)		((FP)(fn))
@@ -215,12 +217,36 @@ LOCAL ER cre_in( CONST T_OBCRE *u, CRECOPY **pp )
 
 /* ---------------------------------------------------------------- objects */
 
+/*
+ * The group of a restricted process's (include/ts/sbx.h) an object of a
+ * kind is of, when it is opened or made by its UUID: the gateway lets
+ * such calls by only when objects are not shut out as a whole (the
+ * network's process), and the kind decides then.
+ */
+LOCAL UINT sbx_kind( UINT type, UINT sub )
+{
+	switch ( type ) {
+	  case OB_T_DEVICE:	return ( sub == OB_S_GPU ) ? TS_SBX_GPU : TS_SBX_DEV;
+	  case OB_T_PROCESS:	return TS_SBX_PROC;
+	  case OB_T_WINDOW:	return TS_SBX_WIN;
+	  case OB_T_CHANNEL:	return ( sub == OB_S_SOCKET ) ? TS_SBX_NET : 0;
+	  default:		return 0;
+	}
+}
+
 LOCAL ID svc_opn_obj( CONST TS_UUID *uuid, UINT ops )
 {
 	CONST TS_UUID	*u;
 	TS_UUID		k;
 	ER		er = uuid_in(uuid, &k, &u);
 
+	if ( er >= E_OK ) {
+		CONST T_OBMGR	*m = knl_ob_mgr_of(u);
+
+		if ( m != NULL ) {
+			er = knl_sbx_may(sbx_kind(m->type, m->sub), TSN_OB_OPN_OBJ);
+		}
+	}
 	return ( er < E_OK ) ? er : ob_opn_obj(u, ops);
 }
 
@@ -232,8 +258,41 @@ LOCAL ER svc_cre_obj( CONST T_OBCRE *pk_cre, TS_UUID *p_uuid )
 	if ( !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
 	er = cre_in(pk_cre, &k);
 	if ( er < E_OK ) return er;
+	if ( k != NULL && ( er = knl_sbx_may(sbx_kind(k->c.type, k->c.sub), TSN_OB_CRE_OBJ) ) < E_OK ) {
+		cre_free(k);
+		return er;
+	}
 	er = UACCESS(ob_cre_obj(( k != NULL ) ? &k->c : NULL, p_uuid));
 	cre_free(k);
+	return er;
+}
+
+/* The keys of an object without a name (ob_cre_key): room for two for a pair of streams */
+LOCAL ER svc_cre_key( CONST T_OBCRE *pk_cre, UINT ops, ID *keys, TS_UUID *p_uuid )
+{
+	CRECOPY	*k;
+	TS_UUID	u;
+	ID	kk[2] = { 0, 0 };
+	INT	n;
+	ER	er;
+
+	if ( p_uuid != NULL && !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
+	er = cre_in(pk_cre, &k);
+	if ( er < E_OK ) return er;
+	if ( k == NULL ) return E_PAR;
+	n = ( k->c.type == OB_T_CHANNEL && k->c.sub == OB_S_STREAM ) ? 2 : 1;
+	if ( !out_ok(keys, (SZ)sizeof(ID) * n) ) {
+		cre_free(k);
+		return E_MACV;
+	}
+	er = ob_cre_key(&k->c, ops, kk, &u);
+	cre_free(k);
+	if ( er >= E_OK ) {
+		knl_ua_put(keys, kk, (SZ)sizeof(ID) * n);
+		if ( p_uuid != NULL ) {
+			knl_ua_put(p_uuid, &u, sizeof(u));
+		}
+	}
 	return er;
 }
 
@@ -740,6 +799,129 @@ LOCAL ER svc_det_vol( CONST char *path )
 	return ( er < E_OK ) ? er : ob_det_vol(p);
 }
 
+/* ---------------------------------------------------------------- the disk check (ts/tsfsck.h) */
+
+#define CHK_LIST_MAX	64		/* volumes told a process at one call */
+
+LOCAL INT svc_chk_list( T_TSFSCKDEV *buf, INT max )
+{
+	T_TSFSCKDEV	*k = NULL;
+	INT		n;
+
+	if ( max < 0 ) return E_PAR;
+	if ( buf == NULL ) max = 0;
+	if ( max > CHK_LIST_MAX ) max = CHK_LIST_MAX;
+	if ( !out_ok(buf, (SZ)sizeof(*buf) * max) ) return E_MACV;
+	if ( max > 0 && ( k = (T_TSFSCKDEV *)Kmalloc(sizeof(*k) * (SZ)max) ) == NULL ) return E_NOMEM;
+	n = ob_chk_list(k, max);
+	if ( n > 0 && k != NULL ) {
+		knl_ua_put(buf, k, (SZ)sizeof(*k) * ( ( n < max ) ? n : max ));
+	}
+	if ( k != NULL ) Kfree(k);
+	return n;
+}
+
+/* Where the events of a process's check go: its own memory, with the count after each */
+typedef struct {
+	ID		pid;
+	T_TSFSCKEV	*ev;
+	INT		max;
+	INT		*told;
+	INT		n;
+} CHKOUT;
+
+LOCAL void chk_put( void *ctx, CONST T_TSFSCKEV *ev )
+{
+	CHKOUT	*o = (CHKOUT *)ctx;
+
+	/* the process's memory looked at again each time: it may have let go of it while the check ran */
+	if ( o->n < o->max && knl_prc_user_ok(o->pid, &o->ev[o->n], (SZ)sizeof(*ev), TRUE) ) {
+		knl_ua_put(&o->ev[o->n], ev, sizeof(*ev));
+	}
+	o->n++;
+	__atomic_thread_fence(__ATOMIC_RELEASE);	/* the event before the count that says it is there */
+	if ( o->told != NULL && knl_prc_user_ok(o->pid, o->told, (SZ)sizeof(INT), TRUE) ) {
+		knl_ua_put(o->told, &o->n, sizeof(INT));
+	}
+}
+
+LOCAL ER svc_chk_vol( CONST char *devnm, UINT mode, T_TSFSCK *res, T_TSFSCKEV *ev, INT max, INT *p_told )
+{
+	char		k[TSFSCK_DEVNM_MAX];
+	T_TSFSCK	*r;
+	CHKOUT		o;
+	ER		er;
+
+	if ( devnm == NULL || res == NULL || max < 0 || ( ev == NULL && max > 0 ) ) return E_PAR;
+	er = str_in((CONST UB *)devnm, (UB *)k, sizeof(k), FALSE);
+	if ( er < E_OK ) return er;
+	if ( !out_ok(res, sizeof(*res)) || !out_ok(ev, (SZ)sizeof(*ev) * max) || !out_ok(p_told, sizeof(INT)) ) {
+		return E_MACV;
+	}
+	r = (T_TSFSCK *)Kcalloc(1, sizeof(*r));
+	if ( r == NULL ) return E_NOMEM;
+	o.pid = ts_get_pid();
+	o.ev = ev;
+	o.max = max;
+	o.told = p_told;
+	o.n = 0;
+	er = ob_chk_run(k, mode, r, chk_put, &o);
+	if ( knl_prc_user_ok(o.pid, res, sizeof(*res), TRUE) ) {
+		knl_ua_put(res, r, sizeof(*r));
+	}
+	Kfree(r);
+	return er;
+}
+
+LOCAL ER svc_chk_request( CONST char *devnm, UINT mode )
+{
+	char	k[TSFSCK_DEVNM_MAX];
+	ER	er;
+
+	if ( devnm == NULL ) return E_PAR;
+	er = str_in((CONST UB *)devnm, (UB *)k, sizeof(k), FALSE);
+	return ( er < E_OK ) ? er : ob_chk_request(k, mode);
+}
+
+/* What the repair at start did: to the first process that asks, once */
+LOCAL INT svc_chk_boot( UB *devnm, INT nmax, T_TSFSCK *res, T_TSFSCKEV *ev, INT max )
+{
+	UB		d[TSFSCK_DEVNM_MAX];
+	T_TSFSCK	*r;
+	T_TSFSCKEV	*k = NULL;
+	INT		n;
+
+	if ( nmax < 0 || max < 0 ) return E_PAR;
+	if ( devnm == NULL ) nmax = 0;
+	if ( ev == NULL ) max = 0;
+	if ( !out_ok(devnm, nmax) || !out_ok(res, sizeof(*res)) || !out_ok(ev, (SZ)sizeof(*ev) * max) ) {
+		return E_MACV;
+	}
+	if ( ob_chk_boot_result(NULL, 0, NULL, NULL, 0) <= 0 || !knl_ob_chk_boot_once() ) {
+		return 0;
+	}
+	r = (T_TSFSCK *)Kcalloc(1, sizeof(*r));
+	if ( max > 0 ) k = (T_TSFSCKEV *)Kmalloc(sizeof(*k) * (SZ)max);
+	if ( r == NULL || ( max > 0 && k == NULL ) ) {
+		if ( r != NULL ) Kfree(r);
+		if ( k != NULL ) Kfree(k);
+		return E_NOMEM;
+	}
+	n = ob_chk_boot_result(d, sizeof(d), r, k, max);
+	if ( nmax > 0 ) {
+		INT	i;
+
+		for ( i = 0; d[i] != 0 && i < nmax - 1 && i < (INT)sizeof(d) - 1; i++ ) ;
+		knl_ua_put(devnm, d, i);
+		knl_ua_put(devnm + i, "", 1);
+	}
+	if ( res != NULL ) knl_ua_put(res, r, sizeof(*r));
+	if ( max > 0 && n > 0 ) knl_ua_put(ev, k, (SZ)sizeof(*k) * ( ( n < max ) ? n : max ));
+	Kfree(r);
+	if ( k != NULL ) Kfree(k);
+	return n;
+}
+
 LOCAL ER svc_get_dom( CONST char *vol, T_OBPRT *pk_prt, SZ size, SZ *p_asize )
 {
 	char		k[FS_PATH_MAX];
@@ -953,4 +1135,9 @@ EXPORT const FP knl_ob_svc_tbl[TSN_OB_MAX + 1] = {
 	[TSN_NUMBER(TSN_OB_REF_VOB)]	= F(svc_ref_vob),
 	[TSN_NUMBER(TSN_OB_REF_VID)]	= F(svc_ref_vid),
 	[TSN_NUMBER(TSN_OB_DUP_OBJ)]	= F(svc_dup_obj),
+	[TSN_NUMBER(TSN_OB_CHK_LST)]	= F(svc_chk_list),
+	[TSN_NUMBER(TSN_OB_CHK_VOL)]	= F(svc_chk_vol),
+	[TSN_NUMBER(TSN_OB_CHK_REQ)]	= F(svc_chk_request),
+	[TSN_NUMBER(TSN_OB_CHK_BOOT)]	= F(svc_chk_boot),
+	[TSN_NUMBER(TSN_OB_CRE_KEY)]	= F(svc_cre_key),
 };

@@ -74,6 +74,11 @@ void *pth_tls_make( void *at, PTH *owner )
 #endif
 	((PTH **)tp)[PTH_TCB_OWNER] = owner;
 	((PTH **)tp)[PTH_TCB_EXIT] = NULL;
+#ifdef PTH_TCB_GUARD
+	/* the words code made for the GNU C library reads in the control block (pth_cpu.h) */
+	((uintptr_t *)tp)[PTH_TCB_GUARD] = pth_tcb_guard(tp);
+	((uintptr_t *)tp)[PTH_TCB_GUARD + 1] = 0;
+#endif
 	memcpy(data, __tls_start, (size_t)__tls_filesz);
 	memset(data + (size_t)__tls_filesz, 0, (size_t)__tls_memsz - (size_t)__tls_filesz);
 	return tp;
@@ -230,7 +235,7 @@ extern void *__ts_call_on_stack( void *sp, void *(*fn)( void * ), void *arg );
 typedef struct {
 	void	*self;
 	PTH	*p;
-	void	*pad[2];
+	void	*pad[PTH_TCB_SIZE / sizeof(void *) - 2];
 } TCBLOCAL;
 #else
 typedef struct {
@@ -285,7 +290,7 @@ static void thread_entry( INT stacd, void *exinf )
 	local.p = t;
 #ifdef PTH_TCB_SELF
 	local.self = &local;
-	local.pad[0] = local.pad[1] = NULL;
+	memset(local.pad, 0, sizeof(local.pad));
 #else
 	local.pad = NULL;
 #endif

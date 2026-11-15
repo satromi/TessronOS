@@ -949,17 +949,28 @@ static ER win_open( CONST char *title )
 	char		json[260];
 	char		shown[TS_UUID_STRLEN + 1];
 	INT		x = 100, y = 80, ww = 850, wh = 650, mn = meta_of(&g_obj);
+	UB		scr[12] = "";
+	BOOL		kept = FALSE;
 
 	if ( mn > 0 && js_parse((CONST UB *)g_meta, mn, &root) >= E_OK && js_get(&root, "window", &w) >= E_OK ) {
 		ww = (INT)js_get_num(&w, "width", ww);
 		wh = (INT)js_get_num(&w, "height", wh);
+		(void)js_get_str(&w, "screen", scr, sizeof(scr));
 		if ( js_get(&w, "pos", &pos) >= E_OK ) {
+			kept = TRUE;
 			x = (INT)js_get_num(&pos, "x", x);
 			y = (INT)js_get_num(&pos, "y", y);
 		}
 	}
 	if ( ww < MIN_W ) ww = MIN_W;
 	if ( wh < MIN_H ) wh = MIN_H;
+	/* kept from the corner of its screen, the main one's when it names none (wm_place_open) */
+	if ( kept ) {
+		wm_place_xywh(&x, &y, ww, wh, (CONST char *)scr);
+	} else {
+		x = wm_new_x(x);	/* none kept: from the corner of the screen new windows open on */
+		y = wm_new_y(y);
+	}
 	if ( x < 0 ) x = 0;
 	if ( y < 0 ) y = 0;
 	ts_uuid_text(&g_obj, shown);	/* what it shows, for ウインドウ一覧 */
@@ -1070,23 +1081,41 @@ static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 /* 全画面表示: the size of the screen above the message line, or back where it stood */
 static void fullscreen( void )
 {
-	T_DTREQ	rq;
-	T_DTANS	an;
-	SZ	asz = 0;
+	T_DTREQ		rq;
+	T_DTANS		an;
+	T_OBWPOS	was;
+	SZ		asz = 0;
+	BOOL		read;
 
-	if ( g_full ) {
-		(void)ob_wri_rec(g_kw, OB_WR_PLACE, 0, &g_restore, sizeof(g_restore), &asz);
-		g_full = FALSE;
-		note("fullscreen off");
-	} else if ( ob_rea_rec(g_kw, OB_WR_PLACE, 0, &g_restore, sizeof(g_restore), &asz) >= E_OK ) {
-		memset(&rq, 0, sizeof(rq));
-		rq.req = DT_RQ_FULL;
-		if ( ask_desktop(&rq, &an, 5000) >= E_OK ) {
-			g_full = TRUE;
-			note("fullscreen on");
-		}
+	/* the desktop keeps where it stood, as for a double press on the window's corner */
+	read = ( ob_rea_rec(g_kw, OB_WR_PLACE, 0, &was, sizeof(was), &asz) >= E_OK );
+	memset(&rq, 0, sizeof(rq));
+	rq.req = DT_RQ_FULL;
+	if ( ask_desktop(&rq, &an, 5000) >= E_OK ) {
+		g_full = (BOOL)( ( an.flags & DT_F_FULL ) != 0 && read );
+		if ( g_full ) g_restore = was;
+		note(( an.flags & DT_F_FULL ) != 0 ? "fullscreen on" : "fullscreen off");
 	}
 	resized();
+}
+
+/*
+ * Whether the window is the screen's size by 全画面表示 now, for the tick
+ * in the menu: asked of the desktop, for a double press on the window's
+ * corner changes it without the program. Put back so, the place kept
+ * here is no longer one to save.
+ */
+static BOOL full_shown( void )
+{
+	T_DTREQ	rq;
+	T_DTANS	an;
+
+	memset(&rq, 0, sizeof(rq));
+	rq.req = DT_RQ_FULL;
+	rq.flags = DT_F_ASK;
+	if ( ask_desktop(&rq, &an, 1000) < E_OK ) return g_full;
+	if ( ( an.flags & DT_F_FULL ) == 0 ) g_full = FALSE;
+	return (BOOL)( ( an.flags & DT_F_FULL ) != 0 );
 }
 
 /* 背景色変更: asked of the desktop, which keeps it as the object's paper */
@@ -1101,8 +1130,9 @@ static void paper_ask( void )
 	rq.target = g_obj;
 	rq.look.bgcol = g_paper;
 	if ( ask_desktop(&rq, &an, 30 * 60 * 1000) < E_OK ) return;
-	g_paper = an.look.bgcol & 0x00FFFFFFU;
-	snprintf(s, sizeof(s), "paper #%06x", (UINT)g_paper);
+	/* 仮身属性と同じ: no paper of its own, the ground as when its metadata says none */
+	g_paper = ( an.look.bgcol == DT_PAPER_SAME ) ? C_GROUND : ( an.look.bgcol & 0x00FFFFFFU );
+	snprintf(s, sizeof(s), ( an.look.bgcol == DT_PAPER_SAME ) ? "paper same as the link #%06x" : "paper #%06x", (UINT)g_paper);
 	note(s);
 	g_dirty = TRUE;
 }
@@ -1466,7 +1496,7 @@ static void menu( CONST T_OBNTM *m )
 	BOOL		chosen;
 
 	if ( ui_uuid(SYSDEF_MENU_KANATYPE, &def) < E_OK || mn_cre_men(&def, &mid) < E_OK ) return;
-	(void)mn_chg_atr(mid, NULL, "fullscreen", g_full ? MN_TICK : 0);
+	(void)mn_chg_atr(mid, NULL, "fullscreen", full_shown() ? MN_TICK : 0);
 	(void)mn_chg_atr(mid, NULL, "start", g_e.practising ? MN_GREY : 0);
 	for ( i = 0; i < g_nkb; i++ ) snprintf((char *)kb[i], WM_LABEL_MAX, "%s", (char *)g_kb[i].name);
 	for ( i = 0; i < g_nkana; i++ ) snprintf((char *)ka[i], WM_LABEL_MAX, "%s", (char *)g_kana[i].name);

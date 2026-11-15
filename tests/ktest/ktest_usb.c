@@ -283,6 +283,60 @@ LOCAL void test_control( void )
 	KT_ASSERT_ER(ts_usb_ref_dev(0, &r), E_NOEXS);
 }
 
+/*
+ * A device suspended while idle and resumed (knl_usb_dev_suspend): the
+ * keyboard on a root port, its remote wakeup on, the link in U3; a key
+ * pressed through the QEMU monitor, where there is one, makes it signal
+ * resume and the manager bring it back; else it is resumed as a driver
+ * with something to send would. Then a control transfer goes through.
+ */
+IMPORT USBDEV *knl_usb_test_dev( INT handle );
+
+LOCAL void test_suspend( void )
+{
+	T_USBDEV	*d;
+	USBDEV		*u;
+	UB		desc[18];
+	UW		res0;
+	T_HIDEV		ev;
+	INT		i;
+	ER		er;
+
+	if ( ts_usb_hc_count() <= 0 ) KT_SKIP("no controller");
+	load_tree();
+	d = find_dev(USB_ROLE_HID, 0);
+	if ( d == NULL ) KT_SKIP("no keyboard");
+	knl_usb_lock();
+	u = knl_usb_test_dev(d->dev);
+	if ( u == NULL || u->parent != NULL || u->hc->ops->dev_suspend == NULL ) {
+		knl_usb_unlock();
+		KT_SKIP("not on a root port of a controller that suspends devices");
+	}
+	res0 = u->n_resume;
+	er = knl_usb_dev_suspend(u, TRUE);
+	knl_usb_unlock();
+	KT_ASSERT_ER(er, E_OK);
+	KT_ASSERT(u->suspended);
+
+	while ( ts_hid_read(&ev, TMO_POL) >= E_OK ) ;
+	tm_printf((UB*)"KTEST QMP {\"execute\":\"input-send-event\",\"arguments\":"
+		  "{\"events\":[{\"type\":\"key\",\"data\":"
+		  "{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"a\"}}}]}}\n");
+	for ( i = 0; i < 30 && u->suspended; i++ ) tk_dly_tsk(100);
+	tm_printf((UB*)"KTEST QMP {\"execute\":\"input-send-event\",\"arguments\":"
+		  "{\"events\":[{\"type\":\"key\",\"data\":"
+		  "{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"a\"}}}]}}\n");
+	tm_printf((UB*)"usb: the suspended keyboard %s\n", u->suspended ? "did not wake itself: resumed" : "woke itself");
+	knl_usb_lock();
+	er = knl_usb_dev_resume(u);
+	knl_usb_unlock();
+	KT_ASSERT_ER(er, E_OK);
+	KT_ASSERT(!u->suspended);
+	KT_ASSERT(u->n_resume == res0 + 1);
+	KT_ASSERT_EQ(ts_usb_get_desc(d->dev, 1, 0, desc, sizeof(desc)), 18);
+	while ( ts_hid_read(&ev, TMO_POL) >= E_OK ) ;
+}
+
 #if defined(RPI4) || defined(RPI5)
 IMPORT BOOL knl_dwc2_probing( void );
 
@@ -1537,6 +1591,7 @@ EXPORT void ktest_usb( void )
 	KT_RUN_QEMU_DEVS(test_ports, "the ports the QEMU machine has in use");
 	KT_RUN_QEMU_DEVS(test_tree, "the devices the QEMU machine has");
 	KT_RUN(test_control);
+	KT_RUN(test_suspend);
 #if defined(RPI4) || defined(RPI5)
 	KT_RUN(test_dwc2);
 #endif

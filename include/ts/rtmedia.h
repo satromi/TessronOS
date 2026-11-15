@@ -9,18 +9,21 @@
 
 /*
  *	rtmedia.h
- *	What the player of 実時間制御TAD (in the desktop) says to the
- *	processes that make its sound and its pictures move (design 15.6)
+ *	What the player of 実時間制御TAD (lib/librtplay, in the program that
+ *	plays the record) says to the processes that make its sound and its
+ *	pictures move (design 15.6)
  *
- *	The desktop cannot decode a compressed file in the kernel: that is
- *	floating point and libraries a kernel does not carry. So whatever
- *	sounds -- a file of audio, the notes and MIDI messages of the
- *	program, the PCM a record carries -- is done by the process
+ *	Whatever sounds -- a file of audio, the notes and MIDI messages of
+ *	the program, the PCM a record carries -- is done by the process
  *	実時間メディア (application/rtmedia), and a video by MPEG Player
- *	started in its own way for it (--embed). Each is started with an
- *	RTM_ARG as its start-up argument and is told what to do by
- *	messages on a channel the desktop made; it answers on another, and
- *	a video puts its frames where the desktop reads them.
+ *	started in its own way for it (--embed), each a child of the program
+ *	that plays the record. Each is started with an RTM_ARG as its
+ *	start-up argument and is told what to do by messages on a channel
+ *	the player made; it answers on another, and a video puts its frames
+ *	where the player reads them. Given its host, it watches the process
+ *	it plays for (OB_E_EXIT, told on the channel it reads) and, when
+ *	that ends however it ends, deletes the channels and the memory it
+ *	was given and ends too.
  *
  *	The messages are fixed records, little endian, one a channel
  *	message (at most OB_CH_MSG_MAX bytes). Times are nanoseconds of the
@@ -41,6 +44,7 @@ extern "C" {
 #define RTM_MAGIC	0x4D54525AU	/* "ZRTM" */
 #define RTM_PROG	"rtmedia"	/* the program id of 実時間メディア */
 #define RTM_VIDEO_PROG	"mpeg-player"	/* the program that decodes video, started with --embed */
+#define RTM_VIDEO_UUID	"01a0f638-4c5a-78a9-9bbd-adfbafa3466a"	/* its program object (a package's) */
 #define RTM_EMBED	"--embed"
 
 /* The start-up argument */
@@ -51,7 +55,15 @@ typedef struct {
 	TS_UUID	reply;			/* the channel it answers on */
 	TS_UUID	frames;		/* a video: the memory object its frames go to */
 	UB	embed[8];		/* RTM_EMBED, for a program that has a window of its own otherwise */
+	TS_UUID	host;			/* the process object of the program it plays for; all 0 none */
 } RTM_ARG;
+
+/*
+ * The number the helper asks the host's OB_E_EXIT to be told with, on
+ * the channel of its commands: it stands where a command's op does, and
+ * is none of theirs
+ */
+#define RTM_HOST_ID	0x5854524DU	/* "MRTX" */
 
 /* ---------------------------------------------------------------- what it is told */
 

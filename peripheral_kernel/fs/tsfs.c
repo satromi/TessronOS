@@ -1014,19 +1014,25 @@ EXPORT ER ts_cre_obj( ID vol, CONST T_COBJ *pk_cobj, TS_UUID *p_uuid )
 }
 
 /* How many have the object open (the volume's lock, then the tables') */
-LOCAL INT open_count( TSFSVOL *v, CONST TS_UUID *uuid )
+LOCAL INT open_count_as( TSFSVOL *v, CONST TS_UUID *uuid, BOOL records )
 {
 	INT	i, n = 0;
 
 	tk_loc_mtx(tsfs_mtxid, TMO_FEVR);
 	for ( i = 0; i < TSFS_MAX_OD; i++ ) {
 		if ( tsfs_od[i].used && tsfs_od[i].vol == v
-		  && ts_uuid_cmp(&tsfs_od[i].uuid, uuid) == 0 ) {
+		  && ts_uuid_cmp(&tsfs_od[i].uuid, uuid) == 0
+		  && ( !records || ( tsfs_od[i].omode & TFO_SHARE ) == 0 ) ) {
 			n++;
 		}
 	}
 	tk_unl_mtx(tsfs_mtxid);
 	return n;
+}
+
+LOCAL INT open_count( TSFSVOL *v, CONST TS_UUID *uuid )
+{
+	return open_count_as(v, uuid, FALSE);
 }
 
 EXPORT ER ts_del_obj( ID vol, CONST TS_UUID *uuid )
@@ -1190,7 +1196,8 @@ EXPORT ER ts_od_uuid( ID od, TS_UUID *p_uuid )
 /*
  * On the native store the last to close an object finishes it: one that
  * was written has its link table made again, one deleted while open
- * goes (design 11.7).
+ * goes (design 11.7). A key of the attributes alone does not count for
+ * the link table: the last writer to close makes it again.
  */
 EXPORT ER ts_cls_obj( ID od )
 {
@@ -1217,6 +1224,13 @@ EXPORT ER ts_cls_obj( ID od )
 			if ( ts_obj_reap(v->bvol, &uuid) < E_OK && wrote ) {
 				(void)ts_obj_relink(v->bvol, &uuid);
 			}
+		} else if ( wrote && open_count_as(v, &uuid, TRUE) == 0 ) {
+			/*
+			 * the last that read or wrote its records: those open for
+			 * the attributes alone (TFO_SHARE, a window watching it)
+			 * do not keep its link table from being made again
+			 */
+			(void)ts_obj_relink(v->bvol, &uuid);
 		}
 		er = vol_unlock(v);
 		/* what this opening changed is on the medium before it is closed */

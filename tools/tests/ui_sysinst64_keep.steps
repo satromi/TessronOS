@@ -1,0 +1,28 @@
+# システム登録's 上書き (design 3.10.10, 11.32) on the x64 PC, for tools/x64/ui_run64.py with a
+# second NVMe the system was put on beside Windows before (the KTWIN-C image after the
+# sysinst group of tests/ktest/x86_64/ktest_sysinst.c, given as UI_EXTRA="-drive
+# file=W.img,if=none,id=nv2,format=raw -device nvme,serial=win,drive=nv2"): the desktop is
+# asked whether the TessronOS there can be kept (DT_SI_KEEPQ), 上書きする is offered and
+# chosen, [開始] looks at the way with the objects kept and asks on the panel that does not
+# warn, and 取消 puts it away; nothing is written.
+logmark
+open 01a0d8c4-54c0-7a11-8c22-4d5e6f7054c0
+expectsincein 60 sysinst: opened 1
+expectsincein 120 sysinst: keep nvmeb 0 -1: 0
+waitwin システム登録 30
+wait 500
+shot sysinst64_keep_open
+win システム登録
+logmark
+click 880 288
+expectsincein 120 sysinst: plan nvmeb 256 -1: 0
+expectsince sysinst: ask 登録
+wait 800
+shot sysinst64_keep_ask
+key 29
+expectsince sysinst: answered 0
+wait 300
+key 08 01
+expectsince sysinst: closed
+absent sysinst: started
+absent !OACV!

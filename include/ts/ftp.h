@@ -19,12 +19,15 @@
  *	E_TMOUT and the call that made it gives up with that.
  *
  *	Data goes the passive way unless the caller asks for the active
- *	one. Passive: EPSV, and PASV when the server refuses EPSV. Whatever
- *	address the reply names, the data connection goes to the host the
- *	control connection reached, only the port being taken from the
- *	reply. Active (T_FTP.active): the client listens, names where with
- *	EPRT, and PORT when the server refuses EPRT, and waits a while for
- *	the server to connect after the command that moves the data.
+ *	one. Passive: EPSV, and PASV when the server refuses EPSV or what
+ *	it named cannot be reached. Whatever address the reply names, the
+ *	data connection goes to the host the control connection reached,
+ *	only the port being taken from the reply. When neither way of the
+ *	passive one works the client turns to the active one (T_FTP.active
+ *	set) for the rest of the session, when its connections can listen.
+ *	Active: the client listens, names where with EPRT, and PORT when
+ *	the server refuses EPRT, and waits a while for the server to
+ *	connect after the command that moves the data.
  *
  *	Names and paths are UTF-8 on this side. On the server they are
  *	UTF-8 when it says it knows UTF8 (FEAT, OPTS UTF8 ON), and otherwise

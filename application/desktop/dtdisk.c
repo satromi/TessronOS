@@ -11,17 +11,24 @@
  *	dtdisk.c
  *	ディスク操作: disks attached as volumes of objects (design 11.26)
  *
- *	A partition of TSFS is attached as a volume of objects with 接続,
- *	and the link to the object the volume opens with -- its top, made
- *	when it has none -- is put in the first window: the disk's link.
- *	切り離し takes a volume away again, unless an object of it is open
- *	in a window or by a program. The links to its objects stay, drawn
- *	pale (虚身), and come back as they were when it is attached again.
- *	状態表示 tells how full the disk of an object is. 区画作成 makes a
- *	TSFS partition in a free stretch of a disk, a volume on it, and
- *	attaches it; 拡張 makes the partition of a volume, and the volume,
- *	larger into the free stretch after it (gpt.h). Either on the disk
- *	the system volume is on asks for the administrator's password.
+ *	What the menu ディスク操作 offers is done by the program ディスク操作
+ *	(application/diskop), started with the item chosen and the link it
+ *	was chosen on (dt_disk_menu): its panels are its own, and it asks
+ *	the desktop, which alone knows the disks, the volumes and the windows
+ *	open on them, for each step (DT_RQ_DISK, dt_disk_req). A partition of
+ *	TSFS is attached as a volume of objects with 接続, and the link to
+ *	the object the volume opens with -- its top, made when it has none --
+ *	is put in the first window: the disk's link. 切り離し takes a volume
+ *	away again, unless an object of it is open in a window or by a
+ *	program, or it is being checked (ディスク修復). The links to its
+ *	objects stay, drawn pale (虚身), and come back as they were when it
+ *	is attached again. 状態表示 tells how full the disk of an object is.
+ *	区画作成 makes a TSFS partition in a free stretch of a disk, a volume
+ *	on it, and attaches it; 拡張 makes the partition of a volume, and the
+ *	volume, larger into the free stretch after it (gpt.h). Attaching,
+ *	taking away, making and making larger are an administrator's (design
+ *	8.7): a program that is not one is asked the administrator's
+ *	password for.
  *
  *	The volumes the person attached are remembered by their UUIDs in
  *	the device box (knl_obdev_vols_put) until they are taken away with
@@ -31,19 +38,18 @@
  *
  *	What happens without anyone asking is followed here as well. When a
  *	disk is taken out, its volumes are gone (the kernel's), the windows
- *	of their objects are closed, with a message saying so, and the
- *	links are drawn again. A window with changes not saved is not
- *	closed silently: the person is asked to save them to another
- *	volume, to have them saved when the disk is put back, or to throw
- *	them away.
+ *	of their objects -- the programs' -- are asked to close, each closed
+ *	said with a message, and the links are drawn again. A window with
+ *	changes not saved is not closed silently: its program hands what it
+ *	holds to the desktop (DT_DISK_RESCUE), and the person is asked to
+ *	save it to another volume, to have it saved when the disk is put
+ *	back, or to throw it away.
  *
  *	The disk of the system volume taken out is followed the same way,
- *	except that the first window stays: the record it shows is taken
- *	from the store and kept as the window's own (dt_win_keep), the
- *	message line says the system's disk went, and what cannot be read
- *	without it fails as it would for any disk taken out. The same disk
- *	put back is attached again by itself, and the first window reads its
- *	record anew, writing what was changed in it meanwhile (dt_win_back).
+ *	except that the first window stays: its program keeps the record it
+ *	shows, the message line says the system's disk went, and what cannot
+ *	be read without it fails as it would for any disk taken out. The
+ *	same disk put back is attached again by itself.
  *
  *	Each step is said on the console, "disk: ...", for the tests.
  */
@@ -61,16 +67,18 @@
 #include <ts/tad.h>
 #include <ts/uuid.h>
 #include <ts/gpt.h>
+#include <ts/dtreq.h>
+#include <ts/tsfsck.h>
+#include <ts/fquit.h>
+#include <ts/sysdef.h>
+#include <ts/proc.h>
 #include "desktop.h"
 
 #define DK_WAIT		16		/* records waiting for their disk to be put back */
 #define DK_PATH		64		/* bytes of a volume's path kept here */
 #define DK_TO		8		/* other volumes offered to save to */
 
-#define PN_DISK		10		/* the panel's choices, one per partition */
 #define PN_TO		40		/* where changes of a window whose disk went are to go */
-#define PN_SIZE		70		/* 区画作成 and 拡張: the size in megabytes */
-#define PN_LABEL	71		/* 区画作成: the label of the volume made */
 
 /* A record whose disk went while it had changes, kept until the disk is back */
 typedef struct {
@@ -92,16 +100,26 @@ LOCAL BOOL	dk_has_sysvu = FALSE;
 LOCAL BOOL	dk_sysgone = FALSE;	/* its disk is out */
 
 /*
- * The windows, what each shows, whether that was on a volume and which,
- * as last looked at. A window is known by its number and its object
- * together: a window closed and another opened in its place between two
- * looks may be given the same number, and must not be taken for the one
- * before (and closed for a volume it never was on).
+ * The programs' windows, what each shows, whether that was on a volume
+ * and which, as last looked at. A window is known by its number and its
+ * object together: a window closed and another opened in its place
+ * between two looks may be given the same number, and must not be taken
+ * for the one before (and closed for a volume it never was on). One
+ * asked to close because its disk went is said closed once it is gone.
  */
-LOCAL INT	dk_wid[DT_MAX_WIN];
-LOCAL TS_UUID	dk_id[DT_MAX_WIN];
-LOCAL BOOL	dk_onvol[DT_MAX_WIN];
-LOCAL TS_UUID	dk_vu[DT_MAX_WIN];
+#define DK_WINS		64
+
+typedef struct {
+	INT	wid;
+	TS_UUID	id;
+	BOOL	onvol;
+	TS_UUID	vu;
+	BOOL	asked;			/* asked to close: its disk went */
+	UB	name[TAD_NAME_MAX];
+} DKWIN;
+
+LOCAL DKWIN	dk_win[DK_WINS];
+LOCAL INT	dk_nwin = 0;
 
 /* ---------------------------------------------------------------- small things */
 
@@ -219,22 +237,33 @@ LOCAL INT kept_at( CONST TS_UUID *vu, INT n, CONST TS_UUID *vuuid )
 
 /* ---------------------------------------------------------------- the first window's links */
 
-/* Whether the first window holds a link to the object */
+/* Whether the first window holds a link to the object, as its record is saved */
 LOCAL BOOL on_desktop( CONST TS_UUID *u )
 {
-	DTWIN	*t = dt_first_win();
+	TS_UUID	cab;
+	T_TAD	*rec = NULL;
 	T_VOBJ	*v;
+	UB	*x;
+	SZ	size = 0;
 	INT	i, n;
 	BOOL	hit = FALSE;
 
-	if ( t == NULL || t->rec == NULL || ( v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ)) ) == NULL ) {
+	/* as stored: the record is the first window's program's, which writes it itself */
+	if ( ts_str_to_uuid(SYSDEF_CABINET, &cab) < E_OK || ( x = om_obj_record(&cab, 0, &size) ) == NULL ) {
 		return FALSE;
 	}
-	n = tad_lnk_count(t->rec);
+	if ( tad_parse(x, size, NULL, &rec) < E_OK ) rec = NULL;
+	Kfree(x);
+	if ( rec == NULL || ( v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ)) ) == NULL ) {
+		if ( rec != NULL ) tad_free(rec);
+		return FALSE;
+	}
+	n = tad_lnk_count(rec);
 	for ( i = 0; i < n && !hit; i++ ) {
-		hit = (BOOL)( tad_lnk_get(t->rec, i, v) >= E_OK && ts_uuid_cmp(&v->target, u) == 0 );
+		hit = (BOOL)( tad_lnk_get(rec, i, v) >= E_OK && ts_uuid_cmp(&v->target, u) == 0 );
 	}
 	Kfree(v);
+	tad_free(rec);
 	return hit;
 }
 
@@ -424,30 +453,23 @@ LOCAL void wait_done( void )
 /*
  * A window whose disk went with changes not saved: the person says
  * where they go -- another volume attached, the disk when it is put
- * back, or nowhere. The window is closed after.
+ * back, or nowhere -- in a panel over host. xml (Kmalloc, size bytes)
+ * is the record as the window's program held it, its links made to say
+ * the volume (links_name_vol); it is this function's.
  */
-LOCAL void rescue( DTWIN *d, CONST TS_UUID *vuuid, CONST UB *name )
+LOCAL void rescue( DTWIN *host, CONST TS_UUID *id, UINT body, CONST TS_UUID *vuuid, CONST UB *name,
+		   UB *xml, SZ size )
 {
 	UB		(*to)[DK_PATH], vname[OB_VOL_LABEL + 16], t[WM_LABEL_MAX], msg[TAD_NAME_MAX + 96];
 	T_OBFVREF	ref;
 	T_WMPANEL	*def;
 	T_WMPART	*pt;
-	UB		*xml = NULL;
-	SZ		size = 0;
 	INT		n, m = 0, i, k, pid, w = 600, h, pick = -1;
 	UINT		ans;
-	DTWIN		*f = dt_first_win();
+	DTWIN		*f = host;
 	TS_UUID		nid;
 	ER		er;
 
-	if ( d->xml_view ) {
-		(void)dd_xml_commit(d);
-	}
-	links_name_vol((T_TAD *)d->rec, vuuid);
-	if ( om_store_snapshot(&d->id, d->recno, &xml, &size) < E_OK ) {
-		tm_printf((UB *)"disk: changes of %s cannot be kept\n", (CONST char *)name);
-		return;
-	}
 	to = (UB (*)[DK_PATH])Kmalloc(sizeof(UB) * DK_PATH * DK_TO);
 	n = ( to != NULL ) ? knl_obfile_vols((UB *)to, DK_PATH, DK_TO) : 0;
 	for ( i = 0; i < n; i++ ) {
@@ -504,8 +526,7 @@ LOCAL void rescue( DTWIN *d, CONST TS_UUID *vuuid, CONST UB *name )
 		goto out;
 	}
 	if ( pick >= 0 && pick < m ) {
-		er = save_to((CONST char *)to[pick], name, ( d->fig != NULL ) ? OM_BODY_FIG : OM_BODY_DOC,
-			     xml, size, &nid);
+		er = save_to((CONST char *)to[pick], name, body, xml, size, &nid);
 		tm_printf((UB *)"disk: changes of %s saved to %s (%d)\n", (CONST char *)name,
 			  (CONST char *)to[pick], (INT)er);
 		if ( er >= E_OK ) {
@@ -520,7 +541,7 @@ LOCAL void rescue( DTWIN *d, CONST TS_UUID *vuuid, CONST UB *name )
 	}
     keep:
 	/* cancelled, or not written: kept for the disk, rather than lost */
-	if ( wait_put(vuuid, &d->id, d->recno, xml, size, name) ) {
+	if ( wait_put(vuuid, id, 0, xml, size, name) ) {
 		tm_printf((UB *)"disk: changes of %s kept for the disk\n", (CONST char *)name);
 		k = put(msg, 0, sizeof(msg), "「");
 		k = put(msg, k, sizeof(msg), (CONST char *)name);
@@ -542,7 +563,9 @@ LOCAL void rescue( DTWIN *d, CONST TS_UUID *vuuid, CONST UB *name )
  * the disk is back and the files are written.
  */
 #define CL_LINES	40
-#define CL_MAX		( 512 + CL_LINES * ( 200 * 6 + 8 ) )
+#define CL_MAX		( 1024 + CL_LINES * ( 200 * 6 + 8 ) )
+#define CL_LINE_H	20		/* a line of the 14 dot letters, in the page */
+#define CL_W		1800		/* the box of the text: the longest line, unwrapped */
 
 IMPORT UD	knl_bootlog_head( void );
 IMPORT void	knl_bootlog_tail( UD until, INT lines, void (*out)( CONST UB *s, INT n ) );
@@ -556,6 +579,18 @@ LOCAL INT	cl_n;
 LOCAL void cl_put( CONST char *s )
 {
 	while ( *s != 0 && cl_at < CL_MAX - 1 ) cl_xml[cl_at++] = (UB)*s++;
+}
+
+LOCAL void cl_num( INT v )
+{
+	char	t[12];
+	INT	k = 0;
+
+	do {
+		t[k++] = (char)( '0' + v % 10 );
+		v /= 10;
+	} while ( v > 0 && k < 11 );
+	while ( k > 0 && cl_at < CL_MAX - 1 ) cl_xml[cl_at++] = (UB)t[--k];
 }
 
 /*
@@ -610,6 +645,55 @@ LOCAL void cl_line( CONST UB *s, INT n )
 	cl_len[cl_n++] = i;
 }
 
+/* The window of the console's lines: the page made of them, drawn as a figure's */
+LOCAL void cl_draw( DTWIN *d )
+{
+	T_TAD		*rec = (T_TAD *)d->self;
+	T_TVFIG		*fig = NULL;
+	T_DPRECT	r;
+	INT		gid = wm_gid(d->wid);
+
+	dt_own_ground(d);
+	dt_work_rect(d, &r);
+	if ( rec != NULL && gid >= 0 && tv_fig(rec, &fig) >= E_OK && fig != NULL ) {
+		(void)tv_fig_draw(gid, fig, &r, 0, 0, rec, TV_PAPER_LOOK);
+		tv_fig_free(fig);
+	}
+}
+
+LOCAL BOOL cl_input( DTWIN *d, CONST T_WMEV *ev )
+{
+	(void)d;
+	(void)ev;
+	return FALSE;
+}
+
+LOCAL void cl_menu_do( DTWIN *d, CONST T_MNSEL *sel )
+{
+	(void)d;
+	(void)sel;
+}
+
+LOCAL void cl_close( DTWIN *d )
+{
+	if ( d->self != NULL ) {
+		tad_free((T_TAD *)d->self);
+	}
+}
+
+LOCAL CONST DTOWN	cl_own = {
+	SYSDEF_MENU_NOTE,
+	cl_draw,
+	cl_input,
+	NULL,
+	NULL,
+	cl_menu_do,
+	NULL,
+	cl_close,
+	NULL,
+	NULL
+};
+
 LOCAL void show_console( void )
 {
 	CONST char	*title = "システムのディスクが取り外されたときのコンソール（新しい行が上）";
@@ -626,16 +710,29 @@ LOCAL void show_console( void )
 	}
 	cl_n = 0;
 	cl_at = 0;
+	knl_bootlog_tail(knl_bootlog_head(), CL_LINES, cl_line);
+	/*
+	 * A page of the desktop's is a figure: the lines are a piece of text
+	 * in it, in a box as wide as the longest line and as tall as the lines
+	 */
 	cl_put("<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"");
 	cl_put(title);
-	cl_put("\"><document>");
-	knl_bootlog_tail(knl_bootlog_head(), CL_LINES, cl_line);
+	cl_put("\"><figure><document><docView viewleft=\"8\" viewtop=\"8\" viewright=\"");
+	cl_num(8 + CL_W);
+	cl_put("\" viewbottom=\"");
+	cl_num(8 + ( cl_n + 1 ) * CL_LINE_H);
+	cl_put("\"/><docDraw drawleft=\"8\" drawtop=\"8\" drawright=\"");
+	cl_num(8 + CL_W);
+	cl_put("\" drawbottom=\"");
+	cl_num(8 + ( cl_n + 1 ) * CL_LINE_H);
+	cl_put("\"/><docScale hunit=\"-72\" vunit=\"-72\"/><text lang=\"0\" bpat=\"0\" zIndex=\"0\"/>"
+	       "<font size=\"14\" face=\"sans-serif\" color=\"#000000\"/>");
 	for ( i = cl_n - 1; i >= 0; i-- ) {
 		cl_para(cl_text[i], cl_len[i]);	/* the newest at the top, where a photograph sees it */
 	}
 	Kfree(cl_text);
 	cl_text = NULL;
-	cl_put("</document></tad>");
+	cl_put("</document></figure></tad>");
 	if ( tad_parse(cl_xml, (SZ)cl_at, NULL, &rec) < E_OK ) {
 		rec = NULL;
 	}
@@ -645,30 +742,26 @@ LOCAL void show_console( void )
 		tm_printf((UB *)"disk: the console's lines not shown\n");
 		return;
 	}
-	o.left = 40;
-	o.top = 240;
-	o.right = 1000;
-	o.bottom = 740;
-	(void)dt_open_made(rec, title, DT_TOOL_NONE, &o);
+	o.left = wm_new_x(40);		/* from the corner of the screen new windows open on */
+	o.top = wm_new_y(240);
+	o.right = o.left + 960;
+	o.bottom = o.top + 500;
+	if ( dt_own_open(&cl_own, rec, &o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE, title, NULL) == NULL ) {
+		tad_free(rec);
+	}
 }
 #endif
 
 /*
- * The first window, whose object's volume went: never closed, it keeps
- * the record it shows as its own. Answers what the message line is to
- * say after the windows closed have said theirs: that the disk went,
+ * The first window, whose object's volume went: never closed, its
+ * program keeps the record it shows. Answers what the message line is
+ * to say after the windows closed have said theirs: that the disk went,
  * the system's own disk said as such.
  */
-LOCAL CONST char *keep_first( DTWIN *d, CONST TS_UUID *vuuid )
+LOCAL CONST char *keep_first( CONST TS_UUID *vuuid )
 {
 	BOOL	sys = (BOOL)( dk_has_sysvu && ts_uuid_cmp(vuuid, &dk_sysvu) == 0 );
 
-	if ( d->xml_view ) {
-		(void)dd_xml_commit(d);
-	}
-	if ( !dt_win_keep(d) ) {
-		tm_printf((UB *)"disk: the first window's record is not the store's\n");
-	}
 	if ( sys ) {
 		dk_sysgone = TRUE;
 		tm_printf((UB *)"disk: the system volume went\n");
@@ -700,78 +793,190 @@ LOCAL void close_lost_parts( void )
 	}
 }
 
-/* The windows of objects on a volume that went: closed, and said so */
+/* The window of a program, closed: said so when its disk went */
+LOCAL void win_gone( DKWIN *e )
+{
+	UB	msg[TAD_NAME_MAX + 96];
+	INT	k;
+
+	if ( !e->asked ) {
+		return;
+	}
+	tm_printf((UB *)"disk: closed window of %s\n", (CONST char *)e->name);
+	k = put(msg, 0, sizeof(msg), "ディスクが取り外されたため、");
+	k = put(msg, k, sizeof(msg), (CONST char *)e->name);
+	(void)put(msg, k, sizeof(msg), "のウインドウを閉じました");
+	(void)wm_msg_put((CONST char *)msg);
+}
+
+/*
+ * The windows of objects on a volume that went: their programs asked to
+ * close them, as the person closes a window. One with changes not saved
+ * hands them over first (DT_DISK_RESCUE); one closed is said closed as
+ * it goes (note_windows). The first window stays.
+ */
 LOCAL void close_gone( void )
 {
 	CONST char	*said = NULL;
-	INT		i;
+	INT		i, fw = 0;
+	DTWIN		*f = dt_first_win();
 
 	close_lost_parts();
+	if ( f != NULL ) {
+		fw = f->wid;
+	}
+	for ( i = 0; i < dk_nwin; i++ ) {
+		DKWIN	*e = &dk_win[i];
+		ID	pid;
 
-	for ( i = 0; i < DT_MAX_WIN; i++ ) {
-		DTWIN	*d = dt_win_at(i);
-		UB	name[TAD_NAME_MAX], msg[TAD_NAME_MAX + 96];
-		INT	k;
-
-		if ( d == NULL || !d->used || d->wid != dk_wid[i] || !dk_onvol[i]
-		  || ts_uuid_cmp(&d->id, &dk_id[i]) != 0 ) {
+		if ( !e->onvol || e->asked || knl_obfile_vol_of(&e->id) > 0 ) {
 			continue;
 		}
-		if ( knl_obfile_vol_of(&d->id) > 0 ) {
+		if ( e->wid == fw ) {
+			said = keep_first(&e->vu);
+			e->onvol = FALSE;
 			continue;
 		}
-		if ( d == dt_first_win() ) {
-			said = keep_first(d, &dk_vu[i]);
-			dk_wid[i] = 0;
+		pid = wm_obj_maker(e->wid);
+		if ( pid <= 0 ) {
 			continue;
 		}
-		if ( om_store_name(&d->id, name, sizeof(name)) < 0 ) {
-			(void)put(name, 0, sizeof(name), "実身");
-		}
-		k = put(msg, 0, sizeof(msg), "ディスクが取り外されたため、");
-		k = put(msg, k, sizeof(msg), (CONST char *)name);
-		(void)put(msg, k, sizeof(msg), "のウインドウを閉じました");
-		if ( d->dirty && !d->sealed ) {
-			rescue(d, &dk_vu[i], name);	/* says where the changes went */
-			msg[0] = 0;
-		}
-		tm_printf((UB *)"disk: closed window of %s\n", (CONST char *)name);
-		d->dirty = FALSE;		/* what changed went where the person said */
-		dt_close(d);
-		if ( msg[0] != 0 ) (void)wm_msg_put((CONST char *)msg);
-		dk_wid[i] = 0;
+		e->asked = TRUE;
+		tm_printf((UB *)"disk: window of %s asked to close\n", (CONST char *)e->name);
+		(void)wm_obj_close_window(e->wid);
 	}
 	if ( said != NULL ) {
 #ifdef X64
 		if ( dk_sysgone ) {
-			show_console();		/* after the windows that went, in a place of the table free now */
+			show_console();		/* after the windows that went */
 		}
 #endif
 		(void)wm_msg_put(said);
 	}
 }
 
-/* Which window shows what, and whether that is on a volume: new windows looked at once */
+/*
+ * Which program's window shows what, and whether that is on a volume:
+ * new windows looked at once (all: every one again). A window gone that
+ * was asked to close for its disk is said closed.
+ */
 LOCAL void note_windows( BOOL all )
 {
-	INT	i;
+	DKWIN	*was;
+	INT	*wids, n, i, k, nw = 0;
+	TS_UUID	id;
+	BOOL	seen[DK_WINS];
 
-	for ( i = 0; i < DT_MAX_WIN; i++ ) {
-		DTWIN	*d = dt_win_at(i);
+	knl_memset(seen, 0, sizeof(seen));
+	wids = (INT *)Kmalloc(sizeof(INT) * DK_WINS);
+	was = (DKWIN *)Kmalloc(sizeof(DKWIN) * DK_WINS);
+	if ( wids == NULL || was == NULL ) {
+		if ( wids != NULL ) Kfree(wids);
+		if ( was != NULL ) Kfree(was);
+		return;
+	}
+	n = wm_list(wids, DK_WINS);
+	if ( n > DK_WINS ) n = DK_WINS;
+	knl_memcpy(was, dk_win, sizeof(DKWIN) * (SZ)dk_nwin);
+	for ( i = 0; i < n; i++ ) {
+		DKWIN	*e = &dk_win[nw];
+		T_WMWIN	w;
 
-		if ( d == NULL || !d->used || d->sealed || d->tool != DT_TOOL_NONE ) {
-			dk_wid[i] = 0;
+		if ( dt_win_of(wids[i]) != NULL || wm_obj_maker(wids[i]) <= 0 || !wm_obj_shown(wids[i], &id)
+		  || wm_ref(wids[i], &w) < E_OK || ( w.attr & WM_ATTR_POPUP ) != 0 ) {
 			continue;
 		}
-		if ( all || d->wid != dk_wid[i] || ts_uuid_cmp(&d->id, &dk_id[i]) != 0 ) {
-			dk_wid[i] = d->wid;
-			dk_id[i] = d->id;
-			dk_onvol[i] = (BOOL)( knl_obfile_vol_of(&d->id) > 0 );
-			if ( !dk_onvol[i] || knl_obfile_vuuid_of(&d->id, &dk_vu[i]) < E_OK ) {
-				knl_memset(&dk_vu[i], 0, sizeof(dk_vu[i]));
+		for ( k = 0; k < dk_nwin; k++ ) {
+			if ( was[k].wid == wids[i] && ts_uuid_cmp(&was[k].id, &id) == 0 ) break;
+		}
+		if ( k < dk_nwin && !all ) {
+			*e = was[k];
+		} else {
+			knl_memset(e, 0, sizeof(*e));
+			e->wid = wids[i];
+			e->id = id;
+			e->asked = ( k < dk_nwin ) ? was[k].asked : FALSE;
+			e->onvol = (BOOL)( knl_obfile_vol_of(&id) > 0 );
+			if ( !e->onvol || knl_obfile_vuuid_of(&id, &e->vu) < E_OK ) {
+				knl_memset(&e->vu, 0, sizeof(e->vu));
+			}
+			if ( k < dk_nwin ) {
+				knl_memcpy(e->name, was[k].name, TAD_NAME_MAX);
+			} else if ( om_store_name(&id, e->name, TAD_NAME_MAX) < 0 ) {
+				(void)put(e->name, 0, TAD_NAME_MAX, "実身");
 			}
 		}
+		if ( k < dk_nwin ) seen[k] = TRUE;
+		nw++;
 	}
+	for ( k = 0; k < dk_nwin; k++ ) {
+		if ( !seen[k] ) {
+			win_gone(&was[k]);	/* not there any more */
+		}
+	}
+	dk_nwin = nw;
+	Kfree(was);
+	Kfree(wids);
+}
+
+/*
+ * DT_DISK_RESCUE: what a program holds of an object whose disk went,
+ * handed over before its window closes (grab_x 0: an object of the
+ * system's made for it, given in into, which the program writes its
+ * record into; grab_x 1: that one, named in text, read and the person
+ * asked where the changes go, then thrown away)
+ */
+LOCAL ER rescue_do( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
+{
+	TS_UUID	tmp;
+	T_TAD	*rec = NULL;
+	UB	*xml, *out;
+	SZ	size = 0, osz = 0;
+	INT	i;
+	DKWIN	*e = NULL;
+	ER	er;
+
+	for ( i = 0; i < dk_nwin; i++ ) {
+		if ( ts_uuid_cmp(&dk_win[i].id, &rq->target) == 0 && dk_win[i].asked ) e = &dk_win[i];
+	}
+	if ( e == NULL || pid <= 0 || wm_obj_maker(e->wid) != pid ) {
+		return E_PAR;			/* only the program of a window asked to close for its disk */
+	}
+	if ( rq->grab_x == 0 ) {
+		er = om_cre_obj(NULL, (CONST UB *)"退避", ( rq->grab_y != 0 ) ? OM_BODY_FIG : OM_BODY_DOC, &tmp);
+		if ( er < E_OK ) {
+			return er;
+		}
+		knl_ob_grant(pid, &tmp, OB_OP_R | OB_OP_W);
+		an->into = tmp;
+		return E_OK;
+	}
+	if ( ts_str_to_uuid((CONST char *)rq->text, &tmp) < E_OK ) {
+		return E_PAR;
+	}
+	om_store_forget(&tmp);
+	xml = om_obj_record(&tmp, 0, &size);
+	(void)om_store_delete(&tmp);
+	if ( xml == NULL || tad_parse(xml, size, NULL, &rec) < E_OK ) {
+		if ( xml != NULL ) Kfree(xml);
+		tm_printf((UB *)"disk: changes of %s cannot be kept\n", (CONST char *)e->name);
+		return E_IO;
+	}
+	Kfree(xml);
+	links_name_vol(rec, &e->vu);
+	out = NULL;
+	if ( tad_write_mem(rec, NULL, 0, &osz) >= E_OK && ( out = (UB *)Kmalloc(osz + 1) ) != NULL
+	  && tad_write_mem(rec, out, osz + 1, &osz) < E_OK ) {
+		Kfree(out);
+		out = NULL;
+	}
+	tad_free(rec);
+	if ( out == NULL ) {
+		return E_NOMEM;
+	}
+	rescue(dt_host_of(&rq->win), &e->id, ( rq->grab_y != 0 ) ? OM_BODY_FIG : OM_BODY_DOC, &e->vu, e->name,
+	       out, osz);
+	return E_OK;
 }
 
 /*
@@ -823,25 +1028,13 @@ LOCAL void look_disks( void )
 	if ( kv != NULL ) Kfree(kv);
 }
 
-/* The first window kept while its disk was out: its object found again, read anew */
+/* The system's disk put back: said once (the first window's program kept what it shows meanwhile) */
 LOCAL void first_back( void )
 {
-	DTWIN	*f = dt_first_win();
-	ER	er;
-
 	if ( dk_sysgone && dk_has_sysvu && knl_obfile_vuuid_on(&dk_sysvu) ) {
 		dk_sysgone = FALSE;
 		tm_printf((UB *)"disk: the system volume is back\n");
-	}
-	if ( f == NULL || !f->used || !f->kept || knl_obfile_vol_of(&f->id) <= 0 ) {
-		return;
-	}
-	er = dt_win_back(f);
-	tm_printf((UB *)"disk: the first window read again (%d)\n", (INT)er);
-	if ( er >= E_OK ) {
 		(void)wm_msg_put("ディスクが挿し直され、元に戻りました");
-	} else if ( er != E_NOEXS ) {
-		(void)wm_msg_put("ディスクが挿し直されましたが、初期ウィンドウの変更を保存できませんでした");
 	}
 }
 
@@ -881,138 +1074,197 @@ EXPORT void dt_disk_poll( void )
 	note_windows(FALSE);
 }
 
-/* ---------------------------------------------------------------- 接続 */
+/* ---------------------------------------------------------------- what ディスク操作 asks (DT_RQ_DISK) */
 
-/* The partitions of TSFS that are not attached, and what is on the others, offered in a panel */
-EXPORT void dt_disk_connect( DTWIN *d, CONST T_VOBJ *v )
+/* A tab between the fields of an answer's text */
+LOCAL INT put_tab( UB *buf, INT at, INT max )
 {
-	UB		*names, (*rows)[WM_LABEL_MAX];
-	UINT		*kinds;
-	T_FSPROBE	*pr;
-	T_WMPANEL	*def;
-	T_WMPART	*pt;
-	INT		n, i, k, m = 0, pid, w = 480, h, at = -1;
-	UINT		ans;
-	UB		name[OB_VOL_LABEL + 16];
+	return put(buf, at, max, "\t");
+}
 
-	if ( d == NULL ) {
-		d = dt_first_win();
+/* A number of a text, from *p on, past the tab after it; -1 when there is none */
+LOCAL D text_num( CONST UB *t, INT *p )
+{
+	D	v = 0;
+	BOOL	any = FALSE;
+
+	while ( t[*p] >= '0' && t[*p] <= '9' ) {
+		v = v * 10 + ( t[*p] - '0' );
+		(*p)++;
+		any = TRUE;
 	}
-	if ( d == NULL ) {
+	if ( t[*p] == '\t' ) (*p)++;
+	return any ? v : -1;
+}
+
+/* The link a request names: its object, as a link of the desktop's would point at it; NULL for none */
+LOCAL CONST T_VOBJ *req_link( CONST T_DTREQ *rq, T_VOBJ *v )
+{
+	knl_memset(v, 0, sizeof(*v));
+	if ( zero_uuid(&rq->target) ) {
+		return NULL;
+	}
+	v->target = rq->target;
+	return v;
+}
+
+/*
+ * The rights of an administrator for what only one may do: a process
+ * that is not one is asked the password for, in a panel of the
+ * desktop's (dtadmin.c), and given the rights for a while when it is
+ * typed right, as DT_RQ_ADMIN gives them.
+ */
+LOCAL ER as_admin( CONST T_DTREQ *rq, ID pid, CONST char *what )
+{
+	ER	er;
+
+	if ( pid <= 0 || knl_ob_pid_admin(pid) ) {
+		return E_OK;
+	}
+	er = dt_admin_ask(pid, (CONST UB *)what, &rq->win);
+	if ( er >= E_OK ) {
+		er = knl_ob_adm_give(pid, 0);
+	}
+	tm_printf((UB *)"disk: the administrator for %s (%d)\n", what, (INT)er);
+	return er;
+}
+
+/*
+ * 接続's list, made when its first row is asked for and kept for the
+ * rest: the partitions not attached that hold something, by device
+ * name, the row 接続 shows, and their kind.
+ */
+LOCAL UB	*cl_names = NULL;		/* OB_DV_NAME bytes each */
+LOCAL UB	(*cl_rows)[WM_LABEL_MAX] = NULL;
+LOCAL UINT	*cl_kinds = NULL;
+LOCAL INT	cl_n = 0, cl_pick = -1;
+
+LOCAL void connect_forget( void )
+{
+	if ( cl_names != NULL ) Kfree(cl_names);
+	if ( cl_rows != NULL ) Kfree(cl_rows);
+	if ( cl_kinds != NULL ) Kfree(cl_kinds);
+	cl_names = NULL;
+	cl_rows = NULL;
+	cl_kinds = NULL;
+	cl_n = 0;
+	cl_pick = -1;
+}
+
+LOCAL void connect_list( CONST T_VOBJ *v )
+{
+	T_FSPROBE	*pr;
+	INT		n, i, k, m = 0, at = -1;
+
+	connect_forget();
+	cl_names = disks_all(&n);
+	cl_rows = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * (SZ)( n + 1 ));
+	cl_kinds = (UINT *)Kmalloc(sizeof(UINT) * (SZ)( n + 1 ));
+	pr = (T_FSPROBE *)Kmalloc(sizeof(T_FSPROBE));
+	if ( cl_names == NULL || cl_rows == NULL || cl_kinds == NULL || pr == NULL ) {
+		if ( pr != NULL ) Kfree(pr);
+		connect_forget();
 		return;
 	}
-	/* a row for every disk and partition the device manager knows, as many as there are */
-	names = disks_all(&n);
-	rows = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * (SZ)( n + 1 ));
-	kinds = (UINT *)Kmalloc(sizeof(UINT) * (SZ)( n + 1 ));
-	pr = (T_FSPROBE *)Kmalloc(sizeof(T_FSPROBE));
-	if ( names == NULL || rows == NULL || kinds == NULL || pr == NULL ) {
-		goto done;
-	}
 	for ( i = 0; i < n; i++ ) {
-		CONST char	*dev = (CONST char *)( names + i * OB_DV_NAME );
+		CONST char	*dev = (CONST char *)( cl_names + i * OB_DV_NAME );
 
 		if ( knl_obfile_vol_path(dev) > 0 || knl_fs_probe(dev, pr) < E_OK
 		  || pr->kind == FS_KIND_PARTED || pr->kind == FS_KIND_NONE ) {
 			continue;
 		}
-		k = put(rows[m], 0, WM_LABEL_MAX, dev);
-		k = put(rows[m], k, WM_LABEL_MAX, "  ");
-		k = put(rows[m], k, WM_LABEL_MAX, (CONST char *)pr->name);
+		k = put(cl_rows[m], 0, WM_LABEL_MAX, dev);
+		k = put(cl_rows[m], k, WM_LABEL_MAX, "  ");
+		k = put(cl_rows[m], k, WM_LABEL_MAX, (CONST char *)pr->name);
 		if ( pr->label[0] != 0 ) {
-			k = put(rows[m], k, WM_LABEL_MAX, "「");
-			k = put(rows[m], k, WM_LABEL_MAX, (CONST char *)pr->label);
-			k = put(rows[m], k, WM_LABEL_MAX, "」");
+			k = put(cl_rows[m], k, WM_LABEL_MAX, "「");
+			k = put(cl_rows[m], k, WM_LABEL_MAX, (CONST char *)pr->label);
+			k = put(cl_rows[m], k, WM_LABEL_MAX, "」");
 		}
-		k = put(rows[m], k, WM_LABEL_MAX, "  ");
-		(void)put_size(rows[m], k, WM_LABEL_MAX, pr->bytes);
-		kinds[m] = pr->kind;
+		k = put(cl_rows[m], k, WM_LABEL_MAX, "  ");
+		(void)put_size(cl_rows[m], k, WM_LABEL_MAX, pr->bytes);
+		cl_kinds[m] = pr->kind;
 		/* a 虚身 chosen: its disk, when it is in */
 		if ( at < 0 && v != NULL && pr->kind == FS_KIND_TSFS && !zero_uuid(&pr->top)
 		  && ts_uuid_cmp(&pr->top, &v->target) == 0 ) {
 			at = m;
 		}
-		/* the names are kept beside the rows, for after the panel */
-		knl_memcpy(names + m * OB_DV_NAME, dev, OB_DV_NAME);
+		/* the names are kept beside the rows */
+		knl_memcpy(cl_names + m * OB_DV_NAME, dev, OB_DV_NAME);
 		m++;
 	}
+	Kfree(pr);
+	for ( i = 0; i < m && at < 0; i++ ) {
+		if ( cl_kinds[i] == FS_KIND_TSFS ) at = i;
+	}
+	cl_n = m;
+	cl_pick = ( at < 0 ) ? 0 : at;
 	tm_printf((UB *)"disk: connect offers %d\n", m);
-	if ( m == 0 ) {
-		dt_tell(d, "接続できるディスクがありません", NULL);
-		goto done;
-	}
-	if ( at < 0 ) {
-		for ( i = 0; i < m && at < 0; i++ ) {
-			if ( kinds[i] == FS_KIND_TSFS ) at = i;
-		}
-	}
-	h = 96 + 26 * m;
-	def = dt_pn_new(w, h);
-	if ( def == NULL ) {
-		goto done;
-	}
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 4, w - 28, 22, "接続するディスク:");
-	for ( i = 0; i < m; i++ ) {
-		pt = dt_pn_add(def, WM_PT_CHOICE, PN_DISK + i, 24, 30 + 26 * i, w - 48, 22,
-			       (CONST char *)rows[i]);
-		if ( pt != NULL ) {
-			pt->group = PN_DISK;
-			pt->value = ( i == ( at < 0 ? 0 : at ) ) ? 1 : 0;
-		}
-	}
-	dt_pn_buttons(def, "接続");
-	ans = dt_pn_run(d, def, &pid);
-	k = -1;
-	if ( ans == WM_ANS_OK && pid >= 0 ) {
-		for ( i = 0; i < m; i++ ) {
-			if ( dt_pn_value(pid, PN_DISK + i) != 0 ) k = i;
-		}
-	}
-	dt_pn_done(d, pid);
-	wm_update();
-	if ( k < 0 ) {
-		tm_printf((UB *)"disk: connect cancelled\n");
-		goto done;
-	}
-	{
-		CONST char	*dev = (CONST char *)( names + k * OB_DV_NAME );
-		ER		er;
+}
 
-		tm_printf((UB *)"disk: connect %s\n", dev);
-		if ( kinds[k] == FS_KIND_FAT12 || kinds[k] == FS_KIND_FAT16 || kinds[k] == FS_KIND_FAT32
-		  || kinds[k] == FS_KIND_EXFAT || kinds[k] == FS_KIND_NTFS || kinds[k] == FS_KIND_BTRON ) {
-			/* files, not objects: ファイル変換 reads them */
-			tm_printf((UB *)"disk: %s is files, not objects\n", dev);
-			dt_tell(d, "実身のディスクではありません。", "ファイル変換で開いてください");
-			goto done;
-		}
-		if ( kinds[k] != FS_KIND_TSFS ) {
-			tm_printf((UB *)"disk: %s is of a kind not handled\n", dev);
-			dt_tell(d, "この形式は扱えません", NULL);
-			goto done;
-		}
-		er = attach_dev(dev, TRUE, name, sizeof(name));
-		if ( er == E_OBJ ) {
-			tm_printf((UB *)"disk: %s is attached already\n", dev);
-			dt_tell(d, "同じディスクがすでに接続されています", NULL);
-		} else if ( er < E_OK ) {
-			dt_tell(d, "ディスクを接続できませんでした", NULL);
-		} else {
-			UB	msg[OB_VOL_LABEL + 48];
+LOCAL ER connect_row( CONST T_DTREQ *rq, T_DTANS *an )
+{
+	T_VOBJ	v;
+	INT	i = rq->grab_x, k;
 
-			k = put(msg, 0, sizeof(msg), "ディスク「");
-			k = put(msg, k, sizeof(msg), (CONST char *)name);
-			(void)put(msg, k, sizeof(msg), "」を接続しました");
-			(void)wm_msg_put((CONST char *)msg);
-		}
+	if ( i == 0 ) {
+		connect_list(req_link(rq, &v));
 	}
+	an->how = (UINT)cl_n;
+	if ( i < 0 || i >= cl_n ) {
+		return E_NOEXS;
+	}
+	k = put(an->text, 0, DT_TEXT_MAX, (CONST char *)( cl_names + i * OB_DV_NAME ));
+	k = put_tab(an->text, k, DT_TEXT_MAX);
+	(void)put(an->text, k, DT_TEXT_MAX, (CONST char *)cl_rows[i]);
+	if ( i == cl_pick ) an->flags |= DT_F_DISK_PICK;
+	return E_OK;
+}
 
-    done:
-	if ( names != NULL ) Kfree(names);
-	if ( rows != NULL ) Kfree(rows);
-	if ( kinds != NULL ) Kfree(kinds);
-	if ( pr != NULL ) Kfree(pr);
-	wm_update();
+/* 接続 of the partition named: one of objects attached, and remembered as attached */
+LOCAL ER connect_do( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
+{
+	UB		dev[OB_DV_NAME], name[OB_VOL_LABEL + 16];
+	T_FSPROBE	*pr;
+	UINT		kind;
+	INT		i;
+	ER		er;
+
+	for ( i = 0; i < OB_DV_NAME - 1 && i < (INT)sizeof(rq->name) && rq->name[i] != 0; i++ ) dev[i] = rq->name[i];
+	dev[i] = 0;
+	pr = (T_FSPROBE *)Kmalloc(sizeof(T_FSPROBE));
+	if ( pr == NULL ) {
+		return E_NOMEM;
+	}
+	er = knl_fs_probe((CONST char *)dev, pr);
+	kind = pr->kind;
+	Kfree(pr);
+	tm_printf((UB *)"disk: connect %s\n", dev);
+	if ( er < E_OK ) {
+		return E_NOEXS;
+	}
+	if ( kind == FS_KIND_FAT12 || kind == FS_KIND_FAT16 || kind == FS_KIND_FAT32
+	  || kind == FS_KIND_EXFAT || kind == FS_KIND_NTFS || kind == FS_KIND_BTRON ) {
+		/* files, not objects: ファイル変換 reads them */
+		tm_printf((UB *)"disk: %s is files, not objects\n", dev);
+		return E_NOSPT;
+	}
+	if ( kind != FS_KIND_TSFS ) {
+		tm_printf((UB *)"disk: %s is of a kind not handled\n", dev);
+		return E_PAR;
+	}
+	er = as_admin(rq, pid, "ディスクの接続");
+	if ( er < E_OK ) {
+		return er;
+	}
+	er = attach_dev((CONST char *)dev, TRUE, name, sizeof(name));
+	if ( er == E_OBJ ) {
+		tm_printf((UB *)"disk: %s is attached already\n", dev);
+	}
+	if ( er >= E_OK ) {
+		(void)put(an->text, 0, DT_TEXT_MAX, (CONST char *)name);
+	}
+	return er;
 }
 
 /* ---------------------------------------------------------------- 切り離し */
@@ -1028,50 +1280,60 @@ EXPORT BOOL dt_disk_detachable( CONST T_VOBJ *v )
 }
 
 /*
- * A volume taken away: not while an object of it is shown in a window
- * or used by a program, nor the system's. 'what' is the word the
- * messages use (切り離し, 取り外し), 'fail' what is said when it
- * cannot go for another reason. Answers E_OK when it went.
+ * Why a volume cannot be taken away now, found before anything is asked:
+ * an object of it shown in a window (*p_how DT_HOW_DISK_WIN), or its
+ * check under way (DT_HOW_DISK_CHECK), each E_BUSY; else E_OK
  */
-LOCAL ER detach_vol( DTWIN *d, CONST char *path, CONST UB *name, CONST char *what,
-		      CONST char *fail )
+LOCAL ER detach_held( CONST char *path, UINT *p_how )
 {
-	UB	msg[OB_VOL_LABEL + 96], how[64];
-	INT	i, k;
-	ER	er;
+	*p_how = 0;
+	/* an object of it shown in a program's window (a process's, which says what it shows) keeps it */	/* and one shown in a program's window (a process's, which says what it shows) */
+	{
+		INT	n = knl_wm_nwin(), k;
+		INT	*wids = (INT *)Kmalloc(sizeof(INT) * (SZ)( n + 1 ));
+		TS_UUID	u;
+		BOOL	shown = FALSE;
 
-	/* an object of it shown in a window keeps it */
-	for ( i = 0; i < DT_MAX_WIN; i++ ) {
-		DTWIN	*w = dt_win_at(i);
-
-		if ( w != NULL && w->used && !w->sealed && w->tool == DT_TOOL_NONE
-		  && knl_obfile_on(&w->id, path) ) {
-			k = put(msg, 0, sizeof(msg), "ディスク「");
-			k = put(msg, k, sizeof(msg), (CONST char *)name);
-			(void)put(msg, k, sizeof(msg), "」の実身が開いています。");
-			k = put(how, 0, sizeof(how), "閉じてから");
-			k = put(how, k, sizeof(how), what);
-			(void)put(how, k, sizeof(how), "てください");
+		n = ( wids != NULL ) ? wm_list(wids, n + 1) : 0;
+		for ( k = 0; k < n && !shown; k++ ) {
+			shown = (BOOL)( dt_win_of(wids[k]) == NULL && wm_obj_shown(wids[k], &u)
+					&& knl_obfile_on(&u, path) );
+		}
+		if ( wids != NULL ) Kfree(wids);
+		if ( shown ) {
 			tm_printf((UB *)"disk: detach %s refused: a window is open\n", path);
-			dt_tell(d, (CONST char *)msg, (CONST char *)how);
+			*p_how = DT_HOW_DISK_WIN;
 			return E_BUSY;
 		}
 	}
+	if ( knl_ob_chk_busy(path) ) {
+		tm_printf((UB *)"disk: detach %s refused: being checked\n", path);
+		*p_how = DT_HOW_DISK_CHECK;
+		return E_BUSY;
+	}
+	return E_OK;
+}
+
+/*
+ * A volume taken away: not while detach_held says so, nor while it is
+ * used by a program (*p_how DT_HOW_DISK_PROG), each E_BUSY. E_OK when it
+ * went.
+ */
+LOCAL ER detach_vol( CONST char *path, UINT *p_how )
+{
+	ER	er = detach_held(path, p_how);
+
+	if ( er < E_OK ) {
+		return er;
+	}
 	er = ob_det_vol(path);
 	if ( er == E_BUSY ) {
-		k = put(msg, 0, sizeof(msg), "ディスク「");
-		k = put(msg, k, sizeof(msg), (CONST char *)name);
-		(void)put(msg, k, sizeof(msg), "」の実身を使っているプログラムがあります。");
-		k = put(how, 0, sizeof(how), "終わってから");
-		k = put(how, k, sizeof(how), what);
-		(void)put(how, k, sizeof(how), "てください");
 		tm_printf((UB *)"disk: detach %s refused: in use\n", path);
-		dt_tell(d, (CONST char *)msg, (CONST char *)how);
+		*p_how = knl_ob_chk_busy(path) ? DT_HOW_DISK_CHECK : DT_HOW_DISK_PROG;
 		return er;
 	}
 	if ( er < E_OK ) {
 		tm_printf((UB *)"disk: detach %s failed %d\n", path, (INT)er);
-		dt_tell(d, fail, NULL);
 		return er;
 	}
 	tm_printf((UB *)"disk: detached %s\n", path);
@@ -1082,32 +1344,55 @@ LOCAL ER detach_vol( DTWIN *d, CONST char *path, CONST UB *name, CONST char *wha
 	return E_OK;
 }
 
-EXPORT void dt_disk_detach( DTWIN *d, CONST T_VOBJ *v )
+/* Why a volume could not be taken away, told over d ('what' 切り離し or 取り外し) */
+LOCAL void tell_detach( DTWIN *d, CONST UB *name, CONST char *what, ER er, UINT how, CONST char *fail )
 {
-	UB		path[DK_PATH], name[OB_VOL_LABEL + 16], msg[OB_VOL_LABEL + 96];
-	T_OBFVREF	ref;
-	INT		k;
+	UB	msg[OB_VOL_LABEL + 96], hint[64];
+	INT	k;
 
-	if ( v == NULL || knl_obfile_path_of(&v->target, path, sizeof(path)) < E_OK
-	  || knl_obfile_vol_ref((CONST char *)path, &ref) < E_OK ) {
-		dt_tell(d, "そのディスクは接続されていません", NULL);
+	if ( er != E_BUSY ) {
+		dt_tell(d, fail, NULL);
 		return;
-	}
-	disk_name(ref.label, (CONST char *)path, name, sizeof(name));
-	if ( ref.system ) {
-		dt_tell(d, "システムのディスクは切り離せません", NULL);
-		return;
-	}
-	if ( detach_vol(d, (CONST char *)path, name, "切り離し", "ディスクを切り離せませんでした") < E_OK ) {
-		return;
-	}
-	if ( ref.native ) {
-		keep_vol(&ref.vuuid, &ref.top, FALSE);	/* not attached again by itself */
 	}
 	k = put(msg, 0, sizeof(msg), "ディスク「");
 	k = put(msg, k, sizeof(msg), (CONST char *)name);
-	(void)put(msg, k, sizeof(msg), "」を切り離しました。取り出せます");
-	(void)wm_msg_put((CONST char *)msg);
+	(void)put(msg, k, sizeof(msg), ( how == DT_HOW_DISK_WIN ) ? "」の実身が開いています。"
+				 : ( how == DT_HOW_DISK_CHECK ) ? "」はディスク修復で検査中です。"
+				 : "」の実身を使っているプログラムがあります。");
+	k = put(hint, 0, sizeof(hint), ( how == DT_HOW_DISK_WIN ) ? "閉じてから" : "終わってから");
+	k = put(hint, k, sizeof(hint), what);
+	(void)put(hint, k, sizeof(hint), "てください");
+	dt_tell(d, (CONST char *)msg, (CONST char *)hint);
+}
+
+/* 切り離し of the volume of the link's object */
+LOCAL ER detach_do( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
+{
+	UB		path[DK_PATH], name[OB_VOL_LABEL + 16];
+	T_OBFVREF	ref;
+	ER		er;
+
+	if ( zero_uuid(&rq->target) || knl_obfile_path_of(&rq->target, path, sizeof(path)) < E_OK
+	  || knl_obfile_vol_ref((CONST char *)path, &ref) < E_OK ) {
+		return E_NOEXS;
+	}
+	disk_name(ref.label, (CONST char *)path, name, sizeof(name));
+	(void)put(an->text, 0, DT_TEXT_MAX, (CONST char *)name);
+	if ( ref.system ) {
+		return E_RONLY;
+	}
+	/* what keeps it is said before the password is asked for */
+	er = detach_held((CONST char *)path, &an->how);
+	if ( er >= E_OK ) {
+		er = as_admin(rq, pid, "ディスクの切り離し");
+	}
+	if ( er >= E_OK ) {
+		er = detach_vol((CONST char *)path, &an->how);
+	}
+	if ( er >= E_OK && ref.native ) {
+		keep_vol(&ref.vuuid, &ref.top, FALSE);	/* not attached again by itself */
+	}
+	return er;
 }
 
 /* ---------------------------------------------------------------- 取り外し */
@@ -1126,8 +1411,10 @@ EXPORT BOOL dt_disk_on_delete( DTWIN *d, CONST T_VOBJ *v )
 	T_OBFVREF	ref;
 	TS_UUID		*kv, *kt;
 	INT		nk = 0, i, k;
+	UINT		how;
+	ER		er;
 
-	if ( v == NULL || d == NULL || d != dt_first_win() ) {
+	if ( v == NULL || d == NULL ) {
 		return TRUE;
 	}
 	if ( knl_obfile_path_of(&v->target, path, sizeof(path)) >= E_OK ) {
@@ -1136,7 +1423,9 @@ EXPORT BOOL dt_disk_on_delete( DTWIN *d, CONST T_VOBJ *v )
 			return TRUE;		/* an object's link, not a disk's */
 		}
 		disk_name(ref.label, (CONST char *)path, name, sizeof(name));
-		if ( detach_vol(d, (CONST char *)path, name, "取り外し", "ディスクを取り外せませんでした") < E_OK ) {
+		er = detach_vol((CONST char *)path, &how);
+		if ( er < E_OK ) {
+			tell_detach(d, name, "取り外し", er, how, "ディスクを取り外せませんでした");
 			return FALSE;
 		}
 		keep_vol(&ref.vuuid, &ref.top, FALSE);
@@ -1164,24 +1453,19 @@ EXPORT BOOL dt_disk_on_delete( DTWIN *d, CONST T_VOBJ *v )
 /* ---------------------------------------------------------------- 状態表示 */
 
 /* How full the disk of a link's object is (the system's, away from a link) */
-EXPORT void dt_disk_status( DTWIN *d, CONST T_VOBJ *v )
+LOCAL ER status_do( CONST T_DTREQ *rq, T_DTANS *an )
 {
 	T_OBVOL		vol;
 	T_OBFVREF	ref;
-	T_WMPANEL	*def;
-	UB		path[DK_PATH], name[OB_VOL_LABEL + 16], t[WM_LABEL_MAX];
-	CONST char	*lab[6] = { "全体容量:", "使用容量:", "空き容量:", "使用比率:",
-				    "使用実身数:", "くず実身数:" };
+	T_VOBJ		lv;
+	CONST T_VOBJ	*v = req_link(rq, &lv);
+	UB		path[DK_PATH], name[OB_VOL_LABEL + 16];
 	UD		total, used;
-	INT		gc = 0, i, k, pid, w = 360, h = 230;
+	INT		gc = 0, k;
 	ID		tv;
 
-	if ( d == NULL ) {
-		return;
-	}
 	if ( ob_ref_vol(( v != NULL ) ? &v->target : NULL, &vol) < E_OK ) {
-		dt_tell(d, "その実身のディスクは接続されていません", NULL);
-		return;
+		return E_NOEXS;
 	}
 	tv = ( v != NULL ) ? knl_obfile_vol_of(&v->target) : knl_obfile_first_vol();
 	if ( tv > 0 ) {
@@ -1210,34 +1494,16 @@ EXPORT void dt_disk_status( DTWIN *d, CONST T_VOBJ *v )
 	used = ( vol.blocks - vol.bfree ) * vol.bsize;
 	tm_printf((UB *)"disk: status \"%s\" blocks %d free %d objects %d garbage %d\n",
 		  (CONST char *)name, (INT)vol.blocks, (INT)vol.bfree, vol.nobj, gc);
-	def = dt_pn_new(w, h);
-	if ( def == NULL ) {
-		return;
-	}
-	k = put(t, 0, sizeof(t), "ディスク状態: ");
-	(void)put(t, k, sizeof(t), (CONST char *)name);
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 4, w - 28, 22, (CONST char *)t);
-	for ( i = 0; i < 6; i++ ) {
-		dt_pn_add(def, WM_PT_LABEL, 0, 24, 32 + 24 * i, 120, 22, lab[i]);
-		switch ( i ) {
-		case 0:	(void)put_size(t, 0, sizeof(t), total); break;
-		case 1:	(void)put_size(t, 0, sizeof(t), used); break;
-		case 2:	(void)put_size(t, 0, sizeof(t), total - used); break;
-		case 3:	k = put_num(t, 0, sizeof(t), ( total > 0 ) ? used * 100 / total : 0);
-			(void)put(t, k, sizeof(t), "%"); break;
-		case 4:	(void)put_num(t, 0, sizeof(t), (UD)vol.nobj); break;
-		default: (void)put_num(t, 0, sizeof(t), (UD)gc); break;
-		}
-		dt_pn_add(def, WM_PT_LABEL, 0, 150, 32 + 24 * i, w - 170, 22, (CONST char *)t);
-	}
-	{
-		T_WMPART	*pt = dt_pn_add(def, WM_PT_BUTTON | P_EMPHAS, DT_PN_OK, w - 116, h - 36, 100, 26, "終了");
-
-		if ( pt != NULL ) pt->answer = WM_ANS_OK;
-	}
-	(void)dt_pn_run(d, def, &pid);
-	dt_pn_done(d, pid);
-	wm_update();
+	k = put(an->text, 0, DT_TEXT_MAX, (CONST char *)name);
+	k = put_tab(an->text, k, DT_TEXT_MAX);
+	k = put_num(an->text, k, DT_TEXT_MAX, total);
+	k = put_tab(an->text, k, DT_TEXT_MAX);
+	k = put_num(an->text, k, DT_TEXT_MAX, used);
+	k = put_tab(an->text, k, DT_TEXT_MAX);
+	k = put_num(an->text, k, DT_TEXT_MAX, (UD)vol.nobj);
+	k = put_tab(an->text, k, DT_TEXT_MAX);
+	(void)put_num(an->text, k, DT_TEXT_MAX, (UD)gc);
+	return E_OK;
 }
 
 /* ---------------------------------------------------------------- 区画作成 */
@@ -1266,29 +1532,7 @@ LOCAL BOOL same_name( CONST UB *a, CONST UB *b )
 	return (BOOL)( knl_strcmp((CONST char *)a, (CONST char *)b) == 0 );
 }
 
-/* The number in a number box, in megabytes; -1 when it cannot be read */
-LOCAL D box_mb( INT pid, INT num )
-{
-	INT	v = 0;
-
-	return ( wm_panel_get(pid, num, &v) >= E_OK ) ? (D)v : -1;
-}
-
-/* A box of a number, set to `v` */
-LOCAL T_WMPART *num_box( T_WMPANEL *def, INT num, INT l, INT t, INT w, UD v )
-{
-	T_WMPART	*pt = dt_pn_add(def, WM_PT_NUMBOX, num, l, t, w, 26, NULL);
-	INT		k;
-
-	if ( pt != NULL ) {
-		k = put_num(pt->text, 0, WM_LABEL_MAX, v);
-		pt->caret = k;
-		pt->value = (INT)v;
-	}
-	return pt;
-}
-
-/* A free stretch of a disk, as the panel of 区画作成 offers it */
+/* A free stretch of a disk, as 区画作成 offers it */
 typedef struct {
 	UB	disk[OB_DV_NAME];
 	UD	first, last;
@@ -1299,69 +1543,69 @@ typedef struct {
 #define DK_MIN_MB	8		/* a stretch smaller than this is not offered */
 
 /*
- * 区画作成: the free stretches of the disks, a size and a label, and a
- * TSFS partition made in the stretch chosen, a volume made on it and
- * attached, and remembered as attached (as 接続 does).
+ * The free stretches of one disk, every one: a list that came back full
+ * is asked for again in more room. How many, in *p_g (Kfree it).
  */
-EXPORT void dt_disk_create( DTWIN *d )
+LOCAL INT disk_free( CONST char *dev, T_GPTFREE **p_g, BOOL *p_fresh )
 {
-	UB		*names, (*rows)[WM_LABEL_MAX] = NULL, sd[OB_DV_NAME], label[OB_VOL_LABEL];
-	UB		part[OB_DV_NAME], name[OB_VOL_LABEL + 16], msg[OB_VOL_LABEL + 96];
-	DKFREE		*fr = NULL;
 	T_GPTFREE	*g = NULL;
-	INT		groom = 0, rroom = 0;
-	T_WMPANEL	*def;
-	T_WMPART	*pt;
-	INT		n, i, j, k, m = 0, pid, w = 560, h, top, pick = -1;
-	UINT		ans;
-	D		mb = 0;
-	ER		er;
+	INT		room = 8, c = 0;
+	UD		nsect = 0;
 
-	if ( d == NULL ) {
-		d = dt_first_win();
+	for ( ;; ) {
+		g = (T_GPTFREE *)Kmalloc(sizeof(T_GPTFREE) * (SZ)room);
+		if ( g == NULL ) {
+			c = 0;
+			break;
+		}
+		c = knl_gpt_free(dev, g, room, &nsect, p_fresh);
+		if ( c < room ) break;
+		Kfree(g);
+		g = NULL;
+		room *= 2;
 	}
-	if ( d == NULL ) {
-		return;
-	}
+	*p_g = g;
+	return ( c > 0 ) ? c : 0;
+}
+
+/* 区画作成's list, made when its first row is asked for and kept for the rest */
+LOCAL DKFREE	*fl_fr = NULL;
+LOCAL UB	(*fl_rows)[WM_LABEL_MAX] = NULL;
+LOCAL INT	fl_n = 0;
+
+LOCAL void free_list( void )
+{
+	UB		*names, sd[OB_DV_NAME];
+	T_GPTFREE	*g;
+	INT		n, i, j, k, c, room = 0;
+	BOOL		fresh;
+
+	if ( fl_fr != NULL ) Kfree(fl_fr);
+	if ( fl_rows != NULL ) Kfree(fl_rows);
+	fl_fr = NULL;
+	fl_rows = NULL;
+	fl_n = 0;
 	names = disks_all(&n);
 	if ( names == NULL ) {
-		goto done;
+		return;
 	}
 	sys_disk(sd, sizeof(sd));
 	for ( i = 0; i < n; i++ ) {
 		CONST char	*dev = (CONST char *)( names + i * OB_DV_NAME );
-		UD		nsect = 0;
-		BOOL		fresh = FALSE;
-		INT		c;
 
 		k = (INT)knl_strlen(dev);
 		if ( k == 0 || ( dev[k - 1] >= '0' && dev[k - 1] <= '9' ) ) {
 			continue;		/* a partition: the disks are looked at whole */
 		}
-		/* every free stretch of the disk: a list that came back full is asked for again in more room */
-		for ( c = groom; ; ) {
-			if ( g == NULL || c >= groom ) {
-				T_GPTFREE	*ng;
-
-				groom = ( groom > 0 ) ? groom * 2 : 8;
-				ng = (T_GPTFREE *)Kmalloc(sizeof(T_GPTFREE) * (SZ)groom);
-				if ( ng == NULL ) {
-					c = 0;
-					break;
-				}
-				if ( g != NULL ) Kfree(g);
-				g = ng;
-			}
-			c = knl_gpt_free(dev, g, groom, &nsect, &fresh);
-			if ( c < groom ) break;
-		}
+		fresh = FALSE;
+		c = disk_free(dev, &g, &fresh);
 		/* a row for each, the rows grown to hold them */
-		if ( c > 0 && m + c > rroom ) {
-			INT		nr = ( rroom > 0 ) ? rroom : 16;
-			UB		(*nrw)[WM_LABEL_MAX];
-			DKFREE		*nfr;
+		if ( c > 0 && fl_n + c > room ) {
+			INT	nr = ( room > 0 ) ? room : 16;
+			UB	(*nrw)[WM_LABEL_MAX];
+			DKFREE	*nfr;
 
-			while ( nr < m + c ) nr *= 2;
+			while ( nr < fl_n + c ) nr *= 2;
 			nrw = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * (SZ)nr);
 			nfr = (DKFREE *)Kmalloc(sizeof(DKFREE) * (SZ)nr);
 			if ( nrw == NULL || nfr == NULL ) {
@@ -1369,127 +1613,136 @@ EXPORT void dt_disk_create( DTWIN *d )
 				if ( nfr != NULL ) Kfree(nfr);
 				c = 0;
 			} else {
-				if ( rows != NULL ) {
-					knl_memcpy(nrw, rows, (INT)( sizeof(UB) * WM_LABEL_MAX * (SZ)m ));
-					Kfree(rows);
+				if ( fl_rows != NULL ) {
+					knl_memcpy(nrw, fl_rows, (INT)( sizeof(UB) * WM_LABEL_MAX * (SZ)fl_n ));
+					Kfree(fl_rows);
 				}
-				if ( fr != NULL ) {
-					knl_memcpy(nfr, fr, (INT)( sizeof(DKFREE) * (SZ)m ));
-					Kfree(fr);
+				if ( fl_fr != NULL ) {
+					knl_memcpy(nfr, fl_fr, (INT)( sizeof(DKFREE) * (SZ)fl_n ));
+					Kfree(fl_fr);
 				}
-				rows = nrw;
-				fr = nfr;
-				rroom = nr;
+				fl_rows = nrw;
+				fl_fr = nfr;
+				room = nr;
 			}
 		}
 		for ( j = 0; j < c; j++ ) {
+			DKFREE	*f = &fl_fr[fl_n];
+			UB	*r = fl_rows[fl_n];
 			UD	bytes = ( g[j].last - g[j].first + 1 ) * 512;
 
 			if ( bytes < (UD)DK_MIN_MB << 20 ) continue;
-			knl_memcpy(fr[m].disk, dev, OB_DV_NAME);
-			fr[m].first = g[j].first;
-			fr[m].last = g[j].last;
-			fr[m].fresh = fresh;
-			fr[m].system = same_name((CONST UB *)dev, sd);
-			k = put(rows[m], 0, WM_LABEL_MAX, dev);
-			k = put(rows[m], k, WM_LABEL_MAX, "  空き ");
-			k = put_size(rows[m], k, WM_LABEL_MAX, bytes);
-			k = put(rows[m], k, WM_LABEL_MAX, "(");
-			k = put_size(rows[m], k, WM_LABEL_MAX, g[j].first * 512);
-			k = put(rows[m], k, WM_LABEL_MAX, "の位置から)");
+			knl_memcpy(f->disk, dev, OB_DV_NAME);
+			f->first = g[j].first;
+			f->last = g[j].last;
+			f->fresh = fresh;
+			f->system = same_name((CONST UB *)dev, sd);
+			k = put(r, 0, WM_LABEL_MAX, dev);
+			k = put(r, k, WM_LABEL_MAX, "  空き ");
+			k = put_size(r, k, WM_LABEL_MAX, bytes);
+			k = put(r, k, WM_LABEL_MAX, "(");
+			k = put_size(r, k, WM_LABEL_MAX, g[j].first * 512);
+			k = put(r, k, WM_LABEL_MAX, "の位置から)");
 			if ( fresh ) {
-				k = put(rows[m], k, WM_LABEL_MAX, " 区画表なし");
+				k = put(r, k, WM_LABEL_MAX, " 区画表なし");
 			}
-			if ( fr[m].system ) {
-				(void)put(rows[m], k, WM_LABEL_MAX, " システムのディスク");
+			if ( f->system ) {
+				(void)put(r, k, WM_LABEL_MAX, " システムのディスク");
 			}
-			m++;
+			fl_n++;
 		}
+		if ( g != NULL ) Kfree(g);
 	}
-	tm_printf((UB *)"disk: create offers %d\n", m);
-	if ( m == 0 ) {
-		dt_tell(d, "区画を作れる空き領域がありません", NULL);
-		goto done;
+	Kfree(names);
+	tm_printf((UB *)"disk: create offers %d\n", fl_n);
+}
+
+LOCAL ER free_row( CONST T_DTREQ *rq, T_DTANS *an )
+{
+	DKFREE	*f;
+	INT	i = rq->grab_x, k;
+
+	if ( i == 0 ) {
+		free_list();
 	}
-	h = 176 + 26 * m;
-	def = dt_pn_new(w, h);
-	if ( def == NULL ) {
-		goto done;
+	an->how = (UINT)fl_n;
+	if ( i < 0 || i >= fl_n ) {
+		return E_NOEXS;
 	}
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 4, w - 28, 22, "区画を作る空き領域:");
-	for ( i = 0; i < m; i++ ) {
-		pt = dt_pn_add(def, WM_PT_CHOICE, PN_DISK + i, 24, 30 + 26 * i, w - 48, 22,
-			       (CONST char *)rows[i]);
-		if ( pt != NULL ) {
-			pt->group = PN_DISK;
-			pt->value = ( i == 0 ) ? 1 : 0;
-		}
+	f = &fl_fr[i];
+	k = put(an->text, 0, DT_TEXT_MAX, (CONST char *)f->disk);
+	k = put_tab(an->text, k, DT_TEXT_MAX);
+	k = put_num(an->text, k, DT_TEXT_MAX, f->first);
+	k = put_tab(an->text, k, DT_TEXT_MAX);
+	k = put_num(an->text, k, DT_TEXT_MAX, f->last);
+	k = put_tab(an->text, k, DT_TEXT_MAX);
+	(void)put(an->text, k, DT_TEXT_MAX, (CONST char *)fl_rows[i]);
+	if ( f->system ) an->flags |= DT_F_DISK_SYS;
+	return E_OK;
+}
+
+/*
+ * 区画作成: a TSFS partition made in the free stretch of the disk named
+ * that begins where the text says, a volume made on it and attached, and
+ * remembered as attached (as 接続 does). The stretch is looked for again
+ * on the disk as it is now, not taken from the list.
+ */
+LOCAL ER create_do( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
+{
+	UB		disk[OB_DV_NAME], label[OB_VOL_LABEL], part[OB_DV_NAME], name[OB_VOL_LABEL + 16];
+	T_GPTFREE	*g = NULL;
+	UD		first, last = 0;
+	D		mb = rq->grab_x, at;
+	INT		i, c, p = 0;
+	BOOL		fresh = FALSE, found = FALSE;
+	ER		er;
+
+	for ( i = 0; i < OB_DV_NAME - 1 && i < (INT)sizeof(rq->name) && rq->name[i] != 0; i++ ) disk[i] = rq->name[i];
+	disk[i] = 0;
+	at = text_num(rq->text, &p);
+	for ( i = 0; i < OB_VOL_LABEL - 1 && rq->text[p + i] != 0 && rq->text[p + i] != '\t'; i++ ) {
+		label[i] = rq->text[p + i];
 	}
-	top = 38 + 26 * m;
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, top + 2, 90, 22, "大きさ:");
-	(void)num_box(def, PN_SIZE, 104, top, 110, 0);
-	dt_pn_add(def, WM_PT_LABEL, 0, 222, top + 2, w - 236, 22, "MB(0は空き領域の全体)");
-	top += 34;
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, top + 2, 90, 22, "ラベル:");
-	pt = dt_pn_add(def, WM_PT_BOX | P_JP, PN_LABEL, 104, top, w - 118, 26, NULL);
-	if ( pt != NULL ) {
-		k = put(pt->text, 0, WM_LABEL_MAX, "ディスク");
-		pt->caret = k;
-	}
-	dt_pn_buttons(def, "作成");
-	ans = dt_pn_run(d, def, &pid);
-	label[0] = 0;
-	if ( ans == WM_ANS_OK && pid >= 0 ) {
-		for ( i = 0; i < m; i++ ) {
-			if ( dt_pn_value(pid, PN_DISK + i) != 0 ) pick = i;
-		}
-		mb = box_mb(pid, PN_SIZE);
-		if ( wm_panel_text(pid, PN_LABEL, label, sizeof(label)) < E_OK ) label[0] = 0;
-	}
-	dt_pn_done(d, pid);
-	wm_update();
-	if ( pick < 0 ) {
-		tm_printf((UB *)"disk: create cancelled\n");
-		goto done;
-	}
-	if ( mb < 0 || (UD)mb * 2048 > fr[pick].last - fr[pick].first + 1 || ( mb > 0 && mb < DK_MIN_MB ) ) {
-		tm_printf((UB *)"disk: create %s refused: %d MB\n", fr[pick].disk, (INT)mb);
-		dt_tell(d, "その大きさの区画は作れません", "空き領域に収まる、8MB以上の大きさにしてください");
-		goto done;
-	}
+	label[i] = 0;
 	if ( label[0] == 0 ) {
 		(void)put(label, 0, sizeof(label), "ディスク");
 	}
-	if ( fr[pick].system && dt_admin_self("ディスク操作", (CONST UB *)"システムのディスクに区画を作る") < E_OK ) {
-		tm_printf((UB *)"disk: create %s refused: not the administrator\n", fr[pick].disk);
-		goto done;
+	first = (UD)at;
+	c = ( at >= 0 ) ? disk_free((CONST char *)disk, &g, &fresh) : 0;
+	for ( i = 0; i < c && !found; i++ ) {
+		if ( g[i].first == first ) {
+			last = g[i].last;
+			found = TRUE;
+		}
 	}
-	er = knl_tsfs_part_make((CONST char *)fr[pick].disk, fr[pick].first, (UD)mb << 20,
-				(CONST char *)label, part, sizeof(part));
-	tm_printf((UB *)"disk: created %s %d MB \"%s\" (%d)\n", part,
-		  (INT)( ( mb > 0 ) ? mb : (D)( ( fr[pick].last - fr[pick].first + 1 ) / 2048 ) ),
-		  (CONST char *)label, (INT)er);
+	if ( g != NULL ) Kfree(g);
+	if ( !found ) {
+		tm_printf((UB *)"disk: create %s: no such free stretch\n", disk);
+		return E_NOEXS;
+	}
+	if ( mb < 0 || (UD)mb * 2048 > last - first + 1 || ( mb > 0 && mb < DK_MIN_MB ) ) {
+		tm_printf((UB *)"disk: create %s refused: %d MB\n", disk, (INT)mb);
+		return E_PAR;
+	}
+	er = as_admin(rq, pid, "区画の作成");
 	if ( er < E_OK ) {
-		dt_tell(d, "区画を作れませんでした", NULL);
-		goto done;
+		tm_printf((UB *)"disk: create %s refused: not the administrator\n", disk);
+		return er;
+	}
+	er = knl_tsfs_part_make((CONST char *)disk, first, (UD)mb << 20, (CONST char *)label, part, sizeof(part));
+	tm_printf((UB *)"disk: created %s %d MB \"%s\" (%d)\n", part,
+		  (INT)( ( mb > 0 ) ? mb : (D)( ( last - first + 1 ) / 2048 ) ), (CONST char *)label, (INT)er);
+	if ( er < E_OK ) {
+		return er;
 	}
 	/* the volume made is the person's, as one 接続 attached */
 	er = attach_dev((CONST char *)part, TRUE, name, sizeof(name));
 	if ( er < E_OK ) {
-		dt_tell(d, "区画は作りましたが、接続できませんでした", NULL);
-		goto done;
+		an->how = DT_HOW_DISK_MADE;
+		return er;
 	}
-	k = put(msg, 0, sizeof(msg), "区画「");
-	k = put(msg, k, sizeof(msg), (CONST char *)name);
-	(void)put(msg, k, sizeof(msg), "」を作り、接続しました");
-	(void)wm_msg_put((CONST char *)msg);
-
-    done:
-	if ( names != NULL ) Kfree(names);
-	if ( rows != NULL ) Kfree(rows);
-	if ( fr != NULL ) Kfree(fr);
-	if ( g != NULL ) Kfree(g);
-	wm_update();
+	(void)put(an->text, 0, DT_TEXT_MAX, (CONST char *)name);
+	return E_OK;
 }
 
 /* ---------------------------------------------------------------- 拡張 */
@@ -1517,107 +1770,264 @@ EXPORT BOOL dt_disk_growable( CONST T_VOBJ *v )
 }
 
 /*
- * 拡張: the partition of the volume of the link's object (the system's
- * away from a link) and the volume on it made larger, into the free
- * stretch right after the partition, to the size typed (the whole
- * stretch at first).
+ * What 拡張 can do to the volume of the link's object (the system's
+ * away from a link): its size now and the most it can be, into the
+ * free stretch right after its partition.
  */
-EXPORT void dt_disk_grow( DTWIN *d, CONST T_VOBJ *v )
+LOCAL ER grow_room( CONST T_VOBJ *v, UB *path, T_OBFVREF *ref, UD *p_cur, UD *p_most )
 {
-	UB		path[DK_PATH], name[OB_VOL_LABEL + 16], t[WM_LABEL_MAX], msg[OB_VOL_LABEL + 96];
-	T_OBFVREF	ref;
 	T_GPTPART	gp;
 	T_OBVOL		vol;
-	T_WMPANEL	*def;
-	UD		cur, most, from = 0, to = 0;
-	INT		k, pid, w = 480, h = 206;
-	UINT		ans;
-	D		mb = -1;
-	ER		er;
 
-	if ( d == NULL ) {
-		d = dt_first_win();
+	if ( !grow_target(v, path, DK_PATH, ref) ) {
+		return E_NOSPT;
 	}
-	if ( d == NULL ) {
-		return;
-	}
-	if ( !grow_target(v, path, sizeof(path), &ref) ) {
-		dt_tell(d, "このディスクは広げられません", NULL);
-		return;
-	}
-	disk_name(ref.label, (CONST char *)path, name, sizeof(name));
 	if ( knl_gpt_part((CONST char *)path, &gp) < E_OK || !gp.tsfs ) {
 		tm_printf((UB *)"disk: grow %s: not a partition of a GPT\n", path);
-		dt_tell(d, "このディスクは広げられません", "区画表(GPT)のTSFSの区画ではありません");
-		return;
+		return E_OBJ;
 	}
-	cur = ( gp.last - gp.first + 1 ) * 512;
-	most = ( gp.grow_last - gp.first + 1 ) * 512;
-	if ( ob_ref_vol(( v != NULL ) ? &v->target : NULL, &vol) >= E_OK && vol.blocks * vol.bsize < cur ) {
-		cur = vol.blocks * vol.bsize;	/* a partition larger than its volume: that much to take in */
+	*p_cur = ( gp.last - gp.first + 1 ) * 512;
+	*p_most = ( gp.grow_last - gp.first + 1 ) * 512;
+	if ( ob_ref_vol(( v != NULL ) ? &v->target : NULL, &vol) >= E_OK && vol.blocks * vol.bsize < *p_cur ) {
+		*p_cur = vol.blocks * vol.bsize;	/* a partition larger than its volume: that much to take in */
 	}
-	tm_printf((UB *)"disk: grow %s offers %d MB to %d MB\n", path, (INT)( cur >> 20 ), (INT)( most >> 20 ));
-	if ( most <= cur ) {
-		dt_tell(d, "広げられる空き領域がありません", "区画のすぐ後ろに空き領域が要ります");
-		return;
+	return ( *p_most <= *p_cur ) ? E_LIMIT : E_OK;
+}
+
+LOCAL ER grow_ask( CONST T_DTREQ *rq, T_DTANS *an )
+{
+	UB		path[DK_PATH], name[OB_VOL_LABEL + 16];
+	T_OBFVREF	ref;
+	T_VOBJ		lv;
+	UD		cur = 0, most = 0;
+	INT		k;
+	ER		er;
+
+	er = grow_room(req_link(rq, &lv), path, &ref, &cur, &most);
+	if ( er == E_NOSPT ) {
+		return er;
 	}
-	def = dt_pn_new(w, h);
-	if ( def == NULL ) {
-		return;
+	disk_name(ref.label, (CONST char *)path, name, sizeof(name));
+	if ( er == E_OK || er == E_LIMIT ) {
+		tm_printf((UB *)"disk: grow %s offers %d MB to %d MB\n", path, (INT)( cur >> 20 ), (INT)( most >> 20 ));
 	}
-	k = put(t, 0, sizeof(t), "ディスク「");
-	k = put(t, k, sizeof(t), (CONST char *)name);
-	k = put(t, k, sizeof(t), "」(");
-	k = put(t, k, sizeof(t), (CONST char *)path);
-	(void)put(t, k, sizeof(t), ")を広げます");
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 4, w - 28, 22, (CONST char *)t);
-	dt_pn_add(def, WM_PT_LABEL, 0, 24, 32, 150, 22, "今の大きさ:");
-	k = put_num(t, 0, sizeof(t), cur >> 20);
-	(void)put(t, k, sizeof(t), "MB");
-	dt_pn_add(def, WM_PT_LABEL, 0, 180, 32, w - 194, 22, (CONST char *)t);
-	dt_pn_add(def, WM_PT_LABEL, 0, 24, 58, 150, 22, "広げられる大きさ:");
-	k = put(t, 0, sizeof(t), "最大 ");
-	k = put_num(t, k, sizeof(t), most >> 20);
-	(void)put(t, k, sizeof(t), "MB");
-	dt_pn_add(def, WM_PT_LABEL, 0, 180, 58, w - 194, 22, (CONST char *)t);
-	dt_pn_add(def, WM_PT_LABEL, 0, 24, 94, 150, 22, "新しい大きさ:");
-	(void)num_box(def, PN_SIZE, 180, 92, 120, most >> 20);
-	dt_pn_add(def, WM_PT_LABEL, 0, 308, 94, 60, 22, "MB");
-	dt_pn_buttons(def, "拡張");
-	ans = dt_pn_run(d, def, &pid);
-	if ( ans == WM_ANS_OK && pid >= 0 ) {
-		mb = box_mb(pid, PN_SIZE);
+	k = put(an->text, 0, DT_TEXT_MAX, (CONST char *)name);
+	k = put_tab(an->text, k, DT_TEXT_MAX);
+	k = put(an->text, k, DT_TEXT_MAX, (CONST char *)path);
+	k = put_tab(an->text, k, DT_TEXT_MAX);
+	k = put_num(an->text, k, DT_TEXT_MAX, cur >> 20);
+	k = put_tab(an->text, k, DT_TEXT_MAX);
+	(void)put_num(an->text, k, DT_TEXT_MAX, most >> 20);
+	if ( ref.system ) an->flags |= DT_F_DISK_SYS;
+	return er;
+}
+
+/*
+ * 拡張: the partition of the volume and the volume on it made larger, to
+ * the size asked (grab_x megabytes), the room looked at again first.
+ * Not while the volume is being checked.
+ */
+LOCAL ER grow_do( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
+{
+	UB		path[DK_PATH];
+	T_OBFVREF	ref;
+	T_VOBJ		lv;
+	UD		cur = 0, most = 0, from = 0, to = 0, bytes;
+	D		mb = rq->grab_x;
+	INT		k;
+	ER		er;
+
+	er = grow_room(req_link(rq, &lv), path, &ref, &cur, &most);
+	if ( er < E_OK ) {
+		return er;
 	}
-	dt_pn_done(d, pid);
-	wm_update();
-	if ( ans != WM_ANS_OK ) {
-		tm_printf((UB *)"disk: grow cancelled\n");
-		return;
-	}
-	if ( mb < 0 || ( (UD)mb << 20 ) <= cur || ( (UD)mb << 20 ) > most ) {
+	bytes = (UD)mb << 20;
+	if ( mb < 0 || bytes <= cur || bytes > most ) {
 		tm_printf((UB *)"disk: grow %s refused: %d MB\n", path, (INT)mb);
-		dt_tell(d, "その大きさには広げられません", "今の大きさより大きく、最大までの大きさにしてください");
-		return;
+		return E_PAR;
 	}
-	if ( ref.system && dt_admin_self("ディスク操作", (CONST UB *)"システムのディスクを広げる") < E_OK ) {
+	er = as_admin(rq, pid, "ディスクの拡張");
+	if ( er < E_OK ) {
 		tm_printf((UB *)"disk: grow %s refused: not the administrator\n", path);
-		return;
+		return er;
 	}
-	er = knl_tsfs_part_grow((CONST char *)path, (UD)mb << 20, &from, &to);
+	if ( !knl_ob_chk_hold((CONST char *)path, TRUE) ) {
+		tm_printf((UB *)"disk: grow %s refused: being checked\n", path);
+		an->how = DT_HOW_DISK_CHECK;
+		return E_BUSY;
+	}
+	er = knl_tsfs_part_grow((CONST char *)path, bytes, &from, &to);
+	(void)knl_ob_chk_hold((CONST char *)path, FALSE);
 	tm_printf((UB *)"disk: grown %s %d MB -> %d MB (%d)\n", path, (INT)( from >> 20 ), (INT)( to >> 20 ), (INT)er);
 	if ( er < E_OK ) {
-		dt_tell(d, "ディスクを広げられませんでした", NULL);
+		return er;
+	}
+	k = put_num(an->text, 0, DT_TEXT_MAX, from >> 20);
+	k = put_tab(an->text, k, DT_TEXT_MAX);
+	(void)put_num(an->text, k, DT_TEXT_MAX, to >> 20);
+	dt_draw_all();
+	return E_OK;
+}
+
+/* ---------------------------------------------------------------- ディスク修復's record */
+
+#define LOG_NAME	"ディスク修復記録"
+
+/* The object of that name the system box links to, or a new one linked from it */
+LOCAL ER log_object( CONST TS_UUID *box, TS_UUID *p_u )
+{
+	TS_UUID	*ids;
+	UB	*rec, name[64];
+	SZ	len = 0;
+	INT	n, i;
+	ER	er;
+
+	rec = om_obj_record(box, 0, &len);
+	if ( rec != NULL ) {
+		/* every link of the box: asked how many, then taken */
+		n = om_store_links(rec, len, NULL, 0);
+		ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( ( n > 0 ) ? n : 1 ));
+		n = ( ids != NULL ) ? om_store_links(rec, len, ids, n) : 0;
+		Kfree(rec);
+		for ( i = 0; i < n; i++ ) {
+			if ( om_store_name(&ids[i], name, sizeof(name)) > 0
+			  && knl_strcmp((char *)name, LOG_NAME) == 0 ) {
+				*p_u = ids[i];
+				Kfree(ids);
+				return E_OK;
+			}
+		}
+		if ( ids != NULL ) Kfree(ids);
+	}
+	er = om_cre_obj(NULL, (CONST UB *)LOG_NAME, OM_BODY_DOC, p_u);
+	if ( er >= E_OK ) {
+		er = om_obj_link_add(box, p_u);
+	}
+	return er;
+}
+
+/*
+ * 保存 of ディスク修復's 障害情報: the record the program made (target's
+ * record 0, a document) written as the text object ディスク修復記録 of
+ * the system box (/SYS), a system object only the desktop writes. Only
+ * for the program ディスク修復.
+ */
+LOCAL ER log_do( CONST T_DTREQ *rq, ID pid )
+{
+	TS_UUID	box, u, prog, fix;
+	UB	*x;
+	SZ	len = 0;
+	ER	er;
+
+	if ( pid <= 0 || knl_prc_uuid(pid, NULL, &prog) < E_OK || ts_str_to_uuid(SYSDEF_PROG_DISKFIX, &fix) < E_OK
+	  || ts_uuid_cmp(&prog, &fix) != 0 ) {
+		return E_OACV;
+	}
+	if ( ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &box) < E_OK ) {
+		return E_SYS;
+	}
+	x = om_obj_record(&rq->target, 0, &len);
+	if ( x == NULL ) {
+		return E_NOEXS;
+	}
+	er = log_object(&box, &u);
+	if ( er >= E_OK ) {
+		er = om_obj_record_put(&u, 0, OB_RT_TAD, 0, x, len);
+		om_store_forget(&u);
+	}
+	Kfree(x);
+	tm_printf((UB *)"disk: the record of ディスク修復 written (%d)\n", (INT)er);
+	return er;
+}
+
+/* ---------------------------------------------------------------- the requests */
+
+EXPORT ER dt_disk_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
+{
+	switch ( rq->recno ) {
+	case DT_DISK_LIST:	return connect_row(rq, an);
+	case DT_DISK_ATTACH:	return connect_do(rq, an, pid);
+	case DT_DISK_DETACH:	return detach_do(rq, an, pid);
+	case DT_DISK_STATUS:	return status_do(rq, an);
+	case DT_DISK_FREE:	return free_row(rq, an);
+	case DT_DISK_MAKE:	return create_do(rq, an, pid);
+	case DT_DISK_GROWS:	return grow_ask(rq, an);
+	case DT_DISK_GROW:	return grow_do(rq, an, pid);
+	case DT_DISK_LOG:	return log_do(rq, pid);
+	case DT_DISK_MENU:
+	case DT_DISK_REMOVE: {
+		/* the first window's menu and its links: as the desktop's own did them */
+		T_VOBJ	*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+		DTWIN	*f = dt_first_win();
+		BOOL	ok = TRUE;
+		UB	code[sizeof(rq->name)];
+		INT	i;
+
+		if ( v == NULL ) {
+			return E_NOMEM;
+		}
+		knl_memset(v, 0, sizeof(*v));
+		v->target = rq->target;
+		(void)ts_str_to_uuid((CONST char *)rq->text, &v->tvol);
+		if ( rq->recno == DT_DISK_MENU ) {
+			for ( i = 0; i < (INT)sizeof(code) - 1 && rq->name[i] != 0; i++ ) code[i] = rq->name[i];
+			code[i] = 0;
+			dt_disk_menu(dt_host_of(&rq->win), (CONST char *)code, zero_uuid(&v->target) ? NULL : v);
+		} else if ( f == NULL || wm_obj_maker(f->wid) != pid ) {
+			ok = TRUE;		/* another window's link: no disk is taken away with it */
+		} else {
+			ok = dt_disk_on_delete(f, v);
+		}
+		Kfree(v);
+		return ok ? E_OK : E_BUSY;
+	}
+	case DT_DISK_RESCUE:	return rescue_do(rq, an, pid);
+	default:		return E_PAR;
+	}
+}
+
+/*
+ * An item of the menu ディスク操作 chosen: the program ディスク操作 started
+ * to do it (application/diskop), told the item's code and the link it
+ * was chosen on.
+ */
+EXPORT void dt_disk_menu( DTWIN *d, CONST char *code, CONST T_VOBJ *v )
+{
+	T_DTDISKARG	a;
+	CONST DTPROG	*p = dt_prog_find((CONST UB *)"disk-operation");
+	INT		i;
+
+	if ( p == NULL ) {
+		(void)wm_msg_put("ディスク操作のプログラムがありません");
 		return;
 	}
-	k = put(msg, 0, sizeof(msg), "ディスク「");
-	k = put(msg, k, sizeof(msg), (CONST char *)name);
-	k = put(msg, k, sizeof(msg), "」を");
-	k = put_num(msg, k, sizeof(msg), from >> 20);
-	k = put(msg, k, sizeof(msg), "MBから");
-	k = put_num(msg, k, sizeof(msg), to >> 20);
-	(void)put(msg, k, sizeof(msg), "MBに広げました");
-	(void)wm_msg_put((CONST char *)msg);
-	dt_draw_all();
+	knl_memset(&a, 0, sizeof(a));
+	for ( i = 0; code[i] != 0 && i < (INT)sizeof(a.code) - 1; i++ ) a.code[i] = (UB)code[i];
+	if ( v != NULL ) {
+		a.target = v->target;
+	}
+	tm_printf((UB *)"disk: %s asked of the program\n", code);
+	(void)dt_prog_run_arg(d, p, &a, sizeof(a));
+}
+
+/*
+ * At start: when the system volume was repaired before it was attached,
+ * ディスク修復 is started to show what the repair found and did, once for
+ * a start of the machine (a desktop started again by 強制終了 does not).
+ */
+EXPORT void dt_fix_boot( void )
+{
+	CONST DTPROG	*p;
+	TS_UUID		u;
+
+	if ( knl_fq_restarts() > 0 || ob_chk_boot_result(NULL, 0, NULL, NULL, 0) <= 0 ) {
+		return;
+	}
+	if ( ts_str_to_uuid(SYSDEF_PROG_DISKFIX, &u) < E_OK || ( p = dt_prog_of(&u) ) == NULL ) {
+		return;
+	}
+	tm_printf((UB *)"disk: the repair at start shown by its program\n");
+	(void)dt_prog_run(NULL, p, NULL);
 }
 
 /* ---------------------------------------------------------------- the top of a volume */
@@ -1666,6 +2076,29 @@ EXPORT BOOL dt_disk_absent( DTWIN *d, CONST T_VOBJ *v )
 	}
 	if ( dt_reachable(v) ) {
 		return FALSE;
+	}
+	if ( zero_uuid(&v->tvol) ) {
+		/* the top of a disk remembered as attached: that disk's volume, though the link does not say it */
+		TS_UUID	*kv, *kt;
+		INT	nk = 0, i;
+		T_VOBJ	*c = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
+
+		kv = kept_vols(&nk, &kt);
+		for ( i = 0; c != NULL && kv != NULL && i < nk; i++ ) {
+			if ( ts_uuid_cmp(&kt[i], &v->target) == 0 ) {
+				*c = *v;
+				c->tvol = kv[i];
+				break;
+			}
+		}
+		if ( kv != NULL ) Kfree(kv);
+		if ( c != NULL && !zero_uuid(&c->tvol) ) {
+			BOOL	r = dt_disk_absent(d, c);
+
+			Kfree(c);
+			return r;
+		}
+		if ( c != NULL ) Kfree(c);
 	}
 	if ( !zero_uuid(&v->tvol) && !knl_obfile_vuuid_on(&v->tvol) ) {
 		/* the name the volume had when it was attached; else what the link calls it */

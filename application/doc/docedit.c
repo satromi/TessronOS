@@ -5351,6 +5351,12 @@ EXPORT BOOL de_sel_carrying( void )
 	return (BOOL)( sc_win != NULL && sc_moved );
 }
 
+/* The selection pressed to be carried, whether or not the hand has moved yet */
+EXPORT BOOL de_sel_held( void )
+{
+	return (BOOL)( sc_win != NULL );
+}
+
 EXPORT void de_sel_copy( void )
 {
 	if ( sc_win != NULL ) {

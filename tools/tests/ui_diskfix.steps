@@ -2,13 +2,20 @@
 # tools/tests/dfix_disk.py makes: its first partition (vblka0) a volume
 # damaged on purpose -- a count raised, three blocks taken that nothing
 # uses, a block of a record marked free, two documents that link only to
-# each other. The window (a window of the desktop's like the others,
-# 616x492 inside its frame, the panel's corner at 339,171; a part at l,t
-# of the panel at 339+l,171+t) lists vblka0 and the system volume vblka2
-# in a list, a row 18 pixels apart from 214. A question stands in the
-# middle of it, 取消 at 735,448 and 実行 at 838,448; 障害情報 opens down
-# and right of it, 前へ at 400,658, 次へ at 505,658, 保存 at 840,658,
-# 終了 at 945,658.
+# each other. The accessory runs as a process (application/diskfix); its
+# window (a panel of its data box, 600x476, its corner at 339,171; a part
+# at l,t of the panel at 339+l,171+t) lists vblka0 and the system volume
+# vblka2 in a list, a row 18 pixels apart from 214. A question stands in
+# the middle of the screen, 取消 at 735,448 and 実行 at 838,448; 障害情報
+# opens down and right of it, 前へ at 400,661, 次へ at 498,661, 保存 at
+# 836,661, 終了 at 940,661.
+#
+# A check is an administrator's: each 開始 asks the desktop, which asks for
+# the administrator's password in a panel over its own window (the keys
+# are that panel's). The disk's administrator has none at first, so the
+# first time it is chosen, typed twice (Tab to the second box); after it
+# the password is typed once. The rights are given back when the check is
+# over.
 #
 # The menus of the second button open with the item chosen last on the
 # pointer's row, the rows 20 pixels apart (a line is a row too). That of
@@ -23,8 +30,9 @@
 # the seven put right, two pages of 障害情報. Then looked at whole (検査
 # and 完全 chosen in the menu): nothing. The system volume: 修復 asks to
 # start the machine again, and is left (取消); 検査 finds nothing while
-# it runs. Last the window is carried by its band, made larger by its
-# corner, and closed with Ctrl+E, the letter of 閉じる.
+# it runs. The program run again while its window is up brings that
+# window forward. Last the window is carried by its band, made larger by
+# its corner, and closed with Ctrl+E, the letter of 閉じる.
 open 01a0d8c4-53e0-7a31-8c42-5d6e7f8053e0
 expect dfix: opened 2
 wait 600
@@ -35,7 +43,16 @@ expect dfix: menu 1
 wait 300
 shot df_menu
 click 648 340
-expect desktop: chosen dfix.start
+expect dfix: chosen dfix.start
+wait 1000
+shot df_admin_choose
+text ktest-admin
+key 2b
+text ktest-admin
+wait 300
+key 28
+expect the administrator's password was set
+expect dfix: administrator 0
 expect dfix: done 1: found 7 fixed 0 left 7 refused 0 unfixable 0 er 0
 wait 400
 shot df_checked
@@ -49,6 +66,8 @@ expect dfix: menu 2
 wait 300
 shot df_info_menu
 click 648 520
+expect dfix: chosen dfix.save
+expect disk: the record of ディスク修復 written (0)
 expect dfix: saved 1 0
 wait 300
 # 保存 under the pointer now, 閉じる five rows above it
@@ -57,7 +76,7 @@ expect dfix: menu 3
 wait 300
 click 648 320
 expect dfix: info closed 1
-# 修復: asked first
+# 修復: asked first, then the password
 click 750 240
 wait 200
 click 875 372
@@ -66,6 +85,10 @@ wait 400
 shot df_ask
 click 838 448
 expect dfix: answered 1 1
+wait 1000
+text ktest-admin
+key 28
+expect dfix: administrator 0
 expect dfix: done 2: found 7 fixed 7 left 0 refused 0 unfixable 0 er 0
 wait 400
 shot df_repaired
@@ -73,26 +96,29 @@ click 410 624
 expect dfix: info 2 page 1
 wait 400
 shot df_info_repair
-click 505 658
+click 498 661
 expect dfix: info 3 page 2
 wait 400
 shot df_info_repair2
-click 945 658
+click 940 661
 expect dfix: info closed 2
 # 検査 and 完全 from the menu (開始 under the pointer, then 検査): nothing left
 click 640 300 1
 expect dfix: menu 4
 wait 300
 click 648 360
-expect desktop: chosen dfix.check
+expect dfix: chosen dfix.check
 click 640 300 1
 expect dfix: menu 5
 wait 300
 click 648 400
-expect desktop: chosen dfix.full
+expect dfix: chosen dfix.full
 wait 200
 shot df_full_chosen
 click 875 372
+wait 1000
+text ktest-admin
+key 28
 expect dfix: done 3: found 0 fixed 0 left 0 refused 0 unfixable 0 er 0
 wait 400
 shot df_after
@@ -115,17 +141,25 @@ expect dfix: answered 3 0
 click 750 214
 wait 200
 click 875 372
+wait 1000
+text ktest-admin
+key 28
 expect dfix: done 4: found 0 fixed 0 left 0 refused 0 unfixable 0 er 0
 wait 400
 shot df_system
+# run again while its window is up: that window to the front, no second one
+open 01a0d8c4-53e0-7a31-8c42-5d6e7f8053e0
+wait 800
+shot df_again
 # carried by its band, made larger by its corner, closed with Ctrl+E
 win ディスク修復
-drag 500 148 540 128
+drag 500 158 540 138
 wait 300
 win ディスク修復
-drag 993 641 1060 700
+drag 980 632 1047 690
 wait 300
 win ディスク修復
 shot df_moved
 key 08 01
 expect dfix: closed
+absent !OACV!

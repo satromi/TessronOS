@@ -6,34 +6,8 @@
 # Escape, the figure saved. Record 0 comes out the same, byte for byte.
 # The desktop's panel is worked in a loop of its own, so no sync is asked while it is up.
 # Keys: Enter 28, Esc 29; with Ctrl (01) F 09, S 16, E 08.
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
-mkbig fig 30 4 1
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-dclick 215 255
-sync 600
-key 09 01
-wait 800
-text B
-wait 300
-shot find_kernel_panel
-key 28
-sync 600
-text z
-sync 600
-shot find_kernel_replaced
-key 29
-sync 600
-key 16 01
-sync 600
-sum show
-keep kernel
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 30 4 1
 logmark
 pfig big
@@ -63,6 +37,6 @@ logmark
 key 16 01
 expectsince figure: saved (0)
 sum show
-same kernel
+want ok 4417 5fc986414d144763
 key 08 01
 expect figure: closed

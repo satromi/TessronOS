@@ -6,59 +6,8 @@
 # the first (20,20) taken, put in front (Ctrl+F) and deleted. The second and third links must
 # be left, where they were (their frames drawn, the first and fourth links' places empty), and
 # record 0 of both the same, byte for byte (cab_k_* and cab_p_*).
-cabproc kernel
-mkbig fig 1 0
-xml <tad version="1.0" encoding="UTF-8"><figure>
-xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
-xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
-xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
-xml vobjleft="20" vobjtop="100" vobjright="180" vobjbottom="119" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
-xml vobjleft="220" vobjtop="20" vobjright="380" vobjbottom="39" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml </figure></tad>
-xmlbig
-apps big virtual-object-list
-open big
-waitwin 画用紙 600
-sync 600
-wait 800
-click 357 153
-sync 600
-wait 600
-key 15 01
-sync 600
-shapes
-want ok 4 1
-key 4C
-sync 600
-click 167 153
-sync 600
-wait 600
-key 09 01
-sync 600
-key 4C
-sync 600
-move 890 690
-sync 600
-wait 1500
-shot cab_k_left
-pixel 200 148 FFFFFF
-pixel 400 148 FFFFFF
-pixel 200 188 000000
-pixel 200 228 000000
-key 16 01
-sync 600
-sum show
-keep kernel
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 0
 xml <tad version="1.0" encoding="UTF-8"><figure>
 xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
@@ -108,6 +57,6 @@ logmark
 key 16 01
 expectsince cabinet: saved (0)
 sum show
-same kernel
+want ok 657 b6e4ec0f152d68ef
 key 08 01
 expect cabinet: closed

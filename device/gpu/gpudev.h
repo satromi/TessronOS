@@ -89,6 +89,21 @@ typedef struct {
 	 */
 	BOOL	coherent;
 #endif
+	/*
+	 * Someone is about to sleep on 'delta' (> 0) jobs that have not
+	 * started yet, or one such job is over (-1): the backend runs the
+	 * GPU fast while some are left. The two may come in either order
+	 * for a job that ends at once. NULL when the backend has no clock
+	 * of its own to raise.
+	 */
+	void	(*boost)( void *priv, INT delta );
+	/*
+	 * Whoever shows the screen builds a frame (knl_gpu_interactive):
+	 * the backend answers the load more quickly while frames keep
+	 * coming, and goes back to its usual pace a while after they stop.
+	 * NULL when the backend has no such pace.
+	 */
+	void	(*interactive)( void *priv );
 } T_GPUOPS;
 
 /* The backend's own address space of one of the common layer's */
@@ -106,8 +121,24 @@ IMPORT ER	knl_gpu_register( CONST T_GPUOPS *ops, void *priv );
  */
 IMPORT ER	knl_gpu_unregister( void );
 
+/*
+ * The GPU's device object ("gpu0", gpu_obj.c): the common layer tells
+ * it that a backend came or went, and a backend may give the lines it
+ * adds to record OB_GP_STATE ("key value" per line, as many bytes as
+ * the object keeps) and have the change told, before it registers as
+ * well as after.
+ */
+IMPORT void	knl_gpu_obj_told( void );
+IMPORT void	knl_gpu_obj_detail( CONST UB *text, INT len );
+
 /* The job started last is over, with this result (E_OK or an error) */
 IMPORT void	knl_gpu_job_end( ER result );
+
+/*
+ * Waits that had to sleep so far: on a job already running, and on jobs
+ * still queued (those are the ones boosted)
+ */
+IMPORT void	knl_gpu_wait_counts( UD *p_running, UD *p_queued );
 
 /*
  * A BO over pages that are someone else's (knl_gpu_bo_wrap): their

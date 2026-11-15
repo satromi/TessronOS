@@ -754,6 +754,14 @@ EXPORT ER knl_obsys_write( INT recno, CONST UB *buf, SZ size )
 			}
 			return wm_beep_try(k | ( ( knl_strcmp(t, "tone") == 0 ) ? WM_BEEP_TONE : 0 ));
 		}
+#ifdef USE_UITEST
+		/* "TESTIN 1" or "TESTIN 0": for the tests of the screen, an input that makes a tone */
+		if ( knl_strcmp(w, "TESTIN") == 0 ) {
+			first_word(buf, size, 1, id, sizeof(id));
+			knl_snd_test_in(knl_strcmp(id, "1") == 0);
+			return E_OK;
+		}
+#endif
 		/* "KEEP 1" or "KEEP 0": the stream kept going, or let stop */
 		if ( knl_strcmp(w, "KEEP") == 0 ) {
 			first_word(buf, size, 1, id, sizeof(id));

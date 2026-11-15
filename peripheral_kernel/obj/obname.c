@@ -593,6 +593,46 @@ EXPORT UINT knl_ob_act_take( ID pid )
 }
 
 /*
+ * A start that is one of a group opened together (the links a window
+ * opens with it): the process the arming task makes is marked with the
+ * group and its place in it, as with the ticket, so that its first
+ * window takes its place among the group's (wm_set_rank) however soon
+ * or late it comes up.
+ */
+LOCAL ID	ob_rank_tsk;
+LOCAL UINT	ob_rank_arm_g, ob_rank_arm_r;
+LOCAL UINT	ob_rank_g[CNF_PID_MAX], ob_rank_r[CNF_PID_MAX];
+
+EXPORT void knl_ob_rank_arm( UINT group, UINT rank )
+{
+	if ( ob_mtx <= 0 ) {
+		return;
+	}
+	LOCK();
+	ob_rank_tsk = ( group != 0 ) ? tk_get_tid() : 0;
+	ob_rank_arm_g = group;
+	ob_rank_arm_r = rank;
+	UNLOCK();
+}
+
+EXPORT UINT knl_ob_rank_take( ID pid, UINT *p_rank )
+{
+	UINT	g = 0;
+
+	*p_rank = 0;
+	if ( ob_mtx <= 0 || pid <= 0 || pid >= CNF_PID_MAX ) {
+		return 0;
+	}
+	LOCK();
+	g = ob_rank_g[pid];
+	*p_rank = ob_rank_r[pid];
+	ob_rank_g[pid] = 0;
+	ob_rank_r[pid] = 0;
+	UNLOCK();
+	return g;
+}
+
+/*
  * A new process acts as its parent did, without the administrator's
  * rights the parent may have for a while: they were given for what the
  * parent was doing, not for what it starts. One the kernel starts acts
@@ -606,6 +646,13 @@ EXPORT void knl_ob_prc_start( ID pid, ID ppid, BOOL person )
 	}
 	LOCK();
 	ob_act_pid[pid] = ( ob_act_tsk != 0 && ob_act_tsk == tk_get_tid() ) ? ob_act_arm : 0;
+	if ( ob_rank_tsk != 0 && ob_rank_tsk == tk_get_tid() ) {
+		ob_rank_g[pid] = ob_rank_arm_g;
+		ob_rank_r[pid] = ob_rank_arm_r;
+	} else {
+		ob_rank_g[pid] = 0;
+		ob_rank_r[pid] = 0;
+	}
 	if ( ppid > 0 ) {
 		ob_crd_pid[pid] = crd_base(ppid);
 	} else if ( person ) {
@@ -848,6 +895,9 @@ EXPORT void knl_ob_prc_end( ID pid )
 			hnd_release(his[j]);
 		}
 	}
+	knl_obstrm_prc_end(pid);
+	knl_obpoll_prc_end(pid);
+	knl_gpbo_prc_end(pid);
 }
 
 /*
@@ -1352,6 +1402,136 @@ EXPORT ID ob_dup_key( ID key, UINT ops, ID pid )
 	UNLOCK();
 
 	return nk;
+}
+
+/*
+ * A key held while a stream carries it (obj.h): one reference more to
+ * its opened object, as a key is, so that closing the key meanwhile
+ * does not close the object.
+ */
+EXPORT ER knl_ob_key_hold( ID key, T_OBKHOLD *h, TS_UUID *p_uuid )
+{
+	OBKEY		*k;
+	OBHND		*o;
+	CONST T_OBMGR	*m;
+	ID		me = ts_get_pid();	/* before our lock: it takes the process table's */
+
+	h->hnd = -1;
+	LOCK();
+	k = key_of(key);
+	if ( k == NULL || k->pid != me ) {
+		UNLOCK();
+		return ( k == NULL ) ? E_ID : E_OACV;
+	}
+	o = &(*ob_hndp[k->hnd]);
+	m = ob_mgr[o->mgr];
+	o->refs++;
+	h->hnd = k->hnd;
+	h->ops = k->ops;
+	h->nowait = k->nowait;
+	h->type = m->type;
+	h->sub = m->sub;
+	if ( p_uuid != NULL ) {
+		*p_uuid = o->uuid;
+	}
+	UNLOCK();
+
+	return E_OK;
+}
+
+/*
+ * A key of the caller's watched by a poll set (obj.h): held while its
+ * manager is asked, so that closing it meanwhile does not pull the
+ * object away under the question
+ */
+EXPORT INT knl_ob_key_watch( ID key, OBPWAIT *w, CONST T_OBMGR **p_mgr, INT *p_h )
+{
+	OBKEY		*k;
+	OBHND		*o;
+	CONST T_OBMGR	*m;
+	INT		hi, r;
+	ID		me = ts_get_pid();	/* before our lock: it takes the process table's */
+
+	LOCK();
+	k = key_of(key);
+	if ( k == NULL || k->pid != me ) {
+		UNLOCK();
+		return ( k == NULL ) ? E_ID : E_OACV;
+	}
+	if ( ( k->ops & ( OB_OP_READ | OB_OP_WRITE ) ) == 0 ) {
+		UNLOCK();
+		return E_OACV;
+	}
+	hi = k->hnd;
+	o = &(*ob_hndp[hi]);
+	m = ob_mgr[o->mgr];
+	o->refs++;
+	*p_mgr = m;
+	*p_h = o->h;
+	UNLOCK();
+	r = ( m->pol != NULL ) ? m->pol(*p_h, w) : E_NOSPT;
+	(void)hnd_release(hi);
+	return r;
+}
+
+EXPORT ID knl_ob_key_give( T_OBKHOLD *h, ID pid )
+{
+	ID	nk;
+
+	if ( h->hnd < 0 ) {
+		return E_PAR;
+	}
+	LOCK();
+	nk = key_new(h->hnd, pid, h->ops, h->nowait);
+	if ( nk > 0 ) {
+		(*ob_hndp[h->hnd]).refs--;	/* the hold is now the key's */
+		h->hnd = -1;
+	}
+	UNLOCK();
+	if ( nk <= 0 ) {
+		knl_ob_key_drop(h);
+	}
+	return nk;
+}
+
+EXPORT void knl_ob_key_drop( T_OBKHOLD *h )
+{
+	if ( h->hnd >= 0 ) {
+		(void)hnd_release(h->hnd);
+		h->hnd = -1;
+	}
+}
+
+EXPORT INT knl_ob_key_objs( ID pid, UINT type, UINT sub, TS_UUID *buf, INT max )
+{
+	INT	i, j, n = 0;
+
+	if ( ob_mtx <= 0 || pid <= 0 ) {
+		return 0;
+	}
+	LOCK();
+	for ( i = 0; i < OB_KEY_MAX; i++ ) {
+		OBHND	*o;
+
+		if ( !ob_key[i].used || ob_key[i].pid != pid ) {
+			continue;
+		}
+		o = &(*ob_hndp[ob_key[i].hnd]);
+		if ( ob_mgr[o->mgr]->type != type || ob_mgr[o->mgr]->sub != sub ) {
+			continue;
+		}
+		for ( j = 0; j < n && j < max && !same_uuid(&buf[j], &o->uuid); j++ ) ;
+		if ( j < n && j < max ) {
+			continue;			/* another key to one already counted */
+		}
+		if ( n < max ) {
+			buf[n] = o->uuid;
+		}
+		n++;
+	}
+	UNLOCK();
+
+	return n;
 }
 
 /* ---------------------------------------------------------------- records and attributes */
@@ -2102,6 +2282,68 @@ EXPORT ER ob_cre_obj( CONST T_OBCRE *c, TS_UUID *p_uuid )
 	return er;
 }
 
+/*
+ * An object without a name made and opened at once (include/ts/ob.h):
+ * a queue, a pair of streams (both ends opened), or memory that goes
+ * with its last key. Nothing names it but the keys, which are the
+ * caller's from the start, as memfd_create and socketpair give
+ * descriptors and not names; a restricted process, which opens nothing
+ * by its UUID, makes them so (design 5.9).
+ */
+LOCAL BOOL anonymous_kind( CONST T_OBCRE *c )
+{
+	BOOL	plain = (BOOL)( c->name == NULL && c->json == NULL && c->vol == NULL && c->prt == NULL
+				&& c->icon == NULL && c->arg == NULL && knl_ob_uuid_zero(&c->uuid)
+				&& knl_ob_uuid_zero(&c->near) );
+
+	if ( !plain ) {
+		return FALSE;
+	}
+	if ( c->type == OB_T_CHANNEL ) {
+		return (BOOL)( ( c->sub == OB_S_QUEUE || c->sub == OB_S_STREAM || c->sub == OB_S_POLL )
+			       && c->flags == 0 );
+	}
+	return (BOOL)( c->type == OB_T_STORAGE && c->sub == OB_S_MEMORY && c->flags == OB_F_TRANSIENT );
+}
+
+EXPORT ER ob_cre_key( CONST T_OBCRE *c, UINT ops, ID *keys, TS_UUID *p_uuid )
+{
+	TS_UUID		u;
+	T_OBSTSTAT	s;
+	SZ		asz = 0;
+	ID		k0, k1 = 0;
+	ER		er;
+
+	if ( c == NULL || keys == NULL || !anonymous_kind(c) ) {
+		return E_PAR;
+	}
+	er = ob_cre_obj(c, &u);
+	if ( er < E_OK ) {
+		return er;
+	}
+	k0 = ob_opn_obj(&u, ops);
+	if ( k0 < E_OK ) {
+		(void)ob_del_obj(&u);
+		return (ER)k0;
+	}
+	if ( c->type == OB_T_CHANNEL && c->sub == OB_S_STREAM ) {
+		er = ob_rea_rec(k0, OB_ST_STATE, 0, &s, sizeof(s), &asz);
+		k1 = ( er >= E_OK ) ? ob_opn_obj(&s.peer, ops) : er;
+		if ( k1 < E_OK ) {
+			(void)ob_cls_obj(k0);
+			return (ER)k1;
+		}
+	}
+	keys[0] = k0;
+	if ( k1 > 0 ) {
+		keys[1] = k1;
+	}
+	if ( p_uuid != NULL ) {
+		*p_uuid = u;
+	}
+	return E_OK;
+}
+
 /* Whether the caller may do ops to an object */
 LOCAL ER allowed( CONST T_OBMGR *m, CONST TS_UUID *uuid, UINT ops )
 {
@@ -2114,6 +2356,24 @@ LOCAL ER allowed( CONST T_OBMGR *m, CONST TS_UUID *uuid, UINT ops )
 	may = permit_on(m, uuid, knl_ob_crd_of(ts_get_pid()), prt);
 	Kfree(prt);
 	if ( ( may & ops ) != ops ) {
+		knl_ob_deny_note("object", uuid, ops, may);
+		return E_OACV;
+	}
+	return E_OK;
+}
+
+/* As allowed, one of ops being enough */
+LOCAL ER allowed_any( CONST T_OBMGR *m, CONST TS_UUID *uuid, UINT ops )
+{
+	T_OBPRT	*prt = prot_of(m, uuid);
+	UINT	may;
+
+	if ( prt == NULL ) {
+		return E_NOMEM;
+	}
+	may = permit_on(m, uuid, knl_ob_crd_of(ts_get_pid()), prt);
+	Kfree(prt);
+	if ( ( may & ops ) == 0 ) {
 		knl_ob_deny_note("object", uuid, ops, may);
 		return E_OACV;
 	}
@@ -2211,7 +2471,15 @@ LOCAL ER lnk_by( CONST TS_UUID *uuid, INT delta )
 	if ( m->lnk == NULL ) {
 		return E_NOSPT;
 	}
-	er = allowed(m, uuid, OB_OP_LINK);
+	/*
+	 * The count of links is what the kernel keeps of the object, not
+	 * the object's to keep out: whoever may read it (its attributes)
+	 * links to it and lets go of a link to it, as 超漢字 has it, without
+	 * the right to write it (OB_OP_LINK, which the w of rwx holds, also
+	 * does). Throwing away for good what nothing links to any more is
+	 * still the deleter's (OB_OP_DELETE, DT_RQ_PURGE).
+	 */
+	er = allowed_any(m, uuid, OB_OP_LINK | OB_OP_ATRRD);
 
 	return ( er < E_OK ) ? er : m->lnk(uuid, delta);
 }
@@ -3637,13 +3905,68 @@ EXPORT ER ob_att_vol( CONST char *path, UINT flags )
 	return er;
 }
 
+/*
+ * The keys that read nothing but the attributes of objects of the volume
+ * at path -- held to be told of changes, as a window of links watches the
+ * objects its links point at -- closed, their requests to be told with
+ * them: as a watch does not keep a disk from being taken away elsewhere
+ * (inotify), such a key does not keep a volume from being detached. The
+ * process finds the key gone (E_ID) when it uses or closes it.
+ */
+LOCAL void watch_keys_drop( CONST char *path )
+{
+	ID	key;
+	INT	i, hi = 0;
+
+	for ( i = 0; i < OB_KEY_MAX; i++ ) {
+		OBKEY	*k = &ob_key[i];
+		TS_UUID	u;
+		BOOL	drop = FALSE;
+
+		LOCK();
+		if ( k->used && ( k->ops & OB_OP_ALL & ~OB_OP_ATRRD ) == 0 ) {
+			hi = k->hnd;
+			u = (*ob_hndp[hi]).uuid;
+			drop = TRUE;
+		}
+		UNLOCK();
+		if ( !drop || !knl_obfile_on(&u, path) ) {
+			continue;
+		}
+		LOCK();
+		drop = (BOOL)( k->used && k->hnd == hi );
+		key = ( (ID)( (*ob_hndp[hi]).mgr + 1 ) << KEY_MGR_SHIFT ) | (ID)( i + 1 );
+		if ( drop ) {
+			k->used = FALSE;
+		}
+		UNLOCK();
+		if ( drop ) {
+			ntf_drop(key, 0);
+			(void)hnd_release(hi);
+		}
+	}
+}
+
 EXPORT ER ob_det_vol( CONST char *path )
 {
+	ER	er;
+
 	if ( !knl_ob_is_admin(knl_ob_crd_of(ts_get_pid())) ) {
 		knl_ob_deny_note("detach-volume", NULL, 0, 0);
 		return E_OACV;
 	}
-	return knl_obfile_detach(path);
+	/* not while it is being checked, which works on the volume attached (ts/tsfsck.h) */
+	if ( path == NULL || !knl_ob_chk_hold(path, TRUE) ) {
+		return ( path == NULL ) ? E_PAR : E_BUSY;
+	}
+	er = knl_obfile_detach(path);
+	if ( er == E_BUSY ) {
+		/* open only for its notices: those keys let go, and asked again */
+		watch_keys_drop(path);
+		er = knl_obfile_detach(path);
+	}
+	(void)knl_ob_chk_hold(path, FALSE);
+	return er;
 }
 
 EXPORT ER ob_get_dom( CONST char *vol, T_OBPRT *pk_prt, SZ size, SZ *p_asize )
@@ -3702,6 +4025,9 @@ EXPORT ER knl_ob_init( void )
 	if ( er >= E_OK ) er = knl_obprc_init();
 	if ( er >= E_OK ) er = knl_obchan_init();
 	if ( er >= E_OK ) er = knl_obsock_init();
+	if ( er >= E_OK ) er = knl_obstrm_init();
+	if ( er >= E_OK ) er = knl_obpoll_init();
+	if ( er >= E_OK ) er = knl_gpbo_init();
 	if ( er < E_OK ) {
 		tm_printf((UB *)"ob: a manager did not start (%d)\n", (INT)er);
 		return er;

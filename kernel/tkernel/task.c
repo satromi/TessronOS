@@ -125,6 +125,7 @@ EXPORT void knl_make_dormant( TCB *tcb )
 	tcb->svcown	= 0;
 	tcb->svcdepth	= 0;
 	tcb->svcin	= 0;
+	tcb->svcdma	= 0;
 	tcb->runcyc	= 0;
 	tcb->slicetime	= 0;		/* the turn of its band until tk_chg_slt says otherwise */
 	tcb->slice_set	= FALSE;

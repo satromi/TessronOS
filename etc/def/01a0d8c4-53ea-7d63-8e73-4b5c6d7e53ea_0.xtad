@@ -1,0 +1,61 @@
+<tad version="1.0" encoding="UTF-8" filename="ディスク修復のデータボックス">
+<document>
+<p>ディスク修復のデータボックス</p>
+<p>ディスク修復のウインドウのパネル(対象ドライブの一覧、処理方式、開始、進み具合と結果の行、障害情報と終了)、障害情報のウインドウのパネル(18行ずつのページ、前へ、次へ、保存、終了)と、修復の前と再起動の前に尋ねるパネルの定義。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,600,476" title="ディスク修復" kind="bare">
+<text x="14" y="24">対象ドライブ</text>
+<list num="1" rect="14,32,364,182"/>
+<text x="380" y="24">処理方式</text>
+<choice num="20" group="20" rect="380,32,500,54" value="1">検査</choice>
+<choice num="21" group="20" rect="380,58,500,80">修復</choice>
+<choice num="22" group="22" rect="380,98,500,120">簡易</choice>
+<choice num="23" group="22" rect="380,124,500,146" value="1">通常</choice>
+<choice num="24" group="22" rect="380,150,500,172">完全</choice>
+<button num="30" rect="486,188,586,214">開始</button>
+<line rect="14,222,586,223"/>
+<text num="41" x="14" y="250"> </text>
+<text num="42" x="14" y="274"> </text>
+<text num="43" x="14" y="298"> </text>
+<text num="44" x="14" y="322"> </text>
+<text num="45" x="14" y="346"> </text>
+<text num="46" x="14" y="370"> </text>
+<text num="47" x="14" y="394"> </text>
+<button num="31" rect="14,440,134,466">障害情報</button>
+<button num="32" rect="486,440,586,466">終了</button>
+</panel>
+<panel num="2" rect="0,0,660,484" title="障害情報" kind="bare">
+<text num="50" x="14" y="24"> </text>
+<text num="51" x="14" y="52"> </text>
+<text num="52" x="14" y="74"> </text>
+<text num="53" x="14" y="96"> </text>
+<text num="54" x="14" y="118"> </text>
+<text num="55" x="14" y="140"> </text>
+<text num="56" x="14" y="162"> </text>
+<text num="57" x="14" y="184"> </text>
+<text num="58" x="14" y="206"> </text>
+<text num="59" x="14" y="228"> </text>
+<text num="60" x="14" y="250"> </text>
+<text num="61" x="14" y="272"> </text>
+<text num="62" x="14" y="294"> </text>
+<text num="63" x="14" y="316"> </text>
+<text num="64" x="14" y="338"> </text>
+<text num="65" x="14" y="360"> </text>
+<text num="66" x="14" y="382"> </text>
+<text num="67" x="14" y="404"> </text>
+<text num="68" x="14" y="426"> </text>
+<button num="70" rect="14,448,104,474">前へ</button>
+<button num="71" rect="112,448,202,474">次へ</button>
+<button num="72" rect="448,448,542,474">保存</button>
+<button num="73" rect="552,448,646,474">終了</button>
+</panel>
+<panel num="10" rect="0,0,520,140" title="ディスク修復" kind="warn">
+<text num="1" x="14" y="28"> </text>
+<text num="2" x="14" y="52"> </text>
+<text num="3" x="14" y="76"> </text>
+<button num="102" rect="308,104,402,130" answer="cancel">取消</button>
+<button num="101" rect="412,104,506,130" answer="ok" emph="true">実行</button>
+</panel>
+</databox>
+</tad>

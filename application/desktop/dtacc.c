@@ -23,6 +23,14 @@
  *	"menu" says, so a new one is at the end until the person moves it.
  *	With no object, or no line, that is every accessory. Nothing is
  *	written until the person changes something.
+ *
+ *	The 小物箱 is 仮身一覧 running as a process, opened as the 小物箱
+ *	(application/accbox). It reads the order here one accessory at a
+ *	time (DT_RQ_ACC_LIST) and lays the list out itself, as the system's
+ *	lists are laid out (lib/libtv/tv_list.c), and asks the changes the
+ *	person makes (DT_RQ_ACC_SET). Every 小物箱 that asked to be told
+ *	(DT_RQ_TELL for accessory-box) is told when the list changes
+ *	(dt_acc_boxes_tell).
  */
 
 #include <sys/machine.h>
@@ -38,6 +46,7 @@
 #include <ts/uuid.h>
 #include <ts/conf.h>
 #include <ts/sysdef.h>
+#include <ts/dtreq.h>
 #include "desktop.h"
 
 #define ACC_KEY		"ACC"
@@ -173,7 +182,7 @@ LOCAL void acc_changed( CONST ACCENT *e, INT n )
 		tm_printf((UB *)"accbox: not written (%d)\n", (INT)er);
 		return;
 	}
-	dt_acc_boxes_remake();
+	dt_acc_boxes_tell();
 }
 
 LOCAL INT acc_index( CONST ACCENT *e, INT n, CONST TS_UUID *target )
@@ -213,28 +222,6 @@ EXPORT INT dt_acc_menu_list( CONST DTPROG ***p_acc )
 	}
 	if ( e != NULL ) Kfree(e);
 	return k;
-}
-
-/* The 小物箱's page: every accessory in its order, those 小物 leaves out in grey */
-EXPORT T_TAD *dt_acc_page( void )
-{
-	ACCENT	*e;
-	INT	n = acc_read(&e, NULL), i;
-	TS_UUID	*ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( n + 1 ));
-	BOOL	*dim = (BOOL *)Kmalloc(sizeof(BOOL) * (SZ)( n + 1 ));
-	T_TAD	*t = NULL;
-
-	if ( e != NULL && ids != NULL && dim != NULL ) {
-		for ( i = 0; i < n; i++ ) {
-			ids[i] = e[i].p->uuid;
-			dim[i] = (BOOL)!e[i].show;
-		}
-		t = dt_list_record_dim("小物箱", ids, NULL, dim, n);
-	}
-	if ( e != NULL ) Kfree(e);
-	if ( ids != NULL ) Kfree(ids);
-	if ( dim != NULL ) Kfree(dim);
-	return t;
 }
 
 /* The lines of what is no longer an accessory taken out, when the object has lines at all */
@@ -294,42 +281,23 @@ EXPORT void dt_acc_place( CONST TS_UUID *target, CONST TS_UUID *before )
 	if ( e != NULL ) Kfree(e);
 }
 
-/* 小物管理 as it stands for the link the menu was opened on, grey away from one */
-EXPORT void dt_acc_menu_state( ID mid, BOOL on_vobj, CONST T_VOBJ *v )
-{
-	TS_UUID	md;
-	ACCENT	*e;
-	INT	n = acc_read(&e, NULL);
-	INT	at = ( e != NULL && on_vobj && v != NULL ) ? acc_index(e, n, &v->target) : -1;
-	BOOL	show = (BOOL)( at >= 0 && e[at].show );
-
-	if ( ts_str_to_uuid(SYSDEF_MENU_ACCMGR, &md) >= E_OK ) {
-		(void)mn_chg_atr(mid, &md, "acc.top", ( at > 0 ) ? 0 : MN_GREY);
-		(void)mn_chg_atr(mid, &md, "acc.up", ( at > 0 ) ? 0 : MN_GREY);
-		(void)mn_chg_atr(mid, &md, "acc.down", ( at >= 0 && at < n - 1 ) ? 0 : MN_GREY);
-		(void)mn_chg_atr(mid, &md, "acc.bottom", ( at >= 0 && at < n - 1 ) ? 0 : MN_GREY);
-		(void)mn_chg_atr(mid, &md, "acc.show", ( at < 0 ) ? MN_GREY : show ? MN_HIDE : 0);
-		(void)mn_chg_atr(mid, &md, "acc.hide", ( at < 0 || !show ) ? MN_HIDE : 0);
-	}
-	if ( e != NULL ) Kfree(e);
-}
-
-EXPORT BOOL dt_acc_menu_do( CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ *v )
+/* A code of 小物管理 done to the accessory target: E_PAR for no such code */
+LOCAL ER acc_do( CONST UB *code, CONST TS_UUID *target )
 {
 	ACCENT	*e;
 	INT	n, at, to;
-	BOOL	top = mn_is(sel, "acc.top"), up = mn_is(sel, "acc.up");
-	BOOL	down = mn_is(sel, "acc.down"), bottom = mn_is(sel, "acc.bottom");
-	BOOL	show = mn_is(sel, "acc.show"), hide = mn_is(sel, "acc.hide");
+	BOOL	top = (BOOL)( knl_strcmp((CONST char *)code, "acc.top") == 0 );
+	BOOL	up = (BOOL)( knl_strcmp((CONST char *)code, "acc.up") == 0 );
+	BOOL	down = (BOOL)( knl_strcmp((CONST char *)code, "acc.down") == 0 );
+	BOOL	bottom = (BOOL)( knl_strcmp((CONST char *)code, "acc.bottom") == 0 );
+	BOOL	show = (BOOL)( knl_strcmp((CONST char *)code, "acc.show") == 0 );
+	BOOL	hide = (BOOL)( knl_strcmp((CONST char *)code, "acc.hide") == 0 );
 
 	if ( !top && !up && !down && !bottom && !show && !hide ) {
-		return FALSE;
-	}
-	if ( !on_vobj || v == NULL ) {
-		return TRUE;
+		return E_PAR;
 	}
 	n = acc_read(&e, NULL);
-	at = ( e != NULL ) ? acc_index(e, n, &v->target) : -1;
+	at = ( e != NULL ) ? acc_index(e, n, target) : -1;
 	if ( at >= 0 ) {
 		if ( show || hide ) {
 			e[at].show = show;
@@ -343,5 +311,80 @@ EXPORT BOOL dt_acc_menu_do( CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ *v )
 		}
 	}
 	if ( e != NULL ) Kfree(e);
-	return TRUE;
+	return ( at >= 0 ) ? E_OK : E_NOEXS;
+}
+
+/* ---------------------------------------------------------------- the 小物箱s */
+
+/*
+ * The order as it was read for the 小物箱 that reads it now, one
+ * accessory at a time: read again when the first is asked for, and
+ * when it changes
+ */
+LOCAL ACCENT	*acc_e = NULL;
+LOCAL INT	acc_en = 0;
+
+LOCAL void acc_list_drop( void )
+{
+	if ( acc_e != NULL ) Kfree(acc_e);
+	acc_e = NULL;
+	acc_en = 0;
+}
+
+/* Every 小物箱 told that the list changed (DT_HOW_ACC), to make it again */
+EXPORT void dt_acc_boxes_tell( void )
+{
+	acc_list_drop();
+	(void)dt_prog_tell("accessory-box", DT_HOW_ACC, NULL);
+}
+
+/*
+ * DT_RQ_ACC_LIST: the accessory at place recno of those in the store,
+ * its name and whether 小物 lists it (dtreq.h); DT_RQ_ACC_SET: a change
+ * of the person's
+ */
+EXPORT ER dt_acc_req( CONST T_DTREQ *rq, T_DTANS *an )
+{
+	INT	i, k, n;
+	UB	nm[TAD_NAME_MAX];
+
+	if ( rq->req == DT_RQ_ACC_SET ) {
+		UB	code[sizeof(rq->name)];
+		TS_UUID	before;
+		BOOL	has_before;
+
+		for ( i = 0; i < (INT)sizeof(code) - 1 && rq->name[i] != 0; i++ ) code[i] = rq->name[i];
+		code[i] = 0;
+		if ( knl_strcmp((CONST char *)code, "acc.place") != 0 ) {
+			return acc_do(code, &rq->target);
+		}
+		has_before = (BOOL)( rq->text[0] != 0 && ts_str_to_uuid((CONST char *)rq->text, &before) >= E_OK );
+		dt_acc_place(&rq->target, has_before ? &before : NULL);
+		return E_OK;
+	}
+	if ( acc_e == NULL || rq->recno == 0 ) {
+		acc_list_drop();
+		n = acc_read(&acc_e, NULL);
+		/* those of the store alone, as a list of the store's objects shows them */
+		for ( i = k = 0; acc_e != NULL && i < n; i++ ) {
+			if ( om_store_name(&acc_e[i].p->uuid, nm, TAD_NAME_MAX) >= 0 ) acc_e[k++] = acc_e[i];
+		}
+		acc_en = k;
+	}
+	if ( acc_e == NULL ) {
+		return E_NOMEM;
+	}
+	an->how = (UINT)acc_en;
+	if ( rq->recno < 0 ) {
+		return E_OK;
+	}
+	if ( rq->recno >= acc_en ) {
+		return E_NOEXS;
+	}
+	an->into = acc_e[rq->recno].p->uuid;
+	an->flags = acc_e[rq->recno].show ? 0 : DT_F_HIDDEN;
+	if ( om_store_name(&an->into, nm, TAD_NAME_MAX) < 0 ) nm[0] = 0;
+	for ( k = 0; nm[k] != 0 && k < DT_TEXT_MAX - 1; k++ ) an->text[k] = nm[k];
+	an->text[k] = 0;
+	return E_OK;
 }

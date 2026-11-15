@@ -613,6 +613,20 @@ EXPORT INT dp_open_mem( CONST T_DPBMP *bmp )
 	return gid;
 }
 
+/*
+ * The visible part of a window's environment when nothing narrows it:
+ * as far as the frame reaches, whatever size the work area has, rather
+ * than the work area's size at one moment. A program narrows it for a
+ * piece of its drawing and puts back what dp_ref answered before; when
+ * the window changes size in between, put back as a rectangle of the
+ * old size it would keep every later drawing within the old work area,
+ * and what the window grew by would never be drawn. Left as this, it
+ * means the whole work area, the frame doing the cutting (env_clip). It
+ * is far past any work area and small enough that a place within it
+ * scaled to the target (at most 400%) still fits in an INT.
+ */
+#define DP_VIS_WHOLE	( 1 << 20 )
+
 EXPORT ER dp_set_place( INT gid, void *pixels, UINT pitch, INT corner_x, INT corner_y,
 			CONST T_DPRECT *work )
 {
@@ -633,8 +647,8 @@ EXPORT ER dp_set_place( INT gid, void *pixels, UINT pitch, INT corner_x, INT cor
 		e->frame = *work;
 		e->visible.left = 0;
 		e->visible.top = 0;
-		e->visible.right = work->right - work->left;
-		e->visible.bottom = work->bottom - work->top;
+		e->visible.right = DP_VIS_WHOLE;
+		e->visible.bottom = DP_VIS_WHOLE;
 	}
 	tk_unl_mtx(dp_mtxid);
 

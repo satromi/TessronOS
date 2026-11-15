@@ -215,6 +215,65 @@ LOCAL void test_select( void )
 	KT_ASSERT_ER(so_close(s), E_OK);
 }
 
+/*
+ * The same over many sockets, more than a wait takes on the stack: a
+ * select over all their numbers finds the one a datagram came to, and a
+ * poll over all of them finds every one ready to send
+ */
+#define SEL_MANY	100
+
+LOCAL void test_select_many( void )
+{
+	struct sockaddr_in	me;
+	struct pollfd		*p;
+	fd_set			rd;
+	INT			*s, i, n, top = -1;
+	UB			msg[4] = { 'm', 'a', 'n', 'y' };
+
+	if ( !have_stack ) KT_SKIP("no stack");
+	s = (INT *)Kmalloc(sizeof(INT) * SEL_MANY);
+	p = (struct pollfd *)Kmalloc(sizeof(struct pollfd) * SEL_MANY);
+	KT_ASSERT(s != NULL && p != NULL);
+	if ( s == NULL || p == NULL ) goto done;
+	for ( i = 0; i < SEL_MANY; i++ ) {
+		s[i] = so_socket(AF_INET, SOCK_DGRAM, 0);
+		KT_ASSERT(s[i] >= 0);
+		if ( s[i] > top ) top = s[i];
+	}
+	KT_ASSERT(top >= SEL_MANY - 1);
+	addr_set(&me, LOOPBACK, TEST_PORT + 9);
+	KT_ASSERT_ER(so_bind(s[SEL_MANY - 1], (struct sockaddr *)&me, sizeof(me)), E_OK);
+	KT_ASSERT_EQ(so_sendto(s[0], msg, sizeof(msg), 0, (struct sockaddr *)&me, sizeof(me)), (INT)sizeof(msg));
+
+	FD_ZERO(&rd);
+	for ( i = 0; i < SEL_MANY; i++ ) {
+		if ( s[i] >= 0 ) FD_SET(s[i], &rd);
+	}
+	n = so_select(top + 1, &rd, NULL, NULL, 2000);
+	KT_ASSERT_EQ(n, 1);
+	KT_ASSERT(FD_ISSET(s[SEL_MANY - 1], &rd));
+	KT_ASSERT(!FD_ISSET(s[0], &rd));
+
+	for ( i = 0; i < SEL_MANY; i++ ) {
+		p[i].fd = s[i];
+		p[i].events = POLLOUT;
+		p[i].revents = 0;
+	}
+	KT_ASSERT_EQ(so_poll(p, SEL_MANY, TMO_POL), SEL_MANY);
+	p[0].events = POLLIN;
+	p[SEL_MANY - 1].events = POLLIN;
+	n = so_poll(p, SEL_MANY, TMO_POL);
+	KT_ASSERT_EQ(n, SEL_MANY - 1);
+	KT_ASSERT(( p[SEL_MANY - 1].revents & POLLIN ) != 0);
+	KT_ASSERT_EQ(p[0].revents, 0);
+    done:
+	for ( i = 0; s != NULL && i < SEL_MANY; i++ ) {
+		if ( s[i] >= 0 ) KT_ASSERT_ER(so_close(s[i]), E_OK);
+	}
+	if ( s != NULL ) Kfree(s);
+	if ( p != NULL ) Kfree(p);
+}
+
 /* the calls answer with an error rather than acting on nonsense */
 LOCAL void test_errors( void )
 {
@@ -826,18 +885,23 @@ LOCAL BOOL text_has( CONST UB *t, SZ len, CONST char *want )
 	return FALSE;
 }
 
+/* Whether u is among the objects listed: room for every socket there can be, and the channels besides */
 LOCAL BOOL listed( UINT sub, CONST TS_UUID *u )
 {
-	TS_UUID	l[SO_MAX + 16];
+	TS_UUID	*l = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * ( SO_MAX + 16 ));
 	INT	cnt = 0, i;
+	BOOL	found = FALSE;
 
-	if ( ob_lst_obj(OB_T_CHANNEL, sub, NULL, l, SO_MAX + 16, &cnt) < E_OK ) {
+	if ( l == NULL ) {
 		return FALSE;
 	}
-	for ( i = 0; i < cnt; i++ ) {
-		if ( ts_uuid_cmp(&l[i], u) == 0 ) return TRUE;
+	if ( ob_lst_obj(OB_T_CHANNEL, sub, NULL, l, SO_MAX + 16, &cnt) >= E_OK ) {
+		for ( i = 0; i < cnt && !found; i++ ) {
+			found = ( ts_uuid_cmp(&l[i], u) == 0 );
+		}
 	}
-	return FALSE;
+	Kfree(l);
+	return found;
 }
 
 /* A port to take notices at: a channel, read without waiting */
@@ -2031,6 +2095,7 @@ EXPORT void ktest_so( void )
 	KT_RUN(test_sockobj_prc);
 	KT_RUN(test_sockobj_rate);
 	KT_RUN(test_select);
+	KT_RUN(test_select_many);
 	KT_RUN(test_msg);
 	KT_RUN(test_ioctl);
 	KT_RUN(test_names);

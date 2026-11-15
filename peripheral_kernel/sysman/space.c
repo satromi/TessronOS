@@ -175,7 +175,11 @@ EXPORT ER knl_space_create( T_SPACE *sp )
 #define SHM_L0_FIRST	( (INT)( SHM_WINDOW_BASE >> 39 ) )
 #define SHM_L0_END	( (INT)( SHM_WINDOW_END >> 39 ) )
 
-LOCAL void free_level( UD table_pa, INT level, BOOL keep )
+#ifdef PF_FREE_CHECK
+IMPORT void knl_pf_check_owner( UD pa, UBINT va );	/* pfalloc.c: whose a page given up was */
+#endif
+
+LOCAL void free_level( UD table_pa, INT level, BOOL keep, UBINT base )
 {
 	UD	*t = (UD *)PA2VA(table_pa);
 	INT	i;
@@ -184,6 +188,7 @@ LOCAL void free_level( UD table_pa, INT level, BOOL keep )
 		UD	e = t[i];
 		UD	pa;
 		BOOL	k = keep || ( level == 0 && i >= SHM_L0_FIRST && i < SHM_L0_END );
+		UBINT	va = base | ( (UBINT)i << ( 39 - 9 * level ) );
 
 		if ( (e & PTE_VALID) == 0 ) continue;
 		pa = e & PTE_ADDR_MASK;
@@ -193,8 +198,11 @@ LOCAL void free_level( UD table_pa, INT level, BOOL keep )
 		   they are present and writable, which every table entry of a
 		   process space is, and a space has no large pages) */
 		if ( level < 3 && (e & 3) == 3 ) {
-			free_level(pa, level + 1, k);
+			free_level(pa, level + 1, k, va);
 		} else if ( !k && pa != sink_pa && ( e & PTE_SW_SHARED ) == 0 ) {
+#ifdef PF_FREE_CHECK
+			knl_pf_check_owner(pa, va);
+#endif
 			knl_free_pages(knl_pa_to_pf(pa), 0);	/* a mapped page: one shared is its owner's */
 		}
 		t[i] = 0;
@@ -203,26 +211,112 @@ LOCAL void free_level( UD table_pa, INT level, BOOL keep )
 }
 
 /*
- * The next free stretch of the shared window. 64TB handed out a piece
- * at a time and never taken back is more than a system ever uses, and
- * an address never used twice is one no stale mapping can alias.
+ * Stretches of the shared window. Each is handed out with a page of
+ * nothing after it, so that an overrun faults. One given back
+ * (knl_shm_va_free) is kept in a list in address order, joined with
+ * its neighbours, and handed out again first fit; one that ends where
+ * the untouched part begins (shm_next) goes back into it. Only the
+ * caller that has taken the stretch out of every space it was mapped
+ * into gives it back, so no space still reaches the pages that were
+ * there. A stretch the list has no room for is left unused: the window
+ * is 64TB, and only stretches that cannot be joined take entries.
  */
+#define SHM_FREE_MAX	1024
+
 LOCAL UBINT	shm_next = SHM_WINDOW_BASE;
+LOCAL struct {
+	UBINT	va;
+	UD	len;
+}		shm_free[SHM_FREE_MAX];
+LOCAL INT	shm_nfree = 0;
 
 EXPORT UBINT knl_shm_va_alloc( UD size )
 {
 	UINT	imask;
 	UBINT	va = 0;
+	UD	need;
+	INT	i;
 
 	size = ( size + PAGE_SIZE - 1 ) & ~(UD)( PAGE_SIZE - 1 );
+	if ( size == 0 ) {
+		return 0;
+	}
+	need = size + PAGE_SIZE;		/* a page apart: an overrun faults */
 	ISpinLock(&space_lock, &imask);
-	if ( size > 0 && shm_next + size <= SHM_WINDOW_END ) {
+	for ( i = 0; i < shm_nfree; i++ ) {
+		if ( shm_free[i].len >= need ) {
+			va = shm_free[i].va;
+			shm_free[i].va += need;
+			shm_free[i].len -= need;
+			if ( shm_free[i].len == 0 ) {
+				for ( ; i + 1 < shm_nfree; i++ ) shm_free[i] = shm_free[i + 1];
+				shm_nfree--;
+			}
+			break;
+		}
+	}
+	if ( va == 0 && shm_next + need <= SHM_WINDOW_END ) {
 		va = shm_next;
-		shm_next += size + PAGE_SIZE;	/* a page apart: an overrun faults */
+		shm_next += need;
 	}
 	ISpinUnlock(&space_lock, &imask);
 
 	return va;
+}
+
+EXPORT void knl_shm_va_free( UBINT va, UD size )
+{
+	UINT	imask;
+	UD	len;
+	INT	i, k;
+
+	size = ( size + PAGE_SIZE - 1 ) & ~(UD)( PAGE_SIZE - 1 );
+	if ( va < SHM_WINDOW_BASE || size == 0 || va + size + PAGE_SIZE > shm_next ) {
+		return;
+	}
+	len = size + PAGE_SIZE;
+	ISpinLock(&space_lock, &imask);
+	for ( i = 0; i < shm_nfree && shm_free[i].va < va; i++ ) ;
+	if ( i > 0 && shm_free[i - 1].va + shm_free[i - 1].len == va ) {
+		/* joined to the one before, and to the one after when it now meets it */
+		shm_free[i - 1].len += len;
+		if ( i < shm_nfree && shm_free[i - 1].va + shm_free[i - 1].len == shm_free[i].va ) {
+			shm_free[i - 1].len += shm_free[i].len;
+			for ( k = i; k + 1 < shm_nfree; k++ ) shm_free[k] = shm_free[k + 1];
+			shm_nfree--;
+		}
+		i--;
+	} else if ( i < shm_nfree && va + len == shm_free[i].va ) {
+		shm_free[i].va = va;
+		shm_free[i].len += len;
+	} else if ( shm_nfree < SHM_FREE_MAX ) {
+		for ( k = shm_nfree; k > i; k-- ) shm_free[k] = shm_free[k - 1];
+		shm_free[i].va = va;
+		shm_free[i].len = len;
+		shm_nfree++;
+	} else {
+		i = -1;				/* no room in the list: left unused */
+	}
+	if ( i >= 0 && i == shm_nfree - 1 && shm_free[i].va + shm_free[i].len == shm_next ) {
+		shm_next = shm_free[i].va;
+		shm_nfree--;
+	}
+	ISpinUnlock(&space_lock, &imask);
+}
+
+/* The window's addresses in use and free in the list, for the tests and the log */
+EXPORT UD knl_shm_va_used( UD *p_listed )
+{
+	UINT	imask;
+	UD	used, listed = 0;
+	INT	i;
+
+	ISpinLock(&space_lock, &imask);
+	for ( i = 0; i < shm_nfree; i++ ) listed += shm_free[i].len;
+	used = ( shm_next - SHM_WINDOW_BASE ) - listed;
+	ISpinUnlock(&space_lock, &imask);
+	if ( p_listed != NULL ) *p_listed = listed;
+	return used;
 }
 
 EXPORT void knl_space_delete( T_SPACE *sp )
@@ -232,7 +326,7 @@ EXPORT void knl_space_delete( T_SPACE *sp )
 	}
 	stk_forget(sp->l0_pa);
 	knl_mmu_space_drop(sp->ttbr0);
-	free_level(sp->l0_pa, 0, FALSE);
+	free_level(sp->l0_pa, 0, FALSE, 0);
 	knl_tlb_flush_asid(sp->asid);
 
 	asid_free(sp->asid);

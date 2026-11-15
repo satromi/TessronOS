@@ -77,7 +77,7 @@ LOCAL void part_set( T_WMPART *pt, UINT kind, INT num,
 	pt->colour = 0;
 	for ( i = 0; i < WM_LABEL_MAX; i++ ) pt->label[i] = 0;
 	for ( i = 0; i < WM_LABEL_MAX; i++ ) pt->text[i] = 0;
-	pt->pool  = 0;
+	pt->names = NULL;
 	pt->count = 0;
 	pt->top   = 1;
 	pt->rows  = 0;
@@ -689,26 +689,25 @@ LOCAL void test_list( void )
 	d->num = 11;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
 	d->r.left = 20;  d->r.top = 20;  d->r.right = 260;  d->r.bottom = 140;
 	d->npart = 1;
-	d->used = 0;
 	part_set(&d->part[0], WM_PT_LIST, 1, 10, 10, 220, 110);
 
-	/* ten names, the first of them where the part says to look */
+	/* ten names, the part's own, the first of them at its start */
 	at = -1;
 	for ( i = 0; i < 10; i++ ) {
 		INT	k;
 
 		name[0] = 'n';  name[1] = 'a';  name[2] = 'm';  name[3] = 'e';
 		name[4] = (UB)('0' + i);  name[5] = 0;
-		k = wm_panel_name(d, name);
+		k = wm_part_name(&d->part[0], name);
 		KT_ASSERT(k >= 0);
 		if ( at < 0 ) at = k;
 	}
-	d->part[0].pool  = at;
+	KT_ASSERT_EQ(at, 0);
 	d->part[0].count = 10;
 	d->part[0].top   = 1;
 
 	pid = wm_panel_open(wid, d);
-	Kfree(d);
+	wm_panel_free(d);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 	KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
@@ -761,6 +760,207 @@ LOCAL void test_list( void )
 	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
 }
 
+/*
+ * A list of many names, more than a panel ever had room for: five
+ * thousand rows, over a hundred thousand bytes, set by the record a
+ * program writes, read back whole, wound and chosen in, at the speed of
+ * the rows shown. Each part keeps its own names, so that one that cannot
+ * be set (no memory) leaves the part as it was and moves no other part's
+ * names; and nothing is kept once the panel is closed.
+ */
+IMPORT SZ	knl_Iused( INT *p_areas );
+
+#define BIG_ROWS	5000
+
+/* The names of n rows, "行 NNNN" and a long address after a tab, one after another: how many bytes */
+LOCAL INT big_names( UB *b, INT n, CONST char *tag )
+{
+	INT	i, k = 0, j;
+
+	for ( i = 0; i < n; i++ ) {
+		CONST char	*h = "https://example.test/path/to/a/page/";
+		UB		num[5];
+
+		num[0] = (UB)( '0' + ( i / 1000 ) % 10 );
+		num[1] = (UB)( '0' + ( i / 100 ) % 10 );
+		num[2] = (UB)( '0' + ( i / 10 ) % 10 );
+		num[3] = (UB)( '0' + i % 10 );
+		num[4] = 0;
+		b[k++] = 0xE8;  b[k++] = 0xA1;  b[k++] = 0x8C;	/* 行 */
+		b[k++] = ' ';
+		for ( j = 0; tag[j] != 0; j++ ) b[k++] = (UB)tag[j];
+		for ( j = 0; j < 4; j++ ) b[k++] = num[j];
+		b[k++] = 0x09;
+		for ( j = 0; h[j] != 0; j++ ) b[k++] = (UB)h[j];
+		for ( j = 0; j < 4; j++ ) b[k++] = num[j];
+		b[k++] = 0;
+	}
+	return k;
+}
+
+LOCAL void cpy( UB *to, CONST char *from, INT n )
+{
+	INT	k;
+
+	for ( k = 0; k < n; k++ ) to[k] = (UB)from[k];
+}
+
+/* Whether part i of a panel holds just these len bytes of names */
+LOCAL BOOL names_are( INT pid, INT i, CONST UB *want, INT len )
+{
+	UB	*b = NULL;
+	INT	n = knl_pn_names(pid, i, &b), k;
+	BOOL	same = ( n == len );
+
+	for ( k = 0; same && k < len; k++ ) {
+		if ( b[k] != want[k] ) same = FALSE;
+	}
+	if ( b != NULL ) Kfree(b);
+	return same;
+}
+
+LOCAL void test_names_big( void )
+{
+	T_WMPANEL	*d = NULL;
+	T_WMEV		ev;
+	UINT		ans;
+	SYSTIM		t0, t1;
+	UB		*big, *other, small[32], pops[16], sels[16];
+	INT		pid, len, len2, npop, nsel, value = 0, k, a0, a1, round;
+	SZ		u0, u1;
+
+	if ( !ready ) KT_SKIP("no window");
+	big = (UB *)Kmalloc(BIG_ROWS * 64);
+	other = (UB *)Kmalloc(BIG_ROWS * 64);
+	KT_ASSERT(big != NULL && other != NULL);
+	if ( big == NULL || other == NULL ) goto out;
+	len = big_names(big, BIG_ROWS, "");
+	len2 = big_names(other, BIG_ROWS, "x");
+	KT_ASSERT(len > 100 * 1024);
+	tm_printf((UB *)"  %d rows, %d bytes of names\n", BIG_ROWS, len);
+
+	u0 = knl_Iused(&a0);
+	for ( round = 0; round < 3; round++ ) {
+		d = (T_WMPANEL *)Kcalloc(1, sizeof(T_WMPANEL));
+		KT_ASSERT(d != NULL);
+		if ( d == NULL ) break;
+		d->num = 40;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
+		d->r.left = 20;  d->r.top = 20;  d->r.right = 440;  d->r.bottom = 470;
+		part_set(&d->part[0], WM_PT_LIST, 1, 10, 10, 400, 380);
+		d->part[0].top = 1;
+		part_set(&d->part[1], WM_PT_POPUP, 2, 10, 390, 200, 416);
+		(void)wm_part_name(&d->part[1], (CONST UB *)"p1");
+		(void)wm_part_name(&d->part[1], (CONST UB *)"p2");
+		KT_ASSERT_EQ(wm_part_name(&d->part[1], (CONST UB *)"p3"), 6);
+		d->part[1].count = 3;
+		d->part[1].value = 1;
+		part_set(&d->part[2], WS_PARTS, 3, 210, 390, 400, 416);
+		(void)wm_part_name(&d->part[2], (CONST UB *)"w1");
+		(void)wm_part_name(&d->part[2], (CONST UB *)"w2");
+		d->part[2].count = 2;
+		d->part[2].value = 1;
+		d->npart = 3;
+		npop = 9;  cpy(pops, "p1\0p2\0p3\0", 9);
+		nsel = 6;  cpy(sels, "w1\0w2\0", 6);
+
+		/* a definition whose names cannot be copied is not opened, and keeps nothing */
+		if ( round == 0 ) {
+			knl_pn_test_nomem(2);
+			KT_ASSERT_EQ(wm_panel_open(wid, d), E_NOMEM);
+			knl_pn_test_nomem(0);
+		}
+		pid = wm_panel_open(wid, d);
+		wm_panel_free(d);		/* the panel has names of its own */
+		KT_ASSERT(pid > 0);
+		if ( pid <= 0 ) break;
+		KT_ASSERT(names_are(pid, 1, pops, npop));
+		KT_ASSERT(names_are(pid, 2, sels, nsel));
+
+		/* the names set whole, as a program's record 4 sets them, and read back whole */
+		(void)tk_get_otm(&t0);
+		KT_ASSERT_ER(knl_pn_set_names(pid, 0, big, len), E_OK);
+		(void)tk_get_otm(&t1);
+		if ( round == 0 ) tm_printf((UB *)"  set: %d ms\n", (INT)( t1.lo - t0.lo ));
+		KT_ASSERT(names_are(pid, 0, big, len));
+		KT_ASSERT(names_are(pid, 1, pops, npop));
+		KT_ASSERT(names_are(pid, 2, sels, nsel));
+
+		/* drawn: the rows shown, the first drawing measuring the columns once */
+		(void)tk_get_otm(&t0);
+		KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
+		(void)tk_get_otm(&t1);
+		if ( round == 0 ) tm_printf((UB *)"  first drawing: %d ms\n", (INT)( t1.lo - t0.lo ));
+		(void)tk_get_otm(&t0);
+		for ( k = 0; k < 10; k++ ) {
+			KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
+		}
+		(void)tk_get_otm(&t1);
+		if ( round == 0 ) tm_printf((UB *)"  ten drawings: %d ms\n", (INT)( t1.lo - t0.lo ));
+		KT_ASSERT((INT)( t1.lo - t0.lo ) < 2000);
+
+		/* wound by the wheel, ten turns of three rows, each drawn: the first row is then the 31st */
+		(void)tk_get_otm(&t0);
+		for ( k = 0; k < 10; k++ ) {
+			ev_at(&ev, HID_EV_WHEEL, 20 + 10 + 40, 20 + 10 + 30);
+			ev.dz = -1;
+			KT_ASSERT_ER(wm_panel_event(pid, &ev, &ans), E_OK);
+		}
+		(void)tk_get_otm(&t1);
+		if ( round == 0 ) tm_printf((UB *)"  ten turns of the wheel: %d ms\n", (INT)( t1.lo - t0.lo ));
+		KT_ASSERT((INT)( t1.lo - t0.lo ) < 2000);
+		ev_at(&ev, HID_EV_BTN_DOWN, 20 + 10 + 40, 20 + 10 + 2 + 9);
+		KT_ASSERT_ER(wm_panel_event(pid, &ev, &ans), E_OK);
+		ev_at(&ev, HID_EV_BTN_UP, 20 + 10 + 40, 20 + 10 + 2 + 9);
+		KT_ASSERT_ER(wm_panel_event(pid, &ev, &ans), E_OK);
+		KT_ASSERT_ER(wm_panel_get(pid, 1, &value), E_OK);
+		KT_ASSERT_EQ(value, 31);
+
+		/* the last row chosen and shown */
+		KT_ASSERT_ER(wm_panel_set(pid, 1, BIG_ROWS), E_OK);
+		KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
+		KT_ASSERT_ER(wm_panel_get(pid, 1, &value), E_OK);
+		KT_ASSERT_EQ(value, BIG_ROWS);
+		KT_ASSERT_EQ(wm_panel_self_check(), 0);
+
+		/*
+		 * names that cannot be set, as when the memory has run out: the
+		 * part keeps the ones it had, and the parts after it and before
+		 * it keep theirs where they were
+		 */
+		knl_pn_test_nomem(1);
+		KT_ASSERT_EQ(knl_pn_set_names(pid, 0, other, len2), E_NOMEM);
+		knl_pn_test_nomem(1);
+		KT_ASSERT_EQ(knl_pn_set_names(pid, 1, (CONST UB *)"q1\0q2\0", 6), E_NOMEM);
+		knl_pn_test_nomem(0);
+		KT_ASSERT(names_are(pid, 0, big, len));
+		KT_ASSERT(names_are(pid, 1, pops, npop));
+		KT_ASSERT(names_are(pid, 2, sels, nsel));
+
+		/* a part's names set anew move no other part's */
+		cpy(small, "s1\0s2\0s3\0s4\0", 12);
+		KT_ASSERT_ER(knl_pn_set_names(pid, 1, small, 12), E_OK);
+		KT_ASSERT_ER(knl_pn_set_names(pid, 0, other, len2), E_OK);
+		KT_ASSERT(names_are(pid, 0, other, len2));
+		KT_ASSERT(names_are(pid, 1, small, 12));
+		KT_ASSERT(names_are(pid, 2, sels, nsel));
+		KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
+		/* and none at all */
+		KT_ASSERT_ER(knl_pn_set_names(pid, 0, NULL, 0), E_OK);
+		KT_ASSERT(names_are(pid, 0, NULL, 0));
+		KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
+		KT_ASSERT_ER(knl_pn_set_names(pid, 0, big, len), E_OK);
+
+		KT_ASSERT_ER(wm_panel_close(pid), E_OK);
+	}
+	/* three panels opened and closed with them: what the names took is all given back */
+	u1 = knl_Iused(&a1);
+	tm_printf((UB *)"  heap in use before %d, after %d bytes\n", (INT)u0, (INT)u1);
+	KT_ASSERT(u1 < u0 + 64 * 1024);
+out:
+	if ( big != NULL ) Kfree(big);
+	if ( other != NULL ) Kfree(other);
+}
+
 /* a box takes letters, keeps them in order, and gives them back */
 LOCAL void test_box( void )
 {
@@ -778,7 +978,6 @@ LOCAL void test_box( void )
 	d->num = 12;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
 	d->r.left = 20;  d->r.top = 160;  d->r.right = 280;  d->r.bottom = 210;
 	d->npart = 1;
-	d->used = 0;
 	part_set(&d->part[0], WM_PT_BOX, 1, 10, 10, 200, 36);
 
 	pid = wm_panel_open(wid, d);
@@ -983,7 +1182,6 @@ LOCAL void test_dbox( void )
 	d->num = 30;  d->owner = 7;  d->kind = WM_PNL_PLAIN;
 	d->r.left = 10;  d->r.top = 10;  d->r.right = 210;  d->r.bottom = 90;
 	d->npart = 1;
-	d->used = 0;
 	part_set(&d->part[0], WM_PT_BUTTON, 1, 10, 10, 90, 40);
 	d->part[0].answer = WM_ANS_OK;
 
@@ -1042,7 +1240,6 @@ LOCAL void test_volume( void )
 	d->num = 13;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
 	d->r.left = 300;  d->r.top = 160;  d->r.right = 540;  d->r.bottom = 220;
 	d->npart = 1;
-	d->used = 0;
 	part_set(&d->part[0], WM_PT_VOL, 1, 10, 10, 220, 42);
 	d->part[0].type |= P_HALIGN;
 	d->part[0].lo = 0;
@@ -1081,7 +1278,6 @@ LOCAL void test_boxes( void )
 	d->num = 14;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
 	d->r.left = 300;  d->r.top = 240;  d->r.right = 600;  d->r.bottom = 340;
 	d->npart = 2;
-	d->used = 0;
 	part_set(&d->part[0], WM_PT_NUMBOX, 1, 10, 10, 120, 40);
 	part_set(&d->part[1], SB_PARTS, 2, 10, 50, 280, 82);
 	{
@@ -1189,23 +1385,22 @@ LOCAL void test_popup_warn( void )
 	d->num = 15;  d->owner = 0;  d->kind = WM_PNL_WARN;
 	d->r.left = 40;  d->r.top = 260;  d->r.right = 280;  d->r.bottom = 340;
 	d->npart = 1;
-	d->used = 0;
 	part_set(&d->part[0], WM_PT_POPUP, 1, 10, 10, 200, 44);
 	at0 = -1;
 	for ( i = 0; i < 3; i++ ) {
 		INT	k;
 
 		name[0] = 'h';  name[1] = 'i';  name[2] = (UB)('1' + i);  name[3] = 0;
-		k = wm_panel_name(d, name);
+		k = wm_part_name(&d->part[0], name);
 		KT_ASSERT(k >= 0);
 		if ( at0 < 0 ) at0 = k;
 	}
-	d->part[0].pool = at0;
+	KT_ASSERT_EQ(at0, 0);
 	d->part[0].count = 3;
 	d->part[0].value = 2;
 
 	pid = wm_panel_open(wid, d);
-	Kfree(d);
+	wm_panel_free(d);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 	KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
@@ -1322,7 +1517,7 @@ LOCAL void test_popup_box( void )
 		}
 	}
 	KT_ASSERT_EQ(n, 2);
-	Kfree(d);
+	wm_panel_free(d);
 }
 
 /*
@@ -1452,9 +1647,9 @@ LOCAL void test_scroll_draw( void )
 	part_set(&d->part[0], WM_PT_TAGS | P_SCROLL, 100, 0, 0, 400, 700);
 	d->part[0].inner.left = 4;  d->part[0].inner.top = 28;
 	d->part[0].inner.right = 396;  d->part[0].inner.bottom = 696;
-	at = wm_panel_name(d, (CONST UB *)"a");
-	(void)wm_panel_name(d, (CONST UB *)"b");
-	d->part[0].pool = at;
+	at = wm_part_name(&d->part[0], (CONST UB *)"a");
+	KT_ASSERT_EQ(at, 0);
+	(void)wm_part_name(&d->part[0], (CONST UB *)"b");
 	d->part[0].count = 2;
 	d->part[0].value = 1;
 	for ( i = 1; i <= 10; i++ ) {
@@ -1466,7 +1661,7 @@ LOCAL void test_scroll_draw( void )
 	d->part[11].sheet = 1;
 	d->npart = 12;
 	sd_pid = wm_panel_open(wid, d);
-	Kfree(d);
+	wm_panel_free(d);
 	KT_ASSERT(sd_pid > 0);
 	if ( sd_pid <= 0 ) return;
 	KT_ASSERT_ER(wm_panel_rect(sd_pid, &pr), E_OK);
@@ -1517,6 +1712,7 @@ EXPORT void ktest_part( void )
 	KT_RUN(test_menu_sub);
 	KT_RUN(test_label);
 	KT_RUN(test_list);
+	KT_RUN(test_names_big);
 	KT_RUN(test_box);
 	KT_RUN(test_menu_look);
 	KT_RUN(test_centre);

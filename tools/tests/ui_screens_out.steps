@@ -1,0 +1,66 @@
+# The outputs on システム環境設定's 画面サイズ page (docs/tessronos 10.4.10), for tools/ui_run.py with
+# UI_SCREENS=2 (QEMU's second bochs-display, right of the first at start). The window is at 160,80:
+# the device list's first line at 206,181 and 表示 at 706,184; on the screen's page the parts
+# 166 right and 108 down of where the panel puts them: the outputs' pop-up at 290,157 (a list
+# opens with the row chosen over the part, a row 20 high), 使う at 452,157, 使わない at 536,157,
+# the side's pop-up at 670,157, 識別 at 508,554, 設定 at 706,554. The desktop's question is answered with Enter
+# to keep what was set.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+wait 800
+win システム環境設定
+click 206 181
+wait 300
+click 706 184
+expect sysenv: screen page 1280x800
+expect output 1 of 2
+wait 500
+shot so_main
+# the second output chosen: its size, on, right of the main one
+click 290 157
+wait 300
+click 290 177
+expect output 2 of 2
+wait 500
+shot so_second
+# off
+click 536 157
+wait 200
+click 706 554
+wait 1500
+key 28
+expect sysenv: screen OUT1 off
+expectin 30 output 1 kept as DISPLAY.
+wait 800
+shot so_off
+# on again, below the main one
+click 452 157
+wait 200
+click 670 157
+wait 300
+click 670 177
+wait 300
+click 706 554
+wait 1500
+key 28
+expect sysenv: screen OUT1 on
+expectin 30 below 0
+wait 800
+shot so_below
+# and right of it again
+click 670 157
+wait 300
+click 670 137
+wait 300
+click 706 554
+wait 1500
+key 28
+expectin 30 right 0
+wait 800
+shot so_right
+# 識別: each screen's number on it for three seconds
+click 508 554
+expect numbers shown, 2
+wait 800
+shot so_ident
+wait 3000

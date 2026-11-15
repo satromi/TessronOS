@@ -194,10 +194,16 @@ if_input(struct ifnet *ifp, struct mbuf_list *ml)
 	}
 }
 
-/* The manager reads the state itself (tswifi_obsd.c): nothing to tell */
+/*
+ * The manager reads the state itself (tswifi_obsd.c); a link up that
+ * the driver's task made once the card had the keys wakes it
+ */
+void	tsw_link_state(struct ifnet *);		/* tswifi_obsd.c */
+
 void
 if_link_state_change(struct ifnet *ifp)
 {
+	tsw_link_state(ifp);
 }
 
 int

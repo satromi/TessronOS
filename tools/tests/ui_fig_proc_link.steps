@@ -1,5 +1,5 @@
 # 基本図形編集をプロセスで、デスクトップのウインドウの仮身から開く (design 11.3), for
-# tools/ui_run.py. figproc 1 makes every figure open with the process. A copy of 画用紙
+# tools/ui_run.py. Every figure opens with the process. A copy of 画用紙
 # (mkbig fig) and of 基本文章編集 (mkbig doc) are linked into BTRON, the desktop's first
 # window (linkbig); the figure is opened by a double press on its link, so the process is
 # given that link (T_PRCOPEN): closed, it writes its view back into the link and its place
@@ -11,7 +11,6 @@
 # the screen: a drawing of part of the window must not leave the next whole drawing cut to it.
 # Keys with Ctrl (01): C 06, V 19, E 08; Enter 28.
 mkbig fig 30 4
-figproc 1
 linkbig 180 45
 mkbig doc 5
 linkbig 190 70

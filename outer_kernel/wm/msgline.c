@@ -54,13 +54,16 @@ LOCAL UB	*ml_pixels = NULL;
 LOCAL UD	ml_pages = 0;
 LOCAL UINT	ml_pitch;
 LOCAL INT	ml_w, ml_h, ml_top;		/* the band, on the screen */
+LOCAL INT	ml_left = 0;			/* and where it starts: the main screen's left edge */
 /*
  * The band's own pixels, in pixels of the screen: at a scale other than
  * 100 (T_DISPSPEC scale) the band is laid out in view pixels and its
- * pixels are the screen's, from row ml_dtop of the screen, ml_dh rows
+ * pixels are the screen's, from row ml_dtop and column ml_dleft of the
+ * screen, ml_dh rows. What is drawn in the band is placed from its own
+ * left edge.
  */
 LOCAL UINT	ml_scale = 100;
-LOCAL INT	ml_dtop, ml_dh;
+LOCAL INT	ml_dtop, ml_dh, ml_dleft = 0;
 LOCAL INT	ml_fh = 16, ml_fw = 16;		/* the letters */
 LOCAL INT	ml_margin;			/* the rules above the letters */
 LOCAL INT	ml_x0, ml_lim;			/* where a message starts and ends */
@@ -108,7 +111,7 @@ LOCAL void ml_show( INT l, INT r )
 {
 	T_DPRECT	s;
 
-	s.left = l;  s.top = ml_top;  s.right = r;  s.bottom = ml_top + ml_h;
+	s.left = ml_left + l;  s.top = ml_top;  s.right = ml_left + r;  s.bottom = ml_top + ml_h;
 	(void)wm_composite_at(&s);
 }
 
@@ -312,11 +315,22 @@ LOCAL ER ml_make( void )
 	ml_margin = q + 1;
 	ml_h = ml_fh + q + 3 + ml_margin;
 	ml_scale = ( spec.scale >= 100 ) ? spec.scale : 100;
-	/* on the main screen */
-	ml_w = (INT)( ( spec.view_w > 0 ) ? spec.view_w : spec.width ) / ts_disp_screens();
-	ml_top = (INT)( ( spec.view_h > 0 ) ? spec.view_h : spec.height ) - ml_h;
+	/* on the main screen, at its bottom, wherever it is in the view */
+	{
+		INT	x, y, w, h;
+
+		if ( ts_disp_screen(0, &x, &y, &w, &h) < E_OK ) {
+			x = y = 0;
+			w = (INT)( ( spec.view_w > 0 ) ? spec.view_w : spec.width );
+			h = (INT)( ( spec.view_h > 0 ) ? spec.view_h : spec.height );
+		}
+		ml_left = x;
+		ml_w = w;
+		ml_top = y + h - ml_h;
+	}
 	ml_pitch = spec.pitch;
 	ml_dtop = disp_dev_of(ml_top, ml_scale);
+	ml_dleft = disp_dev_of(ml_left, ml_scale);
 	ml_dh = disp_dev_of(ml_h, ml_scale);
 	if ( (UINT)disp_dev_of(ml_w, ml_scale) * 4 > ml_pitch ) {
 		ml_pitch = ( (UINT)disp_dev_of(ml_w, ml_scale) * 4 + 63 ) & ~63U;
@@ -345,10 +359,10 @@ LOCAL ER ml_make( void )
 			return E_LIMIT;
 		}
 	}
-	dp_set_target(ml_gid, ml_pixels, ml_pitch, 0, ml_top);
+	dp_set_target(ml_gid, ml_pixels, ml_pitch, ml_left, ml_top);
 	(void)dp_set_scale(ml_gid, ml_scale);
-	dp_set_origin(ml_gid, 0, ml_top);
-	r.left = 0;  r.top = ml_top;  r.right = ml_w;  r.bottom = ml_top + ml_h;
+	dp_set_origin(ml_gid, ml_left, ml_top);
+	r.left = ml_left;  r.top = ml_top;  r.right = ml_left + ml_w;  r.bottom = ml_top + ml_h;
 	dp_set_frame(ml_gid, &r);
 	ml_clip(0, ml_w);
 
@@ -607,10 +621,23 @@ EXPORT INT knl_msg_top( void )
 	return ml_on ? ml_top : 0x7FFFFFFF;
 }
 
+/* The band's rectangle in the view: the main screen's bottom (10.4.8); FALSE when it is not shown */
+EXPORT BOOL knl_msg_band( T_DPRECT *r )
+{
+	if ( !ml_on ) {
+		return FALSE;
+	}
+	r->left = ml_left;
+	r->top = ml_top;
+	r->right = ml_left + ml_w;
+	r->bottom = ml_top + ml_h;
+	return TRUE;
+}
+
 /* The band laid onto the screen being built, as far as box reaches */
 EXPORT void knl_msg_lay( UB *back, UINT pitch, CONST T_DPRECT *box )
 {
-	INT	y, from, to, wide;
+	INT	y, from, to, wide, left, right;
 
 	if ( !ml_on || ml_pixels == NULL ) {
 		return;
@@ -618,14 +645,20 @@ EXPORT void knl_msg_lay( UB *back, UINT pitch, CONST T_DPRECT *box )
 	/* box is in pixels of the screen, as the band's own are */
 	from = ( box->top > ml_dtop ) ? box->top : ml_dtop;
 	to = ( box->bottom < ml_dtop + ml_dh ) ? box->bottom : ml_dtop + ml_dh;
-	wide = box->right - box->left;
+	/* only as far as the band reaches: the main screen; the screens beside it keep their own ground */
+	left = ( box->left > ml_dleft ) ? box->left : ml_dleft;
+	right = ml_dleft + disp_dev_of(ml_w, ml_scale);
+	if ( box->right < right ) {
+		right = box->right;
+	}
+	wide = right - left;
 	if ( to <= from || wide <= 0 ) {
 		return;
 	}
 	for ( y = from; y < to; y++ ) {
-		knl_memcpy(back + (SZ)y * pitch + (SZ)box->left * sizeof(UW),
+		knl_memcpy(back + (SZ)y * pitch + (SZ)left * sizeof(UW),
 			   ml_pixels + (SZ)( y - ml_dtop ) * ml_pitch
-			   + (SZ)box->left * sizeof(UW),
+			   + (SZ)( left - ml_dleft ) * sizeof(UW),
 			   (SZ)wide * sizeof(UW));
 	}
 }
@@ -636,7 +669,8 @@ EXPORT void knl_msg_lay( UB *back, UINT pitch, CONST T_DPRECT *box )
  */
 EXPORT void knl_msg_press( INT x, INT y )
 {
-	if ( !ml_on || y < ml_top || x <= ml_sepx ) {
+	x -= ml_left;
+	if ( !ml_on || y < ml_top || y >= ml_top + ml_h || x <= ml_sepx || x >= ml_w ) {
 		return;
 	}
 	ml_date_at = ( ml_date_at == 0 ) ? ( ml_now() | 1 ) : 0;

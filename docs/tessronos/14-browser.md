@@ -25,6 +25,7 @@
 | `application/browser/br_blink.cc`、`br_bindings.cc`、`br_loader.cc` | Blinkの起動、ページの組み立てと描画、V8のバインディングの登録、部品(スタイルシート、画像、スクリプト)の読み込み |
 | `application/browser/br_http.cc`、`br_tls.cc`、`br_text.cc` | Blinkを使わない版のHTTP、TLS、文字だけの描画 |
 | `application/browser/br_obj.cc` | ページの実身のメタデータとレコード0 |
+| `application/browser/br_proc.cc`、`br_rproc.cc`、`br_proc.h`、`mojom/br_process.mojom` | ブラウザのプロセスとレンダラのプロセス(14.13)。レンダラの起動と予備と上限、レンダラのページを表す`RemotePage`、レンダラの側のループとページ、両者の間のMojoのインタフェース |
 | `application/browser/port/net/` | ネットワークスタックの下の層(TCPとUDPのソケット、名前解決、ルート証明書、Cookie・保存域・キャッシュの保存)、ページのクリップボードとしてのトレー(`br_tray.cc`) |
 | `application/browser/port/base/`、`blink/`、`skia/`、`v8/` | Chromiumの`base`、Blink、Skia、V8がOSに求めるもの(メモリ、スレッド、時刻、`localStorage`、`WebSocket`のチャネル、IndexedDBの格納側、フォントマネージャ、PNGのコーデック)。`blink/`には、Blobの格納側(`blob_tessronos.cc`)、専用ワーカーのホスト(`worker_tessronos.cc`)、ブラウザの側のサービス(`services_tessronos.cc`、`cache_storage_tessronos.cc`)もある |
 | `application/browser/port/media/`、`webgl/` | メディア要素のプレーヤ(Chromiumのメディアのパイプラインへのつなぎ、音と映像の出力、EMEのエントリポイント)、Web Audioの出力、WebGLのGLES2(ANGLEに渡すものと、CPUで実行するもの)とGLSLの解釈 |
@@ -58,12 +59,12 @@ make TARGET=_QEMU_VIRT_ DESKTOP=1 BROWSER=1 BROWSER_BLINK=1 GL=1
 - gnの引数(`tools/browser/args.gn`)で、V8を機械語のコンパイラ(Sparkplug、Maglev、Turbofan、WebAssemblyのLiftoff)とともに作る(`v8_jitless = false`)。WebAssemblyのインタプリタDrumBrakeは作らない(`v8_enable_drumbrake = false`)。DrumBrakeをgccで作るためのパッチ(`wasm_interpreter.patch`、`wasm_interpreter_h.patch`)は、作り直すときのために残している。パッチを当てたヘッダのコピーのディレクトリはV8のすべてのソースのインクルードのディレクトリに加わるので、パッチを外すとV8のすべてのソースがコンパイルし直しになる。ポインタ圧縮を有効にし、その4GBのケージはプロセスの中で1つを共有する。この設定はホストの`mksnapshot`にも効き、スナップショットに入る組込み関数の一覧がプログラムのものと一致する。設定を変えたときは`build.sh gngen`と`build.sh hostgen`をやり直す。
 - 使わない部分(テスト、GPUのバックエンド、プロセス間のサンドボックスなど)は`tools/browser/exclude_blink.txt`で外す。ネットワークスタックはQUIC(`net/quic`、`third_party/quiche`、BoringSSLのQUICの部分)も含めてコンパイルし、システムに尋ねる部分(TCPとUDPのソケット、名前解決など)だけを外して、移植層の`port/net`のものを使う。
 - 同じ目標の8ファイルを1つの翻訳単位にまとめてコンパイルする。Blinkの1つの翻訳単位は1GBから3GBのメモリを使うので、並列はメモリ16GBで6までにする。最初から全部をコンパイルすると数時間かかる。WSLが使うメモリはWindowsから見ると確保済みのメモリになり、Windowsのページファイル(C:にある)がそれに合わせて大きくなる。C:の空きが少ないときは、並列を減らし、WSLのページキャッシュをこまめに捨てる。WSLのメモリが12GBのときは4並列にし、`TRANSLATE_TUNE="--param=ggc-min-expand=20 --param=ggc-min-heapsize=262144"`でgccの使うメモリを抑える(7並列ではWSLのメモリとスワップを使い切った)。構造体の詰め方を`#pragma pack(<数>)`で変えて戻さないソース(WebRTCの`wav_header.cc`)は、後ろのソースの構造体の配置を変えてしまうので、単位から外して単独でコンパイルする(単位の区切りはそのまま)。
-- リンクするときに解決できないシンボルには、`tools/browser/blink_stubs.py`がスタブを作る。関数は最初に呼ばれたときに名前を一度表示して0を返し、変数は0で埋めた領域になる。移植層に足した関数も、定義を無名の名前空間に置くなどしてリンクされないと気づかないうちにスタブになり、`std::string`のように値を返す関数では呼び出した側のメモリが壊れる。新しいインタフェースを足したら、実行の記録に`browser: stand-in called:`でその名前が出ないことを確かめる。Cの名前は関数か変数かを名前から見分けられないので、移植層の変数がリンクされないと関数のスタブ(`.text`の数バイト)が当てられ、そこに書き込んだときに書き込み禁止の違反で落ちる(2026年10月、`br_net_quic`で起きた)。そのため、移植層の名前(`br_`、`ts_`、`knl_`、`tessronos`で始まる名前と、`tessronos::`の中や`Br`で始まるクラスのC++の名前)が解決できないときは、スタブを作らずに名前の一覧を出してビルドを止める。
+- リンクするときに解決できないシンボルには、`tools/browser/blink_stubs.py`がスタブを作る。関数は最初に呼ばれたときに名前を一度表示して0を返し、変数は0で埋めた領域になる。移植層に足した関数も、定義を無名の名前空間に置くなどしてリンクされないと気づかないうちにスタブになり、`std::string`のように値を返す関数では呼び出した側のメモリが壊れる。新しいインタフェースを足したら、実行の記録に`browser: stand-in called:`でその名前が出ないことを確かめる。Cの名前は関数か変数かを名前から見分けられないので、移植層の変数がリンクされないと関数のスタブ(`.text`の数バイト)が当てられ、そこに書き込んだときに書き込み禁止の違反で落ちる(2026年10月、`br_net_quic`で起きた)。そのため、移植層の名前が解決できないときは、スタブを作らずにビルドを止める。移植層の名前とは、名前空間のないCの名前とC++の関数・変数のうち`br_`、`ts_`、`knl_`、`tessronos`、TessronOSのAPIの接頭辞(`tk_`、`wm_`、`ob_`、`so_`、`dp_`、`ui_`、`fs_`、`om_`、`gp_`、`ns_`、`usb_`)で始まるものと、`tessronos::`、`br::`、`brgl::`の中や`Br`で始まるクラスのC++の名前である。`blink::`、`gpu::`、`base::`、`net::`などエンジンの名前空間の中の名前は、これまでどおりスタブにする。止めるときは、名前ごとに、その名前を参照している移植層の目的物(`port/`と`compat/`の`.o`)と、同じ名前の定義を無名の名前空間や`static`の中に持つ目的物を出し、原因の見当(無名の名前空間の中への定義、宣言と定義の食い違い、ビルドされていないファイル)を添える。わざとスタブにする名前は、`tools/browser/blink_stubs_allow.txt`に1行に1つ、nmが出す名前と`#`のあとに理由を書いて許す。今は空である。確かめは`blink_stubs.py`だけで動くので、未定義の名前を持つ目的物を`ld -r`でまとめて渡せば、ブラウザ全体をリンクせずに試せる。
 - `blink.sh all`はBlinkのcore、`base`、`net`などをコンパイルし、makeはそれをコンパイルし直さない。coreのソースに当てるパッチ(`loader_factory_for_frame.patch`など)を足したり変えたりしたときは、`blink.sh all`をやり直す(変わった翻訳単位だけをコンパイルするので数分で済む)。modulesのうちリンクするもの(`blink_modules_src.txt`)とバインディング(`blink_modules.txt`)は、makeのたびに変わったものをコンパイルする。
 - メディアのパイプラインのデコーダのために、gnの引数で`proprietary_codecs = true`、`ffmpeg_branding = "Chrome"`、`enable_hls_demuxer = false`とし、ChromiumのFFmpeg(H.264とAACを含む構成)、libvpx、libopusをBlinkと一緒にコンパイルする。FFmpegのNEONのアセンブリ(16ファイル)はコンパイルのコマンドに含まれないので、`build.sh`が`ffmpeg_internal.ninja`の定義とインクルードのディレクトリでアセンブルする。libvpxのうちドット積、行列積、SVEの命令を使うファイルは、`flags.txt`でその命令を許してコンパイルする。これらは実行時にプロセッサがその命令を持つと答えたときだけ呼ばれ、TessronOSでは呼ばれない。
 - Rustで書かれた部分(JPEG XL、AVIF、JSON、XML、Webフォントの形式の判定、Skiaのフォントの読込み)は、Chromiumのビルド規則でaarch64向けにビルドし、1つのオブジェクトファイルにまとめてリンクする。
 - パッチ`canvas_gpu.patch`は`canvas_2d_bitmap_provider.cc`だけを変え、ヘッダは変えないので、当てたときにコンパイルし直すのはその翻訳単位だけである(`blink.sh all`)。
-- 実行ファイルは約122MB(JITを入れる前は約106MB、`GL=1`でANGLEとMesaをリンクすると約142MB)で、プログラムの実身のレコード1になる。`BROWSER_BLINK=1`のときは、システムボリュームを448MB、試験用ディスクを1GBにする。Raspberry Piのカードのイメージでは、システムボリュームはそれより先に2GBと決めてある(3.3)。
+- 実行ファイルは約122MB(JITを入れる前は約106MB、`GL=1`でANGLEとMesaをリンクすると約142MB)で、プログラムの実身のレコード1になる。`BROWSER_BLINK=1`のときは、システムボリュームを512MB、試験用ディスクを1GB(中身が増えれば自動で広がる)にする。Raspberry Piのカードのイメージでは、システムボリュームはそれより先に2GBと決めてある(3.3)。
 
 `tessron-chromium`は、TessronOSのリポジトリと同じディレクトリに置く。別の場所に置くときは、makeに`CHROMIUM=<場所>`を、スクリプトを直接実行するときは環境変数`TESSRONOS=<TessronOSのリポジトリ>`を与える。
 
@@ -107,7 +108,7 @@ make TARGET=_X64_ DESKTOP=1 BROWSER=1 BROWSER_BLINK=1 GL=1 BUILD_ID=<名前> sdi
 - 処理の時間を足す所(エンジンの1回り、タスク、ANGLEの呼出し)は、ARMでは汎用タイマのカウンタ、x64ではTSC(`rdtsc`)を読む(`port/base/counter_tessronos.h`)。TSCの1秒の数は、最初に単調時計と20ミリ秒の間で比べて求める(`br_counter_hz`)。
 - 音声の合成と認識の部品はx64でも同じものを作る。whisper.cppのggmlは、x86の行(`arch/x86`)をx86-64-v2でコンパイルする。
 - zstdのHuffmanの復号はx86-64のアセンブリのループを呼ぶが、gnはそのソースをコンパイルのコマンドに出さないので、Cのループにする(`ZSTD_DISABLE_ASM`)。Web Audioの`OscillatorNode`のSSE2の部分(`cpu/x86/oscillator_kernel_sse2.cc`)を`blink_modules_src.txt`に加えた。
-- Widevine(14.6.3.1)の部品はaarch64のglibcの共有オブジェクトなので、x64では読み込まない(`port/compat/ts_so.c`の読込みは、x64では「この処理系の共有オブジェクトは無い」と答える)。`com.widevine.alpha`は`NotSupportedError`で、Clear Keyは使える。
+- Widevine(14.6.3.1)は、x64ではGoogleのコンポーネントの更新のサービスが配るLinux x64のCDMを、利用者が導入したときだけ使う。`port/compat/ts_so.c`はx86-64のglibcの共有オブジェクトを読み込み、`port/compat/ts_glibc.c`はx86-64のglibcの型の大きさとLinuxの番号で肩代わりする。スレッドの制御ブロックは、glibcのものと同じく64バイトにして、0x28にスタックの保護の値を置く(`lib/libpthread/sysdepend/x86_64/pth_cpu.h`)。
 - HEVCのハードウェアのデコーダ(14.6.7)はRaspberry Pi 5のものなので、x64にはデバイスの実身「動画の復号器」が無く、QEMUと同じくHEVCを扱えないと答える。
 - x64のイメージでは試験のプログラムがESP(区画1)に載るので、`BROWSER_BLINK=1`のときはESPを1GB、システムのボリュームを768MBにする(`browser.mk`の`SD_BOOT_MB`と`SYS_VOL_SIZE`、指定すれば変えられる)。実行ファイルは約225MB(`GL=1`)である。
 
@@ -135,9 +136,34 @@ V8 15.3は、W^Xを守るためのページの属性の切替え(以前の`--wri
 
 TessronOSは書込みと実行を同時に許すページを作らない(5.3)ので、移植層の`OS::SetPermissions`(`port/v8/platform-tessronos.cc`)は`kReadWriteExecute`を`TS_MEM_JIT`に対応させる。この範囲のページは、カーネルが例外を受けて書込みと実行を切り替える。V8がコードを書き込むとページは読み書きになり、それを実行すると、カーネルがデータキャッシュの書戻しと命令キャッシュの無効化を行って読出しと実行に切り替え、同じプロセスを実行中の他のプロセッサにコンテキスト同期をさせる。V8から見ると、ページは書き込めて実行できるメモリとして振る舞う。`kReadExecute`は読出しと実行のページに、`kNoAccessWillJitLater`は予約だけに対応させる。V8が自分で行うキャッシュの操作(`FlushInstructionCache`はLinuxとして`__builtin___clear_cache`を呼び、`CTR_EL0`を読んで`dc cvau`と`ic ivau`を実行する)は、EL0に許してある。
 
-ページは触れたときに作るので、コードの領域の全体を一度に求めても、使った分のメモリしか使わない。`DiscardSystemPages`はページを残したまま何もしないので、一度使ったページはプロセスが終わるまで残る。
+ページは触れたときに作るので、コードの領域の全体を一度に求めても、使った分のメモリしか使わない。`DiscardSystemPages`は`ts_ctl_mem`の`TS_MEM_DISCARD`を呼び、捨てたページはシステムに返る(5.3)。読み書きのページも触れたときに作るので、`OS::HasLazyCommits`は真を返す。
 
-WebAssemblyのメモリの範囲外の参照は、V8のトラップハンドラがモジュールのトラップに変える(`EnableWebAssemblyTrapHandler`)。V8はモジュールのメモリの前後にアクセスできないページを置き、生成するコードは範囲を確かめる命令を持たない。範囲外のロードとストアはそこでデータアボートになり、カーネルがそれをプロセスのエントリポイントに返す(`ts_def_flt`、5.5.2)。移植層はそれを`SIGSEGV`として`sigaction`のハンドラ、つまりV8のトラップハンドラに渡し(`port/compat/ts_signal.c`)、ハンドラは戻り先をトラップの着地点に書き換える。`siginfo_t`の`si_code`はLinuxの値にしてある(`port/shim/sys/signal.h`)。newlibでは`SI_USER`が1で`SEGV_MAPERR`とぶつかり、V8がカーネルの出したシグナルと認めないためである。WebAssemblyのものでない例外は、ハンドラが外れて同じアクセスがやり直され、これまでどおりプロセスが終わる。
+ブラウザのメモリの返し方は次のとおりである。`malloc`はnewlibのもので、ヒープは`_sbrk`の1つの予約(64GB)を1MBずつ読み書きにする(`lib/libcxxrt/ts_syscalls.c`)。ページは触れたときに作られる(5.3)。newlibがヒープの末尾を縮めると(`malloc_trim`)、新しい末尾より上のページを`TS_MEM_DISCARD`で返す。Linuxでbrkを下げるとページが返るのと同じである。ヒープの途中の空きは、newlibが`mmap`を使わないので返らない。V8とpartition_allocは、使わなくなった範囲を`DecommitPages`(`ts_ctl_mem`の`TS_MEM_NONE`)、`mprotect`の`PROT_NONE`、`munmap`、`MAP_FIXED`の`mmap`で外すか、`madvise`の`MADV_DONTNEED`(partition_allocの空いたスロットスパン)と`DiscardSystemPages`で捨てる。どちらでもページはシステムに返る。
+
+以前は、読み書きのページを予約やコミットの時点で全部作り、`MADV_DONTNEED`はその場で0で埋めるだけ、`DiscardSystemPages`は何もせず、ヒープを縮めてもページを返さなかった。2026年11月9日のSurface Go 2で、YouTubeを見ている間に`asked`が30秒で1.2GB増えて戻らなかった(5.3.1)のは、このため一度でも使ったメモリが全部残っていたからである。YouTubeは1ページのアプリなので、別の動画へ移っても文書は替わらない。その操作の前後で`asked`はほとんど増えておらず、前の文書が残ったためではない。
+
+メモリの内訳は、30秒ごとと、文書を入れ替えるたびにコンソールに出す(`BlinkEngine::memory`)。前の文書が解放されたかは`documents`と`contexts`で、何が増えたかはほかの項目で見分ける。
+
+```text
+browser: memory: malloc 210000 KB in use (arena 380000 KB), V8 70000 KB used of 90000 KB (external 120000 KB), Oilpan 30000 KB, partitions 150000 KB, memory objects 40 (20000 KB); documents 3, frames 3, contexts 3, detached 0, array buffers 900, media keys 0
+browser: page https://example.com/ committed: malloc ...
+```
+
+| 項目 | 内容 |
+| --- | --- |
+| `malloc`、`arena` | newlibの`mallinfo`の使用中の量と、ヒープの大きさ |
+| `V8` | JSのヒープの使用量と大きさ、`external`はArrayBufferなどV8の外のメモリ |
+| `Oilpan` | Blinkのオブジェクトのヒープ |
+| `partitions` | Blinkのpartition_allocのパーティションのコミットした量 |
+| `memory objects` | このプロセスがマッピングしている`memfd_create`のメモリの実身(Mojoのデータパイプと共有メモリ)の数と、マッピングの大きさ(`ts_memfd_bytes`) |
+| `documents`、`frames`、`contexts`、`detached` | BlinkのInstanceCountersの文書、フレーム、V8のコンテキスト、切り離されたScriptStateの数 |
+| `array buffers`、`media keys` | ArrayBufferの中身とMediaKeysの数 |
+
+ページを移ってもGCが走るまでは前の文書が残る。`documents`が移るたびに増え続けるなら、前の文書を何かが持っている。
+
+2026年11月9日、Surface Go 2(メモリ8GB)でYouTubeを約20分見ていると、V8がZoneのメモリを確保できず(`V8 process OOM (Zone)`)、続いて64KBの確保(`base::AlignedAlloc`、newlibの`posix_memalign`)がNULLを返して、ブラウザが`IMMEDIATE_CRASH`の`int3`で止まった。JSのヒープは70MBほどだった。newlibの`malloc`は`mmap`を使わず、`_sbrk`のコミット(`ts_ctl_mem`)が断られたときだけNULLを返す。カーネルが断るのは、マシンの空きのページが、求めた分と残しておく16MB(`UMEM_FLOOR`)の和より少ないときである。つまり、マシンの空きのページが尽きていた。当時のカーネルは、プロセスが外したページを、そのプロセスのどれかのタスクが呼出しの中にいる間は返さなかった(5.6.1)。ブラウザでは、ネットワークのスレッドが`poll`で、描画やGPUの待ちのスレッドがそれぞれの呼出しで待ち、ほぼいつも誰かが呼出しの中にいる。V8とpartition_allocが外したページが返るのは、全部のタスクが同時に呼出しの外にいる瞬間だけだった。今は、デバイスにページを貸している呼出しの間だけ保留する。実機でこれが尽きた原因だったか、ほかに増えていたもの(GPUのBO、ヒープ)があったかは、30秒ごとのメモリの行(5.3.1の`held`、`asked`、`gpu`、`free`)で確かめる。パネルに「一般保護例外(エラーコード0x1a)」と出ていたのは、IDTのベクタ3のゲートがDPL 0だったためで、今は「ブレークポイント」と出る(5.5.2)。
+
+WebAssemblyのメモリの範囲外の参照は、V8のトラップハンドラがモジュールのトラップに変える(`EnableWebAssemblyTrapHandler`)。V8はモジュールのメモリの前後にアクセスできないページを置き、生成するコードは範囲を確かめる命令を持たない。範囲外のロードとストアはそこでデータアボートになり、カーネルがそれをプロセスのエントリポイントに返す(`ts_def_flt`、5.5.2)。移植層はそれを`SIGSEGV`として`sigaction`のハンドラ、つまりV8のトラップハンドラに渡し(`port/compat/ts_signal.c`)、ハンドラは戻り先をトラップの着地点に書き換える。`siginfo_t`の`si_code`はLinuxの値にしてある(`port/shim/sys/signal.h`)。newlibでは`SI_USER`が1で`SEGV_MAPERR`とぶつかり、V8がカーネルの出したシグナルと認めないためである。WebAssemblyのものでない例外は、ハンドラが外れて同じアクセスがやり直され、これまでどおりプロセスが終わる。x64では、カーネルが状態をタスクのrspから大きさを引いただけの、8の倍数の位置に置いていた時期があった。`T_TSFLT`は16バイトのアライメントを持つので、コンパイラは`ts_flt_handle`の中で状態の`sp`と`pc`をまとめてSSEの`movdqa`で読む。rspが16の倍数でない所で起きたデータアボートでは、この読出しが一般保護例外になり、元の例外ではなく`ts_flt_handle`のアドレスでブラウザが異常終了していた(2026年11月9日、Surface Go 2でYouTubeを見ているとき)。今はカーネルが状態を16バイトにそろえ、レッドゾーンの下に置く(5.5.2)。元の例外はカーネルのコンソールの`fault handed to the program`の行で分かる。
 
 試験(14.10)のために、ブラウザの起動の引数の行`v8=<フラグ>`でV8にフラグを与えられる。`v8=--jitless`では機械語を生成せず、DrumBrakeを作らないのでWebAssemblyは使えない。
 
@@ -264,6 +290,10 @@ Chromiumでは、Service Workerの登録とその保存、ワーカーの起動�
 | 平文の形からの移し替えの前に書かれたブロック | 守れる(このボリュームの中では) | 移し替えでは、同じ場所とジャーナルを0で書きつぶす。前の形のブラウザが書いたものを別のボリュームに複製したり、バックアップに取ったりしていれば、そこには残る |
 
 住所とカード(レコード12)も同じ形式と同じ鍵で暗号化する。
+
+パスワードとパスキーは、ページを動かすプロセスのメモリに置かない。読み書きは操作ごとに行う(`port/net/br_cred_core.cc`)。「このオリジンのパスワード」「このRP IDのパスキーのIDと利用者名」「パスキーを作る」「このパスキーで署名する」「このオリジンのパスワードを保存する」の操作ごとに、レコード9を開いて読み、変えたときはその場で書き戻す。メモリに残すものはない。ほかのプロセス(別に起動したブラウザ、〈設定〉)が変えた内容も、次の操作で読む。そのため、以前のプロセスの間の知らせ(`BR_RELOAD_CREDS`)はいらなくなった。パスキーの秘密鍵は署名する操作の中でだけ使い、操作の外へは出さない。マルチプロセスでは、レンダラはネットワークのプロセスに操作を頼む(14.13.8)。〈設定〉の一覧、変更、削除は、ブラウザのプロセスが同じ操作で直接行う。1つのプロセスのブラウザは、自分のプロセスで行う。
+
+住所とカードは、ブラウザのプロセスが読む。フォームの欄にフォーカスが移ると、レンダラはブラウザに`Host.AutofillChoose`を送る。ブラウザが実身を読み、パネル4で選ばせ、選んだ1件の欄だけをレンダラに返す。乗っ取られたレンダラでも、利用者がパネルで選んでいない住所やカードは受け取れない。
 
 鍵の実身を消すと、そのユーザの保存したパスワードとパスキーは開けなくなる。次に保存するときに新しい鍵を作り、そのユーザの部分を作り直す。
 
@@ -541,13 +571,13 @@ YouTubeの再生の検証(`GenerateIT`)は、2026年10月9日の時点では答�
 
 ネットワークスタック(`URLRequestContext`)は専用のスレッドで動き、ソケットはノンブロッキングで使う。スレッドは、スタックが読み書きを待たせているすべてのソケットと、自分を起こすためのデータグラムのソケット(ループバックにバインドする)を1回の`poll`で待つ。どれかのソケットの準備ができたとき、ほかのスレッドから仕事を渡されたとき(そのソケットに1バイトが送られる。続けて渡されても、スレッドが受け取るまでは1回だけ送る)、スタックの次のタイマーの時刻が来たときに起き、準備のできたソケットを進めて、時刻の来た仕事を実行する。その回のうちは、ソケットの準備を待ちの結果から答え、システムに尋ね直さない。待ちは長くても0.1秒である。以前は10ミリ秒ごとにすべてのソケットを1つずつ調べていたので、届いたデータグラムを最大10ミリ秒待たせていた。
 
-名前は、スタックのDNSクライアントが、システムのネームサーバにデータグラムのソケットで尋ねる。ネームサーバは、`so_getdns`で得るIPv4のものと、システムの実身のレコード7の`DNS6`の行(設定のもの、次にルータが告げたもの、9.3.4)のIPv6のもので、この順に尋ねる(`port/net/br_sysnet.cc`)。アドレス(AとAAAA)と同時に、`https`のアドレスの名前ではHTTPSレコード(RFC 9460)も尋ねる。ネームサーバがないとき、またはDNSクライアントが答えられないときは、1件ごとのスレッドで`getaddrinfo`を呼び、IPv4とIPv6のアドレスをすべて、システムが返す順に受け取る(9.3.2)。ページの部品は並行して取得し、ページを表示するのは部品がそろってから(最長30秒)である。
+名前は、スタックのDNSクライアントが、システムのネームサーバにデータグラムのソケットで尋ねる。ネームサーバは、`so_getdns`で得るIPv4のものと、システムの実身のレコード7の`DNS6`の行(設定のもの、次にルータが告げたもの、9.3.4)のIPv6のもので、この順に尋ねる(`port/net/br_sysnet.cc`)。ネームサーバは、Chromiumのシステムの設定を読む仕組み(`DnsConfigService`)の移植(`port/net/net_platform_tessronos.cc`の`DnsConfigServiceTessronOS`)が読み、ネットワークが変わるたびに読み直す(14.5.3)。アドレス(AとAAAA)と同時に、`https`のアドレスの名前ではHTTPSレコード(RFC 9460)も尋ねる。ネームサーバがないとき、またはDNSクライアントが答えられないときは、1件ごとのスレッドで`getaddrinfo`を呼び、IPv4とIPv6のアドレスをすべて、システムが返す順に受け取る(9.3.2)。ページの部品は並行して取得し、ページを表示するのは部品がそろってから(最長30秒)である。
 
-- 同時に持つ接続は32までに抑え、それを超える要求はソケットが空くのを待つ。システム全体のソケットの上限は64である(9.2)。
+- 同時に持つ接続はソフトの上限32(乱数の上乗せで最大64)に抑え、それを超える要求はソケットが空くのを待つ。ソケットの数の上限は、システム全体の1024と、プロセスごとの512である(9.2.2)。
 - TLSはChromiumのBoringSSLで、サーバの証明書はChromiumのルートストアの証明書(実行ファイルに埋め込む)で検証する。期限の切れた証明書のサイトは開かない。
 - Cookie、`localStorage`、HTTPキャッシュは、実身「かな漢字変換の学習」にある実身「ブラウザのCookie」、「ブラウザの保存域」、「ブラウザの蓄え」のレコード1にしまう(14.8)。Cookieと`localStorage`は変わってから2秒後、キャッシュは新しいものが来てから1分後に保存し、終了時に残りを保存する。HTTPキャッシュはエントリ単位で、新しいエントリと変わったエントリ(ストリームの大きさか、ヘッダとメタデータのハッシュが変わったもの)、消えたエントリだけを書く。書き込みはストアのスレッドが行う(14.8.1)。
 - フォームの`POST`は、本文と種類をアプリが受け取り、ネットワークスタックで送る。
-- スクリプトの`fetch`と`XMLHttpRequest`の応答の本文は、Mojoのデータパイプで渡す。`fetch()`の`Response`は本文をストリームとしてだけ読むためである。応答は100ミリ秒だけ持っておき、その間に本文が終われば、応答と本文を1つのタスクでまとめて渡す(すぐに終わる応答が、それまでと同じ順でタスクに乗る。長いタスクの後のXMLHttpRequestの`timeout`の判定など)。終わらなければ、そこで応答とパイプを渡し、本文はネットワークスタックから届いた分ずつパイプに書く(`BrURLLoader`の`PipedPart`と`Release`、パイプは512KB)。パイプが一杯のときは、受け取れなかった分を取っておき、パイプが書けるようになったら書く。そのため、ページは本文を届いた分ずつ読め(`ReadableStream`、XMLHttpRequestの`progress`)、動画を`fetch()`で少しずつ受け取るページ(YouTubeのSABR)も、全部が届く前に再生に回せる。終わらない応答も、応答が来た時点で`fetch()`が答える。読み手が本文を手放したとき(`reader.cancel()`)と、ローダが捨てられたとき(`AbortController`)は、スタックに取得をやめさせる。こうした要求は、応答が来た時点でページの部品の待ちから外す。届いた分ごとにページのスレッドの仕事が1つ増えるので、動画を流し続けるページでは仕事の列が空にならない。そこで、エンジンのスレッドが仕事を回すのは列が空になるまでか、長くても100ミリ秒までとし(`run_tasks`)、残りは次に回す。そうしないと、スレッドがフレームと入力とページの部品の待ちに戻らず、YouTubeのページの表示が4分ほど遅れた。データパイプの共有メモリは、`lib/libcxxrt`の`memfd_create`が作るプロセスの中のメモリオブジェクトで(5.7)、パッチ`shared_memory_region.patch`と`shared_memory_tracker.patch`がそれを使わせる。同じ領域のマッピングはどれも同じアドレスになる。
+- スクリプトの`fetch`と`XMLHttpRequest`の応答の本文は、Mojoのデータパイプで渡す。`fetch()`の`Response`は本文をストリームとしてだけ読むためである。応答は100ミリ秒だけ持っておき、その間に本文が終われば、応答と本文を1つのタスクでまとめて渡す(すぐに終わる応答が、それまでと同じ順でタスクに乗る。長いタスクの後のXMLHttpRequestの`timeout`の判定など)。終わらなければ、そこで応答とパイプを渡し、本文はネットワークスタックから届いた分ずつパイプに書く(`BrURLLoader`の`PipedPart`と`Release`、パイプは512KB)。パイプが一杯のときは、受け取れなかった分を取っておき、パイプが書けるようになったら書く。そのため、ページは本文を届いた分ずつ読め(`ReadableStream`、XMLHttpRequestの`progress`)、動画を`fetch()`で少しずつ受け取るページ(YouTubeのSABR)も、全部が届く前に再生に回せる。終わらない応答も、応答が来た時点で`fetch()`が答える。読み手が本文を手放したとき(`reader.cancel()`)と、ローダが捨てられたとき(`AbortController`)は、スタックに取得をやめさせる。こうした要求は、応答が来た時点でページの部品の待ちから外す。届いた分ごとにページのスレッドの仕事が1つ増えるので、動画を流し続けるページでは仕事の列が空にならない。そこで、エンジンのスレッドが仕事を回すのは列が空になるまでか、長くても100ミリ秒までとし(`run_tasks`)、残りは次に回す。そうしないと、スレッドがフレームと入力とページの部品の待ちに戻らず、YouTubeのページの表示が4分ほど遅れた。データパイプの共有メモリは、`lib/libcxxrt`の`memfd_create`が作る名前のないメモリの実身で(5.7、8.3)、パッチ`shared_memory_region.patch`と`shared_memory_tracker.patch`がそれを使わせる。同じ領域のマッピングはどれも同じアドレスになる。
 - `indexedDB`は、BlinkのIndexedDBのページ側(要求、トランザクションの進み、値からのキーの取出し、値の包み)をそのまま使い、ブラウザがプロセスの外に持つ格納側(Mojoの`IDBFactory`、`IDBDatabase`、`IDBTransaction`、`IDBCursor`)を`port/blink/indexeddb_tessronos.cc`がプロセスの中に持つ。ページが空のブローカに`IDBFactory`を求めると、そのページのオリジンの格納側が結ばれる。データはメモリにあり、オリジンごとのデータベース、データベースごとのオブジェクトストア、ストアごとのレコードとインデックスである。キーは、並びがIndexedDBのキーの順(数、日付、文字列、バイナリ、配列)になるバイト列にして持つので、レコードとインデックスの並びがそのままカーソルの順になる。書くトランザクションは最初に書く前にデータベースのコピーを取り、中断されるとコピーに戻す。トランザクションは互いを待たず、要求が来た順に答える。データベースを開くことと消すことは、Chromiumの接続の調整役(connection coordinator)と同じく、データベースごとに頼まれた順に1つずつ行う。開く頼みは、そのデータベースのバージョン変更のトランザクションが動いている間は待ち、終わってから、アップグレードが作ったオブジェクトストアを含む姿で答える。アップグレードと削除は、ほかの開いている接続に`versionchange`を伝え、それらが閉じるまで待つ。ページがその接続を閉じずにおくと(`VersionChangeIgnored`)、頼んだ側に`blocked`を伝える。以前は、アップグレードの最中に来た同じバージョンを開く頼みに、まだストアのない姿で答えていた。ページの別々の部品が同じデータベースを続けて開くZoomのWeb版では、2つ目の接続の`transaction()`が`NotFoundError`(One of the specified object stores was not found)で失敗していた。削除も、開いている接続を強制的に閉じて(`ForcedClose`)すぐに消していた。何かを変えたトランザクションが確定すると、2秒後に全体を「ブラウザの保存域」のレコード2に書き、起動時に読み戻す。BlobやFileを含む値(大きな値もBlinkがBlobに包んで渡す)は、値のバイト列の前にその外部オブジェクトの番号を付けて持つ。外部オブジェクトは番号ごとに、ページが渡したBlob(持ち続け、値を返すたびに複製して渡す)、種類、大きさ、Fileなら名前と時刻、Blobの格納側から後で読み取った中身を持つ。データベースを書くときは中身も書き、読み戻した中身は、それを含む値を最初に返すときにBlobに作り直す。File System Accessのハンドルを含む値は受け付けない。
 - `WebSocket`は、BlinkのチャネルをMojoでネットワークサービスに繋ぐ代わりに、`port/blink/websocket_tessronos.cc`のチャネル(パッチ`dom_websocket.patch`で`DOMWebSocket`が作る)が、ネットワークスレッドでネットワークスタックの`net::WebSocketChannel`を動かす。開くときのハンドシェイク、フレームの組立てとマスク、閉じるときのハンドシェイクはスタックが行い、TLS、証明書の検証、Cookieは通常の要求と同じものを使う。メッセージはネットワークスレッドでフレームから組み立て、まとめてページのスレッドに渡す。Blobを送るときは、Blobの格納側からその中身を読み取ってからバイナリのメッセージとして送る。読み取る間にページが送ったものは、そのBlobの後ろで待たせ、送った順を保つ。`WebSocketStream`も同じチャネルで動く(パッチ`websocket_stream.patch`)。
 - `URL.createObjectURL(blob)`は、ChromiumではBlobの公開URLを`BlobURLStore`に同期のMojo呼び出し(`Register`)で登録する。このブラウザでは受け手をバインドする仕事がページのスレッドの後の仕事として残るので、同期の呼び出しはその仕事を待って永久に戻らず、Googleマップの読込みが止まった(14.7のエンジンのスレッドの待ちの記録で分かった)。パッチ`public_url_manager.patch`で、`Register`を答えを待たない形で送り、URLはそのまま作る。Blobの中身とURLの解決は14.4.4の格納側が持つ。
@@ -584,6 +614,17 @@ YouTubeの再生の検証(`GenerateIT`)は、2026年10月9日の時点では答�
 - 受け取った音は、WebRTCに求めたときにだけ復号される。窓のWebRTCの音の装置(`blink::WebRtcAudioDeviceImpl`)から10ミリ秒ずつ引く(`RenderData`)と、WebRTCの混合器がその窓のすべての接続の受信の流れからその分を取り出し、受信のトラックのシンクにも渡す。Chromiumでは、要素が相手のストリームを再生するときに作るWebRTCの音のレンダラ(`blink::WebRtcAudioRenderer`)がオーディオサービスの出力の流れの上で引く。このブラウザは`WebLocalFrame`を使わないのでそれを作れず、引く者がいなかった。そのため、相手の音は聞こえず、受信の流れのジッタのバッファはあふれ、マイクのエコーキャンセラは再生した音の参照を受け取らなかった(装置は引かれた音を再生のシンク、つまりマイクの音の処理にも渡す)。`port/media/rtc_audio_tessronos.cc`が、窓ごとの装置に1つ、レンダラにあたるスレッドを持つ。要素が相手のストリームを`srcObject`にすると、プレーヤは最初の音のトラックが相手のもの(`PeerConnectionRemoteAudioTrack`)ならそのレンダラの受け手になり(Chromiumと同じ選び方)、自分ではその音を流さない。スレッドは、ブラウザの音の混合(14.6.2)の自分の流れとリングに残る分が0.1秒より減るたびに引き、残る分が聞こえるまでの時間を再生の遅れとして渡す(エコーキャンセラはこの遅れで参照の音を合わせる)。要素が一時停止していても引き続け(受信の流れがあふれないように)、どの要素も再生していなければ無音を流す。音量はChromiumと同じく、相手の音源ごとに、それを持って再生している要素の音量の和(10まで、なければ0)を、WebRTCのシグナリングのスレッドで音源に設定し、WebRTCが混合の前に掛ける。
 
 HSTS(`Strict-Transport-Security`)で知ったことは、`BrHstsKeeper`が`TransportSecurityState`の変更を聞き、利用者ごとのストア`hsts`に10秒後に保存し、次の起動で読み戻す。ホスト名はそのSHA-256だけを持つ。
+
+### 14.5.3 ネットワークの切り替え
+
+Wi-Fiで別のアクセスポイントにつなぎ直し、アドレス、ゲートウェイ、DNSサーバが替わったときは、ChromiumがLinuxでnetlinkの知らせを受けたときと同じく、接続のプールとセッションを閉じ、名前の答えを捨て、DNSの設定を読み直す。
+
+- `port/net/net_platform_tessronos.cc`の`NetworkChangeNotifierTessronOS`が、TessronOSの`NetworkChangeNotifier`である。ネットワークのスレッドで、スタックを組む前(`Context()`の初め)に1つだけ作り、プログラムの終わりまで持つ。作るときに今の構成を読み、専用のスレッド(スタック64KB)を起こす。スレッドはSVCの`so_netwait`(9.3.5)で、システムの構成の数が変わるまで1回60秒を限りに待ち、変わればネットワークのスレッドに仕事を渡す。見回りはせず、変わらない間はブラウザのスレッドは起きない(カーネルの中で0.2秒ごとにタイムアウトを見るだけである)。
+- ネットワークのスレッドは、IPv4のアドレス、マスク、ゲートウェイ(`so_getifaddr`)と使っているIPv6のアドレス(システムの実身のレコード7の`ADDRESS6`)、DNSサーバ(`so_getdns`とレコード7の`DNS6`)を読み直して前のものと比べる。アドレスが変わっていれば`NotifyObserversOfIPAddressChange`で知らせる。これを受けて、TCPのソケットのプール(`TransportClientSocketPool`)は待ちの接続と使っていない接続を`ERR_NETWORK_CHANGED`で捨て、HTTP/2のセッション(`SpdySessionPool`、Linuxと同じく閉じる形)とQUICのセッション(`QuicSessionPool`)は閉じ、名前解決(`HostResolverManager`)は答えの蓄えを捨て、進行中の問い合わせをやり直させる。外へ届くアドレス(IPv4のアドレス、またはリンクローカルでないIPv6のアドレス)が無くなったときと戻ったときは、接続の種類(`CONNECTION_NONE`と`CONNECTION_ETHERNET`)の変化も知らせる。知らせの遅れは、Linuxの`NetworkChangeNotifierLinux`と同じ値(アドレスの変化で2秒、接続の種類で0.5秒と1.5秒)にして、アドレスが外れて新しいアドレスが付く一連の変化が、`OnNetworkChanged`の1回の知らせになるようにする。
+- アドレスかDNSサーバが変わっていれば、`SystemDnsConfigChangeNotifier`に読み直させる(`RefreshConfig`)。DNSの設定は`DnsConfigServiceTessronOS`(Chromiumの`DnsConfigService`の移植)が、DNSサーバだけを持つ`DnsConfig`として読む。hostsのファイルは無い。新しい設定は`HostResolverManager`のDNSクライアントに渡り、古いサーバで進んでいた問い合わせはやり直される。DNSサーバが無いときは、名前はシステムの名前解決で引く。前は、DNSサーバをネットワークのコンテキストを作るときに一度だけ読み、`DnsConfigOverrides`で固定していた。
+- `dns=system`の行のときは、DNSクライアントを使わない名前解決(`insecure_dns_mode`が`kDisabled`)のままである。
+
+前は`NetworkChangeNotifier`が無く、Chromiumはネットワークが替わったことを知らなかった。QEMUで切り替えを再現すると(下の`test_netswitch`)、新しいアドレス10.1.2.15、ゲートウェイ10.1.2.2、DNSサーバ10.1.2.3が付いた後も、ブラウザは前のネットワークで開いたQUICのセッション(IPv6の`[2606:4700:10::ac42:93f3]:443`)で`https://example.com/`への要求を送り、要求は応答待ち(`LOAD_STATE_WAITING_FOR_RESPONSE`)のまま60秒で打ち切られた。初めての名前(`www.wikipedia.org`)は、DNSクライアントが前のサーバ(10.0.2.3と`[fec0::3]`)に尋ねて答えが無く、システムの名前解決に回ってから約4.9秒で届いた。Surface Go 2で家のWi-Fiからスマートフォンのテザリングに替えたとき、ブラウザが「接続中」のまま進まなくなったのは、この形である。直した後は、ブラウザがアドレスとDNSサーバの変化を知り(`browser: net: the network changed: addresses name servers`)、新しいサーバ10.1.2.3に尋ね、2つの要求はそれぞれ約1.3秒と約1.1秒で届いた。
 
 ## 14.6 画像、動画、音声、WebGL
 
@@ -622,7 +663,7 @@ ChromiumのWebGLは、普通はGPUプロセスの中で動く。レンダラのB
 - コンテキストごとに、5秒の間の呼出しの数、描画と消去の数、描画バッファから読んだフレームの数、`readPixels`の数(メモリとピクセルのパックのバッファ。メモリなら先頭の4バイト)、`getBufferSubData`の数と先頭の8バイト、フェンスの数と、その問合せに「終わった」「まだ」と答えた数、ページに返したエラーの数、色のバッファの大きさを数え、使われたコンテキストについて5秒ごとに1行コンソールに出す。最初のWebGL 1と2のコンテキストを作ったときは、限界値(テクスチャの大きさ、ユニフォームとバリイングの数、サンプル数、描画バッファの数、ユニフォームブロックの大きさなど)とフラグメントシェーダの`highp`の精度、拡張の一覧を1回ずつ出す。実機のV3DとQEMUのsoftpipeでページが選ぶ描き方が違うとき、どの値が違うかをこの行で比べる。
 - ANGLEのOpenGL ESのバックエンドは、仮想化のグループ(`EGL_CONTEXT_VIRTUALIZATION_GROUP_ANGLE`)が同じコンテキストを、システムのEGLの1つのコンテキストの上で切り替えて動かす。指定しなければディスプレイの全部のコンテキストが1つのグループになる。システムのコンテキストも同時に1つのスレッドでしか現在のものにできないので、ワーカーとページが同時にWebGLを使うと、互いにシステムのコンテキストを取り合い、システムの`eglMakeCurrent`が失敗して、呼出しが別のコンテキストの状態の上で動いた。新しく作ったコンテキストが返す文字列が不正なアドレスになり、ブラウザが落ちた(ワーカーの`OffscreenCanvas`とページのcanvasで同時にWebGLを使う試験のページで再現した。Google マップを`gpu=on`で開いたときも、同じ所で落ちていた)。そこで、ページのスレッドのコンテキストはディスプレイのグループに、ほかのスレッドのコンテキストはスレッドごとのグループに入れる。ワーカーのコンテキストはページのスレッドで作られるので、ワーカーのスレッドで最初に現在のものにするときに、そのスレッドのグループで作り直す(まだ何も描いていないので、要求した拡張を求め直すだけでよい)。システムのコンテキストは、ページのスレッドに1つ、WebGLを使うワーカーのスレッドごとに1つになる。softpipeではシステムのコンテキスト1つが約200MBを使うので、QEMUの2GBのマシンで`gpu=on`(Skiaのコンテキストがもう1つ)のままWebGLを使うワーカーのあるサイトを開くと、メモリが足りなくなることがある(4GBでは足りる)。`EGL_MakeCurrent`が失敗したときは、コンソールに1度`browser: webgl: a context could not be made current`を出し、どのコンテキストも現在のものにしないでおく(呼出しはコンテキストのないものとしてANGLEが答える)。
 - 描画バッファの色のバッファは共有イメージとして作られる。共有イメージのインタフェースは作られたときの大きさをメールボックスごとに覚え、`CreateAndTexStorage2DSharedImageCHROMIUM`がその大きさのRGBA8のテクスチャをANGLEに作る(`ColorBuffer`)。共有イメージへのアクセスの開始と終了、同期トークンは、呼出しが返ったときには実行が済んでいるので、何もしない。
-- 描いた結果は、合成をCPUで行う設定(`IsGpuCompositingDisabled`)により、描画バッファが`ReadPixels`で読み戻してcanvasのビットマップにし、Skiaがページに描く。ページをGPUでラスタ化するとき(14.7.2)は、Ganeshがそのビットマップをテクスチャにして描く。GPUから読み戻すので、v3dではキャッシュしないマッピングのBOを読むことになる。描画バッファ全体を原点から読む`ReadPixels`は表示のためのフレームとして数え、コンソールの`browser: draw: webgl`の行(14.7.2)に出す。後で、色のバッファをMesaのBOにしてウインドウシステムに渡し、GPUで合成する(13.10)ときは、色のバッファを作る1か所(`ColorBuffer`。BOのEGLイメージをテクスチャにする)と、描画バッファの出力(読み戻しをやめて共有イメージのまま渡す)を変える。転送の部分は変わらない。
+- 描いた結果は、合成をCPUで行う設定(`IsGpuCompositingDisabled`)により、描画バッファが`ReadPixels`で読み戻してcanvasのビットマップにし、Skiaがページに描く。ページをGPUでラスタ化するとき(14.7.2)は、Ganeshがそのビットマップをテクスチャにして描く。GPUから読み戻すので、v3dではキャッシュしないマッピングのBOを読むことになる。描画バッファ全体を原点から読む`ReadPixels`は表示のためのフレームとして数え、コンソールの`browser: draw: webgl`の行(14.7.2)に出す。ページのcanvasは、コンポジタのレイヤーで見せる前提(`IsComposited`)なので、Blinkは描いてもページの描画の描き直しを求めない。このブラウザはcanvasをページの記録に描くので(`html_canvas_painter.patch`)、パッチ`webgl_snapshot.patch`で、描画バッファが前のフレームの後で初めて変わったとき(`MarkContextChanged`)に、canvasのレイアウトオブジェクトに描き直しを求める。また、資源の作り手(`CanvasNon2DResourceProvider`)が作れないとき、Blinkは読み戻したスナップショット(`cached_snapshot_`)を1度作ると大きさが変わるまで作り直さないので、同じパッチで、描画バッファが変わった後に描くたびに読み直す(読めなかったときは前のものを使う)。以前はどちらもGPUのプロセスの道(14.13.10)にしかなかったので、`gpuproc=off`では、ページのWebGLのcanvasは最初に描かれた1枚のまま画面に残った。実機のSurface Go 2で、水槽のデモ(webglsamplesのaquarium)の間ずっと`browser: draw: webgl 1 frames`で、テクスチャの画像を読み込む前のフレームが出たままになり、テクスチャが黒く見えた。three.jsの例も同じで、テクスチャそのものは正しかった(`test_blink_gltex`)。後で、色のバッファをMesaのBOにしてウインドウシステムに渡し、GPUで合成する(13.10)ときは、色のバッファを作る1か所(`ColorBuffer`。BOのEGLイメージをテクスチャにする)と、描画バッファの出力(読み戻しをやめて共有イメージのまま渡す)を変える。転送の部分は変わらない。
 - softpipeはマルチサンプリングを持たず、`GL_MAX_SAMPLES`を1としたままOpenGL ES 3.1を出す(Mesaのソフトウェアのマルチサンプリングの扱い)。ANGLEは、OpenGL ES 3.0の必須の形式が4サンプルを持たないとOpenGL ES 2.0に制限するので、そのままではsoftpipeでWebGL 2ができない。パッチ(`angle_es3_samples.patch`)で、システムのドライバ自身がOpenGL ES 3以上を出しているときはこの制限をしないようにした。v3dは4サンプルを持つので、この変更は効かない。softpipeのWebGL 2で`renderbufferStorageMultisample`に2以上のサンプル数を与えるとエラーになる。描画バッファのアンチエイリアスは使わない(`kAntialiasingModeNone`)。
 - ANGLEのソースのうち、gccで通らない1か所(`IntermNode.cpp`の配列の大きさ)はパッチ(`angle_intermnode.patch`)で直した。X11、Vulkan、WebGPU、NULLのバックエンド、libpci、HLSL・MSL・WGSL・SPIR-Vの出力はコンパイルせず(`tools/browser/exclude_angle.txt`)、そこを指す名前は`blink_stubs.py`のスタブになる。どれも呼ばれない。ANGLEがGPUの情報を集めるときにPCIのデバイスを探す関数は、`gl_angle.cc`が「PCIのデバイスはない」と答える。ANGLEがDRMの`drmGetVersion`を呼ぶ場所(デバイスファイルを開いて名前を見る)は、ファイルが開けないので通らない。そのヘッダは`port/shim/xf86drm.h`である。
 - 古いCPUの実装は残す。`GL=1`でないブラウザ(Mesaをリンクしない)では、WebGL 1をCPUで描くのに使い、WebGL 2はない。`GL=1`でも、ANGLEのディスプレイができなかったとき(システムのEGLが初期化できないときなど)は、WebGL 1をこれで描く。ANGLEのコンテキストのプロバイダは弱い名前で参照し(`br_blink.cc`の`BrWebGLProvider`)、リンクされていないときは呼ばない。
@@ -631,6 +672,7 @@ ChromiumのWebGLは、普通はGPUプロセスの中で動く。レンダラのB
 | --- | --- |
 | `application/browser/port/webgl/gl_angle.cc` | ANGLEの上の`GLES2Interface`、共有イメージ、コンテキストのプロバイダ |
 | `application/browser/port/webgl/gl_angle_forward.inc`、`gl_angle_entry.inc` | 生成した転送のコードと、ANGLEの拡張のエントリポイントの宣言 |
+| `application/browser/port/webgl/gl_cmdbuf.cc` | `gpuproc=on`のときの、GPUのプロセスのコマンドバッファのWebGLのプロバイダ(14.13.10) |
 | `tools/browser/gen_gl_forward.py` | 上の2つを生成する |
 | `tools/browser/labels_angle.txt`、`exclude_angle.txt` | コンパイルするANGLEのgnのラベルと、外すソース |
 | `tools/browser/patches/angle_intermnode.patch`、`angle_es3_samples.patch` | ANGLEへのパッチ |
@@ -692,26 +734,40 @@ Raspberry Pi 5の実機でYouTubeの動画を開くと、広告の1本目の映�
 
 `KeySystemsImpl`は、メディアのクライアント(`media::MediaClient`)があるときだけ、Clear Key以外のキーシステムを登録のコールバック(`GetSupportedKeySystemsCB`)で尋ねる。そのため`eme_tessronos.cc`はメディアのクライアント(`BrMediaClient`)を置く。キーシステムを答えるほかは、型の可否(`IsDefaultDecoderSupportedVideoType`など)をクライアントがないときと同じに答えるので、再生できる型は変わらない。登録のコールバックは覚えておき、WidevineのCDMを導入したときと外したときに、新しい一覧でもう一度呼ぶ。ブラウザを起動し直さなくても、次の`requestMediaKeySystemAccess`から答えが変わる。
 
-要素に`MediaKeys`が付くと、プレーヤはそのCDMのコンテキストをパイプラインに渡し(`SetCdm`)、パイプラインは暗号化されたストリームを復号してからデコーダに渡す。パイプラインが始まる前に付いたときは、始まったところで渡す。CENC(`cenc`)のMP4とWebMの暗号化を扱う。
+要素に`MediaKeys`が付くと、プレーヤはそのCDMのコンテキストをパイプラインに渡し(`SetCdm`)、パイプラインは暗号化されたストリームを復号してからデコーダに渡す。パイプラインが始まる前に付いたときは、始まったところで渡す。ライブラリのCDM(`media::CdmAdapter`、Widevine)は1つのスレッドのもので、復号を含むすべての呼び出しを作ったスレッド(エンジンのスレッド)で受け、そうでなければ止まる(Chromiumはそれを専用のプロセスに置き、復号の部分はMojoで呼ぶ)。そこでプレーヤは、パイプラインにCDMのコンテキストをそのまま渡さず、復号の呼び出しをCDMのスレッドに送り、その答えを呼んだスレッドに返すもの(`port/media/media_player.cc`の`BrCdmOnThread`)を渡す。CDMは、パイプラインが止まった後で自分のスレッドで手放される(`DeleteOnCorrectThread`)ので、それまでに送った呼び出しはCDMに届く。CENC(`cenc`)のMP4とWebMの暗号化を扱う。
 
 EMEは安全なコンテキスト(`https`のページ)にだけある。YouTubeの普通の動画は暗号化されていないので、Widevineがなくても再生できる。PlayReadyなど、ほかの独自のCDMのキーシステムは持たない。
 
 #### 14.6.3.1 利用者が導入するWidevine
 
-WidevineのCDM(`libwidevinecdm.so`)はGoogleの独自のソフトウェアで、TessronOSにもブラウザにも同梱しない。リポジトリにも入れない。利用者が自分で導入したときだけ使える。LinuxのディストリビューションがChromiumに対して行うのと同じく、Raspberry Piの公式リポジトリ(<https://archive.raspberrypi.com/debian>)がRaspberry Pi OSに配っているパッケージ`libwidevinecdm0`(arm64)を、その配布の形のまま使う。CDMの中身は書き換えず、調べもしない。Chromiumの正規のインタフェースで読み込んで使うだけである。導入していなければ、`requestMediaKeySystemAccess('com.widevine.alpha', ...)`は従来どおり`NotSupportedError`で拒否される。
+WidevineのCDM(`libwidevinecdm.so`)はGoogleの独自のソフトウェアで、TessronOSにもブラウザにも同梱しない。リポジトリにも入れない。利用者が自分で導入したときだけ使える。CDMは、そのプロセッサ向けにGoogleのCDMを配っている正規の配布元から、その配布の形のまま取る。
 
-導入はメニューの〈Widevineを導入...〉で行う。ブラウザはまずデータボックスのパネル7「Widevineの導入」(14.8)を出す。パネルは、WidevineがGoogleの独自のソフトウェアでTessronOSに同梱していないこと、入手元(Raspberry Piの公式リポジトリ)、利用者の実身に入れること、利用の条件は導入する前に利用者が確かめることを示す。〈導入〉を選んだときだけ取りに行き、〈取消〉とEscでは何も取らない。取得と展開は別のスレッドで行い(`port/media/br_widevine.cc`)、その間はページを使える。手順は次のとおりである。
+- aarch64では、LinuxのディストリビューションがChromiumに対して行うのと同じく、Raspberry Piの公式リポジトリ(<https://archive.raspberrypi.com/debian>)がRaspberry Pi OSに配っているパッケージ`libwidevinecdm0`(arm64)を使う。
+- x64では、LinuxのChromeとChromiumのコンポーネントの更新(`components/component_updater`)がWidevineを入れるのと同じく、Googleのコンポーネントの更新のサービス(<https://update.googleapis.com/service/update2/json>)が配るWidevine CDMのコンポーネント(Linux x64のCRX3のファイル)を使う。Firefoxも、LinuxでWidevineをこのサービスから取る(設定`media.gmp-manager.chromium-update-url`)。版はサービスが決める。このエンジンのバージョンを名乗って尋ね、サービスが答えたものを入れる。
+
+CDMの中身は書き換えず、調べもしない。Chromiumの正規のインタフェースで読み込んで使うだけである。導入していなければ、`requestMediaKeySystemAccess('com.widevine.alpha', ...)`は従来どおり`NotSupportedError`で拒否される。
+
+導入はメニューの〈Widevineを導入...〉で行う。ブラウザはまずデータボックスのパネル7「Widevineの導入」(14.8)を出す。パネルは、WidevineがGoogleの独自のソフトウェアでTessronOSに同梱していないこと、入手元、利用者の実身に入れること、利用の条件は導入する前に利用者が確かめることを示す。入手元の2行(部品3と4)は、プロセッサに合わせてブラウザが書く(`br_wv_source`。aarch64はRaspberry Piの公式リポジトリ、x64はGoogleのコンポーネントの更新のサービス)。パネルとメニューは両方のプロセッサで同じものである。〈導入〉を選んだときだけ取りに行き、〈取消〉とEscでは何も取らない。取得と展開は別のスレッドで行い(`port/media/br_widevine.cc`)、その間はページを使える。aarch64の手順は次のとおりである。
 
 1. リポジトリのインデックス`dists/<配布>/main/binary-arm64/Packages`をHTTPSで取る。配布は`trixie`、なければ`bookworm`の順に見る。インデックスのうち`Package: libwidevinecdm0`で`Architecture: arm64`のものから、Debianのバージョンの順序(dpkgと同じ比べ方)で最も新しいものを選び、`Filename`、`Size`、`SHA256`を読む。`Filename`は`pool/`で始まり、`..`を含まないものに限る。
 2. パッケージ(`.deb`)をHTTPSで取り、大きさとSHA-256(BoringSSL)をインデックスの値と照らす。合わなければ何も入れない。転送でHTTPSでない所へ移されたときも取りやめる。
 3. `.deb`(arのアーカイブ)の`debian-binary`が`2.x`であることを確かめ、`data.tar.xz`をLZMA SDKのXZのデコーダ(Chromiumのチェックアウトの`third_party/lzma_sdk`。`tools/browser/build.sh`の`xz_lib`)で展開する。tarのアーカイブ(ustar、GNUの長い名前とpaxのパスを読む)から、`opt/WidevineCdm/`の下の`libwidevinecdm.so`と`opt/WidevineCdm/manifest.json`を取り出す。
 4. `manifest.json`を、Chromiumの`components/cdm/common/cdm_manifest.cc`の`IsCdmManifestCompatibleWithChrome`と`ParseCdmManifest`で確かめる。このブラウザが話すCDMのモジュール、インタフェース、ホストのバージョン(`x-cdm-module-versions`、`x-cdm-interface-versions`、`x-cdm-host-versions`)を名乗らないCDMは入れない。
+
+x64では、1から3の代わりに次を行う。4から後は同じである。
+
+1. コンポーネントの更新のサービスに、その更新の確認のプロトコル(3.1)で、Widevine CDMのコンポーネントのアプリケーションID(`oimompecagnajdejgnnjijobebaeigek`)、OSの`linux`、アーキテクチャの`x64`、このエンジンのバージョン(`prodversion`、153.0.8010.36)をHTTPSのPOSTで尋ねる。アプリケーションIDは、Chromiumのコンポーネントのインストーラ(`chrome/browser/component_updater/widevine_cdm_component_installer.cc`)が持つ署名の鍵のSHA-256(`kWidevineSha2Hash`)の先頭16バイトを`a`から`p`の文字で書いたものである。答えの`updatecheck`が`ok`のとき、`manifest.version`(CDMのバージョン)、パッケージの`name`(`.crx3`で終わり、英数字と`._-`だけのもの)、`size`、`hash_sha256`と、`urls.url`の`codebase`を読む。
+2. `https://`で始まる`codebase`に名前を足したアドレスから、答えの順にファイルを取り、大きさとSHA-256を答えの値と照らす。合わなければ何も入れない。転送でHTTPSでない所へ移されたときも取りやめる。
+3. CRX3のファイルを、Chromiumの`components/crx_file/crx_verifier.cc`と同じく確かめる。ヘッダ(`crx3.proto`の`CrxFileHeader`)を読み、ヘッダにZIPの終わりの印(`PK\x05\x06`、`PK\x06\x07`、`PK\x06\x06`)があれば断る。すべての証明(`sha256_with_rsa`、`sha256_with_ecdsa`)の署名を、`CRX3 SignedData`と0のバイト、署名したヘッダの長さ(32ビットのリトルエンディアン)、署名したヘッダ、アーカイブに対してBoringSSLで確かめ、1つでも合わなければ断る。証明の鍵に、SHA-256が`kWidevineSha2Hash`のもの(Widevineのコンポーネントの鍵)と、署名したヘッダの`crx_id`が示す鍵の両方がなければ断る。そのあと、アーカイブ(ZIP)から`_platform_specific/linux_x64/libwidevinecdm.so`と`manifest.json`を取り出す(格納のままか、zlibで展開する)。マニフェストのバージョンがサービスの答えと違えば断る。
+
+両方のプロセッサで、続けて次を行う。
+
 5. 利用者ごとの普通の実身「Widevine CDM」を「ブラウザの保存域」と同じボリュームに作る。所有者はブラウザが代理するユーザ(`ob_get_crd`)、モードは`rw-------`で、レコード0にこの実身が何かを書いた文章、レコード1にライブラリ、レコード2にマニフェスト、レコード3にバージョン、入手元、SHA-256を持つ。新しい箱は作らない。「ブラウザの鍵」(14.4.7.1)と同じく、どの仮身からも指されないので固定(`ob_lnk_obj`)を1つ付ける。
 6. エンジンのスレッドで、「ブラウザの保存域」のレコード10のそのユーザの行(`<ユーザのUUID> <実身のUUID>`)を新しい実身に向け、前に導入した実身があれば消す。続けてキーシステムの一覧を作り直す。結果はメッセージ行に出し、導入できなかったときは理由をパネル1で通知する。
 
 メニューの〈Widevineを外す〉(導入していないときは灰色)は、パネル2で確かめてから、そのユーザの行と実身「Widevine CDM」を消し、キーシステムの一覧からWidevineを除く。
 
-CDMの読み込みは、最初にページがEMEを使ってキーシステムの一覧を作るときに行う。レコード10からそのユーザの実身を引き、マニフェストを上と同じく確かめてから、ライブラリのレコードをメモリに読み、`port/compat/ts_so.c`でプロセスに読み込む。これはLinuxの動的リンカと同じく、aarch64のELFの共有オブジェクトのセグメントを置き、再配置(RELR、RELA、PLT)を当て、GNU Cライブラリの関数の名前を`port/compat/ts_glibc.c`の肩代わりの関数にリンクし(求めるバージョンはGNU Cライブラリのバージョンでなければならないが、動的リンカと同じく、弱いとマークされたバージョンの要求は満たせなくてもよく、文字列表の文字列は`DT_STRSZ`の外でもオブジェクトの中にあれば読む)、スレッドローカルストレージをTLSの記述子で与え、初期化の関数を呼ぶ。名前は`libwidevinecdm.so`で、`dlopen`(`port/compat/ts_linux.c`)はこの名前で読み込んだものを返す。そのうえでメディアのライブラリの`media::CdmModule`が`dlopen`で開いてエントリポイント(`InitializeCdmModule_4`、`CreateCdmInstance`、`GetCdmVersion`など)を引き、初期化する。コンソールには`browser: widevine: CDM <CDMのバージョン> loaded (manifest <バージョン>)`と出る。読み込みは1回の起動に1度で、外した後もプロセスが終わるまでメモリに残る(一覧には出さない)。
+CDMの読み込みは、最初にページがEMEを使ってキーシステムの一覧を作るときに行う。レコード10からそのユーザの実身を引き、マニフェストを上と同じく確かめてから、ライブラリのレコードをメモリに読み、`port/compat/ts_so.c`でプロセスに読み込む。これはLinuxの動的リンカと同じく、そのプロセッサ(aarch64かx86-64)のELFの共有オブジェクトのセグメントを置き、再配置(RELR、RELA、PLT。種類はそれぞれのプロセッサのELFのABIのもの)を当て、GNU Cライブラリの関数の名前を`port/compat/ts_glibc.c`の肩代わりの関数にリンクし(求めるバージョンはGNU Cライブラリのバージョンでなければならないが、動的リンカと同じく、弱いとマークされたバージョンの要求は満たせなくてもよく、文字列表の文字列は`DT_STRSZ`の外でもオブジェクトの中にあれば読む)、スレッドローカルストレージをTLSの記述子(x86-64ではGNU2の形。解決の関数は`%rax`の記述子を受け、`%fs:0`からの距離を返し、ほかのレジスタを保つ)か`__tls_get_addr`で与え、初期化の関数を呼ぶ。結べない名前は1つずつコンソールに出す。x64のCDMはGCCのアンワインダ(`libgcc_s.so.1`、バージョン`GCC_3.0`など)を名指すので、その`_Unwind_`の関数はプロセスのもの(libgccの`unwind-dw2.c`)に結ぶ。プロセスのアンワインダは、登録されたフレームの情報の中からだけFDEを探す(libgccの`unwind-dw2-fde.c`。`dl_iterate_phdr`は使わない)ので、`libgcc_s.so.1`を名指すオブジェクトは、初期化の関数を呼ぶ前に、`PT_GNU_EH_FRAME`(`.eh_frame_hdr`)の表に並ぶFDEを`__register_frame_info_table_bases`で登録し、オブジェクトを手放すときに登録を外す。x86-64のglibcの向けに作られたコードは、スタックの保護の値を`%fs:0x28`から読むので、TessronOSのx86-64のスレッドの制御ブロックはglibcの`tcbhead_t`の頭と同じ64バイトにし、0x28にスレッドごとの値(一番下のバイトは0)を、0x30(glibcのポインタの保護)に0を置く(`lib/libpthread/sysdepend/x86_64/pth_cpu.h`)。glibcの肩代わりは、x86-64ではミューテックスを40バイト、スレッドの属性を56バイトとし、`open`の`O_DIRECTORY`、`syscall()`の番号、`uname`の`machine`、`setjmp`と`longjmp`の`jmp_buf`をx86-64のものにする。`/proc/cpuinfo`はCPUIDから作る(ベンダ、ファミリ、モデル、ブランドの文字列、機能のフラグ。AVXとAVX2はXCR0で有効なときだけ)。動的リンカの変数`__libc_stack_end`は、メインスレッドのスタックの上端(`lib/libpthread`のメインスレッドの`pthread_getattr_np`)にする。名前は`libwidevinecdm.so`で、`dlopen`(`port/compat/ts_linux.c`)はこの名前で読み込んだものを返す。そのうえでメディアのライブラリの`media::CdmModule`が`dlopen`で開いてエントリポイント(`InitializeCdmModule_4`、`CreateCdmInstance`、`GetCdmVersion`など)を引き、初期化する。コンソールには`browser: widevine: CDM <CDMのバージョン> loaded (manifest <バージョン>)`と出る。読み込みは1回の起動に1度で、外した後もプロセスが終わるまでメモリに残る(一覧には出さない)。
 
 キーシステムの記述は、Chromiumの`components/cdm/renderer/widevine_key_system_info.cc`の`cdm::WidevineKeySystemInfo`をそのまま使う。エンジンはWidevineを同梱しない構成(`enable_widevine`が偽)でビルドしているので、このソースはそのままではコンパイルできない。`port/media/widevine_ks_tessronos.cc`がその翻訳単位の中だけ`ENABLE_WIDEVINE`を真にして取り込む。コーデックと暗号化の方式はマニフェストのもの(`x-cdm-codecs`)で、ロバストネスはソフトウェアのもの(L3)だけである。音声は`SW_SECURE_CRYPTO`まで、映像は`SW_SECURE_DECODE`まで、ハードウェアで守るデコーダと`HW_SECURE_*`はない。セッションは一時的なものだけで、永続するライセンスは、ホストの検証とストレージのIDがないので扱わない(LinuxのChromeと同じ)。マシンを識別する値は使わない。
 
@@ -845,7 +901,7 @@ iframeの文書の確定には、移動を始めたときの読込みの種類(�
 
 拡大と縮小は、Chromeの倍率の段(25%から500%)で、メインフレームの倍率(`LocalFrame::SetLayoutZoomFactor`)を変える。`devicePixelRatio`もそれに従う(110%で1.100000023841858、Chromeと同じ値)。倍率はホストごとに覚え、同じホストのページを開くとその倍率にする(ブラウザが動いている間)。
 
-全画面は、ページの`requestFullscreen`(動画のプレーヤの全画面のボタンなど)とF11、メニューの〈全画面表示〉で入る。ウインドウを、作業領域が画面全体になるように動かし(枠とバーは画面の外に出る)、ツールパネルを隠す。ページが求めたときは、そうしてから`Fullscreen::DidResolveEnterFullscreenRequest`でページに通知し、ページの`exitFullscreen`とEsc、F11では、ウインドウを元に戻してから`Fullscreen::DidExitFullscreen`で通知する。ホイールと矢印キーはBlinkの中でスクロールし、ページの中のスクロールできる領域にも効く。ページ全体のスクロールバーは、Blinkのものではなく、ウインドウの右と下にあるTessronOSのスクロールバーである。ブラウザは表示のたびに、ページの高さと幅、表示している範囲をスクロールバーのレコードに書き、つまみの前後を押したときやつまみをドラッグしたときの`OB_E_SCROLL`(10.4)を受けて、その位置へスクロールする。ドラッグ中の通知は続けて届くので、最後の位置だけを描く。Blinkのスクロールバーはメインフレームのものだけを隠し(設定の`HideScrollbars`を、パッチ`viewport_scrollbars.patch`でメインフレームのビューポートに限る)、ページの中のスクロールできる領域とiframeは自分のスクロールバーを持つ。新しいウインドウで開くリンク(`target="_blank"`)と、クリックから呼ばれた`window.open`は、新しいウインドウで開く(14.7.8)。直前にクリックやキーの操作がない`window.open`(スクリプトが出すポップアップ)は開かない。ページの入力欄に入力するときは、キーを先にかな漢字変換に渡し、確定した文字を欄に入れる。変換中の文字は欄の中に下線付きで表示し、候補はブラウザが文字の位置の下に表示する。
+全画面は、ページの`requestFullscreen`(動画のプレーヤの全画面のボタンなど)とF11、メニューの〈全画面表示〉で入る。ウインドウの配置のレコードに`OB_WP_FULL`を立てて書き、ウインドウマネージャに作業領域を画面全体にさせる(枠、バー、メッセージ行の上に重なる、10.2.2)。ツールパネルは隠す。抜けるときは旗を下ろして書き、ウインドウマネージャが元の位置と大きさに戻す。ページが求めたときは、そうしてから`Fullscreen::DidResolveEnterFullscreenRequest`でページに通知し、ページの`exitFullscreen`とEsc、F11では、ウインドウを元に戻してから`Fullscreen::DidExitFullscreen`で通知する。ホイールと矢印キーはBlinkの中でスクロールし、ページの中のスクロールできる領域にも効く。ページ全体のスクロールバーは、Blinkのものではなく、ウインドウの右と下にあるTessronOSのスクロールバーである。ブラウザは表示のたびに、ページの高さと幅、表示している範囲をスクロールバーのレコードに書き、つまみの前後を押したときやつまみをドラッグしたときの`OB_E_SCROLL`(10.4)を受けて、その位置へスクロールする。ドラッグ中の通知は続けて届くので、最後の位置だけを描く。Blinkのスクロールバーはメインフレームのものだけを隠し(設定の`HideScrollbars`を、パッチ`viewport_scrollbars.patch`でメインフレームのビューポートに限る)、ページの中のスクロールできる領域とiframeは自分のスクロールバーを持つ。新しいウインドウで開くリンク(`target="_blank"`)と、クリックから呼ばれた`window.open`は、新しいウインドウで開く(14.7.8)。直前にクリックやキーの操作がない`window.open`(スクリプトが出すポップアップ)は開かない。ページの入力欄に入力するときは、キーを先にかな漢字変換に渡し、確定した文字を欄に入れる。変換中の文字は欄の中に下線付きで表示し、候補はブラウザが文字の位置の下に表示する。
 
 ウインドウのイベントは、ブラウザのウインドウのスレッドが受け取る。Blinkが動くスレッド(エンジンのスレッド)は、ページの部品がそろうのを待つ間(長くて30秒)、ページのスクリプトが走り続ける間、ページの本文の取得を待つ間はイベントを受け取れないので、以前はその間、右ボタンのメニューも、ピクトグラムのダブルクリックやCtrl+Eで閉じることも効かず、ウインドウが固まったように見えた。ウインドウのスレッドはイベントを受け取ると、次のものはその場で応じる。
 
@@ -960,7 +1016,7 @@ MSEの試験のページ(14.10、H.264の640×360と426×240)を`NET=user`と`gp
 | 許可の確認 | 5 | メッセージ4行(「<オリジン>がトレーの内容の読み取りを求めています。」「許可しますか。」)、拒否、許可 |
 | ファイルの選択(`<input type="file">`) | 6 | メッセージ2行、一覧(トレーにある仮身と、パネルに入れた仮身の名前)、取消、了解 |
 
-メッセージは半角で52文字(全角は2文字に数える)ごとに折り返し、入りきらない分は「…」で終える。`alert`、`confirm`、`prompt`の間は、ページのスクリプトもエンジンのスレッドもパネルの答えを待つ(Chromiumと同じく、ページはその間止まる)。`<select>`の一覧は、押した操作が終わってからの仕事として出し、選んだ項目を`HTMLSelectElement`に渡して`change`イベントを起こす。許可の確認はサービスのスレッドとは別のスレッドで尋ねるので、その間もほかのサービスは答える。起動の引数の`quit=`で終える時刻が来ると、出ているパネルは答えのないまま閉じる。
+メッセージは半角で52文字(全角は2文字に数える)までの行に折り返し(`br_main.cc`の`dlg_lines`)、入りきらない分は「…」で終える。折る位置は禁則を守る所まで戻す(10.7.1、`kin_break`)。句点や閉じ括弧が行の頭に来るときは前の字と一緒に次の行へ送り、開き括弧は行の終わりに置かない。英字の語(オリジンなど)は、1行に収まる限り途中で折らない。`alert`、`confirm`、`prompt`の間は、ページのスクリプトもエンジンのスレッドもパネルの答えを待つ(Chromiumと同じく、ページはその間止まる)。`<select>`の一覧は、押した操作が終わってからの仕事として出し、選んだ項目を`HTMLSelectElement`に渡して`change`イベントを起こす。許可の確認はサービスのスレッドとは別のスレッドで尋ねるので、その間もほかのサービスは答える。起動の引数の`quit=`で終える時刻が来ると、出ているパネルは答えのないまま閉じる。
 
 アドレス欄はカーソルを持つ。左右の矢印、Home、Endで動かし、押した位置に置き、文字の入力、Backspace、Deleteはカーソルの位置に働く。文字を末尾に入力すると、閲覧履歴のうちアドレスがその文字で始まるもの(スキームと`www.`は省いてもよい)を回数の多い順に補完して色を付けて示す。Enterで補完したアドレスに移り、右矢印かEndで確定し、上下の矢印で候補を替える。次の文字、Backspace、Deleteは補完を外す。
 
@@ -969,8 +1025,11 @@ MSEの試験のページ(14.10、H.264の640×360と426×240)を`NET=user`と`gp
 ページに渡すファイルと、ページが保存するファイルは、実身にする。File System Access API(`showOpenFilePicker`、`showSaveFilePicker`、`port/blink/file_system_access_tessronos.cc`)も同じで、開くときはパネル6で選んだ実身をファイルとして渡し、保存するときは名前をパネル3で尋ねた空のファイルを渡す。ページが書いたものは、書き込みのストリームを閉じたときにブラウザの保存箱の新しい実身になる(開いた実身は書き換えない)。`showDirectoryPicker`は、パネル6で選んだ実身を、ファイル変換がディレクトリとして書き出すもの(仮身を並べた図形、キャビネットのようなもの。並べた仮身の実身がその中身になる)として渡す。書き出したツリーはメモリの中に、オリジンごとのファイルシステムと同じ作りで持ち、ページはその中のファイルとフォルダを読み書きする。ページが変えると、2秒後にツリーの全体を、仮身を並べた図形の新しい実身としてブラウザの保存箱に取り込み、トレーに仮身を置く(選んだ実身は書き換えない)。ディレクトリとして書き出せない実身を選ぶと、選ばなかったものとする(`AbortError`)。オリジンごとのファイルシステム(`navigator.storage.getDirectory()`)は実身ではなく、ブラウザの保存域に持つ(14.4.5)。ファイルと実身の間の変換は、ファイル変換(`lib/libxfu`、`include/ts/xfu.h`)の規則に従う(`port/net/br_objfile.cc`)。ライブラリが読み書きするファイルのツリーは、メモリの中の1つのファイルである。
 
 - `<input type="file">`を押すと、ブラウザはパネル6(14.7.3)を出す。一覧には、トレーで手にある組の仮身が並び、パネルに仮身を入れると一覧の終わりに加わって選ばれる。了解で選んだ実身を、ファイル変換が書き出すときと同じ1つのファイルにする。取り込んだファイルの実身はそのときのファイル、文章の実身はその文字、ほかはxmlTADである。ファイルのバイト列は、ブラウザの中で`/obj/<UUID>/<名前>`というパスで持ち、Blinkにはそのパスのファイルとして渡す。ファイルの大きさと時刻はブラウザの側のサービス(`FileUtilitiesHost`、`port/blink/files_tessronos.cc`)が答え、Blobの格納側(14.4.4)がバイト列を読む。取消のときは、ページに`cancel`イベントが届く。フォルダの選択(`webkitdirectory`)では、パネル6で選んだ実身を`showDirectoryPicker`と同じくディレクトリとして書き出し、その中のすべてのファイルを渡す。ファイルのパスはASCIIの文字だけの`/obj/<UUID>/top/<番号>/file<拡張子>`で、名前を持たないので、上のフォルダの名前を選んだ実身の名前から順に`base_subdirs`に入れて渡す。`webkitRelativePath`(`fsadir/sub/b.txt`など)はそれと名前から作られる。BlinkはこれをAndroidの作りでしか使わないので、パッチ`file_input_type.patch`で、`base_subdirs`があれば使うようにする。Blinkの`FileChooser`はブラウザのプロセスの`FileChooser`のサービスに尋ねる作りで、パネルの答えを渡すインタフェースがないので、パッチ`file_chooser.patch`で、埋め込み側が選んだファイルを渡すインタフェースを足す。このパッチはヘッダを変えるので、ヘッダを使う`br_blink.cc`だけが、パッチを当てたヘッダのツリーを先に探す(`flags.txt`の`-iquote`)。
-- ネットワークから保存するものは、受信しながらメモリにためて、終わってから実身にする。設定ウインドウの〈ダウンロード〉で進み具合を見られ、〈中止〉で取得を止められる。一覧は利用者ごとのストア`downloads`に持ち、次の起動でも見られる。保存先は下のとおりブラウザの保存箱のままである。
-- ページが保存するもの(`download`属性のリンク、Blobの`blob:`のURL、`data:`のURL)と、応答が`Content-Disposition: attachment`のページは、実身にして実身「システム」の「ブラウザの保存箱」(`SYSDEF_BROWSER_SAVE`、14.8)に入れ、その仮身をトレーに置く。メッセージ行に「「名前」をブラウザの保存箱に入れ、トレーに仮身を置きました」と出す。ファイル変換が取り込むときと同じく、文字のファイルは文章、画像は図形の実身になり、ほかはそのまま持つ。名前は、ページが付けた名前、`Content-Disposition`の`filename`、アドレスの最後の部分の順に取り、拡張子がなければ型から付ける。Blinkはダウンロードをブラウザのプロセスに頼む作りなので、パッチ`local_frame.patch`で、頼む内容をブラウザに渡すフック(`g_download_url_hook`)を足す。バイト列は、`data:`ならフレームが作ったBlobから、`blob:`ならURLのBlobから(ページがURLをすぐに取り消してもトークンで読める)、ほかは取得して得る。保存はそれぞれのスレッドで行うので、同時に終わったものが保存箱に仮身を足すときに保存箱を開き合い、`E_BUSY`で失敗した。いまは保存を1つずつ行う(`br_objfile.cc`の`br_obj_save`)。添付のページは表示せず、表示していたページをそのまま残す。
+- ネットワークから保存するもの(ダウンロードになったナビゲーションの応答、`download`属性のリンク)は、受信しながら実身に書く。設定ウインドウの〈ダウンロード〉で進み具合(受け取った量と、`Content-Length`があればその割合)を見られ、〈中止〉で取得を止められる。一覧は利用者ごとのストア`downloads`に持ち、次の起動でも見られる。保存先は下のとおりブラウザの保存箱のままである。以前は受信しながらメモリにため、終わってから実身にしていた。
+- ページが保存するもの(`download`属性のリンク、Blobの`blob:`のURL、`data:`のURL)と、応答が`Content-Disposition: attachment`のページは、実身にして実身「システム」の「ブラウザの保存箱」(`SYSDEF_BROWSER_SAVE`、14.8)に入れ、その仮身をトレーに置く。メッセージ行に「「名前」をブラウザの保存箱に入れ、トレーに仮身を置きました」と出す。ファイル変換が取り込むときと同じく、文字のファイルは文章、画像は図形の実身になり、ほかはそのまま持つ。名前は、ページが付けた名前、`Content-Disposition`の`filename`、アドレスの最後の部分の順に取り、拡張子がなければ型から付ける。Blinkはダウンロードをブラウザのプロセスに頼む作りなので、パッチ`local_frame.patch`で、頼む内容をブラウザに渡すフック(`g_download_url_hook`)を足す。バイト列は、`data:`ならフレームが作ったBlobから、`blob:`ならURLのBlobから(ページがURLをすぐに取り消してもトークンで読める)、ほかは取得して得る。保存はそれぞれのスレッドで行うので、同時に終わったものが保存箱に仮身を足すときに保存箱を開き合い、`E_BUSY`で失敗した。いまは保存箱に仮身を足すところを1つずつ行う(`br_objfile.cc`の`g_save_lock`)。全体を持つもの(`br_obj_save`)は取り込み全体をその中で行い、受信しながら書くもの(`br_obj_save_stream`)は、保存箱のボリュームに、どこからも仮身のない実身として取り込み(`xfu_import`に保存箱を渡さず`near`で場所だけ渡す)、全体を書き終えてからその中で保存箱に仮身を足す(`xfu_box_link`)。受信は長くかかるので、その間ほかの保存を待たせない。添付のページは表示せず、表示していたページをそのまま残す。レンダラを使うときは、保存とダウンロードの一覧の記録はブラウザのプロセスが行う。ページが作ったバイト列(`blob:`、`data:`)は、レンダラがメモリの実身に入れ、`Host.KeepDownload`(同期)でブラウザに渡し、ブラウザが受け取ってから答えを返す。ネットワークから取るものは、応答の時点でリクエストごとブラウザに渡す(下)。ブラウザは、添付のサイトのために起こしたレンダラを、ページの答えが保存とわかった時点で終わらせる。以前はレンダラが自分のスレッドで保存していたので、別のサイトの添付は保存の前にレンダラごと消え、保存箱にも一覧にも残らず、メッセージ行は「保存しています…」のままだった。Chromeでもダウンロードはブラウザのプロセスの仕事で、レンダラはファイルを書かない。〈設定〉の〈ダウンロード〉は、ブラウザが記録した行(受信中の行もブラウザが持つ)と、ウインドウのページのレンダラが記録した行(応答の来る前に失敗した`download`属性のリンク)を合わせ、同じ行は1つにして、受信中、新しい順に並べる。ブラウザの受信中の行の〈中止〉は、レンダラに尋ねずブラウザで止める(`br_uidata.cc`の`br_ui_download_cancel`、キーの`browser:`)。
+- ナビゲーションの応答を表示するか保存するかは、Chromeのブラウザがコミットの前に決めるのと同じ判定で、応答のヘッダが来た時点で決める(`br_blink.cc`の`br_nav_judge`。Chromeでは`NavigationURLLoaderImpl::OnReceiveResponse`)。`Content-Disposition: attachment`の応答のほか、型がBlinkの文書にできるもの(`blink::IsSupportedMimeType`。HTML、XML、文字、Blinkが表示する画像と動画と音声)でない応答も保存する。PDFは今までどおりPDFiumで描くページとして表示する。型が中身を言わないもの(型なし、`text/plain`、`application/octet-stream`など`net::ShouldSniffMimeType`が挙げるもの)は、`X-Content-Type-Options: nosniff`がなければ先頭の1024バイトから型を嗅ぎ(`net::SniffMimeType`)、その型で判定して表示する。型なしの文字は文字の文書になり、文字でないバイト列は保存になる。保存になる応答の状態が成功(2xx)でないときは、保存も表示もせず、Chromeと同じく無効な応答のエラーのページ(`ERR_INVALID_RESPONSE`)を出す。ブラウザ自身のページ(`about:`など)で型のないものはHTMLのままである。以前は添付だけを保存し、ほかの応答はすべて文書にしていた。`application/zip`の2.7MBの応答をBlinkがHTMLとして組み、実機ではレンダラが数分たっても答えず、ブラウザが固まった。QEMUでは1.5MBの文字でないバイト列の解析が1つのタスクで27〜30秒かかり(Oilpanの領域が100MBになる)、その間レンダラはどの求めにも答えなかった。`application/octet-stream`の応答が文字として表示されたのも同じ根である。
+- 保存のメッセージ行は、保存する側がブラウザのエンジンのスレッドに頼んで出す(コマンド`said:`)。保存を始めるときに「「名前」を保存しています…」、実身にし終えたときに「「名前」をブラウザの保存箱に入れ、トレーに仮身を置きました」を出す。取り込めなかったとき、接続が切れたとき、1分のあいだ何も届かなかったときは「「名前」を保存できませんでした」、〈中止〉とブラウザを閉じたときは「「名前」の保存を中止しました」を出す。頼んだ順に、ナビゲーションの答えの後で出るので、上書きされない。以前はナビゲーションの答えを受けたエンジンのスレッドが「保存しています…」を出していた。保存をブラウザのプロセスへ移してからは保存が答えより先に終わり、完了の文がその後の「保存しています…」で上書きされて残らなかった。`said:`の文は、届いてから3秒は、ポインタの下のリンクのアドレスより優先して出し、その後はリンクのアドレスに戻す(`br_main.cc`の`kSaidMs`)。以前はポインタがリンクの上にある間、完了の文がリンクのアドレスに隠れて読めなかった。Chromeの状態の表示も、ページの状態の文とリンクのアドレスを分けて持ち、リンクのアドレスはポインタがリンクの上にある間だけ出す。
+- 応答は、ヘッダと、型を嗅ぐのに要る先頭の分(1024バイト。嗅がないときは要らない)が来た時点で判定する(`br_nav_head_fetch`)。ナビゲーションの取得は、ネットワークのスタックの、受け取り手の歩調に合わせるストリーム(`br_net_fetch_paced`)で行い、答えはナビゲーションのスレッドでなく、ネットワークのスレッド(レンダラではネットワークのプロセスの答えの届くスレッド)で受けて、ナビゲーションのスレッドが待つ。表示するものは、そのまま全体を受け取ってから文書にする(全体で60秒の打ち切りは今までどおり)。ダウンロードと決まったら、ナビゲーションはそこで保存になったと答えて終わり、表示していたページは残る。本体はリクエストごとダウンロードの受け取り手に渡す。レンダラでは、ネットワークのプロセスからの答えのパイプ(`NetFetchClient`の受け手)を自分から外し(`br_net_fetch_take`)、それまでに届いた分と一緒に`Host.Download`(同期)でブラウザに渡す(`br_net_fetch_give`)。パイプにまだ読んでいない分は、そのまま受け手とともにブラウザへ移る。ブラウザはそれを専用のスレッド(downloads)で受け、届いた分を取り込みのスレッドに渡す。レンダラは本体を持たず、ブラウザに渡した後に終わってもよい。1つのプロセスのときは、同じストリームの続きを取り込みのスレッドに渡す。取り込みは1つのダウンロードに1つのスレッドで、ファイル変換の取り込み(`xfu_import`)が読むファイルを、届いたものを順に返すツリーにする(`br_obj_save_stream`)。全体をメモリに持たないよう、ネットワークのプロセスは、渡した分のうち受け取り手が取り終えたと答えていない分(`NetFetchClient.Piece`の答え)が512KB(`kPaceWindow`)になると、それ以上読まない。レンダラの受け手は届いたときにすぐ答え、ブラウザの受け手は取り込みのスレッドが取ったときに答える。Chromeでネットワークのサービスとダウンロードの間のデータパイプが満ちると読むのを止めるのと同じ働きである。ダウンロードには全体の打ち切りを掛けず、1分のあいだ1バイトも届かなければ止まった接続とみなして失敗にする(`kDlIdleMs`)。接続が切れたとき、2xxでないとき、書けなかったとき、〈中止〉のときは、取り込みが途中まで作った実身を消し(ファイル変換が失敗した取り込みの実身を残さないのと同じ)、保存箱にもトレーにも何も足さず、一覧の行を失敗か中止にする。ネットワークのプロセスのリクエストは、パイプを閉じて止める。ブラウザを閉じるときは、受信中のダウンロードを〈中止〉と同じく止め、途中の実身を消して一覧に中止と記録してから(3秒まで待つ)、レンダラとネットワークのプロセスを終わらせる(`br_downloads_close`)。Chromeは受信中のダウンロードがあると閉じる前に確かめ、閉じればダウンロードを取り消す(次の起動で続きから受け直せる途中のものとして残す)。ここは続きからの受け直し(`Range`)を持たないので、途中のものは残さない。以前は応答の全体を受け取ってから判定していたので、実機で3MBのzipを受ける間エンジンのスレッドが5秒止まり(「has not come round for 5.1 s」)、ナビゲーションの全体の打ち切りの60秒より長くかかるファイルは取得できず、受け取る間はレンダラとブラウザのメモリにその大きさだけ持っていた。`download`属性のリンク(`save_from_net`)も、ストリームを始めて応答が来たら同じ道で渡す。サービスワーカーが答えたナビゲーションと、1つのプロセスのときにページが開いたウインドウのナビゲーションは、今までどおり全体を受け取ってから判定し(`br_nav_answer`)、ページが作ったバイト列と同じく全体を渡す。
 
 ### 14.7.5 印刷
 
@@ -1147,10 +1206,15 @@ HTTPキャッシュのストアは、2026年10月16日まで、本文を受信�
 | `test_blink_history` | 閲覧履歴が次の起動で並び、1件消せる。アドレス欄の補完で残ったページに移る |
 | `test_blink_hsts` | HSTSの情報が次の起動に残り、閲覧履歴の消去で消える。規則は試験の行で足す(TLSのサーバを使わないので、応答のヘッダからの登録はChromiumの処理に任せ、ここでは試さない) |
 | `test_blink_dl` | 受信中の進み具合、〈中止〉、完了、一覧の持ち越しと一覧からの削除 |
+| `test_blink_dlatt` | `127.0.0.1`のページから別のサイト(`localhost`)の添付へ移ると、そのために起こしたレンダラはすぐ終わるが、添付はブラウザの保存箱の実身になり、次の起動の〈ダウンロード〉に完了の行が出る |
+| `test_blink_dlmime` | 添付と言わない応答のうち、`application/zip`、`application/octet-stream`、型なしの文字でないバイト列、文字でないバイト列の`text/plain`がダウンロードになり、ページが残り、メッセージ行が完了の文になってそのまま残り、保存箱の仮身が1つ増え、トレーの一番上がその仮身で、次の起動の〈ダウンロード〉に完了の行が出る。型なしの文字は表示する。`text/html`と称する1.5MBのバイト列をレンダラが組んでいる間に〈中止〉(Esc)が5秒以内に効く |
+| `test_blink_dlslow` | 秒を数えてタイトルに出すページ`/dsp`から、64秒かけて届く640000バイトの文字でないバイト列`/dsl.bin`へ移ると、応答の時点でダウンロードになり、10秒以内にメッセージ行に「保存しています…」が出て、ページは残って数え続け(レンダラが本体を待たない)、途中の〈ダウンロード〉に受信中の行が0%と100%の間の割合で出て、60秒より後に完了の文が出て保存箱の仮身が1つ増え、次の起動の〈ダウンロード〉に完了の行が出る |
 | `test_blink_autofill` | 住所とカードの登録、変更、削除、番号を伏せること、暗号化、パネルで取消なら入力しないこと、選べば入力すること |
 | `test_blink_input` | 入力欄への入力とフォームの送信、ホイールのスクロール、かな漢字変換、`target="_blank"`のリンクを別のプロセスのブラウザが開くこと(押してから新しいブラウザがページを求めるまでの時間をコンソールに出す。待つのは20秒まで)。戻ったフォームの欄は打った文字を保つ(Chromeと同じ) |
 | `test_blink_hwheel` | 横のホイール(`HID_WHEEL_H`。`dz`が正で右。タッチスクリーンの二本指を左へ動かした向き)が、右向きの`wheel`イベント(`deltaX`が正)としてページに届き、ページを横にだけ動かすこと。縦のホイールは縦にだけ動かし、左へ回すと左端に戻ること |
 | `test_blink_spa` | 単一ページのアプリケーションのセッション履歴。`replaceState`、`pushState`、フラグメントの項目、Alt+←と→、ページの`navigation.back()`と`history.go()`、`popstate`と`hashchange`、別の文書から戻ったときの状態のオブジェクトとスクロール位置とNavigation APIの項目、アドレスの欄が追いつくこと(`addr=`の行で欄が出したアドレスを書き出す) |
+| `test_blink_mp` | ページを別のサイトへ移すとレンダラが替わり、上限で閉じた前のレンダラのメモリが返ること、〈戻る〉で前のページの項目が新しいレンダラで状態のオブジェクトとともに戻ること、レンダラを`kill`してもブラウザが動いたままエラーのページを出すこと(14.13.7) |
+| `test_blink_mpnest` | `requestAnimationFrame`のコールバックが300msずつ`document.cookie`を読み続け、10回に1回は飛ばされるビューの切替えを始める間に、ブラウザが拡大・縮小で`Layout`を呼ぶ。コールバックの中でタイマー、`resize`、`ResizeObserver`が1つも走らず(`nested=0`)、レンダラが落ちないこと(14.13.2) |
 | `test_blink_ui` | リンクの上のアドレスをメッセージ行に出す、右ボタンの`contextmenu`、Ctrl+＝とCtrl+0の拡大(`devicePixelRatio`)、Ctrl+A・Ctrl+C・Ctrl+Vのトレーを通した複写、`requestFullscreen`とEsc、Ctrl+クリックで別のプロセスのブラウザ、`beforeunload`の確認(取消と了解) |
 | `test_blink_face` | ページから見えるブラウザの姿(14.4.12の表)をコンソールに書き出す。ChromeのLinux版が出さない`navigator.share`、`CSS.animationWorklet`、Content Indexが既定で見えないこと。`serif`が`Noto Serif JP`と同じ幅で`sans-serif`と違い、`monospace`が`Noto Sans Mono CJK JP`と同じ幅でラテン文字がどれも同じ幅であること |
 | `test_blink_api5` | CSS Paint APIのワークレットが箱を緑に描き、Animation Workletのアニメーション(起動の行`features=AnimationWorklet`で出す)が不透明度0.5に保つ。別のサイトのiframeがStorage Accessのハンドル(`requestStorageAccess({all: true})`)でファーストパーティの`localStorage`、`sessionStorage`、IndexedDB、Web Locks、Cache Storage、OPFS、見積もり、`createObjectURL`、`BroadcastChannel`を使う。加速度センサーはセンサーがないので`NotReadableError`。アプリのバッジ3がウインドウのタイトルの前に出る |
@@ -1168,10 +1232,10 @@ HTTPキャッシュのストアは、2026年10月16日まで、本文を受信�
 | `test_blink_pad` | 試験のソフトウェアのUSBコントローラ(6.3.2、`device/usb/vhc.c`)に挿したLogitech Dual Action(DirectInputのモード)が、ボタンを押すまでは見えず、押すと標準の配置で現れ(ボタン16、軸4)、Aの押しと離し、スティック、十字キーが届き、`gamepadconnected`が1回来ること |
 | `test_blink_midi` | 同じコントローラに挿した、送られたものを返すUSBのMIDIの機器が、入力と出力1つずつとして機器の名前で見え、システムエクスクルーシブを許したアクセスで、ノートと`F0 7D 01 02 03 04 05 F7`を送ると同じものが入力に戻ること |
 | `test_blink_pdf` | PDF(PDFiumの試験の`hello_world.pdf`)のページが白く灰色の背景に描かれ、タイトルがファイルの名前になること。ページが`pdfViewerEnabled`の真、5つのプラグインと2つのMIMEの型を見て、iframeのPDFが画像の1枚のページになること |
-| `test_blink_pw` | 前の形のブラウザが平文で書いたレコード9(試験が書く)を読めること。パスキーと、`PasswordCredential`の`store()`とログインのフォームのパスワードをパネルで許して保存し、起動し直したブラウザで、そのパスキーで署名し、`get({password})`で選び、フォームの欄にフォーカスして入れること。終わった後、レコード9が暗号化の形で部分が1つ、その鍵の実身の所有者が部分のユーザでモードが`rw-------`、ACLがないこと。ボリュームを書き出してから、起動したディスク全体を読み、3つのパスワードがどこにもないこと(パスワードはページのスクリプトが組み立て、タイトルには合ったかどうかだけを出し、試験の中では逆さに持つので、蓄えやタイトルやカーネルのイメージには現れない) |
+| `test_blink_pw` | 前の形のブラウザが平文で書いたレコード9(試験が書く)を読めること。パスキーと、`PasswordCredential`の`store()`とログインのフォームのパスワードをパネルで許して保存し、起動し直したブラウザで、そのパスキーで署名し、`get({password})`で選び、フォームの欄にフォーカスして入れること。続いて別のサイトの`localhost`の`/pw3`(3つ目のブラウザ)で、`127.0.0.1`のiframe(`/pwf`)のログインのフォームの欄にフォーカスが移っても、パネルが出ず欄が空のままで(`frame=empty`)、`localhost`には何もないこと(`get=null`)。終わった後、レコード9が暗号化の形で部分が1つ、その鍵の実身の所有者が部分のユーザでモードが`rw-------`、ACLがないこと。ボリュームを書き出してから、起動したディスク全体を読み、3つのパスワードがどこにもないこと(パスワードはページのスクリプトが組み立て、タイトルには合ったかどうかだけを出し、試験の中では逆さに持つので、蓄えやタイトルやカーネルのイメージには現れない) |
 | `test_blink_av1` | AV1を扱えると答えること(`canPlayType`、MSE、WebCodecs、MediaCapabilitiesの480pはなめらか、1080pはなめらかでない)と、WebMのAV1の480×360の動画がフレームを出して再生されること(Chromiumのメディアの試験のデータの`bear-av1-480x360.webm`)。キャンバスの1フレームを`VideoEncoder`でAV1のキーフレームに符号化し、MediaRecorderがAV1を受け付けること |
 | `test_blink_mseav1` | MSEでAV1を扱えると答えること(`isTypeSupported`のMP4とWebMの`av01`、MediaCapabilitiesの`media-source`の640×360)と、断片に分けたMP4のAV1(`bear-av1.mp4`、320×240)とWebMのAV1(480×360)をそれぞれ`SourceBuffer`に入れて、フレームを出して再生すること。読めないデータを入れた要素が誤りで終わったあと、別の要素でWebMのVP9が再生されること |
-| `test_blink_wv` | 導入していないとき、`/wv`のページの`com.widevine.alpha`が`NotSupportedError`、Clear Keyが使えること。メニューの〈Widevineを導入...〉のパネル7にEscで答えると何も取らないこと。`make ... WV_TEST=<ディレクトリ>`で、開発のマシンでリポジトリから取ったインデックスとパッケージ(`wv_Packages`、`wv.deb`)を試験のディスクの`/boot`にだけ載せたときは、起動の行`wvrepo=`で試験のサーバのコピーをリポジトリとし、パネル7にEnterで答えると、取得、SHA-256の照合、展開を経て、レコード10が指すモード`rw-------`の実身にライブラリが入り、同じページで`SW_SECURE_DECODE`のWidevineが使え、`HW_SECURE_ALL`は断られること。起動し直したブラウザが実身からCDMを読み込み(コンソールにバージョンが出る)、〈Widevineを外す〉をパネル2の了解で選ぶと、行と実身が消え、Widevineが断られること。暗号化された動画の再生と、鍵の要求の生成は試さない |
+| `test_blink_wv` | 導入していないとき、`/wv`のページの`com.widevine.alpha`が`NotSupportedError`、Clear Keyが使えること。メニューの〈Widevineを導入...〉のパネル7にEscで答えると何も取らないこと。`make ... WV_TEST=<ディレクトリ>`で、開発のマシンでリポジトリから取ったインデックスとパッケージ(`wv_Packages`、`wv.deb`。x64ではコンポーネントの更新のサービスの答えのアドレスを試験のサーバのものにした`wv_update.json`と、CRX3の`wv.crx3`)を試験のディスクの`/boot`にだけ載せたときは、起動の行`wvrepo=`で試験のサーバのコピーを入手元とし、パネル7にEnterで答えると、取得、SHA-256の照合(x64ではCRX3の署名も)、展開を経て、レコード10が指すモード`rw-------`の実身にライブラリが入り、同じページで`SW_SECURE_DECODE`のWidevineが使え、`HW_SECURE_ALL`は断られること。`NET=user`では続けて`/wvplay`のページで、Shaka Player(4.12.0)がデモのWidevineのストリーム(Angel One、H.264とAAC、CENC)をデモのライセンスのサーバの鍵で3秒より先まで再生すること(インターネットに届かずShaka Playerを取れないときは試さない)。起動し直したブラウザが実身からCDMを読み込み(コンソールにバージョンが出る)、〈Widevineを外す〉をパネル2の了解で選ぶと、行と実身が消え、Widevineが断られること |
 | `test_blink_find` | ページの中の検索。Ctrl+Fのパネルに「apple」、3つの一致のうち次、次、前へ移り、表示がその中ほどへ動くこと、動いている一致の橙色 |
 | `test_blink_keep` | フォームの`POST`、次に起動したブラウザがCookieと`localStorage`を読み戻す |
 | `test_blink_media` | WebGL(三角形の描画と画面の画素、`readPixels`、2×2のテクスチャを最近傍で貼ったフレームバッファオブジェクトの画素、WebGL 2のコンテキストでGLSL ES 3.00の頂点配列オブジェクトと整数のユニフォームで描いた色)、音声の長さ、`crypto`、`preload`のない動画を取得しないこと。`GL=1`でないときはWebGL 2がないことを確かめる |
@@ -1240,6 +1304,7 @@ HTTPキャッシュのストアは、2026年10月16日まで、本文を受信�
 | `test_blink_home` | メニューを右ボタンで出し、〈編集〉の下の〈ホームページに設定〉をポインタで選ぶと、ページの実身の本文が表示しているページのアドレスになることを確かめる |
 | `test_https` | `NET=user`のときだけ。外部のサイトを開いて画面のスクリーンショットを撮る。期限切れの証明書のサイトを拒否する |
 | `test_http3` | `NET=user`のときだけ。HTTP/3を使えるサイト(`https://cloudflare-quic.com/`、`https://www.google.com/`)を開き、続けて同じサイトのページを2つ開く(`then=`の行)。応答の`Alt-Svc`の直後の要求は、できかけのQUICの接続と競って既にあるTCPの接続で送られることがあるためである。ブラウザが終わるときに書く、プロトコルごとの応答の数と最初の応答のプロトコル(`proto=`の行)で、HTTP/3(`h3`)で届いた応答があることを確かめる。QEMUの利用者モードのネットワークがUDPを外へ通すことも、これで確かめる。続けて、ブラウザを開き直し、キャッシュにない各サイトのページを1つ開くと、最初の応答からHTTP/3で届くこと(サーバについて知ったことの持ち越し。HTTPSレコードが助けないように、名前はシステムの名前解決で引く。`dns=system`の行)、知ったことを使わずに(`forget`の行)1つのページを開いても、HTTPSレコードによってHTTP/3で届く応答があることを確かめる |
+| `test_netswitch` | `NET=user`のときだけ。ネットワークの切り替え(14.5.3)。makeに`TEST_NETDEV='-netdev hubport,id=n0,hubid=0 -netdev user,id=u1,ipv4=on,ipv6=on -netdev hubport,id=p1,hubid=0,netdev=u1 -netdev user,id=u2,net=10.1.2.0/24,ipv6=off -netdev hubport,id=p2,hubid=0,netdev=u2'`を与え、カードをQEMUのハブにつなぎ、その先に2つの利用者モードのネットワーク(10.0.2.0/24と10.1.2.0/24)を置く。初めにQMP係の`set_link`でu2を切り離してu1のアドレスを取り、ブラウザで`https://example.com/`を開く。表示の後、カードのリンクを下げ、u1を切り離してu2をつなぎ、リンクを上げて、前のアドレスを持ったままDHCPで問い合わせ直させ(9.3.1)、アドレス、ゲートウェイ、DNSサーバがすべて10.1.2.xになることを確かめる。ページのスクリプト(`script=js:`の行)は表示の45秒後に、前から接続のある`https://example.com/`と、まだ名前を引いていない`https://www.wikipedia.org/`を並べて`fetch`し(それぞれ60秒まで)、結果をタイトルに書く。両方が届くことを確かめる。2つ目のネットワークが無いときはアドレスが変わらず、飛ばす。終わるとu1に戻す |
 
 `test_blink_image`、`test_blink_dialog`、`test_blink_clip`、`test_blink_file`、`test_blink_print`、`test_blink_drag`はデスクトップを起こし、デスクトップが前のウインドウに渡す入力でクリックとキーを与える。試験のサーバのポートは試験ごとに変え(`HTTP_PORT`に足す数。`test_blink_frame`は20から22を使うので、2026年10月7日に足した試験は31から使う)、前の試験の閉じた接続が残っていても開けるようにしている。
 
@@ -1323,6 +1388,10 @@ QEMUのTCGでは、854×480のVP9でも1秒の再生にほぼ1秒で進む(MSE�
 
 2026年10月10日、明朝体と等幅の書体、ワーカーの`OffscreenCanvas`のWebGL、長いアニメーションフレーム、iframeの文書のService Worker、Web Platform Testsで見つけた違い(14.4.17)を直し、新しい`test_blink_swframe`と`test_blink_owl`を足して、`test_blink`、`test_blink_worker`、`test_blink_iframe`、`test_blink_api`、`test_blink_storage`、`test_blink_cache`、`test_blink_shared`、`test_blink_file`、`test_blink_sw`、`test_blink_swframe`、`test_blink_owl`、`test_blink_face`、`test_blink_idb`、`test_blink_frame`が通った(`make GL=1`)。
 
+2026年11月8日、x64のWidevine(14.6.3.1)を、QEMUのq35とOVMF(`tools/x64/ktest64.sh`、`ACCEL=whpx NET=user`)で`test_blink_wv`により確かめた。開発のマシンでコンポーネントの更新のサービスから取った答えとCRX3(Widevine CDM 4.10.3112.0、21,970,001バイト、SHA-256 `1bf1f200…a98f`)を試験のサーバから渡すと、パネル7に〈導入〉で答えたときだけ取得し、大きさとSHA-256の照合、CRX3の3つの署名の確かめ(Widevineのコンポーネントの鍵を含む)を経て、ライブラリ(21,965,296バイト)とマニフェストを実身に入れた。CDMは`ts_so.c`で読み込まれ(81,912KB、TLSあり、532のFDEをアンワインダに登録)、`requestMediaKeySystemAccess('com.widevine.alpha')`は`SW_SECURE_DECODE`で通り、`HW_SECURE_ALL`は断られた。インターネットに出る`/wvplay`では、Shaka Player 4.12.0がデモのWidevineのストリームの鍵をデモのライセンスのサーバから受け、CDMが復号とVP9のデコードを行う`DecryptingVideoDecoder`で768×576の映像を60秒の終わりまで再生した(1,500フレームで落としたものは0)。同じ映像のClear Keyのストリームも、復号の呼び出しを`BrCdmOnThread`を通して再生した。起動し直したブラウザは実身からCDMを読み込み、〈Widevineを外す〉で実身と行が消えた。同じイメージで`cxx`の群と`test_present`、`test_script`、`test_jit`、`test_skia`、`test_blink_media`、`test_blink_face`も通り、スレッドの制御ブロックを64バイトにしたあとも、C++のプログラムとブラウザは今までどおり動く。
+
+同じ日、`test_blink_wv`が最後まで終わらなかった原因を、キーの知らせの行き先の記録で確かめて直した。試験はブラウザのプロセスを利用者の操作なしに作るので、ブラウザのウインドウは入力フォーカスを受け取らず(10.4の規則)、キーは最初のウインドウ「BTRON」に残っていた。ブラウザのパネル7は開くときに入力フォーカスを取り、閉じるとそれを「BTRON」に返したので、試験のCtrl+Eは「BTRON」に届き、デスクトップは「OSを終了しますか？」を出して待った。デスクトップのパネルは、ほかのウインドウに打たれたキーも自分への答えとして読んでいたので、後でブラウザのパネル2に答えたEnterが、背後のこのパネルの「はい」にもなり、OSの終了が始まってブラウザも閉じた。直したのは次の3つである。デスクトップのパネル(`dt_pn_run`、`dt_confirm_timed`)は、その下のウインドウに打たれたキーだけで答える。問い合わせが出ている間にそのプログラムのウインドウが入力フォーカスを受け取ると、入力フォーカスは問い合わせに渡り、閉じるとそのウインドウに戻る(`knl_wmobj_focused`)。試験の`run_browser`は、利用者がページを開いたときと同じく、ページのウインドウに入力フォーカスを与えてから操作する。これで、`/wvplay`をCtrl+Eで閉じる元の形のまま、x64の`test_blink_wv`は92件の確かめがすべて通り、集計が出た。
+
 ## 14.11 ライセンス
 
 `tessron-chromium`のファイルはMITライセンスで配布する。`BROWSER=1`でビルドしたイメージには、Chromium(Blink、V8、Skia、`base`、`net`など)とその第三者コンポーネント、BoringSSL、FFmpeg、dav1d、Rustのクレートが含まれる。`GL=1`でビルドしたときは、ANGLE(BSD 3条項)とMesa(大半はMIT)も含まれる。一覧と条件は`THIRD_PARTY_NOTICES.md`にある。
@@ -1399,3 +1468,387 @@ Chrome拡張(Manifest V3)を扱う。Chromiumの`extensions/`はブラウザプ�
 - `runtime.connect`、`offscreen`、`userScripts`、WebTransportの`resourceType`はない。呼ばれない名前は`undefined`である。`commands`は`onCommand`があるだけで、キーでは動かない。
 - アイコンは使わない。`action`のボタンはメニューの項目で、ツールバーにもアイコンにも出ない。
 - CRXの署名、拡張機能の更新は扱わない。
+
+## 14.13 レンダラのプロセス
+
+Blinkの版のブラウザは、ページを別のプロセス(レンダラ)で動かす。ブラウザのプロセスはウインドウ、ツールパネル、入力、かな漢字変換、メニュー、パネル、セッション履歴を持ち、BlinkとV8は持たない。レンダラは1つのサイトのページを動かし、ページの保存域のストアとGPUのラスタ化を自分で持つ。ネットワークは、ブラウザごとに1つのネットワークのプロセスが持つ(14.13.8)。起動の行`process=single`を与えると、以前と同じく1つのプロセスでページを動かす。レンダラを起動できなかったときも同じである。
+
+### 14.13.1 起動と通信路
+
+レンダラはブラウザと同じプログラムで、起動の引数の1行目が`renderer`、その後にブラウザが受け取った行(`v8=`、`features=`など)が続く。ブラウザは`ts_spn_obj`に`TS_SPN_WITHPARENT`を付けて起動し、ブラウザが終わるとレンダラも終わる。
+
+通信路はMojoで、下の層は段階0のストリームの対(`socketpair`、5.7.1)である。ブラウザはMojoのブローカで、`PlatformChannel`の片端を`ts_chan_give`でレンダラに渡し、もう片端で招待(invitation)を送る。レンダラは`ts_chan_take`で受け取って招待を受ける。チャネルはMojoのIOスレッド(`MessagePumpEpoll`)が`epoll`で待つ。共有メモリ(ipczのノードのメモリ、ページの画素)は`memfd_create`のメモリの実身で、`SCM_RIGHTS`で運ぶ。
+
+招待には次の5つのインタフェースのうち4つのパイプが付く(`Page`のパイプは`CreatePage`で渡す)。招待の添付の名前は0から3の整数にする。MojoのipczはこれをNodeの最初のポータルの番号とし、それ以外の形の名前は1つだけの添付とみなすからである。定義は`tessron-chromium`の`application/browser/mojom/br_process.mojom`で、`tools/browser/build.sh`がChromiumのチェックアウトのMojoの生成器でC++にする(`$OBJ/_brgen`)。
+
+| インタフェース | 呼ぶ側 | 内容 |
+| --- | --- | --- |
+| `Renderer` | ブラウザのエンジンのスレッド | ページを作る(`CreatePage`)、エンジンの側のメニューのコマンド、試験が読む値、ストアの書き出し |
+| `Page` | ブラウザのエンジンのスレッド | `BrEngine`(br.h)の呼出しのすべて。ナビゲーションの取得と表示(`Navigate`)、描画、入力、セッション履歴 |
+| `Control` | ブラウザのウインドウのスレッド | 中止、スクリプトの停止、レンダラの終わり。レンダラのIOスレッドで受けるので、スクリプトがメインスレッドを止めていても届く |
+| `Host` | レンダラのどのスレッドからでも | ページの問い、許可、選択、ファイルの選択、スポイト、画面の共有のパネル、読み込みの進み具合、ブラウザのループへのコマンド、ダウンロードの受け渡し(`KeepDownload`、`Download`、14.7.4) |
+| `Data` | ブラウザの専用のスレッド(data calls) | 設定のウインドウと拡張機能のパネルが読み書きする、レンダラの持つもの(パスワード、パスキー、拡張機能、サイトのデータ、ダウンロード)。操作の名前と、JSONの引数と答え。ブラウザではエンジンのスレッドを通らないので、ウインドウとエンジンのスレッドが互いを待つことがない。レンダラでも専用のスレッド(data)で受ける。操作の中にはページのスレッドに仕事を頼んで待つもの(サイトの一覧など)があり、ページのスレッドで受けると自分を待つことになるからである。頼んだ仕事は、ブラウザが次に`Pump`を呼んだときにページのスレッドで行われる |
+
+### 14.13.2 呼出しの形
+
+ページのターン(Blinkのタスク、フレームのコールバック、描画)は、レンダラが自分の時点で行う。ブラウザはページを回すための呼出しをしない。ターンの結果は、ページの状態(タイトル、アドレス、リンクの上の文字、ページが求めた移動、全画面、開いたウインドウ、スクロールの位置など)を`FrameSink`の`State`で、描いたものを`Frame`で、どちらも非同期に送る。`State`は、前に送ったものと変わったときと、移動の求めや開いたウインドウがあったときだけ送る。ブラウザの側のページは`RemotePage`(`br_proc.cc`)という`BrEngine`で、届いた状態を持っておき、ウインドウのループが尋ねることにはその写しで答える。`br_main.cc`のループと画面の更新の手順は、1つのプロセスのときと同じである。
+
+入力(`Mouse`、`Wheel`、`SetScrollLeft`、`Compose`、`Commit`)と、答えの要らない求め(`Zoom`、`Edit`、`HistoryCut`、`LoadAs`、`Response`、`FullscreenDone`、`SaveUrl`、`DragAway`、`RunScript`)は非同期に送り、その結果は次の`State`で届く。ウインドウの位置と画面の大きさは、変わったときに`Window`で伝える。答えが要る問い(リンクの位置、移動の取得、戻ると進む、レイアウト、状態の問合せなど)も、Mojoの同期の呼出しにはしない(`Page`と`Renderer`に`[Sync]`のメソッドはない)。ブラウザは非同期で送り、エンジンのスレッドのタスクのループで答えを待つ(`br_proc.cc`の`call_wait`、`wait_answer`)。待つ間に〈中止〉を受けると、レンダラのメインスレッドが1秒以上ふさがっていればスクリプトの停止を伝え、ウインドウが終わりを与える時間がたっても答えなければレンダラを終わらせる。ウインドウを閉じるときは3秒まで待つ。答えが来ないまま応答の約束(コールバック)が捨てられたとき(パイプが切れたとき)も、待ちを終える。待つ間に走るのは、エンジンのスレッドのMojoのタスク(ほかの呼出しの答え、知らせ)だけで、メニューのコマンドと窓のイベントはループの本体が扱う。待ちの中から別の呼出しの待ちが始まったときは、記録に1行出す(`browser: the call ... is made inside a wait for another`)。レンダラの受け手は同期のメソッドを持たないので、Mojoはレンダラの同期の呼出しの待ちの中でそれを起こさない。Chromeのレンダラと同じく、ブラウザの呼出しはいつも`IpcRunner`のループで実行される。
+
+移動の取得(`Navigate`)は、レンダラがページを取得して文書にし終えるまで答えないので、長くかかることがある(遅いサーバ、大きな文書)。ダウンロードになる応答は、応答の時点でリクエストをブラウザに渡して答えるので、本体を待たない(14.7.4)。ブラウザはこれを非同期に送り、答えをエンジンのスレッドのタスクのループで待ち、待つ間も100msごとにウインドウの状態を見る(`br_nav_wait_verdict`)。〈中止〉(×とEsc)を受けると、そのレンダラに読み込みの中止(`Control.StopLoad`)を伝え、メインスレッドが1秒以上ふさがっていればスクリプトの停止も伝える。ブラウザはナビゲーションごとに番号を付け(`Navigation.seq`)、中止はその番号を名指す。`Control`はレンダラのIOスレッドで、`Navigate`はメインスレッドで受けるので、中止が`Navigate`の始まりより先に着くことがある。以前はレンダラが`Navigate`の始めに中止の印を消していたので、そのときの中止は失われ、応答しないサーバのページは中止できなかった。いまは、そのナビゲーションを名指した中止は始めに消さずに残す。応答を受け取り終えた後でも、表示や保存の前に中止が来ていれば、表示も保存もせずに中止とする(以前は取得が成功すると中止に関係なく表示し、表示中のページのスクリプトが終わらないと答えなかった)。中止から、ウインドウが閉じるときにエンジンのスレッドに与える時間(3秒)がたっても答えなければ、レンダラはBlinkの中の止められない仕事にいるとみなして終わらせる。表示中のページのレンダラなら、レンダラが落ちたとき(14.13.5)と同じエラーのページを元のアドレスで出し、メッセージ行に「読み込みを中止しました。応答しないページのプロセスを終了しました」と出す。別のサイトのために起こしたレンダラなら、表示中のページはそのまま残る。ウインドウを閉じるときは待ちをすぐにやめ、レンダラは閉じる手順で終わらせる。待ちをやめた呼出しの答えは捨てる。以前は同期の呼出しで答えを待ち続けたので、Blinkが大きな文書を組む間は中止も閉じるも効かず、閉じると3秒後にプロセスごと強制的に終わっていた。待つ間の右ボタンのメニューは、以前と同じくウインドウのスレッドが出す。
+
+レンダラは`Renderer`と`Page`の呼出しを、Blinkのタスクではなく自分のループ(`br_rproc.cc`の`IpcRunner`)で実行する。ページのターンは自分でBlinkのタスクを回す(`run_tasks`)ので、Blinkのタスクの中で受けると、タスクの中でタスクを回すことになるからである。
+
+Mojoでは、スレッドが同期の呼出しの答えを待つ間に、そのスレッドに結んだ受け手への同期の呼出しが届くと、待ちの中でそれを実行する(待ちの割込み)。`Renderer`と`Page`は同期のメソッドを持っていたので、レンダラのメインスレッドが同期の呼出しを待つ間に届いたブラウザの`Layout`などは、`IpcRunner`のループを通らず、その待ちの中で実行されていた。ページの`document.cookie`は、ネットワークのプロセスへの同期の呼出し(`Network.CookieLine`)である。そのため、`requestAnimationFrame`のコールバックやスクリプトの中、レイアウトの最中にページの組直し(`run_tasks`とライフサイクル)が入れ子で走った。入れ子の`run_tasks`はRunLoopの1段目なので、V8の入れ子にしないタスク(スタックを走査しない前提のGC)も実行する。実機(Surface Go 2)のYouTubeでは、これでコールバックの後に`PageAnimator::ServiceScriptedAnimations`のスタックだけにあるコントローラの一覧が回収されて0になり、`GetExecutionContext`でNULLを読んで落ちた。また、レイアウトの最中のライフサイクルの巻戻しで`document_lifecycle.cc`の検査に当たって止まった。最初の直しとして、`Network`の同期の呼出し(cookie、HSTS、消去、サイト、プロトコル、書き出し)を`[NoInterrupt]`にした(今も残している)。待つスレッドは自分の答えだけを待ち、その間に来た`Renderer`と`Page`の呼出しは、待ちが終わってから実行する。ネットワークのプロセスは、これらの呼出しにレンダラもブラウザも呼ばずに答えるので、この待ちで行き詰まることはない。実機では、`ServiceScriptedAnimations`で落ちる件はこれで出なくなった。`document_lifecycle.cc`の検査に当たる件は残った。下の記録の行で、残りの入れ子はBlinkの中の同期の呼出し(`PluginRegistry.GetPlugins`、`NotificationService.GetPermissionStatus`、`BlobRegistry.Register`、`GpuDataManager.Are3DAPIsBlockedForUrl`)の待ちに`Page.Layout`が入ったものと分かった。これは上のとおり`Page`と`Renderer`を非同期にしてなくした。
+
+ほかに2つの形を試してやめた。1つは、レンダラのプロセス全体で待ちの割込みを止める形(`mojo::SyncCallRestrictions::DisableSyncCallInterrupts`)である。Chromeでこの関数を呼ぶのはブラウザのプロセスで(`content_main_runner_impl.cc`の`RunBrowser`)、レンダラは呼ばない。Chromeのレンダラでは、ブラウザからメインスレッドへの同期の呼出しがないので入れ子が起きない。この形では`test_blink_api4`が通らなくなった(OPFS、同期アクセスハンドル、PressureObserver、スポイトの結果が来ない)。プロセスの中のサービスへの同期の呼出しのうち、待ちの割込みで答えが来るものが答えを得られなくなるためとみられる。もう1つは、エンジンの仕事の間は`IpcRunner`の`RunsTasksInCurrentSequence`を偽にして、待ちの中に届いた`Renderer`と`Page`の呼出しをMojoにループへ投げさせる形である。QEMUの試験は通ったが、実機のYouTubeでブラウザが固まった。ブラウザのエンジンのスレッドは`Renderer.Query`の答えを160秒以上待ったが、その間もレンダラはスクリプトとタスクを実行し続けていた(スクリプトの停止の問合せに答え、長いタスクの記録も出た)。互いの同期の待ちではなく、`IpcRunner`のループに戻らなかったか、投げた呼出しが実行されなかったとみられるが、どちらかはまだ確かめていない。本来の形は、ブラウザからレンダラへの呼出しを同期にしないことで、上のとおりにした。
+
+入れ子で届いた呼出しは、記録に1行出す(プロセスで最初の8回まで、`browser: renderer: Page.Layout taken inside the engine's work ... frames ...`)。framesはメインスレッドのフレームの戻り番地で、記号つきのプログラムで`addr2line`にかけると、どの同期の呼出しの待ちで届いたかが分かる。`Page`と`Renderer`を非同期にした後は出ない。
+
+レンダラのメインスレッドから出る同期の呼出しと、その答える側は次のとおりである。
+
+| 呼出し | 呼ぶスレッド | 答える側 | 待つスレッドを呼び返すか(`[NoInterrupt]`にできるか) |
+|---|---|---|---|
+| `Network.CookieLine`、`Cookies`、`CookiePut`、`HstsKnown`、`Clear`、`Sites`、`Protocols`、`Flush` | メイン(`document.cookie`、cookieStoreなど) | ネットワークのプロセスの`network calls` | 呼び返さない。拡張機能の規則(`NetHooks`)はネットワークスタックのスレッドからレンダラの`net hooks`のスレッドへ行き、メインスレッドは通らない |
+| `Store`のすべて(`Load`、`LoadEntries`、`Version`、`Save`、`Apply`、パスワード、パスキー、`Ext*`) | `store asks`(メインは条件変数で待つ) | ネットワークのプロセスの`store calls` | 呼び返さない。メインの待ちはMojoの待ちではないので、もともと割り込まれない |
+| `Host.AskPage`、`AskPermission`、`Choose`、`ChooseObjects`、`ShareChoose`、`AutofillChoose` | メイン(シーケンスのあるスレッドはそのまま呼ぶ) | ブラウザのパネルのスレッドのパネル(`dlg_work`、自分のチャネルで回る) | 呼び返さない。パネルが出ている間、エンジンのスレッドがそのレンダラに答えを求める呼出しはパネルが閉じるまで答えを待つが、待つのはタスクのループなので、ほかのウインドウとレンダラは止まらない |
+| `Host.Progress`、`MainCommand`、`ExtAskLoad` | メイン | パネルのスレッド(メッセージ行、コマンドの列) | 呼び返さない |
+| `Host.PickColor` | スポイトの専用のスレッド(`std::thread`、`g_caller`経由) | パネルのスレッドが、ブラウザのループの押下を待つ | メインスレッドは待たないので、ブラウザのループが`Page`を呼んでも答えられる |
+| `Host.KeepDownload`、`Download` | サービスのスレッド | パネルのスレッド | 呼び返さない |
+| `Host.GpuChannel` | メイン(起動時) | ブラウザの`g_gpuq`がGPUのプロセスを待つ(最長10秒) | 呼び返さない |
+| GPUのプロセスのチャネル(`GpuChannel`、コマンドバッファの待ち、共有イメージ) | メイン | GPUのプロセス | GPUのプロセスはレンダラを同期で呼ばない |
+| Blinkの中の同期の呼出し(`PluginRegistry.GetPlugins`、`NotificationService.GetPermissionStatus`、`BlobRegistry.Register`、`GpuDataManager.Are3DAPIsBlockedForUrl`、ファイルのBlobの大きさなど) | メイン | このプロセスのサービスのスレッド(blob、services) | 読んだ範囲では、メインスレッドに投げて答えを待つものはない。待ちの割込みは残るが、`Page`と`Renderer`は起こされない |
+
+ネットワークのプロセスとGPUのプロセスでは、同じ入れ子は起きない。ネットワークのプロセスの同期の呼出しは`NetHooks`だけで、ネットワークスタックのスレッドから出る。そのスレッドには同期のメソッドを持つ受け手がない。GPUのプロセスは同期の呼出しをしない。試験は`test_blink_mpnest`である。待ちの道の行き詰まりがないことは、`test_blink_dialog`(alert、confirm、prompt、select)、`test_blink_clip`(権限のパネル)、`test_blink_api4`(スポイト)、`test_blink_mp`(読込み中の`Progress`)で見る。
+
+ブラウザのエンジンのスレッドは、すべてのウインドウとレンダラの呼出しを1本で受け持つので、1つのレンダラの答えを待つ間は、ほかのウインドウとレンダラの仕事も止まる。そのため、ブラウザの側の呼出しを次の3つに分けている。
+
+| 分け | 呼出し | 扱い |
+|---|---|---|
+| (a) 利用者の操作の結果としてすぐ答えが要るもの | `Click`、`Key`、`Context`、`Find`、`LinkAt`、`FirstLink`、`Drop`、`Print`、`HistoryGo`、`Caret`、`Load`、`OpenPage`、`Navigate`、`SetCanvas`、`SetGsurf`、`CreatePage`、`Command`(メニュー)、`KeepFile`、`PlayerCanvas`、`PlayerState`(一時停止かどうか、押下のとき)、`PipPress`、`PipClosed`、`Query`(試験の終わりとメニューの問い)、`Memory` | 答えを待つ(`call_wait`)。ふさがっていれば〈中止〉でスクリプトの停止、それでも答えなければレンダラの終了、閉じるときは3秒まで |
+| (b) 周期のもの、見張り、記録のためのもの | 描画の統計の`Query`(`gpustat`、`mediaframes`)、動画のウインドウの`PlayerState`(見せた画の数、ループが回るごとに見る)、`PaintPlayer`(動画のウインドウの画) | 待たない。非同期で頼み、答えが来たときに受け取る。統計は答えが来たときに前の答えからの分を記録に出し、来なければその回は出さない。同じ頼みが答えられていなければ頼み直さない(`br_proc_query_async`)。動画のウインドウは、メモリにある画を描いて次の画を頼み、来たら描き直す(`br_proc_player_painted`) |
+| 答えを待たずに送るもの | `Layout` | Chromeが大きさを送るだけなのと同じく(`WidgetBase::UpdateVisualProperties`)、幅が変わったときに送り、前の高さを返す。答えとページの状態(`doc_height`)で高さを直し、`pump()`が変わったと言うのでウインドウが組み直す。答えの来ない`Layout`は1つだけで、その間に変わった幅は答えの後に送る |
+| 聞き手があるときだけ時限つきで待つもの | `MayLeave`、`Closed` | `MayLeave`は、ページの状態(`beforeunload`)が聞き手なしと言えば問わずに移る。聞き手があれば500ミリ秒まで待ち(パネルが利用者に問う間は数えない)、答えがなければ移る。Chromeの`RenderFrameHostImpl::ShouldDispatchBeforeUnload`と`kUnloadTimeout`に当たる。`Closed`(アンロード)も500ミリ秒まで |
+| (c) 別のレンダラの仕事を止めてはいけないもの | 離れたページのレンダラの`FlushStores`(`end_proc`)、表示をやめるページの`HistoryState`(`run_keep`) | `FlushStores`は、メインスレッドが`BR_HELD_MS`より長くふさがっていれば頼まず、そうでなければ最長5秒。`HistoryState`は待たずに写しを使う(写しがまだないページだけ待つ)。写しは、ページのアドレスか項目の中の位置が変わったときに、レンダラがページの状態とともに送り(`hist_given`。Chromeでレンダラが項目の状態を送る`UpdateState`に当たる)、取り出すたびに非同期で頼み直す。閉じるときの待ちは3秒まで |
+
+聞き手の有無は、レンダラがページの状態を送るたびに、ページとそのiframeの文書に`beforeunload`の聞き手があるかを見て入れる(`BlinkEngine::beforeunload`)。
+
+エンジンのスレッドは、ブラウザ自身のメニューとパネルでもふさがない。ページの上の右ボタンは、ページの`contextmenu`を`Context`で問うたあと、メニューを窓のスレッドに渡して出させ(`ctx_menu_due`、`window_menu`)、選ばれた項目をコマンド(`g_commands`)として受ける。〈探す〉の入力、Widevineの導入と取り外しの確認、拡張機能の選択と確認と権限の問いのパネルも、窓のスレッドで出し(`panel_on_window`、`panels_due`)、答えをコマンド(`findword:`、`wvgo`、`wvremovego`、`extloadid:`、`extadd:`、`extnot`、`extpermis:`)で受けて続きを行う。以前は、メニューとパネルが答えられるまでエンジンのスレッドで回っていたので、その間はほかのウインドウとレンダラの状態も描画も止まり、見張りが「has not come round … its loop」と出した(実機の記録で最長10.2秒)。ページのスクリプトが出すパネル(`alert`など、`Host`)は、今までどおりパネルのスレッドで出す。ページを見せ始めるときの`SetCanvas`は(a)のままで、見せ始めたページのスクリプトがすぐにふさがると、その間は答えを待つ。Chromeのように待たずに渡すには、フレームにメモリの代(どの`SetCanvas`のものか)を付ける必要があり、まだしていない。
+
+何もすることがないとき、ブラウザのエンジンのスレッドとレンダラのメインスレッドは、そのスレッドのタスクのループの中で待つ(`br_loop_wait`)。1つのプロセスのブラウザとレンダラではBlinkのスケジューラ、マルチプロセスのブラウザではMojoのタスクの`SingleThreadTaskExecutor`である。待つのは次に決まった時刻まで(ページが求めたフレーム、再生中のプレーヤを見る10msごとの時刻)で、長くて1秒である。その間にそのスレッドのタスク(ページのタイマー、ほかのスレッドが送ったもの、そのスレッドに結んだパイプのメッセージ)が1つでも走ると、残りのタスクを済ませて待ちを終える。ほかのスレッドは、何もしないタスクを送って待ちを終わらせる(`br_loop_wake`)。ブラウザでは、ウインドウのスレッドがイベントを受けたとき、メニューのコマンドやパネルの求めをエンジンのスレッドに渡したとき、IOスレッドがレンダラのフレームと状態を受けたときに起こす。レンダラでは、`IpcRunner`にMojoのタスクが来たときに起こす。レンダラの待ちがタスクで終わったときは、すべてのページがターンを行う。動画の一時停止中のシークの画のように、メディアのスレッドから画が届いたときも起こす。ウインドウのスレッドは、ポートのイベントを`ob_rea_tmo`で200msまで待つ。以前は、エンジンのループが10msごとに回り(何もしていなくても1秒に約77回)、ウインドウのスレッドは5msごとにポートを見ていた。
+
+`Host`は、ブラウザでは専用のスレッドで答える。エンジンのスレッドがレンダラを呼んでいる間にページが`alert`を出しても、パネルが出る。スポイトのように、ブラウザのループがページの押下で答えるものも待てる。レンダラの側で、シーケンスを持たないスレッド(移植層のpthread)からの呼出しは、そのための専用のスレッドで行い、終わるまで待つ。Mojoの同期の呼出しは、呼ぶスレッドのシーケンスで待つからである。
+
+ページの画素は、ブラウザが作ったメモリの実身(ビューの大きさ)にレンダラが描き、ブラウザがそこから変わった矩形だけをウインドウの面に写す。GPUでラスタ化するレンダラは、同じメモリに読み戻す。
+
+フレームは、ChromiumのCompositorFrameと同じ考え方で、レンダラが自分の時点で作る。ページのターンがフレームを作ったら、レンダラはそのターンの終わりに、変わった所をビューの位置で描き、矩形の一覧を`FrameSink`の`Frame`で1回だけ送る。ブラウザはこれをIOスレッドで受けて控え、次の表示でその矩形だけをメモリからウインドウの面に写し、写し終えたら`FrameDone`を送る(どちらも非同期)。次のフレームの時刻は、フレームが`FrameDone`で表示し終えたときに決まる(14.4.2。`frame_shown`)。ターンがフレームを始めても、ページの描画に変わった所がなくて送らなかったとき、または前のフレームがまだ表示中のときは、そのターンの終わりでそのフレームを終えたものとし、次の時刻を決める(ChromiumのBeginFrameで、何も変わらなかったフレームがそこで終わるのと同じ)。以前はこれがなく、描き直しのないcanvasやWebGLだけを毎フレーム描くページでは、時刻が進まないままターンのたびにフレームが始まり、`requestAnimationFrame`が1秒に600〜740回(実機のthree.jsの例)、QEMUで160〜180回呼ばれた。1つのプロセスのときは、フレームを始めるたびに`frame_shown`を呼んでいる。レンダラは`FrameDone`を受けるまで、そのメモリに描かない。描かれている途中の画素をブラウザが写すことはない。ウインドウの全体を描き直すとき、ブラウザがメモリを持っていなければ(フレームを受けていないか、送り返した後)、`Redraw`で全体のフレームを1回求め、それが来るまではウインドウの面の今の画素を残す。以前は、ブラウザが表示のたびに、変わった所を尋ね(`Damage`)、矩形ごとに`Paint`を同期で呼び、表示したことを伝えていた(`FrameShown`)。QEMUのav1の再生では、レンダラが1回5〜11msで描くのに対し、ブラウザは1回の`Paint`で145〜280ms待っていた。表示は1秒に0.7回、1回366msで、1プロセスのとき(1秒に3.6回、1回12.4ms)より大きく遅かった。
+
+ビューの位置は、前のフレームの後にブラウザが`View`で上端と高さを伝えていれば(バーを動かしたとき、ウインドウの大きさが変わったとき)その位置、伝えていなければページが自分で動いた位置(ホイール、キー、スクリプトのスクロール、滑らかなスクロールの途中)である。ブラウザは次の`State`のスクロールの位置で表示の位置を合わせ、同じ位置のフレームを写す。ページが自分で動いた位置をブラウザの古い位置で描くと、描くたびにページが元の位置へ戻され、ホイールでスクロールできない。
+
+ウインドウを閉じたページ(`Closed`)は、文書がなくなるので、それ以降ターンを行わず、状態も送らない。
+
+### 14.13.3 サイトとレンダラ
+
+ナビゲーションの行き先が、表示中のページと違うサイト(スキームと登録可能なドメイン、`net::SchemefulSite`)のときだけ、別のレンダラのページで取得して表示する。同じサイトの中の移動、`about:`、`data:`のページ、再読み込みは同じレンダラで行う。iframeは別のプロセスにしない。ランのサイト(14.13.4)は、リダイレクトの後に表示したページのアドレスで決める。別のサイトへリダイレクトされたページを表示したレンダラは、そのページのサイトのレンダラになる。
+
+別のレンダラでページを表示したら、ブラウザは前のページを閉じる(`run_leave`、`Page.Closed`)。前の文書はアンロードされ(`unload`、`pagehide`)、その文書の動画と音の再生、`MediaRecorder`の録画、`getUserMedia`のカメラとマイク、WebRTCは文書とともに終わる。そのプレーヤのピクチャインピクチャのウインドウも閉じる。前のレンダラにほかのページ(そのページが開いたウインドウ)がなければ、レンダラを終わらせてメモリを返す。開いたウインドウがあれば、レンダラはそのウインドウのために残り、最後のウインドウを閉じたときに終わる(`sub_close`)。同じサイトの中の移動は、同じレンダラの中でBlinkが新しい文書をコミットし、前の文書をアンロードする。1つのプロセスのときと同じである。以前は、前のページを閉じずに戻るために残していた。上限(下)に届かないかぎり前のページが動き続け、ほかのサイトへ移っても、前のページの動画と音、カメラの録画が止まらなかった。前のページを凍結して戻ると進むに使う形(ChromiumのバックフォワードキャッシュでのBlinkの凍結)は、今は持たない。
+
+プログラムを読み込みBlinkを起こすのに数秒かかるので、ブラウザはレンダラを1つ用意しておく(予備)。用意したレンダラは起動してすぐにBlinkを起こし、ページを待つ。予備はページに使った後、別のスレッドで次のものを起こす。
+
+レンダラの数(予備を含む)の上限は、マシンのメモリが4GBで3、8GBで6とし、その間とそれより大きい分は比例で決め、2を下回らない。QEMUの試験機(2GB)では2である。上限は、試験の起動の行`renderers=`で変えられる。表示していないランのページは閉じるので、上限を超えるのは、ページが開いたウインドウのために残ったレンダラがあるときだけである。そのときも、ページが開いたウインドウ(`window.open`)を表示しているレンダラは閉じない。閉じるレンダラには、ストアを書かせてから終わらせ(`FlushStores`、`Control.Closing`)、`waitpid`で回収する。5秒で終わらなければ`kill`する。
+
+### 14.13.4 セッション履歴
+
+セッション履歴はブラウザが持つ。1つのレンダラが続けて表示したもの(1つのサイトのページと、そのエンジンが作った項目)を「ラン」と呼び、ブラウザはランを順に並べる。別のサイトへの移動は、表示中のランの後ろに新しいランを作り、その後ろのランを捨てる(進む項目が消えるのと同じ)。ランの項目は、そのランを表示しなくなるときに、レンダラから項目ごとのページの状態(`blink::PageState`。アドレス、状態のオブジェクト、スクロールの位置、フォームの状態、Navigation APIのキー)とアドレスを受け取って持つ。
+
+戻ると進むは、ランの中ではそのレンダラのエンジンが行う(同じ文書の項目と、同じサイトの別の文書)。ランの最初の項目より前、最後の項目より後へは、隣のランへ移る。表示していないランのページは閉じているので、新しいレンダラにランの項目を渡して組み立て直し(`history_restore`)、離れたときの項目を戻る移動として取得する。その後、それまで表示していたランのページを閉じる。状態のオブジェクトとスクロールの位置はその項目のものになる。ページのスクリプトの`history.go()`は、ランの中でだけ動く。
+
+### 14.13.5 レンダラが落ちたとき
+
+レンダラが終わると(異常で終わっても、`kill`されても)、そのパイプが切れ、呼出しが失敗する。ブラウザはそのページを捨て、新しいレンダラに、Chromeと同じ「エラーが発生しました」のページを、元のページのアドレスで表示する。〈再読み込み〉で元のページを読み直す。ブラウザは動き続ける。
+
+### 14.13.6 エンジンの側のものの運び方
+
+1つのプロセスのときにブラウザのプロセスの中で呼んでいたエンジンの側のものは、次のように運ぶ。
+
+| もの | 運び方 |
+| --- | --- |
+| 動画のピクチャインピクチャのウインドウ | ウインドウはブラウザが開く。開く、替える、閉じるの求めはページの状態(`PageState.pip`)で届き、プレーヤの画は、ブラウザが作ったメモリの実身にレンダラが描く(`PlayerCanvas`、`PaintPlayer`)。閉じたことと押下(再生、一時停止)はレンダラに伝える |
+| ページへのリンクのドロップ | 実身の中身をメモリの実身でレンダラに渡し、レンダラがページの読むファイルとして持つ(`KeepFile`) |
+| 〈Widevineを導入...〉と〈Widevineを外す〉 | パネルはブラウザが出す。導入中か、導入済みかはページの状態で届く。取得と展開、完了、削除はレンダラのコマンドで、導入の終わりは`wvdone`としてブラウザのループに戻る |
+| 〈設定〉のウインドウ | ほかのパネルと同じくブラウザのプロセスで開く。閲覧履歴はブラウザのものをそのまま使う。パスワードとパスキーは、ブラウザのプロセスが自分で読み書きする(14.4.7.1)。拡張機能、サイトのデータ、ダウンロード、HSTSは、表示中のページのレンダラに操作の名前とJSONで尋ねる(`Data`のパイプ、`br_uidata.cc`)。データの消去、拡張機能の有効と無効と削除、ダウンロードの中止は、どのレンダラも自分の分を持つので、すべてのレンダラに送る。尋ねる呼出しは、ブラウザのエンジンのスレッドを通らず、専用のスレッド(data calls)から各レンダラの`Data`のパイプへ同期で出す。設定のウインドウはエンジンのスレッドを待たず、エンジンのスレッドも設定のウインドウを待たない。ブラウザを閉じるときは、設定のウインドウに閉じるよう伝えるだけで、閉じ終わりは待たない。閉じている途中にもう一度開くよう求められたら、閉じ終わった後に同じスレッドが開き直す |
+| 拡張機能の状態の記録 | 状態の記録(有効と無効、ストレージ、アラームなど)は、ページを動かすプロセス(1つのプロセスのブラウザ、各レンダラ)がそれぞれ持ち、変わったときに丸ごと書く。有効と無効は〈設定〉で切り替えた利用者の言葉なので、自分のプロセスで切り替えたもの以外は、書く時点の記録の値を使う。起動時に読んだ値で、ほかのプロセスの切替えを書き戻さない |
+| 拡張機能のメッセージの受け方 | ワーカーの`msg.poll`(来たものを尋ねる)と`msg.answer`(返事を待つ)は、何も来ていなければブラウザの側で問いを待たせ(`br_ext_serve_later`)、来たとき(ログへの追加、`msg.reply`)に答える。`msg.answer`を起こす返事は、ほかのコンテキストの`msg.reply`のほかに、`chrome.scripting`のスクリプトがページで出した結果(`br_ext_inject_done`)と、`permissions.request`のパネルの答えもある。どれも同じ関数(`reply_given`)で、待っている問いがあればその場で答え、なければ次の`msg.answer`のために取っておく。ページのスレッドが読込みで混んでいると、結果より先にワーカーの`msg.answer`が待ちに入るので、結果が待ちを起こさないと20秒の時間切れまで返事が届かない。アラームは待ち合わせのスレッドがその時刻に起きて出す。20秒たっても何も来なければ、そのまま答える。ワーカーは答えを受けたらすぐに次を尋ねる。以前は100msごとに尋ねていた。内容スクリプトと拡張機能のページの問いは、フレームのnativeの関数がPromiseを返し、来たときにブラウザの側がそのフレームのスレッドにタスクを送って解決する。何か来ていればその場で答える。以前は150msごとに尋ねていた |
+| 試験の`gpucheck=`、`check=` | 比べる描画はブラウザが`RemotePage`を通して求める。動画のフレームの数、WebGLのフレームの数、GPUのラスタ化の数は、レンダラに尋ねる(`Query`) |
+
+ブラウザのプロセスは閲覧履歴とダウンロードの一覧のストアを自分で持ち(`br_data_init`)、エンジンの部分(ネットワーク、ページの保存域、サービスのスレッド)には触れない(`br_data.cc`の`engine_here`)。ほかのプロセスが残したデータの消去の知らせ(14.8)も、そのとおりに扱う。
+
+### 14.13.7 試験
+
+`tests/ktest/ktest_v8.c`の`test_blink_mp`が確かめる。`127.0.0.1`の`/mp1`を開き、別のサイトの`localhost`の`/mp2`へ移る。2GBの試験機ではレンダラは2つまでなので、`/mp1`のレンダラが閉じ、そのとき空きのメモリがレンダラ自身の分(試験機では26MB。プログラムのページはプロセスの間で共有するので戻らない)だけ増えること(10MB以上)、〈戻る〉で`/mp1`の項目が新しいレンダラで組み立て直され、状態のオブジェクト(`{n: 7}`)が戻ること、レンダラを`kill`する(起動の行`menu=killrenderer`)と、ブラウザが動いたままエラーのページを元のアドレスで出すことを、ブラウザが起動の行`procs=`のファイルに書いたものとタイトルで見る。
+
+`test_blink_mpnav`は、ページを離れたときに、そのページの再生と録画が終わることを確かめる。`127.0.0.1`の`/mpv1`は動画と音を繰り返して再生し、再生の0.5秒ごとに試験のサーバへ知らせる(`timeupdate`)。3回目で同じサイトの`/mpv2`へ移り、`/mpv2`も同じように再生して、別のサイトの`localhost`の`/mpv3`へ移る。`/mpv2`を求められた後に`/mpv1`の知らせが1回より多く来ないこと、`/mpv3`を求められた後に`/mpv2`の知らせが1回より多く来ないことを見る。続いて`/mpc`はカメラの映像を`MediaRecorder`で0.5秒ごとに録り、3回目で`/mpv3`へ移る。その後に録画の知らせが1回より多く来ないこと、4秒後にカメラの装置の流れ(`DN_CAMSTREAM`)が止まっていることを見る。どちらも起動の行`renderers=4`でレンダラの上限を上げ、上限のためにレンダラが閉じることがないようにする。マルチプロセスでは、前のレンダラが終わり、メモリを10MB以上返すこと(`procs=`の`left pid=`と`freed=`。試験機で27〜36MB)も見る。直す前は、別のサイトへ移った後も`/mpv2`の知らせが35回、録画の知らせが8回来て、カメラの流れは止まらなかった。
+
+### 14.13.8 ネットワークのプロセス
+
+マルチプロセスのブラウザは、ネットワークのプロセスを1つ持つ。ブラウザと同じプログラムで、起動の引数の1行目が`network`である。ブラウザは最初のレンダラより前に起動し(`br_proc.cc`の`net_start`)、`TS_SPN_WITHPARENT`でブラウザとともに終わる。このプロセスだけが、ネットワークスタック(14.4)を持つ。接続のプール、cookieの入れ物、HTTPキャッシュ、QUICのセッション、名前の解決、HSTSと、それらのストア(`cookie`、`cache`、`quic`、`hsts`)である。ChromiumのNetwork Serviceと同じ切り方で、レンダラはソケットとcookieを持たない。2つのレンダラは同じcookieとログインの状態を見て、片方が開いた接続をもう片方も使う。以前(段階1)は、レンダラごとにスタックとcookieの入れ物を持ち、ストアを通して互いの変更を読み直していた(「store cookie: N taken in」「store cookie not read」の行)。`process=single`では、以前と同じく1つのプロセスの中にスタックを持つ。
+
+インタフェースは`br_process.mojom`にある。
+
+| インタフェース | 呼ぶ側 | 内容 |
+| --- | --- | --- |
+| `NetworkService` | ブラウザ(専用のスレッドnetwork) | レンダラのパイプをつなぐ(`Connect`、レンダラの番号とともに)、レンダラのサイト(`SetSite`)、レンダラが読んでよい拡張機能の実身(`ExtAllow`)、ストアの書き出し、終わり |
+| `Network` | レンダラ(どのスレッドからでも) | リクエスト(`Fetch`)、cookie(`CookieLine`、`CookieSet`、cookieStoreの読み書きと監視)、HSTS、データの消去とサイトの一覧、プロトコルの数、WebSocket |
+| `NetFetchClient` | ネットワークのプロセス | 1つのリクエストの答え。本体を分けて受けるものは`Response`と`Piece`、終わりは`Done`。`Piece`には受け手が取ったときに答え、ネットワークのプロセスは答えのない分が512KBになると読むのを待つ。レンダラがパイプを閉じると、そのリクエストは捨てられる。ダウンロードでは、レンダラがこの受け手をブラウザに渡し、ブラウザが続きを受ける(14.7.4) |
+| `NetHooks` | ネットワークのプロセス(ネットワークのスレッド) | リクエストを出したレンダラの拡張機能の規則(declarativeNetRequest)と、webRequestの知らせ |
+| `NetSocket`、`NetSocketClient` | レンダラとネットワークのプロセス | ページのWebSocketの送信と、接続からの知らせ |
+| `Store` | レンダラ(どのスレッドからでも) | ページの保存域のストアの実身の読み書き。ストアの読込み(`Load`、`LoadEntries`)、書いた世代(`Version`)、保存(`Save`、`Apply`)。パスワードとパスキーの操作(`PasswordsFor`、`PasswordKeep`、`PasskeysFor`、`PasskeyMake`、`PasskeySign`)。拡張機能の一覧、パッケージ、状態の記録(`ExtList`、`ExtRead`、`ExtState`、`ExtStateWrite`、`ExtLink`、`ExtUnlink`) |
+
+レンダラのパイプは、招待の5つ目のパイプ(`kNetworkPipe`、`Network`)と6つ目のパイプ(`kStorePipe`、`Store`)で渡す。ブラウザは、その反対の端を`NetworkService.Connect`でネットワークのプロセスに渡す。ネットワークのプロセスは、パイプを専用のスレッド(network calls)で受ける。ネットワークのスレッドで受けないのは、スタックの関数の中に、ネットワークのスレッドに仕事を渡して待つものがあるからである。
+
+レンダラでは、スタックの関数(`br_net.h`、`br_cookies.h`)がそのままネットワークのプロセスへの呼出しになる(`net_fetch_tessronos.cc`の各関数の入口の`br_net_remote()`、実体は`net_service_tessronos.cc`)。答えはレンダラの専用のスレッド(net answers)に届き、1つのプロセスのときと同じ形で、求めた側のスレッドに渡る。`chrome-extension:`のアドレスは、拡張機能を持つレンダラが自分で答える。
+
+拡張機能はレンダラが持つので、ネットワークのプロセスのネットワークデリゲートは、リクエストを出したレンダラに規則を尋ねる(`NetHooks`、同期)。レンダラは、ほかに何もしないスレッド(net hooks)で答える。リクエストには、レンダラが規則やwebRequestのリスナを持つかどうかを付け(`X-TessronOS-Hooks`の行。スタックが外す)、持たないレンダラには尋ねない。
+
+ネットワークのプロセスが終わると(異常で終わっても、`kill`されても)、ブラウザのnetworkのスレッドがパイプの切断で気づき、起動し直して、すべてのレンダラに新しいパイプを渡す(`Control.NetworkAgain`)。途中だったリクエストは失敗になり(`ERR_FAILED`)、ページは〈再読み込み〉で読み直せる。ブラウザとレンダラは動き続ける。cookieとキャッシュは、新しいプロセスがストアから読み戻す。書く前だった変更(cookieは2秒以内)は失われる。1分に5回起動しても終わるときは、起動し直すのをやめる。ブラウザが終わるときは、レンダラの後に、ネットワークのプロセスにストアを書かせて(`Flush`)から終わらせる。
+
+ストアのうち、ネットワークスタックのもの(`cookie`、`cache`、`quic`、`hsts`)は、このプロセスが1つだけの書き手になった。ページの保存域のストア(localStorage、IndexedDB、Cache Storage、サービスワーカー、権限、OPFSなど)は、メモリの中身と保存の手順をレンダラが持ち、実身を開いて読み書きするのはこのプロセスである。レンダラの`br_store.cc`は、登録、`br_store_dirty`、差の計算、書き手のスレッド、見回り、読めなかったストアの記録(`g_unread`)を今のまま持ち、その下の層(`log_load`、`log_save`、`log_version`、封をしたストアと以前の形のストアの読み書き)だけを`Store`の呼出しに替える(`br_store_remote()`、`store_service_tessronos.cc`)。渡すのは、読んだバイト列とエントリ、書く変更(エントリの書込みと削除)、エントリの合計の大きさ(ログを書き直すかの判断に使う)で、答えの数はレンダラの中で開いていたときと同じである。そのため、レンダラはストアのために実身を開かない。レンダラで実身を開こうとすると、断って記録に1行出す(`browser: store: an object of the stores would be opened in a renderer: refused`)。ネットワークのプロセスは`Store`を専用のスレッド(store calls)で受ける。ストアの実身は、ほかのプロセスが持っていると最大30秒待つので、`network calls`を止めないためである。答えるのはページのストア(`kObjects`のうち、ネットワークの4つと、封をした`creds`、`autofill`を除いたもの)だけで、ほかの名前とエントリの書込みと削除以外の変更は断る。レンダラは呼出しを専用のスレッド(store asks)で行い、終わるまで待つ。ストアの書き手のスレッドと見回りのスレッドはMojoのシーケンスを持たず、そこからは同期の呼出しを待てないからである。ネットワークのプロセスが落ちた間は呼出しが失敗し(読込みは`-2`、書込みは15秒後にやり直し)、`Control.NetworkAgain`で新しい`Store`のパイプに付け替わった後に、書けなかった変更を書く。ブラウザがレンダラに`Control.Closing`を送ったときのストアの書き出しは、IOスレッドでなく別のスレッドで行う。書込みはネットワークのプロセスへの呼出しで、そのパイプをIOスレッドが運ぶからである。別々に起動したブラウザとの間、同じブラウザのレンダラの間の変更の取込みは、今のところ14.8の見回り(3秒ごとの`Version`と読込み)のままで、これも`Store`の呼出しになった。同じプロセスに置くのは、cookieのようにネットワークとストアの両方にまたがるものがあること、書き手のスレッドとロックが1組で済むこと、2GBの機械でプロセスを増やさないことによる。落ちたときは両方が一緒に起動し直される。
+
+パスワードとパスキー(`creds`)は、バイト列をレンダラに渡さない。レンダラは`Store`の操作を頼み(14.4.7.1)、ネットワークのプロセスが封をしたレコードを開いて答える。パスキーの秘密鍵はネットワークのプロセスから出ず、署名もそこで行う(`PasskeySign`。クライアントのデータの`type`が`webauthn.get`で`origin`が頼んだオリジンであることも確かめる)。答えるのは、そのレンダラのサイトのオリジンの分だけである。レンダラのサイトは、レンダラが名乗るものでなく、ブラウザが決めたものを使う。ブラウザは、レンダラにページを取得させる前(`Page.Navigate`の前)に、行き先のアドレスのサイト(`net::SchemefulSite`)を`NetworkService.SetSite`で伝え、ページを表示したら、リダイレクトの後のアドレスのサイトにしてそこで固定する。一度ページを表示したレンダラのサイトは変えない。そのレンダラのページが開いたウインドウや、レンダラの上限のために同じレンダラで表示した別のサイトのページには、そのページのサイトのパスワードを出さない。ネットワークのプロセスは`Connect`で受けたレンダラの番号ごとにサイトを持つ。サイトのまだないレンダラ(予備のレンダラ、`about:`のページ)の頼みは2秒までサイトを待ち、来なければ断る。サイトの違うオリジンの頼みは断り、記録に1行出す(`browser: store: renderer N of the site S asked for the passwords of O: refused`)。iframeは同じレンダラで動くので、別のサイトのiframeにはパスワードを出さない(Chromeはブラウザがフレームのオリジンを確かめてiframeにも出すが、OOPIFのないここではフレームのオリジンを確かめられない)。1つのプロセスのブラウザでも、ページと別のサイトの文書にはパスワードを出さない(`credentials_tessronos.cc`の`PasswordsOf`)。ネットワークのプロセスが起動し直したときは、ブラウザが`Connect`の後に各レンダラのサイトを伝え直す。住所とカード(`autofill`)は、ブラウザが読んでパネルで選ばせ、選んだ1件だけをレンダラに渡す(`Host.AutofillChoose`)。
+
+拡張機能(14.12)の一覧、パッケージ、状態の記録(有効と無効、`chrome.storage`、アラームなど)も、レンダラは「ブラウザの拡張機能」(`SYSDEF_BROWSER_EXT`)を開かず、`Store`で頼む(`br_ext_os.cc`の各関数の入口の`br_store_remote()`)。ネットワークのプロセスがパッケージを読むのは、一覧にある実身と、ブラウザが`NetworkService.ExtAllow`で伝えた実身(〈拡張機能を読み込む〉のパネルで利用者が選んだもの、試験の起動の行`extadd=`)だけで、一覧に足す(`ExtLink`)のも後者だけ、一覧から外す(`ExtUnlink`)のは一覧にあるものだけである。乗っ取られたレンダラが、UUIDを名乗ってほかの実身を読む道にはならない。ブラウザの知らせはレンダラへの頼みと別のパイプで届くので、ネットワークのプロセスは1秒まで待つ。この形を使うかどうかは`br_ext_os.cc`の`kExtAsked`で決め、今は使っている。
+
+WebTransport、WebRTCのソケット(P2P)、Web Pushの接続、Direct Socketsは、まだレンダラが自分で開く。そのためのコンテキストは何も保存しない(cookieのストアもキャッシュも持たない)。
+
+試験は`test_blink_mpck`である。`127.0.0.1`の`/mck1`でログインし(HttpOnlyのcookie、長く残るcookie、セッションのcookie、スクリプトが付けるcookie)、別のサイトの`localhost`の`/mck2`(別のレンダラ)が自分のcookieを付け、`127.0.0.1`の`/mck3`(さらに別のレンダラ)が、ログインのcookieをすべて持ち、`localhost`のものは持たないこと、その求めにHttpOnlyのcookieが付いていることを見る。続いてネットワークのプロセスを`kill`し(起動の行`menu=killnetwork`)、ブラウザが新しいプロセスを起動して、〈再読み込み〉で`/mck3`が同じcookieで表示されることを見る。
+
+ほかのプロセスから届いたメッセージの検査が失敗すると、Mojoはパイプを閉じる。そのとき、見つけたプロセスは`browser: mojo: the renderer <pid> found a bad message`の行で、プロセスの種類と、Mojoの説明(インタフェース、メソッドの番号、求めか応答か(`RequestValidator`、`ResponseValidator`)、誤りの種類)を出す(`br_proc.cc`、Mojoの既定のプロセスのエラーの関数。1つのプロセスで4回まで)。ストアのパイプでは、さらに次の2つを出す。レンダラは、つながっていたパイプで`Load`、`LoadEntries`、`Apply`が失敗した最初の1回を出す。ネットワークのプロセスは、64KB以上の応答の後に呼出しがないままそのパイプが閉じたとき(応答を断ったレンダラは、その後の呼出しがパイプの上で失敗するので、もう何も届かない)、その応答の要素の数、メッセージの中のおよその大きさ、キーと値のFNV-1aを出す(`store_service_tessronos.cc`)。どれも、ふだんは何も出さない。
+
+ソケットの数の上限は、システム全体の表の1024個(最後の32個はカーネルのもの)と、プロセスごとの上限(ソフトの上限512、ハードの上限768)の2段である(9.2.2)。すべての接続を1つのプロセスが持つので、このプロセスがChromiumのすべてのプールを合わせた数を持つ。Chromiumの上限とプロセスの上限の関係は次のとおりである。
+
+| 上限 | 値 | 決めている所 |
+| --- | --- | --- |
+| TCPのプールのソフトの上限 | 32 | `net_fetch_tessronos.cc`(Chromiumの既定は256) |
+| TCPのプールの乱数の上乗せ | ソフトの上限と同じ数まで、合わせて最大64 | Chromiumの`TcpSocketPoolLimitRandomization`(既定で有効) |
+| WebSocketのプール | 256 | Chromiumの既定 |
+| QUIC | セッションごとにUDPのソケット1つ | Chromium |
+| DNSのクライアント | 同時に6つの名前、1つの名前で3つまで | `net_fetch_tessronos.cc` |
+| プロセスのソフトの上限 | 512 | システム(`SO_PRC_SOFT`) |
+| `getrlimit(RLIMIT_NOFILE)` | ソフト512、ハード768 | `port/compat/ts_linux.c`が`so_getlimit`の値をそのまま返す |
+
+Chromiumの上限を合わせた数は多くて約400で、プロセスのソフトの上限512より小さい。LinuxのChromiumが起動時にソフトの上限を8192に上げて、Chromium自身の上限が先に効くようにしているのと同じ関係である。プロセスの上限に当たると`EMFILE`に、表が尽きると`ENFILE`になり、Chromiumはどちらも`ERR_INSUFFICIENT_RESOURCES`として扱う。`setrlimit(RLIMIT_NOFILE)`は`so_setlimit`につなぎ、ソフトの上限がハードの上限より大きいと`EINVAL`、管理者でないプロセスがハードの上限を上げようとすると(`RLIM_INFINITY`など、システムの数を越える値を含む)`EPERM`で断る。ほかの資源の`getrlimit`は、今までどおり`RLIM_INFINITY`を返す。
+
+表が64個の1段だったときは、乱数の上乗せまで使うとTCPだけで64個に届き、QUICとDNSのUDP、カーネルの名前の解決がソケットを作れなくなった(Surfaceの実機で、多くの広告のホストに`h2`でつなぐページを開いたとき、`browser: net: no datagram socket (5)`が195回、名前が引けないことが35回あった)。そのため乱数の上乗せを切り、上限を32で頭打ちにしていた。2段にした後は、上乗せの分(最大32)を足してもプロセスの上限と表に十分な余りがあるので、上乗せを戻した(`br_blink.cc`)。この機能は、ページがプールを使い切ってほかのサイトの接続の数を知る手口(クロスサイトの漏洩)を難しくするためのもので、切っている間はこの手口への備えがなかった。
+
+試験は`test_blink_mpsock`である。受け付けても答えない24のサーバに6つずつ求め(144の接続、乱数の上乗せをしてもプールが持てる数より多い)、どの求めも失敗しないこと(待つだけになること)、表の満杯とプロセスの上限の行が出ないこと、ブラウザが「ソケットがない」行を出さないこと、その間もカーネルがソケットを作れることを見る。表が64個の1段で上乗せを切る前は、ネットワークのプロセスが50個を持って表が満杯になり、12のサーバに6つずつの72の求めのうち23が失敗し、カーネルは10回のうち1回もソケットを作れなかった。2段にして上乗せを戻した後は、QEMU virtで144の求めのうち失敗は0、プロセスが持ったソケットは最大64個、カーネルは10回のうち10回ソケットを作れ、表の満杯とプロセスの上限の行は出なかった。
+
+ページの保存域は`test_blink_mpkeep`が確かめる。`127.0.0.1`の`/mpk1`が、その回だけの値(アドレスの`#`の後)をlocalStorageとIndexedDBのレコードに書いて、別のサイトの`localhost`の`/mpk2`(別のレンダラ)へ移る。`/mpk2`は同じ名前に自分の値を書いて、`127.0.0.1`の`/mpk3`(さらに別のレンダラ)へ移る。`/mpk3`と、後から起動したブラウザの`/mpk4`が、どちらの値も`/mpk1`のものであることをタイトルで見る。QEMU virtでは、`/mpk3`も`/mpk4`も最初の読込みで値を見つけた。
+
+ストアが大きいときのレンダラの起動の繰り返しは`test_blink_mpstore`が確かめる。`127.0.0.1`と`localhost`の`/mps`を交互に開き、どの訪問も新しいレンダラで動く。各サイトの最初の訪問が、localStorage(4KBの項目を160)、IndexedDB(8KBのレコードを300)、Cache Storage(4KBの応答を300)を作るので、後のレンダラは起動のたびに数MBのストアを読み戻す。その間も前のレンダラが書き、用意しておくレンダラが同時に起動する。最初の起動で24回、ブラウザを起動し直して10回ずつを3回行い、どの回も最後の訪問まで進み、最初の訪問が残したものを見つけることを見る。QEMU virt(`-smp 4`、`KLOCK=3`)では、62のレンダラの起動のうち59がストアを読み戻し、落ちたレンダラはなかった。試験用ディスクのシステムのボリュームが`SYS_VOL_SIZE=auto`で満杯のときは、ネットワークのプロセスの書込みが`E_NOMEM`で失敗し(`browser: writing the store storage failed (-33, ...)`)、ストアが空のままになるので、`SYS_VOL_SIZE=1G`を付けて作る。
+
+lib/libpthreadは、待ちの決まりが破れたとき、コンソールに最初の16行まで出す(`libpthread: task N woken while it still waits`、`had its wait ended by an error`、`put on a list while it is on one`)。ふだんは何も出さない。レンダラがストアを読み戻す所でヒープが壊れて落ちた件(Surface Go 2で2回)の調べのためのもので、ARMのQEMUの試験では1行も出ていない。
+
+### 14.13.9 サンドボックス
+
+レンダラは、ページのスクリプトに乗っ取られても利用者の実身、ネットワーク、機器、ほかのプロセスに手を出せないように、制限付きのプロセス(5.9)として動かす。LinuxのChromiumがseccomp-bpfで行うことを、TessronOSではカーネルのSVCゲートが行う。ブラウザは、プロセスの種類ごとに`include/ts/sbx.h`の組を使う。
+
+| プロセス | 組 | 使えないもの |
+| --- | --- | --- |
+| レンダラ | `TS_SBX_RENDERER` | 実身をUUIDや名前で開くこと、パスでのファイル、ネットワーク、機器、GPU、ほかのプロセス、ウインドウ、システムのもの |
+| レンダラ(GPUのプロセスができるまで) | `TS_SBX_RENDERER_GPU` | 上からGPUを除いたもの |
+| レンダラ(今の形。保存域のストアと音・カメラなどを持つ間) | `TS_SBX_RENDERER_STORE` | ほかのプロセス、システムのもの。実身を開くこと、機器、GPU、ウインドウ、ネットワークは使える(それぞれの仕事がレンダラの外に出るまで) |
+| GPUのプロセス | `TS_SBX_GPUPROC` | 同じ。GPUの呼出しと、渡されたメモリの実身は使える |
+| ネットワークとストアのプロセス | `TS_SBX_NETWORK` | 機器、GPU、ほかのプロセス、ウインドウ、システムのもの。ソケットとストレージの実身は使える |
+
+制限はプロセスが自分で掛ける(`ts_sandbox_enter`)。起動の初めに要るもの(書体、ICUのデータ、乱数の実身のキー、Mojoの招待と通信路の受け取り)を済ませてから掛け、その後は、持っているキーと、名前のない実身(`ob_cre_key`で作るメモリの実身とストリームの対)だけを使う。
+
+レンダラが今呼んでいるシステムコールを、QEMU virtの`test_blink_mp`で、カーネルに一時的に入れた数え上げで調べた(段階3の作業中のブラウザ。ネットワークは別のプロセスにあり、GPUのラスタ化は使っていない)。2つ目のサイトのページを約40秒表示したレンダラで、次のとおりであった。
+
+| 呼出し | 回数 | 時期と中身 | 制限の後 |
+| --- | --- | --- | --- |
+| `ob_rea_tmo`、`ob_rea_rec`、`ob_lst_rec`、`ob_wri_rec`、`ob_cls_obj`、`ob_ntf_evt`、`ob_map_rec`、`ob_dup_key`(自分へ)、`ob_cre_key` | 5138、275、217、42、92、4、3、3、2 | 通信路の端とポート、メモリの実身 | 使える |
+| `ts_get_mono`、`tk_`(ミューテックス、セマフォ、タスク)、`ts_map_mem`、`ts_ctl_mem`、`ts_unm_mem`、`tk_get_utc`、`dt_getsyszone`、`tm_putstring` | 4329、約1200、45、174、24、7、13、15 | 時刻、スレッドとその待ち、メモリ | 使える |
+| `ts_rcv_msg`、`ts_get_arg`、`ts_ref_cpu`、`ts_def_flt`、`ts_get_pid` | 1、2、2、1、35 | 起動の初め(通信路の受け取りなど) | 使える |
+| `ob_opn_obj` | 90 | 書体の実身3つ(起動から0.8〜3.5秒)、乱数の実身1つ(0.1秒)、ブラウザの保存域11回とブラウザの拡張機能2回(4.3〜4.8秒、ページの用意)、保存域の中の1つの実身を73回(表示している間ずっと) | 書体と乱数は先に開いておく。保存域と拡張機能の実身は、ストアのプロセスかブラウザに尋ねる形にする |
+| `ob_fnd_sys`、`ob_fnd_lnk`、`ob_lst_obj`、`ob_get_prt` | 3、3、1、1 | 起動の初め(保存域を探す) | 同じ |
+| `fs_open`、`fs_stat` | 1、18 | `fs_open`は起動から29msの`/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq` | 制限の前に済ませる |
+| `so_socket`、`so_bind`、`so_getsockname`、`so_fcntl`、`so_sendto`、`so_recv`、`so_poll` | 1、1、1、1、1、2、333 | ネットワークのスレッドを起こすためのループバックのUDPのソケット(`br_stream.cc`の`make_wake_socket`)。レンダラはもうネットワークを持たないのに作っている | 作らないようにする |
+| `dp_`、`wm_`、`gp_`、`sr_`、`us_` | 0 | GPUのラスタ化を使うと`gp_`を呼ぶ | 使えない(GPUは段階2まで`TS_SBX_RENDERER_GPU`で許す) |
+
+ネットワークのプロセスは、起動の0.1〜0.3秒にシステムの実身(デバイス)を3回開き、その後はストアの実身(Cookie、蓄え、保存域の中の実身)を開き続け、ソケットを使う。システムの実身は起動の初めだけなので、`TS_SBX_NETWORK`を掛けるのはその後にする。
+
+今の組み込みは次のとおりである。
+
+- レンダラ(`br_rproc.cc`の`br_renderer_main`)は、Blinkを起こし(`br_sys_engine_up`)、通信路とdataのスレッドを用意した後、ページの呼出しを待つループに入る前に`TS_SBX_RENDERER_STORE`を掛ける(`br_main.cc`の`br_sandbox_renderer`)。ページの保存域のストア(localStorage、IndexedDB、パスワードなど)をまだレンダラが持ち、表示中も保存域の実身を開くので、実身を開くこと(`TS_SBX_OBJ`)は許す。GPUも、GPUのプロセス(段階2)が済むまで許す。音、マイク、カメラのデバイスの実身もレンダラが自分で開く(`br_snd.cc`など)ので、機器(`TS_SBX_DEV`)も許す。
+- ネットワークのプロセス(`net_service_tessronos.cc`の`br_network_main`)は、スタックとストアを読み戻し(`br_net_prepare`)、招待を受け取った後、ループに入る前に`TS_SBX_NETWORK`を掛ける(`br_sandbox_network`)。
+- ブラウザのプロセス(ウインドウを持つ側)と、`process=single`のときのプロセスには掛けない。
+- 起動の行`sandbox=`で形を選ぶ。`refuse`(既定)は`TS_SBX_REFUSE`で断るだけ、`kill`は断られた呼出しでプロセスを終わらせ、`off`は掛けない。実機で断られた呼出しの行が出ないことを確かめてから、既定を`kill`にする。
+- レンダラはネットワークのスレッドを、待ち合わせのループバックのソケット(`br_stream.cc`の`make_wake_socket`)なしで動かす(`br_net_thread_start(0)`)。スタックがネットワークのプロセスにあるときは、ソケットを待たないので、仕事を渡すときのセマフォだけで待つ。
+- WebTransport、WebRTCのP2Pのソケット、Web Pushの接続、Direct Socketsは、まだレンダラが自分でソケットを開く。レンダラの組では`so_socket`が断られ(`EPERM`)、それぞれ接続の失敗としてページに返る。ネットワークのプロセスに移すまで、これらは使えない。
+- 残っている例外は、実身(`TS_SBX_OBJ`)、GPU(`TS_SBX_GPU`)、音・マイク・カメラ(`TS_SBX_DEV`)である。それぞれレンダラの外へ出したら、組から外す。すべて外したら`TS_SBX_RENDERER`になる。
+- ページの保存域のストアの実身は、ネットワークのプロセスが開く(14.13.8)。起動の行`sandbox_renderer=noobj`を与えると、レンダラは`TS_SBX_RENDERER_STORE`に`TS_SBX_OBJ`を加えた組に入る。既定は今のところ`TS_SBX_RENDERER_STORE`のままで、実機で確かめてから既定を変える。
+  - `OB_DENY_LOG`のビルドのQEMU virtで、`test_blink_sbxobj`(4つのレンダラとネットワークのプロセス)の断られた呼出しは0である。ページの保存域は動き(`/mpk3`がlocalStorageとIndexedDBの値を読めた)、パスワードとパスキー(14.13.8)、拡張機能の一覧と状態とパッケージ(14.13.8)もレンダラは開かない。この0は拡張機能を`Store`で頼む形(`kExtAsked`、今は`true`)を使ったときのものである。その形を切ると、`noobj`では拡張機能を開く呼出しが断られる。以前に残っていた2つは次のように直した。
+  - `fs_stat`(`/sys/fs/cgroup/cpuset/chrome`と`/sys/fs/cgroup/schedtune/chrome`):baseはスレッドの種類を変えるたびに(`PlatformThreadLinux::SetThreadCgroupsForThreadType`)、制御グループのディレクトリがあるかを見ていた。TessronOSに制御グループはないので、レンダラは起動の初め(スレッドを作る前)に、スレッドの種類の扱いを自分のものにする(`ThreadTypeDelegate`、`port/base/base_tessronos.cc`の`br_thread_types_own`)。リアルタイムの音のスレッドは`SCHED_RR`を求め、どの種類もniceの値を設定し、パスは見ない。Chromiumの木は変えていない。
+  - `ob_opn_obj`(「ブラウザの拡張機能」を2回、一覧と状態):ネットワークのプロセスに頼む形を作った(14.13.8)。今は切ってある。
+  - 書体、乱数の実身、起動の初めの`fs_open`は、制限の前に済んでいる。
+  - この試験で通らない道で、レンダラが今も実身や機器を開くもの(直していない):Widevine(`br_widevine.cc`。CDMの実身をUUIDで開いて読み、導入と削除で`ob_cre_obj`、`ob_lnk_obj`、`ob_unl_obj`、`ob_del_obj`)、カメラ(`br_cam.cc`。カメラの機器の実身を開く)、音とマイク(`br_snd.cc`。`ob_lst_obj`で音の機器を探して開く)、HEVCのハードウェア復号(`br_hevc.cc`。`ob_lst_obj`と機器を開く)、通知(`br_notify.cc`。返事の実身を`ob_cre_obj`で作り、デスクトップの受付を`ob_fnd_nam`で探して開く)、印刷(`br_print.cc`の`br_ask_desktop`。通知と同じ)、音声認識(`br_speech_rec.cc`。辞書の入ったプログラムの実身を開く)、IPv6のアドレスとDNS(`br_sysnet.cc`。システムの実身のレコード7。WebRTCのP2Pなど、まだレンダラが自分で使うネットワークの道で呼ばれる見込み)。ページへのドロップは、ブラウザが中身をメモリの実身で渡す(`KeepFile`)ので開かない。
+
+試験は`test_blink_sbx`である。`127.0.0.1`の`/mp1`から別のサイトの`localhost`の`/mp2`へ移り、その間、ブラウザの子のプロセスの実身の属性`tessronos.process.sandbox`を読む。レンダラが2つ以上`TS_SBX_RENDERER_STORE`で、ネットワークのプロセスが`TS_SBX_NETWORK`で、どれも断る形であること、`OB_DENY_LOG`のビルド(`make OACVLOG=1`)のコンソールに`sandbox want=`の行が1つもないことを見る。
+`test_blink_sbxobj`は、`sandbox_renderer=noobj`で`test_blink_mpkeep`の`/mpk1`から`/mpk3`までを動かす。レンダラが`TS_SBX_RENDERER_STORE | TS_SBX_OBJ`の組にあること、`/mpk3`が保存域の値を読めること、断られた呼出しの行がないことを見る。
+
+### 14.13.10 GPUのプロセス
+
+起動の行`gpuproc=on`を与えると、ブラウザはGPUのプロセスを1つ持ち、レンダラのページとcanvas 2Dのラスタ化をそこで行う(OOP-R)。既定は`gpuproc=off`で、以前と同じくレンダラが自分のGPUのスレッドでラスタ化する(14.7.2)。実機で確かめるまでの間の切替えである。`gpuproc=on`では、WebGLとWebGPUのコンテキストもGPUのプロセスに置く(下の「WebGL」「WebGPU」)。動画のフレームは、`gpuproc=on`でもまだレンダラの中で扱う。
+
+GPUのプロセスはブラウザと同じプログラムで、起動の引数の1行目が`gpu`である(`br_proc.h`の`BR_GPU_LINE`)。ブラウザはネットワークのプロセスを起こした後、専用のスレッド(gpu)でGPUのプロセスを起こす(`br_proc.cc`の`gpu_start`)。プログラムの読込みに数秒かかるので、最初のレンダラの起動と並行させる。招待には2つのパイプが付く。`GpuService`(`kGpuServicePipe`、ブラウザが呼ぶ)と`GpuHost`(`kGpuHostPipe`、GPUのプロセスが呼ぶ)である。ブラウザは起動の直後に`GpuService.Start`を呼び、GPUのプロセスはそこでGLを起こす。
+
+| インタフェースと型 | 呼ぶ側 | 内容 |
+| --- | --- | --- |
+| `GpuService` | ブラウザ(スレッドgpu) | GLを起こす(`Start`)、レンダラのチャネルを作る(`EstablishChannel`)、閉じる(`CloseChannel`)、試験の値(`Query`)、終わり(`Closing`) |
+| `GpuHost` | GPUのプロセス | 後から来たGPUの知らせ(`GpuArrived`) |
+| `Host.GpuChannel` | レンダラ | チャネルを求める。ブラウザはスレッドgpuで`EstablishChannel`を呼び、答えを`Host`のスレッドに戻す |
+| `GpuChannelInfo` | | チャネルの片端、`gpu::mojom::GpuInfo`、`GpuFeatureInfo`、`SharedImageCapabilities`を直列化したバイトの列、ページをGPUでラスタ化するか(`raster`)、`GL_RENDERER`の文字列 |
+
+チャネルの番号(`client_id`)はレンダラのプロセス番号である。同期トークンのコマンドバッファの番号はチャネルの番号から作られるので、レンダラも同じ番号で`GpuChannelHost`を作る。ブラウザは`Host`のパイプにレンダラの番号を結び付けておき(`ReceiverSet`の文脈)、`GpuChannel`を求めたレンダラを知る。レンダラが終わると、ブラウザはそのチャネルを閉じさせる。
+
+GPUのプロセス(`port/gpu/br_gpu_main.cc`)は、ChromiumのコマンドバッファのサービスをそのままGPUのプロセスで動かす。`gpu::GpuChannelManager`、`Scheduler`、`SyncPointManager`、`SharedImageManager`である。`gpu::GpuInit`はChromiumのウインドウの層(Ozone)とサンドボックスの補助に頼るので使わず、同じ順でGLを起こす。静的な結び付け、ANGLEのディスプレイ(`port/gpu/gl_init_tessronos.cc`)、GLの文字列の取得(`CollectGraphicsInfoGL`)、拡張機能の設定、既定のオフスクリーンの面の順である。デコーダはパススルーだけで、SkiaのGaneshはANGLEの上で動く。GPUの機能(`GpuFeatureInfo`)は、すべての機能を有効にし、ドライバの回避策の表は使わない。ドライバはMesaのv3d、iris、softpipeに限られ、回避策はANGLEが持つからである。共有イメージの工場はOzoneの面に、ネイティブのピクスマップがあるかを尋ねる。そのため、ウインドウも入力もピクスマップも持たない面のオブジェクト(`NoWindows`)を置く。共有イメージはGLのテクスチャだけになる。
+
+GPUを使うかどうかは、GPUのプロセスが決める。GLの`GL_RENDERER`がsoftpipeなら、既定ではラスタ化しない(`raster`が偽)。プロセッサのSkiaの方が速いという14.7.2の決まりを保つためである。`gpu=on`ではsoftpipeでもラスタ化し、`gpu=off`ではしない。GPUのプロセスはsoftpipeの機械でも起こす。
+
+レンダラ(`port/gpu/br_gpu_client.cc`)は、Blinkを起こす前(`br_sys_engine_up`のGPUの段)にチャネルを求め、最初の表示のときにメインスレッドでラスタのコンテキスト(`viz::ContextProviderCommandBuffer`)を作る。表示ごとに、ページの記録(`cc::PaintRecord`)を`cc::DisplayItemList`に包み、白で塗る命令を先に置く。ビューの大きさの共有イメージ(RGBA8、用途はラスタの書込みと読出し)に、変わった矩形ごとに`RasterCHROMIUM`で再生する。新しい共有イメージは、最初のラスタで消してから描く(`needs_clear`)。サービスは消していない共有イメージには描かないからである。その後、`ReadbackImagePixels`でページのメモリへ読み戻す(ウインドウのGPUの面を使わないとき。下の「ウインドウのGPUの面」)。これは同期の呼出しで、GPUの仕事の終わりを待つ。1表示の往復は1回にする。矩形が2つ以上あり、それらを囲む矩形の面積が矩形の和の2倍以下なら、囲む矩形を1回で読み戻す。そうでなければ矩形ごとに読む。囲む矩形には変わっていない画素も入るが、共有イメージはいつもページのメモリと同じ絵を持つので、同じ値が書かれるだけである。そのために、新しい共有イメージと、失敗した表示(プロセッサで描いた表示)の次の表示では、ビュー全体をラスタ化して読み戻す。画像は`cc::GpuImageDecodeCache`で復号して、転送キャッシュで運ぶ。`br_gpu_start`、`br_gpu_raster`、`br_gpu_stat`の名前はそのままなので、`br_blink.cc`の呼出し側は変えていない。`process=single`と`gpuproc=off`では、同じ名前が`br_gpu.cc`の道(`br_gpu_inproc_*`)を呼ぶ。
+
+canvas 2D(メインスレッドの、128×128以上で8ビットのもの)も、同じラスタのコンテキストの共有イメージ(RGBA8、用途はラスタの書込みと読出し)に描く。Blinkのcanvasの画素の持ち主の差込み口(`canvas_gpu.patch`の5つ。パッチは変えていない)に、`br_gpu_client.cc`が次の中身を入れる。`make`は共有イメージを作り、透明(不透明のcanvasは黒)で消しておく。`raster`はcanvasの記録を`cc::DisplayItemList`に包んで`RasterCHROMIUM`で再生し、非同期のフラッシュを1つ出す。画像はページと同じく`cc::GpuImageDecodeCache`で運ぶ。`write`(putImageData)は`WritePixels`である。`snapshot`は共有イメージを持つ`cc::TextureBacking`の画像を返す。ページのラスタはそのメールボックスで直列化され、GPUのプロセスの中で写しなしに描かれる。画素を求められたとき(getImageData、toBlob、プロセッサのcanvasへのdrawImage)は`ReadbackImagePixels`で読む。これはどのスレッドからでもよく、コンテキストは錠で守る。スナップショットは共有イメージへの参照を持つので、スナップショットが残っている間にcanvasへ描くときは、先に新しい共有イメージへ写してから描く(書込み時の写し)。`free`は参照を放す。アニメーションの画像をcanvasに描いたときのフレームの選び方(Blinkの`CustomDataOp`の呼戻し)は、GPUのプロセスの道では渡らず、最初のフレームになる(未対応)。
+
+WebGL(1と2)のコンテキストは、GPUのプロセスのGLES2のコマンドバッファである(`port/webgl/gl_cmdbuf.cc`)。Blinkがプラットフォームにコンテキストを求めると(`br_blink.cc`の`BrWebGLProvider`)、レンダラにGPUのプロセスへのチャネルがあれば、そのチャネルにWebGLの属性の`viz::ContextProviderCommandBuffer`(`CreateForWebGL`)を作り、`WebGraphicsContext3DProvider`で包んで渡す。Blinkの呼出しは`GLES2Implementation`がコマンドバッファに積み、GPUのプロセスのパススルーのデコーダ(`GLES2DecoderPassthroughImpl`)がANGLEに渡す。ANGLEのコンテキストは、デコーダがWebGLの属性(`EGL_CONTEXT_WEBGL_COMPATIBILITY_ANGLE`、資源の0での初期化、表示のテクスチャ共有のグループ、クライアントの配列なし)で作るので、WebGLの規則での検査とシェーダの変換はGPUのプロセスのANGLEが行う。デコーダが初期化で求めるANGLEの拡張(`GL_ANGLE_robust_client_memory`、`GL_CHROMIUM_bind_generates_resource`、`GL_CHROMIUM_copy_texture`、`GL_ANGLE_client_arrays`、`GL_ANGLE_webgl_compatibility`、`GL_ANGLE_request_extension`、`GL_KHR_debug`)と、コンテキストを作るのに要るEGLの拡張は、GPUのプロセスが起動の行に出す一覧でそろっている(QEMUのsoftpipe)。WebGL 2は、GPUのプロセスのGLの版がOpenGL ES 3以上のときだけ出す(`GpuChannelInfo.webgl2`)。`gl_angle.cc`が手で答えていたもの(フェンスの問合せ、リンクの完了の問合せ、共有イメージ、同期トークン、拡張の要求、`getBufferSubData`)は、Chromiumのクライアントとデコーダが答える。スレッドごとの仮想化のグループの手当て(14.6.1)は要らない。デコーダはすべてGPUのプロセスのメインスレッドで動くからである。
+
+- プロバイダは、ワーカーの`OffscreenCanvas`のものもページのスレッドで作られる(Blinkがそこで求める)。使うスレッドで`BindToCurrentSequence`したときに、コマンドバッファの返事とコンテキストの喪失の知らせがそのスレッドに結び付く。
+- ページのcanvasのフレームは、ページをGPUのプロセスでラスタ化するとき(`GpuChannelInfo.raster`)、読み戻さずに描く。合成をCPUで行う設定(`IsGpuCompositingDisabled`)では、Blinkはページを描くときにcanvasのスナップショットを求め(`PaintRenderingResultsToSnapshot`)、共有イメージの資源を作らずに描画バッファを読み戻す。そこでパッチ(`webgl_snapshot.patch`)がその前に差込み口(`g_webgl_gpu_snapshot`)を置き、`gl_cmdbuf.cc`がこのブラウザのプロバイダのcanvasに答える。描画バッファの色のバッファを、ラスタのコンテキストの新しい共有イメージ(RGBA8、上から下の行の順、用途はラスタの書込みと読出し)にGPUのプロセスの中で写し(`DrawingBuffer::CopyToPlatformSharedImage`、WebGLのコンテキストの同期トークンを待つ`CopySharedImage`)。色のバッファはGLの下から上の行の順だが、Skiaは下から上の順の共有イメージには書かないので、写しのときに上下を入れ替える、その共有イメージを持つ`cc::TextureBacking`の画像を返す(`br_gpu_client.cc`の`br_gpu_frame_image`)。画像は`UnacceleratedStaticBitmapImage`に包むので、Blinkのページの描画(`HTMLCanvasElement::PaintInternal`の`MakeUnaccelerated`)はそれを読み戻さずに記録に入れる。ページのラスタはその画像をメールボックスで直列化し、GPUのプロセスの中で写しなしに描く。写しとページのラスタは同じラスタのコンテキストに積まれるので、順序はコマンドバッファの順で守られる。画像の画素を求められたとき(プロセッサでラスタ化する表示、プロセッサのcanvasへの`drawImage`、`toDataURL`、WebGPUへの`copyExternalImageToTexture`)は、canvas 2Dのスナップショットと同じく`ReadbackImagePixels`で読む。`copyExternalImageToTexture`のプロセッサの道は、テクスチャの画像を受けないと決めている(`CHECK`)ので、パッチ(`webgpu_external_image.patch`)で、テクスチャを持つ画像はその道の手前で画素に読み戻す。
+- WebGLとWebGPUのcanvasは、コンポジタのレイヤーで見せる前提のため(`IsComposited`)、描いてもページの描画を描き直さない。このブラウザはcanvasをページの記録に描くので(`html_canvas_painter.patch`)、新しいフレームでcanvasのレイアウトオブジェクトに描き直しを求める(WebGLは差込み口の有無によらず。14.6.1)(`SetShouldDoFullPaintInvalidation`)。WebGLは描画バッファが前のフレームの後で初めて変わったとき(`webgl_snapshot.patch`の`MarkContextChanged`)、WebGPUは新しいテクスチャを渡すとき(`gpu_canvas_context.patch`の`getCurrentTexture`)である。これがない間は、最初の描画の後のフレームが画面に出なかった(200ミリ秒ごとに描くページで、13秒に1枚)。画像の最後の持ち主がなくなるときは、ラスタのコンテキストの同期トークンを付けて共有イメージを消す。ページをプロセッサでラスタ化するとき、メインスレッド以外(ワーカーの`OffscreenCanvas`、14.6.1)、差込み口が答えられないときは、今までどおり描画バッファが色のバッファを`ReadPixels`(GPUのプロセスへの1往復)でcanvasのビットマップに読む。写しと、描画バッファ全体を原点から読む`ReadPixels`を、WebGLのフレームとして`browser: draw: webgl`の行(14.7.2)に数える。プロバイダはラスタのインタフェースと画像の復号のキャッシュを持たない(`RasterContextProvider`はnull)ので、canvasが取り込む画像の扱いは今までの道のままである。
+- ANGLEがエラーを記録したときの説明は、デコーダがコマンドバッファの`OnConsoleMessage`でレンダラに送り、`GLES2Implementation`がBlinkのエラーメッセージのコールバックに渡す。プロバイダはその間に入り、違う説明ごとに最初の1回だけ`browser: webgl: [.WebGL-0x10000183aad0] GL_INVALID_OPERATION: glDrawArrays: Vertex buffer is not big enough for the draw call.`の形の行をシステムのコンソールに出す(64件まで。括弧の中のコンテキストの名前は比べない)。Blinkはページのコンソールに警告として出す。GPUのプロセスのデコーダも、同じ説明をChromiumのログの`ERROR`の行(`gl_utils.cc`)で出す(コンテキストごとに256件まで)。Blinkが自分で検査して出すエラー(有効な属性にバッファがない、など)はANGLEに届かないので、この行は出ない。
+- GPUのプロセスが終わると、チャネルの喪失がコマンドバッファの喪失として`ContextProviderCommandBuffer`の観察者に知らされ、プロバイダはBlinkの喪失のコールバックを呼ぶ。Blinkはページに`webglcontextlost`を出し、ページが`preventDefault`したときは、時間をおいてプラットフォームに新しいコンテキストを求め直す。レンダラが新しいチャネルを求めている間は、プロバイダを作らずにnullを返すので(`gl_angle.cc`の道には行かない)、Blinkは求め直しを続け、新しいチャネルができるとそこにコンテキストを作って`webglcontextrestored`を出す。
+- チャネルがないとき(`gpuproc=off`、`process=single`、`gpu=off`、3回落ちて「GPUなし」になったとき)は、今までどおりレンダラの中のANGLE(`gl_angle.cc`)、それもなければCPUの実装(WebGL 1)で作る。
+
+| 行 | 意味 |
+| --- | --- |
+| `browser: webgl: WebGL 1 in the GPU process, ANGLE (Mesa, softpipe, ...)` | WebGL 1の最初のコンテキストをGPUのプロセスに作った。WebGL 2も同じ形 |
+| `browser: webgl: WebGL N in the GPU process could not be made (R)` | コマンドバッファのコンテキストが作れなかった(Rは`gpu::ContextResult`) |
+| `browser: webgl: no WebGL 2 in the GPU process (its GL has no OpenGL ES 3)` | GPUのプロセスのGLでWebGL 2が出せない。レンダラの中のANGLEに戻る |
+| `browser: webgl: a context in the GPU process is lost: ...` | GPUのプロセスのコンテキストが失われ、ページに知らせた(最初の1回) |
+| `browser: webgl: no context while the GPU process is started again` | 新しいチャネルを求めている間にコンテキストを求められた(最初の1回) |
+| `browser: webgl: the frames are shown from shared images of the GPU process, with no readback` | ページのcanvasのフレームを、GPUのプロセスの共有イメージの写しとして初めて描いた |
+| `browser: webgl: a frame of the GPU process was read back to be shown` | GPUのプロセスのWebGLのフレームを、描画バッファ全体の読み戻しで初めて描いた |
+
+GPUのプロセスの起動の行の最後に、WebGLの版とWebGPUの有無(`WebGL 1 and 2 and WebGPU (Dawn on ANGLE, OpenGL ES 3.1) here`)が付く。`gl_angle.cc`が出していたコンテキストごとの5秒の数、限界値と拡張の一覧の行は、GPUのプロセスのコンテキストでは出さない。エンジンのスレッドの1回りの内訳の`WebGL`の時間(14.7)も、GPUのプロセスのコンテキストの呼出しは数えない。
+
+WebGPUのコンテキストは、GPUのプロセスのWebGPUのコマンドバッファである(`port/webgpu/webgpu_cmdbuf.cc`)。Blinkがプラットフォームにコンテキストを求めると(`br_blink.cc`の`BrWebGPUProvider`)、レンダラにGPUのプロセスへのチャネルがあれば、そのチャネルにWebGPUの`viz::ContextProviderCommandBuffer`(`CreateForWebGPU`)を作って渡す。Blinkの呼出しは`WebGPUImplementation`(Dawnのワイヤのクライアント)が直列化してコマンドバッファに積み(ワイヤのクライアント、その直列化と転送バッファの扱いの3つのソースは、gnがDawnのあるときにしかエンジンのグラフに入れないので、`WebGPUImplementation`の命令で翻訳する。`build.sh`の`dawn_lib`)、GPUのプロセスの`WebGPUDecoderImpl`がワイヤのサーバとしてDawnの実装に渡す。答え、サーバの遅れた仕事(バッファのマッピング、キューの仕事の終わり)、デバイスの喪失は、コマンドバッファを通って戻る。14.6.5の同じプロセスのワイヤ、答えのタスク、2ミリ秒ごとの見回りは、このとき使わない。
+
+- DawnのOpenGL ESのバックエンドは、GPUのプロセスのANGLEの上で動く。デコーダは、アダプタを求めるときにANGLEのディスプレイとANGLEの`eglGetProcAddress`(`gl::GetGLProcAddress`)をDawnに渡す(`RequestAdapterOptionsGetGLProc`)。Chromiumのビルドではこのためのスイッチ(`DAWN_ENABLE_BACKEND_OPENGLES`)が切なので、デコーダとEGLイメージの共有イメージのソースだけ、先に読むヘッダ(`port/gpu/dawn_gles_flags.h`、`flags.txt`)で入にする。
+- `SystemHasGles31`の確かめ(14.6.5)はGPUのプロセスで行う。GLを起こした後、ANGLEのディスプレイでOpenGL ES 3.1のコンテキストを1つ作って捨て(版を下げない)、作れたときだけWebGPUを出す(`GpuChannelInfo.webgpu`)。そのとき`GpuPreferences`で、WebGPUのスタブを許し(`enable_webgpu`)、アダプタをOpenGL ESのものにし(`use_webgpu_adapter`)、水準を互換(compatibility)に決め(`force_webgpu_compat`。DawnのOpenGL ESのバックエンドは互換の水準しか持たない)、Chromiumのアダプタの除外の表を使わない(`adapter_blocklist`を切る。表はプロセッサの上のアダプタを除くので、softpipeが外れる)。Dawnの関数表はDawnの実装のものにする(`dawnProcSetProcs`)。
+- Dawnのインスタンスは、ライブラリを探す場所としてプログラムのディレクトリを求める(`base::PathService`の`DIR_MODULE`)。プログラムはディレクトリの中のファイルではないので、GPUのプロセスはプログラムとそのディレクトリの道(`FILE_EXE`、`FILE_MODULE`、`DIR_EXE`、`DIR_MODULE`)を「ない」と答える提供者を先に登録する。baseの既定の提供者は`/proc`のリンクを読もうとし、読めないとプロセスを止める。Dawnはここではライブラリを読み込まない。
+- `GpuChannelManager`に`DawnContextProvider`は渡さない(9章の未確認15)。それはSkiaのGraphiteがDawnで描くときのもので、WebGPUのデコーダは自分のDawnのインスタンスを持つ。
+- canvasの`webgpu`のコンテキストのテクスチャは、GPUのプロセスの共有イメージである。ANGLEのOpenGL ESのバックエンドでは、GLのテクスチャの共有イメージ(`GLTextureImageBackingFactory`)はWebGPUの用途を受けないので、EGLイメージの共有イメージ(`EGLImageBackingFactory`)になり、DawnはそのEGLイメージを自分のテクスチャとして取り込む(`DawnEGLImageRepresentation`)。ページを描くときのcanvasの画素(`g_webgpu_canvas_snapshot`、14.6.5)は、canvasのデバイスで今のテクスチャをcanvasごとの共有イメージ(用途はWebGPUの書込みとラスタの読出し)に写し(内部の用途で`CopyTextureToTexture`)、その同期トークンの後でラスタのコンテキストの`ReadbackImagePixels`で読む。今のテクスチャはcanvasのものである間Dawnが持っているので、直接は読めない。テクスチャがないときは、最後に読んだ画素を使う。パッチ`gpu_canvas_context.patch`は、この写しのために差込み口にデバイスとテクスチャ(クライアントの番号)を渡す。
+- WebGL on WebGPU(14.6.5.1)の同期で作るコンテキストは、答えをIOのスレッドで受ける(`SetReplyTaskRunner`)。ANGLEがデバイスを待つ間も答えが届く。QEMUでは、`test_blink_wgw`のページを`gpuproc=on`で開き、消去の色と三角の色が正しいことを1度確かめた(試験そのものは`gpuproc=off`のまま)。
+- チャネルがないとき(`gpuproc=off`、`process=single`、`gpu=off`、「GPUなし」)は、今までどおりレンダラの中のDawn(`webgpu_tessronos.cc`)で作る。新しいチャネルを求めている間と、GPUのプロセスがWebGPUを出さないときは、コンテキストを作らない(ページの`requestAdapter()`はnull)。
+
+| 行 | 意味 |
+| --- | --- |
+| `browser: webgpu: a context in the GPU process` | WebGPUの最初のコンテキストをGPUのプロセスに作った(`(waited on, for WebGL on WebGPU)`は同期で作るもの) |
+| `browser: gpu process N: no WebGPU: ANGLE makes no context of OpenGL ES 3.1` | GPUのプロセスのANGLEがOpenGL ES 3.1のコンテキストを作れない。WebGPUは出さない |
+| `browser: webgpu: the GPU process runs no WebGPU (...): no adapter` | 上のとき、ページがアダプタを求めた(最初の1回) |
+| `browser: webgpu: a canvas's texture was not read back from the GPU process` | canvasの画素を読めなかった(最初の1回) |
+| `browser: webgpu: a context in the GPU process is lost: ...` | GPUのプロセスのWebGPUのコンテキストが失われ、ページに知らせた(`device.lost`、最初の1回) |
+
+GPUのプロセスは、`GpuService.Start`のときにコンソールへ次を出す。GLの`GL_RENDERER`と版、ANGLEのEGLの拡張の一覧、GLの拡張の一覧である。レンダラは、最初の表示をブラウザに送った後(2つ目の表示の前)に、GPUのプロセスへの1往復の時間を出す(`browser: gpu: a round trip to the GPU process N us`)。測り方は、何もしない同期の呼出し(`GpuChannel.Flush`)を100回呼んだ平均である。測る間はレンダラのメインスレッドが止まるので、最初の表示より後にし、回数も抑えている。1表示の時間は、今までの`browser: draw`の行で5秒ごとに出る。`browser: draw: on the GPU a view: play, flush, read back`の3つは、`gpuproc=off`ではレンダラのGPUのスレッドの記録の再生、ドライバへの命令の受渡し(`flushAndSubmit`)、読み戻しである。`gpuproc=on`では、同じ3つのレンダラの側(記録をコマンドにする、送る、GPUのプロセスの仕事を待つ読み戻し)で、行の後ろに`in the renderer, of the GPU process`と付く。`gpuproc=on`のときだけ、続けて`browser: draw: in the GPU process:`の行が出る。1表示あたりの往復の回数と1往復の時間、GPUのプロセスのラスタの数(ビューとcanvasの合計)とその1回あたりの記録の再生(直列化した記録を戻してGaneshに渡す時間)とフラッシュ(GaneshがANGLEに命令を出す時間)、読み戻しの数とその1回あたりの描画の終わりまでの待ち(`glFinish`)と写しの時間である。GPUのプロセスの中の時間は、ラスタのデコーダに足したパッチ(`raster_decoder_time.patch`)が数え、ブラウザが`GpuService.Query("rasterstat")`で問い合わせる。読み戻しの前の`glFinish`は、読み戻しがどのみち待つ分を分けて測るためのものである。GPUのプロセスでラスタ化した表示がない5秒の間は、GPUの行は出さない。`gpuproc=off`と`process=single`では、GPUのプロセスの項目は出ない。ブラウザは、`procs=`のファイルに`gpu pid=N renderer=...`を、`gpucheck=`のファイルの9つ目の値にGPUのプロセスでラスタ化したビューの数を書く。
+
+`gpuproc=on`では、GPUのプロセスが、読み戻しのあった5秒ごとに次の行を出す。
+
+```text
+browser: gpu readback: N reads, K kpx; source S, dest D; skia A us (gl B us, convert C us); new transfer buffers T
+```
+
+読み戻しの数と画素の数、読む元の共有イメージと読む先の色の並び(`RGBA`か`BGRA`、両方あれば`mixed`)、Skiaの`readPixels`全体の時間、その中のANGLEの`glReadPixels`の時間、残り(色の変換と写し)、その間に新しく登録された転送バッファの数である。数はラスタのデコーダと転送バッファの管理に足したパッチ(`raster_decoder_time.patch`、`transfer_buffer_count.patch`)が数える。`glReadPixels`の時間は、GLの関数を名前で引く所(`gl_init_tessronos.cc`、`SetGLGetProcAddressProc`)で`glReadPixels`を時間を測る包みに替えて数える。コンテキストの関数表もSkiaのGLのインタフェースも、関数をそこから取るからである。包みが時間を測るのは、ラスタのデコーダが読み戻しをしている間(スレッドごとの印)だけである。GPUのジョブの数と待ち、GPUの周波数は、まだ行に入れていない。
+
+ビューとcanvas 2Dの共有イメージは、GPUのプロセスのGLがBGRAのテクスチャを作れるとき(`texture_format_bgra8888`)、ページのメモリ(N32)と同じBGRA8にする。読み戻しで色を並べ替えないためである。作れないとき、と読む先がBGRAでないときはRGBA8にする。どちらにしたかは、最初に`browser: gpu: the shared images of the view and the canvases are ...`の行で出す。ラスタのコンテキストだけが失われたとき(チャネルは残っているとき)も、`browser: gpu: the raster's context in the GPU process is lost (reset status 0x..., the channel ...)`の行を出し、チャネルが失われたときと同じく新しいチャネルを求める。
+
+ウインドウのGPUの面(10.2.4)。`gpuproc=on`では、ブラウザはページのウインドウを、GPUのプロセスが作った2枚のBOから見せる。レンダラはページのフレームを2枚に交互にラスタ化して読み戻さず、ブラウザもページのメモリから作業領域の面へ写さない。ウインドウマネージャはBOを作業領域の画素として読む。起動の行`gsurf=off`で、ビューをページのメモリへ読み戻す今までの道に戻せる(実機で比べるため)。
+
+| 段 | 誰が | すること |
+| --- | --- | --- |
+| BOを作る | GPUのプロセス(`GpuService.MakeGsurf(w, h)`) | 自分のGPUのコンテキスト(`gp_opn_gpu`)で線形のBOを2枚作り(1行は幅×4を256の倍数に切り上げる)、BOの実身(`OB_S_GPUBO`)にする。BOをテクスチャにし、共有イメージ(BGRA8、`kTopLeft`、用途はラスタの書込みと読出し)として`SharedImageManager`に登録する(`br_gpu_main.cc`の`GsBacking`)。BOは0で始まり、テクスチャの中身は決まっているので、消した印を付けておく。答えは、BOのPRIMEの記述子(`handle<platform>`。`ts_chan.c`がBOの実身のキーにして運ぶ)と、共有イメージのメールボックス |
+| レンダラに渡す | ブラウザ(`Page.SetGsurf`) | メールボックス2つ、大きさ、GPUのプロセスのプロセス番号、ブラウザが付けた組の番号。レンダラはBOのキーを持たない |
+| 描く | レンダラ | ラスタのコンテキストで、次の番のBOの共有イメージに`RasterCHROMIUM`で再生する。描く矩形は、このフレームの矩形と、もう一方のBOに描いた前のフレームの矩形の和(一度も描いていないBOには全体)。その後に同期トークンを作り、`SignalSyncToken`で待つ(メインスレッドは止めない)。GPUのプロセスがそこまでの命令を処理したと知らされてから、`FrameSink.GsurfFrame`(このフレームの矩形、組、BOの番号)を送る |
+| ウインドウに付ける | ブラウザ | 組の最初のフレームを見せるときに、記述子が持つキー(`ts_gpu_fd_key`)をウインドウのレコード`OB_WR_GSURF`の`OB_GS_SET`に書く。その後も記述子は組の間持つ |
+| 見せる | ブラウザ | `OB_GS_SHOW`(BOの番号、通し番号、矩形)を書く。ウインドウマネージャは、そのBOを使うGPUのジョブが終わった後の組み立てで見せ、`OB_E_CHANGE`を知らせる。ブラウザはウインドウのスレッドで知らせを受けて番号を覚え、エンジンのスレッドがページを回すとき(`pump`。メインのループのほか、試験の待ちや移動の待ちの中でも回る)に`FrameDone`を送る。レンダラはそれまで次のフレームを描かない |
+
+GPUのプロセスがBOに描く形は、GLを起こすときに1回だけ決める(`gs_choose`)。
+
+- GLがGPUの上にあり、ANGLEのEGLが`EGL_EXT_image_dma_buf_import`を出すとき(`drawn`)は、BOをEGLのDMA-BUFとして取り込み(`DRM_FORMAT_XRGB8888`、修飾子は線形)、そのEGLイメージを兄弟とするテクスチャを共有イメージにする。ラスタはBOに直に描き、プロセッサは何も写さない。共有イメージへの書込みの終わりに`glFlush`して、同期トークンが進む前にGPUのジョブがカーネルに入るようにする。決めるときに64×64のBOで確かめる。全体と最初の8行を違う色で消して`glFinish`し、BOの最初と最後の画素を読む。取り込めることと、行の並び(テクスチャの最初の行、つまりSkiaが`kTopLeft`の面に描く上端が、BOの最初の行)を見る。
+- GLがプロセッサの上にあるとき(softpipe。`copied`)は、DMA-BUFを取り込めない。テクスチャはGLのものにし、BOをGPUのプロセスにマップして、書込みの終わりにテクスチャ全体をBOへ読む(`GLTextureHolder::ReadbackToMemory`)。GLがプロセッサで描くので写しもプロセッサがし、レンダラとブラウザとカーネルの写しはなくなる。BOはGPUの空間に入れない(`GPU_BO_NOGPU`)。QEMUではこの形で確かめる。
+- どちらでもないとき(GPUの上のGLだがDMA-BUFを取り込めない、確かめの色が合わない、ページをラスタ化しない)は面を作らず(`none`)、今までの読み戻しの道のままにする。
+
+GPUのプロセスの起動の行の最後に、`gsurf=drawn`、`gsurf=copied`、`gsurf=none`のどれかが付く。`none`のときは理由の行も出る。
+
+ページのフレームは、ページのメモリへのもの(`Frame`)と面へのもの(`GsurfFrame`)が混ざってよい。レンダラは、面がページのメモリと同じ大きさで、面を作ったGPUのプロセスへのチャネルでページをラスタ化しているときだけ面に描き、そうでないときはページのメモリに描く。種類が前のフレームと違うときはビュー全体を描く。ブラウザは、ページのメモリのフレームが来たとき、ウインドウが面を見せていれば`OB_GS_DROP`を書き(ウインドウマネージャは見せていたBOの絵をウインドウの画素へ写して残す)、今までどおり作業領域の面へ写す。ウインドウが面を見せている間は、作業領域の面に何も描かず、`wm_obj_put`もしない(倍率が100でないときなど、カーネルがBOをウインドウの画素へ写す形を上書きしないため)。
+
+- 大きさが変わったとき、ウインドウのページが別のページ(別のレンダラ)に替わったとき、GPUのプロセスが替わったときは、新しい組を作って渡し、古い組の記述子を閉じてGPUのプロセスに返す(`GpuService.DropGsurf`)。ウインドウは新しい組の最初のフレームまで古いBOの絵を見せ続ける。前のページから組を取り上げるのは、そのレンダラがほかのページのウインドウに描けないようにするためである。
+- かな漢字変換の候補の一覧を出している間と、消した後の1回は、面を取り上げてページのメモリに描かせる(一覧は作業領域の面に描くため。決めること8)。
+- GPUのプロセスが落ちると、レンダラは同期トークンの待ちを失ったものとして終え、次のフレームからページのメモリに描く。ブラウザはそのフレームで`OB_GS_DROP`して最後の絵をウインドウに残し、新しいGPUのプロセスができたら新しい組を作る。面を作れないと答えたGPUのプロセス、組をウインドウかレンダラが受け取らなかったGPUのプロセスには、そのプロセスの間は頼み直さない。
+- 取り上げた後に届いた、前の組のフレームは見せずに返す。
+- 見せた知らせが1秒来ないときは、ウインドウのレコードを1回読んで確かめる(知らせが失われたときのため。見回りではなく、ページを回すときに見る)。
+
+`gpucheck=`では、レンダラは面に描いたビューを、比べるときだけ共有イメージから読み戻してプロセッサの絵と比べる。5秒ごとの描画の行に次の行が足される。`browser: draw: on the GPU a view:`の読み戻しの時間は、読み戻したビューの数で割る。`procs=`のファイルには`gsurf how=copied sets=N shown=M drops=K`の行が付く。
+
+```text
+browser: draw: window buffers (drawn): N views rastered into them, taken in by the GPU process A us after each; M shown, each B us after the window was asked; let go K times for the page's memory
+```
+
+面にラスタ化したビューの数、ラスタの終わりからGPUのプロセスが受け取ったと知らされるまでの時間、ウインドウに見せた数と`OB_GS_SHOW`から知らせまでの時間(`drawn`ではGPUの描き終わりの待ちを含む)、ページのメモリのフレームのために面を外した回数である。
+
+| 行 | 意味 |
+| --- | --- |
+| `browser: gpu: the page's window is shown from buffers of the GPU process (copied), 800x560, no view read back` | 最初の組をページに渡した |
+| `browser: gpu: the window can have no GPU buffers (...): each view is read back from the GPU process` | GPUのプロセスが面を作れなかった。そのプロセスの間は今までの道 |
+| `browser: gpu: the window did not take its GPU buffers (N): each view is read back` | `OB_GS_SET`が断られた |
+| `browser: the window has no GPU buffers (N): each view is read back from the GPU process` | ウインドウが`OB_WR_GSURF`の知らせを受け付けなかった(古いカーネル) |
+| `browser: gpu process N: no window buffers of WxH: ...` | GPUのプロセスでBOか共有イメージを作れなかった |
+
+`drawn`の形、V3DとIntelの合成がBOを読むこと、Pi 5のv3dで線形のBGRAに描けることは、実機で確かめていない(未確認)。
+
+`gpucheck=`のプロセッサの絵との比べは、レンダラを使うときはレンダラが行う(`br_sys_gpu_check`)。ブラウザのウインドウの画素はレンダラのページのメモリの写しで、ブラウザのエンジンもそのメモリから描くので、ブラウザで比べると同じ絵どうしの比べになるからである。レンダラは、GPUで描いた表示をブラウザへ送った後に、同じビューをプロセッサで描いて比べる。ブラウザは終わるときに、ウインドウのページのレンダラから合計を問合せ(`gpucheck`)で受け取り、ファイルに書く。比べはアルファも含む。
+
+GPUのプロセスが自分で終わると(落ちた、または試験の`menu=killgpu`)、ブラウザは回収してすぐ起こし直す。60秒の間に3回終わったときは起こし直さず、以後は「GPUなし」とする。レンダラは`GpuChannelHost`の接続の喪失(`GpuChannelLostObserver`、IOスレッド)で知る。メインスレッドで、コンテキストと共有イメージを捨て、ページをプロセッサで描くようにし、新しいチャネルを待たずに求める(`Host.GpuChannel`を非同期で呼ぶ。ブラウザはGPUのプロセスを起こし直している間、答えを待たせる)。答えが来たら、新しいチャネルでレンダラのすべてのページのビュー全体を描き直す(`Page.Redraw`と同じ)。答えが空なら「GPUなし」として、以後はプロセッサで描く。ブラウザがプロセスの終わりを見る前にレンダラが求めたときは、`EstablishChannel`が失敗するので、ブラウザはそこで終わったものとして扱い、起こし直してからもう1度作らせる。GPUのプロセスにあったcanvasの中身は、Chromeと同じく失われる。canvasは次に描かれるときに新しいコンテキストの共有イメージで続き、コンテキストがない間はプロセッサの面で続く。プロセッサの面に描いたものは、コンテキストが戻ったときに共有イメージへ書き込む。失われたコンテキストの共有イメージを指すスナップショットはメールボックスを返さず、ページには描かれない。Blinkには喪失を知らせないので、`contextlost`と`contextrestored`の出来事は出ない(Chromeとの違い)。
+
+後から来たGPU(x64の`igt: ready`など)は、GPUのプロセスが知る。GLを起こす前に、GPUのデバイスの実身(`gpu0`、`OB_UUID_GPU_INIT`)を開いて記録`OB_GP_STATE`の`OB_E_CHANGE`を通信の実身に知らせるよう頼み、その後で`gp_ref_gpu`を見る(この順で取りこぼさない)。GPUがまだ登録されていなければ、専用のスレッドで知らせを待ち、知らせのたびに`gp_ref_gpu`を見直す。登録されたら`GpuHost.GpuArrived`をブラウザに送る。ブラウザはGPUのプロセスを閉じさせて新しいものを起こす(落ちた回数には数えない)。レンダラは落ちたときと同じ道でチャネルを作り直す。起動のときにGPUが登録されていたプロセスは、待たない。見回りはしない。TessronOSのヘッダを読むのは`br_`で始まるファイルだけなので(`flags.txt`)、待ちの処理は`br_main.cc`の`br_sys_gpu_watch`に置いた。`gpufake=`は、`gpuproc=on`ではGPUのプロセスもGLの前に入れ(`br_sys_gpu_fake_begin`)、結果のファイル(`driver=v3d step=6`)はGPUのプロセスが書く。
+
+QEMU virt(softpipe、4コア)で測った値は次のとおりである(TCGなので、実機の値ではない)。
+
+| 項目 | 値 |
+| --- | --- |
+| GPUのプロセスの起動(読込みからGLの用意まで) | 1.4〜3.4秒。空きのメモリが約210MB減る(1693MBから1485MB) |
+| GPUのプロセスへの1往復(`GpuChannel.Flush`の平均) | 5.7〜7.2ミリ秒(1000回)、6.7ミリ秒(100回) |
+| 1表示の往復の回数 | 1回(読み戻し) |
+
+1表示の時間を、レンダラの中のGPUのスレッドでのラスタ化(`gpuproc=off`、14.7.2)と並べると次のとおりである。ページは`test_blink_gpu`の`/g`(800×560)である。「GPUの仕事」は、`gpuproc=off`では記録の再生と`flushAndSubmit`(SkiaがMesaに命令を出し、softpipeが描く)、`gpuproc=on`ではGPUのプロセスが命令を受けて描き終わるまで(調べのために読み戻しの前に`Finish`を置いて測り、1往復を含む)である。
+
+| 表示 | 道 | レンダラでの再生 | GPUの仕事 | 読み戻し | 合計 |
+| --- | --- | --- | --- | --- | --- |
+| 最初の表示(448kpx、シェーダの翻訳を含む) | `gpuproc=off` | 67ミリ秒 | 1002ミリ秒 | 45ミリ秒 | 約1110ミリ秒 |
+| 同上 | `gpuproc=on` | 78ミリ秒 | 1484ミリ秒 | 39ミリ秒 | 約1600ミリ秒(1.44倍) |
+| その後の表示(12kpx、動画の矩形) | `gpuproc=off` | 3ミリ秒 | 74〜96ミリ秒 | 4〜6ミリ秒 | 約80〜105ミリ秒 |
+| 同上 | `gpuproc=on` | 1.5〜2.5ミリ秒 | 108〜172ミリ秒 | 7〜16ミリ秒 | 約145〜165ミリ秒(約1.8倍) |
+
+読み戻しそのものは遅くない。ビュー全体(448kpx)の読み戻しは23ミリ秒で、そのうち約9ミリ秒が往復である。色の型をRGBAにしても、行の幅を詰めても変わらなかった(23.7ミリ秒、22.6ミリ秒)。以前の測定で「読み戻し」が1.6秒だったのは、同期の読み戻しがGPUのプロセスの描画の終わりを待つ時間を含んでいたためである。遅れの大部分はGPUのプロセスの中にある。直列化された記録を戻してGaneshで再生する分と、ANGLEを挟む分である。GPUのプロセスの中で測ると(`browser: draw: in the GPU process:`の行、QEMU)、その後の表示(30〜45kpx)の1回のラスタで、記録の再生が約2ミリ秒、フラッシュ(GaneshがANGLEに命令を出し、softpipeが描く)が約210ミリ秒、読み戻しの前の描画の終わりの待ちが約6ミリ秒、写しが約3ミリ秒だった。遅れのほとんどはフラッシュ、つまりANGLEとsoftpipeの側にある。softpipeは命令を受けたときに描くので、実機のGPUではフラッシュと描画の終わりの待ちの割合が変わる見込みである(未確認)。
+
+以前、`gpuproc=on`で画面の7か所が黒かったのは、レンダラが最初の表示の前に往復の時間を1000回の呼出しで測っていたためである。約5.7秒の間、最初の表示がブラウザに届かず、試験が画面を見たときにウインドウはまだ何も描かれていなかった。読み戻した画素はアルファも色も正しかった(箱の位置でBGRAが`50 a0 00 ff`)。また、そのときの`gpucheck=`の違いが0だったのは、ブラウザで同じ絵どうしを比べていたためで、レンダラで比べるようにした後は、48を超える違いが0、違う画素は約1.9%(最大27)である。
+
+試験は`test_blink_gpuproc`と`test_blink_gpulost`である。`test_blink_gpuproc`は、`test_blink_gpu`のページ`/g`を`gpuproc=on`と`gpu=on`で開く。次のことを見る。`procs=`に`gpu pid=`があり、その`renderer=`がANGLEの上のsoftpipeであること。画面の7か所が`test_blink_gpu`と同じ色であること。プロセッサの絵と比べて、48を超えて違う画素が0.5%以下であること。GPUのプロセスでラスタ化したビューと、canvasの記録が1つ以上あること。getImageDataで読んだcanvasの色(橙、円、putImageDataの緑、スナップショットを描いたプロセッサのcanvasの橙)が正しいこと。動画の平面はまだ見ない。この試験のページも、ウインドウのGPUの面(`copied`)から見せる。
+
+`test_blink_gsurf`は、同じページ`/g`を`gpuproc=on`と`gpu=on`で開き、途中で`menu=killgpu`でGPUのプロセスを1回終わらせる。画面の箱、画像、動画、グラデーションが`test_blink_gpu`と同じ色であること(新しいGPUのプロセスのBOから見せている絵。canvasとWebGLの中身は古いプロセスとともに失われるので見ない)、`procs=`に`gsurf how=copied`があり、組を2つ以上作り(GPUのプロセスごとに1つ)、面から見せたフレームが1つ以上あること、GPUのプロセスを終わらせた後にビューがラスタ化されたことを見る。
+
+`test_blink_gpulost`は、箱と200ミリ秒ごとに描き直すcanvasのページ`/gpl`を`gpuproc=on`と`gpu=on`で開く。QEMUにはGPUがないので、GPUのプロセスはGPUを待つ。試験は、GPUのプロセスが待つと言ったら、試験用のバックエンド(`GPU_KIND_TEST`)を`knl_gpu_register`で登録する。`menu=waitgpu`で、GPUのプロセスが起こし直され、ページが新しいプロセスで描き直されることを見る。続けて`menu=killgpu`を3回行う。2回目までは、新しいGPUのプロセスが起き、ページが描き直されること。3回目は起こし直されず(「GPUなし」)、レンダラが「GPUのプロセスはない」と言うこと。最後に、箱とcanvasが画面にあり(プロセッサで描かれている)、題にgetImageDataで読んだcanvasの色があること。試験用のバックエンドは終わりに外す。
+
+`test_blink_glproc`は、GPUのプロセスのWebGLを`gpuproc=on`と`gpu=on`(softpipe)で見る。試験はブラウザが動く間コンソールを読む。1つ目は`test_blink_glw`のページ`/glw`で、ワーカーのWebGL 1と2、ページが作り続ける多くのコンテキスト、WebGL 2のフェンス、`KHR_parallel_shader_compile`で見回るリンクが、`test_blink_glw`と同じ結果になること。レンダラがWebGL 1と2をGPUのプロセスに作ったと言い、自分のANGLEには作っていないこと。2つ目は`test_blink_glgpu`のページ`/glgpu`で、GPUのプロセスのWebGLのcanvasをWebGPUのテクスチャに写し、WebGPUのcanvasをWebGLのテクスチャに取り込んで、色が保たれること。3つ目のページ`/glp`は、ANGLEが拒む描画(バッファのない属性を有効にした`drawArrays`)をし、`getError`が`INVALID_OPERATION`を返し、その説明が`browser: webgl: [`の行でコンソールに出ること、WebGL 2で消した色を読めることを見る。続けて`menu=killgpu`でGPUのプロセスを1回終わらせ、ページが`webglcontextlost`と`webglcontextrestored`を1回ずつ受け、新しいGPUのプロセスのコンテキストで緑に消した色を読むことを見る。ANGLEが拒む描画には、Blinkが検査しない頂点バッファの大きさの不足を使う(Blinkが自分で検査するものはANGLEに届かない)。QEMU virt(softpipe)で`test_blink_glproc`と`test_blink_gpuproc`が通った。4つ目のページ`/glo`は、ページのWebGLのcanvas(緑で消し、GLの上半分の行を青で消す)を200ミリ秒ごとに描き、画面の上半分が青、下半分が緑であること(写した共有イメージが上下を保って描かれること)、コンソールに`with no readback`の行が出て、`was read back to be shown`の行が出ないことを見る。3つ目のページでも同じ2つの行を見る。`/glgpu`のWebGLとWebGPUの間の写しは、どちらのコンテキストもGPUのプロセスにある形で通る。
+
+`test_blink_gltex`は、テクスチャとページのWebGLのcanvasを、`gpu=on`(実機と同じくページをGPUでラスタ化する。QEMUではsoftpipe)で、レンダラのANGLE(`gpuproc=off`)とGPUのプロセス(`gpuproc=on`)の2通りで見る。ページ`/gltx`は、WebGL 1と2のコンテキストで、配列(`texImage2D`)、1色のPNGとJPEG(`/i.png`、`/i.jpg`。ミップマップを作る)、2の累乗でない大きさの小さいcanvas、256×256のcanvas(GPUで描くcanvas)、`ImageBitmap`から、WebGL 2ではさらに`texStorage2D`と`texSubImage2D`、R8のテクスチャ、2D配列のテクスチャの層(`texImage3D`)からテクスチャを作り、フレームバッファに描いて読み戻した画素が元の色であること(15通り)を見る。ページのcanvasは毎フレーム描き、テクスチャを作り終えて1.5秒の間は赤、その後は緑で上半分をPNGの青にする。画面のcanvasの上半分が青、下半分が緑であること(最初の赤のフレームのまま残らないこと)と、それからの2秒の`requestAnimationFrame`が1秒に64回以下であることを見る。直す前は、`gpuproc=off`で画面が赤のまま、毎秒162回だった。
+
+`test_blink_gpuwgpu`は、`test_blink_webgpu`のページ`/wgpu`を`gpuproc=on`と`gpu=on`で開き、`test_blink_webgpu`と同じこと(互換の水準のアダプタ、計算シェーダの結果、canvasの三角を2Dのcanvasに描いて読んだ色、デバイスのエラーがないこと、画面の三角と緑)を見る。あわせて、GPUのプロセスがWebGPUを出すと言い、レンダラがGPUのプロセスにコンテキストを作り、自分のアダプタを作っていないことをコンソールで見る。

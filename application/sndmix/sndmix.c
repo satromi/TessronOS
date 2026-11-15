@@ -17,6 +17,12 @@
  *	  全体		    the output the sound plays on, the volume of the
  *			    left and of the right, 消音, and 左右をそろえる,
  *			    with which a move of either takes the other along
+ *	  マイク	    the input that records, or would (OB_SND_MIXIN):
+ *			    what it is and how it takes its volume (機器で:
+ *			    the hardware's amplifier, ソフトウェアで: the
+ *			    samples multiplied), 録音中 while a program
+ *			    records, its volume (50 as it comes), its level
+ *			    as a meter, and 消音
  *	  アプリケーション  every program that has played on the device and
  *			    is still there, a row each: its icon, its name
  *			    with 再生中 while it plays, its volume and 消音
@@ -35,14 +41,16 @@
  *	(OB_E_CHANGE of OB_SND_MIX: a program come or gone, one that starts
  *	or stops playing, a volume set here or elsewhere -- システム環境設定's
  *	音量 is the whole's) and when the system object tells that the output
- *	changed (OB_SYS_SOUND); nothing is looked at between. A part the hand
+ *	changed (OB_SYS_SOUND); nothing is looked at between but the
+ *	microphone's level, read every METER_MS while it records. A part the hand
  *	has just moved is left as the hand put it for a second, so that a
  *	reading does not pull it back mid-drag, and read again once the
  *	second is over.
  *
  *	Everything is the window manager's parts from the data box
  *	(SYSDEF_BOX_SNDMIX): volumes, switches, boxes, the icon part that
- *	shows a program object's icon. Nothing here draws.
+ *	shows a program object's icon; the level's meter is a volume that is
+ *	shown and not to be worked. Nothing here draws.
  */
 
 #include <string.h>
@@ -54,6 +62,7 @@
 #include <ts/snd.h>
 
 #define HOLD_MS		1000		/* a part just moved is left alone this long */
+#define METER_MS	100		/* the microphone's level read this often while it records */
 #define TEXT_MAX	4096
 
 #define PN_MAIN		1
@@ -64,8 +73,13 @@
 #define P_RIGHT_BOX	5
 #define P_MUTE		6
 #define P_LINK		7
+#define P_MIC		8		/* the input, how, 録音中 */
+#define P_MIC_VOL	9
+#define P_MIC_BOX	10
+#define P_MIC_LEVEL	11		/* the meter */
+#define P_MIC_MUTE	12
 #define NROW_MAX	10		/* the rows the panel has */
-#define ROW_TOP		222		/* where the first row is in the panel */
+#define ROW_TOP		366		/* where the first row is in the panel */
 #define ROW_H		40
 #define START_ROWS	5		/* rows the window opens with */
 #define P_ROW(k)	( 100 + (k) * 10 )
@@ -87,6 +101,10 @@ LOCAL UB	top_prog[16];		/* the program in the first row, to keep it there */
 LOCAL INT	top_pid = -1;
 LOCAL INT	said_vis = -1, said_top = -1, said_n = -1, said_pid = -2;	/* the list as last said */
 LOCAL UD	hold_all;		/* the whole left as the hand put it until then, 0 not */
+LOCAL UD	hold_mic;		/* the microphone */
+LOCAL SDMixIn	mic;			/* the microphone as last read */
+LOCAL INT	said_lv = -1;		/* its level's tenth as last told, for the tests */
+LOCAL INT	said_rec = -1;		/* and whether it recorded */
 LOCAL UD	hold_row[NROW_MAX];	/* and each row */
 
 /*
@@ -104,6 +122,7 @@ typedef struct {
 } SHOWN;
 
 LOCAL SHOWN	shown_all;
+LOCAL SHOWN	shown_mic;		/* pid: the kind, -1 no input */
 LOCAL SHOWN	shown_row[NROW_MAX];
 LOCAL INT	shown_rows = -1;	/* rows shown, -1 not yet set */
 LOCAL char	said[512];		/* what was last said of the programs */
@@ -150,6 +169,20 @@ LOCAL BOOL mix_read( void )
 	}
 	said_er = er;
 	return (BOOL)( er >= E_OK );
+}
+
+/* The microphone as the device has it now; FALSE with no device or no answer */
+LOCAL BOOL mic_read( void )
+{
+	SZ	asz = 0;
+
+	memset(&mic, 0, sizeof(mic));
+	if ( dev_open() <= 0 || ob_rea_rec(dev, OB_SND_MIXIN, 0, &mic, sizeof(mic), &asz) < E_OK
+	  || asz < (SZ)sizeof(mic) ) {
+		memset(&mic, 0, sizeof(mic));
+		return FALSE;
+	}
+	return TRUE;
 }
 
 LOCAL ER mix_put( CONST SDMixSet *s )
@@ -218,6 +251,87 @@ LOCAL void vol_show( INT num, INT box, INT v )
 	ui_set_range(&ui, num, v, SND_VOL_MAX, 0);
 	snprintf(t, sizeof(t), "%d", v);
 	ui_set_text(&ui, box, t);
+}
+
+/*
+ * A level of 0 .. 32767 as the meter's 0 .. 100: -60 dB of full scale at
+ * 0, full scale at 100, even steps of dB between (a halving is 6 dB, and
+ * within one a straight line, which is near enough for the eye)
+ */
+LOCAL INT meter_of( UINT level )
+{
+	INT	l = (INT)level, db10 = 0;		/* tenths of a dB */
+
+	if ( l <= 0 ) return 0;
+	if ( l > 32767 ) l = 32767;
+	while ( l < 16384 && db10 > -600 ) {
+		l <<= 1;
+		db10 -= 60;
+	}
+	db10 += ( l - 32767 ) * 60 / 16384;
+	if ( db10 <= -600 ) return 0;
+	return ( 600 + db10 ) * 100 / 600;
+}
+
+/* The microphone's meter, and 録音中 with what records, from what was last read */
+LOCAL void mic_level( void )
+{
+	INT	pct = mic.recording ? meter_of(mic.level) : 0;
+
+	ui_set_range(&ui, P_MIC_LEVEL, pct, 100, 0);
+	if ( mic.recording && pct / 10 != said_lv ) {
+		char	l[64];
+
+		/* the meter's tenth, told as it changes, for the tests */
+		said_lv = pct / 10;
+		snprintf(l, sizeof(l), "sndmix: microphone level %d (%d)\n", pct, (INT)mic.level);
+		tm_putstring((CONST UB *)l);
+	} else if ( !mic.recording ) {
+		said_lv = -1;
+	}
+}
+
+/* The microphone's part of the page */
+LOCAL void mic_show( void )
+{
+	char		t[160];
+	CONST char	*what, *how;
+
+	(void)mic_read();
+	if ( !mic.have ) {
+		ui_set_text(&ui, P_MIC, "（マイクがありません）");
+	} else {
+		what = ( mic.kind == SND_BE_USB ) ? "ＵＳＢのマイク"
+		     : ( mic.kind == SND_BE_BT ) ? "Ｂｌｕｅｔｏｏｔｈ：イヤホンのマイク（通話）"
+		     : ( mic.kind == SND_BE_I2S ) ? "Ｉ２Ｓの入力"
+		     : ( mic.kind == SND_BE_HDA ) ? "内蔵のサウンド：マイク入力"
+		     : "試験用の入力";
+		how = ( mic.how == SND_MIC_HW ) ? "（機器で調整）" : "（ソフトウェアで調整）";
+		snprintf(t, sizeof(t), "%s%s%s", what, how, mic.recording ? "　録音中" : "");
+		ui_set_text(&ui, P_MIC, t);
+	}
+	ui_off(&ui, P_MIC_VOL, !mic.have);
+	ui_off(&ui, P_MIC_MUTE, !mic.have);
+	if ( ui_now() >= hold_mic && ( !shown_mic.set || shown_mic.pid != ( mic.have ? (INT)mic.kind : -1 )
+				       || shown_mic.vol != mic.vol || shown_mic.mute != mic.mute ) ) {
+		vol_show(P_MIC_VOL, P_MIC_BOX, (INT)mic.vol);
+		ui_set_value(&ui, P_MIC_MUTE, mic.mute != 0);
+		shown_mic.set = TRUE;
+		shown_mic.pid = mic.have ? (INT)mic.kind : -1;
+		shown_mic.vol = mic.vol;
+		shown_mic.mute = mic.mute;
+		snprintf(t, sizeof(t), "sndmix: microphone %s kind %d volume %d mute %d how %d recording %d\n",
+			 mic.have ? "there" : "none", (INT)mic.kind, (INT)mic.vol, (INT)mic.mute, (INT)mic.how,
+			 (INT)mic.recording);
+		tm_putstring((CONST UB *)t);
+	}
+	if ( (INT)mic.recording != said_rec ) {
+		/* told as it changes, for the tests */
+		said_rec = (INT)mic.recording;
+		snprintf(t, sizeof(t), "sndmix: microphone recording %d\n", said_rec);
+		tm_putstring((CONST UB *)t);
+	}
+	mic_level();
 }
 
 LOCAL BOOL prog_none( CONST UB *p )
@@ -314,6 +428,7 @@ LOCAL void fill( void )
 		shown_all.vol = mix.lv << 16 | mix.rv;
 		shown_all.mute = mix.mute;
 	}
+	mic_show();
 	n = (INT)mix.napp;
 	top_find(n);
 	top_keep(n);
@@ -467,6 +582,28 @@ LOCAL void all_set( INT moved )
 	tm_putstring((CONST UB *)t);
 }
 
+LOCAL void mic_set( void )
+{
+	SDMixSet	s;
+	INT		v = ui_value(&ui, P_MIC_VOL);
+	char		t[96];
+	ER		er;
+
+	if ( v < 0 ) v = 0;
+	if ( v > SND_VOL_MAX ) v = SND_VOL_MAX;
+	snprintf(t, sizeof(t), "%d", v);
+	ui_set_text(&ui, P_MIC_BOX, t);
+	memset(&s, 0, sizeof(s));
+	s.what = SND_MIX_IN;
+	s.pid = SND_MIC_NOW;
+	s.lv = s.rv = (UINT)v;
+	s.mute = ( ui_value(&ui, P_MIC_MUTE) != 0 );
+	er = mix_put(&s);
+	hold_mic = ui_now() + HOLD_MS;
+	snprintf(t, sizeof(t), "sndmix: microphone %d mute %d (%d)\n", v, (INT)s.mute, (INT)er);
+	tm_putstring((CONST UB *)t);
+}
+
 LOCAL void row_set( INT k )
 {
 	INT		i = top + k, v;
@@ -502,6 +639,10 @@ LOCAL void changed( INT id )
 
 	if ( id == P_LEFT || id == P_RIGHT || id == P_MUTE ) {
 		all_set(id);
+		return;
+	}
+	if ( id == P_MIC_VOL || id == P_MIC_MUTE ) {
+		mic_set();
 		return;
 	}
 	for ( k = 0; k < NROW_MAX; k++ ) {
@@ -542,6 +683,7 @@ LOCAL UD hold_next( void )
 	INT	k;
 
 	if ( hold_all != 0 ) at = hold_all;
+	if ( hold_mic != 0 && ( at == 0 || hold_mic < at ) ) at = hold_mic;
 	for ( k = 0; k < NROW_MAX; k++ ) {
 		if ( hold_row[k] != 0 && ( at == 0 || hold_row[k] < at ) ) at = hold_row[k];
 	}
@@ -555,6 +697,7 @@ LOCAL void hold_over( void )
 	INT	k;
 
 	if ( hold_all != 0 && now >= hold_all ) hold_all = 0;
+	if ( hold_mic != 0 && now >= hold_mic ) hold_mic = 0;
 	for ( k = 0; k < NROW_MAX; k++ ) {
 		if ( hold_row[k] != 0 && now >= hold_row[k] ) hold_row[k] = 0;
 	}
@@ -610,7 +753,7 @@ int main( void )
 
 	ui_icon(SYSDEF_PROG_SNDMIX);
 	ui_attr(WM_ATTR_RESIZE | WM_ATTR_RBAR);
-	if ( ui_open(&ui, SYSDEF_BOX_SNDMIX, PN_MAIN, 200, 100) < E_OK ) {
+	if ( ui_open(&ui, SYSDEF_BOX_SNDMIX, PN_MAIN, wm_new_x(200), wm_new_y(100)) < E_OK ) {
 		tm_putstring((CONST UB *)"sndmix: no window\n");
 		return 1;
 	}
@@ -620,6 +763,11 @@ int main( void )
 
 		if ( ob_rea_rec(ui.kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) >= E_OK ) {
 			wp.bottom -= ( wp.wbottom - wp.wtop ) - ( ROW_TOP + START_ROWS * ROW_H + 8 );
+			/* a panel taller than the screen had the window put higher: back where it was asked, once it fits */
+			if ( wp.top < 100 && wp.bottom + ( 100 - wp.top ) <= wp.sh ) {
+				wp.bottom += 100 - wp.top;
+				wp.top = 100;
+			}
 			(void)ob_wri_rec(ui.kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
 		}
 	}
@@ -631,8 +779,13 @@ int main( void )
 
 	/* until something is told, or a part's second of being left alone is over */
 	while ( !closing ) {
-		UD	at = hold_next();
+		UD	hold_at = hold_next(), lv_at = 0, at = hold_at;
 
+		if ( mic.recording ) {
+			/* the level read again soon: the earlier of that and the part's second */
+			lv_at = ui_now() + METER_MS;
+			if ( at == 0 || lv_at < at ) at = lv_at;
+		}
 		told = FALSE;
 		for ( TMO tmo = ( at != 0 ) ? ui_left(at) : TMO_FEVR;
 		      !closing && ui_wait(&ui, &m, tmo) >= E_OK; tmo = TMO_POL ) {
@@ -673,11 +826,17 @@ int main( void )
 			}
 		}
 		if ( closing ) break;
-		if ( at != 0 && ui_now() >= at ) {
+		if ( hold_at != 0 && ui_now() >= hold_at ) {
 			hold_over();
 			told = TRUE;		/* what a part left alone shows, read again */
 		}
-		if ( told ) fill();
+		if ( told ) {
+			fill();
+		} else if ( lv_at != 0 && ui_now() >= lv_at ) {
+			(void)mic_read();	/* only the level: what else changed is told */
+			mic_level();
+			if ( !mic.recording ) fill();
+		}
 	}
 	if ( ksys > 0 ) ob_cls_obj(ksys);
 	if ( dev > 0 ) ob_cls_obj(dev);

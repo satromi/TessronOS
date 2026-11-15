@@ -75,6 +75,8 @@ IMPORT int	rump_tswifisim_ap_stations( WSIM_STA *list, int max );
 IMPORT int	rump_tswifisim_stats( UW *v, int n );
 /* OpenBSD's layer's simulator only (obsd_sim.c); weak: NetBSD's has none */
 IMPORT int	rump_tswifisim_seqshare( int on ) __attribute__((weak));
+IMPORT int	rump_tswifisim_keydelay( int ms ) __attribute__((weak));
+IMPORT int	rump_tswifisim_ap_bssid( CONST UB *mac ) __attribute__((weak));
 IMPORT void	rump_tswifisim_air( int on, int rssi );
 
 #define AP_PRI		25
@@ -89,8 +91,9 @@ IMPORT void	rump_tswifisim_air( int on, int rssi );
 #define ETH_ARP		0x0806
 #define ETH_PAE		0x888e
 
-#define AP_IP		0xc0a84d01UL		/* 192.168.77.1 */
-#define POOL_IP		0xc0a84d64UL		/* 192.168.77.100 */
+/* the network's addresses: 192.168.77.0/24 as it starts, 192.168.n.0/24 after "net <n>" */
+#define AP_IP		ap_ip			/* 192.168.77.1 */
+#define POOL_IP		( ( ap_ip & 0xffffff00UL ) | 100 )	/* 192.168.77.100 */
 #define NET_MASK	0xffffff00UL
 #define DOMAIN		"wifisim.test"
 
@@ -126,6 +129,7 @@ LOCAL UB		ap_mac[6];
 LOCAL WIFISIM_COUNTS	cnt;
 
 /* The network as it is set */
+LOCAL UW		ap_ip = WIFISIM_AP_IP;
 LOCAL char		ap_ssid[33] = WIFISIM_SSID;
 LOCAL char		ap_pass[64] = WIFISIM_PASS;
 LOCAL BOOL		ap_wpa = TRUE;
@@ -620,6 +624,19 @@ LOCAL void dhcp_in( CONST UB *f, CONST UB *ip, CONST UB *u, INT ulen )
 				  (INT)( now_ms() - dhcp_offer_ms ));
 			return;
 		}
+		/*
+		 * A client asking for an address of another network with no
+		 * server named (INIT-REBOOT, as after a join of another
+		 * network): not answered, as a server not authoritative for
+		 * the client (dnsmasq without dhcp-authoritative, a phone's
+		 * tethering) leaves it (RFC 2131 4.3.2)
+		 */
+		if ( ci == 0 && req != 0 && ( req & NET_MASK ) != ( AP_IP & NET_MASK )
+		  && dhcp_opt(b + 240, blen - 240, 54, &l) == NULL ) {
+			ip_str(req, s1);
+			tm_printf((UB *)"wifisim: DHCP: the REQUEST for %s not answered: not of this network\n", s1);
+			return;
+		}
 		reply = ( ( req != 0 && req == yi ) || ( req == 0 && ci == yi ) ) ? 5 : 6;
 	} else if ( type == 7 ) {
 		leases[k].used = FALSE;
@@ -862,10 +879,15 @@ LOCAL INT num_of( CONST char *s )
  * "seqshare on" / "seqshare off" (the access point keeps one record of
  * the sequence numbers of a station's data frames without the QoS field
  * and of TID 0, and drops a QoS frame of TID 0 not after it; OpenBSD's
+ * layer only), "keydelay <ms>" (the station's card sets each key ms
+ * after it is asked, as a driver's task does; 0 at once; OpenBSD's
  * layer only), "dhcp slowreq <ms>" (a REQUEST sooner than ms after the OFFER not
  * answered; 0 for all answered), "taken <n>" (the pool's address ending
  * in n another machine's, answering ARP for it; 0 for none), "lease <s>",
- * "forget" (the leases, those declined too). A change of
+ * "forget" (the leases, those declined too), "net <n>" (the network's
+ * addresses 192.168.n.0/24, the router and name server .1, the pool from
+ * .100, as another network's: with "ssid", the network a phone's
+ * tethering is after the one at home; 77 as it starts). A change of
  * the network starts it again, its stations forgotten.
  */
 EXPORT ER knl_wifisim_ctl( CONST char *cmd )
@@ -887,6 +909,11 @@ EXPORT ER knl_wifisim_ctl( CONST char *cmd )
 	}
 	if ( word_is(cmd, "rssi", &a) ) {
 		rump_tswifisim_air(-1, num_of(a));
+		return E_OK;
+	}
+	if ( word_is(cmd, "keydelay", &a) ) {
+		if ( rump_tswifisim_keydelay == NULL ) return E_NOSPT;
+		(void)rump_tswifisim_keydelay(num_of(a));
 		return E_OK;
 	}
 	LOCK();
@@ -912,6 +939,23 @@ EXPORT ER knl_wifisim_ctl( CONST char *cmd )
 		arp_taken_ip = ( n > 0 && n < 255 ) ? ( ( POOL_IP & 0xffffff00UL ) | (UW)n ) : 0;
 	} else if ( word_is(cmd, "lease", &a) && num_of(a) >= 10 ) {
 		dhcp_lease = (UW)num_of(a);
+	} else if ( word_is(cmd, "net", &a) && ( n = num_of(a) ) >= 1 && n <= 254 ) {
+		ap_ip = 0xc0a80001UL | ( (UW)n << 8 );
+		/*
+		 * Another access point's address too (02:77:73:00:n:01; 77's
+		 * the first), where the layer lets it be changed (OpenBSD's):
+		 * that layer keeps the SSID first heard for a BSSID
+		 */
+		if ( rump_tswifisim_ap_bssid != NULL ) {
+			UB	mac[6];
+
+			knl_memcpy(mac, ap_mac, 6);
+			mac[4] = ( n == 77 ) ? 0 : (UB)n;
+			if ( rump_tswifisim_ap_bssid(mac) == 0 ) {
+				knl_memcpy(ap_mac, mac, 6);
+				ap_apply();
+			}
+		}
 	} else if ( word_is(cmd, "forget", &a) ) {
 		knl_memset(leases, 0, sizeof(leases));
 	} else {
@@ -924,14 +968,14 @@ EXPORT ER knl_wifisim_ctl( CONST char *cmd )
 /* What the access point and the air saw */
 EXPORT void knl_wifisim_counts( WIFISIM_COUNTS *c )
 {
-	UW	v[20];
+	UW	v[WSIM_AIR_N];
 	INT	i;
 
 	knl_memset(v, 0, sizeof(v));
-	(void)rump_tswifisim_stats(v, 20);
+	(void)rump_tswifisim_stats(v, WSIM_AIR_N);
 	if ( ap_mtx > 0 ) LOCK();
 	*c = cnt;
-	for ( i = 0; i < 20; i++ ) c->air[i] = v[i];
+	for ( i = 0; i < WSIM_AIR_N; i++ ) c->air[i] = v[i];
 	c->ready = ap_ready;
 	for ( i = 0; i < STAS; i++ ) {
 		if ( stas[i].used && stas[i].open ) c->open_stas++;

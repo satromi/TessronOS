@@ -2,7 +2,7 @@
 # from 電卓 with Ctrl+C, the accessory opened from its program, the levels
 # chosen with the arrow keys and the digits, the window built again when
 # another set is put in while it is open, and the menu's 一覧表示 and
-# 付せん表示. The tags stand down the window's left side, a tag for
+# 付せん表示. The accessory is a process (application/trayview); the tags stand down the window's left side, a tag for
 # each of the ten levels, those that hold nothing greyed: the tag of
 # level N at 205, 145+26(N-1).
 open 01a0d8c4-5320-7a41-8b52-6c7d8e9fa020
@@ -39,8 +39,12 @@ key 24
 key 06 01
 expect calculator: copied 67
 expect trayview: changed, 3 levels, level 1 文章
+# run again while open: no second process, its window brought forward
 open 01a0d8c4-5430-7a31-8b42-5c6d7e8f5430
 wait 500
+nwin トレー
+want ok 1
+absent trayview: opened, 3 levels
 win トレー
 shot trv_changed
 key 20

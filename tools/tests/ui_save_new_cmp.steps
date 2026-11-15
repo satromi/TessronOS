@@ -8,56 +8,15 @@
 # (画用紙のコピー, 基本文章編集のコピー) taken with Enter. Exactly one object is made
 # (objects new), and the link to it goes into BTRON: the last link of BTRON's record points at
 # a copy whose record 0, read as stored, and name are the same, byte for byte, whichever
-# editor saved it (sum keys link, with BTRON in front). The menu then opens with 保存 under
+# editor saved it (sum keys link, with BTRON in front and saved: it is 仮身一覧's window, a process). The menu then opens with 保存 under
 # the pointer: 閉じる, two rows up, closes the window and leaves 閉じる the row chosen last.
 # The menu is opened at 500,400 with 閉じる under the pointer, the rows 20 apart (閉じる, a
 # line, 保存, 表示, ...); 保存's own opens beside it, its first row on 保存's row.
 # Keys: Enter 28.
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 
 # ---------------------------------------------------------------- 基本図形編集
-figproc kernel
-mkbig fig 30 4
-click 50 14
-wait 300
-linkbig 180 45
-wait 300
-dclick 190 52
-waitwin 画用紙 600
-sync 600
-wait 800
-click 111 128
-drag 111 128 211 328
-sync 600
-objects
-click 500 400 1
-wait 800
-move 510 440
-wait 300
-move 650 440
-move 650 461
-wait 300
-click 650 461
-wait 1000
-wait 800
-shot sn_fig_k_ask
-key 28
-sync 600
-wait 800
-objects new
-want ok 1
-click 500 400 1
-wait 800
-move 510 360
-wait 300
-click 510 360
-sync 600
-wait 800
-click 50 14
-sync 600
-sum show keys link
-keep fig
-
-figproc 1
 mkbig fig 30 4
 click 50 14
 wait 300
@@ -100,55 +59,13 @@ expectsince figure: closed
 wait 800
 click 50 14
 sync 600
+# BTRON's record is its program's (仮身一覧, a process): saved (Ctrl+S) for its last link to be read as stored
+key 16 01
+wait 800
 sum show keys link
-same fig
-figproc 0
+want ok 4124 bfec2c4b922289d5 画用紙のコピー
 
 # ---------------------------------------------------------------- 基本文章編集
-docproc kernel
-mkbig doc 5
-click 50 14
-wait 300
-linkbig 180 95
-wait 300
-dclick 190 102
-waitwin 基本文章編集 600
-sync 600
-wait 800
-click 300 170
-sync 600
-text abc
-sync 600
-objects
-click 500 400 1
-wait 800
-move 510 440
-wait 300
-move 650 440
-move 650 461
-wait 300
-click 650 461
-wait 1000
-wait 800
-shot sn_doc_k_ask
-key 28
-sync 600
-wait 800
-objects new
-want ok 1
-click 500 400 1
-wait 800
-move 510 360
-wait 300
-click 510 360
-sync 600
-wait 800
-click 50 14
-sync 600
-sum show keys link
-keep doc
-
-docproc 1
 mkbig doc 5
 click 50 14
 wait 300
@@ -194,66 +111,13 @@ expectsince document: closed
 wait 800
 click 50 14
 sync 600
+# BTRON's record is its program's (仮身一覧, a process): saved (Ctrl+S) for its last link to be read as stored
+key 16 01
+wait 800
 sum show keys link
-same doc
-docproc 0
+want ok 1002 52afcbabf6103c28 基本文章編集のコピー
 
 # ---------------------------------------------------------------- 仮身一覧
-cabproc kernel
-mkbig fig 1 0
-xml <tad version="1.0" encoding="UTF-8"><figure>
-xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
-xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
-xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml </figure></tad>
-xmlbig
-apps big virtual-object-list
-click 50 14
-wait 300
-linkbig 180 145
-wait 300
-dclick 190 152
-waitwin 画用紙 600
-sync 600
-wait 800
-click 167 153
-sync 600
-wait 600
-drag 167 153 267 353
-sync 600
-objects
-click 500 400 1
-wait 800
-move 510 440
-wait 300
-move 650 440
-move 650 461
-wait 300
-click 650 461
-wait 1000
-wait 800
-shot sn_cab_k_ask
-key 28
-sync 600
-wait 800
-objects new
-want ok 1
-click 500 400 1
-wait 800
-move 510 360
-wait 300
-click 510 360
-sync 600
-wait 800
-click 50 14
-sync 600
-sum show keys link
-keep cab
-
-cabproc 1
 mkbig fig 1 0
 xml <tad version="1.0" encoding="UTF-8"><figure>
 xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
@@ -307,7 +171,9 @@ expectsince cabinet: closed
 wait 800
 click 50 14
 sync 600
+# BTRON's record is its program's (仮身一覧, a process): saved (Ctrl+S) for its last link to be read as stored
+key 16 01
+wait 800
 sum show keys link
-same cab
-cabproc 0
+want ok 775 878c34ff8cdaf1e6 画用紙のコピー
 absent !OACV!

@@ -16,8 +16,9 @@
  *	(what the window showing it is called) and what it is for, and holds
  *	its parts in the order they are drawn:
  *
- *	  <tags num rect inner value scroll><tag>＠名前</tag><tag>子名</tag>...</tags>
+ *	  <tags num rect inner value scroll down view><tag>＠名前</tag><tag>子名</tag>...</tags>
  *	  <text x y>words</text>			words on the base line y
+ *	  <label num rect>words</label>			words in the middle of the rectangle
  *	  <box num rect max jp ascii digits>letters</box>
  *	  <secret num rect max/>			a box whose letters are hidden
  *	  <number num rect value/>
@@ -43,6 +44,9 @@
  *	says foot="true" -- the row of buttons along a sheet's foot, with
  *	whatever stands in that row -- does not scroll: it rises with the
  *	panel's foot and stays in sight, and the sheet scrolls above it.
+ *	Tags that say down="true" stand one under another down the sheet's
+ *	left side; view="true" says the program draws in the sheet itself,
+ *	and its window is told to draw it again whenever the panel is drawn.
  *	A list, a selector or a pop-up whose names are parted into columns
  *	by tabs may say cols="0,72r,96": each column's width in pixels from
  *	the left, 0 for an equal share of what the others leave, and r
@@ -154,22 +158,28 @@ LOCAL INT words( CONST T_TADNODE *nd, UB *out, INT max )
 	return n;
 }
 
-/* The <name>s of an element into the pool: how many */
-LOCAL INT names( T_WMPANEL *def, CONST T_TADNODE *nd, INT *p_at, CONST char *tag )
+/*
+ * The <name>s of an element put after the part's names: how many, and
+ * in *p_at where the first of them went
+ */
+LOCAL INT names( T_WMPART *pt, CONST T_TADNODE *nd, INT *p_at, CONST char *tag )
 {
 	CONST T_TADNODE	*c;
 	UB		w[WM_LABEL_MAX];
 	INT		n = 0, at;
 
-	*p_at = def->used;
+	*p_at = 0;
 	for ( c = nd->first; c != NULL; c = c->next ) {
 		if ( !is(c, tag) ) {
 			continue;
 		}
 		(void)words(c, w, sizeof(w));
-		at = wm_panel_name(def, w);
+		at = wm_part_name(pt, w);
 		if ( at < 0 ) {
 			break;
+		}
+		if ( n == 0 ) {
+			*p_at = at;
 		}
 		n++;
 	}
@@ -187,7 +197,7 @@ LOCAL void label( T_WMPART *pt, CONST UB *s )
 }
 
 /* Fields along a line: the label with a run of hashes for each field */
-LOCAL void serial( T_WMPANEL *def, T_WMPART *pt, CONST T_TADNODE *nd )
+LOCAL void serial( T_WMPART *pt, CONST T_TADNODE *nd )
 {
 	CONST T_TADNODE	*c;
 	INT		n = 0, f = 0, k;
@@ -218,7 +228,7 @@ LOCAL void serial( T_WMPANEL *def, T_WMPART *pt, CONST T_TADNODE *nd )
 			if ( yes(c, "zero") ) pt->sbf[f] |= SBF_ZERO;
 			if ( yes(c, "left") ) pt->sbf[f] |= SBF_LEFT;
 		} else {
-			INT	at, cnt = names(def, c, &at, "name");
+			INT	at, cnt = names(pt, c, &at, "name");
 
 			pt->sbf[f] = SBF_NAMES;
 			pt->sbpool[f] = at;
@@ -292,12 +302,18 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 		pt->r.right = def->r.right - def->r.left;
 		pt->r.bottom = y + 4;
 		if ( pt->r.right <= x ) pt->r.right = x + 1;
+	} else if ( is(nd, "label") ) {
+		/* words in the middle of the rectangle's height, four in from its left */
+		pt->type |= WM_PT_LABEL;
+		(void)words(nd, w, sizeof(w));
+		label(pt, w);
 	} else if ( is(nd, "tags") ) {
 		pt->type |= TG_PARTS;
 		if ( yes(nd, "scroll") ) pt->type |= P_SCROLL;
+		if ( yes(nd, "down") ) pt->type |= P_DOWN;
+		if ( yes(nd, "view") ) pt->type |= P_VIEW;
 		(void)rect(nd, "inner", &pt->inner);
-		pt->count = names(def, nd, &at, "tag");
-		pt->pool = at;
+		pt->count = names(pt, nd, &at, "tag");
 		pt->value = num(nd, "value", 1);
 	} else if ( is(nd, "box") || is(nd, "secret") ) {
 		pt->type |= is(nd, "box") ? TB_PARTS : XB_PARTS;
@@ -313,7 +329,7 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 		pt->type |= SB_PARTS;
 		if ( yes(nd, "zero") ) pt->type |= P_ZERO;
 		if ( yes(nd, "blank") ) pt->type |= P_BLANK;
-		serial(def, pt, nd);
+		serial(pt, nd);
 	} else if ( is(nd, "switch") ) {
 		pt->type |= AS_PARTS;
 		pt->value = num(nd, "value", 0);
@@ -358,8 +374,7 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 		pt->type |= is(nd, "select") ? WS_PARTS : SS_PARTS;
 		if ( yes(nd, "nosel") ) pt->type |= P_NOSEL;
 		if ( yes(nd, "double") ) pt->type |= P_DOUBLE;
-		pt->count = names(def, nd, &at, "name");
-		pt->pool = at;
+		pt->count = names(pt, nd, &at, "name");
 		pt->value = num(nd, "value", 0);
 		pt->now = num(nd, "now", 0);
 		pt->top = 1;
@@ -370,8 +385,7 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 	} else if ( is(nd, "popup") ) {
 		/* its names may also be set only once the panel is open */
 		pt->type |= WM_PT_POPUP;
-		pt->count = names(def, nd, &at, "name");
-		pt->pool = at;
+		pt->count = names(pt, nd, &at, "name");
 		pt->value = num(nd, "value", ( pt->count > 0 ) ? 1 : 0);
 		cols(pt, nd);
 	} else if ( is(nd, "volume") ) {
@@ -409,6 +423,8 @@ EXPORT ER knl_pn_load( CONST TS_UUID *box, INT n, T_WMPANEL *def, UB *title, INT
 	if ( box == NULL || def == NULL ) {
 		return E_PAR;
 	}
+	/* nought from the start, so that a definition not loaded is one wm_panel_free lets go */
+	knl_memset(def, 0, sizeof(*def));
 	rec = om_obj_record(box, 0, &size);
 	if ( rec == NULL ) {
 		return E_NOEXS;
@@ -426,7 +442,6 @@ EXPORT ER knl_pn_load( CONST TS_UUID *box, INT n, T_WMPANEL *def, UB *title, INT
 	if ( er >= E_OK ) {
 		CONST UB *kind = tad_attr(pn, "kind");
 
-		knl_memset(def, 0, sizeof(*def));
 		def->num = n;
 		if ( !rect(pn, "rect", &def->r) || def->r.right <= def->r.left
 		  || def->r.bottom <= def->r.top ) {

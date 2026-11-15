@@ -76,13 +76,16 @@
  *				networks, its saved networks changed as on a card
  *	  xml TEXT		a line of xmlTAD kept, after the lines kept before it
  *	  focus TAG TITLE	the window of that title has the keys
- *	  xmlopen TITLE		the xmlTAD kept, a document, opened in a window titled
- *				TITLE that can be edited (no object behind it), and forgotten
+ *	  xmlopen TITLE		the xmlTAD kept, a figure, made a new object named TITLE
+ *				and opened with 仮身一覧 in a window at 100,60, 500 by 400,
+ *				and forgotten; a document is refused
  *	  xmlbig		the xmlTAD kept written as record 0 of the large object made
  *				last (mkbig), and forgotten: a text of the test's own made an
- *				object, for the desktop's editor and the process alike
- *	  caret			the caret of the document in front: "ok c PARA,POS a PARA,POS",
- *				the caret and the other end of the selection
+ *				object, for the programs that open it. In it
+ *				ffffffff-ffff-ffff-ffff-ffffffffffff stands for that object
+ *				and eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee for the one made
+ *				before it (big1): a link to itself, or to another made for
+ *				the test
  *	  mkbig doc|fig|calc N [M [T [V]]]
  *				a large object for the tests of size, a copy of the
  *				template of its kind with record 0 made here: a text of N
@@ -99,8 +102,8 @@
  *				record of the object its last link points at instead, its
  *				name after the hash; with res, the resource NAME beside the
  *				records instead ("_0_1.png", a picture the canvas painted);
- *				with keys, the record of the desktop's window with the keys
- *				as it is now, and with keys link the stored record 0 of the
+ *				with keys, the stored record 0 of the object the window with
+ *				the keys shows, and with keys link the stored record 0 of the
  *				object its last link points at. bigN is the large object
  *				made N before the last (1 to 7), wherever big is taken
  *	  objects [new]		how many objects the volumes keep: "ok N"; with new, how
@@ -110,21 +113,14 @@
  *	  ftdef			the palettes of the 道具パネル laid out as panels of a data
  *				box, said on the console ("ftdef: "): what the data box of
  *				基本図形編集 (SYSDEF_BOX_FIG) holds for the process's palettes
- *	  shapes		the figure in front: "ok SHAPES PICKED"
- *	  pfig UUID|big		the object opened with 基本図形編集 as a process, whatever
- *				its program object says
- *	  figproc 1|kernel|0	every figure opened with 基本図形編集 as a process from now
- *				(1), with the desktop's own figure editor even when the
- *				program object says the process (kernel), or as the
- *				program object says again (0)
- *	  pdoc UUID|big		the object opened with 基本文章編集 as a process, whatever
- *				its program object says
- *	  docproc 1|kernel|0	the same as figproc, for documents and 基本文章編集
- *	  pcab UUID|big		the object opened with 仮身一覧 as a process, whatever
- *				its program object says
- *	  cabproc 1|kernel|0	the same as figproc, for 仮身一覧
- *	  linkbig X Y		a link to the large object made last put in the window at
- *				X, Y of the screen
+ *	  pfig UUID|big		the object opened with 基本図形編集, whatever program its
+ *				applist names
+ *	  pdoc UUID|big		the same with 基本文章編集
+ *	  pcab UUID|big		the same with 仮身一覧
+ *	  linkbig X Y		a link to the large object made last dropped on the window
+ *				at X, Y of the screen, its corner there, as a link carried
+ *				there is
+ *	  nwin TITLE		how many windows say TITLE (spaces and all): "ok N"
  *	  mark			the time from which the next two count
  *	  waitwin TITLE [S]	a window that says TITLE (spaces and all) shown, looked for up to S seconds
  *				(60): "ok MS" since the mark
@@ -750,40 +746,66 @@ LOCAL BOOL token( CONST char **p, char *w, INT max )
  * looked for over the work area, the box of the first one found. FALSE
  * when there is none.
  */
+/*
+ * The link to the object named name in the window titled title, where it
+ * is on the screen: a program's window showing a figure (仮身一覧, the
+ * 原紙箱, the first window) as its object's record 0 is stored, laid out
+ * from its corner, unscrolled: what the program changed and has not
+ * saved is not seen.
+ */
 LOCAL BOOL link_named( CONST char *title, CONST char *name, T_DPRECT *p_box )
 {
-	DTWIN		*d;
 	T_WMWIN		w;
 	T_DPRECT	page, box;
-	T_VOBJ		v;
+	T_VOBJ		*v;
+	T_TAD		*rec = NULL, *own = NULL;
+	T_TVFIG		*fig = NULL, *made = NULL;
+	TS_UUID		shown;
 	UB		nm[TAD_NAME_MAX];
-	INT		wid = 0, tries, x, y, which, cw, ch;
+	INT		wid = 0, tries, x, y, which, cw, ch, sx = 0, sy = 0;
+	BOOL		found = FALSE;
 
+	knl_memset(p_box, 0, sizeof(*p_box));
 	for ( tries = 0; tries < 20 && ( wid = ut_named(title) ) <= 0; tries++ ) {
 		tk_dly_tsk(100);
 	}
-	d = ( wid > 0 ) ? dt_win_of(wid) : NULL;
-	if ( d == NULL || d->fig == NULL || d->rec == NULL || wm_ref(wid, &w) < E_OK ) {
+	if ( wid <= 0 || wm_ref(wid, &w) < E_OK ) {
 		return FALSE;
 	}
-	dt_work_rect(d, &page);
 	cw = w.work.right - w.work.left;
 	ch = w.work.bottom - w.work.top;
-	for ( y = 0; y < ch; y += 4 ) {
-		for ( x = 0; x < cw; x += 8 ) {
-			if ( tv_fig_at(d->fig, &page, d->scroll_x, d->scroll_y, d->rec, x, y, &v, &box, &which) < E_OK ) {
+	if ( dt_win_of(wid) == NULL && wm_obj_shown(wid, &shown) ) {
+		SZ	size = 0;
+		UB	*xml = om_obj_record(&shown, 0, &size);
+
+		if ( xml != NULL && tad_parse(xml, size, NULL, &own) >= E_OK && tv_fig(own, &made) >= E_OK ) {
+			fig = made;
+			rec = own;
+		}
+		if ( xml != NULL ) Kfree(xml);
+		page.left = page.top = 0;
+		page.right = cw;
+		page.bottom = ch;
+	}
+	v = ( fig != NULL ) ? (T_VOBJ *)Kmalloc(sizeof(T_VOBJ)) : NULL;
+	for ( y = 0; v != NULL && y < ch && !found; y += 4 ) {
+		for ( x = 0; x < cw && !found; x += 8 ) {
+			if ( tv_fig_at(fig, &page, sx, sy, rec, x, y, v, &box, &which) < E_OK ) {
 				continue;
 			}
-			if ( om_store_name(&v.target, nm, sizeof(nm)) > 0 && same_title((CONST char *)nm, name) ) {
+			if ( om_store_name(&v->target, nm, sizeof(nm)) > 0 && same_title((CONST char *)nm, name) ) {
 				p_box->left = w.work.left + box.left;
 				p_box->top = w.work.top + box.top;
 				p_box->right = w.work.left + box.right;
 				p_box->bottom = w.work.top + box.bottom;
-				return TRUE;
+				found = TRUE;
 			}
 		}
 	}
-	return FALSE;
+	if ( v != NULL ) Kfree(v);
+	if ( made != NULL ) tv_fig_free(made);
+	if ( own != NULL ) tad_free(own);
+	return found;
 }
 
 LOCAL void all_wins( void )
@@ -803,6 +825,24 @@ LOCAL void all_wins( void )
 		say_rect("", wids[i], t);
 	}
 	if ( wids != NULL ) Kfree(wids);
+}
+
+/* How many windows on the screen say the title: one object is open in one window */
+LOCAL void count_wins( CONST char *title )
+{
+	INT	n, i, k = 0, c = 0;
+	INT	*wids = ut_windows(&n);
+	char	b[16], t[WM_TITLE_MAX];
+
+	for ( i = 0; i < n; i++ ) {
+		if ( wm_title(wids[i], t, sizeof(t)) >= 0 && same_title(t, title) ) c++;
+	}
+	if ( wids != NULL ) Kfree(wids);
+	b[k++] = 'o';  b[k++] = 'k';  b[k++] = ' ';
+	put_num(b, &k, c);
+	b[k++] = '\n';
+	b[k] = 0;
+	say(b);
 }
 
 /*
@@ -924,36 +964,10 @@ LOCAL void hidden_check( CONST char *s )
 
 /* An object opened as a double press on a link to it opens it, asked of the desktop as a program asks */
 /*
- * "kslide UUID": the object shown with the desktop's own slides
- * (dtslide.c) whatever its program object says, so that a test measures
- * them and the slides of the process (application/slide) in one run
- */
-LOCAL void kslide( CONST char *us )
-{
-	T_VOBJ	*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
-
-	if ( v == NULL ) {
-		say("err no memory\n");
-		return;
-	}
-	knl_memset(v, 0, sizeof(*v));
-	v->recno = -1;
-	if ( ts_str_to_uuid(us, &v->target) < E_OK ) {
-		Kfree(v);
-		say("err no uuid\n");
-		return;
-	}
-	dt_slide_open(NULL, v);
-	Kfree(v);
-	say("ok\n");
-}
-
-/*
- * "pfig UUID": the object opened with 基本図形編集 as a process
- * (application/fig, its program object's record 1) whatever the program
- * object says, so that a test works the process while the program object
- * still opens figures with the desktop's own figure editor, and both in
- * one run; "pdoc UUID" likewise with 基本文章編集 (application/doc)
+ * "pfig UUID": the object opened with 基本図形編集 (application/fig, its
+ * program object's record 1) whatever program the object's applist
+ * names; "pdoc UUID" likewise with 基本文章編集 (application/doc) and
+ * "pcab UUID" with 仮身一覧 (application/cab)
  */
 /*
  * "big" (the large object made last) or "bigN" (made N before it) at the
@@ -987,18 +1001,17 @@ LOCAL BOOL big_of( CONST char *us, TS_UUID *u )
 LOCAL void pfig( CONST char *prog, CONST char *us )
 {
 	CONST DTPROG	*p = dt_prog_find((CONST UB *)prog);
-	DTPROG		*q = (DTPROG *)Kmalloc(sizeof(DTPROG));
 	T_VOBJ		*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
 	ER		er = E_NOEXS;
 
-	if ( q == NULL || v == NULL ) {
-		if ( q != NULL ) Kfree(q);
-		if ( v != NULL ) Kfree(v);
+	if ( v == NULL ) {
 		say("err no memory\n");
 		return;
 	}
 	knl_memset(v, 0, sizeof(*v));
 	v->recno = -1;
+	/* no link stands behind it: no colours said, as a double press on no link gives */
+	v->frcol = v->chcol = v->tbcol = v->bgcol = TAD_COL_NONE;
 	if ( big_of(us, &v->target) ) {
 		er = E_OK;
 	} else {
@@ -1006,78 +1019,10 @@ LOCAL void pfig( CONST char *prog, CONST char *us )
 	}
 	if ( p == NULL ) er = E_NOEXS;
 	if ( er >= E_OK ) {
-		*q = *p;
-		q->builtin = FALSE;
-		er = dt_prog_run(NULL, q, v);
+		er = dt_prog_run(NULL, p, v);
 	}
-	Kfree(q);
 	Kfree(v);
 	say(( er >= E_OK ) ? "ok\n" : "err not started\n");
-}
-
-/*
- * "figproc 1": from then on every figure that would open in the
- * desktop's own figure editor opens with 基本図形編集 as a process
- * instead, from wherever it is opened (a link of a window, 実行, open),
- * so that the tests of the figure editor run as they are on the process;
- * "figproc 0" puts it back. The program object is not changed.
- */
-LOCAL BOOL	ut_fig_proc = FALSE;
-
-/*
- * "figproc 1": figures opened by the process even while the program
- * object says the desktop's figure editor; "figproc kernel": by the
- * desktop's even while it says the process, so that the two can still
- * be compared once the program object has been switched; "figproc 0":
- * as the program object says. "docproc 1|kernel|0" does the same for
- * documents and 基本文章編集.
- */
-LOCAL BOOL	ut_fig_kernel = FALSE;
-LOCAL BOOL	ut_doc_proc = FALSE;
-LOCAL BOOL	ut_doc_kernel = FALSE;
-LOCAL BOOL	ut_cab_proc = FALSE;		/* cabproc, for 仮身一覧 */
-LOCAL BOOL	ut_cab_kernel = FALSE;
-
-LOCAL void figproc( BOOL *p_proc, BOOL *p_kernel, CONST char *s )
-{
-	*p_proc = (BOOL)( s[0] == '1' );
-	*p_kernel = (BOOL)( s[0] == 'k' );
-	say("ok\n");
-}
-
-/* The program is one of those whose two editors figproc (fig), docproc (doc) or cabproc (cab) switches */
-LOCAL BOOL ut_switched( CONST DTPROG *p, BOOL fig, BOOL doc, BOOL cab )
-{
-	if ( p == NULL ) {
-		return FALSE;
-	}
-	return (BOOL)( ( fig && knl_strcmp((CONST char *)p->id, "basic-figure-editor") == 0 )
-		       || ( doc && knl_strcmp((CONST char *)p->id, "basic-text-editor") == 0 )
-		       || ( cab && knl_strcmp((CONST char *)p->id, "virtual-object-list") == 0 ) );
-}
-
-EXPORT BOOL dt_ut_as_kernel( CONST DTPROG *p )
-{
-	return (BOOL)( p != NULL && !p->builtin && ut_switched(p, ut_fig_kernel, ut_doc_kernel, ut_cab_kernel) );
-}
-
-EXPORT BOOL dt_ut_as_process( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v )
-{
-	DTPROG	*q;
-	ER	er;
-
-	if ( p == NULL || !p->builtin || !ut_switched(p, ut_fig_proc, ut_doc_proc, ut_cab_proc) ) {
-		return FALSE;
-	}
-	q = (DTPROG *)Kmalloc(sizeof(DTPROG));
-	if ( q == NULL ) {
-		return FALSE;
-	}
-	*q = *p;
-	q->builtin = FALSE;
-	er = dt_prog_run(from, q, v);
-	Kfree(q);
-	return (BOOL)( er >= E_OK );
 }
 
 /*
@@ -1110,7 +1055,7 @@ LOCAL void linkbig( CONST char *s )
 	v->right = tad_lnk_least_w(v) * 4;
 	v->bottom = tad_lnk_closed_h(v);
 	v->height = v->bottom;
-	ok = ed_place_link(dt_win_of(wm_at(x, y)), x, y, v);
+	ok = dt_drop_links_at(NULL, x, y, x, y, v, 1);
 	Kfree(v);
 	say(ok ? "ok\n" : "err no window there takes links\n");
 }
@@ -1434,9 +1379,8 @@ LOCAL void xml_keep( CONST char *s )
 }
 
 /*
- * The window is opened by the desktop's own task, in its loop
- * (dt_uitest_poll): the drawing is the desktop's, and its task has the
- * stack for it. This task waits for it.
+ * The object is made and opened by the desktop's own task, in its loop
+ * (dt_uitest_poll), as a double click opens one. This task waits for it.
  */
 LOCAL T_TAD	*ut_open_rec = NULL;
 LOCAL char	ut_open_title[UT_LINE];
@@ -1471,7 +1415,7 @@ LOCAL void redraw_focused( void )
 		knl_wmobj_moved(wid, TRUE);
 		return;
 	}
-	dt_draw(d);
+	dt_draw(d);		/* a part's window */
 	if ( wm_ref(d->wid, &w) >= E_OK ) {
 		all.left = 0;
 		all.top = 0;
@@ -1506,10 +1450,50 @@ EXPORT void dt_uitest_idle( void )
 	}
 }
 
+/* The figure rec made a new object named title, its window at o, and opened with 仮身一覧 */
+LOCAL ER xml_made( T_TAD *rec, CONST char *title, CONST T_DPRECT *o )
+{
+	T_VOBJ	*v;
+	TS_UUID	u;
+	UB	*xml;
+	SZ	size = 0;
+	ER	er;
+
+	er = om_cre_obj(NULL, (CONST UB *)title, OM_BODY_FIG, &u);
+	if ( er < E_OK ) {
+		return er;
+	}
+	(void)tad_write_mem(rec, NULL, 0, &size);
+	xml = (UB *)Kmalloc(size + 1);
+	if ( xml == NULL ) {
+		return E_NOMEM;
+	}
+	er = tad_write_mem(rec, xml, size + 1, &size);
+	if ( er >= E_OK ) {
+		er = ( om_store_get(&u, 0) != NULL && om_store_restore(&u, 0, xml, size) != NULL )
+		     ? om_store_save(&u, 0) : E_IO;
+	}
+	Kfree(xml);
+	if ( er < E_OK ) {
+		return er;
+	}
+	om_store_set_window(&u, o);
+	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	if ( v == NULL ) {
+		return E_NOMEM;
+	}
+	knl_memset(v, 0, sizeof(*v));
+	v->target = u;
+	v->recno = -1;
+	v->frcol = v->chcol = v->tbcol = v->bgcol = TAD_COL_NONE;
+	er = dt_open_as(NULL, v, (CONST UB *)"virtual-object-list");
+	Kfree(v);
+	return er;
+}
+
 EXPORT void dt_uitest_poll( void )
 {
 	T_DPRECT	o;
-	DTWIN		*d;
 
 	if ( ut_sync == 1 ) {
 		ut_sync = 3;
@@ -1531,14 +1515,12 @@ EXPORT void dt_uitest_poll( void )
 	if ( ut_open_state != 1 ) {
 		return;
 	}
-	o.left = 100;  o.top = 60;  o.right = 600;  o.bottom = 460;
-	d = dt_open_made(ut_open_rec, ut_open_title, DT_TOOL_NONE, &o);
+	/* on the main screen, wherever it is in the view */
+	wm_screen_main_rect(&o);
+	o.left += 100;  o.top += 60;  o.right = o.left + 500;  o.bottom = o.top + 400;
+	ut_open_state = ( xml_made(ut_open_rec, ut_open_title, &o) >= E_OK ) ? 2 : 3;
+	tad_free(ut_open_rec);
 	ut_open_rec = NULL;
-	if ( d != NULL ) {
-		d->sealed = FALSE;
-		dt_draw(d);
-	}
-	ut_open_state = ( d != NULL ) ? 2 : 3;
 }
 
 LOCAL void xml_open( CONST char *title )
@@ -1552,6 +1534,11 @@ LOCAL void xml_open( CONST char *title )
 		return;
 	}
 	ut_xml_n = 0;
+	if ( tv_kind(rec) != TV_KIND_FIG ) {
+		tad_free(rec);
+		say("err not a figure\n");
+		return;
+	}
 	for ( i = 0; title[i] != 0 && i < UT_LINE - 1; i++ ) {
 		ut_open_title[i] = title[i];
 	}
@@ -1579,16 +1566,29 @@ LOCAL void xml_big( void )
 	}
 	tad_free(rec);
 	{
-		/* ffffffff-ffff-ffff-ffff-ffffffffffff stands for the object itself: a link to itself */
-		CONST char	*self = "ffffffff-ffff-ffff-ffff-ffffffffffff";
-		char		us[TS_UUID_STRLEN + 1];
+		/*
+		 * ffffffff-ffff-ffff-ffff-ffffffffffff stands for the object itself
+		 * (a link to itself), eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee for the
+		 * one made before it
+		 */
+		CONST char	*mark[2] = { "ffffffff-ffff-ffff-ffff-ffffffffffff",
+					     "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee" };
+		char		us[2][TS_UUID_STRLEN + 1];
 		SZ		i, j;
+		INT		m;
 
-		ts_uuid_text(&ut_big, us);
+		ts_uuid_text(&ut_big, us[0]);
+		if ( ut_big_nwas > 0 ) {
+			ts_uuid_text(&ut_big_was[0], us[1]);
+		} else {
+			knl_memcpy(us[1], mark[1], TS_UUID_STRLEN + 1);
+		}
 		for ( i = 0; i + 36 <= ut_xml_n; i++ ) {
-			for ( j = 0; j < 36 && ut_xml[i + j] == (UB)self[j]; j++ ) ;
-			if ( j < 36 ) continue;
-			for ( j = 0; j < 36; j++ ) ut_xml[i + j] = (UB)us[j];
+			for ( m = 0; m < 2; m++ ) {
+				for ( j = 0; j < 36 && ut_xml[i + j] == (UB)mark[m][j]; j++ ) ;
+				if ( j < 36 ) continue;
+				for ( j = 0; j < 36; j++ ) ut_xml[i + j] = (UB)us[m][j];
+			}
 		}
 	}
 	k = ob_opn_obj(&ut_big, OB_OP_R | OB_OP_W);
@@ -1597,69 +1597,6 @@ LOCAL void xml_big( void )
 	if ( er >= E_OK ) om_store_forget(&ut_big);
 	ut_xml_n = 0;
 	say(( er >= E_OK ) ? "ok\n" : "err not written\n");
-}
-
-/* The caret of the document in front, or of the text being edited in the figure in front */
-/* How many shapes the figure in front has, and how many of them are picked */
-LOCAL void shapes_say( void )
-{
-	DTWIN	*d = dt_win_of(wm_focused());
-	char	b[48];
-	INT	k = 0;
-
-	tk_dly_tsk(200);			/* what was put in before taken first */
-	d = dt_win_of(wm_focused());
-	if ( d == NULL || d->fig == NULL ) {
-		say("err no figure\n");
-		return;
-	}
-	b[k++] = 'o';  b[k++] = 'k';  b[k++] = ' ';
-	put_num(b, &k, d->fig->nsh);
-	b[k++] = ' ';
-	put_num(b, &k, d->npick);
-	b[k++] = '\n';
-	b[k] = 0;
-	say(b);
-}
-
-LOCAL void caret_say( void )
-{
-	DTWIN	*d;
-	char	b[64];
-	INT	k = 0, same = 0, tries, was[4] = { -1, -1, -1, -1 };
-
-	/* the keys put in before are taken first: asked until it stays the same */
-	for ( tries = 0; tries < 100 && same < 3; tries++ ) {
-		tk_dly_tsk(100);
-		d = dt_win_of(wm_focused());
-		if ( d != NULL && d->tb != NULL ) d = d->tb;
-		if ( d == NULL || d->doc == NULL ) break;
-		if ( d->dd.cpara == was[0] && d->dd.cpos == was[1] && d->dd.apara == was[2] && d->dd.apos == was[3] ) {
-			same++;
-		} else {
-			same = 0;
-			was[0] = d->dd.cpara;  was[1] = d->dd.cpos;  was[2] = d->dd.apara;  was[3] = d->dd.apos;
-		}
-	}
-	d = dt_win_of(wm_focused());
-	if ( d != NULL && d->tb != NULL ) {
-		d = d->tb;
-	}
-	if ( d == NULL || d->doc == NULL ) {
-		say("err no document\n");
-		return;
-	}
-	b[k++] = 'o';  b[k++] = 'k';  b[k++] = ' ';  b[k++] = 'c';  b[k++] = ' ';
-	put_num(b, &k, d->dd.cpara);
-	b[k++] = ',';
-	put_num(b, &k, d->dd.cpos);
-	b[k++] = ' ';  b[k++] = 'a';  b[k++] = ' ';
-	put_num(b, &k, d->dd.apara);
-	b[k++] = ',';
-	put_num(b, &k, d->dd.apos);
-	b[k++] = '\n';
-	b[k] = 0;
-	say(b);
 }
 
 /* ---------------------------------------------------------------- objects of size */
@@ -2211,8 +2148,6 @@ LOCAL void rec_sum( CONST char *us )
 	ER	er = E_OK;
 	BOOL	show = FALSE, anon = FALSE, link = FALSE, res = FALSE, pdf = FALSE, keys = FALSE;
 	UB	rn[TAD_NAME_MAX];
-	T_VOBJ	lv;
-	INT	c;
 
 	for ( ;; ) {
 		if ( word(&us, "pdf") ) {
@@ -2242,41 +2177,26 @@ LOCAL void rec_sum( CONST char *us )
 	}
 	us = skip(us);
 	if ( keys ) {
-		/* written as xmlTAD from the window's record: a window with no object behind it too */
-		DTWIN	*f = dt_win_of(wm_focused());
-
-		buf = NULL;
-		if ( link ) {
-			/* the object the window's last link points at, as the store keeps it */
-			c = ( f != NULL && f->rec != NULL ) ? tad_lnk_count(f->rec) : 0;
-			if ( c <= 0 || tad_lnk_get(f->rec, c - 1, &lv) < E_OK ) {
-				say("err no link\n");
-				return;
-			}
-			u = lv.target;
-			goto read;
-		}
-		if ( f != NULL && f->rec != NULL && tad_write_mem(f->rec, NULL, 0, &at) >= E_OK && at > 0 ) {
-			buf = (UB *)Kmalloc(at + 1);
-			if ( buf != NULL && tad_write_mem(f->rec, buf, at + 1, &at) < E_OK ) {
-				Kfree(buf);
-				buf = NULL;
-			}
-		}
-		if ( buf == NULL ) {
+		/* the object the window with the keys shows, as the store keeps it */
+		if ( !wm_obj_shown(wm_focused(), &u) ) {
 			say("err no window\n");
 			return;
 		}
-		sum_bytes(&h, buf, at, show);
-		Kfree(buf);
-		goto said;
+		if ( link ) {
+			if ( !last_link(&u, &to) ) {
+				say("err no link\n");
+				return;
+			}
+			u = to;
+		}
+		goto read;
 	}
 	if ( pdf ) {
 		if ( dt_first_win() == NULL ) {
 			say("err no window\n");
 			return;
 		}
-		u = dt_first_win()->id;
+		u = dt_first_win()->id;		/* the first window's object, the cabinet */
 	} else if ( *us == 0 && ut_big_have ) {
 		u = ut_big;
 	} else if ( big_of(us, &u) ) {
@@ -2336,7 +2256,6 @@ read:
 		ob_cls_obj(k);
 		if ( buf != NULL ) Kfree(buf);
 	}
-said:
 	b[n++] = 'o';  b[n++] = 'k';  b[n++] = ' ';
 	put_num(b, &n, (INT)at);
 	b[n++] = ' ';
@@ -2704,20 +2623,12 @@ LOCAL void line( CONST char *s )
 		ut_emurom();
 	} else if ( word(&s, "emuromx") ) {
 		ut_emuromx(s);
-	} else if ( word(&s, "kslide") ) {
-		kslide(skip(s));
 	} else if ( word(&s, "linkbig") ) {
 		linkbig(s);
-	} else if ( word(&s, "figproc") ) {
-		figproc(&ut_fig_proc, &ut_fig_kernel, skip(s));
-	} else if ( word(&s, "docproc") ) {
-		figproc(&ut_doc_proc, &ut_doc_kernel, skip(s));
 	} else if ( word(&s, "pfig") ) {
 		pfig("basic-figure-editor", skip(s));
 	} else if ( word(&s, "pdoc") ) {
 		pfig("basic-text-editor", skip(s));
-	} else if ( word(&s, "cabproc") ) {
-		figproc(&ut_cab_proc, &ut_cab_kernel, skip(s));
 	} else if ( word(&s, "pcab") ) {
 		pfig("virtual-object-list", skip(s));
 	} else if ( word(&s, "open") ) {
@@ -2743,6 +2654,8 @@ LOCAL void line( CONST char *s )
 		find_win(skip(s));
 	} else if ( word(&s, "wins") ) {
 		all_wins();
+	} else if ( word(&s, "nwin") ) {
+		count_wins(skip(s));
 	} else if ( word(&s, "front") ) {
 		front_check(s);
 	} else if ( word(&s, "focus") ) {
@@ -2793,10 +2706,6 @@ LOCAL void line( CONST char *s )
 		xml_big();
 	} else if ( word(&s, "xml") ) {
 		xml_keep(skip(s));
-	} else if ( word(&s, "shapes") ) {
-		shapes_say();
-	} else if ( word(&s, "caret") ) {
-		caret_say();
 	} else if ( word(&s, "redraw") ) {
 		redraw_ask();
 	} else if ( word(&s, "mkbig") ) {

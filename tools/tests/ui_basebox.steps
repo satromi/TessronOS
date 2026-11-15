@@ -1,10 +1,11 @@
 # 原紙箱 and 原紙集め (design 11.2.2, 11.2.3), for tools/ui_run.py. The system's
 # 原紙箱 (its window at 893,35, its work area from 903,64, the links from 8,8 of
 # it, 27 apart) is an ordinary box of links to the templates: its own template
-# is in it, and carried into the BTRON window it makes a new, empty 原紙箱. An
+# is in it, and carried into the BTRON window it makes a new 原紙箱 holding
+# links to the templates the system's holds, laid out as the system's are. An
 # application deleted takes its template's link out of the system's 原紙箱, and
 # registered again puts it back. 原紙集め (its work area from 670,69, the links
-# laid out as in the 原紙箱) lists every template. The link of 空書庫 taken out
+# laid out in rows as wide as it, 27 apart) lists every template. The link of 空書庫 taken out
 # of the 原紙箱 leaves the template, and carried from 原紙集め into the 原紙箱 a
 # new object made from it is put there. A text put into the 原紙箱 is a template
 # of the person's (ユーザ原紙): carried out, a copy is made and the text stays as
@@ -19,11 +20,46 @@ linkdrag 原紙箱 原紙箱 250 60
 wait 1000
 key 28
 expect desktop: 原紙箱 made from the template 原紙箱
+expect dtprog: new 原紙箱 given the system's 16 templates (0)
 wait 800
-# opened: an empty 原紙箱 of its own, closed again (Ctrl+E)
+# opened: a 原紙箱 of its own holding the templates the system's holds, closed again (Ctrl+E).
+# It keeps the system's 原紙箱's place (its template's), where that window stands: it opens a
+# step down and across, its window at 921,63 (the links from 939,99, 27 apart)
+logmark
 dclick 250 60
+expectsince basebox: opened 原紙箱 shapes 16 links 16
 wait 1500
 shot bb_new
+# the 原紙箱's ways hold in it as in the system's: 画用紙 (its second link, at 939,126)
+# dragged down stays where it was, and 基本文章編集 (the first, at 939,99) carried
+# into the BTRON window makes a new object from the template
+drag 988 135 1008 328
+wait 800
+# 〈整頓〉 grey in its menu (opened away from the links), with 画用紙 taken
+logmark
+click 1028 588 1
+expectsince basebox: arrange menu grey
+wait 400
+key 29
+wait 700
+key 29
+wait 500
+drag 988 108 250 150
+wait 1000
+key 28
+expect desktop: 基本文章編集 made from the template 基本文章編集
+wait 800
+# closed (Ctrl+E) and opened again: as it was first shown
+click 1018 76
+wait 300
+key 08 01
+wait 800
+logmark
+dclick 250 60
+expectsince basebox: opened 原紙箱 shapes 16 links 16
+wait 1500
+shot bb_new2
+shotsame bb_new bb_new2 921 63 1121 663
 key 08 01
 wait 800
 # MPEG Player deleted: its template's link out of the system's 原紙箱; registered again: back
@@ -50,8 +86,9 @@ expect basecol: up
 expect basecol: 16 templates
 wait 1000
 shot bb_collect
-# 空書庫 (the 12th row, at 678,374) carried from 原紙集め into the 原紙箱, under its links
-drag 700 383 990 600
+# 空書庫 (the 10th row, at 678,319, 手帳用紙 beside it) carried from 原紙集め into the 原紙箱,
+# under its links
+drag 700 328 990 600
 wait 1000
 key 28
 expect desktop: template carried, made from it: 0
@@ -69,7 +106,9 @@ wait 800
 drag 175 423 1000 560
 wait 800
 shot bb_user
-linkdrag 原紙箱 実身/仮身 400 600
+# the link put into the 原紙箱 (a process, which has not saved it: linkdrag reads the stored
+# record) is at 926,551 to 1076,570 of the screen: carried from its middle
+drag 1001 560 400 600
 wait 1000
 key 28
 expect desktop: 実身/仮身 made from the template 実身/仮身

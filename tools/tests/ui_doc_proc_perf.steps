@@ -10,69 +10,8 @@
 # or drawn from), and the process's "drew in" (letters: the calls of the letters). Closed with
 # Ctrl+E, which saves what was typed; each round makes its copy again.
 # Keys: a..j 04..0d; Ctrl+E 08 01.
-docproc kernel
-# round 1
-mkbig doc 200
-open big
-waitwin 基本文章編集 600
-sync 600
-wait 800
-click 300 170
-sync 600
-wait 300
-logmark
-key 04
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 05
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 06
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 07
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 08
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 09
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 0a
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 0b
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 0c
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 0d
-sync 600
-expectsince desktop: document key to screen
-wait 200
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig doc 200
 logmark
 pdoc big
@@ -128,67 +67,6 @@ expectsince document: closed
 wait 500
 # round 2
 mkbig doc 200
-open big
-waitwin 基本文章編集 600
-sync 600
-wait 800
-click 300 170
-sync 600
-wait 300
-logmark
-key 04
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 05
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 06
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 07
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 08
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 09
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 0a
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 0b
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 0c
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 0d
-sync 600
-expectsince desktop: document key to screen
-wait 200
-key 08 01
-sync 600
-wait 500
-mkbig doc 200
 logmark
 pdoc big
 expectsincein 60 document: opened 基本文章編集 paragraphs 200
@@ -242,67 +120,6 @@ key 08 01
 expectsince document: closed
 wait 500
 # round 3
-mkbig doc 200
-open big
-waitwin 基本文章編集 600
-sync 600
-wait 800
-click 300 170
-sync 600
-wait 300
-logmark
-key 04
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 05
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 06
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 07
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 08
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 09
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 0a
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 0b
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 0c
-sync 600
-expectsince desktop: document key to screen
-wait 200
-logmark
-key 0d
-sync 600
-expectsince desktop: document key to screen
-wait 200
-key 08 01
-sync 600
-wait 500
 mkbig doc 200
 logmark
 pdoc big

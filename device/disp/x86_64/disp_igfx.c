@@ -68,6 +68,7 @@
 #include "../disp_hw.h"
 #include "disp_pc.h"
 #include "sysdepend/x64/igt_ggtt.h"
+#include <ts/board.h>
 
 IMPORT ER   knl_igt_pcode_rw( UW cmd, UW in, UW *out );	/* igt_pcode.c */
 IMPORT void knl_bootlog_soon( void );			/* bootlog.c */
@@ -89,6 +90,10 @@ IMPORT void knl_bootlog_soon( void );			/* bootlog.c */
 #define R_PLANE_WM_1A(l)	( 0x70240 + 4 * (l) )
 #define R_PLANE_WM_TRANS_1A	0x70268
 #define R_PLANE_BUF_CFG_1A	0x7027c
+#define R_CUR_BASE_A		0x70084
+#define R_CUR_WM_A(l)		( 0x70140 + 4 * (l) )
+#define R_CUR_WM_TRANS_A	0x70168
+#define R_CUR_BUF_CFG_A		0x7017c
 #define R_PIPECONF_B		0x71008
 #define R_PIPECONF_C		0x72008
 #define R_PIPECONF_EDP		0x7f008
@@ -122,12 +127,14 @@ typedef struct {
 	UW	pipe_src;
 	UW	ps_ctrl, ps_pos, ps_sz;
 	UW	wm[8], wm_trans, buf_cfg;
+	UW	cur_wm[8], cur_trans, cur_buf;
 	UW	stride, pos, size, offset, ctl;
 	UW	surf;
 } IGREGS;
 
 LOCAL BOOL	ig_found = FALSE;		/* an Intel display function */
 LOCAL BOOL	ig_ok = FALSE;			/* set up as this driver can change */
+LOCAL BOOL	ig_wm_on = TRUE;		/* the start-up setting igfx.wm=0: the old way, level 0 only */
 LOCAL UBINT	ig_mmio = 0;
 LOCAL UD	ig_gmadr = 0, ig_stolen = 0, ig_stolen_size = 0;
 LOCAL UD	ig_place_off[2];		/* the places' GGTT addresses */
@@ -150,6 +157,8 @@ LOCAL IGREGS	ig_fw;				/* as the firmware left them */
 #define LOG_MAX		8192
 LOCAL char	ig_log[LOG_MAX];
 LOCAL INT	ig_loglen = 0;
+
+LOCAL void wm_apply( CONST char *what );
 
 LOCAL void say( CONST char *s )
 {
@@ -195,6 +204,9 @@ LOCAL void read_regs( IGREGS *r )
 	for ( l = 0; l < 8; l++ ) r->wm[l] = rd(R_PLANE_WM_1A(l));
 	r->wm_trans = rd(R_PLANE_WM_TRANS_1A);
 	r->buf_cfg = rd(R_PLANE_BUF_CFG_1A);
+	for ( l = 0; l < 8; l++ ) r->cur_wm[l] = rd(R_CUR_WM_A(l));
+	r->cur_trans = rd(R_CUR_WM_TRANS_A);
+	r->cur_buf = rd(R_CUR_BUF_CFG_A);
 	r->stride = rd(R_PLANE_STRIDE_1A);
 	r->pos = rd(R_PLANE_POS_1A);
 	r->size = rd(R_PLANE_SIZE_1A);
@@ -210,6 +222,9 @@ LOCAL void say_regs( CONST char *what, CONST IGREGS *r )
 	sayf("igfx:   PLANE_WM0-7 %08x %08x %08x %08x %08x %08x %08x %08x TRANS %08x BUF_CFG %08x\n",
 	     r->wm[0], r->wm[1], r->wm[2], r->wm[3], r->wm[4], r->wm[5], r->wm[6], r->wm[7], r->wm_trans,
 	     r->buf_cfg);
+	sayf("igfx:   CUR_WM0-7 %08x %08x %08x %08x %08x %08x %08x %08x TRANS %08x CUR_BUF_CFG %08x\n",
+	     r->cur_wm[0], r->cur_wm[1], r->cur_wm[2], r->cur_wm[3], r->cur_wm[4], r->cur_wm[5], r->cur_wm[6],
+	     r->cur_wm[7], r->cur_trans, r->cur_buf);
 	sayf("igfx:   PLANE STRIDE %08x POS %08x SIZE %08x OFFSET %08x CTL %08x SURF %08x\n", r->stride,
 	     r->pos, r->size, r->offset, r->ctl, r->surf);
 }
@@ -217,12 +232,201 @@ LOCAL void say_regs( CONST char *what, CONST IGREGS *r )
 /* ---------------------------------------------------------------- finding it */
 
 /* The DP link's symbol clock DPLL0 gives, kHz, from DPLL_CTRL1's rate of it; 0 not known */
-LOCAL UD link_khz( UW ctrl1 )
-{
-	CONST UW	mhz[8] = { 2700, 1350, 810, 1620, 1080, 2160, 0, 0 };
+/*
+ * DDI A's link symbol clock in kHz: the DPLL DPLL_CTRL2 selects for it
+ * (DPLL0 when not overridden), and that DPLL's rate in DPLL_CTRL1 (six
+ * bits a DPLL: override, the rate's code, SSC, HDMI). The code names
+ * half the symbol clock in 100 kHz: 810 for 1.62 Gbps, 1350 for 2.7, 2700
+ * for 5.4, 1620, 1080 and 2160 for eDP 1.4's 3.24, 2.16 and 4.32. 0 when
+ * the DPLL's rate is not given there.
+ */
+#define R_DPLL_CTRL2		0x6c05c
 
-	if ( ( ctrl1 & 1 ) == 0 ) return 0;		/* DPLL0 not overridden: the rate is the default */
-	return (UD)mhz[( ctrl1 >> 1 ) & 7] * 200;	/* the DPLL's MHz is half the link rate; a symbol is 10 bits */
+LOCAL INT ddi_a_dpll( UW ctrl2 )
+{
+	return ( ctrl2 & 1 ) ? (INT)( ( ctrl2 >> 1 ) & 3 ) : 0;
+}
+
+LOCAL UD link_khz( UW ctrl1, UW ctrl2 )
+{
+	CONST UW	code[8] = { 2700, 1350, 810, 1620, 1080, 2160, 0, 0 };
+	UW		f = ctrl1 >> ( 6 * ddi_a_dpll(ctrl2) );
+
+	if ( ( f & 1 ) == 0 ) return 0;
+	return (UD)code[( f >> 1 ) & 7] * 200;
+}
+
+/* ---------------------------------------------------------------- what the outputs are, for the records */
+
+IMPORT INT	knl_igfx_aux_ch( INT port );		/* disp_igfx_aux.c */
+IMPORT INT	knl_igfx_dpcd_read( INT ch, UW addr, UB *buf, INT len );
+
+#define R_DDI_BUF_CTL(p)	( 0x64000 + 0x100 * (p) )
+#define R_TRANS_DDI(t)		( 0x60400 + 0x1000 * (t) )
+#define R_SDEISR		0xc4000
+#define R_SHOTPLUG_CTL		0xc4030
+#define R_SHOTPLUG_CTL2		0xc403c
+#define VBT_OFF			0x400		/* the VBT in the OpRegion's fourth mailbox */
+#define BDB_GENERAL_DEFS	2
+
+/*
+ * Once at the start, read only: each DDI's buffer control (A to E), the
+ * PCH's hot plug state and controls, pipes B's and C's PIPECONF and the
+ * transcoders' DDI function controls (A, B, C, eDP); and the VBT's
+ * child devices (the connectors and how they are wired: each one's
+ * type, DVO port, DDC pin and AUX channel as its bytes say), where the
+ * OpRegion (ASLS) holds a VBT
+ */
+LOCAL void outputs_say( void )
+{
+	UW	asls;
+	INT	p;
+	char	t[300];
+	INT	n;
+
+	n = tm_sprintf((UB *)t, (CONST UB *)"igfx: outputs: DDI_BUF_CTL");
+	for ( p = 0; p < 5; p++ ) n += tm_sprintf((UB *)t + n, (CONST UB *)" %c %08x", 'A' + p, rd(R_DDI_BUF_CTL(p)));
+	tm_sprintf((UB *)t + n, (CONST UB *)"; SDEISR %08x SHOTPLUG_CTL %08x SHOTPLUG_CTL2 %08x\n", rd(R_SDEISR),
+		   rd(R_SHOTPLUG_CTL), rd(R_SHOTPLUG_CTL2));
+	say(t);
+	sayf("igfx: outputs: PIPECONF B %08x C %08x eDP %08x; TRANS_DDI_FUNC_CTL A %08x B %08x C %08x eDP %08x\n",
+	     rd(R_PIPECONF_B), rd(R_PIPECONF_C), rd(R_PIPECONF_EDP), rd(R_TRANS_DDI(0)), rd(R_TRANS_DDI(1)),
+	     rd(R_TRANS_DDI(2)), rd(R_TRANS_DDI_EDP));
+
+	asls = ts_pcie_cfg_read(0, 2, 0, 0xfc, 4);
+	if ( asls == 0 || asls == 0xffffffffU ) {
+		say("igfx: VBT: no OpRegion\n");
+		return;
+	}
+	{
+		CONST volatile UB	*v = (CONST volatile UB *)( DEV_VA_BASE + (UD)asls + VBT_OFF );
+		CONST volatile UB	*bdb, *blk, *end;
+		UW			bdb_off;
+		UH			hsz, bsz;
+
+		if ( v[0] != '$' || v[1] != 'V' || v[2] != 'B' || v[3] != 'T' ) {
+			say("igfx: VBT: none in the OpRegion\n");
+			return;
+		}
+		bdb_off = (UW)v[0x1c] | ( (UW)v[0x1d] << 8 ) | ( (UW)v[0x1e] << 16 ) | ( (UW)v[0x1f] << 24 );
+		if ( bdb_off < 0x20 || bdb_off > 0x1000 ) {
+			sayf("igfx: VBT: the data block's offset %x not taken\n", bdb_off);
+			return;
+		}
+		bdb = v + bdb_off;
+		hsz = (UH)( bdb[0x12] | ( bdb[0x13] << 8 ) );
+		bsz = (UH)( bdb[0x14] | ( bdb[0x15] << 8 ) );
+		sayf("igfx: VBT: version %d, data block version %d, %d bytes\n", v[0x14] | ( v[0x15] << 8 ),
+		     bdb[0x10] | ( bdb[0x11] << 8 ), bsz);
+		blk = bdb + hsz;
+		end = bdb + bsz;
+		while ( blk + 3 <= end ) {
+			UB	id = blk[0];
+			UH	sz = (UH)( blk[1] | ( blk[2] << 8 ) );
+
+			if ( sz == 0 || blk + 3 + sz > end ) break;
+			if ( id == BDB_GENERAL_DEFS && sz > 5 && blk[3 + 4] != 0 ) {
+				UB			csz = blk[3 + 4];
+				INT			i, k, cnt = ( sz - 5 ) / csz;
+				CONST volatile UB	*c;
+
+				for ( i = 0; i < cnt; i++ ) {
+					c = blk + 3 + 5 + i * csz;
+					if ( ( c[2] | c[3] ) == 0 ) continue;		/* no device in the slot */
+					n = tm_sprintf((UB *)t, (CONST UB *)"igfx: VBT child %d: handle %04x type %04x DVO port %d "
+						       "DDC pin %d; bytes", i, c[0] | ( c[1] << 8 ), c[2] | ( c[3] << 8 ), c[16], c[19]);
+					for ( k = 0; k < csz && k < 40; k++ ) n += tm_sprintf((UB *)t + n, (CONST UB *)" %02x", c[k]);
+					tm_sprintf((UB *)t + n, (CONST UB *)"\n");
+					say(t);
+				}
+			}
+			blk += 3 + sz;
+		}
+	}
+}
+
+/*
+ * The VBT's i-th child device slot (the General Definitions block), its
+ * bytes into buf, up to max: how many (0 for an empty slot), or E_NOEXS
+ * past the last one or where there is no VBT. Read only; for the external
+ * ports (disp_ext.c), which go by its DVO port, AUX channel and DDC pin.
+ */
+EXPORT INT knl_igfx_vbt_child( INT i, UB *buf, INT max )
+{
+	UW	asls;
+	CONST volatile UB	*v, *bdb, *blk, *end;
+	UW	bdb_off;
+	UH	hsz, bsz;
+
+	asls = ts_pcie_cfg_read(0, 2, 0, 0xfc, 4);
+	if ( asls == 0 || asls == 0xffffffffU || i < 0 ) return E_NOEXS;
+	v = (CONST volatile UB *)( DEV_VA_BASE + (UD)asls + VBT_OFF );
+	if ( v[0] != '$' || v[1] != 'V' || v[2] != 'B' || v[3] != 'T' ) return E_NOEXS;
+	bdb_off = (UW)v[0x1c] | ( (UW)v[0x1d] << 8 ) | ( (UW)v[0x1e] << 16 ) | ( (UW)v[0x1f] << 24 );
+	if ( bdb_off < 0x20 || bdb_off > 0x1000 ) return E_NOEXS;
+	bdb = v + bdb_off;
+	hsz = (UH)( bdb[0x12] | ( bdb[0x13] << 8 ) );
+	bsz = (UH)( bdb[0x14] | ( bdb[0x15] << 8 ) );
+	blk = bdb + hsz;
+	end = bdb + bsz;
+	while ( blk + 3 <= end ) {
+		UB	id = blk[0];
+		UH	sz = (UH)( blk[1] | ( blk[2] << 8 ) );
+
+		if ( sz == 0 || blk + 3 + sz > end ) break;
+		if ( id == BDB_GENERAL_DEFS && sz > 5 && blk[3 + 4] != 0 ) {
+			UB			csz = blk[3 + 4];
+			INT			cnt = ( sz - 5 ) / csz, k;
+			CONST volatile UB	*c;
+
+			if ( i >= cnt ) return E_NOEXS;
+			c = blk + 3 + 5 + i * csz;
+			if ( ( c[2] | c[3] ) == 0 ) return 0;		/* no device in the slot */
+			for ( k = 0; k < csz && k < max; k++ ) buf[k] = c[k];
+			return k;
+		}
+		blk += 3 + sz;
+	}
+	return E_NOEXS;
+}
+
+/*
+ * Once at the start: the panel's DPCD over DDI A's AUX channel, read
+ * only: 000h-00Fh (revision, the most link rate and lanes), 02Eh (ALPM),
+ * 070h-074h (PSR: its version, capabilities, PSR2's selective update
+ * granularity), 2200h-220Fh (the extended receiver capabilities) when
+ * 00Eh says they are there, 700h-701h (the eDP revision and general
+ * capabilities). What failed is told, and the start goes on.
+ */
+LOCAL void dpcd_bytes( CONST char *what, UW addr, INT len )
+{
+	UB	b[16];
+	char	t[160];
+	INT	n, i, k;
+
+	n = knl_igfx_dpcd_read(knl_igfx_aux_ch(0), addr, b, len);
+	if ( n < E_OK ) {
+		sayf("igfx: DPCD %s (%04x): not read (%d)\n", what, addr, n);
+		return;
+	}
+	k = tm_sprintf((UB *)t, (CONST UB *)"igfx: DPCD %s (%04x):", what, addr);
+	for ( i = 0; i < n; i++ ) k += tm_sprintf((UB *)t + k, (CONST UB *)" %02x", b[i]);
+	tm_sprintf((UB *)t + k, (CONST UB *)"\n");
+	say(t);
+}
+
+LOCAL void dpcd_say( void )
+{
+	UB	ext = 0;
+
+	dpcd_bytes("receiver capabilities", 0x000, 16);
+	dpcd_bytes("link set (LINK_BW_SET, LANE_COUNT_SET)", 0x100, 2);
+	dpcd_bytes("ALPM", 0x02e, 1);
+	dpcd_bytes("PSR", 0x070, 5);
+	if ( knl_igfx_dpcd_read(knl_igfx_aux_ch(0), 0x00e, &ext, 1) == 1 && ( ext & 0x80 ) != 0 ) {
+		dpcd_bytes("extended receiver capabilities", 0x2200, 16);
+	}
+	dpcd_bytes("eDP", 0x700, 2);
 }
 
 EXPORT BOOL knl_igfx_probe( UD fb_pa )
@@ -246,6 +450,7 @@ EXPORT BOOL knl_igfx_probe( UD fb_pa )
 	sayf("igfx: %04x:%04x, registers %lx, aperture %lx (%ld MB reachable), stolen %lx %ld MB, GGC %08x\n",
 	     dev.pci.vendor, dev.pci.device, dev.pci.bar[0], ig_gmadr, (D)( dev.mappable >> 20 ), ig_stolen,
 	     (D)( ig_stolen_size >> 20 ), dev.ggc);
+	outputs_say();
 	if ( fb_pa != ig_gmadr ) {
 		sayf("igfx: the screen is at %lx, not the aperture: it keeps its size\n", fb_pa);
 		return FALSE;
@@ -261,6 +466,7 @@ EXPORT BOOL knl_igfx_probe( UD fb_pa )
 		say("igfx: another pipe is on: the screen keeps its size\n");
 		return FALSE;
 	}
+	dpcd_say();
 	read_regs(&ig_fw);
 	if ( ( ig_fw.ctl & 0x80000000U ) == 0 || ( ( ig_fw.ctl >> 24 ) & 0xf ) != 4 || ( ( ig_fw.ctl >> 10 ) & 7 ) != 0
 	  || ig_fw.surf != 0 ) {
@@ -274,7 +480,14 @@ EXPORT BOOL knl_igfx_probe( UD fb_pa )
 	ig_vstart = ( rd(R_EDP_VBLANK) & 0x1fff ) + 1;
 	m = rd(R_EDP_LINK_M1) & 0xffffff;
 	n = rd(R_EDP_LINK_N1) & 0xffffff;
-	ig_pixel_khz = ( n != 0 && link_khz(rd(R_DPLL_CTRL1)) != 0 ) ? link_khz(rd(R_DPLL_CTRL1)) * m / n : 0;
+	{
+		UW	c1 = rd(R_DPLL_CTRL1), c2 = rd(R_DPLL_CTRL2);
+		UD	lk = link_khz(c1, c2);
+
+		ig_pixel_khz = ( n != 0 && lk != 0 ) ? lk * m / n : 0;
+		sayf("igfx: DDI A on DPLL%d (DPLL_CTRL1 %08x CTRL2 %08x): link symbol clock %d kHz, link M/N %x/%x, "
+		     "pixel clock %d kHz\n", ddi_a_dpll(c2), c1, c2, (INT)lk, m, n, (INT)ig_pixel_khz);
+	}
 	ig_w = ( ig_fw.size & 0x1fff ) + 1;
 	ig_h = ( ( ig_fw.size >> 16 ) & 0x1fff ) + 1;
 	ig_fw_wm0 = ig_fw.wm[0];
@@ -316,6 +529,16 @@ EXPORT BOOL knl_igfx_probe( UD fb_pa )
 	ig_place = 0;
 	ig_ok = TRUE;
 	say("igfx: the size can be changed while the system runs\n");
+	{
+		UB	v[4];
+
+		if ( knl_bootarg(knl_bootargs, "igfx.wm", v, sizeof(v)) && v[0] == '0' ) {
+			ig_wm_on = FALSE;
+			say("igfx: igfx.wm=0: the watermarks as the firmware left them (level 0 only on a change)\n");
+		}
+	}
+	wm_apply("the watermarks at the start");
+	knl_igfx_psr_start();
 	return TRUE;
 }
 
@@ -458,6 +681,10 @@ LOCAL void write_regs( CONST IGREGS *r )
 	for ( l = 0; l < 8; l++ ) wr(R_PLANE_WM_1A(l), r->wm[l]);
 	wr(R_PLANE_WM_TRANS_1A, r->wm_trans);
 	wr(R_PLANE_BUF_CFG_1A, r->buf_cfg);
+	for ( l = 0; l < 8; l++ ) wr(R_CUR_WM_A(l), r->cur_wm[l]);
+	wr(R_CUR_WM_TRANS_A, r->cur_trans);
+	wr(R_CUR_BUF_CFG_A, r->cur_buf);
+	wr(R_CUR_BASE_A, rd(R_CUR_BASE_A));	/* the cursor's registers take with its base */
 	wr(R_PLANE_STRIDE_1A, r->stride);
 	wr(R_PLANE_POS_1A, r->pos);
 	wr(R_PLANE_SIZE_1A, r->size);
@@ -472,7 +699,20 @@ LOCAL void write_regs( CONST IGREGS *r )
  * plane shows the new surface and no underrun came, else E_IO (what
  * was written stays; the caller puts back)
  */
+LOCAL ER commit_now( CONST IGREGS *r, CONST char *what );
+
+/* PSR and the DC states off while the plane changes, on again after */
 LOCAL ER commit( CONST IGREGS *r, CONST char *what )
+{
+	ER	er;
+
+	knl_igfx_psr_hold(TRUE, what);
+	er = commit_now(r, what);
+	knl_igfx_psr_hold(FALSE, what);
+	return er;
+}
+
+LOCAL ER commit_now( CONST IGREGS *r, CONST char *what )
 {
 	UINT	s, line, ms;
 	UW	imr, iir;
@@ -505,6 +745,371 @@ LOCAL ER commit( CONST IGREGS *r, CONST char *what )
 		return E_IO;
 	}
 	return E_OK;
+}
+
+/*
+ * All eight levels, as the PRM's watermark program asks for them and as
+ * worked out for this generation (9th):
+ *
+ * The latencies: the power controller's for levels 0-3 and 4-7 (two
+ * requests); a level of 0 after level 0 turns it and those above off,
+ * each level at least the one below; when level 0 reads 0 the memory's
+ * read latency (2 us) is added to every level there is; and 1 us more,
+ * as for memory of 16Gb chips, since what memory is fitted is not read.
+ * IPC (the isochronous priority control) is not turned on without
+ * knowing the memory is symmetric, so its 4 us is not added.
+ *
+ * A level for a plane w pixels wide of cpp bytes, linear, not rotated,
+ * at the pipe's pixel rate (kHz): method 1 the bytes fetched in the
+ * latency, latency * rate * cpp / 1000 in blocks of 512 bytes; method 2
+ * the lines of the latency, rounded up, times the blocks of a line
+ * (the line's bytes in blocks rounded up, and one more); the smaller of
+ * the two when the latency is a line's time or more, else method 1.
+ * Blocks: that rounded up and one more, at least a line's blocks above
+ * level 0 and one block more there; lines: the result in lines rounded
+ * up (none for level 0); each at least the level below; more than 31
+ * lines is not a level. A level needs its blocks and one more of the
+ * plane's share of the display buffer (DDB), or it is off. The
+ * transition watermark stays off on this generation.
+ *
+ * The buffer: 892 blocks for the one pipe (896, 4 kept for the bypass
+ * path); the cursor's share at its end, 32 blocks or what its levels
+ * need for a cursor 256 pixels wide, and the rest the plane's.
+ *
+ * SAGV (the system agent's changes of voltage and clock, which stop the
+ * display's reads for up to 30 us): left on only when the deepest level
+ * the plane has on is for 30 us or more, asked of the power controller
+ * before the change is written to be off, and after it to be on.
+ */
+#define DBUF_BLOCKS		892
+#define DBUF_BLOCK_BYTES	512
+#define WM_LEVELS		8
+#define WM_MAX_LINES		31
+#define CURSOR_W		256
+#define CURSOR_MIN_ALLOC	32
+#define SAGV_BLOCK_US		30
+#define PCODE_SAGV_CONTROL	0x21
+#define SAGV_DISABLE		0x0
+#define SAGV_ENABLE		0x3
+#define SAGV_IS_DISABLED	0x1
+#define FX_ONE			( 1ULL << 16 )
+
+typedef struct {
+	BOOL	on;
+	UW	blocks, lines, min_ddb;
+} WMLEVEL;
+
+LOCAL INT	ig_lat_state = 0;		/* 0 not read, 1 read, -1 could not */
+LOCAL UH	ig_lat[WM_LEVELS];
+LOCAL INT	ig_sagv = -1;			/* -1 as the firmware left it, 0 off, 1 on */
+LOCAL UW	ig_underruns = 0;
+
+LOCAL UD fx_div_up( UD a, UD d )		/* a / d as 16.16, rounded up */
+{
+	return ( ( a << 16 ) + d - 1 ) / d;
+}
+
+LOCAL UW fx_up( UD f )				/* 16.16 rounded up to an integer */
+{
+	return (UW)( ( f + FX_ONE - 1 ) >> 16 );
+}
+
+LOCAL BOOL latencies( void )
+{
+	UW	v0 = 0, v1 = 0;
+	INT	l, i;
+
+	if ( ig_lat_state != 0 ) return (BOOL)( ig_lat_state > 0 );
+	if ( knl_igt_pcode_rw(PCODE_MEM_LATENCY, 0, &v0) < E_OK || knl_igt_pcode_rw(PCODE_MEM_LATENCY, 1, &v1) < E_OK ) {
+		ig_lat_state = -1;
+		say("igfx: the memory latencies not read from the power controller: the deeper watermarks not set\n");
+		return FALSE;
+	}
+	for ( l = 0; l < 4; l++ ) {
+		ig_lat[l] = (UH)( ( v0 >> ( 8 * l ) ) & 0xff );
+		ig_lat[l + 4] = (UH)( ( v1 >> ( 8 * l ) ) & 0xff );
+	}
+	sayf("igfx: memory latencies %d %d %d %d %d %d %d %d us (power controller)\n", ig_lat[0], ig_lat[1], ig_lat[2],
+	     ig_lat[3], ig_lat[4], ig_lat[5], ig_lat[6], ig_lat[7]);
+	for ( l = 1; l < WM_LEVELS && ig_lat[l] != 0; l++ ) ;
+	for ( i = l + 1; i < WM_LEVELS; i++ ) ig_lat[i] = 0;
+	for ( l = 1; l < WM_LEVELS && ig_lat[l] != 0; l++ ) {
+		if ( ig_lat[l] < ig_lat[l - 1] ) ig_lat[l] = ig_lat[l - 1];
+	}
+	if ( ig_lat[0] == 0 ) {
+		ig_lat[0] += 2;
+		for ( l = 1; l < WM_LEVELS && ig_lat[l] != 0; l++ ) ig_lat[l] += 2;
+	}
+	ig_lat[0] += 1;
+	for ( l = 1; l < WM_LEVELS && ig_lat[l] != 0; l++ ) ig_lat[l] += 1;
+	sayf("igfx: latencies taken %d %d %d %d %d %d %d %d us\n", ig_lat[0], ig_lat[1], ig_lat[2], ig_lat[3],
+	     ig_lat[4], ig_lat[5], ig_lat[6], ig_lat[7]);
+	ig_lat_state = 1;
+	return TRUE;
+}
+
+/* The levels of a linear plane w pixels wide of cpp bytes, on a pipe of htotal at khz, for the latencies lat */
+LOCAL void levels_calc( CONST UH *lat_of, UINT w, UINT cpp, UINT htotal, UD khz, WMLEVEL *lv )
+{
+	UD	pbpl, m1, m2, sel;
+	UW	linetime_us, blocks, lines, prev_b = 0, prev_l = 0;
+	INT	l;
+
+	pbpl = (UD)( ( w * cpp + DBUF_BLOCK_BYTES - 1 ) / DBUF_BLOCK_BYTES + 1 ) << 16;
+	linetime_us = (UW)( ( (UD)htotal * 1000 + khz - 1 ) / khz );
+	for ( l = 0; l < WM_LEVELS; l++ ) {
+		UW	lat = lat_of[l];
+
+		lv[l].on = FALSE;
+		lv[l].blocks = lv[l].lines = 0;
+		lv[l].min_ddb = 0xffff;
+		if ( lat == 0 ) continue;
+		m1 = fx_div_up((UD)lat * khz * cpp, 1000ULL * DBUF_BLOCK_BYTES);
+		m2 = ( ( (UD)lat * khz + (UD)htotal * 1000 - 1 ) / ( (UD)htotal * 1000 ) ) * pbpl;
+		if ( (UD)cpp * htotal / DBUF_BLOCK_BYTES < 1 && (UD)w * cpp / DBUF_BLOCK_BYTES < 1 ) {
+			sel = m2;
+		} else if ( lat >= linetime_us ) {
+			sel = ( m1 < m2 ) ? m1 : m2;
+		} else {
+			sel = m1;
+		}
+		blocks = fx_up(sel) + 1;
+		if ( l > 0 && blocks < fx_up(pbpl) ) blocks = fx_up(pbpl);
+		lines = (UW)( ( sel + pbpl - 1 ) / pbpl );	/* both 16.16: the quotient is the lines, rounded up */
+		if ( l >= 1 ) blocks++;
+		if ( blocks < prev_b ) blocks = prev_b;
+		if ( lines < prev_l ) lines = prev_l;
+		if ( l == 0 ) lines = 0;		/* level 0 has no lines */
+		if ( lines > WM_MAX_LINES ) {
+			prev_b = prev_l = 0;		/* not a level: the next is held to nothing below */
+			continue;
+		}
+		prev_b = blocks;
+		prev_l = lines;
+		lv[l].on = TRUE;
+		lv[l].blocks = blocks;
+		lv[l].lines = lines;
+		lv[l].min_ddb = blocks + 1;
+	}
+}
+
+/* The levels of pipe A's plane w pixels wide */
+LOCAL void levels_of( UINT w, UINT cpp, WMLEVEL *lv )
+{
+	levels_calc(ig_lat, w, cpp, ig_htotal, ig_pixel_khz, lv);
+}
+
+/* The register of a level, off when it does not fit the share */
+LOCAL UW wm_reg( CONST WMLEVEL *w, UW share )
+{
+	if ( !w->on || w->min_ddb > share ) return 0;
+	return 0x80000000U | ( w->lines << 14 ) | ( w->blocks & 0x7ff );
+}
+
+/*
+ * The cursor's share: least blocks (32 with one pipe on, 8 with more, as
+ * i915's skl_cursor_allocation), or what the deepest level it can have
+ * needs
+ */
+LOCAL UW cursor_calc( CONST UH *lat_of, UINT htotal, UD khz, UW least )
+{
+	WMLEVEL	lv[WM_LEVELS];
+	UW	need = 0;
+	INT	l;
+
+	levels_calc(lat_of, CURSOR_W, 4, htotal, khz, lv);
+	for ( l = 0; l < WM_LEVELS && lv[l].on; l++ ) need = lv[l].min_ddb;
+	return ( need > least ) ? need : least;
+}
+
+#define CURSOR_MIN_ALLOC_MANY	8	/* with more than one pipe on */
+
+EXPORT BOOL knl_igfx_wm_calc( CONST UH *lat, UINT w, UINT htotal, UD khz, UW start, UW end, INT npipes, T_IGWM *o )
+{
+	WMLEVEL	lv[WM_LEVELS];
+	INT	l, deepest = -1;
+
+	if ( lat == NULL || o == NULL || khz == 0 || htotal == 0 || end <= start ) return FALSE;
+	o->cur = cursor_calc(lat, htotal, khz, ( npipes <= 1 ) ? CURSOR_MIN_ALLOC : CURSOR_MIN_ALLOC_MANY);
+	if ( o->cur >= end - start ) return FALSE;
+	o->share = end - start - o->cur;
+	levels_calc(lat, w, CPP, htotal, khz, lv);
+	for ( l = 0; l < WM_LEVELS; l++ ) {
+		o->wm[l] = wm_reg(&lv[l], o->share);
+		if ( o->wm[l] != 0 ) deepest = l;
+	}
+	o->buf_cfg = ( ( start + o->share - 1 ) << 16 ) | start;
+	o->cur_buf = ( ( end - 1 ) << 16 ) | ( start + o->share );
+	o->sagv = (BOOL)( npipes <= 1 && deepest >= 0 && lat[deepest] >= SAGV_BLOCK_US );
+	return TRUE;
+}
+
+/* Pipe A's part of the DDB, [0, ig_a_end), and the pipes on (knl_igfx_pipes) */
+LOCAL UW	ig_a_end = DBUF_BLOCKS;
+LOCAL INT	ig_npipes = 1;
+
+/*
+ * The watermarks and shares of the buffer into r for a plane w pixels
+ * wide: the plane's eight levels, the cursor's (off: no cursor plane is
+ * shown), both shares; FALSE when they cannot be worked out. *p_sagv
+ * says whether SAGV may stay on.
+ */
+LOCAL BOOL wm_fill( IGREGS *r, UINT w, BOOL *p_sagv )
+{
+	WMLEVEL	lv[WM_LEVELS];
+	T_IGWM	o;
+	UW	cur, share;
+	INT	l;
+
+	if ( ig_pixel_khz == 0 || ig_htotal == 0 || !latencies() ) return FALSE;
+	if ( !knl_igfx_wm_calc(ig_lat, w, ig_htotal, ig_pixel_khz, 0, ig_a_end, ig_npipes, &o) ) return FALSE;
+	cur = o.cur;
+	share = o.share;
+	levels_of(w, CPP, lv);			/* for the record below */
+	for ( l = 0; l < WM_LEVELS; l++ ) {
+		r->wm[l] = o.wm[l];
+		r->cur_wm[l] = 0;
+	}
+	r->wm_trans = 0;
+	r->cur_trans = 0;
+	r->buf_cfg = o.buf_cfg;
+	r->cur_buf = o.cur_buf;
+	*p_sagv = o.sagv;
+	{
+		char	t[400];
+		INT	n;
+
+		n = tm_sprintf((UB *)t, (CONST UB *)"igfx: watermarks for %d pixels at %ld kHz (htotal %d): plane share %d blocks, "
+			       "cursor %d; levels (blocks/lines)", w, (D)ig_pixel_khz, ig_htotal, share, cur);
+		for ( l = 0; l < WM_LEVELS; l++ ) {
+			n += tm_sprintf((UB *)t + n, (CONST UB *)" %d:%s%d/%d", l, ( r->wm[l] != 0 ) ? "" : "off ",
+					lv[l].blocks, lv[l].lines);
+		}
+		tm_sprintf((UB *)t + n, (CONST UB *)"; SAGV %s\n", *p_sagv ? "may stay on" : "to be off");
+		say(t);
+	}
+	return TRUE;
+}
+
+/* SAGV asked on or off of the power controller, as needed */
+LOCAL void sagv_set( BOOL on )
+{
+	UW	r = 0;
+	INT	i;
+	ER	er = E_OK;
+
+	if ( ig_sagv == ( on ? 1 : 0 ) ) return;
+	if ( on ) {
+		er = knl_igt_pcode_rw(PCODE_SAGV_CONTROL, SAGV_ENABLE, &r);
+	} else {
+		/* asked again until it says off, for a millisecond at least */
+		for ( i = 0; i < 50; i++ ) {
+			er = knl_igt_pcode_rw(PCODE_SAGV_CONTROL, SAGV_DISABLE, &r);
+			if ( er < E_OK || ( r & SAGV_IS_DISABLED ) != 0 ) break;
+			WaitUsec(100);
+		}
+	}
+	sayf("igfx: SAGV asked %s: %d (answer %08x)\n", on ? "on" : "off", (INT)er, r);
+	if ( er >= E_OK ) ig_sagv = on ? 1 : 0;
+}
+
+/*
+ * The watermarks of the plane as it is now, worked out and written
+ * within a frame (at the start, and after a sleep); put back when the
+ * plane did not take them
+ */
+LOCAL void wm_apply( CONST char *what )
+{
+	IGREGS	now, want;
+	BOOL	sagv = FALSE;
+
+	if ( !ig_ok || !ig_wm_on ) return;
+	read_regs(&now);
+	want = now;
+	if ( !wm_fill(&want, ( now.size & 0x1fff ) + 1, &sagv) ) return;
+	if ( !sagv ) sagv_set(FALSE);
+	if ( commit(&want, what) < E_OK ) {
+		(void)commit(&now, "put back");
+		return;
+	}
+	if ( sagv ) sagv_set(TRUE);
+}
+
+EXPORT BOOL knl_igfx_latencies( UH *lat )
+{
+	if ( lat == NULL || !latencies() ) return FALSE;
+	knl_memcpy(lat, ig_lat, sizeof(ig_lat));
+	return TRUE;
+}
+
+EXPORT ER knl_igfx_pipes( INT npipes, UW a_end )
+{
+	IGREGS	now, want;
+	BOOL	sagv = FALSE;
+	UW	was_end = ig_a_end;
+	INT	was_n = ig_npipes;
+
+	if ( !ig_ok || !ig_wm_on ) return E_NOSPT;
+	if ( npipes < 1 || a_end == 0 || a_end > DBUF_BLOCKS ) return E_PAR;
+	if ( npipes > 1 ) sagv_set(FALSE);	/* off before a second pipe reads the memory */
+	ig_npipes = npipes;
+	ig_a_end = a_end;
+	read_regs(&now);
+	want = now;
+	if ( !wm_fill(&want, ( now.size & 0x1fff ) + 1, &sagv) ) {
+		ig_npipes = was_n;
+		ig_a_end = was_end;
+		return E_NOSPT;
+	}
+	sayf("igfx: pipe A's part of the display buffer 0 to %d, %d pipe(s) on\n", (INT)a_end, npipes);
+	if ( commit(&want, ( npipes > 1 ) ? "pipe A's part for another pipe" : "pipe A's part whole again") < E_OK ) {
+		(void)commit(&now, "put back");
+		ig_npipes = was_n;
+		ig_a_end = was_end;
+		return E_IO;
+	}
+	if ( npipes == 1 && sagv ) sagv_set(TRUE);
+	return E_OK;
+}
+
+EXPORT UINT knl_igfx_panel_w( void )
+{
+	return ig_nw;
+}
+
+EXPORT UD knl_igfx_gmadr( void )
+{
+	return ig_gmadr;
+}
+
+EXPORT void knl_igfx_wm_again( void )
+{
+	wm_apply("the watermarks after the sleep");
+}
+
+/*
+ * For the records (cpuidle.c, idlelog=1): the watermarks as they read
+ * now, the shares, SAGV as asked, and the pipe's FIFO underruns counted
+ * since the start (the interrupt's latch, cleared as it is read)
+ */
+EXPORT INT knl_igfx_wm_text( char *t )
+{
+	INT	l, n;
+
+	if ( !ig_found || ig_mmio == 0 ) return 0;
+	knl_igfx_dc_pause(TRUE);		/* the plane's registers read with the power wells on */
+	if ( rd(R_DE_PIPE_IIR_A) & PIPE_UNDERRUN ) {
+		ig_underruns++;
+		wr(R_DE_PIPE_IIR_A, PIPE_UNDERRUN);
+	}
+	n = tm_sprintf((UB *)t, (CONST UB *)"; display WM%s", ig_wm_on ? "" : " (igfx.wm=0)");
+	for ( l = 0; l < WM_LEVELS; l++ ) n += tm_sprintf((UB *)t + n, (CONST UB *)" %08x", rd(R_PLANE_WM_1A(l)));
+	n += tm_sprintf((UB *)t + n, (CONST UB *)" trans %08x DDB %08x cursor DDB %08x, SAGV %s, underruns %d",
+			rd(R_PLANE_WM_TRANS_1A), rd(R_PLANE_BUF_CFG_1A), rd(R_CUR_BUF_CFG_A),
+			( ig_sagv < 0 ) ? "as left" : ig_sagv ? "on" : "off", (INT)ig_underruns);
+	knl_igfx_dc_pause(FALSE);
+	n += knl_igfx_psr_text(t + n);
+	return n;
 }
 
 /* Where the scaler lays w x h on the panel, for the shape kept */
@@ -546,6 +1151,14 @@ LOCAL ER regs_for( UINT w, UINT h, UINT p, CONST IGREGS *now, IGREGS *r )
 		r->ps_pos = ( x << 16 ) | y;
 		r->ps_sz = ( ww << 16 ) | wh;
 	}
+	if ( ig_wm_on ) {
+		BOOL	sagv = FALSE;
+
+		if ( wm_fill(r, w, &sagv) ) {
+			if ( !sagv ) sagv_set(FALSE);
+			goto plane;
+		}
+	}
 	alloc = ( ( now->buf_cfg >> 16 ) & 0x3ff ) - ( now->buf_cfg & 0x3ff ) + 1;
 	lat = latency0();
 	wm_old = wm0_of(( ( now->size ) & 0x1fff ) + 1, alloc, lat);
@@ -574,6 +1187,7 @@ LOCAL ER regs_for( UINT w, UINT h, UINT p, CONST IGREGS *now, IGREGS *r )
 	r->wm_trans = now->wm_trans & ~0x80000000U;
 	sayf("igfx: %d x %d: latency %d us, %d blocks of the buffer, level 0 %d blocks %d lines\n", w, h, lat,
 	     alloc, wm & 0x3ff, ( wm >> 14 ) & 0x1f);
+plane:
 	r->stride = pitch / 64;
 	r->pos = 0;
 	r->size = ( ( h - 1 ) << 16 ) | ( w - 1 );
@@ -621,6 +1235,12 @@ EXPORT INT knl_igfx_setmode( T_DISPHW *hw, UINT w, UINT h )
 		(void)commit(&now, "put back");
 		knl_bootlog_soon();
 		return 0;
+	}
+	if ( ig_wm_on && ig_lat_state > 0 ) {
+		INT	l, deepest = -1;
+
+		for ( l = 0; l < WM_LEVELS; l++ ) if ( want.wm[l] & 0x80000000U ) deepest = l;
+		if ( deepest >= 0 && ig_lat[deepest] >= SAGV_BLOCK_US ) sagv_set(TRUE);
 	}
 	ig_place = p;
 	ig_w = w;
@@ -735,9 +1355,17 @@ EXPORT void knl_igfx_dark( BOOL dark )
 	UW	v;
 
 	if ( !ig_found || ig_mmio == 0 ) return;
+	if ( dark ) knl_igfx_psr_hold(TRUE, "the backlight off");
 	v = rd(PP_CONTROL);
 	wr(PP_CONTROL, dark ? ( v & ~PP_BL_ENABLE ) : ( v | PP_BL_ENABLE ));
 	tm_printf((UB *)"igfx: the backlight %s: PP_CONTROL %08x -> %08x\n", dark ? "off" : "on", v, rd(PP_CONTROL));
+	if ( !dark ) knl_igfx_psr_hold(FALSE, "the backlight on");
+}
+
+/* The pipe's pixel clock in kHz; 0 when it is not known */
+EXPORT UD knl_igfx_pixel_khz( void )
+{
+	return ig_pixel_khz;
 }
 
 #endif /* X64 */

@@ -11,90 +11,8 @@
 # 保護's row. Closing by 閉じる leaves 閉じる the item chosen last, as it was at the start, so
 # the process's half finds the menu as the desktop's half did.
 # Keys: Ctrl+C 06 01, Ctrl+V 19 01, Ctrl+L 0F 01, Ctrl+S 16 01.
-cabproc kernel
-mkbig fig 1 0
-xml <tad version="1.0" encoding="UTF-8"><figure>
-xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
-xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
-xml vobjleft="20" vobjtop="60" vobjright="180" vobjbottom="79" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
-xml vobjleft="20" vobjtop="100" vobjright="180" vobjbottom="119" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
-xml vobjleft="220" vobjtop="20" vobjright="380" vobjbottom="39" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml </figure></tad>
-xmlbig
-apps big virtual-object-list
-open big
-waitwin 画用紙 600
-sync 600
-wait 800
-click 167 153
-sync 600
-wait 600
-click 600 400 1
-wait 600
-wait 400
-move 610 500
-wait 300
-move 720 500
-wait 300
-move 720 560
-wait 300
-click 720 560
-sync 600
-wait 600
-move 890 690
-wait 1500
-shot cabm_k_bg
-click 167 193
-sync 600
-wait 600
-click 600 400 1
-wait 600
-wait 400
-move 610 400
-wait 300
-move 720 400
-wait 300
-click 720 400
-sync 600
-wait 600
-click 167 233
-sync 600
-wait 600
-key 06 01
-sync 600
-key 19 01
-sync 600
-wait 600
-move 890 690
-wait 1500
-shot cabm_k_paste
-key 0F 01
-sync 600
-wait 1500
-shot cabm_k_full
-key 0F 01
-sync 600
-wait 1000
-key 16 01
-sync 600
-sum show anon
-keep kernel
-click 600 400 1
-wait 600
-wait 400
-move 610 300
-wait 300
-click 610 300
-sync 600
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 0
 xml <tad version="1.0" encoding="UTF-8"><figure>
 xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
@@ -175,7 +93,7 @@ logmark
 key 16 01
 expectsince cabinet: saved (0)
 sum show anon
-same kernel
+want ok 1933 9319f3b1740ac8fe
 logmark
 click 600 400 1
 expectsince cabinet: menu

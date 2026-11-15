@@ -846,6 +846,14 @@ LOCAL void id_of( CONST PEER *p, UB *id )
 	(void)tm_sprintf(id, (UB *)"bt-%02x%02x%02x%02x%02x%02x", p->addr[5], p->addr[4], p->addr[3], p->addr[2], p->addr[1], p->addr[0]);
 }
 
+/* Whether the device's stream is set up, so that it is a sound output: what the list of devices tells */
+EXPORT BOOL knl_bta_ready( CONST PEER *p )
+{
+	AV	*a = av;
+
+	return (BOOL)( a != NULL && a->p == p && a->st >= V_READY );
+}
+
 LOCAL INT bta_outputs( SDOut *o, INT max )
 {
 	AV	*a = av;
@@ -942,8 +950,16 @@ LOCAL ER bta_rec_start( UW rate, UW *dev_rate, INT *channels )
 
 LOCAL void bta_rec_stop( void )		{ knl_bth_rec_stop(); }
 LOCAL BOOL bta_rec_running( void )	{ return knl_bth_rec_running(); }
-LOCAL ER   bta_get_level( INT dn, SDVol *v ) { (void)dn; (void)v; return E_NOSPT; }
-LOCAL ER   bta_set_level( INT dn, CONST SDVol *v ) { (void)dn; (void)v; return E_NOSPT; }
+/* The input's level is the earphones' microphone gain (hands-free, +VGM); the output's volume goes by AVRCP and +VGS */
+LOCAL ER bta_get_level( INT dn, SDVol *v )
+{
+	return ( dn == DN_SDVOLMIC || dn == DN_SDGAININ ) ? knl_bth_mic_get(v) : E_NOSPT;
+}
+
+LOCAL ER bta_set_level( INT dn, CONST SDVol *v )
+{
+	return ( dn == DN_SDVOLMIC || dn == DN_SDGAININ ) ? knl_bth_mic_set(v) : E_NOSPT;
+}
 
 /* A sink takes a moment to open its sound after the start, and a suspend would cut what follows */
 EXPORT CONST SNDHW knl_bta_hw = {

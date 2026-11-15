@@ -15,14 +15,19 @@
  *	ts_map_mem reserves size bytes somewhere in [TS_MEM_BASE,
  *	TS_MEM_END): *p_adr, when it is not NULL, is where the program
  *	would like them (taken when that stretch is free and aligned),
- *	'align' a power of two of at least a page (0: a page). With a
- *	protection other than TS_MEM_NONE the pages are made at once,
- *	zero filled; with TS_MEM_NONE only the addresses are held, and no
- *	page is spent until ts_ctl_mem asks for one.
+ *	'align' a power of two of at least a page (0: a page). With
+ *	TS_MEM_RW no page is made then: each is made, zero filled, the
+ *	first time the process touches it or hands it to a call of the
+ *	system, as the pages of an anonymous mapping are on Linux, so a
+ *	large writable reservation costs only the pages used. With another
+ *	protection other than TS_MEM_NONE the pages are made at once, zero
+ *	filled; with TS_MEM_NONE only the addresses are held. When memory
+ *	runs out at a first touch, the process ends with a fault.
  *
- *	ts_ctl_mem changes what a part of the reservations is: TS_MEM_READ
- *	or TS_MEM_RW makes the pages that are not there (zero filled) and
- *	gives all of them that protection; TS_MEM_NONE takes the pages
+ *	ts_ctl_mem changes what a part of the reservations is: TS_MEM_RW
+ *	makes the pages there writable and the others are made when
+ *	touched; TS_MEM_READ makes the pages that are not there (zero
+ *	filled) and gives all of them that protection; TS_MEM_NONE takes the pages
  *	away -- what they held is gone, and making them again gives
  *	zeros. ts_unm_mem takes the pages away and gives the addresses
  *	back. Both take a part of a reservation and split it as needed.
@@ -43,8 +48,9 @@
  *
  *	ts_ctl_mem with TS_MEM_DISCARD (alone) gives up what the pages
  *	hold and keeps what they allow: the pages read as zeros after it
- *	(those written and run by turns are taken away, to be made again
- *	when touched; the others are zero filled where they are).
+ *	(writable ones and those written and run by turns are taken away
+ *	and go back to the system, to be made again when touched; the
+ *	others are zero filled where they are).
  *
  *	A process may clean and invalidate the caches by address itself
  *	(dc cvau, ic ivau and CTR_EL0 are open to EL0).

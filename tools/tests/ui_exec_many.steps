@@ -35,7 +35,7 @@ move 220 592
 wait 500
 shot exec_many
 click 220 592
-expect desktop: chosen exec.app
+expect cabinet: chosen exec.app
 wait 3000
 shot exec_many_ran
 absent !OACV!

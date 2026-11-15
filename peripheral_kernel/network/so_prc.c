@@ -36,7 +36,7 @@
 #define ADDR_MAX	128		/* bytes of an address the calls take */
 #define OPT_MAX		64		/* bytes of a socket option */
 #define NAME_MAX	256		/* bytes of a name to look up, the terminator included */
-#define POLL_MAX	SO_MAX
+#define POLL_LOCAL	16		/* sockets of a poll taken in on the stack */
 #define PAGE_BYTES	4096		/* a user string is asked about a page at a time */
 
 LOCAL BOOL user_ok( CONST void *p, SZ len, BOOL write )
@@ -441,14 +441,11 @@ LOCAL ER svc_so_getpeername( INT s, struct sockaddr *name, socklen_t *namelen )
 	return UACCESS(so_getpeername(s, name, namelen));
 }
 
-/* The list is taken in, every socket in it the process's, and the answers put back */
-LOCAL INT svc_so_poll( struct pollfd *fds, INT nfds, TMO tmout )
+/* The answers to a list taken into k (every socket in it the process's), put back into fds */
+LOCAL INT poll_list( struct pollfd *fds, struct pollfd *k, INT nfds, TMO tmout )
 {
-	struct pollfd	k[POLL_MAX];
-	INT		i, n;
+	INT	i, n;
 
-	if ( nfds < 0 || nfds > POLL_MAX ) return E_PAR;
-	if ( nfds > 0 && !user_ok(fds, (SZ)nfds * (SZ)sizeof(*fds), TRUE) ) return E_MACV;
 	for ( i = 0; i < nfds; i++ ) {
 		knl_ua_get(&k[i], &fds[i], sizeof(k[i]));
 		if ( !mine(k[i].fd) ) return E_ID;
@@ -472,6 +469,51 @@ LOCAL INT svc_so_poll( struct pollfd *fds, INT nfds, TMO tmout )
 		}
 	}
 	return n;
+}
+
+/*
+ * The list may be as long as the process's limit, as Linux's poll takes
+ * up to RLIMIT_NOFILE: a short one is taken in on the stack, a longer one
+ * into memory of its own for the call.
+ */
+LOCAL INT svc_so_poll( struct pollfd *fds, INT nfds, TMO tmout )
+{
+	struct pollfd	local[POLL_LOCAL], *k = local;
+	INT		n;
+
+	if ( nfds < 0 || nfds > knl_prc_so_cur(ts_get_pid()) ) return E_PAR;
+	if ( nfds > 0 && !user_ok(fds, (SZ)nfds * (SZ)sizeof(*fds), TRUE) ) return E_MACV;
+	if ( nfds > POLL_LOCAL ) {
+		k = (struct pollfd *)Kmalloc(sizeof(*k) * (SZ)nfds);
+		if ( k == NULL ) return E_NOMEM;
+	}
+	n = poll_list(fds, k, nfds, tmout);
+	if ( k != local ) Kfree(k);
+	return n;
+}
+
+/*
+ * The sockets the process may hold (include/ts/soapp.h). The hard limit
+ * goes up only for an administrator, as Linux's only for CAP_SYS_RESOURCE.
+ */
+LOCAL ER svc_so_getlimit( INT *p_cur, INT *p_max )
+{
+	INT	cur, max;
+	ER	er;
+
+	if ( ( p_cur != NULL && !user_ok(p_cur, sizeof(*p_cur), TRUE) )
+	  || ( p_max != NULL && !user_ok(p_max, sizeof(*p_max), TRUE) ) ) return E_MACV;
+	er = knl_prc_so_limit(ts_get_pid(), &cur, &max);
+	if ( er >= E_OK ) {
+		if ( p_cur != NULL ) knl_ua_put(p_cur, &cur, sizeof(cur));
+		if ( p_max != NULL ) knl_ua_put(p_max, &max, sizeof(max));
+	}
+	return er;
+}
+
+LOCAL ER svc_so_setlimit( INT cur, INT max )
+{
+	return knl_prc_so_setlimit(ts_get_pid(), cur, max, admin());
 }
 
 /* Only whether a call may block (F_GETFL, F_SETFL with O_NONBLOCK) */
@@ -572,6 +614,116 @@ LOCAL ER svc_so_getobj( INT s, TS_UUID *p_uuid )
 	return UACCESS(so_getobj(s, p_uuid));
 }
 
+/* ---------------------------------------------------------------- the network's configuration changing */
+
+/*
+ * A number counted up each time what a program sees of the network's
+ * configuration changes: the interface's IPv4 address, mask or gateway,
+ * the name servers, IPv6's addresses, router or name servers (knl_so_netchg,
+ * called by the stack, DHCP, the router advertisements' task and the
+ * settings). A program waits for it to move with so_netwait, as a Linux
+ * program reads its netlink socket: the browser drops its connections and
+ * the names it holds when it moves (docs/tessronos 9.3.5).
+ *
+ * A waiter takes a bit of nc_flg of its own and knl_so_netchg sets the
+ * bits of every waiter, so that one is let go however close to the change
+ * its look at the number was. With more waiters than bits, the ones over
+ * look at the number each slice.
+ */
+#define NC_SLOTS	32
+
+LOCAL volatile UW	nc_gen = 1;
+LOCAL volatile UW	nc_used = 0;	/* the bits of nc_flg taken by waiters */
+LOCAL volatile ID	nc_flg = 0;
+
+EXPORT void knl_so_netchg( void )
+{
+	UW	used;
+
+	(void)__atomic_add_fetch(&nc_gen, 1, __ATOMIC_SEQ_CST);
+	used = __atomic_load_n(&nc_used, __ATOMIC_SEQ_CST);
+	if ( used != 0 && nc_flg > 0 ) {
+		(void)tk_set_flg(nc_flg, used);
+	}
+}
+
+/* The flag the waiters wait on, made by the first of them */
+LOCAL ID nc_flag( void )
+{
+	T_CFLG	cf;
+	ID	id, none = 0;
+
+	if ( nc_flg > 0 ) {
+		return nc_flg;
+	}
+	knl_memset(&cf, 0, sizeof(cf));
+	cf.flgatr = TA_TFIFO | TA_WMUL;
+	id = tk_cre_flg(&cf);
+	if ( id <= 0 ) {
+		return id;
+	}
+	if ( !__atomic_compare_exchange_n(&nc_flg, &none, id, FALSE, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ) {
+		(void)tk_del_flg(id);
+	}
+	return nc_flg;
+}
+
+/*
+ * Until the number differs from *p_gen, or tmo ms (TMO_FEVR: no limit,
+ * TMO_POL: only a look) have gone by: E_OK when it differs, E_TMOUT when
+ * the time ran out, E_DISWAI when the process is being ended. *p_gen is
+ * given the number as it is now in each case.
+ */
+LOCAL ER svc_so_netwait( UW *p_gen, TMO tmo )
+{
+	UW	known, now, bit = 0, b, ptn;
+	INT	k, left = ( tmo < 0 ) ? -1 : tmo, slice;
+	ID	flg;
+	ER	er = E_TMOUT;
+
+	if ( p_gen == NULL || !user_ok(p_gen, sizeof(*p_gen), TRUE) ) {
+		return E_MACV;
+	}
+	known = UACCESS(*p_gen);
+	flg = ( left != 0 ) ? nc_flag() : 0;
+	for ( k = 0; flg > 0 && k < NC_SLOTS; k++ ) {
+		b = 1U << k;
+		if ( ( __atomic_fetch_or(&nc_used, b, __ATOMIC_SEQ_CST) & b ) == 0 ) {
+			bit = b;
+			(void)tk_clr_flg(flg, ~bit);	/* a change told before it was this waiter's */
+			break;
+		}
+	}
+	for ( ;; ) {
+		if ( __atomic_load_n(&nc_gen, __ATOMIC_SEQ_CST) != known ) {
+			er = E_OK;
+			break;
+		}
+		if ( left == 0 ) {
+			break;
+		}
+		if ( knl_prc_ending() ) {
+			er = E_DISWAI;
+			break;
+		}
+		slice = ( left < 0 || left > SLICE_MS ) ? SLICE_MS : left;
+		if ( bit != 0 ) {
+			(void)tk_wai_flg(flg, bit, TWF_ORW | TWF_BITCLR, &ptn, (TMO)slice);
+		} else {
+			(void)tk_dly_tsk((RELTIM)slice);
+		}
+		if ( left > 0 ) {
+			left = ( left > slice ) ? left - slice : 0;
+		}
+	}
+	if ( bit != 0 ) {
+		(void)__atomic_fetch_and(&nc_used, ~bit, __ATOMIC_SEQ_CST);
+	}
+	now = __atomic_load_n(&nc_gen, __ATOMIC_SEQ_CST);
+	knl_ua_put(p_gen, &now, sizeof(now));
+	return er;
+}
+
 #define F(fn)	((FP)(fn))
 
 EXPORT const FP knl_so_svc_tbl[TSN_SO_MAX + 1] = {
@@ -600,4 +752,7 @@ EXPORT const FP knl_so_svc_tbl[TSN_SO_MAX + 1] = {
 	[TSN_NUMBER(TSN_SO_GETOBJ)]	= F(svc_so_getobj),
 	[TSN_NUMBER(TSN_SO_RESOLVEALL)]	= F(svc_so_resolveall),
 	[TSN_NUMBER(TSN_SO_RECVTOS)]	= F(svc_so_recvtos),
+	[TSN_NUMBER(TSN_SO_NETWAIT)]	= F(svc_so_netwait),
+	[TSN_NUMBER(TSN_SO_GETLIMIT)]	= F(svc_so_getlimit),
+	[TSN_NUMBER(TSN_SO_SETLIMIT)]	= F(svc_so_setlimit),
 };

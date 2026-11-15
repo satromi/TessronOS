@@ -8,7 +8,6 @@
 # it is put in BTRON and leaves the figure, as when the hand is held there a while.
 # Keys with Ctrl (01): C 06, V 19.
 mkbig fig 30 4
-figproc 1
 linkbig 180 45
 mkbig doc 5
 linkbig 190 70

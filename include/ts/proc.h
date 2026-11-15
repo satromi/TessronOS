@@ -49,6 +49,7 @@ extern "C" {
 #define TS_ABORT_FAULT		(-256)		/* memory access fault */
 #define TS_ABORT_ILL		(-257)		/* illegal instruction */
 #define TS_ABORT_TERM		(-258)		/* terminated by ts_ter_prc */
+#define TS_ABORT_SBX		(-259)		/* a call its restriction shuts out (include/ts/sbx.h) */
 
 /*
  * Process attributes (T_CPRC.prcatr). TS_PRC_SYSTEM: the system needs
@@ -68,6 +69,16 @@ extern "C" {
  * starts is started so (ob_cre_obj of a process object by the kernel).
  */
 #define TS_PRC_USER		0x0002
+
+/*
+ * TS_PRC_WITHPARENT: the process ends (as ts_ter_prc ends it,
+ * TS_ABORT_TERM) when the process that made it ends, as
+ * PR_SET_PDEATHSIG asks on Linux. A child the kernel makes has no
+ * parent to end with and ignores it. Set or cleared afterwards through
+ * the attribute tessronos.process.withParent of the process object
+ * (design 5.5.7).
+ */
+#define TS_PRC_WITHPARENT	0x0004
 
 /*
  * Process creation information
@@ -152,6 +163,10 @@ IMPORT ER knl_proc_init( void );
 
 /* A process as a real object (design 18.8) */
 IMPORT ER  knl_prc_uuid( ID pid, TS_UUID *p_uuid, TS_UUID *p_prog );
+
+/* Whether a process ends with its parent (TS_PRC_WITHPARENT): set, and asked (1 or 0) */
+IMPORT ER  knl_prc_set_withpar( ID pid, BOOL on );
+IMPORT ER  knl_prc_withpar( ID pid );
 
 /*
  * Pages mapped into a process at an address of the shared window, and

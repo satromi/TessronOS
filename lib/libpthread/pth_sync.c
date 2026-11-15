@@ -185,11 +185,30 @@ int pthread_mutex_unlock( pthread_mutex_t *m )
 		if ( --m->__count > 0 ) return 0;
 	}
 	m->__owner = 0;
-	if ( __atomic_exchange_n(&m->__state, 0, __ATOMIC_RELEASE) == 2 ) {
+	{
+		int	held = 1;
+
+		if ( __atomic_compare_exchange_n(&m->__state, &held, 0, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED) ) {
+			return 0;		/* nobody waits */
+		}
+	}
+	{
 		PTH	*t;
 
+		/*
+		 * Someone waits: the one to wake is taken off the queue before the
+		 * mutex is free, and the store of the free state is the last touch
+		 * of the mutex. A thread that takes it as soon as it is free may end
+		 * the mutex's life at once (POSIX lets a mutex unlocked be destroyed,
+		 * and a waiter often holds it in a frame of its stack that it then
+		 * leaves): reading the queue after that would read memory no longer
+		 * the mutex's, and write through what was found there. The waiters'
+		 * queue is changed only under the global lock, held here until the
+		 * state is stored, so no waiter is queued unseen meanwhile.
+		 */
 		pth_glock();
 		t = pth_deq((void **)&m->__head);
+		__atomic_store_n(&m->__state, 0, __ATOMIC_RELEASE);
 		pth_gunlock();
 		if ( t != NULL ) pth_unpark(t);
 	}

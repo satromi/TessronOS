@@ -32,6 +32,13 @@
  *			here, \EFI\BOOT\BOOTX64.EFI and \EFI\TESSRON\) and a
  *			TessronOS partition over the rest.
  *
+ *	Each way may instead keep the TessronOS partition there (SI_KEEP,
+ *	上書き): its objects and links stay, and the system's objects and boot
+ *	files are put on as an update puts a package's (dt_sysup_onto,
+ *	application/desktop/dtsysup.c), taken from the running system and
+ *	the list of the system's objects its volume keeps. Nothing of the
+ *	table is written, nor anything of the ESP but the boot files there.
+ *
  *	The system volume is copied block by block while its journal is
  *	frozen (knl_jrnl_freeze): every block its maps say is taken, the
  *	superblocks and the journal; the rest is not read. The copy keeps
@@ -56,6 +63,7 @@
 #define SI_COEXIST		0
 #define SI_ERASE		1
 #define SI_REPLACE		2
+#define SI_KEEP			0x100	/* or'd in a way: the TessronOS there kept, its system put on as an update does */
 
 #define SI_DISK_MAX		8
 #define SI_PART_MAX		32
@@ -113,6 +121,16 @@ typedef struct {
 #define SI_R_NOSYS		8	/* no system volume, or no loader or kernel on /boot */
 #define SI_R_BOOTDISK		9	/* the disk the system runs from */
 #define SI_R_KEEP		10	/* SI_REPLACE of a partition that is kept: the ESP, MSR, recovery, one not known */
+/* why SI_KEEP cannot be taken */
+#define SI_R_NOTSFS		11	/* no TessronOS partition there to keep (SI_ERASE: the disk goes whole) */
+#define SI_R_NOLIST		12	/* the running system keeps no list of its objects (an image made before it kept one) */
+#define SI_R_NOVOL		13	/* the TessronOS partition's volume cannot be opened, or is broken */
+#define SI_R_NOSYSVOL		14	/* it is not a system volume */
+#define SI_R_NEWER		15	/* the system there is newer */
+#define SI_R_FORM		16	/* the system there is another machine's */
+#define SI_R_VOLFULL		17	/* its volume has not the room */
+#define SI_R_NOBOOT		18	/* its ESP has not the boot files システム登録 puts there (INSTALL.TXT) */
+#define SI_R_BUSY		19	/* a system update is under way */
 
 /* What will be done: si_plan fills it in, si_run does it */
 typedef struct {
@@ -140,6 +158,12 @@ typedef struct {
 	T_SIPART lost[SI_PART_MAX];
 	UB	disk_guid[16];		/* the new table's */
 	UB	ts_uniq[16];
+	/* SI_KEEP: the TessronOS there, kept */
+	BOOL	keep;
+	BOOL	had_ts;			/* a TessronOS partition is written (again): what it holds goes, or is kept */
+	UB	ver[24], tver[24];	/* the running system's version, the one there ("" not known) */
+	UD	vol_need, vol_free;
+	INT	nobj;
 } T_SIPLAN;
 
 /* The steps, as the progress says them */
@@ -151,6 +175,7 @@ typedef struct {
 #define SI_ST_ESP		5	/* the ESP's files */
 #define SI_ST_ENTRY		6	/* the firmware's boot entry asked for */
 #define SI_ST_DONE		7
+#define SI_ST_UPDATE		8	/* SI_KEEP: the system's objects and boot files put on as an update does */
 
 /* What si_run tells as it goes: the step, and bytes done of the step's */
 typedef void (*SI_PROG)( void *ctx, INT step, UD done, UD total );
@@ -163,6 +188,7 @@ typedef struct {
 	BOOL	grow_later;		/* grown at the next start */
 	BOOL	entry_asked;		/* BOOTREG.TXT written */
 	INT	failed_step;		/* SI_ST_* of a failure, -1 none */
+	INT	nobj;			/* SI_KEEP: the system's objects put on */
 } T_SIRES;
 
 /*

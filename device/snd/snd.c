@@ -59,6 +59,14 @@
  *	set through DN_SDMIXSET are kept a second after they last change, by
  *	what knl_snd_mix_keeper was given (uconf.c).
  *
+ *	The microphone: each kind of input has a volume and a mute of its own
+ *	(include/ts/snd.h, SDMixIn), set through DN_SDMIXSET as SND_MIX_IN
+ *	and kept with the mixer's settings. The input takes the volume on its
+ *	amplifier when it has one (the backend's set_level of DN_SDVOLMIC);
+ *	otherwise knl_snd_capture multiplies the samples by it, held to 16
+ *	bits. It is applied as it is set, as a recording starts and as an
+ *	input comes, and each time said on the console in a line.
+ *
  *	Rate conversion: to a lower rate, the mean of the input samples since
  *	the previous output sample; to a higher one, a straight line between
  *	them.
@@ -222,10 +230,35 @@ LOCAL void		(*mix_keep_fn)( void ) = NULL;
 LOCAL volatile BOOL	mix_unkept = FALSE;
 LOCAL ID		keep_tsk = 0;
 
+/*
+ * The microphone (include/ts/snd.h, SDMixIn): a volume and a mute for
+ * each kind of input, and how the one there is takes its volume. The
+ * gain is what knl_snd_capture multiplies the input by: GAIN_ONE when
+ * the hardware's amplifier has the volume, the volume's own when it has
+ * none, 0 muted. mic_kind_on is the kind it is for, -1 none.
+ */
+#define MIC_KINDS	( SND_BE_BT + 1 )
+
+typedef struct {
+	UW	vol;
+	BOOL	mute;
+	BOOL	set;			/* set, not only the hardware's: applied to it and kept */
+} MICENT;
+
+LOCAL MICENT		mic[MIC_KINDS] = {
+	{ SND_MIC_UNITY, FALSE, FALSE }, { SND_MIC_UNITY, FALSE, FALSE }, { SND_MIC_UNITY, FALSE, FALSE },
+	{ SND_MIC_UNITY, FALSE, FALSE }, { SND_MIC_UNITY, FALSE, FALSE }, { SND_MIC_UNITY, FALSE, FALSE }
+};
+LOCAL volatile INT	mic_gain = GAIN_ONE;
+LOCAL UW		mic_how = SND_MIC_NONE;
+LOCAL INT		mic_kind_on = -1;
+LOCAL UW		mic_peak = 0;
+
 LOCAL void lock( void )   { knl_usb_lock(); }
 LOCAL void unlock( void ) { knl_usb_unlock(); }
 
 LOCAL void mix_look( void );
+LOCAL void mic_apply( CONST SNDHW *hw, CONST char *why );
 
 /* a / b in 16.16 fixed point, for sample rates */
 LOCAL UW ratio16( UW a, UW b )
@@ -252,13 +285,61 @@ LOCAL BOOL loop_can_record( void ) { return loop_on; }
 LOCAL ER   loop_play_start( CONST UB *id, UW *rate, INT *channels ) { return E_NOSPT; }
 LOCAL void loop_play_stop( void )  { }
 LOCAL BOOL loop_play_running( void ) { return FALSE; }
+
+#ifdef USE_UITEST
+/*
+ * For the tests of the screen (make UITEST=1): the source makes a tone
+ * of its own, 1 kHz at a quarter of full scale, at the pace of the clock,
+ * so that a recording has something to show without a microphone
+ */
+LOCAL BOOL	loop_tone = FALSE;
+LOCAL UW	tone_ms, tone_t;
+
+LOCAL void loop_poll( void )
+{
+	H	b[96 * 2];
+	UW	now = knl_usb_ms();
+	INT	due, n, i;
+
+	if ( !loop_tone || !loop_run ) {
+		return;
+	}
+	due = (INT)( now - tone_ms ) * 48;
+	if ( due > 4800 ) due = 4800;		/* a long stop is not made up */
+	tone_ms = now;
+	while ( due > 0 ) {
+		n = ( due > 96 ) ? 96 : due;
+		for ( i = 0; i < n; i++, tone_t++ ) {
+			INT	p = (INT)( tone_t % 48 );
+			H	v = (H)( ( ( p < 24 ) ? p : 48 - p ) * 8192 / 12 - 8192 );
+
+			b[i * 2] = b[i * 2 + 1] = v;
+		}
+		knl_snd_capture((CONST UB *)b, n, 2);
+		due -= n;
+	}
+}
+
+EXPORT void knl_snd_test_in( BOOL on )
+{
+	lock();
+	loop_on = loop_tone = on;
+	tone_ms = knl_usb_ms();
+	unlock();
+	tm_printf((UB *)"TessronOS: snd: the test's input %s\n", on ? "on" : "off");
+}
+#else
 LOCAL void loop_poll( void )       { }
+#endif
 
 LOCAL ER loop_rec_start( UW rate, UW *dev_rate, INT *channels )
 {
 	*dev_rate = 48000;
 	*channels = 2;
 	loop_run = TRUE;
+#ifdef USE_UITEST
+	tone_ms = knl_usb_ms();
+#endif
 
 	return E_OK;
 }
@@ -809,18 +890,30 @@ LOCAL void input( CHAN *c, INT l, INT r )
 EXPORT void knl_snd_capture( CONST UB *src, INT frames, INT channels )
 {
 	CHAN	*c = rec_ch;
-	INT	i, fb = 2 * channels;
+	INT	i, fb = 2 * channels, g = mic_gain;
+	UW	pk = mic_peak, fall;
 
 	if ( c == NULL || c->ctl != PCM_REC || channels <= 0 || frames <= 0 ) {
 		return;
 	}
 	snd_stat.in_frames += (UW)frames;
+	/* the level falls from the top to nought in a second, whatever the rate */
+	fall = (UW)( (UD)frames * 32768 / ( ( rec_in_rate > 0 ) ? rec_in_rate : 48000 ) );
+	pk = ( pk > fall ) ? pk - fall : 0;
 	for ( i = 0; i < frames; i++, src += fb ) {
 		INT	l = (H)(src[0] | (src[1] << 8));
 		INT	r = ( channels > 1 ) ? (H)(src[2] | (src[3] << 8)) : l;
 
+		/* the microphone's volume, where the hardware has none of its own; held to 16 bits */
+		if ( g != GAIN_ONE ) {
+			l = clamp16((INT)( ( (D)l * g ) >> 16 ));
+			r = clamp16((INT)( ( (D)r * g ) >> 16 ));
+		}
+		if ( (UW)( l < 0 ? -l : l ) > pk ) pk = (UW)( l < 0 ? -l : l );
+		if ( (UW)( r < 0 ? -r : r ) > pk ) pk = (UW)( r < 0 ? -r : r );
 		input(c, l, r);
 	}
+	mic_peak = ( pk > 32767 ) ? 32767 : pk;
 }
 
 EXPORT void knl_snd_feed( CONST UB *src, INT frames, INT channels )
@@ -1256,6 +1349,24 @@ EXPORT INT knl_snd_mix( UB *dst, INT frames, UW rate, INT channels, BOOL wait )
 	return frames;
 }
 
+EXPORT void knl_snd_in_rate( UW in )
+{
+	CHAN	*c = rec_ch;
+	UW	out;
+
+	if ( c == NULL || rec_hw == NULL || c->ctl != PCM_REC || in == 0 || in == rec_in_rate ) {
+		return;
+	}
+	out = rate_hz[c->mode.sampling];
+	tm_printf((UB *)"TessronOS: snd: the input now at %d Hz (was %d)\n", (INT)in, (INT)rec_in_rate);
+	rec_in_rate = in;
+	c->down = ( in >= out );
+	c->step = ratio16(in, out);
+	c->acc = 0;
+	c->sum_l = c->sum_r = c->nsum = 0;
+	c->have_prev = FALSE;
+}
+
 /* ---------------------------------------------------------------- control */
 
 LOCAL ER start_rec( CHAN *c )
@@ -1312,6 +1423,8 @@ LOCAL ER start_rec( CHAN *c )
 	}
 	rec_in_rate = in;
 	rec_in_channels = nch;
+	mic_peak = 0;
+	mic_apply(hw, "recording");
 	c->down = ( in >= out );
 	c->step = ratio16(in, out);
 	c->acc = 0;
@@ -1575,6 +1688,174 @@ LOCAL INT outputs_of( SDOut *o, INT max )
 	return n + 1;
 }
 
+/* ---------------------------------------------------------------- the microphone */
+
+/* The input a volume set now is for: the one that records, else the one that would */
+LOCAL CONST SNDHW *mic_hw( void )
+{
+	return ( rec_hw != NULL ) ? rec_hw : hw_record();
+}
+
+/* A volume as what the sound device multiplies by, 16.16: SND_MIC_UNITY as it comes, the square around it */
+LOCAL INT mic_soft( UW vol )
+{
+	if ( vol > SND_VOL_MAX ) vol = SND_VOL_MAX;
+	return (INT)( (UD)vol * vol * GAIN_ONE / ( SND_MIC_UNITY * SND_MIC_UNITY ) );
+}
+
+/* A volume as a level of DN_SDVOLMIC, SND_MIC_UNITY at its middle (where an amplifier has its 0 dB) */
+EXPORT UH knl_snd_mic_level( UW vol )
+{
+	if ( vol > SND_VOL_MAX ) vol = SND_VOL_MAX;
+	if ( vol >= SND_MIC_UNITY ) {
+		return (UH)( 0x8000 + ( vol - SND_MIC_UNITY ) * 0x7fff / ( SND_VOL_MAX - SND_MIC_UNITY ) );
+	}
+	return (UH)( vol * 0x8000 / SND_MIC_UNITY );
+}
+
+/* And back, to the nearest volume */
+EXPORT UW knl_snd_mic_vol( UH level )
+{
+	if ( level >= 0x8000 ) {
+		return SND_MIC_UNITY + ( ( (UW)level - 0x8000 ) * ( SND_VOL_MAX - SND_MIC_UNITY ) + 0x7fff / 2 ) / 0x7fff;
+	}
+	return ( (UW)level * SND_MIC_UNITY + 0x4000 ) / 0x8000;
+}
+
+LOCAL CONST char *CONST mic_kind_names[MIC_KINDS] = { "test", "usb", "i2s", "hdmi", "hda", "bt" };
+
+/* What takes the volume in the hardware of a kind, for the console */
+LOCAL CONST char *mic_hw_name( INT kind )
+{
+	switch ( kind ) {
+	case SND_BE_USB:	return "the USB function's feature unit";
+	case SND_BE_HDA:	return "the HD Audio input amplifiers";
+	case SND_BE_BT:		return "the earphones' own gain (+VGM)";
+	default:		return "the hardware";
+	}
+}
+
+/*
+ * The microphone's volume to the input hw, with the lock held: to its
+ * amplifier when it has one (DN_SDVOLMIC), else into the samples. One
+ * whose volume was never set keeps its hardware's level, which the
+ * volume shown is then made from. Said on the console in a line with
+ * why, unless why is NULL.
+ */
+LOCAL void mic_apply( CONST SNDHW *hw, CONST char *why )
+{
+	MICENT	*e;
+	SDVol	v;
+	UW	how;
+	INT	kind;
+
+	if ( hw == NULL || hw->kind < 0 || hw->kind >= MIC_KINDS ) {
+		mic_kind_on = -1;
+		mic_how = SND_MIC_NONE;
+		mic_gain = GAIN_ONE;
+		return;
+	}
+	kind = hw->kind;
+	e = &mic[kind];
+	v.lv = v.rv = 0;
+	if ( e->set ) {
+		v.lv = v.rv = knl_snd_mic_level(e->vol);
+		how = ( hw->set_level(DN_SDVOLMIC, &v) >= E_OK ) ? SND_MIC_HW : SND_MIC_SOFT;
+	} else if ( hw->get_level(DN_SDVOLMIC, &v) >= E_OK ) {
+		e->vol = knl_snd_mic_vol(v.lv);
+		how = SND_MIC_HW;
+	} else {
+		how = SND_MIC_SOFT;
+	}
+	mic_kind_on = kind;
+	mic_how = how;
+	mic_gain = ( e->mute || e->vol == 0 ) ? 0 : ( how == SND_MIC_HW ) ? GAIN_ONE : mic_soft(e->vol);
+	if ( why == NULL ) {
+		return;
+	}
+	if ( how == SND_MIC_HW ) {
+		tm_printf((UB *)"TessronOS: snd: microphone (%s) volume %d%s on %s: %s at level %04x%s\n", why,
+			  (INT)e->vol, e->mute ? " muted" : "", mic_kind_names[kind], mic_hw_name(kind),
+			  (INT)v.lv, e->set ? "" : " (its own, not set)");
+	} else {
+		tm_printf((UB *)"TessronOS: snd: microphone (%s) volume %d%s on %s: the samples multiplied by %d.%02d\n",
+			  why, (INT)e->vol, e->mute ? " muted" : "", mic_kind_names[kind],
+			  mic_gain / GAIN_ONE, ( mic_gain % GAIN_ONE ) * 100 / GAIN_ONE);
+	}
+}
+
+/* The microphone as DN_SDMIXIN has it, with the lock held */
+LOCAL void mic_of( SDMixIn *m )
+{
+	CONST SNDHW	*hw = mic_hw();
+	MICENT		*e;
+
+	knl_memset(m, 0, sizeof(*m));
+	m->vol = SND_MIC_UNITY;
+	m->gain = GAIN_ONE;
+	if ( hw == NULL || hw->kind < 0 || hw->kind >= MIC_KINDS ) {
+		return;
+	}
+	if ( hw->kind != mic_kind_on ) {
+		mic_apply(hw, "came");		/* an input come since it was last looked at */
+	}
+	e = &mic[hw->kind];
+	m->have = 1;
+	m->kind = (UINT)hw->kind;
+	m->vol = e->vol;
+	m->mute = e->mute;
+	m->how = mic_how;
+	m->recording = ( rec_ch != NULL );
+	m->level = m->recording ? mic_peak : 0;
+	m->gain = (UINT)mic_gain;
+}
+
+EXPORT void knl_snd_mic_get( SDMixIn *m )
+{
+	lock();
+	mic_of(m);
+	unlock();
+}
+
+/* The volumes of the kinds of input that had theirs set, for the keeper: up to max into s, and how many there are */
+EXPORT INT knl_snd_mic_kept( SDMixSet *s, INT max )
+{
+	INT	k, n = 0;
+
+	lock();
+	for ( k = SND_BE_NONE + 1; k < MIC_KINDS; k++ ) {	/* a test's source is not kept */
+		if ( !mic[k].set ) {
+			continue;
+		}
+		if ( n < max ) {
+			knl_memset(&s[n], 0, sizeof(s[n]));
+			s[n].what = SND_MIX_IN;
+			s[n].pid = k;
+			s[n].lv = s[n].rv = mic[k].vol;
+			s[n].mute = mic[k].mute;
+		}
+		n++;
+	}
+	unlock();
+	return n;
+}
+
+/* A kind of input by its name in the machine's settings, -1 none */
+EXPORT INT knl_snd_mic_kind( CONST char *name )
+{
+	INT	k;
+
+	for ( k = SND_BE_NONE + 1; k < MIC_KINDS; k++ ) {
+		if ( knl_strcmp(name, mic_kind_names[k]) == 0 ) return k;
+	}
+	return -1;
+}
+
+EXPORT CONST char *knl_snd_mic_kind_name( INT kind )
+{
+	return ( kind >= 0 && kind < MIC_KINDS ) ? mic_kind_names[kind] : "";
+}
+
 /* ---------------------------------------------------------------- the mixer's settings */
 
 LOCAL volatile UW	mix_gen = 0;		/* changes to be kept, counted */
@@ -1659,6 +1940,20 @@ EXPORT ER knl_snd_mix_set( CONST SDMixSet *s, BOOL keep )
 		} else {
 			v->vol = s->lv;
 			v->mute = ( s->mute != 0 );
+		}
+	} else if ( s->what == SND_MIX_IN ) {
+		CONST SNDHW	*hw = mic_hw();
+		INT		kind = ( s->pid != SND_MIC_NOW ) ? s->pid : ( hw != NULL ) ? hw->kind : -1;
+
+		if ( kind < 0 || kind >= MIC_KINDS ) {
+			er = ( s->pid == SND_MIC_NOW ) ? E_NOEXS : E_PAR;
+		} else {
+			mic[kind].vol = s->lv;
+			mic[kind].mute = ( s->mute != 0 );
+			mic[kind].set = TRUE;
+			if ( hw != NULL && hw->kind == kind ) {
+				mic_apply(hw, keep ? "set" : "taken");
+			}
 		}
 	} else {
 		er = E_PAR;
@@ -1788,6 +2083,19 @@ LOCAL void mix_look( void )
 	h = mix_mixin(h, mvol_l);
 	h = mix_mixin(h, mvol_r);
 	h = mix_mixin(h, mmute);
+	/* the microphone: the input there is, its volume, how it takes it, a recording */
+	{
+		CONST SNDHW	*hw = mic_hw();
+		INT		kind = ( hw != NULL ) ? hw->kind : -1;
+
+		h = mix_mixin(h, (UD)(UW)( kind + 1 ));
+		if ( kind >= 0 && kind < MIC_KINDS ) {
+			h = mix_mixin(h, mic[kind].vol);
+			h = mix_mixin(h, mic[kind].mute);
+		}
+		h = mix_mixin(h, mic_how);
+		h = mix_mixin(h, ( rec_ch != NULL ) ? 1 : 0);
+	}
 	for ( i = 0; i < nch; i++ ) {
 		CHAN		*c = chs[i];
 		CONST VOLENT	*v;
@@ -1897,6 +2205,14 @@ EXPORT void knl_snd_poll( void )
 		sig_ms = now;
 		outputs_look();
 	}
+	{
+		/* an input come or gone: its volume to it */
+		CONST SNDHW	*hw = mic_hw();
+
+		if ( ( ( hw != NULL ) ? hw->kind : -1 ) != mic_kind_on ) {
+			mic_apply(hw, "came");
+		}
+	}
 	mix_look();
 	if ( play_hw == NULL && keep_on && (INT)(now - look_ms) >= LOOK_MS ) {
 		look_ms = now;
@@ -1991,6 +2307,23 @@ EXPORT void knl_snd_service( void )
 LOCAL BOOL is_level( INT dn )
 {
 	return ( dn <= DN_SDGAININ && dn >= DN_SDVOLAUX2 );
+}
+
+LOCAL BOOL in_level( INT dn )
+{
+	return ( dn == DN_SDVOLMIC || dn == DN_SDGAININ );
+}
+
+/* The backend a level is of, with the lock held: an input's the input's, the others the output's */
+LOCAL CONST SNDHW *level_hw( INT dn )
+{
+	CONST SNDHW	*hw;
+
+	if ( in_level(dn) ) {
+		return mic_hw();
+	}
+	hw = ( play_hw != NULL ) ? play_hw : hw_play();
+	return ( hw != NULL ) ? hw : hw_record();
 }
 
 /* An attribute answered: what fits of it, or its size to a read of 0 */
@@ -2158,6 +2491,16 @@ LOCAL ER proc_read( CHAN *c, T_DEVREQ *req )
 		Kfree(m);
 		return E_OK;
 	}
+	case DN_SDMIXIN: {
+		SDMixIn	mi;
+
+		lock();
+		knl_obedge_arm(&mix_edge);	/* a change after this read is told, as the mixer's */
+		mic_of(&mi);
+		unlock();
+		reply(req, &mi, (INT)sizeof(mi));
+		return E_OK;
+	}
 	case DN_SDOUTSEL: {
 		SDOutSel	s;
 
@@ -2203,10 +2546,7 @@ LOCAL ER proc_read( CHAN *c, T_DEVREQ *req )
 
 			knl_memset(&v, 0, sizeof(v));
 			lock();
-			hw = ( play_hw != NULL ) ? play_hw : hw_play();
-			if ( hw == NULL ) {
-				hw = hw_record();
-			}
+			hw = level_hw((INT)req->start);
 			er = ( hw != NULL ) ? hw->get_level((INT)req->start, &v) : E_NOSPT;
 			unlock();
 			if ( er < E_OK ) {
@@ -2390,6 +2730,8 @@ LOCAL ER proc_write( CHAN *c, T_DEVREQ *req )
 		knl_memcpy(&m, req->buf, sizeof(m));
 		return knl_snd_mix_set(&m, TRUE);
 	}
+	case DN_SDMIXIN:
+		return E_RONLY;			/* set through DN_SDMIXSET, SND_MIX_IN */
 	case DN_SDOUTSEL: {
 		UB	id[SND_ID_MAX];
 		INT	i;
@@ -2411,11 +2753,16 @@ LOCAL ER proc_write( CHAN *c, T_DEVREQ *req )
 			}
 			knl_memcpy(&s, req->buf, sizeof(s));
 			lock();
-			hw = ( play_hw != NULL ) ? play_hw : hw_play();
-			if ( hw == NULL ) {
-				hw = hw_record();
-			}
+			hw = level_hw((INT)req->start);
 			er = ( hw != NULL ) ? hw->set_level((INT)req->start, &s) : E_NOSPT;
+			if ( er >= E_OK && in_level((INT)req->start) && hw->kind >= 0 && hw->kind < MIC_KINDS ) {
+				/* the hardware's level set by hand: the microphone's volume shows it */
+				mic[hw->kind].vol = knl_snd_mic_vol(s.lv);
+				if ( hw->kind == mic_kind_on ) {
+					mic_how = SND_MIC_HW;
+					mic_gain = ( mic[hw->kind].mute || mic[hw->kind].vol == 0 ) ? 0 : GAIN_ONE;
+				}
+			}
 			unlock();
 			return er;
 		}

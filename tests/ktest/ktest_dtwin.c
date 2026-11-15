@@ -36,6 +36,7 @@
 #include <ts/hid.h>
 #include <ts/ob.h>
 #include <ts/wm.h>
+#include <ts/om.h>
 #include <ts/uuid.h>
 #include <ts/sysdef.h>
 #include <ts/dtreq.h>
@@ -43,6 +44,7 @@
 #include "../../peripheral_kernel/obj/obj.h"
 #include "../../outer_kernel/wm/wmobj.h"
 #include "../../application/desktop/desktop.h"
+#include <ts/disp.h>
 
 #define LOG_MAX		( 128 * 1024 )
 #define MN_ROW		20		/* a row of a menu */
@@ -50,6 +52,7 @@
 
 #define K_ESC		0x29
 #define K_E		0x08
+#define K_S		0x16
 #define K_RIGHT		0x4F
 #define K_SPACE		0x2C
 
@@ -280,9 +283,9 @@ LOCAL void test_setup( void )
 }
 
 /*
- * ディスク修復: its menu; ドライブの一覧を更新 and 完全 chosen in it, the
- * window carried and sized, 障害情報 grey until a check found something,
- * and closed with Ctrl+E
+ * ディスク修復 (a process, application/diskfix): its menu, which the
+ * program says it opened ("dfix: menu"); ドライブの一覧を更新 and 完全
+ * chosen in it, the window carried and sized, and closed with Ctrl+E
  */
 LOCAL void test_diskfix( void )
 {
@@ -298,16 +301,16 @@ LOCAL void test_diskfix( void )
 	KT_ASSERT(wid > 0);
 	if ( wid <= 0 ) return;
 	tk_dly_tsk(300);
-	(void)menu_at(wid, 300, 280, "desktop: menu ディスク修復", MN_AWAY);
+	(void)menu_at(wid, 300, 280, "dfix: menu", MN_AWAY);
 	(void)kt_shot("/boot/DTWIN0.PPM");
 	/* 完全, the tenth row below 閉じる */
 	pos = log_now();
-	(void)menu_at(wid, 300, 120, "desktop: menu ディスク修復", 10);
-	KT_ASSERT(wait_for(pos, "desktop: chosen dfix.full", 30));
+	(void)menu_at(wid, 300, 120, "dfix: menu", 10);
+	KT_ASSERT(wait_for(pos, "dfix: chosen dfix.full", 30));
 	/* ドライブの一覧を更新, two rows below 完全 now on the pointer's row */
 	pos = log_now();
-	(void)menu_at(wid, 300, 120, "desktop: menu ディスク修復", 2);
-	KT_ASSERT(wait_for(pos, "desktop: chosen dfix.list", 30));
+	(void)menu_at(wid, 300, 120, "dfix: menu", 2);
+	KT_ASSERT(wait_for(pos, "dfix: chosen dfix.list", 30));
 	carry_and_size(wid, TRUE);
 	pos = log_now();
 	key(K_E, HID_MOD_LCTRL);
@@ -319,12 +322,26 @@ LOCAL void test_diskfix( void )
  * スライド: over the whole screen with no frame; its menu, 次へ進む
  * chosen in it, a key of its own, and closed with Ctrl+E
  */
+
+/*
+ * More than one output (10.4.8): the back buffer is larger than the main
+ * screen. A touch screen's and a pen's places are then taken on the main
+ * screen only, not across the view these tests measure them against.
+ */
+LOCAL BOOL outputs_more( void )
+{
+	T_DISPSPEC	s;
+
+	return (BOOL)( ts_disp_ref(&s) >= E_OK && s.width != s.main_w );
+}
+
 LOCAL void test_slide( void )
 {
 	UD	pos;
 	INT	wid;
 
 	if ( !up ) KT_SKIP("no desktop");
+	if ( outputs_more() ) KT_SKIP("more than one output: the slide's presses are aimed at a view of one screen");
 	pos = log_now();
 	KT_ASSERT_ER(ask_open(DT_SLIDE_DECK), E_OK);
 	if ( !wait_for(pos, "slide: 1 of", 80) ) {
@@ -364,11 +381,12 @@ LOCAL void test_slide( void )
 /*
  * MPEG Player playing a record of 実時間制御TAD: opened as a double press
  * opens it (its applist names basic-player, the player's alias), the
- * scene handed to the desktop, which plays it in the player's window
- * (dtrthost.c); a press there given to the program, Space begins or
- * holds it, the pointer's moves given to it, the window sized (the scene laid out again), closed with
- * Ctrl+E -- the player let go by its process -- and opened again and
- * ended from outside, the player going with the window
+ * scene played in the player's window by the player it links
+ * (lib/librtplay); a press there given to the program, Space begins or
+ * holds it, the pointer's moves given to it, the window sized (the scene
+ * laid out again), closed with Ctrl+E -- the player let go by its
+ * process -- and opened again and ended from outside, its window going
+ * with it
  */
 LOCAL void test_player( void )
 {
@@ -386,7 +404,6 @@ LOCAL void test_player( void )
 	wid = win_titled("MPEG Player", 30);
 	KT_ASSERT(wid > 0);
 	if ( wid <= 0 ) return;
-	KT_ASSERT_EQ(dt_rthost_count(), 1);
 	tk_dly_tsk(800);
 	(void)kt_shot("/boot/DTWIN2.PPM");
 
@@ -414,11 +431,10 @@ LOCAL void test_player( void )
 	pos = log_now();
 	key(K_E, HID_MOD_LCTRL);
 	KT_ASSERT(wait_for(pos, "closed by its process", 100));
-	KT_ASSERT_EQ(dt_rthost_count(), 0);
 	tk_dly_tsk(500);
 	KT_ASSERT_EQ(win_titled("MPEG Player", 30), 0);
 
-	/* ended from outside: the player goes with the window */
+	/* ended from outside: the player goes with the process, and the window with it */
 	pos = log_now();
 	KT_ASSERT_ER(ask_open(DT_PLAYER_10_4), E_OK);
 	KT_ASSERT(wait_for(pos, "player: hosted", 150));
@@ -429,8 +445,8 @@ LOCAL void test_player( void )
 	KT_ASSERT(pid > 0);
 	pos = log_now();
 	KT_ASSERT_ER(ts_ter_prc(pid, TS_ABORT_TERM), E_OK);
-	KT_ASSERT(wait_for(pos, "closed with its window", 50));
-	KT_ASSERT_EQ(dt_rthost_count(), 0);
+	tk_dly_tsk(1000);
+	KT_ASSERT_EQ(win_titled("MPEG Player", 30), 0);
 }
 
 /* ---------------------------------------------------------------- a finger */
@@ -458,21 +474,69 @@ LOCAL void finger_drag( INT x0, INT y0, INT x1, INT y1 )
 	tk_dly_tsk(600);			/* not the second of a double tap */
 }
 
-/* Link shape i of a figure, where it is on the screen (a cabinet is shown at life size) */
-LOCAL BOOL link_screen( DTWIN *d, INT i, T_DPRECT *b )
+/*
+ * The record a program's window shows, as it is stored: with save, the
+ * window told to save first (Ctrl+S) and its program's word waited for.
+ * NULL when it shows none; the caller frees it.
+ */
+LOCAL T_TAD *shown_rec( INT wid, BOOL save )
 {
-	T_WMWIN		w;
-	T_DPRECT	page;
-	INT		z;
+	TS_UUID	u;
+	UB	*xml;
+	SZ	size = 0;
+	T_TAD	*rec = NULL;
 
-	if ( d->fig == NULL || i >= d->fig->nsh || wm_ref(d->wid, &w) < E_OK ) return FALSE;
-	z = ( d->fig->zoom > 0 ) ? d->fig->zoom : 8;
-	dt_work_rect(d, &page);
-	b->left = w.work.left + page.left - d->scroll_x + d->fig->sh[i].r.left * z / 8;
-	b->top = w.work.top + page.top - d->scroll_y + d->fig->sh[i].r.top * z / 8;
-	b->right = w.work.left + page.left - d->scroll_x + d->fig->sh[i].r.right * z / 8;
-	b->bottom = w.work.top + page.top - d->scroll_y + d->fig->sh[i].r.bottom * z / 8;
+	if ( !wm_obj_shown(wid, &u) ) return NULL;
+	if ( save ) {
+		UD	pos = log_now();
+
+		wm_raise(wid);
+		(void)wm_focus(wid);
+		key(K_S, HID_MOD_LCTRL);
+		(void)wait_for(pos, "saved (", 30);
+	}
+	om_store_forget(&u);
+	xml = om_obj_record(&u, 0, &size);
+	if ( xml == NULL ) return NULL;
+	if ( tad_parse(xml, size, NULL, &rec) < E_OK ) rec = NULL;
+	Kfree(xml);
+	return rec;
+}
+
+/*
+ * Link lk of the record a cabinet's window shows, where it is on the
+ * screen (a cabinet shows its record at life size from the corner of the
+ * work area, unscrolled) and where it is in the record
+ */
+LOCAL BOOL link_screen( INT wid, CONST T_TAD *rec, INT lk, T_DPRECT *b, T_DPRECT *in )
+{
+	T_WMWIN	w;
+	T_VOBJ	v;
+
+	if ( rec == NULL || tad_lnk_get(rec, lk, &v) < E_OK || wm_ref(wid, &w) < E_OK ) return FALSE;
+	if ( in != NULL ) {
+		in->left = v.left;
+		in->top = v.top;
+		in->right = v.right;
+		in->bottom = v.bottom;
+	}
+	b->left = w.work.left + v.left;
+	b->top = w.work.top + v.top;
+	b->right = w.work.left + v.right;
+	b->bottom = w.work.top + v.bottom;
 	return TRUE;
+}
+
+/* The width link lk comes to in the record the window saves */
+LOCAL INT saved_w( INT wid, INT lk )
+{
+	T_TAD		*rec = shown_rec(wid, TRUE);
+	T_DPRECT	b, in;
+	INT		w = -1;
+
+	if ( link_screen(wid, rec, lk, &b, &in) ) w = in.right - in.left;
+	if ( rec != NULL ) tad_free(rec);
+	return w;
 }
 
 /* A real object of the store with a record 0 of xmlTAD, the program app its own */
@@ -503,53 +567,48 @@ LOCAL ER make_obj( CONST char *name, CONST char *app, CONST char *win, CONST cha
 	return er;
 }
 
-/* Link lk of a figure's record, where it is in the figure: what sizing it changes */
-LOCAL BOOL link_rec( DTWIN *d, INT lk, T_DPRECT *b )
+/* Whether a place of the screen is on none of the links of the window there, or on the ground */
+LOCAL BOOL bare_at( INT x, INT y )
 {
-	T_VOBJ	v;
-
-	if ( tad_lnk_get(d->rec, lk, &v) < E_OK ) return FALSE;
-	b->left = v.left;
-	b->top = v.top;
-	b->right = v.right;
-	b->bottom = v.bottom;
-	return TRUE;
-}
-
-/* Whether a place of the screen is on none of the figure's links, and on its window */
-LOCAL BOOL bare_at( DTWIN *d, INT x, INT y )
-{
+	INT		wid = wm_at(x, y), k, n;
+	T_TAD		*rec;
 	T_DPRECT	b;
-	INT		k;
+	BOOL		bare = TRUE;
 
-	if ( wm_at(x, y) != d->wid ) return FALSE;
-	for ( k = 0; k < d->fig->nsh; k++ ) {
-		if ( d->fig->sh[k].kind == TV_SH_LINK && link_screen(d, k, &b)
-		  && x >= b.left - 2 && x < b.right + 2 && y >= b.top - 2 && y < b.bottom + 2 ) return FALSE;
+	if ( wid <= 0 ) return TRUE;
+	rec = shown_rec(wid, FALSE);
+	if ( rec == NULL ) return FALSE;	/* a window that shows no figure: not bare */
+	n = tad_lnk_count(rec);
+	for ( k = 0; k < n && bare; k++ ) {
+		if ( link_screen(wid, rec, k, &b, NULL)
+		  && x >= b.left - 2 && x < b.right + 2 && y >= b.top - 2 && y < b.bottom + 2 ) bare = FALSE;
 	}
-	return TRUE;
+	tad_free(rec);
+	return bare;
 }
 
 /*
- * The handles a finger reaches farther (design 10.4.6): in the first
- * cabinet, a link taken; the pointer pressed just out of its right edge
- * draws a band and sizes nothing, a finger pressed there sizes it. The
+ * The handles a finger reaches farther (design 10.4.6): in a cabinet (a
+ * window of 仮身一覧, a process), a link taken; the pointer on its right
+ * edge sizes it, pressed just out of it draws a band and sizes nothing,
+ * a finger pressed there sizes it. What it came to is read from the
+ * record the window saves (Ctrl+S). The
  * window's foot corner: the pointer pressed just out of the window
  * sizes nothing, a finger pressed there sizes it.
  */
 LOCAL void test_touch_reach( void )
 {
-	DTWIN		*d = NULL;
-	T_DPRECT	b, a;
+	T_DPRECT	b;
 	T_WMWIN		w0, w1;
-	INT		i, k = -1, lk, px, py, sw = 0, sh = 0, wid, behind;
+	T_TAD		*rec;
+	INT		i, lk = 0, px, py, sw = 0, sh = 0, wid, w_was, w_now;
 	TS_UUID		cu;
 	char		us[40];
 	static char	xml[512];
 
 	if ( !up ) KT_SKIP("no desktop");
-	knl_memset(&a, 0, sizeof(a));
-	/* a cabinet of one link, in a window of its own */
+	if ( outputs_more() ) KT_SKIP("more than one output: a touch is taken on the main screen, not the whole view");
+	/* a cabinet of one link, in a window of 仮身一覧's (a process) */
 	tm_sprintf((UB *)xml, (UB *)"<tad version=\"1.0\" encoding=\"UTF-8\"><figure>"
 		   "<link id=\"%s_0.xtad\" vobjid=\"01a0d8c4-0000-7000-8000-00000000e001\" vobjleft=\"20\" vobjtop=\"20\""
 		   " vobjright=\"170\" vobjbottom=\"45\" height=\"25\" chsz=\"14\"/></figure></tad>\n", SYSDEF_CABINET);
@@ -559,58 +618,49 @@ LOCAL void test_touch_reach( void )
 	KT_ASSERT_ER(ask_open(us), E_OK);
 	wid = win_titled("KT指の箱", 50);
 	KT_ASSERT(wid > 0);
-	tk_dly_tsk(500);
-	d = ( wid > 0 ) ? dt_win_of(wid) : NULL;
-	for ( i = 0; d != NULL && d->fig != NULL && i < d->fig->nsh; i++ ) {
-		if ( d->fig->sh[i].kind == TV_SH_LINK && d->fig->sh[i].link >= 0 ) {
-			k = i;
-			break;
-		}
+	if ( wid <= 0 ) return;
+	tk_dly_tsk(800);
+	rec = shown_rec(wid, FALSE);
+	if ( rec == NULL || !link_screen(wid, rec, lk, &b, NULL) ) {
+		if ( rec != NULL ) tad_free(rec);
+		KT_SKIP("the cabinet not shown");
 	}
-	if ( d == NULL || k < 0 ) KT_SKIP("the cabinet not shown");
-	(void)link_screen(d, k, &b);
-	if ( !bare_at(d, b.right + 6, b.top + 5) ) d = NULL;
-	if ( d == NULL ) KT_SKIP("no link with room beside it");
+	tad_free(rec);
+	if ( !bare_at(b.right + 6, b.top + 5) ) KT_SKIP("no link with room beside it");
 	if ( !kt_touch_plug() ) KT_SKIP("no touch screen plugged in");
 
 	/* taken by the pointer */
-	lk = d->fig->sh[k].link;
-	(void)link_screen(d, k, &b);
-	tm_printf((UB *)"  link %d at %d,%d..%d,%d\n", k, b.left, b.top, b.right, b.bottom);
+	tm_printf((UB *)"  link at %d,%d..%d,%d\n", b.left, b.top, b.right, b.bottom);
+	w_was = b.right - b.left;
 	click(( b.left + b.right ) / 2, ( b.top + b.bottom ) / 2, 0);
-	KT_ASSERT(ed_picked(d, k));
 	px = b.right + 6;
 	py = b.top + 5;
 	/* the pointer on its right edge: it is sized, as it always was */
 	drag(b.right - 2, py, b.right + 18, py);
 	tk_dly_tsk(300);
-	KT_ASSERT(link_rec(d, lk, &a));
-	tm_printf((UB *)"  by the pointer on its edge: %d wide, was %d\n", a.right - a.left, b.right - b.left);
-	KT_ASSERT_EQ(a.right - a.left, b.right - b.left + 20);
-	ed_undo(d);
-	tk_dly_tsk(300);
-	tk_dly_tsk(300);
-	KT_ASSERT(link_rec(d, lk, &a));
-	KT_ASSERT_EQ(a.right - a.left, b.right - b.left);
+	w_now = saved_w(wid, lk);
+	tm_printf((UB *)"  by the pointer on its edge: %d wide, was %d\n", w_now, w_was);
+	KT_ASSERT_EQ(w_now, w_was + 20);
+	w_was = w_now;
+	rec = shown_rec(wid, FALSE);
+	KT_ASSERT(link_screen(wid, rec, lk, &b, NULL));
+	if ( rec != NULL ) tad_free(rec);
+	px = b.right + 6;
 	/* the pointer 6 pixels out of its right edge: a band, the link as it was */
 	drag(px, py, px + 40, py);
 	tk_dly_tsk(300);
-	KT_ASSERT(link_rec(d, lk, &a));
-	KT_ASSERT_EQ(a.right - a.left, b.right - b.left);
+	KT_ASSERT_EQ(saved_w(wid, lk), w_was);
 	/* taken again, and a finger there: it is sized */
 	click(( b.left + b.right ) / 2, ( b.top + b.bottom ) / 2, 0);
-	KT_ASSERT(ed_picked(d, k));
 	finger_drag(px, py, px + 40, py);
 	tk_dly_tsk(300);
-	KT_ASSERT(link_rec(d, lk, &a));
-	tm_printf((UB *)"  by a finger 6 pixels out: %d wide, was %d\n", a.right - a.left, b.right - b.left);
-	KT_ASSERT(a.right - a.left >= b.right - b.left + 30);
-	ed_undo(d);				/* taken back, the cabinet as it was */
-	tk_dly_tsk(300);
+	w_now = saved_w(wid, lk);
+	tm_printf((UB *)"  by a finger 6 pixels out: %d wide, was %d\n", w_now, w_was);
+	KT_ASSERT(w_now >= w_was + 30);
 
 	/* the window's corner, 6 pixels out of it, over a bare place: the window put where there is one */
 	wm_screen(&sw, &sh);
-	KT_ASSERT_ER(wm_ref(d->wid, &w0), E_OK);
+	KT_ASSERT_ER(wm_ref(wid, &w0), E_OK);
 	for ( i = 0; i < 6; i++ ) {
 		T_DPRECT	o = w0.outer;
 		INT		cx = sw - 80 - ( i % 3 ) * ( sw / 4 ), cy = sh - 120 - ( i / 3 ) * ( sh / 4 );
@@ -620,15 +670,13 @@ LOCAL void test_touch_reach( void )
 		o.left = cx - ( w0.outer.right - w0.outer.left );
 		o.top = cy - ( w0.outer.bottom - w0.outer.top );
 		if ( o.left < 0 || o.top < 0 ) continue;
-		(void)wm_move(d->wid, &o);
+		(void)wm_move(wid, &o);
 		wm_update();
 		tk_dly_tsk(200);
-		KT_ASSERT_ER(wm_ref(d->wid, &w0), E_OK);
+		KT_ASSERT_ER(wm_ref(wid, &w0), E_OK);
 		px = w0.outer.right + 6;
 		py = w0.outer.bottom + 6;
-		behind = wm_at(px, py);
-		if ( behind == 0 || ( dt_win_of(behind) != NULL && dt_win_of(behind)->fig != NULL
-				   && bare_at(dt_win_of(behind), px, py) && bare_at(dt_win_of(behind), px + 30, py + 20) ) ) break;
+		if ( bare_at(px, py) && bare_at(px + 30, py + 20) ) break;
 	}
 	if ( i == 6 || ( w0.attr & WM_ATTR_RESIZE ) == 0 ) {
 		tm_printf((UB *)"  the window's corner: nothing bare out of it, not tried\n");
@@ -637,11 +685,11 @@ LOCAL void test_touch_reach( void )
 	}
 	tm_printf((UB *)"  the window at %d,%d..%d,%d\n", w0.outer.left, w0.outer.top, w0.outer.right, w0.outer.bottom);
 	drag(px, py, px + 30, py + 20);
-	KT_ASSERT_ER(wm_ref(d->wid, &w1), E_OK);
+	KT_ASSERT_ER(wm_ref(wid, &w1), E_OK);
 	KT_ASSERT_EQ(w1.outer.right, w0.outer.right);
 	KT_ASSERT_EQ(w1.outer.bottom, w0.outer.bottom);
 	finger_drag(px, py, px + 30, py + 20);
-	KT_ASSERT_ER(wm_ref(d->wid, &w1), E_OK);
+	KT_ASSERT_ER(wm_ref(wid, &w1), E_OK);
 	tm_printf((UB *)"  the window by a finger out of its corner: %d by %d, was %d by %d\n",
 		  w1.outer.right - w1.outer.left, w1.outer.bottom - w1.outer.top,
 		  w0.outer.right - w0.outer.left, w0.outer.bottom - w0.outer.top);

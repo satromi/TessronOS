@@ -74,6 +74,8 @@ SRCS_SYSMAN := \
 	peripheral_kernel/obj/obprc.c \
 	peripheral_kernel/obj/obchan.c \
 	peripheral_kernel/obj/obsock.c \
+	peripheral_kernel/obj/obstrm.c \
+	peripheral_kernel/obj/obpoll.c \
 	peripheral_kernel/obj/obuser.c \
 	peripheral_kernel/obj/obsvc.c \
 	peripheral_kernel/sysman/proc.c \
@@ -174,6 +176,7 @@ SRCS_FONT := $(SRCS_FT) \
 SRCS_DEVICE  := \
 	device/gpu/gpu.c \
 	device/gpu/gpu_svc.c \
+	device/gpu/gpu_obj.c \
 	device/ser/ser_svc.c \
 	device/gpu/v3d/v3d_mmu.c \
 	device/i2c/i2c_gpio.c \
@@ -187,6 +190,8 @@ SRCS_DEVICE  := \
 # 各 .mk が足す。画面の見つからない機械では起動時に何も描かずに済ませる(設計書 16.5)
 SRCS_GUI := \
 	device/disp/disp.c \
+	device/disp/dispout.c \
+	device/disp/edid.c \
 	outer_kernel/dp/dp.c \
 	outer_kernel/dp/dp_pat.c \
 	outer_kernel/dp/dp_rgn.c \
@@ -226,8 +231,6 @@ SRCS_DESKTOP := \
 	application/kconv/kconv.c \
 	lib/libudic/udic.c \
 	application/desktop/desktop.c \
-	application/desktop/dtedit.c \
-	application/desktop/dtcab.c \
 	application/desktop/dtform.c \
 	application/desktop/dtcolour.c \
 	application/desktop/dtprint.c \
@@ -244,28 +247,16 @@ SRCS_DESKTOP := \
 	application/desktop/dtres.c \
 	application/desktop/dttool.c \
 	application/desktop/dtscr.c \
-	application/desktop/dttrayv.c \
 	application/desktop/dtnotify.c \
-	application/desktop/dtfix.c \
 	application/sysinst/sysinst.c \
 	application/sysinst/si_core.c \
 	application/desktop/dtdisk.c \
 	application/desktop/dttype.c \
 	application/desktop/dtadmin.c \
-	application/desktop/dtdoc.c \
-	application/desktop/dtfig.c \
 	application/fig/figedit.c \
 	application/fig/figtool.c \
 	application/fig/figcanvas.c \
-	application/fig/figpat.c \
-	application/desktop/dtftool.c \
-	application/desktop/dtfcanvas.c \
-	application/desktop/dtfpat.c \
-	application/desktop/dttip.c \
-	application/desktop/dtslide.c \
 	application/slide/sl_deck.c \
-	application/desktop/dtrt.c \
-	application/desktop/dtrthost.c \
 	lib/librtad/rt_num.c \
 	lib/librtad/rt_prog.c \
 	lib/librtad/rt_run.c \
@@ -312,7 +303,7 @@ endif
 
 # Bluetooth(設計書 6.8)。LE のペアリングの P-256 と AES は lib/mbedtls の一部をカーネルの旗で作る
 SRCS_BT := device/bt/bt.c device/bt/bt_le.c device/bt/bt_a2dp.c device/bt/bt_sdp.c device/bt/bt_avrcp.c device/bt/bt_rfcomm.c device/bt/bt_hfp.c device/bt/bt_crypto.c device/bt/sbc_enc.c device/bt/bt_intel.c \
-	device/bt/bt_h4.c device/bt/bt_bcm.c \
+	device/bt/bt_h4.c device/bt/bt_bcm.c device/bt/sbc_dec.c device/bt/bt_msbc.c \
 	lib/mbedtls/library/aes.c lib/mbedtls/library/bignum.c lib/mbedtls/library/bignum_core.c \
 	lib/mbedtls/library/constant_time.c lib/mbedtls/library/ecp.c lib/mbedtls/library/ecp_curves.c \
 	lib/mbedtls/library/platform_util.c
@@ -351,6 +342,9 @@ SRCS_APP += \
 	tests/ktest/ktest_stkg.c \
 	tests/ktest/ktest_cred.c \
 	tests/ktest/ktest_cxx.c \
+	tests/ktest/ktest_chan2.c \
+	tests/ktest/ktest_shm2.c \
+	tests/ktest/ktest_sbx.c \
 	tests/ktest/ktest_v8.c \
 	tests/ktest/ktest_uuid.c \
 	tests/ktest/ktest_tsfs.c \

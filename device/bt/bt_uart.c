@@ -40,9 +40,10 @@
  *
  *	Then the controller's task (bt.c) runs this file's prep: the UART at
  *	115200 baud with its flow control, the interrupt, and the controller's
- *	start with its patch (bt_bcm.c). The interrupt handler takes the bytes
- *	out of the FIFO and the packets out of the bytes (bt_h4.c) into the
- *	task's ring; the task sends, waiting on the FIFO.
+ *	start with its patch (bt_bcm.c), which also routes the chip's SCO to
+ *	the HCI. The interrupt handler takes the bytes out of the FIFO and the
+ *	packets out of the bytes (bt_h4.c) into the task's ring, events, ACL
+ *	and SCO; the task sends, waiting on the FIFO, SCO among the rest.
  *
  *	Every step says a line that starts with "bt: uart:" or "bt: bcm:".
  */
@@ -342,6 +343,7 @@ LOCAL void bu_packet( void *ctx, UB type, CONST UB *p, INT len )
 	(void)ctx;
 	if ( type == H4_EVENT ) knl_btx_ring_in(bu.c, 0, p, len);
 	else if ( type == H4_ACL ) knl_btx_ring_in(bu.c, 1, p, len);
+	else if ( type == H4_SCO ) knl_btx_ring_in(bu.c, 2, p, len);
 }
 
 LOCAL void bu_inthdr( UINT intno )
@@ -406,6 +408,12 @@ LOCAL ER bu_acl( BTC *c, UB *b, INT n )
 	return bu_send(H4_ACL, b, n);
 }
 
+LOCAL ER bu_sco( BTC *c, UB *b, INT n )
+{
+	(void)c;
+	return bu_send(H4_SCO, b, n);
+}
+
 LOCAL void bu_count( CONST char *when )
 {
 	tm_printf((UB *)"bt: uart: %s: %d bytes in, %d packets, %d bytes not a packet's type, %d too long, %d overruns, %d line errors\n",
@@ -446,12 +454,13 @@ LOCAL BOOL bu_prep( BTC *c )
 	cfg.oper_baud = bu.max_baud;
 	knl_memcpy(cfg.bdaddr, bu.bdaddr, 6);
 	cfg.speed = bu_speed;
+	cfg.sco_hci = TRUE;		/* the board has nothing on the chip's PCM pins: the voice to the host */
 	ok = knl_btb_load(c, &cfg);
 	bu_count(ok ? "after the controller's start" : "the controller's start stopped");
 	return ok;
 }
 
-LOCAL CONST BTTRANS	bu_tr = { bu_cmd, bu_acl, bu_prep, NULL };	/* the chip has no isochronous channels */
+LOCAL CONST BTTRANS	bu_tr = { bu_cmd, bu_acl, bu_prep, NULL, bu_sco };	/* the chip has no isochronous channels */
 
 /*
  * At the start of the system (devinit.c), before the Wi-Fi: the pins and

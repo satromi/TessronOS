@@ -35,7 +35,58 @@
 #include <errno.h>
 #include "pth_int.h"
 
+IMPORT ER tm_putstring( CONST UB *s );	/* the monitor's console (lib/libts) */
+
 static ID	glock_id;
+
+/*
+ * A wait that broke the rules above, said on the console (the first few):
+ * a thread woken while it is still on a list, a wait the kernel ended with
+ * an error, a thread put on a list while it is on one. The line is put
+ * together here and written with the monitor's call, which takes no lock
+ * of this library's.
+ */
+static volatile int	stray_count;
+
+static char *put_num( char *p, long v )
+{
+	char	t[24];
+	int	n = 0;
+
+	if ( v < 0 ) {
+		*p++ = '-';
+		v = -v;
+	}
+	do {
+		t[n++] = (char)( '0' + v % 10 );
+		v /= 10;
+	} while ( v != 0 );
+	while ( n > 0 ) *p++ = t[--n];
+	return p;
+}
+
+static void pth_stray( const char *what, long v )
+{
+	char	b[160], *p = b;
+	int	k = __atomic_add_fetch(&stray_count, 1, __ATOMIC_RELAXED);
+	const char *s;
+
+	if ( k > 16 ) return;
+	for ( s = "libpthread: task "; *s != '\0'; ) *p++ = *s++;
+	p = put_num(p, (long)tk_get_tid());
+	*p++ = ' ';
+	for ( s = what; *s != '\0' && p < b + sizeof(b) - 32; ) *p++ = *s++;
+	*p++ = ' ';
+	*p++ = '(';
+	p = put_num(p, v);
+	*p++ = ')';
+	*p++ = ' ';
+	*p++ = '#';
+	p = put_num(p, (long)k);
+	*p++ = '\n';
+	*p = '\0';
+	(void)tm_putstring((const UB *)b);
+}
 
 void pth_glock( void )
 {
@@ -128,6 +179,11 @@ int pth_park( PTH *me, uint64_t dl )
 
 		er = tk_wai_sem_u(me->sem, 1, us);
 	}
+	if ( er == E_OK ) {
+		if ( __atomic_load_n(&me->queued, __ATOMIC_ACQUIRE) ) pth_stray("woken while it still waits", (long)dl);
+	} else if ( er != E_TMOUT ) {
+		pth_stray("had its wait ended by an error", (long)er);
+	}
 	return ( er == E_TMOUT ) ? ETIMEDOUT : 0;
 }
 
@@ -153,6 +209,7 @@ void pth_prepare( PTH *me )
 
 void pth_enq( void **q, PTH *t )
 {
+	if ( t->queued ) pth_stray("put on a list while it is on one", (long)( q[1] == t ));
 	pth_prepare(t);
 	t->qnext = NULL;
 	if ( q[1] != NULL ) {

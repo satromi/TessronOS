@@ -32,6 +32,11 @@
  *	  alone as before. The pen's tip
  *	  presses at once, the barrel switch makes it the second button,
  *	  and while it is near, touches are not taken.
+ *	- combo keyboard: one interface of a keyboard, a mouse and consumer
+ *	  keys told apart by report IDs (a Raspberry Pi Pico's TinyUSB
+ *	  descriptor), and a keyboard of a bit a key: each report goes to
+ *	  the entry of its ID, the lamps' output reports are set, more than
+ *	  six keys are taken at once, and what is held is let go on unplug.
  */
 
 #include "kernel.h"
@@ -885,6 +890,19 @@ LOCAL INT tw_px_of( void )
 	return ( p > 0 ) ? p : 1;
 }
 
+
+/*
+ * More than one output (10.4.8): the back buffer is larger than the main
+ * screen. A touch screen's and a pen's places are then taken on the main
+ * screen only, not across the view these tests measure them against.
+ */
+LOCAL BOOL outputs_more( void )
+{
+	T_DISPSPEC	s;
+
+	return (BOOL)( ts_disp_ref(&s) >= E_OK && s.width != s.main_w );
+}
+
 LOCAL void test_digi_touch( void )
 {
 	T_HIDATTR	a, keep;
@@ -894,6 +912,8 @@ LOCAL void test_digi_touch( void )
 	INT		n, i;
 	UD		t0, t1;
 	UINT		b;
+
+	if ( outputs_more() ) KT_SKIP("more than one output: a touch is taken on the main screen, not the whole view");
 
 	KT_ASSERT_ER(ts_hid_getattr(&keep), E_OK);
 	a = keep;
@@ -1218,6 +1238,267 @@ LOCAL void test_consumer_keys( void )
 	(void)ts_hid_setattr(&keep);
 }
 
+/* ---------------------------------------------------------------- keyboards of the report protocol */
+
+/*
+ * A board's own keyboard (a Raspberry Pi Pico's, TinyUSB's composite
+ * descriptor): one interface of three applications, a keyboard of
+ * report 1 (eight modifier bits, a byte kept, the lamps, six keys as an
+ * array), a mouse of report 2 (five buttons, X, Y, a wheel) and the
+ * consumer keys of report 3 (a 16-bit array). 156 bytes, as the board
+ * says its own is.
+ */
+LOCAL CONST UB rd_combo[] = {
+	0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x85, 0x01,
+	0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01, 0x95, 0x08, 0x75, 0x01, 0x81, 0x02,
+	0x95, 0x01, 0x75, 0x08, 0x81, 0x01,
+	0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x95, 0x05, 0x75, 0x01, 0x91, 0x02,
+	0x95, 0x01, 0x75, 0x03, 0x91, 0x01,
+	0x05, 0x07, 0x19, 0x00, 0x2a, 0xff, 0x00, 0x15, 0x00, 0x26, 0xff, 0x00, 0x95, 0x06, 0x75, 0x08, 0x81, 0x00,
+	0xc0,
+	0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x02, 0x09, 0x01, 0xa1, 0x00,
+	0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01, 0x95, 0x05, 0x75, 0x01, 0x81, 0x02,
+	0x95, 0x01, 0x75, 0x03, 0x81, 0x01,
+	0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7f, 0x95, 0x02, 0x75, 0x08, 0x81, 0x06,
+	0x09, 0x38, 0x15, 0x81, 0x25, 0x7f, 0x95, 0x01, 0x75, 0x08, 0x81, 0x06,
+	0xc0, 0xc0,
+	0x05, 0x0c, 0x09, 0x01, 0xa1, 0x01, 0x85, 0x03, 0x15, 0x00, 0x26, 0xff, 0x03,
+	0x19, 0x00, 0x2a, 0xff, 0x03, 0x95, 0x01, 0x75, 0x10, 0x81, 0x00,
+	0xc0
+};
+
+/*
+ * A keyboard that reports any number of keys held: no report ID, eight
+ * modifier bits, then a bit each for usages 0..119; its lamps one byte
+ */
+LOCAL CONST UB rd_nkro[] = {
+	0x05, 0x01, 0x09, 0x06, 0xa1, 0x01,
+	0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+	0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x95, 0x05, 0x75, 0x01, 0x91, 0x02,
+	0x95, 0x01, 0x75, 0x03, 0x91, 0x01,
+	0x05, 0x07, 0x19, 0x00, 0x29, 0x77, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x78, 0x81, 0x02,
+	0xc0
+};
+
+LOCAL CONST UB kc_cfg[59] = {
+	9, 2, 59, 0, 2, 1, 0, 0xa0, 50,
+	9, 4, 0, 0, 1, 3, 0, 0, 0,
+	9, 0x21, 0x11, 0x01, 0, 1, 0x22, sizeof(rd_combo), 0,
+	7, 5, 0x81, 3, 64, 0, 8,
+	9, 4, 1, 0, 1, 3, 0, 0, 0,
+	9, 0x21, 0x11, 0x01, 0, 1, 0x22, sizeof(rd_nkro), 0,
+	7, 5, 0x82, 3, 64, 0, 8
+};
+
+/* The lamps' output reports set: by interface, the report ID and length of the last */
+LOCAL INT	kc_lamps[2], kc_lamp_rid[2], kc_lamp_len[2];
+
+LOCAL INT kc_klass( CONST UB *setup, UB *data, INT len )
+{
+	switch ( setup[1] ) {
+	case 0x0a:				/* SET_IDLE */
+		return 0;
+	case 0x09:				/* SET_REPORT */
+		if ( setup[3] == 2 && setup[4] < 2 ) {
+			kc_lamps[setup[4]]++;
+			kc_lamp_rid[setup[4]] = setup[2];
+			kc_lamp_len[setup[4]] = len;
+		}
+		return 0;
+	}
+	return -1;
+}
+
+LOCAL CONST T_VHCDEV kc_dev = {
+	dg_ddesc, kc_cfg, sizeof(kc_cfg), { "TessronOS test", "Combined keyboard test", NULL, NULL },
+	{ rd_combo, rd_nkro, NULL, NULL }, { sizeof(rd_combo), sizeof(rd_nkro), 0, 0 },
+	NULL, kc_klass
+};
+
+LOCAL UD	kc_pos;			/* where the copy of the events is read from: the last report's */
+
+/* A report given to endpoint ep, waited for until the driver has taken it */
+LOCAL void kc_send( UB ep, CONST UB *r, INT len )
+{
+	T_HIDSTAT	st0, st;
+	INT		i;
+
+	KT_ASSERT_ER(ts_hid_stat(&st0), E_OK);
+	kc_pos = knl_hid_tap_now();
+	KT_ASSERT_ER(knl_vhc_in(1, ep, r, len), E_OK);
+	for ( i = 0; i < 100; i++ ) {
+		KT_ASSERT_ER(ts_hid_stat(&st), E_OK);
+		if ( st.reports > st0.reports ) break;
+		tk_dly_tsk(5);
+	}
+	KT_ASSERT(st.reports > st0.reports);
+}
+
+/*
+ * The events of interface entry src since the last report was sent, as
+ * the input layer took them before any shaping: n of them, each of type
+ * and code (a move's code not looked at) and, for a key, the modifiers
+ * held, in this order
+ */
+LOCAL void kc_want( UINT src, INT n, CONST UINT (*w)[3] )
+{
+	T_HIDEV	ev[16];
+	INT	got, i;
+	UD	lost = 0, pos = kc_pos;
+
+	got = knl_hid_tap(&pos, src, ev, 16, &lost);
+	for ( i = 0; i < got; i++ ) {
+		tm_printf((UB *)"  %d: type %d code %02x mods %02x\n", (INT)src, (INT)ev[i].type,
+			  (INT)ev[i].code, (INT)ev[i].mods & 0xff);
+	}
+	KT_ASSERT_EQ(lost, 0);
+	KT_ASSERT_EQ(got, n);
+	for ( i = 0; i < n; i++ ) {
+		KT_ASSERT_EQ(ev[i].type, w[i][0]);
+		if ( w[i][0] != HID_EV_MOVE ) KT_ASSERT_EQ(ev[i].code, w[i][1]);
+		if ( w[i][0] == HID_EV_KEY_DOWN || w[i][0] == HID_EV_KEY_UP ) {
+			KT_ASSERT_EQ(ev[i].mods & 0xff, w[i][2]);
+		}
+	}
+}
+
+/*
+ * One interface of a keyboard, a mouse and consumer keys told apart by
+ * their report IDs: the keyboard is an entry of its own (a keyboard in
+ * the list), the mouse the interface's pointer, and each report goes to
+ * the one of its ID; the keyboard's lamps are set in its own output
+ * report. A keyboard of a bit a key takes more than six keys at once.
+ * What is held is let go when the device goes.
+ */
+LOCAL void test_combo_keyboard( void )
+{
+	T_HIDATTR	a, keep;
+	T_HIDINFO	h[16];
+	T_HIDSTAT	st0, st1;
+	T_HIDEV		ev;
+	UINT		last = 0, kbd = 0, ptr = 0, nk = 0;
+	INT		n, i, k;
+	UB		r[16];
+	UINT		w_n[9][3];
+
+	CONST UB	k_sq[9] = { 1, 0x02, 0, 0x14, 0, 0, 0, 0, 0 };	/* left Shift and q */
+	CONST UB	k_qa[9] = { 1, 0x00, 0, 0x14, 0x04, 0, 0, 0, 0 };	/* q and a */
+	CONST UB	k_jam[9] = { 1, 0x00, 0, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01 };	/* ErrorRollOver */
+	CONST UB	k_q[9] = { 1, 0x00, 0, 0x14, 0, 0, 0, 0, 0 };
+	CONST UB	k_none[9] = { 1 };
+	CONST UB	m_move[5] = { 2, 0x01, 5, 0xfd, 0 };	/* the main button, right 5 and up 3 */
+	CONST UB	m_none[5] = { 2 };
+	CONST UB	c_up[3] = { 3, 0xe9, 0x00 }, c_none[3] = { 3 };
+	CONST UINT	w_sq[2][3] = { { HID_EV_KEY_DOWN, 0x14, 0x02 }, { HID_EV_KEY_DOWN, 0xE1, 0x02 } };
+	CONST UINT	w_qa[2][3] = { { HID_EV_KEY_DOWN, 0x04, 0 }, { HID_EV_KEY_UP, 0xE1, 0 } };
+	CONST UINT	w_none[2][3] = { { HID_EV_KEY_UP, 0x14, 0 }, { HID_EV_KEY_UP, 0x04, 0 } };
+	CONST UINT	w_m[2][3] = { { HID_EV_MOVE, 0, 0 }, { HID_EV_BTN_DOWN, 0, 0 } };
+	CONST UINT	w_m0[1][3] = { { HID_EV_BTN_UP, 0, 0 } };
+	CONST UINT	w_c[1][3] = { { HID_EV_KEY_DOWN, HID_KEY_VOLUP, 0 } };
+	CONST UINT	w_c0[1][3] = { { HID_EV_KEY_UP, HID_KEY_VOLUP, 0 } };
+	CONST UINT	w_q[1][3] = { { HID_EV_KEY_DOWN, 0x14, 0 } };
+	CONST UINT	w_q0[1][3] = { { HID_EV_KEY_UP, 0x14, 0 } };
+
+	KT_ASSERT_ER(ts_hid_getattr(&keep), E_OK);
+	a = keep;
+	a.main = 0;
+	a.middbl = 0;
+	KT_ASSERT_ER(ts_hid_setattr(&a), E_OK);
+	KT_ASSERT_ER(ts_hid_stat(&st0), E_OK);
+	n = knl_hid_list(h, 16);
+	for ( i = 0; i < n && i < 16; i++ ) {
+		if ( h[i].id > last ) last = h[i].id;
+	}
+	for ( i = 0; i < 2; i++ ) kc_lamps[i] = kc_lamp_rid[i] = kc_lamp_len[i] = 0;
+	KT_ASSERT_ER(knl_vhc_plug(1, &kc_dev), E_OK);
+	for ( i = 0; i < 60 && ( kbd == 0 || ptr == 0 || nk == 0 ); i++ ) {
+		tk_dly_tsk(50);
+		n = knl_hid_list(h, 16);
+		for ( k = 0; k < n && k < 16; k++ ) {
+			if ( h[k].id <= last ) continue;
+			if ( h[k].ifno == 0 && h[k].keyboard ) kbd = h[k].id;
+			if ( h[k].ifno == 0 && !h[k].keyboard ) ptr = h[k].id;
+			if ( h[k].ifno == 1 && h[k].keyboard ) nk = h[k].id;
+		}
+	}
+	tm_printf((UB *)"  keyboard %d, pointer %d, keyboard of a bit a key %d\n", (INT)kbd, (INT)ptr, (INT)nk);
+	KT_ASSERT(kbd != 0 && ptr != 0 && nk != 0);
+	KT_ASSERT_ER(ts_hid_stat(&st1), E_OK);
+	KT_ASSERT_EQ(st1.keyboards, st0.keyboards + 2);
+	KT_ASSERT_EQ(st1.pointers, st0.pointers + 1);
+	/* the lamps: report 1's two bytes, and the other's one byte without an ID */
+	KT_ASSERT(kc_lamps[0] >= 1);
+	KT_ASSERT_EQ(kc_lamp_rid[0], 1);
+	KT_ASSERT_EQ(kc_lamp_len[0], 2);
+	KT_ASSERT(kc_lamps[1] >= 1);
+	KT_ASSERT_EQ(kc_lamp_rid[1], 0);
+	KT_ASSERT_EQ(kc_lamp_len[1], 1);
+
+	/* report 1: the keyboard's keys, and its modifiers as keys too; nothing to the pointer */
+	kc_send(0x81, k_sq, 9);
+	kc_want(kbd, 2, w_sq);
+	kc_want(ptr, 0, NULL);
+	kc_send(0x81, k_qa, 9);
+	kc_want(kbd, 2, w_qa);
+	kc_send(0x81, k_jam, 9);		/* too many held: the keys are as they were */
+	kc_want(kbd, 0, NULL);
+	kc_send(0x81, k_none, 9);
+	kc_want(kbd, 2, w_none);
+	/* report 2: the pointer's, nothing to the keyboard */
+	kc_send(0x81, m_move, 5);
+	kc_want(ptr, 2, w_m);
+	kc_want(kbd, 0, NULL);
+	kc_send(0x81, m_none, 5);
+	kc_want(ptr, 1, w_m0);
+	/* report 3: the consumer keys */
+	kc_send(0x81, c_up, 3);
+	kc_want(ptr, 1, w_c);
+	kc_want(kbd, 0, NULL);
+	kc_send(0x81, c_none, 3);
+	kc_want(ptr, 1, w_c0);
+
+	/* a bit a key: eight held at once (usages 4..11), then right Shift, then none */
+	knl_memset(r, 0, sizeof(r));
+	r[1] = 0xf0;
+	r[2] = 0x0f;
+	for ( i = 0; i < 8; i++ ) {
+		w_n[i][0] = HID_EV_KEY_DOWN;
+		w_n[i][1] = 4 + i;
+		w_n[i][2] = 0;
+	}
+	kc_send(0x82, r, 16);
+	kc_want(nk, 8, (CONST UINT (*)[3])w_n);
+	r[0] = 0x20;
+	w_n[0][1] = 0xE5;
+	w_n[0][2] = 0x20;
+	kc_send(0x82, r, 16);
+	kc_want(nk, 1, (CONST UINT (*)[3])w_n);
+	knl_memset(r, 0, sizeof(r));
+	for ( i = 0; i < 9; i++ ) {
+		w_n[i][0] = HID_EV_KEY_UP;
+		w_n[i][1] = ( i < 8 ) ? 4 + i : 0xE5;
+		w_n[i][2] = 0;
+	}
+	kc_send(0x82, r, 16);
+	kc_want(nk, 9, (CONST UINT (*)[3])w_n);
+
+	/* held as the device goes: let go */
+	kc_send(0x81, k_q, 9);
+	kc_want(kbd, 1, w_q);
+	kc_pos = knl_hid_tap_now();
+	KT_ASSERT_ER(knl_vhc_unplug(1), E_OK);
+	for ( i = 0; i < 60; i++ ) {
+		KT_ASSERT_ER(ts_hid_stat(&st1), E_OK);
+		if ( st1.keyboards == st0.keyboards && st1.pointers == st0.pointers ) break;
+		tk_dly_tsk(50);
+	}
+	KT_ASSERT_EQ(st1.keyboards, st0.keyboards);
+	KT_ASSERT_EQ(st1.pointers, st0.pointers);
+	kc_want(kbd, 1, w_q0);
+	while ( ts_hid_read(&ev, TMO_POL) >= E_OK ) ;
+	(void)ts_hid_setattr(&keep);
+}
+
 /* The next press or let go, moves passed over: FALSE when it is not this one by tmo */
 LOCAL BOOL btn_is( UINT type, UINT code, TMO tmo )
 {
@@ -1281,6 +1562,7 @@ LOCAL void test_digi_press( void )
 	GOT		g;
 	INT		a, b, x, y, i, ids[WM_PRESS_WINS + 1];
 
+	if ( outputs_more() ) KT_SKIP("more than one output: a touch is taken on the main screen, not the whole view");
 	r.left = 20;  r.top = 20;  r.right = 120;  r.bottom = 100;
 	o.left = 100;  o.top = 80;  o.right = 460;  o.bottom = 360;
 	a = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE, "press a");
@@ -1435,6 +1717,7 @@ EXPORT void ktest_digi( void )
 	KT_RUN(test_digi_desc);
 #if KT_VHC
 	KT_RUN(test_consumer_keys);
+	KT_RUN(test_combo_keyboard);
 	KT_RUN(test_digi_touch);
 	KT_RUN_SCREEN(test_digi_press);
 #endif

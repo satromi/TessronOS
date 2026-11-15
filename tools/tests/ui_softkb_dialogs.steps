@@ -1,0 +1,121 @@
+# ソフトウェアキーボード in the panels the desktop asks with over a program's window
+# (design 11.3), for tools/ui_run.py on a kernel built with UITEST=1. While the
+# desktop asks (wm_obj_quiet) the program is told nothing, but the screen keyboard,
+# a window that never has the keys, still is: what it types goes into the panel,
+# and pressing it does not put away the colour pop-up. The keyboard is an input aid
+# (WM_ATTR_AID): it stands in front of the panels, the pop-up and a window over the
+# whole screen, behind the menus (WM_ATTR_MENU), where it opened (its window at 270,448): 1 at 388,501,
+# 2 at 430,501, 8 at 683,501, BS at 934,501, Enter at 909,590. Each panel is typed
+# into with the screen keyboard (and the first two with the keyboard as well), and
+# what the panel answered is looked at on the console.
+open 01a0d8c4-54b0-7ac1-8cd2-9fab0c1d54b0
+waitwin ソフトウェアキーボード 30
+wait 1500
+win ソフトウェアキーボード
+want ok 270 448 1014 718
+#
+# 1. the name of a new object, from the 原紙箱's own template carried into the BTRON
+# window (the first window, a process): the name offered is chosen whole, the
+# screen keyboard types 1 over it and the keyboard 2 after it
+click 1000 48
+wait 300
+linkdrag 原紙箱 原紙箱 250 60
+wait 1500
+logmark
+click 388 501
+expectsince softkb: typed 1e
+wait 500
+key 1f
+wait 500
+shot skb_name
+key 28
+expectsince desktop: 12 made from the template 原紙箱
+wait 1500
+#
+# 2. 実身名変更 of the link TADjsについて in the BTRON window (実身操作, its first item)
+logmark
+click 90 88 1
+expectsince cabinet: menu
+wait 600
+move 100 210
+wait 200
+move 100 228
+wait 400
+move 180 228
+wait 600
+click 220 228
+wait 1500
+logmark
+click 388 501
+expectsince softkb: typed 1e
+wait 500
+key 1f
+wait 500
+shot skb_rename
+key 28
+expectsince cabinet: renamed 12
+wait 1500
+#
+# 3. 仮身属性変更 of the same link (仮身操作, 属性変更). The menu opens with 実身操作,
+# chosen last, under the pointer, held to the top of the screen: 仮身操作 at 100,131
+# and 属性変更 at 215,191. The panel stands under the keyboard, which covers its
+# foot. The colour 表示領域背景 pressed opens its pop-up under it (its corner at
+# 630,422), its box R holding 255 chosen, under the keyboard too: 1, 2 and 8 typed
+# on the screen keyboard leave it open and make the colour 80ffff, which the
+# keyboard's Enter keeps. The box 自由入力 of the size has the keys then: BS three
+# times, 1 and 8, and Enter for 設定
+logmark
+click 90 88 1
+expectsince cabinet: menu
+wait 600
+move 100 115
+wait 200
+move 100 131
+wait 400
+move 180 131
+wait 600
+click 215 191
+wait 1500
+shot skb_attr_open
+click 678 410
+wait 1000
+logmark
+click 388 501
+expectsince softkb: typed 1e
+wait 300
+click 430 501
+wait 300
+click 683 501
+expectsince softkb: typed 25
+wait 500
+shot skb_picker
+click 909 590
+wait 800
+click 934 501
+wait 300
+click 934 501
+wait 300
+click 934 501
+wait 300
+click 388 501
+wait 300
+click 683 501
+wait 500
+shot skb_attr
+click 909 590
+expectsince cabinet: attr 12 chsz 18 bgcol 80ffff
+wait 800
+#
+# 4. a window over the whole screen, the message line too (スライド, WM_ATTR_SCREEN):
+# the keyboard stays in front of it and takes the press, which the slide does not
+# (it would go on to its second slide)
+logmark
+open 72c584f2-af6c-45cb-8dfc-3f181d13cd0a
+expectsince slide: 1 of 3
+wait 800
+shot skb_slide
+logmark
+click 388 501
+expectsince softkb: typed 1e
+wait 800
+absent slide: 2 of 3

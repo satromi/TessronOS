@@ -189,7 +189,7 @@ LOCAL CONST char script_xml[] =
 
 LOCAL void test_run( void )
 {
-	TS_UUID	prog, scr, fig, pu, win, list[64], vob, memo, pic, vm, vp;
+	TS_UUID	prog, scr, fig, pu, win, *wins, vob, memo, pic, vm, vp;
 	T_OBCRE	c;
 	T_OBREF	r;
 	T_PSTS	psts;
@@ -276,14 +276,15 @@ LOCAL void test_run( void )
 	}
 	KT_ASSERT(scene);
 	tk_dly_tsk(200);
-	if ( ob_lst_obj(OB_T_WINDOW, 0, NULL, list, 64, &cnt) >= E_OK ) {
+	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &wins) ) >= 0 ) {
 		for ( i = 0; i < cnt; i++ ) {
-			if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_WINDOW
+			if ( ob_ref_obj(&wins[i], &r) >= E_OK && r.sub == OB_S_WINDOW
 			  && has(r.name, s_len((CONST char *)r.name), "MSテスト") ) {
-				win = list[i];
+				win = wins[i];
 				wid = 0;
 			}
 		}
+		Kfree(wins);
 	}
 	KT_ASSERT(wid == 0);
 	kw = ( wid == 0 ) ? ob_opn_obj(&win, OB_OP_R) : 0;
@@ -400,12 +401,12 @@ LOCAL void test_run( void )
 /* The window of a name, and its number; -1 when there is none */
 LOCAL INT window_of( CONST char *name, TS_UUID *out )
 {
-	TS_UUID	list[64];
+	TS_UUID	*list;
 	T_OBREF	r;
-	INT	cnt = 0, i, wid = -1;
+	INT	cnt, i, wid = -1;
 	ID	kw;
 
-	if ( ob_lst_obj(OB_T_WINDOW, 0, NULL, list, 64, &cnt) < E_OK ) return -1;
+	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return -1;
 	for ( i = 0; i < cnt; i++ ) {
 		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_WINDOW
 		  && has(r.name, s_len((CONST char *)r.name), name) ) {
@@ -426,6 +427,7 @@ LOCAL INT window_of( CONST char *name, TS_UUID *out )
 			}
 		}
 	}
+	Kfree(list);
 	return wid;
 }
 

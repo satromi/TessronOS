@@ -1,6 +1,6 @@
 <tad version="1.0" encoding="UTF-8" filename="仮身ネットワーク">
 <document>
 <p>仮身ネットワーク</p>
-<p>組込みのプログラム(virtual-object-network)</p>
+<p>ある実身から、その仮身がつながる実身をたどり、段ごとの列(仮身ネットワーク表示)か、ばねで配置したグラフ(仮身グラフ表示)で見せるシステムの道具。プロセスとして動く(application/systool/nw_main.c)。</p>
 </document>
 </tad>

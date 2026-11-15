@@ -5,43 +5,52 @@
 # the first row end, a new one starts, the bar's track is pressed below its knob, and
 # the window is made taller: every time the mixer says how many rows it shows, from
 # which program, of how many, and which process is in the first row -- the first row
-# stays on its program while programs before it come and go. The window is at
-# 200,100,788,568: its corner at 784,564, the bar down 772..786.
-run /boot/SVCPROG.ELF 38 300 14000
-run /boot/SVCPROG.ELF 38 500 14000
-run /boot/SVCPROG.ELF 38 700 40000
-run /boot/SVCPROG.ELF 38 900 40000
-run /boot/SVCPROG.ELF 38 1100 40000
-run /boot/SVCPROG.ELF 38 1300 40000
-wait 300
+# stays on its program while programs before it come and go (each program by the number
+# its run answered, {pN}: what numbers the processes get hangs on what ran before). The window is at
+# 200,100,788,712: its corner at 784,708, the bar down 772..786.
+# the window first: the first two programs' 14 seconds are not to be used up
+# by its first page (a machine just started may take long over it)
 open 01a0d8c4-5440-7a51-8c62-7e8f90a15440
-expect sndmix: ready
-expect sndmix: rows 5 from 0 of 6, pid 2 first
+expectin 90 sndmix: ready
+run /boot/SVCPROG.ELF 38 300 14000
+keep p1
+run /boot/SVCPROG.ELF 38 500 14000
+keep p2
+run /boot/SVCPROG.ELF 38 700 40000
+keep p3
+run /boot/SVCPROG.ELF 38 900 40000
+keep p4
+run /boot/SVCPROG.ELF 38 1100 40000
+keep p5
+run /boot/SVCPROG.ELF 38 1300 40000
+keep p6
+wait 300
+expect sndmix: rows 5 from 0 of 6, pid {p1} first
 win 音量ミキサー
 shot mixs_open
 # shorter: three rows
-drag 784 564 784 484
-expect sndmix: rows 3 from 0 of 6, pid 2 first
+drag 784 708 784 628
+expect sndmix: rows 3 from 0 of 6, pid {p1} first
 # the wheel, two notches toward the person: two programs on
 move 500 300
 wheel -2
-expect sndmix: rows 3 from 2 of 6, pid 4 first
+expect sndmix: rows 3 from 2 of 6, pid {p3} first
 shot mixs_wheel
 # the first two end: the first row stays on its program
-expect sndmix: rows 3 from 0 of 4, pid 4 first
+expect sndmix: rows 3 from 0 of 4, pid {p3} first
 # a new one comes, in the place of one that ended, before the first row. The
 # same line is said as the first two end one after the other (six, five, four):
 # only one said after the new program started tells that the mixer has it, and
 # the bar is pressed once it has (a press before it is a page of the list before)
 logmark
 run /boot/SVCPROG.ELF 38 400 20000
-expectsince sndmix: rows 3 from 1 of 5, pid 4 first
+expectsince sndmix: rows 3 from 1 of 5, pid {p3} first
 # the bar's track pressed below its knob: a page on, as far as there is
-click 779 474
-expect sndmix: rows 3 from 2 of 5, pid 5 first
+click 779 618
+expect sndmix: rows 3 from 2 of 5, pid {p4} first
 shot mixs_bar
 # taller: as many rows as there are programs
-drag 784 484 784 604
+drag 784 628 784 748
 expect sndmix: rows 6 from 0 of 5
 shot mixs_tall
 key 08 01

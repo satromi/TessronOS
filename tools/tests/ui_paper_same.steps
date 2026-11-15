@@ -1,0 +1,87 @@
+# 背景色変更 with 仮身属性と同じ (design 11.3), for tools/ui_run.py on a kernel built
+# with UITEST=1: TADjsについて (基本文章編集, a process) asks with DT_RQ_PAPER from its
+# menu (表示, 背景色変更 at 752,645), and the pop-up opens at the pointer, held to the
+# foot of the screen (its chart from 760,682, 15 apart, and the switch 仮身属性と同じ
+# at 770,781 under it). The object's metadata gives it a paper: the switch starts
+# off. A colour of the chart chosen is kept as its paper; the switch put on takes
+# the paper away (the answer TAD_COL_NONE) and the document lays itself on the
+# link's 表示領域背景 or the system's look; opened again, the switch is on. The
+# work area is looked at, not only the console: red, then the 表示領域背景 of the link in
+# BTRON it was opened from (ffffff), also after Escape.
+#
+# 1. red (the chart's fourth row, first column) chosen and kept with Enter
+logmark
+click 600 560 1
+expectsince document: menu
+wait 600
+move 610 506
+wait 200
+move 610 525
+wait 400
+move 680 525
+wait 600
+move 752 645
+wait 400
+click 752 645
+expectsince desktop: paper asked, same off
+wait 1000
+shot paper_open
+click 770 727
+wait 400
+key 28
+expectsince desktop: paper own ff0000 (0)
+expectsince document: paper #ff0000
+wait 1000
+shot paper_red
+pixel 700 215 FF0000
+#
+# 2. opened again: off, the paper being the object's own; put on and kept
+logmark
+click 600 560 1
+expectsince document: menu
+wait 600
+move 610 506
+wait 200
+move 610 525
+wait 400
+move 680 525
+wait 600
+move 752 645
+wait 400
+click 752 645
+expectsince desktop: paper asked, same off
+wait 1000
+click 770 781
+wait 400
+shot paper_same_on
+key 28
+expectsince desktop: paper same ffffff (0)
+expectsince document: paper same as the link: #ffffff
+wait 1000
+shot paper_same
+pixel 700 215 FFFFFF
+#
+# 3. opened again: on, the metadata giving no paper now. A colour chosen puts the
+# switch off; Escape leaves the object as it was
+logmark
+click 600 560 1
+expectsince document: menu
+wait 600
+move 610 506
+wait 200
+move 610 525
+wait 400
+move 680 525
+wait 600
+move 752 645
+wait 400
+click 752 645
+expectsince desktop: paper asked, same on
+wait 1000
+shot paper_again
+click 770 727
+wait 400
+shot paper_again_red
+key 29
+wait 1000
+pixel 700 215 FFFFFF

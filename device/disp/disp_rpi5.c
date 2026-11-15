@@ -1135,4 +1135,62 @@ EXPORT INT knl_disp_hw_setmode( T_DISPHW *hw, UINT w, UINT h )
 	return 1;
 }
 
+
+/*
+ * The displays the firmware drives besides the one shown (10.4.8, the
+ * Raspberry Pi 5's second HDMI): read and said on the console only, for
+ * the records the second output is to be made from; no further output is
+ * given yet. The firmware counts its displays (GET_NUM_DISPLAYS) and
+ * says how each is set (GET_DISPLAY_SETTINGS, the display's number given:
+ * its size, depth, row stride and virtual size, and where its buffer is),
+ * as the firmware's own framebuffer driver asks; config.txt's
+ * max_framebuffers=2 is what makes it keep a second one. Nothing is set,
+ * so the screen shown goes on as it was.
+ */
+#define TAG_GET_NUM_DISPLAYS	0x00040013U
+#define TAG_GET_DISPLAY_SETTINGS 0x00040014U
+
+LOCAL BOOL	more_told = FALSE;
+
+EXPORT INT knl_disp_hw_more( INT i, UINT main_w, UINT main_h, T_DISPHW *hw, INT *p_side, INT *p_offset )
+{
+	INT	at, k, n;
+
+	(void)main_w; (void)main_h; (void)hw; (void)p_side; (void)p_offset;
+	if ( i != 0 || more_told ) {
+		return 0;
+	}
+	more_told = TRUE;
+	mb_begin();
+	at = mb_tag(TAG_GET_NUM_DISPLAYS, 1, 0, 0);
+	if ( mb_call() < E_OK || !mb_answered(at) ) {
+		tm_printf((UB *)"disp: displays: the firmware does not say how many it drives\n");
+		return 0;
+	}
+	n = (INT)mb[at];
+	if ( n < 0 || n > 16 ) {
+		tm_printf((UB *)"disp: displays: the firmware says %d, not taken\n", n);
+		return 0;
+	}
+	tm_printf((UB *)"disp: displays: the firmware drives %d\n", n);
+	for ( k = 0; k < n && k < 4; k++ ) {
+		mb_begin();
+		mb[mb_at++] = TAG_GET_DISPLAY_SETTINGS;
+		mb[mb_at++] = 11 * 4;
+		mb[mb_at++] = 4;
+		at = mb_at;
+		mb[mb_at++] = (UW)k;
+		mb_at += 10;
+		/* a call the firmware does not answer in time, or answers with an error or too short, is passed over */
+		if ( mb_call() < E_OK || !mb_answered(at) || ( mb[at - 1] & ~TAG_ANSWERED ) < 11 * 4 ) {
+			tm_printf((UB *)"disp: display %d: no settings answered\n", k);
+			continue;
+		}
+		tm_printf((UB *)"disp: display %d: %d x %d, %d bpp, pitch %d, virtual %d x %d at %d, %d, buffer %08x%08x\n",
+			  (INT)mb[at], (INT)mb[at + 1], (INT)mb[at + 2], (INT)mb[at + 3], (INT)mb[at + 4],
+			  (INT)mb[at + 5], (INT)mb[at + 6], (INT)mb[at + 7], (INT)mb[at + 8], mb[at + 10], mb[at + 9]);
+	}
+	return 0;
+}
+
 #endif /* RPI_VCFW */

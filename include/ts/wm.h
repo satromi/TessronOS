@@ -52,8 +52,8 @@ extern "C" {
 #define WM_ATTR_BBAR		0x0010	/* one along the foot */
 #define WM_ATTR_LBAR		0x0080	/* one down the left side as well */
 /*
- * A popup: no frame, always in front of every ordinary window, never
- * given the input. A pixel whose top byte is WM_CLEAR's is not laid,
+ * A popup: no frame, always in front of every ordinary window and of
+ * the floating ones, never given the input. A pixel whose top byte is WM_CLEAR's is not laid,
  * so what is under it shows through -- which is how a menu's half-tone
  * shadow falls on whatever it stands over.
  */
@@ -69,8 +69,9 @@ extern "C" {
 /*
  * A window that floats: an ordinary window in every other way (its
  * frame, the input), but in front of every window that does not float,
- * and behind the popups. A window brought forward comes up behind the
- * floating ones, as a picture-in-picture window stays over the others.
+ * and behind the popups, the input aids (WM_ATTR_AID) and the menus.
+ * A window brought forward comes up behind the floating ones, as a
+ * picture-in-picture window stays over the others.
  */
 #define WM_ATTR_FLOAT		0x0400
 /*
@@ -81,6 +82,25 @@ extern "C" {
  * shows its slides in one.
  */
 #define WM_ATTR_SCREEN		0x0800
+/*
+ * An input aid, a screen keyboard: a window that never has the keys and
+ * floats. It stands in front of every other window but the menus, the
+ * panels, pop-ups and windows in full screen among them, and of the
+ * message line, so that what it types can always be typed. A panel or a
+ * window brought forward comes up behind it. A window that only floats
+ * (a picture in a picture) or only never has the keys (a palette of
+ * tools) is not one.
+ */
+#define WM_ATTR_AID		( WM_ATTR_NOFOCUS | WM_ATTR_FLOAT )
+
+/*
+ * A menu, given with WM_ATTR_POPUP: a menu's lists, a pop-up list, the
+ * candidates of a conversion. It is up only until a choice is made, and
+ * it stands in front of every window, the input aids included; only the
+ * pointer is laid over it. The layers, from the back: the ordinary
+ * windows, the floating ones, the pop-ups, the input aids, the menus.
+ */
+#define WM_ATTR_MENU		0x1000
 
 /*
  * A window of its own, as a person sees one: it comes forward with the
@@ -325,6 +345,16 @@ IMPORT ER  wm_move( INT wid, CONST T_DPRECT *outer );
  * gives it back.
  */
 IMPORT ER  wm_place( INT wid, CONST T_DPRECT *outer );
+/*
+ * A window in full screen (OB_WP_FULL of OB_WR_PLACE): its work area the
+ * whole screen, over the message line, with no frame, band or bars;
+ * out of it, the frame, place and size it had before given back. The
+ * window stays where it is among the others; panels of its own stand in
+ * front of it. The message line is under it while it, or a window of
+ * its own, is in front. Whether a window is in it.
+ */
+IMPORT ER  wm_full( INT wid, BOOL on );
+IMPORT BOOL wm_full_is( INT wid );
 
 /* Bring a window to the front, or send it behind everything */
 IMPORT ER  wm_raise( INT wid );
@@ -345,6 +375,18 @@ IMPORT ER  wm_set_parent( INT wid, INT parent );
 IMPORT INT wm_list( INT *wids, INT max );
 IMPORT INT wm_title( INT wid, char *buf, INT max );
 IMPORT ER  wm_lower( INT wid );
+
+/*
+ * Windows opened together (the links a window opens with it, 自動起動):
+ * wid given its place, rank, in the group. Of the group's windows that
+ * are shown, those of a higher rank stand in front of it: a window that
+ * comes up in front of one of them goes back just behind the hindmost of
+ * them, so the order the ranks say holds however late each window comes
+ * up, and every other window, one a person brought forward meanwhile
+ * among them, stays where it is. A process started as one of a group
+ * (knl_ob_rank_arm) has its first ordinary window placed so as it opens.
+ */
+IMPORT ER  wm_set_rank( INT wid, UINT group, UINT rank );
 
 IMPORT ER  wm_show( INT wid, BOOL on );
 
@@ -598,12 +640,44 @@ typedef struct {
 IMPORT ER  wm_surf_get( INT wid, ID pid, T_WMSURF *s );
 IMPORT ER  wm_surf_put( INT wid, ID pid, CONST T_DPRECT *r, INT n );
 
+/*
+ * A process's first picture: wm_mark_drawn is told by the system call
+ * that shows what the process drew in its window (wm_obj_flush), as
+ * wm_surf_put marks the window itself; wm_prc_drawn is TRUE once a
+ * window the process made, still open, has been so marked. Parts and
+ * the frame the window manager draws do not count.
+ */
+IMPORT void wm_mark_drawn( INT wid );
+IMPORT BOOL wm_prc_drawn( ID pid );
+
 /* The surfaces a process had, let go of as it ends */
 IMPORT void knl_wm_surf_prc_end( ID pid );
 
 /* For a test: how many surfaces there are and the pages they hold; a window's, where its process has it */
 IMPORT INT knl_wm_surf_count( UD *p_pages );
 IMPORT ER  knl_wm_surf_ref( INT wid, ID *p_pid, UBINT *p_va, UD *p_pages );
+
+/*
+ * A work area shown from two BOs of the GPU (OB_WR_GSURF of ts/ob.h):
+ * set by process pid, the window holding a reference to each BO of its
+ * own; one of them shown once no job of the GPU that uses it is left;
+ * let go of. wm_gsurf_ref reads the state. The process ends: what it
+ * set is let go of (knl_wm_gsurf_prc_end).
+ */
+struct gpubo;
+IMPORT ER  wm_gsurf_set( INT wid, ID pid, struct gpubo *CONST *bo, INT w, INT h, UINT pitch );
+IMPORT ER  wm_gsurf_show( INT wid, ID pid, INT idx, UW serial, CONST T_DPRECT *r, INT n );
+IMPORT ER  wm_gsurf_drop( INT wid, ID pid );
+IMPORT ER  wm_gsurf_ref( INT wid, T_OBWGSTAT *st );
+IMPORT void knl_wm_gsurf_prc_end( ID pid );
+
+/*
+ * For a test: how many windows are shown from BOs; a window's BO idx
+ * (no reference taken), and its own pixel at the work area's middle
+ */
+IMPORT INT knl_wm_gsurf_count( void );
+IMPORT ER  knl_wm_gsurf_bo( INT wid, INT idx, struct gpubo **p_bo );
+IMPORT ER  knl_wm_gsurf_own_px( INT wid, INT x, INT y, UW *p_px );
 
 /* --------------------------------------------------------------- pointer */
 
@@ -921,7 +995,140 @@ IMPORT ER  wm_frames( T_WMFRAMES *st );
 /* The size of the screen, 0 by 0 before the manager is up */
 IMPORT void wm_screen( INT *p_w, INT *p_h );
 IMPORT void wm_screen_main( INT *p_w, INT *p_h );	/* the main screen (10.4.8); wm_screen is the whole view */
+IMPORT void wm_screen_main_rect( T_DPRECT *r );	/* its rectangle in the view: not at the corner when a screen is left of it or above it */
+IMPORT BOOL wm_screen_is_main( CONST T_DPRECT *on );	/* whether a screen's rectangle (wm_screen_at) is the main screen's */
 IMPORT void wm_screen_at( INT x, INT y, T_DPRECT *r );	/* the screen a point of the view is on */
+
+/*
+ * The screen a point of the view is on, the main screen when it is on
+ * none (not the nearest: a place between screens or past them is the
+ * main screen's); and the screen a window that has no place kept opens
+ * on: the one the pointer is on, the main screen when that cannot be
+ * told (no pointer, or the pointer on no screen). Both reach a program
+ * by svc.
+ */
+IMPORT void wm_screen_of( INT x, INT y, T_DPRECT *r );
+IMPORT void wm_screen_new_rect( T_DPRECT *r );
+
+/*
+ * Where a rectangle w by h stands in the middle of a screen's rectangle
+ * on, its left and top kept on it (one of no size: 1280 by 800 at the
+ * corner, for a system that does not answer): in the middle of the main
+ * screen for what the system says (wm_main_centre), of the screen new
+ * windows open on for what a program opens with no place kept
+ * (wm_new_centre)
+ */
+static __inline__ void wm_centre_in( CONST T_DPRECT *on, INT w, INT h, INT *p_x, INT *p_y )
+{
+	T_DPRECT	m = *on;
+	INT		sw = m.right - m.left, sh = m.bottom - m.top;
+
+	if ( sw <= 0 || sh <= 0 ) {
+		m.left = m.top = 0;
+		sw = 1280;
+		sh = 800;
+	}
+	*p_x = m.left + ( ( sw > w ) ? ( sw - w ) / 2 : 0 );
+	*p_y = m.top + ( ( sh > h ) ? ( sh - h ) / 2 : 0 );
+}
+
+static __inline__ void wm_main_centre( INT w, INT h, INT *p_x, INT *p_y )
+{
+	T_DPRECT	m;
+
+	m.left = m.top = m.right = m.bottom = 0;
+	wm_screen_main_rect(&m);
+	wm_centre_in(&m, w, h, p_x, p_y);
+}
+
+static __inline__ void wm_new_centre( INT w, INT h, INT *p_x, INT *p_y )
+{
+	T_DPRECT	m;
+
+	m.left = m.top = m.right = m.bottom = 0;
+	wm_screen_new_rect(&m);
+	wm_centre_in(&m, w, h, p_x, p_y);
+}
+
+/*
+ * A program's own place for a window it opens with no place kept, from
+ * the corner of the screen new windows open on, into the view: what was
+ * from the view's corner when the main screen was always there
+ */
+static __inline__ INT wm_new_x( INT x )
+{
+	T_DPRECT	m;
+
+	m.left = m.top = m.right = m.bottom = 0;
+	wm_screen_new_rect(&m);
+	return m.left + x;
+}
+
+static __inline__ INT wm_new_y( INT y )
+{
+	T_DPRECT	m;
+
+	m.left = m.top = m.right = m.bottom = 0;
+	wm_screen_new_rect(&m);
+	return m.top + y;
+}
+
+/*
+ * A window's place as it is kept (an object's metadata "window", 10.4.8):
+ * its rectangle from the top left of the screen its own top left corner
+ * is on, and which screen that is -- the identity the display on it has
+ * by its EDID, as DISPLAY.<ident> keeps an output's setting, or 0 for the
+ * main screen. A place kept without a screen is the main screen's, so a
+ * place kept while the main screen was at the view's corner reads as it
+ * did. wm_place_keep turns a rectangle of the view into a place;
+ * wm_place_open turns a place back into the view, on its screen when it
+ * is on (1), else on the main screen at the same place from its corner,
+ * moved in to stand inside it (0). A program calls the same two (svc).
+ */
+typedef struct {
+	T_DPRECT	r;
+	UW		screen;
+} T_WMPLACE;
+
+IMPORT ER  wm_place_keep( CONST T_DPRECT *view, T_WMPLACE *p );
+IMPORT ER  wm_place_open( CONST T_WMPLACE *p, T_DPRECT *view );
+
+/* A screen's identity as a place keeps it in words: 8 hex digits, none for the main screen */
+static __inline__ UW wm_place_screen_of( CONST char *s )
+{
+	UW	v = 0;
+	INT	k;
+
+	for ( k = 0; s != 0 && s[k] != 0 && k < 8; k++ ) {
+		CONST char	c = s[k];
+
+		v = ( v << 4 ) | (UW)( ( c >= '0' && c <= '9' ) ? c - '0' : ( c >= 'a' && c <= 'f' ) ? c - 'a' + 10
+				       : ( c >= 'A' && c <= 'F' ) ? c - 'A' + 10 : 0 );
+	}
+	return v;
+}
+
+/*
+ * A kept place's corner (*p_x, *p_y in and out) and size, and the screen
+ * it names in words (none: the main screen), turned into the view
+ * (wm_place_open): what a program that keeps a place of its own calls
+ * before it opens its window there
+ */
+static __inline__ void wm_place_xywh( INT *p_x, INT *p_y, INT w, INT h, CONST char *screen )
+{
+	T_WMPLACE	p;
+	T_DPRECT	v;
+
+	p.r.left = *p_x;
+	p.r.top = *p_y;
+	p.r.right = *p_x + w;
+	p.r.bottom = *p_y + h;
+	p.screen = wm_place_screen_of(screen);
+	if ( wm_place_open(&p, &v) >= 0 ) {
+		*p_x = v.left;
+		*p_y = v.top;
+	}
+}
 
 /*
  * The screen as last built, copied into 'dst' (width by height pixels,
@@ -1038,7 +1245,15 @@ IMPORT BOOL wm_obj_shown( INT wid, TS_UUID *p_obj );
 IMPORT INT  wm_obj_showing( CONST TS_UUID *obj );
 /* The process that made a window object, 0 the system's or no such window */
 IMPORT ID   wm_obj_maker( INT wid );
+/*
+ * Every program's window asked to close: the processes asked, at most
+ * max, in pids, how many the answer. _but leaves the windows of process
+ * except as they are (the first window, closed last as the session ends).
+ * wm_obj_close_window asks one window.
+ */
 IMPORT INT  wm_obj_close_programs( ID *pids, INT max );
+IMPORT INT  wm_obj_close_programs_but( ID *pids, INT max, ID except );
+IMPORT ER   wm_obj_close_window( INT wid );
 IMPORT INT  wm_obj_program_window( ID pid );
 IMPORT ER   knl_wmobj_init( void );		/* after the object layer is up */
 

@@ -87,6 +87,12 @@ IMPORT void ui_sub( CONST TS_UUID *parent );
 
 /* The program object whose icon the window wears in its band (set before ui_open) */
 IMPORT void ui_icon( CONST char *prog );
+/*
+ * The object the next window ui_open makes says it shows (its UUID as
+ * text): the window stands for it, so that opening the object again
+ * brings this window to the front rather than opening another
+ */
+IMPORT void ui_shows( CONST char *obj );
 IMPORT void ui_close( UI *u );
 
 /* A notice from the window's channel (u->port): what it was, and the part */
@@ -125,7 +131,12 @@ IMPORT void ui_set_text( UI *u, INT num, CONST char *s );	/* a box's letters, a 
 IMPORT INT  ui_fields( UI *u, INT num, INT *v, INT n );
 IMPORT void ui_set_fields( UI *u, INT num, CONST INT *v, INT n );
 IMPORT void ui_blank( UI *u, INT num );			/* fields shown empty */
-IMPORT void ui_names( UI *u, INT num, CONST char *const *names, INT n );
+/*
+ * A list's, a selector's or a pop-up's names, as many as there are: E_OK,
+ * or what went wrong (E_NOMEM when there is not the memory for them,
+ * the part then keeping the names it had; E_NOEXS for no such part)
+ */
+IMPORT ER   ui_names( UI *u, INT num, CONST char *const *names, INT n );
 IMPORT void ui_off( UI *u, INT num, BOOL off );		/* shown, but not to be worked */
 IMPORT void ui_show( UI *u, INT num, BOOL shown );
 IMPORT void ui_focus( UI *u, INT num );			/* a box given the keys, the caret after its letters */

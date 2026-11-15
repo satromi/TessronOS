@@ -384,7 +384,8 @@ static T_TAD *h_tray_frag( T_DDED *e )
 
 static void h_tray_pictures( T_DDED *e, T_TAD *frag )
 {
-	(void)e; (void)frag;
+	(void)e;
+	(void)ta_tray_pictures(frag);	/* a picture of 画面印刷 in the tray goes beside the record */
 }
 
 static void h_tray_taken( T_DDED *e )
@@ -427,89 +428,17 @@ static void carry_look( T_DTREQ *rq, INT sx, INT sy, INT cx, INT cy, INT w, INT 
 }
 
 /*
- * What is carried out, as a fragment with its look, in the tray's place
- * of its own for the desktop to put in where it is let go (DT_F_FRAG);
- * FALSE when it could not be put there
- */
-static BOOL frag_put( CONST T_TAD *frag )
-{
-	T_TRREC	r;
-	UB	*buf;
-	SZ	size = 0;
-	ER	er;
-
-	buf = ( frag != NULL ) ? rec_text(frag, &size) : NULL;
-	if ( buf == NULL ) return FALSE;
-	memset(&r, 0, sizeof(r));
-	r.kind = TR_TAD;
-	r.data = buf;
-	r.size = size;
-	er = tr_set_dat(&r, 1);
-	free(buf);
-	return (BOOL)( er >= E_OK );
-}
-
-/* Where the hand let go back over this window (DT_F_BACK), in its work area */
-static BOOL back_at( CONST T_DTANS *an, INT *p_x, INT *p_y )
-{
-	T_OBWPOS	wp;
-	SZ		asz = 0;
-
-	if ( ob_rea_rec(g_kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) < E_OK ) return FALSE;
-	*p_x = an->look.w - wp.wleft;
-	*p_y = an->look.h - wp.wtop;
-	return TRUE;
-}
-
-/*
- * Letters carried out of the window: the desktop follows the hand on
- * (DT_RQ_CARRY with DT_F_TEXT) and puts them where they are let go -- a
- * text of the desktop's as they looked (DT_F_FRAG), a figure of the
- * desktop's or another program's window as one line, line ends and tabs
- * as spaces. They leave here unless they were copied: the second button
- * on the way, or another program's window that was not asked beforehand
- * whether it takes them, and may yet refuse them. Let go back over this
- * window, they move within it (DT_F_BACK).
+ * Letters carried out of the window (ta_text_away): the desktop follows
+ * the hand on and puts them where they are let go; they leave here unless
+ * they were copied, and let go back over this window they move within it
  */
 static ER h_text_away( T_DDED *e, INT sx, INT sy, INT cx, INT cy, UB *s, INT n )
 {
 	T_DTREQ	rq;
-	T_DTANS	an;
-	T_TAD	*frag;
-	INT	i, k;
-	BOOL	put;
-	ER	er;
-	char	m[64];
 
 	memset(&rq, 0, sizeof(rq));
-	rq.req = DT_RQ_CARRY;
-	rq.flags = DT_F_TEXT;
-	k = ( n < DT_CARRY_TEXT - 1 ) ? n : DT_CARRY_TEXT - 1;
-	while ( k > 0 && k < n && ( s[k] & 0xC0 ) == 0x80 ) k--;	/* cut at a letter's edge */
-	for ( i = 0; i < k; i++ ) rq.text[i] = ( s[i] == '\n' || s[i] == '\t' ) ? ' ' : s[i];
-	rq.text[k] = 0;
-	frag = de_sel_frag(e);
-	put = frag_put(frag);
-	if ( frag != NULL ) tad_free(frag);
-	if ( put ) rq.flags |= DT_F_FRAG;
 	carry_look(&rq, sx, sy, cx, cy, 120, 20);
-	memset(&an, 0, sizeof(an));
-	er = ask_desktop(&rq, &an, 30 * 60 * 1000);
-	if ( put ) (void)tr_set_dat(NULL, 0);
-	snprintf(m, sizeof(m), "letters carried out (%d)%s%s%s", (INT)er,
-		 ( er >= E_OK && an.how == DT_HOW_COPY ) ? " as a copy" : "",
-		 ( er >= E_OK && ( an.flags & DT_F_TO_PROG ) != 0 ) ? " to a program" : "",
-		 ( er < E_OK && ( an.flags & DT_F_BACK ) != 0 ) ? " back here" : "");
-	note(m);
-	if ( er < E_OK && ( an.flags & DT_F_BACK ) != 0 ) {
-		/* back over this window: within it, where the hand let go */
-		INT	x, y;
-
-		if ( back_at(&an, &x, &y) ) de_sel_back(e, x, y, (BOOL)( an.how == DT_HOW_COPY ));
-		return 0;
-	}
-	if ( er < E_OK ) return er;	/* the desktop said so, when it was not over this window */
-	return ( an.how == DT_HOW_COPY ) ? 0 : 1;
+	return ta_text_away(e, &rq, s, n);
 }
 
 /* What the desktop is asked of a link, carried or put, as it shows here */
@@ -555,7 +484,7 @@ static BOOL piece_away( T_DDED *e, CONST T_DDTHING *th, INT w, INT h )
 	char		m[64];
 
 	if ( p != NULL && tad_node_copy(frag, p, NULL, th->node) != NULL ) {
-		put = frag_put(frag);
+		put = ta_frag_put(frag);
 	}
 	if ( frag != NULL ) tad_free(frag);
 	if ( !put ) {
@@ -583,7 +512,7 @@ static BOOL piece_away( T_DDED *e, CONST T_DDTHING *th, INT w, INT h )
 		INT		x, y;
 
 		t.copy = (BOOL)( an.how == DT_HOW_COPY || th->copy );
-		if ( back_at(&an, &x, &y) ) de_thing_back(e, x, y, &t);
+		if ( ta_back_at(&an, &x, &y) ) de_thing_back(e, x, y, &t);
 		return FALSE;
 	}
 	if ( er < E_OK || an.how == DT_HOW_COPY || th->copy ) return FALSE;
@@ -633,7 +562,7 @@ static BOOL h_thing_away( T_DDED *e, INT sx, INT sy, CONST T_DDTHING *th )
 
 		note("link carried back here");
 		t.copy = (BOOL)( an.how == DT_HOW_COPY || th->copy );
-		if ( back_at(&an, &x, &y) ) de_thing_back(e, x, y, &t);
+		if ( ta_back_at(&an, &x, &y) ) de_thing_back(e, x, y, &t);
 		return FALSE;
 	}
 	if ( er < E_OK ) {

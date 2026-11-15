@@ -63,6 +63,7 @@
 #include <ts/keymap.h>
 #include <ts/sysdef.h>
 #include <ts/psx.h>
+#include <ts/sbx.h>
 
 typedef UBINT (*SVCFN)( UBINT, UBINT, UBINT, UBINT, UBINT, UBINT, UBINT, UBINT );
 
@@ -617,6 +618,222 @@ LOCAL INT svc_ts_lst_prc( ID *pids, INT max )
 	return n;
 }
 
+/*
+ * Restricted processes (include/ts/sbx.h, design 5.9): the group of each
+ * call. A class is wholly of one group, or of none and then the calls
+ * that reach beyond what the process holds are named one by one. A
+ * call named with SBX_SELF is the process's still when its first
+ * argument (SBX_SELF2: its third) is itself, or (SBX_SELF0) 0, which
+ * names the caller there.
+ */
+#define SBX_CLASSES	( TSN_CLASS_US + 1 )
+
+LOCAL const UB sbx_class[SBX_CLASSES] = {
+	[TSN_CLASS_SO]	= TS_SBX_NET,
+	[TSN_CLASS_DP]	= TS_SBX_WIN,
+	[TSN_CLASS_WM]	= TS_SBX_WIN,
+	[TSN_CLASS_GP]	= TS_SBX_GPU,
+	[TSN_CLASS_SR]	= TS_SBX_DEV,
+	[TSN_CLASS_US]	= TS_SBX_DEV,
+};
+
+#define SBX_SELF	1		/* allowed when the first argument is the caller */
+#define SBX_SELF0	2		/* or that, or 0 */
+#define SBX_SELF2	3		/* when the third is */
+
+typedef struct {
+	UW	fncd;
+	UB	group;		/* TS_SBX_* */
+	UB	self;		/* SBX_SELF*, 0 */
+} SBXCALL;
+
+LOCAL const SBXCALL sbx_calls[] = {
+	/* other processes */
+	{ TSN_TS_SPN_PRC,	TS_SBX_PROC },
+	{ TSN_TS_SPN_OBJ,	TS_SBX_PROC },
+	{ TSN_TS_TER_PRC,	TS_SBX_PROC, SBX_SELF },
+	{ TSN_TS_WAI_PRC,	TS_SBX_PROC },
+	{ TSN_TS_WAI_PSX,	TS_SBX_PROC },
+	{ TSN_TS_REF_PRC,	TS_SBX_PROC, SBX_SELF0 },
+	{ TSN_TS_REF_PSX,	TS_SBX_PROC, SBX_SELF0 },
+	{ TSN_TS_KIL_PRC,	TS_SBX_PROC, SBX_SELF },
+	{ TSN_TS_SND_MSG,	TS_SBX_PROC, SBX_SELF },
+	{ TSN_TS_SET_PGID,	TS_SBX_PROC },
+	{ TSN_TS_SET_SID,	TS_SBX_PROC },
+	{ TSN_TS_LST_PRC,	TS_SBX_PROC },
+	{ TSN_OB_DUP_KEY,	TS_SBX_PROC, SBX_SELF2 },
+	/* objects by UUID or name */
+	{ TSN_TS_LKP_OBJ,	TS_SBX_OBJ },
+	{ TSN_OB_OPN_OBJ,	TS_SBX_OBJ },
+	{ TSN_OB_CRE_OBJ,	TS_SBX_OBJ },
+	{ TSN_OB_DEL_OBJ,	TS_SBX_OBJ },
+	{ TSN_OB_REF_OBJ,	TS_SBX_OBJ },
+	{ TSN_OB_LST_OBJ,	TS_SBX_OBJ },
+	{ TSN_OB_LNK_OBJ,	TS_SBX_OBJ },
+	{ TSN_OB_UNL_OBJ,	TS_SBX_OBJ },
+	{ TSN_OB_GET_PRT,	TS_SBX_OBJ },
+	{ TSN_OB_SET_PRT,	TS_SBX_OBJ },
+	{ TSN_OB_FND_NAM,	TS_SBX_OBJ },
+	{ TSN_OB_BEG_TRX,	TS_SBX_OBJ },
+	{ TSN_OB_END_TRX,	TS_SBX_OBJ },
+	{ TSN_OB_CPY_OBJ,	TS_SBX_OBJ },
+	{ TSN_OB_GET_DOM,	TS_SBX_OBJ },
+	{ TSN_OB_REF_VOL,	TS_SBX_OBJ },
+	{ TSN_OB_FND_LNK,	TS_SBX_OBJ },
+	{ TSN_OB_LST_LNK,	TS_SBX_OBJ },
+	{ TSN_OB_FND_SYS,	TS_SBX_OBJ },
+	{ TSN_OB_ACC_OBJ,	TS_SBX_OBJ },
+	{ TSN_OB_REF_VOB,	TS_SBX_OBJ },
+	{ TSN_OB_REF_VID,	TS_SBX_OBJ },
+	{ TSN_OB_DUP_OBJ,	TS_SBX_OBJ },
+	{ TSN_OB_CHK_LST,	TS_SBX_OBJ },
+	/* files and folders by path */
+	{ TSN_FS_OPEN,		TS_SBX_OBJ },
+	{ TSN_FS_STAT,		TS_SBX_OBJ },
+	{ TSN_FS_TRUNCATE,	TS_SBX_OBJ },
+	{ TSN_FS_MKDIR,		TS_SBX_OBJ },
+	{ TSN_FS_RMDIR,		TS_SBX_OBJ },
+	{ TSN_FS_UNLINK,	TS_SBX_OBJ },
+	{ TSN_FS_RENAME,	TS_SBX_OBJ },
+	{ TSN_FS_STATVFS,	TS_SBX_OBJ },
+	{ TSN_FS_UTIME,		TS_SBX_OBJ },
+	{ TSN_FS_XSTAT,		TS_SBX_OBJ },
+	{ TSN_FS_LINK,		TS_SBX_OBJ },
+	{ TSN_FS_CHMOD,		TS_SBX_OBJ },
+	{ TSN_FS_OPENAT,	TS_SBX_OBJ },
+	{ TSN_FS_STATAT,	TS_SBX_OBJ },
+	{ TSN_FS_MKDIRAT,	TS_SBX_OBJ },
+	{ TSN_FS_RMDIRAT,	TS_SBX_OBJ },
+	{ TSN_FS_UNLINKAT,	TS_SBX_OBJ },
+	{ TSN_FS_UTIMEAT,	TS_SBX_OBJ },
+	{ TSN_FS_RENAMEAT,	TS_SBX_OBJ },
+	{ TSN_FS_FSTATVFS,	TS_SBX_OBJ },
+	/* the system's own */
+	{ TSN_FS_SYNC,		TS_SBX_SYS },
+	{ TSN_FS_ATTACH_DEV,	TS_SBX_SYS },
+	{ TSN_FS_DETACH_DEV,	TS_SBX_SYS },
+	{ TSN_FS_MOUNTS,	TS_SBX_SYS },
+	{ TSN_FS_OPN_VOL,	TS_SBX_SYS },
+	{ TSN_TK_SET_TIM,	TS_SBX_SYS },
+	{ TSN_TK_SET_TIM_U,	TS_SBX_SYS },
+	{ TSN_TK_SET_UTC,	TS_SBX_SYS },
+	{ TSN_DT_SETTIME,	TS_SBX_SYS },
+	{ TSN_DT_SETSYSTZ,	TS_SBX_SYS },
+	{ TSN_DT_SETSYSZONE,	TS_SBX_SYS },
+#ifdef TSN_DT_SETRTC
+	{ TSN_DT_SETRTC,	TS_SBX_SYS },
+#endif
+	{ TSN_TM_LOG_READ,	TS_SBX_SYS },
+	{ TSN_OB_LOGIN,		TS_SBX_SYS },
+	{ TSN_OB_SET_PWD,	TS_SBX_SYS },
+	{ TSN_OB_ATT_VOL,	TS_SBX_SYS },
+	{ TSN_OB_DET_VOL,	TS_SBX_SYS },
+	{ TSN_OB_SET_DOM,	TS_SBX_SYS },
+	{ TSN_OB_WIP_VOL,	TS_SBX_SYS },
+	{ TSN_OB_CHK_VOL,	TS_SBX_SYS },
+	{ TSN_OB_CHK_REQ,	TS_SBX_SYS },
+	{ TSN_OB_CHK_BOOT,	TS_SBX_SYS },
+};
+
+LOCAL CONST char * const sbx_prefix[SBX_CLASSES] = {
+	"tk_", "ts_", "fs_", "dt_", "pm_", "so_", "tm_", "ob_", "dp_", "wm_", "gp_", "sr_", "us_"
+};
+
+/* The groups call fncd with these first and third arguments needs of process me, 0 for none */
+LOCAL UINT sbx_group_of( UINT fncd, UBINT a0, UBINT a2, ID me )
+{
+	UINT	cls = TSN_CLASS(fncd), i, g;
+
+	if ( cls < SBX_CLASSES && sbx_class[cls] != 0 ) {
+		return sbx_class[cls];
+	}
+	for ( i = 0; i < sizeof(sbx_calls) / sizeof(sbx_calls[0]); i++ ) {
+		if ( sbx_calls[i].fncd != fncd ) {
+			continue;
+		}
+		g = sbx_calls[i].self;
+		if ( ( g == SBX_SELF && (ID)a0 == me ) || ( g == SBX_SELF0 && ( (ID)a0 == me || (ID)a0 == 0 ) )
+		  || ( g == SBX_SELF2 && (ID)a2 == me ) ) {
+			return 0;
+		}
+		return sbx_calls[i].group;
+	}
+	return 0;
+}
+
+/*
+ * A call of process me that its set shuts out (sbx, as knl_prc_sbx
+ * gives it): refused (E_OACV, EX_PERM in the files), or the process
+ * ended, with the console told which call it was. The gateway ends it
+ * there and then (now); a layer behind it, inside a call into the
+ * objects that has to come out first, has it ended as that call returns.
+ */
+LOCAL UBINT sbx_refuse( UINT fncd, UINT groups, UW sbx, ID me, BOOL now )
+{
+	UINT	cls = TSN_CLASS(fncd);
+	CONST char *pre = ( cls < SBX_CLASSES ) ? sbx_prefix[cls] : "?";
+
+	UINT	first = knl_prc_sbx_count(fncd, groups);
+
+	if ( ( sbx >> TS_SBX_HOW_SHIFT ) & TS_SBX_REFUSE ) {
+		if ( first != 0 ) {
+			/* once per group for a process, in any build: the rest are counted (attribute sandbox_refused) */
+			UB	name[TS_FLT_FILE];
+
+			if ( knl_prc_file_peek(me, name, sizeof(name)) == 0 ) {
+				name[0] = '?';		/* started from a program object: no file name */
+				name[1] = 0;
+			}
+			tm_printf((UB *)"TessronOS: pid %d \"%s\" is refused by its sandbox (%x): %s%d (call %x, group %x);"
+				  " further refusals are counted\n",
+				  me, name, sbx & TS_SBX_ALL, pre, TSN_NUMBER(fncd), fncd, groups);
+		}
+		knl_ob_deny_note("sandbox", NULL, fncd, groups);
+		return (UBINT)(BINT)( ( cls == TSN_CLASS_FS ) ? EX_PERM : E_OACV );
+	}
+	tm_printf((UB *)"TessronOS: pid %d breaks its sandbox (%x): %s%d (call %x, group %x), and ends\n",
+		  me, sbx & TS_SBX_ALL, pre, TSN_NUMBER(fncd), fncd, groups);
+	if ( now ) {
+		(void)ts_ter_prc(me, TS_ABORT_SBX);	/* no return */
+	}
+	knl_prc_sbx_break(fncd);
+	return (UBINT)(BINT)E_OACV;
+}
+
+/*
+ * For the layers behind the gateway (obsvc.c): whether the caller may
+ * reach what is of the groups given -- an object of a kind, opened or
+ * made by its UUID -- E_OK, or as sbx_refuse answers.
+ */
+EXPORT ER knl_sbx_may( UINT groups, UINT fncd )
+{
+	UW	sbx;
+	ID	me = ts_get_pid();
+
+	if ( me <= 0 ) {
+		return E_OK;
+	}
+	sbx = knl_prc_sbx();
+	if ( ( sbx & groups & TS_SBX_ALL ) == 0 ) {
+		return E_OK;
+	}
+	return (ER)(BINT)sbx_refuse(fncd, sbx & groups & TS_SBX_ALL, sbx, me, FALSE);
+}
+
+LOCAL ER svc_ts_set_sbx( UINT groups, UINT how )
+{
+	return knl_prc_set_sbx(groups, how);
+}
+
+LOCAL INT svc_ts_get_sbx( void )
+{
+	return (INT)knl_prc_sbx();
+}
+
+#ifdef TSN_TS_SET_TLS
+IMPORT ER knl_set_tls( UBINT tp );	/* the calling task's thread pointer (kernel/sysdepend/cpu) */
+#endif
+
 LOCAL const FP ts_svc_tbl[TSN_TS_MAX + 1] = {
 	[TSN_NUMBER(TSN_TS_SPN_PRC)]	= F(svc_ts_spn_prc),
 	[TSN_NUMBER(TSN_TS_GET_INH)]	= F(svc_ts_get_inh),
@@ -653,6 +870,11 @@ LOCAL const FP ts_svc_tbl[TSN_TS_MAX + 1] = {
 	[TSN_NUMBER(TSN_TS_MAP_MEM)]	= F(svc_ts_map_mem),
 	[TSN_NUMBER(TSN_TS_UNM_MEM)]	= F(ts_unm_mem),
 	[TSN_NUMBER(TSN_TS_CTL_MEM)]	= F(ts_ctl_mem),
+	[TSN_NUMBER(TSN_TS_SET_SBX)]	= F(svc_ts_set_sbx),
+	[TSN_NUMBER(TSN_TS_GET_SBX)]	= F(svc_ts_get_sbx),
+#ifdef TSN_TS_SET_TLS
+	[TSN_NUMBER(TSN_TS_SET_TLS)]	= F(knl_set_tls),
+#endif
 };
 
 /*
@@ -1356,7 +1578,12 @@ IMPORT const FP knl_so_svc_tbl[TSN_SO_MAX + 1];
  * A drawing environment is handed to a process only through the key of
  * a window it may write (wm_obj_gid), and is its own from then on: what
  * it draws with is looked up here on every call, and a window that has
- * closed takes its environment's use with it.
+ * closed takes its environment's use with it. The table is read and
+ * written under draw_mtx: processes on other processors open their
+ * windows at the same time (the programs the desktop opens at its
+ * start), and two that took the same free place unguarded would leave
+ * one of them refused everything it draws, its window blank though it
+ * had drawn and shown it.
  */
 #define GRANT_MAX	32
 
@@ -1384,7 +1611,8 @@ LOCAL BOOL grant_live( CONST GRANT *g )
  * Environments of memory a process opened (dp_open_mem): the kernel's
  * copy of the process's picture they draw into, and where in the
  * process it is written back as one is closed. Each is its process's
- * alone, and goes with it (knl_dp_prc_end).
+ * alone, and goes with it (knl_dp_prc_end). Under draw_mtx, as the
+ * grants are.
  */
 #define MEMENV_MAX	8
 
@@ -1398,11 +1626,11 @@ typedef struct {
 } MEMENV;
 
 LOCAL MEMENV	memenv[MEMENV_MAX];
-LOCAL ID	memenv_mtx;
+LOCAL ID	draw_mtx;		/* the grants and the environments of memory */
 
-LOCAL BOOL memenv_lock( void )
+LOCAL BOOL draw_lock( void )
 {
-	if ( memenv_mtx == 0 ) {
+	if ( draw_mtx == 0 ) {
 		T_CMTX	c;
 		ID	id;
 
@@ -1412,28 +1640,25 @@ LOCAL BOOL memenv_lock( void )
 		id = tk_cre_mtx(&c);
 		if ( id <= 0 ) return FALSE;
 		/* the first to set it wins; tasks on other processors race here */
-		if ( atomic_cmpxchg((UW *)&memenv_mtx, (UW)id, 0) == 0 ) {
+		if ( atomic_cmpxchg((UW *)&draw_mtx, (UW)id, 0) == 0 ) {
 			id = 0;
 		}
 		if ( id > 0 ) tk_del_mtx(id);
 	}
-	return (BOOL)( tk_loc_mtx(memenv_mtx, TMO_FEVR) >= E_OK );
+	return (BOOL)( tk_loc_mtx(draw_mtx, TMO_FEVR) >= E_OK );
 }
 
+/* Whether gid is an environment of memory of pid's. Under draw_mtx. */
 LOCAL BOOL memenv_mine( ID pid, INT gid )
 {
 	INT	i;
-	BOOL	mine = FALSE;
 
-	if ( !memenv_lock() ) return FALSE;
 	for ( i = 0; i < MEMENV_MAX; i++ ) {
 		if ( memenv[i].used && memenv[i].gid == gid && memenv[i].pid == pid ) {
-			mine = TRUE;
-			break;
+			return TRUE;
 		}
 	}
-	tk_unl_mtx(memenv_mtx);
-	return mine;
+	return FALSE;
 }
 
 LOCAL BOOL granted( INT gid )
@@ -1441,18 +1666,17 @@ LOCAL BOOL granted( INT gid )
 	ID	pid = ts_get_pid();
 	INT	i;
 
-	if ( pid <= 0 || gid < 0 ) {
+	BOOL	ok;
+
+	if ( pid <= 0 || gid < 0 || !draw_lock() ) {
 		return FALSE;
 	}
-	if ( memenv_mine(pid, gid) ) {
-		return TRUE;
+	ok = memenv_mine(pid, gid);
+	for ( i = 0; i < GRANT_MAX && !ok; i++ ) {
+		ok = (BOOL)( grants[i].pid == pid && grants[i].gid == gid && grant_live(&grants[i]) );
 	}
-	for ( i = 0; i < GRANT_MAX; i++ ) {
-		if ( grants[i].pid == pid && grants[i].gid == gid && grant_live(&grants[i]) ) {
-			return TRUE;
-		}
-	}
-	return FALSE;
+	tk_unl_mtx(draw_mtx);
+	return ok;
 }
 
 /* A string of the process's, copied in with its terminator; FALSE when it cannot be */
@@ -1620,9 +1844,11 @@ LOCAL INT svc_wm_obj_gid( ID key )
 	if ( wid <= 0 ) return E_OBJ;		/* not a window: nothing to draw in */
 	gid = wm_gid(wid);
 	if ( gid < 0 ) return gid;
+	if ( !draw_lock() ) return E_SYS;
 	for ( i = 0; i < GRANT_MAX; i++ ) {
 		if ( grants[i].pid == pid && grants[i].gid == gid && grants[i].wid == wid
 		  && ts_uuid_cmp(&grants[i].win, &u) == 0 ) {
+			tk_unl_mtx(draw_mtx);
 			return gid;
 		}
 		/* a slot whose window has gone may be taken again */
@@ -1630,12 +1856,14 @@ LOCAL INT svc_wm_obj_gid( ID key )
 			free = i;
 		}
 	}
-	if ( free < 0 ) return E_LIMIT;
-	grants[free].gid = gid;
-	grants[free].pid = pid;
-	grants[free].wid = wid;
-	grants[free].win = u;
-	return gid;
+	if ( free >= 0 ) {
+		grants[free].gid = gid;
+		grants[free].pid = pid;
+		grants[free].wid = wid;
+		grants[free].win = u;
+	}
+	tk_unl_mtx(draw_mtx);
+	return ( free >= 0 ) ? gid : E_LIMIT;
 }
 
 /* What was drawn in a window, shown: the rectangle of its work area, or all of it */
@@ -1661,6 +1889,7 @@ LOCAL ER svc_wm_obj_flush( ID key, CONST T_DPRECT *r )
 		return E_OBJ;
 	}
 	(void)wm_damage(wid, &k);
+	wm_mark_drawn(wid);
 	return wm_update();
 }
 
@@ -1962,7 +2191,7 @@ LOCAL INT svc_dp_open_mem( CONST T_DPBMP *bmp )
 	kb.pitch = k.w * 4;
 	kb.w = k.w;
 	kb.h = k.h;
-	if ( !memenv_lock() ) {
+	if ( !draw_lock() ) {
 		Kfree(px);
 		return E_SYS;
 	}
@@ -1974,7 +2203,7 @@ LOCAL INT svc_dp_open_mem( CONST T_DPBMP *bmp )
 	}
 	gid = ( slot < 0 ) ? E_LIMIT : dp_open_mem(&kb);
 	if ( gid < 0 ) {
-		tk_unl_mtx(memenv_mtx);
+		tk_unl_mtx(draw_mtx);
 		Kfree(px);
 		return gid;
 	}
@@ -1986,7 +2215,7 @@ LOCAL INT svc_dp_open_mem( CONST T_DPBMP *bmp )
 	memenv[slot].pitch = k.pitch;
 	memenv[slot].w = k.w;
 	memenv[slot].h = k.h;
-	tk_unl_mtx(memenv_mtx);
+	tk_unl_mtx(draw_mtx);
 	return gid;
 }
 
@@ -2006,7 +2235,7 @@ LOCAL ER svc_dp_close( INT gid )
 	ER	er = E_ID;
 
 	if ( pid <= 0 ) return E_ID;
-	if ( !memenv_lock() ) return E_SYS;
+	if ( !draw_lock() ) return E_SYS;
 	for ( i = 0; i < MEMENV_MAX; i++ ) {
 		if ( memenv[i].used && memenv[i].gid == gid && memenv[i].pid == pid ) {
 			m = memenv[i];
@@ -2015,7 +2244,7 @@ LOCAL ER svc_dp_close( INT gid )
 			break;
 		}
 	}
-	tk_unl_mtx(memenv_mtx);
+	tk_unl_mtx(draw_mtx);
 	if ( er < E_OK ) return er;
 	if ( !user_ok(m.user, (SZ)m.pitch * ( m.h - 1 ) + (SZ)m.w * 4, TRUE) ) {
 		er = E_MACV;			/* its picture is not there any more */
@@ -2034,14 +2263,14 @@ EXPORT void knl_dp_prc_end( ID pid )
 	UW	*gone[MEMENV_MAX];
 	INT	i, n = 0;
 
-	if ( pid <= 0 || !memenv_lock() ) return;
+	if ( pid <= 0 || !draw_lock() ) return;
 	for ( i = 0; i < MEMENV_MAX; i++ ) {
 		if ( memenv[i].used && memenv[i].pid == pid ) {
 			gone[n++] = memenv[i].px;
 			memenv_drop(&memenv[i]);
 		}
 	}
-	tk_unl_mtx(memenv_mtx);
+	tk_unl_mtx(draw_mtx);
 	for ( i = 0; i < n; i++ ) {
 		Kfree(gone[i]);
 	}
@@ -2053,11 +2282,11 @@ EXPORT INT knl_dp_mem_count( void )
 {
 	INT	i, n = 0;
 
-	if ( !memenv_lock() ) return E_SYS;
+	if ( !draw_lock() ) return E_SYS;
 	for ( i = 0; i < MEMENV_MAX; i++ ) {
 		if ( memenv[i].used ) n++;
 	}
-	tk_unl_mtx(memenv_mtx);
+	tk_unl_mtx(draw_mtx);
 	return n;
 }
 #endif
@@ -2762,6 +2991,76 @@ LOCAL ER svc_wm_screen( INT *p_w, INT *p_h )
 	return E_OK;
 }
 
+/* The main screen's rectangle in the view: where wm_screen's size stands, not at the corner when a screen is left of it or above it */
+LOCAL ER svc_wm_screen_main( T_DPRECT *r )
+{
+	T_DPRECT	m;
+
+	if ( !user_ok(r, sizeof(*r), TRUE) ) {
+		return E_MACV;
+	}
+	wm_screen_main_rect(&m);
+	knl_ua_put(r, &m, sizeof(m));
+	return E_OK;
+}
+
+/* The screen a window with no place kept opens on: the pointer's, else the main one */
+LOCAL ER svc_wm_screen_new( T_DPRECT *r )
+{
+	T_DPRECT	m;
+
+	if ( !user_ok(r, sizeof(*r), TRUE) ) {
+		return E_MACV;
+	}
+	wm_screen_new_rect(&m);
+	knl_ua_put(r, &m, sizeof(m));
+	return E_OK;
+}
+
+/* The screen a point of the view is on, the main one when it is on none */
+LOCAL ER svc_wm_screen_of( INT x, INT y, T_DPRECT *r )
+{
+	T_DPRECT	m;
+
+	if ( !user_ok(r, sizeof(*r), TRUE) ) {
+		return E_MACV;
+	}
+	wm_screen_of(x, y, &m);
+	knl_ua_put(r, &m, sizeof(m));
+	return E_OK;
+}
+
+/* A rectangle of the view as a place to keep (its screen, and from that screen's corner) */
+LOCAL ER svc_wm_place_keep( CONST T_DPRECT *view, T_WMPLACE *p )
+{
+	T_DPRECT	v;
+	T_WMPLACE	k;
+	ER		er;
+
+	if ( user_rect(view, &v) < E_OK || !user_ok(p, sizeof(*p), TRUE) ) {
+		return E_MACV;
+	}
+	er = wm_place_keep(&v, &k);
+	if ( er >= E_OK ) knl_ua_put(p, &k, sizeof(k));
+	return er;
+}
+
+/* A kept place back into the view: 1 on its screen, 0 on the main screen in place of one not there */
+LOCAL ER svc_wm_place_open( CONST T_WMPLACE *p, T_DPRECT *view )
+{
+	T_WMPLACE	k;
+	T_DPRECT	v;
+	ER		er;
+
+	if ( !user_ok(p, sizeof(*p), FALSE) || !user_ok(view, sizeof(*view), TRUE) ) {
+		return E_MACV;
+	}
+	knl_ua_get(&k, p, sizeof(k));
+	er = wm_place_open(&k, &v);
+	if ( er >= E_OK ) knl_ua_put(view, &v, sizeof(v));
+	return er;
+}
+
 /* How much farther a handle is reached by the press made at when: a number, nothing to copy */
 LOCAL INT svc_wm_hit_slop( UD when )
 {
@@ -3189,6 +3488,11 @@ LOCAL const FP wm_svc_tbl[TSN_WM_MAX + 1] = {
 	[TSN_NUMBER(TSN_WM_GRAB_WINDOW)]	= F(svc_wm_grab_window),
 	[TSN_NUMBER(TSN_WM_PRESS_AREA)]		= F(svc_wm_press_area),
 	[TSN_NUMBER(TSN_WM_FILL_LOOK)]		= F(svc_wm_fill_look),
+	[TSN_NUMBER(TSN_WM_SCREEN_MAIN)]	= F(svc_wm_screen_main),
+	[TSN_NUMBER(TSN_WM_PLACE_KEEP)]		= F(svc_wm_place_keep),
+	[TSN_NUMBER(TSN_WM_PLACE_OPEN)]		= F(svc_wm_place_open),
+	[TSN_NUMBER(TSN_WM_SCREEN_NEW)]		= F(svc_wm_screen_new),
+	[TSN_NUMBER(TSN_WM_SCREEN_OF)]		= F(svc_wm_screen_of),
 };
 
 /* What went to the console, from where the process had got to */
@@ -3292,6 +3596,8 @@ LOCAL const SVCRIGHT svc_rights[] = {
 	{ TSN_OB_ATT_VOL,	TSN_RIGHT_ADMIN },
 	{ TSN_OB_DET_VOL,	TSN_RIGHT_ADMIN },
 	{ TSN_OB_SET_DOM,	TSN_RIGHT_ADMIN },
+	{ TSN_OB_CHK_VOL,	TSN_RIGHT_ADMIN },
+	{ TSN_OB_CHK_REQ,	TSN_RIGHT_ADMIN },
 	{ TSN_WM_SET_LOOK,	TSN_RIGHT_CONF_USER },
 	{ TSN_KM_SET,		TSN_RIGHT_CONF_DEV },
 };
@@ -3393,6 +3699,7 @@ EXPORT UBINT knl_svc_gateway( T_EXCFRAME *frame )
 	FP	fn = NULL;
 	UBINT	ret;
 	BOOL	inside, busy, opened;
+	UW	sbx;
 	TCB	*me = knl_ctxtsk;		/* interrupts are still disabled here */
 	ID	prc = ( me != NULL ) ? me->owner : 0;
 
@@ -3440,6 +3747,25 @@ EXPORT UBINT knl_svc_gateway( T_EXCFRAME *frame )
 	}
 #endif
 	enaint(0);				/* the system call may block or be preempted */
+
+	/*
+	 * A restricted process's call of a group it is shut out of is
+	 * refused, or ends it, before anything of it is done (sbx_group_of).
+	 * One that is not restricted has its set read and nothing more.
+	 */
+	sbx = ( prc > 0 ) ? knl_prc_sbx() : 0;
+	if ( ( sbx & TS_SBX_ALL ) != 0 ) {
+		UINT	g = sbx_group_of(fncd, KNL_SVC_ARG(frame, 0), KNL_SVC_ARG(frame, 2), prc) & sbx;
+
+		if ( g != 0 ) {
+			ret = sbx_refuse(fncd, g, sbx, prc, TRUE);
+			if ( busy ) {
+				me->svcdepth--;
+			}
+			disint();
+			return ret;
+		}
+	}
 
 	/*
 	 * A call that acts on the whole system is a process's to make only
@@ -3500,6 +3826,11 @@ EXPORT UBINT knl_svc_gateway( T_EXCFRAME *frame )
 		}
 	}
 	knl_ua_close(opened);
+
+	/* a call shut out met inside the call: the process ends now it is out */
+	if ( ( sbx & TS_SBX_ALL ) != 0 && knl_prc_sbx_broke() != 0 ) {
+		(void)ts_ter_prc(prc, TS_ABORT_SBX);	/* no return */
+	}
 
 	/*
 	 * A signal the process catches is handed over as the call returns

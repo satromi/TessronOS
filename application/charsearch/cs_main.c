@@ -1559,7 +1559,7 @@ int main( void )
 	dic_read();
 
 	ui_icon(SYSDEF_PROG_CHARSRCH);
-	if ( ui_open(&ui, SYSDEF_BOX_CHARSRCH, PN_MAIN, 180, 70) < E_OK ) {
+	if ( ui_open(&ui, SYSDEF_BOX_CHARSRCH, PN_MAIN, wm_new_x(180), wm_new_y(70)) < E_OK ) {
 		tm_putstring((CONST UB *)"charsearch: no window\n");
 		return 1;
 	}

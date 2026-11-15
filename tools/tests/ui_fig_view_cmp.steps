@@ -10,39 +10,8 @@
 # then 表示. The screens with 実寸 and with the paper are kept for comparing; 実寸 at 640,500,
 # where a zigzag line passes, has the line's black at its own size.
 # Keys: Ctrl+E 08 01.
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
-mkbig fig 1 2 0
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-click 600 400 1
-wait 500
-move 610 460
-wait 400
-move 720 460
-wait 150
-move 720 480
-wait 300
-click 720 480
-wait 800
-sync 600
-wins
-shot vcmp_k_realsize
-click 600 400 1
-wait 500
-move 610 480
-wait 400
-move 720 480
-wait 300
-click 720 480
-wait 800
-sync 600
-shot vcmp_k_paper
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 2 0
 logmark
 pfig big
@@ -52,13 +21,13 @@ logmark
 click 600 400 1
 expectsince figure: menu
 wait 500
-move 610 320
+move 610 460
 wait 400
-move 720 320
+move 720 460
 wait 150
-move 720 340
+move 720 480
 wait 300
-click 720 340
+click 720 480
 expectsince figure: realsize open
 wait 800
 wins

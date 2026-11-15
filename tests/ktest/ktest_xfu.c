@@ -329,9 +329,10 @@ LOCAL void test_png( void )
  * Each step: 'S' a line the client must send, 'R' a reply it reads,
  * 'O' a data connection it opens to that port, 'D' what the data
  * connection gives, 'W' what the client must have written on it when
- * it closes it. The active way: 'L' the client listens and is given
- * "a.b.c.d:port" as where, 'A' the server's connection to it is taken
- * ("A:-" when none comes).
+ * it closes it. 'X' a data connection to that port that is refused.
+ * The active way: 'L' the client listens and is given "a.b.c.d:port"
+ * as where, 'A' the server's connection to it is taken ("A:-" when
+ * none comes).
  */
 typedef struct {
 	CONST char * CONST *step;
@@ -365,6 +366,10 @@ LOCAL INT fk_open( void *ctx, CONST char *host, UINT port, INT peer )
 	}
 	s = ( k->at < k->n ) ? k->step[k->at] : "";
 	for ( i = 2; s[i] >= '0' && s[i] <= '9'; i++ ) p = p * 10 + ( s[i] - '0' );
+	if ( s[0] == 'X' && p == port && peer == 1 && host == NULL ) {
+		k->at++;
+		return E_IO;			/* nothing listens there for this client */
+	}
 	if ( s[0] != 'O' || p != port || peer != 1 || host != NULL ) {
 		fk_fail(k);
 		return E_IO;
@@ -883,6 +888,147 @@ LOCAL void test_ftp_active( void )
 	f->active = TRUE;
 	KT_ASSERT_ER(ftp_get(f, (CONST UB *)"x"), E_NOSPT);
 	f->ctl = -1;
+	Kfree(f);
+}
+
+/*
+ * A server that ends its FEAT reply on the first line ("211 Features:"
+ * and the features after it), knows neither EPSV nor EPRT, names a
+ * loopback in PASV and listens only there, and lists with ISO dates:
+ * each command still gets its own reply, the passive way given up for
+ * the active one, the names read
+ */
+LOCAL CONST char * CONST script_fallback[] = {
+	"R:220 FTP server ready\r\n",
+	"S:USER anonymous",
+	"R:331 Password required.\r\n",
+	"S:PASS anonymous@",
+	"R:230 User logged in.\r\n",
+	"S:SYST",
+	"R:215 UNIX Type: L8\r\n",
+	"S:FEAT",
+	"R:211 Features:\r\n SIZE\r\n MDTM\r\n REST STREAM\r\n211 End\r\n",
+	"S:TYPE I",
+	"R:200 Type set to I.\r\n",
+	"S:EPSV",
+	"R:502 Command not implemented.\r\n",
+	"S:PASV",
+	"R:227 Entering Passive Mode (127,0,0,1,12,34).\r\n",
+	"X:3106",
+	"L:192.168.0.143:50963",
+	"S:EPRT |1|192.168.0.143|50963|",
+	"R:502 Command not implemented.\r\n",
+	"S:PORT 192,168,0,143,199,19",
+	"R:200 PORT command successful.\r\n",
+	"S:LIST",
+	"R:150 Opening data connection.\r\n",
+	"A:",
+	"D:-rw-r--r-- 1 user group       1234 2026-11-10 日本語.txt\r\n"
+	  "drwxr-xr-x 1 user group          0 2026-11-09 sub dir\r\n",
+	"R:226 Transfer complete.\r\n",
+	"L:192.168.0.143:50964",
+	"S:PORT 192,168,0,143,199,20",
+	"R:200 PORT command successful.\r\n",
+	"S:LIST empty",
+	"R:150 Opening data connection.\r\n",
+	"A:",
+	"D:",
+	"R:226 Transfer complete.\r\n",
+	"S:QUIT",
+	"R:221 Goodbye.\r\n",
+};
+
+/* The same kind of FEAT reply with its features come late, after the next command */
+LOCAL CONST char * CONST script_late[] = {
+	"R:220 ready\r\n",
+	"S:USER anonymous",
+	"R:331 pw\r\n",
+	"S:PASS anonymous@",
+	"R:230 in\r\n",
+	"S:SYST",
+	"R:215 UNIX Type: L8\r\n",
+	"S:FEAT",
+	"R:211 Features:\r\n",
+	"S:TYPE I",
+	"R: SIZE\r\n EPSV\r\n211 End\r\n200 binary\r\n",
+	"S:EPSV",
+	"R:229 Entering Extended Passive Mode (|||3200|)\r\n",
+	"O:3200",
+	"S:LIST",
+	"R:150 here\r\n",
+	"D:-rw-r--r-- 1 u g 5 2026-11-10 12:34 a.txt\r\n"
+	  "-rw-r--r-- 1 u g 7 2026-11-10 12:34:56.000000000 +0900 b c.txt\r\n"
+	  "lrwxrwxrwx 1 u g 3 2026-01-02 03:04 ln -> a.txt\r\n",
+	"R:226 done\r\n",
+	"S:EPSV",
+	"R:229 (|||3201|)\r\n",
+	"O:3201",
+	"S:LIST odd",
+	"R:150 here\r\n",
+	"D:total 2\r\nfile one 11/10 big\r\nfile two 11/10 small\r\n",
+	"R:226 done\r\n",
+	"S:EPSV",
+	"R:229 (|||3202|)\r\n",
+	"O:3202",
+	"S:NLST odd",
+	"R:150 here\r\n",
+	"D:one\r\nodd/two\r\n",
+	"R:226 done\r\n",
+	"S:QUIT",
+	"R:221 bye\r\n",
+};
+
+LOCAL void test_ftp_fallback( void )
+{
+	T_FTP		*f;
+	T_FTPNET	net;
+	FAKE		k;
+	SEEN		s;
+
+	f = (T_FTP *)Kmalloc(sizeof(T_FTP));
+	if ( f == NULL ) KT_SKIP("no memory");
+	fk_init(&k, &net, script_fallback, NSTEP(script_fallback), 128);
+	KT_ASSERT_ER(ftp_open(f, &net, "192.168.0.150", 2121, NULL, NULL, TXC_UTF8), E_OK);
+	KT_ASSERT_EQ(f->feat, FTP_F_SIZE | FTP_F_MDTM);
+
+	knl_memset(&s, 0, sizeof(s));
+	KT_ASSERT_ER(ftp_list(f, NULL, seen_ent, &s), E_OK);
+	KT_ASSERT(f->pasv && f->active && f->port);
+	KT_ASSERT_EQ(s.n, 2);
+	KT_ASSERT(same_str(s.name[0], "日本語.txt") && !s.dir[0] && s.size[0] == 1234);
+	KT_ASSERT_EQ(s.mtime[0], xfu_time_parse((CONST UB *)"2026-11-10T00:00:00Z"));
+	KT_ASSERT(same_str(s.name[1], "sub dir") && s.dir[1]);
+
+	/* the active way from then on; an empty directory is no fault */
+	knl_memset(&s, 0, sizeof(s));
+	KT_ASSERT_ER(ftp_list(f, (CONST UB *)"empty", seen_ent, &s), E_OK);
+	KT_ASSERT_EQ(s.n, 0);
+	KT_ASSERT_ER(ftp_close(f), E_OK);
+	KT_ASSERT_EQ(k.fails, 0);
+	KT_ASSERT_EQ(k.at, k.n);
+	if ( k.fails > 0 ) tm_printf((UB *)"  fake: first fault at step %d\n", k.failat);
+
+	/* the features after the next command: passed over, that command's own reply taken */
+	fk_init(&k, &net, script_late, NSTEP(script_late), 128);
+	KT_ASSERT_ER(ftp_open(f, &net, "late.example", 0, NULL, NULL, TXC_UTF8), E_OK);
+	KT_ASSERT_EQ(f->code, 200);
+	knl_memset(&s, 0, sizeof(s));
+	KT_ASSERT_ER(ftp_list(f, NULL, seen_ent, &s), E_OK);
+	KT_ASSERT(!f->pasv && !f->active);
+	KT_ASSERT_EQ(s.n, 3);
+	KT_ASSERT(same_str(s.name[0], "a.txt") && s.size[0] == 5);
+	KT_ASSERT_EQ(s.mtime[0], xfu_time_parse((CONST UB *)"2026-11-10T12:34:00Z"));
+	KT_ASSERT(same_str(s.name[1], "b c.txt") && s.size[1] == 7);
+	KT_ASSERT_EQ(s.mtime[1], xfu_time_parse((CONST UB *)"2026-11-10T03:34:56Z"));
+	KT_ASSERT(same_str(s.name[2], "ln"));
+	/* a LIST of which no line can be read: the names by NLST */
+	knl_memset(&s, 0, sizeof(s));
+	KT_ASSERT_ER(ftp_list(f, (CONST UB *)"odd", seen_ent, &s), E_OK);
+	KT_ASSERT(s.n == 2 && same_str(s.name[0], "one") && same_str(s.name[1], "two") && s.size[0] == -1);
+	KT_ASSERT_ER(ftp_close(f), E_OK);
+	KT_ASSERT_EQ(k.fails, 0);
+	KT_ASSERT_EQ(k.at, k.n);
+	if ( k.fails > 0 ) tm_printf((UB *)"  fake: first fault at step %d\n", k.failat);
 	Kfree(f);
 }
 
@@ -1846,6 +1992,7 @@ EXPORT void ktest_xfu( void )
 	KT_RUN(test_ftp_new);
 	KT_RUN(test_ftp_old);
 	KT_RUN(test_ftp_active);
+	KT_RUN(test_ftp_fallback);
 	KT_RUN(test_xfu_fat);
 	KT_RUN(test_xfu_native);
 	KT_RUN(test_xfu_stop);

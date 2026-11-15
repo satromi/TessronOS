@@ -39,6 +39,7 @@
 
 #include <ts/tvport.h>
 #include <ts/tadview.h>
+#include <ts/kinsoku.h>
 #include <ts/dp.h>
 #include <ts/fn.h>
 #include <ts/wm.h>
@@ -75,53 +76,6 @@ LOCAL UW utf8_at( CONST UB *s, INT *p_n )
 	return c;
 }
 
-/* Characters that may not begin a line */
-LOCAL BOOL no_start( UW c )
-{
-	LOCAL CONST UW	tab[] = {
-		0x3001, 0x3002,			/* 、 。 */
-		0xFF0C, 0xFF0E, 0xFF1A, 0xFF1B,	/* ， ． ： ； */
-		0xFF1F, 0xFF01,			/* ？ ！ */
-		0x30FB, 0x30FC,			/* ・ ー */
-		0xFF09, 0x300D, 0x300F, 0x3011,	/* ） 」 』 】 */
-		0x3015, 0xFF5D, 0x3009, 0x300B,	/* 〕 ｝ 〉 》 */
-		0x3041, 0x3043, 0x3045, 0x3047, 0x3049,	/* ぁぃぅぇぉ */
-		0x3063, 0x3083, 0x3085, 0x3087, 0x308E,	/* っゃゅょゎ */
-		0x30A1, 0x30A3, 0x30A5, 0x30A7, 0x30A9,	/* ァィゥェォ */
-		0x30C3, 0x30E3, 0x30E5, 0x30E7, 0x30EE,	/* ッャュョヮ */
-		',', '.', ':', ';', '?', '!', ')', ']', '}',
-	};
-	INT	i;
-
-	for ( i = 0; i < (INT)(sizeof(tab) / sizeof(tab[0])); i++ ) {
-		if ( tab[i] == c ) {
-			return TRUE;
-		}
-	}
-
-	return FALSE;
-}
-
-/* Characters that may not end one */
-LOCAL BOOL no_end( UW c )
-{
-	LOCAL CONST UW	tab[] = {
-		0xFF08, 0x300C, 0x300E, 0x3010,	/* （ 「 『 【 */
-		0x3014, 0xFF5B, 0x3008, 0x300A,	/* 〔 ｛ 〈 《 */
-		'(', '[', '{',
-	};
-	INT	i;
-
-	for ( i = 0; i < (INT)(sizeof(tab) / sizeof(tab[0])); i++ ) {
-		if ( tab[i] == c ) {
-			return TRUE;
-		}
-	}
-
-	return FALSE;
-}
-
-
 /* Whether a letter is among those of a 禁則 setting (UTF-8, n bytes) */
 LOCAL BOOL in_letters( CONST UB *s, INT n, UW c )
 {
@@ -144,7 +98,7 @@ LOCAL BOOL in_letters( CONST UB *s, INT n, UW c )
 LOCAL BOOL head_no( CONST T_TVPARA *p, UW c )
 {
 	if ( p == NULL || p->khead_kind < 0 ) {
-		return no_start(c);
+		return kin_no_head(c);
 	}
 
 	return (BOOL)( ( p->khead_kind >> 4 ) != 0 && in_letters(p->khead, p->khead_len, c) );
@@ -153,7 +107,7 @@ LOCAL BOOL head_no( CONST T_TVPARA *p, UW c )
 LOCAL BOOL tail_no( CONST T_TVPARA *p, UW c )
 {
 	if ( p == NULL || p->ktail_kind < 0 ) {
-		return no_end(c);
+		return kin_no_tail(c);
 	}
 
 	return (BOOL)( ( p->ktail_kind >> 4 ) != 0 && in_letters(p->ktail, p->ktail_len, c) );
@@ -1047,7 +1001,7 @@ LOCAL INT page_map( CONST LAY *l, INT y, INT *p_dx )
 /* Whether a byte is part of a word of Latin letters, kept on one line */
 LOCAL BOOL wordish( UB c )
 {
-	return (BOOL)( c > 0x20 && c < 0x7F );
+	return kin_word(c);
 }
 
 /*

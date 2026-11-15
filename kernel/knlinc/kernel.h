@@ -138,12 +138,16 @@ struct task_control_block {
 	 * name (0: any; see knl_not_owner), and the calls of the task
 	 * through the gateway under way: those that are more than a wait
 	 * of the core (svcdepth), and of them the calls into the files,
-	 * the sockets and the objects (svcin). design 9.7
+	 * the sockets and the objects (svcin); and whether such a call has
+	 * lent a device the kernel's view of the process's pages
+	 * (knl_prc_dma), which keeps the pages the process takes away from
+	 * being freed until the call is out (svcdma). design 9.7
 	 */
 	ID	owner;
 	ID	svcown;
 	volatile INT	svcdepth;
 	INT	svcin;
+	INT	svcdma;
 
 	/*
 	 * The time the task has run, in counts of the system counter

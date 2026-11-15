@@ -1,0 +1,71 @@
+<tad version="1.0" encoding="UTF-8" filename="基本印刷のデータボックス">
+<document>
+<p>基本印刷のデータボックス</p>
+<p>印刷設定、印刷詳細設定、画面表示の帯、知らせのパネルの定義。基本印刷(プロセス)が使う。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,576,284" title="印刷設定">
+<text num="1" x="26" y="30"> </text>
+<text x="26" y="64">ページ:</text>
+<choice num="2" rect="92,46,202,68" group="2" value="1">全ページ</choice>
+<choice num="3" rect="204,46,314,68" group="2">部分ページ</choice>
+<text x="322" y="62">開始:</text>
+<number num="4" rect="378,44,438,70" value="1"/>
+<text x="446" y="62">終了:</text>
+<number num="5" rect="502,44,562,70" value="1"/>
+<text x="26" y="100">部数:</text>
+<number num="6" rect="82,82,142,108" value="1"/>
+<text x="150" y="100">部</text>
+<text x="26" y="136">品質:</text>
+<choice num="7" rect="92,118,178,140" group="7" value="1">通常</choice>
+<choice num="8" rect="182,118,268,140" group="7">高速</choice>
+<choice num="9" rect="272,118,358,140" group="7">高密度</choice>
+<switch num="10" rect="378,118,478,140">カラー</switch>
+<text num="11" x="26" y="174"> </text>
+<button num="14" rect="136,240,246,266">詳細設定</button>
+<button num="15" rect="252,240,362,266">画面表示</button>
+<button num="12" rect="372,240,458,266" answer="cancel">取消</button>
+<button num="13" rect="468,240,554,266" answer="ok" emph="true">印刷</button>
+</panel>
+<panel num="2" rect="0,0,576,360" title="印刷詳細設定">
+<text num="1" x="26" y="30"> </text>
+<text x="26" y="62">印刷用紙:</text>
+<list num="2" rect="112,44,332,214" value="1"><name>レイアウト用紙と同じ</name><name>A3用紙:縦</name><name>A3用紙:横</name><name>A4用紙:縦</name><name>A4用紙:横</name><name>A5用紙:縦</name><name>A5用紙:横</name><name>B4用紙:縦</name><name>B4用紙:横</name><name>B5用紙:縦</name><name>B5用紙:横</name><name>はがき:縦</name><name>はがき:横</name><name>レター:縦</name><name>レター:横</name><name>その他の用紙</name></list>
+<text x="352" y="62">縦:</text>
+<number num="3" rect="408,44,488,70" value="0"/>
+<text x="496" y="62">mm</text>
+<text x="352" y="96">横:</text>
+<number num="4" rect="408,78,488,104" value="0"/>
+<text x="496" y="96">mm</text>
+<switch num="5" rect="348,118,528,140">用紙回転</switch>
+<text x="26" y="246">倍率:</text>
+<choice num="6" rect="112,228,176,250" group="6" value="1">自動</choice>
+<text num="14" x="178" y="246"> </text>
+<choice num="7" rect="268,228,338,250" group="6">指定</choice>
+<number num="8" rect="338,226,408,252" value="100"/>
+<text x="412" y="244">%</text>
+<text x="26" y="280">仮身:</text>
+<switch num="9" rect="112,262,202,284">印刷</switch>
+<switch num="10" rect="208,262,298,284">展開</switch>
+<text x="312" y="278">深さ:</text>
+<number num="11" rect="368,260,428,286" value="1"/>
+<button num="12" rect="372,316,458,342" answer="cancel">取消</button>
+<button num="13" rect="468,316,554,342" answer="ok" emph="true">設定</button>
+</panel>
+<panel num="3" rect="0,0,340,40" title="画面表示" kind="bare">
+<button num="1" rect="8,7,64,33">前頁</button>
+<button num="2" rect="68,7,124,33">次頁</button>
+<button num="3" rect="136,7,192,33">標準</button>
+<button num="4" rect="196,7,252,33">拡大</button>
+<text num="5" x="266" y="26"> </text>
+</panel>
+<panel num="4" rect="0,0,72,40" title="画面表示" kind="bare">
+<button num="1" rect="0,7,64,33">終了</button>
+</panel>
+<panel num="5" rect="0,0,496,116" title="基本印刷">
+<text num="1" x="26" y="34"> </text>
+<text num="2" x="26" y="58"> </text>
+<button num="11" rect="380,72,474,98" answer="ok" emph="true">了解</button>
+</panel>
+</databox>
+</tad>

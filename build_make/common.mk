@@ -172,6 +172,13 @@ ifeq ($(OACVLOG),1)
   CFLAGS_COMMON += -DOB_DENY_LOG=1
 endif
 
+# make PGCHECK=1 で、返したページに模様を書き、もう一度渡すときに確かめる。返した後に
+# 書かれたページと、2 度返されたページを、コンソールに「pgcheck:」で出す(設計書 9.8.1)。
+# 旗は全部の翻訳に効くので、BUILD_ID を分けて作る
+ifeq ($(PGCHECK),1)
+  CFLAGS_COMMON += -DPF_FREE_CHECK=1
+endif
+
 # make NETSTACK=netbsd(既定)で、TCP/IP スタックは NetBSD のもの(rump カーネルとして
 # tools/netbsd/build.sh が作る一つのオブジェクト)。NETSTACK=lwip で以前の lwIP に戻す
 # (設計書 12.6)。オブジェクトが無ければ、リンクの前に tools/netbsd/build.sh が作る

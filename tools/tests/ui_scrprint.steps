@@ -1,4 +1,5 @@
-# 画面印刷 (design 11.24), for tools/ui_run.py: the accessory's panel
+# 画面印刷 (design 11.24), for tools/ui_run.py: the accessory's panel,
+# shown by its process (scrprint), the screen taken by the desktop
 # (画面印刷／画面保存, 536x284 in the middle of a 1280x800 screen, its
 # corner at 372,258; a part at l,t of the panel at 380+l,266+t), worked
 # three times. First the whole screen three seconds after 実行 (the
@@ -11,6 +12,10 @@
 open 01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0
 expect scrprint: panel 1
 wait 600
+# chosen again while the panel is up: no second panel, the first in front
+open 01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0
+expect scrprint: the panel up already
+wait 400
 shot sp_panel
 click 414 313
 click 650 343
@@ -66,7 +71,8 @@ click 414 481
 wait 150
 shot sp_set3
 click 836 511
-wait 1500
+expect bprint: panel 印刷設定
+wait 800
 shot sp_print_panel
 key 28
 expect scrprint: pick 1

@@ -46,6 +46,8 @@
 #include <ts/img.h>
 #include <ts/om.h>
 #include <ts/keymap.h>
+#include <ts/fquit.h>
+#include <ts/gpu.h>
 #include "wmobj.h"
 #include "pdraw.h"
 
@@ -141,6 +143,7 @@ typedef struct {
 	BOOL	beside;			/* a panel beside what its program draws ("beside":1, ui_strip) */
 	INT	pid;			/* the panel or menu it is placed as or on, 0 none */
 	INT	idx;			/* a part: which of that panel's parts it is */
+	ID	maker;			/* the process that made it, 0 the system */
 } WOFREE;
 
 LOCAL WOFREE		wo_free[WO_FREE_MAX];
@@ -422,21 +425,29 @@ EXPORT void knl_wmobj_close( INT wid )
 	}
 }
 
+LOCAL ER fr_remove( INT h );
+
 /*
- * A process ended: the windows it made are closed. A program closes its
- * windows itself as it ends; one taken down by a fault or by ts_ter_prc
- * cannot, and its windows (a sub window among them) would stay on the
- * screen with nobody to draw them or to close them. The surfaces it drew
- * any window in go first.
+ * A process ended: the windows it made are closed, with the panels and
+ * menus standing in them, and the panels, menus and parts it made on
+ * their own (ui_open's panel among them) go. A program closes its
+ * windows and deletes its panels itself as it ends; one taken down by a
+ * fault or by ts_ter_prc, or ending while a thread of it still had a
+ * window up, cannot, and what it made would stay -- on the screen with
+ * nobody to draw it or to close it, in the list of the windows
+ * (ob_lst_obj), and in the room for panels (WO_FREE_MAX). The surfaces
+ * it drew any window in go first.
  */
 EXPORT void knl_wmobj_prc_end( ID pid )
 {
 	INT	*wids, n = 0, i;
+	INT	frees[WO_FREE_MAX], nf = 0;
 
 	if ( wo_mtx <= 0 || pid <= 0 ) {
 		return;
 	}
 	knl_wm_surf_prc_end(pid);
+	knl_wm_gsurf_prc_end(pid);		/* the BOs it gave: its windows keep the last picture */
 	LOCK();
 	wids = (INT *)Kmalloc(sizeof(INT) * (SZ)( wo_nwin + 1 ));
 	for ( i = 1; i <= wo_nwin && wids != NULL; i++ ) {
@@ -444,12 +455,23 @@ EXPORT void knl_wmobj_prc_end( ID pid )
 			wids[n++] = i;
 		}
 	}
+	for ( i = 0; i < WO_FREE_MAX; i++ ) {
+		if ( wo_free[i].used && wo_free[i].maker == pid ) {
+			frees[nf++] = i;
+		}
+	}
 	UNLOCK();
+	if ( n > 0 ) {
+		knl_pn_wins_gone(wids, n);
+	}
 	for ( i = 0; i < n; i++ ) {
-		(void)wm_close(wids[i]);
+		(void)wm_close(wids[i]);	/* E_ID for one a panel took with it */
+	}
+	for ( i = 0; i < nf; i++ ) {
+		(void)fr_remove(H_MAKE(H_FREE, frees[i], 0));
 	}
 	if ( wids != NULL ) Kfree(wids);
-	if ( n > 0 ) {
+	if ( n > 0 || nf > 0 ) {
 		wm_update();
 	}
 }
@@ -982,7 +1004,7 @@ LOCAL ER cand_put( INT wid, CONST T_OBWCAND *c )
 		(void)wm_move(pop, &o);
 		(void)wm_raise(pop);
 	} else {
-		pop = wm_open(&o, WM_ATTR_POPUP | WM_ATTR_NOFOCUS, NULL);
+		pop = wm_open(&o, WM_ATTR_POPUP | WM_ATTR_NOFOCUS | WM_ATTR_MENU, NULL);
 		if ( pop <= 0 ) {
 			return ( pop < 0 ) ? (ER)pop : E_LIMIT;
 		}
@@ -1060,6 +1082,49 @@ LOCAL void release_away( CONST T_WMEV *ev )
 	win_post(wo_down, OB_E_RELEASE, &up);
 }
 
+/* A window made as an object that never has the keys (WM_ATTR_NOFOCUS): a screen keyboard */
+LOCAL BOOL keyless( INT wid )
+{
+	BOOL	k;
+
+	if ( wid < 1 || wid > wo_nwin ) {
+		return FALSE;
+	}
+	LOCK();
+	k = (BOOL)( WOW(wid).used && WOW(wid).nofocus );
+	UNLOCK();
+	return k;
+}
+
+/*
+ * While the desktop asks something over a program's window (wm_obj_quiet)
+ * the program is told nothing, but a window that never has the keys is
+ * not the program asked: a screen keyboard is pressed to type into the
+ * panel, and is outside the question. Its presses, moves and let-goes still reach
+ * it, and a press begun on it is let go there wherever the button comes
+ * up; the pointer leaving it for the program's window is told to it as
+ * a leave, and the program is not told of the arrival.
+ */
+LOCAL BOOL quiet_passes( CONST T_WMEV *ev )
+{
+	INT	was;
+
+	if ( ev->type == HID_EV_KEY_DOWN || ev->type == HID_EV_KEY_UP ) {
+		return FALSE;			/* the keys are the panel's */
+	}
+	if ( ev->wid > 0 && keyless(ev->wid) ) {
+		return TRUE;
+	}
+	if ( ev->type == HID_EV_BTN_UP && wo_down > 0 && keyless(wo_down) ) {
+		release_away(ev);
+	} else if ( ev->type == HID_EV_MOVE && wo_hover > 0 && keyless(wo_hover) ) {
+		was = wo_hover;
+		wo_hover = 0;
+		win_post(was, OB_E_LEAVE, NULL);
+	}
+	return FALSE;
+}
+
 EXPORT void knl_wmobj_event( CONST T_WMEV *ev )
 {
 	UINT	event;
@@ -1074,7 +1139,7 @@ EXPORT void knl_wmobj_event( CONST T_WMEV *ev )
 	if ( ev->type == HID_EV_BTN_DOWN ) {
 		knl_wm_press_seen(ev->when, ev->code);	/* the button a menu opened by it follows */
 	}
-	if ( wo_quiet > 0 ) {
+	if ( wo_quiet > 0 && !quiet_passes(ev) ) {
 		return;
 	}
 	switch ( ev->type ) {
@@ -1367,6 +1432,19 @@ EXPORT void knl_wmobj_moved( INT wid, BOOL resized )
 }
 
 /*
+ * A panel of the window whose tags' sheet its program draws in (P_VIEW)
+ * was drawn, its ground over what the program drew there: the program
+ * is told to draw again, as for a window whose size changed
+ */
+EXPORT void knl_wmobj_view_drawn( INT wid )
+{
+	if ( wo_mtx <= 0 ) {
+		return;
+	}
+	win_post(wid, OB_E_REDRAW, NULL);
+}
+
+/*
  * Something happened to one part of a panel. A menu's items are its
  * records, so there it is the menu that is told, on the item's record;
  * a panel's parts are objects of their own.
@@ -1452,6 +1530,35 @@ EXPORT ID wm_obj_maker( INT wid )
  */
 EXPORT INT wm_obj_close_programs( ID *pids, INT max )
 {
+	return wm_obj_close_programs_but(pids, max, 0);
+}
+
+/*
+ * A program's window asked to close (OB_E_CLOSE), as the person closing
+ * it asks: E_NOEXS for no window made by a program
+ */
+EXPORT ER wm_obj_close_window( INT wid )
+{
+	T_WMWIN	w;
+	ID	m = 0;
+
+	if ( wo_mtx <= 0 || wid < 1 || wid > wo_nwin ) {
+		return E_NOEXS;
+	}
+	LOCK();
+	if ( WOW(wid).used ) {
+		m = WOW(wid).maker;
+	}
+	UNLOCK();
+	if ( m <= 0 || wm_ref(wid, &w) < E_OK ) {
+		return E_NOEXS;
+	}
+	win_post(wid, OB_E_CLOSE, NULL);
+	return E_OK;
+}
+
+EXPORT INT wm_obj_close_programs_but( ID *pids, INT max, ID except )
+{
 	INT	wid, i, n = 0, nwin = wo_nwin;
 
 	if ( wo_mtx <= 0 ) {
@@ -1466,7 +1573,7 @@ EXPORT INT wm_obj_close_programs( ID *pids, INT max )
 			m = WOW(wid).maker;
 		}
 		UNLOCK();
-		if ( m <= 0 || wm_ref(wid, &w) < E_OK || ( w.attr & WM_ATTR_POPUP ) != 0 ) {
+		if ( m <= 0 || m == except || wm_ref(wid, &w) < E_OK || ( w.attr & WM_ATTR_POPUP ) != 0 ) {
 			continue;
 		}
 		win_post(wid, OB_E_CLOSE, NULL);
@@ -1546,6 +1653,51 @@ LOCAL void drop_activate( INT wid )
  */
 #define OPEN_FOLLOWS_MS	2000
 
+/*
+ * A window given the keys (wm_focus) whose program has a question up
+ * (a pop-up of the same process, ui_dlg_open's panel) passes them to
+ * the question, as a press on the program's window does while it asks:
+ * the question is what the person answers next. When it goes, the keys
+ * come back to this window (back).
+ */
+EXPORT void knl_wmobj_focused( INT wid )
+{
+	T_WMWIN	w;
+	ID	mk = 0;
+	INT	i, q = 0;
+
+	if ( wo_mtx <= 0 || wid < 1 || wid > wo_nwin || wm_ref(wid, &w) < E_OK
+	  || ( w.attr & WM_ATTR_POPUP ) != 0 ) {
+		return;
+	}
+	LOCK();
+	if ( WOW(wid).used ) mk = WOW(wid).maker;
+	UNLOCK();
+	if ( mk <= 0 ) {
+		return;				/* the system's windows ask nothing of their own here */
+	}
+	for ( i = 1; i <= wo_nwin; i++ ) {
+		T_WMWIN	p;
+		BOOL	his;
+
+		if ( i == wid ) continue;
+		LOCK();
+		his = (BOOL)( WOW(i).used && WOW(i).maker == mk );
+		UNLOCK();
+		if ( his && wm_ref(i, &p) >= E_OK && ( p.attr & WM_ATTR_POPUP ) != 0
+		  && ( p.attr & WM_ATTR_NOFOCUS ) == 0 ) {
+			q = i;			/* the latest of them */
+		}
+	}
+	if ( q > 0 ) {
+		LOCK();
+		if ( WOW(q).used ) WOW(q).back = wid;
+		UNLOCK();
+		(void)wm_focus(q);
+	}
+}
+
+
 LOCAL void open_activate( INT wid, ID maker, UINT attr, BOOL sub )
 {
 	INT	f;
@@ -1560,6 +1712,27 @@ LOCAL void open_activate( INT wid, ID maker, UINT attr, BOOL sub )
 	if ( !keys_asked() && ( wm_act_good(t)
 			       || ( f != wid && wm_obj_maker(f) == maker && wm_act_age() < OPEN_FOLLOWS_MS ) ) ) {
 		(void)wm_focus(wid);
+	}
+}
+
+/*
+ * The first ordinary window of a process started as one of a group
+ * opened together (knl_ob_rank_arm: the links a window opens with it)
+ * takes its place among the group's windows as it comes up, before
+ * anything of it is shown: where it stands then is the place its link
+ * gives it, not the moment its program happened to be ready at.
+ */
+LOCAL void open_rank( INT wid, ID maker, UINT attr, BOOL sub )
+{
+	UINT	g, r;
+
+	if ( maker <= 0 || sub || ( attr & WM_ATTR_OWN ) == 0
+	  || ( attr & ( WM_ATTR_POPUP | WM_ATTR_NOFOCUS | WM_ATTR_FLOAT ) ) != 0 ) {
+		return;
+	}
+	g = knl_ob_rank_take(maker, &r);
+	if ( g != 0 ) {
+		(void)wm_set_rank(wid, g, r);
 	}
 }
 
@@ -2072,7 +2245,7 @@ LOCAL INT nrec_of( INT h )
 	INT	n = 0;
 
 	if ( H_KIND(h) == H_WIN ) {
-		return WO_NREC + 3;		/* and the drop record, the bars, the candidates */
+		return OB_WR_GSURF + 1;		/* and the drop record, the bars, the candidates, the question, the BOs */
 	}
 	if ( H_KIND(h) == H_PART ) {
 		return WO_NREC + 1;		/* and a selector's names */
@@ -2184,6 +2357,9 @@ LOCAL ER rec_bytes( INT h, INT recno, UB **p_buf, SZ *p_len )
 			wp->wbottom = w.work.bottom;
 			wp->z = w.z;
 			wp->flags = w.visible ? OB_WP_SHOWN : 0;
+			if ( er >= E_OK && wm_full_is(H_A(h)) ) {
+				wp->flags |= OB_WP_FULL;
+			}
 			if ( er >= E_OK && wm_focused() == H_A(h) ) {
 				wp->flags |= OB_WP_FOCUS;	/* the keys go to it */
 			}
@@ -2211,6 +2387,13 @@ LOCAL ER rec_bytes( INT h, INT recno, UB **p_buf, SZ *p_len )
 				wp->top = pt->r.top;
 				wp->right = pt->r.right;
 				wp->bottom = pt->r.bottom;
+				if ( WM_PT_KIND(pt->type) == TG_PARTS ) {
+					/* a panel of tags: its sheet, in the panel */
+					wp->wleft = pt->inner.left;
+					wp->wtop = pt->inner.top;
+					wp->wright = pt->inner.right;
+					wp->wbottom = pt->inner.bottom;
+				}
 				wp->flags = knl_pn_flags(H_A(h), H_B(h));
 				Kfree(pt);
 			}
@@ -2253,10 +2436,11 @@ LOCAL ER rec_bytes( INT h, INT recno, UB **p_buf, SZ *p_len )
 		}
 		if ( pt->count > 0 && ( WM_PT_KIND(pt->type) == WS_PARTS || WM_PT_KIND(pt->type) == SS_PARTS
 				    || WM_PT_KIND(pt->type) == WM_PT_POPUP ) ) {
-			b = (UB *)Kmalloc(WM_POOL_BYTES);
-			if ( b != NULL ) {
-				n = knl_pn_names(H_A(h), H_B(h), b, WM_POOL_BYTES);
-				if ( n < 0 ) n = 0;
+			/* as many bytes as the names take, copied as they are now */
+			n = knl_pn_names(H_A(h), H_B(h), &b);
+			if ( n < 0 ) {
+				Kfree(pt);
+				return (ER)n;
 			}
 		}
 		(void)e;
@@ -2290,6 +2474,21 @@ LOCAL ER rec_bytes( INT h, INT recno, UB **p_buf, SZ *p_len )
 	}
 	if ( H_KIND(h) == H_WIN && ( recno == OB_WR_CAND || recno == OB_WR_ASK ) ) {
 		return E_OK;			/* written only: nothing to read */
+	}
+	if ( H_KIND(h) == H_WIN && recno == OB_WR_GSURF ) {
+		T_OBWGSTAT	*st = (T_OBWGSTAT *)Kmalloc(sizeof(T_OBWGSTAT));
+
+		if ( st == NULL ) {
+			return E_NOMEM;
+		}
+		er = wm_gsurf_ref(H_A(h), st);
+		if ( er < E_OK ) {
+			Kfree(st);
+			return er;
+		}
+		*p_buf = (UB *)st;
+		*p_len = sizeof(*st);
+		return E_OK;
 	}
 	if ( H_KIND(h) == H_WIN ) {
 		/* the latest drop, empty when there has been none */
@@ -2562,6 +2761,99 @@ LOCAL ER keep_bytes( INT wid, INT which, D off, CONST void *buf, SZ size )
 LOCAL BOOL panel_seen( INT pid );
 LOCAL void panels_draw_on( INT wid );
 
+/*
+ * Record OB_WR_GSURF written (ts/ob.h): the BOs taken by the writer's
+ * keys to their objects, each needing the right to read it, and handed
+ * to the window manager, which holds its own references to them.
+ */
+LOCAL ER gsurf_write( INT wid, D off, CONST void *buf, SZ size )
+{
+	T_OBWGSURF	*g;
+	T_GPUBO		*bo[OB_GS_BUFS];
+	T_DPRECT	r[OB_GS_RECTS];
+	ID		pid = ts_get_pid();
+	INT		i;
+	ER		er = E_PAR;
+
+	if ( off != 0 || size < (SZ)sizeof(UINT) ) {
+		return E_PAR;
+	}
+	g = (T_OBWGSURF *)Kcalloc(1, sizeof(T_OBWGSURF));
+	if ( g == NULL ) {
+		return E_NOMEM;
+	}
+	knl_memcpy(g, buf, (INT)( ( size < (SZ)sizeof(*g) ) ? size : (SZ)sizeof(*g) ));
+	switch ( g->op ) {
+	case OB_GS_SET:
+		if ( g->format != OB_GS_XRGB8888 ) {
+			break;
+		}
+		for ( i = 0; i < OB_GS_BUFS; i++ ) {
+			bo[i] = NULL;
+		}
+		for ( i = 0, er = E_OK; i < OB_GS_BUFS && er >= E_OK; i++ ) {
+			er = knl_gpu_bo_of_key(g->bo[i], OB_OP_READ, &bo[i]);
+		}
+		if ( er >= E_OK ) {
+			er = wm_gsurf_set(wid, pid, bo, g->w, g->h, g->pitch);
+		}
+		for ( i = 0; i < OB_GS_BUFS; i++ ) {
+			if ( bo[i] != NULL ) {
+				knl_gpu_bo_put(bo[i]);
+			}
+		}
+		break;
+	case OB_GS_SHOW:
+		if ( g->nrect < 0 || g->nrect > OB_GS_RECTS ) {
+			break;
+		}
+		for ( i = 0; i < g->nrect; i++ ) {
+			r[i].left = g->rect[i].left;
+			r[i].top = g->rect[i].top;
+			r[i].right = g->rect[i].right;
+			r[i].bottom = g->rect[i].bottom;
+		}
+		er = wm_gsurf_show(wid, pid, g->idx, g->serial, r, g->nrect);
+		break;
+	case OB_GS_DROP:
+		er = wm_gsurf_drop(wid, pid);
+		break;
+	default:
+		break;
+	}
+	Kfree(g);
+	return er;
+}
+
+/* A BO shown in a window's work area (OB_WR_GSURF), told to whoever asked: code the BO, x the serial */
+EXPORT void knl_wmobj_gsurf_shown( INT wid, INT idx, UW serial )
+{
+	T_OBNTM	nt;
+	SYSTIM	now;
+	TS_UUID	u;
+	BOOL	known = FALSE;
+
+	if ( wo_mtx <= 0 || wid < 1 || wid > wo_nwin ) {
+		return;
+	}
+	LOCK();
+	if ( WOW(wid).used ) {
+		u = WOW(wid).uuid;
+		known = TRUE;
+	}
+	UNLOCK();
+	if ( !known ) {
+		return;
+	}
+	knl_memset(&nt, 0, sizeof(nt));
+	nt.code = (UINT)idx;
+	nt.x = (INT)serial;
+	if ( tk_get_otm(&now) >= E_OK ) {
+		nt.when = ( (UD)(UW)now.hi << 32 ) | (UD)now.lo;
+	}
+	knl_ob_post(&u, OB_WR_GSURF, OB_E_CHANGE, &nt);
+}
+
 LOCAL ER wo_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 		 BOOL nowait )
 {
@@ -2601,7 +2893,13 @@ LOCAL ER wo_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 		r.top = wp.top;
 		r.right = wp.right;
 		r.bottom = wp.bottom;
-		er = wm_place(H_A(h), &r);	/* on the screen; what was asked kept for a larger one */
+		if ( ( wp.flags & OB_WP_FULL ) != 0 ) {
+			er = wm_full(H_A(h), TRUE);	/* the whole screen; the rectangle is not looked at */
+		} else if ( wm_full_is(H_A(h)) ) {
+			er = wm_full(H_A(h), FALSE);	/* back where it was; the rectangle is not looked at */
+		} else {
+			er = wm_place(H_A(h), &r);	/* on the screen; what was asked kept for a larger one */
+		}
 		if ( er >= E_OK && ( wp.flags & OB_WP_SHOWN ) != 0 ) {
 			panels_draw_on(H_A(h));	/* what a hidden window's parts were set to, drawn once */
 		}
@@ -2618,6 +2916,8 @@ LOCAL ER wo_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 		knl_memcpy(&an, buf, (INT)( ( size < (SZ)sizeof(an) ) ? size : (SZ)sizeof(an) ));
 		an.msg[OB_DROP_MSG - 1] = 0;
 		er = drop_answer(H_A(h), &an);
+	} else if ( H_KIND(h) == H_WIN && recno == OB_WR_GSURF ) {
+		er = gsurf_write(H_A(h), off, buf, size);
 	} else if ( H_KIND(h) == H_WIN && recno == OB_WR_ASK ) {
 		T_OBDRANS	an;
 
@@ -2683,7 +2983,9 @@ LOCAL ER wo_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 		if ( recno == OB_WR_STATE ) {
 			er = knl_pn_set_state(H_A(h), H_B(h), (CONST UB *)buf, (INT)size);
 		} else if ( recno == OB_WR_KIND ) {
-			er = knl_pn_set_names(H_A(h), H_B(h), (CONST UB *)buf, (INT)size);
+			/* the names whole in one write, as many as there are */
+			er = ( size > (SZ)0x7FFFFFFF ) ? E_PAR
+			   : knl_pn_set_names(H_A(h), H_B(h), (CONST UB *)buf, (INT)size);
 			if ( er >= E_OK ) {
 				er = 1;		/* the names are not compared: drawn again */
 			}
@@ -2691,9 +2993,42 @@ LOCAL ER wo_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize,
 			er = E_PAR;
 		} else {
 			T_OBWPOS	wp;
+			T_WMPART	*was = part_copy(H_A(h), H_B(h));
+			T_DPRECT	r, in;
+			BOOL		moved = FALSE;
 
 			knl_memcpy(&wp, buf, sizeof(wp));
+			/*
+			 * Its rectangle in the panel, and a panel of tags its
+			 * sheet in the work area's fields: what reads as it is
+			 * leaves the part where it is, so that the flags alone
+			 * are changed by writing back what was read
+			 */
+			r.left = wp.left;
+			r.top = wp.top;
+			r.right = wp.right;
+			r.bottom = wp.bottom;
+			in.left = wp.wleft;
+			in.top = wp.wtop;
+			in.right = wp.wright;
+			in.bottom = wp.wbottom;
+			if ( was != NULL && r.right > r.left && r.bottom > r.top
+			  && ( r.left != was->r.left || r.top != was->r.top
+			    || r.right != was->r.right || r.bottom != was->r.bottom ) ) {
+				(void)knl_pn_set_rect(H_A(h), H_B(h), &r);
+				moved = TRUE;
+			}
+			if ( was != NULL && WM_PT_KIND(was->type) == TG_PARTS && in.right > in.left && in.bottom > in.top
+			  && ( in.left != was->inner.left || in.top != was->inner.top
+			    || in.right != was->inner.right || in.bottom != was->inner.bottom ) ) {
+				(void)knl_pn_set_inner(H_A(h), H_B(h), &in);
+				moved = TRUE;
+			}
+			if ( was != NULL ) Kfree(was);
 			er = knl_pn_set_flags(H_A(h), H_B(h), wp.flags);
+			if ( er == E_OK && moved ) {
+				er = 1;			/* moved: drawn again */
+			}
 		}
 		/*
 		 * A part written as it already was (the state and the flags
@@ -2786,7 +3121,7 @@ LOCAL ER wo_trn( INT h, INT recno, UD size )
 	/* the place, the state, a drop and the bars are rewritten whole: nothing to cut */
 	if ( recno == OB_WR_PLACE || recno == OB_WR_STATE
 	  || ( H_KIND(h) == H_WIN && ( recno == OB_WR_DROP || recno == OB_WR_BARS || recno == OB_WR_CAND
-				      || recno == OB_WR_ASK ) ) ) {
+				      || recno == OB_WR_ASK || recno == OB_WR_GSURF ) ) ) {
 		return E_OK;
 	}
 	return E_NOSPT;
@@ -3056,6 +3391,19 @@ LOCAL ER fr_wri( INT h, INT recno, D off, CONST void *buf, SZ size )
 		if ( r.right <= r.left || r.bottom <= r.top ) {
 			return E_PAR;
 		}
+		if ( pl > 0 && e->sub == OB_S_PANEL && H_KIND(pl) == H_PNL ) {
+			/*
+			 * A placed panel stays where it was put; its size may
+			 * change, for a panel the program lays out to its
+			 * window's size
+			 */
+			er = knl_pn_set_size(H_A(pl), r.right - r.left, r.bottom - r.top);
+			if ( er >= E_OK ) {
+				wm_panel_draw(H_A(pl));
+				wm_update();
+			}
+			return er;
+		}
 		if ( pl > 0 && e->sub != OB_S_PART ) {
 			return E_NOSPT;			/* a placed panel stays where it was put */
 		}
@@ -3287,7 +3635,7 @@ LOCAL ER fr_map( INT h, INT target, CONST T_OBMAP *m )
 			TS_UUID	box = e->box;
 
 			if ( knl_pn_load(&box, e->boxnum, def, NULL, 0) < E_OK ) {
-				Kfree(def);
+				wm_panel_free(def);
 				return E_OBJ;
 			}
 			w = def->r.right - def->r.left;
@@ -3304,7 +3652,7 @@ LOCAL ER fr_map( INT h, INT target, CONST T_OBMAP *m )
 		}
 		UNLOCK();
 		pid = wm_panel_open(H_A(t), def);
-		Kfree(def);
+		wm_panel_free(def);
 		if ( pid > 0 ) {
 			BOOL	bs;
 
@@ -3476,6 +3824,7 @@ LOCAL ER fr_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	INT	i, n, boxnum = 0;
 	BOOL	beside = FALSE;
 	UB	title[WM_LABEL_MAX];
+	ID	maker;
 
 	title[0] = 0;
 
@@ -3523,20 +3872,21 @@ LOCAL ER fr_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 				return E_NOMEM;
 			}
 			if ( knl_pn_load(&box, boxnum, def, title, sizeof(title)) < E_OK ) {
-				Kfree(def);
+				wm_panel_free(def);
 				return E_OBJ;
 			}
 			r.left = 0;
 			r.top = 0;
 			r.right = def->r.right - def->r.left;
 			r.bottom = def->r.bottom - def->r.top;
-			Kfree(def);
+			wm_panel_free(def);
 		}
 	}
 	if ( ts_gen_uuid(&u) < E_OK ) {
 		if ( items != NULL ) Kfree(items);
 		return E_SYS;
 	}
+	maker = knl_prc_self(NULL, NULL);
 	LOCK();
 	for ( i = 0; i < WO_FREE_MAX; i++ ) {
 		if ( !wo_free[i].used ) {
@@ -3566,6 +3916,7 @@ LOCAL ER fr_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 			e->box = box;
 		}
 		e->item = items;
+		e->maker = maker;
 		e->used = TRUE;
 		wo_nfree++;
 	}
@@ -3842,6 +4193,7 @@ LOCAL ER wo_setprot( CONST TS_UUID *uuid, CONST T_OBPRT *prt )
 	return E_OK;
 }
 
+
 /*
  * A window made as an object: where it goes and what frame it wears
  * are in the metadata given, {"rect":[l,t,r,b],"attr":n}, and its title
@@ -3884,10 +4236,11 @@ LOCAL ER wo_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	if ( c->sub != 0 && c->sub != OB_S_WINDOW ) {
 		return E_PAR;
 	}
-	r.left = 100;
-	r.top = 100;
-	r.right = 500;
-	r.bottom = 400;
+	/* a window asked for with no rectangle: from the corner of the screen new windows open on */
+	r.left = wm_new_x(100);
+	r.top = wm_new_y(100);
+	r.right = r.left + 400;
+	r.bottom = r.top + 300;
 	if ( c->json != NULL && c->jsonsz > 0 ) {
 		CONST UB	*j = c->json;
 		INT		len = (INT)c->jsonsz;
@@ -3919,7 +4272,7 @@ LOCAL ER wo_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 
 			(void)sw;
 			(void)sh;
-			wm_screen_at(( r.left + r.right ) / 2, 0, &on);
+			wm_screen_at(( r.left + r.right ) / 2, ( r.top + r.bottom ) / 2, &on);
 			r = on;
 		}
 		v = ( root >= 0 ) ? knl_oj_member(j, len, root, "wide") : -1;
@@ -3930,7 +4283,7 @@ LOCAL ER wo_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 
 			(void)sw;
 			(void)sh;
-			wm_screen_at(( r.left + r.right ) / 2, 0, &on);
+			wm_screen_at(( r.left + r.right ) / 2, ( r.top + r.bottom ) / 2, &on);
 			r.left = on.left;
 			r.right = on.right;
 		}
@@ -3981,6 +4334,9 @@ LOCAL ER wo_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 		if ( pw > 0 ) {
 			(void)wm_set_parent(wid, pw);
 		}
+	}
+	if ( er >= E_OK ) {
+		open_rank(wid, maker, attr, has_parent);
 	}
 	/*
 	 * A window a program asks something in (a pop-up, over its own) has

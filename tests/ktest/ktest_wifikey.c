@@ -45,6 +45,9 @@
  *	  keeps both the PMK and the password; saved again as WPA2 it keeps
  *	  the PMK and lets the password go, and so cannot be saved again as
  *	  WPA3 without one.
+ *	- bsslist: the list of networks seen lately (record 2 of wlan0):
+ *	  a scan that finds fewer takes none out at once, the time or full
+ *	  scans in a row do, and the access point joined stays.
  *
  *	The settings as they were are put back.
  */
@@ -434,8 +437,91 @@ LOCAL void test_wpa3( void )
 	knl_memset(pt, 0, sizeof(pt));
 }
 
+/*
+ * The list of networks seen lately (wifi.c, bss_merge and bss_expire),
+ * on a table of the test's own, the scans as on the Surface Go 2 while
+ * joined: a full scan finds six networks; background scans that find
+ * only the access point joined and one more take none of them out; two
+ * full scans without four of them do; a network not seen for 180 s
+ * goes, at 180 s and not before; the access point joined stays through
+ * both; a network seen again between misses starts its count again.
+ */
+IMPORT void *knl_wifi_bss_new( void );
+IMPORT void knl_wifi_bss_free( void *h );
+IMPORT void knl_wifi_bss_scan( void *h, CONST UB (*bssid)[6], INT n, UD t, BOOL full, CONST UB *keep );
+IMPORT BOOL knl_wifi_bss_expire( void *h, UD t, CONST UB *keep );
+IMPORT BOOL knl_wifi_bss_has( void *h, CONST UB *bssid );
+IMPORT INT  knl_wifi_bss_count( void *h );
+
+LOCAL CONST UB	ap[8][6] = {
+	{ 0x02, 0, 0, 0, 0, 1 }, { 0x02, 0, 0, 0, 0, 2 }, { 0x02, 0, 0, 0, 0, 3 }, { 0x02, 0, 0, 0, 0, 4 },
+	{ 0x02, 0, 0, 0, 0, 5 }, { 0x02, 0, 0, 0, 0, 6 }, { 0x02, 0, 0, 0, 0, 7 }, { 0x02, 0, 0, 0, 0, 8 },
+};
+#define AP_A	ap[0]			/* the one joined */
+#define T0	1000000ULL
+
+LOCAL void test_bsslist( void )
+{
+	void	*h = knl_wifi_bss_new();
+	UB	two[2][6], one[1][6];
+	INT	i;
+
+	KT_ASSERT(h != NULL);
+	if ( h == NULL ) return;
+	knl_memcpy(two[0], ap[0], 6);
+	knl_memcpy(two[1], ap[1], 6);
+	knl_memcpy(one[0], ap[0], 6);
+
+	/* a full scan: six */
+	knl_wifi_bss_scan(h, ap, 6, T0, TRUE, NULL);
+	KT_ASSERT_EQ(knl_wifi_bss_count(h), 6);
+
+	/* joined; background scans that see the one joined and one more, the one joined only */
+	knl_wifi_bss_scan(h, (CONST UB (*)[6])two, 2, T0 + 5000, FALSE, AP_A);
+	KT_ASSERT_EQ(knl_wifi_bss_count(h), 6);
+	knl_wifi_bss_scan(h, (CONST UB (*)[6])one, 1, T0 + 10000, FALSE, AP_A);
+	knl_wifi_bss_scan(h, (CONST UB (*)[6])one, 1, T0 + 15000, FALSE, AP_A);
+	KT_ASSERT_EQ(knl_wifi_bss_count(h), 6);			/* none out at once */
+	for ( i = 0; i < 6; i++ ) KT_ASSERT(knl_wifi_bss_has(h, ap[i]));
+	KT_ASSERT(!knl_wifi_bss_expire(h, T0 + 20000, AP_A));	/* nor by the time yet */
+
+	/* full scans without four of them: out after the second */
+	knl_wifi_bss_scan(h, (CONST UB (*)[6])two, 2, T0 + 20000, TRUE, AP_A);
+	KT_ASSERT_EQ(knl_wifi_bss_count(h), 6);
+	knl_wifi_bss_scan(h, (CONST UB (*)[6])two, 2, T0 + 30000, TRUE, AP_A);
+	KT_ASSERT_EQ(knl_wifi_bss_count(h), 2);
+	KT_ASSERT(knl_wifi_bss_has(h, ap[0]) && knl_wifi_bss_has(h, ap[1]) && !knl_wifi_bss_has(h, ap[2]));
+
+	/* a network seen again between misses starts its count again */
+	knl_wifi_bss_scan(h, &ap[6], 1, T0 + 40000, TRUE, AP_A);	/* G in; A and B missed once */
+	knl_wifi_bss_scan(h, (CONST UB (*)[6])two, 2, T0 + 50000, TRUE, AP_A);	/* A, B seen again; G missed once */
+	knl_wifi_bss_scan(h, &ap[6], 1, T0 + 60000, TRUE, AP_A);	/* B missed once again */
+	KT_ASSERT(knl_wifi_bss_has(h, ap[1]) && knl_wifi_bss_has(h, ap[6]));
+	KT_ASSERT_EQ(knl_wifi_bss_count(h), 3);
+
+	/* the time: G (last seen at 60 s) stays until 180 s after, then goes; A, the one joined, stays */
+	KT_ASSERT(knl_wifi_bss_expire(h, T0 + 60000 + 179999, AP_A));
+	KT_ASSERT(!knl_wifi_bss_has(h, ap[1]));				/* B, last seen at 50 s */
+	KT_ASSERT(knl_wifi_bss_has(h, ap[6]));				/* G, 1 ms before its time */
+	KT_ASSERT(knl_wifi_bss_expire(h, T0 + 60000 + 180000, AP_A));
+	KT_ASSERT(!knl_wifi_bss_has(h, ap[6]));
+	KT_ASSERT(knl_wifi_bss_has(h, AP_A));				/* last seen at 50 s, as B */
+	KT_ASSERT_EQ(knl_wifi_bss_count(h), 1);
+
+	/* the one joined stays through full scans without it; left, it goes by them */
+	knl_wifi_bss_scan(h, &ap[7], 1, T0 + 300000, TRUE, AP_A);
+	knl_wifi_bss_scan(h, &ap[7], 1, T0 + 310000, TRUE, AP_A);
+	KT_ASSERT(knl_wifi_bss_has(h, AP_A));
+	knl_wifi_bss_scan(h, &ap[7], 1, T0 + 320000, TRUE, NULL);
+	KT_ASSERT(!knl_wifi_bss_has(h, AP_A));
+	KT_ASSERT_EQ(knl_wifi_bss_count(h), 1);
+	tm_printf((UB *)"  the list after: %d network(s)\n", knl_wifi_bss_count(h));
+	knl_wifi_bss_free(h);
+}
+
 EXPORT void ktest_wifikey( void )
 {
+	KT_RUN(test_bsslist);			/* needs no settings */
 	if ( ts_str_to_uuid(SYSDEF_CONF_WIFI, &conf) < E_OK || ( was_len = conf_get(&was) ) < 0 ) {
 		kt_skip("wifikey", "no Wi-Fi settings object on the system volume (WIFI=1 puts it there)");
 		return;

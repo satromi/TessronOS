@@ -16,7 +16,9 @@
  *	Broadcom controller with its patch against a controller made in
  *	software, which answers each command at once: the order of the
  *	commands, the speeds, the patch's commands sent as they are, the
- *	board's address given, and where it stops when something fails.
+ *	board's address given, and where it stops when something fails;
+ *	the SCO routed to the HCI when the board asks it, and an SCO packet
+ *	of H4 made and found.
  *	The UART itself is the Raspberry Pi 5's (bt_uart.c), on the machine.
  */
 
@@ -228,6 +230,9 @@ LOCAL struct {
 	UB	given[6];		/* the address written */
 	UB	patch[sizeof(hcd_good)];	/* the vendor's commands as they came, the patch's form */
 	INT	npatch;
+	UB	pcm[5];			/* what it answers for its SCO PCM parameters */
+	UB	pcm_w[5];		/* and what was written */
+	INT	npcm_w;
 } fk;
 
 LOCAL ER fk_cmd( BTC *c, UB *b, INT n )
@@ -264,6 +269,14 @@ LOCAL ER fk_cmd( BTC *c, UB *b, INT n )
 		knl_memcpy(ev + 6, fk.addr, 6);
 		k = 12;
 	}
+	if ( ev[5] == 0 && op == 0xfc1d ) {
+		knl_memcpy(ev + 6, fk.pcm, 5);
+		k = 11;
+	}
+	if ( op == 0xfc1c && n == 8 ) {
+		knl_memcpy(fk.pcm_w, b + 3, 5);
+		fk.npcm_w++;
+	}
 	ev[1] = (UB)( k - 2 );
 	knl_btx_ring_in(c, 0, ev, k);
 	return E_OK;
@@ -284,7 +297,7 @@ LOCAL ER fk_speed( BTC *c, UW baud )
 	return E_OK;
 }
 
-LOCAL CONST BTTRANS	fk_tr = { fk_cmd, fk_acl, NULL };
+LOCAL CONST BTTRANS	fk_tr = { fk_cmd, fk_acl, NULL, NULL, NULL };
 
 /* A controller with only what the start uses: the ring and its semaphore */
 LOCAL BTC *fk_new( void )
@@ -420,6 +433,87 @@ LOCAL void test_bcm_fail( void )
 	fk_del(c);
 }
 
+/*
+ * The SCO to the host: the chip's PCM parameters read, the routing set
+ * to the HCI with the rest as they were, after the address; when they
+ * are not read, the routing with the board's values; when the write is
+ * refused, the start goes on without the voice on the HCI.
+ */
+LOCAL void test_bcm_sco( void )
+{
+	static CONST UB	pcm_was[5] = { 0x00, 0x04, 0x01, 0x00, 0x00 };
+	static CONST UB	pcm_want[5] = { 0x01, 0x04, 0x01, 0x00, 0x00 };
+	static CONST UB	pcm_dflt[5] = { 0x01, 0x02, 0x00, 0x01, 0x01 };
+	BTBCFG		cfg;
+	BTC		*c = fk_new();
+
+	KT_ASSERT(c != NULL);
+	if ( c == NULL ) return;
+	fk_cfg(&cfg);
+	knl_memcpy(fk.pcm, pcm_was, 5);
+	cfg.sco_hci = TRUE;
+	KT_ASSERT(knl_btb_run(c, &cfg, hcd_good, sizeof(hcd_good), "test.hcd"));
+	KT_ASSERT(fk.nops >= 4);
+	KT_ASSERT_EQ(fk.ops[fk.nops - 3], 0xfc01);
+	KT_ASSERT_EQ(fk.ops[fk.nops - 2], 0xfc1d);
+	KT_ASSERT_EQ(fk.ops[fk.nops - 1], 0xfc1c);
+	KT_ASSERT_EQ(fk.npcm_w, 1);
+	KT_ASSERT(same(fk.pcm_w, pcm_want, 5));
+	KT_ASSERT(c->sco_hci);
+
+	/* not read: the board's values, the routing to the HCI */
+	c->sco_hci = FALSE;
+	fk_cfg(&cfg);
+	cfg.sco_hci = TRUE;
+	fk.fail_op = 0xfc1d;
+	KT_ASSERT(knl_btb_run(c, &cfg, NULL, 0, NULL));
+	KT_ASSERT(same(fk.pcm_w, pcm_dflt, 5));
+	KT_ASSERT(c->sco_hci);
+
+	/* the write refused: on all the same, without the voice there */
+	c->sco_hci = FALSE;
+	fk_cfg(&cfg);
+	cfg.sco_hci = TRUE;
+	fk.fail_op = 0xfc1c;
+	KT_ASSERT(knl_btb_run(c, &cfg, NULL, 0, NULL));
+	KT_ASSERT(!c->sco_hci);
+
+	/* a board that does not ask: nothing of the PCM sent */
+	fk_cfg(&cfg);
+	knl_memcpy(fk.addr, cfg.bdaddr, 6);
+	KT_ASSERT(knl_btb_run(c, &cfg, NULL, 0, NULL));
+	KT_ASSERT_EQ(fk.ops[fk.nops - 1], 0x1009);
+	fk_del(c);
+}
+
+/* An SCO packet of H4: made with its type, and found again in a stream */
+LOCAL void test_h4_sco( void )
+{
+	UB	pkt[3 + 48], out[1 + 3 + 48];
+	INT	i;
+	BTH4	*h = (BTH4 *)Kmalloc(sizeof(BTH4));
+
+	KT_ASSERT(h != NULL);
+	if ( h == NULL ) return;
+	pkt[0] = 0x07;
+	pkt[1] = 0x00;
+	pkt[2] = 48;
+	for ( i = 0; i < 48; i++ ) pkt[3 + i] = (UB)i;
+	KT_ASSERT_EQ(knl_bth4_pack(H4_SCO, pkt, sizeof(pkt), out, sizeof(out)), (INT)sizeof(out));
+	KT_ASSERT_EQ(out[0], H4_SCO);
+	KT_ASSERT_EQ(knl_bth4_pack(H4_SCO, pkt, sizeof(pkt) - 1, out, sizeof(out)), E_PAR);
+	knl_memset(&got, 0, sizeof(got));
+	knl_bth4_init(h);
+	for ( i = 0; i < (INT)sizeof(out); i += 5 ) {
+		knl_bth4_feed(h, out + i, ( (INT)sizeof(out) - i < 5 ) ? (INT)sizeof(out) - i : 5, got_out, NULL);
+	}
+	KT_ASSERT_EQ(got.n, 1);
+	KT_ASSERT_EQ(got.type[0], H4_SCO);
+	KT_ASSERT_EQ(got.len[0], (INT)sizeof(pkt));
+	KT_ASSERT(same(got.b, pkt, sizeof(pkt)));
+	Kfree(h);
+}
+
 EXPORT void ktest_btuart( void )
 {
 	KT_RUN(test_h4_pack);
@@ -427,4 +521,6 @@ EXPORT void ktest_btuart( void )
 	KT_RUN(test_hcd_check);
 	KT_RUN(test_bcm_start);
 	KT_RUN(test_bcm_fail);
+	KT_RUN(test_bcm_sco);
+	KT_RUN(test_h4_sco);
 }

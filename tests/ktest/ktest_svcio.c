@@ -63,6 +63,7 @@ IMPORT UW	knl_prc_ter_inside;
 #define SP_OBBIG	12
 #define SP_KILLOB	13
 #define SP_KILLSUB	17
+#define SP_SOLIM	50
 #define NET_PORT	17100
 #define LOOPBACK	0x7f000001UL
 #define SO_NUM		SO_MAX
@@ -1181,6 +1182,89 @@ LOCAL void test_prc_limits( void )
 }
 
 /*
+ * The two limits on sockets (design 9.2). Two processes each lower their
+ * soft limit and make sockets to it, the one past it refused (EMFILE),
+ * neither in the other's way. Then the system's table is filled by
+ * owners that are no process, each to its limit, until a socket for any
+ * of them is refused (E_LIMIT, ENFILE) while the kernel still makes one
+ * of the numbers kept for it; the process that is left, its soft limit
+ * raised again, is refused by the full table too. All of it goes when
+ * the owners end.
+ */
+#define SOLIM_N		24
+#define SOLIM_FAKE	9900		/* process numbers no process has */
+
+LOCAL void test_prc_solim( void )
+{
+	T_TSMSG	*m;
+	UW	arg[8];
+	INT	*fill, nfill = 0, s = E_OK, k = 0, i, t;
+	ID	pa, pb;
+
+	if ( !have_prog ) KT_SKIP("no program");
+	if ( !have_stack ) KT_SKIP("no stack");
+	m = (T_TSMSG *)Kmalloc(sizeof(T_TSMSG));
+	fill = (INT *)Kmalloc(sizeof(INT) * SO_MAX);
+	KT_ASSERT(m != NULL && fill != NULL);
+	if ( m == NULL || fill == NULL ) goto done;
+	knl_memset(arg, 0, sizeof(arg));
+	arg[0] = SP_SOLIM;
+	arg[1] = SOLIM_N;
+	arg[2] = (UW)SO_PRC_SOFT;
+	arg[3] = (UW)SO_PRC_HARD;
+	pa = start_args(arg);
+	pb = start_args(arg);
+	KT_ASSERT(pa > 0 && pb > 0);
+	for ( t = 0; t < 100 && ( owned_socks(pa) < SOLIM_N || owned_socks(pb) < SOLIM_N ); t++ ) {
+		tk_dly_tsk(100);
+	}
+	KT_ASSERT_EQ(owned_socks(pa), SOLIM_N);
+	KT_ASSERT_EQ(owned_socks(pb), SOLIM_N);
+
+	/* the second ends as it is: its sockets go with it */
+	knl_memset(m, 0, sizeof(T_TSMSG));
+	m->type = 1;
+	m->size = 1;
+	if ( pb > 0 ) KT_ASSERT_ER(ts_snd_msg(pb, m, 1000), E_OK);
+	run_to_end(pb, 10000);
+	KT_ASSERT_EQ(owned_socks(pb), 0);
+
+	/* the table filled, each owner to its own limit */
+	while ( nfill < SO_MAX ) {
+		s = knl_so_socket_as(AF_INET, SOCK_DGRAM, 0, SOLIM_FAKE + k);
+		if ( s == EX_MFILE ) {
+			k++;
+			continue;
+		}
+		if ( s < 0 ) break;
+		fill[nfill++] = s;
+	}
+	KT_ASSERT_ER(s, E_LIMIT);
+	KT_ASSERT(k >= 1);			/* the first owner met its limit before the table ran out */
+	tm_printf((UB *)"  %d sockets of %d owners that are no process fill the table\n", nfill, k + 1);
+	KT_ASSERT_ER(knl_so_socket_as(AF_INET, SOCK_DGRAM, 0, SOLIM_FAKE + k + 1), E_LIMIT);
+	s = so_socket(AF_INET, SOCK_DGRAM, 0);	/* the kernel's numbers are still there */
+	KT_ASSERT(s >= 0);
+	if ( s >= 0 ) KT_ASSERT_ER(so_close(s), E_OK);
+
+	/* the first, its limit back, is refused by the table */
+	m->body[0] = 1;
+	if ( pa > 0 ) KT_ASSERT_ER(ts_snd_msg(pa, m, 1000), E_OK);
+	run_to_end(pa, 10000);
+	KT_ASSERT_EQ(owned_socks(pa), 0);
+	for ( i = 0; i <= k; i++ ) {
+		knl_so_prc_end(SOLIM_FAKE + i);
+		KT_ASSERT_EQ(owned_socks(SOLIM_FAKE + i), 0);
+	}
+	s = so_socket(AF_INET, SOCK_DGRAM, 0);
+	KT_ASSERT(s >= 0);
+	if ( s >= 0 ) KT_ASSERT_ER(so_close(s), E_OK);
+    done:
+	if ( m != NULL ) Kfree(m);
+	if ( fill != NULL ) Kfree(fill);
+}
+
+/*
  * A process under a user that is not an administrator: it logs in as
  * one (ob_login) and is refused what only an administrator may do --
  * setting the interface, opening the disk -- and may mount the disk only
@@ -1679,6 +1763,7 @@ EXPORT void ktest_svcio( void )
 	KT_RUN(test_prc_kill_ob);
 	KT_RUN(test_prc_kfault);
 	KT_RUN(test_prc_limits);
+	KT_RUN(test_prc_solim);
 	KT_RUN(test_prc_user);
 	KT_RUN(test_prc_kill_recv);
 	KT_RUN(test_prc_kill_accept);

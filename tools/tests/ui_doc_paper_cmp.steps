@@ -11,27 +11,8 @@
 # process's after it with 表示 there; 表示's own opens with 原稿 on its row, 詳細 20 below.
 # The panel is the desktop's and holds it until it is answered: sync is not answered meanwhile.
 # Keys: Ctrl+P 13 01, Enter 28, Ctrl+E 08 01.
-docproc kernel
-mkbig doc 120
-open big
-waitwin 基本文章編集 600
-sync 600
-wait 800
-move 690 490
-sync 600
-key 13 01
-wait 2000
-shot prn_k_panel
-logmark
-key 28
-expectsince print: 
-wait 1500
-sync 600
-sum pdf
-keep kernel
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig doc 120
 logmark
 pdoc big
@@ -48,44 +29,12 @@ expectsince document: print (0)
 wait 500
 sync 600
 sum pdf
-same kernel
+want ok 37646 23ebb97fb0461a2f 基本文章編集
 logmark
 key 08 01
 expectsince document: closed
 wait 500
 # 詳細
-mkbig doc 120
-open big
-waitwin 基本文章編集 600
-sync 600
-wait 500
-click 300 170
-sync 600
-click 300 250 1
-wait 400
-wait 400
-move 330 310
-wait 300
-move 440 310
-wait 400
-move 440 330
-wait 300
-click 440 330
-sync 600
-move 690 490
-sync 600
-key 13 01
-wait 2000
-logmark
-key 28
-expectsince print: 
-wait 1500
-sync 600
-sum pdf
-keep detail
-key 08 01
-sync 600
-wait 500
 mkbig doc 120
 logmark
 pdoc big
@@ -98,13 +47,13 @@ logmark
 click 300 250 1
 expectsince document: menu
 wait 400
-move 330 250
+move 330 310
 wait 300
-move 440 250
+move 440 310
 wait 400
-move 440 270
+move 440 330
 wait 300
-click 440 270
+click 440 330
 expectsince document: command view.detail
 expectsince document: drew
 move 690 490
@@ -117,7 +66,7 @@ expectsince document: print (0)
 wait 500
 sync 600
 sum pdf
-same detail
+want ok 39610 4cbbf128176fa165 基本文章編集
 logmark
 key 08 01
 expectsince document: closed

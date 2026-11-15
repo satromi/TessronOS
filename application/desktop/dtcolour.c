@@ -7,7 +7,8 @@
  * each other: the plane of saturation and brightness with its bar of
  * hues, the dropper that takes a colour off the screen, the boxes of the
  * numbers in the form chosen (RGB, HSL or HEX), and the chart of ready
- * colours. A press outside it or Enter keeps the colour; Escape leaves
+ * colours. A press outside it (but on a screen keyboard, which types
+ * into it) or Enter keeps the colour; Escape leaves
  * the caller's colour as it was.
  *
  * A program of its own process asks with DT_RQ_COLOUR (ts/dtreq.h), and
@@ -37,6 +38,7 @@
 #define CP_LHEX		12
 #define CP_FORM		13		/* RGB, HSL, HEX: three choices */
 #define CP_CHART	20
+#define CP_SAME		( CP_CHART + CHART_N )	/* 仮身属性と同じ, for 背景色変更 only */
 
 #define FORM_RGB	0
 #define FORM_HSL	1
@@ -59,6 +61,8 @@
 #define CHART_DX	27
 #define CHART_DY	15
 #define POP_H		( CHART_Y + CHART_ROWS * CHART_DY + 6 )
+#define SAME_Y		( POP_H - 2 )	/* the switch under the chart */
+#define SAME_H		28		/* the room it adds to the pop-up */
 
 #define ANS_DROPPER	WM_ANS_ACT
 
@@ -169,15 +173,21 @@ LOCAL T_WMPART *add( T_WMPANEL *def, UW type, INT num, INT l, INT t, INT w, INT 
 	return dt_pn_add(def, type, num, l - DT_PN_IN, t - DT_PN_IN, w, h, label);
 }
 
-LOCAL T_WMPANEL *panel_def( UW col )
+LOCAL T_WMPANEL *panel_def( UW col, CONST BOOL *same )
 {
 	LOCAL CONST char * CONST forms[3] = { "RGB", "HSL", "HEX" };
-	T_WMPANEL	*def = dt_pn_new(POP_W - 2 * DT_PN_IN, POP_H - 2 * DT_PN_IN);
+	T_WMPANEL	*def = dt_pn_new(POP_W - 2 * DT_PN_IN, POP_H + ( ( same != NULL ) ? SAME_H : 0 ) - 2 * DT_PN_IN);
 	T_WMPART	*pt;
 	INT		k;
 
 	if ( def == NULL ) {
 		return NULL;
+	}
+	if ( same != NULL ) {
+		pt = add(def, WM_PT_CHECK, CP_SAME, 8, SAME_Y, POP_W - 16, 22, "仮身属性と同じ");
+		if ( pt != NULL ) {
+			pt->value = *same ? 1 : 0;
+		}
 	}
 	def->kind = WM_PNL_SHEET;
 	(void)add(def, WM_PT_SVMAP, CP_MAP, 0, 0, POP_W, MAP_H, NULL);
@@ -366,22 +376,47 @@ LOCAL BOOL drop_take( UW *p_col )
 }
 
 /*
+ * A window that never has the keys (WM_ATTR_NOFOCUS), a screen keyboard:
+ * pressing it types into the pop-up, and is no press elsewhere
+ */
+LOCAL BOOL keyless( INT wid )
+{
+	T_WMWIN	w;
+
+	return (BOOL)( wid > 0 && wm_ref(wid, &w) >= E_OK && ( w.attr & WM_ATTR_NOFOCUS ) != 0 );
+}
+
+/*
+ * A colour chosen in the pop-up of 背景色変更 is the object's own: the
+ * switch 仮身属性と同じ goes off
+ */
+LOCAL void same_off( INT pid, CONST BOOL *p_same, UW was, UW now )
+{
+	INT	n = 0;
+
+	if ( p_same != NULL && was != now && wm_panel_get(pid, CP_SAME, &n) >= E_OK && n != 0 ) {
+		(void)wm_panel_set(pid, CP_SAME, 0);
+		wm_panel_draw(pid);
+	}
+}
+
+/*
  * The pop-up with its corner at (x, y) of the screen, or as near as the
  * screen lets it be, worked until it ends. TRUE with the colour in *io
  * when it was kept. 'owner' is the window whose keys are the pop-up's:
  * it holds them throughout, and they go back to whichever window held
  * them before, the panel that asked or a program's own window.
  */
-LOCAL BOOL pick_at( INT owner, UW *io, INT x, INT y )
+LOCAL BOOL pick_at( INT owner, UW *io, INT x, INT y, BOOL *p_same )
 {
 	T_WMPANEL	*def;
 	T_WMEV		ev;
 	UINT		ans = WM_ANS_NONE;
-	UW		col = *io & 0x00FFFFFFU, c;
+	UW		col = *io & 0x00FFFFFFU, c, prev;
 	INT		pid, wid, was = wm_focused(), form = FORM_RGB;
 	INT		h = 0, s = 0, v = 0, k, n, hh;
 
-	def = panel_def(col);
+	def = panel_def(col, p_same);
 	if ( def == NULL ) {
 		return FALSE;
 	}
@@ -405,11 +440,12 @@ LOCAL BOOL pick_at( INT owner, UW *io, INT x, INT y )
 		if ( wm_read_event(&ev, 2000) < E_OK ) {
 			continue;
 		}
+		prev = col;
 		if ( ev.type == HID_EV_KEY_DOWN && ev.code == KEY_ENTER ) {
 			ans = WM_ANS_OK;
 			break;
 		}
-		if ( ev.type == HID_EV_BTN_DOWN && ev.wid != wid ) {
+		if ( ev.type == HID_EV_BTN_DOWN && ev.wid != wid && !keyless(ev.wid) ) {
 			ans = WM_ANS_OK;	/* pressed elsewhere: put away with what it shows */
 			break;
 		}
@@ -427,6 +463,7 @@ LOCAL BOOL pick_at( INT owner, UW *io, INT x, INT y )
 				rgb_hsv(col, &h, &s, &v);
 				panel_show(pid, form, FALSE, col, h, s, v);
 			}
+			same_off(pid, p_same, prev, col);
 			wm_update();
 			continue;
 		}
@@ -468,7 +505,11 @@ LOCAL BOOL pick_at( INT owner, UW *io, INT x, INT y )
 			}
 			panel_show(pid, form, TRUE, col, h, s, v);
 		}
+		same_off(pid, p_same, prev, col);
 		wm_update();
+	}
+	if ( p_same != NULL && wm_panel_get(pid, CP_SAME, &n) >= E_OK ) {
+		*p_same = (BOOL)( n != 0 );
 	}
 	wm_panel_close(pid);
 	if ( was > 0 ) {
@@ -491,13 +532,29 @@ EXPORT BOOL dt_pick_colour( INT owner, UW *io )
 
 	(void)ts_hid_pointer(&x, &y, &btn);
 
-	return pick_at(owner, io, x, y + 8);
+	return pick_at(owner, io, x, y + 8, NULL);
+}
+
+/*
+ * 背景色変更: the pop-up at the pointer with the switch 仮身属性と同じ
+ * under the chart, on from *p_same. A colour chosen puts it off; on when
+ * the pop-up is put away, *p_same is TRUE and the object is to have no
+ * paper of its own. *io is the colour shown either way.
+ */
+EXPORT BOOL dt_pick_paper( INT owner, UW *io, BOOL *p_same )
+{
+	INT	x = 0, y = 0;
+	UINT	btn;
+
+	(void)ts_hid_pointer(&x, &y, &btn);
+
+	return pick_at(owner, io, x, y + 8, p_same);
 }
 
 /* Asked with a place: the pop-up with its corner there (a program's part, DT_F_AT) */
 EXPORT BOOL dt_pick_colour_at( INT owner, UW *io, INT x, INT y )
 {
-	return pick_at(owner, io, x, y);
+	return pick_at(owner, io, x, y, NULL);
 }
 
 /* Asked from a part that shows the colour: the pop-up under it, set against its left */
@@ -509,5 +566,5 @@ EXPORT BOOL dt_pick_colour_part( INT owner, INT pid, INT num, UW *io )
 		return dt_pick_colour(owner, io);
 	}
 
-	return pick_at(owner, io, r.left, r.bottom + 2);
+	return pick_at(owner, io, r.left, r.bottom + 2, NULL);
 }

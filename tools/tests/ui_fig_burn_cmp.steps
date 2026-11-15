@@ -9,53 +9,8 @@
 # figure. Saved: record 0 (its UUIDs as noughts) and the picture beside it come out the same,
 # byte for byte, and the screens are kept to be compared.
 # Keys: Esc 29; Ctrl+S 16 01, Ctrl+E 08 01.
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
-mkbig fig 1 2 0
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-click 264 48
-wait 300
-drag 300 250 420 330
-wait 500
-drag 320 270 400 270
-wait 400
-key 29
-wait 400
-click 298 82
-wait 300
-drag 350 280 450 360
-wait 400
-click 298 48
-wait 300
-click 310 260
-wait 400
-shot bcmp_k_picked
-click 600 600 1
-wait 600
-move 620 606
-wait 150
-move 680 606
-wait 500
-move 700 606
-wait 150
-move 720 685
-wait 150
-click 720 685
-wait 600
-shot bcmp_k_burnt
-sync 600
-key 16 01
-sync 600
-sum anon
-keep kernel
-sum res _0_1.png
-keep kpng
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 2 0
 logmark
 pfig big
@@ -97,8 +52,8 @@ logmark
 key 16 01
 expectsince figure: saved (0)
 sum anon
-same kernel
+want ok 679 fab9852657f468b9
 sum res _0_1.png
-same kpng
+want ok 379 6a41131dd8a2efe6
 key 08 01
 expect figure: closed

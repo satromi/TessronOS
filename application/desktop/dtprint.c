@@ -9,9 +9,9 @@
 
 /*
  *	dtprint.c
- *	印刷 as the desktop does it (design 11.22): the panels that say how
- *	(印刷設定, 印刷詳細設定), the pages shown before they are written
- *	(画面表示), and the file put on the desktop as a real object
+ *	印刷 as the desktop serves it (design 11.22): the pages of what is
+ *	printed, the jobs 基本印刷 works, and the file put on the desktop as
+ *	a real object
  *
  *	What is printed is pages of a layout paper drawn by whatever shows
  *	them: a document's pages by its own drawing (tv_doc_draw_page), a
@@ -20,6 +20,13 @@
  *	hands over as records of xmlTAD in an object made for the purpose
  *	(DT_RQ_PRINT). The layer below (prn_) lays them on the printing
  *	paper and writes the file.
+ *
+ *	The panels that say how (印刷設定, 印刷詳細設定) and the pages shown
+ *	before they are written (画面表示) are 基本印刷's, a process
+ *	(application/bprint) the desktop starts for each job; it asks the
+ *	desktop (DT_RQ_PRJOB) for what only the desktop can do with the
+ *	pages: lay them on the paper, draw a sheet in its window, write the
+ *	file.
  *
  *	The output is a PDF file. It is made a real object the way a file
  *	from outside is, and a link to it is put in the desktop's first
@@ -41,18 +48,12 @@
 #include <ts/tadview.h>
 #include <ts/fn.h>
 #include <ts/print.h>
+#include <ts/time.h>
+#include <ts/proc.h>
+#include <ts/fquit.h>
+#include <ts/sysdef.h>
+#include <ts/dtreq.h>
 #include "desktop.h"
-
-#define KEY_ENTER	0x28
-#define KEY_ESC		0x29
-#define KEY_BS		0x2A
-#define KEY_F10		0x43
-#define KEY_PGUP	0x4B
-#define KEY_PGDN	0x4E
-#define KEY_RIGHT	0x4F
-#define KEY_LEFT	0x50
-#define KEY_DOWN	0x51
-#define KEY_UP		0x52
 
 /* ---------------------------------------------------------------- the pages */
 
@@ -506,670 +507,6 @@ LOCAL SPOOL *spool_read( CONST TS_UUID *obj, T_PRNJOB *job, CONST UB *name,
 	return sp;
 }
 
-/* ---------------------------------------------------------------- 印刷詳細設定 */
-
-typedef struct {
-	CONST char	*name;
-	INT		w, h;		/* tenths of a millimetre, as it lies */
-} PRPAPER;
-
-LOCAL CONST PRPAPER pr_papers[] = {
-	{ "レイアウト用紙と同じ", 0, 0 },
-	{ "A3用紙:縦", 2970, 4200 },	{ "A3用紙:横", 4200, 2970 },
-	{ "A4用紙:縦", 2100, 2970 },	{ "A4用紙:横", 2970, 2100 },
-	{ "A5用紙:縦", 1480, 2100 },	{ "A5用紙:横", 2100, 1480 },
-	{ "B4用紙:縦", 2570, 3640 },	{ "B4用紙:横", 3640, 2570 },
-	{ "B5用紙:縦", 1820, 2570 },	{ "B5用紙:横", 2570, 1820 },
-	{ "はがき:縦", 1000, 1480 },	{ "はがき:横", 1480, 1000 },
-	{ "レター:縦", 2159, 2794 },	{ "レター:横", 2794, 2159 },
-	{ "その他の用紙", -1, -1 }
-};
-#define N_PRPAPER	( (INT)( sizeof(pr_papers) / sizeof(pr_papers[0]) ) )
-
-#define PD_LIST		1
-#define PD_H		2
-#define PD_W		3
-#define PD_ROTATE	4
-#define PD_AUTO		5
-#define PD_GIVEN	6
-#define PD_PCT		7
-#define PD_LINKS	8
-#define PD_EXPAND	9
-#define PD_DEPTH	10
-
-/* A number as its digits */
-LOCAL void num_text( INT v, UB *out )
-{
-	char	t[12];
-	INT	n = 0, k = 0;
-
-	if ( v < 0 ) {
-		out[k++] = '-';
-		v = -v;
-	}
-	do {
-		t[n++] = (char)( '0' + v % 10 );
-		v /= 10;
-	} while ( v > 0 && n < 11 );
-	while ( n > 0 ) {
-		out[k++] = (UB)t[--n];
-	}
-	out[k] = 0;
-}
-
-/* Digits as a number, -1 when they are not */
-LOCAL INT text_num( CONST UB *s )
-{
-	INT	v = 0;
-	BOOL	any = FALSE;
-
-	while ( *s == ' ' ) s++;
-	for ( ; *s >= '0' && *s <= '9'; s++ ) {
-		v = v * 10 + ( *s - '0' );
-		any = TRUE;
-		if ( v > 100000 ) return -1;
-	}
-	return any ? v : -1;
-}
-
-LOCAL void put_words( UB *to, INT max, CONST char *a, CONST UB *b, CONST char *c )
-{
-	INT	k = 0, i;
-
-	for ( i = 0; a != NULL && a[i] != 0 && k < max - 1; i++ ) to[k++] = (UB)a[i];
-	for ( i = 0; b != NULL && b[i] != 0 && k < max - 1; i++ ) to[k++] = b[i];
-	for ( i = 0; c != NULL && c[i] != 0 && k < max - 1; i++ ) to[k++] = (UB)c[i];
-	while ( k > 0 && k == max - 1 && ( to[k] & 0xC0 ) == 0x80 ) k--;
-	to[k] = 0;
-}
-
-/* A box of a number, with the words in front of and after it */
-LOCAL T_WMPART *num_box( T_WMPANEL *p, INT num, INT x, INT y, CONST char *before, INT w,
-			 INT v, CONST char *after, BOOL grey )
-{
-	T_WMPART	*pt;
-	INT		k;
-
-	if ( before != NULL ) {
-		dt_pn_add(p, WM_PT_LABEL, 0, x, y + 2, 60, 22, before);
-		x += 60;
-	}
-	pt = dt_pn_add(p, WM_PT_NUMBOX | ( grey ? P_DISABLE : 0 ), num, x, y, w, 26, NULL);
-	if ( pt != NULL ) {
-		num_text(v, pt->text);
-		for ( k = 0; pt->text[k] != 0; k++ ) ;
-		pt->caret = k;
-		pt->value = v;
-	}
-	if ( after != NULL ) {
-		dt_pn_add(p, WM_PT_LABEL, 0, x + w + 4, y + 2, 60, 22, after);
-	}
-	return pt;
-}
-
-LOCAL INT box_num( INT pid, INT num, INT dflt )
-{
-	UB	t[WM_LABEL_MAX];
-	INT	v;
-
-	if ( wm_panel_text(pid, num, t, WM_LABEL_MAX) < E_OK ) {
-		return dflt;
-	}
-	v = text_num(t);
-	return ( v >= 0 ) ? v : dflt;
-}
-
-/* The paper of the list the setting is, or the last: その他 */
-LOCAL INT paper_index( CONST T_PRNSET *set )
-{
-	INT	i;
-
-	if ( set->paper_w <= 0 ) {
-		return 0;
-	}
-	for ( i = 1; i < N_PRPAPER - 1; i++ ) {
-		if ( pr_papers[i].w == set->paper_w && pr_papers[i].h == set->paper_h ) {
-			return i;
-		}
-	}
-	return N_PRPAPER - 1;
-}
-
-/* "A4用紙:縦 (210×297mm)" for the paper the setting prints on */
-LOCAL void paper_words( CONST T_PRNJOB *job, CONST T_PRNSET *set, UB *out, INT max )
-{
-	INT	i = paper_index(set), w, h, pct;
-	UB	a[16], b[16];
-	UB	t[WM_LABEL_MAX];
-
-	prn_paper(job, set, &w, &h, &pct);
-	num_text(( w * 254 + 360000 ) / 720000, a);		/* thousandths of a point as millimetres */
-	num_text(( h * 254 + 360000 ) / 720000, b);
-	put_words(t, WM_LABEL_MAX, ( i == 0 ) ? "レイアウト用紙と同じ (" : pr_papers[i].name,
-		  ( i == 0 ) ? a : (CONST UB *)"", ( i == 0 ) ? "×" : " (");
-	if ( i != 0 ) {
-		put_words(t + knl_strlen((CONST char *)t), WM_LABEL_MAX - (INT)knl_strlen((CONST char *)t),
-			  NULL, a, "×");
-	}
-	put_words(out, max, (CONST char *)t, b, "mm)");
-}
-
-/* 印刷詳細設定: TRUE when set */
-LOCAL BOOL detail_panel( DTWIN *host, CONST T_PRNJOB *job, T_PRNSET *set )
-{
-	T_WMPANEL	*def;
-	T_WMPART	*pt;
-	INT		pid, i, at = -1, cnt = 0, w = 560, h = 344, pct;
-	INT		pw, ph, cur = paper_index(set);
-	UINT		ans;
-	UB		t[WM_LABEL_MAX], a[16], b[16];
-
-	def = dt_pn_new(w, h);
-	if ( def == NULL ) {
-		return FALSE;
-	}
-	prn_paper(job, set, &pw, &ph, &pct);
-	num_text(( job->lw * job->unit * 254 + 360000 ) / 720000, a);
-	num_text(( job->lh * job->unit * 254 + 360000 ) / 720000, b);
-	put_words(t, WM_LABEL_MAX, "レイアウト用紙:  ", a, "×");
-	put_words(t + knl_strlen((CONST char *)t), WM_LABEL_MAX - (INT)knl_strlen((CONST char *)t), NULL, b, "mm");
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 6, w - 28, 22, (CONST char *)t);
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 38, 90, 22, "印刷用紙:");
-	pt = dt_pn_add(def, WM_PT_LIST, PD_LIST, 104, 36, 220, 170, NULL);
-	for ( i = 0; i < N_PRPAPER; i++ ) {
-		INT	k = wm_panel_name(def, (CONST UB *)pr_papers[i].name);
-
-		if ( k < 0 ) {
-			break;
-		}
-		if ( at < 0 ) {
-			at = k;
-		}
-		cnt++;
-	}
-	if ( pt != NULL ) {
-		pt->pool = ( at >= 0 ) ? at : 0;
-		pt->count = cnt;
-		pt->top = 1;
-		pt->value = cur + 1;
-	}
-	num_box(def, PD_H, 340, 36, "縦:", 80, ( ph * 254 + 360000 ) / 720000, "mm", FALSE);
-	num_box(def, PD_W, 340, 70, "横:", 80, ( pw * 254 + 360000 ) / 720000, "mm", FALSE);
-	pt = dt_pn_add(def, WM_PT_CHECK, PD_ROTATE, 340, 110, 180, 22, "用紙回転");
-	if ( pt != NULL ) pt->value = set->rotate ? 1 : 0;
-
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 222, 90, 22, "倍率:");
-	num_text(pct / 100, a);
-	put_words(t, WM_LABEL_MAX, "自動 (", a, "%)");
-	pt = dt_pn_add(def, WM_PT_CHOICE, PD_AUTO, 104, 220, 150, 22, (CONST char *)t);
-	if ( pt != NULL ) {
-		pt->group = PD_AUTO;
-		pt->value = ( set->scale == PRN_SCALE_AUTO ) ? 1 : 0;
-	}
-	pt = dt_pn_add(def, WM_PT_CHOICE, PD_GIVEN, 260, 220, 70, 22, "指定");
-	if ( pt != NULL ) {
-		pt->group = PD_AUTO;
-		pt->value = ( set->scale != PRN_SCALE_AUTO ) ? 1 : 0;
-	}
-	num_box(def, PD_PCT, 330, 218, NULL, 70, ( set->scale != PRN_SCALE_AUTO ) ? set->scale : pct / 100,
-		"%", FALSE);
-
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 256, 90, 22, "仮身:");
-	pt = dt_pn_add(def, WM_PT_CHECK, PD_LINKS, 104, 254, 90, 22, "印刷");
-	if ( pt != NULL ) pt->value = set->links ? 1 : 0;
-	pt = dt_pn_add(def, WM_PT_CHECK, PD_EXPAND, 200, 254, 90, 22, "展開");
-	if ( pt != NULL ) pt->value = set->expand ? 1 : 0;
-	num_box(def, PD_DEPTH, 300, 252, "深さ:", 60, set->depth, NULL, FALSE);
-	dt_pn_buttons(def, "設定");
-
-	ans = dt_pn_run(host, def, &pid);
-	if ( ans == WM_ANS_OK && pid >= 0 ) {
-		INT	v = dt_pn_value(pid, PD_LIST);
-
-		if ( v >= 1 && v <= N_PRPAPER ) {
-			if ( v == 1 ) {
-				set->paper_w = set->paper_h = 0;
-			} else if ( v < N_PRPAPER ) {
-				set->paper_w = pr_papers[v - 1].w;
-				set->paper_h = pr_papers[v - 1].h;
-			} else {
-				/* その他の用紙: the size typed in */
-				INT	hh = box_num(pid, PD_H, 0), ww = box_num(pid, PD_W, 0);
-
-				if ( hh >= 30 && hh <= 1000 && ww >= 30 && ww <= 1000 ) {
-					set->paper_w = ww * 10;
-					set->paper_h = hh * 10;
-				}
-			}
-		}
-		set->rotate = (BOOL)( dt_pn_value(pid, PD_ROTATE) != 0 );
-		if ( dt_pn_value(pid, PD_GIVEN) != 0 ) {
-			INT	p = box_num(pid, PD_PCT, 100);
-
-			set->scale = ( p < 10 ) ? 10 : ( p > 400 ) ? 400 : p;
-		} else {
-			set->scale = PRN_SCALE_AUTO;
-		}
-		set->links = (BOOL)( dt_pn_value(pid, PD_LINKS) != 0 );
-		set->expand = (BOOL)( set->links && dt_pn_value(pid, PD_EXPAND) != 0 );
-		set->depth = box_num(pid, PD_DEPTH, 1);
-		if ( set->depth < 1 ) set->depth = 1;
-		if ( set->depth > PRN_DEPTH_MAX ) set->depth = PRN_DEPTH_MAX;
-	}
-	dt_pn_done(host, pid);
-
-	return (BOOL)( ans == WM_ANS_OK );
-}
-
-/* ---------------------------------------------------------------- 画面表示 */
-
-#define PV_BAND		40		/* the band of buttons at the head */
-#define PV_PAD		16		/* grey round the sheet */
-
-typedef struct {
-	CONST T_PRNJOB	*job;
-	CONST T_PRNSET	*set;
-	INT		wid, gid;
-	INT		ww, wh;		/* the work area */
-	INT		page, pages;
-	BOOL		zoom;		/* 拡大 */
-	INT		cx, cy;		/* the middle of what is shown when magnified, sheet pixels */
-	UW		*px;		/* the sheet as shown */
-	INT		sw, sh;
-	INT		typed;		/* a page number being typed, 0 none */
-} PV;
-
-typedef struct {
-	CONST char	*label;
-	INT		x, w;
-} PVBTN;
-
-LOCAL CONST PVBTN pv_btn[] = {
-	{ "前頁", 8, 56 }, { "次頁", 68, 56 }, { "標準", 136, 56 }, { "拡大", 196, 56 },
-	{ "終了", 0, 64 }		/* at the right */
-};
-#define PV_NBTN		5
-#define PV_B_PREV	0
-#define PV_B_NEXT	1
-#define PV_B_STD	2
-#define PV_B_ZOOM	3
-#define PV_B_END	4
-
-LOCAL INT btn_x( CONST PV *v, INT i )
-{
-	return ( i == PV_B_END ) ? v->ww - pv_btn[i].w - 8 : pv_btn[i].x;
-}
-
-LOCAL void pv_words( CONST PV *v, INT x, INT y, CONST UB *s, UW col )
-{
-	ID	fid = fn_system();
-
-	if ( fid > 0 ) {
-		fn_set_size(fid, 14);
-		(void)fn_draw(v->gid, fid, x, y, s, col);
-	}
-}
-
-LOCAL INT pv_width( CONST UB *s )
-{
-	ID	fid = fn_system();
-
-	if ( fid <= 0 ) {
-		return 0;
-	}
-	fn_set_size(fid, 14);
-	return fn_width(fid, s);
-}
-
-/* The sheet as shown made again: the whole of it, or twice as large */
-LOCAL void pv_render( PV *v )
-{
-	INT	pw, ph, pct, aw = v->ww - 2 * PV_PAD, ah = v->wh - PV_BAND - 2 * PV_PAD;
-
-	prn_paper(v->job, v->set, &pw, &ph, &pct);
-	if ( pw <= 0 || ph <= 0 || aw <= 0 || ah <= 0 ) {
-		return;
-	}
-	/* the whole sheet in the area, its sides kept */
-	v->sh = ah;
-	v->sw = (INT)( (D)ah * pw / ph );
-	if ( v->sw > aw ) {
-		v->sw = aw;
-		v->sh = (INT)( (D)aw * ph / pw );
-	}
-	if ( v->zoom ) {
-		v->sw *= 2;
-		v->sh *= 2;
-	}
-	if ( v->px != NULL ) {
-		Kfree(v->px);
-	}
-	v->px = (UW *)Kmalloc(sizeof(UW) * (SZ)v->sw * v->sh);
-	if ( v->px != NULL ) {
-		(void)prn_sheet(v->job, v->set, v->page, v->px, v->sw, v->sh);
-	}
-}
-
-LOCAL void pv_draw( PV *v )
-{
-	T_DPRECT	r;
-	INT		i, x, y, sx = 0, sy = 0, w, h;
-	UB		t[48], a[12], b[12];
-	UW		grey = 0x00808080U;
-
-	r.left = 0;
-	r.top = 0;
-	r.right = v->ww;
-	r.bottom = PV_BAND;
-	dp_fill_rect(v->gid, &r, wm_look(WM_LOOK_PART_FACE));
-	for ( i = 0; i < PV_NBTN; i++ ) {
-		BOOL	on = (BOOL)( ( i == PV_B_STD && !v->zoom ) || ( i == PV_B_ZOOM && v->zoom ) );
-
-		r.left = btn_x(v, i);
-		r.top = 7;
-		r.right = r.left + pv_btn[i].w;
-		r.bottom = r.top + 26;
-		dp_fill_rect(v->gid, &r, on ? 0x00D0E8FFU : 0x00FFFFFFU);
-		dp_frame_rect(v->gid, &r, 0x00404040U, 1);
-		pv_words(v, r.left + ( pv_btn[i].w - pv_width((CONST UB *)pv_btn[i].label) ) / 2, r.top + 19,
-			 (CONST UB *)pv_btn[i].label, 0x00000000U);
-	}
-	/* the page shown, of how many, between the buttons and 終了 */
-	num_text(( v->typed > 0 ) ? v->typed : v->page + 1, a);
-	num_text(v->pages, b);
-	put_words(t, sizeof(t), NULL, a, " / ");
-	put_words(t + knl_strlen((CONST char *)t), sizeof(t) - (INT)knl_strlen((CONST char *)t), NULL, b, NULL);
-	x = btn_x(v, PV_B_ZOOM) + pv_btn[PV_B_ZOOM].w;
-	x += ( btn_x(v, PV_B_END) - x - pv_width(t) ) / 2;
-	pv_words(v, x, 26, t, ( v->typed > 0 ) ? 0x00C00000U : 0x00000000U);
-
-	r.left = 0;
-	r.top = PV_BAND;
-	r.right = v->ww;
-	r.bottom = v->wh;
-	dp_fill_rect(v->gid, &r, grey);
-	if ( v->px == NULL ) {
-		return;
-	}
-	/* where the sheet goes: in the middle, or around the place magnified */
-	w = v->ww - 2 * PV_PAD;
-	h = v->wh - PV_BAND - 2 * PV_PAD;
-	if ( v->sw <= w ) {
-		x = PV_PAD + ( w - v->sw ) / 2;
-	} else {
-		sx = v->cx - w / 2;
-		if ( sx < 0 ) sx = 0;
-		if ( sx > v->sw - w ) sx = v->sw - w;
-		x = PV_PAD;
-	}
-	if ( v->sh <= h ) {
-		y = PV_BAND + PV_PAD + ( h - v->sh ) / 2;
-	} else {
-		sy = v->cy - h / 2;
-		if ( sy < 0 ) sy = 0;
-		if ( sy > v->sh - h ) sy = v->sh - h;
-		y = PV_BAND + PV_PAD;
-	}
-	dp_put_argb(v->gid, x, y, v->px + (SZ)sy * v->sw + sx, v->sw,
-		    ( v->sw - sx < w ) ? v->sw - sx : w, ( v->sh - sy < h ) ? v->sh - sy : h, 0xFFFFFFFFU);
-	r.left = x - 1;
-	r.top = y - 1;
-	r.right = x + ( ( v->sw - sx < w ) ? v->sw - sx : w ) + 1;
-	r.bottom = y + ( ( v->sh - sy < h ) ? v->sh - sy : h ) + 1;
-	dp_frame_rect(v->gid, &r, 0x00303030U, 1);
-	wm_update();
-}
-
-LOCAL void pv_go( PV *v, INT page )
-{
-	if ( page < 0 ) page = 0;
-	if ( page >= v->pages ) page = v->pages - 1;
-	v->typed = 0;
-	if ( page != v->page ) {
-		v->page = page;
-		pv_render(v);
-	}
-	pv_draw(v);
-}
-
-/* 画面表示: the sheets shown one at a time until 終了 */
-LOCAL void preview( DTWIN *host, CONST T_PRNJOB *job, CONST T_PRNSET *set )
-{
-	PV		v;
-	T_DPRECT	o;
-	T_WMWIN		w;
-	T_WMEV		ev;
-	INT		sw = 1024, shh = 768, pw, ph, pct, h, wd;
-	BOOL		done = FALSE;
-
-	pr_open_set(set);
-
-	knl_memset(&v, 0, sizeof(v));
-	v.job = job;
-	v.set = set;
-	v.pages = prn_sheets(job, set);
-	if ( v.pages <= 0 ) {
-		dt_tell(host, "印刷するページがありません", NULL);
-		return;
-	}
-	wm_screen_main(&sw, &shh);
-	prn_paper(job, set, &pw, &ph, &pct);
-	/* as tall as the screen allows, as wide as the sheet's sides say */
-	h = shh - 120;
-	if ( h > 900 ) h = 900;
-	wd = (INT)( (D)( h - PV_BAND - 2 * PV_PAD ) * pw / ( ph > 0 ? ph : 1 ) ) + 2 * PV_PAD;
-	if ( wd < 420 ) wd = 420;
-	if ( wd > sw - 40 ) wd = sw - 40;
-	o.left = ( sw - wd ) / 2;
-	o.top = 30;
-	o.right = o.left + wd;
-	o.bottom = o.top + h;
-	v.wid = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "画面表示");
-	if ( v.wid <= 0 ) {
-		return;
-	}
-	v.gid = wm_gid(v.wid);
-	if ( wm_ref(v.wid, &w) >= E_OK ) {
-		v.ww = w.work.right - w.work.left;
-		v.wh = w.work.bottom - w.work.top;
-	}
-	wm_raise(v.wid);
-	wm_focus(v.wid);
-	v.page = 0;
-	pv_render(&v);
-	pv_draw(&v);
-	tm_printf((UB *)"print: preview of %d sheets, %d x %d shown\n", v.pages, v.sw, v.sh);
-
-	while ( !done ) {
-		if ( wm_read_event(&ev, 2000) < E_OK ) {
-			continue;
-		}
-		if ( ev.wid != v.wid ) {
-			continue;		/* the rest of the desktop waits for this */
-		}
-		if ( ev.type == HID_EV_BTN_DOWN && ev.code == 0 ) {
-			INT	i, hit = -1;
-
-			if ( ev.y < PV_BAND ) {
-				for ( i = 0; i < PV_NBTN; i++ ) {
-					if ( ev.x >= btn_x(&v, i) && ev.x < btn_x(&v, i) + pv_btn[i].w ) {
-						hit = i;
-					}
-				}
-				switch ( hit ) {
-				case PV_B_PREV:	pv_go(&v, v.page - 1);	break;
-				case PV_B_NEXT:	pv_go(&v, v.page + 1);	break;
-				case PV_B_STD:
-					v.zoom = FALSE;
-					pv_render(&v);
-					pv_draw(&v);
-					break;
-				case PV_B_ZOOM:
-					v.zoom = TRUE;
-					v.cx = v.sw;		/* the middle of a sheet twice as large */
-					v.cy = v.sh;
-					pv_render(&v);
-					pv_draw(&v);
-					break;
-				case PV_B_END:	done = TRUE;		break;
-				default:	break;
-				}
-				continue;
-			}
-			if ( ( ev.mods & ( HID_MOD_LALT | HID_MOD_RALT ) ) != 0 ) {
-				/* Alt and a press: magnified about where it was pressed */
-				INT	aw = v.ww - 2 * PV_PAD, x0 = PV_PAD + ( aw - v.sw ) / 2;
-				INT	y0 = PV_BAND + PV_PAD + ( v.wh - PV_BAND - 2 * PV_PAD - v.sh ) / 2;
-
-				if ( !v.zoom ) {
-					v.cx = ( ev.x - x0 ) * 2;
-					v.cy = ( ev.y - y0 ) * 2;
-					v.zoom = TRUE;
-					pv_render(&v);
-				}
-				pv_draw(&v);
-				continue;
-			}
-			/* a press on the sheet: the next, or with Shift the one before */
-			if ( ( ev.mods & ( HID_MOD_LSHIFT | HID_MOD_RSHIFT ) ) != 0 ) {
-				pv_go(&v, v.page - 1);
-			} else {
-				pv_go(&v, v.page + 1);
-			}
-			continue;
-		}
-		if ( ev.type != HID_EV_KEY_DOWN ) {
-			continue;
-		}
-		if ( ev.code >= 0x1E && ev.code <= 0x27 ) {
-			/* digits: a page number, gone to by right Ctrl, F10 or Enter */
-			INT	d = ( ev.code == 0x27 ) ? 0 : ev.code - 0x1D;
-
-			v.typed = v.typed * 10 + d;
-			if ( v.typed > PRN_PAGE_MAX ) v.typed = d;
-			pv_draw(&v);
-		} else if ( ev.code == KEY_BS ) {
-			v.typed /= 10;
-			pv_draw(&v);
-		} else if ( ( ev.code == KEY_F10 || ev.code == KEY_ENTER || ev.code == 0xE4 ) && v.typed > 0 ) {
-			pv_go(&v, v.typed - 1);
-		} else if ( ev.code == KEY_PGDN || ev.code == KEY_RIGHT || ev.code == KEY_DOWN ) {
-			pv_go(&v, v.page + 1);
-		} else if ( ev.code == KEY_PGUP || ev.code == KEY_LEFT || ev.code == KEY_UP ) {
-			pv_go(&v, v.page - 1);
-		} else if ( ev.code == KEY_ESC || ev.code == KEY_ENTER ) {
-			done = TRUE;
-		}
-	}
-	if ( v.px != NULL ) {
-		Kfree(v.px);
-	}
-	wm_close(v.wid);
-	if ( host != NULL ) {
-		wm_focus(host->wid);
-	}
-	wm_update();
-}
-
-/* ---------------------------------------------------------------- 印刷設定 */
-
-#define PS_ALL		1
-#define PS_PART		2
-#define PS_FROM		3
-#define PS_TO		4
-#define PS_COPIES	5
-#define PS_NORMAL	6
-#define PS_FAST		7
-#define PS_FINE		8
-#define PS_COLOUR	9
-#define PS_DETAIL	92
-#define PS_SHOW		93
-
-#define ANS_DETAIL	( WM_ANS_ACT + 1 )
-#define ANS_SHOW	( WM_ANS_ACT + 2 )
-
-/* What was set last time is where the panel starts next time */
-LOCAL T_PRNSET	pr_last;
-LOCAL BOOL	pr_last_ok = FALSE;
-
-LOCAL UINT print_panel( DTWIN *host, CONST T_PRNJOB *job, T_PRNSET *set, BOOL show )
-{
-	T_WMPANEL	*def;
-	T_WMPART	*pt;
-	INT		pid, w = 560, h = 268, i;
-	UINT		ans;
-	UB		t[WM_LABEL_MAX], u[WM_LABEL_MAX];
-
-	def = dt_pn_new(w, h);
-	if ( def == NULL ) {
-		return WM_ANS_CANCEL;
-	}
-	paper_words(job, set, u, WM_LABEL_MAX);
-	put_words(t, WM_LABEL_MAX, "印刷用紙:  ", u, NULL);
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 6, w - 28, 22, (CONST char *)t);
-
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 40, 70, 22, "ページ:");
-	pt = dt_pn_add(def, WM_PT_CHOICE, PS_ALL, 84, 38, 110, 22, "全ページ");
-	if ( pt != NULL ) {
-		pt->group = PS_ALL;
-		pt->value = set->all ? 1 : 0;
-	}
-	pt = dt_pn_add(def, WM_PT_CHOICE, PS_PART, 196, 38, 110, 22, "部分ページ");
-	if ( pt != NULL ) {
-		pt->group = PS_ALL;
-		pt->value = set->all ? 0 : 1;
-	}
-	num_box(def, PS_FROM, 310, 36, "開始:", 60, set->from, NULL, FALSE);
-	num_box(def, PS_TO, 434, 36, "終了:", 60, ( set->to > job->npage ) ? job->npage : set->to, NULL,
-		FALSE);
-	num_box(def, PS_COPIES, 14, 74, "部数:", 60, set->copies, "部", FALSE);
-
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 112, 70, 22, "品質:");
-	for ( i = 0; i < 3; i++ ) {
-		LOCAL CONST char *CONST q[3] = { "通常", "高速", "高密度" };
-
-		pt = dt_pn_add(def, WM_PT_CHOICE, PS_NORMAL + i, 84 + i * 90, 110, 86, 22, q[i]);
-		if ( pt != NULL ) {
-			pt->group = PS_NORMAL;
-			pt->value = ( set->quality == i ) ? 1 : 0;
-		}
-	}
-	pt = dt_pn_add(def, WM_PT_CHECK, PS_COLOUR, 370, 110, 100, 22, "カラー");
-	if ( pt != NULL ) pt->value = set->colour ? 1 : 0;
-
-	num_text(job->npage, u);
-	put_words(t, WM_LABEL_MAX, "出力先:  PDF ファイル (デスクトップに置く)  全 ", u, " ページ");
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 150, w - 28, 22, (CONST char *)t);
-
-	dt_pn_buttons(def, "印刷");
-	pt = dt_pn_add(def, WM_PT_BUTTON, PS_DETAIL, w - 432, h - 36, 110, 26, "詳細設定");
-	if ( pt != NULL ) pt->answer = ANS_DETAIL;
-	if ( show ) {
-		pt = dt_pn_add(def, WM_PT_BUTTON, PS_SHOW, w - 316, h - 36, 110, 26, "画面表示");
-		if ( pt != NULL ) pt->answer = ANS_SHOW;
-	}
-
-	ans = dt_pn_run(host, def, &pid);
-	if ( ans != WM_ANS_CANCEL && pid >= 0 ) {
-		INT	c = box_num(pid, PS_COPIES, 1);
-
-		set->all = (BOOL)( dt_pn_value(pid, PS_ALL) != 0 );
-		set->from = box_num(pid, PS_FROM, 1);
-		set->to = box_num(pid, PS_TO, PRN_PAGE_MAX);
-		if ( set->from < 1 ) set->from = 1;
-		if ( set->from > PRN_PAGE_MAX ) set->from = PRN_PAGE_MAX;
-		if ( set->to < set->from ) set->to = set->from;
-		if ( set->to > PRN_PAGE_MAX ) set->to = PRN_PAGE_MAX;
-		set->copies = ( c < 1 ) ? 1 : ( c > PRN_COPY_MAX ) ? PRN_COPY_MAX : c;
-		set->quality = ( dt_pn_value(pid, PS_FAST) != 0 ) ? PRN_Q_FAST
-			     : ( dt_pn_value(pid, PS_FINE) != 0 ) ? PRN_Q_FINE : PRN_Q_NORMAL;
-		set->colour = (BOOL)( dt_pn_value(pid, PS_COLOUR) != 0 );
-	}
-	dt_pn_done(host, pid);
-
-	return ans;
-}
-
 /* ---------------------------------------------------------------- the file on the desktop */
 
 /* A link to an object as a figure keeps one: its band, at the system's size */
@@ -1195,41 +532,27 @@ LOCAL void link_of( T_VOBJ *v, CONST TS_UUID *u, CONST UB *name )
 	v->height = 24;
 }
 
-/* A link to an object put in a window of a figure, under what is there */
-LOCAL BOOL place_in_window( DTWIN *t, CONST TS_UUID *u, CONST UB *name )
-{
-	T_WMWIN		wt;
-	T_DPRECT	to;
-	T_VOBJ		v;
-	INT		i, bottom = 8;
-
-	if ( t == NULL || t->fig == NULL || t->sealed || wm_ref(t->wid, &wt) < E_OK ) {
-		return FALSE;
-	}
-	for ( i = 0; i < t->fig->nsh; i++ ) {
-		if ( t->fig->sh[i].kind != TV_SH_GROUP && t->fig->sh[i].r.bottom + 8 > bottom ) {
-			bottom = t->fig->sh[i].r.bottom + 8;
-		}
-	}
-	link_of(&v, u, name);
-	dt_work_rect(t, &to);
-	if ( ed_place_link(t, wt.work.left + to.left - t->scroll_x + 16,
-			   wt.work.top + to.top - t->scroll_y + bottom, &v) ) {
-		(void)dt_save(t);
-	}
-	return TRUE;
-}
-
-/* A link to an object put in the desktop's first window, under what is there */
+/*
+ * A link to an object put in the desktop's first window, under what is
+ * there: by the program of the window, which saves it (DT_HOW_LINK_PUT);
+ * written into the cabinet's record directly while the window is not up
+ */
 EXPORT void dt_place_on_desktop( CONST TS_UUID *u, CONST UB *name )
 {
-	(void)place_in_window(dt_first_win(), u, name);
+	TS_UUID	cab;
+
+	if ( dt_prog_tell_text(DT_TELL_FIRST, DT_HOW_LINK_PUT, u, name) ) {
+		return;
+	}
+	if ( ts_str_to_uuid(SYSDEF_CABINET, &cab) >= E_OK ) {
+		(void)dt_place_in(&cab, u, name);
+	}
 }
 
 /*
  * A link to an object put in the figure 'box' (a volume's top object),
- * under what is there: in its window when it is open, else written into
- * its record directly.
+ * under what is there, written into its record directly: the first
+ * window's by its program, as dt_place_on_desktop puts it.
  */
 EXPORT ER dt_place_in( CONST TS_UUID *box, CONST TS_UUID *u, CONST UB *name )
 {
@@ -1239,8 +562,13 @@ EXPORT ER dt_place_in( CONST TS_UUID *box, CONST TS_UUID *u, CONST UB *name )
 	INT	i, n, bottom = 8;
 	ER	er;
 
-	if ( place_in_window(dt_showing(box), u, name) ) {
-		return E_OK;
+	{
+		TS_UUID	cab;
+
+		if ( ts_str_to_uuid(SYSDEF_CABINET, &cab) >= E_OK && ts_uuid_cmp(&cab, box) == 0
+		  && dt_prog_tell_text(DT_TELL_FIRST, DT_HOW_LINK_PUT, u, name) ) {
+			return E_OK;
+		}
 	}
 	doc = om_store_get(box, 0);
 	if ( doc == NULL ) {
@@ -1270,73 +598,125 @@ EXPORT ER dt_place_in( CONST TS_UUID *box, CONST TS_UUID *u, CONST UB *name )
 	return er;
 }
 
-/*
- * The panels of 印刷 (印刷設定, and 印刷詳細設定 and 画面表示 from it)
- * worked for a job, the setting they leave in 'set': E_OK when 印刷 was
- * pressed, E_ABORT when the panel was put away. Without 'show' the
- * panel has no 画面表示, for pages that are not there yet.
- */
-EXPORT ER dt_print_ask( DTWIN *host, CONST T_PRNJOB *job, T_PRNSET *set, BOOL show )
-{
-	UINT	ans;
+/* ---------------------------------------------------------------- words */
 
-	if ( pr_last_ok ) {
-		*set = pr_last;
-		set->all = TRUE;
+LOCAL INT put( UB *b, INT at, INT max, CONST char *s )
+{
+	while ( s != NULL && *s != 0 && at + 1 < max ) {
+		b[at++] = (UB)*s++;
+	}
+	b[at] = 0;
+	return at;
+}
+
+LOCAL INT put_num( UB *b, INT at, INT max, INT v )
+{
+	char	t[12];
+	INT	n = 0;
+
+	if ( v < 0 ) {
+		at = put(b, at, max, "-");
+		v = -v;
+	}
+	do {
+		t[n++] = (char)( '0' + v % 10 );
+		v /= 10;
+	} while ( v > 0 && n < 11 );
+	while ( n > 0 && at + 1 < max ) {
+		b[at++] = (UB)t[--n];
+	}
+	b[at] = 0;
+	return at;
+}
+
+/*
+ * 印刷の指定 as the text DT_RQ_PRJOB carries it: thirteen numbers apart
+ * by spaces, in the order of T_PRNSET
+ */
+LOCAL INT set_text( CONST T_PRNSET *s, UB *out, INT max )
+{
+	INT	v[13], i, at = 0;
+
+	v[0] = s->all ? 1 : 0;
+	v[1] = s->from;
+	v[2] = s->to;
+	v[3] = s->copies;
+	v[4] = s->quality;
+	v[5] = s->colour ? 1 : 0;
+	v[6] = s->paper_w;
+	v[7] = s->paper_h;
+	v[8] = s->rotate ? 1 : 0;
+	v[9] = s->scale;
+	v[10] = s->links ? 1 : 0;
+	v[11] = s->expand ? 1 : 0;
+	v[12] = s->depth;
+	out[0] = 0;
+	for ( i = 0; i < 13; i++ ) {
+		if ( i > 0 ) at = put(out, at, max, " ");
+		at = put_num(out, at, max, v[i]);
+	}
+	return at;
+}
+
+/* The text read back, every number kept within what the panels allow; FALSE when it is not one */
+LOCAL BOOL text_set( CONST UB *t, T_PRNSET *s )
+{
+	INT	v[13], k = 0, i = 0;
+
+	while ( k < 13 ) {
+		INT	x = 0;
+		BOOL	neg = FALSE, any = FALSE;
+
+		while ( t[i] == ' ' ) i++;
+		if ( t[i] == '-' ) {
+			neg = TRUE;
+			i++;
+		}
+		while ( t[i] >= '0' && t[i] <= '9' && x < 10000000 ) {
+			x = x * 10 + ( t[i++] - '0' );
+			any = TRUE;
+		}
+		if ( !any ) {
+			return FALSE;
+		}
+		v[k++] = neg ? -x : x;
+	}
+	s->all = (BOOL)( v[0] != 0 );
+	s->from = ( v[1] < 1 ) ? 1 : ( v[1] > PRN_PAGE_MAX ) ? PRN_PAGE_MAX : v[1];
+	s->to = ( v[2] < s->from ) ? s->from : ( v[2] > PRN_PAGE_MAX ) ? PRN_PAGE_MAX : v[2];
+	s->copies = ( v[3] < 1 ) ? 1 : ( v[3] > PRN_COPY_MAX ) ? PRN_COPY_MAX : v[3];
+	s->quality = ( v[4] == PRN_Q_FAST || v[4] == PRN_Q_FINE ) ? v[4] : PRN_Q_NORMAL;
+	s->colour = (BOOL)( v[5] != 0 );
+	if ( v[6] >= 300 && v[6] <= 10000 && v[7] >= 300 && v[7] <= 10000 ) {
+		s->paper_w = v[6];
+		s->paper_h = v[7];
 	} else {
-		prn_default(set);
+		s->paper_w = s->paper_h = 0;
 	}
-	for ( ;; ) {
-		ans = print_panel(host, job, set, show);
-		if ( ans == ANS_DETAIL ) {
-			(void)detail_panel(host, job, set);
-			continue;
-		}
-		if ( ans == ANS_SHOW ) {
-			preview(host, job, set);
-			continue;
-		}
-		break;
-	}
-	pr_last = *set;
-	pr_last_ok = TRUE;
-
-	return ( ans == WM_ANS_OK ) ? E_OK : E_ABORT;
+	s->rotate = (BOOL)( v[8] != 0 );
+	s->scale = ( v[9] == PRN_SCALE_AUTO ) ? PRN_SCALE_AUTO : ( v[9] < 10 ) ? 10 : ( v[9] > 400 ) ? 400 : v[9];
+	s->links = (BOOL)( v[10] != 0 );
+	s->expand = (BOOL)( s->links && v[11] != 0 );
+	s->depth = ( v[12] < 1 ) ? 1 : ( v[12] > PRN_DEPTH_MAX ) ? PRN_DEPTH_MAX : v[12];
+	return TRUE;
 }
 
-/*
- * 印刷 of a job: the panels, the pages shown when asked, and the file
- * written and put on the desktop. Answers E_OK when it was written,
- * E_ABORT when the panel was put away.
- */
-EXPORT ER dt_print( DTWIN *host, T_PRNJOB *job )
-{
-	T_PRNSET	set;
+/* ---------------------------------------------------------------- the file written */
 
-	if ( job == NULL || job->npage <= 0 ) {
-		dt_tell(host, "印刷するページがありません", NULL);
-		return E_NOEXS;
-	}
-	if ( dt_print_ask(host, job, &set, TRUE) < E_OK ) {
-		return E_ABORT;
-	}
-	return dt_print_out(host, job, &set);
-}
+/* What was set last time is where the panels start next time */
+LOCAL T_PRNSET	pr_last;
+LOCAL BOOL	pr_last_ok = FALSE;
 
-/* The file of a job written as 'set' says and put on the desktop */
-EXPORT ER dt_print_out( DTWIN *host, CONST T_PRNJOB *job, CONST T_PRNSET *set )
+/* The file of a job written as 'set' says and put on the desktop: some sheets are known to be there */
+LOCAL ER print_write( CONST T_PRNJOB *job, CONST T_PRNSET *set )
 {
 	TS_UUID		u;
 	ER		er;
 	T_PRNSTAT	st;
-	UB		msg[WM_LABEL_MAX], a[12];
+	UB		msg[WM_LABEL_MAX];
 	UB		fname[TAD_NAME_MAX];
-	INT		k, i;
+	INT		k, i, at;
 
-	if ( prn_sheets(job, set) <= 0 ) {
-		dt_tell(host, "印刷するページがありません", "ページの範囲を確かめてください");
-		return E_NOEXS;
-	}
 	(void)wm_msg_put("印刷しています");
 	wm_update();
 	pr_open_set(set);
@@ -1354,66 +734,359 @@ EXPORT ER dt_print_out( DTWIN *host, CONST T_PRNJOB *job, CONST T_PRNSET *set )
 	}
 	fname[k] = 0;
 	if ( om_store_name(&u, fname, TAD_NAME_MAX) < 0 ) {
-		put_words(fname, TAD_NAME_MAX, NULL, job->name, ".pdf");
+		(void)put(fname, k, TAD_NAME_MAX, ".pdf");
 	}
 	dt_place_on_desktop(&u, fname);
-	num_text(st.pages, a);
-	put_words(msg, WM_LABEL_MAX, "「", fname, "」を作りました (");
-	put_words(msg + knl_strlen((CONST char *)msg), WM_LABEL_MAX - (INT)knl_strlen((CONST char *)msg),
-		  NULL, a, "ページ)");
+	at = put(msg, 0, WM_LABEL_MAX, "「");
+	at = put(msg, at, WM_LABEL_MAX, (CONST char *)fname);
+	at = put(msg, at, WM_LABEL_MAX, "」を作りました (");
+	at = put_num(msg, at, WM_LABEL_MAX, st.pages);
+	(void)put(msg, at, WM_LABEL_MAX, "ページ)");
 	(void)wm_msg_put((CONST char *)msg);
 	wm_update();
 
 	return E_OK;
 }
 
-/* 印刷 of a window of the desktop's: its document or its figure */
-EXPORT void dt_print_window( DTWIN *d )
+/* The file of a job written as 'set' says and put on the desktop */
+EXPORT ER dt_print_out( DTWIN *host, CONST T_PRNJOB *job, CONST T_PRNSET *set )
 {
-	DTPRSRC		s;
-	T_PRNJOB	job;
-	UB		name[TAD_NAME_MAX];
-	INT		k;
+	if ( prn_sheets(job, set) <= 0 ) {
+		dt_tell(host, "印刷するページがありません", "ページの範囲を確かめてください");
+		return E_NOEXS;
+	}
+	return print_write(job, set);
+}
 
-	if ( d == NULL || ( d->doc == NULL && d->fig == NULL ) ) {
+/* ---------------------------------------------------------------- the jobs 基本印刷 works */
+
+/*
+ * 基本印刷 is a process (application/bprint). What it prints is a job
+ * the desktop holds: the pages a process made (DT_RQ_PRINT), an object
+ * printed from the 実行 menu of a link (dt_print_vobj), or pages of the
+ * desktop's own (a slide, 画面印刷: dt_print_start). The desktop starts
+ * 基本印刷 for the job, and the process works the panels -- 印刷設定,
+ * 印刷詳細設定, 画面表示 -- asking the desktop (DT_RQ_PRJOB) for what
+ * only the desktop can do: how a setting lays the pages on the paper,
+ * a sheet drawn into its window, and the file written and put on the
+ * desktop. One job is worked at a time; one asked for meanwhile waits
+ * its turn, as a program that asked waited while the panels were the
+ * desktop's own.
+ */
+#define PJ_MAX		8
+#define PJ_START_MS	60000		/* 基本印刷 has not asked in this long: it did not start */
+#define PJ_POLL_MS	500		/* how often the process working the job is looked for */
+
+#define PJ_SPOOL	1		/* the pages a process made */
+#define PJ_OBJ		2		/* an object, printed without being opened */
+#define PJ_OWN		3		/* the desktop's own pages */
+
+#define PV_PAD		16		/* grey round the sheet in 画面表示 */
+
+typedef struct {
+	BOOL		used;
+	BOOL		active;		/* the one 基本印刷 is started for */
+	UINT		serial;		/* the order they were asked in */
+	UINT		kind;		/* PJ_* */
+	UINT		how;		/* DT_PRINT_SHOW, DT_PRINT_SET */
+	T_PRNJOB	job;		/* PJ_SPOOL, PJ_OBJ: made here */
+	T_PRNJOB	*own;		/* PJ_OWN: the caller's */
+	void		(*done)( void *arg, ER er, CONST T_PRNSET *set );
+	void		*arg;
+	SPOOL		*sp;		/* PJ_SPOOL */
+	TS_UUID		target;		/* PJ_SPOOL: the object of the pages; PJ_OBJ: the object */
+	UW		paper;
+	UINT		flags;		/* PJ_SPOOL: DT_F_PR_DETAIL, DT_F_PR_HIDDEN */
+	DTPRSRC		src;		/* PJ_OBJ */
+	CONST T_TAD	*rec;		/* as the store held it when the pages were made */
+	INT		recno;
+	T_TVDOC		*doc;
+	T_TVFIG		*fig;
+	BOOL		links;		/* the pages as made: with their links */
+	UB		name[TAD_NAME_MAX];
+	TS_UUID		reply;		/* PJ_SPOOL: answered when the job ends */
+	UINT		seq;
+	SZ		anssz;
+	ID		pid;		/* the 基本印刷 working it; 0 none yet */
+	TS_UUID		puuid;
+	UD		since;		/* when 基本印刷 was started for it, ms */
+	UW		*px;		/* 画面表示: the sheet as last drawn */
+	INT		pxk, pxw, pxh;
+	T_PRNSET	pxset;
+} PJOB;
+
+LOCAL PJOB	pj[PJ_MAX];
+LOCAL UINT	pj_serial = 0;
+LOCAL UD	pj_looked = 0;
+
+LOCAL UD ms_now( void )
+{
+	UD	ns = 0;
+
+	(void)ts_get_mono(&ns);
+	return ns / 1000000ULL;
+}
+
+LOCAL PJOB *pj_active( void )
+{
+	INT	i;
+
+	for ( i = 0; i < PJ_MAX; i++ ) {
+		if ( pj[i].used && pj[i].active ) return &pj[i];
+	}
+	return NULL;
+}
+
+LOCAL T_PRNJOB *pj_job( PJOB *J )
+{
+	return ( J->own != NULL ) ? J->own : &J->job;
+}
+
+LOCAL PJOB *pj_take( UINT kind, UINT how, CONST UB *name )
+{
+	INT	i, k;
+
+	for ( i = 0; i < PJ_MAX; i++ ) {
+		if ( !pj[i].used ) break;
+	}
+	if ( i == PJ_MAX ) {
+		return NULL;
+	}
+	knl_memset(&pj[i], 0, sizeof(pj[i]));
+	pj[i].used = TRUE;
+	pj[i].serial = ++pj_serial;
+	pj[i].kind = kind;
+	pj[i].how = how;
+	pj[i].links = TRUE;
+	for ( k = 0; name != NULL && name[k] != 0 && k < TAD_NAME_MAX - 1; k++ ) {
+		pj[i].name[k] = name[k];
+	}
+	pj[i].name[k] = 0;
+	return &pj[i];
+}
+
+/* An object's pages made from its record, with their links or without them */
+LOCAL void pj_obj_pages( PJOB *J )
+{
+	dt_print_src_free(&J->src);
+	if ( J->doc != NULL ) tv_doc_free(J->doc);
+	if ( J->fig != NULL ) tv_fig_free(J->fig);
+	J->doc = NULL;
+	J->fig = NULL;
+	knl_memset(&J->job, 0, sizeof(J->job));
+	if ( J->rec == NULL ) {
 		return;
 	}
-	for ( k = 0; d->name[k] != 0 && k < TAD_NAME_MAX - 1; k++ ) {
-		name[k] = d->name[k];
-	}
-	name[k] = 0;
-	if ( k == 0 ) {
-		(void)om_store_name(&d->id, name, TAD_NAME_MAX);
-	}
-	/* the links are drawn or not as the setting last made says; the panel can change it */
-	if ( d->doc != NULL ) {
-		dt_print_src_doc(&s, &job, d->doc, d->rec, d->paper, name,
-				 pr_last_ok ? pr_last.links : TRUE);
+	if ( tv_kind(J->rec) == TV_KIND_DOC && tv_doc(J->rec, &J->doc) >= E_OK && J->doc != NULL ) {
+		dt_print_src_doc(&J->src, &J->job, J->doc, J->rec, J->paper, J->name, J->links);
+	} else if ( tv_kind(J->rec) == TV_KIND_FIG && tv_fig(J->rec, &J->fig) >= E_OK && J->fig != NULL ) {
+		dt_print_src_fig(&J->src, &J->job, J->fig, J->rec, J->paper, J->name, J->links);
 	} else {
-		dt_print_src_fig(&s, &job, d->fig, d->rec, d->paper, name,
-				 pr_last_ok ? pr_last.links : TRUE);
+		J->doc = NULL;
+		J->fig = NULL;
 	}
-	(void)dt_print(d, &job);
-	dt_print_src_free(&s);
-	dt_draw(d);
+}
+
+/*
+ * An object's record as the store holds it now: the store lets a record
+ * go when the object changes (om_store_forget), and the job, which may
+ * wait its turn and be worked for a while, makes its pages again from
+ * the record read anew rather than keep drawing from the one let go
+ */
+LOCAL void pj_fresh( PJOB *J )
+{
+	CONST T_TAD	*rec;
+
+	if ( J->kind != PJ_OBJ ) {
+		return;
+	}
+	rec = om_store_get(&J->target, J->recno);
+	if ( rec == J->rec ) {
+		return;
+	}
+	J->rec = rec;
+	if ( J->px != NULL ) {
+		Kfree(J->px);
+		J->px = NULL;
+	}
+	pj_obj_pages(J);
+}
+
+/* The pages made again with their links or without them, as 仮身: 印刷 now says */
+LOCAL void pj_links( PJOB *J, BOOL links )
+{
+	pj_fresh(J);
+	if ( J->links == links || J->kind == PJ_OWN ) {
+		return;
+	}
+	J->links = links;
+	if ( J->px != NULL ) {
+		Kfree(J->px);
+		J->px = NULL;
+	}
+	if ( J->kind == PJ_SPOOL ) {
+		SPOOL	*sp = spool_read(&J->target, &J->job, J->name, J->paper, J->flags, links);
+
+		if ( sp != NULL ) {
+			spool_free(J->sp);
+			J->sp = sp;
+		}
+	} else {
+		pj_obj_pages(J);
+	}
+}
+
+/* Whether the process working the job is still there */
+LOCAL BOOL pj_alive( CONST PJOB *J )
+{
+	TS_UUID	u;
+
+	return (BOOL)( J->pid > 0 && knl_prc_uuid(J->pid, &u, NULL) >= E_OK && ts_uuid_cmp(&u, &J->puuid) == 0 );
+}
+
+LOCAL void pj_next( void );
+
+/*
+ * A job ended: the setting kept for the next time, the one who asked
+ * told, and the next job begun. er E_OK: written (the setting taken,
+ * for DT_PRINT_SET); E_ABORT: put away.
+ */
+LOCAL void pj_end( PJOB *J, ER er, CONST T_PRNSET *set )
+{
+	T_DTANS	an;
+	UINT	serial = J->serial;
+
+	if ( set != NULL ) {
+		pr_last = *set;
+		pr_last_ok = TRUE;
+	}
+	if ( J->sp != NULL ) {
+		spool_free(J->sp);
+		J->sp = NULL;
+	}
+	dt_print_src_free(&J->src);
+	if ( J->doc != NULL ) tv_doc_free(J->doc);
+	if ( J->fig != NULL ) tv_fig_free(J->fig);
+	if ( J->px != NULL ) Kfree(J->px);
+	if ( J->kind == PJ_SPOOL ) {
+		/* the program that asked, which throws the object of its pages away now */
+		knl_memset(&an, 0, sizeof(an));
+		an.seq = J->seq;
+		an.er = er;
+		dt_answer(&J->reply, &an, J->anssz);
+	}
+	if ( J->done != NULL ) {
+		J->done(J->arg, er, set);
+	}
+	knl_memset(J, 0, sizeof(*J));
+	tm_printf((UB *)"print: job %u ended (%d)\n", serial, (INT)er);
 	wm_update();
+	pj_next();
+}
+
+/* The job that has waited longest begun, when none is under way: 基本印刷 started for it */
+LOCAL void pj_next( void )
+{
+	CONST DTPROG	*p;
+	PJOB		*J = NULL;
+	INT		i;
+	ER		er;
+
+	if ( pj_active() != NULL ) {
+		return;
+	}
+	for ( i = 0; i < PJ_MAX; i++ ) {
+		if ( pj[i].used && ( J == NULL || pj[i].serial < J->serial ) ) J = &pj[i];
+	}
+	if ( J == NULL ) {
+		return;
+	}
+	J->active = TRUE;
+	J->pid = 0;
+	J->since = ms_now();
+	p = dt_prog_find((CONST UB *)"basic-print");
+	er = ( p != NULL && !p->builtin ) ? dt_prog_run(NULL, p, NULL) : E_NOEXS;
+	tm_printf((UB *)"print: job %u of %d pages, 基本印刷 started (%d)\n", J->serial,
+		  pj_job(J)->npage, (INT)er);
+	if ( er < E_OK ) {
+		(void)wm_msg_put("基本印刷を起動できませんでした");
+		pj_end(J, er, NULL);
+	}
+}
+
+/*
+ * The windows of a process brought in front of the others, in the
+ * order they stand, the nearest given the keys: a program asked for
+ * again while it is up
+ */
+EXPORT void dt_raise_pid( ID pid )
+{
+	INT	room = 64, n, i, top = 0;
+	INT	*w;
+
+	for ( ;; ) {
+		w = (INT *)Kmalloc(sizeof(INT) * (SZ)room);
+		if ( w == NULL ) {
+			return;
+		}
+		n = wm_list(w, room);
+		if ( n < room ) break;
+		Kfree(w);
+		room *= 2;
+	}
+	for ( i = n - 1; i >= 0; i-- ) {
+		if ( pid > 0 && wm_obj_maker(w[i]) == pid ) {
+			wm_raise(w[i]);
+			top = w[i];
+		}
+	}
+	Kfree(w);
+	if ( top > 0 ) {
+		(void)wm_focus(top);
+	}
+	wm_update();
+}
+
+/*
+ * A job of the desktop's own: job, and whatever it draws from, stay the
+ * caller's until done is called -- E_OK when the file was written (with
+ * DT_PRINT_SET: the setting chosen, in set, nothing written), E_ABORT
+ * when the panel was put away, or why it could not be worked. done may
+ * be called before this returns.
+ */
+EXPORT ER dt_print_start( T_PRNJOB *job, CONST TS_UUID *win, UINT how,
+			  void (*done)( void *arg, ER er, CONST T_PRNSET *set ), void *arg )
+{
+	PJOB	*J;
+
+	if ( job == NULL || job->npage <= 0 ) {
+		dt_tell(dt_host_of(win), "印刷するページがありません", NULL);
+		return E_NOEXS;
+	}
+	J = pj_take(PJ_OWN, how, job->name);
+	if ( J == NULL ) {
+		return E_LIMIT;
+	}
+	J->own = job;
+	J->done = done;
+	J->arg = arg;
+	pj_next();
+	return E_OK;
 }
 
 /*
  * 基本印刷 (the 実行 menu of a link): the object the link points at
  * printed without being opened in a window -- its document, or its
- * figure -- with the panels over the window the link is in.
+ * figure
  */
 EXPORT void dt_print_vobj( DTWIN *from, CONST T_VOBJ *v )
 {
 	DTWIN		*host = ( from != NULL ) ? from : dt_first_win();
-	T_TAD		*rec = om_store_get(&v->target, ( v->recno > 0 ) ? v->recno : 0);
-	T_TVDOC		*d = NULL;
-	T_TVFIG		*f = NULL;
-	DTPRSRC		s;
-	T_PRNJOB	job;
+	CONST T_TAD	*rec = om_store_get(&v->target, ( v->recno > 0 ) ? v->recno : 0);
+	PJOB		*J;
 	UB		name[TAD_NAME_MAX];
 	UW		paper = TV_PAPER_LOOK;
+	BOOL		links = pr_last_ok ? pr_last.links : TRUE;
 
 	if ( rec == NULL || host == NULL ) {
 		(void)wm_msg_put("実身を読めませんでした");
@@ -1423,37 +1096,47 @@ EXPORT void dt_print_vobj( DTWIN *from, CONST T_VOBJ *v )
 		name[0] = 0;
 	}
 	(void)om_store_paper(&v->target, &paper);
-	if ( tv_kind(rec) == TV_KIND_DOC && tv_doc(rec, &d) >= E_OK && d != NULL ) {
-		dt_print_src_doc(&s, &job, d, rec, paper, name, pr_last_ok ? pr_last.links : TRUE);
-	} else if ( tv_kind(rec) == TV_KIND_FIG && tv_fig(rec, &f) >= E_OK && f != NULL ) {
-		dt_print_src_fig(&s, &job, f, rec, paper, name, pr_last_ok ? pr_last.links : TRUE);
-	} else {
+	if ( tv_kind(rec) != TV_KIND_DOC && tv_kind(rec) != TV_KIND_FIG ) {
 		dt_tell(host, "この実身は基本印刷できません", "文章か図形の実身を選んでください");
 		return;
 	}
-	(void)dt_print(host, &job);
-	dt_print_src_free(&s);
-	if ( d != NULL ) tv_doc_free(d);
-	if ( f != NULL ) tv_fig_free(f);
-	dt_draw_all();
-	wm_update();
+	J = pj_take(PJ_OBJ, DT_PRINT_SHOW, name);
+	if ( J == NULL ) {
+		(void)wm_msg_put("印刷を待っているものが多すぎます");
+		return;
+	}
+	J->target = v->target;
+	J->recno = ( v->recno > 0 ) ? v->recno : 0;
+	J->paper = paper;
+	J->rec = rec;
+	J->links = links;
+	pj_obj_pages(J);
+	if ( J->job.npage <= 0 ) {
+		dt_tell(host, ( J->doc == NULL && J->fig == NULL ) ? "この実身は基本印刷できません"
+								  : "印刷するページがありません", NULL);
+		dt_print_src_free(&J->src);
+		if ( J->doc != NULL ) tv_doc_free(J->doc);
+		if ( J->fig != NULL ) tv_fig_free(J->fig);
+		knl_memset(J, 0, sizeof(*J));
+		return;
+	}
+	pj_next();
 }
 
 /*
  * DT_RQ_PRINT: the pages a process made, in the object 'target' it made
- * for them, printed as a window of the desktop's is, the panels in the
- * middle of the process's window. The object is the process's to throw
- * away afterwards.
+ * for them, printed as a window of the desktop's printed its own. The
+ * answer is the job's, written when it ends (DT_ANS_LATER: not here);
+ * the object is the process's to throw away after it.
  */
-EXPORT ER dt_print_spool( CONST T_DTREQ *rq, T_DTANS *an )
+EXPORT ER dt_print_spool( CONST T_DTREQ *rq, SZ anssz )
 {
-	DTWIN		*host = dt_host_of(&rq->win);
-	T_PRNJOB	job;
+	PJOB		*J;
 	SPOOL		*sp;
 	UB		name[sizeof(rq->name) + 1];
 	UW		paper;
+	BOOL		links = pr_last_ok ? pr_last.links : TRUE;
 	INT		k;
-	ER		er;
 
 	for ( k = 0; k < (INT)sizeof(rq->name) && rq->name[k] != 0; k++ ) {
 		name[k] = rq->name[k];
@@ -1463,18 +1146,266 @@ EXPORT ER dt_print_spool( CONST T_DTREQ *rq, T_DTANS *an )
 	if ( paper == TV_PAPER_LOOK ) {
 		paper = wm_look(WM_LOOK_WORK);		/* the paper of the scheme, as the window shows it */
 	}
-	sp = spool_read(&rq->target, &job, name, paper,
-			rq->flags & ( DT_F_PR_DETAIL | DT_F_PR_HIDDEN ), pr_last_ok ? pr_last.links : TRUE);
+	J = pj_take(PJ_SPOOL, DT_PRINT_SHOW, name);
+	if ( J == NULL ) {
+		return E_LIMIT;
+	}
+	sp = spool_read(&rq->target, &J->job, J->name, paper, rq->flags & ( DT_F_PR_DETAIL | DT_F_PR_HIDDEN ), links);
 	if ( sp == NULL ) {
+		knl_memset(J, 0, sizeof(*J));
 		return E_NOEXS;
 	}
-	wm_obj_quiet(TRUE);		/* the keys that answer the panels are theirs, not the program's */
-	er = dt_print(host, &job);
-	wm_obj_quiet(FALSE);
-	spool_free(sp);
-	(void)an;
+	J->sp = sp;
+	J->target = rq->target;
+	J->paper = paper;
+	J->flags = rq->flags & ( DT_F_PR_DETAIL | DT_F_PR_HIDDEN );
+	J->links = links;
+	J->reply = rq->reply;
+	J->seq = rq->seq;
+	J->anssz = anssz;
+	pj_next();
 
-	return er;
+	return DT_ANS_LATER;
+}
+
+/* Whether two settings are one */
+LOCAL BOOL same_set( CONST T_PRNSET *a, CONST T_PRNSET *b )
+{
+	UB	x[DT_TEXT_MAX], y[DT_TEXT_MAX];
+	INT	i;
+
+	(void)set_text(a, x, sizeof(x));
+	(void)set_text(b, y, sizeof(y));
+	for ( i = 0; x[i] != 0 && x[i] == y[i]; i++ ) ;
+	return (BOOL)( x[i] == y[i] );
+}
+
+/* Whether the process is a 基本印刷, and which */
+LOCAL BOOL is_bprint( ID pid, TS_UUID *p_uuid )
+{
+	TS_UUID	prog, bp;
+
+	return (BOOL)( pid > 0 && knl_prc_uuid(pid, p_uuid, &prog) >= E_OK
+		       && ts_str_to_uuid(SYSDEF_PROG_BPRINT, &bp) >= E_OK && ts_uuid_cmp(&prog, &bp) == 0 );
+}
+
+/*
+ * 画面表示: sheet k drawn in the work area of the process's window
+ * below 'top', the whole of it in the middle, or (zoom) twice as large
+ * about (cx, cy) of it, on grey; the sheet drawn last kept for the next
+ * time it is asked with the same setting
+ */
+LOCAL ER pj_show( PJOB *J, CONST T_DTREQ *rq, T_DTANS *an, ID pid, CONST T_PRNSET *set )
+{
+	CONST T_PRNJOB	*job = pj_job(J);
+	T_WMWIN		w;
+	T_DPRECT	r;
+	ID		maker = 0, forp = 0;
+	INT		wid = wm_obj_wid(&rq->win), gid, ww, wh, top = rq->grab_y, k = rq->grab_x;
+	INT		pw, ph, pct, aw, ah, sw, sh, x, y, sx = 0, sy = 0, cw, ch, sheets;
+	BOOL		zoom = (BOOL)( ( rq->flags & DT_F_PJ_ZOOM ) != 0 );
+
+	if ( wid <= 0 || wm_ref(wid, &w) < E_OK ) {
+		return E_NOEXS;
+	}
+	/* the window has to be the asking process's own */
+	if ( knl_wmobj_who(wid, TMO_FEVR, &maker, &forp) < E_OK || maker != pid ) {
+		return E_OACV;
+	}
+	sheets = prn_sheets(job, set);
+	if ( k < 0 || k >= sheets ) {
+		return E_PAR;
+	}
+	ww = w.work.right - w.work.left;
+	wh = w.work.bottom - w.work.top;
+	aw = ww - 2 * PV_PAD;
+	ah = wh - top - 2 * PV_PAD;
+	prn_paper(job, set, &pw, &ph, &pct);
+	if ( pw <= 0 || ph <= 0 || aw <= 0 || ah <= 0 || top < 0 ) {
+		return E_PAR;
+	}
+	/* the whole sheet in the area, its sides kept */
+	sh = ah;
+	sw = (INT)( (D)ah * pw / ph );
+	if ( sw > aw ) {
+		sw = aw;
+		sh = (INT)( (D)aw * ph / pw );
+	}
+	if ( zoom ) {
+		sw *= 2;
+		sh *= 2;
+	}
+	if ( J->px == NULL || J->pxk != k || J->pxw != sw || J->pxh != sh
+	  || !same_set(&J->pxset, set) ) {
+		if ( J->px != NULL ) Kfree(J->px);
+		J->px = (UW *)Kmalloc(sizeof(UW) * (SZ)sw * sh);
+		if ( J->px == NULL ) {
+			return E_NOMEM;
+		}
+		pr_open_set(set);
+		(void)prn_sheet(job, set, k, J->px, sw, sh);
+		J->pxk = k;
+		J->pxw = sw;
+		J->pxh = sh;
+		J->pxset = *set;
+		tm_printf((UB *)"print: preview of %d sheets, sheet %d, %d x %d shown\n", sheets, k + 1, sw, sh);
+	}
+	gid = wm_gid(wid);
+	if ( gid < 0 ) {
+		return E_NOEXS;
+	}
+	r.left = 0;
+	r.top = top;
+	r.right = ww;
+	r.bottom = wh;
+	dp_fill_rect(gid, &r, 0x00808080U);
+	/* where the sheet goes: in the middle, or around the place magnified */
+	if ( sw <= aw ) {
+		x = PV_PAD + ( aw - sw ) / 2;
+	} else {
+		sx = rq->look.w - aw / 2;
+		if ( sx < 0 ) sx = 0;
+		if ( sx > sw - aw ) sx = sw - aw;
+		x = PV_PAD;
+	}
+	if ( sh <= ah ) {
+		y = top + PV_PAD + ( ah - sh ) / 2;
+	} else {
+		sy = rq->look.h - ah / 2;
+		if ( sy < 0 ) sy = 0;
+		if ( sy > sh - ah ) sy = sh - ah;
+		y = top + PV_PAD;
+	}
+	cw = ( sw - sx < aw ) ? sw - sx : aw;
+	ch = ( sh - sy < ah ) ? sh - sy : ah;
+	dp_put_argb(gid, x, y, J->px + (SZ)sy * sw + sx, sw, cw, ch, 0xFFFFFFFFU);
+	r.left = x - 1;
+	r.top = y - 1;
+	r.right = x + cw + 1;
+	r.bottom = y + ch + 1;
+	dp_frame_rect(gid, &r, 0x00303030U, 1);
+	wm_update();
+	an->look.w = sw;
+	an->look.h = sh;
+	an->how = (UINT)sheets;
+	return E_OK;
+}
+
+/* DT_RQ_PRJOB: what 基本印刷 asks of the desktop for the job it works */
+EXPORT ER dt_print_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
+{
+	PJOB		*J = pj_active();
+	T_PRNJOB	*job;
+	T_PRNSET	set;
+	TS_UUID		pu;
+	UB		t[DT_TEXT_MAX];
+	INT		at, w, h, pct;
+	ER		er;
+
+	if ( rq->recno == DT_PJ_JOB ) {
+		if ( J == NULL ) {
+			return E_NOEXS;
+		}
+		if ( J->pid != 0 && J->pid != pid && pj_alive(J) ) {
+			dt_raise_pid(J->pid);	/* asked again: the one working it in front */
+			return E_BUSY;
+		}
+		if ( !is_bprint(pid, &pu) ) {
+			return E_OACV;
+		}
+		J->pid = pid;
+		J->puuid = pu;
+		if ( pr_last_ok ) {
+			set = pr_last;
+			set.all = TRUE;
+		} else {
+			prn_default(&set);
+		}
+		pj_links(J, set.links);
+		job = pj_job(J);
+		at = set_text(&set, an->text, DT_TEXT_MAX);
+		at = put(an->text, at, DT_TEXT_MAX, "\t");
+		(void)put(an->text, at, DT_TEXT_MAX, (CONST char *)J->name);
+		an->how = (UINT)job->npage;
+		an->flags = ( ( J->how & DT_PRINT_SHOW ) ? DT_F_PJ_SHOW : 0 ) | ( ( J->how & DT_PRINT_SET ) ? DT_F_PJ_SET : 0 );
+		tm_printf((UB *)"print: job %u taken by process %d\n", J->serial, (INT)pid);
+		return E_OK;
+	}
+	if ( J == NULL || J->pid != pid ) {
+		return E_NOEXS;
+	}
+	knl_memcpy(t, rq->text, sizeof(t));
+	t[sizeof(t) - 1] = 0;
+	if ( !text_set(t, &set) ) {
+		return E_PAR;
+	}
+	pj_links(J, set.links);
+	job = pj_job(J);
+	switch ( rq->recno ) {
+	case DT_PJ_PAPER:
+		prn_paper(job, &set, &w, &h, &pct);
+		at = put_num(an->text, 0, DT_TEXT_MAX, w);
+		at = put(an->text, at, DT_TEXT_MAX, " ");
+		at = put_num(an->text, at, DT_TEXT_MAX, h);
+		at = put(an->text, at, DT_TEXT_MAX, " ");
+		at = put_num(an->text, at, DT_TEXT_MAX, pct);
+		at = put(an->text, at, DT_TEXT_MAX, " ");
+		at = put_num(an->text, at, DT_TEXT_MAX, prn_sheets(job, &set));
+		at = put(an->text, at, DT_TEXT_MAX, " ");
+		at = put_num(an->text, at, DT_TEXT_MAX, job->lw * job->unit);
+		at = put(an->text, at, DT_TEXT_MAX, " ");
+		(void)put_num(an->text, at, DT_TEXT_MAX, job->lh * job->unit);
+		an->how = (UINT)job->npage;
+		return E_OK;
+	case DT_PJ_SHOW:
+		return pj_show(J, rq, an, pid, &set);
+	case DT_PJ_OUT:
+		if ( J->how & DT_PRINT_SET ) {
+			pj_end(J, E_OK, &set);
+			return E_OK;
+		}
+		if ( prn_sheets(job, &set) <= 0 ) {
+			return E_NOEXS;
+		}
+		er = print_write(job, &set);
+		pj_end(J, ( er < E_OK ) ? er : E_OK, &set);
+		return er;
+	case DT_PJ_END:
+		pj_end(J, E_ABORT, &set);
+		return E_OK;
+	default:
+		return E_PAR;
+	}
+}
+
+/*
+ * The job under way followed: one whose 基本印刷 did not start, or went
+ * (強制終了) before it was done, put away
+ */
+EXPORT void dt_print_poll( void )
+{
+	PJOB	*J = pj_active();
+	UD	now;
+
+	if ( J == NULL ) {
+		return;
+	}
+	now = ms_now();
+	if ( now - pj_looked < PJ_POLL_MS ) {
+		return;
+	}
+	pj_looked = now;
+	if ( J->pid == 0 ) {
+		if ( now - J->since > PJ_START_MS ) {
+			tm_printf((UB *)"print: 基本印刷 did not come for job %u\n", J->serial);
+			pj_end(J, E_TMOUT, NULL);
+		}
+		return;
+	}
+	if ( !pj_alive(J) ) {
+		tm_printf((UB *)"print: 基本印刷 gone, job %u put away\n", J->serial);
+		pj_end(J, E_ABORT, NULL);
+	}
 }
 
 /* The same pages as a job, without the panels: what the tests print */

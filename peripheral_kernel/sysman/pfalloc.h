@@ -60,6 +60,7 @@ IMPORT UD	knl_pf_to_pa( CONST PFRAME *pf );
 IMPORT PFRAME	*knl_pa_to_pf( UD pa );
 IMPORT UD	knl_pf_free_count( INT zone );	/* zone < 0: all zones */
 IMPORT UD	knl_pf_total_count( INT zone );
+IMPORT void	knl_pf_check_tell( void );	/* PF_FREE_CHECK: what was found, said once */
 
 Inline void *knl_pf_to_va( CONST PFRAME *pf )
 {

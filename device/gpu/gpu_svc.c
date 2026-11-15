@@ -754,6 +754,39 @@ LOCAL ER svc_gp_imp_bo( INT ctx, INT name, T_GPBO *out )
 	return er;
 }
 
+/*
+ * For the BO objects (gpu_obj.c): the BO of a number of the caller's, or
+ * of a name when name is above 0, with a reference the caller gives back;
+ * and a BO entered in a context of the caller's under a new number, the
+ * caller's reference kept.
+ */
+EXPORT T_GPUBO *knl_gpu_bo_named( INT ctx, UINT handle, INT name )
+{
+	T_GPUBO	*bo = NULL;
+	INT	i = ( name & 0xFF ) - 1;
+	UINT	imask;
+
+	if ( name <= 0 ) {
+		return bo_take(ctx, handle);
+	}
+	if ( i < 0 || i >= GP_NAME_MAX ) {
+		return NULL;
+	}
+	ISpinLock(&gp_lock, &imask);
+	if ( gp_name[i].bo != NULL && gp_name[i].gen == ( (UINT)name >> 8 ) ) {
+		bo = gp_name[i].bo;
+		knl_gpu_bo_get(bo);
+	}
+	ISpinUnlock(&gp_lock, &imask);
+	return bo;
+}
+
+EXPORT ER knl_gpu_bo_import( INT ctx, T_GPUBO *bo, T_GPBO *out )
+{
+	knl_gpu_bo_get(bo);			/* the entry's own */
+	return bo_enter(ctx, bo, TRUE, out);
+}
+
 #ifdef __x86_64__
 #define VA48_MASK	( ( 1ULL << 48 ) - 1 )
 #define EVICT_TELL	8		/* places taken over told on the console */
@@ -905,6 +938,32 @@ EXPORT void knl_gpu_prc_end( ID pid )
 			(void)ctx_close(i + 1, pid);
 		}
 	}
+}
+
+/*
+ * The pages of the BOs a process's contexts hold, and how many BOs
+ * (*p_bos), for the account of its memory (proc.c). A BO in two of its
+ * contexts, or shared with another process, is counted in each.
+ */
+EXPORT UD knl_gpu_prc_pages( ID pid, INT *p_bos )
+{
+	INT	i, j, bos = 0;
+	UD	pages = 0;
+	UINT	imask;
+
+	ISpinLock(&gp_lock, &imask);
+	for ( i = 0; i < GP_CTX_MAX; i++ ) {
+		if ( pid <= 0 || gp_ctx[i].pid != pid ) continue;
+		for ( j = 0; j < gp_ctx[i].nent; j++ ) {
+			if ( gp_ctx[i].ent[j].bo != NULL ) {
+				pages += knl_gpu_bo_npages(gp_ctx[i].ent[j].bo);
+				bos++;
+			}
+		}
+	}
+	ISpinUnlock(&gp_lock, &imask);
+	if ( p_bos != NULL ) *p_bos = bos;
+	return pages;
 }
 
 /* For a test: the contexts open, and the BOs they hold */

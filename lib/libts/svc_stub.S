@@ -56,6 +56,11 @@
 	SVCSTUB	ts_map_mem,	TSN_TS_MAP_MEM
 	SVCSTUB	ts_unm_mem,	TSN_TS_UNM_MEM
 	SVCSTUB	ts_ctl_mem,	TSN_TS_CTL_MEM
+	SVCSTUB	ts_set_sbx,	TSN_TS_SET_SBX
+	SVCSTUB	ts_get_sbx,	TSN_TS_GET_SBX
+#ifdef TSN_TS_SET_TLS
+	SVCSTUB	ts_set_tls,	TSN_TS_SET_TLS
+#endif
 	SVCSTUB	tk_dly_tsk_u,	TSN_TK_DLY_TSK_U
 	SVCSTUB	tk_slp_tsk_u,	TSN_TK_SLP_TSK_U
 	SVCSTUB	tk_wai_sem_u,	TSN_TK_WAI_SEM_U
@@ -136,6 +141,7 @@
 	SVCSTUB	ob_opn_obj,	TSN_OB_OPN_OBJ
 	SVCSTUB	ob_cls_obj,	TSN_OB_CLS_OBJ
 	SVCSTUB	ob_cre_obj,	TSN_OB_CRE_OBJ
+	SVCSTUB	ob_cre_key,	TSN_OB_CRE_KEY
 	SVCSTUB	ob_del_obj,	TSN_OB_DEL_OBJ
 	SVCSTUB	ob_ref_obj,	TSN_OB_REF_OBJ
 	SVCSTUB	ob_lst_obj,	TSN_OB_LST_OBJ
@@ -160,6 +166,10 @@
 	SVCSTUB	ob_ref_vol,	TSN_OB_REF_VOL
 	SVCSTUB	ob_ref_vid,	TSN_OB_REF_VID
 	SVCSTUB	ob_dup_obj,	TSN_OB_DUP_OBJ
+	SVCSTUB	ob_chk_list,	TSN_OB_CHK_LST
+	SVCSTUB	ob_chk_vol,	TSN_OB_CHK_VOL
+	SVCSTUB	ob_chk_request,	TSN_OB_CHK_REQ
+	SVCSTUB	ob_chk_boot_result,	TSN_OB_CHK_BOOT
 	SVCSTUB	ob_wip_vol,	TSN_OB_WIP_VOL
 	SVCSTUB	ob_get_atv,	TSN_OB_GET_ATV
 	SVCSTUB	ob_get_prt,	TSN_OB_GET_PRT
@@ -247,6 +257,9 @@
 	SVCSTUB	so_getobj,	TSN_SO_GETOBJ
 	SVCSTUB	so_resolveall,	TSN_SO_RESOLVEALL
 	SVCSTUB	so_recvtos,	TSN_SO_RECVTOS
+	SVCSTUB	so_netwait,	TSN_SO_NETWAIT
+	SVCSTUB	so_getlimit,	TSN_SO_GETLIMIT
+	SVCSTUB	so_setlimit,	TSN_SO_SETLIMIT
 
 	/* drawing in a window of one's own (class 8) */
 	SVCSTUB	dp_fill_rect,	TSN_DP_FILL_RECT
@@ -310,6 +323,11 @@
 	SVCSTUB	wm_grab_window,	TSN_WM_GRAB_WINDOW
 	SVCSTUB	wm_press_area,	TSN_WM_PRESS_AREA
 	SVCSTUB	wm_fill_look,	TSN_WM_FILL_LOOK
+	SVCSTUB	wm_screen_main_rect,	TSN_WM_SCREEN_MAIN
+	SVCSTUB	wm_place_keep,	TSN_WM_PLACE_KEEP
+	SVCSTUB	wm_place_open,	TSN_WM_PLACE_OPEN
+	SVCSTUB	wm_screen_new_rect,	TSN_WM_SCREEN_NEW
+	SVCSTUB	wm_screen_of,	TSN_WM_SCREEN_OF
 
 	/* the tray (class 9) */
 	SVCSTUB	tr_psh_dat,	TSN_TR_PSH_DAT

@@ -1029,7 +1029,7 @@ int main( void )
 
 	ui_icon(SYSDEF_PROG_USERENV);
 	ui_attr(UI_ATTR_HIDDEN);		/* filled hidden, and shown once (ui_reveal) */
-	if ( ui_open(&ui, SYSDEF_BOX_USERENV, PN_MAIN, 180, 90) < E_OK ) {
+	if ( ui_open(&ui, SYSDEF_BOX_USERENV, PN_MAIN, wm_new_x(180), wm_new_y(90)) < E_OK ) {
 		tm_putstring((CONST UB *)"userenv: no window\n");
 		return 1;
 	}

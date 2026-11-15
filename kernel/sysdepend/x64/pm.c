@@ -85,6 +85,7 @@ IMPORT UD	knl_pm_ctx_save( UD *ctx );		/* pm_ctx.S */
 IMPORT void	knl_pm_ctx_load( UD *ctx );
 IMPORT void	knl_pm_segs_load( void );
 IMPORT void	knl_lockup_stop( void );
+IMPORT void	knl_cpu_pm_again( T_PCPU *p );		/* cpuidle.c */
 
 #define PMC_S3		1
 #define PMC_LOW_S0	2
@@ -412,6 +413,7 @@ LOCAL void cpu_state_load( T_PCPU *p, PMCPU *c )
 		}
 	}
 	knl_apic_wake_init();
+	knl_cpu_pm_again(p);		/* the idle states' and HWP's registers again, in its idle loop */
 	wrmsr(MSR_FS_BASE_PM, c->fs);
 	wrmsr(MSR_KERNEL_GS_BASE, c->kgs);
 	fpu_load(c);

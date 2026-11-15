@@ -56,28 +56,225 @@ Inline void flush_local_all( void )
 {
 	UD	cr4;
 
-	/* toggling PGE drops the global translations as well */
+	/* toggling PGE drops the global translations as well, of every PCID */
 	Asm("mov %%cr4, %0" : "=r"(cr4));
 	Asm("mov %0, %%cr4" :: "r"(cr4 & ~(UD)CR4_PGE) : "memory");
 	Asm("mov %0, %%cr4" :: "r"(cr4) : "memory");
-	knl_pcpu()->tlb_flushes++;		/* the spaces it noted may be forgotten (knl_tlb_note) */
+	knl_pcpu()->tlb_flushes++;
+}
+
+/* ------------------------------------------------------------------------ */
+/*
+ * The translations of the process spaces (design 4.5)
+ *
+ *	Each space a processor has run gets a record here, made the first
+ *	time a processor loads it: a context number that is never used again
+ *	(ctx), a generation of its tables (gen), and the processors that have
+ *	it loaded now (mask). Whoever takes a page out of a space or makes it
+ *	allow less raises the generation, and asks the processors of the mask
+ *	to drop the page; the others are not asked.
+ *
+ *	A processor keeps up to SLOTS spaces' translations at once, each under
+ *	a PCID of its own (1..SLOTS; the empty space of the kernel's tasks is
+ *	PCID 0), with the context and the generation its translations were
+ *	made at. When it loads a space whose slot is there and up to the
+ *	space's generation, the translations are kept; one behind, or a space
+ *	with no slot (it takes the next slot in turn), is loaded with the
+ *	slot's translations dropped. So a processor that was not asked -- it
+ *	did not have the space loaded -- drops what it kept of it before it
+ *	can use it again, whatever happened between.
+ *
+ *	The loading processor sets itself in the mask and then reads the
+ *	generation; the changing one raises the generation and then reads
+ *	the mask (both past full barriers): either it sees the processor, or
+ *	the processor sees the new generation. A processor leaves the mask
+ *	only after its CR3 holds another space.
+ *
+ *	The kernel's tasks run on the empty space (no lazy loading): the
+ *	process space's translations stay in its slot, unused, and are
+ *	checked as above when it is loaded again. Without PCIDs every load
+ *	drops all but the global translations, and only the mask is used.
+ */
+#define SLOTS		6
+#define CTX_HASH	8192		/* the records by their tables' address, twice the ASIDs */
+
+typedef struct {
+	UD		l0;		/* the space's PML4; 0: no record */
+	UD		ctx;
+	UD		gen;
+	UW		mask;		/* bit n: processor n + 1 has it loaded */
+} TLBCTX;
+
+LOCAL TLBCTX	ctx_rec[MMU_ASID_MAX + 1];	/* by the space's ASID */
+LOCAL UH	ctx_hash[CTX_HASH];		/* ASID + 1 by the PML4's address, 0 empty */
+LOCAL T_SPLOCK	ctx_lock;
+LOCAL UD	ctx_next = 1;
+
+/* What each processor holds, its own (and its NMI's) */
+LOCAL struct {
+	UD	slot_ctx[SLOTS], slot_gen[SLOTS];
+	UINT	next;			/* the slot taken next */
+	UINT	asid;			/* the space loaded: its record, 0 none */
+	UINT	slot;
+	volatile UINT switching;	/* loading a space: what it holds is being changed */
+} tlb_cpu[CNF_MAX_PRCID];
+
+LOCAL UINT ctx_hidx( UD l0 )
+{
+	return (UINT)( ( l0 >> PAGE_SHIFT ) * 2654435761U ) & ( CTX_HASH - 1 );
+}
+
+/* Under ctx_lock: the record of the space at l0 out of the table */
+LOCAL void ctx_hash_del( UD l0 )
+{
+	UINT	i = ctx_hidx(l0), j, k;
+
+	while ( ctx_hash[i] != 0 && ctx_rec[ctx_hash[i] - 1].l0 != l0 ) i = ( i + 1 ) & ( CTX_HASH - 1 );
+	if ( ctx_hash[i] == 0 ) return;
+	ctx_hash[i] = 0;
+	/* the entries after it moved back where a search finds them */
+	for ( j = ( i + 1 ) & ( CTX_HASH - 1 ); ctx_hash[j] != 0; j = ( j + 1 ) & ( CTX_HASH - 1 ) ) {
+		k = ctx_hidx(ctx_rec[ctx_hash[j] - 1].l0);
+		if ( ( j > i && ( k <= i || k > j ) ) || ( j < i && ( k <= i && k > j ) ) ) {
+			ctx_hash[i] = ctx_hash[j];
+			ctx_hash[j] = 0;
+			i = j;
+		}
+	}
+}
+
+/* The record of the space at l0 with ASID asid, made when it has none (interrupts masked) */
+LOCAL TLBCTX *ctx_get( UD l0, UINT asid )
+{
+	TLBCTX	*c = &ctx_rec[asid];
+	UINT	i;
+
+	if ( __atomic_load_n(&c->l0, __ATOMIC_ACQUIRE) == l0 ) {
+		return c;
+	}
+	SpinLock(&ctx_lock);
+	if ( c->l0 != l0 ) {
+		if ( c->l0 != 0 ) ctx_hash_del(c->l0);	/* one left by a space not dropped */
+		c->ctx = ctx_next++;
+		c->gen = 1;
+		c->mask = 0;
+		for ( i = ctx_hidx(l0); ctx_hash[i] != 0; i = ( i + 1 ) & ( CTX_HASH - 1 ) ) ;
+		ctx_hash[i] = (UH)( asid + 1 );
+		__atomic_store_n(&c->l0, l0, __ATOMIC_RELEASE);
+	}
+	SpinUnlock(&ctx_lock);
+	return c;
+}
+
+/* The ASID of the record of the space at l0, 0 when no processor has loaded it (interrupts masked) */
+LOCAL UINT ctx_find( UD l0 )
+{
+	UINT	i, a = 0;
+
+	SpinLock(&ctx_lock);
+	for ( i = ctx_hidx(l0); ctx_hash[i] != 0; i = ( i + 1 ) & ( CTX_HASH - 1 ) ) {
+		if ( ctx_rec[ctx_hash[i] - 1].l0 == l0 ) {
+			a = ctx_hash[i] - 1;
+			break;
+		}
+	}
+	SpinUnlock(&ctx_lock);
+	return a;
+}
+
+LOCAL INT me_idx( void )
+{
+	return knl_pcpu()->prcid - 1;
+}
+
+/*
+ * The space ttbr0 loaded on this processor (the dispatcher, before the
+ * task runs, with interrupts masked), as said above. CR3 is written
+ * here, and cur_ttbr0 with it, so that the dispatcher finds the space
+ * loaded already.
+ */
+EXPORT void knl_tlb_note( UD ttbr0 )
+{
+	T_PCPU	*p = knl_pcpu();
+	INT	me = p->prcid - 1;
+	UINT	old = tlb_cpu[me].asid, asid = 0, s = 0, k;
+	UD	cr3, l0 = ttbr0 & MMU_ROOT_PA, g = 0;
+	TLBCTX	*c = NULL;
+	BOOL	keep = FALSE;
+
+	if ( ttbr0 == 0 || ttbr0 == p->cur_ttbr0 ) {
+		return;
+	}
+	tlb_cpu[me].switching = 1;
+	Asm("" ::: "memory");
+	if ( ttbr0 == knl_ttbr0_null ) {
+		cr3 = knl_mmu_root_cr3(knl_ttbr0_null);
+		if ( knl_pcid_on ) cr3 |= U64(1) << 63;	/* it maps nothing of the processes */
+		tlb_cpu[me].asid = 0;
+	} else {
+		asid = knl_mmu_root_asid(ttbr0);
+		c = ctx_get(l0, asid);
+		if ( knl_pcid_on ) {
+			for ( k = 0; k < SLOTS && tlb_cpu[me].slot_ctx[k] != c->ctx; k++ ) ;
+			if ( k < SLOTS ) {
+				s = k;
+				keep = TRUE;
+			} else {
+				s = tlb_cpu[me].next;
+				tlb_cpu[me].next = ( s + 1 ) % SLOTS;
+				tlb_cpu[me].slot_ctx[s] = 0;
+			}
+		}
+		tlb_cpu[me].asid = asid;
+		tlb_cpu[me].slot = s;
+		__atomic_or_fetch(&c->mask, 1U << me, __ATOMIC_SEQ_CST);
+		__atomic_thread_fence(__ATOMIC_SEQ_CST);
+		g = __atomic_load_n(&c->gen, __ATOMIC_SEQ_CST);
+		if ( keep && tlb_cpu[me].slot_gen[s] < g ) keep = FALSE;
+		cr3 = l0;
+		if ( knl_pcid_on ) {
+			cr3 |= (UD)( s + 1 );
+			if ( keep ) cr3 |= U64(1) << 63;	/* the slot's translations are up to date */
+		}
+	}
+	Asm("mov %0, %%cr3" :: "r"(cr3) : "memory");
+	p->cur_ttbr0 = ttbr0;
+	if ( c != NULL ) {
+		tlb_cpu[me].slot_ctx[s] = c->ctx;
+		tlb_cpu[me].slot_gen[s] = g;
+	}
+	if ( old != 0 && old != asid ) {
+		__atomic_and_fetch(&ctx_rec[old].mask, ~( 1U << me ), __ATOMIC_SEQ_CST);
+	}
+	Asm("" ::: "memory");
+	tlb_cpu[me].switching = 0;
 }
 
 /* ------------------------------------------------------------------------ */
 /*
  * Other processors' translations
  *	A request is a word of the processor's T_PCPU: the address with bit
- *	0 for "everything", bit 1 for "off the space shoot_drop as well".
- *	The processor that asks writes it, sends the NMI and waits until the
+ *	0 for "everything", bit 1 for "off the space shoot_drop as well", bit
+ *	2 for "of the space shoot_asid alone, at generation shoot_gen". The
+ *	processor that asks writes it, sends the NMI and waits until the
  *	asked one has counted its acknowledge on; one request is out at a
- *	time (shoot_lock). A processor that does not answer within a bound
- *	(one stopped) is not waited for longer.
+ *	time (shoot_lock). The asker waits for every processor asked: what
+ *	was taken out is given back only after (umem.c, space.c). A processor
+ *	that leaves the online state (stopped) is not waited for; one that
+ *	does not answer within a bound is said on the console (proc.c,
+ *	knl_tlb_abandoned) and waited for still.
  */
 LOCAL T_SPLOCK	shoot_lock;
 LOCAL volatile UD shoot_drop;		/* the space of a SHOOT_DROP request */
+LOCAL volatile UINT shoot_asid;		/* the space of a SHOOT_SPACE request */
+LOCAL volatile UD shoot_ctx, shoot_gen;
+LOCAL UW	shoot_late = 0;		/* processors that answered past the bound, counted */
+LOCAL INT	shoot_late_cpu = -1;	/* the last of them */
 
 #define SHOOT_ALL	1
 #define SHOOT_DROP	2
+#define SHOOT_SPACE	4
+#define SHOOT_FLAGS	7
 #define SHOOT_SPINS	50000000
 
 /*
@@ -89,9 +286,48 @@ LOCAL volatile UD shoot_drop;		/* the space of a SHOOT_DROP request */
  */
 LOCAL void drop_space( T_PCPU *p, UD ttbr0 )
 {
+	INT	me = p->prcid - 1;
+	UINT	a;
+	UD	cr3;
+
 	if ( p->cur_ttbr0 == ttbr0 ) {
+		a = tlb_cpu[me].asid;
+		cr3 = knl_mmu_root_cr3(knl_ttbr0_null);
+		if ( knl_pcid_on ) cr3 |= U64(1) << 63;
+		tlb_cpu[me].asid = 0;
 		p->cur_ttbr0 = knl_ttbr0_null;
-		Asm("mov %0, %%cr3" :: "r"(knl_mmu_root_cr3(knl_ttbr0_null)) : "memory");
+		Asm("mov %0, %%cr3" :: "r"(cr3) : "memory");
+		if ( a != 0 ) __atomic_and_fetch(&ctx_rec[a].mask, ~( 1U << me ), __ATOMIC_SEQ_CST);
+	}
+}
+
+/*
+ * A page (or all, va 0 with all) of the space with record asid dropped
+ * here, when this processor has it loaded; its slot then up to gen. In
+ * the middle of loading a space, everything is dropped and the slot is
+ * left as the loading makes it (a generation said lower than it is only
+ * drops the translations once more).
+ */
+LOCAL void drop_own( UINT asid, UD ctx, UD gen, UBINT va, BOOL all )
+{
+	INT	me = me_idx();
+	UINT	s;
+
+	if ( tlb_cpu[me].asid != asid ) {
+		return;
+	}
+	if ( tlb_cpu[me].switching ) {
+		flush_local_all();
+		return;
+	}
+	s = tlb_cpu[me].slot;
+	if ( all ) {
+		flush_local_all();
+	} else {
+		invlpg(va);		/* the PCID loaded is the space's */
+	}
+	if ( tlb_cpu[me].slot_ctx[s] == ctx && tlb_cpu[me].slot_gen[s] < gen ) {
+		tlb_cpu[me].slot_gen[s] = gen;
 	}
 }
 
@@ -107,10 +343,12 @@ EXPORT BOOL knl_tlb_nmi( void )
 	if ( ( r & SHOOT_DROP ) != 0 ) {
 		drop_space(p, shoot_drop);
 	}
-	if ( ( r & SHOOT_ALL ) != 0 ) {
+	if ( ( r & SHOOT_SPACE ) != 0 ) {
+		drop_own(shoot_asid, shoot_ctx, shoot_gen, (UBINT)( r & ~(UD)SHOOT_FLAGS ), ( r & SHOOT_ALL ) != 0);
+	} else if ( ( r & SHOOT_ALL ) != 0 ) {
 		flush_local_all();
 	} else {
-		invlpg((UBINT)r);
+		invlpg((UBINT)( r & ~(UD)SHOOT_FLAGS ));
 	}
 	p->tlb_req = 0;
 	__atomic_add_fetch(&p->tlb_ack, 1, __ATOMIC_RELEASE);
@@ -118,173 +356,149 @@ EXPORT BOOL knl_tlb_nmi( void )
 }
 
 /*
- * The spaces each processor may hold translations of (design 4.5): the
- * dispatcher notes the space of the task it is about to run, before the
- * processor loads it, and a change in a space's user half is asked of
- * the processors that noted it. Without PCIDs, loading a space drops
- * the others, so the space loaded is the only one. With them, the
- * spaces run since the processor last dropped all its translations;
- * when it has since, the list starts again from the one loaded. More
- * than the list holds, and the processor is asked whatever the space.
- * Called with interrupts masked; the list grows before the space is
- * loaded, and the one who asks reads it after the change is made, so
- * a processor left out loads the changed tables.
+ * The processors of 'want' (bit n: processor n + 1; this one left out)
+ * asked for r and waited for, as said above. Called with interrupts
+ * masked; the request's space, when there is one, is set under the lock.
  */
-EXPORT void knl_tlb_note( UD ttbr0 )
-{
-	T_PCPU	*p = knl_pcpu();
-	UD	l0 = ttbr0 & MMU_ROOT_PA, cur = p->cur_ttbr0;
-	UW	n, f = p->tlb_flushes, i;
-
-	if ( ttbr0 == 0 || ttbr0 == knl_ttbr0_null ) {
-		return;
-	}
-	n = p->tlb_spn;
-	if ( !knl_pcid_on || f != p->tlb_flushes_seen ) {
-		p->tlb_flushes_seen = f;
-		p->tlb_sp[0] = l0;
-		n = 1;
-		if ( knl_pcid_on && cur != 0 && cur != knl_ttbr0_null && ( cur & MMU_ROOT_PA ) != l0 ) {
-			p->tlb_sp[1] = cur & MMU_ROOT_PA;
-			n = 2;
-		}
-	} else if ( n <= TLB_SP_N ) {
-		for ( i = 0; i < n && p->tlb_sp[i] != l0; i++ ) ;
-		if ( i == n ) {
-			if ( n < TLB_SP_N ) {
-				p->tlb_sp[n] = l0;
-			}
-			n++;			/* TLB_SP_N + 1: any space */
-		}
-	}
-	p->tlb_spn = n;
-	Asm("mfence" ::: "memory");
-}
-
-/* Whether processor p may hold translations of the space at l0 (0: of the kernel's half, all may) */
-LOCAL BOOL may_hold( T_PCPU *p, UD l0 )
-{
-	UW	n, i;
-
-	if ( l0 == 0 || ( p->cur_ttbr0 & MMU_ROOT_PA ) == l0 ) {
-		return TRUE;
-	}
-	n = p->tlb_spn;
-	if ( n > TLB_SP_N ) {
-		return TRUE;
-	}
-	for ( i = 0; i < n; i++ ) {
-		if ( p->tlb_sp[i] == l0 ) return TRUE;
-	}
-	return FALSE;
-}
-
-/* The others asked for r (SHOOT_*, or an address), waited for as said above */
-LOCAL void shoot_others_in( UD r, UD drop, UD l0 )
+LOCAL void shoot_cpus( UW want, UD r, UD drop, UINT asid, UD ctx, UD gen )
 {
 	T_PCPU		*me = knl_pcpu();
 	T_PRCSET	mask;
-	UINT		imask;
-	INT		i, n;
+	INT		i;
+	UD		n;
+	BOOL		told = FALSE;
 
 	if ( knl_num_prc <= 1 ) {
 		return;
 	}
 	prcset_zero(&mask);
-	ISpinLock(&shoot_lock, &imask);
+	SpinLock(&shoot_lock);
 	shoot_drop = drop;
-	Asm("mfence" ::: "memory");		/* the change made before the lists are read */
+	shoot_asid = asid;
+	shoot_ctx = ctx;
+	shoot_gen = gen;
+	Asm("mfence" ::: "memory");
 	for ( i = 0; i < knl_num_prc; i++ ) {
 		T_PCPU	*p = knl_pcpu_of(i);
 
-		if ( p == me || p->state != PC_ONLINE || !may_hold(p, l0) ) continue;
+		if ( p == me || p->state != PC_ONLINE || ( want & ( 1U << i ) ) == 0 ) continue;
 		p->tlb_seen = __atomic_load_n(&p->tlb_ack, __ATOMIC_ACQUIRE);
 		p->tlb_req = r;
 		prcset_add(&mask, i);
 		knl_apic_send(p->apic_id, 0, APIC_DM_NMI);
 	}
-	for ( n = 0; n < SHOOT_SPINS && !prcset_empty(&mask); n++ ) {
+	for ( n = 0; !prcset_empty(&mask); n++ ) {
 		for ( i = prcset_next(&mask, 0, knl_num_prc); i >= 0; i = prcset_next(&mask, i + 1, knl_num_prc) ) {
 			T_PCPU	*p = knl_pcpu_of(i);
 
-			if ( __atomic_load_n(&p->tlb_ack, __ATOMIC_ACQUIRE) != p->tlb_seen ) {
+			if ( __atomic_load_n(&p->tlb_ack, __ATOMIC_ACQUIRE) != p->tlb_seen || p->state != PC_ONLINE ) {
 				prcset_del(&mask, i);
 			}
 		}
+		if ( n == SHOOT_SPINS && !told && !prcset_empty(&mask) ) {
+			told = TRUE;
+			shoot_late_cpu = prcset_next(&mask, 0, knl_num_prc);
+			__atomic_add_fetch(&shoot_late, 1, __ATOMIC_RELAXED);
+		}
 		CpuRelax();
 	}
-	ISpinUnlock(&shoot_lock, &imask);
+	SpinUnlock(&shoot_lock);
 }
 
-LOCAL void shoot_others( UD r, UD drop )
+/* How many times a processor asked to drop translations answered past the bound, and the last one */
+EXPORT UW knl_tlb_abandoned( INT *p_cpu )
 {
-	shoot_others_in(r, drop, 0);
+	if ( p_cpu != NULL ) *p_cpu = shoot_late_cpu;
+	return __atomic_load_n(&shoot_late, __ATOMIC_RELAXED);
+}
+
+/* Every other processor online */
+LOCAL UW all_others( void )
+{
+	return (UW)( ( 1ULL << knl_num_prc ) - 1 ) & ~( 1U << me_idx() );
 }
 
 EXPORT void knl_tlb_shootdown( UINT pcid, UBINT va, BOOL all )
 {
 	(void)pcid;
 	/*
-	 * With PCIDs, INVLPG drops a page of the space installed only: the
-	 * same page of a space another task left in the TLB stays. A page
-	 * dropped is then everything dropped (CR4.PGE toggled), here and on
-	 * every other processor.
+	 * Of the kernel's half: every processor, every PCID. With PCIDs,
+	 * INVLPG drops a page of the PCID installed only (and the global
+	 * ones), so a page dropped is then everything dropped (CR4.PGE
+	 * toggled), here and on every other processor.
 	 */
 	UINT	imask;
 
 	if ( knl_pcid_on ) {
 		all = TRUE;
 	}
-	/*
-	 * Here and the others with interrupts disabled throughout: a task
-	 * moved to another processor after its own was dropped would leave
-	 * that one out as "this one", and drop it nowhere
-	 */
 	DI(imask);
 	if ( all ) {
 		flush_local_all();
 	} else {
 		invlpg(va);
 	}
-	shoot_others(all ? SHOOT_ALL : ( va & ~(UBINT)( PAGE_SIZE - 1 ) ), 0);
+	shoot_cpus(all_others(), all ? SHOOT_ALL : ( va & ~(UBINT)( PAGE_SIZE - 1 ) ), 0, 0, 0, 0);
 	EI(imask);
 }
 
 /*
  * A page of the space at l0_pa: of the kernel's half, every processor
- * drops it; of a process's half, those that may hold it (knl_tlb_note)
+ * drops it; of a process's half, the generation of the space is raised
+ * and the processors that have it loaded drop it (the others when they
+ * load it next)
  */
 LOCAL void tlb_flush_in( UD l0_pa, UBINT va, BOOL all )
 {
-	UINT	imask;
+	UINT	imask, asid;
+	TLBCTX	*c;
+	UD	gen, r;
 
 	if ( l0_pa == 0 || l0_pa == knl_pt_l0_k_pa || ( !all && va >= USER_HALF_END ) ) {
 		knl_tlb_shootdown(0, va, all);
 		return;
 	}
-	if ( knl_pcid_on ) {
-		all = TRUE;
-	}
+	va &= ~(UBINT)( PAGE_SIZE - 1 );
 	DI(imask);
-	if ( all ) {
-		flush_local_all();
-	} else {
-		invlpg(va);
+	asid = ctx_find(l0_pa);
+	if ( asid != 0 ) {
+		c = &ctx_rec[asid];
+		__atomic_thread_fence(__ATOMIC_SEQ_CST);	/* the tables changed before the generation */
+		gen = __atomic_add_fetch(&c->gen, 1, __ATOMIC_SEQ_CST);
+		__atomic_thread_fence(__ATOMIC_SEQ_CST);	/* and that before the mask is read */
+		drop_own(asid, c->ctx, gen, va, all);
+		r = SHOOT_SPACE | ( all ? SHOOT_ALL : va );
+		shoot_cpus(__atomic_load_n(&c->mask, __ATOMIC_SEQ_CST) & ~( 1U << me_idx() ), r, 0, asid, c->ctx, gen);
 	}
-	shoot_others_in(all ? SHOOT_ALL : ( va & ~(UBINT)( PAGE_SIZE - 1 ) ), 0, l0_pa);
 	EI(imask);
 }
 
+/*
+ * A space to be freed: every processor that has it loaded put on the
+ * empty space, and its record let go. Its context number is never used
+ * again, so what the processors' slots keep of it is never taken for
+ * another space's.
+ */
 EXPORT void knl_mmu_space_drop( UD ttbr0 )
 {
-	UINT	imask;
+	UINT	imask, asid;
+	UD	l0 = ttbr0 & MMU_ROOT_PA;
 
 	if ( ttbr0 == 0 || ttbr0 == knl_ttbr0_null ) {
 		return;
 	}
 	DI(imask);				/* this processor and the others, without moving between */
 	drop_space(knl_pcpu(), ttbr0);
-	shoot_others(SHOOT_ALL | SHOOT_DROP, ttbr0);
+	shoot_cpus(all_others(), SHOOT_DROP, ttbr0, 0, 0, 0);
+	asid = knl_mmu_root_asid(ttbr0);
+	SpinLock(&ctx_lock);
+	if ( ctx_rec[asid].l0 == l0 ) {
+		ctx_hash_del(l0);
+		ctx_rec[asid].mask = 0;
+		ctx_rec[asid].ctx = 0;
+		__atomic_store_n(&ctx_rec[asid].l0, 0, __ATOMIC_RELEASE);
+	}
+	SpinUnlock(&ctx_lock);
 	EI(imask);
 }
 
@@ -319,11 +533,15 @@ EXPORT void knl_mmu_cpu_init( void )
 	{
 		UW	a, b, c, d;
 
-		/* a program sets its own TLS pointer (WRFSBASE, lib/libpthread) */
-		cpuid(7, 0, &a, &b, &c, &d);
-		if ( ( b & 1 ) != 0 ) {
-			cr4 |= CR4_FSGSBASE;
-		}
+		/*
+		 * RDFSBASE, WRFSBASE, RDGSBASE and WRGSBASE stay closed to user
+		 * mode on every processor, whatever the firmware left in CR4:
+		 * the switch of tasks keeps the FS base (dispatch.S) but not a
+		 * user's GS base, which a program could otherwise set and leave
+		 * to the next task. The thread pointer is set through
+		 * ts_set_tls (syscall.c) and read at %fs:0.
+		 */
+		cr4 &= ~(UD)CR4_FSGSBASE;
 		/*
 		 * Process-context identifiers, where the processor has them:
 		 * asked once, on the first processor before any space is made

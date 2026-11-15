@@ -444,6 +444,24 @@ static void ask_of( CONST CXCELL *c, UINT req, T_DTREQ *rq )
 	if ( ct_attr_bool(c->el, c->ellen, "hidden", FALSE) ) rq->flags |= DT_F_HIDDEN;
 }
 
+/*
+ * 仮身属性変更 of a link named for the desktop as opening it names it
+ * (DT_F_LINK), so that the windows opened from the link are told its new
+ * look; the relationship (name) and wordWrap (grab_x) the naming writes
+ * are put back as the request had them
+ */
+static void attr_named( T_DTREQ *rq, CONST TS_UUID *parent, CONST UB *el, INT n )
+{
+	UB	name[sizeof(rq->name)];
+	INT	gx = rq->grab_x;
+
+	if ( g_lport <= 0 ) return;
+	memcpy(name, rq->name, sizeof(name));
+	(void)ct_link_from(rq, parent, &g_lch, el, n);
+	memcpy(rq->name, name, sizeof(name));
+	rq->grab_x = gx;
+}
+
 void link_open( INT col, INT row )
 {
 	CXCELL	*c = cx_get(&g_s, col, row);
@@ -745,6 +763,7 @@ void link_op( CONST char *code, INT index )
 		(void)ask_desktop(&rq, &an, 5000);
 	} else if ( strcmp(code, "vobj.attr") == 0 ) {
 		ask_of(c, DT_RQ_ATTR, &rq);
+		attr_named(&rq, &g_obj, c->el, c->ellen);
 		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
 			link_look(c, &an);
 			snprintf(s, sizeof(s), "attr %s", nm);
@@ -824,8 +843,9 @@ void paper_ask( void )
 	rq.target = g_obj;
 	rq.look.bgcol = g_bg;
 	if ( ask_desktop(&rq, &an, 30 * 60 * 1000) < E_OK ) return;
-	g_bg = an.look.bgcol & 0x00FFFFFFU;
-	snprintf(s, sizeof(s), "paper #%06x", (UINT)g_bg);
+	/* 仮身属性と同じ: no paper of its own, the sheet's as when its metadata says none */
+	g_bg = ( an.look.bgcol == DT_PAPER_SAME ) ? C_PAPER : ( an.look.bgcol & 0x00FFFFFFU );
+	snprintf(s, sizeof(s), ( an.look.bgcol == DT_PAPER_SAME ) ? "paper same as the link #%06x" : "paper #%06x", (UINT)g_bg);
 	note(s);
 	say("背景色を変更しました");
 	g_dirty = TRUE;

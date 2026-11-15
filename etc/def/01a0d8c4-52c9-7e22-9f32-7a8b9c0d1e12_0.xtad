@@ -113,6 +113,9 @@
 <list num="21" sheet="7" rect="12,228,588,422"/>
 <text foot="true" sheet="7" x="16" y="452">パッケージ（.tpk）を落とすとインストール・更新</text>
 <button foot="true" num="46" sheet="7" rect="480,434,588,458">詳細情報</button>
+<popup num="91" sheet="8" rect="12,36,236,62" value="1"><name>1：主画面</name></popup>
+<select num="92" sheet="8" rect="244,36,412,62" across="true" value="1"><name>使う</name><name>使わない</name></select>
+<popup num="93" sheet="8" rect="420,36,588,62" value="1"><name>主画面の右</name><name>主画面の下</name><name>主画面の左</name><name>主画面の上</name><name>主画面の複製</name></popup>
 <text sheet="8" x="16" y="83">画面サイズ／色数</text>
 <list num="23" sheet="8" rect="12,94,380,420"/>
 <text num="24" sheet="8" x="396" y="113">色数：１６７７万色</text>
@@ -122,6 +125,7 @@
 <select num="85" sheet="8" rect="396,234,588,290" value="1"><name>比を保つ</name><name>全体に広げる</name></select>
 <text sheet="8" x="396" y="325">表示の倍率：</text>
 <popup num="86" sheet="8" rect="396,334,588,360" value="1"><name>100％</name></popup>
+<button foot="true" num="94" sheet="8" rect="292,434,392,458">識別</button>
 <button foot="true" num="25" sheet="8" rect="400,434,488,458">取り消し</button>
 <button foot="true" num="26" sheet="8" rect="496,434,584,458" emph="true">設定</button>
 <text sheet="9" x="16" y="89">アダプタ：</text>

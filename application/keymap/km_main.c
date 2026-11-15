@@ -1005,13 +1005,13 @@ static INT selftest( void )
 	/* a window that may have the keys types nothing; this one, only after a press */
 	st_check(wm_key_put(0, 0x04, 0) < E_OK, "a key put through no window");
 	if ( port_open() >= E_OK ) {
-		if ( win_open(40, 40, TRUE) >= E_OK ) {
+		if ( win_open(wm_new_x(40), wm_new_y(40), TRUE) >= E_OK ) {
 			st_check(wm_key_put(g_kw, 0x04, 0) == E_OBJ, "a window that may have the keys");
 			win_close();
 		} else {
 			st_check(FALSE, "a plain window");
 		}
-		if ( win_open(40, 40, FALSE) >= E_OK ) {
+		if ( win_open(wm_new_x(40), wm_new_y(40), FALSE) >= E_OK ) {
 			st_check(wm_key_put(g_kw, 0x04, 0) == E_OACV, "a key before any press");
 			st_check(wm_key_put(g_kw, 0, 0) == E_PAR, "key 0");
 			st_check(wm_key_put(g_kw, 0x04, 0x10000) == E_PAR, "modifiers there are not");
@@ -1042,7 +1042,7 @@ int main( void )
 		return 2;
 	}
 	state_read();
-	if ( win_open(160, 200, FALSE) < E_OK ) {
+	if ( win_open(wm_new_x(160), wm_new_y(200), FALSE) < E_OK ) {
 		say("no window");
 		port_close();
 		return 3;

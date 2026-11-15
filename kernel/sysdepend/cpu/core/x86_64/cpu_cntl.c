@@ -261,9 +261,20 @@ EXPORT ER knl_tcb_sysdep_del( TCB *tcb )
  * with interrupts disabled). STI lets the next instruction run before
  * any interrupt is taken, so one that is already pending wakes the HLT;
  * it is taken there, and the loop goes on with interrupts disabled again.
+ * Where the idle states are in use (kernel/sysdepend/x64/cpuidle.c) the
+ * state they choose is entered instead, with interrupts still disabled;
+ * the interrupt that woke it is taken when the loop opens them.
  */
+WEAK_FUNC EXPORT BOOL knl_cpuidle_enter( void )
+{
+	return FALSE;
+}
+
 EXPORT void low_pow( void )
 {
+	if ( knl_cpuidle_enter() ) {
+		return;
+	}
 	Asm("sti; hlt; cli" ::: "memory");
 }
 

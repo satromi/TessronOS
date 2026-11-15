@@ -1021,7 +1021,7 @@ LOCAL CONST char *w_sec_word( CONST char *s )
 	     : ( strcmp(s, "wep") == 0 ) ? "WEP(未対応)" : "802.1X";
 }
 
-/* The networks the last scan found, the strongest first, however many */
+/* The networks seen lately (wlan0 record 2: the scans merged, the strongest first), however many */
 LOCAL void w_scan_show( void )
 {
 	CONST char **names;
@@ -1510,7 +1510,7 @@ int main( void )
 
 	ui_icon(SYSDEF_PROG_NETENV);
 	ui_attr(UI_ATTR_HIDDEN);		/* filled hidden, and shown once (ui_reveal) */
-	if ( ui_open(&ui, SYSDEF_BOX_NETENV, PN_MAIN, 200, 120) < E_OK ) {
+	if ( ui_open(&ui, SYSDEF_BOX_NETENV, PN_MAIN, wm_new_x(200), wm_new_y(120)) < E_OK ) {
 		tm_putstring((CONST UB *)"netenv: no window\n");
 		return 1;
 	}

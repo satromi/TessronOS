@@ -87,6 +87,17 @@ IMPORT INT  js_get_str( CONST T_JSON *obj, CONST char *name, UB *out, INT max );
 IMPORT D    js_get_num( CONST T_JSON *obj, CONST char *name, D dflt );
 IMPORT BOOL js_get_bool( CONST T_JSON *obj, CONST char *name, BOOL dflt );
 
+/*
+ * The text with a member of one of its objects (obj, a span of text) set
+ * to a string (val, which needs no escapes): in place of the member's
+ * value where there is one, else put last in the object. Every other byte
+ * stays as it was. The new text into out (max bytes, ended with 0);
+ * answers its length, E_PAR when obj is no object, E_LIMIT when it does
+ * not fit.
+ */
+IMPORT INT  js_set_str( CONST UB *text, INT len, CONST T_JSON *obj, CONST char *name, CONST char *val,
+			UB *out, INT max );
+
 #ifdef __cplusplus
 }
 #endif

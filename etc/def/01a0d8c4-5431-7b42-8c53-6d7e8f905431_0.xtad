@@ -1,0 +1,13 @@
+<tad version="1.0" encoding="UTF-8" filename="トレーのデータボックス">
+<document>
+<p>トレーのデータボックス</p>
+<p>トレー小物のウインドウのパネルの定義。左に縦に並ぶトレーの10段のタグ、タグの横の紙の上に、種別とサイズの見出しと、一覧表示のときの段の一覧。紙には、プログラムが段の中身を描く。パネルとその部品の大きさと位置は、ウインドウの大きさに合わせてプログラムが決め直す。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,560,380" title="トレー" kind="bare">
+<tags num="1" rect="0,0,560,380" inner="40,6,554,374" down="true" view="true"><tag>1</tag><tag>2</tag><tag>3</tag><tag>4</tag><tag>5</tag><tag>6</tag><tag>7</tag><tag>8</tag><tag>9</tag><tag>10</tag></tags>
+<label num="2" rect="48,12,546,34"></label>
+<list num="3" rect="46,38,548,368"></list>
+</panel>
+</databox>
+</tad>

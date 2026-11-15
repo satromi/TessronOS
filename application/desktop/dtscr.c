@@ -9,28 +9,29 @@
 
 /*
  *	dtscr.c
- *	画面印刷: the screen taken as pixels and kept, put in the tray or
- *	printed (docs/tessronos/11-desktop.md 11.24)
+ *	画面印刷 as the desktop serves it: the screen taken as pixels and
+ *	kept, put in the tray or printed (docs/tessronos/11-desktop.md 11.24)
  *
- *	Chosen from 小物, it shows the panel 画面印刷／画面保存: where the
- *	picture goes (図形実身へ保存, トレーへ複写, プリンタへ印刷), whether
- *	the pointer is in it (ポインタ印刷), what is taken (全画面, the
- *	window in front with those subordinate to it, or a rectangle dragged
- *	out on the screen), and when (so many seconds after 実行, at the
- *	PrintScreen key, or at every press of it until the panel is put away
- *	with 取り消し). What is set is kept in the machine's settings
- *	(SCRPRINT) for the next time.
+ *	The accessory is a process (application/scrprint). Chosen from 小物,
+ *	it shows the panel 画面印刷／画面保存: where the picture goes
+ *	(図形実身へ保存, トレーへ複写, プリンタへ印刷), whether the pointer is
+ *	in it (ポインタ印刷), what is taken (全画面, the window in front with
+ *	those subordinate to it, or a rectangle dragged out on the screen),
+ *	and when (so many seconds after 実行, at the PrintScreen key, or at
+ *	every press of it until the panel is put away with 取り消し). It asks
+ *	the desktop (DT_RQ_SCRPRINT) for what was set last, which the desktop
+ *	keeps in the machine's settings (SCRPRINT), and for the volumes a
+ *	figure object can go on, and hands over what 実行 set.
  *
- *	After 実行 the panel goes, and with it whatever of this accessory
- *	is on the screen: a figure object asks the volume it goes on (one of
- *	those attached) and its name first, printing asks
- *	its 印刷設定 (without 画面表示, for there is nothing yet to show),
- *	and a rectangle is dragged out, its outline drawn over every window
- *	while the input is told to no program. Counting down, the buzzer
- *	sounds short at three, two and one seconds left and long at nought,
- *	and the screen is taken at the long one. The message line is cleared
- *	and the screen built before it is read, so what this accessory said
- *	is not in the picture.
+ *	What follows is the desktop's alone, for it reads the screen and
+ *	every input: the panel gone, printing asks its 印刷設定 of 基本印刷
+ *	(without 画面表示, for there is nothing yet to show), and a rectangle
+ *	is dragged out, its outline drawn over every window while the input
+ *	is told to no program. Counting down, the buzzer sounds short at
+ *	three, two and one seconds left and long at nought, and the screen
+ *	is taken at the long one. The message line is cleared and the screen
+ *	built before it is read, so what this accessory said is not in the
+ *	picture.
  *
  *	The pixels are the screen as the window manager last built it
  *	(wm_grab_screen), the pointer left as it lies or replaced by what it
@@ -68,6 +69,8 @@
 #include <ts/print.h>
 #include <ts/time.h>
 #include <ts/uuid.h>
+#include <ts/proc.h>
+#include <ts/dtreq.h>
 #include "desktop.h"
 
 #define KEY_PRTSC	0x46
@@ -94,21 +97,6 @@
 #define SC_VOLS		12		/* volumes offered: as many as a panel holds on the screen */
 #define SC_VOL_PATH	64		/* bytes of a volume's path kept */
 
-/* the panel's parts */
-#define PN_FIG		1
-#define PN_TRAY		2
-#define PN_PRINTER	3
-#define PN_POINTER	4
-#define PN_SCREEN	5
-#define PN_FRONT	6
-#define PN_RANGE	7
-#define PN_TIME		8
-#define PN_KEY		9
-#define PN_KEYS		10
-#define PN_SECS		11
-#define PN_NAME		12
-#define PN_VOL		20		/* 20.. the volumes, one choice each */
-
 /* what is under way */
 #define SC_IDLE		0
 #define SC_PICK		1		/* a rectangle being dragged out */
@@ -125,7 +113,6 @@ typedef struct {
 
 LOCAL SCSET	sc = { SC_TO_FIG, FALSE, DT_SCR_SCREEN, SC_BY_TIME, SC_SEC_DFLT };
 LOCAL BOOL	sc_loaded = FALSE;
-LOCAL BOOL	sc_ask = FALSE;		/* the panel is to be shown at the next turn */
 LOCAL INT	sc_state = SC_IDLE;
 LOCAL T_DPRECT	sc_range;		/* the rectangle dragged out, on the screen */
 LOCAL BOOL	sc_drag = FALSE;
@@ -801,237 +788,230 @@ LOCAL void stop( void )
 	sc_state = SC_IDLE;
 }
 
-/* ---------------------------------------------------------------- the panels */
 
-LOCAL T_WMPART *choice( T_WMPANEL *def, INT num, INT group, INT x, INT y, INT w, CONST char *label, BOOL on )
+/* ---------------------------------------------------------------- what 画面印刷 asks */
+
+/*
+ * The process (application/scrprint) whose panel is up: one asked for
+ * again meanwhile brings it to the front instead of a second panel
+ */
+LOCAL ID	sc_panel_pid = 0;
+LOCAL TS_UUID	sc_panel_uuid;
+LOCAL BOOL	sc_was = FALSE;		/* something was under way when the panel came up */
+LOCAL UINT	sc_gen = 0;		/* what 実行 started: an answer of 基本印刷 for an older one is not used */
+
+LOCAL BOOL panel_up( void )
 {
-	T_WMPART	*pt = dt_pn_add(def, WM_PT_CHOICE, num, x, y, w, 22, label);
+	TS_UUID	u;
 
-	if ( pt != NULL ) {
-		pt->group = group;
-		pt->value = on ? 1 : 0;
-	}
-	return pt;
+	return (BOOL)( sc_panel_pid > 0 && knl_prc_uuid(sc_panel_pid, &u, NULL) >= E_OK
+		       && ts_uuid_cmp(&u, &sc_panel_uuid) == 0 );
 }
 
-/* 画面印刷／画面保存: TRUE for 実行, what was set in sc */
-LOCAL BOOL set_panel( DTWIN *host )
+/* The rectangle dragged out, or else the count or the key */
+LOCAL void go( void )
 {
-	T_WMPANEL	*def;
-	T_WMPART	*pt;
-	INT		pid, w = 520, h = 268, v = sc.secs;
-	UINT		ans;
+	INT	x = 0, y = 0;
+	UINT	btn = 0;
 
-	def = dt_pn_new(w, h);
-	if ( def == NULL ) {
-		return FALSE;
+	if ( sc.area != DT_SCR_RANGE ) {
+		arm();
+		return;
 	}
-	dt_pn_add(def, WM_PT_LABEL, 0, 190, 4, 200, 22, "画面印刷／画面保存");
-	choice(def, PN_FIG, PN_FIG, 14, 36, 190, "図形実身へ保存", (BOOL)( sc.to == SC_TO_FIG ));
-	choice(def, PN_TRAY, PN_FIG, 14, 62, 190, "トレーへ複写", (BOOL)( sc.to == SC_TO_TRAY ));
-	choice(def, PN_PRINTER, PN_FIG, 14, 88, 190, "プリンタへ印刷", (BOOL)( sc.to == SC_TO_PRINTER ));
-	pt = dt_pn_add(def, WM_PT_CHECK, PN_POINTER, 250, 36, 180, 22, "ポインタ印刷");
-	if ( pt != NULL ) pt->value = sc.pointer ? 1 : 0;
-	choice(def, PN_SCREEN, PN_SCREEN, 250, 66, 250, "全画面", (BOOL)( sc.area == DT_SCR_SCREEN ));
-	choice(def, PN_FRONT, PN_SCREEN, 250, 92, 250, "最前面ウィンドウのみ", (BOOL)( sc.area == DT_SCR_FRONT ));
-	choice(def, PN_RANGE, PN_SCREEN, 250, 118, 250, "範囲指定", (BOOL)( sc.area == DT_SCR_RANGE ));
-	choice(def, PN_TIME, PN_TIME, 14, 152, 280, "指定時間後に実行", (BOOL)( sc.by == SC_BY_TIME ));
-	choice(def, PN_KEY, PN_TIME, 14, 178, 280, "PrntScrnキーで実行", (BOOL)( sc.by == SC_BY_KEY ));
-	choice(def, PN_KEYS, PN_TIME, 14, 204, 280, "PrntScrnキーで連続実行", (BOOL)( sc.by == SC_BY_KEYS ));
-	pt = dt_pn_add(def, SB_PARTS, PN_SECS, 330, 150, 40, 26, "##");
-	if ( pt != NULL ) {
-		pt->sb_n = 1;
-		pt->sb_at = 0;
-		pt->sbw[0] = 2;
-		pt->sblo[0] = SC_SEC_MIN;
-		pt->sbhi[0] = SC_SEC_MAX;
-		pt->sbv[0] = sc.secs;
-	}
-	dt_pn_add(def, WM_PT_LABEL, 0, 376, 152, 60, 22, "秒後");
-	pt = dt_pn_add(def, WM_PT_BUTTON, DT_PN_CANCEL, 14, h - 36, 100, 26, "取り消し");
-	if ( pt != NULL ) pt->answer = WM_ANS_CANCEL;
-	pt = dt_pn_add(def, WM_PT_BUTTON | P_EMPHAS, DT_PN_OK, w - 114, h - 36, 100, 26, "実行");
-	if ( pt != NULL ) pt->answer = WM_ANS_OK;
-
-	tm_printf((UB *)"scrprint: panel %d\n", told(SN_PANEL));
-	ans = dt_pn_run(host, def, &pid);
-	if ( ans == WM_ANS_OK && pid >= 0 ) {
-		sc.to = ( dt_pn_value(pid, PN_TRAY) != 0 ) ? SC_TO_TRAY
-		      : ( dt_pn_value(pid, PN_PRINTER) != 0 ) ? SC_TO_PRINTER : SC_TO_FIG;
-		sc.pointer = (BOOL)( dt_pn_value(pid, PN_POINTER) != 0 );
-		sc.area = ( dt_pn_value(pid, PN_FRONT) != 0 ) ? DT_SCR_FRONT
-			: ( dt_pn_value(pid, PN_RANGE) != 0 ) ? DT_SCR_RANGE : DT_SCR_SCREEN;
-		sc.by = ( dt_pn_value(pid, PN_KEY) != 0 ) ? SC_BY_KEY
-		      : ( dt_pn_value(pid, PN_KEYS) != 0 ) ? SC_BY_KEYS : SC_BY_TIME;
-		if ( wm_panel_field(pid, PN_SECS, 0, &v) >= E_OK ) {
-			sc.secs = ( v < SC_SEC_MIN ) ? SC_SEC_MIN : ( v > SC_SEC_MAX ) ? SC_SEC_MAX : v;
-		}
-	}
-	dt_pn_done(host, pid);
+	sc_state = SC_PICK;
+	sc_drag = FALSE;
+	wm_obj_quiet(TRUE);
+	(void)wm_set_pointer(WM_PT_PICK);
+	(void)wm_msg_put("画面印刷: 取り込む範囲をドラッグしてください (Escで取り消し)");
+	tm_printf((UB *)"scrprint: pick %d\n", told(SN_PICK));
+	/* the loupe at once where the pointer is, before it moves */
+	if ( ts_hid_pointer(&x, &y, &btn) >= E_OK ) loupe_show(x, y);
 	wm_update();
+}
 
-	return (BOOL)( ans == WM_ANS_OK );
+/* The page the screen will be printed on, for its 印刷設定: the screen's size, before anything is taken */
+typedef struct {
+	T_PRNJOB	job;
+	DTSCRPIC	pic;
+	UINT		gen;
+} SCASK;
+
+LOCAL void print_set( void *arg, ER er, CONST T_PRNSET *set )
+{
+	SCASK	*a = (SCASK *)arg;
+	UINT	gen = a->gen;
+
+	Kfree(a);
+	if ( gen != sc_gen ) {
+		return;				/* the panel came up again meanwhile */
+	}
+	if ( er < E_OK || set == NULL ) {
+		tm_printf((UB *)"scrprint: cancelled %d\n", told(SN_CANCELLED));
+		return;
+	}
+	sc_prn = *set;
+	go();
+}
+
+/* "to pointer area by secs<tab>volume<tab>name": what 実行 set */
+LOCAL BOOL set_from( CONST UB *t )
+{
+	INT	n[5], k = 0, i = 0, j;
+
+	while ( k < 5 ) {
+		INT	x = 0;
+		BOOL	any = FALSE;
+
+		while ( t[i] == ' ' ) i++;
+		while ( t[i] >= '0' && t[i] <= '9' && x < 1000 ) {
+			x = x * 10 + ( t[i++] - '0' );
+			any = TRUE;
+		}
+		if ( !any ) return FALSE;
+		n[k++] = x;
+	}
+	sc.to = ( n[0] <= SC_TO_PRINTER ) ? n[0] : SC_TO_FIG;
+	sc.pointer = (BOOL)( n[1] != 0 );
+	sc.area = ( n[2] <= DT_SCR_RANGE ) ? n[2] : DT_SCR_SCREEN;
+	sc.by = ( n[3] <= SC_BY_KEYS ) ? n[3] : SC_BY_TIME;
+	sc.secs = ( n[4] < SC_SEC_MIN ) ? SC_SEC_MIN : ( n[4] > SC_SEC_MAX ) ? SC_SEC_MAX : n[4];
+	if ( t[i] != '\t' ) return TRUE;
+	i++;
+	for ( j = 0; t[i] != 0 && t[i] != '\t' && j < SC_VOL_PATH - 1; ) sc_vol[j++] = t[i++];
+	sc_vol[j] = 0;
+	while ( t[i] != 0 && t[i] != '\t' ) i++;
+	if ( t[i] != '\t' ) return TRUE;
+	i++;
+	while ( t[i] == ' ' ) i++;
+	if ( t[i] != 0 ) {
+		for ( j = 0; t[i] != 0 && j < TAD_NAME_MAX - 1; ) sc_name[j++] = t[i++];
+		while ( j > 0 && ( sc_name[j] & 0xC0 ) == 0x80 ) j--;	/* cut at a letter's edge */
+		sc_name[j] = 0;
+	}
+	return TRUE;
 }
 
 /*
- * 保存先ディスク and 実身名: the volumes attached, one choice each (the
- * first, the system's, marked so), the one chosen last time chosen
- * again, and the name. TRUE for 保存.
+ * DT_RQ_SCRPRINT: 画面印刷's process asks for what it set and the
+ * volumes to save to, and hands over what 実行 set; the desktop takes
+ * the screen as that says
  */
-LOCAL BOOL name_panel( DTWIN *host )
+EXPORT ER dt_scr_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 {
-	T_WMPANEL	*def;
-	T_WMPART	*pt;
+	UB		t[DT_TEXT_MAX];
 	UB		vols[SC_VOLS][SC_VOL_PATH];
-	INT		pid, w = 440, h, k, i, n, at = 0;
-	UINT		ans;
-	UB		t[WM_LABEL_MAX];
+	INT		at, n, i;
 
-	n = knl_obfile_vols(&vols[0][0], SC_VOL_PATH, SC_VOLS);
-	for ( i = 0; i < n; i++ ) {
-		for ( k = 0; vols[i][k] == sc_vol[k] && vols[i][k] != 0; k++ ) ;
-		if ( vols[i][k] == sc_vol[k] ) at = i;
+	if ( !sc_loaded ) {
+		settings_load();
 	}
-	h = 102 + 26 * ( ( n > 0 ) ? n : 1 );
-	def = dt_pn_new(w, h);
-	if ( def == NULL ) {
-		return FALSE;
-	}
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, 4, 120, 22, "保存先ディスク:");
-	for ( i = 0; i < n; i++ ) {
-		k = put(t, 0, sizeof(t), (CONST char *)vols[i]);
-		if ( i == 0 ) {
-			(void)put(t, k, sizeof(t), "（システム）");
-		} else {
+	knl_memcpy(t, rq->text, sizeof(t));
+	t[sizeof(t) - 1] = 0;
+	switch ( rq->recno ) {
+	case DT_SP_GET:
+		/* the panel coming up: what was under way stops, and 実行 starts it again */
+		if ( panel_up() && sc_panel_pid != pid ) {
+			dt_raise_pid(sc_panel_pid);
+			return E_BUSY;
+		}
+		if ( knl_prc_uuid(pid, &sc_panel_uuid, NULL) < E_OK ) {
+			return E_NOEXS;
+		}
+		sc_panel_pid = pid;
+		sc_was = (BOOL)( sc_state != SC_IDLE );
+		stop();
+		sc_gen++;
+		at = put_num(an->text, 0, DT_TEXT_MAX, sc.to);
+		at = put(an->text, at, DT_TEXT_MAX, " ");
+		at = put_num(an->text, at, DT_TEXT_MAX, sc.pointer ? 1 : 0);
+		at = put(an->text, at, DT_TEXT_MAX, " ");
+		at = put_num(an->text, at, DT_TEXT_MAX, sc.area);
+		at = put(an->text, at, DT_TEXT_MAX, " ");
+		at = put_num(an->text, at, DT_TEXT_MAX, sc.by);
+		at = put(an->text, at, DT_TEXT_MAX, " ");
+		at = put_num(an->text, at, DT_TEXT_MAX, sc.secs);
+		at = put(an->text, at, DT_TEXT_MAX, "\t");
+		at = put(an->text, at, DT_TEXT_MAX, (CONST char *)sc_vol);
+		at = put(an->text, at, DT_TEXT_MAX, "\t");
+		(void)put(an->text, at, DT_TEXT_MAX, (CONST char *)sc_name);
+		an->how = (UINT)told(SN_PANEL);
+		return E_OK;
+	case DT_SP_VOL:
+		/* 保存先ディスク: the volumes attached, the first the system's */
+		n = knl_obfile_vols(&vols[0][0], SC_VOL_PATH, SC_VOLS);
+		an->how = (UINT)( ( n > 0 ) ? n : 0 );
+		i = rq->grab_x;
+		if ( i < 0 || i >= n ) {
+			return E_NOEXS;
+		}
+		at = put(an->text, 0, DT_TEXT_MAX, (CONST char *)vols[i]);
+		at = put(an->text, at, DT_TEXT_MAX, "\t");
+		if ( i > 0 ) {
 			T_OBFVREF	ref;
 
 			/* a disk attached with ディスク操作: its name */
 			if ( knl_obfile_vol_ref((CONST char *)vols[i], &ref) >= E_OK && ref.label[0] != 0 ) {
-				k = put(t, k, sizeof(t), "「");
-				k = put(t, k, sizeof(t), (CONST char *)ref.label);
-				(void)put(t, k, sizeof(t), "」");
+				(void)put(an->text, at, DT_TEXT_MAX, (CONST char *)ref.label);
 			}
 		}
-		pt = dt_pn_add(def, WM_PT_CHOICE, PN_VOL + i, 134, 2 + 26 * i, w - 148, 22, (CONST char *)t);
-		if ( pt != NULL ) {
-			pt->group = PN_VOL;
-			pt->value = ( i == at ) ? 1 : 0;
+		return E_OK;
+	case DT_SP_ARM:
+		if ( pid != sc_panel_pid || !set_from(t) ) {
+			return ( pid != sc_panel_pid ) ? E_NOEXS : E_PAR;
 		}
-	}
-	if ( n == 0 ) {
-		dt_pn_add(def, WM_PT_LABEL, 0, 134, 4, w - 148, 22, "初期ウィンドウ");
-	}
-	k = 10 + 26 * ( ( n > 0 ) ? n : 1 );
-	dt_pn_add(def, WM_PT_LABEL, 0, 14, k + 2, 80, 22, "実身名:");
-	pt = dt_pn_add(def, WM_PT_BOX | P_JP, PN_NAME, 94, k, w - 108, 26, NULL);
-	if ( pt != NULL ) {
-		for ( i = 0; sc_name[i] != 0 && i < WM_LABEL_MAX - 1; i++ ) {
-			pt->text[i] = sc_name[i];
-		}
-		pt->text[i] = 0;
-		pt->caret = i;
-	}
-	dt_pn_buttons(def, "保存");
-	tm_printf((UB *)"scrprint: volumes %d\n", n);
-	ans = dt_pn_run(host, def, &pid);
-	if ( ans == WM_ANS_OK && pid >= 0 ) {
-		if ( wm_panel_text(pid, PN_NAME, t, sizeof(t)) >= E_OK ) {
-			for ( k = 0; t[k] == ' '; k++ ) ;
-			if ( t[k] != 0 ) {
-				(void)put(sc_name, 0, sizeof(sc_name), (CONST char *)( t + k ));
+		sc_panel_pid = 0;
+		settings_save();
+		sc_taken = 0;
+		stop();
+		if ( sc.to == SC_TO_PRINTER ) {
+			SCASK	*a = (SCASK *)Kmalloc(sizeof(SCASK));
+			INT	sw = 0, sh = 0;
+			ER	er;
+
+			if ( a == NULL ) {
+				return E_NOMEM;
 			}
-		}
-		sc_vol[0] = 0;
-		for ( i = 0; i < n; i++ ) {
-			if ( dt_pn_value(pid, PN_VOL + i) != 0 ) {
-				(void)put(sc_vol, 0, sizeof(sc_vol), (CONST char *)vols[i]);
+			/* the pages are not there yet: the setting for a page the screen's size */
+			wm_screen(&sw, &sh);
+			a->pic.px = NULL;
+			a->pic.w = ( sw > 0 ) ? sw : 1;
+			a->pic.h = ( sh > 0 ) ? sh : 1;
+			a->gen = sc_gen;
+			dt_scr_job(&a->job, &a->pic, (CONST UB *)"画面印刷");
+			er = dt_print_start(&a->job, NULL, DT_PRINT_SET, print_set, a);
+			if ( er < E_OK ) {
+				Kfree(a);
 			}
+			return er;
 		}
-		tm_printf((UB *)"scrprint: save to %s\n", ( sc_vol[0] != 0 ) ? (CONST char *)sc_vol : "-");
-	}
-	dt_pn_done(host, pid);
-	wm_update();
-
-	return (BOOL)( ans == WM_ANS_OK );
-}
-
-/* The panels one after another, and then the range or the count */
-LOCAL void ask( void )
-{
-	DTWIN		*host = dt_first_win();
-	BOOL		was = (BOOL)( sc_state != SC_IDLE );
-	INT		sw = 0, sh = 0;
-
-	if ( host == NULL ) {
-		return;
-	}
-	if ( !sc_loaded ) {
-		settings_load();
-	}
-	stop();					/* 取り消し ends what was under way, 実行 starts again */
-	if ( !set_panel(host) ) {
+		go();
+		return E_OK;
+	case DT_SP_STOP:
+		/* 取り消し: what was set kept all the same, when it is said */
+		if ( pid == sc_panel_pid ) {
+			sc_panel_pid = 0;
+		}
+		if ( t[0] != 0 && set_from(t) ) {
+			settings_save();
+		}
+		stop();
 		tm_printf((UB *)"scrprint: cancelled %d\n", told(SN_CANCELLED));
-		if ( was ) (void)wm_msg_put("画面印刷を取り消しました");
-		return;
-	}
-	settings_save();
-	sc_taken = 0;
-	if ( sc.to == SC_TO_FIG && !name_panel(host) ) {
-		tm_printf((UB *)"scrprint: cancelled %d\n", told(SN_CANCELLED));
-		return;
-	}
-	if ( sc.to == SC_TO_PRINTER ) {
-		T_PRNJOB	job;
-		DTSCRPIC	pic;
-
-		/* the pages are not there yet: the setting for a page the screen's size */
-		wm_screen(&sw, &sh);
-		pic.px = NULL;
-		pic.w = ( sw > 0 ) ? sw : 1;
-		pic.h = ( sh > 0 ) ? sh : 1;
-		dt_scr_job(&job, &pic, (CONST UB *)"画面印刷");
-		if ( dt_print_ask(host, &job, &sc_prn, FALSE) < E_OK ) {
-			tm_printf((UB *)"scrprint: cancelled %d\n", told(SN_CANCELLED));
-			return;
-		}
-	}
-	if ( sc.area == DT_SCR_RANGE ) {
-		sc_state = SC_PICK;
-		sc_drag = FALSE;
-		wm_obj_quiet(TRUE);
-		(void)wm_set_pointer(WM_PT_PICK);
-		(void)wm_msg_put("画面印刷: 取り込む範囲をドラッグしてください (Escで取り消し)");
-		tm_printf((UB *)"scrprint: pick %d\n", told(SN_PICK));
-		{
-			INT	x = 0, y = 0;
-			UINT	btn = 0;
-
-			/* the loupe at once where the pointer is, before it moves */
-			if ( ts_hid_pointer(&x, &y, &btn) >= E_OK ) loupe_show(x, y);
-		}
+		if ( sc_was ) (void)wm_msg_put("画面印刷を取り消しました");
+		sc_was = FALSE;
 		wm_update();
-		return;
+		return E_OK;
+	default:
+		return E_PAR;
 	}
-	arm();
 }
 
 /* ---------------------------------------------------------------- the calls */
-
-/* Chosen from 小物: the panel at the next turn, out of whatever chose it */
-EXPORT void dt_scr_open( void )
-{
-	sc_ask = TRUE;
-}
 
 EXPORT void dt_scr_poll( void )
 {
 	UD	now = 0;
 	INT	left;
 
-	if ( sc_ask ) {
-		sc_ask = FALSE;
-		ask();
-	}
 	if ( sc_state != SC_TIMING ) {
 		return;
 	}

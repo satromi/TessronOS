@@ -1,0 +1,61 @@
+# The second output put left of and above the main one on システム環境設定's 画面サイズ page
+# (docs/tessronos 10.4.8, 10.4.10), for tools/ui_run.py with UI_SCREENS=2 (QEMU's second
+# bochs-display, 1024 x 800, right of the first at start). The parts are where
+# ui_screens_out.steps says; the side's pop-up opens with the row chosen over the part, a row
+# 20 high (右, 下, 左, 上). With the second screen left of the main one, the main screen and the
+# window on it are 1024 further right; with it above, 800 further down. The desktop's question
+# is answered with Enter to keep what was set.
+open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
+expect sysenv: ready
+wait 800
+win システム環境設定
+click 206 181
+wait 300
+click 706 184
+expect sysenv: screen page 1280x800
+wait 500
+click 290 157
+wait 300
+click 290 177
+expect output 2 of 2
+wait 500
+# left of the main one
+logmark
+click 670 157
+wait 300
+click 670 197
+wait 300
+click 706 554
+wait 1500
+key 28
+expect sysenv: screen OUT1 on
+expectsincein 30 left 0
+wait 800
+win システム環境設定
+shot sl_left
+# above it: the window is 1024 further right now
+logmark
+click 1694 157
+wait 300
+click 1694 177
+wait 300
+click 1730 554
+wait 1500
+key 28
+expectsincein 30 above 0
+wait 800
+win システム環境設定
+shot sl_above
+# and right of it again: the window is 800 further down now
+logmark
+click 670 957
+wait 300
+click 670 897
+wait 300
+click 706 1354
+wait 1500
+key 28
+expectsincein 30 right 0
+wait 800
+win システム環境設定
+shot sl_right

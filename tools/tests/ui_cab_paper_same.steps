@@ -1,0 +1,155 @@
+# 仮身一覧の中の仮身から開いた仮身一覧で、背景色変更の「仮身属性と同じ」を選ぶと、
+# ウインドウの背景がその仮身の今の表示領域背景になる(design 11.3), for tools/ui_run.py.
+# C, an empty figure, and P, a figure holding a link to C whose 表示領域背景 is 00c000, are
+# made (mkbig, xmlbig: eeeeeeee-... stands for C) and given to 仮身一覧 (apps). P is opened
+# with the process (pcab); C, opened by a double press on its link, is another process of
+# 仮身一覧 given that link (DT_F_LINK). C is a copy of 画用紙, whose metadata keeps the
+# paper ffffff: C opens white. 背景色変更 (表示, its third row) opens the desktop's pop-up
+# at the pointer, held to the foot of the screen: red (the chart's fourth row) is kept as
+# C's paper. Opened again (表示 under the pointer, as chosen last) with 仮身属性と同じ (the
+# switch under the chart) put on, the metadata keeps no paper and C is laid on the link's
+# 00c000, also after the notice that the desktop wrote the metadata (OB_E_CHANGE). C is
+# moved aside by its title bar; in P, 仮身操作, 属性変更 of the link (its 表示領域背景's
+# colour pressed, blue of the chart, Enter, 設定) changes the link in P's record: the
+# desktop tells C at once, before P saves (C asked to be told, DT_RQ_LINK_WATCH; P named
+# the link with DT_RQ_ATTR, DT_F_LINK), and C is drawn blue. Saved (Ctrl+S), C reads the
+# link from P's record as well (OB_E_CHANGE of P), blue still. Before that, 再表示 of C
+# (表示, its second row) asks the desktop for the link as it is now (DT_RQ_LINK_WATCH
+# again: the look last told), not the copy C opened with: blue. Both are closed.
+# Keys: Enter 28, Ctrl+S 16 01, Ctrl+E 08 01.
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure></figure></tad>
+xmlbig
+apps big virtual-object-list
+mkbig fig 1 0
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-0000000000c1"
+xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="39" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#ffffff" bgcol="#00c000" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
+xmlbig
+apps big virtual-object-list
+logmark
+pcab big
+expectsincein 60 cabinet: opened 画用紙 shapes 1 links 1
+wait 800
+shot cps_p
+logmark
+dclick 200 157
+expectsincein 60 cabinet: opened 画用紙 shapes 0 links 0
+expectsince cabinet: link watched (0)
+wait 800
+shot cps_c
+paper big1
+want ok FFFFFF
+pixel 600 600 FFFFFF
+logmark
+click 500 400 1
+wait 800
+move 510 460
+wait 300
+move 650 460
+move 650 500
+wait 300
+click 650 500
+expectsince cabinet: chosen bgcolour
+expectsince desktop: paper asked
+wait 800
+click 668 727
+wait 400
+key 28
+expectsince cabinet: paper #ff0000
+wait 1000
+shot cps_red
+pixel 600 600 FF0000
+logmark
+click 500 400 1
+wait 800
+move 510 400
+wait 300
+move 650 400
+move 650 440
+wait 300
+click 650 440
+expectsince desktop: paper asked, same off
+wait 800
+click 668 781
+wait 400
+key 28
+expectsince cabinet: paper same as the link: #00c000
+wait 1500
+shot cps_same
+pixel 600 600 00C000
+paper big1
+want ok none
+drag 500 115 700 415
+wait 800
+shot cps_moved
+pixel 600 600 00C000
+logmark
+click 200 157 1
+wait 1500
+move 220 197
+wait 300
+move 220 217
+wait 600
+move 320 217
+wait 600
+move 320 277
+wait 300
+click 320 277
+expectsince cabinet: chosen vobj.attr
+wait 1000
+shot cps_attr
+click 678 410
+wait 800
+click 785 740
+wait 400
+key 28
+wait 600
+logmark
+click 902 527
+expectsince cabinet: attr 画用紙 chsz 14 bgcol 0000ff
+wait 1000
+expectsince cabinet: link look told: bgcol #0000ff
+wait 1000
+shot cps_attr_set
+pixel 1000 600 0000FF
+click 1000 600
+wait 500
+logmark
+click 500 600 1
+wait 1000
+move 520 541
+wait 300
+move 530 541
+wait 600
+move 620 541
+move 620 561
+wait 300
+click 620 561
+expectsince cabinet: chosen refresh
+expectsince cabinet: link asked (0): bgcol #0000ff
+wait 1000
+shot cps_refresh
+pixel 1000 600 0000FF
+click 200 300
+wait 500
+logmark
+key 16 01
+expectsince cabinet: saved (0)
+expectsince cabinet: link bgcol #0000ff
+wait 1500
+shot cps_follow
+pixel 1000 600 0000FF
+logmark
+key 08 01
+expectsince cabinet: closed
+wait 500
+click 1000 600
+wait 300
+logmark
+key 08 01
+expectsince cabinet: closed
+wait 500
+absent !OACV!

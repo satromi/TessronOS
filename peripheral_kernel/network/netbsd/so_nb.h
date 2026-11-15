@@ -79,6 +79,7 @@ IMPORT void	knl_so_ip6_text( char *buf, SZ len, CONST UB *a );
 
 IMPORT ER	knl_so_dhcp_run( void );	/* start asking, or ask again */
 IMPORT void	knl_so_dhcp_stop( void );	/* stop asking; the address stays */
+IMPORT void	knl_so_dhcp_forget( void );	/* the leases kept for the networks forgotten */
 
 /* ---------------------------------------------------------------- so_slaac.c */
 

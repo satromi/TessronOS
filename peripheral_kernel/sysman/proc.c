@@ -50,6 +50,7 @@
 #include <ts/ser.h>
 #include <ts/usb.h>
 #include <ts/psx.h>
+#include <ts/sbx.h>
 #include "pfalloc.h"
 #include "space.h"
 #include "umem.h"
@@ -84,6 +85,27 @@ typedef struct {
 	UB	file[TS_FLT_FILE];	/* the file it was started from, its last part */
 	SZ	argsz;			/* bytes of the start-up argument, 0 for none */
 	BOOL	sys;			/* the system needs it (TS_PRC_SYSTEM) */
+	BOOL	withpar;		/* ends when its parent does (TS_PRC_WITHPARENT) */
+	ID	par_pid;		/* that parent, and which process under its number */
+	UW	par_gen;
+	/*
+	 * The groups of calls it is shut out of and how a call of them goes
+	 * (include/ts/sbx.h, knl_prc_set_sbx): written under the lock, read
+	 * by the gateway without it, as one word
+	 */
+	UW	sbx;
+	UW	sbx_broke;		/* a call shut out met inside a call: it ends as that returns */
+	/* the calls turned away, in all and per group, and the last one's code: atomic adds, 0 at its start */
+	UW	sbx_ref_total;
+	UW	sbx_ref_grp[TS_SBX_NGROUP];
+	UW	sbx_ref_last;
+
+	/*
+	 * The sockets it may hold at once, soft and hard (include/ts/so.h,
+	 * knl_prc_so_setlimit), its parent's when it is made: written under
+	 * the lock
+	 */
+	INT	so_cur, so_max;
 
 	/* message queue (design 9.9), made on first use */
 	T_TSMSG	*msgq;
@@ -107,6 +129,15 @@ typedef struct {
 	 * the call). Everything else of the end is decided under the lock.
 	 */
 	INT	incall;
+	/*
+	 * Of those calls, the ones that have lent a device the kernel's
+	 * view of the process's pages (knl_prc_dma; each task's own mark is
+	 * its TCB's svcdma). A page the process takes away is held back
+	 * only while this is not 0 (umem.c): a call that only waits, or
+	 * reaches the process's memory through its own mapping, does not
+	 * keep any (design 5.6.1).
+	 */
+	INT	indma;
 	BOOL	ending;
 	BOOL	finishing;
 	UD	end_at;			/* ns (monotonic) it was marked to end */
@@ -151,6 +182,7 @@ typedef struct {
 
 	/* where a fault of its own goes (ts_def_flt), 0 for none: the process ends */
 	UD	flt_entry;
+	UH	flt_told;		/* how many of those faults the console was told of */
 
 	/*
 	 * What a POSIX program has of a process (design 5.8, include/ts/psx.h):
@@ -227,6 +259,7 @@ LOCAL void prc_lock( void )
 #define PCB_OF(q)	( (T_PCB *)( (UB *)(q) - offsetof(T_PCB, link) ) )
 
 #define INCALL(p)	__atomic_load_n(&(p)->incall, __ATOMIC_SEQ_CST)
+#define INDMA(p)	__atomic_load_n(&(p)->indma, __ATOMIC_SEQ_CST)
 #define ENDING(p)	__atomic_load_n(&(p)->ending, __ATOMIC_SEQ_CST)
 #define FOR_EACH_PCB(p, q) \
 	for ( (q) = prc_all.next; (q) != &prc_all && ( ( (p) = PCB_OF(q) ) != NULL ); (q) = (q)->next )
@@ -283,7 +316,10 @@ LOCAL T_PCB *cur_pcb( void )
 EXPORT UW	knl_prc_orphan_ms = PRC_ORPHAN_KEEP_MS;
 
 LOCAL void prc_reaper( INT stacd, void *exinf );
+LOCAL void prc_memlog( INT stacd, void *exinf );
 LOCAL void prc_free( T_PCB *p );
+
+#define PRC_MEMLOG_PRI		12	/* above the programs, so that a busy machine still tells */
 
 EXPORT ER knl_proc_init( void )
 {
@@ -303,6 +339,7 @@ EXPORT ER knl_proc_init( void )
 
 	{
 		T_CTSK	ctsk;
+		ID	memlog_tid;
 
 		ctsk.exinf   = NULL;
 		ctsk.tskatr  = TA_HLNG | TA_RNG0;
@@ -314,6 +351,16 @@ EXPORT ER knl_proc_init( void )
 			tm_printf((UB*)"TessronOS: no task to give back what ended processes held (%d)\n",
 				  prc_reaper_tid);
 			prc_reaper_tid = 0;	/* their collectors do it, as before */
+		}
+
+		ctsk.exinf   = NULL;
+		ctsk.tskatr  = TA_HLNG | TA_RNG0;
+		ctsk.task    = (FP)prc_memlog;
+		ctsk.itskpri = PRC_MEMLOG_PRI;
+		ctsk.stksz   = 8 * 1024;
+		memlog_tid = tk_cre_tsk(&ctsk);
+		if ( memlog_tid <= 0 || tk_sta_tsk(memlog_tid, 0) < E_OK ) {
+			tm_printf((UB*)"TessronOS: no task to tell the processes' memory (%d)\n", memlog_tid);
 		}
 	}
 	if ( knl_psx_init() < E_OK ) {
@@ -356,6 +403,7 @@ LOCAL void tk_objs_end( ID pid )
 }
 
 IMPORT void knl_dp_prc_end( ID pid );		/* svc_gate.c: its environments of memory */
+IMPORT void knl_obmem_prc_end( ID pid );	/* obj/obmem.c: the shared memory mapped into it */
 
 /*
  * What a process has open in the layers above -- its keys to objects,
@@ -372,6 +420,7 @@ LOCAL void prc_close_all( ID pid )
 		return;
 	}
 	knl_ob_prc_end(pid);
+	knl_obmem_prc_end(pid);		/* after its keys: what only it held then goes */
 	knl_wmobj_prc_end(pid);
 	knl_dp_prc_end(pid);
 	knl_fs_prc_end(pid);
@@ -591,17 +640,409 @@ LOCAL BOOL prc_free_orphans( void )
 	}
 }
 
+/*
+ * Whether the parent a process is to end with is ending or gone: the
+ * process under that number is not the one it was made by, or it is
+ * marked to end. Under the lock.
+ */
+LOCAL BOOL prc_parent_gone( T_PCB *p )
+{
+	T_PCB	*pp = pid_to_pcb(p->par_pid);
+
+	return (BOOL)( pp == NULL || !pp->used || pp->gen != p->par_gen || ENDING(pp) );
+}
+
+/*
+ * The processes that are to end with their parent (TS_PRC_WITHPARENT)
+ * whose parent is ending, ended as ts_ter_prc ends one, as SIGKILL
+ * from PR_SET_PDEATHSIG does on Linux. Done here, on the reaper, and
+ * not on the task that finishes the parent: a chain of them would
+ * otherwise be finished one inside another on that task's stack. A
+ * child's own end wakes the reaper again, for its children.
+ */
+#define PRC_WITHPAR_BATCH	32
+
+LOCAL void prc_end_with_parents( void )
+{
+	T_PCB	*p;
+	QUEUE	*q;
+	ID	pids[PRC_WITHPAR_BATCH], par[PRC_WITHPAR_BATCH];
+	INT	n, i;
+
+	do {
+		n = 0;
+		prc_lock();
+		FOR_EACH_PCB(p, q) {
+			if ( n == PRC_WITHPAR_BATCH ) break;
+			if ( p->used && p->withpar && p->state == PS_RUNNING && !ENDING(p)
+			  && prc_parent_gone(p) ) {
+				pids[n] = p->pid;
+				par[n] = p->par_pid;
+				n++;
+			}
+		}
+		tk_unl_mtx(prc_mtxid);
+		for ( i = 0; i < n; i++ ) {
+			tm_printf((UB *)"TessronOS: pid %d ends with its parent pid %d\n", pids[i], par[i]);
+			(void)ts_ter_prc(pids[i], TS_ABORT_TERM);
+		}
+	} while ( n == PRC_WITHPAR_BATCH );
+}
+
+/*
+ * Whether process pid ends with its parent from now on (on), or no
+ * longer. Only a process whose parent is a process has one to end
+ * with (E_OBJ). One whose parent is already ending is ended now.
+ */
+EXPORT ER knl_prc_set_withpar( ID pid, BOOL on )
+{
+	T_PCB	*p, *pp;
+	BOOL	now = FALSE;
+	ER	er = E_OK;
+
+	prc_lock();
+	p = pid_to_pcb(pid);
+	if ( p == NULL || !p->used || p->state != PS_RUNNING ) {
+		er = E_NOEXS;
+	} else if ( !on ) {
+		p->withpar = FALSE;
+	} else if ( p->withpar ) {
+		now = prc_parent_gone(p);
+	} else if ( ( pp = pid_to_pcb(p->ppid) ) == NULL || !pp->used || p->ppid == prc_init_pid ) {
+		er = E_OBJ;			/* no parent, or init, which has taken it in */
+	} else {
+		p->withpar = TRUE;
+		p->par_pid = pp->pid;
+		p->par_gen = pp->gen;
+		now = ENDING(pp);
+	}
+	tk_unl_mtx(prc_mtxid);
+	if ( now && prc_reaper_tid > 0 ) {
+		(void)tk_wup_tsk(prc_reaper_tid);
+	}
+	return er;
+}
+
+/* Whether process pid ends with its parent: 1 it does, 0 not, or an error */
+EXPORT ER knl_prc_withpar( ID pid )
+{
+	T_PCB	*p;
+	ER	er;
+
+	prc_lock();
+	p = pid_to_pcb(pid);
+	er = ( p == NULL || !p->used ) ? E_NOEXS : p->withpar ? 1 : 0;
+	tk_unl_mtx(prc_mtxid);
+
+	return er;
+}
+
+/*
+ * Restricted processes (include/ts/sbx.h, design 5.9). The set is the
+ * process's sbx: the groups in the low half, how in the high half. It
+ * is written under the lock and read without it by the gateway on each
+ * call, as one word: a call that reads it as it is being added to sees
+ * the old set or the new one.
+ */
+EXPORT ER knl_prc_set_sbx( UINT groups, UINT how )
+{
+	T_PCB	*p;
+	UW	old, now, refuse;
+	ER	er = E_OK;
+
+	if ( ( groups & ~TS_SBX_ALL ) != 0 || ( how & ~TS_SBX_REFUSE ) != 0 ) {
+		return E_PAR;
+	}
+	prc_lock();
+	p = cur_pcb();
+	if ( p == NULL ) {
+		er = E_CTX;			/* the kernel's and the system's tasks have none */
+	} else {
+		old = __atomic_load_n(&p->sbx, __ATOMIC_RELAXED);
+		refuse = ( how & TS_SBX_REFUSE ) << TS_SBX_HOW_SHIFT;
+		if ( refuse != 0 && ( old & TS_SBX_ALL ) != 0 && ( old & refuse ) == 0 ) {
+			er = E_OACV;		/* restricted to be ended: refusing is looser */
+		} else {
+			now = ( old & TS_SBX_ALL ) | groups;
+			if ( ( old & TS_SBX_ALL ) == 0 || refuse == 0 ) {
+				now |= refuse;	/* the first set chooses; later only stricter */
+			} else {
+				now |= old & ~(UW)TS_SBX_ALL;
+			}
+			__atomic_store_n(&p->sbx, now, __ATOMIC_SEQ_CST);
+		}
+	}
+	tk_unl_mtx(prc_mtxid);
+	return er;
+}
+
+/* The caller's set and how; 0 for the kernel's and the system's tasks */
+EXPORT UW knl_prc_sbx( void )
+{
+	T_PCB	*p = cur_pcb();		/* the caller's own: it stays while the caller runs */
+
+	return ( p != NULL ) ? __atomic_load_n(&p->sbx, __ATOMIC_SEQ_CST) : 0;
+}
+
+EXPORT void knl_prc_sbx_break( UINT fncd )
+{
+	T_PCB	*p = cur_pcb();
+
+	if ( p != NULL ) {
+		__atomic_store_n(&p->sbx_broke, (UW)fncd, __ATOMIC_SEQ_CST);
+	}
+}
+
+EXPORT UINT knl_prc_sbx_broke( void )
+{
+	T_PCB	*p = cur_pcb();
+
+	return ( p != NULL ) ? __atomic_load_n(&p->sbx_broke, __ATOMIC_SEQ_CST) : 0;
+}
+
+EXPORT UINT knl_prc_sbx_count( UINT fncd, UINT groups )
+{
+	T_PCB	*p = cur_pcb();
+	UINT	i, first = 0;
+
+	if ( p == NULL ) {
+		return 0;
+	}
+	for ( i = 0; i < TS_SBX_NGROUP; i++ ) {
+		if ( ( groups & ( 1U << i ) ) != 0
+		  && __atomic_fetch_add(&p->sbx_ref_grp[i], 1, __ATOMIC_SEQ_CST) == 0 ) {
+			first |= 1U << i;
+		}
+	}
+	__atomic_fetch_add(&p->sbx_ref_total, 1, __ATOMIC_SEQ_CST);
+	__atomic_store_n(&p->sbx_ref_last, (UW)fncd, __ATOMIC_SEQ_CST);
+	return first;
+}
+
+EXPORT BOOL knl_prc_sbx_refused_of( ID pid, UW out[TS_SBX_NGROUP + 2] )
+{
+	T_PCB	*p;
+	BOOL	ok = FALSE;
+	INT	i;
+
+	prc_lock();
+	p = pid_to_pcb(pid);
+	if ( p != NULL && p->used ) {
+		out[0] = __atomic_load_n(&p->sbx_ref_total, __ATOMIC_SEQ_CST);
+		for ( i = 0; i < TS_SBX_NGROUP; i++ ) {
+			out[1 + i] = __atomic_load_n(&p->sbx_ref_grp[i], __ATOMIC_SEQ_CST);
+		}
+		out[TS_SBX_NGROUP + 1] = __atomic_load_n(&p->sbx_ref_last, __ATOMIC_SEQ_CST);
+		ok = TRUE;
+	}
+	tk_unl_mtx(prc_mtxid);
+	return ok;
+}
+
+EXPORT UW knl_prc_sbx_of( ID pid )
+{
+	T_PCB	*p;
+	UW	s = 0;
+
+	prc_lock();
+	p = pid_to_pcb(pid);
+	if ( p != NULL && p->used ) {
+		s = __atomic_load_n(&p->sbx, __ATOMIC_RELAXED);
+	}
+	tk_unl_mtx(prc_mtxid);
+	return s;
+}
+
+/*
+ * The limits on the sockets of a process (include/ts/so.h, design 9.2).
+ * An owner that is no process -- the kernel's tests make sockets for
+ * such -- has the first ones.
+ */
+EXPORT ER knl_prc_so_limit( ID pid, INT *p_cur, INT *p_max )
+{
+	T_PCB	*p = cur_pcb();
+	INT	cur = SO_PRC_SOFT, max = SO_PRC_HARD;
+
+	if ( p != NULL && p->pid == pid ) {
+		/* the caller's own, as every poll asks: it stays while the caller runs */
+		cur = __atomic_load_n(&p->so_cur, __ATOMIC_RELAXED);
+		max = __atomic_load_n(&p->so_max, __ATOMIC_RELAXED);
+	} else if ( prc_mtxid > 0 ) {
+		prc_lock();
+		p = pid_to_pcb(pid);
+		if ( p != NULL && p->used ) {
+			cur = p->so_cur;
+			max = p->so_max;
+		}
+		tk_unl_mtx(prc_mtxid);
+	}
+	if ( p_cur != NULL ) *p_cur = cur;
+	if ( p_max != NULL ) *p_max = max;
+	return E_OK;
+}
+
+EXPORT INT knl_prc_so_cur( ID pid )
+{
+	INT	cur;
+
+	(void)knl_prc_so_limit(pid, &cur, NULL);
+	return cur;
+}
+
+/*
+ * Both set. The soft one no higher than the hard one (E_PAR); the hard
+ * one above what it is only when raise (an administrator: E_OACV
+ * otherwise), and never past SO_PRC_CEIL (E_PAR). Lowering the soft one
+ * below what the process holds closes nothing: it makes no more until
+ * it holds fewer.
+ */
+EXPORT ER knl_prc_so_setlimit( ID pid, INT cur, INT max, BOOL raise )
+{
+	T_PCB	*p;
+	ER	er = E_OK;
+
+	if ( cur < 0 || max < 0 || cur > max || max > SO_PRC_CEIL ) {
+		return E_PAR;
+	}
+	if ( prc_mtxid <= 0 ) {
+		return E_OBJ;
+	}
+	prc_lock();
+	p = pid_to_pcb(pid);
+	if ( p == NULL || !p->used ) {
+		er = E_NOEXS;
+	} else if ( max > p->so_max && !raise ) {
+		er = E_OACV;
+	} else {
+		__atomic_store_n(&p->so_cur, cur, __ATOMIC_RELAXED);
+		__atomic_store_n(&p->so_max, max, __ATOMIC_RELAXED);
+	}
+	tk_unl_mtx(prc_mtxid);
+	return er;
+}
+
+#ifdef __x86_64__
+IMPORT UW knl_tlb_abandoned( INT *p_cpu );	/* mmu.c: requests of translations answered late */
+#endif
+
+/*
+ * What is said as processes end: the pages written while free
+ * (PF_FREE_CHECK), and, on x86-64, the processors that answered a
+ * request to drop translations only past the bound (they are waited for
+ * all the same) -- said only when there are any
+ */
+LOCAL void reaper_tell( void )
+{
+#ifdef __x86_64__
+	static UW	told = 0;
+	INT		cpu = -1;
+	UW		n = knl_tlb_abandoned(&cpu);
+
+	if ( n != told ) {
+		told = n;
+		tm_printf((UB *)"TessronOS x64: %d requests to drop translations were answered only past the bound "
+			  "(waited for); the last by processor %d\n", (int)n, (int)cpu);
+	}
+#endif
+	knl_pf_check_tell();
+}
+
 /* Woken by prc_finish; looks again now and then while ended processes are kept */
 LOCAL void prc_reaper( INT stacd, void *exinf )
 {
 	BOOL	kept = FALSE, ending = FALSE;
 
+	knl_pf_check_tell();		/* the table of PF_FREE_CHECK, before any process ends */
+
 	for ( ;; ) {
 		(void)tk_slp_tsk(( ending ) ? PRC_REAP_SOON : ( kept ) ? PRC_REAP_TICK : TMO_FEVR);
+		prc_end_with_parents();
 		ending = prc_reap_ended();
 		kept = prc_free_orphans();
 		if ( knl_pt_reclaim() ) {	/* page tables taken out of the spaces, once it is safe */
 			kept = TRUE;
+		}
+		reaper_tell();
+	}
+}
+
+/*
+ * The memory of the processes that hold much of it, on the console every
+ * PRC_MEMLOG_MS (design 5.3.1), one line each, as /proc/<pid>/status
+ * tells on Linux: what its image and stacks take (image), the pages it
+ * has of what it asked for (asked: the heap, mmap and the reservations
+ * of ts_map_mem; a writable page counts once touched, as VmRSS), the
+ * writable stretches it reserved, touched or not (writable, as VmSize
+ * counts them),
+ * the pages it gave back that are held for a call that has them lent to
+ * a device (held, no longer the process's and not yet free), the pages
+ * of the GPU's BOs of its contexts, its calls under way and those of
+ * them with pages lent, and the memory of the machine still free. A
+ * process under PRC_MEMLOG_MIN is not told of. What is read of each is
+ * taken under the table's lock and said after it.
+ */
+#define PRC_MEMLOG_MS		30000
+#define PRC_MEMLOG_MIN		( 64ULL << 20 )
+#define PRC_MEMLOG_MAX		16		/* processes in one look */
+
+IMPORT UD knl_gpu_prc_pages( ID pid, INT *p_bos );	/* device/gpu/gpu_svc.c */
+IMPORT INT knl_obmem_stat( UD *p_pages, UD *p_mapped, ID pid, UD *p_pid_pages );	/* obj/obmem.c */
+
+typedef struct {
+	ID	pid;
+	UB	file[TS_FLT_FILE];
+	UD	image, asked, held, lazy;
+	INT	incall, indma;
+} PRC_MEMNOTE;
+
+#define MB(b)	( (UD)(b) >> 20 )
+
+LOCAL void prc_memlog( INT stacd, void *exinf )
+{
+	PRC_MEMNOTE	n[PRC_MEMLOG_MAX];
+	T_PCB		*p;
+	QUEUE		*q;
+	INT		k, i, bos, nshm;
+	UD		gpu, avail, shm, shm_mapped;
+
+	for ( ;; ) {
+		(void)tk_dly_tsk(PRC_MEMLOG_MS);
+		k = 0;
+		prc_lock();
+		FOR_EACH_PCB(p, q) {
+			UD	asked = knl_umem_bytes(p->umem), held = knl_umem_held_bytes(p->umem);
+
+			if ( k >= PRC_MEMLOG_MAX ) break;
+			if ( !p->used || p->released || p->memsz + asked + held < PRC_MEMLOG_MIN ) continue;
+			n[k].pid = p->pid;
+			knl_memcpy(n[k].file, p->file, sizeof(n[k].file));
+			n[k].file[sizeof(n[k].file) - 1] = '\0';
+			n[k].image = p->memsz;
+			n[k].asked = asked;
+			n[k].held = held;
+			n[k].lazy = knl_umem_lazy_bytes(p->umem);
+			n[k].incall = INCALL(p);
+			n[k].indma = INDMA(p);
+			k++;
+		}
+		tk_unl_mtx(prc_mtxid);
+		avail = knl_pf_free_count(-1) * PAGE_SIZE;
+		for ( i = 0; i < k; i++ ) {
+			bos = 0;
+			gpu = knl_gpu_prc_pages(n[i].pid, &bos) * PAGE_SIZE;
+			(void)knl_obmem_stat(NULL, NULL, n[i].pid, &shm);
+			tm_printf((UB *)"mem: pid %d %s: image %ldMB asked %ldMB (writable %ldMB) held %ldMB"
+				  " gpu %ldMB (%d BOs) shared %ldMB calls %d lent %d; free %ldMB of %ldMB\n",
+				  n[i].pid, n[i].file, MB(n[i].image), MB(n[i].asked), MB(n[i].lazy), MB(n[i].held),
+				  MB(gpu), bos, MB(shm * PAGE_SIZE), n[i].incall, n[i].indma, MB(avail),
+				  MB(knl_pf_total_count(-1) * PAGE_SIZE));
+		}
+		/* the shared memory as a whole: each page counted once, however many map it */
+		nshm = knl_obmem_stat(&shm, &shm_mapped, 0, NULL);
+		if ( shm >= ( PRC_MEMLOG_MIN >> PAGE_SHIFT ) ) {
+			tm_printf((UB *)"mem: shared memory: %d objects %ldMB, %ldMB of them mapped;"
+				  " window %ldMB in use\n",
+				  nshm, MB(shm * PAGE_SIZE), MB(shm_mapped * PAGE_SIZE), MB(knl_shm_va_used(NULL)));
 		}
 	}
 }
@@ -898,6 +1339,18 @@ LOCAL ID cre_prc( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, CONST T_SPAWN *sp )
 	}
 	/* only the kernel says a process is the system's: a program cannot say it of its child */
 	p->sys = (BOOL)( ( pk_cprc->prcatr & TS_PRC_SYSTEM ) != 0 && parent == NULL );
+	/* to end with its parent: only a process has one to end with */
+	p->withpar = (BOOL)( parent != NULL && ( ( pk_cprc->prcatr & TS_PRC_WITHPARENT ) != 0
+					     || ( sp != NULL && ( sp->flags & TS_SPN_WITHPARENT ) != 0 ) ) );
+	if ( p->withpar ) {
+		p->par_pid = parent->pid;
+		p->par_gen = parent->gen;
+	}
+	/* a restricted parent's child is as restricted from its first instruction */
+	p->sbx = ( parent != NULL ) ? __atomic_load_n(&parent->sbx, __ATOMIC_SEQ_CST) : 0;
+	/* the limits on its sockets are its parent's, as a Linux child's rlimits are */
+	p->so_cur = ( parent != NULL ) ? parent->so_cur : SO_PRC_SOFT;
+	p->so_max = ( parent != NULL ) ? parent->so_max : SO_PRC_HARD;
 	if ( pk_cprc->arg != NULL && pk_cprc->argsz > 0 ) {
 		p->argsz = pk_cprc->argsz;
 	}
@@ -1084,11 +1537,18 @@ LOCAL void prc_finish( T_PCB *p )
 	ID	tids[TS_PRC_TSK_MAX];
 	ID	self = tk_get_tid(), pid, ppid;
 	INT	n, i, code;
+	UW	ref[TS_SBX_NGROUP + 1];
+	UB	file[TS_FLT_FILE];
 
 	prc_lock();
 	pid = p->pid;
 	ppid = p->ppid;
 	code = p->exitcd;
+	ref[0] = __atomic_load_n(&p->sbx_ref_total, __ATOMIC_SEQ_CST);
+	for ( i = 0; i < TS_SBX_NGROUP; i++ ) {
+		ref[1 + i] = __atomic_load_n(&p->sbx_ref_grp[i], __ATOMIC_SEQ_CST);
+	}
+	knl_memcpy(file, p->file, TS_FLT_FILE);
 	n = knl_own_list(TK_OWN_TSK, pid, tids, TS_PRC_TSK_MAX);
 	for ( i = 0; i < n && i < TS_PRC_TSK_MAX; i++ ) {
 		if ( tids[i] == self ) {
@@ -1102,6 +1562,15 @@ LOCAL void prc_finish( T_PCB *p )
 	tk_unl_mtx(prc_mtxid);
 
 	prc_close_all(pid);
+
+	/* the calls its sandbox turned away, said once as it ends */
+	if ( ref[0] != 0 ) {
+		file[TS_FLT_FILE - 1] = 0;
+		tm_printf((UB *)"TessronOS: pid %d \"%s\" ended with %d calls refused by its sandbox"
+			  " (obj %d, net %d, dev %d, gpu %d, proc %d, win %d, sys %d)\n",
+			  pid, file, (INT)ref[0], (INT)ref[1], (INT)ref[2], (INT)ref[3], (INT)ref[4],
+			  (INT)ref[5], (INT)ref[6], (INT)ref[7]);
+	}
 
 	/* the parent told, when it is a process that is listening */
 	if ( ppid > 0 ) {
@@ -1345,9 +1814,9 @@ EXPORT ER knl_prc_call_enter( void )
  *
  * The way out takes no lock unless there is something to do under it:
  * the process is to end, the kernel met a bad address of it, or this
- * was the last call out while pages it gave back are held for the calls
- * (umem.c). The count goes down before ending is looked at, as on the
- * way in.
+ * was the last call that had pages lent to a device (knl_prc_dma) to
+ * come out while pages it gave back are held for such calls (umem.c).
+ * The counts go down before ending is looked at, as on the way in.
  */
 EXPORT void knl_prc_call_leave( BOOL entered )
 {
@@ -1356,7 +1825,7 @@ EXPORT void knl_prc_call_leave( BOOL entered )
 	BOOL	end = FALSE, fin = FALSE, fault = FALSE, note = FALSE, pan = FALSE;
 	UBINT	va = 0;
 	ID	pid = 0;
-	INT	left;
+	INT	lent;
 	T_PRCFLT info;
 
 	p = cur_pcb();
@@ -1366,18 +1835,23 @@ EXPORT void knl_prc_call_leave( BOOL entered )
 	}
 	if ( entered && t->svcin > 0 ) {
 		t->svcin--;
-		left = __atomic_sub_fetch(&p->incall, 1, __ATOMIC_SEQ_CST);
-	} else {
-		left = INCALL(p);
+		(void)__atomic_sub_fetch(&p->incall, 1, __ATOMIC_SEQ_CST);
 	}
-	if ( !p->kfault && !ENDING(p) && !( left == 0 && knl_umem_held(p->umem) ) ) {
+	/* the pages lent to a device (knl_prc_dma) are the call's no longer once it is out */
+	if ( t->svcin == 0 && t->svcdma != 0 ) {
+		t->svcdma = 0;
+		lent = __atomic_sub_fetch(&p->indma, 1, __ATOMIC_SEQ_CST);
+	} else {
+		lent = INDMA(p);
+	}
+	if ( !p->kfault && !ENDING(p) && !( lent == 0 && knl_umem_held(p->umem) ) ) {
 		return;
 	}
 
 	prc_lock();
 	{
-		if ( INCALL(p) == 0 ) {
-			knl_umem_flush(p->umem);	/* no call holds its pages now */
+		if ( INDMA(p) == 0 ) {
+			knl_umem_flush(p->umem);	/* no call has its pages lent now */
 		}
 		if ( p->kfault ) {
 			p->kfault = FALSE;
@@ -1548,6 +2022,9 @@ EXPORT BOOL knl_prc_ufault( UBINT va, UD esr )
 
 /* ---------------------------------------------------------------- a fault handed back (ts_def_flt) */
 
+/* The faults handed to a process's entry the console is told of (the first ones) */
+#define FLT_TELL_MAX	8
+
 EXPORT ER ts_def_flt( void (*f)( T_TSFLT *flt ) )
 {
 	T_PCB	*p;
@@ -1584,6 +2061,7 @@ EXPORT BOOL knl_prc_flt_give( void *frame, UD esr, UD far )
 	UD	entry = 0;
 	UBINT	sp;
 	ID	pid = 0;
+	BOOL	tell = FALSE;
 
 	if ( !knl_ufault_is_data(esr) ) {
 		return FALSE;
@@ -1593,6 +2071,10 @@ EXPORT BOOL knl_prc_flt_give( void *frame, UD esr, UD far )
 	if ( p != NULL && !p->ending ) {
 		entry = p->flt_entry;
 		pid = p->pid;
+		if ( entry != 0 && p->flt_told < FLT_TELL_MAX ) {
+			p->flt_told++;
+			tell = TRUE;
+		}
 	}
 	tk_unl_mtx(prc_mtxid);
 	if ( entry == 0 ) {
@@ -1604,10 +2086,29 @@ EXPORT BOOL knl_prc_flt_give( void *frame, UD esr, UD far )
 	knl_uflt_set_fault(&c, far, esr);
 	knl_uflt_save_fp(&c);
 
-	/* the picture goes on the task's own stack, below where it was */
-	sp = ( (UBINT)knl_uframe_sp(f) - sizeof(c) - 64 ) & ~(UBINT)UFLT_SP_MASK;
+	/*
+	 * The picture goes on the task's own stack, below where it was and
+	 * below the red zone the function there may be using, at the
+	 * alignment of T_TSFLT: the entry's code reads it as such (on x86-64
+	 * with SSE loads that fault on an address not a multiple of 16),
+	 * while the task's own stack pointer may be only a multiple of 8.
+	 */
+	sp = ( (UBINT)knl_uframe_sp(f) - UFLT_RED_ZONE - sizeof(c) )
+	   & ~(UBINT)( UFLT_SP_MASK | ( __alignof__(T_TSFLT) - 1 ) );
 	if ( sp >= (UBINT)knl_uframe_sp(f) || !knl_prc_user_ok(pid, (CONST void *)sp, sizeof(c), TRUE) ) {
 		return FALSE;
+	}
+
+	/*
+	 * What the fault was, on the console: when the entry cannot put it
+	 * right the process ends on the same access again, and if the entry
+	 * itself fails, this is all that tells of the first one. The first
+	 * few of each process only.
+	 */
+	if ( tell ) {
+		tm_printf((UB*)"TessronOS: pid %d task %d: fault handed to the program, syndrome %lx"
+			  " address %lx pc %lx sp %lx\n",
+			  pid, tk_get_tid(), esr, far, (UD)c.pc, (UD)c.sp);
 	}
 	knl_ua_put((void *)sp, &c, sizeof(c));
 	knl_uframe_arg(f, 0, sp);
@@ -1664,7 +2165,9 @@ EXPORT ER knl_prc_mem_wx( ID pid, UD out[6] )
  * writes the memory: the pages must then be the process's to write.
  * A process's pages outside the shared window go only when the space
  * is taken down, which does not happen while one of its tasks is inside
- * a call (knl_prc_call_enter), so the answer holds until the call
+ * a call (knl_prc_call_enter), or when the process takes them away
+ * itself, which then holds them back until every call that was lent
+ * pages by this is out (indma); so the answer holds until the call
  * returns; the shared window's pages may be taken out by another
  * process and are not given, nor are the tasks' stacks above it, which
  * go with their tasks. E_PAR when
@@ -1694,6 +2197,17 @@ EXPORT INT knl_prc_dma( CONST void *uaddr, INT len, BOOL into, void **p_kaddr )
 	}
 	if ( end > SHM_WINDOW_BASE ) {
 		end = SHM_WINDOW_BASE;
+	}
+	/*
+	 * The call counted among those that lend the pages before the
+	 * tables are read, past a full barrier: a page taken away meanwhile
+	 * is either seen gone here, or held back by the count until the call
+	 * is out (umem_settle, knl_prc_call_leave)
+	 */
+	if ( t->svcdma == 0 ) {
+		t->svcdma = 1;
+		(void)__atomic_add_fetch(&p->indma, 1, __ATOMIC_SEQ_CST);
+		__atomic_thread_fence(__ATOMIC_SEQ_CST);
 	}
 	for ( pg = va & PAGE_MASK; pg < end; pg += PAGE_SIZE ) {
 		e = knl_pt_entry(p->space.l0_pa, pg);
@@ -2650,7 +3164,8 @@ EXPORT ER knl_prc_sink_shared( ID pid, UBINT va, UD size )
 EXPORT BOOL knl_prc_user_ok( ID pid, CONST void *p, SZ len, BOOL write )
 {
 	T_PCB	*pc;
-	UBINT	va = (UBINT)p, end, pg;
+	UBINT	va = (UBINT)p, end, pg = 0;
+	UD	e = ~(UD)0;
 	BOOL	ok = TRUE, mine;
 
 	if ( p == NULL || len < 0 ) {
@@ -2677,10 +3192,31 @@ EXPORT BOOL knl_prc_user_ok( ID pid, CONST void *p, SZ len, BOOL write )
 		ok = FALSE;
 	}
 	for ( pg = va & PAGE_MASK; ok && pg < end; pg += PAGE_SIZE ) {
-		UD	e = knl_pt_entry(pc->space.l0_pa, pg);
+		e = knl_pt_entry(pc->space.l0_pa, pg);
 
 		/* the process may read it, and write it when it is to be written */
-		ok = ( e != 0 && PTE_USER_OK(e, write) );
+		if ( e == 0 || !PTE_USER_OK(e, write) ) {
+			ok = FALSE;
+			break;
+		}
+	}
+	/*
+	 * The first page missing, when it is of a writable stretch not yet
+	 * touched, is made now with the others of the range after it, under
+	 * the table's lock, as a fault of the process would make them
+	 * (umem.c): the kernel's own accesses do not fault pages in. The
+	 * walk stops at the first page that is not the process's, so a
+	 * length said to be larger than the process's memory costs no more
+	 * than the pages it has.
+	 */
+	if ( !ok && e == 0 && pc != NULL && pc->space.l0_pa != 0 && pc->umem != NULL ) {
+		if ( mine ) prc_lock();
+		ok = knl_umem_touch(pc->umem, &pc->space, pg, end);
+		for ( ; ok && pg < end; pg += PAGE_SIZE ) {
+			e = knl_pt_entry(pc->space.l0_pa, pg);
+			ok = ( e != 0 && PTE_USER_OK(e, write) );
+		}
+		if ( mine ) tk_unl_mtx(prc_mtxid);
 	}
 	if ( !mine ) {
 		tk_unl_mtx(prc_mtxid);
@@ -2882,30 +3418,50 @@ EXPORT INT knl_prc_end_all( UW term_ms, void (*tick)( void ) )
 
 /*
  * Pages a change of the reservations takes away are always held, and
- * given back at once only when no call of the process is inside (umem.c).
- * The count is looked at after the change, past a full barrier: a call
+ * given back at once unless a call of the process has the kernel's view
+ * of its pages lent to a device (knl_prc_dma, umem.c). The count of those
+ * calls is looked at after the change, past a full barrier: such a call
  * counts itself in before it reads the tables, so either it finds the
  * page gone or the count shows it, and the page then waits for the last
- * call out (knl_prc_call_leave).
+ * of them to come out (knl_prc_call_leave). A call that only waits (a
+ * poll of the sockets, a wait for an event) holds nothing back: were it
+ * to, a process with a task always inside one would never get a page
+ * back while it runs.
  */
 LOCAL void umem_settle( T_PCB *p )
 {
 	__atomic_thread_fence(__ATOMIC_SEQ_CST);
-	if ( INCALL(p) == 0 ) {
+	if ( INDMA(p) == 0 ) {
 		knl_umem_flush(p->umem);
 	}
 }
 
 /*
+ * A reservation or change of UMEM_TELL_MIN bytes or more that gives
+ * access, on the console (after the lock), with the pages the process
+ * has after it: who asks for a large stretch is seen in the log
+ */
+#define UMEM_TELL_MIN	( 64ULL << 20 )
+
+LOCAL void umem_tell( CONST char *what, ID pid, UBINT va, SZ size, UINT prot, ER er, UD asked )
+{
+	if ( (UD)size < UMEM_TELL_MIN || prot == TS_MEM_NONE ) return;
+	tm_printf((UB *)"mem: pid %d %s %ldMB at %lx prot %x: %d, asked %ldMB\n",
+		  pid, what, (UD)size >> 20, (UD)va, prot, er, asked >> 20);
+}
+
+/*
  * Reservations and pages in the calling process's own half (design
- * 9.8.1, include/ts/umem.h). A page taken away while another task of
- * the process is inside a call is held back until none is (umem.c).
+ * 9.8.1, include/ts/umem.h). A page taken away while a call of the
+ * process has pages lent to a device is held back until none has (umem.c).
  * The kernel's tasks have no such memory (E_NOSPT).
  */
 EXPORT ER ts_map_mem( void **p_adr, SZ size, SZ align, UINT prot )
 {
 	T_PCB	*p;
-	UBINT	va;
+	UBINT	va = 0;
+	ID	pid = 0;
+	UD	asked = 0;
 	ER	er;
 
 	if ( p_adr == NULL || size <= 0 || align < 0 ) {
@@ -2922,8 +3478,11 @@ EXPORT ER ts_map_mem( void **p_adr, SZ size, SZ align, UINT prot )
 			*p_adr = (void *)va;
 		}
 		umem_settle(p);
+		pid = p->pid;
+		asked = knl_umem_bytes(p->umem);
 	}
 	tk_unl_mtx(prc_mtxid);
+	umem_tell("maps", pid, va, size, prot, er, asked);
 
 	return er;
 }
@@ -2952,6 +3511,8 @@ EXPORT ER ts_unm_mem( void *adr, SZ size )
 EXPORT ER ts_ctl_mem( void *adr, SZ size, UINT prot )
 {
 	T_PCB	*p;
+	ID	pid = 0;
+	UD	asked = 0;
 	ER	er;
 
 	if ( size <= 0 ) {
@@ -2964,8 +3525,11 @@ EXPORT ER ts_ctl_mem( void *adr, SZ size, UINT prot )
 	} else {
 		er = knl_umem_ctl(&p->umem, &p->space, (UBINT)adr, (UD)size, prot, TRUE);
 		umem_settle(p);
+		pid = p->pid;
+		asked = knl_umem_bytes(p->umem);
 	}
 	tk_unl_mtx(prc_mtxid);
+	if ( prot != TS_MEM_DISCARD ) umem_tell("changes", pid, (UBINT)adr, size, prot, er, asked);
 
 	return er;
 }

@@ -1,0 +1,45 @@
+# 音量ミキサーのマイク (design 11.6, 6.5.6), for tools/ui_run.py: with no microphone the
+# part says so and its volume cannot be worked; SVCPROG.ELF records for 12 seconds from
+# the test's input (a kernel built with UITEST=1 has one that makes a tone, which takes
+# its volume in software); the mixer shows 録音中 and the level, the volume is turned up
+# (the kernel says how it took it), muted (the level falls to nothing) and let go, and
+# the recording's end is shown. The window is at 200,100, its panel from 206,128: the
+# microphone's volume at y 402, 50 at x 469 and 81 at 550, its 消音 at 686,433. Ctrl+E closes.
+open 01a0d8c4-5440-7a51-8c62-7e8f90a15440
+expect sndmix: ready
+expect sndmix: microphone none
+win 音量ミキサー
+click 600 300
+wait 500
+shot mic_none
+logmark
+run /boot/SVCPROG.ELF 49 12000 1
+expectsince sndmix: microphone there kind 0 volume 50 mute 0 how 2
+expectsince sndmix: microphone recording 1
+expectsince sndmix: microphone level 8
+shot mic_rec
+# turned up, toward the right end: multiplied in software
+logmark
+click 550 402
+expectsince on test: the samples multiplied by 2.
+expectsince sndmix: microphone level 9
+shot mic_up
+# muted: nothing comes, the meter falls
+logmark
+click 686 433
+expectsince mute 1 (0)
+expectsince muted on test: the samples multiplied by 0.00
+expectsince sndmix: microphone level 0 (
+shot mic_mute
+# let go, and back to as it comes
+logmark
+click 686 433
+click 469 402
+expectsince on test: the samples multiplied by 1.00
+# the recording over
+expectsincein 30 sndmix: microphone recording 0
+expectsince sndmix: microphone none
+shot mic_end
+key 08 01
+wait 500
+absent !OACV!

@@ -21,11 +21,18 @@
  *	against one who only listens.
  *
  *	A device paired is kept like any other (knl_btx_keep), with the keys
- *	it gave. While one of those is not connected, this end listens for it
+ *	it gave, once a service of it is used here: its HID service, or LE
+ *	Audio. While one of those is not connected, this end listens for it
  *	(a passive scan) and connects when it advertises, resolving a private
  *	address with the device's identity key. The services are found again
  *	on each connection: nothing of them is kept, so a device whose firmware
  *	changed cannot be read wrongly.
+ *
+ *	A device none of whose services is used here is not kept, and one kept
+ *	from before is forgotten (knl_btx_le_unused): connecting to it again
+ *	whenever it advertises would only be let go again each time. Earphones
+ *	of LE Audio on a controller that cannot carry it are paired on BR/EDR
+ *	instead when their BR/EDR side is known (bt.c).
  *
  *	One ATT request is outstanding at a time, the answer to one sending
  *	the next, as the protocol wants.
@@ -64,13 +71,25 @@ IMPORT INT  knl_hid_ext_attach( BOOL kbd, CONST UB *rd, INT rdlen, CONST UB *nam
 #define ADV_SCAN_IND		0x02
 #define ADV_NONCONN		0x03
 #define ADV_SCAN_RSP		0x04
+#define AD_FLAGS		0x01
 #define AD_UUID16_MORE		0x02
 #define AD_UUID16_ALL		0x03
 #define AD_NAME_SHORT		0x08
 #define AD_NAME_FULL		0x09
+#define AD_SVC_DATA16		0x16
 #define AD_APPEARANCE		0x19
+#define ADF_NO_BREDR		0x04	/* the flags' "BR/EDR Not Supported" */
 #define APPEAR_HID_FIRST	0x03c0
 #define APPEAR_HID_LAST		0x03cf
+/* The appearances of sound (Assigned Numbers 2.6): the categories audio sink and wearable audio device */
+#define APPEAR_SINK_FIRST	0x0840
+#define APPEAR_SINK_LAST	0x087f
+#define APPEAR_WEAR_FIRST	0x0940
+#define APPEAR_WEAR_LAST	0x097f
+/* The services an LE Audio sink announces: ASCS, PACS, and CAS */
+#define UUID_ASCS		0x184e
+#define UUID_PACS		0x1850
+#define UUID_CAS		0x1853
 #define CONN_TMO_MS		10000
 
 /* SMP */
@@ -302,17 +321,26 @@ LOCAL void sc_checks( BTC *c, PEER *p, LES *s )
 	smp_send(c, p, m, 17);
 }
 
-/* The bond is whole: what it gave kept, and on to its services */
+/* The bond is whole: on to its services, which say whether it is kept */
 LOCAL void smp_done( BTC *c, PEER *p, LES *s )
+{
+	s->st = S_DONE;
+	p->have_key = TRUE;
+	p->keep_wait = TRUE;
+	tm_printf((UB *)"bt: \"%s\": LE pairing done, %s, key of %d bytes; kept if a service of it is used\n", p->name,
+		  p->le_sc ? "Secure Connections" : "the older pairing", p->key_sz);
+	gatt_start(c, p);
+}
+
+/* A service of it is used here: a bond made on this link is kept */
+LOCAL void le_used( PEER *p, CONST char *what )
 {
 	ER	er;
 
-	s->st = S_DONE;
-	p->have_key = TRUE;
+	if ( !p->keep_wait ) return;
+	p->keep_wait = FALSE;
 	er = knl_btx_keep(p);
-	tm_printf((UB *)"bt: \"%s\": LE pairing done, %s, key of %d bytes; kept (%d)\n", p->name,
-		  p->le_sc ? "Secure Connections" : "the older pairing", p->key_sz, (INT)er);
-	gatt_start(c, p);
+	tm_printf((UB *)"bt: \"%s\": used as %s: kept (%d)\n", p->name, what, (INT)er);
 }
 
 LOCAL void smp_in( BTC *c, PEER *p, LES *s, CONST UB *f, INT n )
@@ -458,8 +486,18 @@ LOCAL void smp_in( BTC *c, PEER *p, LES *s, CONST UB *f, INT n )
 
 			/* from now on it is known by this address; an all zero one is none */
 			if ( !same_bt_bytes(f + 2, none, 6) ) {
+				INT	k;
+
 				p->atype = f[1];
 				knl_memcpy(p->addr, f + 2, 6);
+				tm_printf((UB *)"bt: \"%s\": its identity address %02x:%02x:%02x:%02x:%02x:%02x, %s\n", p->name,
+					  f[7], f[6], f[5], f[4], f[3], f[2], ( f[1] == 0 ) ? "public" : "random static");
+				/* the same device listed before under another address: one entry, this one */
+				for ( k = 0; k < NPEER; k++ ) {
+					PEER	*q = &c->peer[k];
+
+					if ( q != p && q->used && q->le && !q->up && same_bt_bytes(q->addr, p->addr, 6) ) q->used = FALSE;
+				}
 			}
 			s->want &= (UB)~SMP_DIST_ID;
 			if ( s->want == 0 ) smp_done(c, p, s);
@@ -552,6 +590,7 @@ LOCAL void gatt_ready( BTC *c, PEER *p, LES *s )
 	}
 	tm_printf((UB *)"bt: \"%s\": HID over GATT: %d reports, a map of %d bytes: keyboard slot %d, ID %d; other slot %d\n",
 		  p->name, s->nrep, p->rdlen, p->hd, p->lay.rid, p->hd2);
+	le_used(p, "an input device");
 }
 
 LOCAL void next_ccc( BTC *c, PEER *p, LES *s )
@@ -687,13 +726,24 @@ LOCAL void gatt_answer( BTC *c, PEER *p, LES *s, CONST UB *f, INT n )
 			/* no input, but sound: LE Audio (bt_bap.c) */
 			s->at = A_LEA;
 			s->at_due = 0;
+			le_used(p, "LE Audio");
 			break;
 		}
 		if ( s->svc_first == 0 ) {
-			/* listed by what it advertised alone, and not for input after all: let go */
-			tm_printf((UB *)"bt: \"%s\": no HID service: disconnected\n", p->name);
+			/*
+			 * Listed by what it advertised alone, and nothing of it used
+			 * here: let go, and neither kept nor listened for again.
+			 */
+			BOOL	lea = knl_btbap_has_lea(c, p);
+
+			if ( lea && !c->has_cis ) {
+				tm_printf((UB *)"bt: \"%s\": no HID service; LE Audio (PACS, ASCS), which this controller cannot carry (no CIS central)\n", p->name);
+			} else {
+				tm_printf((UB *)"bt: \"%s\": no HID service%s: disconnected\n", p->name, lea ? ", and its LE Audio not taken" : "");
+			}
 			s->at = A_NONE;
 			s->at_due = 0;
+			knl_btx_le_unused(c, p, lea);
 			le_drop(c, p, HCI_REMOTE_USER_ENDED);
 			break;
 		}
@@ -1041,11 +1091,22 @@ EXPORT void knl_btl_connect( BTC *c, PEER *p )
 	knl_btx_cmd(c, C_LE_CREATE_CONN, r, 25);
 }
 
-/* What the advertising data says: its name, and whether it is for input */
-LOCAL BOOL ad_look( CONST UB *ad, INT n, CONST UB **p_name, INT *p_nlen )
+LOCAL BOOL is_lea_uuid( UH u )
+{
+	return (BOOL)( u == UUID_ASCS || u == UUID_PACS || u == UUID_CAS );
+}
+
+/*
+ * What the advertising data says: its name, whether it is for input, and
+ * the hints (FH_*) of what else it is: its flags, whether it serves LE
+ * Audio (a service of it listed, or the announcement of ASCS or CAS in
+ * service data), and an appearance of sound.
+ */
+LOCAL BOOL ad_look( CONST UB *ad, INT n, CONST UB **p_name, INT *p_nlen, UB *p_hint )
 {
 	BOOL	input = FALSE;
 	INT	at = 0;
+	UB	hint = FH_LE;
 
 	while ( at < n && ad[at] != 0 && at + 1 + ad[at] <= n ) {
 		INT	l = ad[at] - 1, t = ad[at + 1];
@@ -1054,19 +1115,31 @@ LOCAL BOOL ad_look( CONST UB *ad, INT n, CONST UB **p_name, INT *p_nlen )
 		if ( t == AD_NAME_FULL || ( t == AD_NAME_SHORT && *p_name == NULL ) ) {
 			*p_name = v;
 			*p_nlen = l;
+		} else if ( t == AD_FLAGS && l >= 1 ) {
+			hint |= FH_FLAGS;
+			if ( ( v[0] & ADF_NO_BREDR ) != 0 ) hint |= FH_NO_BREDR;
 		} else if ( t == AD_UUID16_MORE || t == AD_UUID16_ALL ) {
 			INT	i;
 
 			for ( i = 0; i + 2 <= l; i += 2 ) {
-				if ( ( v[i] | ( v[i + 1] << 8 ) ) == UUID_HID_SERVICE ) input = TRUE;
+				UH	u = (UH)( v[i] | ( v[i + 1] << 8 ) );
+
+				if ( u == UUID_HID_SERVICE ) input = TRUE;
+				if ( is_lea_uuid(u) ) hint |= FH_LEAUDIO;
 			}
+		} else if ( t == AD_SVC_DATA16 && l >= 2 ) {
+			if ( is_lea_uuid((UH)( v[0] | ( v[1] << 8 ) )) ) hint |= FH_LEAUDIO;
 		} else if ( t == AD_APPEARANCE && l >= 2 ) {
 			INT	a = v[0] | ( v[1] << 8 );
 
 			if ( a >= APPEAR_HID_FIRST && a <= APPEAR_HID_LAST ) input = TRUE;
+			if ( ( a >= APPEAR_SINK_FIRST && a <= APPEAR_SINK_LAST ) || ( a >= APPEAR_WEAR_FIRST && a <= APPEAR_WEAR_LAST ) ) {
+				hint |= FH_AUDIO;
+			}
 		}
 		at += 1 + ad[at];
 	}
+	if ( p_hint != NULL ) *p_hint = hint;
 	return input;
 }
 
@@ -1134,14 +1207,18 @@ LOCAL void adv_one( BTC *c, INT evt, INT type, CONST UB *a, CONST UB *ad, INT n 
 	CONST UB	*name = NULL;
 	INT		nlen = 0;
 
+	UB		hint = 0;
+
 	if ( p != NULL && !p->up && c->le_conn == NULL && !c->le_user_scan
 	  && ( evt == ADV_IND || evt == ADV_DIRECT ) ) {
+		(void)ad_look(ad, n, &name, &nlen, &hint);
+		p->hint |= hint;
 		knl_memcpy(p->cur_addr, a, 6);
 		p->cur_type = (UB)type;
 		tm_printf((UB *)"bt: \"%s\" is advertising: connecting\n", p->name);
 		knl_btl_connect(c, p);
 	} else if ( c->le_user_scan && p == NULL ) {
-		BOOL		input = ad_look(ad, n, &name, &nlen);
+		BOOL		input = ad_look(ad, n, &name, &nlen, &hint);
 		T_BTFOUND	*f = NULL;
 		INT		i;
 
@@ -1153,24 +1230,33 @@ LOCAL void adv_one( BTC *c, INT evt, INT type, CONST UB *a, CONST UB *ad, INT n 
 		 * says of itself: many input devices put nothing for input in
 		 * what they advertise, and the pairing finds out from the
 		 * device's services. What one not marked for input advertised
-		 * is said, to tell the devices apart.
+		 * is said, to tell the devices apart, and so is what one of
+		 * sound advertised.
 		 */
-		if ( !input && f == NULL ) {
-			if ( evt == ADV_IND ) c->le_other++;
+		if ( ( !input || ( hint & ( FH_LEAUDIO | FH_AUDIO ) ) != 0 ) && f == NULL ) {
+			if ( evt == ADV_IND && !input ) c->le_other++;
 			ad_say(a, type, evt, ad, n);
 		}
 		if ( evt == ADV_IND && f == NULL ) {
 			f = knl_btx_found_add(c, a, 0, NULL, 0);
 		}
 		if ( f != NULL ) {
+			INT	k = (INT)( f - c->found );
+
 			f->le = 1;
 			f->atype = (UB)type;
+			c->found_hint[k] |= hint;
+			/* earphones of LE Audio alone, on a controller that cannot carry it: said in the list */
+			if ( ( c->found_hint[k] & FH_LEAUDIO ) != 0 && !c->has_cis && c->found_note[k] == BT_NOTE_NONE ) {
+				c->found_note[k] = BT_NOTE_LEA;
+			}
 			if ( name != NULL ) (void)knl_btx_found_add(c, a, 0, name, nlen);
 		}
 	} else if ( p == NULL && evt == ADV_IND && c->le_conn == NULL && !c->le_user_scan
 		 && knl_btbap_rsi(c, ad, n) && ( p = knl_btx_peer_new(c, a) ) != NULL && !p->up ) {
 		/* its set identifier resolves with the SIRK of one here: the other earphone, paired as it comes */
-		(void)ad_look(ad, n, &name, &nlen);
+		(void)ad_look(ad, n, &name, &nlen, &hint);
+		p->hint |= hint;
 		if ( name != NULL && p->name[0] == 0 ) {
 			if ( nlen > (INT)sizeof(p->name) - 1 ) nlen = (INT)sizeof(p->name) - 1;
 			knl_memcpy(p->name, name, nlen);
@@ -1237,7 +1323,8 @@ LOCAL void le_conn_done( BTC *c, CONST UB *d, INT len )
 	st = d[0];
 	c->le_conn = NULL;
 	h = (UH)( d[1] | ( d[2] << 8 ) );
-	tm_printf((UB *)"bt: LE connection %d to \"%s\": status %02x, interval %d\n", h, p->name, st, d[11] | ( d[12] << 8 ));
+	tm_printf((UB *)"bt: LE connection %d to \"%s\" at %02x:%02x:%02x:%02x:%02x:%02x (type %d): status %02x, interval %d\n",
+		  h, p->name, d[10], d[9], d[8], d[7], d[6], d[5], d[4], st, d[11] | ( d[12] << 8 ));
 	if ( st != 0 ) return;
 	if ( p->les == NULL ) p->les = Kcalloc(1, sizeof(LES));
 	s = (LES *)p->les;

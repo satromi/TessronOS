@@ -18,15 +18,12 @@
  *	went to, newest first, and types into the newest that is still there
  *	and is not the asking program's own:
  *
- *	  a text of the desktop's, or a piece of text being edited in a
- *	  figure: the letters go in at the caret as the converter's
- *	  committed letters do (dd_type_text), whatever was being composed
- *	  committed first
  *	  a window with a panel whose box has the keys: into the box at its
  *	  caret, as the panel's own conversion commits (wm_panel_type)
  *
- *	Any other window answers E_NOEXS, and the program does what it
- *	does instead (文字検索 puts the letters in the tray).
+ *	Any other window -- the desktop's own windows hold no text to type
+ *	into -- answers E_NOEXS, and the program does what it does instead
+ *	(文字検索 puts the letters in the tray).
  */
 
 #include <sys/machine.h>
@@ -68,27 +65,13 @@ LOCAL INT type_target( INT asker )
 EXPORT ER dt_type_req( CONST T_DTREQ *rq, T_DTANS *an )
 {
 	CONST UB	*s = rq->name;
-	DTWIN		*d;
 	INT		n = 0, wid;
 
 	while ( n < (INT)sizeof(rq->name) && s[n] != 0 ) n++;
 	if ( n == 0 || n >= (INT)sizeof(rq->name) ) return E_PAR;
 	wid = type_target(wm_obj_wid(&rq->win));
 	if ( wid <= 0 ) return E_NOEXS;
-	d = dt_win_of(wid);
-	if ( d != NULL ) {
-		DTWIN	*t = ( d->tb != NULL ) ? d->tb : d;
-
-		if ( t->xml_view || !dd_editable(t) ) return E_NOEXS;
-		tip_commit();
-		dd_type_text(t, s, n);
-		dt_draw(d);
-		wm_update();
-		an->how = DT_HOW_TEXT;
-		tm_printf((UB *)"desktop: typed %s into window %d\n", s, wid);
-		return E_OK;
-	}
-	if ( wm_panel_type(wid, s, n) ) {
+	if ( dt_win_of(wid) == NULL && wm_panel_type(wid, s, n) ) {
 		wm_update();
 		an->how = DT_HOW_BOX;
 		tm_printf((UB *)"desktop: typed %s into a box of window %d\n", s, wid);

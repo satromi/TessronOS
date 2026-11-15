@@ -125,6 +125,13 @@ athx_t_debug(int level)
 		athx_sc->debug = level;
 }
 
+/* Every key asked of the card set by the driver's task (athx_setkey_task, each with the firmware's answer) */
+static int
+athx_t_keys_in(void)
+{
+	return athx_sc != NULL && athx_sc->setkey_nkeys == 0;
+}
+
 const struct tsw_drv tsw_athx_drv = {
 	.name = "athx",
 	.min_dbm = -256,
@@ -138,5 +145,6 @@ const struct tsw_drv tsw_athx_drv = {
 	.rx_peek = NULL,
 	.card_stats = athx_t_card_stats,
 	.port_say = NULL,
+	.keys_in = athx_t_keys_in,
 	.debug = athx_t_debug,
 };

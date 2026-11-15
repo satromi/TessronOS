@@ -78,6 +78,8 @@ UI		g_ui;
 ID		g_port;
 T_TAD		*g_rec;
 UW		g_paper = TV_PAPER_LOOK;
+static UW	g_paper_own = TV_PAPER_LOOK;	/* the object's own, as its metadata keeps it */
+static UW	g_link_bg = TAD_COL_NONE;	/* the 表示領域背景 of the link it was opened from, as last known */
 BOOL		g_full;
 BOOL		g_changed;
 BOOL		g_dirty;
@@ -199,6 +201,15 @@ ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 /* A link in the record opened as a double press opens it */
 void link_open( CONST T_VOBJ *v )
 {
+	ta_link_open(v, 0, 0);
+}
+
+/*
+ * The same with DT_F_AUTO in flags (自動起動): opened by no act of the
+ * person, at place rank of the links of the record opened so
+ */
+void ta_link_open( CONST T_VOBJ *v, UINT flags, INT rank )
+{
 	T_DTREQ	rq;
 	T_DTANS	an;
 	char	s[TAD_NAME_MAX + 32];
@@ -211,6 +222,8 @@ void link_open( CONST T_VOBJ *v )
 	rq.req = DT_RQ_OPEN;
 	rq.target = v->target;
 	rq.recno = -1;
+	rq.flags = flags;
+	rq.grab_y = rank;
 	/* what the window opened does to the link comes back here, to be put in the record (DT_F_LINK) */
 	if ( g_lport > 0 ) {
 		ts_uuid_text(&g_obj, po);
@@ -234,6 +247,31 @@ void link_open( CONST T_VOBJ *v )
 	snprintf(s, sizeof(s), "opened %s (%d)", (CONST char *)v->name, (INT)er);
 	note(s);
 	if ( er < E_OK ) say("開けませんでした");
+}
+
+/*
+ * A request about link vobjid of this record (DT_RQ_ATTR) named for the
+ * desktop as DT_RQ_OPEN with DT_F_LINK names it: the record's object, the
+ * vobjid and the channel in front of the applist, so that the windows
+ * opened from the link are told what it changes. FALSE, and rq as it was,
+ * when there is no channel or no room.
+ */
+BOOL ta_link_named( T_DTREQ *rq, CONST TS_UUID *vobjid )
+{
+	char	po[TS_UUID_STRLEN + 1], pv[TS_UUID_STRLEN + 1], pc[TS_UUID_STRLEN + 1];
+	size_t	a = ( ( rq->flags & DT_F_APPLIST ) != 0 ) ? strlen((CONST char *)rq->text) : 0;
+	size_t	f = 3 * ( TS_UUID_STRLEN + 1 );
+	char	head[3 * ( TS_UUID_STRLEN + 1 ) + 1];
+
+	if ( g_lport <= 0 || f + a >= sizeof(rq->text) ) return FALSE;
+	ts_uuid_text(&g_obj, po);
+	ts_uuid_text(vobjid, pv);
+	ts_uuid_text(&g_lch, pc);
+	memmove(rq->text + f, rq->text, a + 1);
+	snprintf(head, sizeof(head), "%s\t%s\t%s\n", po, pv, pc);
+	memcpy(rq->text, head, f);
+	rq->flags |= DT_F_LINK;
+	return TRUE;
 }
 
 /* ---------------------------------------------------------------- the record */
@@ -420,6 +458,65 @@ ER ta_rec_put( CONST TS_UUID *id, T_TAD *rec )
 	return er;
 }
 
+/*
+ * The window asked to close while the disk of its object is out (the
+ * desktop asks so when the disk is taken out): what was changed handed
+ * to the desktop, which asks the person where it is to go
+ * (DT_DISK_RESCUE) -- written into an object the desktop makes for it,
+ * then named to it. TRUE when the object cannot be reached: the window
+ * closes without saving and without keeping where it stood; FALSE when
+ * it is there, to close as usual. figure: what is held is a figure.
+ */
+BOOL ta_disk_gone( BOOL figure )
+{
+	T_OBREF	ref;
+	T_DTREQ	rq;
+	T_DTANS	an;
+	TS_UUID	tmp;
+	UB	*buf;
+	SZ	size = 0;
+	ID	k;
+	ER	er;
+
+	if ( ob_ref_obj(&g_obj, &ref) >= E_OK ) return FALSE;
+	if ( g_changed && g_rec != NULL ) {
+		memset(&rq, 0, sizeof(rq));
+		rq.req = DT_RQ_DISK;
+		rq.recno = DT_DISK_RESCUE;
+		rq.target = g_obj;
+		rq.grab_x = 0;
+		rq.grab_y = figure ? 1 : 0;
+		memset(&an, 0, sizeof(an));
+		er = ask_desktop(&rq, &an, 5000);
+		tmp = an.into;
+		buf = NULL;
+		if ( er >= E_OK && tad_write_mem(g_rec, NULL, 0, &size) >= E_OK
+		  && ( buf = malloc((size_t)size + 1) ) != NULL && tad_write_mem(g_rec, buf, size + 1, &size) >= E_OK ) {
+			k = ob_opn_obj(&tmp, OB_OP_R | OB_OP_W);
+			er = ( k > 0 ) ? ob_rpl_rec(k, 0, buf, size) : (ER)k;
+			if ( k > 0 ) ob_cls_obj(k);
+		} else if ( er >= E_OK ) {
+			er = E_NOMEM;
+		}
+		free(buf);
+		if ( er >= E_OK ) {
+			rq.grab_x = 1;
+			ts_uuid_text(&tmp, (char *)rq.text);
+			memset(&an, 0, sizeof(an));
+			er = ask_desktop(&rq, &an, TMO_FEVR);
+		}
+		{
+			char	s[48];
+
+			snprintf(s, sizeof(s), "changes handed over, its disk gone (%d)", (INT)er);
+			note(s);
+		}
+		g_changed = FALSE;
+	}
+	note("closes: its disk went");
+	return TRUE;
+}
+
 /* Notices of changes to an object, at the window's channel */
 void ta_watch( CONST TS_UUID *id )
 {
@@ -431,7 +528,12 @@ void ta_watch( CONST TS_UUID *id )
 		if ( memcmp(&g_watched[i], id, sizeof(TS_UUID)) == 0 ) return;
 	}
 	if ( g_nwatched >= WATCH_MAX ) return;
-	k = ob_opn_obj(id, OB_OP_READ | OB_OP_ATRRD);	/* told to one who may read its attributes */
+	/*
+	 * told to one who may read its attributes; a key that reads no
+	 * records keeps nobody out who opens the object alone to write it
+	 * (書庫管理 writing its book, OB_O_EXCL)
+	 */
+	k = ob_opn_obj(id, OB_OP_ATRRD);
 	if ( k <= 0 ) return;
 	memset(&req, 0, sizeof(req));
 	req.events = OB_E_CHANGE;
@@ -475,6 +577,32 @@ static void remade( void )
 	g_dirty = TRUE;
 }
 
+static void paper_shown( void );
+
+/*
+ * The link this window was opened from changed by 仮身属性変更 in the
+ * window that holds it, told by the desktop before that record is saved
+ * (DT_HOW_LINK_LOOK): its 表示領域背景 is the paper when the object has
+ * none of its own. Only bgcol of the look shows here; the frame, the
+ * letters and the band of the link are drawn by the window holding it.
+ */
+static void link_look_told( CONST T_DTANS *an )
+{
+	TS_UUID	p, v;
+	char	s[48];
+
+	if ( !g_has_parent || ts_str_to_uuid((CONST char *)an->text, &p) < E_OK
+	  || an->text[TS_UUID_STRLEN] != '\t'
+	  || ts_str_to_uuid((CONST char *)an->text + TS_UUID_STRLEN + 1, &v) < E_OK
+	  || memcmp(&p, &g_parent, sizeof(TS_UUID)) != 0 || memcmp(&v, &g_vobjid, sizeof(TS_UUID)) != 0
+	  || memcmp(&an->into, &g_obj, sizeof(TS_UUID)) != 0 ) return;
+	g_link_bg = an->look.bgcol;
+	paper_shown();
+	g_dirty = TRUE;
+	snprintf(s, sizeof(s), "link look told: bgcol #%06x", (UINT)( g_link_bg & 0x00FFFFFFU ));
+	note(s);
+}
+
 /*
  * What a window opened from a link of this record did to it, told by the
  * desktop (DT_F_LINK): the view it closed with written into the link, or
@@ -490,6 +618,15 @@ static void link_told( CONST T_DTANS *an )
 	UB	vm[TAD_VIEW_MAX];
 	char	s[80];
 
+	if ( an->how == DT_HOW_LINK_LOOK ) {
+		link_look_told(an);
+		return;
+	}
+	/* anything else the desktop says there is the program's (the 小物箱's list changed) */
+	if ( an->how != DT_HOW_LINK_VIEW && an->how != DT_HOW_LINK_ADD ) {
+		if ( ta_host != NULL && ta_host->told != NULL ) ta_host->told(an);
+		return;
+	}
 	/* the record's object, a tab, the link's vobjid */
 	if ( g_rec == NULL || ts_str_to_uuid((CONST char *)an->text, &id) < E_OK
 	  || memcmp(&id, &g_obj, sizeof(TS_UUID)) != 0 || an->text[TS_UUID_STRLEN] != '\t'
@@ -551,6 +688,52 @@ void ta_links_told( void )
 	}
 }
 
+BOOL ta_told_channel( TS_UUID *p )
+{
+	if ( g_lport <= 0 ) return FALSE;
+	*p = g_lch;
+	return TRUE;
+}
+
+/*
+ * Told by the desktop at that channel about the program prog_id (its
+ * id): when it is run again while its window is open (DT_HOW_AGAIN),
+ * and what else the program's list follows (DT_RQ_TELL)
+ */
+void ta_listen( CONST char *prog_id )
+{
+	T_DTREQ	rq;
+	T_DTANS	an;
+	TS_UUID	ch;
+	char	s[64];
+	ER	er;
+
+	if ( !ta_told_channel(&ch) ) return;
+	memset(&rq, 0, sizeof(rq));
+	rq.req = DT_RQ_TELL;
+	snprintf((char *)rq.name, sizeof(rq.name), "%s", prog_id);
+	ts_uuid_text(&ch, (char *)rq.text);
+	memset(&an, 0, sizeof(an));
+	er = ask_desktop(&rq, &an, 5000);
+	snprintf(s, sizeof(s), "told of changes (%d)", (INT)er);
+	note(s);
+}
+
+/* The window's title, as the name it shows (a list made, which is no object's record) */
+void ta_title( CONST char *title )
+{
+	char	json[WM_TITLE_MAX * 2 + 16];
+	INT	at = snprintf(json, sizeof(json), "{\"name\":\"");
+	CONST UB *s;
+
+	for ( s = (CONST UB *)title; *s != 0 && at < (INT)sizeof(json) - 4; s++ ) {
+		if ( *s == '"' || *s == '\\' ) json[at++] = '\\';
+		json[at++] = (char)*s;
+	}
+	at += snprintf(json + at, sizeof(json) - (size_t)at, "\"}");
+	if ( g_kw > 0 ) (void)ob_set_atr(g_kw, (CONST UB *)json, (SZ)at);
+}
+
 BOOL ta_links_event( CONST T_OBNTM *m )
 {
 	if ( g_lport <= 0 || memcmp(&m->uuid, &g_lch, sizeof(TS_UUID)) != 0 ) return FALSE;
@@ -603,6 +786,196 @@ void ta_ask_answer( CONST T_OBNTM *m, BOOL takes )
 	note(s);
 }
 
+/* ---------------------------------------------------------------- pictures from the tray */
+
+/* The number after the last '_' of a picture beside a record ("<object>_0_<n>.png") */
+static INT pic_number( CONST UB *h )
+{
+	INT	j, v = 0, under = 0;
+
+	for ( j = 0; h != NULL && h[j] != 0 && h[j] != '.'; j++ ) {
+		if ( h[j] == '_' ) {
+			under++;
+			v = 0;
+		} else if ( under == 2 && h[j] >= '0' && h[j] <= '9' ) {
+			v = v * 10 + ( h[j] - '0' );
+		}
+	}
+	return ( under == 2 ) ? v : 0;
+}
+
+static INT pic_top( CONST T_TAD *frag )
+{
+	CONST T_TAD	*docs[2];
+	T_TADNODE	*n;
+	INT		top = 0, k, v;
+
+	docs[0] = g_rec;
+	docs[1] = frag;
+	for ( k = 0; k < 2; k++ ) {
+		for ( n = tad_walk(docs[k], NULL); n != NULL; n = tad_walk(docs[k], n) ) {
+			if ( n->kind != TAD_ND_ELEM ) continue;
+			v = pic_number(tad_attr(n, "href"));
+			if ( v > top ) top = v;
+		}
+	}
+	return top;
+}
+
+/*
+ * The pictures a fragment from the tray names by its set ("tray:N"),
+ * written beside this object's record under names of their own past
+ * every number used, and the fragment made to name them so: how many
+ * (the figure editor's paste, the text editor's, a piece of text's)
+ */
+INT ta_tray_pictures( T_TAD *frag )
+{
+	T_TADNODE	*n;
+	T_TRINF		inf;
+	CONST UB	*h;
+	char		us[TS_UUID_STRLEN + 1];
+	UB		name[TS_UUID_STRLEN + 24], *png;
+	SZ		asz = 0;
+	INT		rn, i, done = 0;
+	ID		k;
+
+	ts_uuid_text(&g_obj, us);
+	for ( n = tad_walk(frag, NULL); n != NULL; n = tad_walk(frag, n) ) {
+		h = ( n->kind == TAD_ND_ELEM ) ? tad_attr(n, "href") : NULL;
+		if ( h == NULL || strncmp((CONST char *)h, "tray:", 5) != 0 ) continue;
+		for ( rn = 0, i = 5; h[i] >= '0' && h[i] <= '9'; i++ ) rn = rn * 10 + ( h[i] - '0' );
+		if ( tr_ref_rec(TR_HAND, rn, &inf) < E_OK || inf.kind != TR_PNG || inf.size <= 0 ) continue;
+		png = malloc((size_t)inf.size);
+		if ( png == NULL ) continue;
+		k = ob_opn_obj(&g_obj, OB_OP_R | OB_OP_W);
+		if ( k > 0 && tr_rea_rec(TR_HAND, rn, png, inf.size, &asz) >= E_OK ) {
+			snprintf((char *)name, sizeof(name), "%s_0_%d.png", us, pic_top(frag) + 1);
+			if ( ob_wri_res(k, name + TS_UUID_STRLEN, png, asz) >= E_OK
+			  && tad_set_attr(frag, n, "href", name) >= E_OK ) {
+				char	s[TS_UUID_STRLEN + 40];
+
+				snprintf(s, sizeof(s), "tray: picture %s", (char *)name);
+				note(s);
+				tv_src_forget(&g_obj);
+				done++;
+			}
+		}
+		if ( k > 0 ) ob_cls_obj(k);
+		free(png);
+	}
+	return done;
+}
+
+/* ---------------------------------------------------------------- carried out of the window */
+
+/*
+ * What is carried out, as a fragment with its look, in the tray's place
+ * of its own for the desktop to put in where it is let go (DT_F_FRAG);
+ * FALSE when it could not be put there
+ */
+BOOL ta_frag_put( CONST T_TAD *frag )
+{
+	T_TRREC	r;
+	UB	*buf;
+	SZ	size = 0;
+	ER	er;
+
+	if ( frag == NULL ) return FALSE;
+	(void)tad_write_mem(frag, NULL, 0, &size);
+	buf = malloc((size_t)size + 1);
+	if ( buf == NULL ) return FALSE;
+	if ( tad_write_mem(frag, buf, size + 1, &size) < E_OK ) {
+		free(buf);
+		return FALSE;
+	}
+	memset(&r, 0, sizeof(r));
+	r.kind = TR_TAD;
+	r.data = buf;
+	r.size = size;
+	er = tr_set_dat(&r, 1);
+	free(buf);
+	return (BOOL)( er >= E_OK );
+}
+
+/* Where the hand let go back over this window (DT_F_BACK), in its work area */
+BOOL ta_back_at( CONST T_DTANS *an, INT *p_x, INT *p_y )
+{
+	T_OBWPOS	wp;
+	SZ		asz = 0;
+
+	if ( ob_rea_rec(g_kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) < E_OK ) return FALSE;
+	*p_x = an->look.w - wp.wleft;
+	*p_y = an->look.h - wp.wtop;
+	return TRUE;
+}
+
+/*
+ * Letters of the text e carried out of the window: the desktop follows
+ * the hand on (DT_RQ_CARRY with DT_F_TEXT) and puts them where they are
+ * let go -- a text of the desktop's as they looked (DT_F_FRAG), a figure
+ * of the desktop's or another program's window as one line, line ends
+ * and tabs as spaces. rq has the outline's look, the place the hand
+ * holds it at and the window already. The answer is the editor's
+ * (T_DDHOST text_away): 1 when they leave here, 0 when they stay (copied:
+ * the second button on the way, or another program's window that was not
+ * asked beforehand whether it takes them, and may yet refuse them; or let
+ * go back over this window, where they move within it, DT_F_BACK), below
+ * nought when the desktop put them nowhere.
+ */
+ER ta_text_away( T_DDED *e, T_DTREQ *rq, CONST UB *s, INT n )
+{
+	T_DTANS	an;
+	T_TAD	*frag;
+	INT	i, k;
+	BOOL	put;
+	ER	er;
+	char	m[64];
+
+	rq->req = DT_RQ_CARRY;
+	rq->flags |= DT_F_TEXT;
+	k = ( n < DT_CARRY_TEXT - 1 ) ? n : DT_CARRY_TEXT - 1;
+	while ( k > 0 && k < n && ( s[k] & 0xC0 ) == 0x80 ) k--;	/* cut at a letter's edge */
+	for ( i = 0; i < k; i++ ) rq->text[i] = ( s[i] == '\n' || s[i] == '\t' ) ? ' ' : s[i];
+	rq->text[k] = 0;
+	frag = de_sel_frag(e);
+	put = ta_frag_put(frag);
+	if ( frag != NULL ) tad_free(frag);
+	if ( put ) rq->flags |= DT_F_FRAG;
+	memset(&an, 0, sizeof(an));
+	er = ask_desktop(rq, &an, 30 * 60 * 1000);
+	if ( put ) (void)tr_set_dat(NULL, 0);
+	snprintf(m, sizeof(m), "letters carried out (%d)%s%s%s", (INT)er,
+		 ( er >= E_OK && an.how == DT_HOW_COPY ) ? " as a copy" : "",
+		 ( er >= E_OK && ( an.flags & DT_F_TO_PROG ) != 0 ) ? " to a program" : "",
+		 ( er < E_OK && ( an.flags & DT_F_BACK ) != 0 ) ? " back here" : "");
+	note(m);
+	if ( er < E_OK && ( an.flags & DT_F_BACK ) != 0 ) {
+		/* back over this window: within it, where the hand let go */
+		INT	x, y;
+
+		if ( ta_back_at(&an, &x, &y) ) de_sel_back(e, x, y, (BOOL)( an.how == DT_HOW_COPY ));
+		return 0;
+	}
+	if ( er < E_OK ) return er;	/* the desktop said so, when it was not over this window */
+	return ( an.how == DT_HOW_COPY ) ? 0 : 1;
+}
+
+/*
+ * The paper the window is drawn on: the object's own when its metadata
+ * keeps one; else, opened from a link, that link's 表示領域背景 as it is
+ * now (仮身属性と同じ); else the system's look
+ */
+static void paper_shown( void )
+{
+	if ( g_paper_own != TV_PAPER_LOOK ) {
+		g_paper = g_paper_own;
+	} else if ( g_link_bg != TAD_COL_NONE ) {
+		g_paper = g_link_bg & 0x00FFFFFFU;
+	} else {
+		g_paper = TV_PAPER_LOOK;
+	}
+}
+
 /* The object's paper, as the store has it */
 void ta_paper_read( void )
 {
@@ -613,10 +986,138 @@ void ta_paper_read( void )
 	v.target = g_obj;
 	v.disp = TAD_D_DEFAULT;
 	if ( tv_src_look(&v, NULL, 0, &paper) < 0 ) paper = TV_PAPER_LOOK;
-	g_paper = paper;
+	g_paper_own = paper;
+	paper_shown();
+}
+
+/*
+ * The link it was opened from, read again from the record of the object
+ * that holds it, as that record is stored now: FALSE when it is not
+ * there (no longer linked, or pointing elsewhere), the link as known
+ * before then standing
+ */
+static BOOL link_reread( void )
+{
+	UB	*x;
+	SZ	n = 0;
+	T_TAD	*rec = NULL;
+	T_VOBJ	*v;
+	BOOL	found = FALSE;
+
+	if ( !g_has_parent ) return FALSE;
+	x = tv_src_read(&g_parent, 0, &n);
+	if ( x == NULL ) return FALSE;
+	v = (T_VOBJ *)malloc(sizeof(T_VOBJ));
+	if ( v != NULL && tad_parse(x, n, NULL, &rec) >= E_OK && rec != NULL
+	  && tad_lnk_find(rec, &g_vobjid, v) >= E_OK && memcmp(&v->target, &g_obj, sizeof(TS_UUID)) == 0 ) {
+		g_link_bg = v->bgcol;
+		found = TRUE;
+	}
+	if ( rec != NULL ) tad_free(rec);
+	free(v);
+	free(x);
+	return found;
+}
+
+/*
+ * The paper as the window opens: the object's own, or the link's as the
+ * desktop gave it (T_PRCOPEN, the link as the window holding it has it,
+ * saved or not). Afterwards the link is followed two ways: the desktop
+ * tells its new look when the window holding it changes it by 仮身属性変更
+ * (DT_RQ_LINK_WATCH, link_look_told), and the object holding it is
+ * watched, the link read again from its record when that is written
+ * (ta_paper_changed), as when another program writes it.
+ */
+/*
+ * Told by the desktop when the window holding the link changes it, saved
+ * or not (DT_RQ_LINK_WATCH); asked again, the answer gives the look last
+ * told since the window opened: TRUE with it in g_link_bg then
+ */
+static BOOL link_watch( CONST char *what )
+{
+	T_DTREQ	rq;
+	T_DTANS	an;
+	char	po[TS_UUID_STRLEN + 1], pv[TS_UUID_STRLEN + 1], pc[TS_UUID_STRLEN + 1];
+	char	s[64];
+	ER	er;
+
+	if ( !g_has_parent || g_lport <= 0 ) return FALSE;
+	memset(&rq, 0, sizeof(rq));
+	memset(&an, 0, sizeof(an));
+	rq.req = DT_RQ_LINK_WATCH;
+	rq.target = g_obj;
+	rq.recno = -1;
+	ts_uuid_text(&g_parent, po);
+	ts_uuid_text(&g_vobjid, pv);
+	ts_uuid_text(&g_lch, pc);
+	snprintf((char *)rq.text, sizeof(rq.text), "%s\t%s\t%s\n", po, pv, pc);
+	er = ask_desktop(&rq, &an, 3000);
+	if ( er >= E_OK && an.how == DT_HOW_LINK_LOOK ) {
+		g_link_bg = an.look.bgcol;
+		snprintf(s, sizeof(s), "link %s (%d): bgcol #%06x", what, (INT)er, (UINT)( g_link_bg & 0x00FFFFFFU ));
+	} else {
+		snprintf(s, sizeof(s), "link %s (%d)", what, (INT)er);
+	}
+	note(s);
+	return (BOOL)( er >= E_OK && an.how == DT_HOW_LINK_LOOK );
+}
+
+void ta_paper_open( void )
+{
+	ta_paper_read();
+	if ( !g_has_parent ) return;
+	ta_watch(&g_parent);
+	(void)link_watch("watched");
+}
+
+/*
+ * 再表示: the paper read again, the link with it as it is now -- as the
+ * desktop was last told of it by the window holding it (saved or not),
+ * else as the record holding it is stored -- not as it was when the
+ * window opened
+ */
+void ta_paper_refresh( void )
+{
+	char	s[48];
+
+	if ( g_has_parent && !link_watch("asked") && link_reread() ) {
+		snprintf(s, sizeof(s), "link bgcol #%06x", (UINT)( g_link_bg & 0x00FFFFFFU ));
+		note(s);
+	}
+	ta_paper_read();
+}
+
+/*
+ * A notice that object u changed (OB_E_CHANGE): the paper read again when
+ * u is the object itself (its metadata written by 背景色変更) or the one
+ * whose record holds the link it was opened from. TRUE when the paper
+ * shown is not what it was.
+ */
+BOOL ta_paper_changed( CONST TS_UUID *u )
+{
+	UW	was = g_paper;
+	char	s[48];
+
+	if ( memcmp(u, &g_obj, sizeof(TS_UUID)) == 0 ) ta_paper_read();
+	if ( g_has_parent && memcmp(u, &g_parent, sizeof(TS_UUID)) == 0 && link_reread() ) {
+		paper_shown();
+		snprintf(s, sizeof(s), "link bgcol #%06x", (UINT)( g_link_bg & 0x00FFFFFFU ));
+		note(s);
+	}
+	return (BOOL)( g_paper != was );
 }
 
 /* ---------------------------------------------------------------- starting and ending */
+
+/* The object opened found: what its store says of it, and the links' store made ready */
+static ER started( CONST T_OBREF *p_ref )
+{
+	g_autoref = (BOOL)( ( p_ref->flags & OB_F_AUTOREF ) != 0 );
+	memcpy(g_name, p_ref->name, OB_NAME_MAX);
+	g_name[OB_NAME_MAX - 1] = 0;
+	tv_src_init();
+	return E_OK;
+}
 
 ER ta_start( CONST T_TAHOST *host, T_OBREF *p_ref )
 {
@@ -639,12 +1140,17 @@ ER ta_start( CONST T_TAHOST *host, T_OBREF *p_ref )
 		g_from_link = a.fromlink;
 		g_start_arg = a;
 		g_start_arg.viewmode[DT_VIEW_MAX - 1] = 0;
+		g_link_bg = a.fromlink ? a.bgcol : TAD_COL_NONE;
 	}
-	g_autoref = (BOOL)( ( p_ref->flags & OB_F_AUTOREF ) != 0 );
-	memcpy(g_name, p_ref->name, OB_NAME_MAX);
-	g_name[OB_NAME_MAX - 1] = 0;
-	tv_src_init();
-	return E_OK;
+	return started(p_ref);
+}
+
+ER ta_start_on( CONST T_TAHOST *host, CONST TS_UUID *obj, T_OBREF *p_ref )
+{
+	ta_host = host;
+	g_obj = *obj;
+	if ( ob_ref_obj(&g_obj, p_ref) < E_OK ) return E_NOEXS;
+	return started(p_ref);
 }
 
 ER ta_channel( void )
@@ -684,6 +1190,15 @@ static void place_of( INT *p_x, INT *p_y, INT *p_w, INT *p_h )
 	*p_y = 40;
 	*p_w = 900;
 	*p_h = 640;
+	if ( ta_host != NULL && ta_host->at_w > 0 && ta_host->at_h > 0 ) {
+		*p_x = ta_host->at_x;
+		*p_y = ta_host->at_y;
+		*p_w = ta_host->at_w;
+		*p_h = ta_host->at_h;
+	}
+	/* the program's own place, where none is kept: from the corner of the screen new windows open on */
+	*p_x = wm_new_x(*p_x);
+	*p_y = wm_new_y(*p_y);
 	if ( k <= 0 ) return;
 	n = ob_atr_read(k, 0, &m);
 	ob_cls_obj(k);
@@ -691,10 +1206,16 @@ static void place_of( INT *p_x, INT *p_y, INT *p_w, INT *p_h )
 	  && js_get(&w, "pos", &pos) >= E_OK ) {
 		INT	x = (INT)js_get_num(&pos, "x", -1), y = (INT)js_get_num(&pos, "y", -1);
 		INT	ww = (INT)js_get_num(&w, "width", 0), wh = (INT)js_get_num(&w, "height", 0);
+		UB	scr[12] = "";
 
 		if ( ww > 0 && wh > 0 ) {
-			*p_x = ( x < 0 ) ? 0 : x;
-			*p_y = ( y < 0 ) ? 0 : y;
+			/* kept from the corner of its screen, the main one's when it names none */
+			(void)js_get_str(&w, "screen", scr, sizeof(scr));
+			if ( x < 0 ) x = 0;
+			if ( y < 0 ) y = 0;
+			wm_place_xywh(&x, &y, ww, wh, (CONST char *)scr);
+			*p_x = x;
+			*p_y = y;
 			*p_w = ww;
 			*p_h = wh;
 		}
@@ -758,37 +1279,84 @@ void ta_channel_close( void )
 
 /* ---------------------------------------------------------------- the window */
 
-/* 全画面表示: the window made as large as the desktop makes it, or put back */
+/*
+ * 全画面表示: the window made as large as the desktop makes it, or put
+ * back. The desktop keeps where it stood and says which it did, for a
+ * double press on the window's corner does the same; the place kept
+ * here is only for saving where the window stands.
+ */
 void ta_fullscreen( void )
 {
-	T_DTREQ	rq;
-	T_DTANS	an;
-	SZ	asz = 0;
+	T_DTREQ		rq;
+	T_DTANS		an;
+	T_OBWPOS	was;
+	SZ		asz = 0;
+	BOOL		read;
 
-	if ( g_full ) {
-		(void)ob_wri_rec(g_kw, OB_WR_PLACE, 0, &g_restore, sizeof(g_restore), &asz);
-		g_full = FALSE;
-	} else if ( ob_rea_rec(g_kw, OB_WR_PLACE, 0, &g_restore, sizeof(g_restore), &asz) >= E_OK ) {
-		memset(&rq, 0, sizeof(rq));
-		rq.req = DT_RQ_FULL;
-		if ( ask_desktop(&rq, &an, 5000) >= E_OK ) g_full = TRUE;
+	read = ( ob_rea_rec(g_kw, OB_WR_PLACE, 0, &was, sizeof(was), &asz) >= E_OK );
+	memset(&rq, 0, sizeof(rq));
+	rq.req = DT_RQ_FULL;
+	if ( ask_desktop(&rq, &an, 5000) >= E_OK ) {
+		g_full = (BOOL)( ( an.flags & DT_F_FULL ) != 0 && read );
+		if ( g_full ) g_restore = was;
 	}
 	ta_work_size();
 	g_dirty = TRUE;
 }
 
-/* 背景色変更: the object's paper, chosen in the desktop's panel and kept in its metadata */
-void ta_paper_ask( void )
+/*
+ * Whether the window is the screen's size by 全画面表示 now, for the tick
+ * in the menu: the desktop is asked, for a double press on the window's
+ * corner changes it without the program. Put back so, the place kept
+ * here is no longer one to save.
+ */
+BOOL ta_full_shown( void )
 {
 	T_DTREQ	rq;
 	T_DTANS	an;
 
 	memset(&rq, 0, sizeof(rq));
+	rq.req = DT_RQ_FULL;
+	rq.flags = DT_F_ASK;
+	if ( ask_desktop(&rq, &an, 1000) < E_OK ) return g_full;
+	if ( ( an.flags & DT_F_FULL ) == 0 ) g_full = FALSE;
+	return (BOOL)( ( an.flags & DT_F_FULL ) != 0 );
+}
+
+/*
+ * 背景色変更: the object's paper, chosen in the desktop's panel and kept
+ * in its metadata. 仮身属性と同じ (TAD_COL_NONE in the answer) leaves it
+ * none of its own: laid on the link's 表示領域背景 as it is now when it
+ * was opened from a link that gives one, else on the system's look
+ * (paper_shown). The panel is asked with the object's own paper, not
+ * the one shown, so that its switch says whether there is one.
+ */
+void ta_paper_ask( void )
+{
+	T_DTREQ	rq;
+	T_DTANS	an;
+	char	s[48];
+
+	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_PAPER;
 	rq.target = g_obj;
-	rq.look.bgcol = ( g_paper == TV_PAPER_LOOK ) ? TAD_COL_NONE : g_paper;
+	rq.look.bgcol = ( g_paper_own == TV_PAPER_LOOK ) ? TAD_COL_NONE : g_paper_own;
 	if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-		g_paper = an.look.bgcol & 0x00FFFFFFU;
+		if ( an.look.bgcol == TAD_COL_NONE ) {
+			g_paper_own = TV_PAPER_LOOK;
+			paper_shown();
+			if ( g_paper == TV_PAPER_LOOK ) {
+				note("paper same as the link: the system's look");
+			} else {
+				snprintf(s, sizeof(s), "paper same as the link: #%06x", (UINT)g_paper);
+				note(s);
+			}
+		} else {
+			g_paper_own = an.look.bgcol & 0x00FFFFFFU;
+			paper_shown();
+			snprintf(s, sizeof(s), "paper #%06x", (UINT)g_paper);
+			note(s);
+		}
 		tv_src_forget(&g_obj);
 	}
 	g_dirty = TRUE;
@@ -927,37 +1495,84 @@ static BOOL win_num( UB **p_m, INT *p_n, CONST char *key, BOOL in_pos, INT v )
 	return TRUE;
 }
 
-/* Where the window stood and how large it was, into the object's metadata, for it to open there next time */
+/*
+ * The screen of the kept place written into the metadata's "window" (8
+ * hex digits): in place of the one named, or put last where it names
+ * none and the place is not the main screen's, so that a place of the
+ * main screen is kept as it was before
+ */
+static BOOL win_screen_put( UB **p_m, INT *p_n, UW screen )
+{
+	T_JSON	root, w, at;
+	UB	*nm;
+	INT	n, max;
+	char	txt[12];
+
+	if ( js_parse(*p_m, *p_n, &root) < E_OK || js_get(&root, "window", &w) < E_OK ) return FALSE;
+	if ( screen == 0 && js_get(&w, "screen", &at) < E_OK ) return TRUE;
+	if ( screen != 0 ) snprintf(txt, sizeof(txt), "%08x", (UINT)screen);
+	else txt[0] = 0;
+	max = *p_n + 32;
+	nm = malloc((size_t)max);
+	if ( nm == NULL ) return FALSE;
+	n = js_set_str(*p_m, *p_n, &w, "screen", txt, nm, max);
+	if ( n < 0 ) {
+		free(nm);
+		return FALSE;
+	}
+	free(*p_m);
+	*p_m = nm;
+	*p_n = n;
+	return TRUE;
+}
+
+/*
+ * Where the window stood and how large it was, into the object's
+ * metadata, for it to open there next time: from the corner of the
+ * screen its top left corner is on, and which screen that is (none for
+ * the main one), as wm_place_keep makes it
+ */
 void ta_window_keep( void )
 {
 	T_OBWPOS	wp;
+	T_DPRECT	view;
+	T_WMPLACE	p;
 	SZ		asz = 0;
 	UB		*m = NULL;
 	INT		n;
 	ID		k;
 	BOOL		any;
 	ER		er = E_NOEXS;
-	char		s[64];
+	char		s[80];
 
 	if ( g_full ) {
 		wp = g_restore;			/* 全画面表示 is not where it stands */
 	} else if ( ob_rea_rec(g_kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) < E_OK ) {
 		return;
 	}
+	view.left = wp.left;
+	view.top = wp.top;
+	view.right = wp.right;
+	view.bottom = wp.bottom;
+	if ( wm_place_keep(&view, &p) < E_OK ) {
+		p.r = view;
+		p.screen = 0;
+	}
 	k = ob_opn_obj(&g_obj, OB_OP_ATRRD | OB_OP_ATRWR);
 	if ( k <= 0 ) return;
 	n = ob_atr_read(k, 0, &m);
 	if ( n > 0 ) {
-		any = win_num(&m, &n, "x", TRUE, wp.left);
-		any = win_num(&m, &n, "y", TRUE, wp.top) || any;
-		any = win_num(&m, &n, "width", FALSE, wp.right - wp.left) || any;
-		any = win_num(&m, &n, "height", FALSE, wp.bottom - wp.top) || any;
+		any = win_num(&m, &n, "x", TRUE, p.r.left);
+		any = win_num(&m, &n, "y", TRUE, p.r.top) || any;
+		any = win_num(&m, &n, "width", FALSE, p.r.right - p.r.left) || any;
+		any = win_num(&m, &n, "height", FALSE, p.r.bottom - p.r.top) || any;
+		if ( any ) (void)win_screen_put(&m, &n, p.screen);
 		if ( any ) er = ob_set_atr(k, m, (SZ)n);
 	}
 	free(m);
 	ob_cls_obj(k);
-	snprintf(s, sizeof(s), "window kept %d,%d %dx%d (%d)", wp.left, wp.top, wp.right - wp.left,
-		 wp.bottom - wp.top, (INT)er);
+	snprintf(s, sizeof(s), "window kept %d,%d %dx%d screen %08x (%d)", p.r.left, p.r.top, p.r.right - p.r.left,
+		 p.r.bottom - p.r.top, (UINT)p.screen, (INT)er);
 	note(s);
 }
 
@@ -1452,17 +2067,47 @@ BOOL ta_ime_on( void )
 #define TA_P_TITLE	61		/* the words over a form's boxes or a list */
 
 /*
- * A panel of the data box worked until one of its buttons is pressed or
- * it is put away: the number of the button, 'enter' for Enter, 0 for 取消
+ * The data box's panels are asked with the window's channel; before the
+ * window is open (実身/仮身検索 asks first), with a channel of their own,
+ * given back once the panel is put away. A panel of another data box
+ * than the program's (box) is asked the same way.
+ */
+static UI	dlg_with;
+static TS_UUID	dlg_own_ch;
+static ID	dlg_own_port = 0;
+
+ER ta_dlg_open( CONST char *box, INT num, UI *q )
+{
+	dlg_with = g_ui;
+	if ( box != NULL && ui_uuid(box, &dlg_with.box) < E_OK ) return E_NOEXS;
+	if ( dlg_with.port <= 0 ) {
+		if ( dlg_own_port <= 0 ) {
+			T_OBCRE	c;
+
+			memset(&c, 0, sizeof(c));
+			c.type = OB_T_CHANNEL;
+			if ( ob_cre_obj(&c, &dlg_own_ch) >= E_OK ) {
+				dlg_own_port = ob_opn_obj(&dlg_own_ch, OB_OP_READ | OB_OP_WRITE);
+			}
+		}
+		dlg_with.port = dlg_own_port;
+	}
+	if ( dlg_with.port <= 0 ) return E_NOEXS;
+	return ui_dlg_open(&dlg_with, num, q);
+}
+
+/*
+ * A panel worked until one of its buttons is pressed or it is put away:
+ * the number of the button, 'enter' for Enter, 0 for 取消 (button 101)
  * and for a panel put away
  */
-static INT dlg_run( UI *q, INT enter )
+INT ta_dlg_run( UI *q, INT enter )
 {
 	T_OBNTM	m;
 	INT	num = 0, ev, how = -1;
 
 	while ( how < 0 ) {
-		ev = ( ui_wait(&g_ui, &m, TMO_FEVR) >= E_OK ) ? ui_dlg_take(q, &m, &num) : UI_EV_CLOSE;
+		ev = ( ui_wait(&dlg_with, &m, TMO_FEVR) >= E_OK ) ? ui_dlg_take(q, &m, &num) : UI_EV_CLOSE;
 		if ( ev == UI_EV_BUTTON ) {
 			how = ( num == TA_P_CANCEL ) ? 0 : num;
 		} else if ( ev == UI_EV_CLOSE ) {
@@ -1473,6 +2118,47 @@ static INT dlg_run( UI *q, INT enter )
 		}
 	}
 	return how;
+}
+
+void ta_dlg_close( UI *q )
+{
+	ui_dlg_close(q);
+	if ( dlg_own_port > 0 ) {
+		ob_cls_obj(dlg_own_port);
+		(void)ob_del_obj(&dlg_own_ch);
+		dlg_own_port = 0;
+	}
+	g_dirty = TRUE;
+}
+
+void ta_tell_in( CONST char *box, INT num, CONST char *l1, CONST char *l2 )
+{
+	UI	q;
+
+	if ( ta_dlg_open(box, num, &q) < E_OK ) return;
+	ui_set_text(&q, 1, l1);
+	ui_set_text(&q, 2, ( l2 != NULL ) ? l2 : " ");
+	note("tell panel open");
+	(void)ta_dlg_run(&q, TA_P_OK);
+	ta_dlg_close(&q);
+	note("tell panel put away");
+}
+
+BOOL ta_ask_in( CONST char *box, INT num, CONST char *l1, CONST char *l2, CONST char *no, CONST char *yes )
+{
+	UI	q;
+	INT	how;
+
+	if ( ta_dlg_open(box, num, &q) < E_OK ) return FALSE;
+	ui_set_text(&q, 1, l1);
+	ui_set_text(&q, 2, ( l2 != NULL ) ? l2 : " ");
+	ui_set_text(&q, TA_P_CANCEL, no);
+	ui_set_text(&q, TA_P_OK, yes);
+	note("ask panel open");
+	how = ta_dlg_run(&q, TA_P_OK);
+	ta_dlg_close(&q);
+	note(( how == TA_P_OK ) ? "ask panel answered yes" : "ask panel answered no");
+	return (BOOL)( how == TA_P_OK );
 }
 
 /*
@@ -1486,14 +2172,14 @@ BOOL ta_ask_name( CONST char *prompt, CONST UB *start, UB *out, INT max )
 	INT	how;
 
 	out[0] = 0;
-	if ( ui_dlg_open(&g_ui, TA_PN_NAME, &q) < E_OK ) return FALSE;
+	if ( ta_dlg_open(NULL, TA_PN_NAME, &q) < E_OK ) return FALSE;
 	ui_set_text(&q, 1, prompt);
 	ui_set_text(&q, 2, ( start != NULL ) ? (CONST char *)start : "");
 	ui_focus(&q, 2);
 	note("name panel open");
-	how = dlg_run(&q, TA_P_OK);
+	how = ta_dlg_run(&q, TA_P_OK);
 	if ( how == TA_P_OK ) (void)ui_text(&q, 2, (char *)out, max);
-	ui_dlg_close(&q);
+	ta_dlg_close(&q);
 	g_dirty = TRUE;
 	note(( how == TA_P_OK && out[0] != 0 ) ? "name panel answered" : "name panel put away");
 	return (BOOL)( how == TA_P_OK && out[0] != 0 );
@@ -1513,16 +2199,16 @@ BOOL ta_ask_text( CONST char *p1, CONST char *p2, CONST UB *start, UB *out, INT 
 	char	say[WM_LABEL_MAX];
 
 	out[0] = 0;
-	if ( ui_dlg_open(&g_ui, TA_PN_TEXT, &q) < E_OK ) return FALSE;
+	if ( ta_dlg_open(NULL, TA_PN_TEXT, &q) < E_OK ) return FALSE;
 	snprintf(say, sizeof(say), "%s%s", ( p1 != NULL ) ? p1 : "", ( p2 != NULL ) ? p2 : "");
 	ui_set_text(&q, 1, say);
 	ui_set_text(&q, 2, ( start != NULL ) ? (CONST char *)start : "");
 	if ( ok != NULL && strcmp(ok, "設定") != 0 ) ui_set_text(&q, TA_P_OK, ok);	/* the panel says 設定 */
 	ui_focus(&q, 2);
 	note("text panel open");
-	how = dlg_run(&q, TA_P_OK);
+	how = ta_dlg_run(&q, TA_P_OK);
 	if ( how == TA_P_OK ) (void)ui_text(&q, 2, (char *)out, max);
-	ui_dlg_close(&q);
+	ta_dlg_close(&q);
 	g_dirty = TRUE;
 	note(( how == TA_P_OK ) ? "text panel answered" : "text panel put away");
 	return (BOOL)( how == TA_P_OK );
@@ -1540,7 +2226,7 @@ BOOL ta_fields_form( CONST char *title, INT n, CONST char *CONST *labels,
 	UI	q;
 	INT	how, i, rows = ( n <= 6 ) ? 6 : 9;
 
-	if ( n <= 0 || n > 9 || ui_dlg_open(&g_ui, ( rows == 6 ) ? TA_PN_FIELDS6 : TA_PN_FIELDS9, &q) < E_OK ) {
+	if ( n <= 0 || n > 9 || ta_dlg_open(NULL, ( rows == 6 ) ? TA_PN_FIELDS6 : TA_PN_FIELDS9, &q) < E_OK ) {
 		return FALSE;
 	}
 	ui_set_text(&q, TA_P_TITLE, title);
@@ -1557,11 +2243,11 @@ BOOL ta_fields_form( CONST char *title, INT n, CONST char *CONST *labels,
 	}
 	ui_focus(&q, 1);
 	note("fields panel open");
-	how = dlg_run(&q, TA_P_OK);
+	how = ta_dlg_run(&q, TA_P_OK);
 	if ( how == TA_P_OK ) {
 		for ( i = 0; i < n; i++ ) (void)ui_text(&q, 1 + i, (char *)vals[i], DE_FIELD_MAX);
 	}
-	ui_dlg_close(&q);
+	ta_dlg_close(&q);
 	g_dirty = TRUE;
 	note(( how == TA_P_OK ) ? "fields panel answered" : "fields panel put away");
 	return (BOOL)( how == TA_P_OK );
@@ -1574,14 +2260,14 @@ INT ta_list_form( CONST char *title, CONST char *CONST *names, INT n, INT start 
 	INT	how, v = 0;
 	char	t[40];
 
-	if ( n <= 0 || ui_dlg_open(&g_ui, TA_PN_LIST, &q) < E_OK ) return -1;
+	if ( n <= 0 || ta_dlg_open(NULL, TA_PN_LIST, &q) < E_OK ) return -1;
 	ui_set_text(&q, TA_P_TITLE, title);
 	ui_names(&q, 1, names, n);
 	ui_set_value(&q, 1, ( start >= 0 && start < n ) ? start + 1 : 0);
 	note("list panel open");
-	how = dlg_run(&q, TA_P_OK);
+	how = ta_dlg_run(&q, TA_P_OK);
 	if ( how == TA_P_OK ) v = ui_value(&q, 1);
-	ui_dlg_close(&q);
+	ta_dlg_close(&q);
 	g_dirty = TRUE;
 	v = ( how == TA_P_OK && v >= 1 && v <= n ) ? v - 1 : -1;
 	snprintf(t, sizeof(t), "list panel answered %d", v);
@@ -1607,13 +2293,13 @@ INT ta_find_form( UB *what, UB *with, INT max, BOOL *p_regex )
 	INT	how;
 	char	t[48];
 
-	if ( ui_dlg_open(&g_ui, TA_PN_FIND, &q) < E_OK ) return 0;
+	if ( ta_dlg_open(NULL, TA_PN_FIND, &q) < E_OK ) return 0;
 	ui_set_text(&q, P_FIND_WHAT, (CONST char *)what);
 	ui_set_text(&q, P_FIND_WITH, (CONST char *)with);
 	ui_set_value(&q, P_FIND_REGEX, *p_regex ? 1 : 0);
 	ui_focus(&q, P_FIND_WHAT);
 	note("find panel open");
-	how = dlg_run(&q, TA_P_OK);
+	how = ta_dlg_run(&q, TA_P_OK);
 	how = ( how == TA_P_OK ) ? DE_FIND_NEXT : ( how == P_FIND_REPLACE ) ? DE_FIND_REPLACE
 	    : ( how == P_FIND_ALL ) ? DE_FIND_ALL : 0;
 	if ( how != 0 ) {
@@ -1621,7 +2307,7 @@ INT ta_find_form( UB *what, UB *with, INT max, BOOL *p_regex )
 		(void)ui_text(&q, P_FIND_WITH, (char *)with, max);
 		*p_regex = (BOOL)( ui_value(&q, P_FIND_REGEX) != 0 );
 	}
-	ui_dlg_close(&q);
+	ta_dlg_close(&q);
 	g_dirty = TRUE;
 	snprintf(t, sizeof(t), "find panel answered %d", how);
 	note(t);
@@ -1697,7 +2383,7 @@ INT ta_paper_form( T_DEPAPER *pp )
 	to[0] = &pp->h;    to[1] = &pp->w;
 	to[2] = &pp->top;  to[3] = &pp->bottom;
 	to[4] = &pp->left; to[5] = &pp->right;
-	if ( ui_dlg_open(&g_ui, TA_PN_PAPER, &q) < E_OK ) return DE_PAPER_CANCEL;
+	if ( ta_dlg_open(NULL, TA_PN_PAPER, &q) < E_OK ) return DE_PAPER_CANCEL;
 	ui_set_value(&q, PS_LIST, start + 1);
 	for ( i = 0; i < 6; i++ ) {
 		tenths_text(*to[i], t, sizeof(t));
@@ -1705,7 +2391,7 @@ INT ta_paper_form( T_DEPAPER *pp )
 	}
 	ui_set_value(&q, ( pp->imposition != 0 ) ? PS_SPREAD : PS_ONE, 1);
 	note("paper panel open");
-	how = dlg_run(&q, TA_P_OK);
+	how = ta_dlg_run(&q, TA_P_OK);
 	how = ( how == TA_P_OK ) ? DE_PAPER_SET : ( how == PS_STD ) ? DE_PAPER_STD
 	    : ( how == PS_HF ) ? DE_PAPER_HF : DE_PAPER_CANCEL;
 	if ( how == DE_PAPER_SET ) {
@@ -1720,7 +2406,7 @@ INT ta_paper_form( T_DEPAPER *pp )
 		}
 		pp->imposition = ( ui_value(&q, PS_SPREAD) != 0 ) ? 1 : 0;
 	}
-	ui_dlg_close(&q);
+	ta_dlg_close(&q);
 	g_dirty = TRUE;
 	snprintf(t, sizeof(t), "paper panel answered %d", how);
 	note(t);

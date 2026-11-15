@@ -37,11 +37,13 @@
 #include <ts/wm.h>
 #include <ts/dp.h>
 #include <ts/disp.h>
+#include <ts/dispout.h>
 #include <ts/hid.h>
 #include <ts/fn.h>
 #include <ts/part.h>
 #include <ts/img.h>
 #include <ts/proc.h>
+#include <ts/gpu.h>
 #include <ts/conf.h>
 #include <ts/time.h>
 #include "sysman/pfalloc.h"
@@ -77,6 +79,33 @@ typedef struct {
 	INT		w, h;		/* pixels; rows w long */
 	UW		serial;
 } WMSURF;
+
+/*
+ * A work area shown from two BOs of the GPU (wm_gsurf_set): the BOs, a
+ * reference held to each and the kernel's view of their pages; the one
+ * shown, and the one to be shown once no job of the GPU uses it, with
+ * the rectangles it changed. While the window is solid and stands
+ * still at the scale of 100, the BO shown is laid over the work area
+ * itself and the window's own pixels there are not kept up (laid);
+ * otherwise it is copied into them (in_pix says they hold it).
+ */
+typedef struct {
+	struct gpubo	*bo[OB_GS_BUFS];	/* NULL: none given */
+	UB		*kva[OB_GS_BUFS];
+	ID		pid;		/* the process that gave them */
+	INT		w, h;		/* pixels */
+	UINT		pitch;
+	INT		shown;		/* -1 none yet */
+	UW		shown_serial;
+	INT		wait;		/* -1 none */
+	UW		wait_serial;
+	INT		wait_builds;	/* builds that found the one waiting still being drawn */
+	BOOL		whole;		/* the one waiting changed all of it */
+	INT		nrect;		/* else these */
+	T_DPRECT	rect[OB_GS_RECTS];
+	BOOL		in_pix;		/* the window's own pixels hold the one shown */
+	BOOL		laid;		/* the last build laid the one shown over the work area */
+} WMGSURF;
 
 typedef struct {
 	BOOL		used;
@@ -124,13 +153,25 @@ typedef struct {
 	UINT		mo_dur;		/* and how long it takes; 0: not opening */
 	UW		serial;		/* which opening of its number this is */
 	WMSURF		surf;		/* what its process draws in, if any */
+	WMGSURF		gs;		/* the BOs its work area is shown from, if any */
 	ID		mktsk;		/* the task that opened it */
 	ID		mkpid;		/* and its process, 0 none */
+	BOOL		drawn;		/* its process has shown what it drew in it (wm_mark_drawn, wm_surf_put) */
+	UINT		rgroup;		/* the group of windows opened together it is one of (wm_set_rank); 0 none */
+	UINT		rank;		/* and its place in it: a higher one stands in front */
 	INT		wid;		/* its number: its place in the table, from 1 */
 	/* what a change of the screen keeps of it between laying the windows and telling their programs */
 	UB		*chg_old;
 	UD		chg_oldpages;
 	BOOL		chg_resized, chg_moved;
+	/*
+	 * Full screen (wm_full): the work area is the whole screen, over the
+	 * message line, with no frame, band or bars. What it was before is
+	 * kept, and given back when it leaves full screen.
+	 */
+	BOOL		full;
+	UINT		full_attr;
+	T_DPRECT	full_outer, full_want;
 } WMWIN;
 
 /*
@@ -331,6 +372,7 @@ IMPORT ER  knl_look_scheme( UINT n );
 
 /* The message line (msgline.c) */
 IMPORT INT  knl_msg_top( void );
+IMPORT BOOL knl_msg_band( T_DPRECT *r );
 IMPORT void knl_msg_lay( UB *back, UINT pitch, CONST T_DPRECT *box );
 IMPORT void knl_msg_press( INT x, INT y );
 IMPORT void knl_msg_tick( void );
@@ -406,17 +448,26 @@ LOCAL void ground_make( void )
 	wm_ground_h = sh;
 	wm_ground_gen++;
 
+	/* screens of different sizes leave parts of the back buffer no screen shows: the desk's colour */
+	if ( ts_disp_screens() > 1 ) {
+		for ( x = 0; x < sw * sh; x++ ) {
+			wm_ground[x] = desk;
+		}
+	}
 	/* a picture laid as it is, or in tiles, is laid in view pixels, each as large as the scale makes it */
 	for ( i = 0; ts_disp_screen(i, &vx, &vy, &vw, &vh) >= E_OK; i++ ) {
 		INT	dx0 = disp_dev_of(vx, wm_scale), dw = disp_dev_of(vx + vw, wm_scale) - dx0;
+		INT	dy0 = disp_dev_of(vy, wm_scale), dh = disp_dev_of(vy + vh, wm_scale) - dy0;
+
+		if ( dy0 + dh > sh ) dh = sh - dy0;
 
 		ox = oy = 0;
 		if ( wm_wall != NULL && wm_wall_mode == WM_WALL_CENTRE ) {
 			ox = (vw - wm_wall_w) / 2;
 			oy = (vh - wm_wall_h) / 2;
 		}
-		for ( y = 0; y < sh; y++ ) {
-			UW	*p = wm_ground + (SZ)y * sw + dx0;
+		for ( y = 0; y < dh; y++ ) {
+			UW	*p = wm_ground + (SZ)( dy0 + y ) * sw + dx0;
 
 			if ( wm_wall == NULL ) {
 				for ( x = 0; x < dw && dx0 + x < sw; x++ ) {
@@ -439,7 +490,7 @@ LOCAL void ground_make( void )
 					break;
 				case WM_WALL_FIT:
 					wx = ( dw > 0 ) ? x * wm_wall_w / dw : 0;
-					wy = ( sh > 0 ) ? y * wm_wall_h / sh : 0;
+					wy = ( dh > 0 ) ? y * wm_wall_h / dh : 0;
 					break;
 				default:
 					wx = disp_view_of(x, wm_scale) % wm_wall_w;
@@ -831,6 +882,51 @@ LOCAL WMWIN *win_at_z( INT z )
 	}
 
 	return NULL;
+}
+
+/* An input aid (WM_ATTR_AID): in front of every other window, the panels and the message line too, behind the menus */
+#define IS_AID(w)	( ( (w)->attr & WM_ATTR_AID ) == WM_ATTR_AID )
+
+/*
+ * The window in full screen that stands in front, with the windows that
+ * are its own in front of it (its panels): the message line is laid
+ * under it, and the screen's foot is its. NULL when the front window is
+ * not one in full screen nor one of its own.
+ */
+LOCAL WMWIN *full_front( void )
+{
+	WMWIN	*w = NULL;
+	INT	z, guard;
+
+	for ( z = 0; z < wm_nwin; z++ ) {
+		w = win_at_z(z);
+		if ( w != NULL && w->visible && ( w->attr & WM_ATTR_POPUP ) == 0 && !IS_AID(w) ) {
+			break;
+		}
+		w = NULL;
+	}
+	for ( guard = 0; w != NULL && !w->full && w->parent != 0 && guard < 64; guard++ ) {
+		w = win_of(w->parent);
+	}
+	return ( w != NULL && w->full && w->visible ) ? w : NULL;
+}
+
+/*
+ * Whether the message line is over (x, y) for window w: only inside the
+ * band, which is the main screen's bottom, nor while w is
+ * the full screen's or in front of it, nor over a pop-up or an input aid
+ */
+LOCAL BOOL msg_over( CONST WMWIN *w, INT x, INT y )
+{
+	CONST WMWIN	*f;
+	T_DPRECT	b;
+
+	if ( !knl_msg_band(&b) || x < b.left || x >= b.right || y < b.top || y >= b.bottom
+	  || ( w->attr & WM_ATTR_POPUP ) != 0 || IS_AID(w) ) {
+		return FALSE;
+	}
+	f = full_front();
+	return !( f != NULL && w->z <= f->z );
 }
 
 /* Close the gap a window left behind when it was removed from the order */
@@ -1260,9 +1356,11 @@ LOCAL void surf_tell( CONST WMSURF *s, T_WMSURF *out )
 /* ---------------------------------------------------------------- windows */
 
 LOCAL void floats_front( void );
+LOCAL void aids_front( void );
 LOCAL void subs_away( void );
 
 LOCAL void screen_win( BOOL opened );
+LOCAL BOOL main_screen( CONST T_DPRECT *on );
 
 EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 {
@@ -1282,7 +1380,7 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 	}
 	ask = *outer;
 	wm_screen_at(( outer->left + outer->right ) / 2, ( outer->top + outer->bottom ) / 2, &on);
-	base = ( on.left == 0 ) ? wm_msg_height() : 0;
+	base = main_screen(&on) ? wm_msg_height() : 0;
 	if ( outer->right - outer->left > on.right - on.left
 	  || outer->bottom - outer->top > on.bottom - on.top ) {
 		/*
@@ -1377,6 +1475,8 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 	wm_nwin++;
 	if ( ( attr & ( WM_ATTR_POPUP | WM_ATTR_FLOAT ) ) == 0 ) {
 		floats_front();
+	} else {
+		aids_front();		/* a panel or a floating window comes up behind the input aids, an input aid behind the menus */
 	}
 	subs_away();			/* it is in front: another group may be in use now */
 
@@ -1434,18 +1534,11 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 	}
 	draw_frame(w);
 
-	/* it draws into this window's own pixels, not onto the screen */
-	dp_set_target(w->gid, w->pixels, wm_wpitch,
-			      w->outer.left, w->outer.top);
-	dp_set_origin(w->gid, w->work.left, w->work.top);
-	dp_set_frame(w->gid, &w->work);
+	/* it draws into this window's own pixels, not onto the screen, as wm_move places it */
 	{
-		T_DPRECT	v;
+		T_DPRECT	v = w->work;
 
-		v.left = 0;  v.top = 0;
-		v.right = w->work.right - w->work.left;
-		v.bottom = w->work.bottom - w->work.top;
-		dp_set_visible(w->gid, &v);
+		dp_set_place(w->gid, w->pixels, wm_wpitch, w->outer.left, w->outer.top, &v);
 	}
 	knl_wmobj_open(i + 1);			/* it is an object from now on */
 	if ( w->mo_dur != 0 ) {
@@ -1627,7 +1720,7 @@ EXPORT BOOL knl_wm_press_now( INT x, INT y )
 		if ( !w->used || !w->visible ) {
 			continue;
 		}
-		if ( y >= knl_msg_top() && ( w->attr & WM_ATTR_POPUP ) == 0 ) {
+		if ( msg_over(w, x, y) ) {
 			continue;
 		}
 		z = w->z;
@@ -1690,10 +1783,15 @@ LOCAL void screen_win( BOOL opened )
 	if ( up ) (void)wm_msg_show(TRUE);
 }
 
+LOCAL void gs_keep( WMWIN *w );
+LOCAL void gs_take( WMWIN *w, WMGSURF *out );
+LOCAL void gs_drop( CONST WMGSURF *g );
+
 EXPORT ER wm_close( INT wid )
 {
 	WMWIN	*w;
 	WMSURF	surf;
+	WMGSURF	gs;
 	INT	z, band_at;
 	BOOL	ghost, screen;
 
@@ -1712,6 +1810,8 @@ EXPORT ER wm_close( INT wid )
 		}
 	}
 	surf_take(w, &surf);
+	gs_keep(w);			/* what the BO showed stays in its pixels, for the ghost */
+	gs_take(w, &gs);
 	z = w->z;
 	screen = (BOOL)( ( w->attr & WM_ATTR_SCREEN ) != 0 );
 	if ( w->visible ) {
@@ -1787,6 +1887,7 @@ EXPORT ER wm_close( INT wid )
 	subs_away();
 	tk_unl_mtx(wm_mtxid);
 	surf_drop(&surf);
+	gs_drop(&gs);
 	knl_wmobj_close(wid);
 	if ( ghost ) {
 		mo_wake();			/* it goes out step by step */
@@ -1980,7 +2081,7 @@ EXPORT ER wm_place( INT wid, CONST T_DPRECT *outer )
 	}
 	o = *outer;
 	wm_screen_at(( o.left + o.right ) / 2, ( o.top + o.bottom ) / 2, &on);
-	sh = on.bottom - ( ( on.left == 0 ) ? wm_msg_height() : 0 );
+	sh = on.bottom - ( main_screen(&on) ? wm_msg_height() : 0 );
 	wide = o.right - o.left;
 	high = o.bottom - o.top;
 	if ( wide > on.right - on.left ) wide = on.right - on.left;
@@ -1993,6 +2094,128 @@ EXPORT ER wm_place( INT wid, CONST T_DPRECT *outer )
 	o.bottom = o.top + high;
 
 	return move_win(wid, &o, outer);
+}
+
+/*
+ * A window in full screen, as a program asks with OB_WP_FULL in
+ * OB_WR_PLACE: its work area made the whole screen it stands on, the
+ * message line under it, no frame, band or bars (the window keeps its
+ * place in front and its keys); and out of it, the frame, the place and
+ * the size it had before given back. The desktop's 全画面表示
+ * (dt_fullscreen), which fills the screen above the message line with
+ * the frame on, is not this.
+ */
+EXPORT ER wm_full( INT wid, BOOL on )
+{
+	WMWIN		*w;
+	T_DPRECT	o, want, scr;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_ID;
+	}
+	if ( ( w->full != FALSE ) == ( on != FALSE ) ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_OK;
+	}
+	if ( on ) {
+		wm_screen_at(( w->outer.left + w->outer.right ) / 2, ( w->outer.top + w->outer.bottom ) / 2, &scr);
+		w->full_outer = w->outer;
+		w->full_want = w->want;
+		w->full_attr = w->attr;
+		w->attr &= ~(UINT)( WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE | WM_ATTR_RBAR | WM_ATTR_BBAR | WM_ATTR_LBAR );
+		w->full = TRUE;
+		o = scr;
+		want = scr;
+	} else {
+		w->attr = w->full_attr;
+		w->full = FALSE;
+		o = w->full_outer;
+		want = w->full_want;
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	return move_win(wid, &o, &want);
+}
+
+/* Whether a window is in full screen (wm_full) */
+EXPORT BOOL wm_full_is( INT wid )
+{
+	WMWIN	*w;
+	BOOL	full;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	full = ( w != NULL && w->full );
+	tk_unl_mtx(wm_mtxid);
+	return full;
+}
+
+/*
+ * A rectangle of a window's own pixels, in view pixels from its outer
+ * corner, filled with one colour, as far as the pixels reach
+ */
+LOCAL void pixels_fill( CONST WMWIN *w, CONST T_DPRECT *r, UW colour )
+{
+	INT	X0 = dv(r->left), X1 = dv(r->right), Y0 = dv(r->top), Y1 = dv(r->bottom);
+	INT	cols = (INT)( wm_wpitch / sizeof(UW) );
+	INT	rows = (INT)( ( w->pix_pages * PAGE_SIZE ) / wm_wpitch );
+	INT	X, Y;
+
+	if ( X0 < 0 ) X0 = 0;
+	if ( Y0 < 0 ) Y0 = 0;
+	if ( X1 > cols ) X1 = cols;
+	if ( Y1 > rows ) Y1 = rows;
+	for ( Y = Y0; Y < Y1; Y++ ) {
+		UW	*d = (UW *)( w->pixels + (UD)Y * wm_wpitch );
+
+		for ( X = X0; X < X1; X++ ) {
+			d[X] = colour;
+		}
+	}
+}
+
+/*
+ * What a window's new work area takes in that its old one did not (the
+ * strips the window grew by, the old frame and bars among them) laid
+ * with the colour a work area starts with (wm_open), with the lock
+ * held: its program, told to draw again, draws there in its own time,
+ * and until then the window shows its own colour rather than black or
+ * what its pixels held before. A work area that grew from a corner of
+ * its own (the frame measured anew) is laid whole.
+ */
+LOCAL void uncovered_clear( CONST WMWIN *w, CONST T_DPRECT *was_outer, CONST T_DPRECT *was_work )
+{
+	T_DPRECT	o, n, r;
+	UW		colour = ( ( w->attr & WM_ATTR_POPUP ) != 0 ) ? WM_CLEAR : wm_look(WM_LOOK_WORK);
+
+	if ( w->pixels == NULL ) {
+		return;
+	}
+	n.left = w->work.left - w->outer.left;
+	n.top = w->work.top - w->outer.top;
+	n.right = w->work.right - w->outer.left;
+	n.bottom = w->work.bottom - w->outer.top;
+	o.left = was_work->left - was_outer->left;
+	o.top = was_work->top - was_outer->top;
+	o.right = was_work->right - was_outer->left;
+	o.bottom = was_work->bottom - was_outer->top;
+	if ( o.left != n.left || o.top != n.top ) {
+		pixels_fill(w, &n, colour);
+		return;
+	}
+	if ( n.right > o.right ) {
+		r.left = o.right;  r.top = n.top;  r.right = n.right;  r.bottom = n.bottom;
+		pixels_fill(w, &r, colour);
+	}
+	if ( n.bottom > o.bottom ) {
+		r.left = n.left;  r.top = o.bottom;
+		r.right = ( n.right < o.right ) ? n.right : o.right;
+		r.bottom = n.bottom;
+		if ( r.right > r.left ) pixels_fill(w, &r, colour);
+	}
 }
 
 LOCAL ER move_win( INT wid, CONST T_DPRECT *outer, CONST T_DPRECT *ask )
@@ -2025,19 +2248,25 @@ LOCAL ER move_win( INT wid, CONST T_DPRECT *outer, CONST T_DPRECT *ask )
 	}
 
 	/*
-	 * A taller window needs a larger surface. The pixels are not
-	 * carried over: what a window holds is its own business, and it
-	 * will be told to draw itself again.
+	 * A taller window needs a larger surface. What it showed is
+	 * carried over as far as both reach, so that until its program
+	 * has drawn it again at the new size it shows what it did, and
+	 * not black; the rows are laid alike in both (wm_wpitch).
 	 */
 	pages = win_pages(outer);
 	old = NULL;
 	if ( pages != w->pix_pages ) {
+		UD	keep = ( w->pixels == NULL ) ? 0 : ( pages < w->pix_pages ) ? pages : w->pix_pages;
+
 		pixels = (UB *)knl_vmap(pages, 0);
 		if ( pixels == NULL ) {
 			tk_unl_mtx(wm_mtxid);
 			return E_NOMEM;
 		}
-		knl_memset(pixels, 0, (SZ)(pages * PAGE_SIZE));
+		if ( keep > 0 ) {
+			knl_memcpy(pixels, w->pixels, (SZ)( keep * PAGE_SIZE ));
+		}
+		knl_memset(pixels + keep * PAGE_SIZE, 0, (SZ)( ( pages - keep ) * PAGE_SIZE ));
 		old = w->pixels;		/* let go of once nothing draws there */
 		oldpages = w->pix_pages;
 		w->pixels = pixels;
@@ -2070,6 +2299,10 @@ LOCAL ER move_win( INT wid, CONST T_DPRECT *outer, CONST T_DPRECT *ask )
 	resized = (BOOL)( resized || v.right - v.left != w->work.right - w->work.left
 			  || v.bottom - v.top != w->work.bottom - w->work.top );
 	shape_of(w);				/* a new size is a new shape */
+	uncovered_clear(w, &was, &v);		/* what it grew by, the work area's colour until drawn */
+	if ( resized ) {
+		w->gs.in_pix = FALSE;		/* the BO reaches where its pixels were cleared */
+	}
 	if ( w->visible ) {
 		gone_win(w);			/* and where it stands now */
 	}
@@ -2145,8 +2378,14 @@ EXPORT void wm_relayout( void )
 }
 
 /*
- * The windows that have 'attr' put back in front of everything, in the
- * order they stood among themselves
+ * The windows that have all of 'attr' put back in front of everything,
+ * in the order they stood among themselves. They are taken from the
+ * furthest back to the nearest, each put at the very front: after k of
+ * them the ones taken are at 0..k-1 and the rest further back, so the
+ * nearest is taken last and ends in front. Every one of them is taken,
+ * the ones already at the front too: one found where it would be after
+ * the step is not yet where it ends, since each later step puts another
+ * in front of it.
  */
 LOCAL void attr_front( UINT attr )
 {
@@ -2154,15 +2393,15 @@ LOCAL void attr_front( UINT attr )
 
 	for ( k = 0; k < wm_nwin; k++ ) {
 		best = -1;
-		/* the one furthest back that is not yet in front */
+		/* the one furthest back that is not yet taken */
 		for ( i = 0; i < wm_wcap; i++ ) {
-			if ( WMW(i).used && ( WMW(i).attr & attr ) != 0
+			if ( WMW(i).used && ( WMW(i).attr & attr ) == attr
 			  && WMW(i).z >= k
 			  && ( best < 0 || WMW(i).z > WMW(best).z ) ) {
 				best = i;
 			}
 		}
-		if ( best < 0 || WMW(best).z == k ) {
+		if ( best < 0 ) {
 			break;
 		}
 		{
@@ -2179,13 +2418,41 @@ LOCAL void attr_front( UINT attr )
 }
 
 /*
- * The popups put back in front of everything: a window brought forward
- * comes up behind them, as a menu's lists stay over the window they were
- * opened from
+ * The order of the layers, from the back: the ordinary windows, the
+ * floating ones (WM_ATTR_FLOAT), the pop-ups (panels, a program's
+ * window that asks), the input aids (WM_ATTR_AID), and the menus
+ * (WM_ATTR_MENU: a menu's lists, a pop-up list, the conversion's
+ * candidates). The pointer is laid over them all. Each of these puts
+ * one layer and those above it back in front, each keeping the order
+ * its windows stood in among themselves, so that a window brought
+ * forward comes up at the front of its own layer and never over a
+ * higher one.
+ */
+
+/* The menus put back in front of everything: one is gone as soon as a choice is made, and nothing may cover it */
+LOCAL void menus_front( void )
+{
+	attr_front(WM_ATTR_MENU);
+}
+
+/*
+ * The input aids (WM_ATTR_AID) put back in front of every window but
+ * the menus: a screen keyboard stays over the panels it types into
+ */
+LOCAL void aids_front( void )
+{
+	attr_front(WM_ATTR_AID);
+	menus_front();
+}
+
+/*
+ * The popups put back in front of the windows: a window brought forward
+ * comes up behind them, and behind the input aids and the menus
  */
 LOCAL void popups_front( void )
 {
 	attr_front(WM_ATTR_POPUP);
+	aids_front();
 }
 
 /* The floating windows put back in front of the others, then the popups in front of them */
@@ -2450,6 +2717,8 @@ EXPORT ER wm_raise( INT wid )
 		} else {
 			popups_front();
 		}
+	} else {
+		aids_front();
 	}
 	if ( old != w->z && w->visible ) {
 		gone_win(w);		/* it now covers what covered it */
@@ -2479,10 +2748,64 @@ EXPORT ER wm_lower( INT wid )
 	}
 	w->z = wm_nwin - 1;
 	subs_front();
+	aids_front();			/* an input aid sent back still stands in front */
 	if ( old != w->z && w->visible ) {
 		gone_win(w);		/* what it covered shows now */
 	}
 	subs_away();
+	tk_unl_mtx(wm_mtxid);
+
+	return E_OK;
+}
+
+/*
+ * A window of a group opened together, given its place in the group.
+ * Of the group's windows that are up, the ones of a higher rank stand in
+ * front of it: when one of them is behind it, it goes back just behind
+ * the hindmost of them, which keeps the order the ranks say whichever of
+ * them came up first, and leaves where every other window stands, those
+ * a person brought forward in the meantime among them, as it was. One
+ * already behind them all stays where it is.
+ */
+EXPORT ER wm_set_rank( INT wid, UINT group, UINT rank )
+{
+	WMWIN	*w, *ref = NULL;
+	INT	i, old, rz;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_ID;
+	}
+	w->rgroup = group;
+	w->rank = rank;
+	for ( i = 0; i < wm_wcap && group != 0; i++ ) {
+		WMWIN	*o = &WMW(i);
+
+		if ( !o->used || o == w || !o->visible || o->parent > 0
+		  || o->rgroup != group || o->rank <= rank ) {
+			continue;
+		}
+		if ( ref == NULL || o->z > ref->z ) {
+			ref = o;
+		}
+	}
+	if ( ref != NULL && w->z < ref->z ) {
+		old = w->z;
+		rz = ref->z;
+		for ( i = 0; i < wm_wcap; i++ ) {
+			if ( WMW(i).used && &WMW(i) != w && WMW(i).z > old && WMW(i).z <= rz ) {
+				WMW(i).z--;
+			}
+		}
+		w->z = rz;
+		subs_front();
+		if ( w->visible ) {
+			gone_win(w);		/* what was behind it shows now */
+		}
+		subs_away();
+	}
 	tk_unl_mtx(wm_mtxid);
 
 	return E_OK;
@@ -3524,6 +3847,36 @@ EXPORT ER wm_bar_drag( INT wid, UINT which, INT x, INT y )
 	return E_OK;
 }
 
+
+EXPORT void wm_mark_drawn( INT wid )
+{
+	WMWIN	*w;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w != NULL ) {
+		w->drawn = TRUE;
+	}
+	tk_unl_mtx(wm_mtxid);
+}
+
+EXPORT BOOL wm_prc_drawn( ID pid )
+{
+	INT	i;
+	BOOL	drawn = FALSE;
+
+	if ( pid <= 0 || !wm_ready ) {
+		return FALSE;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	for ( i = 0; i < wm_wcap && !drawn; i++ ) {
+		drawn = (BOOL)( WMW(i).used && WMW(i).mkpid == pid && WMW(i).drawn );
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	return drawn;
+}
+
 EXPORT ER wm_damage( INT wid, CONST T_DPRECT *r )
 {
 	WMWIN	*w;
@@ -3712,6 +4065,7 @@ EXPORT ER wm_surf_put( INT wid, ID pid, CONST T_DPRECT *r, INT n )
 		tk_unl_mtx(wm_mtxid);
 		return E_OBJ;			/* no surface of this process's */
 	}
+	w->drawn = TRUE;
 	lim.left = 0;
 	lim.top = 0;
 	lim.right = w->work.right - w->work.left;
@@ -3960,7 +4314,7 @@ EXPORT INT wm_at( INT x, INT y )
 		if ( w == NULL || !w->visible ) {
 			continue;
 		}
-		if ( y >= knl_msg_top() && ( w->attr & WM_ATTR_POPUP ) == 0 ) {
+		if ( msg_over(w, x, y) ) {
 			continue;		/* the message line is over it */
 		}
 		if ( x >= w->outer.left && x < w->outer.right
@@ -3972,6 +4326,23 @@ EXPORT INT wm_at( INT x, INT y )
 	tk_unl_mtx(wm_mtxid);
 
 	return found;
+}
+
+/* Whether (x, y) is on an input aid, which the message line is not over */
+LOCAL BOOL aid_at( INT x, INT y )
+{
+	WMWIN	*w;
+	INT	wid = wm_at(x, y);
+	BOOL	aid;
+
+	if ( wid <= 0 ) {
+		return FALSE;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	aid = (BOOL)( w != NULL && IS_AID(w) );
+	tk_unl_mtx(wm_mtxid);
+	return aid;
 }
 
 /*
@@ -3993,7 +4364,7 @@ LOCAL INT at_reach( INT x, INT y, INT slop )
 		if ( w == NULL || !w->visible ) {
 			continue;
 		}
-		if ( y >= knl_msg_top() && ( w->attr & WM_ATTR_POPUP ) == 0 ) {
+		if ( msg_over(w, x, y) ) {
 			continue;
 		}
 		if ( x >= w->outer.left && x < w->outer.right
@@ -4109,6 +4480,8 @@ EXPORT ER wm_focus( INT wid )
 	band_redraw(band_at);
 	subs_away();			/* another group may be in use now */
 	tk_unl_mtx(wm_mtxid);
+	/* a question of that window's program, up without the keys, takes them */
+	if ( wid > 0 ) knl_wmobj_focused(wid);
 
 	return E_OK;
 }
@@ -4511,7 +4884,7 @@ again:
 	}
 	if ( h.type == HID_EV_BTN_DOWN ) {
 		knl_wm_touch_note(h.when);
-		knl_msg_press(h.x, h.y);
+		if ( full_front() == NULL && !aid_at(h.x, h.y) ) knl_msg_press(h.x, h.y);
 		knl_wm_press_seen(h.when, h.code);
 		lp_when = h.when;
 		lp_code = h.code;
@@ -4842,6 +5215,10 @@ typedef struct {
 	CONST T_CPGPU	*gpu;
 } PLAN;
 
+LOCAL BOOL gs_lay_test( CONST WMWIN *w, INT z, CONST LOOKNOW *look, UD now, CONST T_DPRECT *abox,
+			T_CPWIN *cp, BOOL count );
+LOCAL void gs_ready( CONST LOOKNOW *l, UD now );
+
 /*
  * A picture in view pixels laid over the view rectangle at, within the
  * part box of the screen's pixels: each of its pixels as large as a
@@ -4883,6 +5260,7 @@ LOCAL void build_part( CONST PLAN *pl, UB *back, CONST LOOKNOW *look, UD now )
 	INT		z, x, y, i, gdone = -1, seen, nl;
 	INT		sw = (INT)wm_spec.width, sh = (INT)wm_spec.height;
 	CONST T_CPGPU	*gpu = pl->gpu;
+	WMWIN		*fw = full_front();	/* the message line under it */
 
 	if ( cp_gpu_get() != NULL ) {
 		(void)ts_get_mono(&t0);
@@ -4923,11 +5301,14 @@ LOCAL void build_part( CONST PLAN *pl, UB *back, CONST LOOKNOW *look, UD now )
 			if ( w == NULL || !w->visible || w->pixels == NULL ) {
 				continue;
 			}
-			if ( ( w->attr & WM_ATTR_POPUP ) != 0 ) {
+			if ( ( w->attr & WM_ATTR_POPUP ) != 0 || IS_AID(w) || w == fw ) {
 				break;			/* the message line goes under it */
 			}
 			if ( lay_test(w, z, look, now, &abox, &wm_gcp[n], FALSE) ) {
 				n++;
+			}
+			if ( n < CP_GPU_MAX && gs_lay_test(w, z, look, now, &abox, &wm_gcp[n], FALSE) ) {
+				n++;			/* the BO its work area is shown from, just in front of it */
 			}
 		}
 		gdone = gpu->lay(&dst, wm_ground, (UINT)sw * sizeof(UW), wm_ground_gen, wm_gcp, n);
@@ -4964,33 +5345,39 @@ LOCAL void build_part( CONST PLAN *pl, UB *back, CONST LOOKNOW *look, UD now )
 	seen = 0;
 	nl = 0;
 	for ( z = wm_nwin - 1; z >= 0; z-- ) {
+		INT	k;
+
 		w = win_at_z(z);
 		if ( w == NULL || !w->visible || w->pixels == NULL ) {
 			continue;
 		}
-		if ( !laid && ( w->attr & WM_ATTR_POPUP ) != 0 ) {
-			/* the message line over the windows, under the menus */
+		if ( !laid && ( ( w->attr & WM_ATTR_POPUP ) != 0 || IS_AID(w) || w == fw ) ) {
+			/* the message line over the windows, under the menus, the input aids and a window in full screen */
 			cp_lay(&dst, wm_lcp, nl);
 			nl = 0;
 			knl_msg_lay(back, wm_spec.pitch, &abox);
 			laid = TRUE;
 		}
-		if ( !lay_test(w, z, look, now, &abox, &cp, TRUE) ) {
-			continue;
+		/* the window, and then the BO its work area is shown from, as the GPU's list has them */
+		for ( k = 0; k < 2; k++ ) {
+			if ( k == 0 ? !lay_test(w, z, look, now, &abox, &cp, TRUE)
+				    : !gs_lay_test(w, z, look, now, &abox, &cp, TRUE) ) {
+				continue;
+			}
+			wm_count.windows_drawn++;
+			if ( seen++ < gdone ) {
+				continue;		/* the GPU laid it */
+			}
+			if ( laid ) {
+				cp_window(&dst, &cp);
+				continue;
+			}
+			if ( nl >= CP_LAY_MAX ) {
+				cp_lay(&dst, wm_lcp, nl);
+				nl = 0;
+			}
+			wm_lcp[nl++] = cp;
 		}
-		wm_count.windows_drawn++;
-		if ( seen++ < gdone ) {
-			continue;			/* the GPU laid it */
-		}
-		if ( laid ) {
-			cp_window(&dst, &cp);
-			continue;
-		}
-		if ( nl >= CP_LAY_MAX ) {
-			cp_lay(&dst, wm_lcp, nl);
-			nl = 0;
-		}
-		wm_lcp[nl++] = cp;
 	}
 	cp_lay(&dst, wm_lcp, nl);
 
@@ -5456,6 +5843,7 @@ LOCAL ER compose_parts( CONST PARTS *ask )
 
 	if ( np > 0 ) {
 		ground_make();
+		gs_ready(&look, now);
 
 		/*
 		 * The frames' lines bent round the corners, in the windows' own
@@ -5680,11 +6068,602 @@ LOCAL void drawn_give( void )
 	tk_unl_mtx(wm_touch_mtx);
 }
 
+/* ---------------------------------------------------------------- work areas shown from BOs of the GPU */
+
+/*
+ * A program whose pictures the GPU draws gives a window two BOs and says
+ * which to show (OB_WR_GSURF, wmobj.c). The BO shown is laid over the
+ * work area as a window of its own with no frame, solid, just in front
+ * of the window, so whoever builds the screen -- the processor or the
+ * GPU -- reads the BO's pages where it would read the window's, and the
+ * picture is never copied. Where it cannot be so laid (the window seen
+ * through, at another scale, opening, with an outline of its own, its
+ * corners round into the work area), the processor copies the BO into
+ * the window's own pixels instead and the window is laid as it always
+ * was.
+ *
+ * A BO asked to be shown waits until no job of the GPU that uses it is
+ * left, so that a picture is never seen half drawn; the compositor
+ * looks at that as each build begins, and is woken each time a job is
+ * over while one waits (gs_job_over). Once shown, the window is told,
+ * and its program may have the other BO drawn: no build reads the BO
+ * shown before once this one is.
+ */
+LOCAL INT	wm_gs_n = 0;		/* windows given BOs; under the lock */
+LOCAL UW	wm_gs_waits = 0;	/* BOs waiting to be shown; read without the lock */
+LOCAL UW	wm_gs_hint = 0;		/* a job was over while one waited */
+
+LOCAL void cp_wake( void );
+
+/* A job of the GPU is over: the compositor woken when a BO waits for its jobs */
+LOCAL void gs_job_over( void )
+{
+	if ( __atomic_load_n(&wm_gs_waits, __ATOMIC_ACQUIRE) == 0 ) {
+		return;
+	}
+	__atomic_store_n(&wm_gs_hint, 1, __ATOMIC_RELEASE);
+	cp_wake();
+}
+
+/* What a window was given taken from it under the lock, let go of after (gs_drop) */
+LOCAL void gs_take( WMWIN *w, WMGSURF *out )
+{
+	*out = w->gs;
+	if ( w->gs.bo[0] != NULL ) {
+		wm_gs_n--;
+		if ( w->gs.wait >= 0 ) {
+			__atomic_sub_fetch(&wm_gs_waits, 1, __ATOMIC_ACQ_REL);
+		}
+	}
+	knl_memset(&w->gs, 0, sizeof(w->gs));
+	w->gs.shown = -1;
+	w->gs.wait = -1;
+}
+
+/*
+ * Without the lock: taking the kernel's view away tells whatever
+ * entered its pages in a GPU's MMU (knl_vunmap_hook), and the BO goes
+ * with the last reference.
+ */
+LOCAL void gs_drop( CONST WMGSURF *g )
+{
+	INT	i;
+
+	for ( i = 0; i < OB_GS_BUFS; i++ ) {
+		if ( g->bo[i] == NULL ) {
+			continue;
+		}
+		if ( g->kva[i] != NULL ) {
+			knl_gpu_bo_kunmap(g->bo[i], g->kva[i]);
+		}
+		knl_gpu_bo_put(g->bo[i]);
+	}
+}
+
+/*
+ * A rectangle r of the work area (view pixels) of the BO shown into the
+ * window's own pixels, as far as the work area and the BO both reach;
+ * at a scale other than 100, each of the BO's pixels as large as a view
+ * pixel (the nearest one taken for each pixel of the window).
+ */
+LOCAL void gs_put( CONST WMWIN *w, CONST T_DPRECT *r )
+{
+	CONST WMGSURF	*g = &w->gs;
+	CONST UB	*src;
+	T_DPRECT	c = *r, lim;
+	INT		ox, oy, x, y;
+
+	if ( g->shown < 0 || w->pixels == NULL ) {
+		return;
+	}
+	src = g->kva[g->shown];
+	lim.left = 0;
+	lim.top = 0;
+	lim.right = w->work.right - w->work.left;
+	lim.bottom = w->work.bottom - w->work.top;
+	if ( lim.right > g->w )  lim.right = g->w;
+	if ( lim.bottom > g->h ) lim.bottom = g->h;
+	if ( !rect_cut(&c, &lim) ) {
+		return;
+	}
+	ox = w->work.left - w->outer.left;
+	oy = w->work.top - w->outer.top;
+	if ( wm_scale != 100 ) {
+		INT	Y0 = dv(oy + c.top), Y1 = dv(oy + c.bottom), X0 = dv(ox + c.left), X1 = dv(ox + c.right);
+
+		for ( y = Y0; y < Y1; y++ ) {
+			INT		sy = disp_view_of(y, wm_scale) - oy;
+			UW		*d = (UW *)( w->pixels + (UD)y * wm_wpitch );
+			CONST UW	*s = (CONST UW *)( src + (UD)sy * g->pitch );
+
+			for ( x = X0; x < X1; x++ ) {
+				d[x] = s[disp_view_of(x, wm_scale) - ox];
+			}
+		}
+		return;
+	}
+	for ( y = c.top; y < c.bottom; y++ ) {
+		row_copy((UW *)( w->pixels + (UD)( oy + y ) * wm_wpitch ) + ox + c.left,
+			 (CONST UW *)( src + (UD)y * g->pitch ) + c.left, c.right - c.left);
+	}
+}
+
+/* The window's own pixels made to hold the BO shown, when they do not */
+LOCAL void gs_keep( WMWIN *w )
+{
+	T_DPRECT	all;
+
+	if ( w->gs.bo[0] == NULL || w->gs.shown < 0 || w->gs.in_pix || w->pixels == NULL ) {
+		return;
+	}
+	all.left = 0;
+	all.top = 0;
+	all.right = w->gs.w;
+	all.bottom = w->gs.h;
+	gs_put(w, &all);
+	w->gs.in_pix = TRUE;
+}
+
+/*
+ * Whether the BO shown may be laid over the work area itself: the work
+ * area solid and keyed by no colour, the window standing still with no
+ * outline of its own, at the scale of 100, and no round corner cutting
+ * into the work area. A window seen through is laid as it was, from its
+ * own pixels with the BO copied into them, so that what shows through
+ * it and what is spread behind it are worked out as before.
+ */
+LOCAL BOOL gs_front( CONST WMWIN *w, CONST LOOKNOW *l, UD now )
+{
+	T_CPWIN	cp;
+	INT	rad;
+
+	if ( w->gs.bo[0] == NULL || w->gs.shown < 0 || !w->visible || w->pixels == NULL
+	  || wm_scale != 100 || w->own != NULL || ( w->attr & WM_ATTR_POPUP ) != 0 ) {
+		return FALSE;
+	}
+	win_cp(w, l, now, &cp);
+	if ( CP_MOVING(&cp) || cp.a_work < 255 || cp.keyed ) {
+		return FALSE;
+	}
+	rad = cp_round_of(&cp.outer, cp.round);
+	if ( rad > 0
+	  && ( cp.work.left < cp.outer.left + rad || cp.work.right > cp.outer.right - rad )
+	  && ( cp.work.top < cp.outer.top + rad || cp.work.bottom > cp.outer.bottom - rad ) ) {
+		return FALSE;
+	}
+	return TRUE;
+}
+
+/*
+ * The BO shown as the stages lay it: a window with no frame over the
+ * work area from its corner, as far as the BO reaches, solid, its pixels
+ * the BO's pages, its rows the BO's. FALSE when nothing of it is in the
+ * work area.
+ */
+LOCAL BOOL gs_cp( CONST WMWIN *w, T_CPWIN *cp )
+{
+	CONST WMGSURF	*g = &w->gs;
+
+	knl_memset(cp, 0, sizeof(*cp));
+	cp->outer.left = w->work.left;
+	cp->outer.top = w->work.top;
+	cp->outer.right = w->work.left + g->w;
+	cp->outer.bottom = w->work.top + g->h;
+	if ( cp->outer.right > w->work.right )   cp->outer.right = w->work.right;
+	if ( cp->outer.bottom > w->work.bottom ) cp->outer.bottom = w->work.bottom;
+	if ( cp->outer.right <= cp->outer.left || cp->outer.bottom <= cp->outer.top ) {
+		return FALSE;
+	}
+	cp->work = cp->outer;
+	cp->band = cp->outer;
+	cp->band.bottom = cp->band.top;
+	cp->pixels = g->kva[g->shown];
+	cp->pitch = g->pitch;
+	cp->a_frame = 255;
+	cp->a_work = 255;
+	cp->shown = cp->outer;
+	cp->fade = 255;
+	return TRUE;
+}
+
+/*
+ * As lay_test, for the BO laid in front of the window at place z: its
+ * description in 'cp', FALSE when nothing of it is in 'abox' or what is
+ * there is covered by a solid window in front.
+ */
+LOCAL BOOL gs_lay_test( CONST WMWIN *w, INT z, CONST LOOKNOW *look, UD now, CONST T_DPRECT *abox,
+			T_CPWIN *cp, BOOL count )
+{
+	T_DPRECT	vis;
+	INT		fz;
+
+	if ( !w->gs.laid || !gs_cp(w, cp) ) {
+		return FALSE;
+	}
+	vis = cp->outer;
+	if ( !rect_cut(&vis, abox) ) {
+		return FALSE;
+	}
+	for ( fz = z - 1; fz >= 0; fz-- ) {
+		WMWIN		*f = win_at_z(fz);
+		T_DPRECT	s;
+
+		if ( f != NULL && solid_of(f, look, now, &s) && rect_covers(&s, &vis) ) {
+			if ( count ) {
+				wm_count.windows_skipped++;
+			}
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+/*
+ * As a build begins, with the lock held: how each window given BOs is to
+ * be laid in it, and its own pixels made to hold the BO shown where the
+ * BO is not laid itself.
+ */
+LOCAL void gs_ready( CONST LOOKNOW *l, UD now )
+{
+	INT	i;
+
+	if ( wm_gs_n == 0 ) {
+		return;
+	}
+	for ( i = 0; i < wm_wcap; i++ ) {
+		WMWIN	*w = &WMW(i);
+
+		if ( !w->used || w->gs.bo[0] == NULL ) {
+			continue;
+		}
+		w->gs.laid = gs_front(w, l, now);
+		if ( !w->gs.laid ) {
+			gs_keep(w);
+		}
+	}
+}
+
+/* A window told that a BO is shown, once the build that shows it is over */
+typedef struct {
+	INT	wid;
+	INT	idx;
+	UW	serial;
+} GSTOLD;
+
+#define GS_TELL_MAX	16
+
+/*
+ * As a build begins, with the lock held: each BO waiting whose jobs are
+ * all over is shown, what it changed added to what is to be built, and
+ * the window put in 'told'; how many. Those left over for want of room
+ * there are shown at the next build.
+ */
+LOCAL INT gs_switch( PARTS *p, CONST LOOKNOW *l, UD now, GSTOLD *told )
+{
+	INT	i, k, n = 0;
+
+	if ( __atomic_load_n(&wm_gs_waits, __ATOMIC_ACQUIRE) == 0 ) {
+		return 0;
+	}
+	for ( i = 0; i < wm_wcap; i++ ) {
+		WMWIN		*w = &WMW(i);
+		WMGSURF		*g = &w->gs;
+		T_GPUBOINFO	bi;
+		T_DPRECT	all, r;
+		CONST T_DPRECT	*rs;
+		INT		nr;
+
+		if ( !w->used || g->bo[0] == NULL || g->wait < 0 ) {
+			continue;
+		}
+		if ( knl_gpu_bo_ref(g->bo[g->wait], &bi) < E_OK || bi.busy != 0 ) {
+			/*
+			 * The GPU is still drawing it. Still so a build after the
+			 * one it was asked for, the frame is late: its jobs that
+			 * have not started are hurried.
+			 */
+			if ( g->wait_builds++ >= 1 ) knl_gpu_bo_boost(g->bo[g->wait]);
+			continue;
+		}
+		if ( n == GS_TELL_MAX ) {
+			__atomic_store_n(&wm_gs_hint, 1, __ATOMIC_RELEASE);
+			break;
+		}
+		g->shown = g->wait;
+		g->shown_serial = g->wait_serial;
+		g->wait = -1;
+		__atomic_sub_fetch(&wm_gs_waits, 1, __ATOMIC_ACQ_REL);
+		all.left = 0;
+		all.top = 0;
+		all.right = g->w;
+		all.bottom = g->h;
+		rs = g->whole ? &all : g->rect;
+		nr = g->whole ? 1 : g->nrect;
+		if ( gs_front(w, l, now) ) {
+			g->in_pix = FALSE;		/* the BO itself is laid: its pixels are not kept up */
+		} else if ( !g->in_pix ) {
+			gs_keep(w);
+		} else {
+			for ( k = 0; k < nr; k++ ) {
+				gs_put(w, &rs[k]);
+			}
+		}
+		if ( w->visible ) {
+			for ( k = 0; k < nr; k++ ) {
+				r = rs[k];
+				if ( !rect_cut(&r, &all) ) {
+					continue;
+				}
+				r.left += w->work.left;
+				r.right += w->work.left;
+				r.top += w->work.top;
+				r.bottom += w->work.top;
+				spread_add(p, &r, l, now);
+			}
+		}
+		told[n].wid = w->wid;
+		told[n].idx = g->shown;
+		told[n].serial = g->shown_serial;
+		n++;
+	}
+	return n;
+}
+
+EXPORT ER wm_gsurf_set( INT wid, ID pid, struct gpubo *CONST *bo, INT gw, INT gh, UINT pitch )
+{
+	WMWIN		*w;
+	WMGSURF		nw, old;
+	T_GPUBOINFO	bi;
+	UW		serial;
+	INT		i;
+	ER		er;
+
+	if ( bo == NULL || gw <= 0 || gh <= 0 || gw > 16384 || gh > 16384
+	  || pitch % OB_GS_PITCH != 0 || pitch < (UINT)gw * sizeof(UW) ) {
+		return E_PAR;
+	}
+	for ( i = 0; i < OB_GS_BUFS; i++ ) {
+		if ( bo[i] == NULL || knl_gpu_bo_ref(bo[i], &bi) < E_OK
+		  || (UD)bi.size < (UD)pitch * (UD)gh ) {
+			return E_PAR;
+		}
+	}
+	if ( bo[0] == bo[1] ) {
+		return E_PAR;			/* one is drawn while the other is shown */
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_ID;
+	}
+	serial = w->serial;
+	tk_unl_mtx(wm_mtxid);
+
+	/* the kernel's view of their pages, made with the lock let go of */
+	knl_memset(&nw, 0, sizeof(nw));
+	nw.shown = -1;
+	nw.wait = -1;
+	er = E_OK;
+	for ( i = 0; i < OB_GS_BUFS && er >= E_OK; i++ ) {
+		void	*va = NULL;
+
+		knl_gpu_bo_get(bo[i]);
+		nw.bo[i] = bo[i];
+		er = knl_gpu_bo_kmap(bo[i], &va);
+		nw.kva[i] = (UB *)va;
+	}
+	if ( er < E_OK ) {
+		gs_drop(&nw);
+		return er;
+	}
+	nw.pid = pid;
+	nw.w = gw;
+	nw.h = gh;
+	nw.pitch = pitch;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL || w->serial != serial ) {
+		tk_unl_mtx(wm_mtxid);
+		gs_drop(&nw);
+		return E_ID;
+	}
+	gs_keep(w);			/* the window goes on showing what it did until one is shown */
+	gs_take(w, &old);
+	w->gs = nw;
+	wm_gs_n++;
+	tk_unl_mtx(wm_mtxid);
+	gs_drop(&old);
+
+	return E_OK;
+}
+
+EXPORT ER wm_gsurf_show( INT wid, ID pid, INT idx, UW serial, CONST T_DPRECT *r, INT n )
+{
+	WMWIN	*w;
+	WMGSURF	*g;
+	INT	i;
+
+	if ( idx < 0 || idx >= OB_GS_BUFS || n < 0 || n > OB_GS_RECTS || ( n > 0 && r == NULL ) ) {
+		return E_PAR;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_ID;
+	}
+	g = &w->gs;
+	if ( g->bo[0] == NULL || g->pid != pid ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_OBJ;			/* no BOs given by this process */
+	}
+	if ( g->wait < 0 ) {
+		g->whole = FALSE;
+		g->nrect = 0;
+		__atomic_add_fetch(&wm_gs_waits, 1, __ATOMIC_ACQ_REL);
+	}
+	/* one waiting already gives its rectangles to this one, which takes its place */
+	if ( n == 0 || g->nrect + n > OB_GS_RECTS ) {
+		g->whole = TRUE;
+	}
+	for ( i = 0; !g->whole && i < n; i++ ) {
+		g->rect[g->nrect++] = r[i];
+	}
+	g->wait = idx;
+	g->wait_serial = serial;
+	g->wait_builds = 0;
+	w->drawn = TRUE;
+	tk_unl_mtx(wm_mtxid);
+	(void)ask(ASK_UPD, NULL);		/* not waited for: shown once the GPU is done with it */
+
+	return E_OK;
+}
+
+EXPORT ER wm_gsurf_drop( INT wid, ID pid )
+{
+	WMWIN	*w;
+	WMGSURF	old;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_ID;
+	}
+	if ( w->gs.bo[0] == NULL || w->gs.pid != pid ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_OBJ;
+	}
+	gs_keep(w);			/* the last picture stays, in its own pixels */
+	gs_take(w, &old);
+	if ( w->visible ) {
+		gone_add(&w->work);
+	}
+	tk_unl_mtx(wm_mtxid);
+	gs_drop(&old);
+	(void)ask(ASK_UPD, NULL);
+
+	return E_OK;
+}
+
+EXPORT ER wm_gsurf_ref( INT wid, T_OBWGSTAT *st )
+{
+	WMWIN	*w;
+
+	if ( st == NULL ) {
+		return E_PAR;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL ) {
+		tk_unl_mtx(wm_mtxid);
+		return E_ID;
+	}
+	knl_memset(st, 0, sizeof(*st));
+	st->set = (BOOL)( w->gs.bo[0] != NULL );
+	st->shown = st->set ? w->gs.shown : -1;
+	st->shown_serial = w->gs.shown_serial;
+	st->waiting = st->set ? w->gs.wait : -1;
+	st->waiting_serial = w->gs.wait_serial;
+	st->laid = (BOOL)( st->set && w->gs.laid );
+	tk_unl_mtx(wm_mtxid);
+
+	return E_OK;
+}
+
+/* The BOs a process gave, let go of as it ends: the windows keep the last picture */
+EXPORT void knl_wm_gsurf_prc_end( ID pid )
+{
+	WMGSURF	gone[16];
+	INT	i, n;
+
+	if ( pid <= 0 || wm_mtxid <= 0 ) {
+		return;
+	}
+	do {
+		n = 0;
+		tk_loc_mtx(wm_mtxid, TMO_FEVR);
+		for ( i = 0; i < wm_wcap && n < 16; i++ ) {
+			WMWIN	*w = &WMW(i);
+
+			if ( w->used && w->gs.bo[0] != NULL && w->gs.pid == pid ) {
+				gs_keep(w);
+				gs_take(w, &gone[n++]);
+				if ( w->visible ) {
+					gone_add(&w->work);
+				}
+			}
+		}
+		tk_unl_mtx(wm_mtxid);
+		for ( i = 0; i < n; i++ ) {
+			gs_drop(&gone[i]);
+		}
+	} while ( n == 16 );
+}
+
+EXPORT INT knl_wm_gsurf_count( void )
+{
+	INT	n;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	n = wm_gs_n;
+	tk_unl_mtx(wm_mtxid);
+
+	return n;
+}
+
+EXPORT ER knl_wm_gsurf_bo( INT wid, INT idx, struct gpubo **p_bo )
+{
+	WMWIN	*w;
+	ER	er = E_NOEXS;
+
+	if ( idx < 0 || idx >= OB_GS_BUFS || p_bo == NULL ) {
+		return E_PAR;
+	}
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL ) {
+		er = E_ID;
+	} else if ( w->gs.bo[0] != NULL ) {
+		*p_bo = w->gs.bo[idx];
+		er = E_OK;
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	return er;
+}
+
+/* The window's own pixel at (x, y) of its work area, in view pixels */
+EXPORT ER knl_wm_gsurf_own_px( INT wid, INT x, INT y, UW *p_px )
+{
+	WMWIN	*w;
+	ER	er = E_OK;
+
+	tk_loc_mtx(wm_mtxid, TMO_FEVR);
+	w = win_of(wid);
+	if ( w == NULL || w->pixels == NULL ) {
+		er = E_ID;
+	} else if ( x < 0 || y < 0 || x >= w->work.right - w->work.left || y >= w->work.bottom - w->work.top ) {
+		er = E_PAR;
+	} else {
+		INT	px = dv(w->work.left - w->outer.left + x), py = dv(w->work.top - w->outer.top + y);
+
+		*p_px = ((CONST UW *)( w->pixels + (UD)py * wm_wpitch ))[px] & 0x00FFFFFFU;
+	}
+	tk_unl_mtx(wm_mtxid);
+
+	return er;
+}
+
 /*
  * What is to be built now, taken from what was asked: the number of the
- * last ask it answers. Called with the lock held.
+ * last ask it answers. The BOs waiting whose jobs are over are shown
+ * (told: the windows to tell, *p_ntold of them). Called with the lock
+ * held.
  */
-LOCAL UW take_asks( PARTS *p )
+LOCAL UW take_asks( PARTS *p, GSTOLD *told, INT *p_ntold )
 {
 	LOOKNOW		look;
 	T_DPRECT	r;
@@ -5735,6 +6714,7 @@ LOCAL UW take_asks( PARTS *p )
 	for ( i = 0; i < wm_ask_chg.n; i++ ) {
 		spread_add(p, &wm_ask_chg.r[i], &look, now);
 	}
+	*p_ntold = gs_switch(p, &look, now, told);
 
 	wm_ask_chg.n = 0;
 	wm_ask.n = 0;
@@ -5750,13 +6730,15 @@ EXPORT volatile UW	knl_wm_torn = 0;
 LOCAL void build_asked( void )
 {
 	PARTS	p;
+	GSTOLD	told[GS_TELL_MAX];
 	UW	seq;
-	INT	i;
+	INT	i, ntold = 0;
 	UD	t, d, frame;
 
 	/* how far from the one before it began */
 	(void)ts_get_mono(&t);
 	wm_fr.builds++;
+	knl_gpu_interactive();			/* frames come: the GPU, if it keeps a pace, answers quickly */
 	if ( wm_cp_began != 0 && t > wm_cp_began && t - wm_cp_began < (UD)WM_APART_MS * 1000000 ) {
 		d = ( t - wm_cp_began ) / 1000;
 		frame = ts_disp_paced();
@@ -5769,8 +6751,9 @@ LOCAL void build_asked( void )
 	wm_cp_began = t;
 
 	(void)__atomic_exchange_n(&wm_ptr_hint, 0, __ATOMIC_ACQ_REL);
+	(void)__atomic_exchange_n(&wm_gs_hint, 0, __ATOMIC_ACQ_REL);
 	tk_loc_mtx(wm_mtxid, TMO_FEVR);
-	seq = take_asks(&p);
+	seq = take_asks(&p, told, &ntold);
 	tk_unl_mtx(wm_mtxid);
 
 #if USE_UITEST
@@ -5799,6 +6782,11 @@ LOCAL void build_asked( void )
 		}
 	}
 	tk_unl_mtx(wm_mtxid);
+
+	/* the BOs now on the screen, told to their windows: the ones shown before may be drawn again */
+	for ( i = 0; i < ntold; i++ ) {
+		knl_wmobj_gsurf_shown(told[i].wid, told[i].idx, told[i].serial);
+	}
 }
 
 LOCAL void cp_task( INT stacd, void *exinf )
@@ -5814,7 +6802,8 @@ LOCAL void cp_task( INT stacd, void *exinf )
 			tk_loc_mtx(wm_mtxid, TMO_FEVR);
 			more = (BOOL)( wm_ask_seq != wm_built_seq );
 			tk_unl_mtx(wm_mtxid);
-			if ( !more && __atomic_load_n(&wm_ptr_hint, __ATOMIC_ACQUIRE) == 0 ) {
+			if ( !more && __atomic_load_n(&wm_ptr_hint, __ATOMIC_ACQUIRE) == 0
+			  && __atomic_load_n(&wm_gs_hint, __ATOMIC_ACQUIRE) == 0 ) {
 				break;
 			}
 
@@ -6369,7 +7358,7 @@ EXPORT void wm_screen( INT *p_w, INT *p_h )
 	*p_h = wm_ready ? wm_vh : 0;
 }
 
-/* The main screen's size: its corner is the view's, so what is centred or kept on it needs no more */
+/* The main screen's size; where it is in the view is wm_screen_main_rect's */
 EXPORT void wm_screen_main( INT *p_w, INT *p_h )
 {
 	INT	x, y;
@@ -6378,20 +7367,196 @@ EXPORT void wm_screen_main( INT *p_w, INT *p_h )
 	(void)ts_disp_screen(0, &x, &y, p_w, p_h);
 }
 
-/* The screen a point of the view is on, or the nearest one */
-EXPORT void wm_screen_at( INT px, INT py, T_DPRECT *r )
+/* The main screen's rectangle in the view: at the corner unless a screen is left of it or above it */
+EXPORT void wm_screen_main_rect( T_DPRECT *r )
 {
-	INT	i, x = 0, y = 0, w = 0, h = 0;
+	INT	x = 0, y = 0, w = 0, h = 0;
 
-	(void)py;
-	for ( i = 0; ts_disp_screen(i, &x, &y, &w, &h) >= E_OK; i++ ) {
-		if ( px < x + w ) break;
+	if ( ts_disp_screen(0, &x, &y, &w, &h) < E_OK ) {
+		x = y = 0;
+		w = wm_vw;
+		h = wm_vh;
 	}
-	if ( i > 0 && i == ts_disp_screens() ) (void)ts_disp_screen(i - 1, &x, &y, &w, &h);
 	r->left = x;
 	r->top = y;
 	r->right = x + w;
 	r->bottom = y + h;
+}
+
+/* The screen a point of the view is on, or the nearest one */
+EXPORT void wm_screen_at( INT px, INT py, T_DPRECT *r )
+{
+	INT	i, x = 0, y = 0, w = 0, h = 0, dx, dy;
+	D	d, best = -1;
+
+	r->left = r->top = r->right = r->bottom = 0;
+	for ( i = 0; ts_disp_screen(i, &x, &y, &w, &h) >= E_OK; i++ ) {
+		/* how far the point is outside it, across and down; 0 inside */
+		dx = ( px < x ) ? x - px : ( px >= x + w ) ? px - ( x + w - 1 ) : 0;
+		dy = ( py < y ) ? y - py : ( py >= y + h ) ? py - ( y + h - 1 ) : 0;
+		d = (D)dx * dx + (D)dy * dy;
+		if ( best < 0 || d < best ) {
+			best = d;
+			r->left = x;
+			r->top = y;
+			r->right = x + w;
+			r->bottom = y + h;
+			if ( d == 0 ) break;
+		}
+	}
+}
+
+/* Whether a screen's rectangle is the main screen's, which has the message line */
+LOCAL BOOL main_screen( CONST T_DPRECT *on )
+{
+	T_DPRECT	m;
+
+	wm_screen_main_rect(&m);
+	return ( on->left == m.left && on->top == m.top );
+}
+
+EXPORT BOOL wm_screen_is_main( CONST T_DPRECT *on )
+{
+	return ( on != NULL && main_screen(on) );
+}
+
+EXPORT void wm_screen_of( INT px, INT py, T_DPRECT *r )
+{
+	INT	i, x, y, w, h;
+
+	/* the main screen unless one contains the point: never the nearest, nor the one at the view's corner */
+	wm_screen_main_rect(r);
+	for ( i = 0; ts_disp_screen(i, &x, &y, &w, &h) >= E_OK; i++ ) {
+		if ( px >= x && px < x + w && py >= y && py < y + h ) {
+			r->left = x;
+			r->top = y;
+			r->right = x + w;
+			r->bottom = y + h;
+			return;
+		}
+	}
+}
+
+EXPORT void wm_screen_new_rect( T_DPRECT *r )
+{
+	INT	x = 0, y = 0;
+	UINT	b = 0;
+
+	if ( ts_hid_pointer(&x, &y, &b) < E_OK ) {
+		wm_screen_main_rect(r);		/* no pointer: the main screen */
+		return;
+	}
+	wm_screen_of(x, y, r);
+}
+
+/*
+ * Kept places of windows (T_WMPLACE): a screen by the identity of the
+ * display on it, which the output layer has from its EDID
+ */
+
+/* The screen a point of the view is on, or the nearest: its number and rectangle */
+LOCAL INT screen_num_at( INT px, INT py, T_DPRECT *r )
+{
+	INT	i, best = 0, x = 0, y = 0, w = 0, h = 0, dx, dy;
+	D	d, bd = -1;
+
+	wm_screen_main_rect(r);
+	for ( i = 0; ts_disp_screen(i, &x, &y, &w, &h) >= E_OK; i++ ) {
+		dx = ( px < x ) ? x - px : ( px >= x + w ) ? px - ( x + w - 1 ) : 0;
+		dy = ( py < y ) ? y - py : ( py >= y + h ) ? py - ( y + h - 1 ) : 0;
+		d = (D)dx * dx + (D)dy * dy;
+		if ( bd < 0 || d < bd ) {
+			bd = d;
+			best = i;
+			r->left = x;
+			r->top = y;
+			r->right = x + w;
+			r->bottom = y + h;
+			if ( d == 0 ) break;
+		}
+	}
+	return best;
+}
+
+/* The identity of the display on a screen (1 or more), 0 when it has none to be known by */
+LOCAL UW screen_ident( INT s )
+{
+	T_DISPOUTINFO	oi;
+	INT		i, n = ts_disp_outputs();
+
+	for ( i = 0; i < n; i++ ) {
+		if ( ts_disp_output(i, &oi) >= E_OK && oi.screen == s ) return oi.ident;
+	}
+	return 0;
+}
+
+/* The screen showing the display of an identity, besides the main one: its number, or -1 */
+LOCAL INT screen_of_ident( UW ident )
+{
+	T_DISPOUTINFO	oi;
+	INT		i, n = ts_disp_outputs();
+
+	for ( i = 0; i < n && ident != 0; i++ ) {
+		if ( ts_disp_output(i, &oi) >= E_OK && oi.ident == ident && oi.screen > 0 ) return oi.screen;
+	}
+	return -1;
+}
+
+EXPORT ER wm_place_keep( CONST T_DPRECT *view, T_WMPLACE *p )
+{
+	T_DPRECT	on;
+	INT		s;
+
+	if ( view == NULL || p == NULL ) {
+		return E_PAR;
+	}
+	/* the screen of its top left corner; one across two screens is the first's */
+	s = screen_num_at(view->left, view->top, &on);
+	p->screen = ( s > 0 ) ? screen_ident(s) : 0;
+	if ( s > 0 && p->screen == 0 ) {
+		wm_screen_main_rect(&on);	/* a display not to be known again: kept from the main screen */
+	}
+	p->r.left = view->left - on.left;
+	p->r.top = view->top - on.top;
+	p->r.right = view->right - on.left;
+	p->r.bottom = view->bottom - on.top;
+	return E_OK;
+}
+
+EXPORT ER wm_place_open( CONST T_WMPLACE *p, T_DPRECT *view )
+{
+	T_DPRECT	on;
+	INT		s, x, y, w, h, wide, high;
+
+	if ( p == NULL || view == NULL ) {
+		return E_PAR;
+	}
+	s = ( p->screen != 0 ) ? screen_of_ident(p->screen) : 0;
+	if ( s > 0 && ts_disp_screen(s, &x, &y, &w, &h) >= E_OK ) {
+		view->left = x + p->r.left;
+		view->top = y + p->r.top;
+		view->right = x + p->r.right;
+		view->bottom = y + p->r.bottom;
+		return 1;
+	}
+	wm_screen_main_rect(&on);
+	view->left = on.left + p->r.left;
+	view->top = on.top + p->r.top;
+	view->right = on.left + p->r.right;
+	view->bottom = on.top + p->r.bottom;
+	if ( p->screen != 0 ) {
+		/* its screen is not on: moved in to stand inside the main screen, above the message line */
+		wide = view->right - view->left;
+		high = view->bottom - view->top;
+		on.bottom -= wm_msg_height();
+		if ( view->left + wide > on.right ) view->left = on.right - wide;
+		if ( view->top + high > on.bottom ) view->top = on.bottom - high;
+		if ( view->left < on.left ) view->left = on.left;
+		if ( view->top < on.top ) view->top = on.top;
+		view->right = view->left + wide;
+		view->bottom = view->top + high;
+	}
+	return 0;
 }
 
 /*
@@ -6564,6 +7729,7 @@ EXPORT ER wm_grab_rows( INT wid, UINT serial, UW *dst, INT pitch, INT top, INT r
 		tk_unl_mtx(wm_mtxid);
 		return E_OBJ;
 	}
+	gs_keep(w);				/* a work area shown from a BO: its pixels made to hold it */
 	ww = w->work.right - w->work.left;
 	wh = w->work.bottom - w->work.top;
 	ox = w->work.left - w->outer.left;
@@ -6681,18 +7847,37 @@ EXPORT void knl_wm_screen_kept( void )
  * smaller only when it is larger than the screen -- so a screen with
  * room again gives it its size and place back; one that stood partly
  * off the old screen keeps at least a corner of its frame on the new one.
+ *
+ * With screens of their own (10.4.8) a window goes with the screen it
+ * stands on (knl_disp_follow), dx, dy: the main screen moves in the view
+ * when a screen is put left of it or above it. One whose screen was taken
+ * away or moved goes to the main screen (keep), at the same place from
+ * its corner, and is kept inside it above the message line. The screen
+ * it is on now is on; a window in full screen is made as large as it.
  */
-LOCAL void outer_on_screen( CONST WMWIN *w, INT ow, INT oh, INT sw, INT sh, INT mh, T_DPRECT *o )
+LOCAL void outer_on_screen( CONST WMWIN *w, INT ow, INT oh, INT sw, INT sh, INT mh,
+			    INT dx, INT dy, CONST T_DPRECT *on, BOOL keep, T_DPRECT *o )
 {
 	INT	wide, high, least_w = 0, least_h = 0;
-	BOOL	fitted;
+	BOOL	fitted, inside;
 
+	if ( w->full ) {
+		if ( on != NULL ) {
+			*o = *on;
+			return;
+		}
+		o->left = 0;
+		o->top = 0;
+		o->right = sw;
+		o->bottom = sh;
+		return;
+	}
 	fitted = (BOOL)( w->want.left != w->outer.left || w->want.top != w->outer.top
 			 || w->want.right != w->outer.right || w->want.bottom != w->outer.bottom );
 	*o = w->outer;
 	wide = o->right - o->left;
 	high = o->bottom - o->top;
-	if ( !fitted && o->left == 0 && o->top == 0 && wide == ow && ( high == oh - mh || high == oh ) ) {
+	if ( !fitted && on == NULL && o->left == 0 && o->top == 0 && wide == ow && ( high == oh - mh || high == oh ) ) {
 		o->right = sw;
 		o->bottom = ( high == oh ) ? sh : sh - mh;
 		return;
@@ -6700,10 +7885,13 @@ LOCAL void outer_on_screen( CONST WMWIN *w, INT ow, INT oh, INT sw, INT sh, INT 
 	*o = w->want;
 	wide = o->right - o->left;
 	high = o->bottom - o->top;
+	inside = (BOOL)( o->left >= 0 && o->top >= 0 && o->right <= ow && o->bottom <= oh );
+	o->left += dx;
+	o->top += dy;
 	(void)wm_least(w->attr, &least_w, &least_h);
 	if ( wide > sw ) wide = ( sw > least_w ) ? sw : least_w;
 	if ( high > sh - mh ) high = ( sh - mh > least_h ) ? sh - mh : least_h;
-	if ( fitted || ( o->left >= 0 && o->top >= 0 && o->right <= ow && o->bottom <= oh ) ) {
+	if ( fitted || inside ) {
 		if ( o->left + wide > sw ) o->left = sw - wide;
 		if ( o->top + high > sh - mh ) o->top = sh - mh - high;
 		if ( o->left < 0 ) o->left = 0;
@@ -6712,6 +7900,16 @@ LOCAL void outer_on_screen( CONST WMWIN *w, INT ow, INT oh, INT sw, INT sh, INT 
 		if ( o->left > sw - 64 ) o->left = sw - 64;
 		if ( o->top > sh - mh - 24 ) o->top = sh - mh - 24;
 		if ( o->top < 0 ) o->top = 0;
+	}
+	if ( keep && on != NULL ) {
+		INT	bottom = on->bottom - mh;
+
+		if ( wide > on->right - on->left ) wide = ( on->right - on->left > least_w ) ? on->right - on->left : least_w;
+		if ( high > bottom - on->top ) high = ( bottom - on->top > least_h ) ? bottom - on->top : least_h;
+		if ( o->left + wide > on->right ) o->left = on->right - wide;
+		if ( o->top + high > bottom ) o->top = bottom - high;
+		if ( o->left < on->left ) o->left = on->left;
+		if ( o->top < on->top ) o->top = on->top;
 	}
 	o->right = o->left + wide;
 	o->bottom = o->top + high;
@@ -6775,6 +7973,7 @@ EXPORT void knl_wm_screen_changed( void )
 	UINT		was_scale, was_wpitch;
 	INT		was_vw, was_vh;
 	INT		i, r, rows, bytes, mh, nwin;
+	BOOL		multi;
 
 	if ( !wm_ready ) {
 		return;
@@ -6794,13 +7993,19 @@ EXPORT void knl_wm_screen_changed( void )
 	ghosts_drop();				/* their rows were the old screen's */
 	knl_pt_forget();			/* and what the pointer covered */
 	knl_dp_screen_changed();
+	ground_drop();				/* the screens may stand elsewhere in a view of the same size */
 	mh = wm_msg_height();
 	nwin = wm_wcap;
+	/* screens of their own, now or before: each window goes with the one it is on */
+	multi = (BOOL)( ( wm_spec.main_w > 0 && ( wm_spec.main_w != wm_spec.width || wm_spec.main_h != wm_spec.height ) )
+			|| ( was.main_w > 0 && ( was.main_w != was.width || was.main_h != was.height ) ) );
 	for ( i = 0; i < nwin; i++ ) {
 		WMWIN		*w = &WMW(i);
-		T_DPRECT	o;
+		T_DPRECT	o, on;
 		UD		pages;
 		UB		*pixels;
+		INT		cx, cy, dx = 0, dy = 0;
+		BOOL		keep = FALSE;
 
 		old(i) = NULL;
 		oldpages(i) = 0;
@@ -6808,7 +8013,44 @@ EXPORT void knl_wm_screen_changed( void )
 		if ( !w->used ) {
 			continue;
 		}
-		outer_on_screen(w, was_vw, was_vh, wm_vw, wm_vh, mh, &o);
+		w->gs.in_pix = FALSE;		/* its pixels are made again at the new screen's */
+		if ( multi ) {
+			/* by the middle of where it was asked to stand; one in full screen by where it stood before */
+			CONST T_DPRECT	*by = w->full ? &w->full_want : &w->want;
+			T_DISPRECT	s;
+
+			cx = ( by->left + by->right ) / 2;
+			cy = ( by->top + by->bottom ) / 2;
+			dx = cx;
+			dy = cy;
+			s.left = s.top = 0;
+			s.right = wm_vw;
+			s.bottom = wm_vh;
+			keep = knl_disp_follow(&dx, &dy, &s);
+			on.left = s.left;  on.top = s.top;  on.right = s.right;  on.bottom = s.bottom;
+			dx -= cx;
+			dy -= cy;
+			if ( w->full ) {
+				/* full screen on the screen it is now on: the one the window's place went to */
+				wm_screen_at(( by->left + by->right ) / 2 + dx, ( by->top + by->bottom ) / 2 + dy, &on);
+			}
+		}
+		outer_on_screen(w, was_vw, was_vh, wm_vw, wm_vh, mh, dx, dy, multi ? &on : NULL, keep, &o);
+		if ( multi ) {
+			/* what it asks for from now on is of the new view */
+			if ( keep && !w->full ) {
+				w->want = o;
+			} else {
+				w->want.left += dx;  w->want.right += dx;
+				w->want.top += dy;  w->want.bottom += dy;
+			}
+			if ( w->full ) {
+				w->full_want.left += dx;  w->full_want.right += dx;
+				w->full_want.top += dy;  w->full_want.bottom += dy;
+				w->full_outer.left += dx;  w->full_outer.right += dx;
+				w->full_outer.top += dy;  w->full_outer.bottom += dy;
+			}
+		}
 		pages = win_pages(&o);
 		pixels = (UB *)knl_vmap(pages, 0);
 		if ( pixels == NULL ) {
@@ -6841,8 +8083,15 @@ EXPORT void knl_wm_screen_changed( void )
 				  || was_scale != wm_scale );
 		moved(i) = (BOOL)( resized(i) || o.left != w->outer.left || o.top != w->outer.top );
 		w->mo_dur = 0;
-		w->outer = o;
-		work_of(&o, w->attr, &w->work);
+		{
+			T_DPRECT	was_o = w->outer, was_w = w->work;
+
+			w->outer = o;
+			work_of(&o, w->attr, &w->work);
+			if ( pixels != NULL ) {
+				uncovered_clear(w, &was_o, &was_w);	/* what it grew by, as wm_move lays it */
+			}
+		}
 		shape_of(w);
 		w->dirty = TRUE;
 		w->damage.left = 0;
@@ -6932,6 +8181,7 @@ EXPORT INT knl_wm_init( void )
 	(void)dp_set_scale(wm_sys_gid, wm_scale);
 	wm_ready = TRUE;
 	cp_start();				/* the compositor (without it each caller builds) */
+	knl_gpu_end_hook = gs_job_over;		/* a BO waiting for the GPU shown once its jobs are over */
 
 	/* the task that carries the windows opening and closing; without it they just appear */
 	{

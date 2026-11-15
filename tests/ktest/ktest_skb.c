@@ -466,9 +466,8 @@ LOCAL void close_by_menu( INT wid, ID pid )
  * The keyboard in front of the windows worked in (WM_ATTR_FLOAT with
  * WM_ATTR_NOFOCUS): another window opened or brought forward comes up
  * behind it, the keys stay with the window that has them, a tool panel
- * of the window worked in stays shown, and with a picture-in-picture
- * window the one brought forward last is in front, both in front of
- * the others
+ * of the window worked in stays shown, and a picture-in-picture window
+ * stays behind the keyboard, both in front of the others
  */
 LOCAL void floats( INT kb, INT twid )
 {
@@ -510,12 +509,17 @@ LOCAL void floats( INT kb, INT twid )
 	if ( par >= 1 ) (void)wm_close(par);
 	KT_ASSERT_ER(wm_focus(twid), E_OK);
 
-	/* a picture-in-picture window: the one brought forward last in front, the others behind both */
+	/*
+	 * A picture-in-picture window, which only floats: behind the keyboard,
+	 * an input aid, opened or brought forward; the others behind both
+	 */
 	o.left = 600;  o.top = 500;  o.right = 900;  o.bottom = 700;
 	pip = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_FLOAT, "skb pip");
 	KT_ASSERT(pip >= 1);
 	if ( pip >= 1 ) {
-		KT_ASSERT(z_of(pip) < z_of(kb));
+		KT_ASSERT(z_of(kb) < z_of(pip));
+		KT_ASSERT_ER(wm_raise(pip), E_OK);
+		KT_ASSERT(z_of(kb) < z_of(pip));
 		KT_ASSERT_ER(wm_raise(kb), E_OK);
 		KT_ASSERT(z_of(kb) < z_of(pip));
 		KT_ASSERT_ER(wm_raise(plain), E_OK);

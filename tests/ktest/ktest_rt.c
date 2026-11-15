@@ -26,6 +26,7 @@
 #include <ts/rtad.h>
 #include <ts/btbk.h>
 #include <ts/bpk.h>
+#include <ts/slide.h>
 #include "../../application/desktop/desktop.h"
 
 #define MS		1000			/* microseconds */
@@ -544,7 +545,6 @@ LOCAL void test_parse( void )
 	/* a <realtime> inside a <document> is found */
 	KT_ASSERT_ER(tad_parse((CONST UB *)prog_slide, s_len(prog_slide), NULL, &doc), E_OK);
 	KT_ASSERT(rt_find(doc) != NULL);
-	KT_ASSERT(dtrt_has(doc));
 	tad_free(doc);
 }
 
@@ -770,10 +770,10 @@ LOCAL void test_slide( void )
 	INT	i, w = 0, h = 0, acts = 0;
 
 	KT_ASSERT_ER(tad_parse((CONST UB *)prog_slide, s_len(prog_slide), NULL, &doc), E_OK);
-	KT_ASSERT(dt_slide_takes(doc));
+	KT_ASSERT(sl_takes(doc));
 	tad_free(doc);
 	KT_ASSERT_ER(tad_parse((CONST UB *)prog_media, s_len(prog_media), NULL, &doc), E_OK);
-	dtrt_scene_size(doc, &w, &h);
+	sl_scene_size(doc, &w, &h);
 	KT_ASSERT_EQ(w, 1280);
 	KT_ASSERT_EQ(h, 720);
 	tad_free(doc);

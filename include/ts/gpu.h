@@ -233,6 +233,48 @@ IMPORT D	knl_gpu_done( void );
 IMPORT ER	knl_gpu_bo_wait( T_GPUBO *bo, TMO_U tmout );
 
 /*
+ * Whoever shows the screen builds a frame now (the window manager, at
+ * each build): the backend may answer the GPU's load more quickly while
+ * frames keep coming
+ */
+IMPORT void	knl_gpu_interactive( void );
+
+/*
+ * A BO the screen was to show is still being drawn a build later: the
+ * jobs that use it and have not started yet raise the GPU's clock as a
+ * wait on them would; those already running are left alone. Does not
+ * sleep.
+ */
+IMPORT void	knl_gpu_bo_boost( T_GPUBO *bo );
+
+/*
+ * The BO's pages at one run of kernel addresses (the vmap area), with
+ * the attribute a process maps it with: uncached, cached where the GPU
+ * sees memory through the processor's caches. The mapping holds a
+ * reference; knl_gpu_bo_kunmap takes it away (knl_vunmap_hook is told,
+ * so what entered the addresses in a GPU's MMU forgets them) and gives
+ * the reference back.
+ */
+IMPORT ER	knl_gpu_bo_kmap( T_GPUBO *bo, void **p_va );
+IMPORT void	knl_gpu_bo_kunmap( T_GPUBO *bo, void *va );
+
+/*
+ * The BO of a key of the calling process's to a BO's object
+ * (OB_S_GPUBO): one reference more, given back with knl_gpu_bo_put.
+ * E_ID not a key, E_OACV another's or one without 'need' (OB_OP_*),
+ * E_OBJ a key to something else.
+ */
+IMPORT ER	knl_gpu_bo_of_key( ID key, UINT need, T_GPUBO **p_bo );
+
+/*
+ * Called by the common layer's task each time a job is over, after the
+ * BOs it used are counted as no longer used by it, with no lock held:
+ * one function, the window manager's (whose surfaces drawn by the GPU
+ * wait for their jobs). It must not wait for anything.
+ */
+IMPORT void	(*knl_gpu_end_hook)( void );
+
+/*
  * An address space of the GPU of its own: a page table that holds only
  * the BOs entered in it (13-gpu.md 13.5). A job submitted with it
  * reaches those BOs and nothing else -- not the kernel's BOs, not those

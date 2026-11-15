@@ -1,0 +1,129 @@
+<tad version="1.0" encoding="UTF-8" filename="画面印刷のデータボックス">
+<document>
+<p>画面印刷のデータボックス</p>
+<p>画面印刷／画面保存のパネルと、保存先ディスクと実身名を尋ねるパネル(ディスクの数ごとに一つ)の定義。画面印刷(プロセス)が使う。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,536,284" title="画面印刷">
+<text x="202" y="28">画面印刷／画面保存</text>
+<choice num="1" rect="22,44,212,66" group="1">図形実身へ保存</choice>
+<choice num="2" rect="22,70,212,92" group="1">トレーへ複写</choice>
+<choice num="3" rect="22,96,212,118" group="1">プリンタへ印刷</choice>
+<switch num="4" rect="258,44,438,66">ポインタ印刷</switch>
+<choice num="5" rect="258,74,508,96" group="5">全画面</choice>
+<choice num="6" rect="258,100,508,122" group="5">最前面ウィンドウのみ</choice>
+<choice num="7" rect="258,126,508,148" group="5">範囲指定</choice>
+<choice num="8" rect="22,160,302,182" group="8">指定時間後に実行</choice>
+<choice num="9" rect="22,186,302,208" group="8">PrntScrnキーで実行</choice>
+<choice num="10" rect="22,212,302,234" group="8">PrntScrnキーで連続実行</choice>
+<serial num="11" rect="338,158,378,184"><f w="2" lo="3" hi="99" value="5"/></serial>
+<text x="388" y="176">秒後</text>
+<button num="12" rect="22,240,122,266" answer="cancel">取り消し</button>
+<button num="13" rect="414,240,514,266" answer="ok" emph="true">実行</button>
+</panel>
+<panel num="100" rect="0,0,456,144" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<text x="146" y="28">初期ウィンドウ</text>
+<text x="26" y="62">実身名:</text>
+<box num="12" rect="102,44,434,70" jp="true"> </box>
+<button num="90" rect="252,100,338,126" answer="cancel">取消</button>
+<button num="91" rect="348,100,434,126" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="101" rect="0,0,456,144" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<select num="20" rect="138,6,438,36" value="1"><name> </name></select>
+<text x="26" y="62">実身名:</text>
+<box num="12" rect="102,44,434,70" jp="true"> </box>
+<button num="90" rect="252,100,338,126" answer="cancel">取消</button>
+<button num="91" rect="348,100,434,126" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="102" rect="0,0,456,170" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<select num="20" rect="138,6,438,62" value="1"><name> </name><name> </name></select>
+<text x="26" y="88">実身名:</text>
+<box num="12" rect="102,70,434,96" jp="true"> </box>
+<button num="90" rect="252,126,338,152" answer="cancel">取消</button>
+<button num="91" rect="348,126,434,152" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="103" rect="0,0,456,196" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<select num="20" rect="138,6,438,88" value="1"><name> </name><name> </name><name> </name></select>
+<text x="26" y="114">実身名:</text>
+<box num="12" rect="102,96,434,122" jp="true"> </box>
+<button num="90" rect="252,152,338,178" answer="cancel">取消</button>
+<button num="91" rect="348,152,434,178" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="104" rect="0,0,456,222" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<select num="20" rect="138,6,438,114" value="1"><name> </name><name> </name><name> </name><name> </name></select>
+<text x="26" y="140">実身名:</text>
+<box num="12" rect="102,122,434,148" jp="true"> </box>
+<button num="90" rect="252,178,338,204" answer="cancel">取消</button>
+<button num="91" rect="348,178,434,204" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="105" rect="0,0,456,248" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<select num="20" rect="138,6,438,140" value="1"><name> </name><name> </name><name> </name><name> </name><name> </name></select>
+<text x="26" y="166">実身名:</text>
+<box num="12" rect="102,148,434,174" jp="true"> </box>
+<button num="90" rect="252,204,338,230" answer="cancel">取消</button>
+<button num="91" rect="348,204,434,230" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="106" rect="0,0,456,274" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<select num="20" rect="138,6,438,166" value="1"><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name></select>
+<text x="26" y="192">実身名:</text>
+<box num="12" rect="102,174,434,200" jp="true"> </box>
+<button num="90" rect="252,230,338,256" answer="cancel">取消</button>
+<button num="91" rect="348,230,434,256" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="107" rect="0,0,456,300" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<select num="20" rect="138,6,438,192" value="1"><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name></select>
+<text x="26" y="218">実身名:</text>
+<box num="12" rect="102,200,434,226" jp="true"> </box>
+<button num="90" rect="252,256,338,282" answer="cancel">取消</button>
+<button num="91" rect="348,256,434,282" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="108" rect="0,0,456,326" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<select num="20" rect="138,6,438,218" value="1"><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name></select>
+<text x="26" y="244">実身名:</text>
+<box num="12" rect="102,226,434,252" jp="true"> </box>
+<button num="90" rect="252,282,338,308" answer="cancel">取消</button>
+<button num="91" rect="348,282,434,308" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="109" rect="0,0,456,352" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<select num="20" rect="138,6,438,244" value="1"><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name></select>
+<text x="26" y="270">実身名:</text>
+<box num="12" rect="102,252,434,278" jp="true"> </box>
+<button num="90" rect="252,308,338,334" answer="cancel">取消</button>
+<button num="91" rect="348,308,434,334" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="110" rect="0,0,456,378" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<select num="20" rect="138,6,438,270" value="1"><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name></select>
+<text x="26" y="296">実身名:</text>
+<box num="12" rect="102,278,434,304" jp="true"> </box>
+<button num="90" rect="252,334,338,360" answer="cancel">取消</button>
+<button num="91" rect="348,334,434,360" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="111" rect="0,0,456,404" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<select num="20" rect="138,6,438,296" value="1"><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name></select>
+<text x="26" y="322">実身名:</text>
+<box num="12" rect="102,304,434,330" jp="true"> </box>
+<button num="90" rect="252,360,338,386" answer="cancel">取消</button>
+<button num="91" rect="348,360,434,386" answer="ok" emph="true">保存</button>
+</panel>
+<panel num="112" rect="0,0,456,430" title="画面印刷">
+<text x="26" y="28">保存先ディスク:</text>
+<select num="20" rect="138,6,438,322" value="1"><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name><name> </name></select>
+<text x="26" y="348">実身名:</text>
+<box num="12" rect="102,330,434,356" jp="true"> </box>
+<button num="90" rect="252,386,338,412" answer="cancel">取消</button>
+<button num="91" rect="348,386,434,412" answer="ok" emph="true">保存</button>
+</panel>
+</databox>
+</tad>

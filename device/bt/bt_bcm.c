@@ -28,6 +28,9 @@
  *	  6 Reset again, at the speed after power on: the patch runs
  *	  7 its version again, and the speed raised again
  *	  8 its address: the chip's own placeholder replaced with the board's
+ *	  9 when the board asks it, the SCO routed to the HCI: the chip's
+ *	    PCM parameters read, their routing set to the transport and
+ *	    written back, the rest as they were
  *
  *	Each command waits for its Command Complete; one with no answer or a
  *	status not 0 ends it there. A patch that is not there, or not whole,
@@ -54,9 +57,14 @@
 #define C_BCM_DOWNLOAD	0xfc2e		/* download minidriver */
 #define C_BCM_CLOCK	0xfc45		/* the UART's clock: 1 is 48 MHz, needed above 3 Mbaud */
 #define C_BCM_LAUNCH	0xfc4e		/* launch RAM */
+#define C_BCM_PCM_W	0xfc1c		/* write the SCO PCM interface's parameters */
+#define C_BCM_PCM_R	0xfc1d		/* and read them */
 #define OGF_VENDOR	0x3f
 
 #define BCM_CLOCK_48MHZ	0x01
+#define PCM_PARAMS	5		/* the routing, the rate, the frame's sync, the sync's and the clock's mode */
+#define ROUTE_PCM	0
+#define ROUTE_HCI	1		/* to the transport: SCO data packets to and from the host */
 #define BAUD_NO_CLOCK	3000000		/* the most the default clock takes */
 
 #define E_CMD_DONE	0x0e
@@ -335,10 +343,48 @@ LOCAL void address( BTC *c, CONST BTBCFG *cfg )
 		  a[5], a[4], a[3], a[2], a[1], a[0]);
 }
 
+/*
+ * The SCO to the host on the HCI. Read first, so that what the chip has
+ * of the PCM interface stays; when it does not answer, the routing with
+ * the values given to this chip on a Raspberry Pi to route its SCO to
+ * the host (512 kHz, short frames, both clocks its own), which the chip
+ * does not use while the routing is the transport. Not taken, the
+ * voice stays on the PCM pins, which the board has nothing on: HFP is
+ * left without voice there, and the rest goes on.
+ */
+LOCAL void sco_route( BTC *c, CONST BTBCFG *cfg )
+{
+	static CONST UB	dflt[PCM_PARAMS] = { ROUTE_HCI, 2, 0, 1, 1 };
+	UB		p[PCM_PARAMS];
+	CONST UB	*r;
+	INT		len = 0;
+	BOOL		read;
+
+	if ( !cfg->sco_hci ) return;
+	read = (BOOL)( ask(c, C_BCM_PCM_R, NULL, 0, &r, &len) && len >= PCM_PARAMS );
+	if ( read ) {
+		knl_memcpy(p, r, PCM_PARAMS);
+		tm_printf((UB *)"bt: bcm: 9 SCO's PCM parameters %02x %02x %02x %02x %02x (routing %d: %s)\n",
+			  p[0], p[1], p[2], p[3], p[4], p[0], ( p[0] == ROUTE_HCI ) ? "the HCI" : ( p[0] == ROUTE_PCM ) ? "the PCM pins" : "another");
+	} else {
+		knl_memcpy(p, dflt, PCM_PARAMS);
+		tm_printf((UB *)"bt: bcm: 9 SCO's PCM parameters not read: %02x %02x %02x %02x %02x written\n",
+			  p[0], p[1], p[2], p[3], p[4]);
+	}
+	p[0] = ROUTE_HCI;
+	if ( !ask(c, C_BCM_PCM_W, p, PCM_PARAMS, NULL, NULL) ) {
+		tm_printf((UB *)"bt: bcm: 9 SCO not routed to the HCI: no voice for the hands-free profile\n");
+		return;
+	}
+	c->sco_hci = TRUE;
+	tm_printf((UB *)"bt: bcm: 9 SCO routed to the HCI\n");
+}
+
 /* Going on without a patch: the address all the same */
 LOCAL BOOL rom( BTC *c, CONST BTBCFG *cfg )
 {
 	address(c, cfg);
+	sco_route(c, cfg);
 	tm_printf((UB *)"bt: bcm: done without a patch, on to the ordinary start\n");
 	return TRUE;
 }
@@ -410,6 +456,7 @@ LOCAL BOOL bcm_start( BTC *c, CONST BTBCFG *cfg, BOOL given, CONST UB *fw_given,
 	if ( !version(c, 7, &sub) ) return fail(c, BT_ST_FWFAILED, 7, "its version not answered after the patch:", file);
 	if ( !raise(c, cfg, 7) ) return fail(c, BT_ST_FWFAILED, 7, "the speed not raised after the patch:", file);
 	address(c, cfg);
+	sco_route(c, cfg);
 	tm_printf((UB *)"bt: bcm: done, on to the ordinary start\n");
 	return TRUE;
 }

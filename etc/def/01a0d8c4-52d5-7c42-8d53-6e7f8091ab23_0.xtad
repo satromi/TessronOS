@@ -1,6 +1,6 @@
 <tad version="1.0" encoding="UTF-8" filename="スライド">
 <document>
 <p>スライド</p>
-<p>文章の仮身が指す実身を1枚ずつ画面いっぱいに映す。組込みのプログラム(basic-slide)</p>
+<p>文章の仮身が指す実身を1枚ずつ画面いっぱいに映す。実時間制御TADを含むスライドはその場で再生する。プロセスで動くプログラム(basic-slide)</p>
 </document>
 </tad>

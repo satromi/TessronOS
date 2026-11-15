@@ -19,7 +19,7 @@
       "id": "microscript",
       "kind": "app",
       "name": "マイクロスクリプト",
-      "version": "R1.200",
+      "version": "R1.400",
       "menu": false,
       "builtin": false,
       "base": [

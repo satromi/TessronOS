@@ -67,6 +67,7 @@
 #define WANT_BPP		32
 
 LOCAL UBINT	vbe_base = 0;
+LOCAL CONST T_DISPOUTHW	main_out;		/* the main display as an output, below */
 LOCAL UD	vbe_fb_size = 0;		/* the pixels' window */
 LOCAL UBINT	vbe_fb_pages = 0;		/* the pages mapped of it */
 
@@ -189,6 +190,7 @@ EXPORT INT knl_disp_hw_init( T_DISPHW *hw )
 	hw->vsync = NULL;
 	hw->latch_us = 0;
 	hw->flip_start = FALSE;
+	hw->out = &main_out;
 
 	return 1;
 }
@@ -227,6 +229,175 @@ EXPORT INT knl_disp_hw_setmode( T_DISPHW *hw, UINT w, UINT h )
 	vbe_rows = (UH)h;
 	hw->pages = vbe_pages(hw->pitch, h);
 	hw->flip = ( hw->pages > 1 ) ? vbe_flip : NULL;
+	return 1;
+}
+
+/*
+ * The EDID QEMU gives a display (its edid property, on by default): in the
+ * first bytes of the register window, the base block and its extensions.
+ * The number of bytes read, 0 when no EDID is there.
+ */
+#define EDID_WIN		1024
+
+LOCAL INT edid_read( UBINT regs, UB *buf, INT max )
+{
+	INT	i, n = ( max < EDID_WIN ) ? max : EDID_WIN;
+
+	if ( regs == 0 ) {
+		return 0;
+	}
+	for ( i = 0; i < n; i++ ) {
+		buf[i] = *(volatile UB *)( regs + i );
+	}
+	return ( n >= 128 && buf[0] == 0x00 && buf[1] == 0xFF && buf[7] == 0x00 ) ? n : 0;
+}
+
+LOCAL INT main_edid( void *ctx, UB *buf, INT max )
+{
+	(void)ctx;
+	return edid_read(vbe_base, buf, max);
+}
+
+/* The main display, as the layer of outputs sees it: its size goes by knl_disp_hw_setmode */
+LOCAL CONST T_DISPOUTHW	main_out = {
+	DISP_CON_VIRTUAL, "Virtual-1", NULL, main_edid, NULL, NULL, NULL,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+
+/*
+ * A second bochs-display (QEMU's -device bochs-display given twice): a
+ * further screen right of the main one (10.4.8), MORE_WIDTH wide and as
+ * tall as the main one at start-up, so that the pointer, which moves in
+ * the rectangle round the screens, finds a screen everywhere. Two pages
+ * where its window has room, flipped between. Its mode is set again by
+ * the layer of outputs (more_commit), and it is turned off when off.
+ */
+#define MORE_WIDTH		1024
+
+LOCAL UBINT	more_regs = 0;
+LOCAL UD	more_fb = 0, more_fb_size = 0;
+LOCAL UBINT	more_va = 0;
+LOCAL UH	more_rows = 0;
+
+#define MORE_RD(reg)		( *(volatile UH *)( more_regs + VBE_OFF + (reg) * 2 ) )
+#define MORE_WR(reg, v)		do { *(volatile UH *)( more_regs + VBE_OFF + (reg) * 2 ) = (UH)(v); DeviceBarrier(); } while ( 0 )
+
+/* The page the second display shows, by the row it starts from; taken at once, as the first's */
+LOCAL ER more_flip( UINT page )
+{
+	MORE_WR(VBE_Y_OFFSET, page * more_rows);
+	return ( MORE_RD(VBE_Y_OFFSET) == (UH)( page * more_rows ) ) ? E_OK : E_IO;
+}
+
+LOCAL INT more_edid( void *ctx, UB *buf, INT max )
+{
+	(void)ctx;
+	return edid_read(more_regs, buf, max);
+}
+
+LOCAL ER more_check( void *ctx, CONST T_DISPMODE *m )
+{
+	(void)ctx;
+	if ( m->hdisp < 320 || m->vdisp < 200 || m->hdisp > 4096 || m->vdisp > 4096 || ( m->hdisp & 7 ) != 0
+	  || (UD)m->hdisp * m->vdisp * ( WANT_BPP / 8 ) > more_fb_size ) {
+		return E_NOSPT;
+	}
+	return E_OK;
+}
+
+/* The second display set to w x h, two pages where the window has room: hw made what it then is */
+LOCAL ER more_mode( UINT w, UINT h, T_DISPHW *hw )
+{
+	UINT	pages = ( (UD)w * h * ( WANT_BPP / 8 ) * 2 <= more_fb_size ) ? 2 : 1;
+
+	MORE_WR(VBE_ENABLE, VBE_DISABLED);
+	MORE_WR(VBE_XRES, w);
+	MORE_WR(VBE_YRES, h);
+	MORE_WR(VBE_BPP, WANT_BPP);
+	MORE_WR(VBE_VIRT_WIDTH, w);
+	MORE_WR(VBE_VIRT_HEIGHT, h * pages);
+	MORE_WR(VBE_X_OFFSET, 0);
+	MORE_WR(VBE_Y_OFFSET, 0);
+	MORE_WR(VBE_ENABLE, VBE_ENABLED | VBE_LFB_ENABLED | VBE_NOCLEARMEM);
+	if ( MORE_RD(VBE_XRES) != w || MORE_RD(VBE_YRES) != h ) {
+		tm_printf((UB *)"disp: the second bochs-display did not take %d x %d\n", (INT)w, (INT)h);
+		return E_IO;
+	}
+	if ( pages == 2 && MORE_RD(VBE_VIRT_HEIGHT) < h * 2 ) {
+		pages = 1;
+	}
+	hw->width  = w;
+	hw->height = h;
+	hw->bpp    = WANT_BPP;
+	hw->pitch  = w * ( WANT_BPP / 8 );
+	hw->format = DISP_FMT_XRGB8888;
+	hw->fb_pa  = more_fb;
+	hw->fb_va  = more_va;
+	hw->alpha  = DISP_ALPHA_ANY;
+	hw->via    = "bochs-display (second)";
+	hw->pages  = pages;
+	hw->page2_va = 0;
+	hw->flip   = ( pages == 2 ) ? more_flip : NULL;
+	hw->vsync  = NULL;
+	hw->latch_us = 0;
+	more_rows = (UH)h;
+	return E_OK;
+}
+
+LOCAL ER more_commit( void *ctx, CONST T_DISPMODE *m, T_DISPHW *hw )
+{
+	(void)ctx;
+	if ( m == NULL ) {
+		MORE_WR(VBE_ENABLE, VBE_DISABLED);	/* off */
+		return E_OK;
+	}
+	if ( more_check(ctx, m) < E_OK ) {
+		return E_NOSPT;
+	}
+	return more_mode(m->hdisp, m->vdisp, hw);
+}
+
+LOCAL CONST T_DISPOUTHW	more_out = {
+	DISP_CON_VIRTUAL, "Virtual-2", NULL, more_edid, NULL, more_check, more_commit,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+
+EXPORT INT knl_disp_hw_more( INT i, UINT main_w, UINT main_h, T_DISPHW *hw, INT *p_side, INT *p_offset )
+{
+	T_PCIDEV	d;
+	UBINT		regs;
+	UINT		w = MORE_WIDTH, h = main_h;
+
+	(void)main_w;
+	if ( i != 0 || hw == NULL || h < 200 || h > 4096 ) {
+		return 0;
+	}
+	if ( ts_pcie_find(PCI_CLASS_DISPLAY, 0xff, 0xff, 1, &d) < E_OK || d.bar[0] == 0 || d.bar[2] == 0 ) {
+		return 0;
+	}
+	ts_pcie_enable(&d);
+	regs = ts_pcie_bar_base(&d, 2);
+	if ( regs == 0 || ( *(volatile UH *)( regs + VBE_OFF + VBE_ID * 2 ) & 0xfff0 ) != 0xb0c0 ) {
+		return 0;
+	}
+	if ( (UD)w * h * ( WANT_BPP / 8 ) > d.bar_size[0] ) {
+		return 0;
+	}
+	/* the whole window mapped, so that another mode needs no new mapping */
+	more_va = (UBINT)knl_vmap_pa(d.bar[0], ( d.bar_size[0] + PAGE_SIZE - 1 ) / PAGE_SIZE, VMAP_NOCACHE);
+	if ( more_va == 0 ) {
+		return 0;
+	}
+	more_regs = regs;
+	more_fb = d.bar[0];
+	more_fb_size = d.bar_size[0];
+	knl_memset(hw, 0, sizeof(*hw));
+	if ( more_mode(w, h, hw) < E_OK ) {
+		return 0;
+	}
+	hw->out = &more_out;
+	*p_side = DISP_SIDE_RIGHT;
+	*p_offset = 0;
 	return 1;
 }
 

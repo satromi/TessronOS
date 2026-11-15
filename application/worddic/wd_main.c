@@ -895,7 +895,7 @@ int main( void )
 	INT	id, ev;
 
 	ui_icon(SYSDEF_PROG_WORDDIC);
-	if ( ui_open(&ui, SYSDEF_BOX_WORDDIC, PN_MAIN, 200, 80) < E_OK ) {
+	if ( ui_open(&ui, SYSDEF_BOX_WORDDIC, PN_MAIN, wm_new_x(200), wm_new_y(80)) < E_OK ) {
 		tm_putstring((CONST UB *)"worddic: no window\n");
 		return 1;
 	}

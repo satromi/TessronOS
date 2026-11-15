@@ -9,63 +9,12 @@
 # and off, and the window closed from its menu; the figure's band pressed, and saved. The screens of the editor are the same, and
 # record 0 saved after it is the same, byte for byte.
 # Keys: Ctrl+S 16 01, Ctrl+E 08 01.
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
-mkbig fig 1 2 0
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-click 128 48
-wait 600
-click 190 293
-expect pattern: opened 2
-wait 500
-shot pcmp_k_open
-click 460 256
-expect pattern: colour ee0000
-click 162 184
-wait 200
-click 492 363
-expect pattern: tool 1
-drag 186 208 222 244
-wait 300
-shot pcmp_k_drawn
-click 383 489
-wait 300
-shot pcmp_k_turned
-click 510 523
-wait 300
-click 383 489
-wait 300
-click 450 523
-expect pattern: 2 put in the figure
-wait 500
-shot pcmp_k_put
-click 380 523
-expect pattern: choosing on
-wait 300
-shot pcmp_k_load
-click 380 523
-expect pattern: choosing off
-wait 300
-click 300 300 1
-wait 600
-move 302 301
-wait 150
-click 302 301
-expect pattern: closed
-wait 300
-click 500 108
-wait 300
-sync 600
-key 16 01
-sync 600
-sum show
-keep kernel
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
+# Record 0 is the process's own, not the desktop's: the desktop's editor, the keys left with
+# its 道具パネル after the band was pressed, never saved (its record stayed as mkbig made it,
+# 369 bytes, with no <patterns>); the process's holds the pattern 入替 put in (783 bytes,
+# <patterns> with masks 128, 129 and pattern 2 of #000000 and #ee0000).
 mkbig fig 1 2 0
 logmark
 pfig big
@@ -124,6 +73,6 @@ logmark
 key 16 01
 expectsince figure: saved (0)
 sum show
-same kernel
+want ok 783 1388f1df713e1e5f
 key 08 01
 expect figure: closed

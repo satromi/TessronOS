@@ -546,6 +546,7 @@ static BOOL kept_places( T_JSON *root )
 	T_JSON	tf, tc, arr, it;
 	INT	k = 0, x[W_N], y[W_N], shown = 0;
 	BOOL	on[W_N];
+	UB	scr[12];
 
 	if ( js_get(root, "tessronos", &tf) < E_OK || js_get(&tf, "techo", &tc) < E_OK
 	  || js_get(&tc, "windows", &arr) < E_OK || js_type(&arr) != JS_ARRAY || js_count(&arr) != W_N ) return FALSE;
@@ -555,6 +556,10 @@ static BOOL kept_places( T_JSON *root )
 		y[k] = (INT)js_get_num(&it, "y", -1);
 		on[k] = js_get_bool(&it, "open", TRUE);
 		if ( x[k] < 0 || y[k] < 0 ) return FALSE;
+		/* from the corner of the screen it names, the main one's when it names none (wm_place_open) */
+		scr[0] = 0;
+		(void)js_get_str(&it, "screen", scr, sizeof(scr));
+		wm_place_xywh(&x[k], &y[k], SCHED_W, 300, (CONST char *)scr);
 		if ( on[k] ) shown++;
 	}
 	if ( k != W_N ) return FALSE;
@@ -566,6 +571,16 @@ static BOOL kept_places( T_JSON *root )
 	return TRUE;
 }
 
+/* A screen's identity as a kept place writes it: 8 hex digits, none for the main screen (one buffer for each window) */
+static CONST char *screen_text( UW screen, INT k )
+{
+	static char	t[W_N][12];
+
+	if ( screen == 0 ) t[k][0] = 0;
+	else snprintf(t[k], sizeof(t[k]), "%08x", (UINT)screen);
+	return t[k];
+}
+
 /*
  * The windows' places and which are shown written into the metadata, the
  * rest of it as it was; nothing written when they are as it says already
@@ -573,8 +588,9 @@ static BOOL kept_places( T_JSON *root )
  */
 static void places_keep( void )
 {
-	char	v[200], *nm;
-	INT	mn, k, at, n, vn;
+	char	v[320], *nm;
+	INT	mn, k, at, n, vn, px[W_N], py[W_N];
+	UW	ps[W_N];
 	T_JSON	root, tf, tc;
 	ID	key;
 	BOOL	ok = FALSE;
@@ -583,11 +599,29 @@ static void places_keep( void )
 	for ( k = 0; k < W_N; k++ ) {
 		if ( g_w[k].open ) work_size(&g_w[k]);
 	}
-	vn = snprintf(v, sizeof(v), "{\"windows\":[{\"x\":%d,\"y\":%d,\"open\":%s},{\"x\":%d,\"y\":%d,\"open\":%s},"
-		      "{\"x\":%d,\"y\":%d,\"open\":%s}]}",
-		      g_w[W_SCHED].x, g_w[W_SCHED].y, g_w[W_SCHED].open ? "true" : "false",
-		      g_w[W_CAL].x, g_w[W_CAL].y, g_w[W_CAL].open ? "true" : "false",
-		      g_w[W_ADDR].x, g_w[W_ADDR].y, g_w[W_ADDR].open ? "true" : "false");
+	/* each kept from the corner of the screen it stands on, and which screen (wm_place_keep) */
+	for ( k = 0; k < W_N; k++ ) {
+		T_DPRECT	view;
+		T_WMPLACE	p;
+
+		view.left = g_w[k].x;
+		view.top = g_w[k].y;
+		view.right = g_w[k].x + 1;
+		view.bottom = g_w[k].y + 1;
+		if ( wm_place_keep(&view, &p) < E_OK ) {
+			p.r = view;
+			p.screen = 0;
+		}
+		px[k] = p.r.left;
+		py[k] = p.r.top;
+		ps[k] = p.screen;
+	}
+	vn = snprintf(v, sizeof(v), "{\"windows\":[{\"x\":%d,\"y\":%d,\"screen\":\"%s\",\"open\":%s},"
+		      "{\"x\":%d,\"y\":%d,\"screen\":\"%s\",\"open\":%s},"
+		      "{\"x\":%d,\"y\":%d,\"screen\":\"%s\",\"open\":%s}]}",
+		      px[W_SCHED], py[W_SCHED], screen_text(ps[W_SCHED], 0), g_w[W_SCHED].open ? "true" : "false",
+		      px[W_CAL], py[W_CAL], screen_text(ps[W_CAL], 1), g_w[W_CAL].open ? "true" : "false",
+		      px[W_ADDR], py[W_ADDR], screen_text(ps[W_ADDR], 2), g_w[W_ADDR].open ? "true" : "false");
 	mn = meta_of(&g_obj);
 	if ( mn <= 0 || js_parse((CONST UB *)g_meta, mn, &root) < E_OK || js_type(&root) != JS_OBJECT ) return;
 	nm = malloc((size_t)mn + sizeof(v) + 32);
@@ -635,16 +669,26 @@ static void places( void )
 {
 	T_JSON	root, w, pos;
 	INT	x = 100, y = 70, mn = meta_of(&g_obj), sw = 1024, sh = 768, k;
+	UB	scr[12] = "";
+	BOOL	wkept = FALSE;
 	BOOL	kept = FALSE;
 
 	if ( mn > 0 && js_parse((CONST UB *)g_meta, mn, &root) >= E_OK ) {
 		kept = kept_places(&root);
 		if ( !kept && js_get(&root, "window", &w) >= E_OK && js_get(&w, "pos", &pos) >= E_OK ) {
+			wkept = TRUE;
 			x = (INT)js_get_num(&pos, "x", x);
 			y = (INT)js_get_num(&pos, "y", y);
+			(void)js_get_str(&w, "screen", scr, sizeof(scr));
 		}
 	}
 	if ( !kept ) {
+		if ( wkept ) {
+			wm_place_xywh(&x, &y, SCHED_W, 400, (CONST char *)scr);	/* from its screen's corner, the main one's when it names none */
+		} else {
+			x = wm_new_x(x);	/* none kept: from the corner of the screen new windows open on */
+			y = wm_new_y(y);
+		}
 		g_w[W_SCHED].x = x;
 		g_w[W_SCHED].y = y;
 		g_w[W_CAL].x = x + SCHED_W + FRAME_W + 12;

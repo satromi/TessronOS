@@ -509,8 +509,13 @@ static BOOL kept_place( INT *p_x, INT *p_y )
 	ob_cls_obj(k);
 	if ( n > 0 && js_parse(m, n, &root) >= E_OK && js_get(&root, "window", &w) >= E_OK
 	  && js_get(&w, "panelpos", &t) >= E_OK ) {
+		UB	scr[12];
+
 		*p_x = (INT)js_get_num(&t, "x", 0);
 		*p_y = (INT)js_get_num(&t, "y", 0);
+		/* from the corner of the screen it names, the main one's when it names none (wm_place_open) */
+		(void)js_get_str(&t, "screen", scr, sizeof(scr));
+		wm_place_xywh(p_x, p_y, 1, 1, (CONST char *)scr);
 		got = TRUE;
 	}
 	free(m);
@@ -543,8 +548,41 @@ static BOOL panelpos_put( UB **p_m, INT *p_n, CONST char *key, INT v )
 	return TRUE;
 }
 
+/*
+ * The screen the panel's place is from written into "panelpos" (8 hex
+ * digits): in place of the one named, else put last unless it is the main
+ * screen, whose place is kept as before
+ */
+static BOOL panelpos_screen( UB **p_m, INT *p_n, UW screen )
+{
+	T_JSON	root, w, t, at;
+	UB	*nm;
+	INT	n, max;
+	char	txt[12];
+
+	if ( js_parse(*p_m, *p_n, &root) < E_OK || js_get(&root, "window", &w) < E_OK
+	  || js_get(&w, "panelpos", &t) < E_OK ) return FALSE;
+	if ( screen == 0 && js_get(&t, "screen", &at) < E_OK ) return TRUE;
+	if ( screen != 0 ) snprintf(txt, sizeof(txt), "%08x", (UINT)screen);
+	else txt[0] = 0;
+	max = *p_n + 32;
+	nm = malloc((size_t)max);
+	if ( nm == NULL ) return FALSE;
+	n = js_set_str(*p_m, *p_n, &t, "screen", txt, nm, max);
+	if ( n < 0 ) {
+		free(nm);
+		return FALSE;
+	}
+	free(*p_m);
+	*p_m = nm;
+	*p_n = n;
+	return TRUE;
+}
+
 static void keep_place( INT x, INT y )
 {
+	T_DPRECT	view;
+	T_WMPLACE	p;
 	UB	*m = NULL;
 	INT	n;
 	ID	k = ob_opn_obj(&g_obj, OB_OP_ATRRD | OB_OP_ATRWR);
@@ -553,7 +591,17 @@ static void keep_place( INT x, INT y )
 
 	if ( k <= 0 ) return;
 	n = ob_atr_read(k, 0, &m);
-	if ( n > 0 && panelpos_put(&m, &n, "x", x) && panelpos_put(&m, &n, "y", y) ) {
+	/* from the corner of the screen it stands on, and which screen (wm_place_keep) */
+	view.left = x;
+	view.top = y;
+	view.right = x + 1;
+	view.bottom = y + 1;
+	if ( wm_place_keep(&view, &p) < E_OK ) {
+		p.r = view;
+		p.screen = 0;
+	}
+	if ( n > 0 && panelpos_put(&m, &n, "x", p.r.left) && panelpos_put(&m, &n, "y", p.r.top)
+	  && panelpos_screen(&m, &n, p.screen) ) {
 		er = ob_set_atr(k, m, (SZ)n);
 	}
 	free(m);

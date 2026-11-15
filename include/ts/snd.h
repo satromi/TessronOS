@@ -270,6 +270,8 @@ typedef struct {
 #define DN_SDMIXSET		(-144)	/* W : SDMixSet, a volume and mute set */
 /* TessronOS: RW: SDMon, what a channel's recording takes from what is played */
 #define DN_SDMONITOR		(-145)
+/* TessronOS: R : SDMixIn, the microphone's volume, how it is applied, its level */
+#define DN_SDMIXIN		(-146)
 
 #define SND_VOL_MAX		100
 
@@ -301,14 +303,55 @@ typedef struct {
 
 #define SND_MIX_ALL		0	/* SDMixSet.what: the whole, lv and rv */
 #define SND_MIX_APP		1	/* a program, lv */
+#define SND_MIX_IN		2	/* an input (the microphone), lv; pid its kind */
 
 typedef struct {
 	UINT	what;			/* SND_MIX_* */
 	UB	prog[16];		/* SND_MIX_APP: the program object, or zeros ... */
-	INT	pid;			/* ... and then the process (0 the system's own) */
+	INT	pid;			/* ... and then the process (0 the system's own);
+					   SND_MIX_IN: the input's kind, SND_BE_*, or
+					   SND_MIC_NOW the input there is now */
 	UINT	lv, rv;
 	UINT	mute;
 } SDMixSet;
+
+/*
+ * The microphone (DN_SDMIXIN, SND_MIX_IN). The input that records is
+ * the first there is of a USB audio function's, the earphones' over
+ * Bluetooth (the hands-free profile), the I2S interface's and the x64
+ * PC's own (HD Audio). Each kind of input has a volume of its own, 0 to
+ * SND_VOL_MAX, as an output has: SND_MIC_UNITY leaves the samples as
+ * they come, 0 is silence, and a volume scales by the square of its
+ * ratio to SND_MIC_UNITY (25 by a quarter, 12dB down; 100 by four, 12dB
+ * up). The input takes it the way it can (SDMixIn.how): an amplifier of
+ * the hardware where it has one (HD Audio's input amplifiers, a USB
+ * function's feature unit, the earphones' own gain told by +VGM), with
+ * the level of DN_SDVOLMIC at SND_MIC_UNITY's middle; otherwise the
+ * sound device multiplies the samples, held to 16 bits. A mute, and a
+ * volume of 0, silence it in the sound device whatever the hardware has.
+ * An input whose volume was never set keeps the level its hardware has,
+ * and shows that. The volumes set are kept for the next start (the
+ * machine's settings' lines SOUND_MIC, uconf.c) and the mixer's notice
+ * (OB_E_CHANGE of OB_SND_MIX) tells of a change of them, of the input
+ * there is and of a recording's start and stop.
+ */
+#define SND_MIC_NOW		(-1)
+#define SND_MIC_UNITY		50
+
+#define SND_MIC_NONE		0	/* SDMixIn.how: no input */
+#define SND_MIC_HW		1	/* the hardware's amplifier */
+#define SND_MIC_SOFT		2	/* the samples multiplied */
+
+typedef struct {
+	UINT	have;			/* an input is there */
+	UINT	kind;			/* its kind, SND_BE_* (SND_BE_NONE a test's source) */
+	UINT	vol;			/* 0 .. SND_VOL_MAX */
+	UINT	mute;
+	UINT	how;			/* SND_MIC_* */
+	UINT	recording;		/* a channel records from it now */
+	UINT	level;			/* the loudest it came of late, after its volume, 0 .. 32767 */
+	UINT	gain;			/* what the sound device multiplies by, 16.16 (0x10000 as it comes) */
+} SDMixIn;
 
 /*
  * The monitor (DN_SDMONITOR): a channel set to it, while stopped, records
@@ -340,6 +383,17 @@ IMPORT ER   knl_snd_mix_set( CONST SDMixSet *s, BOOL keep );
 IMPORT INT  knl_snd_mix_get( SDMix *m, INT max );	/* room for max programs; how many there are */
 /* The settings of the programs that have an object, as the keeper keeps them: up to max into s, and how many there are */
 IMPORT INT  knl_snd_mix_kept( SDMixSet *s, INT max );
+/* The microphone's: those of the kinds of input that had theirs set, up to max into s, and how many there are */
+IMPORT INT  knl_snd_mic_kept( SDMixSet *s, INT max );
+/* The microphone as DN_SDMIXIN has it */
+IMPORT void knl_snd_mic_get( SDMixIn *m );
+/* A kind of input by its name in the line SOUND_MIC ("usb", "i2s", "hda", "bt"), -1 none; and the name of one */
+IMPORT INT  knl_snd_mic_kind( CONST char *name );
+IMPORT CONST char *knl_snd_mic_kind_name( INT kind );
+#ifdef USE_UITEST
+/* For the tests of the screen: an input of the test's that makes a tone ("TESTIN 1" of OB_SYS_SOUND) */
+IMPORT void knl_snd_test_in( BOOL on );
+#endif
 /* What keeps the mixer's settings: called a second after they last changed */
 IMPORT void knl_snd_mix_keeper( void (*fn)( void ) );
 #ifdef USE_KTEST

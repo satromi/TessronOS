@@ -9,12 +9,16 @@
 
 /*
  *	rtm_main.c
- *	実時間メディア: what the desktop's player says, done (design 15.6)
+ *	実時間メディア: what the player of 実時間制御TAD says, done (design 15.6)
  *
- *	Started by the player of 実時間制御TAD with an RTM_ARG naming two
- *	channels: one it reads the player's commands from, one it answers
- *	on. It has no window. It ends when the player deletes the channel
- *	(the player closed) or says RTM_QUIT.
+ *	Started by the player of 実時間制御TAD (lib/librtplay, in the program
+ *	that plays the record) with an RTM_ARG naming two channels: one it
+ *	reads the player's commands from, one it answers on. It has no
+ *	window. It ends when the player deletes the channel (the player
+ *	closed) or says RTM_QUIT, and when the program it plays for ends
+ *	without a word, however it ends: it watches that process (OB_E_EXIT,
+ *	told on the channel of its commands), and then deletes the channels
+ *	the player made for it, which nobody else will.
  *
  *	A file is read from the object the player names -- a resource beside
  *	its records ("_0_1.mp3"), or a record of an object a file was taken
@@ -29,6 +33,7 @@
 #include <stddef.h>
 
 static ID	cmd = -1, ans = -1;
+static ID	host_key = -1, host_port = -1;
 static MEDIA	media[MAX_MEDIA];
 
 /* What the loader is to read */
@@ -313,6 +318,31 @@ static BOOL command( CONST RTM_CMD *c )
 	return TRUE;
 }
 
+/*
+ * The end of the program the player is in, told on the channel of the
+ * commands: a notice whose number stands where a command's op does
+ */
+static BOOL host_watch( CONST RTM_ARG *a )
+{
+	static CONST TS_UUID	none;
+	T_OBNTF			req;
+
+	if ( memcmp(&a->host, &none, sizeof(none)) == 0 ) return TRUE;
+	host_port = ob_opn_obj(&a->cmd, OB_OP_WRITE | OB_O_NOWAIT);
+	host_key = ob_opn_obj(&a->host, OB_OP_ATRRD);
+	if ( host_key <= 0 ) {
+		host_key = -1;
+		return FALSE;		/* it has ended already */
+	}
+	memset(&req, 0, sizeof(req));
+	req.events = OB_E_EXIT;
+	req.id = RTM_HOST_ID;
+	if ( host_port <= 0 || ob_ntf_evt(host_key, OB_REC_ANY, &req, host_port) <= 0 ) {
+		rtm_log("cannot watch the program it plays for");
+	}
+	return TRUE;
+}
+
 int main( void )
 {
 	RTM_ARG	arg;
@@ -322,11 +352,12 @@ int main( void )
 	PRI	pri = 10;
 	SZ	n;
 	ID	ltid;
+	BOOL	gone = FALSE;
 
 	rtm_libc_init();
 	memset(&arg, 0, sizeof(arg));
 	n = ts_get_arg(&arg, sizeof(arg));
-	if ( n < (SZ)sizeof(arg) || arg.magic != RTM_MAGIC ) {
+	if ( n < (SZ)offsetof(RTM_ARG, host) || arg.magic != RTM_MAGIC ) {
 		rtm_log("started without the player's channels");
 		return 1;
 	}
@@ -335,6 +366,14 @@ int main( void )
 	if ( cmd < E_OK || ans < E_OK ) {
 		rtm_log("cannot open the player's channels");
 		return 1;
+	}
+	if ( !host_watch(&arg) ) {
+		rtm_log("the program it was to play for has ended");
+		ob_cls_obj(cmd);
+		ob_cls_obj(ans);
+		(void)ob_del_obj(&arg.cmd);
+		(void)ob_del_obj(&arg.reply);
+		return 0;
 	}
 	if ( tk_ref_tsk(TSK_SELF, &rt) >= E_OK ) pri = rt.tskbpri;
 	syn_init();
@@ -365,13 +404,25 @@ int main( void )
 		ER	er = ob_rea_rec(cmd, 0, 0, &c, sizeof(c), &asz);
 
 		if ( er < E_OK ) break;		/* the channel went: the player has closed */
+		if ( asz >= (SZ)sizeof(UINT) && c.op == RTM_HOST_ID ) {
+			/* the program it plays for has ended: what it made for this goes too */
+			rtm_log("the program it played for has ended");
+			gone = TRUE;
+			break;
+		}
 		if ( asz < (SZ)offsetof(RTM_CMD, u) ) continue;
 		if ( asz < (SZ)sizeof(c) ) memset((UB *)&c + asz, 0, sizeof(c) - asz);
 		if ( !command(&c) ) break;
 	}
 	mix_stop();
 	rtm_log("ended");
+	if ( host_key > 0 ) ob_cls_obj(host_key);
+	if ( host_port > 0 ) ob_cls_obj(host_port);
 	ob_cls_obj(cmd);
 	ob_cls_obj(ans);
+	if ( gone ) {
+		(void)ob_del_obj(&arg.cmd);
+		(void)ob_del_obj(&arg.reply);
+	}
 	return 0;
 }

@@ -161,19 +161,57 @@ LOCAL void timer_hw( UD tsc )
 }
 
 /*
- * The one timer of a processor serves two: the system timer's expiry,
- * which only PRC 1 has (sys_timer.h), and the period of the lockup
- * checks, which every processor has (lockup.c). It is set to the nearer;
- * its interrupt runs whichever is due and sets it again. Changed with
- * interrupts disabled only, on the processor itself.
+ * The one timer of a processor serves three: the system timer's expiry,
+ * which only PRC 1 has (sys_timer.h), the period of the lockup checks,
+ * which every processor has (lockup.c), and, while it is idle with the
+ * idle states' tick kept, that tick (cpuidle.c). It is set to the
+ * nearest; its interrupt runs whichever is due and sets it again. Changed
+ * with interrupts disabled only, on the processor itself.
  */
 EXPORT void	(*knl_apic_lk_hook)( void ) = NULL;
+
+/*
+ * What wakes a processor that has no task: the interrupts it takes then,
+ * by vector (counted at the entry, vector.S), and of its timer's, the
+ * deadlines that were due: the idle states' tick, the lockup period, the
+ * system timer (cpuidle.c tells them)
+ */
+EXPORT volatile UW	knl_idle_irq[256];
+EXPORT volatile UW	knl_idle_tmr[3];
 IMPORT void	knl_cpu_freq_tick( ID prcid );
+LOCAL UD dl_nearer( UD a, UD b )
+{
+	return ( a == 0 ) ? b : ( b == 0 || a < b ) ? a : b;
+}
+
 LOCAL void timer_program( T_PCPU *p )
 {
-	UD	a = p->apic_sys_dl, b = p->apic_lk_dl;
+	timer_hw(dl_nearer(dl_nearer(p->apic_sys_dl, p->apic_lk_dl), p->apic_idle_dl));
+}
 
-	timer_hw( ( a == 0 ) ? b : ( b == 0 || a < b ) ? a : b );
+/*
+ * The nearer of the two deadlines that are events (the system timer's and
+ * the lockup period's), 0 for none: what the idle states may sleep until
+ */
+EXPORT UD knl_apic_next_event( void )
+{
+	T_PCPU	*p = knl_pcpu();
+
+	return dl_nearer(p->apic_sys_dl, p->apic_lk_dl);
+}
+
+/*
+ * The idle states' emulated tick (cpuidle.c): a third deadline that wakes
+ * the processor to choose again, or none for 0. With interrupts disabled,
+ * on the processor itself.
+ */
+EXPORT void knl_apic_idle_tick( UD tsc )
+{
+	T_PCPU	*p = knl_pcpu();
+
+	if ( p->apic_idle_dl == tsc ) return;
+	p->apic_idle_dl = tsc;
+	timer_program(p);
 }
 
 EXPORT void knl_apic_timer_deadline( UD tsc )
@@ -198,6 +236,24 @@ EXPORT void knl_apic_timer_isr( UINT intno, UW iar )
 	T_PCPU	*p = knl_pcpu();
 	UD	now = ReadSysCounterSync();
 
+	if ( p->ctxtsk == NULL ) {
+		if ( p->apic_idle_dl != 0 && now >= p->apic_idle_dl ) {
+			__atomic_add_fetch(&knl_idle_tmr[0], 1, __ATOMIC_RELAXED);
+			p->idle.wake_tmr[0]++;
+		}
+		if ( p->apic_lk_dl != 0 && now >= p->apic_lk_dl ) {
+			__atomic_add_fetch(&knl_idle_tmr[1], 1, __ATOMIC_RELAXED);
+			p->idle.wake_tmr[1]++;
+		}
+		if ( p->apic_sys_dl != 0 && now >= p->apic_sys_dl ) {
+			__atomic_add_fetch(&knl_idle_tmr[2], 1, __ATOMIC_RELAXED);
+			p->idle.wake_tmr[2]++;
+		}
+	}
+	if ( p->apic_idle_dl != 0 && now >= p->apic_idle_dl ) {
+		p->apic_idle_dl = 0;
+		p->apic_idle_got = TRUE;
+	}
 	if ( p->apic_lk_dl != 0 && now >= p->apic_lk_dl ) {
 		p->apic_lk_dl = 0;
 		knl_cpu_freq_tick(p->prcid);		/* this processor's clock over the period (cpuclk.c) */
@@ -480,6 +536,7 @@ EXPORT void knl_apic_sleep_quiet( void )
 
 	p->apic_sys_dl = 0;
 	p->apic_lk_dl = 0;
+	p->apic_idle_dl = 0;
 	timer_hw(0);
 }
 
@@ -489,6 +546,7 @@ EXPORT void knl_apic_wake_init( void )
 
 	p->apic_sys_dl = 0;
 	p->apic_lk_dl = 0;
+	p->apic_idle_dl = 0;
 	knl_apic_cpu_init();
 }
 

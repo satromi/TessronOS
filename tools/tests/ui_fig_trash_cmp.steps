@@ -5,28 +5,8 @@
 # menus remembering, 屑実身操作. Either brings up the desktop's 屑実身操作 window, which is
 # closed again.
 # Keys: Ctrl+E 08 01.
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
-mkbig fig 1 2 0
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-click 600 400 1
-wait 500
-move 610 600
-wait 400
-click 610 600
-wait 800
-sync 600
-win 屑実身操作
-shot trc_k
-key 08 01
-sync 600
-wait 300
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 2 0
 logmark
 pfig big
@@ -36,10 +16,10 @@ logmark
 click 600 400 1
 expectsince figure: menu
 wait 500
-move 610 400
+move 610 600
 wait 400
 shot trc_p_menu
-click 610 400
+click 610 600
 expectsince figure: trash asked 0
 wait 800
 sync 600

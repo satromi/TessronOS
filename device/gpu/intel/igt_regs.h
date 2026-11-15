@@ -143,7 +143,7 @@
 #define  MASTER_GT1		0x0000000c	/* 1: the video engines */
 #define  MASTER_GT2		0x00000030	/* 2: power management (4) and the GuC (5) */
 #define  MASTER_GT3		0x00000040	/* 3: the video enhancement engine */
-#define  MASTER_DISPLAY		0x007f0000	/* the display's: pipes, ports, the rest */
+#define  MASTER_DISPLAY		0x00ff0000	/* the display's: pipes, ports, the rest, the PCH's */
 #define  MASTER_PCU		0x40000000
 #define GT_ISR(n)		( 0x44300 + (n) * 0x10 )
 #define GT_IMR(n)		( 0x44304 + (n) * 0x10 )

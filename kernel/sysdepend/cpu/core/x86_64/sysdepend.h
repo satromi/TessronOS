@@ -231,6 +231,38 @@ typedef struct {
 	volatile BOOL	mute;		/* the tests: looks stopped */
 } T_LKCPU;
 
+/*
+ * What the idle states keep of a processor (kernel/sysdepend/x64/cpuidle.c):
+ * the selection's history and each state's use. IDLE_ST_N is the polling
+ * state and the most states of a table.
+ */
+#define IDLE_ST_N	9
+#define IDLE_BUCKETS	6
+#define IDLE_INTERVALS	8
+
+typedef struct {
+	UW	gen;			/* the settings this processor applied (cpuidle.c) */
+	BOOL	needs_update;
+	BOOL	tick_stopped;		/* the emulated tick is stopped until it leaves idle */
+	BOOL	tick_wakeup;		/* the last sleep ended by that tick */
+	UD	ctxsw_at;		/* its ctxsw_cnt when it last chose */
+	UD	next_timer_ns;
+	UW	bucket;
+	UW	correction[IDLE_BUCKETS];
+	UW	intervals[IDLE_INTERVALS];
+	INT	interval_ptr;
+	INT	last_idx;
+	UD	last_res_ns;		/* 0: the state was not entered */
+	BOOL	poll_limited;		/* the polling state ended on its time limit */
+	UW	wake_tmr[3];		/* its timer's interrupts while idle: the tick, the lockup period, the system timer (apic.c) */
+	UW	wake_tmr_last[3];
+	UW	wake_none, wake_none_last;	/* sleeps ended with no interrupt pending (cpuidle.c, idlelog=1) */
+	UD	usage[IDLE_ST_N];
+	UD	time_ns[IDLE_ST_N];
+	UD	above[IDLE_ST_N];
+	UD	below[IDLE_ST_N];
+} T_IDLECPU;
+
 #define PT_BATCHES	4		/* page tables taken out, waiting to be given back (mmu.c) */
 
 typedef struct {
@@ -289,6 +321,9 @@ typedef struct pcpu {
 	struct task_control_block *sch_task;	/* the scheduler's choice for it, under the lock */
 	UD	apic_sys_dl;		/* its timer's deadlines (apic.c) */
 	UD	apic_lk_dl;
+	UD	apic_idle_dl;		/* the emulated tick of the idle states (cpuidle.c) */
+	volatile BOOL apic_idle_got;	/* that tick woke it */
+	T_IDLECPU idle;
 	volatile BOOL exc_saying;	/* telling an exception (exc_hdl.c) */
 	UW	core_key;		/* the APIC ID above the threads' bits: same for the threads of a core */
 	UW	pkg_key;		/* above the cores' bits: same for one package */

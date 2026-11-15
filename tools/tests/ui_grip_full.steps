@@ -1,0 +1,100 @@
+# The corner at a window's foot that sizes it (design 11.1), for tools/ui_run.py: the
+# pointer over it takes the shape of the hand holding (WM_PT_GRIP) and the ordinary one
+# off it; a double press on it makes the window the screen's size (全画面表示) and a
+# second puts it back where it stood. A window of the desktop's own (原紙箱, 893,35 to
+# 1093,635) and the window of a process (予定表, 100,100 to 920,738), each with Ctrl+L
+# as well, which goes the same way: one put full by the corner put back by Ctrl+L, and
+# the other way round. The screen is 1280x800, the message line under 780.
+# The hand holding is laid with its point 4 down from its top, its knuckles black 9 to
+# the right of the point and 4 above it; the ordinary hand points with its top left.
+waitwin 原紙箱
+win 原紙箱
+want ok 893 35 1093 635
+move 1000 300
+wait 300
+# over the corner: the hand holding
+move 1088 630
+wait 400
+pixel 1097 626 000000
+shot grip_on_desk
+# along the foot, off the corner: the ordinary hand, nothing black where the knuckles were
+move 1060 630
+wait 400
+pixel 1069 626 e0e0e0
+pixel 1060 630 000000
+shot grip_off_desk
+# and back over it
+move 1088 630
+wait 400
+pixel 1097 626 000000
+# a double press on the corner: 全画面表示, and the corner of the screen's size puts it back
+dclick 1088 630
+wait 800
+win 原紙箱
+want ok 0 0 1280 780
+shot grip_full_desk
+dclick 1275 775
+wait 800
+win 原紙箱
+want ok 893 35 1093 635
+shot grip_back_desk
+# full by the corner, back by Ctrl+L
+dclick 1088 630
+wait 800
+win 原紙箱
+want ok 0 0 1280 780
+key 0F 01
+wait 800
+win 原紙箱
+want ok 893 35 1093 635
+# the window of a process
+open 019d6f00-1a2b-7c3d-8e4f-a1b2c3d4e5f6
+expect calendar: ready
+wait 800
+win 予定表
+want ok 100 100 920 738
+move 600 400
+wait 300
+move 915 733
+wait 400
+pixel 924 729 000000
+shot grip_on_proc
+move 880 733
+wait 400
+pixelnot 889 729 000000
+move 915 733
+wait 400
+# full by the corner, back by Ctrl+L: the program asks the desktop, which kept where it stood
+dclick 915 733
+wait 1000
+win 予定表
+want ok 0 0 1280 780
+shot grip_full_proc
+logmark
+key 0F 01
+expectsince calendar: fullscreen off
+wait 1000
+win 予定表
+want ok 100 100 920 738
+# full by Ctrl+L, back by the corner
+logmark
+key 0F 01
+expectsince calendar: fullscreen on
+wait 1000
+win 予定表
+want ok 0 0 1280 780
+dclick 1275 775
+wait 1000
+win 予定表
+want ok 100 100 920 738
+shot grip_back_proc
+# and by the corner twice more
+dclick 915 733
+wait 1000
+win 予定表
+want ok 0 0 1280 780
+dclick 1275 775
+wait 1000
+win 予定表
+want ok 100 100 920 738
+absent !OACV!

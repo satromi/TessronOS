@@ -1,7 +1,8 @@
 # 印刷 from the programs that run as processes (design 11.22.6), for
 # tools/ui_run.py: each makes its pages, hands them to the desktop
-# (DT_RQ_PRINT), and the desktop's 印刷設定 comes up over the program's
-# window; Enter prints, and the PDF file's link goes on the desktop.
+# (DT_RQ_PRINT), and the desktop starts 基本印刷, whose 印刷設定 comes up
+# in the middle of the screen; Enter prints, and the PDF file's link goes
+# on the desktop.
 # 基本表計算: the sample sheet, its cells and charts
 open 019b15f8-72b8-7151-a57f-149fb1f59a17
 expect calc: ready
@@ -9,9 +10,11 @@ wait 1500
 win 基本表計算
 click 900 117
 wait 300
+logmark
 key 13 01
 expect calc: print
-wait 1500
+expectsince bprint: panel 印刷設定
+wait 800
 shot print_calc_panel
 key 28
 expect calc: print answered 0
@@ -30,9 +33,11 @@ key 13 01
 expect mcard: print panel
 wait 800
 shot print_mcard_cards
+logmark
 key 28
 expect mcard: print list
-wait 1500
+expectsince bprint: panel 印刷設定
+wait 800
 shot print_mcard_panel
 key 28
 expect mcard: print answered 0
@@ -47,9 +52,11 @@ wait 1500
 win 予定表
 click 500 110
 wait 300
+logmark
 key 13 01
 expect calendar: print month
-wait 1500
+expectsince bprint: panel 印刷設定
+wait 800
 shot print_cal_panel
 key 28
 expect calendar: print answered 0

@@ -79,6 +79,22 @@ typedef struct {
  */
 IMPORT INT knl_snd_mix( UB *dst, INT frames, UW rate, INT channels, BOOL wait );
 
+/*
+ * The rate the input now comes at, when it changed while it records
+ * (a voice link up in another codec than its start foresaw): with the
+ * manager's lock held. Nothing when nothing records from a backend.
+ */
+IMPORT void knl_snd_in_rate( UW rate );
+
+/*
+ * The microphone's volume (0 .. SND_VOL_MAX) as a level of DN_SDVOLMIC,
+ * SND_MIC_UNITY at the level's middle, and a level back as the nearest
+ * volume: for a backend that has its hardware's gain told it in its own
+ * steps (the earphones' +VGM)
+ */
+IMPORT UH knl_snd_mic_level( UW vol );
+IMPORT UW knl_snd_mic_vol( UH level );
+
 /* An id and a name into an output entry, cut to fit */
 IMPORT void knl_snd_out_set( SDOut *o, CONST UB *id, CONST UB *name, UW kind, UW flags );
 

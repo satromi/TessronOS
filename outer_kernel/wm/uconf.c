@@ -505,7 +505,9 @@ LOCAL char	wall_line[CF_VAL_MAX];		/* the WALLPAPER line last laid */
 /*
  * The mixer's settings (include/ts/snd.h): the whole's volume as
  * "SOUND_VOL left right mute", each program's as "SOUND_APP uuid volume
- * mute", a line each. Taken as they are read, without being kept again;
+ * mute", a line each, and the microphone's of each kind of input that
+ * had its volume set as "SOUND_MIC kind volume mute ...", three words a
+ * kind (usb, i2s, hda, bt) in one line. Taken as they are read, without being kept again;
  * the mixer has them kept, a second after they last changed, by
  * snd_keep. There are as many SOUND_APP lines as programs have had
  * a volume kept.
@@ -529,8 +531,9 @@ LOCAL UW snd_lines_sum( CONST UB *text, INT len )
 	UW	h = 2166136261U;
 	INT	k, i;
 
-	for ( k = -1; ; k++ ) {
-		if ( !cf_get(text, len, ( k < 0 ) ? "SOUND_VOL" : "SOUND_APP", ( k < 0 ) ? 0 : k, v, sizeof(v)) ) {
+	for ( k = -2; ; k++ ) {
+		if ( !cf_get(text, len, ( k == -2 ) ? "SOUND_VOL" : ( k == -1 ) ? "SOUND_MIC" : "SOUND_APP",
+			     ( k < 0 ) ? 0 : k, v, sizeof(v)) ) {
 			if ( k >= 0 ) {
 				break;
 			}
@@ -570,6 +573,22 @@ LOCAL void snd_conf( CONST UB *text, INT len, BOOL changed )
 		s.mute = ( cf_word(v, 2, w, sizeof(w)) && cf_num(w, 0) != 0 );
 		(void)knl_snd_mix_set(&s, FALSE);
 	}
+	if ( cf_get(text, len, "SOUND_MIC", 0, v, sizeof(v)) ) {
+		for ( k = 0; cf_word(v, k * 3, w, sizeof(w)); k++ ) {
+			INT	kind = knl_snd_mic_kind(w);
+
+			if ( kind < 0 ) {
+				continue;		/* a kind this machine does not know */
+			}
+			knl_memset(&s, 0, sizeof(s));
+			s.what = SND_MIX_IN;
+			s.pid = kind;
+			s.lv = s.rv = ( cf_word(v, k * 3 + 1, w, sizeof(w)) ) ? (UW)cf_num(w, SND_MIC_UNITY) : SND_MIC_UNITY;
+			if ( s.lv > SND_VOL_MAX ) s.lv = s.rv = SND_VOL_MAX;
+			s.mute = ( cf_word(v, k * 3 + 2, w, sizeof(w)) && cf_num(w, 0) != 0 );
+			(void)knl_snd_mix_set(&s, FALSE);
+		}
+	}
 	for ( k = 0; cf_get(text, len, "SOUND_APP", k, v, sizeof(v)); k++ ) {
 		if ( !cf_word(v, 0, w, sizeof(w)) || ts_str_to_uuid(w, &u) < E_OK ) {
 			continue;			/* a line left empty */
@@ -589,7 +608,7 @@ LOCAL void snd_keep( void )
 	SDMix		*m = (SDMix *)Kmalloc(sizeof(SDMix));
 	SDMixSet	*a = NULL;
 	UB		*text = NULL;
-	char		v[CF_VAL_MAX], us[40];
+	char		v[CF_VAL_MAX], w[CF_VAL_MAX], us[40];
 	TS_UUID		u;
 	SZ		asz = 0;
 	INT		len, n = 0, k, cap = 0, room = 0;
@@ -616,15 +635,29 @@ LOCAL void snd_keep( void )
 				break;
 			}
 		}
-		/* room for the volume's line and a line for each program, whatever the record holds */
-		len = knl_ob_rea_all(key, 1, ( n + 1 ) * ( CF_VAL_MAX + 16 ), &text, &cap);
+		/* room for the volume's and the microphone's lines and a line for each program, whatever the record holds */
+		len = knl_ob_rea_all(key, 1, ( n + 2 ) * ( CF_VAL_MAX + 16 ), &text, &cap);
 		if ( len < 0 ) {
 			len = 0;
-			text = (UB *)Kmalloc(( n + 1 ) * ( CF_VAL_MAX + 16 ) + 1);
-			cap = ( text != NULL ) ? ( n + 1 ) * ( CF_VAL_MAX + 16 ) : 0;
+			text = (UB *)Kmalloc(( n + 2 ) * ( CF_VAL_MAX + 16 ) + 1);
+			cap = ( text != NULL ) ? ( n + 2 ) * ( CF_VAL_MAX + 16 ) : 0;
 		}
 		tm_sprintf((UB *)v, (CONST UB *)"%d %d %d", (INT)m->lv, (INT)m->rv, (INT)( m->mute != 0 ));
 		len = ( text != NULL ) ? cf_put(text, len, cap, "SOUND_VOL", 0, v) : -1;
+		/* the microphone's: every kind of input that had its volume set, in one line */
+		{
+			SDMixSet	mk[8];
+			INT		nm = knl_snd_mic_kept(mk, 8), at = 0, i;
+
+			v[0] = 0;
+			for ( i = 0; i < nm && i < 8 && at < CF_VAL_MAX - 24; i++ ) {
+				at += tm_sprintf((UB *)v + at, (CONST UB *)"%s%s %d %d", ( at > 0 ) ? " " : "",
+						 knl_snd_mic_kind_name(mk[i].pid), (INT)mk[i].lv, (INT)( mk[i].mute != 0 ));
+			}
+			if ( len >= 0 && ( nm > 0 || cf_get(text, len, "SOUND_MIC", 0, w, sizeof(w)) ) ) {
+				len = cf_put(text, len, cap, "SOUND_MIC", 0, v);
+			}
+		}
 		for ( k = 0; len >= 0; k++ ) {
 			if ( k < n ) {
 				knl_memcpy(&u, a[k].prog, 16);

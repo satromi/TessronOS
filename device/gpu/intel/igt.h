@@ -118,6 +118,7 @@ typedef struct {
 	UW		slice_mask, ss_mask, eu_total, fuse2, eu_dis;
 	UINT		rp0, rp1, rpn;	/* MHz */
 	ID		cyc;
+	BOOL		look_on;	/* the look every millisecond is running (igt_look_set, under 'lock') */
 	T_SPLOCK	lock;		/* the engines' state between the interrupt, the look and the task */
 	ID		mtx;		/* page tables and contexts */
 	UD		irq_n, irq_spurious, irq_display;
@@ -146,9 +147,24 @@ typedef struct {
 	UW		pm_iir;		/* PM events not yet handled */
 	ID		pm_tsk;
 	UD		n_park, n_unpark, n_up, n_down, n_wake, n_pm_irq, n_fw_kick, n_fw_stuck;
+	INT		boost_waiters;	/* jobs waited for before they started, not over yet */
+	UD		n_boost, n_boost_jobs;	/* times those went from none to some; the jobs */
+	BOOL		inter_on;	/* frames of the screen come: the thresholds of the high mode */
+	UD		inter_at;	/* when the last was told (us) */
+	UD		n_inter;	/* times frames began to come */
+	BOOL		pinned;		/* held at RP0 (the check at start) */
+	UINT		f_unpin;	/* where it was before */
+	/*
+	 * The time parked (us, counted at each unpark, from park_at), and
+	 * the look's samples, one a millisecond while unparked: awake, the
+	 * frequency it ran at, asked, at RP0
+	 */
+	UD		st_parked, park_at, st_awake, st_cagf, st_asked, st_top;
 } IGT;
 
 IMPORT IGT	knl_igt;
+IMPORT void	igt_look_set( BOOL on );	/* igt_pm.c, under 'lock' */
+IMPORT UD	igt_parked_ms( void );		/* igt_pm.c, under 'lock' */
 
 /* ---------------------------------------------------------------- igt.c */
 Inline UW igt_rd( UW off )
@@ -199,6 +215,10 @@ IMPORT void	igt_pm_tick( void );		/* from the 1ms look: the GT parked when idle 
 IMPORT BOOL	igt_pm_irq( UW iir );		/* GT interrupt register 2, under the lock: TRUE, igt_pm_wake */
 IMPORT void	igt_pm_wake( void );		/* the task woken, after the lock */
 IMPORT INT	igt_pm_text( char *t, INT max );	/* the state, a line */
+IMPORT void	igt_pm_boost( void *priv, INT delta );	/* T_GPUOPS boost: jobs waited for before they started */
+IMPORT void	igt_pm_pin( BOOL on );		/* the frequency held at RP0, and let go (a task's) */
+IMPORT void	igt_pm_interactive( void *priv );	/* T_GPUOPS interactive: a frame of the screen built */
+IMPORT INT	igt_pm_now_text( char *t );	/* the frequency, heat and limits now, for a line (a task's; 160 bytes) */
 IMPORT INT	igt_setting( CONST char *word, INT dflt );	/* "word=N" of cmdline.txt */
 
 /* ---------------------------------------------------------------- igt_vm.c */

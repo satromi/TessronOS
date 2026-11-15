@@ -9,190 +9,248 @@
 
 /*
  *	dttool.c
- *	The system's own tools (design 16.5.17)
+ *	What the desktop does for the system's tools (design 16.5.17)
  *
- *	Three tools that look at the store as a whole rather than at one
- *	object, each shown in a window whose page the tool makes:
+ *	屑実身操作, 実身/仮身検索, 仮身ネットワーク and ウインドウ一覧 are
+ *	programs running as processes (application/systool), each with its
+ *	program object. They make their lists themselves from what they may
+ *	read; here is what only the desktop can do for them:
  *
- *	  屑実身操作		the objects no link reaches any more; each
- *				can be carried out, which links to it again,
- *				or thrown away for good
- *	  実身/仮身検索		the objects whose name, relationship tags or
- *				text hold some words, or whose dates fall
- *				between two days
- *	  仮身ネットワーク	what an object links to, and what those link
- *				to, a column to each step, with an arrow
- *				from each object to each it links to
- *
- *	A tool's page is a record made here, sealed like the 原紙箱's: it is
- *	drawn, pressed, opened from and carried from by the same code as any
- *	page, and nothing in it is changed or saved. Carrying an object out
- *	of a tool puts a link to it where it is let go; the count of links
- *	to it goes up when that record is saved.
+ *	  - started, each runs once: run again while its window is open, the
+ *	    window is brought to the front with the keys and the tool is told
+ *	    (DT_HOW_AGAIN), 仮身ネットワーク with the object to start from
+ *	    (dt_prog_again, from dt_prog_run). The same is done for every
+ *	    program run again while a window of it stands for its program
+ *	    object, and it is told when it asked to be (DT_RQ_TELL)
+ *	  - a tool is told when what it lists may have changed: 屑実身操作
+ *	    when a record is saved or a package installed or deleted
+ *	    (dt_trash_tell), ウインドウ一覧 when the windows on the screen or
+ *	    their order change (dt_winlist_poll, from the desktop's loop)
+ *	  - 屑実身操作's 削除 and 再探索: an object thrown away for good, the
+ *	    counts of links made again (DT_RQ_PURGE, DT_RQ_RECOUNT)
+ *	  - ウインドウ一覧's list, and the window it opens brought to the
+ *	    front (DT_RQ_WIN_LIST)
+ *	  - what the system itself holds, which no record links to
+ *	    (DT_RQ_ROOTS): 屑実身操作 leaves it out of its list
  */
 
 #include <sys/machine.h>
 #include "kernel.h"
 #include <tk/tkernel.h>
 #include <ts/wm.h>
-#include <ts/part.h>
-#include <ts/dbox.h>
-#include <ts/hid.h>
 #include <ts/om.h>
 #include <ts/tad.h>
-#include <ts/tadview.h>
 #include <ts/uuid.h>
-#include <ts/fn.h>
-#include <ts/mn.h>
+#include <ts/dtreq.h>
 #include <ts/sysdef.h>
+#include "obj/obj.h"
 #include "desktop.h"
 
-#define KEY_C		0x06
-#define KEY_G		0x0A
-#define KEY_N		0x11
-#define KEY_X		0x1B
-#define KEY_DEL		0x4C
-#define MOD_CTRL	( HID_MOD_LCTRL | HID_MOD_RCTRL )
+#define ID_TRASH	"trash-real-objects"
+#define ID_SEARCH	"real-object-search"
+#define ID_NETWORK	"virtual-object-network"
+#define ID_WINLIST	"window-list-viewer"
 
-/* What the items of the tools' menus are, as the tools' commands */
-#define TC_FULL		501
-#define TC_REFRESH	502
-#define TC_COPY		503
-#define TC_CUT		504
-#define TC_DELETE	505
-#define TC_RESCAN	506
-#define TC_FOCUS	508
-#define TC_SEARCH	509
-#define TC_NET		510
-#define TC_GRAPH	511
-
-
-/* ---------------------------------------------------------------- words */
-
-LOCAL INT cat( UB *buf, INT at, INT max, CONST char *s )
+LOCAL BOOL same_id( CONST UB *a, CONST char *b )
 {
-	while ( s != NULL && *s != 0 && at < max - 1 ) {
-		buf[at++] = (UB)*s++;
-	}
-	buf[at] = 0;
+	INT	i;
 
-	return at;
+	for ( i = 0; a[i] != 0 && a[i] == (UB)b[i]; i++ ) ;
+	return (BOOL)( a[i] == 0 && b[i] == 0 );
 }
 
-LOCAL INT cat_n( UB *buf, INT at, INT max, INT v )
+LOCAL BOOL is_tool( CONST UB *id )
 {
-	char	num[12];
-	INT	k = 0;
-
-	if ( v < 0 ) {
-		v = 0;
-	}
-	do {
-		num[k++] = (char)( '0' + v % 10 );
-		v /= 10;
-	} while ( v > 0 && k < 11 );
-	while ( k > 0 && at < max - 1 ) {
-		buf[at++] = (UB)num[--k];
-	}
-	buf[at] = 0;
-
-	return at;
+	return (BOOL)( same_id(id, ID_TRASH) || same_id(id, ID_SEARCH) || same_id(id, ID_NETWORK)
+		    || same_id(id, ID_WINLIST) );
 }
 
-/* The objects the links taken in a tool's page point at */
-LOCAL INT picked_targets( DTWIN *d, TS_UUID *ids, INT max )
-{
-	T_VOBJ	v;
-	INT	i, n = 0;
-
-	for ( i = 0; d->fig != NULL && i < d->fig->nsh && n < max; i++ ) {
-		if ( ed_picked(d, i) && ed_link_at(d, i, &v) ) {
-			ids[n++] = v.target;
-		}
-	}
-
-	return n;
-}
-
-/* Where a tool's window stands when it is first opened */
-LOCAL void tool_rect( T_DPRECT *o, INT x, INT y, INT w, INT h )
-{
-	o->left = x;
-	o->top = y;
-	o->right = x + w;
-	o->bottom = y + h;
-}
-
-/* ---------------------------------------------------------------- 屑実身操作 */
+/* ---------------------------------------------------------------- telling the programs */
 
 /*
- * The objects no link reaches: a count of nought in the metadata, and
- * not one the system itself holds.
+ * The channels the programs named (DT_RQ_TELL), each with the program's
+ * id, until it can no longer be opened (the process ended and its
+ * channel went). The oldest gives way when there is no room.
  */
-LOCAL T_TAD *trash_record( INT *p_n )
+#define TOLD_MAX	32
+#define TOLD_ID		32
+
+typedef struct {
+	TS_UUID	ch;
+	UB	prog[TOLD_ID];
+} TOLD;
+
+LOCAL TOLD	told[TOLD_MAX];
+LOCAL INT	ntold = 0;
+
+LOCAL void told_drop( INT i )
 {
-	TS_UUID	*all, roots[8];
-	INT	n, nr, i, k, keep = 0;
-	T_TAD	*rec;
+	INT	j;
 
-	n = om_store_objects(NULL, 0);
-	all = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( n + 1 ));
-	if ( all == NULL ) {
-		return NULL;
+	for ( j = i + 1; j < ntold; j++ ) told[j - 1] = told[j];
+	ntold--;
+}
+
+LOCAL ER tool_listen( CONST T_DTREQ *rq, ID asker )
+{
+	TS_UUID	u;
+	INT	i;
+
+	if ( ts_str_to_uuid((CONST char *)rq->text, &u) < E_OK ) {
+		return E_PAR;
 	}
-	n = om_store_objects(all, n);
-	nr = dt_roots(roots, 8);
-	for ( i = 0; i < n; i++ ) {
-		BOOL	root = FALSE;
+	if ( same_id(rq->name, DT_TELL_FIRST) ) {
+		/* the first window's: only the process of the window of the cabinet */
+		TS_UUID	cab;
+		INT	wid;
 
-		for ( k = 0; k < nr; k++ ) {
-			if ( ts_uuid_cmp(&all[i], &roots[k]) == 0 ) {
-				root = TRUE;
-			}
+		if ( ts_str_to_uuid(SYSDEF_CABINET, &cab) < E_OK || ( wid = wm_obj_showing(&cab) ) <= 0
+		  || wm_obj_maker(wid) != asker ) {
+			return E_PAR;
 		}
-		if ( !root && om_store_refs(&all[i]) == 0 ) {
-			all[keep++] = all[i];
-		}
+	} else if ( dt_prog_find(rq->name) == NULL ) {
+		return E_PAR;
 	}
-	rec = dt_list_record("屑実身操作", all, NULL, keep);
-	Kfree(all);
-	if ( p_n != NULL ) {
-		*p_n = keep;
+	for ( i = 0; i < ntold; i++ ) {
+		if ( ts_uuid_cmp(&told[i].ch, &u) == 0 ) return E_OK;
 	}
+	if ( ntold >= TOLD_MAX ) told_drop(0);
+	told[ntold].ch = u;
+	for ( i = 0; i < TOLD_ID - 1 && rq->name[i] != 0; i++ ) told[ntold].prog[i] = rq->name[i];
+	told[ntold].prog[i] = 0;
+	ntold++;
+	return E_OK;
+}
 
-	return rec;
+/* Every channel of the program told how (DT_HOW_*), into the object it is about, text with it; FALSE: none heard */
+EXPORT BOOL dt_prog_tell_text( CONST char *prog, UINT how, CONST TS_UUID *into, CONST UB *text )
+{
+	T_DTANS	an;
+	SZ	asz = 0;
+	ID	k;
+	INT	i = 0, j;
+	BOOL	heard = FALSE;
+
+	knl_memset(&an, 0, sizeof(an));
+	an.er = E_OK;
+	an.how = how;
+	if ( into != NULL ) an.into = *into;
+	for ( j = 0; text != NULL && text[j] != 0 && j < DT_TEXT_MAX - 1; j++ ) an.text[j] = text[j];
+	while ( i < ntold ) {
+		if ( !same_id(told[i].prog, prog) ) {
+			i++;
+			continue;
+		}
+		k = ob_opn_obj(&told[i].ch, OB_OP_WRITE | OB_O_NOWAIT);
+		if ( k <= 0 ) {
+			told_drop(i);
+			continue;
+		}
+		if ( ob_wri_rec(k, 0, 0, &an, sizeof(an), &asz) >= E_OK ) {
+			knl_ob_post(&told[i].ch, 0, OB_E_CHANGE, NULL);
+			heard = TRUE;
+		}
+		(void)ob_cls_obj(k);
+		i++;
+	}
+	return heard;
+}
+
+EXPORT BOOL dt_prog_tell( CONST char *prog, UINT how, CONST TS_UUID *into )
+{
+	return dt_prog_tell_text(prog, how, into, NULL);
+}
+
+LOCAL BOOL tool_heard( CONST char *prog )
+{
+	INT	i;
+
+	for ( i = 0; i < ntold; i++ ) {
+		if ( same_id(told[i].prog, prog) ) return TRUE;
+	}
+	return FALSE;
+}
+
+/* 屑実身操作 told that the counts of links may have moved */
+EXPORT void dt_trash_tell( void )
+{
+	(void)dt_prog_tell(ID_TRASH, DT_HOW_TOOL_REMADE, NULL);
+}
+
+/* ---------------------------------------------------------------- starting them */
+
+/*
+ * A program run while a window of it stands for its program object: the
+ * window brought to the front with the keys, and the program told, with
+ * the object a tool was run on (仮身ネットワーク starts from it). TRUE
+ * when it was so, *p_er what dt_prog_run answers; FALSE for a program
+ * with no such window, to be started. A program other than a tool is
+ * run again so only when run by itself or on its program object: run on
+ * another object, it opens that one. 仮身ネットワーク starts only from an
+ * object.
+ */
+EXPORT BOOL dt_prog_again( CONST DTPROG *p, CONST T_VOBJ *v, ER *p_er )
+{
+	INT	wid;
+
+	if ( p == NULL || p->builtin ) {
+		return FALSE;
+	}
+	if ( same_id(p->id, ID_NETWORK) && v == NULL ) {
+		*p_er = E_PAR;
+		return TRUE;
+	}
+	if ( !is_tool(p->id) && v != NULL && ts_uuid_cmp(&v->target, &p->uuid) != 0 ) {
+		return FALSE;
+	}
+	wid = wm_obj_showing(&p->uuid);
+	if ( wid <= 0 ) {
+		return FALSE;
+	}
+	wm_raise(wid);
+	(void)wm_focus(wid);
+	wm_update();
+	(void)dt_prog_tell((CONST char *)p->id, DT_HOW_AGAIN,
+			   ( v != NULL && is_tool(p->id) ) ? &v->target : NULL);
+	*p_er = E_OK;
+	return TRUE;
+}
+
+LOCAL void tool_run( CONST char *id, DTWIN *from, CONST T_VOBJ *v )
+{
+	CONST DTPROG	*p = dt_prog_find((CONST UB *)id);
+
+	if ( p == NULL ) {
+		(void)wm_msg_put("このプログラムはシステムにありません");
+		return;
+	}
+	(void)dt_prog_run(from, p, v);
 }
 
 EXPORT void dt_trash_open( void )
 {
-	DTWIN		*d = dt_tool_window(DT_TOOL_TRASH);
-	T_DPRECT	o;
+	tool_run(ID_TRASH, NULL, NULL);
+}
 
-	if ( d != NULL ) {
-		dt_tool_refresh(DT_TOOL_TRASH);
-		wm_raise(d->wid);
-		wm_focus(d->wid);
-		wm_update();
-		return;
+EXPORT void dt_winlist_open( void )
+{
+	tool_run(ID_WINLIST, NULL, NULL);
+}
+
+EXPORT void dt_search_open( DTWIN *from )
+{
+	tool_run(ID_SEARCH, from, NULL);
+}
+
+EXPORT void dt_network_open( DTWIN *from, CONST T_VOBJ *v )
+{
+	if ( v != NULL ) {
+		tool_run(ID_NETWORK, from, v);
 	}
-	tool_rect(&o, 140, 100, 600, 500);
-	(void)dt_open_made(trash_record(NULL), "屑実身操作", DT_TOOL_TRASH, &o);
-	wm_update();
 }
 
 /* ---------------------------------------------------------------- ウインドウ一覧 */
 
-/*
- * The windows the desktop shows, nearest first, each as a link to the
- * object it shows, named with the window's title: opening one brings
- * that window to the front, as opening an object already open does.
- * A program's window is among them when the program says what object
- * it shows (wm_obj_shows, "shows" of the window object): one that says
- * none -- a settings accessory, a panel -- has no object to be a link
- * to. Its own window and the other tools' are left out. The list is made
- * again whenever the windows on the screen or their order change
- * (dt_winlist_poll, from the desktop's loop).
- */
 /*
  * The windows on the screen, nearest first, every one: a list that came
  * back full is asked for again in twice the room. How many, the list in
@@ -218,1313 +276,240 @@ LOCAL INT wl_windows( INT **p_wids )
 	return n;
 }
 
-LOCAL UW	wl_seen = 0;		/* the order of the windows when the list was made */
-
-LOCAL T_TAD *winlist_record( void )
+/*
+ * Whether a window is listed, and the object it shows: one of the
+ * program's that says what object it shows; not a panel, not one of
+ * the desktop's own parts,
+ * not the asking process's, not a tool's own window
+ */
+LOCAL BOOL wl_listed( INT wid, ID asker, TS_UUID *p_id )
 {
-	INT		*wids, n, i, k = 0;
-	TS_UUID		*ids;
-	UB		(*names)[WM_TITLE_MAX];
-	CONST char	**np;
-	T_TAD		*rec;
+	DTWIN		*d = dt_win_of(wid);
+	CONST DTPROG	*p;
+	T_WMWIN		w;
 
-	n = wl_windows(&wids);
-	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( n + 1 ));
-	names = Kmalloc(sizeof(*names) * (SZ)( n + 1 ));
-	np = (CONST char **)Kmalloc(sizeof(char *) * (SZ)( n + 1 ));
-	if ( wids == NULL || ids == NULL || names == NULL || np == NULL ) n = 0;
-	for ( i = 0; i < n; i++ ) {
-		DTWIN	*d = dt_win_of(wids[i]);
-		T_WMWIN	w;
-
-		if ( d == NULL ) {
-			/* a program's window: the object it says it shows */
-			if ( !wm_obj_shown(wids[i], &ids[k]) || wm_ref(wids[i], &w) < E_OK
-			  || ( w.attr & WM_ATTR_POPUP ) != 0 ) {
-				continue;
-			}
-		} else if ( d->tool != DT_TOOL_NONE || d->sealed ) {
-			continue;
-		} else {
-			ids[k] = d->id;
-		}
-		if ( wm_title(wids[i], (char *)names[k], WM_TITLE_MAX) <= 0 ) {
-			names[k][0] = 0;
-		}
-		np[k] = (CONST char *)names[k];
-		k++;
+	if ( d != NULL ) {
+		return FALSE;			/* a part of the desktop's, which shows no object */
 	}
-	rec = dt_list_record("ウインドウ一覧", ids, np, k);
-	if ( wids != NULL ) Kfree(wids);
-	if ( ids != NULL ) Kfree(ids);
-	if ( names != NULL ) Kfree(names);
-	if ( np != NULL ) Kfree((void *)np);
-	return rec;
+	if ( !wm_obj_shown(wid, p_id) || wm_ref(wid, &w) < E_OK || ( w.attr & WM_ATTR_POPUP ) != 0 ) {
+		return FALSE;
+	}
+	if ( asker > 0 && wm_obj_maker(wid) == asker ) {
+		return FALSE;
+	}
+	p = dt_prog_of(p_id);
+	return (BOOL)( p == NULL || !is_tool(p->id) );
 }
 
-/* What the order of the windows comes to, to see when it changes */
-LOCAL UW winlist_sign( void )
+LOCAL UW	wl_seen = 0;		/* the order of the windows when ウインドウ一覧 was last told */
+
+/*
+ * What the windows come to -- their order, the object each says it
+ * shows and its title -- to see when the list would change: a program's
+ * window says what it shows a moment after it is on the screen
+ */
+LOCAL UW wl_sign( void )
 {
-	INT	*wids, n, i;
+	INT	*wids, n, i, k;
 	UW	h = 2166136261U;
+	TS_UUID	id;
+	char	t[WM_TITLE_MAX];
 
 	n = wl_windows(&wids);
 	for ( i = 0; i < n; i++ ) {
 		h = ( h ^ (UW)wids[i] ) * 16777619U;
+		if ( dt_win_of(wids[i]) == NULL && wm_obj_shown(wids[i], &id) ) {
+			for ( k = 0; k < (INT)sizeof(id); k++ ) h = ( h ^ ((CONST UB *)&id)[k] ) * 16777619U;
+		}
+		if ( wm_title(wids[i], t, sizeof(t)) > 0 ) {
+			for ( k = 0; t[k] != 0; k++ ) h = ( h ^ (UB)t[k] ) * 16777619U;
+		}
 	}
 	if ( wids != NULL ) Kfree(wids);
 	return h ^ (UW)n;
-}
-
-EXPORT void dt_winlist_open( void )
-{
-	DTWIN		*d = dt_tool_window(DT_TOOL_WINLIST);
-	T_DPRECT	o;
-
-	if ( d != NULL ) {
-		wm_raise(d->wid);
-		wm_focus(d->wid);
-		wm_update();
-		return;
-	}
-	tool_rect(&o, 700, 80, 300, 360);
-	(void)dt_open_made(winlist_record(), "ウインドウ一覧", DT_TOOL_WINLIST, &o);
-	wl_seen = winlist_sign();
-	wm_update();
 }
 
 EXPORT void dt_winlist_poll( void )
 {
 	UW	s;
 
-	if ( dt_tool_window(DT_TOOL_WINLIST) == NULL ) {
+	if ( !tool_heard(ID_WINLIST) ) {
 		return;
 	}
-	s = winlist_sign();
+	s = wl_sign();
 	if ( s != wl_seen ) {
 		wl_seen = s;
-		dt_tool_refresh(DT_TOOL_WINLIST);
-		wm_update();
+		(void)dt_prog_tell(ID_WINLIST, DT_HOW_TOOL_REMADE, NULL);
 	}
 }
 
-/*
- * The objects taken, thrown away for good, once it has been agreed to.
- * A window showing one is closed first; what they linked to loses those
- * links, and may itself become a 屑実身.
- */
-LOCAL void trash_delete( DTWIN *d )
+/* DT_RQ_WIN_LIST: the window at place recno of those listed, or the one showing target to the front */
+LOCAL ER wl_req( CONST T_DTREQ *rq, T_DTANS *an, ID asker )
 {
-	TS_UUID	*ids;
-	UB	l1[WM_LABEL_MAX * 2];
-	INT	n, i, at = 0, room = ( d->fig != NULL ) ? d->fig->nsh : 0;
-
-	/* room for every link picked: no more than the page has shapes */
-	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( ( room > 0 ) ? room : 1 ));
-	if ( ids == NULL ) {
-		return;
-	}
-	n = picked_targets(d, ids, room);
-	if ( n == 0 ) {
-		Kfree(ids);
-		return;
-	}
-	if ( n == 1 ) {
-		UB	nm[TAD_NAME_MAX];
-
-		if ( om_store_name(&ids[0], nm, TAD_NAME_MAX) < 0 ) {
-			nm[0] = 0;
-		}
-		at = cat(l1, at, sizeof(l1), "実身「");
-		at = cat(l1, at, sizeof(l1), (CONST char *)nm);
-		at = cat(l1, at, sizeof(l1), "」を完全に削除しますか？");
-	} else {
-		at = cat_n(l1, at, sizeof(l1), n);
-		at = cat(l1, at, sizeof(l1), "件の実身を完全に削除しますか？");
-	}
-	if ( !dt_confirm(d, (CONST char *)l1, "この操作は取り消せません。",
-			 "いいえ", "はい") ) {
-		Kfree(ids);
-		return;
-	}
-	for ( i = 0; i < n; i++ ) {
-		DTWIN	*w = dt_showing(&ids[i]);
-
-		while ( w != NULL ) {
-			dt_close(w);
-			w = dt_showing(&ids[i]);
-		}
-		(void)om_store_delete(&ids[i]);
-	}
-	Kfree(ids);
-	dt_tool_refresh(DT_TOOL_TRASH);
-}
-
-/*
- * Every count made again from the records, once it has been agreed to,
- * and what came of it told.
- */
-LOCAL void trash_rescan( DTWIN *d )
-{
-	TS_UUID	roots[8];
-	INT	nr, total = 0, changed = 0, at = 0;
-	UB	l1[WM_LABEL_MAX];
-
-	if ( !dt_confirm(d, "全実身の参照数を、実際に置かれている仮身の数から数え直します。",
-			 "開いている文書で保存していない仮身は数えません。",
-			 "取消", "数え直す") ) {
-		return;
-	}
-	nr = dt_roots(roots, 8);
-	if ( om_store_recount(roots, nr, &total, &changed) < E_OK ) {
-		dt_tell(d, "参照数を数え直せませんでした。", NULL);
-		return;
-	}
-	dt_tool_refresh(DT_TOOL_TRASH);
-	at = cat_n(l1, at, sizeof(l1), total);
-	if ( changed > 0 ) {
-		at = cat(l1, at, sizeof(l1), "件の実身のうち、");
-		at = cat_n(l1, at, sizeof(l1), changed);
-		at = cat(l1, at, sizeof(l1), "件の参照数を修正しました。");
-	} else {
-		at = cat(l1, at, sizeof(l1), "件の実身の参照数はすべて正しい値でした。");
-	}
-	dt_tell(d, (CONST char *)l1, NULL);
-}
-
-/* ---------------------------------------------------------------- 実身/仮身検索 */
-
-/*
- * The last question asked, kept so that asking again starts from it,
- * and the objects that answered it.
- */
-LOCAL T_DTQUERY	sr_q;
-LOCAL BOOL	sr_asked = FALSE;
-
-/* An ASCII letter made small, so that the words match either way */
-LOCAL UB lower( UB c )
-{
-	return ( c >= 'A' && c <= 'Z' ) ? (UB)( c + 'a' - 'A' ) : c;
-}
-
-/* Whether 'what' is somewhere in the first 'n' bytes of 'in' */
-LOCAL BOOL has( CONST UB *in, SZ n, CONST UB *what )
-{
-	SZ	i, k;
-
-	if ( what[0] == 0 ) {
-		return TRUE;
-	}
-	for ( i = 0; i < n; i++ ) {
-		for ( k = 0; what[k] != 0 && i + k < n
-			     && lower(in[i + k]) == lower(what[k]); k++ ) {
-			;
-		}
-		if ( what[k] == 0 ) {
-			return TRUE;
-		}
-	}
-
-	return FALSE;
-}
-
-/* Whether any value of an attribute in the record holds the words */
-LOCAL BOOL attr_has( CONST UB *buf, SZ len, CONST char *attr, CONST UB *what )
-{
-	SZ	i, k, n = 0;
-
-	while ( attr[n] != 0 ) {
-		n++;
-	}
-	for ( i = 0; i + n < len; i++ ) {
-		for ( k = 0; k < n && buf[i + k] == (UB)attr[k]; k++ ) {
-			;
-		}
-		if ( k < n ) {
-			continue;
-		}
-		for ( k = i + n; k < len && buf[k] != '"'; k++ ) {
-			;
-		}
-		if ( k > i + n && has(buf + i + n, k - ( i + n ), what) ) {
-			return TRUE;
-		}
-		i = k;
-	}
-
-	return FALSE;
-}
-
-/*
- * The words of a record, without its markup: everything outside the
- * tags, with the five named characters put back. Done in place.
- */
-LOCAL SZ text_of( UB *buf, SZ len )
-{
-	SZ	i, o = 0;
-	BOOL	in_tag = FALSE;
-
-	for ( i = 0; i < len; i++ ) {
-		UB	c = buf[i];
-
-		if ( in_tag ) {
-			if ( c == '>' ) {
-				in_tag = FALSE;
-			}
-			continue;
-		}
-		if ( c == '<' ) {
-			in_tag = TRUE;
-			continue;
-		}
-		if ( c == '&' ) {
-			CONST char	*nm[] = { "&amp;", "&lt;", "&gt;", "&quot;", "&apos;" };
-			CONST UB	ch[] = { '&', '<', '>', '"', '\'' };
-			INT		k;
-			SZ		j;
-
-			for ( k = 0; k < 5; k++ ) {
-				for ( j = 0; nm[k][j] != 0 && i + j < len
-					     && buf[i + j] == (UB)nm[k][j]; j++ ) {
-					;
-				}
-				if ( nm[k][j] == 0 ) {
-					c = ch[k];
-					i += j - 1;
-					break;
-				}
-			}
-		}
-		buf[o++] = c;
-	}
-	buf[o] = 0;
-
-	return o;
-}
-
-/* "YYYY-MM-DD" as a number that sorts as the days do; 0 when not a day */
-LOCAL INT day_of( CONST UB *s )
-{
-	INT	v = 0, n = 0, i;
-
-	for ( i = 0; s[i] != 0 && n < 8; i++ ) {
-		if ( s[i] >= '0' && s[i] <= '9' ) {
-			v = v * 10 + ( s[i] - '0' );
-			n++;
-		} else if ( s[i] != '-' && s[i] != '/' && s[i] != ' ' ) {
-			break;
-		}
-	}
-
-	return ( n == 8 ) ? v : 0;
-}
-
-/* Whether one object answers the question */
-LOCAL BOOL sr_match( CONST TS_UUID *id, CONST T_DTQUERY *q )
-{
-	UB	nm[TAD_NAME_MAX];
-	BOOL	hit = FALSE;
-
-	if ( q->date_kind != DQ_DATE_NONE ) {
-		T_OMINFO	info;
-		CONST UB	*when;
-		INT		day, from = day_of(q->from), to = day_of(q->to);
-
-		if ( om_store_info(id, &info) < E_OK ) {
-			return FALSE;
-		}
-		when = ( q->date_kind == DQ_DATE_MADE ) ? info.made
-		     : ( q->date_kind == DQ_DATE_UPDATED ) ? info.updated
-		     : info.accessed;
-		day = day_of(when);
-		if ( day == 0 || ( from != 0 && day < from )
-		  || ( to != 0 && day > to ) ) {
-			return FALSE;
-		}
-		if ( q->text[0] == 0 ) {
-			return TRUE;		/* the dates alone */
-		}
-	}
-	if ( q->target == DQ_NAME || q->target == DQ_ALL ) {
-		if ( om_store_name(id, nm, TAD_NAME_MAX) >= 0
-		  && has(nm, (SZ)TAD_NAME_MAX, q->text) ) {
-			return TRUE;
-		}
-	}
-	if ( q->target == DQ_RELATION || q->target == DQ_ALL ) {
-		UB	tags[WM_LABEL_MAX * 2];
-		SZ	n;
-
-		if ( om_store_relationship(id, tags, sizeof(tags)) > 0 ) {
-			for ( n = 0; tags[n] != 0; n++ ) {
-				;
-			}
-			if ( has(tags, n, q->text) ) {
-				return TRUE;
-			}
-		}
-	}
-	if ( q->target == DQ_TEXT || q->target == DQ_ALL
-	  || q->target == DQ_RELATION ) {
-		SZ	len = 0;
-		UB	*buf = om_store_read(id, 0, &len);
-
-		if ( buf != NULL ) {
-			/* the tags the links in the record carry */
-			if ( q->target != DQ_TEXT ) {
-				hit = attr_has(buf, len, "relationship=\"", q->text);
-			}
-			if ( !hit && q->target != DQ_RELATION ) {
-				len = text_of(buf, len);
-				hit = has(buf, len, q->text);
-			}
-			Kfree(buf);
-		}
-	}
-
-	return hit;
-}
-
-/* The question put to every object in the store; the page of those that answer */
-LOCAL T_TAD *sr_record( CONST T_DTQUERY *q, INT *p_total, INT *p_hits,
-			UB *title, INT max )
-{
-	TS_UUID	*all;
-	INT	n, i, hits = 0, at = 0;
-	T_TAD	*rec;
-
-	n = om_store_objects(NULL, 0);
-	all = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( n + 1 ));
-	if ( all == NULL ) {
-		return NULL;
-	}
-	n = om_store_objects(all, n);
-	for ( i = 0; i < n; i++ ) {
-		if ( sr_match(&all[i], q) ) {
-			all[hits++] = all[i];
-		}
-	}
-	at = cat(title, at, max, "検索結果");
-	if ( q->text[0] != 0 ) {
-		at = cat(title, at, max, "「");
-		at = cat(title, at, max, (CONST char *)q->text);
-		at = cat(title, at, max, "」");
-	}
-	at = cat(title, at, max, " ");
-	at = cat_n(title, at, max, hits);
-	at = cat(title, at, max, "件");
-	rec = dt_list_record((CONST char *)title, all, NULL, hits);
-	Kfree(all);
-	if ( p_total != NULL ) *p_total = n;
-	if ( p_hits != NULL ) *p_hits = hits;
-
-	return rec;
-}
-
-/*
- * The question asked in a panel in the window it was asked from, then
- * put to the store, and what answered shown in a window of its own --
- * the one that showed the last answers, if it is still open.
- */
-EXPORT void dt_search_open( DTWIN *from )
-{
-	DTWIN		*w = dt_tool_window(DT_TOOL_SEARCH);
-	DTWIN		*ask = ( from != NULL ) ? from : w;
-	T_TAD		*rec;
-	T_DPRECT	o;
-	UB		title[WM_TITLE_MAX];
-	INT		total = 0, hits = 0;
-
-	if ( ask == NULL ) {
-		return;
-	}
-	if ( !sr_asked ) {
-		knl_memset(&sr_q, 0, sizeof(sr_q));
-		sr_q.target = DQ_ALL;
-		sr_q.date_kind = DQ_DATE_NONE;
-	}
-	if ( !dt_search_form(ask, &sr_q) ) {
-		return;
-	}
-	sr_asked = TRUE;
-	rec = sr_record(&sr_q, &total, &hits, title, sizeof(title));
-	if ( rec == NULL ) {
-		return;
-	}
-	if ( hits == 0 ) {
-		tad_free(rec);
-		dt_tell(ask, "該当する実身はありませんでした。", NULL);
-		return;
-	}
-	if ( w != NULL ) {
-		dt_remade(w, rec);
-		wm_set_title(w->wid, (CONST char *)title);
-		wm_raise(w->wid);
-		wm_focus(w->wid);
-	} else {
-		tool_rect(&o, 200, 120, 600, 500);
-		(void)dt_open_made(rec, (CONST char *)title, DT_TOOL_SEARCH, &o);
-	}
-	wm_update();
-}
-
-/* ---------------------------------------------------------------- 仮身ネットワーク */
-
-#define NW_W		200		/* each one's box */
-#define NW_GAP_X	100		/* between one column and the next */
-#define NW_GAP_Y	20		/* between one row and the next */
-#define NW_PAD		40
-#define NW_CHSZ		14
-
-typedef struct {
+	INT	*wids, n, i, k = 0, wid;
 	TS_UUID	id;
-	INT	depth;
-	INT	x, y;
-} NWNODE;
+	ER	er = E_NOEXS;
 
-/*
- * Every object the network reaches and every link between them: the
- * lists grow as they are met. hash finds an object's place by its UUID
- * (open addressing, nhash a power of two, -1 an empty slot).
- */
-typedef struct {
-	INT	n, ncap, nedge, ecap;
-	NWNODE	*node;
-	INT	*from, *to;
-	INT	*hash, nhash;
-} NWNET;
+	if ( ( rq->flags & DT_F_OPEN ) != 0 ) {
+		T_VOBJ	v;
 
-LOCAL TS_UUID	nw_start;
-LOCAL BOOL	nw_graph = FALSE;	/* shown as a graph, not in columns */
-
-LOCAL UW nw_hash_of( CONST TS_UUID *id )
-{
-	CONST UB	*b = (CONST UB *)id;
-	UW		h = 2166136261U;
-	INT		i;
-
-	for ( i = 0; i < (INT)sizeof(TS_UUID); i++ ) {
-		h = ( h ^ b[i] ) * 16777619U;
+		if ( ( wid = wm_obj_showing(&rq->target) ) > 0 ) {
+			wm_raise(wid);
+			(void)wm_focus(wid);
+			wm_update();
+			return E_OK;
+		}
+		knl_memset(&v, 0, sizeof(v));
+		v.target = rq->target;
+		v.recno = -1;
+		v.frcol = v.chcol = v.tbcol = v.bgcol = TAD_COL_NONE;
+		dt_open_vobj(NULL, &v);
+		return E_OK;
 	}
-	return h;
+	n = wl_windows(&wids);
+	for ( i = 0; i < n; i++ ) {
+		if ( !wl_listed(wids[i], asker, &id) ) continue;
+		if ( k == rq->recno ) {
+			an->into = id;
+			if ( wm_title(wids[i], (char *)an->text, DT_TEXT_MAX) <= 0 ) an->text[0] = 0;
+			er = E_OK;
+		}
+		k++;
+	}
+	if ( wids != NULL ) Kfree(wids);
+	an->how = (UINT)k;
+	if ( rq->recno < 0 ) er = E_OK;
+	wl_seen = wl_sign();
+	return er;
 }
 
-LOCAL INT nw_find( CONST NWNET *g, CONST TS_UUID *id )
+/* ---------------------------------------------------------------- 屑実身操作 */
+
+/* What the system itself holds, every one: how many, the list in *p_ids (Kfree it) */
+LOCAL INT all_roots( TS_UUID **p_ids )
 {
-	UW	m = (UW)g->nhash - 1, k;
+	INT	room = 64, n;
+	TS_UUID	*r;
 
-	if ( g->nhash == 0 ) {
-		return -1;
+	for ( ;; ) {
+		r = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)room);
+		if ( r == NULL ) {
+			*p_ids = NULL;
+			return 0;
+		}
+		n = dt_roots(r, room);
+		if ( n < room ) break;
+		Kfree(r);
+		room *= 2;
 	}
-	for ( k = nw_hash_of(id) & m; g->hash[k] >= 0; k = ( k + 1 ) & m ) {
-		if ( ts_uuid_cmp(&g->node[g->hash[k]].id, id) == 0 ) {
-			return g->hash[k];
-		}
-	}
-	return -1;
-}
-
-/* The place of a new object, its hash kept less than half full: -1 for no memory */
-LOCAL INT nw_add( NWNET *g, CONST TS_UUID *id, INT depth )
-{
-	INT	i;
-	UW	m, k;
-
-	if ( g->n == g->ncap ) {
-		INT	cap = ( g->ncap > 0 ) ? g->ncap * 2 : 64;
-		NWNODE	*t = (NWNODE *)Kmalloc(sizeof(NWNODE) * (SZ)cap);
-
-		if ( t == NULL ) {
-			return -1;
-		}
-		if ( g->node != NULL ) {
-			knl_memcpy(t, g->node, sizeof(NWNODE) * (SZ)g->n);
-			Kfree(g->node);
-		}
-		g->node = t;
-		g->ncap = cap;
-	}
-	if ( ( g->n + 1 ) * 2 > g->nhash ) {
-		INT	nh = ( g->nhash > 0 ) ? g->nhash * 2 : 128;
-		INT	*h = (INT *)Kmalloc(sizeof(INT) * (SZ)nh);
-
-		if ( h == NULL ) {
-			return -1;
-		}
-		for ( i = 0; i < nh; i++ ) {
-			h[i] = -1;
-		}
-		for ( i = 0; i < g->n; i++ ) {
-			for ( k = nw_hash_of(&g->node[i].id) & (UW)( nh - 1 ); h[k] >= 0; k = ( k + 1 ) & (UW)( nh - 1 ) ) {
-				;
-			}
-			h[k] = i;
-		}
-		if ( g->hash != NULL ) Kfree(g->hash);
-		g->hash = h;
-		g->nhash = nh;
-	}
-	i = g->n++;
-	g->node[i].id = *id;
-	g->node[i].depth = depth;
-	m = (UW)g->nhash - 1;
-	for ( k = nw_hash_of(id) & m; g->hash[k] >= 0; k = ( k + 1 ) & m ) {
-		;
-	}
-	g->hash[k] = i;
-	return i;
-}
-
-/* A link from a to b: FALSE for no memory */
-LOCAL BOOL nw_edge( NWNET *g, INT a, INT b )
-{
-	if ( g->nedge == g->ecap ) {
-		INT	cap = ( g->ecap > 0 ) ? g->ecap * 2 : 128;
-		INT	*f = (INT *)Kmalloc(sizeof(INT) * (SZ)cap * 2);
-
-		if ( f == NULL ) {
-			return FALSE;
-		}
-		if ( g->from != NULL ) {
-			knl_memcpy(f, g->from, sizeof(INT) * (SZ)g->nedge);
-			knl_memcpy(f + cap, g->to, sizeof(INT) * (SZ)g->nedge);
-			Kfree(g->from);
-		}
-		g->from = f;
-		g->to = f + cap;
-		g->ecap = cap;
-	}
-	g->from[g->nedge] = a;
-	g->to[g->nedge] = b;
-	g->nedge++;
-	return TRUE;
-}
-
-LOCAL void nw_free( NWNET *g )
-{
-	if ( g->node != NULL ) Kfree(g->node);
-	if ( g->from != NULL ) Kfree(g->from);
-	if ( g->hash != NULL ) Kfree(g->hash);
-	knl_memset(g, 0, sizeof(*g));
+	*p_ids = r;
+	return n;
 }
 
 /*
- * The network from one object: step by step outwards, each object met
- * once, at the first step it is met at. A link to an object already met
- * is still an arrow, back or across, so that a loop shows as a loop.
+ * DT_RQ_PURGE: a 屑実身 thrown away for good, when the asking process may
+ * delete it. A window of the desktop's showing it is closed first; what
+ * it linked to loses those links, and may itself become a 屑実身.
  */
-LOCAL void nw_build( NWNET *g, CONST TS_UUID *start )
+LOCAL ER purge_req( CONST T_DTREQ *rq, ID asker )
 {
-	TS_UUID	*lk;
-	INT	head = 0, n, j, k, ebase;
+	TS_UUID	*roots;
+	INT	nr, i;
+	BOOL	root = FALSE;
+	ER	er;
 
-	knl_memset(g, 0, sizeof(*g));
-	if ( nw_add(g, start, 0) < 0 ) {
-		return;
+	nr = all_roots(&roots);
+	for ( i = 0; i < nr; i++ ) {
+		if ( ts_uuid_cmp(&roots[i], &rq->target) == 0 ) root = TRUE;
 	}
-	lk = NULL;
-	while ( head < g->n ) {
-		SZ	len = 0;
-		UB	*buf = om_store_read(&g->node[head].id, 0, &len);
-
-		n = 0;
-		if ( buf != NULL ) {
-			/* every link of the record: asked how many, then taken */
-			n = om_store_links(buf, len, NULL, 0);
-			if ( lk != NULL ) Kfree(lk);
-			lk = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( ( n > 0 ) ? n : 1 ));
-			n = ( lk != NULL ) ? om_store_links(buf, len, lk, n) : 0;
-			Kfree(buf);
-		}
-		ebase = g->nedge;		/* the links of this object start here */
-		for ( j = 0; j < n; j++ ) {
-			k = nw_find(g, &lk[j]);
-			if ( k < 0 ) {
-				if ( om_store_refs(&lk[j]) < 0 ) {
-					continue;	/* not in the store */
-				}
-				k = nw_add(g, &lk[j], g->node[head].depth + 1);
-				if ( k < 0 ) {
-					continue;	/* no memory: shown as far as there was */
-				}
-			}
-			{
-				INT	e;
-				BOOL	dup = FALSE;
-
-				for ( e = ebase; e < g->nedge && !dup; e++ ) {
-					if ( g->to[e] == k ) {
-						dup = TRUE;
-					}
-				}
-				if ( !dup ) {
-					(void)nw_edge(g, head, k);
-				}
-			}
-		}
-		head++;
-	}
-	if ( lk != NULL ) Kfree(lk);
-}
-
-LOCAL SZ nw_put( UB *buf, SZ at, SZ max, CONST char *s )
-{
-	while ( *s != 0 && at + 1 < max ) {
-		buf[at++] = (UB)*s++;
-	}
-	buf[at] = 0;
-
-	return at;
-}
-
-LOCAL SZ nw_num( UB *buf, SZ at, SZ max, INT v )
-{
-	UB	t[16];
-	INT	n = cat_n(t, 0, sizeof(t), v);
-
-	(void)n;
-
-	return nw_put(buf, at, max, (CONST char *)t);
-}
-
-/* A name made safe to stand in an attribute */
-LOCAL SZ nw_esc( UB *buf, SZ at, SZ max, CONST UB *s )
-{
-	for ( ; *s != 0 && at + 7 < max; s++ ) {
-		switch ( *s ) {
-		case '&':	at = nw_put(buf, at, max, "&amp;");	break;
-		case '<':	at = nw_put(buf, at, max, "&lt;");	break;
-		case '>':	at = nw_put(buf, at, max, "&gt;");	break;
-		case '"':	at = nw_put(buf, at, max, "&quot;");	break;
-		default:	buf[at++] = *s;				break;
-		}
-	}
-	buf[at] = 0;
-
-	return at;
-}
-
-/*
- * The network laid out as a figure: a column to each step, the objects
- * of a step one under another in the order they were met, each a
- * closed virtual object as wide as the column; and an arrow from the
- * right edge of each object to the left edge of each it links to.
- */
-LOCAL T_TAD *nw_record( NWNET *g, UB *title, INT max )
-{
-	UB	*xml;
-	SZ	cap, at = 0;
-	INT	*row, i, e, band = tad_closed_h(NW_CHSZ, TAD_D_DEFAULT);
-	T_TAD	*doc = NULL;
-	UB	nm[TAD_NAME_MAX];
-
-	/* a column to each step: there are no more steps than objects */
-	row = (INT *)Kcalloc((SZ)g->n, sizeof(INT));
-	if ( row == NULL ) {
-		return NULL;
-	}
-	for ( i = 0; i < g->n; i++ ) {
-		INT	dp = g->node[i].depth;
-
-		g->node[i].x = NW_PAD + dp * ( NW_W + NW_GAP_X );
-		g->node[i].y = NW_PAD + row[dp] * ( band + NW_GAP_Y );
-		row[dp]++;
-	}
-	Kfree(row);
-	cap = 512 + (SZ)g->n * ( 480 + TAD_NAME_MAX * 5 ) + (SZ)g->nedge * 200;
-	xml = (UB *)Kmalloc(cap);
-	if ( xml == NULL ) {
-		return NULL;
-	}
-	if ( om_store_name(&g->node[0].id, nm, TAD_NAME_MAX) < 0 ) {
-		nm[0] = 0;
-	}
-	i = cat(title, 0, max, "仮身ネットワーク: ");
-	(void)cat(title, i, max, (CONST char *)nm);
-
-	at = nw_put(xml, at, cap, "<tad version=\"1.0\" encoding=\"UTF-8\""
-				  " filename=\"仮身ネットワーク\"><figure>");
-	/* the arrows first, so that the objects stand over their ends */
-	for ( e = 0; e < g->nedge; e++ ) {
-		CONST NWNODE	*a = &g->node[g->from[e]];
-		CONST NWNODE	*b = &g->node[g->to[e]];
-		INT		x1 = a->x + NW_W, y1 = a->y + band / 2;
-		INT		x2 = b->x, y2 = b->y + band / 2;
-
-		if ( b->x <= a->x ) {
-			/* back or across: from the foot of the one to the head of the other */
-			x1 = a->x + NW_W / 2;  y1 = a->y + band;
-			x2 = b->x + NW_W / 2;  y2 = ( b->y > a->y ) ? b->y : b->y + band;
-		}
-		at = nw_put(xml, at, cap, "<line lineType=\"0\" lineWidth=\"1\""
-			    " l_pat=\"1\" f_pat=\"0\" start_arrow=\"0\""
-			    " end_arrow=\"1\" arrow_type=\"filled\" points=\"");
-		at = nw_num(xml, at, cap, x1);
-		at = nw_put(xml, at, cap, ",");
-		at = nw_num(xml, at, cap, y1);
-		at = nw_put(xml, at, cap, " ");
-		at = nw_num(xml, at, cap, x2);
-		at = nw_put(xml, at, cap, ",");
-		at = nw_num(xml, at, cap, y2);
-		at = nw_put(xml, at, cap, "\"/>");
-	}
-	for ( i = 0; i < g->n; i++ ) {
-		char	txt[40];
-
-		if ( ts_uuid_to_str(&g->node[i].id, txt, sizeof(txt)) < E_OK ) {
-			continue;
-		}
-		if ( om_store_name(&g->node[i].id, nm, TAD_NAME_MAX) < 0 ) {
-			nm[0] = 0;
-		}
-		at = nw_put(xml, at, cap, "<link id=\"");
-		at = nw_put(xml, at, cap, txt);
-		at = nw_put(xml, at, cap, "_0.xtad\" name=\"");
-		at = nw_esc(xml, at, cap, nm);
-		at = nw_put(xml, at, cap, "\" vobjleft=\"");
-		at = nw_num(xml, at, cap, g->node[i].x);
-		at = nw_put(xml, at, cap, "\" vobjtop=\"");
-		at = nw_num(xml, at, cap, g->node[i].y);
-		at = nw_put(xml, at, cap, "\" vobjright=\"");
-		at = nw_num(xml, at, cap, g->node[i].x + NW_W);
-		at = nw_put(xml, at, cap, "\" vobjbottom=\"");
-		at = nw_num(xml, at, cap, g->node[i].y + band);
-		at = nw_put(xml, at, cap, "\" height=\"");
-		at = nw_num(xml, at, cap, band);
-		at = nw_put(xml, at, cap, "\" chsz=\"");
-		at = nw_num(xml, at, cap, NW_CHSZ);
-		/* the one it starts from stands out */
-		at = nw_put(xml, at, cap, ( i == 0 )
-			    ? "\" frcol=\"#000000\" chcol=\"#000000\""
-			      " tbcol=\"#e0e0ff\" bgcol=\"#ffffff\""
-			    : "\" frcol=\"#000000\" chcol=\"#000000\""
-			      " tbcol=\"#ffffff\" bgcol=\"#ffffff\"");
-		at = nw_put(xml, at, cap, " pictdisp=\"true\" namedisp=\"true\""
-			    " framedisp=\"true\" autoopen=\"false\"/>");
-	}
-	at = nw_put(xml, at, cap, "</figure></tad>");
-	if ( tad_parse(xml, at, NULL, &doc) < E_OK ) {
-		doc = NULL;
-	}
-	Kfree(xml);
-
-	return doc;
-}
-
-
-/* ---------------------------------------------------------------- the graph */
-
-/*
- * The same network laid out as a graph: each object a circle, larger
- * the more links in the network reach it, with its virtual object
- * beside it, and a line for each link. Where the circles go is found
- * by letting them push each other apart while the links pull the ends
- * of each together, for a fixed number of steps with the moves made
- * smaller each step. Places are kept in sixteenths of a pixel.
- */
-#define GR_STEPS	160
-#define GR_SIDE		720		/* the square they are laid in */
-#define GR_K		( 110 * 16 )	/* the length a link settles to */
-
-LOCAL D isqrt( D v )
-{
-	D	r = 0, b = (D)1 << 40;
-
-	if ( v <= 0 ) {
-		return 0;
-	}
-	while ( b > v ) {
-		b >>= 2;
-	}
-	while ( b != 0 ) {
-		if ( v >= r + b ) {
-			v -= r + b;
-			r = ( r >> 1 ) + b;
-		} else {
-			r >>= 1;
-		}
-		b >>= 2;
-	}
-
-	return r;
-}
-
-/*
- * The push of k on i, added to i's force (and taken from k's when both).
- */
-LOCAL void gr_push( D *px, D *py, D *fx, D *fy, INT i, INT k, BOOL both )
-{
-	D	dx = px[i] - px[k], dy = py[i] - py[k];
-	D	d2 = dx * dx + dy * dy, d, f;
-
-	if ( d2 < 256 ) {
-		dx = ( i % 2 ) ? 16 : -16;
-		dy = ( k % 2 ) ? 16 : -16;
-		d2 = 512;
-	}
-	d = isqrt(d2);
-	f = (D)GR_K * GR_K / d;		/* k^2 / d */
-	fx[i] += dx * f / d;  fy[i] += dy * f / d;
-	if ( both ) {
-		fx[k] -= dx * f / d;  fy[k] -= dy * f / d;
-	}
-}
-
-/*
- * Many objects: each is pushed only by those within twice the length a
- * link settles to, found through a grid of squares that size, so that a
- * step costs about as much as there are objects rather than its square.
- * The squares are kept in a hash of 2^hbits places; a node's square is
- * kept with it, so that two squares in one place are told apart.
- */
-#define GR_ALL		256		/* objects pushed each by all the others up to this many */
-#define GR_CELL		( 2 * GR_K )
-
-LOCAL void gr_push_near( NWNET *g, D *px, D *py, D *fx, D *fy, INT *head, INT *next, INT *cx, INT *cy, INT hbits )
-{
-	UW	m = ( 1U << hbits ) - 1;
-	INT	i, k, a, b;
-
-#define GR_SLOT(x, y)	( ( (UW)(x) * 73856093U ^ (UW)(y) * 19349663U ) & m )
-	for ( i = 0; i <= (INT)m; i++ ) {
-		head[i] = -1;
-	}
-	for ( i = 0; i < g->n; i++ ) {
-		UW	h;
-
-		cx[i] = (INT)( px[i] / GR_CELL ) - ( ( px[i] < 0 ) ? 1 : 0 );
-		cy[i] = (INT)( py[i] / GR_CELL ) - ( ( py[i] < 0 ) ? 1 : 0 );
-		h = GR_SLOT(cx[i], cy[i]);
-		next[i] = head[h];
-		head[h] = i;
-	}
-	for ( i = 0; i < g->n; i++ ) {
-		for ( a = cx[i] - 1; a <= cx[i] + 1; a++ ) {
-			for ( b = cy[i] - 1; b <= cy[i] + 1; b++ ) {
-				for ( k = head[GR_SLOT(a, b)]; k >= 0; k = next[k] ) {
-					if ( k != i && cx[k] == a && cy[k] == b ) {
-						gr_push(px, py, fx, fy, i, k, FALSE);
-					}
-				}
-			}
-		}
-	}
-#undef GR_SLOT
-}
-
-LOCAL void gr_layout( NWNET *g, D *px, D *py )
-{
-	D	*fx, *fy;
-	INT	i, k, e, step, *head = NULL, *next = NULL, *cx = NULL, *cy = NULL, hbits = 0;
-
-	fx = (D *)Kmalloc(sizeof(D) * (SZ)g->n * 2);
-	if ( fx == NULL ) {
-		return;
-	}
-	fy = fx + g->n;
-	if ( g->n > GR_ALL ) {
-		while ( ( 1 << hbits ) < g->n * 2 ) hbits++;
-		head = (INT *)Kmalloc(sizeof(INT) * ( ( (SZ)1 << hbits ) + (SZ)g->n * 3 ));
-		if ( head == NULL ) {
-			Kfree(fx);
-			return;
-		}
-		next = head + ( 1 << hbits );
-		cx = next + g->n;
-		cy = cx + g->n;
+	if ( roots != NULL ) Kfree(roots);
+	if ( root || om_store_refs(&rq->target) != 0 ) {
+		return E_OBJ;			/* linked to, or the system's: not a 屑実身 */
 	}
 	/*
-	 * Round a circle to begin with, sixteen to a ring and each ring
-	 * further out, the one started from in the middle. The directions
-	 * are a table: cosine and sine by thousandths.
+	 * one the person may not delete (a program the administrator
+	 * installed): only an administrator throws it away, the password
+	 * asked for as for taking away a program
 	 */
-	for ( i = 0; i < g->n; i++ ) {
-		LOCAL CONST INT	cs[16][2] = {
-			{ 1000, 0 }, { 924, 383 }, { 707, 707 }, { 383, 924 },
-			{ 0, 1000 }, { -383, 924 }, { -707, 707 }, { -924, 383 },
-			{ -1000, 0 }, { -924, -383 }, { -707, -707 }, { -383, -924 },
-			{ 0, -1000 }, { 383, -924 }, { 707, -707 }, { 924, -383 }
-		};
-		D	r = ( i == 0 ) ? 0 : (D)( 120 + ( ( i - 1 ) / 16 ) * 60 ) * 16;
-
-		px[i] = ( GR_SIDE / 2 ) * 16 + r * cs[( i - 1 ) & 15][0] / 1000;
-		py[i] = ( GR_SIDE / 2 ) * 16 + r * cs[( i - 1 ) & 15][1] / 1000;
+	if ( ( ( knl_ob_permit_on(&rq->target, knl_ob_crd_of(asker)) | knl_ob_granted(asker, &rq->target) )
+	       & OB_OP_DELETE ) == 0 && !knl_ob_pid_admin(asker)
+	  && ( er = dt_admin_ask(asker, (CONST UB *)"屑実身の削除", &rq->win) ) < E_OK ) {
+		return er;
 	}
-	for ( step = 0; step < GR_STEPS; step++ ) {
-		D	limit = ( (D)( GR_STEPS - step ) * 40 * 16 ) / GR_STEPS + 16;
+	{
+		/* a window showing it asked to close, as 〈閉じる〉 of its link asks */
+		T_VOBJ	v;
 
-		for ( i = 0; i < g->n; i++ ) {
-			fx[i] = fy[i] = 0;
-		}
-		/* everything pushes everything else away; of many, those near */
-		if ( head != NULL ) {
-			gr_push_near(g, px, py, fx, fy, head, next, cx, cy, hbits);
-		} else {
-			for ( i = 0; i < g->n; i++ ) {
-				for ( k = i + 1; k < g->n; k++ ) {
-					gr_push(px, py, fx, fy, i, k, TRUE);
-				}
-			}
-		}
-		/* and each link pulls its ends together */
-		for ( e = 0; e < g->nedge; e++ ) {
-			INT	a = g->from[e], b = g->to[e];
-			D	dx = px[a] - px[b], dy = py[a] - py[b];
-			D	d = isqrt(dx * dx + dy * dy), f;
-
-			if ( a == b || d == 0 ) {
-				continue;
-			}
-			f = d * d / GR_K;			/* d^2 / k */
-			fx[a] -= dx * f / d;  fy[a] -= dy * f / d;
-			fx[b] += dx * f / d;  fy[b] += dy * f / d;
-		}
-		/* each moves along its force, no further than the step allows */
-		for ( i = 0; i < g->n; i++ ) {
-			D	f = isqrt(fx[i] * fx[i] + fy[i] * fy[i]);
-
-			if ( f == 0 ) {
-				continue;
-			}
-			if ( f > limit ) {
-				fx[i] = fx[i] * limit / f;
-				fy[i] = fy[i] * limit / f;
-			}
-			px[i] += fx[i];
-			py[i] += fy[i];
-		}
+		knl_memset(&v, 0, sizeof(v));
+		v.target = rq->target;
+		dt_close_vobj(&v);
 	}
-	Kfree(fx);
-	if ( head != NULL ) Kfree(head);
+	return om_store_delete(&rq->target);
 }
 
-LOCAL T_TAD *gr_record( NWNET *g, UB *title, INT max )
+/* DT_RQ_ROOTS: what the system holds at place recno, how many there are in how */
+LOCAL ER roots_req( CONST T_DTREQ *rq, T_DTANS *an )
 {
-	UB	*xml;
-	SZ	cap, at = 0;
-	INT	i, e, band = tad_closed_h(NW_CHSZ, TAD_D_DEFAULT), *in;
-	D	*px, *py, minx, miny;
-	T_TAD	*doc = NULL;
-	UB	nm[TAD_NAME_MAX];
+	TS_UUID	*roots;
+	INT	nr = all_roots(&roots);
+	ER	er = E_OK;
 
-	px = (D *)Kmalloc(sizeof(D) * (SZ)g->n * 2);
-	in = (INT *)Kmalloc(sizeof(INT) * (SZ)g->n);
-	if ( px == NULL || in == NULL ) {
-		if ( px != NULL ) Kfree(px);
-		if ( in != NULL ) Kfree(in);
-		return NULL;
+	if ( roots == NULL ) {
+		return E_NOMEM;
 	}
-	py = px + g->n;
-	gr_layout(g, px, py);
-	/* the whole moved so that nothing is left of or above the margin */
-	minx = px[0];
-	miny = py[0];
-	for ( i = 0; i < g->n; i++ ) {
-		if ( px[i] < minx ) minx = px[i];
-		if ( py[i] < miny ) miny = py[i];
-		in[i] = 0;
+	an->how = (UINT)nr;
+	if ( rq->recno >= nr ) {
+		er = E_NOEXS;
+	} else if ( rq->recno >= 0 ) {
+		an->into = roots[rq->recno];
 	}
-	for ( e = 0; e < g->nedge; e++ ) {
-		in[g->to[e]]++;
-	}
-	for ( i = 0; i < g->n; i++ ) {
-		g->node[i].x = (INT)( ( px[i] - minx ) / 16 ) + NW_PAD + 30;
-		g->node[i].y = (INT)( ( py[i] - miny ) / 16 ) + NW_PAD + 30;
-	}
-	Kfree(px);
-
-	cap = 512 + (SZ)g->n * ( 700 + TAD_NAME_MAX * 5 ) + (SZ)g->nedge * 160;
-	xml = (UB *)Kmalloc(cap);
-	if ( xml == NULL ) {
-		Kfree(in);
-		return NULL;
-	}
-	if ( om_store_name(&g->node[0].id, nm, TAD_NAME_MAX) < 0 ) {
-		nm[0] = 0;
-	}
-	i = cat(title, 0, max, "仮身グラフ: ");
-	(void)cat(title, i, max, (CONST char *)nm);
-
-	at = nw_put(xml, at, cap, "<tad version=\"1.0\" encoding=\"UTF-8\""
-				  " filename=\"仮身グラフ\"><figure>");
-	for ( e = 0; e < g->nedge; e++ ) {
-		CONST NWNODE	*a = &g->node[g->from[e]];
-		CONST NWNODE	*b = &g->node[g->to[e]];
-
-		if ( a == b ) {
-			continue;
-		}
-		at = nw_put(xml, at, cap, "<line lineType=\"0\" lineWidth=\"1\""
-			    " l_pat=\"47\" f_pat=\"0\" start_arrow=\"0\""
-			    " end_arrow=\"0\" points=\"");
-		at = nw_num(xml, at, cap, a->x);
-		at = nw_put(xml, at, cap, ",");
-		at = nw_num(xml, at, cap, a->y);
-		at = nw_put(xml, at, cap, " ");
-		at = nw_num(xml, at, cap, b->x);
-		at = nw_put(xml, at, cap, ",");
-		at = nw_num(xml, at, cap, b->y);
-		at = nw_put(xml, at, cap, "\"/>");
-	}
-	for ( i = 0; i < g->n; i++ ) {
-		char	txt[40];
-		INT	r = 6 + 3 * in[i];
-
-		if ( r > 30 ) {
-			r = 30;
-		}
-		/* the circle: the one started from in its own colour */
-		at = nw_put(xml, at, cap, "<ellipse lineType=\"0\" lineWidth=\"1\""
-			    " l_pat=\"1\" f_pat=\"");
-		at = nw_put(xml, at, cap, ( i == 0 ) ? "36" : "40");
-		at = nw_put(xml, at, cap, "\" cx=\"");
-		at = nw_num(xml, at, cap, g->node[i].x);
-		at = nw_put(xml, at, cap, "\" cy=\"");
-		at = nw_num(xml, at, cap, g->node[i].y);
-		at = nw_put(xml, at, cap, "\" rx=\"");
-		at = nw_num(xml, at, cap, r);
-		at = nw_put(xml, at, cap, "\" ry=\"");
-		at = nw_num(xml, at, cap, r);
-		at = nw_put(xml, at, cap, "\"/>");
-
-		if ( ts_uuid_to_str(&g->node[i].id, txt, sizeof(txt)) < E_OK ) {
-			continue;
-		}
-		if ( om_store_name(&g->node[i].id, nm, TAD_NAME_MAX) < 0 ) {
-			nm[0] = 0;
-		}
-		/* and beside it, the object itself */
-		at = nw_put(xml, at, cap, "<link id=\"");
-		at = nw_put(xml, at, cap, txt);
-		at = nw_put(xml, at, cap, "_0.xtad\" name=\"");
-		at = nw_esc(xml, at, cap, nm);
-		at = nw_put(xml, at, cap, "\" vobjleft=\"");
-		at = nw_num(xml, at, cap, g->node[i].x + r + 4);
-		at = nw_put(xml, at, cap, "\" vobjtop=\"");
-		at = nw_num(xml, at, cap, g->node[i].y - band / 2);
-		at = nw_put(xml, at, cap, "\" vobjright=\"");
-		at = nw_num(xml, at, cap, g->node[i].x + r + 4 + 150);
-		at = nw_put(xml, at, cap, "\" vobjbottom=\"");
-		at = nw_num(xml, at, cap, g->node[i].y - band / 2 + band);
-		at = nw_put(xml, at, cap, "\" height=\"");
-		at = nw_num(xml, at, cap, band);
-		at = nw_put(xml, at, cap, "\" chsz=\"");
-		at = nw_num(xml, at, cap, NW_CHSZ);
-		at = nw_put(xml, at, cap, "\" frcol=\"#000000\" chcol=\"#000000\""
-			    " tbcol=\"#ffffff\" bgcol=\"#ffffff\""
-			    " pictdisp=\"true\" namedisp=\"true\""
-			    " framedisp=\"true\" autoopen=\"false\"/>");
-	}
-	at = nw_put(xml, at, cap, "</figure></tad>");
-	if ( tad_parse(xml, at, NULL, &doc) < E_OK ) {
-		doc = NULL;
-	}
-	Kfree(xml);
-	Kfree(in);
-
-	return doc;
+	Kfree(roots);
+	return er;
 }
 
-/* The network from one object, shown in the network's window */
-LOCAL void nw_show( CONST TS_UUID *start )
+/* DT_RQ_RECOUNT: every count made again from the records, "TOTAL<tab>CHANGED" in text */
+LOCAL ER recount_req( T_DTANS *an )
 {
-	DTWIN		*w = dt_tool_window(DT_TOOL_NETWORK);
-	NWNET		*g;
-	T_TAD		*rec;
-	T_DPRECT	o;
-	UB		title[WM_TITLE_MAX];
+	TS_UUID	*roots;
+	INT	nr = all_roots(&roots), total = 0, changed = 0, k = 0;
+	ER	er;
+	UB	*t = an->text;
 
-	g = (NWNET *)Kcalloc(1, sizeof(NWNET));
-	if ( g == NULL ) {
-		return;
-	}
-	nw_start = *start;
-	nw_build(g, start);
-	rec = ( g->n == 0 ) ? NULL : nw_graph ? gr_record(g, title, sizeof(title))
-					      : nw_record(g, title, sizeof(title));
-	nw_free(g);
-	Kfree(g);
-	if ( rec == NULL ) {
-		return;
-	}
-	if ( w != NULL ) {
-		dt_remade(w, rec);
-		wm_set_title(w->wid, (CONST char *)title);
-		wm_raise(w->wid);
-		wm_focus(w->wid);
-	} else {
-		tool_rect(&o, 80, 60, 900, 600);
-		(void)dt_open_made(rec, (CONST char *)title, DT_TOOL_NETWORK, &o);
-	}
-	wm_update();
-}
-
-EXPORT void dt_network_open( DTWIN *from, CONST T_VOBJ *v )
-{
-	(void)from;
-	if ( v != NULL ) {
-		nw_show(&v->target);
-	}
-}
-
-/* ---------------------------------------------------------------- shared */
-
-/* A tool's page made again from the store, if the tool is open */
-EXPORT void dt_tool_refresh( UINT tool )
-{
-	DTWIN	*d = dt_tool_window(tool);
-
-	if ( d == NULL ) {
-		return;
-	}
-	switch ( tool ) {
-	case DT_TOOL_TRASH:
-		dt_remade(d, trash_record(NULL));
-		break;
-	case DT_TOOL_SEARCH:
-		if ( sr_asked ) {
-			UB	title[WM_TITLE_MAX];
-			T_TAD	*rec = sr_record(&sr_q, NULL, NULL, title,
-						 sizeof(title));
-
-			if ( rec != NULL ) {
-				dt_remade(d, rec);
-				wm_set_title(d->wid, (CONST char *)title);
-			}
-		}
-		break;
-	case DT_TOOL_NETWORK:
-		nw_show(&nw_start);
-		break;
-	case DT_TOOL_WINLIST:
-		dt_remade(d, winlist_record());
-		break;
-	default:
-		break;
-	}
-}
-
-/* ---------------------------------------------------------------- the menus */
-
-typedef struct {
-	CONST char	*code;
-	INT		cmd;
-} TOOLCMD;
-
-LOCAL CONST TOOLCMD tool_cmds[] = {
-	{ "fullscreen",	TC_FULL },
-	{ "refresh",	TC_REFRESH },
-	{ "copy",	TC_COPY },
-	{ "cut",	TC_CUT },
-	{ "delete",	TC_DELETE },
-	{ "rescan",	TC_RESCAN },
-	{ "research",	TC_SEARCH },
-	{ "net",	TC_NET },
-	{ "graph",	TC_GRAPH },
-	{ "focus",	TC_FOCUS },
-};
-
-#define NTOOLCMD	( (INT)( sizeof(tool_cmds) / sizeof(tool_cmds[0]) ) )
-
-/* A tool's menu (TOOLMENU.DEF), set to what its window is */
-EXPORT ER dt_tool_menu_make( DTWIN *d, BOOL on_vobj, ID *p_mid )
-{
-	CONST char	*id;
-	TS_UUID		def;
-	UINT		none = ( d->npick == 0 ) ? MN_GREY : 0;
-	ID		mid;
-	ER		er;
-
-	switch ( d->tool ) {
-	case DT_TOOL_TRASH:	id = SYSDEF_MENU_TRASH;		break;
-	case DT_TOOL_SEARCH:	id = SYSDEF_MENU_SEARCH;	break;
-	case DT_TOOL_NETWORK:	id = SYSDEF_MENU_NETWORK;	break;
-	default:		return E_PAR;
-	}
-	er = ts_str_to_uuid(id, &def);
-	if ( er >= E_OK ) {
-		er = mn_cre_men(&def, &mid);
-	}
+	er = ( roots != NULL ) ? om_store_recount(roots, nr, &total, &changed) : E_NOMEM;
+	if ( roots != NULL ) Kfree(roots);
 	if ( er < E_OK ) {
 		return er;
 	}
-	(void)mn_chg_atr(mid, NULL, "fullscreen", d->full ? MN_TICK : 0);
-	(void)mn_chg_atr(mid, NULL, "copy", none);
-	(void)mn_chg_atr(mid, NULL, "cut", none);
-	(void)mn_chg_atr(mid, NULL, "delete", none);
-	(void)mn_chg_atr(mid, NULL, "net", nw_graph ? 0 : MN_TICK);
-	(void)mn_chg_atr(mid, NULL, "graph", nw_graph ? MN_TICK : 0);
-	(void)mn_chg_atr(mid, NULL, "focus", on_vobj ? 0 : MN_GREY);
-	*p_mid = mid;
+	{
+		UB	d[12];
+		INT	n, v, pass;
 
+		for ( pass = 0; pass < 2; pass++ ) {
+			v = ( pass == 0 ) ? total : changed;
+			n = 0;
+			do {
+				d[n++] = (UB)( '0' + v % 10 );
+				v /= 10;
+			} while ( v > 0 && n < 11 );
+			while ( n > 0 ) t[k++] = d[--n];
+			if ( pass == 0 ) t[k++] = '\t';
+		}
+		t[k] = 0;
+	}
+	tm_printf((UB *)"desktop: counts made again, %d objects, %d put right\n", total, changed);
 	return E_OK;
 }
 
-EXPORT void dt_tool_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj,
-			     CONST T_VOBJ *v )
+/* ---------------------------------------------------------------- what the tools ask */
+
+EXPORT ER dt_tool_req( CONST T_DTREQ *rq, T_DTANS *an, ID asker )
 {
-	INT	i, cmd = 0;
-
-	for ( i = 0; i < NTOOLCMD && cmd == 0; i++ ) {
-		if ( mn_is(sel, tool_cmds[i].code) ) {
-			cmd = tool_cmds[i].cmd;
-		}
+	switch ( rq->req ) {
+	case DT_RQ_TELL:	return tool_listen(rq, asker);
+	case DT_RQ_ROOTS:	return roots_req(rq, an);
+	case DT_RQ_PURGE:	return purge_req(rq, asker);
+	case DT_RQ_RECOUNT:	return recount_req(an);
+	case DT_RQ_WIN_LIST:	return wl_req(rq, an, asker);
+	default:		return E_PAR;
 	}
-	switch ( cmd ) {
-	case TC_FULL:		dt_fullscreen(d);			break;
-	case TC_REFRESH:	dt_tool_refresh(d->tool);		break;
-	case TC_COPY:
-	case TC_CUT:		ed_copy(d);				break;
-	case TC_DELETE:		trash_delete(d);			break;
-	case TC_RESCAN:		trash_rescan(d);			break;
-	case TC_SEARCH:		dt_search_open(d);			break;
-	case TC_NET:
-	case TC_GRAPH:
-		nw_graph = (BOOL)( cmd == TC_GRAPH );
-		dt_tool_refresh(DT_TOOL_NETWORK);
-		break;
-	case TC_FOCUS:
-		if ( on_vobj && v != NULL ) {
-			nw_show(&v->target);
-		}
-		break;
-	default:
-		break;
-	}
-	wm_update();
-}
-
-/*
- * A key in a tool's window, when it is the tool's: Delete throws away
- * what is taken in the 屑実身 list, Ctrl+X takes it to the clipboard as
- * Ctrl+C does -- nothing leaves the list until it is linked to again.
- */
-EXPORT BOOL dt_tool_key( DTWIN *d, UINT code, UINT mods )
-{
-	BOOL	ctrl = (BOOL)( ( mods & MOD_CTRL ) != 0 );
-	UINT	cmd = wm_key_cmd(code);		/* the letter the key types, for a command */
-
-	if ( d->tool == DT_TOOL_TRASH && !ctrl && code == KEY_DEL ) {
-		trash_delete(d);
-		wm_update();
-		return TRUE;
-	}
-	if ( ctrl && cmd == KEY_X ) {
-		ed_copy(d);
-		return TRUE;
-	}
-	if ( d->tool == DT_TOOL_NETWORK && ctrl
-	  && ( cmd == KEY_N || cmd == KEY_G ) ) {
-		nw_graph = (BOOL)( cmd == KEY_G );
-		dt_tool_refresh(DT_TOOL_NETWORK);
-		return TRUE;
-	}
-
-	return FALSE;
-}
-
-/* An object carried out of a tool's page: a link to it where it lands */
-EXPORT void dt_tool_carry( DTWIN *d, DTWIN *t, CONST T_VOBJ *v )
-{
-	ed_drop_link(d, t, v);
 }

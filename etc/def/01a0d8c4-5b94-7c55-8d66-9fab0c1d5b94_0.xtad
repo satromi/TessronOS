@@ -1,0 +1,39 @@
+<tad version="1.0" encoding="UTF-8" filename="システムの道具のデータボックス">
+<document>
+<p>システムの道具のデータボックス</p>
+<p>屑実身操作、実身/仮身検索、仮身ネットワーク、ウインドウ一覧(application/systool)のパネル。パネル1は知らせで、文字1と2が知らせる2行(道具が書き換える)、ボタン102が了解。パネル2は確かめる警告のパネルで、文字1と2が尋ねる2行、ボタン101が何もしない方(いいえ、取消)、102が進める方(はい、数え直す)で、どちらの言葉も道具が書き換える。パネル3は実身/仮身検索の条件で、部品と位置はデスクトップの組み込みだったときの検索のパネルと同じ。ボックス1が検索文字列、選択スイッチ10〜13が検索対象の実身名、続柄、本文、全て、20〜23が日付のなし、作成日、更新日、参照日、ボックス2と3が期間の始めと終わり(YYYY-MM-DD、どちらも空でよい)、ボタン101が取消、102が検索。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,600,116" title="お知らせ">
+<text num="1" x="26" y="36"> </text>
+<text num="2" x="26" y="60"> </text>
+<button num="102" rect="486,72,580,98" answer="ok" emph="true">了解</button>
+</panel>
+<panel num="2" rect="0,0,600,116" title="確認" kind="warn">
+<text num="1" x="26" y="36"> </text>
+<text num="2" x="26" y="60"> </text>
+<button num="101" rect="382,72,476,98" answer="cancel">いいえ</button>
+<button num="102" rect="486,72,580,98" emph="true">はい</button>
+</panel>
+<panel num="3" rect="0,0,496,212" title="実身/仮身検索">
+<text x="26" y="38">検索文字列</text>
+<box num="1" rect="122,20,478,46"></box>
+<text x="26" y="72">検索対象</text>
+<choice num="10" rect="122,56,206,78" group="10" value="0">実身名</choice>
+<choice num="11" rect="212,56,296,78" group="10" value="0">続柄</choice>
+<choice num="12" rect="302,56,386,78" group="10" value="0">本文</choice>
+<choice num="13" rect="392,56,476,78" group="10" value="1">全て</choice>
+<text x="26" y="106">日付</text>
+<choice num="20" rect="122,90,206,112" group="20" value="1">なし</choice>
+<choice num="21" rect="212,90,296,112" group="20" value="0">作成日</choice>
+<choice num="22" rect="302,90,386,112" group="20" value="0">更新日</choice>
+<choice num="23" rect="392,90,476,112" group="20" value="0">参照日</choice>
+<text x="26" y="140">期間</text>
+<box num="2" rect="122,122,272,148"></box>
+<text x="280" y="140">〜</text>
+<box num="3" rect="308,122,458,148"></box>
+<button num="101" rect="290,168,376,194" answer="cancel">取消</button>
+<button num="102" rect="386,168,472,194" emph="true">検索</button>
+</panel>
+</databox>
+</tad>

@@ -56,6 +56,16 @@
  *	in the boot protocol has only its eight bytes: any consumer report it
  *	would send in the report protocol is not read.
  *
+ *	A keyboard not of the boot subclass is read in the report protocol,
+ *	where its descriptor puts its keys (HIDKB): the keyboard page's
+ *	usages a bit each (the modifiers, or every key of a keyboard that
+ *	reports any number held) or as an array of usages held, and its
+ *	lamps in an output report. One interface may hold a keyboard, a
+ *	mouse and consumer keys told apart by report IDs (a board's own
+ *	keyboard on a Raspberry Pi Pico): each keyboard beside a pointer is
+ *	then an entry of its own, a keyboard to the list and the objects,
+ *	and each report goes to the entry of its ID (hid_route).
+ *
  *	The USB manager hands every HID interface here when the device is
  *	plugged in. The interrupt endpoint is kept armed as a stream; each
  *	report that comes in is turned into events at once and put into a
@@ -113,6 +123,16 @@
 #define USAGE_PAN		0xC0238		/* the consumer page's AC Pan: a wheel across */
 #define USAGE_PAGE_BUTTON	9
 #define USAGE_PAGE_CONSUMER	0x0C
+#define USAGE_PAGE_KEYBOARD	0x07
+#define USAGE_PAGE_LED		0x08
+
+/* The applications a descriptor's collections are named by, for the console */
+#define APP_POINTER		0x10001
+#define APP_MOUSE		0x10002
+#define APP_KEYBOARD		0x10006
+#define APP_KEYPAD		0x10007
+#define APP_SYSTEM		0x10080		/* System Control: power, sleep, wake */
+#define APP_CONSUMER		0xC0001
 
 /*
  * The digitizer page (HID Usage Tables, 0x0D): a pen or a touch screen
@@ -256,15 +276,60 @@ typedef struct {
 	INT	hrid[HID_CC_HELD];
 } HIDCC;
 
+/*
+ * A keyboard read in the report protocol: one keyboard application of a
+ * report descriptor, its keys in input report rid. The keyboard page's
+ * usages come either a bit each (the modifiers 0xE0..0xE7, and every key
+ * of a keyboard that reports any number held at once) as runs of bits
+ * whose usages follow one another, or as an array whose values are
+ * usages (the boot protocol's six). Its lamps (the LED page's Num Lock,
+ * Caps Lock, Scroll Lock, Compose and Kana) are bits of an output report.
+ */
+#define HID_KB_APPS	2		/* keyboards of one interface */
+#define HID_KB_RUNS	4
+#define HID_KB_ARRAYS	2
+#define HID_KB_KEYS	32		/* keys held at once that are told apart */
+#define HID_KB_LEDS	5
+
 typedef struct {
+	INT	off, count;	/* usage umin + i is the bit off + i */
+	UW	umin;
+} KBRUN;
+
+typedef struct {
+	INT	rid;
+	INT	nrun, narr;
+	KBRUN	run[HID_KB_RUNS];
+	CCARRAY	a[HID_KB_ARRAYS];
+	INT	app;		/* the application collection it is, by number in its descriptor */
+	INT	ilen;		/* its input report in bytes, the ID included */
+	INT	orid, olen;	/* its lamps' output report and its length, the ID included; 0 none */
+	INT	led[HID_KB_LEDS];	/* each lamp's bit in that report after the ID; -1 none */
+} HIDKB;
+
+typedef struct HIDDEV HIDDEV;
+
+struct HIDDEV {
 	BOOL	used;
 	UINT	id;		/* the interface's number while it is there, from 1 */
 	UD	reports;	/* reports taken off it */
 	USBDEV	*dev;
 	INT	ifno;
-	BOOL	is_kbd;
+	BOOL	is_kbd;		/* a keyboard of the boot protocol */
 	USBPIPE	*pipe;
-	UB	last[8];	/* the report before this one */
+	/* a keyboard: the keys held, as last reported */
+	UB	held[HID_KB_KEYS];
+	INT	nheld;
+	UINT	hmods;
+	HIDKB	*kb;		/* a keyboard of the report protocol, NULL none */
+	/*
+	 * One interface may hold several applications told apart by their
+	 * report IDs: each keyboard among them beside a pointer is an entry
+	 * of its own (a keyboard to the list and the objects), fed the
+	 * reports of its ID by the entry that reads the interface.
+	 */
+	HIDDEV	*peer;		/* the next such entry of the interface, NULL none */
+	HIDDEV	*feed;		/* in such an entry: the one that reads the interface */
 	BOOL	have_last;
 	/* a pointer */
 	INT	report_id;	/* 0: reports carry no ID */
@@ -286,9 +351,9 @@ typedef struct {
 	UB	ext_name[16];	/* not on USB: its device object's name ("ps2kbd") */
 	HIDDG	*dg;		/* its pen and touch screen, NULL none */
 	HIDCC	*cc;		/* its consumer page's keys, NULL none */
-	BOOL	cc_only;	/* it has nothing else: a keyboard of those keys, no pointer */
+	BOOL	keys_only;	/* keys and no pointer: a keyboard (of the report protocol, or of consumer keys) */
 	INT	tdiag10;	/* the diagonal of the touch screen its touches are on, 0.1 mm; 0 not known */
-} HIDDEV;
+};
 
 /*
  * The interfaces, as many as come: a table of entries each allocated
@@ -313,13 +378,35 @@ LOCAL UB		hid_tch[HID_RING];	/* TCH_*: a touch screen's, shaped as touches are *
 LOCAL INT		hid_px[HID_RING];	/* and its view pixels in 100 mm of that screen (touch_px) */
 LOCAL UINT		hid_head = 0, hid_tail = 0;
 LOCAL ID		hid_mtxid = 0;
-LOCAL ID		hid_semid = 0;
+/*
+ * What the reader waits on: one event flag for both reasons it wakes, so
+ * one wait sees either. The events themselves are counted by the ring
+ * under hid_mtxid alone; the bits only say "look again", and are cleared
+ * by the wait that sees them (TWF_BITCLR), so a bit set before the wait
+ * is not lost and one already looked at does not keep it awake.
+ */
+LOCAL ID		hid_flgid = 0;
+#define HID_FLG_REPORT	0x01U		/* an event put in the ring */
+#define HID_FLG_WAKE	0x02U		/* ts_hid_wake: the reader to return */
 
 LOCAL INT		ptr_x = 0, ptr_y = 0;
 LOCAL UINT		ptr_buttons = 0;
 LOCAL INT		ptr_press_x = 0, ptr_press_y = 0;	/* where button 0 last went down */
 LOCAL BOOL		ptr_injected = FALSE;	/* pointer events were put in without a device */
 LOCAL INT		scr_w = 0, scr_h = 0;
+
+/*
+ * The screens, when there are outputs of their own sizes (10.4.8): the
+ * pointer stays on one of them, never in a part of the view no screen
+ * shows, and a touch screen's or a pen's place is taken on the main
+ * screen, the built-in one, not across the whole view. With one output
+ * (its view shown whole, or as columns, screens=N) scr_n is 0 and the
+ * whole view is the one rectangle, as before.
+ */
+LOCAL INT		scr_n = 0;
+LOCAL INT		scr_rx[DISP_SCREENS_MAX], scr_ry[DISP_SCREENS_MAX];
+LOCAL INT		scr_rw[DISP_SCREENS_MAX], scr_rh[DISP_SCREENS_MAX];
+LOCAL INT		abs_x0 = 0, abs_y0 = 0, abs_w = 0, abs_h = 0;	/* where a position is taken */
 
 LOCAL T_HIDSTAT		hid_count;
 LOCAL UINT		hid_next_id = 0;
@@ -401,7 +488,7 @@ LOCAL INT isqrt( UD v );
 
 LOCAL INT touch_px( INT diag10 )
 {
-	INT	w = ( scr_w > 0 ) ? scr_w : 640, h = ( scr_h > 0 ) ? scr_h : 480, px;
+	INT	w = ( abs_w > 0 ) ? abs_w : 640, h = ( abs_h > 0 ) ? abs_h : 480, px;
 
 	if ( diag10 > 0 ) {
 		px = (INT)( (D)isqrt((UD)w * w + (UD)h * h) * 1000 / diag10 );
@@ -461,6 +548,7 @@ LOCAL void ring_put_as( CONST T_HIDEV *ev, BOOL inj, UINT src, UB tch, INT px )
 			hid_ring[last] = *ev;
 			hid_count.events++;
 			tk_unl_mtx(hid_mtxid);
+			tk_set_flg(hid_flgid, HID_FLG_REPORT);
 			moved_hint(ev);
 			return;
 		}
@@ -469,8 +557,6 @@ LOCAL void ring_put_as( CONST T_HIDEV *ev, BOOL inj, UINT src, UB tch, INT px )
 	if ( next == hid_head ) {
 		hid_head = (hid_head + 1) % HID_RING;
 		hid_count.dropped++;
-	} else {
-		tk_sig_sem(hid_semid, 1);
 	}
 	hid_ring[hid_tail] = *ev;
 	hid_inj[hid_tail] = inj;
@@ -479,6 +565,7 @@ LOCAL void ring_put_as( CONST T_HIDEV *ev, BOOL inj, UINT src, UB tch, INT px )
 	hid_tail = next;
 	hid_count.events++;
 	tk_unl_mtx(hid_mtxid);
+	tk_set_flg(hid_flgid, HID_FLG_REPORT);	/* after the ring has it: the reader finds it there */
 	moved_hint(ev);
 }
 
@@ -570,79 +657,47 @@ LOCAL UD now_ns( void )
 /* ---------------------------------------------------------------- keyboard */
 
 /*
- * A keyboard report is the keys held down, so what changed since the
- * last one is what happened. Six keys at a time is what the boot
- * protocol carries.
+ * A keyboard reports the keys held down, so what changed since the last
+ * report is what happened: keys[n] and the modifier bits mods are those
+ * held now, and are kept to compare the next with. The first report is
+ * compared like any other: what was last seen starts as none held,
+ * which is exactly what a keyboard nobody has touched is. Keeping the
+ * first report only to compare the next with would lose the first key
+ * anyone presses.
  */
-LOCAL void kbd_report( HIDDEV *d, CONST UB *r )
+LOCAL void kbd_keys( HIDDEV *d, UINT mods, CONST UB *keys, INT n )
 {
 	T_HIDEV	ev;
 	INT	i, k;
 	BOOL	found;
 
-	UB	keys[8];
-
 	knl_memset(&ev, 0, sizeof(ev));
-	ev.mods = r[0];
+	ev.mods = mods;
 	ev.when = now_ns();
 	ev.x = ptr_x;
 	ev.y = ptr_y;
-
-	/*
-	 * Usages 1 to 3 in the key array (ErrorRollOver, POSTFail,
-	 * ErrorUndefined) say the keyboard cannot tell which keys are held:
-	 * more are down than it can report, or it has a ghost. The keys
-	 * are then still the ones last reported, not none of them, or each
-	 * would be let go and pressed again when the jam clears. The
-	 * modifiers are bits of their own and still true.
-	 */
-	knl_memcpy(keys, r, 8);
-	for ( i = 2; i < 8; i++ ) {
-		if ( r[i] >= 1 && r[i] <= 3 ) {
-			knl_memcpy(keys + 2, d->last + 2, 6);
-			break;
-		}
+	if ( n > HID_KB_KEYS ) {
+		n = HID_KB_KEYS;
 	}
-	r = keys;
-
-	/*
-	 * The first report is compared like any other. What was last
-	 * seen starts as all zero, which is a keyboard with no key held
-	 * -- exactly what a keyboard nobody has touched is. Keeping the
-	 * first report only to compare the next with would lose the
-	 * first key anyone presses.
-	 */
-	for ( i = 2; i < 8; i++ ) {		/* down now and were not */
-		if ( r[i] <= 3 ) {
-			continue;		/* nothing, or an error code */
-		}
+	for ( i = 0; i < n; i++ ) {		/* down now and were not */
 		found = FALSE;
-		for ( k = 2; k < 8; k++ ) {
-			if ( d->last[k] == r[i] ) {
-				found = TRUE;
-				break;
-			}
+		for ( k = 0; k < d->nheld && !found; k++ ) {
+			found = ( d->held[k] == keys[i] );
 		}
 		if ( !found ) {
 			ev.type = HID_EV_KEY_DOWN;
-			ev.code = r[i];
+			ev.code = keys[i];
 			ring_put(d, &ev);
 		}
 	}
-	for ( i = 2; i < 8; i++ ) {		/* were down and are not */
-		if ( d->last[i] <= 3 ) {
-			continue;
-		}
+	for ( i = 0; i < d->nheld; i++ ) {	/* were down and are not */
 		found = FALSE;
-		for ( k = 2; k < 8; k++ ) {
-			if ( r[k] == d->last[i] ) {
-				found = TRUE;
-				break;
-			}
+		for ( k = 0; k < n && !found; k++ ) {
+			found = ( keys[k] == d->held[i] );
 		}
 		if ( !found ) {
 			ev.type = HID_EV_KEY_UP;
-			ev.code = d->last[i];
+			ev.code = d->held[i];
 			ring_put(d, &ev);
 		}
 	}
@@ -652,16 +707,61 @@ LOCAL void kbd_report( HIDDEV *d, CONST UB *r )
 	 * pressed alone, as right Ctrl is 入力終 to the text input port.
 	 */
 	for ( i = 0; i < 8; i++ ) {
-		UB	bit = (UB)( 1U << i );
+		UINT	bit = 1U << i;
 
-		if ( ( r[0] & bit ) != ( d->last[0] & bit ) ) {
-			ev.type = ( ( r[0] & bit ) != 0 ) ? HID_EV_KEY_DOWN : HID_EV_KEY_UP;
+		if ( ( mods & bit ) != ( d->hmods & bit ) ) {
+			ev.type = ( ( mods & bit ) != 0 ) ? HID_EV_KEY_DOWN : HID_EV_KEY_UP;
 			ev.code = 0xE0 + i;
 			ring_put(d, &ev);
 		}
 	}
-	knl_memcpy(d->last, r, 8);
+	if ( n > 0 && keys != d->held ) {
+		knl_memcpy(d->held, keys, (SZ)n);
+	}
+	d->nheld = n;
+	d->hmods = mods & 0xff;
 	d->have_last = TRUE;
+}
+
+/* A key put among those held now, once, while there is room */
+LOCAL void kbd_note( UB *keys, INT *p_n, UINT code )
+{
+	INT	i;
+
+	for ( i = 0; i < *p_n; i++ ) {
+		if ( keys[i] == code ) return;
+	}
+	if ( *p_n < HID_KB_KEYS ) {
+		keys[(*p_n)++] = (UB)code;
+	}
+}
+
+/*
+ * The boot protocol's report: the modifiers' byte, a byte kept, and an
+ * array of six keys. Usages 1 to 3 in the array (ErrorRollOver,
+ * POSTFail, ErrorUndefined) say the keyboard cannot tell which keys are
+ * held: more are down than it can report, or it has a ghost. The keys
+ * are then still the ones last reported, not none of them, or each
+ * would be let go and pressed again when the jam clears. The modifiers
+ * are bits of their own and still true.
+ */
+LOCAL void kbd_report( HIDDEV *d, CONST UB *r )
+{
+	UB	keys[HID_KB_KEYS];
+	INT	i, n = 0;
+
+	for ( i = 2; i < 8; i++ ) {
+		if ( r[i] >= 1 && r[i] <= 3 ) {
+			kbd_keys(d, r[0], d->held, d->nheld);
+			return;
+		}
+	}
+	for ( i = 2; i < 8; i++ ) {
+		if ( r[i] > 3 ) {
+			kbd_note(keys, &n, r[i]);
+		}
+	}
+	kbd_keys(d, r[0], keys, n);
 }
 
 /* ---------------------------------------------------------------- pointer */
@@ -873,6 +973,42 @@ LOCAL BOOL ptr_decode( HIDDEV *d, CONST UB *r, INT len, PTRIN *o )
 }
 
 /*
+ * The pointer kept on the screens: inside the view, and with outputs of
+ * their own sizes, on the screen it is on or else at the nearest point of
+ * the nearest screen
+ */
+LOCAL void ptr_keep_on( void )
+{
+	INT	i, best = 0, x, y;
+	D	d, bd = -1;
+
+	if ( ptr_x < 0 ) ptr_x = 0;
+	if ( ptr_y < 0 ) ptr_y = 0;
+	if ( ptr_x >= scr_w ) ptr_x = scr_w - 1;
+	if ( ptr_y >= scr_h ) ptr_y = scr_h - 1;
+	if ( scr_n == 0 ) {
+		return;
+	}
+	for ( i = 0; i < scr_n; i++ ) {
+		x = ( ptr_x < scr_rx[i] ) ? scr_rx[i] : ( ptr_x >= scr_rx[i] + scr_rw[i] ) ? scr_rx[i] + scr_rw[i] - 1 : ptr_x;
+		y = ( ptr_y < scr_ry[i] ) ? scr_ry[i] : ( ptr_y >= scr_ry[i] + scr_rh[i] ) ? scr_ry[i] + scr_rh[i] - 1 : ptr_y;
+		d = (D)( x - ptr_x ) * ( x - ptr_x ) + (D)( y - ptr_y ) * ( y - ptr_y );
+		if ( d == 0 ) {
+			return;			/* on this one */
+		}
+		if ( bd < 0 || d < bd ) {
+			bd = d;
+			best = i;
+		}
+	}
+	i = best;
+	if ( ptr_x < scr_rx[i] ) ptr_x = scr_rx[i];
+	if ( ptr_x >= scr_rx[i] + scr_rw[i] ) ptr_x = scr_rx[i] + scr_rw[i] - 1;
+	if ( ptr_y < scr_ry[i] ) ptr_y = scr_ry[i];
+	if ( ptr_y >= scr_ry[i] + scr_rh[i] ) ptr_y = scr_ry[i] + scr_rh[i] - 1;
+}
+
+/*
  * Where the pointer goes for a report's X and Y, as fields fx and fy
  * place them: a movement moves it, sped up and slowed as the attributes
  * say; a position puts it there when it is to be taken as one (direct:
@@ -886,7 +1022,7 @@ LOCAL BOOL ptr_place( HIDDEV *d, CONST HIDFIELD *fx, CONST HIDFIELD *fy, INT x, 
 
 	if ( !fx->rel && !direct && !hid_attr.absolute ) {
 		/* a pen taken as a mouse: where it went from where it was */
-		INT	ax = abs_scale(x, fx, scr_w), ay = abs_scale(y, fy, scr_h);
+		INT	ax = abs_x0 + abs_scale(x, fx, abs_w), ay = abs_y0 + abs_scale(y, fy, abs_h);
 		BOOL	had = d->have_last;
 		INT	dx = ax - d->lastax, dy = ay - d->lastay;
 
@@ -897,8 +1033,8 @@ LOCAL BOOL ptr_place( HIDDEV *d, CONST HIDFIELD *fx, CONST HIDFIELD *fy, INT x, 
 		x = had ? dx : 0;
 		y = had ? dy : 0;
 	} else if ( !fx->rel ) {
-		ptr_x = abs_scale(x, fx, scr_w);
-		ptr_y = abs_scale(y, fy, scr_h);
+		ptr_x = abs_x0 + abs_scale(x, fx, abs_w);
+		ptr_y = abs_y0 + abs_scale(y, fy, abs_h);
 		/* a position moved when it differs from the last report's */
 		moved = ( !d->have_last || x != d->lastx || y != d->lasty );
 		d->lastx = x;
@@ -931,10 +1067,7 @@ LOCAL BOOL ptr_place( HIDDEV *d, CONST HIDFIELD *fx, CONST HIDFIELD *fy, INT x, 
 	ptr_x += x;
 	ptr_y += y;
 kept:
-	if ( ptr_x < 0 ) ptr_x = 0;
-	if ( ptr_y < 0 ) ptr_y = 0;
-	if ( ptr_x >= scr_w ) ptr_x = scr_w - 1;
-	if ( ptr_y >= scr_h ) ptr_y = scr_h - 1;
+	ptr_keep_on();
 
 	return moved;
 }
@@ -1138,6 +1271,128 @@ LOCAL void cc_let_go( HIDDEV *d )
 	}
 }
 
+/* ---------------------------------------------------------------- keyboards of the report protocol */
+
+/*
+ * What a keyboard page's usage u does held: a modifier's bit into
+ * *p_mods, a key into keys. Answers TRUE for usages 1 to 3, which say
+ * the keyboard cannot tell which keys are held (kbd_report).
+ */
+LOCAL BOOL kb_usage( UW u, UINT *p_mods, UB *keys, INT *p_n )
+{
+	UINT	c = u & 0xffff;
+
+	if ( ( u >> 16 ) != USAGE_PAGE_KEYBOARD || c == 0 || c > 0xff ) {
+		return FALSE;
+	}
+	if ( c <= 3 ) {
+		return TRUE;
+	}
+	if ( c >= 0xE0 && c <= 0xE7 ) {
+		*p_mods |= 1U << ( c - 0xE0 );
+	} else {
+		kbd_note(keys, p_n, c);
+	}
+	return FALSE;
+}
+
+/*
+ * A report of d's keyboard (HIDKB), r and len as they came, the ID
+ * included: the keys held now, read where its descriptor put them.
+ * FALSE when the report is of another ID.
+ */
+LOCAL BOOL kb_report( HIDDEV *d, CONST UB *r, INT len )
+{
+	CONST HIDKB	*kb = d->kb;
+	HIDFIELD	f;
+	UB		keys[HID_KB_KEYS];
+	UINT		mods = 0;
+	INT		i, k, n = 0;
+	BOOL		jam = FALSE;
+
+	if ( kb == NULL ) {
+		return FALSE;
+	}
+	if ( kb->rid != 0 ) {
+		if ( len < 1 || r[0] != kb->rid ) {
+			return FALSE;
+		}
+		r++;
+		len--;
+	}
+	knl_memset(&f, 0, sizeof(f));
+	for ( i = 0; i < kb->nrun; i++ ) {
+		CONST KBRUN	*run = &kb->run[i];
+
+		f.size = 1;
+		for ( k = 0; k < run->count; k++ ) {
+			f.off = run->off + k;
+			if ( get_field(r, len, &f) != 0 ) {
+				jam = kb_usage(run->umin + (UW)k, &mods, keys, &n) || jam;
+			}
+		}
+	}
+	for ( i = 0; i < kb->narr; i++ ) {
+		CONST CCARRAY	*a = &kb->a[i];
+
+		f.size = a->size;
+		f.sgn = ( a->lmin < 0 );
+		for ( k = 0; k < a->count; k++ ) {
+			INT	v;
+
+			f.off = a->off + k * a->size;
+			v = get_field(r, len, &f);
+			if ( v < a->lmin || v > a->lmax ) {
+				continue;	/* out of range: no key in this place */
+			}
+			v -= a->lmin;
+			if ( a->range ) {
+				jam = kb_usage(a->umin + (UW)v, &mods, keys, &n) || jam;
+			} else if ( v < a->nus ) {
+				jam = kb_usage(a->us[v], &mods, keys, &n) || jam;
+			}
+		}
+		f.sgn = FALSE;
+	}
+	if ( jam ) {
+		kbd_keys(d, mods, d->held, d->nheld);
+	} else {
+		kbd_keys(d, mods, keys, n);
+	}
+	if ( d->feed != NULL ) {
+		d->reports++;		/* the entry that reads the interface counts its own */
+	}
+	return TRUE;
+}
+
+/*
+ * A report of an interface that holds several applications: to each of
+ * its keyboards whose ID it has, and to its pointer, pens and consumer
+ * keys unless a keyboard took a report of its own ID.
+ */
+LOCAL void ptr_report( HIDDEV *d, CONST UB *r, INT len );
+
+LOCAL void hid_route( HIDDEV *d, CONST UB *r, INT len )
+{
+	HIDDEV	*k;
+	BOOL	took = FALSE;
+
+	for ( k = d; k != NULL; k = k->peer ) {
+		if ( k->used && k->kb != NULL && kb_report(k, r, len) && k->kb->rid != 0 ) {
+			took = TRUE;
+		}
+	}
+	if ( !took ) {
+		ptr_report(d, r, len);
+	}
+}
+
+/* An entry's keyboard of the report protocol let go of all it holds */
+LOCAL void kb_let_go( HIDDEV *d )
+{
+	kbd_keys(d, 0, NULL, 0);
+}
+
 LOCAL void ptr_report( HIDDEV *d, CONST UB *r, INT len )
 {
 	T_HIDEV	ev;
@@ -1147,7 +1402,7 @@ LOCAL void ptr_report( HIDDEV *d, CONST UB *r, INT len )
 	PTRIN	in;
 
 	cc_report(d, r, len);
-	if ( d->cc_only ) {
+	if ( d->keys_only ) {
 		return;
 	}
 	if ( dg_report(d, r, len) ) {
@@ -1326,8 +1581,8 @@ LOCAL void dg_multi( HIDDEV *d, DGAPP *a, BOOL pen )
 	if ( n == 2 && a->t_n >= 2 ) {
 		INT	ia = ( a->t_id[0] < a->t_id[1] ) ? a->t_id[0] : a->t_id[1];
 		INT	ib = ( a->t_id[0] < a->t_id[1] ) ? a->t_id[1] : a->t_id[0];
-		INT	xa = abs_scale(a->t_x[0], &a->s[0].x, scr_w), ya = abs_scale(a->t_y[0], &a->s[0].y, scr_h);
-		INT	xb = abs_scale(a->t_x[1], &a->s[0].x, scr_w), yb = abs_scale(a->t_y[1], &a->s[0].y, scr_h);
+		INT	xa = abs_x0 + abs_scale(a->t_x[0], &a->s[0].x, abs_w), ya = abs_y0 + abs_scale(a->t_y[0], &a->s[0].y, abs_h);
+		INT	xb = abs_x0 + abs_scale(a->t_x[1], &a->s[0].x, abs_w), yb = abs_y0 + abs_scale(a->t_y[1], &a->s[0].y, abs_h);
 		INT	dx = xa - xb, dy = ya - yb;
 		INT	dist = isqrt((UD)( dx * dx ) + (UD)( dy * dy ));
 
@@ -1359,8 +1614,8 @@ LOCAL void multi_start( DGAPP *a )
 	INT	k = ( a->t_n >= 2 ) ? 2 : a->t_n, i, x = 0, y = 0;
 
 	for ( i = 0; i < k; i++ ) {
-		x += abs_scale(a->t_x[i], &a->s[0].x, scr_w);
-		y += abs_scale(a->t_y[i], &a->s[0].y, scr_h);
+		x += abs_x0 + abs_scale(a->t_x[i], &a->s[0].x, abs_w);
+		y += abs_y0 + abs_scale(a->t_y[i], &a->s[0].y, abs_h);
 	}
 	a->m_x = ( k > 0 ) ? x / k : ptr_x;
 	a->m_y = ( k > 0 ) ? y / k : ptr_y;
@@ -1624,9 +1879,43 @@ typedef struct {
 	BOOL		digi;		/* the digitizer page is used */
 	BOOL		touchpad;	/* it has a touch pad, which is not read here */
 	HIDCC		*cc;		/* the consumer page's keys it declares */
+	HIDKB		*kb;		/* its keyboards, NULL not looked for */
+	INT		nkb, maxkb;
+	INT		*obits;		/* the length in bits of each output report, 256 */
 	UW		apps[8];	/* its application collections, for the console */
+	INT		app_rid[8];	/* the report ID of each one's first input; -1 none */
 	INT		napps;
 } HIDPARSE;
+
+/*
+ * The keyboard of application collection app (ps->apps), made when add
+ * and there is room; NULL none
+ */
+LOCAL HIDKB *kb_of( HIDPARSE *ps, INT app, BOOL add )
+{
+	HIDKB	*kb;
+	INT	i;
+
+	if ( ps->kb == NULL || app < 0 ) {
+		return NULL;
+	}
+	for ( i = 0; i < ps->nkb; i++ ) {
+		if ( ps->kb[i].app == app ) {
+			return &ps->kb[i];
+		}
+	}
+	if ( !add || ps->nkb >= ps->maxkb ) {
+		return NULL;
+	}
+	kb = &ps->kb[ps->nkb++];
+	knl_memset(kb, 0, sizeof(*kb));
+	kb->app = app;
+	kb->rid = kb->orid = -1;
+	for ( i = 0; i < HID_KB_LEDS; i++ ) {
+		kb->led[i] = -1;
+	}
+	return kb;
+}
 
 /*
  * A report descriptor into its fields, bit offsets counted per report
@@ -1655,12 +1944,16 @@ LOCAL INT hid_parse( CONST UB *dsc, INT n, HIDPARSE *ps )
 	BOOL		range = FALSE;
 	INT		*off = ps->bits;	/* the input bit offset per report ID */
 	INT		*foff = ps->fbits;	/* the feature bit offset per report ID */
+	INT		*ooff = ps->obits;	/* the output bit offset per report ID */
 	INT		cstk[HID_COLL_MAX], kstk[HID_COLL_MAX], depth = 0, coll = -1, ck = CK_NONE, ncoll = 0;
+	INT		cur = -1;		/* the application collection the items are in, by number; -1 none */
 
 	knl_memset(off, 0, sizeof(INT) * 256);
 	knl_memset(foff, 0, sizeof(INT) * 256);
+	knl_memset(ooff, 0, sizeof(INT) * 256);
 	knl_memset(&g, 0, sizeof(g));
 	ps->nin = ps->nft = 0;
+	ps->nkb = 0;
 	ps->digi = ps->touchpad = FALSE;
 	ps->napps = 0;
 	while ( i < n ) {
@@ -1751,7 +2044,12 @@ LOCAL INT hid_parse( CONST UB *dsc, INT n, HIDPARSE *ps )
 			if ( ps->wacom ) u = wacom_usage(u);
 			if ( depth == 0 ) {
 				app = u;
-				if ( ps->napps < 8 ) ps->apps[ps->napps++] = u;
+				cur = -1;
+				if ( ps->napps < 8 ) {
+					cur = ps->napps++;
+					ps->apps[cur] = u;
+					ps->app_rid[cur] = -1;
+				}
 				if ( u == DG_TOUCHPAD ) ps->touchpad = TRUE;
 			}
 			if ( depth < HID_COLL_MAX ) {
@@ -1771,12 +2069,37 @@ LOCAL INT hid_parse( CONST UB *dsc, INT n, HIDPARSE *ps )
 					ck = kstk[depth];
 				}
 			}
-		} else if ( tag == 8 || tag == 0xb ) {	/* Input, Feature */
-			BOOL	input = ( tag == 8 );
-			INT	*o = input ? off : foff;
+		} else if ( tag == 8 || tag == 9 || tag == 0xb ) {	/* Input, Output, Feature */
+			BOOL	input = ( tag == 8 ), output = ( tag == 9 );
+			INT	*o = input ? off : output ? ooff : foff;
 
 			if ( input ) {
 				ps->rids[g.rid >> 3] |= (UB)( 1 << ( g.rid & 7 ) );
+				if ( depth > 0 && cur >= 0 && ps->app_rid[cur] < 0 ) {
+					ps->app_rid[cur] = g.rid;
+				}
+			}
+			/* data, an array of the keyboard page's usages: the keys held */
+			if ( input && ( val & 3 ) == 0 && g.rsize >= 1 && g.rsize <= 32 && g.rcount > 0
+			  && ( range ? ( umin >> 16 ) : ( nus > 0 ? ( usages[0] >> 16 ) : 0 ) ) == USAGE_PAGE_KEYBOARD ) {
+				HIDKB	*kb = kb_of(ps, depth > 0 ? cur : -1, TRUE);
+				INT	m;
+
+				if ( kb != NULL && kb->rid < 0 ) kb->rid = g.rid;
+				if ( kb != NULL && kb->rid == g.rid && kb->narr < HID_KB_ARRAYS ) {
+					CCARRAY	*ka = &kb->a[kb->narr++];
+
+					ka->rid = g.rid;
+					ka->off = o[g.rid];
+					ka->size = g.rsize;
+					ka->count = g.rcount;
+					ka->lmin = g.lmin;
+					ka->lmax = g.lmax;
+					ka->range = range;
+					ka->umin = umin;
+					ka->nus = nus;
+					for ( m = 0; m < nus; m++ ) ka->us[m] = usages[m];
+				}
 			}
 			/* data, an array: its values are usages, some perhaps keys */
 			if ( input && ( val & 3 ) == 0 && g.rsize >= 1 && g.rsize <= 32 && g.rcount > 0
@@ -1823,6 +2146,38 @@ LOCAL INT hid_parse( CONST UB *dsc, INT n, HIDPARSE *ps )
 				if ( ps->wacom ) u = wacom_usage(u);
 				/* data, not constant, and variable, not an array */
 				if ( (val & 3) != 2 || g.rsize < 1 || g.rsize > 32 ) {
+					continue;
+				}
+				/* a key a bit: a run of them whose usages follow one another */
+				if ( input && ( u >> 16 ) == USAGE_PAGE_KEYBOARD ) {
+					HIDKB	*kb = kb_of(ps, depth > 0 ? cur : -1, TRUE);
+					INT	bit = o[g.rid] + k;
+
+					if ( kb != NULL && kb->rid < 0 ) kb->rid = g.rid;
+					if ( kb == NULL || kb->rid != g.rid || g.rsize != 1 ) {
+						continue;
+					}
+					if ( kb->nrun > 0 && kb->run[kb->nrun - 1].off + kb->run[kb->nrun - 1].count == bit
+					  && kb->run[kb->nrun - 1].umin + (UW)kb->run[kb->nrun - 1].count == u ) {
+						kb->run[kb->nrun - 1].count++;
+					} else if ( kb->nrun < HID_KB_RUNS ) {
+						kb->run[kb->nrun].off = bit;
+						kb->run[kb->nrun].count = 1;
+						kb->run[kb->nrun].umin = u;
+						kb->nrun++;
+					}
+					continue;
+				}
+				/* a keyboard's lamp: Num Lock, Caps Lock, Scroll Lock, Compose, Kana */
+				if ( output ) {
+					HIDKB	*kb = kb_of(ps, depth > 0 ? cur : -1, TRUE);
+
+					if ( kb != NULL && ( u >> 16 ) == USAGE_PAGE_LED && ( u & 0xffff ) >= 1
+					  && ( u & 0xffff ) <= HID_KB_LEDS && g.rsize == 1
+					  && ( kb->orid < 0 || kb->orid == g.rid ) ) {
+						kb->orid = g.rid;
+						kb->led[( u & 0xffff ) - 1] = o[g.rid] + k;
+					}
 					continue;
 				}
 				if ( input && ps->cc != NULL && cc_key(u) != 0 ) {
@@ -2143,27 +2498,113 @@ LOCAL void show_dg( CONST HIDDEV *h, CONST HIDPARSE *ps )
 	}
 }
 
+/* An application collection's usage as a word, for the console */
+LOCAL CONST char *app_name( UW u )
+{
+	switch ( u ) {
+	case APP_POINTER:	return "pointer";
+	case APP_MOUSE:		return "mouse";
+	case APP_KEYBOARD:	return "keyboard";
+	case APP_KEYPAD:	return "keypad";
+	case APP_SYSTEM:	return "system control";
+	case APP_CONSUMER:	return "consumer control";
+	case DG_DIGITIZER:	return "digitizer";
+	case DG_PEN:		return "pen";
+	case DG_TOUCHSCREEN:	return "touch screen";
+	case DG_TOUCHPAD:	return "touch pad";
+	}
+	return NULL;
+}
+
+/*
+ * What each application collection of an interface is taken as, by its
+ * report ID, on one line: a keyboard (and how its keys and lamps are
+ * given), the pointer, a pen or a touch screen, consumer keys, or not
+ * taken
+ */
+LOCAL void show_roles( CONST HIDDEV *h, CONST HIDPARSE *ps, CONST HIDKB *kbs, INT nkb )
+{
+	char	line[96 * 8 + 48];
+	INT	i, k, m;
+
+	m = tm_sprintf((UB *)line, (UB *)"usb: hid: interface %d roles:", (INT)h->ifno);
+	for ( i = 0; i < ps->napps; i++ ) {
+		CONST char	*nm = app_name(ps->apps[i]);
+		INT		rid = ps->app_rid[i];
+		CONST HIDKB	*kb = NULL;
+		BOOL		cc = FALSE, dg = FALSE;
+
+		for ( k = 0; k < nkb; k++ ) {
+			if ( kbs[k].app == i ) kb = &kbs[k];
+		}
+		for ( k = 0; h->cc != NULL && k < h->cc->nvar; k++ ) cc = cc || ( h->cc->v[k].rid == rid );
+		for ( k = 0; h->cc != NULL && k < h->cc->narr; k++ ) cc = cc || ( h->cc->a[k].rid == rid );
+		for ( k = 0; h->dg != NULL && k < h->dg->n; k++ ) dg = dg || ( h->dg->a[k].rid == rid );
+		m += tm_sprintf((UB *)line + m, (UB *)"%s id %d ", ( i > 0 ) ? ";" : "", rid);
+		if ( nm != NULL ) {
+			m += tm_sprintf((UB *)line + m, (UB *)"%s", nm);
+		} else {
+			m += tm_sprintf((UB *)line + m, (UB *)"usage %x", (INT)ps->apps[i]);
+		}
+		if ( kb != NULL ) {
+			INT	nbit = 0, nkey = 0;
+
+			for ( k = 0; k < kb->nrun; k++ ) nbit += kb->run[k].count;
+			for ( k = 0; k < kb->narr; k++ ) nkey += kb->a[k].count;
+			m += tm_sprintf((UB *)line + m, (UB *)" = keyboard, %d keys a bit, %d in arrays, lamps %d",
+					nbit, nkey, kb->olen > 0 ? kb->orid : -1);
+		} else if ( rid < 0 ) {
+			m += tm_sprintf((UB *)line + m, (UB *)" = no input");
+		} else if ( dg ) {
+			m += tm_sprintf((UB *)line + m, (UB *)" = pen or touch screen");
+		} else if ( h->x.size > 0 && rid == h->report_id ) {
+			m += tm_sprintf((UB *)line + m, (UB *)" = pointer");
+		} else if ( cc ) {
+			m += tm_sprintf((UB *)line + m, (UB *)" = consumer keys");
+		} else {
+			m += tm_sprintf((UB *)line + m, (UB *)" = not taken");
+		}
+		if ( m > (INT)sizeof(line) - 96 ) {
+			break;
+		}
+	}
+	USB_LOG("%s\n", line);
+}
+
 /*
  * An interface's report descriptor: its pointer, its pens and touch
- * screens, the report IDs it declares, how long its reports are. FALSE
- * when it has none of them. When mode is not NULL, the feature report
- * that puts its pen or touch screen into the mode it is read in is left
- * there (*p_mlen bytes, at most 64, its ID *p_mrid; 0 bytes none).
+ * screens, its consumer keys, the report IDs it declares, how long its
+ * reports are. FALSE when it has none of them. When mode is not NULL,
+ * the feature report that puts its pen or touch screen into the mode it
+ * is read in is left there (*p_mlen bytes, at most 64, its ID *p_mrid;
+ * 0 bytes none). When kbs is not NULL its keyboards of the report
+ * protocol are left there too (HID_KB_APPS at most, *p_nkb of them),
+ * and they count: an interface of keyboards alone is found, a keyboard
+ * of its keys (keys_only).
  */
-LOCAL BOOL hid_read_desc( HIDDEV *h, CONST UB *rd, INT n, BOOL wacom, UB *mode, INT *p_mlen, INT *p_mrid )
+#define HID_KB_PARSE	4		/* keyboard applications looked at in one descriptor */
+
+LOCAL BOOL hid_read_desc( HIDDEV *h, CONST UB *rd, INT n, BOOL wacom, UB *mode, INT *p_mlen, INT *p_mrid,
+			  HIDKB *kbs, INT *p_nkb )
 {
 	HIDPARSE	ps;
 	HIDDG		*dg;
 	HIDCC		*cc;
-	BOOL		found = FALSE;
-	INT		k;
+	BOOL		found = FALSE, ptr, show = FALSE;
+	INT		k, nkb = 0;
 
 	if ( p_mlen != NULL ) *p_mlen = 0;
+	if ( p_nkb != NULL ) *p_nkb = 0;
 	knl_memset(&ps, 0, sizeof(ps));
 	ps.in = (HIDFIELD *)Kmalloc(sizeof(HIDFIELD) * HID_FIELDS);
 	ps.ft = (HIDFIELD *)Kmalloc(sizeof(HIDFIELD) * HID_FFIELDS);
 	ps.bits = (INT *)Kmalloc(sizeof(INT) * 256);
 	ps.fbits = (INT *)Kmalloc(sizeof(INT) * 256);
+	ps.obits = (INT *)Kmalloc(sizeof(INT) * 256);
+	if ( kbs != NULL ) {
+		ps.kb = (HIDKB *)Kcalloc(HID_KB_PARSE, sizeof(HIDKB));
+		ps.maxkb = HID_KB_PARSE;
+	}
 	dg = (HIDDG *)Kmalloc(sizeof(HIDDG));
 	cc = (HIDCC *)Kcalloc(1, sizeof(HIDCC));
 	ps.cc = cc;
@@ -2171,7 +2612,8 @@ LOCAL BOOL hid_read_desc( HIDDEV *h, CONST UB *rd, INT n, BOOL wacom, UB *mode, 
 	ps.maxft = HID_FFIELDS;
 	ps.rids = h->rids;
 	ps.wacom = wacom;
-	if ( ps.in != NULL && ps.ft != NULL && ps.bits != NULL && ps.fbits != NULL && dg != NULL && cc != NULL ) {
+	if ( ps.in != NULL && ps.ft != NULL && ps.bits != NULL && ps.fbits != NULL && ps.obits != NULL
+	  && ( kbs == NULL || ps.kb != NULL ) && dg != NULL && cc != NULL ) {
 		INT	nf = hid_parse(rd, n, &ps);
 
 		found = pick_pointer(h, ps.in, nf);
@@ -2195,12 +2637,32 @@ LOCAL BOOL hid_read_desc( HIDDEV *h, CONST UB *rd, INT n, BOOL wacom, UB *mode, 
 				*p_mlen = dg_mode_report(&ps, mode, 64, p_mrid);
 			}
 		}
+		ptr = found;
+		/* the keyboards kept are those with keys; their lamps' report as long as it is */
+		for ( k = 0; k < ps.nkb && nkb < HID_KB_APPS; k++ ) {
+			HIDKB	*kb = &ps.kb[k];
+
+			if ( kb->nrun + kb->narr == 0 || kb->rid < 0 ) {
+				continue;
+			}
+			kb->ilen = report_bytes(ps.bits, kb->rid);
+			kb->olen = 0;
+			if ( kb->orid >= 0 && ps.obits[kb->orid] > 0 ) {
+				kb->olen = ( ps.obits[kb->orid] + 7 ) / 8 + ( kb->orid != 0 ? 1 : 0 );
+			}
+			if ( kb->ilen > h->plen ) h->plen = kb->ilen;
+			kbs[nkb++] = *kb;
+		}
+		if ( nkb > 0 ) {
+			h->keys_only = !ptr;
+			found = TRUE;
+		}
 		if ( cc->nvar + cc->narr > 0 ) {
 			INT	m = 0;
 
 			USB_LOG("usb: hid: interface %d consumer keys: %d a bit each, %d arrays%s\n",
 				h->ifno, cc->nvar, cc->narr, found ? "" : ", and nothing else");
-			h->cc_only = !found;
+			h->keys_only = !ptr;
 			for ( k = 0; k < cc->nvar; k++ ) {
 				if ( report_bytes(ps.bits, cc->v[k].rid) > m ) m = report_bytes(ps.bits, cc->v[k].rid);
 			}
@@ -2208,13 +2670,17 @@ LOCAL BOOL hid_read_desc( HIDDEV *h, CONST UB *rd, INT n, BOOL wacom, UB *mode, 
 				if ( report_bytes(ps.bits, cc->a[k].rid) > m ) m = report_bytes(ps.bits, cc->a[k].rid);
 			}
 			if ( m > h->plen ) h->plen = m;
-			if ( !found ) show_desc(h->ifno, rd, n);
+			show = !found;
 			h->cc = cc;
 			cc = NULL;
 			found = TRUE;
 		}
-		if ( ps.digi || !found ) {
+		/* a descriptor of several applications is shown, and what each is taken as */
+		if ( ps.digi || !found || show || ps.napps > 1 ) {
 			show_desc(h->ifno, rd, n);
+		}
+		if ( ps.napps > 1 || nkb > 0 ) {
+			show_roles(h, &ps, kbs, nkb);
 		}
 		if ( h->dg != NULL ) {
 			show_dg(h, &ps);
@@ -2224,15 +2690,25 @@ LOCAL BOOL hid_read_desc( HIDDEV *h, CONST UB *rd, INT n, BOOL wacom, UB *mode, 
 	if ( ps.ft != NULL ) Kfree(ps.ft);
 	if ( ps.bits != NULL ) Kfree(ps.bits);
 	if ( ps.fbits != NULL ) Kfree(ps.fbits);
+	if ( ps.obits != NULL ) Kfree(ps.obits);
+	if ( ps.kb != NULL ) Kfree(ps.kb);
 	if ( dg != NULL ) Kfree(dg);
 	if ( cc != NULL ) Kfree(cc);
+	if ( p_nkb != NULL ) *p_nkb = nkb;
 
 	return found;
 }
 
-/* The room of an interface's pens, touch screens and consumer keys given back */
+/* The room of an interface's pens, touch screens, consumer keys and keyboard given back */
 LOCAL void dg_forget( HIDDEV *h )
 {
+	if ( h->kb != NULL ) {
+		HIDKB	*kb = h->kb;
+
+		h->kb = NULL;
+		Kfree(kb);
+	}
+	h->peer = h->feed = NULL;
 	if ( h->dg != NULL ) {
 		HIDDG	*dg = h->dg;
 
@@ -2288,7 +2764,7 @@ EXPORT BOOL knl_hid_probe( CONST UB *dsc, INT n, BOOL bootable, INT *info,
 	INT		i;
 
 	knl_memset(&h, 0, sizeof(h));
-	found = hid_read_desc(&h, dsc, n, FALSE, NULL, NULL, NULL);
+	found = hid_read_desc(&h, dsc, n, FALSE, NULL, NULL, NULL, NULL, NULL);
 	h.bootable = bootable;
 	for ( i = 0; found && i < nrep; i++ ) {
 		if ( ptr_decode(&h, reps, lens[i], &in) ) {
@@ -2341,7 +2817,7 @@ EXPORT BOOL knl_hid_probe_dg( CONST UB *dsc, INT n, BOOL wacom, INT *info, UB *m
 	INT	k;
 
 	knl_memset(&h, 0, sizeof(h));
-	found = hid_read_desc(&h, dsc, n, wacom, mode, p_mlen, p_mrid);
+	found = hid_read_desc(&h, dsc, n, wacom, mode, p_mlen, p_mrid, NULL, NULL);
 	info[0] = ( h.dg != NULL ) ? h.dg->n : 0;
 	for ( k = 0; k < info[0]; k++ ) {
 		CONST DGAPP	*a = &h.dg->a[k];
@@ -2401,7 +2877,7 @@ LOCAL void hid_xfer( void *ctx, DMABUF *b, INT off, INT len, INT err )
 	if ( d->is_kbd ) {
 		kbd_report(d, r);
 	} else {
-		ptr_report(d, r, len);
+		hid_route(d, r, len);
 	}
 	/* counted once its events are out: whoever sees the count finds them there */
 	hid_count.reports++;
@@ -2433,13 +2909,13 @@ LOCAL INT ext_attach( BOOL kbd, CONST UB *rd, INT rdlen, CONST UB *name, UB *mod
 	for ( i = 0; i < 15 && name != NULL && name[i] != 0; i++ ) h->ext_name[i] = name[i];
 	h->ext_name[i] = 0;
 	h->is_kbd = kbd;
-	if ( !kbd && ( rd == NULL || !hid_read_desc(h, rd, rdlen, FALSE, mode, p_mlen, p_mrid) ) ) {
+	if ( !kbd && ( rd == NULL || !hid_read_desc(h, rd, rdlen, FALSE, mode, p_mlen, p_mrid, NULL, NULL) ) ) {
 		boot_mouse(h);
 		h->boot = TRUE;
 	}
 	h->id = ++hid_next_id;
 	h->used = TRUE;
-	if ( kbd || h->cc_only ) {
+	if ( kbd || h->keys_only ) {
 		hid_count.keyboards++;
 	} else {
 		hid_count.pointers++;
@@ -2489,7 +2965,7 @@ EXPORT void knl_hid_ext_detach( INT hd )
 		knl_memset(none, 0, sizeof(none));
 		kbd_report(d, none);
 		hid_count.keyboards--;
-	} else if ( d->cc_only ) {
+	} else if ( d->keys_only ) {
 		hid_count.keyboards--;
 	} else {
 		T_HIDEV	ev;
@@ -2817,13 +3293,72 @@ LOCAL void set_mode( USBDEV *dev, INT ifno, UB *rep, INT len, INT rid )
 		ifno, rid, len, line, (INT)er);
 }
 
+/*
+ * A keyboard of the report protocol's lamps put out, as the boot
+ * protocol's are (hid_interface): its output report, all lamps off.
+ */
+LOCAL void kb_lamps( USBDEV *dev, INT ifno, CONST HIDKB *kb )
+{
+	UB	rep[HID_REPORT_MAX];
+	ER	er;
+
+	if ( kb->olen <= 0 || kb->olen > HID_REPORT_MAX ) {
+		return;
+	}
+	knl_memset(rep, 0, sizeof(rep));
+	if ( kb->orid != 0 ) rep[0] = (UB)kb->orid;
+	er = knl_usb_control(dev, HID_RT_OUT, HID_SET_REPORT, (UH)( ( HID_REPORT_OUTPUT << 8 ) | kb->orid ),
+			     (UH)ifno, rep, (UH)kb->olen, NULL);
+	USB_LOG("usb: hid: interface %d lamps: output report %d (%d bytes) set (%d)\n",
+		ifno, kb->orid, kb->olen, (INT)er);
+}
+
+/*
+ * The entries of an interface's keyboards beside the one that reads it
+ * (h): each takes the reports of its keyboard's ID (hid_route). Made
+ * before the interface is read, so that none of its reports comes
+ * before they are there.
+ */
+LOCAL void kb_peers( USBDEV *dev, HIDDEV *h, CONST HIDKB *kbs, INT nkb )
+{
+	HIDDEV	**tail = &h->peer;
+	INT	k;
+
+	for ( k = 0; k < nkb; k++ ) {
+		HIDDEV	*s = hid_slot();
+		HIDKB	*kb = (HIDKB *)Kmalloc(sizeof(HIDKB));
+		INT	slot;
+
+		if ( s == NULL || kb == NULL ) {
+			if ( kb != NULL ) Kfree(kb);
+			USB_LOG("usb: hid: interface %d: no room for the keyboard of report %d\n",
+				h->ifno, kbs[k].rid);
+			continue;
+		}
+		slot = s->slot;
+		dg_forget(s);
+		knl_memset(s, 0, sizeof(*s));
+		s->slot = slot;
+		*kb = kbs[k];
+		s->kb = kb;
+		s->dev = dev;
+		s->ifno = h->ifno;
+		s->feed = h;
+		s->id = ++hid_next_id;
+		s->used = TRUE;
+		*tail = s;
+		tail = &s->peer;
+	}
+}
+
 /* One HID interface; id is its interface descriptor */
 LOCAL ER hid_interface( USBDEV *dev, UB *id, UB *end )
 {
 	UB	*p, *epd = NULL;
-	INT	rd_len = 0, n = 0, xfer;
+	INT	rd_len = 0, n = 0, xfer, nkb = 0, k;
 	INT	ifno = id[2], sub = id[6], proto = id[7];
-	HIDDEV	*h;
+	HIDDEV	*h, *s;
+	HIDKB	*kbs = NULL;
 	USBEP	ep;
 	ER	er;
 
@@ -2894,19 +3429,22 @@ LOCAL ER hid_interface( USBDEV *dev, UB *id, UB *end )
 				UB	mode[64];
 				INT	mlen = 0, mrid = 0;
 
+				kbs = (HIDKB *)Kcalloc(HID_KB_APPS, sizeof(HIDKB));
 				found = hid_read_desc(h, rd, n, GET16(dev->ddesc + 8) == USB_VID_WACOM,
-						      mode, &mlen, &mrid);
+						      mode, &mlen, &mrid, kbs, &nkb);
 				if ( mlen > 0 ) {
 					set_mode(dev, ifno, mode, mlen, mrid);
 				}
 			}
 			if ( rd != NULL ) Kfree(rd);
 		}
-		if ( !found || ( h->cc_only && sub == 1 && proto == HID_PROTO_MOUSE ) ) {
+		if ( !found || ( h->keys_only && sub == 1 && proto == HID_PROTO_MOUSE ) ) {
 			if ( !( sub == 1 && proto == HID_PROTO_MOUSE ) ) {
+				if ( kbs != NULL ) Kfree(kbs);
 				return E_NOSPT;	/* neither a keyboard nor a pointer */
 			}
-			h->cc_only = FALSE;
+			nkb = 0;
+			h->keys_only = FALSE;
 			boot_mouse(h);
 			h->boot = TRUE;
 			knl_usb_control(dev, HID_RT_OUT, HID_SET_PROTOCOL, 0, (UH)ifno,
@@ -2928,11 +3466,31 @@ LOCAL ER hid_interface( USBDEV *dev, UB *id, UB *end )
 		knl_usb_control(dev, HID_RT_OUT, HID_SET_REPORT, HID_REPORT_OUTPUT << 8,
 				(UH)ifno, &leds, 1, NULL);
 	}
+	for ( k = 0; k < nkb; k++ ) {
+		kb_lamps(dev, ifno, &kbs[k]);
+	}
 
 	h->dev = dev;
 	h->ifno = ifno;
 	h->id = ++hid_next_id;
 	h->used = TRUE;
+	/*
+	 * Its keyboards of the report protocol: an interface of nothing
+	 * else is the first of them itself; each other, or each beside a
+	 * pointer, is an entry of its own.
+	 */
+	k = 0;
+	if ( nkb > 0 && h->keys_only ) {
+		h->kb = (HIDKB *)Kmalloc(sizeof(HIDKB));
+		if ( h->kb != NULL ) {
+			*h->kb = kbs[0];
+			k = 1;
+		}
+	}
+	if ( nkb > k ) {
+		kb_peers(dev, h, kbs + k, nkb - k);
+	}
+	if ( kbs != NULL ) Kfree(kbs);
 	knl_usb_ep_from_desc(&ep, dev, epd, NULL);
 	/*
 	 * A transfer a packet long. When the pointer's report is longer
@@ -2950,19 +3508,32 @@ LOCAL ER hid_interface( USBDEV *dev, UB *id, UB *end )
 	}
 	er = dev->hc->ops->stream_open(dev->hc, dev, &ep, xfer, hid_xfer, h, &h->pipe);
 	if ( er < E_OK ) {
+		for ( s = h->peer; s != NULL; ) {
+			HIDDEV	*next = s->peer;
+
+			s->used = FALSE;
+			dg_forget(s);
+			s = next;
+		}
+		h->peer = NULL;
 		h->used = FALSE;
 		return er;
 	}
-	if ( h->is_kbd || h->cc_only ) {
+	if ( h->is_kbd || h->keys_only ) {
 		hid_count.keyboards++;
 	} else {
 		hid_count.pointers++;
 	}
 	USB_LOG("usb: hid: %s on interface %d, endpoint %02x, %s\n",
-		( h->is_kbd || h->cc_only ) ? "keyboard" : "pointer", ifno, (INT)ep.addr,
-		h->is_kbd ? "boot protocol" : h->cc_only ? "consumer keys"
+		( h->is_kbd || h->keys_only ) ? "keyboard" : "pointer", ifno, (INT)ep.addr,
+		h->is_kbd ? "boot protocol" : h->kb != NULL ? "report protocol" : h->keys_only ? "consumer keys"
 		: ( h->x.rel ? "relative" : "absolute" ));
-	if ( !h->is_kbd && !h->cc_only ) {
+	for ( s = h->peer; s != NULL; s = s->peer ) {
+		hid_count.keyboards++;
+		USB_LOG("usb: hid: keyboard on interface %d, endpoint %02x, report %d, beside %d, as %d\n",
+			ifno, (INT)ep.addr, s->kb->rid, (INT)h->id, (INT)s->id);
+	}
+	if ( !h->is_kbd && !h->keys_only ) {
 		/* where its report says what, as read from its descriptor */
 		USB_LOG("usb: hid: %d %s, descriptor %d bytes, report id %d, report %d bytes, "
 			"packet %d, read %d, interval %d; "
@@ -3040,7 +3611,11 @@ EXPORT ER knl_hid_attach( USBDEV *dev )
 	return er;
 }
 
-/* The device went: its keys and buttons are let go, as they would be */
+/*
+ * The device went: its keys and buttons are let go, as they would be.
+ * Every stream of it is closed first, so that no report is handed to an
+ * entry of an interface (peer) while that entry is let go.
+ */
 EXPORT void knl_hid_detach( USBDEV *dev )
 {
 	INT	i;
@@ -3048,21 +3623,22 @@ EXPORT void knl_hid_detach( USBDEV *dev )
 	for ( i = 0; i < HID_N; i++ ) {
 		HIDDEV	*h = HID_AT(i);
 
-		if ( !h->used || h->dev != dev ) {
-			continue;
-		}
-		if ( h->pipe != NULL ) {
+		if ( h->used && h->dev == dev && h->pipe != NULL ) {
 			dev->hc->ops->stream_close(dev->hc, h->pipe);
 			h->pipe = NULL;
 		}
-		cc_let_go(h);
-		if ( h->cc_only ) {
-			hid_count.keyboards--;
-		} else if ( h->is_kbd ) {
-			UB	none[8];
+	}
+	for ( i = 0; i < HID_N; i++ ) {
+		HIDDEV	*h = HID_AT(i);
 
-			knl_memset(none, 0, sizeof(none));
-			kbd_report(h, none);
+		if ( !h->used || h->dev != dev ) {
+			continue;
+		}
+		cc_let_go(h);
+		if ( h->kb != NULL || h->is_kbd ) {
+			kb_let_go(h);
+		}
+		if ( h->keys_only || h->is_kbd || h->feed != NULL ) {
 			hid_count.keyboards--;
 		} else {
 			T_HIDEV	ev;
@@ -3568,7 +4144,7 @@ LOCAL void tc_hold_shown( BOOL on )
 /* How far a finger may move and still be holding still: a 128th of the screen's width */
 LOCAL INT tc_slop( void )
 {
-	INT	s = scr_w / 128;
+	INT	s = abs_w / 128;
 
 	return ( s > TC_SLOP_MIN ) ? s : TC_SLOP_MIN;
 }
@@ -4039,6 +4615,22 @@ EXPORT UW knl_hid_read_late( void )
 	return ms;
 }
 
+/*
+ * The reader woken without an event: its ts_hid_read answers E_TMOUT at
+ * once, as if its time were up. The desktop's loop waits for input here,
+ * and a request of a program's that has come is as much to be answered.
+ */
+LOCAL volatile BOOL	hid_woken = FALSE;
+
+EXPORT void ts_hid_wake( void )
+{
+	if ( !hid_ready ) {
+		return;
+	}
+	__atomic_store_n(&hid_woken, TRUE, __ATOMIC_RELEASE);
+	tk_set_flg(hid_flgid, HID_FLG_WAKE);	/* after the mark: the woken wait finds it */
+}
+
 EXPORT ER ts_hid_read( T_HIDEV *ev, TMO tmout )
 {
 	T_HIDEV	raw;
@@ -4062,7 +4654,6 @@ EXPORT ER ts_hid_read( T_HIDEV *ev, TMO tmout )
 			UD	late = now_ns() - raw.when;
 
 			if ( !inj && late / 1000000ULL > hid_late_ms ) hid_late_ms = (UW)( late / 1000000ULL );
-			tk_wai_sem(hid_semid, 1, TMO_POL);
 			if ( inj ) {
 				sh_emit(&raw);
 			} else if ( tch != TCH_NO ) {
@@ -4084,6 +4675,9 @@ EXPORT ER ts_hid_read( T_HIDEV *ev, TMO tmout )
 		if ( tmout == TMO_POL ) {
 			return E_TMOUT;
 		}
+		if ( __atomic_exchange_n(&hid_woken, FALSE, __ATOMIC_ACQ_REL) ) {
+			return E_TMOUT;		/* woken: what woke it is the caller's to look at */
+		}
 		/* wait for the next report, or until something is due */
 		due = shape_due();
 		if ( tmout == TMO_FEVR ) {
@@ -4097,8 +4691,16 @@ EXPORT ER ts_hid_read( T_HIDEV *ev, TMO tmout )
 			if ( due != 0 && due < until ) until = due;
 			wait = (TMO)( ( until - now ) / 1000000ULL ) + 1;
 		}
-		if ( tk_wai_sem(hid_semid, 1, wait) >= E_OK ) {
-			tk_sig_sem(hid_semid, 1);	/* taken again with the rest above */
+		/*
+		 * Either bit wakes it, and is cleared by this wait: the ring and
+		 * hid_woken are looked at again above. A bit set for an event
+		 * already taken costs one more look, never a wait that does not
+		 * wait.
+		 */
+		{
+			UINT	ptn = 0;
+
+			(void)tk_wai_flg(hid_flgid, HID_FLG_REPORT | HID_FLG_WAKE, TWF_ORW | TWF_BITCLR, &ptn, wait);
 		}
 	}
 }
@@ -4237,14 +4839,15 @@ EXPORT INT knl_hid_list( T_HIDINFO *buf, INT max )
 	for ( i = 0; i < HID_N; i++ ) {
 		HIDDEV	*h = HID_AT(i);
 
-		if ( !h->used || ( h->pipe == NULL && h->dev != NULL ) ) {
-			continue;			/* one not on USB has no pipe of its own */
+		if ( !h->used || ( h->dev != NULL && h->pipe == NULL
+				   && ( h->feed == NULL || h->feed->pipe == NULL ) ) ) {
+			continue;			/* not read yet; one not on USB has no pipe of its own */
 		}
 		if ( n < max && buf != NULL ) {
 			buf[n].id = h->id;
 			buf[n].usbdev = ( h->dev != NULL ) ? h->dev->handle : 0;
 			buf[n].ifno = h->ifno;
-			buf[n].keyboard = ( h->is_kbd || h->cc_only );
+			buf[n].keyboard = ( h->is_kbd || h->keys_only || h->feed != NULL );
 			buf[n].absolute = ( !h->is_kbd && h->x.size > 0 && !h->x.rel );
 			buf[n].wheel = ( !h->is_kbd && h->wheel.size > 0 );
 			buf[n].buttons = (UINT)h->nbtn;
@@ -4265,16 +4868,63 @@ EXPORT INT knl_hid_list( T_HIDINFO *buf, INT max )
  */
 IMPORT ER ts_disp_ref( T_DISPSPEC *spec ) __attribute__((weak));
 
-/* The screen came to another size or scale: the pointer is kept within its view */
+IMPORT ER ts_disp_screen( INT i, INT *p_x, INT *p_y, INT *p_w, INT *p_h ) __attribute__((weak));
+
+/*
+ * The view's size and the screens in it, from the display driver: the
+ * screens' rectangles only where there are outputs of their own sizes
+ * (the back buffer larger than the main screen)
+ */
+LOCAL void screens_take( CONST T_DISPSPEC *spec )
+{
+	INT	i, x, y, w, h;
+
+	scr_w = (INT)( ( spec->view_w > 0 ) ? spec->view_w : spec->width );
+	scr_h = (INT)( ( spec->view_h > 0 ) ? spec->view_h : spec->height );
+	scr_n = 0;
+	abs_x0 = abs_y0 = 0;
+	abs_w = scr_w;
+	abs_h = scr_h;
+	if ( ts_disp_screen == NULL || spec->main_w == 0
+	  || ( spec->main_w == spec->width && spec->main_h == spec->height ) ) {
+		return;
+	}
+	for ( i = 0; i < DISP_SCREENS_MAX && ts_disp_screen(i, &x, &y, &w, &h) >= E_OK; i++ ) {
+		if ( w <= 0 || h <= 0 ) break;
+		scr_rx[i] = x;
+		scr_ry[i] = y;
+		scr_rw[i] = w;
+		scr_rh[i] = h;
+		scr_n = i + 1;
+	}
+	if ( scr_n > 0 ) {
+		abs_x0 = scr_rx[0];
+		abs_y0 = scr_ry[0];
+		abs_w = scr_rw[0];
+		abs_h = scr_rh[0];
+	}
+}
+
+/*
+ * The screen came to another size or scale, or screens came or went: the
+ * pointer is kept on them. With screens of their own it goes with the
+ * screen it was on, which moves in the view when a screen is put left of
+ * the main one or above it, or to the main screen when its own was taken
+ * away or moved (knl_disp_follow).
+ */
+IMPORT BOOL knl_disp_follow( INT *p_x, INT *p_y, T_DISPRECT *on ) __attribute__((weak));
+
 EXPORT void knl_hid_screen_changed( void )
 {
 	T_DISPSPEC	spec;
+	BOOL		had = (BOOL)( scr_n > 0 );
 
 	if ( ts_disp_ref != NULL && ts_disp_ref(&spec) >= E_OK ) {
-		scr_w = (INT)( ( spec.view_w > 0 ) ? spec.view_w : spec.width );
-		scr_h = (INT)( ( spec.view_h > 0 ) ? spec.view_h : spec.height );
-		if ( ptr_x >= scr_w ) ptr_x = scr_w - 1;
-		if ( ptr_y >= scr_h ) ptr_y = scr_h - 1;
+		screens_take(&spec);
+		if ( ( had || scr_n > 0 ) && knl_disp_follow != NULL ) {
+			(void)knl_disp_follow(&ptr_x, &ptr_y, NULL);
+		}
+		ptr_keep_on();
 	}
 }
 
@@ -4286,31 +4936,30 @@ EXPORT void knl_hid_screen_changed( void )
 EXPORT INT knl_hid_init( void )
 {
 	T_CMTX		cmtx;
-	T_CSEM		csem;
+	T_CFLG		cflg;
 	T_DISPSPEC	spec;
 
 	if ( hid_ready ) {
 		return 0;
 	}
 	if ( ts_disp_ref != NULL && ts_disp_ref(&spec) >= E_OK ) {
-		scr_w = (INT)( ( spec.view_w > 0 ) ? spec.view_w : spec.width );
-		scr_h = (INT)( ( spec.view_h > 0 ) ? spec.view_h : spec.height );
+		screens_take(&spec);
 	} else {
-		scr_w = 640;
-		scr_h = 480;
+		scr_w = abs_w = 640;
+		scr_h = abs_h = 480;
 	}
-	ptr_x = scr_w / 2;
-	ptr_y = scr_h / 2;
+	/* the middle of the main screen */
+	ptr_x = abs_x0 + abs_w / 2;
+	ptr_y = abs_y0 + abs_h / 2;
 
 	cmtx.exinf = NULL;
 	cmtx.mtxatr = TA_TFIFO;
 	hid_mtxid = tk_cre_mtx(&cmtx);
-	csem.exinf = NULL;
-	csem.sematr = TA_TFIFO | TA_FIRST;
-	csem.isemcnt = 0;
-	csem.maxsem = HID_RING;
-	hid_semid = tk_cre_sem(&csem);
-	if ( hid_mtxid <= 0 || hid_semid <= 0 ) {
+	cflg.exinf = NULL;
+	cflg.flgatr = TA_TFIFO | TA_WMUL;
+	cflg.iflgptn = 0;
+	hid_flgid = tk_cre_flg(&cflg);
+	if ( hid_mtxid <= 0 || hid_flgid <= 0 ) {
 		return E_LIMIT;
 	}
 	hid_ready = TRUE;

@@ -77,6 +77,9 @@ Inline BOOL knl_ufault_is_data( UD esr )
 #define UFLT_PC_MASK	3
 #define UFLT_SP_MASK	15
 
+/* The bytes below the stack pointer a function may use without moving it: none (AAPCS64) */
+#define UFLT_RED_ZONE	0
+
 /* The task's stack pointer in the frame */
 #define knl_uframe_sp(f)	( (f)[FR_SP] )
 

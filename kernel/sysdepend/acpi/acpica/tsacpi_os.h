@@ -99,6 +99,8 @@ extern void	knl_acpica_rtc_event( void (*fn)( void ) );
 extern int	knl_acpica_has_hid( const char *hid );
 /* The index-th present device with the hardware or compatible ID, NULL when there is none */
 extern void	*knl_acpica_device( const char *hid, int index );
+/* The index-th thermal zone object of the namespace (ThermalZone), NULL when there is none */
+extern void	*knl_acpica_thermal_zone( int index );
 /* Its full path ("\_SB_.BAT0") */
 extern int	knl_acpica_path( void *dev, char *buf, int max );
 /* An integer a method of it gives (_PSR, _LID, _STA): 0 when had */
@@ -131,6 +133,21 @@ extern int	knl_acpica_dsm_int( void *dev, const unsigned char *uuid, unsigned in
 				    unsigned long long *v );
 /* A buffer a method gives (a camera sensor's SSDB, its power controller's CLDB): its length, -1 when it failed */
 extern int	knl_acpica_buf( void *dev, const char *method, unsigned char *buf, int max );
+/* The 16-byte buffers of a package a method gives (the DPTF manager's IDSP): how many, -1 when it failed */
+extern int	knl_acpica_uuids( void *dev, const char *method, unsigned char (*uuid)[16], int max );
+/*
+ * A row of the DPTF manager's passive table PSVT (revision 2): the
+ * participant controlled and the sensor as devices, then the integers in
+ * the table's order; the limit an integer, or a string ("MAX", "MIN")
+ * when limit_str is not empty
+ */
+typedef struct {
+	void			*source, *target;
+	unsigned long long	priority, sample_period, temp, domain, knob, limit, step, limit_coeff, unlimit_coeff;
+	char			limit_str[8];
+} TSACPI_PSVT;
+/* The rows of a PSVT of revision 2 (rows that are not 12 elements of the right kinds left out): how many, -1 none */
+extern int	knl_acpica_psvt( void *dev, TSACPI_PSVT *row, int max );
 /*
  * The index-th GpioIo of a device's _CRS (GpioInt left out): its first
  * pin, its controller's path, flags bit 0 active low, bit 1 output

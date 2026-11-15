@@ -46,7 +46,16 @@
 
 #define SK_TEXT_MAX	1024		/* bytes of record 0 */
 #define SK_SA_MAX	128		/* bytes of an address from the stack */
-#define SK_GEN_MASK	0x7FFFFF	/* the part of the count a handle carries */
+/*
+ * A handle is the number + 1 in its low SK_NUM_BITS bits and the low bits
+ * of the socket's count above them, short of the sign bit
+ */
+#define SK_NUM_BITS	12
+#define SK_NUM_MASK	( ( 1U << SK_NUM_BITS ) - 1 )
+#define SK_GEN_MASK	( 0x7FFFFFFFU >> SK_NUM_BITS )	/* the part of the count a handle carries */
+#if SO_MAX > ( 1 << SK_NUM_BITS ) - 1
+#error "obsock.c: a handle has no room for the socket numbers (SK_NUM_BITS)"
+#endif
 
 typedef struct {
 	BOOL	used;			/* the number is a socket's */
@@ -98,7 +107,7 @@ LOCAL INT entry_of( CONST TS_UUID *uuid, OBSK *e )
 LOCAL INT entry_of_handle( INT h, OBSK *e )
 {
 	UINT	imask;
-	INT	s = ( h & 0xFF ) - 1;
+	INT	s = (INT)( (UINT)h & SK_NUM_MASK ) - 1;
 	BOOL	ok;
 
 	if ( h <= 0 || s < 0 || s >= SO_MAX ) {
@@ -106,7 +115,7 @@ LOCAL INT entry_of_handle( INT h, OBSK *e )
 	}
 	ISpinLock(&obsk_lock, &imask);
 	ok = (BOOL)( obsk[s].used && !knl_ob_uuid_zero(&obsk[s].uuid)
-		     && ( obsk[s].gen & SK_GEN_MASK ) == (UINT)( h >> 8 ) );
+		     && ( obsk[s].gen & SK_GEN_MASK ) == ( (UINT)h >> SK_NUM_BITS ) );
 	if ( ok ) {
 		*e = obsk[s];
 	}
@@ -477,7 +486,7 @@ LOCAL INT obk_open( CONST TS_UUID *uuid, UINT ops )
 	if ( s < 0 ) {
 		return E_NOEXS;
 	}
-	return (INT)( ( ( e.gen & SK_GEN_MASK ) << 8 ) | (UINT)( s + 1 ) );
+	return (INT)( ( ( e.gen & SK_GEN_MASK ) << SK_NUM_BITS ) | (UINT)( s + 1 ) );
 }
 
 LOCAL ER obk_close( INT h )

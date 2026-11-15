@@ -1,0 +1,11 @@
+# システム登録 (design 11.32) on a machine that is not a PC, for tools/ui_run.py:
+# the program, a process now, asks the desktop (DT_RQ_SYSINST), is told the
+# machine has nothing to put the system on, says so and ends without a window.
+logmark
+open 01a0d8c4-54c0-7a11-8c22-4d5e6f7054c0
+expectsincein 30 sysinst: not a PC
+wait 500
+# no window of it was left
+absent sysinst: opened
+# nothing it did was refused for want of a right
+absent !OACV!

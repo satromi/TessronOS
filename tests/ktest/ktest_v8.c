@@ -22,6 +22,7 @@
 #include "ktest.h"
 #include "tstdlib.h"
 #include <ts/proc.h>
+#include <tk/dbgspt.h>
 #include <ts/fs.h>
 #include <ts/ob.h>
 #include <ts/so.h>
@@ -41,8 +42,10 @@
 #include <ts/blk.h>
 #include <ts/tsfsblk.h>
 #include <ts/lockup.h>
+#include <ts/sbx.h>
 #if defined(_QEMU_VIRT_) || defined(X64)
 #include "../../device/usb/usbdev.h"
+#include "../../device/gpu/gpudev.h"
 #include "../../device/usb/vhc.h"
 #endif
 #include "../../application/desktop/desktop.h"
@@ -688,6 +691,169 @@ LOCAL CONST char page_gpu[] =
 	"var v = document.getElementById('v');"
 	"setTimeout(function () { var q = v.getVideoPlaybackQuality().totalVideoFrames;"
 	" document.title = r + ' video ' + (q > 0 ? 'shown' : 'none'); }, 2500);"
+	"</script></body></html>";
+
+/*
+ * The page of test_blink_gpulost: a box, and a canvas (2D, large enough to
+ * be on the GPU) drawn again every 200 ms, orange with a blue circle; the
+ * title says what getImageData reads of it, every 500 ms
+ */
+LOCAL CONST char page_gpl[] =
+	"<!DOCTYPE html><html><head><title>gpl</title><style>body{margin:0;background:#fff}"
+	"#b{position:absolute;left:20px;top:100px;width:100px;height:50px;background:rgb(0,160,80)}</style></head><body>"
+	"<div id=\"b\"></div>"
+	"<canvas id=\"c\" width=256 height=160 style=\"position:absolute;left:20px;top:180px\"></canvas>"
+	"<script>var c = document.getElementById('c').getContext('2d');"
+	"function draw() { c.fillStyle = 'rgb(250,160,0)'; c.fillRect(0, 0, 256, 160);"
+	" c.fillStyle = 'rgb(0,0,200)'; c.beginPath(); c.arc(64, 80, 40, 0, Math.PI * 2); c.fill();"
+	" setTimeout(draw, 200); }"
+	"draw();"
+	"function px(x, y) { var p = c.getImageData(x, y, 1, 1).data; return p[0] + '.' + p[1] + '.' + p[2]; }"
+	"setInterval(function () { document.title = 'gpl ' + px(10, 10) + '/' + px(64, 80); }, 500);"
+	"</script></body></html>";
+
+/*
+ * The page of test_blink_glproc: a WebGL canvas that keeps its context
+ * when it is lost (preventDefault) and is cleared every 200 ms, red
+ * before a restore and green after, one pixel read back; a draw ANGLE
+ * refuses (a vertex buffer too small for it, which Blink leaves to ANGLE:
+ * getError's code in "err");
+ * a WebGL 2 context cleared blue. The title says the losses, the restores
+ * and the pixels.
+ */
+LOCAL CONST char page_glp[] =
+	"<!DOCTYPE html><html><head><title>glp</title></head><body><canvas id=\"c\" width=64 height=64></canvas><script>"
+	"var r = { lost: 0, restored: 0 }, c = document.getElementById('c'), g = c.getContext('webgl');"
+	"function done() { document.title = 'glp ' + Object.keys(r).sort().map(function (k) { return k + '=' + r[k]; }).join(' '); }"
+	"c.addEventListener('webglcontextlost', function (e) { e.preventDefault(); r.lost++; done(); });"
+	"c.addEventListener('webglcontextrestored', function () { r.restored++; done(); });"
+	"r.gl1 = g ? 'yes' : 'no';"
+	"if (g) { var s = g.createShader(g.VERTEX_SHADER), f = g.createShader(g.FRAGMENT_SHADER), p = g.createProgram();"
+	" g.shaderSource(s, 'attribute vec4 a; void main() { gl_Position = a; }');"
+	" g.shaderSource(f, 'precision mediump float; void main() { gl_FragColor = vec4(1.0); }');"
+	" g.compileShader(s); g.compileShader(f); g.attachShader(p, s); g.attachShader(p, f); g.bindAttribLocation(p, 0, 'a');"
+	" g.linkProgram(p); g.useProgram(p); g.bindBuffer(g.ARRAY_BUFFER, g.createBuffer());"
+	" g.bufferData(g.ARRAY_BUFFER, 4, g.STATIC_DRAW); g.vertexAttribPointer(0, 4, g.FLOAT, false, 0, 0);"
+	" g.enableVertexAttribArray(0); g.drawArrays(g.TRIANGLES, 0, 3); r.err = g.getError();"
+	" g.disableVertexAttribArray(0); g.useProgram(null); }"
+	"var g2 = document.createElement('canvas').getContext('webgl2'); r.gl2 = g2 ? 'yes' : 'no';"
+	"if (g2) { g2.clearColor(0, 0, 1, 1); g2.clear(g2.COLOR_BUFFER_BIT); var q = new Uint8Array(4);"
+	" g2.readPixels(0, 0, 1, 1, g2.RGBA, g2.UNSIGNED_BYTE, q); r.gl2px = q.join('.'); }"
+	"function draw() { if (g && !g.isContextLost()) { g.clearColor(r.restored ? 0 : 1, r.restored ? 1 : 0, 0, 1);"
+	" g.clear(g.COLOR_BUFFER_BIT); var p = new Uint8Array(4); g.readPixels(0, 0, 1, 1, g.RGBA, g.UNSIGNED_BYTE, p);"
+	" r.px = p.join('.'); } done(); setTimeout(draw, 200); }"
+	"draw();"
+	"</script></body></html>";
+
+/*
+ * The page of test_blink_glproc's fourth part: a WebGL canvas on the page,
+ * drawn every 200 ms, green with its upper half (GL's rows 32 to 63)
+ * blue. On the screen the blue must be above the green: the frame is the
+ * colour buffer (bottom up) drawn as it is
+ */
+LOCAL CONST char page_glo[] =
+	"<!DOCTYPE html><html><head><title>glo</title></head><body style=\"margin:0\">"
+	"<canvas id=\"c\" width=64 height=64 style=\"position:absolute;left:20px;top:20px\"></canvas><script>"
+	"var n = 0, g = document.getElementById('c').getContext('webgl');"
+	"function draw() { if (g) { g.disable(g.SCISSOR_TEST); g.clearColor(0, 1, 0, 1); g.clear(g.COLOR_BUFFER_BIT);"
+	" g.enable(g.SCISSOR_TEST); g.scissor(0, 32, 64, 32); g.clearColor(0, 0, 1, 1); g.clear(g.COLOR_BUFFER_BIT);"
+	" g.disable(g.SCISSOR_TEST); n++; } document.title = 'glo gl=' + (g ? 'yes' : 'no') + ' n=' + (n > 5 ? 'many' : n);"
+	" setTimeout(draw, 200); }"
+	"draw();"
+	"</script></body></html>";
+
+/*
+ * The page of test_blink_gltex. Textures made in a WebGL 1 and a WebGL 2
+ * context from an array (texImage2D), the PNG and the JPEG of one colour
+ * (/i.png, /i.jpg; mipmaps made), a small canvas whose size is not a power
+ * of two, a 256 x 256 canvas (rastered on the GPU with "gpu=on"), an
+ * ImageBitmap; in WebGL 2 also texStorage2D and texSubImage2D of the PNG,
+ * an R8 texture, and a layer of a 2D array texture (texImage3D). Each is
+ * drawn into a framebuffer and a pixel read back: "texbad" names those
+ * whose colour is not the source's (their pixel under their name).
+ * The canvas on the page is drawn at every animation frame: red until 1.5 s
+ * after the textures are done (frames of it shown meanwhile), then green
+ * with its upper half (GL's rows 32 to 63) the PNG's blue. "raf" is the
+ * frame callbacks a second from then, counted over 2 s.
+ */
+LOCAL CONST char page_gltx[] =
+	"<!DOCTYPE html><html><head><title>gltx</title></head><body style=\"margin:0\">"
+	"<canvas id=\"v\" width=64 height=64 style=\"position:absolute;left:20px;top:20px\"></canvas><script>"
+	"var r = {}, bad = [], ok = 0, nraf = 0, phase = 0, vg = document.getElementById('v').getContext('webgl'), vt, vq,"
+	" ipng = new Image(), ijpg = new Image(), ibmp, left = 2;"
+	"function done() { document.title = 'gltx ' + Object.keys(r).sort().map(function (k) { return k + '=' + r[k]; }).join(' '); }"
+	"function prog(g, kind) {"
+	" var vs = kind ? '#version 300 es\\nin vec2 p; out vec2 v; void main() { v = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }'"
+	"  : 'attribute vec2 p; varying vec2 v; void main() { v = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }';"
+	" var fs = kind == 2 ? '#version 300 es\\nprecision mediump float; precision mediump sampler2DArray; in vec2 v;"
+	" uniform sampler2DArray s; out vec4 o; void main() { o = texture(s, vec3(v, 1.0)); }'"
+	"  : kind ? '#version 300 es\\nprecision mediump float; in vec2 v; uniform sampler2D s; out vec4 o; void main() { o = texture(s, v); }'"
+	"  : 'precision mediump float; varying vec2 v; uniform sampler2D s; void main() { gl_FragColor = texture2D(s, v); }';"
+	" var a = g.createShader(g.VERTEX_SHADER), b = g.createShader(g.FRAGMENT_SHADER), q = g.createProgram();"
+	" g.shaderSource(a, vs); g.shaderSource(b, fs); g.compileShader(a); g.compileShader(b);"
+	" g.attachShader(q, a); g.attachShader(q, b); g.bindAttribLocation(q, 0, 'p'); g.linkProgram(q); return q; }"
+	"function quad(g) { g.bindBuffer(g.ARRAY_BUFFER, g.createBuffer());"
+	" g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), g.STATIC_DRAW);"
+	" g.enableVertexAttribArray(0); g.vertexAttribPointer(0, 2, g.FLOAT, false, 0, 0); }"
+	"function mk(g, target) { var t = g.createTexture(); g.activeTexture(g.TEXTURE0); g.bindTexture(target, t); return t; }"
+	"function par(g, target, mip) { if (mip) g.generateMipmap(target);"
+	" g.texParameteri(target, g.TEXTURE_MIN_FILTER, mip ? g.LINEAR_MIPMAP_LINEAR : g.LINEAR);"
+	" g.texParameteri(target, g.TEXTURE_MAG_FILTER, g.LINEAR);"
+	" g.texParameteri(target, g.TEXTURE_WRAP_S, g.CLAMP_TO_EDGE); g.texParameteri(target, g.TEXTURE_WRAP_T, g.CLAMP_TO_EDGE); }"
+	"function look(g, q, target, t) { var c = mk(g, g.TEXTURE_2D);"
+	" g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, 4, 4, 0, g.RGBA, g.UNSIGNED_BYTE, null);"
+	" var f = g.createFramebuffer(); g.bindFramebuffer(g.FRAMEBUFFER, f);"
+	" g.framebufferTexture2D(g.FRAMEBUFFER, g.COLOR_ATTACHMENT0, g.TEXTURE_2D, c, 0); g.bindTexture(g.TEXTURE_2D, null);"
+	" g.viewport(0, 0, 4, 4); g.useProgram(q); g.bindTexture(target, t);"
+	" g.uniform1i(g.getUniformLocation(q, 's'), 0); g.drawArrays(g.TRIANGLE_STRIP, 0, 4);"
+	" var p = new Uint8Array(4); g.readPixels(1, 1, 1, 1, g.RGBA, g.UNSIGNED_BYTE, p);"
+	" g.bindFramebuffer(g.FRAMEBUFFER, null); g.deleteFramebuffer(f); g.deleteTexture(c); return p; }"
+	"function judge(k, p, w, tol) { var good = true; for (var i = 0; i < 3; i++) if (Math.abs(p[i] - w[i]) > tol) good = false;"
+	" if (good) ok++; else { bad.push(k); r[k] = p.join('.'); } }"
+	"function canvas(w, h, colour) { var c = document.createElement('canvas'); c.width = w; c.height = h;"
+	" var x = c.getContext('2d'); x.fillStyle = colour; x.fillRect(0, 0, w, h); return c; }"
+	"function run(g, w, es3) { var q = prog(g, es3 ? 1 : 0), k = 'w' + w, t, d = new Uint8Array(64);"
+	" quad(g); for (var i = 0; i < 64; i++) d[i] = [10, 200, 30, 255][i % 4];"
+	" t = mk(g, g.TEXTURE_2D); g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, 4, 4, 0, g.RGBA, g.UNSIGNED_BYTE, d); par(g, g.TEXTURE_2D, false);"
+	" judge(k + 'buf', look(g, q, g.TEXTURE_2D, t), [10, 200, 30], 2);"
+	" t = mk(g, g.TEXTURE_2D); g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, g.RGBA, g.UNSIGNED_BYTE, ipng); par(g, g.TEXTURE_2D, true);"
+	" judge(k + 'png', look(g, q, g.TEXTURE_2D, t), [0, 0, 200], 4);"
+	" t = mk(g, g.TEXTURE_2D); g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, g.RGBA, g.UNSIGNED_BYTE, ijpg); par(g, g.TEXTURE_2D, true);"
+	" judge(k + 'jpg', look(g, q, g.TEXTURE_2D, t), [200, 100, 0], 16);"
+	" t = mk(g, g.TEXTURE_2D); g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, g.RGBA, g.UNSIGNED_BYTE, canvas(30, 20, 'rgb(30,60,220)'));"
+	" par(g, g.TEXTURE_2D, false); judge(k + 'c2d', look(g, q, g.TEXTURE_2D, t), [30, 60, 220], 2);"
+	" t = mk(g, g.TEXTURE_2D); g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, g.RGBA, g.UNSIGNED_BYTE, canvas(256, 256, 'rgb(220,40,90)'));"
+	" par(g, g.TEXTURE_2D, true); judge(k + 'cbig', look(g, q, g.TEXTURE_2D, t), [220, 40, 90], 2);"
+	" t = mk(g, g.TEXTURE_2D); g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, g.RGBA, g.UNSIGNED_BYTE, ibmp); par(g, g.TEXTURE_2D, true);"
+	" judge(k + 'bmp', look(g, q, g.TEXTURE_2D, t), [0, 0, 200], 4);"
+	" if (es3) {"
+	"  t = mk(g, g.TEXTURE_2D); g.texStorage2D(g.TEXTURE_2D, 5, g.RGBA8, 16, 16);"
+	"  g.texSubImage2D(g.TEXTURE_2D, 0, 0, 0, g.RGBA, g.UNSIGNED_BYTE, ipng); par(g, g.TEXTURE_2D, true);"
+	"  judge(k + 'st', look(g, q, g.TEXTURE_2D, t), [0, 0, 200], 4);"
+	"  t = mk(g, g.TEXTURE_2D); g.pixelStorei(g.UNPACK_ALIGNMENT, 1);"
+	"  g.texImage2D(g.TEXTURE_2D, 0, g.R8, 3, 3, 0, g.RED, g.UNSIGNED_BYTE, new Uint8Array(9).fill(150));"
+	"  g.pixelStorei(g.UNPACK_ALIGNMENT, 4); par(g, g.TEXTURE_2D, false); judge(k + 'r8', look(g, q, g.TEXTURE_2D, t), [150, 0, 0], 2);"
+	"  var a3 = new Uint8Array(128); for (var i = 0; i < 128; i++) a3[i] = i < 64 ? [255, 0, 0, 255][i % 4] : [40, 90, 160, 255][i % 4];"
+	"  t = mk(g, g.TEXTURE_2D_ARRAY); g.texImage3D(g.TEXTURE_2D_ARRAY, 0, g.RGBA8, 4, 4, 2, 0, g.RGBA, g.UNSIGNED_BYTE, a3);"
+	"  par(g, g.TEXTURE_2D_ARRAY, false); judge(k + 'a3d', look(g, prog(g, 2), g.TEXTURE_2D_ARRAY, t), [40, 90, 160], 2); }"
+	" r['err' + w] = g.getError(); }"
+	"function vis() { vq = prog(vg, 0); quad(vg); vt = mk(vg, vg.TEXTURE_2D);"
+	" vg.texImage2D(vg.TEXTURE_2D, 0, vg.RGBA, vg.RGBA, vg.UNSIGNED_BYTE, ipng); par(vg, vg.TEXTURE_2D, true); }"
+	"function frame() { nraf++; if (vg) { vg.viewport(0, 0, 64, 64); vg.clearColor(phase ? 0 : 1, phase ? 1 : 0, 0, 1);"
+	" vg.clear(vg.COLOR_BUFFER_BIT);"
+	" if (phase) { vg.viewport(0, 32, 64, 32); vg.useProgram(vq); vg.activeTexture(vg.TEXTURE0); vg.bindTexture(vg.TEXTURE_2D, vt);"
+	"  vg.uniform1i(vg.getUniformLocation(vq, 's'), 0); vg.drawArrays(vg.TRIANGLE_STRIP, 0, 4); } }"
+	" requestAnimationFrame(frame); }"
+	"async function go() { try { ibmp = await createImageBitmap(ipng);"
+	" run(document.createElement('canvas').getContext('webgl'), 1, false);"
+	" var g2 = document.createElement('canvas').getContext('webgl2'); r.gl2 = g2 ? 'yes' : 'no'; if (g2) run(g2, 2, true);"
+	" if (vg) vis(); } catch (e) { r.exc = e.name + ':' + e.message; }"
+	" r.texok = ok; r.texbad = bad.length ? bad.join(',') : 'none'; r.gl1 = vg ? 'yes' : 'no'; done();"
+	" setTimeout(function () { phase = 1; var n0 = nraf;"
+	"  setTimeout(function () { r.raf = Math.round(( nraf - n0 ) / 2); done(); }, 2000); }, 1500); }"
+	"ipng.onload = ijpg.onload = function () { if (--left == 0) go(); };"
+	"ipng.onerror = ijpg.onerror = function () { r.img = 'error'; done(); };"
+	"ipng.src = '/i.png'; ijpg.src = '/i.jpg'; requestAnimationFrame(frame);"
 	"</script></body></html>";
 
 /* webm (VP9, 64 x 48, 3 s at 10 frames a second of rgb(32,192,64)), 1158 bytes */
@@ -4743,6 +4909,20 @@ LOCAL CONST char page_dlgo[] =
 LOCAL CONST char page_dlok[] =
 	"<!doctype html><title>dl</title><a id=a href='/dlfile' download='done.txt'>x</a>"
 	"<script>document.getElementById('a').click();</script>";
+/* test_blink_dlatt: an attachment of another site, opened from this page (a renderer of its own) */
+LOCAL CONST char page_dlx[] =
+	"<!doctype html><title>dlx</title>"
+	"<script>setTimeout(function () { location.href = 'http://localhost:' + location.port + '/att2'; }, 1500);</script>";
+/* test_blink_dlmime: a page that goes to the answer named after its "/dmp" (1 to 6) a while after it is shown */
+LOCAL CONST char page_dmp[] =
+	"<!doctype html><title>dmp</title>"
+	"<script>setTimeout(function () { location.href = location.pathname.replace('/dmp', '/dm')"
+	" + ( location.pathname == '/dmp1' ? '.zip' : location.pathname == '/dmp3' ? '.bin' : '' ); }, 1500);</script>";
+/* test_blink_dlslow: a page that counts its seconds in its title, and goes to a download that comes slowly */
+LOCAL CONST char page_dsp[] =
+	"<!doctype html><title>dsp 0</title><script>var n = 0;"
+	" setInterval(function () { document.title = 'dsp ' + ( ++n ); }, 1000);"
+	" setTimeout(function () { location.href = '/dsl.bin'; }, 1500);</script>";
 LOCAL CONST char page_aff[] =
 	"<!doctype html><title>aff</title><body style='margin:0'><form>"
 	"<input id=n autocomplete=name style='position:absolute;left:10px;top:10px;width:300px;height:30px'>"
@@ -7272,6 +7452,253 @@ LOCAL CONST char page_mpa[] =
 	"</script></body></html>";
 
 /*
+ * The page of test_blink_mp, at "/mp1" and "/mp2": its entry is given the
+ * state {n: 7} the first time, and its title says the path and the state
+ * it found, so that an entry restored in another renderer shows "st=7"
+ */
+LOCAL CONST char page_mp[] =
+	"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>mp</title></head><body>"
+	"<p>a page of one site, in a renderer of its own</p><script>"
+	"var s = history.state;"
+	"if ( !s ) history.replaceState({n: 7}, '');"
+	"document.title = 'mp ' + location.pathname + ' st=' + ( s ? s.n : 'none' );"
+	"</script></body></html>";
+
+/*
+ * The page of test_blink_mpnest, at "/mprn": first a task of its script
+ * reads document.cookie (a synchronous call to the network process) and
+ * fetches "/mprn" with a synchronous XMLHttpRequest, over and over for 3
+ * seconds, while the browser lays the page out (its zooms) and asks the
+ * renderer what it counts (the frames' statistics); then for 8 seconds
+ * every animation frame's callback reads document.cookie for 300 ms, and
+ * every tenth begins a view transition that is skipped (no compositor
+ * takes it). A ResizeObserver, the window's resize event and a chain of
+ * timers note when they run inside the task or a callback, which a page's
+ * own code never sees. The title then says how many ran inside
+ * ("nested=") and what they were (r, z, t), and how many fetches the task
+ * made ("xhr=").
+ */
+LOCAL CONST char page_mprn[] =
+	"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>mprn</title>"
+	"<style>#b{width:50%;height:40px;background:#08c}</style></head><body><div id=\"b\"></div><script>"
+	"document.cookie = 'k=v; path=/';"
+	"var inside = false, nested = 0, what = '', frames = 0, ro = 0, vt = 0, timers = 0, xhr = 0, t0 = 0;"
+	"function note(w) { if ( inside ) { nested++; if ( what.indexOf(w) < 0 ) what += w; } }"
+	"new ResizeObserver(function () { ro++; note('r'); }).observe(document.getElementById('b'));"
+	"addEventListener('resize', function () { note('z'); });"
+	"(function tick() { timers++; note('t'); setTimeout(tick, 5); })();"
+	"function frame() {"
+	" frames++;"
+	" if ( document.startViewTransition && frames % 10 == 1 ) {"
+	"  try { var x = document.startViewTransition(function () {"
+	"   document.getElementById('b').style.height = ( 40 + frames % 7 ) + 'px'; });"
+	"   vt++; x.finished.catch(function () {}); x.ready.catch(function () {}); } catch ( e ) {} }"
+	" inside = true; var end = Date.now() + 300, n = 0;"
+	" while ( Date.now() < end ) n += document.cookie.length;"
+	" inside = false;"
+	" if ( Date.now() - t0 < 8000 ) requestAnimationFrame(frame);"
+	" else document.title = 'mprn done nested=' + nested + what + ' frames=' + frames + ' ro=' + ro"
+	"  + ' vt=' + vt + ' timers=' + timers + ' xhr=' + xhr;"
+	"}"
+	"setTimeout(function () {"
+	" inside = true; var end = Date.now() + 3000, n = 0;"
+	" while ( Date.now() < end ) {"
+	"  n += document.cookie.length;"
+	"  var q = new XMLHttpRequest(); q.open('GET', '/mprn', false); q.send(); if ( q.status == 200 ) xhr++; }"
+	" inside = false;"
+	" t0 = Date.now(); requestAnimationFrame(frame);"
+	"}, 300);"
+	"</script></body></html>";
+
+/*
+ * The pages of test_blink_mpleave: "/mpl1" (no beforeunload handler) and
+ * "/mpl3" (with one, that lets the page go) hold their renderer in a
+ * script for 15 seconds from 1.2 seconds after their load on (when the
+ * page has been shown); "/mpl2", of another site, is where the browser
+ * goes back to from them meanwhile
+ */
+LOCAL CONST char page_mpl1[] =
+	"<!DOCTYPE html><html><head><title>mpl1</title></head><body><script>"
+	"if ( location.pathname == '/mpl3' ) addEventListener('beforeunload', function () {});"
+	"addEventListener('load', function () { setTimeout(function () {"
+	" var end = Date.now() + 15000, n = 0; while ( Date.now() < end ) n++;"
+	" document.title = 'mpl1 ' + n; }, 1200); });"
+	"</script></body></html>";
+
+LOCAL CONST char page_mpl2[] =
+	"<!DOCTYPE html><html><head><title>mpl2 ok</title></head><body><p>gone to</p></body></html>";
+
+LOCAL UW	mpl_t1, mpl_t2;		/* when the page left and the one gone to were asked for (ms) */
+
+/*
+ * The pages of test_blink_mpnav, at "/mpv1" and "/mpv2" of 127.0.0.1: a
+ * video plays, looped, with a sound; every half second of its playing
+ * (timeupdate) the page asks for "/mpta" ("/mpv1") or "/mptb" ("/mpv2"),
+ * so that the server sees for how long it plays. At the third, "/mpv1"
+ * goes to "/mpv2" of the same site and "/mpv2" to "/mpv3" of localhost,
+ * another site.
+ */
+LOCAL CONST char page_mpv[] =
+	"<!DOCTYPE html><html><head><title>mpv</title></head><body>"
+	"<video id=\"v\" muted loop></video><audio id=\"a\" loop></audio><script>"
+	"var p = location.pathname, n = 0, last = 0, v = document.getElementById('v'), a = document.getElementById('a');"
+	"var tick = p == '/mpv1' ? '/mpta' : '/mptb';"
+	"var next = p == '/mpv1' ? '/mpv2' : 'http://localhost:' + location.port + '/mpv3';"
+	"document.title = 'mpv ' + p;"
+	"v.addEventListener('timeupdate', function () { var t = Date.now(); if ( t - last < 500 ) return;"
+	" last = t; n++; fetch(tick, { cache: 'no-store' }).catch(function () {});"
+	" if ( n == 3 ) location.href = next; });"
+	"v.src = '/a.av1.webm'; v.play().catch(function (e) { document.title = 'mpv pe=' + e.name; });"
+	"a.src = '/a.mp3'; a.play().catch(function () {});"
+	"</script></body></html>";
+
+/*
+ * The page of test_blink_mpnav at "/mpc" of 127.0.0.1: the camera's
+ * stream recorded with MediaRecorder, a piece every half second, each
+ * telling the server ("/mpr"); at the third it goes to "/mpv3" of
+ * localhost.
+ */
+LOCAL CONST char page_mpc[] =
+	"<!DOCTYPE html><html><head><title>mpc</title></head><body><script>"
+	"(async function () {"
+	" try { var st = await navigator.mediaDevices.getUserMedia({ video: { width: 64, height: 48 } });"
+	"  var n = 0, m = new MediaRecorder(st, { mimeType: 'video/webm;codecs=vp8' });"
+	"  m.ondataavailable = function () { n++; fetch('/mpr', { cache: 'no-store' }).catch(function () {});"
+	"   if ( n == 3 ) location.href = 'http://localhost:' + location.port + '/mpv3'; };"
+	"  m.start(500); document.title = 'mpc recording';"
+	" } catch (e) { document.title = 'mpc err=' + e.name; }"
+	"})();"
+	"</script></body></html>";
+
+/* The page the two go to, at "/mpv3" of localhost: it says so after six seconds */
+LOCAL CONST char page_mpe[] =
+	"<!DOCTYPE html><html><head><title>mpe</title></head><body><p>another site</p><script>"
+	"setTimeout(function () { document.title = 'mpe ' + location.hostname; }, 6000);"
+	"</script></body></html>";
+
+/*
+ * What the server of test_blink_mpnav counted: the asks of "/mpta",
+ * "/mptb" and "/mpr", and how many of each had come when "/mpv2" and
+ * "/mpv3" were asked for
+ */
+LOCAL volatile INT	mpn_a, mpn_b, mpn_r, mpn_a2, mpn_a3, mpn_b3, mpn_r3;
+
+/*
+ * The pages of test_blink_mpck: "/mck1" of 127.0.0.1 is the sign-in (a
+ * cookie only the network sees, a long-lived one and a session one, and
+ * one its script sets), "/mck2" of localhost sets one of its own, and
+ * "/mck3" of 127.0.0.1 says what it has and how many times it was shown
+ * in this tab. mck_sid counts the asks for "/mck3" that carried the sign-in.
+ */
+LOCAL volatile INT	mck_sid, mck_ask;
+LOCAL CONST char page_mck1[] =
+	"<!DOCTYPE html><title>m1</title><script>document.cookie='js=a; max-age=3600; path=/';</script>\n";
+LOCAL CONST char page_mck2[] =
+	"<!DOCTYPE html><title>m2</title><script>document.cookie='lb=1; max-age=3600; path=/';"
+	"document.title='m2 '+document.cookie;</script>\n";
+LOCAL CONST char page_mck3[] =
+	"<!DOCTYPE html><title>m3</title><script>var n=+(sessionStorage.getItem('n')||0)+1;"
+	"sessionStorage.setItem('n',n);document.title='m3 '+document.cookie+' n='+n;</script>\n";
+/*
+ * The page of test_blink_mpsock, at "/msk" of 127.0.0.1: six requests to
+ * each of MSK_SRV servers of the test that take connections and never
+ * answer, so that the network process would hold them all at once; eight
+ * seconds after, the title says how many of them failed and how many
+ * were answered.
+ */
+#define MSK_SRV		24
+#define MSK_PORT	18400
+LOCAL CONST char page_msk[] =
+	"<!DOCTYPE html><title>msk</title><script>var f = 0, o = 0;"
+	"for ( var i = 0; i < 24; i++ ) for ( var j = 0; j < 6; j++ )"
+	" fetch('http://127.0.0.1:' + ( 18400 + i ) + '/h' + j, { cache: 'no-store' })"
+	"  .then(function () { o++; }, function () { f++; });"
+	"setTimeout(function () { document.title = 'msk fail=' + f + ' ok=' + o; }, 8000);"
+	"</script>\n";
+/*
+ * The pages of test_blink_mpkeep and test_blink_sbxobj, all with a token
+ * of the run after "#": "/mpk1" of 127.0.0.1 puts it in localStorage and
+ * in a record of IndexedDB and goes to "/mpk2" of localhost (another
+ * renderer), which puts a value of its own under the same name and goes
+ * to "/mpk3" of 127.0.0.1 (yet another renderer). "/mpk3", and "/mpk4" in
+ * a browser started after, look until they find the token in both (the
+ * renderer ready was started before "/mpk1" wrote: it takes what another
+ * wrote in a few seconds) and say what they found in the title. The
+ * database is not made where it is looked for: one not there is left so.
+ */
+LOCAL CONST char page_mpk1[] =
+	"<!DOCTYPE html><title>mpk1</title><script>var t = location.hash.slice(1);"
+	"localStorage.setItem('mpk', t);"
+	"var r = indexedDB.open('mpk', 1);"
+	"r.onupgradeneeded = function () { r.result.createObjectStore('s'); };"
+	"r.onerror = function () { document.title = 'mpk1 err'; };"
+	"r.onsuccess = function () { var db = r.result, x = db.transaction('s', 'readwrite');"
+	" x.objectStore('s').put(t, 'k');"
+	" x.oncomplete = function () { db.close(); document.title = 'mpk1 ' + t;"
+	"  setTimeout(function () { location.href = 'http://localhost:' + location.port + '/mpk2#' + t; }, 500); }; };"
+	"</script>\n";
+LOCAL CONST char page_mpk2[] =
+	"<!DOCTYPE html><title>mpk2</title><script>var t = location.hash.slice(1);"
+	"localStorage.setItem('mpk', 'other'); document.title = 'mpk2';"
+	"setTimeout(function () { location.href = 'http://127.0.0.1:' + location.port + '/mpk3#' + t; }, 1000);"
+	"</script>\n";
+LOCAL CONST char page_mpk3[] =
+	"<!DOCTYPE html><title>mpk</title><script>var t = location.hash.slice(1), n = 0;"
+	"function say(ls, v) { document.title = location.pathname.slice(1) + ' ls=' + ( ls == t ? 'ok' : ls )"
+	" + ' idb=' + ( v == t ? 'ok' : v ) + ' n=' + n; }"
+	"function again(ls, v) { if ( n < 40 ) setTimeout(look, 500); else say(ls, v); }"
+	"function look() { n++; var ls = localStorage.getItem('mpk'), r = indexedDB.open('mpk');"
+	" r.onupgradeneeded = function () { r.transaction.abort(); };"
+	" r.onerror = function () { again(ls, 'none'); };"
+	" r.onsuccess = function () { var db = r.result;"
+	"  if ( !db.objectStoreNames.contains('s') ) { db.close(); again(ls, 'nostore'); return; }"
+	"  var g = db.transaction('s').objectStore('s').get('k');"
+	"  g.onerror = function () { db.close(); again(ls, 'geterr'); };"
+	"  g.onsuccess = function () { var v = g.result; db.close();"
+	"   if ( ls != t || v != t ) again(ls, v); else say(ls, v); }; }; }"
+	"look();"
+	"</script>\n";
+/*
+ * The page of test_blink_mpstore, at "/mps" of 127.0.0.1 and of localhost
+ * by turns, each visit in a renderer started for it: "#<token>.<n>.<all>".
+ * The first visit of each site fills its localStorage (160 items of 4 KB),
+ * an IndexedDB store (300 records of 8 KB) and Cache Storage (300
+ * responses of 4 KB), so that every renderer started after reads back
+ * some megabytes of stores as it starts; each visit adds a little to each,
+ * and goes on to the other site until the <all>th, which says in its title
+ * what it found.
+ */
+LOCAL CONST char page_mps[] =
+	"<!DOCTYPE html><title>mps</title><script>"
+	"var h = location.hash.slice(1).split('.'), t = h[0], n = +h[1], all = +h[2];"
+	"var other = location.hostname == '127.0.0.1' ? 'localhost' : '127.0.0.1', big = new Array(4001).join('x');"
+	"function fail(w) { document.title = 'mps fail ' + w + ' n=' + n; }"
+	"function ls() { if ( localStorage.getItem('mps0') == null ) for ( var i = 0; i < 160; i++ ) localStorage.setItem('mps' + i, big + i);"
+	" localStorage.setItem('mpsn', '' + n); }"
+	"function idb(then) { var r = indexedDB.open('mps', 1);"
+	" r.onupgradeneeded = function () { r.result.createObjectStore('r'); };"
+	" r.onerror = function () { fail('idb'); };"
+	" r.onsuccess = function () { var db = r.result, x = db.transaction('r', 'readwrite'), s = x.objectStore('r'), c = s.count();"
+	"  c.onsuccess = function () { if ( c.result < 300 ) for ( var i = 0; i < 300; i++ ) s.put(big + big + i, 'k' + i);"
+	"   s.put(t + '.' + n, 'n'); };"
+	"  x.oncomplete = function () { db.close(); then(); }; x.onerror = function () { fail('idbx'); }; }; }"
+	"function cs(then) { caches.open('mps').then(function (c) { return c.keys().then(function (k) {"
+	"  var p = [c.put('/mpsn', new Response(t + '.' + n))];"
+	"  if ( k.length < 300 ) for ( var i = 0; i < 300; i++ ) p.push(c.put('/mpsc' + i, new Response(big + i)));"
+	"  return Promise.all(p); }); }).then(then, function () { fail('cs'); }); }"
+	"function done() { var r = indexedDB.open('mps');"
+	" r.onsuccess = function () { var db = r.result, g = db.transaction('r').objectStore('r').count();"
+	"  g.onsuccess = function () { var ni = g.result; db.close();"
+	"   caches.open('mps').then(function (c) { return c.keys(); }).then(function (k) {"
+	"    document.title = 'mps done n=' + n + ' ls=' + localStorage.length + ' idb=' + ni + ' cs=' + k.length; }); }; }; }"
+	"ls(); idb(function () { cs(function () { document.title = 'mps n=' + n;"
+	" if ( n >= all ) { done(); return; }"
+	" setTimeout(function () { location.href = 'http://' + other + ':' + location.port + '/mps#' + t + '.' + ( n + 1 ) + '.' + all; }, 300); }); });"
+	"</script>\n";
+
+LOCAL volatile BOOL	mpn_left;
+
+/*
  * The page of test_blink_spa, served at every address under "/spa" as a
  * single-page application is, and at "/spb". First visit: replaceState
  * gives the entry the state {n: 0}, two pushState calls make two entries
@@ -7588,6 +8015,32 @@ LOCAL CONST char page_pw2[] =
 
 LOCAL CONST char page_pwdone[] =
 	"<!DOCTYPE html><html><head><title>pwdone</title></head><body>sent</body></html>";
+
+/*
+ * "/pw3", of another site (localhost), in a third browser: an iframe of
+ * 127.0.0.1 ("/pwf") whose login form's field takes the focus. The
+ * renderer is localhost's, so 127.0.0.1's passwords are not offered there
+ * (no panel, the field stays empty), and localhost has none of its own.
+ */
+LOCAL CONST char page_pw3[] =
+	"<!DOCTYPE html><html><head><title>pw3</title></head><body>"
+	"<iframe src=\"http://127.0.0.1:18156/pwf\" style=\"width:300px;height:120px\"></iframe>"
+	"<script>var r = { frame: 'none' };"
+	"function done() { document.title = 'pw3 ' + Object.keys(r).sort().map(function (k) { return k + '=' + r[k]; }).join(' '); }"
+	"window.onmessage = function (e) { if ( r.frame !== 'filled' ) r.frame = e.data; done(); };"
+	"(async function () {"
+	" try { var c = await navigator.credentials.get({ password: true, mediation: 'optional' }); r.get = c ? c.id : 'null'; }"
+	" catch (e) { r.get = 'err:' + e.name; }"
+	" done(); })();"
+	"</script></body></html>";
+
+LOCAL CONST char page_pwf[] =
+	"<!DOCTYPE html><html><head><title>pwf</title></head><body>"
+	"<form id=\"f\" onsubmit=\"return false\"><input id=\"u\"><input id=\"p\" type=\"password\"></form>"
+	"<script>var u = document.getElementById('u'), p = document.getElementById('p');"
+	"setTimeout(function () { u.focus(); }, 500);"
+	"setInterval(function () { parent.postMessage(p.value ? 'filled' : ( document.activeElement === u ? 'empty' : 'nofocus' ), '*'); }, 300);"
+	"</script></body></html>";
 
 /*
  * The page of test_blink_pdf that asks what the browser says of PDF:
@@ -8744,12 +9197,57 @@ LOCAL CONST char page_wv[] =
 	"</script>";
 
 /*
- * The Raspberry Pi archive's index and the Widevine package, fetched on
- * the development machine and put on /boot of the test disk only
- * (make ... WV_TEST=<dir>, build_make/browser.mk)
+ * The page of the playback with the installed CDM ("/wvplay", make ...
+ * NET=user, over the Internet): Shaka Player plays the Widevine stream
+ * of its demonstration (Angel One, H.264 and AAC encrypted with CENC)
+ * with the license server of the demonstration, and writes in the title
+ * whether the video went past 3 seconds, then asks for "/wvend". With
+ * "?ck" it plays the Clear Key stream of the demonstration instead (the
+ * same video, its key given to Shaka Player). When Shaka Player cannot be
+ * fetched the title says "noshaka".
  */
-#define WV_PKGS		"/boot/wv_Packages"
-#define WV_DEB		"/boot/wv.deb"
+LOCAL CONST char page_wvplay[] =
+	"<!doctype html><title>wvplay</title><video id=v muted width=320></video>\n"
+	"<script src=\"https://ajax.googleapis.com/ajax/libs/shaka-player/4.12.0/shaka-player.compiled.js\"></script>\n"
+	"<script>\n"
+	"var v=document.getElementById('v'),over=false;\n"
+	"function done(t){if(over)return;over=true;document.title='wvplay '+t;fetch('/wvend');}\n"
+	"var ck=location.search=='?ck';\n"
+	"if(!window.shaka){done('noshaka');}else{shaka.polyfill.installAll();var p=new shaka.Player();\n"
+	"p.addEventListener('error',function(e){done('error '+e.detail.code);});\n"
+	"p.attach(v).then(function(){p.configure(ck?{drm:{clearKeys:{'feedf00deedeadbeeff0baadf00dd00d':"
+	"'00112233445566778899aabbccddeeff'}}}:{drm:{servers:{'com.widevine.alpha':"
+	"'https://cwip-shaka-proxy.appspot.com/no_auth'}}});\n"
+	"return p.load('https://storage.googleapis.com/shaka-demo-assets/angel-one-'+(ck?'clearkey':'widevine')+'/dash.mpd');})"
+	".then(function(){v.play();var n=0,iv=setInterval(function(){\n"
+	"if(v.currentTime>3){clearInterval(iv);done('ok t='+v.currentTime.toFixed(1)+' drm='+p.drmInfo().keySystem+"
+	"' size='+v.videoWidth+'x'+v.videoHeight);}\n"
+	"else if(++n>240){clearInterval(iv);done('stuck t='+v.currentTime);}},500);})"
+	".catch(function(e){done('error '+(e.code||e));});}\n"
+	"</script>";
+
+/*
+ * What the browser fetches the CDM from, fetched on the development
+ * machine and put on /boot of the test disk only (make ... WV_TEST=<dir>,
+ * build_make/browser.mk): on aarch64 the Raspberry Pi archive's index and
+ * the Widevine package; on x86-64 the answer of Google's component
+ * update service (its addresses made this server's) and the CRX3 file
+ * of the Widevine CDM component
+ */
+#if defined(__x86_64__)
+#define WV_INDEX	"/boot/wv_update.json"
+#define WV_PACKAGE	"/boot/wv.crx3"
+#define WV_BASE		"/gup/"
+#define WV_ASK_INDEX	"/gup/service/"
+#define WV_ASK_PACKAGE	"/gup/crx/"
+#else
+#define WV_INDEX	"/boot/wv_Packages"
+#define WV_PACKAGE	"/boot/wv.deb"
+#define WV_BASE		"/rpi/"
+#define WV_ASK_INDEX	"/rpi/dists/"
+#define WV_ASK_PACKAGE	"/rpi/pool/"
+#endif
+#define WV_REPO		"wvrepo=http://127.0.0.1:18170" WV_BASE "\n"
 
 LOCAL UB	srv_file_buf[16384];
 
@@ -8794,11 +9292,19 @@ LOCAL BOOL srv_wv( INT s, CONST char *path )
 {
 	char	num[16];
 
-	if ( wv_prefix(path, "/rpi/dists/") ) {
-		srv_file(s, WV_PKGS, "text/plain");
-	} else if ( wv_prefix(path, "/rpi/pool/") ) {
-		srv_file(s, WV_DEB, "application/vnd.debian.binary-package");
+	if ( wv_prefix(path, WV_ASK_INDEX) ) {
+		srv_file(s, WV_INDEX, WV_ASK_INDEX[1] == 'g' ? "application/json" : "text/plain");
+	} else if ( wv_prefix(path, WV_ASK_PACKAGE) ) {
+		srv_file(s, WV_PACKAGE, WV_ASK_PACKAGE[1] == 'g' ? "application/x-chrome-extension"
+							 : "application/vnd.debian.binary-package");
+	} else if ( wv_prefix(path, "/wvplay") ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_wvplay), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_wvplay);
 	} else if ( knl_strcmp(path, "/wvend") == 0 ) {
+		tm_printf((UB *)"  wv: /wvend asked\n");
 		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
 	} else if ( wv_prefix(path, "/wv") && ( path[3] == '\0' || path[3] == '?' ) ) {
 		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
@@ -8810,6 +9316,47 @@ LOCAL BOOL srv_wv( INT s, CONST char *path )
 		return FALSE;
 	}
 	return TRUE;
+}
+
+/*
+ * test_blink_dlmime's answers: 'size' bytes that are not text (a fixed
+ * run of pseudo-random bytes, beginning as a zip does when it is said to
+ * be one) or lines of letters, under 'ctype' (NULL: no Content-Type)
+ */
+LOCAL void srv_dm( INT s, CONST char *ctype, UW size, BOOL text )
+{
+	static UB	buf[4096];
+	char		num[16];
+	UW		x = 12345, sent, i, n;
+
+	srv_put(s, "HTTP/1.1 200 OK\r\n");
+	if ( ctype != NULL ) {
+		srv_put(s, "Content-Type: ");
+		srv_put(s, ctype);
+		srv_put(s, "\r\n");
+	}
+	srv_put(s, "Content-Length: ");
+	srv_num(num, size, 10);
+	srv_put(s, num);
+	srv_put(s, "\r\nConnection: close\r\n\r\n");
+	for ( sent = 0; sent < size; sent += n ) {
+		n = ( size - sent < sizeof(buf) ) ? size - sent : sizeof(buf);
+		for ( i = 0; i < n; i++ ) {
+			x = x * 1103515245 + 12345;
+			if ( text ) {
+				buf[i] = ( ( sent + i ) % 64 == 63 ) ? '\n' : (UB)( 'a' + ( x >> 16 ) % 26 );
+			} else {
+				buf[i] = (UB)( x >> 16 );
+			}
+		}
+		if ( sent == 0 && n >= 4 && ctype != NULL && knl_strcmp(ctype, "application/zip") == 0 ) {
+			buf[0] = 'P';
+			buf[1] = 'K';
+			buf[2] = 3;
+			buf[3] = 4;
+		}
+		if ( so_send(s, buf, n, 0) < 0 ) break;
+	}
 }
 
 LOCAL void srv_one( INT s )
@@ -9132,6 +9679,55 @@ LOCAL void srv_one( INT s )
 		srv_put(s, num);
 		srv_put(s, "\r\nConnection: close\r\n\r\n");
 		srv_put(s, page_dlok);
+	} else if ( knl_strcmp(path, "/dlx") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_dlx), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_dlx);
+	} else if ( knl_strcmp(path, "/att2") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+			   "Content-Disposition: attachment; filename=\"att2.txt\"\r\nContent-Length: 8\r\n"
+			   "Connection: close\r\n\r\natt2text");
+	} else if ( path[1] == 'd' && path[2] == 'm' && path[3] == 'p' && path[4] >= '1' && path[4] <= '6' && path[5] == '\0' ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_dmp), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_dmp);
+	} else if ( knl_strcmp(path, "/dm1.zip") == 0 ) {
+		srv_dm(s, "application/zip", 1024, FALSE);
+	} else if ( knl_strcmp(path, "/dm2") == 0 ) {
+		srv_dm(s, "application/octet-stream", 1024, FALSE);
+	} else if ( knl_strcmp(path, "/dm3.bin") == 0 ) {
+		srv_dm(s, NULL, 1024, FALSE);
+	} else if ( knl_strcmp(path, "/dm4") == 0 ) {
+		srv_dm(s, NULL, 2048, TRUE);
+	} else if ( knl_strcmp(path, "/dm5") == 0 ) {
+		srv_dm(s, "text/plain", 1024, FALSE);
+	} else if ( knl_strcmp(path, "/dm6") == 0 ) {
+		srv_dm(s, "text/html", 1536 * 1024, FALSE);
+	} else if ( knl_strcmp(path, "/dsp") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_dsp), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_dsp);
+	} else if ( knl_strcmp(path, "/dsl.bin") == 0 ) {
+		/* 640000 bytes that are not text, 5000 every half second: 64 s, longer than a page is waited for */
+		static UB	piece[5000];
+		UW		x = 777, j;
+
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 640000\r\n"
+			   "Connection: close\r\n\r\n");
+		for ( k = 0; k < 128; k++ ) {
+			for ( j = 0; j < sizeof(piece); j++ ) {
+				x = x * 1103515245 + 12345;
+				piece[j] = (UB)( x >> 16 );
+			}
+			if ( so_send(s, piece, sizeof(piece), 0) < 0 ) break;
+			tk_dly_tsk(500);
+		}
 	} else if ( knl_strcmp(path, "/aff") == 0 ) {
 		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
 		srv_num(num, knl_strlen(page_aff), 10);
@@ -9455,6 +10051,94 @@ LOCAL void srv_one( INT s )
 		srv_put(s, num);
 		srv_put(s, "\r\nConnection: close\r\n\r\n");
 		srv_put(s, page_dirp);
+	} else if ( knl_strcmp(path, "/mck1") == 0 || knl_strcmp(path, "/mck2") == 0 || knl_strcmp(path, "/mck3") == 0 ) {
+		CONST char *body = path[4] == '1' ? page_mck1 : path[4] == '2' ? page_mck2 : page_mck3;
+
+		if ( path[4] == '3' ) {
+			mck_ask++;
+			if ( find_text(req, n, "SID=login") >= 0 ) mck_sid++;
+		}
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n");
+		if ( path[4] == '1' ) {
+			srv_put(s, "Set-Cookie: SID=login; Max-Age=86400; Path=/; HttpOnly\r\n"
+				   "Set-Cookie: SIDJS=login; Max-Age=86400; Path=/\r\n"
+				   "Set-Cookie: SS=sess; Path=/\r\n");
+		}
+		srv_put(s, "Content-Length: ");
+		srv_num(num, knl_strlen(body), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, body);
+	} else if ( knl_strcmp(path, "/msk") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_msk), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_msk);
+	} else if ( knl_strcmp(path, "/mpk1") == 0 || knl_strcmp(path, "/mpk2") == 0
+		    || knl_strcmp(path, "/mpk3") == 0 || knl_strcmp(path, "/mpk4") == 0 ) {
+		CONST char *body = path[4] == '1' ? page_mpk1 : path[4] == '2' ? page_mpk2 : page_mpk3;
+
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: ");
+		srv_num(num, knl_strlen(body), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, body);
+	} else if ( knl_strcmp(path, "/mps") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_mps), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_mps);
+	} else if ( knl_strcmp(path, "/mpl1") == 0 || knl_strcmp(path, "/mpl3") == 0 || knl_strcmp(path, "/mpl2") == 0 ) {
+		CONST char *body = path[4] == '2' ? page_mpl2 : page_mpl1;
+		SYSTIM t;
+
+		(void)tk_get_otm(&t);
+		if ( path[4] == '2' ) mpl_t2 = t.lo;
+		else mpl_t1 = t.lo;
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: ");
+		srv_num(num, knl_strlen(body), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, body);
+	} else if ( knl_strcmp(path, "/mprn") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_mprn), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_mprn);
+	} else if ( knl_strcmp(path, "/mp1") == 0 || knl_strcmp(path, "/mp2") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_mp), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_mp);
+	} else if ( knl_strcmp(path, "/mpv1") == 0 || knl_strcmp(path, "/mpv2") == 0 || knl_strcmp(path, "/mpv3") == 0
+		    || knl_strcmp(path, "/mpc") == 0 ) {
+		CONST char *body = ( path[3] == 'c' ) ? page_mpc : ( path[4] == '3' ) ? page_mpe : page_mpv;
+
+		if ( path[4] == '2' ) mpn_a2 = mpn_a;
+		if ( path[4] == '3' ) {
+			mpn_a3 = mpn_a;
+			mpn_b3 = mpn_b;
+			mpn_r3 = mpn_r;
+			mpn_left = TRUE;
+		}
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(body), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, body);
+	} else if ( knl_strcmp(path, "/mpta") == 0 || knl_strcmp(path, "/mptb") == 0 || knl_strcmp(path, "/mpr") == 0 ) {
+		if ( path[3] == 'r' ) {
+			mpn_r++;
+		} else if ( path[4] == 'a' ) {
+			mpn_a++;
+		} else {
+			mpn_b++;
+		}
+		srv_put(s, "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
 	} else if ( knl_strcmp(path, "/mpa") == 0 ) {
 		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
 		srv_num(num, knl_strlen(page_mpa), 10);
@@ -9485,8 +10169,10 @@ LOCAL void srv_one( INT s )
 		srv_put(s, num);
 		srv_put(s, "\r\nConnection: close\r\n\r\n");
 		srv_put(s, page_spa);
-	} else if ( knl_strcmp(path, "/pw1") == 0 || knl_strcmp(path, "/pw2") == 0 || knl_strcmp(path, "/pwdone") == 0 ) {
-		CONST char *p = ( path[3] == '1' ) ? page_pw1 : ( path[3] == '2' ) ? page_pw2 : page_pwdone;
+	} else if ( knl_strcmp(path, "/pw1") == 0 || knl_strcmp(path, "/pw2") == 0 || knl_strcmp(path, "/pw3") == 0
+		    || knl_strcmp(path, "/pwf") == 0 || knl_strcmp(path, "/pwdone") == 0 ) {
+		CONST char *p = ( path[3] == '1' ) ? page_pw1 : ( path[3] == '2' ) ? page_pw2 : ( path[3] == '3' ) ? page_pw3
+				: ( path[3] == 'f' ) ? page_pwf : page_pwdone;
 
 		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
 		srv_num(num, knl_strlen(p), 10);
@@ -9531,6 +10217,12 @@ LOCAL void srv_one( INT s )
 		srv_put(s, page_iwa);
 	} else if ( knl_strcmp(path, "/iwa-echo") == 0 ) {
 		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 7\r\nConnection: close\r\n\r\necho-ok");
+	} else if ( knl_strcmp(path, "/gltx") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_gltx), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_gltx);
 	} else if ( knl_strcmp(path, "/wgw") == 0 || knl_strcmp(path, "/glgpu") == 0 ) {
 		CONST char *pg = ( path[1] == 'w' ) ? page_wgw : page_glgpu;
 
@@ -9708,6 +10400,24 @@ LOCAL void srv_one( INT s )
 		srv_put(s, num);
 		srv_put(s, "\r\nConnection: close\r\n\r\n");
 		srv_put(s, page_gpu);
+	} else if ( knl_strcmp(path, "/gpl") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_gpl), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_gpl);
+	} else if ( knl_strcmp(path, "/glp") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_glp), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_glp);
+	} else if ( knl_strcmp(path, "/glo") == 0 ) {
+		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+		srv_num(num, knl_strlen(page_glo), 10);
+		srv_put(s, num);
+		srv_put(s, "\r\nConnection: close\r\n\r\n");
+		srv_put(s, page_glo);
 	} else if ( knl_strcmp(path, "/g.webm") == 0 ) {
 		srv_put(s, "HTTP/1.1 200 OK\r\nContent-Type: video/webm\r\nContent-Length: ");
 		srv_num(num, sizeof(vid_webm), 10);
@@ -9998,18 +10708,18 @@ LOCAL INT read_title( void )
 /* The window that says it shows u */
 LOCAL BOOL window_of( CONST TS_UUID *u, TS_UUID *win )
 {
-	TS_UUID	list[64];
+	TS_UUID	*list;
 	char	us[40], want[64];
 	UB	j[512];
-	INT	cnt = 0, i;
+	INT	cnt, i;
 	SZ	asz = 0;
 	BOOL	yes = FALSE;
 	ID	kw;
 
 	ts_uuid_to_str(u, us, sizeof(us));
 	tm_sprintf((UB *)want, (UB *)"\"shows\":\"%s\"", us);
-	if ( ob_lst_obj(OB_T_WINDOW, 0, NULL, list, 64, &cnt) < E_OK ) return FALSE;
-	for ( i = 0; i < cnt && i < 64 && !yes; i++ ) {
+	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return FALSE;
+	for ( i = 0; i < cnt && !yes; i++ ) {
 		kw = ob_opn_obj(&list[i], OB_OP_ATRRD);
 		if ( kw <= 0 ) continue;
 		if ( ob_get_atr(kw, j, sizeof(j) - 1, &asz) >= E_OK && find_text((char *)j, (INT)asz, want) >= 0 ) {
@@ -10018,6 +10728,7 @@ LOCAL BOOL window_of( CONST TS_UUID *u, TS_UUID *win )
 		}
 		ob_cls_obj(kw);
 	}
+	Kfree(list);
 	return yes;
 }
 
@@ -10028,6 +10739,18 @@ LOCAL BOOL window_of( CONST TS_UUID *u, TS_UUID *win )
  * is taken to 'shot' once it says the last page is shown, and a window
  * must then say it shows the page object.
  */
+/* How many windows, panels and parts there are (ob_lst_obj) */
+LOCAL INT windows_count( void )
+{
+	TS_UUID	*list;
+	INT	cnt = kt_lst_obj(OB_T_WINDOW, 0, &list);
+
+	if ( cnt >= 0 ) Kfree(list);
+	return cnt;
+}
+
+LOCAL BOOL boot_word( CONST char *w );
+
 LOCAL INT run_browser( CONST TS_UUID *page, CONST char *lines, CONST char *shot,
 			void (*check)( CONST TS_UUID *page ) )
 {
@@ -10048,6 +10771,12 @@ LOCAL INT run_browser( CONST TS_UUID *page, CONST char *lines, CONST char *shot,
 	}
 	knl_strcpy(brarg + n, lines);
 	n += (INT)knl_strlen(lines);
+	if ( boot_word("ktsingle") ) {
+		/* the comparison: the pages in the browser's own process */
+		if ( n > 0 && brarg[n - 1] != '\n' ) brarg[n++] = '\n';
+		knl_strcpy(brarg + n, "process=single\n");
+		n += (INT)knl_strlen("process=single\n");
+	}
 	/* the page's title into BRTITLE when the browser ends (read_title) */
 	if ( n > 0 && brarg[n - 1] != '\n' ) brarg[n++] = '\n';
 	knl_strcpy(brarg + n, "title=" BRTITLE "\n");
@@ -10078,8 +10807,17 @@ LOCAL INT run_browser( CONST TS_UUID *page, CONST char *lines, CONST char *shot,
 	KT_ASSERT(i < 1200);
 	if ( i < 1200 && page != NULL ) {
 		TS_UUID	w;
+		INT	wid;
 
 		KT_ASSERT(window_of(page, &w));
+		/*
+		 * The person works in the page's window, as after opening the
+		 * page with a double click: the keys typed go there. A program
+		 * started without a person's act opens its window without the
+		 * keys (design 10), and this one is started from here.
+		 */
+		wid = window_of(page, &w) ? wm_obj_wid(&w) : 0;
+		if ( wid > 0 ) (void)wm_focus(wid);
 	}
 	if ( i < 1200 && ( shot != NULL || check != NULL ) ) {
 		tk_dly_tsk(1000);		/* the window manager's own drawing done */
@@ -10824,6 +11562,151 @@ LOCAL void test_https( void )
 LOCAL void test_http3( void )
 {
 	KT_SKIP("not on the user mode network (NET=user)");
+}
+#endif
+
+/*
+ * The network changing under a running browser, as when Wi-Fi joins
+ * another network (a phone's hotspot after the one at home): the address,
+ * the gateway and the name server all change while the browser holds
+ * connections, sessions and names from the network before.
+ *
+ * The machine is on a hub with two user mode networks behind it, u1
+ * (10.0.2.0/24, its name server 10.0.2.3) and u2 (10.1.2.0/24, its name
+ * server 10.1.2.3), made by giving the test's make
+ *
+ *   TEST_NETDEV='-netdev hubport,id=n0,hubid=0
+ *     -netdev user,id=u1,ipv4=on,ipv6=on -netdev hubport,id=p1,hubid=0,netdev=u1
+ *     -netdev user,id=u2,net=10.1.2.0/24,ipv6=off -netdev hubport,id=p2,hubid=0,netdev=u2'
+ *
+ * The test first cuts u2 off (the QMP helper's set_link) and takes u1's
+ * address. Once the browser has shown https://example.com/, it takes the
+ * card's link down, cuts u1 off, puts u2 back, brings the link up and has
+ * the system ask DHCP again with u1's address still held (in a KTEST
+ * kernel the adapters' manager leaves the asking to the tests); the
+ * system takes u2's address, gateway and name server. Nothing of u1 answers any more: what was sent
+ * to it, or from its address, is lost, as on a network left behind.
+ * Then the page fetches example.com again (a server the browser has a
+ * connection to from before) and a host it has not looked up yet
+ * (www.wikipedia.org, whose name must be asked of the new name server);
+ * both must come. The page's title says how each went and how long it
+ * took. Without the second network (another TEST_NETDEV) the address does
+ * not move, and the test is skipped. Afterwards u2 is cut off again and
+ * u1 put back.
+ */
+#if defined(KT_NET_USER) && defined(KT_BROWSER_BLINK)
+#define NSW_AFTER_MS	45000	/* from the page shown to the fetches: the switch is done by then */
+#define NSW_ADDR(a)	( lwip_ntohl(a) >> 8 )
+
+LOCAL UW	nsw_addr, nsw_gw, nsw_dns;	/* what the system had after the switch */
+
+LOCAL void nsw_link( CONST char *name, BOOL up )
+{
+	tm_printf((UB*)"KTEST QMP {\"execute\":\"set_link\",\"arguments\":{\"name\":\"%s\",\"up\":%s}}\n",
+		  name, up ? "true" : "false");
+}
+
+/* The address of the network 'net' (0x0a0102: 10.1.2.x) taken by DHCP; FALSE when it did not come */
+LOCAL BOOL nsw_dhcp( UW net )
+{
+	UW	addr = 0, mask = 0, gw = 0;
+	INT	i;
+
+	/*
+	 * Asked again with the address of the network before held, as the
+	 * adapters' manager asks when the Wi-Fi joined another network: the
+	 * broadcasts must leave to 255.255.255.255 (so_dhcp.c), which is all
+	 * the user mode network's DHCP server takes
+	 */
+	(void)so_dhcp_start();
+	for ( i = 0; i < DHCP_WAIT_S * 2 * 10; i++ ) {
+		if ( so_getifaddr(&addr, &mask, &gw) >= E_OK && addr != 0 && NSW_ADDR(addr) == net ) break;
+		tk_dly_tsk(100);
+	}
+	nsw_addr = addr;
+	nsw_gw = gw;
+	nsw_dns = 0;
+	(void)so_getdns(&nsw_dns);
+	tm_printf((UB*)"  after %d ms: address %08x, gateway %08x, name server %08x\n", i * 100,
+		  (UINT)lwip_ntohl(addr), (UINT)lwip_ntohl(gw), (UINT)lwip_ntohl(nsw_dns));
+	return NSW_ADDR(addr) == net;
+}
+
+/* The switch, from u1 to u2, while the browser shows its page */
+LOCAL void nsw_switch( void )
+{
+	/* the card's link down while it goes to the other network, as the Wi-Fi's does */
+	nsw_link("n0", FALSE);
+	tk_dly_tsk(1500);
+	nsw_link("u1", FALSE);
+	nsw_link("u2", TRUE);
+	tk_dly_tsk(1500);
+	nsw_link("n0", TRUE);
+	tk_dly_tsk(1500);
+	(void)nsw_dhcp(0x0a0102);
+}
+
+LOCAL void test_netswitch( void )
+{
+	T_FSTAT	st;
+	UW	addr = 0, mask = 0, gw = 0;
+	char	lines[1536];
+	INT	n;
+	BOOL	moved;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( so_getifaddr(&addr, &mask, &gw) < E_OK ) {
+		KT_SKIP("no network stack");
+	}
+	/* u1 alone to begin with: both answered DHCP as the machine started */
+	nsw_link("u2", FALSE);
+	tk_dly_tsk(1500);
+	addr = user_net_addr();
+	if ( NSW_ADDR(addr) != 0x0a0002 ) {
+		(void)nsw_dhcp(0x0a0002);
+		addr = nsw_addr;
+	}
+	KT_ASSERT(NSW_ADDR(addr) == 0x0a0002);
+	/*
+	 * The page's script: after the switch, the two fetches side by side,
+	 * each given 60 s; the title says each one's end as it comes
+	 */
+	tm_sprintf((UB *)lines, (UB *)"https://example.com/\nready=" BRREADY "\nquit=%d\n"
+		   "script=js:(function(){var r={};function say(){var t='nsw';"
+		   "for(var k in r)t+=' '+k+'='+r[k];document.title=t;}"
+		   "function go(n,u,o){var t0=Date.now();o.cache='no-store';o.signal=AbortSignal.timeout(60000);"
+		   "r[n]='wait';fetch(u,o).then(function(){r[n]='ok:'+(Date.now()-t0);say();},"
+		   "function(e){r[n]='err:'+(Date.now()-t0);say();});}"
+		   "document.title='nsw before';setTimeout(function(){"
+		   "go('same','https://example.com/?nsw='+Date.now(),{});"
+		   "go('other','https://www.wikipedia.org/?nsw='+Date.now(),{mode:'no-cors'});say();},%d);})();\n",
+		   NSW_AFTER_MS + 75000, NSW_AFTER_MS);
+	nsw_addr = 0;
+	shot_then = nsw_switch;
+	KT_ASSERT_EQ(run_browser(NULL, lines, "/boot/NSW.PPM", NULL), 0);
+	shot_then = NULL;
+	moved = ( NSW_ADDR(nsw_addr) == 0x0a0102 );
+	n = read_title();
+	tm_printf((UB*)"  %s\n", brmeta);
+	if ( moved ) {
+		KT_ASSERT(NSW_ADDR(nsw_gw) == 0x0a0102);
+		KT_ASSERT(NSW_ADDR(nsw_dns) == 0x0a0102);
+		KT_ASSERT(find_text(brmeta, n, "same=ok") > 0);
+		KT_ASSERT(find_text(brmeta, n, "other=ok") > 0);
+	}
+	/* u1 back, as the tests after this one want it */
+	nsw_link("u2", FALSE);
+	nsw_link("u1", TRUE);
+	tk_dly_tsk(1500);
+	KT_ASSERT(nsw_dhcp(0x0a0002));
+	if ( !moved ) KT_SKIP("the address did not move: no second network (TEST_NETDEV, above)");
+}
+#else
+LOCAL void test_netswitch( void )
+{
+	KT_SKIP("not on the user mode network with the browser with Blink (NET=user, BROWSER_BLINK=1)");
 }
 #endif
 
@@ -11582,7 +12465,15 @@ LOCAL void test_blink_keep( void )
 	KT_ASSERT_EQ(run_browser(&page2, "ready=" BRREADY "\nquit=3000\n", "/boot/BKEEP.PPM", NULL), 0);
 	srv_end();
 	n = read_title();
-	KT_ASSERT(find_text(brmeta, n, "\"title\": \"kept pk=kept yes\"") > 0);
+	/*
+	 * The cookie that lasts an hour and the value came back. The jar is
+	 * the machine's session's (14.8): the session cookies the tests
+	 * before this one left on 127.0.0.1 (test_blink's k and j) may be
+	 * there with it, as they would be for any window of this session.
+	 */
+	KT_ASSERT(find_text(brmeta, n, "\"title\": \"kept ") > 0);
+	KT_ASSERT(find_text(brmeta, n, "pk=kept") > 0);
+	KT_ASSERT(find_text(brmeta, n, " yes\"") > 0);
 	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
 	KT_ASSERT_ER(ob_del_obj(&page2), E_OK);
 }
@@ -12374,13 +13265,14 @@ LOCAL INT	tool_ok = 0, tool_z = -1;
 /* The window at this outer corner that is not 'not' */
 LOCAL BOOL window_at( INT left, INT top, CONST TS_UUID *not, TS_UUID *win, T_OBWPOS *wp )
 {
-	TS_UUID	list[64];
-	INT	cnt = 0, i;
+	TS_UUID	*list;
+	INT	cnt, i;
 	SZ	asz = 0;
 	ID	k;
+	BOOL	found = FALSE;
 
-	if ( ob_lst_obj(OB_T_WINDOW, OB_S_WINDOW, NULL, list, 64, &cnt) < E_OK ) return FALSE;
-	for ( i = 0; i < cnt && i < 64; i++ ) {
+	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, OB_S_WINDOW, &list) ) < 0 ) return FALSE;
+	for ( i = 0; i < cnt && !found; i++ ) {
 		if ( ts_uuid_cmp(&list[i], not) == 0 ) continue;
 		k = ob_opn_obj(&list[i], OB_OP_READ);
 		if ( k <= 0 ) continue;
@@ -12389,10 +13281,11 @@ LOCAL BOOL window_at( INT left, INT top, CONST TS_UUID *not, TS_UUID *win, T_OBW
 		ob_cls_obj(k);
 		if ( wp->left == left && wp->top == top ) {
 			*win = list[i];
-			return TRUE;
+			found = TRUE;
 		}
 	}
-	return FALSE;
+	Kfree(list);
+	return found;
 }
 
 LOCAL void type_text( CONST char *s )
@@ -12838,23 +13731,36 @@ LOCAL void test_blink_storage( void )
 
 LOCAL INT panels_up( void );
 LOCAL BOOL panel_came( INT was, INT ms );
+LOCAL void panel_corner( CONST T_OBWPOS *wp, INT pw, INT ph, INT *px, INT *py );
 
-/* Up to ms for the window's name (the page's title) to have w in it: whether it came */
+/*
+ * Up to ms for the window's title (the page's title) to have w in it:
+ * whether it came. The title bar's (WM_TITLE_MAX) is read, and the
+ * object's name (OB_NAME_MAX, shorter) when the window has no number
+ */
 LOCAL BOOL title_came( CONST TS_UUID *win, CONST char *w, INT ms )
 {
 	static UB	j[512];
+	char		t[WM_TITLE_MAX];
 	SZ		asz = 0;
 	ID		k;
+	INT		wid;
 	BOOL		got = FALSE;
 
 	for ( ; ms > 0 && !got; ms -= 200 ) {
-		k = ob_opn_obj(win, OB_OP_ATRRD);
-		if ( k > 0 ) {
-			if ( ob_get_atr(k, j, sizeof(j) - 1, &asz) >= E_OK ) {
-				j[asz] = '\0';
-				got = (BOOL)( find_text((char *)j, (INT)asz, w) >= 0 );
+		wid = wm_obj_wid(win);
+		t[0] = '\0';
+		if ( wid > 0 && wm_title(wid, t, sizeof(t)) >= E_OK ) {
+			got = (BOOL)( find_text(t, (INT)knl_strlen(t), w) >= 0 );
+		} else {
+			k = ob_opn_obj(win, OB_OP_ATRRD);
+			if ( k > 0 ) {
+				if ( ob_get_atr(k, j, sizeof(j) - 1, &asz) >= E_OK ) {
+					j[asz] = '\0';
+					got = (BOOL)( find_text((char *)j, (INT)asz, w) >= 0 );
+				}
+				ob_cls_obj(k);
 			}
-			ob_cls_obj(k);
 		}
 		if ( !got ) tk_dly_tsk(200);
 	}
@@ -12905,8 +13811,9 @@ LOCAL void dialog_check( CONST TS_UUID *page )
 	hid_ev(HID_EV_BTN_UP, 0, x, y, 0, 0);
 	if ( !panel_came(was, 20000) ) tm_printf((UB *)"  no list of the <select> came\n");
 	tk_dly_tsk(500);
-	x = wp.wleft + ( wp.wright - wp.wleft - DLG_SEL_W ) / 2 + DLG_SEL_W / 2;
-	y = wp.wtop + BAR_H + ( wp.wbottom - wp.wtop - BAR_H - DLG_SEL_H ) / 2 + 43;
+	panel_corner(&wp, DLG_SEL_W, DLG_SEL_H, &x, &y);
+	x += DLG_SEL_W / 2;
+	y += 43;
 	hid_ev(HID_EV_MOVE, 0, x, y, 0, 0);
 	hid_ev(HID_EV_BTN_DOWN, 0, x, y, 0, 0);
 	hid_ev(HID_EV_BTN_UP, 0, x, y, 0, 0);
@@ -14635,10 +15542,10 @@ LOCAL void share_press( INT x, INT y )
 
 LOCAL void share_answer( CONST T_OBWPOS *wp, INT row, BOOL sound, BOOL ok )
 {
-	INT	x = wp->wleft + ( wp->wright - wp->wleft - SHARE_PN_W ) / 2;
-	INT	y = wp->wtop + ( wp->wbottom - wp->wtop - SHARE_PN_H ) / 2;
+	INT	x, y;
 
 	tk_dly_tsk(2000);
+	panel_corner(wp, SHARE_PN_W, SHARE_PN_H, &x, &y);
 	if ( row > 0 ) share_press(x + 100, y + 64 + 28);
 	if ( sound ) share_press(x + 30, y + 316);
 	share_press(x + ( ok ? 404 : 308 ), y + 349);
@@ -14819,8 +15726,7 @@ LOCAL void ext_panel_check( CONST TS_UUID *page )
 	ob_cls_obj(k);
 	tk_dly_tsk(6000);
 	if ( kt_screen() ) (void)kt_shot("/boot/BEXTP.PPM");
-	x = wp.wleft + ( wp.wright - wp.wleft - EXT_PN_W ) / 2;
-	y = wp.wtop + ( wp.wbottom - wp.wtop - EXT_PN_H ) / 2;
+	panel_corner(&wp, EXT_PN_W, EXT_PN_H, &x, &y);
 	share_press(x + ( ext_panel_ok ? 464 : 368 ), y + 349);
 	if ( ext_panel_ok ) {
 		tk_dly_tsk(6000);
@@ -14843,6 +15749,109 @@ LOCAL void ext_panel_check( CONST TS_UUID *page )
  */
 LOCAL INT set_read( char *out, INT max );
 
+/*
+ * The processes there are now, by number, for a test that opens browsers
+ * of their own (tabs.create, a link to _blank): those it opened are closed
+ * at its end, every process of theirs ends -- their renderers, the one
+ * kept ready among them -- and the memory comes back, so that the tests
+ * after it start on the machine as it was
+ */
+#define PRC_SEEN_MAX	256
+#define PRC_PID_MAX	4096
+
+LOCAL INT prc_seen( ID *pids, INT max )
+{
+	T_RPRC	rp;
+	ID	pid;
+	INT	n = 0;
+
+	for ( pid = 1; pid < PRC_PID_MAX && n < max; pid++ ) {
+		if ( ts_ref_prc(pid, &rp) >= E_OK ) pids[n++] = pid;
+	}
+	return n;
+}
+
+LOCAL BOOL prc_in( CONST ID *pids, INT n, ID pid )
+{
+	INT	i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( pids[i] == pid ) return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * Whether process pid runs the browser's program: a browser (one the
+ * desktop started for tabs.create, or one a page opened apart) or a
+ * renderer of one
+ */
+LOCAL BOOL browser_prc( ID pid )
+{
+	TS_UUID	u, prog, br;
+
+	if ( knl_prc_uuid(pid, &u, &prog) < E_OK || ts_str_to_uuid(SYSDEF_PROG_BROWSER, &br) < E_OK ) return FALSE;
+	return (BOOL)( ts_uuid_cmp(&prog, &br) == 0 );
+}
+
+/*
+ * The windows of the browsers' processes that were not there in 'was'
+ * closed, as a person closes them, and up to 'ms' for every such
+ * process to end: how many were left. The desktop's own (the document
+ * and the box it opens) are not touched
+ */
+LOCAL INT close_opened( CONST ID *was, INT nwas, INT ms )
+{
+	static ID	now[PRC_SEEN_MAX], ours[PRC_SEEN_MAX];
+	static INT	wl[256];
+	INT		nw, i, k, n, nours = 0, left = 0, asked = 0;
+	T_RPRC		rp;
+
+	/* which they are, taken while they all live (a renderer is known by the browser that made it) */
+	n = prc_seen(now, PRC_SEEN_MAX);
+	for ( i = 0; i < n; i++ ) {
+		if ( prc_in(was, nwas, now[i]) ) continue;
+		if ( browser_prc(now[i]) ) {
+			ours[nours++] = now[i];
+		} else if ( ts_ref_prc(now[i], &rp) >= E_OK ) {
+			/* not the browsers', nor there before: said, so that what holds the memory is known */
+			tm_printf((UB *)"  another process since the start: pid %d (made by %d, %d tasks, %ld KB)\n", now[i],
+				  rp.ppid, rp.ntsk, (long)( rp.memsz >> 10 ));
+		}
+	}
+	nw = wm_list(wl, 256);
+	if ( nw > 256 ) nw = 256;
+	for ( i = 0; i < nw; i++ ) {
+		ID m = wm_obj_maker(wl[i]);
+		if ( m > 0 && prc_in(ours, nours, m) && wm_obj_close_window(wl[i]) >= E_OK ) asked++;
+	}
+	tm_printf((UB *)"  processes the browsers it opened run: %d; their windows asked to close: %d\n", nours, asked);
+	for ( ; ms >= 0; ms -= 500 ) {
+		left = 0;
+		/* one that ended and that nobody collects (its browser gone first: init's) is kept a while as PS_ZOMBIE, with nothing */
+		for ( i = 0; i < nours; i++ ) {
+			if ( ts_ref_prc(ours[i], &rp) >= E_OK && rp.state != PS_ZOMBIE ) left++;
+		}
+		if ( left == 0 ) break;
+		tk_dly_tsk(500);
+	}
+	if ( left > 0 ) {
+		nw = wm_list(wl, 256);
+		if ( nw > 256 ) nw = 256;
+		for ( i = 0; i < nours; i++ ) {
+			INT	nwin = 0;
+
+			if ( ts_ref_prc(ours[i], &rp) < E_OK || rp.state == PS_ZOMBIE ) continue;
+			for ( k = 0; k < nw; k++ ) {
+				if ( wm_obj_maker(wl[k]) == ours[i] ) nwin++;
+			}
+			tm_printf((UB *)"  still there: pid %d (made by %d, state %x, %d tasks, %ld KB, %d windows shown)\n",
+				  ours[i], rp.ppid, rp.state, rp.ntsk, (long)( rp.memsz >> 10 ), nwin);
+		}
+	}
+	return left;
+}
+
 LOCAL void test_blink_ext( void )
 {
 	static char	line[320], tad0[4096], got[1024];
@@ -14852,6 +15861,9 @@ LOCAL void test_blink_ext( void )
 	SZ		tadn = 0;
 	ID		k;
 	INT		n;
+	static ID	was[PRC_SEEN_MAX];
+	INT		nwas;
+	UD		free0, free1;
 
 	if ( fs_stat(SKPROG, &st) < EX_OK ) {
 		KT_SKIP("the engine is not built (make BROWSER=1)");
@@ -14875,6 +15887,9 @@ LOCAL void test_blink_ext( void )
 	ts_uuid_text(&ext, us);
 	ts_uuid_text(&lim, ls);
 	if ( desk_up() ) {
+		/* the processes and the memory with the desktop up, before any browser */
+		nwas = prc_seen(was, PRC_SEEN_MAX);
+		free0 = knl_pf_free_count(-1);
 		/* the panel says what the CRX declares: 〈取消〉 leaves it out, 〈読み込む〉 brings it in */
 		ext_panel_ok = FALSE;
 		tm_sprintf((UB *)line, (UB *)"ready=" BRREADY "\nquit=25000\nlater=extask %s\nlater=settings\nsetstep=sheet:8\nsetstep=dump:/boot/BRSET.TXT\n", ls);
@@ -15007,6 +16022,14 @@ LOCAL void test_blink_ext( void )
 		n = set_read(got, sizeof(got));
 		KT_ASSERT(find_text(got, n, "ktlim") < 0);
 		KT_ASSERT(find_text(got, n, "ktext") >= 0);
+		/* the browsers the extension opened (tabs.create) closed: all of their processes end */
+		if ( !boot_word("ktextkeep") ) {
+			KT_ASSERT_EQ(close_opened(was, nwas, 30000), 0);
+			free1 = knl_pf_free_count(-1);
+			tm_printf((UB *)"  free memory %ld MB at the start, %ld MB once they have ended\n",
+				  (long)( free0 >> 8 ), (long)( free1 >> 8 ));
+			KT_ASSERT(free1 + ( 48 << 8 ) >= free0);	/* back, but for what the stores and caches keep (48 MB) */
+		}
 		desk_down();
 	}
 	srv_end();
@@ -15383,6 +16406,49 @@ LOCAL void test_blink_webgpu( void )
 
 LOCAL INT	win_video;	/* the video's colour seen in its window, at points */
 
+/*
+ * Up to ms for a window whose title has w in it (is w, with whole) to be up: its number, 0
+ * when none came. What a test presses or types in it waits for it so,
+ * not for a time
+ */
+LOCAL INT window_titled( CONST char *w, BOOL whole, INT ms )
+{
+	INT	wl[64], nw, q;
+	char	tt[96];
+
+	for ( ; ms > 0; ms -= 100 ) {
+		nw = wm_list(wl, 64);
+		if ( nw > 64 ) nw = 64;
+		for ( q = 0; q < nw; q++ ) {
+			tt[0] = '\0';
+			(void)wm_title(wl[q], tt, sizeof(tt));
+			if ( whole ? knl_strcmp(tt, w) == 0 : find_text(tt, (INT)knl_strlen(tt), w) >= 0 ) return wl[q];
+		}
+		tk_dly_tsk(100);
+	}
+	return 0;
+}
+
+/* Up to ms for the message line to have w in it: whether it came */
+LOCAL BOOL msg_came( CONST char *w, INT ms )
+{
+	char	m[256];
+
+	for ( ; ms > 0; ms -= 100 ) {
+		m[0] = '\0';
+		(void)wm_msg_text(m, sizeof(m));
+		if ( find_text(m, (INT)knl_strlen(m), w) >= 0 ) return TRUE;
+		tk_dly_tsk(100);
+	}
+	return FALSE;
+}
+
+/* What a check waited for and did not see, said */
+LOCAL void not_came( CONST char *what )
+{
+	tm_printf((UB *)"  did not come: %s\n", what);
+}
+
 LOCAL void win_check( CONST TS_UUID *page )
 {
 	TS_UUID		win;
@@ -15398,7 +16464,7 @@ LOCAL void win_check( CONST TS_UUID *page )
 	knl_memset(&wp, 0, sizeof(wp));
 	(void)ob_rea_rec(k, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
 	ob_cls_obj(k);
-	tk_dly_tsk(1500);
+	if ( !title_came(&win, "win", 15000) ) not_came("the page's title");
 	for ( i = 0; i < 4; i++ ) {
 		x = wp.wleft + 680;
 		y = wp.wtop + BAR_H + 40 + 60 * i;
@@ -15411,7 +16477,8 @@ LOCAL void win_check( CONST TS_UUID *page )
 			 * field (the whole of its page) pressed, and 日本語 typed
 			 * in romaji, committed with Enter
 			 */
-			tk_dly_tsk(3000);
+			if ( window_titled("child", FALSE, 20000) == 0 ) not_came("the window the page opened");
+			tk_dly_tsk(300);		/* its first drawing */
 			x = wp.left + 40 + 140;
 			y = wp.top + 40 + 110;
 			hid_ev(HID_EV_MOVE, 0, x, y, 0, 0);
@@ -15424,20 +16491,28 @@ LOCAL void win_check( CONST TS_UUID *page )
 			type_key(0x28, 0);
 			tk_dly_tsk(300);
 			(void)wm_msg_mode(WM_MODE_ALPH | WM_MODE_ROMAN);
-			tk_dly_tsk(4000);
+			if ( !title_came(&win, "closed=", 20000) ) not_came("the window's answer");
+			continue;
+		}
+		if ( i == 1 ) {
+			if ( !title_came(&win, "pipwin=", 20000) ) not_came("the picture-in-picture window");
 			continue;
 		}
 		if ( i == 2 ) {
 			/*
 			 * The video's window, the third the page opened, a little
 			 * down and right of the page's window: the video's colour
-			 * there while it is open
+			 * there while it is open, looked for until it is drawn
 			 */
-			tk_dly_tsk(900);
-			for ( y = wp.top + 80; y < wp.top + 80 + 120; y += 4 ) {
-				for ( x = wp.left + 80; x < wp.left + 80 + 100; x += 4 ) {
-					if ( near_rgb(screen_px(x, y), 0x20C040, 24) ) win_video++;
+			if ( !title_came(&win, "vpip=", 20000) ) not_came("the video's picture-in-picture");
+			for ( k = 0; k < 50 && win_video < 40; k++ ) {
+				win_video = 0;
+				for ( y = wp.top + 80; y < wp.top + 80 + 120; y += 4 ) {
+					for ( x = wp.left + 80; x < wp.left + 80 + 100; x += 4 ) {
+						if ( near_rgb(screen_px(x, y), 0x20C040, 24) ) win_video++;
+					}
 				}
+				if ( win_video < 40 ) tk_dly_tsk(100);
 			}
 			tm_printf((UB*)"  the video's window: its colour at %d points\n", win_video);
 			{
@@ -15455,10 +16530,10 @@ LOCAL void win_check( CONST TS_UUID *page )
 					}
 				}
 			}
-			tk_dly_tsk(3100);
+			if ( !title_came(&win, "vleft=", 20000) ) not_came("the video back in the page");
 			continue;
 		}
-		tk_dly_tsk(i == 0 ? 6000 : 4000);
+		if ( !title_came(&win, "apart=", 20000) ) not_came("the window asked for apart");
 	}
 }
 
@@ -15533,19 +16608,27 @@ LOCAL void subaddr_check( CONST TS_UUID *page )
 	knl_memset(&wp, 0, sizeof(wp));
 	(void)ob_rea_rec(k, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
 	ob_cls_obj(k);
-	tk_dly_tsk(1500);
 	x = wp.wleft + 200;
 	y = wp.wtop + BAR_H + 100;
 	hid_ev(HID_EV_MOVE, 0, x, y, 0, 0);
 	hid_ev(HID_EV_BTN_DOWN, 0, x, y, 0, 0);
 	hid_ev(HID_EV_BTN_UP, 0, x, y, 0, 0);
-	tk_dly_tsk(5000);		/* the window opened, its page shown */
+	/* the window opened, its page shown (its title, "b") and moved on (pushState) */
+	x = window_titled("b", TRUE, 20000);
+	if ( x == 0 ) {
+		not_came("the window the page opened");
+	} else {
+		(void)wm_focus(x);
+	}
+	if ( !asked_for("/sbb", 15000) ) not_came("its page");
+	tk_dly_tsk(300);		/* its field drawn */
 	type_key(0x0F, HID_MOD_LCTRL);	/* Ctrl+L */
 	tk_dly_tsk(300);
 	type_text("http://127.0.0.1:18202/sbe");
 	tk_dly_tsk(300);
 	type_key(0x28, 0);
-	tk_dly_tsk(3000);
+	if ( !asked_for("/sbe", 15000) ) not_came("the address typed");
+	tk_dly_tsk(500);		/* its address said (addr=) */
 }
 
 LOCAL void test_blink_subaddr( void )
@@ -15601,7 +16684,7 @@ LOCAL BOOL note_press( INT x )
 	T_WMWIN	w;
 	INT	wid = 0, i, px, py;
 
-	for ( i = 0; i < 30 && ( wid = dt_note_wid(0) ) == 0; i++ ) tk_dly_tsk(100);
+	for ( i = 0; i < 200 && ( wid = dt_note_wid(0) ) == 0; i++ ) tk_dly_tsk(100);	/* the notice up */
 	if ( wid == 0 || wm_ref(wid, &w) < E_OK ) return FALSE;
 	px = w.work.left + x;
 	py = w.work.bottom - 8 - 13;
@@ -15619,7 +16702,8 @@ LOCAL void note_check( CONST TS_UUID *page )
 	T_OBWPOS	wp;
 	SZ		asz = 0;
 	ID		k;
-	INT		i, x, y;
+	INT		i, x, y, was;
+	static CONST char *CONST said[3] = { "click=yes", "swclick=", "close=yes" };
 
 	for ( i = 0; i < 3; i++ ) note_seen[i] = 0;
 	if ( !window_of(page, &win) ) return;
@@ -15628,22 +16712,27 @@ LOCAL void note_check( CONST TS_UUID *page )
 	knl_memset(&wp, 0, sizeof(wp));
 	(void)ob_rea_rec(k, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
 	ob_cls_obj(k);
-	tk_dly_tsk(2500);		/* the worker ready */
+	if ( !title_came(&win, "sw=ready", 30000) ) not_came("the worker ready");
 	for ( i = 0; i < 3; i++ ) {
 		x = wp.wleft + 100;
 		y = wp.wtop + BAR_H + 40 + 60 * i;
+		was = panels_up();
 		hid_ev(HID_EV_MOVE, 0, x, y, 0, 0);
 		hid_ev(HID_EV_BTN_DOWN, 0, x, y, 0, 0);
 		hid_ev(HID_EV_BTN_UP, 0, x, y, 0, 0);
 		if ( i == 0 ) {
-			tk_dly_tsk(2500);
-			type_key(0x28, 0);		/* 許可 */
+			/* the panel that asks (許可), once it is up */
+			if ( panel_came(was, 20000) ) {
+				tk_dly_tsk(300);
+				type_key(0x28, 0);
+			} else {
+				not_came("the panel asking to show notifications");
+			}
 		}
-		tk_dly_tsk(2000);
 		/* 〈開く〉, 〈返信〉 (the notice's own, at the left), 〈閉じる〉 */
 		note_seen[i] = note_press(( i == 0 ) ? 340 - 12 - 2 * 76 - 6 + 38 : ( i == 1 ) ? 12 + 38 : 340 - 12 - 38)
 			       ? 1 : 0;
-		tk_dly_tsk(2500);
+		if ( !title_came(&win, said[i], 20000) ) not_came(said[i]);
 	}
 }
 
@@ -15873,19 +16962,20 @@ LOCAL void api4_check( CONST TS_UUID *page )
 	knl_memset(&wp, 0, sizeof(wp));
 	(void)ob_rea_rec(k, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
 	ob_cls_obj(k);
-	tk_dly_tsk(3000);
+	if ( !title_came(&win, "clone=", 20000) ) not_came("the page's first answers");
 	x = wp.wleft + 100;
 	y = wp.wtop + BAR_H + 40;
 	hid_ev(HID_EV_MOVE, 0, x, y, 0, 0);
 	hid_ev(HID_EV_BTN_DOWN, 0, x, y, 0, 0);
 	hid_ev(HID_EV_BTN_UP, 0, x, y, 0, 0);
-	tk_dly_tsk(1500);
+	/* the EyeDropper waits: the message line asks for a point */
+	if ( !msg_came("色を取る点", 15000) ) not_came("the message line asking for a point");
 	x = wp.wleft + 60;
 	y = wp.wtop + BAR_H + 130;
 	hid_ev(HID_EV_MOVE, 0, x, y, 0, 0);
 	hid_ev(HID_EV_BTN_DOWN, 0, x, y, 0, 0);
 	hid_ev(HID_EV_BTN_UP, 0, x, y, 0, 0);
-	tk_dly_tsk(2500);
+	if ( !title_came(&win, "eye=", 15000) ) not_came("the colour picked");
 }
 
 LOCAL void test_blink_api4( void )
@@ -16186,8 +17276,9 @@ LOCAL void pw_verify( void )
 LOCAL void test_blink_pw( void )
 {
 	T_FSTAT	st;
-	TS_UUID	page, page2;
+	TS_UUID	page, page2, page3;
 	INT	n;
+	BOOL	up;
 
 	if ( fs_stat(SKPROG, &st) < EX_OK ) {
 		KT_SKIP("the engine is not built (make BROWSER=1)");
@@ -16197,22 +17288,27 @@ LOCAL void test_blink_pw( void )
 		(void)ob_del_obj(&page);
 		return;
 	}
+	if ( !make_page("http://localhost:18156/pw3", &page3) ) {
+		(void)ob_del_obj(&page);
+		(void)ob_del_obj(&page2);
+		return;
+	}
 	if ( !srv_start(HTTP_PORT + 76) ) {
 		(void)ob_del_obj(&page);
 		(void)ob_del_obj(&page2);
+		(void)ob_del_obj(&page3);
 		KT_SKIP("no network stack");
 	}
 	KT_ASSERT(pw_prepare());
-	if ( desk_up() ) {
+	up = desk_up();
+	if ( up ) {
 		pw_panels = 4;
 		KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=17000\n", NULL, pw_check), 0);
 		n = read_title();
 		tm_printf((UB *)"  first run: %s\n", brmeta);
 		pw_panels = 3;
 		KT_ASSERT_EQ(run_browser(&page2, "ready=" BRREADY "\nquit=14000\n", NULL, pw_check), 0);
-		desk_down();
 	}
-	srv_end();
 	n = read_title();
 	KT_ASSERT(find_text(brmeta, n, "old=dave:dave") > 0);
 	KT_ASSERT(find_text(brmeta, n, "pk=made") > 0);
@@ -16220,9 +17316,21 @@ LOCAL void test_blink_pw( void )
 	KT_ASSERT(find_text(brmeta, n, "pk2=signed:7") > 0);
 	KT_ASSERT(find_text(brmeta, n, "get=alice:alice") > 0);
 	KT_ASSERT(find_text(brmeta, n, "fill=alice:alice") > 0);
+	if ( up ) {
+		/* another site's page with an iframe of 127.0.0.1: Enter twice, which would agree to a panel if one came */
+		pw_panels = 2;
+		KT_ASSERT_EQ(run_browser(&page3, "ready=" BRREADY "\nquit=12000\n", NULL, pw_check), 0);
+		desk_down();
+	}
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  another site: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "frame=empty") > 0);
+	KT_ASSERT(find_text(brmeta, n, "get=null") > 0);
 	pw_verify();
 	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
 	KT_ASSERT_ER(ob_del_obj(&page2), E_OK);
+	KT_ASSERT_ER(ob_del_obj(&page3), E_OK);
 }
 
 /*
@@ -16313,6 +17421,21 @@ LOCAL void test_blink_settings( void )
 		(void)run_browser(&blank, "ready=" BRREADY "\nquit=8000\nmenu=settings\nsetstep=sheet:3\n", "/boot/BSET3.PPM", NULL);
 		shot_later = NULL;
 		(void)run_browser(&blank, "ready=" BRREADY "\nquit=6000\nmenu=settings\nsetstep=sheet:7\n", "/boot/BSET7.PPM", NULL);
+		/*
+		 * The browser ends while the settings window is still busy (a
+		 * step waiting): its window is told to close and not waited
+		 * for, and the process ends with the window up. The system
+		 * takes the window, its panel and the panel's parts with it,
+		 * and the next browser's window is found among the windows
+		 */
+		n = windows_count();
+		KT_ASSERT_EQ(run_browser(&blank, "ready=" BRREADY "\nquit=4000\nmenu=settings\nsetstep=wait:20000\n",
+					 NULL, NULL), 0);
+		tk_dly_tsk(500);
+		rows = windows_count();
+		tm_printf((UB *)"  windows before %d, after the browser ended with its settings up %d\n", n, rows);
+		KT_ASSERT(rows <= n);
+		KT_ASSERT_EQ(run_browser(&blank, "ready=" BRREADY "\nquit=3000\n", NULL, NULL), 0);
 		desk_down();
 	}
 	srv_end();
@@ -16590,6 +17713,52 @@ LOCAL void test_blink_history( void )
 	(void)ob_del_obj(&blank);
 }
 
+/*
+ * A history of thousands of pages, as a machine used for long has: the
+ * list of 〈履歴〉 shows every one of them (its names are more than a
+ * panel's parts once had room for together), and the window opens with
+ * them in a few seconds. The history is cleared again afterwards.
+ */
+#define HIST_MANY	3000
+
+LOCAL void test_blink_hist_many( void )
+{
+	T_FSTAT	st;
+	TS_UUID	blank, d;
+	SYSTIM	t0, t1;
+	char	*got;
+	INT	n, i, rows;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("about:blank", &blank) ) return;
+	got = (char *)Kmalloc(512 * 1024);
+	KT_ASSERT(got != NULL);
+	if ( got == NULL ) return;
+	KT_ASSERT_ER(dt_start(), E_OK);
+	for ( i = 0; i < 100 && ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK; i++ ) tk_dly_tsk(100);
+	(void)fs_unlink(BRSET);
+	(void)tk_get_otm(&t0);
+	(void)keep_run(&blank, "quit=15000\n" SET_OPEN "setstep=histfill:3000\nsetstep=sheet:4\nsetstep=dump:" BRSET "\n", NULL);
+	(void)tk_get_otm(&t1);
+	n = set_read(got, 512 * 1024);
+	for ( rows = 0, i = 0; i + 3 < n; i++ ) {
+		if ( ( i == 0 || got[i - 1] == '\n' ) && got[i] == '4' && got[i + 1] == '0' && got[i + 2] == ':' ) rows++;
+	}
+	tm_printf((UB *)"  %d rows of the history listed, %d bytes, the run %d ms\n", rows, n, (INT)( t1.lo - t0.lo ));
+	KT_ASSERT(rows >= HIST_MANY);
+	KT_ASSERT(find_text(got, n, "fill.test/2999/") > 0);
+	/* the window as it looks with them, for a person to read */
+	(void)run_browser(&blank, "ready=" BRREADY "\nquit=8000\nmenu=settings\nsetstep=sheet:4\n", "/boot/BHIST.PPM", NULL);
+	/* everything out again */
+	(void)keep_run(&blank, "quit=7000\n" SET_OPEN "setstep=sheet:3\nsetstep=set:28:1\nsetstep=press:32\n", NULL);
+	dt_quit();
+	wm_update();
+	Kfree(got);
+	(void)ob_del_obj(&blank);
+}
+
 /* HTTPS rules: a host's kept to the next run, and gone with the history (the rule added by a test's line; no TLS server here) */
 LOCAL void test_blink_hsts( void )
 {
@@ -16668,6 +17837,286 @@ LOCAL void test_blink_dl( void )
 	srv_end();
 	(void)ob_del_obj(&go);
 	(void)ob_del_obj(&ok);
+	(void)ob_del_obj(&blank);
+}
+
+/*
+ * An attachment of another site: "/dlx" on 127.0.0.1 goes to "/att2" on
+ * localhost, which the server answers as an attachment. With renderers the
+ * browser starts one of the other site for it and ends it as soon as the
+ * answer is a download; what was saved is the browser's to keep, so it is
+ * a real object in ブラウザの保存箱 all the same, and done in the list of
+ * the next run.
+ */
+LOCAL void test_blink_dlatt( void )
+{
+	T_FSTAT	st;
+	TS_UUID	dlx, blank;
+	static char	got[4096];
+	INT	n, before, after;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18294/dlx", &dlx) ) return;
+	if ( !make_page("about:blank", &blank) ) return;
+	if ( !srv_start(HTTP_PORT + 214) ) KT_SKIP("no network stack");
+	before = saved_links();
+	KT_ASSERT(before >= 0);
+	n = keep_run(&dlx, "quit=12000\n", NULL);
+	after = saved_links();
+	tm_printf((UB *)"  asked for /att2 %d times; links in the box %d before, %d after\n", seen_count("/att2"),
+		  before, after);
+	KT_ASSERT_EQ(seen_count("/att2"), 1);
+	KT_ASSERT_EQ(after, before + 1);
+	n = keep_run(&blank, "quit=6000\nmenu=settings\nsetstep=sheet:5\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	tm_printf((UB *)"  the list: %s\n", got);
+	KT_ASSERT(find_text(got, n, "att2.txt\t完了") >= 0);
+	srv_end();
+	(void)ob_del_obj(&dlx);
+	(void)ob_del_obj(&blank);
+}
+
+/*
+ * Answers Blink does not make a document of, with no attachment said, are
+ * downloads, as Chrome makes them (a type it does not show; a type that
+ * says nothing, or none, sniffed from the bytes, which are not text):
+ * "/dm1.zip" (application/zip), "/dm2" (application/octet-stream),
+ * "/dm3.bin" (no Content-Type) and "/dm5" (text/plain, its bytes not
+ * text). The page shown stays; the message line says the object is in
+ * the save box and goes on saying so; the box has a link more, the tray
+ * the object's link on top, and the next run's list a done row. Text with
+ * no type ("/dm4") is shown, not saved. "/dm6" is bytes that are not text
+ * said to be HTML, long for the renderer to make a document of: 中止 is
+ * taken while it works, and the page shown stays.
+ */
+LOCAL CONST char	*dm_name;	/* the name of the real object saved (the file's, without its extension) */
+LOCAL BOOL		dm_said, dm_kept, dm_stopped;
+
+LOCAL void dm_check( CONST TS_UUID *page )
+{
+	char	w[80], m[256];
+
+	(void)page;
+	knl_strcpy(w, "「");
+	knl_strcat(w, dm_name);
+	knl_strcat(w, "」をブラウザの保存箱に入れ");
+	dm_said = msg_came(w, 30000);
+	tk_dly_tsk(3000);
+	m[0] = '\0';
+	(void)wm_msg_text(m, sizeof(m));
+	dm_kept = find_text(m, (INT)knl_strlen(m), w) >= 0;
+	tm_printf((UB *)"  %s: the message line %s, 3 s later: %s\n", dm_name, dm_said ? "said it" : "did not say it", m);
+}
+
+LOCAL void dm_stop( CONST TS_UUID *page )
+{
+	T_OBWPOS	wp;
+	INT		i;
+	UW		t0;
+
+	/* the window pressed, for the keys to go to it */
+	if ( stuck_window(page, &wp) ) {
+		hid_ev(HID_EV_MOVE, 0, wp.wleft + 40, wp.wtop + 40, 0, 0);
+		hid_ev(HID_EV_BTN_DOWN, 0, wp.wleft + 40, wp.wtop + 40, 0, 0);
+		hid_ev(HID_EV_BTN_UP, 0, wp.wleft + 40, wp.wtop + 40, 0, 0);
+	}
+	for ( i = 0; i < 300 && seen_count("/dm6") == 0; i++ ) tk_dly_tsk(100);
+	tk_dly_tsk(4000);			/* its bytes come; the renderer works on them */
+	t0 = lag_now();
+	type_key(0x29, 0);			/* Esc */
+	dm_stopped = msg_came("読み込みを中止しました", 5000);
+	tm_printf((UB *)"  /dm6: 中止 %s in %d ms\n", dm_stopped ? "taken" : "not taken", (INT)( lag_now() - t0 ));
+}
+
+/* The name of the set on top of the tray, "" when there is none */
+LOCAL void dm_tray_top( char *out, INT max )
+{
+	T_TRSTS	sts;
+	INT	i;
+
+	out[0] = '\0';
+	if ( tr_get_sts(&sts) < E_OK || sts.nlevel <= 0 ) return;
+	for ( i = 0; i < max - 1 && i < TR_NAME_MAX && sts.set[1].name[i] != '\0'; i++ ) out[i] = (char)sts.set[1].name[i];
+	out[i] = '\0';
+}
+
+LOCAL void test_blink_dlmime( void )
+{
+	static CONST struct {
+		CONST char	*page, *path, *name, *file;
+	} kDl[] = {
+		{ "http://127.0.0.1:18312/dmp1", "/dm1.zip", "dm1", "dm1.zip" },
+		{ "http://127.0.0.1:18312/dmp2", "/dm2", "dm2", "dm2" },
+		{ "http://127.0.0.1:18312/dmp3", "/dm3.bin", "dm3", "dm3.bin" },
+		{ "http://127.0.0.1:18312/dmp5", "/dm5", "dm5", "dm5" },
+	};
+	T_FSTAT	st;
+	TS_UUID	pg, blank;
+	static char	got[4096];
+	char	top[TR_NAME_MAX];
+	INT	n, i, before, after;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("about:blank", &blank) ) return;
+	if ( !srv_start(HTTP_PORT + 232) ) {
+		(void)ob_del_obj(&blank);
+		KT_SKIP("no network stack");
+	}
+	(void)tr_clr_tra();
+	for ( i = 0; i < (INT)( sizeof(kDl) / sizeof(kDl[0]) ); i++ ) {
+		if ( !make_page(kDl[i].page, &pg) ) break;
+		before = saved_links();
+		dm_name = kDl[i].name;
+		dm_said = dm_kept = FALSE;
+		n = keep_run(&pg, "quit=40000\n", dm_check);
+		after = saved_links();
+		dm_tray_top(top, sizeof(top));
+		tm_printf((UB *)"  %s: asked %d times; links in the box %d before, %d after; the tray's top \"%s\"\n",
+			  kDl[i].path, seen_count(kDl[i].path), before, after, top);
+		KT_ASSERT_EQ(seen_count(kDl[i].path), 1);
+		KT_ASSERT(dm_said);
+		KT_ASSERT(dm_kept);
+		KT_ASSERT_EQ(after, before + 1);
+		KT_ASSERT(knl_strcmp(top, kDl[i].name) == 0);
+		/* the page that went there is the one shown still */
+		KT_ASSERT(find_text(brmeta, n, "\"title\": \"dmp") > 0);
+		(void)ob_del_obj(&pg);
+	}
+	/* text with no type: shown */
+	if ( make_page("http://127.0.0.1:18312/dmp4", &pg) ) {
+		before = saved_links();
+		n = keep_run(&pg, "quit=12000\n", NULL);
+		after = saved_links();
+		tm_printf((UB *)"  /dm4: asked %d times; links in the box %d before, %d after\n", seen_count("/dm4"),
+			  before, after);
+		KT_ASSERT_EQ(seen_count("/dm4"), 1);
+		KT_ASSERT_EQ(after, before);
+		KT_ASSERT(find_text(brmeta, n, "\"title\": \"dmp") < 0);
+		(void)ob_del_obj(&pg);
+	}
+	/* a page long to make: 中止 taken while the renderer works on it */
+	if ( make_page("http://127.0.0.1:18312/dmp6", &pg) ) {
+		TS_UUID	d;
+
+		/* with the desktop up, as a person works: the keys go to the window pressed */
+		KT_ASSERT_ER(dt_start(), E_OK);
+		for ( i = 0; i < 100 && ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK; i++ ) tk_dly_tsk(100);
+		tk_dly_tsk(1000);
+		dm_stopped = FALSE;
+		/* the page shown is the one of its renderer ended: the run's own end is not looked at */
+		(void)run_browser(&pg, "ready=" BRREADY "\nquit=20000\n", NULL, dm_stop);
+		dt_quit();
+		wm_update();
+		/* the desktop gone before the next test brings its own up */
+		for ( i = 0; i < 100 && ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) >= E_OK; i++ ) tk_dly_tsk(100);
+		tk_dly_tsk(1000);
+		KT_ASSERT(dm_stopped);
+		(void)ob_del_obj(&pg);
+	}
+	n = keep_run(&blank, "quit=6000\nmenu=settings\nsetstep=sheet:5\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	tm_printf((UB *)"  the list: %s\n", got);
+	for ( i = 0; i < (INT)( sizeof(kDl) / sizeof(kDl[0]) ); i++ ) {
+		char	row[40];
+
+		knl_strcpy(row, kDl[i].file);
+		knl_strcat(row, "\t完了");
+		KT_ASSERT(find_text(got, n, row) >= 0);
+	}
+	(void)tr_clr_tra();
+	srv_end();
+	(void)ob_del_obj(&blank);
+}
+
+/*
+ * A download that comes slowly: "/dsp" counts its seconds in its title
+ * and goes to "/dsl.bin", 640000 bytes that are not text, coming in 64 s,
+ * longer than a page is waited for (60 s). The answer is a download at
+ * its response and is handed over there: the message line says it is
+ * being saved at once, the page shown stays and goes on counting (the
+ * renderer does not wait for the bytes), the list shows it coming with
+ * how much has come, and it is saved whole after more than 60 s, a link
+ * more in the box and a done row in the next run's list.
+ */
+LOCAL BOOL	dsl_begun, dsl_done;
+LOCAL INT	dsl_begin_ms, dsl_ms;
+
+LOCAL void dsl_check( CONST TS_UUID *page )
+{
+	UW	t0;
+	INT	i;
+
+	(void)page;
+	for ( i = 0; i < 300 && seen_count("/dsl.bin") == 0; i++ ) tk_dly_tsk(100);
+	t0 = lag_now();
+	dsl_begun = msg_came("「dsl.bin」を保存しています", 10000);
+	dsl_begin_ms = (INT)( lag_now() - t0 );
+	dsl_done = msg_came("「dsl」をブラウザの保存箱に入れ", 90000);
+	dsl_ms = (INT)( lag_now() - t0 );
+	tm_printf((UB *)"  /dsl.bin: saving said %s in %d ms, saved %s %d ms after it was asked for\n",
+		  dsl_begun ? "" : "not", dsl_begin_ms, dsl_done ? "" : "not", dsl_ms);
+}
+
+/* The number after 'w' in 'got', -1 when 'w' is not there */
+LOCAL INT num_after( CONST char *got, INT n, CONST char *w )
+{
+	INT	k = find_text(got, n, w), v = 0;
+
+	if ( k < 0 ) return -1;
+	for ( k += (INT)knl_strlen(w); k < n && got[k] >= '0' && got[k] <= '9'; k++ ) v = v * 10 + ( got[k] - '0' );
+	return v;
+}
+
+LOCAL void test_blink_dlslow( void )
+{
+	T_FSTAT	st;
+	TS_UUID	pg, blank;
+	static char	got[4096];
+	INT	n, before, after, counted, pct;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18325/dsp", &pg) ) return;
+	if ( !make_page("about:blank", &blank) ) return;
+	if ( !srv_start(HTTP_PORT + 245) ) {
+		(void)ob_del_obj(&pg);
+		(void)ob_del_obj(&blank);
+		KT_SKIP("no network stack");
+	}
+	(void)fs_unlink(BRSET);
+	before = saved_links();
+	dsl_begun = dsl_done = FALSE;
+	dsl_begin_ms = dsl_ms = 0;
+	/* the sheet shown again after the wait: the list is not filled again while a step waits */
+	n = keep_run(&pg, "quit=95000\nmenu=settings\nsetstep=sheet:5\nsetstep=wait:30000\nsetstep=sheet:5\nsetstep=dump:" BRSET "\n",
+		     dsl_check);
+	after = saved_links();
+	counted = num_after(brmeta, n, "\"title\": \"dsp ");
+	tm_printf((UB *)"  asked for /dsl.bin %d times; links in the box %d before, %d after; the page counted %d s\n",
+		  seen_count("/dsl.bin"), before, after, counted);
+	KT_ASSERT_EQ(seen_count("/dsl.bin"), 1);
+	KT_ASSERT(dsl_begun);
+	KT_ASSERT(dsl_done);
+	KT_ASSERT(dsl_ms > 60000);
+	KT_ASSERT_EQ(after, before + 1);
+	/* the page shown went on while the bytes came: its renderer did not wait for them */
+	KT_ASSERT(counted >= 60);
+	n = set_read(got, sizeof(got));
+	tm_printf((UB *)"  the list while it came: %s\n", got);
+	pct = num_after(got, n, "dsl.bin\t受信中\t");
+	KT_ASSERT(pct > 0 && pct < 100);
+	n = keep_run(&blank, "quit=6000\nmenu=settings\nsetstep=sheet:5\nsetstep=dump:" BRSET "\n", NULL);
+	n = set_read(got, sizeof(got));
+	tm_printf((UB *)"  the next run's list: %s\n", got);
+	KT_ASSERT(find_text(got, n, "dsl.bin\t完了") >= 0);
+	(void)tr_clr_tra();
+	srv_end();
+	(void)ob_del_obj(&pg);
 	(void)ob_del_obj(&blank);
 }
 
@@ -16915,6 +18364,39 @@ LOCAL INT panels_up( void )
 		if ( wm_panel_rect(pid, &r) >= E_OK ) n++;
 	}
 	return n;
+}
+
+/*
+ * Where the panel of a size (its window's work area, pw by ph) stands:
+ * ui_dlg_open puts a program's question in the middle of the screen, not
+ * over its window, so a press on it is reckoned from where it is. The
+ * latest such panel; when none is up, the middle of the window wp is
+ * taken, and that is said.
+ */
+LOCAL void panel_corner( CONST T_OBWPOS *wp, INT pw, INT ph, INT *px, INT *py )
+{
+	T_DPRECT	r;
+	INT		pid, found = 0;
+
+	*px = wp->wleft + ( wp->wright - wp->wleft - pw ) / 2;
+	*py = wp->wtop + ( wp->wbottom - wp->wtop - ph ) / 2;
+	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) {
+		T_WMWIN	w;
+		INT	wid;
+
+		if ( wm_panel_rect(pid, &r) < E_OK ) continue;
+		if ( r.right - r.left < pw - 8 || r.right - r.left > pw + 8 ) continue;
+		if ( r.bottom - r.top < ph - 8 || r.bottom - r.top > ph + 8 ) continue;
+		/* the panel's rectangle is in its window's work area */
+		wid = wm_panel_wid(pid);
+		if ( wid <= 0 || wm_ref(wid, &w) < E_OK ) continue;
+		found = pid;
+		tm_printf((UB *)"  the panel %dx%d is at %d,%d (the window's middle would put it at %d,%d)\n",
+			  pw, ph, w.work.left + r.left, w.work.top + r.top, *px, *py);
+		*px = w.work.left + r.left;
+		*py = w.work.top + r.top;
+	}
+	if ( found == 0 ) tm_printf((UB *)"  no panel %dx%d is up: pressed over the window's middle\n", pw, ph);
 }
 
 /* Up to ms for more panels than 'was' to be up: whether they came */
@@ -17647,13 +19129,15 @@ LOCAL void test_blink_find( void )
  * The Widevine CDM the user installs (BROWSER_BLINK=1, design 14.6.3).
  * Not installed, "/wv" is refused Widevine (NotSupportedError) and given
  * Clear Key; 〈Widevineを導入〉 shows its panel, and 取消 (Esc) fetches
- * nothing. With the archive's index and the package on /boot (make ...
- * WV_TEST=<dir>, fetched on the development machine), the browser is
+ * nothing. With the archive's index and the package (on x86-64 the
+ * component update service's answer and the CRX3 file) on /boot (make
+ * ... WV_TEST=<dir>, fetched on the development machine), the browser is
  * pointed at this server's copy ("wvrepo="): 導入 (Enter) fetches,
  * checks and keeps the CDM in an object of the user's, which record 10
  * of the browser's storage object names, mode rw-------; "/wv?want=ok"
  * then gets Widevine with software security, not with hardware
- * security. A browser started again loads the CDM from the object
+ * security. With NET=user, "/wvplay" then plays a Widevine stream over
+ * the Internet. A browser started again loads the CDM from the object
  * (the console says its version), and 〈Widevineを外す〉 with 了解 takes
  * the object and the entry away, and Widevine with them.
  */
@@ -17750,11 +19234,21 @@ LOCAL void wv_check( CONST TS_UUID *page )
 			type_key(0x29, 0);		/* Esc: 取消 */
 			continue;
 		}
+		tm_printf((UB *)"  wv: Enter (%d)\n", (int)i);
 		type_key(0x28, 0);			/* Enter: 導入, or 了解 */
 		tk_dly_tsk(2500);
-		if ( wv_asked("/rpi/") || wv_asked("/wvend") ) break;
+		if ( wv_asked(WV_BASE) || wv_asked("/wvend") ) break;
 	}
 	if ( wv_step == 0 ) return;
+	if ( asked_for("/wvend", 300000) ) tk_dly_tsk(500);
+	tm_printf((UB *)"  wv: Ctrl+E (%d requests seen)\n", (int)srv_seen);
+	type_key(0x08, 0x01);				/* Ctrl+E: the window closed */
+}
+
+/* The playback page: the end of its wait, then the window closed */
+LOCAL void wvplay_check( CONST TS_UUID *page )
+{
+	(void)page;
 	if ( asked_for("/wvend", 300000) ) tk_dly_tsk(500);
 	type_key(0x08, 0x01);				/* Ctrl+E: the window closed */
 }
@@ -17766,6 +19260,9 @@ LOCAL void test_blink_wv( void )
 	T_OBPRT		*prt = (T_OBPRT *)prt_b;
 	T_OBREC	r[8];
 	TS_UUID	page, page2, page3, obj, other;
+#ifdef KT_NET_USER
+	TS_UUID	page4, page5;
+#endif
 	INT	n, cnt = 0, i;
 	UD	lib = 0;
 	BOOL	have;
@@ -17774,7 +19271,7 @@ LOCAL void test_blink_wv( void )
 	if ( fs_stat(SKPROG, &st) < EX_OK ) {
 		KT_SKIP("the engine is not built (make BROWSER=1)");
 	}
-	have = (BOOL)( fs_stat(WV_DEB, &st) >= EX_OK && fs_stat(WV_PKGS, &st) >= EX_OK );
+	have = (BOOL)( fs_stat(WV_PACKAGE, &st) >= EX_OK && fs_stat(WV_INDEX, &st) >= EX_OK );
 	wv_clear();
 	if ( !make_page("http://127.0.0.1:18170/wv", &page) ) return;
 	if ( !make_page("http://127.0.0.1:18170/wv?want=ok", &page2) ) {
@@ -17796,20 +19293,20 @@ LOCAL void test_blink_wv( void )
 		/* not installed; the panel answered 取消 */
 		wv_step = 0;
 		KT_ASSERT_EQ(run_browser(&page, "ready=" BRREADY "\nquit=15000\nsecure=http://127.0.0.1:18170\n"
-					 "wvrepo=http://127.0.0.1:18170/rpi\nmenu=wvinstall\n", NULL, wv_check), 0);
+					 WV_REPO "menu=wvinstall\n", NULL, wv_check), 0);
 		n = read_title();
 		KT_ASSERT(find_text(brmeta, n, "wv first=NotSupportedError last=NotSupportedError hw=NotSupportedError ck=ok") > 0);
-		KT_ASSERT(!wv_asked("/rpi/"));
+		KT_ASSERT(!wv_asked(WV_BASE));
 		KT_ASSERT(!wv_object(wv_read(), 0, &obj));
 		if ( have ) {
 			/* 導入: fetched from this server's copy of the archive */
 			wv_step = 1;
 			KT_ASSERT_EQ(run_browser(&page2, "ready=" BRREADY "\nquit=400000\nsecure=http://127.0.0.1:18170\n"
-						 "wvrepo=http://127.0.0.1:18170/rpi\nmenu=wvinstall\n", NULL, wv_check), 0);
+						 WV_REPO "menu=wvinstall\n", NULL, wv_check), 0);
 			n = read_title();
 			KT_ASSERT(find_text(brmeta, n, "wv first=NotSupportedError last=ok hw=NotSupportedError ck=ok") > 0);
-			KT_ASSERT(wv_asked("/rpi/dists/"));
-			KT_ASSERT(wv_asked("/rpi/pool/"));
+			KT_ASSERT(wv_asked(WV_ASK_INDEX));
+			KT_ASSERT(wv_asked(WV_ASK_PACKAGE));
 			KT_ASSERT(wv_object(wv_read(), 0, &obj));
 			KT_ASSERT(!wv_object(wv_read(), 1, &other));
 			KT_ASSERT_ER(ob_get_prt(&obj, prt, KT_PRT_SIZE, NULL), E_OK);
@@ -17826,6 +19323,36 @@ LOCAL void test_blink_wv( void )
 			}
 			tm_printf((UB *)"  the CDM's object: %d records, the library %d bytes\n", (int)cnt, (int)lib);
 			KT_ASSERT(lib > 1024 * 1024);
+#ifdef KT_NET_USER
+			/* a Widevine stream played over the Internet */
+			if ( make_page("http://127.0.0.1:18170/wvplay", &page4) ) {
+				srv_seen = 0;
+				KT_ASSERT_EQ(run_browser(&page4, "ready=" BRREADY "\nquit=400000\nsecure=http://127.0.0.1:18170\n",
+							 NULL, wvplay_check), 0);
+				n = read_title();
+				tm_printf((UB *)"  the playback: %s\n", brmeta);
+				if ( find_text(brmeta, n, "wvplay noshaka") > 0 ) {
+					tm_printf((UB *)"  Shaka Player is not reached: the playback is not tried\n");
+				} else {
+					KT_ASSERT(find_text(brmeta, n, "wvplay ok") > 0);
+					KT_ASSERT(find_text(brmeta, n, "drm=com.widevine.alpha") > 0);
+				}
+				KT_ASSERT_ER(ob_del_obj(&page4), E_OK);
+			}
+			/* the Clear Key stream of the same video, the decryptor called from the pipeline's thread too */
+			if ( make_page("http://127.0.0.1:18170/wvplay?ck", &page5) ) {
+				srv_seen = 0;
+				KT_ASSERT_EQ(run_browser(&page5, "ready=" BRREADY "\nquit=400000\nsecure=http://127.0.0.1:18170\n",
+							 NULL, wvplay_check), 0);
+				n = read_title();
+				tm_printf((UB *)"  the Clear Key playback: %s\n", brmeta);
+				if ( find_text(brmeta, n, "wvplay noshaka") < 0 ) {
+					KT_ASSERT(find_text(brmeta, n, "wvplay ok") > 0);
+					KT_ASSERT(find_text(brmeta, n, "drm=org.w3.clearkey") > 0);
+				}
+				KT_ASSERT_ER(ob_del_obj(&page5), E_OK);
+			}
+#endif
 
 			/* started again: loaded from the object; 〈Widevineを外す〉 and 了解 */
 			wv_step = 1;
@@ -17833,6 +19360,7 @@ LOCAL void test_blink_wv( void )
 			KT_ASSERT_EQ(run_browser(&page3, "ready=" BRREADY "\nquit=400000\nsecure=http://127.0.0.1:18170\n"
 						 "menu=wvremove\n", NULL, wv_check), 0);
 			n = read_title();
+			tm_printf((UB *)"  started again and taken away: %s\n", brmeta);
 			KT_ASSERT(find_text(brmeta, n, "wv first=ok last=NotSupportedError hw=NotSupportedError ck=ok") > 0);
 			KT_ASSERT(!wv_object(wv_read(), 0, &other));
 			KT_ASSERT(ob_get_prt(&obj, prt, KT_PRT_SIZE, NULL) < E_OK);
@@ -17987,6 +19515,1657 @@ LOCAL void test_blink_spa( void )
 }
 
 /*
+ * The window's pages in renderers of their own (design 14.13): "/mp1" at
+ * 127.0.0.1, then "/mp2" at localhost, another site, which a renderer of
+ * its own shows. With the memory of the test's machine (2 GB) two
+ * renderers are kept, the one ready among them, so that the first is let
+ * go and its memory comes back: what is its own (its heap, V8's, its
+ * stacks; some tens of MB), the program's pages being shared by the
+ * processes of the program. 戻る then restores the first page's entry
+ * in a new renderer with its state (st=7), and the renderer is ended as
+ * one that fails ends: the browser goes on and shows the error page at
+ * the page's address. The browser writes what the renderers did
+ * ("procs=").
+ */
+#define BRPROCS	"/boot/BRPROCS.TXT"
+
+LOCAL char	procs_text[2048];
+
+LOCAL void test_blink_mp( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n, fd, at, freed = 0, rc = -2, i;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18267/mp1", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 187) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	(void)fs_unlink(BRPROCS);
+	if ( desk_up() ) {
+		rc = run_browser(&page, "trace\nthen=http://localhost:18267/mp2\nmenu=back\nmenu=killrenderer\n"
+				 "ready=" BRREADY "\nquit=40000\nprocs=" BRPROCS "\n", NULL, NULL);
+		desk_down();
+	}
+	KT_ASSERT(asked_for("/mp1", 1000));
+	KT_ASSERT(asked_for("/mp2", 1000));
+	srv_end();
+	n = read_title();
+	procs_text[0] = '\0';
+	fd = fs_open(BRPROCS, O_RDONLY);
+	KT_ASSERT(fd >= 0);
+	if ( fd >= 0 ) {
+		INT got = fs_read(fd, procs_text, sizeof(procs_text) - 1);
+		procs_text[got > 0 ? got : 0] = '\0';
+		(void)fs_close(fd);
+	}
+	tm_printf((UB *)"  what the renderers did:\n%s", procs_text);
+	i = (INT)knl_strlen(procs_text);
+	KT_ASSERT(find_text(procs_text, i, "first pid=") >= 0);
+	KT_ASSERT(find_text(procs_text, i, "site=http://localhost") >= 0);
+	KT_ASSERT(find_text(procs_text, i, "title=mp /mp1 st=none") >= 0);
+	KT_ASSERT(find_text(procs_text, i, "title=mp /mp2 st=none") >= 0);
+	at = find_text(procs_text, i, "freed=");
+	KT_ASSERT(at >= 0);
+	if ( at >= 0 ) {
+		CONST char *q = procs_text + at + 6;
+		BOOL neg = ( *q == '-' );
+		if ( neg ) q++;
+		for ( ; *q >= '0' && *q <= '9'; q++ ) freed = freed * 10 + ( *q - '0' );
+		if ( neg ) freed = -freed;
+		tm_printf((UB *)"  the renderer let go gave back %d MB\n", freed);
+	}
+	KT_ASSERT(freed >= 10);
+	KT_ASSERT(find_text(procs_text, i, "restored pid=") >= 0);
+	KT_ASSERT(find_text(procs_text, i, "title=mp /mp1 st=7") >= 0);
+	KT_ASSERT(find_text(procs_text, i, "gone pid=") >= 0);
+	/* the error page at the page's address, the browser still up to end by itself */
+	KT_ASSERT(find_text(brmeta, n, "127.0.0.1:18267/mp1") > 0);
+	KT_ASSERT(find_text(brmeta, n, "st=") < 0);
+	KT_ASSERT_EQ(rc, 4);
+	(void)fs_unlink(BRPROCS);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * A renderer takes the browser's calls only from its own loop (design
+ * 14.13.2): "/mprn" (page_mprn) holds a task of its script, and then its
+ * animation frames' callbacks, in synchronous reads of document.cookie and
+ * synchronous fetches, and the browser meanwhile lays the page out again
+ * (its zooms) and asks the renderer what it counts. Those calls wait for
+ * the script to end, and the browser waits for their answers in its loop:
+ * no timer, resize event or resize observer of the page runs inside the
+ * script ("nested=0"), the fetches are answered, the frames go on to the
+ * end, neither side waits for the other for good and the renderer does
+ * not fail (exit code 0).
+ */
+LOCAL void test_blink_mpnest( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n, rc = -2;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( boot_word("ktsingle") ) {
+		KT_SKIP("one process: the browser's calls are not made to a renderer");
+	}
+	if ( !make_page("http://127.0.0.1:18330/mprn", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 250) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	if ( desk_up() ) {
+		rc = run_browser(&page, "menu=zoomin\nmenu=zoomout\nmenu=zoomin\nmenu=zoomreset\nmenu=zoomin\nmenu=zoomreset\n"
+				 "ready=" BRREADY "\nquit=30000\n", NULL, NULL);
+		desk_down();
+	}
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  the title: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "mprn done") > 0);
+	KT_ASSERT(find_text(brmeta, n, "nested=0 ") > 0);
+	KT_ASSERT(find_text(brmeta, n, "xhr=0") < 0);
+	KT_ASSERT_EQ(rc, 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * Leaving a page whose script holds its renderer (design 14.13.2): the
+ * browser opens "/mpl2" of localhost, goes to "/mpl1" (no beforeunload
+ * handler) of 127.0.0.1, whose script holds its renderer for 15 seconds
+ * from 1.2 seconds after its load on, and goes back (〈戻る〉, after eight
+ * of the menu's items, 300 ms apart, that let the script begin). It leaves "/mpl1" without asking its
+ * renderer, and "/mpl3" (a handler) after waiting 500 ms at most for its
+ * answer, as Chrome does: "/mpl2" is asked for again well before the 15
+ * seconds are over, and is shown.
+ */
+LOCAL void test_blink_mpleave( void )
+{
+	T_FSTAT		st;
+	TS_UUID		page;
+	INT		n, rc, run;
+	char		lines[256];
+	static CONST char *CONST from[2] = { "/mpl1", "/mpl3" };
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( boot_word("ktsingle") ) {
+		KT_SKIP("one process: the browser's calls are not made to a renderer");
+	}
+	if ( !make_page("http://localhost:18331/mpl2", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 251) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	for ( run = 0; run < 2; run++ ) {
+		tm_sprintf((UB *)lines, (UB *)"then=http://127.0.0.1:%d%s\nmenu=zoomin\nmenu=zoomreset\nmenu=zoomin\nmenu=zoomreset\n"
+			   "menu=zoomin\nmenu=zoomreset\nmenu=zoomin\nmenu=zoomreset\nmenu=back\n"
+			   "ready=" BRREADY "\nquit=3000\n", HTTP_PORT + 251, from[run]);
+		mpl_t1 = mpl_t2 = 0;
+		rc = -2;
+		if ( desk_up() ) {
+			rc = run_browser(&page, lines, NULL, NULL);
+			desk_down();
+		}
+		n = read_title();
+		tm_printf((UB *)"  from %s: %s; /mpl2 asked for again %d ms after it\n", from[run], brmeta,
+			  mpl_t1 != 0 && mpl_t2 != 0 ? (INT)( mpl_t2 - mpl_t1 ) : -1);
+		KT_ASSERT(find_text(brmeta, n, "mpl2 ok") > 0);
+		KT_ASSERT(mpl_t1 != 0 && mpl_t2 > mpl_t1 && mpl_t2 - mpl_t1 < 10000);
+		KT_ASSERT_EQ(rc, 0);
+	}
+	srv_end();
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * The GPU process (design 14.13.10; BROWSER_BLINK=1, make GL=1): the
+ * page of test_blink_gpu opened with "gpu=on" (softpipe), its renderer
+ * rasters it in the GPU process. The browser must have started the GPU
+ * process and written its number and the GL it is on ("procs="), which
+ * is ANGLE over Mesa; the page must be on the screen as in
+ * test_blink_gpu, and the comparison with the processor's raster must
+ * have run with no more than 0.5 % of the pixels differing by more than
+ * 48, and views must have been rastered in the GPU process. The first
+ * canvas (2D) is a shared image of the GPU process: its records must have
+ * been rastered there, and what getImageData read of it (the orange, the
+ * circle, the square putImageData wrote) and of the second canvas, on the
+ * processor, which drew a snapshot of it, must be what was drawn. The
+ * video's planes are not asked of the GPU process yet.
+ */
+LOCAL void test_blink_gpuproc( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n, at, i, fd;
+	char	b[160];
+	long	v[9];
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( fs_stat("/boot/GLPROG.ELF", &st) < EX_OK ) {
+		KT_SKIP("the browser is built without OpenGL ES (make GL=1)");
+	}
+	if ( boot_word("ktsingle") ) {
+		KT_SKIP("one process: there is no GPU process");
+	}
+	if ( !make_page("http://127.0.0.1:18096/g", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 16) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	(void)fs_unlink(BRGPU);
+	(void)fs_unlink(BRPROCS);
+	KT_ASSERT_EQ(run_browser(&page, "gpuproc=on\ngpu=on\ngpucheck=" BRGPU "\nready=" BRREADY "\nquit=12000\nprocs=" BRPROCS "\n",
+				 "/boot/BGPUP.PPM", gpu_check), 0);
+	srv_end();
+	for ( i = 0; i < 7; i++ ) KT_ASSERT_EQ(gp_ok[i], 1);
+
+	procs_text[0] = '\0';
+	fd = fs_open(BRPROCS, O_RDONLY);
+	KT_ASSERT(fd >= 0);
+	if ( fd >= 0 ) {
+		INT got = fs_read(fd, procs_text, sizeof(procs_text) - 1);
+		procs_text[got > 0 ? got : 0] = '\0';
+		(void)fs_close(fd);
+	}
+	tm_printf((UB *)"  what the processes did:\n%s", procs_text);
+	n = (INT)knl_strlen(procs_text);
+	KT_ASSERT(find_text(procs_text, n, "gpu pid=") >= 0);
+	KT_ASSERT(find_text(procs_text, n, " renderer=ANGLE (") >= 0);
+	KT_ASSERT(find_text(procs_text, n, "softpipe") >= 0);
+
+	for ( i = 0; i < 9; i++ ) v[i] = -1;
+	fd = fs_open(BRGPU, O_RDONLY);
+	KT_ASSERT(fd >= 0);
+	if ( fd >= 0 ) {
+		n = fs_read(fd, b, sizeof(b) - 1);
+		(void)fs_close(fd);
+		if ( n > 0 ) {
+			b[n] = '\0';
+			for ( at = 0, i = 0; i < 9 && b[at] != '\0'; i++ ) {
+				for ( v[i] = 0; b[at] >= '0' && b[at] <= '9'; at++ ) v[i] = v[i] * 10 + ( b[at] - '0' );
+				while ( b[at] == ' ' ) at++;
+			}
+		}
+	}
+	(void)fs_unlink(BRGPU);
+	(void)fs_unlink(BRPROCS);
+	tm_printf((UB*)"  in the GPU process: %ld views, %ld pixels compared, %ld differed, %ld by more than 48, by %ld at most;"
+		  " %ld views rastered there; %ld canvases' records\n", v[0], v[1], v[2], v[3], v[4], v[8], v[7]);
+	KT_ASSERT(v[0] > 0);
+	KT_ASSERT(v[3] >= 0 && v[3] * 200 <= v[1]);
+	KT_ASSERT(v[8] > 0);
+	KT_ASSERT(v[7] > 0);
+	n = read_title();
+	tm_printf((UB*)"  the title: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "cv 250.160.0/0.0.200/0.200.0/250.160.0 gl") > 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * The window shown from the GPU process's buffers (design 14.13.10;
+ * BROWSER_BLINK=1, make GL=1): the page of test_blink_gpu opened with
+ * "gpuproc=on" and "gpu=on" (softpipe). The GPU process makes two BOs
+ * the window is shown from (OB_WR_GSURF), and the renderer rasters the
+ * page's frames into them in turn; with the GL on the processor, each
+ * raster's end copies the drawing into the BO. The GPU process is then
+ * ended once ("killgpu"): the page goes on into its memory meanwhile,
+ * and the browser gives it the buffers of the new GPU process. The box,
+ * the image, the video and the gradient must be on the screen as in
+ * test_blink_gpu (now shown from a BO of the new process; the canvases
+ * and WebGL lost what they held with the old one), the browser must say ("procs=") that the buffers were
+ * copied into, that a set was made for each GPU process and that frames
+ * were shown from them, and views must have been rastered after the
+ * GPU process came back.
+ */
+#define BRGSURF		"/boot/BRGSURF.TXT"
+
+/* The number after 'key' in the n characters at s; -1 when it is not there */
+LOCAL long gs_num( CONST char *s, INT n, CONST char *key )
+{
+	INT	at = find_text(s, n, key);
+	long	v = 0;
+
+	if ( at < 0 ) return -1;
+	for ( s += at + (INT)knl_strlen(key); *s >= '0' && *s <= '9'; s++ ) v = v * 10 + ( *s - '0' );
+	return v;
+}
+
+LOCAL void test_blink_gsurf( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n, at, i, fd;
+	long	sets = -1, shown = -1, drops = -1, v0 = -1, v1 = -1;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( fs_stat("/boot/GLPROG.ELF", &st) < EX_OK ) {
+		KT_SKIP("the browser is built without OpenGL ES (make GL=1)");
+	}
+	if ( boot_word("ktsingle") ) {
+		KT_SKIP("one process: there is no GPU process");
+	}
+	if ( !make_page("http://127.0.0.1:18096/g", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 16) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	(void)fs_unlink(BRGSURF);
+	KT_ASSERT_EQ(run_browser(&page, "gpuproc=on\ngpu=on\nmenu=killgpu\nready=" BRREADY "\nquit=16000\nprocs=" BRGSURF "\n",
+				 "/boot/BGSURF.PPM", gpu_check), 0);
+	srv_end();
+	/*
+	 * the page's own drawing, rastered again in the new GPU process; what
+	 * the canvases and WebGL held there went with the old one (14.13.10),
+	 * so their places are not looked at
+	 */
+	for ( i = 0; i < 7; i++ ) {
+		if ( i == 2 || i == 3 || i == 4 ) continue;
+		KT_ASSERT_EQ(gp_ok[i], 1);
+	}
+
+	procs_text[0] = '\0';
+	fd = fs_open(BRGSURF, O_RDONLY);
+	KT_ASSERT(fd >= 0);
+	if ( fd >= 0 ) {
+		INT got = fs_read(fd, procs_text, sizeof(procs_text) - 1);
+		procs_text[got > 0 ? got : 0] = '\0';
+		(void)fs_close(fd);
+	}
+	(void)fs_unlink(BRGSURF);
+	tm_printf((UB *)"  what the processes did:\n%s", procs_text);
+	n = (INT)knl_strlen(procs_text);
+	at = find_text(procs_text, n, "gsurf how=copied ");
+	KT_ASSERT(at >= 0);
+	if ( at >= 0 ) {
+		sets = gs_num(procs_text + at, n - at, "sets=");
+		shown = gs_num(procs_text + at, n - at, "shown=");
+		drops = gs_num(procs_text + at, n - at, "drops=");
+	}
+	at = find_text(procs_text, n, "gpukill old=");
+	KT_ASSERT(at >= 0);
+	if ( at >= 0 ) {
+		INT vat = find_text(procs_text + at, n - at, " views=");
+		if ( vat >= 0 ) {
+			CONST char *q = procs_text + at + vat + 7;
+			for ( v0 = 0; *q >= '0' && *q <= '9'; q++ ) v0 = v0 * 10 + ( *q - '0' );
+			if ( *q == '>' ) {
+				for ( q++, v1 = 0; *q >= '0' && *q <= '9'; q++ ) v1 = v1 * 10 + ( *q - '0' );
+			}
+		}
+	}
+	tm_printf((UB*)"  the window's buffers: %ld sets made, %ld frames shown from them, let go %ld times; views %ld before "
+		  "the GPU process was ended, %ld after\n", sets, shown, drops, v0, v1);
+	KT_ASSERT(sets >= 2);
+	KT_ASSERT(shown > 0);
+	KT_ASSERT(v1 > v0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * The GPU process lost and come back (design 14.13.10; BROWSER_BLINK=1,
+ * make GL=1). "/gpl" is a box and a canvas (2D, rastered in the GPU
+ * process) that its script draws again every 200 ms, its title saying
+ * what getImageData reads of it. The browser starts on a machine with no
+ * GPU (softpipe), so the GPU process waits for one: the test registers
+ * a backend of its own once the GPU process says it waits, and the GPU
+ * process must tell the browser, which starts another, in which the page
+ * is drawn again ("waitgpu"). Then the GPU process is ended three times
+ * as one that fails ends ("killgpu"): the first two times the browser
+ * starts another and the page's renderer, finding its channel lost, gets
+ * a new one and draws the page again in it; the third time (three within
+ * a minute) the browser gives up, and the page and its canvas are drawn
+ * on the processor from then on. The box and the canvas must be on the
+ * screen, and the title must still say the canvas's colours.
+ */
+#define GPL_TAIL	48
+#define GPL_LOG		4096
+
+LOCAL UD		gpl_pos;
+LOCAL char		gpl_log[GPL_TAIL + GPL_LOG + 1];
+LOCAL volatile INT	gpl_stop, gpl_done, gpl_reg;
+LOCAL INT		gpl_seen[3];
+LOCAL INT		gpl_ok[3];
+
+LOCAL ER gpl_info( void *priv, T_GPUINFO *info )
+{
+	(void)priv;
+	info->kind = GPU_KIND_TEST;
+	info->feature = 0;
+	return E_OK;
+}
+
+LOCAL CONST T_GPUOPS	gpl_ops = { .kind = GPU_KIND_TEST, .info = gpl_info };
+
+/*
+ * A task of the test's while the browser runs: the console read as it
+ * comes; once the GPU process says it waits for a GPU, the test's backend
+ * is registered. It counts the renderer's lines of a new channel and of
+ * no GPU process.
+ */
+LOCAL void gpl_watch( INT stacd, void *exinf )
+{
+	static CONST char *CONST w[3] = {
+		"registered later is waited for", "browser: gpu: a new channel to the GPU process",
+		"browser: gpu: the browser has no GPU process to give"
+	};
+	INT	n, k, i, at, from, tail = 0;
+
+	(void)stacd;
+	(void)exinf;
+	while ( !gpl_stop ) {
+		k = tm_log_read(&gpl_pos, (UB *)gpl_log + tail, GPL_LOG);
+		if ( k <= 0 ) {
+			tk_dly_tsk(50);
+			continue;
+		}
+		n = tail + k;
+		gpl_log[n] = '\0';
+		for ( i = 0; i < 3; i++ ) {
+			for ( from = 0; ( at = find_text(gpl_log + from, n - from, w[i]) ) >= 0; from = at + 1 ) {
+				at += from;
+				if ( at + (INT)knl_strlen(w[i]) <= tail ) continue;	/* counted with the read before */
+				gpl_seen[i]++;
+			}
+		}
+		if ( gpl_seen[0] > 0 && !gpl_reg ) {
+			tk_dly_tsk(500);
+			gpl_reg = ( knl_gpu_register(&gpl_ops, NULL) >= E_OK ) ? 1 : -1;
+			tm_printf((UB *)"  the test's GPU registered (%d)\n", gpl_reg);
+		}
+		tail = ( n < GPL_TAIL ) ? n : GPL_TAIL;
+		for ( i = 0; i < tail; i++ ) gpl_log[i] = gpl_log[n - tail + i];
+	}
+	gpl_done = 1;
+	tk_exd_tsk();
+}
+
+LOCAL void gpl_check( CONST TS_UUID *page )
+{
+	static CONST struct { INT x, y; UW rgb; INT tol; } at[3] = {
+		{ 20 + 50, 100 + 25, 0x00A050, 4 },		/* the box */
+		{ 20 + 10, 180 + 10, 0xFAA000, 4 },		/* the canvas's orange */
+		{ 20 + 64, 180 + 80, 0x0000C8, 4 },		/* its circle */
+	};
+	TS_UUID		win;
+	T_OBWPOS	wp;
+	SZ		asz = 0;
+	ID		k;
+	INT		i;
+	UW		px;
+
+	for ( i = 0; i < 3; i++ ) gpl_ok[i] = -1;
+	tk_dly_tsk(1500);		/* the canvas drawn again on the processor */
+	if ( !window_of(page, &win) ) return;
+	k = ob_opn_obj(&win, OB_OP_READ);
+	if ( k <= 0 ) return;
+	knl_memset(&wp, 0, sizeof(wp));
+	(void)ob_rea_rec(k, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
+	ob_cls_obj(k);
+	for ( i = 0; i < 3; i++ ) {
+		px = screen_px(wp.wleft + at[i].x, wp.wtop + BAR_H + at[i].y);
+		gpl_ok[i] = near_rgb(px, at[i].rgb, at[i].tol) ? 1 : 0;
+		tm_printf((UB*)"  %d: 0x%06x (0x%06x within %d)\n", i, px, at[i].rgb, at[i].tol);
+	}
+}
+
+/* The procs line that begins with 'what': its numbers after "old=", "new=", "none=" and the views before and after */
+LOCAL BOOL gpl_line( CONST char *what, INT nth, long *old, long *now, long *none, long *v0, long *v1 )
+{
+	INT	len = (INT)knl_strlen(procs_text), at = -1, from = 0, i;
+	long	*out[5] = { old, now, none, v0, v1 };
+	CONST char *key[5] = { "old=", "new=", "none=", "views=", ">" };
+
+	for ( i = 0; i <= nth; i++ ) {
+		at = find_text(procs_text + from, len - from, what);
+		if ( at < 0 ) return FALSE;
+		at += from;
+		from = at + 1;
+	}
+	for ( i = 0; i < 5; i++ ) {
+		INT	e = at, k;
+		*out[i] = -1;
+		while ( procs_text[e] != '\0' && procs_text[e] != '\n' ) e++;
+		k = find_text(procs_text + at, e - at, key[i]);
+		if ( k < 0 ) continue;
+		k += at + (INT)knl_strlen(key[i]);
+		for ( *out[i] = 0; procs_text[k] >= '0' && procs_text[k] <= '9'; k++ ) *out[i] = *out[i] * 10 + ( procs_text[k] - '0' );
+	}
+	return TRUE;
+}
+
+LOCAL void test_blink_gpulost( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	T_CTSK	ct;
+	T_GPUINFO gi;
+	ID	tid;
+	INT	n, i, fd, rc = -2;
+	long	old, now, none, v0, v1;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( fs_stat("/boot/GLPROG.ELF", &st) < EX_OK ) {
+		KT_SKIP("the browser is built without OpenGL ES (make GL=1)");
+	}
+	if ( boot_word("ktsingle") ) {
+		KT_SKIP("one process: there is no GPU process");
+	}
+	if ( knl_gpu_ref(&gi) >= E_OK ) {
+		KT_SKIP("the machine has a GPU registered already");
+	}
+	if ( !make_page("http://127.0.0.1:18291/gpl", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 211) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	(void)fs_unlink(BRPROCS);
+	gpl_pos = 0;
+	while ( tm_log_read(&gpl_pos, (UB *)gpl_log, GPL_LOG) > 0 ) ;
+	gpl_stop = gpl_done = gpl_reg = 0;
+	for ( i = 0; i < 3; i++ ) gpl_seen[i] = 0;
+	knl_memset(&ct, 0, sizeof(ct));
+	ct.tskatr = TA_HLNG | TA_RNG0;
+	ct.task = (FP)gpl_watch;
+	ct.itskpri = KT_PRI_HIGH;
+	ct.stksz = 8192;
+	tid = tk_cre_tsk(&ct);
+	KT_ASSERT(tid > 0);
+	if ( tid > 0 && tk_sta_tsk(tid, 0) >= E_OK ) {
+		rc = run_browser(&page, "gpuproc=on\ngpu=on\nmenu=waitgpu\nmenu=killgpu\nmenu=killgpu\nmenu=killgpu\n"
+				 "ready=" BRREADY "\nquit=6000\nprocs=" BRPROCS "\n", "/boot/BGPL.PPM", gpl_check);
+	}
+	gpl_stop = 1;
+	for ( i = 0; i < 100 && tid > 0 && !gpl_done; i++ ) tk_dly_tsk(50);
+	if ( gpl_reg > 0 ) (void)knl_gpu_unregister();
+	srv_end();
+	KT_ASSERT_EQ(rc, 0);
+
+	procs_text[0] = '\0';
+	fd = fs_open(BRPROCS, O_RDONLY);
+	if ( fd >= 0 ) {
+		INT got = fs_read(fd, procs_text, sizeof(procs_text) - 1);
+		procs_text[got > 0 ? got : 0] = '\0';
+		(void)fs_close(fd);
+	}
+	tm_printf((UB *)"  what the processes did:\n%s", procs_text);
+	tm_printf((UB *)"  the console: %d waits for a GPU, %d new channels, %d times no GPU process\n", gpl_seen[0],
+		  gpl_seen[1], gpl_seen[2]);
+	/* the GPU that came: the GPU process started again, the page drawn in the new one */
+	KT_ASSERT_EQ(gpl_reg, 1);
+	KT_ASSERT(gpl_line("gpuarrived n=1", 0, &old, &now, &none, &v0, &v1));
+	KT_ASSERT(old > 0 && now > 0 && now != old);
+	KT_ASSERT(v1 > v0);
+	/* ended twice: started again each time, and the page drawn again in it */
+	for ( i = 0; i < 2; i++ ) {
+		KT_ASSERT(gpl_line("gpukill", i, &old, &now, &none, &v0, &v1));
+		KT_ASSERT(old > 0 && now > 0 && now != old);
+		KT_ASSERT_EQ(none, 0);
+		KT_ASSERT(v1 > v0);
+	}
+	/* the third time within a minute: no GPU process from then on */
+	KT_ASSERT(gpl_line("gpukill", 2, &old, &now, &none, &v0, &v1));
+	KT_ASSERT(old > 0);
+	KT_ASSERT_EQ(now, 0);
+	KT_ASSERT_EQ(none, 1);
+	KT_ASSERT(gpl_seen[1] >= 3);
+	KT_ASSERT(gpl_seen[2] >= 1);
+	/* the page and its canvas on the screen, drawn on the processor */
+	for ( i = 0; i < 3; i++ ) KT_ASSERT_EQ(gpl_ok[i], 1);
+	n = read_title();
+	tm_printf((UB *)"  the title: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "gpl 250.160.0/0.0.200") > 0);
+	(void)fs_unlink(BRPROCS);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * WebGL in the GPU process (design 14.13.10; BROWSER_BLINK=1, make GL=1),
+ * "gpuproc=on" and "gpu=on" (softpipe). The console is read as the
+ * browser runs (glp_watch).
+ *
+ * 1. "/glw" (see test_blink_glw): the workers' WebGL 1 and 2 and the
+ *    page's many contexts in the GPU process, with what test_blink_glw
+ *    asks of them (the fence of WebGL 2, the link polled through
+ *    KHR_parallel_shader_compile). The renderer must have said its
+ *    contexts are in the GPU process, and must not have made one on its
+ *    own ANGLE.
+ * 2. "/glgpu" (see test_blink_glgpu): a WebGL canvas of the GPU process
+ *    copied into a WebGPU texture, a WebGPU canvas taken into a WebGL
+ *    texture.
+ * 3. "/glp" (see page_glp): the error of a draw ANGLE refused, in the GPU
+ *    process, comes back to the renderer and is put on the console; WebGL
+ *    2 clears; the GPU process ended once ("killgpu"), the context is
+ *    lost (webglcontextlost), restored on the new one
+ *    (webglcontextrestored), and clears green there.
+ */
+#define GLP_TAIL	64
+#define GLP_LOG		4096
+#define GLP_N		7
+
+LOCAL UD		glp_pos;
+LOCAL char		glp_log[GLP_TAIL + GLP_LOG + 1];
+LOCAL volatile INT	glp_stop, glp_done;
+LOCAL INT		glp_seen[GLP_N];
+
+/* The lines counted: WebGL's, or what a test sets before glp_run */
+LOCAL CONST char *CONST glp_gl[GLP_N] = {
+	"browser: webgl: WebGL 1 in the GPU process", "browser: webgl: WebGL 2 in the GPU process",
+	"WebGL 1 on ANGLE", "browser: webgl: [", "browser: webgl: a context in the GPU process is lost",
+	"shown from shared images of the GPU process", "of the GPU process was read back to be shown"
+};
+LOCAL CONST char *CONST *glp_words = glp_gl;
+
+LOCAL void glp_watch( INT stacd, void *exinf )
+{
+	CONST char *CONST *w = glp_words;
+	INT	n, k, i, at, from, tail = 0;
+
+	(void)stacd;
+	(void)exinf;
+	while ( !glp_stop ) {
+		k = tm_log_read(&glp_pos, (UB *)glp_log + tail, GLP_LOG);
+		if ( k <= 0 ) {
+			tk_dly_tsk(50);
+			continue;
+		}
+		n = tail + k;
+		glp_log[n] = '\0';
+		for ( i = 0; i < GLP_N; i++ ) {
+			for ( from = 0; ( at = find_text(glp_log + from, n - from, w[i]) ) >= 0; from = at + 1 ) {
+				at += from;
+				if ( at + (INT)knl_strlen(w[i]) <= tail ) continue;	/* counted with the read before */
+				glp_seen[i]++;
+			}
+		}
+		tail = ( n < GLP_TAIL ) ? n : GLP_TAIL;
+		for ( i = 0; i < tail; i++ ) glp_log[i] = glp_log[n - tail + i];
+	}
+	glp_done = 1;
+	tk_exd_tsk();
+}
+
+/*
+ * The console watched while one page is shown, its window checked (ppm
+ * and check as run_browser takes them); false when the watching task
+ * could not start
+ */
+LOCAL BOOL glp_run_check( CONST TS_UUID *page, CONST char *lines, CONST char *ppm,
+			  void (*check)( CONST TS_UUID * ), INT *rc )
+{
+	T_CTSK	ct;
+	ID	tid;
+	INT	i;
+
+	glp_pos = 0;
+	while ( tm_log_read(&glp_pos, (UB *)glp_log, GLP_LOG) > 0 ) ;
+	glp_stop = glp_done = 0;
+	for ( i = 0; i < GLP_N; i++ ) glp_seen[i] = 0;
+	knl_memset(&ct, 0, sizeof(ct));
+	ct.tskatr = TA_HLNG | TA_RNG0;
+	ct.task = (FP)glp_watch;
+	ct.itskpri = KT_PRI_HIGH;
+	ct.stksz = 8192;
+	tid = tk_cre_tsk(&ct);
+	if ( tid <= 0 || tk_sta_tsk(tid, 0) < E_OK ) return FALSE;
+	*rc = run_browser(page, lines, ppm, check);
+	glp_stop = 1;
+	for ( i = 0; i < 100 && !glp_done; i++ ) tk_dly_tsk(50);
+	if ( glp_words == glp_gl ) {
+		tm_printf((UB *)"  the console: %d WebGL 1 and %d WebGL 2 in the GPU process, %d on the renderer's ANGLE,"
+			  " %d errors, %d losses; frames from shared images %d, read back %d\n", glp_seen[0], glp_seen[1],
+			  glp_seen[2], glp_seen[3], glp_seen[4], glp_seen[5], glp_seen[6]);
+	} else {
+		for ( i = 0; i < GLP_N; i++ ) tm_printf((UB *)"  the console: %d of \"%s\"\n", glp_seen[i], glp_words[i]);
+	}
+	return TRUE;
+}
+
+/* The same with the window not checked */
+LOCAL BOOL glp_run( CONST TS_UUID *page, CONST char *lines, INT *rc )
+{
+	return glp_run_check(page, lines, NULL, NULL, rc);
+}
+
+/* The WebGL canvas of "/glo" on the screen: blue above, green below */
+LOCAL INT	glo_ok[2];
+
+LOCAL void glo_check( CONST TS_UUID *page )
+{
+	static CONST struct { INT x, y; UW rgb; INT tol; } at[2] = {
+		{ 20 + 32, 20 + 8, 0x0000FF, 8 },		/* the upper half */
+		{ 20 + 32, 20 + 56, 0x00FF00, 8 },		/* the lower half */
+	};
+	TS_UUID		win;
+	T_OBWPOS	wp;
+	SZ		asz = 0;
+	ID		k;
+	INT		i;
+	UW		px;
+
+	for ( i = 0; i < 2; i++ ) glo_ok[i] = -1;
+	tk_dly_tsk(3000);
+	if ( !window_of(page, &win) ) return;
+	k = ob_opn_obj(&win, OB_OP_READ);
+	if ( k <= 0 ) return;
+	knl_memset(&wp, 0, sizeof(wp));
+	(void)ob_rea_rec(k, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
+	ob_cls_obj(k);
+	for ( i = 0; i < 2; i++ ) {
+		px = screen_px(wp.wleft + at[i].x, wp.wtop + BAR_H + at[i].y);
+		glo_ok[i] = near_rgb(px, at[i].rgb, at[i].tol) ? 1 : 0;
+		tm_printf((UB*)"  webgl canvas %d: 0x%06x (0x%06x within %d)\n", i, px, at[i].rgb, at[i].tol);
+	}
+}
+
+LOCAL void test_blink_glproc( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n, rc = -2;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( fs_stat("/boot/GLPROG.ELF", &st) < EX_OK ) {
+		KT_SKIP("the browser is built without OpenGL ES (make GL=1)");
+	}
+	if ( boot_word("ktsingle") ) {
+		KT_SKIP("one process: there is no GPU process");
+	}
+
+	/* 1: the workers' and the page's contexts */
+	if ( !make_page_text("<p>http://127.0.0.1:18292/glw</p>\n<p>trace=exceptions</p>", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 212) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	KT_ASSERT(glp_run(&page, "gpuproc=on\ngpu=on\nready=" BRREADY "\nquit=30000\n", &rc));
+	KT_ASSERT_EQ(rc, 0);
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  the title: %s\n", brmeta);
+	KT_ASSERT(glp_seen[0] >= 1);
+	KT_ASSERT(glp_seen[1] >= 1);
+	KT_ASSERT_EQ(glp_seen[2], 0);
+	KT_ASSERT(find_text(brmeta, n, "main=0,255,0,255") > 0);
+	KT_ASSERT(find_text(brmeta, n, "mainn=many") > 0);
+	KT_ASSERT(find_text(brmeta, n, "bad=0") > 0);
+	KT_ASSERT(find_text(brmeta, n, "w0=255,0,0,255:many:0:nofence:") > 0);
+	KT_ASSERT(find_text(brmeta, n, ":nodone") < 0);
+	KT_ASSERT(find_text(brmeta, n, ":fail") < 0);
+	KT_ASSERT(find_text(brmeta, n, "w1=255,0,0,255:many:0:sig:255,0,0,255:0:done:0") > 0 ||
+		  find_text(brmeta, n, "w1=255,0,0,255:many:0:sig:255,0,0,255:0:noext:0") > 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+
+	/* 2: WebGL and WebGPU together */
+	if ( !make_page("http://127.0.0.1:18292/glgpu", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 212) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	rc = -2;
+	KT_ASSERT(glp_run(&page, "gpuproc=on\ngpu=on\nready=" BRREADY "\nquit=30000\n", &rc));
+	KT_ASSERT_EQ(rc, 0);
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  the title: %s\n", brmeta);
+	KT_ASSERT(glp_seen[0] >= 1);
+	KT_ASSERT(find_text(brmeta, n, "gl2gpu=0.255.0.255") > 0);
+	KT_ASSERT(find_text(brmeta, n, "gpu2gl=255.0.0.255") > 0);
+	KT_ASSERT(find_text(brmeta, n, "exc=") < 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+
+	/* 3: an error of ANGLE's, WebGL 2, and the context lost with the GPU process and restored */
+	if ( !make_page("http://127.0.0.1:18292/glp", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 212) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	rc = -2;
+	KT_ASSERT(glp_run(&page, "gpuproc=on\ngpu=on\nmenu=killgpu\nready=" BRREADY "\nquit=8000\n", &rc));
+	KT_ASSERT_EQ(rc, 0);
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  the title: %s\n", brmeta);
+	KT_ASSERT(glp_seen[0] >= 1);
+	KT_ASSERT(glp_seen[3] >= 1);
+	KT_ASSERT(glp_seen[4] >= 1);
+	/* the page's canvas shown from shared images of the GPU process, none read back (stage 6) */
+	KT_ASSERT(glp_seen[5] >= 1);
+	KT_ASSERT_EQ(glp_seen[6], 0);
+	KT_ASSERT(find_text(brmeta, n, "gl1=yes") > 0);
+	KT_ASSERT(find_text(brmeta, n, "err=1282") > 0);
+	KT_ASSERT(find_text(brmeta, n, "gl2=yes") > 0);
+	KT_ASSERT(find_text(brmeta, n, "gl2px=0.0.255.255") > 0);
+	KT_ASSERT(find_text(brmeta, n, "lost=1") > 0);
+	KT_ASSERT(find_text(brmeta, n, "restored=1") > 0);
+	KT_ASSERT(find_text(brmeta, n, "px=0.255.0.255") > 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+
+	/* 4: the page's WebGL canvas on the screen, its frames drawn in the GPU process with no readback */
+	if ( !make_page("http://127.0.0.1:18292/glo", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 212) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	rc = -2;
+	KT_ASSERT(glp_run_check(&page, "gpuproc=on\ngpu=on\nready=" BRREADY "\nquit=12000\n", "/boot/BGLO.PPM", glo_check,
+				&rc));
+	KT_ASSERT_EQ(rc, 0);
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  the title: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "gl=yes") > 0);
+	KT_ASSERT(find_text(brmeta, n, "n=many") > 0);
+	KT_ASSERT(glp_seen[5] >= 1);
+	KT_ASSERT_EQ(glp_seen[6], 0);
+	KT_ASSERT_EQ(glo_ok[0], 1);
+	KT_ASSERT_EQ(glo_ok[1], 1);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * Textures and the page's WebGL canvas (BROWSER_BLINK=1, make GL=1):
+ * "/gltx" (see page_gltx), the page rastered on the GPU ("gpu=on",
+ * softpipe here) as a machine with a GPU rasters it, WebGL first on the
+ * renderer's ANGLE, then in the GPU process ("gpuproc=on"). Every
+ * texture gives its source's colour back; the canvas drawn at every
+ * animation frame is on the screen as it was last drawn (the PNG's blue
+ * above, green below), not as a frame before (red); and the frame
+ * callbacks come no more often than the screen is refreshed (60 Hz),
+ * though nothing but the WebGL canvas changes in the page.
+ */
+LOCAL INT	gltx_ok[2];
+
+LOCAL void gltx_check( CONST TS_UUID *page )
+{
+	static CONST struct { INT x, y; UW rgb; INT tol; } at[2] = {
+		{ 20 + 32, 20 + 8, 0x0000C8, 8 },		/* the upper half: the PNG */
+		{ 20 + 32, 20 + 56, 0x00FF00, 8 },		/* the lower half */
+	};
+	TS_UUID		win;
+	T_OBWPOS	wp;
+	SZ		asz = 0;
+	ID		k;
+	INT		i;
+	UW		px;
+
+	for ( i = 0; i < 2; i++ ) gltx_ok[i] = -1;
+	tk_dly_tsk(8000);
+	if ( !window_of(page, &win) ) return;
+	k = ob_opn_obj(&win, OB_OP_READ);
+	if ( k <= 0 ) return;
+	knl_memset(&wp, 0, sizeof(wp));
+	(void)ob_rea_rec(k, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
+	ob_cls_obj(k);
+	for ( i = 0; i < 2; i++ ) {
+		px = screen_px(wp.wleft + at[i].x, wp.wtop + BAR_H + at[i].y);
+		gltx_ok[i] = near_rgb(px, at[i].rgb, at[i].tol) ? 1 : 0;
+		tm_printf((UB*)"  webgl canvas %d: 0x%06x (0x%06x within %d)\n", i, px, at[i].rgb, at[i].tol);
+	}
+}
+
+LOCAL void test_blink_gltex( void )
+{
+	static CONST char *CONST how[2] = { "gpu=on\n", "gpuproc=on\ngpu=on\n" };
+	T_FSTAT	st;
+	TS_UUID	page;
+	char	lines[160];
+	INT	n, k, at, raf, rc;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( fs_stat("/boot/GLPROG.ELF", &st) < EX_OK ) {
+		KT_SKIP("the browser is built without OpenGL ES (make GL=1)");
+	}
+	for ( k = 0; k < 2; k++ ) {
+		if ( k == 1 && boot_word("ktsingle") ) break;		/* one process: there is no GPU process */
+		tm_printf((UB *)"  WebGL %s\n", k == 0 ? "on the renderer's ANGLE" : "in the GPU process");
+		if ( !make_page("http://127.0.0.1:18311/gltx", &page) ) return;
+		if ( !srv_start(HTTP_PORT + 231) ) {
+			(void)ob_del_obj(&page);
+			KT_SKIP("no network stack");
+		}
+		tm_sprintf((UB *)lines, (UB *)"%sready=" BRREADY "\nquit=20000\n", how[k]);
+		rc = -2;
+		KT_ASSERT(glp_run_check(&page, lines, NULL, gltx_check, &rc));
+		KT_ASSERT_EQ(rc, 0);
+		srv_end();
+		n = read_title();
+		tm_printf((UB *)"  the title: %s\n", brmeta);
+		KT_ASSERT(find_text(brmeta, n, "gl1=yes") > 0);
+		KT_ASSERT(find_text(brmeta, n, "gl2=yes") > 0);
+		KT_ASSERT(find_text(brmeta, n, "texbad=none") > 0);
+		KT_ASSERT(find_text(brmeta, n, "texok=15") > 0);
+		KT_ASSERT(find_text(brmeta, n, "err1=0") > 0);
+		KT_ASSERT(find_text(brmeta, n, "err2=0") > 0);
+		KT_ASSERT(find_text(brmeta, n, "exc=") < 0);
+		raf = -1;
+		at = find_text(brmeta, n, "raf=");
+		if ( at >= 0 ) {
+			for ( raf = 0, at += 4; brmeta[at] >= '0' && brmeta[at] <= '9'; at++ ) raf = raf * 10 + brmeta[at] - '0';
+		}
+		tm_printf((UB *)"  frame callbacks a second: %d\n", raf);
+		KT_ASSERT(raf >= 1 && raf <= 64);
+		KT_ASSERT_EQ(gltx_ok[0], 1);
+		KT_ASSERT_EQ(gltx_ok[1], 1);
+		KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+	}
+}
+
+/*
+ * WebGPU in the GPU process (design 14.13.10; BROWSER_BLINK=1, make GL=1),
+ * "gpuproc=on" and "gpu=on" (softpipe): the page of test_blink_webgpu,
+ * with what it asks of it (an adapter of the compatibility level, the
+ * compute shader, the canvas's triangle drawn into a 2D canvas, no error
+ * of the device) and the triangle and the green on the screen. The
+ * renderer must have made its context in the GPU process, where Dawn runs
+ * on ANGLE, and no adapter of its own.
+ */
+LOCAL CONST char *CONST gwg_words[GLP_N] = {
+	"browser: webgpu: a context in the GPU process", "browser: webgpu: adapter ",
+	"no WebGPU: ANGLE makes no context", "was not read back from the GPU process",
+	"and WebGPU (Dawn on ANGLE", "the GPU process runs no WebGPU", "browser: webgpu: no WebGPU"
+};
+
+LOCAL void test_blink_gpuwgpu( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n, i, rc = -2;
+	BOOL	ok;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( fs_stat("/boot/GLPROG.ELF", &st) < EX_OK ) {
+		KT_SKIP("the browser is built without OpenGL ES (make GL=1)");
+	}
+	if ( boot_word("ktsingle") ) {
+		KT_SKIP("one process: there is no GPU process");
+	}
+	if ( !make_page("http://127.0.0.1:18293/wgpu", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 213) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	glp_words = gwg_words;
+	ok = glp_run_check(&page, "gpuproc=on\ngpu=on\nready=" BRREADY "\nquit=20000\n", "/boot/BGWGPU.PPM", wgpu_check,
+			   &rc);
+	glp_words = glp_gl;
+	KT_ASSERT(ok);
+	KT_ASSERT_EQ(rc, 0);
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  the title: %s\n", brmeta);
+	KT_ASSERT(glp_seen[4] >= 1);
+	KT_ASSERT_EQ(glp_seen[2], 0);
+	KT_ASSERT(glp_seen[0] >= 1);
+	KT_ASSERT_EQ(glp_seen[1], 0);
+	KT_ASSERT_EQ(glp_seen[3], 0);
+	KT_ASSERT_EQ(glp_seen[5], 0);
+	KT_ASSERT_EQ(glp_seen[6], 0);
+	KT_ASSERT(find_text(brmeta, n, "adapter=compatibility") > 0);
+	KT_ASSERT(find_text(brmeta, n, "cs=3.5.7.81") > 0);
+	KT_ASSERT(find_text(brmeta, n, "px=255.0.0/0.12") > 0);
+	KT_ASSERT(find_text(brmeta, n, "errs=0") > 0);
+	for ( i = 0; i < 2; i++ ) KT_ASSERT_EQ(wg_ok[i], 1);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * The network process (design 14.13.8): the cookies and the sign-in are
+ * the same in every renderer, and the browser outlives the network
+ * process. "/mck1" of 127.0.0.1 signs in, "/mck2" of localhost (a renderer
+ * of its own) sets a cookie of its own, and "/mck3" of 127.0.0.1, in
+ * another renderer again, finds the sign-in, the session cookie and what
+ * the first page's script set, and not localhost's; its ask carried the
+ * cookie only the network sees (HttpOnly). The network process is then
+ * ended as one that fails ends: the browser starts another, and
+ * 〈再読み込み〉 shows "/mck3" again through it, with the cookies it read
+ * back.
+ */
+LOCAL void test_blink_mpck( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n, fd, i, at, rc = -2;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( boot_word("ktsingle") ) {
+		KT_SKIP("one process: there is no network process");
+	}
+	if ( !make_page("http://127.0.0.1:18270/mck1", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 190) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	mck_sid = mck_ask = 0;
+	(void)fs_unlink(BRPROCS);
+	if ( desk_up() ) {
+		rc = run_browser(&page, "then=http://localhost:18270/mck2\nthen=http://127.0.0.1:18270/mck3\n"
+				 "menu=killnetwork\nmenu=reload\n"
+				 "ready=" BRREADY "\nquit=30000\nprocs=" BRPROCS "\n", NULL, NULL);
+		desk_down();
+	}
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  the last page: %s; /mck3 asked %d times, %d with the sign-in\n", brmeta, mck_ask, mck_sid);
+	procs_text[0] = '\0';
+	fd = fs_open(BRPROCS, O_RDONLY);
+	if ( fd >= 0 ) {
+		INT got = fs_read(fd, procs_text, sizeof(procs_text) - 1);
+		procs_text[got > 0 ? got : 0] = '\0';
+		(void)fs_close(fd);
+	}
+	tm_printf((UB *)"  what the renderers did:\n%s", procs_text);
+	i = (INT)knl_strlen(procs_text);
+	KT_ASSERT(find_text(procs_text, i, "site=http://localhost") >= 0);
+	KT_ASSERT(find_text(procs_text, i, "title=m2 lb=1") >= 0);
+	at = find_text(procs_text, i, "netkill old=");
+	KT_ASSERT(at >= 0);
+	KT_ASSERT(find_text(procs_text, i, "netkill old=0") < 0);
+	KT_ASSERT(find_text(procs_text, i, " new=0") < 0);
+	KT_ASSERT(find_text(brmeta, n, "SIDJS=login") > 0);
+	KT_ASSERT(find_text(brmeta, n, "SS=sess") > 0);
+	KT_ASSERT(find_text(brmeta, n, "js=a") > 0);
+	KT_ASSERT(find_text(brmeta, n, "lb=1") < 0);
+	KT_ASSERT(find_text(brmeta, n, "n=2") > 0);
+	KT_ASSERT_EQ(mck_ask, 2);
+	KT_ASSERT_EQ(mck_sid, 2);
+	KT_ASSERT_EQ(rc, 0);
+	(void)fs_unlink(BRPROCS);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * The sockets of the network process (design 14.13.8, 12.6): "/msk" asks
+ * for six addresses of each of MSK_SRV servers that take the connection
+ * and never answer (listening sockets of the test that are never
+ * accepted from), 144 connections at once, more than the pool takes even
+ * as it grows past its soft cap at random (TcpSocketPoolLimitRandomization).
+ * The pool keeps within its cap, which is within the process's own limit
+ * on sockets (design 9.2), and the rest of the requests wait their turn:
+ * none fails for want of a socket, neither the system's table nor the
+ * process's limit is met (no line of either), the browser says no line
+ * of a socket it did not get, and while the requests wait the kernel can
+ * still make sockets of its own (the system's name lookups, DHCP).
+ */
+#define MSK_TAIL	40
+#define MSK_LOG		4096
+
+LOCAL UD	msk_pos;
+LOCAL char	msk_log[MSK_TAIL + MSK_LOG + 1];
+LOCAL INT	msk_seen[4];
+LOCAL INT	msk_most;		/* the most sockets the processes held at once */
+LOCAL INT	msk_kern;		/* sockets the kernel made while the requests waited */
+
+/* The console since the last look: the lines of all sockets in use and of sockets not had counted */
+LOCAL void msk_read_log( void )
+{
+	static CONST char *CONST w[4] = {
+		"sockets are in use", "browser: net: no socket (", "browser: net: no datagram socket (",
+		"sockets its limit allows"
+	};
+	INT	n, k, i, at, from, tail = 0;
+
+	for ( ;; ) {
+		k = tm_log_read(&msk_pos, (UB *)msk_log + tail, MSK_LOG);
+		if ( k <= 0 ) break;
+		n = tail + k;
+		msk_log[n] = '\0';
+		for ( i = 0; i < 4; i++ ) {
+			for ( from = 0; ( at = find_text(msk_log + from, n - from, w[i]) ) >= 0; from = at + 1 ) {
+				at += from;
+				if ( at + (INT)knl_strlen(w[i]) <= tail ) continue;	/* counted with the read before */
+				msk_seen[i]++;
+			}
+		}
+		tail = ( n < MSK_TAIL ) ? n : MSK_TAIL;
+		for ( i = 0; i < tail; i++ ) msk_log[i] = msk_log[n - tail + i];
+	}
+}
+
+/* While the page's requests are made and wait: the processes' sockets, and one the kernel makes */
+LOCAL void msk_watch( CONST TS_UUID *page )
+{
+	INT	i, n, s;
+
+	(void)page;
+	for ( i = 0; i < 18; i++ ) {
+		tk_dly_tsk(500);
+		n = so_busy(0);
+		if ( n > msk_most ) msk_most = n;
+		if ( i >= 8 ) {
+			s = so_socket(AF_INET, SOCK_DGRAM, 0);
+			if ( s >= 0 ) {
+				msk_kern++;
+				(void)so_close(s);
+			}
+		}
+	}
+}
+
+LOCAL void test_blink_mpsock( void )
+{
+	T_FSTAT		st;
+	TS_UUID		page;
+	struct sockaddr_in a;
+	INT		l[MSK_SRV], i, n, rc = -2;
+	ER		er;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( !make_page("http://127.0.0.1:18271/msk", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 191) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	for ( i = 0; i < MSK_SRV; i++ ) {
+		l[i] = so_socket(AF_INET, SOCK_STREAM, 0);
+		KT_ASSERT(l[i] >= 0);
+		if ( l[i] < 0 ) continue;
+		knl_memset(&a, 0, sizeof(a));
+		a.sin_family = AF_INET;
+		a.sin_port = lwip_htons(MSK_PORT + i);
+		a.sin_addr.s_addr = lwip_htonl(LOOPBACK);
+		er = so_bind(l[i], (struct sockaddr *)&a, sizeof(a));
+		if ( er >= E_OK ) er = so_listen(l[i], 8);
+		KT_ASSERT_ER(er, E_OK);
+	}
+	msk_most = msk_kern = 0;
+	for ( i = 0; i < 4; i++ ) msk_seen[i] = 0;
+	msk_pos = 0;
+	while ( tm_log_read(&msk_pos, (UB *)msk_log, MSK_LOG) > 0 ) ;
+	if ( desk_up() ) {
+		rc = run_browser(&page, "ready=" BRREADY "\nquit=20000\n", NULL, msk_watch);
+		desk_down();
+	}
+	for ( i = 0; i < MSK_SRV; i++ ) {
+		if ( l[i] >= 0 ) (void)so_close(l[i]);
+	}
+	srv_end();
+	msk_read_log();
+	n = read_title();
+	tm_printf((UB *)"  the last page: %s; the processes held at most %d sockets; the kernel made %d of 10"
+		  " while the requests waited; lines: %d of all sockets in use, %d of a process at its limit,"
+		  " %d and %d of sockets not had\n",
+		  brmeta, msk_most, msk_kern, msk_seen[0], msk_seen[3], msk_seen[1], msk_seen[2]);
+	KT_ASSERT(find_text(brmeta, n, "msk fail=0 ") > 0);
+	KT_ASSERT_EQ(msk_kern, 10);
+	KT_ASSERT_EQ(msk_seen[0], 0);
+	KT_ASSERT_EQ(msk_seen[1], 0);
+	KT_ASSERT_EQ(msk_seen[2], 0);
+	KT_ASSERT_EQ(msk_seen[3], 0);
+	KT_ASSERT_EQ(rc, 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * The sandbox of the browser's processes (design 14.13.9): "/mp1" of
+ * 127.0.0.1, then "/mp2" of localhost, each in a renderer of its own.
+ * While the browser runs, its children's process objects are read
+ * (tessronos.process.sandbox): every renderer is shut out of the groups
+ * of TS_SBX_RENDERER_STORE, the network process of those of
+ * TS_SBX_NETWORK, both with the calls refused (the default
+ * "sandbox=refuse"). The console has no line of a call refused for a
+ * sandbox ("sandbox want=") in a build that says the refusals
+ * (OB_DENY_LOG: make OACVLOG=1 or UITEST=1).
+ */
+#define SBX_TAIL	160
+#define SBX_LOG		( 16 * 1024 )
+#define SBX_SEEN	16
+
+LOCAL UD	sbx_pos;
+LOCAL char	sbx_log[SBX_TAIL + SBX_LOG + 1];
+LOCAL INT	sbx_tail;		/* bytes of the last read kept for a line read in two */
+LOCAL INT	sbx_breaks;		/* the lines of calls refused */
+LOCAL INT	sbx_rend, sbx_net, sbx_odd, sbx_kill;
+LOCAL ID	sbx_seen[SBX_SEEN];
+LOCAL INT	sbx_nseen;
+LOCAL INT	sbx_want_rend;	/* the set a renderer is to be in */
+
+/* The console since the last look: the lines of calls refused for a sandbox counted and said */
+LOCAL void sbx_read_log( void )
+{
+	static CONST char w[] = "sandbox want=";
+	INT	n, k, at, from, s, e, i;
+	char	line[160];
+
+	for ( ;; ) {
+		k = tm_log_read(&sbx_pos, (UB *)sbx_log + sbx_tail, SBX_LOG);
+		if ( k <= 0 ) break;
+		n = sbx_tail + k;
+		sbx_log[n] = '\0';
+		for ( from = 0; ( at = find_text(sbx_log + from, n - from, w) ) >= 0; from = at + 1 ) {
+			at += from;
+			if ( at + (INT)sizeof(w) - 1 <= sbx_tail ) continue;	/* counted with the read before */
+			for ( s = at; s > 0 && sbx_log[s - 1] != '\n'; s-- ) ;
+			/* the kernel's line, not this test's own saying of it read back */
+			if ( sbx_log[s] != '!' ) continue;
+			sbx_breaks++;
+			for ( e = at; e < n && sbx_log[e] != '\n' && e - s < (INT)sizeof(line) - 1; e++ ) ;
+			knl_memcpy(line, sbx_log + s, (SZ)( e - s ));
+			line[e - s] = '\0';
+			tm_printf((UB *)"  refused: %s\n", line);
+		}
+		sbx_tail = ( n < SBX_TAIL ) ? n : SBX_TAIL;
+		for ( i = 0; i < sbx_tail; i++ ) sbx_log[i] = sbx_log[n - sbx_tail + i];
+	}
+}
+
+/* tessronos.process.sandbox of process pid's object, -1 when it cannot be read */
+LOCAL INT sbx_attr( ID pid )
+{
+	TS_UUID	u, prog;
+	INT	n, at, v = 0;
+	CONST char *q;
+
+	if ( knl_prc_uuid(pid, &u, &prog) < E_OK ) return -1;
+	n = read_meta(&u);
+	at = find_text(brmeta, n, "\"sandbox\":");
+	if ( at < 0 ) return -1;
+	for ( q = brmeta + at + 10; *q >= '0' && *q <= '9'; q++ ) v = v * 10 + ( *q - '0' );
+	return v;
+}
+
+/* The browser's children that have entered their sandbox since the last look, each counted by its set */
+LOCAL void sbx_look( void )
+{
+	ID	pids[64];
+	T_RPRC	rp;
+	INT	n, i, j, set;
+	UW	s;
+
+	n = knl_prc_list(pids, 64);
+	for ( i = 0; i < n; i++ ) {
+		if ( ts_ref_prc(pids[i], &rp) < E_OK || rp.ppid != mem_pid ) continue;
+		for ( j = 0; j < sbx_nseen && sbx_seen[j] != pids[i]; j++ ) ;
+		if ( j < sbx_nseen ) continue;
+		set = sbx_attr(pids[i]);
+		if ( set <= 0 ) continue;		/* not yet in it */
+		s = knl_prc_sbx_of(pids[i]);
+		if ( sbx_nseen < SBX_SEEN ) sbx_seen[sbx_nseen++] = pids[i];
+		tm_printf((UB *)"  pid %d: tessronos.process.sandbox %x (how %x)\n", (INT)pids[i], set,
+			  (INT)( s >> TS_SBX_HOW_SHIFT ));
+		if ( set == sbx_want_rend ) sbx_rend++;
+		else if ( set == TS_SBX_NETWORK ) sbx_net++;
+		else if ( set != TS_SBX_GPUPROC ) sbx_odd++;
+		if ( ( ( s >> TS_SBX_HOW_SHIFT ) & TS_SBX_REFUSE ) == 0 ) sbx_kill++;
+	}
+}
+
+LOCAL void sbx_check( CONST TS_UUID *page )
+{
+	INT	t;
+
+	(void)page;
+	for ( t = 0; t < 16000; t += 250 ) {
+		sbx_look();
+		sbx_read_log();
+		tk_dly_tsk(250);
+	}
+}
+
+LOCAL void test_blink_sbx( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	rc = -2;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( boot_word("ktsingle") ) {
+		KT_SKIP("one process: no renderer and no network process to restrict");
+	}
+	if ( !make_page("http://127.0.0.1:18277/mp1", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 197) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	/* the console from here on */
+	sbx_pos = 0;
+	while ( tm_log_read(&sbx_pos, (UB *)sbx_log, SBX_LOG) > 0 ) ;
+	sbx_tail = sbx_breaks = sbx_rend = sbx_net = sbx_odd = sbx_kill = sbx_nseen = 0;
+	sbx_want_rend = TS_SBX_RENDERER_STORE;
+	if ( desk_up() ) {
+		rc = run_browser(&page, "then=http://localhost:18277/mp2\nready=" BRREADY "\nquit=24000\n", NULL, sbx_check);
+		desk_down();
+	}
+	sbx_read_log();
+	KT_ASSERT(asked_for("/mp1", 1000));
+	KT_ASSERT(asked_for("/mp2", 1000));
+	srv_end();
+	tm_printf((UB *)"  in a sandbox: %d renderers, %d network, %d of another set, %d ended by a call; "
+		  "%d calls refused\n", sbx_rend, sbx_net, sbx_odd, sbx_kill, sbx_breaks);
+	KT_ASSERT(sbx_rend >= 2);
+	KT_ASSERT(sbx_net >= 1);
+	KT_ASSERT_EQ(sbx_odd, 0);
+	KT_ASSERT_EQ(sbx_kill, 0);
+#ifdef OB_DENY_LOG
+	KT_ASSERT_EQ(sbx_breaks, 0);
+#else
+	tm_printf((UB *)"  the refusals are not said in this build (make OACVLOG=1)\n");
+#endif
+	KT_ASSERT_EQ(rc, 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * The pages' storage of a browser of several processes (design 14.8,
+ * 14.13.8): the renderers do not open the stores' objects, the network
+ * process does for them. What "/mpk1" left in localStorage and IndexedDB
+ * is there for "/mpk3" in another renderer of the same browser, and for
+ * "/mpk4" in a browser started after; what "/mpk2" of another site put
+ * under the same name is not.
+ */
+LOCAL char	mpk_token[16];
+
+LOCAL void mpk_url( char *url, CONST char *path )
+{
+	SYSTIM	t;
+
+	if ( mpk_token[0] == '\0' ) {
+		(void)tk_get_otm(&t);
+		srv_num(mpk_token, (UW)t.lo, 10);
+	}
+	tm_sprintf((UB *)url, (UB *)"http://127.0.0.1:18278%s#%s", path, mpk_token);
+}
+
+LOCAL void test_blink_mpkeep( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page, page4;
+	char	url[96];
+	INT	n, rc = -2, rc4 = -2;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( boot_word("ktsingle") ) {
+		KT_SKIP("one process: the stores are the browser's own");
+	}
+	mpk_token[0] = '\0';
+	mpk_url(url, "/mpk1");
+	if ( !make_page(url, &page) ) return;
+	mpk_url(url, "/mpk4");
+	if ( !make_page(url, &page4) ) {
+		(void)ob_del_obj(&page);
+		return;
+	}
+	if ( !srv_start(HTTP_PORT + 198) ) {
+		(void)ob_del_obj(&page);
+		(void)ob_del_obj(&page4);
+		KT_SKIP("no network stack");
+	}
+	tm_printf((UB *)"  the token: %s\n", mpk_token);
+	if ( desk_up() ) {
+		rc = run_browser(&page, "ready=" BRREADY "\nquit=32000\n", NULL, NULL);
+		desk_down();
+	}
+	n = read_title();
+	tm_printf((UB *)"  in another renderer: %s\n", brmeta);
+	KT_ASSERT(asked_for("/mpk2", 1000));
+	KT_ASSERT(asked_for("/mpk3", 1000));
+	KT_ASSERT(find_text(brmeta, n, "mpk3 ls=ok idb=ok") > 0);
+	if ( desk_up() ) {
+		rc4 = run_browser(&page4, "ready=" BRREADY "\nquit=15000\n", NULL, NULL);
+		desk_down();
+	}
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  in the browser started after: %s\n", brmeta);
+	KT_ASSERT(find_text(brmeta, n, "mpk4 ls=ok idb=ok") > 0);
+	KT_ASSERT_EQ(rc, 0);
+	KT_ASSERT_EQ(rc4, 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+	KT_ASSERT_ER(ob_del_obj(&page4), E_OK);
+}
+
+/*
+ * Renderers started one after another while the stores they read back
+ * as they start are some megabytes (test_blink_mpstore): "/mps" of
+ * 127.0.0.1 and of localhost by turns, each visit in a renderer of its
+ * own, the next one (the one kept ready) starting and reading the stores
+ * back while the one before still writes; then the browser started again
+ * a few times, its network process new each time, and the same. Every
+ * run must get to its last visit, which finds what the first ones kept.
+ */
+#define MPS_RUNS	4
+#define MPS_FIRST	24		/* visits in the first run */
+#define MPS_AGAIN	10		/* in each run after */
+
+LOCAL void test_blink_mpstore( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page[MPS_RUNS];
+	char	url[96], want[48], token[16];
+	SYSTIM	t;
+	INT	run, n, rc;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( boot_word("ktsingle") ) {
+		KT_SKIP("one process: the stores are the browser's own");
+	}
+	(void)tk_get_otm(&t);
+	srv_num(token, (UW)t.lo, 10);
+	for ( run = 0; run < MPS_RUNS; run++ ) {
+		tm_sprintf((UB *)url, (UB *)"http://127.0.0.1:%d/mps#%s.0.%d", HTTP_PORT + 241, token,
+			   run == 0 ? MPS_FIRST : MPS_AGAIN);
+		if ( !make_page(url, &page[run]) ) {
+			while ( --run >= 0 ) (void)ob_del_obj(&page[run]);
+			return;
+		}
+	}
+	if ( !srv_start(HTTP_PORT + 241) ) {
+		for ( run = 0; run < MPS_RUNS; run++ ) (void)ob_del_obj(&page[run]);
+		KT_SKIP("no network stack");
+	}
+	tm_printf((UB *)"  the token: %s\n", token);
+	for ( run = 0; run < MPS_RUNS; run++ ) {
+		rc = -2;
+		if ( desk_up() ) {
+			rc = run_browser(&page[run], run == 0 ? "ready=" BRREADY "\nquit=300000\n"
+							      : "ready=" BRREADY "\nquit=150000\n", NULL, NULL);
+			desk_down();
+		}
+		n = read_title();
+		tm_printf((UB *)"  run %d: %s\n", run, brmeta);
+		tm_sprintf((UB *)want, (UB *)"mps done n=%d ", run == 0 ? MPS_FIRST : MPS_AGAIN);
+		KT_ASSERT(find_text(brmeta, n, want) > 0);
+		KT_ASSERT(find_text(brmeta, n, "idb=301 cs=301") > 0);
+		KT_ASSERT_EQ(rc, 0);
+	}
+	srv_end();
+	for ( run = 0; run < MPS_RUNS; run++ ) KT_ASSERT_ER(ob_del_obj(&page[run]), E_OK);
+}
+
+/*
+ * The renderers shut out of the objects too ("sandbox_renderer=noobj"):
+ * the pages of test_blink_mpkeep keep and find their storage, each
+ * renderer is in TS_SBX_RENDERER_STORE with TS_SBX_OBJ, and the console
+ * says what calls were refused (OB_DENY_LOG: make OACVLOG=1), the
+ * renderers' to be none.
+ */
+LOCAL void test_blink_sbxobj( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	char	url[96];
+	INT	n, rc = -2;
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	if ( boot_word("ktsingle") ) {
+		KT_SKIP("one process: no renderer to restrict");
+	}
+	mpk_token[0] = '\0';
+	mpk_url(url, "/mpk1");
+	if ( !make_page(url, &page) ) return;
+	if ( !srv_start(HTTP_PORT + 198) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	sbx_pos = 0;
+	while ( tm_log_read(&sbx_pos, (UB *)sbx_log, SBX_LOG) > 0 ) ;
+	sbx_tail = sbx_breaks = sbx_rend = sbx_net = sbx_odd = sbx_kill = sbx_nseen = 0;
+	sbx_want_rend = TS_SBX_RENDERER_STORE | TS_SBX_OBJ;
+	if ( desk_up() ) {
+		rc = run_browser(&page, "sandbox_renderer=noobj\nready=" BRREADY "\nquit=32000\n", NULL, sbx_check);
+		desk_down();
+	}
+	sbx_read_log();
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  shut out of the objects: %d renderers, %d network, %d of another set, %d ended by a call; "
+		  "%d calls refused; %s\n", sbx_rend, sbx_net, sbx_odd, sbx_kill, sbx_breaks, brmeta);
+	KT_ASSERT(find_text(brmeta, n, "mpk3 ls=ok idb=ok") > 0);
+	KT_ASSERT(sbx_rend >= 2);
+	KT_ASSERT(sbx_net >= 1);
+	KT_ASSERT_EQ(sbx_odd, 0);
+	KT_ASSERT_EQ(sbx_kill, 0);
+#ifdef OB_DENY_LOG
+	KT_ASSERT_EQ(sbx_breaks, 0);
+#else
+	tm_printf((UB *)"  the refusals are not said in this build (make OACVLOG=1)\n");
+#endif
+	KT_ASSERT_EQ(rc, 0);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
+ * A page left (BROWSER_BLINK=1): what it played, recorded and took from
+ * the camera ends with it, as its document is unloaded. "/mpv1" plays a
+ * video and goes to "/mpv2" of the same site, which plays one too and
+ * goes to "/mpv3" of another site (localhost): "/mpv1" is not heard of
+ * once "/mpv2" is asked for (one ask under way at most), nor "/mpv2" once
+ * "/mpv3" is. Then "/mpc" records the camera's stream and goes to
+ * "/mpv3": the recorder's pieces stop and the camera's stream is stopped
+ * four seconds after. The browser keeps up to four renderers
+ * ("renderers=4"), so that none is let go for the limit: the renderer of
+ * the page left ends because nothing of it is shown, and gives back its
+ * memory.
+ */
+LOCAL INT	mpn_cam;
+
+/* The camera's stream: CAM_START, CAM_STOP, or -1 when it cannot be read */
+LOCAL INT cam_streaming( void )
+{
+	ID	dd;
+	W	v = -1;
+	SZ	asz = 0;
+
+	dd = tk_opn_dev((UB *)CAM_DEVNM, TD_READ);
+	if ( dd < E_OK ) return -1;
+	if ( tk_srea_dev(dd, DN_CAMSTREAM, &v, sizeof(v), &asz) < E_OK ) v = -1;
+	(void)tk_cls_dev(dd, 0);
+	return (INT)v;
+}
+
+LOCAL void mpnav_cam_check( CONST TS_UUID *page )
+{
+	static UB	frame[64 * 48 * 2];
+	INT		i, t, left = -1;
+
+	(void)page;
+	for ( i = 0; i < 64 * 48; i++ ) {
+		frame[i * 2] = 200;
+		frame[i * 2 + 1] = 128;
+	}
+	tk_dly_tsk(2500);
+	type_key(0x28, 0);		/* 許可: the camera */
+	for ( t = 0; t < 300; t++ ) {	/* ten frames a second, until four seconds after the page is left */
+		knl_cam_feed(frame, sizeof(frame));
+		tk_dly_tsk(100);
+		if ( mpn_left && left < 0 ) left = t;
+		if ( left >= 0 && t - left >= 40 ) break;
+	}
+	mpn_cam = cam_streaming();
+}
+
+/* What the browser wrote of its renderers (procs=): the renderer left, and the memory it gave back (-1: none) */
+LOCAL INT mpnav_freed( void )
+{
+	INT	fd, i, k, at, freed = 0;
+
+	procs_text[0] = '\0';
+	fd = fs_open(BRPROCS, O_RDONLY);
+	if ( fd >= 0 ) {
+		INT got = fs_read(fd, procs_text, sizeof(procs_text) - 1);
+		procs_text[got > 0 ? got : 0] = '\0';
+		(void)fs_close(fd);
+	}
+	(void)fs_unlink(BRPROCS);
+	tm_printf((UB *)"  what the renderers did:\n%s", procs_text);
+	i = (INT)knl_strlen(procs_text);
+	at = find_text(procs_text, i, "left pid=");
+	if ( at < 0 ) return -1;
+	k = find_text(procs_text + at, i - at, "freed=");
+	if ( k < 0 ) return -1;
+	at += k;
+	{
+		CONST char *q = procs_text + at + 6;
+		BOOL neg = ( *q == '-' );
+		if ( neg ) q++;
+		for ( ; *q >= '0' && *q <= '9'; q++ ) freed = freed * 10 + ( *q - '0' );
+		if ( neg ) freed = -freed;
+	}
+	tm_printf((UB *)"  the renderer left gave back %d MB\n", freed);
+	return freed;
+}
+
+LOCAL void test_blink_mpnav( void )
+{
+	T_FSTAT	st;
+	TS_UUID	page;
+	INT	n, freed;
+	BOOL	multi = !boot_word("ktsingle");
+
+	if ( fs_stat(SKPROG, &st) < EX_OK ) {
+		KT_SKIP("the engine is not built (make BROWSER=1)");
+	}
+	/* a video played, the page left within its site and to another */
+	if ( !make_page("http://127.0.0.1:18268/mpv1", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 188) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	mpn_a = mpn_b = mpn_r = mpn_a2 = mpn_a3 = mpn_b3 = mpn_r3 = 0;
+	mpn_left = FALSE;
+	(void)fs_unlink(BRPROCS);
+	if ( desk_up() ) {
+		KT_ASSERT_EQ(run_browser(&page, "renderers=4\nready=" BRREADY "\nquit=40000\nprocs=" BRPROCS "\n",
+					 NULL, NULL), 0);
+		desk_down();
+	}
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  /mpv1 told %d (%d of them once /mpv2 was asked for), /mpv2 %d (%d once /mpv3 was)\n",
+		  mpn_a, mpn_a - mpn_a2, mpn_b, mpn_b - mpn_b3);
+	KT_ASSERT(mpn_left);
+	KT_ASSERT(mpn_a >= 3);
+	KT_ASSERT(mpn_b >= 3);
+	KT_ASSERT(mpn_a - mpn_a2 <= 1);
+	KT_ASSERT(mpn_a == mpn_a3);
+	KT_ASSERT(mpn_b - mpn_b3 <= 1);
+	KT_ASSERT(find_text(brmeta, n, "mpe localhost") >= 0);
+	freed = mpnav_freed();
+	if ( multi ) KT_ASSERT(freed >= 10);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+
+	/* the camera recorded, the page left to another site */
+	if ( !make_page("http://127.0.0.1:18269/mpc", &page) ) return;
+	if ( !srv_start(HTTP_PORT + 189) ) {
+		(void)ob_del_obj(&page);
+		KT_SKIP("no network stack");
+	}
+	mpn_r = mpn_r3 = 0;
+	mpn_left = FALSE;
+	mpn_cam = -1;
+	knl_cam_loopback(TRUE);
+	if ( desk_up() ) {
+		KT_ASSERT_EQ(run_browser(&page, "renderers=4\nready=" BRREADY "\nquit=40000\nprocs=" BRPROCS "\n",
+					 NULL, mpnav_cam_check), 0);
+		desk_down();
+	}
+	knl_cam_loopback(FALSE);
+	srv_end();
+	n = read_title();
+	tm_printf((UB *)"  /mpc recorded %d pieces (%d once /mpv3 was asked for); the camera's stream then %d\n",
+		  mpn_r, mpn_r - mpn_r3, mpn_cam);
+	KT_ASSERT(mpn_left);
+	KT_ASSERT(mpn_r >= 3);
+	KT_ASSERT(mpn_r - mpn_r3 <= 1);
+	KT_ASSERT_EQ(mpn_cam, CAM_STOP);
+	KT_ASSERT(find_text(brmeta, n, "mpe localhost") >= 0);
+	freed = mpnav_freed();
+	if ( multi ) KT_ASSERT(freed >= 10);
+	KT_ASSERT_ER(ob_del_obj(&page), E_OK);
+}
+
+/*
  * What a user of a browser does with it (BROWSER_BLINK=1): "/ui" (see
  * page_ui). The pointer over the link puts its address on the message
  * line ("addr=" writes it after "> "); the right button on the box is the
@@ -18019,41 +21198,63 @@ LOCAL void ui_check( CONST TS_UUID *page )
 	ob_cls_obj(k);
 	x0 = wp.wleft;
 	y0 = wp.wtop + BAR_H;
-	tk_dly_tsk(2000);
+	/* each step waits for what the page says of the one before (its title), a panel, or a page asked for */
+	if ( !title_came(&win, "fe=", 15000) ) not_came("the page");
 	hid_ev(HID_EV_MOVE, 0, x0 + 110, y0 + 25, 0, 0);		/* over the link */
-	tk_dly_tsk(1000);
+	if ( !msg_came("/ui/next", 10000) ) not_came("the link's address on the message line");
 	ui_click(x0 + 110, y0 + 80, 1, 0);				/* the box's contextmenu */
-	tk_dly_tsk(1200);
+	if ( !title_came(&win, "ctx=1", 10000) ) not_came("ctx=1");
 	type_key(0x2E, 0x01);						/* Ctrl+= : 110 % */
-	tk_dly_tsk(1500);
+	if ( !title_came(&win, "1.1", 10000) ) not_came("110 %");
 	type_key(0x27, 0x01);						/* Ctrl+0 : 100 % */
-	tk_dly_tsk(1500);
+	if ( !title_came(&win, "1.100000023841858,1", 10000) ) not_came("100 %");
 	ui_click(x0 + 300, y0 + 300, 0, 0);				/* the page, not a field */
-	tk_dly_tsk(500);
+	tk_dly_tsk(300);
 	type_key(0x04, 0x01);						/* Ctrl+A */
-	tk_dly_tsk(500);
+	tk_dly_tsk(300);
 	type_key(0x06, 0x01);						/* Ctrl+C */
-	tk_dly_tsk(1000);
-	ui_click(x0 + 110, y0 + 240, 0, 0);				/* the field */
 	tk_dly_tsk(500);
+	ui_click(x0 + 110, y0 + 240, 0, 0);				/* the field */
+	tk_dly_tsk(300);
 	type_key(0x19, 0x01);						/* Ctrl+V */
-	tk_dly_tsk(1500);
+	if ( !title_came(&win, "copy_me", 10000) ) not_came("the text pasted");
 	ui_click(x0 + 70, y0 + 140, 0, 0);				/* full screen */
-	tk_dly_tsk(3000);
+	if ( !title_came(&win, "fs=", 10000) ) not_came("full screen");
+	tk_dly_tsk(500);						/* the screen drawn so */
 	type_key(0x29, 0);						/* Esc */
-	tk_dly_tsk(3000);
+	if ( !title_came(&win, "fx=", 10000) ) not_came("full screen left");
 	hid_ev(HID_EV_KEY_DOWN, 0xE0, 0, 0, 0x01, 0);			/* Ctrl held, and the link pressed */
 	ui_click(x0 + 110, y0 + 25, 0, 0x01);
 	hid_ev(HID_EV_KEY_UP, 0xE0, 0, 0, 0, 0);
-	tk_dly_tsk(7000);
+	/*
+	 * The browser of its own opens the link (its window, titled by the
+	 * page, up); it ends by itself later (its apart=quit=). The keys go
+	 * to the page's window again
+	 */
+	if ( !asked_for("/ui/next", 20000) ) not_came("the link in a browser of its own");
+	if ( window_titled("uinext", FALSE, 20000) == 0 ) not_came("the window of the browser of its own");
+	(void)wm_focus(wm_obj_wid(&win));
+	tk_dly_tsk(300);						/* the focus taken */
+	k = panels_up();
 	type_key(0x3E, 0);						/* F5: held */
-	tk_dly_tsk(2000);
-	type_key(0x29, 0);						/* 取消 */
-	tk_dly_tsk(1500);
+	if ( panel_came(k, 15000) ) {
+		tk_dly_tsk(300);
+		type_key(0x29, 0);					/* 取消 */
+	} else {
+		not_came("the panel of beforeunload");
+	}
+	for ( x0 = 0; x0 < 100 && panels_up() > k; x0++ ) tk_dly_tsk(100);
+	/* the panel gone, the keys may have gone to the browser of its own (still up): the page's window again */
+	(void)wm_focus(wm_obj_wid(&win));
+	tk_dly_tsk(300);						/* the focus taken */
 	type_key(0x3E, 0);						/* F5 */
-	tk_dly_tsk(2000);
-	type_key(0x28, 0);						/* 了解: loaded again */
-	tk_dly_tsk(4000);
+	if ( panel_came(k, 15000) ) {
+		tk_dly_tsk(300);
+		type_key(0x28, 0);					/* 了解: loaded again */
+	} else {
+		not_came("the panel of beforeunload, again");
+	}
+	if ( !title_came(&win, "nt=reload", 15000) ) not_came("the page loaded again");
 }
 
 LOCAL void test_blink_ui( void )
@@ -19057,6 +22258,56 @@ LOCAL void test_blink_spa( void )
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
 }
 
+LOCAL void test_blink_mp( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_mpnest( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_mpleave( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_mpnav( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_mpck( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_mpsock( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_sbx( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_mpkeep( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_mpstore( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_sbxobj( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
 LOCAL void test_blink_ui( void )
 {
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
@@ -19107,12 +22358,32 @@ LOCAL void test_blink_history( void )
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
 }
 
+LOCAL void test_blink_hist_many( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
 LOCAL void test_blink_hsts( void )
 {
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
 }
 
 LOCAL void test_blink_dl( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_dlatt( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_dlmime( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_dlslow( void )
 {
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
 }
@@ -19247,6 +22518,36 @@ LOCAL void test_blink_gpu( void )
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
 }
 
+LOCAL void test_blink_gpuproc( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_gsurf( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_gpulost( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_glproc( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_gltex( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
+LOCAL void test_blink_gpuwgpu( void )
+{
+	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
+}
+
 LOCAL void test_blink_menu( void )
 {
 	KT_SKIP("the browser is built without Blink (BROWSER_BLINK=1)");
@@ -19273,25 +22574,62 @@ LOCAL void test_blink_frame( void )
 }
 #endif
 
-#ifdef KT_V8
-/* make ... KT_V8=<name>,<name>: only the tests named run */
-LOCAL BOOL v8_want( CONST char *name )
+/* Whether 'name' is one of a list of names parted by ',', the list ending at end (a ' ' or the string's end) */
+LOCAL BOOL v8_listed( CONST char *p, CONST char *name )
 {
-	CONST char	*p = KT_V8;
-	INT		i;
+	INT	i;
 
-	while ( *p != '\0' ) {
+	while ( *p != '\0' && *p != ' ' ) {
 		for ( i = 0; name[i] != '\0' && p[i] == name[i]; i++ ) ;
-		if ( name[i] == '\0' && ( p[i] == ',' || p[i] == '\0' ) ) return TRUE;
-		while ( *p != '\0' && *p != ',' ) p++;
+		if ( name[i] == '\0' && ( p[i] == ',' || p[i] == '\0' || p[i] == ' ' ) ) return TRUE;
+		while ( *p != '\0' && *p != ',' && *p != ' ' ) p++;
 		if ( *p == ',' ) p++;
 	}
 	return FALSE;
 }
-#define V8_RUN(fn)	do { if ( v8_want(#fn) ) KT_RUN(fn); } while ( 0 )
-#else
-#define V8_RUN(fn)	KT_RUN(fn)
+
+/* The kernel's command line (/chosen/bootargs, the ESP's cmdline.txt) */
+IMPORT UB	knl_bootargs[];
+
+/*
+ * Whether the kernel's command line has the word w: "ktsingle", every
+ * browser the tests start runs its pages in its own process (14.13), to
+ * be compared with renderers of their own; "ktextkeep", the browsers
+ * test_blink_ext opens are left as they are at its end
+ */
+LOCAL BOOL boot_word( CONST char *w )
+{
+	CONST char	*a = (CONST char *)knl_bootargs;
+	INT		i, j;
+
+	for ( i = 0; a[i] != '\0'; i++ ) {
+		if ( i > 0 && a[i - 1] != ' ' ) continue;
+		for ( j = 0; w[j] != '\0' && a[i + j] == w[j]; j++ ) ;
+		if ( w[j] == '\0' && ( a[i + j] == '\0' || a[i + j] == ' ' ) ) return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * Which tests run: make ... KT_V8=<name>,<name> builds only those in; and
+ * a word "ktv8=<name>,<name>" on the kernel's command line (QEMU's
+ * -append) runs only those of them, so that one image is run in parts by
+ * machines side by side
+ */
+LOCAL BOOL v8_want( CONST char *name )
+{
+	CONST char	*a = (CONST char *)knl_bootargs;
+	INT		i;
+
+#ifdef KT_V8
+	if ( !v8_listed(KT_V8, name) ) return FALSE;
 #endif
+	for ( i = 0; a[i] != '\0'; i++ ) {
+		if ( ( i == 0 || a[i - 1] == ' ' ) && a[i] == 'k' && a[i + 1] == 't' && a[i + 2] == 'v' && a[i + 3] == '8' && a[i + 4] == '=' ) return v8_listed(a + i + 5, name);
+	}
+	return TRUE;
+}
+#define V8_RUN(fn)	do { if ( v8_want(#fn) ) KT_RUN(fn); } while ( 0 )
 
 EXPORT void ktest_v8( void )
 {
@@ -19313,6 +22651,12 @@ EXPORT void ktest_v8( void )
 	V8_RUN(test_blink_keep);
 	V8_RUN(test_blink_media);
 	V8_RUN(test_blink_gpu);
+	V8_RUN(test_blink_gpuproc);
+	V8_RUN(test_blink_gsurf);
+	V8_RUN(test_blink_gpulost);
+	V8_RUN(test_blink_glproc);
+	V8_RUN(test_blink_gltex);
+	V8_RUN(test_blink_gpuwgpu);
 	V8_RUN(test_blink_wasm);
 	V8_RUN(test_blink_worker);
 	V8_RUN(test_blink_iframe);
@@ -19363,6 +22707,16 @@ EXPORT void ktest_v8( void )
 	V8_RUN(test_blink_clipa);
 	V8_RUN(test_blink_mpa);
 	V8_RUN(test_blink_spa);
+	V8_RUN(test_blink_mp);
+	V8_RUN(test_blink_mpnest);
+	V8_RUN(test_blink_mpleave);
+	V8_RUN(test_blink_mpnav);
+	V8_RUN(test_blink_mpck);
+	V8_RUN(test_blink_mpsock);
+	V8_RUN(test_blink_sbx);
+	V8_RUN(test_blink_mpkeep);
+	V8_RUN(test_blink_mpstore);
+	V8_RUN(test_blink_sbxobj);
 	V8_RUN(test_blink_ui);
 	V8_RUN(test_blink_face);
 	V8_RUN(test_blink_find);
@@ -19374,8 +22728,12 @@ EXPORT void ktest_v8( void )
 	V8_RUN(test_blink_clear);
 	V8_RUN(test_blink_users);
 	V8_RUN(test_blink_history);
+	V8_RUN(test_blink_hist_many);
 	V8_RUN(test_blink_hsts);
 	V8_RUN(test_blink_dl);
+	V8_RUN(test_blink_dlatt);
+	V8_RUN(test_blink_dlmime);
+	V8_RUN(test_blink_dlslow);
 	V8_RUN(test_blink_autofill);
 	V8_RUN(test_blink_pdf);
 	V8_RUN(test_blink_mchunk);
@@ -19412,4 +22770,5 @@ EXPORT void ktest_v8( void )
 	V8_RUN(test_desk);
 	V8_RUN(test_https);
 	V8_RUN(test_http3);
+	V8_RUN(test_netswitch);
 }

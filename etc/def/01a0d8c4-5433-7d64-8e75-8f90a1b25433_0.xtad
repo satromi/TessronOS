@@ -1,0 +1,87 @@
+<tad version="1.0" encoding="UTF-8" filename="管理情報のデータボックス">
+<document>
+<p>管理情報のデータボックス</p>
+<p>管理情報のウインドウのパネルの定義。実身情報、使用者管理、付箋指定の三つのタグと、適用と取消のボタン。2 は利用者や機能付箋を一覧から選ぶパネル、3 と 4 は知らせのパネル。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,476,436" title="管理情報" kind="bare">
+<tags num="100" rect="8,8,468,384" inner="12,36,464,380" value="1"><tag>実身情報</tag><tag>使用者管理</tag><tag>付箋指定</tag></tags>
+<label sheet="1" num="300" rect="22,48,134,70">実身名</label>
+<label sheet="1" num="200" rect="138,48,454,70"></label>
+<label sheet="1" num="301" rect="22,74,134,96">ＵＵＩＤ</label>
+<label sheet="1" num="201" rect="138,74,454,96"></label>
+<label sheet="1" num="302" rect="22,100,134,122">続柄</label>
+<label sheet="1" num="202" rect="138,100,454,122"></label>
+<label sheet="1" num="303" rect="22,126,134,148">作成者</label>
+<label sheet="1" num="203" rect="138,126,454,148"></label>
+<label sheet="1" num="304" rect="22,152,134,174">作成日時</label>
+<label sheet="1" num="204" rect="138,152,454,174"></label>
+<label sheet="1" num="305" rect="22,178,134,200">更新日時</label>
+<label sheet="1" num="205" rect="138,178,454,200"></label>
+<label sheet="1" num="306" rect="22,204,134,226">参照日時</label>
+<label sheet="1" num="206" rect="138,204,454,226"></label>
+<label sheet="1" num="307" rect="22,230,134,252">サイズ</label>
+<label sheet="1" num="207" rect="138,230,454,252"></label>
+<label sheet="1" num="308" rect="22,256,134,278">レコード数</label>
+<label sheet="1" num="208" rect="138,256,454,278"></label>
+<label sheet="1" num="309" rect="22,282,134,304">参照仮身数</label>
+<label sheet="1" num="209" rect="138,282,454,304"></label>
+<label sheet="1" num="310" rect="22,308,134,330">含む仮身数</label>
+<label sheet="1" num="210" rect="138,308,454,330"></label>
+<label sheet="2" num="301" rect="22,48,132,70">所有者</label>
+<label sheet="2" num="20" rect="138,48,368,70"></label>
+<button sheet="2" num="60" rect="376,46,454,72">変更</button>
+<label sheet="2" num="302" rect="22,80,132,102">グループ</label>
+<label sheet="2" num="21" rect="138,80,368,102"></label>
+<button sheet="2" num="61" rect="376,78,454,104">変更</button>
+<label sheet="2" num="303" rect="22,116,132,138">利用権</label>
+<label sheet="2" num="66" rect="138,116,454,138">（この実身の保護は読めません）</label>
+<label sheet="2" num="310" rect="48,140,132,162">所有者</label>
+<switch sheet="2" num="30" rect="138,140,228,162">読出し</switch>
+<switch sheet="2" num="31" rect="234,140,324,162">書込み</switch>
+<switch sheet="2" num="32" rect="330,140,420,162">実行</switch>
+<label sheet="2" num="311" rect="48,166,132,188">グループ</label>
+<switch sheet="2" num="33" rect="138,166,228,188">読出し</switch>
+<switch sheet="2" num="34" rect="234,166,324,188">書込み</switch>
+<switch sheet="2" num="35" rect="330,166,420,188">実行</switch>
+<label sheet="2" num="312" rect="48,192,132,214">一般</label>
+<switch sheet="2" num="36" rect="138,192,228,214">読出し</switch>
+<switch sheet="2" num="37" rect="234,192,324,214">書込み</switch>
+<switch sheet="2" num="38" rect="330,192,420,214">実行</switch>
+<label sheet="2" num="304" rect="22,224,132,246">属性</label>
+<switch sheet="2" num="40" rect="138,224,248,246">編集不可</switch>
+<switch sheet="2" num="41" rect="258,224,368,246">削除不可</switch>
+<label sheet="2" num="305" rect="22,256,222,278">個別の利用権</label>
+<list sheet="2" num="42" rect="22,280,454,346"></list>
+<switch sheet="2" num="43" rect="22,354,102,376" value="1">読出し</switch>
+<switch sheet="2" num="44" rect="106,354,186,376">書込み</switch>
+<switch sheet="2" num="45" rect="190,354,270,376">実行</switch>
+<button sheet="2" num="62" rect="284,352,366,378">追加</button>
+<button sheet="2" num="63" rect="372,352,454,378">削除</button>
+<label sheet="3" num="306" rect="22,48,132,70">既定の起動</label>
+<label sheet="3" num="51" rect="138,48,454,70"></label>
+<label sheet="3" num="307" rect="22,76,322,98">機能付箋</label>
+<list sheet="3" num="50" rect="22,100,454,250"></list>
+<button sheet="3" num="64" rect="22,258,114,284">追加</button>
+<button sheet="3" num="65" rect="120,258,212,284">削除</button>
+<switch sheet="3" num="52" rect="22,298,142,320">起動固定</switch>
+<button num="90" rect="272,392,358,418" answer="cancel">取消</button>
+<button num="91" rect="368,392,454,418" answer="ok" emph="true">適用</button>
+</panel>
+<panel num="2" rect="0,0,396,306" title="管理情報">
+<label num="1" rect="22,12,374,34"></label>
+<list num="2" rect="22,40,374,236"></list>
+<button num="90" rect="192,262,278,288" answer="cancel">取消</button>
+<button num="91" rect="288,262,374,288" answer="ok" emph="true">決定</button>
+</panel>
+<panel num="3" rect="0,0,496,116" title="管理情報">
+<label num="1" rect="22,18,474,40"></label>
+<label num="2" rect="22,42,474,64"></label>
+<button num="91" rect="380,72,474,98" answer="ok" emph="true">了解</button>
+</panel>
+<panel num="4" rect="0,0,496,92" title="管理情報">
+<label num="1" rect="22,18,474,40"></label>
+<button num="91" rect="380,48,474,74" answer="ok" emph="true">了解</button>
+</panel>
+</databox>
+</tad>

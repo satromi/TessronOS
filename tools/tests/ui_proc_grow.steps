@@ -1,0 +1,100 @@
+# A window made larger by its sizing corner is drawn to its new edges (design 10.1), for
+# tools/ui_run.py. 原紙集め (a process: 仮身一覧's code, its window at 660,40 to 880,528, the
+# corner at 870,518) is carried by the corner to 1060,700 in steps: the work area (670,69 to
+# 1052,692) is white to the right and the foot, where it grew. A program narrows what may be
+# drawn for a piece of its drawing and puts back what it found; the size changing meanwhile
+# must not leave it drawing within the old size for good (dp_set_place). Made smaller, and
+# 全画面表示 by a double press on the corner and back, it is drawn as well. The same for
+# 基本文章編集 running as a process (pdoc) and for the desktop's own window BTRON. (Closing
+# 原紙集め is refused a right on its object, !OACV!, apart from this: looked for before.)
+waitwin 原紙箱
+open 01a0d8c4-5b92-7c53-8d64-9fab0c1d5b92
+waitwin 原紙集め
+expect basecol: up
+wait 1000
+win 原紙集め
+want ok 660 40 880 528
+logmark
+drag 870 518 1060 700
+expectsince basecol: 16 templates in 6 rows 382 wide
+wait 1500
+win 原紙集め
+want ok 660 40 1070 710
+shot pg_grown
+pixel 1000 600 FFFFFF
+pixel 1048 688 FFFFFF
+pixel 1048 300 FFFFFF
+pixel 674 688 FFFFFF
+# drawn by the program, not only laid white: the frame of ブラウザ's link, laid out at the new width
+pixel 1015 103 000000
+pixel 1022 112 000000
+# smaller again
+logmark
+drag 1060 700 820 420
+expectsince basecol: drew
+wait 1500
+win 原紙集め
+want ok 660 40 830 430
+shot pg_small
+pixel 800 400 FFFFFF
+# larger in one step
+logmark
+drag 820 420 1000 650
+expectsince basecol: drew
+wait 1500
+win 原紙集め
+want ok 660 40 1010 660
+pixel 988 640 FFFFFF
+# 全画面表示 by a double press on the corner, and back
+logmark
+dclick 1000 650
+expectsince basecol: drew
+wait 1500
+shot pg_full
+pixel 1250 740 FFFFFF
+pixel 30 740 FFFFFF
+logmark
+dclick 1270 770
+expectsince basecol: drew
+wait 1500
+win 原紙集め
+want ok 660 40 1010 660
+shot pg_back
+pixel 988 640 FFFFFF
+absent !OACV!
+key 08 01
+wait 800
+# 基本文章編集 as a process: its window at 100,100 600x400, the corner at 690,490
+mkbig doc 30
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 30
+wait 800
+logmark
+drag 690 490 900 680
+expectsince document: drew
+wait 1500
+shot pg_doc
+pixelnot 880 660 000000
+pixelnot 880 200 000000
+pixelnot 200 660 000000
+key 08 01
+expect document: closed
+wait 800
+# the desktop's own window BTRON, at 0,0 to 350,226, the corner at 340,216
+win BTRON
+want ok 0 0 350 226
+click 100 12
+wait 300
+drag 340 216 520 420
+wait 1500
+win BTRON
+want ok 0 0 530 430
+shot pg_btron
+pixelnot 500 400 000000
+pixelnot 500 40 000000
+pixelnot 20 400 000000
+drag 520 420 340 216
+wait 1000
+win BTRON
+want ok 0 0 350 226

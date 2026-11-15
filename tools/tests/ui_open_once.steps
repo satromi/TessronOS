@@ -1,0 +1,172 @@
+# 一つの実身は一つのウインドウで開く (design 11.4), for tools/ui_run.py. A copy of
+# 基本文章編集 (mkbig doc 5) is linked into BTRON (linkbig) and opened by a double press on
+# its link: the text editor's process opens it. Double pressed again while that window is
+# up, it is brought to the front and no second window opens; two double presses one after
+# the other, the second while the process is still being started, open one window too.
+# While it is open, 実行 of the link's menu is grey; closed, 実行 can be chosen again and
+# the link opens it again. The same in a process's window: a copy of 画用紙 opened by the
+# figure editor's process (A), the text's link pasted into it, double pressed from there
+# brings the text's window forward, and 実行 of that link's menu in A is grey (the
+# desktop answers DT_RQ_APPS with no program for an object open already).
+# Keys: Ctrl+E 08 01, Ctrl+C 06 01, Ctrl+V 19 01.
+mkbig doc 5
+linkbig 190 100
+wait 300
+# opened, and the window moved down off the link
+logmark
+dclick 200 109
+expectsincein 60 document: opened 基本文章編集 paragraphs 5
+wait 800
+nwin 基本文章編集
+want ok 1
+win 基本文章編集
+keep docwin
+drag 400 108 400 520
+wait 800
+# BTRON in front, then the link double pressed again: the text's window comes forward
+click 260 109
+wait 300
+logmark
+dclick 200 109
+expectsince desktop: open already, window
+wait 800
+nwin 基本文章編集
+want ok 1
+focus d1 基本文章編集
+want ok d1: has the keys
+# 実行 of the link's menu grey while it is open
+click 260 109
+wait 300
+logmark
+click 200 109 1
+expectsince cabinet: exec menu grey
+wait 500
+click 800 700
+wait 500
+# closed: 実行 can be chosen again
+logmark
+click 400 530
+wait 300
+key 08 01
+expectsince document: closed
+wait 800
+nwin 基本文章編集
+want ok 0
+logmark
+click 200 109 1
+expectsince cabinet: exec menu on
+wait 500
+click 800 700
+wait 500
+# two double presses at once: one window (the second finds the start under way, "window 0", or
+# the window up already, as the start goes quickly or not)
+logmark
+dclick 200 109
+dclick 200 109
+expectsince desktop: open already, window
+expectsincein 60 document: opened 基本文章編集 paragraphs 5
+wait 3000
+nwin 基本文章編集
+want ok 1
+# asked again while it was starting: the window takes the keys as it comes up
+focus d2 基本文章編集
+want ok d2: has the keys
+shot oo_one
+logmark
+key 08 01
+expectsince document: closed
+wait 800
+nwin 基本文章編集
+want ok 0
+# the same from a process's window: A, a copy of 画用紙, with the text's link pasted in
+mkbig fig 30 4
+linkbig 180 45
+wait 300
+click 250 109
+wait 300
+key 06 01
+wait 300
+logmark
+dclick 190 52
+expectsincein 60 figure: opened 画用紙 shapes 32 links 0 autoref 1 parent 1
+wait 800
+click 600 500
+wait 300
+logmark
+key 19 01
+expectsince figure: pasted, 33 shapes 1 picked
+wait 500
+click 600 500
+wait 300
+# the text opened from its link in A, then double pressed there again: one window, forward
+logmark
+dclick 360 225
+expectsincein 60 document: opened 基本文章編集 paragraphs 5
+wait 800
+click 600 500
+wait 300
+logmark
+dclick 360 225
+expectsince desktop: open already, window
+wait 800
+nwin 基本文章編集
+want ok 1
+focus p1 基本文章編集
+want ok p1: has the keys
+# 実行 of the link's menu in A grey while the text is open
+click 600 500
+wait 300
+logmark
+click 360 225 1
+expectsince figure: exec menu grey
+wait 500
+shot oo_fig_menu
+click 1000 700
+wait 500
+# closed (Ctrl+E in the text's window, brought forward by its link): 実行 in A can be chosen again
+logmark
+dclick 360 225
+expectsince desktop: open already, window
+wait 500
+key 08 01
+expectsince document: closed
+wait 800
+nwin 基本文章編集
+want ok 0
+click 600 500
+wait 300
+logmark
+click 360 225 1
+expectsince figure: exec menu on
+wait 500
+click 1000 700
+wait 500
+click 600 500
+wait 300
+logmark
+key 08 01
+expectsince figure: closed
+wait 800
+# a template in the 原紙箱's window (a process): opened once
+click 1000 48
+wait 300
+logmark
+dclick 970 80
+expectsincein 60 document: opened
+wait 800
+click 1000 48
+wait 300
+logmark
+dclick 970 80
+expectsince desktop: open already, window
+wait 800
+nwin 基本文章編集
+want ok 1
+shot oo_basebox
+logmark
+key 08 01
+expectsince document: closed
+wait 800
+nwin 基本文章編集
+want ok 0
+absent !OACV!

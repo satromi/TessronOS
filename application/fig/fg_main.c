@@ -59,8 +59,11 @@
 /* and of 仮身一覧, when the program is the cabinet */
 #define CB_PROG		"01a0d6d1-08d3-72ef-ad1e-323b44cc2172"
 
-/* 基本図形編集 unless the program is linked with application/cab/cb_main.c, which says TRUE */
+/* 基本図形編集 unless the program is linked with a cabinet's file (application/cab, basebox, accbox, basecol), which says TRUE */
 __attribute__((weak)) BOOL	fg_cabinet = FALSE;
+/* and what the 原紙箱, the 小物箱 and 原紙集め add, which their files give */
+__attribute__((weak)) CONST T_FGBOX	*fg_box = NULL;
+UINT		fg_as = 0;
 
 #define TICK_MS		20
 #define WHEEL_STEP	48		/* a notch of the wheel */
@@ -83,6 +86,16 @@ INT		g_sx, g_sy;
 INT		g_fw, g_fh;
 INT		g_zoom = 8;
 BOOL		g_show_hidden;
+
+/*
+ * The first window (最初のウインドウ): the window of the cabinet the system
+ * opens with (SYSDEF_CABINET), which the desktop starts as it starts.
+ * Closing it ends the session, asked of the desktop (DT_RQ_FIRST_CLOSE);
+ * a link to what the system makes is put in it when the desktop says
+ * (DT_HOW_LINK_PUT); deleting the link of a disk from it takes the disk
+ * away (DT_DISK_REMOVE).
+ */
+static BOOL	g_first = FALSE;
 
 /* the link under the pointer when the menu was opened, for 実行 and the link's items */
 static T_VOBJ	g_link;
@@ -111,9 +124,14 @@ static ER load( void )
 	T_TAD	*rec = NULL;
 	ER	er;
 
-	if ( ta_read(&x, &len) < E_OK ) return E_NOEXS;
-	er = tad_parse(x, len, NULL, &rec);
-	free(x);
+	if ( FG_MADE ) {
+		/* the 小物箱, 原紙集め: the list the program makes, not the object's record */
+		er = fg_box->load(&rec);
+	} else {
+		if ( ta_read(&x, &len) < E_OK ) return E_NOEXS;
+		er = tad_parse(x, len, NULL, &rec);
+		free(x);
+	}
 	if ( er < E_OK ) return er;
 	if ( tv_kind(rec) != TV_KIND_FIG ) {
 		tad_free(rec);
@@ -124,6 +142,21 @@ static ER load( void )
 	ta_was();
 	fg_model();
 	return E_OK;
+}
+
+/* The record read again as it is stored, nothing taken, scrolled as it was */
+static void reread( void )
+{
+	INT	sx = g_sx, sy = g_sy;
+	char	s[48];
+	ER	er;
+
+	fg_pick_none();
+	er = load();
+	fg_scroll_to(sx, sy);
+	ta_watch_links();
+	snprintf(s, sizeof(s), "read again (%d)", (INT)er);
+	note(s);
 }
 
 /* ---------------------------------------------------------------- the window */
@@ -139,15 +172,153 @@ static void print( void )
 static void close_asked( void )
 {
 	if ( fg_holding() ) fg_hold_cancel();
-	if ( g_changed && ta_save() < E_OK ) {
+	if ( g_first ) {
+		/* the first window: closed when the session ends, and asked whether it is to end */
+		T_DTREQ	rq;
+		T_DTANS	an;
+		ER	er;
+
+		memset(&rq, 0, sizeof(rq));
+		rq.req = DT_RQ_FIRST_CLOSE;
+		memset(&an, 0, sizeof(an));
+		er = ask_desktop(&rq, &an, TMO_FEVR);
+		if ( er != E_OK ) {
+			note("first window stays");
+			return;
+		}
+		note("first window closes: the session ends");
+	} else if ( !FG_MADE && ta_disk_gone(TRUE) ) {
+		g_closing = TRUE;		/* the disk of the object went: what changed was handed over */
+		return;
+	}
+	/* the list of the 小物箱 or of 原紙集め: nothing of it is the object's to keep */
+	if ( g_changed && !FG_MADE && ta_save() < E_OK ) {
 		tell("保存できなかったため、ウインドウを閉じませんでした", "メモリやディスクの空きを確かめてから、もう一度閉じてください");
 		return;
 	}
 	/* a cabinet's link keeps no view of its own and no zoom, as the desktop's cabinet writes it */
 	if ( fg_cabinet ) ta_link_view_back(g_sx, g_sy, 0, TAD_WRAP_NONE, NULL);
 	else ta_link_view_back(g_sx, g_sy, g_zoom * 100 / 8, TAD_WRAP_NONE, "canvas");
-	ta_window_keep();
+	/*
+	 * where the window stood, into the object it shows; 原紙集め shows
+	 * the program object, the system's to change and the person's only
+	 * to read, so its window opens where the program says each time; so
+	 * does a tool's
+	 */
+	if ( !FG_BASECOL && !FG_TOOL ) ta_window_keep();
 	g_closing = TRUE;
+}
+
+/*
+ * 自動起動: the links of the cabinet that ask to be opened with it, each
+ * opened as a double press opens it, by no act of the person, in the
+ * order of the links. The first window says when they are all asked:
+ * the system's start is over once what they opened is up.
+ */
+static void auto_open( void )
+{
+	T_DTREQ	rq;
+	T_DTANS	an;
+	T_VOBJ	v;
+	INT	i, n, k = 0;
+	char	s[48];
+
+	if ( !fg_cabinet || FG_MADE || g_rec == NULL ) return;
+	n = tad_lnk_count(g_rec);
+	for ( i = 0; i < n; i++ ) {
+		if ( tad_lnk_get(g_rec, i, &v) >= E_OK && v.autoopen && ( !v.hidden || g_show_hidden ) ) {
+			ta_link_open(&v, DT_F_AUTO, i + 1);
+			k++;
+		}
+	}
+	if ( g_first ) {
+		memset(&rq, 0, sizeof(rq));
+		rq.req = DT_RQ_OPEN;
+		rq.flags = DT_F_AUTO;
+		rq.grab_y = k;
+		memset(&an, 0, sizeof(an));
+		(void)ask_desktop(&rq, &an, 3000);
+	}
+	snprintf(s, sizeof(s), "opened by itself %d", k);
+	note(s);
+}
+
+/*
+ * The first window told by the desktop: a link to what the system made
+ * (a file printed, a screen saved, a disk attached) put under what is
+ * there, closed and as wide as its name, and the record saved
+ */
+static void first_told( CONST T_DTANS *an )
+{
+	T_VOBJ	v;
+	TS_UUID	id;
+	INT	i, bottom = 8;
+	char	s[TAD_NAME_MAX + 40];
+
+	if ( an->how != DT_HOW_LINK_PUT || g_rec == NULL ) return;
+	for ( i = 0; g_fig != NULL && i < g_fig->nsh; i++ ) {
+		if ( g_fig->sh[i].kind != TV_SH_GROUP && g_fig->sh[i].r.bottom + 8 > bottom ) {
+			bottom = g_fig->sh[i].r.bottom + 8;
+		}
+	}
+	memset(&v, 0, sizeof(v));
+	v.target = an->into;
+	v.recno = -1;
+	snprintf((char *)v.name, sizeof(v.name), "%s", (CONST char *)an->text);
+	v.chsz = 14;
+	v.frcol = 0x000000;
+	v.chcol = 0x000000;
+	v.tbcol = 0xFFFFFF;
+	v.bgcol = 0xFFFFFF;
+	v.disp = TAD_D_DEFAULT;
+	v.zoom = 100;
+	/* 200 by 24, as the desktop has always put what it made there */
+	v.left = 16;
+	v.top = bottom;
+	v.right = v.left + 200;
+	v.height = 24;
+	v.bottom = v.top + v.height;
+	if ( fg_holding() ) fg_hold_cancel();
+	fg_before();
+	fg_pick_none();
+	if ( tad_lnk_add(g_rec, &v, &id) >= E_OK ) {
+		tv_src_forget(&an->into);
+		ta_watch(&an->into);
+	}
+	fg_after();
+	(void)ta_save();
+	snprintf(s, sizeof(s), "put on the desktop: %s", (CONST char *)v.name);
+	note(s);
+}
+
+/* A disk's link deleted from the first window takes its disk away; FALSE: it cannot now, and stays */
+static BOOL first_link_going( CONST T_VOBJ *v )
+{
+	T_DTREQ	rq;
+	T_DTANS	an;
+
+	memset(&rq, 0, sizeof(rq));
+	rq.req = DT_RQ_DISK;
+	rq.recno = DT_DISK_REMOVE;
+	rq.target = v->target;
+	ts_uuid_text(&v->tvol, (char *)rq.text);
+	memset(&an, 0, sizeof(an));
+	return (BOOL)( ask_desktop(&rq, &an, TMO_FEVR) >= E_OK );
+}
+
+/* An item of ディスク操作: the program ディスク操作 started with it, on the link the menu was opened on */
+static void disk_item( CONST char *code )
+{
+	T_DTREQ	rq;
+	T_DTANS	an;
+
+	memset(&rq, 0, sizeof(rq));
+	rq.req = DT_RQ_DISK;
+	rq.recno = DT_DISK_MENU;
+	snprintf((char *)rq.name, sizeof(rq.name), "%s", code);
+	if ( g_has_link ) rq.target = g_link.target;
+	memset(&an, 0, sizeof(an));
+	(void)ask_desktop(&rq, &an, 5000);
 }
 
 /* ---------------------------------------------------------------- the menu */
@@ -164,6 +335,24 @@ static CONST char *CONST cab_on_pick[] = {
 };
 
 
+/*
+ * What changes the record, which the 小物箱 does not do: its page is the
+ * desktop's list, sealed as the desktop's own lists are
+ */
+static BOOL sealed_cmd( CONST char *code )
+{
+	static CONST char *CONST changes[] = {
+		"save", "save.new", "undo", "cut", "paste", "moveback", "delete", "front", "back",
+		"arrange", "fix", "unfix", "bg", "unbg"
+	};
+	INT	i;
+
+	for ( i = 0; i < (INT)( sizeof(changes) / sizeof(changes[0]) ); i++ ) {
+		if ( strcmp(code, changes[i]) == 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
 /* The links taken, each opened */
 static void open_picked( void )
 {
@@ -171,7 +360,7 @@ static void open_picked( void )
 	INT	i;
 
 	for ( i = 0; g_fig != NULL && i < g_fig->nsh; i++ ) {
-		if ( g_pick[i] != 0 && fg_is_link(i) && tad_lnk_get(g_rec, g_fig->sh[i].link, &v) >= E_OK ) link_open(&v);
+		if ( g_pick[i] != 0 && fg_is_link(i) && tad_lnk_get(g_rec, g_fig->sh[i].link, &v) >= E_OK ) fg_open(&v);
 	}
 }
 
@@ -280,7 +469,10 @@ static void command( CONST char *code, INT index )
 	snprintf(s, sizeof(s), "command %s", code);
 	note(s);
 	if ( !fg_cabinet && fgt_command(code) ) ;
+	else if ( fg_box != NULL && fg_box->command != NULL
+		  && fg_box->command(code, g_has_link ? &g_link : NULL) ) ;	/* 小物管理, 原紙集め's 再表示 */
 	else if ( strcmp(code, "close") == 0 ) close_asked();
+	else if ( FG_MADE && sealed_cmd(code) ) ;	/* nothing in a list made is put, taken or saved */
 	else if ( strcmp(code, "save") == 0 ) (void)ta_save();
 	else if ( strcmp(code, "save.new") == 0 ) ta_save_new();
 	else if ( ( strncmp(code, "vobj.", 5) == 0 || strncmp(code, "real.", 5) == 0 ) && g_has_link ) {
@@ -290,10 +482,11 @@ static void command( CONST char *code, INT index )
 	else if ( strcmp(code, "fullscreen") == 0 ) ta_fullscreen();
 	else if ( strcmp(code, "panel") == 0 ) fgt_toggle();
 	else if ( strcmp(code, "trash") == 0 ) ta_trash_open();
+	else if ( strncmp(code, "disk.", 5) == 0 ) disk_item(code);
 	else if ( strcmp(code, "pattern") == 0 ) fpe_open(( ft_look.fill_pat > 0 ) ? ft_look.fill_pat : 2);
 	else if ( strcmp(code, "refresh") == 0 ) {
 		tv_src_forget(NULL);
-		ta_paper_read();
+		ta_paper_refresh();
 	} else if ( strcmp(code, "bgcolour") == 0 ) ta_paper_ask();
 	else if ( strcmp(code, "hidden") == 0 ) {
 		g_show_hidden = (BOOL)!g_show_hidden;
@@ -318,7 +511,7 @@ static void command( CONST char *code, INT index )
 	else if ( strcmp(code, "selectall") == 0 ) fg_pick_all();
 	else if ( fg_cabinet && strcmp(code, "front") == 0 ) fg_link_order(TRUE);
 	else if ( fg_cabinet && strcmp(code, "back") == 0 ) fg_link_order(FALSE);
-	else if ( fg_cabinet && strcmp(code, "arrange") == 0 ) arrange();
+	else if ( fg_cabinet && !FG_TEMPLATES && strcmp(code, "arrange") == 0 ) arrange();
 	else if ( strcmp(code, "front") == 0 ) FE_DO(fe_order(&g_ed, FE_TO_FRONT));
 	else if ( strcmp(code, "back") == 0 ) FE_DO(fe_order(&g_ed, FE_TO_BACK));
 	else if ( strcmp(code, "forward") == 0 ) FE_DO(fe_order(&g_ed, FE_TO_FORWARD));
@@ -373,12 +566,19 @@ static void menu( CONST T_OBNTM *m )
 		g_has_link = picked_link(&g_link);
 	}
 	none = (BOOL)( g_npick == 0 );
-	if ( ui_uuid(fg_cabinet ? SYSDEF_MENU_CAB : SYSDEF_MENU_FIG, &def) < E_OK || mn_cre_men(&def, &mid) < E_OK ) return;
+	if ( fg_box != NULL && fg_box->menu_def != NULL && fg_box->menu_def[0] == 0 ) return;	/* a tool with no menu */
+	if ( ui_uuid(( fg_box != NULL && fg_box->menu_def != NULL ) ? fg_box->menu_def
+		     : FG_BASECOL ? SYSDEF_MENU_BASECOL : FG_ACCBOX ? SYSDEF_MENU_ACCBOX
+		     : fg_cabinet ? SYSDEF_MENU_CAB : SYSDEF_MENU_FIG, &def) < E_OK
+	  || mn_cre_men(&def, &mid) < E_OK ) return;
 	if ( fg_cabinet ) {
 		/* what the desktop's cabinet greys (cabmenu.c): its undo is never grey */
 		for ( i = 0; i < (INT)( sizeof(cab_on_pick) / sizeof(cab_on_pick[0]) ); i++ ) {
 			(void)mn_chg_atr(mid, NULL, cab_on_pick[i], none ? MN_GREY : 0);
 		}
+		/* the templates of a 原紙箱 stay where they were laid out: nothing for 整頓 to do */
+		if ( FG_TEMPLATES ) (void)mn_chg_atr(mid, NULL, "arrange", MN_GREY);
+		note(( FG_TEMPLATES || none ) ? "arrange menu grey" : "arrange menu on");	/* for the tests */
 	} else {
 		for ( i = 0; i < (INT)( sizeof(on_pick) / sizeof(on_pick[0]) ); i++ ) {
 			(void)mn_chg_atr(mid, NULL, on_pick[i], none ? MN_GREY : 0);
@@ -387,14 +587,15 @@ static void menu( CONST T_OBNTM *m )
 		(void)mn_chg_atr(mid, NULL, "group", ( g_npick < 2 ) ? MN_GREY : 0);
 		(void)mn_chg_atr(mid, NULL, "align", ( g_npick < 2 ) ? MN_GREY : 0);
 	}
-	i = (INT)fe_prot_can(g_rec, g_fig, g_pick);
+	/* nothing of a list made can be protected, as nothing in it is changed */
+	i = FG_MADE ? 0 : (INT)fe_prot_can(g_rec, g_fig, g_pick);
 	fe_prot_grey(mid, (UINT)i);
 	snprintf(s, sizeof(s), "protect menu %x", (UINT)i);	/* for the tests */
 	note(s);
-	(void)mn_chg_atr(mid, NULL, "save.new", g_has_parent ? 0 : MN_GREY);
+	(void)mn_chg_atr(mid, NULL, "save.new", ( g_has_parent && !FG_MADE ) ? 0 : MN_GREY);
 	(void)mn_chg_atr(mid, NULL, "hidden", g_show_hidden ? MN_TICK : 0);
-	(void)mn_chg_atr(mid, NULL, "fullscreen", g_full ? MN_TICK : 0);
-	i = ( fg_cabinet ? fg_tray_links() > 0 : fg_tray_has() ) ? 0 : MN_GREY;
+	(void)mn_chg_atr(mid, NULL, "fullscreen", ta_full_shown() ? MN_TICK : 0);
+	i = ( !FG_MADE && ( fg_cabinet ? fg_tray_links() > 0 : fg_tray_has() ) ) ? 0 : MN_GREY;
 	(void)mn_chg_atr(mid, NULL, "paste", (UINT)i);
 	(void)mn_chg_atr(mid, NULL, "moveback", (UINT)i);
 	ta_tray_menu(mid);
@@ -402,6 +603,7 @@ static void menu( CONST T_OBNTM *m )
 	(void)mn_chg_atr(mid, NULL, "exec", (UINT)i);
 	note(( i == 0 ) ? "exec menu on" : "exec menu grey");	/* for the tests */
 	fg_link_menu(mid, g_has_link ? &g_link : NULL);
+	if ( fg_box != NULL && fg_box->menu != NULL ) fg_box->menu(mid, g_has_link ? &g_link : NULL);
 	note("menu");
 	chosen = (BOOL)( mn_pop_men(mid, g_kw, m->x, m->y, m->when, &sel) >= E_OK );
 	(void)mn_del_men(mid);
@@ -434,9 +636,16 @@ static void key( CONST T_OBNTM *m )
 	case 'f': case 'F':	if ( g_npick > 0 ) command("front", 0);	break;
 	case 'r': case 'R':	if ( g_npick > 0 ) command("back", 0);	break;
 	case 'p': case 'P':	if ( !fg_cabinet ) command("print", 0);	break;	/* a cabinet's menu has no 印刷 */
-	case 'd': case 'D':	if ( fg_cabinet && g_npick > 0 ) command("arrange", 0);	break;
+	case 'd': case 'D':	if ( fg_cabinet && !FG_TEMPLATES && g_npick > 0 ) command("arrange", 0);	break;
 	case 'o': case 'O':	command("open", 0);		break;
-	default:		break;
+	default: {
+		/* a tool's own letters (仮身ネットワーク's Ctrl+N, Ctrl+G) */
+		CONST char	*code = ( fg_box != NULL && fg_box->key != NULL )
+				  ? fg_box->key((INT)wm_key_char(m->code, 0)) : NULL;
+
+		if ( code != NULL ) command(code, 0);
+		break;
+	}
 	}
 }
 
@@ -453,7 +662,7 @@ static void dropped( void )
 	T_OBDROP	*d = ob_drop_read(g_ui.kw);	/* links, or letters (n 0) */
 
 	if ( d == NULL ) return;
-	if ( g_fig == NULL ) {
+	if ( g_fig == NULL || FG_MADE ) {
 		ui_drop_answer(&g_ui, d, OB_DR_REFUSE, "");
 		free(d);
 		return;
@@ -582,7 +791,17 @@ static void event( CONST T_OBNTM *m )
 		/* what a link points at changed: what was read of it is read again */
 		if ( m->event == OB_E_CHANGE ) {
 			tv_src_forget(&m->uuid);
-			if ( memcmp(&m->uuid, &g_obj, sizeof(TS_UUID)) == 0 ) ta_paper_read();
+			(void)ta_paper_changed(&m->uuid);
+			/*
+			 * the 原紙箱 written by another (a package installed or
+			 * deleted puts or takes its templates' links): shown as it
+			 * is now, unless the person has changed it here
+			 */
+			if ( FG_BASEBOX && memcmp(&m->uuid, &g_obj, sizeof(TS_UUID)) == 0 && !g_changed && !fg_holding() ) {
+				reread();
+			}
+			/* the program box of 原紙集め: a program installed or deleted, the list made again */
+			if ( fg_box != NULL && fg_box->changed != NULL ) (void)fg_box->changed(&m->uuid);
 			g_dirty = TRUE;
 		}
 		return;
@@ -629,7 +848,8 @@ static void event( CONST T_OBNTM *m )
 		}
 		break;
 	case OB_E_LEAVE:
-		if ( fg_holding() ) fg_left();
+		if ( fg_text_holding() ) fg_text_left();
+		else if ( fg_holding() ) fg_left();
 		break;
 	case OB_E_KEY:
 		if ( g_input_at == 0 ) g_input_at = m->when;
@@ -648,6 +868,7 @@ static void event( CONST T_OBNTM *m )
 		break;
 	case OB_E_REDRAW:
 		ta_work_size();
+		if ( fg_box != NULL && fg_box->shown != NULL ) fg_box->shown();
 		g_dirty = TRUE;
 		break;
 	case OB_E_DROP:
@@ -655,7 +876,7 @@ static void event( CONST T_OBNTM *m )
 		break;
 	case OB_E_ASK:
 		/* links, or letters, would be taken as dropped() takes them */
-		ta_ask_answer(m, (BOOL)( g_fig != NULL && ( ( m->mods & OB_ASK_LETTERS ) == 0 || g_ed.usable ) ));
+		ta_ask_answer(m, (BOOL)( g_fig != NULL && !FG_MADE && ( ( m->mods & OB_ASK_LETTERS ) == 0 || g_ed.usable ) ));
 		break;
 	default:
 		break;
@@ -678,7 +899,7 @@ static CONST T_TAHOST	fg_host = {
 /* 仮身一覧's: its panels are those of 基本図形編集's data box, which say what could not be done */
 static CONST T_TAHOST	cb_host = {
 	.who = "cabinet", .prog = CB_PROG, .box = SYSDEF_BOX_FIG,
-	.remade = remade, .picks_none = fg_pick_none,
+	.remade = remade, .picks_none = fg_pick_none, .told = first_told,
 };
 
 int main( void )
@@ -688,20 +909,40 @@ int main( void )
 	SZ	asz = 0;
 	UD	t0 = ta_now(), t1, t2, t3, t4, t5;
 	char	s[TAD_NAME_MAX + 160];
+	CONST char	*cab_name = ( fg_box != NULL && fg_box->name != NULL ) ? fg_box->name : "仮身一覧";
 	ER	er;
 
-	if ( ta_start(fg_cabinet ? &cb_host : &fg_host, &ref) < E_OK ) {
+	er = ( fg_box != NULL && fg_box->start != NULL ) ? fg_box->start(&ref)
+	     : ta_start(fg_cabinet ? &cb_host : &fg_host, &ref);
+	if ( er < E_OK ) {
 		note("no object to open");
-		(void)wm_msg_put(fg_cabinet ? "仮身一覧は、実身を開いて使います" : "基本図形編集は、図形の実身を開いて使います");
+		if ( fg_cabinet ) {
+			snprintf(s, sizeof(s), "%sは、実身を開いて使います", cab_name);
+			(void)wm_msg_put(s);
+		} else {
+			(void)wm_msg_put("基本図形編集は、図形の実身を開いて使います");
+		}
 		return 1;
+	}
+	if ( fg_box != NULL && fg_box->begin != NULL ) fg_box->begin();
+	{
+		TS_UUID	cab;
+
+		g_first = (BOOL)( fg_cabinet && fg_box == NULL && ts_str_to_uuid(SYSDEF_CABINET, &cab) >= E_OK
+				  && memcmp(&cab, &g_obj, sizeof(cab)) == 0 );
+		if ( g_first ) fg_link_going = first_link_going;
 	}
 	t1 = ta_now();
 	er = load();
 	if ( er < E_OK ) {
 		snprintf(s, sizeof(s), "the object cannot be read as a figure (%d)", (INT)er);
 		note(s);
-		(void)wm_msg_put(( er == E_OBJ ) ? ( fg_cabinet ? "仮身一覧で開けない実身です" : "図形の実身ではありません" )
-						 : "実身を読めません");
+		if ( er == E_OBJ && fg_cabinet ) {
+			snprintf(s, sizeof(s), "%sで開けない実身です", cab_name);
+			(void)wm_msg_put(s);
+		} else {
+			(void)wm_msg_put(( er == E_OBJ ) ? "図形の実身ではありません" : "実身を読めません");
+		}
 		return 2;
 	}
 	t2 = ta_now();
@@ -709,6 +950,7 @@ int main( void )
 		note("no channel");
 		return 3;
 	}
+	if ( fg_box != NULL && fg_box->listen != NULL ) fg_box->listen();
 	if ( ta_win_open(OB_E_CLOSE | OB_E_PRESS | OB_E_RELEASE | OB_E_MOVE | OB_E_KEY | OB_E_REDRAW
 			 | OB_E_DELETE | OB_E_DROP | OB_E_TEXT | OB_E_ASK | OB_E_WHEEL | OB_E_SCROLL | OB_E_LEAVE
 			 | OB_E_PRESSED) < E_OK ) {	/* every press: the frames' turn counted from it */
@@ -716,13 +958,12 @@ int main( void )
 		ta_channel_close();
 		return 3;
 	}
+	if ( fg_box != NULL && fg_box->shown != NULL ) fg_box->shown();
 	t3 = ta_now();
 	tv_src_host(&g_obj);
 	/* a link in it to itself, opened, shows it as it is being edited, not as it was saved */
 	tv_src_live(&g_obj, g_recno, &g_rec);
-	ta_paper_read();
-	/* opened from a link: laid on its bgcol when the figure says no colour of its own */
-	if ( g_from_link && g_paper == TV_PAPER_LOOK && g_start_arg.bgcol != TAD_COL_NONE ) g_paper = g_start_arg.bgcol;
+	ta_paper_open();	/* opened from a link: laid on its bgcol when the figure says no colour of its own */
 	ta_watch(&g_obj);
 	ta_watch_links();
 	t4 = ta_now();
@@ -736,6 +977,11 @@ int main( void )
 		 (INT)( ( t5 - t0 ) / 1000 ), (INT)( ( t1 - t0 ) / 1000 ), (INT)( ( t2 - t1 ) / 1000 ),
 		 (INT)( ( t3 - t2 ) / 1000 ), (INT)( ( t4 - t3 ) / 1000 ), (INT)( ( t5 - t4 ) / 1000 ));
 	note(s);
+	if ( g_first ) {
+		ta_listen(DT_TELL_FIRST);	/* its window up: what the system puts on the desktop comes here */
+		note("first window up");
+	}
+	auto_open();
 	g_blink_at = ta_now();
 
 	while ( !g_closing ) {

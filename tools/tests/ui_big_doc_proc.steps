@@ -11,100 +11,8 @@
 # are the same, and so are those after the letter is typed (deep_*_typed): both draw the
 # object inside its links to itself as it is being edited (the process by tv_src_live).
 # Keys: x 1b; End 4D; Ctrl+S 16 01, Ctrl+E 08 01.
-docproc kernel
-# the deepest there may be
-mkbig doc 1
-xml <tad version="1.0" encoding="UTF-8"><document>
-xml <p>深い入れ子の文章</p>
-xml <p>
-xml <font color="#000000">
-xml <font color="#c00000">
-xml <font color="#0000c0">
-xml <font color="#008000">
-xml <font color="#000000">
-xml <font color="#c00000">
-xml <font color="#0000c0">
-xml <font color="#008000">
-xml <font color="#000000">
-xml <font color="#c00000">
-xml <font color="#0000c0">
-xml <font color="#008000">
-xml <font color="#000000">
-xml <font color="#c00000">
-xml <font color="#0000c0">
-xml <font color="#008000">
-xml <font color="#000000">
-xml <font color="#c00000">
-xml <font color="#0000c0">
-xml <font color="#008000">
-xml <font color="#000000">
-xml <font color="#c00000">
-xml <font color="#0000c0">
-xml <font color="#008000">
-xml <font color="#000000">
-xml <font color="#c00000">
-xml <font color="#0000c0">
-xml <font color="#008000">
-xml <font color="#000000">
-xml 入れ子32段の字
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </font>
-xml </p>
-xml <p>自分への開いた仮身 
-xml <link id="ffffffff-ffff-ffff-ffff-ffffffffffff_0.xtad" heightpx="260" width="520" chsz="14" tbcol="#e1f2f9" bgcol="#ffffff"/>
-xml </p>
-xml <p>後の段落</p>
-xml </document></tad>
-xmlbig
-open big
-waitwin 基本文章編集 600
-sync 600
-wait 1500
-move 690 490
-sync 600
-shot deep_k_open
-click 300 175
-sync 600
-key 4D
-sync 600
-key 1b
-sync 600
-shot deep_k_typed
-key 16 01
-sync 600
-sum show anon
-keep kernel
-stkuse
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig doc 1
 xml <tad version="1.0" encoding="UTF-8"><document>
 xml <p>深い入れ子の文章</p>
@@ -196,7 +104,7 @@ logmark
 key 16 01
 expectsince document: saved (0)
 sum show anon
-same kernel
+want ok 1211 63b32a614f915b30
 logmark
 key 08 01
 expectsince document: stack used

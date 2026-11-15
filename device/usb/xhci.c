@@ -2930,6 +2930,103 @@ LOCAL ER xhci_pm_resume( USBHC *hc )
 }
 #endif /* X64 */
 
+/*
+ * A device on a root port suspended by its driver: every endpoint with a
+ * ring stopped (Stop Endpoint with the suspend flag; the transfers queued
+ * stay on the rings), then the link put in U3. Resumed: a USB 2 port
+ * signals resume for USB_RESUME_MS and goes to U0, a USB 3 port is told
+ * U0, the device has USB_RECOVERY_MS to recover, and the doorbells start
+ * the endpoints again. A device that signalled resume itself (remote
+ * wakeup) is found by its port in the Resume state (USB 2), or back in U0
+ * with the link state changed (USB 3).
+ */
+#define USB_RESUME_MS		40
+#define USB_RECOVERY_MS		10
+#define TRB_SUSPEND		( 1U << 23 )
+
+LOCAL INT dev_port( XHCI *x, USBDEV *dev )
+{
+	if ( dev->parent != NULL || dev->port < 0 || dev->port >= x->nports ) return -1;
+	return dev->port;
+}
+
+LOCAL ER xhci_dev_suspend( USBHC *hc, USBDEV *dev )
+{
+	XHCI	*x = (XHCI *)hc;
+	XDEV	*d = (XDEV *)dev->hcpriv;
+	INT	p = dev_port(x, dev), e, i;
+	UW	v;
+
+	if ( p < 0 || d == NULL || !x->running || x->dead ) return E_NOSPT;
+	v = rd32(x->op, OP_PORTSC(p));
+	if ( ( v & PS_CCS ) == 0 || PS_PLS(v) != PLS_U0 ) return E_OBJ;
+	for ( e = 1; e < 32; e++ ) {
+		if ( d->ep[e] != NULL ) {
+			(void)x_cmd(x, 0, TRB_TYPE(T_STOP_EP) | TRB_EP(e) | TRB_SLOT(d->slot) | TRB_SUSPEND, NULL);
+		}
+	}
+	wr32(x->op, OP_PORTSC(p), ( v & PS_NEUTRAL & ~PS_PLS_MASK ) | PS_LWS | ( PLS_U3 << 5 ));
+	for ( i = 0; i < 50; i++ ) {
+		v = rd32(x->op, OP_PORTSC(p));
+		if ( PS_PLS(v) == PLS_U3 ) return E_OK;
+		tk_dly_tsk(1);
+	}
+	/* not suspended: the endpoints go on as they were */
+	for ( e = 1; e < 32; e++ ) {
+		if ( d->ep[e] != NULL ) doorbell(x, d->slot, (UW)e);
+	}
+	return E_IO;
+}
+
+LOCAL ER xhci_dev_resume( USBHC *hc, USBDEV *dev )
+{
+	XHCI	*x = (XHCI *)hc;
+	XDEV	*d = (XDEV *)dev->hcpriv;
+	INT	p = dev_port(x, dev), e, i;
+	UW	v;
+
+	if ( p < 0 || d == NULL || !x->running || x->dead ) return E_NOSPT;
+	v = rd32(x->op, OP_PORTSC(p));
+	if ( ( v & PS_CCS ) == 0 ) return E_NOEXS;
+	if ( PS_PLS(v) == PLS_U3 || PS_PLS(v) == PLS_RESUME ) {
+		if ( x->port_major[p] == 3 ) {
+			wr32(x->op, OP_PORTSC(p), ( v & PS_NEUTRAL & ~PS_PLS_MASK ) | PS_LWS | ( PLS_U0 << 5 ));
+		} else {
+			if ( PS_PLS(v) == PLS_U3 ) {
+				wr32(x->op, OP_PORTSC(p), ( v & PS_NEUTRAL & ~PS_PLS_MASK ) | PS_LWS | ( PLS_RESUME << 5 ));
+			}
+			tk_dly_tsk(USB_RESUME_MS);
+			v = rd32(x->op, OP_PORTSC(p));
+			wr32(x->op, OP_PORTSC(p), ( v & PS_NEUTRAL & ~PS_PLS_MASK ) | PS_LWS | ( PLS_U0 << 5 ));
+		}
+	}
+	for ( i = 0; i < 100; i++ ) {
+		v = rd32(x->op, OP_PORTSC(p));
+		if ( PS_PLS(v) == PLS_U0 ) break;
+		tk_dly_tsk(1);
+	}
+	if ( PS_PLS(v) != PLS_U0 ) return E_IO;
+	tk_dly_tsk(USB_RECOVERY_MS);
+	v = rd32(x->op, OP_PORTSC(p));
+	if ( ( v & PS_PLC ) != 0 ) wr32(x->op, OP_PORTSC(p), ( v & PS_NEUTRAL ) | PS_PLC);
+	for ( e = 1; e < 32; e++ ) {
+		if ( d->ep[e] != NULL ) doorbell(x, d->slot, (UW)e);
+	}
+	return E_OK;
+}
+
+LOCAL BOOL xhci_dev_woke( USBHC *hc, USBDEV *dev )
+{
+	XHCI	*x = (XHCI *)hc;
+	INT	p = dev_port(x, dev);
+	UW	v;
+
+	if ( p < 0 ) return FALSE;
+	v = rd32(x->op, OP_PORTSC(p));
+	if ( x->port_major[p] == 3 ) return (BOOL)( PS_PLS(v) == PLS_U0 );
+	return (BOOL)( PS_PLS(v) == PLS_RESUME );
+}
+
 LOCAL CONST USBHC_OPS xhci_ops = {
 	xhci_nports,
 	xhci_port_connected,
@@ -2954,6 +3051,9 @@ LOCAL CONST USBHC_OPS xhci_ops = {
 	xhci_pm_suspend,
 	xhci_pm_resume,
 #endif
+	.dev_suspend = xhci_dev_suspend,
+	.dev_resume = xhci_dev_resume,
+	.dev_woke = xhci_dev_woke,
 };
 
 #ifdef X64

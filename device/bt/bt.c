@@ -43,6 +43,20 @@
  *	on what is here: the commands, and L2CAP frames going out in order as
  *	the controller says it has room for their packets.
  *
+ *	A search is the inquiry with an LE scan beside it, then a Remote Name
+ *	Request, one at a time, of each device the inquiry found that did not
+ *	tell its name: what a person chooses by is its name. A pairing on
+ *	BR/EDR first stops what is left of the search, as a page waits behind
+ *	an inquiry or a name being asked.
+ *
+ *	One device may be found twice, on LE and on BR/EDR. Earphones of LE
+ *	Audio on a controller that cannot carry it are paired on BR/EDR, for
+ *	A2DP and HFP: chosen on LE, by their BR/EDR side when it is the same
+ *	address or the one device of sound found with the same name; or, once
+ *	paired on LE and found to serve nothing used here, by their identity
+ *	address when it is public and their flags do not say BR/EDR is not
+ *	supported, as a device of both has the one public address for both.
+ *
  *	A controller on a UART (bt_uart.c, the Raspberry Pi 5's own) comes
  *	through knl_btx_open into the same task: only the way a command and an
  *	ACL packet go out and what comes back comes in differ (BTTRANS).
@@ -62,6 +76,7 @@
 #include <ts/bt.h>
 #include "../usb/usbdev.h"
 #include "../../peripheral_kernel/obj/obj.h"
+#include <ts/board.h>
 #include "btint.h"
 
 IMPORT INT  knl_hid_ext_attach( BOOL kbd, CONST UB *rd, INT rdlen, CONST UB *name );
@@ -78,6 +93,7 @@ IMPORT void knl_hid_ext_report( INT hd, CONST UB *r, INT len );
 #define BT_TSK_PRI		20
 #define CMD_TMO_MS		5000	/* a command with no answer is given up, the start going on */
 #define INQ_UNIT_MS		1280
+#define NAME_TMO_MS		10000	/* a name asked is given up: past the page timeout of 5.12 s with room */
 
 /* Commands: ogf << 10 | ocf */
 #define C_INQUIRY	0x0401
@@ -90,6 +106,7 @@ IMPORT void knl_hid_ext_report( INT hd, CONST UB *r, INT len );
 #define C_AUTH		0x0411
 #define C_ENCRYPT	0x0413
 #define C_NAME_REQ	0x0419
+#define C_NAME_CANCEL	0x041a
 #define C_IOCAP_REPLY	0x042b
 #define C_CONFIRM_REPLY	0x042c
 #define C_SET_MASK	0x0c01
@@ -219,6 +236,7 @@ LOCAL void ring_put( BTC *c, UB kind, DMABUF *b, INT off, INT len )
 	r->kind = kind;
 	r->len = (UH)len;
 	c->tail = next;
+	c->last_busy = knl_usb_ms();
 	(void)tk_sig_sem(c->sem, 1);
 }
 
@@ -1345,19 +1363,281 @@ EXPORT T_BTFOUND *knl_btx_found_add( BTC *c, CONST UB *addr, UW cod, CONST UB *n
 	}
 	if ( f == NULL ) {
 		if ( c->nfound >= NFOUND ) return NULL;
-		f = &c->found[c->nfound++];
+		i = c->nfound++;
+		f = &c->found[i];
 		knl_memset(f, 0, sizeof(*f));
 		knl_memcpy(f->addr, addr, 6);
+		c->found_hint[i] = c->found_note[i] = c->found_psrm[i] = 0;
+		c->found_clk[i] = 0;
 		tm_printf((UB *)"bt: found %02x:%02x:%02x:%02x:%02x:%02x, class %06x\n",
 			  addr[5], addr[4], addr[3], addr[2], addr[1], addr[0], cod);
 	}
-	f->cod = cod;
+	if ( cod != 0 ) f->cod = cod;		/* LE has none, and does not take away what the inquiry gave */
 	if ( name != NULL && nlen > 0 ) {
+		BOOL	first = (BOOL)( f->name[0] == 0 );
+
 		if ( nlen > (INT)sizeof(f->name) - 1 ) nlen = (INT)sizeof(f->name) - 1;
 		knl_memcpy(f->name, name, nlen);
 		f->name[nlen] = 0;
+		if ( first ) {
+			tm_printf((UB *)"bt: %02x:%02x:%02x:%02x:%02x:%02x is \"%s\"\n",
+				  addr[5], addr[4], addr[3], addr[2], addr[1], addr[0], f->name);
+		}
 	}
 	return f;
+}
+
+/* A device the inquiry found, and how to page it: what a name asked of it takes */
+LOCAL void found_page( BTC *c, CONST UB *addr, UW cod, UB psrm, UH clk )
+{
+	T_BTFOUND	*f = knl_btx_found_add(c, addr, cod, NULL, 0);
+	INT		k;
+
+	if ( f == NULL ) return;
+	k = (INT)( f - c->found );
+	c->found_hint[k] |= FH_BREDR;
+	c->found_psrm[k] = psrm;
+	c->found_clk[k] = (UH)( clk | 0x8000 );		/* bit 15: the offset is valid */
+}
+
+/* The found entry of that address, -1 none */
+LOCAL INT found_of( BTC *c, CONST UB *addr )
+{
+	INT	i;
+
+	for ( i = 0; i < c->nfound; i++ ) {
+		if ( same_bt_bytes(c->found[i].addr, addr, 6) ) return i;
+	}
+	return -1;
+}
+
+/*
+ * The BR/EDR side of earphones found on LE: a device of sound (its Class
+ * of Device) that an inquiry found at the same address, or else the one
+ * such device found under the same name. Two of that name are no answer:
+ * either could be it.
+ */
+LOCAL INT bredr_twin( BTC *c, CONST UB *addr, CONST UB *name )
+{
+	INT	i, k = -1, n = 0;
+
+	i = found_of(c, addr);
+	if ( i >= 0 && ( c->found_hint[i] & FH_BREDR ) != 0 && COD_MAJOR(c->found[i].cod) == COD_MAJOR_AUDIO ) return i;
+	if ( name == NULL || name[0] == 0 ) return -1;
+	for ( i = 0; i < c->nfound; i++ ) {
+		T_BTFOUND	*f = &c->found[i];
+		INT		j;
+
+		if ( ( c->found_hint[i] & FH_BREDR ) == 0 || COD_MAJOR(f->cod) != COD_MAJOR_AUDIO ) continue;
+		for ( j = 0; j < (INT)sizeof(f->name) && f->name[j] == name[j] && name[j] != 0; j++ ) ;
+		if ( j < (INT)sizeof(f->name) && f->name[j] == name[j] ) {
+			k = i;
+			n++;
+		}
+	}
+	return ( n == 1 ) ? k : -1;
+}
+
+/* The next name the search asks, of a device the inquiry found that did not tell it; the search over when none */
+LOCAL void name_next( BTC *c )
+{
+	INT	i;
+	UB	r[10];
+
+	c->naming = FALSE;
+	for ( i = 0; i < c->nfound; i++ ) {
+		T_BTFOUND	*f = &c->found[i];
+
+		if ( ( c->found_hint[i] & ( FH_BREDR | FH_NAMED ) ) != FH_BREDR || f->name[0] != 0 ) continue;
+		c->found_hint[i] |= FH_NAMED;
+		knl_memcpy(r, f->addr, 6);
+		r[6] = c->found_psrm[i];
+		r[7] = 0;
+		r[8] = (UB)c->found_clk[i];
+		r[9] = (UB)( c->found_clk[i] >> 8 );
+		knl_memcpy(c->name_addr, f->addr, 6);
+		c->naming = TRUE;
+		c->name_due = knl_btx_now() + NAME_TMO_MS;
+		knl_btx_cmd(c, C_NAME_REQ, r, 10);
+		return;
+	}
+	if ( c->scanning ) {
+		c->scanning = FALSE;
+		tm_printf((UB *)"bt: search over, %d found (after %d ms)\n", c->nfound, (INT)( knl_btx_now() - c->scan_at ));
+	}
+}
+
+/* What is left of the search stopped, for a page: the inquiry and the name being asked */
+LOCAL void search_stop( BTC *c )
+{
+	if ( c->inq_on ) {
+		c->inq_on = FALSE;
+		knl_btx_cmd(c, C_INQ_CANCEL, NULL, 0);
+		knl_btl_scan_end(c);
+	}
+	if ( c->naming ) {
+		c->naming = FALSE;
+		knl_btx_cmd(c, C_NAME_CANCEL, c->name_addr, 6);
+	}
+	if ( c->scanning ) {
+		c->scanning = FALSE;
+		tm_printf((UB *)"bt: search stopped for a connection, %d found\n", c->nfound);
+	}
+}
+
+/*
+ * A pairing: on LE when the device was found there alone, on BR/EDR when
+ * an inquiry found it or bredr says so. audio says it is for sound
+ * whatever its class says; name is what to call it when nothing else
+ * tells, NULL none. The BR/EDR side of earphones is taken
+ * in place of LE Audio this controller cannot carry.
+ */
+LOCAL void pair_start( BTC *c, CONST UB *addr, BOOL bredr, BOOL audio, CONST UB *name )
+{
+	PEER	*p = knl_btx_peer_new(c, addr);
+	INT	k = found_of(c, addr), tw;
+	UB	r[13];
+
+	if ( p == NULL ) {
+		tm_printf((UB *)"bt: no room for another device\n");
+		return;
+	}
+	if ( p->up ) {
+		tm_printf((UB *)"bt: \"%s\" is connected already\n", p->name);
+		return;
+	}
+	if ( k >= 0 ) {
+		T_BTFOUND	*f = &c->found[k];
+
+		if ( f->cod != 0 ) p->cod = f->cod;
+		if ( f->name[0] != 0 ) knl_memcpy(p->name, f->name, sizeof(p->name));
+		p->hint = c->found_hint[k];
+		/* found on LE alone, or on both where LE is what it is for */
+		if ( !bredr && f->le ) {
+			p->le = TRUE;
+			p->atype = f->atype;
+		}
+	}
+	if ( name != NULL && name[0] != 0 && p->name[0] == 0 ) knl_memcpy(p->name, name, sizeof(p->name) - 1);
+	if ( bredr && p->le ) {
+		p->le = FALSE;
+		p->have_key = FALSE;		/* an LE bond of the same address is not this one */
+	}
+	if ( audio ) p->audio = TRUE;
+	if ( p->le && !c->has_cis && ( ( p->hint & ( FH_LEAUDIO | FH_AUDIO ) ) != 0 || COD_MAJOR(p->cod) == COD_MAJOR_AUDIO )
+	  && ( tw = bredr_twin(c, addr, p->name) ) >= 0 ) {
+		/* earphones whose LE Audio this controller cannot carry, their BR/EDR side found: that side */
+		UB	nm[32];
+
+		knl_memcpy(nm, p->name, sizeof(nm));
+		tm_printf((UB *)"bt: \"%s\": LE Audio, which this controller cannot carry; paired on BR/EDR as %02x:%02x:%02x:%02x:%02x:%02x\n",
+			  p->name, c->found[tw].addr[5], c->found[tw].addr[4], c->found[tw].addr[3],
+			  c->found[tw].addr[2], c->found[tw].addr[1], c->found[tw].addr[0]);
+		if ( k >= 0 ) c->found_note[k] = BT_NOTE_BREDR;
+		if ( !p->have_key ) p->used = FALSE;
+		pair_start(c, c->found[tw].addr, TRUE, TRUE, nm);
+		return;
+	}
+	if ( p->le ) {
+		knl_memcpy(p->cur_addr, p->addr, 6);
+		p->cur_type = p->atype;
+		knl_btl_connect(c, p);
+		return;
+	}
+	if ( COD_MAJOR(p->cod) == COD_MAJOR_AUDIO || ( p->hint & ( FH_LEAUDIO | FH_AUDIO ) ) != 0 ) p->audio = TRUE;
+	search_stop(c);
+	knl_memcpy(r, addr, 6);
+	r[6] = 0x18;			/* the packets DM1, DH1 ... */
+	r[7] = 0xcc;
+	r[8] = ( k >= 0 && ( c->found_hint[k] & FH_BREDR ) != 0 ) ? c->found_psrm[k] : 1;	/* page scan repetition, R1 not known */
+	r[9] = 0;
+	r[10] = ( k >= 0 ) ? (UB)c->found_clk[k] : 0;
+	r[11] = ( k >= 0 ) ? (UB)( c->found_clk[k] >> 8 ) : 0;
+	r[12] = 1;			/* a role change allowed */
+	tm_printf((UB *)"bt: \"%s\": connecting on BR/EDR%s\n", p->name, p->audio ? ", for sound" : "");
+	knl_btx_cmd(c, C_CREATE_CONN, r, 13);
+	if ( p->name[0] == 0 ) {
+		knl_memcpy(r, addr, 6);
+		r[6] = r[8];
+		r[7] = 0;
+		r[8] = r[10];
+		r[9] = r[11];
+		knl_btx_cmd(c, C_NAME_REQ, r, 10);
+	}
+}
+
+/* The objects a device was kept in, if any: deleted, with their links from 機器の設定. le: 1 an LE bond's, 0 a BR/EDR one's, -1 either */
+LOCAL void bt_unkeep( CONST UB *addr, INT le )
+{
+	TS_UUID	*ids;
+	char	idb[TS_UUID_STRLEN + 1];
+	INT	n = 0, i;
+
+	if ( ( ids = bt_links(&n) ) == NULL ) return;
+	for ( i = 0; i < n; i++ ) {
+		T_BTKEPT	o;
+		SZ		asz = 0;
+		ID		key;
+		BOOL		mine;
+
+		if ( !bt_is_obj(&ids[i]) ) continue;
+		key = ob_opn_obj(&ids[i], OB_OP_R);
+		if ( key <= 0 ) continue;
+		knl_memset(&o, 0, sizeof(o));
+		mine = (BOOL)( ob_rea_rec(key, 1, 0, &o, sizeof(o), &asz) >= E_OK && same_addr(o.addr, addr)
+			     && ( le < 0 || ( o.le != 0 ) == ( le != 0 ) ) );
+		(void)ob_cls_obj(key);
+		if ( mine ) {
+			(void)knl_conf_link_drop(bt_conf(idb), CF_ROLE_BTDEV, &ids[i]);
+			(void)ob_del_obj(&ids[i]);
+		}
+	}
+	Kfree(ids);
+}
+
+/*
+ * An LE device none of whose services is used here, its link being let
+ * go: not kept, and forgotten if it was kept from before, so that it is
+ * not listened for and connected to again. Earphones have their BR/EDR
+ * side paired once the link is gone, when it is known: for one that is of
+ * sound (lea: its services are those of LE Audio; or what it advertised),
+ * its identity address when it is public and its flags do not say BR/EDR
+ * is not supported; for any, a device of sound an inquiry found at its
+ * address or under its name. What became of it is said in the list.
+ */
+EXPORT void knl_btx_le_unused( BTC *c, PEER *p, BOOL lea )
+{
+	CONST UB	*to = NULL;
+	UB		note = BT_NOTE_NOUSE;
+	INT		k, tw;
+
+	if ( ( lea || ( p->hint & ( FH_LEAUDIO | FH_AUDIO ) ) != 0 )
+	  && p->atype == 0 && ( p->hint & ( FH_FLAGS | FH_NO_BREDR ) ) == FH_FLAGS ) {
+		to = p->addr;
+	} else if ( ( tw = bredr_twin(c, p->addr, p->name) ) >= 0 ) {
+		to = c->found[tw].addr;		/* a device of sound found on BR/EDR under its address or its name */
+	}
+	note = ( to != NULL ) ? BT_NOTE_BREDR : lea ? BT_NOTE_LEA : BT_NOTE_NOUSE;
+	bt_unkeep(p->addr, 1);			/* kept on a link before, perhaps more than once */
+	p->have_key = FALSE;
+	p->keep_wait = FALSE;
+	p->key_sz = 0;
+	p->has_irk = FALSE;
+	knl_memset(p->ltk, 0, sizeof(p->ltk));
+	knl_memset(p->irk, 0, sizeof(p->irk));
+	if ( ( k = found_of(c, p->cur_addr) ) >= 0 ) c->found_note[k] = note;
+	if ( ( k = found_of(c, p->addr) ) >= 0 && c->found[k].le ) c->found_note[k] = note;
+	if ( to != NULL ) {
+		c->fb_on = TRUE;
+		c->fb_handle = p->handle;
+		knl_memcpy(c->fb_addr, to, 6);
+		knl_memcpy(c->fb_name, p->name, sizeof(c->fb_name));
+		tm_printf((UB *)"bt: \"%s\": not kept on LE; its BR/EDR side %02x:%02x:%02x:%02x:%02x:%02x is paired once the link is gone\n",
+			  p->name, to[5], to[4], to[3], to[2], to[1], to[0]);
+	} else {
+		tm_printf((UB *)"bt: \"%s\": not kept, and not connected to again%s\n", p->name,
+			  lea ? ": its BR/EDR side is not known (search again with the earphones ready to pair)" : "");
+	}
 }
 
 LOCAL void ev_in( BTC *c, CONST UB *e, INT n )
@@ -1387,6 +1667,7 @@ LOCAL void ev_in( BTC *c, CONST UB *e, INT n )
 				  d[4], d[5] | ( d[6] << 8 ), d[7], d[10] | ( d[11] << 8 ), d[8] | ( d[9] << 8 ));
 		}
 		if ( op == C_READ_FEATURES && st == 0 ) {
+			knl_memcpy(c->lmp, d + 4, 8);
 			c->has_le = (BOOL)( ( d[8] >> 6 ) & 1 );
 			/* byte 4 bit 6 LE, byte 6 bit 3 Secure Simple Pairing: what the controller can be asked for */
 			tm_printf((UB *)"bt: features %02x %02x %02x %02x %02x %02x %02x %02x: LE %d, simple pairing %d\n",
@@ -1395,7 +1676,10 @@ LOCAL void ev_in( BTC *c, CONST UB *e, INT n )
 		if ( op == C_READ_BUF && st == 0 ) {
 			c->acl_len = (UH)( d[4] | ( d[5] << 8 ) );
 			c->acl_room = d[7] | ( d[8] << 8 );
-			tm_printf((UB *)"bt: ACL packets of %d bytes, %d at a time\n", c->acl_len, c->acl_room);
+			c->sco_mtu = d[6];
+			c->sco_num = (UH)( d[9] | ( d[10] << 8 ) );
+			tm_printf((UB *)"bt: ACL packets of %d bytes, %d at a time; SCO packets of %d bytes, %d at a time\n",
+				  c->acl_len, c->acl_room, c->sco_mtu, c->sco_num);
 			if ( c->acl_len > TX_MAX ) c->acl_len = TX_MAX;
 		}
 		if ( op == C_LE_READ_BUF && st == 0 ) {
@@ -1412,27 +1696,34 @@ LOCAL void ev_in( BTC *c, CONST UB *e, INT n )
 	}
 	case E_CMD_STATUS:
 		if ( d[0] != 0 ) tm_printf((UB *)"bt: command %04x not started, status %02x\n", d[2] | ( d[3] << 8 ), d[0]);
-		if ( d[0] != 0 && (UH)( d[2] | ( d[3] << 8 ) ) == C_INQUIRY ) c->scanning = FALSE;
+		if ( d[0] != 0 && (UH)( d[2] | ( d[3] << 8 ) ) == C_INQUIRY ) {
+			c->inq_on = FALSE;
+			c->scanning = FALSE;
+			knl_btl_scan_end(c);
+		}
+		if ( d[0] != 0 && (UH)( d[2] | ( d[3] << 8 ) ) == C_NAME_REQ && c->naming ) name_next(c);
 		knl_btiso_cmd_status(c, (UH)( d[2] | ( d[3] << 8 ) ), d[0]);
 		knl_bta_event(c, code, d, len);
 		cmd_answered(c);
 		break;
 	case E_INQ_RESULT:
+		/* the addresses, then the page scan repetition modes, two reserved bytes, the classes and the clock offsets */
 		for ( i = 0; i < d[0] && 1 + 14 * ( i + 1 ) <= len; i++ ) {
 			CONST UB *a = d + 1 + 6 * i;
 			CONST UB *cl = d + 1 + 6 * d[0] + 3 * d[0] + 3 * i;
+			CONST UB *ck = d + 1 + 12 * d[0] + 2 * i;
 
-			(void)knl_btx_found_add(c, a, cl[0] | ( cl[1] << 8 ) | ( (UW)cl[2] << 16 ), NULL, 0);
+			found_page(c, a, cl[0] | ( cl[1] << 8 ) | ( (UW)cl[2] << 16 ), d[1 + 6 * d[0] + i], (UH)( ck[0] | ( ck[1] << 8 ) ));
 		}
 		break;
 	case E_INQ_RSSI:
-		if ( len >= 15 ) (void)knl_btx_found_add(c, d + 1, d[9] | ( d[10] << 8 ) | ( (UW)d[11] << 16 ), NULL, 0);
+		if ( len >= 15 ) found_page(c, d + 1, d[9] | ( d[10] << 8 ) | ( (UW)d[11] << 16 ), d[7], (UH)( d[12] | ( d[13] << 8 ) ));
 		break;
 	case E_EXT_INQ:
 		if ( len >= 15 ) {
 			INT	at = 15;
 
-			(void)knl_btx_found_add(c, d + 1, d[9] | ( d[10] << 8 ) | ( (UW)d[11] << 16 ), NULL, 0);
+			found_page(c, d + 1, d[9] | ( d[10] << 8 ) | ( (UW)d[11] << 16 ), d[7], (UH)( d[12] | ( d[13] << 8 ) ));
 			/* its name, among what it tells */
 			while ( at < len && d[at] != 0 ) {
 				INT	l = d[at];
@@ -1465,10 +1756,14 @@ LOCAL void ev_in( BTC *c, CONST UB *e, INT n )
 		break;
 	case E_INQ_DONE:
 		knl_btl_scan_end(c);
-		c->scanning = FALSE;
 		/* the status: 0 when the inquiry ran its length, an error code when the controller ended it */
 		tm_printf((UB *)"bt: scan over, %d found (status %02x, after %d ms)\n",
 			  c->nfound, ( len > 0 ) ? d[0] : 0xff, (INT)( knl_btx_now() - c->scan_at ));
+		/* the names the devices did not tell, unless a pairing stopped the search */
+		if ( c->inq_on ) {
+			c->inq_on = FALSE;
+			name_next(c);
+		}
 		break;
 	case E_CONN_REQ: {
 		if ( len >= 10 && d[9] != 1 ) {
@@ -1579,14 +1874,26 @@ LOCAL void ev_in( BTC *c, CONST UB *e, INT n )
 		knl_memcpy(r, d, 6);
 		knl_btx_cmd(c, C_CONFIRM_REPLY, r, 6);
 		break;
-	case E_NAME_DONE:
+	case E_NAME_DONE: {
+		INT	nl;
+
+		/* the name, up to its zero, in as many bytes as came */
+		for ( nl = 0; 7 + nl < len && d[7 + nl] != 0; nl++ ) ;
 		p = peer_of_addr(c, d + 1);
 		if ( p != NULL && d[0] == 0 ) {
 			knl_memset(p->name, 0, sizeof(p->name));
-			for ( i = 0; i < (INT)sizeof(p->name) - 1 && d[7 + i] != 0 && 7 + i < len; i++ ) p->name[i] = d[7 + i];
-			if ( p->have_key ) (void)knl_btx_keep(p);
+			for ( i = 0; i < (INT)sizeof(p->name) - 1 && i < nl; i++ ) p->name[i] = d[7 + i];
+			if ( p->have_key && !p->keep_wait ) (void)knl_btx_keep(p);
 		}
+		if ( d[0] == 0 && nl > 0 && found_of(c, d + 1) >= 0 ) {
+			(void)knl_btx_found_add(c, d + 1, 0, d + 7, nl);
+		} else if ( d[0] != 0 ) {
+			tm_printf((UB *)"bt: the name of %02x:%02x:%02x:%02x:%02x:%02x not had, status %02x\n",
+				  d[6], d[5], d[4], d[3], d[2], d[1], d[0]);
+		}
+		if ( c->naming && same_addr(c->name_addr, d + 1) ) name_next(c);
 		break;
+	}
 	case E_DISCONN: {
 		UH	h = (UH)( d[1] | ( d[2] << 8 ) );
 
@@ -1603,6 +1910,18 @@ LOCAL void ev_in( BTC *c, CONST UB *e, INT n )
 				hid_let_go(p);
 				knl_usb_unlock();
 			}
+			/* a bond of this link whose services were never used goes with it: it was not kept */
+			if ( p->keep_wait ) {
+				p->keep_wait = FALSE;
+				p->have_key = FALSE;
+			}
+			/* a device not paired, or let go unkept, takes no room: one found again is made anew */
+			if ( !p->have_key ) p->used = FALSE;
+		}
+		if ( c->fb_on && c->fb_handle == h ) {
+			/* its LE link gone: its BR/EDR side paired in its place */
+			c->fb_on = FALSE;
+			pair_start(c, c->fb_addr, TRUE, TRUE, c->fb_name);
 		}
 		break;
 	}
@@ -1628,11 +1947,71 @@ LOCAL INT bo_attr( void *ctx, UB *j, INT n, INT max )
 	return knl_oj_put(j, n, max, ",\"virtual\":true");
 }
 
+/* What a device's connection is doing: set up for what it is used for, or not yet */
+LOCAL UB peer_use( BTC *c, PEER *p )
+{
+	if ( !p->up ) return BT_USE_NONE;
+	if ( p->hid_on ) return BT_USE_INPUT;
+	if ( knl_bta_ready(p) || ( p->le && knl_btbap_ready(c, p) ) ) return BT_USE_SOUND;
+	return BT_USE_SETUP;
+}
+
+/*
+ * The lines of the list: the devices paired, then those the search found
+ * that are not among them, each with what its connection is doing and
+ * what became of a try with it. A device being paired is a found one
+ * whose connection is up.
+ */
+LOCAL INT bt_lines( BTC *c, T_BTLINE *l, INT max )
+{
+	T_BTLINE	one;
+	INT		i, k, n = 0;
+
+	for ( i = 0; i < NPEER && n < max; i++ ) {
+		PEER	*p = &c->peer[i];
+
+		if ( !p->used || !p->have_key || p->keep_wait ) continue;
+		knl_memset(&one, 0, sizeof(one));
+		knl_memcpy(one.addr, p->addr, 6);
+		one.paired = 1;
+		one.use = peer_use(c, p);
+		one.connected = (UB)( one.use == BT_USE_INPUT || one.use == BT_USE_SOUND );
+		one.cod = p->cod;
+		one.bearer = p->le ? BT_BEARER_LE : BT_BEARER_BREDR;
+		knl_memcpy(one.name, p->name, sizeof(one.name));
+		l[n++] = one;
+	}
+	for ( i = 0; i < c->nfound && n < max; i++ ) {
+		T_BTFOUND	*f = &c->found[i];
+		BOOL		had = FALSE;
+
+		knl_memset(&one, 0, sizeof(one));
+		for ( k = 0; k < NPEER; k++ ) {
+			PEER	*p = &c->peer[k];
+
+			if ( !p->used ) continue;
+			if ( p->have_key && !p->keep_wait && same_addr(p->addr, f->addr) ) had = TRUE;
+			if ( p->up && ( same_addr(p->addr, f->addr) || ( p->le && same_addr(p->cur_addr, f->addr) ) ) ) {
+				one.use = peer_use(c, p);
+			}
+		}
+		if ( had ) continue;
+		knl_memcpy(one.addr, f->addr, 6);
+		one.cod = f->cod;
+		one.connected = (UB)( one.use == BT_USE_INPUT || one.use == BT_USE_SOUND );
+		one.bearer = (UB)( ( ( c->found_hint[i] & FH_BREDR ) ? BT_BEARER_BREDR : 0 ) | ( f->le ? BT_BEARER_LE : 0 ) );
+		one.note = c->found_note[i];
+		knl_memcpy(one.name, f->name, sizeof(one.name));
+		l[n++] = one;
+	}
+	return n;
+}
+
 LOCAL ER bo_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *p_asize )
 {
 	BTC		*c = (BTC *)ctx;
-	T_BTLINE	*l = (T_BTLINE *)buf, one;
-	INT		i, k, n = 0, max = (INT)( size / (SZ)sizeof(T_BTLINE) );
+	T_BTLINE	*l = (T_BTLINE *)buf;
+	INT		n, max = (INT)( size / (SZ)sizeof(T_BTLINE) );
 
 	(void)pos;
 	if ( recno == OB_BT_STATE ) {
@@ -1650,31 +2029,7 @@ LOCAL ER bo_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *p
 		if ( p_asize != NULL ) *p_asize = 0;
 		return E_OK;
 	}
-	for ( i = 0; i < NPEER && n < max; i++ ) {
-		PEER	*p = &c->peer[i];
-
-		if ( !p->used || !p->have_key ) continue;
-		knl_memset(&one, 0, sizeof(one));
-		knl_memcpy(one.addr, p->addr, 6);
-		one.paired = 1;
-		one.connected = (UB)p->up;
-		one.cod = p->cod;
-		knl_memcpy(one.name, p->name, sizeof(one.name));
-		l[n++] = one;
-	}
-	for ( i = 0; i < c->nfound && n < max; i++ ) {
-		BOOL	had = FALSE;
-
-		for ( k = 0; k < NPEER; k++ ) {
-			had = had || ( c->peer[k].used && c->peer[k].have_key && same_addr(c->peer[k].addr, c->found[i].addr) );
-		}
-		if ( had ) continue;
-		knl_memset(&one, 0, sizeof(one));
-		knl_memcpy(one.addr, c->found[i].addr, 6);
-		one.cod = c->found[i].cod;
-		knl_memcpy(one.name, c->found[i].name, sizeof(one.name));
-		l[n++] = one;
-	}
+	n = bt_lines(c, l, max);
 	if ( p_asize != NULL ) *p_asize = (SZ)n * (SZ)sizeof(T_BTLINE);
 	return E_OK;
 }
@@ -1715,9 +2070,6 @@ LOCAL CONST T_OBDVOPS bo_ops = {
 LOCAL void bt_forget( BTC *c )
 {
 	PEER	*p = peer_of_addr(c, c->forget_addr);
-	TS_UUID	*ids;
-	char	idb[TS_UUID_STRLEN + 1];
-	INT	n = 0, i;
 	UB	r[3];
 
 	if ( p == NULL ) return;
@@ -1727,28 +2079,10 @@ LOCAL void bt_forget( BTC *c )
 		r[2] = 0x13;			/* the person ended it */
 		knl_btx_cmd(c, C_DISCONNECT, r, 3);
 	}
-	if ( ( ids = bt_links(&n) ) != NULL ) {
-		for ( i = 0; i < n; i++ ) {
-			T_BTKEPT	o;
-			SZ		asz = 0;
-			ID		key;
-			BOOL		mine = FALSE;
-
-			if ( !bt_is_obj(&ids[i]) ) continue;
-			key = ob_opn_obj(&ids[i], OB_OP_R);
-			if ( key <= 0 ) continue;
-			mine = (BOOL)( ob_rea_rec(key, 1, 0, &o, sizeof(o), &asz) >= E_OK && same_addr(o.addr, p->addr) );
-			(void)ob_cls_obj(key);
-			if ( mine ) {
-				(void)knl_conf_link_drop(bt_conf(idb), CF_ROLE_BTDEV, &ids[i]);
-				(void)ob_del_obj(&ids[i]);
-				break;
-			}
-		}
-		Kfree(ids);
-	}
+	bt_unkeep(p->addr, -1);
 	tm_printf((UB *)"bt: forgot %02x:..:%02x\n", p->addr[5], p->addr[0]);
 	p->have_key = FALSE;
+	p->keep_wait = FALSE;
 	if ( !p->up ) p->used = FALSE;
 }
 
@@ -1813,6 +2147,7 @@ LOCAL void requests( BTC *c )
 		c->req_scan_s = 0;
 		c->nfound = 0;
 		c->scanning = TRUE;
+		c->inq_on = TRUE;
 		c->scan_at = knl_btx_now();
 		knl_btl_scan_start(c);
 		r[0] = 0x33;			/* the general inquiry access code */
@@ -1823,45 +2158,8 @@ LOCAL void requests( BTC *c )
 		knl_btx_cmd(c, C_INQUIRY, r, 5);
 	}
 	if ( c->req_pair ) {
-		PEER		*p = knl_btx_peer_new(c, c->pair_addr);
-		INT		i;
-
 		c->req_pair = FALSE;
-		if ( p == NULL ) {
-			tm_printf((UB *)"bt: no room for another device\n");
-			return;
-		}
-		for ( i = 0; i < c->nfound; i++ ) {
-			if ( same_addr(c->found[i].addr, c->pair_addr) ) {
-				p->cod = c->found[i].cod;
-				knl_memcpy(p->name, c->found[i].name, sizeof(p->name));
-				if ( c->found[i].le ) {
-					p->le = TRUE;
-					p->atype = c->found[i].atype;
-				}
-			}
-		}
-		if ( p->le ) {
-			knl_memcpy(p->cur_addr, p->addr, 6);
-			p->cur_type = p->atype;
-			knl_btl_connect(c, p);
-			return;
-		}
-		knl_memcpy(r, c->pair_addr, 6);
-		r[6] = 0x18;			/* the packets DM1, DH1 ... */
-		r[7] = 0xcc;
-		r[8] = 1;			/* page scan repetition R1 */
-		r[9] = 0;
-		r[10] = r[11] = 0;
-		r[12] = 1;			/* a role change allowed */
-		knl_btx_cmd(c, C_CREATE_CONN, r, 13);
-		if ( p->name[0] == 0 ) {
-			knl_memcpy(r, c->pair_addr, 6);
-			r[6] = 1;
-			r[7] = 0;
-			r[8] = r[9] = 0;
-			knl_btx_cmd(c, C_NAME_REQ, r, 10);
-		}
+		pair_start(c, c->pair_addr, FALSE, FALSE, NULL);
 	}
 }
 
@@ -1882,6 +2180,8 @@ LOCAL void sdp_overdue( BTC *c )
 	}
 }
 
+LOCAL void usb_autosuspend( BTC *c );
+
 LOCAL void bt_task( INT stacd, void *exinf )
 {
 	BTC	*c = (BTC *)exinf;
@@ -1895,6 +2195,7 @@ LOCAL void bt_task( INT stacd, void *exinf )
 			RINGITEM	*r = &c->ring[c->head];
 
 			if ( r->kind == 0 ) ev_piece(c, r->b, r->len);
+			else if ( r->kind == 2 ) knl_bth_sco_in(c, r->b, r->len);
 			else acl_piece(c, r->b, r->len);
 			c->head = ( c->head + 1 ) % RING_N;
 		}
@@ -1908,10 +2209,17 @@ LOCAL void bt_task( INT stacd, void *exinf )
 			if ( !c->ready && ( op >> 10 ) != 0x3f ) start_stuck(c, op, 0xffff);
 			if ( !c->ready ) start_next(c);
 		}
+		if ( c->naming && (W)( knl_btx_now() - c->name_due ) >= 0 ) {
+			/* a name the controller has not answered for: given up, and on to the next */
+			tm_printf((UB *)"bt: the name of %02x:..:%02x not answered in %d ms\n", c->name_addr[5], c->name_addr[0], NAME_TMO_MS);
+			knl_btx_cmd(c, C_NAME_CANCEL, c->name_addr, 6);
+			name_next(c);
+		}
 		requests(c);
 		sdp_overdue(c);
 		knl_btl_tick(c);
 		knl_bta_tick(c);
+		usb_autosuspend(c);
 	}
 	if ( c->obj_up ) (void)knl_obdev_del((CONST UB *)"Bluetooth");
 	tk_exd_tsk();
@@ -1919,12 +2227,55 @@ LOCAL void bt_task( INT stacd, void *exinf )
 
 /* ---------------------------------------------------------------- the USB side */
 
+/*
+ * The adapter suspended while idle, as a USB device may be: allowed
+ * unless the start-up setting says "btusb.enable_autosuspend=0"; after
+ * AUTOSUSP_MS with nothing sent or received, while it has no connection,
+ * no search (an inquiry or an active LE scan), no command, frame or event
+ * waiting, and is up. Its remote wakeup is on while suspended, so that
+ * an event (a connection asked for by a device, an advertisement of a
+ * passive scan) brings it back; anything to send brings it back first.
+ */
+#define AUTOSUSP_MS	2000
+
+LOCAL CONST BTTRANS	usb_tr;
+
+LOCAL BOOL bt_idle( BTC *c )
+{
+	INT	i;
+
+	if ( !c->ready || c->cmd_busy || c->qh != c->qt || c->tx_h != c->tx_t || c->head != c->tail ) return FALSE;
+	if ( c->scanning || c->inq_on || c->naming || c->le_scan_active || c->le_user_scan || c->le_conn != NULL || c->fb_on ) {
+		return FALSE;
+	}
+	for ( i = 0; i < NPEER; i++ ) {
+		if ( c->peer[i].used && c->peer[i].handle != 0xffff ) return FALSE;
+	}
+	return (BOOL)( (W)( knl_usb_ms() - c->last_busy ) >= AUTOSUSP_MS );
+}
+
+LOCAL void usb_autosuspend( BTC *c )
+{
+	if ( !c->autosusp || c->tr != &usb_tr || c->dev == NULL || c->dev->suspended || !bt_idle(c) ) return;
+	knl_usb_lock();
+	if ( !c->gone && bt_idle(c) ) (void)knl_usb_dev_suspend(c->dev, TRUE);
+	knl_usb_unlock();
+}
+
+/* With the manager's lock held: the adapter brought back before anything goes to it */
+LOCAL ER usb_awake( BTC *c )
+{
+	c->last_busy = knl_usb_ms();
+	return c->dev->suspended ? knl_usb_dev_resume(c->dev) : E_OK;
+}
+
 LOCAL ER usb_cmd( BTC *c, UB *b, INT n )
 {
 	ER	er;
 
 	knl_usb_lock();
-	er = c->gone ? E_IO : knl_usb_control(c->dev, USB_RT_CLASS, REQ_HCI_COMMAND, 0, 0, b, (UH)n, NULL);
+	er = c->gone ? E_IO : usb_awake(c);
+	if ( er >= E_OK ) er = knl_usb_control(c->dev, USB_RT_CLASS, REQ_HCI_COMMAND, 0, 0, b, (UH)n, NULL);
 	knl_usb_unlock();
 	return er;
 }
@@ -1935,13 +2286,14 @@ LOCAL ER usb_acl( BTC *c, UB *b, INT n )
 	ER	er;
 
 	knl_usb_lock();
-	er = c->gone ? E_IO : c->dev->hc->ops->bulk(c->dev->hc, c->dev, &c->ep_out, b, n, &got, 1000);
+	er = c->gone ? E_IO : usb_awake(c);
+	if ( er >= E_OK ) er = c->dev->hc->ops->bulk(c->dev->hc, c->dev, &c->ep_out, b, n, &got, 1000);
 	knl_usb_unlock();
 	return er;
 }
 
 /* ISO data goes on the same bulk endpoint as ACL data */
-LOCAL CONST BTTRANS	usb_tr = { usb_cmd, usb_acl, NULL, usb_acl };
+LOCAL CONST BTTRANS	usb_tr = { usb_cmd, usb_acl, NULL, usb_acl, NULL };	/* SCO on the voice interface (bt_hfp.c) */
 
 EXPORT BOOL knl_bt_match( USBDEV *dev )
 {
@@ -1988,6 +2340,14 @@ EXPORT ER knl_bt_attach( USBDEV *dev )
 	if ( c == NULL ) return E_NOMEM;
 	c->tr = &usb_tr;
 	c->dev = dev;
+	{
+		UB	v[4];
+
+		/* suspended while idle unless the start-up setting says "btusb.enable_autosuspend=0" */
+		c->autosusp = !( knl_bootarg(knl_bootargs, "btusb.enable_autosuspend", v, sizeof(v))
+				 && ( v[0] == '0' || v[0] == 'n' || v[0] == 'N' ) );
+		c->last_busy = knl_usb_ms();
+	}
 	c->intel = (BOOL)( GET16(dev->ddesc + 8) == USB_VID_INTEL );
 	c->st.state = BT_ST_STARTING;
 	c->st.vid = (UH)GET16(dev->ddesc + 8);
@@ -2093,6 +2453,11 @@ EXPORT BTC *knl_btx_open( CONST BTTRANS *tr, void *ctx )
 	return c;
 }
 
+EXPORT BTC *knl_btx_ctl( void )
+{
+	return bt_c;
+}
+
 /* ---------------------------------------------------------------- what others ask */
 
 EXPORT ER knl_bt_scan( INT seconds )
@@ -2124,6 +2489,14 @@ EXPORT INT knl_bt_found( T_BTFOUND *buf, INT max )
 	if ( c == NULL ) return E_NOEXS;
 	for ( i = 0; i < c->nfound && i < max; i++ ) buf[i] = c->found[i];
 	return c->nfound;
+}
+
+EXPORT INT knl_bt_lines( T_BTLINE *buf, INT max )
+{
+	BTC	*c = bt_c;
+
+	if ( c == NULL ) return E_NOEXS;
+	return bt_lines(c, buf, max);
 }
 
 EXPORT BOOL knl_bt_ready( void )

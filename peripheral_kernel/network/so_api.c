@@ -50,6 +50,9 @@ LOCAL BOOL		so_asking = FALSE;	/* DHCP is running on the interface */
 LOCAL UW		so_dns_fixed[2];	/* name servers the settings name */
 LOCAL char		so_domain[80];
 
+/* The programs told that the network's configuration changed (so_prc.c, so_netwait) */
+IMPORT void	knl_so_netchg( void );
+
 /* ---------------------------------------------------------------- errors */
 
 /*
@@ -118,6 +121,30 @@ LOCAL INT so_owned( INT s, ID owner )
 	return s;
 }
 
+/*
+ * A new socket of a process past its limit (include/ts/so.h) is closed
+ * again: EX_MFILE. The count takes the new one in, so that tasks of one
+ * process making sockets at once may each be refused but never take it
+ * past its limit.
+ */
+LOCAL INT so_within( INT s, ID owner )
+{
+	INT	i, held = 0;
+
+	if ( s < 0 || owner <= 0 ) {
+		return s;
+	}
+	for ( i = 0; i < SO_NUM; i++ ) {
+		if ( so_owner[i] == owner ) held++;
+	}
+	if ( held > knl_prc_so_cur(owner) ) {
+		(void)so_owned(s, 0);
+		(void)lwip_close(s);
+		return EX_MFILE;
+	}
+	return s;
+}
+
 EXPORT BOOL knl_so_mine( INT s, ID owner )
 {
 	return ( s >= 0 && s < SO_NUM && so_owner[s] == owner );
@@ -145,7 +172,7 @@ EXPORT INT knl_so_socket_as( INT domain, INT type, INT protocol, ID owner )
 	if ( !so_started ) {
 		return E_OBJ;
 	}
-	s = so_owned(so_ret_n(lwip_socket(domain, type, protocol)), owner);
+	s = so_within(so_owned(so_ret_n(lwip_socket(domain, type, protocol)), owner), owner);
 	if ( s >= 0 ) {
 		knl_so_obj_made(s, owner, domain, type, protocol);
 	}
@@ -154,7 +181,7 @@ EXPORT INT knl_so_socket_as( INT domain, INT type, INT protocol, ID owner )
 
 EXPORT INT knl_so_accept_as( INT s, struct sockaddr *addr, socklen_t *addrlen, ID owner )
 {
-	INT	ns = so_owned(so_ret_n(lwip_accept(s, addr, addrlen)), owner);
+	INT	ns = so_within(so_owned(so_ret_n(lwip_accept(s, addr, addrlen)), owner), owner);
 
 	if ( ns >= 0 ) {
 		knl_so_obj_accepted(ns, s, owner);
@@ -673,6 +700,7 @@ EXPORT ER so_setifaddr( UW addr, UW mask, UW gw, UW dns )
 		LOCK_TCPIP_CORE();
 		dns_setserver(0, &d);
 		UNLOCK_TCPIP_CORE();
+		knl_so_netchg();
 	}
 
 	return E_OK;
@@ -701,6 +729,7 @@ LOCAL void so_status( struct netif *n )
 {
 	(void)n;
 	dns_fixed();
+	knl_so_netchg();
 }
 
 EXPORT ER so_setdns( INT n, UW addr )
@@ -708,12 +737,16 @@ EXPORT ER so_setdns( INT n, UW addr )
 	if ( n < 0 || n > 1 ) {
 		return E_PAR;
 	}
+	if ( so_dns_fixed[n] == addr ) {
+		return E_OK;
+	}
 	so_dns_fixed[n] = addr;
 	if ( so_started ) {
 		LOCK_TCPIP_CORE();
 		dns_fixed();
 		UNLOCK_TCPIP_CORE();
 	}
+	knl_so_netchg();
 	return E_OK;
 }
 

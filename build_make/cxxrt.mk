@@ -31,7 +31,7 @@ CXXRT_OBJS := $(CXXRT_OUT)/cxxrt/crt_cxx.o $(CXXRT_OUT)/cxxrt/ts_start.o $(CXXRT
 	      $(CXXRT_OUT)/cxxrt/ts_locks.o $(CXXRT_OUT)/cxxrt/ts_mman.o $(CXXRT_OUT)/cxxrt/cxx_thread.o \
 	      $(CXXRT_OUT)/cxxrt/cxx_abi.o $(CXXRT_OUT)/cxxrt/svc_stub.o $(CXXRT_OUT)/cxxrt/ts_socket.o \
 	      $(CXXRT_OUT)/cxxrt/ts_dirent.o $(CXXRT_OUT)/cxxrt/ts_face.o $(CXXRT_OUT)/cxxrt/ts_posix.o $(CXXRT_OUT)/cxxrt/ts_evfd.o \
-	      $(CXXRT_OUT)/cxxrt/ts_random.o $(CXXRT_OUT)/cxxrt/ts_urandom.o
+	      $(CXXRT_OUT)/cxxrt/ts_random.o $(CXXRT_OUT)/cxxrt/ts_urandom.o $(CXXRT_OUT)/cxxrt/ts_chan.o
 ifneq ($(UARCH_LIBC),)
 CXXRT_OBJS += $(CXXRT_OUT)/cxxrt/sysnames.o
 
@@ -150,6 +150,17 @@ $(CXXPROG_ELF): $(TOP)/tests/uprog/cxxprog.cc $(CXXRT_LIB) $(PTH_LIB) $(CXXRT_LD
 	@$(call CXXRT_LINK,$@,$(TSPOSIX_CXXFLAGS) $(TOP)/tests/uprog/cxxprog.cc)
 
 EXTRA_BOOT_FILES += $(CXXPROG_ELF)
+
+# 二つのプロセスの間のローカルソケット(tests/uprog/chanprog.cc)。/boot に CHANPROG.ELF として
+# 載り、ktest_chan2 が走らせる
+CHANPROG_ELF := $(UOBJ)/chanprog.elf
+
+$(CHANPROG_ELF): $(TOP)/tests/uprog/chanprog.cc $(CXXRT_LIB) $(PTH_LIB) $(CXXRT_LD) $(CXXRT_HDRS)
+	@mkdir -p $(dir $@)
+	@echo 'CXX $@'
+	@$(call CXXRT_LINK,$@,$(TSPOSIX_CXXFLAGS) $(TOP)/tests/uprog/chanprog.cc)
+
+EXTRA_BOOT_FILES += $(CHANPROG_ELF)
 
 # 小物「ブラウザ」のプログラム実身のレコード1(設計書 17.19)。make BROWSER=1 のときは
 # エンジンを結んだもの(browser.mk)、そうでないときは作り方を言うだけの小さなもの。

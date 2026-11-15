@@ -236,6 +236,39 @@ IMPORT BOOL knl_so_mine( INT s, ID owner );
 IMPORT void knl_so_prc_end( ID pid );
 
 /*
+ * The two limits on the sockets there are (design 9.2), as Linux and
+ * NetBSD limit descriptors: the system's table (SO_MAX), whose last
+ * SO_KERNEL_RESERVE numbers only the kernel is given, so that its name
+ * lookups, DHCP, SLAAC and the clock go on when the processes have
+ * taken the rest (E_LIMIT, ENFILE); and each process's own (EX_MFILE,
+ * EMFILE), as RLIMIT_NOFILE: a soft limit that is the one that holds, and
+ * a hard one the soft may be raised to. A process starts with its
+ * parent's, the first ones with SO_PRC_SOFT and SO_PRC_HARD. Anyone may
+ * lower either and raise the soft one up to the hard one; only an
+ * administrator raises the hard one, and never past SO_PRC_CEIL, so that
+ * no one program can take the table from the others.
+ *	knl_prc_so_cur		the soft limit of process pid; SO_PRC_SOFT for
+ *				an owner that is no process
+ *	knl_prc_so_limit	both of them
+ *	knl_prc_so_setlimit	both of them set; raise: the hard one may go up
+ */
+#if TS_NETSTACK_NETBSD
+#define SO_KERNEL_RESERVE	32
+#else
+#define SO_KERNEL_RESERVE	0		/* lwIP: no numbers kept back */
+#endif
+#define SO_PRC_CEIL		( SO_MAX - SO_KERNEL_RESERVE )
+#define SO_PRC_HARD		( ( SO_PRC_CEIL < 768 ) ? SO_PRC_CEIL : 768 )
+#define SO_PRC_SOFT		( ( SO_PRC_HARD < 512 ) ? SO_PRC_HARD : 512 )
+#ifndef EX_MFILE
+#define EX_MFILE		(-24)		/* the process's limit (include/ts/fs.h) */
+#endif
+
+IMPORT INT  knl_prc_so_cur( ID pid );
+IMPORT ER   knl_prc_so_limit( ID pid, INT *p_cur, INT *p_max );
+IMPORT ER   knl_prc_so_setlimit( ID pid, INT cur, INT max, BOOL raise );
+
+/*
  * Each socket is a real object (OB_T_CHANNEL, OB_S_SOCKET, peripheral_
  * kernel/obj/obsock.c) from when it is made until it is closed. The
  * stack says when a number is given out (made: domain, type and

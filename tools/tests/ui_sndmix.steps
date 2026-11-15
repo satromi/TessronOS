@@ -4,7 +4,7 @@
 # whole's left alone turned down, three seconds apart, so that tools/tests/wav_tones.py F
 # shows each in what was heard: 500Hz lower, then 1500Hz gone, then the left lower than
 # the right. The window is at 200,100, its panel from 210,128: in a row k (from 0) of
-# アプリケーション, the volume from 486 to 620 at y 365+40k and 消音 at 716,403 for row 1;
+# アプリケーション, the volume from 486 to 620 at y 509+40k and 消音 at 716,547 for row 1;
 # 左右をそろえる at 494,287 and the whole's left from 326 to 606 at y 220. Ctrl+E closes.
 run /boot/SVCPROG.ELF 38 500 40000
 wait 300
@@ -21,12 +21,12 @@ expect sndmix: 3 programs
 shot mix_three
 wait 3000
 # the first turned down: a little above the left end
-click 500 365
+click 500 509
 expect sndmix: SVCPROG.ELF
 wait 3000
 shot mix_down
 # the second muted
-click 716 403
+click 716 547
 expect mute 1 (0)
 wait 3000
 # the whole's left alone, its right as it was
@@ -39,8 +39,8 @@ shot mix_left
 # all back
 click 600 220
 click 494 287
-click 716 403
-click 610 365
+click 716 547
+click 610 509
 wait 1500
 shot mix_back
 look 9155 0

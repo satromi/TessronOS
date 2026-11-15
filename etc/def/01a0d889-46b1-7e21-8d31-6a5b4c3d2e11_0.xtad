@@ -9,7 +9,8 @@
 <item code="import" key="I">実身に変換（取込）</item>
 <item code="export" key="O">ファイルに変換（書出）</item>
 <line/>
-<item code="mount" key="M">マウント・取外し</item>
+<item code="mount" key="M">マウント</item>
+<item code="unmount" key="D">取り外し</item>
 <item code="ro" key="W">読込みのみでマウント</item>
 <item code="ftp" key="F">FTP に接続</item>
 <item code="dir">ディレクトリ<link id="01a0d889-46b2-7f32-8e42-7b6c5d4e3f22_0.xtad" vobjid="01a0d8c3-2002-7ec1-8a41-7c6d5e4f3a21"/></item>

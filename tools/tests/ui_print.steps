@@ -1,12 +1,16 @@
 # 印刷 (design 11.22), for tools/ui_run.py: the text open at the start
-# (TADjsについて) printed. Ctrl+P (the menu letter of 書式's 印刷) opens
-# 印刷設定; 画面表示 shows the sheets, goes to the next, is magnified and
-# put away; 詳細設定 sets the printing paper to A4 across; 印刷 writes
-# the PDF file and puts its link in the BTRON window.
+# (TADjsについて) printed. Ctrl+P (the menu letter of 書式's 印刷) has the
+# desktop start 基本印刷, a process, which opens 印刷設定; 画面表示 shows
+# the sheets, goes to the next, is magnified and put away; 詳細設定 sets
+# the printing paper to A4 across; 印刷 writes the PDF file and puts its
+# link in the BTRON window.
 click 600 450
 wait 300
 key 13 01
-wait 1500
+expect bprint: job
+expect print: job 1 taken by process
+expect bprint: panel 印刷設定
+wait 1000
 shot print_panel
 # 画面表示: the first sheet, the next, magnified
 click 658 511
@@ -32,12 +36,19 @@ shot print_panel_a4
 # 印刷: the file written, its link on the desktop
 click 862 511
 expect print: 4 sheets
+expect bprint: printed (0)
+expect print: job 1 ended (0)
 wait 1500
 shot print_done
 # 基本印刷: the link to the same text taken in the BTRON window, and 実行
 # from its menu (opened with the right button, the item pressed): printed
 # without being opened. 基本印刷 is in 実行 once it is one of the object's
 # 機能付箋: the second row of the list, under 基本文章編集
+# the text closed first: 実行 is grey for an object open in a window
+click 600 450
+wait 300
+key 08 01
+wait 1500
 apps 019a6c96-e262-7dfd-a3bc-1e85d495d60d basic-text-editor basic-print
 click 60 90
 wait 300
@@ -52,12 +63,16 @@ wait 150
 move 180 351
 wait 300
 shot print_basic_menu
+logmark
 click 180 351
-wait 1500
+expectsince print: job 2 taken by process
+expectsince bprint: panel 印刷設定
+wait 1000
 shot print_basic_panel
 logmark
 key 28
 expectsince print: 4 sheets
+expectsince print: job 2 ended (0)
 wait 1500
 shot print_basic_done
 # nothing it did was refused for want of a right

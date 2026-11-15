@@ -9,61 +9,8 @@
 # by 51,45 it goes 48,48 (its corner at 400,384), and sized by its corner by 33,21 its
 # corner goes to 576,496. Saved, record 0 is the same from both, byte for byte.
 # Keys: Esc 29; Ctrl+S 16 01, Ctrl+E 08 01.
-figproc kernel
-mkbig fig 1 2 0
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-pixel 446 448 FFFFFF
-click 366 48
-wait 500
-click 579 86
-wait 400
-pixel 446 448 808080
-pixel 447 448 FFFFFF
-pixel 798 640 808080
-key 29
-wait 400
-pixel 446 448 808080
-pixel 798 640 808080
-click 366 48
-wait 500
-click 499 86
-wait 400
-pixel 446 448 FFFFFF
-pixel 798 640 FFFFFF
-key 29
-wait 400
-pixel 446 448 FFFFFF
-click 366 48
-wait 500
-click 683 86
-wait 400
-pixel 446 448 808080
-key 29
-wait 400
-pixel 798 640 808080
-click 298 82
-wait 300
-drag 455 457 603 565
-wait 400
-click 298 48
-wait 300
-drag 520 500 571 545
-sync 600
-wait 300
-drag 654 608 687 629
-sync 600
-wait 300
-shot grid_k_done
-key 16 01
-sync 600
-sum show
-keep kernel
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 2 0
 logmark
 pfig big
@@ -125,4 +72,4 @@ shot grid_p_done
 key 16 01
 sync 600
 sum show
-same kernel
+want ok 692 56c3851b867c4eb1

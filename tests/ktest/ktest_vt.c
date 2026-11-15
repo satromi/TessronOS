@@ -35,7 +35,7 @@
 #include <ts/xf.h>
 #include <ts/sysdef.h>
 #include <ts/docmenu.h>
-#include "../../application/desktop/desktop.h"
+#include <ts/docedit.h>
 
 #define XT_GENKO	"/boot/genko.xtad"
 
@@ -704,9 +704,117 @@ LOCAL BOOL has_text( CONST UB *s, CONST char *w )
  * text written downwards -- its lines ending in CR LF, the direction
  * after the paper -- reads as 縦書き and writes back unchanged.
  */
+/*
+ * The editor of text (application/doc/docedit.c) over a record of the
+ * test's own, shown nowhere: the model made again from the record when
+ * it asks, and nothing else of a host done.
+ */
+typedef struct {
+	T_TAD	*rec;
+	T_TVDOC	*doc;
+	T_TAD	*xrec;
+	INT	sx, sy, height;
+	UINT	kind;
+	BOOL	xml, detail, dirty, sealed, used, settling;
+	TS_UUID	id;
+	INT	recno;
+} VTTEXT;
+
+#define VT(e)	( (VTTEXT *)(e)->arg )
+
+LOCAL void vh_model( T_DDED *e )
+{
+	if ( VT(e)->doc != NULL ) tv_doc_free(VT(e)->doc);
+	VT(e)->doc = NULL;
+	(void)tv_doc(VT(e)->rec, &VT(e)->doc);
+}
+LOCAL void vh_changed( T_DDED *e )	{ vh_model(e); VT(e)->dirty = TRUE; }
+LOCAL void vh_none( T_DDED *e )		{ (void)e; }
+LOCAL void vh_page( T_DDED *e, T_DPRECT *r )
+{
+	(void)e;
+	r->left = 0;  r->top = 0;  r->right = 600;  r->bottom = 400;
+}
+LOCAL BOOL vh_no( T_DDED *e )		{ (void)e; return FALSE; }
+LOCAL BOOL vh_origin( T_DDED *e, INT *x, INT *y )	{ (void)e; *x = *y = 0; return FALSE; }
+LOCAL INT vh_look( T_DDED *e, UINT n, INT d )	{ (void)e; (void)n; return d; }
+LOCAL void vh_drag( T_DDED *e, CONST T_DPRECT *r, BOOL f, INT dx, INT dy )	{ (void)e; (void)r; (void)f; (void)dx; (void)dy; }
+LOCAL void vh_note( T_DDED *e, CONST char *s )	{ (void)e; (void)s; }
+LOCAL void vh_tell( T_DDED *e, CONST char *a, CONST char *b )	{ (void)e; (void)a; (void)b; }
+LOCAL BOOL vh_ask_text( T_DDED *e, CONST char *a, CONST char *b, CONST UB *s, UB *o, INT m, CONST char *k )
+{ (void)e; (void)a; (void)b; (void)s; (void)o; (void)m; (void)k; return FALSE; }
+LOCAL BOOL vh_ask_name( T_DDED *e, CONST char *p, CONST UB *s, UB *o, INT m )
+{ (void)e; (void)p; (void)s; (void)o; (void)m; return FALSE; }
+LOCAL BOOL vh_fields( T_DDED *e, CONST char *t, INT n, CONST char *CONST *l, CONST char *CONST *h, UB (*v)[DE_FIELD_MAX] )
+{ (void)e; (void)t; (void)n; (void)l; (void)h; (void)v; return FALSE; }
+LOCAL INT vh_list( T_DDED *e, CONST char *t, CONST char *CONST *n, INT c, INT s )
+{ (void)e; (void)t; (void)n; (void)c; (void)s; return -1; }
+LOCAL INT vh_paper( T_DDED *e, T_DEPAPER *p )	{ (void)e; (void)p; return DE_PAPER_CANCEL; }
+LOCAL INT vh_find( T_DDED *e, UB *w, UB *t, INT m, BOOL *r )	{ (void)e; (void)w; (void)t; (void)m; (void)r; return 0; }
+LOCAL BOOL vh_colour( T_DDED *e, UW *io )	{ (void)e; (void)io; return FALSE; }
+LOCAL INT vh_faces( T_DDED *e, UB (*n)[64], INT m )	{ (void)e; (void)n; (void)m; return 0; }
+LOCAL BOOL vh_ime_key( T_DDED *e, UINT c, UINT m )	{ (void)e; (void)c; (void)m; return FALSE; }
+LOCAL void vh_ime_draw( T_DDED *e, INT g )	{ (void)e; (void)g; }
+LOCAL ER vh_tray_put( T_DDED *e, CONST T_TAD *f, CONST char *n )	{ (void)e; (void)f; (void)n; return E_NOEXS; }
+LOCAL T_TAD *vh_tray_frag( T_DDED *e )	{ (void)e; return NULL; }
+LOCAL void vh_tray_pictures( T_DDED *e, T_TAD *f )	{ (void)e; (void)f; }
+LOCAL UINT vh_at( T_DDED *e, INT x, INT y, T_DDED **t )	{ (void)e; (void)x; (void)y; *t = NULL; return DE_AT_NONE; }
+LOCAL void vh_focus( T_DDED *e, T_DDED *t )	{ (void)e; (void)t; }
+LOCAL ER vh_text_away( T_DDED *e, INT sx, INT sy, INT cx, INT cy, UB *s, INT n )
+{ (void)e; (void)sx; (void)sy; (void)cx; (void)cy; (void)s; (void)n; return E_PAR; }
+LOCAL BOOL vh_thing_away( T_DDED *e, INT sx, INT sy, CONST T_DDTHING *th )
+{ (void)e; (void)sx; (void)sy; (void)th; return FALSE; }
+LOCAL ER vh_new( T_DDED *e, CONST UB *n, TS_UUID *u, T_TAD **r )	{ (void)e; (void)n; (void)u; (void)r; return E_NOEXS; }
+LOCAL void vh_done( T_DDED *e, CONST TS_UUID *u, CONST UB *n )	{ (void)e; (void)u; (void)n; }
+LOCAL T_TAD *vh_restore( T_DDED *e, CONST UB *x, SZ n )	{ (void)e; (void)x; (void)n; return NULL; }
+LOCAL void vh_word( T_DDED *e, CONST UB *w, INT n )	{ (void)e; (void)w; (void)n; }
+
+LOCAL CONST T_DDHOST	vt_host = {
+	.model = vh_model, .changed = vh_changed, .draw = vh_none, .draw_all = vh_none,
+	.update = vh_none, .shown = vh_none, .draw_band = NULL, .work_rect = vh_page,
+	.origin = vh_origin, .caret_on = vh_no, .look = vh_look, .drag = vh_drag, .note = vh_note,
+	.before = vh_none, .forget = vh_none, .undo = vh_none,
+	.tell = vh_tell, .no_memory = vh_none, .ask_text = vh_ask_text, .ask_name = vh_ask_name,
+	.fields_form = vh_fields, .list_form = vh_list, .paper_form = vh_paper, .find_form = vh_find,
+	.pick_colour = vh_colour, .faces = vh_faces,
+	.ime_key = vh_ime_key, .ime_draw = vh_ime_draw, .ime_on = vh_no,
+	.tray_put = vh_tray_put, .tray_frag = vh_tray_frag, .tray_pictures = vh_tray_pictures,
+	.tray_taken = vh_none, .at = vh_at, .focus = vh_focus, .text_away = vh_text_away,
+	.thing_away = vh_thing_away, .new_object = vh_new, .object_done = vh_done,
+	.restore = vh_restore, .word_register = vh_word,
+};
+
+LOCAL void vt_text( VTTEXT *t, T_DDED *e, T_TAD *rec )
+{
+	knl_memset(t, 0, sizeof(*t));
+	knl_memset(e, 0, sizeof(*e));
+	t->rec = rec;
+	t->kind = TV_KIND_DOC;
+	t->used = TRUE;
+	e->rec = &t->rec;
+	e->doc = &t->doc;
+	e->xrec = &t->xrec;
+	e->scroll_x = &t->sx;
+	e->scroll_y = &t->sy;
+	e->height = &t->height;
+	e->kind = &t->kind;
+	e->xml_view = &t->xml;
+	e->detail_view = &t->detail;
+	e->dirty = &t->dirty;
+	e->sealed = &t->sealed;
+	e->used = &t->used;
+	e->settling = &t->settling;
+	e->id = &t->id;
+	e->recno = &t->recno;
+	e->host = &vt_host;
+	e->arg = t;
+	vh_model(e);
+}
+
 LOCAL void test_edit( void )
 {
-	DTWIN	*w;
+	VTTEXT	*w;
+	T_DDED	*e;
 	T_TAD	*doc = NULL;
 	UB	*out;
 	SZ	n = 0;
@@ -714,18 +822,19 @@ LOCAL void test_edit( void )
 	start();
 	KT_ASSERT_ER(tad_parse((CONST UB *)edit_doc, s_len(edit_doc), NULL, &doc), E_OK);
 	if ( doc == NULL ) return;
-	w = (DTWIN *)Kmalloc(sizeof(DTWIN));
-	if ( w == NULL ) { tad_free(doc); return; }
-	knl_memset(w, 0, sizeof(*w));
-	w->used = TRUE;
-	w->rec = doc;
-	w->kind = TV_KIND_DOC;
-	w->paper = TV_PAPER_LOOK;
-	ed_model(w);
+	w = (VTTEXT *)Kmalloc(sizeof(VTTEXT));
+	e = (T_DDED *)Kmalloc(sizeof(T_DDED));
+	if ( w == NULL || e == NULL ) {
+		if ( w != NULL ) Kfree(w);
+		if ( e != NULL ) Kfree(e);
+		tad_free(doc);
+		return;
+	}
+	vt_text(w, e, doc);
 	KT_ASSERT(w->doc != NULL && !w->doc->vert);
 
 	/* 縦書き */
-	KT_ASSERT(dd_command(w, DM_DIR_VERT));
+	KT_ASSERT(de_command(e, DM_DIR_VERT));
 	KT_ASSERT(w->doc->vert);
 	out = written(doc, &n);
 	KT_ASSERT(out != NULL);
@@ -735,8 +844,8 @@ LOCAL void test_edit( void )
 	}
 
 	/* 縦中横 on "7", and off again */
-	w->dd.apara = 0;  w->dd.apos = 6;  w->dd.cpara = 0;  w->dd.cpos = 7;
-	KT_ASSERT(dd_command(w, DM_COMB));
+	e->apara = 0;  e->apos = 6;  e->cpara = 0;  e->cpos = 7;
+	KT_ASSERT(de_command(e, DM_COMB));
 	out = written(doc, &n);
 	if ( out != NULL ) {
 		KT_ASSERT(has_text(out, "<combchar>7</combchar>"));
@@ -745,13 +854,13 @@ LOCAL void test_edit( void )
 	{
 		BOOL	comb = FALSE, turned = FALSE;
 
-		w->dd.apara = 0;  w->dd.apos = 6;  w->dd.cpara = 0;  w->dd.cpos = 7;
-		dd_menu_state(w, &comb, &turned);
+		e->apara = 0;  e->apos = 6;  e->cpara = 0;  e->cpos = 7;
+		de_menu_state(e, &comb, &turned);
 		KT_ASSERT(comb);
 		KT_ASSERT(!turned);
 	}
-	w->dd.apara = 0;  w->dd.apos = 6;  w->dd.cpara = 0;  w->dd.cpos = 7;
-	KT_ASSERT(dd_command(w, DM_COMB));
+	e->apara = 0;  e->apos = 6;  e->cpara = 0;  e->cpos = 7;
+	KT_ASSERT(de_command(e, DM_COMB));
 	out = written(doc, &n);
 	if ( out != NULL ) {
 		KT_ASSERT(!has_text(out, "combchar"));
@@ -759,18 +868,18 @@ LOCAL void test_edit( void )
 	}
 
 	/* 回転 on "ABC", and off again */
-	w->dd.apara = 0;  w->dd.apos = 10;  w->dd.cpara = 0;  w->dd.cpos = 13;
-	KT_ASSERT(dd_command(w, DM_TURN));
+	e->apara = 0;  e->apos = 10;  e->cpara = 0;  e->cpos = 13;
+	KT_ASSERT(de_command(e, DM_TURN));
 	out = written(doc, &n);
 	if ( out != NULL ) {
 		KT_ASSERT(has_text(out, "<font rotation=\"90\" rotabs=\"0\">ABC</font>"));
 		Kfree(out);
 	}
-	w->dd.apara = 0;  w->dd.apos = 10;  w->dd.cpara = 0;  w->dd.cpos = 13;
-	KT_ASSERT(dd_command(w, DM_TURN));
+	e->apara = 0;  e->apos = 10;  e->cpara = 0;  e->cpos = 13;
+	KT_ASSERT(de_command(e, DM_TURN));
 
 	/* 横書き: the record as it was */
-	KT_ASSERT(dd_command(w, DM_DIR_HORIZ));
+	KT_ASSERT(de_command(e, DM_DIR_HORIZ));
 	KT_ASSERT(!w->doc->vert);
 	out = written(doc, &n);
 	if ( out != NULL ) {
@@ -781,7 +890,8 @@ LOCAL void test_edit( void )
 		KT_ASSERT(has_text(out, edit_doc));
 		Kfree(out);
 	}
-	ed_forget(w);
+	if ( w->doc != NULL ) tv_doc_free(w->doc);
+	Kfree(e);
 	Kfree(w);
 	tad_free(doc);
 }

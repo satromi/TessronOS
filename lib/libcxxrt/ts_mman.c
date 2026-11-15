@@ -12,15 +12,18 @@
  *	mmap, munmap, mprotect and madvise on ts_map_mem, ts_unm_mem and
  *	ts_ctl_mem (include/tsposix/sys/mman.h, design 9.8.1).
  *
- *	memfd_create makes a memory object of the process, known by
- *	descriptors of their own range (MEMFD_BASE up): its size is set once
- *	with ftruncate, which takes the pages, and every mapping of it
- *	(mmap with MAP_SHARED) is the same memory, at the same address. The
- *	descriptors can be duplicated and marked read-only (F_SETFL); the
- *	pages go back when the last descriptor is closed and the last mapping
- *	let go. This is the shared memory a program shares with itself (the
- *	buffers of Mojo's data pipes in the browser); the protection asked
- *	for a mapping is not applied.
+ *	memfd_create makes a memory object of the system without a name
+ *	(include/ts/ob.h, OB_F_TRANSIENT, design 18.6), and a descriptor of
+ *	their own range (MEMFD_BASE up) is a key to it. ftruncate sets the
+ *	size of its record, and mmap with MAP_SHARED maps the record at the
+ *	one address the kernel gives it in every process it is mapped
+ *	into. The key can be handed to another process (ts_memfd_key, and
+ *	ts_memfd_from_key there), which then maps the same pages; a
+ *	descriptor made read-only (F_SETFL O_RDONLY) is a key that may only
+ *	read, and a process it is handed to can map it only so. The object
+ *	goes when its last key in any process is closed and its last
+ *	mapping let go. The protection asked for an anonymous mapping is
+ *	applied as ts_ctl_mem has it.
  */
 
 #include <config.h>
@@ -29,6 +32,8 @@
 #include <tk/typedef.h>
 #include <tk/errno.h>
 #include <ts/umem.h>
+#include <ts/ob.h>
+#include <ts/proc.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -50,52 +55,65 @@ extern int	ts_gpu_fd_munmap( void *addr, size_t len ) __attribute__((weak));
 
 #define MEMFD_BASE	0x3c00		/* between the random sources and the sockets */
 /*
- * As many descriptors as the range up to the sockets holds, and as many
- * objects: a page that reads many Blobs and fetches many bodies has a data
- * pipe, and so an object, for each until the collector lets it go
+ * As many descriptors as the range up to the sockets holds: a page that
+ * reads many Blobs and fetches many bodies has a data pipe, and so a
+ * memory object, for each until the collector lets it go
  */
-#define MEMFD_MAX	1024		/* descriptors */
-#define MOBJ_MAX	1024		/* objects */
+#define MEMFD_MAX	1024
+/* Mappings: one for each object mapped, however many times it is (mmap counts them) */
+#define MFMAP_MAX	1024
 
-typedef struct {
-	int	refs;			/* descriptors on it; 0: free */
-	int	maps;			/* mappings of it */
-	char	*base;			/* its pages, once its size is set */
-	size_t	size;
-} MOBJ;
-
+/*
+ * A descriptor is a key to the memory object (ts/ob.h, OB_F_TRANSIENT),
+ * read-only when the key may not write. Record 0 is its memory.
+ */
 static struct {
-	int	obj;			/* index of the object + 1; 0: free */
+	ID	key;			/* 0: free */
 	int	rdonly;
 } mfd[MEMFD_MAX];
-static MOBJ		mobj[MOBJ_MAX];
+
+/*
+ * An object mapped into this process: where (the kernel maps an object
+ * at one address in every process), how many mmaps of it there are,
+ * and a key of its own, so that the mapping stays when the descriptors
+ * are closed, as it does on Linux.
+ */
+static struct {
+	char	*base;			/* NULL: free */
+	size_t	len;
+	int	count;
+	ID	key;
+} mfmap[MFMAP_MAX];
+
 static pthread_mutex_t	mfd_mu = PTHREAD_MUTEX_INITIALIZER;
 
-static MOBJ *mfd_obj( int fd )
+static ID mfd_key( int fd )
 {
 	int	i = fd - MEMFD_BASE;
 
-	if ( i < 0 || i >= MEMFD_MAX || mfd[i].obj == 0 ) return NULL;
-	return &mobj[mfd[i].obj - 1];
+	return ( i < 0 || i >= MEMFD_MAX ) ? 0 : mfd[i].key;
 }
 
-/* An object without descriptors or mappings gives its pages back (under mfd_mu) */
-static void mobj_drop( MOBJ *o )
+static int er_errno( ER er )
 {
-	if ( o->refs > 0 || o->maps > 0 ) return;
-	if ( o->base != NULL ) (void)ts_unm_mem(o->base, (SZ)( ( o->size + PAGE - 1 ) & ~( PAGE - 1 ) ));
-	memset(o, 0, sizeof(*o));
+	switch ( er ) {
+	case E_NOMEM:	return ENOMEM;
+	case E_OACV:	return EACCES;
+	case E_LIMIT:	return ENOMEM;
+	case E_ID:	return EBADF;
+	default:	return EINVAL;
+	}
 }
 
-static int mfd_new( int obj, int rdonly )
+/* A descriptor for a key, which it holds from now on (under mfd_mu) */
+static int mfd_new( ID key, int rdonly )
 {
 	int	i;
 
 	for ( i = 0; i < MEMFD_MAX; i++ ) {
-		if ( mfd[i].obj == 0 ) {
-			mfd[i].obj = obj + 1;
+		if ( mfd[i].key == 0 ) {
+			mfd[i].key = key;
 			mfd[i].rdonly = rdonly;
-			mobj[obj].refs++;
 			return MEMFD_BASE + i;
 		}
 	}
@@ -108,165 +126,326 @@ int ts_memfd_is( int fd )
 	return fd >= MEMFD_BASE && fd < MEMFD_BASE + MEMFD_MAX;
 }
 
+/*
+ * A memory object without a name, which goes when its last key is
+ * closed and its last mapping let go, in whatever processes they are
+ */
 int memfd_create( const char *name, unsigned int flags )
 {
-	int	i, fd = -1;
+	T_OBCRE	c;
+	TS_UUID	u;
+	ID	key;
+	INT	recno;
+	int	fd;
 
 	(void)name; (void)flags;
-	pthread_mutex_lock(&mfd_mu);
-	for ( i = 0; i < MOBJ_MAX && mobj[i].refs + mobj[i].maps > 0; i++ ) ;
-	if ( i < MOBJ_MAX ) {
-		memset(&mobj[i], 0, sizeof(mobj[i]));
-		fd = mfd_new(i, 0);
-	} else {
-		errno = EMFILE;
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_MEMORY;
+	c.flags = OB_F_TRANSIENT;
+	if ( ob_cre_key(&c, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD, &key, &u) < E_OK || key <= 0 ) {
+		errno = ENOMEM;
+		return -1;
 	}
+	if ( ob_apd_rec(key, OB_RT_SYSDATA, 0, &recno) < E_OK ) {
+		(void)ob_cls_obj(key);
+		errno = ENOMEM;
+		return -1;
+	}
+	pthread_mutex_lock(&mfd_mu);
+	fd = mfd_new(key, 0);
+	pthread_mutex_unlock(&mfd_mu);
+	if ( fd < 0 ) {
+		(void)ob_cls_obj(key);		/* the object goes with it */
+	}
+	return fd;
+}
+
+/*
+ * The key a descriptor is, for handing it to another process
+ * (ob_dup_key, or the channels' references); 0 with EBADF when it is
+ * not one of these
+ */
+ID ts_memfd_key( int fd )
+{
+	ID	key;
+
+	pthread_mutex_lock(&mfd_mu);
+	key = mfd_key(fd);
+	pthread_mutex_unlock(&mfd_mu);
+	if ( key == 0 ) errno = EBADF;
+	return key;
+}
+
+/*
+ * A key to a memory object that was handed to this process made a
+ * descriptor, which holds it from now on (closing the descriptor closes
+ * the key). Read-only when the key may not write: a write of nothing
+ * asks the key without changing the record.
+ */
+int ts_memfd_from_key( ID key )
+{
+	SZ	asz = 0;
+	int	fd, rdonly;
+
+	if ( key <= 0 ) {
+		errno = EBADF;
+		return -1;
+	}
+	rdonly = ( ob_wri_rec(key, 0, 0, "", 0, &asz) == E_OACV );
+	pthread_mutex_lock(&mfd_mu);
+	fd = mfd_new(key, rdonly);
 	pthread_mutex_unlock(&mfd_mu);
 	return fd;
 }
 
-int ts_memfd_close( int fd )
+/* The bytes of the objects this process has mapped, and how many (the browser's report of its memory) */
+size_t ts_memfd_bytes( int *p_n )
 {
-	MOBJ	*o;
+	size_t	sum = 0;
+	int	i, n = 0;
 
 	pthread_mutex_lock(&mfd_mu);
-	o = mfd_obj(fd);
-	if ( o == NULL ) {
-		pthread_mutex_unlock(&mfd_mu);
+	for ( i = 0; i < MFMAP_MAX; i++ ) {
+		if ( mfmap[i].base != NULL ) {
+			n++;
+			sum += mfmap[i].len;
+		}
+	}
+	pthread_mutex_unlock(&mfd_mu);
+	if ( p_n != NULL ) *p_n = n;
+	return sum;
+}
+
+int ts_memfd_close( int fd )
+{
+	ID	key;
+
+	pthread_mutex_lock(&mfd_mu);
+	key = mfd_key(fd);
+	if ( key != 0 ) mfd[fd - MEMFD_BASE].key = 0;
+	pthread_mutex_unlock(&mfd_mu);
+	if ( key == 0 ) {
 		errno = EBADF;
 		return -1;
 	}
-	mfd[fd - MEMFD_BASE].obj = 0;
-	o->refs--;
-	mobj_drop(o);
-	pthread_mutex_unlock(&mfd_mu);
+	(void)ob_cls_obj(key);
 	return 0;
 }
 
 int ts_memfd_dup( int fd )
 {
-	MOBJ	*o;
-	int	r = -1;
+	ID	key, nk;
+	int	r = -1, ro = 0;
 
 	pthread_mutex_lock(&mfd_mu);
-	o = mfd_obj(fd);
-	if ( o != NULL ) {
-		r = mfd_new((int)( o - mobj ), mfd[fd - MEMFD_BASE].rdonly);
-	} else {
-		errno = EBADF;
-	}
+	key = mfd_key(fd);
+	if ( key != 0 ) ro = mfd[fd - MEMFD_BASE].rdonly;
 	pthread_mutex_unlock(&mfd_mu);
+	if ( key == 0 ) {
+		errno = EBADF;
+		return -1;
+	}
+	nk = ob_dup_key(key, OB_OP_ALL, ts_get_pid());
+	if ( nk <= 0 ) {
+		errno = EMFILE;
+		return -1;
+	}
+	pthread_mutex_lock(&mfd_mu);
+	r = mfd_new(nk, ro);
+	pthread_mutex_unlock(&mfd_mu);
+	if ( r < 0 ) (void)ob_cls_obj(nk);
 	return r;
 }
 
-/* The size, set once: the pages are taken, zero filled */
+/*
+ * The size: grown with zero filled pages, or cut. Not grown past the
+ * pages it was mapped with while it is mapped anywhere.
+ */
 int ts_memfd_truncate( int fd, size_t len )
 {
-	MOBJ	*o;
-	void	*p = NULL;
-	int	r = 0;
+	ID	key;
+	int	ro = 0;
+	ER	er;
 
 	pthread_mutex_lock(&mfd_mu);
-	o = mfd_obj(fd);
-	if ( o == NULL || mfd[fd - MEMFD_BASE].rdonly ) {
-		errno = EBADF;
-		r = -1;
-	} else if ( o->base != NULL ) {
-		if ( len != o->size ) {
-			errno = EINVAL;
-			r = -1;
-		}
-	} else if ( len > 0 ) {
-		if ( ts_map_mem(&p, (SZ)( ( len + PAGE - 1 ) & ~( PAGE - 1 ) ), 0, TS_MEM_RW) < E_OK ) {
-			errno = ENOMEM;
-			r = -1;
-		} else {
-			o->base = (char *)p;
-			o->size = len;
-		}
-	}
+	key = mfd_key(fd);
+	if ( key != 0 ) ro = mfd[fd - MEMFD_BASE].rdonly;
 	pthread_mutex_unlock(&mfd_mu);
-	return r;
-}
-
-int ts_memfd_fstat( int fd, struct stat *st )
-{
-	MOBJ	*o;
-
-	pthread_mutex_lock(&mfd_mu);
-	o = mfd_obj(fd);
-	memset(st, 0, sizeof(*st));
-	if ( o != NULL ) {
-		st->st_mode = S_IFREG | 0600;
-		st->st_size = (off_t)o->size;
-		st->st_ino = (ino_t)( o - mobj + 1 );
-		st->st_nlink = 1;
-		st->st_blksize = PAGE;
+	if ( key == 0 || ro ) {
+		errno = ( key == 0 ) ? EBADF : EINVAL;
+		return -1;
 	}
-	pthread_mutex_unlock(&mfd_mu);
-	if ( o == NULL ) {
-		errno = EBADF;
+	er = ob_trn_rec(key, 0, (UD)len);
+	if ( er < E_OK ) {
+		errno = ( er == E_LIMIT ) ? EINVAL : er_errno(er);
 		return -1;
 	}
 	return 0;
 }
 
-/* F_GETFL says whether the descriptor is read-only; F_SETFL may make it so */
+int ts_memfd_fstat( int fd, struct stat *st )
+{
+	T_OBREC	r;
+	ID	key = ts_memfd_key(fd);
+	INT	n = 0;
+
+	memset(st, 0, sizeof(*st));
+	if ( key == 0 || ob_lst_rec(key, &r, 1, &n) < E_OK || n < 1 ) {
+		errno = EBADF;
+		return -1;
+	}
+	st->st_mode = S_IFREG | 0600;
+	st->st_size = (off_t)r.size;
+	st->st_ino = (ino_t)key;
+	st->st_nlink = 1;
+	st->st_blksize = PAGE;
+	return 0;
+}
+
+/*
+ * F_GETFL says whether the descriptor is read-only. F_SETFL may make it
+ * so: its key is replaced by one that may only read, so that whoever it
+ * is handed to cannot write either. Seals are not kept: the commands
+ * of them, as any other, are taken and do nothing (Mesa seals what it
+ * makes and does not depend on the seals holding).
+ */
 int ts_memfd_fcntl( int fd, int cmd, int arg )
 {
+	ID	key, nk = 0;
 	int	r = 0;
 
+	key = ts_memfd_key(fd);
+	if ( key == 0 ) {
+		return -1;
+	}
+	if ( cmd == F_SETFL && ( arg & O_ACCMODE ) == O_RDONLY ) {
+		nk = ob_dup_key(key, OB_OP_R, ts_get_pid());
+		if ( nk <= 0 ) {
+			errno = EMFILE;
+			return -1;
+		}
+	}
 	pthread_mutex_lock(&mfd_mu);
-	if ( mfd_obj(fd) == NULL ) {
-		errno = EBADF;
+	if ( mfd_key(fd) != key ) {
+		errno = EBADF;			/* closed meanwhile */
 		r = -1;
 	} else if ( cmd == F_GETFL ) {
 		r = mfd[fd - MEMFD_BASE].rdonly ? O_RDONLY : O_RDWR;
-	} else if ( cmd == F_SETFL ) {
-		if ( ( arg & O_ACCMODE ) == O_RDONLY ) mfd[fd - MEMFD_BASE].rdonly = 1;
+	} else if ( nk > 0 ) {
+		mfd[fd - MEMFD_BASE].key = nk;
+		mfd[fd - MEMFD_BASE].rdonly = 1;
+		nk = key;			/* the old key is closed below */
 	}
 	pthread_mutex_unlock(&mfd_mu);
+	if ( nk > 0 ) (void)ob_cls_obj(nk);
 	return r;
 }
 
-/* A mapping of an object: its own pages, from the offset */
-static void *mfd_map( int fd, size_t len, off_t off )
+/*
+ * A mapping of an object, from the offset. The kernel maps the whole
+ * record at its one address, with pages for at least off + len bytes
+ * the first time; a second mmap of an object mapped here already is
+ * the same pages and only counted. PROT_WRITE asks the key to write
+ * (EACCES on a read-only one).
+ */
+static void *mfd_map( int fd, size_t len, int prot, off_t off )
 {
-	MOBJ	*o;
+	T_OBMAP	m;
+	ID	key, mk;
+	ER	er;
+	int	i, fr = -1;
 	void	*p = MAP_FAILED;
 
-	pthread_mutex_lock(&mfd_mu);
-	o = mfd_obj(fd);
-	if ( o == NULL || o->base == NULL ) {
-		errno = ( o == NULL ) ? EBADF : EINVAL;
-	} else if ( off < 0 || (size_t)off > o->size || len > o->size - (size_t)off ) {
+	key = ts_memfd_key(fd);
+	if ( key == 0 ) {
+		return MAP_FAILED;
+	}
+	if ( off < 0 || ( (size_t)off & ( PAGE - 1 ) ) != 0 || len > SIZE_MAX - (size_t)off ) {
 		errno = EINVAL;
+		return MAP_FAILED;
+	}
+	mk = ob_dup_key(key, OB_OP_ALL, ts_get_pid());
+	if ( mk <= 0 ) {
+		errno = ENOMEM;
+		return MAP_FAILED;
+	}
+	memset(&m, 0, sizeof(m));
+	m.flags = ( prot & PROT_WRITE ) ? OB_M_WRITE : 0;
+	m.size = (SZ)( (size_t)off + len );
+	/*
+	 * The kernel's mapping and the count of it here change together: a
+	 * last munmap of the object in another thread takes the kernel's
+	 * mapping away after it lets the count go, and a mapping made
+	 * between the two would be counted with nothing behind it.
+	 */
+	pthread_mutex_lock(&mfd_mu);
+	er = ob_map_rec(mk, 0, 0, &m);
+	if ( er < E_OK ) {
+		pthread_mutex_unlock(&mfd_mu);
+		(void)ob_cls_obj(mk);
+		errno = er_errno(er);
+		return MAP_FAILED;
+	}
+	for ( i = 0; i < MFMAP_MAX; i++ ) {
+		if ( mfmap[i].base == (char *)m.addr ) break;
+		if ( fr < 0 && mfmap[i].base == NULL ) fr = i;
+	}
+	if ( (size_t)off + len > (size_t)m.size ) {
+		/* mapped already with fewer pages, which it keeps to */
+		errno = ENOMEM;
+		if ( i < MFMAP_MAX ) i = -1;	/* that mapping is the other mmap's */
+		else fr = -1;
+	}
+	if ( i < 0 ) {
+		/* nothing of this one to keep */
+	} else if ( i < MFMAP_MAX ) {
+		mfmap[i].count++;		/* mapped here already: the same pages */
+		p = (char *)m.addr + off;
+	} else if ( fr >= 0 ) {
+		mfmap[fr].base = (char *)m.addr;
+		mfmap[fr].len = (size_t)m.size;
+		mfmap[fr].count = 1;
+		mfmap[fr].key = mk;
+		mk = 0;
+		p = (char *)m.addr + off;
 	} else {
-		o->maps++;
-		p = o->base + off;
+		errno = ENOMEM;
+	}
+	if ( p == MAP_FAILED && i >= 0 ) {
+		(void)ob_unm_rec(mk, 0, 0);	/* mapped by this call alone: taken off again */
 	}
 	pthread_mutex_unlock(&mfd_mu);
+	if ( mk > 0 ) (void)ob_cls_obj(mk);
 	return p;
 }
 
-/* Whether addr is in an object's pages: the mapping let go (1), or not one (0) */
+/* Whether addr is in an object's mapping: the mmap let go (1), or not one (0) */
 static int mfd_unmap( void *addr )
 {
+	ID	key = 0;
 	int	i, r = 0;
 
 	pthread_mutex_lock(&mfd_mu);
-	for ( i = 0; i < MOBJ_MAX; i++ ) {
-		MOBJ *o = &mobj[i];
-
-		if ( o->base != NULL && o->maps > 0 && (char *)addr >= o->base
-		  && (char *)addr < o->base + o->size ) {
-			o->maps--;
-			mobj_drop(o);
+	for ( i = 0; i < MFMAP_MAX; i++ ) {
+		if ( mfmap[i].base != NULL && (char *)addr >= mfmap[i].base
+		  && (char *)addr < mfmap[i].base + mfmap[i].len ) {
+			if ( --mfmap[i].count == 0 ) {
+				key = mfmap[i].key;
+				mfmap[i].base = NULL;
+				mfmap[i].key = 0;
+			}
 			r = 1;
 			break;
 		}
 	}
+	if ( key > 0 ) {
+		(void)ob_unm_rec(key, 0, 0);	/* before another mmap here can count the object again */
+	}
 	pthread_mutex_unlock(&mfd_mu);
+	if ( key > 0 ) {
+		(void)ob_cls_obj(key);
+	}
 	return r;
 }
 
@@ -295,7 +474,7 @@ void *mmap( void *addr, size_t len, int prot, int flags, int fd, off_t off )
 	ER	er;
 
 	if ( len > 0 && ts_memfd_is(fd) && ( flags & MAP_SHARED ) != 0 && ( flags & MAP_FIXED ) == 0 ) {
-		return mfd_map(fd, len, off);
+		return mfd_map(fd, len, prot, off);
 	}
 	if ( fd >= 0 && ts_gpu_fd_mmap != NULL && ( flags & MAP_FIXED ) == 0 ) {
 		p = ts_gpu_fd_mmap(fd, len, off);
@@ -368,7 +547,11 @@ int mprotect( void *addr, size_t len, int prot )
 	return 0;
 }
 
-/* The pages given up: they read as zeros afterwards and keep their protection */
+/*
+ * The pages given up: they read as zeros afterwards and keep their
+ * protection. Writable ones go back to the system and are made again
+ * when touched, as on Linux.
+ */
 int madvise( void *addr, size_t len, int advice )
 {
 	SZ	n = (SZ)( ( len + PAGE - 1 ) & ~( PAGE - 1 ) );
@@ -393,8 +576,11 @@ int msync( void *addr, size_t len, int flags )
 	return 0;
 }
 
-/* Pages are made when their memory is made accessible and are not paged
-   out; every page asked about is counted present */
+/*
+ * Pages are not paged out; every page asked about is counted present,
+ * though a writable page not yet touched has none behind it (it is
+ * made, zero filled, by the first access)
+ */
 int mincore( void *addr, size_t len, unsigned char *vec )
 {
 	size_t	i, n;

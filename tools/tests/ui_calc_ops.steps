@@ -112,7 +112,9 @@ wait 500
 click 820 390
 wait 300
 shot calc_dropped
-dclick 830 252
+# the link stands in the cell under the outline's corner (design 11.4: 744,229, G4, from 700,218), not
+# under the hand: opened by a double press on it
+dclick 760 228
 expect calc: opened TADjsについて
 wait 1000
 key 08 01

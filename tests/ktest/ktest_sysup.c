@@ -414,6 +414,9 @@ LOCAL void test_sysup( void )
 	KT_ASSERT(!wm_dev_conf_get("SYSUP", v, sizeof(v)) || v[0] == 0);
 	KT_ASSERT(rec_is(SU_SYS, 0, DOC("new system")));
 	KT_ASSERT(rec_is(SU_SYS, 1, "NEW-SYSTEM-RECORD, LONGER"));
+	/* the list of the system's objects the volume keeps is the package's */
+	manifest(man, "R9.999", SU_MACH, SU_ARCH, "system");
+	KT_ASSERT(rec_is(SYSDEF_SYSTEM_BOX, 1, man));
 	{
 		UB	*res;
 		SZ	rn = 0;
@@ -437,6 +440,7 @@ LOCAL void test_sysup( void )
 	n = links_of(SU_BOX, ids, 8);
 	KT_ASSERT_EQ(n, 3);
 	KT_ASSERT(has_link(ids, n, SU_SYS) && has_link(ids, n, SU_MINE) && has_link(ids, n, SU_NEW));
+	KT_ASSERT(rec_is(SU_MINE, 0, DOC("mine too")));	/* not the package's: not touched */
 	(void)ts_str_to_uuid(SU_BOX, &u);
 	KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
 	KT_ASSERT(same(r.name, s_len((CONST char *)r.name), "更新の試験・箱"));
@@ -898,9 +902,30 @@ LOCAL void test_sysup_room( void )
 
 EXPORT void ktest_sysup( void )
 {
+	TS_UUID	box;
+	T_OBREC	*rec = NULL;
+	UB	*list;
+	SZ	ln = 0;
+	INT	n;
+
+	/* the list of the system's objects the volume keeps, put back after the packages made here */
+	(void)ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &box);
+	list = om_obj_record(&box, 1, &ln);
 	KT_RUN(test_sysup);
 	KT_RUN(test_sysup_program);
 	KT_RUN(test_sysup_installed);
 	KT_RUN(test_sysup_cut);
 	KT_RUN(test_sysup_room);
+	if ( list != NULL ) {
+		(void)om_obj_record_put(&box, 1, OB_RT_SYSDATA, 0, list, ln);
+		Kfree(list);
+	} else if ( ( n = om_obj_records_all(&box, &rec) ) > 1 ) {
+		ID	k = ob_opn_obj(&box, OB_OP_WRITE | OB_OP_RECORD);
+
+		if ( k > 0 ) {
+			(void)ob_del_rec(k, 1);
+			ob_cls_obj(k);
+		}
+	}
+	if ( rec != NULL ) Kfree(rec);
 }

@@ -27,9 +27,13 @@
 Noinit(EXPORT FP knl_intvec_tbl[N_INTVEC]);
 
 /*
- * The IDT, shared by all processors. Every gate is an interrupt gate of
+ * The IDT, shared by all processors. Every gate is an interrupt gate.
+ * The breakpoint (3) and the overflow (4) gates have DPL 3, so a user
+ * program's INT3 and INTO raise #BP and #OF as such; with DPL 0 they
+ * would turn into a general protection fault naming the gate (error
+ * code vector*8+2), and the cause would be lost. Every other gate has
  * the kernel's privilege, so a user program raises none of them with
- * INT; NMI, the double fault and the machine check have IST stacks.
+ * INT n. NMI, the double fault and the machine check have IST stacks.
  */
 typedef struct {
 	UH	off_lo;
@@ -46,6 +50,7 @@ LOCAL T_IDTENT	knl_idt[256] __attribute__((aligned(16)));
 IMPORT const UD	knl_int_stubs[256];	/* vector.S */
 
 #define GATE_INT	0x8e		/* present, DPL 0, 64 bit interrupt gate */
+#define GATE_INT_U	0xee		/* present, DPL 3, 64 bit interrupt gate */
 
 EXPORT void knl_idt_load( void )
 {
@@ -68,7 +73,7 @@ LOCAL void idt_init( void )
 		e->off_lo = (UH)a;
 		e->sel = SEL_KCODE;
 		e->ist = ( v == 2 ) ? IST_NMI : ( v == 8 ) ? IST_DF : ( v == 18 ) ? IST_MC : 0;
-		e->type = GATE_INT;
+		e->type = ( v == 3 || v == 4 ) ? GATE_INT_U : GATE_INT;
 		e->off_mid = (UH)( a >> 16 );
 		e->off_hi = (UW)( a >> 32 );
 		e->reserved = 0;

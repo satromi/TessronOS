@@ -1,0 +1,49 @@
+# 管理情報 as a process (design 11.3, 18.15), for tools/ui_run.py: opened from
+# 実身操作 > 管理情報 of a link in the first window, then chosen again for the
+# same object with the first window in front: no second process starts, the
+# window that is open comes forward; 適用 with nothing changed writes
+# nothing that is refused and closes it.
+wait 1000
+click 80 87
+click 80 87 1
+wait 500
+move 100 227
+wait 150
+move 160 227
+wait 300
+move 200 227
+wait 150
+move 210 307
+wait 150
+click 210 307
+expect info: opened TADjsについての管理情報
+wait 800
+# the first window brought in front by its band, the link chosen again;
+# the menu opens with 編集 on the pointer's row this time
+click 300 14
+wait 300
+click 80 87
+click 80 87 1
+wait 500
+move 100 151
+wait 150
+move 160 151
+wait 300
+move 200 151
+wait 150
+move 210 231
+wait 150
+click 210 231
+expect info: brought forward
+wait 500
+nwin TADjsについての管理情報
+want ok 1
+focus d1 TADjsについての管理情報
+want ok d1: has the keys
+absent info: opened TADjsについての管理情報 2
+# 適用
+click 460 473
+expect info: applied
+expect info: closed
+absent !OACV!
+absent !EXCEPTION!

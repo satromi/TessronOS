@@ -45,6 +45,22 @@
  *	number before the bit, so a fence that ends between the look and the
  *	wait still wakes the waiter. Every waiter looks again after it
  *	wakes, so one waiter clearing the bit cannot make another miss it.
+ *
+ *	A waiter that is about to sleep on a job still in the queue (one
+ *	that has not started: it waits behind others) marks the job and has
+ *	the backend raise its clock until that job is over (T_GPUOPS boost).
+ *	The GPU's own measure of how busy it is takes tens of milliseconds
+ *	to answer, while the waiter, stalled, adds nothing to it. A job that
+ *	runs already is not marked: it is expected to end soon, and raising
+ *	the clock on every short wait would keep it high under a light load.
+ *	A look that does not sleep (TMO_POL) marks nothing.
+ *
+ *	The screen marks jobs the same way when a BO it was to show is still
+ *	being drawn a build later (knl_gpu_bo_boost): the frame is late, and
+ *	the queued jobs that draw it are hurried as a waiter's would be. The
+ *	window manager also tells each build (knl_gpu_interactive); the
+ *	backend may then answer the load more quickly while frames come
+ *	(T_GPUOPS interactive).
  */
 
 #include <sys/machine.h>
@@ -97,6 +113,7 @@ typedef struct qjob {
 	D		fence;
 	T_GPUAS		*as;		/* NULL: the kernel's space */
 	T_GPUJOB	job;
+	BOOL		boost;		/* waited for before it started: the backend told */
 	INT		nbo;
 	T_GPUBO		*bo[1];		/* nbo of them */
 } QJOB;
@@ -114,6 +131,8 @@ LOCAL ID		gpu_tsk;
 LOCAL ID		gpu_flg;
 LOCAL QJOB		*q_head, *q_tail;
 LOCAL BOOL		q_running;	/* the task has a job out of the queue */
+LOCAL D			fence_run;	/* that job's, while q_running */
+LOCAL UD		n_wait_run, n_wait_queued;	/* waits that slept, on a running job, on queued ones */
 LOCAL D			fence_next;	/* last fence handed out */
 LOCAL volatile D	fence_done;	/* last fence that is over */
 LOCAL D			failed[NFAILED];
@@ -121,6 +140,8 @@ LOCAL INT		failed_at;
 LOCAL volatile ER	end_result;	/* what the backend said of the running job */
 LOCAL UINT		bound_bos;	/* live BOs in the backend's MMU */
 LOCAL UINT		live_as;	/* address spaces of the backend's that are alive */
+
+EXPORT void		(*knl_gpu_end_hook)( void ) = NULL;
 
 /* ---------------------------------------------------------------- caches */
 
@@ -418,6 +439,34 @@ EXPORT ER knl_gpu_bo_unmap( T_GPUBO *bo, void *space )
 	return E_OK;
 }
 
+/*
+ * The kernel's view of a BO: the same attribute as a process's (BO_PTE),
+ * so that no page is seen through two kinds of mapping that disagree on
+ * the cache.
+ */
+EXPORT ER knl_gpu_bo_kmap( T_GPUBO *bo, void **p_va )
+{
+	UINT	flags = VMAP_NOCACHE;
+	void	*va;
+
+	if ( bo == NULL || p_va == NULL || bo->npages == 0 ) return E_PAR;
+#ifdef __x86_64__
+	if ( gpu_ops != NULL && gpu_ops->coherent ) flags = 0;
+#endif
+	va = knl_vmap_pages(bo->pa, bo->npages, flags);
+	if ( va == NULL ) return E_NOMEM;
+	knl_gpu_bo_get(bo);
+	*p_va = va;
+	return E_OK;
+}
+
+EXPORT void knl_gpu_bo_kunmap( T_GPUBO *bo, void *va )
+{
+	if ( bo == NULL || va == NULL ) return;
+	knl_vunmap_pa(va, bo->npages);
+	knl_gpu_bo_put(bo);
+}
+
 /* ---------------------------------------------------------------- fences */
 
 LOCAL BOOL fence_failed( D fence )
@@ -475,11 +524,81 @@ LOCAL BOOL fence_reached( void *arg )
 	return (BOOL)( fence_done >= *(D *)arg );
 }
 
+/* Whether a queued job uses 'bo'; under the lock */
+LOCAL BOOL uses( CONST QJOB *q, CONST T_GPUBO *bo )
+{
+	INT	i;
+
+	for ( i = 0; i < q->nbo; i++ ) {
+		if ( q->bo[i] == bo ) return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * About to sleep on the job of 'fence', or on every job that uses 'bo'
+ * (or, not 'wait', the screen still waiting for 'bo'): those still
+ * queued marked, and the backend told of the new ones; a wait counted
+ */
+LOCAL void boost_queued( D fence, CONST T_GPUBO *bo, BOOL wait )
+{
+	CONST T_GPUOPS	*ops;
+	void		*priv;
+	QJOB		*q;
+	UINT		imask;
+	INT		n = 0;
+	BOOL		queued = FALSE, running = FALSE;
+
+	ISpinLock(&gpu_lock, &imask);
+	ops = gpu_ops;
+	priv = gpu_priv;
+	if ( bo == NULL ) {
+		if ( fence > fence_done ) {
+			for ( q = q_head; q != NULL && q->fence != fence; q = q->next ) ;
+			if ( q != NULL ) {
+				queued = TRUE;
+				if ( !q->boost ) {
+					q->boost = TRUE;
+					n++;
+				}
+			} else {
+				running = q_running;
+			}
+		}
+	} else if ( bo->busy > 0 ) {
+		for ( q = q_head; q != NULL; q = q->next ) {
+			if ( !uses(q, bo) ) continue;
+			queued = TRUE;
+			if ( !q->boost ) {
+				q->boost = TRUE;
+				n++;
+			}
+		}
+		running = !queued;
+	}
+	if ( wait && queued ) n_wait_queued++;
+	if ( wait && running ) n_wait_run++;
+	ISpinUnlock(&gpu_lock, &imask);
+	/* the backend cannot leave while those jobs are queued (knl_gpu_unregister) */
+	if ( n > 0 && ops != NULL && ops->boost != NULL ) ops->boost(priv, n);
+}
+
+EXPORT void knl_gpu_wait_counts( UD *p_running, UD *p_queued )
+{
+	UINT	imask;
+
+	ISpinLock(&gpu_lock, &imask);
+	*p_running = n_wait_run;
+	*p_queued = n_wait_queued;
+	ISpinUnlock(&gpu_lock, &imask);
+}
+
 EXPORT ER knl_gpu_wait( D fence, TMO_U tmout )
 {
 	ER	er;
 
 	if ( fence <= 0 || fence > fence_next || gpu_flg <= 0 ) return E_PAR;
+	if ( tmout != TMO_POL ) boost_queued(fence, NULL, TRUE);
 	er = wait_until(fence_reached, &fence, tmout);
 	if ( er < E_OK ) return er;
 	return fence_failed(fence) ? E_IO : E_OK;
@@ -493,7 +612,34 @@ LOCAL BOOL bo_idle( void *arg )
 EXPORT ER knl_gpu_bo_wait( T_GPUBO *bo, TMO_U tmout )
 {
 	if ( gpu_flg <= 0 ) return ( bo->busy == 0 ) ? E_OK : E_SYS;
+	if ( tmout != TMO_POL ) boost_queued(0, bo, TRUE);
 	return wait_until(bo_idle, bo, tmout);
+}
+
+/*
+ * The screen missed a build for 'bo': as a wait on it would, without
+ * sleeping and without being counted as a wait. A job that runs already
+ * is expected to be over by the next build.
+ */
+EXPORT void knl_gpu_bo_boost( T_GPUBO *bo )
+{
+	if ( gpu_flg <= 0 || bo == NULL ) return;
+	boost_queued(0, bo, FALSE);
+}
+
+/* A frame of the screen built: told to the backend that keeps a pace for it */
+EXPORT void knl_gpu_interactive( void )
+{
+	CONST T_GPUOPS	*ops;
+	void		*priv;
+	UINT		imask;
+
+	ISpinLock(&gpu_lock, &imask);
+	ops = gpu_ops;
+	priv = gpu_priv;
+	ISpinUnlock(&gpu_lock, &imask);
+	/* only a test takes a backend out again (knl_gpu_unregister), and its backends keep no pace */
+	if ( ops != NULL && ops->interactive != NULL ) ops->interactive(priv);
 }
 
 /* ---------------------------------------------------------------- address spaces */
@@ -625,6 +771,7 @@ EXPORT D knl_gpu_submit_as( CONST T_GPUJOB *job, T_GPUBO *CONST *bo, INT nbo, T_
 	if ( q == NULL ) return E_NOMEM;
 	q->next = NULL;
 	q->job = *job;
+	q->boost = FALSE;
 	q->as = as;
 	q->nbo = nbo;
 	if ( as != NULL ) knl_gpu_as_get(as);
@@ -701,6 +848,7 @@ LOCAL void gpu_task( INT stacd, void *exinf )
 				q_head = q->next;
 				if ( q_head == NULL ) q_tail = NULL;
 				q_running = TRUE;
+				fence_run = q->fence;
 			}
 			ISpinUnlock(&gpu_lock, &imask);
 			if ( q == NULL ) break;
@@ -724,6 +872,9 @@ LOCAL void gpu_task( INT stacd, void *exinf )
 			for ( i = 0; i < q->nbo; i++ ) knl_gpu_bo_put(q->bo[i]);
 			knl_gpu_as_put(q->as);
 
+			/* a boosted job over: its part of the boost given back before anyone sees it over */
+			if ( q->boost && gpu_ops->boost != NULL ) gpu_ops->boost(gpu_priv, -1);
+
 			ISpinLock(&gpu_lock, &imask);
 			fence_done = q->fence;
 			q_running = FALSE;
@@ -731,6 +882,9 @@ LOCAL void gpu_task( INT stacd, void *exinf )
 
 			Kfree(q);
 			tk_set_flg(gpu_flg, FLG_DONE);
+			if ( knl_gpu_end_hook != NULL ) {
+				knl_gpu_end_hook();
+			}
 		}
 	}
 }
@@ -781,6 +935,7 @@ EXPORT ER knl_gpu_register( CONST T_GPUOPS *ops, void *priv )
 	gpu_priv = priv;
 	gpu_ops = ops;
 	ISpinUnlock(&gpu_lock, &imask);
+	knl_gpu_obj_told();		/* told after it is in: a waiter that looks again finds it */
 	return E_OK;
 }
 
@@ -796,6 +951,7 @@ EXPORT ER knl_gpu_unregister( void )
 	gpu_ops = NULL;
 	gpu_priv = NULL;
 	ISpinUnlock(&gpu_lock, &imask);
+	knl_gpu_obj_told();
 	return E_OK;
 }
 

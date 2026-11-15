@@ -1,6 +1,6 @@
 # MPEG Player playing 実時間制御TAD (design 11.12, 15.5.1), for tools/ui_run.py: a
 # sample whose applist names basic-player (MPEG Player's alias) opened, its scene
-# played by the desktop in the player's window, a press, moves and Space passed on to it,
+# played in the player's window by the player it links, a press, moves and Space passed on to it,
 # full screen and back, closed; the sample 10.5's playlist stepped with Ctrl+N;
 # and the programs 実行 offers for a link by the type of its object's record.
 # MPEG Player opens with its work area near (104, 108): the video area, 640 by

@@ -1,12 +1,12 @@
 # BeSFC (design 11.32), installed as a package (make PKGS=besfc.tpk), for tools/ui_run.py: a ROM
-# of the tests in a document, its link carried onto the window; the key that is button A
+# of the tests on a page of the desktop's, its link carried onto the window; the key that is button A
 # changes the colour (compare the pictures); then closed, and removed from バージョン.
 emurom
-xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
-xml <p><link id="01a0d8c4-5501-7f01-8b12-3c4d5e6f7b71_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c22"
-xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
-xml framedisp="true" namedisp="true" pictdisp="true"/></p>
-xml </document></tad>
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d8c4-5501-7f01-8b12-3c4d5e6f7b71_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c22"
+xml vobjleft="10" vobjtop="10" vobjright="160" vobjbottom="29" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#e1f2f9" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
 xmlopen ROMの文書
 wait 500
 win ROMの文書

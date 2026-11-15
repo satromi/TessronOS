@@ -6,7 +6,8 @@
 # screen US us" and "cabinet: input to screen US us" (from the press to the window drawn),
 # the time to open (waitwin; hosttime from pcab to "cabinet: opened ... up in US us") and what the process has mapped
 # as it closes ("cabinet: mapped KB KB").
-cabproc kernel
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 0
 xml <tad version="1.0" encoding="UTF-8"><figure>
 xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
@@ -373,45 +374,6 @@ xml </figure></tad>
 xmlbig
 apps big virtual-object-list
 # round 1
-mark
-open big
-waitwin 画用紙 600
-under open_kernel 1500
-sync 600
-wait 800
-click 167 153
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-click 167 178
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-click 167 203
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-click 167 228
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-click 167 253
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-key 08 01
-sync 600
-wait 500
 logmark
 hostmark
 pcab big
@@ -464,45 +426,6 @@ expectsince cabinet: mapped
 expectsince cabinet: closed
 wait 500
 # round 2
-mark
-open big
-waitwin 画用紙 600
-under open_kernel 1500
-sync 600
-wait 800
-click 167 153
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-click 167 178
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-click 167 203
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-click 167 228
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-click 167 253
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-key 08 01
-sync 600
-wait 500
 logmark
 hostmark
 pcab big
@@ -555,45 +478,6 @@ expectsince cabinet: mapped
 expectsince cabinet: closed
 wait 500
 # round 3
-mark
-open big
-waitwin 画用紙 600
-under open_kernel 1500
-sync 600
-wait 800
-click 167 153
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-click 167 178
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-click 167 203
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-click 167 228
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-click 167 253
-sync 600
-wait 300
-click 700 650
-sync 600
-wait 300
-key 08 01
-sync 600
-wait 500
 logmark
 hostmark
 pcab big

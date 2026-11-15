@@ -1442,12 +1442,12 @@ LOCAL void test_room( void )
 
 LOCAL INT window_of( CONST char *name, TS_UUID *out )
 {
-	TS_UUID	list[64];
+	TS_UUID	*list;
 	T_OBREF	r;
-	INT	cnt = 0, i, wid = -1, p;
+	INT	cnt, i, wid = -1, p;
 	ID	kw;
 
-	if ( ob_lst_obj(OB_T_WINDOW, 0, NULL, list, 64, &cnt) < E_OK ) return -1;
+	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return -1;
 	for ( i = 0; i < cnt; i++ ) {
 		if ( ob_ref_obj(&list[i], &r) < E_OK || r.sub != OB_S_WINDOW || !same(r.name, name) ) continue;
 		*out = list[i];
@@ -1465,6 +1465,7 @@ LOCAL INT window_of( CONST char *name, TS_UUID *out )
 			ob_cls_obj(kw);
 		}
 	}
+	Kfree(list);
 	return wid;
 }
 

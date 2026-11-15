@@ -682,7 +682,8 @@ EXTRA_RECS += $(CAL_REC)
 
 # スライド: 文章の仮身が指す実身を1枚ずつ画面いっぱいに映すアプリ。文章と図形の組版と描画は
 # カーネルと同じソースを TV_USER で結び(include/ts/tvport.h)、描画と書体はカーネルの
-# SVC で行う。実時間制御TADはデスクトップの再生部に頼む(lib/librtad は数の読み取りだけを結ぶ)。
+# SVC で行う。実時間制御TADは再生部 lib/librtplay を結んで自分の窓で再生する(実行系は lib/librtad、
+# newlib だけのプログラムなのでメモリの錠 rtp_mlock.c も結ぶ)。
 # パネルは lib/libui。newlib を使う。
 # プログラム実身のレコード1(設計書 11.11)
 SL_DIR       := $(TOP)/application/slide
@@ -694,7 +695,8 @@ TV_LIB_SRCS  := $(TOP)/outer_kernel/tad/tad.c $(TOP)/outer_kernel/tad/tad_link.c
 		$(TOP)/outer_kernel/img/img_scale.c $(TOP)/peripheral_kernel/sysman/uuidtext.c \
 		$(TOP)/lib/libtv/tv_fn.c $(TOP)/lib/libtv/tv_src.c
 SL_SRCS      := $(SL_DIR)/sl_deck.c $(SL_DIR)/sl_main.c $(TV_LIB_SRCS) \
-		$(TOP)/lib/librtad/rt_num.c \
+		$(TOP)/lib/librtad/rt_num.c $(TOP)/lib/librtad/rt_prog.c $(TOP)/lib/librtad/rt_run.c \
+		$(TOP)/lib/librtplay/rtplay.c $(TOP)/lib/librtplay/rtp_mlock.c \
 		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c
 SL_ELF       := $(UOBJ)/slide.elf
 SL_REC       := $(UOBJ)/rec/01a0d8c4-52d5-7c42-8d53-6e7f8091ab23_1.bin
@@ -718,7 +720,7 @@ EXTRA_RECS += $(SL_REC)
 FG_DIR       := $(TOP)/application/fig
 FG_SRCS      := $(FG_DIR)/fg_main.c $(FG_DIR)/fg_edit.c $(FG_DIR)/fg_link.c $(FG_DIR)/fg_text.c $(FG_DIR)/fg_tool.c $(FG_DIR)/figedit.c $(FG_DIR)/figtool.c $(FG_DIR)/figcanvas.c $(FG_DIR)/figpat.c $(FG_DIR)/fg_pat.c \
 		$(TOP)/outer_kernel/img/png.c $(TOP)/outer_kernel/img/deflate.c $(TOP)/outer_kernel/img/inflate.c \
-		$(TOP)/application/doc/docedit.c $(TOP)/application/doc/docfind.c $(TV_LIB_SRCS) $(TOP)/lib/libtv/tv_app.c 		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c
+		$(TOP)/application/doc/docedit.c $(TOP)/application/doc/docfind.c $(TV_LIB_SRCS) $(TOP)/lib/libtv/tv_app.c $(TOP)/lib/libtv/tv_list.c 		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c
 FG_ELF       := $(UOBJ)/figedit.elf
 FG_REC       := $(UOBJ)/rec/01a0d6d1-08d2-7344-a6e2-6cede408d684_1.bin
 
@@ -777,16 +779,56 @@ $(CB_REC): $(CB_ELF)
 
 EXTRA_RECS += $(CB_REC)
 
-# 原紙集め: すべてのアプリの原紙を原紙箱と同じ形の一覧で見せる小物。一覧は図形として作り、
-# 表示は TV_USER で結ぶ。newlib を使う。プログラム実身のレコード1(設計書 11.2.3)
+# 原紙箱: 原紙を並べた実身を開くアプリ。仮身一覧と同じく基本図形編集のソースに
+# application/basebox/bb_main.c(原紙箱であることを示す)を結んだもので、原紙は動かさず、運び出すと
+# 新しい実身になる。表示は TV_USER で結ぶ。newlib を使う。プログラム実身のレコード1(設計書 11.2.2)
+BB_DIR       := $(TOP)/application/basebox
+BB_SRCS      := $(BB_DIR)/bb_main.c $(FG_SRCS)
+BB_ELF       := $(UOBJ)/basebox.elf
+BB_REC       := $(UOBJ)/rec/01a0d6d1-08d4-7809-bc38-c7d99aa28f29_1.bin
+
+$(BB_ELF): $(APP_HDRS) $(MS_LIBTS) $(BB_SRCS) $(FG_DIR)/fg.h $(TOP)/include/ts/figedit.h $(TOP)/include/ts/figtool.h 	    $(TOP)/include/ts/docedit.h $(TOP)/include/ts/tadlnk.h $(TOP)/include/ts/tvapp.h 	    $(TOP)/include/ts/tadview.h $(TOP)/include/ts/dtreq.h 	    $(TOP)/outer_kernel/tad/tad_local.h $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(BB_SRCS) -lc -lgcc
+
+$(BB_REC): $(BB_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(BB_REC)
+
+# 小物箱: プログラム箱の小物をデスクトップの順に並べるアプリ。仮身一覧と同じく基本図形編集のソースに
+# application/accbox/ab_main.c(小物箱であることと一覧の作り方を示す)を結んだもので、一覧はデスクトップに
+# 問い合わせてプロセスの中で作る。表示は TV_USER で結ぶ。newlib を使う。プログラム実身のレコード1(設計書 11.2.1)
+AB_DIR       := $(TOP)/application/accbox
+AB_SRCS      := $(AB_DIR)/ab_main.c $(FG_SRCS)
+AB_ELF       := $(UOBJ)/accbox.elf
+AB_REC       := $(UOBJ)/rec/01a0d6d1-08d5-7125-a6e5-6790429ce3a8_1.bin
+
+$(AB_ELF): $(APP_HDRS) $(MS_LIBTS) $(AB_SRCS) $(FG_DIR)/fg.h $(TOP)/include/ts/figedit.h $(TOP)/include/ts/figtool.h 	    $(TOP)/include/ts/docedit.h $(TOP)/include/ts/tadlnk.h $(TOP)/include/ts/tvapp.h 	    $(TOP)/include/ts/tadview.h $(TOP)/include/ts/dtreq.h 	    $(TOP)/outer_kernel/tad/tad_local.h $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(AB_SRCS) -lc -lgcc
+
+$(AB_REC): $(AB_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(AB_REC)
+
+# 原紙集め: すべてのアプリの原紙を原紙箱と同じ形の一覧で見せる小物。仮身一覧と同じく基本図形編集の
+# ソースに application/basecol/bc_main.c(原紙集めであることと一覧の作り方を示す)を結んだもので、
+# 一覧は図形としてプロセスの中で作る。表示は TV_USER で結ぶ。newlib を使う。
+# プログラム実身のレコード1(設計書 11.2.3)
 BC_DIR       := $(TOP)/application/basecol
-BC_SRCS      := $(BC_DIR)/bc_main.c \
-		$(TOP)/outer_kernel/img/png.c $(TOP)/outer_kernel/img/deflate.c $(TOP)/outer_kernel/img/inflate.c \
-		$(TV_LIB_SRCS) $(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libjson/json.c
+BC_SRCS      := $(BC_DIR)/bc_main.c $(FG_SRCS)
 BC_ELF      := $(UOBJ)/basecol.elf
 BC_REC       := $(UOBJ)/rec/01a0d8c4-5b92-7c53-8d64-9fab0c1d5b92_1.bin
 
-$(BC_ELF): $(APP_HDRS) $(MS_LIBTS) $(BC_SRCS) $(TOP)/include/ts/tadview.h $(TOP)/include/ts/dtreq.h \
+$(BC_ELF): $(APP_HDRS) $(MS_LIBTS) $(BC_SRCS) $(FG_DIR)/fg.h $(TOP)/include/ts/figedit.h $(TOP)/include/ts/figtool.h \
+	    $(TOP)/include/ts/docedit.h $(TOP)/include/ts/tadlnk.h $(TOP)/include/ts/tvapp.h \
+	    $(TOP)/include/ts/tadview.h $(TOP)/include/ts/dtreq.h \
 	    $(TOP)/outer_kernel/tad/tad_local.h $(USER_LD) $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
@@ -797,6 +839,195 @@ $(BC_REC): $(BC_ELF)
 	@cp $< $@
 
 EXTRA_RECS += $(BC_REC)
+
+# 基本印刷: 印刷設定・印刷詳細設定・画面表示のパネルを受け持つユーティリティ。デスクトップが印刷の
+# 仕事ごとに起こし、ページを並べる・シートを描く・ファイルを書くことはデスクトップに頼む(DT_RQ_PRJOB)。
+# 窓の部品は lib/libui。newlib を使う。プログラム実身のレコード1(設計書 11.22)
+BP_DIR       := $(TOP)/application/bprint
+BP_SRCS      := $(BP_DIR)/bp_main.c $(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c
+BP_ELF       := $(UOBJ)/bprint.elf
+BP_REC       := $(UOBJ)/rec/01a0d8c4-53a0-7b11-8c22-4d5e6f7a8b90_1.bin
+
+$(BP_ELF): $(APP_HDRS) $(MS_LIBTS) $(BP_SRCS) $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(BP_SRCS) -lc -lgcc
+
+$(BP_REC): $(BP_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(BP_REC)
+
+# 画面印刷: 画面印刷／画面保存と保存先のパネルを受け持つ小物。画面を読むこと、範囲のドラッグ、
+# PrintScreen の待ち、取り込んだものの保存・トレー・印刷はデスクトップに頼む(DT_RQ_SCRPRINT)。
+# 窓の部品は lib/libui。newlib を使う。プログラム実身のレコード1(設計書 11.24)
+SP_DIR       := $(TOP)/application/scrprint
+SP_SRCS      := $(SP_DIR)/sp_main.c $(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c
+SP_ELF       := $(UOBJ)/scrprint.elf
+SP_REC       := $(UOBJ)/rec/01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0_1.bin
+
+$(SP_ELF): $(APP_HDRS) $(MS_LIBTS) $(SP_SRCS) $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(SP_SRCS) -lc -lgcc
+
+$(SP_REC): $(SP_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(SP_REC)
+
+# システムの道具: 屑実身操作、実身/仮身検索、仮身ネットワーク、ウインドウ一覧。それぞれ別のアプリで、
+# 仮身一覧と同じく基本図形編集のソースに、道具どうしで共通の application/systool/st_list.c と、
+# 道具ごとの一覧の作り方(tr_main.c、sr_main.c、nw_main.c、wl_main.c)を結んだもの。一覧は図形として
+# プロセスの中で作り、デスクトップにしかできないことは頼む。表示は TV_USER で結ぶ。newlib を使う。
+# プログラム実身のレコード1(設計書 11.2.4)
+ST_DIR       := $(TOP)/application/systool
+ST_SRCS      := $(ST_DIR)/st_list.c $(FG_SRCS)
+ST_DEPS      := $(APP_HDRS) $(MS_LIBTS) $(ST_SRCS) $(ST_DIR)/st.h $(FG_DIR)/fg.h $(TOP)/include/ts/figedit.h \
+		$(TOP)/include/ts/figtool.h $(TOP)/include/ts/docedit.h $(TOP)/include/ts/tadlnk.h \
+		$(TOP)/include/ts/tvapp.h $(TOP)/include/ts/tadview.h $(TOP)/include/ts/dtreq.h \
+		$(TOP)/outer_kernel/tad/tad_local.h $(USER_LD) $(TOP)/include/ts/svc.h
+TR_ELF       := $(UOBJ)/trashobj.elf
+TR_REC       := $(UOBJ)/rec/01a0d6d1-08d6-7896-adb0-7469517f6b4b_1.bin
+SR_ELF       := $(UOBJ)/objsearch.elf
+SR_REC       := $(UOBJ)/rec/01a0d6d1-08d7-75a5-aac9-341907329044_1.bin
+NW_ELF       := $(UOBJ)/vnetwork.elf
+NW_REC       := $(UOBJ)/rec/01a0d6d1-08d8-7fad-953e-8efd87b6fdb2_1.bin
+WL_ELF       := $(UOBJ)/winlist.elf
+WL_REC       := $(UOBJ)/rec/01a0d8c4-52e2-7c63-9d74-e8f9a0b1c2d3_1.bin
+
+$(TR_ELF): $(ST_DEPS) $(ST_DIR)/tr_main.c
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(ST_DIR)/tr_main.c $(ST_SRCS) -lc -lgcc
+
+$(SR_ELF): $(ST_DEPS) $(ST_DIR)/sr_main.c
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(ST_DIR)/sr_main.c $(ST_SRCS) -lc -lgcc
+
+$(NW_ELF): $(ST_DEPS) $(ST_DIR)/nw_main.c
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(ST_DIR)/nw_main.c $(ST_SRCS) -lc -lgcc
+
+$(WL_ELF): $(ST_DEPS) $(ST_DIR)/wl_main.c
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(ST_DIR)/wl_main.c $(ST_SRCS) -lc -lgcc
+
+$(TR_REC): $(TR_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+$(SR_REC): $(SR_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+$(NW_REC): $(NW_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+$(WL_REC): $(WL_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(TR_REC) $(SR_REC) $(NW_REC) $(WL_REC)
+
+# トレー: トレーの全部の段を見せる小物。パネルはデータボックスの定義(縦に並ぶ段のタグ)を lib/libui で開き、
+# 紙の上の段の中身はプロセスが描く。文章と図形の組版と描画はカーネルと同じソースを TV_USER で結ぶ。
+# newlib を使う。プログラム実身のレコード1(設計書 11.27)
+TRV_DIR      := $(TOP)/application/trayview
+TRV_SRCS     := $(TRV_DIR)/trv_main.c $(TV_LIB_SRCS) 		$(TOP)/outer_kernel/img/png.c $(TOP)/outer_kernel/img/deflate.c $(TOP)/outer_kernel/img/inflate.c 		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libjson/json.c
+TRV_ELF      := $(UOBJ)/trayview.elf
+TRV_REC      := $(UOBJ)/rec/01a0d8c4-5430-7a31-8b42-5c6d7e8f5430_1.bin
+
+$(TRV_ELF): $(APP_HDRS) $(MS_LIBTS) $(TRV_SRCS) $(TOP)/include/ts/ui.h $(TOP)/include/ts/tray.h 	    $(TOP)/include/ts/tadview.h $(TOP)/outer_kernel/tad/tad_local.h $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(TRV_SRCS) -lc -lgcc
+
+$(TRV_REC): $(TRV_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(TRV_REC)
+
+# 管理情報: 実身の管理情報を見せて設定するプログラム。デスクトップが仮身の〈管理情報〉から実身ごとに
+# プロセスを起こす。パネルはデータボックスの定義を lib/libui で開き、保護は自分で ob_set_prt する。
+# 機能付箋と起動固定はデスクトップに頼む。newlib を使う。プログラム実身のレコード1(設計書 18.15)
+RI_DIR       := $(TOP)/application/realinfo
+RI_SRCS      := $(RI_DIR)/ri_main.c $(TOP)/outer_kernel/tad/tad.c $(TOP)/outer_kernel/tad/tad_link.c 		$(TOP)/peripheral_kernel/sysman/uuidtext.c $(TOP)/lib/libtv/tv_fn.c 		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libjson/json.c
+RI_ELF       := $(UOBJ)/realinfo.elf
+RI_REC       := $(UOBJ)/rec/01a0d8c4-5432-7c53-8d64-7e8f90a15432_1.bin
+
+$(RI_ELF): $(APP_HDRS) $(MS_LIBTS) $(RI_SRCS) $(TOP)/include/ts/ui.h $(TOP)/include/ts/dtreq.h 	    $(TOP)/outer_kernel/tad/tad_local.h $(USER_LD) $(TOP)/include/ts/svc.h
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -DTV_USER -o $@ $(MS_LIBTS) $(RI_SRCS) -lc -lgcc
+
+$(RI_REC): $(RI_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(RI_REC)
+
+# ディスク操作: デスクトップのメニュー「ディスク操作」の項目(接続、切り離し、状態表示、区画作成、拡張)を
+# 行うプログラム。ディスク修復: TSFS のボリュームを検査し修復する小物。どちらもパネルはデータボックスの定義を
+# lib/libui で開き、ディスクとボリュームのことはデスクトップに頼み(DT_RQ_DISK)、検査はカーネルの
+# ob_chk_vol で行う。newlib を使う。プログラム実身のレコード1(設計書 11.25、11.26)
+DOP_SRCS     := $(TOP)/application/diskop/dop_main.c $(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c \
+		$(TOP)/lib/libjson/json.c
+DOP_ELF      := $(UOBJ)/diskop.elf
+DOP_REC      := $(UOBJ)/rec/01a0d8c4-53e8-7d61-8e71-4b5c6d7e53e8_1.bin
+DF_SRCS      := $(TOP)/application/diskfix/df_main.c $(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c \
+		$(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c $(TOP)/peripheral_kernel/sysman/uuidtext.c
+DF_ELF       := $(UOBJ)/diskfix.elf
+DF_REC       := $(UOBJ)/rec/01a0d8c4-53e0-7a31-8c42-5d6e7f8053e0_1.bin
+DISK_DEPS    := $(APP_HDRS) $(MS_LIBTS) $(TOP)/include/ts/ui.h $(TOP)/include/ts/dtreq.h \
+		$(TOP)/include/ts/tsfsck.h $(TOP)/include/ts/uiprn.h $(USER_LD) $(TOP)/include/ts/svc.h
+
+$(DOP_ELF): $(DISK_DEPS) $(DOP_SRCS)
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(DOP_SRCS) -lc -lgcc
+
+$(DF_ELF): $(DISK_DEPS) $(DF_SRCS)
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(DF_SRCS) -lc -lgcc
+
+$(DOP_REC): $(DOP_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+$(DF_REC): $(DF_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(DOP_REC) $(DF_REC)
+
+# システム登録: PC の内蔵のディスクにシステムを写す小物(x64 のほかでは使えないと言って終わる)。
+# パネルはデータボックスの定義を lib/libui で開き、ディスクを調べて写すのはカーネル
+# (application/sysinst/si_core.c)で、デスクトップに頼む(DT_RQ_SYSINST)。newlib を使う。
+# プログラム実身のレコード1(設計書 11.32)
+SI_SRCS      := $(TOP)/application/sysinst/si_main.c $(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c \
+		$(TOP)/lib/libjson/json.c
+SI_ELF       := $(UOBJ)/sysinst.elf
+SI_REC       := $(UOBJ)/rec/01a0d8c4-54c0-7a11-8c22-4d5e6f7054c0_1.bin
+
+$(SI_ELF): $(DISK_DEPS) $(SI_SRCS)
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(SI_SRCS) -lc -lgcc
+
+$(SI_REC): $(SI_ELF)
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+EXTRA_RECS += $(SI_REC)
 
 # かな入力練習: 問題文を打ち、次に打つキーをキーボードの図に示すアプリ。キーボードとかなの
 # 配列の表は lib/libkbmap、判定と成績は application/kanatype/kp_eng.c(どちらもカーネルの試験も
@@ -1039,7 +1270,7 @@ $(CHARDIC_REC): $(TOP)/tools/gen_chardic.py $(wildcard $(CHARDIC_SRC)/*.zip $(CH
 EXTRA_RECS += $(CHARDIC_REC)
 
 # 実時間メディア: 実時間制御TADの音(音声ファイル、音符、MIDI、PCM)を鳴らすプロセス。デスクトップの
-# 再生部(application/desktop/dtrt.c)が起動する。newlib と libm、MP3 は minimp3。プログラム実身の
+# 再生部(lib/librtplay、再生するアプリに結ぶ)が子のプロセスとして起動する。newlib と libm、MP3 は minimp3。プログラム実身の
 # レコード1(設計書 15.6)
 RTM_DIR      := $(TOP)/application/rtmedia
 RTM_SRCS     := $(RTM_DIR)/rtm_main.c $(RTM_DIR)/rtm_mix.c $(RTM_DIR)/rtm_synth.c $(RTM_DIR)/rtm_dec.c \
@@ -1214,7 +1445,7 @@ TSFS_TOOLS  := $(TOP)/tools/mktsfs $(wildcard $(TOP)/tools/tsfs_py/*.py)
 # 版(R1.000 の形: R、桁数の決まらない整数、点、3桁)。プログラムの版はプログラム実身の
 # メタデータ tessronos.program.version に書く(etc/def)。TS_VERSION はシステムの版で、
 # システムの実身の OB_SYS_INFO に VERSION として出る
-TS_VERSION   ?= R1.300
+TS_VERSION   ?= R1.400
 VER_STAMP    := obj/version.stamp
 $(shell mkdir -p obj; [ -f $(VER_STAMP) ] && [ "$$(cat $(VER_STAMP))" = "$(TS_VERSION)" ] || echo "$(TS_VERSION)" > $(VER_STAMP))
 $(OBJDIR)/peripheral_kernel/obj/obsys.o: $(VER_STAMP)
@@ -1267,6 +1498,7 @@ $(SYS_VOL): $(TSFS_TOOLS) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(
 	@python3 $(TOP)/tools/mktsfs -q -L "TessronOS system" --size $(SYS_VOL_SIZE) \
 	  $(addprefix --exclude ,$(SYS_VOL_EXCLUDE)) \
 	  $(PKG_OVER) $(CMD_OVER) $(WIFI_OVER) --from $(TOP)/etc/def --from $(TOP)/etc/xtad --from $(UOBJ)/rec --from $(UOBJ)/rec/sys \
+	  --from $(SYS_MAN_DIR) \
 	  --hold $(TOP)/etc/def --hold $(TOP)/etc/xtad $(PKG_HOLD) $(WPAP_HOLD) \
 	  --sysbox 01a0d8c4-5211-7c52-9e0a-3b61d27f4c85 $@
 
@@ -1541,19 +1773,29 @@ SYSUP_BOOT = --boot init.elf=$(USER_ELF)
 endif
 SYSUP_TPK := $(OBJDIR)/tessronos-$(SYSUP_MACHINE)-$(TS_VERSION).tpk
 
-$(SYSUP_TPK): $(TOP)/tools/mktpk.py $(TSFS_TOOLS) $(SYSUP_BOOT_DEPS) $(USER_ELF) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) \
+# システムの実身の集め方: .tpk と、システムのボリュームが持つ一覧(システムの箱のレコード1)で同じにする
+SYS_SET_DEPS := $(TOP)/tools/mktpk.py $(TSFS_TOOLS) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) \
 	      $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(DICT_REC) $(EXTRA_RECS) $(SYS_RECS) $(KTEST_XTAD) $(KTEST_DEF) \
 	      $(CMD_V8_REC) $(CMD_DONE) $(WIFI_DONE) $(WPAP_DONE) $(VER_STAMP)
+SYS_SET_ARGS = --system --machine $(SYSUP_MACHINE) --arch $(ARCH) --version $(TS_VERSION) \
+	  $(CMD_OVER) $(WIFI_OVER) --from $(TOP)/etc/def --from $(UOBJ)/rec --from $(UOBJ)/rec/sys --user $(TOP)/etc/xtad \
+	  $(addprefix --exclude ,$(SYS_VOL_EXCLUDE)) --keep 01a0d8c4-5481-7b92-9db3-0abc1d2e5481
+
+$(SYSUP_TPK): $(SYS_SET_DEPS) $(SYSUP_BOOT_DEPS) $(USER_ELF)
 	@rm -rf $(SYSUP_STAGE) && mkdir -p $(SYSUP_STAGE)
 	@cp $(TOP)/etc/boot/config.txt $(SYSUP_STAGE)/config.txt
 	@if [ "$(RP1_CONSOLE)" = 1 ] || [ "$(RP1_UART)" = 1 ]; then echo 'enable_rp1_uart=1' >> $(SYSUP_STAGE)/config.txt; fi
 	@printf '%s\n' "$(X64_CMDLINE)" > $(SYSUP_STAGE)/cmdline.txt
 	@echo 'TPK $@'
-	@python3 $(TOP)/tools/mktpk.py --system --machine $(SYSUP_MACHINE) --arch $(ARCH) --version $(TS_VERSION) \
-	  $(CMD_OVER) $(WIFI_OVER) --from $(TOP)/etc/def --from $(UOBJ)/rec --from $(UOBJ)/rec/sys --user $(TOP)/etc/xtad \
-	  $(addprefix --exclude ,$(SYS_VOL_EXCLUDE)) --keep 01a0d8c4-5481-7b92-9db3-0abc1d2e5481 \
-	  $(SYSUP_BOOT) -o $@
+	@python3 $(TOP)/tools/mktpk.py $(SYS_SET_ARGS) $(SYSUP_BOOT) -o $@
 	@rm -rf $(SYSUP_STAGE)
+
+# システムの実身の一覧(設計書 11.8.1): システムのボリュームの「システム」のレコード1。システム登録の上書きが読む
+SYS_MAN_DIR := $(OBJDIR)/sysman
+SYS_MAN     := $(SYS_MAN_DIR)/01a0d8c4-5211-7c52-9e0a-3b61d27f4c85_1.bin
+$(SYS_MAN): $(SYS_SET_DEPS)
+	@python3 $(TOP)/tools/mktpk.py $(SYS_SET_ARGS) --manifest $(SYS_MAN_DIR) >/dev/null
+$(SYS_VOL): $(SYS_MAN)
 
 sysup: $(SYSUP_TPK)
 

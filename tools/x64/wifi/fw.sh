@@ -43,6 +43,10 @@
 #   LICENSES/LICENSE.QualcommAtheros_ath10k. Each is the same file in hw3.0 for hw3.0 and hw3.2;
 # - LICENCE.iwlwifi_firmware: the same text at both tags, and in both packages (iwm-license,
 #   iwx-license).
+# - the display's: Intel's DMC program for Kaby Lake and Amber Lake (i915/kbl_dmc_ver1_04.bin, DMC
+#   1.04), which the display engine runs to enter and leave its DC states, and LICENSE.i915 (its
+#   redistribution in binary form without modification, with the notice and the disclaimer), at
+#   20251021 (the same bytes at 20261019, where the licence is in LICENSES/).
 #
 # The same bytes were had from git.kernel.org and from the project's mirror on gitlab.com when
 # the sums were written; FW_URL may name another place with the same tree (FW_URL/<dir><file>).
@@ -99,7 +103,9 @@ LICENCE.iwlwifi_firmware 16d5040c7cf851fc693b7542e20870935b99802533ea1bfd231c377
 firmware-6.bin 04d3bad5efa3f9fbe3ba53fd3e25fa9b0585ed227eea8111303b4e08861f979d 706360 20261019 ath10k/QCA6174/hw3.0/
 board-2.bin 66e83dde1c9af535df1fcd17c72971a96a263357300e921b358d35a353227d60 740076 20261019 ath10k/QCA6174/hw3.0/
 notice_ath10k_firmware-6.txt 8ce5c6ea0542bf4aac31fc3ae16a39792ad22d0eae4543063fac56fb3380f021 53425 20261019 ath10k/QCA6174/hw3.0/
-LICENSE.QualcommAtheros_ath10k 337a55102138d7baa143ee4a4c6c91693e0113fece35d380b2a12109e8c23b3f 2713 20261019 LICENSES/"
+LICENSE.QualcommAtheros_ath10k 337a55102138d7baa143ee4a4c6c91693e0113fece35d380b2a12109e8c23b3f 2713 20261019 LICENSES/
+kbl_dmc_ver1_04.bin 2cde41c3e5ad181423bcc3e98ff9c49f743c88f18646af4d0b3c3a9664b831a1 8840 20251021 i915/
+LICENSE.i915 8542aeabf2761935122d693561e16766ce1bcc2b0d003204f9040b7d6d929f2e 2080 20251021 -"
 
 ok() {
 	[ -f "$1" ] && [ "$(stat -c %s "$1")" = "$3" ] && echo "$2  $1" | sha256sum -c --status

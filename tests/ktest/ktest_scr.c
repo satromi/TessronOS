@@ -541,8 +541,9 @@ LOCAL void test_tray( void )
 }
 
 /*
- * Pasted into a text: the PNG written beside the text's record, and a
- * figure standing in the text holding the image under that name
+ * Pasted into a text: the PNG written beside the text's record, under
+ * the name the figure the set holds gives the image (dt_tray_pictures,
+ * what the desktop does for 基本文章編集 pasting the set)
  */
 LOCAL void test_tray_doc( void )
 {
@@ -551,8 +552,7 @@ LOCAL void test_tray_doc( void )
 	UW		*px;
 	CONST UW	*back = NULL;
 	TS_UUID		du;
-	DTWIN		*d = NULL;
-	T_TAD		*doc = NULL;
+	T_TAD		*doc = NULL, *frag = NULL;
 	T_TADNODE	*nd, *img = NULL, *fig = NULL;
 	CONST UB	*href = NULL;
 	UB		want[TS_UUID_STRLEN + 16];
@@ -571,19 +571,12 @@ LOCAL void test_tray_doc( void )
 	KT_ASSERT_ER(om_cre_obj(NULL, (CONST UB *)"画面印刷の貼り込み先の文章", OM_BODY_DOC, &du), E_OK);
 	(void)ts_uuid_to_str(&du, us, sizeof(us));
 	KT_ASSERT_ER(tad_parse((CONST UB *)doc0, s_len(doc0), NULL, &doc), E_OK);
-	d = (DTWIN *)Kmalloc(sizeof(DTWIN));
-	KT_ASSERT(d != NULL && doc != NULL);
-	if ( d == NULL || doc == NULL ) goto done;
-	knl_memset(d, 0, sizeof(*d));
-	d->used = TRUE;
-	d->id = du;
-	d->rec = doc;
-	d->kind = TV_KIND_DOC;
-	d->paper = TV_PAPER_LOOK;
-	ed_model(d);
-	KT_ASSERT(dd_command(d, DM_PASTE));
+	frag = dt_tray_frag();
+	KT_ASSERT(doc != NULL && frag != NULL);
+	if ( doc == NULL || frag == NULL ) goto done;
+	KT_ASSERT(dt_tray_pictures(&du, doc, frag) > 0);
 
-	for ( nd = tad_walk(doc, NULL); nd != NULL; nd = tad_walk(doc, nd) ) {
+	for ( nd = tad_walk(frag, NULL); nd != NULL; nd = tad_walk(frag, nd) ) {
 		if ( nd->kind != TAD_ND_ELEM || nd->name == NULL ) continue;
 		if ( s_len((CONST char *)nd->name) == 6 && find(nd->name, 6, "figure") == 0 ) fig = nd;
 		if ( s_len((CONST char *)nd->name) == 5 && find(nd->name, 5, "image") == 0 ) img = nd;
@@ -593,7 +586,7 @@ LOCAL void test_tray_doc( void )
 		T_TADNODE	*p;
 
 		for ( p = img->parent; p != NULL && p != fig; p = p->parent ) ;
-		KT_ASSERT(p == fig);			/* the image in the figure in the text */
+		KT_ASSERT(p == fig);			/* the image in the figure of the set */
 		href = tad_attr(img, "href");
 	}
 	k = 0;
@@ -615,10 +608,7 @@ LOCAL void test_tray_doc( void )
 		om_store_picture_done(back);
 	}
 done:
-	if ( d != NULL ) {
-		if ( d->doc != NULL ) tv_doc_free(d->doc);
-		Kfree(d);
-	}
+	if ( frag != NULL ) tad_free(frag);
 	if ( doc != NULL ) tad_free(doc);
 	(void)tr_del_dat(TR_HAND);
 	(void)ob_del_obj(&du);

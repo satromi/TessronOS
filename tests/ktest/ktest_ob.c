@@ -1219,21 +1219,19 @@ LOCAL void test_notice( void )
 /* The first window object of a subtype, other than 'not' */
 LOCAL BOOL find_window( UINT sub, CONST TS_UUID *not, TS_UUID *out )
 {
-	TS_UUID	*list = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * 256);
+	TS_UUID	*list;
 	T_OBREF	r;
-	INT	cnt = 0, i;
+	INT	cnt, i;
 	BOOL	found = FALSE;
 
-	if ( list == NULL ) {
+	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) {
 		return FALSE;
 	}
-	if ( ob_lst_obj(OB_T_WINDOW, 0, NULL, list, 256, &cnt) >= E_OK ) {
-		for ( i = 0; i < cnt && !found; i++ ) {
-			if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == sub
-			  && ( not == NULL || ts_uuid_cmp(&list[i], not) != 0 ) ) {
-				*out = list[i];
-				found = TRUE;
-			}
+	for ( i = 0; i < cnt && !found; i++ ) {
+		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == sub
+		  && ( not == NULL || ts_uuid_cmp(&list[i], not) != 0 ) ) {
+			*out = list[i];
+			found = TRUE;
 		}
 	}
 	Kfree(list);
@@ -2353,7 +2351,9 @@ LOCAL void test_shared( void )
 	KT_ASSERT_ER(ob_map_rec(km, 0, k2, &m), E_OK);
 	KT_ASSERT_EQ((UBINT)m.addr, va);
 	KT_ASSERT_EQ(knl_prc_lookup(pid2, va), pa);
-	KT_ASSERT_EQ(knl_prc_lookup(pid2, va + 4096), pa + 4096);
+	/* each page wherever the record has it: the second is the first process's second */
+	KT_ASSERT(knl_prc_lookup(pid1, va + 4096) != ~(UD)0);
+	KT_ASSERT_EQ(knl_prc_lookup(pid2, va + 4096), knl_prc_lookup(pid1, va + 4096));
 
 	/* written through the object: what the processes see changes */
 	KT_ASSERT_ER(ob_wri_rec(km, 0, 0, "again", 5, &asz), E_OK);
@@ -2763,7 +2763,7 @@ LOCAL void test_plugin( void )
 	CONST char	*bj = "{\"name\":\"試験の原紙\",\"refCount\":1,\"recordCount\":1}";
 	CONST char	*bx = "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>base</p></document></tad>";
 	CONST char	*fj =
-		"{\"id\":\"trash-real-objects\",\"name\":\"屑実身操作\",\"type\":\"base\"}";
+		"{\"id\":\"force-quit\",\"name\":\"強制終了\",\"type\":\"base\"}";
 	CONST char	*gj =
 		"{\"id\":\"basic-figure-editor\",\"name\":\"基本図形編集\",\"type\":\"base\"}";
 	CONST DTPROG	*pp;
@@ -2836,10 +2836,17 @@ LOCAL void test_plugin( void )
 	KT_ASSERT(ob_ref_obj(&prog, &r) < E_OK);			/* the one it replaced, gone */
 	KT_ASSERT(ob_ref_obj(&base, &r) < E_OK);			/* and its template */
 
-	/* one the desktop carries itself is not replaced; an object that is no plugin is refused */
+	/*
+	 * one the desktop carries itself (強制終了, the one left builtin) is
+	 * not replaced; an object that is no plugin is refused
+	 */
 	KT_ASSERT_ER(dt_pkg_install(&fdir, TRUE, 0, NULL, &prog, &how), E_PAR);
-	pp = dt_prog_find((CONST UB *)"trash-real-objects");
+	pp = dt_prog_find((CONST UB *)"force-quit");
 	KT_ASSERT(pp != NULL && pp->builtin);
+	/* one the system's boxes need (SYSDEF_PROGS_KEPT) runs as a process and is not deleted */
+	pp = dt_prog_find((CONST UB *)"trash-real-objects");
+	KT_ASSERT(pp != NULL && !pp->builtin);
+	if ( pp != NULL ) KT_ASSERT_ER(dt_prog_remove(&pp->uuid), E_PAR);
 	/*
 	 * one of the system's that runs as a process (not builtin) is the
 	 * person's to replace and delete: a plugin of its id is refused only
@@ -3153,14 +3160,13 @@ LOCAL void test_sound_object( void )
 /* A window object of a name, waited for up to ms */
 LOCAL BOOL wait_window( CONST char *name, TS_UUID *out, INT ms )
 {
-	TS_UUID	*list = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * 128);
+	TS_UUID	*list;
 	T_OBREF	r;
 	INT	cnt, i;
 	BOOL	found = FALSE;
 
-	for ( ; list != NULL && ms > 0 && !found; ms -= 100 ) {
-		cnt = 0;
-		if ( ob_lst_obj(OB_T_WINDOW, 0, NULL, list, 128, &cnt) >= E_OK ) {
+	for ( ; ms > 0 && !found; ms -= 100 ) {
+		if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) >= 0 ) {
 			for ( i = 0; i < cnt && !found; i++ ) {
 				if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_WINDOW
 				  && has(r.name, s_len((CONST char *)r.name), name) ) {
@@ -3168,10 +3174,10 @@ LOCAL BOOL wait_window( CONST char *name, TS_UUID *out, INT ms )
 					found = TRUE;
 				}
 			}
+			Kfree(list);
 		}
 		if ( !found ) tk_dly_tsk(100);
 	}
-	if ( list != NULL ) Kfree(list);
 	return found;
 }
 
@@ -3518,8 +3524,11 @@ LOCAL void test_package( void )
 	KT_ASSERT_ER(pk_object((CONST UB *)"not a package at all", 20, &bad), E_OK);
 	KT_ASSERT_ER(dt_pkg_install(&bad, FALSE, 0, NULL, &got, &how), E_OBJ);
 	(void)ob_del_obj(&bad);
-	pp = dt_prog_find((CONST UB *)"basic-text-editor");
+	pp = dt_prog_find((CONST UB *)"force-quit");
 	KT_ASSERT(pp != NULL && pp->builtin);
+	if ( pp != NULL ) KT_ASSERT_ER(dt_prog_remove(&pp->uuid), E_PAR);
+	pp = dt_prog_find((CONST UB *)"accessory-box");	/* kept, though a process */
+	KT_ASSERT(pp != NULL && !pp->builtin);
 	if ( pp != NULL ) KT_ASSERT_ER(dt_prog_remove(&pp->uuid), E_PAR);
 	wm_update();
 out:

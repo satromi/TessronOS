@@ -40,6 +40,9 @@ IMPORT ER   knl_pn_part( INT pid, INT i, T_WMPART *out );
 IMPORT INT  knl_pn_add( INT pid, CONST T_WMPART *pt );
 IMPORT ER   knl_pn_del( INT pid, INT i );
 IMPORT ER   knl_pn_set_rect( INT pid, INT i, CONST T_DPRECT *r );
+/* A panel of tags' sheet moved within the panel, and a panel made another size where it stands */
+IMPORT ER   knl_pn_set_inner( INT pid, INT i, CONST T_DPRECT *r );
+IMPORT ER   knl_pn_set_size( INT pid, INT w, INT h );
 
 /*
  * wmobj.c. Each is called with no lock of the window layer held: a
@@ -48,8 +51,17 @@ IMPORT ER   knl_pn_set_rect( INT pid, INT i, CONST T_DPRECT *r );
  */
 IMPORT void knl_wmobj_open( INT wid );
 IMPORT void knl_wmobj_close( INT wid );
+IMPORT void knl_wmobj_gsurf_shown( INT wid, INT idx, UW serial );	/* OB_E_CHANGE on OB_WR_GSURF */
 IMPORT void knl_wmobj_moved( INT wid, BOOL resized );
+/* A panel whose tags' sheet the program draws in (P_VIEW) was drawn: the window told OB_E_REDRAW */
+IMPORT void knl_wmobj_view_drawn( INT wid );
 IMPORT void knl_wmobj_event( CONST T_WMEV *ev );
+/*
+ * A window was given the keys (wm_focus): when a question of its
+ * program's (a pop-up of the same process) is up without them, the
+ * question takes them, and gives them back to this window when it goes
+ */
+IMPORT void knl_wmobj_focused( INT wid );
 /*
  * A key from the keyboard as it came, before it is addressed to the
  * window with the keys: told to every window that never has the keys

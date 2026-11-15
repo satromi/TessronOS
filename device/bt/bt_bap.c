@@ -740,6 +740,22 @@ EXPORT BOOL knl_btbap_start( BTC *c, PEER *p, UH mtu )
 	return TRUE;
 }
 
+/* Whether its services are those of an LE Audio sink, whether or not this controller can carry it */
+EXPORT BOOL knl_btbap_has_lea( BTC *c, PEER *p )
+{
+	BAP	*b = bap_of(c, p);
+
+	return (BOOL)( b != NULL && b->svc_first[NS_PACS] != 0 && b->svc_first[NS_ASCS] != 0 );
+}
+
+/* Whether it is taken as an LE Audio device and its services are read */
+EXPORT BOOL knl_btbap_ready( BTC *c, PEER *p )
+{
+	BAP	*b = bap_of(c, p);
+
+	return (BOOL)( b != NULL && b->used && b->d.ready );
+}
+
 /* What ATT brings of a device taken here: TRUE when this file has dealt with it */
 EXPORT BOOL knl_btbap_att_in( BTC *c, PEER *p, CONST UB *f, INT n )
 {

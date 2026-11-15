@@ -46,7 +46,6 @@ extern "C" {
 #include <ts/wm.h>
 
 #define WM_PART_MAX	200		/* parts in one panel: the words on it are parts too */
-#define WM_POOL_BYTES	8192		/* the names of every list, field and tag in one panel: a list of a few hundred disks */
 #define WM_SB_MAX	6		/* fields in one box along a line */
 #define WM_LABEL_MAX	128		/* bytes of a label, with its terminator:
 					   a name of 40 Japanese letters */
@@ -121,6 +120,12 @@ extern "C" {
  */
 #define P_FOOT		0x08000000U	/* stands at the panel's foot: never scrolled */
 #define P_SCROLL	0x10000000U	/* a panel of tags whose sheets scroll */
+/*
+ * A panel of tags whose sheet the program draws in (P_VIEW): every time
+ * the panel is drawn, its ground over what was drawn there, the window
+ * is told OB_E_REDRAW so that the program draws it again.
+ */
+#define P_VIEW		0x20000000U	/* a panel of tags whose sheet the program draws in */
 
 /* What each field of a box along a line is (sbf) */
 #define SBF_ZERO	0x01		/* shown with noughts to its width */
@@ -146,8 +151,8 @@ extern "C" {
  * A pop-up: one name of several, shown in a raised box with a mark at
  * its right. Pressed, the names open as a list over it, the one chosen
  * on the part's own row; the name let go on, or chosen with the arrow
- * keys and Enter, becomes the part's. Its names live in the pool as a
- * selector's do, and its value is the one chosen (1 up), 0 none.
+ * keys and Enter, becomes the part's. Its names are its own as a
+ * selector's are, and its value is the one chosen (1 up), 0 none.
  */
 #define WM_PT_POPUP	16
 
@@ -203,6 +208,17 @@ extern "C" {
  * a push button does.
  */
 
+/*
+ * The names a part holds (a list's rows, a selector's or a pop-up's
+ * choices, a panel of tags' tags, the names of a box's fields), kept by
+ * the part itself in one block as large as they are: there is no bound
+ * on how many there are or how long they are together but the memory.
+ * What is in the block is the window manager's: a definition is given
+ * its names with wm_part_name, a panel's part with knl_pn_set_names
+ * (record 4 of a part), and they are read with knl_pn_names.
+ */
+typedef struct T_WMNAMES	T_WMNAMES;
+
 typedef struct {
 	UW		type;		/* the kind, and the flags above */
 	INT		num;		/* how the caller knows this part */
@@ -225,12 +241,13 @@ typedef struct {
 	INT		lo, hi;
 
 	/*
-	 * A list, a selector of one part, or a tag panel: its names live in
-	 * the panel's pool, one after another. A selector of one part lays
+	 * A list, a selector of one part, a pop-up or a tag panel: its
+	 * names, one after another each ending in a nought, in a block of
+	 * its own (NULL while it has none). A selector of one part lays
 	 * them out itself; a choice of a group (count nought) is one name
 	 * of the selector its group makes.
 	 */
-	INT		pool;		/* where the first of them starts */
+	T_WMNAMES	*names;
 	INT		count;		/* how many there are */
 	INT		top;		/* the first one shown (1 up) */
 	INT		rows;		/* how many fit, worked out when drawn */
@@ -259,7 +276,7 @@ typedef struct {
 	INT		sbw[WM_SB_MAX];
 	INT		sblo[WM_SB_MAX], sbhi[WM_SB_MAX];
 	UB		sbf[WM_SB_MAX];	/* SBF_* */
-	INT		sbpool[WM_SB_MAX];	/* a field of names: its first name in the pool */
+	INT		sbpool[WM_SB_MAX];	/* a field of names: where its first name is among the part's names */
 	INT		sb_n;		/* fields, worked out from the label */
 	INT		sb_at;		/* the one the caret is in */
 
@@ -312,28 +329,27 @@ typedef struct {
 	T_DPRECT	r;		/* in the work area of the window */
 	INT		npart;
 	T_WMPART	part[WM_PART_MAX];
-
-	/*
-	 * The names every list in this panel shows, one after another with
-	 * a nought between them. They live here rather than behind a
-	 * pointer for the reason the definition itself is copied: a name
-	 * a program can free while the panel is drawing it is a name that
-	 * will be freed while the panel is drawing it.
-	 */
-	UB		pool[WM_POOL_BYTES];
-	INT		used;		/* bytes of it taken */
 } T_WMPANEL;
 
 /*
- * Put a name in the pool and say where it went, which is what a list
- * part's 'pool' field wants. -1 when the pool is full.
+ * A name put after the names a part of a definition has, and where it
+ * went among them in bytes (what a field of names' sbpool wants), or
+ * E_NOMEM. The caller sets the part's count. The block grows as names
+ * are put; a definition that has been given names is let go with
+ * wm_panel_free.
  */
-IMPORT INT wm_panel_name( T_WMPANEL *def, CONST UB *name );
+IMPORT INT wm_part_name( T_WMPART *pt, CONST UB *name );
 
 /*
- * Open a panel in a window. The definition is copied, so the caller may
- * change or free its own at once. Answers the panel's number, or an
- * error.
+ * A definition let go: the names of its parts, and the definition
+ * itself (Kmalloc'd). A panel opened from it has names of its own.
+ */
+IMPORT void wm_panel_free( T_WMPANEL *def );
+
+/*
+ * Open a panel in a window. The definition is copied, names and all, so
+ * the caller may change or free its own at once. Answers the panel's
+ * number, or an error (E_NOMEM when its names could not be copied).
  */
 IMPORT INT wm_panel_open( INT wid, CONST T_WMPANEL *def );
 
@@ -341,7 +357,9 @@ IMPORT INT wm_panel_open( INT wid, CONST T_WMPANEL *def );
  * The same, with the definition taken out of the data box rather than
  * passed in. This is how a program that keeps its panels as data opens
  * one: it puts the definition in the box once and opens it by number
- * afterwards.
+ * afterwards. The box keeps a definition as bytes, so the names of its
+ * parts do not go into it: a panel opened from it has none until they
+ * are set (knl_pn_set_names).
  */
 IMPORT INT wm_panel_open_box( INT wid, INT num, ID owner );
 IMPORT ER  wm_panel_close( INT pid );
@@ -561,14 +579,22 @@ IMPORT INT  knl_pn_list( INT *p_wid );
 /*
  * What a part of an open panel holds, as its state record carries it,
  * whether it is shown and can be worked (OB_WP_SHOWN, OB_WP_OFF), and a
- * selector's names set anew (count names, each ending in a nought).
+ * selector's names set anew (count names, each ending in a nought: as
+ * many and as long as they are, E_NOMEM only when there is not the
+ * memory, the names it had then left as they were). knl_pn_names
+ * answers how many bytes its names take, in a copy made for the caller
+ * (*p_buf, to be Kfree'd; NULL when it has none).
  */
 IMPORT INT  knl_pn_state( INT pid, INT i, UB *buf, INT max );
 IMPORT ER   knl_pn_set_state( INT pid, INT i, CONST UB *buf, INT len );
 IMPORT UINT knl_pn_flags( INT pid, INT i );
 IMPORT ER   knl_pn_set_flags( INT pid, INT i, UINT f );
 IMPORT ER   knl_pn_set_names( INT pid, INT i, CONST UB *names, INT len );
-IMPORT INT  knl_pn_names( INT pid, INT i, UB *buf, INT max );
+IMPORT INT  knl_pn_names( INT pid, INT i, UB **p_buf );
+#if USE_KTEST
+/* For a test: the next n blocks of names are refused, as when the memory has run out */
+IMPORT void knl_pn_test_nomem( INT n );
+#endif
 
 /*
  * A panel whose sheets scroll (P_SCROLL): knl_pn_fit takes the height

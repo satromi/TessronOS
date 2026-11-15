@@ -695,8 +695,11 @@ static struct {
 	INT	mode;
 	BOOL	saved;
 	INT	x, y, w, h;		/* the frame's top left, the work area's size */
+	char	scr[12];		/* and the screen x, y are from (T_WMPLACE): none for the main one */
 } wnext;
 static INT	wbase[4];		/* the figure's window: pos.x, pos.y, width, height */
+static char	wbase_scr[12];		/* the screen pos is from: none for the main one */
+static BOOL	wbase_kept;		/* pos was kept, not the program's own */
 
 static void wnext_read( void )
 {
@@ -704,16 +707,20 @@ static void wnext_read( void )
 	INT	b[4], i = 0;
 
 	wbase[0] = wbase[1] = 150;
+	wbase_scr[0] = 0;
+	wbase_kept = FALSE;
 	wbase[2] = 640;
 	wbase[3] = 480;
 	if ( metalen <= 0 || js_parse((const UB *)meta, (INT)metalen, &root) < E_OK ) return;
 	if ( js_get(&root, "window", &wj) >= E_OK ) {
 		if ( js_get(&wj, "pos", &pos) >= E_OK ) {
+			wbase_kept = TRUE;
 			wbase[0] = (INT)js_get_num(&pos, "x", wbase[0]);
 			wbase[1] = (INT)js_get_num(&pos, "y", wbase[1]);
 		}
 		wbase[2] = (INT)js_get_num(&wj, "width", wbase[2]);
 		wbase[3] = (INT)js_get_num(&wj, "height", wbase[3]);
+		(void)js_get_str(&wj, "screen", (UB *)wbase_scr, sizeof(wbase_scr));
 	}
 	if ( js_get(&root, "microscriptWindow", &o) < E_OK ) return;
 	if ( js_get(&o, "base", &arr) < E_OK || js_type(&arr) != JS_ARRAY ) return;
@@ -732,6 +739,8 @@ static void wnext_read( void )
 		wnext.y = (INT)js_get_num(&o, "y", 0);
 		wnext.w = (INT)js_get_num(&o, "w", wbase[2]);
 		wnext.h = (INT)js_get_num(&o, "h", wbase[3]);
+		wnext.scr[0] = 0;
+		(void)js_get_str(&o, "screen", (UB *)wnext.scr, sizeof(wnext.scr));
 	}
 }
 
@@ -741,7 +750,8 @@ static void wnext_write( void )
 
 	mb_init(&a);
 	mb_printf(&a, "{\"mode\":%d,\"base\":[%d,%d,%d,%d]", wnext.mode, wbase[0], wbase[1], wbase[2], wbase[3]);
-	if ( wnext.saved ) mb_printf(&a, ",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d", wnext.x, wnext.y, wnext.w, wnext.h);
+	if ( wnext.saved ) mb_printf(&a, ",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"screen\":\"%s\"", wnext.x, wnext.y,
+				     wnext.w, wnext.h, wnext.scr);
 	mb_putc(&a, '}');
 	meta_put("microscriptWindow", &a);
 	mb_free(&a);
@@ -755,6 +765,24 @@ void ms_win_save( void )
 
 	if ( ob_rea_rec(kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) < E_OK ) return;
 	wnext.saved = TRUE;
+	/* from the corner of the screen it stands on, and which screen (wm_place_keep) */
+	{
+		T_DPRECT	view;
+		T_WMPLACE	p;
+
+		view.left = wp.left;
+		view.top = wp.top;
+		view.right = wp.right;
+		view.bottom = wp.bottom;
+		if ( wm_place_keep(&view, &p) < E_OK ) {
+			p.r = view;
+			p.screen = 0;
+		}
+		wp.left = p.r.left;
+		wp.top = p.r.top;
+		if ( p.screen != 0 ) snprintf(wnext.scr, sizeof(wnext.scr), "%08x", (UINT)p.screen);
+		else wnext.scr[0] = 0;
+	}
 	wnext.x = wp.left;
 	wnext.y = wp.top;
 	wnext.w = wp.wright - wp.wleft;
@@ -1300,16 +1328,24 @@ static ER open_window( const char *title )
 		w = wnext.w;
 		h = wnext.h;
 	}
+	/* kept from the corner of its screen, the main one's when it names none (wm_place_open) */
+	if ( wnext.saved || wbase_kept ) {
+		wm_place_xywh(&l, &t, w, h, wnext.saved ? wnext.scr : wbase_scr);
+	} else {
+		l = wm_new_x(l);	/* none kept: from the corner of the screen new windows open on */
+		t = wm_new_y(t);
+	}
 	switch ( wnext.mode ) {
 	case WM_FULL:
-		snprintf(json, sizeof(json), "{\"rect\":[0,0,%d,%d],\"attr\":0,\"full\":1}", w, h);
+		/* the whole of the screen it stands on: where the window would, from the corner of that screen */
+		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":0,\"full\":1}", l, t, l + w, t + h);
 		break;
 	case WM_PLAIN:
 		/* no frame: the work area is the window */
 		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":0}", l, t, l + w, t + h);
 		break;
 	case WM_WIDE:
-		snprintf(json, sizeof(json), "{\"rect\":[0,%d,%d,%d],\"attr\":0,\"wide\":1}", t, w, t + h);
+		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":0,\"wide\":1}", l, t, l + w, t + h);
 		break;
 	default:
 		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":7}", l, t, l + w + FRAME_W, t + h + TITLE_H);

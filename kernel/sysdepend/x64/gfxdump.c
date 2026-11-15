@@ -34,6 +34,7 @@
 #include "igt_gen.h"
 
 IMPORT INT knl_igfx_log( char *buf, INT max );		/* disp_igfx.c */
+IMPORT BOOL knl_igfx_dc_active( void );		/* disp_igfx_psr.c */
 
 typedef struct {
 	CONST char	*name;
@@ -156,6 +157,9 @@ EXPORT INT knl_gfx_report( char *buf, INT max )
 	if ( knl_igt_gen(d.device) != NULL ) {
 		gfmt(&b, "  graphics of the 11th generation or later: what is told of it is in the lines \"igt12:\"\n");
 		return b.len;
+	}
+	if ( knl_igfx_dc_active() ) {
+		return 0;		/* the DMC may have the wells off: the file written before kept */
 	}
 	mmio = (UBINT)DEV_BASE(bar0);
 	gtt_va = (UD)DEV_BASE(bar0 + 8 * 1024 * 1024);

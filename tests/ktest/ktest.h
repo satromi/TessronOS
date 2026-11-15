@@ -67,6 +67,15 @@ IMPORT ER   kt_sysobj( const char *box, const char *file, TS_UUID *p_uuid );
 IMPORT UB  *kt_obj_data( const TS_UUID *uuid, SZ *p_size );
 
 /*
+ * Every object of a type there is (of the subtype sub, 0 any), read a
+ * page at a time from the last one given, as ob_lst_obj answers: how
+ * many, in *p_list to be freed with Kfree; E_* when the list cannot be
+ * read (*p_list NULL). The windows, panels and parts are more than one
+ * page when many are up, and a list of one page would miss the rest.
+ */
+IMPORT INT  kt_lst_obj( UINT type, UINT sub, TS_UUID **p_list );
+
+/*
  * The system's face, as the desktop sets it when it starts: the suite
  * that sets it (fn) runs only when the whole book is run, so a suite
  * that draws letters, or starts a process that does, opens the face of
@@ -231,6 +240,9 @@ IMPORT void ktest_stkg( void );
 IMPORT void ktest_wg( void );
 IMPORT void ktest_cred( void );
 IMPORT void ktest_cxx( void );
+IMPORT void ktest_chan2( void );
+IMPORT void ktest_shm2( void );
+IMPORT void ktest_sbx( void );
 IMPORT void ktest_v8( void );
 IMPORT void ktest_uuid( void );
 IMPORT void ktest_tsfs( void );

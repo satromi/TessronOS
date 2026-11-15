@@ -206,7 +206,12 @@
 #define TSN_WM_GRAB_WINDOW	TSN(9, 40)	/* and a window's work area copied */
 #define TSN_WM_PRESS_AREA	TSN(9, 41)	/* the places where a finger presses at once */
 #define TSN_WM_FILL_LOOK	TSN(9, 42)	/* a rectangle filled with an entry of the look table */
-#define TSN_WM_MAX		42
+#define TSN_WM_SCREEN_MAIN	TSN(9, 43)	/* the main screen's rectangle in the view */
+#define TSN_WM_PLACE_KEEP	TSN(9, 44)	/* a window's rectangle as a place to keep: its screen and from its corner */
+#define TSN_WM_PLACE_OPEN	TSN(9, 45)	/* and a kept place back into the view */
+#define TSN_WM_SCREEN_NEW	TSN(9, 46)	/* the screen a window with no place kept opens on */
+#define TSN_WM_SCREEN_OF	TSN(9, 47)	/* the screen a point is on, the main one when none */
+#define TSN_WM_MAX		47
 
 /* fs_ (class 2): the file management of T2EX, for a process */
 #define TSN_FS_OPEN		TSN(2, 1)
@@ -279,7 +284,10 @@
 #define TSN_SO_GETOBJ		TSN(5, 23)
 #define TSN_SO_RESOLVEALL	TSN(5, 24)
 #define TSN_SO_RECVTOS		TSN(5, 25)
-#define TSN_SO_MAX		25
+#define TSN_SO_NETWAIT		TSN(5, 26)
+#define TSN_SO_GETLIMIT		TSN(5, 27)	/* the sockets the process may hold (include/ts/soapp.h) */
+#define TSN_SO_SETLIMIT		TSN(5, 28)
+#define TSN_SO_MAX		28
 
 /* class 0: tk_ */
 #define TSN_TK_CRE_TSK		TSN(0, 1)
@@ -401,7 +409,12 @@
 #define TSN_TS_LST_PRC		TSN(1, 34)
 #define TSN_TS_SPN_OBJ		TSN(1, 35)	/* a POSIX process of a program object (include/ts/psx.h) */
 #define TSN_TS_LKP_OBJ		TSN(1, 36)	/* the object a path of the object world names */
-#define TSN_TS_MAX		36
+#ifdef __x86_64__
+#define TSN_TS_SET_TLS		TSN(1, 37)	/* the calling task's thread pointer, the FS base (lib/libpthread) */
+#endif
+#define TSN_TS_SET_SBX		TSN(1, 38)	/* groups of calls the caller shuts itself out of (include/ts/sbx.h) */
+#define TSN_TS_GET_SBX		TSN(1, 39)
+#define TSN_TS_MAX		39
 
 /* class 3: calendar */
 #define TSN_DT_GETTIME		TSN(3, 1)
@@ -478,7 +491,12 @@
 #define TSN_OB_REF_VOB	TSN(7, 54)	/* what links show, as the store has it (include/ts/tadview.h) */
 #define TSN_OB_REF_VID	TSN(7, 55)	/* the volume's UUID an object is on, and this machine's */
 #define TSN_OB_DUP_OBJ	TSN(7, 56)	/* a real object copied as the desktop copies one, under a name */
-#define TSN_OB_MAX		56
+#define TSN_OB_CHK_LST	TSN(7, 57)	/* the native volumes there are (ts/tsfsck.h) */
+#define TSN_OB_CHK_VOL	TSN(7, 58)	/* TSN_RIGHT_ADMIN: one checked, and repaired */
+#define TSN_OB_CHK_REQ	TSN(7, 59)	/* TSN_RIGHT_ADMIN: the system volume repaired at the next start */
+#define TSN_OB_CHK_BOOT	TSN(7, 60)	/* what that repair did, once */
+#define TSN_OB_CRE_KEY	TSN(7, 61)	/* an object without a name made and opened at once */
+#define TSN_OB_MAX		61
 
 /* class 6: tm_ */
 #define TSN_TM_PUTSTRING	TSN(6, 1)

@@ -1,6 +1,6 @@
 <tad version="1.0" encoding="UTF-8" filename="屑実身操作">
 <document>
 <p>屑実身操作</p>
-<p>組込みのプログラム(trash-real-objects)</p>
+<p>どの仮身からも参照されなくなった実身(屑実身)を一覧するシステムの道具。仮身を運び出すと、その実身はまた参照されて屑実身でなくなる。削除で完全に削除し、再探索で全実身の参照数を数え直す。プロセスとして動く(application/systool/tr_main.c)。</p>
 </document>
 </tad>

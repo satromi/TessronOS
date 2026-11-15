@@ -30,10 +30,13 @@ IMPORT ER   knl_umem_map( T_UMEM **pp, T_SPACE *sp, UBINT *p_va, UD size, UD ali
 IMPORT ER   knl_umem_unmap( T_UMEM **pp, T_SPACE *sp, UBINT va, UD size, BOOL hold );
 IMPORT ER   knl_umem_ctl( T_UMEM **pp, T_SPACE *sp, UBINT va, UD size, UINT prot, BOOL hold );
 IMPORT BOOL knl_umem_fault( T_UMEM *um, T_SPACE *sp, UBINT va, UINT acc );
+IMPORT BOOL knl_umem_touch( T_UMEM *um, T_SPACE *sp, UBINT s, UBINT e );
+IMPORT UD   knl_umem_lazy_bytes( T_UMEM *um );
 IMPORT void knl_umem_wx( T_UMEM *um, T_SPACE *sp, UD out[6] );
 IMPORT void knl_umem_flush( T_UMEM *um );
 IMPORT BOOL knl_umem_held( T_UMEM *um );
 IMPORT UD   knl_umem_bytes( T_UMEM *um );
+IMPORT UD   knl_umem_held_bytes( T_UMEM *um );
 IMPORT void knl_umem_free( T_UMEM **pp );
 
 #endif /* _SYSMAN_UMEM_H_ */

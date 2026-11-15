@@ -158,6 +158,11 @@ knl_int_common:
 	cmp	$INTVEC_SPURIOUS, %rax
 	je	knl_int_restore			/* spurious: no EOI, nothing to do */
 
+	/* taken while the processor had no task: counted by vector (what wakes the idle, apic.c) */
+	cmpq	$0, %gs:PCPU_ctxtsk
+	jne	4f
+	lock incl knl_idle_irq(,%rax,4)
+4:
 	/* an interrupt: the task independent part */
 	incl	%gs:PCPU_taskindp
 	cmpl	$1, %gs:PCPU_taskindp

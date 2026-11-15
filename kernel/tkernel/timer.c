@@ -235,6 +235,13 @@ EXPORT void knl_timer_insert_abs( TMEB *evt, ABSTIM time, CBACK cback, void *arg
  *	has been reached, then programs the comparator for the next one or
  *	stops it when the queue is empty.
  */
+/*
+ * Told of each event as it fires, with its callback and argument, when
+ * set (the records of what wakes an idle processor, x64's cpuidle.c with
+ * "idlelog=1"); NULL otherwise, and then it costs one load
+ */
+EXPORT void	(*knl_timer_fire_hook)( CBACK cb, void *arg ) = NULL;
+
 EXPORT void knl_timer_handler( void )
 {
 	TMEB	*event;
@@ -271,6 +278,9 @@ EXPORT void knl_timer_handler( void )
 			arg = event->arg;
 			if ( cb != NULL ) {
 				KLK_UNTMR();
+				if ( knl_timer_fire_hook != NULL ) {
+					(*knl_timer_fire_hook)(cb, arg);
+				}
 				KLK_KT_SPIN(knl_kt_fire_spin)
 				(*cb)(arg);
 				KLK_TMR_DI();

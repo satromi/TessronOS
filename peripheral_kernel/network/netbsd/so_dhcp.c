@@ -11,12 +11,15 @@
  *	so_dhcp.c
  *	An address from the network (DHCP, RFC 2131; design 12.6).
  *
- *	A task of its own asks for an address over a UDP socket of the
- *	stack. Until it has one, the interface's address is 0.0.0.0 with the
- *	broadcast address of all ones, which is what lets the stack send the
- *	broadcasts from port 68 and take the answers; the requests ask the
- *	server to broadcast its answers too, since the address they carry is
- *	not yet the interface's.
+ *	A task of its own asks for an address. The broadcasts go to the card
+ *	as whole frames past the stack, from 0.0.0.0 (or the address being
+ *	renewed) to 255.255.255.255 (broadcast below); a renewal sent to the
+ *	server itself, and every answer, go through a UDP socket of the
+ *	stack bound to port 68. Until it has an address, the interface's
+ *	address is 0.0.0.0 with the broadcast address of all ones, which is
+ *	what lets the stack take the answers; the requests ask the server to
+ *	broadcast its answers too, since the address they carry is not yet
+ *	the interface's.
  *
  *	DISCOVER, OFFER, REQUEST, ACK: the address, its mask, the router and
  *	up to two name servers are then set (so_api.c). A REQUEST not
@@ -24,10 +27,14 @@
  *	16 s, each wait made up to a second longer or shorter at random
  *	(RFC 2131 4.1, as Linux's DHCP clients do), and only when the fourth
  *	has gone unanswered as well does the asking start again from a
- *	DISCOVER. Asking again while the interface still has the address of
- *	a lease taken in this boot (the network joined again) first asks for
- *	that address (INIT-REBOOT, RFC 2131 3.2 and 4.3.2), and from a
- *	DISCOVER only when that is refused or not answered. Every message
+ *	DISCOVER. A lease is kept for each network it was taken on (the
+ *	card, and the SSID for the Wi-Fi's; net_key below): asking again
+ *	on a network with a lease kept that has not run out first asks for
+ *	its address (INIT-REBOOT, RFC 2131 3.2 and 4.3.2), and from a
+ *	DISCOVER only when that is refused or not answered; on a network
+ *	with none it asks from a DISCOVER at once, and an address the
+ *	interface still has from another network is taken away first.
+ *	Every message
  *	carries the seconds since the round of asking began (secs, RFC 2131
  *	2). Half way through the
  *	lease the same server is asked to renew it, and at seven eighths any
@@ -107,12 +114,45 @@ LOCAL ID		dhcp_tsk = 0;
 LOCAL volatile BOOL	dhcp_want = FALSE;
 LOCAL volatile UINT	dhcp_gen = 0;		/* changes when asked to start again or stop */
 LOCAL UB		dhcp_mac[NET_MAC_LEN];
-LOCAL BOOL		dhcp_noaddr;		/* the interface has no address of its own */
 
-/* The lease taken last in this boot, for asking for its address again (INIT-REBOOT) */
-LOCAL LEASE		dhcp_last;
-LOCAL UD		dhcp_last_end = 0;	/* s: when it runs out; 0 for none */
-LOCAL UB		dhcp_last_mac[NET_MAC_LEN];	/* the card it was taken with */
+/*
+ * The network a lease is of: the card it was taken with (the client
+ * identifier carries its address, so another card has a lease of its
+ * own) and, for the Wi-Fi's, the SSID of the network joined; a wired
+ * card's is the card alone, as dhcpcd keeps one lease file for an
+ * interface and one for each SSID on a wireless one. The BSSID is not
+ * a part of it: the access points of one network (one SSID) share its
+ * DHCP server and its addresses, and a move between them keeps the
+ * lease.
+ */
+typedef struct {
+	UB	mac[NET_MAC_LEN];
+	UB	ssid_len;		/* 0: a wired card's */
+	UB	ssid[32];
+} NETKEY;
+
+/*
+ * The leases taken in this boot, one for each network, for asking for
+ * the address again when the network is joined again (INIT-REBOOT).
+ * As many as DHCP_NETS; when another is taken with all of them in use,
+ * the one used longest ago gives its place. They are not kept over a
+ * restart (design 9.3.1).
+ */
+#define DHCP_NETS		16
+
+typedef struct {
+	BOOL	used;
+	NETKEY	key;
+	LEASE	l;
+	UD	end;			/* s: when it runs out; ~0 never */
+	UD	at;			/* s: when it was last taken or renewed */
+} NETLEASE;
+
+LOCAL NETLEASE		dhcp_nets[DHCP_NETS];
+LOCAL volatile BOOL	dhcp_forget = FALSE;	/* all forgotten as the next round begins */
+
+/* The SSID of the Wi-Fi's network when mac is its card's and it is connected (wifi.c); weak: no Wi-Fi */
+IMPORT INT	knl_wifi_ssid_of( CONST UB *mac, UB *ssid ) __attribute__((weak));
 
 /* ---------------------------------------------------------------- time */
 
@@ -287,12 +327,202 @@ LOCAL BOOL read_msg( CONST UB *m, INT len, UW xid, LEASE *l )
 	return ( l->type != 0 );
 }
 
+/* ---------------------------------------------------------------- the leases of the networks */
+
+/* The network asked on now: the card in use and, when it is the Wi-Fi's, the network joined */
+LOCAL void net_key( NETKEY *k )
+{
+	knl_memset(k, 0, sizeof(*k));
+	knl_memcpy(k->mac, dhcp_mac, NET_MAC_LEN);
+	if ( knl_wifi_ssid_of != NULL ) {
+		INT	n = knl_wifi_ssid_of(dhcp_mac, k->ssid);
+
+		k->ssid_len = (UB)( ( n > 0 && n <= 32 ) ? n : 0 );
+	}
+}
+
+LOCAL BOOL same_key( CONST NETKEY *a, CONST NETKEY *b )
+{
+	return same_bytes(a->mac, b->mac, NET_MAC_LEN) && a->ssid_len == b->ssid_len
+		&& same_bytes(a->ssid, b->ssid, a->ssid_len);
+}
+
+/* The network for the console: the Wi-Fi's "SSID" or the wired card, and the card's address */
+LOCAL INT say_net( UB *b, CONST NETKEY *k )
+{
+	INT	n = 0, i;
+
+	if ( k->ssid_len > 0 ) {
+		n = tm_sprintf(b, (UB *)"the Wi-Fi's network \"");
+		for ( i = 0; i < k->ssid_len; i++ ) {
+			b[n++] = ( k->ssid[i] >= 0x20 && k->ssid[i] < 0x7f ) ? k->ssid[i] : '.';
+		}
+		b[n++] = '"';
+	} else {
+		n = tm_sprintf(b, (UB *)"the wired link");
+	}
+	return n + tm_sprintf(b + n, (UB *)" (card %02x:%02x:%02x:%02x:%02x:%02x)", k->mac[0], k->mac[1],
+			      k->mac[2], k->mac[3], k->mac[4], k->mac[5]);
+}
+
+/* The lease kept for the network k, not run out: its place, or -1; one run out is forgotten */
+LOCAL INT net_find( CONST NETKEY *k )
+{
+	INT	i;
+
+	for ( i = 0; i < DHCP_NETS; i++ ) {
+		if ( dhcp_nets[i].used && same_key(&dhcp_nets[i].key, k) ) {
+			if ( dhcp_nets[i].end > now_s() ) return i;
+			dhcp_nets[i].used = FALSE;
+			return -1;
+		}
+	}
+	return -1;
+}
+
+/* The lease, not run out, whose address is addr and taken with this card: its place, or -1 */
+LOCAL INT net_of_addr( UW addr )
+{
+	INT	i;
+
+	for ( i = 0; i < DHCP_NETS; i++ ) {
+		if ( dhcp_nets[i].used && dhcp_nets[i].l.yiaddr == addr && dhcp_nets[i].end > now_s() ) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+/* The lease l taken or renewed on the network k at got (s) kept for it */
+LOCAL void net_keep( CONST NETKEY *k, CONST LEASE *l, UD got )
+{
+	INT	i, at = -1;
+
+	for ( i = 0; i < DHCP_NETS; i++ ) {
+		if ( dhcp_nets[i].used && same_key(&dhcp_nets[i].key, k) ) {
+			at = i;
+			break;
+		}
+	}
+	for ( i = 0; at < 0 && i < DHCP_NETS; i++ ) {
+		if ( !dhcp_nets[i].used ) at = i;
+	}
+	if ( at < 0 ) {				/* all in use: the one used longest ago */
+		for ( at = 0, i = 1; i < DHCP_NETS; i++ ) {
+			if ( dhcp_nets[i].at < dhcp_nets[at].at ) at = i;
+		}
+	}
+	/* another network's lease of the same address with this card is of no use any more */
+	for ( i = 0; i < DHCP_NETS; i++ ) {
+		if ( i != at && dhcp_nets[i].used && dhcp_nets[i].l.yiaddr == l->yiaddr
+		  && same_bytes(dhcp_nets[i].key.mac, k->mac, NET_MAC_LEN) ) {
+			dhcp_nets[i].used = FALSE;
+		}
+	}
+	dhcp_nets[at].used = TRUE;
+	dhcp_nets[at].key = *k;
+	dhcp_nets[at].l = *l;
+	dhcp_nets[at].end = ( l->lease == 0xffffffffU ) ? ~(UD)0 : got + l->lease;
+	dhcp_nets[at].at = got;
+}
+
+/* The lease of the network k forgotten: refused, given back, or run out */
+LOCAL void net_drop( CONST NETKEY *k )
+{
+	INT	i;
+
+	for ( i = 0; i < DHCP_NETS; i++ ) {
+		if ( dhcp_nets[i].used && same_key(&dhcp_nets[i].key, k) ) dhcp_nets[i].used = FALSE;
+	}
+}
+
 /* ---------------------------------------------------------------- the exchange */
+
+/* A frame past the stack to the card in use (neta_user.c); 0 when it went into the ring */
+IMPORT int	knl_neta_send_frame( CONST void *frame, UD len );
+
+LOCAL UW sum16( UW sum, CONST UB *p, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i + 1 < n; i += 2 ) {
+		sum += ( (UW)p[i] << 8 ) | p[i + 1];
+	}
+	if ( i < n ) {
+		sum += (UW)p[i] << 8;
+	}
+	return sum;
+}
+
+LOCAL UH fold( UW sum )
+{
+	while ( ( sum >> 16 ) != 0 ) {
+		sum = ( sum & 0xffff ) + ( sum >> 16 );
+	}
+	return (UH)~sum;
+}
+
+LOCAL void put16( UB *p, UW v )
+{
+	p[0] = (UB)( v >> 8 );
+	p[1] = (UB)v;
+}
+
+/*
+ * A message broadcast to the servers: an Ethernet frame to all, an IP
+ * header from 'from' to 255.255.255.255 and a UDP header from port 68 to
+ * 67 made here and handed to the card past the stack, as BSD's dhclient
+ * and dhcpcd write it to BPF and Linux's clients to a packet socket.
+ * Through a socket of the stack, a datagram to 255.255.255.255 leaves
+ * for the broadcast address of the interface's address instead
+ * (in_pcbconnect puts it there once the interface has an address): with
+ * the address of the network left behind still held, the broadcasts of
+ * a DHCP that asks again went to that network's broadcast address
+ * (10.0.2.255), which a server on another network does not take. 'from'
+ * is 0.0.0.0 except when the address of the lease is renewed from any
+ * server (ciaddr, RFC 2131 4.1 and 4.4.5).
+ */
+LOCAL INT broadcast( CONST UB *m, INT len, UW from )
+{
+	LOCAL UH	ip_id = 0;
+	UB		f[14 + 20 + 8 + MSG_MAX];
+	UB		*ip = f + 14, *udp = f + 34;
+	UW		sum;
+
+	if ( len > MSG_MAX ) {
+		return E_PAR;
+	}
+	knl_memset(f, 0xff, 6);				/* to all */
+	knl_memcpy(f + 6, dhcp_mac, NET_MAC_LEN);
+	put16(f + 12, 0x0800);				/* IPv4 */
+	ip[0] = 0x45;					/* version 4, a header of 20 bytes */
+	ip[1] = 0;
+	put16(ip + 2, 20 + 8 + (UW)len);
+	put16(ip + 4, ++ip_id);
+	put16(ip + 6, 0);
+	ip[8] = 64;					/* TTL */
+	ip[9] = 17;					/* UDP */
+	put16(ip + 10, 0);
+	knl_memcpy(ip + 12, &from, 4);
+	knl_memset(ip + 16, 0xff, 4);
+	put16(ip + 10, fold(sum16(0, ip, 20)));
+	put16(udp, PORT_CLIENT);
+	put16(udp + 2, PORT_SERVER);
+	put16(udp + 4, 8 + (UW)len);
+	put16(udp + 6, 0);
+	knl_memcpy(udp + 8, m, (SZ)len);
+	/* the pseudo header: the addresses, the protocol and the UDP length */
+	sum = sum16(0, ip + 12, 8) + 17 + 8 + (UW)len;
+	sum = fold(sum16(sum, udp, 8 + len));
+	put16(udp + 6, ( sum == 0 ) ? 0xffff : sum);
+	return ( knl_neta_send_frame(f, (UD)( 14 + 20 + 8 + len )) == 0 ) ? len : E_IO;
+}
 
 /*
  * Send the message to 'to' (all ones for a broadcast) and wait up to ms
  * for an answer of one of the two types; FALSE when none came or the
- * asking was stopped.
+ * asking was stopped. The answers come in through the socket, which is
+ * bound to port 68.
  */
 LOCAL BOOL exchange( INT s, UB *m, INT len, UW to, UW xid, INT ms, INT type1, INT type2,
 		     LEASE *l, UINT gen )
@@ -300,16 +530,20 @@ LOCAL BOOL exchange( INT s, UB *m, INT len, UW to, UW xid, INT ms, INT type1, IN
 	struct sockaddr_in	sa;
 	struct pollfd		p;
 	UB			r[MSG_MAX];
-	INT			n, direct = ( to == 0xffffffffU && dhcp_noaddr ) ? 1 : 0;
+	UW			ciaddr;
+	INT			n;
 
-	/* a broadcast from no address goes out on the interface itself, past the routes */
-	(void)so_setsockopt(s, SOL_SOCKET, SO_DONTROUTE, &direct, sizeof(direct));
-	knl_memset(&sa, 0, sizeof(sa));
-	sa.sin_len = sizeof(sa);
-	sa.sin_family = AF_INET;
-	sa.sin_port = so_htons(PORT_SERVER);
-	sa.sin_addr.s_addr = to;
-	n = so_sendto(s, m, len, 0, (struct sockaddr *)&sa, sizeof(sa));
+	if ( to == 0xffffffffU ) {
+		knl_memcpy(&ciaddr, m + 12, 4);
+		n = broadcast(m, len, ciaddr);
+	} else {
+		knl_memset(&sa, 0, sizeof(sa));
+		sa.sin_len = sizeof(sa);
+		sa.sin_family = AF_INET;
+		sa.sin_port = so_htons(PORT_SERVER);
+		sa.sin_addr.s_addr = to;
+		n = so_sendto(s, m, len, 0, (struct sockaddr *)&sa, sizeof(sa));
+	}
 	if ( n != len ) {
 		tm_printf((UB *)"net: DHCP: not sent (%d)\n", n);
 		(void)nap(ms, gen);
@@ -364,7 +598,6 @@ LOCAL void take( LEASE *l, UINT gen )
 	}
 	(void)knl_so_nb_ifaddr(l->yiaddr, l->mask, l->router, FALSE);
 	knl_so_nb_ifdns(l->dns[0], l->dns[1]);
-	dhcp_noaddr = FALSE;
 	/* the line made whole and said at once: another task's line may come between two calls */
 	{
 		UB	line[160];
@@ -418,8 +651,11 @@ LOCAL void dhcp_client( UINT gen )
 	INT			s, len, on = 1, wait = DHCP_FIRST_MS, rwait, sent;
 	UW			held = 0;		/* the address of the lease held */
 	UW			reboot = 0;		/* the address to ask for first (INIT-REBOOT) */
-	BOOL			acked;
-	UB			line[96];
+	BOOL			acked, first = TRUE;
+	UB			line[96], net[96];
+	NETKEY			key;			/* the network asked on */
+	LEASE			kept;			/* the lease kept for it */
+	UD			t_begin = now_ms();	/* the asking began: the network joined, or asked again */
 
 	s = so_socket(AF_INET, SOCK_DGRAM, 0);
 	if ( s < 0 ) {
@@ -439,35 +675,56 @@ LOCAL void dhcp_client( UINT gen )
 	}
 
 	/*
-	 * An address the interface has already stays while the network is
-	 * asked again, as connections may be using it; with none, the
-	 * interface is made ready for the broadcasts. The address of the
-	 * lease taken last in this boot, with this card and not run out, is
-	 * asked for first: the network joined again is most often the same.
+	 * The network asked on, and the lease kept for it. An address the
+	 * interface has already stays while the network is asked again, as
+	 * connections may be using it, when it is this network's lease's or
+	 * of no lease known. The address of a lease taken on another network
+	 * (another SSID, or another card: the stack moved onto another
+	 * adapter) is of no use here: it is taken away, and the asking is
+	 * from no address (RFC 2131 4.1), as dhcpcd drops the lease of the
+	 * network left and Linux leaves an address with the interface it was
+	 * given to. With no address, the interface is made ready for the
+	 * broadcasts. The address of this network's lease, not run out, is
+	 * asked for first, held or not; with none, a DISCOVER is sent at once.
 	 */
+	if ( dhcp_forget ) {
+		dhcp_forget = FALSE;
+		knl_memset(dhcp_nets, 0, sizeof(dhcp_nets));
+		tm_printf((UB *)"net: DHCP: the leases kept for the networks forgotten\n");
+	}
+	net_key(&key);
+	(void)say_net(net, &key);
 	{
 		UW	addr = 0, mask = 0;
+		INT	k = net_find(&key), o;
 
-		(void)rump_tsnet_getaddr4(SO_IFNAME, &addr, &mask);
-		/*
-		 * The address of a lease taken with another card (the stack moved
-		 * onto another adapter): not this card's, and of no use with it, as
-		 * on Linux, where it stays with the interface it was given to. It
-		 * is taken away, and the asking is from no address (RFC 2131 4.1).
-		 */
-		if ( addr != 0 && dhcp_last_end != 0 && addr == dhcp_last.yiaddr
-		  && !same_bytes(dhcp_last_mac, dhcp_mac, NET_MAC_LEN) ) {
-			(void)say_ip(line, 0, "address", addr);
-			tm_printf((UB *)"net: DHCP: the%s was leased to another card: taken away\n", line);
-			addr = 0;
-			dhcp_last_end = 0;
+		knl_memset(&kept, 0, sizeof(kept));
+		if ( k >= 0 ) {
+			kept = dhcp_nets[k].l;
 		}
-		dhcp_noaddr = ( addr == 0 );
-		if ( dhcp_noaddr ) {
+		(void)rump_tsnet_getaddr4(SO_IFNAME, &addr, &mask);
+		if ( addr != 0 && ( k < 0 || addr != kept.yiaddr ) && ( o = net_of_addr(addr) ) >= 0 ) {
+			UB	other[96];
+
+			(void)say_net(other, &dhcp_nets[o].key);
+			(void)say_ip(line, 0, "address", addr);
+			tm_printf((UB *)"net: DHCP: the%s was leased on %s, not on %s: taken away\n", line, other, net);
+			addr = 0;
+		}
+		if ( addr == 0 ) {
 			(void)knl_so_nb_ifaddr(0, 0, 0, TRUE);
-		} else if ( dhcp_last_end > now_s() && addr == dhcp_last.yiaddr
-			 && same_bytes(dhcp_last_mac, dhcp_mac, NET_MAC_LEN) ) {
-			reboot = addr;
+		}
+		if ( k >= 0 ) {
+			reboot = kept.yiaddr;
+			(void)say_ip(line, 0, "address", reboot);
+			if ( dhcp_nets[k].end == ~(UD)0 ) {
+				tm_printf((UB *)"net: DHCP: asking on %s: a lease kept for it,%s, for ever\n", net, line);
+			} else {
+				tm_printf((UB *)"net: DHCP: asking on %s: a lease kept for it,%s, %d s left\n", net, line,
+					  (INT)( dhcp_nets[k].end - now_s() ));
+			}
+		} else {
+			tm_printf((UB *)"net: DHCP: asking on %s: no lease kept for it: a DISCOVER at once\n", net);
 		}
 	}
 
@@ -488,6 +745,7 @@ LOCAL void dhcp_client( UINT gen )
 				&& ack.type == DHCPACK;
 			if ( ack.type == DHCPNAK ) {
 				held = reboot;		/* not to be used any more: taken away below */
+				net_drop(&key);
 			}
 			reboot = 0;
 			if ( dhcp_gen != gen ) {
@@ -495,7 +753,7 @@ LOCAL void dhcp_client( UINT gen )
 			}
 			if ( acked ) {
 				if ( ack.server == 0 ) {
-					ack.server = dhcp_last.server;
+					ack.server = kept.server;
 				}
 				tm_printf((UB *)"net: DHCP: the address of the lease held acknowledged in %d ms\n",
 					  (INT)( now_ms() - round0 ));
@@ -510,7 +768,6 @@ LOCAL void dhcp_client( UINT gen )
 			/* INIT: the address of a lease lost is taken away first */
 			if ( held != 0 ) {
 				(void)knl_so_nb_ifaddr(0, 0, 0, TRUE);
-				dhcp_noaddr = TRUE;
 				held = 0;
 			}
 			/*
@@ -576,9 +833,16 @@ LOCAL void dhcp_client( UINT gen )
 		got = now_s();
 		round0 = 0;
 		renew0 = 0;
-		dhcp_last = ack;
-		dhcp_last_end = ( ack.lease == 0xffffffffU ) ? ~(UD)0 : got + ack.lease;
-		knl_memcpy(dhcp_last_mac, dhcp_mac, NET_MAC_LEN);
+		if ( dhcp_gen == gen ) {
+			net_keep(&key, &ack, got);
+		}
+		/* how long the address took from the start of the asking (the join), for the records */
+		if ( first && dhcp_gen == gen ) {
+			first = FALSE;
+			(void)say_ip(line, 0, "address", ack.yiaddr);
+			tm_printf((UB *)"net: DHCP: the%s on %s in %d ms from the start of the asking (%s)\n", line, net,
+				  (INT)( now_ms() - t_begin ), ( sent == 0 ) ? "INIT-REBOOT" : "DISCOVER");
+		}
 
 		/*
 		 * Another machine's address: given back with a DECLINE from no
@@ -587,9 +851,8 @@ LOCAL void dhcp_client( UINT gen )
 		 */
 		if ( dhcp_gen == gen && addr_taken(ack.yiaddr, gen) ) {
 			(void)knl_so_nb_ifaddr(0, 0, 0, TRUE);
-			dhcp_noaddr = TRUE;
 			held = 0;
-			dhcp_last_end = 0;
+			net_drop(&key);
 			(void)ts_get_random(&xid, sizeof(xid));
 			len = make_msg(m, xid, DHCPDECLINE, 0, ack.yiaddr, ack.server, 0);
 			(void)exchange(s, m, len, 0xffffffffU, xid, 0, 0, 0, &offer, gen);
@@ -618,6 +881,7 @@ LOCAL void dhcp_client( UINT gen )
 			}
 			if ( now >= end ) {
 				tm_printf((UB *)"net: DHCP lease ran out\n");
+				net_drop(&key);
 				break;
 			}
 			(void)ts_get_random(&xid, sizeof(xid));
@@ -629,6 +893,7 @@ LOCAL void dhcp_client( UINT gen )
 					    DHCP_FIRST_MS, DHCPACK, DHCPNAK, &r, gen);
 			if ( answered && r.type == DHCPNAK ) {
 				tm_printf((UB *)"net: DHCP lease refused\n");
+				net_drop(&key);
 				break;
 			}
 			if ( answered ) {
@@ -638,8 +903,9 @@ LOCAL void dhcp_client( UINT gen )
 				take(&ack, gen);
 				got = now_s();
 				renew0 = 0;
-				dhcp_last = ack;
-				dhcp_last_end = ( ack.lease == 0xffffffffU ) ? ~(UD)0 : got + ack.lease;
+				if ( dhcp_gen == gen ) {
+					net_keep(&key, &ack, got);
+				}
 				continue;
 			}
 			/* no answer: again in half the time left, not sooner than a minute */
@@ -692,6 +958,16 @@ EXPORT ER knl_so_dhcp_run( void )
 	}
 	dhcp_tsk = tskid;
 	return tk_sta_tsk(tskid, 0);
+}
+
+/*
+ * The leases kept for the networks forgotten, as on a machine never on
+ * them: the next round of asking begins from a DISCOVER. The task alone
+ * touches them, so they go as that round begins.
+ */
+EXPORT void knl_so_dhcp_forget( void )
+{
+	dhcp_forget = TRUE;
 }
 
 /* Stop asking; whatever address there is stays */

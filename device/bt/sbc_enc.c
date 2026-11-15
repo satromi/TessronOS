@@ -9,10 +9,12 @@
 
 /*
  *	sbc_enc.c
- *	The SBC encoder that A2DP needs (design 6.8), written from appendix B
- *	of the A2DP specification: 8 subbands, 16 blocks, the loudness
- *	allocation, stereo or joint stereo. Every sink must decode all of
- *	these, so no other form is made.
+ *	The SBC encoder (design 6.8), written from appendix B of the A2DP
+ *	specification: 8 subbands and the loudness allocation. A2DP's frames
+ *	are 16 blocks in stereo or joint stereo, which every sink must
+ *	decode; the hands-free profile's mSBC (its appendix A) is 15 blocks
+ *	of one channel at 16 kHz with the bit pool 26, its header the sync
+ *	0xAD and two bytes of zero.
  *
  *	It works in integers, as the kernel has no floating point registers:
  *	the subband samples have 12 fractional bits, which leaves the largest
@@ -50,14 +52,16 @@ static const int cos16[9] = {
 	596539483, 410903207, 209476638, 0
 };
 
-/* What the loudness allocation takes from each subband, by the sampling rate 44.1, 48 kHz */
-static const signed char offset8[2][8] = {
+/* What the loudness allocation takes from each subband, by the sampling rate 16, 32, 44.1, 48 kHz */
+static const signed char offset8[4][8] = {
+	{ -2, 0, 0, 0, 0, 0, 0, 1 },
+	{ -3, 0, 0, 0, 0, 0, 1, 2 },
 	{ -4, 0, 0, 0, 0, 0, 1, 2 },
 	{ -4, 0, 0, 0, 0, 0, 1, 2 }
 };
 
 /* cos(n pi / 16) for any n */
-static int cos_n( int n )
+int sbc_cos( int n )
 {
 	if ( n < 0 ) {
 		n = -n;
@@ -67,6 +71,13 @@ static int cos_n( int n )
 		n = 32 - n;
 	}
 	return ( n <= 8 ) ? cos16[n] : -cos16[16 - n];
+}
+
+int sbc_tap( int i )
+{
+	int	v = proto[( i <= 40 ) ? i : 80 - i];
+
+	return ( ( i / 16 ) & 1 ) ? -v : v;
 }
 
 void sbc_enc_init( SBC_ENC *e, int rate48, int joint, int bitpool )
@@ -79,25 +90,37 @@ void sbc_enc_init( SBC_ENC *e, int rate48, int joint, int bitpool )
 		}
 	}
 	for ( i = 0; i < 80; i++ ) {
-		int	v = proto[( i <= 40 ) ? i : 80 - i];
-
-		e->c[i] = ( ( i / 16 ) & 1 ) ? -v : v;
+		e->c[i] = sbc_tap(i);
 	}
 	for ( i = 0; i < 8; i++ ) {
 		for ( k = 0; k < 16; k++ ) {
-			e->m[i][k] = cos_n(( 2 * i + 1 ) * ( k - 4 ));
+			e->m[i][k] = sbc_cos(( 2 * i + 1 ) * ( k - 4 ));
 		}
 	}
 	e->rate48 = rate48;
 	e->joint = joint;
 	e->bitpool = bitpool;
+	e->nch = 2;
+	e->blocks = 16;
+	e->freq = rate48 ? SBC_FREQ_48K : SBC_FREQ_44K;
+	e->msbc = 0;
+}
+
+void sbc_enc_init_msbc( SBC_ENC *e )
+{
+	sbc_enc_init(e, 0, 0, MSBC_BITPOOL);
+	e->nch = 1;
+	e->blocks = 15;
+	e->freq = SBC_FREQ_16K;
+	e->msbc = 1;
 }
 
 int sbc_enc_frame_len( const SBC_ENC *e )
 {
-	int	bits = 16 * e->bitpool + ( e->joint ? 8 : 0 );
+	/* one channel, stereo and joint stereo all have blocks * bitpool bits of samples */
+	int	bits = e->blocks * e->bitpool + ( e->joint ? 8 : 0 );
 
-	return 4 + ( 4 * 8 * 2 ) / 8 + ( bits + 7 ) / 8;
+	return 4 + ( 4 * 8 * e->nch ) / 8 + ( bits + 7 ) / 8;
 }
 
 /* One block of 8 samples of one channel into its 8 subband samples */
@@ -112,7 +135,7 @@ static void analyse( SBC_ENC *e, const short *pcm, int ch, int *sb )
 		x[i] = x[i - 8];
 	}
 	for ( i = 7; i >= 0; i-- ) {
-		x[i] = pcm[( 7 - i ) * 2 + ch];
+		x[i] = pcm[( 7 - i ) * e->nch + ch];
 	}
 	for ( i = 0; i < 16; i++ ) {
 		y[i] = 0;
@@ -134,11 +157,11 @@ static void analyse( SBC_ENC *e, const short *pcm, int ch, int *sb )
 }
 
 /* The smallest scale factor that holds the samples of a subband */
-static int scale_of( const int *s, int step )
+static int scale_of( const int *s, int step, int blocks )
 {
 	int	i, top = 0, f = 0;
 
-	for ( i = 0; i < 16; i++ ) {
+	for ( i = 0; i < blocks; i++ ) {
 		int	v = s[i * step];
 
 		if ( v < 0 ) {
@@ -155,23 +178,24 @@ static int scale_of( const int *s, int step )
 }
 
 /*
- * The bits of each subband, both channels drawing on one bit pool: the
- * loudness rule of the specification, stereo and joint stereo alike.
+ * The bits of each subband, the channels drawing on one bit pool: the
+ * loudness rule of the specification, for one channel, stereo and joint
+ * stereo alike.
  */
-static void allocate( const SBC_ENC *e, const unsigned char sf[2][8], unsigned char bits[2][8] )
+void sbc_bit_alloc( int nch, int freq, int bitpool, const unsigned char sf[2][8], unsigned char bits[2][8] )
 {
 	int	need[2][8];
 	int	ch, sb, top = 0, slice, count = 0, in_slice = 0;
-	int	pool = e->bitpool;
+	int	pool = bitpool;
 
-	for ( ch = 0; ch < 2; ch++ ) {
+	for ( ch = 0; ch < nch; ch++ ) {
 		for ( sb = 0; sb < 8; sb++ ) {
 			int	n;
 
 			if ( sf[ch][sb] == 0 ) {
 				n = -5;
 			} else {
-				int	loud = sf[ch][sb] - offset8[e->rate48 ? 1 : 0][sb];
+				int	loud = sf[ch][sb] - offset8[freq & 3][sb];
 
 				n = ( loud > 0 ) ? loud / 2 : loud;
 			}
@@ -186,7 +210,7 @@ static void allocate( const SBC_ENC *e, const unsigned char sf[2][8], unsigned c
 		slice--;
 		count += in_slice;
 		in_slice = 0;
-		for ( ch = 0; ch < 2; ch++ ) {
+		for ( ch = 0; ch < nch; ch++ ) {
 			for ( sb = 0; sb < 8; sb++ ) {
 				if ( need[ch][sb] > slice + 1 && need[ch][sb] < slice + 16 ) {
 					in_slice++;
@@ -200,7 +224,7 @@ static void allocate( const SBC_ENC *e, const unsigned char sf[2][8], unsigned c
 		count += in_slice;
 		slice--;
 	}
-	for ( ch = 0; ch < 2; ch++ ) {
+	for ( ch = 0; ch < nch; ch++ ) {
 		for ( sb = 0; sb < 8; sb++ ) {
 			if ( need[ch][sb] < slice + 2 ) {
 				bits[ch][sb] = 0;
@@ -220,11 +244,9 @@ static void allocate( const SBC_ENC *e, const unsigned char sf[2][8], unsigned c
 			bits[ch][sb] = 2;
 			count += 2;
 		}
-		if ( ch == 1 ) {
+		if ( ++ch == nch ) {
 			ch = 0;
 			sb++;
-		} else {
-			ch = 1;
 		}
 	}
 	ch = sb = 0;
@@ -233,17 +255,15 @@ static void allocate( const SBC_ENC *e, const unsigned char sf[2][8], unsigned c
 			bits[ch][sb]++;
 			count++;
 		}
-		if ( ch == 1 ) {
+		if ( ++ch == nch ) {
 			ch = 0;
 			sb++;
-		} else {
-			ch = 1;
 		}
 	}
 }
 
 /* The frame's check: x^8 + x^4 + x^3 + x^2 + 1 from 0x0f, over the bits given */
-static unsigned char crc_bits( unsigned char crc, const unsigned char *b, int nbits )
+unsigned char sbc_crc8( unsigned char crc, const unsigned char *b, int nbits )
 {
 	int	i;
 
@@ -288,13 +308,14 @@ int sbc_enc_frame( SBC_ENC *e, const short *pcm, unsigned char *out )
 	BITS		w;
 	int		ch, sb, b, head_bits;
 
-	for ( b = 0; b < 16; b++ ) {
-		analyse(e, pcm + b * 8 * 2, 0, s[0][b]);
-		analyse(e, pcm + b * 8 * 2, 1, s[1][b]);
+	for ( b = 0; b < e->blocks; b++ ) {
+		for ( ch = 0; ch < e->nch; ch++ ) {
+			analyse(e, pcm + b * 8 * e->nch, ch, s[ch][b]);
+		}
 	}
-	for ( ch = 0; ch < 2; ch++ ) {
+	for ( ch = 0; ch < e->nch; ch++ ) {
 		for ( sb = 0; sb < 8; sb++ ) {
-			sf[ch][sb] = (unsigned char)scale_of(&s[ch][0][sb], 8);
+			sf[ch][sb] = (unsigned char)scale_of(&s[ch][0][sb], 8, e->blocks);
 		}
 	}
 	if ( e->joint ) {
@@ -306,8 +327,8 @@ int sbc_enc_frame( SBC_ENC *e, const short *pcm, unsigned char *out )
 				m[b] = ( s[0][b][sb] >> 1 ) + ( s[1][b][sb] >> 1 );
 				d[b] = ( s[0][b][sb] >> 1 ) - ( s[1][b][sb] >> 1 );
 			}
-			fm = scale_of(m, 1);
-			fd = scale_of(d, 1);
+			fm = scale_of(m, 1, 16);
+			fd = scale_of(d, 1, 16);
 			if ( fm + fd < sf[0][sb] + sf[1][sb] ) {
 				join |= 1u << sb;
 				sf[0][sb] = (unsigned char)fm;
@@ -319,15 +340,22 @@ int sbc_enc_frame( SBC_ENC *e, const short *pcm, unsigned char *out )
 			}
 		}
 	}
-	allocate(e, sf, bits);
+	sbc_bit_alloc(e->nch, e->freq, e->bitpool, sf, bits);
 
-	out[0] = SBC_SYNC;
-	out[1] = (unsigned char)( ( ( e->rate48 ? 3 : 2 ) << 6 )	/* the rate */
-				| ( 3 << 4 )				/* 16 blocks */
-				| ( ( e->joint ? 3 : 2 ) << 2 )		/* the channel mode */
-				| ( 0 << 1 )				/* loudness */
-				| 1 );					/* 8 subbands */
-	out[2] = (unsigned char)e->bitpool;
+	if ( e->msbc ) {
+		/* what the header would say is fixed: two bytes of zero in its place */
+		out[0] = MSBC_SYNC;
+		out[1] = 0;
+		out[2] = 0;
+	} else {
+		out[0] = SBC_SYNC;
+		out[1] = (unsigned char)( ( e->freq << 6 )			/* the rate */
+					| ( 3 << 4 )				/* 16 blocks */
+					| ( ( e->joint ? 3 : 2 ) << 2 )		/* the channel mode */
+					| ( 0 << 1 )				/* loudness */
+					| 1 );					/* 8 subbands */
+		out[2] = (unsigned char)e->bitpool;
+	}
 	w.p = out + 4;
 	w.bit = 0;
 	if ( e->joint ) {
@@ -335,17 +363,17 @@ int sbc_enc_frame( SBC_ENC *e, const short *pcm, unsigned char *out )
 			put_bits(&w, ( join >> sb ) & 1, 1);
 		}
 	}
-	for ( ch = 0; ch < 2; ch++ ) {
+	for ( ch = 0; ch < e->nch; ch++ ) {
 		for ( sb = 0; sb < 8; sb++ ) {
 			put_bits(&w, sf[ch][sb], 4);
 		}
 	}
 	head_bits = w.bit;
-	crc = crc_bits(0x0f, out + 1, 16);
-	crc = crc_bits(crc, out + 4, head_bits);
+	crc = sbc_crc8(0x0f, out + 1, 16);
+	crc = sbc_crc8(crc, out + 4, head_bits);
 	out[3] = crc;
-	for ( b = 0; b < 16; b++ ) {
-		for ( ch = 0; ch < 2; ch++ ) {
+	for ( b = 0; b < e->blocks; b++ ) {
+		for ( ch = 0; ch < e->nch; ch++ ) {
 			for ( sb = 0; sb < 8; sb++ ) {
 				int		n = bits[ch][sb];
 				unsigned int	levels;

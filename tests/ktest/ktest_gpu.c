@@ -29,6 +29,9 @@
 #include "sysdepend/sysdepend.h"
 #include "sysman/pfalloc.h"
 #include "sysman/space.h"
+#include <ts/ob.h>
+#include <ts/uuid.h>
+#include <ts/gpuapp.h>
 #include "../../device/gpu/gpudev.h"
 #include "../../device/gpu/v3d/v3d.h"
 #include "../../device/gpu/v3d/v3d_regs.h"
@@ -262,9 +265,23 @@ typedef struct {
 	INT		kicked;
 	UINT		last_kind;
 	UINT		resets;
+	INT		boost;		/* jobs waited for before they started, not over */
+	INT		boosted;	/* told of so many */
 } TB;
 
 LOCAL TB	tb;
+LOCAL T_SPLOCK	tb_lock;
+
+/* From the waiter and from the common layer's task, on any processor */
+LOCAL void tb_boost( void *priv, INT delta )
+{
+	UINT	imask;
+
+	ISpinLock(&tb_lock, &imask);
+	tb.boost += delta;
+	if ( delta > 0 ) tb.boosted += delta;
+	ISpinUnlock(&tb_lock, &imask);
+}
 
 LOCAL ER tb_info( void *priv, T_GPUINFO *info )
 {
@@ -313,7 +330,8 @@ LOCAL CONST T_GPUOPS	tb_ops = {
 	GPU_KIND_TEST,
 	GPU_FEAT_CL | GPU_FEAT_TFU | GPU_FEAT_CACHE | GPU_FEAT_MMU,
 	0,
-	tb_info, tb_bind, tb_unbind, tb_kick, tb_reset
+	tb_info, tb_bind, tb_unbind, tb_kick, tb_reset,
+	.boost = tb_boost
 };
 
 LOCAL void gpu_jobs( void )
@@ -325,6 +343,7 @@ LOCAL void gpu_jobs( void )
 	D		f1, f2, f3, f4;
 	UD		free0;
 	ER		er;
+	INT		nb;
 
 	KT_ASSERT_ER(knl_gpu_init(), E_OK);
 	knl_memset(&tb, 0, sizeof(tb));
@@ -385,6 +404,8 @@ LOCAL void gpu_jobs( void )
 	f4 = knl_gpu_submit(&job, NULL, 0);
 	KT_ASSERT_ER(knl_gpu_wait(f3, 500 * MS), E_IO);
 	KT_ASSERT_ER(knl_gpu_wait(f4, 500 * MS), E_OK);
+	/* jobs waited for while still queued above were boosted: all given back once over */
+	KT_ASSERT_EQ(tb.boost, 0);
 
 	/* a job still running keeps its BOs busy and alive */
 	bo2 = knl_gpu_bo_create(4096, 0, &er);
@@ -392,12 +413,25 @@ LOCAL void gpu_jobs( void )
 	if ( bo2 == NULL ) goto out_bo;
 	tb.hold = TRUE;
 	job.kind = GPU_JOB_CL;
+	nb = tb.boosted;
 	f1 = knl_gpu_submit(&job, &bo2, 1);
 	f2 = knl_gpu_submit(&job, &bo2, 1);		/* queued behind it */
 	KT_ASSERT_ER(knl_gpu_wait(f1, 20 * MS), E_TMOUT);
-	knl_gpu_bo_ref(bo2, &bi);
-	KT_ASSERT_EQ(bi.busy, 2);
-	KT_ASSERT_ER(knl_gpu_bo_wait(bo2, 10 * MS), E_TMOUT);
+	{
+		INT	b0 = tb.boosted;		/* f1 may have been queued at first */
+
+		KT_ASSERT_ER(knl_gpu_wait(f1, 10 * MS), E_TMOUT);
+		KT_ASSERT_EQ(tb.boosted, b0);		/* a wait on the running job boosts nothing */
+		knl_gpu_bo_ref(bo2, &bi);
+		KT_ASSERT_EQ(bi.busy, 2);
+		KT_ASSERT_ER(knl_gpu_bo_wait(bo2, TMO_POL), E_TMOUT);
+		KT_ASSERT_EQ(tb.boosted, b0);		/* nor a look that does not sleep */
+		KT_ASSERT_ER(knl_gpu_bo_wait(bo2, 10 * MS), E_TMOUT);
+		KT_ASSERT_EQ(tb.boosted, b0 + 1);	/* the queued one, once however often waited for */
+		KT_ASSERT_ER(knl_gpu_wait(f2, 10 * MS), E_TMOUT);
+		KT_ASSERT_EQ(tb.boosted, b0 + 1);
+		KT_ASSERT_EQ(tb.boost, 1 + ( b0 - nb ));	/* f2, and f1 if it was boosted */
+	}
 	KT_ASSERT_ER(knl_gpu_unregister(), E_BUSY);
 	knl_gpu_bo_put(bo2);				/* the jobs still hold it */
 	KT_ASSERT(v3d_mmu_lookup(&tb.mmu, bi.offset) != 0);
@@ -405,6 +439,7 @@ LOCAL void gpu_jobs( void )
 	knl_gpu_job_end(E_OK);				/* f1 ends, f2 runs and ends */
 	KT_ASSERT_ER(knl_gpu_wait(f2, 500 * MS), E_OK);
 	KT_ASSERT_ER(knl_gpu_wait(f1, TMO_POL), E_OK);
+	KT_ASSERT_EQ(tb.boost, 0);			/* given back when it was over */
 	KT_ASSERT_EQ(v3d_mmu_lookup(&tb.mmu, bi.offset), 0);	/* gone with its last reference */
 	KT_ASSERT_EQ(tb.resets, 0);
 
@@ -418,10 +453,155 @@ out:
 	v3d_mmu_fini(&tb.mmu);
 }
 
+
+/* ---------------------------------------------------------------- the GPU's object tells a backend that came */
+
+/* A backend that only says what it is: the object tells of it, no job runs */
+LOCAL ER tg_info( void *priv, T_GPUINFO *info )
+{
+	info->kind = GPU_KIND_TEST;
+	info->feature = GPU_FEAT_CL;
+	return E_OK;
+}
+
+LOCAL CONST T_GPUOPS	tg_ops = { GPU_KIND_TEST, GPU_FEAT_CL, 0, tg_info };
+
+LOCAL void tg_late( INT stacd, void *exinf )
+{
+	(void)stacd;
+	(void)exinf;
+	tk_dly_tsk(300);
+	(void)knl_gpu_register(&tg_ops, NULL);
+	tk_ext_tsk();
+}
+
+LOCAL INT tg_read( CONST TS_UUID *u, UB *t, INT max )
+{
+	ID	k = ob_opn_obj(u, OB_OP_R);
+	SZ	asz = 0;
+	ER	er;
+
+	if ( k <= 0 ) return (INT)k;
+	er = ob_rea_rec(k, OB_GP_STATE, 0, t, max - 1, &asz);
+	(void)ob_cls_obj(k);
+	if ( er < E_OK ) return (INT)er;
+	t[asz] = 0;
+	return (INT)asz;
+}
+
+LOCAL BOOL tg_has( CONST UB *t, CONST char *w )
+{
+	INT	i, k, n = (INT)knl_strlen(w), len = (INT)knl_strlen((CONST char *)t);
+
+	for ( i = 0; i + n <= len; i++ ) {
+		for ( k = 0; k < n && t[i + k] == (UB)w[k]; k++ ) ;
+		if ( k == n ) return TRUE;
+	}
+	return FALSE;
+}
+
+/* Notices of OB_E_CHANGE on record OB_GP_STATE at the port, taken: how many */
+LOCAL INT tg_notices( ID port, INT ms )
+{
+	T_OBNTM	m;
+	SZ	asz = 0;
+	INT	n = 0, waited = 0;
+
+	for (;;) {
+		while ( ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) >= E_OK && asz == (SZ)sizeof(m) ) {
+			if ( m.event == OB_E_CHANGE && m.recno == OB_GP_STATE ) n++;
+			asz = 0;
+		}
+		if ( n > 0 || waited >= ms ) break;
+		tk_dly_tsk(20);
+		waited += 20;
+	}
+	return n;
+}
+
+/*
+ * The object is there before any backend: a program that opened it and
+ * asked to be told is told when a backend registers later, finds the
+ * backend by what the call that asks the GPU answers, and is told again
+ * when it goes; one that opens it afterwards reads the state at once.
+ */
+LOCAL void gpu_obj_told( void )
+{
+	CONST TS_UUID	gu = OB_UUID_GPU_INIT;
+	T_GPUINFO	info;
+	T_OBCRE		c;
+	T_OBNTF		req;
+	TS_UUID		pu;
+	UB		t[512];
+	ID		port, kw, tid;
+	T_CTSK		ct;
+	ER		er;
+
+	if ( knl_gpu_ref(&info) >= E_OK ) KT_SKIP("a GPU is registered already");
+	KT_ASSERT_ER(knl_gpu_init(), E_OK);
+
+	/* a key opened before the backend, with the request made before looking */
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	KT_ASSERT_ER(ob_cre_obj(&c, &pu), E_OK);
+	port = ob_opn_obj(&pu, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT);
+	kw = ob_opn_obj(&gu, OB_OP_ATRRD);
+	KT_ASSERT(port > 0 && kw > 0);
+	if ( port <= 0 || kw <= 0 ) goto out;
+	knl_memset(&req, 0, sizeof(req));
+	req.events = OB_E_CHANGE;
+	KT_ASSERT(ob_ntf_evt(kw, OB_GP_STATE, &req, port) > 0);
+	KT_ASSERT(tg_read(&gu, t, sizeof(t)) > 0 && tg_has(t, "BACKEND none"));
+	KT_ASSERT_ER(knl_gpu_ref(&info), E_NOEXS);
+	(void)tg_notices(port, 0);
+
+	/* nothing is told while no one registers, and the task that does comes later */
+	knl_memset(&ct, 0, sizeof(ct));
+	ct.tskatr = TA_HLNG | TA_RNG0;
+	ct.task = (FP)tg_late;
+	ct.itskpri = KT_PRI_HIGH;
+	ct.stksz = 4096;
+	tid = tk_cre_tsk(&ct);
+	KT_ASSERT(tid > 0);
+	if ( tid <= 0 ) goto out;
+	KT_ASSERT_ER(tk_sta_tsk(tid, 0), E_OK);
+	KT_ASSERT_EQ(tg_notices(port, 100), 0);
+	KT_ASSERT_ER(knl_gpu_ref(&info), E_NOEXS);
+
+	/* told: the backend is there, and the record says so */
+	KT_ASSERT(tg_notices(port, 3000) >= 1);
+	er = knl_gpu_ref(&info);
+	KT_ASSERT_ER(er, E_OK);
+	if ( er < E_OK ) goto out;
+	KT_ASSERT_EQ(info.kind, GPU_KIND_TEST);
+	KT_ASSERT(tg_read(&gu, t, sizeof(t)) > 0 && tg_has(t, "BACKEND registered") && tg_has(t, "KIND test"));
+
+	/* opened after the registration: the state is there to read at once */
+	(void)tg_notices(port, 0);
+	KT_ASSERT(tg_read(&gu, t, sizeof(t)) > 0 && tg_has(t, "BACKEND registered"));
+	KT_ASSERT_ER(knl_gpu_ref(&info), E_OK);
+
+	/* a backend's own lines come with its text, and the change is told */
+	knl_gpu_obj_detail((CONST UB *)"STATE running\n", 14);
+	KT_ASSERT(tg_notices(port, 500) >= 1);
+	KT_ASSERT(tg_read(&gu, t, sizeof(t)) > 0 && tg_has(t, "STATE running"));
+
+	/* gone: told, and the record says none */
+	KT_ASSERT_ER(knl_gpu_unregister(), E_OK);
+	KT_ASSERT(tg_notices(port, 500) >= 1);
+	KT_ASSERT(tg_read(&gu, t, sizeof(t)) > 0 && tg_has(t, "BACKEND none"));
+	knl_gpu_obj_detail((CONST UB *)"", 0);
+out:
+	if ( kw > 0 ) (void)ob_cls_obj(kw);
+	if ( port > 0 ) (void)ob_cls_obj(port);
+	(void)ob_del_obj(&pu);
+}
+
 EXPORT void ktest_gpu( void )
 {
 	KT_RUN(gpu_mmu_table);
 	KT_RUN(gpu_bo_pages);
 	KT_RUN(gpu_bo_map);
 	KT_RUN(gpu_jobs);
+	KT_RUN(gpu_obj_told);
 }

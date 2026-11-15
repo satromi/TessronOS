@@ -112,7 +112,10 @@
  *		write to FAULT_VA and a read a page above it go to its entry,
  *		which goes back past the access (ts_flt_ret); the address is
  *		the one met, a register of FP/SIMD the entry changed is put
- *		back, and the entry taken away leaves it as before.
+ *		back, the picture is at the alignment of T_TSFLT (on x86-64
+ *		also with the stack pointer 8 off a multiple of 16, the red
+ *		zone below it kept), and the entry taken away leaves it as
+ *		before.
  *	SP_USBDEV a USB device of the program's own (us_, class 12): the
  *		FTDI serial converter the test plugged in is listed and its
  *		device descriptor read; opened (and not twice); a vendor
@@ -172,6 +175,11 @@
  *		device's object with a channel of its own, over and over
  *		(ui_sndmix: two of these at once are two programs to the
  *		mixer).
+ *	SP_RECORD records from the microphone for arg[1] ms, 16 kHz mono,
+ *		reading what comes as it comes; with arg[2] 1 the input is
+ *		the test's tone first ("TESTIN 1" of the system object's
+ *		sound record, a kernel built with UITEST=1), let go after
+ *		(ui_sndmix_mic: the mixer shows the recording and its level).
  *	SP_ADMINASK asks the desktop for the administrator's rights
  *		(ts_admin_ask), which shows its panel for it; ends with what
  *		came of it (ktest_fq, a panel the desktop shows for it).
@@ -182,6 +190,12 @@
  *		and ends: what a program keeps as the machine goes off
  *	SP_SDNBG no window: writes /boot/SDNBG.TXT and sleeps until it is ended
  *	SP_SDNSTUCK no window: ignores being told to end, and has to be forced
+ *	SP_SOLIM the limits on its sockets (so_getlimit, so_setlimit): its
+ *		soft limit set to arg[1], that many made and one more
+ *		refused, a wait over them and one longer refused, one closed
+ *		and made again; held until a message, after which, with 1 in
+ *		it, the table the test filled meanwhile refuses one more.
+ *		arg[2] and arg[3] are the first soft and hard limits.
  *	SP_SLICE arg[1] 0: five tasks of its priority spin for arg[2] ms
  *		beside one more that notes the longest it went without
  *		running, which is the exit code (ms). arg[1] 1: one task
@@ -262,6 +276,8 @@ IMPORT ER ts_get_mono( UD *p_ns );
 #define SP_TVSVC	46
 #define SP_DPMEM	47
 #define SP_FNFACE	48
+#define SP_RECORD	49
+#define SP_SOLIM	50
 #define LIST_MAX	128
 #define MNT_MAX		32		/* mounts looked at: the system's few and a test's */
 #define BIG_SZ		( 160 * 1024 )
@@ -672,6 +688,61 @@ LOCAL INT limits( void )
 	if ( ts_rcv_msg(&msg, 10000) != E_OK ) return 525;
 	for ( i = 0; i < FS_PRC_FILE; i++ ) {
 		if ( fs_close(fds[i]) != EX_OK ) return 530;
+	}
+	return 0;
+}
+
+/*
+ * The limits on its sockets (so_getlimit): the first ones as the test
+ * says them, the soft one set to arg[1] and that many sockets made, the
+ * one past them refused with EX_MFILE, a wait over all of them taken and
+ * one longer refused; one closed lets one more be made. Then it holds
+ * them until a message: with 1 in it the soft limit goes back up and a
+ * socket is asked for again, which the system's table, full by then,
+ * refuses with E_LIMIT.
+ */
+#define SOLIM_MAX	64
+
+LOCAL INT	socks[SOLIM_MAX + 1];
+
+LOCAL INT solim( void )
+{
+	struct pollfd	p[SOLIM_MAX + 1];
+	INT		cur = -1, max = -1, n = (INT)arg[1], i, s;
+
+	if ( n <= 0 || n > SOLIM_MAX ) return 5000;
+	if ( so_getlimit(&cur, &max) != E_OK ) return 5001;
+	if ( cur != (INT)arg[2] || max != (INT)arg[3] ) return 5002;
+	if ( so_setlimit(max, max - 1) != E_PAR ) return 5003;	/* the soft one past the hard one */
+	if ( so_setlimit(n, max) != E_OK ) return 5004;
+	if ( so_getlimit(&cur, &max) != E_OK || cur != n || max != (INT)arg[3] ) return 5005;
+	for ( i = 0; i < n; i++ ) {
+		socks[i] = so_socket(AF_INET, SOCK_DGRAM, 0);
+		if ( socks[i] < 0 ) return 5100 + i;
+	}
+	if ( so_socket(AF_INET, SOCK_DGRAM, 0) != EX_MFILE ) return 5006;
+	for ( i = 0; i < n; i++ ) {
+		p[i].fd = socks[i];
+		p[i].events = POLLOUT;
+		p[i].revents = 0;
+	}
+	if ( so_poll(p, n, TMO_POL) != n ) return 5007;		/* every datagram socket may send */
+	p[n] = p[0];
+	if ( so_poll(p, n + 1, TMO_POL) != E_PAR ) return 5008;
+	if ( so_close(socks[0]) != E_OK ) return 5009;
+	socks[0] = so_socket(AF_INET, SOCK_DGRAM, 0);
+	if ( socks[0] < 0 ) return 5010;
+	if ( so_socket(AF_INET, SOCK_DGRAM, 0) != EX_MFILE ) return 5011;
+
+	if ( ts_rcv_msg(&msg, 60000) != E_OK ) return 5012;
+	if ( msg.body[0] == 1 ) {
+		if ( so_setlimit((INT)arg[2], (INT)arg[3]) != E_OK ) return 5013;
+		s = so_socket(AF_INET, SOCK_DGRAM, 0);
+		if ( s >= 0 ) (void)so_close(s);
+		if ( s != E_LIMIT ) return 5014;
+	}
+	for ( i = 0; i < n; i++ ) {
+		if ( so_close(socks[i]) != E_OK ) return 5015;
 	}
 	return 0;
 }
@@ -1850,6 +1921,7 @@ LOCAL INT faults( void )
 
 LOCAL volatile INT	flt_seen;
 LOCAL volatile UD	flt_far;
+LOCAL volatile INT	flt_odd;		/* pictures not at the alignment of T_TSFLT */
 #if defined(__x86_64__)
 LOCAL volatile UD	flt_skip;		/* bytes of the instruction that faults */
 #endif
@@ -1859,6 +1931,7 @@ LOCAL void flt_take( T_TSFLT *c )
 {
 	flt_seen++;
 	flt_far = c->far;
+	if ( ( (UD)c & ( __alignof__(T_TSFLT) - 1 ) ) != 0 ) flt_odd++;
 #if defined(__x86_64__)
 	c->pc += flt_skip;
 	__asm__ volatile ( "pxor %xmm8, %xmm8\n\tpxor %xmm0, %xmm0" );	/* (the program keeps nothing in them) */
@@ -1896,6 +1969,33 @@ LOCAL INT fltback( void )
 	(void)*(volatile UW *)( FAULT_VA + 0x1000 );
 #endif
 	if ( flt_seen != 2 || flt_far != FAULT_VA + 0x1000 ) return 3604;
+#if defined(__x86_64__)
+	{
+		/*
+		 * A fault with the stack pointer 8 off a multiple of 16, as in
+		 * code that has pushed one word, and with words in the red zone
+		 * below it, which the picture must not overwrite
+		 */
+		UD	rz8, rz120, keep;
+
+		flt_skip = 6;
+		__asm__ volatile (
+			"movq %%rsp, %2\n\t"
+			"andq $-16, %%rsp\n\t"
+			"subq $8, %%rsp\n\t"
+			"movq %3, -8(%%rsp)\n\t"
+			"movq %3, -120(%%rsp)\n\t"
+			"movl $1, (%4)\n\t"
+			"movq -8(%%rsp), %0\n\t"
+			"movq -120(%%rsp), %1\n\t"
+			"movq %2, %%rsp"
+			: "=&r"(rz8), "=&r"(rz120), "=&r"(keep)
+			: "r"(0x5a5a1234a5a5c3c3ULL), "a"(FAULT_VA) : "memory" );
+		if ( flt_seen != 3 || flt_far != FAULT_VA ) return 3607;
+		if ( rz8 != 0x5a5a1234a5a5c3c3ULL || rz120 != 0x5a5a1234a5a5c3c3ULL ) return 3608;
+	}
+#endif
+	if ( flt_odd != 0 ) return 3609;
 	if ( ts_def_flt(NULL) != E_OK ) return 3605;
 	if ( ts_def_flt((void (*)( T_TSFLT * ))0x10) != E_PAR ) return 3606;
 	return 0;
@@ -2729,6 +2829,64 @@ LOCAL INT tone( void )
 	return 0;
 }
 
+/* The system object's sound record written a line, for the tests */
+LOCAL ER sys_sound( CONST char *line )
+{
+	SZ	asz = 0, n = 0;
+	ER	er;
+	/* the system object, SYSDEF_SYSTEM */
+	static CONST TS_UUID	sys = { { 0x01, 0xa0, 0xd6, 0x80, 0x3a, 0xa6, 0x7c, 0x52,
+					  0x9d, 0x6f, 0x3e, 0x72, 0xa0, 0xb1, 0x8f, 0x14 } };
+	ID	k = ob_opn_obj(&sys, OB_OP_R | OB_OP_WRITE);
+
+	if ( k <= 0 ) return (ER)k;
+	while ( line[n] != 0 ) n++;
+	er = ob_wri_rec(k, OB_SYS_SOUND, 0, line, n, &asz);
+	ob_cls_obj(k);
+	return er;
+}
+
+/* Recorded from the microphone for arg[1] ms, what comes read as it comes */
+LOCAL INT record( void )
+{
+	static UB	buf[8192];
+	TS_UUID		dev;
+	SDPcmMode	m;
+	INT		cnt = 0, t, got = 0;
+	W		w;
+	SZ		asz = 0;
+	ID		k;
+	ER		er;
+
+	if ( arg[2] == 1 && sys_sound("TESTIN 1") < E_OK ) return 4900;
+	if ( ob_lst_obj(OB_T_DEVICE, OB_S_SOUND, NULL, &dev, 1, &cnt) < E_OK || cnt < 1 ) return 4901;
+	k = ob_opn_obj(&dev, OB_OP_R | OB_OP_WRITE);
+	if ( k <= 0 ) return 4902;
+	memset(&m, 0, sizeof(m));
+	m.sampling = PCMST16K;
+	m.datafmt = PCMFmt16;
+	m.stereo = 0;
+	(void)ob_wri_rec(k, OB_SND_MODE, 0, &m, sizeof(m), &asz);
+	w = 65536;
+	(void)ob_wri_rec(k, OB_SND_BUFSZ, 0, &w, sizeof(w), &asz);
+	w = PCM_REC;
+	er = ob_wri_rec(k, OB_SND_CTL, 0, &w, sizeof(w), &asz);
+	if ( er < E_OK ) {
+		ob_cls_obj(k);
+		if ( arg[2] == 1 ) (void)sys_sound("TESTIN 0");
+		return 4903;
+	}
+	for ( t = 0; t < (INT)arg[1]; t += 50 ) {
+		tk_dly_tsk(50);
+		if ( ob_rea_rec(k, OB_SND_PCM, 0, buf, sizeof(buf), &asz) >= E_OK ) got += (INT)asz;
+	}
+	w = PCM_STOP;
+	(void)ob_wri_rec(k, OB_SND_CTL, 0, &w, sizeof(w), &asz);
+	ob_cls_obj(k);
+	if ( arg[2] == 1 ) (void)sys_sound("TESTIN 0");
+	return ( got > 0 ) ? 0 : 4904;
+}
+
 /*
  * SP_TVRTT: the time of one round trip into the kernel and back, as the
  * drawing of documents in a process makes them (design 11.11): arg[1]
@@ -3101,6 +3259,8 @@ int main( void )
 	  case SP_OBSTUCK: return obstuck();
 	  case SP_ADMINASK: return adminask();
 	  case SP_TONE:	return tone();
+	  case SP_RECORD: return record();
+	  case SP_SOLIM: return solim();
 	  case SP_TCHURN: return tchurn();
 	  case SP_SLICE: return slice();
 	  case SP_SDNWIN: return sdnwin();

@@ -120,9 +120,28 @@
 #define SYSDEF_PROG_WORDDIC	"01a0d8c4-5312-7c23-8d34-5e6f7b8c9d12"	/* 単語登録 */
 #define SYSDEF_PROG_CALCU	"01a0d8c4-5320-7a41-8b52-6c7d8e9fa020"	/* 電卓 */
 #define SYSDEF_PROG_SCRPRINT	"01a0d8c4-53d0-7a21-8b32-4c5d6e7f53d0"	/* 画面印刷 */
+#define SYSDEF_PROG_BPRINT	"01a0d8c4-53a0-7b11-8c22-4d5e6f7a8b90"	/* 基本印刷 */
 #define SYSDEF_PROG_TRAY	"01a0d8c4-5430-7a31-8b42-5c6d7e8f5430"	/* トレー */
+#define SYSDEF_PROG_INFO	"01a0d8c4-5432-7c53-8d64-7e8f90a15432"	/* 管理情報 */
 #define SYSDEF_PROG_BASECOL	"01a0d8c4-5b92-7c53-8d64-9fab0c1d5b92"	/* 原紙集め */
+#define SYSDEF_PROG_TRASHOBJ	"01a0d6d1-08d6-7896-adb0-7469517f6b4b"	/* 屑実身操作 */
+#define SYSDEF_PROG_OBJSEARCH	"01a0d6d1-08d7-75a5-aac9-341907329044"	/* 実身/仮身検索 */
+#define SYSDEF_PROG_VNET	"01a0d6d1-08d8-7fad-953e-8efd87b6fdb2"	/* 仮身ネットワーク */
+#define SYSDEF_PROG_WINLIST	"01a0d8c4-52e2-7c63-9d74-e8f9a0b1c2d3"	/* ウインドウ一覧 */
+
+/*
+ * The programs of the system's 原紙箱 (SYSROLE_BASES) and 小物箱
+ * (SYSROLE_ACCS): what opens the boxes an installed program's templates
+ * and accessories are put in, and the desktop's menus name. They run as
+ * processes, but are not deleted (DT_RQ_REMOVE answers E_PAR), for the
+ * system does not stand without them; a package or the system's update
+ * may still replace them. SYSDEF_PROGS_KEPT lists them, for one list.
+ */
+#define SYSDEF_PROG_BASEBOX	"01a0d6d1-08d4-7809-bc38-c7d99aa28f29"	/* 原紙箱 */
+#define SYSDEF_PROG_ACCBOX	"01a0d6d1-08d5-7125-a6e5-6790429ce3a8"	/* 小物箱 */
+#define SYSDEF_PROGS_KEPT	{ SYSDEF_PROG_BASEBOX, SYSDEF_PROG_ACCBOX, SYSDEF_PROG_TRASHOBJ, SYSDEF_PROG_OBJSEARCH, SYSDEF_PROG_VNET, SYSDEF_PROG_WINLIST, SYSDEF_PROG_TRAY, SYSDEF_PROG_INFO }
 #define SYSDEF_PROG_DISKFIX	"01a0d8c4-53e0-7a31-8c42-5d6e7f8053e0"	/* ディスク修復 */
+#define SYSDEF_PROG_DISKOP	"01a0d8c4-53e8-7d61-8e71-4b5c6d7e53e8"	/* ディスク操作 */
 #define SYSDEF_PROG_MCARD	"01a0d8c4-5330-7a51-8c62-7d8e9fab3030"	/* マイクロカード */
 #define SYSDEF_PROG_CHARSRCH	"01a0d8c4-5350-7a61-8d72-9fab0c1d5050"	/* 文字検索 */
 #define SYSDEF_PROG_ARCHIVE	"01a0d8c4-5370-7a71-8e82-9fab0c1d7070"	/* 書庫管理 */
@@ -186,6 +205,7 @@
 #define SYSDEF_FW_MWX7922_RAM	"01a0d8c4-54a8-7a19-8b28-19a8a2b354a8"	/* WIFI_RAM_CODE_MT7922_1.bin */
 #define SYSDEF_FW_ATHX6174_FW	"01a0d8c4-55a0-7c01-8d10-01a0b2c355a0"	/* QCA6174 hw3.x firmware-6.bin, for TessronOS's athx */
 #define SYSDEF_FW_ATHX6174_BD	"01a0d8c4-55a2-7c03-8d12-03a2b2c355a2"	/* QCA6174 hw3.x board-2.bin */
+#define SYSDEF_FW_DMC_KBL	"01a0d8c4-55b0-7c11-8d20-11b0b2c355b0"	/* i915/kbl_dmc_ver1_04.bin, the display's DMC program (design 6.10) */
 
 /*
  * The Wi-Fi of the Raspberry Pi 5 (CYW43455 on SDIO, design 9.6.8): the
@@ -332,6 +352,8 @@
 #define SYSDEF_BOX_XFCONV	"01a0d8c4-52cb-7b44-9c54-9d0e1f2a3b45"	/* ファイル変換: 尋ねるパネル */
 #define SYSDEF_BOX_CALENDAR	"01a0d8c4-52d6-7d53-9e64-7f8091a2bc34"	/* 予定表: 上の帯と年月を尋ねるパネル */
 #define SYSDEF_BOX_SLIDE	"01a0d8c4-52db-7d64-8e75-9f8091a2b3db"	/* スライド: ジャンプと背景色変更の一覧のパネル */
+#define SYSDEF_BOX_RTPLAY	"01a0d8c4-52dc-7e75-8f86-a0b1c2d3e4dc"	/* 実時間制御TADの再生: プレイリストと背景色変更の一覧のパネル */
+#define SYSDEF_BOX_SYSINST	"01a0d8c4-54c2-7a13-8c24-4d5e6f7054c2"	/* システム登録: 窓のパネルと登録の前に尋ねるパネル */
 #define SYSDEF_BOX_CALC		"01a0d8c4-52e7-7a08-8b19-2c3d4e5f6a73"	/* 基本表計算: 検索/置換、用紙設定、保存の確認 */
 #define SYSDEF_BOX_KANATYPE	"01a0d8c4-52f2-7c23-8d34-5e6f7a8b9c12"	/* かな入力練習: 結果、先読みキー数 */
 #define SYSDEF_BOX_WORDDIC	"01a0d8c4-5314-7e45-8f56-7b8c9daebf14"	/* 単語登録: 窓のパネルと尋ねるパネル */
@@ -346,7 +368,14 @@
 #define SYSDEF_BOX_MICROSCRIPT	"01a0d8c4-521c-7f74-8d39-6fae4c8b2f45"	/* マイクロスクリプト: 接続の許可を尋ねるパネル */
 #define SYSDEF_BOX_BACKUP	"01a0d8c4-52b4-7f54-8d64-7c8f9fa0beb4"	/* バックアップ: 窓のパネル(保存と復帰のタブ)と次の媒体を尋ねるパネル */
 #define SYSDEF_BOX_FQUIT	"01a0d8c4-5422-7c32-9d43-8e5f6071a422"	/* 強制終了: 窓のパネルと立ち上げ直しを尋ねるパネル */
+#define SYSDEF_BOX_DISKOP	"01a0d8c4-53e9-7d62-8e72-4b5c6d7e53e9"	/* ディスク操作: 接続、状態表示、区画作成、拡張と知らせのパネル */
+#define SYSDEF_BOX_DISKFIX	"01a0d8c4-53ea-7d63-8e73-4b5c6d7e53ea"	/* ディスク修復: 窓、障害情報と尋ねるパネル */
 #define SYSDEF_BOX_TECHO	"01a0d8c4-53c2-7c33-8d44-5e6f7a8b53c2"	/* 電子手帳: 検索パネル、用紙設定、印刷と閉じるときに尋ねるパネル */
 #define SYSDEF_BOX_BROWSER	"01a0d8c4-5442-7c94-8a05-1b2c3d4e5442"	/* ブラウザ: 頁の alert・confirm・prompt と select の一覧のパネル */
+#define SYSDEF_BOX_BPRINT	"01a0d8c4-53a1-7b12-8c23-4d5e6f7a8b91"	/* 基本印刷: 印刷設定、印刷詳細設定、画面表示の帯、知らせ */
+#define SYSDEF_BOX_SCRPRINT	"01a0d8c4-53d1-7a22-8b33-4c5d6e7f53d1"	/* 画面印刷: 画面印刷／画面保存と、ディスクの数ごとの保存先のパネル */
+#define SYSDEF_BOX_TRAYV	"01a0d8c4-5431-7b42-8c53-6d7e8f905431"	/* トレー: 段のタグと紙のパネル */
+#define SYSDEF_BOX_INFO	"01a0d8c4-5433-7d64-8e75-8f90a1b25433"	/* 管理情報: 三つのタグのパネル、一覧から選ぶパネル、知らせ */
+#define SYSDEF_BOX_SYSTOOL	"01a0d8c4-5b94-7c55-8d66-9fab0c1d5b94"	/* システムの道具: 知らせ、確かめ、検索の条件のパネル */
 
 #endif /* __TS_SYSDEF_H__ */

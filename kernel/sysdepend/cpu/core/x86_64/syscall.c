@@ -68,4 +68,36 @@ EXPORT void knl_syscall_c( T_EXCFRAME *f )
 	f->rax = knl_svc_gateway(f);
 }
 
+/*
+ * ts_set_tls: the calling task's thread pointer, the FS base its code
+ * reaches its thread local storage through (lib/libpthread). A program
+ * sets it here on every processor: not every one lets user mode write
+ * the base itself (WRFSBASE and CR4.FSGSBASE are not in the 2nd
+ * generation Core i, mmu.c).
+ *
+ * The register takes only a canonical address (WRMSR faults on any
+ * other), and nothing of a process is above the user half: such a value
+ * is refused. The value goes into the register at once, and into the
+ * task's context, which the dispatcher saves from the register and loads
+ * back into it (dispatch.S); interrupts are masked between the two, so
+ * that the task is not switched out halfway.
+ */
+EXPORT ER knl_set_tls( UBINT tp )
+{
+	TCB	*me;
+	UINT	imask;
+
+	if ( tp >= USER_HALF_END ) {
+		return E_PAR;
+	}
+	DI(imask);
+	me = knl_ctxtsk;
+	wrmsr(MSR_FS_BASE, (UD)tp);
+	if ( me != NULL ) {
+		me->tskctxb.fsbase = (UD)tp;
+	}
+	EI(imask);
+	return E_OK;
+}
+
 #endif /* CPU_CORE_X86_64 */

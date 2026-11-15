@@ -1,0 +1,30 @@
+# システム登録 (design 11.32) on the x64 PC, for tools/x64/ui_run64.py with a second
+# NVMe laid out as Windows leaves it (tools/tests/mkwindisk.py make W.img C, given with
+# UI_EXTRA="-drive file=W.img,if=none,id=nv2,format=raw -device nvme,serial=win,drive=nv2"):
+# the program, a process, lists the disk through the desktop (DT_RQ_SYSINST), looks
+# at Windowsと共存する on it, shows what it would do in the panel that asks, and is
+# put away with 取消; nothing is written. The copy itself is the kernel's test
+# (tests/ktest/x86_64/ktest_sysinst.c).
+logmark
+open 01a0d8c4-54c0-7a11-8c22-4d5e6f7054c0
+expectsincein 60 sysinst: opened 1
+# no TessronOS on the disk: 上書きする and 初期化する both greyed
+expectsincein 60 sysinst: keep nvmeb 0 -1: -1
+waitwin システム登録 30
+wait 500
+shot sysinst64_open
+# 開始: the panel's button, at 506..606, 230..256 of the work area: the window opens in the middle
+win システム登録
+logmark
+click 880 288
+expectsincein 60 sysinst: plan nvmeb 0 -1: 0
+expectsince sysinst: ask 登録
+wait 800
+shot sysinst64_ask
+key 29
+expectsince sysinst: answered 0
+wait 300
+key 08 01
+expectsince sysinst: closed
+absent sysinst: started
+absent !OACV!

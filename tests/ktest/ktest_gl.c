@@ -21,6 +21,9 @@
  *	at the addresses the job names -- the context's own pages, never
  *	another context's, never a BO of the kernel's.
  *
+ *	The same program gives a window of its own two BOs to show its work
+ *	area from (gl_gsurf, OB_WR_GSURF), and the test looks at the screen.
+ *
  *	/boot/GLPROG.ELF (tests/uprog/glprog.c, made with make GL=1) draws
  *	with Mesa -- softpipe, as the machine has no GPU -- and reads what it
  *	drew back: a triangle, the depth test, textures with mipmaps, GLSL
@@ -36,6 +39,10 @@
 #include <ts/proc.h>
 #include <ts/fs.h>
 #include <ts/gpu.h>
+#include <ts/ob.h>
+#include <ts/dp.h>
+#include <ts/disp.h>
+#include <ts/wm.h>
 #include "../../device/gpu/gpudev.h"
 #include "../../device/gpu/v3d/v3d.h"
 
@@ -339,6 +346,314 @@ LOCAL void gl_gp_hold( void )
 	KT_ASSERT_EQ(pages_settled(before), before);
 }
 
+/* ---------------------------------------------------------------- a work area shown from BOs */
+
+/*
+ * A window of a process's shown from two BOs (OB_WR_GSURF; GPPROG.ELF
+ * gsurf): the BO itself laid over the work area, its pixels not copied
+ * into the window; another BO not shown while a job of the GPU uses it,
+ * shown once the job is over, by the job's end alone; the picture going
+ * with the window when it moves, under a window in front of it, copied
+ * into the window while the window is seen through; the last picture
+ * kept when the BOs are let go of; and nothing left -- BOs, pages, the
+ * window -- when the window is closed or the process killed. The jobs
+ * are on a backend of the test's own, which holds a job until the test
+ * lets it end.
+ */
+#define GS_BLUE		0x0000C0U
+#define GS_GREEN	0x00C000U
+#define GS_RED		0xC00000U
+
+LOCAL volatile BOOL	hj_hold;
+LOCAL volatile INT	hj_kicked;
+
+LOCAL ER hj_kick( void *priv, CONST T_GPUJOB *job, void *as )
+{
+	hj_kicked++;
+	if ( !hj_hold ) {
+		knl_gpu_job_end(E_OK);
+	}
+	return E_OK;
+}
+
+LOCAL CONST T_GPUOPS	hj_ops = {
+	GPU_KIND_TEST, GPU_FEAT_CL | GPU_FEAT_CACHE, 0,
+	jb_info, jb_bind, jb_unbind, hj_kick, jb_reset,
+	jb_as_create, jb_as_destroy, jb_as_bind, jb_as_unbind
+};
+
+LOCAL ID gs_start( void )
+{
+	T_CPRC	cprc;
+
+	cprc.pri    = KT_PRI_HIGH;
+	cprc.prcatr = 0;
+	cprc.stksz  = 0;
+	cprc.arg    = (void *)"gsurf";
+	cprc.argsz  = 5;
+	return ts_cre_prc(GP_PROG, &cprc);
+}
+
+/* Until the program has made so many semaphores (its steps done); FALSE if it ended first */
+LOCAL BOOL gs_steps( ID pid, INT n )
+{
+	T_RPRC	r;
+	INT	t;
+
+	for ( t = 0; t < 400; t++ ) {
+		if ( knl_own_list(TK_OWN_SEM, pid, NULL, 0) >= n ) {
+			return TRUE;
+		}
+		if ( ts_ref_prc(pid, &r) < E_OK || r.state != PS_RUNNING ) {
+			return FALSE;
+		}
+		tk_dly_tsk(50);
+	}
+	return FALSE;
+}
+
+LOCAL ER gs_send( ID pid, UINT type )
+{
+	T_TSMSG	*m = (T_TSMSG *)Kmalloc(sizeof(T_TSMSG));
+	ER	er;
+
+	if ( m == NULL ) return E_NOMEM;
+	knl_memset(m, 0, sizeof(T_TSMSG));
+	m->type = type;
+	er = ts_snd_msg(pid, m, 1000);
+	Kfree(m);
+	return er;
+}
+
+/* The window the program made */
+LOCAL INT gs_window( void )
+{
+	TS_UUID	*list;
+	T_OBREF	r;
+	INT	cnt, i, wid = 0;
+
+	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return 0;
+	for ( i = 0; i < cnt && wid == 0; i++ ) {
+		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_WINDOW
+		  && knl_strcmp((CONST char *)r.name, "ktgsurf") == 0 ) {
+			wid = wm_obj_wid(&list[i]);
+		}
+	}
+	Kfree(list);
+	return wid;
+}
+
+/* The screen's pixel at (x, y) of a window's work area, as built */
+LOCAL UW gs_px( INT wid, INT x, INT y )
+{
+	T_WMWIN		ref;
+	T_DISPSPEC	spec;
+	UB		*fb;
+
+	if ( wm_ref(wid, &ref) < E_OK || ts_disp_ref(&spec) < E_OK
+	  || ( fb = (UB *)ts_disp_buffer() ) == NULL ) return 0xFFFFFFFF;
+	return ((UW *)( fb + (UD)( ref.work.top + y ) * spec.pitch ))[ref.work.left + x] & 0x00FFFFFF;
+}
+
+LOCAL UW gs_own( INT wid, INT x, INT y )
+{
+	UW	px = 0xFFFFFFFF;
+
+	(void)knl_wm_gsurf_own_px(wid, x, y, &px);
+	return px;
+}
+
+/* Until the window shows BO idx under serial, up to 5 s */
+LOCAL BOOL gs_shown( INT wid, INT idx, UW serial )
+{
+	T_OBWGSTAT	st;
+	INT		t;
+
+	for ( t = 0; t < 100; t++ ) {
+		if ( wm_gsurf_ref(wid, &st) >= E_OK && st.shown == idx && st.shown_serial == serial ) {
+			return TRUE;
+		}
+		tk_dly_tsk(50);
+	}
+	return FALSE;
+}
+
+LOCAL void gl_gsurf( void )
+{
+	T_OBWGSTAT	st;
+	T_WMWIN		ref;
+	T_DPRECT	o;
+	T_PSTS		psts;
+	T_GPUJOB	job;
+	T_GPUBO		*bo1 = NULL;
+	UD		before;
+	INT		n0, wid, cw, mx, my, t, bos = -1, lk_look, lk_whole;
+	D		fence;
+	ID		pid;
+	ER		er;
+
+	if ( !present(GP_PROG) ) KT_SKIP("no " GP_PROG);
+	hj_hold = FALSE;
+	hj_kicked = 0;
+	jb_next = 0x100000;
+	jb_as_live = 0;
+	er = knl_gpu_register(&hj_ops, NULL);
+	if ( er == E_OBJ ) KT_SKIP("a GPU is registered already");
+	KT_ASSERT_ER(er, E_OK);
+	before = pages_free();
+	n0 = knl_wm_gsurf_count();
+
+	/* given, and BO 0 shown: laid itself, not copied into the window */
+	pid = gs_start();
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) goto out;
+	KT_ASSERT(gs_steps(pid, 1));
+	wid = gs_window();
+	KT_ASSERT(wid > 0);
+	if ( wid <= 0 ) goto kill;
+	KT_ASSERT_EQ(knl_wm_gsurf_count(), n0 + 1);
+	KT_ASSERT_ER(wm_ref(wid, &ref), E_OK);
+	mx = ( ref.work.right - ref.work.left ) / 2;
+	my = ( ref.work.bottom - ref.work.top ) / 2;
+	KT_ASSERT_ER(wm_gsurf_ref(wid, &st), E_OK);
+	KT_ASSERT(st.set && st.shown == 0 && st.laid);
+	KT_ASSERT_EQ(gs_px(wid, mx, my), GS_BLUE);
+	KT_ASSERT_EQ(gs_px(wid, 0, 0), GS_BLUE);
+	KT_ASSERT(gs_own(wid, mx, my) != GS_BLUE);	/* nothing was copied */
+
+	/* BO 1 shown while a job of the GPU uses it: not until the job is over */
+	KT_ASSERT_ER(knl_wm_gsurf_bo(wid, 1, &bo1), E_OK);
+	knl_memset(&job, 0, sizeof(job));
+	job.kind = GPU_JOB_CL;
+	hj_hold = TRUE;
+	cw = hj_kicked;
+	fence = knl_gpu_submit(&job, &bo1, 1);
+	KT_ASSERT(fence > 0);
+	for ( t = 0; t < 100 && hj_kicked == cw; t++ ) tk_dly_tsk(10);
+	KT_ASSERT(hj_kicked > cw);
+	KT_ASSERT_ER(gs_send(pid, 1), E_OK);
+	for ( t = 0; t < 100; t++ ) {
+		if ( wm_gsurf_ref(wid, &st) >= E_OK && st.waiting == 1 ) break;
+		tk_dly_tsk(20);
+	}
+	KT_ASSERT_EQ(st.waiting, 1);
+	(void)wm_update();
+	tk_dly_tsk(300);
+	KT_ASSERT_ER(wm_gsurf_ref(wid, &st), E_OK);
+	KT_ASSERT_EQ(st.shown, 0);
+	KT_ASSERT_EQ(gs_px(wid, 20, 20), GS_BLUE);	/* the BO being drawn is not seen */
+	hj_hold = FALSE;
+	knl_gpu_job_end(E_OK);				/* the job's end alone shows it */
+	KT_ASSERT_ER(knl_gpu_wait(fence, 2000000), E_OK);
+	KT_ASSERT(gs_shown(wid, 1, 2));
+	KT_ASSERT(gs_steps(pid, 2));			/* and the program was told */
+	KT_ASSERT_EQ(gs_px(wid, 20, 20), GS_GREEN);
+	KT_ASSERT_EQ(gs_px(wid, mx, my), GS_BLUE);
+	tm_printf((UB*)"  BO 1 shown after its job: (20,20) %06x, middle %06x\n",
+		  gs_px(wid, 20, 20), gs_px(wid, mx, my));
+
+	/* moved: the picture goes with the window */
+	o = ref.outer;
+	o.left += 40;  o.right += 40;  o.top += 30;  o.bottom += 30;
+	KT_ASSERT_ER(wm_move(wid, &o), E_OK);
+	(void)wm_update();
+	KT_ASSERT_EQ(gs_px(wid, 20, 20), GS_GREEN);
+	KT_ASSERT_EQ(gs_px(wid, mx, my), GS_BLUE);
+	KT_ASSERT_ER(wm_gsurf_ref(wid, &st), E_OK);
+	KT_ASSERT(st.laid);
+
+	/* under a window in front of it: the front window shows where it stands */
+	{
+		INT	fw;
+		T_DPRECT	fo, all;
+
+		KT_ASSERT_ER(wm_ref(wid, &ref), E_OK);
+		fo.left = ref.work.left - 20;
+		fo.top = ref.work.top - 20;
+		fo.right = ref.work.left + 30;
+		fo.bottom = ref.work.top + 30;
+		fw = wm_open(&fo, 0, "ktgsfront");
+		KT_ASSERT(fw > 0);
+		if ( fw > 0 ) {
+			all.left = 0;  all.top = 0;
+			all.right = fo.right - fo.left;  all.bottom = fo.bottom - fo.top;
+			(void)dp_fill_rect(wm_gid(fw), &all, GS_RED);
+			(void)wm_update();
+			KT_ASSERT_EQ(gs_px(wid, 20, 20), GS_RED);
+			KT_ASSERT_EQ(gs_px(wid, 40, 35), GS_GREEN);
+			KT_ASSERT_EQ(gs_px(wid, mx, my), GS_BLUE);
+			KT_ASSERT_ER(wm_close(fw), E_OK);
+			(void)wm_update();
+			KT_ASSERT_EQ(gs_px(wid, 20, 20), GS_GREEN);
+		}
+	}
+
+	/* seen through: the BO copied into the window, which is laid as before */
+	lk_look = wm_get(LK_LOOK);
+	lk_whole = wm_get(LK_OPA_WHOLE);
+	KT_ASSERT_ER(wm_set(LK_LOOK, 1), E_OK);
+	KT_ASSERT_ER(wm_set(LK_OPA_WHOLE, 1), E_OK);
+	KT_ASSERT_ER(wm_set_opacity(wid, 128), E_OK);
+	(void)wm_composite();
+	KT_ASSERT_ER(wm_gsurf_ref(wid, &st), E_OK);
+	KT_ASSERT(!st.laid);
+	KT_ASSERT_EQ(gs_own(wid, mx, my), GS_BLUE);
+	KT_ASSERT_EQ(gs_own(wid, 20, 20), GS_GREEN);
+	KT_ASSERT(gs_px(wid, mx, my) != GS_BLUE);
+	KT_ASSERT_ER(wm_set_opacity(wid, 255), E_OK);
+	(void)wm_set(LK_OPA_WHOLE, ( lk_whole < 0 ) ? 0 : lk_whole);
+	(void)wm_set(LK_LOOK, ( lk_look < 0 ) ? 1 : lk_look);
+	(void)wm_composite();
+	KT_ASSERT_ER(wm_gsurf_ref(wid, &st), E_OK);
+	KT_ASSERT(st.laid);
+	KT_ASSERT_EQ(gs_px(wid, mx, my), GS_BLUE);
+
+	/* let go of: the last picture stays */
+	KT_ASSERT_ER(gs_send(pid, 2), E_OK);
+	KT_ASSERT(gs_steps(pid, 3));
+	KT_ASSERT_EQ(knl_wm_gsurf_count(), n0);
+	(void)wm_update();
+	KT_ASSERT_EQ(gs_px(wid, 20, 20), GS_GREEN);
+	KT_ASSERT_EQ(gs_px(wid, mx, my), GS_BLUE);
+	KT_ASSERT_EQ(gs_own(wid, mx, my), GS_BLUE);
+
+	/* given again; the window closed under them: they go */
+	KT_ASSERT_ER(gs_send(pid, 3), E_OK);
+	KT_ASSERT(gs_steps(pid, 4));
+	KT_ASSERT_EQ(knl_wm_gsurf_count(), n0 + 1);
+	KT_ASSERT_EQ(gs_px(wid, 20, 20), GS_BLUE);
+	KT_ASSERT_ER(wm_close(wid), E_OK);
+	(void)wm_update();
+	KT_ASSERT_EQ(knl_wm_gsurf_count(), n0);
+	KT_ASSERT_ER(gs_send(pid, 4), E_OK);
+	psts.exitcd = -1;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 20000), E_OK);
+	if ( psts.exitcd != 0 ) {
+		tm_printf((UB*)"  the program stopped at step %d\n", psts.exitcd);
+	}
+	KT_ASSERT_EQ(psts.exitcd, 0);
+	KT_ASSERT_EQ(pages_settled(before), before);
+
+	/* killed while it shows them: nothing is left */
+	pid = gs_start();
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) goto out;
+	KT_ASSERT(gs_steps(pid, 1));
+	KT_ASSERT_EQ(knl_wm_gsurf_count(), n0 + 1);
+kill:
+	KT_ASSERT_ER(ts_ter_prc(pid, -7), E_OK);
+	psts.exitcd = 0;
+	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 20000), E_OK);
+	KT_ASSERT_EQ(knl_wm_gsurf_count(), n0);
+	KT_ASSERT_EQ(gs_window(), 0);
+	KT_ASSERT_EQ(pages_settled(before), before);
+	KT_ASSERT_EQ(wm_self_check(), 0);
+out:
+	hj_hold = FALSE;
+	KT_ASSERT_EQ(knl_gpu_ctx_count(&bos), 0);
+	KT_ASSERT_ER(knl_gpu_unregister(), E_OK);
+}
+
 /* ---------------------------------------------------------------- OpenGL ES */
 
 LOCAL BOOL	have_gl;
@@ -391,6 +706,7 @@ EXPORT void ktest_gl( void )
 	KT_RUN(gl_gp_bo);
 	KT_RUN(gl_gp_job);
 	KT_RUN(gl_gp_hold);
+	KT_RUN_SCREEN(gl_gsurf);
 	KT_RUN(gl_present);
 	KT_RUN(gl_info);
 	KT_RUN(gl_tri);

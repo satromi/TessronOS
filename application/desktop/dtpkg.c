@@ -496,6 +496,7 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, ID pid, CONST TS_UUID 
 				continue;
 			}
 			if ( om_store_refs(&was[k]) <= ( ( k < nwbase ) ? 1 : 0 ) ) {
+				if ( k < nwbase ) (void)ob_unl_obj(&was[k]);	/* the hold */
 				(void)del_object(&was[k]);
 			}
 		}
@@ -632,8 +633,25 @@ LOCAL void release_brought( CONST TS_UUID *prog, CONST DTPROG *p, BOOL release )
 }
 
 /*
+ * Whether the program is one the system's boxes need (SYSDEF_PROGS_KEPT:
+ * the programs of the system's 原紙箱 and 小物箱), which is not deleted
+ */
+LOCAL BOOL prog_kept( CONST TS_UUID *prog )
+{
+	static CONST char	*CONST kept[] = SYSDEF_PROGS_KEPT;
+	TS_UUID			u;
+	INT			i;
+
+	for ( i = 0; i < (INT)( sizeof(kept) / sizeof(kept[0]) ); i++ ) {
+		if ( ts_str_to_uuid(kept[i], &u) >= E_OK && ts_uuid_cmp(&u, prog) == 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
+/*
  * The person's 削除: out of the box, and what it comes to is a 屑実身.
- * Nothing is deleted here. An accessory's line leaves 小物の設定.
+ * Nothing is deleted here. An accessory's line leaves 小物の設定. The
+ * desktop's own and the programs the system's boxes need are refused.
  */
 EXPORT ER dt_prog_remove( CONST TS_UUID *prog )
 {
@@ -644,7 +662,7 @@ EXPORT ER dt_prog_remove( CONST TS_UUID *prog )
 	if ( p == NULL ) {
 		return E_NOEXS;
 	}
-	if ( p->builtin ) {
+	if ( p->builtin || prog_kept(prog) ) {
 		return E_PAR;
 	}
 	perm_off(prog);
@@ -655,7 +673,7 @@ EXPORT ER dt_prog_remove( CONST TS_UUID *prog )
 	}
 	dt_prog_reread();
 	dt_acc_sync();
-	dt_tool_refresh(DT_TOOL_TRASH);
+	dt_trash_tell();
 	return er;
 }
 
@@ -683,10 +701,22 @@ EXPORT ER dt_prog_drop( CONST TS_UUID *prog )
 	er = ( ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &box) >= E_OK ) ? om_obj_link_del(&box, prog) : E_SYS;
 	if ( er >= E_OK ) {
 		er = del_object(prog);
-		/* its templates; what its record 0 linked to once nothing else does */
+		/*
+		 * Its templates, with the hold reading the registry gave one
+		 * nothing linked to (dt_prog_reread) let go first: a template a
+		 * box of the person's still links to stays for that link. What
+		 * its record 0 linked to goes once nothing else does.
+		 */
 		for ( i = 0; i < nwas; i++ ) {
+			if ( i < nbase ) {
+				(void)ob_unl_obj(&was[i]);
+			}
 			if ( i < nbase || om_store_refs(&was[i]) <= 0 ) {
-				(void)del_object(&was[i]);
+				ER	de = del_object(&was[i]);
+
+				if ( i < nbase ) {
+					tm_printf((UB *)"dtprog: template %d of %s deleted (%d)\n", i, p->id, (INT)de);
+				}
 			}
 		}
 	}
@@ -730,7 +760,7 @@ LOCAL ER prog_adopt( CONST TS_UUID *u, CONST DTPROG *q, BOOL force, ID pid, CONS
 	release_brought(u, q, FALSE);
 	dt_base_box_put(u, TRUE);
 	dt_prog_reread();
-	dt_tool_refresh(DT_TOOL_TRASH);
+	dt_trash_tell();
 	if ( p_prog != NULL ) *p_prog = *u;
 	if ( p_how != NULL ) *p_how = DT_PKG_NEW;
 	tm_printf((UB *)"TessronOS desktop: %s registered again\n", q->id);

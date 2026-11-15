@@ -18,55 +18,8 @@
 # frame): the rows between two frames are white, as many as the room asked for. The shots
 # (arr_k_*, arr_p_*) are compared afterwards inside the window.
 # Keys: Ctrl+A 04 01, Ctrl+D 07 01, Ctrl+S 16 01, Ctrl+E 08 01.
-cabproc kernel
-mkbig fig 1 0
-xml <tad version="1.0" encoding="UTF-8"><figure>
-xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
-xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="45" height="25" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
-xml vobjleft="20" vobjtop="70" vobjright="180" vobjbottom="89" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
-xml vobjleft="20" vobjtop="120" vobjright="180" vobjbottom="200" height="80" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
-xml vobjleft="20" vobjtop="230" vobjright="180" vobjbottom="252" height="22" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml </figure></tad>
-xmlbig
-apps big virtual-object-list
-open big
-waitwin 画用紙 600
-sync 600
-wait 800
-key 04 01
-sync 600
-key 07 01
-wait 1500
-click 430 358
-wait 300
-click 902 537
-wait 800
-sync 600
-click 700 650
-sync 600
-wait 300
-shot arr_k_compact
-pixel 200 148 000000
-pixel 200 171 FFFFFF
-pixel 200 172 000000
-pixel 200 195 FFFFFF
-pixel 200 196 000000
-pixel 200 280 FFFFFF
-pixel 200 281 000000
-key 16 01
-sync 600
-sum show
-keep compact
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 0
 xml <tad version="1.0" encoding="UTF-8"><figure>
 xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
@@ -115,57 +68,9 @@ logmark
 key 16 01
 expectsince cabinet: saved (0)
 sum show
-same compact
+want ok 1720 6631f8b0533fde08
 key 08 01
 expect cabinet: closed
-wait 500
-mkbig fig 1 0
-xml <tad version="1.0" encoding="UTF-8"><figure>
-xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
-xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="45" height="25" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
-xml vobjleft="20" vobjtop="70" vobjright="180" vobjbottom="89" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
-xml vobjleft="20" vobjtop="120" vobjright="180" vobjbottom="200" height="80" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
-xml vobjleft="20" vobjtop="230" vobjright="180" vobjbottom="252" height="22" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml </figure></tad>
-xmlbig
-apps big virtual-object-list
-open big
-waitwin 画用紙 600
-sync 600
-wait 800
-key 04 01
-sync 600
-key 07 01
-wait 1500
-click 440 380
-wait 300
-click 902 537
-wait 800
-sync 600
-click 700 650
-sync 600
-wait 300
-shot arr_k_align
-pixel 200 148 000000
-pixel 200 197 FFFFFF
-pixel 200 198 000000
-pixel 200 247 FFFFFF
-pixel 200 248 000000
-pixel 200 358 FFFFFF
-pixel 200 359 000000
-key 16 01
-sync 600
-sum show
-keep align
-key 08 01
-sync 600
 wait 500
 mkbig fig 1 0
 xml <tad version="1.0" encoding="UTF-8"><figure>
@@ -215,54 +120,9 @@ logmark
 key 16 01
 expectsince cabinet: saved (0)
 sum show
-same align
+want ok 1721 cae862d1ffb35c81
 key 08 01
 expect cabinet: closed
-wait 500
-mkbig fig 1 0
-xml <tad version="1.0" encoding="UTF-8"><figure>
-xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000001"
-xml vobjleft="20" vobjtop="20" vobjright="180" vobjbottom="45" height="25" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08d2-7344-a6e2-6cede408d684_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000002"
-xml vobjleft="20" vobjtop="70" vobjright="180" vobjbottom="89" height="19" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08cf-750a-8479-73bdcfc4823c_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000003"
-xml vobjleft="20" vobjtop="120" vobjright="180" vobjbottom="200" height="80" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml <link id="01a0d6d1-08d1-781f-8f58-35c45aeacef9_0.xtad" vobjid="01a0d8c4-ca00-7000-8000-000000000004"
-xml vobjleft="20" vobjtop="230" vobjright="180" vobjbottom="252" height="22" chsz="14" frcol="#000000"
-xml chcol="#000000" tbcol="#ffffff" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
-xml </figure></tad>
-xmlbig
-apps big virtual-object-list
-open big
-waitwin 画用紙 600
-sync 600
-wait 800
-key 04 01
-sync 600
-key 07 01
-wait 1500
-click 842 284
-wait 300
-click 842 424
-wait 300
-click 652 402
-wait 300
-click 902 537
-wait 800
-sync 600
-click 700 650
-sync 600
-wait 300
-shot arr_k_name
-key 16 01
-sync 600
-sum show
-keep name
-key 08 01
-sync 600
 wait 500
 mkbig fig 1 0
 xml <tad version="1.0" encoding="UTF-8"><figure>
@@ -309,7 +169,7 @@ logmark
 key 16 01
 expectsince cabinet: saved (0)
 sum show
-same name
+want ok 1719 11bf9a9256112faf
 key 08 01
 expect cabinet: closed
 wait 500

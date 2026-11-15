@@ -230,13 +230,21 @@ LOCAL INT read_line( T_FTP *f, UB *line, INT max )
 typedef void (*LINECB)( T_FTP *f, CONST UB *line, void *arg );
 
 /*
- * A reply, all its lines: its code. A line that is not a reply's first
- * is passed over, as is a line in the middle of one that looks like its
- * end but is not ("234-" again).
+ * A reply, all its lines: its code. A line in the middle of one that
+ * looks like its end but is not ("234-" again) is passed over.
+ *
+ * A reply starts with its code. Lines that come before any code are the
+ * rest of an earlier reply the server ended too soon -- "211 Features:"
+ * with the features and "211 End" after it, where "211-" was due -- and
+ * the code line that closes them closes that reply, not this one; it is
+ * passed over too, so that each command still gets its own reply. With
+ * tail TRUE the caller knows such lines are coming and wants them as
+ * the reply (their lines go to cb either way).
  */
-LOCAL INT get_reply( T_FTP *f, LINECB cb, void *arg )
+LOCAL INT get_reply_x( T_FTP *f, LINECB cb, void *arg, BOOL tail )
 {
 	INT	n, code = -1;
+	BOOL	stray = tail;
 
 	for (;;) {
 		n = read_line(f, f->text, sizeof(f->text));
@@ -249,16 +257,37 @@ LOCAL INT get_reply( T_FTP *f, LINECB cb, void *arg )
 		if ( n >= 3 && is_digit(f->text[0]) && is_digit(f->text[1]) && is_digit(f->text[2]) ) {
 			INT	c = ( f->text[0] - '0' ) * 100 + ( f->text[1] - '0' ) * 10 + f->text[2] - '0';
 
-			if ( code < 0 ) {
+			if ( code < 0 && stray ) {
+				if ( f->text[3] != '-' ) {
+					stray = FALSE;
+					if ( tail ) {
+						code = c;
+						break;
+					}
+				}
+			} else if ( code < 0 ) {
 				code = c;
 				if ( f->text[3] != '-' ) break;
 			} else if ( c == code && f->text[3] != '-' ) {
 				break;
 			}
+		} else if ( code < 0 && n > 0 ) {
+			stray = TRUE;
 		}
 	}
 	f->code = code;
 	return code;
+}
+
+LOCAL INT get_reply( T_FTP *f, LINECB cb, void *arg )
+{
+	return get_reply_x(f, cb, arg, FALSE);
+}
+
+/* Whether a line that cannot start a reply has come already and waits to be read */
+LOCAL BOOL tail_waits( T_FTP *f )
+{
+	return (BOOL)( f->rat < f->rlen && f->rbuf[f->rat] == ' ' );
 }
 
 /* A command line sent: "CMD arg", the argument in the server's encoding */
@@ -362,9 +391,9 @@ EXPORT ER ftp_open( T_FTP *f, CONST T_FTPNET *net, CONST char *host, UINT port,
 		return (ER)f->ctl;
 	}
 
-	/* the greeting, after any "wait" */
+	/* the greeting, after any "wait": no reply came before it, so lines without a code are its own */
 	do {
-		code = get_reply(f, NULL, NULL);
+		code = get_reply_x(f, NULL, NULL, TRUE);
 	} while ( code >= 100 && code < 200 );
 	er = ( code == 220 ) ? E_OK : ( code < 0 ) ? (ER)code : ftp_error(code);
 
@@ -384,6 +413,10 @@ EXPORT ER ftp_open( T_FTP *f, CONST T_FTPNET *net, CONST char *host, UINT port,
 	}
 	if ( er >= E_OK ) {
 		code = get_reply(f, feat_line, NULL);
+		if ( code == 211 && tail_waits(f) ) {
+			/* "211 text" and the features after it: the list the server meant as "211-" */
+			code = get_reply_x(f, feat_line, NULL, TRUE);
+		}
 		if ( code < 0 ) er = (ER)code;
 		if ( code != 211 ) f->feat = 0;
 	}
@@ -622,36 +655,57 @@ LOCAL INT pasv_port( CONST UB *t )
 	return (INT)( v[4] * 256 + v[5] );
 }
 
-/* A data connection opened, to the host of the control connection */
-LOCAL ER data_open( T_FTP *f )
+/*
+ * A data connection the passive way, to the host of the control
+ * connection on the port the reply names. The address in a 227 reply is
+ * not used: a server behind NAT or listening on a loopback names one
+ * the client cannot reach, and a data connection to a third machine is
+ * not wanted anyway. *p_ctl is set when the control connection itself
+ * failed, the session then being of no further use.
+ */
+LOCAL ER pasv_open( T_FTP *f, BOOL epsv, BOOL *p_ctl )
 {
-	INT	code, port = -1;
+	INT	code, port;
 
-	if ( !f->pasv ) {
-		code = ftp_cmd(f, "EPSV", NULL);
-		if ( code < 0 ) {
-			return (ER)code;
-		}
-		if ( code == 229 ) {
-			port = epsv_port(f->text + 4);
-		} else if ( code >= 500 ) {
-			f->pasv = TRUE;
-		} else {
-			return ftp_error(code);
-		}
+	code = ftp_cmd(f, epsv ? "EPSV" : "PASV", NULL);
+	if ( code < 0 ) {
+		*p_ctl = TRUE;
+		return (ER)code;
 	}
-	if ( f->pasv ) {
-		code = ftp_cmd(f, "PASV", NULL);
-		if ( code != 227 ) {
-			return ( code < 0 ) ? (ER)code : ( code < 400 ) ? E_IO : ftp_error(code);
-		}
-		port = pasv_port(f->text);
+	if ( code != ( epsv ? 229 : 227 ) ) {
+		return ( code < 400 ) ? E_IO : ftp_error(code);
 	}
+	port = epsv ? epsv_port(f->text + 4) : pasv_port(f->text);
 	if ( port <= 0 ) {
 		return E_IO;
 	}
 	f->data = f->net->open(f->net->ctx, NULL, (UINT)port, f->ctl);
-	return ( f->data >= 0 ) ? E_OK : (ER)f->data;
+	if ( f->data < 0 ) {
+		ER	er = (ER)f->data;
+
+		f->data = -1;
+		return er;
+	}
+	return E_OK;
+}
+
+/*
+ * A data connection opened the passive way: EPSV, and PASV once EPSV
+ * was refused or what it named could not be reached. f->pasv keeps that
+ * PASV is the one to use.
+ */
+LOCAL ER data_open( T_FTP *f, BOOL *p_ctl )
+{
+	ER	er;
+
+	if ( !f->pasv ) {
+		er = pasv_open(f, TRUE, p_ctl);
+		if ( er >= E_OK || *p_ctl ) {
+			return er;
+		}
+		f->pasv = TRUE;
+	}
+	return pasv_open(f, FALSE, p_ctl);
 }
 
 /* v in decimal at s; how many digits */
@@ -744,7 +798,20 @@ LOCAL ER xfer_begin( T_FTP *f, CONST char *cmd, CONST UB *arg )
 	if ( f->data >= 0 || f->lsn >= 0 ) {
 		return E_OBJ;				/* one transfer at a time */
 	}
-	er = f->active ? data_listen(f) : data_open(f);
+	if ( f->active ) {
+		er = data_listen(f);
+	} else {
+		BOOL	ctl = FALSE;
+
+		er = data_open(f, &ctl);
+		if ( er < E_OK && !ctl && f->net->listen != NULL && f->net->accept != NULL ) {
+			/* no passive way to this server: the active one, from then on, once it works */
+			if ( data_listen(f) >= E_OK ) {
+				f->active = TRUE;
+				er = E_OK;
+			}
+		}
+	}
 	if ( er < E_OK ) {
 		return er;
 	}
@@ -875,6 +942,110 @@ LOCAL BOOL dots( CONST UB *s, INT n )
 	return (BOOL)( ( n == 1 && s[0] == '.' ) || ( n == 2 && s[0] == '.' && s[1] == '.' ) );
 }
 
+/* YYYY-MM-DD as a whole word: the year, month and day; FALSE when it is not that */
+LOCAL BOOL iso_date( CONST UB *w, INT n, D *p_y, INT *p_mo, INT *p_d )
+{
+	INT	k;
+
+	if ( n != 10 || w[4] != '-' || w[7] != '-' ) {
+		return FALSE;
+	}
+	*p_y = number(w, &k);
+	if ( k != 4 ) return FALSE;
+	*p_mo = (INT)number(w + 5, &k);
+	if ( k != 2 || *p_mo < 1 || *p_mo > 12 ) return FALSE;
+	*p_d = (INT)number(w + 8, &k);
+	return (BOOL)( k == 2 && *p_d >= 1 && *p_d <= 31 );
+}
+
+/* HH:MM or HH:MM:SS, with any fraction after the seconds, as a whole word */
+LOCAL BOOL iso_time( CONST UB *w, INT n, D *p_h, D *p_mi, D *p_s )
+{
+	INT	k;
+
+	*p_s = 0;
+	if ( n < 5 || w[2] != ':' ) {
+		return FALSE;
+	}
+	*p_h = number(w, &k);
+	if ( k != 2 || *p_h > 23 ) return FALSE;
+	*p_mi = number(w + 3, &k);
+	if ( k != 2 || *p_mi > 59 ) return FALSE;
+	if ( n == 5 ) return TRUE;
+	if ( w[5] != ':' ) return FALSE;
+	*p_s = number(w + 6, &k);
+	if ( k != 2 || *p_s > 60 ) return FALSE;
+	return (BOOL)( n == 8 || w[8] == '.' || w[8] == ',' );
+}
+
+/* A zone after a time: +HHMM or -HHMM, its offset in seconds; FALSE when it is not that */
+LOCAL BOOL iso_zone( CONST UB *w, INT n, D *p_off )
+{
+	INT	k;
+	D	v;
+
+	if ( n != 5 || ( w[0] != '+' && w[0] != '-' ) ) {
+		return FALSE;
+	}
+	v = number(w + 1, &k);
+	if ( k != 4 ) return FALSE;
+	*p_off = ( v / 100 ) * 3600 + ( v % 100 ) * 60;
+	if ( w[0] == '-' ) *p_off = -*p_off;
+	return TRUE;
+}
+
+/* The name of a line of "ls -l", from i on (a link's " -> where" taken off) */
+LOCAL BOOL unix_name( T_FTP *f, CONST UB *s, INT i, T_FTPENT *e )
+{
+	INT	k, end;
+
+	if ( s[i] == ' ' || s[i] == '\t' ) i++;
+	for ( end = i; s[end] != 0; end++ ) ;
+	if ( s[0] == 'l' ) {
+		for ( k = i; k + 3 < end; k++ ) {
+			if ( s[k] == ' ' && s[k + 1] == '-' && s[k + 2] == '>' && s[k + 3] == ' ' ) {
+				end = k;
+				break;
+			}
+		}
+	}
+	if ( end <= i || dots(s + i, end - i) ) {
+		return FALSE;
+	}
+	from_server(f, s + i, end - i, e->name, sizeof(e->name));
+	return TRUE;
+}
+
+/*
+ * A line of "ls -l" with the date as ISO 8601 has it, as GNU ls
+ * --time-style=long-iso or full-iso prints it and some servers send:
+ * "-rw-r--r-- 1 user group 1234 2026-11-10 12:34 name", the time and,
+ * after seconds, a zone (+0900) there or not. The date is the first
+ * word past the owner that is one, the size the word before it; the
+ * time is local to the server unless a zone is given.
+ */
+LOCAL BOOL parse_iso( T_FTP *f, CONST UB *s, T_FTPENT *e, CONST INT *at, CONST INT *len, INT n )
+{
+	INT	m, mo = 0, d = 0, last;
+	D	y = 0, hh = 0, mi = 0, sec = 0, off = 0;
+
+	for ( m = 2; m + 1 < n; m++ ) {
+		if ( iso_date(s + at[m], len[m], &y, &mo, &d) ) break;
+	}
+	if ( m + 1 >= n || !is_digit(s[at[m - 1]]) ) {
+		return FALSE;
+	}
+	last = m;
+	if ( last + 2 < n && iso_time(s + at[last + 1], len[last + 1], &hh, &mi, &sec) ) {
+		last++;
+		if ( last + 2 < n && len[last] > 5 && iso_zone(s + at[last + 1], len[last + 1], &off) ) last++;
+	}
+	e->dir = (BOOL)( s[0] == 'd' );
+	e->size = number(s + at[m - 1], NULL);
+	e->mtime = ts_time(y, mo, d, (INT)hh, (INT)mi, (INT)sec) - off;
+	return unix_name(f, s, at[last] + len[last], e);
+}
+
 /*
  * A line of "ls -l": the kind in the first letter, then somewhere a
  * month, a day and a time or a year, the size just before the month
@@ -882,7 +1053,7 @@ LOCAL BOOL dots( CONST UB *s, INT n )
  */
 LOCAL BOOL parse_unix( T_FTP *f, CONST UB *s, T_FTPENT *e )
 {
-	INT	at[NTOK], len[NTOK], n, m, mo = 0, i, k, end;
+	INT	at[NTOK], len[NTOK], n, m, mo = 0, k;
 	D	day, y, hh = 0, mm = 0;
 
 	if ( s[0] != '-' && s[0] != 'd' && s[0] != 'l' ) {
@@ -893,7 +1064,7 @@ LOCAL BOOL parse_unix( T_FTP *f, CONST UB *s, T_FTPENT *e )
 		if ( ( mo = month_of(s + at[m], len[m]) ) > 0 ) break;
 	}
 	if ( mo == 0 ) {
-		return FALSE;
+		return parse_iso(f, s, e, at, len, n);
 	}
 	day = number(s + at[m + 1], &k);
 	if ( day < 1 || k != len[m + 1] ) {
@@ -919,22 +1090,7 @@ LOCAL BOOL parse_unix( T_FTP *f, CONST UB *s, T_FTPENT *e )
 	e->mtime = ( y > 0 ) ? ts_time(y, mo, (INT)day, (INT)hh, (INT)mm, 0) : 0;
 
 	/* the name: after one blank past the time or year */
-	i = at[m + 2] + len[m + 2];
-	if ( s[i] == ' ' || s[i] == '\t' ) i++;
-	for ( end = i; s[end] != 0; end++ ) ;
-	if ( s[0] == 'l' ) {
-		for ( k = i; k + 3 < end; k++ ) {
-			if ( s[k] == ' ' && s[k + 1] == '-' && s[k + 2] == '>' && s[k + 3] == ' ' ) {
-				end = k;
-				break;
-			}
-		}
-	}
-	if ( end <= i || dots(s + i, end - i) ) {
-		return FALSE;
-	}
-	from_server(f, s + i, end - i, e->name, sizeof(e->name));
-	return TRUE;
+	return unix_name(f, s, at[m + 2] + len[m + 2], e);
 }
 
 /* A line of DOS "dir": MM-DD-YY  HH:MMAM  <DIR> or size  name */
@@ -1034,11 +1190,33 @@ EXPORT BOOL ftp_parse_mlsd( T_FTP *f, CONST UB *line, T_FTPENT *e )
 #define L_MLSD	1
 #define L_NLST	2
 
-/* The lines of a listing's data, each read into an entry and given to cb */
+/*
+ * Whether a line of LIST that gave no entry is one with no name in it to
+ * lose: an empty one, "total N", or the directory itself or the one
+ * above (a name "." or ".." last)
+ */
+LOCAL BOOL list_nothing( CONST UB *s )
+{
+	INT	n = s_len(s), b;
+
+	if ( n == 0 || starts(s, "total ") ) {
+		return TRUE;
+	}
+	for ( b = n; b > 0 && !is_blank(s[b - 1]); b-- ) ;
+	return dots(s + b, n - b);
+}
+
+/*
+ * The lines of a listing's data, each read into an entry and given to
+ * cb. LIST is text for people, laid out as the server likes; when not
+ * one of its lines could be read, though some held names, the names are
+ * asked for again with NLST, which gives them alone, rather than none
+ * shown.
+ */
 LOCAL ER listing( T_FTP *f, CONST UB *path, INT how, FTP_ENTCB cb, void *arg )
 {
 	UB	chunk[256];
-	INT	got, i, n = 0, stop = 0;
+	INT	got, i, n = 0, stop = 0, good = 0, bad = 0;
 	BOOL	ok;
 	ER	er;
 
@@ -1082,6 +1260,8 @@ LOCAL ER listing( T_FTP *f, CONST UB *path, INT how, FTP_ENTCB cb, void *arg )
 				}
 			} else {
 				ok = ftp_parse_list(f, f->line, &f->ent);
+				if ( ok ) good++;
+				else if ( !list_nothing(f->line) ) bad++;
 			}
 			if ( ok ) {
 				stop = cb(arg, &f->ent);
@@ -1095,7 +1275,11 @@ LOCAL ER listing( T_FTP *f, CONST UB *path, INT how, FTP_ENTCB cb, void *arg )
 		(void)ftp_end(f);
 		return er;
 	}
-	return ftp_end(f);
+	er = ftp_end(f);
+	if ( er >= E_OK && how == L_LIST && good == 0 && bad > 0 ) {
+		er = listing(f, path, L_NLST, cb, arg);
+	}
+	return er;
 }
 
 EXPORT ER ftp_list( T_FTP *f, CONST UB *path, FTP_ENTCB cb, void *arg )

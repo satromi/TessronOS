@@ -1,0 +1,156 @@
+# The system's tools as processes (design 11.2.4), for tools/ui_run.py: 屑実身操作,
+# 実身/仮身検索, 仮身ネットワーク and ウインドウ一覧, each a program of its own. Each window
+# stands for the tool's program object and opens where the desktop's own tool opened.
+# Run again while open, a tool is brought to the front in the one window it has.
+# Keys: Ctrl+E 08 01, Enter 28, Delete 4C, Ctrl+A 04 01, Ctrl+G 0A 01, Ctrl+N 11 01.
+waitwin 原紙箱
+#
+# ---- 屑実身操作: a process, its list made by it
+logmark
+open 01a0d6d1-08d6-7896-adb0-7469517f6b4b
+waitwin 屑実身操作 30
+expectsince trash: up
+expectsince trash: told of changes (0)
+expectsince trash: opened 屑実身操作
+win 屑実身操作
+want ok 140 100 740 600
+# run again: the one window to the front, its list made again
+logmark
+open 01a0d6d1-08d6-7896-adb0-7469517f6b4b
+expectsince trash: run again
+nwin 屑実身操作
+want ok 1
+# a program deleted: its program object becomes a 屑実身, and the list is told
+logmark
+progrm 01a0f638-4c5a-78a9-9bbd-adfbafa3466a
+want ok 0
+expectsince trash: told to make the list again
+wait 800
+shot st_trash
+# everything taken and deleted for good, once agreed to
+logmark
+click 400 400
+key 04 01
+key 4C
+expectsince trash: ask panel open
+wait 600
+shot st_trash_ask
+key 28
+expectsince trash: ask panel answered yes
+# MPEG Player's program object is the administrator's: the desktop asks for the
+# administrator's password, which the disk does not have yet (chosen, typed twice)
+wait 1000
+shot st_trash_admin
+text ktest-admin
+key 2b
+text ktest-admin
+wait 300
+key 28
+expectsince the administrator's password was set
+expectsince trash: purge (
+expectsince trash: purged 1 of 1
+expectsince trash: 0 objects
+refs 01a0f638-4c5a-78a9-9bbd-adfbafa3466a
+want ok -1
+logmark
+key 08 01
+expectsince trash: closed
+#
+# ---- ウインドウ一覧: the windows, asked of the desktop
+logmark
+open 01a0d8c4-52e2-7c63-9d74-e8f9a0b1c2d3
+waitwin ウインドウ一覧 30
+expectsince winlist: up
+expectsince winlist: told of changes (0)
+win ウインドウ一覧
+want ok 700 80 1000 440
+wait 800
+shot st_winlist
+# another window opened: the list made again with it
+logmark
+open 01a0d8c4-5b92-7c53-8d64-9fab0c1d5b92
+waitwin 原紙集め 30
+expectsince winlist: 4 windows
+wait 800
+shot st_winlist2
+logmark
+key 08 01
+expectsince basecol: closed
+expectsince winlist: 3 windows
+logmark
+open 01a0d8c4-52e2-7c63-9d74-e8f9a0b1c2d3
+nwin ウインドウ一覧
+want ok 1
+#
+# ---- 実身/仮身検索: asked first, the window with what answered
+logmark
+open 01a0d6d1-08d7-75a5-aac9-341907329044
+expectsince search: search panel open
+wait 600
+shot st_search_ask
+text TADjs
+key 28
+expectsince search: search panel answered
+expectsince search: objects answered
+expectsince search: up
+wait 800
+shot st_search
+# 再検索 by running it again: the panel over the window, put away
+logmark
+open 01a0d6d1-08d7-75a5-aac9-341907329044
+expectsince search: run again
+expectsince search: search panel open
+key 29
+expectsince search: search panel put away
+nwin 検索結果「TADjs」 16件
+want ok 1
+#
+# ---- 仮身ネットワーク: from TADjsについて of the BTRON window, by 実身操作 > 仮身ネットワーク.
+# The window at 80,60, its work area from 90,89; the first column at 130, the next at 430
+logmark
+click 80 87 1
+wait 600
+move 90 220
+wait 150
+move 100 227
+wait 300
+move 200 227
+wait 150
+move 240 327
+wait 300
+click 240 327
+expectsince network: up
+expectsince network: told of changes (0)
+expectsince network: 18 objects 17 links as columns
+nwin 仮身ネットワーク: TADjsについて
+want ok 1
+win 仮身ネットワーク: TADjsについて
+want ok 80 60 980 660
+wait 800
+shot st_network
+# the lines bent at right angles, no arrowheads: the upright of TADjsについて's links stands
+# halfway between its right edge (330) and the left edge of the next column (430), at 380
+pixel 380 300 000000
+pixelnot 372 300 000000
+pixelnot 388 300 000000
+pixelnot 420 300 000000
+# Ctrl+G and Ctrl+N: the graph, and the columns again, in the same window
+logmark
+key 0A 01
+expectsince network: 18 objects 17 links as a graph
+nwin 仮身グラフ: TADjsについて
+want ok 1
+wait 800
+shot st_graph
+logmark
+key 11 01
+expectsince network: 18 objects 17 links as columns
+# its program run by itself: it starts only from a link, and the window stays the one
+open 01a0d6d1-08d8-7fad-953e-8efd87b6fdb2
+wait 500
+nwin 仮身ネットワーク: TADjsについて
+want ok 1
+logmark
+key 08 01
+expectsince network: closed
+absent !OACV!

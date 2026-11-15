@@ -2,9 +2,12 @@
 # tools/tests/mkvoldisk.py: volc.img plugged into the hub (VOLC1 a TSFS
 # partition uda0, a blank one uda1, a FAT16 one uda2). The first window
 # (BTRON) is made larger; 接続 from its menu (ディスク操作 at 440,480 when
-# the menu opens at 400,300, 接続 to its right) offers the partitions in a
-# panel in the middle of the screen, a row 26 pixels apart from 303. The
-# FAT partition is refused as files. VOLC1 attached: its link at the foot
+# the menu opens at 400,300, 接続 to its right) starts the program ディスク操作
+# (a process), which offers the partitions in a window of its own in the
+# middle of the screen, a list whose rows are 18 pixels apart from 332, its
+# 接続 at 823,498. The FAT partition is refused as files. Attaching and
+# taking away are an administrator's: the desktop asks for the password in
+# a panel of its own (chosen the first time, typed twice with Tab between). VOLC1 attached: its link at the foot
 # of the first window (120,205), marked as on another volume; opened, its
 # window keeps 切り離し from being done; closed, 切り離し leaves the link
 # pale, and opening it says the volume is not attached. 接続 again, then
@@ -35,9 +38,9 @@ click 530 481
 expect disk: connect offers
 wait 800
 shot vol_connect
-click 430 459
+click 430 440
 wait 200
-click 822 516
+click 823 498
 expect disk: uda2 is files, not objects
 wait 600
 shot vol_fat
@@ -57,16 +60,26 @@ wait 300
 click 530 301
 expect disk: connect offers
 wait 800
-click 430 407
+click 430 404
 wait 200
-click 822 516
+click 823 498
+wait 1000
+text ktest-admin
+key 2b
+text ktest-admin
+wait 300
+key 28
+expect the administrator's password was set
 expect disk: attached uda0 "VOLC1"
 wait 1000
 shot vol_attached
-# its top object opened: 切り離し refused
+# its top object opened: 切り離し refused. Its window (a process's) stands
+# over the first window, which is brought forward by its band first
 dclick 120 205
 wait 1500
 shot vol_top
+click 300 12
+wait 300
 click 60 205 1
 wait 300
 move 90 205
@@ -103,6 +116,9 @@ wait 300
 move 185 226
 wait 300
 click 185 226
+wait 1000
+text ktest-admin
+key 28
 expect disk: detached uda0
 wait 800
 shot vol_detached
@@ -126,9 +142,12 @@ wait 300
 click 190 206
 expect disk: connect offers
 wait 800
-click 430 407
+click 430 404
 wait 200
-click 822 516
+click 823 498
+wait 1000
+text ktest-admin
+key 28
 expect disk: attached uda0
 wait 1000
 click 60 205 1

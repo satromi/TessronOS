@@ -116,7 +116,8 @@ LOCAL CONST W snd_dn[OB_SND_NREC] = {
 	-122, -123, -124, -125, -126, -127, -128, -129, -130, -131, -132, -133, -134,
 	-141, -142,			/* the outputs, and the one chosen */
 	-143, -144,			/* the mixer, and a volume set */
-	-145				/* the monitor */
+	-145,				/* the monitor */
+	-146				/* the microphone */
 };
 
 /* A camera's records and the data numbers they are (OB_CAM_*, include/ts/cam.h) */
@@ -2356,5 +2357,6 @@ EXPORT void knl_obdev_start( void )
 	knl_obdisp_start();
 	knl_obinput_start();
 	knl_obgpio_start();
+	knl_gpu_obj_start();
 	knl_obusb_start();
 }

@@ -34,6 +34,12 @@
  *			(knl_part_rescan does not let one in use move): the
  *			volume is grown to its partition then.
  *
+ *	SI_KEEP (上書き) writes nothing of the table and copies no blocks: the
+ *	TessronOS partition there and its ESP are opened as they are, and
+ *	the steps of a system update (dt_sysup_onto) put on the system's
+ *	objects the running volume's list names and the loader and the
+ *	kernel /boot has; the rest of the volume stays.
+ *
  *	The copy of the volume is a dump: with the journal frozen and what
  *	it holds put in place (knl_jrnl_freeze, ts_sync_blk), the medium is
  *	the volume as one moment left it. The blocks before the first group
@@ -59,6 +65,7 @@
 #include <ts/tsfsjrnl.h>
 #include <ts/ob.h>
 #include "tstdlib.h"
+#include "../desktop/desktop.h"
 #include "si_core.h"
 
 IMPORT unsigned char	knl_sysvol_name[];
@@ -605,16 +612,104 @@ LOCAL ER esp_room( CONST UB *dev, UD *p_free )
 	return er;
 }
 
+/* The progress of the update told as the step SI_ST_UPDATE */
+typedef struct {
+	SI_PROG	cb;
+	void	*ctx;
+} SIKEEPCB;
+
+LOCAL void keep_prog( void *ctx, INT done, INT total )
+{
+	SIKEEPCB	*k = (SIKEEPCB *)ctx;
+
+	if ( k->cb != NULL ) k->cb(k->ctx, SI_ST_UPDATE, (UD)done, (UD)total);
+}
+
+/*
+ * SI_KEEP looked at, or done: the TessronOS partition of the plan and its
+ * ESP given the system's objects and the boot files of /boot as an update
+ * gives them (dt_sysup_onto). Answers why it cannot be (SI_R_*), *p_er
+ * what the work came to.
+ */
+LOCAL INT keep_onto( T_SIPLAN *pl, BOOL run, SI_PROG cb, void *ctx, ER *p_er )
+{
+	UB		ts[L_DEVNM + 1], esp[L_DEVNM + 1];
+	char		path[SI_NFILE][64];
+	UD		size[SI_NFILE];
+	T_SUBOOTF	bf[SI_NFILE];
+	T_SUONTO	*r;
+	T_FSTAT		st;
+	SIKEEPCB	k;
+	INT		nbf = 0, vd, why;
+	ER		er;
+
+	*p_er = E_OK;
+	name_of(ts, pl->disk, pl->ts_unit);
+	name_of(esp, pl->disk, pl->esp_unit);
+	/* an ESP システム登録 put the boot files on: the loader is looked for there */
+	vd = knl_fs_open_vol("fatfs", (CONST char *)esp, FS_MNT_RDONLY, 0);
+	er = ( vd >= 0 ) ? fs_statat(vd, "EFI/TESSRON/INSTALL.TXT", &st) : (ER)vd;
+	if ( vd >= 0 ) fs_close(vd);
+	if ( er < EX_OK ) {
+		return SI_R_NOBOOT;
+	}
+	if ( si_boot_files(path, size) < E_OK ) {
+		return SI_R_NOSYS;
+	}
+	/* named as the PC's package names them (tools/mktpk.py --boot, --boot-keep) */
+	bf[nbf].name = "EFI/BOOT/BOOTX64.EFI";
+	bf[nbf].src = path[SI_F_LOADER];
+	bf[nbf++].keep = FALSE;
+	bf[nbf].name = "tessronos.elf";
+	bf[nbf].src = path[SI_F_KERNEL];
+	bf[nbf++].keep = FALSE;
+	if ( path[SI_F_CMDLINE][0] != 0 ) {
+		bf[nbf].name = "cmdline.txt";
+		bf[nbf].src = path[SI_F_CMDLINE];
+		bf[nbf++].keep = TRUE;
+	}
+	r = (T_SUONTO *)Kmalloc(sizeof(T_SUONTO));
+	if ( r == NULL ) {
+		*p_er = E_NOMEM;
+		return SI_R_OK;
+	}
+	k.cb = cb;
+	k.ctx = ctx;
+	*p_er = dt_sysup_onto((CONST char *)ts, (CONST char *)esp, bf, nbf, run, keep_prog, &k, r);
+	(void)copy_str(pl->ver, sizeof(pl->ver), (CONST char *)r->ver);
+	(void)copy_str(pl->tver, sizeof(pl->tver), (CONST char *)r->tver);
+	pl->vol_need = r->vol_need;
+	pl->vol_free = r->vol_free;
+	pl->nobj = r->nobj;
+	switch ( r->why ) {
+	case DT_SU_R_OK:	why = SI_R_OK;		break;
+	case DT_SU_R_NOLIST:	why = SI_R_NOLIST;	break;
+	case DT_SU_R_NOVOL:	why = SI_R_NOVOL;	break;
+	case DT_SU_R_NOSYS:	why = SI_R_NOSYSVOL;	break;
+	case DT_SU_R_NEWER:	why = SI_R_NEWER;	break;
+	case DT_SU_R_FORM:	why = SI_R_FORM;	break;
+	case DT_SU_R_VOLFULL:	why = SI_R_VOLFULL;	break;
+	case DT_SU_R_ESPFULL:	why = SI_R_ESPFULL;	break;
+	case DT_SU_R_NOESP:	why = SI_R_NOBOOT;	break;
+	default:		why = SI_R_BUSY;	break;
+	}
+	Kfree(r);
+	return why;
+}
+
 EXPORT ER si_plan( CONST char *disk, INT mode, INT unit, T_SIPLAN *pl )
 {
 	T_SIDISK	*dk;
 	UB		boot[L_DEVNM + 1], dev[L_DEVNM + 1];
 	UD		need, lu;
+	BOOL		keep = (BOOL)( ( mode & SI_KEEP ) != 0 );
 	INT		i;
-	ER		er;
+	ER		er, ker;
 
+	mode &= ~SI_KEEP;
 	knl_memset(pl, 0, sizeof(*pl));
 	pl->mode = mode;
+	pl->keep = keep;
 	pl->ts_unit = pl->esp_unit = pl->esp_entry = -1;
 	(void)copy_str(pl->disk, sizeof(pl->disk), disk);
 	dk = (T_SIDISK *)Kmalloc(sizeof(T_SIDISK));
@@ -669,16 +764,18 @@ EXPORT ER si_plan( CONST char *disk, INT mode, INT unit, T_SIPLAN *pl )
 			}
 			pl->lost[0] = *p;
 			pl->nlost = 1;
-			/* as far as the free stretch right after it goes */
+			pl->had_ts = (BOOL)( p->kind == SI_K_TSFS );
+			/* as far as the free stretch right after it goes; kept, as it is */
 			pl->ts_unit = p->unit;
 			pl->ts_first = p->first;
 			pl->ts_last = p->last;
 			name_of(dev, dk->name, p->unit);
-			if ( knl_gpt_part((CONST char *)dev, &gp) >= E_OK && gp.grow_last > p->last ) {
+			if ( !keep && knl_gpt_part((CONST char *)dev, &gp) >= E_OK && gp.grow_last > p->last ) {
 				pl->ts_last = gp.grow_last;
 			}
 		} else if ( dk->tsfs >= 0 ) {
 			/* a system put here before: its partition written again */
+			pl->had_ts = TRUE;
 			pl->ts_unit = dk->parts[dk->tsfs].unit;
 			pl->ts_first = dk->parts[dk->tsfs].first;
 			pl->ts_last = dk->parts[dk->tsfs].last;
@@ -686,19 +783,35 @@ EXPORT ER si_plan( CONST char *disk, INT mode, INT unit, T_SIPLAN *pl )
 			pl->ts_first = dk->free_first;
 			pl->ts_last = dk->free_last;
 		}
-		if ( pl->ts_last == 0 || pl->ts_last - pl->ts_first + 1 < need ) {
-			pl->why = SI_R_NOROOM;
-			goto out;
-		}
-		name_of(dev, dk->name, pl->esp_unit);
-		if ( esp_room(dev, &pl->esp_free) < E_OK || pl->esp_free < pl->esp_bytes + SI_ESP_SLACK ) {
-			pl->why = SI_R_ESPFULL;
-			goto out;
+		if ( keep ) {
+			/* the TessronOS there kept: nothing is copied, the update has its own room to find */
+			if ( !pl->had_ts ) {
+				pl->why = SI_R_NOTSFS;
+				goto out;
+			}
+			pl->why = keep_onto(pl, FALSE, NULL, NULL, &ker);
+			if ( pl->why == SI_R_OK && ker < E_OK ) pl->why = SI_R_NOVOL;
+			if ( pl->why != SI_R_OK ) goto out;
+		} else {
+			if ( pl->ts_last == 0 || pl->ts_last - pl->ts_first + 1 < need ) {
+				pl->why = SI_R_NOROOM;
+				goto out;
+			}
+			name_of(dev, dk->name, pl->esp_unit);
+			if ( esp_room(dev, &pl->esp_free) < E_OK || pl->esp_free < pl->esp_bytes + SI_ESP_SLACK ) {
+				pl->why = SI_R_ESPFULL;
+				goto out;
+			}
 		}
 	} else {
 		TS_UUID	u;
 		UD	mb = ( dk->nsect >= ( 32ULL << 30 ) / SECT ) ? SI_ESP_MB_LARGE : SI_ESP_MB;
 
+		pl->had_ts = (BOOL)( dk->tsfs >= 0 );
+		if ( keep ) {
+			pl->why = SI_R_NOTSFS;		/* the disk goes whole */
+			goto out;
+		}
 		if ( in_use(dk, -1) ) {
 			pl->why = SI_R_INUSE;
 			goto out;
@@ -1695,10 +1808,11 @@ LOCAL BOOL still( CONST T_SIPLAN *pl )
 	if ( now == NULL ) {
 		return FALSE;
 	}
-	same = (BOOL)( si_plan((CONST char *)pl->disk, pl->mode, pl->ts_unit, now) >= E_OK && now->why == SI_R_OK
+	same = (BOOL)( si_plan((CONST char *)pl->disk, pl->mode | ( pl->keep ? SI_KEEP : 0 ), pl->ts_unit, now) >= E_OK
+		       && now->why == SI_R_OK
 		       && now->nsect == pl->nsect && now->ts_first == pl->ts_first && now->ts_last == pl->ts_last
 		       && now->esp_first == pl->esp_first && now->ts_unit == pl->ts_unit
-		       && now->src_blocks <= pl->src_blocks );
+		       && ( pl->keep || now->src_blocks <= pl->src_blocks ) );
 	Kfree(now);
 	return same;
 }
@@ -1721,11 +1835,26 @@ EXPORT ER si_run( T_SIPLAN *pl, SI_PROG cb, void *ctx, T_SIRES *res )
 		tm_printf((UB *)"sysinst: %s is not as it was when the plan was made\n", pl->disk);
 		return E_OBJ;
 	}
-	tm_printf((UB *)"sysinst: %s: %s, %s (%ld blocks, %ld taken) to sectors %ld to %ld\n", pl->disk,
-		  si_mode_name(pl->mode), pl->src, (D)pl->src_blocks, (D)pl->src_used,
+	tm_printf((UB *)"sysinst: %s: %s%s, %s (%ld blocks, %ld taken) to sectors %ld to %ld\n", pl->disk,
+		  si_mode_name(pl->mode), pl->keep ? " keep" : "", pl->src, (D)pl->src_blocks, (D)pl->src_used,
 		  (D)pl->ts_first, (D)pl->ts_last);
 
-	if ( pl->mode == SI_COEXIST || pl->mode == SI_REPLACE ) {
+	if ( pl->keep ) {
+		/* the TessronOS there kept: the system's objects and boot files put on as an update does */
+		INT	why;
+
+		res->failed_step = SI_ST_UPDATE;
+		if ( cb != NULL ) cb(ctx, SI_ST_UPDATE, 0, 1);
+		name_of(part, pl->disk, pl->ts_unit);
+		(void)copy_str(res->part, sizeof(res->part), (CONST char *)part);
+		why = keep_onto(pl, TRUE, cb, ctx, &er);
+		if ( er >= E_OK && why != SI_R_OK ) er = E_OBJ;
+		if ( er < E_OK ) {
+			tm_printf((UB *)"sysinst: %s: the system could not be put over (%d, %d)\n", part, why, (INT)er);
+			goto fail;
+		}
+		res->nobj = pl->nobj;
+	} else if ( pl->mode == SI_COEXIST || pl->mode == SI_REPLACE ) {
 		/* the partition: added after those in use, the one there is, or the one chosen made another */
 		res->failed_step = SI_ST_TABLE;
 		if ( cb != NULL ) cb(ctx, SI_ST_TABLE, 0, 1);

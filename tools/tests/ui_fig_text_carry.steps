@@ -1,0 +1,130 @@
+# 基本図形編集のプロセスの文字枠から、選んだ文字をウインドウの外へ運び出す (design 11.3), for
+# tools/ui_run.py. A figure of 30 small rectangles, two zigzag lines and one piece of text "ABC"
+# (mkbig fig 30 4 1; its box from 210,247 to 330,287 on the screen) is opened with the process
+# (its window 100,100 800x600), the text pressed twice to edit it and its letters picked. Then,
+# each from a figure as it was read:
+#   1. 速いドラッグ: pressed on the letters picked, the hand straight out of the window in one
+#      move to 1000,500, onto the document TADjsについて that the desktop opened at the start,
+#      the button let go at once. No move in the window is heard before the hand goes out
+#      (OB_E_LEAVE): the process follows the move out first, so it is a carry and not a click.
+#      The letters go to the document as one line (document: letters dropped) and leave the text.
+#   2. ゆっくりのドラッグ: the same, the hand moved out in steps: the same comes of it.
+#   3. クリック: pressed on the letters picked and let go where it was: the caret goes there,
+#      nothing is carried.
+# The keys go to the window let go on: the figure's name band is pressed to give them back
+# to it, which ends the editing of the text. Record 0 saved after 1 and after 2 is the same,
+# the text without its letters (sum 4412 a0d26d9531bddb65 where the figure read is 4415
+# b767ea9c87188e0f); after 3 it is the figure as it was read.
+# Keys: Escape 29; with Ctrl (01) S 16, E 08.
+mkbig fig 30 4 1; its box from 210,247 to 330,287 on the screen) is opened with the process,
+# the text pressed twice to edit it and "AB" picked. Then, each from a figure as it was read:
+#   1. 速いドラッグ: pressed on the letters picked, the hand straight out of the window in one
+#      move onto the document TADjsについて that the desktop opened at the start, the button let
+#      go at once. No move in the window is heard before the hand goes out (OB_E_LEAVE): the
+#      process follows the move out first, so it is a carry and not a click. The letters go
+#      to the document as one line (document: letters dropped) and leave the text.
+#   2. ゆっくりのドラッグ: the same, the hand moved out in steps: the same comes of it.
+#   3. クリック: pressed on the letters picked and let go where it was: the caret goes there,
+#      nothing is carried.
+# The keys go to the window let go on: the figure's name band is pressed to give them back
+# to it. Record 0 saved after 1 and after 2 is the same, and not the figure as it was read;
+# after 3 it is the figure as it was read.
+# Keys: Escape 29; with Ctrl (01) S 16, E 08.
+mkbig fig 30 4 1
+sum
+keep read
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 33
+wait 500
+logmark
+dclick 215 255
+expectsince figure: text editing begun
+drag 213 258 236 258
+wait 300
+logmark
+hold 218 258
+move 1000 500
+up
+expectsincein 10 figure: left the window carrying letters
+expectsincein 10 figure: letters carried out (0)
+expectsincein 10 document: letters dropped
+wait 500
+logmark
+click 500 112
+expectsince figure: text editing ended
+wait 300
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum show
+want ok 4412 a0d26d9531bddb65
+keep carried
+logmark
+key 08 01
+expectsince figure: closed
+wait 500
+# 2. the same, slowly
+mkbig fig 30 4 1
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 33
+wait 500
+logmark
+dclick 215 255
+expectsince figure: text editing begun
+drag 213 258 236 258
+wait 300
+logmark
+hold 218 258
+move 260 270
+wait 200
+move 400 330
+wait 200
+move 800 420
+wait 200
+move 1000 500
+wait 300
+up
+expectsincein 10 figure: letters carried out (0)
+expectsincein 10 document: letters dropped
+wait 500
+logmark
+click 500 112
+expectsince figure: text editing ended
+wait 300
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum show
+same carried
+logmark
+key 08 01
+expectsince figure: closed
+wait 500
+# 3. a click on the letters picked
+mkbig fig 30 4 1
+logmark
+pfig big
+expectsincein 60 figure: opened 画用紙 shapes 33
+wait 500
+logmark
+dclick 215 255
+expectsince figure: text editing begun
+drag 213 258 236 258
+wait 300
+logmark
+click 218 258
+wait 300
+key 29
+expectsince figure: text editing ended
+logmark
+key 16 01
+expectsince figure: saved (0)
+sum show
+same read
+logmark
+key 08 01
+expectsince figure: closed
+wait 500
+absent !OACV!

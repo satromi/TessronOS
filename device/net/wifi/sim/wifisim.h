@@ -33,7 +33,7 @@ typedef struct {
 	UB	dhcp_src[6];		/* and the address its frame came from */
 	BOOL	ready;			/* the network is up */
 	INT	open_stas;		/* stations whose port is open */
-	UW	air[20];		/* the air's counts (tswifi_sim.c, obsd_sim.c: rump_tswifisim_stats) */
+	UW	air[24];		/* the air's counts (tswifi_sim.c, obsd_sim.c: rump_tswifisim_stats) */
 } WIFISIM_COUNTS;
 
 /* The air's counts, by their place in air[] */
@@ -46,6 +46,11 @@ typedef struct {
 #define WSIM_AIR_AP_RX_BA	17	/* the same, as the access point counts them */
 #define WSIM_AIR_AP_OLD		18	/* the station's frames the access point dropped as old or duplicate */
 #define WSIM_AIR_AP_SEQSHARE	19	/* dropped by its one record of the numbers ("seqshare on") */
+#define WSIM_AIR_STA_NOKEY	20	/* the station's protected frames sent before its card had their key ("keydelay") */
+#define WSIM_AIR_STA_NOKEY_RX	21	/* and received then */
+#define WSIM_AIR_LATE_KEYS	22	/* the keys its card set late */
+#define WSIM_AIR_PORT_REL	23	/* the port opened this many ms + 1 after the card had its keys; ~0 before; 0 not seen */
+#define WSIM_AIR_N		24
 
 IMPORT ER	knl_wifisim_ctl( CONST char *cmd );
 IMPORT void	knl_wifisim_counts( WIFISIM_COUNTS *c );

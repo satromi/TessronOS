@@ -74,6 +74,7 @@ typedef struct {
 	UW	oper_baud;		/* the speed to run at; 0 stays at init_baud */
 	UB	bdaddr[6];		/* the board's own address, low byte first; all zero none */
 	ER	(*speed)( BTC *c, UW baud );	/* the host's end of the line to that speed */
+	BOOL	sco_hci;		/* SCO to the host on the HCI rather than to the chip's PCM pins */
 } BTBCFG;
 
 /*

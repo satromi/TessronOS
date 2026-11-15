@@ -385,6 +385,56 @@ EXPORT void knl_kernel_fault( void *frame, UD esr, UD far )
  */
 IMPORT BOOL knl_prc_ufault( UBINT va, UD esr );
 
+/*
+ * Whether len bytes at va of the running process's space can be read
+ * now: both ends inside the user range and mapped. A page not yet given
+ * (demand allocation) is not read, as the read would fault in the kernel.
+ */
+LOCAL BOOL el0_readable( UD l0, UBINT va, UBINT len )
+{
+	return va >= USER_TEXT_VA && va + len <= USER_STACK_TOP && va + len > va
+	    && knl_pt_lookup(l0, va & PAGE_MASK) != ~(UD)0
+	    && knl_pt_lookup(l0, ( va + len - 1 ) & PAGE_MASK) != ~(UD)0;
+}
+
+/*
+ * What a process that ends by an exception left: every register, the FS
+ * base, the 16 bytes of code at RIP and 8 words on top of its stack,
+ * told once on the way to the process's end. A part that cannot be read
+ * is said so.
+ */
+LOCAL void el0_dump( T_EXCFRAME *f )
+{
+	UD	l0 = knl_ctxtsk->tskctxb.ttbr0 & PTE_ADDR_MASK;
+	UB	code[16];
+	UD	w[8];
+	INT	i;
+
+	EXCEPTION_DBG_MSG(" rax=%016lx rbx=%016lx rcx=%016lx rdx=%016lx\n", f->rax, f->rbx, f->rcx, f->rdx);
+	EXCEPTION_DBG_MSG(" rsi=%016lx rdi=%016lx rbp=%016lx rsp=%016lx\n", f->rsi, f->rdi, f->rbp, f->rsp);
+	EXCEPTION_DBG_MSG(" r8 =%016lx r9 =%016lx r10=%016lx r11=%016lx\n", f->r8, f->r9, f->r10, f->r11);
+	EXCEPTION_DBG_MSG(" r12=%016lx r13=%016lx r14=%016lx r15=%016lx\n", f->r12, f->r13, f->r14, f->r15);
+	EXCEPTION_DBG_MSG(" rip=%016lx rflags=%lx cs=%04lx ss=%04lx error=%lx fsbase=%016lx\n",
+		f->rip, f->rflags, f->cs, f->ss, f->err, rdmsr(MSR_FS_BASE));
+	if ( el0_readable(l0, (UBINT)f->rip, sizeof(code)) ) {
+		knl_ua_get(code, (CONST void *)(UBINT)f->rip, sizeof(code));
+		EXCEPTION_DBG_MSG(" code at rip:");
+		for ( i = 0; i < 16; i++ ) {
+			EXCEPTION_DBG_MSG(" %02x", (UINT)code[i]);
+		}
+		EXCEPTION_DBG_MSG("\n");
+	} else {
+		EXCEPTION_DBG_MSG(" code at rip: unreadable\n");
+	}
+	if ( el0_readable(l0, (UBINT)f->rsp, sizeof(w)) ) {
+		knl_ua_get(w, (CONST void *)(UBINT)f->rsp, sizeof(w));
+		EXCEPTION_DBG_MSG(" stack %016lx %016lx %016lx %016lx\n", w[0], w[1], w[2], w[3]);
+		EXCEPTION_DBG_MSG("       %016lx %016lx %016lx %016lx\n", w[4], w[5], w[6], w[7]);
+	} else {
+		EXCEPTION_DBG_MSG(" stack at rsp: unreadable\n");
+	}
+}
+
 EXPORT void knl_el0_fault( void *frame, UD esr, UD far )
 {
 	T_EXCFRAME	*f = (T_EXCFRAME *)frame;
@@ -414,25 +464,15 @@ EXPORT void knl_el0_fault( void *frame, UD esr, UD far )
 		halt();
 	}
 	enaint(0);		/* tk_ext_tsk is a task-context call: run it with interrupts enabled */
-	{
-		/* the words on top of its stack: after a call or a return through
-		   a bad pointer, where it came from */
-		UD	l0 = knl_ctxtsk->tskctxb.ttbr0 & PTE_ADDR_MASK, w[4];
-		UBINT	sp = (UBINT)f->rsp;
-
-		if ( sp >= USER_TEXT_VA && sp + sizeof(w) <= USER_STACK_TOP
-		  && knl_pt_lookup(l0, sp & PAGE_MASK) != ~(UD)0
-		  && knl_pt_lookup(l0, ( sp + sizeof(w) - 1 ) & PAGE_MASK) != ~(UD)0 ) {
-			knl_ua_get(w, (CONST void *)sp, sizeof(w));
-			EXCEPTION_DBG_MSG(" stack %lx %lx %lx %lx\n", w[0], w[1], w[2], w[3]);
-		}
-	}
+	el0_dump(f);
 	knl_memset(&info, 0, sizeof(info));
 	info.kind = TS_FLT_EL0;
 	info.tskid = knl_ctxtsk->tskid;
 	info.esr = esr;
 	info.far = far;
-	info.elr = f->rip;
+	/* #BP is a trap: RIP is past the one-byte INT3; the fault names the
+	   INT3 itself, so that the panel's instruction bytes start with it */
+	info.elr = ( f->vec == 3 ) ? f->rip - 1 : f->rip;
 	info.lr = f->rbp;
 	/* a task of a process takes the whole process down (design 9.11) */
 	knl_prc_abort(knl_ctxtsk->tskctxb.ttbr0,

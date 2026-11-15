@@ -50,9 +50,14 @@ SRCS += kernel/sysdepend/x64/hw_setting.c \
 	kernel/sysdepend/acpi/acpi.c \
 	kernel/sysdepend/acpi/acpi_os.c \
 	kernel/sysdepend/acpi/acpi_power.c \
+	kernel/sysdepend/acpi/acpi_therm.c \
+	kernel/sysdepend/x64/cpuidle.c \
+	kernel/sysdepend/x64/hwp.c \
 	outer_kernel/wm/x86_64/compose_simd.c \
 	device/disp/disp_gop.c \
 	device/disp/x86_64/disp_igfx.c \
+	device/disp/x86_64/disp_igfx_aux.c \
+	device/disp/x86_64/disp_igfx_psr.c \
 	device/disp/x86_64/disp_ext.c \
 	device/gpu/intel/igt.c \
 	device/gpu/intel/igt_vm.c \

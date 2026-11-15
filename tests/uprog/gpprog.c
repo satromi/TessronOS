@@ -31,6 +31,8 @@
  *		each job's address space has there
  *	hold	BOs made and mapped in two contexts, a name shared, and the
  *		program ends with them all held: the test sees they go
+ *	gsurf	a window's work area shown from two BOs (OB_WR_GSURF), step
+ *		by step as the test asks (gsurf_test below)
  */
 
 #include <config.h>
@@ -39,6 +41,9 @@
 #include <tk/errno.h>
 #include <ts/uapp.h>
 #include <ts/gpuapp.h>
+#include <tk/syscall.h>
+#include <ts/proc.h>
+#include <ts/ob.h>
 
 static UB	arg[16];
 
@@ -212,6 +217,254 @@ static INT hold_test( void )
 	return 0;				/* ends with them all held */
 }
 
+/*
+ * gsurf: a window "ktgsurf" shown from two BOs (OB_WR_GSURF of
+ * include/ts/ob.h): BO 0 blue, given and shown; told when it is shown.
+ * Keys that are not the BOs', that may not read them, rows of a bad
+ * length and one BO twice are refused, and so is a show before any are
+ * given. A semaphore made says each step is done. Then, by messages
+ * from the test: 1, BO 1 blue with (10, 10)-(50, 40) green, shown by
+ * that rectangle, and told; 2, the BOs let go of; 3, given again and
+ * BO 0 shown, and told; 4 (the window was closed) a show is refused and
+ * the program ends.
+ */
+#define GS_BLUE		0x0000C0U
+#define GS_GREEN	0x00C000U
+
+static T_TSMSG	gs_msg;
+
+static BOOL gs_step( void )
+{
+	T_CSEM	cs;
+
+	memset(&cs, 0, sizeof(cs));
+	cs.sematr = TA_TFIFO;
+	cs.maxsem = 1;
+	return (BOOL)( tk_cre_sem(&cs) > 0 );
+}
+
+static void gs_fill( UW *p, UINT pitch, INT l, INT t, INT r, INT b, UW colour )
+{
+	INT	x, y;
+
+	for ( y = t; y < b; y++ ) {
+		UW	*row = (UW *)( (UB *)p + (SZ)y * pitch );
+
+		for ( x = l; x < r; x++ ) row[x] = colour;
+	}
+}
+
+/* Until the window is told BO idx is shown under serial; FALSE after 10 s */
+static BOOL gs_told( ID port, INT idx, UW serial )
+{
+	T_OBNTM	ntm;
+	SZ	asz;
+	INT	t;
+
+	for ( t = 0; t < 1000; t++ ) {
+		while ( ob_rea_rec(port, 0, 0, &ntm, sizeof(ntm), &asz) == E_OK && asz == (SZ)sizeof(ntm) ) {
+			if ( ntm.event == OB_E_CHANGE && ntm.recno == OB_WR_GSURF
+			  && ntm.code == (UINT)idx && (UW)ntm.x == serial ) {
+				return TRUE;
+			}
+		}
+		tk_dly_tsk(10);
+	}
+	return FALSE;
+}
+
+static ER gs_write( ID kw, CONST T_OBWGSURF *g )
+{
+	SZ	asz;
+
+	return ob_wri_rec(kw, OB_WR_GSURF, 0, g, sizeof(*g), &asz);
+}
+
+static INT gsurf_test( void )
+{
+	CONST char	*j = "{\"rect\":[300,200,560,380],\"attr\":7}";
+	T_OBCRE		c;
+	T_OBGBMAKE	mk;
+	T_OBNTF		req;
+	T_OBWPOS	wp;
+	T_OBWGSURF	g;
+	T_OBWGSTAT	st;
+	T_GPBO		bo[2];
+	TS_UUID		win, ch, bu[2];
+	UW		*p[2];
+	UINT		pitch;
+	SZ		asz;
+	INT		ctx, ww, wh, i;
+	ID		kw, port, key[2], weak;
+
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_WINDOW;
+	c.sub = OB_S_WINDOW;
+	c.name = (CONST UB *)"ktgsurf";
+	c.json = (CONST UB *)j;
+	for ( c.jsonsz = 0; j[c.jsonsz] != '\0'; c.jsonsz++ ) ;
+	if ( ob_cre_obj(&c, &win) != E_OK ) return 400;
+	kw = ob_opn_obj(&win, OB_OP_R | OB_OP_W);
+	if ( kw <= 0 ) return 401;
+	if ( ob_rea_rec(kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) != E_OK ) return 402;
+	ww = wp.wright - wp.wleft;
+	wh = wp.wbottom - wp.wtop;
+	if ( ww <= 60 || wh <= 50 ) return 403;
+	pitch = ( (UINT)ww * 4 + OB_GS_PITCH - 1 ) / OB_GS_PITCH * OB_GS_PITCH;
+
+	/* the BOs, drawn by the processor here as the GPU would draw them */
+	ctx = gp_opn_gpu();
+	if ( ctx <= 0 ) return 404;
+	for ( i = 0; i < 2; i++ ) {
+		if ( gp_cre_bo(ctx, (SZ)pitch * wh, GPU_BO_NOGPU, &bo[i]) != E_OK ) return 405;
+		if ( gp_map_bo(ctx, bo[i].handle, (void **)&p[i]) != E_OK ) return 406;
+		memset(&c, 0, sizeof(c));
+		c.type = OB_T_STORAGE;
+		c.sub = OB_S_GPUBO;
+		mk.ctx = ctx;
+		mk.handle = bo[i].handle;
+		mk.name = 0;
+		c.arg = &mk;
+		c.argsz = sizeof(mk);
+		if ( ob_cre_obj(&c, &bu[i]) != E_OK ) return 407;
+		key[i] = ob_opn_obj(&bu[i], OB_OP_R);
+		if ( key[i] <= 0 ) return 408;
+	}
+	gs_fill(p[0], pitch, 0, 0, ww, wh, GS_BLUE);
+
+	/* told when a BO is shown */
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	if ( ob_cre_obj(&c, &ch) != E_OK ) return 409;
+	port = ob_opn_obj(&ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT);
+	if ( port <= 0 ) return 410;
+	memset(&req, 0, sizeof(req));
+	req.events = OB_E_CHANGE;
+	if ( ob_ntf_evt(kw, OB_WR_GSURF, &req, port) <= 0 ) return 411;
+
+	/* refused */
+	memset(&g, 0, sizeof(g));
+	g.op = OB_GS_SHOW;
+	if ( gs_write(kw, &g) != E_OBJ ) return 420;		/* nothing given yet */
+	g.op = OB_GS_SET;
+	g.w = ww;
+	g.h = wh;
+	g.pitch = pitch;
+	g.format = OB_GS_XRGB8888;
+	g.bo[0] = kw;
+	g.bo[1] = key[1];
+	if ( gs_write(kw, &g) != E_OBJ ) return 421;		/* a key to the window */
+	g.bo[0] = 0x7FFF;
+	if ( gs_write(kw, &g) != E_ID ) return 422;		/* no key */
+	weak = ob_opn_obj(&bu[0], OB_OP_ATRRD);
+	if ( weak <= 0 ) return 423;
+	g.bo[0] = weak;
+	if ( gs_write(kw, &g) != E_OACV ) return 424;		/* may not read it */
+	ob_cls_obj(weak);
+	g.bo[0] = key[0];
+	g.bo[1] = key[0];
+	if ( gs_write(kw, &g) != E_PAR ) return 425;		/* one BO twice */
+	g.bo[1] = key[1];
+	g.pitch = pitch + 4;
+	if ( gs_write(kw, &g) != E_PAR ) return 426;		/* rows of a bad length */
+	g.pitch = pitch;
+	g.h = wh + 64;
+	if ( gs_write(kw, &g) != E_PAR ) return 427;		/* more rows than the BOs hold */
+	g.h = wh;
+	g.format = 0;
+	if ( gs_write(kw, &g) != E_PAR ) return 428;
+
+	/* given, and BO 0 shown */
+	g.format = OB_GS_XRGB8888;
+	if ( gs_write(kw, &g) != E_OK ) return 430;
+	if ( ob_rea_rec(kw, OB_WR_GSURF, 0, &st, sizeof(st), &asz) != E_OK || asz != (SZ)sizeof(st)
+	  || !st.set || st.shown != -1 ) return 431;
+	ob_cls_obj(key[0]);				/* the window holds the BOs */
+	ob_cls_obj(key[1]);
+	memset(&g, 0, sizeof(g));
+	g.op = OB_GS_SHOW;
+	g.idx = 0;
+	g.serial = 1;
+	if ( gs_write(kw, &g) != E_OK ) return 432;
+	if ( !gs_told(port, 0, 1) ) return 433;
+	if ( ob_rea_rec(kw, OB_WR_GSURF, 0, &st, sizeof(st), &asz) != E_OK
+	  || st.shown != 0 || st.shown_serial != 1 || st.waiting != -1 ) return 434;
+	if ( !gs_step() ) return 435;
+
+	for ( ;; ) {
+		if ( ts_rcv_msg(&gs_msg, 60000) != E_OK ) return 440;
+		switch ( gs_msg.type ) {
+		case 1:
+			/* BO 1 as BO 0 was, but for the rectangle */
+			gs_fill(p[1], pitch, 0, 0, ww, wh, GS_BLUE);
+			gs_fill(p[1], pitch, 10, 10, 50, 40, GS_GREEN);
+			memset(&g, 0, sizeof(g));
+			g.op = OB_GS_SHOW;
+			g.idx = 1;
+			g.serial = 2;
+			g.nrect = 1;
+			g.rect[0].left = 10;
+			g.rect[0].top = 10;
+			g.rect[0].right = 50;
+			g.rect[0].bottom = 40;
+			if ( gs_write(kw, &g) != E_OK ) return 441;
+			if ( !gs_told(port, 1, 2) ) return 442;
+			if ( !gs_step() ) return 443;
+			break;
+		case 2:
+			memset(&g, 0, sizeof(g));
+			g.op = OB_GS_DROP;
+			if ( gs_write(kw, &g) != E_OK ) return 450;
+			if ( gs_write(kw, &g) != E_OBJ ) return 451;
+			if ( ob_rea_rec(kw, OB_WR_GSURF, 0, &st, sizeof(st), &asz) != E_OK || st.set ) return 452;
+			if ( !gs_step() ) return 453;
+			break;
+		case 3:
+			for ( i = 0; i < 2; i++ ) {
+				key[i] = ob_opn_obj(&bu[i], OB_OP_R);
+				if ( key[i] > 0 ) continue;
+				/* the objects went with their keys: made again */
+				memset(&c, 0, sizeof(c));
+				c.type = OB_T_STORAGE;
+				c.sub = OB_S_GPUBO;
+				mk.ctx = ctx;
+				mk.handle = bo[i].handle;
+				mk.name = 0;
+				c.arg = &mk;
+				c.argsz = sizeof(mk);
+				if ( ob_cre_obj(&c, &bu[i]) != E_OK ) return 460;
+				key[i] = ob_opn_obj(&bu[i], OB_OP_R);
+				if ( key[i] <= 0 ) return 461;
+			}
+			memset(&g, 0, sizeof(g));
+			g.op = OB_GS_SET;
+			g.w = ww;
+			g.h = wh;
+			g.pitch = pitch;
+			g.format = OB_GS_XRGB8888;
+			g.bo[0] = key[0];
+			g.bo[1] = key[1];
+			if ( gs_write(kw, &g) != E_OK ) return 462;
+			memset(&g, 0, sizeof(g));
+			g.op = OB_GS_SHOW;
+			g.idx = 0;
+			g.serial = 3;
+			if ( gs_write(kw, &g) != E_OK ) return 463;
+			if ( !gs_told(port, 0, 3) ) return 464;
+			if ( !gs_step() ) return 465;
+			break;
+		case 4:
+			memset(&g, 0, sizeof(g));
+			g.op = OB_GS_SHOW;
+			g.serial = 4;
+			if ( gs_write(kw, &g) >= E_OK ) return 470;	/* the window is gone */
+			return 0;
+		default:
+			return 480;
+		}
+	}
+}
+
 #ifdef __x86_64__
 /*
  * place: BOs placed where the program chooses (gp_bnd_bo), for a GPU
@@ -261,6 +514,7 @@ int main( void )
 	if ( arg[0] == 'b' )		r = bo_test();
 	else if ( arg[0] == 'j' )	r = job_test();
 	else if ( arg[0] == 'h' )	r = hold_test();
+	else if ( arg[0] == 'g' )	r = gsurf_test();
 #ifdef __x86_64__
 	else if ( arg[0] == 'p' )	r = place_test();
 #endif

@@ -8,35 +8,8 @@
 # pixels of the bar and of the letters); Space converts it, Escape takes the conversion back, Escape again
 # ends the editing, and the figure is saved and closed.
 # Keys: End 4D, ひらがなカタカナ 88, Space 2C, Esc 29, 英数 39; Ctrl+E 08 01.
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
-mkbig fig 30 4 1 1
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-dclick 228 260
-sync 600
-key 4D
-key 88
-text kana
-sync 600
-shot vime_kernel
-pixel 232 320 D00000
-pixel 246 320 D00000
-pixelnot 240 300 FFFFFF
-key 2c
-wait 800
-shot vime_kernel_conv
-key 29
-key 29
-key 29
-key 39
-sync 600
-key 16 01
-sync 600
-key 08 01
-wait 1500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 30 4 1 1
 logmark
 pfig big

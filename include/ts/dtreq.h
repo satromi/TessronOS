@@ -31,6 +31,44 @@ extern "C" {
 #define DT_RQ_TOOL	2		/* the accessory (小物), or the system's tool (屑実身操作 ...), of this name started */
 
 /*
+ * DT_RQ_OPEN with DT_F_AUTO in flags (自動起動): the object opened as a
+ * link that asks to be opened with the window of the record that holds
+ * it, when that window opened. It is opened by no act of the person: it
+ * does not take the keys, and the windows opened together stand in the
+ * order of their links, grab_y the place of this one (1 the first), the
+ * asking window in front with the keys. A request with DT_F_AUTO and no
+ * target says that every link of the asking window that is to be opened
+ * so has been asked for (grab_y how many): the first window's say when
+ * what the system opens as it starts is all asked.
+ */
+#define DT_F_AUTO	0x0010
+
+/*
+ * The first window (最初のウインドウ, the cabinet BTRON the system opens
+ * with) is a window of 仮身一覧, a process, which the desktop starts as
+ * it starts and starts again when it ended while the session goes on.
+ * Its object is SYSDEF_CABINET.
+ *
+ *   DT_RQ_FIRST_CLOSE	the first window is to close (閉じる, Ctrl+E):
+ *			closing it ends the session. While the session is
+ *			not ending, the person is asked whether the system
+ *			is to end (OSを終了しますか？) in a panel over win:
+ *			E_ABORT, and the window stays as it is -- with はい
+ *			the system ends, and asks the window to close when
+ *			every other program has ended. While the session
+ *			ends, E_OK: the window closes, saving what changed
+ *
+ * A channel named with DT_RQ_TELL for first-window (the first window's)
+ * is told DT_HOW_LINK_PUT when something the system made is to be put
+ * on the desktop (a file printed, a screen saved, a disk attached):
+ * into the object, text its name. The window puts a closed link to it
+ * under what is there and saves the record.
+ */
+#define DT_RQ_FIRST_CLOSE 49
+#define DT_HOW_LINK_PUT	15
+#define DT_TELL_FIRST	"first-window"
+
+/*
  * A link carried out of the asking program's window: asked while the
  * hand is down on what the program shows as a link, the desktop carries
  * its outline until the hand lets go, and answers where. Let go over a
@@ -141,9 +179,26 @@ extern "C" {
  *			then on
  *   DT_RQ_PAPER	背景色変更: the colour asked for, starting from
  *			look.bgcol, kept as the paper of the object; it
- *			comes back in look.bgcol
- *   DT_RQ_FULL		win made the size of the screen above the message
- *			line (全画面表示); the program puts it back itself
+ *			comes back in look.bgcol. The pop-up has the
+ *			switch 仮身属性と同じ, on when the object's metadata
+ *			gives no paper of its own; kept on, the paper is
+ *			taken out of the metadata and look.bgcol comes back
+ *			DT_PAPER_SAME: the object is laid on its link's
+ *			表示領域背景 (or the system's look), as one that
+ *			never had a paper. look.bgcol TAD_COL_NONE in the
+ *			request asks with no colour to start from
+ *   DT_RQ_FULL		全画面表示: win made the size of the screen above
+ *			the message line, or, when it is that already by
+ *			全画面表示 and has not been sized or moved since,
+ *			put back where it stood before. The desktop keeps
+ *			where it stood, as it does for a double press on
+ *			the corner that sizes the window, which does the
+ *			same; the answer has DT_F_FULL in flags when the
+ *			window is now the screen's size. A program that
+ *			puts the window back itself still finds it made
+ *			the screen's size the next time it asks. With
+ *			DT_F_ASK in flags the window is left as it is, and
+ *			the answer only says whether it is so
  */
 #define DT_RQ_CLOSE	8
 #define DT_RQ_ATTR	9
@@ -156,6 +211,7 @@ extern "C" {
 #define DT_RQ_SEARCH	16
 #define DT_RQ_EXEC	17
 #define DT_RQ_PAPER	18
+#define DT_PAPER_SAME	0xFFFFFFFFU	/* DT_RQ_PAPER's look.bgcol: 仮身属性と同じ, no paper of its own (TAD_COL_NONE) */
 #define DT_RQ_FULL	19
 
 /*
@@ -175,11 +231,12 @@ extern "C" {
  * process made for them, a page of xmlTAD in each record -- a document,
  * which may run to several pages of its paper, or a figure, one sheet
  * of its paper -- and name is what is printed (UTF-8), the name the
- * file is given. The desktop asks with its panels in the middle of win,
- * shows the pages when asked, writes the file and puts a link to it on
- * the desktop; the answer is E_OK when it was written, E_ABORT when the
- * panel was put away. The object is the process's to throw away after
- * the answer.
+ * file is given. The desktop starts 基本印刷 (DT_RQ_PRJOB), whose panels
+ * ask how, which shows the pages when asked; the desktop writes the file
+ * and puts a link to it on the desktop. The answer comes when the job
+ * ends: E_OK when it was written, E_ABORT when the panel was put away.
+ * One asked for while another is worked waits its turn. The object is
+ * the process's to throw away after the answer.
  *
  * The pages lie on white unless flags has DT_F_PR_PAPER: then on
  * look.bgcol, the colour the window shows the paper in, as a window of
@@ -294,68 +351,15 @@ extern "C" {
 #define DT_RQ_SCREEN	30
 
 /*
- * 実時間制御TAD played in the asking program's window (design 15.5.1):
- * the scenes of such a record are documents and figures, which only the
- * desktop draws, so a program that plays media hands the record to it.
- * The desktop lays the scene out in the top left of win's work area,
- * look.w by look.h, and plays it there as it plays a slide, starting the
- * processes that sound and decode for it. win must be a window the asking
- * process made, and only that process asks about the player afterwards.
- *   DT_RQ_RT_OPEN	target's record recno (-1 the first) played, the
- *			ground round it look.bgcol (0xFFFFFFFF black). E_OBJ
- *			when the record has no <realtime>; the answer's how
- *			is the number the others name the player by
- *   DT_RQ_RT_DO	what recno says (DT_RT_*) done to player carry
- *   DT_RQ_RT_CLOSE	player carry stopped, its processes ended; it also
- *			goes by itself when win goes
- * The answers to DT_RQ_RT_OPEN and DT_RQ_RT_DO say how the program goes:
- * flags the DT_RTS_* bits, look.w its time in ms, look.h the media of its
- * playlist, text the title and the artist of the one playing. E_NOEXS:
- * there is no such player (any more).
- *
- * A slide (スライド, design 11.11) is opened with DT_F_RT_SLIDE in flags:
- * grab_x by grab_y is the screen the slides are made for, carry the
- * slide's number (from 1), look.chcol the slide's paper (0xFFFFFFFF its
- * object's, else white). The scene is then fitted to the work area,
- * look.w by look.h, its shape kept, in the middle, as the desktop shows
- * a slide. What the slide's program asks of the slides (slide:next,
- * slide:prev, slide:index:N) is kept and handed on in the next answer:
- * DT_RTS_GO in flags, look.disp what it asked (RT_ACT_NEXT, RT_ACT_PREV,
- * RT_ACT_INDEX of ts/rtad.h), look.autoopen the slide's index for
- * RT_ACT_INDEX.
+ * 31 to 33 were the requests by which a program had the desktop play
+ * 実時間制御TAD in its window. The program plays it itself now, with
+ * the player it links (include/ts/rtplay.h); the numbers are not used
+ * again.
  */
-#define DT_RQ_RT_OPEN	31
-#define DT_RQ_RT_DO	32
-#define DT_RQ_RT_CLOSE	33
-
-#define DT_RT_STATE	0		/* nothing done: only how it goes */
-#define DT_RT_TOGGLE	1		/* 再生 / 一時停止; one waiting to be begun begins */
-#define DT_RT_STOP	2		/* back to the start, and held there */
-#define DT_RT_RESTART	3		/* 先頭から */
-#define DT_RT_SEEK	4		/* grab_x ms forward, back when less than 0 */
-#define DT_RT_TRACK	5		/* the medium of the playlist grab_x after (before) the one playing */
-#define DT_RT_AREA	6		/* the scene laid out again in look.w by look.h */
-#define DT_RT_REDRAW	7		/* the scene drawn again */
-#define DT_RT_GROUND	8		/* 背景色変更: chosen in a panel over win */
-#define DT_RT_LIST	9		/* プレイリスト表示: a panel over win, the medium chosen played */
-#define DT_RT_PRESS	10		/* the first button down at grab_x, grab_y of the work area */
-#define DT_RT_RELEASE	11		/* and up there */
-#define DT_RT_KEY	12		/* key grab_x (a HID usage) down, grab_y DT_RT_KEY_* */
-#define DT_RT_MOVE	13		/* the pointer at grab_x, grab_y of the work area (outside it: left the scene) */
-#define DT_RT_KEY_UP	0x0001		/* up, not down */
-#define DT_RT_KEY_MINE	0x0002		/* the program's own key: given only when the program takes it */
-
-#define DT_RTS_PLAYING	0x0001
-#define DT_RTS_PAUSED	0x0002
-#define DT_RTS_WAITING	0x0004		/* it waits to be begun (autoplay="false") */
-#define DT_RTS_DONE	0x0008		/* it has run to its end */
-#define DT_RTS_TAKEN	0x0010		/* DT_RT_PRESS, DT_RT_RELEASE, DT_RT_KEY: a trigger or a wait of it took it */
-#define DT_RTS_GO	0x0020		/* a slide's program asked for another slide */
-
-#define DT_F_RT_SLIDE	0x1000		/* DT_RQ_RT_OPEN: played as a slide */
 
 #define DT_F_HIDDEN	0x0002		/* the link is hidden (隠蔽仮身) */
 #define DT_F_KEEP	0x0004		/* the link keeps to its program (起動アプリの固定) */
+#define DT_F_FULL	0x1000000	/* DT_RQ_FULL answered: the window is the size of the screen */
 
 /*
  * DT_RQ_OPEN and the requests about a link with DT_F_APPLIST in flags:
@@ -378,7 +382,11 @@ extern "C" {
  * how many there are, text the entry's program id, a tab and its name
  * (UTF-8), and flags DT_F_KIND for one offered for the object's kind;
  * E_NOEXS past the last. DT_RQ_EXEC with DT_F_KIND opens the object with
- * such a one and leaves the program it opens with as it is.
+ * such a one and leaves the program it opens with as it is. For an
+ * object open already (in any window, or in one being started on it) the
+ * list is empty -- how 0, E_NOEXS, flags DT_F_OPEN -- and 実行 is grey:
+ * one object is open in one window, and opening it again, whatever
+ * program is asked for, brings that window forward.
  */
 #define DT_RQ_APPS	34
 
@@ -552,11 +560,40 @@ extern "C" {
 #define DT_HOW_LINK_ADD	11
 
 /*
+ * How the link looks, told to the windows opened from it before the
+ * record holding it is saved:
+ *   DT_RQ_ATTR with DT_F_LINK	仮身属性変更 of a link of the asking
+ *			program's own window, text beginning as DT_RQ_OPEN's
+ *			with DT_F_LINK does (the object whose record holds the
+ *			link, its vobjid, the program's channel, a line feed;
+ *			the applist after it with DT_F_APPLIST). Answered as
+ *			DT_RQ_ATTR is; when it was agreed to, every window
+ *			watching that link is told the answer's look
+ *   DT_RQ_LINK_WATCH	the asking program's window, opened from a link
+ *			(T_PRCOPEN's parent and vobjid), told how it looks: text
+ *			is the object whose record holds the link, a tab, its
+ *			vobjid, a tab, a channel the program reads, a line
+ *			feed; target the object the window shows. Told until
+ *			the process ends or the channel is gone. Asked again
+ *			by the same window (〈再表示〉), the answer's how is
+ *			DT_HOW_LINK_LOOK and its look the link's last told
+ *			since the window opened, when it was told one
+ *   DT_HOW_LINK_LOOK	what such a window is told at that channel, as a
+ *			T_DTANS: into the object it shows, look the link's
+ *			look as 仮身属性変更 left it (its bgcol the
+ *			表示領域背景, the window's paper when it has none of its
+ *			own), text the object holding the link, a tab, its vobjid;
+ *			then the channel is told OB_E_CHANGE on record 0
+ */
+#define DT_RQ_LINK_WATCH 50
+#define DT_HOW_LINK_LOOK 16
+
+/*
  * DT_RQ_LET_GO: what was carried within the asking program's window was
  * let go outside it, at (grab_x, grab_y) on the screen, and only links
- * may leave a window. Over a window of the desktop's that a figure's
- * links are carried into (a figure or a cabinet that is not sealed),
- * that window takes the keys and the answer is E_OK with into its
+ * may leave a window. Over another program's window that shows an
+ * object (the first window, a cabinet, a text), that window takes the
+ * keys and the answer is E_OK with into its
  * object: the program leaves what it carried where it was and lets it
  * go, as when nothing is carried there. Anywhere else E_NOEXS, and
  * nothing is done.
@@ -567,13 +604,383 @@ extern "C" {
  * DT_RQ_LINK_STATE: how a program's link stands, for its 仮身操作 and
  * 実身操作 to be greyed as the desktop greys them for a link of its own.
  * Asked as DT_RQ_ATTR is (DT_F_APPLIST with the link's applist). The
- * answer's flags: DT_F_OPEN when the object is shown in a window of the
- * desktop's (〈開く〉 grey, 〈閉じる〉 not), DT_F_LOCKABLE when there is
+ * answer's flags: DT_F_OPEN when the object is open, in a window of the
+ * desktop's or of a program, or in one being started on it (〈開く〉
+ * grey, 〈閉じる〉 not), DT_F_LOCKABLE when there is
  * a program the link opens with, which 起動アプリの固定 fixes.
  */
 #define DT_RQ_LINK_STATE 40
 #define DT_F_OPEN	0x400000
 #define DT_F_LOCKABLE	0x800000
+/*
+ * and, in the same answer, for ディスク操作's items: DT_F_DETACHABLE when
+ * the link is a disk's that 切り離し may take away, DT_F_GROWABLE when
+ * 拡張 may make the volume of its object larger
+ */
+#define DT_F_DETACHABLE	0x2000000
+#define DT_F_GROWABLE	0x4000000
+
+/*
+ * The 小物箱 (application/accbox, a process) shows the accessories
+ * of the program box in the order of 小物の設定, as the desktop lays out
+ * its lists, and asks the desktop for them and for what the person
+ * changes of them.
+ *
+ *   DT_RQ_ACC_LIST	the accessory at place recno (0 the first) of those
+ *			in the store: how is the number of them, into its
+ *			program object, text its name, DT_F_HIDDEN in flags
+ *			for one 小物 does not list (the program lays the list
+ *			out itself, as the system's lists are, tvlist.h).
+ *			E_NOEXS past the last; recno -1 answers the number
+ *			alone. Whenever the list changes -- the order, what
+ *			小物 lists, an accessory installed or deleted -- the
+ *			channels named with DT_RQ_TELL for accessory-box are
+ *			told DT_HOW_ACC
+ *   DT_RQ_ACC_SET	a change of 小物の設定 for the accessory target:
+ *			name is a code of 小物管理 (acc.top, acc.up,
+ *			acc.down, acc.bottom, acc.show, acc.hide), or
+ *			acc.place with text the accessory it goes before
+ *			(empty: after them all), as when it is carried within
+ *			the 小物箱. E_PAR for another code
+ */
+#define DT_RQ_ACC_LIST	41
+#define DT_RQ_ACC_SET	42
+#define DT_HOW_ACC	12
+
+/*
+ * 管理情報 (application/realinfo) is a process of its own for each
+ * object, started by the desktop on the link it was chosen on (openArg
+ * "link"); asked again for the same object, the desktop brings its
+ * window to the front. What it shows it reads itself, and it sets the
+ * protection itself (ob_set_prt, with the rights of the person it runs
+ * for). What only the desktop keeps it asks for that link, target the
+ * object, and only the process started on it is answered (E_PAR for
+ * any other):
+ *
+ *   DT_RQ_APPS with DT_F_INFO	as DT_RQ_APPS, the list given whether the
+ *			object is open or not, text the program's id (not
+ *			the applist's key) and its name, DT_F_DEFAULT in the
+ *			answer's flags for the one it opens with
+ *   DT_RQ_INFO_APPS	the object's applist written (付箋指定's 適用): text is
+ *			the place of the one it opens with (-1 none), then
+ *			each program after a line feed, its id, a tab and its
+ *			name
+ *   DT_RQ_INFO_KEEP	起動アプリの固定 of the link, fixed with DT_F_KEEP in
+ *			flags or let go without, in the window it was chosen
+ *			in. The answer's flags say DT_F_LOCKABLE when it can be
+ *			(that window still open and not sealed, a program the
+ *			link opens with) and DT_F_KEEP when it is fixed; with
+ *			DT_F_ASK nothing is changed, and look.w, look.h are
+ *			where that window's outer corner stands on the screen
+ *			(-1 when it is gone), for 管理情報's window to stand
+ *			down and right of it. E_NOEXS when it cannot be
+ */
+#define DT_RQ_INFO_APPS	70
+#define DT_RQ_INFO_KEEP	71
+#define DT_F_INFO	0x40000000
+#define DT_F_DEFAULT	0x20000000
+
+/*
+ * What any program running as a process is told, and what the system's
+ * tools (application/systool: 屑実身操作, 実身/仮身検索, 仮身ネットワーク,
+ * ウインドウ一覧) ask of the desktop for what only it can do; they make
+ * their lists themselves, from what they may read.
+ *
+ *   DT_RQ_TELL		name is the program's id, text a channel of the
+ *			program's (as ts_uuid_text writes it): until the
+ *			channel goes, the desktop writes a T_DTANS there and
+ *			tells the channel OB_E_CHANGE -- how DT_HOW_AGAIN
+ *			when the program is run again while a window of it
+ *			stands for its program object (the window is brought
+ *			to the front with the keys first; 仮身ネットワーク:
+ *			into the object to start from), DT_HOW_TOOL_REMADE
+ *			when what a tool's list shows may have changed
+ *			(屑実身操作: a record saved, a package installed or
+ *			deleted; ウインドウ一覧: the windows on the screen or
+ *			their order), DT_HOW_ACC when the accessories the
+ *			小物箱 (accessory-box) shows changed. E_PAR for an id
+ *			that is no program's
+ *   DT_RQ_PURGE	屑実身操作's 削除: the object target thrown away for
+ *			good, the windows showing it closed first; what its
+ *			records linked to is linked to that much less. Only
+ *			a 屑実身 (no link reaches it, and the system does not
+ *			hold it): E_OBJ for another; E_OACV when the asking
+ *			process may not delete it
+ *   DT_RQ_RECOUNT	屑実身操作's 再探索: every count of links made again
+ *			from the records, the objects the system holds counted
+ *			once each. text answers "TOTAL<tab>CHANGED": how many
+ *			objects there are and how many counts were put right
+ *   DT_RQ_ROOTS	what the system itself holds that no record links to
+ *			(the first window's cabinet, the システム箱, the
+ *			templates of the programs): the one at place recno in
+ *			into, how the number of them. E_NOEXS past the last;
+ *			recno -1 answers the number alone
+ *   DT_RQ_WIN_LIST	ウインドウ一覧: the window at place recno (0 the
+ *			nearest) of those that show an object -- a program's
+ *			that says what object it shows, not a panel, not the
+ *			asking process's own, not a tool's -- with how the
+ *			number of them, into the object and text the window's
+ *			title. E_NOEXS past the last; recno -1 answers the
+ *			number alone. With DT_F_OPEN in flags, the window that
+ *			shows target is brought to the front with the keys,
+ *			or the object opened as a double click opens it when
+ *			no window shows it
+ */
+#define DT_RQ_TELL	43
+#define DT_RQ_TOOL_TELL	DT_RQ_TELL
+#define DT_RQ_PURGE	44
+#define DT_RQ_RECOUNT	45
+#define DT_RQ_WIN_LIST	46
+#define DT_RQ_ROOTS	48
+#define DT_HOW_TOOL_REMADE 13
+#define DT_HOW_AGAIN	14
+#define DT_HOW_TOOL_AGAIN DT_HOW_AGAIN
+
+/*
+ * ディスク操作 (application/diskop, design 11.26): what the program asks
+ * of the desktop, which alone knows the disks, the volumes and the
+ * windows open on them. recno says what (DT_DISK_*); target is the
+ * object of the link the item was chosen on, 0 for none.
+ *   DT_DISK_LIST	the partitions 接続 offers, the one at grab_x (0 up):
+ *			how is how many, text its device name, a tab and its
+ *			row; DT_F_DISK_PICK in flags on the one chosen first
+ *			(the disk of target, a 虚身's object, when it is in).
+ *			E_NOEXS past the last. The list is made when grab_x
+ *			is 0, and kept for the rest
+ *   DT_DISK_ATTACH	the partition name names attached, the link to its
+ *			top put in the first window, and remembered as
+ *			attached: text the disk's name. E_OBJ when the same
+ *			volume is attached already, E_NOSPT for files (what
+ *			ファイル変換 reads), E_PAR for a kind not handled
+ *   DT_DISK_DETACH	the volume of target taken away: text the disk's
+ *			name. E_NOEXS when it is not attached, E_RONLY for the
+ *			system's, E_BUSY with how DT_HOW_DISK_WIN (an object
+ *			of it in a window), DT_HOW_DISK_PROG (used by a
+ *			program) or DT_HOW_DISK_CHECK (ディスク修復 checks it)
+ *   DT_DISK_STATUS	how full the disk of target is (the system's for 0):
+ *			text "NAME<tab>BYTES<tab>USED<tab>OBJECTS<tab>GARBAGE"
+ *   DT_DISK_FREE	the free stretches 区画作成 offers, the one at grab_x:
+ *			how is how many, text "DISK<tab>FIRST<tab>LAST<tab>ROW"
+ *			(FIRST and LAST sectors), DT_F_DISK_SYS on a stretch
+ *			of the system's disk. Made at grab_x 0 as for LIST
+ *   DT_DISK_MAKE	a partition made on the disk name names, in the free
+ *			stretch that begins at the sector text says, grab_x
+ *			megabytes (0 the whole stretch), its volume labelled
+ *			with what follows a tab in text; attached and
+ *			remembered as ATTACH does: text the disk's name.
+ *			E_NOEXS when there is no such stretch now, E_PAR for a
+ *			size it cannot be; how DT_HOW_DISK_MADE when it was
+ *			made but not attached
+ *   DT_DISK_GROWS	what 拡張 can do to the volume of target (the
+ *			system's for 0): text "NAME<tab>PATH<tab>NOW<tab>MOST"
+ *			(MB), DT_F_DISK_SYS for the system's. E_NOSPT when it
+ *			is not a native volume, E_OBJ when it is not a
+ *			partition of a GPT, E_LIMIT when nothing is free after
+ *			it (text said all the same)
+ *   DT_DISK_GROW	that volume made grab_x megabytes: text "FROM<tab>TO"
+ *			(MB). E_PAR for a size it cannot be made, E_BUSY with
+ *			DT_HOW_DISK_CHECK while it is being checked
+ *   DT_DISK_LOG	ディスク修復's 障害情報 saved: target's record 0, a
+ *			document the program made (ui_prn_open), written as
+ *			the text object ディスク修復記録 linked from the system
+ *			box (/SYS). Only for the program ディスク修復 (E_OACV)
+ *   DT_DISK_MENU	an item of ディスク操作 chosen in a window of a program
+ *			(name its code: disk.connect, disk.status,
+ *			disk.create, disk.grow, disk.detach), on the link to
+ *			target (0 none): the program ディスク操作 started
+ *			with it, as for the first window's menu
+ *   DT_DISK_REMOVE	the link to target deleted from the first window
+ *			(取り外し), text the volume it was saved on (tvol, as
+ *			ts_uuid_text writes it): a disk's link takes the
+ *			volume away and forgets it, so that it is not attached
+ *			again at the next start; a link to a disk not attached
+ *			forgets it. E_OK when the link may go (one that is no
+ *			disk's too), else why not, the person told in a panel
+ *			over win, and the link stays. Only the first window's
+ *   DT_DISK_RESCUE	a program whose window was asked to close because the
+ *			disk of its object went, holding changes not saved:
+ *			grab_x 0 asks for an object to hand them over in
+ *			(into; grab_y 1 for a figure, 0 a text), which the
+ *			program may write record 0 of; grab_x 1, text that
+ *			object (as ts_uuid_text writes it), hands them over:
+ *			the person is asked over win where they go, as for
+ *			any window whose disk went, the object is thrown
+ *			away, and the program closes its window without
+ *			saving. E_PAR from a program not so asked
+ * ATTACH, DETACH, MAKE and GROW are an administrator's: a process that is
+ * not one is asked the password for (as DT_RQ_ADMIN asks, and is given
+ * the rights as it gives them), E_ABORT or E_OACV when it is not given.
+ */
+#define DT_RQ_DISK	47
+
+/*
+ * システム登録 (application/sysinst, a process, x64 only; design 3.10.10,
+ * 11.32): the disks the system may be put on, the plan and the copy are
+ * the kernel's (application/sysinst/sysinst.c, si_core.c). recno says
+ * what (DT_SI_*):
+ *   DT_SI_DISK		the disk at grab_x (0 up): how is how many, text its
+ *			device name, a tab and its row. The list is made
+ *			again when grab_x is 0. E_NOEXS past the last;
+ *			E_NOSPT on a machine that is not a PC
+ *   DT_SI_PART		the partition at grab_y of the disk at grab_x that
+ *			区画を1つ消して使う may take: how is how many, text its
+ *			subunit, a tab and its row; DT_F_SI_BEST on the one
+ *			offered first (the largest Windows volume)
+ *   DT_SI_PLAN		the way grab_x (DT_SI_COEXIST, DT_SI_ERASE,
+ *			DT_SI_REPLACE) on the disk name names, with the
+ *			partition of subunit grab_y for DT_SI_REPLACE, looked
+ *			at: how is 0 when it can be taken, and the plan is
+ *			kept, look.w the lines of what is asked before it is
+ *			done; else why not, said in text
+ *   DT_SI_LINE		line grab_y of what grab_x says (DT_SI_L_*): how is
+ *			how many lines there are
+ *   DT_SI_RUN		the plan kept done, in a task of the desktop's, which
+ *			runs to its end whatever the program does. An
+ *			administrator's: a process that is not one is asked
+ *			the password for, as DT_RQ_ADMIN asks. E_BUSY while
+ *			one runs, E_OBJ when no plan is kept that can be taken
+ *   DT_SI_STATE	how it goes: how the step, DT_F_SI_RUN while it runs,
+ *			DT_F_SI_OVER once it is over, with look.w what it ended
+ *			with (below 0 an error) and look.h the step it failed
+ *			at (-1 none)
+ *   DT_SI_RESTART	the machine started again: only once it went well
+ *   DT_SI_KEEPQ	whether the way grab_x on the disk name names (the
+ *			partition of subunit grab_y for DT_SI_REPLACE) can put
+ *			the system over the TessronOS there, keeping its
+ *			objects (上書き): how is 0 when it can, DT_SI_K_NONE
+ *			when there is no TessronOS there to keep, else why
+ *			not, said in text
+ * DT_SI_KEEP or'd in grab_x of DT_SI_PLAN asks for that way; its answer
+ * has look.h 1 when what the disk holds goes (the warning panel).
+ */
+#define DT_RQ_SYSINST	80
+#define DT_SI_DISK	0
+#define DT_SI_PART	1
+#define DT_SI_PLAN	2
+#define DT_SI_LINE	3
+#define DT_SI_RUN	4
+#define DT_SI_STATE	5
+#define DT_SI_RESTART	6
+#define DT_SI_KEEPQ	7
+#define DT_SI_KEEP	0x100		/* or'd in grab_x: the objects there kept (上書き) */
+#define DT_SI_K_NONE	(-1)		/* DT_SI_KEEPQ: no TessronOS there */
+#define DT_SI_COEXIST	0		/* beside Windows, in the free stretch */
+#define DT_SI_ERASE	1		/* the whole disk */
+#define DT_SI_REPLACE	2		/* one partition made the TessronOS one */
+#define DT_SI_L_ASK	0		/* what is asked before the plan is done */
+#define DT_SI_L_RUN	1		/* what is under way */
+#define DT_SI_L_RESULT	2		/* what came of it */
+#define DT_SI_ROWS	16		/* lines at most of any of them */
+#define DT_F_SI_BEST	0x8000000
+#define DT_F_SI_RUN	0x10000000
+#define DT_F_SI_OVER	0x80000000
+#define DT_DISK_LIST	0
+#define DT_DISK_ATTACH	1
+#define DT_DISK_DETACH	2
+#define DT_DISK_STATUS	3
+#define DT_DISK_FREE	4
+#define DT_DISK_MAKE	5
+#define DT_DISK_GROWS	6
+#define DT_DISK_GROW	7
+#define DT_DISK_LOG	8
+#define DT_DISK_MENU	9
+#define DT_DISK_REMOVE	10
+#define DT_DISK_RESCUE	11
+#define DT_F_DISK_PICK	0x2000000
+#define DT_F_DISK_SYS	0x4000000
+#define DT_HOW_DISK_WIN		20
+#define DT_HOW_DISK_PROG	21
+#define DT_HOW_DISK_CHECK	22
+#define DT_HOW_DISK_MADE	23
+
+/*
+ * The start-up argument of ディスク操作 (dt_disk_menu): the code of the
+ * item of the menu ディスク操作 chosen (disk.connect, disk.detach,
+ * disk.status, disk.create, disk.grow), and the object of the link it was
+ * chosen on, 0 away from a link.
+ */
+typedef struct {
+	UB	code[16];
+	TS_UUID	target;
+} T_DTDISKARG;
+
+/*
+ * 基本印刷 (application/bprint, design 11.22) works the panels of a
+ * print job the desktop holds -- the pages of DT_RQ_PRINT, an object
+ * printed from the 実行 menu, pages of the desktop's own -- and asks the
+ * desktop for what needs the pages. The desktop starts it for the job;
+ * only a process of that program, and then only the one that took the
+ * job, is answered. recno says what (DT_PJ_*). Every step but the first
+ * carries the setting in text: the thirteen numbers of T_PRNSET (ts/
+ * print.h) apart by spaces, in its order (all from to copies quality
+ * colour paper_w paper_h rotate scale links expand depth).
+ *   DT_PJ_JOB		the job taken: text the setting to start from, a
+ *			tab, and what is printed (the file's name); how the
+ *			pages of layout paper; flags DT_F_PJ_SHOW when 画面表示
+ *			is offered, DT_F_PJ_SET when only the setting is
+ *			asked for (〈印刷〉 writes nothing yet). E_NOEXS when
+ *			no job waits; E_BUSY when another 基本印刷 works it,
+ *			which is brought to the front
+ *   DT_PJ_PAPER	how the setting lays the pages: text "W H PCT SHEETS
+ *			LW LH" -- the printing paper as it lies and the
+ *			layout paper in thousandths of a point, the
+ *			magnification 自動 makes in hundredths of a percent,
+ *			the sheets that will be printed; how the pages
+ *			(which 仮身: 印刷 changes for pages with links)
+ *   DT_PJ_SHOW		sheet grab_x (0 up) drawn in the work area of win, a
+ *			window of the asking process's, below grab_y: the
+ *			whole sheet in the middle on grey, or with
+ *			DT_F_PJ_ZOOM twice as large about (look.w, look.h)
+ *			of it. The answer's look.w and look.h are the sheet
+ *			as shown, how the sheets
+ *   DT_PJ_OUT		the file written and its link put in the desktop's
+ *			first window (with DT_F_PJ_SET: the setting taken);
+ *			the job ends, and the one who asked is answered E_OK.
+ *			E_NOEXS when the setting leaves no sheet
+ *   DT_PJ_END		the job put away (〈取消〉): its asker answered
+ *			E_ABORT; the setting is kept for the next time
+ * A job whose 基本印刷 ends before OUT or END is put away as by END.
+ */
+#define DT_RQ_PRJOB	60
+#define DT_PJ_JOB	0
+#define DT_PJ_PAPER	1
+#define DT_PJ_SHOW	2
+#define DT_PJ_OUT	3
+#define DT_PJ_END	4
+#define DT_F_PJ_SHOW	0x10000000
+#define DT_F_PJ_SET	0x20000000
+#define DT_F_PJ_ZOOM	0x40000000
+
+/*
+ * 画面印刷 (application/scrprint, design 11.24): the panel is the
+ * program's, the screen and the input the desktop's. recno says what
+ * (DT_SP_*); what is set travels as text, "TO POINTER AREA BY SECS",
+ * a tab, the volume a figure object goes on ("" the first), a tab, and
+ * its name -- TO 0 図形実身へ保存, 1 トレーへ複写, 2 プリンタへ印刷; AREA
+ * 0 全画面, 1 最前面ウィンドウのみ, 2 範囲指定; BY 0 指定時間後に実行,
+ * 1 PrntScrnキーで実行, 2 PrntScrnキーで連続実行.
+ *   DT_SP_GET		the panel coming up: what was under way stops, and
+ *			text answers what was set last (the machine's
+ *			setting SCRPRINT); how counts the panels shown.
+ *			E_BUSY when another 画面印刷's panel is up, which is
+ *			brought to the front
+ *   DT_SP_VOL		the volume at grab_x (0 the system's) a figure
+ *			object can go on: text its path, a tab and its name
+ *			(empty when it has none); how how many. E_NOEXS past
+ *			the last
+ *   DT_SP_ARM		実行 with what text sets, kept for the next time:
+ *			printing asks its 印刷設定 of 基本印刷, a rectangle is
+ *			dragged out, then the count or the key, and the
+ *			screen taken and sent where it is set to go. Only
+ *			the process whose panel is up
+ *   DT_SP_STOP		取り消し: what was under way stopped, and what text
+ *			sets kept when it is not empty
+ */
+#define DT_RQ_SCRPRINT	61
+#define DT_SP_GET	0
+#define DT_SP_VOL	1
+#define DT_SP_ARM	2
+#define DT_SP_STOP	3
 
 /*
  * The start-up argument of a program whose program object says

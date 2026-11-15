@@ -8,37 +8,8 @@
 # the new object's record 0 and its name come out the same, byte for byte.
 # Keys: Home 4A, Right 4F, End 4D (Shift 02), 9 26 (Ctrl 01), Enter 28, Esc 29; Ctrl+S 16,
 # Ctrl+E 08.
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
-mkbig fig 30 4 1
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-dclick 215 255
-sync 600
-key 4A
-key 4F
-key 4D 02
-sync 600
-key 26 01
-wait 800
-shot virt_kernel_name
-key 28
-wait 800
-sync 600
-shot virt_kernel_link
-key 29
-sync 600
-key 16 01
-sync 600
-sum show anon
-keep kernel_fig
-sum show link
-keep kernel_new
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 30 4 1
 logmark
 pfig big
@@ -68,8 +39,8 @@ logmark
 key 16 01
 expectsince figure: saved (0)
 sum show anon
-same kernel_fig
+want ok 4821 77d462db06778a37
 sum show link
-same kernel_new
+want ok 4429 810246d3f882065a BC
 key 08 01
 expect figure: closed

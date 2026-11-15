@@ -74,6 +74,15 @@ struct tsw_drv {
 	/* The keys the card holds said, as the port opens */
 	void		(*port_say)(void);
 
+	/*
+	 * Of a driver whose task sets the keys into the card (its
+	 * ic_set_key answers EBUSY) and does not make the port valid
+	 * itself once they are in: 1 when the card has answered every key
+	 * asked of it. NULL: the driver makes the port valid then (iwx,
+	 * mwx, bwfm), or sets the keys at once
+	 */
+	int		(*keys_in)(void);
+
 	/* How much the driver says on the console */
 	void		(*debug)(int);
 };

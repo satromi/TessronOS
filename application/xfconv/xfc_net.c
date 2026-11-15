@@ -517,7 +517,31 @@ LOCAL ER conf_make( TS_UUID *p_u )
 	return er;
 }
 
-/* The list a system before kept in an object's metadata, taken out of it */
+/* Whether an object's metadata still holds the list a system before kept there */
+LOCAL BOOL conf_old_there( BOOL prog )
+{
+	T_JSON	root, tf, xc;
+	UB	*meta = NULL;
+	INT	len;
+	ID	key;
+	BOOL	there = FALSE;
+
+	key = conf_key(OB_OP_ATRRD, prog);
+	if ( key <= 0 ) return FALSE;
+	len = ob_atr_read(key, 0, &meta);
+	there = (BOOL)( len >= 0 && js_parse(meta, len, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
+		     && js_get(&tf, "xfconv", &xc) >= E_OK );
+	free(meta);
+	ob_cls_obj(key);
+	return there;
+}
+
+/*
+ * The list a system before kept in an object's metadata, taken out of
+ * it. Looked for first with the right to read alone: the object is
+ * opened to be written only when there is something to take out, as
+ * the program object may be written by an administrator alone.
+ */
 LOCAL void conf_drop_old( BOOL prog )
 {
 	T_JSON	root, tf, xc;
@@ -525,6 +549,7 @@ LOCAL void conf_drop_old( BOOL prog )
 	INT	len, from, to, k;
 	ID	key;
 
+	if ( !conf_old_there(prog) ) return;
 	key = conf_key(OB_OP_ATRRD | OB_OP_ATRWR | OB_O_WEXCL, prog);	/* read, changed, written back */
 	if ( key <= 0 ) return;
 	len = ob_atr_read(key, 0, &meta);

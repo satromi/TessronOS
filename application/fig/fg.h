@@ -33,6 +33,7 @@
 #include <ts/dtreq.h>
 #include <ts/docedit.h>
 #include <ts/tvapp.h>
+#include <ts/tvlist.h>
 
 /* The panels of the program's data box (SYSDEF_BOX_FIG) */
 #define PN_ALIGN	1		/* 位置あわせ */
@@ -69,6 +70,61 @@ extern BOOL	g_show_hidden;
  */
 extern BOOL	fg_cabinet;
 
+/*
+ * What the cabinet is, said by the file it is linked with (fg_box's
+ * begin; 0 an ordinary 仮身一覧). Each is a program of its own, with its
+ * program object and its executable:
+ *   FG_AS_BASEBOX  the 原紙箱 (application/basebox/bb_main.c): the links
+ *                  stay where they were laid out, neither moved nor sized
+ *                  within it, left by 整頓, and one carried out to another
+ *                  window becomes a new object made from it there
+ *   FG_AS_ACCBOX   the 小物箱 (application/accbox/ab_main.c): the
+ *                  accessories of the program box as the desktop orders
+ *                  them, nothing in it changed but their order
+ *   FG_AS_BASECOL  原紙集め (application/basecol/bc_main.c): the templates
+ *                  of every application of the program box, a list the
+ *                  program makes and no object's record. Its templates
+ *                  are carried out as the 原紙箱's are (FG_TEMPLATES), and
+ *                  nothing in it is changed or saved, as nothing in the
+ *                  小物箱 is (FG_MADE)
+ *   FG_AS_TOOL     one of the system's tools (application/systool:
+ *                  屑実身操作, 実身/仮身検索, 仮身ネットワーク, ウインドウ一覧):
+ *                  a list the program makes (FG_MADE) with the tool's
+ *                  own menu. A link carried out of it is put there as a
+ *                  copy and stays in the list; carried within, nothing
+ *                  moves. Where the window stood is not kept
+ */
+extern UINT	fg_as;
+#define FG_AS_BASEBOX	1
+#define FG_AS_ACCBOX	2
+#define FG_AS_BASECOL	3
+#define FG_AS_TOOL	4
+#define FG_BASEBOX	( fg_as == FG_AS_BASEBOX )
+#define FG_ACCBOX	( fg_as == FG_AS_ACCBOX )
+#define FG_BASECOL	( fg_as == FG_AS_BASECOL )
+#define FG_TOOL		( fg_as == FG_AS_TOOL )
+#define FG_TEMPLATES	( FG_BASEBOX || FG_BASECOL )	/* carried out: a new object made from it */
+#define FG_MADE		( FG_ACCBOX || FG_BASECOL || FG_TOOL )	/* the list made by the program, sealed */
+
+/* What the cabinet adds for the boxes (bb_main.c, ab_main.c, bc_main.c); NULL in 基本図形編集 and 仮身一覧, a member NULL none */
+typedef struct {
+	CONST char	*name;			/* the program's name, in what it says it cannot open */
+	void	(*begin)( void );		/* started: fg_as set */
+	ER	(*load)( T_TAD **p_rec );	/* the record of a list made (FG_MADE): the 小物箱's, 原紙集め's */
+	void	(*listen)( void );		/* the window's channel made: told of changes to the list */
+	void	(*menu)( ID mid, CONST T_VOBJ *v );	/* 小物管理 greyed for the link */
+	BOOL	(*command)( CONST char *code, CONST T_VOBJ *v );	/* TRUE: the box's own item */
+	void	(*place)( CONST TS_UUID *target, CONST TS_UUID *before );	/* carried within the 小物箱 */
+	ER	(*start)( T_OBREF *p_ref );	/* the object the window stands for, in place of ta_start */
+	void	(*shown)( void );		/* the window opened, or its work area sized again (g_w, g_h) */
+	BOOL	(*changed)( CONST TS_UUID *u );	/* an object watched changed: TRUE when it was the box's */
+	CONST char	*menu_def;		/* the window's menu (SYSDEF_MENU_*) in place of the cabinet's; "" none */
+	CONST char	*(*key)( INT ch );	/* a letter with Ctrl that no item of the cabinet's has: the code it does */
+	BOOL	(*open)( CONST T_VOBJ *v );	/* a link opened: TRUE when the box opened it its own way */
+} T_FGBOX;
+
+extern CONST T_FGBOX	*fg_box;
+
 IMPORT void tell( CONST char *l1, CONST char *l2 );
 
 /* ---------------------------------------------------------------- links (fg_link.c) */
@@ -79,6 +135,7 @@ IMPORT BOOL fg_app_locked( CONST T_VOBJ *v );
 IMPORT void fg_link_menu( ID mid, CONST T_VOBJ *v );
 IMPORT void fg_link_op( CONST char *code, T_VOBJ *v );
 IMPORT void fg_link_copy_put( CONST T_VOBJ *v, CONST TS_UUID *copy, INT dx, INT dy );
+IMPORT void fg_open( CONST T_VOBJ *v );	/* opened as a double press opens it, or as the box opens it */
 
 /* ---------------------------------------------------------------- editing (fg_edit.c) */
 
@@ -115,6 +172,8 @@ IMPORT void fg_hold_cancel( void );
 IMPORT void fg_left( void );		/* the pointer left the window while the hand was down */
 
 IMPORT void fg_delete( void );
+/* Whether a link taken may be deleted (the first window: a disk's link takes the disk away); NULL every one */
+extern BOOL	(*fg_link_going)( CONST T_VOBJ *v );
 IMPORT BOOL fg_copy( void );
 IMPORT void fg_cut( void );
 IMPORT void fg_paste( BOOL take );
@@ -127,6 +186,7 @@ IMPORT void fg_dropped( CONST T_OBDROP *dr );
 
 IMPORT void fg_scroll_to( INT x, INT y );
 IMPORT T_TAD *fg_tray_frag( void );	/* the first fragment of the set in hand; NULL none */
+IMPORT void fg_list_set( T_TAD *rec );	/* a list made shown in place of the one shown, scrolled as it was */
 
 /* ---------------------------------------------------------------- a piece of text edited (fg_text.c) */
 
@@ -140,6 +200,7 @@ IMPORT BOOL fg_text_holding( void );
 IMPORT void fg_text_second_down( void );	/* 複写ドラッグ: what is carried, a copy */
 IMPORT void fg_text_moved( INT x, INT y );
 IMPORT void fg_text_released( INT x, INT y );
+IMPORT void fg_text_left( void );		/* the pointer left the window carrying letters */
 IMPORT BOOL fg_text_key( CONST T_OBNTM *m );
 IMPORT void fg_text_pick( INT row );		/* a name on the list of candidates */
 IMPORT BOOL fg_text_command( INT cmd );

@@ -1,6 +1,6 @@
 # 基本図形編集をプロセスで開き、その中の仮身から開いたウインドウが、閉じるときに元の仮身へ
-# 書き戻すこと(DT_RQ_OPEN の DT_F_LINK、design 11.3), for tools/ui_run.py. figproc 1
-# makes every figure open with the process. Two copies of 画用紙 (A of 30 rectangles, B of
+# 書き戻すこと(DT_RQ_OPEN の DT_F_LINK、design 11.3), for tools/ui_run.py. Every
+# figure opens with the process. Two copies of 画用紙 (A of 30 rectangles, B of
 # 2000, wider than the window) and a text (mkbig doc) are linked into BTRON, the desktop's
 # first window. A is opened from its link (the process P); the links of B and of the text are
 # copied to the tray in BTRON and pasted into A. B opened from its link in A is another
@@ -11,7 +11,6 @@
 # it carried out over BTRON stays where it was, and one let go on the ground moves there.
 # Keys with Ctrl (01): C 06, V 19, E 08; Enter 28.
 mkbig fig 30 4
-figproc 1
 linkbig 180 45
 mkbig fig 2000 2
 linkbig 180 95
@@ -105,8 +104,8 @@ dclick 190 52
 expectsincein 60 figure: opened 画用紙 shapes 35 links 3 autoref 1 parent 1
 wait 800
 shot pl_a_again
-# a shape alone carried out and let go over BTRON, a window of the desktop's that links are
-# carried into: only links leave a figure's window, so it stays where it was (DT_RQ_LET_GO),
+# a shape alone carried out and let go over BTRON, another program's window that links are
+# carried into (仮身一覧's): only links leave a figure's window, so it stays where it was (DT_RQ_LET_GO),
 # and BTRON takes the keys
 logmark
 move 260 163

@@ -78,6 +78,7 @@
 #include <ts/ui.h>
 #include <ts/conf.h>
 #include <ts/sysdef.h>
+#include <ts/uuid.h>
 #include <tk/typedef.h>
 #include <ts/bt.h>
 #include <ts/look.h>
@@ -162,6 +163,10 @@
 #define P_SCR_SIZE	84		/* the width and the height, typed */
 #define P_SCR_FIT	85		/* 比を保つ, 全体に広げる */
 #define P_SCR_SCALE	86		/* 表示の倍率: the scales the screen can take (画面's SCALES) */
+#define P_SCR_OUT	91		/* 画面: the outputs, the main one first (画面's OUTi), where there is more than one */
+#define P_SCR_USE	92		/* 使う, 使わない: the output chosen, not the main one */
+#define P_SCR_SIDE	93		/* 主画面の右, 主画面の下, 主画面の左, 主画面の上, 主画面の複製 */
+#define P_SCR_IDENT	94		/* 識別: each screen's number shown on it */
 #define P_NET_LIST	120		/* 〈ネットワークアダプタ〉: 自動 and the adapters; the row chosen is the one to use */
 #define P_NET_SET	122
 
@@ -273,6 +278,7 @@ typedef struct {
 	char	kind[16];
 	char	version[16];
 	BOOL	builtin;	/* carried in the desktop: not deleted */
+	BOOL	kept;		/* one the system's boxes need (SYSDEF_PROGS_KEPT): not deleted either */
 	BOOL	system;		/* the system's own ("source": "system"): said so, and deleted all the same */
 } PROGINFO;
 LOCAL PROGINFO	*prog_info = NULL;
@@ -517,7 +523,15 @@ LOCAL void prog_read( CONST TS_UUID *u, PROGINFO *pi )
 		{
 			char	src[16];
 
+			static CONST char	*CONST kept[] = SYSDEF_PROGS_KEPT;
+			char			us[TS_UUID_STRLEN + 1];
+			INT			i;
+
 			pi->builtin = js_get_bool(&g, "builtin", FALSE);
+			ts_uuid_text(u, us);
+			for ( i = 0; i < (INT)( sizeof(kept) / sizeof(kept[0]) ); i++ ) {
+				if ( strcmp(us, kept[i]) == 0 ) pi->kept = TRUE;
+			}
 			pi->system = (BOOL)( js_get_str(&g, "source", (UB *)src, sizeof(src)) > 0
 					     && strcmp(src, "system") == 0 );
 		}
@@ -1059,6 +1073,138 @@ LOCAL char	scr_fit[16];			/* 画面's FIT: "" where the screen does not choose *
 LOCAL INT	scr_w, scr_h;
 
 /*
+ * The outputs, where 画面 says there is more than one (OUTPUTS, OUTi):
+ * how many, the one chosen (0 the main one), and for each its name in
+ * the popup, whether it is on, its side and its size
+ */
+#define SCR_OUTS	4
+LOCAL INT	scr_nout = 0, scr_out = 0;
+LOCAL char	scr_out_nm[SCR_OUTS][64];
+LOCAL CONST char *scr_out_names[SCR_OUTS];
+LOCAL BOOL	scr_out_on[SCR_OUTS];
+LOCAL INT	scr_out_side[SCR_OUTS], scr_out_w[SCR_OUTS], scr_out_h[SCR_OUTS];
+LOCAL INT	scr_mir_w[SCR_OUTS], scr_mir_h[SCR_OUTS];	/* the mode it would mirror the main screen in */
+LOCAL BOOL	scr_mir_ok[SCR_OUTS];				/* and whether it can */
+
+/* "WIDTHxHEIGHT" read; 0 for each part not there */
+LOCAL void wxh( CONST char *s, INT *p_w, INT *p_h )
+{
+	INT	w = 0, h = 0;
+
+	while ( *s >= '0' && *s <= '9' ) w = w * 10 + ( *s++ - '0' );
+	if ( *s == 'x' ) {
+		s++;
+		while ( *s >= '0' && *s <= '9' ) h = h * 10 + ( *s++ - '0' );
+	}
+	*p_w = w;
+	*p_h = h;
+}
+
+/*
+ * The sides an output besides the main one is put at, as the screen's
+ * record words them, in the order of the choice P_SCR_SIDE (1 主画面の右,
+ * 2 主画面の下, 3 主画面の左, 4 主画面の上, 5 主画面の複製: the same
+ * picture as the main screen's, no place of its own)
+ */
+#define SIDE_MIRROR	5
+LOCAL CONST char *CONST side_words[5] = { "right", "below", "left", "above", "mirror" };
+
+/* The choice of P_SCR_SIDE a side's word is: right where it is none of them */
+LOCAL INT side_value( CONST char *word )
+{
+	INT	k;
+
+	for ( k = 0; k < 5; k++ ) {
+		if ( strcmp(word, side_words[k]) == 0 ) return k + 1;
+	}
+	return 1;
+}
+
+/* The outputs as 画面's record says them (text, len long): their number, 0 or 1 where there is one */
+LOCAL INT outs_read( INT len )
+{
+	char	v[CF_VAL_MAX], key[8] = "OUT0", w[6][32];
+	INT	n, i, k, a, b;
+
+	if ( len <= 0 || !cf_get(text, len, "OUTPUTS", 0, v, sizeof(v)) ) return 0;
+	n = cf_num(v, 0);
+	if ( n > SCR_OUTS ) n = SCR_OUTS;
+	for ( i = 0; i < n; i++ ) {
+		key[3] = (char)( '0' + i );
+		if ( !cf_get(text, len, key, 0, v, sizeof(v)) ) break;
+		for ( k = 0; k < 6; k++ ) {
+			if ( !cf_word(v, k, w[k], sizeof(w[k])) ) w[k][0] = 0;
+		}
+		/* name on|off WIDTHxHEIGHT side offset ident */
+		scr_out_on[i] = (BOOL)( strcmp(w[1], "on") == 0 );
+		scr_out_side[i] = side_value(w[3]);
+		a = b = 0;
+		wxh(w[2], &a, &b);
+		scr_out_w[i] = a;
+		scr_out_h[i] = b;
+		snprintf(scr_out_nm[i], sizeof(scr_out_nm[i]), "%d：%s%s", i + 1, w[0], ( i == 0 ) ? "（主画面）" : "");
+		scr_out_names[i] = scr_out_nm[i];
+		/* OUTMIRRORi WIDTHxHEIGHT ok|no */
+		scr_mir_w[i] = scr_mir_h[i] = 0;
+		scr_mir_ok[i] = FALSE;
+		{
+			char	mk[12] = "OUTMIRROR0";
+
+			mk[9] = (char)( '0' + i );
+			if ( i > 0 && cf_get(text, len, mk, 0, v, sizeof(v)) && cf_word(v, 0, w[0], sizeof(w[0]))
+			  && cf_word(v, 1, w[1], sizeof(w[1])) ) {
+				wxh(w[0], &scr_mir_w[i], &scr_mir_h[i]);
+				scr_mir_ok[i] = (BOOL)( strcmp(w[1], "ok") == 0 && scr_mir_w[i] > 0 );
+			}
+		}
+	}
+	return i;
+}
+
+/*
+ * 主画面の複製 chosen for the output: the size it mirrors in put in the
+ * fields and chosen on the list (the main screen's own size where it
+ * offers it, else its preferred one, scaled); where it cannot mirror (its
+ * scaler cannot scale the main screen's size into any of its modes) told
+ * why, and the side put back as it was
+ */
+LOCAL void tell( CONST char *line );
+
+LOCAL void mirror_chosen( void )
+{
+	INT	f[2], k;
+
+	if ( scr_out <= 0 || scr_out >= scr_nout || ui_value(&ui, P_SCR_SIDE) != SIDE_MIRROR ) return;
+	if ( !scr_mir_ok[scr_out] ) {
+		ui_set_value(&ui, P_SCR_SIDE, ( scr_out_side[scr_out] != SIDE_MIRROR ) ? scr_out_side[scr_out] : 1);
+		tell("この画面には、主画面と同じ大きさのモードがなく、主画面を拡大・縮小しても映せないため、複製は選べません。");
+		return;
+	}
+	f[0] = scr_mir_w[scr_out];
+	f[1] = scr_mir_h[scr_out];
+	ui_set_fields(&ui, P_SCR_SIZE, f, 2);
+	for ( k = 0; k < nmode; k++ ) {
+		if ( modes[k].w == f[0] && modes[k].h == f[1] ) {
+			ui_set_now(&ui, P_SCR_LIST, k, k);
+			break;
+		}
+	}
+}
+
+/* The parts of the outputs shown only where there is more than one; the main one's choice not its own */
+LOCAL void outs_shown( void )
+{
+	BOOL	many = (BOOL)( scr_nout > 1 );
+
+	ui_show(&ui, P_SCR_OUT, many);
+	ui_show(&ui, P_SCR_USE, many);
+	ui_show(&ui, P_SCR_SIDE, many);
+	ui_show(&ui, P_SCR_IDENT, many);
+	ui_off(&ui, P_SCR_USE, !many || scr_out == 0);
+	ui_off(&ui, P_SCR_SIDE, !many || scr_out == 0);
+}
+
+/*
  * 表示の倍率: the scales the screen can be drawn at at its size (画面's
  * SCALES, those that leave a view large enough), the one it is drawn at
  * (SCALE) chosen. Only those it can take are offered.
@@ -1141,15 +1287,21 @@ LOCAL BOOL mode_add( INT w, INT h )
 
 LOCAL void fill_screen( void )
 {
-	char	v[CF_VAL_MAX], cur[32] = "";
+	char	v[CF_VAL_MAX], cur[32] = "", mkey[16] = "MODES";
 	CONST UB *mv;
 	INT	len = disp_rec(), i, f[2], mlen = 0;
 
 	if ( len > 0 ) (void)cf_get(text, len, "SIZE", 0, cur, sizeof(cur));
+	scr_nout = outs_read(len);
+	if ( scr_out >= scr_nout ) scr_out = 0;
+	if ( scr_out > 0 ) {
+		snprintf(cur, sizeof(cur), "%dx%d", scr_out_w[scr_out], scr_out_h[scr_out]);
+		snprintf(mkey, sizeof(mkey), "OUTMODES%d", scr_out);
+	}
 	nmode = 0;
 	mode_cur = 0;
 	/* the list read where it is in the record, however long it is: WIDTHxHEIGHT words parted by blanks */
-	if ( len > 0 && cf_find(text, len, "MODES", 0, &mv, &mlen) ) {
+	if ( len > 0 && cf_find(text, len, mkey, 0, &mv, &mlen) ) {
 		i = 0;
 		while ( i < mlen ) {
 			INT	at, a = 0, b = 0, k;
@@ -1181,19 +1333,28 @@ LOCAL void fill_screen( void )
 	scr_w = scr_h = 0;
 	if ( len > 0 && cf_get(text, len, "WIDTH", 0, v, sizeof(v)) ) scr_w = cf_num(v, 0);
 	if ( len > 0 && cf_get(text, len, "HEIGHT", 0, v, sizeof(v)) ) scr_h = cf_num(v, 0);
-	f[0] = scr_w;
-	f[1] = scr_h;
+	/* the main screen's own size, where the back buffer is larger round more than one */
+	if ( len > 0 && cf_get(text, len, "SIZE", 0, v, sizeof(v)) ) wxh(v, &scr_w, &scr_h);
+	f[0] = ( scr_out > 0 ) ? scr_out_w[scr_out] : scr_w;
+	f[1] = ( scr_out > 0 ) ? scr_out_h[scr_out] : scr_h;
 	ui_set_fields(&ui, P_SCR_SIZE, f, 2);
+	if ( scr_nout > 1 ) {
+		ui_names(&ui, P_SCR_OUT, scr_out_names, scr_nout);
+		ui_set_value(&ui, P_SCR_OUT, scr_out + 1);
+		ui_set_value(&ui, P_SCR_USE, ( scr_out == 0 || scr_out_on[scr_out] ) ? 1 : 2);
+		ui_set_value(&ui, P_SCR_SIDE, ( scr_out > 0 ) ? scr_out_side[scr_out] : 1);
+	}
+	outs_shown();
 	scr_fit[0] = 0;
 	if ( len > 0 ) (void)cf_get(text, len, "FIT", 0, scr_fit, sizeof(scr_fit));
 	ui_set_value(&ui, P_SCR_FIT, ( strcmp(scr_fit, "stretch") == 0 ) ? 2 : 1);
 	ui_off(&ui, P_SCR_FIT, scr_fit[0] == 0);
 	fill_scale(len);
 	{
-		char	m[96];
+		char	m[128];
 
-		snprintf(m, sizeof(m), "sysenv: screen page %dx%d fit \"%s\", %d sizes, %d chosen\n", scr_w, scr_h,
-			 scr_fit, nmode, mode_cur);
+		snprintf(m, sizeof(m), "sysenv: screen page %dx%d fit \"%s\", %d sizes, %d chosen, output %d of %d\n",
+			 scr_w, scr_h, scr_fit, nmode, mode_cur, scr_out + 1, ( scr_nout > 0 ) ? scr_nout : 1);
 		tm_putstring((CONST UB *)m);
 	}
 }
@@ -1531,12 +1692,12 @@ LOCAL T_BTLINE	bt_list[BT_LINES];
 LOCAL INT	nbt = 0;
 #define BT_MS		1000		/* the list read again, while a search goes */
 #define BT_START_MS	3000		/* how long a search asked for may take to show it has begun */
-LOCAL BOOL	bt_seek;		/* a search is going, or was just asked for */
+LOCAL BOOL	bt_seek;		/* a search is going, or was just asked for, or a connection is being set up */
 LOCAL UD	bt_at, bt_asked;
 
 LOCAL void fill_bt( void )
 {
-	static char	s[BT_LINES][96];
+	static char	s[BT_LINES][256];
 	CONST char	*p[BT_LINES], *none = "（機器はありません。〈探す〉で探します）", *noadp = "（Bluetoothのアダプタがありません）";
 	TS_UUID		u;
 	SZ		asz = 0;
@@ -1579,12 +1740,20 @@ LOCAL void fill_bt( void )
 	ob_cls_obj(k);
 	for ( i = 0; i < nbt; i++ ) {
 		CONST T_BTLINE	*l = &bt_list[i];
+		/* 接続中 only for a device in use: a link still being set up, or one let go, is not one */
+		CONST char	*st = ( l->use == BT_USE_SOUND ) ? "接続中（音声）" : ( l->use == BT_USE_INPUT ) ? "接続中（入力）"
+				    : ( l->use == BT_USE_SETUP ) ? "接続処理中" : l->paired ? "登録済" : "未登録";
+		CONST char	*by = ( l->bearer == ( BT_BEARER_LE | BT_BEARER_BREDR ) ) ? "LE・BR/EDR"
+				    : ( l->bearer == BT_BEARER_LE ) ? "LE" : ( l->bearer == BT_BEARER_BREDR ) ? "BR/EDR" : "";
+		CONST char	*note = ( l->note == BT_NOTE_LEA ) ? "（LE Audioはこのアダプタでは使えません。BR/EDRの側を選んでください）"
+				      : ( l->note == BT_NOTE_BREDR ) ? "（LE Audioはこのアダプタでは使えないので、BR/EDRでつなぎます）"
+				      : ( l->note == BT_NOTE_NOUSE ) ? "（この機械で使える機能がありません）" : "";
 
-		snprintf(s[i], sizeof(s[i]), "%s  %02X:%02X:%02X:%02X:%02X:%02X  %s",
-			 l->connected ? "接続中" : l->paired ? "登録済" : "未登録",
+		snprintf(s[i], sizeof(s[i]), "%s  %s%s%02X:%02X:%02X:%02X:%02X:%02X  %s%s", st, by, by[0] != 0 ? "  " : "",
 			 l->addr[5], l->addr[4], l->addr[3], l->addr[2], l->addr[1], l->addr[0],
-			 l->name[0] != 0 ? (CONST char *)l->name : "（名前なし）");
+			 l->name[0] != 0 ? (CONST char *)l->name : "（名前なし）", note);
 		p[i] = s[i];
+		if ( l->use == BT_USE_SETUP ) bt_seek = TRUE;	/* read again until it is set up or let go */
 	}
 	if ( nbt == 0 ) {
 		ui_names(&ui, P_BT_LIST, &none, 1);
@@ -2381,6 +2550,7 @@ LOCAL void open_page( INT sheet )
 	default:		break;
 	}
 	ui_show_sheet(&ui, sheet);
+	if ( sheet == S_D_SCREEN ) outs_shown();	/* parts are hidden only on the sheet shown */
 }
 
 /*
@@ -2401,6 +2571,38 @@ LOCAL void screen_set( void )
 	if ( scr_fit[0] != 0 ) fit = ( ui_value(&ui, P_SCR_FIT) == 2 ) ? "stretch" : "aspect";
 	if ( f[0] <= 0 || f[1] <= 0 ) {
 		tell("画面の幅と高さを入れてください。");
+		return;
+	}
+	if ( scr_out > 0 && scr_out < scr_nout ) {
+		/* an output besides the main one: on in that size and on that side, or off */
+		BOOL	on = (BOOL)( ui_value(&ui, P_SCR_USE) == 1 );
+		INT	side = ui_value(&ui, P_SCR_SIDE);
+
+		if ( on == scr_out_on[scr_out] && ( !on || ( f[0] == scr_out_w[scr_out] && f[1] == scr_out_h[scr_out]
+							   && side == scr_out_side[scr_out] ) ) ) {
+			devs_show();
+			return;
+		}
+		if ( on ) {
+			snprintf(v, sizeof(v), "OUT%d on %dx%d %s 0", scr_out, f[0], f[1],
+				 side_words[( side >= 1 && side <= 5 ) ? side - 1 : 0]);
+		} else {
+			snprintf(v, sizeof(v), "OUT%d off", scr_out);
+		}
+		memset(&nil, 0, sizeof(nil));
+		er = desk_req(DT_RQ_SCREEN, &nil, 0, 0, v, &an);
+		{
+			char	m[80];
+
+			snprintf(m, sizeof(m), "sysenv: screen %s: %d\n", v, (INT)er);
+			tm_putstring((CONST UB *)m);
+		}
+		if ( er == E_NOSPT ) {
+			tell("この画面はその大きさにできません。");
+		} else if ( er < E_OK && er != E_ABORT ) {
+			tell("画面の設定を変更できません。");
+		}
+		fill_screen();
 		return;
 	}
 	scale_word(sc, sizeof(sc));
@@ -2890,6 +3092,7 @@ LOCAL void prog_detail( void )
 		 : ( strcmp(pi->kind, "utility") == 0 ) ? "道具" : "アプリケーション");
 	snprintf(l[4], sizeof(l[4]), "実身：%s", us);
 	snprintf(l[5], sizeof(l[5]), "%s", pi->builtin ? "システムに組み込み（削除できません）"
+					   : pi->kept ? "システムに必要なもの（削除できません）"
 					   : pi->system ? "システムのもの（削除できます）" : "追加したもの（削除できます）");
 	for ( i = 0; i < 6; i++ ) lp[i] = l[i];
 	(void)ui_ask(&ui, PN_PROG, lp, 6);
@@ -2906,8 +3109,9 @@ LOCAL void prog_delete( void )
 		tell("削除するアプリケーションを選んでください。");
 		return;
 	}
-	if ( prog_info[k].builtin ) {
-		tell("システムに組み込みのアプリケーションは削除できません。");
+	if ( prog_info[k].builtin || prog_info[k].kept ) {
+		tell(prog_info[k].builtin ? "システムに組み込みのアプリケーションは削除できません。"
+					  : "システムに必要なアプリケーションは削除できません。");
 		return;
 	}
 	snprintf(l1, sizeof(l1), "〈%s %s〉を削除します。", prog_info[k].name, prog_info[k].version);
@@ -4257,7 +4461,7 @@ LOCAL BOOL fset_open( CONST TS_UUID *u, INT cur, BOOL reg )
 	free(idx);
 	fsw.cur = ( cur >= 0 && cur < fsw.nface ) ? cur : 0;
 	ui_icon(SYSDEF_PROG_SYSENV);
-	if ( ui_open_on(&fsw.w, &ui, SYSDEF_BOX_SYSENV, PN_FONTSET, 200, 110) < E_OK ) {
+	if ( ui_open_on(&fsw.w, &ui, SYSDEF_BOX_SYSENV, PN_FONTSET, wm_new_x(200), wm_new_y(110)) < E_OK ) {
 		free(line);
 		free((void *)lp);
 		tell("フォント設定のウインドウを開けません。");
@@ -4746,7 +4950,7 @@ LOCAL void menu( CONST T_OBNTM *m )
 			(void)mn_chg_atr(mid, &od, "font.save", font ? 0 : MN_GREY);
 			(void)mn_chg_atr(mid, &od, "delete",
 					 ( font || ( ui_sheet(&ui) == S_VERSION && k >= 0 && k < nprog
-						     && !prog_info[k].builtin ) ) ? 0 : MN_GREY);
+						     && !prog_info[k].builtin && !prog_info[k].kept ) ) ? 0 : MN_GREY);
 		}
 	}
 	chosen = (BOOL)( mn_pop_men(mid, ui.kw, m->x, m->y, m->when, &sel) >= E_OK );
@@ -4806,6 +5010,15 @@ LOCAL void changed( INT id )
 	case P_SCR_LIST:
 		screen_chosen();
 		break;
+	case P_SCR_OUT:
+		scr_out = ui_value(&ui, P_SCR_OUT) - 1;
+		fill_screen();
+		break;
+	case P_SCR_USE:
+		break;
+	case P_SCR_SIDE:
+		mirror_chosen();
+		break;
 	case P_CPU_LIST:
 		cpu_chosen();
 		break;
@@ -4841,6 +5054,16 @@ LOCAL void pressed( INT id )
 	case P_SCR_SET:
 		screen_set();
 		break;
+	case P_SCR_IDENT:
+	{
+		T_DTANS	an;
+		TS_UUID	nil;
+
+		memset(&nil, 0, sizeof(nil));
+		(void)desk_req(DT_RQ_SCREEN, &nil, 0, 0, "IDENT", &an);
+		tm_putstring((CONST UB *)"sysenv: screens identified\n");
+		break;
+	}
 	case P_KBD_SET:
 		kbd_set();
 		break;
@@ -4867,6 +5090,9 @@ LOCAL void pressed( INT id )
 		break;
 	case P_BT_PAIR:
 		bt_cmd(BT_C_PAIR);
+		bt_asked = ui_now();		/* read again while the connection is set up */
+		bt_at = bt_asked + BT_MS;
+		fill_bt();
 		break;
 	case P_BT_FORGET:
 		bt_cmd(BT_C_FORGET);
@@ -4980,7 +5206,7 @@ int main( void )
 	 * on its tags); the buttons at the sheets' foot stay in sight.
 	 */
 	ui_attr(WM_ATTR_RBAR | UI_ATTR_HIDDEN);	/* filled hidden, and shown once (ui_reveal) */
-	if ( ui_open(&ui, SYSDEF_BOX_SYSENV, PN_MAIN, 160, 80) < E_OK ) {
+	if ( ui_open(&ui, SYSDEF_BOX_SYSENV, PN_MAIN, wm_new_x(160), wm_new_y(80)) < E_OK ) {
 		tm_putstring((CONST UB *)"sysenv: no window\n");
 		return 1;
 	}

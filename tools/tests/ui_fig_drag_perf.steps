@@ -10,58 +10,8 @@
 # 表にするのは tools/tests/fig_drag_sum.py(ui_run の console.log を渡す)。
 # 道具パネルの1段目の選択は 298,48、2段目の直線 162、長方形 298、楕円 434(y 82)。
 # ---- 図形が少ないとき: カーネル内
-figproc kernel
-mkbig fig 30 4
-open big
-waitwin 画用紙 600
-sync 600
-wait 800
-# kernel 30: rect drawn
-click 298 48
-wait 200
-click 298 82
-wait 300
-logmark
-dragn 450 450 650 600 60 8
-expectsince desktop: drag moves
-sync 600
-wait 300
-# kernel 30: ellipse drawn
-click 298 48
-wait 200
-click 434 82
-wait 300
-logmark
-dragn 450 450 650 600 60 8
-expectsince desktop: drag moves
-sync 600
-wait 300
-# kernel 30: line drawn
-click 298 48
-wait 200
-click 162 82
-wait 300
-logmark
-dragn 450 450 650 600 60 8
-expectsince desktop: drag moves
-sync 600
-wait 300
-# kernel 30: rectangle 3 sized by its handle
-click 298 48
-wait 200
-click 135 128
-wait 300
-logmark
-dragn 143 136 243 236 60 8
-expectsince desktop: drag moves
-sync 600
-wait 300
-key 16 01
-sync 600
-key 08 01
-sync 600
-wait 500
-# ---- 図形が少ないとき: プロセス
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 30 4
 logmark
 pfig big
@@ -116,58 +66,6 @@ key 08 01
 expectsincein 60 figure: closed
 wait 500
 # ---- 図形が多いとき: カーネル内
-figproc kernel
-mkbig fig 2000 200
-open big
-waitwin 画用紙 600
-sync 600
-wait 800
-# kernel 2000: rect drawn
-click 298 48
-wait 200
-click 298 82
-wait 300
-logmark
-dragn 450 450 650 600 60 8
-expectsince desktop: drag moves
-sync 600
-wait 300
-# kernel 2000: ellipse drawn
-click 298 48
-wait 200
-click 434 82
-wait 300
-logmark
-dragn 450 450 650 600 60 8
-expectsince desktop: drag moves
-sync 600
-wait 300
-# kernel 2000: line drawn
-click 298 48
-wait 200
-click 162 82
-wait 300
-logmark
-dragn 450 450 650 600 60 8
-expectsince desktop: drag moves
-sync 600
-wait 300
-# kernel 2000: rectangle 3 sized by its handle
-click 298 48
-wait 200
-click 135 128
-wait 300
-logmark
-dragn 143 136 243 236 60 8
-expectsince desktop: drag moves
-sync 600
-wait 300
-key 16 01
-sync 600
-key 08 01
-sync 600
-wait 500
-# ---- 図形が多いとき: プロセス
 mkbig fig 2000 200
 logmark
 pfig big

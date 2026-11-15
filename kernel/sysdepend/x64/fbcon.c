@@ -501,6 +501,19 @@ EXPORT void knl_fbcon_watch( UD now, UD frq, INT me, INT ticking, INT online, CO
 }
 
 /*
+ * Told before the console draws on the screen the driver has had (an
+ * exception): what keeps the screen from showing what is written to it
+ * (the panel's self refresh, device/disp/x86_64/disp_igfx_psr.c) turned
+ * off. NULL: nothing to do. Any context.
+ */
+EXPORT void	(*knl_fbcon_wake)( void ) = NULL;
+
+LOCAL void wake( void )
+{
+	if ( handed && knl_fbcon_wake != NULL ) knl_fbcon_wake();
+}
+
+/*
  * What stops the machine is said on the screen again, on a cleared
  * screen under a red band naming the last step reached
  */
@@ -511,6 +524,7 @@ EXPORT void knl_fbcon_resume( void )
 	if ( fb == NULL ) {
 		return;
 	}
+	wake();
 	if ( stopped ) {
 		stopped = FALSE;
 		for ( r = 1; r < rows; r++ ) clear_row(r);
@@ -538,6 +552,7 @@ EXPORT void knl_fbcon_repaint( void )
 	if ( fb == NULL ) {
 		return;
 	}
+	wake();
 	stopped = FALSE;
 	for ( r = 1; r < rows; r++ ) clear_row(r);
 	draw_band((CONST UB *)" TessronOS x64 STOPPED; the last step: ", red);
@@ -563,6 +578,7 @@ EXPORT void knl_fbcon_pin( CONST UB *line )
 	if ( fb == NULL || stopped ) {
 		return;
 	}
+	wake();
 	draw_pins();
 	if ( cy < first_row() ) {
 		cy = first_row();
@@ -593,6 +609,7 @@ EXPORT void knl_fbcon_tail( void )
 	if ( fb == NULL || stopped || cy + 4 >= lines_end ) {
 		return;
 	}
+	wake();
 	room = (INT)( lines_end - cy ) - 3;
 	if ( room > 24 ) room = 24;
 	newline();

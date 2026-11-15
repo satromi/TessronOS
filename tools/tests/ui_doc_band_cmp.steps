@@ -11,133 +11,9 @@
 # and of the process's are compared too. The caret is kept from blinking (LK_BLINK 306 very
 # slow) so that both shots have it alike.
 # Keys: Backspace 2A, Enter 28; Ctrl+E 08 01.
-docproc kernel
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 look 306 3600000
-mkbig doc 30
-open big
-waitwin 基本文章編集 600
-sync 600
-wait 500
-move 690 490
-sync 600
-click 300 170
-sync 600
-move 690 490
-sync 600
-# typed
-text ab
-sync 600
-wait 300
-shot band_k_1
-redraw
-sync 600
-wait 300
-shot band_k_1_whole
-shotsame band_k_1 band_k_1_whole 101 125 682 482
-# taken back
-key 2A
-sync 600
-wait 300
-shot band_k_2
-redraw
-sync 600
-wait 300
-shot band_k_2_whole
-shotsame band_k_2 band_k_2_whole 101 125 682 482
-# a new paragraph
-key 28
-sync 600
-wait 300
-shot band_k_3
-redraw
-sync 600
-wait 300
-shot band_k_3_whole
-shotsame band_k_3 band_k_3_whole 101 125 682 482
-# the lines broken elsewhere
-text abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz
-sync 600
-wait 300
-shot band_k_4
-redraw
-sync 600
-wait 300
-shot band_k_4_whole
-shotsame band_k_4 band_k_4_whole 101 125 682 482
-# and back
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-key 2A
-sync 600
-wait 300
-shot band_k_5
-redraw
-sync 600
-wait 300
-shot band_k_5_whole
-shotsame band_k_5 band_k_5_whole 101 125 682 482
-# wound down, then typed
-move 300 300
-wheel -1
-sync 600
-wheel -1
-sync 600
-wheel -1
-sync 600
-wait 300
-click 300 300
-sync 600
-move 690 490
-sync 600
-text cd
-sync 600
-wait 300
-shot band_k_6
-redraw
-sync 600
-wait 300
-shot band_k_6_whole
-shotsame band_k_6 band_k_6_whole 101 125 682 482
-key 08 01
-sync 600
-wait 500
-# the process
 mkbig doc 30
 logmark
 pdoc big
@@ -266,7 +142,8 @@ expectsince document: drew
 wait 300
 shot band_p_6_whole
 shotsame band_p_6 band_p_6_whole 101 125 682 482
-shotsame band_k_6_whole band_p_6_whole 101 125 682 482
+shotsum band_p_6_whole 101 125 682 482
+want ok 893a6c71b0211cb5
 logmark
 key 08 01
 expectsince document: closed

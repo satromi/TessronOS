@@ -251,9 +251,30 @@ struct pollfd {
 #define POLLWRBAND	0x100
 #define POLLHUP		0x200
 
-/* so_select: one bit for each socket number */
-#define SO_MAX		64		/* sockets there can be, numbered 0 .. SO_MAX - 1 */
+/*
+ * The system's table of sockets: SO_MAX of them, numbered 0 .. SO_MAX - 1,
+ * shared by the kernel and every process (design 9.2). A process holds
+ * no more than its own limit of them (so_getlimit), and the last
+ * SO_KERNEL_RESERVE (include/ts/so.h) are the kernel's alone.
+ */
+#define SO_MAX		1024
+
+/*
+ * so_select, which only the kernel calls: one bit for each number of the
+ * table, since a kernel's socket may have any of them. A process waits
+ * with so_poll, whose list is as long as the caller makes it.
+ */
 #define FD_SETSIZE	SO_MAX
+
+/*
+ * so_socket and so_accept of a process that holds as many sockets as its
+ * limit allows (EMFILE); E_LIMIT is the system's table having none left
+ * (ENFILE). The number is the file layer's EX_MFILE (include/ts/fs.h),
+ * the same limit of the same kind there.
+ */
+#ifndef EX_MFILE
+#define EX_MFILE	(-24)
+#endif
 
 typedef struct fd_set {
 	UB	fd_bits[(FD_SETSIZE + 7) / 8];
@@ -338,6 +359,7 @@ struct addrinfo {
 #define EFAULT		14
 #define EBUSY		16
 #define EINVAL		22
+#define ENFILE		23
 #define EMFILE		24
 #define EPIPE		32
 #define ENOSYS		38

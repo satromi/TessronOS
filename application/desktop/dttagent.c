@@ -25,6 +25,23 @@
  *	the handshake has ended. After a failure the next is not looked at
  *	for a second. A connection silent for TA_IDLE_MS is closed.
  *
+ *	A client that has gone away without a word (its network changed, the
+ *	machine slept) is let go soon, so that the next is taken at once:
+ *	  - TCP's keepalive probes an idle connection and drops it when they
+ *	    go unanswered (TA_KA_*), as sshd's ClientAliveInterval would;
+ *	  - what is sent must make progress within TA_SEND_MS, as Linux's
+ *	    TCP_USER_TIMEOUT bounds data left unacknowledged: a send never
+ *	    waits on the stack's retransmissions, which give up only after
+ *	    minutes;
+ *	  - a session whose own address is no longer the interface's (another
+ *	    network joined) ends;
+ *	  - while a session waits for a line, a new client is taken in as soon
+ *	    as it asks, and once its handshake has proved the key, the silent
+ *	    session gives way to it. A client without the key never ends one.
+ *	A connection the client gave up on while it waited in the listening
+ *	queue is dropped without a handshake and without the wait after a
+ *	failure, which is for a key that failed.
+ *
  *	A line is taken as dtuitest.c takes it, and its answer lines come
  *	back without the mark "@ut ". These few are the agent's own, the
  *	bytes they name following the answer or the line:
@@ -78,22 +95,42 @@ IMPORT INT knl_so_tcp_stats( UD *v, INT n ) __attribute__((weak));	/* the NetBSD
 #define TA_KEY_MAX	64
 #define TA_HANDSHAKE_MS	10000
 #define TA_IDLE_MS	600000
+#define TA_ADDR_LOOK_MS	2000		/* how often the address shown is looked at again */
 #define TA_DATA_MS	60000
 #define TA_SEND_MS	30000
 #define TA_REFUSED_MS	1000
 #define TA_STACK	( 64 * 1024 )
 #define TA_SHOW_MS	3000
 #define TA_SHOW_PRI	30
+#define TA_LOOK_MS	1000		/* how often a session waiting for a line looks about it */
+#define TA_KA_IDLE_S	15		/* keepalive: idle before the first probe, s */
+#define TA_KA_INTVL_S	5		/* between probes, s */
+#define TA_KA_CNT	3		/* probes unanswered before the connection is dropped */
+#define TA_TLS_CONN_EOF	(-0x7280)	/* mbed TLS: the other side closed in the middle */
+#define TA_TLS_RECORD	16384		/* the most a TLS record carries */
 
-/* What the transport needs: the socket and how long a receive may wait */
+/*
+ * A connection: the socket, how long a receive may wait, whether it is
+ * given up (nothing more is sent on it, and it is closed with a reset),
+ * and the two addresses
+ */
 typedef struct {
 	INT	s;
 	INT	tmo;
+	BOOL	dead;
+	UB	self[4];
+	UB	peer[4];
 } TAIO;
 
-LOCAL TAIO	ta_io;
+LOCAL TAIO	ta_iob[2];		/* the session's, and one coming in while it waits */
+LOCAL TAIO	*ta_io = &ta_iob[0];
 LOCAL void	*ta_conn = NULL;
-LOCAL UB	ta_in[1024];
+/*
+ * A whole record read at a time: mbed TLS then holds nothing of the
+ * client's between reads, and a session waiting on the socket for a
+ * line misses nothing it already has.
+ */
+LOCAL UB	ta_in[TA_TLS_RECORD];
 LOCAL BOOL	ta_ending = FALSE;	/* reboot or poweroff asked: no one else is let in */
 LOCAL INT	ta_in_at = 0, ta_in_n = 0;
 
@@ -108,40 +145,101 @@ LOCAL ID		ta_tid = 0;
 LOCAL CONST char	*volatile ta_step = TA_ACCEPT;
 LOCAL volatile UW	ta_beat = 0;
 
+LOCAL UW now_ms( void )
+{
+	SYSTIM	t;
+
+	(void)tk_get_otm(&t);
+	return (UW)t.lo;
+}
+
+LOCAL BOOL connected( INT s )
+{
+	struct sockaddr_in	sa;
+	socklen_t		len = sizeof(sa);
+
+	return (BOOL)( so_getpeername(s, (struct sockaddr *)&sa, &len) >= E_OK );
+}
+
+/*
+ * As much as the socket takes now, with no wait inside the stack: the
+ * wait is here, for room in the sending buffer, and it ends when none has
+ * come for TA_SEND_MS, as the client then takes in nothing
+ */
 LOCAL int io_send( void *ctx, const unsigned char *buf, size_t n )
 {
 	TAIO		*io = (TAIO *)ctx;
 	struct pollfd	p;
+	UW		t0 = now_ms();
+	INT		k = 0, left;
 
-	p.fd = io->s;
-	p.events = POLLOUT;
-	p.revents = 0;
-	if ( so_poll(&p, 1, TA_SEND_MS) <= 0 ) {
+	if ( io->dead ) {
 		return -1;
 	}
-	return so_send(io->s, buf, (SZ)n, 0);
+	for ( ;; ) {
+		left = TA_SEND_MS - (INT)( now_ms() - t0 );
+		p.fd = io->s;
+		p.events = POLLOUT;
+		p.revents = 0;
+		if ( left <= 0 || so_poll(&p, 1, left) <= 0 || ( p.revents & ( POLLERR | POLLHUP ) ) != 0 ) {
+			break;
+		}
+		k = so_send(io->s, buf, (SZ)n, MSG_DONTWAIT);
+		if ( k > 0 ) {
+			return k;
+		}
+		/*
+		 * E_TMOUT is both no room after all and the stack's own giving
+		 * up (ETIMEDOUT): only a connection still connected is waited on
+		 */
+		if ( k != E_TMOUT || !connected(io->s) ) {
+			break;
+		}
+		tk_dly_tsk(10);
+	}
+	tm_printf((UB *)"testagent: sending given up after %d ms (%d): the client takes nothing in\n",
+		  (INT)( now_ms() - t0 ), k);
+	io->dead = TRUE;
+	return -1;
 }
 
 LOCAL int io_recv( void *ctx, unsigned char *buf, size_t n )
 {
 	TAIO		*io = (TAIO *)ctx;
 	struct pollfd	p;
+	INT		k;
 
 	p.fd = io->s;
 	p.events = POLLIN;
 	p.revents = 0;
-	if ( so_poll(&p, 1, io->tmo) <= 0 ) {
+	if ( io->dead || so_poll(&p, 1, io->tmo) <= 0 ) {
+		io->dead = TRUE;
 		return -1;
 	}
-	return so_recv(io->s, buf, (SZ)n, 0);
+	k = so_recv(io->s, buf, (SZ)n, 0);
+	if ( k < 0 ) {
+		io->dead = TRUE;
+	}
+	return k;
+}
+
+/* Bytes to the client: FALSE when the connection is given up */
+LOCAL BOOL send_out( CONST void *buf, size_t n )
+{
+	if ( ta_conn == NULL || ta_io->dead ) {
+		return FALSE;
+	}
+	if ( ta_tls_write(ta_conn, buf, n) != 0 ) {
+		ta_io->dead = TRUE;
+		return FALSE;
+	}
+	return TRUE;
 }
 
 /* An answer line of dtuitest.c's: it is whole, new line and all */
 LOCAL void to_client( CONST char *s )
 {
-	if ( ta_conn != NULL ) {
-		(void)ta_tls_write(ta_conn, s, (size_t)knl_strlen(s));
-	}
+	(void)send_out(s, (size_t)knl_strlen(s));
 }
 
 LOCAL void answer( CONST char *s )
@@ -156,19 +254,12 @@ LOCAL INT in_byte( void )
 		ta_in_n = ta_tls_read(ta_conn, ta_in, sizeof(ta_in));
 		ta_in_at = 0;
 		if ( ta_in_n <= 0 ) {
+			tm_printf((UB *)"testagent: the connection ended in reading (-0x%x)\n", -ta_in_n);
 			ta_in_n = 0;
 			return -1;
 		}
 	}
 	return ta_in[ta_in_at++];
-}
-
-LOCAL UW now_ms( void )
-{
-	SYSTIM	t;
-
-	(void)tk_get_otm(&t);
-	return (UW)t.lo;
 }
 
 LOCAL void step( CONST char *what )
@@ -258,7 +349,7 @@ LOCAL void do_shot( void )
 		row[k++] = (UB)( px[i] >> 8 );
 		row[k++] = (UB)px[i];
 		if ( k > TA_CHUNK - 3 || i == n - 1 ) {
-			if ( ta_tls_write(ta_conn, row, (size_t)k) != 0 ) {
+			if ( !send_out(row, (size_t)k) ) {
 				break;
 			}
 			k = 0;
@@ -285,7 +376,7 @@ LOCAL void do_log( CONST char *s )
 	(void)tm_sprintf((UB *)t, (UB *)"ok %d %d %d\n", n, (INT)pos, (INT)tm_log_at());
 	answer(t);
 	if ( n > 0 ) {
-		(void)ta_tls_write(ta_conn, buf, (size_t)n);
+		(void)send_out(buf, (size_t)n);
 	}
 	Kfree(buf);
 }
@@ -336,7 +427,7 @@ LOCAL BOOL do_put( CONST char *s )
 	if ( er >= E_OK ) er = ob_apd_rec(key, OB_RT_SYSDATA, 0, &rec);
 
 	/* the bytes are taken off the connection whatever came of the object */
-	ta_io.tmo = TA_DATA_MS;
+	ta_io->tmo = TA_DATA_MS;
 	knl_memset(st0, 0, sizeof(st0));
 	if ( knl_so_tcp_stats != NULL ) (void)knl_so_tcp_stats(st0, TA_TCPST);
 	t0 = now_ms();
@@ -361,7 +452,6 @@ LOCAL BOOL do_put( CONST char *s )
 		at += (UD)n;
 		left -= (UD)n;
 	}
-	ta_io.tmo = TA_IDLE_MS;
 	step("put: closing");
 	tw0 = now_ms();
 	if ( key > 0 ) (void)ob_cls_obj(key);
@@ -436,30 +526,6 @@ LOCAL BOOL do_line( CONST char *s )
 	return TRUE;
 }
 
-LOCAL void session( void )
-{
-	char	line[TA_LINE];
-	INT	n = 0, c;
-
-	ta_in_at = ta_in_n = 0;
-	ta_io.tmo = TA_IDLE_MS;
-	step(TA_LINE_WAIT);
-	while ( ( c = in_byte() ) >= 0 ) {
-		if ( c == '\r' ) continue;
-		if ( c != '\n' ) {
-			if ( n < TA_LINE - 1 ) line[n++] = (char)c;
-			continue;
-		}
-		line[n] = 0;
-		n = 0;
-		step("a line");
-		if ( !do_line(line) ) {
-			break;
-		}
-		step(TA_LINE_WAIT);
-	}
-}
-
 /* From a private network only: this port is for the tests on one's own LAN */
 LOCAL BOOL private_addr( CONST UB *a )
 {
@@ -468,17 +534,34 @@ LOCAL BOOL private_addr( CONST UB *a )
 		    || a[0] == 127 );
 }
 
-LOCAL char	ta_shown[160];
+LOCAL char	ta_shown[200];
 
+LOCAL void show( void )
+{
+	(void)wm_msg_put(ta_shown);
+	tm_printf((UB *)"testagent: %s\n", ta_shown);
+}
+
+/* This machine's address listened on, or what it waits for */
 LOCAL void tell( CONST char *what, CONST UB *a )
 {
 	if ( a != NULL ) {
-		(void)tm_sprintf((UB *)ta_shown, (UB *)"試験用の遠隔操作が有効: %s %d.%d.%d.%d:%d", what, a[0], a[1], a[2], a[3], TA_PORT);
+		(void)tm_sprintf((UB *)ta_shown, (UB *)"試験用の遠隔操作が有効: %s この機械 %d.%d.%d.%d:%d",
+				 what, a[0], a[1], a[2], a[3], TA_PORT);
 	} else {
 		(void)tm_sprintf((UB *)ta_shown, (UB *)"試験用の遠隔操作が有効: %s", what);
 	}
-	(void)wm_msg_put(ta_shown);
-	tm_printf((UB *)"testagent: %s\n", ta_shown);
+	show();
+}
+
+/* A connection: both ends, so that the client's address is not taken for this machine's */
+LOCAL void tell_conn( CONST char *what, CONST TAIO *io )
+{
+	CONST UB	*a = io->self, *b = io->peer;
+
+	(void)tm_sprintf((UB *)ta_shown, (UB *)"試験用の遠隔操作が有効: %s この機械 %d.%d.%d.%d:%d、相手 %d.%d.%d.%d",
+			 what, a[0], a[1], a[2], a[3], TA_PORT, b[0], b[1], b[2], b[3]);
+	show();
 }
 
 /*
@@ -538,10 +621,240 @@ LOCAL INT listening( void )
 	return s;
 }
 
+/*
+ * A connection ended: TLS's closing word sent while the connection still
+ * carries, and one given up closed with a reset, so that the stack does
+ * not go on sending to a client that is gone
+ */
+LOCAL void conn_end( TAIO *io, void *conn )
+{
+	struct linger	l;
+
+	if ( conn != NULL ) {
+		ta_tls_close(conn);		/* io_send sends nothing on one given up */
+	}
+	if ( io->dead ) {
+		l.l_onoff = 1;
+		l.l_linger = 0;
+		(void)so_setsockopt(io->s, SOL_SOCKET, SO_LINGER, &l, sizeof(l));
+	}
+	(void)so_close(io->s);
+	io->s = -1;
+}
+
+/* TCP's keepalive: an idle connection whose client no longer answers is dropped by the stack */
+LOCAL void keepalive( INT s )
+{
+	INT	on = 1, idle = TA_KA_IDLE_S, intvl = TA_KA_INTVL_S, cnt = TA_KA_CNT;
+
+	(void)so_setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+	(void)so_setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+	(void)so_setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+	(void)so_setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+}
+
+/* The client closed or reset the connection before a byte of it was read */
+LOCAL BOOL gone_already( INT s )
+{
+	struct pollfd	p;
+	UB		b;
+	INT		k;
+
+	p.fd = s;
+	p.events = POLLIN;
+	p.revents = 0;
+	if ( so_poll(&p, 1, 0) <= 0 ) {
+		return FALSE;
+	}
+	k = so_recv(s, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+	return (BOOL)( k == 0 || ( k < 0 && k != E_TMOUT ) );
+}
+
+/*
+ * The next connection of the listening queue into io, its handshake done:
+ * the TLS connection, or NULL. Only a key that failed (or no address of
+ * a private network) makes the next wait TA_REFUSED_MS; a connection the
+ * client has already given up on is let go at once, so that a queue of
+ * them does not keep the one still waiting behind them past its patience.
+ */
+LOCAL void *come_in( INT ls, TAIO *io )
+{
+	struct sockaddr_in	peer, self;
+	socklen_t		len = sizeof(peer);
+	CONST UB		*pa = io->peer;
+	void			*conn;
+	INT			c, err = 0;
+
+	c = so_accept(ls, (struct sockaddr *)&peer, &len);
+	if ( c < 0 ) {
+		tk_dly_tsk(TA_REFUSED_MS);
+		return NULL;
+	}
+	knl_memset(io, 0, sizeof(*io));
+	io->s = c;
+	knl_memcpy(io->peer, &peer.sin_addr, 4);
+	len = sizeof(self);
+	if ( so_getsockname(c, (struct sockaddr *)&self, &len) >= E_OK ) {
+		knl_memcpy(io->self, &self.sin_addr, 4);
+	}
+	if ( !private_addr(pa) ) {
+		tm_printf((UB *)"testagent: refused %d.%d.%d.%d: not a private address\n", pa[0], pa[1], pa[2], pa[3]);
+		io->dead = TRUE;
+		conn_end(io, NULL);
+		tk_dly_tsk(TA_REFUSED_MS);
+		return NULL;
+	}
+	if ( gone_already(c) ) {
+		tm_printf((UB *)"testagent: %d.%d.%d.%d gave up while it waited to be taken: let go\n", pa[0], pa[1], pa[2], pa[3]);
+		io->dead = TRUE;
+		conn_end(io, NULL);
+		return NULL;
+	}
+	keepalive(c);
+	io->tmo = TA_HANDSHAKE_MS;
+	conn = ta_tls_open(io_send, io_recv, io, &err);
+	if ( conn == NULL ) {
+		io->dead = TRUE;
+		conn_end(io, NULL);
+		if ( err == TA_TLS_CONN_EOF ) {
+			tm_printf((UB *)"testagent: %d.%d.%d.%d closed in the handshake: let go\n", pa[0], pa[1], pa[2], pa[3]);
+		} else {
+			tm_printf((UB *)"testagent: refused %d.%d.%d.%d: handshake -0x%x\n", pa[0], pa[1], pa[2], pa[3], -err);
+			tk_dly_tsk(TA_REFUSED_MS);
+		}
+		return NULL;
+	}
+	return conn;
+}
+
+/*
+ * The session's own address no longer the interface's: another network
+ * joined, nothing of this connection can come or go. No address at all
+ * is left to the keepalive, as the same one may come back.
+ */
+LOCAL BOOL self_gone( void )
+{
+	UW	now = 0, mask, gw;
+	UW	self;
+
+	knl_memcpy(&self, ta_io->self, 4);
+	if ( ta_io->self[0] == 127 || self == 0 ) {
+		return FALSE;
+	}
+	return (BOOL)( so_getifaddr(&now, &mask, &gw) >= E_OK && now != 0 && now != self );
+}
+
+/*
+ * A new client while the session is silent: it takes the session's
+ * place once its handshake has proved the key, and not before, so that
+ * one without the key cannot end a session. The silent one is reset: a
+ * client that went away no longer reads, and one still there learns at
+ * once that it was let go.
+ */
+LOCAL BOOL take_over( INT ls )
+{
+	TAIO	*io = ( ta_io == &ta_iob[0] ) ? &ta_iob[1] : &ta_iob[0];
+	CONST UB *a = ta_io->peer, *b = io->peer;
+	void	*conn;
+
+	step("handshake");
+	conn = come_in(ls, io);
+	if ( conn == NULL ) {
+		return FALSE;
+	}
+	tm_printf((UB *)"testagent: %d.%d.%d.%d came in with the key: the silent session of %d.%d.%d.%d gives way\n",
+		  b[0], b[1], b[2], b[3], a[0], a[1], a[2], a[3]);
+	ta_io->dead = TRUE;
+	conn_end(ta_io, ta_conn);
+	ta_io = io;
+	ta_conn = conn;
+	ta_in_at = ta_in_n = 0;
+	tell_conn("接続中", ta_io);
+	return TRUE;
+}
+
+/*
+ * Until the client says something: TRUE when there is something to read
+ * (or the connection's end, which the reading finds), FALSE when the
+ * session is to end
+ */
+LOCAL BOOL wait_line( INT ls )
+{
+	struct pollfd	p[2];
+	UW		t0 = now_ms();
+	INT		k;
+
+	step(TA_LINE_WAIT);
+	for ( ;; ) {
+		if ( (INT)( now_ms() - t0 ) >= TA_IDLE_MS ) {
+			tm_printf((UB *)"testagent: silent for %d s: the session ends\n", TA_IDLE_MS / 1000);
+			return FALSE;
+		}
+		p[0].fd = ta_io->s;
+		p[0].events = POLLIN;
+		p[0].revents = 0;
+		p[1].fd = ls;
+		p[1].events = POLLIN;
+		p[1].revents = 0;
+		k = so_poll(p, 2, TA_LOOK_MS);
+		if ( k < 0 ) {
+			ta_io->dead = TRUE;
+			return FALSE;
+		}
+		if ( p[0].revents != 0 ) {
+			return TRUE;
+		}
+		if ( ( p[1].revents & POLLIN ) != 0 ) {
+			if ( take_over(ls) ) {
+				t0 = now_ms();
+			}
+			step(TA_LINE_WAIT);
+			continue;
+		}
+		if ( self_gone() ) {
+			CONST UB	*a = ta_io->self;
+
+			tm_printf((UB *)"testagent: %d.%d.%d.%d is no longer this machine's address: the session ends\n",
+				  a[0], a[1], a[2], a[3]);
+			ta_io->dead = TRUE;
+			return FALSE;
+		}
+	}
+}
+
+LOCAL void session( INT ls )
+{
+	char	line[TA_LINE];
+	INT	n = 0, c;
+
+	ta_in_at = ta_in_n = 0;
+	for ( ;; ) {
+		if ( n == 0 && ta_in_at >= ta_in_n && !wait_line(ls) ) {
+			break;
+		}
+		ta_io->tmo = TA_DATA_MS;	/* the rest of a line, once something has come */
+		if ( ( c = in_byte() ) < 0 ) {
+			break;
+		}
+		if ( c == '\r' ) continue;
+		if ( c != '\n' ) {
+			if ( n < TA_LINE - 1 ) line[n++] = (char)c;
+			continue;
+		}
+		line[n] = 0;
+		n = 0;
+		step("a line");
+		if ( !do_line(line) || ta_io->dead ) {
+			break;
+		}
+	}
+}
+
 LOCAL void ta_task( INT stacd, void *exinf )
 {
-	INT	ls, c, err = 0;
+	INT	ls;
 	UW	addr = 0, mask = 0, gw = 0;
+	void	*conn;
 
 	(void)stacd;
 	(void)exinf;
@@ -554,43 +867,47 @@ LOCAL void ta_task( INT stacd, void *exinf )
 	}
 	tell("待受け", (CONST UB *)&addr);
 	for ( ;; ) {
-		struct sockaddr_in	peer;
-		socklen_t		plen = sizeof(peer);
-		CONST UB		*pa = (CONST UB *)&peer.sin_addr;
-
 		step(TA_ACCEPT);
-		c = so_accept(ls, (struct sockaddr *)&peer, &plen);
-		if ( c < 0 ) {
-			tk_dly_tsk(TA_REFUSED_MS);
-			continue;
+		/*
+		 * Listening on every address, a new one (another network
+		 * joined) is answered on at once; what the message line shows
+		 * follows it, looked at while no one asks to connect.
+		 */
+		{
+			struct pollfd	lp;
+			UW		now = 0;
+
+			lp.fd = ls;
+			lp.events = POLLIN;
+			lp.revents = 0;
+			if ( so_poll(&lp, 1, TA_ADDR_LOOK_MS) <= 0 ) {
+				if ( so_getifaddr(&now, &mask, &gw) >= E_OK && now != 0 && now != addr ) {
+					addr = now;
+					tell("待受け", (CONST UB *)&addr);
+				}
+				continue;
+			}
 		}
-		if ( !private_addr(pa) ) {
-			tm_printf((UB *)"testagent: refused %d.%d.%d.%d: not a private address\n", pa[0], pa[1], pa[2], pa[3]);
-			(void)so_close(c);
-			tk_dly_tsk(TA_REFUSED_MS);
-			continue;
-		}
-		ta_io.s = c;
-		ta_io.tmo = TA_HANDSHAKE_MS;
 		step("handshake");
-		ta_conn = ta_tls_open(io_send, io_recv, &ta_io, &err);
-		if ( ta_conn == NULL ) {
-			tm_printf((UB *)"testagent: refused %d.%d.%d.%d: handshake -0x%x\n", pa[0], pa[1], pa[2], pa[3], -err);
-			(void)so_close(c);
-			tk_dly_tsk(TA_REFUSED_MS);
+		conn = come_in(ls, &ta_iob[0]);
+		if ( conn == NULL ) {
 			continue;
 		}
-		tell("接続", pa);
-		session();
+		ta_io = &ta_iob[0];
+		ta_conn = conn;
+		tell_conn("接続中", ta_io);
+		session(ls);
 		step("closing");
-		ta_tls_close(ta_conn);
+		conn_end(ta_io, ta_conn);
 		ta_conn = NULL;
-		(void)so_close(c);
-		tell("切断", pa);
+		tell_conn("切断", ta_io);
 		if ( ta_ending ) {
 			/* a client waiting for the machine to come back must not find this one on its way out */
 			(void)so_close(ls);
 			(void)tk_slp_tsk(TMO_FEVR);
+		}
+		if ( so_getifaddr(&addr, &mask, &gw) >= E_OK && addr != 0 ) {
+			tell("待受け", (CONST UB *)&addr);
 		}
 	}
 }

@@ -1,13 +1,13 @@
 # BeFC (design 11.32), for tools/ui_run.py: a ROM of the tests made as an
-# object (emurom), its link in a document; BeFC opened from its program
+# object (emurom), its link on a page of the desktop's (a figure: xmlopen); BeFC opened from its program
 # object and the link carried onto its window, which runs it; its menu
 # opened and the state saved and read back; closed, what it keeps kept.
 emurom
-xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
-xml <p><link id="01a0d8c4-5500-7f01-8b12-3c4d5e6f7b70_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c21"
-xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
-xml framedisp="true" namedisp="true" pictdisp="true"/></p>
-xml </document></tad>
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="01a0d8c4-5500-7f01-8b12-3c4d5e6f7b70_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c21"
+xml vobjleft="10" vobjtop="0" vobjright="160" vobjbottom="19" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#e1f2f9" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
 xmlopen ROMの文書
 wait 500
 win ROMの文書

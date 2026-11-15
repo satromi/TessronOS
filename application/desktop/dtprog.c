@@ -14,7 +14,7 @@
  *
  *	A program is a real object whose metadata says what it is:
  *	  "tessronos": { "program": { "id": "basic-text-editor", "kind": "app",
- *		"name": "基本文章編集", "base": [ UUID ], "builtin": true } }
+ *		"name": "基本文章編集", "base": [ UUID ], "builtin": false } }
  *	The id is the one an applist names, so what a TADjs Desktop wrote
  *	opens with the program it names. "aliases" lists ids the program
  *	had before (書庫管理 took in 書庫解凍, unpack-file): an applist that
@@ -22,8 +22,9 @@
  *	原紙, and opens objects), accessory (小物: no data of its own),
  *	utility (a tool of the system) or command (no window of its own: run
  *	in a コンソール, which shows what it prints). A program the desktop carries in
- *	itself is "builtin" and has no executable; one that is a process has
- *	its executable in a record of type 9 (tessronos.exec).
+ *	itself (the list 'carried') is "builtin" and has no executable; one
+ *	that is a process has its executable in a record of type 9
+ *	(tessronos.exec).
  *
  *	The program box is the list of programs: an object of the store
  *	whose record links to each program object. The system's programs
@@ -143,6 +144,28 @@ LOCAL BOOL same( CONST UB *a, CONST char *b )
 
 /* ---------------------------------------------------------------- what a program says */
 
+/*
+ * The programs the desktop carries in itself, by their ids: only these
+ * are "builtin". A program object of any other id that says it is is
+ * started as a process all the same: the desktop has no code of its own
+ * for it (基本図形編集, 基本文章編集, 仮身一覧, the 原紙箱, the 小物箱, the
+ * トレー and the system's tools (屑実身操作, 実身/仮身検索, 仮身ネットワーク,
+ * ウインドウ一覧) run only as processes).
+ */
+LOCAL CONST char	*CONST carried[] = {
+	"force-quit",
+};
+
+LOCAL BOOL is_carried( CONST UB *id )
+{
+	INT	i;
+
+	for ( i = 0; i < (INT)( sizeof(carried) / sizeof(carried[0]) ); i++ ) {
+		if ( same(id, carried[i]) ) return TRUE;
+	}
+	return FALSE;
+}
+
 /* A program object's metadata read into an entry; FALSE when it is not a program */
 LOCAL BOOL read_prog( CONST TS_UUID *uuid, DTPROG *p )
 {
@@ -172,7 +195,7 @@ LOCAL BOOL read_prog( CONST TS_UUID *uuid, DTPROG *p )
 		if ( js_get_str(&g, "version", p->version, DT_VER_MAX) <= 0 ) {
 			p->version[0] = 0;
 		}
-		p->builtin = js_get_bool(&g, "builtin", FALSE);
+		p->builtin = (BOOL)( js_get_bool(&g, "builtin", FALSE) && is_carried(p->id) );
 		p->menu = js_get_bool(&g, "menu", FALSE);
 		p->open_link = (BOOL)( js_get_str(&g, "openArg", s, sizeof(s)) > 0 && same(s, "link") );
 
@@ -490,7 +513,7 @@ EXPORT ER dt_plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UU
 EXPORT void dt_prog_reread( void )
 {
 	read_box();
-	dt_acc_boxes_remake();
+	dt_acc_boxes_tell();
 }
 
 EXPORT BOOL dt_prog_read( CONST TS_UUID *uuid, DTPROG *p )
@@ -687,47 +710,6 @@ EXPORT INT dt_app_list( CONST T_VOBJ *v, DTAPP *out, INT max, INT *p_dflt )
 }
 
 /*
- * A box's page: the 原紙箱 shows the templates of the applications; the
- * 小物箱 the accessories, as dtacc.c orders them. A template's link
- * shows the template's own name, so its width is measured from that
- * name, not from its program's.
- */
-EXPORT T_TAD *dt_prog_page( UINT kind )
-{
-	TS_UUID		*ids;
-	CONST char	**names;
-	T_TAD		*t;
-	INT		i, k, n = 0;
-
-	if ( kind == DT_PK_ACCESSORY ) {
-		return dt_acc_page();
-	}
-	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( nprog * DT_PROG_BASE + 1 ));
-	names = (CONST char **)Kmalloc(sizeof(char *) * (SZ)( nprog * DT_PROG_BASE + 1 ));
-	if ( ids == NULL || names == NULL ) {
-		if ( ids != NULL ) Kfree(ids);
-		if ( names != NULL ) Kfree((void *)names);
-		return NULL;
-	}
-	for ( i = 0; i < nprog; i++ ) {
-		if ( prog[i]->kind != kind ) continue;
-		if ( kind == DT_PK_APP ) {
-			for ( k = 0; k < prog[i]->nbase; k++ ) {
-				ids[n] = prog[i]->base[k];
-				names[n++] = NULL;	/* the template's own name */
-			}
-		} else {
-			ids[n] = prog[i]->uuid;
-			names[n++] = (CONST char *)prog[i]->name;
-		}
-	}
-	t = dt_list_record("原紙箱", ids, names, n);
-	Kfree(ids);
-	Kfree((void *)names);
-	return t;
-}
-
-/*
  * What the system holds that no record links to: the システム箱, which
  * links to every box of the system, and the templates of the programs
  */
@@ -799,6 +781,102 @@ EXPORT void dt_base_box_put( CONST TS_UUID *prog, BOOL add )
 	Kfree(p);
 }
 
+/*
+ * An object made by the person from a template (tmpl): made the
+ * person's, and, when the template is the 原紙箱 program's own, the new
+ * 原紙箱 given links to the templates the system's 原紙箱 links to now,
+ * in its order and laid out as om_obj_links_set lays a box (closed,
+ * as wide as the name, LINK_GAP below the one before). A box of the
+ * person's starts with what the system has, an application installed
+ * later included; a ユーザ原紙 that is a 原紙箱 is copied as it is.
+ */
+/*
+ * The place an object made from a template keeps is the template's, as
+ * every other thing of its metadata is. Where a window stands at that
+ * very corner now -- the system's 原紙箱, beside which a 原紙箱 made from
+ * its template is opened, keeps the template's place -- the new object
+ * keeps a place a step down and across, so that its window does not
+ * hide the other when it is opened.
+ */
+#define MADE_STEP	28
+#define MADE_STEPS	8
+
+LOCAL void made_place( CONST TS_UUID *made )
+{
+	T_DPRECT	r;
+	T_WMWIN		w;
+	INT		wids[64], n, i, k;
+	BOOL		over = TRUE, moved = FALSE;
+
+	if ( om_store_window(made, &r) < E_OK ) {
+		return;				/* no place of its own: it opens where a new window opens */
+	}
+	n = wm_list(wids, 64);
+	if ( n > 64 ) n = 64;
+	for ( k = 0; k < MADE_STEPS && over; k++ ) {
+		over = FALSE;
+		for ( i = 0; i < n && !over; i++ ) {
+			over = (BOOL)( wm_ref(wids[i], &w) >= E_OK && ( w.attr & WM_ATTR_POPUP ) == 0
+				       && w.outer.left == r.left && w.outer.top == r.top );
+		}
+		if ( over ) {
+			r.left += MADE_STEP;
+			r.right += MADE_STEP;
+			r.top += MADE_STEP;
+			r.bottom += MADE_STEP;
+			moved = TRUE;
+		}
+	}
+	if ( moved ) {
+		(void)om_store_set_window(made, &r);
+		tm_printf((UB *)"dtprog: made from a template, kept at %d,%d beside the window there\n",
+			  (INT)r.left, (INT)r.top);
+	}
+}
+
+EXPORT void dt_template_made( CONST TS_UUID *tmpl, CONST TS_UUID *made )
+{
+	CONST DTPROG	*bb;
+	TS_UUID		box, *ids = NULL;
+	T_TAD		*doc = NULL;
+	T_VOBJ		v;
+	UB		*rec;
+	SZ		size = 0;
+	INT		i, k, n = 0, all;
+	ER		er;
+
+	(void)om_store_set_maker(made);
+	made_place(made);
+	if ( ts_str_to_uuid(SYSDEF_PROG_BASEBOX, &box) < E_OK
+	  || ( bb = dt_prog_of(&box) ) == NULL ) {
+		return;
+	}
+	for ( k = 0; k < bb->nbase && ts_uuid_cmp(&bb->base[k], tmpl) != 0; k++ ) ;
+	if ( k == bb->nbase || !dt_base_box(&box) || ts_uuid_cmp(&box, made) == 0 ) {
+		return;
+	}
+	rec = om_obj_record(&box, 0, &size);
+	if ( rec == NULL ) {
+		return;
+	}
+	er = tad_parse(rec, size, NULL, &doc);
+	Kfree(rec);
+	if ( er < E_OK || doc == NULL ) {
+		return;
+	}
+	all = tad_lnk_count(doc);
+	ids = ( all > 0 ) ? (TS_UUID *)Kcalloc((size_t)all, sizeof(TS_UUID)) : NULL;
+	for ( i = 0; ids != NULL && i < all; i++ ) {
+		if ( tad_lnk_get(doc, i, &v) >= E_OK ) {
+			ids[n++] = v.target;
+		}
+	}
+	tad_free(doc);
+	er = ( n > 0 ) ? om_obj_links_set(made, ids, n) : E_OK;
+	if ( ids != NULL ) Kfree(ids);
+	tm_printf((UB *)"dtprog: new 原紙箱 given the system's %d templates (%d)\n", n, (INT)er);
+}
+
 /* ---------------------------------------------------------------- running one */
 
 /*
@@ -826,11 +904,190 @@ typedef struct {
 	SZ	anssz;			/* how much of a T_DTANS the asker reads */
 	BOOL	with_er;		/* the answer says whether the start failed */
 	UINT	ticket;			/* of the person's act that asked for it, 0 none */
+	UINT	rgroup, rank;		/* of a group opened together (dt_prog_rank), 0 none */
+	INT	watch;			/* its place in watch_proc, from 1; 0 not watched */
+	INT	opening;		/* its place in opening, from 1; 0 none */
+	INT	info;			/* a 管理情報 started: its place in dtinfo.c's table, from 1; 0 none */
 	UB	name[TAD_NAME_MAX];	/* the program, for the message line */
+	SZ	rawsz;			/* a start-up argument of the program's own (dt_prog_run_arg), 0 none */
+	UB	raw[DT_PROG_ARG];
 } DTSTART;
 
 LOCAL ID	start_mbf = 0;
 LOCAL ID	start_tsk = 0;
+
+/*
+ * What the desktop opened by itself as it started (auto_open), watched
+ * until each process has shown its first picture or has ended: the
+ * start is over then (dt_prog_settled). Each start has its own place,
+ * given as it is asked; the task that starts it fills it in.
+ */
+#define WATCH_MAX	16
+LOCAL BOOL	watch_on = FALSE;		/* the starts asked now are watched */
+LOCAL INT	watch_asked = 0;		/* of the desktop's task */
+LOCAL TS_UUID	watch_proc[WATCH_MAX];		/* the process; 0 for a start that failed */
+LOCAL UINT	watch_done[WATCH_MAX];		/* watch_proc[i] filled in */
+
+EXPORT void dt_prog_watch( BOOL on )
+{
+	watch_on = on;
+}
+
+/*
+ * The starts asked now are of a group of windows opened together, at
+ * this place in it (auto_open): the window each process puts up first
+ * takes that place among the group's (wm_set_rank). 0 ends it.
+ */
+LOCAL UINT	rank_group = 0, rank_place = 0;
+
+EXPORT void dt_prog_rank( UINT group, UINT rank )
+{
+	rank_group = group;
+	rank_place = rank;
+}
+
+/*
+ * Objects being opened in a process's window. A program started on an
+ * object takes a while to put its window up (the start is the
+ * starter's, and a large program is read in for seconds), and until it
+ * has, no window says it shows the object (wm_obj_showing). An open
+ * asked for in that time -- a double click done twice quickly, 実行
+ * chosen while the first is still starting -- finds the object here and
+ * starts nothing: one object is open in one window. An entry is
+ * forgotten when the start failed, when the process has ended, and once
+ * the process has shown a window, which says what it shows from then on.
+ *
+ * The desktop's task takes a free place and asks the start; the starter
+ * says how the start went (OP_STARTED with the process, or OP_FAILED);
+ * the desktop's task alone frees the place again. The state is read and
+ * written with __atomic, the process written before OP_STARTED is.
+ */
+#define OPENING_MAX	16
+
+#define OP_FREE		0
+#define OP_STARTING	1		/* handed to the starter */
+#define OP_STARTED	2		/* the process is there */
+#define OP_FAILED	3
+
+LOCAL UINT	opening_state[OPENING_MAX];
+LOCAL TS_UUID	opening_obj[OPENING_MAX];
+LOCAL TS_UUID	opening_proc[OPENING_MAX];
+LOCAL UINT	opening_keys[OPENING_MAX];	/* asked again: the ticket of that act (wm_act_ticket), 0 none */
+
+/* A place taken for an object about to be opened: from 1, 0 when all are taken */
+LOCAL INT opening_take( CONST TS_UUID *obj )
+{
+	INT	i;
+
+	for ( i = 0; i < OPENING_MAX; i++ ) {
+		if ( __atomic_load_n(&opening_state[i], __ATOMIC_ACQUIRE) == OP_FREE ) {
+			opening_obj[i] = *obj;
+			opening_keys[i] = 0;
+			__atomic_store_n(&opening_state[i], OP_STARTING, __ATOMIC_RELEASE);
+			return i + 1;
+		}
+	}
+	return 0;
+}
+
+/* Whether place i still stands for an object being opened; freed when not */
+LOCAL BOOL opening_stands( INT i )
+{
+	UINT	st = __atomic_load_n(&opening_state[i], __ATOMIC_ACQUIRE);
+	ID	pid;
+
+	if ( st == OP_FREE || st == OP_STARTING ) {
+		return (BOOL)( st == OP_STARTING );
+	}
+	if ( st == OP_STARTED ) {
+		pid = knl_prc_of_uuid(&opening_proc[i]);
+		if ( pid > 0 && !wm_prc_drawn(pid) ) {
+			return TRUE;
+		}
+		/*
+		 * Asked to be opened again while it was being started: the
+		 * press of that ask came after the one the start carried, so
+		 * the window is given the keys here, unless the person has
+		 * gone on to something else since
+		 */
+		if ( pid > 0 && opening_keys[i] != 0 && wm_act_good(opening_keys[i]) ) {
+			INT	wid = wm_obj_showing(&opening_obj[i]);
+
+			if ( wid > 0 ) {
+				wm_raise(wid);
+				(void)wm_focus(wid);
+				wm_update();
+			}
+		}
+	}
+	__atomic_store_n(&opening_state[i], OP_FREE, __ATOMIC_RELEASE);
+	return FALSE;
+}
+
+EXPORT BOOL dt_prog_opening( CONST TS_UUID *obj )
+{
+	INT	i;
+	BOOL	is = FALSE;
+
+	for ( i = 0; i < OPENING_MAX; i++ ) {
+		if ( opening_stands(i) && ts_uuid_cmp(&opening_obj[i], obj) == 0 ) {
+			is = TRUE;
+		}
+	}
+	return is;
+}
+
+EXPORT void dt_prog_opening_keys( CONST TS_UUID *obj )
+{
+	INT	i;
+
+	for ( i = 0; i < OPENING_MAX; i++ ) {
+		if ( opening_stands(i) && ts_uuid_cmp(&opening_obj[i], obj) == 0 ) {
+			opening_keys[i] = ( dt_opens_quiet > 0 ) ? 0 : wm_act_ticket();
+		}
+	}
+}
+
+EXPORT void dt_prog_opening_poll( void )
+{
+	INT	i;
+
+	for ( i = 0; i < OPENING_MAX; i++ ) {
+		(void)opening_stands(i);
+	}
+}
+
+/*
+ * TRUE once every start watched is done and its process has shown what
+ * it drew in a window of its own (wm_prc_drawn) or is gone; *p_drawn
+ * and *p_gone say how many of each, *p_all how many were watched
+ */
+EXPORT BOOL dt_prog_settled( INT *p_drawn, INT *p_gone, INT *p_all )
+{
+	TS_UUID	none;
+	INT	i, drawn = 0, gone = 0;
+	ID	pid;
+
+	knl_memset(&none, 0, sizeof(none));
+	for ( i = 0; i < watch_asked; i++ ) {
+		if ( __atomic_load_n(&watch_done[i], __ATOMIC_ACQUIRE) == 0 ) {
+			break;
+		}
+		pid = ( ts_uuid_cmp(&watch_proc[i], &none) != 0 ) ? knl_prc_of_uuid(&watch_proc[i]) : 0;
+		if ( pid <= 0 ) {
+			gone++;
+		} else if ( wm_prc_drawn(pid) ) {
+			drawn++;
+		} else {
+			break;
+		}
+	}
+	*p_drawn = drawn;
+	*p_gone = gone;
+	*p_all = watch_asked;
+	/* over once every start watched is up, and none is to be asked any more */
+	return (BOOL)( i == watch_asked && !watch_on );
+}
 
 /* The answer the next start takes over (dt_prog_reply) */
 LOCAL struct {
@@ -872,12 +1129,17 @@ LOCAL ER start_now( CONST DTSTART *s, TS_UUID *pu )
 	knl_memset(&c, 0, sizeof(c));
 	c.type = OB_T_PROCESS;
 	c.prog = s->prog;
-	if ( s->has_arg ) {
+	if ( s->rawsz > 0 ) {
+		c.arg = s->raw;
+		c.argsz = s->rawsz;
+	} else if ( s->has_arg ) {
 		c.arg = &s->arg;
 		c.argsz = s->link_arg ? sizeof(s->arg) : sizeof(s->arg.target);
 	}
 	knl_ob_act_arm(s->ticket);
+	knl_ob_rank_arm(s->rgroup, s->rank);
 	er = ob_cre_obj(&c, pu);
+	knl_ob_rank_arm(0, 0);
 	knl_ob_act_arm(0);
 	return er;
 }
@@ -911,6 +1173,23 @@ LOCAL void start_done( CONST DTSTART *s, ER er, CONST TS_UUID *pu )
 		(void)put(msg, n, sizeof(msg), "を起動できませんでした");
 		(void)wm_msg_put((CONST char *)msg);
 		tm_printf((UB *)"TessronOS desktop: %s not started (%d)\n", s->name, (INT)er);
+	}
+	if ( s->watch > 0 ) {
+		if ( er >= E_OK && pu != NULL ) {
+			watch_proc[s->watch - 1] = *pu;
+		}
+		__atomic_store_n(&watch_done[s->watch - 1], 1, __ATOMIC_RELEASE);
+	}
+	if ( s->info > 0 ) {
+		dt_info_started(s->info, er, pu);
+	}
+	if ( s->opening > 0 ) {
+		if ( er >= E_OK && pu != NULL ) {
+			opening_proc[s->opening - 1] = *pu;
+			__atomic_store_n(&opening_state[s->opening - 1], OP_STARTED, __ATOMIC_RELEASE);
+		} else {
+			__atomic_store_n(&opening_state[s->opening - 1], OP_FAILED, __ATOMIC_RELEASE);
+		}
 	}
 }
 
@@ -973,9 +1252,16 @@ LOCAL BOOL starter( void )
 /*
  * A process started from the program: handed to the starter, or started
  * here when there is none. from and v, when given, are the window of the
- * desktop's and the link in it the object was opened from.
+ * desktop's and the link in it the object was opened from. opens: the
+ * process is to show the object arg in its window, which is kept in
+ * opening until it does.
  */
-LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg, CONST DTWIN *from, CONST T_VOBJ *v )
+LOCAL UB	raw_next[DT_PROG_ARG];		/* the argument dt_prog_run_arg gives the next start */
+LOCAL SZ	raw_next_sz = 0;
+
+LOCAL INT	start_info = 0;		/* the place of the 管理情報 dt_prog_start_info starts */
+
+LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg, CONST DTWIN *from, CONST T_VOBJ *v, BOOL opens )
 {
 	DTSTART	s;
 	TS_UUID	pu;
@@ -983,13 +1269,27 @@ LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg, CONST DTWIN *from, 
 	ER	er;
 
 	knl_memset(&s, 0, sizeof(s));
+	s.info = start_info;
+	if ( raw_next_sz > 0 ) {
+		knl_memcpy(s.raw, raw_next, raw_next_sz);
+		s.rawsz = raw_next_sz;
+		raw_next_sz = 0;
+	}
 	s.prog = p->uuid;
 	s.ticket = ( dt_opens_quiet > 0 ) ? 0 : wm_act_ticket();
+	s.rgroup = rank_group;
+	s.rank = rank_place;
+	if ( watch_on && watch_asked < WATCH_MAX ) {
+		s.watch = ++watch_asked;
+	}
 	s.arg.recno = -1;
 	if ( arg != NULL ) {
 		s.arg.target = *arg;
 		s.has_arg = TRUE;
 		s.link_arg = p->open_link;
+		if ( opens ) {
+			s.opening = opening_take(arg);
+		}
 	}
 	if ( v != NULL ) {
 		s.arg.recno = v->recno;
@@ -1054,7 +1354,62 @@ EXPORT ER dt_command_run( CONST TS_UUID *target )
 	if ( !is || ts_str_to_uuid(SYSDEF_PROG_CONSOLE, &cu) < E_OK || ( con = dt_prog_of(&cu) ) == NULL ) {
 		return E_NOEXS;
 	}
-	return start_process(con, target, NULL, NULL);
+	return start_process(con, target, NULL, NULL, FALSE);
+}
+
+/*
+ * 管理情報 started on the link v of the window from (the link its
+ * start-up argument): what process it is, or that it failed, is told
+ * to dtinfo.c's place slot once the starter has made it (dt_info_started)
+ */
+EXPORT ER dt_prog_start_info( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v, INT slot )
+{
+	ER	er;
+
+	start_info = slot;
+	er = start_process(p, &v->target, from, v, FALSE);
+	start_info = 0;
+	return er;
+}
+
+/*
+ * The object v points at opened in the window of a program that is a
+ * process. Until the window is up the object counts as open
+ * (dt_prog_opening). One of the desktop's own, or a command, is run as
+ * dt_prog_run runs it.
+ */
+EXPORT ER dt_prog_open( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v )
+{
+	if ( p == NULL || v == NULL ) {
+		return E_PAR;
+	}
+	if ( p->builtin || p->kind == DT_PK_COMMAND ) {
+		return dt_prog_run(from, p, v);
+	}
+	return start_process(p, &v->target, from, v, TRUE);
+}
+
+/*
+ * A program started with a start-up argument of its own, as a process,
+ * unless a window of it is up already
+ */
+EXPORT ER dt_prog_run_arg( DTWIN *from, CONST DTPROG *p, CONST void *arg, SZ size )
+{
+	INT	wid;
+
+	if ( p == NULL || p->builtin || size <= 0 || size > DT_PROG_ARG ) {
+		return E_PAR;
+	}
+	/* a window of it standing for its program object ("shows"): brought to the front, as dt_prog_run does */
+	if ( ( wid = wm_obj_showing(&p->uuid) ) > 0 ) {
+		wm_raise(wid);
+		(void)wm_focus(wid);
+		wm_update();
+		return E_OK;
+	}
+	knl_memcpy(raw_next, arg, size);
+	raw_next_sz = size;
+	return start_process(p, NULL, from, NULL, FALSE);
 }
 
 /*
@@ -1070,71 +1425,40 @@ EXPORT ER dt_prog_run( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v )
 	if ( p->kind == DT_PK_COMMAND && !p->builtin ) {
 		return dt_command_run(&p->uuid);
 	}
-	if ( !p->builtin ) {
-		return start_process(p, ( v != NULL ) ? &v->target : NULL, from, v);
-	}
-	if ( same(p->id, "base-file-manager") ) {
-		/* run by itself: the system's 原紙箱 opened */
+	if ( same(p->id, "base-file-manager") || same(p->id, "accessory-box") ) {
+		/*
+		 * The 原紙箱's or the 小物箱's program run by itself, or on its
+		 * own program object: the system's 原紙箱 or 小物箱 opened with
+		 * it, in one window, as a double click on its link opens it
+		 */
 		T_VOBJ	bv;
+		BOOL	bb = same(p->id, "base-file-manager");
 
 		knl_memset(&bv, 0, sizeof(bv));
-		if ( p->kind != DT_PK_APP ) {
-			return E_OBJ;		/* dt_open_as would come back here */
-		}
 		if ( v != NULL && ts_uuid_cmp(&v->target, &p->uuid) != 0 ) {
 			bv = *v;
-		} else if ( !dt_base_box(&bv.target) ) {
-			(void)wm_msg_put("システムの原紙箱がありません");
+		} else if ( bb ? !dt_base_box(&bv.target) : !knl_sys_find(SYSROLE_ACCS, SYSDEF_ACC_BOX, &bv.target) ) {
+			(void)wm_msg_put(bb ? "システムの原紙箱がありません" : "システムの小物箱がありません");
 			return E_NOEXS;
 		}
 		return dt_open_as(from, &bv, p->id);
 	}
-	if ( same(p->id, "accessory-box") ) {
-		T_DPRECT	o;
-		DTWIN		*w;
+	if ( !p->builtin ) {
+		/*
+		 * Run by itself while a window of it stands for its program
+		 * object (an accessory's, a tool's, "shows"): that window
+		 * brought to the front and the program told it was run again,
+		 * one window for the program as for any object
+		 */
+		ER	er;
 
-		o.left = 120;  o.top = 90;  o.right = 520;  o.bottom = 420;
-		w = dt_open_made(dt_prog_page(DT_PK_ACCESSORY), (CONST char *)p->name, DT_TOOL_NONE, &o);
-		if ( w != NULL ) {
-			w->accbox = TRUE;
+		if ( dt_prog_again(p, v, &er) ) {
+			return er;
 		}
-		return ( w != NULL ) ? E_OK : E_NOMEM;
-	}
-	if ( same(p->id, "trash-real-objects") ) {
-		dt_trash_open();
-		return E_OK;
-	}
-	if ( same(p->id, "window-list-viewer") ) {
-		dt_winlist_open();
-		return E_OK;
+		return start_process(p, ( v != NULL ) ? &v->target : NULL, from, v, FALSE);
 	}
 	if ( same(p->id, "force-quit") ) {
 		knl_fq_open();			/* 強制終了's own window (outer_kernel/wm/fquit.c) */
-		return E_OK;
-	}
-	if ( same(p->id, "screen-print") ) {
-		dt_scr_open();
-		return E_OK;
-	}
-	if ( same(p->id, "tray-viewer") ) {
-		dt_trayv_open();
-		return E_OK;
-	}
-	if ( same(p->id, "disk-repair") ) {
-		dt_fix_open();
-		return E_OK;
-	}
-	if ( same(p->id, "system-install") ) {
-		dt_sysinst_open();
-		return E_OK;
-	}
-	if ( same(p->id, "real-object-search") ) {
-		dt_search_open(from);
-		return E_OK;
-	}
-	if ( same(p->id, "virtual-object-network") ) {
-		if ( v == NULL ) return E_PAR;
-		dt_network_open(from, v);
 		return E_OK;
 	}
 	/* an editor: the object opened in a window of that kind */

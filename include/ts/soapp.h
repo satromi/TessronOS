@@ -186,12 +186,28 @@ IMPORT ER  so_getsockname( INT s, struct sockaddr *name, socklen_t *namelen );
 IMPORT ER  so_getpeername( INT s, struct sockaddr *name, socklen_t *namelen );
 
 /*
- * Wait until one of up to 16 sockets is ready as asked (POLLIN,
- * POLLOUT); how many are. The timeout is in milliseconds, TMO_FEVR for
- * none and TMO_POL to look without waiting.
+ * Wait until one of the sockets is ready as asked (POLLIN, POLLOUT); how
+ * many are. The list may be as long as the process's limit (so_getlimit;
+ * E_PAR past it). The timeout is in milliseconds, TMO_FEVR for none and
+ * TMO_POL to look without waiting.
  */
 IMPORT INT so_poll( struct pollfd *fds, INT nfds, TMO tmout );
 IMPORT ER  so_fcntl( INT s, INT cmd, INT val );
+
+/*
+ * How many sockets the process may hold at once, as RLIMIT_NOFILE (design
+ * 9.2): the soft limit *p_cur, which is the one that holds, and the hard
+ * one *p_max it may be raised to. so_socket and so_accept past the soft
+ * one answer EX_MFILE; with the system's table all taken they answer
+ * E_LIMIT. so_setlimit sets both: E_PAR for cur above max, E_OACV for
+ * max above the hard one there is when the caller is not an
+ * administrator. A process the process starts has the same two.
+ */
+#ifndef EX_MFILE
+#define EX_MFILE	(-24)
+#endif
+IMPORT ER  so_getlimit( INT *p_cur, INT *p_max );
+IMPORT ER  so_setlimit( INT cur, INT max );
 
 /* The first IPv4 address of a name: "10.0.2.2" as it is, a host name through DNS */
 IMPORT ER  so_resolve( CONST char *name, UINT *p_addr );
@@ -227,6 +243,18 @@ IMPORT ER  so_getifaddr( UINT *p_addr, UINT *p_mask, UINT *p_gw );
 IMPORT ER  so_getdns( UINT *p_dns );
 IMPORT ER  so_setifaddr( UINT addr, UINT mask, UINT gw, UINT dns );
 IMPORT ER  so_dhcp_start( void );
+
+/*
+ * The network's configuration changing: a number the system counts up
+ * each time the interface's addresses, its gateway or IPv6 router, or
+ * the name servers change. Waits until it differs from *p_gen, or for
+ * tmo ms (TMO_FEVR: no limit, TMO_POL: only a look), and gives *p_gen
+ * the number as it is now: E_OK when it differed, E_TMOUT when the time
+ * ran out. A program that keeps connections or names of the network
+ * waits for it in a thread of its own, as a Linux program reads netlink
+ * (docs/tessronos 9.3.5).
+ */
+IMPORT ER  so_netwait( UINT *p_gen, TMO tmo );
 
 /*
  * The real object of one of the process's sockets (OB_T_CHANNEL,

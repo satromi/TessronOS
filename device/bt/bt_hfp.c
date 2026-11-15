@@ -15,31 +15,56 @@
  *
  *	The service level connection is AT commands on the RFCOMM channel
  *	(bt_rfcomm.c): the earphones say their features (AT+BRSF) and are
- *	told this end's, ask what the indicators are and their values
- *	(AT+CIND), and turn their reports on (AT+CMER); with that the
- *	connection is up. This end has no calls: the indicators say a
- *	network and no call, and what asks for a call is answered ERROR.
- *	The other commands earphones send to set themselves up are taken.
+ *	told this end's, say their codecs (AT+BAC) when both ends negotiate
+ *	codecs, ask what the indicators are and their values (AT+CIND), and
+ *	turn their reports on (AT+CMER); with that the connection is up.
+ *	This end has no calls: the indicators say a network and no call, and
+ *	what asks for a call is answered ERROR. The other commands earphones
+ *	send to set themselves up are taken.
  *
  *	The voice goes on a synchronous link, eSCO or SCO, set up when the
  *	sound device plays on the output or records from the microphone,
- *	and taken down a while after both have stopped. This end does not
- *	negotiate codecs, so the voice is CVSD at 8 kHz, which every
- *	hands-free unit has. The link is asked with the parameter sets the
- *	profile names for CVSD, the best first (S4 when the earphones say
- *	they take it, S3, S1, and SCO's D1 last), each next one when the
- *	one before is refused.
+ *	and taken down a while after both have stopped. Its codec is mSBC,
+ *	the wide band speech at 16 kHz, when both ends negotiate codecs, the
+ *	earphones list mSBC and the controller is one known to carry it;
+ *	otherwise CVSD at 8 kHz, which every hands-free unit has. With codec
+ *	negotiation each link is first agreed: this end says the codec
+ *	(+BCS), the earphones say it back (AT+BCS). The link is asked with
+ *	the parameter sets the profile names for the codec, the best first,
+ *	each next one when the one before is refused: for mSBC T2 and T1 in
+ *	transparent mode, for CVSD S4 (when the earphones say they take it),
+ *	S3, S1 and SCO's D1. mSBC refused, or not agreed in time, is CVSD
+ *	agreed and asked next, so that there is always a voice when CVSD is.
  *
- *	The samples of the voice go over USB, on the isochronous endpoints
- *	of the controller's second interface, in its alternate setting for
- *	one voice channel of 16-bit samples: an SCO packet, its head of
- *	three bytes and 48 bytes of samples, is three USB packets of 17
- *	bytes, one a millisecond, so that the stream out is paced by the
- *	USB frames themselves. The packets in are put back together by
- *	their heads, and their samples given to the sound device.
+ *	The voice goes over USB, on the isochronous endpoints of the
+ *	controller's second interface, or over the HCI itself on a controller
+ *	whose SCO the board routes to the host (the UART's, bt_bcm.c).
+ *
+ *	On USB, CVSD is the alternate setting for one voice channel of
+ *	16-bit samples, 2: an SCO packet, its head of three bytes and 48
+ *	bytes of samples, is three USB packets of 17 bytes, one a millisecond,
+ *	so that the stream out is paced by the USB frames themselves. mSBC is
+ *	setting 6 when the controller has it (63-byte packets), else 1
+ *	(9-byte packets): an SCO packet is one H2 frame of 60 bytes, which
+ *	those packets carry faster than its 7.5 ms, so a packet is begun only
+ *	when its time has come. The packets in are put back together by
+ *	their heads.
+ *
+ *	On the HCI, each SCO packet that comes in is answered with one of the
+ *	same length going out: the controller's own pace, as it sends one
+ *	each interval of the link.
+ *
+ *	CVSD's samples go to the sound device as they are; mSBC's H2 frames
+ *	are found in the bytes, decoded, and those lost made up (bt_msbc.c).
  *
  *	The earphones' speaker gain (AT+VGS) and the mixer's whole are kept
- *	the same while the voice plays, as AVRCP's absolute volume is.
+ *	the same while the voice plays, as AVRCP's absolute volume is. Their
+ *	microphone gain is the microphone's volume of the sound device for
+ *	earphones that take remote volume control (their feature bit): the
+ *	volume set is told them by +VGM, in their 16 steps, and the gain they
+ *	say (AT+VGM) is the mixer's. Earphones that do not take it have the
+ *	volume multiplied into their samples by the sound device, mSBC's and
+ *	CVSD's alike, once they are 16-bit samples.
  */
 
 #include <sys/machine.h>
@@ -53,6 +78,7 @@
 #include "../snd/sndhw.h"
 #include "btint.h"
 #include "btaudio.h"
+#include "bt_msbc.h"
 
 /* HCI */
 #define C_SETUP_SYNC		0x0428
@@ -66,36 +92,64 @@
 #define LINK_SCO		0x00
 #define LINK_ESCO		0x02
 #define VOICE_CVSD_16		0x0060	/* linear input, 2's complement, 16-bit samples, CVSD in the air */
+#define VOICE_TRANSPARENT	0x0003	/* the bytes as they are: the host's mSBC */
+#define AIR_TRANSPARENT		3	/* the air mode the link says for it */
 #define VOICE_BW		8000	/* bytes a second each way */
 #define REJ_LIMITED		0x0d
+#define LMP_TRANSPARENT_B	2	/* the byte and bit of the LMP features: transparent synchronous data */
+#define LMP_TRANSPARENT		0x08
+#define LMP_ESCO_B		3	/* the extended SCO link */
+#define LMP_ESCO		0x80
 
 /* The HF's features (AT+BRSF) */
 #define HF_REMOTE_VOL		0x0010
+#define HF_CODEC_NEG		0x0080
 #define HF_ESCO_S4		0x0200
-#define AG_FEATURES		0
+/* This end's (+BRSF), and those of its service record */
+#define AG_CODEC_NEG		0x0200
+#define AG_SDP_WBS		0x0020
+
+/* The codecs' IDs, as AT+BAC and +BCS have them */
+#define CODEC_CVSD		1
+#define CODEC_MSBC		2
 
 /* The voice interface on USB */
 #define VOICE_IF		1
-#define VOICE_ALT		2	/* one voice channel of 16-bit samples */
+#define ALT_CVSD		2	/* one voice channel of 16-bit samples */
+#define ALT_MSBC_BEST		6	/* 63-byte packets: one H2 frame each */
+#define ALT_MSBC		1	/* 9-byte packets, which every controller with the interface has */
 #define SCO_MAX			60
+#define PACE_LEAD2		8	/* how far ahead of its time an mSBC packet may begin, in half milliseconds */
+#define PACE_LATE2		60	/* and how far behind before the count starts again */
 
 #define AT_MAX			128
 #define OPEN_AFTER_MS		1500	/* the earphones' time to open the channel themselves */
 #define SETUP_TMO_MS		10000
+#define BCS_TMO_MS		3000	/* for the earphones to say the codec back */
 #define IDLE_MS			1500	/* the link kept this long after the last use */
 #define RETRY_MS		5000	/* and not asked again for this long after it failed */
 #define VGS_MAX			15
 
-/* CVSD's parameter sets: the latest packet, retransmission, and the packet types */
-LOCAL CONST struct { UH lat; UB retx; UH pkt; CONST char *name; } psets[] = {
+/* A controller not known to carry wide band speech may: for the tests */
+EXPORT BOOL	knl_bth_wbs_any = FALSE;
+
+/* The parameter sets: the latest packet, retransmission, the packet types */
+typedef struct { UH lat; UB retx; UH pkt; CONST char *name; } PSET;
+
+LOCAL CONST PSET	cvsd_sets[] = {
 	{ 0x000c, 0x02, 0x0380, "S4" },		/* 2-EV3 */
 	{ 0x000a, 0x01, 0x0380, "S3" },		/* 2-EV3 */
 	{ 0x0007, 0x01, 0x03c8, "S1" },		/* EV3 */
 	{ 0xffff, 0xff, 0x03c4, "D1" }		/* SCO, HV3 */
 };
-#define NPSET	( (INT)( sizeof(psets) / sizeof(psets[0]) ) )
+LOCAL CONST PSET	msbc_sets[] = {
+	{ 0x000d, 0x02, 0x0380, "T2" },		/* 2-EV3 */
+	{ 0x0008, 0x02, 0x03c8, "T1" }		/* EV3 */
+};
+#define NCVSD	( (INT)( sizeof(cvsd_sets) / sizeof(cvsd_sets[0]) ) )
+#define NMSBC	( (INT)( sizeof(msbc_sets) / sizeof(msbc_sets[0]) ) )
 
-enum { V_NONE, V_SETUP, V_UP, V_DOWNING };
+enum { V_NONE, V_CODEC, V_SETUP, V_UP, V_DOWNING };
 
 typedef struct {
 	BTC		*c;
@@ -103,33 +157,116 @@ typedef struct {
 	BOOL		dlc;			/* the RFCOMM channel is up */
 	BOOL		slc;			/* the service level connection is */
 	UW		hf_feat;
+	UW		ag_feat;		/* what this end told it */
 	UB		open_ch;		/* the earphones' channel to open, 0 none */
 	UW		open_at;
 	char		line[AT_MAX];
 	INT		nl;
 	INT		vgs_sent;		/* the gain the earphones have, as far as this end knows */
+	volatile INT	vgm_sent;		/* their microphone's, -1 not known */
+	volatile INT	vgm_want;		/* the one to tell them, -1 none */
+	/* the codecs */
+	BOOL		neg;			/* both ends negotiate codecs */
+	UB		hf_codecs;		/* a bit for each codec ID of AT+BAC */
+	UB		offered;		/* the codec of the +BCS sent */
+	UB		agreed;			/* the codec the next link is asked in */
+	BOOL		msbc_failed;		/* mSBC tried and not had: CVSD from here on */
+	BOOL		bcc;			/* the earphones asked for the voice (AT+BCC) */
 	/* the voice link */
 	UB		vst;			/* V_* */
 	UH		sh;
-	INT		pset;
+	CONST PSET	*sets;
+	INT		nsets, pset;
 	BOOL		incoming;
 	UW		due;
 	UW		idle_from;
 	UW		failed_at;		/* when it last could not be set up, 0 not */
+	UB		codec;			/* of the link up */
+	UB		way;			/* VW_*: where its packets go */
 	/* the sound device's side, with the manager's lock */
 	volatile BOOL	want_play, want_rec;
 	/* USB */
 	USBPIPE		*pin, *pout;
 	UB		alt;
 	INT		sco_len;
-	UB		tx[3 + SCO_MAX];
+	BOOL		pace;			/* an SCO packet begun only when its time has come */
+	UW		due2, period2;		/* that time and the packets' interval, in half milliseconds */
+	UB		tx[3 + 255];
 	INT		tx_at, tx_len;
 	UB		rx[3 + 255];
 	INT		rx_have;
+	/* mSBC */
+	MSBC_TX		mtx;
+	MSBC_RX		mrx;
+	UB		h2[H2_LEN];
+	INT		h2_at;
 	T_BTHSTAT	st;
 } HFP;
 
 LOCAL HFP	hf;
+
+/* ---------------------------------------------------------------- where the voice goes */
+
+/* Whether the controller's voice interface has the setting alt */
+LOCAL BOOL has_alt( USBDEV *dev, INT alt )
+{
+	UB	*p, *end;
+
+	if ( dev == NULL || dev->cfg == NULL ) return FALSE;
+	end = dev->cfg + dev->cfglen;
+	for ( p = dev->cfg; p != NULL; p = knl_usb_next_desc(p, end) ) {
+		if ( p[1] == USB_DT_INTERFACE && p[0] >= 9 && p[2] == VOICE_IF && p[3] == alt ) return TRUE;
+	}
+	return FALSE;
+}
+
+EXPORT INT knl_bth_way( BTC *c )
+{
+	if ( c == NULL || c->gone ) return VW_NONE;
+	if ( c->tr != NULL && c->tr->sco != NULL && c->sco_hci ) return VW_HCI;
+	if ( c->dev != NULL && has_alt(c->dev, ALT_CVSD) ) return VW_USB;
+	return VW_NONE;
+}
+
+/*
+ * Whether mSBC may be offered: the controller carries transparent data
+ * on eSCO, and is one whose transparent voice is known to work, as
+ * Linux takes it: Intel's on USB. A Broadcom on a UART, as the board's
+ * own, is left at CVSD.
+ */
+LOCAL BOOL wbs_able( BTC *c )
+{
+	INT	w = knl_bth_way(c);
+
+	if ( w == VW_NONE ) return FALSE;
+	if ( ( c->lmp[LMP_TRANSPARENT_B] & LMP_TRANSPARENT ) == 0 || ( c->lmp[LMP_ESCO_B] & LMP_ESCO ) == 0 ) return FALSE;
+	if ( w == VW_USB ) {
+		return (BOOL)( ( c->intel || knl_bth_wbs_any ) && ( has_alt(c->dev, ALT_MSBC_BEST) || has_alt(c->dev, ALT_MSBC) ) );
+	}
+	return knl_bth_wbs_any;
+}
+
+EXPORT UH knl_bth_sdp_features( BTC *c )
+{
+	return (UH)( wbs_able(c) ? AG_SDP_WBS : 0 );
+}
+
+/* The codec the next link is offered in */
+LOCAL UB codec_wanted( void )
+{
+	if ( hf.neg && !hf.msbc_failed && ( hf.hf_codecs & ( 1 << CODEC_MSBC ) ) != 0 && wbs_able(hf.c) ) return CODEC_MSBC;
+	return CODEC_CVSD;
+}
+
+LOCAL CONST char *codec_name( UB k )
+{
+	return ( k == CODEC_MSBC ) ? "mSBC" : "CVSD";
+}
+
+LOCAL UW codec_rate( UB k )
+{
+	return ( k == CODEC_MSBC ) ? 16000 : 8000;
+}
 
 /* ---------------------------------------------------------------- AT */
 
@@ -188,6 +325,112 @@ LOCAL void vgs_in( INT g )
 	hf.vgs_sent = gain_of(s.lv);
 }
 
+/* A microphone gain of the earphones' 16 steps as a level of DN_SDVOLMIC, and back */
+LOCAL UH vgm_level( INT g )
+{
+	return (UH)( g * 0xffff / VGS_MAX );
+}
+
+LOCAL INT vgm_of( UH level )
+{
+	return (INT)( ( (UW)level * VGS_MAX + 0x7fff ) / 0xffff );
+}
+
+/* The earphones' microphone gain as they say it (AT+VGM): the mixer's microphone with it */
+LOCAL void vgm_in( INT g )
+{
+	SDMixIn		m;
+	SDMixSet	s;
+
+	if ( g < 0 || g > VGS_MAX ) return;
+	hf.vgm_sent = hf.vgm_want = g;
+	knl_snd_mic_get(&m);
+	knl_memset(&s, 0, sizeof(s));
+	s.what = SND_MIX_IN;
+	s.pid = SND_BE_BT;
+	s.lv = s.rv = knl_snd_mic_vol(vgm_level(g));
+	s.mute = ( m.have && m.kind == SND_BE_BT && m.mute != 0 );
+	(void)knl_snd_mix_set(&s, TRUE);
+	/* what the mixer gave back is the gain they said, not one step off it */
+	hf.vgm_sent = hf.vgm_want = g;
+	tm_printf((UB *)"bt: \"%s\": microphone gain %d (AT+VGM): the microphone's volume %d\n", hf.p->name, g, (INT)s.lv);
+}
+
+EXPORT ER knl_bth_mic_get( SDVol *v )
+{
+	if ( !hf.slc || ( hf.hf_feat & HF_REMOTE_VOL ) == 0 || hf.vgm_sent < 0 ) return E_NOSPT;
+	v->lv = v->rv = vgm_level(hf.vgm_sent);
+	return E_OK;
+}
+
+EXPORT ER knl_bth_mic_set( CONST SDVol *v )
+{
+	if ( !hf.slc || ( hf.hf_feat & HF_REMOTE_VOL ) == 0 ) return E_NOSPT;
+	hf.vgm_want = vgm_of(v->lv);
+	if ( hf.c != NULL ) (void)tk_sig_sem(hf.c->sem, 1);
+	return E_OK;
+}
+
+/* AT+BAC: the codec IDs, by commas */
+LOCAL void bac_in( CONST char *s )
+{
+	hf.hf_codecs = 0;
+	for ( ;; ) {
+		INT	k;
+
+		while ( *s == ' ' ) s++;
+		if ( *s < '0' || *s > '9' ) break;
+		k = at_num(s);
+		if ( k > 0 && k < 8 ) hf.hf_codecs |= (UB)( 1 << k );
+		while ( *s >= '0' && *s <= '9' ) s++;
+		while ( *s == ' ' ) s++;
+		if ( *s != ',' ) break;
+		s++;
+	}
+	tm_printf((UB *)"bt: \"%s\": hands-free codecs:%s%s\n", hf.p->name,
+		  ( hf.hf_codecs & ( 1 << CODEC_CVSD ) ) ? " CVSD" : "", ( hf.hf_codecs & ( 1 << CODEC_MSBC ) ) ? " mSBC" : "");
+}
+
+LOCAL void setup_start( void );
+
+/* The codec offered: +BCS, and AT+BCS awaited */
+LOCAL void bcs_send( UB k )
+{
+	char	t[16];
+
+	hf.offered = k;
+	hf.vst = V_CODEC;
+	hf.due = knl_btx_now() + BCS_TMO_MS;
+	(void)tm_sprintf((UB *)t, (UB *)"+BCS: %d", k);
+	at_send(t);
+	tm_printf((UB *)"bt: \"%s\": codec: offers %s (+BCS: %d)\n", hf.p->name, codec_name(k), k);
+}
+
+/* AT+BCS: the codec said back */
+LOCAL void bcs_in( INT k )
+{
+	if ( hf.vst != V_CODEC ) {
+		at_send("ERROR");
+		return;
+	}
+	if ( k == hf.offered ) {
+		at_send("OK");
+		hf.agreed = (UB)k;
+		tm_printf((UB *)"bt: \"%s\": codec: %s agreed (AT+BCS=%d)\n", hf.p->name, codec_name((UB)k), k);
+		setup_start();
+		return;
+	}
+	at_send("ERROR");
+	tm_printf((UB *)"bt: \"%s\": codec: %s offered, the earphones said %d\n", hf.p->name, codec_name(hf.offered), k);
+	/* what it said in its place, when this end has it; else CVSD, which both have */
+	if ( k == CODEC_MSBC && codec_wanted() == CODEC_MSBC ) {
+		bcs_send(CODEC_MSBC);
+	} else {
+		hf.msbc_failed = TRUE;
+		bcs_send(CODEC_CVSD);
+	}
+}
+
 LOCAL void at_line( CONST char *l )
 {
 	CONST char	*rest;
@@ -197,9 +440,23 @@ LOCAL void at_line( CONST char *l )
 	rest = l + 2;
 	if ( at_is(rest, "+BRSF=") ) {
 		hf.hf_feat = (UW)at_num(rest + 6);
-		(void)tm_sprintf((UB *)t, (UB *)"+BRSF: %d", AG_FEATURES);
+		hf.ag_feat = wbs_able(hf.c) ? AG_CODEC_NEG : 0;
+		hf.neg = (BOOL)( ( hf.hf_feat & HF_CODEC_NEG ) != 0 && ( hf.ag_feat & AG_CODEC_NEG ) != 0 );
+		hf.hf_codecs = 1 << CODEC_CVSD;
+		(void)tm_sprintf((UB *)t, (UB *)"+BRSF: %d", (INT)hf.ag_feat);
 		at_send(t);
 		at_send("OK");
+	} else if ( at_is(rest, "+BAC=") ) {
+		bac_in(rest + 5);
+		at_send("OK");
+		/* a list changed while a codec was being agreed: offered again */
+		if ( hf.vst == V_CODEC ) bcs_send(codec_wanted());
+	} else if ( at_is(rest, "+BCS=") ) {
+		bcs_in(at_num(rest + 5));
+	} else if ( at_is(rest, "+BCC") ) {
+		at_send("OK");
+		hf.bcc = TRUE;
+		if ( hf.c != NULL ) (void)tk_sig_sem(hf.c->sem, 1);
 	} else if ( at_is(rest, "+CIND=?") ) {
 		at_send("+CIND: (\"service\",(0,1)),(\"call\",(0,1)),(\"callsetup\",(0-3)),(\"callheld\",(0-2)),"
 			"(\"signal\",(0-5)),(\"roam\",(0,1)),(\"battchg\",(0-5))");
@@ -213,7 +470,13 @@ LOCAL void at_line( CONST char *l )
 			hf.slc = TRUE;
 			hf.failed_at = 0;
 			hf.vgs_sent = -1;
-			tm_printf((UB *)"bt: \"%s\": hands-free up, its features %04x\n", hf.p->name, hf.hf_feat);
+			hf.vgm_sent = hf.vgm_want = -1;
+			hf.msbc_failed = FALSE;
+			hf.agreed = CODEC_CVSD;
+			tm_printf((UB *)"bt: \"%s\": hands-free up, its features %04x, this end's %04x: codecs %s\n",
+				  hf.p->name, hf.hf_feat, hf.ag_feat,
+				  hf.neg ? "negotiated" : ( hf.hf_feat & HF_CODEC_NEG ) ? "CVSD only (not negotiated: this controller carries no mSBC)"
+					 : "CVSD only (the earphones do not negotiate)");
 		}
 	} else if ( at_is(rest, "+CHLD=?") ) {
 		at_send("+CHLD: (0)");
@@ -224,7 +487,10 @@ LOCAL void at_line( CONST char *l )
 	} else if ( at_is(rest, "+COPS?") ) {
 		at_send("+COPS: 0,0,\"TessronOS\"");
 		at_send("OK");
-	} else if ( at_is(rest, "+VGM=") || at_is(rest, "+BAC=") || at_is(rest, "+CMEE=") || at_is(rest, "+CLIP=")
+	} else if ( at_is(rest, "+VGM=") ) {
+		vgm_in(at_num(rest + 5));
+		at_send("OK");
+	} else if ( at_is(rest, "+CMEE=") || at_is(rest, "+CLIP=")
 		 || at_is(rest, "+CCWA=") || at_is(rest, "+NREC=") || at_is(rest, "+BIA=") || at_is(rest, "+XAPL=")
 		 || at_is(rest, "+IPHONEACCEV=") || at_is(rest, "+XEVENT=") || at_is(rest, "+CSRSF=")
 		 || at_is(rest, "+BTRH?") || at_is(rest, "+CNUM") || at_is(rest, "+CLCC") || at_is(rest, "+COPS=")
@@ -274,28 +540,85 @@ EXPORT void knl_bth_dlc_up( BTC *c, PEER *p )
 	hf.p = p;
 	hf.dlc = TRUE;
 	hf.slc = FALSE;
+	hf.neg = FALSE;
 	hf.nl = 0;
 	hf.open_at = 0;
 }
 
 LOCAL void voice_close( void );
 
-EXPORT void knl_bth_dlc_down( BTC *c, PEER *p )
+LOCAL void link_drop( UH h )
 {
 	UB	r[3];
 
+	r[0] = (UB)h;
+	r[1] = (UB)( h >> 8 );
+	r[2] = 0x13;
+	knl_btx_cmd(hf.c, C_DISCONNECT, r, 3);
+	hf.vst = V_DOWNING;
+}
+
+EXPORT void knl_bth_dlc_down( BTC *c, PEER *p )
+{
 	(void)c;
 	if ( hf.p != p ) return;
 	if ( hf.slc ) tm_printf((UB *)"bt: \"%s\": hands-free down\n", p->name);
 	hf.dlc = hf.slc = FALSE;
-	if ( hf.vst == V_UP || hf.vst == V_SETUP ) {
-		if ( hf.vst == V_UP ) {
-			r[0] = (UB)hf.sh;
-			r[1] = (UB)( hf.sh >> 8 );
-			r[2] = 0x13;
-			knl_btx_cmd(hf.c, C_DISCONNECT, r, 3);
-			hf.vst = V_DOWNING;
+	if ( hf.vst == V_UP ) link_drop(hf.sh);
+	else if ( hf.vst == V_CODEC ) hf.vst = V_NONE;
+}
+
+/* ---------------------------------------------------------------- the voice's bytes */
+
+/* n bytes of what goes out: CVSD's samples, or mSBC's H2 frames as a stream; with the manager's lock */
+LOCAL void voice_make( UB *dst, INT n )
+{
+	if ( hf.codec != CODEC_MSBC ) {
+		if ( !hf.want_play || knl_snd_mix(dst, n / 2, 8000, 1, FALSE) <= 0 ) knl_memset(dst, 0, n);
+		return;
+	}
+	while ( n > 0 ) {
+		INT	k;
+
+		if ( hf.h2_at >= H2_LEN ) {
+			H	pcm[MSBC_SAMPLES];
+
+			if ( !hf.want_play || knl_snd_mix((UB *)pcm, MSBC_SAMPLES, 16000, 1, FALSE) <= 0 ) {
+				knl_memset(pcm, 0, sizeof(pcm));
+			}
+			knl_msbc_tx_frame(&hf.mtx, pcm, hf.h2);
+			hf.h2_at = 0;
 		}
+		k = H2_LEN - hf.h2_at;
+		if ( k > n ) k = n;
+		knl_memcpy(dst, hf.h2 + hf.h2_at, k);
+		hf.h2_at += k;
+		dst += k;
+		n -= k;
+	}
+}
+
+LOCAL void msbc_out( void *ctx, CONST H *pcm, INT n )
+{
+	(void)ctx;
+	if ( hf.want_rec ) {
+		knl_snd_capture((CONST UB *)pcm, n, 1);
+		hf.st.rx_frames += (UW)n;
+	}
+}
+
+/* The data of an SCO packet in, its status (0 received right); with the manager's lock */
+LOCAL void voice_take( CONST UB *d, INT n, INT status )
+{
+	if ( hf.codec == CODEC_MSBC ) {
+		knl_msbc_rx_feed(&hf.mrx, d, n, (BOOL)( status == 0 ), msbc_out, NULL);
+		hf.st.filled = hf.mrx.filled;
+		hf.st.bad = hf.mrx.bad;
+		return;
+	}
+	if ( hf.want_rec && n >= 2 ) {
+		knl_snd_capture(d, n / 2, 1);
+		hf.st.rx_frames += (UW)( n / 2 );
 	}
 }
 
@@ -307,14 +630,19 @@ LOCAL INT sco_fill( void *ctx, UB *dst, INT max )
 	INT	n;
 
 	(void)ctx;
-	if ( hf.vst != V_UP || hf.sco_len <= 0 ) return 0;
+	if ( hf.vst != V_UP || hf.way != VW_USB || hf.sco_len <= 0 ) return 0;
 	if ( hf.tx_at >= hf.tx_len ) {
+		if ( hf.pace ) {
+			UW	now2 = knl_usb_ms() * 2;
+
+			if ( (W)( hf.due2 - now2 ) > PACE_LEAD2 ) return 0;
+			if ( (W)( now2 - hf.due2 ) > PACE_LATE2 ) hf.due2 = now2;
+			hf.due2 += hf.period2;
+		}
 		hf.tx[0] = (UB)hf.sh;
 		hf.tx[1] = (UB)( ( hf.sh >> 8 ) & 0x0f );
 		hf.tx[2] = (UB)hf.sco_len;
-		if ( !hf.want_play || knl_snd_mix(hf.tx + 3, hf.sco_len / 2, 8000, 1, FALSE) <= 0 ) {
-			knl_memset(hf.tx + 3, 0, hf.sco_len);
-		}
+		voice_make(hf.tx + 3, hf.sco_len);
 		hf.tx_len = 3 + hf.sco_len;
 		hf.tx_at = 0;
 		hf.st.tx_packets++;
@@ -337,7 +665,7 @@ LOCAL void sco_xfer( void *ctx, DMABUF *b, INT off, INT len, INT err )
 		hf.rx_have = 0;
 		return;
 	}
-	if ( len <= 0 || hf.vst != V_UP ) return;
+	if ( len <= 0 || hf.vst != V_UP || hf.way != VW_USB ) return;
 	if ( len > (INT)sizeof(t) ) len = sizeof(t);
 	knl_dmabuf_read(b, off, t, len);
 	while ( k < len ) {
@@ -350,29 +678,24 @@ LOCAL void sco_xfer( void *ctx, DMABUF *b, INT off, INT len, INT err )
 		hf.rx_have += take;
 		k += take;
 		if ( hf.rx_have == 3 + hf.rx[2] && hf.rx_have >= 3 ) {
-			INT	ns = hf.rx[2] / 2;
-
-			if ( ( ( hf.rx[0] | ( hf.rx[1] << 8 ) ) & 0x0fff ) == hf.sh && ns > 0 ) {
+			if ( ( ( hf.rx[0] | ( hf.rx[1] << 8 ) ) & 0x0fff ) == hf.sh && hf.rx[2] > 0 ) {
 				hf.st.rx_packets++;
-				if ( hf.want_rec ) {
-					knl_snd_capture(hf.rx + 3, ns, 1);
-					hf.st.rx_frames += (UW)ns;
-				}
+				voice_take(hf.rx + 3, hf.rx[2], ( hf.rx[1] >> 4 ) & 3);
 			}
 			hf.rx_have = 0;
 		}
 	}
 }
 
-/* The second interface's setting for the voice, and its endpoints: FALSE when the controller has none */
-LOCAL BOOL voice_eps( USBDEV *dev, USBEP *in, USBEP *out )
+/* The voice interface's setting alt, and its endpoints: FALSE when the controller has none */
+LOCAL BOOL voice_eps( USBDEV *dev, INT alt, USBEP *in, USBEP *out )
 {
 	UB	*p, *end = dev->cfg + dev->cfglen;
 	BOOL	here = FALSE, got_in = FALSE, got_out = FALSE;
 
 	for ( p = dev->cfg; p != NULL; p = knl_usb_next_desc(p, end) ) {
 		if ( p[1] == USB_DT_INTERFACE && p[0] >= 9 ) {
-			here = (BOOL)( p[2] == VOICE_IF && p[3] == VOICE_ALT );
+			here = (BOOL)( p[2] == VOICE_IF && p[3] == alt );
 			continue;
 		}
 		if ( !here || p[1] != USB_DT_ENDPOINT || p[0] < 7 || ( p[3] & 3 ) != USB_EP_ISOC ) continue;
@@ -384,39 +707,81 @@ LOCAL BOOL voice_eps( USBDEV *dev, USBEP *in, USBEP *out )
 			got_out = TRUE;
 		}
 	}
-	return (BOOL)( got_in && got_out );
+	return (BOOL)( got_in && got_out && out->size > 0 );
+}
+
+/* The codec's state for a link up, with the manager's lock */
+LOCAL void codec_reset( void )
+{
+	hf.tx_at = hf.tx_len = 0;
+	hf.rx_have = 0;
+	hf.h2_at = H2_LEN;
+	knl_msbc_tx_init(&hf.mtx);
+	knl_msbc_rx_init(&hf.mrx);
+	hf.st.filled = hf.st.bad = 0;
+	hf.st.rx_frames = hf.st.tx_packets = hf.st.rx_packets = 0;	/* what this link carries */
+	hf.st.codec = hf.codec;
+	knl_snd_in_rate(codec_rate(hf.codec));
 }
 
 /* The link up: the voice interface set and its streams opened */
-LOCAL BOOL voice_open( void )
+LOCAL BOOL voice_open_usb( void )
 {
 	USBDEV	*dev = hf.c->dev;
 	USBEP	in, out;
+	INT	alt, upk, ms;
 	ER	er;
 
-	if ( dev == NULL || dev->cfg == NULL || !voice_eps(dev, &in, &out) ) {
-		tm_printf((UB *)"bt: the controller has no voice interface on USB: no voice\n");
+	alt = ( hf.codec == CODEC_MSBC ) ? ( has_alt(dev, ALT_MSBC_BEST) ? ALT_MSBC_BEST : ALT_MSBC ) : ALT_CVSD;
+	if ( dev == NULL || dev->cfg == NULL || !voice_eps(dev, alt, &in, &out) ) {
+		tm_printf((UB *)"bt: the controller has no voice interface on USB for %s (setting %d): no voice\n", codec_name(hf.codec), alt);
 		return FALSE;
 	}
 	knl_usb_lock();
-	hf.tx_at = hf.tx_len = 0;
-	hf.rx_have = 0;
-	hf.sco_len = 3 * out.size - 3;
-	if ( hf.sco_len > SCO_MAX ) hf.sco_len = SCO_MAX;
-	hf.sco_len &= ~1;
-	er = hf.c->gone ? E_IO : knl_usb_set_interface(dev, VOICE_IF, VOICE_ALT);
+	hf.way = VW_USB;
+	if ( hf.codec == CODEC_MSBC ) {
+		hf.sco_len = H2_LEN;
+		hf.period2 = 15;		/* 7.5 ms */
+	} else {
+		hf.sco_len = 3 * out.size - 3;
+		if ( hf.sco_len > SCO_MAX ) hf.sco_len = SCO_MAX;
+		hf.sco_len &= ~1;
+		hf.period2 = (UW)hf.sco_len / 2 * 2000 / 8000;
+	}
+	/* the USB packets of one SCO packet, one a millisecond: faster than its samples last, it is paced */
+	upk = ( 3 + hf.sco_len + out.size - 1 ) / out.size;
+	ms = (INT)hf.period2 / 2;
+	hf.pace = (BOOL)( (UW)upk * 2 < hf.period2 );
+	hf.due2 = knl_usb_ms() * 2;
+	codec_reset();
+	er = hf.c->gone ? E_IO : knl_usb_set_interface(dev, VOICE_IF, alt);
 	if ( er >= E_OK ) er = dev->hc->ops->stream_open(dev->hc, dev, &in, in.size, sco_xfer, &hf, &hf.pin);
 	if ( er >= E_OK ) er = dev->hc->ops->stream_open_out(dev->hc, dev, &out, sco_fill, &hf, &hf.pout);
-	if ( er >= E_OK ) hf.alt = VOICE_ALT;
+	if ( er >= E_OK ) hf.alt = (UB)alt;
 	knl_usb_unlock();
 	if ( er < E_OK ) {
 		tm_printf((UB *)"bt: the voice interface not opened (%d)\n", (INT)er);
 		voice_close();
 		return FALSE;
 	}
-	tm_printf((UB *)"bt: voice on USB: setting %d, packets of %d bytes, %d samples an SCO packet\n",
-		  VOICE_ALT, out.size, hf.sco_len / 2);
+	tm_printf((UB *)"bt: voice on USB: setting %d, packets of %d bytes, %d bytes an SCO packet (%s, %d USB packets each %d.%d ms%s)\n",
+		  alt, out.size, hf.sco_len, codec_name(hf.codec), upk, ms, ( hf.period2 & 1 ) ? 5 : 0, hf.pace ? ", paced" : "");
 	return TRUE;
+}
+
+LOCAL BOOL voice_open( void )
+{
+	if ( knl_bth_way(hf.c) == VW_HCI ) {
+		knl_usb_lock();
+		hf.way = VW_HCI;
+		hf.sco_len = 0;
+		codec_reset();
+		knl_usb_unlock();
+		tm_printf((UB *)"bt: voice on the HCI (%s): a packet out for each that comes in, of %d bytes at most\n",
+			  codec_name(hf.codec), hf.c->sco_mtu);
+		return TRUE;
+	}
+	return voice_open_usb();
 }
 
 LOCAL void voice_close_locked( void )
@@ -431,6 +796,7 @@ LOCAL void voice_close_locked( void )
 	hf.pin = hf.pout = NULL;
 	hf.alt = 0;
 	hf.sco_len = 0;
+	hf.way = VW_NONE;
 }
 
 LOCAL void voice_close( void )
@@ -440,12 +806,40 @@ LOCAL void voice_close( void )
 	knl_usb_unlock();
 }
 
+/* ---------------------------------------------------------------- the voice on the HCI */
+
+/* An SCO packet from the controller, in its task: its data taken, and one as long sent back */
+EXPORT void knl_bth_sco_in( BTC *c, CONST UB *b, INT len )
+{
+	UB	out[3 + 255];
+	INT	n, k;
+
+	if ( c != hf.c || hf.vst != V_UP || hf.way != VW_HCI || len < 3 ) return;
+	if ( ( ( b[0] | ( b[1] << 8 ) ) & 0x0fff ) != hf.sh ) return;
+	n = b[2];
+	if ( 3 + n > len || n == 0 ) return;
+	k = n;
+	if ( c->sco_mtu > 0 && k > c->sco_mtu ) k = c->sco_mtu;
+	if ( hf.codec != CODEC_MSBC ) k &= ~1;
+	out[0] = (UB)hf.sh;
+	out[1] = (UB)( ( hf.sh >> 8 ) & 0x0f );
+	out[2] = (UB)k;
+	knl_usb_lock();
+	hf.st.rx_packets++;
+	voice_take(b + 3, n, ( b[1] >> 4 ) & 3);
+	voice_make(out + 3, k);
+	knl_usb_unlock();
+	if ( k > 0 && !c->gone && c->tr->sco(c, out, 3 + k) >= E_OK ) hf.st.tx_packets++;
+}
+
 /* ---------------------------------------------------------------- the link */
 
 LOCAL void setup_send( void )
 {
-	UB	r[17];
-	UH	h = hf.p->handle;
+	UB		r[17];
+	UH		h = hf.p->handle;
+	UH		vs = ( hf.agreed == CODEC_MSBC ) ? VOICE_TRANSPARENT : VOICE_CVSD_16;
+	CONST PSET	*s = &hf.sets[hf.pset];
 
 	r[0] = (UB)h;
 	r[1] = (UB)( h >> 8 );
@@ -455,30 +849,54 @@ LOCAL void setup_send( void )
 	r[6] = (UB)VOICE_BW;
 	r[7] = (UB)( VOICE_BW >> 8 );
 	r[8] = r[9] = 0;
-	r[10] = (UB)psets[hf.pset].lat;
-	r[11] = (UB)( psets[hf.pset].lat >> 8 );
-	r[12] = (UB)VOICE_CVSD_16;
-	r[13] = (UB)( VOICE_CVSD_16 >> 8 );
-	r[14] = psets[hf.pset].retx;
-	r[15] = (UB)psets[hf.pset].pkt;
-	r[16] = (UB)( psets[hf.pset].pkt >> 8 );
+	r[10] = (UB)s->lat;
+	r[11] = (UB)( s->lat >> 8 );
+	r[12] = (UB)vs;
+	r[13] = (UB)( vs >> 8 );
+	r[14] = s->retx;
+	r[15] = (UB)s->pkt;
+	r[16] = (UB)( s->pkt >> 8 );
 	hf.due = knl_btx_now() + SETUP_TMO_MS;
 	knl_btx_cmd(hf.c, C_SETUP_SYNC, r, 17);
-	tm_printf((UB *)"bt: \"%s\": asks a voice link, %s\n", hf.p->name, psets[hf.pset].name);
+	tm_printf((UB *)"bt: \"%s\": asks a voice link, %s %s\n", hf.p->name, codec_name(hf.agreed), s->name);
+}
+
+/* The link asked in the codec agreed, from its best set */
+LOCAL void setup_start( void )
+{
+	hf.incoming = FALSE;
+	hf.vst = V_SETUP;
+	if ( hf.agreed == CODEC_MSBC ) {
+		hf.sets = msbc_sets;
+		hf.nsets = NMSBC;
+		hf.pset = 0;
+	} else {
+		hf.sets = cvsd_sets;
+		hf.nsets = NCVSD;
+		hf.pset = ( ( hf.hf_feat & HF_ESCO_S4 ) != 0 ) ? 0 : 1;
+	}
+	setup_send();
 }
 
 LOCAL void setup_failed( CONST char *why, INT st )
 {
-	tm_printf((UB *)"bt: \"%s\": no voice link: %s (%02x)\n", hf.p->name, why, st);
-	hf.vst = V_NONE;
 	hf.due = 0;
+	hf.vst = V_NONE;
+	if ( hf.agreed == CODEC_MSBC ) {
+		/* CVSD next, at once */
+		tm_printf((UB *)"bt: \"%s\": no mSBC voice link: %s (%02x): back to CVSD\n", hf.p->name, why, st);
+		hf.msbc_failed = TRUE;
+		hf.agreed = CODEC_CVSD;
+		return;
+	}
+	tm_printf((UB *)"bt: \"%s\": no voice link: %s (%02x)\n", hf.p->name, why, st);
 	hf.failed_at = knl_btx_now() | 1;
 }
 
 /* The next parameter set, or none left */
 LOCAL void setup_next( INT st )
 {
-	if ( !hf.incoming && hf.pset + 1 < NPSET && hf.p != NULL && hf.p->up ) {
+	if ( !hf.incoming && hf.pset + 1 < hf.nsets && hf.p != NULL && hf.p->up ) {
 		hf.pset++;
 		setup_send();
 	} else {
@@ -492,27 +910,32 @@ EXPORT void knl_bth_event( BTC *c, UB code, CONST UB *d, INT len )
 
 	switch ( code ) {
 	case E_CONN_REQ:
-		/* the earphones ask the voice link themselves */
+		/* the earphones ask the voice link themselves: in the codec last agreed */
 		if ( len < 10 ) break;
 		knl_memcpy(r, d, 6);
-		if ( hf.slc && hf.c == c && hf.p != NULL && same_bt_bytes(hf.p->addr, d, 6) && hf.vst == V_NONE && c->dev != NULL ) {
+		if ( hf.slc && hf.c == c && hf.p != NULL && same_bt_bytes(hf.p->addr, d, 6) && hf.vst == V_NONE && knl_bth_way(c) != VW_NONE ) {
+			BOOL	t = (BOOL)( hf.agreed == CODEC_MSBC );
+			UH	vs = t ? VOICE_TRANSPARENT : VOICE_CVSD_16;
+
 			r[6] = (UB)VOICE_BW;
 			r[7] = (UB)( VOICE_BW >> 8 );
 			r[8] = r[9] = 0;
 			r[10] = (UB)VOICE_BW;
 			r[11] = (UB)( VOICE_BW >> 8 );
 			r[12] = r[13] = 0;
-			r[14] = r[15] = 0xff;			/* any latency */
-			r[16] = (UB)VOICE_CVSD_16;
-			r[17] = (UB)( VOICE_CVSD_16 >> 8 );
-			r[18] = 0xff;				/* any retransmission */
+			r[14] = t ? 0x0d : 0xff;		/* T2's latency for mSBC, else any */
+			r[15] = t ? 0x00 : 0xff;
+			r[16] = (UB)vs;
+			r[17] = (UB)( vs >> 8 );
+			r[18] = t ? 0x02 : 0xff;		/* for the link's quality, else any */
 			r[19] = 0x3f;				/* any packet type */
 			r[20] = 0x00;
 			hf.vst = V_SETUP;
 			hf.incoming = TRUE;
 			hf.due = knl_btx_now() + SETUP_TMO_MS;
 			knl_btx_cmd(c, C_ACCEPT_SYNC, r, 21);
-			tm_printf((UB *)"bt: \"%s\" asks a voice link (%s): taken\n", hf.p->name, ( d[9] == LINK_ESCO ) ? "eSCO" : "SCO");
+			tm_printf((UB *)"bt: \"%s\" asks a voice link (%s): taken, %s\n", hf.p->name,
+				  ( d[9] == LINK_ESCO ) ? "eSCO" : "SCO", codec_name(hf.agreed));
 		} else {
 			r[6] = REJ_LIMITED;
 			knl_btx_cmd(c, C_REJECT_SYNC, r, 7);
@@ -535,19 +958,19 @@ EXPORT void knl_bth_event( BTC *c, UB code, CONST UB *d, INT len )
 		}
 		hf.sh = (UH)( ( d[1] | ( d[2] << 8 ) ) & 0x0fff );
 		hf.due = 0;
-		hf.vst = V_UP;
 		hf.idle_from = knl_btx_now();
 		hf.st.handle = hf.sh;
+		hf.codec = ( d[16] == AIR_TRANSPARENT ) ? CODEC_MSBC : CODEC_CVSD;
 		tm_printf((UB *)"bt: \"%s\": voice link %d up, %s, every %d slots, packets of %d bytes, air mode %d\n",
 			  hf.p->name, hf.sh, ( d[9] == LINK_ESCO ) ? "eSCO" : "SCO", d[10], d[12] | ( d[13] << 8 ), d[16]);
-		if ( !voice_open() ) {
-			r[0] = (UB)hf.sh;
-			r[1] = (UB)( hf.sh >> 8 );
-			r[2] = 0x13;
-			knl_btx_cmd(c, C_DISCONNECT, r, 3);
-			hf.vst = V_DOWNING;
+		tm_printf((UB *)"bt: \"%s\": the call's voice is %s, %d kHz (%s band)\n", hf.p->name,
+			  codec_name(hf.codec), (INT)codec_rate(hf.codec) / 1000, ( hf.codec == CODEC_MSBC ) ? "wide" : "narrow");
+		hf.vst = V_UP;
+		if ( ( hf.codec == CODEC_MSBC && !wbs_able(c) ) || !voice_open() ) {
+			link_drop(hf.sh);
 			hf.failed_at = knl_btx_now() | 1;
 		}
+		hf.bcc = FALSE;
 		hf.st.alt = hf.alt;
 		break;
 	case E_SYNC_CHANGED:
@@ -556,8 +979,13 @@ EXPORT void knl_bth_event( BTC *c, UB code, CONST UB *d, INT len )
 		}
 		break;
 	case E_DISCONN:
-		if ( len >= 4 && hf.vst != V_NONE && ( ( d[1] | ( d[2] << 8 ) ) & 0x0fff ) == hf.sh ) {
-			tm_printf((UB *)"bt: voice link %d gone, reason %02x\n", hf.sh, d[3]);
+		if ( len >= 4 && hf.vst != V_NONE && hf.vst != V_CODEC && ( ( d[1] | ( d[2] << 8 ) ) & 0x0fff ) == hf.sh ) {
+			if ( hf.codec == CODEC_MSBC ) {
+				tm_printf((UB *)"bt: voice link %d gone, reason %02x; mSBC: %d frames in, %d made up, %d failed their check, %d bytes passed over\n",
+					  hf.sh, d[3], (INT)hf.mrx.frames, (INT)hf.mrx.filled, (INT)hf.mrx.bad, (INT)hf.mrx.skipped);
+			} else {
+				tm_printf((UB *)"bt: voice link %d gone, reason %02x\n", hf.sh, d[3]);
+			}
 			voice_close();
 			hf.vst = V_NONE;
 			hf.sh = 0;
@@ -582,7 +1010,6 @@ EXPORT void knl_bth_tick( BTC *c )
 {
 	UW	now = knl_btx_now();
 	BOOL	want;
-	UB	r[3];
 
 	if ( hf.c != c || hf.p == NULL ) return;
 	if ( hf.open_at != 0 && (W)( now - hf.open_at ) >= 0 ) {
@@ -592,25 +1019,34 @@ EXPORT void knl_bth_tick( BTC *c )
 			knl_btf_open(c, hf.p, hf.open_ch);
 		}
 	}
-	want = (BOOL)( hf.want_play || hf.want_rec );
+	want = (BOOL)( hf.want_play || hf.want_rec || hf.bcc );
 	if ( !want && hf.failed_at != 0 && hf.vst == V_NONE ) hf.failed_at = 0;	/* asked anew next time */
 	if ( hf.failed_at != 0 && (W)( now - hf.failed_at ) >= RETRY_MS ) hf.failed_at = 0;
 	if ( hf.vst == V_SETUP && hf.due != 0 && (W)( now - hf.due ) >= 0 ) setup_failed("no answer", 0xff);
-	if ( want && hf.slc && hf.vst == V_NONE && hf.failed_at == 0 && hf.p->up && c->dev != NULL ) {
-		hf.incoming = FALSE;
-		hf.pset = ( ( hf.hf_feat & HF_ESCO_S4 ) != 0 ) ? 0 : 1;
-		hf.vst = V_SETUP;
-		setup_send();
+	if ( hf.vst == V_CODEC && hf.due != 0 && (W)( now - hf.due ) >= 0 ) {
+		/* no AT+BCS: mSBC given up for CVSD; CVSD not said back either, asked all the same */
+		tm_printf((UB *)"bt: \"%s\": codec: %s not said back in %d ms\n", hf.p->name, codec_name(hf.offered), BCS_TMO_MS);
+		if ( hf.offered == CODEC_MSBC ) {
+			hf.msbc_failed = TRUE;
+			bcs_send(CODEC_CVSD);
+		} else {
+			hf.agreed = CODEC_CVSD;
+			setup_start();
+		}
+	}
+	if ( want && hf.slc && hf.vst == V_NONE && hf.failed_at == 0 && hf.p->up && knl_bth_way(c) != VW_NONE ) {
+		if ( hf.neg ) {
+			bcs_send(codec_wanted());
+		} else {
+			hf.agreed = CODEC_CVSD;
+			setup_start();
+		}
 	}
 	if ( hf.vst == V_UP ) {
 		if ( want ) {
 			hf.idle_from = now;
 		} else if ( (W)( now - hf.idle_from ) >= IDLE_MS ) {
-			r[0] = (UB)hf.sh;
-			r[1] = (UB)( hf.sh >> 8 );
-			r[2] = 0x13;
-			knl_btx_cmd(c, C_DISCONNECT, r, 3);
-			hf.vst = V_DOWNING;
+			link_drop(hf.sh);
 		}
 	}
 	/* the mixer's whole to the earphones' speaker while the voice plays */
@@ -628,6 +1064,16 @@ EXPORT void knl_bth_tick( BTC *c )
 			at_send(t);
 		}
 	}
+	/* the microphone's volume to the earphones' microphone */
+	if ( hf.slc && ( hf.hf_feat & HF_REMOTE_VOL ) != 0 && hf.vgm_want >= 0 && hf.vgm_want != hf.vgm_sent ) {
+		char	t[16];
+		INT	g = hf.vgm_want;
+
+		hf.vgm_sent = g;
+		(void)tm_sprintf((UB *)t, (UB *)"+VGM: %d", g);
+		at_send(t);
+		tm_printf((UB *)"bt: \"%s\": microphone gain told: +VGM: %d\n", hf.p->name, g);
+	}
 }
 
 /* The link to the earphones gone */
@@ -639,6 +1085,7 @@ EXPORT void knl_bth_down( BTC *c, PEER *p )
 	knl_usb_lock();
 	hf.vst = V_NONE;
 	hf.dlc = hf.slc = FALSE;
+	hf.neg = FALSE;
 	hf.open_at = 0;
 	hf.p = NULL;
 	knl_usb_unlock();
@@ -651,6 +1098,7 @@ EXPORT void knl_bth_gone( BTC *c )
 	voice_close_locked();
 	hf.vst = V_NONE;
 	hf.dlc = hf.slc = FALSE;
+	hf.neg = FALSE;
 	hf.p = NULL;
 	hf.c = NULL;
 }
@@ -671,7 +1119,7 @@ EXPORT INT knl_bth_outputs( SDOut *o, INT max )
 {
 	UB	id[SND_ID_MAX], name[SND_NAME_MAX];
 
-	if ( !hf.slc || hf.p == NULL || max < 1 || hf.c == NULL || hf.c->dev == NULL ) return 0;
+	if ( !hf.slc || hf.p == NULL || max < 1 || knl_bth_way(hf.c) == VW_NONE ) return 0;
 	hfp_id(hf.p, id);
 	(void)tm_sprintf(name, (UB *)"%s（通話）", hf.p->name);
 	knl_snd_out_set(&o[0], id, name, SND_BE_BT, ( hf.failed_at != 0 ) ? SND_OF_NOSOUND : 0);
@@ -687,10 +1135,16 @@ EXPORT BOOL knl_bth_is_id( CONST UB *id )
 	return (BOOL)( knl_strcmp((CONST char *)id, (CONST char *)mine) == 0 );
 }
 
+/* The rate the voice will come at: that of the link up, else of the codec it will be offered in */
+LOCAL UW rate_now( void )
+{
+	return codec_rate( ( hf.vst == V_UP ) ? hf.codec : codec_wanted() );
+}
+
 EXPORT ER knl_bth_play_start( CONST UB *id, UW *rate, INT *channels )
 {
 	if ( !hf.slc || !knl_bth_is_id(id) ) return E_NOEXS;
-	*rate = 8000;
+	*rate = rate_now();
 	*channels = 1;
 	hf.want_play = TRUE;
 	(void)tk_sig_sem(hf.c->sem, 1);
@@ -710,14 +1164,14 @@ EXPORT BOOL knl_bth_play_running( void )
 
 EXPORT BOOL knl_bth_can_record( void )
 {
-	return (BOOL)( hf.slc && hf.c != NULL && hf.c->dev != NULL && hf.failed_at == 0 );
+	return (BOOL)( hf.slc && knl_bth_way(hf.c) != VW_NONE && hf.failed_at == 0 );
 }
 
 EXPORT ER knl_bth_rec_start( UW rate, UW *dev_rate, INT *channels )
 {
 	(void)rate;
 	if ( !knl_bth_can_record() ) return E_NOSPT;
-	*dev_rate = 8000;
+	*dev_rate = rate_now();
 	*channels = 1;
 	hf.want_rec = TRUE;
 	(void)tk_sig_sem(hf.c->sem, 1);

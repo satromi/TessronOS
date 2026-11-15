@@ -9,54 +9,8 @@
 # same, byte for byte. The palettes of the process stand where the desktop's do, framed
 # and with no title, so its presses in them are the same.
 # Keys: Esc 29, Backspace 2a, 1 1e, 0 27, Enter 28; Ctrl+S 16 01, Ctrl+E 08 01.
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
-mkbig fig 1 2 0
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-click 298 82
-wait 300
-drag 450 450 600 560
-wait 400
-click 162 48
-wait 500
-click 359 125
-wait 300
-shot tcmp_k_stroke
-key 29
-wait 300
-click 128 48
-wait 500
-click 202 170
-wait 300
-shot tcmp_k_fill
-key 29
-wait 300
-click 230 48
-wait 500
-key 2a
-key 1e
-key 27
-key 28
-wait 400
-click 196 48
-wait 500
-click 509 95
-wait 300
-shot tcmp_k_lstyle
-key 29
-wait 300
-sync 600
-shot tcmp_k_done
-key 16 01
-sync 600
-sum show
-keep kernel
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 2 0
 logmark
 pfig big
@@ -109,6 +63,6 @@ logmark
 key 16 01
 expectsince figure: saved (0)
 sum show
-same kernel
+want ok 695 e0d67bde39a0e069
 key 08 01
 expect figure: closed

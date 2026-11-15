@@ -1,0 +1,22 @@
+# システム登録's 上書き refused (design 3.10.10, 11.32) on the x64 PC, for tools/x64/ui_run64.py
+# with a second NVMe whose TessronOS keeps the list of a newer system (the KTWIN-R image after
+# the sysinst group of tests/ktest/x86_64/ktest_sysinst.c, given as UI_EXTRA as in
+# ui_sysinst64_keep.steps): 上書きする is greyed with why, neither way is chosen, and [開始]
+# asks for one to be chosen rather than going on to 初期化; nothing is written.
+logmark
+open 01a0d8c4-54c0-7a11-8c22-4d5e6f7054c0
+expectsincein 60 sysinst: opened 1
+expectsincein 120 sysinst: keep nvmeb 0 -1: 15
+waitwin システム登録 30
+wait 500
+shot sysinst64_newer_open
+win システム登録
+logmark
+click 880 288
+wait 800
+shot sysinst64_newer_start
+absent sysinst: plan
+key 08 01
+expectsince sysinst: closed
+absent sysinst: started
+absent !OACV!

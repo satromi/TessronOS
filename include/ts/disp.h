@@ -72,6 +72,18 @@ typedef struct {
 	UINT	view_w;
 	UINT	view_h;
 	UINT	scale_want;		/* the scale asked for; scale is less where the view would be too small */
+	/*
+	 * The main screen's own pixels: what a size is set for
+	 * (ts_disp_setmode). With one output they are width and height;
+	 * with more, the back buffer is the rectangle round all of them,
+	 * its corner the top left of the screens, and the main screen is
+	 * at main_x, main_y in it: 0, 0 unless a screen is left of it or
+	 * above it (10.4.8).
+	 */
+	UINT	main_w;
+	UINT	main_h;
+	INT	main_x;
+	INT	main_y;
 } T_DISPSPEC;
 
 /*
@@ -134,15 +146,62 @@ IMPORT INT knl_disp_init( void );
 IMPORT ER  ts_disp_ref( T_DISPSPEC *spec );
 
 /*
- * The screens the view is shown on, side by side, the first being the main
- * one (10.4.8). The view is one surface; each screen shows its column of
- * it. How many; and the i-th one's rectangle in view coordinates, E_NOEXS
- * past the last. knl_disp_screens sets how many, 1 to DISP_SCREENS_MAX.
+ * The screens the view is shown on, the first being the main one (10.4.8).
+ * The view's corner is the top left of the rectangle round all of them,
+ * so the main screen is at the corner unless a screen is put left of it or
+ * above it. The view is one surface; each screen shows its
+ * rectangle of it. How many; and the i-th one's rectangle in view
+ * coordinates, E_NOEXS past the last. With one output the screens are
+ * columns of the same width, as many as knl_disp_screens sets (1 to
+ * DISP_SCREENS_MAX); with more outputs (knl_disp_out_attach, disp_hw.h)
+ * each output is one screen, of its own size and place.
  */
 #define DISP_SCREENS_MAX	4
 IMPORT INT ts_disp_screens( void );
 IMPORT ER  ts_disp_screen( INT i, INT *p_x, INT *p_y, INT *p_w, INT *p_h );
 IMPORT void knl_disp_screens( INT n );
+
+/*
+ * Where an output besides the main one is put: past the right edge, the
+ * bottom, the left edge or the top of the rectangle round the screens
+ * before it, and how far along that edge from the main screen's corner
+ * (pixels, 0 or more; less is E_NOSPT). A screen left of or above the
+ * main one moves the main one away from the view's corner.
+ */
+#define DISP_SIDE_RIGHT		0
+#define DISP_SIDE_BELOW		1
+#define DISP_SIDE_LEFT		2
+#define DISP_SIDE_ABOVE		3
+
+/*
+ * Or no place of its own: the output shows what the main screen shows,
+ * the main screen's rectangle of the back buffer (two CRTCs scanning out
+ * one framebuffer, in DRM's words). The view stays the main screen's, and
+ * the output is no screen: ts_disp_screens and ts_disp_screen do not count
+ * it. Where its framebuffer is of another size, the rectangle is shown
+ * scaled with its ratio kept, in the middle, black round it -- by the
+ * driver's scaler where it has one (T_DISPOUTHW fit), else by the send.
+ */
+#define DISP_SIDE_MIRROR	4
+
+/*
+ * Where a point of the view, as the screens were before the last change
+ * of their sizes, places or scale, is now (*p_x, *p_y in and out): on the
+ * main screen, or on a screen still there, it goes with that screen; on
+ * one taken away it goes to the main screen at the same place from its
+ * corner, kept inside it; on none, with the nearest. The rectangle of the screen it
+ * is now on into *on when not NULL. Answers TRUE when it went to the main
+ * screen from another screen; a window or the pointer is kept by this
+ * on the screen it was on (10.4.8).
+ */
+IMPORT BOOL knl_disp_follow( INT *p_x, INT *p_y, T_DISPRECT *on );
+
+/*
+ * An output besides the main one taken away again, by its number on the
+ * driver (1 or more, knl_disp_out_attach's answer): its screen number
+ * where no output that mirrors the main screen comes before it
+ */
+IMPORT ER  knl_disp_out_detach( INT out );
 
 /* Another size of screen: E_NOSPT when this one cannot be set to it */
 IMPORT ER  ts_disp_setmode( UINT w, UINT h );

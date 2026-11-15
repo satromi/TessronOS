@@ -17,7 +17,8 @@
  *	it; its name ("process" and the number) is only shown. Record 0 is what
  *	the process is doing, written as xmlTAD when it is read, with a
  *	virtual object of the program it runs and one of each socket it has
- *	open (obsock.c). Its owner is the user it acts for: that user may
+ *	open (obsock.c) and one of each end of a stream it holds a key to
+ *	(obstrm.c). Its owner is the user it acts for: that user may
  *	end it, others may only look.
  */
 
@@ -27,6 +28,7 @@
 #include <ts/proc.h>
 #include <ts/so.h>
 #include <ts/sysdef.h>
+#include <ts/sbx.h>
 #include "obj.h"
 
 
@@ -145,6 +147,12 @@ EXPORT BOOL knl_ob_trusted( CONST TS_UUID *prog )
  * person (TS_PRC_USER), but for a helper the system trusts, which acts
  * as the system; one a process starts acts as the process does.
  */
+LOCAL INT says_withpar( CONST UB *json, INT len );
+
+/*
+ * The metadata given may say that it ends with its maker
+ * (tessronos.process.withParent, TS_PRC_WITHPARENT).
+ */
 LOCAL ER obp_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 {
 	T_CPRC	cprc;
@@ -158,6 +166,10 @@ LOCAL ER obp_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	knl_memset(&cprc, 0, sizeof(cprc));
 	cprc.arg = c->arg;
 	cprc.argsz = c->argsz;
+	if ( c->json != NULL && c->jsonsz > 0 && c->jsonsz < 0x3FFFFFFF
+	  && says_withpar(c->json, (INT)c->jsonsz) == 1 ) {
+		cprc.prcatr |= TS_PRC_WITHPARENT;
+	}
 	if ( ts_get_pid() <= 0 && !knl_ob_trusted(&c->prog) ) {
 		cprc.prcatr = TS_PRC_USER;
 	}
@@ -225,6 +237,26 @@ LOCAL INT socket_links( ID pid, UB *t, INT n, INT max )
 	return n;
 }
 
+/* A paragraph with a link for each end of a stream the process holds a key to (obstrm.c) */
+#define STREAM_LINKS	64
+
+LOCAL INT stream_links( ID pid, UB *t, INT n, INT max )
+{
+	TS_UUID	*u;
+	INT	k, i;
+
+	u = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * STREAM_LINKS);
+	if ( u == NULL ) {
+		return n;
+	}
+	k = knl_ob_key_objs(pid, OB_T_CHANNEL, OB_S_STREAM, u, STREAM_LINKS);
+	for ( i = 0; i < k && i < STREAM_LINKS; i++ ) {
+		n = knl_obdev_link(t, n, max, &u[i], (CONST UB *)"stream");
+	}
+	Kfree(u);
+	return n;
+}
+
 /* What the process is doing, as xmlTAD */
 LOCAL INT status_text( ID pid, UB *t, INT max )
 {
@@ -259,6 +291,7 @@ LOCAL INT status_text( ID pid, UB *t, INT max )
 		n = knl_oj_put(t, n, max, "_0.xtad\"/></p>");
 	}
 	n = socket_links(pid, t, n, max);
+	n = stream_links(pid, t, n, max);
 	return knl_oj_put(t, n, max, "</document></tad>");
 }
 
@@ -312,6 +345,25 @@ LOCAL ER obp_gat( INT h, UB *json, SZ size, SZ *p_asize )
 	n = knl_oj_put_str(json, n, (INT)size, name);
 	n = knl_oj_put(json, n, (INT)size, ",\"tessronos\":{\"process\":{\"pid\":");
 	n = knl_oj_put_num(json, n, (INT)size, (D)h);
+	n = knl_oj_put(json, n, (INT)size, ( knl_prc_withpar((ID)h) == 1 )
+		       ? ",\"withParent\":true" : ",\"withParent\":false");
+	/* the groups of calls it is shut out of (include/ts/sbx.h), 0 for none */
+	n = knl_oj_put(json, n, (INT)size, ",\"sandbox\":");
+	n = knl_oj_put_num(json, n, (INT)size, (D)( knl_prc_sbx_of((ID)h) & TS_SBX_ALL ));
+	/* the calls its sandbox turned away: in all, per group, and the last one's code */
+	{
+		UW	r[TS_SBX_NGROUP + 2];
+		UB	txt[96];
+
+		if ( !knl_prc_sbx_refused_of((ID)h, r) ) {
+			knl_memset(r, 0, sizeof(r));
+		}
+		(void)tm_sprintf(txt, (CONST UB *)"total=%d obj=%d net=%d dev=%d gpu=%d proc=%d win=%d sys=%d last=%x",
+				 (INT)r[0], (INT)r[1], (INT)r[2], (INT)r[3], (INT)r[4], (INT)r[5], (INT)r[6],
+				 (INT)r[7], (UINT)r[8]);
+		n = knl_oj_put(json, n, (INT)size, ",\"sandbox_refused\":");
+		n = knl_oj_put_str(json, n, (INT)size, txt);
+	}
 	n = knl_oj_put(json, n, (INT)size, "}}}");
 	if ( n < 0 ) {
 		return E_LIMIT;
@@ -320,6 +372,32 @@ LOCAL ER obp_gat( INT h, UB *json, SZ size, SZ *p_asize )
 		*p_asize = n;
 	}
 	return E_OK;
+}
+
+/* tessronos.process.withParent of metadata: 1 true, 0 false, -1 not said */
+LOCAL INT says_withpar( CONST UB *json, INT len )
+{
+	INT	v;
+	BOOL	b;
+
+	if ( json == NULL || len <= 0 ) {
+		return -1;
+	}
+	v = knl_oj_path(json, len, "tessronos", "process");
+	v = ( v >= 0 ) ? knl_oj_member(json, len, v, "withParent") : -1;
+	return ( v >= 0 && knl_oj_bool(json, len, v, &b) ) ? ( b ? 1 : 0 ) : -1;
+}
+
+/*
+ * What of the attributes may be changed: whether it ends with its
+ * parent (tessronos.process.withParent). The rest is made from the
+ * process each time it is read and is not kept.
+ */
+LOCAL ER obp_sat( INT h, CONST UB *json, SZ size )
+{
+	INT	w = says_withpar(json, (INT)size);
+
+	return ( w < 0 ) ? E_OK : knl_prc_set_withpar((ID)h, (BOOL)( w == 1 ));
 }
 
 LOCAL ER obp_lst( CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt )
@@ -389,7 +467,7 @@ LOCAL CONST T_OBMGR obp_mgr = {
 	OB_T_PROCESS, 0, "process",
 	obp_find, obp_ref, obp_prot, NULL, obp_create, obp_remove,
 	obp_open, obp_close, obp_rea, NULL, NULL, NULL, NULL, obp_lrc,
-	obp_gat, NULL, NULL, obp_lst, NULL,
+	obp_gat, obp_sat, NULL, obp_lst, NULL,
 	NULL, NULL, NULL, NULL,
 	NULL, NULL,
 	/* no icon of their own */

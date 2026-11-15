@@ -17,8 +17,13 @@ one for ファイル変換. --vols DIR gives the machine a USB hub with
 nothing on it, and copies the disk images of DIR (tools/tests/
 mkvoldisk.py) beside the run, where a step plugs them in.
 
-The first run starts the machine, waits until the desktop says it is
-up, and keeps the machine as it is then (its memory, and a copy of the
+UI_SCREENS=2 in the environment gives the machine a second display (id
+disp2), which the kernel puts right of the first (docs/tessronos 10.4.8);
+use another --tag for it, and "hmp screendump FILE disp2" to see it.
+
+The first run starts the machine, waits until the desktop says its
+start is over (TessronOS desktop: settled, once what it opened by itself
+has drawn its window), and keeps the machine as it is then (its memory, and a copy of the
 disk made at the same moment) under ui_<tag> in the temporary directory. Every later run with
 the same kernel and disk starts from that, in a few seconds rather than
 the minutes a start takes. --fresh starts it again.
@@ -30,6 +35,10 @@ given; windows can be found by their names ("win 管理情報" answers
 where it is). A few lines are the runner's own:
 
   shot NAME        the screen, as NAME.png (or .ppm) in --out
+  shotsame A B X0 Y0 X1 Y1  the shots A and B the same, pixel for pixel, there
+  shotsum NAME X0 Y0 X1 Y1  what the shot shows there, as "ok HASH" (16 digits
+                   of the SHA-1 of its pixels) for a want after it: a picture
+                   checked against one recorded before
   expect TEXT      the console must say TEXT (waits up to 20 seconds)
   expectin S TEXT  the same, waiting up to S seconds
   logmark          where the console's log is now: what expectsince looks after
@@ -40,7 +49,9 @@ where it is). A few lines are the runner's own:
   hostmark         the time from which hosttime counts, on this machine's clock
   hosttime NAME MS how long since hostmark, printed with NAME; at most MS
   want ANSWER      the answer to the step before must be ANSWER ("want ok c 1,4 a 1,4")
-  keep NAME        the answer to the step before kept under NAME
+  keep NAME        the answer to the step before kept under NAME; {NAME} in a later
+                   line stands for its last word ("run" answers "ok PID": the
+                   process's number, for an expect that names it)
   same NAME        the answer to the step before must be the one kept under NAME
   under NAME MS    the answer to the step before ("ok MS") must be at most MS;
                    it is printed with NAME either way, for the record of times
@@ -107,7 +118,9 @@ def machine_args(elf, disk, con_log, ut_port, mon_port, net="socket", wav=None, 
             "-drive", "file=%s,if=none,format=raw,id=hd0" % disk,
             "-device", "virtio-blk-device,drive=hd0",
             "-device", "qemu-xhci,id=xhci", "-device", "usb-kbd", "-device", "usb-mouse"] + snd + [
-            "-device", "bochs-display",
+            "-device", "bochs-display"] + (
+            # UI_SCREENS=2: a second display, right of the first (10.4.8); "hmp screendump F disp2" writes it
+            ["-device", "bochs-display,id=disp2"] if os.environ.get("UI_SCREENS") == "2" else []) + [
             "-netdev", "user,id=n0" if net == "user" else "socket,id=n0,mcast=230.0.0.1:12347",
             "-device", "virtio-net-device,netdev=n0",
             "-serial", "file:%s" % con_log,
@@ -200,17 +213,24 @@ class Driver:
 
 
 def wait_for(log, text, tmo, since=0):
+    return wait_any(log, (text,), tmo, since) is not None
+
+
+def wait_any(log, texts, tmo, since=0):
+    """The first of texts the console says, waiting up to tmo seconds; None when none"""
     end = time.time() + tmo
     while time.time() < end:
         try:
             with open(log, "rb") as f:
                 f.seek(since)
-                if text in f.read().decode("utf-8", "replace"):
-                    return True
+                d = f.read().decode("utf-8", "replace")
+            for t in texts:
+                if t in d:
+                    return t
         except OSError:
             pass
         time.sleep(0.2)
-    return False
+    return None
 
 
 def shot(mon, out, name, tmp):
@@ -402,7 +422,16 @@ def main():
             if not wait_for(con, "uitest: ready", 300):
                 sys.stderr.write("ui_run: the desktop did not come up\n")
                 return 2
-            drv.ask("wait 1500")
+            # the start over: what the desktop opened by itself (the 原紙箱's process) has
+            # drawn its window, as the desktop says once (desktop.c settle_poll)
+            st = wait_any(con, ("TessronOS desktop: settled", "TessronOS desktop: not settled"), 300)
+            if st != "TessronOS desktop: settled":
+                sys.stderr.write("ui_run: the desktop's start did not settle (%s)\n" % (st or "nothing said"))
+                return 2
+            # and its task round its loop once more, nothing left of what it was doing
+            if not drv.ask("sync 60").startswith("ok"):
+                sys.stderr.write("ui_run: the desktop is busy\n")
+                return 2
             # kept as it is now: the memory, and the disk at the same moment
             mon.cmd("stop")
             save_state(mon, state)

@@ -120,7 +120,7 @@ static struct {
 } wsim_joins[WSIM_JOINS];
 
 static const uint8_t wsim_sta_mac[ETHER_ADDR_LEN] = { 0x02, 0x77, 0x73, 0x00, 0x00, 0x02 };
-static const uint8_t wsim_ap_mac[ETHER_ADDR_LEN] = { 0x02, 0x77, 0x73, 0x00, 0x00, 0x01 };
+static uint8_t wsim_ap_mac[ETHER_ADDR_LEN] = { 0x02, 0x77, 0x73, 0x00, 0x00, 0x01 };	/* the BSSID */
 
 static uint64_t
 wsim_ms(void)
@@ -142,6 +142,151 @@ wsim_chan(struct wsim_softc *sc)
 	    ic->ic_bss->ni_chan == IEEE80211_CHAN_ANYC)
 		return -1;
 	return ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan);
+}
+
+/*
+ * The station's keys as a card whose driver sets them by a task of its
+ * own keeps them ("keydelay <ms>", rump_tswifisim_keydelay): its
+ * ic_set_key answers EBUSY, and the key is in the card ms later; once
+ * the pairwise and the group key (and the integrity group key, with
+ * protected management frames) are in, the port is made valid and the
+ * link up, as iwx's iwx_add_sta_key does. A protected frame sent while
+ * its key is not yet in the card is dropped (the access point could
+ * not read it) and counted (wsim_nokey), and a protected one received
+ * then is dropped too (the card cannot decrypt it). 0, as the
+ * simulator starts: the keys are in at once.
+ */
+#define WSIM_KEYQ	8
+#define WSIM_HAVE_PTK	1
+#define WSIM_HAVE_GTK	2
+#define WSIM_HAVE_IGTK	4
+
+static int			wsim_keydelay;
+static struct {
+	struct ieee80211_key	*k;
+	struct ieee80211_node	*ni;
+	uint64_t		due;
+} wsim_keyq[WSIM_KEYQ];
+static int			wsim_nkeyq;
+static int			wsim_have;
+static uint32_t			wsim_nokey, wsim_nokey_rx, wsim_late_keys;
+static uint64_t			wsim_keys_in_ns;	/* the card had them all (ns); 0 not yet */
+static uint32_t			wsim_port_rel;		/* the port opened ms + 1 after them; ~0 before; 0 not seen */
+static int			(*wsim_set_key0)(struct ieee80211com *, struct ieee80211_node *,
+				    struct ieee80211_key *);
+static void			(*wsim_delete_key0)(struct ieee80211com *, struct ieee80211_node *,
+				    struct ieee80211_key *);
+uint64_t	tsw_port_ns(void);		/* tswifi_obsd.c */
+
+static int
+wsim_key_pending(const struct ieee80211_key *k)
+{
+	int i;
+
+	for (i = 0; i < wsim_nkeyq; i++) {
+		if (wsim_keyq[i].k == k)
+			return 1;
+	}
+	return 0;
+}
+
+static int
+wsim_set_key(struct ieee80211com *ic, struct ieee80211_node *ni, struct ieee80211_key *k)
+{
+	if (wsim_keydelay <= 0 || (k->k_cipher != IEEE80211_CIPHER_CCMP &&
+	    !(k->k_flags & IEEE80211_KEY_IGTK)))
+		return (*wsim_set_key0)(ic, ni, k);
+	if (wsim_key_pending(k))
+		return EBUSY;
+	if (wsim_nkeyq >= WSIM_KEYQ)
+		return ENOSPC;
+	wsim_keyq[wsim_nkeyq].k = k;
+	wsim_keyq[wsim_nkeyq].ni = ni;
+	wsim_keyq[wsim_nkeyq].due = wsim_ms() + (uint64_t)wsim_keydelay;
+	wsim_nkeyq++;
+	wsim_keys_in_ns = 0;
+	return EBUSY;
+}
+
+static void
+wsim_key_drop(struct ieee80211_key *k)
+{
+	int i, j;
+
+	for (i = j = 0; i < wsim_nkeyq; i++) {
+		if (wsim_keyq[i].k != k)
+			wsim_keyq[j++] = wsim_keyq[i];
+	}
+	wsim_nkeyq = j;
+}
+
+static void
+wsim_delete_key(struct ieee80211com *ic, struct ieee80211_node *ni, struct ieee80211_key *k)
+{
+	if (wsim_key_pending(k)) {
+		wsim_key_drop(k);
+		return;
+	}
+	(*wsim_delete_key0)(ic, ni, k);
+}
+
+/* The keys whose time has come put into the card; the port valid once all are in */
+static void
+wsim_keys_tick(struct ieee80211com *ic)
+{
+	struct ieee80211_key *k;
+	struct ieee80211_node *ni;
+	uint64_t now = wsim_ms(), pn;
+	int want = WSIM_HAVE_PTK | WSIM_HAVE_GTK, err;
+
+	if (wsim_port_rel == 0 && wsim_keys_in_ns != 0 && (pn = tsw_port_ns()) != 0)
+		wsim_port_rel = (pn >= wsim_keys_in_ns) ?
+		    (uint32_t)((pn - wsim_keys_in_ns) / 1000000) + 1 : ~0U;
+	while (wsim_nkeyq > 0 && wsim_keyq[0].due <= now) {
+		k = wsim_keyq[0].k;
+		ni = wsim_keyq[0].ni;
+		wsim_key_drop(k);
+		if (ic->ic_state != IEEE80211_S_RUN || ni != ic->ic_bss)
+			continue;
+		err = (*wsim_set_key0)(ic, ni, k);
+		wsim_late_keys++;
+		if (err != 0) {
+			printf("wifisim: the station's card refused a key (%d)\n", err);
+			continue;
+		}
+		if (k->k_flags & IEEE80211_KEY_IGTK)
+			wsim_have |= WSIM_HAVE_IGTK;
+		else if (k->k_flags & IEEE80211_KEY_GROUP)
+			wsim_have |= WSIM_HAVE_GTK;
+		else
+			wsim_have |= WSIM_HAVE_PTK;
+		ni = ic->ic_bss;
+		if (ni->ni_flags & IEEE80211_NODE_MFP)
+			want |= WSIM_HAVE_IGTK;
+		if (wsim_nkeyq == 0 && (wsim_have & want) == want) {
+			wsim_keys_in_ns = getnsecuptime();
+			wsim_port_rel = 0;
+			printf("wifisim: the station's card has its keys (%d ms after they were asked)%s\n",
+			    wsim_keydelay, ni->ni_port_valid ? "; the port was open before them" :
+			    ": the port valid");
+			if (ni->ni_flags & IEEE80211_NODE_MFP)
+				ni->ni_flags |= IEEE80211_NODE_TXMGMTPROT;
+			if (!ni->ni_port_valid) {
+				ni->ni_port_valid = 1;
+				ieee80211_set_link_state(ic, LINK_STATE_UP);
+			}
+			/* the port opened by the manager before them (it did not wait for the keys) */
+			if ((pn = tsw_port_ns()) != 0 && pn < wsim_keys_in_ns)
+				wsim_port_rel = ~0U;
+		}
+	}
+}
+
+/* A protected frame whose key the card has not yet: the station's card cannot use it */
+static int
+wsim_nokey_frame(struct ieee80211com *ic)
+{
+	return wsim_nkeyq > 0 && (ic->ic_flags & IEEE80211_F_RSNON);
 }
 
 static void
@@ -220,6 +365,11 @@ wsim_air_recv(struct wsim_softc *sc, struct mbuf *m)
 			m_freem(m);
 			return;
 		}
+	}
+	if (!sc->sc_ap && (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) && wsim_nokey_frame(ic)) {
+		wsim_nokey_rx++;
+		m_freem(m);
+		return;
 	}
 	sc->sc_rx++;
 	memset(&rxi, 0, sizeof(rxi));
@@ -303,6 +453,7 @@ wsim_air(void *arg)
 	}
 	sc = wsim_sta;
 	ic = &sc->sc_ic;
+	wsim_keys_tick(ic);
 	if (sc->sc_scan != 0 && (ic->ic_if.if_flags & IFF_RUNNING) &&
 	    now - sc->sc_scan_at >= (sc->sc_scan == 2 ? WSIM_BGDWELL_MS : WSIM_DWELL_MS))
 		wsim_scan_step(sc);
@@ -374,6 +525,16 @@ wsim_start(struct ifnet *ifp)
 		wh = mtod(m, struct ieee80211_frame *);
 		if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) {
 			k = ieee80211_get_txkey(ic, wh, ni);
+			if (!sc->sc_ap && wsim_key_pending(k)) {
+				if (wsim_nokey++ < 8)
+					printf("wifisim: the station sent a protected frame before its card"
+					    " had the key (%d bytes): the access point cannot read it\n",
+					    m->m_pkthdr.len);
+				m_freem(m);
+				ieee80211_release_node(ic, ni);
+				ifp->if_oerrors++;
+				continue;
+			}
 			if ((m = ieee80211_encrypt(ic, m, k)) == NULL) {
 				ieee80211_release_node(ic, ni);
 				ifp->if_oerrors++;
@@ -470,6 +631,13 @@ wsim_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 
 	if (nstate == IEEE80211_S_RUN)
 		sc->sc_heard_at = sc->sc_bmiss_at = wsim_ms();
+	if (!sc->sc_ap && nstate != IEEE80211_S_RUN) {
+		/* the card's keys taken out as the station leaves its access point, as iwx's newstate does */
+		wsim_nkeyq = 0;
+		wsim_have = 0;
+		if (wsim_keydelay > 0 && ic->ic_bss != NULL)
+			ic->ic_bss->ni_port_valid = 0;
+	}
 	if (nstate != IEEE80211_S_SCAN && !(nstate == IEEE80211_S_RUN && sc->sc_scan == 2))
 		sc->sc_scan = 0;
 	if (!sc->sc_ap && nstate == IEEE80211_S_SCAN) {
@@ -582,9 +750,13 @@ wsim_attach(const char *name, int ap, const uint8_t *mac)
 	sc->sc_newstate = ic->ic_newstate;
 	ic->ic_newstate = wsim_newstate;
 	ic->ic_newassoc = wsim_newassoc;
-	if (!ap)
+	if (!ap) {
 		ic->ic_bgscan_start = wsim_bgscan;
-	else
+		wsim_set_key0 = ic->ic_set_key;
+		ic->ic_set_key = wsim_set_key;
+		wsim_delete_key0 = ic->ic_delete_key;
+		ic->ic_delete_key = wsim_delete_key;
+	} else
 		ic->ic_des_chan = &ic->ic_channels[WSIM_AP_CHAN];
 	return sc;
 }
@@ -655,6 +827,7 @@ int	rump_tswifisim_ap_setkey(int, const uint8_t *, int, const uint8_t *, int);
 int	rump_tswifisim_ap_port(const uint8_t *, int);
 int	rump_tswifisim_ap_kick(const uint8_t *, int);
 int	rump_tswifisim_ap_mac(uint8_t *);
+int	rump_tswifisim_ap_bssid(const uint8_t *);
 int	rump_tswifisim_ap_stations(struct tswifisim_sta *, int);
 int	rump_tswifisim_stats(uint32_t *, int);
 void	rump_tswifisim_air(int, int);
@@ -721,6 +894,29 @@ int
 rump_tswifisim_ap_mac(uint8_t *mac)
 {
 	memcpy(mac, wsim_ap_mac, ETHER_ADDR_LEN);
+	return 0;
+}
+
+/*
+ * The access point's address (its BSSID) changed, as another access
+ * point's: taken at its next start (rump_tswifisim_ap_config). The layer
+ * keeps the SSID it first heard for a BSSID (ieee80211_recv_probe_resp
+ * takes one only for a node that has none), so another network is
+ * another BSSID as well, as two access points' are.
+ */
+int
+rump_tswifisim_ap_bssid(const uint8_t *mac)
+{
+	struct ifnet *ifp;
+
+	if (wsim_ap == NULL)
+		return ENXIO;
+	ifp = &wsim_ap->sc_ic.ic_if;
+	obsd_lock();
+	memcpy(wsim_ap_mac, mac, ETHER_ADDR_LEN);
+	memcpy(wsim_ap->sc_ic.ic_myaddr, mac, ETHER_ADDR_LEN);
+	(void)if_setlladdr(ifp, mac);
+	obsd_unlock();
 	return 0;
 }
 
@@ -848,6 +1044,25 @@ rump_tswifisim_air(int on, int rssi)
 	obsd_unlock();
 }
 
+int	rump_tswifisim_keydelay(int);
+
+/*
+ * The station's card sets each key ms after it is asked (0: at once),
+ * its counts of this forgotten
+ */
+int
+rump_tswifisim_keydelay(int ms)
+{
+	obsd_lock();
+	wsim_keydelay = ms > 0 ? ms : 0;
+	wsim_nokey = wsim_nokey_rx = wsim_late_keys = 0;
+	wsim_keys_in_ns = 0;
+	wsim_port_rel = 0;
+	obsd_unlock();
+	printf("wifisim: the station's card sets its keys %d ms after they are asked\n", wsim_keydelay);
+	return 0;
+}
+
 int	rump_tswifisim_seqshare(int);
 
 /* The access point's one record of the numbers (wsim_seqshare) on or off, forgotten */
@@ -874,12 +1089,16 @@ rump_tswifisim_seqshare(int on)
  * agreements for what the station sends, v[17] as the access point
  * counts them; v[18] the station's frames the access point dropped as
  * below the agreement's window or as duplicates; v[19] those dropped by
- * its one record of the numbers (wsim_seqshare)
+ * its one record of the numbers (wsim_seqshare); v[20] the station's
+ * protected frames sent before its card had their key, v[21] those
+ * received then; v[22] the keys its card set late (wsim_keydelay);
+ * v[23] how long after the card had its keys the port opened, in ms
+ * plus 1 (~0: before them; 0: not seen)
  */
 int
 rump_tswifisim_stats(uint32_t *v, int n)
 {
-	uint32_t a[20];
+	uint32_t a[24];
 	int i;
 
 	memset(a, 0, sizeof(a));
@@ -906,9 +1125,13 @@ rump_tswifisim_stats(uint32_t *v, int n)
 		a[18] = wsim_ap->sc_ic.ic_stats.is_ht_rx_frame_below_ba_winstart +
 		    wsim_ap->sc_ic.ic_stats.is_rx_dup;
 		a[19] = wsim_lost_seqshare;
+		a[20] = wsim_nokey;
+		a[21] = wsim_nokey_rx;
+		a[22] = wsim_late_keys;
+		a[23] = wsim_port_rel;
 	}
 	obsd_unlock();
-	for (i = 0; i < n && i < 20; i++)
+	for (i = 0; i < n && i < 24; i++)
 		v[i] = a[i];
 	return i;
 }

@@ -45,10 +45,44 @@ typedef struct {
 	T_DPRECT	box;		/* where the list stood when drawn */
 } T_PDCONV;
 
+/*
+ * A part's names (T_WMNAMES of part.h): the bytes, len of the size
+ * allocated, the last one a nought. With them, what a list's columns
+ * measure, worked out once for these names in face colfid and kept
+ * until the names change (ncol nought: not yet): a list of thousands of
+ * rows is not measured again each time a row of it is drawn.
+ */
+#define PD_COL_MAX	16		/* columns a row is parted into, at most */
+
+struct T_WMNAMES {
+	INT		size;		/* bytes allocated for b */
+	INT		len;		/* bytes of b used */
+	INT		ncol;		/* columns the names make, 0 not measured */
+	ID		colfid;		/* the face they were measured in */
+	INT		nat[PD_COL_MAX];	/* the widest entry of each column */
+	UB		b[];
+};
+
+/* A block for n bytes of names, empty; NULL when there is not the memory */
+IMPORT T_WMNAMES *pd_names_new( INT n );
+/* A copy of a block, of the bytes it uses; NULL for none or no memory (*p_er says which) */
+IMPORT T_WMNAMES *pd_names_dup( CONST T_WMNAMES *nm, ER *p_er );
+IMPORT void pd_names_free( T_WMNAMES *nm );
+
+/*
+ * The name numbered i (0 up) of a part's names that start 'at' bytes in
+ * (0 for a list, sbpool[f] for a field of names), or NULL when there is
+ * none; and the one after a name, NULL after the last.
+ */
+IMPORT CONST UB *pd_name_at( CONST T_WMPART *pt, INT at, INT i );
+#define pd_name(pt, i)	pd_name_at((pt), 0, (i))
+IMPORT CONST UB *pd_name_next( CONST T_WMPART *pt, CONST UB *nm );
+/* Bytes the first count names take (each with its nought), at most what there is */
+IMPORT INT pd_names_len( CONST T_WMPART *pt, INT count );
+
 /* What the panel knows about a part as it is drawn */
 typedef struct {
 	INT		gid;
-	CONST UB	*pool;		/* the panel's names */
 	BOOL		focus;		/* the part has the keys */
 	INT		held;		/* held down: 1; a field's half: -1 its up, -2 its down; 0 not */
 	INT		held_at;	/* a selector's name or a tag held (1 up), 0 none */
@@ -59,9 +93,6 @@ typedef struct {
 } T_PDCTX;
 
 IMPORT void pd_part( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c );
-
-/* The name numbered i (0 up) of those starting at 'at' in a pool, or NULL */
-IMPORT CONST UB *pd_pool_name( CONST UB *pool, INT at, INT i );
 
 /* A selector of one part: the name (0 up) whose cell holds the point, or -1 */
 IMPORT INT pd_ws_at( CONST T_WMPART *pt, CONST T_DPRECT *r, INT x, INT y );
@@ -94,11 +125,11 @@ IMPORT INT pd_tb_at( CONST T_WMPART *pt, CONST T_DPRECT *r, INT x );
  * when it is an upper tag with a lower row). pd_tag_show answers the tag
  * now shown, or 0 when it was already.
  */
-IMPORT INT pd_tag_at( T_WMPART *pt, CONST UB *pool, INT x, INT y, T_DPRECT *p_tab );
-IMPORT INT pd_tag_show( T_WMPART *pt, CONST UB *pool, INT num );
+IMPORT INT pd_tag_at( T_WMPART *pt, INT x, INT y, T_DPRECT *p_tab );
+IMPORT INT pd_tag_show( T_WMPART *pt, INT num );
 IMPORT void pd_tag_turn( INT gid, CONST T_DPRECT *tab );	/* a tag held: turned over */
 /* The sheet the parts of the tag shown stand on, in the panel's coordinates */
-IMPORT void pd_tag_sheet( T_WMPART *pt, CONST UB *pool, T_DPRECT *out );
+IMPORT void pd_tag_sheet( T_WMPART *pt, T_DPRECT *out );
 
 /* The candidates of a conversion, listed under the box they belong to */
 IMPORT void pd_cands( INT gid, CONST T_DPRECT *r, T_PDCONV *cv, INT h );

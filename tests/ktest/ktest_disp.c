@@ -20,6 +20,8 @@
 #include "ktest.h"
 #include "tstdlib.h"
 #include <ts/disp.h>
+#include <ts/dispout.h>
+#include <ts/wm.h>
 #include <ts/time.h>
 #include <tk/smem.h>
 #include "../../device/disp/disp_hw.h"
@@ -33,7 +35,7 @@ LOCAL BOOL		flip_was = FALSE;	/* the screen flipped before the suite turned it o
 /* The first byte of a page */
 LOCAL UB *page_base( UINT page )
 {
-	return fb_all + (UBINT)page * spec.fb_pitch * spec.height;
+	return fb_all + (UBINT)page * spec.fb_pitch * spec.main_h;
 }
 
 /* One pixel of the back buffer */
@@ -105,7 +107,9 @@ LOCAL void test_spec( void )
 	KT_ASSERT(spec.fb_pa != 0);
 	KT_ASSERT(spec.fb_format == DISP_FMT_XRGB8888 || spec.fb_format == DISP_FMT_XBGR8888
 		  || spec.fb_format == DISP_FMT_RGB565);
-	KT_ASSERT(spec.fb_pitch >= spec.width * ( spec.fb_bpp / 8 ));
+	KT_ASSERT(spec.main_w >= 320 && spec.main_w <= spec.width);
+	KT_ASSERT(spec.main_h >= 200 && spec.main_h <= spec.height);
+	KT_ASSERT(spec.fb_pitch >= spec.main_w * ( spec.fb_bpp / 8 ));
 	KT_ASSERT_EQ(spec.held, 0);
 	KT_ASSERT(ts_disp_buffer() != NULL);
 
@@ -120,7 +124,7 @@ LOCAL void test_spec( void )
 	 * and hide every later write that went past it to the memory.
 	 */
 	fb_all = (UB *)knl_vmap_pa(spec.fb_pa & ~(UD)4095,
-				   ((spec.fb_pa & 4095) + (UD)spec.fb_pitch * spec.height * spec.fb_pages
+				   ((spec.fb_pa & 4095) + (UD)spec.fb_pitch * spec.main_h * spec.fb_pages
 				    + 4095) / 4096,
 				   VMAP_NOCACHE);
 	KT_ASSERT(fb_all != NULL);
@@ -373,8 +377,8 @@ LOCAL void test_flip( void )
 	KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
 	KT_ASSERT(spec.flipping);
 	KT_ASSERT_EQ(spec.fb_pages, 2);
-	w = (INT)spec.width;
-	h = (INT)spec.height;
+	w = (INT)spec.main_w;
+	h = (INT)spec.main_h;
 
 	/* the whole screen once, to the other page, which is then shown */
 	page = spec.fb_shown;
@@ -574,6 +578,985 @@ LOCAL void test_blank( void )
 	KT_ASSERT_ER(ts_disp_clear(0x00000000), E_OK);
 }
 
+/*
+ * Screens of their own sizes (10.4.8): framebuffers in memory put right
+ * of and below the screens there are, as an output a driver found would
+ * be. The back buffer grows round them, each screen's rectangle is its
+ * own, and what changes on a screen reaches its framebuffer at its place
+ * in it, a rectangle across two screens to both.
+ */
+#define SC_W		320
+#define SC_H		240
+#define SC_DOWN		16		/* the screen right of the others starts this far down */
+
+
+/* A framebuffer in memory, w x h, as an output; NULL when there is no room */
+LOCAL UW *mem_out( T_DISPHW *hw, UINT w, UINT h )
+{
+	UBINT	pages = ( (UBINT)w * h * 4 + 4095 ) / 4096;
+	UW	*m = (UW *)knl_vmap(pages, 0);
+
+	if ( m == NULL ) return NULL;
+	knl_memset(m, 0, (SZ)( pages * 4096 ));
+	knl_memset(hw, 0, sizeof(*hw));
+	hw->width = w;
+	hw->height = h;
+	hw->bpp = 32;
+	hw->pitch = w * 4;
+	hw->format = DISP_FMT_XRGB8888;
+	hw->alpha = DISP_ALPHA_ANY;
+	hw->fb_va = (UBINT)m;
+	hw->via = "memory (test)";
+	hw->pages = 1;
+	return m;
+}
+
+LOCAL void test_screens( void )
+{
+	T_DISPHW	hw;
+	T_DISPSPEC	was, s;
+	T_DISPRECT	r;
+	T_DPRECT	on;
+	UW		*m1, *m2;
+	INT		n0, sc1, sc2, x, y, w, h, bad;
+
+	if ( !have_disp ) KT_SKIP("no screen");
+	KT_ASSERT_ER(ts_disp_ref(&was), E_OK);
+	n0 = ts_disp_screens();
+	if ( n0 > 1 && was.width == was.main_w && was.height == was.main_h ) {
+		KT_SKIP("the screen is shown as columns (screens=N)");
+	}
+	if ( n0 + 2 > DISP_SCREENS_MAX ) KT_SKIP("no room for two more screens");
+	m1 = mem_out(&hw, SC_W, SC_H);
+	KT_ASSERT(m1 != NULL);
+	if ( m1 == NULL ) return;
+
+	/* a place left of or above the main screen, a side not known, a framebuffer that cannot be sent to */
+	KT_ASSERT_ER(knl_disp_out_attach(&hw, DISP_SIDE_RIGHT, -1), E_NOSPT);
+	KT_ASSERT_ER(knl_disp_out_attach(&hw, 7, 0), E_PAR);
+	hw.bpp = 24;
+	KT_ASSERT_ER(knl_disp_out_attach(&hw, DISP_SIDE_RIGHT, 0), E_PAR);
+	hw.bpp = 32;
+	KT_ASSERT_EQ(ts_disp_screens(), n0);
+
+	/* right of the others, a little down */
+	sc1 = knl_disp_out_attach(&hw, DISP_SIDE_RIGHT, SC_DOWN);
+	KT_ASSERT_EQ(sc1, n0);
+	KT_ASSERT_EQ(ts_disp_screens(), n0 + 1);
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	KT_ASSERT_EQ(s.width, was.width + SC_W);
+	KT_ASSERT_EQ(s.height, ( was.height > SC_DOWN + SC_H ) ? was.height : SC_DOWN + SC_H);
+	KT_ASSERT_EQ(s.main_w, was.main_w);
+	KT_ASSERT_EQ(s.main_h, was.main_h);
+	KT_ASSERT(s.pitch >= s.width * 4);
+	KT_ASSERT_ER(ts_disp_screen(sc1, &x, &y, &w, &h), E_OK);
+	if ( s.scale == 100 ) {
+		KT_ASSERT_EQ(x, (INT)was.width);
+		KT_ASSERT_EQ(y, SC_DOWN);
+		KT_ASSERT_EQ(w, SC_W);
+		KT_ASSERT_EQ(h, SC_H);
+	}
+	KT_ASSERT_ER(ts_disp_screen(sc1 + 1, &x, &y, &w, &h), E_NOEXS);
+	tm_printf((UB *)"  a screen of %d x %d put right: the back buffer %d x %d (was %d x %d), screen %d at %d,%d %dx%d\n",
+		  SC_W, SC_H, (INT)s.width, (INT)s.height, (INT)was.width, (INT)was.height, sc1, x, y, w, h);
+
+	/* the window manager's screen of a point: by both its coordinates */
+	(void)ts_disp_screen(sc1, &x, &y, &w, &h);
+	wm_screen_at(x + w / 2, y + h / 2, &on);
+	KT_ASSERT_EQ(on.left, x);
+	KT_ASSERT_EQ(on.top, y);
+	KT_ASSERT_EQ(on.right - on.left, w);
+	wm_screen_at(x + w + 100, y + 2, &on);		/* past the right edge: the nearest */
+	KT_ASSERT_EQ(on.left, x);
+	wm_screen_at(10, 10, &on);
+	KT_ASSERT_EQ(on.left, 0);
+	KT_ASSERT_EQ(on.top, 0);
+
+	/* a rectangle across the main screen's right edge and into the new one */
+	(void)wm_flush();
+	for ( y = SC_DOWN + 5; y < SC_DOWN + 15; y++ ) {
+		for ( x = (INT)was.width - 10; x < (INT)was.width + 20; x++ ) {
+			*(UW *)( (UB *)ts_disp_buffer() + (UBINT)y * s.pitch + (UBINT)x * 4 ) = 0x00ABCDEF;
+		}
+	}
+	spec = s;
+	r.left = (INT)was.width - 10; r.top = SC_DOWN + 5; r.right = (INT)was.width + 20; r.bottom = SC_DOWN + 15;
+	KT_ASSERT_ER(ts_disp_damage(&r), E_OK);
+	bad = 0;
+	for ( y = 5; y < 15; y++ ) {
+		for ( x = 0; x < 20; x++ ) {
+			if ( ( m1[y * SC_W + x] & 0x00FFFFFF ) != 0x00ABCDEF ) bad++;
+		}
+	}
+	KT_ASSERT_EQ(bad, 0);
+	/* round it, the screen holds what the back buffer does (the desk the windows were laid on) */
+	KT_ASSERT_EQ(m1[5 * SC_W + 20] & 0x00FFFFFF,
+		     *(UW *)( (UB *)ts_disp_buffer() + (UBINT)( SC_DOWN + 5 ) * s.pitch + (UBINT)( was.width + 20 ) * 4 ) & 0x00FFFFFF);
+	KT_ASSERT_EQ(m1[4 * SC_W + 0] & 0x00FFFFFF,
+		     *(UW *)( (UB *)ts_disp_buffer() + (UBINT)( SC_DOWN + 4 ) * s.pitch + (UBINT)was.width * 4 ) & 0x00FFFFFF);
+	KT_ASSERT(( m1[5 * SC_W + 20] & 0x00FFFFFF ) != 0x00ABCDEF);
+	if ( n0 == 1 ) {
+		KT_ASSERT_EQ(screen_at((INT)was.main_w - 5, SC_DOWN + 6), as_sent(0xABCDEF));
+	}
+
+	/* below them all */
+	m2 = mem_out(&hw, SC_W, SC_H);
+	KT_ASSERT(m2 != NULL);
+	if ( m2 != NULL ) {
+		sc2 = knl_disp_out_attach(&hw, DISP_SIDE_BELOW, 8);
+		KT_ASSERT_EQ(sc2, n0 + 1);
+		KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+		KT_ASSERT_EQ(s.height, ( ( was.height > SC_DOWN + SC_H ) ? was.height : SC_DOWN + SC_H ) + SC_H);
+		KT_ASSERT_ER(ts_disp_screen(sc2, &x, &y, &w, &h), E_OK);
+		wm_screen_at(x + 1, y + 1, &on);
+		KT_ASSERT_EQ(on.top, y);
+		KT_ASSERT_EQ(on.left, x);
+		if ( s.scale == 100 ) {
+			KT_ASSERT_EQ(x, 8);
+			KT_ASSERT_EQ(w, SC_W);
+		}
+		(void)wm_flush();
+		{
+			INT	px = disp_dev_of(x, s.scale), py = disp_dev_of(y, s.scale);
+
+			*(UW *)( (UB *)ts_disp_buffer() + (UBINT)( py + 3 ) * s.pitch + (UBINT)( px + 4 ) * 4 ) = 0x00135791;
+			r.left = px + 4; r.top = py + 3; r.right = px + 5; r.bottom = py + 4;
+			KT_ASSERT_ER(ts_disp_damage(&r), E_OK);
+			KT_ASSERT_EQ(m2[3 * SC_W + 4] & 0x00FFFFFF, 0x00135791U);
+		}
+		KT_ASSERT_ER(knl_disp_out_detach(sc2), E_OK);
+		knl_vunmap((UB *)m2, ( SC_W * SC_H * 4 + 4095 ) / 4096);
+	}
+
+	/* taken away again: the back buffer as it was */
+	KT_ASSERT_ER(knl_disp_out_detach(n0 + 2), E_NOEXS);
+	KT_ASSERT_ER(knl_disp_out_detach(sc1), E_OK);
+	KT_ASSERT_EQ(ts_disp_screens(), n0);
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	KT_ASSERT_EQ(s.width, was.width);
+	KT_ASSERT_EQ(s.height, was.height);
+	KT_ASSERT_EQ(s.pitch, was.pitch);
+	spec = s;
+	knl_vunmap((UB *)m1, ( SC_W * SC_H * 4 + 4095 ) / 4096);
+	(void)wm_flush();
+	KT_ASSERT_ER(ts_disp_clear(0x00000000), E_OK);
+}
+
+/*
+ * Screens left of and above the main one: the view's corner is the top
+ * left of them all, so the main screen moves away from it and shows its
+ * own rectangle of the back buffer from there; each other screen shows
+ * its part; a point of the view goes with the screen it was on, and to
+ * the main screen when its own is taken away; taken away, the main screen
+ * is at the corner again.
+ */
+LOCAL void test_screens_left( void )
+{
+	T_DISPHW	hw;
+	T_DISPSPEC	was, s;
+	T_DISPRECT	r, on;
+	T_DPRECT	m;
+	UW		*m1, *m2;
+	INT		n0, sc1, sc2, x, y, w, h, mx, my, ox = 0, oy = 0, ow, oh, px, py, ax = 0, ay = 0;
+
+	if ( !have_disp ) KT_SKIP("no screen");
+	KT_ASSERT_ER(ts_disp_ref(&was), E_OK);
+	n0 = ts_disp_screens();
+	if ( n0 > 1 && was.width == was.main_w && was.height == was.main_h ) {
+		KT_SKIP("the screen is shown as columns (screens=N)");
+	}
+	if ( n0 + 2 > DISP_SCREENS_MAX ) KT_SKIP("no room for two more screens");
+	KT_ASSERT_EQ(was.main_x, 0);
+	KT_ASSERT_EQ(was.main_y, 0);
+	if ( n0 > 1 ) (void)ts_disp_screen(1, &ox, &oy, &ow, &oh);	/* one there already, right of the main one */
+	m1 = mem_out(&hw, SC_W, SC_H);
+	KT_ASSERT(m1 != NULL);
+	if ( m1 == NULL ) return;
+
+	/* before the main screen's corner along the edge: not taken */
+	KT_ASSERT_ER(knl_disp_out_attach(&hw, DISP_SIDE_LEFT, -1), E_NOSPT);
+	KT_ASSERT_ER(knl_disp_out_attach(&hw, DISP_SIDE_ABOVE, -1), E_NOSPT);
+
+	/* left of the main screen, a little down */
+	sc1 = knl_disp_out_attach(&hw, DISP_SIDE_LEFT, SC_DOWN);
+	KT_ASSERT_EQ(sc1, n0);
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	KT_ASSERT_EQ(s.width, was.width + SC_W);
+	KT_ASSERT_EQ(s.main_x, SC_W);
+	KT_ASSERT_EQ(s.main_y, 0);
+	KT_ASSERT_EQ(s.main_w, was.main_w);
+	KT_ASSERT_ER(ts_disp_screen(0, &mx, &my, &w, &h), E_OK);
+	KT_ASSERT_ER(ts_disp_screen(sc1, &x, &y, &w, &h), E_OK);
+	KT_ASSERT_EQ(x, 0);
+	if ( s.scale == 100 ) {
+		KT_ASSERT_EQ(mx, SC_W);
+		KT_ASSERT_EQ(my, 0);
+		KT_ASSERT_EQ(y, SC_DOWN);
+		KT_ASSERT_EQ(w, SC_W);
+	}
+	if ( n0 > 1 ) {
+		/* the one right of the main screen went with it */
+		KT_ASSERT_ER(ts_disp_screen(1, &px, &py, &w, &h), E_OK);
+		KT_ASSERT_EQ(px, ox + mx);
+		KT_ASSERT_EQ(py, oy);
+	}
+	wm_screen_main_rect(&m);
+	KT_ASSERT_EQ(m.left, mx);
+	KT_ASSERT_EQ(m.top, my);
+	KT_ASSERT(wm_screen_is_main(&m));
+	wm_screen_at(x + 2, y + 2, &m);
+	KT_ASSERT_EQ(m.left, x);
+	KT_ASSERT(!wm_screen_is_main(&m));
+	tm_printf((UB *)"  a screen of %d x %d put left: the back buffer %d x %d, the main screen at %d,%d, screen %d at %d,%d\n",
+		  SC_W, SC_H, (INT)s.width, (INT)s.height, mx, my, sc1, x, y);
+
+	/* a point of the main screen goes with it */
+	px = 10;
+	py = 10;
+	KT_ASSERT(!knl_disp_follow(&px, &py, &on));
+	KT_ASSERT_EQ(px, mx + 10);
+	KT_ASSERT_EQ(py, my + 10);
+	KT_ASSERT_EQ(on.left, mx);
+
+	/* the main screen shows its own rectangle of the back buffer, the left one its part */
+	spec = s;
+	(void)wm_flush();
+	{
+		INT	dmx = disp_dev_of(mx, s.scale), dx = disp_dev_of(x, s.scale), dy = disp_dev_of(y, s.scale);
+
+		*back_at(dmx + 3, 4) = 0x00246801;
+		r.left = dmx + 3; r.top = 4; r.right = dmx + 4; r.bottom = 5;
+		KT_ASSERT_ER(ts_disp_damage(&r), E_OK);
+		KT_ASSERT_EQ(screen_at(3, 4), as_sent(0x246801));
+		*back_at(dx + 5, dy + 6) = 0x00135791;
+		r.left = dx + 5; r.top = dy + 6; r.right = dx + 6; r.bottom = dy + 7;
+		KT_ASSERT_ER(ts_disp_damage(&r), E_OK);
+		KT_ASSERT_EQ(m1[6 * SC_W + 5] & 0x00FFFFFF, 0x00135791U);
+		KT_ASSERT(screen_at(5, dy + 6) != as_sent(0x135791));
+		ax = x + 5;
+		ay = y + 6;
+	}
+
+	/* above them, after the left one: the main screen moves down as well */
+	m2 = mem_out(&hw, SC_W, SC_H);
+	KT_ASSERT(m2 != NULL);
+	if ( m2 != NULL ) {
+		INT	lx = x, ly = y, lx2 = 0, ly2 = 0;
+
+		sc2 = knl_disp_out_attach(&hw, DISP_SIDE_ABOVE, 8);
+		KT_ASSERT_EQ(sc2, n0 + 1);
+		KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+		KT_ASSERT_EQ(s.main_x, SC_W);
+		KT_ASSERT_EQ(s.main_y, SC_H);
+		KT_ASSERT_ER(ts_disp_screen(0, &mx, &my, &w, &h), E_OK);
+		KT_ASSERT_ER(ts_disp_screen(sc2, &x, &y, &w, &h), E_OK);
+		KT_ASSERT_EQ(y, 0);
+		if ( s.scale == 100 ) {
+			KT_ASSERT_EQ(x, SC_W + 8);
+			KT_ASSERT_EQ(my, SC_H);
+		}
+		/* the left one went down with the main one; a point on it with it */
+		KT_ASSERT_ER(ts_disp_screen(sc1, &lx2, &ly2, &w, &h), E_OK);
+		KT_ASSERT_EQ(lx2, lx);
+		if ( s.scale == 100 ) KT_ASSERT_EQ(ly2, ly + my);
+		px = ax;
+		py = ay;
+		KT_ASSERT(!knl_disp_follow(&px, &py, &on));
+		KT_ASSERT_EQ(px, ax - lx + lx2);
+		KT_ASSERT_EQ(py, ay - ly + ly2);
+		KT_ASSERT_EQ(on.top, ly2);
+
+		spec = s;
+		(void)wm_flush();
+		{
+			INT	dx = disp_dev_of(x, s.scale), dmx = disp_dev_of(mx, s.scale), dmy = disp_dev_of(my, s.scale);
+
+			*back_at(dx + 4, 3) = 0x00102030;
+			r.left = dx + 4; r.top = 3; r.right = dx + 5; r.bottom = 4;
+			KT_ASSERT_ER(ts_disp_damage(&r), E_OK);
+			KT_ASSERT_EQ(m2[3 * SC_W + 4] & 0x00FFFFFF, 0x00102030U);
+			*back_at(dmx + 2, dmy + 2) = 0x00405060;
+			r.left = dmx + 2; r.top = dmy + 2; r.right = dmx + 3; r.bottom = dmy + 3;
+			KT_ASSERT_ER(ts_disp_damage(&r), E_OK);
+			KT_ASSERT_EQ(screen_at(2, 2), as_sent(0x405060));
+		}
+
+		/* the one above taken away: a point on it goes to the main screen, as far from its corner */
+		ax = x + 4;
+		ay = y + 3;
+		KT_ASSERT_ER(knl_disp_out_detach(sc2), E_OK);
+		KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+		KT_ASSERT_EQ(s.main_y, 0);
+		KT_ASSERT_EQ(s.main_x, SC_W);
+		KT_ASSERT_ER(ts_disp_screen(0, &mx, &my, &w, &h), E_OK);
+		px = ax;
+		py = ay;
+		KT_ASSERT(knl_disp_follow(&px, &py, &on));
+		KT_ASSERT_EQ(px, mx + 4);
+		KT_ASSERT_EQ(py, my + 3);
+		KT_ASSERT_EQ(on.left, mx);
+		KT_ASSERT_EQ(on.top, my);
+		knl_vunmap((UB *)m2, ( SC_W * SC_H * 4 + 4095 ) / 4096);
+	}
+
+	/* taken away again: the main screen at the corner, the back buffer as it was */
+	KT_ASSERT_ER(knl_disp_out_detach(sc1), E_OK);
+	KT_ASSERT_EQ(ts_disp_screens(), n0);
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	KT_ASSERT_EQ(s.main_x, 0);
+	KT_ASSERT_EQ(s.main_y, 0);
+	KT_ASSERT_EQ(s.width, was.width);
+	KT_ASSERT_EQ(s.height, was.height);
+	KT_ASSERT_EQ(s.pitch, was.pitch);
+	if ( n0 > 1 ) {
+		KT_ASSERT_ER(ts_disp_screen(1, &px, &py, &w, &h), E_OK);
+		KT_ASSERT_EQ(px, ox);
+		KT_ASSERT_EQ(py, oy);
+	}
+	spec = s;
+	knl_vunmap((UB *)m1, ( SC_W * SC_H * 4 + 4095 ) / 4096);
+	(void)wm_flush();
+	KT_ASSERT_ER(ts_disp_clear(0x00000000), E_OK);
+}
+
+/*
+ * An output that mirrors the main screen (DISP_SIDE_MIRROR): no screen of
+ * its own, the view and the back buffer as they were; of the same size it
+ * is sent the main screen's pixels as they are, of another it is sent
+ * them scaled with the ratio kept, in the middle, black round them
+ */
+LOCAL void test_mirror( void )
+{
+	T_DISPHW	hw;
+	T_DISPSPEC	was, s;
+	T_DISPRECT	r;
+	UW		*m;
+	INT		n0, out, x, y, mw, mh, dmx, dmy;
+
+	if ( !have_disp ) KT_SKIP("no screen");
+	KT_ASSERT_ER(ts_disp_ref(&was), E_OK);
+	n0 = ts_disp_screens();
+	if ( n0 > 1 && was.width == was.main_w && was.height == was.main_h ) {
+		KT_SKIP("the screen is shown as columns (screens=N)");
+	}
+	if ( knl_disp_out_count() + 1 >= DISP_SCREENS_MAX ) KT_SKIP("no room for another output");
+
+	/* the rectangle a picture is shown in: as large as it goes, its ratio kept, in the middle */
+	knl_disp_fit(1280, 800, 1920, 1080, &r);
+	KT_ASSERT(r.left == 96 && r.top == 0 && r.right == 96 + 1728 && r.bottom == 1080);
+	knl_disp_fit(1920, 1080, 1280, 1024, &r);
+	KT_ASSERT(r.left == 0 && r.top == 152 && r.right == 1280 && r.bottom == 152 + 720);
+	knl_disp_fit(1024, 768, 2048, 1536, &r);
+	KT_ASSERT(r.left == 0 && r.top == 0 && r.right == 2048 && r.bottom == 1536);
+
+	mw = (INT)was.main_w;
+	mh = (INT)was.main_h;
+	dmx = disp_dev_of(was.main_x, was.scale);
+	dmy = disp_dev_of(was.main_y, was.scale);
+
+	/* of the main screen's size: no screen of its own, a copy of the main screen */
+	m = mem_out(&hw, (UINT)mw, (UINT)mh);
+	KT_ASSERT(m != NULL);
+	if ( m == NULL ) return;
+	out = knl_disp_out_attach(&hw, DISP_SIDE_MIRROR, 0);
+	KT_ASSERT_EQ(out, knl_disp_out_count());
+	KT_ASSERT_EQ(knl_disp_out_screen(out), -1);
+	KT_ASSERT_EQ(ts_disp_screens(), n0);
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	KT_ASSERT_EQ(s.width, was.width);
+	KT_ASSERT_EQ(s.height, was.height);
+	KT_ASSERT_EQ(s.main_x, was.main_x);
+	KT_ASSERT_ER(ts_disp_screen(n0, &x, &y, &mw, &mh), E_NOEXS);
+	mw = (INT)was.main_w;
+	mh = (INT)was.main_h;
+	spec = s;
+	(void)wm_flush();
+	*back_at(dmx + 7, dmy + 9) = 0x00123456;
+	r.left = dmx + 7; r.top = dmy + 9; r.right = dmx + 8; r.bottom = dmy + 10;
+	KT_ASSERT_ER(ts_disp_damage(&r), E_OK);
+	KT_ASSERT_EQ(m[9 * mw + 7] & 0x00FFFFFF, 0x00123456U);
+	KT_ASSERT_ER(knl_disp_out_detach(out), E_OK);
+	knl_vunmap((UB *)m, ( (UBINT)mw * mh * 4 + 4095 ) / 4096);
+
+	/* of another size, 320 x 240: the main screen scaled into the middle, black above and below */
+	m = mem_out(&hw, 320, 240);
+	KT_ASSERT(m != NULL);
+	if ( m == NULL ) return;
+	out = knl_disp_out_attach(&hw, DISP_SIDE_MIRROR, 0);
+	KT_ASSERT(out >= 1);
+	KT_ASSERT_EQ(ts_disp_screens(), n0);
+	knl_disp_fit((UINT)mw, (UINT)mh, 320, 240, &r);
+	tm_printf((UB *)"  the main screen of %d x %d mirrored in 320 x 240: in %d,%d-%d,%d\n", mw, mh,
+		  r.left, r.top, r.right, r.bottom);
+	(void)wm_flush();
+	for ( y = 0; y < mh; y++ ) {
+		UW	*p = back_at(dmx, dmy + y);
+
+		for ( x = 0; x < mw; x++ ) p[x] = 0x00ABCDEF;
+	}
+	{
+		T_DISPRECT	all;
+
+		all.left = dmx; all.top = dmy; all.right = dmx + mw; all.bottom = dmy + mh;
+		KT_ASSERT_ER(ts_disp_damage(&all), E_OK);
+	}
+	KT_ASSERT_EQ(m[( ( r.top + r.bottom ) / 2 ) * 320 + ( r.left + r.right ) / 2] & 0x00FFFFFF, 0x00ABCDEFU);
+	KT_ASSERT_EQ(m[r.top * 320 + r.left] & 0x00FFFFFF, 0x00ABCDEFU);
+	KT_ASSERT_EQ(m[( r.bottom - 1 ) * 320 + r.right - 1] & 0x00FFFFFF, 0x00ABCDEFU);
+	if ( r.top > 0 ) {
+		KT_ASSERT_EQ(m[0], 0U);					/* the bar above */
+		KT_ASSERT_EQ(m[239 * 320 + 319], 0U);			/* and below */
+	}
+	if ( r.left > 0 ) {
+		KT_ASSERT_EQ(m[120 * 320], 0U);
+	}
+	KT_ASSERT_ER(knl_disp_out_detach(out), E_OK);
+	KT_ASSERT_EQ(ts_disp_screens(), n0);
+	knl_vunmap((UB *)m, ( 320 * 240 * 4 + 4095 ) / 4096);
+
+	/*
+	 * The main screen set to another size while mirrored into 320 x 200:
+	 * what is scaled from and the rectangle it is scaled into made anew
+	 * for the new size (800 x 600 into 320 x 200: bars left and right,
+	 * black), and a pixel there the one the new size's sampling takes,
+	 * scaled once
+	 */
+	m = mem_out(&hw, 320, 200);
+	KT_ASSERT(m != NULL);
+	if ( m == NULL ) return;
+	out = knl_disp_out_attach(&hw, DISP_SIDE_MIRROR, 0);
+	KT_ASSERT(out >= 1);
+	if ( n0 == 1 && ts_disp_setmode(800, 600) >= E_OK ) {
+		T_DISPRECT	f, all;
+		UD		stx, sty;
+		INT		cx, cy, fx, fy;
+
+		KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+		spec = s;
+		knl_disp_fit(800, 600, 320, 200, &f);
+		KT_ASSERT(f.left > 0 && f.top == 0);
+		(void)wm_flush();
+		for ( y = 0; y < 600; y++ ) {
+			UW	*p = back_at(0, y);
+
+			for ( x = 0; x < 800; x++ ) p[x] = ( (UW)x << 12 ) ^ (UW)y;	/* every pixel its own */
+		}
+		all.left = 0; all.top = 0; all.right = 800; all.bottom = 600;
+		KT_ASSERT_ER(ts_disp_damage(&all), E_OK);
+		stx = ( 800ULL << 16 ) / (UD)( f.right - f.left );
+		sty = ( 600ULL << 16 ) / (UD)( f.bottom - f.top );
+		cx = ( f.left + f.right ) / 2 + 7;
+		cy = ( f.top + f.bottom ) / 2 + 5;
+		fx = (INT)( ( (UD)( cx - f.left ) * stx + ( stx >> 1 ) ) >> 16 );
+		fy = (INT)( ( (UD)( cy - f.top ) * sty + ( sty >> 1 ) ) >> 16 );
+		KT_ASSERT_EQ(m[cy * 320 + cx] & 0x00FFFFFF, ( ( (UW)fx << 12 ) ^ (UW)fy ) & 0x00FFFFFF);
+		KT_ASSERT_EQ(m[100 * 320 + f.left - 1], 0U);		/* the bar left */
+		KT_ASSERT_EQ(m[100 * 320 + f.right], 0U);		/* and right */
+		tm_printf((UB *)"  the main screen set to 800 x 600 while mirrored into 320 x 200: in %d,%d-%d,%d\n",
+			  f.left, f.top, f.right, f.bottom);
+		KT_ASSERT_ER(ts_disp_setmode(was.main_w, was.main_h), E_OK);
+	} else {
+		tm_printf((UB *)"  the main screen's size not changed here (two screens, or a screen that keeps its size)\n");
+	}
+	KT_ASSERT_ER(knl_disp_out_detach(out), E_OK);
+	knl_vunmap((UB *)m, ( 320 * 200 * 4 + 4095 ) / 4096);
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	spec = s;
+	(void)wm_flush();
+	KT_ASSERT_ER(ts_disp_clear(0x00000000), E_OK);
+}
+
+/*
+ * An output with two pages keeps its own frames: a send goes to its page
+ * not shown, which is then shown; a send that comes before that flip has
+ * been taken (latch_us here, made long) does not wait for it, and what it
+ * brought is sent by the output task once the flip is taken, with what
+ * the other page lacked, so that the page shown holds both.
+ */
+#define OF_LATCH_US	40000
+
+LOCAL UINT	of_page[16];
+LOCAL INT	of_n = 0;
+
+LOCAL ER of_flip( UINT page )
+{
+	if ( of_n < 16 ) of_page[of_n] = page;
+	of_n++;
+	return E_OK;
+}
+
+LOCAL void of_fill( UINT pitch, INT x0, INT y0, INT x1, INT y1, UW c )
+{
+	INT		x, y;
+	T_DISPRECT	r;
+
+	for ( y = y0; y < y1; y++ ) {
+		for ( x = x0; x < x1; x++ ) {
+			*(UW *)( (UB *)ts_disp_buffer() + (UBINT)y * pitch + (UBINT)x * 4 ) = c;
+		}
+	}
+	r.left = x0; r.top = y0; r.right = x1; r.bottom = y1;
+	(void)ts_disp_damage(&r);
+}
+
+LOCAL void test_out_flip( void )
+{
+	T_DISPHW	hw;
+	T_DISPSPEC	was, s;
+	UW		*m, *pg;
+	UBINT		pages = ( (UBINT)SC_W * SC_H * 4 * 2 + 4095 ) / 4096;
+	INT		sc, n0, x0, last;
+	UD		t0, t1;
+
+	if ( !have_disp ) KT_SKIP("no screen");
+	KT_ASSERT_ER(ts_disp_ref(&was), E_OK);
+	if ( ts_disp_screens() > 1 && was.width == was.main_w ) KT_SKIP("the screen is shown as columns (screens=N)");
+	if ( ts_disp_screens() + 1 > DISP_SCREENS_MAX ) KT_SKIP("no room for another screen");
+	m = (UW *)knl_vmap(pages, 0);
+	KT_ASSERT(m != NULL);
+	if ( m == NULL ) return;
+	knl_memset(m, 0, (SZ)( pages * 4096 ));
+	knl_memset(&hw, 0, sizeof(hw));
+	hw.width = SC_W;
+	hw.height = SC_H;
+	hw.bpp = 32;
+	hw.pitch = SC_W * 4;
+	hw.format = DISP_FMT_XRGB8888;
+	hw.alpha = DISP_ALPHA_ANY;
+	hw.fb_va = (UBINT)m;
+	hw.via = "memory, two pages (test)";
+	hw.pages = 2;
+	hw.flip = of_flip;
+	hw.latch_us = OF_LATCH_US;
+	of_n = 0;
+	sc = knl_disp_out_attach(&hw, DISP_SIDE_RIGHT, 0);
+	KT_ASSERT(sc >= 1);
+	if ( sc < 1 ) {
+		knl_vunmap((UB *)m, pages);
+		return;
+	}
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	x0 = (INT)was.width;
+	(void)wm_flush();
+	tk_dly_tsk(200);			/* what the windows laid again sent, flipped and settled */
+	n0 = of_n;
+	last = ( n0 > 0 ) ? (INT)of_page[( n0 - 1 ) % 16] : 0;
+
+	/* the first send: to the page not shown, then shown, without waiting */
+	(void)ts_get_mono(&t0);
+	of_fill(s.pitch, x0 + 10, 10, x0 + 30, 20, 0x00A1B2C3);
+	(void)ts_get_mono(&t1);
+	KT_ASSERT_EQ(of_n, n0 + 1);
+	KT_ASSERT_EQ((INT)of_page[n0 % 16], 1 - last);
+	pg = m + (SZ)( 1 - last ) * SC_W * SC_H;
+	KT_ASSERT_EQ(pg[15 * SC_W + 20] & 0x00FFFFFF, 0x00A1B2C3U);
+	KT_ASSERT(( t1 - t0 ) / 1000 < OF_LATCH_US / 2);
+
+	/* the next, before that flip is taken: it does not wait, nor flip */
+	(void)ts_get_mono(&t0);
+	of_fill(s.pitch, x0 + 50, 10, x0 + 60, 20, 0x00C3B2A1);
+	(void)ts_get_mono(&t1);
+	KT_ASSERT_EQ(of_n, n0 + 1);
+	KT_ASSERT(( t1 - t0 ) / 1000 < OF_LATCH_US / 2);
+
+	/* the output task sends it once the flip is taken: the page shown has both */
+	tk_dly_tsk(OF_LATCH_US / 1000 * 3);
+	KT_ASSERT_EQ(of_n, n0 + 2);
+	KT_ASSERT_EQ((INT)of_page[( n0 + 1 ) % 16], last);
+	pg = m + (SZ)last * SC_W * SC_H;
+	KT_ASSERT_EQ(pg[15 * SC_W + 55] & 0x00FFFFFF, 0x00C3B2A1U);
+	KT_ASSERT_EQ(pg[15 * SC_W + 20] & 0x00FFFFFF, 0x00A1B2C3U);
+	tm_printf((UB *)"  an output of two pages: %d flips; a send while its flip was not taken came back in %ld us\n",
+		  of_n, (D)( ( t1 - t0 ) / 1000 ));
+
+	KT_ASSERT_ER(knl_disp_out_detach(sc), E_OK);
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	spec = s;
+	knl_vunmap((UB *)m, pages);
+	(void)wm_flush();
+	KT_ASSERT_ER(ts_disp_clear(0x00000000), E_OK);
+}
+
+/*
+ * The outputs (10.4.9): each display listed with what its EDID says and
+ * the modes it offers, the display's preferred first; a state checked
+ * without touching anything, refused when it does not make sense;
+ * committed, and put back as it was when an output does not take its
+ * part; an output turned off stays listed without a screen.
+ */
+LOCAL T_DISPHW	fo_hw;
+
+LOCAL INT fo_modes( void *ctx, T_DISPMODE *m, INT max )
+{
+	INT	k;
+
+	(void)ctx;
+	if ( max < 2 ) return 0;
+	knl_memset(m, 0, 2 * sizeof(*m));
+	for ( k = 0; k < 2; k++ ) {
+		m[k].hdisp = m[k].hss = m[k].hse = m[k].htotal = (UH)( k == 0 ? SC_W : 640 );
+		m[k].vdisp = m[k].vss = m[k].vse = m[k].vtotal = (UH)( k == 0 ? SC_H : 480 );
+		m[k].clock_khz = (UW)m[k].hdisp * m[k].vdisp * 60 / 1000;
+		m[k].vrefresh = 60;
+		m[k].flags = DISP_MODE_DRIVER | ( k == 0 ? DISP_MODE_PREFERRED : 0 );
+	}
+	return 2;
+}
+
+/* It takes only its first mode: another is refused, as hardware that cannot drive it would */
+LOCAL ER fo_commit( void *ctx, CONST T_DISPMODE *m, T_DISPHW *hw )
+{
+	(void)ctx;
+	if ( m == NULL ) return E_OK;
+	if ( m->hdisp != SC_W || m->vdisp != SC_H ) return E_IO;
+	*hw = fo_hw;
+	return E_OK;
+}
+
+LOCAL CONST T_DISPOUTHW	fo_out = {
+	DISP_CON_USB, "Test-1", NULL, NULL, fo_modes, NULL, fo_commit,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+
+LOCAL void test_outputs( void )
+{
+	T_DISPOUTINFO	oi;
+	T_DISPMODE	md[DISP_MODES_MAX];
+	T_DISPSTATE	st, st2;
+	T_DISPSPEC	s;
+	UB		edid[DISP_EDID_MAX];
+	INT		n, nm, k, sc, fo;
+	UW		*m;
+
+	if ( !have_disp ) KT_SKIP("no screen");
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	if ( ts_disp_screens() > 1 && s.width == s.main_w ) KT_SKIP("the screen is shown as columns (screens=N)");
+	n = ts_disp_outputs();
+	KT_ASSERT(n >= 1);
+	for ( k = 0; k < n; k++ ) {
+		KT_ASSERT_ER(ts_disp_output(k, &oi), E_OK);
+		nm = ts_disp_out_modes(k, md, DISP_MODES_MAX);
+		tm_printf((UB *)"  output %d: %s, kind %d, screen %d, EDID %d bytes, %s %s %04x, %d x %d mm, %d modes%s%s\n",
+			  k, oi.name, (INT)oi.kind, oi.screen, (INT)oi.edid_len, oi.maker, oi.model, (INT)oi.product,
+			  (INT)oi.mm_w, (INT)oi.mm_h, nm, oi.hdmi ? ", HDMI" : "", oi.audio ? ", sound" : "");
+		KT_ASSERT(oi.name[0] != 0);
+		KT_ASSERT(nm >= 1);
+		KT_ASSERT_EQ(nm, oi.nmodes);
+		if ( nm >= 1 ) {
+			INT	j;
+
+			for ( j = 0; j < nm && j < 6; j++ ) {
+				tm_printf((UB *)"    %d x %d %d Hz, %d kHz, flags %04x\n", (INT)md[j].hdisp, (INT)md[j].vdisp,
+					  (INT)md[j].vrefresh, (INT)md[j].clock_khz, (INT)md[j].flags);
+			}
+		}
+		if ( oi.edid_len >= 128 ) {
+			KT_ASSERT_EQ(ts_disp_out_edid(k, edid, sizeof(edid)), (INT)oi.edid_len);
+			KT_ASSERT(edid[0] == 0x00 && edid[1] == 0xFF);
+			KT_ASSERT(oi.maker[0] >= 'A' && oi.maker[0] <= 'Z');
+			KT_ASSERT(( md[0].flags & DISP_MODE_PREFERRED ) != 0);
+		}
+	}
+	KT_ASSERT_ER(ts_disp_output(n, &oi), E_NOEXS);
+	KT_ASSERT_ER(ts_disp_output(0, &oi), E_OK);
+	KT_ASSERT_EQ(oi.screen, 0);
+	KT_ASSERT_EQ((UINT)oi.mode.hdisp, s.main_w);
+
+	/* checked without touching anything */
+	KT_ASSERT_ER(ts_disp_state(&st), E_OK);
+	KT_ASSERT_EQ(st.n, n);
+	KT_ASSERT(st.out[0].on);
+	KT_ASSERT_ER(ts_disp_check(&st), E_OK);
+	st2 = st;
+	st2.out[0].on = FALSE;
+	KT_ASSERT_ER(ts_disp_check(&st2), E_NOSPT);	/* the main screen stays on */
+	st2 = st;
+	st2.n = n + 1;
+	KT_ASSERT_ER(ts_disp_check(&st2), E_PAR);
+	st2 = st;
+	st2.out[0].w = 123;
+	KT_ASSERT_ER(ts_disp_check(&st2), E_NOSPT);	/* not a mode it offers */
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	KT_ASSERT_EQ(s.main_w, (UINT)st.out[0].w);
+	KT_ASSERT_ER(ts_disp_commit(&st), E_OK);	/* as it is */
+
+	/* the main screen to another of its modes, and back */
+	nm = ts_disp_out_modes(0, md, DISP_MODES_MAX);
+	for ( k = 0; k < nm; k++ ) {
+		if ( md[k].hdisp >= 800 && md[k].vdisp >= 600 && md[k].hdisp <= 1600 && md[k].vdisp <= 1200
+		  && ( md[k].hdisp != st.out[0].w || md[k].vdisp != st.out[0].h ) ) break;
+	}
+	if ( k < nm ) {
+		st2 = st;
+		st2.out[0].w = md[k].hdisp;
+		st2.out[0].h = md[k].vdisp;
+		KT_ASSERT_ER(ts_disp_commit(&st2), E_OK);
+		KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+		KT_ASSERT_EQ(s.main_w, (UINT)md[k].hdisp);
+		KT_ASSERT_EQ(s.main_h, (UINT)md[k].vdisp);
+		KT_ASSERT_ER(ts_disp_commit(&st), E_OK);
+		KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+		KT_ASSERT_EQ(s.main_w, (UINT)st.out[0].w);
+		tm_printf((UB *)"  the main output to %d x %d and back\n", (INT)md[k].hdisp, (INT)md[k].vdisp);
+	}
+
+	/* an output that refuses a mode: the state put back as it was */
+	if ( ts_disp_screens() + 1 > DISP_SCREENS_MAX ) return;
+	m = mem_out(&fo_hw, SC_W, SC_H);		/* kept: the output stays listed after the test */
+	KT_ASSERT(m != NULL);
+	if ( m == NULL ) return;
+	fo_hw.out = &fo_out;
+	sc = knl_disp_out_attach(&fo_hw, DISP_SIDE_RIGHT, 0);
+	KT_ASSERT(sc >= 1);
+	if ( sc < 1 ) return;
+	KT_ASSERT_EQ(ts_disp_outputs(), n + 1);
+	fo = n;
+	KT_ASSERT_ER(ts_disp_output(fo, &oi), E_OK);
+	KT_ASSERT_EQ(oi.screen, sc);
+	KT_ASSERT_EQ(oi.nmodes, 2);
+	KT_ASSERT_ER(ts_disp_state(&st), E_OK);
+	KT_ASSERT(st.out[fo].on && st.out[fo].w == SC_W);
+	st2 = st;
+	st2.out[fo].w = 640;
+	st2.out[fo].h = 480;
+	KT_ASSERT_ER(ts_disp_check(&st2), E_OK);	/* it offers it */
+	KT_ASSERT_ER(ts_disp_commit(&st2), E_IO);	/* and does not take it */
+	KT_ASSERT_ER(ts_disp_state(&st2), E_OK);
+	KT_ASSERT(st2.out[fo].on && st2.out[fo].w == SC_W && st2.out[fo].h == SC_H);
+	KT_ASSERT_EQ(ts_disp_screens(), sc + 1);
+	/* off: no screen, still listed */
+	st2 = st;
+	st2.out[fo].on = FALSE;
+	KT_ASSERT_ER(ts_disp_commit(&st2), E_OK);
+	KT_ASSERT_EQ(ts_disp_screens(), sc);
+	KT_ASSERT_EQ(ts_disp_outputs(), n + 1);
+	KT_ASSERT_ER(ts_disp_output(fo, &oi), E_OK);
+	KT_ASSERT_EQ(oi.screen, -1);
+	/* on again */
+	KT_ASSERT_ER(ts_disp_commit(&st), E_OK);
+	KT_ASSERT_EQ(ts_disp_screens(), sc + 1);
+	KT_ASSERT_ER(ts_disp_commit(&st2), E_OK);
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	spec = s;
+	(void)wm_flush();
+	KT_ASSERT_ER(ts_disp_clear(0x00000000), E_OK);
+}
+
+/*
+ * A second display the machine was started with (QEMU's -device
+ * bochs-display twice, or the standard VGA and a secondary-vga): it is a
+ * screen right of the main one, and what is drawn there reaches it
+ */
+LOCAL void test_second( void )
+{
+	T_DISPSPEC	s;
+	INT		x, y, w, h;
+
+	if ( !have_disp ) KT_SKIP("no screen");
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	if ( ts_disp_screens() < 2 || s.width == s.main_w ) KT_SKIP("started with one display");
+	KT_ASSERT_ER(ts_disp_screen(1, &x, &y, &w, &h), E_OK);
+	tm_printf((UB *)"  a second display: screen 1 at %d,%d %dx%d; the back buffer %d x %d, the main screen %d x %d\n",
+		  x, y, w, h, (INT)s.width, (INT)s.height, (INT)s.main_w, (INT)s.main_h);
+	KT_ASSERT_EQ(y, 0);
+	KT_ASSERT(x > 0 && w > 0 && h > 0);
+	if ( s.scale == 100 ) {
+		KT_ASSERT_EQ((INT)s.width, (INT)s.main_w + w);
+		KT_ASSERT_EQ(x, (INT)s.main_w);
+	}
+
+	/*
+	 * A window across the two screens, for a person to look at: QEMU is
+	 * asked to write what each display shows (the second display is the
+	 * one given the id disp2), into obj/ beside where it runs
+	 */
+	{
+		T_DPRECT	o, r;
+		INT		wid;
+
+		o.left = x - 300;  o.top = 150;  o.right = x + 300;  o.bottom = 450;
+		wid = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "two screens");
+		if ( wid >= 1 ) {
+			(void)wm_move(wid, &o);		/* across the edge, as one dragged there */
+			r.left = 0;  r.top = 0;  r.right = 600;  r.bottom = 300;
+			(void)dp_fill_rect(wm_gid(wid), &r, 0x003060C0);
+			(void)wm_raise(wid);
+			KT_ASSERT_ER(wm_composite(), E_OK);
+			tm_printf((UB *)"KTEST QMP {\"execute\": \"screendump\", \"arguments\": {\"filename\": \"obj/kt_screens_head0.ppm\"}}\n");
+			tm_printf((UB *)"KTEST QMP {\"execute\": \"screendump\", \"arguments\": {\"filename\": \"obj/kt_screens_head1.ppm\", \"device\": \"disp2\"}}\n");
+			tk_dly_tsk(3000);
+			KT_ASSERT_ER(wm_close(wid), E_OK);
+		}
+	}
+}
+
+#ifdef X64
+#include "../../device/disp/x86_64/disp_pc.h"
+
+IMPORT BOOL knl_dp_link_fits( UW pixel_khz, UINT bpp, UW link_khz, INT lanes );
+IMPORT BOOL knl_dp_link_choose( UW pixel_khz, UINT bpp, UW max_khz, INT max_lanes, UW *p_khz, INT *p_lanes );
+IMPORT void knl_dp_m_n( UINT bpp, INT lanes, UW pixel_khz, UW link_khz, UW *p_dm, UW *p_dn, UW *p_lm, UW *p_ln );
+IMPORT BOOL knl_dp_fallback( UW *p_khz, INT *p_lanes, UW max_khz );
+IMPORT UW   knl_igfx_split( UINT wa, UINT wb );
+
+/*
+ * What the external output of Intel's 9th generation works out without
+ * the hardware (06-device.md 6.9.1), against values found by hand:
+ *
+ * Watermarks, the PRM's methods 1 and 2 (06-device.md 6.10), latencies
+ * 3 5 16 27 42 71 101 126 us. A plane 1920 wide, htotal 2050, 99138 kHz:
+ * a line 4 blocks (7680 bytes / 512 = 15, + 1 = 16 a line: 16.0 in 16.16);
+ * level 0: method 1 = 3 us x 99138 kHz x 4 / 512 000 = 2.32, 3 + 1 = 4
+ * blocks, no lines (80000004); level 1: 3.87 -> 5 < 16 so a line's 16,
+ * +1 = 17, 1 line (80004011); and so on to level 7: 126 us, 97.59 against
+ * method 2's 7 lines x 16 = 112, the smaller 97.59 -> 99 + 1 = 100, 7
+ * lines (8001c064). The cursor 256 wide: its deepest level needs 26
+ * blocks, so 32; the plane 892 - 32 = 860 (BUF_CFG 035b0000, CUR 037b035c)
+ * -- the table of 6.10. At 165231 kHz (the panel's clock read on the
+ * machine) with the same latencies: level 0 3.87 -> 5 blocks, level 7
+ * 162.65 -> 165 blocks, 11 lines; the cursor's deepest needs 36, the plane
+ * 856. With a second pipe of the same width the buffer is shared at 446
+ * (892 x 1920 / 3840); pipe A 0-445, its cursor 36, the plane 410; pipe B
+ * of 1920 at 148500 kHz, htotal 2200, 446-891: cursor 30 (more than 8),
+ * plane 416. Worked out apart from the C code (scratch Python of the same
+ * steps written from the PRM's description), matching the 6.10 table.
+ *
+ * The link: 1920 x 1080 at 148500 kHz, 24 bits a pixel, 445 500 kB/s; at
+ * RBR (162 000 kHz a lane) one lane 162 000, two 324 000, four 648 000:
+ * the least is RBR x 4; with two lanes at most, HBR x 2 (540 000). 3840 x
+ * 2160 at 297000 kHz (891 000): HBR x 4. M/N of 1080p60 on HBR x 2: data
+ * 24 x 148500 = 3 564 000 over 270 000 x 2 x 8 = 4 320 000, N the next
+ * power of two 8 388 608 (the most, 0x800000), M = 3 564 000 x 8 388 608 /
+ * 4 320 000 = 6 920 601.6 -> 0x699999; link 148 500 / 270 000, N 524 288
+ * (0x80000), M 288 358.4 -> 0x46666. The fallback from HBR2 x 4: HBR x 4,
+ * RBR x 4, HBR2 x 2, HBR x 2, RBR x 2, HBR2 x 1, HBR x 1, RBR x 1, then none.
+ */
+LOCAL void test_igfx_calc( void )
+{
+	CONST UH	lat[8] = { 3, 5, 16, 27, 42, 71, 101, 126 };
+	CONST UW	wm1[8] = { 0x80000004, 0x80004011, 0x80004011, 0x80008017, 0x8000c023, 0x80010039, 0x80014051, 0x8001c064 };
+	CONST UW	wm2[8] = { 0x80000005, 0x80004011, 0x80008017, 0x8000c025, 0x80010039, 0x8001805e, 0x80024085, 0x8002c0a5 };
+	CONST UW	wmb[8] = { 0x80000005, 0x80004011, 0x80008015, 0x80008022, 0x8000c032, 0x80014052, 0x8001c072, 0x80024092 };
+	CONST UW	fb_khz[9] = { 270000, 162000, 540000, 270000, 162000, 540000, 270000, 162000, 0 };
+	CONST INT	fb_lanes[9] = { 4, 4, 2, 2, 2, 1, 1, 1, 0 };
+	T_IGWM		o;
+	UW		khz, dm, dn, lm, ln;
+	INT		lanes, l, k;
+
+	/* one pipe: the table of 6.10, the plane 860 blocks */
+	KT_ASSERT(knl_igfx_wm_calc(lat, 1920, 2050, 99138, 0, IGFX_DBUF_BLOCKS, 1, &o));
+	for ( l = 0; l < 8; l++ ) KT_ASSERT_EQ(o.wm[l], wm1[l]);
+	KT_ASSERT_EQ(o.cur, 32U);
+	KT_ASSERT_EQ(o.share, 860U);
+	KT_ASSERT_EQ(o.buf_cfg, 0x035b0000U);
+	KT_ASSERT_EQ(o.cur_buf, 0x037b035cU);
+	KT_ASSERT(o.sagv);
+	KT_ASSERT(knl_igfx_wm_calc(lat, 1920, 2050, 165231, 0, IGFX_DBUF_BLOCKS, 1, &o));
+	for ( l = 0; l < 8; l++ ) KT_ASSERT_EQ(o.wm[l], wm2[l]);
+	KT_ASSERT_EQ(o.cur, 36U);
+	KT_ASSERT_EQ(o.buf_cfg, 0x03570000U);
+	KT_ASSERT_EQ(o.cur_buf, 0x037b0358U);
+
+	/* two pipes: the buffer shared by width, SAGV off */
+	KT_ASSERT_EQ(knl_igfx_split(1920, 1920), 446U);
+	KT_ASSERT_EQ(knl_igfx_split(1920, 2560), 382U);
+	KT_ASSERT_EQ(knl_igfx_split(1920, 0), (UW)IGFX_DBUF_BLOCKS);
+	KT_ASSERT(knl_igfx_wm_calc(lat, 1920, 2050, 165231, 0, 446, 2, &o));
+	KT_ASSERT_EQ(o.cur, 36U);
+	KT_ASSERT_EQ(o.share, 410U);
+	KT_ASSERT_EQ(o.buf_cfg, 0x01990000U);
+	KT_ASSERT_EQ(o.cur_buf, 0x01bd019aU);
+	KT_ASSERT(!o.sagv);
+	KT_ASSERT(knl_igfx_wm_calc(lat, 1920, 2200, 148500, 446, IGFX_DBUF_BLOCKS, 2, &o));
+	for ( l = 0; l < 8; l++ ) KT_ASSERT_EQ(o.wm[l], wmb[l]);
+	KT_ASSERT_EQ(o.cur, 30U);
+	KT_ASSERT_EQ(o.share, 416U);
+	KT_ASSERT_EQ(o.buf_cfg, 0x035d01beU);
+	KT_ASSERT_EQ(o.cur_buf, 0x037b035eU);
+
+	/* the link */
+	KT_ASSERT(!knl_dp_link_fits(148500, 24, 162000, 2));
+	KT_ASSERT(knl_dp_link_fits(148500, 24, 162000, 4));
+	KT_ASSERT(knl_dp_link_choose(148500, 24, 540000, 4, &khz, &lanes));
+	KT_ASSERT_EQ(khz, 162000U);
+	KT_ASSERT_EQ(lanes, 4);
+	KT_ASSERT(knl_dp_link_choose(148500, 24, 540000, 2, &khz, &lanes));
+	KT_ASSERT_EQ(khz, 270000U);
+	KT_ASSERT_EQ(lanes, 2);
+	KT_ASSERT(knl_dp_link_choose(297000, 24, 540000, 4, &khz, &lanes));
+	KT_ASSERT_EQ(khz, 270000U);
+	KT_ASSERT_EQ(lanes, 4);
+	KT_ASSERT(!knl_dp_link_choose(594000, 24, 270000, 4, &khz, &lanes));
+	knl_dp_m_n(24, 2, 148500, 270000, &dm, &dn, &lm, &ln);
+	KT_ASSERT_EQ(dm, 0x699999U);
+	KT_ASSERT_EQ(dn, 0x800000U);
+	KT_ASSERT_EQ(lm, 0x46666U);
+	KT_ASSERT_EQ(ln, 0x80000U);
+	khz = 540000;
+	lanes = 4;
+	for ( k = 0; k < 9; k++ ) {
+		BOOL	more = knl_dp_fallback(&khz, &lanes, 540000);
+
+		KT_ASSERT_EQ(more, (BOOL)( fb_khz[k] != 0 ));
+		if ( !more ) break;
+		KT_ASSERT_EQ(khz, fb_khz[k]);
+		KT_ASSERT_EQ(lanes, fb_lanes[k]);
+	}
+	/*
+	 * The DPLL's dividers for TMDS (i915's skl_ddi_calculate_wrpll): 148500 kHz,
+	 * the AFE clock 742.5 MHz; the even dividers: 12 gives 8910 MHz, 1% under
+	 * 9000 (a deviation of 100, under the 600 allowed below), and none comes
+	 * nearer (10: 7425, 14: 10395, and 8910 is 6.1% over 8400, past the 100
+	 * allowed above): P 12 = 2 x 3 x 2 (p0 2, q 3, k 2), the DCO 8910 MHz =
+	 * 371.25 x 24 MHz: integer 371 (173h), fraction 0.25 x 8000h = 2000h;
+	 * CFGCR1 80000000h | 2000h << 9 | 173h = 80400173h; CFGCR2 q 3 << 8 | q
+	 * mode 80h | k 1 << 5 | p 1 << 2 | 9000 MHz 1 = 3A5h. 74250 kHz: AFE
+	 * 371.25 MHz, divider 24 to 8910 MHz again, 24 = 2 x 6 x 2: CFGCR2 6A5h.
+	 */
+	{
+		IMPORT BOOL knl_skl_wrpll( UW tmds_khz, UW *p_c1, UW *p_c2 );
+		UW	c1 = 0, c2 = 0;
+
+		KT_ASSERT(knl_skl_wrpll(148500, &c1, &c2));
+		KT_ASSERT_EQ(c1, 0x80400173U);
+		KT_ASSERT_EQ(c2, 0x3a5U);
+		KT_ASSERT(knl_skl_wrpll(74250, &c1, &c2));
+		KT_ASSERT_EQ(c1, 0x80400173U);
+		KT_ASSERT_EQ(c2, 0x6a5U);
+	}
+	/*
+	 * The pipe scaler for a mirrored picture of another size: the window
+	 * (ratio kept, in the middle), Gen9's limits (8 to 4096 each way, a
+	 * downscale under 3, the pixel rate as the scaler reads it within
+	 * CDCLK) and that rate, as worked out by hand; the initial phase as
+	 * skl_scaler_calc_phase makes it
+	 */
+	{
+		IMPORT ER knl_skl_scaler_check( UINT src_w, UINT src_h, UINT dst_w, UINT dst_h, UW mode_khz, UW cdclk, UW *p_khz );
+		IMPORT UW knl_skl_scaler_phase( UW scale );
+		UW	khz = 0;
+
+		/* 1920 x 1080 into 1280 x 1024: a window of 1280 x 720, 1.5 down each way: the rate 2.25 times */
+		KT_ASSERT_ER(knl_skl_scaler_check(1920, 1080, 1280, 1024, 108000, 675000, &khz), E_OK);
+		KT_ASSERT_EQ(khz, 243000U);
+		/* 1280 x 800 up into 1920 x 1080: a window of 1728 x 1080, the rate as the mode's */
+		KT_ASSERT_ER(knl_skl_scaler_check(1280, 800, 1920, 1080, 148500, 675000, &khz), E_OK);
+		KT_ASSERT_EQ(khz, 148500U);
+		/* a downscale of 3 is past it, and a source wider than 4096 */
+		KT_ASSERT_ER(knl_skl_scaler_check(3840, 2160, 1280, 720, 74250, 675000, &khz), E_NOSPT);
+		KT_ASSERT_ER(knl_skl_scaler_check(5120, 1440, 1920, 1080, 148500, 675000, &khz), E_NOSPT);
+		/* 2560 x 1600 into 1280 x 800, 2 down each way: 4 times 71 MHz, within 337.5 MHz and not 270 MHz */
+		KT_ASSERT_ER(knl_skl_scaler_check(2560, 1600, 1280, 800, 71000, 337500, &khz), E_OK);
+		KT_ASSERT_EQ(khz, 284000U);
+		KT_ASSERT_ER(knl_skl_scaler_check(2560, 1600, 1280, 800, 71000, 270000, &khz), E_NOSPT);
+		KT_ASSERT_EQ(knl_skl_scaler_phase(0x18000), 0x1001U);	/* 1.5 down */
+		KT_ASSERT_EQ(knl_skl_scaler_phase(0x10000), 0x0001U);	/* none */
+		KT_ASSERT_EQ(knl_skl_scaler_phase(0xAAAA), 0x3554U);	/* 1.5 up */
+	}
+	tm_printf((UB *)"  the external output's sums: watermarks, the buffer's shares, the link, M/N, the fallback and the TMDS DPLL as worked out by hand\n");
+}
+#endif
+
 EXPORT void ktest_disp( void )
 {
 	KT_RUN(test_spec);
@@ -584,4 +1567,13 @@ EXPORT void ktest_disp( void )
 	KT_RUN(test_colours);
 	KT_RUN(test_flip);
 	KT_RUN(test_blank);
+	KT_RUN(test_second);
+	KT_RUN(test_screens);
+	KT_RUN(test_screens_left);
+	KT_RUN(test_mirror);
+	KT_RUN(test_out_flip);
+	KT_RUN(test_outputs);
+#ifdef X64
+	KT_RUN(test_igfx_calc);
+#endif
 }

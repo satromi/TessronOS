@@ -13,7 +13,7 @@
  *
  *	The system's package (.tpk, made by tools/mktpk.py --system) is an
  *	application's package of another kind: package.json says "kind":
- *	"system", the version (TS_VERSION, R1.300), the machine and the
+ *	"system", the version (TS_VERSION, R1.400), the machine and the
  *	processor it is for, and the objects it holds, each as the files of
  *	the TADjs form, and the files of the boot partition (/boot: the Pi's
  *	FAT partition, the PC's EFI system partition) as entries
@@ -86,6 +86,25 @@
  *	The boot files the package names under "bootkeep" (the start-up
  *	settings the person writes, cmdline.txt of the PC) are put only
  *	where there is none.
+ *
+ *	The system volume keeps what the package says of the objects --
+ *	package.json, or for an image the same list tools/mktpk.py
+ *	--manifest makes -- as record SU_MAN_REC of the system box; an update
+ *	writes the package's there with the holds. That list lets the same
+ *	steps be taken from the running system onto the system volume of
+ *	another disk (dt_sysup_onto, システム登録's 上書き): the source is
+ *	then the running volume's objects the list names, read through the
+ *	native store, and the target the TSFS volume of the partition and the
+ *	FAT volume of its ESP, both opened here and written through the
+ *	store and the FAT file system as they are not attached (the target
+ *	has the objects of the same UUIDs, its volume often the same UUID).
+ *	What is made the source's, kept and added to is decided by the list,
+ *	as an update decides it; nothing of the target is deleted. The steps
+ *	are those of an update in the same order, done at once in the
+ *	caller's task; SYSUP is not written, as only the running system can
+ *	do them again: a cut leaves the target's objects partly new, each of
+ *	them whole, its boot files the old ones, and the next 上書き does
+ *	what is left.
  */
 
 #include <sys/machine.h>
@@ -95,6 +114,9 @@
 #include <ts/ob.h>
 #include <ts/om.h>
 #include <ts/fs.h>
+#include <ts/tsfs.h>
+#include <ts/tsfsobj.h>
+#include <ts/tad.h>
 #include <ts/json.h>
 #include <ts/uuid.h>
 #include <ts/conf.h>
@@ -120,6 +142,11 @@
 #define SU_TS_DIR	"EFI/TESSRON/"	/* where システム登録 puts the PC's boot files */
 #define SU_INSTALL	SU_TS_DIR "INSTALL.TXT"	/* its note: this ESP is a PC's own disk's */
 #define LOADER_MARK	"TessronOS loader"	/* a text TessronOS's UEFI loader holds */
+#define SU_MAN_REC	1		/* the record of the system box that lists the system's objects */
+#define SU_ENAME	64		/* an entry's name: the package's, or a resource's of the volume */
+#define SU_NBSRC	8		/* boot files taken from the tree at most */
+#define SU_ROOM_SLACK	( 16ULL * 1024 * 1024 )	/* a record replaced in one change is written beside the old */
+#define SU_OBJ_ROOM	8192		/* an object made: its head, metadata and index entry, at most */
 
 #if defined(_RPI5_)
 #define SU_MACHINE	"rpi5"
@@ -149,8 +176,8 @@
 #define U_LINKS		2
 
 typedef struct {
-	UB	name[PKG_NAME];
-	UW	off, size, rt, sub;
+	UB	name[SU_ENAME];
+	UW	off, size, rt, sub;	/* off: in the package; for a boot file of the tree, its index in su.bsrc */
 	TS_UUID	u;			/* the object, for E_META .. E_RES and records */
 	INT	what;			/* E_* or the record's number */
 	BOOL	keep;			/* E_BOOT: one of "bootkeep" */
@@ -183,11 +210,32 @@ LOCAL struct {
 	SUBOOT	*boot;			/* where each boot file goes, those the firmware reads first */
 	INT	total, done;
 	UB	ver[DT_VER_MAX];
+	/* the source and the target: the package and the running system, or (dt_sysup_onto) volumes */
+	ID	svol;			/* the native store's volume the objects are read from, 0 the package */
+	ID	dvol;			/* the one they are put on, 0 the running system's objects */
+	BOOL	onto;			/* the boot files below bvd, not su_root */
+	INT	bvd;
+	UB	*man;			/* the list of the system's objects written last, the session's */
+	SZ	mansz;
+	char	bsrc[SU_NBSRC][SU_PATH_MAX];	/* the boot files of the tree */
 } su;
 
 /* The boot partition's root, and for the tests a cut in the power after so many renames */
 LOCAL char	su_root[SU_ROOT_MAX] = "/boot";
 LOCAL INT	su_cut = -1;
+
+/* One session at a time: the desktop's requests, and dt_sysup_onto in another task */
+LOCAL UW	su_flag = 0;
+
+LOCAL BOOL su_try( void )
+{
+	return (BOOL)( __atomic_exchange_n(&su_flag, 1U, __ATOMIC_ACQUIRE) == 0 );
+}
+
+LOCAL void su_drop( void )
+{
+	__atomic_store_n(&su_flag, 0U, __ATOMIC_RELEASE);
+}
 
 /*
  * The files the PC's UEFI loader reads, looking in \EFI\TESSRON\ before
@@ -240,13 +288,128 @@ LOCAL ER pkg_read( ID key, D off, void *buf, SZ size )
 	return E_OK;
 }
 
+/* A record of an object of a volume of the native store, size bytes from off, all of them */
+LOCAL ER vrec_read( ID vol, CONST TS_UUID *u, INT recno, D off, void *buf, SZ size )
+{
+	SZ	got = 0, asz;
+	ID	od;
+	ER	er = E_OK;
+
+	od = ts_opn_obj(vol, u, TFO_READ);
+	if ( od <= 0 ) return ( od < 0 ) ? (ER)od : E_SYS;
+	while ( er >= E_OK && got < size ) {
+		asz = 0;
+		er = ts_rea_rec(od, recno, off + (D)got, (UB *)buf + got, size - got, &asz);
+		if ( er >= E_OK && asz <= 0 ) er = E_OBJ;
+		got += asz;
+	}
+	ts_cls_obj(od);
+	return er;
+}
+
+/* A resource of an object of a volume of the native store whole, the caller's to Kfree; NULL none */
+LOCAL UB *vres_bytes( ID vol, CONST TS_UUID *u, CONST UB *name, SZ *p_size )
+{
+	UB	*buf = NULL, *nb;
+	SZ	cap = 0, got = 0, n;
+
+	for ( ;; ) {
+		if ( got == cap ) {
+			cap = ( cap == 0 ) ? 16384 : cap * 2;
+			nb = (UB *)Kmalloc(cap + 1);
+			if ( nb == NULL ) break;
+			if ( buf != NULL ) {
+				knl_memcpy(nb, buf, got);
+				Kfree(buf);
+			}
+			buf = nb;
+		}
+		n = 0;
+		if ( knl_tsfs_res_rea(vol, u, name, (D)got, buf + got, cap - got, &n) < E_OK || n <= 0 ) break;
+		got += n;
+	}
+	if ( buf != NULL && got == 0 ) {
+		Kfree(buf);
+		buf = NULL;
+	}
+	if ( buf != NULL ) buf[got] = 0;
+	*p_size = got;
+	return buf;
+}
+
+/* An icon of an object of a volume of the native store whole, the caller's to Kfree; NULL none */
+LOCAL UB *vicon_bytes( ID vol, CONST TS_UUID *u, SZ *p_size )
+{
+	UB	*buf;
+	SZ	len = 0;
+
+	*p_size = 0;
+	if ( knl_tsfs_get_icon(vol, u, NULL, 0, &len) < E_OK || len <= 0 ) return NULL;
+	buf = (UB *)Kmalloc(len);
+	if ( buf != NULL && knl_tsfs_get_icon(vol, u, buf, len, &len) < E_OK ) {
+		Kfree(buf);
+		return NULL;
+	}
+	*p_size = len;
+	return buf;
+}
+
+/* size bytes of an entry from at: of the package, or of the source volume and the tree */
+LOCAL ER ent_read( CONST SUENT *e, UD at, void *buf, SZ size )
+{
+	UB	*all = NULL;
+	SZ	n = 0;
+	INT	fd, len, r;
+	ER	er = E_OK;
+
+	if ( su.svol <= 0 ) {
+		return pkg_read(su.key, (D)e->off + (D)at, buf, size);
+	}
+	knl_wdog_alive();
+	if ( size == 0 ) return E_OK;
+	if ( at + size > (UD)e->size ) return E_OBJ;
+	switch ( e->what ) {
+	case E_BOOT:
+		fd = fs_open(su.bsrc[e->off], O_RDONLY);
+		if ( fd < 0 ) return (ER)fd;
+		if ( fs_lseek(fd, (D)at, SEEK_SET_) != (D)at ) er = E_IO;
+		while ( er >= E_OK && n < size ) {
+			r = fs_read(fd, (UB *)buf + n, size - n);
+			if ( r <= 0 ) er = E_IO;
+			else n += (SZ)r;
+		}
+		fs_close(fd);
+		return er;
+	case E_META:
+		len = knl_tsfs_meta_all(su.svol, &e->u, 0, &all, NULL);
+		n = ( len < 0 ) ? 0 : (SZ)len;
+		break;
+	case E_ICON:
+		all = vicon_bytes(su.svol, &e->u, &n);
+		break;
+	case E_RES:
+		all = vres_bytes(su.svol, &e->u, e->name + TS_UUID_STRLEN, &n);
+		break;
+	default:
+		if ( e->what < 0 ) return E_OBJ;
+		return vrec_read(su.svol, &e->u, e->what, (D)at, buf, size);
+	}
+	if ( all == NULL || n < (SZ)( at + size ) ) {
+		er = E_OBJ;			/* it changed since the list of entries was made */
+	} else {
+		knl_memcpy(buf, all + at, size);
+	}
+	if ( all != NULL ) Kfree(all);
+	return er;
+}
+
 /* An entry's bytes whole, the caller's to Kfree; NULL when they cannot be read */
 LOCAL UB *ent_bytes( CONST SUENT *e )
 {
 	UB	*b = (UB *)Kmalloc((SZ)e->size + 1);
 
 	if ( b == NULL ) return NULL;
-	if ( pkg_read(su.key, (D)e->off, b, (SZ)e->size) < E_OK ) {
+	if ( ent_read(e, 0, b, (SZ)e->size) < E_OK ) {
 		Kfree(b);
 		return NULL;
 	}
@@ -319,6 +482,7 @@ LOCAL void su_end( void )
 	if ( su.e != NULL ) Kfree(su.e);
 	if ( su.obj != NULL ) Kfree(su.obj);
 	if ( su.boot != NULL ) Kfree(su.boot);
+	if ( su.man != NULL ) Kfree(su.man);
 	knl_memset(&su, 0, sizeof(su));
 }
 
@@ -396,6 +560,7 @@ LOCAL ER su_open( CONST TS_UUID *pkg, UB *text, INT max )
 	/* package.json: a system's, its version, machine and processor */
 	for ( i = 0; i < su.n && !name_is(su.e[i].name, "package.json"); i++ ) ;
 	man = ( i < su.n ) ? ent_bytes(&su.e[i]) : NULL;
+	su.mansz = ( man != NULL ) ? (SZ)su.e[i].size : 0;
 	if ( man == NULL || js_parse(man, (INT)su.e[i].size, &root) < E_OK
 	  || js_get_str(&root, "kind", s, sizeof(s)) <= 0 || !name_is(s, "system")
 	  || js_get_str(&root, "version", su.ver, sizeof(su.ver)) <= 0 || dt_ver_num(su.ver) < 0 ) {
@@ -452,7 +617,7 @@ LOCAL ER su_open( CONST TS_UUID *pkg, UB *text, INT max )
 	sys_version(now, sizeof(now));
 	if ( text != NULL ) tm_sprintf(text, (UB *)"%s\t%s", su.ver, now);
 	er = ( dt_ver_num(su.ver) > dt_ver_num(now) ) ? E_OK : E_LIMIT;
-	Kfree(man);
+	su.man = man;			/* the list the system box is given with the holds */
 	return er;
 
 bad:
@@ -460,6 +625,153 @@ bad:
 	if ( man != NULL ) Kfree(man);
 	su_end();
 	return er;
+}
+
+/* ---------------------------------------------------------------- the objects put on */
+
+/*
+ * What the objects are put on: the running system's, through the object
+ * manager (su.dvol 0), or those of a volume of the native store that is
+ * not attached (dt_sysup_onto), through the store itself.
+ */
+
+/* The records of an object of a volume of the native store: how many, the table in *p (Kfree it) */
+LOCAL INT v_records( ID vol, CONST TS_UUID *u, T_RREC **p )
+{
+	INT	cnt = 0;
+	ID	od;
+	ER	er;
+
+	*p = NULL;
+	od = ts_opn_obj(vol, u, TFO_READ);
+	if ( od <= 0 ) return ( od < 0 ) ? (INT)od : E_SYS;
+	*p = (T_RREC *)Kmalloc(sizeof(T_RREC) * TSFS_MAX_REC);
+	er = ( *p == NULL ) ? E_NOMEM : ts_lst_rec(od, *p, TSFS_MAX_REC, &cnt);
+	ts_cls_obj(od);
+	if ( er < E_OK ) {
+		if ( *p != NULL ) Kfree(*p);
+		*p = NULL;
+		return (INT)er;
+	}
+	return cnt;
+}
+
+/* A record of an object of a volume of the native store whole, the caller's to Kfree */
+LOCAL UB *v_record( ID vol, CONST TS_UUID *u, INT recno, SZ *p_size )
+{
+	T_RREC	*r;
+	UB	*b = NULL;
+	INT	n, i;
+
+	*p_size = 0;
+	n = v_records(vol, u, &r);
+	for ( i = 0; i < n && r[i].recno != recno; i++ ) ;
+	if ( i < n ) {
+		b = (UB *)Kmalloc((SZ)r[i].size + 1);
+		if ( b != NULL && vrec_read(vol, u, recno, 0, b, (SZ)r[i].size) < E_OK ) {
+			Kfree(b);
+			b = NULL;
+		}
+		if ( b != NULL ) {
+			b[r[i].size] = 0;
+			*p_size = (SZ)r[i].size;
+		}
+	}
+	if ( r != NULL ) Kfree(r);
+	return b;
+}
+
+LOCAL BOOL d_has( CONST TS_UUID *u )
+{
+	T_OBREF	r;
+
+	if ( su.dvol > 0 ) return (BOOL)( knl_tsfs_exists(su.dvol, u) >= E_OK );
+	return (BOOL)( ob_ref_obj(u, &r) >= E_OK );
+}
+
+/* The records of an object put on: how many, the table in *p_rec (Kfree it) */
+LOCAL INT d_records( CONST TS_UUID *u, T_OBREC **p_rec )
+{
+	T_RREC	*r;
+	INT	n, i;
+
+	if ( su.dvol <= 0 ) return om_obj_records_all(u, p_rec);
+	*p_rec = NULL;
+	n = v_records(su.dvol, u, &r);
+	if ( n < 0 ) return n;
+	*p_rec = (T_OBREC *)Kmalloc(sizeof(T_OBREC) * (SZ)( n + 1 ));
+	if ( *p_rec == NULL ) {
+		Kfree(r);
+		return E_NOMEM;
+	}
+	for ( i = 0; i < n; i++ ) {
+		(*p_rec)[i].recno = r[i].recno;
+		(*p_rec)[i].size = r[i].size;
+		(*p_rec)[i].rt = r[i].rt;
+		(*p_rec)[i].sub = r[i].sub;
+	}
+	Kfree(r);
+	return n;
+}
+
+/*
+ * A record written whole in one change: the one there replaced, or, when
+ * it is the next number, added with the type given
+ */
+LOCAL ER d_rec_whole( CONST TS_UUID *u, INT recno, UINT rt, UINT sub, CONST UB *buf, SZ size )
+{
+	T_ROBJ	ro;
+	ID	od;
+	INT	got;
+	ER	er;
+
+	if ( su.dvol <= 0 ) return om_obj_record_put(u, recno, rt, sub, buf, size);
+	od = ts_opn_obj(su.dvol, u, TFO_READ | TFO_WRITE | TFO_WEXCL);
+	if ( od <= 0 ) return ( od < 0 ) ? (ER)od : E_SYS;
+	er = ts_ref_obj(su.dvol, u, &ro);
+	if ( er >= E_OK && recno == ro.nrec ) {
+		er = ts_ins_rec(od, -1, rt, sub, &got);
+	} else if ( er >= E_OK && ( recno < 0 || recno > ro.nrec ) ) {
+		er = E_PAR;
+	}
+	if ( er >= E_OK ) er = ts_rpl_rec(od, recno, buf, size);
+	ts_cls_obj(od);
+	return er;
+}
+
+LOCAL UB *d_res( CONST TS_UUID *u, CONST UB *name, SZ *p_size )
+{
+	return ( su.dvol > 0 ) ? vres_bytes(su.dvol, u, name, p_size) : om_obj_res(u, name, p_size);
+}
+
+LOCAL ER d_res_put( CONST TS_UUID *u, CONST UB *name, CONST UB *buf, SZ size )
+{
+	return ( su.dvol > 0 ) ? knl_tsfs_res_wri(su.dvol, u, name, buf, size) : om_obj_res_put(u, name, buf, size);
+}
+
+/* The store's own flags of an object put on another volume made the source's (editable, deletable) */
+LOCAL ER d_flags( CONST TS_UUID *u )
+{
+	T_ROBJ	ro;
+	ER	er;
+
+	if ( su.dvol <= 0 || su.svol <= 0 ) return E_OK;
+	er = ts_ref_obj(su.svol, u, &ro);
+	if ( er < E_OK ) return er;
+	return knl_tsfs_set_flags(su.dvol, u, ro.flags & ( TSFSO_F_EDITABLE | TSFSO_F_DELETABLE ),
+				  TSFSO_F_EDITABLE | TSFSO_F_DELETABLE);
+}
+
+/* Whether an object put on is linked to from nowhere, and held then */
+LOCAL void d_hold( CONST TS_UUID *u )
+{
+	T_ROBJ	ro;
+
+	if ( su.dvol > 0 ) {
+		if ( ts_ref_obj(su.dvol, u, &ro) >= E_OK && ro.refcnt == 0 ) (void)ts_lnk_obj(su.dvol, u);
+		return;
+	}
+	if ( om_store_refs(u) == 0 ) (void)ob_lnk_obj(u);
 }
 
 /* ---------------------------------------------------------------- an object's parts */
@@ -481,6 +793,9 @@ LOCAL ER meta_put( CONST TS_UUID *u, CONST UB *json, SZ size, BOOL prot )
 	ID	key = prot ? ob_opn_obj(u, OB_OP_ATRRD | OB_OP_ATRWR | OB_OP_PROT) : 0;
 	ER	er;
 
+	if ( su.dvol > 0 ) {
+		return knl_tsfs_set_meta(su.dvol, u, json, (INT)size);	/* the protection is the metadata's */
+	}
 	if ( key <= 0 ) {
 		return om_obj_meta_put(u, json, size);
 	}
@@ -494,17 +809,18 @@ LOCAL ER obj_meta( CONST SUOBJ *o )
 {
 	SUENT	*me = ent_of(&o->u, E_META), *ie = ent_of(&o->u, E_ICON);
 	UB	*meta, *icon = NULL, *now;
-	T_OBREF	r;
 	T_OBCRE	c;
 	T_OBPRT	prt;
 	TS_UUID	got;
 	SZ	isz = 0;
+	BOOL	has;
 	ER	er = E_OK;
 
 	if ( me == NULL ) {
 		return E_OBJ;
 	}
-	if ( ob_ref_obj(&o->u, &r) >= E_OK && o->how != U_SYSTEM ) {
+	has = d_has(&o->u);
+	if ( has && o->how != U_SYSTEM ) {
 		return E_OK;			/* the person's, or a box they add to: as it is */
 	}
 	meta = ent_bytes(me);
@@ -513,15 +829,20 @@ LOCAL ER obj_meta( CONST SUOBJ *o )
 		er = E_NOMEM;
 		goto out;
 	}
-	if ( ob_ref_obj(&o->u, &r) >= E_OK ) {
-		er = om_obj_meta_put(&o->u, meta, (SZ)me->size);
+	if ( has ) {
+		er = meta_put(&o->u, meta, (SZ)me->size, FALSE);
 		if ( er >= E_OK && icon != NULL ) {
-			now = om_obj_icon(&o->u, &isz);
+			now = ( su.dvol > 0 ) ? vicon_bytes(su.dvol, &o->u, &isz) : om_obj_icon(&o->u, &isz);
 			if ( now == NULL || isz != (SZ)ie->size || !same_bytes(now, icon, isz) ) {
-				er = om_obj_icon_put(&o->u, icon, (SZ)ie->size);
+				er = ( su.dvol > 0 ) ? knl_tsfs_set_icon(su.dvol, &o->u, icon, (SZ)ie->size)
+						     : om_obj_icon_put(&o->u, icon, (SZ)ie->size);
 			}
 			if ( now != NULL ) Kfree(now);
 		}
+	} else if ( su.dvol > 0 ) {
+		/* made with the source's metadata, its protection with it, and its icon in one transaction */
+		er = ( icon != NULL ) ? knl_tsfs_cre_icon(su.dvol, &o->u, meta, (INT)me->size, icon, (SZ)ie->size, &got)
+				      : knl_tsfs_cre_as(su.dvol, &o->u, meta, (INT)me->size);
 	} else {
 		dt_sys_prt(&prt);
 		knl_memset(&c, 0, sizeof(c));
@@ -538,6 +859,7 @@ LOCAL ER obj_meta( CONST SUOBJ *o )
 			(void)meta_put(&o->u, meta, (SZ)me->size, TRUE);	/* and the protection it says */
 		}
 	}
+	if ( er >= E_OK ) er = d_flags(&o->u);
 out:
 	if ( meta != NULL ) Kfree(meta);
 	if ( icon != NULL ) Kfree(icon);
@@ -548,24 +870,28 @@ out:
 LOCAL BOOL rec_same( CONST TS_UUID *u, INT recno, UD size, CONST SUENT *e )
 {
 	UB	*a, *b;
-	ID	k;
+	ID	k = 0;
 	UD	at;
 	SZ	n, asz;
-	BOOL	same = TRUE;
+	BOOL	same = TRUE, ok;
 
 	if ( size != (UD)e->size ) return FALSE;
 	if ( size == 0 ) return TRUE;
 	a = (UB *)Kmalloc(SU_CHUNK);
 	b = (UB *)Kmalloc(SU_CHUNK);
-	k = ob_opn_obj(u, OB_OP_READ);
-	if ( a == NULL || b == NULL || k <= 0 ) {
+	if ( su.dvol <= 0 ) k = ob_opn_obj(u, OB_OP_READ);
+	if ( a == NULL || b == NULL || ( su.dvol <= 0 && k <= 0 ) ) {
 		same = FALSE;
 	}
 	for ( at = 0; same && at < size; at += (UD)n ) {
 		n = ( size - at > SU_CHUNK ) ? SU_CHUNK : (SZ)( size - at );
-		asz = 0;
-		if ( ob_rea_rec(k, recno, (D)at, a, n, &asz) < E_OK || asz != n
-		  || pkg_read(su.key, (D)e->off + (D)at, b, n) < E_OK || !same_bytes(a, b, n) ) {
+		if ( su.dvol > 0 ) {
+			ok = (BOOL)( vrec_read(su.dvol, u, recno, (D)at, a, n) >= E_OK );
+		} else {
+			asz = 0;
+			ok = (BOOL)( ob_rea_rec(k, recno, (D)at, a, n, &asz) >= E_OK && asz == n );
+		}
+		if ( !ok || ent_read(e, at, b, n) < E_OK || !same_bytes(a, b, n) ) {
 			same = FALSE;
 		}
 	}
@@ -593,25 +919,37 @@ LOCAL ER rec_put( CONST TS_UUID *u, INT recno, INT nrec, CONST SUENT *e )
 	if ( e->size <= SU_WHOLE ) {
 		b = ent_bytes(e);
 		if ( b == NULL ) return E_NOMEM;
-		er = om_obj_record_put(u, recno, e->rt, e->sub, b, (SZ)e->size);
+		er = d_rec_whole(u, recno, e->rt, e->sub, b, (SZ)e->size);
 		Kfree(b);
 		return er;
 	}
 	b = (UB *)Kmalloc(SU_CHUNK);
 	if ( b == NULL ) return E_NOMEM;
-	k = ob_opn_obj(u, OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRRD | OB_O_WEXCL);
-	er = ( k > 0 ) ? E_OK : (ER)k;
-	if ( er >= E_OK && recno == nrec ) {
-		er = ob_apd_rec(k, e->rt, e->sub, &got);
+	if ( su.dvol > 0 ) {
+		k = ts_opn_obj(su.dvol, u, TFO_READ | TFO_WRITE | TFO_WEXCL);
+		er = ( k > 0 ) ? E_OK : ( k < 0 ) ? (ER)k : E_SYS;
+		if ( er >= E_OK && recno == nrec ) er = ts_ins_rec(k, -1, e->rt, e->sub, &got);
+		if ( er >= E_OK ) er = ts_trn_rec(k, recno, 0);
+	} else {
+		k = ob_opn_obj(u, OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRRD | OB_O_WEXCL);
+		er = ( k > 0 ) ? E_OK : (ER)k;
+		if ( er >= E_OK && recno == nrec ) er = ob_apd_rec(k, e->rt, e->sub, &got);
+		if ( er >= E_OK ) er = ob_trn_rec(k, recno, 0);
 	}
-	if ( er >= E_OK ) er = ob_trn_rec(k, recno, 0);
 	for ( at = 0; er >= E_OK && at < (UD)e->size; at += (UD)n ) {
 		n = ( (UD)e->size - at > SU_CHUNK ) ? SU_CHUNK : (SZ)( (UD)e->size - at );
-		er = pkg_read(su.key, (D)e->off + (D)at, b, n);
+		er = ent_read(e, at, b, n);
 		asz = 0;
-		if ( er >= E_OK ) er = ob_wri_rec(k, recno, (D)at, b, n, &asz);
+		if ( er >= E_OK ) {
+			er = ( su.dvol > 0 ) ? ts_wri_rec(k, recno, (D)at, b, n, &asz)
+					     : ob_wri_rec(k, recno, (D)at, b, n, &asz);
+		}
 	}
-	if ( k > 0 ) ob_cls_obj(k);		/* closing waits for what was written to be on the medium */
+	/* closing waits for what was written to be on the medium */
+	if ( k > 0 ) {
+		if ( su.dvol > 0 ) ts_cls_obj(k);
+		else ob_cls_obj(k);
+	}
 	Kfree(b);
 	return er;
 }
@@ -619,37 +957,53 @@ LOCAL ER rec_put( CONST TS_UUID *u, INT recno, INT nrec, CONST SUENT *e )
 /* A box given a link to each object the package's box links to and it does not */
 LOCAL ER box_merge( CONST TS_UUID *box, CONST SUENT *e )
 {
-	UB	*rec, *cur;
+	UB	*rec, *cur, *out;
 	TS_UUID	*ids, *has = NULL;
-	T_OBREF	r;
-	SZ	csz = 0;
-	INT	n, nh = 0, i, k, added = 0;
+	T_TAD	*doc = NULL;
+	SZ	csz = 0, osz = 0;
+	INT	n, nh = 0, i, k, added = 0, a;
 	ER	er = E_OK;
 
 	rec = ent_bytes(e);
 	if ( rec == NULL ) return E_NOMEM;
 	n = om_store_links(rec, (SZ)e->size, NULL, 0);
 	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( n + 1 ));
-	cur = om_obj_record(box, 0, &csz);
+	cur = ( su.dvol > 0 ) ? v_record(su.dvol, box, 0, &csz) : om_obj_record(box, 0, &csz);
 	if ( cur != NULL ) {
 		nh = om_store_links(cur, csz, NULL, 0);
 		has = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( nh + 1 ));
 		nh = ( has != NULL ) ? om_store_links(cur, csz, has, nh) : 0;
+		if ( su.dvol > 0 && tad_parse(cur, csz, NULL, &doc) < E_OK ) doc = NULL;
 		Kfree(cur);
 	}
-	if ( ids == NULL || ( cur != NULL && has == NULL ) ) {
-		er = E_NOMEM;
+	if ( ids == NULL || ( cur != NULL && has == NULL ) || ( su.dvol > 0 && doc == NULL ) ) {
+		er = ( su.dvol > 0 && doc == NULL && ids != NULL ) ? E_OBJ : E_NOMEM;
 		n = 0;
 	} else {
 		n = om_store_links(rec, (SZ)e->size, ids, n);
 	}
 	for ( i = 0; i < n && er >= E_OK; i++ ) {
-		if ( ts_uuid_cmp(&ids[i], box) == 0 || ob_ref_obj(&ids[i], &r) < E_OK ) continue;
+		if ( ts_uuid_cmp(&ids[i], box) == 0 || !d_has(&ids[i]) ) continue;
 		for ( k = 0; k < nh && ts_uuid_cmp(&has[k], &ids[i]) != 0; k++ ) ;
 		if ( k < nh ) continue;			/* linked already */
-		er = om_obj_link_add(box, &ids[i]);
-		if ( er >= E_OK ) added++;
+		if ( su.dvol > 0 ) {
+			a = om_tad_link_add(doc, &ids[i]);
+			er = ( a < 0 ) ? (ER)a : E_OK;
+			if ( a > 0 ) added++;
+		} else {
+			er = om_obj_link_add(box, &ids[i]);
+			if ( er >= E_OK ) added++;
+		}
 	}
+	if ( er >= E_OK && added > 0 && doc != NULL ) {
+		/* the box of the other volume written once with every link added */
+		(void)tad_write_mem(doc, NULL, 0, &osz);
+		out = (UB *)Kmalloc(osz + 1);
+		er = ( out != NULL ) ? tad_write_mem(doc, out, osz + 1, &osz) : E_NOMEM;
+		if ( er >= E_OK ) er = d_rec_whole(box, 0, OB_RT_TAD, 0, out, osz);
+		if ( out != NULL ) Kfree(out);
+	}
+	if ( doc != NULL ) tad_free(doc);
 	if ( added > 0 ) {
 		tm_printf((UB *)"TessronOS desktop: system update: %d links added to a box\n", added);
 	}
@@ -675,7 +1029,7 @@ LOCAL ER obj_records( CONST SUOBJ *o )
 	for ( i = 0; i < su.n; i++ ) {
 		if ( su.e[i].what > last && ts_uuid_cmp(&su.e[i].u, &o->u) == 0 ) last = su.e[i].what;
 	}
-	nrec = om_obj_records_all(&o->u, &rec);
+	nrec = d_records(&o->u, &rec);
 	if ( nrec < 0 ) {
 		return (ER)nrec;
 	}
@@ -699,7 +1053,7 @@ LOCAL ER obj_records( CONST SUOBJ *o )
 
 		e = &su.e[i];
 		if ( e->what != E_RES || ts_uuid_cmp(&e->u, &o->u) != 0 ) continue;
-		now = om_obj_res(&o->u, e->name + TS_UUID_STRLEN, &nsz);
+		now = d_res(&o->u, e->name + TS_UUID_STRLEN, &nsz);
 		if ( now != NULL && o->how != U_SYSTEM ) {
 			Kfree(now);
 			continue;
@@ -708,7 +1062,7 @@ LOCAL ER obj_records( CONST SUOBJ *o )
 		if ( want == NULL ) {
 			er = E_NOMEM;
 		} else if ( now == NULL || nsz != (SZ)e->size || !same_bytes(now, want, nsz) ) {
-			er = om_obj_res_put(&o->u, e->name + TS_UUID_STRLEN, want, (SZ)e->size);
+			er = d_res_put(&o->u, e->name + TS_UUID_STRLEN, want, (SZ)e->size);
 		}
 		if ( want != NULL ) Kfree(want);
 		if ( now != NULL ) Kfree(now);
@@ -722,12 +1076,46 @@ LOCAL ER obj_records( CONST SUOBJ *o )
 
 /* ---------------------------------------------------------------- the boot files */
 
+/*
+ * The boot partition's files: paths of the tree below su_root, or, for
+ * dt_sysup_onto, the same paths below the root of the FAT volume su.bvd
+ */
+LOCAL CONST char *b_rel( CONST char *path )
+{
+	return ( path[0] == '/' ) ? path + 1 : path;
+}
+
+LOCAL ER b_stat( CONST char *path, T_FSTAT *st )
+{
+	return su.onto ? fs_statat(su.bvd, b_rel(path), st) : fs_stat(path, st);
+}
+
+LOCAL INT b_open( CONST char *path, UINT oflags )
+{
+	return su.onto ? fs_openat(su.bvd, b_rel(path), oflags) : fs_open(path, oflags);
+}
+
+LOCAL ER b_unlink( CONST char *path )
+{
+	return su.onto ? fs_unlinkat(su.bvd, b_rel(path)) : fs_unlink(path);
+}
+
+LOCAL ER b_rename( CONST char *from, CONST char *to )
+{
+	return su.onto ? fs_renameat(su.bvd, b_rel(from), b_rel(to)) : fs_rename(from, to);
+}
+
+LOCAL ER b_mkdir( CONST char *path )
+{
+	return su.onto ? fs_mkdirat(su.bvd, b_rel(path)) : fs_mkdir(path);
+}
+
 /* A path of the boot partition: the root, rel below it, and tail */
 LOCAL void bpath( char *out, CONST char *rel, CONST char *tail )
 {
 	INT	n;
 
-	knl_strcpy(out, su_root);
+	knl_strcpy(out, su.onto ? "" : su_root);
 	n = (INT)knl_strlen(out);
 	out[n++] = '/';
 	for ( ; *rel != 0 && n < SU_PATH_MAX - 6; rel++ ) out[n++] = *rel;
@@ -740,7 +1128,7 @@ LOCAL BOOL f_size( CONST char *path, UD *p_size )
 {
 	T_FSTAT	st;
 
-	if ( fs_stat(path, &st) < E_OK || ( st.mode & FS_IFMT ) != FS_IFREG ) return FALSE;
+	if ( b_stat(path, &st) < E_OK || ( st.mode & FS_IFMT ) != FS_IFREG ) return FALSE;
 	if ( p_size != NULL ) *p_size = st.size;
 	return TRUE;
 }
@@ -767,7 +1155,7 @@ LOCAL BOOL f_has( CONST char *path, CONST char *s )
 	BOOL	got = FALSE;
 
 	b = (UB *)Kmalloc(SU_CHUNK + m);
-	fd = ( b != NULL ) ? fs_open(path, O_RDONLY) : -1;
+	fd = ( b != NULL ) ? b_open(path, O_RDONLY) : -1;
 	while ( fd >= 0 && !got && ( n = fs_read(fd, b + have, SU_CHUNK) ) > 0 ) {
 		have += (SZ)n;
 		for ( k = 0; k + m <= have && !got; k++ ) {
@@ -920,14 +1308,14 @@ LOCAL BOOL file_same( CONST char *path, CONST SUENT *e )
 	INT	fd;
 	BOOL	same = TRUE;
 
-	if ( fs_stat(path, &st) < E_OK || st.size != (UD)e->size ) return FALSE;
+	if ( b_stat(path, &st) < E_OK || st.size != (UD)e->size ) return FALSE;
 	a = (UB *)Kmalloc(SU_CHUNK);
 	b = (UB *)Kmalloc(SU_CHUNK);
-	fd = fs_open(path, O_RDONLY);
+	fd = b_open(path, O_RDONLY);
 	if ( a == NULL || b == NULL || fd < 0 ) same = FALSE;
 	for ( at = 0; same && at < (UD)e->size; at += (UD)n ) {
 		n = ( (UD)e->size - at > SU_CHUNK ) ? SU_CHUNK : (SZ)( (UD)e->size - at );
-		if ( fs_read(fd, a, n) != (INT)n || pkg_read(su.key, (D)e->off + (D)at, b, n) < E_OK
+		if ( fs_read(fd, a, n) != (INT)n || ent_read(e, at, b, n) < E_OK
 		  || !same_bytes(a, b, n) ) {
 			same = FALSE;
 		}
@@ -944,17 +1332,17 @@ LOCAL void dirs_for( CONST char *path )
 	char	d[SU_PATH_MAX];
 	INT	i;
 
-	for ( i = (INT)knl_strlen(su_root) + 1; path[i] != 0 && i < SU_PATH_MAX - 1; i++ ) {
+	for ( i = (INT)knl_strlen(su.onto ? "" : su_root) + 1; path[i] != 0 && i < SU_PATH_MAX - 1; i++ ) {
 		if ( path[i] == '/' ) {
 			knl_memcpy(d, path, (SZ)i);
 			d[i] = 0;
-			(void)fs_mkdir(d);
+			(void)b_mkdir(d);
 		}
 	}
 }
 
-/* The bytes of a file written to path whole, made sure to be on the medium */
-LOCAL ER file_write( CONST char *path, ID from_key, D from_off, INT from_fd, UD size )
+/* The bytes of a file written to path whole, made sure to be on the medium: an entry's, or those of from_fd */
+LOCAL ER file_write( CONST char *path, CONST SUENT *e, INT from_fd, UD size )
 {
 	UB	*b = (UB *)Kmalloc(SU_CHUNK);
 	UD	at;
@@ -964,7 +1352,7 @@ LOCAL ER file_write( CONST char *path, ID from_key, D from_off, INT from_fd, UD 
 
 	if ( b == NULL ) return E_NOMEM;
 	dirs_for(path);
-	fd = fs_open(path, O_WRONLY | O_CREAT | O_TRUNC);
+	fd = b_open(path, O_WRONLY | O_CREAT | O_TRUNC);
 	if ( fd < 0 ) {
 		Kfree(b);
 		return (ER)fd;
@@ -974,7 +1362,7 @@ LOCAL ER file_write( CONST char *path, ID from_key, D from_off, INT from_fd, UD 
 		if ( from_fd >= 0 ) {
 			er = ( fs_read(from_fd, b, n) == (INT)n ) ? E_OK : E_IO;
 		} else {
-			er = pkg_read(from_key, from_off + (D)at, b, n);
+			er = ent_read(e, at, b, n);
 		}
 		if ( er >= E_OK && fs_write(fd, b, n) != (INT)n ) er = E_IO;
 	}
@@ -1009,19 +1397,19 @@ LOCAL ER boot_stage( CONST SUBOOT *bt )
 			return E_OK;
 		}
 		if ( f_size(po, NULL) ) {
-			er = fs_rename(po, p);
+			er = b_rename(po, p);
 			if ( er < E_OK ) return er;
 		}
 	}
 	if ( ( e->keep && f_size(p, NULL) ) || file_same(p, e) ) {
-		(void)fs_unlink(pn);
+		(void)b_unlink(pn);
 		return E_OK;
 	}
-	if ( f_size(p, NULL) ) (void)fs_unlink(po);
+	if ( f_size(p, NULL) ) (void)b_unlink(po);
 	if ( file_same(pn, e) ) {
 		return E_OK;
 	}
-	return file_write(pn, su.key, (D)e->off, -1, (UD)e->size);
+	return file_write(pn, e, -1, (UD)e->size);
 }
 
 /* A rename of the commit; the tests stop after so many, as a cut in the power would */
@@ -1031,7 +1419,7 @@ LOCAL ER commit_rename( CONST char *from, CONST char *to, INT *p_n )
 		return E_IO;
 	}
 	(*p_n)++;
-	return fs_rename(from, to);
+	return b_rename(from, to);
 }
 
 /*
@@ -1059,18 +1447,18 @@ LOCAL ER boot_commit( void )
 		knl_strcat(pn, ".new");
 		knl_strcpy(po, bt->path);
 		knl_strcat(po, ".old");
-		if ( fs_stat(pn, &sn) < E_OK ) continue;
+		if ( b_stat(pn, &sn) < E_OK ) continue;
 		if ( sn.size != (UD)e->size ) {
 			er = E_IO;		/* written short: the next start writes it again */
 			break;
 		}
 		if ( f_size(p, &sz) ) {
-			(void)fs_unlink(po);
+			(void)b_unlink(po);
 			if ( bt->near ) {
 				er = commit_rename(p, po, &renames);
 			} else {
-				fd = fs_open(p, O_RDONLY);
-				er = ( fd >= 0 ) ? file_write(po, 0, 0, fd, sz) : (ER)fd;
+				fd = b_open(p, O_RDONLY);
+				er = ( fd >= 0 ) ? file_write(po, NULL, fd, sz) : (ER)fd;
 				if ( fd >= 0 ) fs_close(fd);
 			}
 		}
@@ -1099,18 +1487,30 @@ LOCAL ER su_do( INT k )
 	}
 	k -= su.nobj;
 	if ( k == 0 ) {
+		TS_UUID	box;
+
 		/* what nothing links to, held, so that it is not taken for a 屑実身 */
 		for ( i = 0; i < su.nobj; i++ ) {
-			if ( om_store_refs(&su.obj[i].u) == 0 ) (void)ob_lnk_obj(&su.obj[i].u);
+			d_hold(&su.obj[i].u);
 		}
-		return E_OK;
+		/* and the list of the system's objects, what システム登録 puts on another disk from */
+		if ( su.man == NULL || su.mansz <= 0 ) {
+			return E_OK;
+		}
+		er = ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &box);
+		if ( er >= E_OK ) er = d_rec_whole(&box, SU_MAN_REC, OB_RT_SYSDATA, 0, su.man, su.mansz);
+		if ( er < E_OK ) {
+			tm_printf((UB *)"TessronOS desktop: system update: the list of the system's objects not written (%d)\n",
+				  (INT)er);
+		}
+		return er;
 	}
 	k -= 1;
 	if ( k < su.nboot ) {
 		return boot_stage(&su.boot[k]);
 	}
 	er = boot_commit();
-	if ( er >= E_OK ) {
+	if ( er >= E_OK && !su.onto ) {
 		(void)wm_dev_conf_put(SU_KEY, "");
 		dt_prog_reread();
 		tm_printf((UB *)"TessronOS desktop: system update to %s done\n", su.ver);
@@ -1120,9 +1520,14 @@ LOCAL ER su_do( INT k )
 
 EXPORT ER dt_sysup_check( CONST TS_UUID *pkg, UB *text, INT max )
 {
-	ER	er = su_open(pkg, text, max);
+	ER	er;
 
+	if ( su.on || !su_try() ) {
+		return E_BUSY;
+	}
+	er = su_open(pkg, text, max);
 	su_end();
+	su_drop();
 	return er;
 }
 
@@ -1152,11 +1557,12 @@ EXPORT ER dt_sysup_need( CONST TS_UUID *pkg, UD *p_need, UD *p_free )
 {
 	ER	er;
 
-	if ( su.on ) {
+	if ( su.on || !su_try() ) {
 		return E_BUSY;
 	}
 	er = su_ready(pkg, TRUE, p_need, p_free);
 	su_end();
+	su_drop();
 	return er;
 }
 
@@ -1167,7 +1573,7 @@ EXPORT void dt_sysup_test( CONST char *root, INT cut )
 	su_cut = cut;
 }
 
-EXPORT ER dt_sysup_begin( CONST TS_UUID *pkg, BOOL force, ID pid, INT *p_total )
+LOCAL ER su_begin( CONST TS_UUID *pkg, BOOL force, ID pid, INT *p_total )
 {
 	UB	us[TS_UUID_STRLEN + 1];
 	UD	need, room;
@@ -1200,7 +1606,7 @@ EXPORT ER dt_sysup_begin( CONST TS_UUID *pkg, BOOL force, ID pid, INT *p_total )
 	return E_OK;
 }
 
-EXPORT ER dt_sysup_step( ID pid, INT *p_done, INT *p_total )
+LOCAL ER su_step( ID pid, INT *p_done, INT *p_total )
 {
 	UD	t0 = 0, t = 0;
 	ER	er = E_OK;
@@ -1227,6 +1633,30 @@ EXPORT ER dt_sysup_step( ID pid, INT *p_done, INT *p_total )
 	if ( er < E_OK || su.done >= su.total ) {
 		su_end();			/* failed: SYSUP stays, and the next start does it again */
 	}
+	return er;
+}
+
+EXPORT ER dt_sysup_begin( CONST TS_UUID *pkg, BOOL force, ID pid, INT *p_total )
+{
+	ER	er;
+
+	if ( !su_try() ) {
+		return E_BUSY;			/* dt_sysup_onto is under way */
+	}
+	er = su_begin(pkg, force, pid, p_total);
+	su_drop();
+	return er;
+}
+
+EXPORT ER dt_sysup_step( ID pid, INT *p_done, INT *p_total )
+{
+	ER	er;
+
+	if ( !su_try() ) {
+		return E_BUSY;
+	}
+	er = su_step(pid, p_done, p_total);
+	su_drop();
 	return er;
 }
 
@@ -1320,4 +1750,329 @@ EXPORT void dt_sysup_resume( DTWIN *d )
 		dt_tell(d, "途中で止まっていたシステムの更新を続けられませんでした。",
 			"次に起動したときにもう一度続けます。");
 	}
+}
+
+/* ---------------------------------------------------------------- onto the system volume of another disk */
+
+/* The list of the system's objects a volume of the native store keeps, the caller's to Kfree; NULL none */
+LOCAL UB *man_of( ID vol, SZ *p_size )
+{
+	TS_UUID	box;
+
+	*p_size = 0;
+	if ( ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &box) < E_OK ) return NULL;
+	return v_record(vol, &box, SU_MAN_REC, p_size);
+}
+
+/* What a list says: a system's, and of this machine and processor; its version in ver */
+LOCAL BOOL man_parse( CONST UB *man, SZ size, T_JSON *root, UB *ver, INT max )
+{
+	UB	s[48];
+
+	ver[0] = 0;
+	return (BOOL)( man != NULL && js_parse(man, (INT)size, root) >= E_OK
+		    && js_get_str(root, "kind", s, sizeof(s)) > 0 && name_is(s, "system")
+		    && js_get_str(root, "version", ver, max) > 0 && dt_ver_num(ver) >= 0
+		    && js_get_str(root, "machine", s, sizeof(s)) > 0 && name_is(s, SU_MACHINE)
+		    && js_get_str(root, "arch", s, sizeof(s)) > 0 && name_is(s, SU_ARCH) );
+}
+
+LOCAL INT	su_ecap = 0;		/* room of su.e while it is made from a volume */
+
+/* One entry more of the table made from a volume, its name the UUID's and rest */
+LOCAL SUENT *ent_new( CONST TS_UUID *u, CONST char *rest, INT what, UD size )
+{
+	SUENT	*n;
+	char	us[TS_UUID_STRLEN + 1];
+	INT	k;
+
+	if ( size > 0xFFFFFFFFULL ) {
+		return NULL;			/* more than a package's entry holds: not a system's */
+	}
+	if ( su.n >= su_ecap ) {
+		INT	cap = ( su_ecap == 0 ) ? 1024 : su_ecap * 2;
+
+		n = (SUENT *)Kmalloc(sizeof(SUENT) * (SZ)cap);
+		if ( n == NULL ) return NULL;
+		if ( su.e != NULL ) {
+			knl_memcpy(n, su.e, sizeof(SUENT) * (SZ)su.n);
+			Kfree(su.e);
+		}
+		su.e = n;
+		su_ecap = cap;
+	}
+	n = &su.e[su.n];
+	knl_memset(n, 0, sizeof(*n));
+	k = 0;
+	if ( u != NULL ) {
+		(void)ts_uuid_to_str(u, us, sizeof(us));
+		for ( ; us[k] != 0; k++ ) n->name[k] = (UB)us[k];
+		n->u = *u;
+	}
+	for ( ; *rest != 0 && k < SU_ENAME - 1; rest++ ) n->name[k++] = (UB)*rest;
+	if ( *rest != 0 ) {
+		return NULL;			/* a name longer than an entry's */
+	}
+	n->name[k] = 0;
+	n->what = what;
+	n->size = (UW)size;
+	su.n++;
+	return n;
+}
+
+/* The entries of one object of the source volume: its metadata, icon, records and resources */
+LOCAL ER ents_of( CONST TS_UUID *u )
+{
+	T_RREC	*r = NULL;
+	UB	*b, *names;
+	char	rn[16];
+	SZ	sz = 0, at;
+	INT	n, i, cnt = 0, len;
+	SUENT	*e;
+	ER	er = E_OK;
+
+	knl_wdog_alive();		/* looked at from the desktop's loop too (DT_SI_KEEPQ) */
+	b = NULL;
+	len = knl_tsfs_meta_all(su.svol, u, 0, &b, NULL);
+	if ( b != NULL ) Kfree(b);
+	if ( len < 0 || ent_new(u, ".json", E_META, (UD)len) == NULL ) return ( len < 0 ) ? (ER)len : E_NOMEM;
+	b = vicon_bytes(su.svol, u, &sz);
+	if ( b != NULL ) {
+		Kfree(b);
+		if ( ent_new(u, ".ico", E_ICON, (UD)sz) == NULL ) return E_NOMEM;
+	}
+	n = v_records(su.svol, u, &r);
+	for ( i = 0; i < n; i++ ) {
+		(void)tm_sprintf((UB *)rn, (UB *)"_%d.bin", r[i].recno);
+		e = ent_new(u, rn, r[i].recno, r[i].size);
+		if ( e == NULL ) {
+			er = E_NOMEM;
+			break;
+		}
+		e->rt = r[i].rt;
+		e->sub = r[i].sub;
+	}
+	if ( r != NULL ) Kfree(r);
+	if ( n < 0 ) return (ER)n;
+	if ( er < E_OK ) return er;
+
+	names = (UB *)Kmalloc(16384);
+	if ( names == NULL ) return E_NOMEM;
+	if ( knl_tsfs_res_lst(su.svol, u, names, 16384, &cnt) < E_OK ) cnt = 0;
+	for ( at = 0, i = 0; i < cnt && er >= E_OK; i++ ) {
+		CONST UB	*nm = names + at;
+
+		at += knl_strlen((CONST char *)nm) + 1;
+		b = vres_bytes(su.svol, u, nm, &sz);
+		if ( b == NULL ) continue;
+		Kfree(b);
+		if ( ent_new(u, (CONST char *)nm, E_RES, (UD)sz) == NULL ) er = E_NOMEM;
+	}
+	Kfree(names);
+	return er;
+}
+
+/*
+ * The session made from the running volume: the objects its list names,
+ * as an update takes a package's, and the boot files of the tree
+ */
+LOCAL ER su_open_vol( CONST T_SUBOOTF *bf, INT nbf, T_SUONTO *res )
+{
+	T_JSON	root, list, it;
+	T_FSTAT	st;
+	SUENT	*e;
+	INT	room, i, k;
+	ER	er;
+
+	su.man = man_of(su.svol, &su.mansz);
+	if ( !man_parse(su.man, su.mansz, &root, su.ver, sizeof(su.ver)) ) {
+		res->why = DT_SU_R_NOLIST;
+		return E_NOEXS;
+	}
+	knl_strcpy((char *)res->ver, (CONST char *)su.ver);
+	room = ( js_get(&root, "objects", &list) >= E_OK ) ? js_count(&list) : 0;
+	su.obj = (SUOBJ *)Kmalloc(sizeof(SUOBJ) * (SZ)( room + 1 ));
+	if ( su.obj == NULL ) {
+		return E_NOMEM;
+	}
+	for ( it.s = NULL; room > 0 && su.nobj < room && js_next(&list, &it); ) {
+		UB	us[TS_UUID_STRLEN + 1];
+		TS_UUID	u;
+
+		if ( js_str(&it, us, sizeof(us)) != TS_UUID_STRLEN
+		  || ts_str_to_uuid((CONST char *)us, &u) < E_OK ) continue;
+		for ( k = 0; k < su.nobj && ts_uuid_cmp(&su.obj[k].u, &u) != 0; k++ ) ;
+		if ( k < su.nobj ) continue;
+		if ( knl_tsfs_exists(su.svol, &u) < E_OK ) {
+			tm_printf((UB *)"TessronOS desktop: system update: %s of the list is not on the system volume\n", us);
+			continue;
+		}
+		er = ents_of(&u);
+		if ( er < E_OK ) {
+			tm_printf((UB *)"TessronOS desktop: system update: %s cannot be read (%d)\n", us, (INT)er);
+			return er;
+		}
+		su.obj[su.nobj].u = u;
+		su.obj[su.nobj].how = listed(&root, "keep", us) ? U_KEEP
+				    : listed(&root, "links", us) ? U_LINKS : U_SYSTEM;
+		su.nobj++;
+	}
+	for ( i = 0; i < nbf && i < SU_NBSRC; i++ ) {
+		char	nm[PKG_NAME];
+
+		if ( fs_stat(bf[i].src, &st) < E_OK || ( st.mode & FS_IFMT ) != FS_IFREG ) continue;
+		knl_strcpy(nm, "boot/");
+		knl_strncpy(nm + 5, bf[i].name, PKG_NAME - 6);
+		nm[PKG_NAME - 1] = 0;
+		e = ent_new(NULL, nm, E_BOOT, st.size);
+		if ( e == NULL ) return E_NOMEM;
+		knl_strncpy(su.bsrc[i], bf[i].src, SU_PATH_MAX - 1);
+		e->off = (UW)i;
+		e->keep = bf[i].keep;
+		e->put = TRUE;
+	}
+	return E_OK;
+}
+
+/*
+ * The bytes of the target volume the objects take more than now: each
+ * object made, whole with its head; each of the system's own there, what
+ * its records grow by; one kept or a box, nothing. And room for a record
+ * written beside the one it replaces.
+ */
+LOCAL UD onto_need( void )
+{
+	T_ROBJ	ro;
+	UD	need = SU_ROOM_SLACK, src;
+	INT	k, i;
+
+	for ( k = 0; k < su.nobj; k++ ) {
+		CONST SUOBJ	*o = &su.obj[k];
+		BOOL		has = (BOOL)( ts_ref_obj(su.dvol, &o->u, &ro) >= E_OK );
+
+		if ( has && o->how != U_SYSTEM ) continue;
+		for ( src = 0, i = 0; i < su.n; i++ ) {
+			if ( su.e[i].what != E_BOOT && ts_uuid_cmp(&su.e[i].u, &o->u) == 0
+			  && ( !has || su.e[i].what >= 0 ) ) {
+				src += su.e[i].size;
+			}
+		}
+		if ( !has ) {
+			need += src + SU_OBJ_ROOM;
+		} else if ( src > ro.size ) {
+			need += src - ro.size;
+		}
+	}
+	return need;
+}
+
+EXPORT ER dt_sysup_onto( CONST char *tsdev, CONST char *espdev, CONST T_SUBOOTF *bf, INT nbf,
+			 BOOL run, DT_SUPROG cb, void *ctx, T_SUONTO *res )
+{
+	T_FSSTAT fst;
+	T_RVOL	rv;
+	T_JSON	troot;
+	TS_UUID	box;
+	UB	*tman;
+	SZ	tsz = 0;
+	ER	er = E_OK;
+
+	knl_memset(res, 0, sizeof(*res));
+	if ( su.on || !su_try() ) {
+		res->why = DT_SU_R_BUSY;
+		return E_OK;
+	}
+	su_end();
+	su_ecap = 0;
+	su.onto = TRUE;
+	su.bvd = -1;
+	(void)ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &box);
+	su.svol = knl_obfile_vol_of(&box);
+	if ( su.svol <= 0 ) {
+		res->why = DT_SU_R_NOLIST;
+		goto out;
+	}
+	er = su_open_vol(bf, nbf, res);
+	if ( er < E_OK ) {
+		if ( res->why != DT_SU_R_OK ) er = E_OK;
+		goto out;
+	}
+
+	/* the target: a system volume, of a system not newer than this one, of this machine */
+	su.dvol = ts_opn_vol(tsdev, TSFS_STORE_BLK);
+	if ( su.dvol <= 0 ) {
+		tm_printf((UB *)"TessronOS desktop: system update onto %s: the volume cannot be opened (%d)\n",
+			  tsdev, (INT)su.dvol);
+		su.dvol = 0;
+		res->why = DT_SU_R_NOVOL;
+		goto out;
+	}
+	if ( knl_tsfs_exists(su.dvol, &box) < E_OK ) {
+		res->why = DT_SU_R_NOSYS;
+		goto out;
+	}
+	tman = man_of(su.dvol, &tsz);
+	if ( tman != NULL ) {
+		if ( !man_parse(tman, tsz, &troot, res->tver, sizeof(res->tver)) ) {
+			res->why = DT_SU_R_FORM;
+		} else if ( dt_ver_num(res->tver) > dt_ver_num(su.ver) ) {
+			res->why = DT_SU_R_NEWER;
+		}
+		Kfree(tman);
+		if ( res->why != DT_SU_R_OK ) goto out;
+	}
+
+	/* its ESP: where each boot file goes, and the room there */
+	su.bvd = knl_fs_open_vol("fatfs", espdev, run ? 0 : FS_MNT_RDONLY, 0);
+	if ( su.bvd < 0 ) {
+		res->why = DT_SU_R_NOESP;
+		goto out;
+	}
+	er = su_place();
+	if ( er < E_OK ) goto out;
+	if ( fs_fstatvfs(su.bvd, &fst) >= E_OK ) {
+		res->esp_need = su_need(fst.bsize);
+		res->esp_free = fst.bfree * fst.bsize;
+	}
+	if ( res->esp_need > res->esp_free ) {
+		res->why = DT_SU_R_ESPFULL;
+		goto out;
+	}
+	res->vol_need = onto_need();
+	if ( ts_ref_vol(su.dvol, &rv) >= E_OK ) res->vol_free = rv.bfree * rv.bsize;
+	if ( res->vol_need > res->vol_free ) {
+		res->why = DT_SU_R_VOLFULL;
+		goto out;
+	}
+	res->nobj = su.nobj;
+	res->total = su.total;
+	tm_printf((UB *)"TessronOS desktop: system update onto %s and %s: %s over %s, %d objects, %d boot files,"
+		  " %ld KB of %ld KB, ESP %ld KB of %ld KB\n", tsdev, espdev, su.ver,
+		  ( res->tver[0] != 0 ) ? (CONST char *)res->tver : "(no list)", su.nobj, su.nboot,
+		  (D)( res->vol_need >> 10 ), (D)( res->vol_free >> 10 ), (D)( res->esp_need >> 10 ),
+		  (D)( res->esp_free >> 10 ));
+	if ( !run ) goto out;
+
+	/* the steps of an update, in its order: the objects, the holds and the list, then the boot files */
+	for ( su.done = 0; su.done < su.total; su.done++ ) {
+		er = su_do(su.done);
+		if ( er < E_OK ) {
+			tm_printf((UB *)"TessronOS desktop: system update onto %s: step %d of %d failed (%d)\n",
+				  tsdev, su.done, su.total, (INT)er);
+			break;
+		}
+		if ( cb != NULL ) cb(ctx, su.done + 1, su.total);
+	}
+	if ( er >= E_OK ) er = ts_syn_vol(su.dvol);
+	if ( er >= E_OK ) {
+		tm_printf((UB *)"TessronOS desktop: system update onto %s to %s done\n", tsdev, su.ver);
+	}
+out:
+	if ( su.bvd >= 0 ) fs_close(su.bvd);
+	if ( su.dvol > 0 ) ts_cls_vol(su.dvol);
+	su_end();
+	su_ecap = 0;
+	su_drop();
+	if ( run && er >= E_OK && res->why != DT_SU_R_OK ) er = E_OBJ;
+	return er;
 }

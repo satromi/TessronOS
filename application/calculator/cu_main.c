@@ -402,7 +402,7 @@ int main( void )
 
 	cu_init(&eng, FALSE, cu_fn);
 	ui_icon(SYSDEF_PROG_CALCU);
-	if ( open_win(WIN_X, WIN_Y) < E_OK ) {
+	if ( open_win(wm_new_x(WIN_X), wm_new_y(WIN_Y)) < E_OK ) {
 		tm_putstring((CONST UB *)"calculator: no window\n");
 		return 1;
 	}

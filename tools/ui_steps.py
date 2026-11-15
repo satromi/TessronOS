@@ -48,6 +48,19 @@ def shot_same(a, b, box):
     return False, "%d pixels in %d rows, first %s, rows %d..%d" % (len(bad), len(ys), bad[0], ys[0], ys[-1])
 
 
+def shot_sum(a, box):
+    """A shot kept, in x0 y0 x1 y1, as 16 hexadecimal digits of the SHA-1 of its pixels (RGB)"""
+    if a is None:
+        return None
+    try:
+        import hashlib
+        from PIL import Image
+        with Image.open(a) as ia:
+            return hashlib.sha1(ia.convert("RGB").crop(tuple(box)).tobytes()).hexdigest()[:16]
+    except Exception:
+        return None
+
+
 def run_steps(paths, m, emit=print):
     """Every line of the files, in order. Returns (ok, stopped)"""
     ok = True
@@ -61,6 +74,10 @@ def run_steps(paths, m, emit=print):
             l = raw.strip()
             if not l or l.startswith("#"):
                 continue
+            # {NAME}: the last word of the answer kept under NAME (a process's number that "run" answered)
+            for name, ans in kept.items():
+                if ("{%s}" % name) in l and ans.split():
+                    l = l.replace("{%s}" % name, ans.split()[-1])
             if l.startswith("shot "):
                 shots[l[5:].strip()] = m.shot(l[5:].strip())
                 emit("shot %s" % shots[l[5:].strip()])
@@ -69,6 +86,12 @@ def run_steps(paths, m, emit=print):
                 met, why = shot_same(shots.get(w[1]), shots.get(w[2]), [int(v) for v in w[3:7]])
                 emit("%s: %s" % (l, "met" if met else "NOT MET (%s)" % why))
                 ok = ok and met
+            elif l.startswith("shotsum "):
+                # what a shot shows there, as the answer a want after it looks at
+                w = l.split()
+                h = shot_sum(shots.get(w[1]), [int(v) for v in w[2:6]])
+                last = ("ok %s" % h) if h else "err no such shot"
+                emit("%s -> %s" % (l, last))
             elif l.startswith("hmp "):
                 emit(m.hmp(l[4:].strip()))
             elif l.startswith("expectin "):

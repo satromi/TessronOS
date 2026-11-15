@@ -53,6 +53,8 @@ IMPORT void	*knl_vmap( UD npages, UINT flags );
 /* The same area, but over memory that already exists (a framebuffer) */
 IMPORT void	*knl_vmap_pa( UD pa, UD npages, UINT flags );
 IMPORT void	knl_vunmap_pa( void *va, UD npages );
+/* Pages that exist already, one physical address each, at one run of addresses; knl_vunmap_pa takes them away */
+IMPORT void	*knl_vmap_pages( CONST UD *pa, UD npages, UINT flags );
 IMPORT void	knl_vunmap( void *va, UD npages );
 
 /* A task's stack: npages mapped, unmapped pages under them (TASK_STK_GUARD_PAGES) */

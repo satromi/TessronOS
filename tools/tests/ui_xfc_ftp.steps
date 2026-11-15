@@ -1,0 +1,87 @@
+# ファイル変換 and an FTP server (design 11.9), for tools/ui_run.py --net user,
+# on a test disk as the build made it (a KTEST run keeps a connection on it),
+# with a server on this machine's 127.0.0.1:2131 (10.0.2.2 inside): connected
+# through the panel, the files listed; two of them (one of 8 MB) carried into
+# the BTRON window, which is a 仮身一覧's process: the panel asks how, Enter
+# downloads them and makes them 実身 there. The connection kept is then taken
+# off with 〈取り外し〉: its window closed, gone from the list and from the
+# person's settings ("xfconv: dropped ftp"), and not back when ファイル変換 is
+# started again. The machine is turned off at the end, so that the disk kept
+# with --keep-disk shows the settings as they were written.
+dclick 80 131
+wait 1500
+open 01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91
+expect xfconv: ready
+# a test disk as the build made it: no connection kept yet (rows below are counted from that)
+expect xfconv: connections 0
+wait 500
+win ファイル変換
+dclick 182 335
+expect xfconv: asked for an FTP connection
+wait 500
+text 10.0.2.2
+key 2b
+key 2a
+key 2a
+text 2131
+key 28
+expectin 60 xfconv: connected 10.0.2.2
+expectin 60 xfconv: dir ftp://10.0.2.2
+expect xfconv: - KTEST.TXT 24
+expect xfconv: - BIG.BIN 8388608
+expect xfconv: connections 1
+wait 800
+shot xff_list
+# BIG.BIN and KTEST.TXT chosen and carried into the BTRON window
+click 262 248
+key 51 2
+expect xfconv: selected 2:
+wait 600
+hold 262 248
+wait 300
+move 150 220
+wait 100
+move 70 195
+wait 300
+up
+expect xfconv: carried 2 into
+expect xfconv: asked how to import 2:
+wait 500
+key 28
+expectin 180 xfconv: imported 2 of 2 objects 2
+expect xfconv: placed 2 links
+wait 800
+shot xff_placed
+# the connection made just now (the row under ネットワーク(FTP)) chosen; the
+# menu opened on it has 〈マウント〉 and 〈取り外し〉 to choose (the shot), and is put away
+win ファイル変換
+click 155 367
+wait 300
+down 1
+wait 300
+up 1
+wait 600
+shot xff_menu
+key 29
+wait 300
+# 〈取り外し〉 (Ctrl+D): the window of the connection closed, the connection gone
+# from the list and from the settings
+logmark
+key 07 1
+expect xfconv: disconnected ftp://10.0.2.2
+expectsince xfconv: dropped ftp
+expectsince xfconv: connections 0
+wait 500
+shot xff_dropped
+# ファイル変換 ended and started again: the list read back from the settings
+key 08 1
+wait 2000
+logmark
+open 01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91
+expectsince xfconv: ready
+expectsince xfconv: connections 0
+wait 500
+shot xff_reopened
+absent !OACV!
+# the machine turned off as the desktop does it, so that the disk kept (--keep-disk) holds what was written
+reboot

@@ -132,6 +132,8 @@ typedef struct {
 	void	*les;			/* its state, bt_le.c */
 	UB	cur_addr[6];		/* the address it comes from now, perhaps a private one */
 	UB	cur_type;
+	UB	hint;			/* FH_*: what its advertising said of it */
+	BOOL	keep_wait;		/* paired on this link: kept once a service of it is used */
 	/* earphones */
 	BOOL	audio;
 	UH	rcid_av, rcid_media;
@@ -162,6 +164,18 @@ typedef struct {
 #define BTKEPT_OLD_SIZE		60	/* its size before the LE fields */
 
 /*
+ * What is known of a device found, beside its T_BTFOUND: where it was
+ * seen, what its advertising said, and whether its name has been asked.
+ */
+#define FH_BREDR		0x01	/* an inquiry found it */
+#define FH_LE			0x02	/* it advertises on LE */
+#define FH_FLAGS		0x04	/* its advertising had the flags (AD type 1) */
+#define FH_NO_BREDR		0x08	/* and they say BR/EDR is not supported */
+#define FH_LEAUDIO		0x10	/* it says it serves LE Audio: ASCS, PACS or CAS */
+#define FH_AUDIO		0x20	/* its appearance is one of sound: an audio sink, earphones */
+#define FH_NAMED		0x40	/* its name has been asked of it (Remote Name Request) */
+
+/*
  * How the controller is reached: on USB (bt.c), or on a UART in H4
  * (bt_uart.c). A command is its opcode, its length and its parameters;
  * an ACL packet its header and its data. What comes back goes into the
@@ -175,7 +189,13 @@ typedef struct {
 	ER	(*acl)( struct bt_ctl *c, UB *b, INT n );
 	BOOL	(*prep)( struct bt_ctl *c );
 	ER	(*iso)( struct bt_ctl *c, UB *b, INT n );	/* an ISO data packet, NULL where none can go */
+	ER	(*sco)( struct bt_ctl *c, UB *b, INT n );	/* an SCO data packet on the HCI, NULL where none can go */
 } BTTRANS;
+
+/* Where a voice link's packets go (knl_bth_way) */
+#define VW_NONE			0	/* nowhere: no voice */
+#define VW_USB			1	/* the isochronous endpoints of the voice interface */
+#define VW_HCI			2	/* SCO data packets, as the transport has them */
 
 typedef struct bt_ctl {
 	CONST BTTRANS	*tr;
@@ -197,6 +217,10 @@ typedef struct bt_ctl {
 	BOOL		cmd_busy;
 	UH		cmd_op;
 	UW		cmd_ms;		/* when the command went */
+	UB		lmp[8];		/* its LMP features, as Read Local Supported Features answered */
+	UB		sco_mtu;	/* the data of one SCO packet on the HCI (Read Buffer Size) */
+	UH		sco_num;	/* and the packets it holds */
+	BOOL		sco_hci;	/* its SCO goes to the host on the HCI, not to pins of its own (bt_bcm.c) */
 	/* what a command waiting its turn will say: a small queue */
 	UB		q[NQCMD][64];
 	UB		qn[NQCMD];
@@ -212,10 +236,23 @@ typedef struct bt_ctl {
 	UB		pair_addr[6], forget_addr[6];
 	BOOL		obj_up;
 	BOOL		recalled;	/* the devices kept have been read */
-	BOOL		scanning;
+	BOOL		scanning;	/* a search: the inquiry, then the names it did not tell */
+	BOOL		inq_on;		/* the inquiry itself */
 	UW		scan_at;	/* when the scan was asked of the controller (ms) */
 	INT		nfound;
 	T_BTFOUND	found[NFOUND];
+	UB		found_hint[NFOUND];	/* FH_* */
+	UB		found_note[NFOUND];	/* BT_NOTE_*: what became of a try with it */
+	UB		found_psrm[NFOUND];	/* its page scan repetition mode, from the inquiry */
+	UH		found_clk[NFOUND];	/* and its clock offset */
+	BOOL		naming;		/* a Remote Name Request of the search is out */
+	UB		name_addr[6];
+	UW		name_due;
+	/* a device whose BR/EDR side is paired once its LE link has gone */
+	BOOL		fb_on;
+	UH		fb_handle;
+	UB		fb_addr[6];
+	UB		fb_name[32];
 	PEER		peer[NPEER];
 	/* what goes out: frames in order, as the controller has room for their packets */
 	UH		acl_len, le_len;	/* the data of one packet */
@@ -240,6 +277,9 @@ typedef struct bt_ctl {
 	BOOL		has_cis;	/* the central of CISes, with buffers for them: LE Audio */
 	UH		iso_len;	/* the data of one ISO packet */
 	INT		iso_room;	/* the ISO packets it can hold now */
+	/* the USB device suspended while idle (bt.c) */
+	BOOL		autosusp;	/* allowed */
+	volatile UW	last_busy;	/* when something last went to it or came from it (ms) */
 } BTC;
 
 IMPORT BOOL same_bt_bytes( CONST void *a, CONST void *b, INT n );
@@ -256,9 +296,11 @@ IMPORT ER   knl_btx_keep( PEER *p );
 IMPORT void knl_btx_rd_layout( CONST UB *rd, INT n, KBDLAY *l );
 IMPORT void knl_btx_report_in( PEER *p, CONST UB *r, INT m );
 IMPORT T_BTFOUND *knl_btx_found_add( BTC *c, CONST UB *addr, UW cod, CONST UB *name, INT nlen );
+IMPORT void knl_btx_le_unused( BTC *c, PEER *p, BOOL lea );
 IMPORT UW   knl_btx_now( void );
 IMPORT void knl_btx_ring_in( BTC *c, UB kind, CONST UB *b, INT len );
 IMPORT BTC  *knl_btx_open( CONST BTTRANS *tr, void *ctx );
+IMPORT BTC  *knl_btx_ctl( void );		/* the controller in use, NULL none: for the tests */
 
 /* bt_intel.c */
 IMPORT BOOL knl_bti_load( BTC *c );
@@ -287,6 +329,12 @@ IMPORT UH   knl_bta_accept( BTC *c, PEER *p, UH psm );
 IMPORT void knl_bta_x_up( BTC *c, PEER *p );
 IMPORT void knl_bta_x_in( BTC *c, PEER *p, UH cid, CONST UB *f, INT n );
 IMPORT void knl_bta_event( BTC *c, UB code, CONST UB *d, INT len );
+IMPORT BOOL knl_bta_ready( CONST PEER *p );	/* its stream set up: a sound output */
+
+/* bt_hfp.c: the voice */
+IMPORT void knl_bth_sco_in( BTC *c, CONST UB *b, INT len );	/* an SCO data packet that came on the HCI */
+IMPORT INT  knl_bth_way( BTC *c );		/* VW_* */
+IMPORT UH   knl_bth_sdp_features( BTC *c );	/* this end's features in its audio gateway's record */
 
 /* bt_iso.c */
 IMPORT void knl_btiso_cmd_done( BTC *c, UH op, INT st, CONST UB *r, INT n );
@@ -303,6 +351,8 @@ IMPORT BOOL knl_btbap_att_in( BTC *c, PEER *p, CONST UB *f, INT n );
 IMPORT void knl_btbap_down( BTC *c, PEER *p );
 IMPORT BOOL knl_btbap_rsi( BTC *c, CONST UB *ad, INT n );
 IMPORT BOOL knl_btbap_seek( BTC *c );
+IMPORT BOOL knl_btbap_has_lea( BTC *c, PEER *p );	/* PACS and ASCS among its services */
+IMPORT BOOL knl_btbap_ready( BTC *c, PEER *p );	/* taken as LE Audio, its services read */
 
 /* bt_lea.c: sound to LE Audio earphones */
 IMPORT void knl_btlea_tick( BTC *c );

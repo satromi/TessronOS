@@ -1369,9 +1369,9 @@ static ER open_all( void )
 	if ( ob_cre_obj(&c, &g_ch) < E_OK ) return E_NOMEM;
 	g_port = ob_opn_obj(&g_ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT);
 	if ( g_port <= 0 ) return E_OBJ;
-	wm_screen(&sw, &sh);
-	x = ( sw > g_w + 16 ) ? ( sw - g_w - 16 ) / 2 : 0;
-	y = ( sh > g_h + 60 ) ? ( sh - g_h - 60 ) / 2 : 0;
+	(void)sw;
+	(void)sh;
+	wm_new_centre(g_w + 16, g_h + 60, &x, &y);	/* the screen new windows open on: the pointer's, else the main one */
 	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%u,\"icon\":\"%s\"}",
 		 x, y, x + g_w + 16, y + g_h + 34, (UINT)( WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_RESIZE ), APP_PROG);
 	memset(&c, 0, sizeof(c));

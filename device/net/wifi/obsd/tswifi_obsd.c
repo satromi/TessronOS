@@ -213,6 +213,26 @@ void	tsw_arp_frame(int, const uint8_t *, int);
 static uint8_t	dhcp_yi[4];	/* the address DHCP last offered or acknowledged */
 static int	tx_said, arp_said;
 static uint64_t	port_ns;	/* when the port opened; 0 while it is not */
+/*
+ * The keys the driver sets into the card by a task of its own
+ * (ic_set_key answered EBUSY: iwx, mwx, athx, bwfm): the port opens
+ * only once the card has them all (tsw_keys_in), as OpenBSD's handshake
+ * leaves the port to the driver then (deferlink). Forgotten as the
+ * station leaves RUN.
+ */
+static int	keys_busy;	/* keys asked of the card and answered EBUSY in this association */
+static uint64_t	keys_asked_ns;	/* when the first of them was asked */
+static uint64_t	keys_last_ns;	/* when the last of them was asked */
+static uint64_t	keys_in_ns;	/* when the card had them all (the driver's link up); 0 not yet */
+static uint64_t	port_asked_ns;	/* when the manager asked for the port while the keys were not in */
+/*
+ * The frames handed in before the first pairwise key that the driver
+ * had not taken yet (its queue full): they are to go as they were
+ * handed in, unprotected (the 4-way's message 4 among them), so the
+ * pairwise key protects only what is handed in after them (ptk_hold)
+ */
+static int	ptk_hold;
+static void	(*orig_start)(struct ifnet *);
 static int	txr_hs_said;	/* the card's answers said during the handshake of this join */
 static int	bg_asked;	/* the manager's scan is being begun */
 static int	bg_said;	/* the reason last said for putting a background scan off */
@@ -770,8 +790,77 @@ tsw_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 	if (nstate < IEEE80211_S_RUN) {
 		port_ns = 0;		/* the next access point's port opens anew */
 		txr_hs_said = 0;
+		keys_busy = 0;
+		keys_asked_ns = keys_last_ns = keys_in_ns = port_asked_ns = 0;
+		ptk_hold = 0;
 	}
 	return (*orig_newstate)(ic, nstate, arg);
+}
+
+/*
+ * The driver's start, and then the first pairwise key made to protect
+ * what is sent once the frames handed in before it have gone to the
+ * driver (ptk_hold)
+ */
+static void
+tsw_start(struct ifnet *ifp)
+{
+	struct ieee80211com *ic = tsw_ic;
+
+	(*orig_start)(ifp);
+	if (ptk_hold && ifq_empty(&ifp->if_snd)) {
+		ptk_hold = 0;
+		if (ic != NULL && ic->ic_bss != NULL &&
+		    !(ic->ic_bss->ni_flags & IEEE80211_NODE_RSN_NEW_PTK))
+			ic->ic_bss->ni_flags |= IEEE80211_NODE_TXRXPROT;
+		printf("wifi: the frames handed in before the pairwise key went to the driver;"
+		    " what is sent is protected from now on\n");
+	}
+}
+
+/* When the port opened (ns of getnsecuptime); 0 while it is not */
+uint64_t
+tsw_port_ns(void)
+{
+	return port_ns;
+}
+
+/*
+ * The card has every key its driver's task was asked to set: the
+ * driver says so by making the port valid (iwx, mwx, bwfm, and the
+ * simulator's station, as OpenBSD's iwx_add_sta_key does) or by its
+ * count of the keys still to be set (athx)
+ */
+static int
+tsw_keys_in(struct ieee80211_node *ni)
+{
+#if !TSWIFI_SIM
+	if (tsw_drv != NULL && tsw_drv->keys_in != NULL)
+		return (*tsw_drv->keys_in)();
+#endif
+	return ni->ni_port_valid;
+}
+
+/*
+ * The interface's link changed (obsd_net.c's if_link_state_change):
+ * the driver's task made the link up once the card had the keys, when
+ * the port was waiting for them; the manager woken to open it
+ */
+void	tsw_link_state(struct ifnet *);
+
+void
+tsw_link_state(struct ifnet *ifp)
+{
+	if (ifp != tsw_ifp || !LINK_STATE_IS_UP(ifp->if_link_state) || !keys_busy ||
+	    keys_in_ns != 0 || tsw_ic == NULL || tsw_ic->ic_bss == NULL ||
+	    !tsw_keys_in(tsw_ic->ic_bss))
+		return;
+	keys_in_ns = getnsecuptime();
+	printf("wifi: the card has the keys: %u ms after the first was asked of it, %u ms after the last\n",
+	    (unsigned int)((keys_in_ns - keys_asked_ns) / 1000000),
+	    (unsigned int)((keys_in_ns - keys_last_ns) / 1000000));
+	if (port_asked_ns != 0)
+		obsd_hc_kick();
 }
 
 /* ---------------------------------------------------------------- the start */
@@ -876,6 +965,8 @@ rump_tswifi_start(uint8_t *mac)
 	orig_bgscan_start = ic->ic_bgscan_start;
 	if (orig_bgscan_start != NULL)
 		ic->ic_bgscan_start = tsw_bgscan_start;
+	orig_start = tsw_ifp->if_start;
+	tsw_ifp->if_start = tsw_start;
 	timeout_set(&rxs_to, rxs_tick, NULL);
 	timeout_add_sec(&rxs_to, RXS_SEC);
 	memcpy(mac, ic->ic_myaddr, IEEE80211_ADDR_LEN);
@@ -1876,12 +1967,6 @@ rp_look(const struct ieee80211_frame *wh, uint32_t flen)
 	}
 }
 
-uint64_t
-tsw_port_ns(void)
-{
-	return port_ns;
-}
-
 void
 tsw_rx_mpdu(const struct ieee80211_frame *wh, uint32_t flen, uint32_t st, uint32_t rate)
 {
@@ -1979,6 +2064,26 @@ tsw_stats_size(const char *drv, unsigned int got, unsigned int want, const char 
 #endif
 
 /*
+ * A key asked of the card, as the driver answered it: EBUSY, the
+ * driver's task sets it into the card, and the port is to wait for it
+ * (keys_busy). 0 or an errno value.
+ */
+static int
+key_asked(int error)
+{
+	uint64_t now;
+
+	if (error != EBUSY)
+		return error;
+	now = getnsecuptime();
+	if (keys_busy++ == 0)
+		keys_asked_ns = now;
+	keys_last_ns = now;
+	keys_in_ns = 0;
+	return 0;
+}
+
+/*
  * A key from the handshake, set as the layer's own handshake sets it:
  * cipher 1 TKIP, 3 CCMP, 6 BIP (the integrity group key, index 4 or 5);
  * addr all ones for the group's; the receive counter as it came (little
@@ -2014,10 +2119,13 @@ rump_tswifi_setkey(int cipher, const uint8_t *addr, int idx, int set_tx,
 		k->k_len = key_len;
 		memcpy(k->k_key, key, key_len);
 		error = (*ic->ic_set_key)(ic, ni, k);
-		if (error == 0 || error == EBUSY) {
-			ni->ni_flags |= IEEE80211_NODE_TXMGMTPROT | IEEE80211_NODE_RXMGMTPROT;
+		/* management frames protected once the card has the key: by the driver's task when it sets it */
+		if (error == 0)
+			ni->ni_flags |= IEEE80211_NODE_TXMGMTPROT;
+		error = key_asked(error);
+		if (error == 0) {
+			ni->ni_flags |= IEEE80211_NODE_RXMGMTPROT;
 			ic->ic_igtk_kid = idx;
-			error = 0;
 		}
 	} else if (IEEE80211_IS_MULTICAST(addr)) {
 		if (idx < 0 || idx > 3) {
@@ -2032,9 +2140,7 @@ rump_tswifi_setkey(int cipher, const uint8_t *addr, int idx, int set_tx,
 		k->k_rsc[0] = seq != NULL ? le48(seq, seq_len) : 0;
 		k->k_len = key_len;
 		memcpy(k->k_key, key, key_len);
-		error = (*ic->ic_set_key)(ic, ni, k);
-		if (error == EBUSY)
-			error = 0;
+		error = key_asked((*ic->ic_set_key)(ic, ni, k));
 		if (error == 0)
 			ic->ic_rsngroupcipher = ni->ni_rsngroupcipher = k->k_cipher;
 	} else {
@@ -2045,17 +2151,31 @@ rump_tswifi_setkey(int cipher, const uint8_t *addr, int idx, int set_tx,
 		k->k_len = key_len;
 		memcpy(k->k_key, key, key_len);
 		ni->ni_rsncipher = k->k_cipher;
+		/*
+		 * What was handed in before the first pairwise key (the
+		 * 4-way's message 4) goes unprotected: the driver given it
+		 * now, and, if its queue is full, the key protects only
+		 * what is handed in after it has taken them (tsw_start)
+		 */
+		if (!(ni->ni_flags & IEEE80211_NODE_TXRXPROT) && !ifq_empty(&tsw_ifp->if_snd)) {
+			if_start(tsw_ifp);
+			if (!ifq_empty(&tsw_ifp->if_snd)) {
+				ptk_hold = 1;
+				printf("wifi: %u frames handed in before the pairwise key wait for the driver:"
+				    " they go unprotected, the key protects what comes after them\n",
+				    (unsigned int)ifq_len(&tsw_ifp->if_snd));
+			}
+		}
 #if !TSWIFI_SIM
 		if (tsw_drv != NULL && tsw_drv->ptk_to_card != NULL && k->k_cipher == IEEE80211_CIPHER_CCMP)
 			error = (*tsw_drv->ptk_to_card)(ic, ni, k);
 		else
 #endif
 		error = (*ic->ic_set_key)(ic, ni, k);
-		if (error == EBUSY)
-			error = 0;
+		error = key_asked(error);
 		if (error == 0) {
 			ni->ni_flags &= ~IEEE80211_NODE_RSN_NEW_PTK;
-			ni->ni_flags |= IEEE80211_NODE_TXRXPROT | IEEE80211_NODE_RXPROT;
+			ni->ni_flags |= IEEE80211_NODE_RXPROT | (ptk_hold ? 0 : IEEE80211_NODE_TXRXPROT);
 		}
 	}
 	obsd_unlock();
@@ -2084,20 +2204,49 @@ rump_tswifi_delkey(const uint8_t *addr, int idx)
 	return 0;
 }
 
-/* The handshakes are done: data may pass, and the link is up */
+/*
+ * The handshakes are done: data may pass, and the link is up, once the
+ * card has the keys its driver's task sets (keys_busy). 0 the port
+ * open (or closed, valid 0); EINPROGRESS while the card has not all of
+ * them yet, the manager asking again (it is woken as the driver says
+ * it has them, tsw_link_state).
+ */
 int
 rump_tswifi_port(int valid)
 {
 	struct ieee80211com *ic = tsw_ic;
 	struct ieee80211_node *ni;
+	uint64_t now;
 
 	if (ic == NULL)
 		return ENXIO;
 	obsd_lock();
 	ni = ic->ic_bss;
+	now = getnsecuptime();
+	if (ni != NULL && valid && keys_busy && !tsw_keys_in(ni)) {
+		if (port_asked_ns == 0) {
+			port_asked_ns = now;
+			printf("wifi: the port waits for the card's keys (%d asked of it, the first %u ms ago,"
+			    " the last %u ms ago)\n", keys_busy,
+			    (unsigned int)((now - keys_asked_ns) / 1000000),
+			    (unsigned int)((now - keys_last_ns) / 1000000));
+		}
+		obsd_unlock();
+		return EINPROGRESS;
+	}
+	if (ni != NULL && valid && keys_busy) {
+		if (keys_in_ns == 0)
+			keys_in_ns = now;	/* seen here first (a driver that counts them, athx) */
+		printf("wifi: the port opens %u ms after the card had the keys (%u ms after the first"
+		    " was asked of it; the manager asked for the port %u ms before)\n",
+		    (unsigned int)((now - keys_in_ns) / 1000000),
+		    (unsigned int)((keys_in_ns - keys_asked_ns) / 1000000),
+		    port_asked_ns != 0 ? (unsigned int)((now - port_asked_ns) / 1000000) : 0);
+	}
 	if (ni != NULL) {
 		ni->ni_port_valid = valid ? 1 : 0;
-		port_ns = valid ? getnsecuptime() : 0;
+		port_ns = valid ? now : 0;
+		port_asked_ns = 0;
 		bg_said = 0;
 		drv_said = 0;
 		tim_said = 0;

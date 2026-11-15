@@ -146,6 +146,11 @@ struct usb_dev {
 	USBPIPE	*hub_pipe;	/* its status change endpoint */
 	volatile UW hub_change;	/* ports that reported a change */
 
+	/* suspended by its driver when idle (knl_usb_dev_suspend), and how often */
+	volatile BOOL suspended;
+	BOOL	wake_on;	/* its remote wakeup was turned on for the suspend */
+	UW	n_suspend, n_resume, n_remote_wake, n_suspend_fail;
+
 	void	*hcpriv;	/* the controller driver's */
 	void	*hid;		/* the class drivers' */
 	void	*msc;
@@ -250,6 +255,16 @@ typedef struct {
 	 */
 	ER	(*pm_suspend)( USBHC *hc );
 	ER	(*pm_resume)( USBHC *hc );
+	/*
+	 * A device on a root port suspended (its endpoints stopped, the
+	 * link put in U3) and resumed (the link back in U0 after the resume
+	 * signalling and the recovery time, its endpoints going on), and
+	 * whether the device itself signalled resume (remote wakeup). NULL
+	 * when the controller does not suspend single devices.
+	 */
+	ER	(*dev_suspend)( USBHC *hc, USBDEV *dev );
+	ER	(*dev_resume)( USBHC *hc, USBDEV *dev );
+	BOOL	(*dev_woke)( USBHC *hc, USBDEV *dev );
 } USBHC_OPS;
 
 struct usb_hc {
@@ -416,7 +431,10 @@ IMPORT void knl_uac_notify( void );
 IMPORT USBDEV *knl_usb_dev_of( INT handle );	/* with the manager's lock held */
 IMPORT void knl_uusb_detach( USBDEV *dev );
 IMPORT BOOL knl_uusb_active( void );
-IMPORT ER   knl_usb_reset_device( USBDEV *dev );	/* usbcore.c, with the lock held */
+IMPORT ER   knl_usb_reset_device( USBDEV *dev );
+IMPORT ER   knl_usb_dev_suspend( USBDEV *dev, BOOL wake );	/* usbman.c, with the lock held */
+IMPORT ER   knl_usb_dev_resume( USBDEV *dev );		/* usbman.c, with the lock held */
+IMPORT INT  knl_usb_pm_text( char *t );			/* usbman.c: the suspends, for the records */	/* usbcore.c, with the lock held */
 
 /* ---------------------------------------------------------------- uvc.c */
 IMPORT BOOL knl_bt_match( USBDEV *dev );	/* ../bt/bt.c */

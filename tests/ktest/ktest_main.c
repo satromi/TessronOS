@@ -18,6 +18,7 @@
  */
 
 #include "ktest.h"
+#include "tstdlib.h"
 #include <ts/wm.h>
 #include <ts/disp.h>
 #include <ts/fs.h>
@@ -448,6 +449,42 @@ EXPORT ID kt_face( void )
 	return fid;
 }
 
+#define KT_LST_PAGE	64
+
+EXPORT INT kt_lst_obj( UINT type, UINT sub, TS_UUID **p_list )
+{
+	TS_UUID	*l = NULL, *nl;
+	INT	n = 0, cap = 0, got;
+	ER	er;
+
+	*p_list = NULL;
+	for ( ;; ) {
+		if ( n + KT_LST_PAGE > cap ) {
+			nl = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( cap + KT_LST_PAGE ));
+			if ( nl == NULL ) {
+				if ( l != NULL ) Kfree(l);
+				return E_NOMEM;
+			}
+			if ( l != NULL ) {
+				knl_memcpy(nl, l, sizeof(TS_UUID) * (SZ)n);
+				Kfree(l);
+			}
+			l = nl;
+			cap += KT_LST_PAGE;
+		}
+		got = 0;
+		er = ob_lst_obj(type, sub, ( n > 0 ) ? &l[n - 1] : NULL, l + n, KT_LST_PAGE, &got);
+		if ( er < E_OK ) {
+			Kfree(l);
+			return (INT)er;
+		}
+		n += got;
+		if ( got < KT_LST_PAGE ) break;
+	}
+	*p_list = l;
+	return n;
+}
+
 EXPORT UB *kt_obj_data( const TS_UUID *uuid, SZ *p_size )
 {
 	T_OBREC	rec[4];
@@ -822,6 +859,9 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE(pan);
 	RUN_SUITE(cred);
 	RUN_SUITE(cxx);
+	RUN_SUITE(chan2);
+	RUN_SUITE(shm2);
+	RUN_SUITE(sbx);
 	RUN_SUITE(v8);
 	RUN_SUITE_ARM(gpu, "no V3D");
 #ifdef X64

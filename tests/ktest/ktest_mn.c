@@ -354,21 +354,32 @@ LOCAL void test_vmn( void )
 	KT_ASSERT_EQ(mn_get_atr(mid, &vd, "vobj.open"), 0);
 	KT_ASSERT_EQ(mn_get_atr(mid, &vd, "vobj.close"), MN_GREY);
 	KT_ASSERT_EQ(mn_get_atr(mid, &vd, "vobj.reconnect"), MN_HIDE);
-	KT_ASSERT_EQ(mn_get_atr(mid, &rd, "real.lock"), MN_GREY);	/* its applist names no program */
+	KT_ASSERT_EQ(mn_get_atr(mid, &rd, "real.lock"), MN_GREY);
 	KT_ASSERT_EQ(mn_get_atr(mid, &rd, "real.unlock"), MN_HIDE);
 	(void)mn_del_men(mid);
 
-	/* on one that opens with a program: what it opens with can be fixed */
-	v->target = def_of(SYSDEF_PROG_BOX);
-	KT_ASSERT_ER(cab_menu_make(&st, &mid), E_OK);
-	dt_get_vmn(d, mid, TRUE, v);
-	KT_ASSERT_EQ(mn_get_atr(mid, &rd, "real.lock"), 0);
-	KT_ASSERT_EQ(mn_get_atr(mid, &rd, "real.unlock"), MN_HIDE);
-	(void)mn_del_men(mid);
-	v->target = cab;
+	/*
+	 * Whether what a link opens with can be fixed, as a program's menu
+	 * asks it (DT_RQ_LINK_STATE): not for one whose applist names no
+	 * program, for one that opens with a program
+	 */
+	{
+		T_DTREQ	rq;
+		T_DTANS	an;
 
-	/* in a sealed window, what changes its record is grey */
-	d->sealed = TRUE;
+		knl_memset(&rq, 0, sizeof(rq));
+		knl_memset(&an, 0, sizeof(an));
+		rq.req = DT_RQ_LINK_STATE;
+		rq.target = cab;
+		KT_ASSERT_ER(dt_link_state_req(&rq, &an), E_OK);
+		KT_ASSERT_EQ(an.flags & DT_F_LOCKABLE, 0);
+		rq.target = def_of(SYSDEF_PROG_BOX);
+		knl_memset(&an, 0, sizeof(an));
+		KT_ASSERT_ER(dt_link_state_req(&rq, &an), E_OK);
+		KT_ASSERT_EQ(an.flags & DT_F_LOCKABLE, DT_F_LOCKABLE);
+	}
+
+	/* a window of the desktop's is a part's, which keeps no record: what changes a link is grey */
 	KT_ASSERT_ER(cab_menu_make(&st, &mid), E_OK);
 	dt_get_vmn(d, mid, TRUE, v);
 	KT_ASSERT_EQ(mn_get_atr(mid, &vd, "vobj.attr"), MN_GREY);

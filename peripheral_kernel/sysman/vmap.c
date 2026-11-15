@@ -282,6 +282,52 @@ EXPORT void *knl_vmap_pa( UD pa, UD npages, UINT flags )
 }
 
 /*
+ * Pages that are someone else's and need not follow one another (a BO
+ * of the GPU), mapped one after another at a run of addresses, so that
+ * the kernel reads them as one buffer. Taken away with knl_vunmap_pa.
+ */
+EXPORT void *knl_vmap_pages( CONST UD *pa, UD npages, UINT flags )
+{
+	UBINT	va, v;
+	UD	attr = ( (flags & VMAP_NOCACHE) != 0 ) ? PTE_PAGE_KDATA_NC
+						      : PTE_PAGE_KDATA;
+	UINT	imask;
+	UD	i;
+
+	if ( pa == NULL || npages == 0 || npages >= VMAP_PAGES ) {
+		return NULL;
+	}
+	for ( i = 0; i < npages; i++ ) {
+		if ( (pa[i] & (PAGE_SIZE - 1)) != 0 ) {
+			return NULL;
+		}
+	}
+
+	ISpinLock(&vmap_lock, &imask);
+	va = vmap_alloc_va(npages);
+	ISpinUnlock(&vmap_lock, &imask);
+	if ( va == 0 ) {
+		vmap_failed(npages, "no run of addresses that long");
+		return NULL;
+	}
+	for ( i = 0, v = va; i < npages; i++, v += PAGE_SIZE ) {
+		if ( knl_pt_map(knl_pt_l0_k_pa, v, pa[i], PAGE_SIZE, attr) != E_OK ) {
+			UD	k;
+
+			for ( k = 0, v = va; k < i; k++, v += PAGE_SIZE ) {
+				knl_pt_unmap(knl_pt_l0_k_pa, v, PAGE_SIZE);
+			}
+			ISpinLock(&vmap_lock, &imask);
+			vmap_free_va(va, npages);
+			ISpinUnlock(&vmap_lock, &imask);
+			return NULL;
+		}
+	}
+
+	return (void *)va;
+}
+
+/*
  * Take such a mapping away again. The memory itself belongs to whoever
  * it belonged to before, so nothing is given back to the allocator.
  */

@@ -80,7 +80,9 @@ def main():
     try:
         if args.size == "auto":
             mb = 16 * 1024 * 1024
-            length = need + need // 4 + 48 * 1024 * 1024
+            # a quarter over for the volume's own records, and 256M for what
+            # the system writes once it runs (stores, saved objects, logs)
+            length = need + need // 4 + 256 * 1024 * 1024
             length = max(64 * 1024 * 1024, (length + mb - 1) // mb * mb)
         else:
             length = parse_size(args.size) if args.size else None

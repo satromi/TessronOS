@@ -224,6 +224,28 @@ void *knl_acpica_device( const char *hid, int index )
 	return p.h;
 }
 
+static ACPI_STATUS pick_any( ACPI_HANDLE h, UINT32 Level, void *Context, void **ReturnValue )
+{
+	PICK	*p = (PICK *)Context;
+
+	(void)Level;
+	(void)ReturnValue;
+	if ( p->seen++ == p->want ) {
+		p->h = h;
+		return AE_CTRL_TERMINATE;
+	}
+	return AE_OK;
+}
+
+void *knl_acpica_thermal_zone( int index )
+{
+	PICK	p = { index, 0, NULL };
+
+	if ( !ready ) return NULL;
+	(void)AcpiWalkNamespace(ACPI_TYPE_THERMAL, ACPI_ROOT_OBJECT, ACPI_UINT32_MAX, pick_any, NULL, &p, NULL);
+	return p.h;
+}
+
 /*
  * The SoundWire controllers the namespace has: a device whose _ADR has link
  * type 4 in bits 28-31 (a PCI function's _ADR, device << 16 | function, never
@@ -491,6 +513,97 @@ int knl_acpica_dsm_int( void *dev, const unsigned char *uuid, unsigned int rev, 
 }
 
 /* ---------------------------------------------------------------- buffers, GPIO lines, memory, dependencies */
+
+int knl_acpica_uuids( void *dev, const char *method, unsigned char (*uuid)[16], int max )
+{
+	ACPI_BUFFER	b = { ACPI_ALLOCATE_BUFFER, NULL };
+	ACPI_OBJECT	*o;
+	int		i, n = 0;
+
+	if ( dev == NULL || ACPI_FAILURE(AcpiEvaluateObjectTyped(dev, (char *)method, NULL, &b, ACPI_TYPE_PACKAGE)) ) {
+		return -1;
+	}
+	o = (ACPI_OBJECT *)b.Pointer;
+	for ( i = 0; i < (int)o->Package.Count; i++ ) {
+		ACPI_OBJECT	*e = &o->Package.Elements[i];
+
+		/* a package with anything but UUIDs is not taken at all */
+		if ( e->Type != ACPI_TYPE_BUFFER || e->Buffer.Length != 16 ) {
+			n = -1;
+			break;
+		}
+		if ( n < max ) memcpy(uuid[n], e->Buffer.Pointer, 16);
+		n++;
+	}
+	ACPI_FREE(b.Pointer);
+	return n;
+}
+
+/* A reference of a package to a named object: its handle, NULL when it is not one */
+static ACPI_HANDLE ref_handle( ACPI_OBJECT *e )
+{
+	if ( e->Type == ACPI_TYPE_LOCAL_REFERENCE || e->Type == ACPI_TYPE_ANY ) return e->Reference.Handle;
+	return NULL;
+}
+
+#define PSVT_ELEMENTS	12
+#define PSVT_LIMIT	7
+
+int knl_acpica_psvt( void *dev, TSACPI_PSVT *row, int max )
+{
+	ACPI_BUFFER	b = { ACPI_ALLOCATE_BUFFER, NULL };
+	ACPI_OBJECT	*o;
+	int		i, k, n = 0;
+
+	if ( dev == NULL || ACPI_FAILURE(AcpiEvaluateObjectTyped(dev, "PSVT", NULL, &b, ACPI_TYPE_PACKAGE)) ) {
+		return -1;
+	}
+	o = (ACPI_OBJECT *)b.Pointer;
+	/* the first element is the revision, and only revision 2 is known */
+	if ( o->Package.Count < 2 || o->Package.Elements[0].Type != ACPI_TYPE_INTEGER
+	  || o->Package.Elements[0].Integer.Value != 2 ) {
+		ACPI_FREE(b.Pointer);
+		return -1;
+	}
+	for ( i = 1; i < (int)o->Package.Count && n < max; i++ ) {
+		ACPI_OBJECT		*p = &o->Package.Elements[i], *e;
+		TSACPI_PSVT		*r = &row[n];
+		unsigned long long	*v[10];
+		int			bad = 0;
+
+		if ( p->Type != ACPI_TYPE_PACKAGE || p->Package.Count < PSVT_ELEMENTS ) continue;
+		e = p->Package.Elements;
+		r->source = ref_handle(&e[0]);
+		r->target = ref_handle(&e[1]);
+		if ( r->source == NULL || r->target == NULL ) continue;
+		v[0] = &r->priority;
+		v[1] = &r->sample_period;
+		v[2] = &r->temp;
+		v[3] = &r->domain;
+		v[4] = &r->knob;
+		v[5] = &r->limit;
+		v[6] = &r->step;
+		v[7] = &r->limit_coeff;
+		v[8] = &r->unlimit_coeff;
+		r->limit_str[0] = '\0';
+		for ( k = 2; k < 11; k++ ) {
+			unsigned long long	*to = v[k - 2];
+
+			*to = 0;
+			if ( k == PSVT_LIMIT && e[k].Type == ACPI_TYPE_STRING ) {
+				strncpy(r->limit_str, e[k].String.Pointer, sizeof(r->limit_str) - 1);
+				r->limit_str[sizeof(r->limit_str) - 1] = '\0';
+			} else if ( e[k].Type == ACPI_TYPE_INTEGER ) {
+				*to = e[k].Integer.Value;
+			} else {
+				bad = 1;
+			}
+		}
+		if ( !bad ) n++;
+	}
+	ACPI_FREE(b.Pointer);
+	return n;
+}
 
 int knl_acpica_buf( void *dev, const char *method, unsigned char *buf, int max )
 {

@@ -216,11 +216,13 @@ void fg_link_menu( ID mid, CONST T_VOBJ *v )
 	T_OBREF	ref;
 	T_DTREQ	rq;
 	T_DTANS	an;
-	BOOL	cut, kept, open = FALSE, lockable = TRUE;
+	BOOL	cut, kept, open = FALSE, lockable = TRUE, detach = FALSE, grow = FALSE;
 
 	if ( v == NULL ) {
 		(void)mn_chg_atr(mid, NULL, "vobj", MN_GREY);
 		(void)mn_chg_atr(mid, NULL, "real", MN_GREY);
+		/* ディスク操作 away from a link: 切り離し is of a disk's link, 拡張 of the system's volume */
+		(void)mn_chg_atr(mid, NULL, "disk.detach", MN_GREY);
 		return;
 	}
 	cut = (BOOL)( ob_ref_obj(&v->target, &ref) < E_OK );
@@ -231,7 +233,11 @@ void fg_link_menu( ID mid, CONST T_VOBJ *v )
 	if ( ask_desktop(&rq, &an, 3000) >= E_OK ) {
 		open = (BOOL)( ( an.flags & DT_F_OPEN ) != 0 );
 		lockable = (BOOL)( ( an.flags & DT_F_LOCKABLE ) != 0 );
+		detach = (BOOL)( ( an.flags & DT_F_DETACHABLE ) != 0 );
+		grow = (BOOL)( ( an.flags & DT_F_GROWABLE ) != 0 );
 	}
+	(void)mn_chg_atr(mid, NULL, "disk.detach", detach ? 0 : MN_GREY);
+	(void)mn_chg_atr(mid, NULL, "disk.grow", grow ? 0 : MN_GREY);
 	(void)mn_chg_atr(mid, NULL, "vobj.open", ( open || cut ) ? MN_GREY : 0);
 	(void)mn_chg_atr(mid, NULL, "vobj.close", open ? 0 : MN_GREY);
 	(void)mn_chg_atr(mid, NULL, "vobj.reconnect", cut ? 0 : MN_HIDE);
@@ -271,6 +277,16 @@ void fg_link_copy_put( CONST T_VOBJ *v, CONST TS_UUID *copy, INT dx, INT dy )
 }
 
 /*
+ * A link opened: as a double press opens it, unless the box opens it its
+ * own way (ウインドウ一覧 brings the window that shows it to the front)
+ */
+void fg_open( CONST T_VOBJ *v )
+{
+	if ( fg_box != NULL && fg_box->open != NULL && fg_box->open(v) ) return;
+	link_open(v);
+}
+
+/*
  * One of the 仮身操作 and 実身操作 on link v, by its code (the link as the
  * menu found it under the pointer)
  */
@@ -283,12 +299,13 @@ void fg_link_op( CONST char *code, T_VOBJ *v )
 
 	memset(&an, 0, sizeof(an));
 	if ( strcmp(code, "vobj.open") == 0 ) {
-		link_open(v);
+		fg_open(v);
 	} else if ( strcmp(code, "vobj.close") == 0 ) {
 		fg_ask_of(v, DT_RQ_CLOSE, &rq);
 		(void)ask_desktop(&rq, &an, 5000);
 	} else if ( strcmp(code, "vobj.attr") == 0 ) {
 		fg_ask_of(v, DT_RQ_ATTR, &rq);
+		(void)ta_link_named(&rq, &v->vobjid);	/* the windows opened from it told its new look */
 		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
 			fg_before();
 			v->right = v->left + an.look.w;
@@ -304,7 +321,8 @@ void fg_link_op( CONST char *code, T_VOBJ *v )
 			v->hidden = (BOOL)( ( an.flags & DT_F_HIDDEN ) != 0 );
 			(void)tad_lnk_set(g_rec, v);
 			fg_after();
-			snprintf(s, sizeof(s), "attr %s", fg_link_name(v));
+			snprintf(s, sizeof(s), "attr %s chsz %d bgcol %06x", fg_link_name(v), (INT)v->chsz,
+				 (UINT)( v->bgcol & 0x00FFFFFFU ));
 			note(s);
 		}
 	} else if ( strcmp(code, "vobj.relation") == 0 ) {
@@ -427,7 +445,8 @@ void fg_arrange( CONST T_FEARRANGE *o )
 	if ( g_fig == NULL || g_npick <= 0 ) return;
 	it = malloc(sizeof(T_FEARITEM) * (size_t)g_npick);
 	if ( it == NULL ) return;
-	for ( i = 0; i < g_fig->nsh && n < g_npick; i++ ) {
+	/* the templates of the 原紙箱 stay where they were laid out: 整頓 leaves them */
+	for ( i = 0; i < g_fig->nsh && n < g_npick && !FG_TEMPLATES; i++ ) {
 		if ( g_pick[i] != 0 && fg_is_link(i) && tad_lnk_get(g_rec, g_fig->sh[i].link, &it[n].v) >= E_OK ) {
 			it[n].seq = g_pick[i];
 			n++;

@@ -25,15 +25,15 @@
  *	never runs the processors faster than that, and a machine whose
  *	settings say more is brought up to it as they are read.
  *
- *	On a PC the clock is the processor's and its firmware's to choose
- *	(HWP, when the firmware turned it on), and the kernel leaves it so:
- *	nothing here or anywhere in the kernel writes the registers that
- *	would change it (IA32_PERF_CTL, IA32_PM_ENABLE, the HWP requests,
- *	IA32_ENERGY_PERF_BIAS, the speed step and turbo bits of
- *	IA32_MISC_ENABLE, the package's power limits), and the machine's
- *	setting CPU_MHZ is not used (システム環境設定 does not offer it on a
- *	PC). What HWP is set to is read once, on a machine that is not a
- *	virtual one, and told on the console. Calls are one at a time, the
+ *	On a PC the clock is the processor's to choose: where it has HWP the
+ *	kernel turns it on with the range of the powersave policy and the
+ *	energy bias (kernel/sysdepend/x64/hwp.c), and the DPTF passive table
+ *	may set the package's PL1 (acpi_therm.c); nothing here writes the
+ *	registers that set the clock (IA32_PERF_CTL, the speed step and turbo
+ *	bits of IA32_MISC_ENABLE), and the machine's setting CPU_MHZ is not
+ *	used (システム環境設定 does not offer it on a PC). What HWP is set to
+ *	is read once, on a machine that is not a virtual one, and told on
+ *	the console. Calls are one at a time, the
  *	limit and the fan coming from different tasks: the clock asked for
  *	and what the firmware took belong together.
  */
@@ -173,7 +173,7 @@ EXPORT void knl_cpu_start( void )
 #define MSR_HWP_REQUEST		0x774
 
 /*
- * What the firmware set HWP to, read and told: nothing is written. Not
+ * What HWP is set to, read and told: nothing is written here. Not
  * read on a virtual machine (CPUID.1:ECX bit 31), whose hypervisor may
  * not let these registers be read, nor without HWP (CPUID.6:EAX bit 7).
  */
@@ -198,7 +198,7 @@ LOCAL void hwp_tell( void )
 	}
 	en = rdmsr(MSR_PM_ENABLE);
 	if ( ( en & 1 ) == 0 ) {
-		tm_printf((UB *)"cpu: HWP there but not on (IA32_PM_ENABLE %lx): left as the firmware set it\n", en);
+		tm_printf((UB *)"cpu: HWP there but not on (IA32_PM_ENABLE %lx)\n", en);
 		return;
 	}
 	cap = rdmsr(MSR_HWP_CAPABILITIES);
@@ -256,8 +256,8 @@ EXPORT ER knl_cpu_heat( UW hz, UW *p_got )
  * processor that slept most of the period is told at the clock it ran
  * at, not slowed by its sleep. Reading costs no wait: the last periods'
  * values are taken as they are. A processor whose sample is older than
- * FREQ_STALE_MS (gone offline, its timer stopped) is left out. Only read:
- * the registers that set the clock are not written (see above). Not on
+ * FREQ_STALE_MS (gone offline, its timer stopped) is left out. Only read.
+ * Not on
  * a virtual machine (CPUID.1:ECX bit 31), whose hypervisor may fault
  * the reads, nor without the two counters (CPUID.6:ECX bit 0).
  */

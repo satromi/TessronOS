@@ -8,38 +8,8 @@
 # Escape to end it, the figure saved. Record 0 comes out the same, byte for byte.
 # Keys: Home 4A, Delete 4C, End 4D, Enter 28, Esc 29, ひらがなカタカナ 88, 英数 39;
 # with Ctrl (01) S 16, E 08.
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
-mkbig fig 30 4 1
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-dclick 215 255
-sync 600
-key 4A
-key 4C
-key 4D
-text xy
-key 88
-text kana
-sync 600
-shot text_kernel_kana
-key 28
-key 39
-key 28
-sync 600
-shot text_kernel_typing
-key 29
-sync 600
-key 16 01
-sync 600
-shot text_kernel
-sum show
-keep kernel
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 30 4 1
 logmark
 pfig big
@@ -69,6 +39,6 @@ key 16 01
 expectsince figure: saved (0)
 shot text_process
 sum show
-same kernel
+want ok 4433 f63069c8cfb0c0df
 key 08 01
 expect figure: closed

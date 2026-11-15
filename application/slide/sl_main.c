@@ -22,12 +22,12 @@
  *	takes the line down while it is open and puts it back after, however
  *	the program ends.
  *
- *	A slide that holds a <realtime> is played by the desktop's player in
- *	this window (DT_RQ_RT_OPEN with DT_F_RT_SLIDE, ts/dtreq.h), as
- *	MPEG Player has it play: what the person does goes to the slide's
- *	program first, and what the program asks of the slides comes back
- *	in the player's answers (DT_RTS_GO), asked for every tenth of a
- *	second while it plays.
+ *	A slide that holds a <realtime> is played in this window by the
+ *	player linked into this program (lib/librtplay, ts/rtplay.h), as a
+ *	slide: fitted to the window as the slides are made for. What the
+ *	person does goes to the slide's program first, and what the program
+ *	asks of the slides comes back in the player's state (RTP_S_GO),
+ *	asked for every tenth of a second while it plays.
  *
  *	The second button opens the slides' menu (SYSDEF_MENU_SLIDE), 実行
  *	for the link under the pointer; ジャンプ and 背景色変更 choose from a
@@ -53,6 +53,7 @@
 #include <ts/tvsrc.h>
 #include <ts/fn.h>
 #include <ts/rtad.h>
+#include <ts/rtplay.h>
 #include <ts/slide.h>
 #include <ts/wm.h>
 
@@ -111,9 +112,9 @@ static BOOL	g_down;
 static INT	g_down_x, g_down_y;
 
 /* the player of the slide shown, when it holds a <realtime> */
-static UINT	g_rt;			/* the player's number, 0 none */
+static RTPLAY	*g_rt;			/* the player, NULL none */
 static INT	g_rt_page;
-static UINT	g_rt_flags;		/* DT_RTS_* as it said last */
+static UINT	g_rt_flags;		/* RTP_S_* as it said last */
 
 /* the programs 実行 offers for the link under the pointer */
 static UB	g_app_id[APP_MAX][APP_ID];
@@ -188,82 +189,63 @@ static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 
 /* ---------------------------------------------------------------- the player */
 
-static void rt_take( CONST T_DTANS *an )
+static void rt_take( CONST RTP_HOW *st )
 {
-	g_rt_flags = an->flags;
-	if ( ( an->flags & DT_RTS_GO ) == 0 ) return;
+	g_rt_flags = st->flags;
+	if ( ( st->flags & RTP_S_GO ) == 0 ) return;
 	/* what the slide's program asked of the slides */
-	if ( an->look.disp == RT_ACT_NEXT ) {
+	if ( st->go == RT_ACT_NEXT ) {
 		if ( g_end ) g_closing = TRUE;
 		else sl_go(g_cur + 1);
-	} else if ( an->look.disp == RT_ACT_PREV ) {
+	} else if ( st->go == RT_ACT_PREV ) {
 		if ( g_end ) sl_go(g_n - 1);
 		else if ( g_cur > 0 ) sl_go(g_cur - 1);
-	} else if ( an->look.disp == RT_ACT_INDEX ) {
-		sl_go((INT)an->look.autoopen);
+	} else if ( st->go == RT_ACT_INDEX ) {
+		sl_go(st->go_n);
 	}
 }
 
-/* Something done to the player; its answer taken. FALSE when there is no player any more */
+/* Something done to the player; how it goes then taken. FALSE when there is no player */
 static BOOL rt_do( UINT op, INT x, INT y )
 {
-	T_DTREQ	rq;
-	T_DTANS	an;
+	RTP_HOW	st;
 
-	if ( g_rt == 0 ) return FALSE;
-	memset(&rq, 0, sizeof(rq));
-	memset(&an, 0, sizeof(an));
-	rq.req = DT_RQ_RT_DO;
-	rq.carry = g_rt;
-	rq.recno = (INT)op;
-	rq.grab_x = x;
-	rq.grab_y = y;
-	if ( ask_desktop(&rq, &an, 5000) < E_OK ) {
-		g_rt = 0;
-		g_rt_flags = 0;
-		return FALSE;
-	}
-	rt_take(&an);
+	if ( g_rt == NULL ) return FALSE;
+	if ( rtp_do(g_rt, op, x, y, &st) < E_OK ) return FALSE;
+	rt_take(&st);
 	return TRUE;
 }
 
 static void rt_end( void )
 {
-	T_DTREQ	rq;
-	T_DTANS	an;
-
-	if ( g_rt == 0 ) return;
-	memset(&rq, 0, sizeof(rq));
-	rq.req = DT_RQ_RT_CLOSE;
-	rq.carry = g_rt;
-	(void)ask_desktop(&rq, &an, 5000);
-	g_rt = 0;
+	if ( g_rt == NULL ) return;
+	rtp_close(g_rt);
+	g_rt = NULL;
 	g_rt_flags = 0;
 }
 
-/* The slide shown played by the desktop's player, fitted to the window as a slide is */
+/* The slide shown played in this window, fitted to it as a slide is */
 static BOOL rt_open( UW ground, UW paper )
 {
-	T_DTREQ	rq;
-	T_DTANS	an;
+	RTP_OPEN	o;
 
-	memset(&rq, 0, sizeof(rq));
-	memset(&an, 0, sizeof(an));
-	rq.req = DT_RQ_RT_OPEN;
-	rq.target = g_page[g_cur];
-	rq.recno = 0;
-	rq.flags = DT_F_RT_SLIDE;
-	rq.look.w = g_w;
-	rq.look.h = g_h;
-	rq.look.bgcol = ground;
-	rq.look.chcol = paper;
-	rq.grab_x = g_tw;
-	rq.grab_y = g_th;
-	rq.carry = (UINT)( g_cur + 1 );
-	if ( ask_desktop(&rq, &an, 10000) < E_OK ) return FALSE;
-	g_rt = an.how;
+	memset(&o, 0, sizeof(o));
+	o.gid = g_gid;
+	o.kw = g_kw;
+	o.port = g_port;
+	o.area.right = g_w;
+	o.area.bottom = g_h;
+	o.ground = ground;
+	o.paper = paper;
+	o.slide = TRUE;
+	o.tw = g_tw;
+	o.th = g_th;
+	o.slide_no = g_cur + 1;
+	g_rt = rtp_open(&g_page[g_cur], 0, &o);
+	if ( g_rt == NULL ) return FALSE;
 	g_rt_page = g_cur;
-	g_rt_flags = an.flags;
+	g_rt_flags = RTP_S_PLAYING;
+	(void)rt_do(RTP_STATE, 0, 0);
 	return TRUE;
 }
 
@@ -401,9 +383,9 @@ static void sl_draw( void )
 	if ( tv_src_look(&v, name, sizeof(name), NULL) < 0 ) name[0] = 0;
 	z = sl_fit(g_w, g_h, g_tw, g_th, &area, &den);
 	rec = tv_src_get(&g_page[g_cur], 0);
-	if ( g_rt != 0 && g_rt_page != g_cur ) rt_end();
+	if ( g_rt != NULL && g_rt_page != g_cur ) rt_end();
 	if ( sl_has_rt(rec) ) {
-		if ( g_rt == 0 ) {
+		if ( g_rt == NULL ) {
 			dp_fill_rect(g_gid, &all, ground);
 			if ( !rt_open(ground, paper) ) {
 				/* no player: the slide shown as it stands, still */
@@ -411,7 +393,7 @@ static void sl_draw( void )
 				(void)draw_page(g_gid, &g_page[g_cur], &area, z, den, paper);
 			}
 		} else {
-			(void)rt_do(DT_RT_REDRAW, 0, 0);
+			(void)rt_do(RTP_REDRAW, 0, 0);
 		}
 	} else {
 		rt_end();
@@ -427,7 +409,7 @@ static void sl_draw( void )
 	(void)wm_msg_put(msg);
 	snprintf(msg, sizeof(msg), "%d of %d zoom %d/%d at %d,%d %dx%d%s", g_cur + 1, g_n, z, den,
 		 area.left, area.top, area.right - area.left, area.bottom - area.top,
-		 ( g_rt != 0 ) ? " playing" : "");
+		 ( g_rt != NULL ) ? " playing" : "");
 	note(msg);
 	(void)wm_obj_flush(g_kw, NULL);
 	tv_src_stat(&s1);
@@ -721,7 +703,7 @@ static void key( CONST T_OBNTM *m )
 	BOOL	up = (BOOL)( ( m->mods & OB_KEY_UP ) != 0 );
 
 	if ( up ) {
-		if ( g_rt != 0 ) (void)rt_do(DT_RT_KEY, (INT)m->code, DT_RT_KEY_UP);
+		if ( g_rt != NULL ) (void)rt_do(RTP_KEY, (INT)m->code, RTP_KEY_UP);
 		return;
 	}
 	if ( ( m->mods & M_CTRL ) != 0 ) {
@@ -735,14 +717,14 @@ static void key( CONST T_OBNTM *m )
 		}
 		return;
 	}
-	if ( g_rt != 0 && !g_end ) {
+	if ( g_rt != NULL && !g_end ) {
 		/* the program's own key first; a program waiting to be begun is begun by Space and Enter */
-		if ( rt_do(DT_RT_KEY, (INT)m->code, DT_RT_KEY_MINE) && ( g_rt_flags & DT_RTS_TAKEN ) != 0 ) return;
-		if ( ( g_rt_flags & DT_RTS_WAITING ) != 0 && ( m->code == K_SPACE || m->code == K_ENTER ) ) {
-			(void)rt_do(DT_RT_TOGGLE, 0, 0);
+		if ( rt_do(RTP_KEY, (INT)m->code, RTP_KEY_MINE) && ( g_rt_flags & RTP_S_TAKEN ) != 0 ) return;
+		if ( ( g_rt_flags & RTP_S_WAITING ) != 0 && ( m->code == K_SPACE || m->code == K_ENTER ) ) {
+			(void)rt_do(RTP_TOGGLE, 0, 0);
 			return;
 		}
-		(void)rt_do(DT_RT_KEY, (INT)m->code, 0);
+		(void)rt_do(RTP_KEY, (INT)m->code, 0);
 	}
 	sl_key(m->code);
 }
@@ -754,13 +736,13 @@ static void press( CONST T_OBNTM *m )
 	g_down = TRUE;
 	g_down_x = m->x;
 	g_down_y = m->y;
-	if ( g_rt != 0 && !g_end ) {
+	if ( g_rt != NULL && !g_end ) {
 		/* a program waiting to be begun is begun; a click it waits for is its */
-		if ( ( g_rt_flags & DT_RTS_WAITING ) != 0 ) {
-			(void)rt_do(DT_RT_TOGGLE, 0, 0);
+		if ( ( g_rt_flags & RTP_S_WAITING ) != 0 ) {
+			(void)rt_do(RTP_TOGGLE, 0, 0);
 			return;
 		}
-		if ( rt_do(DT_RT_PRESS, m->x, m->y) && ( g_rt_flags & DT_RTS_TAKEN ) != 0 ) return;
+		if ( rt_do(RTP_PRESS, m->x, m->y) && ( g_rt_flags & RTP_S_TAKEN ) != 0 ) return;
 	}
 	/* a press on a link does not turn the page */
 	if ( link_at(m->x, m->y, &v) ) return;
@@ -773,7 +755,7 @@ static void released( CONST T_OBNTM *m )
 
 	if ( !g_down ) return;
 	g_down = FALSE;
-	if ( g_rt != 0 && rt_do(DT_RT_RELEASE, m->x, m->y) && ( g_rt_flags & DT_RTS_TAKEN ) != 0 ) return;
+	if ( g_rt != NULL && rt_do(RTP_RELEASE, m->x, m->y) && ( g_rt_flags & RTP_S_TAKEN ) != 0 ) return;
 	/* a swipe across the slide, when its program does not take it */
 	if ( ( dx > SWIPE_X || dx < -SWIPE_X ) && ( dy < SWIPE_Y && dy > -SWIPE_Y ) ) {
 		if ( dx < 0 ) sl_next();
@@ -802,6 +784,15 @@ static void event( CONST T_OBNTM *m )
 		if ( m->event == OB_E_CHANGE ) {
 			tv_src_forget(&m->uuid);
 			sl_draw();
+		} else if ( m->event == OB_E_DELETE ) {
+			/* the document of the slides gone: the window goes with it; a slide gone is shown as it fails */
+			if ( memcmp(&m->uuid, &g_doc, sizeof(TS_UUID)) == 0 ) {
+				g_closing = TRUE;
+			} else {
+				if ( g_rt != NULL && memcmp(&m->uuid, &g_page[g_rt_page], sizeof(TS_UUID)) == 0 ) rt_end();
+				tv_src_forget(&m->uuid);
+				sl_draw();
+			}
 		}
 		return;
 	}
@@ -822,7 +813,7 @@ static void event( CONST T_OBNTM *m )
 		if ( m->code == 0 ) released(m);
 		break;
 	case OB_E_MOVE:
-		if ( g_rt != 0 ) (void)rt_do(DT_RT_MOVE, m->x, m->y);
+		if ( g_rt != NULL ) (void)rt_do(RTP_MOVE, m->x, m->y);
 		break;
 	case OB_E_KEY:
 		if ( ( m->mods & OB_KEY_UP ) == 0 ) g_input_at = m->when;
@@ -836,18 +827,7 @@ static void event( CONST T_OBNTM *m )
 		break;
 	case OB_E_REDRAW:
 		work_size();
-		if ( g_rt != 0 ) {
-			T_DTREQ	rq;
-			T_DTANS	an;
-
-			memset(&rq, 0, sizeof(rq));
-			rq.req = DT_RQ_RT_DO;
-			rq.carry = g_rt;
-			rq.recno = DT_RT_AREA;
-			rq.look.w = g_w;
-			rq.look.h = g_h;
-			if ( ask_desktop(&rq, &an, 5000) >= E_OK ) rt_take(&an);
-		}
+		if ( g_rt != NULL ) (void)rt_do(RTP_AREA, g_w, g_h);
 		sl_draw();
 		break;
 	default:
@@ -865,7 +845,7 @@ static void watch( CONST TS_UUID *id )
 
 	if ( k <= 0 ) return;
 	memset(&req, 0, sizeof(req));
-	req.events = OB_E_CHANGE;
+	req.events = OB_E_CHANGE | OB_E_DELETE;
 	req.id = 1;
 	(void)ob_ntf_evt(k, OB_REC_ANY, &req, g_port);
 	/* the request goes with the key: the key is kept until the program ends */
@@ -879,8 +859,9 @@ static ER win_open( void )
 
 	ts_uuid_text(&g_doc, shown);
 	/* the whole screen, the message line too, with no frame */
-	snprintf(json, sizeof(json), "{\"rect\":[0,0,640,480],\"attr\":%d,\"full\":1,\"icon\":\"%s\",\"shows\":\"%s\"}",
-		 WM_ATTR_SCREEN, SYSDEF_PROG_SLIDE, shown);
+	/* on the screen new windows open on: a rectangle from its corner tells which */
+	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%d,\"full\":1,\"icon\":\"%s\",\"shows\":\"%s\"}",
+		 wm_new_x(0), wm_new_y(0), wm_new_x(640), wm_new_y(480), WM_ATTR_SCREEN, SYSDEF_PROG_SLIDE, shown);
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
 	c.sub = OB_S_WINDOW;
@@ -966,14 +947,14 @@ int main( void )
 
 	while ( !g_closing ) {
 		ER	er;
-		TMO	tmo = ( g_rt != 0 ) ? RT_POLL_MS : TMO_FEVR;
+		TMO	tmo = ( g_rt != NULL ) ? RT_POLL_MS : TMO_FEVR;
 
 		er = ob_rea_tmo(g_port, 0, 0, &m, sizeof(m), &asz, tmo);
 		if ( er >= E_OK ) {
 			event(&m);
-		} else if ( er == E_TMOUT && g_rt != 0 ) {
+		} else if ( er == E_TMOUT && g_rt != NULL ) {
 			/* what a playing slide's program asks of the slides */
-			(void)rt_do(DT_RT_STATE, 0, 0);
+			(void)rt_do(RTP_STATE, 0, 0);
 		} else if ( er != E_TMOUT ) {
 			break;
 		}

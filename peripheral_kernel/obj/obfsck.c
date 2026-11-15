@@ -45,7 +45,9 @@
 #define SB_CRC		4092
 
 LOCAL ID	chk_mtx = 0;
-LOCAL UB	chk_busy[TSFSCK_DEVNM_MAX];	/* the device being checked alone, "" for none */
+LOCAL UB	chk_busy[TSFSCK_DEVNM_MAX];	/* the device being checked, "" for none */
+LOCAL INT	chk_held = 0;			/* volumes being attached, detached or made larger */
+LOCAL BOOL	boot_given = FALSE;		/* the repair at start given to a program */
 
 LOCAL BOOL		boot_done = FALSE;
 LOCAL UB		boot_dev[TSFSCK_DEVNM_MAX];
@@ -226,9 +228,43 @@ EXPORT BOOL knl_ob_chk_busy( CONST char *devnm )
 }
 
 /*
- * A volume checked: in place when its objects are in use, else opened
- * for the check alone. The system's own volume is not repaired here.
+ * A change of a volume (attaching, detaching, making it larger) and its
+ * check kept apart: the check opens the volume or works on the one
+ * attached, and neither may be closed or have its size changed under it.
  */
+EXPORT BOOL knl_ob_chk_hold( CONST char *devnm, BOOL on )
+{
+	BOOL	ok = TRUE;
+
+	if ( devnm == NULL || chk_init() < E_OK ) {
+		return FALSE;
+	}
+	tk_loc_mtx(chk_mtx, TMO_FEVR);
+	if ( !on ) {
+		if ( chk_held > 0 ) chk_held--;
+	} else if ( chk_busy[0] != 0 && same_name(chk_busy, devnm) ) {
+		ok = FALSE;
+	} else {
+		chk_held++;
+	}
+	tk_unl_mtx(chk_mtx);
+	return ok;
+}
+
+EXPORT BOOL knl_ob_chk_boot_once( void )
+{
+	BOOL	first;
+
+	if ( chk_init() < E_OK ) {
+		return FALSE;
+	}
+	tk_loc_mtx(chk_mtx, TMO_FEVR);
+	first = (BOOL)!boot_given;
+	boot_given = TRUE;
+	tk_unl_mtx(chk_mtx);
+	return first;
+}
+
 /*
  * The record of links from other volumes, checked after the volume
  * itself (design 7.5, 8.3), and put right with the repair. Not on a
@@ -251,6 +287,10 @@ LOCAL void xref_check( ID vol, UINT mode, T_TSFSCK *res, FP_TSFSCK fn, void *ctx
 	}
 }
 
+/*
+ * A volume checked: in place when its objects are in use, else opened
+ * for the check alone. The system's own volume is not repaired here.
+ */
 EXPORT ER ob_chk_run( CONST char *devnm, UINT mode, T_TSFSCK *res, FP_TSFSCK fn, void *ctx )
 {
 	ID	vol;
@@ -269,9 +309,9 @@ EXPORT ER ob_chk_run( CONST char *devnm, UINT mode, T_TSFSCK *res, FP_TSFSCK fn,
 		return E_NOEXS;
 	}
 	tk_loc_mtx(chk_mtx, TMO_FEVR);
-	if ( chk_busy[0] != 0 ) {
+	if ( chk_busy[0] != 0 || chk_held > 0 ) {
 		tk_unl_mtx(chk_mtx);
-		return E_BUSY;			/* one at a time */
+		return E_BUSY;			/* one at a time, and not while a volume is changing */
 	}
 	name_copy(chk_busy, devnm);
 	tk_unl_mtx(chk_mtx);

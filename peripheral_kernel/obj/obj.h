@@ -21,6 +21,20 @@
 #define OB_MGR_MAX	16		/* managers */
 
 /*
+ * A watcher of an object for a poll set (obpoll.c), on a list the object
+ * keeps. The lists are the poll sets' own, under their lock: an object
+ * only holds the head.
+ */
+typedef struct OBPWAIT {
+	struct OBPWAIT	*next, *prev;
+	struct OBPLIST	*on;		/* the list it is on; NULL none */
+} OBPWAIT;
+
+typedef struct OBPLIST {
+	OBPWAIT	*first;
+} OBPLIST;
+
+/*
  * A manager: the part of the peripheral kernel that serves one kind of
  * object. The handle is the manager's own number for an open object. A
  * call a manager has no use for is left NULL and answers E_NOSPT.
@@ -84,6 +98,19 @@ typedef struct {
 	 * something; NULL: the manager has nothing that comes in (E_NOSPT)
 	 */
 	ER	(*rtm)( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, TMO tmo );
+
+	/*
+	 * What holds for handle h now, as a poll set asks (OB_PL_IN, OB_PL_OUT,
+	 * OB_PL_HUP, OB_PL_RDHUP, OB_PL_ERR); with w, w is put on the object's
+	 * watchers (knl_obpoll_link) in the same take of the manager's lock,
+	 * so that no change after the look goes untold. A manager that has
+	 * it never names another object by a handle once its object is gone
+	 * (a generation in the handle), tells its watchers of every change
+	 * that may make the object ready (knl_obpoll_tell), and lets them go
+	 * when the object goes (knl_obpoll_gone), both under that lock.
+	 * NULL: its objects cannot be watched (E_NOSPT).
+	 */
+	INT	(*pol)( INT h, OBPWAIT *w );
 } T_OBMGR;
 
 /* The name manager (obname.c) */
@@ -115,6 +142,53 @@ IMPORT ER knl_obdev_init( void );
 IMPORT ER knl_obprc_init( void );
 IMPORT ER knl_obchan_init( void );
 IMPORT ER knl_obsock_init( void );		/* obsock.c: the sockets of the network */
+IMPORT ER knl_obstrm_init( void );		/* obstrm.c: the pairs of streams */
+IMPORT ER knl_obpoll_init( void );		/* obpoll.c: the poll sets */
+IMPORT ER knl_gpbo_init( void );		/* device/gpu/gpu_obj.c: the BOs of the GPU as objects */
+
+/*
+ * The ends of streams and the BO objects a process made and never
+ * opened go when it ends (knl_ob_prc_end, after its keys are closed)
+ */
+IMPORT void knl_obstrm_prc_end( ID pid );
+IMPORT void knl_obpoll_prc_end( ID pid );
+IMPORT void knl_gpbo_prc_end( ID pid );
+
+/*
+ * A key carried by a stream (obstrm.c): held, it keeps the object it
+ * names open as the key did, with the key's operations, until it is
+ * given to a process as a key of its own or let go. knl_ob_key_hold
+ * takes the calling process's key (it stays the caller's); E_ID: not a
+ * key, E_OACV: another's. knl_ob_key_give makes the new key, for pid
+ * (0: the calling task of the kernel), and the hold is spent either
+ * way; knl_ob_key_drop lets it go. Neither of the last two may be called
+ * holding a lock a manager's close takes.
+ */
+typedef struct {
+	INT	hnd;			/* the opened object held; -1 none */
+	UINT	ops;
+	BOOL	nowait;
+	UINT	type, sub;		/* its manager's */
+} T_OBKHOLD;
+
+IMPORT ER   knl_ob_key_hold( ID key, T_OBKHOLD *h, TS_UUID *p_uuid );
+IMPORT ID   knl_ob_key_give( T_OBKHOLD *h, ID pid );
+IMPORT void knl_ob_key_drop( T_OBKHOLD *h );
+
+/*
+ * Poll sets (obpoll.c). knl_ob_key_watch takes a key of the caller's
+ * that may read or write: the manager and handle of the object it opens
+ * and what holds for it now (its manager's pol, w put on its watchers
+ * unless NULL), or an error. The object's manager calls the other three
+ * under its own lock.
+ */
+IMPORT INT  knl_ob_key_watch( ID key, OBPWAIT *w, CONST T_OBMGR **p_mgr, INT *p_h );
+IMPORT void knl_obpoll_link( OBPLIST *l, OBPWAIT *w );
+IMPORT void knl_obpoll_tell( OBPLIST *l );	/* the object changed: its watchers made ready */
+IMPORT void knl_obpoll_gone( OBPLIST *l, BOOL tell );	/* the object goes: its watchers let go, told an error when keys to it are left */
+
+/* The objects of a manager's kind process pid holds keys to: their UUIDs, at most max; how many */
+IMPORT INT  knl_ob_key_objs( ID pid, UINT type, UINT sub, TS_UUID *buf, INT max );
 
 /* Volumes of the file manager */
 IMPORT ER   knl_obfile_attach( CONST char *path, UINT flags );
@@ -142,6 +216,7 @@ IMPORT void knl_obrand_start( void );		/* obrand.c */
 IMPORT void knl_obdisp_start( void );		/* obdisp.c */
 IMPORT void knl_obinput_start( void );		/* obinput.c */
 IMPORT void knl_obgpio_start( void );		/* obgpio.c */
+IMPORT void knl_gpu_obj_start( void );		/* device/gpu/gpu_obj.c: the GPU's device object */
 IMPORT void knl_obusb_start( void );		/* obusb.c, and the keyboards and pointers */
 IMPORT void knl_obinput_sync( void );		/* the keyboards and pointers there are now */
 

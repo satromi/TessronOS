@@ -310,8 +310,17 @@ LOCAL ER fu_volume( UAC *u, UACDIR *dir, UB req, H *v )
 
 /*
  * The level 0 .. 0xFFFF, or -1 when that direction has no volume. The
- * device's range may have 0xFFFF steps, so the products are unsigned.
+ * control is in 1/256 dB: a range across 0 dB has the level's middle
+ * (0x8000) at 0 dB, the cut below and the gain above each spread over
+ * their half, as the sound device's levels are (sndhw.h); a range all
+ * on one side of it is spread whole. The device's range may have 0xFFFF
+ * steps, so the products are unsigned.
  */
+LOCAL BOOL zero_inside( CONST UACDIR *d )
+{
+	return ( d->vol_min < 0 && d->vol_max > 0 );
+}
+
 LOCAL INT uac_get_volume( UAC *u, BOOL out )
 {
 	UACDIR	*d;
@@ -331,6 +340,10 @@ LOCAL INT uac_get_volume( UAC *u, BOOL out )
 	cur = d->vol_cur;
 	if ( cur < d->vol_min ) cur = d->vol_min;
 	if ( cur > d->vol_max ) cur = d->vol_max;
+	if ( zero_inside(d) ) {
+		return ( cur >= 0 ) ? 0x8000 + (INT)( (UW)cur * 0x7fff / (UW)d->vol_max )
+				    : (INT)( (UW)( cur - d->vol_min ) * 0x8000 / (UW)( -d->vol_min ) );
+	}
 
 	return (INT)((UW)(cur - d->vol_min) * 0xffff / (UW)((INT)d->vol_max - d->vol_min));
 }
@@ -349,7 +362,12 @@ LOCAL ER uac_set_volume( UAC *u, BOOL out, INT level )
 	}
 	if ( level < 0 ) level = 0;
 	if ( level > 0xffff ) level = 0xffff;
-	v = (H)(d->vol_min + (INT)((UW)((INT)d->vol_max - d->vol_min) * (UW)level / 0xffff));
+	if ( zero_inside(d) ) {
+		v = ( level >= 0x8000 ) ? (H)( (UW)( level - 0x8000 ) * (UW)d->vol_max / 0x7fff )
+					: (H)( d->vol_min + (INT)( (UW)level * (UW)( -d->vol_min ) / 0x8000 ) );
+	} else {
+		v = (H)(d->vol_min + (INT)((UW)((INT)d->vol_max - d->vol_min) * (UW)level / 0xffff));
+	}
 	if ( fu_volume(u, d, UAC_SET_CUR, &v) < E_OK ) {
 		return E_IO;
 	}

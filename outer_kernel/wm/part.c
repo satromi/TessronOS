@@ -213,6 +213,7 @@ LOCAL T_WMCLICK	ls_click;		/* the press that opened it, to its release */
 
 LOCAL void pop_open( INT pid, INT i, CONST T_WMEV *ev );
 LOCAL void pop_close( BOOL draw );
+LOCAL void pn_names_drop( T_WMPANEL *def );
 LOCAL INT  tlen( CONST UB *t );
 
 /*
@@ -396,7 +397,7 @@ LOCAL BOOL pn_view( CONST PANEL *p, T_DPRECT *v, INT *p_max )
 		return FALSE;
 	}
 	tg = (T_WMPART *)&p->def.part[p->scr];
-	pd_tag_sheet(tg, p->def.pool, &s);
+	pd_tag_sheet(tg, &s);
 	v->left = p->def.r.left + s.left + 2;
 	v->top = p->def.r.top + s.top + 2;
 	v->right = p->def.r.left + s.right - 2;
@@ -583,8 +584,10 @@ EXPORT INT knl_pn_add( INT pid, CONST T_WMPART *pt )
 
 LOCAL INT knl_pn_add_u( INT pid, CONST T_WMPART *pt )
 {
-	PANEL	*p = pn_of(pid);
-	INT	i;
+	PANEL		*p = pn_of(pid);
+	T_WMNAMES	*nm;
+	INT		i;
+	ER		er;
 
 	if ( p == NULL || p->is_menu ) {
 		return E_ID;
@@ -595,8 +598,13 @@ LOCAL INT knl_pn_add_u( INT pid, CONST T_WMPART *pt )
 	if ( p->def.npart >= WM_PART_MAX ) {
 		return E_LIMIT;
 	}
+	nm = pd_names_dup(pt->names, &er);	/* the panel's own, as opening one copies them */
+	if ( er < E_OK ) {
+		return er;
+	}
 	i = p->def.npart++;
 	p->def.part[i] = *pt;
+	p->def.part[i].names = nm;
 	pn_find_scroller(p);
 
 	return i;
@@ -629,6 +637,7 @@ LOCAL ER knl_pn_del_u( INT pid, INT i )
 	if ( ls_owner == pid && ls_part >= i ) {
 		pop_close(FALSE);		/* its part goes, or moves up one */
 	}
+	pd_names_free(p->def.part[i].names);
 	for ( k = i; k + 1 < p->def.npart; k++ ) {
 		p->def.part[k] = p->def.part[k + 1];
 	}
@@ -672,6 +681,53 @@ LOCAL ER knl_pn_set_rect_u( INT pid, INT i, CONST T_DPRECT *r )
 	return E_OK;
 }
 
+/*
+ * The sheet of a panel of tags moved within the panel: the program lays
+ * out a panel that follows its window's size. Another kind of part has
+ * no sheet (E_PAR).
+ */
+EXPORT ER knl_pn_set_inner( INT pid, INT i, CONST T_DPRECT *r )
+{
+	PANEL	*p;
+	ER	res = E_OK;
+
+	pn_lock();
+	p = pn_of(pid);
+	if ( p == NULL ) {
+		res = E_ID;
+	} else if ( i < 0 || i >= p->def.npart || r == NULL || r->right <= r->left || r->bottom <= r->top
+		 || WM_PT_KIND(p->def.part[i].type) != TG_PARTS ) {
+		res = E_PAR;
+	} else {
+		p->def.part[i].inner = *r;
+		wm_damage(p->wid, &p->def.r);
+	}
+	pn_unlock();
+	return res;
+}
+
+/* A panel made w by h where it stands: its ground is drawn over that much of the window */
+EXPORT ER knl_pn_set_size( INT pid, INT w, INT h )
+{
+	PANEL	*p;
+	ER	res = E_OK;
+
+	if ( w <= 0 || h <= 0 ) {
+		return E_PAR;
+	}
+	pn_lock();
+	p = pn_of(pid);
+	if ( p == NULL || p->is_menu ) {
+		res = E_ID;
+	} else {
+		p->def.r.right = p->def.r.left + w;
+		p->def.r.bottom = p->def.r.top + h;
+		wm_damage(p->wid, &p->def.r);
+	}
+	pn_unlock();
+	return res;
+}
+
 /* One of a panel's parts, copied out: nothing outside holds a pointer in */
 LOCAL ER knl_pn_part_u( INT pid, INT i, T_WMPART *out );
 
@@ -696,6 +752,7 @@ LOCAL ER knl_pn_part_u( INT pid, INT i, T_WMPART *out )
 		return E_PAR;
 	}
 	*out = p->def.part[i];
+	out->names = NULL;		/* the names stay the panel's: knl_pn_names copies them */
 
 	return E_OK;
 }
@@ -738,6 +795,19 @@ LOCAL INT wm_panel_open_u( INT wid, CONST T_WMPANEL *def )
 	}
 	p = &pn_tab[i];
 	p->def = *def;				/* the copy: see the head of this file */
+	{
+		/* and the names, a block of the panel's own for each part */
+		INT	k;
+		ER	er = E_OK;
+
+		for ( k = 0; k < p->def.npart; k++ ) {
+			p->def.part[k].names = ( er >= E_OK ) ? pd_names_dup(def->part[k].names, &er) : NULL;
+		}
+		if ( er < E_OK ) {
+			pn_names_drop(&p->def);
+			return er;
+		}
+	}
 	p->wid = wid;
 	p->is_menu = FALSE;
 	p->pressed = -1;
@@ -855,6 +925,16 @@ EXPORT INT wm_panel_open_box( INT wid, INT num, ID owner )
 	if ( n < 0 ) {
 		Kfree(def);
 		return n;
+	}
+	/* the box keeps bytes: whatever names the definition pointed at are not its own */
+	for ( n = 0; n < def->npart && n < WM_PART_MAX; n++ ) {
+		T_WMPART	*pt = &def->part[n];
+		UINT		k = WM_PT_KIND(pt->type);
+
+		pt->names = NULL;
+		if ( k == WS_PARTS || k == SS_PARTS || k == WM_PT_POPUP || k == TG_PARTS ) {
+			pt->count = 0;
+		}
 	}
 	pid = wm_panel_open(wid, def);
 	Kfree(def);
@@ -975,6 +1055,7 @@ LOCAL ER wm_panel_close_u( INT pid )
 		}
 		wm_close(p->popup);
 		p->popup = 0;
+		pn_names_drop(&p->def);
 		p->used = FALSE;
 		return E_OK;
 	}
@@ -993,6 +1074,7 @@ LOCAL ER wm_panel_close_u( INT pid )
 		p->under = NULL;
 	}
 	wm_damage(p->wid, &p->def.r);
+	pn_names_drop(&p->def);
 	p->used = FALSE;
 
 	return E_OK;
@@ -1624,7 +1706,6 @@ LOCAL void draw_part_body( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margi
 
 		knl_memset(&c, 0, sizeof(c));
 		c.gid = gid;
-		c.pool = p->def.pool;
 		c.focus = (BOOL)( p->focus == i );
 		c.held = ( p->pressed == i && p->held_in ) ? ( ( p->held_half != 0 ) ? p->held_half : 1 ) : 0;
 		c.held_at = ( p->pressed == i && p->held_in ) ? p->held_at : 0;
@@ -1673,6 +1754,7 @@ EXPORT volatile UW	knl_pn_drawing = 0;
 EXPORT ER wm_panel_draw( INT pid )
 {
 	ER	er;
+	INT	view = 0, i;
 
 	pn_lock();
 #if USE_UITEST
@@ -1683,7 +1765,25 @@ EXPORT ER wm_panel_draw( INT pid )
 #if USE_UITEST
 	knl_pn_drawing = 0;
 #endif
+	/*
+	 * A sheet of tags the program draws in (P_VIEW): the panel's ground
+	 * went over what it drew there, and the window is told to draw it
+	 * again, once the panel's lock is let go
+	 */
+	if ( er >= E_OK ) {
+		PANEL	*p = pn_of(pid);
+
+		for ( i = 0; p != NULL && !p->is_menu && i < p->def.npart; i++ ) {
+			if ( WM_PT_KIND(p->def.part[i].type) == TG_PARTS && ( p->def.part[i].type & P_VIEW ) != 0 ) {
+				view = p->wid;
+				break;
+			}
+		}
+	}
 	pn_unlock();
+	if ( view > 0 ) {
+		knl_wmobj_view_drawn(view);
+	}
 	return er;
 }
 
@@ -2828,7 +2928,7 @@ LOCAL void pn_press( PANEL *p, INT pid, CONST T_WMEV *ev )
 		vl_follow(p, pt);
 		break;
 	case TG_PARTS:
-		k = pd_tag_at(pt, p->def.pool, ev->x, ev->y, NULL);
+		k = pd_tag_at(pt, ev->x, ev->y, NULL);
 		if ( k > 0 ) {
 			p->held_at = k;
 		} else {
@@ -2921,7 +3021,7 @@ LOCAL void pn_move( PANEL *p, INT pid, CONST T_WMEV *ev )
 		p->held_in = in;
 		break;
 	case TG_PARTS:
-		in = (BOOL)( pd_tag_at(pt, p->def.pool, ev->x, ev->y, NULL) == p->held_at );
+		in = (BOOL)( pd_tag_at(pt, ev->x, ev->y, NULL) == p->held_at );
 		draw = ( in != p->held_in );
 		p->held_in = in;
 		break;
@@ -2981,8 +3081,8 @@ LOCAL void pn_release( PANEL *p, INT pid, CONST T_WMEV *ev )
 		}
 		break;
 	case TG_PARTS:
-		if ( p->held_at > 0 && pd_tag_at(pt, p->def.pool, ev->x, ev->y, NULL) == p->held_at
-		  && pd_tag_show(pt, p->def.pool, p->held_at) > 0 ) {
+		if ( p->held_at > 0 && pd_tag_at(pt, ev->x, ev->y, NULL) == p->held_at
+		  && pd_tag_show(pt, p->held_at) > 0 ) {
 			pn_focus_first(p);
 		}
 		break;
@@ -3417,8 +3517,10 @@ LOCAL ER knl_pn_set_state_u( INT pid, INT i, CONST UB *buf, INT len )
 	if ( len < (INT)sizeof(INT) ) return E_PAR;
 	knl_memcpy(v, buf, ( len >= 2 * (INT)sizeof(INT) ) ? 2 * (INT)sizeof(INT) : (INT)sizeof(INT));
 	if ( k == TG_PARTS ) {
+		/* with a second INT, the tags that cannot be chosen: a bit each from bit 0 for tag 1 */
+		if ( len >= 2 * (INT)sizeof(INT) ) pt->inact = (UW)v[1];
 		/* a sheet no tag names -- a page opened from another -- is shown as well */
-		if ( pd_tag_show(pt, p->def.pool, v[0]) < 0 ) pt->value = v[0];
+		if ( pd_tag_show(pt, v[0]) < 0 ) pt->value = v[0];
 		pn_focus_first(p);
 		return E_OK;
 	}
@@ -3505,40 +3607,49 @@ LOCAL ER knl_pn_set_flags_u( INT pid, INT i, UINT f )
 	return E_OK;
 }
 
-/* The names a selector shows, each ending in a nought: how many bytes */
-LOCAL INT knl_pn_names_u( INT pid, INT i, UB *buf, INT max );
+/*
+ * The names a selector shows, each ending in a nought: how many bytes,
+ * copied for the caller under the lock, so that what it reads is the
+ * names of one moment however long they are.
+ */
+LOCAL INT knl_pn_names_u( INT pid, INT i, UB **p_buf );
 
-EXPORT INT knl_pn_names( INT pid, INT i, UB *buf, INT max )
+EXPORT INT knl_pn_names( INT pid, INT i, UB **p_buf )
 {
 	INT	res;
 
 	pn_lock();
-	res = knl_pn_names_u(pid, i, buf, max);
+	res = knl_pn_names_u(pid, i, p_buf);
 	pn_unlock();
 	return res;
 }
 
-LOCAL INT knl_pn_names_u( INT pid, INT i, UB *buf, INT max )
+LOCAL INT knl_pn_names_u( INT pid, INT i, UB **p_buf )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
-	CONST UB	*e;
+	UB		*b;
 	INT		n;
 
+	if ( p_buf == NULL ) return E_PAR;
+	*p_buf = NULL;
 	if ( p == NULL || i < 0 || i >= p->def.npart ) return E_ID;
 	pt = &p->def.part[i];
-	if ( pt->count <= 0 || pt->pool < 0 || pt->pool >= WM_POOL_BYTES ) return 0;
-	e = pd_pool_name(p->def.pool, pt->pool, pt->count);
-	n = ( e != NULL ) ? (INT)( e - &p->def.pool[pt->pool] ) : WM_POOL_BYTES - pt->pool;
-	if ( n > max ) n = max;
-	knl_memcpy(buf, &p->def.pool[pt->pool], n);
+	n = pd_names_len(pt, pt->count);
+	if ( n <= 0 ) return 0;
+	b = (UB *)Kmalloc((SZ)n);
+	if ( b == NULL ) return E_NOMEM;
+	knl_memcpy(b, pt->names->b, n);
+	*p_buf = b;
 	return n;
 }
 
 /*
- * The names a selector shows, or a list's, set anew: the panel's pool
- * made again with every part's names where they were and this part's
- * new ones in theirs. names holds count names, each ending in a nought.
+ * The names a selector shows, or a list's, set anew. names holds count
+ * names, each ending in a nought, as many as the program has: they go
+ * into a block of the part's own made for them, and the block they
+ * replace is let go. No other part's names move, and when there is not
+ * the memory for the new block the part keeps the names it had.
  */
 LOCAL ER knl_pn_set_names_u( INT pid, INT i, CONST UB *names, INT len );
 
@@ -3554,84 +3665,40 @@ EXPORT ER knl_pn_set_names( INT pid, INT i, CONST UB *names, INT len )
 
 LOCAL ER knl_pn_set_names_u( INT pid, INT i, CONST UB *names, INT len )
 {
-	PANEL	*p = pn_of(pid);
-	UB	*np;
-	INT	used = 0, k, f, count = 0, at;
+	PANEL		*p = pn_of(pid);
+	T_WMPART	*pt;
+	T_WMNAMES	*nb = NULL;
+	INT		k, count = 0;
 
 	if ( p == NULL || i < 0 || i >= p->def.npart ) return E_ID;
+	if ( len < 0 || ( names == NULL && len > 0 ) ) return E_PAR;
+	pt = &p->def.part[i];
 	for ( k = 0; k < len; k++ ) {
 		if ( names[k] == 0 ) count++;
 	}
-	{
-		/*
-		 * the names it has already, written again (a program that reads
-		 * what it shows every second and sets it each time): nothing
-		 * changes, and a list opened from the part stays open
-		 */
-		T_WMPART	*pt = &p->def.part[i];
-		CONST UB	*e;
-		INT		n = 0;
-
-		if ( pt->count == count && pt->count > 0 && pt->pool >= 0 && pt->pool < WM_POOL_BYTES ) {
-			e = pd_pool_name(p->def.pool, pt->pool, pt->count);
-			n = ( e != NULL ) ? (INT)( e - &p->def.pool[pt->pool] ) : WM_POOL_BYTES - pt->pool;
-		}
-		if ( n == len && n > 0 ) {
-			for ( k = 0; k < len && p->def.pool[pt->pool + k] == names[k]; k++ ) ;
-			if ( k == len ) return E_OK;
-		}
+	/*
+	 * the names it has already, written again (a program that reads
+	 * what it shows every second and sets it each time): nothing
+	 * changes, and a list opened from the part stays open
+	 */
+	if ( pt->count == count && count > 0 && pd_names_len(pt, count) == len ) {
+		for ( k = 0; k < len && pt->names->b[k] == names[k]; k++ ) ;
+		if ( k == len ) return E_OK;
+	}
+	if ( len > 0 ) {
+		nb = pd_names_new(len);
+		if ( nb == NULL ) return E_NOMEM;
+		knl_memcpy(nb->b, names, len);
+		nb->b[len] = 0;
+		nb->len = len;
 	}
 	if ( ls_owner == pid && ls_part == i ) {
 		pop_close(TRUE);		/* the list shows names no longer the part's */
 	}
-	np = (UB *)Kmalloc(WM_POOL_BYTES);
-	if ( np == NULL ) return E_NOMEM;
-	for ( k = 0; k < p->def.npart; k++ ) {
-		T_WMPART	*pt = &p->def.part[k];
-		UINT		kind = WM_PT_KIND(pt->type);
-		INT		n;
-
-		if ( k == i ) {
-			if ( used + len > WM_POOL_BYTES ) goto full;
-			knl_memcpy(np + used, names, len);
-			pt->pool = used;
-			pt->count = count;
-			used += len;
-			continue;
-		}
-		if ( ( ( kind == WS_PARTS || kind == SS_PARTS || kind == WM_PT_POPUP || kind == TG_PARTS )
-		       && pt->count > 0 ) ) {
-			CONST UB *e = pd_pool_name(p->def.pool, pt->pool, pt->count);
-
-			at = pt->pool;
-			n = ( e != NULL ) ? (INT)( e - &p->def.pool[at] ) : WM_POOL_BYTES - at;
-			if ( used + n > WM_POOL_BYTES ) goto full;
-			knl_memcpy(np + used, &p->def.pool[at], n);
-			pt->pool = used;
-			used += n;
-		}
-		if ( kind == SB_PARTS ) {
-			for ( f = 0; f < pt->sb_n && f < WM_SB_MAX; f++ ) {
-				CONST UB *e;
-
-				if ( !( pt->sbf[f] & SBF_NAMES ) ) continue;
-				at = pt->sbpool[f];
-				e = pd_pool_name(p->def.pool, at, pt->sbhi[f] + 1);
-				n = ( e != NULL ) ? (INT)( e - &p->def.pool[at] ) : WM_POOL_BYTES - at;
-				if ( used + n > WM_POOL_BYTES ) goto full;
-				knl_memcpy(np + used, &p->def.pool[at], n);
-				pt->sbpool[f] = used;
-				used += n;
-			}
-		}
-	}
-	knl_memcpy(p->def.pool, np, used);
-	p->def.used = used;
-	Kfree(np);
+	pd_names_free(pt->names);
+	pt->names = nb;
+	pt->count = count;
 	return E_OK;
-full:
-	Kfree(np);
-	return E_LIMIT;
 }
 
 LOCAL ER wm_panel_get_u( INT pid, INT num, INT *p_value );
@@ -3870,13 +3937,16 @@ LOCAL INT mn_body_width( CONST T_WMMENU *def, CONST MNMET *m, BOOL *p_marks )
 LOCAL void mn_screen( INT *p_w, INT *p_h )
 {
 	T_DISPSPEC	spec;
+	INT		x, y;
 
 	*p_w = 1280;
 	*p_h = 800;
 	if ( ts_disp_ref(&spec) >= E_OK ) {
-		/* the view the windows are laid in */
-		*p_w = (INT)( ( spec.view_w > 0 ) ? spec.view_w : spec.width ) / ts_disp_screens();
-		*p_h = (INT)( ( spec.view_h > 0 ) ? spec.view_h : spec.height );
+		/* the main screen, in the view the windows are laid in */
+		if ( ts_disp_screen(0, &x, &y, p_w, p_h) < E_OK ) {
+			*p_w = (INT)( ( spec.view_w > 0 ) ? spec.view_w : spec.width );
+			*p_h = (INT)( ( spec.view_h > 0 ) ? spec.view_h : spec.height );
+		}
 	}
 }
 
@@ -3895,7 +3965,7 @@ LOCAL void mn_keep_on( T_DPRECT *b, CONST MNMET *m )
 	if ( d < 0 ) { b->top += d;  b->bottom += d; }
 	d = on.left - ( b->left - gx );
 	if ( d > 0 ) { b->left += d;  b->right += d; }
-	d = 0 - ( b->top - gy );
+	d = on.top - ( b->top - gy );
 	if ( d > 0 ) { b->top += d;  b->bottom += d; }
 }
 
@@ -3938,7 +4008,7 @@ LOCAL INT mn_open_body( INT owner, CONST T_WMMENU *def, CONST T_DPRECT *body,
 	o.top    = body->top - gy;
 	o.right  = body->right + gx + MN_SHADOW;
 	o.bottom = body->bottom + gy + MN_SHADOW;
-	pop = wm_open(&o, WM_ATTR_POPUP, NULL);
+	pop = wm_open(&o, WM_ATTR_POPUP | WM_ATTR_MENU, NULL);
 	if ( pop < 0 ) {
 		return pop;
 	}
@@ -4510,6 +4580,7 @@ LOCAL void pop_open( INT pid, INT i, CONST T_WMEV *ev )
 	T_DPRECT	ps, body, o;
 	MNMET		m;
 	ID		fid;
+	CONST UB	*nm;
 	INT		n, fit, first, cur, k, wide = 0, sw, sh, gx, gy, pop, lp;
 
 	if ( p == NULL || ls_pid > 0 || i < 0 || i >= p->def.npart ) {
@@ -4543,9 +4614,9 @@ LOCAL void pop_open( INT pid, INT i, CONST T_WMEV *ev )
 
 	/* the rows, and how wide the widest of them is */
 	fid = mn_font();
-	for ( k = 0; k < n; k++ ) {
+	nm = pd_name(pt, first);
+	for ( k = 0; k < n; k++, nm = pd_name_next(pt, nm) ) {
 		T_WMPART	*r = &pn->part[k];
-		CONST UB	*nm = pd_pool_name(p->def.pool, pt->pool, first + k);
 		INT		ww;
 
 		if ( nm == NULL ) {
@@ -4590,7 +4661,7 @@ LOCAL void pop_open( INT pid, INT i, CONST T_WMEV *ev )
 	o.top = body.top - gy;
 	o.right = body.right + gx + MN_SHADOW;
 	o.bottom = body.bottom + gy + MN_SHADOW;
-	pop = wm_open(&o, WM_ATTR_POPUP, NULL);
+	pop = wm_open(&o, WM_ATTR_POPUP | WM_ATTR_MENU, NULL);
 	if ( pop < 0 ) {
 		Kfree(pn);
 		return;
@@ -4860,10 +4931,21 @@ EXPORT INT wm_panel_open_at( INT owner, CONST T_WMPANEL *def, INT x, INT y )
 		return E_PAR;
 	}
 	mn_screen(&sw, &sh);
-	o.left = ( x + w > sw ) ? sw - w : x;
-	o.top = ( y + h > sh ) ? sh - h : y;
-	if ( o.left < 0 ) o.left = 0;
-	if ( o.top < 0 )  o.top = 0;
+	{
+		/* on the screen it opens on (10.4.8): with one screen, the screen */
+		T_DPRECT	on;
+
+		wm_screen_at(x + w / 2, y + h / 2, &on);
+		if ( ts_disp_screens() <= 1 ) {
+			on.left = on.top = 0;
+			on.right = sw;
+			on.bottom = sh;
+		}
+		o.left = ( x + w > on.right ) ? on.right - w : x;
+		o.top = ( y + h > on.bottom ) ? on.bottom - h : y;
+		if ( o.left < on.left ) o.left = on.left;
+		if ( o.top < on.top )  o.top = on.top;
+	}
 	o.right = o.left + w;
 	o.bottom = o.top + h;
 	pop = wm_open(&o, WM_ATTR_POPUP, NULL);
@@ -4901,28 +4983,65 @@ EXPORT INT wm_panel_open_at( INT owner, CONST T_WMPANEL *def, INT x, INT y )
 
 /* ---------------------------------------------------------------- checking */
 
-EXPORT INT wm_panel_name( T_WMPANEL *def, CONST UB *name )
+/*
+ * A name put after a definition's part's names. The block is made twice
+ * as large as it must be when it is full, so that a list of n names put
+ * one at a time is copied a few times over and not n.
+ */
+EXPORT INT wm_part_name( T_WMPART *pt, CONST UB *name )
 {
-	INT	at, n = 0;
+	T_WMNAMES	*nm;
+	INT		n = 0, at;
 
-	if ( def == NULL || name == NULL ) {
-		return -1;
+	if ( pt == NULL || name == NULL ) {
+		return E_PAR;
 	}
-	if ( def->used < 0 || def->used >= WM_POOL_BYTES ) {
-		def->used = 0;
-	}
-	at = def->used;
-	while ( name[n] != 0 && at + n + 1 < WM_POOL_BYTES ) {
-		def->pool[at + n] = name[n];
+	while ( name[n] != 0 ) {
 		n++;
 	}
-	if ( at + n + 1 >= WM_POOL_BYTES ) {
-		return -1;			/* the pool is full */
+	nm = pt->names;
+	at = ( nm != NULL ) ? nm->len : 0;
+	if ( nm == NULL || at + n + 1 >= nm->size ) {
+		INT	want = ( at + n + 1 ) * 2;
+		T_WMNAMES *g = pd_names_new(( want > 64 ) ? want : 64);
+
+		if ( g == NULL ) {
+			return E_NOMEM;
+		}
+		if ( nm != NULL ) {
+			knl_memcpy(g->b, nm->b, at);
+			g->len = at;
+			pd_names_free(nm);
+		}
+		pt->names = nm = g;
 	}
-	def->pool[at + n] = 0;
-	def->used = at + n + 1;
+	knl_memcpy(nm->b + at, name, n);
+	nm->b[at + n] = 0;
+	nm->len = at + n + 1;
+	nm->b[nm->len] = 0;
+	nm->ncol = 0;			/* measured again */
 
 	return at;
+}
+
+/* The names of a definition's parts let go */
+LOCAL void pn_names_drop( T_WMPANEL *def )
+{
+	INT	k;
+
+	for ( k = 0; k < def->npart && k < WM_PART_MAX; k++ ) {
+		pd_names_free(def->part[k].names);
+		def->part[k].names = NULL;
+	}
+}
+
+EXPORT void wm_panel_free( T_WMPANEL *def )
+{
+	if ( def == NULL ) {
+		return;
+	}
+	pn_names_drop(def);
+	Kfree(def);
 }
 
 EXPORT ER wm_panel_field( INT pid, INT num, INT field, INT *p_value )

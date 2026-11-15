@@ -279,7 +279,7 @@ EXPORT ER knl_obfile_set_dom( CONST char *path, CONST T_OBPRT *prt )
  * UUID as one attached (a copy of it) is refused with E_OBJ, since the
  * same objects would be found on both.
  */
-EXPORT ER knl_obfile_attach( CONST char *path, UINT flags )
+LOCAL ER attach_vol( CONST char *path, UINT flags )
 {
 	OBFVOL		*v = NULL;
 	T_TSFSVINF	*inf;
@@ -287,12 +287,6 @@ EXPORT ER knl_obfile_attach( CONST char *path, UINT flags )
 	INT		i;
 	ER		er = E_OK;
 
-	if ( path == NULL ) {
-		return E_PAR;
-	}
-	if ( knl_ob_chk_busy(path) ) {
-		return E_BUSY;			/* being checked on its own */
-	}
 	LOCK();
 	v = vent_by_path(path);
 	UNLOCK();
@@ -365,6 +359,22 @@ EXPORT ER knl_obfile_attach( CONST char *path, UINT flags )
 	}
 
 	return E_OK;
+}
+
+/* Not while the volume is being checked (ts/tsfsck.h), nor is it checked while it is being attached */
+EXPORT ER knl_obfile_attach( CONST char *path, UINT flags )
+{
+	ER	er;
+
+	if ( path == NULL ) {
+		return E_PAR;
+	}
+	if ( !knl_ob_chk_hold(path, TRUE) ) {
+		return E_BUSY;
+	}
+	er = attach_vol(path, flags);
+	(void)knl_ob_chk_hold(path, FALSE);
+	return er;
 }
 
 /* The entry of the volume attached with a path, looked at under the lock */

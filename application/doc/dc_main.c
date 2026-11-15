@@ -469,15 +469,13 @@ static ER load( void )
 
 /*
  * Opened from a link: shown as the link asks, in its viewMode (清書,
- * 詳細 or 原稿) with its wordWrap, and laid on the link's bgcol when the
- * object says no colour of its own. The desktop gives the link as it is
- * now (T_PRCOPEN), with what a window that closed wrote back into it
- * before the record holding it was saved.
+ * 詳細 or 原稿) with its wordWrap (its bgcol is the paper's, ta_paper_open).
+ * The desktop gives the link as it is now (T_PRCOPEN), with what a window
+ * that closed wrote back into it before the record holding it was saved.
  */
 static void from_link( void )
 {
 	if ( !g_from_link ) return;
-	if ( g_paper == TV_PAPER_LOOK && g_start_arg.bgcol != TAD_COL_NONE ) g_paper = g_start_arg.bgcol;
 	if ( g_start_arg.wordwrap != TAD_WRAP_NONE ) g_nowrap = (BOOL)( g_start_arg.wordwrap == TAD_WRAP_OFF );
 	if ( strcmp((CONST char *)g_start_arg.viewmode, "xml") == 0 ) {
 		g_detail_view = FALSE;
@@ -500,6 +498,11 @@ static ER save( void )
 static void close_asked( void )
 {
 	ta_ime_commit(&g_de);		/* a composition is part of what is saved */
+	if ( g_xml_view && g_changed ) (void)de_xml_commit(&g_de);	/* what is handed over is the record as edited */
+	if ( ta_disk_gone(FALSE) ) {
+		g_closing = TRUE;		/* the disk of the object went: what changed was handed over */
+		return;
+	}
 	if ( save() < E_OK ) {
 		tell("保存できなかったため、ウインドウを閉じませんでした", "メモリやディスクの空きを確かめてから、もう一度閉じてください");
 		return;
@@ -550,7 +553,7 @@ static void doc_do( INT cmd )
 		break;
 	case DM_REFRESH:
 		tv_src_forget(NULL);
-		ta_paper_read();
+		ta_paper_refresh();
 		break;
 	case DM_FULLSCREEN:
 		ta_fullscreen();
@@ -745,6 +748,15 @@ static void released( INT x, INT y )
 
 static void left( void )
 {
+	/*
+	 * Out of the window, the hand has moved, even when no move was told
+	 * before it left: the input layer merges a move into the one still
+	 * waiting, and the move out may be the first heard. Letters or a thing
+	 * pressed and let go without a move are only a click (the caret put,
+	 * the thing picked), so the move out is followed first.
+	 */
+	if ( de_sel_held() ) de_follow(DC_OUTSIDE, DC_OUTSIDE);
+	else if ( de_link_carrying() ) de_link_follow(DC_OUTSIDE, DC_OUTSIDE);
 	if ( !de_sel_carrying() && !de_link_carrying() ) return;
 	note("left the window carrying");
 	released(DC_OUTSIDE, DC_OUTSIDE);
@@ -830,7 +842,7 @@ static void event( CONST T_OBNTM *m )
 		/* what a link points at changed: what was read of it is read again */
 		if ( m->event == OB_E_CHANGE ) {
 			tv_src_forget(&m->uuid);
-			if ( memcmp(&m->uuid, &g_obj, sizeof(TS_UUID)) == 0 ) ta_paper_read();
+			(void)ta_paper_changed(&m->uuid);
 			g_dirty = TRUE;
 		}
 		return;
@@ -973,7 +985,7 @@ int main( void )
 	tv_src_host(&g_obj);
 	/* a link in it to itself, opened, shows it as it is being edited, not as it was saved */
 	tv_src_live(&g_obj, g_recno, &g_rec);
-	ta_paper_read();
+	ta_paper_open();	/* opened from a link: laid on its bgcol when the object says no colour of its own */
 	ta_watch(&g_obj);
 	ta_watch_links();
 	from_link();

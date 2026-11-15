@@ -1,0 +1,18 @@
+# Where a window with no place kept opens (docs/tessronos 10.4.8), for tools/ui_run.py with UI_SCREENS=2
+# (QEMU's second bochs-display, 1024 x 800, right of the first at start): on the screen the pointer is
+# on. With the pointer on the second display, 音量ミキサー opens there, its own place (200, 100) from
+# that screen's corner; with the pointer on the main screen, 単語登録 opens there.
+move 1500 300
+wait 300
+open 01a0d8c4-5440-7a51-8c62-7e8f90a15440
+wait 2500
+win 音量ミキサー
+want ok 1480 100 2068 712
+shot np_ext
+move 600 400
+wait 300
+open 01a0d8c4-5312-7c23-8d34-5e6f7b8c9d12
+wait 2500
+win 単語登録
+want ok 200 80 772 586
+shot np_main

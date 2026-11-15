@@ -1,13 +1,13 @@
-# The keys when a link is opened (design 10.4), for tools/ui_run.py: a document with
+# The keys when a link is opened (design 10.4), for tools/ui_run.py: a page of the desktop's (a figure) with
 # links to a sheet at 190,107 and to the calculator at 190,157.
-xml <tad version="1.0" encoding="UTF-8"><document><text lang="0" bpat="0"/>
-xml <p><link id="019b54a4-6ccf-72f7-e320-c98e4a0bab4e_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c31"
-xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
-xml framedisp="true" namedisp="true" pictdisp="true"/></p>
-xml <p><link id="01a0d8c4-5320-7a41-8b52-6c7d8e9fa020_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c32"
-xml tbcol="#e1f2f9" frcol="#000000" chcol="#000000" bgcol="#ffffff" width="150"
-xml framedisp="true" namedisp="true" pictdisp="true"/></p>
-xml </document></tad>
+xml <tad version="1.0" encoding="UTF-8"><figure>
+xml <link id="019b54a4-6ccf-72f7-e320-c98e4a0bab4e_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c31"
+xml vobjleft="10" vobjtop="10" vobjright="160" vobjbottom="29" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#e1f2f9" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml <link id="01a0d8c4-5320-7a41-8b52-6c7d8e9fa020_0.xtad" vobjid="01a0d8c3-2500-7021-9a10-c1d2e3f40c32"
+xml vobjleft="10" vobjtop="60" vobjright="160" vobjbottom="79" height="19" chsz="14" frcol="#000000"
+xml chcol="#000000" tbcol="#e1f2f9" bgcol="#ffffff" pictdisp="true" namedisp="true" framedisp="true"/>
+xml </figure></tad>
 xmlopen 開く元
 wait 500
 win 開く元

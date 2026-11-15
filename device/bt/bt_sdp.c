@@ -119,6 +119,7 @@ typedef struct {
 
 LOCAL REC	rec[NREC];
 LOCAL BOOL	rec_made = FALSE;
+LOCAL INT	ag_feat_at;		/* where the audio gateway's features are in its record */
 LOCAL UB	answer[ANSWER_MAX];
 
 /* ---------------------------------------------------------------- making the records */
@@ -301,6 +302,7 @@ LOCAL void rec_make( void )
 	put_u8(0x00);
 	put_attr(AT_FEATURES);
 	put_u16(0x0000);
+	ag_feat_at = mk->n - 2;
 	rec_made = TRUE;
 }
 
@@ -514,6 +516,13 @@ EXPORT void knl_btsd_serve( BTC *c, PEER *p, CONST UB *f, INT n )
 	CONST UB	*cont;
 
 	if ( !rec_made ) rec_make();
+	/* the audio gateway's features are the controller's: wide band speech or not */
+	{
+		UH	af = knl_bth_sdp_features(c);
+
+		rec[3].b[ag_feat_at] = (UB)( af >> 8 );
+		rec[3].b[ag_feat_at + 1] = (UB)af;
+	}
 	if ( n < 5 ) return;
 	if ( 5 + ( ( f[3] << 8 ) | f[4] ) != n ) {
 		sdp_error(c, p, f, SDPE_PDU_SIZE);

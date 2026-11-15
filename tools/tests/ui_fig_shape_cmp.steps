@@ -11,59 +11,8 @@
 # 変形 two rows under, the line between them. Its corner at 400,450
 # carried to 430,480; Escape ends it. Saved, record 0 comes out the same, byte for byte.
 # Keys: Esc 29, Enter 28; Ctrl+S 16 01, Ctrl+E 08 01.
-# the desktop's figure editor opened by open, whatever the program object says (figproc kernel)
-figproc kernel
-mkbig fig 1 2 0
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-click 162 82
-wait 300
-drag 300 250 500 250
-wait 400
-click 298 48
-wait 300
-drag 500 250 540 300
-wait 400
-shot scmp_k_end
-click 332 82
-wait 300
-click 300 450
-wait 700
-click 400 450
-wait 700
-click 350 550
-wait 700
-key 28
-wait 400
-click 298 48
-wait 300
-click 600 400 1
-wait 500
-move 610 500
-wait 400
-move 720 500
-wait 150
-move 720 540
-wait 300
-shot scmp_k_menu
-click 720 540
-wait 500
-shot scmp_k_transform
-drag 400 450 430 480
-wait 400
-shot scmp_k_moved
-key 29
-wait 300
-sync 600
-key 16 01
-sync 600
-sum show
-keep kernel
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 2 0
 logmark
 pfig big
@@ -100,14 +49,14 @@ logmark
 click 600 400 1
 expectsince figure: menu
 wait 500
-move 610 400
+move 610 500
 wait 400
-move 720 400
+move 720 500
 wait 300
 shot scmp_p_menu
-move 720 440
+move 720 540
 wait 300
-click 720 440
+click 720 540
 expectsince figure: transform begun
 wait 500
 shot scmp_p_transform
@@ -124,6 +73,6 @@ logmark
 key 16 01
 expectsince figure: saved (0)
 sum show
-same kernel
+want ok 860 d6eb9cce795687f5
 key 08 01
 expect figure: closed

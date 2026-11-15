@@ -68,8 +68,15 @@ IMPORT ER	knl_space_protect( T_SPACE *sp, UBINT va, UD size, UD attr );
 IMPORT void	*knl_space_page( T_SPACE *sp, UBINT va );
 IMPORT ER	knl_space_sink( T_SPACE *sp, UBINT va );
 
-/* Addresses in the shared window: each handed out once, never again */
+/* Addresses in the shared window: a stretch with a page of nothing after it */
 IMPORT UBINT	knl_shm_va_alloc( UD size );
+/*
+ * A stretch given back, to be handed out again: only once nothing maps
+ * it in any space. And the window in use (the list of free stretches
+ * in *p_listed).
+ */
+IMPORT void	knl_shm_va_free( UBINT va, UD size );
+IMPORT UD	knl_shm_va_used( UD *p_listed );
 
 IMPORT void	*knl_ustack_alloc_sp( T_SPACE *sp, UD npages, void **p_top );
 IMPORT void	knl_ustack_free_sp( T_SPACE *sp, void *base, UD npages );

@@ -665,6 +665,152 @@ LOCAL void test_record( void )
 	Kfree(in);
 }
 
+/* Whether the text s holds w */
+LOCAL BOOL text_has( CONST char *s, CONST char *w )
+{
+	INT	i, k;
+
+	for ( i = 0; s[i] != 0; i++ ) {
+		for ( k = 0; w[k] != 0 && s[i + k] == w[k]; k++ ) ;
+		if ( w[k] == 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
+/* The microphone's volume set (SND_MIX_IN) for an input of kind, or the one there is */
+LOCAL ER mic_set( INT kind, UW vol, UW mute )
+{
+	SDMixSet	s;
+	SZ		asz = 0;
+
+	knl_memset(&s, 0, sizeof(s));
+	s.what = SND_MIX_IN;
+	s.pid = kind;
+	s.lv = s.rv = vol;
+	s.mute = mute;
+	return tk_swri_dev(snd_dd, DN_SDMIXSET, &s, sizeof(s), &asz);
+}
+
+/*
+ * Recorded with the microphone at vol: a tenth of a second of frames of
+ * left l and right r fed in, 48 kHz stereo 16 bit both ways, and whether
+ * every frame read is el, er
+ */
+LOCAL BOOL mic_rec( UW vol, UW mute, INT l, INT r, INT el, INT er )
+{
+	static UB	in[4800 * 4], out[4800 * 4];
+	SZ		asz = 0;
+	INT		i, n, bad = 0, got = 0;
+
+	for ( i = 0; i < 4800; i++ ) {
+		in[i * 4] = (UB)l;
+		in[i * 4 + 1] = (UB)( l >> 8 );
+		in[i * 4 + 2] = (UB)r;
+		in[i * 4 + 3] = (UB)( r >> 8 );
+	}
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMCTL, PCM_STOP), E_OK);
+	KT_ASSERT_ER(mic_set(SND_MIC_NOW, vol, mute), E_OK);
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMCTL, PCM_REC), E_OK);
+	knl_snd_feed(in, 4800, 2);
+	while ( got < (INT)sizeof(out) ) {
+		if ( tk_srea_dev(snd_dd, 1, out + got, (SZ)sizeof(out) - got, &asz) < E_OK || asz <= 0 ) break;
+		got += (INT)asz;
+	}
+	for ( i = 0; i + 3 < got; i += 4 ) {
+		H	a = (H)( out[i] | ( out[i + 1] << 8 ) ), b = (H)( out[i + 2] | ( out[i + 3] << 8 ) );
+
+		if ( a != el || b != er ) bad++;
+	}
+	n = got / 4;
+	tm_printf((UB *)"  volume %d%s: %d/%d in, %d frames, %d of them not %d/%d\n", (INT)vol, mute ? " muted" : "",
+		  l, r, n, bad, el, er);
+	return ( n >= 4790 && bad == 0 );
+}
+
+/*
+ * The microphone's volume: an input that has no amplifier of its own
+ * (the device's test source) has it multiplied into its samples -- 0
+ * silence, 25 a quarter, SND_MIC_UNITY (50) as it comes, 100 four
+ * times, beyond 16 bits held to them, a mute silence -- and the mixer
+ * tells what it is, how it takes it and its level; a volume set is
+ * kept in the machine's settings (SOUND_MIC) a second after, and taken
+ * from them again.
+ */
+LOCAL void test_mic( void )
+{
+	SDMixIn		mi;
+	SDMixSet	k[8];
+	SZ		asz = 0;
+	INT		n, i, at;
+
+	if ( snd_dd <= 0 ) KT_SKIP("no sound device");
+	knl_snd_loopback(TRUE);
+	KT_ASSERT_ER(set_mode(snd_dd, PCMST48K, PCMFmt16, 1), E_OK);
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMBUFSZ, 65536), E_OK);
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMENDCNT, 0), E_OK);
+
+	KT_ASSERT(mic_rec(0, 0, 8000, -8000, 0, 0));
+	KT_ASSERT(mic_rec(25, 0, 8000, -8000, 2000, -2000));
+	KT_ASSERT(mic_rec(SND_MIC_UNITY, 0, 8000, -8000, 8000, -8000));
+	KT_ASSERT(mic_rec(100, 0, 8000, -8000, 32000, -32000));
+	KT_ASSERT(mic_rec(100, 0, 20000, -20000, 32767, -32768));	/* held to 16 bits */
+	KT_ASSERT(mic_rec(100, 1, 8000, -8000, 0, 0));
+
+	/* what the mixer says of it, while it records */
+	KT_ASSERT_ER(mic_set(SND_MIC_NOW, 70, 0), E_OK);
+	{
+		static UB	in[480 * 4];
+
+		for ( i = 0; i < 480; i++ ) {
+			in[i * 4] = (UB)( 10000 & 0xff );
+			in[i * 4 + 1] = (UB)( 10000 >> 8 );
+			in[i * 4 + 2] = in[i * 4 + 3] = 0;
+		}
+		knl_snd_feed(in, 480, 2);
+	}
+	KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDMIXIN, &mi, sizeof(mi), &asz), E_OK);
+	KT_ASSERT_EQ(asz, sizeof(mi));
+	tm_printf((UB *)"  the mixer: have %d kind %d volume %d mute %d how %d recording %d level %d gain %x\n",
+		  mi.have, mi.kind, mi.vol, mi.mute, mi.how, mi.recording, mi.level, mi.gain);
+	KT_ASSERT(mi.have == 1 && mi.kind == SND_BE_NONE && mi.vol == 70 && mi.mute == 0);
+	KT_ASSERT(mi.how == SND_MIC_SOFT && mi.recording == 1);
+	KT_ASSERT_EQ(mi.gain, 0x10000 * 70 * 70 / ( 50 * 50 ));
+	KT_ASSERT(mi.level >= 19590 && mi.level <= 19600);	/* 10000 by 1.96 */
+	KT_ASSERT_ER(mic_set(SND_MIC_NOW, 101, 0), E_PAR);
+	KT_ASSERT_ER(mic_set(99, 50, 0), E_PAR);
+	KT_ASSERT_ER(tk_swri_dev(snd_dd, DN_SDMIXIN, &mi, sizeof(mi), &asz), E_RONLY);
+	KT_ASSERT_ER(attr_w(snd_dd, DN_SDPCMCTL, PCM_STOP), E_OK);
+	KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDMIXIN, &mi, sizeof(mi), &asz), E_OK);
+	KT_ASSERT(mi.recording == 0 && mi.level == 0);
+	KT_ASSERT_ER(mic_set(SND_MIC_NOW, SND_MIC_UNITY, 0), E_OK);
+	knl_snd_loopback(FALSE);
+
+	/* kept: an input of another kind (the I2S interface's, which is not there here), set as a program sets it */
+	if ( wm_dev_conf_apply() >= E_OK ) {
+		char	v[CF_VAL_MAX];
+
+		KT_ASSERT_ER(mic_set(SND_BE_I2S, 30, 1), E_OK);
+		tk_dly_tsk(2000);
+		KT_ASSERT(wm_dev_conf_get("SOUND_MIC", v, sizeof(v)));
+		tm_printf((UB *)"  kept: SOUND_MIC %s\n", v);
+		KT_ASSERT(text_has(v, "i2s 30 1"));
+		KT_ASSERT(!text_has(v, "test"));		/* the test's source is not kept */
+		/* changed here, then taken again from what was kept */
+		KT_ASSERT_ER(mic_set(SND_BE_I2S, 90, 0), E_OK);
+		KT_ASSERT_ER(wm_dev_conf_put("SOUND_MIC", "i2s 30 1"), E_OK);
+		KT_ASSERT_ER(wm_dev_conf_apply(), E_OK);
+		n = knl_snd_mic_kept(k, 8);
+		for ( i = 0, at = -1; i < n && i < 8; i++ ) {
+			if ( k[i].pid == SND_BE_I2S ) at = i;
+		}
+		KT_ASSERT(at >= 0);
+		if ( at >= 0 ) KT_ASSERT(k[at].lv == 30 && k[at].mute == 1);
+		/* left as it comes */
+		KT_ASSERT_ER(mic_set(SND_BE_I2S, SND_MIC_UNITY, 0), E_OK);
+		tk_dly_tsk(2000);
+	}
+}
+
 #if KT_QEMU_DEVS
 /* Room for the outputs a test looks at: more than it ever plugs in */
 #define KT_OUTS		32
@@ -1561,6 +1707,7 @@ EXPORT void ktest_snd( void )
 	KT_RUN_QEMU_DEVS(test_restart, "written for the USB audio function of the QEMU machine");
 	KT_RUN_QEMU_DEVS(test_switch, "written for the USB audio function of the QEMU machine");
 	KT_RUN(test_record);
+	KT_RUN(test_mic);
 #if defined(X64)
 	KT_RUN(test_hda_record);
 	KT_RUN(test_hda_judge);

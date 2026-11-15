@@ -409,6 +409,14 @@ EXPORT void ui_icon( CONST char *prog )
 	ui_prog[sizeof(ui_prog) - 1] = 0;
 }
 
+LOCAL char	ui_shows_obj[40];		/* what ui_shows asked for the next window */
+
+EXPORT void ui_shows( CONST char *obj )
+{
+	strncpy(ui_shows_obj, ( obj != NULL ) ? obj : "", sizeof(ui_shows_obj) - 1);
+	ui_shows_obj[sizeof(ui_shows_obj) - 1] = 0;
+}
+
 LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y );
 
 EXPORT ER ui_open( UI *u, CONST char *box, INT num, INT x, INT y )
@@ -447,7 +455,7 @@ LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y )
 	T_OBNTF		req;
 	T_OBWPOS	wp;
 	SZ		asz = 0;
-	char		json[224], title[128];
+	char		json[320], title[128];
 	TS_UUID		pnl;
 	ID		pk;
 	UINT		attr;
@@ -491,6 +499,11 @@ LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y )
 				 y + u->h + 34, wa | attr);
 		}
 		if ( hidden ) snprintf(json + strlen(json), sizeof(json) - strlen(json), ",\"hidden\":1");
+	}
+	if ( ui_shows_obj[0] != 0 ) {
+		/* the object the window says it shows (wm_obj_shows): one window for it */
+		snprintf(json + strlen(json), sizeof(json) - strlen(json), ",\"shows\":\"%s\"", ui_shows_obj);
+		ui_shows_obj[0] = 0;
 	}
 	if ( ui_parent[0] != 0 ) {
 		/* a subordinate window of that one, as the system keeps it (wm_set_parent) */
@@ -793,17 +806,18 @@ EXPORT void ui_blank( UI *u, INT num )
 }
 
 /* The names a list or a popup offers, each ending in its nought, as many as are given */
-EXPORT void ui_names( UI *u, INT num, CONST char *const *names, INT n )
+EXPORT ER ui_names( UI *u, INT num, CONST char *const *names, INT n )
 {
 	UIPART	*p = part(u, num);
 	char	*buf;
 	SZ	len = 0, asz = 0;
 	INT	i;
+	ER	er;
 
-	if ( p == NULL ) return;
+	if ( p == NULL ) return E_NOEXS;
 	for ( i = 0; i < n; i++ ) len += (SZ)strlen(names[i]) + 1;
 	buf = (char *)malloc(( len > 0 ) ? (size_t)len : 1);
-	if ( buf == NULL ) return;
+	if ( buf == NULL ) return E_NOMEM;
 	len = 0;
 	for ( i = 0; i < n; i++ ) {
 		SZ	k = (SZ)strlen(names[i]);
@@ -811,8 +825,10 @@ EXPORT void ui_names( UI *u, INT num, CONST char *const *names, INT n )
 		memcpy(buf + len, names[i], (size_t)k + 1);
 		len += k + 1;
 	}
-	(void)ob_wri_rec(p->key, OB_WR_KIND, 0, buf, len, &asz);
+	/* all of them in one write: the window manager takes as many as there are */
+	er = ob_wri_rec(p->key, OB_WR_KIND, 0, buf, len, &asz);
 	free(buf);
+	return ( er < E_OK ) ? er : E_OK;
 }
 
 LOCAL void flags( UI *u, INT num, UINT set, UINT clear )
@@ -873,26 +889,24 @@ EXPORT void ui_show_sheet( UI *u, INT tag )
 
 /*
  * Where a panel of pw x ph that asks something stands: in the middle of
- * the main screen and kept on it, as the system's own panels that ask
- * something stand (wm_panel_open_centre).
+ * the screen the window that asks is on (the one its middle is on), and
+ * kept on it; for a program with no window of its own, of the main
+ * screen, as the system's own panels that ask something stand
  */
-LOCAL void ask_place( INT pw, INT ph, INT *p_x, INT *p_y )
+LOCAL void ask_place( CONST UI *u, INT pw, INT ph, INT *p_x, INT *p_y )
 {
-	INT	sw = 0, sh = 0, x, y;
+	T_OBWPOS	wp;
+	T_DPRECT	on;
+	SZ		asz = 0;
 
-	wm_screen(&sw, &sh);
-	if ( sw <= 0 || sh <= 0 ) {
-		sw = 1280;
-		sh = 800;
+	if ( u != NULL && u->kw > 0 && ob_rea_rec(u->kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) >= E_OK
+	  && wp.right > wp.left ) {
+		on.left = on.top = on.right = on.bottom = 0;
+		wm_screen_of(( wp.left + wp.right ) / 2, ( wp.top + wp.bottom ) / 2, &on);
+		wm_centre_in(&on, pw, ph, p_x, p_y);
+		return;
 	}
-	x = ( sw - pw ) / 2;
-	y = ( sh - ph ) / 2;
-	if ( x + pw > sw ) x = sw - pw;
-	if ( y + ph > sh ) y = sh - ph;
-	if ( x < 0 ) x = 0;
-	if ( y < 0 ) y = 0;
-	*p_x = x;
-	*p_y = y;
+	wm_main_centre(pw, ph, p_x, p_y);
 }
 
 EXPORT INT ui_ask( UI *u, INT num, CONST char *const *lines, INT nline )
@@ -919,7 +933,7 @@ EXPORT INT ui_ask( UI *u, INT num, CONST char *const *lines, INT nline )
 		(void)ob_rea_rec(q.pk, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
 		pw = wp.right - wp.left;
 		ph = wp.bottom - wp.top;
-		ask_place(pw, ph, &x, &y);
+		ask_place(u, pw, ph, &x, &y);
 		snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":256}", x, y, x + pw, y + ph);
 		memset(&c, 0, sizeof(c));
 		c.type = OB_T_WINDOW;
@@ -1043,7 +1057,7 @@ EXPORT ER ui_dlg_open( UI *u, INT num, UI *q )
 		free(meta);
 	}
 
-	ask_place(pw, ph, &x, &y);
+	ask_place(u, pw, ph, &x, &y);
 	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":256}", x, y, x + pw, y + ph);
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;

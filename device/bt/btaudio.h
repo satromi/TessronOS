@@ -94,6 +94,10 @@ IMPORT BOOL knl_bth_can_record( void );
 IMPORT ER   knl_bth_rec_start( UW rate, UW *dev_rate, INT *channels );
 IMPORT void knl_bth_rec_stop( void );
 IMPORT BOOL knl_bth_rec_running( void );
+/* The earphones' microphone gain as a level of DN_SDVOLMIC: E_NOSPT when they take no remote volume, or have not said theirs */
+IMPORT ER   knl_bth_mic_get( SDVol *v );
+/* Set: told them by +VGM in the next round; E_NOSPT when they take no remote volume */
+IMPORT ER   knl_bth_mic_set( CONST SDVol *v );
 
 /* What the voice link has carried, for the tests */
 typedef struct {
@@ -102,6 +106,9 @@ typedef struct {
 	UW	rx_packets;
 	UB	alt;			/* the alternate setting of the voice interface */
 	UH	handle;
+	UB	codec;			/* of the last link up: 1 CVSD, 2 mSBC */
+	UW	filled;			/* mSBC frames lost and made up */
+	UW	bad;			/* mSBC frames whose check failed */
 } T_BTHSTAT;
 IMPORT void knl_bth_stat( T_BTHSTAT *s );
 

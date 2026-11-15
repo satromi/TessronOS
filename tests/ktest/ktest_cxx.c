@@ -215,6 +215,143 @@ LOCAL void test_exec_wx( void )
 	(void)ts_wai_prc(pid, &psts, 10000);
 }
 
+/*
+ * Pages taken away while another task of the process waits inside a
+ * call (the program's "churn": 8GB made and given back in 64MB rounds
+ * while a thread waits in poll). They go back to the system at once,
+ * not when the waiting call comes out: every round gets its pages, and
+ * the program ends with 0.
+ */
+#define CHURN_TMO	600000		/* ms: 8GB of pages zeroed, under TCG */
+
+LOCAL void test_churn( void )
+{
+	T_PSTS	psts;
+	UD	before, after;
+	ID	pid;
+	ER	er;
+
+	if ( !have_prog ) KT_SKIP("no program");
+	before = pages_free();
+	pid = start_mode("churn");
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) return;
+	psts.exitcd = -1;
+	er = ts_wai_prc(pid, &psts, CHURN_TMO);
+	KT_ASSERT_ER(er, E_OK);
+	if ( er < E_OK ) {
+		(void)ts_ter_prc(pid, TS_ABORT_TERM);
+		(void)ts_wai_prc(pid, &psts, 10000);
+	}
+	after = pages_free();
+	tm_printf((UB*)"  churn: exit code %d, free pages %d -> %d\n",
+		  psts.exitcd, (INT)before, (INT)after);
+	KT_ASSERT_EQ(psts.exitcd, 0);
+}
+
+/*
+ * A breakpoint of the program's (INT3): the process ends by #BP, vector
+ * 3, and the place recorded is the INT3 itself. With a gate of the
+ * kernel's privilege it would be a general protection fault naming the
+ * gate (error code 0x1a) instead.
+ */
+LOCAL void test_breakpoint( void )
+{
+#if defined(__x86_64__)
+	T_PSTS		psts;
+	T_PRCFLT	f;
+	UW		lost;
+	ID		pid;
+	ER		er;
+	BOOL		seen = FALSE;
+
+	if ( !have_prog ) KT_SKIP("no program");
+	while ( knl_prc_fault_take(&f, &lost) ) ;		/* what earlier tests left */
+	pid = start_mode("bp");
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) return;
+	psts.exitcd = -1;
+	er = ts_wai_prc(pid, &psts, RUN_TMO);
+	KT_ASSERT_ER(er, E_OK);
+	KT_ASSERT_EQ(psts.exitcd, TS_ABORT_FAULT);
+	while ( knl_prc_fault_take(&f, &lost) ) {
+		if ( f.pid == pid ) {
+			tm_printf((UB*)"  vector %d error %x at %08x%08x\n", (INT)( f.esr >> 32 ) & 0xff,
+				  (UW)f.esr, (UW)( f.elr >> 32 ), (UW)f.elr);
+			KT_ASSERT_EQ((UW)( f.esr >> 32 ) & 0xff, 3);
+			KT_ASSERT_EQ((UW)f.esr, 0);
+			if ( ( f.codeok & ( 1U << ( TS_FLT_CODE_BACK / 4 ) ) ) != 0 ) {
+				KT_ASSERT_EQ(f.code[TS_FLT_CODE_BACK], 0xcc);	/* the INT3 */
+			}
+			seen = TRUE;
+		}
+	}
+	KT_ASSERT(seen);
+#else
+	KT_SKIP("x86 only");
+#endif
+}
+
+/*
+ * Translations of pages given back left on a processor (design 4.5.2):
+ * two processes of the program's "tlbre" (each gives back pages its
+ * other threads wrote and wait to read again, on whichever processors
+ * they are put) while processes that end at once are started one after
+ * another, so that the processors go between the two spaces, the
+ * kernel's tasks and the empty space, and drop all their translations
+ * now and then (the ends of the processes). No thread may see an old
+ * content, and, with PF_FREE_CHECK (make PGCHECK=1), no page may be
+ * written while it is free.
+ */
+IMPORT BOOL knl_pf_check_counts( UW *p_written, UW *p_twice );
+
+#define TLBRE_TMO	600000		/* ms: 3000 rounds under TCG */
+
+LOCAL void test_tlb_stale( void )
+{
+	T_PSTS	sa, sb, sq;
+	ID	a, b, q;
+	ER	ea = E_TMOUT, eb = E_TMOUT;
+	UW	w0 = 0, t0 = 0, w1 = 0, t1 = 0;
+	BOOL	watched;
+	INT	quick = 0, i;
+
+	if ( !have_prog ) KT_SKIP("no program");
+	watched = knl_pf_check_counts(&w0, &t0);
+	a = start_mode("tlbre");
+	b = start_mode("tlbre");
+	KT_ASSERT(a > 0 && b > 0);
+	if ( a <= 0 || b <= 0 ) return;
+	sa.exitcd = sb.exitcd = -1;
+	for ( i = 0; i < TLBRE_TMO / 50 && ( ea == E_TMOUT || eb == E_TMOUT ); i++ ) {
+		q = start_mode("quick");
+		if ( q > 0 ) {
+			(void)ts_wai_prc(q, &sq, 10000);
+			quick++;
+		}
+		if ( ea == E_TMOUT ) ea = ts_wai_prc(a, &sa, 25);
+		if ( eb == E_TMOUT ) eb = ts_wai_prc(b, &sb, 25);
+	}
+	if ( ea < E_OK ) {
+		(void)ts_ter_prc(a, TS_ABORT_TERM);
+		(void)ts_wai_prc(a, &sa, 10000);
+	}
+	if ( eb < E_OK ) {
+		(void)ts_ter_prc(b, TS_ABORT_TERM);
+		(void)ts_wai_prc(b, &sb, 10000);
+	}
+	(void)knl_pf_check_counts(&w1, &t1);
+	tm_printf((UB*)"  tlbre: exit codes %d %d, %d processes started and ended meanwhile; "
+		  "pages written while free %d, given back twice %d%s\n", sa.exitcd, sb.exitcd, quick,
+		  (INT)( w1 - w0 ), (INT)( t1 - t0 ), watched ? "" : " (not watched: make PGCHECK=1)");
+	KT_ASSERT_ER(ea, E_OK);
+	KT_ASSERT_ER(eb, E_OK);
+	KT_ASSERT_EQ(sa.exitcd, 0);
+	KT_ASSERT_EQ(sb.exitcd, 0);
+	KT_ASSERT_EQ(w1, w0);
+	KT_ASSERT_EQ(t1, t0);
+}
+
 EXPORT void ktest_cxx( void )
 {
 	KT_RUN(test_present);
@@ -223,4 +360,7 @@ EXPORT void ktest_cxx( void )
 	KT_RUN(test_exec_write);
 	KT_RUN(test_exec_run);
 	KT_RUN(test_exec_wx);
+	KT_RUN(test_breakpoint);
+	KT_RUN(test_churn);
+	KT_RUN(test_tlb_stale);
 }

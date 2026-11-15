@@ -830,7 +830,7 @@ static ER open_window( void )
 
 	unp_uuid_str(&archive, id);
 	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":7,\"shows\":\"%s\"}",
-		 200, 150, 200 + WORK_W + FRAME_W, 150 + WORK_H + TITLE_H, id);
+		 wm_new_x(200), wm_new_y(150), wm_new_x(200) + WORK_W + FRAME_W, wm_new_y(150) + WORK_H + TITLE_H, id);
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
 	c.sub = OB_S_WINDOW;

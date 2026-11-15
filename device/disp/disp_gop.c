@@ -66,6 +66,7 @@ LOCAL INT	hw_kind = HW_GOP;
 #define VBE_ON		( 0x01 | 0x40 | 0x80 )	/* enabled, one flat run of pixels, not cleared */
 
 LOCAL UBINT	vbe_regs = 0;
+LOCAL CONST T_DISPOUTHW	stdvga_out;		/* the standard VGA as an output, below */
 LOCAL UD	vbe_fb = 0, vbe_fb_size = 0;
 LOCAL UBINT	vbe_va = 0;
 
@@ -154,9 +155,14 @@ LOCAL INT vbe_setmode( T_DISPHW *hw, UINT w, UINT h )
  * QEMU's adapter is reset by S3, and has its mode set again.
  */
 IMPORT void	knl_igfx_dark( BOOL dark );	/* x86_64/disp_igfx.c */
+IMPORT void	knl_igfx_wm_again( void );
+
+IMPORT void	knl_disp_ext_suspend( void );	/* x86_64/disp_ext.c */
+IMPORT void	knl_disp_ext_resume( void );
 
 LOCAL ER gop_pm_suspend( void *arg, INT how )
 {
+	if ( hw_kind == HW_IGFX ) knl_disp_ext_suspend();	/* an external screen off first */
 	knl_igfx_dark(TRUE);
 	return E_OK;
 }
@@ -172,6 +178,8 @@ LOCAL void gop_pm_resume( void *arg, INT how )
 		tm_printf((UB *)"disp: QEMU standard VGA: %d x %d again after the sleep\n", vbe_w, vbe_h);
 	}
 	knl_igfx_dark(FALSE);
+	knl_igfx_wm_again();	/* the watermarks the sleep may have lost */
+	if ( hw_kind == HW_IGFX ) knl_disp_ext_resume();	/* and an external screen lit again */
 }
 
 LOCAL CONST T_PMDEV	gop_pm = { "screen", PM_ORD_DISPLAY, gop_pm_suspend, gop_pm_resume, NULL };
@@ -196,14 +204,14 @@ LOCAL void screens_setting( void )
 
 IMPORT void	knl_disp_ext_start( void );	/* x86_64/disp_ext.c */
 
-/* The start-up setting ext=1: what is plugged into the external ports is looked at */
-LOCAL BOOL ext_wanted( void )
+/* The start-up setting ext=0: the external ports are not looked at (disp_ext.c) */
+LOCAL BOOL ext_off( void )
 {
 	CONST char	*c = knl_bootinfo->cmdline;
 
 	for ( ; *c != '\0'; c++ ) {
 		if ( ( c == knl_bootinfo->cmdline || c[-1] == ' ' )
-		  && c[0] == 'e' && c[1] == 'x' && c[2] == 't' && c[3] == '=' && c[4] == '1' ) return TRUE;
+		  && c[0] == 'e' && c[1] == 'x' && c[2] == 't' && c[3] == '=' && c[4] == '0' ) return TRUE;
 	}
 	return FALSE;
 }
@@ -257,9 +265,11 @@ EXPORT INT knl_disp_hw_init( T_DISPHW *hw )
 	knl_fbcon_stage("screen: the display engine under it");
 	if ( hw->format == DISP_FMT_XRGB8888 && knl_igfx_probe(hw->fb_pa) ) {
 		hw_kind = HW_IGFX;
-		if ( ext_wanted() ) knl_disp_ext_start();
+		hw->dirty = knl_igfx_dirty;	/* the panel's self refresh told of each send */
+		if ( !ext_off() ) knl_disp_ext_start();
 	} else if ( hw->format == DISP_FMT_XRGB8888 && vbe_probe(hw->fb_pa) ) {
 		hw_kind = HW_STDVGA;
+		hw->out = &stdvga_out;
 	}
 	screens_setting();
 	knl_fbcon_stage("screen: the back buffer");
@@ -333,6 +343,176 @@ EXPORT INT knl_disp_hw_modes( UH (*m)[2], INT max )
 EXPORT INT knl_disp_hw_fit( INT fit, BOOL now )
 {
 	return ( hw_kind == HW_IGFX ) ? knl_igfx_fit(fit, now) : -1;
+}
+
+/*
+ * The EDID QEMU gives its adapters (their edid property, on by default):
+ * in the first bytes of the register window, the base block and its
+ * extensions. The number of bytes read, 0 when no EDID is there.
+ */
+#define EDID_WIN	1024
+
+LOCAL INT edid_read( UBINT regs, UB *buf, INT max )
+{
+	INT	i, n = ( max < EDID_WIN ) ? max : EDID_WIN;
+
+	if ( regs == 0 ) {
+		return 0;
+	}
+	for ( i = 0; i < n; i++ ) {
+		buf[i] = *(volatile UB *)( regs + i );
+	}
+	return ( n >= 128 && buf[0] == 0x00 && buf[1] == 0xFF && buf[7] == 0x00 ) ? n : 0;
+}
+
+LOCAL INT stdvga_edid( void *ctx, UB *buf, INT max )
+{
+	(void)ctx;
+	return edid_read(vbe_regs, buf, max);
+}
+
+/* QEMU's standard VGA as the main output: its size goes by knl_disp_hw_setmode */
+LOCAL CONST T_DISPOUTHW	stdvga_out = {
+	DISP_CON_VIRTUAL, "Virtual-1", NULL, stdvga_edid, NULL, NULL, NULL,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+
+/*
+ * QEMU's secondary-vga (1234:1111 without the old VGA, class 03.80) beside
+ * the standard VGA: a further screen right of the main one (10.4.8),
+ * MORE_WIDTH wide and as tall as the main one at start-up, so that the
+ * pointer, which moves in the rectangle round the screens, finds a screen
+ * everywhere. Two pages where its window has room, flipped between. Its
+ * mode is set again by the layer of outputs (more_commit), and it is
+ * turned off when off.
+ */
+#define MORE_WIDTH	1024
+
+LOCAL UBINT	more_regs = 0;
+LOCAL UD	more_fb = 0, more_fb_size = 0;
+LOCAL UBINT	more_va = 0;
+LOCAL UH	more_rows = 0;
+
+#define MORE_RD(reg)	( *(volatile UH *)( more_regs + VBE_OFF + (reg) * 2 ) )
+#define MORE_WR(reg, v)	do { *(volatile UH *)( more_regs + VBE_OFF + (reg) * 2 ) = (UH)(v); DeviceBarrier(); } while ( 0 )
+
+/* The page the secondary-vga shows, by the row it starts from; taken at once */
+LOCAL ER more_flip( UINT page )
+{
+	MORE_WR(VBE_Y_OFFSET, page * more_rows);
+	return ( MORE_RD(VBE_Y_OFFSET) == (UH)( page * more_rows ) ) ? E_OK : E_IO;
+}
+
+LOCAL INT more_edid( void *ctx, UB *buf, INT max )
+{
+	(void)ctx;
+	return edid_read(more_regs, buf, max);
+}
+
+LOCAL ER more_check( void *ctx, CONST T_DISPMODE *m )
+{
+	(void)ctx;
+	if ( m->hdisp < 320 || m->vdisp < 200 || m->hdisp > 4096 || m->vdisp > 4096 || ( m->hdisp & 7 ) != 0
+	  || (UD)m->hdisp * m->vdisp * 4 > more_fb_size ) {
+		return E_NOSPT;
+	}
+	return E_OK;
+}
+
+/* The secondary-vga set to w x h, two pages where the window has room: hw made what it then is */
+LOCAL ER more_mode( UINT w, UINT h, T_DISPHW *hw )
+{
+	UINT	pages = ( (UD)w * h * 4 * 2 <= more_fb_size ) ? 2 : 1;
+
+	MORE_WR(VBE_ENABLE, 0);
+	MORE_WR(VBE_XRES, w);
+	MORE_WR(VBE_YRES, h);
+	MORE_WR(VBE_BPP, 32);
+	MORE_WR(VBE_VIRT_WIDTH, w);
+	MORE_WR(VBE_VIRT_HEIGHT, h * pages);
+	MORE_WR(VBE_X_OFFSET, 0);
+	MORE_WR(VBE_Y_OFFSET, 0);
+	MORE_WR(VBE_ENABLE, VBE_ON);
+	if ( MORE_RD(VBE_XRES) != w || MORE_RD(VBE_YRES) != h ) {
+		tm_printf((UB *)"disp: QEMU secondary-vga did not take %d x %d\n", (INT)w, (INT)h);
+		return E_IO;
+	}
+	if ( pages == 2 && MORE_RD(VBE_VIRT_HEIGHT) < h * 2 ) {
+		pages = 1;
+	}
+	hw->width  = w;
+	hw->height = h;
+	hw->bpp    = 32;
+	hw->pitch  = w * 4;
+	hw->format = DISP_FMT_XRGB8888;
+	hw->fb_pa  = more_fb;
+	hw->fb_va  = more_va;
+	hw->alpha  = DISP_ALPHA_ANY;
+	hw->via    = "QEMU secondary-vga";
+	hw->pages  = pages;
+	hw->page2_va = 0;
+	hw->flip   = ( pages == 2 ) ? more_flip : NULL;
+	hw->vsync  = NULL;
+	hw->latch_us = 0;
+	more_rows = (UH)h;
+	return E_OK;
+}
+
+LOCAL ER more_commit( void *ctx, CONST T_DISPMODE *m, T_DISPHW *hw )
+{
+	(void)ctx;
+	if ( m == NULL ) {
+		MORE_WR(VBE_ENABLE, 0);		/* off */
+		return E_OK;
+	}
+	if ( more_check(ctx, m) < E_OK ) {
+		return E_NOSPT;
+	}
+	return more_mode(m->hdisp, m->vdisp, hw);
+}
+
+LOCAL CONST T_DISPOUTHW	more_out = {
+	DISP_CON_VIRTUAL, "Virtual-2", NULL, more_edid, NULL, more_check, more_commit,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+
+EXPORT INT knl_disp_hw_more( INT i, UINT main_w, UINT main_h, T_DISPHW *hw, INT *p_side, INT *p_offset )
+{
+	T_PCIDEV	d;
+	UINT		w = MORE_WIDTH, h = main_h;
+	INT		k;
+
+	(void)main_w;
+	if ( i != 0 || hw == NULL || hw_kind != HW_STDVGA || h < 200 || h > 4096 ) {
+		return 0;
+	}
+	for ( k = 0; ts_pcie_find(0x03, 0x80, 0x00, k, &d) >= E_OK; k++ ) {
+		if ( d.vendor == 0x1234 && d.device == 0x1111 && d.bar[0] != 0 && d.bar[2] != 0 ) break;
+	}
+	if ( ts_pcie_find(0x03, 0x80, 0x00, k, &d) < E_OK || (UD)w * h * 4 > d.bar_size[0] ) {
+		return 0;
+	}
+	more_regs = (UBINT)DEV_BASE(d.bar[2]);
+	if ( ( MORE_RD(VBE_ID) & 0xfff0 ) != 0xb0c0 ) {
+		more_regs = 0;
+		return 0;
+	}
+	/* the whole window mapped, so that another mode needs no new mapping */
+	more_va = (UBINT)knl_vmap_pa(d.bar[0], ( d.bar_size[0] + PAGE_SIZE - 1 ) / PAGE_SIZE, VMAP_NOCACHE);
+	if ( more_va == 0 ) {
+		more_regs = 0;
+		return 0;
+	}
+	more_fb = d.bar[0];
+	more_fb_size = d.bar_size[0];
+	knl_memset(hw, 0, sizeof(*hw));
+	if ( more_mode(w, h, hw) < E_OK ) {
+		return 0;
+	}
+	hw->out = &more_out;
+	*p_side = DISP_SIDE_RIGHT;
+	*p_offset = 0;
+	return 1;
 }
 
 #endif /* X64 */

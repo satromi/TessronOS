@@ -19,7 +19,7 @@
       "id": "basic-calc-editor",
       "kind": "app",
       "name": "基本表計算",
-      "version": "R1.300",
+      "version": "R1.400",
       "menu": false,
       "builtin": false,
       "base": [

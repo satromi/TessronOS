@@ -202,6 +202,7 @@ IMPORT BOOL de_mark_carrying( void );
 IMPORT void de_mark_follow( INT sx, INT sy );
 IMPORT void de_mark_release( void );
 IMPORT BOOL de_sel_carrying( void );
+IMPORT BOOL de_sel_held( void );	/* pressed to be carried, moved or not */
 IMPORT void de_sel_copy( void );
 IMPORT void de_sel_release( INT sx, INT sy );
 IMPORT void de_sel_back( T_DDED *d, INT sx, INT sy, BOOL copy );

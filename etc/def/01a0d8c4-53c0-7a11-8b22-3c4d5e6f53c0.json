@@ -19,7 +19,7 @@
       "id": "tessronos-techo",
       "kind": "app",
       "name": "電子手帳",
-      "version": "R1.300",
+      "version": "R1.400",
       "menu": false,
       "builtin": false,
       "base": [

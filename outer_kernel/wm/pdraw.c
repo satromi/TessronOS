@@ -284,7 +284,7 @@ LOCAL INT text( INT gid, INT x, INT y, CONST UB *s, INT n, INT gap, UW colour )
 		return 0;
 	}
 	if ( n < 0 ) {
-		n = s_len(s, WM_POOL_BYTES);
+		n = s_len(s, 0x7FFFFFFF);	/* a name, which ends in its nought */
 	}
 	if ( gap == 0 && n < (INT)sizeof(buf) ) {
 		knl_memcpy(buf, s, n);
@@ -313,24 +313,117 @@ LOCAL INT width( CONST UB *s, INT n, INT gap )
 	return text(-1, 0, 0, s, n, gap, 0);
 }
 
-EXPORT CONST UB *pd_pool_name( CONST UB *pool, INT at, INT i )
-{
-	INT	k = 0;
+/* ---------------------------------------------------------------- names */
 
-	if ( pool == NULL || at < 0 || at >= WM_POOL_BYTES || i < 0 ) {
+#if USE_KTEST
+LOCAL INT	pd_nomem = 0;		/* blocks still to be refused, as though the memory had run out */
+
+EXPORT void knl_pn_test_nomem( INT n )
+{
+	pd_nomem = n;
+}
+#endif
+
+EXPORT T_WMNAMES *pd_names_new( INT n )
+{
+	T_WMNAMES	*nm;
+
+	if ( n < 0 ) {
+		return NULL;
+	}
+#if USE_KTEST
+	if ( pd_nomem > 0 ) {
+		pd_nomem--;
+		return NULL;
+	}
+#endif
+	nm = (T_WMNAMES *)Kmalloc(sizeof(T_WMNAMES) + (SZ)n + 1);
+	if ( nm != NULL ) {
+		nm->size = n + 1;
+		nm->len = 0;
+		nm->ncol = 0;
+		nm->colfid = 0;
+		nm->b[0] = 0;
+	}
+	return nm;
+}
+
+EXPORT T_WMNAMES *pd_names_dup( CONST T_WMNAMES *nm, ER *p_er )
+{
+	T_WMNAMES	*c;
+	INT		k;
+
+	*p_er = E_OK;
+	if ( nm == NULL ) {
+		return NULL;
+	}
+	c = pd_names_new(nm->len);
+	if ( c == NULL ) {
+		*p_er = E_NOMEM;
+		return NULL;
+	}
+	knl_memcpy(c->b, nm->b, nm->len);
+	c->b[nm->len] = 0;
+	c->len = nm->len;
+	c->ncol = nm->ncol;
+	c->colfid = nm->colfid;
+	for ( k = 0; k < PD_COL_MAX; k++ ) c->nat[k] = nm->nat[k];
+	return c;
+}
+
+EXPORT void pd_names_free( T_WMNAMES *nm )
+{
+	if ( nm != NULL ) {
+		Kfree(nm);
+	}
+}
+
+EXPORT CONST UB *pd_name_at( CONST T_WMPART *pt, INT at, INT i )
+{
+	CONST T_WMNAMES	*nm = pt->names;
+	INT		k = 0;
+
+	if ( nm == NULL || at < 0 || at >= nm->len || i < 0 ) {
 		return NULL;
 	}
 	while ( k < i ) {
-		while ( at < WM_POOL_BYTES && pool[at] != 0 ) {
+		while ( at < nm->len && nm->b[at] != 0 ) {
 			at++;
 		}
 		at++;
 		k++;
-		if ( at >= WM_POOL_BYTES ) {
+		if ( at >= nm->len ) {
 			return NULL;
 		}
 	}
-	return &pool[at];
+	return &nm->b[at];
+}
+
+EXPORT CONST UB *pd_name_next( CONST T_WMPART *pt, CONST UB *s )
+{
+	CONST T_WMNAMES	*nm = pt->names;
+	INT		at;
+
+	if ( nm == NULL || s == NULL || s < nm->b || s >= nm->b + nm->len ) {
+		return NULL;
+	}
+	at = (INT)( s - nm->b );
+	while ( at < nm->len && nm->b[at] != 0 ) {
+		at++;
+	}
+	at++;
+	return ( at < nm->len ) ? &nm->b[at] : NULL;
+}
+
+EXPORT INT pd_names_len( CONST T_WMPART *pt, INT count )
+{
+	CONST UB	*e;
+
+	if ( pt->names == NULL || count <= 0 ) {
+		return 0;
+	}
+	e = pd_name(pt, count);
+	return ( e != NULL ) ? (INT)( e - pt->names->b ) : pt->names->len;
 }
 
 /* ---------------------------------------------------------------- switches */
@@ -385,7 +478,7 @@ LOCAL void lamp( INT gid, INT l, INT t, INT b, INT sel, BOOL off, BOOL held, UIN
  * also drawn clipped to it, so that letters a scale draws a little
  * wider than they measure still stay inside.
  */
-#define COL_MAX		16		/* columns a row is parted into, at most */
+#define COL_MAX		PD_COL_MAX	/* columns a row is parted into, at most */
 #define COL_GAP		( MARGIN / 2 )	/* between two columns */
 #define COL_END		( MARGIN / 2 )	/* left free at the right of the row */
 
@@ -481,13 +574,25 @@ LOCAL void cols_lay( CONST T_WMPART *pt, INT n, CONST INT *nat, INT room, PDCOLS
 	}
 }
 
-/* The columns of every name of a list or a selector, from its definition or from the widest of each */
-LOCAL void cols_part( CONST T_WMPART *pt, CONST UB *pool, INT room, PDCOLS *c )
+/*
+ * The columns of every name of a list or a selector, from its definition
+ * or from the widest of each. What the names measure is kept with them
+ * (T_WMNAMES), so that only the first drawing after they are set reads
+ * every name, and each drawing after it costs the rows it shows.
+ */
+LOCAL void cols_part( CONST T_WMPART *pt, INT room, PDCOLS *c )
 {
+	T_WMNAMES	*blk = pt->names;
 	INT		nat[COL_MAX], n = 1, i, k, b, e;
-	CONST UB	*nm = pd_pool_name(pool, pt->pool, 0);
+	ID		fid = face(NULL);
+	CONST UB	*nm;
 
+	if ( blk != NULL && blk->ncol > 0 && blk->colfid == fid ) {
+		cols_lay(pt, blk->ncol, blk->nat, room, c);
+		return;
+	}
 	for ( k = 0; k < COL_MAX; k++ ) nat[k] = 0;
+	nm = pd_name(pt, 0);
 	for ( i = 0; i < pt->count && nm != NULL; i++ ) {
 		INT	len = s_len(nm, WM_LABEL_MAX), m = col_count(nm, len);
 
@@ -499,7 +604,12 @@ LOCAL void cols_part( CONST T_WMPART *pt, CONST UB *pool, INT room, PDCOLS *c )
 				if ( w > nat[k] ) nat[k] = w;
 			}
 		}
-		nm = pd_pool_name(pool, (INT)( nm - pool ), 1);
+		nm = pd_name_next(pt, nm);
+	}
+	if ( blk != NULL ) {
+		blk->ncol = n;
+		blk->colfid = fid;
+		for ( k = 0; k < COL_MAX; k++ ) blk->nat[k] = nat[k];
 	}
 	cols_lay(pt, n, nat, room, c);
 }
@@ -1037,6 +1147,7 @@ LOCAL void draw_scroll( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 	BOOL		off = ( pt->type & ( P_DISABLE | P_INACT ) ) != 0;
 	T_DPRECT	cell;
 	PDCOLS		cols;
+	CONST UB	*nm;
 
 	pt->rows = rows;
 	if ( pt->top < 1 ) {
@@ -1055,10 +1166,11 @@ LOCAL void draw_scroll( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 	}
 	/* the columns, the same for every row: from the definition, or from every name of the list */
 	ss_cell(r, 0, &cell);
-	cols_part(pt, c->pool, cell.right - COL_END - ( cell.left + MARGIN ), &cols);
-	for ( i = 0; i < rows && pt->top + i <= pt->count; i++ ) {
+	cols_part(pt, cell.right - COL_END - ( cell.left + MARGIN ), &cols);
+	/* the rows shown, each name found from the one before it */
+	nm = pd_name(pt, pt->top - 1);
+	for ( i = 0; i < rows && pt->top + i <= pt->count; i++, nm = pd_name_next(pt, nm) ) {
 		INT		idx = pt->top + i;
-		CONST UB	*nm = pd_pool_name(c->pool, pt->pool, idx - 1);
 		BOOL		noff = off || ( idx <= 32 && ( pt->inact & ( 1U << ( idx - 1 ) ) ) );
 
 		if ( nm == NULL ) {
@@ -1356,7 +1468,7 @@ LOCAL INT sb_ymar( CONST T_DPRECT *r )
 }
 
 /* A field's letters: its number, with noughts to its width when asked, or its name */
-LOCAL INT sb_text( CONST T_WMPART *pt, CONST UB *pool, INT f, INT chars, UB *out, INT max )
+LOCAL INT sb_text( CONST T_WMPART *pt, INT f, INT chars, UB *out, INT max )
 {
 	INT	v = pt->sbv[f], n;
 
@@ -1365,7 +1477,7 @@ LOCAL INT sb_text( CONST T_WMPART *pt, CONST UB *pool, INT f, INT chars, UB *out
 		return 0;
 	}
 	if ( pt->sbf[f] & SBF_NAMES ) {
-		CONST UB *nm = pd_pool_name(pool, pt->sbpool[f], v);
+		CONST UB *nm = pd_name_at(pt, pt->sbpool[f], v);
 
 		n = s_len(nm, max - 1);
 		if ( n > 0 ) {
@@ -1461,7 +1573,7 @@ LOCAL void draw_serial( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 			}
 		}
 		{
-			INT	f = it[k].field, m = sb_text(pt, c->pool, f, it[k].chars, buf, sizeof(buf));
+			INT	f = it[k].field, m = sb_text(pt, f, it[k].chars, buf, sizeof(buf));
 			INT	x = x0;
 
 			if ( m <= 0 ) {
@@ -1507,12 +1619,12 @@ typedef struct {
  * letters' height tall with seven more round them, and its letters' box
  * ends three left of the sheet; every box is as wide as the widest name.
  */
-LOCAL INT tag_column( CONST T_WMPART *pt, CONST UB *pool, PDTAG *t )
+LOCAL INT tag_column( CONST T_WMPART *pt, PDTAG *t )
 {
 	INT	i, wide = 0, w, y = pt->inner.top;
 
 	for ( i = 0; i < pt->count && i < PD_TAG_MAX; i++ ) {
-		CONST UB	*s = pd_pool_name(pool, pt->pool, i);
+		CONST UB	*s = pd_name(pt, i);
 
 		if ( s == NULL ) {
 			break;
@@ -1539,16 +1651,16 @@ LOCAL INT tag_column( CONST T_WMPART *pt, CONST UB *pool, PDTAG *t )
 	return i;
 }
 
-LOCAL INT tag_layout( CONST T_WMPART *pt, CONST UB *pool, PDTAG *t )
+LOCAL INT tag_layout( CONST T_WMPART *pt, PDTAG *t )
 {
 	INT	i = 0, k, num = 1, x = pt->inner.left, saved = -1, grp = 0, nrow = 0, row = -1;
 	INT	top2 = pt->inner.top + PD_FH + 10;
 
 	if ( ( pt->type & P_DOWN ) != 0 ) {
-		return tag_column(pt, pool, t);
+		return tag_column(pt, t);
 	}
 	for ( k = 0; k < pt->count && i < PD_TAG_MAX; k++ ) {
-		CONST UB	*s = pd_pool_name(pool, pt->pool, k);
+		CONST UB	*s = pd_name(pt, k);
 		INT		parent = -1;
 
 		if ( s == NULL ) {
@@ -1590,7 +1702,7 @@ LOCAL INT tag_layout( CONST T_WMPART *pt, CONST UB *pool, PDTAG *t )
 			row = nrow++;
 			i++;
 			k++;
-			s = pd_pool_name(pool, pt->pool, k);
+			s = pd_name(pt, k);
 			if ( s == NULL ) {
 				break;
 			}
@@ -1722,7 +1834,7 @@ LOCAL void draw_tags( T_WMPART *pt, CONST T_DPRECT *F, T_PDCTX *c )
 	T_DPRECT	I = pt->inner, I2 = pt->inner, top;
 	T_DPPAT		fr;
 
-	n = tag_layout(pt, c->pool, t);
+	n = tag_layout(pt, t);
 	I2.top += PD_FH + 10;
 	/* the frame as wide as the widest of the sides the tags do not stand on */
 	if ( ( pt->type & P_DOWN ) != 0 ) {
@@ -1777,10 +1889,10 @@ EXPORT void pd_tag_turn( INT gid, CONST T_DPRECT *tab )
  * The tag under a point: of the upper row, or of the lower row of the
  * upper tag shown; none that cannot be chosen.
  */
-EXPORT INT pd_tag_at( T_WMPART *pt, CONST UB *pool, INT x, INT y, T_DPRECT *p_tab )
+EXPORT INT pd_tag_at( T_WMPART *pt, INT x, INT y, T_DPRECT *p_tab )
 {
 	PDTAG	t[PD_TAG_MAX];
-	INT	n = tag_layout(pt, pool, t), k;
+	INT	n = tag_layout(pt, t), k;
 
 	for ( k = 0; k < n; k++ ) {
 		if ( t[k].name == NULL ) {
@@ -1806,10 +1918,10 @@ EXPORT INT pd_tag_at( T_WMPART *pt, CONST UB *pool, INT x, INT y, T_DPRECT *p_ta
  * The sheet the parts of the tag shown stand on: the sheet of the panel
  * of tags, below the lower row when the upper tag shown has one.
  */
-EXPORT void pd_tag_sheet( T_WMPART *pt, CONST UB *pool, T_DPRECT *out )
+EXPORT void pd_tag_sheet( T_WMPART *pt, T_DPRECT *out )
 {
 	PDTAG	t[PD_TAG_MAX];
-	INT	n = tag_layout(pt, pool, t), k;
+	INT	n = tag_layout(pt, t), k;
 
 	*out = pt->inner;
 	for ( k = 0; k < n; k++ ) {
@@ -1824,10 +1936,10 @@ EXPORT void pd_tag_sheet( T_WMPART *pt, CONST UB *pool, T_DPRECT *out )
  * A tag shown. A lower tag becomes the one its upper tag stands for;
  * the answer is the tag, or 0 when it was the one shown already.
  */
-EXPORT INT pd_tag_show( T_WMPART *pt, CONST UB *pool, INT num )
+EXPORT INT pd_tag_show( T_WMPART *pt, INT num )
 {
 	PDTAG	t[PD_TAG_MAX];
-	INT	n = tag_layout(pt, pool, t), k;
+	INT	n = tag_layout(pt, t), k;
 
 	for ( k = 0; k < n; k++ ) {
 		if ( t[k].num != num || t[k].sub < 0 || t[k].name == NULL ) {
@@ -2057,10 +2169,10 @@ LOCAL void draw_switch( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 		}
 		break;
 	case WS_PARTS: {
-		INT	i;
+		INT		i;
+		CONST UB	*nm = pd_name(pt, 0);
 
-		for ( i = 0; i < pt->count; i++ ) {
-			CONST UB	*nm = pd_pool_name(c->pool, pt->pool, i);
+		for ( i = 0; i < pt->count; i++, nm = pd_name_next(pt, nm) ) {
 			BOOL		noff = off || ( i < 32 && ( pt->inact & ( 1U << i ) ) );
 
 			if ( nm == NULL ) {
@@ -2104,7 +2216,7 @@ LOCAL void draw_popup( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 	T_DPPAT		pat;
 
 	if ( pt->value >= 1 && pt->value <= pt->count ) {
-		nm = pd_pool_name(c->pool, pt->pool, pt->value - 1);
+		nm = pd_name(pt, pt->value - 1);
 	}
 	if ( pt->type & P_NOFRAME ) {
 		wm_look_pat(LK_INACTPARTS, &pat);

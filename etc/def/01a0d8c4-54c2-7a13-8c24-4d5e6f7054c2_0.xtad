@@ -1,0 +1,75 @@
+<tad version="1.0" encoding="UTF-8" filename="システム登録のデータボックス">
+<document>
+<p>システム登録のデータボックス</p>
+<p>システム登録のウインドウのパネル(写し先のディスクの一覧、登録の方法、開始、登録先にTessronOSがあるときの上書きと初期化、消す区画の一覧、進み具合と結果の行、再起動と終了)と、登録の前に尋ねる2つのパネル(Windowsと共存するときの〈登録〉と、消すときの〈消して登録〉)の定義。</p>
+</document>
+<databox>
+<panel num="1" rect="0,0,620,724" title="システム登録" kind="bare">
+<text x="14" y="24">写し先のディスク</text>
+<list num="1" rect="14,32,606,142"/>
+<text x="14" y="170">登録の方法</text>
+<choice num="20" group="20" rect="14,178,474,200" value="1">Windowsと共存する(空き領域に区画を作る)</choice>
+<choice num="22" group="20" rect="14,204,474,226">区画を1つ消して使う(EFIシステムと回復の区画は残す)</choice>
+<choice num="21" group="20" rect="14,230,474,252">ディスク全体を消して使う</choice>
+<button num="30" rect="506,230,606,256">開始</button>
+<text x="14" y="276">登録先にTessronOSがあるとき</text>
+<choice num="23" group="23" rect="14,284,474,306" value="1">上書きする(実身を残し、システムだけを入れ直す)</choice>
+<choice num="24" group="23" rect="14,310,474,332">初期化する(登録先の実身はすべて消える)</choice>
+<text num="25" x="14" y="352"> </text>
+<text x="14" y="380">消す区画</text>
+<list num="2" rect="14,388,606,462"/>
+<line rect="14,470,606,471"/>
+<text num="41" x="14" y="498"> </text>
+<text num="42" x="14" y="520"> </text>
+<text num="43" x="14" y="542"> </text>
+<text num="44" x="14" y="564"> </text>
+<text num="45" x="14" y="586"> </text>
+<text num="46" x="14" y="608"> </text>
+<text num="47" x="14" y="630"> </text>
+<text num="48" x="14" y="652"> </text>
+<text num="49" x="14" y="674"> </text>
+<button num="31" rect="14,688,134,714">再起動</button>
+<button num="32" rect="506,688,606,714">終了</button>
+</panel>
+<panel num="10" rect="0,0,600,412" title="システム登録">
+<text num="1" x="14" y="28"> </text>
+<text num="2" x="14" y="50"> </text>
+<text num="3" x="14" y="72"> </text>
+<text num="4" x="14" y="94"> </text>
+<text num="5" x="14" y="116"> </text>
+<text num="6" x="14" y="138"> </text>
+<text num="7" x="14" y="160"> </text>
+<text num="8" x="14" y="182"> </text>
+<text num="9" x="14" y="204"> </text>
+<text num="10" x="14" y="226"> </text>
+<text num="11" x="14" y="248"> </text>
+<text num="12" x="14" y="270"> </text>
+<text num="13" x="14" y="292"> </text>
+<text num="14" x="14" y="314"> </text>
+<text num="15" x="14" y="336"> </text>
+<text num="16" x="14" y="358"> </text>
+<button num="102" rect="368,376,462,402" answer="cancel">取消</button>
+<button num="101" rect="472,376,586,402" answer="ok" emph="true">登録</button>
+</panel>
+<panel num="11" rect="0,0,600,412" title="システム登録" kind="warn">
+<text num="1" x="14" y="28"> </text>
+<text num="2" x="14" y="50"> </text>
+<text num="3" x="14" y="72"> </text>
+<text num="4" x="14" y="94"> </text>
+<text num="5" x="14" y="116"> </text>
+<text num="6" x="14" y="138"> </text>
+<text num="7" x="14" y="160"> </text>
+<text num="8" x="14" y="182"> </text>
+<text num="9" x="14" y="204"> </text>
+<text num="10" x="14" y="226"> </text>
+<text num="11" x="14" y="248"> </text>
+<text num="12" x="14" y="270"> </text>
+<text num="13" x="14" y="292"> </text>
+<text num="14" x="14" y="314"> </text>
+<text num="15" x="14" y="336"> </text>
+<text num="16" x="14" y="358"> </text>
+<button num="102" rect="368,376,462,402" answer="cancel">取消</button>
+<button num="101" rect="472,376,586,402" answer="ok" emph="true">消して登録</button>
+</panel>
+</databox>
+</tad>

@@ -12,6 +12,14 @@
   "deletable": false,
   "readable": true,
   "maker": "TessronOS",
+  "window": {
+    "pos": {
+      "x": 144,
+      "y": 124
+    },
+    "width": 900,
+    "height": 640
+  },
   "applist": {
     "accessory-box": {
       "name": "小物箱",

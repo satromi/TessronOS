@@ -1,0 +1,28 @@
+# システム登録's 初期化 of a TessronOS there (design 3.10.10, 11.32) on the x64 PC, for
+# tools/x64/ui_run64.py with the disk of ui_sysinst64_keep.steps: 初期化する chosen, [開始]
+# asks on the warning panel that every object there goes, and 取消 puts it away; nothing
+# is written.
+logmark
+open 01a0d8c4-54c0-7a11-8c22-4d5e6f7054c0
+expectsincein 60 sysinst: opened 1
+expectsincein 120 sysinst: keep nvmeb 0 -1: 0
+waitwin システム登録 30
+wait 500
+win システム登録
+# 初期化する: the switch at 14..474, 310..332 of the work area
+click 424 366
+wait 500
+shot sysinst64_init_chosen
+logmark
+click 880 288
+expectsincein 120 sysinst: plan nvmeb 0 -1: 0
+expectsince sysinst: ask 消して登録
+wait 800
+shot sysinst64_init_ask
+key 29
+expectsince sysinst: answered 0
+wait 300
+key 08 01
+expectsince sysinst: closed
+absent sysinst: started
+absent !OACV!

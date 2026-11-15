@@ -17,125 +17,8 @@
 # <polygon> 1つで、プロセスで開き直すと図形は 3+7 の 10 個(記録の中身は sum show の rec: の行)。
 # Keys: Esc 29, Enter 28;
 # Ctrl+S 16 01, Ctrl+E 08 01.
-figproc kernel
-mkbig fig 1 2 0
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-click 366 82
-wait 300
-click 260 430
-wait 700
-click 340 430
-wait 700
-click 300 490
-wait 700
-key 28
-wait 700
-click 380 430
-wait 700
-click 460 430
-wait 700
-click 420 490
-wait 700
-key 29
-wait 700
-click 500 430
-wait 700
-click 580 430
-wait 700
-dclick 540 490
-wait 700
-click 620 430
-wait 700
-click 700 430
-wait 700
-click 660 490
-wait 700
-click 622 431
-wait 700
-key 28
-wait 700
-click 260 560
-wait 700
-click 340 560
-wait 700
-click 300 620
-wait 700
-move 300 620
-wait 400
-shot pline_k_preview
-pixel 320 590 000000
-pixelnot 280 590 000000
-key 28
-wait 700
-click 760 430
-wait 700
-key 28
-wait 700
-click 332 82
-wait 300
-click 380 560
-wait 700
-click 460 560
-wait 700
-click 420 620
-wait 700
-key 28
-wait 500
-click 366 48
-wait 500
-click 683 86
-wait 400
-key 29
-wait 400
-click 366 82
-wait 300
-click 525 565
-wait 700
-click 603 566
-wait 700
-click 700 640
-wait 700
-key 28
-wait 500
-click 298 48
-wait 300
-sync 600
-shot pline_k_drawn
-pixel 566 560 000000
-pixelnot 566 565 000000
-pixel 300 430 000000
-pixel 320 460 000000
-pixelnot 280 460 000000
-pixelnot 400 460 000000
-pixelnot 520 460 000000
-pixelnot 280 590 000000
-pixel 400 590 000000
-key 16 01
-sync 600
-sum show
-keep kernel
-key 08 01
-sync 600
-wait 500
-open big
-waitwin 画用紙 600
-sync 600
-wait 500
-shot pline_k_reopened
-pixel 566 560 000000
-pixelnot 566 565 000000
-pixel 300 430 000000
-pixelnot 280 460 000000
-pixelnot 400 460 000000
-pixelnot 520 460 000000
-pixelnot 280 590 000000
-pixel 400 590 000000
-key 08 01
-sync 600
-wait 500
+# The desktop's own editor this was once compared with is gone: what it saved and showed
+# (record 0, its pictures) is what is wanted of the process here (want, shotsum).
 mkbig fig 1 2 0
 logmark
 pfig big
@@ -243,7 +126,7 @@ logmark
 key 16 01
 expectsince figure: saved (0)
 sum show
-same kernel
+want ok 1694 045daafd3fc3a65e
 key 08 01
 expect figure: closed
 logmark
