@@ -25,14 +25,21 @@
 #define H4_EVENT		0x04
 #define H4_ISO			0x05
 
-/* The longest packet taken whole: an ACL header and the data bt.c reassembles */
-#define BTH4_MAX		1100
+/*
+ * The room for a packet at the start, before the controller has said how
+ * long its packets are: an event, whose length is one byte. A task makes
+ * it as long as the controller's answers say (knl_bth4_room); the
+ * interrupt handler never allocates.
+ */
+#define BTH4_FIRST		( 2 + 255 )
 
 /*
  * What comes from the controller, a byte at a time: each whole packet
  * (without its type byte) goes to out. A byte that is not a known type
- * where a type belongs is passed over; a packet longer than BTH4_MAX is
- * passed over to its end, so that the next one is still found.
+ * where a type belongs is passed over; a packet longer than the room,
+ * longer than the controller said its packets are, is not one the
+ * specification allows: it is passed over to its end and counted, so
+ * that the next one is still found.
  */
 typedef void (*BTH4_OUT)( void *ctx, UB type, CONST UB *p, INT len );
 
@@ -45,15 +52,22 @@ typedef struct {
 	UW	frames;			/* whole packets given */
 	UW	bad_type;		/* bytes passed over where a type belonged */
 	UW	too_long;		/* packets passed over */
-	UB	b[BTH4_MAX];
+	T_SPLOCK lk;			/* the feeding, against the room made longer */
+	UB	*b;			/* the packet coming */
+	INT	cap;			/* and its room: the longest packet taken whole */
 } BTH4;
 
-IMPORT void knl_bth4_init( BTH4 *h );
+/* Ready for a stream, its room BTH4_FIRST at least, kept from before: E_NOMEM when it cannot be had */
+IMPORT ER   knl_bth4_init( BTH4 *h );
+/* In a task: room for packets of n bytes, what is coming kept; E_NOMEM when it cannot be had */
+IMPORT ER   knl_bth4_room( BTH4 *h, INT n );
 IMPORT void knl_bth4_feed( BTH4 *h, CONST UB *b, INT n, BTH4_OUT out, void *ctx );
 /* The header length of a type, 0 for one not known */
 IMPORT INT  knl_bth4_hlen( UB type );
 /* A packet with its type byte before it, into out: its length, or E_PAR when its header does not say n */
 IMPORT INT  knl_bth4_pack( UB type, CONST UB *pkt, INT n, UB *out, INT max );
+/* Whether the n bytes are one packet of the type, as its header says */
+IMPORT BOOL knl_bth4_ok( UB type, CONST UB *pkt, INT n );
 
 /*
  * A patch file (.hcd): HCI commands one after the other, each its

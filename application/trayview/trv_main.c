@@ -247,15 +247,16 @@ static BOOL is_program( CONST TS_UUID *u )
 /* Whether every link of a fragment points at a program */
 static BOOL links_to_programs( CONST T_TAD *frag, INT n )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	i;
+	BOOL	all = TRUE;
 
-	for ( i = 0; i < n; i++ ) {
-		if ( tad_lnk_get(frag, i, &v) < E_OK || !is_program(&v.target) ) {
-			return FALSE;
-		}
+	tad_vobj_init(&v);
+	for ( i = 0; i < n && all; i++ ) {
+		if ( tad_lnk_get(frag, i, &v) < E_OK || !is_program(&v.target) ) all = FALSE;
 	}
-	return TRUE;
+	tad_vobj_clear(&v);
+	return all;
 }
 
 /* How many of a fragment's elements are shapes, its links not counted */

@@ -375,11 +375,11 @@ LOCAL void bu_inthdr( UINT intno )
 /* A packet out, its type before it, as fast as the FIFO takes it; the controller's CTS holds it back */
 LOCAL ER bu_send( UB type, CONST UB *b, INT n )
 {
-	UB	out[1 + BTH4_MAX];
-	INT	len = knl_bth4_pack(type, b, n, out, sizeof(out)), i = 0, k;
+	INT	len = n + 1, i = 0, k;
 	UW	due = knl_btx_now() + 200 + (UW)n * 10000 / bu.baud;	/* ten bits a byte, in ms, and room */
 
-	if ( len < 0 ) return E_PAR;
+	/* the type, then the packet as it is: byte i of what goes is the type for 0, b[i - 1] after */
+	if ( !knl_bth4_ok(type, b, n) ) return E_PAR;
 	while ( i < len ) {
 		if ( ( bu_rd(U_LSR) & LSR_THRE ) == 0 ) {
 			if ( (W)( knl_btx_now() - due ) >= 0 ) {
@@ -391,7 +391,7 @@ LOCAL ER bu_send( UB type, CONST UB *b, INT n )
 			if ( bu.baud < 1000000 ) tk_dly_tsk(1);
 			continue;
 		}
-		for ( k = 0; k < U_FIFO && i < len; k++ ) bu_wr(U_RBR, out[i++]);
+		for ( k = 0; k < U_FIFO && i < len; k++, i++ ) bu_wr(U_RBR, ( i == 0 ) ? type : b[i - 1]);
 	}
 	return E_OK;
 }
@@ -438,7 +438,10 @@ LOCAL BOOL bu_prep( BTC *c )
 	for ( i = 0; i < 2 * U_FIFO && ( bu_rd(U_LSR) & LSR_DR ) != 0; i++ ) (void)bu_rd(U_RBR);
 	(void)bu_rd(U_IIR);
 	(void)bu_rd(U_MSR);
-	knl_bth4_init(&bu.h4);
+	if ( knl_bth4_init(&bu.h4) < E_OK ) {
+		tm_printf((UB *)"bt: uart: no room for a packet coming in\n");
+		return FALSE;
+	}
 	bu_wr(U_MCR, MCR_RTS | MCR_OUT2 | MCR_AFE);
 	knl_define_inthdr(bu.intno, TA_HLNG, (FP)bu_inthdr);
 	SetIntMode(bu.intno, IM_LEVEL);
@@ -460,7 +463,19 @@ LOCAL BOOL bu_prep( BTC *c )
 	return ok;
 }
 
-LOCAL CONST BTTRANS	bu_tr = { bu_cmd, bu_acl, bu_prep, NULL, bu_sco };	/* the chip has no isochronous channels */
+/* In the controller's task: the room for a packet coming as long as the controller said its packets are */
+LOCAL void bu_rx_size( BTC *c, INT n )
+{
+	(void)c;
+	if ( n <= bu.h4.cap ) return;
+	if ( knl_bth4_room(&bu.h4, n) < E_OK ) {
+		tm_printf((UB *)"bt: uart: no room for packets of %d bytes coming in: longer ones than %d are passed over\n", n, bu.h4.cap);
+	} else {
+		tm_printf((UB *)"bt: uart: packets of up to %d bytes taken\n", n);
+	}
+}
+
+LOCAL CONST BTTRANS	bu_tr = { bu_cmd, bu_acl, bu_prep, NULL, bu_sco, bu_rx_size };	/* the chip has no isochronous channels */
 
 /*
  * At the start of the system (devinit.c), before the Wi-Fi: the pins and

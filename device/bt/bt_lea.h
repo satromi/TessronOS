@@ -20,8 +20,17 @@
 #ifndef __BT_LEA_H__
 #define __BT_LEA_H__
 
-#define LEA_NASE	4		/* the sink ASEs of one device that are taken */
-#define LEA_NSTREAM	2		/* the streams of the group, a CIS each */
+/*
+ * The channels of the output this end plays, as lea_play_start answers
+ * them to the sound device, whose mixer makes that many: left and right.
+ * A stream of the group, a CIS each, carries one channel of it, or both
+ * on a device that takes two in one; so there are as many streams as the
+ * output has channels at most, on one device or one each of a pair. A
+ * device's sink ASEs are as many as it has (LEADEV.ase); those no stream
+ * uses are said on the console.
+ */
+#define LEA_OUT_CHANNELS	2
+#define LEA_NSTREAM		LEA_OUT_CHANNELS
 #define LEA_OCT_MAX	155		/* the longest LC3 frame asked for, of 48 kHz in 10 ms */
 #define LEA_SDU_MAX	( 2 * LEA_OCT_MAX )
 
@@ -67,8 +76,8 @@ typedef struct {
 	UB	frames_max;	/* codec frames in one SDU */
 	UW	sink_loc;	/* LOC_* */
 	/* ASCS */
-	INT	nase;
-	LEASE	ase[LEA_NASE];
+	INT	nase, ase_cap;
+	LEASE	*ase;		/* its sink ASEs, as many as it has */
 	UH	cp;
 	/* CSIS: the set of earphones it is one of */
 	BOOL	in_set;
@@ -89,7 +98,7 @@ IMPORT void knl_btiso_drop( BTC *c, UH cis );
 IMPORT BOOL knl_btiso_send( BTC *c, UH cis, UH seq, CONST UB *sdu, INT n );
 
 /* bt_bap.c: the devices, and what is asked of them */
-IMPORT LEADEV *knl_btbap_dev( BTC *c, INT i );	/* NPEER of them, NULL where none */
+IMPORT LEADEV *knl_btbap_dev( BTC *c, INT i );	/* one for each of the controller's entries (c->npeer), NULL where none */
 IMPORT void knl_btbap_codec( BTC *c, LEADEV *d, INT ai, UB freq, UW alloc, UH octets );
 IMPORT void knl_btbap_qos( BTC *c, LEADEV *d, INT ai, UB cig, UB cis, UW interval, UB framing,
 			   UB phy, UH max_sdu, UB rtn, UH latency, UW pd );

@@ -39,6 +39,7 @@
 #include <tk/errno.h>
 #include <ts/uuid.h>
 #include <ts/dtreq.h>
+#include <ts/ob.h>
 #include <ts/vobjsz.h>
 
 /* The month's grid as the record has it */
@@ -88,6 +89,13 @@ IMPORT void ct_put( CTBUF *b, CONST char *s );
 IMPORT void ct_putn( CTBUF *b, CONST UB *s, INT n );
 IMPORT void ct_num( CTBUF *b, INT v );
 IMPORT void ct_esc( CTBUF *b, CONST UB *s, INT n );	/* XML-escaped */
+
+/*
+ * The words link i of a drop was carried with -- its name, relationship
+ * and applist (ob_drop_name and the others, ts/ob.h) -- as attributes of
+ * the element made of it, escaped, whole: those it has
+ */
+IMPORT void ct_drop_words( CTBUF *b, CONST T_OBDROP *d, INT i );
 
 /* ---------------------------------------------------------------- dates */
 
@@ -196,7 +204,11 @@ typedef struct {
  */
 IMPORT void ct_link_edit( CTBUF *b, CONST UB *el, INT len, CONST CTSET *set, INT n );
 
-/* An attribute's value as text: the XML's escapes undone; its length, -1 when it has none */
+/*
+ * An attribute's value as text: the XML's escapes undone; its length, -1
+ * when it has none. With out NULL nothing is written and the length is
+ * the whole value's, for the room to read it in (max then len + 1).
+ */
 IMPORT INT  ct_attr_text( CONST UB *el, INT n, CONST char *name, UB *out, INT max );
 
 /* "true" or "false"; dflt when it has none */
@@ -242,12 +254,23 @@ IMPORT ER   ct_app_lock( CTBUF *b, CONST UB *json, INT n, BOOL lock );
 IMPORT BOOL ct_app_locked( CONST UB *json, INT n );
 
 /*
- * A request about the link el (n bytes) given the link's applist in
- * text with DT_F_APPLIST, for the desktop to open it with the program
- * it keeps to; nothing added when the link has no applist or it does
- * not fit
+ * A request about the link el (n bytes) given the link's applist, whole,
+ * as a part of the request's tail (DT_TAIL_APPLIST, ts/dtreq.h) with
+ * DT_F_APPLIST, for the desktop to open it with the program it keeps
+ * to: tail holds *p_tailsz bytes of the tail so far in cap bytes of
+ * room. Nothing added when the link has no applist; E_LIMIT when the
+ * room does not hold it. ct_link_room says how much room the parts of
+ * ct_link_req and ct_link_from take at most.
  */
-IMPORT void ct_link_req( T_DTREQ *rq, CONST UB *el, INT n );
+IMPORT SZ   ct_link_room( CONST UB *el, INT n );
+IMPORT ER   ct_link_req( T_DTREQ *rq, CONST UB *el, INT n, UB *tail, UINT *p_tailsz, SZ cap );
+
+/*
+ * The box the link el (n bytes) has in its record (vobjleft and the
+ * rest), put in a DT_RQ_PLACE as where it was (dt_req_was): none when the
+ * link says none.
+ */
+IMPORT void ct_link_was( T_DTREQ *rq, CONST UB *el, INT n );
 
 /* The entries of an applist, in order: each one's key (the program's id) and "name"; how many */
 #define CT_APP_ID	48
@@ -258,25 +281,32 @@ IMPORT INT  ct_app_list( CONST UB *json, INT n, UB (*ids)[CT_APP_ID], UB (*names
  * An answer to DT_RQ_APPS, an entry of the list 実行 shows for a link
  * (the desktop's dt_app_list): the program's id and name, and whether it
  * is offered for the object's kind (DT_F_KIND). FALSE when it gives none.
+ * an is the answer read whole, its tail after it: "id\tname" is the
+ * tail's text (DT_TAIL_TEXT).
  */
 IMPORT BOOL ct_app_entry( CONST T_DTANS *an, UB *id, UB *name, BOOL *p_kind );
 
 /*
  * DT_RQ_OPEN of the link el (n bytes) of the record of parent, with
  * DT_F_LINK (ts/dtreq.h): what the window opened does to the link is
- * told at chan. The link's viewMode and wordWrap go with it, and its
- * applist as ct_link_req puts it; the caller says its colours (look).
- * FALSE when the link has no vobjid or it does not fit, and the request
- * is made as ct_link_req makes it.
+ * told at chan. The record's object, the link's vobjid and chan go in
+ * the tail's text, parted by tabs, its viewMode as a part of its own
+ * (DT_TAIL_VIEW), its wordWrap in grab_x, and its applist as ct_link_req
+ * puts it; the caller says its colours (look). E_NOEXS when the link has
+ * no vobjid, and the request is made as ct_link_req makes it; E_LIMIT
+ * when the room does not hold the parts, and none of them is put.
  */
-IMPORT BOOL ct_link_from( T_DTREQ *rq, CONST TS_UUID *parent, CONST TS_UUID *chan, CONST UB *el, INT n );
+IMPORT ER   ct_link_from( T_DTREQ *rq, CONST TS_UUID *parent, CONST TS_UUID *chan, CONST UB *el, INT n,
+			  UB *tail, UINT *p_tailsz, SZ cap );
 
 /*
  * What a window opened from a link did to it, as the desktop told it
  * (DT_HOW_LINK_VIEW, DT_HOW_LINK_ADD): the object whose record holds the
  * link and the link's vobjid. For DT_HOW_LINK_VIEW, the attributes to
  * set in the link, as ct_link_edit takes them, their texts in v; how
- * many (none for DT_HOW_LINK_ADD). -1 when the answer is not one.
+ * many (none for DT_HOW_LINK_ADD). -1 when the answer is not one. an is
+ * the notice read whole, its tail after it; what it says is the tail's
+ * text (DT_TAIL_TEXT).
  */
 #define CT_VIEW_SET	5
 typedef struct {

@@ -5,9 +5,9 @@
 # the menu opens at 400,300, 接続 to its right) starts the program ディスク操作
 # (a process), which offers the partitions in a window of its own in the
 # middle of the screen, a list whose rows are 18 pixels apart from 332, its
-# 接続 at 823,498. The FAT partition is refused as files. Attaching and
-# taking away are an administrator's: the desktop asks for the password in
-# a panel of its own (chosen the first time, typed twice with Tab between). VOLC1 attached: its link at the foot
+# 接続 at 823,498. The FAT partition is refused as files. A USB medium the
+# system uses nothing of is the person's to attach and take away: no
+# administrator's password is asked for (design 8.7.1). VOLC1 attached: its link at the foot
 # of the first window (120,205), marked as on another volume; opened, its
 # window keeps 切り離し from being done; closed, 切り離し leaves the link
 # pale, and opening it says the volume is not attached. 接続 again, then
@@ -63,13 +63,7 @@ wait 800
 click 430 404
 wait 200
 click 823 498
-wait 1000
-text ktest-admin
-key 2b
-text ktest-admin
-wait 300
-key 28
-expect the administrator's password was set
+expect disk: uda0 is the person's medium
 expect disk: attached uda0 "VOLC1"
 wait 1000
 shot vol_attached
@@ -116,9 +110,6 @@ wait 300
 move 185 226
 wait 300
 click 185 226
-wait 1000
-text ktest-admin
-key 28
 expect disk: detached uda0
 wait 800
 shot vol_detached
@@ -145,9 +136,6 @@ wait 800
 click 430 404
 wait 200
 click 823 498
-wait 1000
-text ktest-admin
-key 28
 expect disk: attached uda0
 wait 1000
 click 60 205 1
@@ -205,12 +193,13 @@ expect disk: uda0 is back
 expect disk: attached uda0
 wait 1500
 shot vol_back
-# Pulled out with changes not saved (the link in VOLC1's top moved): asked
+# Pulled out with changes not saved (the link in VOLC1's top moved; its
+# window, a process's, stands at 62,42 with the link 画面印刷 at 86,76): asked
 # where they go; Enter takes the first, the system's volume, as an object
 # of its own with a link in the first window.
 dclick 120 205
 wait 1500
-drag 270 172 420 300
+drag 200 85 350 213
 wait 500
 hmp device_del uvcd
 expect disk: VOLC1 has changes not saved; 1 volumes to save to
@@ -228,7 +217,7 @@ wait 1500
 # again, kept until the disk is put back
 dclick 120 205
 wait 1500
-drag 270 172 420 360
+drag 200 85 350 273
 wait 500
 hmp device_del uvcd
 expect disk: VOLC1 has changes not saved

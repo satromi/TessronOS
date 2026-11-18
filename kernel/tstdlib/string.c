@@ -176,3 +176,25 @@ char* knl_strcat( char *dst, const char *src )
 
 	return dst;
 }
+
+/*
+ * How many of the len bytes of UTF-8 s, at most max, end on a whole
+ * letter: a cut there never leaves the first bytes of a letter whose
+ * following bytes were cut away.
+ */
+SZ knl_utf8_fit( const UB *s, SZ len, SZ max )
+{
+	SZ	n;
+
+	if ( max < 0 ) {
+		max = 0;
+	}
+	if ( len <= max ) {
+		return ( len > 0 ) ? len : 0;
+	}
+	n = max;
+	while ( n > 0 && ( s[n] & 0xC0 ) == 0x80 ) {
+		n--;		/* s[n] continues the letter before: cut where that letter starts */
+	}
+	return n;
+}

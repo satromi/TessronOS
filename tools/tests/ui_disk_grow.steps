@@ -2,8 +2,9 @@
 # DIR made by tools/tests/mkvoldisk.py: volh.img (64MB, GPT, a TSFS partition
 # "VOLH" of 8MB at 1MB and nothing after it) plugged into the hub as uda.
 # The program ディスク操作 (a process) shows its panels in windows of its own
-# in the middle of the screen, and the desktop asks for the administrator's
-# password before it changes a volume (chosen the first time, typed twice).
+# in the middle of the screen. 接続 of a USB medium is the person's; before
+# it changes a volume (拡張, 区画作成) the desktop asks for the
+# administrator's password (chosen the first time, typed twice).
 # VOLH is attached with 接続; 拡張 on its link offers 8MB to 62MB, and 32 is
 # typed into the size (Backspace takes the last digit off the number box).
 # 区画作成 away from a link offers the 30MB left on uda; the label is typed
@@ -35,13 +36,7 @@ click 530 481
 expect disk: connect offers
 wait 800
 key 28
-wait 1000
-text ktest-admin
-key 2b
-text ktest-admin
-wait 300
-key 28
-expect the administrator's password was set
+expect disk: uda0 is the person's medium
 expect disk: attached uda0 "VOLH"
 wait 1000
 # 拡張 on its link: from 8MB, up to the end of the disk
@@ -70,7 +65,11 @@ wait 300
 key 28
 wait 1000
 text ktest-admin
+key 2b
+text ktest-admin
+wait 300
 key 28
+expect the administrator's password was set
 expect gpt: uda0 grown from 16384 to 65536 sectors
 expect tsfs: uda0 grown from 2048 to 8192 blocks
 expect disk: grown uda0 8 MB -> 32 MB (0)

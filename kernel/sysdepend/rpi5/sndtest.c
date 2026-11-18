@@ -60,14 +60,38 @@ IMPORT UW knl_usb_ms( void );
 #define NRESULT		12
 #define TONE_FRAMES	48000		/* a second, played over and over */
 
-/* The outputs, as many as the board can have and more: the first ST_OUTS of them */
-#define ST_OUTS		32
-
-LOCAL INT outs_of( SDOut *o )
+/* Every output, ids and names whole, for the caller to Kfree; NULL when there is no memory */
+LOCAL SDOuts *outs_read( void )
 {
-	INT	n = knl_snd_outputs(o, ST_OUTS);
+	SDOuts	*l = NULL;
+	SZ	room = 0, need;
 
-	return ( n > ST_OUTS ) ? ST_OUTS : n;
+	while ( ( need = knl_snd_outputs_v(l, room) ) > room ) {
+		if ( l != NULL ) Kfree(l);
+		room = need;
+		l = (SDOuts *)Kmalloc(room);
+		if ( l == NULL ) return NULL;
+	}
+	if ( need < 0 ) {
+		if ( l != NULL ) Kfree(l);
+		return NULL;
+	}
+	return l;
+}
+
+/* The output chosen and the one playing, whole, for the caller to Kfree; NULL when there is no memory */
+LOCAL SDOutSelV *sel_read( void )
+{
+	SDOutSelV	*s = NULL;
+	SZ		room = 0, need;
+
+	while ( ( need = knl_snd_sel_v(s, room) ) > room ) {
+		if ( s != NULL ) Kfree(s);
+		room = need;
+		s = (SDOutSelV *)Kmalloc(room);
+		if ( s == NULL ) return NULL;
+	}
+	return s;
 }
 
 LOCAL ID	dd = 0;
@@ -116,15 +140,6 @@ LOCAL ER choose( CONST UB *id )
 	return tk_swri_dev(dd, DN_SDOUTSEL, (void *)id, (SZ)knl_strlen((CONST char *)id) + 1, &asz);
 }
 
-LOCAL void now_of( UB *now )
-{
-	SDOutSel	s;
-	SZ		asz = 0;
-
-	knl_memset(&s, 0, sizeof(s));
-	tk_srea_dev(dd, DN_SDOUTSEL, &s, sizeof(s), &asz);
-	knl_strcpy((char *)now, (CONST char *)s.now);
-}
 
 /* The tone playing over and over, from the top */
 LOCAL ER tone_start( void )
@@ -154,11 +169,14 @@ LOCAL void tone_stop( void )
 /* Up to ms for the stream to play on id */
 LOCAL BOOL wait_on( CONST UB *id, INT ms )
 {
-	UB	now[SND_ID_MAX];
+	SDOutSelV	*s;
+	BOOL		on;
 
 	for ( ; ms > 0; ms -= 50 ) {
-		now_of(now);
-		if ( knl_strcmp((CONST char *)now, (CONST char *)id) == 0 ) {
+		s = sel_read();
+		on = ( s != NULL && knl_strcmp((CONST char *)SND_OUTSELV_NOW(s), (CONST char *)id) == 0 );
+		if ( s != NULL ) Kfree(s);
+		if ( on ) {
 			return TRUE;
 		}
 		tk_dly_tsk(50);
@@ -170,29 +188,36 @@ LOCAL BOOL wait_on( CONST UB *id, INT ms )
 /* The output of id among the outputs: its flags, or -1 when it is not there */
 LOCAL INT flags_of( CONST char *id )
 {
-	LOCAL SDOut	o[ST_OUTS];	/* off the stack: the checks run in one task, one at a time */
-	INT	n = outs_of(o), k;
+	SDOuts	*l = outs_read();
+	SDOutV	*e;
+	UINT	k;
+	INT	f = -1;
 
-	for ( k = 0; k < n; k++ ) {
-		if ( knl_strcmp((CONST char *)o[k].id, id) == 0 ) {
-			return (INT)o[k].flags;
+	for ( k = 0, e = ( l != NULL ) ? SND_OUTS_FIRST(l) : NULL; l != NULL && k < l->n; k++, e = SND_OUTV_NEXT(e) ) {
+		if ( knl_strcmp((CONST char *)e->id, id) == 0 ) {
+			f = (INT)e->flags;
+			break;
 		}
 	}
+	if ( l != NULL ) Kfree(l);
 
-	return -1;
+	return f;
 }
 
 /* ---------------------------------------------------------------- checks */
 
 LOCAL void check_outputs( void )
 {
-	LOCAL SDOut	o[ST_OUTS];	/* off the stack, apart from flags_of's, which it calls */
-	INT	n = outs_of(o), k;
+	SDOuts	*l = outs_read();
+	SDOutV	*e;
+	UINT	k;
+	INT	n = ( l != NULL ) ? (INT)l->n : 0;
 
-	for ( k = 0; k < n; k++ ) {
-		tm_printf((UB *)"sndtest:   %s \"%s\" kind %d flags %x\n", o[k].id, o[k].name,
-			  (INT)o[k].kind, (INT)o[k].flags);
+	for ( k = 0, e = ( l != NULL ) ? SND_OUTS_FIRST(l) : NULL; l != NULL && k < l->n; k++, e = SND_OUTV_NEXT(e) ) {
+		tm_printf((UB *)"sndtest:   %s \"%s\" kind %d flags %x\n", e->id, SND_OUTV_NAME(e),
+			  (INT)e->kind, (INT)e->flags);
 	}
+	if ( l != NULL ) Kfree(l);
 	note("outputs", ( n >= 2 && flags_of("i2s") >= 0 ) ? 1 : 0, "%d with auto, i2s there %d", n,
 	     (INT)( flags_of("i2s") >= 0 ), 0);
 }
@@ -259,21 +284,26 @@ LOCAL void check_hdmi( INT h )
 
 LOCAL void check_usb( void )
 {
-	SDOut	o[ST_OUTS];
+	SDOuts	*l = outs_read();
+	SDOutV	*e = NULL;
 	SDStat	s0, s1;
 	SZ	asz = 0;
 	UW	t0, t1, fps;
-	INT	n = outs_of(o), k;
+	UINT	k;
+	BOOL	on;
 
-	for ( k = 0; k < n && o[k].kind != SND_BE_USB; k++ ) {
-		;
+	for ( k = 0, e = ( l != NULL ) ? SND_OUTS_FIRST(l) : NULL; l != NULL && k < l->n; k++, e = SND_OUTV_NEXT(e) ) {
+		if ( e->kind == SND_BE_USB ) break;
 	}
-	if ( k >= n ) {
+	if ( l == NULL || k >= l->n ) {
+		if ( l != NULL ) Kfree(l);
 		note("usb", -1, "no USB audio function plugged in", 0, 0, 0);
 		return;
 	}
-	tm_printf((UB *)"sndtest:   usb: %s \"%s\"\n", o[k].id, o[k].name);
-	if ( choose(o[k].id) < E_OK || tone_start() < E_OK || !wait_on(o[k].id, 1000) ) {
+	tm_printf((UB *)"sndtest:   usb: %s \"%s\"\n", e->id, SND_OUTV_NAME(e));
+	on = ( choose(e->id) >= E_OK && tone_start() >= E_OK && wait_on(e->id, 1000) );
+	Kfree(l);
+	if ( !on ) {
 		tone_stop();
 		note("usb", 0, "the stream does not play on it", 0, 0, 0);
 		return;
@@ -293,34 +323,38 @@ LOCAL void check_usb( void )
 /* The stream moved through every output that can sound while one channel plays on */
 LOCAL void check_move( void )
 {
-	SDOut	o[ST_OUTS];
-	INT	n = outs_of(o), k, moved = 0, bad = 0;
+	SDOuts	*l = outs_read();
+	SDOutV	*e;
+	UINT	k;
+	INT	moved = 0, bad = 0;
 	W	c0, c1;
 
-	if ( tone_start() < E_OK ) {
+	if ( l == NULL || tone_start() < E_OK ) {
+		if ( l != NULL ) Kfree(l);
 		tone_stop();
 		note("move", 0, "nothing plays", 0, 0, 0);
 		return;
 	}
-	for ( k = 1; k < n; k++ ) {
-		if ( (o[k].flags & SND_OF_NOSOUND) != 0 ) {
-			continue;
+	for ( k = 0, e = SND_OUTS_FIRST(l); k < l->n; k++, e = SND_OUTV_NEXT(e) ) {
+		if ( k == 0 || (e->flags & SND_OF_NOSOUND) != 0 ) {
+			continue;		/* "auto", and what cannot sound */
 		}
 		c0 = attr_r(DN_SDPCMCNT);
-		choose(o[k].id);
-		if ( !wait_on(o[k].id, 1000) ) {
-			tm_printf((UB *)"sndtest:   move: not on %s\n", o[k].id);
+		choose(e->id);
+		if ( !wait_on(e->id, 1000) ) {
+			tm_printf((UB *)"sndtest:   move: not on %s\n", e->id);
 			bad++;
 			continue;
 		}
 		tk_dly_tsk(1000);
 		c1 = attr_r(DN_SDPCMCNT);
 		if ( attr_r(DN_SDPCMCTL) != PCM_REPPLAY || c1 == c0 ) {
-			tm_printf((UB *)"sndtest:   move: on %s the channel stopped\n", o[k].id);
+			tm_printf((UB *)"sndtest:   move: on %s the channel stopped\n", e->id);
 			bad++;
 		}
 		moved++;
 	}
+	Kfree(l);
 	choose((CONST UB *)SND_ID_AUTO);
 	tk_dly_tsk(500);
 	if ( attr_r(DN_SDPCMCTL) != PCM_REPPLAY ) {
@@ -334,8 +368,7 @@ LOCAL void check_move( void )
 
 LOCAL void test_task( INT stacd, void *exinf )
 {
-	SDOutSel	was;
-	SZ		asz = 0;
+	SDOutSelV	*was;
 	INT		i;
 
 	(void)stacd;
@@ -355,8 +388,7 @@ LOCAL void test_task( INT stacd, void *exinf )
 
 		tone[i * 2] = tone[i * 2 + 1] = (H)(v * 8000 / 24000 - 4000);
 	}
-	knl_memset(&was, 0, sizeof(was));
-	tk_srea_dev(dd, DN_SDOUTSEL, &was, sizeof(was), &asz);
+	was = sel_read();
 
 	check_outputs();
 	check_i2s();
@@ -365,7 +397,8 @@ LOCAL void test_task( INT stacd, void *exinf )
 	check_usb();
 	check_move();
 
-	choose(( was.id[0] != 0 ) ? was.id : (CONST UB *)SND_ID_AUTO);
+	choose(( was != NULL && was->id[0] != 0 ) ? was->id : (CONST UB *)SND_ID_AUTO);
+	if ( was != NULL ) Kfree(was);
 	tk_cls_dev(dd, 0);
 	Kfree(tone);
 	for ( i = 0; i < nres; i++ ) {

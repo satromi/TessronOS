@@ -4422,9 +4422,16 @@ EXPORT UW wm_act_age( void )
 	return ( d > 0xFFFFFFFFUL ) ? 0xFFFFFFFFU : (UW)d;
 }
 
+/*
+ * A press that came after the ticket's ends it as well while it still
+ * waits to be read: the reader may be late (the desktop's loop held up
+ * for a while), and a key typed before the window came is the person
+ * going on, however late it is read.
+ */
 EXPORT BOOL wm_act_good( UINT ticket )
 {
-	return (BOOL)( ticket != 0 && ticket == act_seq && wm_act_age() < WM_ACT_MS );
+	return (BOOL)( ticket != 0 && ticket == act_seq && wm_act_age() < WM_ACT_MS
+		       && !ts_hid_press_waiting() );
 }
 
 EXPORT ER wm_focus( INT wid )

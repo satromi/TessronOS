@@ -4740,6 +4740,24 @@ EXPORT ER ts_hid_press_at( INT *p_x, INT *p_y )
 	return E_OK;
 }
 
+EXPORT BOOL ts_hid_press_waiting( void )
+{
+	BOOL	yes = FALSE;
+	UINT	i;
+
+	if ( !hid_ready ) {
+		return FALSE;
+	}
+	tk_loc_mtx(hid_mtxid, TMO_FEVR);
+	for ( i = hid_head; i != hid_tail && !yes; i = ( i + 1 ) % HID_RING ) {
+		yes = (BOOL)( hid_ring[i].type == HID_EV_BTN_DOWN
+			   || ( hid_ring[i].type == HID_EV_KEY_DOWN && hid_ring[i].code < 0xE0 ) );
+	}
+	tk_unl_mtx(hid_mtxid);
+
+	return yes;
+}
+
 EXPORT ER ts_hid_stat( T_HIDSTAT *st )
 {
 	if ( !hid_ready || st == NULL ) {

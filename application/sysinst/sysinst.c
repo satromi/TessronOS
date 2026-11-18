@@ -594,9 +594,17 @@ LOCAL void follow( void )
 	}
 }
 
+/*
+ * A line of the answer's text (DT_TAIL_TEXT), made in t: the lines this
+ * says of a disk and a plan are its own, of a few words each
+ */
+#define SI_LINE_MAX	DT_TEXT_MAX
+
 EXPORT ER dt_sysinst_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 {
-	INT	i, way;
+	UB		t[SI_LINE_MAX];
+	CONST UB	*dname = dt_rq_word(rq, DT_TAIL_NAME, NULL);	/* the disk the request names */
+	INT		i, way;
 
 	follow();
 	switch ( rq->recno ) {
@@ -604,10 +612,10 @@ EXPORT ER dt_sysinst_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 		if ( rq->grab_x == 0 && sw_state != SW_RUN ) list_disks();
 		an->how = (UINT)sw_ndisk;
 		if ( rq->grab_x < 0 || rq->grab_x >= sw_ndisk ) return E_NOEXS;
-		i = put(an->text, 0, DT_TEXT_MAX, (CONST char *)sw_disk[rq->grab_x].name);
-		i = put(an->text, i, DT_TEXT_MAX, "\t");
-		disk_row(&sw_disk[rq->grab_x], an->text + i, DT_TEXT_MAX - i);
-		return E_OK;
+		i = put(t, 0, SI_LINE_MAX, (CONST char *)sw_disk[rq->grab_x].name);
+		i = put(t, i, SI_LINE_MAX, "\t");
+		disk_row(&sw_disk[rq->grab_x], t + i, SI_LINE_MAX - i);
+		return dt_ans_cat(an, t, -1);
 	case DT_SI_PART:
 		if ( rq->grab_x < 0 || rq->grab_x >= sw_ndisk ) return E_NOEXS;
 		if ( rq->grab_x != sw_pdisk || rq->grab_y == 0 ) part_map(rq->grab_x);
@@ -617,19 +625,19 @@ EXPORT ER dt_sysinst_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 			CONST T_SIDISK	*dk = &sw_disk[rq->grab_x];
 			CONST T_SIPART	*p = &dk->parts[sw_pmap[rq->grab_y]];
 
-			i = put_num(an->text, 0, DT_TEXT_MAX, p->unit);
-			i = put(an->text, i, DT_TEXT_MAX, "\t");
-			part_row(dk, p, an->text + i, DT_TEXT_MAX - i);
+			i = put_num(t, 0, SI_LINE_MAX, p->unit);
+			i = put(t, i, SI_LINE_MAX, "\t");
+			part_row(dk, p, t + i, SI_LINE_MAX - i);
 			if ( rq->grab_y == sw_pbest ) an->flags |= DT_F_SI_BEST;
 		}
-		return E_OK;
+		return dt_ans_cat(an, t, -1);
 	case DT_SI_PLAN:
 		if ( sw_state == SW_RUN ) return E_BUSY;
 		sw_planned = FALSE;
-		for ( i = 0; i < sw_ndisk && !same(sw_disk[i].name, rq->name); i++ ) ;
+		for ( i = 0; i < sw_ndisk && !same(sw_disk[i].name, dname); i++ ) ;
 		if ( i >= sw_ndisk ) return E_NOEXS;
 		way = rq->grab_x & ~DT_SI_KEEP;
-		if ( si_plan((CONST char *)rq->name, way | ( ( rq->grab_x & DT_SI_KEEP ) ? SI_KEEP : 0 ),
+		if ( si_plan((CONST char *)dname, way | ( ( rq->grab_x & DT_SI_KEEP ) ? SI_KEEP : 0 ),
 			     ( way == SI_REPLACE ) ? rq->grab_y : -1, &sw_plan) < E_OK ) {
 			return E_NOMEM;
 		}
@@ -637,8 +645,7 @@ EXPORT ER dt_sysinst_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 			  sw_plan.keep ? " keep" : "", ( way == SI_REPLACE ) ? rq->grab_y : -1, sw_plan.why);
 		an->how = (UINT)sw_plan.why;
 		if ( sw_plan.why != SI_R_OK ) {
-			(void)put(an->text, 0, DT_TEXT_MAX, why_text(sw_plan.why, way));
-			return E_OK;
+			return dt_ans_cat(an, (CONST UB *)why_text(sw_plan.why, way), -1);
 		}
 		sw_pldisk = i;
 		confirm_lines(&sw_disk[i]);
@@ -650,40 +657,41 @@ EXPORT ER dt_sysinst_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 	case DT_SI_KEEPQ:
 		/* whether the TessronOS there can be kept: looked at only, the plan kept is not touched */
 		if ( sw_state == SW_RUN ) return E_BUSY;
-		for ( i = 0; i < sw_ndisk && !same(sw_disk[i].name, rq->name); i++ ) ;
+		for ( i = 0; i < sw_ndisk && !same(sw_disk[i].name, dname); i++ ) ;
 		if ( i >= sw_ndisk ) return E_NOEXS;
 		way = rq->grab_x & ~DT_SI_KEEP;
 		{
 			T_SIPLAN	*kp = (T_SIPLAN *)Kmalloc(sizeof(T_SIPLAN));
+			ER		er = E_OK;
 
 			if ( kp == NULL ) return E_NOMEM;
-			if ( si_plan((CONST char *)rq->name, way | SI_KEEP, ( way == SI_REPLACE ) ? rq->grab_y : -1, kp) < E_OK ) {
+			if ( si_plan((CONST char *)dname, way | SI_KEEP, ( way == SI_REPLACE ) ? rq->grab_y : -1, kp) < E_OK ) {
 				Kfree(kp);
 				return E_NOMEM;
 			}
 			tm_printf((UB *)"sysinst: keep %s %s %d: %d\n", kp->disk, si_mode_name(way),
 				  ( way == SI_REPLACE ) ? rq->grab_y : -1, kp->why);
 			an->how = ( kp->why == SI_R_NOTSFS ) ? (UINT)DT_SI_K_NONE : (UINT)kp->why;
-			if ( kp->why != SI_R_OK ) (void)put(an->text, 0, DT_TEXT_MAX, why_text(kp->why, way));
+			if ( kp->why != SI_R_OK ) er = dt_ans_cat(an, (CONST UB *)why_text(kp->why, way), -1);
 			Kfree(kp);
+			return er;
 		}
-		return E_OK;
 	case DT_SI_LINE:
-		an->text[0] = 0;
+		t[0] = 0;
 		if ( rq->grab_x == DT_SI_L_ASK ) {
 			an->how = (UINT)sw_nask;
 			if ( rq->grab_y < 0 || rq->grab_y >= sw_nask ) return E_NOEXS;
-			(void)put(an->text, 0, DT_TEXT_MAX, (CONST char *)sw_ask[rq->grab_y]);
+			return dt_ans_cat(an, (CONST UB *)sw_ask[rq->grab_y], -1);
 		} else if ( rq->grab_x == DT_SI_L_RESULT ) {
 			if ( sw_state != SW_DONE ) return E_OBJ;
-			an->how = (UINT)result_line(rq->grab_y, an->text, DT_TEXT_MAX);
+			an->how = (UINT)result_line(rq->grab_y, t, SI_LINE_MAX);
 		} else if ( rq->grab_x == DT_SI_L_RUN ) {
 			if ( sw_state == SW_SETUP ) return E_OBJ;
-			an->how = (UINT)running_line(rq->grab_y, an->text, DT_TEXT_MAX);
+			an->how = (UINT)running_line(rq->grab_y, t, SI_LINE_MAX);
 		} else {
 			return E_PAR;
 		}
-		return E_OK;
+		return ( t[0] != 0 ) ? dt_ans_cat(an, t, -1) : E_OK;
 	case DT_SI_RUN:
 		return run(pid, &rq->win);
 	case DT_SI_STATE:

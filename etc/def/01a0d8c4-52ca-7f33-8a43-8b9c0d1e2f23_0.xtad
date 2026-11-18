@@ -222,5 +222,12 @@
 <button num="106" rect="188,92,312,116">元に戻して終了</button>
 <button num="107" rect="324,92,436,116" answer="ok" emph="true">更新して終了</button>
 </panel>
+<panel num="12" rect="0,0,460,150" title="ユーザ環境設定">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<text num="3" x="24" y="84"> </text>
+<button num="102" rect="196,114,284,138" answer="cancel">取り消し</button>
+<button num="108" rect="296,114,436,138" answer="ok" emph="true">設定</button>
+</panel>
 </databox>
 </tad>

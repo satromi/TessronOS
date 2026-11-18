@@ -28,10 +28,11 @@ typedef struct {
 } T_EDIDINFO;
 
 /*
- * The EDID of len bytes read into info, and its modes into modes, up to
- * max: how many, or E_PAR when it is not an EDID (its header or the base
- * block's sum wrong)
+ * The EDID of len bytes read into info, and every mode it offers into a
+ * list taken for them, *p_modes (NULL when there is none; the caller
+ * Kfrees it): how many, E_PAR when it is not an EDID (its header or the
+ * base block's sum wrong), E_NOMEM when there was no room for the list
  */
-IMPORT INT knl_edid_parse( CONST UB *e, INT len, T_EDIDINFO *info, T_DISPMODE *modes, INT max );
+IMPORT INT knl_edid_parse( CONST UB *e, INT len, T_EDIDINFO *info, T_DISPMODE **p_modes );
 
 #endif /* __TS_EDID_H__ */

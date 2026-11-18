@@ -47,7 +47,9 @@ def main():
         prog="mktsfs", description="make a TSFS native volume")
     p.add_argument("image", help="image file to write into")
     p.add_argument("-L", "--label", default="",
-                   help="volume label, up to %d bytes" % (LABEL_MAX - 1))
+                   help="volume label; the superblock keeps its first %d bytes, "
+                        "cut at a whole letter, and the whole is the name of the "
+                        "--root object (design 7.6)" % (LABEL_MAX - 1))
     p.add_argument("--size", metavar="BYTES",
                    help="size of the volume (suffix K, M or G), or auto; "
                         "the file is made or grown to fit")
@@ -71,8 +73,6 @@ def main():
         sys.stderr.write("mktsfs: %s\n" % msg)
         return 2
 
-    if len(args.label.encode("utf-8")) > LABEL_MAX - 1:
-        return die("the label is longer than %d bytes" % (LABEL_MAX - 1))
     if (args.root or args.sysbox or args.domain) and not args.dirs:
         return die("--root, --sysbox and --domain need --from")
 
@@ -113,9 +113,18 @@ def main():
                                     % (need // (1024 * 1024),
                                        vol.sb.total_blocks * BLOCK_SIZE // (1024 * 1024)))
                 vol.flush(both=True, spares=True)
+            whole = vol.label()
+            if whole != args.label and args.label:
+                # the copy alone keeps it: a volume without a top, or a top of another name
+                sys.stderr.write("mktsfs: the label is \"%s\"%s\n"
+                                 % (whole, " (the name of the --root object)"
+                                    if whole != vol.sb.label else
+                                    ", cut from \"%s\" to fit the superblock; give "
+                                    "--root an object of that name to keep it whole"
+                                    % args.label))
             if not args.quiet:
-                print("%s: a volume of %d blocks at offset %d"
-                      % (args.image, vol.sb.total_blocks, dev.offset))
+                print("%s: a volume of %d blocks at offset %d, label \"%s\""
+                      % (args.image, vol.sb.total_blocks, dev.offset, whole))
                 print(str(vol.sb))
                 if args.dirs:
                     print("%d objects put on, %d left out"

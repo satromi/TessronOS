@@ -11,7 +11,8 @@
  *	bt.h
  *	Bluetooth (design 6.8, device/bt/bt.c). A program reaches it through
  *	its device object, BT_DEV_UUID: record OB_BT_LIST reads T_BTLINE, one
- *	for each device paired or found, record OB_BT_CMD takes a T_BTCMD.
+ *	for each device paired or found, one after the other, each as long as
+ *	its name makes it (BT_LINE_NEXT); record OB_BT_CMD takes a T_BTCMD.
  */
 
 #ifndef __TS_BT_H__
@@ -21,7 +22,7 @@
 extern "C" {
 #endif
 
-#define BT_FOUND_MAX	16
+#define BT_NAME_MAX	248		/* a device's name: Core 5.4 Vol 4 Part E 7.3.12, Vol 3 Part C 8.1.2 */
 
 #define BT_DEV_UUID	"01a0d8c4-5502-7a01-8b12-3c4d5e6f7b80"
 #define OB_BT_LIST	1
@@ -49,17 +50,27 @@ extern "C" {
 #define BT_BEARER_LE	0x01
 #define BT_BEARER_BREDR	0x02
 
+/*
+ * A line of the list: its fields, then its name, namelen bytes of UTF-8
+ * and a 0. size is the whole line's bytes, to a four-byte boundary; the
+ * next line begins there. The record is the lines one after the other.
+ */
 typedef struct {
+	UH	size;			/* BT_LINE_SIZE(namelen) */
+	UH	namelen;		/* 0 when it has told none */
 	UB	addr[6];
 	UB	paired;
 	UB	connected;		/* in use: BT_USE_INPUT or BT_USE_SOUND */
 	UW	cod;
-	UB	name[32];
 	UB	bearer;			/* BT_BEARER_*, 0 for a paired device not seen in this search */
 	UB	use;			/* BT_USE_* */
 	UB	note;			/* BT_NOTE_* */
 	UB	pad;
+	UB	name[4];		/* as long as namelen and its 0 */
 } T_BTLINE;
+#define BT_LINE_HEAD		20	/* the bytes before name */
+#define BT_LINE_SIZE(nlen)	( ( BT_LINE_HEAD + (nlen) + 1 + 3 ) & ~3 )
+#define BT_LINE_NEXT(l)		( (T_BTLINE *)( (UB *)(l) + (l)->size ) )
 
 #define BT_ST_STARTING	0		/* the commands of the start are going */
 #define BT_ST_READY	1
@@ -89,13 +100,13 @@ typedef struct {
 	UB	le;			/* found on LE, which has no Class of Device */
 	UB	atype;			/* and its address's type */
 	UW	cod;			/* its Class of Device */
-	UB	name[32];		/* when it told: UTF-8; empty when not */
+	UB	name[BT_NAME_MAX + 1];	/* when it told: UTF-8 and a 0; empty when not */
 } T_BTFOUND;
 
 IMPORT BOOL knl_bt_ready( void );
 IMPORT ER   knl_bt_scan( INT seconds );		/* found devices are listed by knl_bt_found as they come */
-IMPORT INT  knl_bt_found( T_BTFOUND *buf, INT max );
-IMPORT INT  knl_bt_lines( T_BTLINE *buf, INT max );	/* what OB_BT_LIST reads */
+IMPORT INT  knl_bt_found( T_BTFOUND *buf, INT max );	/* up to max into buf; how many there are */
+IMPORT INT  knl_bt_lines( UB *buf, INT size );	/* what OB_BT_LIST reads: the whole lines size takes; the bytes of all */
 IMPORT ER   knl_bt_pair( CONST UB *addr );	/* connected, paired and kept, its keys or buttons taken */
 
 #ifdef __cplusplus

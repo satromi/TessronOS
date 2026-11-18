@@ -179,16 +179,34 @@ IMPORT INT ts_obj_drop_cycles( ID bvol, CONST TS_UUID *from, INT nfrom );
  */
 #define TSFSCK_DEVNM_MAX	16
 
+/*
+ * label is the first bytes of the volume's label, cut at a whole letter;
+ * TSFSCK_F_LABELCUT in flags says the label is longer (or, of a volume
+ * not attached, whose top object is not read for the list, that the
+ * copy in its superblock is full and may be), and ob_chk_label reads it
+ * whole.
+ */
+#define TSFSCK_F_LABELCUT	0x0001
+
 typedef struct {
 	UB	devnm[TSFSCK_DEVNM_MAX];
 	UB	label[TSFSBLK_LABEL_MAX];
 	UD	blocks;
 	BOOL	attached;		/* its objects are in use */
 	BOOL	system;			/* the volume the system runs on */
+	UINT	flags;			/* TSFSCK_F_* */
 } T_TSFSCKDEV;
 
 /* Every volume there is: up to max of them into buf, and how many there are (ask again with more room when more) */
 IMPORT INT ob_chk_list( T_TSFSCKDEV *buf, INT max );
+/*
+ * The label of a volume ob_chk_list lists, whole: the name of its top
+ * object (design 7.6), read with the volume opened for it when it is not
+ * attached; T_TSFSCKDEV.label is its first bytes, cut at a whole letter.
+ * As ob_ref_nam puts a name: at most size bytes, the whole size in
+ * *p_asize.
+ */
+IMPORT ER  ob_chk_label( CONST char *devnm, UB *buf, SZ size, SZ *p_asize );
 IMPORT ER  ob_chk_run( CONST char *devnm, UINT mode, T_TSFSCK *res, FP_TSFSCK fn, void *ctx );
 IMPORT ER  ob_chk_request( CONST char *devnm, UINT mode );
 IMPORT INT ob_chk_boot_result( UB *devnm, INT nmax, T_TSFSCK *res, T_TSFSCKEV *ev, INT max );
@@ -224,6 +242,13 @@ IMPORT BOOL knl_ob_chk_boot_once( void );
 
 /* At start, before the system volume is attached: the request carried out */
 IMPORT ER  knl_ob_chk_boot( CONST char *sysvol );
+
+/*
+ * What the repair at start found and did forgotten, as if the machine had
+ * started without one: a test that carries one out (knl_ob_chk_boot)
+ * leaves the kernel so, and a desktop started after it shows nothing.
+ */
+IMPORT void knl_ob_chk_boot_forget( void );
 
 /* Whether a device is being checked alone, and must not be attached meanwhile */
 IMPORT BOOL knl_ob_chk_busy( CONST char *devnm );

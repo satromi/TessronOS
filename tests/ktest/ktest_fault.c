@@ -113,6 +113,37 @@ LOCAL UD log_now( void )
 	return pos;
 }
 
+/*
+ * Whether the console said w after pos, looked at for up to tries tenths
+ * of a second, however much it said before: the log is read on in
+ * pieces, the end of each kept in front of the next so that a line cut
+ * between two is still found.
+ */
+LOCAL BOOL log_wait( UD pos, CONST char *w, INT tries )
+{
+	UB	*b = (UB *)Kmalloc(4096);
+	INT	t, k, n, keep = 0, m = s_len(w), i;
+	UD	p = pos;
+
+	if ( b == NULL ) return FALSE;
+	for ( t = 0; t < tries; t++ ) {
+		while ( ( k = tm_log_read(&p, b + keep, 4095 - keep) ) > 0 ) {
+			n = keep + k;
+			b[n] = 0;
+			if ( has((CONST char *)b, w) ) {
+				Kfree(b);
+				return TRUE;
+			}
+			keep = ( n < m - 1 ) ? n : m - 1;
+			for ( i = 0; i < keep; i++ ) b[i] = b[n - keep + i];
+		}
+		tk_dly_tsk(100);
+	}
+	Kfree(b);
+	tm_printf((UB *)"  the console did not say \"%s\"\n", w);
+	return FALSE;
+}
+
 LOCAL ID start( UW mode, UW a1, UW a2, ATR atr )
 {
 	T_CPRC	cprc;
@@ -218,20 +249,24 @@ LOCAL BOOL running( ID pid )
 	return (BOOL)( ts_ref_prc(pid, &r) >= E_OK && r.state == PS_RUNNING );
 }
 
-/* A window of the system's own in front, with the keys */
+/*
+ * A window of the system's own in front, with the keys: one the test
+ * opens, which no process made. The desktop's first window is not one,
+ * since 仮身一覧 shows it as a process of its own.
+ */
 LOCAL INT kernel_window( void )
 {
-	DTWIN		*d = dt_first_win();
 	T_DPRECT	o;
-	INT		wid = ( d != NULL ) ? d->wid : 0;
+	INT		wid;
 
-	if ( wid <= 0 || wm_ref(wid, &wr) < E_OK ) {
-		if ( own_wid <= 0 ) {
-			o.left = 40;  o.top = 60;  o.right = 300;  o.bottom = 220;
-			own_wid = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "ktdesk");
-		}
-		wid = own_wid;
+	if ( own_wid > 0 && wm_ref(own_wid, &wr) < E_OK ) {
+		own_wid = 0;
 	}
+	if ( own_wid <= 0 ) {
+		o.left = 40;  o.top = 60;  o.right = 300;  o.bottom = 220;
+		own_wid = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "ktdesk");
+	}
+	wid = own_wid;
 	if ( wid > 0 ) {
 		wm_raise(wid);
 		wm_focus(wid);
@@ -287,6 +322,19 @@ LOCAL BOOL dialog_gone( void )
 	return (BOOL)( dt_fault_wid() == 0 && window_titled(FT_TITLE, 0) == 0 );
 }
 
+/*
+ * The dialog's window once the desktop has it as its dialog, looked for
+ * up to 3 seconds; 0 none. The window is listed by its title from inside
+ * wm_open, before the desktop has its number: the two are taken together.
+ */
+LOCAL INT dialog_up( void )
+{
+	INT	wid = window_titled(FT_TITLE, 30), t;
+
+	for ( t = 0; t < 30 && wid > 0 && dt_fault_wid() != wid; t++ ) tk_dly_tsk(100);
+	return wid;
+}
+
 /* A process that faults as svcprog's SP_FAULT kind says, waited for; the dialog's window */
 LOCAL INT fault_run( UW kind, INT want, ID *p_pid )
 {
@@ -300,7 +348,7 @@ LOCAL INT fault_run( UW kind, INT want, ID *p_pid )
 	psts.exitcd = 0;
 	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 10000), E_OK);
 	KT_ASSERT_EQ(psts.exitcd, want);
-	return window_titled(FT_TITLE, 30);
+	return dialog_up();
 }
 
 /* ---------------------------------------------------------------- the tests */
@@ -329,7 +377,11 @@ LOCAL void test_setup( void )
 	 */
 	for ( i = 0; i < 600 && dt_test_loops() == turns; i++ ) tk_dly_tsk(100);
 	KT_ASSERT(dt_test_loops() != turns);
-	tk_dly_tsk(500);
+	/*
+	 * and the start over: the windows it opens by itself come up in front
+	 * of what these tests put there until then
+	 */
+	KT_ASSERT(log_wait(pos, "TessronOS desktop: settled", 600));
 }
 
 LOCAL void test_pause_desk( void )
@@ -355,7 +407,7 @@ LOCAL void test_pause_proc( void )
 {
 	T_PSTS	psts;
 	char	w[160];
-	INT	wa, wb;
+	INT	wa, wb, t;
 	ID	a, b;
 
 	if ( !up || !have_prog ) KT_SKIP("no desktop or no program");
@@ -370,6 +422,8 @@ LOCAL void test_pause_proc( void )
 	psts.exitcd = 0;
 	KT_ASSERT_ER(ts_wai_prc(a, &psts, 5000), E_OK);
 	KT_ASSERT_EQ(psts.exitcd, TS_ABORT_TERM);
+	/* its window is closed by the desktop's loop once it sees the end */
+	for ( t = 0; t < 30 && window_titled("ktpause", 0) != 0; t++ ) tk_dly_tsk(100);
 	KT_ASSERT(window_titled("ktpause", 0) == 0);
 	(void)tm_sprintf((UB *)w, (CONST UB *)"SVCPROG.ELF(pid %d)を強制終了しました", a);
 	KT_ASSERT(msg_says(w, 30));
@@ -495,9 +549,12 @@ LOCAL void test_fault_ill( void )
 	/* given the keys by a press on it, Enter closes it */
 	{
 		T_WMWIN	w;
+		INT	t;
 
 		KT_ASSERT_ER(wm_ref(wid, &w), E_OK);
 		click(w.work.left + 20, w.work.top + 20);
+		/* the desktop's loop reads the press and gives the keys when it next comes round */
+		for ( t = 0; t < 30 && wm_focused() != wid; t++ ) tk_dly_tsk(100);
 	}
 	KT_ASSERT_EQ(wm_focused(), wid);
 	key(KEY_ENTER, 0, HID_EV_KEY_DOWN);
@@ -557,7 +614,7 @@ LOCAL void test_fault_kcall( void )
 	KT_ASSERT_ER(ts_wai_prc(pid, &psts, 10000), E_OK);
 	KT_ASSERT_EQ(psts.exitcd, TS_ABORT_FAULT);
 	if ( ob_fnd_nam((CONST UB *)"ktkfault", &u) >= E_OK ) (void)ob_del_obj(&u);
-	wid = window_titled(FT_TITLE, 30);
+	wid = dialog_up();
 	KT_ASSERT(wid > 0);
 	if ( wid <= 0 ) return;
 	KT_ASSERT(dialog_says("システムコールに不正なアドレスを渡した"));
@@ -588,7 +645,7 @@ LOCAL void test_fault_many( void )
 	for ( i = 0; i < MANY; i++ ) {
 		if ( pid[i] > 0 ) KT_ASSERT_ER(ts_wai_prc(pid[i], &psts, 10000), E_OK);
 	}
-	wid = window_titled(FT_TITLE, 30);
+	wid = dialog_up();
 	KT_ASSERT(wid > 0);
 	for ( t = 0; t < 30; t++ ) {
 		(void)dt_fault_lines(lines, LINES_MAX);

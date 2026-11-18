@@ -25,6 +25,7 @@
 #include <ts/ob.h>
 #include <ts/tad.h>
 #include <ts/fn.h>
+#include <ts/wm.h>
 
 /* ---------------------------------------------------------------- the metadata */
 
@@ -413,14 +414,15 @@ LOCAL ER box_write( CONST TS_UUID *box, T_TAD *doc )
  * face is left as it was set. With no face yet, or no name, the name
  * is taken to be six letters wide.
  */
-LOCAL INT link_w( CONST TS_UUID *uuid )
+LOCAL INT link_w( CONST TS_UUID *uuid, INT room )
 {
-	UB		nm[TAD_NAME_MAX];
+	UB		*nm;
 	T_FNSTATE	st;
 	ID		fid;
 	INT		w = LINK_CHSZ * 6;
 
-	if ( om_store_name(uuid, nm, sizeof(nm)) > 0 ) {
+	nm = om_store_name_dup(uuid, NULL);
+	if ( nm != NULL ) {
 		fn_hold();
 		fid = fn_system();
 		if ( fid > 0 && fn_state_get(fid, &st) >= E_OK ) {
@@ -432,19 +434,48 @@ LOCAL INT link_w( CONST TS_UUID *uuid )
 			(void)fn_state_set(fid, &st);
 		}
 		fn_release();
+		Kfree(nm);
 	}
 
-	return tad_closed_w(LINK_CHSZ, LINK_DISP, w);
+	w = tad_closed_w(LINK_CHSZ, LINK_DISP, w);
+	/*
+	 * No wider than the window it is put in shows, LINK_PAD from either
+	 * edge: a long name is not cut, only drawn shortened in the band
+	 * (om_vdraw.c), and the link can be stretched to show more of it
+	 */
+	if ( room > 0 && w > room - 2 * LINK_PAD ) {
+		w = room - 2 * LINK_PAD;
+	}
+	if ( w < tad_least_w(LINK_CHSZ, LINK_DISP) ) {
+		w = tad_least_w(LINK_CHSZ, LINK_DISP);
+	}
+	return w;
 }
 
-/* A new closed link to the object, its top at top */
-LOCAL void link_new( T_VOBJ *v, CONST TS_UUID *uuid, INT top )
+/*
+ * How wide the window of a box shows: the width kept in its metadata
+ * (om_store_window), the main screen's when it keeps none (box NULL too)
+ */
+LOCAL INT box_room( CONST TS_UUID *box )
 {
-	knl_memset(v, 0, sizeof(*v));
+	T_DPRECT	r;
+	INT		w = 0, h = 0;
+
+	if ( box != NULL && om_store_window(box, &r) >= E_OK && r.right > r.left ) {
+		return r.right - r.left;
+	}
+	wm_screen_main(&w, &h);
+	return w;
+}
+
+/* A new closed link to the object, its top at top, in a window room wide */
+LOCAL void link_new( T_VOBJ *v, CONST TS_UUID *uuid, INT top, INT room )
+{
+	tad_vobj_clear(v);
 	v->target = *uuid;
 	v->left = LINK_PAD;
 	v->top = top;
-	v->right = v->left + link_w(uuid);
+	v->right = v->left + link_w(uuid, room);
 	v->chsz = LINK_CHSZ;
 	v->disp = LINK_DISP;
 	v->bottom = v->top + tad_lnk_closed_h(v);
@@ -462,24 +493,32 @@ LOCAL void link_new( T_VOBJ *v, CONST TS_UUID *uuid, INT top )
  * LINK_PAD in an empty box). A box that links to it already is left as
  * it is.
  */
-EXPORT INT om_tad_link_add( T_TAD *doc, CONST TS_UUID *uuid )
+LOCAL INT tad_link_add_in( T_TAD *doc, CONST TS_UUID *uuid, INT room )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	TS_UUID	id;
 	INT	i, n, low = 0;
 	ER	er;
 
+	tad_vobj_init(&v);
 	n = tad_lnk_count(doc);
 	for ( i = 0; i < n; i++ ) {
 		if ( tad_lnk_get(doc, i, &v) < E_OK ) continue;
 		if ( ts_uuid_cmp(&v.target, uuid) == 0 ) {
+			tad_vobj_clear(&v);
 			return 0;
 		}
 		if ( v.bottom > low ) low = v.bottom;
 	}
-	link_new(&v, uuid, low + LINK_GAP);	/* LINK_PAD in an empty box */
+	link_new(&v, uuid, low + LINK_GAP, room);	/* LINK_PAD in an empty box */
 	er = tad_lnk_add(doc, &v, &id);
+	tad_vobj_clear(&v);
 	return ( er < E_OK ) ? (INT)er : 1;
+}
+
+EXPORT INT om_tad_link_add( T_TAD *doc, CONST TS_UUID *uuid )
+{
+	return tad_link_add_in(doc, uuid, box_room(NULL));
 }
 
 EXPORT ER om_obj_link_add( CONST TS_UUID *box, CONST TS_UUID *uuid )
@@ -492,7 +531,7 @@ EXPORT ER om_obj_link_add( CONST TS_UUID *box, CONST TS_UUID *uuid )
 	if ( doc == NULL ) {
 		return er;
 	}
-	added = om_tad_link_add(doc, uuid);
+	added = tad_link_add_in(doc, uuid, box_room(box));
 	if ( added <= 0 ) {
 		tad_free(doc);
 		return ( added < 0 ) ? (ER)added : E_OK;
@@ -504,7 +543,7 @@ EXPORT ER om_obj_link_add( CONST TS_UUID *box, CONST TS_UUID *uuid )
 EXPORT ER om_obj_link_del( CONST TS_UUID *box, CONST TS_UUID *uuid )
 {
 	T_TAD	*doc;
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	i, gone = 0;
 	ER	er;
 
@@ -512,12 +551,14 @@ EXPORT ER om_obj_link_del( CONST TS_UUID *box, CONST TS_UUID *uuid )
 	if ( doc == NULL ) {
 		return er;
 	}
+	tad_vobj_init(&v);
 	for ( i = tad_lnk_count(doc) - 1; i >= 0; i-- ) {
 		if ( tad_lnk_get(doc, i, &v) >= E_OK && ts_uuid_cmp(&v.target, uuid) == 0
 		  && tad_lnk_del(doc, &v.vobjid) >= E_OK ) {
 			gone++;
 		}
 	}
+	tad_vobj_clear(&v);
 	if ( gone == 0 ) {
 		tad_free(doc);
 		return E_OK;
@@ -534,21 +575,23 @@ EXPORT ER om_obj_link_del( CONST TS_UUID *box, CONST TS_UUID *uuid )
 EXPORT ER om_obj_links_set( CONST TS_UUID *box, CONST TS_UUID *uuids, INT n )
 {
 	T_TAD	*doc;
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	TS_UUID	id;
 	BOOL	*have;
-	INT	i, j, low = 0, changed = 0;
+	INT	i, j, low = 0, changed = 0, room;
 	ER	er;
 
 	doc = box_read(box, &er);
 	if ( doc == NULL ) {
 		return er;
 	}
+	room = box_room(box);
 	have = (BOOL *)Kcalloc((size_t)( n + 1 ), sizeof(BOOL));
 	if ( have == NULL ) {
 		tad_free(doc);
 		return E_NOMEM;
 	}
+	tad_vobj_init(&v);
 	for ( i = tad_lnk_count(doc) - 1; i >= 0; i-- ) {
 		if ( tad_lnk_get(doc, i, &v) < E_OK ) continue;
 		for ( j = 0; j < n && ts_uuid_cmp(&v.target, &uuids[j]) != 0; j++ ) ;
@@ -561,10 +604,11 @@ EXPORT ER om_obj_links_set( CONST TS_UUID *box, CONST TS_UUID *uuids, INT n )
 	}
 	for ( j = 0; j < n; j++ ) {
 		if ( have[j] ) continue;
-		link_new(&v, &uuids[j], low + LINK_GAP);
+		link_new(&v, &uuids[j], low + LINK_GAP, room);
 		low = v.bottom;
 		if ( tad_lnk_add(doc, &v, &id) >= E_OK ) changed++;
 	}
+	tad_vobj_clear(&v);
 	Kfree(have);
 	if ( changed == 0 ) {
 		tad_free(doc);

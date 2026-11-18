@@ -202,6 +202,7 @@ LOCAL void forget( void )
 		if ( cab_ent[i].used && cab_ent[i].vid > 0 ) {
 			om_del_vob(cab_ent[i].vid);
 		}
+		tad_vobj_clear(&cab_ent[i].v);
 		cab_ent[i].used = FALSE;
 		cab_ent[i].vid  = 0;
 		cab_ent[i].pick = -1;
@@ -1639,7 +1640,9 @@ EXPORT INT cab_self_check( void )
 		if ( rect_empty(&e->r) ) {
 			faults++;
 		}
+		tad_vobj_init(&v.vobj);
 		if ( om_ref_vob(e->vid, &v) < E_OK ) {
+			tad_vobj_clear(&v.vobj);
 			faults++;
 			continue;
 		}
@@ -1647,6 +1650,7 @@ EXPORT INT cab_self_check( void )
 		  || v.reg.right != e->r.right || v.reg.bottom != e->r.bottom ) {
 			faults++;		/* the register says somewhere else */
 		}
+		tad_vobj_clear(&v.vobj);	/* om_ref_vob gives a copy of the link's words */
 	}
 
 	return faults;

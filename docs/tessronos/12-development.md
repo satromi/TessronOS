@@ -55,7 +55,8 @@ makefileは`build_make/`にあり、再帰呼出しをしない1つのmakefile�
 | `make TARGET=_RPI5_ WIFI=0`、`make TARGET=_QEMU_VIRT_ WIFI=1` | Raspberry Pi 5のWi-Fiを除く(Pi 5は既定で含める)。QEMU virtの`WIFI=1`は、ホストの無い機械で何も壊れないことと、基板の設定の取り出し(KTESTの群`wifinv`)を確かめるためのもの(09章9.6.8) |
 | `make TARGET=_X64_ WIFI=0` | Wi-Fiを除く(既定の`WIFI=1`は含める。09章9.6)。含めるときはOpenBSDの802.11の層とiwm(`~/tessronos-obsd-x64/obsdwifi.o`、9.6.9)と、WPA2の部分`~/tessronos-wpa-x64/wpasupp.o`を結び、ファームウェアの実身とWi-Fiの設定の実身をシステムボリュームに載せる |
 | `make pkg PKG=<id>` | アプリケーションのパッケージ`obj/pkg/<id>.tpk`(11.8) |
-| `make TARGET=<機種> sysup` | システムのパッケージ`obj/<TARGET><BUILD_ID>/tessronos-<機種>-<TS_VERSION>.tpk`。機種は`_RPI5_`、`_RPI4_`、`_X64_`(`_QEMU_VIRT_`は試験用)。システムの実身はイメージと同じ指定(`DESKTOP=1`、`MOZC=1`、`BROWSER=1`、`WIFI`など)で作ったものを集めるので、配るイメージと同じ変数で作る(11.8.1) |
+| `make TARGET=<機種> sysup` | システムのパッケージ`obj/<TARGET><BUILD_ID>/TessronOS-<機種の名前>-<TS_VERSION>.tpk`(機種の名前は`Pi5`、`Pi4`、`x64`、`QEMU`。例:`TessronOS-Pi4-R1.410.tpk`)。機種は`_RPI5_`、`_RPI4_`、`_X64_`(`_QEMU_VIRT_`は試験用)。システムの実身はイメージと同じ指定(`DESKTOP=1`、`MOZC=1`、`BROWSER=1`、`WIFI`など)で作ったものを集めるので、配るイメージと同じ変数で作る(11.8.1) |
+| `make TARGET=<機種> sdzip` | 配布用に圧縮したイメージ`obj/<TARGET><BUILD_ID>/TessronOS-<機種の名前>-<TS_VERSION>.zip`。中身は`TessronOS-<機種の名前>-<TS_VERSION>.img`の1つで、`sd.img`と同じ内容 |
 | `make clean` | 生成物を削除する |
 
 変数で構成を切り替える。
@@ -81,7 +82,7 @@ makefileは`build_make/`にあり、再帰呼出しをしない1つのmakefile�
 | `DWC2=0` | Raspberry PiのUSB-CのポートのDWC2を調べず、使わない(3.6.7) |
 | `PCIE_POLL=1` | Raspberry Pi 4系で、PCIeの先のxHCIを割込みではなく一定の間隔で見る(3.6.4) |
 | `OBJTEST=0` | Raspberry Pi 5と4系で、起動の後のデバイスの実身とボードの確認(`objtest:`)を行わない |
-| `TS_VERSION=R1.400` | システムのバージョン。システムの実身の情報に`VERSION`として出る |
+| `TS_VERSION=R1.410` | システムのバージョン。システムの実身の情報に`VERSION`として出る |
 | `PKGS="a.tpk …"` | イメージに組み込むアプリケーションのパッケージ。既定は`etc/pkg/`の.tpk、x64では`etc/pkg/x64/`の.tpk、Raspberry Pi 4系では`etc/pkg/rpi4/`の.tpk(`build_make/rpi4.mk`、11.8) |
 | `BUILD_ID=<名前>` | 生成物の出力先を`obj/<マシン><名前>/`と`tessronos<名前>.*`に分ける。同じソースツリーで複数の構成を並行してビルドするときに使う |
 
@@ -193,7 +194,7 @@ WSL版のQEMUはユーザモードネットワークを持たないので、外�
 
 x64のイメージ(`make TARGET=_X64_ DESKTOP=1 UITEST=1 sdimg`)は`tools/x64/ui_run64.py --disk obj/_X64_<名前>/sd.img`で試験する。引数は`ui_run.py`と同じで、マシンの引数だけを`q35`、OVMF、NVMeのディスク、`virtio-net-pci`、2つ目のシリアルポート、ローカル時刻のRTC(`-rtc base=localtime`)に替える。`UI_ACCEL=whpx`でWindowsのハイパーバイザを使う。NVMeのデバイスは状態を保存できないので、毎回起動から始める(WHPXで約5秒)。`UI_USBBOOT=1`のときは、ディスクのイメージをNVMeでなくUSBの記憶装置(`id=sysdisk`、ルートポート)として挿し、カードから起動したPCと同じく、システムのボリュームを`uda1`にする(ファームウェアはハブの先のディスクから起動しないので、ルートポートに挿す)。台本の`hmp`の行では、`$DISK`が走らせているディスクの写しを指す。`tools/x64/tests/ui_sysgone.steps`はこれで、デスクトップが上がった後にシステムのディスクを`device_del`で抜き、挿し直す(11.26)。
 
-ディスクの名前や並びがQEMU virtと違うために座標や名前が変わる台本は、x64のものを`tools/x64/tests/`に置く。`ui_xfconv`、`ui_scrprint`(ファイル変換の一覧で`/boot`が`nvmea0`の2行目)、`ui_btcd`、`ui_sysenv_font`(USBのディスク`uda`が`nvmea`、`nvmea0`、`nvmea1`、`nvmea2`の後の5行目。`ui_btcd`はファイル変換をプログラムの実身を開いて起こす。x64のイメージの小物のメニューは並びが違うため)、`ui_vols`(〈接続〉のパネルの行が`nvmea2`を含めて5つで、QEMU virtより26ドット低い)、`ui_diskfix`(壊したボリュームを`tools/tests/dfix_disk.py`で`mkvoldisk.py`の`volc.img`の第1区画に作り、USBのディスクとして挿す。一覧はシステムのボリューム`nvmea1`が先)、`ui_diskfix_boot`(`dfix_disk.py --pc`でx64のディスクのイメージに修復の依頼を書く)がある。`ui_vols2`はQEMU virtの台本のまま通る。
+ディスクの名前や並びがQEMU virtと違うために座標や名前が変わる台本は、x64のものを`tools/x64/tests/`に置く。`ui_xfconv`、`ui_scrprint`(ファイル変換の一覧で`/boot`が`nvmea0`の2行目)、`ui_xfc_carry`(`nvmea0`のウインドウから仮身を運ぶ)、`ui_btcd`、`ui_sysenv_font`(USBのディスク`uda`が`nvmea`、`nvmea0`、`nvmea1`、`nvmea2`の後の5行目。`--vols`の置き場に`tools/tests/mkfontdisk.py`で`font.img`を作っておく。`ui_btcd`はファイル変換をプログラムの実身を開いて起こす。x64のイメージの小物のメニューは並びが違うため)、`ui_vols`(ディスク操作の〈接続〉の一覧で`uda0`の前が`nvmea0`と`nvmea2`の2行で、QEMU virtより2行上。ほかはQEMU virtの台本と同じ)、`ui_diskfix`(壊したボリュームを`tools/tests/dfix_disk.py`で`mkvoldisk.py`の`volc.img`の第1区画に作り、USBのディスクとして挿す。一覧はシステムのボリューム`nvmea1`が先)、`ui_diskfix_boot`(`dfix_disk.py --pc`でx64のディスクのイメージに修復の依頼を書く)がある。`ui_vols2`はQEMU virtの台本のまま通る。
 
 以前の`tools/desk_act.sh`(QEMUのモニタからマウスを少しずつ動かす方式)は1回に数分かかるので、新しい試験には使わない。
 

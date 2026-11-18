@@ -163,7 +163,6 @@ enum {
 #define UUID_PROTO_MODE		0x2a4e
 
 #define REPORT_INPUT		1
-#define NREPORT			12
 
 enum {
 	A_NONE, A_MTU, A_SVC, A_CHR, A_DESC, A_REF, A_MAP, A_CCC, A_READY,
@@ -203,7 +202,8 @@ typedef struct {
 	UH	svc_first, svc_last;
 	UH	map, mode;
 	INT	nrep, cur;
-	LEREP	rep[NREPORT];
+	LEREP	*rep;			/* the HID service's reports, as many as it has */
+	INT	rep_cap;
 	BOOL	map_big;
 } LES;
 
@@ -493,8 +493,8 @@ LOCAL void smp_in( BTC *c, PEER *p, LES *s, CONST UB *f, INT n )
 				tm_printf((UB *)"bt: \"%s\": its identity address %02x:%02x:%02x:%02x:%02x:%02x, %s\n", p->name,
 					  f[7], f[6], f[5], f[4], f[3], f[2], ( f[1] == 0 ) ? "public" : "random static");
 				/* the same device listed before under another address: one entry, this one */
-				for ( k = 0; k < NPEER; k++ ) {
-					PEER	*q = &c->peer[k];
+				for ( k = 0; k < c->npeer; k++ ) {
+					PEER	*q = c->peer[k];
 
 					if ( q != p && q->used && q->le && !q->up && same_bt_bytes(q->addr, p->addr, 6) ) q->used = FALSE;
 				}
@@ -676,8 +676,23 @@ LOCAL void note_char( LES *s, UH decl, UH val, UH uuid )
 		s->map = val;
 	} else if ( uuid == UUID_PROTO_MODE ) {
 		s->mode = val;
-	} else if ( uuid == UUID_REPORT && s->nrep < NREPORT ) {
-		LEREP	*r = &s->rep[s->nrep++];
+	} else if ( uuid == UUID_REPORT ) {
+		LEREP	*r;
+
+		if ( s->nrep >= s->rep_cap ) {
+			INT	cap = ( s->rep_cap > 0 ) ? s->rep_cap * 2 : 16;
+			LEREP	*nr = (LEREP *)Kmalloc(sizeof(LEREP) * (SZ)cap);
+
+			if ( nr == NULL ) {
+				tm_printf((UB *)"bt: no room for report %d of the HID service: it is not read\n", s->nrep + 1);
+				return;
+			}
+			if ( s->nrep > 0 ) knl_memcpy(nr, s->rep, (INT)( sizeof(LEREP) * (SZ)s->nrep ));
+			if ( s->rep != NULL ) Kfree(s->rep);
+			s->rep = nr;
+			s->rep_cap = cap;
+		}
+		r = &s->rep[s->nrep++];
 
 		knl_memset(r, 0, sizeof(*r));
 		r->val = val;
@@ -809,8 +824,16 @@ LOCAL void gatt_answer( BTC *c, PEER *p, LES *s, CONST UB *f, INT n )
 		if ( op == ATT_READ_RSP || op == ATT_BLOB_RSP ) {
 			INT	m = n - 1;
 
-			if ( p->rdlen + m > HID_RD_MAX ) {
-				tm_printf((UB *)"bt: \"%s\": a report map longer than %d bytes\n", p->name, HID_RD_MAX);
+			/* the map is an attribute's value, ATT_VAL_MAX at most */
+			if ( m < 0 || p->rdlen + m > ATT_VAL_MAX ) {
+				tm_printf((UB *)"bt: \"%s\": a report map longer than %d bytes: the device is wrong, the map not used\n", p->name, ATT_VAL_MAX);
+				p->rdlen = 0;
+				map_done(c, p, s);
+				break;
+			}
+			if ( !knl_btx_rd_room(p, p->rdlen + m) ) {
+				tm_printf((UB *)"bt: \"%s\": no room for a report map of %d bytes\n", p->name, p->rdlen + m);
+				p->rdlen = 0;
 				map_done(c, p, s);
 				break;
 			}
@@ -1148,8 +1171,8 @@ LOCAL PEER *le_kept_of( BTC *c, CONST UB *a, INT type )
 {
 	INT	i;
 
-	for ( i = 0; i < NPEER; i++ ) {
-		PEER	*p = &c->peer[i];
+	for ( i = 0; i < c->npeer; i++ ) {
+		PEER	*p = c->peer[i];
 
 		if ( !p->used || !p->le || !p->have_key ) continue;
 		if ( same_bt_bytes(p->addr, a, 6) ) return p;
@@ -1171,7 +1194,7 @@ LOCAL PEER *le_kept_of( BTC *c, CONST UB *a, INT type )
  */
 LOCAL void ad_say( CONST UB *a, INT type, INT evt, CONST UB *ad, INT n )
 {
-	char	name[33], svc[64], raw[2 * 31 + 1];
+	char	name[BT_NAME_MAX + 1], svc[64], raw[2 * 31 + 1];
 	INT	at = 0, appear = -1, sn = 0, nl = 0, i;
 
 	name[0] = svc[0] = '\0';
@@ -1219,12 +1242,8 @@ LOCAL void adv_one( BTC *c, INT evt, INT type, CONST UB *a, CONST UB *ad, INT n 
 		knl_btl_connect(c, p);
 	} else if ( c->le_user_scan && p == NULL ) {
 		BOOL		input = ad_look(ad, n, &name, &nlen, &hint);
-		T_BTFOUND	*f = NULL;
-		INT		i;
+		BTFOUND		*f = knl_btx_found_at(c, a);
 
-		for ( i = 0; i < c->nfound; i++ ) {
-			if ( same_bt_bytes(c->found[i].addr, a, 6) ) f = &c->found[i];
-		}
 		/*
 		 * Every device that takes a connection is listed, whatever it
 		 * says of itself: many input devices put nothing for input in
@@ -1241,14 +1260,12 @@ LOCAL void adv_one( BTC *c, INT evt, INT type, CONST UB *a, CONST UB *ad, INT n 
 			f = knl_btx_found_add(c, a, 0, NULL, 0);
 		}
 		if ( f != NULL ) {
-			INT	k = (INT)( f - c->found );
-
-			f->le = 1;
-			f->atype = (UB)type;
-			c->found_hint[k] |= hint;
+			f->f.le = 1;
+			f->f.atype = (UB)type;
+			f->hint |= hint;
 			/* earphones of LE Audio alone, on a controller that cannot carry it: said in the list */
-			if ( ( c->found_hint[k] & FH_LEAUDIO ) != 0 && !c->has_cis && c->found_note[k] == BT_NOTE_NONE ) {
-				c->found_note[k] = BT_NOTE_LEA;
+			if ( ( f->hint & FH_LEAUDIO ) != 0 && !c->has_cis && f->note == BT_NOTE_NONE ) {
+				f->note = BT_NOTE_LEA;
 			}
 			if ( name != NULL ) (void)knl_btx_found_add(c, a, 0, name, nlen);
 		}
@@ -1275,10 +1292,11 @@ LOCAL void adv_report( BTC *c, CONST UB *d, INT len )
 {
 	INT	at = 1, k;
 
+	if ( len < 1 ) return;
 	for ( k = 0; k < d[0]; k++ ) {
 		INT	n;
 
-		if ( at + 8 > len ) return;
+		if ( at + 9 > len ) return;
 		n = d[at + 8];
 		if ( at + 9 + n + 1 > len ) return;
 		adv_one(c, d[at], d[at + 1], d + at + 2, d + at + 9, n);
@@ -1297,6 +1315,7 @@ LOCAL void ext_adv_report( BTC *c, CONST UB *d, INT len )
 {
 	INT	at = 1, k;
 
+	if ( len < 1 ) return;
 	for ( k = 0; k < d[0]; k++ ) {
 		INT	et, type, n, evt;
 
@@ -1374,6 +1393,7 @@ EXPORT void knl_btl_down( BTC *c, PEER *p )
 {
 	knl_btbap_down(c, p);
 	if ( p->les != NULL ) {
+		if ( ( (LES *)p->les )->rep != NULL ) Kfree(( (LES *)p->les )->rep);
 		knl_memset(p->les, 0, sizeof(LES));	/* the keys of a pairing not finished go */
 		Kfree(p->les);
 		p->les = NULL;
@@ -1392,8 +1412,8 @@ EXPORT void knl_btl_tick( BTC *c )
 		c->le_conn_cancelled = TRUE;
 		knl_btx_cmd(c, C_LE_CONN_CANCEL, NULL, 0);
 	}
-	for ( i = 0; i < NPEER; i++ ) {
-		PEER	*p = &c->peer[i];
+	for ( i = 0; i < c->npeer; i++ ) {
+		PEER	*p = c->peer[i];
 		LES	*s = (LES *)p->les;
 
 		if ( p->used && p->le && p->have_key && !p->up ) absent = TRUE;

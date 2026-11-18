@@ -50,6 +50,8 @@ IMPORT void xfu_mcpy( void *d, CONST void *s, SZ n );
 IMPORT void xfu_mset( void *d, INT c, SZ n );
 IMPORT INT  xfu_slen( CONST UB *s );
 IMPORT INT  xfu_scpy( UB *d, INT max, CONST UB *s );
+/* An object's name, whole, in memory to xfu_sys_free; NULL when it cannot be read */
+IMPORT UB  *xfu_obj_name( CONST TS_UUID *u );
 IMPORT BOOL xfu_same( CONST UB *a, CONST char *b );
 IMPORT BOOL xfu_same_ci( CONST UB *a, CONST UB *b );
 IMPORT INT  xfu_find( CONST UB *s, SZ n, CONST char *w, SZ from );
@@ -106,7 +108,7 @@ IMPORT ER   xfu_link_add( CONST TS_UUID *box, CONST TS_UUID *u );
 
 typedef struct {
 	BOOL	have;
-	UB	name[OB_NAME_MAX];	/* what the program is called */
+	UB	*name;			/* what the program is called, whole; NULL none */
 	UB	*icon;			/* its template's icon, or NULL */
 	SZ	iconsz;
 } XFUAPP;

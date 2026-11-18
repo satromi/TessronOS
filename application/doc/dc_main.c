@@ -705,7 +705,7 @@ static void press( CONST T_OBNTM *m )
 	static INT	px = -1000, py = -1000;
 	static UD	pat = 0;
 	T_DPRECT	page, box;
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	INT		which = -1, near = dc_look(LK_DBL_W, 10) / 2;
 	UD		gap = (UD)dc_look(WM_LOOK_DBLTIME, 400) * 1000000ULL;
 	BOOL		twice;
@@ -718,12 +718,15 @@ static void press( CONST T_OBNTM *m )
 	py = m->y;
 	pat = m->when;
 	dc_work_rect(&page);
+	tad_vobj_init(&v);
 	if ( g_doc != NULL && tv_doc_at(g_doc, &page, g_sy, g_rec, m->x, m->y, &v, &box, &which) >= E_OK ) {
 		if ( twice ) link_open(&v);
 		else de_link_take(&g_de, which, &box, m->x, m->y, m->when);
+		tad_vobj_clear(&v);
 		g_dirty = TRUE;
 		return;
 	}
+	tad_vobj_clear(&v);
 	if ( de_editable(&g_de) ) {
 		de_press(&g_de, m->x, m->y, (BOOL)( ( m->mods & M_SHIFT ) != 0 ), m->when);
 		g_dirty = TRUE;
@@ -771,8 +774,8 @@ static void left( void )
 static void dropped( void )
 {
 	T_OBDROP	*d = ob_drop_read(g_ui.kw);
-	T_VOBJ		v;
-	INT		i, n = 0;
+	T_VOBJ		v = { .recno = 0 };
+	INT		i, mx, my, n = 0;
 	ER		er = E_OK;
 	char		s[64];
 
@@ -795,10 +798,27 @@ static void dropped( void )
 		return;
 	}
 	ui_drop_answer(&g_ui, d, OB_DR_ACCEPT, "");
-	for ( i = 0; i < d->n; i++ ) {
+	/* the least corner of the boxes: where the outline's corner was, which is let go at x, y */
+	mx = d->v[0].left;
+	my = d->v[0].top;
+	for ( i = 1; i < d->n; i++ ) {
+		if ( d->v[i].left < mx ) mx = d->v[i].left;
+		if ( d->v[i].top < my ) my = d->v[i].top;
+	}
+	tad_vobj_init(&v);
+	for ( i = 0; i < d->n && er >= E_OK; i++ ) {
 		CONST T_OBDROPV	*o = &d->v[i];
+		CONST UB	*nm, *rl, *al;
+		SZ		nl, rll, all;
 
-		memset(&v, 0, sizeof(v));
+		/* each with the name, relationship and applist it was carried with */
+		tad_vobj_clear(&v);
+		nm = ob_drop_name(d, i, &nl);
+		rl = ob_drop_rel(d, i, &rll);
+		al = ob_drop_applist(d, i, &all);
+		if ( ( er = tad_vobj_set(&v, TAD_W_NAME, nm, nl) ) < E_OK
+		  || ( er = tad_vobj_set(&v, TAD_W_REL, rl, rll) ) < E_OK
+		  || ( er = tad_vobj_set(&v, TAD_W_APPLIST, al, all) ) < E_OK ) break;
 		v.target = o->target;
 		v.width = o->right - o->left;
 		v.heightpx = o->bottom - o->top;
@@ -809,8 +829,10 @@ static void dropped( void )
 		v.bgcol = o->bgcol;
 		v.disp = ( o->disp != 0 ) ? o->disp : TAD_D_DEFAULT;
 		v.zoom = 100;
-		if ( de_link_drop(&g_de, d->x + o->left + 2, d->y + o->top + 2, &v) >= E_OK ) n++;
+		if ( de_link_drop(&g_de, d->x + ( o->left - mx ) + 2, d->y + ( o->top - my ) + 2, &v) >= E_OK ) n++;
 	}
+	tad_vobj_clear(&v);
+	if ( er == E_NOMEM ) tell("メモリが足りないため、仮身をすべては置けませんでした", NULL);
 	snprintf(s, sizeof(s), "dropped %d", n);
 	note(s);
 	free(d);
@@ -954,7 +976,7 @@ int main( void )
 	T_OBREF	ref;
 	SZ	asz = 0;
 	UD	t0 = ta_now();
-	char	s[TAD_NAME_MAX + 96];
+	char	s[DC_LOG];
 	ER	er;
 
 	ta_stack_start();

@@ -1,10 +1,12 @@
 <tad version="1.0" encoding="UTF-8" filename="システム環境設定の操作メニュー">
 <document>
 <p>システム環境設定の操作メニュー</p>
-<p>〈書体〉の一覧で選んだ書体を実身として保存する、削除する。〈バージョン〉の一覧で選んだアプリケーションを削除する。メニューの定義。</p>
+<p>〈書体〉の一覧で選んだ書体を実身として保存する、削除する。〈バージョン〉の一覧で選んだアプリケーションを削除する。表示しているページの設定の写しを実身として作る。表示しているページを開く仮身を作る。メニューの定義。</p>
 </document>
 <menu>
 <item code="font.save">保存</item>
 <item code="delete">削除</item>
+<item code="copy.make">写しを作る</item>
+<item code="page.link">このページの仮身を作る</item>
 </menu>
 </tad>

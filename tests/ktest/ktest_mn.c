@@ -221,16 +221,16 @@ LOCAL void test_empty_list( void )
 LOCAL void test_many_apps_end( TS_UUID *u, T_VOBJ *v, DTAPP *a )
 {
 	(void)ob_del_obj(u);
+	tad_vobj_clear(v);
 	Kfree(v);
 	Kfree(a);
 }
 
 /*
  * 機能付箋 in any number. Twelve programs in an object's applist: all of
- * them in the list, in the menu's list, and the link can be fixed to the
- * one it opens with though the list does not fit a link. A link read from
- * a record with such a list in its attribute is still a link, with that
- * one entry.
+ * them in the list, in the menu's list, and the link fixed to the one it
+ * opens with holds the whole list. A link read from a record with such a
+ * list in its attribute holds all of it.
  */
 LOCAL void test_many_apps( void )
 {
@@ -241,7 +241,7 @@ LOCAL void test_many_apps( void )
 	};
 	UB		*js = (UB *)Kmalloc(4096);
 	UB		*xml = (UB *)Kmalloc(4096);
-	T_VOBJ		*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	T_VOBJ		*v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	DTAPP		*a = (DTAPP *)Kmalloc(sizeof(DTAPP) * 64);
 	T_OBCRE		c;
 	TS_UUID		u, cab = def_of(SYSDEF_MENU_CAB), ed = def_of(SYSDEF_MENU_EXEC);
@@ -264,7 +264,7 @@ LOCAL void test_many_apps( void )
 	c.json = js;
 	c.jsonsz = k;
 	KT_ASSERT_ER(ob_cre_obj(&c, &u), E_OK);
-	knl_memset(v, 0, sizeof(*v));
+	tad_vobj_clear(v);
 	v->target = u;
 
 	KT_ASSERT_EQ(om_link_napps(v), KT_MANY_APPS);
@@ -287,6 +287,24 @@ LOCAL void test_many_apps( void )
 	KT_ASSERT_ER(om_link_lock(v, TRUE), E_OK);
 	KT_ASSERT(om_link_locked(v));
 	KT_ASSERT_EQ(dt_app_list(v, a, 64, NULL), KT_MANY_APPS);
+	{
+		/* the whole list, every program of it */
+		CONST UB	*al = TAD_VS(v->vapplist);
+		INT		found = 0, q;
+
+		for ( i = 0; i < KT_MANY_APPS; i++ ) {
+			for ( q = 0; al[q] != 0; q++ ) {
+				INT	z;
+
+				for ( z = 0; ids[i][z] != 0 && al[q + z] == (UB)ids[i][z]; z++ ) ;
+				if ( ids[i][z] == 0 ) {
+					found++;
+					break;
+				}
+			}
+		}
+		KT_ASSERT_EQ(found, KT_MANY_APPS);
+	}
 	KT_ASSERT_ER(om_link_lock(v, FALSE), E_OK);
 	KT_ASSERT(!om_link_locked(v));
 
@@ -302,10 +320,10 @@ LOCAL void test_many_apps( void )
 	k += tm_sprintf(xml + k, (UB *)"}\"/></figure></tad>\n");
 	KT_ASSERT_ER(tad_parse(xml, k, NULL, &doc), E_OK);
 	if ( doc != NULL ) {
-		knl_memset(v, 0, sizeof(*v));
+		tad_vobj_clear(v);
 		KT_ASSERT_EQ(tad_lnk_count(doc), 1);
 		KT_ASSERT_ER(tad_lnk_get(doc, 0, v), E_OK);
-		KT_ASSERT(same(v->applist, "{\"basic-calc-editor\":{\"name\":\"名前3\",\"defaultOpen\":true}}"));
+		KT_ASSERT(v->vapplist_len > 12 * 30 && TAD_VS(v->vapplist)[0] == '{');
 		KT_ASSERT_EQ(dt_app_list(v, a, 64, NULL), KT_MANY_APPS);
 		tad_free(doc);
 	}
@@ -330,7 +348,7 @@ LOCAL void test_vmn( void )
 		KT_SKIP("no definitions");
 	}
 	d = (DTWIN *)Kmalloc(sizeof(DTWIN));
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(d != NULL && v != NULL);
 	if ( d == NULL || v == NULL ) return;
 	knl_memset(d, 0, sizeof(*d));

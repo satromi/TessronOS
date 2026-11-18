@@ -228,7 +228,7 @@ LOCAL INT window_named( CONST char *name, TS_UUID *out )
 	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return -1;
 	for ( i = 0; i < cnt; i++ ) {
 		if ( ob_ref_obj(&list[i], &r) < E_OK || r.sub != OB_S_WINDOW
-		  || find(r.name, s_len((CONST char *)r.name), name, 0) < 0 ) continue;
+		  || !kt_name_has(&list[i], name) ) continue;
 		*out = list[i];
 		kw = ob_opn_obj(out, OB_OP_ATRRD);
 		if ( kw > 0 ) {
@@ -479,12 +479,10 @@ LOCAL void test_setup( void )
 	KT_ASSERT(wait_for(pos, "TessronOS desktop: 書体箱 renamed 書体", 10, NULL, 0));
 	{
 		TS_UUID	fb, wb;
-		T_OBREF	r;
-
 		(void)ts_str_to_uuid(SYSDEF_FONT_BOX, &fb);
 		(void)ts_str_to_uuid(SYSDEF_WALL_BOX, &wb);
-		KT_ASSERT(ob_ref_obj(&fb, &r) >= E_OK && knl_strcmp((CONST char *)r.name, "書体") == 0);
-		KT_ASSERT(ob_ref_obj(&wb, &r) >= E_OK && knl_strcmp((CONST char *)r.name, "KTの壁紙") == 0);
+		KT_ASSERT(kt_name_is(&fb, "書体"));
+		KT_ASSERT(kt_name_is(&wb, "KTの壁紙"));
 		(void)om_store_rename(&wb, (CONST UB *)"壁紙");
 	}
 	for ( i = 0; i < 50; i++ ) {
@@ -530,9 +528,17 @@ LOCAL BOOL superfloppy( char *name, INT max )
 		k = ob_opn_obj(&list[i], OB_OP_ATRRD);
 		if ( k <= 0 ) continue;
 		if ( ob_lst_rec(k, rc, 2, &nr) >= E_OK && nr >= 2 && rc[1].size == SF_BYTES ) {
+			UB	*nm = kt_name(&list[i]);
+			SZ	nl = ( nm != NULL ) ? knl_strlen((CONST char *)nm) : 0;
+
 			ob_cls_obj(k);
-			knl_strncpy(name, (CONST char *)r.name, max - 1);
-			name[max - 1] = 0;
+			/* the whole name or none: a cut name would name another disk */
+			if ( nm == NULL || nl == 0 || nl > (SZ)( max - 1 ) ) {
+				if ( nm != NULL ) Kfree(nm);
+				return FALSE;
+			}
+			knl_memcpy(name, nm, nl + 1);
+			Kfree(nm);
 			return TRUE;
 		}
 		ob_cls_obj(k);
@@ -564,7 +570,7 @@ LOCAL void sf_attach( CONST char *name, BOOL on )
 	}
 	if ( sf_key > 0 || ob_lst_obj(OB_T_DEVICE, OB_S_DISK, NULL, list, 64, &cnt) < E_OK ) return;
 	for ( i = 0; i < cnt && i < 64; i++ ) {
-		if ( ob_ref_obj(&list[i], &r) < E_OK || knl_strcmp((CONST char *)r.name, name) != 0 ) continue;
+		if ( ob_ref_obj(&list[i], &r) < E_OK || !kt_name_is(&list[i], name) ) continue;
 		sf_key = ob_opn_obj(&list[i], OB_OP_R | OB_OP_WRITE);
 		if ( sf_key <= 0 || fs_attach_dev(sf_key, NULL, 0) < E_OK ) {
 			tm_printf((UB *)"  %s not attached at its place\n", name);
@@ -752,7 +758,7 @@ LOCAL void test_xfconv( void )
 		d = win_rec(twid);		/* as the window's program saves it */
 		KT_ASSERT(d != NULL && tad_lnk_count(d) == 2);
 		for ( k = 0; d != NULL && k < 2 && k < tad_lnk_count(d); k++ ) {
-			T_VOBJ	v;
+			T_VOBJ	v = { .recno = 0 };
 			UB	*rec;
 			SZ	size = 0;
 
@@ -762,6 +768,7 @@ LOCAL void test_xfconv( void )
 			KT_ASSERT(rec != NULL && ( size == 4608 || ( size == 25 && find(rec, 25, "TessronOS FAT test file.", 0) == 0 ) ));
 			if ( rec != NULL ) Kfree(rec);
 			KT_ASSERT_EQ(links_to(d, &made[k], NULL), 1);
+			tad_vobj_clear(&v);
 		}
 		if ( d != NULL ) tad_free(d);
 		(void)u;
@@ -888,14 +895,16 @@ LOCAL ER drop_one( INT wid, CONST TS_UUID *target )
 {
 	T_OBDROPV	v;
 	T_WMWIN		w;
+	UB		words[32];
+	UINT		wsz = 0;
 
 	if ( wm_ref(wid, &w) < E_OK ) return E_NOEXS;
 	knl_memset(&v, 0, sizeof(v));
 	v.target = *target;
-	knl_strcpy((char *)v.name, "ktdrop-secret");
+	(void)ob_drop_put(words, &wsz, sizeof(words), (CONST UB *)"ktdrop-secret", -1, &v.name_at, &v.name_len);
 	v.right = L_W;
 	v.bottom = L_H;
-	return wm_obj_drop(wid, w.work.left + 20, w.work.top + 20, 0, NULL, &v, 1);
+	return wm_obj_drop(wid, w.work.left + 20, w.work.top + 20, 0, NULL, &v, 1, words, wsz);
 }
 
 /*
@@ -990,8 +999,8 @@ LOCAL void test_grant( void )
 		knl_memset(&dv, 0, sizeof(dv));
 		dv.target = secret;
 		KT_ASSERT_ER(wm_ref(wid, &ww), E_OK);
-		KT_ASSERT_ER(wm_obj_drop_for(wid, ww.work.left + 20, ww.work.top + 20, 0, NULL, 0, &dv, 1), E_OACV);
-		KT_ASSERT_ER(wm_obj_drop_for(wid, ww.work.left + 20, ww.work.top + 20, 0, NULL, pid, &dv, 1), E_OACV);
+		KT_ASSERT_ER(wm_obj_drop_for(wid, ww.work.left + 20, ww.work.top + 20, 0, NULL, 0, &dv, 1, NULL, 0), E_OACV);
+		KT_ASSERT_ER(wm_obj_drop_for(wid, ww.work.left + 20, ww.work.top + 20, 0, NULL, pid, &dv, 1, NULL, 0), E_OACV);
 		KT_ASSERT_EQ(knl_ob_granted(pid, &secret), 0);
 
 		/* the first: granted until refused (the process opens it meanwhile) */
@@ -1074,21 +1083,23 @@ LOCAL T_TAD *win_rec( INT wid )
 LOCAL INT links_to( CONST T_TAD *rec, CONST TS_UUID *u, T_VOBJ *v )
 {
 	INT	i, n = 0, cnt = ( rec != NULL ) ? tad_lnk_count(rec) : 0;
-	T_VOBJ	w;
+	T_VOBJ	w = { .recno = 0 };
 
 	for ( i = 0; i < cnt; i++ ) {
 		if ( tad_lnk_get(rec, i, &w) >= E_OK && ts_uuid_cmp(&w.target, u) == 0 ) {
-			if ( n++ == 0 && v != NULL ) *v = w;
+			if ( n++ == 0 && v != NULL ) (void)tad_vobj_copy(v, &w);
 		}
 	}
+	tad_vobj_clear(&w);
 	return n;
 }
 
 /*
- * A process carries a link to a figure of the desktop's and asks it put
- * there: of an object its user may not read it is refused and no link is
- * made; of one the user may read it is put. What programs make and place
- * themselves goes the same way (test_unpack and the file conversion here).
+ * A process carries a link to the window of a figure, which is its
+ * program's (DT_F_TO_PROG), and asks it put there: of an object its
+ * user may not read it is refused and no link is made; of one the user
+ * may read it is put. What programs make and place themselves goes the
+ * same way (test_unpack and the file conversion here).
  */
 LOCAL void test_place( void )
 {
@@ -1316,7 +1327,7 @@ LOCAL BOOL carry_root( INT uwid, INT twid, INT tx, INT ty, TS_UUID *root )
 LOCAL INT walk_root( CONST TS_UUID *root, TS_UUID *objs, INT *nref, INT max )
 {
 	TS_UUID	list[64];
-	UB	*x, name[TAD_NAME_MAX];
+	UB	*x, *name;
 	SZ	len = 0;
 	INT	nobj = 0, i, k, j, nl;
 
@@ -1326,7 +1337,9 @@ LOCAL INT walk_root( CONST TS_UUID *root, TS_UUID *objs, INT *nref, INT max )
 		ID	key;
 		SZ	asz = 0;
 
-		KT_ASSERT(om_store_name(&objs[i], name, sizeof(name)) > 0);		key = ob_opn_obj(&objs[i], OB_OP_R);
+		name = om_store_name_dup(&objs[i], NULL);
+		KT_ASSERT(name != NULL);
+		key = ob_opn_obj(&objs[i], OB_OP_R);
 		KT_ASSERT(key > 0);
 		if ( key > 0 ) {
 			KT_ASSERT(ob_get_ico(key, NULL, 0, &asz) >= E_OK && asz > 0);
@@ -1334,15 +1347,19 @@ LOCAL INT walk_root( CONST TS_UUID *root, TS_UUID *objs, INT *nref, INT max )
 		}
 		x = om_obj_record(&objs[i], 0, &len);
 		KT_ASSERT(x != NULL);
-		if ( x == NULL ) continue;
+		if ( x == NULL ) {
+			if ( name != NULL ) Kfree(name);
+			continue;
+		}
 		KT_ASSERT(find(x, (INT)len, "<tad version=\"1.0\"", 0) >= 0 && find(x, (INT)len, "</tad>", 0) >= 0);
 		nl = om_store_links(x, len, list, 64);
 		if ( nl > 64 ) nl = 64;
 		if ( i == 0 ) {
-			KT_ASSERT(find(name, s_len((CONST char *)name), UNP_ROOT, 0) == 0);
+			KT_ASSERT(name != NULL && find(name, s_len((CONST char *)name), UNP_ROOT, 0) == 0);
 			KT_ASSERT(find(x, (INT)len, "<document>", 0) >= 0);
 			KT_ASSERT_EQ(nl, 27);
 		}
+		if ( name != NULL ) Kfree(name);
 		for ( k = 0; k < nl; k++ ) {
 			for ( j = 0; j < nobj && ts_uuid_cmp(&objs[j], &list[k]) != 0; j++ ) ;
 			if ( j < nobj ) {
@@ -1371,7 +1388,7 @@ LOCAL void test_unpack( void )
 	TS_UUID	arc, win, root, objs[UNP_NOBJ + 8];
 	INT	nref[UNP_NOBJ + 8];
 	T_OBREF	r;
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	T_TAD	*d;
 	UD	pos;
 	INT	wid = -1, nobj, i, x, y;
@@ -1422,6 +1439,7 @@ LOCAL void test_unpack( void )
 		tad_free(d);
 	}
 	for ( i = nobj - 1; i >= 0; i-- ) (void)ob_del_obj(&objs[i]);
+	tad_vobj_clear(&v);
 	wm_update();
 }
 
@@ -1756,6 +1774,21 @@ LOCAL INT saved_link_h( INT fwid, CONST TS_UUID *fig, UB **rec, INT *len )
 	return ( t >= 0 && b >= 0 ) ? b - t : -1;
 }
 
+/*
+ * A drag of the link's foot, waited for until the figure says it sized
+ * the link: the drag goes in where the devices' events go and is handed
+ * on by the desktop, while the key that saves goes to the window
+ * straight away (save_key), so the save is not to be asked before the
+ * let go has been taken
+ */
+LOCAL BOOL figlink_drag( INT x, INT y0, INT y1 )
+{
+	UD	pos = log_now();
+
+	drag(x, y0, x, y1, 0);
+	return wait_for(pos, "figure: sized 0 to ", 100, NULL, 0);
+}
+
 LOCAL void figlink_run( BOOL with_id )
 {
 	CONST char	*name = with_id ? "KT図形仮身" : "KT図形仮身無";
@@ -1793,7 +1826,7 @@ LOCAL void figlink_run( BOOL with_id )
 	KT_ASSERT(at_work(fwid, 100, 20 + ch, &x, &yb));
 
 	/* carried up: it stops at the closed height */
-	drag(x, yb - 2, x, yb - 2 - 30, 0);
+	KT_ASSERT(figlink_drag(x, yb - 2, yb - 2 - 30));
 	h = saved_link_h(fwid, &fig, &rec, &len);
 	tm_printf((UB *)"  carried up: %d high\n", h);
 	KT_ASSERT_EQ(h, ch);
@@ -1801,7 +1834,7 @@ LOCAL void figlink_run( BOOL with_id )
 	tk_dly_tsk(500);
 
 	/* a little down: still closed */
-	drag(x, yb - 2, x, yb - 2 + 4, 0);
+	KT_ASSERT(figlink_drag(x, yb - 2, yb - 2 + 4));
 	h = saved_link_h(fwid, &fig, &rec, &len);
 	tm_printf((UB *)"  a little down: %d high\n", h);
 	KT_ASSERT_EQ(h, ch);
@@ -1809,7 +1842,7 @@ LOCAL void figlink_run( BOOL with_id )
 	tk_dly_tsk(500);
 
 	/* well down: opened, as tall as it was carried */
-	drag(x, yb - 2, x, yb - 2 + 60, 0);
+	KT_ASSERT(figlink_drag(x, yb - 2, yb - 2 + 60));
 	h = saved_link_h(fwid, &fig, &rec, &len);
 	tm_printf((UB *)"  well down: %d high\n", h);
 	KT_ASSERT_EQ(h, ch + 60);
@@ -1961,7 +1994,7 @@ LOCAL void test_figcopy( void )
 	att = TRUE;
 	fx = (char *)Kmalloc(1024);
 	q = (DTPROG *)Kmalloc(sizeof(DTPROG));
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(fx != NULL && q != NULL && v != NULL);
 	if ( fx == NULL || q == NULL || v == NULL ) goto out;
 
@@ -2082,7 +2115,10 @@ out:
 	if ( att ) KT_ASSERT_ER(ob_det_vol(UNP_FAT), E_OK);
 	if ( fx != NULL ) Kfree(fx);
 	if ( q != NULL ) Kfree(q);
-	if ( v != NULL ) Kfree(v);
+	if ( v != NULL ) {
+		tad_vobj_clear(v);
+		Kfree(v);
+	}
 	wm_update();
 }
 

@@ -39,6 +39,7 @@
 #include <sys/machine.h>
 #include "kernel.h"
 #include <tk/tkernel.h>
+#include <tm/tmonitor.h>
 #include <ts/proc.h>
 #include <ts/hid.h>
 #include <ts/uuid.h>
@@ -58,14 +59,20 @@
 /*
  * A handle: the kind in bits 28 to 30, then a window's number in the 28
  * bits below (WM_WIN_LAST), a panel's or a made one's place the same,
- * or for a part its panel's number in bits 12 to 27 and its place on
- * the panel in the 12 below.
+ * or for a part its panel's number in bits 20 to 27 and its place on
+ * the panel in the 20 below. A panel's parts are as many as its
+ * definition has; a handle names the first WO_PART_H of them, more than
+ * the memory holds (a part is 512 bytes).
  */
-#define H_MAKE(k, a, b)	( ( (k) == H_PART ) ? ( ( (k) << 28 ) | ( (a) << 12 ) | (b) ) \
+#define H_MAKE(k, a, b)	( ( (k) == H_PART ) ? ( ( (k) << 28 ) | ( (a) << 20 ) | (b) ) \
 					    : ( ( (k) << 28 ) | (a) ) )
 #define H_KIND(h)	( (h) >> 28 )
-#define H_A(h)		( ( H_KIND(h) == H_PART ) ? ( ( (h) >> 12 ) & 0xFFFF ) : ( (h) & 0x0FFFFFFF ) )
-#define H_B(h)		( ( H_KIND(h) == H_PART ) ? ( (h) & 0xFFF ) : 0 )
+#define H_A(h)		( ( H_KIND(h) == H_PART ) ? ( ( (h) >> 20 ) & 0xFF ) : ( (h) & 0x0FFFFFFF ) )
+#define H_B(h)		( ( H_KIND(h) == H_PART ) ? ( (h) & 0xFFFFF ) : 0 )
+#define WO_PART_H	0x100000
+#if WM_PANEL_MAX > 0xFF
+#error "a part's handle has eight bits for its panel's number"
+#endif
 
 #define WO_REC_MAX	( 1024 * 1024 )	/* bytes of a drawing or a shape */
 #define WO_NREC		OB_WR_KIND	/* the records every window has */
@@ -113,7 +120,8 @@ typedef struct {
 	TS_UUID	uuid;
 	WOPRT	prt;
 	INT	npart;
-	TS_UUID	part[WM_PART_MAX];
+	INT	room;			/* the UUIDs part has room for */
+	TS_UUID	*part;			/* each part's, as many as the panel has (NULL none) */
 } WOPNL;
 
 #define WO_FREE_MAX	64
@@ -558,37 +566,84 @@ EXPORT ID knl_wmobj_maker( INT wid )
 	return pid;
 }
 
-EXPORT void knl_wmobj_panel( INT pid )
+EXPORT ER knl_wmobj_panel( INT pid )
 {
-	WOPNL	*p;
+	WOPNL	p;
+	TS_UUID	*old;
 	INT	n, i;
 
 	if ( wo_mtx <= 0 || pid < 1 || pid > WM_PANEL_MAX ) {
-		return;
+		return E_OK;			/* no objects' layer: nothing to be */
 	}
 	n = knl_pn_count(pid, NULL);
 	if ( n < 0 ) {
-		return;
+		return (ER)n;
 	}
-	p = (WOPNL *)Kmalloc(sizeof(WOPNL));
-	if ( p == NULL ) {
-		return;
+	knl_memset(&p, 0, sizeof(p));
+	prt_of_maker(&p.prt);
+	if ( ts_gen_uuid(&p.uuid) < E_OK ) {
+		return E_OK;			/* no name to be known by: the panel is not an object */
 	}
-	knl_memset(p, 0, sizeof(*p));
-	prt_of_maker(&p->prt);
-	p->npart = ( n > WM_PART_MAX ) ? WM_PART_MAX : n;
-	if ( ts_gen_uuid(&p->uuid) < E_OK ) {
-		Kfree(p);
-		return;
+	/* a UUID for every part the panel has */
+	if ( n > 0 ) {
+		if ( (SZ)n > (SZ)( 0x7FFFFFFF / sizeof(TS_UUID) ) ) {
+			return E_NOMEM;
+		}
+		p.part = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)n);
+		if ( p.part == NULL ) {
+			return E_NOMEM;
+		}
+		p.room = n;
 	}
-	for ( i = 0; i < p->npart; i++ ) {
-		(void)ts_gen_uuid(&p->part[i]);
+	p.npart = n;
+	for ( i = 0; i < p.npart; i++ ) {
+		(void)ts_gen_uuid(&p.part[i]);
 	}
-	p->used = TRUE;
+	p.used = TRUE;
 	LOCK();
-	wo_pnl[pid] = *p;
+	old = wo_pnl[pid].part;
+	wo_pnl[pid] = p;
 	UNLOCK();
-	Kfree(p);
+	if ( old != NULL ) {
+		Kfree(old);
+	}
+	return E_OK;
+}
+
+/*
+ * Room for want UUIDs of a panel's parts, made before a part is put on
+ * the panel so that a part never stands there without one: E_NOMEM when
+ * there is not the memory. Under the lock.
+ */
+LOCAL ER pnl_room( WOPNL *p, INT want )
+{
+	TS_UUID	*t;
+	INT	room;
+
+	if ( want <= p->room ) {
+		return E_OK;
+	}
+	if ( want > WO_PART_H ) {
+		return E_NOMEM;			/* past what a handle names: the memory is long gone */
+	}
+	room = ( p->room > 0 ) ? p->room * 2 : 8;
+	if ( room < want ) {
+		room = want;
+	}
+	if ( room > WO_PART_H ) {
+		room = WO_PART_H;
+	}
+	t = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)room);
+	if ( t == NULL ) {
+		return E_NOMEM;
+	}
+	if ( p->part != NULL ) {
+		knl_memcpy(t, p->part, sizeof(TS_UUID) * (SZ)p->npart);
+		Kfree(p->part);
+	}
+	p->part = t;
+	p->room = room;
+	return E_OK;
 }
 
 LOCAL void fr_keep_state( INT fi );
@@ -600,7 +655,7 @@ LOCAL void fr_keep_state( INT fi );
  */
 EXPORT void knl_wmobj_panel_close( INT pid )
 {
-	TS_UUID	u;
+	TS_UUID	u, *parts;
 	BOOL	was = FALSE, own = FALSE;
 	INT	i;
 
@@ -618,6 +673,10 @@ EXPORT void knl_wmobj_panel_close( INT pid )
 		wo_pnl[pid].used = FALSE;
 		was = TRUE;
 	}
+	parts = wo_pnl[pid].part;		/* the parts' UUIDs go with the panel */
+	wo_pnl[pid].part = NULL;
+	wo_pnl[pid].room = 0;
+	wo_pnl[pid].npart = 0;
 	for ( i = 0; i < WO_FREE_MAX; i++ ) {
 		if ( wo_free[i].used && wo_free[i].pid == pid ) {
 			if ( wo_free[i].sub != OB_S_PART ) {
@@ -627,6 +686,9 @@ EXPORT void knl_wmobj_panel_close( INT pid )
 		}
 	}
 	UNLOCK();
+	if ( parts != NULL ) {
+		Kfree(parts);
+	}
 	if ( was && !own ) {
 		knl_ob_post(&u, -1, OB_E_DELETE, NULL);
 	}
@@ -792,7 +854,7 @@ LOCAL BOOL menu_open( void )
 LOCAL void drive_menus( CONST T_WMEV *ev )
 {
 	BOOL	on;
-	INT	i, cmd;
+	INT	i, cmd, k;
 
 	for ( i = 0; i < WO_MSESS; i++ ) {
 		WOMSESS	*s = &wo_ms[i];
@@ -804,8 +866,14 @@ LOCAL void drive_menus( CONST T_WMEV *ev )
 			s->skip = 0;		/* the click's release, already counted when the menu began */
 			continue;
 		}
-		if ( wm_click_take(&s->ck, ev) != WM_CK_PASS ) {
-			continue;		/* a click: the menu stays; another button while it is held */
+		k = wm_click_take(&s->ck, ev);
+		if ( k != WM_CK_PASS ) {
+			/* a click: the menu stays; another button while it is held, said as the desktop's menus say it */
+			if ( k == WM_CK_EAT ) {
+				tm_printf((UB *)"wmobj: menu: button %d %s while the menu's is held: not taken\n",
+					  ev->code, ( ev->type == HID_EV_BTN_DOWN ) ? "pressed" : "let go");
+			}
+			continue;
 		}
 		on = wm_menu_has(s->pid, ev->wid);
 		if ( ev->type == HID_EV_BTN_DOWN && !on ) {
@@ -1861,7 +1929,7 @@ LOCAL ER ask_answer( INT wid, CONST T_OBDRANS *an )
  * too. Otherwise the taker is granted what the caller may do.
  */
 LOCAL ER drop_links( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
-		     BOOL byprog, ID giver, CONST T_OBDROPV *v, INT n )
+		     BOOL byprog, ID giver, CONST T_OBDROPV *v, INT n, CONST UB *words, SZ strsz )
 {
 	CONST T_OBCRD	*crd;
 	T_OBDROP	*d, *old = NULL;
@@ -1890,11 +1958,16 @@ LOCAL ER drop_links( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
 		}
 	}
 	/* every link let go */
-	d = (T_OBDROP *)Kcalloc(1, OB_DROP_SIZE(n));
+	if ( strsz < 0 || ( strsz > 0 && words == NULL ) ) {
+		return E_PAR;
+	}
+	d = (T_OBDROP *)Kcalloc(1, OB_DROP_SIZE(n) + strsz);
 	if ( d == NULL ) {
 		return E_NOMEM;
 	}
 	d->n = n;
+	d->strsz = (UINT)strsz;
+	if ( strsz > 0 ) knl_memcpy(OB_DROP_WORDS(d), words, strsz);
 	d->x = sx - w.work.left;
 	d->y = sy - w.work.top;
 	d->mods = mods;
@@ -1917,7 +1990,6 @@ LOCAL ER drop_links( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
 	crd = knl_ob_crd_of(ts_get_pid());
 	for ( i = 0; i < n; i++ ) {
 		d->v[i] = v[i];
-		d->v[i].name[OB_DROP_NAME - 1] = 0;
 		if ( byprog ) {
 			d->v[i].ops = rights_of(giver, &v[i].target) & rights_of(taker, &v[i].target) & OB_DROP_OPS;
 			continue;
@@ -1944,7 +2016,7 @@ LOCAL ER drop_links( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
 	}
 	d->seq = ++WOW(wid).seq;
 	WOW(wid).drop = d;
-	WOW(wid).droplen = (SZ)OB_DROP_SIZE(n);
+	WOW(wid).droplen = (SZ)OB_DROP_SIZE(n) + strsz;
 	WOW(wid).taker = taker;
 	WOW(wid).answered = FALSE;
 	WOW(wid).gave = !byprog;
@@ -1979,15 +2051,15 @@ LOCAL ER drop_links( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
 }
 
 EXPORT ER wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
-		       CONST T_OBDROPV *v, INT n )
+		       CONST T_OBDROPV *v, INT n, CONST UB *words, SZ strsz )
 {
-	return drop_links(wid, sx, sy, mods, from, FALSE, 0, v, n);
+	return drop_links(wid, sx, sy, mods, from, FALSE, 0, v, n, words, strsz);
 }
 
 EXPORT ER wm_obj_drop_for( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
-			   ID giver, CONST T_OBDROPV *v, INT n )
+			   ID giver, CONST T_OBDROPV *v, INT n, CONST UB *words, SZ strsz )
 {
-	return drop_links(wid, sx, sy, mods, from, TRUE, giver, v, n);
+	return drop_links(wid, sx, sy, mods, from, TRUE, giver, v, n, words, strsz);
 }
 
 EXPORT ER wm_obj_drop_text( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
@@ -2186,7 +2258,7 @@ LOCAL INT locate( CONST TS_UUID *uuid )
 		if ( same_uuid(&wo_pnl[i].uuid, uuid) ) {
 			h = H_MAKE(H_PNL, i, 0);
 		}
-		for ( k = 0; k < wo_pnl[i].npart && h == 0; k++ ) {
+		for ( k = 0; k < wo_pnl[i].npart && k < WO_PART_H && h == 0; k++ ) {
 			if ( same_uuid(&wo_pnl[i].part[k], uuid) ) {
 				h = H_MAKE(H_PART, i, k);
 			}
@@ -3599,12 +3671,27 @@ LOCAL ER fr_map( INT h, INT target, CONST T_OBMAP *m )
 		pt->r.right = m->x + w;
 		pt->r.bottom = m->y + hgt;
 		pt->num = next_num(pid);
+		/* its UUID's room first: a part on the panel is always an object */
+		i = knl_pn_count(pid, NULL);
+		LOCK();
+		er = pnl_room(&wo_pnl[pid], i + 1);
+		UNLOCK();
+		if ( er < E_OK ) {
+			Kfree(pt);
+			return er;
+		}
 		i = knl_pn_add(pid, pt);
 		Kfree(pt);
 		if ( i < 0 ) {
 			return (ER)i;
 		}
 		LOCK();
+		er = pnl_room(&wo_pnl[pid], i + 1);	/* the panel had more parts by then */
+		if ( er < E_OK ) {
+			UNLOCK();
+			(void)knl_pn_del(pid, i);
+			return er;
+		}
 		wo_pnl[pid].part[i] = e->uuid;
 		if ( i >= wo_pnl[pid].npart ) {
 			wo_pnl[pid].npart = i + 1;
@@ -3621,12 +3708,11 @@ LOCAL ER fr_map( INT h, INT target, CONST T_OBMAP *m )
 		return E_PAR;				/* a panel or a menu goes on a window */
 	}
 	if ( e->sub == OB_S_PANEL ) {
-		T_WMPANEL	*def = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+		T_WMPANEL	*def = wm_panel_new(0);
 
 		if ( def == NULL ) {
 			return E_NOMEM;
 		}
-		knl_memset(def, 0, sizeof(*def));
 		LOCK();
 		w = e->pt.r.right - e->pt.r.left;
 		hgt = e->pt.r.bottom - e->pt.r.top;
@@ -3634,9 +3720,10 @@ LOCAL ER fr_map( INT h, INT target, CONST T_OBMAP *m )
 		if ( e->boxnum > 0 ) {
 			TS_UUID	box = e->box;
 
-			if ( knl_pn_load(&box, e->boxnum, def, NULL, 0) < E_OK ) {
+			er = knl_pn_load(&box, e->boxnum, def, NULL, 0);
+			if ( er < E_OK ) {
 				wm_panel_free(def);
-				return E_OBJ;
+				return ( er == E_NOMEM ) ? E_NOMEM : E_OBJ;
 			}
 			w = def->r.right - def->r.left;
 			hgt = def->r.bottom - def->r.top;
@@ -3864,16 +3951,20 @@ LOCAL ER fr_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 
 		if ( v >= 0 && knl_oj_str(c->json, (INT)c->jsonsz, v, us, sizeof(us)) > 0
 		  && ts_str_to_uuid((CONST char *)us, &box) >= E_OK ) {
-			T_WMPANEL	*def = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+			T_WMPANEL	*def = wm_panel_new(0);
+			ER		le;
 
 			v = knl_oj_member(c->json, (INT)c->jsonsz, pdef, "num");
 			boxnum = ( v >= 0 && knl_oj_num(c->json, (INT)c->jsonsz, v, &d) ) ? (INT)d : 1;
 			if ( def == NULL ) {
+				if ( items != NULL ) Kfree(items);
 				return E_NOMEM;
 			}
-			if ( knl_pn_load(&box, boxnum, def, title, sizeof(title)) < E_OK ) {
+			le = knl_pn_load(&box, boxnum, def, title, sizeof(title));
+			if ( le < E_OK ) {
 				wm_panel_free(def);
-				return E_OBJ;
+				if ( items != NULL ) Kfree(items);
+				return ( le == E_NOMEM ) ? E_NOMEM : E_OBJ;
 			}
 			r.left = 0;
 			r.top = 0;
@@ -4124,10 +4215,32 @@ LOCAL ER wo_close( INT h )
 	return E_OK;
 }
 
+/* The name whole: the title or the label, as long as the window manager keeps it */
+#define WO_NAME_ROOM	( ( WM_TITLE_MAX > WM_LABEL_MAX ) ? WM_TITLE_MAX : WM_LABEL_MAX )
+
+LOCAL ER wo_refnam( CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize )
+{
+	UB	*nm;
+	INT	h = locate(uuid);
+	ER	er;
+
+	if ( h < 0 ) {
+		return (ER)h;
+	}
+	nm = (UB *)Kmalloc(WO_NAME_ROOM);
+	if ( nm == NULL ) {
+		return E_NOMEM;
+	}
+	name_of(h, nm, WO_NAME_ROOM);
+	er = knl_ob_name_put(nm, -1, buf, size, p_asize);
+	Kfree(nm);
+	return er;
+}
+
 LOCAL ER wo_ref( CONST TS_UUID *uuid, T_OBREF *r )
 {
 	T_OBREC	*recs;
-	INT	h = locate(uuid), cnt = 0, i;
+	INT	h = locate(uuid), cnt = 0, i, n;
 
 	if ( h < 0 ) {
 		return (ER)h;
@@ -4136,9 +4249,10 @@ LOCAL ER wo_ref( CONST TS_UUID *uuid, T_OBREF *r )
 	r->sub = sub_of(h);
 	r->flags = OB_F_VOLATILE;
 	r->refcnt = 0;
-	name_of(h, r->name, OB_NAME_MAX);
-	recs = (T_OBREC *)Kmalloc(sizeof(T_OBREC) * ( WO_NREC + WM_PART_MAX ));
-	if ( recs != NULL && wo_lrc(h, recs, WO_NREC + WM_PART_MAX, &cnt) >= E_OK ) {
+	/* a panel's: one for each part it has; one made on its own counts as it is made */
+	n = ( H_KIND(h) == H_FREE ) ? fr_nrec(h) : nrec_of(h);
+	recs = (T_OBREC *)Kmalloc(sizeof(T_OBREC) * (SZ)n);
+	if ( recs != NULL && wo_lrc(h, recs, n, &cnt) >= E_OK ) {
 		r->nrec = cnt;
 		r->size = 0;
 		for ( i = 0; i < cnt; i++ ) {
@@ -4418,7 +4532,10 @@ LOCAL ER wo_lst( CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt )
 	INT	cnt = 0, i, k;
 
 	LOCK();
-	max = WO_FREE_MAX + wo_nwin + WM_PANEL_MAX * ( 1 + WM_PART_MAX );
+	max = WO_FREE_MAX + wo_nwin;
+	for ( i = 1; i <= WM_PANEL_MAX; i++ ) {
+		if ( wo_pnl[i].used ) max += 1 + wo_pnl[i].npart;
+	}
 	all = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)max);
 	if ( all == NULL ) {
 		UNLOCK();
@@ -4507,7 +4624,9 @@ LOCAL CONST T_OBMGR wo_mgr = {
 	NULL, NULL,
 	NULL,			/* records replaced by writing over them */
 	NULL,			/* nothing to wait for */
-	NULL			/* nothing comes in to wait for (ob_rea_tmo) */
+	NULL,			/* nothing comes in to wait for (ob_rea_tmo) */
+	NULL,
+	wo_refnam
 };
 
 /* The window manager registered with the name manager, which must be up */

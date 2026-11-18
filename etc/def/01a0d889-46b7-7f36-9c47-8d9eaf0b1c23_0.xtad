@@ -1,13 +1,16 @@
 <tad version="1.0" encoding="UTF-8" filename="ユーザ環境設定のメニュー">
 <document>
 <p>ユーザ環境設定のメニュー</p>
-<p>ユーザ環境設定のウインドウのメニュー。メニューの定義。</p>
+<p>ユーザ環境設定のウインドウのメニュー。表示しているページの写しと、そのページを開く仮身を作る。メニューの定義。</p>
 </document>
 <menu>
 <include><link id="01a0d889-45e7-7a0c-adb9-ddf2d690ef56_0.xtad" vobjid="01a0d8c3-2002-7eb7-8c38-5e6f7a8b9ca3"/></include>
 <item code="clear">削除</item>
 <line/>
 <item code="standard">標準設定</item>
+<line/>
+<item code="copy.make">写しを作る</item>
+<item code="page.link">このページの仮身を作る</item>
 <include><link id="01a0d889-46bd-7f9c-8bad-e3f4a5b6c789_0.xtad" vobjid="01a0d8c3-2002-7fd1-9a0e-c1d2e3f40a0e"/></include>
 </menu>
 </tad>

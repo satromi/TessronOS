@@ -276,17 +276,16 @@ LOCAL void test_front( void )
 
 	/* a panel in a window of its own in front: it alone */
 	{
-		T_WMPANEL	*def = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+		T_WMPANEL	*def = wm_panel_new(0);
 		INT		pid = -1, pop;
 
 		if ( def != NULL ) {
-			knl_memset(def, 0, sizeof(*def));
 			def->num = 2;
 			def->kind = WM_PNL_PLAIN;
 			def->r.right = 300;
 			def->r.bottom = 120;
 			pid = wm_panel_open_centre(b, def);
-			Kfree(def);
+			wm_panel_free(def);
 		}
 		KT_ASSERT(pid > 0);
 		if ( pid > 0 ) {
@@ -374,7 +373,8 @@ LOCAL void test_save( void )
 	UW		*px;
 	CONST UW	*back = NULL;
 	TS_UUID		u;
-	UB		name[TAD_NAME_MAX], *rec, href[64];
+	UB		*name, app[OM_APP_ID], *rec, href[64];
+	SZ		nl = 0;
 	char		us[TS_UUID_STRLEN + 1];
 	SZ		size = 0;
 	INT		w, h, bw = 0, bh = 0, i, bad = 0, k;
@@ -388,11 +388,12 @@ LOCAL void test_save( void )
 	w = at.right - at.left;
 	h = at.bottom - at.top;
 	KT_ASSERT_ER(dt_scr_save(px, w, h, (CONST UB *)"画面印刷の試験 <1>", NULL, &u), E_OK);
-	KT_ASSERT(om_store_name(&u, name, sizeof(name)) > 0);
-	KT_ASSERT(find(name, s_len((CONST char *)name), "画面印刷の試験 <1>") == 0);
+	name = om_store_name_dup(&u, &nl);
+	KT_ASSERT(name != NULL && find(name, (INT)nl, "画面印刷の試験 <1>") == 0);
+	if ( name != NULL ) Kfree(name);
 	/* it opens in 基本図形編集 */
-	KT_ASSERT(om_store_default_app(&u, name, sizeof(name)) > 0
-		  && find(name, s_len((CONST char *)name), "basic-figure-editor") == 0);
+	KT_ASSERT(om_store_default_app(&u, app, sizeof(app)) > 0
+		  && find(app, s_len((CONST char *)app), "basic-figure-editor") == 0);
 	rec = om_obj_record(&u, 0, &size);
 	KT_ASSERT(rec != NULL);
 	if ( rec != NULL ) {

@@ -33,6 +33,10 @@
  *	  - a UUID is one object's on every volume: an object is not made
  *	    with the UUID of one on another volume, and a copy of a volume
  *	    is not attached beside it;
+ *	  - another machine's system volume, holding objects of the UUIDs
+ *	    of this system's, is told as such: the UUIDs name this system's
+ *	    objects, nothing of this system is emptied or held by it, and a
+ *	    link of its own records names its own object;
  *	  - a volume with an object open is not detached;
  *	  - a disk pulled out with an object and a file open on it: the
  *	    volume goes, the key and the descriptor answer errors, and all
@@ -63,6 +67,7 @@
 #include <ts/uuid.h>
 #include <ts/tad.h>
 #include <ts/om.h>
+#include <ts/sysdef.h>
 
 #ifndef KT_VOL_DIR
 #define KT_VOL_DIR	""		/* no images: nothing is plugged in */
@@ -714,7 +719,7 @@ LOCAL void test_across( void )
 	char	vs[TS_UUID_STRLEN + 1], ms[TS_UUID_STRLEN + 1], bs[TS_UUID_STRLEN + 1];
 	TS_UUID	a, b, a2, vb, mine;
 	T_TAD	*doc = NULL;
-	T_VOBJ	*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	T_VOBJ	*v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	SZ	len;
 	INT	r0, r1, n;
 
@@ -1002,6 +1007,225 @@ LOCAL void test_unique( void )
 	KT_ASSERT_ER(attach(13), E_OK);
 }
 
+/*
+ * The aliases of another machine's objects (design 8.3), on VOLC1 made
+ * such a volume (test_foreign): an object of VOLC1's own whose record
+ * links to the first window and to tmp reads with both UUIDs turned into
+ * aliases of the same length, whole however the read is cut, the record
+ * as long as before; the alias is VOLC1's object (its name, its volume),
+ * the UUID itself this system's; what is written with the alias is kept
+ * with the UUID on the disk and read again as the alias; no object is
+ * made with an alias. Taken away, VOLC1's alias is found on no volume.
+ */
+/* n bytes the same: 0, as memcmp says */
+LOCAL INT al_cmp( CONST void *a, CONST void *b, INT n )
+{
+	CONST UB	*p = (CONST UB *)a, *q = (CONST UB *)b;
+	INT		i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( p[i] != q[i] ) return 1;
+	}
+	return 0;
+}
+
+/* Whether text holds the word w */
+LOCAL BOOL al_has( CONST char *text, CONST char *w )
+{
+	INT	n = (INT)knl_strlen(w), i;
+
+	for ( i = 0; text[i] != 0; i++ ) {
+		if ( al_cmp(text + i, w, n) == 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
+LOCAL TS_UUID	alias_kept;		/* an alias test_alias found, looked for after VOLC1 is taken away */
+
+LOCAL void test_alias( CONST char *dev, ID here, CONST TS_UUID *cab, CONST TS_UUID *tmp )
+{
+	char		text[200], got[200], cs[TS_UUID_STRLEN + 1], ts[TS_UUID_STRLEN + 1], as[TS_UUID_STRLEN + 1];
+	TS_UUID		x, a, r, made;
+	T_OBREC		rl[4];
+	T_OBCRE		c;
+	UB		nm[64];
+	SZ		asz = 0, len;
+	INT		at, cnt = 0, k;
+	ID		key, vol = 0;
+
+	(void)ts_uuid_to_str(cab, cs, sizeof(cs));
+	(void)ts_uuid_to_str(tmp, ts, sizeof(ts));
+	knl_strcpy(text, "<tad><figure><link id=\"");
+	knl_strcat(text, cs);
+	knl_strcat(text, "_0.xtad\"/><link id=\"");
+	knl_strcat(text, ts);
+	knl_strcat(text, "_0.xtad\"/></figure></tad>");
+	len = (SZ)knl_strlen(text);
+	at = 23;				/* where the first UUID is written */
+	KT_ASSERT_ER(obj_make(13, (CONST UB *)text, len, &x), E_OK);
+	KT_ASSERT(knl_obfile_vol_of(&x) == here);
+
+	key = ob_opn_obj(&x, OB_OP_R | OB_OP_W);
+	KT_ASSERT(key > 0);
+	if ( key <= 0 ) return;
+	knl_memset(got, 0, sizeof(got));
+	KT_ASSERT_ER(ob_rea_rec(key, 0, 0, got, sizeof(got) - 1, &asz), E_OK);
+	KT_ASSERT_EQ((INT)asz, (INT)len);
+	KT_ASSERT(al_cmp(got, text, at) == 0 && al_cmp(got + at, cs, TS_UUID_STRLEN) != 0);
+	KT_ASSERT(!al_has(got, ts));
+	knl_memcpy(as, got + at, TS_UUID_STRLEN);
+	as[TS_UUID_STRLEN] = 0;
+	KT_ASSERT_ER(ts_str_to_uuid(as, &a), E_OK);
+	KT_ASSERT(( a.b[6] & 0xF0 ) == 0x80);	/* version 8 */
+	/* a read that begins and ends inside the UUID gives the alias's letters */
+	knl_memset(got, 0, sizeof(got));
+	KT_ASSERT_ER(ob_rea_rec(key, 0, at + 10, got, 12, &asz), E_OK);
+	KT_ASSERT(asz == 12 && al_cmp(got, as + 10, 12) == 0);
+	KT_ASSERT_ER(ob_lst_rec(key, rl, 4, &cnt), E_OK);
+	KT_ASSERT(cnt >= 1 && rl[0].size == (UD)len);
+
+	/* the alias is VOLC1's object; the UUID is this system's */
+	KT_ASSERT(knl_obfile_vol_of(&a) == here);
+	KT_ASSERT(knl_obfile_real(&a, &vol, &r) >= E_OK && vol == here && ts_uuid_cmp(&r, cab) == 0);
+	KT_ASSERT(knl_obfile_vol_of(cab) != here);
+	KT_ASSERT(knl_obfile_on(&a, dev) && !knl_obfile_on(cab, dev));
+	knl_memset(nm, 0, sizeof(nm));
+	KT_ASSERT_ER(ob_ref_nam(&a, nm, sizeof(nm), &asz), E_OK);
+	KT_ASSERT(knl_strcmp((CONST char *)nm, "another machine's") == 0);
+	knl_memset(nm, 0, sizeof(nm));
+	(void)ob_ref_nam(cab, nm, sizeof(nm), &asz);
+	KT_ASSERT(knl_strcmp((CONST char *)nm, "another machine's") != 0);
+
+	/* written with the alias, kept with the UUID, read as the alias again */
+	{
+		char	w[200];
+
+		knl_memcpy(w, text, (INT)len);
+		knl_memcpy(w + at, as, TS_UUID_STRLEN);
+		KT_ASSERT_ER(ob_wri_rec(key, 0, 0, w, len, &asz), E_OK);
+		knl_memset(got, 0, sizeof(got));
+		KT_ASSERT_ER(ob_rea_rec(key, 0, 0, got, sizeof(got) - 1, &asz), E_OK);
+		KT_ASSERT(al_cmp(got + at, as, TS_UUID_STRLEN) == 0);
+	}
+	ob_cls_obj(key);
+	{
+		TS_UUID	xr;
+		ID	d = 0, od;
+		char	raw[200];
+		SZ	rn = 0;
+
+		KT_ASSERT(knl_obfile_real(&x, &d, &xr) >= E_OK && d == here);
+		od = ts_opn_obj(d, &xr, TFO_READ);
+		KT_ASSERT(od > 0);
+		if ( od > 0 ) {
+			knl_memset(raw, 0, sizeof(raw));
+			KT_ASSERT_ER(ts_rea_rec(od, 0, 0, raw, sizeof(raw) - 1, &rn), E_OK);
+			KT_ASSERT(al_cmp(raw + at, cs, TS_UUID_STRLEN) == 0);	/* on the disk, the UUID */
+			ts_cls_obj(od);
+		}
+	}
+
+	/* no object made with an alias */
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.uuid = a;
+	KT_ASSERT(ob_cre_obj(&c, &made) < E_OK);		/* E_OBJ while it is found, E_PAR after */
+
+	KT_ASSERT_ER(ob_del_obj(&x), E_OK);
+	k = (INT)( knl_obfile_vol_of(&a) == here );
+	KT_ASSERT(k);
+	alias_kept = a;
+}
+
+/*
+ * Another machine's system volume (design 8.3): VOLC1 given objects of
+ * the UUIDs this system's objects have -- the system box, tmp, the first
+ * window, 機器の設定 -- as a TessronOS disk of another machine has them,
+ * and attached. It is told as another machine's; the UUIDs name this
+ * system's objects, not VOLC1's (knl_obfile_vol_of, knl_obfile_on); this
+ * system's tmp is not emptied by the attach; seen from a record of VOLC1
+ * the UUID is VOLC1's object (knl_obfile_vuuid_near); the machine is
+ * still this one; it is detached though this system's first window is
+ * open. And a USB medium the system uses nothing of is the person's to
+ * attach (knl_obdev_medium_person), a disk not of USB is not.
+ */
+LOCAL void test_foreign( void )
+{
+	static CONST char *CONST ids[] = { SYSDEF_SYSTEM_BOX, SYSDEF_TMP, SYSDEF_CABINET, SYSDEF_CONF_DEV };
+	static CONST char	meta[] = "{\"name\":\"another machine's\",\"refCount\":1,\"recordCount\":0}";
+	TS_UUID		u[4], fonts, tmp, cab, vu, mine, mach;
+	T_OBFVREF	ref;
+	UB		dev[NAME_MAX];
+	ID		vol, here, key;
+	INT		i, n = -1;
+
+	if ( !have_disks ) KT_SKIP("no disks");
+	for ( i = 0; i < 4; i++ ) {
+		KT_ASSERT_ER(ts_str_to_uuid(ids[i], &u[i]), E_OK);
+	}
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_FONT_BOX, &fonts), E_OK);
+	tmp = u[1];
+	cab = u[2];
+	KT_ASSERT_ER(knl_obfile_machine(&mine), E_OK);
+	vol_dev(13, dev);
+	KT_ASSERT(knl_obdev_medium_person(dev));
+	KT_ASSERT(!knl_obdev_medium_person((CONST UB *)"vblka"));
+
+	/* VOLC1 made a system volume of another machine's */
+	KT_ASSERT_ER(detach(13), E_OK);
+	vol = ts_opn_vol((CONST char *)dev, TSFS_STORE_BLK);
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) return;
+	for ( i = 0; i < 4; i++ ) {
+		KT_ASSERT_ER(knl_tsfs_cre_as(vol, &u[i], (CONST UB *)meta, (INT)sizeof(meta) - 1), E_OK);
+	}
+	(void)ts_cls_vol(vol);
+
+	/* something in this system's tmp, which an attach of this system's volume would empty */
+	KT_ASSERT_ER(om_obj_link_add(&tmp, &fonts), E_OK);
+	KT_ASSERT_ER(attach(13), E_OK);
+	here = knl_obfile_vol_path((CONST char *)dev);
+	KT_ASSERT(here > 0);
+	KT_ASSERT(knl_obfile_foreign((CONST char *)dev));
+	KT_ASSERT_ER(knl_obfile_vol_ref((CONST char *)dev, &ref), E_OK);
+	KT_ASSERT(ref.foreign && !ref.system);
+	for ( i = 0; i < 4; i++ ) {
+		KT_ASSERT(knl_obfile_vol_of(&u[i]) > 0 && knl_obfile_vol_of(&u[i]) != here);
+		KT_ASSERT(!knl_obfile_on(&u[i], (CONST char *)dev));
+	}
+	KT_ASSERT(ob_lst_lnk(&tmp, NULL, NULL, 0, &n) >= E_OK && n == 1);
+	test_alias((CONST char *)dev, here, &u[2], &tmp);
+	KT_ASSERT_ER(knl_obfile_vuuid_near(&cab, &ref.vuuid, &vu), E_OK);
+	KT_ASSERT(ts_uuid_cmp(&vu, &ref.vuuid) == 0);
+	KT_ASSERT_ER(knl_obfile_vuuid_near(&cab, NULL, &vu), E_OK);
+	KT_ASSERT(ts_uuid_cmp(&vu, &ref.vuuid) != 0);
+	KT_ASSERT(knl_obfile_vol_of(&obj_of[13]) == here);	/* VOLC1's own, found on it */
+	KT_ASSERT_ER(knl_obfile_machine(&mach), E_OK);
+	KT_ASSERT(ts_uuid_cmp(&mach, &mine) == 0);
+	KT_ASSERT(knl_obdev_medium_person(dev));		/* attached by the person: still the person's */
+
+	/* this system's first window open: VOLC1 is detached all the same */
+	key = ob_opn_obj(&cab, OB_OP_R);
+	KT_ASSERT(key > 0);
+	KT_ASSERT_ER(detach(13), E_OK);
+	if ( key > 0 ) ob_cls_obj(key);
+	KT_ASSERT(knl_obfile_vol_of(&alias_kept) < 0);		/* its alias found on no volume */
+	KT_ASSERT(knl_obfile_vol_of(&cab) > 0);
+
+	/* as it was */
+	vol = ts_opn_vol((CONST char *)dev, TSFS_STORE_BLK);
+	KT_ASSERT(vol > 0);
+	for ( i = 0; vol > 0 && i < 4; i++ ) {
+		(void)ts_unl_obj(vol, &u[i]);
+		KT_ASSERT_ER(ts_del_obj(vol, &u[i]), E_OK);
+	}
+	if ( vol > 0 ) (void)ts_cls_vol(vol);
+	KT_ASSERT_ER(attach(13), E_OK);
+	KT_ASSERT(!knl_obfile_foreign((CONST char *)dev));
+	KT_ASSERT_ER(om_obj_links_set(&tmp, NULL, 0), E_OK);
+}
+
 /* A volume with an object open is not detached */
 LOCAL void test_busy( void )
 {
@@ -1071,6 +1295,67 @@ LOCAL void test_yank( void )
 	}
 	for ( i = 0; i < (INT)sizeof(data); i++ ) data[i] = (UB)( 12 * 7 + i );
 	KT_ASSERT(obj_same(&obj_of[12], data, sizeof(data)));
+	for ( i = 5; i <= 11; i++ ) {
+		KT_ASSERT_ER(mount_auto(i, 0), E_OK);
+	}
+}
+
+/*
+ * The disk pulled out with an object open only for its notices (as a
+ * window watches what its links point at): the watcher is told
+ * OB_E_DETACH, the key that reads nothing but the attributes is let go
+ * (E_ID when it is closed after), and the volume closes and the device
+ * leaves as with nothing open (design 7.6); put back as before.
+ */
+LOCAL void test_watch_gone( void )
+{
+	T_OBCRE	c;
+	T_OBNTF	req;
+	T_OBNTM	m;
+	TS_UUID	ch;
+	SZ	asz = 0;
+	BOOL	told = FALSE;
+	ID	port = 0, key;
+	INT	i;
+
+	if ( !have_disks ) KT_SKIP("no disks");
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	KT_ASSERT_ER(ob_cre_obj(&c, &ch), E_OK);
+	port = ob_opn_obj(&ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT);
+	KT_ASSERT(port > 0);
+	key = ob_opn_obj(&obj_of[12], OB_OP_ATRRD);		/* VOLB */
+	KT_ASSERT(key > 0);
+	if ( port <= 0 || key <= 0 ) {
+		if ( key > 0 ) ob_cls_obj(key);
+		if ( port > 0 ) ob_cls_obj(port);
+		(void)ob_del_obj(&ch);
+		return;
+	}
+	knl_memset(&req, 0, sizeof(req));
+	req.events = OB_E_CHANGE | OB_E_DETACH;
+	req.id = 7;
+	KT_ASSERT(ob_ntf_evt(key, OB_REC_ANY, &req, port) > 0);
+	unplug(&dk[1]);
+	for ( i = 0; i < WAIT_MS / 100 && !told; i++ ) {
+		while ( ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) >= E_OK && asz == (SZ)sizeof(m) ) {
+			if ( m.event == OB_E_DETACH && m.id == 7 && ts_uuid_cmp(&m.uuid, &obj_of[12]) == 0 ) told = TRUE;
+		}
+		if ( !told ) tk_dly_tsk(100);
+	}
+	KT_ASSERT(told);
+	/* the key let go by the system: the device leaves without its being closed */
+	for ( i = 0; i < WAIT_MS / 100 && listed(dk[1].name); i++ ) {
+		tk_dly_tsk(100);
+	}
+	KT_ASSERT(!listed(dk[1].name));
+	KT_ASSERT_ER(ob_cls_obj(key), E_ID);
+	dk[1].in = FALSE;
+	ob_cls_obj(port);
+	(void)ob_del_obj(&ch);
+	/* put back: attached again */
+	KT_ASSERT(come(&dk[1]));
+	KT_ASSERT_ER(attach(12), E_OK);
 	for ( i = 5; i <= 11; i++ ) {
 		KT_ASSERT_ER(mount_auto(i, 0), E_OK);
 	}
@@ -1509,8 +1794,10 @@ EXPORT void ktest_vols( void )
 	KT_RUN(test_across);
 	KT_RUN(test_xref);
 	KT_RUN(test_unique);
+	KT_RUN(test_foreign);
 	KT_RUN(test_busy);
 	KT_RUN(test_yank);
+	KT_RUN(test_watch_gone);
 	KT_RUN(test_leak);
 	KT_RUN(test_cycles);
 	KT_RUN(test_smp);

@@ -54,6 +54,7 @@
 #include <ts/json.h>
 #include <ts/hid.h>
 #include <ts/ui.h>
+#include "../dtask.h"
 
 /* The panels of the data box, and their parts */
 #define PN_MAIN		1
@@ -215,7 +216,6 @@ LOCAL void name_of( const TS_UUID *u, char *out, INT max )
 	UB	*meta = NULL;
 	T_JSON	root;
 	INT	asz;
-	T_OBREF	r;
 	ID	k = ob_opn_obj(u, OB_OP_ATRRD);
 
 	out[0] = 0;
@@ -227,9 +227,8 @@ LOCAL void name_of( const TS_UUID *u, char *out, INT max )
 		free(meta);
 		ob_cls_obj(k);
 	}
-	if ( out[0] == 0 && ob_ref_obj(u, &r) >= E_OK ) {
-		strncpy(out, (const char *)r.name, (size_t)max - 1);
-		out[max - 1] = 0;
+	if ( out[0] == 0 ) {
+		(void)ob_ref_nam(u, (UB *)out, max, NULL);	/* what fits, at a whole letter */
 	}
 }
 
@@ -779,43 +778,15 @@ LOCAL ER peek( void )
 
 LOCAL ER open_on_desktop( const TS_UUID *u )
 {
-	TS_UUID	d, c2;
-	T_DTREQ	rq;
-	T_DTANS	an;
-	T_OBCRE	c;
-	SZ	asz = 0;
-	ID	k, ka;
-	ER	er;
+	static DTASK	q;		/* the answer read whole, however long (dtask.h) */
+	T_DTREQ		rq;
+	T_DTANS		an;
 
-	if ( ob_fnd_nam((const UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &c2) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&c2, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&c2);
-		return E_OBJ;
-	}
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_OPEN;
-	rq.seq = 1;
 	rq.target = *u;
 	rq.recno = -1;
-	rq.reply = c2;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, &rq, sizeof(rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	/* the answer waited for on its channel, at most 5000 ms */
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, &an, sizeof(an), &asz, 5000);
-		if ( er >= E_OK && asz == (SZ)sizeof(an) && an.seq == rq.seq ) {
-			er = an.er;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&c2);
-	return er;
+	return dq_ask(&q, &rq, &an, NULL, 5000);
 }
 
 /*
@@ -1292,7 +1263,7 @@ LOCAL void drop_in( void )
 		memset(&items[n], 0, sizeof(items[n]));
 		items[n].uuid = d->v[i].target;
 		name_of(&items[n].uuid, items[n].name, sizeof(items[n].name));
-		if ( items[n].name[0] == 0 ) strncpy(items[n].name, (const char *)d->v[i].name, sizeof(items[n].name) - 1);
+		if ( items[n].name[0] == 0 ) strncpy(items[n].name, (const char *)ob_drop_name(d, i, NULL), sizeof(items[n].name) - 1);
 		items[n].parent = d->fromobj;		/* the record the links were in */
 		items[n].box[0] = d->v[i].left;
 		items[n].box[1] = d->v[i].top;

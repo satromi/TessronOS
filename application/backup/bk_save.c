@@ -737,10 +737,10 @@ EXPORT ER bk_save_walk( BKJOB *j, const BKROOT *roots, INT nroot )
 		}
 		asz = ob_atr_read(k, 0, &meta);
 		if ( asz < 0 || !read_meta(j, i, k, meta, asz) ) {
-			strncpy(o->name, (const char *)ref.name, sizeof(o->name) - 1);
+			(void)ob_ref_nam(&o->uuid, (UB *)o->name, (SZ)sizeof(o->name), NULL);
 		}
 		free(meta);
-		if ( o->name[0] == 0 ) strncpy(o->name, (const char *)ref.name, sizeof(o->name) - 1);
+		if ( o->name[0] == 0 ) (void)ob_ref_nam(&o->uuid, (UB *)o->name, (SZ)sizeof(o->name), NULL);
 
 		/* record 0: its links, the objects they name, and its size as binary TAD */
 		x->execrec = -1;

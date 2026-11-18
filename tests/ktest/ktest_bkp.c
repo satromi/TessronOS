@@ -1449,7 +1449,7 @@ LOCAL INT window_of( CONST char *name, TS_UUID *out )
 
 	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return -1;
 	for ( i = 0; i < cnt; i++ ) {
-		if ( ob_ref_obj(&list[i], &r) < E_OK || r.sub != OB_S_WINDOW || !same(r.name, name) ) continue;
+		if ( ob_ref_obj(&list[i], &r) < E_OK || r.sub != OB_S_WINDOW || !kt_name_is(&list[i], name) ) continue;
 		*out = list[i];
 		kw = ob_opn_obj(out, OB_OP_R);
 		if ( kw > 0 ) {

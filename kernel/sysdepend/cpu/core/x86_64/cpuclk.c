@@ -196,13 +196,17 @@ LOCAL void hwp_tell( void )
 		tm_printf((UB *)"cpu: no HWP: the firmware's own clock steps\n");
 		return;
 	}
-	en = rdmsr(MSR_PM_ENABLE);
+	/* for the line only: read where they may be refused */
+	en = 0;
+	cap = 0;
+	req = 0;
+	(void)knl_rdmsr_safe(MSR_PM_ENABLE, &en);
 	if ( ( en & 1 ) == 0 ) {
 		tm_printf((UB *)"cpu: HWP there but not on (IA32_PM_ENABLE %lx)\n", en);
 		return;
 	}
-	cap = rdmsr(MSR_HWP_CAPABILITIES);
-	req = rdmsr(MSR_HWP_REQUEST);
+	(void)knl_rdmsr_safe(MSR_HWP_CAPABILITIES, &cap);
+	(void)knl_rdmsr_safe(MSR_HWP_REQUEST, &req);
 	tm_printf((UB *)"cpu: HWP on: performance %d to %d (guaranteed %d), asked %d to %d, desired %d, energy %d%s\n",
 		  (INT)( ( cap >> 24 ) & 0xff ), (INT)( cap & 0xff ), (INT)( ( cap >> 8 ) & 0xff ),
 		  (INT)( req & 0xff ), (INT)( ( req >> 8 ) & 0xff ), (INT)( ( req >> 16 ) & 0xff ),
@@ -279,6 +283,7 @@ typedef struct {
 LOCAL FREQ		freq[FREQ_NPRC];
 LOCAL volatile INT	freq_can = -1;		/* -1 not yet asked of CPUID */
 LOCAL volatile INT	temp_can = -1;		/* 0 none, 1 the core's sensor, 2 the package's */
+LOCAL INT		temp_tj = TJMAX_DEFAULT;	/* TjMax, C */
 
 LOCAL BOOL on_vm( void )
 {
@@ -379,6 +384,112 @@ EXPORT ER knl_cpu_x64_rated( UW *p_base, UW *p_most )
 	return E_OK;
 }
 
+/* ---------------------------------------------------------------- the registers of power there are */
+
+/*
+ * Which registers of power and of the limits' reasons the processor has
+ * (syslib.h X64M_*). CPUID does not tell them: the family 6 model says
+ * where a model is known to have a register and where it is known not
+ * to, and each one taken is read once with knl_rdmsr_safe before it is
+ * used, so that a model the tables do not know, or one whose firmware
+ * hides a register, is answered with none instead of a fault later.
+ *
+ *   RAPL's package registers (0x606 units, 0x610 limits, 0x611 energy):
+ *	Sandy Bridge and later; looked at on any other model
+ *   the cores' limit reasons: 0x690 on Haswell and Broadwell, 0x64f on
+ *	Skylake to Comet Lake, none on Sandy Bridge and Ivy Bridge; 0x64f
+ *	then 0x690 looked at on the others
+ *   the GT's limit reasons (0x6b0): none on Sandy Bridge, Ivy Bridge and
+ *	the server parts without a GT; looked at on the others
+ *   MSR_PKG_POWER_INFO (0x614) and MSR_PP0_CURRENT_CONFIG (0x601):
+ *	looked at where RAPL is there
+ *   the Atom cores: no RAPL on Bonnell, Saltwell and Airmont (Braswell,
+ *	Cherry Trail), and none taken on Silvermont, whose units are of
+ *	another form; RAPL as on the others on Goldmont, Goldmont Plus and
+ *	Tremont; none of the limits' reasons on any of them
+ */
+LOCAL BOOL	msr_decided = FALSE;
+LOCAL UW	msr_at[X64M_N];
+
+LOCAL BOOL model_in( UW m, CONST UB *t, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( t[i] == m ) return TRUE;
+	}
+	return FALSE;
+}
+
+/* The address when the register answers a read, 0 when it is refused */
+LOCAL UW msr_there( UW msr )
+{
+	UD	v;
+
+	return ( msr != 0 && knl_rdmsr_safe(msr, &v) == E_OK ) ? msr : 0;
+}
+
+LOCAL void msr_decide( void )
+{
+	static CONST UB	rapl[] = { 0x2a, 0x2d, 0x3a, 0x3e, 0x3c, 0x3f, 0x45, 0x46, 0x3d, 0x47, 0x4f, 0x56,
+				   0x4e, 0x5e, 0x55, 0x8e, 0x9e, 0xa5, 0xa6 };
+	static CONST UB	snb_ivb[] = { 0x2a, 0x2d, 0x3a, 0x3e };
+	static CONST UB	hsw_bdw[] = { 0x3c, 0x3f, 0x45, 0x46, 0x3d, 0x47, 0x4f, 0x56 };
+	static CONST UB	skl_cml[] = { 0x4e, 0x5e, 0x8e, 0x9e, 0xa5, 0xa6 };
+	static CONST UB	no_gt[] = { 0x3f, 0x4f, 0x56, 0x55 };
+	static CONST UB	atom_no_rapl[] = { 0x1c, 0x26, 0x27, 0x35, 0x36, 0x37, 0x4a, 0x4c, 0x4d, 0x5a, 0x5d, 0x75 };
+	static CONST UB	atom[] = { 0x1c, 0x26, 0x27, 0x35, 0x36, 0x37, 0x4a, 0x4c, 0x4d, 0x5a, 0x5d, 0x75,
+				   0x5c, 0x5f, 0x7a, 0x86, 0x96, 0x9c };
+	static CONST UB	atom_rapl[] = { 0x5c, 0x5f, 0x7a, 0x86, 0x96, 0x9c };
+	UW		a, b, c, d, model;
+	INT		i;
+
+	msr_decided = TRUE;
+	for ( i = 0; i < X64M_N; i++ ) msr_at[i] = 0;
+	cpuid(0, 0, &a, &b, &c, &d);
+	if ( on_vm() || b != 0x756e6547U || d != 0x49656e69U || c != 0x6c65746eU ) {	/* "GenuineIntel" */
+		return;
+	}
+	cpuid(1, 0, &a, &b, &c, &d);
+	if ( ( ( a >> 8 ) & 0xf ) != 6 ) {
+		return;
+	}
+	model = ( ( a >> 4 ) & 0xf ) | ( ( a >> 12 ) & 0xf0 );
+	if ( model_in(model, atom_no_rapl, (INT)sizeof(atom_no_rapl)) ) {
+		;
+	} else if ( model_in(model, rapl, (INT)sizeof(rapl)) || model_in(model, atom_rapl, (INT)sizeof(atom_rapl))
+		 || ( msr_there(0x606) && msr_there(0x610) && msr_there(0x611) ) ) {
+		if ( msr_there(0x610) && msr_there(0x611) ) msr_at[X64M_RAPL] = msr_there(0x606);
+	}
+	if ( msr_at[X64M_RAPL] != 0 ) {
+		msr_at[X64M_PKG_INFO] = msr_there(0x614);
+		msr_at[X64M_PP0_CUR] = msr_there(0x601);
+	}
+	if ( model_in(model, snb_ivb, (INT)sizeof(snb_ivb)) || model_in(model, atom, (INT)sizeof(atom)) ) {
+		;
+	} else if ( model_in(model, hsw_bdw, (INT)sizeof(hsw_bdw)) ) {
+		msr_at[X64M_PLR_CORE] = msr_there(0x690);
+	} else if ( model_in(model, skl_cml, (INT)sizeof(skl_cml)) ) {
+		msr_at[X64M_PLR_CORE] = msr_there(0x64f);
+	} else {
+		msr_at[X64M_PLR_CORE] = msr_there(0x64f);
+		if ( msr_at[X64M_PLR_CORE] == 0 ) msr_at[X64M_PLR_CORE] = msr_there(0x690);
+	}
+	if ( !model_in(model, snb_ivb, (INT)sizeof(snb_ivb)) && !model_in(model, no_gt, (INT)sizeof(no_gt))
+	  && !model_in(model, atom, (INT)sizeof(atom)) ) {
+		msr_at[X64M_PLR_GFX] = msr_there(0x6b0);
+	}
+	tm_printf((UB *)"cpu: model %02x: RAPL %x, power info %x, the cores' limit reasons %x, the GT's %x, "
+		  "PP0 current %x (0: none)\n", model, msr_at[X64M_RAPL], msr_at[X64M_PKG_INFO], msr_at[X64M_PLR_CORE],
+		  msr_at[X64M_PLR_GFX], msr_at[X64M_PP0_CUR]);
+}
+
+EXPORT UW knl_x64_msr( INT what )
+{
+	if ( !msr_decided ) msr_decide();
+	return ( what >= 0 && what < X64M_N ) ? msr_at[what] : 0;
+}
+
 /*
  * The processor's temperature in degrees, as coretemp and the package
  * sensor tell it: TjMax (MSR_TEMPERATURE_TARGET bits 23:16, 100 when
@@ -390,9 +501,13 @@ EXPORT ER knl_cpu_x64_rated( UW *p_base, UW *p_most )
 EXPORT ER knl_cpu_x64_temp( INT *p_deg )
 {
 	UW	a, b, c, d;
-	UD	st;
-	INT	tj;
+	UD	st, v;
 
+	/*
+	 * Decided once: the package's sensor (CPUID 6 EAX bit 6) or this
+	 * core's (bit 0), each taken only when its status register answers a
+	 * read; TjMax from MSR_TEMPERATURE_TARGET where it answers, else 100
+	 */
 	if ( temp_can < 0 ) {
 		INT	can = 0;
 
@@ -400,20 +515,26 @@ EXPORT ER knl_cpu_x64_temp( INT *p_deg )
 		/* "GenuineIntel" */
 		if ( !on_vm() && a >= 6 && b == 0x756e6547U && d == 0x49656e69U && c == 0x6c65746eU ) {
 			cpuid(6, 0, &a, &b, &c, &d);
-			can = ( a & 0x40U ) ? 2 : ( a & 0x1U ) ? 1 : 0;
+			if ( ( a & 0x40U ) != 0 && knl_rdmsr_safe(MSR_PKG_THERM_STATUS, &v) == E_OK ) {
+				can = 2;
+			} else if ( ( a & 0x1U ) != 0 && knl_rdmsr_safe(MSR_THERM_STATUS, &v) == E_OK ) {
+				can = 1;
+			}
+			if ( can != 0 ) {
+				temp_tj = ( knl_rdmsr_safe(MSR_TEMPERATURE_TARGET, &v) == E_OK ) ? (INT)( ( v >> 16 ) & 0xff ) : 0;
+				if ( temp_tj == 0 ) temp_tj = TJMAX_DEFAULT;
+			}
 		}
 		temp_can = can;
 	}
 	if ( temp_can == 0 ) {
 		return E_NOSPT;
 	}
-	tj = (INT)( ( rdmsr(MSR_TEMPERATURE_TARGET) >> 16 ) & 0xff );
-	if ( tj == 0 ) tj = TJMAX_DEFAULT;
 	st = rdmsr(( temp_can == 2 ) ? MSR_PKG_THERM_STATUS : MSR_THERM_STATUS);
 	if ( ( st & 0x80000000ULL ) == 0 ) {
 		return E_NOEXS;
 	}
-	*p_deg = tj - (INT)( ( st >> 16 ) & 0x7f );
+	*p_deg = temp_tj - (INT)( ( st >> 16 ) & 0x7f );
 	return E_OK;
 }
 

@@ -46,6 +46,7 @@
 #include <ts/sysdef.h>
 #include <ts/bt.h>
 #include "../usb/usbdev.h"
+#include "../../peripheral_kernel/obj/obj.h"
 #include "btint.h"
 #include "bt_bcm.h"
 
@@ -75,7 +76,6 @@
 #define RESET_MS	100		/* after a Reset, before anything else */
 #define DOWNLOAD_MS	50		/* after Download Minidriver */
 #define LAUNCH_MS	250		/* after Launch RAM */
-#define FW_MAX		( 256 * 1024 )
 
 IMPORT ID knl_obfile_first_vol( void );
 
@@ -138,13 +138,17 @@ LOCAL BOOL next_event( BTC *c, INT tmo )
 	UW	due = knl_btx_now() + (UW)tmo;
 
 	for ( ;; ) {
-		while ( c->head != c->tail ) {
-			RINGITEM	*r = &c->ring[c->head];
-			BOOL		ev = (BOOL)( r->kind == 0 && r->len >= 2 && r->len >= r->b[1] + 2 );
+		CONST UB	*b;
+		INT		len;
+		UB		kind;
 
-			if ( ev ) knl_memcpy(c->ev, r->b, r->b[1] + 2);
-			c->head = ( c->head + 1 ) % RING_N;
-			if ( ev ) return TRUE;
+		knl_btx_ring_grow(c);
+		while ( knl_btx_ring_take(c, &kind, &b, &len) ) {
+			/* a whole event as the line brings it: its length is one byte, c->ev holds any */
+			if ( kind == RK_EVENT && len >= 2 && len >= b[1] + 2 ) {
+				knl_memcpy(c->ev, b, b[1] + 2);
+				return TRUE;
+			}
 		}
 		if ( c->gone || (W)( knl_btx_now() - due ) >= 0 ) return FALSE;
 		(void)tk_wai_sem(c->sem, 1, 20);
@@ -158,10 +162,14 @@ LOCAL BOOL next_event( BTC *c, INT tmo )
  */
 LOCAL BOOL ask( BTC *c, UH op, CONST UB *p, INT n, CONST UB **p_ret, INT *p_len )
 {
-	UB	b[3 + 255];
+	UB	b[3 + HCI_PARAM_MAX];
 	UW	due = knl_btx_now() + CMD_TMO;
 	ER	er;
 
+	if ( n < 0 || n > HCI_PARAM_MAX ) {
+		tm_printf((UB *)"bt: bcm: command %04x of %d bytes of parameters refused\n", op, n);
+		return FALSE;
+	}
 	b[0] = (UB)op;
 	b[1] = (UB)( op >> 8 );
 	b[2] = (UB)n;
@@ -265,10 +273,9 @@ LOCAL BOOL raise( BTC *c, CONST BTBCFG *cfg, INT step )
 LOCAL UB *fw_read( CONST char *uuid, INT *p_n )
 {
 	TS_UUID	u;
-	UB	*b;
-	SZ	asz = 0;
+	UB	*b = NULL;
 	ID	key;
-	INT	waited = 0;
+	INT	len, waited = 0;
 
 	if ( ts_str_to_uuid(uuid, &u) < E_OK ) return NULL;
 	for ( ;; ) {
@@ -279,13 +286,14 @@ LOCAL UB *fw_read( CONST char *uuid, INT *p_n )
 		waited += 500;
 	}
 	if ( key <= 0 ) return NULL;
-	b = (UB *)Kmalloc(FW_MAX);
-	if ( b != NULL && ob_rea_rec(key, 1, 0, b, FW_MAX, &asz) < E_OK ) {
-		Kfree(b);
-		b = NULL;
-	}
+	/* the record whole, however long the file is */
+	len = knl_ob_rea_all(key, 1, 0, &b, NULL);
 	(void)ob_cls_obj(key);
-	*p_n = (INT)asz;
+	if ( len < 0 ) {
+		tm_printf((UB *)"bt: a firmware's record not read (%d)\n", len);
+		return NULL;
+	}
+	*p_n = len;
 	return b;
 }
 

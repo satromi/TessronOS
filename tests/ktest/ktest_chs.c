@@ -400,13 +400,12 @@ LOCAL void test_type_box( void )
 	wid = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "chs");
 	KT_ASSERT(wid > 0);
 	if ( wid <= 0 ) return;
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(1);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) {
 		(void)wm_close(wid);
 		return;
 	}
-	knl_memset(d, 0, sizeof(*d));
 	d->num = 1;
 	d->kind = WM_PNL_PLAIN;
 	d->r.left = 0;
@@ -436,7 +435,7 @@ LOCAL void test_type_box( void )
 		KT_ASSERT(same((char *)buf, "&T213021;"));
 		KT_ASSERT_ER(wm_panel_close(pid), E_OK);
 	}
-	Kfree(d);
+	wm_panel_free(d);
 	(void)wm_close(wid);
 }
 

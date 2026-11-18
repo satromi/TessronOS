@@ -122,7 +122,7 @@ LOCAL void test_link( void )
 
 	if ( !have_objs ) KT_SKIP("no objects");
 
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	if ( v == NULL ) return;
 	for ( i = 0; i < (INT)sizeof(T_VOBJ); i++ ) ((UB *)v)[i] = 0;
@@ -183,7 +183,7 @@ LOCAL void test_missing( void )
 
 	KT_ASSERT_ER(ts_gen_uuid(&ghost), E_OK);
 
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	if ( v == NULL ) return;
 	for ( i = 0; i < (INT)sizeof(T_VOBJ); i++ ) ((UB *)v)[i] = 0;
@@ -252,7 +252,7 @@ LOCAL void test_remount( void )
 
 	if ( !have_objs ) KT_SKIP("no objects");
 
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	if ( v == NULL ) return;
 	for ( i = 0; i < (INT)sizeof(T_VOBJ); i++ ) ((UB *)v)[i] = 0;
@@ -305,10 +305,9 @@ LOCAL void test_register( void )
 	T_VOBJ		*v;
 	TS_UUID		id1, id2;
 	ID		vid1 = 0, vid2 = 0, got = 0;
-	INT		i;
 
-	v   = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
-	out = (T_OMVOBJ *)Kmalloc(sizeof(T_OMVOBJ));
+	v   = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
+	out = (T_OMVOBJ *)Kcalloc(1, sizeof(T_OMVOBJ));
 	KT_ASSERT(v != NULL && out != NULL);
 	if ( v == NULL || out == NULL ) {
 		if ( v != NULL ) Kfree(v);
@@ -319,7 +318,6 @@ LOCAL void test_register( void )
 	KT_ASSERT_ER(om_ini(), E_OK);		/* twice is no error */
 	KT_ASSERT_EQ(om_cnt_vob(), 0);
 
-	for ( i = 0; i < (INT)sizeof(T_VOBJ); i++ ) ((UB *)v)[i] = 0;
 	KT_ASSERT_ER(ts_gen_uuid(&id1), E_OK);
 	KT_ASSERT_ER(ts_gen_uuid(&id2), E_OK);
 
@@ -329,6 +327,7 @@ LOCAL void test_register( void )
 	v->vobjid = id1;
 	v->target = target;
 	v->chsz   = 14;
+	KT_ASSERT_ER(tad_vobj_set(v, TAD_W_NAME, (CONST UB *)"登録の名前", -1), E_OK);
 	KT_ASSERT_ER(om_reg_vob(v, &reg, &vid1), E_OK);
 	KT_ASSERT_EQ(om_cnt_vob(), 1);
 
@@ -346,6 +345,9 @@ LOCAL void test_register( void )
 	KT_ASSERT_EQ(out->reg.right, 110);
 	KT_ASSERT_EQ(out->reg.wid, 3);
 	KT_ASSERT_EQ(out->vobj.chsz, 14);
+	/* the words its own copy: the caller's and the register's apart */
+	KT_ASSERT(out->vobj.vname != NULL && out->vobj.vname != v->vname);
+	KT_ASSERT_EQ(out->vobj.vname_len, v->vname_len);
 	KT_ASSERT_EQ(ts_uuid_cmp(&out->target, &target), 0);
 
 	/* it moved */
@@ -365,6 +367,8 @@ LOCAL void test_register( void )
 	KT_ASSERT_ER(om_fin(), E_OK);
 	KT_ASSERT_ER(om_reg_vob(v, &reg, &vid1), E_OBJ);	/* it is gone */
 
+	tad_vobj_clear(&out->vobj);
+	tad_vobj_clear(v);
 	Kfree(out);
 	Kfree(v);
 }
@@ -420,7 +424,7 @@ LOCAL void test_box_add( void )
 	KT_ASSERT_ER(om_obj_link_add(&box, &b), E_OK);
 	KT_ASSERT_ER(om_obj_link_add(&box, &a), E_OK);	/* linked already: left */
 
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	KT_ASSERT_ER(om_rea_doc(&box, 0, NULL, &doc), E_OK);
 	if ( v == NULL || doc == NULL ) {
@@ -466,6 +470,127 @@ LOCAL void test_box_add( void )
 	(void)fn_set_system(was);
 }
 
+LOCAL BOOL js_same( CONST UB *a, SZ an, CONST char *b )
+{
+	SZ	i;
+
+	for ( i = 0; i < an && b[i] != 0 && a[i] == (UB)b[i]; i++ ) ;
+	return (BOOL)( i == an && b[i] == 0 );
+}
+
+/*
+ * A JSON string written and read back (om_json_quote, om_json_unquote):
+ * the quote, the backslash and every control letter escaped, the short
+ * forms where JSON has them; the size asked for first and nothing put
+ * when there is too little room; read back as it was, a surrogate pair
+ * made one letter of UTF-8, \u0000 and a lone surrogate U+FFFD.
+ */
+LOCAL void test_json_name( void )
+{
+	static CONST char	s[] = "a\"b\\c\x01\x1f\b\f\n\r\t/日本";
+	static CONST char	want[] = "\"a\\\"b\\\\c\\u0001\\u001f\\b\\f\\n\\r\\t/日本\"";
+	static CONST char	pair[] = "\"x\\ud83d\\ude00\\u0000\\ud800y\\/\"";
+	UB	out[96], *q, *u;
+	SZ	n, qn, un;
+
+	n = om_json_quote(NULL, 0, (CONST UB *)s, -1);
+	KT_ASSERT_EQ((INT)n, (INT)( sizeof(want) - 1 ));
+	out[0] = 'Z';
+	KT_ASSERT_EQ((INT)om_json_quote(out, n - 1, (CONST UB *)s, -1), (INT)n);
+	KT_ASSERT_EQ(out[0], 'Z');				/* too little room: nothing put */
+	KT_ASSERT_EQ((INT)om_json_quote(out, sizeof(out), (CONST UB *)s, -1), (INT)n);
+	KT_ASSERT(js_same(out, n, want) && out[n] == 0);
+	q = om_json_quote_dup((CONST UB *)s, -1, &qn);
+	KT_ASSERT(q != NULL && qn == n);
+	if ( q != NULL ) {
+		u = om_json_unquote(q, 0, qn, &un);
+		KT_ASSERT(u != NULL);
+		if ( u != NULL ) {
+			KT_ASSERT(js_same(u, un, s) && u[un] == 0);
+			Kfree(u);
+		}
+		Kfree(q);
+	}
+	u = om_json_unquote((CONST UB *)pair, 0, sizeof(pair) - 1, &un);
+	KT_ASSERT(u != NULL);
+	if ( u != NULL ) {
+		KT_ASSERT(js_same(u, un, "x\xF0\x9F\x98\x80\xEF\xBF\xBD\xEF\xBF\xBDy/"));
+		Kfree(u);
+	}
+	KT_ASSERT(om_json_unquote((CONST UB *)"abc", 0, 3, &un) == NULL);	/* not a string */
+}
+
+/*
+ * An object made with a name of 100 letters of Japanese and '"' and
+ * '\' in it (om_cre_obj): no limit of its own on the length, the name
+ * read back whole; a name with a control letter is refused, since the
+ * record's attribute cannot hold it.
+ */
+LOCAL void test_cre_long( void )
+{
+	static CONST char	kana[] = "かきくけこさしすせそ";
+	UB	*nm, *got;
+	SZ	nl, gl = 0;
+	TS_UUID	u;
+	INT	i;
+
+	if ( vol <= 0 ) KT_SKIP("no volume");
+	nm = (UB *)Kmalloc(100 * 3 + 8);
+	KT_ASSERT(nm != NULL);
+	if ( nm == NULL ) return;
+	for ( i = 0; i < 300; i++ ) {
+		nm[i] = (UB)kana[( i / 3 % 10 ) * 3 + i % 3];
+	}
+	nl = 300;
+	nm[nl++] = '"';
+	nm[nl++] = 0x5C;
+	nm[nl] = 0;
+	KT_ASSERT_ER(om_cre_obj(OMDEV, nm, OM_BODY_DOC, &u), E_OK);
+	got = om_store_name_dup(&u, &gl);
+	KT_ASSERT(got != NULL);
+	if ( got != NULL ) {
+		KT_ASSERT(js_same(got, gl, (CONST char *)nm));
+		Kfree(got);
+	}
+	/*
+	 * Put in a box whose window shows 300 dots: the new closed link is
+	 * made no wider than that shows (LINK_PAD 8 from either edge), the
+	 * name itself kept whole
+	 */
+	{
+		TS_UUID		box;
+		T_DPRECT	r = { 40, 40, 340, 240 };
+		T_TAD		*doc = NULL;
+		T_VOBJ		*v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
+
+		KT_ASSERT(v != NULL);
+		KT_ASSERT_ER(om_cre_obj(OMDEV, (CONST UB *)"KT細い箱", OM_BODY_FIG, &box), E_OK);
+		KT_ASSERT_ER(om_store_set_window(&box, &r), E_OK);
+		KT_ASSERT_ER(om_obj_link_add(&box, &u), E_OK);
+		KT_ASSERT_ER(om_rea_doc(&box, 0, NULL, &doc), E_OK);
+		if ( v != NULL && doc != NULL && tad_lnk_get(doc, 0, v) >= E_OK ) {
+			tm_printf((UB *)"  a link of a name of 302 bytes: %d wide in a window of 300\n",
+				  v->right - v->left);
+			KT_ASSERT(v->right - v->left <= 300 - 16);
+			KT_ASSERT(v->right - v->left >= tad_least_w(14, TAD_D_PICT | TAD_D_NAME | TAD_D_FRAME));
+		} else {
+			KT_ASSERT(FALSE);
+		}
+		got = om_store_name_dup(&u, &gl);
+		KT_ASSERT(got != NULL && gl == nl);
+		if ( got != NULL ) Kfree(got);
+		if ( doc != NULL ) tad_free(doc);
+		if ( v != NULL ) {
+			tad_vobj_clear(v);
+			Kfree(v);
+		}
+		(void)om_store_delete(&box);
+	}
+	(void)om_store_delete(&u);
+	KT_ASSERT_ER(om_cre_obj(OMDEV, (CONST UB *)"KT\x01", OM_BODY_DOC, &u), E_PAR);
+	Kfree(nm);
+}
+
 /* leave the volume where the host tools can read it */
 LOCAL void test_leave( void )
 {
@@ -485,5 +610,7 @@ EXPORT void ktest_om( void )
 	KT_RUN(test_remount);
 	KT_RUN(test_box_add);
 	KT_RUN(test_register);
+	KT_RUN(test_json_name);
+	KT_RUN(test_cre_long);
 	KT_RUN(test_leave);
 }

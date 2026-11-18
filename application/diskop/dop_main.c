@@ -43,6 +43,7 @@
 #include <ts/uuid.h>
 #include <ts/ob.h>
 #include <ts/dtreq.h>
+#include "../dtask.h"
 
 /* The panels of the data box */
 #define PN_CONNECT	1
@@ -64,8 +65,8 @@
 
 #define PW_CONNECT	480		/* the panels' sizes, for the middle of the screen */
 #define PH_CONNECT	230
-#define PW_STATUS	360
-#define PH_STATUS	230
+#define PW_STATUS	300
+#define PH_STATUS	206
 #define PW_CREATE	560
 #define PH_CREATE	302
 #define PW_GROW		480
@@ -78,9 +79,15 @@
 #define DK_MIN_MB	8		/* the smallest partition made */
 
 static UI	g_base;			/* the channel, and the data box, the panels are worked through */
-static ID	g_reply = 0;		/* where the desktop answers */
-static TS_UUID	g_reply_u;
-static UINT	g_seq = 0;
+static DTASK	g_dq;			/* the words of the requests and the answers (dtask.h) */
+/*
+ * The texts of the last two answers, each in memory of its own to be
+ * parted into its fields: what one answer said stays while the next is
+ * asked (拡張 says the disk's name after it asks to grow it)
+ */
+static char	*g_text[2];
+static INT	g_ti = 0;
+#define ANS_TEXT	( ( g_text[g_ti] != NULL ) ? g_text[g_ti] : (char *)"" )
 static TS_UUID	g_win;			/* the window up now, for the desktop's panels to give the keys back to */
 
 static void note( CONST char *s )
@@ -95,38 +102,17 @@ static void note( CONST char *s )
 
 static ER ask( T_DTREQ *rq, T_DTANS *an )
 {
-	TS_UUID	d;
-	SZ	asz = 0;
-	ID	k;
 	ER	er;
 
-	if ( g_reply <= 0 ) {
-		T_OBCRE	c;
-
-		memset(&c, 0, sizeof(c));
-		c.type = OB_T_CHANNEL;
-		if ( ob_cre_obj(&c, &g_reply_u) < E_OK ) return E_NOMEM;
-		g_reply = ob_opn_obj(&g_reply_u, OB_OP_READ);
-		if ( g_reply <= 0 ) return E_OBJ;
-	}
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
 	rq->req = DT_RQ_DISK;
-	rq->seq = ++g_seq;
-	rq->reply = g_reply_u;
-	rq->win = g_win;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	if ( k <= 0 ) return E_NOEXS;
-	er = ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz);
-	(void)ob_cls_obj(k);
-	if ( er < E_OK ) return er;
+	memset(an, 0, sizeof(*an));
 	/* the answer waited for: the person may be typing the administrator's password */
-	for ( ;; ) {
-		memset(an, 0, sizeof(*an));
-		if ( ob_rea_tmo(g_reply, 0, 0, an, sizeof(*an), &asz, 10 * 60 * 1000) < E_OK ) return E_TMOUT;
-		if ( asz == (SZ)sizeof(*an) && an->seq == rq->seq ) break;
-	}
-	an->text[DT_TEXT_MAX - 1] = 0;
-	return an->er;
+	er = dq_ask(&g_dq, rq, an, &g_win, 10 * 60 * 1000);
+	g_ti ^= 1;
+	free(g_text[g_ti]);
+	g_text[g_ti] = dq_ans_dup(&g_dq, DT_TAIL_TEXT);
+	if ( g_text[g_ti] == NULL && er >= E_OK ) er = E_NOMEM;
+	return er;
 }
 
 static void req_init( T_DTREQ *rq, INT what, CONST TS_UUID *target )
@@ -234,7 +220,7 @@ static void said( CONST char *a, CONST char *name, CONST char *b )
 /* ---------------------------------------------------------------- the rows of a list */
 
 static char	*g_rows[ROWS_MAX];
-static char	g_keys[ROWS_MAX][DT_TEXT_MAX];	/* what goes before the row in each answer */
+static char	*g_keys[ROWS_MAX];		/* what goes before the row in each answer, as long as it is */
 static UINT	g_flags[ROWS_MAX];
 static INT	g_nrows = 0;
 
@@ -252,8 +238,9 @@ static INT rows_get( INT what, CONST TS_UUID *target, INT nkey )
 		rq.grab_x = i;
 		if ( ask(&rq, &an) < E_OK ) break;
 		n = (INT)an.how;
-		strncpy(g_keys[i], (char *)an.text, DT_TEXT_MAX - 1);
-		g_keys[i][DT_TEXT_MAX - 1] = 0;
+		free(g_keys[i]);
+		g_keys[i] = strdup(ANS_TEXT);
+		if ( g_keys[i] == NULL ) break;
 		/* the fields before the row kept as they are, the row after them */
 		p = g_keys[i];
 		for ( k = 0; k < nkey; k++ ) {
@@ -304,12 +291,12 @@ static void do_connect( CONST TS_UUID *target )
 	snprintf(b, sizeof(b), "connect %s", g_keys[at]);
 	note(b);
 	req_init(&rq, DT_DISK_ATTACH, NULL);
-	strncpy((char *)rq.name, g_keys[at], sizeof(rq.name) - 1);
+	(void)dq_part(&g_dq, DT_TAIL_NAME, (CONST UB *)g_keys[at], -1);
 	er = ask(&rq, &an);
 	snprintf(b, sizeof(b), "attach answered %d", (INT)er);
 	note(b);
 	if ( er >= E_OK ) {
-		said("ディスク「", (char *)an.text, "」を接続しました");
+		said("ディスク「", ANS_TEXT, "」を接続しました");
 	} else if ( no_right(er, "ディスクを接続") ) {
 		/* said */
 	} else if ( er == E_OBJ ) {
@@ -337,7 +324,7 @@ static void do_detach( CONST TS_UUID *target )
 	snprintf(b, sizeof(b), "detach answered %d %u", (INT)er, an.how);
 	note(b);
 	if ( er >= E_OK ) {
-		said("ディスク「", (char *)an.text, "」を切り離しました。取り出せます");
+		said("ディスク「", ANS_TEXT, "」を切り離しました。取り出せます");
 	} else if ( no_right(er, "ディスクの切り離しを") ) {
 		/* said */
 	} else if ( er == E_NOEXS ) {
@@ -345,7 +332,7 @@ static void do_detach( CONST TS_UUID *target )
 	} else if ( er == E_RONLY ) {
 		tell("システムのディスクは切り離せません", NULL);
 	} else if ( er == E_BUSY ) {
-		snprintf(l1, sizeof(l1), "ディスク「%s」%s", (char *)an.text,
+		snprintf(l1, sizeof(l1), "ディスク「%s」%s", ANS_TEXT,
 			 ( an.how == DT_HOW_DISK_WIN ) ? "の実身が開いています。"
 			 : ( an.how == DT_HOW_DISK_CHECK ) ? "はディスク修復で検査中です。"
 			 : "の実身を使っているプログラムがあります。");
@@ -385,7 +372,7 @@ static void do_status( CONST TS_UUID *target )
 		tell("その実身のディスクは接続されていません", NULL);
 		return;
 	}
-	p = (char *)an.text;
+	p = ANS_TEXT;
 	name = field(&p);
 	total = strtoull(field(&p), NULL, 10);
 	used = strtoull(field(&p), NULL, 10);
@@ -462,14 +449,25 @@ static void do_create( void )
 		return;
 	}
 	req_init(&rq, DT_DISK_MAKE, NULL);
-	strncpy((char *)rq.name, disk, sizeof(rq.name) - 1);
-	snprintf((char *)rq.text, sizeof(rq.text), "%llu\t%s", first, label);
+	{
+		size_t	max = strlen(label) + 32;
+		char	*t = (char *)malloc(max);
+
+		if ( t == NULL ) {
+			tell("メモリが足りないため、区画を作れませんでした", NULL);
+			return;
+		}
+		(void)dq_part(&g_dq, DT_TAIL_NAME, (CONST UB *)disk, -1);
+		snprintf(t, max, "%llu\t%s", first, label);
+		(void)dq_part(&g_dq, DT_TAIL_TEXT, (CONST UB *)t, -1);
+		free(t);
+	}
 	rq.grab_x = mb;
 	er = ask(&rq, &an);
 	snprintf(b, sizeof(b), "make answered %d", (INT)er);
 	note(b);
 	if ( er >= E_OK ) {
-		said("区画「", (char *)an.text, "」を作り、接続しました");
+		said("区画「", ANS_TEXT, "」を作り、接続しました");
 	} else if ( no_right(er, "区画を作成") ) {
 		/* said */
 	} else if ( an.how == DT_HOW_DISK_MADE ) {
@@ -506,7 +504,7 @@ static void do_grow( CONST TS_UUID *target )
 		tell("このディスクは広げられません", NULL);
 		return;
 	}
-	p = (char *)an.text;
+	p = ANS_TEXT;
 	name = field(&p);
 	path = field(&p);
 	cur = strtol(field(&p), NULL, 10);
@@ -541,7 +539,7 @@ static void do_grow( CONST TS_UUID *target )
 	snprintf(b, sizeof(b), "grow answered %d", (INT)er);
 	note(b);
 	if ( er >= E_OK ) {
-		p = (char *)an.text;
+		p = ANS_TEXT;
 		from = field(&p);
 		to = field(&p);
 		snprintf(b, sizeof(b), "ディスク「%s」を%sMBから%sMBに広げました", name, from, to);
@@ -609,10 +607,7 @@ int main( void )
 	} else if ( strcmp((char *)a.code, "disk.grow") == 0 ) {
 		do_grow(t);
 	}
-	if ( g_reply > 0 ) {
-		(void)ob_cls_obj(g_reply);
-		(void)ob_del_obj(&g_reply_u);
-	}
+	dq_free(&g_dq);
 	(void)ob_cls_obj(g_base.port);
 	(void)ob_del_obj(&g_base.ch);
 	note("done");

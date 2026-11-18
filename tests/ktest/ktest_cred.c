@@ -444,16 +444,19 @@ LOCAL void test_media( void )
 		if ( ob_ref_obj(&ids[i], &r) < E_OK || r.sub != OB_S_DISK ) continue;
 		ops = knl_ob_permit_on(&ids[i], &knl_ob_crd_person);
 #if defined(X64)
-		if ( r.name[0] == 'n' && r.name[1] == 'v' ) {
+		if ( kt_name_starts(&ids[i], "nv") ) {
 #else
-		if ( r.name[0] == 'v' || ( r.name[0] == 's' && r.name[1] == 'd' ) ) {
+		if ( kt_name_starts(&ids[i], "v") || kt_name_starts(&ids[i], "sd") ) {
 #endif
 			/* the disk the machine runs on: the administrators' alone */
 			KT_ASSERT_EQ(ops & ( OB_OP_READ | OB_OP_WRITE ), 0);
 			sys++;
-		} else if ( r.name[0] == 'u' && r.name[1] == 'd' ) {
-			tm_printf((UB *)"  %s: %s\n", r.name,
+		} else if ( kt_name_starts(&ids[i], "ud") ) {
+			UB	*nm = kt_name(&ids[i]);
+
+			tm_printf((UB *)"  %s: %s\n", ( nm != NULL ) ? nm : (UB *)"",
 				  ( ops & OB_OP_WRITE ) ? "the person's" : "held by the system");
+			if ( nm != NULL ) Kfree(nm);
 			usb++;
 		}
 	}

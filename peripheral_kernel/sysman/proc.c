@@ -83,6 +83,7 @@ typedef struct {
 	TS_UUID	uuid;			/* the process as a real object (design 18.8) */
 	TS_UUID	prog;			/* the program object it was started from, or 0 */
 	UB	file[TS_FLT_FILE];	/* the file it was started from, its last part */
+	UB	role[TS_PRC_ROLE];	/* its role among its program's processes (knl_prc_set_role), "" none */
 	SZ	argsz;			/* bytes of the start-up argument, 0 for none */
 	BOOL	sys;			/* the system needs it (TS_PRC_SYSTEM) */
 	BOOL	withpar;		/* ends when its parent does (TS_PRC_WITHPARENT) */
@@ -1143,7 +1144,8 @@ LOCAL ID pid_new( void )
 typedef struct {
 	CONST char	*path;
 	ID		vol;
-	CONST TS_UUID	*uuid;
+	CONST TS_UUID	*uuid;		/* the program's UUID, as it is known */
+	CONST TS_UUID	*real;		/* its UUID on vol (NULL: the same) */
 	INT		recno;
 } PRCIMG;
 
@@ -1159,6 +1161,7 @@ EXPORT ID ts_cre_prc( CONST char *path, CONST T_CPRC *pk_cprc )
 	img.path = path;
 	img.vol = 0;
 	img.uuid = NULL;
+	img.real = NULL;
 	img.recno = 0;
 	return cre_prc(&img, pk_cprc, NULL);
 }
@@ -1188,7 +1191,7 @@ LOCAL ER load_image( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, T_SPACE *sp, UD *
 		return er;
 	}
 	er = ( img->path != NULL ) ? knl_elf_load(img->path, sp, p_entry, p_brk)
-				   : knl_elf_load_rec(img->vol, img->uuid, img->recno, sp,
+				   : knl_elf_load_rec(img->vol, ( img->real != NULL ) ? img->real : img->uuid, img->recno, sp,
 						      p_entry, p_brk, p_shared);
 	if ( er < E_OK ) goto err;
 
@@ -1242,9 +1245,14 @@ LOCAL ID cre_prc( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, CONST T_SPAWN *sp )
 	if ( prc_mtxid <= 0 ) {
 		return E_OBJ;
 	}
-	if ( pk_cprc->arg != NULL
-	  && (UD)pk_cprc->argsz > ( ( sp != NULL ) ? (UD)TS_SPN_ARG_MAX : (UD)PAGE_SIZE ) ) {
-		return E_PAR;
+	/*
+	 * The start-up argument is copied into pages of the new space: the
+	 * pages it may take bound it, the same for every way a process is
+	 * made (TS_SPN_ARG_MAX), so that what a program is started with --
+	 * a link's 固有データ as long as it is -- is not cut by the way
+	 */
+	if ( pk_cprc->arg != NULL && (UD)pk_cprc->argsz > (UD)TS_SPN_ARG_MAX ) {
+		return E_LIMIT;
 	}
 
 	/* no process could be made: not worth reading the program for */
@@ -1463,15 +1471,26 @@ EXPORT ID ts_cre_prc_obj( ID vol, CONST TS_UUID *uuid, CONST T_CPRC *pk_cprc )
 LOCAL ID cre_prc_obj( ID vol, CONST TS_UUID *uuid, CONST T_CPRC *pk_cprc, CONST T_SPAWN *sp )
 {
 	PRCIMG	img;
+	TS_UUID	real;
 	UB	*path;
 	INT	recno;
-	ID	pid;
+	ID	pid, rv;
 	ER	er;
 
 	if ( uuid == NULL || pk_cprc == NULL ) {
 		return E_PAR;
 	}
-	recno = knl_tsfs_exec_rec(vol, uuid);
+	/*
+	 * A program of another machine's system volume that is named by the
+	 * alias of its UUID is read from that volume under its own UUID; the
+	 * process keeps the alias as the program it runs.
+	 */
+	if ( knl_obfile_real(uuid, &rv, &real) >= E_OK && ts_uuid_cmp(&real, uuid) != 0 ) {
+		vol = rv;
+	} else {
+		real = *uuid;
+	}
+	recno = knl_tsfs_exec_rec(vol, &real);
 	if ( recno < 0 ) {
 		return (ER)recno;		/* not a program */
 	}
@@ -1479,10 +1498,11 @@ LOCAL ID cre_prc_obj( ID vol, CONST TS_UUID *uuid, CONST T_CPRC *pk_cprc, CONST 
 	if ( path == NULL ) {
 		return E_NOMEM;
 	}
-	er = knl_tsfs_rec_path(vol, uuid, recno, path, FS_PATH_MAX);
+	er = knl_tsfs_rec_path(vol, &real, recno, path, FS_PATH_MAX);
 	img.path = ( er >= E_OK ) ? (CONST char *)path : NULL;
 	img.vol = vol;
 	img.uuid = uuid;
+	img.real = &real;
 	img.recno = recno;
 	if ( er < E_OK && er != E_NOSPT ) {
 		Kfree(path);
@@ -1714,6 +1734,7 @@ LOCAL void flt_note( T_PCB *p, INT code, CONST T_PRCFLT *f, T_PRCFLT *out )
 	out->exitcd = code;
 	out->prog = p->prog;
 	knl_memcpy(out->file, p->file, TS_FLT_FILE);
+	knl_memcpy(out->role, p->role, TS_PRC_ROLE);
 }
 
 LOCAL void flt_put( T_PRCFLT *f )
@@ -2316,36 +2337,46 @@ EXPORT void knl_prc_abort( UD ttbr0, INT abortcd, CONST T_PRCFLT *f )
 	}
 }
 
+/* The role's bytes, at most TS_PRC_ROLE - 1 */
+LOCAL INT role_len( CONST UB *role )
+{
+	INT	n = 0;
+
+	while ( role != NULL && n < TS_PRC_ROLE - 1 && role[n] != 0 ) {
+		n++;
+	}
+	return n;
+}
+
 /*
  * A name a person knows the program by: the name of the program object
- * it was started from, or else the file, or else its number. max is at
- * least 16.
+ * it was started from, or else the file, or else its number; its role
+ * after it in parentheses when it has one, the name cut short to leave
+ * room for it. max is at least 16.
  */
-LOCAL INT name_of( ID pid, CONST TS_UUID *prog, CONST UB *file, UB *buf, INT max )
+LOCAL INT name_of( ID pid, CONST TS_UUID *prog, CONST UB *file, CONST UB *role, UB *buf, INT max )
 {
-	T_OBREF	*r;
-	INT	n = 0;
+	UB	*nm;
+	SZ	nl = 0;
+	INT	n = 0, rl = role_len(role), room = max - 1;
 
 	if ( buf == NULL || max < 16 ) {
 		return 0;
 	}
+	if ( rl > 0 && rl + 2 + 8 <= room ) {
+		room -= rl + 2;			/* "(" role ")" after the name, which keeps 8 bytes at least */
+	} else {
+		rl = 0;
+	}
 	buf[0] = 0;
 	if ( prog != NULL && !( prog->d.hi == 0 && prog->d.lo == 0 )
-	  && ( r = (T_OBREF *)Kmalloc(sizeof(T_OBREF)) ) != NULL ) {
-		if ( ob_ref_obj(prog, r) >= E_OK ) {
-			while ( n < max - 1 && n < OB_NAME_MAX && r->name[n] != 0 ) {
-				buf[n] = r->name[n];
-				n++;
-			}
-			/* never half a character */
-			while ( n > 0 && n < OB_NAME_MAX && r->name[n] != 0 && ( r->name[n] & 0xC0 ) == 0x80 ) {
-				n--;
-			}
-		}
-		Kfree(r);
+	  && ( nm = knl_ob_name(prog, &nl, NULL) ) != NULL ) {
+		n = (INT)knl_utf8_fit(nm, nl, room);		/* never half a character */
+		knl_memcpy(buf, nm, n);
+		Kfree(nm);
 	}
 	if ( n == 0 && file != NULL ) {
-		while ( n < max - 1 && n < TS_FLT_FILE && file[n] != 0 ) {
+		while ( n < room && n < TS_FLT_FILE && file[n] != 0 ) {
 			buf[n] = file[n];
 			n++;
 		}
@@ -2353,27 +2384,113 @@ LOCAL INT name_of( ID pid, CONST TS_UUID *prog, CONST UB *file, UB *buf, INT max
 	if ( n == 0 ) {
 		n = tm_sprintf(buf, (CONST UB *)"pid %d", pid);
 	}
+	if ( rl > 0 ) {
+		buf[n++] = '(';
+		knl_memcpy(buf + n, role, rl);
+		n += rl;
+		buf[n++] = ')';
+	}
 	buf[n] = 0;
 	return n;
+}
+
+/* The same whole: the program object's name as long as it is, else the file or the number, and the role */
+EXPORT UB *knl_prc_name_dup( ID pid, SZ *p_len )
+{
+	T_PCB	*p;
+	TS_UUID	prog;
+	UB	file[TS_FLT_FILE], role[TS_PRC_ROLE], *nm = NULL, *all;
+	SZ	nl = 0;
+	INT	rl;
+
+	knl_memset(&prog, 0, sizeof(prog));
+	file[0] = 0;
+	role[0] = 0;
+	prc_lock();
+	p = pid_to_pcb(pid);
+	if ( p != NULL ) {
+		prog = p->prog;
+		knl_memcpy(file, p->file, TS_FLT_FILE);
+		knl_memcpy(role, p->role, TS_PRC_ROLE);
+	}
+	tk_unl_mtx(prc_mtxid);
+
+	if ( !( prog.d.hi == 0 && prog.d.lo == 0 ) ) {
+		nm = knl_ob_name(&prog, &nl, NULL);
+		if ( nm != NULL && nl == 0 ) {
+			Kfree(nm);
+			nm = NULL;
+		}
+	}
+	if ( nm == NULL ) {
+		/* the file, or the number, and the role: as knl_prc_name puts them, never longer than these */
+		nm = (UB *)Kmalloc(TS_FLT_FILE + TS_PRC_ROLE + 16);
+		if ( nm == NULL ) {
+			return NULL;
+		}
+		nl = name_of(pid, NULL, file, role, nm, TS_FLT_FILE + TS_PRC_ROLE + 16);
+	} else if ( ( rl = role_len(role) ) > 0 ) {
+		all = (UB *)Kmalloc(nl + rl + 3);
+		if ( all != NULL ) {
+			knl_memcpy(all, nm, nl);
+			all[nl] = '(';
+			knl_memcpy(all + nl + 1, role, rl);
+			all[nl + 1 + rl] = ')';
+			all[nl + 2 + rl] = 0;
+			Kfree(nm);
+			nm = all;
+			nl += rl + 2;
+		}
+	}
+	if ( p_len != NULL ) {
+		*p_len = nl;
+	}
+	return nm;
 }
 
 EXPORT INT knl_prc_name( ID pid, UB *buf, INT max )
 {
 	T_PCB	*p;
 	TS_UUID	prog;
-	UB	file[TS_FLT_FILE];
+	UB	file[TS_FLT_FILE], role[TS_PRC_ROLE];
 
 	knl_memset(&prog, 0, sizeof(prog));
 	file[0] = 0;
+	role[0] = 0;
 	prc_lock();
 	p = pid_to_pcb(pid);
 	if ( p != NULL ) {
 		prog = p->prog;
 		knl_memcpy(file, p->file, TS_FLT_FILE);
+		knl_memcpy(role, p->role, TS_PRC_ROLE);
 	}
 	tk_unl_mtx(prc_mtxid);
 
-	return name_of(pid, &prog, file, buf, max);
+	return name_of(pid, &prog, file, role, buf, max);
+}
+
+EXPORT ER knl_prc_set_role( ID pid, CONST UB *role, INT len )
+{
+	T_PCB	*p;
+	ER	er = E_OK;
+	INT	n;
+
+	if ( len < 0 || ( len > 0 && role == NULL ) ) {
+		return E_PAR;
+	}
+	n = ( len > 0 ) ? (INT)knl_utf8_fit(role, (SZ)len, TS_PRC_ROLE - 1) : 0;	/* never half a character */
+	prc_lock();
+	p = pid_to_pcb(pid);
+	if ( p == NULL || !p->used || p->state != PS_RUNNING ) {
+		er = E_NOEXS;
+	} else {
+		knl_memset(p->role, 0, TS_PRC_ROLE);
+		if ( n > 0 ) {
+			knl_memcpy(p->role, role, n);
+		}
+	}
+	tk_unl_mtx(prc_mtxid);
+	return er;
 }
 
 /*
@@ -2402,7 +2519,7 @@ EXPORT INT knl_prc_file_peek( ID pid, UB *buf, INT max )
 
 EXPORT INT knl_prc_flt_name( CONST T_PRCFLT *f, UB *buf, INT max )
 {
-	return ( f != NULL ) ? name_of(f->pid, &f->prog, f->file, buf, max) : 0;
+	return ( f != NULL ) ? name_of(f->pid, &f->prog, f->file, f->role, buf, max) : 0;
 }
 
 /*
@@ -3689,6 +3806,7 @@ EXPORT ID ts_spn_prc( CONST char *path, CONST T_SPAWN *sp )
 		img.path = path;
 		img.vol = 0;
 		img.uuid = NULL;
+		img.real = NULL;
 		img.recno = 0;
 		return cre_prc(&img, &cprc, sp);
 	}

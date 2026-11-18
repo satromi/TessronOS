@@ -33,6 +33,8 @@
 #include <ts/tvapp.h>
 
 /* The panels of the program's data box (SYSDEF_BOX_DOC) */
+#define DC_LOG		TA_LOG		/* a line of the log (note cuts it at a whole letter) */
+
 #define PN_TELL		2		/* what could not be done, two lines */
 
 #define DC_PAPER_W	DE_PAPER_W	/* A4, when a document names no paper */

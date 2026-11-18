@@ -346,15 +346,15 @@ LOCAL ER vol_uuid( ID vol, TS_UUID *p )
 EXPORT ER knl_obxref_move( CONST TS_UUID *hvol, CONST TS_UUID *host, CONST TS_UUID *target, INT d )
 {
 	XRTAB	*x;
-	TS_UUID	obj, tv;
+	TS_UUID	obj, tv, real;
 	ID	vol;
 	ER	er;
 
 	if ( hvol == NULL || host == NULL || target == NULL || d == 0 || xr_mtx <= 0 ) {
 		return E_PAR;
 	}
-	vol = knl_obfile_vol_of(target);
-	if ( vol <= 0 ) {
+	/* the record of the volume holds the target under the UUID it has on that volume */
+	if ( knl_obfile_real(target, &vol, &real) < E_OK || vol <= 0 ) {
 		return E_OK;			/* not attached: matched when it is */
 	}
 	if ( vol_uuid(vol, &tv) < E_OK || ts_uuid_cmp(&tv, hvol) == 0 ) {
@@ -372,7 +372,7 @@ EXPORT ER knl_obxref_move( CONST TS_UUID *hvol, CONST TS_UUID *host, CONST TS_UU
 	if ( er >= E_OK && !is_zero(&obj) ) {
 		er = rec_load(vol, &obj, x);
 		if ( er >= E_OK ) {
-			if ( !ent_add(x, hvol, host, target, d) ) {
+			if ( !ent_add(x, hvol, host, &real, d) ) {
 				er = E_LIMIT;
 			} else {
 				er = rec_store(vol, &obj, x);
@@ -427,8 +427,9 @@ EXPORT void knl_obxref_drain( void )
  */
 LOCAL ER links_of( ID hv, CONST TS_UUID *hu, ID tv, XRTAB *x )
 {
-	TS_UUID	*ids, from, own;
+	TS_UUID	*ids, from, own, rt;
 	T_RLNK	*lk;
+	ID	rv;
 	INT	got, nl, i, k;
 	BOOL	first = TRUE;
 	ER	er = E_OK;
@@ -460,9 +461,17 @@ LOCAL ER links_of( ID hv, CONST TS_UUID *hu, ID tv, XRTAB *x )
 				continue;
 			}
 			for ( k = 0; k < nl; k++ ) {
+				/*
+				 * an alias is the object of another machine's volume under
+				 * the UUID it has there; any other UUID is looked for on tv
+				 * as it is, tv being opened only for its check as well
+				 */
+				if ( knl_obfile_real(&lk[k].target, &rv, &rt) < E_OK || rv != tv ) {
+					rt = lk[k].target;
+				}
 				if ( ( lk[k].flags & TSFS_LNK_EXTERNAL ) != 0
-				  && knl_tsfs_exists(tv, &lk[k].target) >= E_OK
-				  && !ent_add(x, hu, &ids[i], &lk[k].target, 1) ) {
+				  && knl_tsfs_exists(tv, &rt) >= E_OK
+				  && !ent_add(x, hu, &ids[i], &rt, 1) ) {
 					er = E_LIMIT;
 				}
 			}

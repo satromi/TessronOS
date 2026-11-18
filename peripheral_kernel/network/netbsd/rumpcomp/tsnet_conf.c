@@ -259,7 +259,9 @@ tsnet_left(uint32_t lifetime, time_t expire)
 
 /*
  * The IPv6 addresses of the interface, up to max of them into list;
- * how many there are, or -1 for no such interface.
+ * how many there are, or -1 for no such interface. All of them are
+ * counted, so an answer larger than max tells the caller to ask again
+ * with room for that many (list may be NULL with max 0 to count only).
  */
 int
 rump_tsnet_addrs6(const char *ifname, struct tsnet_a6 *list, int max)
@@ -280,8 +282,10 @@ rump_tsnet_addrs6(const char *ifname, struct tsnet_a6 *list, int max)
 	IFADDR_READER_FOREACH(ifa, ifp) {
 		if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET6)
 			continue;
-		if (n >= max)
-			break;
+		if (n >= max) {
+			n++;
+			continue;
+		}
 		ia = (struct in6_ifaddr *)ifa;
 		a = ia->ia_addr.sin6_addr;
 		in6_clearscope(&a);

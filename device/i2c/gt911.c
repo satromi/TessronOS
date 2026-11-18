@@ -71,7 +71,7 @@ IMPORT void	knl_usb_unlock( void );
 IMPORT void	knl_obinput_sync( void ) __attribute__((weak));
 IMPORT ER	ts_disp_ref( T_DISPSPEC *spec ) __attribute__((weak));
 
-#define GT_MAX		2
+#define GT_FIRST	2		/* controllers the table starts with; it doubles when full */
 #define GT_CONTACTS	10		/* the most the family reports */
 #define GT_CONTACT_SIZE	8
 #define GT_RANGE_MAX	4096		/* a range larger than this is not the configuration's */
@@ -94,10 +94,44 @@ typedef struct {
 	INT		xr, yr;		/* the range across the screen and down it */
 	ID		sem;
 	INT		missed;
+	INT		no;		/* its number, the interrupt's word for it */
 	UB		name[16];
 } GT911;
 
-LOCAL GT911	gt[GT_MAX];
+/*
+ * The controllers, as many as are attached: the table holds a pointer to
+ * each, taken once and kept. The interrupt reads the table without a
+ * lock, so a table grown is put in place after its entries, and the one
+ * before is not given back.
+ */
+LOCAL GT911	**gt = NULL;
+LOCAL INT	gt_n = 0, gt_cap = 0;
+
+/* A new controller's entry at the end of the table: NULL when there is no room */
+LOCAL GT911 *gt_new( void )
+{
+	GT911	*g, **t;
+	INT	k;
+
+	if ( gt_n == gt_cap ) {
+		INT	cap = ( gt_cap > 0 ) ? gt_cap * 2 : GT_FIRST;
+
+		t = (GT911 **)Kmalloc(sizeof(GT911 *) * (SZ)cap);
+		if ( t == NULL ) return NULL;
+		for ( k = 0; k < gt_n; k++ ) t[k] = gt[k];
+		DeviceBarrier();
+		gt = t;
+		gt_cap = cap;
+	}
+	g = (GT911 *)Kmalloc(sizeof(GT911));
+	if ( g == NULL ) return NULL;
+	knl_memset(g, 0, sizeof(*g));
+	g->no = gt_n;
+	gt[gt_n] = g;
+	DeviceBarrier();
+	gt_n++;
+	return g;
+}
 
 /* n bytes of the registers from reg */
 LOCAL ER reg_read( GT911 *g, UH addr, UH reg, UB *buf, INT n )
@@ -245,14 +279,14 @@ LOCAL INT read_frame( GT911 *g, BOOL told )
 
 LOCAL BOOL arm( GT911 *g )
 {
-	return ( g->c.irq_arm != NULL && g->c.irq_arm(g->c.irq_ctx, g->i.trig, (INT)( g - gt )) >= E_OK );
+	return ( g->c.irq_arm != NULL && g->c.irq_arm(g->c.irq_ctx, g->i.trig, g->no) >= E_OK );
 }
 
 EXPORT void knl_gt911_irq( INT gd )
 {
-	if ( gd >= 0 && gd < GT_MAX && gt[gd].used && gt[gd].sem > 0 ) {
-		gt[gd].i.ints++;
-		(void)tk_sig_sem(gt[gd].sem, 1);
+	if ( gd >= 0 && gd < gt_n && gt[gd]->used && gt[gd]->sem > 0 ) {
+		gt[gd]->i.ints++;
+		(void)tk_sig_sem(gt[gd]->sem, 1);
 	}
 }
 
@@ -288,15 +322,18 @@ EXPORT INT knl_gt911_attach( CONST T_GT911CONF *c )
 	ID	t;
 	INT	k;
 
-	for ( k = 0; k < GT_MAX; k++ ) {
-		if ( !gt[k].used && gt[k].sem == 0 ) {
-			g = &gt[k];
+	if ( c == NULL || c->bus == NULL ) return E_PAR;
+	for ( k = 0; k < gt_n; k++ ) {
+		if ( !gt[k]->used && gt[k]->sem == 0 ) {
+			g = gt[k];
 			break;
 		}
 	}
-	if ( g == NULL ) return E_LIMIT;
-	if ( c == NULL || c->bus == NULL ) return E_PAR;
+	if ( g == NULL ) g = gt_new();
+	if ( g == NULL ) return E_NOMEM;
+	k = g->no;
 	knl_memset(g, 0, sizeof(*g));
+	g->no = k;
 	g->c = *c;
 	if ( g->c.period <= 0 ) g->c.period = GT_PERIOD_MS;
 	for ( k = 0; k < 15 && c->name != NULL && c->name[k] != 0; k++ ) g->name[k] = c->name[k];
@@ -346,12 +383,12 @@ EXPORT INT knl_gt911_attach( CONST T_GT911CONF *c )
 		  ( g->i.trig == GT911_TRIG_RISING ) ? "rising" : ( g->i.trig == GT911_TRIG_FALLING ) ? "falling"
 		  : ( g->i.trig == GT911_TRIG_LOW ) ? "low" : "high",
 		  g->i.polled ? "read every" : "interrupt, else read after", g->i.polled ? g->c.period : GT_IDLE_MS, " ms");
-	return (INT)( g - gt );
+	return g->no;
 }
 
 EXPORT ER knl_gt911_info( INT gd, T_GT911INFO *info )
 {
-	if ( gd < 0 || gd >= GT_MAX || !gt[gd].used ) return E_PAR;
-	*info = gt[gd].i;
+	if ( gd < 0 || gd >= gt_n || !gt[gd]->used ) return E_PAR;
+	*info = gt[gd]->i;
 	return E_OK;
 }

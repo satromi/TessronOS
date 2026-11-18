@@ -1413,7 +1413,13 @@ EXPORT int rumpuser_getrandom( void *buf, UD buflen, int flags, UD *retp )
 	return 0;
 }
 
-/* The rump kernel's console: whole lines to T-Monitor's */
+/*
+ * The rump kernel's console: whole lines to T-Monitor's. The characters
+ * are gathered under a spin lock, where no memory can be had, so a line
+ * longer than the gathering place goes out in parts as the place fills,
+ * the line's end only after its last part: nothing of it is left out
+ * and no line break is put in it.
+ */
 LOCAL T_SPLOCK	con_lock;
 LOCAL char	con_line[160];
 LOCAL INT	con_len = 0;
@@ -1423,6 +1429,7 @@ EXPORT void rumpuser_putchar( int c )
 	char	out[sizeof(con_line) + 1];
 	UINT	imask;
 	INT	n = 0;
+	BOOL	end = FALSE;
 
 	ISpinLock(&con_lock, &imask);
 	if ( c != '\n' && c != '\r' ) {
@@ -1434,17 +1441,32 @@ EXPORT void rumpuser_putchar( int c )
 		}
 		out[n] = '\0';
 		con_len = 0;
-		n = ( n > 0 ) ? n : -1;
+		end = ( c == '\n' );
+		n = ( n > 0 || end ) ? 1 : 0;
 	}
 	ISpinUnlock(&con_lock, &imask);
 	if ( n != 0 ) {
-		tm_printf((UB *)"%s\n", ( n > 0 ) ? out : "");
+		tm_printf((UB *)( end ? "%s\n" : "%s" ), out);
 	}
+}
+
+/* A character of a message into buf; the place full, what is there goes out first as a part of it */
+LOCAL void dp_put( char *buf, INT size, INT *p_o, char c )
+{
+	if ( *p_o >= size - 1 ) {
+		buf[*p_o] = '\0';
+		tm_printf((UB *)"%s", buf);
+		*p_o = 0;
+	}
+	buf[(*p_o)++] = c;
 }
 
 /*
  * The rump kernel's own messages of the host's: only what is needed to
- * read them -- strings, integers and pointers.
+ * read them -- strings, integers and pointers. It may be called where no
+ * memory can be had (a spin lock held), so a message longer than the
+ * place it is made in goes out in parts as the place fills: nothing of
+ * it is left out.
  */
 EXPORT void rumpuser_dprintf( CONST char *fmt, ... )
 {
@@ -1456,9 +1478,9 @@ EXPORT void rumpuser_dprintf( CONST char *fmt, ... )
 	BOOL			neg;
 
 	__builtin_va_start(ap, fmt);
-	for ( ; *fmt != '\0' && o < (INT)sizeof(buf) - 1; fmt++ ) {
+	for ( ; *fmt != '\0'; fmt++ ) {
 		if ( *fmt != '%' ) {
-			buf[o++] = *fmt;
+			dp_put(buf, (INT)sizeof(buf), &o, *fmt);
 			continue;
 		}
 		fmt++;
@@ -1506,8 +1528,8 @@ EXPORT void rumpuser_dprintf( CONST char *fmt, ... )
 			s = "?";
 			break;
 		}
-		while ( *s != '\0' && o < (INT)sizeof(buf) - 1 ) {
-			buf[o++] = *s++;
+		while ( *s != '\0' ) {
+			dp_put(buf, (INT)sizeof(buf), &o, *s++);
 		}
 	}
 	__builtin_va_end(ap);

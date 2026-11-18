@@ -441,11 +441,12 @@ static ER h_text_away( T_DDED *e, INT sx, INT sy, INT cx, INT cy, UB *s, INT n )
 	return ta_text_away(e, &rq, s, n);
 }
 
-/* What the desktop is asked of a link, carried or put, as it shows here */
+/*
+ * What the desktop is asked of a link, carried or put, as it shows here;
+ * its relationship and its applist go in the tail of the next ask_desktop
+ */
 static void link_ask( CONST T_VOBJ *v, UINT req, T_DTREQ *rq )
 {
-	size_t	n = strlen((CONST char *)v->applist);
-
 	memset(rq, 0, sizeof(*rq));
 	rq->req = req;
 	rq->target = v->target;
@@ -457,12 +458,40 @@ static void link_ask( CONST T_VOBJ *v, UINT req, T_DTREQ *rq )
 	rq->look.bgcol = v->bgcol;
 	rq->look.disp = v->disp;
 	rq->look.autoopen = v->autoopen ? 1 : 0;
-	snprintf((char *)rq->name, sizeof(rq->name), "%s", (CONST char *)v->relationship);
+	/* where it is in the text's record: a link in a text has its width and height, not a right and foot */
+	if ( v->right > v->left ) dt_req_was(rq, v->left, v->top, v->right, v->bottom);
+	else dt_req_was(rq, v->left, v->top, v->left + v->width, v->top + v->heightpx);
+	if ( v->vrel_len > 0 ) ta_req_part(DT_TAIL_REL, v->vrel, v->vrel_len);
 	if ( v->hidden ) rq->flags |= DT_F_HIDDEN;
-	if ( n > 0 && n < sizeof(rq->text) - 1 ) {
-		memcpy(rq->text, v->applist, n + 1);
+	if ( v->vapplist_len > 0 ) {
+		ta_req_part(DT_TAIL_APPLIST, v->vapplist, v->vapplist_len);
 		rq->flags |= DT_F_APPLIST;
 	}
+}
+
+/*
+ * A thing that went out let go back over this window (DT_F_BACK): moved,
+ * or copied, within the text where the answer says, as th says with copy
+ */
+static void thing_back( T_DDED *e, CONST T_DDTHING *th, BOOL copy, CONST T_DTANS *an )
+{
+	T_DDTHING	t;
+	INT		x, y;
+
+	if ( !ta_back_at(an, &x, &y) ) return;
+	memset(&t, 0, sizeof(t));		/* t.v empty */
+	t.kind = th->kind;
+	t.node = th->node;
+	t.box = th->box;
+	t.x0 = th->x0;
+	t.y0 = th->y0;
+	t.copy = copy;
+	if ( th->kind == TV_RUN_LINK && tad_vobj_copy(&t.v, &th->v) < E_OK ) {
+		tell("メモリが足りないため、この操作をできませんでした", NULL);
+		return;
+	}
+	de_thing_back(e, x, y, &t);
+	tad_vobj_clear(&t.v);
 }
 
 /*
@@ -508,11 +537,7 @@ static BOOL piece_away( T_DDED *e, CONST T_DDTHING *th, INT w, INT h )
 		 ( er < E_OK && ( an.flags & DT_F_BACK ) != 0 ) ? " back here" : "");
 	note(m);
 	if ( er < E_OK && ( an.flags & DT_F_BACK ) != 0 ) {
-		T_DDTHING	t = *th;
-		INT		x, y;
-
-		t.copy = (BOOL)( an.how == DT_HOW_COPY || th->copy );
-		if ( ta_back_at(&an, &x, &y) ) de_thing_back(e, x, y, &t);
+		thing_back(e, th, (BOOL)( an.how == DT_HOW_COPY || th->copy ), &an);
 		return FALSE;
 	}
 	if ( er < E_OK || an.how == DT_HOW_COPY || th->copy ) return FALSE;
@@ -540,7 +565,7 @@ static BOOL h_thing_away( T_DDED *e, INT sx, INT sy, CONST T_DDTHING *th )
 	BOOL	copy, given;
 	INT	w = th->box.right - th->box.left, h = th->box.bottom - th->box.top;
 	ER	er;
-	char	m[TAD_NAME_MAX + 64];
+	char	m[DC_LOG];
 
 	if ( th->kind != TV_RUN_LINK ) {
 		return piece_away(e, th, w, h);
@@ -557,12 +582,8 @@ static BOOL h_thing_away( T_DDED *e, INT sx, INT sy, CONST T_DDTHING *th )
 	memset(&an, 0, sizeof(an));
 	er = ask_desktop(&rq, &an, 30 * 60 * 1000);
 	if ( er < E_OK && ( an.flags & DT_F_BACK ) != 0 ) {
-		T_DDTHING	t = *th;
-		INT		x, y;
-
 		note("link carried back here");
-		t.copy = (BOOL)( an.how == DT_HOW_COPY || th->copy );
-		if ( ta_back_at(&an, &x, &y) ) de_thing_back(e, x, y, &t);
+		thing_back(e, th, (BOOL)( an.how == DT_HOW_COPY || th->copy ), &an);
 		return FALSE;
 	}
 	if ( er < E_OK ) {
@@ -681,7 +702,7 @@ static void h_word_register( T_DDED *e, CONST UB *w, INT n )
 	}
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_TOOL;
-	strncpy((char *)rq.name, "単語登録", sizeof(rq.name) - 1);
+	ta_req_part(DT_TAIL_NAME, (CONST UB *)"単語登録", -1);
 	memset(&an, 0, sizeof(an));
 	er = ask_desktop(&rq, &an, 5000);
 	if ( er >= E_OK ) er = an.er;

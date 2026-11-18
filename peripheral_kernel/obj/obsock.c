@@ -44,8 +44,8 @@
 #include <ts/proc.h>
 #include "obj.h"
 
-#define SK_TEXT_MAX	1024		/* bytes of record 0 */
 #define SK_SA_MAX	128		/* bytes of an address from the stack */
+#define OBK_NAME_ROOM	48		/* "socket N (process M)" of two numbers: the most such a name takes */
 /*
  * A handle is the number + 1 in its low SK_NUM_BITS bits and the low bits
  * of the socket's count above them, short of the sign bit
@@ -382,7 +382,7 @@ LOCAL INT describe( INT s, CONST OBSK *e, UB *t, INT max )
 {
 	SKNOW	k;
 	TS_UUID	pu;
-	UB	name[OB_NAME_MAX];
+	UB	name[OBK_NAME_ROOM];
 	INT	n;
 
 	now_of(s, e->type, &k);
@@ -416,6 +416,19 @@ LOCAL INT describe( INT s, CONST OBSK *e, UB *t, INT max )
 	return knl_oj_put(t, n, max, "</document></tad>");
 }
 
+/* Record 0 of socket s, made as long as it needs (knl_oj_make) */
+typedef struct {
+	INT		s;
+	CONST OBSK	*e;
+} SKDESC;
+
+LOCAL INT describe_make( void *ctx, UB *t, INT max )
+{
+	SKDESC	*d = (SKDESC *)ctx;
+
+	return describe(d->s, d->e, t, max);
+}
+
 /* Bytes that have come in and not been read */
 LOCAL UD waiting( INT s )
 {
@@ -433,6 +446,19 @@ LOCAL ER obk_find( CONST TS_UUID *uuid )
 	return ( entry_of(uuid, &e) >= 0 ) ? E_OK : E_NOEXS;
 }
 
+LOCAL ER obk_refnam( CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize )
+{
+	UB	t[OBK_NAME_ROOM];
+	OBSK	e;
+	INT	s = entry_of(uuid, &e);
+
+	if ( s < 0 ) {
+		return E_NOEXS;
+	}
+	(void)put_name(t, 0, (INT)sizeof(t), s, e.owner);
+	return knl_ob_name_put(t, -1, buf, size, p_asize);
+}
+
 LOCAL ER obk_ref( CONST TS_UUID *uuid, T_OBREF *r )
 {
 	OBSK	e;
@@ -441,7 +467,6 @@ LOCAL ER obk_ref( CONST TS_UUID *uuid, T_OBREF *r )
 	if ( s < 0 ) {
 		return E_NOEXS;
 	}
-	(void)put_name(r->name, 0, OB_NAME_MAX, s, e.owner);
 	r->flags = OB_F_VOLATILE;
 	r->refcnt = 0;
 	r->nrec = OB_SK_NREC;
@@ -499,9 +524,8 @@ LOCAL ER obk_close( INT h )
 LOCAL ER obk_rea( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, BOOL nowait )
 {
 	OBSK	e;
-	UB	*t;
+	SKDESC	d;
 	INT	s = entry_of_handle(h, &e), len;
-	SZ	n = 0;
 
 	if ( s < 0 ) {
 		return E_NOEXS;
@@ -525,21 +549,9 @@ LOCAL ER obk_rea( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, BOOL
 	if ( recno != 0 ) {
 		return E_NOEXS;
 	}
-	t = (UB *)Kmalloc(SK_TEXT_MAX);
-	if ( t == NULL ) {
-		return E_NOMEM;
-	}
-	len = describe(s, &e, t, SK_TEXT_MAX);
-	if ( len > 0 && off < len ) {
-		n = (SZ)( len - off );
-		if ( n > size ) n = size;
-		knl_memcpy(buf, t + off, (INT)n);
-	}
-	Kfree(t);
-	if ( p_asize != NULL ) {
-		*p_asize = n;
-	}
-	return E_OK;
+	d.s = s;
+	d.e = &e;
+	return knl_oj_make_rea(describe_make, &d, off, buf, size, p_asize);
 }
 
 /* Record 1 written: sent */
@@ -573,23 +585,25 @@ LOCAL ER obk_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize
 LOCAL ER obk_lrc( INT h, T_OBREC *buf, INT n, INT *p_cnt )
 {
 	OBSK	e;
+	SKDESC	d;
 	UB	*t;
 	INT	s = entry_of_handle(h, &e), len, k = 0;
 
 	if ( s < 0 ) {
 		return E_NOEXS;
 	}
-	t = (UB *)Kmalloc(SK_TEXT_MAX);
-	if ( t == NULL ) {
-		return E_NOMEM;
+	d.s = s;
+	d.e = &e;
+	len = knl_oj_make(describe_make, &d, &t);
+	if ( len < 0 ) {
+		return (ER)len;
 	}
-	len = describe(s, &e, t, SK_TEXT_MAX);
 	Kfree(t);
 	if ( k < n ) {
 		buf[k].recno = 0;
 		buf[k].rt = OB_RT_TAD;
 		buf[k].sub = 0;
-		buf[k].size = ( len > 0 ) ? (UD)len : 0;
+		buf[k].size = (UD)len;
 		k++;
 	}
 	if ( k < n ) {
@@ -621,7 +635,7 @@ LOCAL ER obk_gat( INT h, UB *json, SZ size, SZ *p_asize )
 {
 	OBSK	e;
 	SKNOW	k;
-	UB	name[OB_NAME_MAX];
+	UB	name[OBK_NAME_ROOM];
 	INT	s = entry_of_handle(h, &e), n, max = (INT)size;
 
 	if ( s < 0 ) {
@@ -696,7 +710,9 @@ LOCAL CONST T_OBMGR obk_mgr = {
 	NULL, NULL,
 	NULL,			/* records replaced by writing over them */
 	NULL,			/* nothing to wait for */
-	NULL			/* nothing comes in to wait for (ob_rea_tmo) */
+	NULL,			/* nothing comes in to wait for (ob_rea_tmo) */
+	NULL,
+	obk_refnam
 };
 
 /*

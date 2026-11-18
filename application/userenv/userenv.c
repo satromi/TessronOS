@@ -50,6 +50,10 @@
 #include <ts/json.h>
 #include <ts/obatr.h>
 #include <ts/snd.h>
+#include <ts/dtreq.h>
+#include <ts/uuid.h>
+#include "../dtask.h"
+#include <stdlib.h>
 
 #define TICK_MS		20
 
@@ -83,6 +87,8 @@
 #define PN_FINISH	11
 #define B_UNDO		106
 #define B_KEEP		107
+#define PN_COPY		12		/* a 写し's values shown: 取り消し or 設定 */
+#define B_COPY_SET	108
 
 #define TAG_ME		1		/* 〈個人属性〉 */
 
@@ -274,10 +280,18 @@ LOCAL INT step_index( CONST LKPART *l, INT v )
  * as where it starts; one that takes a list of values runs over their
  * places in it.
  */
+LOCAL void lk_show_v( CONST LKPART *l, INT v );
+
 LOCAL void lk_show( CONST LKPART *l )
 {
+	lk_show_v(l, (INT)wm_look(l->look));
+}
+
+/* The part of an entry showing v, which need not be what is set (a 写し's) */
+LOCAL void lk_show_v( CONST LKPART *l, INT v )
+{
 	CONST CF_ITEM	*it = cf_user_look(l->look);
-	INT		v = (INT)wm_look(l->look), num = P_LOOK(l->look);
+	INT		num = P_LOOK(l->look);
 
 	switch ( l->kind ) {
 	case K_VOL:
@@ -948,6 +962,349 @@ LOCAL void standard( void )
 	touch_parts();
 }
 
+/* ---------------------------------------------------------------- pages, their links and their 写し */
+
+/*
+ * The program is started, or run again while its window is open, with
+ * the 固有データ of the applist entry it was opened from (T_PRCOPEN's
+ * data, design 11.3): the name of a sheet, which is shown; a name it
+ * does not know, or none, leaves the window as it is. このページの仮身を
+ * 作る puts a link to the program's object with the sheet in its applist;
+ * 写しを作る writes what the sheet sets into an object of the person's
+ * (a 写し, design 11.6), which opened shows its values on the sheet and
+ * sets them only with 設定. 〈個人属性〉 -- the name, the kana input,
+ * the time, the zone, the time server -- is copied by no 写し.
+ */
+typedef struct {
+	CONST char	*name;		/* the data that asks for it */
+	INT		tag;
+	CONST char	*label;
+	CONST char	*copy;		/* the page a 写し of it names (cf_copy_allowed); NULL none */
+} UPAGE;
+
+LOCAL CONST UPAGE upages[] = {
+	{ "personal",	1, "個人属性",	NULL },
+	{ "pointer",	2, "ＰＤ属性",	"user.pointer" },
+	{ "key",	3, "キー属性",	"user.key" },
+	{ "display",	4, "表示属性",	"user.display" },
+	{ "sound",	5, "音属性",	"user.sound" },
+	{ "editkeys",	6, "キー操作",	"user.editkeys" },
+};
+#define NUPAGE	( (INT)( sizeof(upages) / sizeof(upages[0]) ) )
+
+LOCAL CONST UPAGE *upage_named( CONST char *s )
+{
+	INT	i;
+
+	for ( i = 0; s != NULL && s[0] != 0 && i < NUPAGE; i++ ) {
+		if ( strcmp(upages[i].name, s) == 0 || ( upages[i].copy != NULL && strcmp(upages[i].copy, s) == 0 ) ) {
+			return &upages[i];
+		}
+	}
+	return NULL;
+}
+
+LOCAL CONST UPAGE *upage_of_tag( INT tag )
+{
+	INT	i;
+
+	for ( i = 0; i < NUPAGE; i++ ) {
+		if ( upages[i].tag == tag ) return &upages[i];
+	}
+	return NULL;
+}
+
+LOCAL BOOL no_uuid( CONST TS_UUID *u )
+{
+	static CONST TS_UUID	zero;
+
+	return (BOOL)( u == NULL || memcmp(u, &zero, sizeof(zero)) == 0 );
+}
+
+/*
+ * A request to the desktop, answered on a channel of its own: what came
+ * of it. name and text go whole in the request's tail (DT_TAIL_NAME and
+ * DT_TAIL_TEXT); with DT_F_APPLIST the text is the link's applist
+ * (DT_TAIL_APPLIST).
+ */
+LOCAL ER desk_req( UINT req, CONST TS_UUID *target, UINT flags, CONST char *name, CONST char *text, T_DTANS *an )
+{
+	static DTASK	q;		/* the words and the answer, as long as they are (dtask.h) */
+	T_DTREQ		rq;
+
+	memset(an, 0, sizeof(*an));
+	memset(&rq, 0, sizeof(rq));
+	rq.req = req;
+	if ( target != NULL ) rq.target = *target;
+	rq.recno = -1;
+	rq.flags = flags;
+	if ( name != NULL ) (void)dq_part(&q, DT_TAIL_NAME, (CONST UB *)name, -1);
+	if ( text != NULL ) {
+		(void)dq_part(&q, ( ( flags & DT_F_APPLIST ) != 0 ) ? DT_TAIL_APPLIST : DT_TAIL_TEXT, (CONST UB *)text, -1);
+	}
+	return dq_ask(&q, &rq, an, &ui.win, 10000);
+}
+
+LOCAL void page_show( CONST UPAGE *pg )
+{
+	char	s[64];
+
+	ui_show_sheet(&ui, pg->tag);
+	snprintf(s, sizeof(s), "userenv: page \"%s\"\n", pg->name);
+	tm_putstring((CONST UB *)s);
+}
+
+/* The parts of a value not set (a 写し's), shown as lk_show shows what is set */
+LOCAL void lk_show_v( CONST LKPART *l, INT v );
+
+LOCAL BOOL is_copy( CONST TS_UUID *u, char *page, INT max )
+{
+	static UB	meta[4096];
+	T_JSON		root, tf, g;
+	SZ		asz = 0;
+	ID		key;
+	BOOL		is = FALSE;
+
+	page[0] = 0;
+	key = ob_opn_obj(u, OB_OP_R);
+	if ( key <= 0 ) return FALSE;
+	if ( ob_get_atr(key, meta, sizeof(meta) - 1, &asz) >= E_OK
+	  && js_parse(meta, (INT)asz, &root) >= E_OK
+	  && js_get(&root, "tessronos", &tf) >= E_OK && js_get(&tf, "confcopy", &g) >= E_OK ) {
+		is = (BOOL)( js_get_str(&g, "page", (UB *)page, max) > 0 );
+	}
+	ob_cls_obj(key);
+	return is;
+}
+
+/* What a 写し says of each entry of the look table, -1 for what it does not say */
+#define UC_VAL_NONE	( (INT)0x80000000 )
+
+LOCAL void copy_open( CONST TS_UUID *u )
+{
+	CONST UPAGE	*pg;
+	char		page[32], l1[128], l2[160], s[128], v[CF_VAL_MAX];
+	UB		*t = NULL, *w;
+	INT		len, wl, i, n = 0, differ = 0, nl = 0, val[NLK];
+	CONST char	*l[4];
+
+	if ( !is_copy(u, page, (INT)sizeof(page)) || ( pg = upage_named(page) ) == NULL || pg->copy == NULL ) {
+		warn("この写しはユーザ環境設定のページのものではありません。");
+		return;
+	}
+	page_show(pg);
+	len = ui_rec_all(u, 1, 0, &t);
+	w = ( len > 0 ) ? (UB *)malloc((size_t)len + 2) : NULL;
+	/* the lines of the page's table alone: any other a copy has is not read */
+	wl = ( w != NULL ) ? cf_copy_lines(t, len, pg->copy, w, len + 2) : -1;
+	free(t);
+	l2[0] = 0;
+	for ( i = 0; i < NLK; i++ ) {
+		CONST CF_ITEM	*it = cf_user_look(lkparts[i].look);
+
+		val[i] = UC_VAL_NONE;
+		if ( it == NULL || wl <= 0 || !cf_get(w, wl, it->key, 0, v, sizeof(v)) ) continue;
+		val[i] = cf_num(v, it->dflt);
+		if ( val[i] < it->lo ) val[i] = it->lo;
+		if ( val[i] > it->hi ) val[i] = it->hi;
+		nl++;
+		if ( val[i] == (INT)wm_look(lkparts[i].look) ) continue;
+		differ++;
+		if ( strlen(l2) + strlen(it->key) + 4 < 96 ) {
+			if ( n++ > 0 ) strcat(l2, "、");
+			strcat(l2, it->key);
+		} else if ( strstr(l2, " ほか") == NULL ) {
+			strcat(l2, " ほか");
+		}
+	}
+	free(w);
+	snprintf(s, sizeof(s), "userenv: copy of \"%s\" opened, %d lines, %d differ\n", pg->copy, nl, differ);
+	tm_putstring((CONST UB *)s);
+	if ( nl == 0 ) {
+		warn("この写しには、このページで設定できる値がありません。");
+		return;
+	}
+	for ( i = 0; i < NLK; i++ ) {
+		if ( val[i] != UC_VAL_NONE ) lk_show_v(&lkparts[i], val[i]);
+	}
+	{
+		UB	*cn = ui_obj_name(u);
+
+		snprintf(l1, sizeof(l1), "「%s」の値を表示しています。", ( cn != NULL ) ? (CONST char *)cn : "");
+		free(cn);
+	}
+	if ( differ == 0 ) {
+		snprintf(l2, sizeof(l2), "今の設定と同じです。");
+	} else {
+		char	x[176];
+
+		snprintf(x, sizeof(x), "違う項目：%s", l2);
+		snprintf(l2, sizeof(l2), "%s", x);
+	}
+	l[0] = l1;
+	l[1] = l2;
+	l[2] = "〈設定〉を押すと、この値を設定します。";
+	if ( ui_ask(&ui, PN_COPY, l, 3) == B_COPY_SET ) {
+		for ( i = 0; i < NLK; i++ ) {
+			if ( val[i] != UC_VAL_NONE ) (void)wm_set_look(lkparts[i].look, (UW)val[i]);
+		}
+		from_system();
+		snprintf(s, sizeof(s), "userenv: copy of \"%s\" set\n", pg->copy);
+	} else {
+		from_system();
+		snprintf(s, sizeof(s), "userenv: copy of \"%s\" put back\n", pg->copy);
+	}
+	tm_putstring((CONST UB *)s);
+}
+
+/* 写しを作る: the sheet shown, as it is now, into a new object linked from the first window */
+LOCAL void copy_make( void )
+{
+	CONST UPAGE	*pg = upage_of_tag(ui_sheet(&ui));
+	static char	json[1024], body[3072];
+	static UB	doc[512];
+	char		name[128], s[128];
+	T_OBCRE		c;
+	T_DTANS		an;
+	TS_UUID		u;
+	INT		recno = -1, i, n, dlen, nl = 0;
+	SZ		asz = 0;
+	ID		k;
+	ER		er;
+
+	if ( pg == NULL || pg->copy == NULL ) {
+		warn("このページには写せる設定がありません。");
+		return;
+	}
+	snprintf(name, sizeof(name), "ユーザ環境設定（%s）の写し", pg->label);
+	snprintf(json, sizeof(json),
+		 "{\"name\":\"%s\",\"relationship\":[],\"linktype\":false,\"refCount\":0,"
+		 "\"editable\":true,\"deletable\":true,\"readable\":true,"
+		 "\"applist\":{\"tessronos-userenv\":{\"name\":\"ユーザ環境設定\",\"defaultOpen\":true,\"data\":\"%s\"}},"
+		 "\"tessronos\":{\"confcopy\":{\"page\":\"%s\"}}}",
+		 name, pg->name, pg->copy);
+	n = snprintf(body, sizeof(body), "# ユーザ環境設定の写し：%s\n", pg->label);
+	for ( i = 0; i < NLK && n < (INT)sizeof(body) - 1; i++ ) {
+		CONST CF_ITEM	*it = cf_user_look(lkparts[i].look);
+
+		if ( it == NULL || cf_user_page(it->look) == NULL || strcmp(cf_user_page(it->look), pg->copy) != 0 ) continue;
+		n += snprintf(body + n, sizeof(body) - (size_t)n, "%s\t%d\n", it->key, (INT)wm_look(it->look));
+		nl++;
+	}
+	dlen = snprintf((char *)doc, sizeof(doc),
+			"<tad version=\"1.0\" encoding=\"UTF-8\">\n<document>\n<p>%s</p>\n</document>\n</tad>\n", name);
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.json = (CONST UB *)json;
+	c.jsonsz = (SZ)strlen(json);
+	er = ob_cre_obj(&c, &u);
+	if ( er >= E_OK ) {
+		k = ob_opn_obj(&u, OB_OP_R | OB_OP_W | OB_O_EXCL);
+		er = ( k > 0 ) ? ob_apd_rec(k, OB_RT_TAD, 0, &recno) : (ER)k;
+		if ( er >= E_OK ) er = ob_wri_rec(k, recno, 0, doc, (SZ)dlen, &asz);
+		if ( er >= E_OK ) er = ob_apd_rec(k, OB_RT_SYSDATA, 0, &recno);
+		if ( er >= E_OK ) er = ob_wri_rec(k, recno, 0, body, (SZ)n, &asz);
+		if ( k > 0 ) ob_cls_obj(k);
+		if ( er < E_OK ) (void)ob_del_obj(&u);
+	}
+	if ( er < E_OK ) {
+		warn("写しの実身を作れませんでした。");
+		return;
+	}
+	er = desk_req(DT_RQ_LINK_PUT, &u, 0, name, NULL, &an);
+	snprintf(s, sizeof(s), "userenv: copy of \"%s\" made, %d lines (%d)\n", pg->copy, nl, (INT)er);
+	tm_putstring((CONST UB *)s);
+}
+
+/* このページの仮身を作る: a link to the program's object, the sheet in its applist's data */
+LOCAL void page_link( void )
+{
+	CONST UPAGE	*pg = upage_of_tag(ui_sheet(&ui));
+	char		name[96], appl[160], s[96];
+	TS_UUID		me;
+	T_DTANS		an;
+	ER		er;
+
+	if ( pg == NULL || ui_uuid(SYSDEF_PROG_USERENV, &me) < E_OK ) return;
+	snprintf(name, sizeof(name), "ユーザ環境設定（%s）", pg->label);
+	snprintf(appl, sizeof(appl), "{\"tessronos-userenv\":{\"name\":\"ユーザ環境設定\",\"data\":\"%s\"}}", pg->name);
+	er = desk_req(DT_RQ_LINK_PUT, &me, DT_F_APPLIST, name, appl, &an);
+	snprintf(s, sizeof(s), "userenv: link of page \"%s\" put (%d)\n", pg->name, (INT)er);
+	tm_putstring((CONST UB *)s);
+	if ( er < E_OK ) warn("このページの仮身を置けませんでした。");
+}
+
+/* Opened on target (0 none, or the program object itself) with data */
+LOCAL BOOL	copy_due = FALSE;
+LOCAL TS_UUID	copy_obj;
+
+LOCAL void opened_on( CONST TS_UUID *target, CONST char *data, BOOL up )
+{
+	TS_UUID		me;
+	CONST UPAGE	*pg;
+	char		page[32], s[160];
+
+	/* a note for the log: long data shown in part */
+	snprintf(s, sizeof(s), "userenv: opened with data \"%.100s\"\n", ( data != NULL ) ? data : "");
+	tm_putstring((CONST UB *)s);
+	if ( !no_uuid(target) && ( ui_uuid(SYSDEF_PROG_USERENV, &me) < E_OK || memcmp(&me, target, sizeof(me)) != 0 )
+	  && is_copy(target, page, (INT)sizeof(page)) ) {
+		copy_obj = *target;
+		copy_due = !up;
+		if ( up ) copy_open(&copy_obj);
+		return;
+	}
+	pg = upage_named(data);
+	if ( pg != NULL ) page_show(pg);
+}
+
+/* The desktop's channel (DT_RQ_TELL): run again while the window is open (DT_HOW_AGAIN) */
+LOCAL TS_UUID	told_ch;
+LOCAL ID	told_port = 0;
+
+LOCAL void listen( void )
+{
+	T_OBCRE	c;
+	T_OBNTF	req;
+	T_DTANS	an;
+	char	t[TS_UUID_STRLEN + 1];
+
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	if ( ob_cre_obj(&c, &told_ch) < E_OK ) return;
+	told_port = ob_opn_obj(&told_ch, OB_OP_READ | OB_OP_ATRRD | OB_O_NOWAIT);
+	if ( told_port <= 0 ) {
+		told_port = 0;
+		(void)ob_del_obj(&told_ch);
+		return;
+	}
+	memset(&req, 0, sizeof(req));
+	req.events = OB_E_CHANGE;
+	req.id = 3;
+	(void)ob_ntf_evt(told_port, OB_REC_ANY, &req, ui.port);
+	ts_uuid_text(&told_ch, t);
+	(void)desk_req(DT_RQ_TELL, NULL, 0, "tessronos-userenv", t, &an);
+}
+
+LOCAL BOOL told( CONST T_OBNTM *m )
+{
+	static UB	*buf = NULL;	/* each notice read whole, its tail after it */
+	static SZ	cap = 0;
+	SZ		n;
+
+	if ( told_port <= 0 || memcmp(&m->uuid, &told_ch, sizeof(TS_UUID)) != 0 ) return FALSE;
+	while ( ( n = dq_read(told_port, &buf, &cap, TMO_POL) ) >= (SZ)sizeof(T_DTANS) ) {
+		CONST T_DTANS	*an = (CONST T_DTANS *)buf;
+
+		if ( an->how == DT_HOW_AGAIN ) {
+			/* the 固有データ it was run again with, as long as it is */
+			opened_on(&an->into, (CONST char *)dq_told_text(buf, n, DT_TAIL_DATA, NULL), TRUE);
+		}
+	}
+	return TRUE;
+}
+
 /* ---------------------------------------------------------------- the menu */
 
 LOCAL BOOL is_code( CONST T_MNSEL *sel, CONST char *code )
@@ -965,6 +1322,11 @@ LOCAL void menu( CONST T_OBNTM *m )
 
 	if ( ui_uuid(SYSDEF_MENU_USERENV, &def) < E_OK || mn_cre_men(&def, &mid) < E_OK ) return;
 	if ( !box ) (void)mn_chg_atr(mid, NULL, "clear", MN_GREY);
+	{
+		CONST UPAGE	*pg = upage_of_tag(ui_sheet(&ui));
+
+		(void)mn_chg_atr(mid, NULL, "copy.make", ( pg != NULL && pg->copy != NULL ) ? 0 : MN_GREY);
+	}
 	chosen = (BOOL)( mn_pop_men(mid, ui.kw, m->x, m->y, m->when, &sel) >= E_OK );
 	(void)mn_del_men(mid);
 	if ( !chosen ) return;
@@ -974,6 +1336,10 @@ LOCAL void menu( CONST T_OBNTM *m )
 		ui_set_text(&ui, ui.last, "");
 	} else if ( is_code(&sel, "standard") ) {
 		standard();
+	} else if ( is_code(&sel, "copy.make") ) {
+		copy_make();
+	} else if ( is_code(&sel, "page.link") ) {
+		page_link();
 	}
 }
 
@@ -1028,19 +1394,44 @@ int main( void )
 	UD	shown_s = 0;
 
 	ui_icon(SYSDEF_PROG_USERENV);
+	/* the window stands for the program object: opened again, from a page's link or a copy, it is told ("once") */
+	ui_shows(SYSDEF_PROG_USERENV);
 	ui_attr(UI_ATTR_HIDDEN);		/* filled hidden, and shown once (ui_reveal) */
 	if ( ui_open(&ui, SYSDEF_BOX_USERENV, PN_MAIN, wm_new_x(180), wm_new_y(90)) < E_OK ) {
 		tm_putstring((CONST UB *)"userenv: no window\n");
 		return 1;
 	}
 	read_start();
+	/* the object and the 固有データ it was opened with (T_PRCOPEN): the sheet shown before the window comes up */
+	{
+		SZ		n = ts_get_arg(NULL, 0);	/* the whole argument's size, the data after it */
+		T_PRCOPEN	*a = (T_PRCOPEN *)calloc(1, ( n > (SZ)sizeof(T_PRCOPEN) ) ? (size_t)n : sizeof(T_PRCOPEN));
+
+		if ( a == NULL ) {
+			warn("メモリが足りないため、開いたページを表示できませんでした。");
+		} else {
+			if ( n > 0 ) n = ts_get_arg(a, ( n > (SZ)sizeof(T_PRCOPEN) ) ? n : (SZ)sizeof(T_PRCOPEN));
+			if ( n >= (SZ)sizeof(TS_UUID) ) {
+				CONST UB	*data = dt_prcopen_data(a, n);
+
+				opened_on(&a->target, ( data != NULL ) ? (CONST char *)data : "", FALSE);
+			}
+			free(a);
+		}
+	}
+	listen();
 	ui_reveal(&ui);
 	tm_putstring((CONST UB *)"userenv: ready\n");
+	if ( copy_due ) {
+		copy_due = FALSE;
+		copy_open(&copy_obj);
+	}
 
 	while ( !closing ) {
 		/* the clock on 〈使用者〉 goes on at each second; nothing else is waited for but the notices */
 		for ( TMO tmo = ( ui_sheet(&ui) == TAG_ME ) ? ui_left(( ui_now() / 1000 + 1 ) * 1000) : TMO_FEVR;
 		      !closing && ui_wait(&ui, &m, tmo) >= E_OK; tmo = TMO_POL ) {
+			if ( told(&m) ) continue;
 			ev = ui_event(&ui, &m, &id);
 			switch ( ev ) {
 			case UI_EV_CLOSE:
@@ -1075,6 +1466,10 @@ int main( void )
 			shown_s = ui_now() / 1000;
 			time_show();			/* the clock goes on */
 		}
+	}
+	if ( told_port > 0 ) {
+		ob_cls_obj(told_port);
+		(void)ob_del_obj(&told_ch);
 	}
 	ui_close(&ui);
 	tm_putstring((CONST UB *)"userenv: closed\n");

@@ -100,7 +100,6 @@ LOCAL INT put_s( UB *out, INT n, CONST UB *s )
 LOCAL INT ports_each( void (*fn)( INT k, CONST PORT *p, void *ctx ), void *ctx )
 {
 	TS_UUID	ids[LIST_PAGE], last;
-	T_OBREF	r;
 	PORT	p;
 	SZ	asz;
 	INT	cnt, i, k, all = 0, n = 0;
@@ -112,8 +111,16 @@ LOCAL INT ports_each( void (*fn)( INT k, CONST PORT *p, void *ctx ), void *ctx )
 			break;
 		}
 		for ( i = 0; i < cnt; i++ ) {
-			if ( ob_ref_obj(&ids[i], &r) < E_OK || r.name[0] != 's' || r.name[1] != 'e'
-			  || r.name[2] != 'r' ) {
+			SZ	need = 0;
+
+			/*
+			 * the port's name into p.name: "sera" to "serz", then "seraa", a
+			 * letter more after every 26 to the power of the letters; the
+			 * program keeps no heap, and a name longer than p.name is no port
+			 * this program can show
+			 */
+			if ( ob_ref_nam(&ids[i], p.name, (SZ)sizeof(p.name), &need) < E_OK
+			  || need > (SZ)sizeof(p.name) || p.name[0] != 's' || p.name[1] != 'e' || p.name[2] != 'r' ) {
 				continue;
 			}
 			key = ob_opn_obj(&ids[i], OB_OP_READ);
@@ -124,8 +131,6 @@ LOCAL INT ports_each( void (*fn)( INT k, CONST PORT *p, void *ctx ), void *ctx )
 			if ( ob_rea_rec(key, 3, 0, &p.info, sizeof(T_SERINFO), &asz) >= E_OK
 			  && asz == (SZ)sizeof(T_SERINFO) ) {
 				p.uuid = ids[i];
-				for ( k = 0; r.name[k] != 0 && k < 15; k++ ) p.name[k] = r.name[k];
-				p.name[k] = 0;
 				if ( fn != NULL ) fn(n, &p, ctx);
 				n++;
 			}

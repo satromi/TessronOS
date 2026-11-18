@@ -467,11 +467,6 @@ EXPORT void bk_vol_label( BKVOL *v, char *out, INT max )
 		if ( n > 4 && tmp[n - 4] == '.' ) tmp[n - 4] = 0;
 		(void)xfu_name_in((const UB *)tmp, (UB *)out, max);
 	} else {
-		T_OBREF	r;
-
-		if ( ob_ref_obj(&v->obj, &r) >= E_OK ) {
-			strncpy(out, (const char *)r.name, (size_t)max - 1);
-			out[max - 1] = 0;
-		}
+		(void)ob_ref_nam(&v->obj, (UB *)out, max, NULL);	/* what fits, at a whole letter */
 	}
 }

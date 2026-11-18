@@ -19,7 +19,7 @@
       "id": "virtual-object-list",
       "kind": "app",
       "name": "仮身一覧",
-      "version": "R1.400",
+      "version": "R1.410",
       "builtin": false,
       "openArg": "link",
       "base": [

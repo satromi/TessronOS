@@ -475,7 +475,23 @@ LOCAL void close_requests( void )
 	SZ	asz = 0;
 	INT	i;
 
-	while ( dt_port > 0 && ob_rea_rec(dt_port, 0, 0, &m, sizeof(m), &asz) >= E_OK ) {
+	for ( ;; ) {
+		ER	er = ( dt_port > 0 ) ? ob_rea_rec(dt_port, 0, 0, &m, sizeof(m), &asz) : E_NOEXS;
+
+		if ( er == E_LIMIT && asz > (SZ)sizeof(m) ) {
+			/* longer than a notice: no notice, read in room of its size and passed over */
+			UB	*b = (UB *)Kmalloc((size_t)asz);
+
+			if ( b == NULL ) {
+				break;			/* it stays first on the channel: read again next time */
+			}
+			(void)ob_rea_rec(dt_port, 0, 0, b, asz, &asz);
+			Kfree(b);
+			continue;
+		}
+		if ( er < E_OK ) {
+			break;
+		}
 		if ( m.event != OB_E_CLOSE ) {
 			continue;
 		}
@@ -500,7 +516,7 @@ LOCAL void close_requests( void )
  */
 LOCAL struct {
 	BOOL	on;			/* the outline follows the hand */
-	T_DTREQ	rq;
+	T_DTREQ	*rq;			/* the request, with its tail (Kmalloc); kept until the next carry */
 	BOOL	pending;		/* let go where a link can go, the link not yet asked for */
 	INT	first;			/* the count of links before the first put, -1 none put yet */
 	UINT	seq;
@@ -514,9 +530,10 @@ LOCAL struct {
 	BOOL	toprog;			/* let go over another program's window */
 	T_OBDROPV *links;		/* and the links asked for so far, dropped with the last */
 	INT	nlink;
+	UB	*words;			/* their words (ob_drop_put), strsz bytes of wcap */
+	UINT	strsz;
+	SZ	wcap;
 } carry;
-
-LOCAL void name_cut( UB *out, CONST UB *s, INT max );
 
 /*
  * The first form of a request and its answer, before a carried link
@@ -530,28 +547,407 @@ LOCAL void name_cut( UB *out, CONST UB *s, INT max );
 #define DTANS_V2_SIZE	( (SZ)( (UB *)&((T_DTANS *)0)->look - (UB *)0 ) )
 /* The third, before the letters carried: answered in the size of now */
 #define DTREQ_V3_SIZE	( (SZ)( (UB *)&((T_DTREQ *)0)->text - (UB *)0 ) )
+/* The fourth, before the box where a placed link was */
+#define DTREQ_V4_SIZE	( (SZ)( (UB *)&((T_DTREQ *)0)->was_left - (UB *)0 ) )
+/*
+ * The fifth, before the tail: the third to the fifth are answered in the
+ * size the answer had then, its words in its text
+ */
+#define DTREQ_V5_SIZE	( (SZ)( (UB *)&((T_DTREQ *)0)->tailsz - (UB *)0 ) )
+#define DTANS_V5_SIZE	( (SZ)( (UB *)&((T_DTANS *)0)->tailsz - (UB *)0 ) )
 
-LOCAL void answer_as( CONST TS_UUID *reply, CONST T_DTANS *an, SZ size )
+/*
+ * What a program built for a form whose structure ended at 'end' sends or
+ * reads: sizeof that structure, its end rounded up to the structure's
+ * alignment (a TS_UUID's). The fourth form, which every release from
+ * R1.100 to R1.400 had, ends at 900 bytes and is 904 long, its answer
+ * 276 and 280; the second's answer 44 and 48.
+ */
+#define DT_FORM_SIZE(end, T)	( ( (SZ)(end) + (SZ)__alignof__(T) - 1 ) & ~( (SZ)__alignof__(T) - 1 ) )
+
+/* ---------------------------------------------------------------- the words of requests and answers */
+
+LOCAL BOOL	dt_req_tailed = FALSE;		/* the request being done had the tail's size */
+LOCAL SZ	dt_req_anssz = 0;		/* and the size of its answer */
+LOCAL DTANS	*dt_ans_list = NULL;		/* the answers being made, of the desktop's task */
+
+EXPORT BOOL dt_rq_tailed( void )
 {
-	TS_UUID	none;
+	return dt_req_tailed;
+}
+
+EXPORT SZ dt_rq_anssz( void )
+{
+	return dt_req_anssz;
+}
+
+EXPORT CONST UB *dt_rq_word( CONST T_DTREQ *rq, UINT kind, SZ *p_len )
+{
+	CONST UB	*w = NULL;
+	SZ		len = 0;
+
+	if ( rq != NULL && rq->tailsz > 0 ) {
+		w = dt_tail_get((CONST UB *)( rq + 1 ), rq->tailsz, kind, &len);
+	}
+	if ( w == NULL ) {
+		w = (CONST UB *)"";
+		len = 0;
+	}
+	if ( p_len != NULL ) *p_len = len;
+	return w;
+}
+
+EXPORT CONST UB *dt_rq_applist( CONST T_DTREQ *rq, SZ *p_len )
+{
+	return dt_rq_word(rq, DT_TAIL_APPLIST, p_len);
+}
+
+EXPORT CONST UB *dt_rq_view( CONST T_DTREQ *rq, SZ *p_len )
+{
+	return dt_rq_word(rq, DT_TAIL_VIEW, p_len);
+}
+
+EXPORT CONST UB *dt_rq_rel( CONST T_DTREQ *rq, SZ *p_len )
+{
+	return dt_rq_word(rq, DT_TAIL_REL, p_len);
+}
+
+EXPORT T_DTREQ *dt_rq_dup( CONST T_DTREQ *rq )
+{
+	SZ	size = (SZ)sizeof(T_DTREQ) + (SZ)rq->tailsz;
+	T_DTREQ	*c = (T_DTREQ *)Kmalloc((size_t)size);
+
+	if ( c != NULL ) {
+		knl_memcpy(c, rq, size);
+	}
+	return c;
+}
+
+EXPORT ER dt_rq_reword( T_DTREQ *rq, UINT kind, CONST UB *s, SZ len )
+{
+	CONST UB	*old = (CONST UB *)( rq + 1 );
+	UB		*nt;
+	UINT		nsz = 0;
+	SZ		at = 0;
+	T_DTPART	h;
+	BOOL		done = FALSE;
+	ER		er = E_OK;
+
+	if ( s == NULL ) {
+		len = 0;
+	} else if ( len < 0 ) {
+		for ( len = 0; s[len] != 0; len++ ) ;
+	}
+	if ( rq->tailsz == 0 ) {
+		return ( len == 0 ) ? E_OK : E_LIMIT;
+	}
+	nt = (UB *)Kmalloc(rq->tailsz);
+	if ( nt == NULL ) {
+		return E_NOMEM;
+	}
+	/* the new tail made apart, s being perhaps in the old one, then put in its place */
+	while ( at + (SZ)sizeof(h) <= (SZ)rq->tailsz && er >= E_OK ) {
+		knl_memcpy(&h, old + at, sizeof(h));
+		if ( at + dt_tail_room(h.len) > (SZ)rq->tailsz ) {
+			break;
+		}
+		if ( h.kind == kind && !done ) {
+			done = TRUE;
+			er = dt_tail_put(nt, &nsz, rq->tailsz, kind, s, len);
+		} else {
+			er = dt_tail_put(nt, &nsz, rq->tailsz, h.kind, old + at + sizeof(h), (SZ)h.len);
+		}
+		at += dt_tail_room(h.len);
+	}
+	if ( er >= E_OK && !done && len > 0 ) {
+		er = dt_tail_put(nt, &nsz, rq->tailsz, kind, s, len);
+	}
+	if ( er >= E_OK ) {
+		knl_memcpy((UB *)( rq + 1 ), nt, nsz);
+		rq->tailsz = nsz;
+	}
+	Kfree(nt);
+	return er;
+}
+
+LOCAL DTANS *ans_of( CONST T_DTANS *an )
+{
+	DTANS	*a;
+
+	for ( a = dt_ans_list; a != NULL; a = a->next ) {
+		if ( &a->an == an ) return a;
+	}
+	return NULL;
+}
+
+EXPORT void dt_ans_begin( DTANS *a, UINT seq )
+{
+	knl_memset(a, 0, sizeof(*a));
+	a->an.seq = seq;
+	a->an.er = E_OK;
+	a->er = E_OK;
+	a->next = dt_ans_list;
+	dt_ans_list = a;
+}
+
+EXPORT void dt_ans_end( DTANS *a )
+{
+	DTANS	**pp;
+
+	for ( pp = &dt_ans_list; *pp != NULL; pp = &(*pp)->next ) {
+		if ( *pp == a ) {
+			*pp = a->next;
+			break;
+		}
+	}
+	if ( a->text != NULL ) Kfree(a->text);
+	if ( a->data != NULL ) Kfree(a->data);
+	a->text = a->data = NULL;
+	a->textlen = a->textcap = a->datalen = 0;
+	a->hasdata = FALSE;
+	a->next = NULL;
+}
+
+EXPORT ER dt_ans_cat( T_DTANS *an, CONST UB *s, SZ len )
+{
+	DTANS	*a = ans_of(an);
+
+	if ( a == NULL ) {
+		return E_PAR;
+	}
+	if ( s == NULL ) {
+		len = 0;
+	} else if ( len < 0 ) {
+		for ( len = 0; s[len] != 0; len++ ) ;
+	}
+	if ( a->textlen + len + 1 > a->textcap ) {
+		SZ	cap = ( a->textcap > 0 ) ? a->textcap : 256;
+		UB	*t;
+
+		while ( cap < a->textlen + len + 1 ) cap *= 2;
+		t = (UB *)Krealloc(a->text, (size_t)cap);
+		if ( t == NULL ) {
+			a->er = E_NOMEM;
+			return E_NOMEM;
+		}
+		a->text = t;
+		a->textcap = cap;
+	}
+	if ( len > 0 ) {
+		knl_memcpy(a->text + a->textlen, s, len);
+	}
+	a->textlen += len;
+	a->text[a->textlen] = 0;
+	return E_OK;
+}
+
+EXPORT ER dt_ans_num( T_DTANS *an, D v )
+{
+	UB	d[24], s[24];
+	INT	k = 0, n = 0;
+	UD	u = ( v < 0 ) ? (UD)-v : (UD)v;
+
+	do {
+		d[k++] = (UB)( '0' + (INT)( u % 10 ) );
+		u /= 10;
+	} while ( u != 0 && k < (INT)sizeof(d) );
+	if ( v < 0 ) s[n++] = '-';
+	while ( k > 0 ) s[n++] = d[--k];
+	return dt_ans_cat(an, s, n);
+}
+
+EXPORT ER dt_ans_data( T_DTANS *an, CONST UB *s, SZ len )
+{
+	DTANS	*a = ans_of(an);
+	UB	*d = NULL;
+
+	if ( a == NULL ) {
+		return E_PAR;
+	}
+	if ( s != NULL && len < 0 ) {
+		for ( len = 0; s[len] != 0; len++ ) ;
+	}
+	if ( s != NULL ) {
+		d = (UB *)Kmalloc((size_t)( len + 1 ));
+		if ( d == NULL ) {
+			a->er = E_NOMEM;
+			return E_NOMEM;
+		}
+		knl_memcpy(d, s, len);
+		d[len] = 0;
+	}
+	if ( a->data != NULL ) Kfree(a->data);
+	a->data = d;
+	a->datalen = ( d != NULL ) ? len : 0;
+	a->hasdata = (BOOL)( d != NULL );
+	return E_OK;
+}
+
+EXPORT CONST UB *dt_ans_text( CONST T_DTANS *an, SZ *p_len )
+{
+	DTANS	*a = ans_of(an);
+
+	if ( a == NULL || a->text == NULL ) {
+		if ( p_len != NULL ) *p_len = 0;
+		return (CONST UB *)"";
+	}
+	if ( p_len != NULL ) *p_len = a->textlen;
+	return a->text;
+}
+
+EXPORT void dt_ans_untext( T_DTANS *an )
+{
+	DTANS	*a = ans_of(an);
+
+	if ( a != NULL && a->text != NULL ) {
+		a->textlen = 0;
+		a->text[0] = 0;
+	}
+}
+
+/*
+ * An answer or a message of the desktop's written at k in the form of
+ * size: text and data in its tail for the form of now; for an older form
+ * in its text when they fit (data there when there is no text, as the
+ * older form had it), else E_LIMIT in it. wer, an error a word had, is
+ * the message's when it says none of its own.
+ */
+/* The message of the form of now made (Kmalloc): an, text and data in its tail; NULL no memory */
+LOCAL T_DTANS *ans_build( CONST T_DTANS *an, CONST UB *text, SZ tl, CONST UB *data, SZ dl, ER wer )
+{
+	SZ	cap = ( ( tl > 0 ) ? dt_tail_room(tl) : 0 ) + ( ( data != NULL ) ? dt_tail_room(dl) : 0 );
+	T_DTANS	*m = (T_DTANS *)Kmalloc(sizeof(T_DTANS) + (size_t)cap);
+
+	if ( m == NULL ) {
+		return NULL;
+	}
+	*m = *an;
+	knl_memset(m->text, 0, sizeof(m->text));
+	m->tailsz = 0;
+	if ( wer < E_OK && m->er >= E_OK ) {
+		m->er = wer;
+	}
+	if ( tl > 0 ) (void)dt_tail_put((UB *)( m + 1 ), &m->tailsz, cap, DT_TAIL_TEXT, text, tl);
+	if ( data != NULL ) (void)dt_tail_put((UB *)( m + 1 ), &m->tailsz, cap, DT_TAIL_DATA, data, dl);
+	return m;
+}
+
+EXPORT T_DTANS *dt_ans_message( CONST DTANS *a )
+{
+	return ans_build(&a->an, a->text, a->textlen, a->hasdata ? a->data : NULL, a->datalen, a->er);
+}
+
+LOCAL ER ans_write( ID k, CONST T_DTANS *an, SZ size, CONST UB *text, SZ tl,
+		    CONST UB *data, SZ dl, ER wer )
+{
 	SZ	asz = 0;
-	ID	k;
+	ER	er;
+
+	if ( size >= (SZ)sizeof(T_DTANS) ) {
+		T_DTANS	*m = ans_build(an, text, tl, data, dl, wer);
+
+		if ( m == NULL ) {
+			T_DTANS	o = *an;
+
+			knl_memset(o.text, 0, sizeof(o.text));
+			o.tailsz = 0;
+			if ( o.er >= E_OK ) o.er = E_NOMEM;
+			return ob_wri_rec(k, 0, 0, &o, (SZ)sizeof(o), &asz);
+		}
+		er = ob_wri_rec(k, 0, 0, m, (SZ)sizeof(T_DTANS) + (SZ)m->tailsz, &asz);
+		Kfree(m);
+		return er;
+	}
+	{
+		T_DTANS	o = *an;
+
+		knl_memset(o.text, 0, sizeof(o.text));
+		if ( wer < E_OK && o.er >= E_OK ) {
+			o.er = wer;
+		}
+		if ( tl == 0 && data != NULL ) {
+			text = data;
+			tl = dl;
+		}
+		if ( tl >= DT_TEXT_MAX ) {
+			if ( o.er >= E_OK ) o.er = E_LIMIT;	/* the older form has no room for the words */
+		} else if ( tl > 0 ) {
+			knl_memcpy(o.text, text, tl);
+		}
+		o.tailsz = 0;
+		/* in the size the program of that form reads: the structure as it was, with its padding */
+		size = DT_FORM_SIZE(size, T_DTANS);
+		return ob_wri_rec(k, 0, 0, &o, ( size < (SZ)sizeof(o) ) ? size : (SZ)sizeof(o), &asz);
+	}
+}
+
+/* The answer written, in the form of the request (size), with the words of a (NULL none) */
+LOCAL void answer_words( CONST TS_UUID *reply, CONST T_DTANS *an, SZ size, CONST DTANS *a )
+{
+	TS_UUID		none;
+	CONST UB	*text = NULL, *data = NULL;
+	SZ		tl = 0, dl = 0;
+	ID		k;
 
 	knl_memset(&none, 0, sizeof(none));
 	if ( ts_uuid_cmp(reply, &none) == 0 ) {
 		return;
 	}
+	if ( a != NULL ) {
+		text = a->text;
+		tl = a->textlen;
+		if ( a->hasdata ) {
+			data = a->data;
+			dl = a->datalen;
+		}
+	}
 	k = ob_opn_obj(reply, OB_OP_WRITE);
 	if ( k > 0 ) {
-		(void)ob_wri_rec(k, 0, 0, an, size, &asz);
+		(void)ans_write(k, an, size, text, tl, data, dl, ( a != NULL ) ? a->er : E_OK);
 		(void)ob_cls_obj(k);
 	}
 }
 
+EXPORT ER dt_tell_words( CONST TS_UUID *chan, CONST T_DTANS *an, BOOL tail,
+			 CONST UB *text, SZ tl, CONST UB *data, SZ dl, BOOL *p_gone )
+{
+	ID	k;
+	ER	er;
+
+	if ( p_gone != NULL ) *p_gone = FALSE;
+	if ( text != NULL && tl < 0 ) {
+		for ( tl = 0; text[tl] != 0; tl++ ) ;
+	}
+	if ( text == NULL ) tl = 0;
+	if ( data != NULL && dl < 0 ) {
+		for ( dl = 0; data[dl] != 0; dl++ ) ;
+	}
+	k = ob_opn_obj(chan, OB_OP_WRITE | OB_O_NOWAIT);
+	if ( k <= 0 ) {
+		if ( p_gone != NULL ) *p_gone = TRUE;	/* the channel is gone */
+		return ( k < 0 ) ? (ER)k : E_NOEXS;
+	}
+	er = ans_write(k, an, tail ? (SZ)sizeof(T_DTANS) : DTANS_V5_SIZE, text, tl, data, dl, E_OK);
+	(void)ob_cls_obj(k);
+	if ( er >= E_OK ) {
+		knl_ob_post(chan, 0, OB_E_CHANGE, NULL);
+	}
+	return er;
+}
+
+LOCAL void answer_as( CONST TS_UUID *reply, CONST T_DTANS *an, SZ size )
+{
+	answer_words(reply, an, size, NULL);
+}
 
 EXPORT void dt_answer( CONST TS_UUID *reply, CONST T_DTANS *an, SZ size )
 {
-	answer_as(reply, an, size);
+	answer_words(reply, an, size, NULL);
+}
+
+EXPORT void dt_answer_words( CONST TS_UUID *reply, CONST DTANS *a, SZ size )
+{
+	answer_words(reply, &a->an, size, a);
 }
 
 LOCAL ER carry_place( CONST T_DTREQ *rq, BOOL more, TS_UUID *p_into, ID asker );
@@ -561,29 +957,33 @@ LOCAL void carry_answer( ER er, CONST TS_UUID *into )
 	T_DTANS	an;
 	TS_UUID	made;
 
-	if ( er >= E_OK && ( carry.rq.flags & DT_F_BASE ) != 0 && carry.pending ) {
+	if ( er >= E_OK && ( carry.rq->flags & DT_F_BASE ) != 0 && carry.pending ) {
 		/* a template let go where a link goes: the new object made from it, and its link put (DT_F_BASE) */
-		static T_DTREQ	r;
+		T_DTREQ	*r = dt_rq_dup(carry.rq);
 
-		r = carry.rq;
-		r.flags = DT_F_DUPLICATE | DT_F_BASE;
-		r.carry = carry.seq;
-		r.grab_x = r.grab_y = 0;
-		r.name[0] = 0;
 		knl_memset(&made, 0, sizeof(made));
-		er = carry_place(&r, FALSE, &made, carry.asker);
+		if ( r == NULL ) {
+			er = E_NOMEM;
+		} else {
+			r->flags = DT_F_DUPLICATE | DT_F_BASE;
+			r->carry = carry.seq;
+			r->grab_x = r->grab_y = 0;
+			(void)dt_rq_reword(r, DT_TAIL_NAME, NULL, 0);	/* the copy is named anew */
+			er = carry_place(r, FALSE, &made, carry.asker);
+			Kfree(r);
+		}
 		into = ( er >= E_OK ) ? &made : NULL;
 		tm_printf((UB *)"desktop: template carried, made from it: %d\n", (INT)er);
 	}
 	knl_memset(&an, 0, sizeof(an));
-	an.seq = carry.rq.seq;
+	an.seq = carry.rq->seq;
 	an.er = er;
 	if ( into != NULL ) {
 		an.into = *into;
 	}
 	an.how = carry.copy ? DT_HOW_COPY : 0;
 	an.flags = ( er >= E_OK && carry.toprog ) ? DT_F_TO_PROG : 0;
-	answer_as(&carry.rq.reply, &an, carry.anssz);
+	answer_as(&carry.rq->reply, &an, carry.anssz);
 }
 
 /* Let go back over the asking program's own window, at px, py: its own to do there (DT_F_BACK) */
@@ -592,13 +992,13 @@ LOCAL void carry_back( INT px, INT py )
 	T_DTANS	an;
 
 	knl_memset(&an, 0, sizeof(an));
-	an.seq = carry.rq.seq;
+	an.seq = carry.rq->seq;
 	an.er = E_NOEXS;
 	an.how = carry.copy ? DT_HOW_COPY : 0;
 	an.flags = DT_F_BACK;
 	an.look.w = px;
 	an.look.h = py;
-	answer_as(&carry.rq.reply, &an, carry.anssz);
+	answer_as(&carry.rq->reply, &an, carry.anssz);
 }
 
 /* The outline where the hand is, held where it was taken */
@@ -606,10 +1006,10 @@ LOCAL void carry_outline( INT px, INT py )
 {
 	T_DPRECT	r;
 
-	r.left = px - carry.rq.grab_x;
-	r.top = py - carry.rq.grab_y;
-	r.right = r.left + carry.rq.look.w;
-	r.bottom = r.top + carry.rq.look.h;
+	r.left = px - carry.rq->grab_x;
+	r.top = py - carry.rq->grab_y;
+	r.right = r.left + carry.rq->look.w;
+	r.bottom = r.top + carry.rq->look.h;
 	wm_pointer_moved(px, py);
 	(void)wm_set_drag(&r, 1);
 }
@@ -629,6 +1029,12 @@ LOCAL void carry_links_free( void )
 		carry.links = NULL;
 	}
 	carry.nlink = 0;
+	if ( carry.words != NULL ) {
+		Kfree(carry.words);
+		carry.words = NULL;
+	}
+	carry.strsz = 0;
+	carry.wcap = 0;
 }
 
 /* A carry let go over a program's window whose program is being asked (DT_F_ASK) */
@@ -650,13 +1056,34 @@ LOCAL void carry_start( CONST T_DTREQ *rq, SZ anssz, ID asker )
 	UINT	btn = 0;
 	BOOL	up;
 
-	carry.rq = *rq;
+	T_DTREQ	*c;
+
+	if ( carry.on || carry_asking.on ) {
+		/* one carried already: this one refused, that one going on as it was */
+		T_DTANS	an;
+
+		tm_printf((UB *)"desktop: carry refused: one carried already\n");
+		knl_memset(&an, 0, sizeof(an));
+		an.seq = rq->seq;
+		an.er = E_OBJ;
+		answer_as(&rq->reply, &an, anssz);
+		return;
+	}
+	c = dt_rq_dup(rq);
+	if ( c == NULL ) {
+		T_DTANS	an;
+
+		knl_memset(&an, 0, sizeof(an));
+		an.seq = rq->seq;
+		an.er = E_NOMEM;
+		answer_as(&rq->reply, &an, anssz);
+		return;
+	}
+	if ( carry.rq != NULL ) Kfree(carry.rq);
+	carry.rq = c;
 	carry.anssz = anssz;
 	carry.copy = FALSE;
-	carry.rq.ask[0][sizeof(rq->ask[0]) - 1] = 0;
-	carry.rq.ask[1][sizeof(rq->ask[1]) - 1] = 0;
-	carry.rq.yes[sizeof(rq->yes) - 1] = 0;
-	if ( carry.on || carry_asking.on || rq->look.w <= 0 || rq->look.h <= 0
+	if ( rq->look.w <= 0 || rq->look.h <= 0
 	  || ts_hid_pointer(&px, &py, &btn) < E_OK
 	  || ts_hid_press_at(&x0, &y0) < E_OK ) {
 		/* why nothing is carried, for the console: a click is the usual one */
@@ -682,7 +1109,7 @@ LOCAL void carry_start( CONST T_DTREQ *rq, SZ anssz, ID asker )
 		return;
 	}
 	/* letters have no picture of their own on the screen: they are carried as an outline */
-	if ( ( carry.rq.flags & DT_F_TEXT ) == 0 ) {
+	if ( ( carry.rq->flags & DT_F_TEXT ) == 0 ) {
 		/*
 		 * The link where it lies in the program's window: grab_x, grab_y
 		 * are from the press, and the hand has moved on by the time the
@@ -690,10 +1117,10 @@ LOCAL void carry_start( CONST T_DTREQ *rq, SZ anssz, ID asker )
 		 */
 		T_DPRECT	r;
 
-		r.left = x0 - carry.rq.grab_x;
-		r.top = y0 - carry.rq.grab_y;
-		r.right = r.left + carry.rq.look.w;
-		r.bottom = r.top + carry.rq.look.h;
+		r.left = x0 - carry.rq->grab_x;
+		r.top = y0 - carry.rq->grab_y;
+		r.right = r.left + carry.rq->look.w;
+		r.bottom = r.top + carry.rq->look.h;
 		dt_carry_looks(&r, 1, 0, 0);
 	}
 	carry_outline(px, py);
@@ -731,22 +1158,24 @@ LOCAL void carry_to_prog( INT wid, INT px, INT py, CONST TS_UUID *into, BOOL ask
 	er = wm_obj_uuid(wid, &win);
 	if ( er >= E_OK ) {
 		er = wm_obj_drop_may(wid, carry.asker,
-				     ( ts_uuid_cmp(&carry.rq.target, &none) != 0 ) ? &carry.rq.target : NULL);
+				     ( ts_uuid_cmp(&carry.rq->target, &none) != 0 ) ? &carry.rq->target : NULL);
 	}
 	if ( er < E_OK ) {
 		carry_said_no(er);
 		carry_answer(( er == E_OACV ) ? E_OACV : E_NOEXS, NULL);
 		return;
 	}
-	if ( carry.rq.ask[0][0] != 0 ) {
-		DTWIN	*host = dt_host_of(&win);
-		BOOL	yes;
+	if ( dt_rq_word(carry.rq, DT_TAIL_ASK1, NULL)[0] != 0 ) {
+		DTWIN		*host = dt_host_of(&win);
+		CONST UB	*ask2 = dt_rq_word(carry.rq, DT_TAIL_ASK2, NULL);
+		CONST UB	*yesw = dt_rq_word(carry.rq, DT_TAIL_YES, NULL);
+		BOOL		yes;
 
 		wm_obj_quiet(TRUE);	/* the keys that answer are the panel's, not the program's */
 		yes = (BOOL)( host != NULL
-			      && dt_confirm(host, (CONST char *)carry.rq.ask[0],
-					    ( carry.rq.ask[1][0] != 0 ) ? (CONST char *)carry.rq.ask[1] : NULL,
-					    "取消", ( carry.rq.yes[0] != 0 ) ? (CONST char *)carry.rq.yes : "実行") );
+			      && dt_confirm(host, (CONST char *)dt_rq_word(carry.rq, DT_TAIL_ASK1, NULL),
+					    ( ask2[0] != 0 ) ? (CONST char *)ask2 : NULL,
+					    "取消", ( yesw[0] != 0 ) ? (CONST char *)yesw : "実行") );
 		wm_obj_quiet(FALSE);
 		if ( !yes ) {
 			wm_update();
@@ -756,12 +1185,12 @@ LOCAL void carry_to_prog( INT wid, INT px, INT py, CONST TS_UUID *into, BOOL ask
 	}
 	carry.pending = TRUE;
 	carry.toprog = TRUE;
-	carry.seq = carry.rq.seq;
+	carry.seq = carry.rq->seq;
 	carry.wid = wid;
 	carry.into = win;
 	/* the outline's corner, as over a window of the desktop's: each link put at its place in it */
-	carry.sx = px - carry.rq.grab_x;
-	carry.sy = py - carry.rq.grab_y;
+	carry.sx = px - carry.rq->grab_x;
+	carry.sy = py - carry.rq->grab_y;
 	if ( !asked ) {
 		carry.copy = TRUE;	/* it may yet refuse: the link stays where it was */
 	}
@@ -777,13 +1206,12 @@ LOCAL void carry_to_prog( INT wid, INT px, INT py, CONST TS_UUID *into, BOOL ask
  */
 LOCAL void carry_text_to_prog( INT wid, INT px, INT py, BOOL asked )
 {
-	INT	n;
-	ER	er;
+	SZ		n;
+	CONST UB	*text = dt_rq_word(carry.rq, DT_TAIL_TEXT, &n);
+	ER		er;
 
-	carry.rq.text[DT_CARRY_TEXT - 1] = 0;
-	for ( n = 0; carry.rq.text[n] != 0; n++ ) ;
-	er = wm_obj_drop_text(wid, px - carry.rq.grab_x, py - carry.rq.grab_y, dt_up_mods,
-			      &carry.rq.win, carry.rq.text, n);
+	er = wm_obj_drop_text(wid, px - carry.rq->grab_x, py - carry.rq->grab_y, dt_up_mods,
+			      &carry.rq->win, text, (INT)n);
 	if ( er == E_NOSPT ) {
 		er = E_NOEXS;
 	}
@@ -811,13 +1239,13 @@ LOCAL void carry_text_to_prog( INT wid, INT px, INT py, BOOL asked )
 LOCAL void carry_ask( INT wid, INT px, INT py )
 {
 	UINT	seq = 0;
-	BOOL	letters = (BOOL)( ( carry.rq.flags & DT_F_TEXT ) != 0 );
+	BOOL	letters = (BOOL)( ( carry.rq->flags & DT_F_TEXT ) != 0 );
 	ER	er = letters ? wm_obj_ask_text(wid, px, py, dt_up_mods, &seq)
 			     : wm_obj_ask(wid, px, py, dt_up_mods, &seq);
 
 	tm_printf((UB *)"desktop: carry asks window %d at %d,%d%s: %d\n", wid, px, py,
 		  letters ? " of letters" : "", (INT)er);
-	if ( er == E_NOSPT && ( carry.rq.flags & DT_F_ASK ) == 0 ) {
+	if ( er == E_NOSPT && ( carry.rq->flags & DT_F_ASK ) == 0 ) {
 		if ( letters ) {
 			carry_text_to_prog(wid, px, py, FALSE);
 		} else {
@@ -857,12 +1285,12 @@ LOCAL void carry_ask_poll( void )
 		carry_answer(E_NOEXS, NULL);
 		return;
 	}
-	if ( ( carry.rq.flags & DT_F_TEXT ) != 0 ) {
+	if ( ( carry.rq->flags & DT_F_TEXT ) != 0 ) {
 		carry_text_to_prog(carry_asking.wid, carry_asking.px, carry_asking.py, TRUE);
 		return;
 	}
 	carry_to_prog(carry_asking.wid, carry_asking.px, carry_asking.py,
-		      ( ( carry.rq.flags & DT_F_ASK ) != 0 ) ? &shown : NULL, TRUE);
+		      ( ( carry.rq->flags & DT_F_ASK ) != 0 ) ? &shown : NULL, TRUE);
 }
 
 /* Let go: over a window that takes links, and when the question asked is answered yes */
@@ -878,23 +1306,22 @@ LOCAL void carry_release( INT px, INT py )
 		return;
 	}
 	t = dt_win_of(wm_at(px, py));
-	if ( t == NULL && wm_at(px, py) > 0 && wm_at(px, py) == wm_obj_wid(&carry.rq.win) ) {
+	if ( t == NULL && wm_at(px, py) > 0 && wm_at(px, py) == wm_obj_wid(&carry.rq->win) ) {
 		carry_back(px, py);		/* back over the program's own window: its own to do */
 		return;
 	}
-	if ( ( carry.rq.flags & ( DT_F_FRAG | DT_F_TEXT ) ) == DT_F_FRAG ) {
+	if ( ( carry.rq->flags & ( DT_F_FRAG | DT_F_TEXT ) ) == DT_F_FRAG ) {
 		/* a picture or a figure out of a text: no window of the desktop's takes one */
 		(void)wm_msg_put("ここには置けません");
 		wm_update();
 		carry_answer(E_NOEXS, NULL);
 		return;
 	}
-	if ( ( carry.rq.flags & DT_F_TEXT ) != 0 ) {
+	if ( ( carry.rq->flags & DT_F_TEXT ) != 0 ) {
 		/* letters: onto a program's window; no window of the desktop's takes them */
-		INT	n;
+		SZ	n;
 
-		carry.rq.text[DT_CARRY_TEXT - 1] = 0;
-		for ( n = 0; carry.rq.text[n] != 0; n++ ) ;
+		(void)dt_rq_word(carry.rq, DT_TAIL_TEXT, &n);
 		if ( n > 0 && t == NULL && wm_at(px, py) > 0 ) {
 			/* another program's window: asked first for a move, offered for a copy */
 			if ( carry.copy ) {
@@ -909,8 +1336,8 @@ LOCAL void carry_release( INT px, INT py )
 		carry_answer(E_NOEXS, NULL);
 		return;
 	}
-	if ( t == NULL && wm_at(px, py) > 0 && ( carry.rq.flags & DT_F_TO_PROG ) != 0 ) {
-		if ( ( carry.rq.flags & DT_F_ASK ) != 0 || !carry.copy ) {
+	if ( t == NULL && wm_at(px, py) > 0 && ( carry.rq->flags & DT_F_TO_PROG ) != 0 ) {
+		if ( ( carry.rq->flags & DT_F_ASK ) != 0 || !carry.copy ) {
 			carry_ask(wm_at(px, py), px, py);
 		} else {
 			carry_to_prog(wm_at(px, py), px, py, NULL, FALSE);
@@ -930,32 +1357,67 @@ LOCAL void carry_release( INT px, INT py )
  */
 LOCAL ER carry_duplicate( DTWIN *t, CONST TS_UUID *target, BOOL tmpl, TS_UUID *copy )
 {
-	UB		start[WM_LABEL_MAX], name[WM_LABEL_MAX], own[TAD_NAME_MAX];
+	UB		start[WM_LABEL_MAX], name[WM_LABEL_MAX], *own, *pbase = NULL;
 	CONST char	*base = dt_base_name(target);
 	INT		k = 0, i;
+	ER		er = E_OK;
 
-	if ( base == NULL && tmpl && om_store_name(target, own, TAD_NAME_MAX) >= 0 ) {
+	/* the program's name copied: the panel below lets the list of programs be read again */
+	if ( base != NULL ) {
+		pbase = dt_cat(base, NULL);
+		base = (CONST char *)pbase;
+	}
+	own = om_store_name_dup(target, NULL);
+	if ( base == NULL && tmpl && own != NULL ) {
 		base = (CONST char *)own;
 	}
+	/* what fits of the name in the box; a copy's keeps room for のコピー */
 	if ( base != NULL ) {
-		for ( ; base[k] != 0 && k < WM_LABEL_MAX - 1; k++ ) start[k] = (UB)base[k];
-	} else if ( om_store_name(target, start, WM_LABEL_MAX - 16) > 0 ) {
-		while ( start[k] != 0 ) k++;
+		k = dt_fit(start, WM_LABEL_MAX, (CONST UB *)base);
+	} else if ( own != NULL && own[0] != 0 ) {
+		k = dt_fit(start, WM_LABEL_MAX - 16, own);
 		for ( i = 0; "のコピー"[i] != 0 && k < WM_LABEL_MAX - 1; i++ ) start[k++] = (UB)"のコピー"[i];
 	}
 	start[k] = 0;
 	if ( !dt_ask_name(t, "新しい実身の名称を入力してください", start, name, WM_LABEL_MAX) ) {
-		return E_ABORT;
-	}
-	if ( om_store_copy(target, name, TRUE, copy) < E_OK ) {
+		er = E_ABORT;
+	} else if ( om_store_copy(target, name, TRUE, copy) < E_OK ) {
 		(void)wm_msg_put("実身を作れませんでした");
-		return E_IO;
-	}
-	if ( base != NULL ) {
+		er = E_IO;
+	} else if ( base != NULL ) {
 		dt_template_made(target, copy);	/* made by the user, from the template */
 		tm_printf((UB *)"desktop: %s made from the template %s\n", name, base);
 	}
-	return E_OK;
+	if ( own != NULL ) {
+		Kfree(own);
+	}
+	if ( pbase != NULL ) {
+		Kfree(pbase);
+	}
+	return er;
+}
+
+/* A word of a link carried to another program's window put after those of the others */
+LOCAL ER carry_word( CONST UB *s, SZ len, UINT *p_at, UINT *p_len )
+{
+	if ( s == NULL ) {
+		len = 0;
+	} else if ( len < 0 ) {
+		for ( len = 0; s[len] != 0; len++ ) ;
+	}
+	if ( len > 0 && (SZ)carry.strsz + len + 1 > carry.wcap ) {
+		SZ	cap = ( carry.wcap > 0 ) ? carry.wcap : 256;
+		UB	*w;
+
+		while ( cap < (SZ)carry.strsz + len + 1 ) cap *= 2;
+		w = (UB *)Krealloc(carry.words, (size_t)cap);
+		if ( w == NULL ) {
+			return E_NOMEM;
+		}
+		carry.words = w;
+		carry.wcap = cap;
+	}
+	return ob_drop_put(carry.words, &carry.strsz, carry.wcap, s, len, p_at, p_len);
 }
 
 /* One link for the other program's window, among those it is to be dropped with */
@@ -963,7 +1425,8 @@ LOCAL ER carry_prog_link( CONST T_DTREQ *rq, TS_UUID *p_into )
 {
 	T_OBDROPV	*a, *e;
 	TS_UUID		target = rq->target;
-	UB		*name;
+	CONST UB	*w;
+	SZ		wl;
 	ER		er = wm_obj_drop_may(carry.wid, carry.asker, &target);
 
 	if ( er < E_OK ) {
@@ -990,32 +1453,61 @@ LOCAL ER carry_prog_link( CONST T_DTREQ *rq, TS_UUID *p_into )
 			*p_into = target;
 		}
 	}
-	a = (T_OBDROPV *)Kmalloc(sizeof(T_OBDROPV) * (SZ)( carry.nlink + 1 ));
-	name = (UB *)Kmalloc(TAD_NAME_MAX);
-	if ( a == NULL || name == NULL ) {
-		if ( a != NULL ) Kfree(a);
-		if ( name != NULL ) Kfree(name);
+	a = (T_OBDROPV *)Krealloc(carry.links, sizeof(T_OBDROPV) * (SZ)( carry.nlink + 1 ));
+	if ( a == NULL ) {
 		return E_NOMEM;
 	}
-	if ( carry.nlink > 0 ) {
-		knl_memcpy(a, carry.links, (INT)( sizeof(T_OBDROPV) * (SZ)carry.nlink ));
-		Kfree(carry.links);
-	}
 	carry.links = a;
-	e = &a[carry.nlink++];
+	e = &a[carry.nlink];
 	knl_memset(e, 0, sizeof(*e));
 	e->target = target;
 	/* a link to a copy shows the copy's name, not the one the original's link had */
-	if ( rq->name[0] != 0 && ( rq->flags & DT_F_DUPLICATE ) == 0 ) {
-		name_cut(e->name, rq->name, OB_DROP_NAME);
-	} else if ( om_store_name(&target, name, TAD_NAME_MAX) >= 0 ) {
-		name_cut(e->name, name, OB_DROP_NAME);
+	w = dt_rq_word(rq, DT_TAIL_NAME, &wl);
+	if ( wl > 0 && ( rq->flags & DT_F_DUPLICATE ) == 0 ) {
+		er = carry_word(w, wl, &e->name_at, &e->name_len);
+	} else {
+		SZ	nl;
+		UB	*name = om_store_name_dup(&target, &nl);	/* NULL: it has none */
+
+		er = E_OK;
+		if ( name != NULL ) {
+			er = carry_word(name, nl, &e->name_at, &e->name_len);
+			Kfree(name);
+		}
 	}
-	Kfree(name);
-	e->left = rq->grab_x;
-	e->top = rq->grab_y;
-	e->right = rq->grab_x + rq->look.w;
-	e->bottom = rq->grab_y + rq->look.h;
+	/* its relationship and its applist with it: the 固有データ goes where the link goes */
+	w = dt_rq_word(rq, DT_TAIL_REL, &wl);
+	if ( er >= E_OK && wl > 0 ) {
+		er = carry_word(w, wl, &e->rel_at, &e->rel_len);
+	}
+	if ( ( rq->flags & DT_F_APPLIST ) != 0 ) {
+		w = dt_rq_applist(rq, &wl);
+	} else {
+		w = dt_rq_word(rq, DT_TAIL_APPLIST, &wl);
+	}
+	if ( er >= E_OK && wl > 0 ) {
+		er = carry_word(w, wl, &e->appl_at, &e->appl_len);
+	}
+	if ( er < E_OK ) {
+		return er;
+	}
+	carry.nlink++;
+	/*
+	 * its box where it was, in the record it was carried out of, as a
+	 * drop from a window of the desktop's has it; a program that does
+	 * not say so gives where it stood in the outline
+	 */
+	if ( rq->was_right > rq->was_left && rq->was_bottom > rq->was_top ) {
+		e->left = rq->was_left;
+		e->top = rq->was_top;
+		e->right = rq->was_right;
+		e->bottom = rq->was_bottom;
+	} else {
+		e->left = rq->grab_x;
+		e->top = rq->grab_y;
+		e->right = rq->grab_x + rq->look.w;
+		e->bottom = rq->grab_y + rq->look.h;
+	}
 	e->frcol = rq->look.frcol;
 	e->chcol = rq->look.chcol;
 	e->tbcol = rq->look.tbcol;
@@ -1037,6 +1529,7 @@ LOCAL ER carry_prog_link( CONST T_DTREQ *rq, TS_UUID *p_into )
 			dt_link_fit(c);
 			e->right = c->right;
 			e->bottom = c->bottom;
+			tad_vobj_clear(c);
 			Kfree(c);
 		}
 	}
@@ -1062,10 +1555,10 @@ LOCAL ER carry_prog_place( CONST T_DTREQ *rq, BOOL more, TS_UUID *p_into )
 	}
 	if ( !more && carry.nlink > 0 ) {
 		/* the window it says it came from is told only when it is the process's own */
-		INT	fw = wm_obj_wid(&carry.rq.win);
+		INT	fw = wm_obj_wid(&carry.rq->win);
 		ER	de = wm_obj_drop_for(carry.wid, carry.sx, carry.sy, dt_up_mods,
-					     ( fw > 0 && wm_obj_maker(fw) == carry.asker ) ? &carry.rq.win : NULL,
-					     carry.asker, carry.links, carry.nlink);
+					     ( fw > 0 && wm_obj_maker(fw) == carry.asker ) ? &carry.rq->win : NULL,
+					     carry.asker, carry.links, carry.nlink, carry.words, (SZ)carry.strsz);
 
 		if ( de < E_OK ) {
 			carry_said_no(de);
@@ -1116,6 +1609,7 @@ typedef struct {
 	TS_UUID	proc;			/* the program's process */
 	UINT	seq;			/* of the request it was opened with */
 	UINT	age;
+	BOOL	tail;			/* it asked in the form of now: told with a tail */
 } PLINK;
 
 LOCAL PLINK	plink[PLINK_MAX];
@@ -1173,48 +1667,35 @@ LOCAL PLINK *plink_of( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UU
 LOCAL ER plink_tell( CONST PLINK *e, UINT how, CONST TS_UUID *into, CONST UB *text )
 {
 	T_DTANS	an;
-	SZ	asz = 0;
-	ID	k;
-	INT	i;
-	ER	er;
 
 	knl_memset(&an, 0, sizeof(an));
 	an.seq = e->seq;
 	an.er = E_OK;
 	an.how = how;
 	an.into = *into;
-	for ( i = 0; i < DT_TEXT_MAX - 1 && text[i] != 0; i++ ) {
-		an.text[i] = text[i];
-	}
-	k = ob_opn_obj(&e->chan, OB_OP_WRITE | OB_O_NOWAIT);
-	if ( k <= 0 ) {
-		return (ER)k;
-	}
-	er = ob_wri_rec(k, 0, 0, &an, sizeof(an), &asz);
-	(void)ob_cls_obj(k);
-	if ( er >= E_OK ) {
-		knl_ob_post(&e->chan, 0, OB_E_CHANGE, NULL);
-	}
-	return er;
+	return dt_tell_words(&e->chan, &an, e->tail, text, -1, NULL, 0, NULL);
 }
 
 /* A number put at the end of text, after a tab */
-LOCAL INT plink_num( UB *text, INT n, INT max, INT v )
+LOCAL INT plink_num( UB *text, INT n, INT v )
 {
 	UB	d[12];
 	INT	k = 0;
 	UINT	u = ( v < 0 ) ? (UINT)-v : (UINT)v;
 
-	if ( n < max - 1 ) text[n++] = '\t';
-	if ( v < 0 && n < max - 1 ) text[n++] = '-';
+	text[n++] = '	';
+	if ( v < 0 ) text[n++] = '-';
 	do {
 		d[k++] = (UB)( '0' + u % 10 );
 		u /= 10;
 	} while ( u != 0 && k < (INT)sizeof(d) );
-	while ( k > 0 && n < max - 1 ) text[n++] = d[--k];
+	while ( k > 0 ) text[n++] = d[--k];
 	text[n] = 0;
 	return n;
 }
+
+/* The bytes the two UUIDs plink_ids puts take, with the tab and the 0 */
+#define PLINK_IDS	( 2 * 40 )
 
 /* The link named at the front of text: its record's object, a tab, its vobjid; the length */
 LOCAL INT plink_ids( UB *text, CONST PLINK *e )
@@ -1223,7 +1704,7 @@ LOCAL INT plink_ids( UB *text, CONST PLINK *e )
 
 	ts_uuid_text(&e->parent, (char *)text);
 	for ( n = 0; text[n] != 0; n++ ) ;
-	text[n++] = '\t';
+	text[n++] = '	';
 	ts_uuid_text(&e->vobjid, (char *)text + n);
 	for ( ; text[n] != 0; n++ ) ;
 	return n;
@@ -1238,7 +1719,8 @@ LOCAL BOOL plink_view( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UU
 		       INT sx, INT sy, CONST char *vm, INT wrap, INT zoom, ER *p_er )
 {
 	PLINK	*e = plink_of(parent, vobjid, NULL);
-	UB	text[DT_TEXT_MAX];
+	UB	*text;
+	SZ	vl = 0;
 	INT	n, i;
 
 	if ( e == NULL ) {
@@ -1248,15 +1730,22 @@ LOCAL BOOL plink_view( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UU
 		*p_er = E_NOEXS;	/* it does not point at what asks */
 		return TRUE;
 	}
+	for ( ; vm != NULL && vm[vl] != 0; vl++ ) ;
+	text = (UB *)Kmalloc((size_t)( PLINK_IDS + 4 * 13 + 2 + vl ));
+	if ( text == NULL ) {
+		*p_er = E_NOMEM;
+		return TRUE;
+	}
 	n = plink_ids(text, e);
-	n = plink_num(text, n, DT_TEXT_MAX, sx);
-	n = plink_num(text, n, DT_TEXT_MAX, sy);
-	n = plink_num(text, n, DT_TEXT_MAX, zoom);
-	n = plink_num(text, n, DT_TEXT_MAX, wrap);
-	if ( n < DT_TEXT_MAX - 1 ) text[n++] = '\t';
-	for ( i = 0; vm != NULL && vm[i] != 0 && n < DT_TEXT_MAX - 1; i++ ) text[n++] = (UB)vm[i];
+	n = plink_num(text, n, sx);
+	n = plink_num(text, n, sy);
+	n = plink_num(text, n, zoom);
+	n = plink_num(text, n, wrap);
+	text[n++] = '	';
+	for ( i = 0; i < (INT)vl; i++ ) text[n++] = (UB)vm[i];
 	text[n] = 0;
 	*p_er = plink_tell(e, DT_HOW_LINK_VIEW, &e->target, text);
+	Kfree(text);
 	return TRUE;
 }
 
@@ -1268,7 +1757,7 @@ EXPORT BOOL dt_plink_has( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS
 EXPORT ER dt_plink_add( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UUID *copy )
 {
 	PLINK	*e = plink_of(parent, vobjid, NULL);
-	UB	text[DT_TEXT_MAX];
+	UB	text[PLINK_IDS];
 
 	if ( e == NULL ) {
 		return E_NOEXS;
@@ -1287,34 +1776,33 @@ EXPORT BOOL dt_plink_opening( CONST T_VOBJ *v, TS_UUID *p_parent )
 }
 
 /*
- * DT_RQ_OPEN with DT_F_LINK: the link it is opened from, taken off the
- * front of text, kept for what the window opened does to it. FALSE
- * when text does not begin as it should.
+ * DT_RQ_OPEN with DT_F_LINK: the link it is opened from, named by the
+ * text (its parent, its vobjid and the channel, ending at the end of the
+ * text or at a line feed), kept for what the window opened does to it;
+ * the applist and the viewMode are parts of their own. FALSE when the
+ * text is not so.
  */
 LOCAL BOOL plink_take( T_DTREQ *rq, ID asker, PLINK *e )
 {
-	INT	i, k, f = 0, at[3];
+	SZ		tl;
+	CONST UB	*t = dt_rq_word(rq, DT_TAIL_TEXT, &tl);
+	INT		i, f = 0, at[3];
 
 	knl_memset(e, 0, sizeof(*e));
-	rq->text[DT_CARRY_TEXT - 1] = 0;
 	at[0] = 0;
-	for ( i = 0; rq->text[i] != 0 && rq->text[i] != '\n'; i++ ) {
-		if ( rq->text[i] == '\t' && f < 2 ) at[++f] = i + 1;
+	for ( i = 0; i < (INT)tl && t[i] != '\n'; i++ ) {
+		if ( t[i] == '\t' && f < 2 ) at[++f] = i + 1;
 	}
-	if ( rq->text[i] != '\n' || f != 2
-	  || ts_str_to_uuid((CONST char *)rq->text + at[0], &e->parent) < E_OK
-	  || ts_str_to_uuid((CONST char *)rq->text + at[1], &e->vobjid) < E_OK
-	  || ts_str_to_uuid((CONST char *)rq->text + at[2], &e->chan) < E_OK
+	if ( f != 2
+	  || ts_str_to_uuid((CONST char *)t + at[0], &e->parent) < E_OK
+	  || ts_str_to_uuid((CONST char *)t + at[1], &e->vobjid) < E_OK
+	  || ts_str_to_uuid((CONST char *)t + at[2], &e->chan) < E_OK
 	  || knl_prc_uuid(asker, &e->proc, NULL) < E_OK ) {
 		return FALSE;
 	}
 	e->target = rq->target;
 	e->seq = rq->seq;
-	/* what follows the line, the applist, to the front */
-	for ( k = 0, i++; i < DT_CARRY_TEXT && rq->text[i] != 0; ) {
-		rq->text[k++] = rq->text[i++];
-	}
-	rq->text[k] = 0;
+	e->tail = dt_rq_tailed();
 	return TRUE;
 }
 
@@ -1340,6 +1828,7 @@ typedef struct {
 	UINT	age;
 	BOOL	has_look;		/* look told since the window opened */
 	T_DTLOOK look;
+	BOOL	tail;			/* it asked in the form of now: told with a tail */
 } LWATCH;
 
 LOCAL LWATCH	lwatch[LWATCH_MAX];
@@ -1392,6 +1881,7 @@ LOCAL ER lwatch_req( T_DTREQ *rq, T_DTANS *an, ID asker )
 	lwatch[k].target = e.target;
 	lwatch[k].chan = e.chan;
 	lwatch[k].proc = e.proc;
+	lwatch[k].tail = e.tail;
 	lwatch[k].age = ++lwatch_age;
 	if ( lwatch[k].has_look ) {
 		an->how = DT_HOW_LINK_LOOK;
@@ -1406,9 +1896,9 @@ LOCAL void lwatch_tell( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_U
 {
 	T_DTANS	*an = (T_DTANS *)Kmalloc(sizeof(T_DTANS));
 	PLINK	ids;
-	SZ	asz = 0;
+	UB	text[PLINK_IDS];
 	INT	i;
-	ID	k;
+	BOOL	gone;
 
 	if ( an == NULL ) {
 		return;
@@ -1421,7 +1911,7 @@ LOCAL void lwatch_tell( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_U
 	an->how = DT_HOW_LINK_LOOK;
 	an->into = *target;
 	an->look = *look;
-	(void)plink_ids(an->text, &ids);
+	(void)plink_ids(text, &ids);
 	for ( i = 0; i < LWATCH_MAX; i++ ) {
 		LWATCH	*w = &lwatch[i];
 
@@ -1429,17 +1919,12 @@ LOCAL void lwatch_tell( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_U
 		  || ts_uuid_cmp(&w->vobjid, vobjid) != 0 || ts_uuid_cmp(&w->target, target) != 0 ) {
 			continue;
 		}
-		k = ob_opn_obj(&w->chan, OB_OP_WRITE | OB_O_NOWAIT);
-		if ( k <= 0 ) {
-			w->used = FALSE;	/* the window's channel is gone */
-			continue;
-		}
 		w->has_look = TRUE;
 		w->look = *look;
-		if ( ob_wri_rec(k, 0, 0, an, sizeof(*an), &asz) >= E_OK ) {
-			knl_ob_post(&w->chan, 0, OB_E_CHANGE, NULL);
+		(void)dt_tell_words(&w->chan, an, w->tail, text, -1, NULL, 0, &gone);
+		if ( gone ) {
+			w->used = FALSE;	/* the window's channel is gone */
 		}
-		(void)ob_cls_obj(k);
 	}
 	Kfree(an);
 }
@@ -1474,18 +1959,67 @@ LOCAL ER let_go_req( CONST T_DTREQ *rq, T_DTANS *an )
  * rq->target, which the asking process must be able to read: a program
  * acts only on the link to the object it was opened on.
  */
+#ifdef USE_UITEST
+EXPORT TS_UUID	dt_ut_put_last;		/* what the last DT_RQ_LINK_PUT put, for the tests (openput) */
+#endif
+
+/*
+ * A link to an object the asking process made put in the first window
+ * (DT_RQ_LINK_PUT): only one the process may read
+ */
+LOCAL ER link_put_req( CONST T_DTREQ *rq, ID asker )
+{
+	SZ		nl;
+	CONST UB	*rn = dt_rq_word(rq, DT_TAIL_NAME, &nl);
+	UB		*name;
+	INT		i;
+	ER		er;
+
+	if ( ( ( knl_ob_permit_on(&rq->target, knl_ob_crd_of(asker)) | knl_ob_granted(asker, &rq->target) )
+	       & OB_OP_R ) != OB_OP_R ) {
+		return E_OACV;
+	}
+	if ( nl > 0 ) {
+		name = (UB *)Kmalloc((size_t)nl + 1);
+		if ( name != NULL ) {
+			knl_memcpy(name, rn, nl + 1);
+		}
+	} else {
+		name = om_store_name_dup(&rq->target, NULL);	/* the object's, whole */
+		if ( name == NULL ) {
+			name = (UB *)Kcalloc(1, 1);		/* it has none */
+		}
+	}
+	if ( name == NULL ) {
+		return E_NOMEM;
+	}
+	for ( i = 0; name[i] != 0; i++ ) {
+		if ( name[i] == '\t' ) name[i] = ' ';	/* the tab parts the name from the applist */
+	}
+	/* the link's own applist, its 固有データ with it: what the request carries (DT_F_APPLIST) */
+	er = dt_place_on_desktop_appl(&rq->target, name,
+				      ( ( rq->flags & DT_F_APPLIST ) != 0 ) ? dt_rq_applist(rq, NULL) : NULL);
+#ifdef USE_UITEST
+	if ( er >= E_OK ) dt_ut_put_last = rq->target;
+	tm_printf((UB *)"desktop: link put \"%s\"%s (%d)\n", name,
+		  ( ( rq->flags & DT_F_APPLIST ) != 0 ) ? " with its applist" : "", (INT)er);
+#endif
+	Kfree(name);
+	return er;
+}
+
 LOCAL ER link_req( CONST T_DTREQ *rq, T_DTANS *an, ID asker )
 {
-	TS_UUID	parent, vobjid;
-	UB	vm[TAD_VIEW_MAX];
-	INT	i;
-	ER	er;
+	TS_UUID		parent, vobjid;
+	CONST UB	*t = dt_rq_word(rq, DT_TAIL_TEXT, NULL), *vm;
+	INT		i;
+	ER		er;
 
-	if ( ts_str_to_uuid((CONST char *)rq->text, &parent) < E_OK ) {
+	if ( ts_str_to_uuid((CONST char *)t, &parent) < E_OK ) {
 		return E_PAR;
 	}
-	for ( i = 0; i < DT_CARRY_TEXT - 1 && rq->text[i] != 0 && rq->text[i] != '\t'; i++ ) ;
-	if ( rq->text[i] != '\t' || ts_str_to_uuid((CONST char *)rq->text + i + 1, &vobjid) < E_OK ) {
+	for ( i = 0; t[i] != 0 && t[i] != '\t'; i++ ) ;
+	if ( t[i] != '\t' || ts_str_to_uuid((CONST char *)t + i + 1, &vobjid) < E_OK ) {
 		return E_PAR;
 	}
 	if ( ( ( knl_ob_permit_on(&rq->target, knl_ob_crd_of(asker)) | knl_ob_granted(asker, &rq->target) )
@@ -1500,10 +2034,7 @@ LOCAL ER link_req( CONST T_DTREQ *rq, T_DTANS *an, ID asker )
 		wm_obj_quiet(FALSE);
 		return er;
 	}
-	for ( i = 0; i < TAD_VIEW_MAX - 1 && i < (INT)sizeof(rq->name) - 1 && rq->name[i] != 0; i++ ) {
-		vm[i] = rq->name[i];
-	}
-	vm[i] = 0;
+	vm = dt_rq_view(rq, NULL);
 	return dt_link_view(&parent, &vobjid, &rq->target, rq->grab_x, rq->grab_y,
 			    ( vm[0] != 0 ) ? (CONST char *)vm : NULL,
 			    ( rq->look.h == TAD_WRAP_ON || rq->look.h == TAD_WRAP_OFF ) ? rq->look.h : TAD_WRAP_NONE,
@@ -1532,10 +2063,12 @@ LOCAL TS_UUID	dt_port_u, dt_req_u;
 #define REQ_WAIT_MS	200
 
 typedef struct {
-	T_DTREQ	rq;
-	SZ	size;
+	T_DTREQ	*rq;			/* as it was read (Kmalloc), never shorter than a T_DTREQ */
+	SZ	size;			/* how much was written */
 	ID	asker;
 } DTREQQ;
+
+#define REQ_ROOM	( (SZ)sizeof(T_DTREQ) + 512 )	/* what a request is first read into */
 
 LOCAL DTREQQ	dt_reqq[REQ_Q];
 LOCAL UINT	dt_reqq_in = 0, dt_reqq_out = 0;	/* put by the task, taken by the loop */
@@ -1545,6 +2078,9 @@ LOCAL ID	dt_asker = 0;			/* the process of the request being done */
 
 LOCAL void req_task( INT stacd, void *exinf )
 {
+	T_DTREQ	*b = NULL;
+	SZ	cap = 0;
+
 	(void)stacd;
 	(void)exinf;
 	while ( dt_req_run ) {
@@ -1552,19 +2088,45 @@ LOCAL void req_task( INT stacd, void *exinf )
 		DTREQQ	*q = &dt_reqq[in % REQ_Q];
 		ID	k = dt_req;
 		SZ	asz = 0;
+		ER	er;
 
 		if ( k <= 0 || in - __atomic_load_n(&dt_reqq_out, __ATOMIC_ACQUIRE) >= REQ_Q ) {
 			tk_dly_tsk(20);		/* no channel yet, or the queue full until the loop takes some */
 			continue;
 		}
-		if ( ob_rea_tmo(k, 0, 0, &q->rq, sizeof(q->rq), &asz, REQ_WAIT_MS) < E_OK ) {
+		if ( b == NULL ) {
+			cap = REQ_ROOM;
+			b = (T_DTREQ *)Kmalloc((size_t)cap);
+			if ( b == NULL ) {
+				tk_dly_tsk(20);	/* no memory now: the requests wait on the channel */
+				continue;
+			}
+		}
+		er = ob_rea_tmo(k, 0, 0, b, cap, &asz, REQ_WAIT_MS);
+		if ( er == E_LIMIT && asz > cap ) {
+			/* longer than the room: it stays first on the channel, read again in room of its size */
+			T_DTREQ	*nb = (T_DTREQ *)Kmalloc((size_t)asz);
+
+			if ( nb == NULL ) {
+				tk_dly_tsk(20);
+				continue;
+			}
+			Kfree(b);
+			b = nb;
+			cap = asz;
+			er = ob_rea_tmo(k, 0, 0, b, cap, &asz, REQ_WAIT_MS);
+		}
+		if ( er < E_OK ) {
 			continue;
 		}
+		q->rq = b;
 		q->size = asz;
+		b = NULL;			/* the loop's now: a new room for the next */
 		q->asker = knl_obchan_last_from(&dt_req_u);
 		__atomic_store_n(&dt_reqq_in, in + 1, __ATOMIC_RELEASE);
 		ts_hid_wake();
 	}
+	if ( b != NULL ) Kfree(b);
 	tk_exd_tsk();
 }
 
@@ -1608,32 +2170,431 @@ LOCAL void req_stop( void )
 	}
 	(void)tk_del_tsk(dt_req_tsk);
 	dt_req_tsk = 0;
+	/* what the loop did not take let go */
+	while ( dt_reqq_out != dt_reqq_in ) {
+		Kfree(dt_reqq[dt_reqq_out % REQ_Q].rq);
+		dt_reqq_out++;
+	}
 }
 
-/* The next request the task read: FALSE when there is none */
-LOCAL BOOL req_take( T_DTREQ *rq, SZ *p_size )
+/* The next request the task read (Kfree it): FALSE when there is none */
+LOCAL BOOL req_take( T_DTREQ **p_rq, SZ *p_size )
 {
 	UINT	out = __atomic_load_n(&dt_reqq_out, __ATOMIC_ACQUIRE);
 
 	if ( out == __atomic_load_n(&dt_reqq_in, __ATOMIC_ACQUIRE) ) {
 		return FALSE;
 	}
-	*rq = dt_reqq[out % REQ_Q].rq;
+	*p_rq = dt_reqq[out % REQ_Q].rq;
 	*p_size = dt_reqq[out % REQ_Q].size;
 	dt_asker = dt_reqq[out % REQ_Q].asker;
 	__atomic_store_n(&dt_reqq_out, out + 1, __ATOMIC_RELEASE);
 	return TRUE;
 }
 
+/* The bytes of a fixed field of letters up to its 0, within its size */
+LOCAL SZ field_len( CONST UB *s, SZ max )
+{
+	SZ	n;
+
+	for ( n = 0; n < max && s[n] != 0; n++ ) ;
+	return n;
+}
+
+/* The fixed fields of the words emptied: a request of now has them in its tail */
+LOCAL void req_words_empty( T_DTREQ *rq )
+{
+	knl_memset(rq->name, 0, sizeof(rq->name));
+	knl_memset(rq->ask, 0, sizeof(rq->ask));
+	knl_memset(rq->yes, 0, sizeof(rq->yes));
+	knl_memset(rq->text, 0, sizeof(rq->text));
+}
+
+/*
+ * Where the fields of the older form a request of asz bytes was written
+ * in end: asz is the end itself or the structure's size with its padding
+ * (DT_FORM_SIZE), as a program built for that form sends it. 0 when it is
+ * of no form.
+ */
+LOCAL SZ form_end( CONST T_DTREQ *rq, SZ asz )
+{
+	static CONST SZ	ends[] = { DTREQ_V2_SIZE, DTREQ_V3_SIZE, DTREQ_V4_SIZE, DTREQ_V5_SIZE };
+	INT		i;
+
+	for ( i = 0; i < (INT)( sizeof(ends) / sizeof(ends[0]) ); i++ ) {
+		if ( asz == ends[i] || asz == DT_FORM_SIZE(ends[i], T_DTREQ) ) {
+			return ends[i];
+		}
+	}
+	if ( ( asz == DTREQ_OPEN_SIZE || asz == DT_FORM_SIZE(DTREQ_OPEN_SIZE, T_DTREQ) )
+	  && ( rq->req == DT_RQ_OPEN || rq->req == DT_RQ_TOOL ) ) {
+		return DTREQ_OPEN_SIZE;
+	}
+	return 0;
+}
+
+/*
+ * A request of no form known: said on the console, and answered E_PAR
+ * when it is long enough to say where (in the form of R1.100 to R1.400,
+ * which the most programs read), rather than left unanswered for the
+ * program to wait out
+ */
+LOCAL void form_refuse( CONST T_DTREQ *rq, SZ asz )
+{
+	T_DTANS	an;
+	SZ	reply_end = (SZ)( (UB *)&((T_DTREQ *)0)->reply - (UB *)0 ) + (SZ)sizeof(TS_UUID);
+
+	tm_printf((UB *)"desktop: a request of %d bytes, of no form known, refused\n", (INT)asz);
+	if ( asz < reply_end ) {
+		return;
+	}
+	knl_memset(&an, 0, sizeof(an));
+	an.seq = rq->seq;
+	an.er = E_PAR;
+	answer_as(&rq->reply, &an, DTANS_V5_SIZE);
+}
+
+/*
+ * A request taken in the form of now, as dt_rq_word reads it: one of the
+ * tail's size has its tail as it says, one of an older size what it did
+ * not write emptied and its fixed words put into a tail. The request
+ * (the same or a new one; rq let go), NULL when it is of no form -- or,
+ * answered E_NOMEM, when there was no memory for it; *p_anssz the size
+ * of its answer.
+ */
+LOCAL T_DTREQ *req_form( T_DTREQ *rq, SZ asz, SZ *p_anssz )
+{
+	SZ	ln, lt, la0, la1, ly, cap, lline, end;
+	UINT	nkind;
+	BOOL	linked, about;
+	T_DTREQ	*n;
+
+	if ( asz >= (SZ)sizeof(T_DTREQ) ) {
+		if ( rq->tailsz > 0 && dt_req_tail(rq, asz) == NULL ) {
+			/* shorter than its tail says: refused as a request of no form is */
+			form_refuse(rq, asz);
+			Kfree(rq);
+			return NULL;
+		}
+		*p_anssz = (SZ)sizeof(T_DTANS);
+		req_words_empty(rq);
+		return rq;
+	}
+	end = form_end(rq, asz);
+	if ( end == 0 ) {
+		form_refuse(rq, asz);
+		Kfree(rq);
+		return NULL;
+	}
+	knl_memset((UB *)rq + end, 0, sizeof(T_DTREQ) - (SZ)end);	/* its padding too */
+	*p_anssz = ( end == DTREQ_OPEN_SIZE ) ? DTANS_OPEN_SIZE
+		 : ( end == DTREQ_V2_SIZE ) ? DTANS_V2_SIZE : DTANS_V5_SIZE;
+	ln = field_len(rq->name, sizeof(rq->name));
+	lt = field_len(rq->text, sizeof(rq->text));
+	la0 = field_len(rq->ask[0], sizeof(rq->ask[0]));
+	la1 = field_len(rq->ask[1], sizeof(rq->ask[1]));
+	ly = field_len(rq->yes, sizeof(rq->yes));
+	/*
+	 * The older form's fields put into the parts the form of now has for
+	 * them: the name of a link opened from a program's link, or of one
+	 * whose view is written back, is its viewMode; of a link a program
+	 * asks about (仮身操作, 実行's list, its state) its relationship, but
+	 * for 実行, whose name is the program's; the text of a request from a
+	 * program's link is the line naming the link, and after it the
+	 * applist (DT_F_APPLIST), which is otherwise the whole text.
+	 */
+	linked = (BOOL)( ( ( rq->req == DT_RQ_OPEN || rq->req == DT_RQ_ATTR ) && ( rq->flags & DT_F_LINK ) != 0 )
+			 || rq->req == DT_RQ_LINK_WATCH );
+	about = (BOOL)( ( ( rq->req >= DT_RQ_CLOSE && rq->req <= DT_RQ_FULL ) || rq->req == DT_RQ_COLOUR
+			  || rq->req == DT_RQ_APPS || rq->req == DT_RQ_LINK_STATE )
+			&& rq->req != DT_RQ_EXEC && !( rq->req == DT_RQ_APPS && ( rq->flags & DT_F_INFO ) != 0 ) );
+	nkind = ( ( rq->req == DT_RQ_OPEN && ( rq->flags & DT_F_LINK ) != 0 )
+		  || rq->req == DT_RQ_SAVE_NEW || rq->req == DT_RQ_LINK_VIEW ) ? DT_TAIL_VIEW
+	      : about ? DT_TAIL_REL : DT_TAIL_NAME;
+	for ( lline = 0; linked && lline < lt && rq->text[lline] != '\n'; lline++ ) ;
+	if ( !linked ) lline = ( ( rq->flags & DT_F_APPLIST ) != 0 ) ? 0 : lt;
+	cap = ( ( ln > 0 ) ? dt_tail_room(ln) : 0 ) + ( ( lt > 0 ) ? 2 * dt_tail_room(lt) : 0 )
+	    + ( ( la0 > 0 ) ? dt_tail_room(la0) : 0 ) + ( ( la1 > 0 ) ? dt_tail_room(la1) : 0 )
+	    + ( ( ly > 0 ) ? dt_tail_room(ly) : 0 );
+	if ( cap == 0 ) {
+		return rq;
+	}
+	n = (T_DTREQ *)Kmalloc(sizeof(T_DTREQ) + (size_t)cap);
+	if ( n == NULL ) {
+		T_DTANS	an;
+
+		knl_memset(&an, 0, sizeof(an));
+		an.seq = rq->seq;
+		an.er = E_NOMEM;
+		answer_as(&rq->reply, &an, *p_anssz);
+		Kfree(rq);
+		return NULL;
+	}
+	knl_memcpy(n, rq, sizeof(T_DTREQ));
+	n->tailsz = 0;
+	if ( ln > 0 ) (void)dt_tail_put((UB *)( n + 1 ), &n->tailsz, cap, nkind, rq->name, ln);
+	if ( lline > 0 ) (void)dt_tail_put((UB *)( n + 1 ), &n->tailsz, cap, DT_TAIL_TEXT, rq->text, lline);
+	if ( linked && lline < lt ) lline++;		/* past the line feed */
+	if ( lline < lt && ( rq->flags & DT_F_APPLIST ) != 0 ) {
+		(void)dt_tail_put((UB *)( n + 1 ), &n->tailsz, cap, DT_TAIL_APPLIST, rq->text + lline, lt - lline);
+	}
+	if ( la0 > 0 ) (void)dt_tail_put((UB *)( n + 1 ), &n->tailsz, cap, DT_TAIL_ASK1, rq->ask[0], la0);
+	if ( la1 > 0 ) (void)dt_tail_put((UB *)( n + 1 ), &n->tailsz, cap, DT_TAIL_ASK2, rq->ask[1], la1);
+	if ( ly > 0 ) (void)dt_tail_put((UB *)( n + 1 ), &n->tailsz, cap, DT_TAIL_YES, rq->yes, ly);
+	req_words_empty(n);
+	Kfree(rq);
+	return n;
+}
+
+/* DT_RQ_OPEN: the object opened as a double click opens it, from the link of the program's window it names */
+LOCAL ER open_req( T_DTREQ *rq )
+{
+	T_VOBJ	v = { .recno = 0 };
+	ER	er;
+
+	/*
+	 * No link stands behind the request: its colours are not said, so
+	 * the window takes the paper the object asks for (or the usual
+	 * white) rather than a colour 0, which is black.
+	 */
+	tad_vobj_init(&v);
+	v.target = rq->target;
+	v.recno = rq->recno;
+	v.frcol = v.chcol = v.tbcol = v.bgcol = TAD_COL_NONE;
+	/* opened from a link of the program's window: what is opened acts on that link */
+	if ( ( rq->flags & DT_F_LINK ) != 0
+	  && plink_take(rq, dt_asker, &plink_now) ) {
+		CONST UB	*vm;
+		SZ		vl;
+
+		plink_put(&plink_now);
+		plink_opening = TRUE;
+		v.vobjid = plink_now.vobjid;
+		/*
+		 * the volume its object was saved on, as the record the
+		 * program saved says it: a link to a disk taken
+		 * away says which one to attach (dt_disk_absent)
+		 */
+		{
+			/* read as stored: the program wrote it, past what the store kept of it */
+			SZ	psz = 0;
+			UB	*px = om_obj_record(&plink_now.parent, 0, &psz);
+			T_TAD	*prec = NULL;
+			T_VOBJ	*pv = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
+
+			if ( px != NULL && tad_parse(px, psz, NULL, &prec) < E_OK ) prec = NULL;
+			if ( px != NULL ) Kfree(px);
+			if ( prec != NULL && pv != NULL && tad_lnk_find(prec, &plink_now.vobjid, pv) >= E_OK
+			  && ts_uuid_cmp(&pv->target, &v.target) == 0 ) {
+				v.tvol = pv->tvol;
+			}
+			if ( pv != NULL ) {
+				tad_vobj_clear(pv);
+				Kfree(pv);
+			}
+			if ( prec != NULL ) tad_free(prec);
+		}
+		/* shown as the link says, as from a link of a window of the desktop's */
+		v.frcol = rq->look.frcol;
+		v.chcol = rq->look.chcol;
+		v.tbcol = rq->look.tbcol;
+		v.bgcol = rq->look.bgcol;
+		v.wordwrap = rq->grab_x;
+		vm = dt_rq_view(rq, &vl);
+		if ( ( er = tad_vobj_set(&v, TAD_W_VIEW, vm, vl) ) < E_OK ) {
+			plink_opening = FALSE;
+			tad_vobj_clear(&v);
+			return er;
+		}
+	}
+	/* the program a fixed link keeps to */
+	er = dt_req_applist(rq, &v);
+	if ( er >= E_OK && ( rq->flags & DT_F_AUTO ) != 0 ) {
+		auto_req(rq, &v);		/* 自動起動: in its place among those opened with it */
+	} else if ( er >= E_OK ) {
+		dt_open_vobj(NULL, &v);
+	}
+	plink_opening = FALSE;
+	tad_vobj_clear(&v);
+	return er;
+}
+
+/* DT_RQ_TOOL: the accessory or the tool of the system's of the name asked started */
+LOCAL ER tool_req( CONST T_DTREQ *rq )
+{
+	CONST DTPROG	**acc;
+	CONST UB	*name = dt_rq_word(rq, DT_TAIL_NAME, NULL);
+	INT		kind, n, i;
+	ER		er = E_NOEXS;
+
+	/* every accessory, then every tool of the system's (屑実身操作 ...), however many */
+	for ( kind = DT_PK_ACCESSORY; kind <= DT_PK_UTILITY && er == E_NOEXS; kind++ ) {
+		n = dt_prog_count(kind);
+		acc = (CONST DTPROG **)Kmalloc(sizeof(DTPROG *) * (SZ)( ( n > 0 ) ? n : 1 ));
+		n = ( acc != NULL ) ? dt_prog_list(kind, acc, n) : 0;
+		if ( acc == NULL ) er = E_NOMEM;
+		for ( i = 0; i < n; i++ ) {
+			if ( knl_strcmp((CONST char *)acc[i]->name, (CONST char *)name) == 0 ) {
+				er = dt_prog_run(NULL, acc[i], NULL);
+				break;
+			}
+		}
+		if ( acc != NULL ) Kfree((void *)acc);
+	}
+	return er;
+}
+
+/* One request done: FALSE when it is answered later, or by another (the starter) */
+LOCAL BOOL req_do( T_DTREQ *rq, SZ anssz, T_DTANS *an )
+{
+	INT	keys_were = 0;
+	BOOL	quiet;
+
+	/*
+	 * A process started for the request answers it itself, once
+	 * it is there (dt_prog_run): the error of the start is the
+	 * answer's for an accessory asked for by its name, and not
+	 * for an object opened, whose answer is E_OK as a double
+	 * click's would be.
+	 */
+	quiet = FALSE;
+	if ( rq->req == DT_RQ_OPEN && ( rq->flags & DT_F_AUTO ) != 0 ) {
+		TS_UUID	none;
+
+		knl_memset(&none, 0, sizeof(none));
+		if ( ts_uuid_cmp(&rq->target, &none) == 0 ) {
+			/* the asking window's 自動起動 all asked */
+			first_auto_done(dt_asker, rq->grab_y);
+			return TRUE;
+		}
+	}
+	if ( rq->req == DT_RQ_OPEN || rq->req == DT_RQ_TOOL ) {
+		ID	asker = dt_asker;
+
+		dt_prog_reply(&rq->reply, rq->seq, anssz, (BOOL)( rq->req == DT_RQ_TOOL ));
+		/*
+		 * a program without the keys is not being worked, and what
+		 * a window opens by itself is opened by no act of the
+		 * person: what it asks for opens without them
+		 */
+		if ( ( asker > 0 && wm_obj_maker(wm_focused()) != asker )
+		  || ( rq->req == DT_RQ_OPEN && ( rq->flags & DT_F_AUTO ) != 0 ) ) {
+			quiet = TRUE;
+			dt_opens_quiet++;
+			keys_were = wm_focused();
+		}
+	}
+	if ( rq->req == DT_RQ_OPEN ) {
+		an->er = open_req(rq);
+	} else if ( rq->req == DT_RQ_CARRY ) {
+		carry_start(rq, anssz, dt_asker);	/* answered when the hand lets go */
+		return FALSE;
+	} else if ( rq->req == DT_RQ_PLACE || rq->req == DT_RQ_PLACE_MORE ) {
+		an->er = carry_place(rq, (BOOL)( rq->req == DT_RQ_PLACE_MORE ), &an->into,
+				     dt_asker);
+	} else if ( rq->req == DT_RQ_ATTR && ( rq->flags & DT_F_LINK ) != 0 ) {
+		/* 仮身属性変更 of a link the program names: the windows opened from it told its new look */
+		PLINK	e;
+
+		if ( !plink_take(rq, dt_asker, &e) ) {
+			an->er = E_PAR;
+		} else {
+			rq->flags &= ~DT_F_LINK;
+			an->er = dt_proc_link_op(rq, an);
+			if ( an->er >= E_OK ) lwatch_tell(&e.parent, &e.vobjid, &rq->target, &an->look);
+		}
+	} else if ( rq->req >= DT_RQ_CLOSE && rq->req <= DT_RQ_FULL ) {
+		an->er = dt_proc_link_op(rq, an);	/* 仮身操作 and 実身操作 of a program's link */
+	} else if ( rq->req == DT_RQ_LINK_WATCH ) {
+		an->er = lwatch_req(rq, an, dt_asker);	/* a window told how the link it was opened from looks */
+	} else if ( rq->req == DT_RQ_COLOUR ) {
+		an->er = dt_proc_link_op(rq, an);	/* a colour chosen for a program, over its window */
+	} else if ( ( rq->req == DT_RQ_APPS && ( rq->flags & DT_F_INFO ) != 0 )
+		 || rq->req == DT_RQ_INFO_APPS || rq->req == DT_RQ_INFO_KEEP ) {
+		/* 管理情報's process, for the link it was started on */
+		an->er = dt_info_req(rq, an, dt_asker);
+	} else if ( rq->req == DT_RQ_APPS ) {
+		an->er = dt_apps_req(rq, an);		/* 実行's list for a program's link */
+	} else if ( rq->req == DT_RQ_LINK_STATE ) {
+		an->er = dt_link_state_req(rq, an);	/* how a program's link stands, for its menu */
+	} else if ( ( rq->req >= DT_RQ_TELL && rq->req <= DT_RQ_WIN_LIST ) || rq->req == DT_RQ_ROOTS ) {
+		/* the system's tools: told of changes, 削除 and 再探索 of 屑実身操作, ウインドウ一覧 */
+		an->er = dt_tool_req(rq, an, dt_asker);
+	} else if ( rq->req == DT_RQ_ACC_LIST || rq->req == DT_RQ_ACC_SET ) {
+		an->er = dt_acc_req(rq, an);		/* the 小物箱's list, and the person's changes to it */
+	} else if ( rq->req == DT_RQ_LINK_PUT ) {
+		an->er = link_put_req(rq, dt_asker);	/* a link to what the program made, in the first window */
+	} else if ( rq->req == DT_RQ_SAVE_NEW || rq->req == DT_RQ_LINK_VIEW ) {
+		an->er = link_req(rq, an, dt_asker);	/* the link it was opened from */
+	} else if ( rq->req == DT_RQ_LET_GO ) {
+		an->er = let_go_req(rq, an);		/* shapes let go over another window: they stay */
+	} else if ( rq->req == DT_RQ_FIRST_CLOSE ) {
+		an->er = first_close_req(rq);		/* the first window closing: the session's end */
+	} else if ( rq->req == DT_RQ_DISK ) {
+		an->er = dt_disk_req(rq, an, dt_asker);	/* ディスク操作's steps */
+	} else if ( rq->req == DT_RQ_SYSINST ) {
+		/* システム登録: the disks, the plan, and the copy done in a task of the desktop's */
+		an->er = dt_sysinst_req(rq, an, dt_asker);
+	} else if ( rq->req == DT_RQ_ADMIN ) {
+		an->er = dt_admin_req(rq, dt_asker);
+	} else if ( rq->req == DT_RQ_SYSUP ) {
+		/* the system updated from its package: the administrator asked at its beginning */
+		an->er = dt_sysup_req(rq, an, dt_asker);
+	} else if ( rq->req == DT_RQ_REMOVE
+		 && !knl_ob_pid_admin(dt_asker)
+		 && ( an->er = dt_admin_ask(dt_asker,
+					    (CONST UB *)"プログラムの削除", &rq->win) ) < E_OK ) {
+		/* only an administrator takes away programs: the password asked for */
+	} else if ( rq->req == DT_RQ_INSTALL ) {
+		an->er = dt_pkg_install(&rq->target, (BOOL)( rq->recno == 1 ), dt_asker,
+					&rq->win, &an->into, &an->how);
+	} else if ( rq->req == DT_RQ_REMOVE ) {
+		an->er = dt_prog_remove(&rq->target);
+	} else if ( ( rq->req == DT_RQ_FONT_REG || rq->req == DT_RQ_FONT_SET || rq->req == DT_RQ_FONT_DEL )
+		 && !knl_ob_pid_admin(dt_asker)
+		 && ( an->er = dt_admin_ask(dt_asker,
+					    (CONST UB *)( ( rq->req == DT_RQ_FONT_DEL ) ? "書体の削除"
+										  : "書体の登録" ), &rq->win) ) < E_OK ) {
+		/* only an administrator changes the system's faces: the password asked for */
+	} else if ( rq->req >= DT_RQ_FONT_REG && rq->req <= DT_RQ_FONT_TRY ) {
+		an->er = dt_font_req(rq, an);		/* システム環境設定's 書体 */
+	} else if ( rq->req == DT_RQ_TOOL ) {
+		an->er = tool_req(rq);
+	} else if ( rq->req == DT_RQ_TYPE ) {
+		an->er = dt_type_req(rq, an);		/* letters into the window the keys went to before */
+	} else if ( rq->req == DT_RQ_PRINT ) {
+		an->er = dt_print_spool(rq, anssz);	/* 印刷 of the pages it made, by 基本印刷 */
+	} else if ( rq->req == DT_RQ_PRJOB ) {
+		/* 基本印刷 asks for what it prints */
+		an->er = dt_print_req(rq, an, dt_asker);
+	} else if ( rq->req == DT_RQ_SCRPRINT ) {
+		/* 画面印刷's panel asks, and hands over what it set */
+		an->er = dt_scr_req(rq, an, dt_asker);
+	} else if ( rq->req == DT_RQ_NOTIFY ) {
+		an->er = dt_note_req(rq, an);		/* 通知: shown, what comes of it told later */
+	} else if ( rq->req == DT_RQ_SCREEN ) {
+		an->er = dt_screen_req(rq);		/* システム環境設定's 画面サイズ, now */
+	} else {
+		an->er = E_PAR;
+	}
+	if ( quiet ) {
+		dt_opens_quiet--;
+		if ( keys_were > 0 && wm_focused() != keys_were ) (void)wm_focus(keys_were);
+	}
+	wm_update();
+	if ( dt_prog_reply_taken() ) {
+		dt_prog_reply(NULL, 0, 0, FALSE);
+		return FALSE;			/* the starter answers */
+	}
+	dt_prog_reply(NULL, 0, 0, FALSE);
+	return (BOOL)( an->er != DT_ANS_LATER );	/* later: when what it asked for is over */
+}
+
 LOCAL void process_requests( void )
 {
-	T_DTREQ		rq;
-	T_DTANS		an;
-	T_VOBJ		v;
-	SZ		asz = 0;
-	INT		i, n, keys_were = 0;
-	SZ		anssz;
-	BOOL		quiet;
+	T_DTREQ	*rq;
+	DTANS	a;
+	SZ	asz = 0, anssz = 0;
 
 	while ( req_take(&rq, &asz) ) {
 		/*
@@ -1641,232 +2602,19 @@ LOCAL void process_requests( void )
 		 * page of 印刷 -- is the asking process's to 強制終了 (5.5.1).
 		 */
 		knl_wmobj_act_for(dt_asker);
-		if ( asz != (SZ)sizeof(rq) && asz != DTREQ_V2_SIZE && asz != DTREQ_V3_SIZE
-		  && !( asz == DTREQ_OPEN_SIZE && ( rq.req == DT_RQ_OPEN || rq.req == DT_RQ_TOOL ) ) ) {
+		rq = req_form(rq, asz, &anssz);
+		if ( rq == NULL ) {
 			continue;
 		}
-		if ( asz < (SZ)sizeof(rq) ) {
-			knl_memset((UB *)&rq + asz, 0, sizeof(rq) - (SZ)asz);
+		dt_req_tailed = (BOOL)( anssz >= (SZ)sizeof(T_DTANS) );
+		dt_req_anssz = anssz;
+		dt_ans_begin(&a, rq->seq);
+		if ( req_do(rq, anssz, &a.an) ) {
+			answer_words(&rq->reply, &a.an, anssz, &a);
 		}
-		anssz = ( asz == DTREQ_OPEN_SIZE ) ? DTANS_OPEN_SIZE
-		      : ( asz == DTREQ_V2_SIZE ) ? DTANS_V2_SIZE : (SZ)sizeof(an);
-		knl_memset(&an, 0, sizeof(an));
-		an.seq = rq.seq;
-		an.er = E_OK;
-		/*
-		 * A process started for the request answers it itself, once
-		 * it is there (dt_prog_run): the error of the start is the
-		 * answer's for an accessory asked for by its name, and not
-		 * for an object opened, whose answer is E_OK as a double
-		 * click's would be.
-		 */
-		quiet = FALSE;
-		if ( rq.req == DT_RQ_OPEN && ( rq.flags & DT_F_AUTO ) != 0 ) {
-			TS_UUID	none;
-
-			knl_memset(&none, 0, sizeof(none));
-			if ( ts_uuid_cmp(&rq.target, &none) == 0 ) {
-				/* the asking window's 自動起動 all asked */
-				first_auto_done(dt_asker, rq.grab_y);
-				answer_as(&rq.reply, &an, anssz);
-				continue;
-			}
-		}
-		if ( rq.req == DT_RQ_OPEN || rq.req == DT_RQ_TOOL ) {
-			ID	asker = dt_asker;
-
-			dt_prog_reply(&rq.reply, rq.seq, anssz, (BOOL)( rq.req == DT_RQ_TOOL ));
-			/*
-			 * a program without the keys is not being worked, and what
-			 * a window opens by itself is opened by no act of the
-			 * person: what it asks for opens without them
-			 */
-			if ( ( asker > 0 && wm_obj_maker(wm_focused()) != asker )
-			  || ( rq.req == DT_RQ_OPEN && ( rq.flags & DT_F_AUTO ) != 0 ) ) {
-				quiet = TRUE;
-				dt_opens_quiet++;
-				keys_were = wm_focused();
-			}
-		}
-		if ( rq.req == DT_RQ_OPEN ) {
-			/*
-			 * No link stands behind the request: its colours are
-			 * not said, so the window takes the paper the object
-			 * asks for (or the usual white) rather than a colour 0,
-			 * which is black.
-			 */
-			knl_memset(&v, 0, sizeof(v));
-			v.target = rq.target;
-			v.recno = rq.recno;
-			v.frcol = v.chcol = v.tbcol = v.bgcol = TAD_COL_NONE;
-			/* opened from a link of the program's window: what is opened acts on that link */
-			if ( ( rq.flags & DT_F_LINK ) != 0
-			  && plink_take(&rq, dt_asker, &plink_now) ) {
-				INT	i;
-
-				plink_put(&plink_now);
-				plink_opening = TRUE;
-				v.vobjid = plink_now.vobjid;
-				/*
-				 * the volume its object was saved on, as the record the
-				 * program saved says it: a link to a disk taken
-				 * away says which one to attach (dt_disk_absent)
-				 */
-				{
-					/* read as stored: the program wrote it, past what the store kept of it */
-					SZ	psz = 0;
-					UB	*px = om_obj_record(&plink_now.parent, 0, &psz);
-					T_TAD	*prec = NULL;
-					T_VOBJ	*pv = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
-
-					if ( px != NULL && tad_parse(px, psz, NULL, &prec) < E_OK ) prec = NULL;
-					if ( px != NULL ) Kfree(px);
-					if ( prec != NULL && pv != NULL && tad_lnk_find(prec, &plink_now.vobjid, pv) >= E_OK
-					  && ts_uuid_cmp(&pv->target, &v.target) == 0 ) {
-						v.tvol = pv->tvol;
-					}
-					if ( pv != NULL ) Kfree(pv);
-					if ( prec != NULL ) tad_free(prec);
-				}
-				/* shown as the link says, as from a link of a window of the desktop's */
-				v.frcol = rq.look.frcol;
-				v.chcol = rq.look.chcol;
-				v.tbcol = rq.look.tbcol;
-				v.bgcol = rq.look.bgcol;
-				v.wordwrap = rq.grab_x;
-				for ( i = 0; i < TAD_VIEW_MAX - 1 && i < (INT)sizeof(rq.name) - 1 && rq.name[i] != 0; i++ ) {
-					v.viewmode[i] = rq.name[i];
-				}
-				v.viewmode[i] = 0;
-			}
-			dt_req_applist(&rq, &v);	/* the program a fixed link keeps to */
-			if ( ( rq.flags & DT_F_AUTO ) != 0 ) {
-				auto_req(&rq, &v);	/* 自動起動: in its place among those opened with it */
-			} else {
-				dt_open_vobj(NULL, &v);
-			}
-			plink_opening = FALSE;
-		} else if ( rq.req == DT_RQ_CARRY ) {
-			carry_start(&rq, anssz, dt_asker);	/* answered when the hand lets go */
-			continue;
-		} else if ( rq.req == DT_RQ_PLACE || rq.req == DT_RQ_PLACE_MORE ) {
-			an.er = carry_place(&rq, (BOOL)( rq.req == DT_RQ_PLACE_MORE ), &an.into,
-					    dt_asker);
-		} else if ( rq.req == DT_RQ_ATTR && ( rq.flags & DT_F_LINK ) != 0 ) {
-			/* 仮身属性変更 of a link the program names: the windows opened from it told its new look */
-			PLINK	e;
-
-			if ( !plink_take(&rq, dt_asker, &e) ) {
-				an.er = E_PAR;
-			} else {
-				rq.flags &= ~DT_F_LINK;
-				an.er = dt_proc_link_op(&rq, &an);
-				if ( an.er >= E_OK ) lwatch_tell(&e.parent, &e.vobjid, &rq.target, &an.look);
-			}
-		} else if ( rq.req >= DT_RQ_CLOSE && rq.req <= DT_RQ_FULL ) {
-			an.er = dt_proc_link_op(&rq, &an);	/* 仮身操作 and 実身操作 of a program's link */
-		} else if ( rq.req == DT_RQ_LINK_WATCH ) {
-			an.er = lwatch_req(&rq, &an, dt_asker);	/* a window told how the link it was opened from looks */
-		} else if ( rq.req == DT_RQ_COLOUR ) {
-			an.er = dt_proc_link_op(&rq, &an);	/* a colour chosen for a program, over its window */
-		} else if ( ( rq.req == DT_RQ_APPS && ( rq.flags & DT_F_INFO ) != 0 )
-			 || rq.req == DT_RQ_INFO_APPS || rq.req == DT_RQ_INFO_KEEP ) {
-			/* 管理情報's process, for the link it was started on */
-			an.er = dt_info_req(&rq, &an, dt_asker);
-		} else if ( rq.req == DT_RQ_APPS ) {
-			an.er = dt_apps_req(&rq, &an);		/* 実行's list for a program's link */
-		} else if ( rq.req == DT_RQ_LINK_STATE ) {
-			an.er = dt_link_state_req(&rq, &an);	/* how a program's link stands, for its menu */
-		} else if ( ( rq.req >= DT_RQ_TELL && rq.req <= DT_RQ_WIN_LIST ) || rq.req == DT_RQ_ROOTS ) {
-			/* the system's tools: told of changes, 削除 and 再探索 of 屑実身操作, ウインドウ一覧 */
-			an.er = dt_tool_req(&rq, &an, dt_asker);
-		} else if ( rq.req == DT_RQ_ACC_LIST || rq.req == DT_RQ_ACC_SET ) {
-			an.er = dt_acc_req(&rq, &an);		/* the 小物箱's list, and the person's changes to it */
-		} else if ( rq.req == DT_RQ_SAVE_NEW || rq.req == DT_RQ_LINK_VIEW ) {
-			an.er = link_req(&rq, &an, dt_asker);	/* the link it was opened from */
-		} else if ( rq.req == DT_RQ_LET_GO ) {
-			an.er = let_go_req(&rq, &an);		/* shapes let go over another window: they stay */
-		} else if ( rq.req == DT_RQ_FIRST_CLOSE ) {
-			an.er = first_close_req(&rq);		/* the first window closing: the session's end */
-		} else if ( rq.req == DT_RQ_DISK ) {
-			an.er = dt_disk_req(&rq, &an, dt_asker);	/* ディスク操作's steps */
-		} else if ( rq.req == DT_RQ_SYSINST ) {
-			/* システム登録: the disks, the plan, and the copy done in a task of the desktop's */
-			an.er = dt_sysinst_req(&rq, &an, dt_asker);
-		} else if ( rq.req == DT_RQ_ADMIN ) {
-			an.er = dt_admin_req(&rq, dt_asker);
-		} else if ( rq.req == DT_RQ_SYSUP ) {
-			/* the system updated from its package: the administrator asked at its beginning */
-			an.er = dt_sysup_req(&rq, &an, dt_asker);
-		} else if ( rq.req == DT_RQ_REMOVE
-			 && !knl_ob_pid_admin(dt_asker)
-			 && ( an.er = dt_admin_ask(dt_asker,
-						   (CONST UB *)"プログラムの削除", &rq.win) ) < E_OK ) {
-			/* only an administrator takes away programs: the password asked for */
-		} else if ( rq.req == DT_RQ_INSTALL ) {
-			an.er = dt_pkg_install(&rq.target, (BOOL)( rq.recno == 1 ), dt_asker,
-					       &rq.win, &an.into, &an.how);
-		} else if ( rq.req == DT_RQ_REMOVE ) {
-			an.er = dt_prog_remove(&rq.target);
-		} else if ( ( rq.req == DT_RQ_FONT_REG || rq.req == DT_RQ_FONT_SET || rq.req == DT_RQ_FONT_DEL )
-			 && !knl_ob_pid_admin(dt_asker)
-			 && ( an.er = dt_admin_ask(dt_asker,
-						   (CONST UB *)( ( rq.req == DT_RQ_FONT_DEL ) ? "書体の削除"
-										 : "書体の登録" ), &rq.win) ) < E_OK ) {
-			/* only an administrator changes the system's faces: the password asked for */
-		} else if ( rq.req >= DT_RQ_FONT_REG && rq.req <= DT_RQ_FONT_TRY ) {
-			an.er = dt_font_req(&rq, &an);		/* システム環境設定's 書体 */
-		} else if ( rq.req == DT_RQ_TOOL ) {
-			CONST DTPROG	**acc;
-			INT		kind;
-
-			rq.name[sizeof(rq.name) - 1] = 0;
-			an.er = E_NOEXS;
-			/* every accessory, then every tool of the system's (屑実身操作 ...), however many */
-			for ( kind = DT_PK_ACCESSORY; kind <= DT_PK_UTILITY && an.er == E_NOEXS; kind++ ) {
-				n = dt_prog_count(kind);
-				acc = (CONST DTPROG **)Kmalloc(sizeof(DTPROG *) * (SZ)( ( n > 0 ) ? n : 1 ));
-				n = ( acc != NULL ) ? dt_prog_list(kind, acc, n) : 0;
-				if ( acc == NULL ) an.er = E_NOMEM;
-				for ( i = 0; i < n; i++ ) {
-					if ( knl_strcmp((CONST char *)acc[i]->name, (CONST char *)rq.name) == 0 ) {
-						an.er = dt_prog_run(NULL, acc[i], NULL);
-						break;
-					}
-				}
-				if ( acc != NULL ) Kfree((void *)acc);
-			}
-		} else if ( rq.req == DT_RQ_TYPE ) {
-			an.er = dt_type_req(&rq, &an);	/* letters into the window the keys went to before */
-		} else if ( rq.req == DT_RQ_PRINT ) {
-			an.er = dt_print_spool(&rq, anssz);	/* 印刷 of the pages it made, by 基本印刷 */
-		} else if ( rq.req == DT_RQ_PRJOB ) {
-			/* 基本印刷 asks for what it prints */
-			an.er = dt_print_req(&rq, &an, dt_asker);
-		} else if ( rq.req == DT_RQ_SCRPRINT ) {
-			/* 画面印刷's panel asks, and hands over what it set */
-			an.er = dt_scr_req(&rq, &an, dt_asker);
-		} else if ( rq.req == DT_RQ_NOTIFY ) {
-			an.er = dt_note_req(&rq, &an);		/* 通知: shown, what comes of it told later */
-		} else if ( rq.req == DT_RQ_SCREEN ) {
-			an.er = dt_screen_req(&rq);		/* システム環境設定's 画面サイズ, now */
-		} else {
-			an.er = E_PAR;
-		}
-		if ( quiet ) {
-			dt_opens_quiet--;
-			if ( keys_were > 0 && wm_focused() != keys_were ) (void)wm_focus(keys_were);
-		}
-		wm_update();
-		if ( dt_prog_reply_taken() ) {
-			dt_prog_reply(NULL, 0, 0, FALSE);
-			continue;		/* the starter answers */
-		}
-		dt_prog_reply(NULL, 0, 0, FALSE);
-		if ( an.er == DT_ANS_LATER ) {
-			continue;		/* answered when what it asked for is over */
-		}
-		answer_as(&rq.reply, &an, anssz);
+		dt_ans_end(&a);
+		dt_req_tailed = FALSE;
+		Kfree(rq);
 	}
 	knl_wmobj_act_for(0);
 }
@@ -2007,23 +2755,26 @@ EXPORT DTWIN *dt_own_open( CONST DTOWN *own, void *self, CONST T_DPRECT *o, UINT
 		(void)wm_msg_put("これ以上ウインドウを開けません。どれかを閉じてください");
 		return NULL;
 	}
-	wid = wm_open(o, attr, title);
+	{
+		UB	t[WM_TITLE_MAX];
+
+		(void)dt_fit(t, WM_TITLE_MAX, (CONST UB *)title);	/* the window manager's room for a title */
+		wid = wm_open(o, attr, (CONST char *)t);
+	}
 	if ( wid < 0 ) {
 		return NULL;
 	}
 	if ( prog != NULL ) {
 		dt_win_icon(wid, prog);
 	}
+	if ( d->name != NULL ) Kfree(d->name);
 	knl_memset(d, 0, sizeof(*d));
 	d->used   = TRUE;
 	d->tool   = DT_TOOL_OWN;
 	d->own    = own;
 	d->self   = self;
 	d->wid    = wid;
-	for ( i = 0; title[i] != 0 && i < TAD_NAME_MAX - 1; i++ ) {
-		d->name[i] = (UB)title[i];
-	}
-	d->name[i] = 0;
+	d->name = dt_cat(( title != NULL ) ? title : "", NULL);	/* whole; NULL said on the console */
 	win_watch(d, NULL);
 	wm_raise(wid);
 	wm_focus(wid);
@@ -2183,7 +2934,7 @@ LOCAL ID first_pid( void )
 LOCAL ER first_start( void )
 {
 	CONST DTPROG	*p = dt_prog_find((CONST UB *)FIRST_PROG);
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	ER		er;
 
 	knl_memset(&v, 0, sizeof(v));
@@ -2290,14 +3041,6 @@ LOCAL BOOL str_is( CONST UB *a, CONST char *b )
 	return (BOOL)( a[i] == 0 && b[i] == 0 );
 }
 
-LOCAL void str_put( UB *out, CONST char *s, INT max )
-{
-	INT	i;
-
-	for ( i = 0; s[i] != 0 && i < max - 1; i++ ) out[i] = (UB)s[i];
-	out[i] = 0;
-}
-
 /*
  * A window opened from a link, closing: where it was scrolled to, how it
  * was shown (viewMode, wordWrap) and how large (zoomratio) go back into
@@ -2321,10 +3064,13 @@ EXPORT ER dt_link_view( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_U
 		return ( er < E_OK ) ? er : E_OK;
 	}
 	rec = om_store_get(parent, 0);
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	if ( rec == NULL || v == NULL || tad_lnk_find(rec, vobjid, v) < E_OK
 	  || ( target != NULL && ts_uuid_cmp(&v->target, target) != 0 ) ) {
-		if ( v != NULL ) Kfree(v);
+		if ( v != NULL ) {
+			tad_vobj_clear(v);
+			Kfree(v);
+		}
 		return E_NOEXS;
 	}
 	if ( v->scrollx != sx || v->scrolly != sy ) {
@@ -2332,8 +3078,13 @@ EXPORT ER dt_link_view( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_U
 		v->scrolly = sy;
 		changed = TRUE;
 	}
-	if ( vm != NULL && !str_is(v->viewmode, vm) ) {
-		str_put(v->viewmode, vm, TAD_VIEW_MAX);
+	if ( vm != NULL && !str_is(TAD_VS(v->vview), vm) ) {
+		er = tad_vobj_set(v, TAD_W_VIEW, (CONST UB *)vm, -1);
+		if ( er < E_OK ) {
+			tad_vobj_clear(v);
+			Kfree(v);
+			return er;
+		}
 		changed = TRUE;
 	}
 	if ( wrap != TAD_WRAP_NONE && v->wordwrap != wrap ) {
@@ -2347,6 +3098,7 @@ EXPORT ER dt_link_view( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_U
 	if ( changed && ( er = tad_lnk_set(rec, v) ) >= E_OK ) {
 		er = om_store_save(parent, 0);
 	}
+	tad_vobj_clear(v);
 	Kfree(v);
 	return ( er < E_OK ) ? er : E_OK;
 }
@@ -2384,6 +3136,10 @@ LOCAL void win_close( DTWIN *d )
 	}
 	if ( dt_own_held == d->wid ) {
 		dt_own_held = 0;
+	}
+	if ( d->name != NULL ) {
+		Kfree(d->name);
+		d->name = NULL;
 	}
 	d->used = FALSE;
 }
@@ -2448,7 +3204,7 @@ LOCAL BOOL app_any( CONST T_VOBJ *v )
 		return TRUE;
 	}
 	n = dt_app_list(v, a, room, NULL);
-	Kfree(a);
+	dt_app_free(a, n);
 	return (BOOL)( n > 0 );
 }
 
@@ -2478,10 +3234,22 @@ EXPORT void dt_open_vobj( DTWIN *from, CONST T_VOBJ *v )
 	if ( dt_disk_absent(from, v) ) {
 		return;
 	}
-	/* a program object: the program is run */
+	/*
+	 * a program object: the program is run, given the 固有データ the
+	 * link's applist (or the program object's) gives it (design 11.3)
+	 */
 	p = dt_prog_of(&v->target);
 	if ( p != NULL ) {
-		(void)dt_prog_run(from, p, NULL);
+		SZ	dl = 0;
+		UB	*data = dt_prog_data(p, &v->target, v->vapplist, &dl);
+
+		if ( dt_prog_data_next(TRUE, data, dl) >= E_OK ) {
+			(void)dt_prog_run(from, p, NULL);
+		} else {
+			(void)wm_msg_put("メモリが足りないため、プログラムを起動できませんでした");
+		}
+		(void)dt_prog_data_next(FALSE, NULL, 0);
+		if ( data != NULL ) Kfree(data);
 		return;
 	}
 	/* a command (a program without a window of its own) wherever it is: run in a コンソール */
@@ -2848,7 +3616,7 @@ EXPORT void dt_exec( DTWIN *from, CONST T_VOBJ *v, INT index )
 	} else {
 		dt_open_vobj(from, v);
 	}
-	if ( a != NULL ) Kfree(a);
+	dt_app_free(a, n);
 }
 
 /*
@@ -2976,13 +3744,14 @@ LOCAL void win_menu_do( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 
 LOCAL void menu_at( DTWIN *d, INT x, INT y, UD when )
 {
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	T_MNSEL		sel;
 	INT		pid, cmd = 0;
 	BOOL		on = FALSE;
 	ID		mid;
 	ER		er;
 
+	tad_vobj_init(&v);		/* the part's link_at fills it; let go at the end */
 	/* a press outside the window (on the ground, which gives the menu to the active window) is on no link */
 	{
 		T_WMWIN	ww;
@@ -2994,11 +3763,13 @@ LOCAL void menu_at( DTWIN *d, INT x, INT y, UD when )
 		}
 	}
 	if ( win_menu(d, on, &v, &mid) < E_OK ) {
+		tad_vobj_clear(&v);
 		return;
 	}
 	pid = mn_opn_men(mid, d->wid, x, y);
 	if ( pid >= 0 ) {
-		tm_printf((UB *)"desktop: menu %s\n", d->name);	/* for the tests, as a process's says it */
+		tm_printf((UB *)"desktop: menu %s\n",		/* for the tests, as a process's says it */
+			  ( d->name != NULL ) ? (CONST char *)d->name : "");
 		cmd = dt_run_menu(d, pid, when);
 	}
 	er = mn_get_sel(mid, cmd, &sel);
@@ -3007,6 +3778,7 @@ LOCAL void menu_at( DTWIN *d, INT x, INT y, UD when )
 		tm_printf((UB *)"desktop: chosen %s\n", sel.code);
 		win_menu_do(d, &sel, on, &v);
 	}
+	tad_vobj_clear(&v);
 	wm_update();
 }
 
@@ -3041,18 +3813,17 @@ EXPORT BOOL dt_ask_name( DTWIN *d, CONST char *prompt, CONST UB *start,
 	T_WMPANEL	*def;
 	T_WMWIN		w;
 	T_WMEV		ev;
-	INT		pid, cx, cy, i;
+	INT		pid, cx, cy;
 	UINT		ans = WM_ANS_NONE;
 
 	if ( d == NULL || out == NULL || max < 2
 	  || wm_ref(d->wid, &w) < E_OK ) {
 		return FALSE;
 	}
-	def = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	def = wm_panel_new(4);
 	if ( def == NULL ) {
 		return FALSE;
 	}
-	knl_memset(def, 0, sizeof(*def));
 	cx = ( w.work.right - w.work.left ) / 2;
 	cy = ( w.work.bottom - w.work.top ) / 2;
 	def->num   = 1;
@@ -3074,12 +3845,7 @@ EXPORT BOOL dt_ask_name( DTWIN *d, CONST char *prompt, CONST UB *start,
 	def->part[1].num  = ASK_BOX;
 	def->part[1].r.left = 22;  def->part[1].r.top = 46;
 	def->part[1].r.right = ASK_W - 22;  def->part[1].r.bottom = 72;
-	for ( i = 0; start != NULL && start[i] != 0
-		     && i < WM_LABEL_MAX - 1; i++ ) {
-		def->part[1].text[i] = start[i];
-	}
-	def->part[1].text[i] = 0;
-	def->part[1].caret = i;
+	def->part[1].caret = dt_fit(def->part[1].text, WM_LABEL_MAX, start);
 
 	def->part[2].type   = WM_PT_BUTTON;
 	def->part[2].num    = ASK_CANCEL;
@@ -3096,7 +3862,7 @@ EXPORT BOOL dt_ask_name( DTWIN *d, CONST char *prompt, CONST UB *start,
 	ask_label(def->part[3].label, "設定");
 
 	pid = wm_panel_open_centre(d->wid, def);
-	Kfree(def);
+	wm_panel_free(def);
 	if ( pid < 0 ) {
 		return FALSE;
 	}
@@ -3340,14 +4106,19 @@ LOCAL void sysdef_names( void )
 		{ SYSDEF_XFCONV_BOX,				"ファイル変換の箱", "ファイル変換" },
 	};
 	TS_UUID	u;
-	T_OBREF	r;
+	UB	*on;
 	UINT	i;
 	INT	k;
+	BOOL	same;
 
 	for ( i = 0; i < sizeof(nm) / sizeof(nm[0]); i++ ) {
-		if ( ts_str_to_uuid(nm[i].id, &u) < E_OK || ob_ref_obj(&u, &r) < E_OK ) continue;
-		for ( k = 0; nm[i].was[k] != 0 && r.name[k] == (UB)nm[i].was[k]; k++ ) ;
-		if ( nm[i].was[k] != 0 || r.name[k] != 0 ) continue;
+		if ( ts_str_to_uuid(nm[i].id, &u) < E_OK ) continue;
+		on = knl_ob_name(&u, NULL, NULL);	/* the whole name: compared as a whole */
+		if ( on == NULL ) continue;
+		for ( k = 0; nm[i].was[k] != 0 && on[k] == (UB)nm[i].was[k]; k++ ) ;
+		same = (BOOL)( nm[i].was[k] == 0 && on[k] == 0 );
+		Kfree(on);
+		if ( !same ) continue;
 		if ( om_store_rename(&u, (CONST UB *)nm[i].now) >= E_OK ) {
 			tm_printf((UB *)"TessronOS desktop: %s renamed %s\n", nm[i].was, nm[i].now);
 		}
@@ -3623,12 +4394,11 @@ EXPORT ER dt_screen_req( CONST T_DTREQ *rq )
 		"［Ｅｎｔｅｒ］以外のキーを押すか、３０秒以上キーを押さ",
 		"ないと、以前の画面の設定に戻します。",
 	};
-	char	t[DT_CARRY_TEXT], a[32], fit[16], ofit[16], s[48];
-	UINT	w, h, ow, oh, sc, osc;
-	ER	er;
+	CONST char	*t = (CONST char *)dt_rq_word(rq, DT_TAIL_TEXT, NULL);
+	char		a[32], fit[16], ofit[16], s[48];
+	UINT		w, h, ow, oh, sc, osc;
+	ER		er;
 
-	knl_memcpy(t, rq->text, sizeof(t));
-	t[sizeof(t) - 1] = 0;
 	if ( t[0] == 'O' && t[1] == 'U' && t[2] == 'T' ) {
 		return outs_req(t);		/* the outputs besides the main one */
 	}
@@ -3966,21 +4736,6 @@ LOCAL void key( DTWIN *d, CONST T_WMEV *ev )
 
 /* ---------------------------------------------------------------- dropping on another program */
 
-/* s cut to fit max bytes with its end, not in the middle of a letter */
-LOCAL void name_cut( UB *out, CONST UB *s, INT max )
-{
-	INT	n = 0;
-
-	while ( s[n] != 0 && n < max - 1 ) {
-		n++;
-	}
-	while ( n > 0 && s[n] != 0 && ( s[n] & 0xC0 ) == 0x80 ) {
-		n--;
-	}
-	knl_memcpy(out, s, n);
-	out[n] = 0;
-}
-
 EXPORT BOOL dt_drop_links( DTWIN *d, INT sx, INT sy, CONST T_VOBJ *v, INT n )
 {
 	return dt_drop_links_at(d, sx, sy, sx, sy, v, n);
@@ -3991,26 +4746,52 @@ LOCAL ER drop_give( DTWIN *d, INT wid, INT ax, INT ay, UINT mods, CONST T_VOBJ *
 {
 	T_OBDROPV	*dv;
 	TS_UUID		from;
-	UB		*name;
+	UB		**name, *words = NULL;
+	UINT		strsz = 0;
+	SZ		cap = 0, nl;
 	INT		i;
-	ER		er;
+	ER		er = E_OK;
 
+	/*
+	 * The object's whole name for a link without one of its own, read
+	 * first; then room for the words of every link: its name, its
+	 * relationship and its applist
+	 */
+	name = (UB **)Kcalloc((SZ)n, sizeof(UB *));
+	for ( i = 0; i < n && name != NULL; i++ ) {
+		nl = v[i].vname_len;
+		if ( nl <= 0 ) {
+			name[i] = om_store_name_dup(&v[i].target, &nl);
+			if ( name[i] == NULL ) nl = 0;
+		}
+		cap += nl + 1 + v[i].vrel_len + 1 + v[i].vapplist_len + 1;
+	}
 	dv = (T_OBDROPV *)Kmalloc(sizeof(T_OBDROPV) * (SZ)n);
-	name = (UB *)Kmalloc(TAD_NAME_MAX);
-	if ( dv == NULL || name == NULL ) {
-		if ( dv != NULL ) Kfree(dv);
-		if ( name != NULL ) Kfree(name);
-		return E_NOMEM;
+	if ( name != NULL ) {
+		words = (UB *)Kmalloc((size_t)( cap + 1 ));
+	}
+	if ( dv == NULL || name == NULL || words == NULL ) {
+		er = E_NOMEM;
+		goto out;
 	}
 	knl_memset(dv, 0, sizeof(T_OBDROPV) * (SZ)n);
-	for ( i = 0; i < n; i++ ) {
+	for ( i = 0; i < n && er >= E_OK; i++ ) {
 		dv[i].target = v[i].target;
 		dv[i].vobjid = v[i].vobjid;
 		/* the name the link shows: its own, or the object's */
-		if ( v[i].name[0] != 0 ) {
-			name_cut(dv[i].name, v[i].name, OB_DROP_NAME);
-		} else if ( om_store_name(&v[i].target, name, TAD_NAME_MAX) >= 0 ) {
-			name_cut(dv[i].name, name, OB_DROP_NAME);
+		if ( v[i].vname_len > 0 ) {
+			er = ob_drop_put(words, &strsz, cap, v[i].vname, v[i].vname_len,
+					 &dv[i].name_at, &dv[i].name_len);
+		} else if ( name[i] != NULL ) {
+			er = ob_drop_put(words, &strsz, cap, name[i], -1, &dv[i].name_at, &dv[i].name_len);
+		}
+		/* its relationship and its applist: the 固有データ goes where the link goes */
+		if ( er >= E_OK ) {
+			er = ob_drop_put(words, &strsz, cap, v[i].vrel, v[i].vrel_len, &dv[i].rel_at, &dv[i].rel_len);
+		}
+		if ( er >= E_OK ) {
+			er = ob_drop_put(words, &strsz, cap, v[i].vapplist, v[i].vapplist_len,
+					 &dv[i].appl_at, &dv[i].appl_len);
 		}
 		dv[i].left = v[i].left;
 		dv[i].top = v[i].top;
@@ -4031,9 +4812,18 @@ LOCAL ER drop_give( DTWIN *d, INT wid, INT ax, INT ay, UINT mods, CONST T_VOBJ *
 	if ( d != NULL ) {
 		(void)wm_obj_uuid(d->wid, &from);
 	}
-	er = wm_obj_drop(wid, ax, ay, mods, &from, dv, n);
-	Kfree(dv);
-	Kfree(name);
+	if ( er >= E_OK ) {
+		er = wm_obj_drop(wid, ax, ay, mods, &from, dv, n, words, (SZ)strsz);
+	}
+out:
+	if ( name != NULL ) {
+		for ( i = 0; i < n; i++ ) {
+			if ( name[i] != NULL ) Kfree(name[i]);
+		}
+		Kfree(name);
+	}
+	if ( dv != NULL ) Kfree(dv);
+	if ( words != NULL ) Kfree(words);
 	return er;
 }
 
@@ -4064,10 +4854,13 @@ LOCAL void dt_begin( CONST char *step )
 }
 
 /*
- * The start over, told once on the console: every process the start
+ * The start over, told once a start on the console: every process the start
  * opened by itself (auto_open) has shown its first picture or ended
  * (dt_prog_settled), counted from when the loop began. What waits for
- * the desktop to be up as a person sees it waits for this line.
+ * the desktop to be up as a person sees it waits for this line. Then,
+ * at the start's end, what the repair of the system volume at this start
+ * of the machine came to is shown (dt_fix_boot): its window comes up in
+ * front of what the start opened, not behind the windows opened after it.
  */
 LOCAL BOOL	dt_settled = FALSE;
 LOCAL UW	dt_loop_at = 0;
@@ -4093,6 +4886,7 @@ LOCAL void settle_poll( void )
 		return;
 	}
 	dt_settled = TRUE;
+	dt_fix_boot();			/* the system volume repaired at this start: what came of it */
 }
 
 /* How a task stands, in a few words: its state, what it waits for and on which object */
@@ -4214,7 +5008,9 @@ LOCAL INT off_panel( CONST ID *pids, INT n )
 	T_WMPANEL	*def;
 	T_WMPART	*pt;
 	DTWIN		*d = dt_first_win();
-	char		name[64], more[64];
+	char		name[WM_TITLE_MAX], more[64];
+	CONST char	*shown;
+	UB		*pn;
 	INT		i, k = 0, w = 480, h, nblock = 0;
 
 	for ( i = 0; i < n; i++ ) {
@@ -4232,15 +5028,18 @@ LOCAL INT off_panel( CONST ID *pids, INT n )
 
 		if ( wid <= 0 ) continue;
 		name[0] = 0;
+		pn = NULL;
 		(void)wm_title(wid, name, sizeof(name));
-		if ( name[0] == 0 ) (void)knl_prc_name(pids[i], (UB *)name, sizeof(name));
-		tm_printf((UB *)"shutdown: pid %d %s has not closed\n", (INT)pids[i], name);
+		if ( name[0] == 0 ) pn = knl_prc_name_dup(pids[i], NULL);	/* the process's, whole */
+		shown = ( pn != NULL ) ? (CONST char *)pn : name;
+		tm_printf((UB *)"shutdown: pid %d %s has not closed\n", (INT)pids[i], shown);
 		if ( k < DT_BLOCK_LINES ) {
-			dt_pn_add(def, WM_PT_LABEL, 0, 30, 34 + k * 24, w - 44, 22, name);
+			dt_pn_add(def, WM_PT_LABEL, 0, 30, 34 + k * 24, w - 44, 22, shown);	/* cut to the label's room */
 		} else if ( k == DT_BLOCK_LINES ) {
 			tm_sprintf((UB *)more, (UB *)"ほか%d個", nblock - DT_BLOCK_LINES);
 			dt_pn_add(def, WM_PT_LABEL, 0, 30, 34 + k * 24, w - 44, 22, more);
 		}
+		if ( pn != NULL ) Kfree(pn);
 		k++;
 	}
 	dt_pn_add(def, WM_PT_LABEL, 0, 14, h - 62, w - 28, 22, "強制的に終了すると、保存していない内容は失われます。");
@@ -4250,7 +5049,7 @@ LOCAL INT off_panel( CONST ID *pids, INT n )
 	if ( pt != NULL ) pt->answer = WM_ANS_OK;
 	dt_off_ans = WM_ANS_NONE;
 	dt_off_pid = wm_panel_open_centre(d->wid, def);
-	Kfree(def);
+	wm_panel_free(def);
 	if ( dt_off_pid < 0 ) {
 		return -1;
 	}
@@ -4417,7 +5216,7 @@ LOCAL void desktop_run( void )
 	scale_start();				/* and the scale it is drawn at */
 	outs_start();				/* and the outputs besides the main one, as kept for their displays */
 	(void)wm_conf_watch();			/* the network's behind, and each again when written */
-	knl_obsys_power((FP)dt_power);		/* the system object's power record comes here */
+	knl_obsys_power((FP)(void (*)(void))dt_power);		/* the system object's power record comes here */
 	(void)dt_prog_start();			/* the programs, as real objects */
 	wm_obj_painter(tv_paint, tv_shape);	/* what a window's drawing and shape records show */
 	port_open();
@@ -4456,10 +5255,9 @@ LOCAL void desktop_run( void )
 	}
 	dt_begin("the first screen");
 	wm_composite();
-	dt_begin("the disk repair's result");
-	dt_fix_boot();				/* the system volume repaired at this start: what came of it */
 	dt_begin("the loop");
 	dt_loop_at = now_ms();
+	dt_settled = FALSE;			/* each start, a start again after Shift+Pause too, says when it is over */
 
     the_session:
 	while ( !dt_stop ) {

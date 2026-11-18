@@ -235,17 +235,51 @@ EXPORT ER tv_draw_link( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 	return tv_draw_link_how(gid, r, v, &how);
 }
 
+/* What a link's band says, whole, in memory to Kfree; NULL when it says nothing or there is no memory */
+LOCAL UB *label_whole( CONST T_VOBJ *v )
+{
+	UB	*b;
+	INT	cap = 256, n;
+
+	for ( ;; ) {
+		b = (UB *)Kmalloc((SZ)cap);
+		if ( b == NULL ) return NULL;
+		n = knl_tv_src->label(v, b, cap, knl_tv_src_arg);
+		if ( n < 0 ) {
+			Kfree(b);
+			return NULL;
+		}
+		if ( n < cap - 1 ) return b;
+		Kfree(b);
+		cap *= 2;
+	}
+}
+
+/* *p_big: room taken for a long name of the object, the caller's to let go after the drawing */
+LOCAL ER link_how( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v, CONST T_TVHOW *how, UB **p_big );
+
 EXPORT ER tv_draw_link_how( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 			    CONST T_TVHOW *how )
 {
+	UB	*big[2] = { NULL, NULL };		/* a long name of the object, the band's words */
+	ER	er = link_how(gid, r, v, how, big);
+
+	if ( big[0] != NULL ) Kfree(big[0]);
+	if ( big[1] != NULL ) Kfree(big[1]);
+	return er;
+}
+
+LOCAL ER link_how( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v, CONST T_TVHOW *how, UB **p_big )
+{
 	INT		depth, open_max;
 
-	T_VOBJ		vv;
+	T_VOBJ		vv = { .recno = 0 };		/* v as it is drawn: its words borrowed from v, never cleared */
+	UB		nm0[64], *nm = nm0;	/* the object's name: asked again in room for all of it (*p_big) */
 	T_DPRECT	inner;
 	INT		band;
 	T_TAD		*target = NULL;
 	T_OMLOOK	look;
-	UB		text[OM_LOOK_TEXT];
+	UB		*text = NULL;	/* the band's words, whole (read again in twice the room while they fill it) */
 
 	if ( r == NULL || v == NULL || how == NULL ) {
 		return E_PAR;
@@ -258,15 +292,26 @@ EXPORT ER tv_draw_link_how( INT gid, CONST T_DPRECT *r, CONST T_VOBJ *v,
 	look.icon_w = look.icon_h = 0;
 	look.state = ( knl_tv_src != NULL && knl_tv_src->state != NULL )
 		     ? knl_tv_src->state(&vv, knl_tv_src_arg) : 0;
-	if ( knl_tv_src != NULL && knl_tv_src->label != NULL
-	  && knl_tv_src->label(&vv, text, OM_LOOK_TEXT, knl_tv_src_arg) >= 0 ) {
+	if ( knl_tv_src != NULL && knl_tv_src->label != NULL && ( text = label_whole(&vv) ) != NULL ) {
+		p_big[1] = text;		/* let go after the drawing */
 		look.text = text;
-	} else if ( vv.name[0] == '\0' && knl_tv_src != NULL && knl_tv_src->name != NULL ) {
+	} else if ( vv.vname_len == 0 && knl_tv_src != NULL && knl_tv_src->name != NULL ) {
 		/* a link with no name of its own is called what the object is called */
-		INT	n = knl_tv_src->name(&vv, vv.name, TAD_NAME_MAX, knl_tv_src_arg);
+		INT	n = knl_tv_src->name(&vv, nm0, (INT)sizeof(nm0), knl_tv_src_arg);
 
-		if ( n < 0 ) {
-			vv.name[0] = '\0';
+		if ( n >= (INT)sizeof(nm0) - 1 && ( *p_big = (UB *)Kmalloc((SZ)n + 2) ) != NULL ) {
+			/* the length told is the whole name's: read again where it fits */
+			INT	m = knl_tv_src->name(&vv, *p_big, n + 2, knl_tv_src_arg);
+
+			if ( m > 0 ) {
+				nm = *p_big;
+				n = m;
+			}
+		}
+		if ( n > 0 ) {
+			for ( n = 0; nm[n] != '\0'; n++ ) ;
+			vv.vname = nm;
+			vv.vname_len = n;
 		}
 	}
 	if ( ( vv.disp & TAD_D_PICT ) != 0 && knl_tv_src != NULL && knl_tv_src->icon != NULL ) {
@@ -742,12 +787,13 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 			break;
 
 		case TV_SH_LINK: {
-			T_VOBJ	v;
+			T_VOBJ	v = { .recno = 0 };
 
 			if ( s->hidden && !f->show_hidden ) {
 				break;		/* 隠蔽仮身: not shown */
 			}
 
+			tad_vobj_init(&v);
 			if ( src != NULL && s->link >= 0
 			  && tad_lnk_get(src, s->link, &v) >= E_OK ) {
 				/* its letters magnified with the rest */
@@ -763,6 +809,7 @@ EXPORT ER tv_fig_draw_at( INT gid, CONST T_TVFIG *f, CONST T_DPRECT *r,
 			} else {
 				dp_frame_rect(gid, &box, wm_look(WM_LOOK_FRAME), 1);
 			}
+			tad_vobj_clear(&v);
 			break;
 		}
 

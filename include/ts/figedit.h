@@ -176,16 +176,23 @@ typedef struct {
 	UINT	seq;
 } T_FEARITEM;
 
+/*
+ * What 整頓 knows of an object. name, label and rel are as long as they
+ * are, each in memory of its own ending in 0 (NULL none), filled by the
+ * info() the host gives and let go with fe_ar_info_clear.
+ */
 typedef struct {
-	UB	name[TAD_NAME_MAX];		/* the metadata's name, for 名前 */
-	UB	label[TAD_NAME_MAX];		/* the name the link shows, for 幅調整 */
+	UB	*name;				/* the metadata's name, for 名前 */
+	UB	*label;				/* the name the link shows, for 幅調整 */
 	UB	made[FE_AR_INFO_TEXT];		/* makeDate */
 	UB	updated[FE_AR_INFO_TEXT];	/* updateDate */
 	INT	bytes;				/* of record 0 */
-	UB	rel[TAD_NAME_MAX];		/* the relationship tags, "[tag] [tag]" */
+	UB	*rel;				/* the relationship tags, "[tag] [tag]" */
 	UB	app[FE_AR_APP_NAME];		/* the first program the applist names */
 	BOOL	has_label, has_app;
 } T_FEARINFO;
+
+IMPORT void fe_ar_info_clear( T_FEARINFO *inf );
 
 typedef struct {
 	INT	horizontal, vertical, column, columns;	/* FE_AR_*, as T_FEARLAY */

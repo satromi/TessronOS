@@ -435,7 +435,7 @@ LOCAL INT gs_window( void )
 	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return 0;
 	for ( i = 0; i < cnt && wid == 0; i++ ) {
 		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_WINDOW
-		  && knl_strcmp((CONST char *)r.name, "ktgsurf") == 0 ) {
+		  && kt_name_is(&list[i], "ktgsurf") ) {
 			wid = wm_obj_wid(&list[i]);
 		}
 	}

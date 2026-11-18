@@ -302,7 +302,7 @@ LOCAL void test_random( void )
 	KT_ASSERT_ER(ob_ref_obj(&ob_uuid_random, &r), E_OK);
 	KT_ASSERT_EQ(r.type, OB_T_DEVICE);
 	KT_ASSERT_EQ(r.sub, OB_S_CHAR);
-	KT_ASSERT(has(r.name, OB_NAME_MAX, "乱数"));
+	KT_ASSERT(kt_name_has(&ob_uuid_random, "乱数"));
 	KT_ASSERT(in_list(&ob_uuid_random));
 
 	k = ob_opn_obj(&ob_uuid_random, OB_OP_R | OB_OP_WRITE);
@@ -519,7 +519,7 @@ LOCAL void test_hid_devices( void )
 		KT_ASSERT_ER(knl_obinput_uuid(h[i].id, &u), E_OK);
 		KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
 		KT_ASSERT_EQ(r.sub, OB_S_INPUT);
-		KT_ASSERT(r.name[0] == 'h' && r.name[1] == 'i' && r.name[2] == 'd');
+		KT_ASSERT(kt_name_starts(&u, "hid"));
 		KT_ASSERT(in_list(&u));
 		len = atr(&u);
 		KT_ASSERT(len > 0 && has(txt, len, "\"vid\":\"") && has(txt, len, "\"pid\":\"")
@@ -537,8 +537,13 @@ LOCAL void test_hid_devices( void )
 				KT_ASSERT(has(txt, len, "\"pointing\":\"relative\""));
 			}
 		}
-		tm_printf((UB *)"  %s %s\n", r.name, h[i].keyboard ? "keyboard"
-				   : h[i].absolute ? "pointer, absolute" : "pointer, relative");
+		{
+			UB	*nm = kt_name(&u);
+
+			tm_printf((UB *)"  %s %s\n", ( nm != NULL ) ? nm : (UB *)"", h[i].keyboard ? "keyboard"
+					   : h[i].absolute ? "pointer, absolute" : "pointer, relative");
+			if ( nm != NULL ) Kfree(nm);
+		}
 		KT_ASSERT_ER(knl_obusb_uuid(h[i].usbdev, &ud), E_OK);
 		KT_ASSERT(links_to(&u, &ud));
 		KT_ASSERT(links_to(&ud, &u));
@@ -600,7 +605,13 @@ LOCAL void test_usb_devices( void )
 		len = atr(&u);
 		KT_ASSERT(len > 0 && has(txt, len, "\"kind\":\"usb\"") && has(txt, len, "\"class\":")
 			  && has(txt, len, "\"speed\":\"") && has(txt, len, "\"product\":"));
-		tm_printf((UB *)"  %s %04x:%04x\n", r.name, (INT)d[i].vendor, (INT)d[i].product);
+		{
+			UB	*nm = kt_name(&u);
+
+			tm_printf((UB *)"  %s %04x:%04x\n", ( nm != NULL ) ? nm : (UB *)"",
+				  (INT)d[i].vendor, (INT)d[i].product);
+			if ( nm != NULL ) Kfree(nm);
+		}
 
 		/* what it provides, and the hub it hangs off */
 		if ( d[i].devnm[0] != 0 && knl_obdev_uuid(d[i].devnm, &f) >= E_OK ) {
@@ -1506,25 +1517,44 @@ LOCAL BOOL sound_read( void )
 
 LOCAL void test_edge_sound( void )
 {
-	SDOut	o[8];
-	INT	n, k;
+	SDOuts	*l;
+	SDOutV	*e;
+	SZ	size;
+	UINT	k;
 	ID	key;
 
-	n = knl_snd_outputs(o, 8);
-	for ( k = 1; k < n && k < 8 && o[k].kind == SND_BE_NONE; k++ ) ;
-	if ( k >= n || k >= 8 ) KT_SKIP("no output to choose");
-	if ( port_make() < E_OK ) KT_SKIP("no channel");
+	/* every output, ids whole: the first that is not "auto" is chosen */
+	size = knl_snd_outputs_v(NULL, 0);
+	if ( size <= 0 ) KT_SKIP("no outputs");
+	l = (SDOuts *)Kmalloc(size + 1024);	/* room for more come meanwhile */
+	KT_ASSERT(l != NULL);
+	if ( l == NULL ) return;
+	if ( knl_snd_outputs_v(l, size + 1024) > size + 1024 ) {
+		Kfree(l);
+		KT_SKIP("the outputs changed while read");
+	}
+	for ( k = 0, e = SND_OUTS_FIRST(l); k < l->n && ( k == 0 || e->kind == SND_BE_NONE ); k++, e = SND_OUTV_NEXT(e) ) ;
+	if ( k >= l->n ) {
+		Kfree(l);
+		KT_SKIP("no output to choose");
+	}
+	if ( port_make() < E_OK ) {
+		Kfree(l);
+		KT_SKIP("no channel");
+	}
 	key = watch(&ob_uuid_system, OB_E_CHANGE);
 	KT_ASSERT(key > 0);
 	if ( key <= 0 ) {
+		Kfree(l);
 		port_gone();
 		return;
 	}
 	KT_ASSERT(sound_read());
 	port_drain();
-	KT_ASSERT_ER(knl_snd_select(o[k].id), E_OK);
+	KT_ASSERT_ER(knl_snd_select(e->id), E_OK);
 	KT_ASSERT(told(&ob_uuid_system, OB_E_CHANGE, OB_SYS_SOUND, 3000) >= 1);
-	tm_printf((UB *)"  %s chosen: told\n", (CONST char *)o[k].id);
+	tm_printf((UB *)"  %s chosen: told\n", (CONST char *)e->id);
+	Kfree(l);
 	KT_ASSERT(sound_read());
 	port_drain();
 	KT_ASSERT_ER(knl_snd_select((CONST UB *)SND_ID_AUTO), E_OK);

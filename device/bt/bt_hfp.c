@@ -122,7 +122,8 @@
 #define PACE_LEAD2		8	/* how far ahead of its time an mSBC packet may begin, in half milliseconds */
 #define PACE_LATE2		60	/* and how far behind before the count starts again */
 
-#define AT_MAX			128
+#define AT_FIRST		128	/* the room for a line of AT at the start, made bigger as a line needs */
+#define AT_LIMIT		( 64 * 1024 )	/* a line longer is answered ERROR, not to take all the memory */
 #define OPEN_AFTER_MS		1500	/* the earphones' time to open the channel themselves */
 #define SETUP_TMO_MS		10000
 #define BCS_TMO_MS		3000	/* for the earphones to say the codec back */
@@ -160,8 +161,9 @@ typedef struct {
 	UW		ag_feat;		/* what this end told it */
 	UB		open_ch;		/* the earphones' channel to open, 0 none */
 	UW		open_at;
-	char		line[AT_MAX];
-	INT		nl;
+	char		*line;			/* the line of AT coming, as long as it is */
+	INT		nl, lcap;
+	BOOL		too_long;		/* the line coming is longer than AT_LIMIT: answered ERROR at its end */
 	INT		vgs_sent;		/* the gain the earphones have, as far as this end knows */
 	volatile INT	vgm_sent;		/* their microphone's, -1 not known */
 	volatile INT	vgm_want;		/* the one to tell them, -1 none */
@@ -270,18 +272,25 @@ LOCAL UW codec_rate( UB k )
 
 /* ---------------------------------------------------------------- AT */
 
+/* A line to the earphones, as long as it is, between its CR LFs */
 LOCAL void at_send( CONST char *s )
 {
-	UB	b[AT_MAX + 4];
 	INT	n = (INT)knl_strlen(s);
+	UB	*b = (UB *)Kmalloc((SZ)n + 4);
+	ER	er;
 
-	if ( n > AT_MAX ) n = AT_MAX;
+	if ( b == NULL ) {
+		tm_printf((UB *)"bt: hands-free: no room for a line of %d bytes to the earphones\n", n);
+		return;
+	}
 	b[0] = '\r';
 	b[1] = '\n';
 	knl_memcpy(b + 2, s, n);
 	b[n + 2] = '\r';
 	b[n + 3] = '\n';
-	knl_btf_send(hf.c, b, n + 4);
+	er = knl_btf_send(hf.c, b, n + 4);
+	Kfree(b);
+	if ( er < E_OK ) tm_printf((UB *)"bt: hands-free: \"%s\" not sent (%d)\n", s, (INT)er);
 }
 
 LOCAL BOOL at_is( CONST char *l, CONST char *pre )
@@ -510,10 +519,29 @@ EXPORT void knl_bth_at_in( BTC *c, PEER *p, CONST UB *d, INT n )
 	if ( hf.p != p || !hf.dlc ) return;
 	for ( i = 0; i < n; i++ ) {
 		if ( d[i] == '\r' ) {
-			hf.line[hf.nl] = 0;
-			if ( hf.nl > 0 ) at_line(hf.line);
+			if ( hf.too_long ) {
+				tm_printf((UB *)"bt: \"%s\": hands-free: a line longer than %d bytes refused\n", hf.p->name, AT_LIMIT);
+				at_send("ERROR");
+			} else if ( hf.nl > 0 ) {
+				hf.line[hf.nl] = 0;
+				at_line(hf.line);
+			}
 			hf.nl = 0;
-		} else if ( d[i] != '\n' && hf.nl < AT_MAX - 1 ) {
+			hf.too_long = FALSE;
+		} else if ( d[i] != '\n' && !hf.too_long ) {
+			if ( hf.nl + 1 >= hf.lcap ) {
+				INT	cap = ( hf.lcap > 0 ) ? hf.lcap * 2 : AT_FIRST;
+				char	*nb = ( cap <= AT_LIMIT ) ? (char *)Kmalloc((SZ)cap) : NULL;
+
+				if ( nb == NULL ) {
+					hf.too_long = TRUE;
+					continue;
+				}
+				if ( hf.nl > 0 ) knl_memcpy(nb, hf.line, hf.nl);
+				if ( hf.line != NULL ) Kfree(hf.line);
+				hf.line = nb;
+				hf.lcap = cap;
+			}
 			hf.line[hf.nl++] = (char)d[i];
 		}
 	}
@@ -542,6 +570,7 @@ EXPORT void knl_bth_dlc_up( BTC *c, PEER *p )
 	hf.slc = FALSE;
 	hf.neg = FALSE;
 	hf.nl = 0;
+	hf.too_long = FALSE;
 	hf.open_at = 0;
 }
 
@@ -1110,29 +1139,29 @@ EXPORT void knl_bth_stat( T_BTHSTAT *s )
 
 /* ---------------------------------------------------------------- the sound device's side */
 
-LOCAL void hfp_id( CONST PEER *p, UB *id )
+/* The voice's output: the device's name and the word after it, as long as they are */
+EXPORT ER knl_bth_outs( SNDOUTS *l )
 {
-	(void)tm_sprintf(id, (UB *)"bt-%02x%02x%02x%02x%02x%02x-hfp", p->addr[5], p->addr[4], p->addr[3], p->addr[2], p->addr[1], p->addr[0]);
-}
+	static CONST char	word[] = "（通話）";
+	UB	id[BTA_ID_ROOM], *name;
+	INT	nl;
+	ER	er;
 
-EXPORT INT knl_bth_outputs( SDOut *o, INT max )
-{
-	UB	id[SND_ID_MAX], name[SND_NAME_MAX];
-
-	if ( !hf.slc || hf.p == NULL || max < 1 || knl_bth_way(hf.c) == VW_NONE ) return 0;
-	hfp_id(hf.p, id);
-	(void)tm_sprintf(name, (UB *)"%s（通話）", hf.p->name);
-	knl_snd_out_set(&o[0], id, name, SND_BE_BT, ( hf.failed_at != 0 ) ? SND_OF_NOSOUND : 0);
-	return 1;
+	if ( !hf.slc || hf.p == NULL || knl_bth_way(hf.c) == VW_NONE ) return E_OK;
+	knl_bta_out_id(id, "bt-", hf.p->addr, "-hfp");
+	nl = (INT)knl_strlen((CONST char *)hf.p->name);
+	name = (UB *)Kmalloc((SZ)nl + sizeof(word));
+	if ( name == NULL ) return E_NOMEM;
+	knl_memcpy(name, hf.p->name, nl);
+	knl_memcpy(name + nl, word, sizeof(word));
+	er = knl_snd_out_add(l, id, name, SND_BE_BT, ( hf.failed_at != 0 ) ? SND_OF_NOSOUND : 0);
+	Kfree(name);
+	return er;
 }
 
 EXPORT BOOL knl_bth_is_id( CONST UB *id )
 {
-	UB	mine[SND_ID_MAX];
-
-	if ( hf.p == NULL || id == NULL ) return FALSE;
-	hfp_id(hf.p, mine);
-	return (BOOL)( knl_strcmp((CONST char *)id, (CONST char *)mine) == 0 );
+	return (BOOL)( hf.p != NULL && knl_bta_is_out_id(id, "bt-", hf.p->addr, "-hfp") );
 }
 
 /* The rate the voice will come at: that of the link up, else of the codec it will be offered in */

@@ -154,23 +154,65 @@ LOCAL IGREGS	ig_fw;				/* as the firmware left them */
 
 /* ---------------------------------------------------------------- the record */
 
-#define LOG_MAX		8192
-LOCAL char	ig_log[LOG_MAX];
+/*
+ * Everything told, from the start: the record begins in LOG_FIRST bytes
+ * of its own and is taken anew twice as large when it is full. The
+ * record before is not given back, since knl_igfx_log may be reading it.
+ * Where there is no room (or the call comes from an interrupt, which may
+ * not take memory) what does not fit is counted in ig_loglost, and the
+ * record says how much.
+ */
+#define LOG_FIRST	8192
+LOCAL char	ig_log0[LOG_FIRST];
+LOCAL char	*ig_log = ig_log0;
+LOCAL INT	ig_logcap = LOG_FIRST;
 LOCAL INT	ig_loglen = 0;
+LOCAL INT	ig_loglost = 0;
 
 LOCAL void wm_apply( CONST char *what );
 
+/* Room for n more bytes and the nought after them */
+LOCAL BOOL log_room( INT n )
+{
+	char	*b;
+	INT	cap = ig_logcap;
+
+	if ( ig_loglen + n < ig_logcap ) {
+		return TRUE;
+	}
+	if ( in_indp() ) {
+		return FALSE;
+	}
+	while ( ig_loglen + n >= cap ) cap *= 2;
+	b = (char *)Kmalloc((SZ)cap);
+	if ( b == NULL ) {
+		return FALSE;
+	}
+	knl_memcpy(b, ig_log, ig_loglen + 1);
+	ig_log = b;
+	ig_logcap = cap;
+	return TRUE;
+}
+
 LOCAL void say( CONST char *s )
 {
-	INT	i;
+	INT	i, n = (INT)knl_strlen(s);
 
 	tm_putstring((CONST UB *)s);
-	for ( i = 0; s[i] != '\0' && ig_loglen < LOG_MAX - 1; i++ ) ig_log[ig_loglen++] = s[i];
+	if ( !log_room(n) ) {
+		ig_loglost += n;
+		return;
+	}
+	for ( i = 0; i < n; i++ ) ig_log[ig_loglen++] = s[i];
 	ig_log[ig_loglen] = '\0';
 }
 
 #define sayf(...)	do { UB t_[240]; tm_sprintf(t_, (CONST UB *)__VA_ARGS__); say((CONST char *)t_); } while (0)
 
+/*
+ * The record into buf, up to max - 1 bytes and a nought: how many were
+ * put; with a line at the end of how many bytes the record could not keep
+ */
 EXPORT INT knl_igfx_log( char *buf, INT max )
 {
 	INT	n = ( ig_loglen < max - 1 ) ? ig_loglen : max - 1;
@@ -178,6 +220,14 @@ EXPORT INT knl_igfx_log( char *buf, INT max )
 	if ( max <= 0 ) return 0;
 	knl_memcpy(buf, ig_log, n);
 	buf[n] = '\0';
+	if ( ig_loglost > 0 && n < max - 1 ) {
+		UB	t[64];
+		INT	k;
+
+		(void)tm_sprintf(t, (CONST UB *)"(%d bytes told were not kept: no memory)\n", ig_loglost);
+		for ( k = 0; t[k] != 0 && n < max - 1; k++ ) buf[n++] = (char)t[k];
+		buf[n] = '\0';
+	}
 	return n;
 }
 
@@ -1290,7 +1340,10 @@ EXPORT INT knl_igfx_fit( INT fit, BOOL at_once )
 	return ig_fit;
 }
 
-/* The sizes offered: the usual ones up to the panel's own, and the one now */
+/*
+ * The sizes offered: the usual ones up to the panel's own, and the one
+ * now. How many there are, of which up to max are put in m.
+ */
 EXPORT INT knl_igfx_modes( UH (*m)[2], INT max )
 {
 	CONST UH	usual[][2] = {
@@ -1304,22 +1357,28 @@ EXPORT INT knl_igfx_modes( UH (*m)[2], INT max )
 	if ( !ig_ok ) {
 		return 0;
 	}
-	for ( i = 0; i < (INT)( sizeof(usual) / sizeof(usual[0]) ) && n < max; i++ ) {
+	for ( i = 0; i < (INT)( sizeof(usual) / sizeof(usual[0]) ); i++ ) {
 		if ( usual[i][0] > ig_nw || usual[i][1] > ig_nh ) continue;
-		m[n][0] = usual[i][0];
-		m[n][1] = usual[i][1];
+		if ( n < max ) {
+			m[n][0] = usual[i][0];
+			m[n][1] = usual[i][1];
+		}
 		if ( usual[i][0] == ig_nw && usual[i][1] == ig_nh ) panel = TRUE;
 		if ( usual[i][0] == ig_w && usual[i][1] == ig_h ) cur = TRUE;
 		n++;
 	}
-	if ( !panel && n < max ) {
-		m[n][0] = (UH)ig_nw;
-		m[n][1] = (UH)ig_nh;
+	if ( !panel ) {
+		if ( n < max ) {
+			m[n][0] = (UH)ig_nw;
+			m[n][1] = (UH)ig_nh;
+		}
 		n++;
 	}
-	if ( !cur && n < max && !( ig_w == ig_nw && ig_h == ig_nh ) ) {
-		m[n][0] = (UH)ig_w;
-		m[n][1] = (UH)ig_h;
+	if ( !cur && !( ig_w == ig_nw && ig_h == ig_nh ) ) {
+		if ( n < max ) {
+			m[n][0] = (UH)ig_w;
+			m[n][1] = (UH)ig_h;
+		}
 		n++;
 	}
 	return n;

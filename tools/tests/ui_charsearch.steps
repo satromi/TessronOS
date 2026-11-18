@@ -1,8 +1,9 @@
 # 文字検索 (design 11.19), for tools/ui_run.py: the accessory opened from its program
 # (its work area at 186,98; the strip it draws under the panel from 234), the code
 # list of 日本基本 and of 各国, 漢字検索 by a reading and the strokes, a double press
-# for 文字情報, the elements to choose from, 記号検索 by a name, 入力 into the text
-# behind it at its caret and as テキスト形式TRONコード, the related characters of 號,
+# for 文字情報, the elements to choose from, 記号検索 by a name, 入力 with the text
+# behind it given the keys before (a process's window that draws itself: the
+# letters go into the tray) and as テキスト形式TRONコード, the related characters of 號,
 # the size of the cells from the menu, and 入力 into the box of 単語登録 that has the keys.
 open 01a0d8c4-5350-7a61-8d72-9fab0c1d5050
 expect charsearch: ready
@@ -72,7 +73,8 @@ click 774 146
 expect charsearch: found symbol
 wait 300
 shot cs_symbol
-# 入力: the text behind given the caret, 文字検索 in front again, 公 typed into it
+# 入力: the text behind given the keys, 文字検索 in front again; the text is a
+# window of 基本文章編集's process, which draws itself, so 公 goes into the tray
 click 318 114
 wait 300
 click 306 258
@@ -82,15 +84,14 @@ wait 300
 click 400 84
 wait 300
 click 774 212
-expect charsearch: typed 公 text
-expect desktop: typed 公 into window
+expect charsearch: tray 公 (-42)
 wait 300
 shot cs_typed
 # its テキスト形式TRONコード, from 文字情報
 click 470 114
 wait 300
 click 620 146
-expect charsearch: typed &T213878; text
+expect charsearch: tray &T213878; (-42)
 wait 300
 shot cs_typed_code
 # 號 by its code (the 43rd, 17 a line), and its information: 号 its simplified form

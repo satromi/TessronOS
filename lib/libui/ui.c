@@ -257,6 +257,27 @@ EXPORT INT ui_lst_lnk( CONST TS_UUID *box, TS_UUID **p_ids )
 	return all;
 }
 
+/* An object's name, whole: asked into a room, and again with the room it says it takes */
+EXPORT UB *ui_obj_name( CONST TS_UUID *u )
+{
+	UB	*b;
+	SZ	cap = 64, need = 0;
+	ER	er;
+
+	for ( ;; ) {
+		b = (UB *)malloc((size_t)cap);
+		if ( b == NULL ) return NULL;
+		er = ob_ref_nam(u, b, cap, &need);
+		if ( er < E_OK ) {
+			free(b);
+			return NULL;
+		}
+		if ( need <= cap ) return b;
+		free(b);
+		cap = need;
+	}
+}
+
 /* ---------------------------------------------------------------- panels */
 
 /* A panel of the box made and placed on the window at (x, y) of its work area */
@@ -299,8 +320,22 @@ LOCAL ER panel_make( UI *u, INT num, INT x, INT y, TS_UUID *p_pnl, ID *p_key, BO
 	return E_OK;
 }
 
-/* A placed panel's parts opened by the links it keeps, and known by number */
-LOCAL void parts_open( UI *u )
+/* Room for one part more in u's table, twice as large when it is full: FALSE when there is not the memory */
+LOCAL BOOL parts_room( UI *u )
+{
+	UIPART	*t;
+	INT	room;
+
+	if ( u->np < u->room ) return TRUE;
+	room = ( u->room > 0 ) ? u->room * 2 : 32;
+	t = (UIPART *)realloc(u->p, sizeof(UIPART) * (size_t)room);
+	if ( t == NULL ) return FALSE;
+	u->p = t;
+	u->room = room;
+	return TRUE;
+}
+
+EXPORT ER ui_parts_open( UI *u )
 {
 	TS_UUID	pu;
 	SZ	asz = 0;
@@ -309,13 +344,18 @@ LOCAL void parts_open( UI *u )
 
 	u->np = 0;
 	u->tags = 0;
-	for ( i = 0; i < UI_PART_MAX; i++ ) {
-		UIPART	*p = &u->p[i];
+	for ( i = 0; ; i++ ) {
+		UIPART	*p;
 
 		if ( ob_rea_rec(u->pk, OB_WR_KIND + i, 0, &pu, sizeof(pu), &asz) < E_OK
 		  || asz < (SZ)sizeof(pu) ) {
 			break;
 		}
+		if ( !parts_room(u) ) {
+			ui_parts_close(u);		/* not some of them: a panel worked without its last parts is not one */
+			return E_NOMEM;
+		}
+		p = &u->p[i];
 		p->key = ob_opn_obj(&pu, OB_OP_R | OB_OP_W | OB_OP_PROT);
 		p->num = 0;
 		p->kind = 0;
@@ -333,9 +373,10 @@ LOCAL void parts_open( UI *u )
 		}
 		u->np = i + 1;
 	}
+	return E_OK;
 }
 
-LOCAL void parts_close( UI *u )
+EXPORT void ui_parts_close( UI *u )
 {
 	INT	i;
 
@@ -344,6 +385,9 @@ LOCAL void parts_close( UI *u )
 		u->p[i].key = 0;
 	}
 	u->np = 0;
+	free(u->p);
+	u->p = NULL;
+	u->room = 0;
 }
 
 LOCAL UIPART *part( UI *u, INT num )
@@ -430,6 +474,22 @@ EXPORT ER ui_open_on( UI *u, CONST UI *with, CONST char *box, INT num, INT x, IN
 	return open_win(u, with->port, box, num, x, y);
 }
 
+/*
+ * A window of panels seen with its parts set: what it shows is all the
+ * program drew for it, so that is told as what was drawn shown
+ * (wm_obj_flush), the program's first picture. The system does not take
+ * the parts it draws itself for one (wm_prc_drawn), and a desktop started
+ * with this program among what it opened by itself waits for it. Every
+ * window made here comes through this once it can be seen: one opened
+ * shown, once its parts are there; one opened hidden, as it is shown.
+ */
+LOCAL void first_shown( UI *u )
+{
+	if ( u->kw > 0 ) {
+		(void)wm_obj_flush(u->kw, NULL);
+	}
+}
+
 /* A window made hidden (UI_ATTR_HIDDEN) shown, in front, its parts as they were set */
 EXPORT void ui_reveal( UI *u )
 {
@@ -440,6 +500,7 @@ EXPORT void ui_reveal( UI *u )
 	wp.flags |= OB_WP_SHOWN;
 	wp.z = 0;
 	(void)ob_wri_rec(u->kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz);
+	first_shown(u);
 }
 
 EXPORT BOOL ui_mine( CONST UI *u, CONST T_OBNTM *m )
@@ -459,6 +520,7 @@ LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y )
 	TS_UUID		pnl;
 	ID		pk;
 	UINT		attr;
+	BOOL		hidden;
 
 	memset(u, 0, sizeof(*u));
 	if ( ui_uuid(box, &u->box) < E_OK ) return E_PAR;
@@ -484,9 +546,8 @@ LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y )
 
 	attr = ui_more_attr;
 	ui_more_attr = 0;			/* what ui_attr asked was for this window alone */
+	hidden = (BOOL)( ( attr & UI_ATTR_HIDDEN ) != 0 );
 	{
-		BOOL	hidden = (BOOL)( ( attr & UI_ATTR_HIDDEN ) != 0 );
-
 		/* framed, with a title bar unless asked not to */
 		UINT	wa = ( ( attr & UI_ATTR_UNTITLED ) != 0 ) ? WM_ATTR_FRAME : WM_ATTR_FRAME | WM_ATTR_TITLE;
 
@@ -552,7 +613,10 @@ LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y )
 	}
 	u->pnl = pnl;
 	u->pk = pk;
-	parts_open(u);
+	if ( ui_parts_open(u) < E_OK ) {
+		ui_close(u);
+		return E_NOMEM;
+	}
 
 	if ( port > 0 ) {
 		u->port = port;			/* the other window's: u->ch stays none */
@@ -576,6 +640,9 @@ LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y )
 	if ( ob_ntf_evt(u->pk, OB_REC_ANY, &req, u->port) <= 0 ) {
 		ui_close(u);
 		return E_OBJ;
+	}
+	if ( !hidden ) {
+		first_shown(u);		/* seen from now, its panel filling it with the parts of its box */
 	}
 	return E_OK;
 }
@@ -609,7 +676,7 @@ EXPORT void ui_close( UI *u )
 {
 	static CONST TS_UUID	none;
 
-	parts_close(u);
+	ui_parts_close(u);
 	if ( u->port > 0 && memcmp(&u->ch, &none, sizeof(none)) != 0 ) {
 		ob_cls_obj(u->port);		/* its own channel, not another window's (ui_open_on) */
 		(void)ob_del_obj(&u->ch);
@@ -782,6 +849,27 @@ EXPORT INT ui_text( UI *u, INT num, char *buf, INT max )
 	return n;
 }
 
+EXPORT char *ui_text_all( UI *u, INT num )
+{
+	char	*b = NULL, *nb;
+	INT	cap = 256, n;
+
+	for ( ;; ) {
+		nb = (char *)realloc(b, (size_t)cap);
+		if ( nb == NULL ) {
+			free(b);
+			return NULL;
+		}
+		b = nb;
+		n = state(u, num, b, cap - 1);
+		if ( n < 0 ) n = 0;
+		if ( n < cap - 1 ) break;	/* room left over: the whole of it */
+		cap *= 2;
+	}
+	b[n] = 0;
+	return b;
+}
+
 EXPORT void ui_set_text( UI *u, INT num, CONST char *s )
 {
 	set_state(u, num, s, (SZ)strlen(s));
@@ -952,10 +1040,17 @@ EXPORT INT ui_ask( UI *u, INT num, CONST char *const *lines, INT nline )
 			(void)ob_map_rec(q.pk, 0, q.kw, &m);
 		}
 	}
-	parts_open(&q);
+	if ( ui_parts_open(&q) < E_OK ) {
+		ob_cls_obj(q.pk);
+		(void)ob_del_obj(&q.pnl);
+		ob_cls_obj(q.kw);
+		(void)ob_del_obj(&q.win);
+		return 0;
+	}
 	for ( i = 0; i < nline && lines != NULL; i++ ) {
 		ui_set_text(&q, i + 1, lines[i]);
 	}
+	first_shown(&q);
 	memset(&req, 0, sizeof(req));
 	req.events = OB_E_CHANGE;
 	req.id = 2;
@@ -982,7 +1077,7 @@ EXPORT INT ui_ask( UI *u, INT num, CONST char *const *lines, INT nline )
 			}
 		}
 	}
-	parts_close(&q);
+	ui_parts_close(&q);
 	ob_cls_obj(q.pk);
 	(void)ob_del_obj(&q.pnl);
 	ob_cls_obj(q.kw);
@@ -1009,7 +1104,10 @@ EXPORT ER ui_strip( UI *u, CONST char *box, INT num, ID kw, ID port, INT x, INT 
 		u->w = wp.right - wp.left;
 		u->h = wp.bottom - wp.top;
 	}
-	parts_open(u);
+	if ( ui_parts_open(u) < E_OK ) {
+		ui_strip_close(u);
+		return E_NOMEM;
+	}
 	memset(&req, 0, sizeof(req));
 	req.events = OB_E_CHANGE;
 	req.id = 1;
@@ -1023,7 +1121,7 @@ EXPORT ER ui_strip( UI *u, CONST char *box, INT num, ID kw, ID port, INT x, INT 
 
 EXPORT void ui_strip_close( UI *u )
 {
-	parts_close(u);
+	ui_parts_close(u);
 	if ( u->pk > 0 ) {
 		ob_cls_obj(u->pk);
 		(void)ob_del_obj(&u->pnl);
@@ -1077,7 +1175,10 @@ EXPORT ER ui_dlg_open( UI *u, INT num, UI *q )
 	}
 	q->w = pw;
 	q->h = ph;
-	parts_open(q);
+	if ( ui_parts_open(q) < E_OK ) {
+		ui_dlg_close(q);
+		return E_NOMEM;
+	}
 	memset(&req, 0, sizeof(req));
 	req.events = OB_E_CHANGE;
 	req.id = 2;
@@ -1085,6 +1186,7 @@ EXPORT ER ui_dlg_open( UI *u, INT num, UI *q )
 	req.events = OB_E_KEY | OB_E_CLOSE;
 	req.id = 3;
 	(void)ob_ntf_evt(q->kw, OB_REC_ANY, &req, u->port);
+	first_shown(q);
 	return E_OK;
 }
 
@@ -1122,7 +1224,7 @@ EXPORT INT ui_dlg_take( UI *q, CONST T_OBNTM *m, INT *p_num )
 
 EXPORT void ui_dlg_close( UI *q )
 {
-	parts_close(q);
+	ui_parts_close(q);
 	if ( q->pk > 0 ) {
 		ob_cls_obj(q->pk);
 		(void)ob_del_obj(&q->pnl);

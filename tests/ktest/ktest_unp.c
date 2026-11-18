@@ -326,42 +326,54 @@ LOCAL ER make_obj( CONST char *json, CONST char *xml, TS_UUID *u )
  */
 LOCAL void same_as_asked( CONST TS_UUID *u, CONST DTAPP *a, INT n, CONST char *applist )
 {
-	T_DTREQ	*rq = (T_DTREQ *)Kmalloc(sizeof(T_DTREQ));
-	T_DTANS	*an = (T_DTANS *)Kmalloc(sizeof(T_DTANS));
+	SZ	al = 0, cap;
+	T_DTREQ	*rq;
+	DTANS	*da = (DTANS *)Kmalloc(sizeof(DTANS));
+	T_DTANS	*an;
 	UB	id[CT_APP_ID], name[CT_APP_NAME];
 	BOOL	kind = FALSE;
-	INT	k, i;
+	INT	k;
 
-	if ( rq == NULL || an == NULL ) {
+	/* the request in the form of now, the applist in its tail; the answer as it is written */
+	for ( ; applist != NULL && applist[al] != 0; al++ ) ;
+	cap = dt_tail_room(al);
+	rq = (T_DTREQ *)Kmalloc(sizeof(T_DTREQ) + (size_t)cap);
+	if ( rq == NULL || da == NULL ) {
 		if ( rq != NULL ) Kfree(rq);
-		if ( an != NULL ) Kfree(an);
+		if ( da != NULL ) Kfree(da);
 		KT_ASSERT(FALSE);
 		return;
 	}
 	for ( k = 0; k <= n; k++ ) {
 		knl_memset(rq, 0, sizeof(*rq));
-		knl_memset(an, 0, sizeof(*an));
 		rq->req = DT_RQ_APPS;
 		rq->target = *u;
 		rq->recno = k;
 		if ( applist != NULL ) {
-			for ( i = 0; applist[i] != 0 && i < DT_CARRY_TEXT - 1; i++ ) rq->text[i] = (UB)applist[i];
+			(void)dt_tail_put((UB *)( rq + 1 ), &rq->tailsz, cap, DT_TAIL_APPLIST, (CONST UB *)applist, al);
 			rq->flags |= DT_F_APPLIST;
 		}
-		an->er = dt_apps_req(rq, an);
+		dt_ans_begin(da, rq->seq);
+		da->an.er = dt_apps_req(rq, &da->an);
+		an = dt_ans_message(da);
+		dt_ans_end(da);
+		KT_ASSERT(an != NULL);
+		if ( an == NULL ) break;
 		KT_ASSERT_EQ((INT)an->how, n);
 		if ( k == n ) {
 			KT_ASSERT_ER(an->er, E_NOEXS);
 			KT_ASSERT(!ct_app_entry(an, id, name, &kind));
+			Kfree(an);
 			break;
 		}
 		KT_ASSERT(ct_app_entry(an, id, name, &kind));
 		KT_ASSERT(same(id, (CONST char *)( ( a[k].listed && a[k].raw[0] != 0 ) ? a[k].raw : a[k].id )));
 		KT_ASSERT(same(name, (CONST char *)a[k].name));
 		KT_ASSERT_EQ(kind, (BOOL)!a[k].listed);
+		Kfree(an);
 	}
 	Kfree(rq);
-	Kfree(an);
+	Kfree(da);
 }
 
 LOCAL INT app_at( CONST DTAPP *a, INT n, CONST char *id )
@@ -397,11 +409,11 @@ LOCAL void test_programs( void )
 	if ( pa == NULL ) KT_SKIP("no program box in the store");
 	KT_ASSERT(dt_prog_find((CONST UB *)"unpack-file") == pa);
 	KT_ASSERT(same(pa->name, "書庫管理"));
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	if ( v == NULL ) KT_SKIP("no memory");
 
 	KT_ASSERT_ER(make_obj(jo, "<tad version=\"1.0\" encoding=\"UTF-8\"><figure></figure></tad>\n", &old), E_OK);
-	knl_memset(v, 0, sizeof(*v));
+	tad_vobj_clear(v);
 	v->target = old;
 	room = dt_app_list(v, NULL, 0, NULL);
 	a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
@@ -419,7 +431,7 @@ LOCAL void test_programs( void )
 	(void)ob_del_obj(&old);
 
 	KT_ASSERT_ER(make_obj(jt, "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>KT</p></document></tad>\n", &txt), E_OK);
-	knl_memset(v, 0, sizeof(*v));
+	tad_vobj_clear(v);
 	v->target = txt;
 	room = dt_app_list(v, NULL, 0, NULL);
 	a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
@@ -438,7 +450,7 @@ LOCAL void test_programs( void )
 	/* an object with no applist and a link with none: the programs of its kind, marked so */
 	KT_ASSERT_ER(make_obj("{\"name\":\"KT機能付箋のない文章\"}",
 			      "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>KT</p></document></tad>\n", &txt), E_OK);
-	knl_memset(v, 0, sizeof(*v));
+	tad_vobj_clear(v);
 	v->target = txt;
 	room = dt_app_list(v, NULL, 0, NULL);
 	a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
@@ -456,13 +468,12 @@ LOCAL void test_programs( void )
 	/* an object with no applist, its link carrying one: the link's and nothing more */
 	KT_ASSERT_ER(make_obj("{\"name\":\"KT仮身のapplist\"}",
 			      "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>KT</p></document></tad>\n", &txt), E_OK);
-	knl_memset(v, 0, sizeof(*v));
+	tad_vobj_clear(v);
 	v->target = txt;
 	{
 		CONST char	*la = "{\"basic-calc-editor\":{\"name\":\"x\",\"defaultOpen\":true}}";
 
-		for ( i = 0; la[i] != 0; i++ ) v->applist[i] = (UB)la[i];
-		v->applist[i] = 0;
+		(void)tad_vobj_set(v, TAD_W_APPLIST, (CONST UB *)la, -1);
 		room = dt_app_list(v, NULL, 0, NULL);
 		a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
 		n = ( a != NULL ) ? dt_app_list(v, a, room, &dflt) : 0;
@@ -472,6 +483,7 @@ LOCAL void test_programs( void )
 		if ( a != NULL ) Kfree(a);
 	}
 	(void)ob_del_obj(&txt);
+	tad_vobj_clear(v);
 	Kfree(v);
 }
 

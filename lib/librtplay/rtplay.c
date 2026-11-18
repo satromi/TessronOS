@@ -1931,7 +1931,7 @@ EXPORT RTPLAY *rtp_open( CONST TS_UUID *obj, INT recno, CONST RTP_OPEN *o )
 	p->ground = o->ground;
 	p->track = -1;
 	if ( paper == TAD_COL_NONE ) {
-		T_VOBJ	v;
+		T_VOBJ	v = { .recno = 0 };
 
 		knl_memset(&v, 0, sizeof(v));
 		v.target = *obj;

@@ -136,6 +136,7 @@ def main():
 
         if args.json:
             out = {"image": args.image, "readable": True,
+                   "label": vol.label(),
                    "volume": vol.sb.summary(),
                    "journal": vol.journal.summary() if vol.journal else None,
                    "clean": rep.ok}
@@ -143,9 +144,13 @@ def main():
             if first is not rep:
                 out["before"] = {"errors": len(first.errors),
                                  "warnings": len(first.warnings)}
-            print(json.dumps(out, ensure_ascii=False, indent=2))
+            # JSON is UTF-8 (RFC 8259) whatever the console's code page is
+            sys.stdout.flush()
+            sys.stdout.buffer.write((json.dumps(out, ensure_ascii=False, indent=2)
+                                     + "\n").encode("utf-8"))
+            sys.stdout.buffer.flush()
         else:
-            print("%s: %s" % (args.image, vol.sb.label or "(no label)"))
+            print("%s: %s" % (args.image, vol.label() or "(no label)"))
             if args.verbose:
                 print(str(vol.sb))
             if first is not rep:

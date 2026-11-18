@@ -672,6 +672,156 @@ EXPORT CONST CF_ITEM cf_look_items[] = {
 
 EXPORT CONST INT cf_look_nitem = (INT)( sizeof(cf_look_items) / sizeof(cf_look_items[0]) );
 
+/* ------------------------------------------------------------ 写し */
+
+/*
+ * The lines each page of システム環境設定 takes from a copy: what the
+ * person sets there and another machine can take. What belongs to this
+ * machine alone -- the processors' roles (CPU_CHORE, CPU_RT), the
+ * devices' interrupts, the clock's limit (CPU_MHZ), the watchdog, the
+ * adapter to use (NET_ADAPTER), the system's update (SYSUP), the
+ * network's addresses and the Wi-Fi's keys -- is on no page's table.
+ * 〈ウィンドウ〉 takes the look's lines (cf_look_items), 画面 its
+ * displays' places (DISPLAY.<the EDID's ident, hexadecimal>) beside the
+ * lines below. 〈書体〉 takes the system's face, a link of record 0 as
+ * the wallpaper is, named by SYSTEMFACE.
+ *
+ * ユーザ環境設定's pages are "user." and the page: user.pointer (ＰＤ属性),
+ * user.key (キー属性), user.display (表示属性), user.sound (音属性) and
+ * user.editkeys (キー操作). Each takes the lines of the person's record
+ * (cf_user_items) of its own sheet (cf_user_page); 〈個人属性〉 -- the
+ * name, the kana input, the time, the zone and the time server -- is
+ * the person's own or the administrator's, and no page takes it.
+ */
+LOCAL CONST char *CONST copy_table[][4] = {
+	{ "power",	"BUTTON_SLEEP", "LID_SLEEP", NULL },
+	{ "wallpaper",	"WALLPAPER", NULL, NULL },
+	{ "colour",	"SCHEME", NULL, NULL },
+	{ "screen",	"SIZE", "FIT", "SCALE" },
+	{ "keyboard",	"KBTYPE", "KBMODE", NULL },
+	{ "sound",	"SOUND_KEEP", NULL, NULL },
+	{ "font",	"SYSTEMFACE", NULL, NULL },
+};
+
+LOCAL BOOL cp_same( CONST char *a, CONST char *b )
+{
+	while ( *a != 0 && *a == *b ) {
+		a++;
+		b++;
+	}
+	return (BOOL)( *a == 0 && *b == 0 );
+}
+
+/* DISPLAY.<ident>: the ident hexadecimal, 1 to 16 digits */
+LOCAL BOOL cp_display( CONST char *k )
+{
+	CONST char	*p = "DISPLAY.";
+	INT		i, n = 0;
+
+	for ( i = 0; p[i] != 0; i++ ) {
+		if ( k[i] != p[i] ) return FALSE;
+	}
+	for ( ; k[i] != 0; i++, n++ ) {
+		char	c = k[i];
+
+		if ( !( ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ) || ( c >= 'A' && c <= 'F' ) ) ) return FALSE;
+	}
+	return (BOOL)( n >= 1 && n <= 16 );
+}
+
+/*
+ * The page of ユーザ環境設定 an entry of the look table is set on, as a
+ * 写し names it; NULL for one on 〈個人属性〉 or on none
+ */
+EXPORT CONST char *cf_user_page( UINT look )
+{
+	switch ( look ) {
+	case LK_PD_ON: case LK_PD_OFF: case LK_DBLTIME: case LK_DBL_W: case LK_PD_SPEED:
+	case LK_PD_ACCEL: case LK_PD_KEYSPD: case LK_PD_MAIN: case LK_PD_ABS: case LK_PD_MIDDBL:
+	case LK_PD_WHEEL: case LK_TCH_ON: case LK_TCH_DBL: case LK_TCH_HIT: case LK_TCH_HOLD:
+	case LK_TCH_SCR: case LK_TCH_STEP:
+		return "user.pointer";
+	case LK_KEY_ON: case LK_KEY_OFF: case LK_KEY_SIM: case LK_KRP: case LK_KRP_START:
+	case LK_KRP_INT: case LK_SCLK: case LK_TSHIFT:
+		return "user.key";
+	case LK_TITLE_H: case LK_BAR_W: case LK_MENU_H: case LK_BLINK: case LK_MARCH:
+	case LK_MENU_DLY: case LK_CARET_W: case LK_SEL_W: case LK_PTR_SIZE: case LK_SCR_LIVE:
+		return "user.display";
+	case LK_CLK_KEY: case LK_CLK_BTN: case LK_SPEAKER:
+		return "user.sound";
+	case LK_EDITKEYS:
+		return "user.editkeys";
+	default:
+		return NULL;
+	}
+}
+
+EXPORT BOOL cf_copy_allowed( CONST char *page, CONST char *key )
+{
+	INT	i, k;
+
+	if ( page == NULL || key == NULL || key[0] == 0 ) {
+		return FALSE;
+	}
+	if ( cp_same(page, "window") ) {
+		for ( i = 0; i < cf_look_nitem; i++ ) {
+			if ( cp_same(cf_look_items[i].key, key) ) return TRUE;
+		}
+		return FALSE;
+	}
+	if ( cp_same(page, "screen") && cp_display(key) ) {
+		return TRUE;
+	}
+	if ( page[0] == 'u' && page[1] == 's' && page[2] == 'e' && page[3] == 'r' && page[4] == '.' ) {
+		CONST CF_ITEM	*it = cf_user_item(key);
+
+		return (BOOL)( it != NULL && cf_user_page(it->look) != NULL && cp_same(cf_user_page(it->look), page) );
+	}
+	for ( i = 0; i < (INT)( sizeof(copy_table) / sizeof(copy_table[0]) ); i++ ) {
+		if ( !cp_same(copy_table[i][0], page) ) continue;
+		for ( k = 1; k < 4 && copy_table[i][k] != NULL; k++ ) {
+			if ( cp_same(copy_table[i][k], key) ) return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+#define CP_KEY		40		/* bytes of a key a copy's line may have, with its terminator */
+
+EXPORT INT cf_copy_lines( CONST UB *text, INT len, CONST char *page, UB *out, INT max )
+{
+	INT	i = 0, n = 0;
+
+	if ( out == NULL || max < 1 ) {
+		return -1;
+	}
+	out[0] = 0;
+	while ( text != NULL && i < len ) {
+		INT	s = i, ke, vs, e, j;
+		char	k[CP_KEY];
+
+		while ( i < len && text[i] != '\n' ) i++;
+		e = i++;
+		if ( e > s && text[e - 1] == '\r' ) e--;
+		if ( s >= e || text[s] == '#' ) continue;
+		for ( ke = s; ke < e && text[ke] != ' ' && text[ke] != '\t'; ke++ ) ;
+		for ( vs = ke; vs < e && ( text[vs] == ' ' || text[vs] == '\t' ); vs++ ) ;
+		if ( ke - s >= CP_KEY || e - vs >= CF_VAL_MAX ) continue;
+		for ( j = 0; j < ke - s; j++ ) k[j] = (char)text[s + j];
+		k[j] = 0;
+		if ( !cf_copy_allowed(page, k) ) continue;
+		if ( n + ( ke - s ) + ( e - vs ) + 3 > max ) {
+			return -1;
+		}
+		for ( j = s; j < ke; j++ ) out[n++] = text[j];
+		out[n++] = '\t';
+		for ( j = vs; j < e; j++ ) out[n++] = text[j];
+		out[n++] = '\n';
+	}
+	out[n] = 0;
+	return n;
+}
+
 EXPORT CONST CF_ITEM *cf_look_look( UINT look )
 {
 	INT	i;

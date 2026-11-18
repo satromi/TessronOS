@@ -827,29 +827,42 @@ LOCAL INT outs( SDOut *o, INT max )
 	return (INT)(asz / (SZ)sizeof(SDOut));
 }
 
+/*
+ * Room for the id of a USB function: its form "usb:VVVV:PPPP@C-R.h.h.h.h.h"
+ * is at most 56 bytes (device/usb/uac.c, UAC_ID_ROOM)
+ */
+#define KT_ID_ROOM	64
+
+LOCAL SDOuts *outv_read( void );
+LOCAL SDOutV *outv_find( SDOuts *l, CONST UB *id );
+
 /* The id of the USB output whose id ends in port (its hub port, as ".1"), into id; FALSE none */
 LOCAL BOOL usb_out( CONST char *port, UB *id )
 {
-	SDOut	o[KT_OUTS];
-	INT	n = outs(o, KT_OUTS), k, a, b;
+	SDOuts	*l = outv_read();
+	SDOutV	*e;
+	UINT	k;
+	INT	a, b = (INT)knl_strlen(port);
+	BOOL	found = FALSE;
 
-	for ( k = 0; k < n; k++ ) {
-		a = (INT)knl_strlen((CONST char *)o[k].id);
-		b = (INT)knl_strlen(port);
-		if ( o[k].kind == SND_BE_USB && a > b
-		  && knl_strcmp((CONST char *)o[k].id + a - b, port) == 0 ) {
-			knl_strcpy((char *)id, (CONST char *)o[k].id);
-			return TRUE;
+	for ( k = 0, e = ( l != NULL ) ? SND_OUTS_FIRST(l) : NULL; l != NULL && k < l->n; k++, e = SND_OUTV_NEXT(e) ) {
+		a = (INT)knl_strlen((CONST char *)e->id);
+		if ( e->kind == SND_BE_USB && a > b && a < KT_ID_ROOM
+		  && knl_strcmp((CONST char *)e->id + a - b, port) == 0 ) {
+			knl_strcpy((char *)id, (CONST char *)e->id);
+			found = TRUE;
+			break;
 		}
 	}
+	if ( l != NULL ) Kfree(l);
 
-	return FALSE;
+	return found;
 }
 
 /* Up to ms for the USB output at hub port port to come (want) or go (!want) */
 LOCAL BOOL wait_usb_out( CONST char *port, BOOL want, INT ms )
 {
-	UB	id[SND_ID_MAX];
+	UB	id[KT_ID_ROOM];
 
 	for ( ; ms > 0; ms -= 50 ) {
 		if ( usb_out(port, id) == want ) {
@@ -876,14 +889,16 @@ LOCAL ER sel_put( CONST char *id )
 	return tk_swri_dev(snd_dd, DN_SDOUTSEL, (void *)id, (SZ)knl_strlen(id) + 1, &asz);
 }
 
-/* Up to ms for the stream to play on id */
+/* Up to ms for the stream to play on id, as DN_SDOUTSELV tells it whole */
 LOCAL BOOL wait_now( CONST UB *id, INT ms )
 {
-	SDOutSel	s;
+	UB	b[256];
+	SDOutSelV *s = (SDOutSelV *)b;
+	SZ	asz = 0;
 
 	for ( ; ms > 0; ms -= 20 ) {
-		sel_get(&s);
-		if ( knl_strcmp((CONST char *)s.now, (CONST char *)id) == 0 ) {
+		if ( tk_srea_dev(snd_dd, DN_SDOUTSELV, b, sizeof(b), &asz) >= E_OK && s->size <= sizeof(b)
+		  && knl_strcmp((CONST char *)SND_OUTSELV_NOW(s), (CONST char *)id) == 0 ) {
 			return TRUE;
 		}
 		tk_dly_tsk(20);
@@ -912,7 +927,7 @@ LOCAL void test_outputs( void )
 {
 	static SDOut	o[KT_OUTS];
 	SDOutSel	s;
-	UB		id1[SND_ID_MAX], id2[SND_ID_MAX];
+	UB		id1[KT_ID_ROOM], id2[KT_ID_ROOM];
 	H		*pcm;
 	SZ		asz = 0;
 	INT		n, bytes = 4800 * 4;
@@ -1076,7 +1091,25 @@ LOCAL void outputs_by_records( CONST UB *id1 )
 				KT_ASSERT_EQ(knl_strcmp((CONST char *)o[0].id, SND_ID_AUTO), 0);
 				KT_ASSERT_ER(ob_rea_rec(k, OB_SND_OUTSEL, 0, &s, sizeof(s), &asz), E_OK);
 				KT_ASSERT_EQ(asz, sizeof(s));
-				KT_ASSERT_ER(ob_wri_rec(k, OB_SND_OUTSEL, 0, id1, SND_ID_MAX, &asz), E_RONLY);
+				KT_ASSERT_ER(ob_wri_rec(k, OB_SND_OUTSEL, 0, id1, (SZ)knl_strlen((CONST char *)id1) + 1, &asz), E_RONLY);
+				/* the same whole: records 30 and 31, read only as well */
+				{
+					SZ	sz = 0;
+					UB	*v;
+
+					KT_ASSERT_ER(ob_rea_rec(k, OB_SND_OUTV, 0, NULL, 0, &sz), E_OK);
+					v = ( sz > 0 ) ? (UB *)Kmalloc(sz + 1024) : NULL;	/* room for more come meanwhile */
+					KT_ASSERT(v != NULL);
+					if ( v != NULL && ob_rea_rec(k, OB_SND_OUTV, 0, v, sz + 1024, &asz) >= E_OK
+					  && asz >= (SZ)sizeof(SDOuts) ) {
+						KT_ASSERT_EQ((SZ)((SDOuts *)v)->size, asz);
+						KT_ASSERT_EQ(knl_strcmp((CONST char *)SND_OUTS_FIRST(v)->id, SND_ID_AUTO), 0);
+						KT_ASSERT(outv_find((SDOuts *)v, id1) != NULL);
+					}
+					if ( v != NULL ) Kfree(v);
+				}
+				KT_ASSERT_ER(ob_wri_rec(k, OB_SND_OUTV, 0, id1, (SZ)knl_strlen((CONST char *)id1) + 1, &asz), E_RONLY);
+				KT_ASSERT_ER(ob_wri_rec(k, OB_SND_OUTSELV, 0, id1, (SZ)knl_strlen((CONST char *)id1) + 1, &asz), E_RONLY);
 				ob_cls_obj(k);
 			}
 		}
@@ -1306,6 +1339,38 @@ LOCAL void test_mixer( void )
 		if ( same16(m->app[k].prog, pb) && m->app[k].vol == 100 && m->app[k].mute == 1 ) nb++;
 	}
 	KT_ASSERT(na == 1 && nb == 1);
+	{
+		/*
+		 * the same with every name whole (DN_SDMIXERV): the size asked
+		 * first, then each entry, its name ending within it, and no
+		 * name of the fixed form longer than what the whole one starts with
+		 */
+		SDMixes		*v;
+		SDMixAppV	*e;
+		SZ		vsz = 0;
+		INT		j;
+
+		KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDMIXERV, NULL, 0, &vsz), E_OK);
+		KT_ASSERT(vsz >= (SZ)sizeof(SDMixes));
+		v = ( vsz >= (SZ)sizeof(SDMixes) ) ? (SDMixes *)Kmalloc(vsz + 256) : NULL;
+		if ( v != NULL ) {
+			KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDMIXERV, v, vsz + 256, &asz), E_OK);
+			KT_ASSERT_EQ(asz, (SZ)v->size);
+			KT_ASSERT(v->lv == 50 && v->rv == 100 && v->mute == 1);
+			KT_ASSERT_EQ(v->napp, m->napp);
+			e = SND_MIXES_FIRST(v);
+			for ( j = 0; j < (INT)v->napp && (UB *)e < (UB *)v + v->size; j++ ) {
+				SZ	nl = (SZ)knl_strlen((CONST char *)e->name);
+
+				KT_ASSERT_EQ((SZ)e->size, SND_MIXV_SIZE(nl));
+				KT_ASSERT(j >= (INT)m->napp || knl_strlen((CONST char *)m->app[j].name) <= (SZ)nl);
+				e = SND_MIXV_NEXT(e);
+			}
+			KT_ASSERT_EQ(j, (INT)v->napp);
+			KT_ASSERT((UB *)e == (UB *)v + v->size);
+			Kfree(v);
+		}
+	}
 	KT_ASSERT_ER(mixset(5, NULL, 50, 50, 0), E_PAR);
 	KT_ASSERT_ER(mixset(SND_MIX_ALL, NULL, 101, 50, 0), E_PAR);
 
@@ -1684,6 +1749,173 @@ LOCAL void test_hda_record( void )
 }
 #endif /* X64 */
 
+/* Whether s starts with w */
+LOCAL BOOL starts( CONST UB *s, CONST char *w )
+{
+	INT	i;
+
+	for ( i = 0; w[i] != 0 && s[i] == (UB)w[i]; i++ ) {
+		;
+	}
+	return ( w[i] == 0 );
+}
+
+/* An output chosen by an id of any length */
+LOCAL ER sel_put_any( CONST char *id )
+{
+	SZ	asz = 0;
+
+	return tk_swri_dev(snd_dd, DN_SDOUTSEL, (void *)id, (SZ)knl_strlen(id) + 1, &asz);
+}
+
+/* The entry of DN_SDOUTV's answer whose id is id; NULL none */
+LOCAL SDOutV *outv_find( SDOuts *l, CONST UB *id )
+{
+	SDOutV	*e = SND_OUTS_FIRST(l);
+	UINT	k;
+
+	for ( k = 0; k < l->n; k++, e = SND_OUTV_NEXT(e) ) {
+		if ( knl_strcmp((CONST char *)e->id, (CONST char *)id) == 0 ) return e;
+	}
+	return NULL;
+}
+
+/* DN_SDOUTV read whole: the size asked first, read again while it grew; NULL when it cannot be */
+LOCAL SDOuts *outv_read( void )
+{
+	SDOuts	*l = NULL;
+	SZ	asz = 0, room = 0;
+
+	for ( ;; ) {
+		if ( tk_srea_dev(snd_dd, DN_SDOUTV, l, room, &asz) < E_OK ) break;
+		if ( l != NULL && (SZ)l->size <= room ) return l;
+		if ( l != NULL ) Kfree(l);
+		room = ( l != NULL ) ? (SZ)l->size : asz;
+		l = (SDOuts *)Kmalloc(room);
+		if ( l == NULL ) return NULL;
+	}
+	if ( l != NULL ) Kfree(l);
+	return NULL;
+}
+
+/*
+ * Outputs beyond the fixed form: 20 of the test's own, each with an id of
+ * 200 bytes and a name of 300 (UTF-8), listed whole by DN_SDOUTV and
+ * knl_snd_outputs_v, the 17th and then the 18th chosen by their whole ids
+ * and the choice told whole by DN_SDOUTSELV, the change between the two
+ * seen in what is compared to tell of a change; in the fixed form the same are cut and
+ * marked SND_OF_CUT, and the choice there is E_LIMIT rather than cut
+ */
+LOCAL void test_outputs_long( void )
+{
+	SDOuts		*l, *k2;
+	SDOutV		*e;
+	SDOutSelV	*sv;
+	SDOutSel	s;
+	SDOut		*o;
+	UB		id[256];
+	SZ		asz = 0, n2;
+	UD		sig0 = 0, sig1;
+	INT		i, n, mine = 0, cut = 0;
+	UINT		k;
+
+	if ( snd_dd <= 0 ) KT_SKIP("no sound device");
+	KT_ASSERT_ER(knl_snd_test_outs(20, 200, 300), E_OK);
+	l = outv_read();
+	KT_ASSERT(l != NULL);
+	if ( l == NULL ) goto done;
+	KT_ASSERT(l->n >= 21);
+	e = SND_OUTS_FIRST(l);
+	KT_ASSERT_EQ(knl_strcmp((CONST char *)e->id, SND_ID_AUTO), 0);
+	for ( k = 0; k < l->n; k++, e = SND_OUTV_NEXT(e) ) {
+		KT_ASSERT(e->size >= SND_OUTV_SIZE(knl_strlen((CONST char *)e->id), knl_strlen((CONST char *)SND_OUTV_NAME(e))));
+		KT_ASSERT_EQ(e->size % 4, 0);
+		if ( !starts(e->id, "usb:fe00:") ) continue;
+		mine++;
+		KT_ASSERT_EQ(knl_strlen((CONST char *)e->id), 200);
+		KT_ASSERT(knl_strlen((CONST char *)SND_OUTV_NAME(e)) > 297);	/* "N " and letters of 3 bytes to 300 */
+		KT_ASSERT(knl_strlen((CONST char *)SND_OUTV_NAME(e)) <= 300);
+		KT_ASSERT(( e->flags & SND_OF_NOSOUND ) != 0);
+	}
+	KT_ASSERT_EQ(mine, 20);
+	tm_printf((UB *)"  %d outputs in %d bytes, 20 with ids of 200 bytes and names of 300\n", l->n, l->size);
+
+	/* the kernel's own reading: the size first, then the same */
+	n2 = knl_snd_outputs_v(NULL, 0);
+	KT_ASSERT_EQ(n2, (SZ)l->size);
+	k2 = (SDOuts *)Kmalloc(n2);
+	KT_ASSERT(k2 != NULL);
+	if ( k2 != NULL ) {
+		KT_ASSERT_EQ(knl_snd_outputs_v(k2, n2), n2);
+		KT_ASSERT_EQ(k2->n, l->n);
+		Kfree(k2);
+	}
+
+	/*
+	 * the 17th of the test's chosen, then the 18th, by their whole ids:
+	 * both lie past the 17th entry of the list, so the change from one
+	 * to the other is seen only when every entry is compared
+	 */
+	for ( i = 16; i <= 17; i++ ) {
+		tm_sprintf(id, (CONST UB *)"usb:fe00:%04x@0-1", i);
+		for ( e = SND_OUTS_FIRST(l), k = 0; k < l->n; k++, e = SND_OUTV_NEXT(e) ) {
+			if ( starts(e->id, (CONST char *)id) ) break;
+		}
+		KT_ASSERT(k < l->n && k >= 17);
+		if ( k >= l->n ) goto done_l;
+		knl_strcpy((char *)id, (CONST char *)e->id);
+		if ( i == 17 ) sig0 = knl_snd_test_sig();
+		KT_ASSERT_ER(sel_put_any((CONST char *)id), E_OK);
+	}
+	sig1 = knl_snd_test_sig();
+	KT_ASSERT(sig0 != sig1);
+	Kfree(l);
+	l = outv_read();
+	KT_ASSERT(l != NULL);
+	if ( l == NULL ) goto done;
+	e = outv_find(l, id);
+	KT_ASSERT(e != NULL && ( e->flags & SND_OF_CHOSEN ) != 0);
+	KT_ASSERT(( SND_OUTS_FIRST(l)->flags & SND_OF_CHOSEN ) == 0);
+	KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDOUTSELV, NULL, 0, &asz), E_OK);
+	sv = (SDOutSelV *)Kmalloc(asz);
+	KT_ASSERT(sv != NULL);
+	if ( sv != NULL ) {
+		KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDOUTSELV, sv, asz, &asz), E_OK);
+		KT_ASSERT_EQ((SZ)sv->size, asz);
+		KT_ASSERT_EQ(knl_strcmp((CONST char *)sv->id, (CONST char *)id), 0);
+		Kfree(sv);
+	}
+
+	/* the fixed form: cut and marked, and the choice not cut */
+	n = knl_snd_outputs(NULL, 0);
+	KT_ASSERT_EQ(n, (INT)l->n);
+	o = (SDOut *)Kmalloc(sizeof(SDOut) * (SZ)n);
+	KT_ASSERT(o != NULL);
+	if ( o != NULL ) {
+		KT_ASSERT_EQ(knl_snd_outputs(o, n), n);
+		for ( i = 0; i < n; i++ ) {
+			if ( !starts(o[i].id, "usb:fe00:") ) continue;
+			KT_ASSERT(( o[i].flags & SND_OF_CUT ) != 0);
+			KT_ASSERT(knl_strlen((CONST char *)o[i].id) < SND_ID_MAX);
+			KT_ASSERT(knl_strlen((CONST char *)o[i].name) < SND_NAME_MAX);
+			/* cut at a whole letter: the last byte ends a "長" */
+			KT_ASSERT_EQ(o[i].name[knl_strlen((CONST char *)o[i].name) - 1], 0xb7);
+			cut++;
+		}
+		KT_ASSERT_EQ(cut, 20);
+		Kfree(o);
+	}
+	KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDOUTSEL, &s, sizeof(s), &asz), E_LIMIT);
+
+done_l:
+	Kfree(l);
+done:
+	KT_ASSERT_ER(sel_put_any(SND_ID_AUTO), E_OK);
+	KT_ASSERT_ER(knl_snd_test_outs(0, 0, 0), E_OK);
+	KT_ASSERT_ER(tk_srea_dev(snd_dd, DN_SDOUTSEL, &s, sizeof(s), &asz), E_OK);
+	KT_ASSERT_EQ(knl_strcmp((CONST char *)s.id, SND_ID_AUTO), 0);
+}
+
 LOCAL void test_i2s( void )
 {
 	KT_SKIP("RP1 I2S: Raspberry Pi 5 only, not verified on hardware");
@@ -1716,6 +1948,7 @@ EXPORT void ktest_snd( void )
 	KT_RUN_QEMU_DEVS(test_mixer, "written for the USB audio function of the QEMU machine");
 	KT_RUN_QEMU_DEVS(test_monitor, "written for the USB audio function of the QEMU machine");
 	KT_RUN_QEMU_DEVS(test_keep, "written for the USB audio function of the QEMU machine");
+	KT_RUN(test_outputs_long);
 	KT_RUN(test_i2s);
 	KT_RUN(test_close);
 }

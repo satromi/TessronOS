@@ -279,7 +279,7 @@ LOCAL void test_run( void )
 	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &wins) ) >= 0 ) {
 		for ( i = 0; i < cnt; i++ ) {
 			if ( ob_ref_obj(&wins[i], &r) >= E_OK && r.sub == OB_S_WINDOW
-			  && has(r.name, s_len((CONST char *)r.name), "MSテスト") ) {
+			  && kt_name_has(&wins[i], "MSテスト") ) {
 				win = wins[i];
 				wid = 0;
 			}
@@ -409,7 +409,7 @@ LOCAL INT window_of( CONST char *name, TS_UUID *out )
 	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return -1;
 	for ( i = 0; i < cnt; i++ ) {
 		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_WINDOW
-		  && has(r.name, s_len((CONST char *)r.name), name) ) {
+		  && kt_name_has(&list[i], name) ) {
 			*out = list[i];
 			kw = ob_opn_obj(out, OB_OP_R);
 			if ( kw > 0 ) {
@@ -509,7 +509,7 @@ LOCAL void test_desktop( void )
 {
 	CONST DTPROG	*pp, *list[32];
 	TS_UUID		base;
-	UB		names[8][OM_APP_NAME], id[64];
+	UB		**names, id[64];
 	INT		n, i;
 	BOOL		found = FALSE;
 
@@ -525,10 +525,13 @@ LOCAL void test_desktop( void )
 	for ( i = 0; i < n; i++ ) if ( list[i] == pp ) found = TRUE;
 	KT_ASSERT(found);				/* its template goes in the 原紙箱 */
 
-	n = om_store_apps(&base, names, 8);
-	KT_ASSERT(n >= 2);
-	KT_ASSERT(has(names[0], s_len((CONST char *)names[0]), "マイクロスクリプト"));
-	KT_ASSERT(has(names[1], s_len((CONST char *)names[1]), "基本図形編集"));
+	names = om_store_apps(&base, &n);
+	KT_ASSERT(names != NULL && n >= 2);
+	if ( names != NULL && n >= 2 ) {
+		KT_ASSERT(has(names[0], s_len((CONST char *)names[0]), "マイクロスクリプト"));
+		KT_ASSERT(has(names[1], s_len((CONST char *)names[1]), "基本図形編集"));
+	}
+	om_apps_free(names, n);
 	KT_ASSERT(om_store_app_id(&base, 1, id, sizeof(id)) > 0);
 	KT_ASSERT(has(id, s_len((CONST char *)id), "basic-figure-editor"));
 	KT_ASSERT(om_store_default_app(&base, id, sizeof(id)) > 0);

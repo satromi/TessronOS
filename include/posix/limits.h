@@ -33,9 +33,14 @@
 #ifndef _POSIX_PATH_MAX
 #define _POSIX_PATH_MAX		256
 #endif
-#ifndef NAME_MAX
-#define NAME_MAX		255
-#endif
+/*
+ * Bytes of one name of a path, the nought not counted: the most a name
+ * of the file systems takes in UTF-8 (FS_NAME_MAX, 255 UTF-16 units of
+ * FAT, exFAT and NTFS), as struct dirent's d_name holds it. newlib's
+ * 255 is replaced.
+ */
+#undef NAME_MAX
+#define NAME_MAX		767
 #ifndef NL_TEXTMAX
 #define NL_TEXTMAX		2048
 #endif

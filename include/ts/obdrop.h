@@ -45,7 +45,7 @@ static inline T_OBDROP *ob_drop_read( ID kw )
 		}
 		if ( asz < cap ) {
 			((UB *)d)[asz] = 0;
-			if ( d->n > 0 && asz < (SZ)OB_DROP_SIZE(d->n) ) {
+			if ( d->n > 0 && asz < (SZ)OB_DROP_SIZE(d->n) + (SZ)d->strsz ) {
 				free(d);		/* shorter than it says: not one */
 				return NULL;
 			}

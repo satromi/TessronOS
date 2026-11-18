@@ -110,6 +110,14 @@ IMPORT ER  ts_hid_pointer( INT *p_x, INT *p_y, UINT *p_buttons );
  */
 IMPORT ER  ts_hid_press_at( INT *p_x, INT *p_y );
 
+/*
+ * Whether a press -- a button down, or a key down that is not a
+ * modifier -- has come and waits, not yet taken (ts_hid_read): what the
+ * person did after the last press the reader took, however late the
+ * reader is.
+ */
+IMPORT BOOL ts_hid_press_waiting( void );
+
 /* What has been seen, for a test or a measurement */
 typedef struct {
 	UD	reports;		/* reports taken off the devices */

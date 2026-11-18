@@ -54,6 +54,7 @@
 #include <ts/uuid.h>
 #include <ts/kbmap.h>
 #include "kp_eng.h"
+#include "../dtask.h"
 
 IMPORT ER tk_get_otm( SYSTIM *pk_tim );
 
@@ -150,7 +151,7 @@ typedef struct {
 /* ---------------------------------------------------------------- state */
 
 static TS_UUID	g_obj;			/* the かな入力練習 object */
-static UB	g_name[OB_NAME_MAX];
+static UB	*g_name = (UB *)"";	/* the object's name, whole */
 static UB	*g_xtad;		/* its record 0 */
 static INT	g_xtadn;
 
@@ -1042,38 +1043,9 @@ static void settle( void )
 
 static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
-	static UINT	seq;
-	TS_UUID		d, reply;
-	T_OBCRE		c;
-	SZ		asz = 0;
-	ID		k, ka;
-	ER		er;
+	static DTASK	q;		/* the answer read whole, however long (dtask.h) */
+	ER		er = dq_ask(&q, rq, an, &g_win, wait_ms);
 
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
-	rq->seq = ++seq;
-	rq->reply = reply;
-	rq->win = g_win;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	/* the answer waited for on its channel, at most wait_ms */
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
-			er = an->er;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
 	settle();
 	return er;
 }
@@ -1434,8 +1406,9 @@ static ER layout_add( CONST UB *json, INT n, CONST UB *fallback )
 static void dropped( void )
 {
 	T_OBDROP	*d;
-	UB		fb[OB_DROP_NAME];
-	INT		n, k;
+	UB		*fb;
+	SZ		k;
+	INT		n;
 
 	if ( ( d = ui_drop(&g_ui) ) == NULL ) return;
 	if ( d->n < 1 ) {
@@ -1451,10 +1424,14 @@ static void dropped( void )
 	}
 	ui_drop_answer(&g_ui, d, OB_DR_ACCEPT, "");
 	/* the name the link shows, without .json, when the layout gives none */
-	snprintf((char *)fb, sizeof(fb), "%s", (char *)d->v[0].name);
-	k = (INT)strlen((char *)fb);
+	fb = (UB *)strdup((CONST char *)ob_drop_name(d, 0, &k));
+	if ( fb == NULL ) {
+		say("メモリが足りないため、配列を追加できませんでした");
+		return;
+	}
 	if ( k > 5 && strcmp((char *)fb + k - 5, ".json") == 0 ) fb[k - 5] = 0;
 	(void)layout_add(g_json, n, fb);
+	free(fb);
 }
 
 /* ---------------------------------------------------------------- the person */
@@ -1785,7 +1762,7 @@ int main( void )
 	T_OBNTM	m;
 	T_OBREF	ref;
 	SZ	asz = 0, an;
-	char	title[OB_NAME_MAX + 8], s[200], arg[16];
+	char	*title, s[200], arg[16];
 
 	memset(arg, 0, sizeof(arg));
 	an = ts_get_arg(arg, sizeof(arg) - 1);
@@ -1795,8 +1772,12 @@ int main( void )
 		(void)wm_msg_put("かな入力練習は、かな入力練習の実身を開いて使います");
 		return 1;
 	}
-	snprintf(title, sizeof(title), "%s", (char *)ref.name);
-	snprintf((char *)g_name, sizeof(g_name), "%s", (char *)ref.name);
+	{
+		UB	*nm = ui_obj_name(&g_obj);
+
+		if ( nm != NULL ) g_name = nm;	/* kept while it runs */
+	}
+	title = (char *)g_name;
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_CHANNEL;
 	g_port = ( ob_cre_obj(&c, &g_ch) >= E_OK ) ? ob_opn_obj(&g_ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) : E_NOEXS;

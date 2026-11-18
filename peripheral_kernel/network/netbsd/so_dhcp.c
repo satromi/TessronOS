@@ -98,12 +98,16 @@
 #define OPT_CLIENT_ID		61
 #define OPT_END			255
 
+/* The name servers an answer can carry: as many addresses as its options have room for */
+#define DHCP_DNS_MAX		( ( MSG_MAX - OPT_AT ) / 4 )
+
 typedef struct {
 	UW	yiaddr;
 	UW	server;
 	UW	mask;
 	UW	router;
-	UW	dns[2];
+	UW	dns[DHCP_DNS_MAX];
+	INT	ndns;
 	UW	lease;			/* s; 0xffffffff for ever */
 	UW	t1, t2;
 	INT	type;
@@ -316,8 +320,10 @@ LOCAL BOOL read_msg( CONST UB *m, INT len, UW xid, LEASE *l )
 			l->msg[n] = 0;
 			break;
 		case OPT_DNS:
-			if ( olen >= 4 ) knl_memcpy(&l->dns[0], m + at, 4);
-			if ( olen >= 8 ) knl_memcpy(&l->dns[1], m + at + 4, 4);
+			/* every server, an option split in parts read as one (RFC 3396) */
+			for ( n = 0; n + 4 <= olen && l->ndns < DHCP_DNS_MAX; n += 4 ) {
+				knl_memcpy(&l->dns[l->ndns++], m + at + n, 4);
+			}
 			break;
 		default:
 			break;
@@ -597,7 +603,7 @@ LOCAL void take( LEASE *l, UINT gen )
 		return;				/* stopped meanwhile: a fixed address is set */
 	}
 	(void)knl_so_nb_ifaddr(l->yiaddr, l->mask, l->router, FALSE);
-	knl_so_nb_ifdns(l->dns[0], l->dns[1]);
+	knl_so_nb_ifdns(l->dns, l->ndns);
 	/* the line made whole and said at once: another task's line may come between two calls */
 	{
 		UB	line[160];
@@ -606,9 +612,10 @@ LOCAL void take( LEASE *l, UINT gen )
 		n = say_ip(line, n, "address", l->yiaddr);
 		n = say_ip(line, n, "mask", l->mask);
 		if ( l->router != 0 ) n = say_ip(line, n, "gateway", l->router);
-		if ( l->dns[0] != 0 ) n = say_ip(line, n, "dns", l->dns[0]);
+		if ( l->ndns > 0 ) n = say_ip(line, n, "dns", l->dns[0]);
 		line[n] = 0;
 		tm_printf((UB *)"net: DHCP%s lease %d s\n", line, (INT)l->lease);
+		if ( l->ndns > 1 ) tm_printf((UB *)"net: DHCP %d name servers\n", l->ndns);
 	}
 }
 

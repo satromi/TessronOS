@@ -73,7 +73,8 @@ IMPORT void knl_wmobj_key_seen( CONST T_WMEV *ev );
  * OB_E_PRESSED told to every window that asked for it
  */
 IMPORT void knl_wmobj_press_seen( CONST T_WMEV *ev );
-IMPORT void knl_wmobj_panel( INT pid );
+/* A panel opened, made an object with its parts: E_NOMEM when their UUIDs could not be kept */
+IMPORT ER   knl_wmobj_panel( INT pid );
 IMPORT void knl_wmobj_panel_close( INT pid );
 IMPORT void knl_wmobj_part( INT pid, INT i, UINT event, CONST T_WMEV *ev );
 

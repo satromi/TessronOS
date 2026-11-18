@@ -87,7 +87,7 @@ LOCAL void test_pair( void )
 	KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
 	KT_ASSERT_EQ(r.type, OB_T_CHANNEL);
 	KT_ASSERT_EQ(r.sub, OB_S_STREAM);
-	KT_ASSERT_EQ(r.name[0], 0);			/* no name */
+	KT_ASSERT(kt_name_is(&u, ""));			/* no name */
 	KT_ASSERT_ER(ob_rea_rec(kb, OB_ST_STATE, 0, &s, sizeof(s), &asz), E_OK);
 	KT_ASSERT(ts_uuid_cmp(&s.peer, &u) == 0);	/* each names the other */
 	KT_ASSERT(( s.flags & OB_SS_PEER ) != 0);

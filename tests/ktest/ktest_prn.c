@@ -965,7 +965,8 @@ LOCAL void test_object( void )
 	T_PRNJOB	job;
 	T_PRNSET	set;
 	TS_UUID		u;
-	UB		name[TAD_NAME_MAX], fname[XF_NAME_MAX];
+	UB		*name, *fname = NULL;
+	SZ		fl = 0, nl = 0;
 	OUT		o;
 	T_PRNSTAT	st;
 
@@ -975,18 +976,23 @@ LOCAL void test_object( void )
 	prn_default(&set);
 	KT_ASSERT_ER(prn_object(&job, &set, NULL, &u), E_OK);
 	prn_stat(&st);
-	KT_ASSERT(om_store_name(&u, name, sizeof(name)) > 0);
-	tm_printf((UB *)"  the object: %s\n", name);
-	KT_ASSERT(find(name, s_len((CONST char *)name), 0, "報告書") == 0);
+	name = om_store_name_dup(&u, &nl);
+	KT_ASSERT(name != NULL);
+	if ( name != NULL ) {
+		tm_printf((UB *)"  the object: %s\n", name);
+		KT_ASSERT(find(name, (INT)nl, 0, "報告書") == 0);
+		Kfree(name);
+	}
 	KT_ASSERT_EQ(xf_data_rec(&u), 1);
 	o.max = 1024 * 1024;
 	o.n = 0;
 	o.b = (UB *)Kmalloc((SZ)o.max);
 	if ( o.b != NULL ) {
-		KT_ASSERT_ER(xf_export(&u, out_write, &o, fname, sizeof(fname)), E_OK);
+		KT_ASSERT_ER(xf_export(&u, out_write, &o, &fname, &fl), E_OK);
 		KT_ASSERT_EQ(o.n, (INT)st.bytes);
 		KT_ASSERT(xref_check(o.b, o.n) > 0);
-		KT_ASSERT(find(fname, s_len((CONST char *)fname), 0, ".pdf") > 0);
+		KT_ASSERT(fname != NULL && find(fname, (INT)fl, 0, ".pdf") > 0);
+		if ( fname != NULL ) Kfree(fname);
 		Kfree(o.b);
 	}
 	(void)ob_del_obj(&u);

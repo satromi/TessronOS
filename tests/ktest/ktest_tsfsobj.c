@@ -29,6 +29,21 @@
 #include <ts/tsfsobj.h>
 #include <ts/tsfsck.h>
 #include <ts/proc.h>
+
+/* An object's name on a volume of the native store, read from its metadata for a test */
+LOCAL UB	rnam_meta[1024], rnam[64];
+
+LOCAL CONST UB *blk_name( ID bvol, CONST TS_UUID *u )
+{
+	SZ	asz = 0;
+
+	rnam[0] = 0;
+	if ( ts_obj_get_meta(bvol, u, rnam_meta, sizeof(rnam_meta), &asz) >= E_OK && asz > 0 ) {
+		knl_json_get_str(rnam_meta, (INT)( ( asz < (SZ)sizeof(rnam_meta) ) ? asz : (SZ)sizeof(rnam_meta) ),
+				 "name", rnam, sizeof(rnam));
+	}
+	return rnam;
+}
 #include <ts/fs.h>
 
 #define ODEV		kt_scratch()
@@ -217,8 +232,8 @@ LOCAL void test_object( void )
 	KT_ASSERT_EQ(robj.refcnt, 0);
 	KT_ASSERT_EQ(robj.nrec, 0);
 	KT_ASSERT_EQ(robj.size, 0);
-	KT_ASSERT_EQ(robj.name[0], (UB)'f');
-	KT_ASSERT_EQ(robj.name[4], (UB)'t');
+	KT_ASSERT_EQ(blk_name(bvol, &uuid)[0], (UB)'f');
+	KT_ASSERT_EQ(rnam[4], (UB)'t');
 	KT_ASSERT((robj.flags & TSFSO_F_DELETABLE) != 0);
 	KT_ASSERT((robj.flags & TSFSO_F_GARBAGE) == 0);
 
@@ -256,7 +271,7 @@ LOCAL void test_object( void )
 	/* the name can be set on its own */
 	KT_ASSERT_ER(ts_obj_set_name(bvol, &uuid, (CONST UB *)"renamed"), E_OK);
 	KT_ASSERT_ER(ts_obj_ref(bvol, &uuid, &robj), E_OK);
-	KT_ASSERT_EQ(robj.name[0], (UB)'r');
+	KT_ASSERT_EQ(blk_name(bvol, &uuid)[0], (UB)'r');
 }
 
 /* a record is written and read back, over more than one block */
@@ -987,7 +1002,7 @@ LOCAL void test_crash( void )
 	/* the record was written, so coming back puts the change in place */
 	KT_ASSERT_ER(ts_obj_exists(bvol, &kept), E_OK);
 	KT_ASSERT_ER(ts_obj_ref(bvol, &kept, &robj), E_OK);
-	KT_ASSERT_EQ(robj.name[0], (UB)'s');
+	KT_ASSERT_EQ(blk_name(bvol, &kept)[0], (UB)'s');
 	KT_ASSERT_EQ(robj.refcnt, 0);
 }
 
@@ -1067,7 +1082,12 @@ LOCAL void test_api( void )
 	KT_ASSERT_ER(ts_ref_obj(vol, &uuid, &robj), E_OK);
 	KT_ASSERT_EQ(robj.nrec, 1);
 	KT_ASSERT_EQ(robj.size, 256);
-	KT_ASSERT_EQ(robj.name[0], (UB)'b');
+	{
+		UB	nb[8];
+
+		KT_ASSERT_ER(ts_ref_nam(vol, &uuid, nb, sizeof(nb), NULL), E_OK);
+		KT_ASSERT_EQ(nb[0], (UB)'b');
+	}
 
 	/* the reference count and the garbage list, through the API */
 	KT_ASSERT_ER(ts_lnk_obj(vol, &uuid), E_OK);

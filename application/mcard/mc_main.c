@@ -38,7 +38,7 @@
 
 MCDB	g_db;
 TS_UUID	g_obj;
-UB	g_name[OB_NAME_MAX];
+UB	*g_name = (UB *)"";
 BOOL	g_autoref;
 BOOL	g_changed, g_closing;
 ID	g_port;
@@ -281,7 +281,7 @@ void list_open( void )
 {
 	T_OBWPOS	wp;
 	SZ		asz = 0;
-	char		title[OB_NAME_MAX + 16];
+	char		*title;
 	INT		x = g_cx + 40, y = g_cy + 60;
 
 	if ( g_lw.open ) {
@@ -294,11 +294,13 @@ void list_open( void )
 		if ( wp.sw > 0 && x + 400 > wp.sw ) x = wp.sw - 560;
 		if ( x < 0 ) x = 0;
 	}
-	snprintf(title, sizeof(title), "%s（一覧）", (char *)g_name);
-	if ( win_make(&g_lw, title, x, y, 520, 360, WIN_EVENTS) < E_OK ) {
+	title = name_with(g_name, "（一覧）");
+	if ( title == NULL || win_make(&g_lw, title, x, y, 520, 360, WIN_EVENTS) < E_OK ) {
+		free(title);
 		say("一覧ウィンドウを開けません");
 		return;
 	}
+	free(title);
 	list_show_cur();
 	note("list on");
 }
@@ -707,7 +709,7 @@ int main( void )
 	T_OBNTM	m;
 	T_OBREF	ref;
 	SZ	asz = 0, argn;
-	char	title[OB_NAME_MAX + 8], s[160], arg[32];
+	char	*title, s[160], arg[32];
 	ER	er;
 	INT	k;
 
@@ -720,9 +722,12 @@ int main( void )
 	}
 	memcpy(&g_obj, arg, sizeof(g_obj));
 	g_autoref = (BOOL)( ( ref.flags & OB_F_AUTOREF ) != 0 );
-	memcpy(g_name, ref.name, OB_NAME_MAX);
-	g_name[OB_NAME_MAX - 1] = 0;
-	snprintf(title, sizeof(title), "%s", (char *)ref.name);
+	{
+		UB	*nm = ui_obj_name(&g_obj);
+
+		if ( nm != NULL ) g_name = nm;	/* the name whole, kept while it runs */
+	}
+	title = (char *)g_name;
 	mc_init(&g_db);
 	g_cw.gid = g_lw.gid = -1;
 	memset(&c, 0, sizeof(c));
@@ -800,10 +805,9 @@ INT mc_link_name( CONST UB *el, INT len, UB *out, INT max )
 	if ( max <= 0 ) return 0;
 	out[0] = 0;
 	if ( !ct_target(el, len, &u) || ob_ref_obj(&u, &ref) < E_OK ) return 0;
-	n = (INT)strnlen((CONST char *)ref.name, OB_NAME_MAX);
-	if ( n > max - 1 ) n = max - 1;
-	memcpy(out, ref.name, (size_t)n);
-	out[n] = 0;
+	/* what fits of the name whole, at a whole letter */
+	if ( ob_ref_nam(&u, out, max, NULL) < E_OK ) return 0;
+	n = (INT)strlen((CONST char *)out);
 	return n;
 }
 

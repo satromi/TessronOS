@@ -121,15 +121,17 @@ static void remake( void )
 /* The objects of the links taken: how many, the list in *p_ids (free it) */
 static INT picked( TS_UUID **p_ids )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	i, n = 0;
 	TS_UUID	*ids = malloc(sizeof(TS_UUID) * (size_t)( ( g_npick > 0 ) ? g_npick : 1 ));
 
+	tad_vobj_init(&v);
 	for ( i = 0; ids != NULL && g_fig != NULL && i < g_fig->nsh && n < g_npick; i++ ) {
 		if ( g_pick[i] != 0 && fg_is_link(i) && tad_lnk_get(g_rec, g_fig->sh[i].link, &v) >= E_OK ) {
 			ids[n++] = v.target;
 		}
 	}
+	tad_vobj_clear(&v);
 	*p_ids = ids;
 	return n;
 }
@@ -154,11 +156,11 @@ static void purge( void )
 		return;
 	}
 	if ( n == 1 ) {
-		UB	nm[TAD_NAME_MAX];
+		UB	*nm = tl_name_dup(&ids[0]);
 
-		(void)tl_name(&ids[0], nm, TAD_NAME_MAX);
 		at = st_cat(l1, at, sizeof(l1), "実身「");
-		at = st_cat(l1, at, sizeof(l1), (CONST char *)nm);
+		at = st_cat(l1, at, sizeof(l1), ( nm != NULL ) ? (CONST char *)nm : "");	/* a question's line: what fits */
+		free(nm);
 		at = st_cat(l1, at, sizeof(l1), "」を完全に削除しますか？");
 	} else {
 		at = st_cat_n(l1, at, sizeof(l1), n);
@@ -210,10 +212,14 @@ static void rescan( void )
 		st_tell("参照数を数え直せませんでした。", NULL);
 		return;
 	}
-	an.text[DT_TEXT_MAX - 1] = 0;
-	while ( an.text[k] >= '0' && an.text[k] <= '9' ) total = total * 10 + ( an.text[k++] - '0' );
-	if ( an.text[k] == '\t' ) k++;
-	while ( an.text[k] >= '0' && an.text[k] <= '9' ) changed = changed * 10 + ( an.text[k++] - '0' );
+	{
+		CONST UB	*t = ta_ans_part(DT_TAIL_TEXT, NULL);
+
+		if ( t == NULL ) t = (CONST UB *)"";
+		while ( t[k] >= '0' && t[k] <= '9' ) total = total * 10 + ( t[k++] - '0' );
+		if ( t[k] == '\t' ) k++;
+		while ( t[k] >= '0' && t[k] <= '9' ) changed = changed * 10 + ( t[k++] - '0' );
+	}
 	remake();
 	at = st_cat_n(l1, at, sizeof(l1), total);
 	if ( changed > 0 ) {

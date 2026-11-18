@@ -22,6 +22,16 @@
 
 /* ---------------------------------------------------------------- what the manager calls */
 
+/* A whole element: its id, its length and up to 255 bytes (IEEE 802.11-2020 9.4.2.1) */
+#define WPAG_ELEM_MAX	257
+
+/*
+ * SAE's password: the standard sets no length; the most the cards'
+ * firmware takes when it makes SAE itself (TSWIFI_SAE_PW_MAX of the
+ * drivers), which the manager holds every password to
+ */
+#define WPAG_SAE_PW_MAX	128
+
 /* The security a network offers, from its elements and its capability field (privacy) */
 #define WPAG_OPEN	0		/* none */
 #define WPAG_WEP	1		/* WEP (not joined) */
@@ -122,10 +132,10 @@ extern int	knl_wpa_choose( int saved, const unsigned char *ap_rsn, int ap_rsn_le
  * PMK (32 bytes: of the passphrase, or SAE's) and, for SAE, its PMKID
  * (16 bytes, put in our RSN element), and h2e (our RSNXE says
  * SAE-H2E). Our RSN element (and RSNXE after it, for H2E) for the
- * association request is written to ie (up to WPAG_IE_MAX bytes) and
- * its length into *ie_len. 0, or -1.
+ * association request is written to ie (up to WPAG_IE_MAX bytes: room
+ * for both whole) and its length into *ie_len. 0, or -1.
  */
-#define WPAG_IE_MAX	96
+#define WPAG_IE_MAX	( 2 * WPAG_ELEM_MAX )
 
 /*
  * The element knl_wpa_start2 writes is the only RSN element of a join:
@@ -189,7 +199,13 @@ extern int	knl_wpa_start2( const unsigned char *own, const unsigned char *bssid,
  * knl_wpa_sae_abort: what SAE holds let go (the password's element and
  * the keys cleared).
  */
-#define WPAG_SAE_MAX		512
+/*
+ * An authentication frame's body: the most a management frame carries
+ * (2304 octets, the MSDU and MMPDU of IEEE 802.11 that are not
+ * aggregated; Linux's IEEE80211_MAX_DATA_LEN), anti-clogging token,
+ * password identifier and the largest group's scalar and element all in it
+ */
+#define WPAG_SAE_MAX		2304
 #define WPAG_SAE_PT_MAX		132
 #define WPAG_SAE_SEND		1
 #define WPAG_SAE_WAIT		0

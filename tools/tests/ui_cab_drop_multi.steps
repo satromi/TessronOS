@@ -95,8 +95,10 @@ pixel 250 100 F3FFFF
 logmark
 key 16 01
 expectsince cabinet: saved (0)
+# the link carried keeps the name it was carried with (name="基本図形編集", the object's own): a link's
+# words travel as long as they are (11.3), so the record is longer than before by that attribute
 sum show anon
-want ok 1486 5f348bf88621f94f
+want ok 1538 add55cd2e66745ac
 key 08 01
 expect cabinet: closed
 wait 500

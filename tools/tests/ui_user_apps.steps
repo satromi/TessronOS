@@ -75,7 +75,11 @@ wait 300
 click 470 431
 wait 300
 click 644 505
-expectin 120 backup: saved 61 objects in 1 volumes
+# 80: every object 仮身サンプル links to, through record 0, on the test disk. The 原紙箱 it links
+# to has held links to the programs since R1.300 (14 of them, and 5 objects they link to), and
+# the packages' programs (PCM Player, MPEG Player) are among them; the 61 of before was the
+# network without those
+expectin 120 backup: saved 80 objects in 1 volumes
 wait 1000
 # the 復帰 tab, the first volume's head read with 〈復帰〉, and restored with it again
 click 237 165

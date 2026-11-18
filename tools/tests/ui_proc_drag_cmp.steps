@@ -147,12 +147,16 @@ wait 500
 logmark
 key 16 01
 expectsince document: saved (0)
+# each link carried keeps the name it was carried with, the object's own (name="基本図形編集" in the
+# figure and the text, name="実身/仮身" in the cabinet): a link's words travel as long as they are
+# (11.3), so each record is longer than before by that attribute (26, 26 and 21 bytes); the link
+# that stayed in the cabinet has none
 sum show anon big2
-want ok 793 7c4ccbda41f73f6c
+want ok 819 69041cd3e1417203
 sum show anon big1
-want ok 517 f749d96003135d2a
+want ok 543 2715844ab5b7af09
 sum show anon
-want ok 711 157024ffb46f8eb6
+want ok 732 fee56c9bc8ef0bd4
 logmark
 key 08 01
 expectsince document: closed

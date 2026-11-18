@@ -19,7 +19,7 @@
       "id": "accessory-box",
       "kind": "app",
       "name": "小物箱",
-      "version": "R1.400",
+      "version": "R1.410",
       "builtin": false,
       "openArg": "link",
       "base": [

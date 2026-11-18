@@ -25,12 +25,14 @@
  *
  *	When the process ends, its contexts are closed: every BO it held is
  *	let go of, the mappings with it, and the names it shared with
- *	gp_shr_bo go too.
+ *	gp_shr_bo go too. There is no fixed number of contexts or of names:
+ *	the kernel's tables grow as they are used.
  *
  *	Errors: E_NOEXS when there is no GPU (gp_ref_gpu, gp_sub_job), E_ID
  *	for a context or a number that is not the caller's, E_LIMIT when a
- *	table is full, E_IO when a job failed or the GPU had to be reset,
- *	E_TMOUT when a wait ran out of time.
+ *	context holds as many BOs as it may, E_NOMEM when the kernel has no
+ *	memory for another context, number or name, E_IO when a job failed
+ *	or the GPU had to be reset, E_TMOUT when a wait ran out of time.
  */
 
 #ifndef __TS_GPUAPP_H__
@@ -43,7 +45,6 @@
 extern "C" {
 #endif
 
-#define GP_CTX_MAX	32		/* contexts in all */
 #define GP_JOB_BO_MAX	1024		/* BOs one job names */
 
 typedef struct {

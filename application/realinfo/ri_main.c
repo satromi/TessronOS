@@ -73,11 +73,12 @@
 #include <ts/dtreq.h>
 #include <ts/sysdef.h>
 #include <ts/uuid.h>
+#include "../dtask.h"
 
 #define IF_TEXT		128		/* one line of a list */
 #define IF_CHSZ		14		/* a 付箋's letters */
 #define IF_ID		64		/* a program's id */
-#define IF_NAME		TAD_NAME_MAX
+#define IF_LOG		256		/* a line said on the console: a long name is cut there, at a whole letter */
 
 /* The panels of the data box */
 #define PN_MAIN		1
@@ -123,7 +124,7 @@ typedef struct {
 
 typedef struct {
 	UB	id[IF_ID];
-	UB	name[IF_NAME];
+	UB	*name;			/* whole, of its own (it goes into the applist written back); never NULL */
 	BOOL	listed;			/* in the applist; FALSE: offered for the object's kind */
 } APP;
 
@@ -131,7 +132,7 @@ typedef struct {
 typedef struct {
 	TS_UUID	uuid;
 	UB	id[IF_ID];
-	UB	name[IF_NAME];
+	UB	*name;			/* whole, of its own; NULL none */
 	UB	kind[16];
 	TS_UUID	*base;			/* its templates */
 	INT	nbase;
@@ -157,9 +158,16 @@ static CONST TS_UUID	g_users = OB_GROUP_USERS_INIT;
 
 static void say( CONST char *s )
 {
-	char	line[TAD_NAME_MAX + 64];
+	char	line[IF_LOG];
+	INT	n;
 
-	snprintf(line, sizeof(line), "info: %s\n", s);
+	n = snprintf(line, sizeof(line) - 1, "info: %s", s);
+	if ( n >= (INT)sizeof(line) - 1 ) {
+		n = (INT)sizeof(line) - 2;
+		while ( n > 0 && ( (UB)line[n] & 0xC0 ) == 0x80 ) n--;	/* never half a letter */
+	}
+	line[n++] = '\n';
+	line[n] = 0;
 	tm_putstring((CONST UB *)line);
 }
 
@@ -276,41 +284,13 @@ static void who_name( CONST TS_UUID *u, UB *b, INT max )
 
 /* ---------------------------------------------------------------- the desktop */
 
+/* The words of the next request and the last answer, as long as they are (dtask.h) */
+static DTASK	g_dq;
+
 /* A request to the desktop, its panels over this window; the answer waited for */
 static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
-	static UINT	seq;
-	TS_UUID		d, reply;
-	T_OBCRE		c;
-	SZ		asz = 0;
-	ID		k, ka;
-	ER		er;
-
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
-	rq->seq = ++seq;
-	rq->reply = reply;
-	if ( ui.kw > 0 ) rq->win = ui.win;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
-			er = an->er;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
-	return er;
+	return dq_ask(&g_dq, rq, an, ( ui.kw > 0 ) ? &ui.win : NULL, wait_ms);
 }
 
 static void req_init( T_DTREQ *rq, UINT req )
@@ -640,8 +620,9 @@ static void app_add( CONST UB *id, CONST UB *name )
 		}
 	}
 	if ( !app_room(g_napp + 1) ) return;
+	g_app[g_napp].name = (UB *)strdup((CONST char *)name);
+	if ( g_app[g_napp].name == NULL ) return;
 	(void)put(g_app[g_napp].id, 0, IF_ID, (CONST char *)id);
-	(void)put(g_app[g_napp].name, 0, IF_NAME, (CONST char *)name);
 	g_app[g_napp].listed = TRUE;
 	if ( g_dflt < 0 ) g_dflt = g_napp;
 	g_napp++;
@@ -674,8 +655,14 @@ static INT progs_read( PROG **p_all )
 		if ( js_parse(m, len, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
 		  && js_get(&tf, "program", &g) >= E_OK && js_get_str(&g, "id", all[k].id, IF_ID) > 0 ) {
 			all[k].uuid = lk[i];
-			if ( js_get_str(&g, "name", all[k].name, IF_NAME) <= 0 ) {
-				(void)js_get_str(&root, "name", all[k].name, IF_NAME);
+			/* the name whole: never longer than the metadata it is in */
+			all[k].name = (UB *)malloc((size_t)len + 1);
+			if ( all[k].name != NULL ) {
+				all[k].name[0] = 0;
+				if ( js_get_str(&g, "name", all[k].name, len + 1) <= 0
+				  && js_get_str(&root, "name", all[k].name, len + 1) <= 0 ) {
+					all[k].name[0] = 0;
+				}
 			}
 			if ( js_get_str(&g, "kind", all[k].kind, sizeof(all[k].kind)) <= 0 ) {
 				(void)put(all[k].kind, 0, sizeof(all[k].kind), "app");
@@ -703,7 +690,10 @@ static void progs_free( PROG *all, INT n )
 {
 	INT	i;
 
-	for ( i = 0; all != NULL && i < n; i++ ) free(all[i].base);
+	for ( i = 0; all != NULL && i < n; i++ ) {
+		free(all[i].base);
+		free(all[i].name);
+	}
 	free(all);
 }
 
@@ -769,9 +759,15 @@ static void copy_tag( INT sel )
 
 		lv->target = all[i].uuid;
 		lv->recno = 0;
-		(void)put(lv->name, 0, TAD_NAME_MAX, (CONST char *)all[i].name);
+		if ( tad_vobj_set(lv, TAD_W_NAME, all[i].name, -1) < E_OK ) {
+			tell("メモリが足りないため、複写できませんでした", NULL);
+			tad_free(frag);
+			free(lv);
+			progs_free(all, n);
+			return;
+		}
 		if ( fid > 0 ) (void)fn_set_size(fid, IF_CHSZ);
-		w = ( fid > 0 ) ? fn_width(fid, lv->name) : IF_CHSZ * 6;
+		w = ( fid > 0 ) ? fn_width(fid, TAD_VS(lv->vname)) : IF_CHSZ * 6;
 		lv->right = tad_closed_w(IF_CHSZ, TAD_D_DEFAULT, w);
 		lv->bottom = band;
 		lv->height = band;
@@ -797,6 +793,7 @@ static void copy_tag( INT sel )
 		}
 	}
 	if ( frag != NULL ) tad_free(frag);
+	if ( lv != NULL ) tad_vobj_clear(lv);
 	free(lv);
 	progs_free(all, n);
 }
@@ -841,7 +838,7 @@ static BOOL tray_has( void )
 static void paste_tags( void )
 {
 	T_TAD	*frag = tray_frag();
-	T_VOBJ	*lv = (T_VOBJ *)malloc(sizeof(T_VOBJ));
+	T_VOBJ	*lv = (T_VOBJ *)calloc(1, sizeof(T_VOBJ));	/* zeroed: empty */
 	PROG	*all = NULL;
 	INT	n, np, i, k, b, got = 0;
 
@@ -863,6 +860,7 @@ static void paste_tags( void )
 		}
 	}
 	if ( frag != NULL ) tad_free(frag);
+	if ( lv != NULL ) tad_vobj_clear(lv);
 	free(lv);
 	progs_free(all, np);
 	if ( got == 0 ) {
@@ -935,6 +933,7 @@ static void button( INT num )
 		if ( sel >= 0 && sel < g_napp && !g_app[sel].listed ) {
 			tell("実身の種類で選べるプログラムは削除できません", (CONST char *)g_app[sel].name);
 		} else if ( sel >= 0 && sel < g_napp ) {
+			free(g_app[sel].name);
 			for ( i = sel; i < g_napp - 1; i++ ) g_app[i] = g_app[i + 1];
 			g_napp--;
 			if ( g_dflt == sel ) g_dflt = ( g_napp > 0 ) ? 0 : -1;
@@ -1048,7 +1047,7 @@ static void load( void )
 	g_prt0 = ( g_prt != NULL ) ? prt_dup(g_prt) : NULL;
 	if ( g_prt == NULL || g_prt0 == NULL ) g_prt_ok = FALSE;
 
-	g_napp = 0;
+	while ( g_napp > 0 ) free(g_app[--g_napp].name);
 	g_dflt = -1;
 	for ( i = 0; i < n; i++ ) {
 		req_init(&rq, DT_RQ_APPS);
@@ -1057,12 +1056,18 @@ static void load( void )
 		memset(&an, 0, sizeof(an));
 		if ( ask_desktop(&rq, &an, 5000) < E_OK || !app_room(g_napp + 1) ) break;
 		n = (INT)an.how;
-		an.text[DT_TEXT_MAX - 1] = 0;
-		for ( k = 0; an.text[k] != 0 && an.text[k] != '\t'; k++ ) ;
-		if ( an.text[k] != '\t' ) continue;
-		an.text[k] = 0;
-		(void)put(g_app[g_napp].id, 0, IF_ID, (CONST char *)an.text);
-		(void)put(g_app[g_napp].name, 0, IF_NAME, (CONST char *)an.text + k + 1);
+		{
+			CONST UB	*t = dq_ans_text(&g_dq, DT_TAIL_TEXT);
+			char		id[IF_ID];
+
+			for ( k = 0; t[k] != 0 && t[k] != '\t'; k++ ) ;
+			if ( t[k] != '\t' || k >= IF_ID ) continue;	/* no program's id */
+			memcpy(id, t, (size_t)k);
+			id[k] = 0;
+			g_app[g_napp].name = (UB *)strdup((CONST char *)t + k + 1);
+			if ( g_app[g_napp].name == NULL ) break;
+			(void)put(g_app[g_napp].id, 0, IF_ID, id);
+		}
 		g_app[g_napp].listed = (BOOL)( ( an.flags & DT_F_KIND ) == 0 );
 		if ( ( an.flags & DT_F_DEFAULT ) != 0 ) g_dflt = g_napp;
 		g_napp++;
@@ -1119,13 +1124,29 @@ static BOOL apply( void )
 			if ( i == g_dflt ) at = n;
 			n++;
 		}
-		c = snprintf((char *)rq.text, sizeof(rq.text), "%d", at);
-		for ( i = 0; i < g_napp && c < (INT)sizeof(rq.text); i++ ) {
-			if ( !g_app[i].listed && i != g_dflt ) continue;
-			c += snprintf((char *)rq.text + c, sizeof(rq.text) - (size_t)c, "\n%s\t%s",
-				      (CONST char *)g_app[i].id, (CONST char *)g_app[i].name);
+		{
+			/* the text as long as the list is: the default's place, then a line for each */
+			SZ	cap = 16, at_c;
+			char	*t;
+
+			for ( i = 0; i < g_napp; i++ ) {
+				cap += (SZ)strlen((CONST char *)g_app[i].id) + (SZ)strlen((CONST char *)g_app[i].name) + 2;
+			}
+			t = (char *)malloc((size_t)cap);
+			if ( t == NULL ) {
+				ok = FALSE;
+			} else {
+				at_c = snprintf(t, (size_t)cap, "%d", at);
+				for ( i = 0; i < g_napp; i++ ) {
+					if ( !g_app[i].listed && i != g_dflt ) continue;
+					at_c += snprintf(t + at_c, (size_t)( cap - at_c ), "\n%s\t%s",
+							 (CONST char *)g_app[i].id, (CONST char *)g_app[i].name);
+				}
+				(void)dq_part(&g_dq, DT_TAIL_TEXT, (CONST UB *)t, at_c);
+				free(t);
+				if ( ask_desktop(&rq, &an, 5000) < E_OK ) ok = FALSE;
+			}
 		}
-		if ( c >= (INT)sizeof(rq.text) || ask_desktop(&rq, &an, 5000) < E_OK ) ok = FALSE;
 	}
 	/* fixed or let go; still fixed with another default chosen, fixed to that one */
 	lock = (BOOL)( ui_value(&ui, N_LOCK) != 0 );
@@ -1223,29 +1244,45 @@ static void event( CONST T_OBNTM *m )
 	}
 }
 
-/* The window's name: the object's with の管理情報 after it, written as JSON says a string */
-static void title_set( char *t, INT max )
+/*
+ * The window's name: the object's, whole, with の管理情報 after it,
+ * written as JSON says a string; in memory to free
+ */
+static char *title_set( void )
 {
-	UB	nm[TAD_NAME_MAX];
-	char	json[TAD_NAME_MAX * 2 + 48];
-	INT	n, i, k;
+	UB	*nm = ui_obj_name(&g_obj);
+	char	*t, *json;
+	size_t	tl;
+	INT	i, k;
 
-	(void)name_of(&g_obj, nm, sizeof(nm));
-	n = put((UB *)t, 0, max, (CONST char *)nm);
-	(void)put((UB *)t, n, max, "の管理情報");
-	k = snprintf(json, sizeof(json), "{\"name\":\"");
-	for ( i = 0; t[i] != 0 && k < (INT)sizeof(json) - 4; i++ ) {
+	tl = ( ( nm != NULL ) ? strlen((CONST char *)nm) : 0 ) + sizeof("の管理情報");
+	t = (char *)malloc(tl);
+	json = (char *)malloc(tl * 2 + 16);
+	if ( t == NULL || json == NULL ) {
+		free(nm);
+		free(t);
+		free(json);
+		return NULL;
+	}
+	snprintf(t, tl, "%sの管理情報", ( nm != NULL ) ? (CONST char *)nm : "");
+	free(nm);
+	k = snprintf(json, tl * 2 + 16, "{\"name\":\"");
+	for ( i = 0; t[i] != 0; i++ ) {
 		if ( t[i] == '"' || t[i] == '\\' ) json[k++] = '\\';
 		json[k++] = t[i];
 	}
-	k += snprintf(json + k, sizeof(json) - (size_t)k, "\"}");
+	json[k++] = '"';
+	json[k++] = '}';
+	json[k] = 0;
 	(void)ob_set_atr(ui.kw, (CONST UB *)json, (SZ)k);
+	free(json);
+	return t;
 }
 
 int main( void )
 {
 	T_OBNTM	m;
-	char	title[TAD_NAME_MAX + 24], line[TAD_NAME_MAX + 40];
+	char	*title, line[IF_LOG];
 	SZ	n;
 	INT	x, y, r, c;
 
@@ -1264,7 +1301,7 @@ int main( void )
 		say("no window");
 		return 1;
 	}
-	title_set(title, sizeof(title));
+	title = title_set();
 	show_info();
 	/* 使用者管理 as the protection reads, every part of it off when it cannot be read */
 	for ( r = 0; r < 3; r++ ) {
@@ -1288,8 +1325,9 @@ int main( void )
 	show_acl();
 	show_apps();
 	ui_reveal(&ui);
-	snprintf(line, sizeof(line), "opened %s", title);
+	snprintf(line, sizeof(line), "opened %s", ( title != NULL ) ? title : "");
 	say(line);
+	free(title);
 
 	while ( !g_closing && ui_wait(&ui, &m, TMO_FEVR) >= E_OK ) {
 		event(&m);

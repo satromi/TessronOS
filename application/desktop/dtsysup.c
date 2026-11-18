@@ -13,7 +13,7 @@
  *
  *	The system's package (.tpk, made by tools/mktpk.py --system) is an
  *	application's package of another kind: package.json says "kind":
- *	"system", the version (TS_VERSION, R1.400), the machine and the
+ *	"system", the version (TS_VERSION, R1.410), the machine and the
  *	processor it is for, and the objects it holds, each as the files of
  *	the TADjs form, and the files of the boot partition (/boot: the Pi's
  *	FAT partition, the PC's EFI system partition) as entries
@@ -1677,8 +1677,15 @@ EXPORT ER dt_sysup_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 	ER	er;
 
 	switch ( rq->recno ) {
-	case DT_SYSUP_CHECK:
-		return dt_sysup_check(&rq->target, an->text, sizeof(an->text));
+	case DT_SYSUP_CHECK: {
+		/* two versions and a tab: what the check writes is that short */
+		UB	t[DT_TEXT_MAX];
+
+		t[0] = 0;
+		er = dt_sysup_check(&rq->target, t, sizeof(t));
+		if ( t[0] != 0 ) (void)dt_ans_cat(an, t, -1);
+		return er;
+	}
 	case DT_SYSUP_BEGIN:
 		if ( su.on ) {
 			return E_BUSY;

@@ -1445,7 +1445,7 @@ TSFS_TOOLS  := $(TOP)/tools/mktsfs $(wildcard $(TOP)/tools/tsfs_py/*.py)
 # 版(R1.000 の形: R、桁数の決まらない整数、点、3桁)。プログラムの版はプログラム実身の
 # メタデータ tessronos.program.version に書く(etc/def)。TS_VERSION はシステムの版で、
 # システムの実身の OB_SYS_INFO に VERSION として出る
-TS_VERSION   ?= R1.400
+TS_VERSION   ?= R1.410
 VER_STAMP    := obj/version.stamp
 $(shell mkdir -p obj; [ -f $(VER_STAMP) ] && [ "$$(cat $(VER_STAMP))" = "$(TS_VERSION)" ] || echo "$(TS_VERSION)" > $(VER_STAMP))
 $(OBJDIR)/peripheral_kernel/obj/obsys.o: $(VER_STAMP)
@@ -1742,12 +1742,13 @@ sd: $(EXE_FILE).img $(RPI_DTB) $(RPI_D0_DTB) $(RPI500_DTB) $(CM5_DTB) $(CM5L_DTB
 endif
 
 # システムのバージョンアップ用のパッケージ(.tpk、設計書 11.8): make TARGET=<機種> [イメージと同じ指定] BUILD_ID=<id> sysup で
-# $(OBJDIR)/tessronos-<機種>-$(TS_VERSION).tpk。システムのボリュームに載る実身(mktsfs と同じ --over・--from・--exclude。
+# $(OBJDIR)/TessronOS-<機種の名前>-$(TS_VERSION).tpk(機種の名前は Pi5、Pi4、x64、QEMU)。システムのボリュームに載る実身(mktsfs と同じ --over・--from・--exclude。
 # 組み込みのアプリのパッケージ PKGS は除く)と、etc/xtad の実身のうちプログラムが原紙として名指すもの、
 # その機種の起動のファイル(区画1・ESP に置くもの)をまとめる。〈バージョン〉の一覧に落とすと入る
 SYSUP_STAGE := $(OBJDIR)/sysupboot
 ifeq ($(TARGET),_RPI5_)
 SYSUP_MACHINE := rpi5
+SYSUP_NAME := Pi5
 SYSUP_BOOT_DEPS := $(EXE_FILE).img $(RPI_DTB) $(RPI_D0_DTB) $(RPI500_DTB) $(CM5_DTB) $(CM5L_DTB) $(TOP)/etc/boot/config.txt $(TOP)/etc/boot/cmdline-cm5.txt
 SYSUP_BOOT = --boot tessronos.img=$(EXE_FILE).img --boot config.txt=$(SYSUP_STAGE)/config.txt \
 	--boot cmdline-cm5.txt=$(TOP)/etc/boot/cmdline-cm5.txt \
@@ -1755,6 +1756,7 @@ SYSUP_BOOT = --boot tessronos.img=$(EXE_FILE).img --boot config.txt=$(SYSUP_STAG
 	--boot bcm2712-rpi-cm5l-cm5io.dtb=$(CM5L_DTB) --boot init.elf=$(USER_ELF)
 else ifeq ($(TARGET),_RPI4_)
 SYSUP_MACHINE := rpi4
+SYSUP_NAME := Pi4
 SYSUP_BOOT_DEPS := $(EXE_FILE).img $(RPI4_FW_FILES) $(RPI4_CONFIG)
 SYSUP_BOOT = --boot tessronos.img=$(EXE_FILE).img --boot config.txt=$(RPI4_CONFIG) \
 	--boot start4.elf=$(RPI4_FW)/start4.elf --boot fixup4.dat=$(RPI4_FW)/fixup4.dat \
@@ -1763,15 +1765,17 @@ SYSUP_BOOT = --boot tessronos.img=$(EXE_FILE).img --boot config.txt=$(RPI4_CONFI
 	--boot overlays/disable-bt.dtbo=$(RPI4_FW)/disable-bt.dtbo --boot init.elf=$(USER_ELF)
 else ifeq ($(TARGET),_X64_)
 SYSUP_MACHINE := x64
+SYSUP_NAME := x64
 SYSUP_BOOT_DEPS := $(EXE_FILE).elf $(OBJDIR)/BOOTX64.EFI
 SYSUP_BOOT = --boot EFI/BOOT/BOOTX64.EFI=$(OBJDIR)/BOOTX64.EFI --boot tessronos.elf=$(EXE_FILE).elf \
 	--boot init.elf=$(USER_ELF) --boot-keep cmdline.txt=$(SYSUP_STAGE)/cmdline.txt
 else
 SYSUP_MACHINE := qemu_virt
+SYSUP_NAME := QEMU
 SYSUP_BOOT_DEPS :=
 SYSUP_BOOT = --boot init.elf=$(USER_ELF)
 endif
-SYSUP_TPK := $(OBJDIR)/tessronos-$(SYSUP_MACHINE)-$(TS_VERSION).tpk
+SYSUP_TPK := $(OBJDIR)/TessronOS-$(SYSUP_NAME)-$(TS_VERSION).tpk
 
 # システムの実身の集め方: .tpk と、システムのボリュームが持つ一覧(システムの箱のレコード1)で同じにする
 SYS_SET_DEPS := $(TOP)/tools/mktpk.py $(TSFS_TOOLS) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) \
@@ -1799,7 +1803,17 @@ $(SYS_VOL): $(SYS_MAN)
 
 sysup: $(SYSUP_TPK)
 
-.PHONY: sysup
+# 配布用に圧縮した SD カード・ディスクのイメージ: $(OBJDIR)/TessronOS-<機種の名前>-$(TS_VERSION).zip。
+# 中身は TessronOS-<機種の名前>-$(TS_VERSION).img の 1 つ($(SD_IMG) と同じ内容)。名前の規則は .tpk と同じ
+SD_ZIP := $(OBJDIR)/TessronOS-$(SYSUP_NAME)-$(TS_VERSION).zip
+$(SD_ZIP): $(SD_IMG)
+	@echo 'ZIP $@'
+	@rm -f $@
+	@python3 -c "import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED,compresslevel=6); z.write(sys.argv[2],sys.argv[3]); z.close()" 		$@ $(SD_IMG) TessronOS-$(SYSUP_NAME)-$(TS_VERSION).img
+
+sdzip: $(SD_ZIP)
+
+.PHONY: sysup sdzip
 
 clean:
 	rm -rf obj $(EXE_FILE).elf $(EXE_FILE).img $(EXE_FILE).map $(EXE_FILE).lst

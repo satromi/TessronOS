@@ -156,7 +156,7 @@ LOCAL ER draw_vob_body( INT gid, CONST T_DPRECT *rect, CONST T_VOBJ *vobj,
 	if ( look != NULL && look->text != NULL ) {
 		text = look->text;
 	} else if ( (vobj->disp & TAD_D_NAME) != 0 ) {
-		text = vobj->name;
+		text = TAD_VS(vobj->vname);
 	}
 
 	/* the whole of it first: a closed one is all band, an opened one the room below */
@@ -223,22 +223,28 @@ LOCAL ER draw_vob_body( INT gid, CONST T_DPRECT *rect, CONST T_VOBJ *vobj,
 
 				fn_set_size(fid, ch);
 				if ( room > 0 && fn_metrics(fid, &met) >= E_OK ) {
-					UB	cut[OM_LOOK_TEXT];
-					INT	i, n;
+					UB	*cut;
+					INT	n;
 
-					/* what does not fit is cut, not squeezed */
+					/*
+					 * What does not fit the room is cut, not squeezed:
+					 * fn_fit says how many bytes of whole letters do,
+					 * and a copy as long as that is drawn.
+					 */
 					n = fn_fit(fid, text, room);
 					if ( n < 0 ) {
 						n = 0;
 					}
-					for ( i = 0; i < n && i < OM_LOOK_TEXT - 1; i++ ) {
-						cut[i] = text[i];
+					cut = (UB *)Kmalloc((SZ)n + 1);
+					if ( cut != NULL ) {
+						knl_memcpy(cut, text, (SZ)n);
+						cut[n] = '\0';
+						/* the letters centred in the name's one letter of height */
+						fn_draw(gid, fid, tx,
+							ntop + ( ch + met.ascent - met.descent ) / 2,
+							cut, chcol);
+						Kfree(cut);
 					}
-					cut[i] = '\0';
-					/* the letters centred in the name's one letter of height */
-					fn_draw(gid, fid, tx,
-						ntop + ( ch + met.ascent - met.descent ) / 2,
-						cut, chcol);
 				}
 			}
 		}

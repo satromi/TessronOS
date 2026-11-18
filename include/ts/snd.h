@@ -87,10 +87,14 @@ extern "C" {
 #define DN_SDVOLAUX2		(-134)
 /* TessronOS: SDStat, what the device and the hardware under it have done */
 #define DN_SDSTAT		(-140)
-/* TessronOS: R : SDOut[], "auto" and every output there is now */
+/* TessronOS: R : SDOut[], "auto" and every output there is now, in the fixed form */
 #define DN_SDOUTS		(-141)
-/* TessronOS: RW: SDOutSel, the output chosen; written, it is taken at once */
+/* TessronOS: RW: SDOutSel, the output chosen in the fixed form; written, an id of any length, taken at once */
 #define DN_SDOUTSEL		(-142)
+/* TessronOS: R : SDOuts, the same as DN_SDOUTS with every id and name whole */
+#define DN_SDOUTV		(-147)
+/* TessronOS: RW: SDOutSelV, the same as DN_SDOUTSEL with the ids whole; written, as DN_SDOUTSEL */
+#define DN_SDOUTSELV		(-148)
 
 /* DN_SDPCMINFO: one entry per sampling rate code */
 typedef struct {
@@ -191,30 +195,45 @@ typedef struct {
 #define SND_BE_BT		5	/* earphones over Bluetooth (A2DP) */
 
 /*
- * The outputs (DN_SDOUTS, DN_SDOUTSEL). An output is named by an id
+ * The outputs (DN_SDOUTV, DN_SDOUTSELV). An output is named by an id
  * that stays the same from one start to the next:
  *	auto		  what is there, in the order above
  *	i2s		  the I2S interface on GPIO 18-21 (a DAC board)
  *	hdmi0, hdmi1	  the HDMI sockets
+ *	hda		  the x64 PC's own sound (Intel HD Audio)
  *	usb:VVVV:PPPP@P	  a USB audio function: its vendor and product ids
  *			  in hex and where it is plugged in (P: the
  *			  controller from 0, a '-', its root port from 1,
  *			  then the hub ports, as 0-2.4)
+ *	bt-AAAAAAAAAAAA...  earphones over Bluetooth, by their address
  * A USB function chosen and plugged into another socket is still the
  * one chosen: with no function at the port named, the first of the same
  * ids is taken.
  *
- * DN_SDOUTS answers "auto" and every output there is, an SDOut each, and
- * as many as there are: a read of size 0 is told the size, and a read
- * with less room has the first ones.
+ * Ids and names have no length of their own: a USB function's product
+ * string, the earphones' name and the hub ports on the way are as long
+ * as they come. DN_SDOUTV answers them whole: an SDOuts head, then
+ * "auto" and every output there is, an SDOutV each, in as many bytes as
+ * they take. A read of size 0 is told the size; a read with less room
+ * has the first bytes, and the head's size says how many there are, so
+ * that a reader whose room was short (an output came meanwhile) reads
+ * again with that room. DN_SDOUTSELV answers the output chosen and the
+ * one playing the same way, in an SDOutSelV.
+ *
+ * DN_SDOUTS and DN_SDOUTSEL are the fixed form of the same for programs
+ * written before: SDOut and SDOutSel, the ids in SND_ID_MAX bytes and the
+ * names in SND_NAME_MAX. An output whose id or name does not fit is
+ * listed with them cut, at a whole letter, and SND_OF_CUT set: its id,
+ * cut, chooses nothing. A DN_SDOUTSEL read whose ids do not fit is
+ * E_LIMIT. Writing DN_SDOUTSEL or DN_SDOUTSELV takes an id of any length.
  */
 /*
  * The structures this system adds (SDOut, SDOutSel, SDMix ...) are made
  * of INT and UINT, which are 32 bits in a program and in the kernel
  * alike; W and UW are not, in a program built without config.h first.
  */
-#define SND_ID_MAX		32
-#define SND_NAME_MAX		64
+#define SND_ID_MAX		32	/* SDOut, SDOutSel: the fixed form's room, NUL included */
+#define SND_NAME_MAX		64	/* SDOut, SDMixApp: the same for a name */
 #define SND_ID_AUTO		"auto"
 
 typedef struct {
@@ -226,6 +245,38 @@ typedef struct {
 	UINT	rate;			/* while it plays: the rate and channels */
 	UINT	channels;
 } SDOut;
+
+/* DN_SDOUTV: the head, and n entries after it */
+typedef struct {
+	UINT	size;			/* bytes of the whole answer, this head and every entry */
+	UINT	n;			/* entries, "auto" first */
+} SDOuts;
+
+typedef struct {
+	UINT	size;			/* bytes of this entry, a multiple of 4: the next starts there */
+	UINT	kind;			/* as SDOut's */
+	UINT	flags;
+	UINT	rate;
+	UINT	channels;
+	UINT	name;			/* where the name starts, in bytes from the entry's start */
+	UB	id[];			/* the id, NUL ended; the name after it, UTF-8, NUL ended */
+} SDOutV;
+
+/* The bytes of an entry of an id of idlen bytes and a name of namelen, NULs not counted */
+#define SND_OUTV_SIZE(idlen, namelen) 	( ( (SZ)sizeof(SDOutV) + (SZ)(idlen) + 1 + (SZ)(namelen) + 1 + 3 ) & ~(SZ)3 )
+#define SND_OUTS_FIRST(l)	( (SDOutV *)( (UB *)(l) + sizeof(SDOuts) ) )
+#define SND_OUTV_NEXT(e)	( (SDOutV *)( (UB *)(e) + (e)->size ) )
+#define SND_OUTV_NAME(e)	( (UB *)(e) + (e)->name )
+
+/* DN_SDOUTSELV */
+typedef struct {
+	UINT	size;			/* bytes of the whole */
+	UINT	now;			/* where what plays now starts, in bytes from the start */
+	UB	id[];			/* the id chosen, NUL ended; what plays now after it,
+					   NUL ended, "" when nothing does */
+} SDOutSelV;
+
+#define SND_OUTSELV_NOW(s)	( (UB *)(s) + (s)->now )
 
 /*
  * Why the machine's own sound may not be heard (the x64 PC; the system
@@ -244,6 +295,8 @@ typedef struct {
 #define SND_OF_NOSOUND		0x0004	/* there, but cannot sound now (a screen that
 					   takes no sound, nothing plugged in) */
 #define SND_OF_LEVEL		0x0008	/* has a volume (DN_SDVOLMAIN) */
+#define SND_OF_CUT		0x0010	/* SDOut: the id or the name did not fit and is cut;
+					   DN_SDOUTV has them whole */
 
 typedef struct {
 	UB	id[SND_ID_MAX];		/* written: what to choose; read: what was chosen */
@@ -300,6 +353,41 @@ typedef struct {
  * room has the whole and the first programs.
  */
 #define SND_MIX_SIZE(napp)	( sizeof(SDMix) + sizeof(SDMixApp) * (SZ)(napp) )
+
+/*
+ * DN_SDMIXERV: the same with every program's name whole, as DN_SDOUTV
+ * answers the outputs: an SDMixes head, then an SDMixAppV each, in as
+ * many bytes as it takes. A read of size 0 is told the size; a read with
+ * less room has the first bytes, and the head's size says how many the
+ * whole takes, so that a reader whose room was short reads again.
+ * SDMixApp.name of DN_SDMIXER, for programs written before, is the name
+ * cut at a whole letter to SND_NAME_MAX.
+ */
+#define DN_SDMIXERV		(-149)
+
+typedef struct {
+	UINT	size;			/* bytes of the whole answer */
+	UINT	lv, rv;
+	UINT	mute;
+	UINT	level_l, level_r;
+	UINT	napp;
+} SDMixes;
+
+typedef struct {
+	UINT	size;			/* bytes of this entry, a multiple of 4: the next starts there */
+	UB	prog[16];
+	INT	pid;
+	UINT	vol;
+	UINT	mute;
+	UINT	channels;
+	UINT	playing;
+	UINT	level;
+	UB	name[];			/* UTF-8, NUL ended */
+} SDMixAppV;
+
+#define SND_MIXV_SIZE(namelen)	( ( (SZ)sizeof(SDMixAppV) + (SZ)(namelen) + 1 + 3 ) & ~(SZ)3 )
+#define SND_MIXES_FIRST(m)	( (SDMixAppV *)( (UB *)(m) + sizeof(SDMixes) ) )
+#define SND_MIXV_NEXT(e)	( (SDMixAppV *)( (UB *)(e) + (e)->size ) )
 
 #define SND_MIX_ALL		0	/* SDMixSet.what: the whole, lv and rv */
 #define SND_MIX_APP		1	/* a program, lv */
@@ -466,6 +554,27 @@ IMPORT UW   knl_snd_note( void );
  * o NULL and max 0 asks only how many.
  */
 IMPORT INT  knl_snd_outputs( SDOut *o, INT max );
+
+/*
+ * The outputs as DN_SDOUTV has them, and the choice as DN_SDOUTSELV:
+ * up to size bytes into l (s), and the bytes of the whole; when that is
+ * more than size, ask again with more room. l NULL and size 0 asks only
+ * the size. E_NOMEM when there is no memory to gather them in.
+ */
+IMPORT SZ   knl_snd_outputs_v( SDOuts *l, SZ size );
+IMPORT SZ   knl_snd_sel_v( SDOutSelV *s, SZ size );
+
+#ifdef USE_KTEST
+/*
+ * For a test: n outputs of the test's own beside the hardware's, each with
+ * an id of idlen bytes ("usb:fe00:" and its number, then hub ports) and a
+ * name of namelen, kind SND_BE_USB and SND_OF_NOSOUND, so that they are
+ * listed and chosen and never played on; n 0 takes them away
+ */
+IMPORT ER   knl_snd_test_outs( INT n, INT idlen, INT namelen );
+/* For a test: what the outputs come to, as compared to tell of a change (OB_E_CHANGE of OB_SYS_SOUND) */
+IMPORT UD   knl_snd_test_sig( void );
+#endif
 
 #ifdef __cplusplus
 }

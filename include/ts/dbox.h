@@ -67,10 +67,9 @@ typedef struct {
 
 #define DB_MAX_ENT	64		/* definitions the box holds at once */
 /*
- * The largest definition. A panel of the most parts it may hold, each
- * with its label, its words and its fields, is a little under ninety
- * thousand bytes, so this is room for the largest thing the box is
- * asked to hold.
+ * The largest definition the box holds; a larger one is refused
+ * (E_PAR) when it is put. A panel of a couple of hundred parts, each
+ * with its label, its words and its fields, fits.
  */
 #define DB_MAX_SIZE	131072
 

@@ -18,15 +18,18 @@ expect calculator: ready
 focus fo_tool 電卓
 key 1E
 expect calculator: shown 1 []
-# the person goes on typing before the window comes: it opens without the keys
+# opened again from its link while the page has the keys: the window it opens takes them.
+# Typing before the window comes, which leaves it without the keys, is not tried here: on a
+# fast machine the window comes before the key does, whatever the steps wait, and then taking
+# the keys is right. A press come and not yet read ending the act is checked where it can be
+# made to wait (ktest_wm.c, test_act_waiting).
 click 300 300
 focus fo_back 開く元
 logmark
 dclick 190 157
-key 04
 expectsincein 30 calculator: ready
 wait 800
-focus fo_kept 開く元
+focus fo_again 電卓
 # an object opened by its link in a program: what is typed goes in its first cell
 click 300 300
 dclick 190 107

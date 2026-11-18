@@ -63,7 +63,7 @@
 #define K_END		0x4D
 
 LOCAL UB	*logb;
-LOCAL char	cdname[16];		/* the drive's disk object, "udc" */
+LOCAL char	*cdname = NULL;		/* the drive's disk object, "udc", whole (kt_name) */
 LOCAL TS_UUID	cdobj;
 LOCAL BOOL	have_cd;
 
@@ -288,7 +288,7 @@ LOCAL void test_attach( void )
 		for ( n = 0; n < 200 && !have_cd; n++ ) {
 			tk_dly_tsk(100);
 			for ( k = disks(list, 64), i = 0; i < k && !have_cd; i++ ) {
-				if ( ob_ref_obj(&list[i], &r) < E_OK || r.name[0] != 'u' ) continue;
+				if ( ob_ref_obj(&list[i], &r) < E_OK || !kt_name_starts(&list[i], "u") ) continue;
 				if ( is_btcd(&list[i]) ) {
 					have_cd = TRUE;
 					cdobj = list[i];
@@ -298,8 +298,10 @@ LOCAL void test_attach( void )
 	}
 	if ( !have_cd ) KT_SKIP("no CD-ROM drive came (the QMP helper is not there, or the image is not)");
 	KT_ASSERT(ob_ref_obj(&cdobj, &r) >= E_OK);
-	knl_strncpy(cdname, (CONST char *)r.name, sizeof(cdname) - 1);
-	cdname[sizeof(cdname) - 1] = 0;
+	if ( cdname != NULL ) Kfree(cdname);
+	cdname = (char *)kt_name(&cdobj);
+	KT_ASSERT(cdname != NULL);
+	if ( cdname == NULL ) return;
 	tm_printf((UB *)"  the CD-ROM is %s\n", cdname);
 	{
 		KRD	d;
@@ -460,7 +462,7 @@ LOCAL INT window_of( CONST char *name, TS_UUID *out )
 	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return -1;
 	for ( i = 0; i < cnt; i++ ) {
 		if ( ob_ref_obj(&list[i], &r) < E_OK || r.sub != OB_S_WINDOW
-		  || find(r.name, s_len((CONST char *)r.name), name, 0) < 0 ) continue;
+		  || !kt_name_has(&list[i], name) ) continue;
 		*out = list[i];
 		kw = ob_opn_obj(out, OB_OP_R);
 		if ( kw > 0 ) {

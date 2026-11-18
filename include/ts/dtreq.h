@@ -61,11 +61,18 @@ extern "C" {
  * A channel named with DT_RQ_TELL for first-window (the first window's)
  * is told DT_HOW_LINK_PUT when something the system made is to be put
  * on the desktop (a file printed, a screen saved, a disk attached):
- * into the object, text its name. The window puts a closed link to it
- * under what is there and saves the record.
+ * into the object, text its name -- and, when the link is to have an
+ * applist of its own (DT_RQ_LINK_PUT with DT_F_APPLIST), a tab and that
+ * applist after the name. The window puts a closed link to it
+ * under what is there and saves the record. DT_HOW_LINK_ONCE is the
+ * same unless the record as the window holds it now has a link to that
+ * object already (a disk attached again, whose link stays or was
+ * deleted without the record being saved): the window, which holds the
+ * record, tells, not the record as it was last saved.
  */
 #define DT_RQ_FIRST_CLOSE 49
 #define DT_HOW_LINK_PUT	15
+#define DT_HOW_LINK_ONCE 17
 #define DT_TELL_FIRST	"first-window"
 
 /*
@@ -88,7 +95,14 @@ extern "C" {
  * DT_RQ_PLACE_MORE, which leaves the carry open for the next, and the
  * last with DT_RQ_PLACE. With either, grab_x and grab_y say where the
  * link's corner is from the outline's corner where it was let go (0, 0
- * the corner itself).
+ * the corner itself), and was, when the program says it, the link's box
+ * where it was, in the record it is carried out of: that is the box the
+ * link has in the drop (T_OBDROPV, "its box where it was"), as from a
+ * window of the desktop's. A request that does not say was (right not
+ * past left, or one written before was) gives the drop grab_x, grab_y
+ * and look's size instead. A taker puts each link where the outline's
+ * corner was let go, moved by how far its box is from the least corner
+ * of all the boxes of the drop.
  */
 #define DT_RQ_PLACE_MORE 7
 
@@ -693,7 +707,11 @@ extern "C" {
  *			when the program is run again while a window of it
  *			stands for its program object (the window is brought
  *			to the front with the keys first; 仮身ネットワーク:
- *			into the object to start from), DT_HOW_TOOL_REMADE
+ *			into the object to start from; a program whose
+ *			metadata says "once": true, run on another object,
+ *			is told so too, into that object; text the 固有データ
+ *			it would have been started with, T_PRCOPEN's data,
+ *			empty none), DT_HOW_TOOL_REMADE
  *			when what a tool's list shows may have changed
  *			(屑実身操作: a record saved, a package installed or
  *			deleted; ウインドウ一覧: the windows on the screen or
@@ -977,6 +995,19 @@ typedef struct {
  *			sets kept when it is not empty
  */
 #define DT_RQ_SCRPRINT	61
+
+/*
+ * A link to target, an object the asking process made and may read, put
+ * in the desktop's first window under what is there (as a file printed
+ * or a screen saved is put), shown with name. E_OACV when the process
+ * may not read target. システム環境設定's 写しを作る puts the copy so.
+ * With DT_F_APPLIST in flags, text is the applist the link is given
+ * (its 固有データ with it, design 11.3): システム環境設定's このページの
+ * 仮身を作る puts a link to its program object so, the page in the
+ * entry's data. The name, a tab and the applist go to the first window
+ * in one answer's text (DT_HOW_LINK_PUT): E_LIMIT when they do not fit.
+ */
+#define DT_RQ_LINK_PUT	62
 #define DT_SP_GET	0
 #define DT_SP_VOL	1
 #define DT_SP_ARM	2
@@ -993,8 +1024,25 @@ typedef struct {
  * window that closed wrote back into it, before its record is saved --
  * for the window to be shown as the link asks, as a window of the
  * desktop's is.
+ * After the structure comes the 固有データ the applist gives the program
+ * started (the entry of the program's id: the link's applist first,
+ * then the object's; design 11.3), as long as it is, ending in 0: the
+ * argument is longer than sizeof(T_PRCOPEN) by it (dt_prcopen_data).
+ * There is none when the argument is no longer. It is given also when
+ * the program is started with no object (target 0), from a link to its
+ * program object. The argument is as long as the start-up argument may
+ * be (TS_SPN_ARG_MAX); data that does not go in is not cut: the start
+ * fails, and says so. A program built before it reads the structure as
+ * it did.
+ * viewmode is the link's viewMode, which is one of the keywords the
+ * windows know ("formatted", "detailed", "xml", "canvas"; the longest is
+ * 9 bytes), so the field holds any of them. A viewMode longer than the
+ * field is no keyword a window knows: it is given as DT_VIEW_UNKNOWN, a
+ * word no window knows, so that the window opens as it does for any word
+ * it does not know -- not as for a link that says none ("").
  */
-#define DT_VIEW_MAX	16		/* bytes of a viewMode, with its terminator (TAD_VIEW_MAX) */
+#define DT_VIEW_MAX	16		/* bytes of a viewMode, with its terminator: the longest keyword and more */
+#define DT_VIEW_UNKNOWN	"?"		/* a viewMode longer than the field: a word no window knows */
 
 typedef struct {
 	TS_UUID	target;			/* the object to open */
@@ -1006,6 +1054,17 @@ typedef struct {
 	INT	wordwrap;		/* TAD_WRAP_* */
 	UB	viewmode[DT_VIEW_MAX];	/* empty when it says none */
 } T_PRCOPEN;
+
+/* The 固有データ after a T_PRCOPEN of size bytes (the whole argument): NULL none */
+static __inline__ CONST UB *dt_prcopen_data( CONST void *arg, SZ size )
+{
+	CONST UB	*d = (CONST UB *)arg + sizeof(T_PRCOPEN);
+
+	if ( arg == NULL || size <= (SZ)sizeof(T_PRCOPEN) || ((CONST UB *)arg)[size - 1] != 0 ) {
+		return NULL;
+	}
+	return d;
+}
 
 #define DT_TEXT_MAX	192		/* bytes of an answer's text, with its terminator */
 
@@ -1033,14 +1092,35 @@ typedef struct {
 	TS_UUID	win;			/* the asking program's window; 0 none said */
 	UINT	flags;			/* DT_F_* */
 	UB	text[DT_CARRY_TEXT];	/* DT_RQ_CARRY with DT_F_TEXT: the letters */
+	INT	was_left, was_top;	/* DT_RQ_PLACE: the link's box where it was, in its */
+	INT	was_right, was_bottom;	/* record; right not past left: not said */
+	UINT	tailsz;			/* bytes of the tail after the request (DT_TAIL_*) */
 } T_DTREQ;
 
 /*
  * A request written in the size it had before win and flags (a program
  * built before them) is still taken, and answered in the size the
  * answer had then, without look, flags and text. One written in the size
- * it had before text is taken as it is, with no letters.
+ * it had before text is taken as it is, with no letters; one written
+ * before was, with no box where the link was.
  */
+
+/*
+ * The box a link had where it was, in the record it is carried out of,
+ * put in a DT_RQ_PLACE: every program that carries links out says it
+ * so. A box with nothing in it says none.
+ */
+static __inline__ void dt_req_was( T_DTREQ *rq, INT left, INT top, INT right, INT bottom )
+{
+	if ( right > left && bottom > top ) {
+		rq->was_left = left;
+		rq->was_top = top;
+		rq->was_right = right;
+		rq->was_bottom = bottom;
+	} else {
+		rq->was_left = rq->was_top = rq->was_right = rq->was_bottom = 0;
+	}
+}
 typedef struct {
 	UINT	seq;
 	ER	er;			/* E_OK, or why not */
@@ -1052,7 +1132,114 @@ typedef struct {
 	T_DTLOOK look;			/* DT_RQ_ATTR, DT_RQ_PAPER */
 	UINT	flags;			/* DT_RQ_ATTR: DT_F_HIDDEN */
 	UB	text[DT_TEXT_MAX];	/* DT_RQ_RELATION, DT_RQ_RENAME: UTF-8 */
+	UINT	tailsz;			/* bytes of the tail after the answer (DT_TAIL_*) */
 } T_DTANS;
+
+/*
+ * The tail of a request and of an answer (the fifth form, design 11.4):
+ * what is as long as it is -- a link's name, relationship and applist,
+ * the letters carried, the questions, an answer's words, the 固有データ
+ * -- in one message with the structure, after it. tailsz says how many
+ * bytes; each part is a T_DTPART (its kind and length) and its bytes,
+ * padded to four. A request or an answer with a tail is written as one
+ * message of sizeof(T_DTREQ or T_DTANS) + tailsz bytes; the channel takes
+ * a message as long as its room (OB_CH_BYTES), and one who reads it with
+ * less room is told how long it is (E_LIMIT, ob.h) and reads it again.
+ *
+ * The fixed fields name and text of T_DTREQ and text of T_DTANS are read
+ * only from a request of a size before the tail (a program built before
+ * it); the desktop and every program of the system put the words in the
+ * tail and leave those fields empty. An answer is written with a tail
+ * only to a request that had the tail's size (one who knows the tail),
+ * and in the size of the request's form otherwise.
+ *
+ * dt_tail_put adds a part (len bytes of s; len < 0 up to its 0) to the
+ * tail at tail, now *p_tailsz bytes long, in cap bytes of room: E_LIMIT
+ * when they do not hold it -- dt_tail_room says how many bytes a part of
+ * len bytes takes, to make the room first. dt_tail_get finds the first
+ * part of a kind: its bytes and length, NULL when there is none. The
+ * bytes of a text part end in 0 (put there, not counted in len).
+ */
+#define DT_TAIL_NAME	1		/* DT_RQ_*: name; a link's displayed name */
+#define DT_TAIL_TEXT	2		/* DT_RQ_* text; DT_ANS text */
+#define DT_TAIL_APPLIST	3		/* a link's applist (DT_F_APPLIST) */
+#define DT_TAIL_REL	4		/* a link's relationship */
+#define DT_TAIL_VIEW	5		/* a link's viewMode */
+#define DT_TAIL_ASK1	6		/* DT_RQ_CARRY: the question's first line */
+#define DT_TAIL_ASK2	7		/* and its second */
+#define DT_TAIL_YES	8		/* and the word on the button that goes ahead */
+#define DT_TAIL_DATA	9		/* 固有データ (DT_HOW_AGAIN) */
+
+typedef struct {
+	UINT	kind;			/* DT_TAIL_* */
+	UINT	len;			/* bytes after this, before the 0 and the padding */
+} T_DTPART;
+
+static __inline__ SZ dt_tail_room( SZ len )
+{
+	return (SZ)sizeof(T_DTPART) + ( ( len + 1 + 3 ) & ~(SZ)3 );
+}
+
+static __inline__ ER dt_tail_put( UB *tail, UINT *p_tailsz, SZ cap, UINT kind, CONST UB *s, SZ len )
+{
+	T_DTPART	h;
+	UB		*at;
+	SZ		i, room;
+
+	if ( tail == NULL || p_tailsz == NULL ) {
+		return E_PAR;
+	}
+	if ( s == NULL ) {
+		len = 0;
+	} else if ( len < 0 ) {
+		for ( len = 0; s[len] != 0; len++ ) ;
+	}
+	room = dt_tail_room(len);
+	if ( (SZ)*p_tailsz + room > cap ) {
+		return E_LIMIT;
+	}
+	at = tail + *p_tailsz;
+	h.kind = kind;
+	h.len = (UINT)len;
+	for ( i = 0; i < (SZ)sizeof(h); i++ ) at[i] = ((CONST UB *)&h)[i];
+	for ( i = 0; i < len; i++ ) at[sizeof(h) + i] = s[i];
+	for ( i = len; i < room - (SZ)sizeof(h); i++ ) at[sizeof(h) + i] = 0;
+	*p_tailsz += (UINT)room;
+	return E_OK;
+}
+
+static __inline__ CONST UB *dt_tail_get( CONST UB *tail, UINT tailsz, UINT kind, SZ *p_len )
+{
+	T_DTPART	h;
+	SZ		at = 0, i;
+
+	while ( tail != NULL && at + (SZ)sizeof(h) <= (SZ)tailsz ) {
+		for ( i = 0; i < (SZ)sizeof(h); i++ ) ((UB *)&h)[i] = tail[at + i];
+		if ( at + dt_tail_room(h.len) > (SZ)tailsz ) {
+			break;			/* not one: shorter than it says */
+		}
+		if ( h.kind == kind ) {
+			if ( p_len != NULL ) *p_len = (SZ)h.len;
+			return tail + at + sizeof(h);
+		}
+		at += dt_tail_room(h.len);
+	}
+	if ( p_len != NULL ) *p_len = 0;
+	return NULL;
+}
+
+/* The tail after a request or an answer read whole (msg, size bytes in all): NULL when it has none */
+static __inline__ CONST UB *dt_req_tail( CONST T_DTREQ *rq, SZ size )
+{
+	return ( size >= (SZ)sizeof(T_DTREQ) && rq->tailsz > 0
+		 && size >= (SZ)sizeof(T_DTREQ) + (SZ)rq->tailsz ) ? (CONST UB *)( rq + 1 ) : NULL;
+}
+
+static __inline__ CONST UB *dt_ans_tail( CONST T_DTANS *an, SZ size )
+{
+	return ( size >= (SZ)sizeof(T_DTANS) && an->tailsz > 0
+		 && size >= (SZ)sizeof(T_DTANS) + (SZ)an->tailsz ) ? (CONST UB *)( an + 1 ) : NULL;
+}
 
 #ifdef __cplusplus
 }

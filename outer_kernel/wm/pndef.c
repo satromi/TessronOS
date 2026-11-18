@@ -61,6 +61,7 @@
 #include <ts/tad.h>
 #include <ts/om.h>
 #include <ts/uuid.h>
+#include "pdraw.h"
 
 LOCAL BOOL str_same( CONST UB *a, CONST char *b )
 {
@@ -270,18 +271,34 @@ LOCAL void cols( T_WMPART *pt, CONST T_TADNODE *nd )
 	pt->sb_n = k;
 }
 
-/* One element of a <panel> as a part, appended; FALSE for what is not one */
-LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
+/* The part last added taken off again, with whatever names it was given */
+LOCAL void unadd( T_WMPANEL *def )
+{
+	T_WMPART	*pt = &def->part[def->npart - 1];
+
+	pd_names_free(pt->names);
+	knl_memset(pt, 0, sizeof(*pt));
+	def->npart--;
+}
+
+/*
+ * One element of a <panel> as a part, appended: E_OK, also for what is
+ * not a part (nothing is added), or E_NOMEM when the table of parts
+ * could not be made larger.
+ */
+LOCAL ER part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 {
 	T_WMPART	*pt;
 	UB		w[WM_LABEL_MAX];
 	INT		at;
 
-	if ( nd->kind != TAD_ND_ELEM || def->npart >= WM_PART_MAX ) {
-		return FALSE;
+	if ( nd->kind != TAD_ND_ELEM ) {
+		return E_OK;
 	}
-	pt = &def->part[def->npart];
-	knl_memset(pt, 0, sizeof(*pt));
+	pt = wm_panel_part_add(def);
+	if ( pt == NULL ) {
+		return E_NOMEM;
+	}
 	pt->num = num(nd, "num", 0);
 	pt->sheet = num(nd, "sheet", 0);
 	pt->sb_at = -1;
@@ -380,7 +397,8 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 		pt->top = 1;
 		cols(pt, nd);
 		if ( is(nd, "select") && pt->count == 0 ) {
-			return FALSE;		/* a selector with no names is nothing */
+			unadd(def);		/* a selector with no names is nothing */
+			return E_OK;
 		}
 	} else if ( is(nd, "popup") ) {
 		/* its names may also be set only once the panel is open */
@@ -403,10 +421,9 @@ LOCAL BOOL part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 		if ( pt->r.bottom <= pt->r.top ) pt->r.bottom = pt->r.top + 1;
 		if ( pt->r.right <= pt->r.left ) pt->r.right = pt->r.left + 1;
 	} else {
-		return FALSE;
+		unadd(def);			/* not a part */
 	}
-	def->npart++;
-	return TRUE;
+	return E_OK;
 }
 
 LOCAL CONST char *pn_kinds[] = { "plain", "warn", "fatal", "bare" };
@@ -420,11 +437,25 @@ EXPORT ER knl_pn_load( CONST TS_UUID *box, INT n, T_WMPANEL *def, UB *title, INT
 	ER		er;
 	INT		k;
 
-	if ( box == NULL || def == NULL ) {
+	if ( box == NULL || def == NULL || def->npart < 0 || def->npart > def->room ) {
 		return E_PAR;
 	}
-	/* nought from the start, so that a definition not loaded is one wm_panel_free lets go */
-	knl_memset(def, 0, sizeof(*def));
+	/*
+	 * nought from the start but its table, its parts let go, so that a
+	 * definition not loaded is one wm_panel_free lets go
+	 */
+	{
+		T_WMPART	*t = def->part;
+		INT		room = def->room;
+
+		for ( k = 0; t != NULL && k < def->npart; k++ ) {
+			pd_names_free(t[k].names);
+			knl_memset(&t[k], 0, sizeof(t[k]));
+		}
+		knl_memset(def, 0, sizeof(*def));
+		def->part = t;
+		def->room = room;
+	}
 	rec = om_obj_record(box, 0, &size);
 	if ( rec == NULL ) {
 		return E_NOEXS;
@@ -461,7 +492,7 @@ EXPORT ER knl_pn_load( CONST TS_UUID *box, INT n, T_WMPANEL *def, UB *title, INT
 			title[i] = 0;
 		}
 		for ( c = pn->first; er >= E_OK && c != NULL; c = c->next ) {
-			(void)part(def, c, box);
+			er = part(def, c, box);
 		}
 	}
 	if ( doc != NULL ) tad_free(doc);

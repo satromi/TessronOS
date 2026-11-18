@@ -301,7 +301,7 @@ LOCAL void test_links( void )
 	TS_UUID		want;
 	T_TADNODE	*nd;
 
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	if ( v == NULL ) return;
 
@@ -326,8 +326,9 @@ LOCAL void test_links( void )
 		KT_ASSERT(v->fixed);
 		KT_ASSERT_EQ(v->zoom, 100);
 		/* the value came through with its references resolved */
-		KT_ASSERT_EQ(v->applist[0], (UB)'{');
-		KT_ASSERT_EQ(v->applist[1], (UB)'"');
+		KT_ASSERT(v->vapplist != NULL && v->vapplist_len > 2);
+		KT_ASSERT_EQ(TAD_VS(v->vapplist)[0], (UB)'{');
+		KT_ASSERT_EQ(TAD_VS(v->vapplist)[1], (UB)'"');
 
 		/* past the end is no error, it is nothing */
 		KT_ASSERT_ER(tad_lnk_get(doc, 1, v), E_NOEXS);
@@ -346,8 +347,9 @@ LOCAL void test_links( void )
 	if ( doc != NULL ) {
 		KT_ASSERT_EQ(tad_lnk_count(doc), 1);
 		KT_ASSERT_ER(tad_lnk_get(doc, 0, v), E_OK);
-		KT_ASSERT(s_eq(v->name, "hyoujimei"));
-		KT_ASSERT(s_eq(v->relationship, "gijiroku shiryou"));
+		KT_ASSERT(s_eq(TAD_VS(v->vname), "hyoujimei"));
+		KT_ASSERT_EQ(v->vname_len, 9);
+		KT_ASSERT(s_eq(TAD_VS(v->vrel), "gijiroku shiryou"));
 		KT_ASSERT_EQ(v->width, 150);
 		KT_ASSERT_EQ(v->heightpx, 30);
 		KT_ASSERT_EQ(v->zoom, 150);
@@ -361,6 +363,7 @@ LOCAL void test_links( void )
 		KT_ASSERT_EQ(v->width, 150);
 		tad_free(doc);
 	}
+	tad_vobj_clear(v);
 	Kfree(v);
 }
 
@@ -378,19 +381,15 @@ LOCAL void test_edit( void )
 	SZ	len = 0, want = s_len(fig_doc);
 	INT	delta = 0, d;
 
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	if ( v == NULL ) return;
 
 	KT_ASSERT_ER(tad_parse((CONST UB *)fig_doc, want, NULL, &doc), E_OK);
-	if ( doc == NULL ) { Kfree(v); return; }
+	if ( doc == NULL ) { tad_vobj_clear(v); Kfree(v); return; }
 
 	/* what is to be drawn: the caller fills in what it wants shown */
-	{
-		INT i;
-
-		for ( i = 0; i < (INT)sizeof(T_VOBJ); i++ ) ((UB *)v)[i] = 0;
-	}
+	tad_vobj_clear(v);
 	KT_ASSERT_ER(ts_str_to_uuid(add_id, &target), E_OK);
 	v->target = target;
 	v->recno  = 0;
@@ -403,7 +402,7 @@ LOCAL void test_edit( void )
 	v->disp   = TAD_D_DEFAULT;
 	v->zoom   = 100;
 	v->tbcol  = 0xe1f2f9;
-	s_cpy(v->name, "atarashii");
+	KT_ASSERT_ER(tad_vobj_set(v, TAD_W_NAME, (CONST UB *)"atarashii", -1), E_OK);
 
 	KT_ASSERT_ER(tad_lnk_add(doc, v, &newid), E_OK);
 	KT_ASSERT_EQ(tad_lnk_count(doc), 2);
@@ -433,7 +432,7 @@ LOCAL void test_edit( void )
 			KT_ASSERT_EQ(v->height, 31);
 			KT_ASSERT_EQ(v->zoom, 100);
 			KT_ASSERT_EQ((INT)v->tbcol, 0xe1f2f9);
-			KT_ASSERT(s_eq(v->name, "atarashii"));
+			KT_ASSERT(s_eq(TAD_VS(v->vname), "atarashii"));
 			KT_ASSERT_EQ(v->recno, 0);
 			tad_free(again);
 		}
@@ -470,6 +469,7 @@ LOCAL void test_edit( void )
 	KT_ASSERT_EQ(tad_lnk_ndelta(doc), 0);
 
 	tad_free(doc);
+	tad_vobj_clear(v);
 	Kfree(v);
 }
 
@@ -488,15 +488,15 @@ LOCAL void test_set_keeps_unknown( void )
 	INT	i;
 	BOOL	saw_zindex = FALSE, saw_view = FALSE, saw_moved = FALSE;
 
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	if ( v == NULL ) return;
 
 	KT_ASSERT_ER(tad_parse((CONST UB *)unknown_doc, s_len(unknown_doc),
 			       NULL, &doc), E_OK);
-	if ( doc == NULL ) { Kfree(v); return; }
+	if ( doc == NULL ) { tad_vobj_clear(v); Kfree(v); return; }
 
-	for ( i = 0; i < (INT)sizeof(T_VOBJ); i++ ) ((UB *)v)[i] = 0;
+	tad_vobj_clear(v);
 	KT_ASSERT_ER(tad_lnk_get(doc, 0, v), E_OK);
 	v->left = 300;			/* move it, so the element is rewritten */
 	v->right = 470;
@@ -505,7 +505,7 @@ LOCAL void test_set_keeps_unknown( void )
 	KT_ASSERT(tad_write_mem(doc, NULL, 0, &want) <= E_OK);
 	out = (UB *)Kmalloc(want + 1);
 	KT_ASSERT(out != NULL);
-	if ( out == NULL ) { tad_free(doc); Kfree(v); return; }
+	if ( out == NULL ) { tad_free(doc); tad_vobj_clear(v); Kfree(v); return; }
 	KT_ASSERT_ER(tad_write_mem(doc, out, want + 1, &want), E_OK);
 
 	for ( i = 0; i + 8 < (INT)want; i++ ) {
@@ -521,6 +521,7 @@ LOCAL void test_set_keeps_unknown( void )
 
 	Kfree(out);
 	tad_free(doc);
+	tad_vobj_clear(v);
 	Kfree(v);
 }
 
@@ -559,14 +560,14 @@ LOCAL void test_link_attrs( void )
 	UB	*out;
 	SZ	want = 0;
 
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	if ( v == NULL ) return;
 	KT_ASSERT_ER(tad_parse((CONST UB *)attrs_doc, s_len(attrs_doc), NULL, &doc), E_OK);
-	if ( doc == NULL ) { Kfree(v); return; }
+	if ( doc == NULL ) { tad_vobj_clear(v); Kfree(v); return; }
 	KT_ASSERT_ER(tad_lnk_get(doc, 0, v), E_OK);
 	KT_ASSERT_EQ(v->heightpx, 31);
-	KT_ASSERT(v->viewmode[0] == 'x' && v->viewmode[1] == 'm' && v->viewmode[2] == 'l' && v->viewmode[3] == 0);
+	KT_ASSERT(s_eq(TAD_VS(v->vview), "xml") && v->vview_len == 3);
 	KT_ASSERT_EQ(v->wordwrap, TAD_WRAP_OFF);
 	KT_ASSERT_EQ(v->vobjheight, 90);
 	KT_ASSERT(v->has_zindex && v->zindex == 3);
@@ -574,9 +575,7 @@ LOCAL void test_link_attrs( void )
 
 	v->heightpx = 40;
 	v->wordwrap = TAD_WRAP_ON;
-	v->viewmode[0] = 'd'; v->viewmode[1] = 'e'; v->viewmode[2] = 't';
-	v->viewmode[3] = 'a'; v->viewmode[4] = 'i'; v->viewmode[5] = 'l';
-	v->viewmode[6] = 'e'; v->viewmode[7] = 'd'; v->viewmode[8] = 0;
+	KT_ASSERT_ER(tad_vobj_set(v, TAD_W_VIEW, (CONST UB *)"detailed", -1), E_OK);
 	KT_ASSERT_ER(tad_lnk_set(doc, v), E_OK);
 	KT_ASSERT(tad_write_mem(doc, NULL, 0, &want) <= E_OK);
 	out = (UB *)Kmalloc(want + 1);
@@ -595,6 +594,7 @@ LOCAL void test_link_attrs( void )
 	}
 	if ( out != NULL ) Kfree(out);
 	tad_free(doc);
+	tad_vobj_clear(v);
 	Kfree(v);
 }
 
@@ -618,10 +618,10 @@ LOCAL void test_reorder_z( void )
 	TS_UUID	order[2];
 	T_VOBJ	*v;
 
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	if ( v == NULL ) return;
 	KT_ASSERT_ER(tad_parse((CONST UB *)z_doc, s_len(z_doc), NULL, &doc), E_OK);
-	if ( doc == NULL ) { Kfree(v); return; }
+	if ( doc == NULL ) { tad_vobj_clear(v); Kfree(v); return; }
 	(void)ts_str_to_uuid("019cf904-4412-7244-a1c2-10d9863b6122", &order[0]);
 	(void)ts_str_to_uuid("019cf904-4412-7244-a1c2-10d9863b6121", &order[1]);
 	KT_ASSERT_ER(tad_lnk_reorder(doc, order, 2), E_OK);
@@ -632,6 +632,7 @@ LOCAL void test_reorder_z( void )
 	KT_ASSERT_ER(tad_lnk_get(doc, 1, v), E_OK);
 	KT_ASSERT(v->has_zindex && v->zindex == 2);
 	tad_free(doc);
+	tad_vobj_clear(v);
 	Kfree(v);
 }
 
@@ -757,6 +758,93 @@ LOCAL void test_text( void )
 	tad_free(doc);
 }
 
+/*
+ * The words of a link as long as the element has them (design 16.3.2):
+ * a name of a kilobyte and an applist of several, read, copied, set and
+ * written back, and read again the same, byte for byte. The words given
+ * out are all let go again (tad_vobj_held).
+ */
+LOCAL void test_long_words( void )
+{
+	static CONST char	head[] = "<tad version=\"1.0\" encoding=\"UTF-8\">\n<figure>\n"
+					 "<link id=\"019a6c96-e262-7dfd-a3bc-1e85d495d60d_0.xtad\" vobjid=\"019cf904-4412-7244-a1c2-10d9863b6130\""
+					 " vobjleft=\"0\" vobjtop=\"0\" vobjright=\"10\" vobjbottom=\"10\" name=\"";
+	static CONST char	mid[] = "\" applist=\"{";
+	static CONST char	tail[] = "}\"/>\n</figure>\n</tad>\n";
+	INT		held0 = tad_vobj_held(), i, n = 0, nl = 1000, na = 0;
+	UB		*x, *out = NULL;
+	T_VOBJ		*v, *w;
+	T_TAD		*doc = NULL, *again = NULL;
+	SZ		want = 0;
+
+	x = (UB *)Kmalloc(16384);
+	v = (T_VOBJ *)Kcalloc(2, sizeof(T_VOBJ));
+	KT_ASSERT(x != NULL && v != NULL);
+	if ( x == NULL || v == NULL ) goto done;
+	w = v + 1;
+	for ( i = 0; head[i] != 0; i++ ) x[n++] = (UB)head[i];
+	for ( i = 0; i < nl; i++ ) x[n++] = (UB)( 'a' + i % 26 );
+	for ( i = 0; mid[i] != 0; i++ ) x[n++] = (UB)mid[i];
+	/* sixty programs, each with data: some four kilobytes of applist */
+	for ( i = 0; i < 60; i++ ) {
+		INT	k = n;
+		char	e[80];
+		INT	j, m;
+
+		m = 0;
+		if ( i > 0 ) e[m++] = ',';
+		for ( j = 0; "&quot;prog-"[j] != 0; j++ ) e[m++] = "&quot;prog-"[j];
+		e[m++] = (char)( '0' + i / 10 );
+		e[m++] = (char)( '0' + i % 10 );
+		for ( j = 0; "&quot;:{&quot;data&quot;:&quot;page-of-program&quot;}"[j] != 0; j++ ) {
+			e[m++] = "&quot;:{&quot;data&quot;:&quot;page-of-program&quot;}"[j];
+		}
+		for ( j = 0; j < m; j++ ) x[n++] = (UB)e[j];
+		na += n - k;
+	}
+	for ( i = 0; tail[i] != 0; i++ ) x[n++] = (UB)tail[i];
+	KT_ASSERT_ER(tad_parse(x, n, NULL, &doc), E_OK);
+	if ( doc == NULL ) goto done;
+	KT_ASSERT_ER(tad_lnk_get(doc, 0, v), E_OK);
+	KT_ASSERT_EQ(v->vname_len, nl);
+	KT_ASSERT(v->vapplist_len > 2000);		/* its references read: some 2.2KB of the record's 4KB */
+	KT_ASSERT_EQ(TAD_VS(v->vapplist)[v->vapplist_len - 1], (UB)'}');
+	/* copied, its own words: the copy outlives the one it was made from */
+	KT_ASSERT_ER(tad_vobj_copy(w, v), E_OK);
+	KT_ASSERT(w->vapplist != v->vapplist && w->vapplist_len == v->vapplist_len);
+	KT_ASSERT_ER(tad_lnk_get(doc, 0, v), E_OK);		/* read again into the same: the old let go */
+	tad_vobj_clear(v);
+	KT_ASSERT(w->vname_len == nl && TAD_VS(w->vname)[nl - 1] == (UB)( 'a' + ( nl - 1 ) % 26 ));
+	/* set longer still, written, and read back the same */
+	KT_ASSERT_ER(tad_vobj_set(w, TAD_W_REL, w->vname, w->vname_len), E_OK);
+	KT_ASSERT_ER(tad_lnk_set(doc, w), E_OK);
+	KT_ASSERT(tad_write_mem(doc, NULL, 0, &want) <= E_OK);
+	out = (UB *)Kmalloc(want + 1);
+	KT_ASSERT(out != NULL);
+	if ( out == NULL || tad_write_mem(doc, out, want + 1, &want) < E_OK ) goto done;
+	KT_ASSERT_ER(tad_parse(out, want, NULL, &again), E_OK);
+	if ( again != NULL ) {
+		KT_ASSERT_ER(tad_lnk_get(again, 0, v), E_OK);
+		KT_ASSERT_EQ(v->vname_len, nl);
+		KT_ASSERT_EQ(v->vrel_len, nl);
+		KT_ASSERT_EQ(v->vapplist_len, w->vapplist_len);
+		for ( i = 0; i < (INT)v->vapplist_len && v->vapplist[i] == w->vapplist[i]; i++ ) ;
+		KT_ASSERT_EQ(i, (INT)w->vapplist_len);
+	}
+done:
+	if ( again != NULL ) tad_free(again);
+	if ( doc != NULL ) tad_free(doc);
+	if ( out != NULL ) Kfree(out);
+	if ( v != NULL ) {
+		tad_vobj_clear(v);
+		tad_vobj_clear(v + 1);
+		Kfree(v);
+	}
+	if ( x != NULL ) Kfree(x);
+	KT_ASSERT_EQ(tad_vobj_held(), held0);
+	(void)na;
+}
+
 EXPORT void ktest_tad( void )
 {
 	KT_RUN(test_roundtrip);
@@ -768,4 +856,5 @@ EXPORT void ktest_tad( void )
 	KT_RUN(test_link_attrs);
 	KT_RUN(test_reorder_z);
 	KT_RUN(test_text);
+	KT_RUN(test_long_words);
 }

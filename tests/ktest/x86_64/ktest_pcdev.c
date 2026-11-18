@@ -100,13 +100,12 @@ LOCAL BOOL find( UINT sub, CONST char *name, TS_UUID *pu )
 {
 	TS_UUID	all[64];
 	T_OBREF	r;
-	INT	cnt = 0, i, k;
+	INT	cnt = 0, i;
 
 	if ( ob_lst_obj(OB_T_DEVICE, sub, NULL, all, 64, &cnt) < E_OK ) return FALSE;
 	for ( i = 0; i < cnt; i++ ) {
 		if ( ob_ref_obj(&all[i], &r) < E_OK ) continue;
-		for ( k = 0; name[k] != '\0' && r.name[k] == (UB)name[k]; k++ ) ;
-		if ( name[k] == '\0' && r.name[k] == 0 ) {
+		if ( kt_name_is(&all[i], name) ) {
 			*pu = all[i];
 			return TRUE;
 		}
@@ -153,12 +152,19 @@ LOCAL void test_ps2( void )
 		KT_ASSERT_ER(knl_obinput_uuid(h[i].id, &u), E_OK);
 		KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
 		/* not USB is not yet the i8042: the touch panels of the group tpanel, run before, stay listed */
-		if ( r.name[0] != 'p' || r.name[1] != 's' || r.name[2] != '2' ) continue;
+		if ( !kt_name_starts(&u, "ps2") ) continue;
 		nps2++;
 		KT_ASSERT_EQ(r.sub, OB_S_INPUT);
 		KT_ASSERT(in_list(&u));
-		KT_ASSERT(h[i].keyboard ? ( r.name[3] == 'k' ) : ( r.name[3] == 'a' ));	/* ps2kbd, ps2aux */
-		same_as_before((CONST char *)r.name, &u);
+		KT_ASSERT(kt_name_starts(&u, h[i].keyboard ? "ps2k" : "ps2a"));	/* ps2kbd, ps2aux */
+		{
+			UB	*nm = kt_name(&u);
+
+			if ( nm != NULL ) {
+				same_as_before((CONST char *)nm, &u);
+				Kfree(nm);
+			}
+		}
 	}
 	if ( nps2 == 0 ) KT_SKIP("no i8042");
 	KT_ASSERT(nps2 >= 1);
@@ -799,6 +805,43 @@ LOCAL void test_nvme_4k( void )
 	Kfree(r);
 }
 
+/*
+ * A model specific register that is not there, read and written through
+ * knl_rdmsr_safe and knl_wrmsr_safe: E_NOSPT, and the test goes on. One
+ * that is (EFER, with long mode active) reads as it is. The addresses
+ * tried: 5555h, which no processor has, and with the Local APIC in
+ * x2APIC mode a reserved register of it (804h), which a virtual machine
+ * that answers any other address may still refuse. Where every one is
+ * answered, the refusal cannot be seen and is skipped.
+ */
+LOCAL void test_msr_safe( void )
+{
+	IMPORT volatile UW	knl_msr_refused;
+	IMPORT BOOL		knl_x2apic_on;
+	static CONST UW	tries[2] = { 0x00005555U, 0x00000804U };
+	UD	v = 0;
+	UW	before = knl_msr_refused, msr = 0;
+	ER	er = E_OK;
+	INT	i;
+
+	KT_ASSERT_ER(knl_rdmsr_safe(0xc0000080U, &v), E_OK);
+	KT_ASSERT(( v & ( 1ULL << 10 ) ) != 0);
+	for ( i = 0; i < 2 && er == E_OK; i++ ) {
+		if ( tries[i] == 0x804U && !knl_x2apic_on ) continue;
+		msr = tries[i];
+		v = 0;
+		er = knl_rdmsr_safe(msr, &v);
+		tm_printf((UB *)"  rdmsr %xh: %d (value %lx), refused so far %d\n", msr, er, v, (INT)( knl_msr_refused - before ));
+	}
+	if ( er == E_OK ) KT_SKIP("the machine answers the addresses that are not registers");
+	KT_ASSERT_ER(er, E_NOSPT);
+	KT_ASSERT(knl_msr_refused - before >= 1);
+	er = knl_wrmsr_safe(msr, 0);
+	tm_printf((UB *)"  wrmsr %xh: %d, refused so far %d\n", msr, er, (INT)( knl_msr_refused - before ));
+	KT_ASSERT_ER(er, E_NOSPT);
+	KT_ASSERT(knl_msr_refused - before >= 2);
+}
+
 EXPORT void ktest_pcdev( void )
 {
 	INT	fd = fs_open(UUID_FILE, 0);
@@ -812,6 +855,7 @@ EXPORT void ktest_pcdev( void )
 		fs_close(fd);
 		tm_printf((UB *)"  the UUIDs of a start before: %d bytes\n", kept_len);
 	}
+	KT_RUN(test_msr_safe);
 	KT_RUN(test_ps2);
 	KT_RUN(test_power);
 	KT_RUN(test_sata);

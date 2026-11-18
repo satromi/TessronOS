@@ -4,22 +4,12 @@
 # window of the 実身 its root links to; 資料 gone into and back; はじめに
 # carried into the BTRON window, made 実身 with the figure it links to; the
 # ISO 9660 side's folder after the 実身 gone into and back;
-# 図１ taken in with Ctrl+I into a new box, and opened.
+# 図１ taken in with Ctrl+I into a new box, and opened. ファイル変換 is started
+# by opening its program object, as on the x64 PC: the 小物 menu is the
+# first window's process's now, and where its rows stand is not this test's.
 dclick 80 141
 wait 1500
-click 1150 700 1
-wait 500
-move 1165 766
-wait 150
-move 1140 766
-wait 150
-move 1100 766
-wait 150
-move 1060 766
-wait 150
-move 1060 485
-wait 150
-click 1060 485
+open 01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91
 expect xfconv: ready
 expect xfconv: media uda 2,514,944 バイト - btron 試験CD
 wait 500

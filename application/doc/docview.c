@@ -818,8 +818,9 @@ LOCAL INT units_px( INT unit, INT v )
 /* How large a virtual object or a picture in the text is */
 LOCAL void thing_size( LAY *l, CONST T_TVRUN *r, INT *p_w, INT *p_h )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 
+	tad_vobj_init(&v);
 	*p_w = LINK_W;
 	*p_h = LINK_H;
 	if ( r->kind == TV_RUN_FIGURE ) {
@@ -837,6 +838,7 @@ LOCAL void thing_size( LAY *l, CONST T_TVRUN *r, INT *p_w, INT *p_h )
 		}
 		*p_w = DZ(( w > 0 ) ? w : 64);
 		*p_h = DZ(( h > 0 ) ? h : 64);
+		tad_vobj_clear(&v);
 		return;
 	}
 	if ( r->kind == TV_RUN_IMAGE ) {
@@ -849,12 +851,14 @@ LOCAL void thing_size( LAY *l, CONST T_TVRUN *r, INT *p_w, INT *p_h )
 		}
 		*p_w = DZ(( w > 0 ) ? w : 64);
 		*p_h = DZ(( h > 0 ) ? h : 64);
+		tad_vobj_clear(&v);
 		return;
 	}
 	if ( l->src != NULL && tad_lnk_get(l->src, r->link, &v) >= E_OK ) {
 		if ( v.hidden && !l->show_hidden ) {
 			*p_w = 0;		/* a hidden link takes no room */
 			*p_h = 0;
+			tad_vobj_clear(&v);
 			return;
 		}
 		/*
@@ -886,19 +890,22 @@ LOCAL void thing_size( LAY *l, CONST T_TVRUN *r, INT *p_w, INT *p_h )
 	}
 	*p_w = DZ(*p_w);
 	*p_h = DZ(*p_h);
+	tad_vobj_clear(&v);
 }
 
 /* A virtual object standing in the text, drawn as a box with its name */
 LOCAL void put_link( LAY *l, INT idx, INT x, INT y, INT w, INT h )
 {
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	T_DPRECT	box;
 	BOOL		known = FALSE;
 
+	tad_vobj_init(&v);
 	if ( l->src != NULL && tad_lnk_get(l->src, idx, &v) >= E_OK ) {
 		known = TRUE;
 	}
 	if ( w <= 0 || h <= 0 ) {
+		tad_vobj_clear(&v);
 		return;			/* hidden */
 	}
 	box.left = x;  box.top = y;
@@ -911,9 +918,11 @@ LOCAL void put_link( LAY *l, INT idx, INT x, INT y, INT w, INT h )
 			l->found = idx;
 			l->found_box = box;
 		}
+		tad_vobj_clear(&v);
 		return;
 	}
 	if ( l->gid < 0 || l->mode != LM_PLAIN ) {
+		tad_vobj_clear(&v);
 		return;
 	}
 	if ( known ) {
@@ -930,6 +939,7 @@ LOCAL void put_link( LAY *l, INT idx, INT x, INT y, INT w, INT h )
 	} else {
 		dp_frame_rect(l->gid, &box, wm_look(WM_LOOK_FRAME), 1);
 	}
+	tad_vobj_clear(&v);
 }
 
 /* ---------------------------------------------------------------- pages */
@@ -2978,8 +2988,9 @@ LOCAL BOOL para_opens( LAY *l, CONST T_TVDOC *d, INT pi )
 {
 	CONST T_TVPARA	*p = &d->para[pi];
 	INT		ri, w, h, k;
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 
+	tad_vobj_init(&v);
 	for ( ri = p->first; ri < p->first + p->n && ri < d->nrun; ri++ ) {
 		CONST T_TVRUN	*r = &d->run[ri];
 
@@ -2988,6 +2999,7 @@ LOCAL BOOL para_opens( LAY *l, CONST T_TVDOC *d, INT pi )
 
 			for ( k = 0; f != NULL && k < f->nsh; k++ ) {
 				if ( f->sh[k].kind == TV_SH_LINK ) {
+					tad_vobj_clear(&v);
 					return TRUE;
 				}
 			}
@@ -3005,10 +3017,12 @@ LOCAL BOOL para_opens( LAY *l, CONST T_TVDOC *d, INT pi )
 			v.chsz = DZ(v.chsz);
 		}
 		if ( h > om_band_h(&v) + OM_OPEN_SLACK ) {
+			tad_vobj_clear(&v);
 			return TRUE;
 		}
 	}
 
+	tad_vobj_clear(&v);
 	return FALSE;
 }
 

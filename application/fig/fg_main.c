@@ -219,18 +219,20 @@ static void auto_open( void )
 {
 	T_DTREQ	rq;
 	T_DTANS	an;
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	i, n, k = 0;
 	char	s[48];
 
 	if ( !fg_cabinet || FG_MADE || g_rec == NULL ) return;
 	n = tad_lnk_count(g_rec);
+	tad_vobj_init(&v);
 	for ( i = 0; i < n; i++ ) {
 		if ( tad_lnk_get(g_rec, i, &v) >= E_OK && v.autoopen && ( !v.hidden || g_show_hidden ) ) {
 			ta_link_open(&v, DT_F_AUTO, i + 1);
 			k++;
 		}
 	}
+	tad_vobj_clear(&v);
 	if ( g_first ) {
 		memset(&rq, 0, sizeof(rq));
 		rq.req = DT_RQ_OPEN;
@@ -246,25 +248,66 @@ static void auto_open( void )
 /*
  * The first window told by the desktop: a link to what the system made
  * (a file printed, a screen saved, a disk attached) put under what is
- * there, closed and as wide as its name, and the record saved
+ * there, closed and as wide as its name, and the record saved. The name
+ * and the link's own applist come as parts of the notice's tail of their
+ * own, or as its text: the name, and after a tab the applist.
  */
 static void first_told( CONST T_DTANS *an )
 {
-	T_VOBJ	v;
-	TS_UUID	id;
-	INT	i, bottom = 8;
-	char	s[TAD_NAME_MAX + 40];
+	CONST UB	*tail = dt_ans_tail(an, (SZ)sizeof(*an) + (SZ)an->tailsz);
+	CONST UB	*nm, *al = NULL, *tab;
+	T_VOBJ		v = { .recno = 0 };
+	TS_UUID		id;
+	SZ		nl = 0, alen = 0;
+	INT		i, bottom = 8;
+	ER		er;
+	char		s[160];
 
-	if ( an->how != DT_HOW_LINK_PUT || g_rec == NULL ) return;
+	if ( ( an->how != DT_HOW_LINK_PUT && an->how != DT_HOW_LINK_ONCE ) || g_rec == NULL ) return;
+	if ( an->how == DT_HOW_LINK_ONCE ) {
+		/* not put again: the record as it is now has a link to it */
+		T_VOBJ	e = { .recno = 0 };
+		INT	n = tad_lnk_count(g_rec);
+		BOOL	there = FALSE;
+
+		tad_vobj_init(&e);
+		for ( i = 0; i < n && !there; i++ ) {
+			there = (BOOL)( tad_lnk_get(g_rec, i, &e) >= E_OK && ts_uuid_cmp(&e.target, &an->into) == 0 );
+		}
+		tad_vobj_clear(&e);
+		if ( there ) {
+			note("put on the desktop: there already");
+			return;
+		}
+	}
 	for ( i = 0; g_fig != NULL && i < g_fig->nsh; i++ ) {
 		if ( g_fig->sh[i].kind != TV_SH_GROUP && g_fig->sh[i].r.bottom + 8 > bottom ) {
 			bottom = g_fig->sh[i].r.bottom + 8;
 		}
 	}
-	memset(&v, 0, sizeof(v));
+	nm = dt_tail_get(tail, an->tailsz, DT_TAIL_NAME, &nl);
+	if ( nm != NULL ) {
+		al = dt_tail_get(tail, an->tailsz, DT_TAIL_APPLIST, &alen);
+	} else {
+		nm = dt_tail_get(tail, an->tailsz, DT_TAIL_TEXT, &nl);
+		if ( nm == NULL ) nm = (CONST UB *)"";
+		tab = (CONST UB *)strchr((CONST char *)nm, '\t');
+		if ( tab != NULL ) {
+			al = tab + 1;
+			alen = nl - (SZ)( al - nm );
+			nl = (SZ)( tab - nm );
+		}
+	}
+	tad_vobj_init(&v);
+	er = tad_vobj_set(&v, TAD_W_NAME, nm, nl);
+	if ( er >= E_OK && al != NULL ) er = tad_vobj_set(&v, TAD_W_APPLIST, al, alen);
+	if ( er < E_OK ) {
+		tad_vobj_clear(&v);
+		note("put on the desktop: no memory for the link");
+		return;
+	}
 	v.target = an->into;
 	v.recno = -1;
-	snprintf((char *)v.name, sizeof(v.name), "%s", (CONST char *)an->text);
 	v.chsz = 14;
 	v.frcol = 0x000000;
 	v.chcol = 0x000000;
@@ -287,8 +330,9 @@ static void first_told( CONST T_DTANS *an )
 	}
 	fg_after();
 	(void)ta_save();
-	snprintf(s, sizeof(s), "put on the desktop: %s", (CONST char *)v.name);
+	snprintf(s, sizeof(s), "put on the desktop: %.120s", (CONST char *)TAD_VS(v.vname));
 	note(s);
+	tad_vobj_clear(&v);
 }
 
 /* A disk's link deleted from the first window takes its disk away; FALSE: it cannot now, and stays */
@@ -301,7 +345,12 @@ static BOOL first_link_going( CONST T_VOBJ *v )
 	rq.req = DT_RQ_DISK;
 	rq.recno = DT_DISK_REMOVE;
 	rq.target = v->target;
-	ts_uuid_text(&v->tvol, (char *)rq.text);
+	{
+		char	t[TS_UUID_STRLEN + 1];
+
+		ts_uuid_text(&v->tvol, t);
+		ta_req_part(DT_TAIL_TEXT, (CONST UB *)t, -1);
+	}
 	memset(&an, 0, sizeof(an));
 	return (BOOL)( ask_desktop(&rq, &an, TMO_FEVR) >= E_OK );
 }
@@ -315,7 +364,7 @@ static void disk_item( CONST char *code )
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_DISK;
 	rq.recno = DT_DISK_MENU;
-	snprintf((char *)rq.name, sizeof(rq.name), "%s", code);
+	ta_req_part(DT_TAIL_NAME, (CONST UB *)code, -1);
 	if ( g_has_link ) rq.target = g_link.target;
 	memset(&an, 0, sizeof(an));
 	(void)ask_desktop(&rq, &an, 5000);
@@ -356,12 +405,14 @@ static BOOL sealed_cmd( CONST char *code )
 /* The links taken, each opened */
 static void open_picked( void )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	i;
 
+	tad_vobj_init(&v);
 	for ( i = 0; g_fig != NULL && i < g_fig->nsh; i++ ) {
 		if ( g_pick[i] != 0 && fg_is_link(i) && tad_lnk_get(g_rec, g_fig->sh[i].link, &v) >= E_OK ) fg_open(&v);
 	}
+	tad_vobj_clear(&v);
 }
 
 /*
@@ -908,7 +959,7 @@ int main( void )
 	T_OBREF	ref;
 	SZ	asz = 0;
 	UD	t0 = ta_now(), t1, t2, t3, t4, t5;
-	char	s[TAD_NAME_MAX + 160];
+	char	s[FG_LOG];
 	CONST char	*cab_name = ( fg_box != NULL && fg_box->name != NULL ) ? fg_box->name : "仮身一覧";
 	ER	er;
 

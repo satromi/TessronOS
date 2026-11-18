@@ -112,7 +112,7 @@ typedef struct {
 
 extern MCDB	g_db;
 extern TS_UUID	g_obj;			/* the database's object */
-extern UB	g_name[OB_NAME_MAX];
+extern UB	*g_name;		/* the object's name, whole; never NULL */
 extern BOOL	g_autoref;		/* its store counts the links of its records itself */
 extern BOOL	g_changed;		/* not saved */
 extern BOOL	g_closing;
@@ -215,7 +215,11 @@ extern void dlg_print_setup( void );
 extern ER   load( void );
 extern ER   save( void );
 extern INT  meta_of( CONST TS_UUID *u );
-extern void name_of( CONST TS_UUID *u, UB *out );
+/* an object's name, whole, to free: "" of its own when it cannot be read, NULL without memory */
+extern UB *name_of( CONST TS_UUID *u );
+#define NM_OR_EMPTY(p)	( ( (p) != NULL ) ? (CONST UB *)(p) : (CONST UB *)"" )
+/* a name and words after it, in memory to free; NULL without memory */
+extern char *name_with( CONST UB *name, CONST char *after );
 extern BOOL link_target( CONST UB *el, TS_UUID *u );
 extern ER   ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms );
 extern void link_open_el( CONST UB *el );
@@ -226,7 +230,7 @@ extern void tray_menu( ID mid );
 extern BOOL tray_has( void );
 extern void carry_link_out( INT x0, INT y0, BOOL twice );
 extern void carry_rows_out( INT from, INT to );
-extern UB  *link_el_from_drop( CONST T_OBDROPV *v, INT *p_len );
+extern UB  *link_el_from_drop( CONST T_OBDROP *d, INT i, INT *p_len );	/* link i of the drop, with its words; free it */
 extern INT  import_obj( CONST TS_UUID *u, INT at );	/* cards read in from an object; how many */
 extern void tray_copy_field( BOOL cut );
 extern void tray_paste_field( BOOL take );

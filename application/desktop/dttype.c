@@ -64,14 +64,14 @@ LOCAL INT type_target( INT asker )
 
 EXPORT ER dt_type_req( CONST T_DTREQ *rq, T_DTANS *an )
 {
-	CONST UB	*s = rq->name;
-	INT		n = 0, wid;
+	SZ		n;
+	CONST UB	*s = dt_rq_word(rq, DT_TAIL_NAME, &n);
+	INT		wid;
 
-	while ( n < (INT)sizeof(rq->name) && s[n] != 0 ) n++;
-	if ( n == 0 || n >= (INT)sizeof(rq->name) ) return E_PAR;
+	if ( n == 0 ) return E_PAR;
 	wid = type_target(wm_obj_wid(&rq->win));
 	if ( wid <= 0 ) return E_NOEXS;
-	if ( dt_win_of(wid) == NULL && wm_panel_type(wid, s, n) ) {
+	if ( dt_win_of(wid) == NULL && wm_panel_type(wid, s, (INT)n) ) {
 		wm_update();
 		an->how = DT_HOW_BOX;
 		tm_printf((UB *)"desktop: typed %s into a box of window %d\n", s, wid);

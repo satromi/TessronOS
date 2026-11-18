@@ -56,6 +56,7 @@
 #include <ts/rtplay.h>
 #include <ts/slide.h>
 #include <ts/wm.h>
+#include "../dtask.h"
 
 #define SL_PAD		16		/* round a document on the slide, at life size */
 #define SL_PAGE_MAX	256
@@ -96,7 +97,7 @@
 /* ---------------------------------------------------------------- what it holds */
 
 static TS_UUID	g_doc;			/* the document of the slides */
-static UB	g_name[OB_NAME_MAX];
+static UB	*g_name = (UB *)"";	/* the object's name, whole */
 static TS_UUID	g_page[SL_PAGE_MAX];	/* what its links point at, in order */
 static INT	g_n, g_cur;
 static BOOL	g_end;			/* the screen after the last */
@@ -132,12 +133,33 @@ static void sl_go( INT to );
 
 /* ---------------------------------------------------------------- saying things */
 
+#define SL_LOG	320			/* a line said on the console: a long name is cut there */
+
 static void note( CONST char *s )
 {
-	char	line[TAD_NAME_MAX + 128];
+	char	line[SL_LOG];
+	INT	n;
 
-	snprintf(line, sizeof(line), "slide: %s\n", s);
+	n = snprintf(line, sizeof(line) - 1, "slide: %s", s);
+	if ( n >= (INT)sizeof(line) - 1 ) {
+		n = (INT)sizeof(line) - 2;
+		while ( n > 0 && ( (UB)line[n] & 0xC0 ) == 0x80 ) n--;	/* never half a letter */
+	}
+	line[n++] = '\n';
+	line[n] = 0;
 	tm_putstring((CONST UB *)line);
+}
+
+/* A page's name, whole, in memory to free ("" of its own when it has none); NULL without memory */
+static UB *page_name( CONST T_VOBJ *v )
+{
+	INT	n = tv_src_look(v, NULL, 0, NULL);
+	UB	*b = (UB *)malloc(( n > 0 ) ? (size_t)n + 1 : 1);
+
+	if ( b == NULL ) return NULL;
+	b[0] = 0;
+	if ( n > 0 && tv_src_look(v, b, n + 1, NULL) < 0 ) b[0] = 0;
+	return b;
 }
 
 static UD now_ns( void )
@@ -150,41 +172,13 @@ static UD now_ns( void )
 
 /* ---------------------------------------------------------------- the desktop */
 
+/* The words of the next request and the last answer, as long as they are (dtask.h) */
+static DTASK	g_dq;
+
 /* A request to the desktop, its panels over this window; the answer waited for */
 static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
-	static UINT	seq;
-	TS_UUID		d, reply;
-	T_OBCRE		c;
-	SZ		asz = 0;
-	ID		k, ka;
-	ER		er;
-
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
-	rq->seq = ++seq;
-	rq->reply = reply;
-	rq->win = g_win;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
-			er = an->er;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
-	return er;
+	return dq_ask(&g_dq, rq, an, &g_win, wait_ms);
 }
 
 /* ---------------------------------------------------------------- the player */
@@ -279,7 +273,7 @@ static void link_to( CONST TS_UUID *id, T_VOBJ *v )
 /* The slide's own colour: its window's background colour, or white */
 static UW page_paper( void )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	UW	paper = C_WHITE;
 
 	link_to(&g_page[g_cur], &v);
@@ -357,10 +351,10 @@ static void sl_draw( void )
 	T_DPRECT	all, area;
 	INT		z, den;
 	UW		paper, ground;
-	UB		name[TAD_NAME_MAX];
-	char		msg[TAD_NAME_MAX + 96];
+	UB		*name;
+	char		msg[SL_LOG];
 	T_TAD		*rec;
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	UD		t0 = now_ns(), f0 = tv_fn_calls();
 	T_TVSRCSTAT	s0, s1;
 
@@ -380,7 +374,7 @@ static void sl_draw( void )
 	/* round the slide: what the menu chose, else the slide's own colour */
 	ground = ( g_back != TAD_COL_NONE ) ? g_back : paper;
 	link_to(&g_page[g_cur], &v);
-	if ( tv_src_look(&v, name, sizeof(name), NULL) < 0 ) name[0] = 0;
+	name = page_name(&v);
 	z = sl_fit(g_w, g_h, g_tw, g_th, &area, &den);
 	rec = tv_src_get(&g_page[g_cur], 0);
 	if ( g_rt != NULL && g_rt_page != g_cur ) rt_end();
@@ -400,13 +394,14 @@ static void sl_draw( void )
 		dp_fill_rect(g_gid, &all, ground);
 		dp_fill_rect(g_gid, &area, paper);
 		if ( !draw_page(g_gid, &g_page[g_cur], &area, z, den, paper) ) {
-			snprintf(msg, sizeof(msg), "スライド「%s」の読み込みに失敗しました", (char *)name);
+			snprintf(msg, sizeof(msg), "スライド「%s」の読み込みに失敗しました", ( name != NULL ) ? (char *)name : "");
 			centre(msg, C_FAIL, 20);
 		}
 	}
 	/* "2 / 5: name" kept as the message, the slide's place, for when the line is up */
-	snprintf(msg, sizeof(msg), "%d / %d: %s", g_cur + 1, g_n, (char *)name);
-	(void)wm_msg_put(msg);
+	snprintf(msg, sizeof(msg), "%d / %d: %s", g_cur + 1, g_n, ( name != NULL ) ? (char *)name : "");
+	(void)wm_msg_put(msg);		/* the message line: what fits of it */
+	free(name);
 	snprintf(msg, sizeof(msg), "%d of %d zoom %d/%d at %d,%d %dx%d%s", g_cur + 1, g_n, z, den,
 		 area.left, area.top, area.right - area.left, area.bottom - area.top,
 		 ( g_rt != NULL ) ? " playing" : "");
@@ -507,13 +502,16 @@ static void sl_jump( void )
 
 	if ( names == NULL ) return;
 	for ( i = 0; i < g_n; i++ ) {
-		UB	nm[TAD_NAME_MAX];
-		T_VOBJ	v;
+		UB	*nm;
+		T_VOBJ	v = { .recno = 0 };
+		size_t	l;
 
 		link_to(&g_page[i], &v);
-		if ( tv_src_look(&v, nm, sizeof(nm), NULL) < 0 ) nm[0] = 0;
-		names[i] = (char *)malloc(TAD_NAME_MAX + 16);
-		if ( names[i] != NULL ) snprintf(names[i], TAD_NAME_MAX + 16, "%d. %s", i + 1, (char *)nm);
+		nm = page_name(&v);
+		l = ( ( nm != NULL ) ? strlen((char *)nm) : 0 ) + 16;
+		names[i] = (char *)malloc(l);
+		if ( names[i] != NULL ) snprintf(names[i], l, "%d. %s", i + 1, ( nm != NULL ) ? (char *)nm : "");
+		free(nm);
 	}
 	at = choose(PN_JUMP, (CONST char *const *)names, g_n, g_end ? g_n - 1 : g_cur);
 	for ( i = 0; i < g_n; i++ ) free(names[i]);
@@ -558,7 +556,7 @@ static void sl_print( void )
 		memset(&rq, 0, sizeof(rq));
 		rq.req = DT_RQ_PRINT;
 		rq.target = up.obj;
-		snprintf((char *)rq.name, sizeof(rq.name), "%s", (char *)g_name);
+		(void)dq_part(&g_dq, DT_TAIL_NAME, g_name, -1);
 		/* the person works the desktop's panels: as long as that takes */
 		er = ask_desktop(&rq, &an, 60 * 60 * 1000);
 	}
@@ -581,7 +579,8 @@ static void exec_menu( ID mid )
 
 	g_napp = 0;
 	for ( k = 0; k < n && g_napp < APP_MAX; k++ ) {
-		INT	i = 0, j;
+		INT		i = 0, j;
+		CONST UB	*t;
 
 		memset(&rq, 0, sizeof(rq));
 		memset(&an, 0, sizeof(an));
@@ -591,13 +590,14 @@ static void exec_menu( ID mid )
 		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
 		n = (INT)an.how;
 		/* "id\tname" */
-		for ( j = 0; i < DT_TEXT_MAX && an.text[i] != 0 && an.text[i] != '\t'; i++ ) {
-			if ( j < APP_ID - 1 ) g_app_id[g_napp][j++] = an.text[i];
+		t = dq_ans_text(&g_dq, DT_TAIL_TEXT);
+		for ( j = 0; t[i] != 0 && t[i] != '\t'; i++ ) {
+			if ( j < APP_ID - 1 ) g_app_id[g_napp][j++] = t[i];
 		}
 		g_app_id[g_napp][j] = 0;
-		if ( j == 0 || i >= DT_TEXT_MAX || an.text[i] != '\t' ) continue;
-		for ( i++, j = 0; i < DT_TEXT_MAX && an.text[i] != 0; i++ ) {
-			if ( j < APP_NAME - 1 ) g_app_name[g_napp][j++] = an.text[i];
+		if ( j == 0 || t[i] != '\t' ) continue;
+		for ( i++, j = 0; t[i] != 0; i++ ) {
+			if ( j < APP_NAME - 1 ) g_app_name[g_napp][j++] = t[i];
 		}
 		g_app_name[g_napp][j] = 0;
 		g_app_kind[g_napp] = (BOOL)( ( an.flags & DT_F_KIND ) != 0 );
@@ -616,7 +616,7 @@ static void exec_menu( ID mid )
 
 static void command( CONST char *code, INT index )
 {
-	char	s[TAD_NAME_MAX + 64];
+	char	s[SL_LOG];
 
 	if ( strcmp(code, "close") == 0 ) g_closing = TRUE;
 	else if ( strcmp(code, "slide.next") == 0 ) sl_next();
@@ -639,10 +639,10 @@ static void command( CONST char *code, INT index )
 		rq.req = DT_RQ_EXEC;
 		rq.target = g_link.target;
 		rq.recno = -1;
-		snprintf((char *)rq.name, sizeof(rq.name), "%s", (char *)g_app_id[index]);
+		(void)dq_part(&g_dq, DT_TAIL_NAME, g_app_id[index], -1);
 		if ( g_app_kind[index] ) rq.flags |= DT_F_KIND;
 		er = ask_desktop(&rq, &an, 5000);
-		snprintf(s, sizeof(s), "exec %s %s (%d)", (char *)g_link.name, (char *)g_app_id[index], (INT)er);
+		snprintf(s, sizeof(s), "exec %.120s %s (%d)", (char *)TAD_VS(g_link.vname), (char *)g_app_id[index], (INT)er);
 		note(s);
 	}
 }
@@ -731,7 +731,7 @@ static void key( CONST T_OBNTM *m )
 
 static void press( CONST T_OBNTM *m )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 
 	g_down = TRUE;
 	g_down_x = m->x;
@@ -745,7 +745,12 @@ static void press( CONST T_OBNTM *m )
 		if ( rt_do(RTP_PRESS, m->x, m->y) && ( g_rt_flags & RTP_S_TAKEN ) != 0 ) return;
 	}
 	/* a press on a link does not turn the page */
-	if ( link_at(m->x, m->y, &v) ) return;
+	tad_vobj_init(&v);
+	if ( link_at(m->x, m->y, &v) ) {
+		tad_vobj_clear(&v);
+		return;
+	}
+	tad_vobj_clear(&v);
 	sl_next();
 }
 
@@ -777,6 +782,8 @@ static void work_size( void )
 	g_ui.h = g_h;
 }
 
+static void watch_gone( CONST TS_UUID *id );
+
 static void event( CONST T_OBNTM *m )
 {
 	if ( memcmp(&m->uuid, &g_win, sizeof(TS_UUID)) != 0 ) {
@@ -784,6 +791,9 @@ static void event( CONST T_OBNTM *m )
 		if ( m->event == OB_E_CHANGE ) {
 			tv_src_forget(&m->uuid);
 			sl_draw();
+		} else if ( m->event == OB_E_DETACH ) {
+			/* its medium went: the key let go, what was read of it kept on the screen */
+			watch_gone(&m->uuid);
 		} else if ( m->event == OB_E_DELETE ) {
 			/* the document of the slides gone: the window goes with it; a slide gone is shown as it fails */
 			if ( memcmp(&m->uuid, &g_doc, sizeof(TS_UUID)) == 0 ) {
@@ -838,17 +848,48 @@ static void event( CONST T_OBNTM *m )
 /* ---------------------------------------------------------------- start and end */
 
 /* Notices of changes to an object, at the window's channel */
+static TS_UUID	g_watched[SL_PAGE_MAX + 1];
+static ID	g_watch_key[SL_PAGE_MAX + 1];
+static INT	g_nwatched;
+
 static void watch( CONST TS_UUID *id )
 {
 	T_OBNTF	req;
-	ID	k = ob_opn_obj(id, OB_OP_READ | OB_OP_ATRRD);	/* that it changed is told to one who may read its attributes */
+	ID	k;
+	INT	i;
 
+	for ( i = 0; i < g_nwatched; i++ ) {
+		if ( memcmp(&g_watched[i], id, sizeof(TS_UUID)) == 0 ) return;
+	}
+	if ( g_nwatched > SL_PAGE_MAX ) return;
+	k = ob_opn_obj(id, OB_OP_READ | OB_OP_ATRRD);	/* that it changed is told to one who may read its attributes */
 	if ( k <= 0 ) return;
 	memset(&req, 0, sizeof(req));
-	req.events = OB_E_CHANGE | OB_E_DELETE;
+	req.events = OB_E_CHANGE | OB_E_DELETE | OB_E_DETACH;
 	req.id = 1;
 	(void)ob_ntf_evt(k, OB_REC_ANY, &req, g_port);
-	/* the request goes with the key: the key is kept until the program ends */
+	/*
+	 * the request goes with the key: the key is kept until the program
+	 * ends, or until the medium of the object goes (OB_E_DETACH), when it
+	 * is let go at once so that the volume is not held (design 11.26)
+	 */
+	g_watch_key[g_nwatched] = k;
+	g_watched[g_nwatched++] = *id;
+}
+
+/* The medium of a watched object went: its key closed */
+static void watch_gone( CONST TS_UUID *id )
+{
+	INT	i;
+
+	for ( i = 0; i < g_nwatched; i++ ) {
+		if ( memcmp(&g_watched[i], id, sizeof(TS_UUID)) == 0 ) break;
+	}
+	if ( i >= g_nwatched ) return;
+	(void)ob_cls_obj(g_watch_key[i]);
+	g_nwatched--;
+	g_watched[i] = g_watched[g_nwatched];
+	g_watch_key[i] = g_watch_key[g_nwatched];
 }
 
 static ER win_open( void )
@@ -904,7 +945,11 @@ int main( void )
 		(void)wm_msg_put("スライドを開けません");
 		return 1;
 	}
-	snprintf((char *)g_name, sizeof(g_name), "%s", (char *)ref.name);
+	{
+		UB	*nm = ui_obj_name(&g_doc);
+
+		if ( nm != NULL ) g_name = nm;	/* kept while it runs */
+	}
 	tv_src_init();
 	rec = tv_src_get(&g_doc, 0);
 	if ( rec == NULL ) {

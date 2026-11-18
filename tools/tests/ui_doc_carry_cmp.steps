@@ -53,6 +53,9 @@ logmark
 hold 120 139
 move 300 200
 move 750 200
+# the pointer goes there at once: the editor told it has left the window before it is brought back,
+# or it sees only a move within the window, the moves on the way merged into the last
+expectsince document: left the window carrying
 move 400 260
 move 300 270
 up
@@ -62,6 +65,7 @@ logmark
 hold 160 225
 move 300 260
 move 750 300
+expectsince document: left the window carrying
 move 400 280
 move 300 272
 up

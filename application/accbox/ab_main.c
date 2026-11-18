@@ -71,10 +71,14 @@ static ER acc_load( T_TAD **p_rec )
 	INT	i, n = 1;
 	char	s[48];
 	ER	er = E_OK;
-	static UB	acc_name[ACC_MAX][TAD_NAME_MAX];
+	static UB	*acc_name[ACC_MAX];	/* each as long as the desktop says it */
 	static CONST UB	*names[ACC_MAX];
 	static BOOL	dim[ACC_MAX];
 
+	for ( i = 0; i < ACC_MAX; i++ ) {
+		free(acc_name[i]);
+		acc_name[i] = NULL;
+	}
 	acc_n = 0;
 	for ( i = 0; i < n && i < ACC_MAX; i++ ) {
 		memset(&rq, 0, sizeof(rq));
@@ -84,10 +88,20 @@ static ER acc_load( T_TAD **p_rec )
 		er = ask_desktop(&rq, &an, 5000);
 		if ( er < E_OK ) break;
 		n = (INT)an.how;
-		an.text[DT_TEXT_MAX - 1] = 0;
+		{
+			SZ		tl = 0;
+			CONST UB	*t = ta_ans_part(DT_TAIL_TEXT, &tl);
+
+			acc_name[acc_n] = (UB *)malloc((size_t)tl + 1);
+			if ( acc_name[acc_n] == NULL ) {
+				er = E_NOMEM;
+				break;
+			}
+			if ( tl > 0 ) memcpy(acc_name[acc_n], t, (size_t)tl);
+			acc_name[acc_n][tl] = 0;
+		}
 		acc_id[acc_n] = an.into;
 		acc_show[acc_n] = (BOOL)( ( an.flags & DT_F_HIDDEN ) == 0 );
-		snprintf((char *)acc_name[acc_n], TAD_NAME_MAX, "%s", (CONST char *)an.text);
 		names[acc_n] = acc_name[acc_n];
 		dim[acc_n] = (BOOL)!acc_show[acc_n];
 		acc_n++;
@@ -157,8 +171,13 @@ static void acc_set( CONST char *code, CONST TS_UUID *target, CONST TS_UUID *bef
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_ACC_SET;
 	rq.target = *target;
-	snprintf((char *)rq.name, sizeof(rq.name), "%s", code);
-	if ( before != NULL ) ts_uuid_text(before, (char *)rq.text);
+	ta_req_part(DT_TAIL_NAME, (CONST UB *)code, -1);
+	if ( before != NULL ) {
+		char	t[TS_UUID_STRLEN + 1];
+
+		ts_uuid_text(before, t);
+		ta_req_part(DT_TAIL_TEXT, (CONST UB *)t, -1);
+	}
 	memset(&an, 0, sizeof(an));
 	er = ask_desktop(&rq, &an, 5000);
 	snprintf(s, sizeof(s), "%s (%d)", code, (INT)er);

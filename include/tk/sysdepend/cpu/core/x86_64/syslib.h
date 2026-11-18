@@ -297,4 +297,29 @@ Inline void cpuid( UW leaf, UW sub, UW *a, UW *b, UW *c, UW *d )
 	__asm__ volatile ( "cpuid" : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d) : "a"(leaf), "c"(sub) );
 }
 
+/*
+ * A model specific register that may not be there: read or written as
+ * rdmsr and wrmsr do, E_OK; E_NOSPT when the processor refuses it (the
+ * general protection fault is taken and the call returns). For the
+ * first look at a register whose presence the model does not settle,
+ * and for addresses the firmware names. A register known to be there is
+ * read with rdmsr.
+ */
+IMPORT ER knl_rdmsr_safe( UW msr, UD *p_v );
+IMPORT ER knl_wrmsr_safe( UW msr, UD v );
+
+/*
+ * The registers of power and temperature this processor has, decided
+ * once by its model and, where the model does not settle it, by a look
+ * with knl_rdmsr_safe (cpuclk.c): the address, 0 when there is none.
+ * Intel's processors not under a hypervisor only.
+ */
+#define X64M_RAPL	0	/* RAPL's package registers (0x606, 0x610, 0x611): 0x606 */
+#define X64M_PKG_INFO	1	/* MSR_PKG_POWER_INFO 0x614 */
+#define X64M_PLR_CORE	2	/* the cores' performance limit reasons: 0x64f or 0x690 */
+#define X64M_PLR_GFX	3	/* the GT's: 0x6b0 */
+#define X64M_PP0_CUR	4	/* MSR_PP0_CURRENT_CONFIG 0x601 */
+#define X64M_N		5
+IMPORT UW knl_x64_msr( INT what );
+
 #endif /* __TK_SYSLIB_DEPEND_CORE_H__ */

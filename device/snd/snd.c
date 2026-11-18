@@ -195,8 +195,21 @@ LOCAL INT		play_channels = 0;
 LOCAL SDStat		snd_stat;
 LOCAL ID		snd_devid = 0;
 LOCAL BOOL		snd_ready = FALSE;
-LOCAL UB		sel_id[SND_ID_MAX] = SND_ID_AUTO;	/* the output chosen */
-LOCAL UB		play_id[SND_ID_MAX];	/* the one the stream plays on, "" none */
+/*
+ * An id held: as long as it comes, in room kept and grown when a longer
+ * one comes (only with the lock held, or before the device is ready)
+ */
+typedef struct {
+	UB	*p;			/* NULL: "" */
+	SZ	cap;
+	BOOL	own;			/* p is from Kmalloc */
+} IDBUF;
+
+LOCAL UB		sel_auto[] = SND_ID_AUTO;
+LOCAL IDBUF		sel_id = { sel_auto, sizeof(sel_auto), FALSE };	/* the output chosen */
+LOCAL IDBUF		play_id = { NULL, 0, FALSE };	/* the one the stream plays on, "" none */
+LOCAL IDBUF		pick_id = { NULL, 0, FALSE };	/* the one pick() found */
+LOCAL IDBUF		was_id = { NULL, 0, FALSE };	/* the one a stream moves from */
 LOCAL UW		look_ms = 0;		/* the output last chosen again */
 LOCAL INT		nmove = 0;		/* the stream moved, since the start */
 
@@ -280,7 +293,7 @@ LOCAL UW ratio16( UW a, UW b )
 LOCAL BOOL	loop_on = FALSE;
 LOCAL BOOL	loop_run = FALSE;
 
-LOCAL INT  loop_outputs( SDOut *o, INT max ) { return 0; }
+LOCAL ER   loop_outs( SNDOUTS *l );
 LOCAL BOOL loop_can_record( void ) { return loop_on; }
 LOCAL ER   loop_play_start( CONST UB *id, UW *rate, INT *channels ) { return E_NOSPT; }
 LOCAL void loop_play_stop( void )  { }
@@ -351,10 +364,11 @@ LOCAL ER   loop_set_level( INT dn, CONST SDVol *v ) { return E_NOSPT; }
 
 LOCAL CONST SNDHW loop_hw = {
 	SND_BE_NONE,
-	loop_outputs, loop_can_record,
+	NULL, loop_can_record,
 	loop_play_start, loop_play_stop, loop_play_running,
 	loop_rec_start, loop_rec_stop, loop_rec_running,
-	loop_poll, loop_get_level, loop_set_level, 0, 0
+	loop_poll, loop_get_level, loop_set_level, 0, 0,
+	loop_outs
 };
 
 EXPORT void knl_snd_loopback( BOOL on )
@@ -377,26 +391,34 @@ LOCAL CONST SNDHW *CONST play_hws[] = {
 };
 #define NPLAY_HW	( (INT)( sizeof(play_hws) / sizeof(play_hws[0]) ) )
 
-EXPORT void knl_snd_out_set( SDOut *o, CONST UB *id, CONST UB *name, UW kind, UW flags )
+/* s copied into the room of n bytes, cut at a whole letter; TRUE when it fitted */
+LOCAL BOOL cut_copy( UB *dst, INT n, CONST UB *s )
 {
 	INT	i;
 
-	knl_memset(o, 0, sizeof(*o));
-	for ( i = 0; id != NULL && id[i] != 0 && i < SND_ID_MAX - 1; i++ ) {
-		o->id[i] = id[i];
+	for ( i = 0; s != NULL && s[i] != 0 && i < n - 1; i++ ) {
+		dst[i] = s[i];
 	}
-	for ( i = 0; name != NULL && name[i] != 0 && i < SND_NAME_MAX - 1; i++ ) {
-		o->name[i] = name[i];
-	}
-	/* a name cut short is cut before the letter that did not fit whole */
-	if ( name != NULL && name[i] != 0 ) {
-		while ( i > 0 && (name[i] & 0xc0) == 0x80 ) {
+	if ( s != NULL && s[i] != 0 ) {
+		while ( i > 0 && ( s[i] & 0xc0 ) == 0x80 ) {
 			i--;
 		}
-		o->name[i] = 0;
+		dst[i] = 0;
+		return FALSE;
 	}
+	dst[i] = 0;
+	return TRUE;
+}
+
+EXPORT void knl_snd_out_set( SDOut *o, CONST UB *id, CONST UB *name, UW kind, UW flags )
+{
+	BOOL	whole;
+
+	knl_memset(o, 0, sizeof(*o));
+	whole = cut_copy(o->id, SND_ID_MAX, id);
+	whole = cut_copy(o->name, SND_NAME_MAX, name) && whole;
 	o->kind = kind;
-	o->flags = flags;
+	o->flags = flags | ( whole ? 0 : SND_OF_CUT );
 }
 
 LOCAL BOOL same_id( CONST UB *a, CONST UB *b )
@@ -404,89 +426,280 @@ LOCAL BOOL same_id( CONST UB *a, CONST UB *b )
 	return ( knl_strcmp((CONST char *)a, (CONST char *)b) == 0 );
 }
 
-LOCAL void id_copy( UB *dst, CONST UB *src )
+LOCAL CONST UB *idb( CONST IDBUF *b )
 {
-	INT	i;
+	return ( b->p != NULL ) ? b->p : (CONST UB *)"";
+}
 
-	for ( i = 0; src[i] != 0 && i < SND_ID_MAX - 1; i++ ) {
-		dst[i] = src[i];
+/* s held in b, whole; E_NOMEM (b as it was) when there is no room for it */
+LOCAL ER idb_set( IDBUF *b, CONST UB *s )
+{
+	SZ	n = (SZ)knl_strlen((CONST char *)s) + 1;
+
+	if ( n > b->cap ) {
+		SZ	cap = ( n < 32 ) ? 32 : n;
+		UB	*p = (UB *)Kmalloc(cap);
+
+		if ( p == NULL ) {
+			return E_NOMEM;
+		}
+		if ( b->own ) {
+			Kfree(b->p);
+		}
+		b->p = p;
+		b->cap = cap;
+		b->own = TRUE;
 	}
-	dst[i] = 0;
+	knl_memcpy(b->p, s, n);
+	return E_OK;
+}
+
+LOCAL void idb_clear( IDBUF *b )
+{
+	if ( b->p != NULL ) {
+		b->p[0] = 0;
+	}
+}
+
+/*
+ * The outputs gathered: their entries one after the other in buf, as
+ * DN_SDOUTV has them, and for each where it starts and its backend.
+ * The room is kept from one gathering to the next and grown as a
+ * backend adds; it is used only with the lock held, so a room grown is
+ * let go at once.
+ */
+struct SNDOUTS {
+	UB		*buf;
+	SZ		cap, len;
+	SZ		*off;
+	CONST SNDHW	**hw;
+	INT		n, ncap;
+	CONST SNDHW	*cur;		/* the backend adding now */
+	BOOL		nomem;		/* an add found no room */
+};
+
+LOCAL SNDOUTS		outl;
+LOCAL SDOut		*leg_o = NULL;	/* the fixed form's room, for a backend without outs */
+LOCAL INT		leg_cap = 0;
+LOCAL BOOL		outl_short = FALSE;	/* the last gathering found no memory (said once) */
+
+/* An entry of DN_SDOUTV made at e, size bytes (SND_OUTV_SIZE) */
+LOCAL void outv_put( SDOutV *e, SZ size, CONST UB *id, SZ il, CONST UB *name, SZ nl, UW kind, UW flags )
+{
+	knl_memset(e, 0, size);
+	e->size = (UINT)size;
+	e->kind = kind;
+	e->flags = flags;
+	e->name = (UINT)( sizeof(SDOutV) + (UW)il + 1 );
+	if ( il > 0 ) knl_memcpy(e->id, id, il);
+	if ( nl > 0 ) knl_memcpy(SND_OUTV_NAME(e), name, nl);
+}
+
+EXPORT ER knl_snd_out_add( SNDOUTS *l, CONST UB *id, CONST UB *name, UW kind, UW flags )
+{
+	SZ	il = ( id != NULL ) ? (SZ)knl_strlen((CONST char *)id) : 0;
+	SZ	nl = ( name != NULL ) ? (SZ)knl_strlen((CONST char *)name) : 0;
+	SZ	size = SND_OUTV_SIZE(il, nl);
+
+	if ( l->nomem ) {
+		return E_NOMEM;
+	}
+	if ( l->len + size > l->cap ) {
+		SZ	cap = ( l->cap < 512 ) ? 512 : l->cap * 2;
+		UB	*b;
+
+		while ( cap < l->len + size ) {
+			cap *= 2;
+		}
+		b = (UB *)Kmalloc(cap);
+		if ( b == NULL ) {
+			l->nomem = TRUE;
+			return E_NOMEM;
+		}
+		if ( l->len > 0 ) knl_memcpy(b, l->buf, l->len);
+		if ( l->buf != NULL ) Kfree(l->buf);
+		l->buf = b;
+		l->cap = cap;
+	}
+	if ( l->n >= l->ncap ) {
+		INT		ncap = ( l->ncap < 8 ) ? 8 : l->ncap * 2;
+		SZ		*o = (SZ *)Kmalloc(sizeof(SZ) * (SZ)ncap);
+		CONST SNDHW	**h = (CONST SNDHW **)Kmalloc(sizeof(SNDHW *) * (SZ)ncap);
+
+		if ( o == NULL || h == NULL ) {
+			if ( o != NULL ) Kfree(o);
+			if ( h != NULL ) Kfree((void *)h);
+			l->nomem = TRUE;
+			return E_NOMEM;
+		}
+		if ( l->n > 0 ) {
+			knl_memcpy(o, l->off, sizeof(SZ) * (SZ)l->n);
+			knl_memcpy((void *)h, (CONST void *)l->hw, sizeof(SNDHW *) * (SZ)l->n);
+		}
+		if ( l->off != NULL ) Kfree(l->off);
+		if ( l->hw != NULL ) Kfree((void *)l->hw);
+		l->off = o;
+		l->hw = h;
+		l->ncap = ncap;
+	}
+	outv_put((SDOutV *)( l->buf + l->len ), size, id, il, name, nl, kind, flags);
+	l->off[l->n] = l->len;
+	l->hw[l->n] = l->cur;
+	l->n++;
+	l->len += size;
+
+	return E_OK;
+}
+
+LOCAL SDOutV *out_at( INT k )
+{
+	return (SDOutV *)( outl.buf + outl.off[k] );
+}
+
+/* A backend that answers in the fixed form: its outputs asked with room enough, and added */
+LOCAL ER legacy_outs( CONST SNDHW *hw )
+{
+	INT	m = 0, k;
+
+	while ( leg_cap == 0 || ( m = hw->outputs(leg_o, leg_cap) ) >= leg_cap ) {
+		/* full: perhaps more there, asked again with twice the room */
+		INT	cap = ( leg_cap == 0 ) ? 8 : leg_cap * 2;
+		SDOut	*o = (SDOut *)Kmalloc(sizeof(SDOut) * (SZ)cap);
+
+		if ( o == NULL ) {
+			return E_NOMEM;
+		}
+		if ( leg_o != NULL ) Kfree(leg_o);
+		leg_o = o;
+		leg_cap = cap;
+	}
+	for ( k = 0; k < m; k++ ) {
+		/* each is NUL ended within its room, whatever the backend wrote */
+		leg_o[k].id[SND_ID_MAX - 1] = 0;
+		leg_o[k].name[SND_NAME_MAX - 1] = 0;
+		if ( knl_snd_out_add(&outl, leg_o[k].id, leg_o[k].name, leg_o[k].kind, leg_o[k].flags) < E_OK ) {
+			return E_NOMEM;
+		}
+	}
+	return E_OK;
+}
+
+#ifdef USE_KTEST
+/* The test's own outputs (knl_snd_test_outs) */
+LOCAL INT	test_nout = 0, test_idlen, test_namelen;
+#endif
+
+/*
+ * The test source has no output; in a test, the outputs of the test's
+ * own (knl_snd_test_outs), which are never played on
+ */
+LOCAL ER loop_outs( SNDOUTS *l )
+{
+#ifdef USE_KTEST
+	INT	k, i, n;
+	UB	*id, *name;
+	ER	er = E_OK;
+
+	if ( test_nout <= 0 ) {
+		return E_OK;
+	}
+	id = (UB *)Kmalloc((SZ)test_idlen + 16);
+	name = (UB *)Kmalloc((SZ)test_namelen + 4);
+	if ( id == NULL || name == NULL ) {
+		if ( id != NULL ) Kfree(id);
+		if ( name != NULL ) Kfree(name);
+		l->nomem = TRUE;
+		return E_NOMEM;
+	}
+	for ( k = 0; k < test_nout && er >= E_OK; k++ ) {
+		/* "usb:fe00:NNNN@0-1" and hub ports ".2" to idlen bytes */
+		n = tm_sprintf(id, (CONST UB *)"usb:fe00:%04x@0-1", k);
+		for ( i = 0; n + 2 <= test_idlen; i++ ) {
+			id[n] = '.';
+			id[n + 1] = (UB)( '1' + i % 9 );
+			n += 2;
+		}
+		if ( n < test_idlen ) {
+			id[n++] = '1';		/* an odd length: the last hub port of two digits */
+		}
+		id[n] = 0;
+		/* the number first, then "長" (three bytes of UTF-8) to namelen bytes */
+		n = tm_sprintf(name, (CONST UB *)"%d ", k);
+		for ( i = n; i + 3 <= test_namelen; i += 3 ) {
+			name[i] = 0xe9;
+			name[i + 1] = 0x95;
+			name[i + 2] = 0xb7;
+		}
+		name[i] = 0;
+		er = knl_snd_out_add(l, id, name, SND_BE_USB, SND_OF_NOSOUND);
+	}
+	Kfree(id);
+	Kfree(name);
+	return er;
+#else
+	return E_OK;
+#endif
 }
 
 /*
  * Every output of every backend there is now, and the backend of each,
- * into out_all and out_hw, with the lock held. The room is kept from one
- * call to the next and made twice as large while the backends fill it.
- * -1 when there is no memory for it.
+ * into outl, with the lock held: how many, -1 when there is no memory
+ * for them (said in the console, once until they are gathered again).
  */
-#define OUT_FIRST	8
-LOCAL SDOut		*out_all = NULL;
-LOCAL CONST SNDHW	**out_hw = NULL;
-LOCAL INT		out_cap = 0;
-
 LOCAL INT all_outputs( void )
 {
-	INT	b, k, n, m;
+	INT	b;
+	ER	er = E_OK;
 
-	for ( ;; ) {
-		if ( out_cap == 0 ) {
-			out_all = (SDOut *)Kmalloc(sizeof(SDOut) * OUT_FIRST);
-			out_hw = (CONST SNDHW **)Kmalloc(sizeof(SNDHW *) * OUT_FIRST);
-			if ( out_all == NULL || out_hw == NULL ) {
-				if ( out_all != NULL ) Kfree(out_all);
-				if ( out_hw != NULL ) Kfree((void *)out_hw);
-				out_all = NULL;
-				out_hw = NULL;
-				return -1;
-			}
-			out_cap = OUT_FIRST;
-		}
-		for ( b = 0, n = 0; b < NPLAY_HW && n < out_cap; b++ ) {
-			m = play_hws[b]->outputs(out_all + n, out_cap - n);
-			for ( k = 0; k < m; k++ ) {
-				out_hw[n + k] = play_hws[b];
-			}
-			n += m;
-		}
-		if ( n < out_cap ) {
-			return n;
-		}
-		{
-			/* full: perhaps more there, asked again with twice the room */
-			SDOut		*o = (SDOut *)Kmalloc(sizeof(SDOut) * (SZ)out_cap * 2);
-			CONST SNDHW	**h = (CONST SNDHW **)Kmalloc(sizeof(SNDHW *) * (SZ)out_cap * 2);
-
-			if ( o == NULL || h == NULL ) {
-				if ( o != NULL ) Kfree(o);
-				if ( h != NULL ) Kfree((void *)h);
-				return n;	/* what there was room for */
-			}
-			Kfree(out_all);
-			Kfree((void *)out_hw);
-			out_all = o;
-			out_hw = h;
-			out_cap *= 2;
-		}
+	outl.n = 0;
+	outl.len = 0;
+	outl.nomem = FALSE;
+	for ( b = 0; b < NPLAY_HW && er >= E_OK; b++ ) {
+		outl.cur = play_hws[b];
+		er = ( play_hws[b]->outs != NULL ) ? play_hws[b]->outs(&outl)
+		   : ( play_hws[b]->outputs != NULL ) ? legacy_outs(play_hws[b]) : E_OK;
 	}
+#ifdef USE_KTEST
+	if ( er >= E_OK ) {
+		outl.cur = &loop_hw;
+		er = loop_outs(&outl);
+	}
+#endif
+	if ( er < E_OK || outl.nomem ) {
+		if ( !outl_short ) {
+			tm_printf((UB *)"TessronOS: snd: no memory to gather the outputs in: none is listed or played on\n");
+		}
+		outl_short = TRUE;
+		outl.n = 0;
+		return -1;
+	}
+	outl_short = FALSE;
+	return outl.n;
 }
 
 /*
- * The output chosen among o: the one of its id, else for a USB function
- * one of the same vendor and product plugged in elsewhere; -1 none.
+ * The output chosen among the n gathered: the one of its id, else for a
+ * USB function one of the same vendor and product plugged in elsewhere;
+ * -1 none ("auto" too).
  */
-LOCAL INT chosen_of( CONST SDOut *o, INT n )
+LOCAL INT chosen_of( INT n )
 {
-	INT	k, like = -1, i;
+	CONST UB	*sel = idb(&sel_id);
+	INT		k, like = -1, i;
 
+	if ( same_id(sel, (CONST UB *)SND_ID_AUTO) ) {
+		return -1;
+	}
 	for ( k = 0; k < n; k++ ) {
-		if ( same_id(o[k].id, sel_id) ) {
+		CONST SDOutV	*o = out_at(k);
+
+		if ( same_id(o->id, sel) ) {
 			return k;
 		}
-		for ( i = 0; o[k].id[i] != 0 && o[k].id[i] == sel_id[i] && o[k].id[i] != '@'; i++ ) {
+		for ( i = 0; o->id[i] != 0 && o->id[i] == sel[i] && o->id[i] != '@'; i++ ) {
 			;
 		}
-		if ( like < 0 && o[k].kind == SND_BE_USB && o[k].id[i] == '@' && sel_id[i] == '@' ) {
+		if ( like < 0 && o->kind == SND_BE_USB && o->id[i] == '@' && sel[i] == '@' ) {
 			like = k;
 		}
 	}
@@ -497,32 +710,30 @@ LOCAL INT chosen_of( CONST SDOut *o, INT n )
 /*
  * The hardware to play on, and its output into id: the one chosen when
  * it is there and can sound, else the first of all that can. NULL when
- * none can.
+ * none can, or there is no memory to tell.
  */
-LOCAL CONST SNDHW *pick( UB *id )
+LOCAL CONST SNDHW *pick( IDBUF *id )
 {
-	SDOut		*o;
-	INT		n = all_outputs(), k;
+	INT	n = all_outputs(), k;
 
 	if ( n <= 0 ) {
 		return NULL;
 	}
-	o = out_all;
-
-	k = same_id(sel_id, (CONST UB *)SND_ID_AUTO) ? -1 : chosen_of(o, n);
-	if ( k < 0 || (o[k].flags & SND_OF_NOSOUND) != 0 ) {
-		for ( k = 0; k < n && (o[k].flags & SND_OF_NOSOUND) != 0; k++ ) {
+	k = chosen_of(n);
+	if ( k < 0 || ( out_at(k)->flags & SND_OF_NOSOUND ) != 0 ) {
+		for ( k = 0; k < n && ( out_at(k)->flags & SND_OF_NOSOUND ) != 0; k++ ) {
 			;
 		}
 	}
 	if ( k >= n ) {
 		return NULL;
 	}
-	if ( id != NULL ) {
-		id_copy(id, o[k].id);
+	if ( id != NULL && idb_set(id, out_at(k)->id) < E_OK ) {
+		tm_printf((UB *)"TessronOS: snd: no memory for the id of the output: nothing plays\n");
+		return NULL;
 	}
 
-	return out_hw[k];
+	return outl.hw[k];
 }
 
 LOCAL CONST SNDHW *hw_play( void )
@@ -602,7 +813,7 @@ LOCAL void follow( void )
 		 && ( !lingering || (INT)(knl_usb_ms() - idle_since) >= (INT)play_hw->tail_ms ) ) {
 		play_hw->play_stop();
 		play_hw = NULL;
-		play_id[0] = 0;
+		idb_clear(&play_id);
 		lingering = FALSE;
 	}
 	if ( rec_hw != NULL && rec_ch == NULL ) {
@@ -1040,29 +1251,55 @@ LOCAL BOOL prog_same( CONST UB *a, CONST UB *b )
 	return ( i == 16 );
 }
 
-/* A program object's name, cut at a whole letter */
+/* A program object's name, whole (Kfree it); NULL when it has none */
+LOCAL UB *prog_name_dup( CONST UB *prog, SZ *p_len )
+{
+	TS_UUID	u;
+	UB	*nm;
+
+	knl_memcpy(&u, prog, 16);
+	nm = knl_ob_name(&u, p_len, NULL);
+	if ( nm != NULL && *p_len == 0 ) {
+		Kfree(nm);
+		nm = NULL;
+	}
+	return nm;
+}
+
+/* The same cut at a whole letter for the fixed form */
 LOCAL BOOL prog_name( CONST UB *prog, UB *name )
 {
-	T_OBREF	*r = (T_OBREF *)Kmalloc(sizeof(T_OBREF));
-	TS_UUID	u;
-	INT	n = 0;
+	SZ	nl = 0, n;
+	UB	*nm = prog_name_dup(prog, &nl);
 
-	if ( r == NULL ) {
+	if ( nm == NULL ) {
 		return FALSE;
 	}
-	knl_memcpy(&u, prog, 16);
-	if ( ob_ref_obj(&u, r) >= E_OK ) {
-		while ( n < SND_NAME_MAX - 1 && n < OB_NAME_MAX && r->name[n] != 0 ) {
-			name[n] = r->name[n];
-			n++;
-		}
-		while ( n > 0 && n < OB_NAME_MAX && r->name[n] != 0 && ( r->name[n] & 0xC0 ) == 0x80 ) {
-			n--;
-		}
-		name[n] = 0;
-	}
-	Kfree(r);
+	n = knl_utf8_fit(nm, nl, SND_NAME_MAX - 1);
+	knl_memcpy(name, nm, n);
+	name[n] = 0;
+	Kfree(nm);
 	return ( n > 0 );
+}
+
+/* What a program of the mixer is called, whole (Kfree it) */
+LOCAL UB *mix_name_dup( CONST SDMixApp *a, SZ *p_len )
+{
+	UB	*nm = NULL;
+
+	if ( a->pid > 0 ) {
+		nm = knl_prc_name_dup(a->pid, p_len);
+	} else if ( !prog_none(a->prog) ) {
+		nm = prog_name_dup(a->prog, p_len);
+	}
+	if ( nm == NULL ) {
+		CONST char	*sys = "システムの音";
+
+		*p_len = (SZ)knl_strlen(sys);
+		nm = (UB *)Kmalloc(*p_len + 1);
+		if ( nm != NULL ) knl_memcpy(nm, sys, *p_len + 1);
+	}
+	return nm;
 }
 
 /* The process a channel's program is known by when it has no object: 0 the kernel's own */
@@ -1443,11 +1680,18 @@ LOCAL ER start_rec( CHAN *c )
 	return E_OK;
 }
 
+/* What pick() found becomes what the stream plays on: the rooms exchanged, so that nothing is taken */
+LOCAL void play_id_take( void )
+{
+	IDBUF	b = play_id;
+
+	play_id = pick_id;
+	pick_id = b;
+}
+
 LOCAL ER start_play( CHAN *c, INT how )
 {
 	ER	er;
-
-	UB	id[SND_ID_MAX];
 
 	if ( play_hw == NULL && hw_play() == NULL ) {
 		return E_NOSPT;
@@ -1471,13 +1715,13 @@ LOCAL ER start_play( CHAN *c, INT how )
 	c->ctl = how;
 	mix_look();				/* a program come, or playing again */
 	if ( play_hw == NULL ) {
-		CONST SNDHW	*hw = pick(id);
+		CONST SNDHW	*hw = pick(&pick_id);
 		UW		rate = 0;
 
 		if ( hw != NULL ) {
 			lead_start(hw);		/* before the start: a backend fills its ring as it starts */
 		}
-		er = ( hw != NULL ) ? hw->play_start(id, &rate, &play_channels) : E_NOSPT;
+		er = ( hw != NULL ) ? hw->play_start(idb(&pick_id), &rate, &play_channels) : E_NOSPT;
 		if ( er < E_OK ) {
 			leading = FALSE;
 			c->ctl = PCM_STOP;
@@ -1486,7 +1730,7 @@ LOCAL ER start_play( CHAN *c, INT how )
 		}
 		play_hw = hw;
 		mix_rate = rate;
-		id_copy(play_id, id);
+		play_id_take();
 		look_ms = knl_usb_ms();
 		/* the manager's task may be asleep for long: it is to serve the stream from now on */
 		knl_usb_kick();
@@ -1503,30 +1747,33 @@ LOCAL ER start_play( CHAN *c, INT how )
 LOCAL BOOL move_stream( CONST SNDHW *old )
 {
 	CONST SNDHW	*hw;
-	UB		id[SND_ID_MAX], was[SND_ID_MAX];
+	IDBUF		b;
 	UW		rate = 0;
 	INT		i;
 	ER		er = E_NOSPT;
 
-	id_copy(was, play_id);
+	/* what played kept for the console in was_id, and play_id emptied */
+	b = was_id;
+	was_id = play_id;
+	play_id = b;
+	idb_clear(&play_id);
 	if ( old != NULL ) {
 		old->play_stop();
 	}
 	play_hw = NULL;
-	play_id[0] = 0;
-	hw = pick(id);
+	hw = pick(&pick_id);
 	if ( hw != NULL ) {
 		lead_start(hw);
-		er = hw->play_start(id, &rate, &play_channels);
+		er = hw->play_start(idb(&pick_id), &rate, &play_channels);
 	}
 	nmove++;
 	tm_printf((UB *)"TessronOS: snd: the stream moves from %s to %s (%d)\n",
-		  ( was[0] != 0 ) ? (CONST char *)was : "nothing",
-		  ( hw != NULL ) ? (CONST char *)id : "nothing", (INT)er);
+		  ( idb(&was_id)[0] != 0 ) ? (CONST char *)idb(&was_id) : "nothing",
+		  ( hw != NULL ) ? (CONST char *)idb(&pick_id) : "nothing", (INT)er);
 	if ( er >= E_OK ) {
 		play_hw = hw;
 		mix_rate = rate;
-		id_copy(play_id, id);
+		play_id_take();
 		knl_usb_kick();
 		return TRUE;
 	}
@@ -1544,13 +1791,11 @@ LOCAL BOOL move_stream( CONST SNDHW *old )
 /* While the stream plays: the output the choice gives now, when that is another */
 LOCAL void choose_again( void )
 {
-	UB	id[SND_ID_MAX];
-
 	if ( play_hw == NULL ) {
 		return;
 	}
 	look_ms = knl_usb_ms();
-	if ( pick(id) != NULL && !same_id(id, play_id) ) {
+	if ( pick(&pick_id) != NULL && !same_id(idb(&pick_id), idb(&play_id)) ) {
 		(void)move_stream(play_hw);
 	}
 }
@@ -1562,36 +1807,35 @@ LOCAL void choose_again( void )
 LOCAL void keep_start( void )
 {
 	CONST SNDHW	*hw;
-	UB		id[SND_ID_MAX];
 	UW		rate = 0;
 
 	if ( !keep_on || play_hw != NULL ) {
 		return;
 	}
-	hw = pick(id);
+	hw = pick(&pick_id);
 	if ( hw == NULL ) {
 		return;
 	}
 	lead_start(hw);
-	if ( hw->play_start(id, &rate, &play_channels) < E_OK ) {
+	if ( hw->play_start(idb(&pick_id), &rate, &play_channels) < E_OK ) {
 		leading = FALSE;
 		return;
 	}
 	play_hw = hw;
 	mix_rate = rate;
-	id_copy(play_id, id);
+	play_id_take();
 	lingering = TRUE;
 	idle_since = knl_usb_ms();
 	look_ms = idle_since;
 	knl_usb_kick();
 }
 
-/* An id of a form an output has */
+/* An id of a form an output has, of any length */
 LOCAL BOOL id_ok( CONST UB *id )
 {
 	INT	n = (INT)knl_strlen((CONST char *)id);
 
-	if ( n <= 0 || n >= SND_ID_MAX ) {
+	if ( n <= 0 ) {
 		return FALSE;
 	}
 
@@ -1612,13 +1856,16 @@ EXPORT ER knl_snd_select( CONST UB *id )
 		return E_PAR;
 	}
 	if ( !snd_ready ) {
-		id_copy(sel_id, id);
-		return E_OK;
+		return idb_set(&sel_id, id);
 	}
 	lock();
-	if ( !same_id(sel_id, id) ) {
-		id_copy(sel_id, id);
-		tm_printf((UB *)"TessronOS: snd: output %s chosen\n", (CONST char *)sel_id);
+	if ( !same_id(idb(&sel_id), id) ) {
+		if ( idb_set(&sel_id, id) < E_OK ) {
+			unlock();
+			tm_printf((UB *)"TessronOS: snd: no memory for the id of the output chosen\n");
+			return E_NOMEM;
+		}
+		tm_printf((UB *)"TessronOS: snd: output %s chosen\n", (CONST char *)idb(&sel_id));
 	}
 	choose_again();
 	keep_start();
@@ -1653,39 +1900,142 @@ EXPORT BOOL knl_snd_keeping( void )
 }
 
 /*
+ * The flags of the k-th output gathered (-1: "auto") as the answers have
+ * them, c the one chosen (chosen_of): what is chosen and what plays marked
+ */
+LOCAL UW out_flags( INT k, INT c )
+{
+	UW	f;
+
+	if ( k < 0 ) {
+		return same_id(idb(&sel_id), (CONST UB *)SND_ID_AUTO) ? SND_OF_CHOSEN : 0;
+	}
+	f = out_at(k)->flags;
+	if ( k == c ) {
+		f |= SND_OF_CHOSEN;
+	}
+	if ( play_hw != NULL && same_id(out_at(k)->id, idb(&play_id)) ) {
+		f |= SND_OF_PLAYING;
+	}
+	return f;
+}
+
+/*
  * The outputs with "auto" first, and what is chosen and plays marked,
- * with lock held: up to max of them into o, and how many there are.
+ * with lock held, in the fixed form: up to max of them into o, and how
+ * many there are (0 when they cannot be gathered). An id or a name that
+ * does not fit is cut and SND_OF_CUT set.
  */
 LOCAL INT outputs_of( SDOut *o, INT max )
 {
-	SDOut		*a;
-	INT		n, k, m = 0, c;
+	INT	n, k, m = 0, c;
 
 	n = all_outputs();
 	if ( n < 0 ) {
-		n = 0;
+		return 0;
 	}
 	if ( max <= 0 ) {
 		return n + 1;
 	}
-	a = out_all;
-	c = same_id(sel_id, (CONST UB *)SND_ID_AUTO) ? -1 : chosen_of(a, n);
-	knl_snd_out_set(&o[m], (CONST UB *)SND_ID_AUTO, (CONST UB *)"", SND_BE_NONE,
-			same_id(sel_id, (CONST UB *)SND_ID_AUTO) ? SND_OF_CHOSEN : 0);
+	c = chosen_of(n);
+	knl_snd_out_set(&o[m], (CONST UB *)SND_ID_AUTO, (CONST UB *)"", SND_BE_NONE, out_flags(-1, c));
 	m++;
 	for ( k = 0; k < n && m < max; k++, m++ ) {
-		o[m] = a[k];
-		if ( k == c ) {
-			o[m].flags |= SND_OF_CHOSEN;
-		}
-		if ( play_hw != NULL && same_id(a[k].id, play_id) ) {
-			o[m].flags |= SND_OF_PLAYING;
+		SDOutV	*a = out_at(k);
+		UW	f = out_flags(k, c);
+
+		knl_snd_out_set(&o[m], a->id, SND_OUTV_NAME(a), a->kind, f);
+		if ( ( f & SND_OF_PLAYING ) != 0 ) {
 			o[m].rate = mix_rate;
 			o[m].channels = (UW)play_channels;
 		}
 	}
 
 	return n + 1;
+}
+
+/* len bytes of src at off of an answer whose room is room bytes: as much of them as falls in it */
+LOCAL void clip_put( UB *dst, SZ room, SZ off, CONST void *src, SZ len )
+{
+	if ( dst == NULL || off >= room ) {
+		return;
+	}
+	if ( off + len > room ) {
+		len = room - off;
+	}
+	knl_memcpy(dst + off, src, len);
+}
+
+/*
+ * The answer of DN_SDOUTV, with lock held: "auto" first, then every
+ * output gathered, what is chosen and plays marked, their ids and names
+ * whole. As much of it as fits into dst (room bytes; NULL, 0 none), and
+ * the bytes of the whole; E_NOMEM when the outputs cannot be gathered.
+ */
+LOCAL SZ outs_answer( UB *dst, SZ room )
+{
+	SDOuts	h;
+	SZ	off, size;
+	INT	n = all_outputs(), k, c;
+	union {
+		SDOutV	e;
+		UB	b[SND_OUTV_SIZE(4, 0)];
+	} au;
+
+	if ( n < 0 ) {
+		return E_NOMEM;
+	}
+	c = chosen_of(n);
+	size = (SZ)sizeof(SDOuts) + SND_OUTV_SIZE(4, 0) + outl.len;
+	h.size = (UINT)size;
+	h.n = (UINT)( n + 1 );
+	clip_put(dst, room, 0, &h, sizeof(h));
+	off = sizeof(h);
+	outv_put(&au.e, SND_OUTV_SIZE(4, 0), (CONST UB *)SND_ID_AUTO, 4, NULL, 0, SND_BE_NONE, out_flags(-1, c));
+	clip_put(dst, room, off, au.b, SND_OUTV_SIZE(4, 0));
+	off += SND_OUTV_SIZE(4, 0);
+	for ( k = 0; k < n; k++ ) {
+		SDOutV	*a = out_at(k), e = *a;
+
+		/* the head as the answer has it, then the id and the name as gathered */
+		e.flags = out_flags(k, c);
+		if ( ( e.flags & SND_OF_PLAYING ) != 0 ) {
+			e.rate = mix_rate;
+			e.channels = (UINT)play_channels;
+		}
+		clip_put(dst, room, off, &e, sizeof(e));
+		clip_put(dst, room, off + (SZ)sizeof(e), a->id, (SZ)a->size - (SZ)sizeof(e));
+		off += a->size;
+	}
+
+	return size;
+}
+
+/*
+ * The answer of DN_SDOUTSELV, with lock held: the output chosen and the
+ * one playing, whole. As much of it as fits into dst (room bytes), and
+ * the bytes of the whole.
+ */
+LOCAL SZ sel_answer( UB *dst, SZ room )
+{
+	SDOutSelV	h;
+	CONST UB	*sel = idb(&sel_id), *now = ( play_hw != NULL ) ? idb(&play_id) : (CONST UB *)"";
+	SZ		sl = (SZ)knl_strlen((CONST char *)sel), nl = (SZ)knl_strlen((CONST char *)now);
+	SZ		size = ( (SZ)sizeof(SDOutSelV) + sl + 1 + nl + 1 + 3 ) & ~(SZ)3;
+	UB		z[4] = { 0, 0, 0, 0 };
+	SZ		off;
+
+	h.size = (UINT)size;
+	h.now = (UINT)( sizeof(SDOutSelV) + sl + 1 );
+	clip_put(dst, room, 0, &h, sizeof(h));
+	off = sizeof(h);
+	clip_put(dst, room, off, sel, sl + 1);
+	off += sl + 1;
+	clip_put(dst, room, off, now, nl + 1);
+	off += nl + 1;
+	clip_put(dst, room, off, z, size - off);
+
+	return size;
 }
 
 /* ---------------------------------------------------------------- the microphone */
@@ -2133,30 +2483,39 @@ LOCAL void mix_look( void )
  * -- a device come or gone -- and, while a stream runs, every few
  * milliseconds, when they are compared every LOOK_MS.
  */
-#define SIG_OUTS	16
-
 LOCAL T_OBEDGE	out_edge;
 LOCAL UD	out_sig = 0;
 LOCAL UW	sig_ms = 0;
-LOCAL SDOut	sig_o[SIG_OUTS];
 
 EXPORT void knl_snd_arm( void )
 {
 	knl_obedge_arm(&out_edge);
 }
 
-/* The outputs as one number, with lock held */
+LOCAL UD sig_add( UD h, CONST UB *id, UW flags )
+{
+	INT	i;
+
+	for ( i = 0; id[i] != 0; i++ ) {
+		h = ( h ^ id[i] ) * 0x100000001B3ULL;
+	}
+	return ( h ^ ( flags & ( SND_OF_CHOSEN | SND_OF_PLAYING ) ) ) * 0x100000001B3ULL;
+}
+
+/* The outputs as one number, every one of them, with lock held; the last one when they cannot be gathered */
 LOCAL UD outputs_sig( void )
 {
 	UD	h = 0xCBF29CE484222325ULL;
-	INT	n = outputs_of(sig_o, SIG_OUTS), k, i;
+	INT	n = all_outputs(), k, c;
 
-	h = ( h ^ (UD)n ) * 0x100000001B3ULL;
-	for ( k = 0; k < n && k < SIG_OUTS; k++ ) {
-		for ( i = 0; i < SND_ID_MAX && sig_o[k].id[i] != 0; i++ ) {
-			h = ( h ^ sig_o[k].id[i] ) * 0x100000001B3ULL;
-		}
-		h = ( h ^ ( sig_o[k].flags & ( SND_OF_CHOSEN | SND_OF_PLAYING ) ) ) * 0x100000001B3ULL;
+	if ( n < 0 ) {
+		return out_sig;
+	}
+	c = chosen_of(n);
+	h = ( h ^ (UD)( n + 1 ) ) * 0x100000001B3ULL;
+	h = sig_add(h, (CONST UB *)SND_ID_AUTO, out_flags(-1, c));
+	for ( k = 0; k < n; k++ ) {
+		h = sig_add(h, out_at(k)->id, out_flags(k, c));
 	}
 	return h;
 }
@@ -2184,6 +2543,56 @@ EXPORT INT knl_snd_outputs( SDOut *o, INT max )
 
 	return n;
 }
+
+EXPORT SZ knl_snd_outputs_v( SDOuts *l, SZ size )
+{
+	SZ	n;
+
+	lock();
+	n = outs_answer((UB *)l, size);
+	unlock();
+
+	return n;
+}
+
+EXPORT SZ knl_snd_sel_v( SDOutSelV *s, SZ size )
+{
+	SZ	n;
+
+	lock();
+	n = sel_answer((UB *)s, size);
+	unlock();
+
+	return n;
+}
+
+#ifdef USE_KTEST
+EXPORT ER knl_snd_test_outs( INT n, INT idlen, INT namelen )
+{
+	if ( n < 0 || idlen < 0 || namelen < 0 ) {
+		return E_PAR;
+	}
+	lock();
+	test_nout = n;
+	test_idlen = idlen;
+	test_namelen = namelen;
+	outputs_look();
+	unlock();
+
+	return E_OK;
+}
+
+EXPORT UD knl_snd_test_sig( void )
+{
+	UD	s;
+
+	lock();
+	s = outputs_sig();
+	unlock();
+
+	return s;
+}
+#endif
 
 /*
  * Every few milliseconds from the USB manager's task, with its lock
@@ -2435,13 +2844,13 @@ LOCAL ER proc_read( CHAN *c, T_DEVREQ *req )
 		return E_OK;
 	}
 	case DN_SDOUTS: {
-		/* every output: as large as the reply needs (a read of size 0 is told how large) */
+		/* every output, the fixed form: as large as the reply needs (a read of size 0 is told how large) */
 		SDOut	*o;
 		INT	n;
 
 		lock();
 		n = outputs_of(NULL, 0);
-		o = (SDOut *)Kmalloc(sizeof(SDOut) * (SZ)n);
+		o = ( n > 0 ) ? (SDOut *)Kmalloc(sizeof(SDOut) * (SZ)n) : NULL;
 		if ( o != NULL ) {
 			n = outputs_of(o, n);
 		}
@@ -2451,6 +2860,36 @@ LOCAL ER proc_read( CHAN *c, T_DEVREQ *req )
 		}
 		reply(req, o, n * (INT)sizeof(SDOut));
 		Kfree(o);
+		return E_OK;
+	}
+	case DN_SDOUTV:
+	case DN_SDOUTSELV: {
+		/* the same whole: gathered and made under one hold of the lock, so that the size is the answer's */
+		UB	*b = NULL;
+		SZ	n, cap = 0;
+
+		lock();
+		for ( ;; ) {
+			n = ( req->start == DN_SDOUTV ) ? outs_answer(b, cap) : sel_answer(b, cap);
+			if ( n < 0 || n <= cap ) {
+				break;
+			}
+			/* more than the room: made again in room for all of it */
+			if ( b != NULL ) Kfree(b);
+			cap = n;
+			b = (UB *)Kmalloc(cap);
+			if ( b == NULL ) {
+				n = E_NOMEM;
+				break;
+			}
+		}
+		unlock();
+		if ( n < 0 ) {
+			if ( b != NULL ) Kfree(b);
+			return (ER)n;
+		}
+		reply(req, b, (INT)n);
+		Kfree(b);
 		return E_OK;
 	}
 	case DN_SDMONITOR: {
@@ -2491,6 +2930,78 @@ LOCAL ER proc_read( CHAN *c, T_DEVREQ *req )
 		Kfree(m);
 		return E_OK;
 	}
+	case DN_SDMIXERV: {
+		/* the same with every name whole: the programs read under the lock, their names after it */
+		SDMix		*m;
+		SDMixes		*h;
+		SDMixAppV	*e;
+		UB		**names;
+		SZ		*lens, total;
+		INT		k;
+		ER		er = E_OK;
+
+		lock();
+		knl_obedge_arm(&mix_edge);
+		m = (SDMix *)Kmalloc(SND_MIX_SIZE(nch));
+		if ( m != NULL ) {
+			(void)mix_of(m, nch);
+		}
+		unlock();
+		if ( m == NULL ) {
+			return E_NOMEM;
+		}
+		names = (UB **)Kcalloc(( m->napp > 0 ) ? m->napp : 1, sizeof(UB *));
+		lens = (SZ *)Kcalloc(( m->napp > 0 ) ? m->napp : 1, sizeof(SZ));
+		total = (SZ)sizeof(SDMixes);
+		for ( k = 0; names != NULL && lens != NULL && k < (INT)m->napp; k++ ) {
+			names[k] = mix_name_dup(&m->app[k], &lens[k]);
+			if ( names[k] == NULL ) {
+				er = E_NOMEM;
+				break;
+			}
+			total += SND_MIXV_SIZE(lens[k]);
+		}
+		if ( names == NULL || lens == NULL ) {
+			er = E_NOMEM;
+		}
+		h = ( er >= E_OK ) ? (SDMixes *)Kcalloc(1, total) : NULL;
+		if ( er >= E_OK && h == NULL ) {
+			er = E_NOMEM;
+		}
+		if ( er >= E_OK ) {
+			h->size = (UINT)total;
+			h->lv = m->lv;
+			h->rv = m->rv;
+			h->mute = m->mute;
+			h->level_l = m->level_l;
+			h->level_r = m->level_r;
+			h->napp = m->napp;
+			e = SND_MIXES_FIRST(h);
+			for ( k = 0; k < (INT)m->napp; k++ ) {
+				CONST SDMixApp	*a = &m->app[k];
+
+				e->size = (UINT)SND_MIXV_SIZE(lens[k]);
+				knl_memcpy(e->prog, a->prog, sizeof(e->prog));
+				e->pid = a->pid;
+				e->vol = a->vol;
+				e->mute = a->mute;
+				e->channels = a->channels;
+				e->playing = a->playing;
+				e->level = a->level;
+				knl_memcpy(e->name, names[k], lens[k] + 1);
+				e = SND_MIXV_NEXT(e);
+			}
+			reply(req, h, (INT)total);
+			Kfree(h);
+		}
+		for ( k = 0; names != NULL && k < (INT)m->napp; k++ ) {
+			if ( names[k] != NULL ) Kfree(names[k]);
+		}
+		if ( names != NULL ) Kfree(names);
+		if ( lens != NULL ) Kfree(lens);
+		Kfree(m);
+		return er;
+	}
 	case DN_SDMIXIN: {
 		SDMixIn	mi;
 
@@ -2502,15 +3013,20 @@ LOCAL ER proc_read( CHAN *c, T_DEVREQ *req )
 		return E_OK;
 	}
 	case DN_SDOUTSEL: {
+		/* the fixed form: E_LIMIT rather than an id cut, which would name another output */
 		SDOutSel	s;
+		BOOL		whole;
 
 		knl_memset(&s, 0, sizeof(s));
 		lock();
-		id_copy(s.id, sel_id);
+		whole = cut_copy(s.id, SND_ID_MAX, idb(&sel_id));
 		if ( play_hw != NULL ) {
-			id_copy(s.now, play_id);
+			whole = cut_copy(s.now, SND_ID_MAX, idb(&play_id)) && whole;
 		}
 		unlock();
+		if ( !whole ) {
+			return E_LIMIT;
+		}
 		reply(req, &s, sizeof(s));
 		return E_OK;
 	}
@@ -2732,16 +3248,24 @@ LOCAL ER proc_write( CHAN *c, T_DEVREQ *req )
 	}
 	case DN_SDMIXIN:
 		return E_RONLY;			/* set through DN_SDMIXSET, SND_MIX_IN */
-	case DN_SDOUTSEL: {
-		UB	id[SND_ID_MAX];
+	case DN_SDOUTSEL:
+	case DN_SDOUTSELV: {
+		UB	*id;
 		INT	i;
 
-		/* the id alone, or a whole SDOutSel */
-		for ( i = 0; i < (INT)req->size && i < SND_ID_MAX - 1 && ((UB *)req->buf)[i] != 0; i++ ) {
-			id[i] = ((UB *)req->buf)[i];
+		/* the id alone, of any length, or a whole SDOutSel: up to its NUL */
+		for ( i = 0; i < (INT)req->size && ((UB *)req->buf)[i] != 0; i++ ) {
+			;
 		}
+		id = (UB *)Kmalloc((SZ)i + 1);
+		if ( id == NULL ) {
+			return E_NOMEM;
+		}
+		knl_memcpy(id, req->buf, (SZ)i);
 		id[i] = 0;
-		return knl_snd_select(id);
+		er = knl_snd_select(id);
+		Kfree(id);
+		return er;
 	}
 	default:
 		if ( is_level((INT)req->start) ) {

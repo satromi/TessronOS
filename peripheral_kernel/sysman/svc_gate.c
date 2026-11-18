@@ -687,6 +687,9 @@ LOCAL const SBXCALL sbx_calls[] = {
 	{ TSN_OB_REF_VID,	TS_SBX_OBJ },
 	{ TSN_OB_DUP_OBJ,	TS_SBX_OBJ },
 	{ TSN_OB_CHK_LST,	TS_SBX_OBJ },
+	{ TSN_OB_REF_NAM,	TS_SBX_OBJ },
+	{ TSN_OB_REF_OBJ2,	TS_SBX_OBJ },
+	{ TSN_OB_CHK_LABEL,	TS_SBX_OBJ },
 	/* files and folders by path */
 	{ TSN_FS_OPEN,		TS_SBX_OBJ },
 	{ TSN_FS_STAT,		TS_SBX_OBJ },

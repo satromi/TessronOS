@@ -186,8 +186,8 @@ LOCAL ER make_box( TS_UUID *box )
 LOCAL void test_text( void )
 {
 	TS_UUID	u;
-	UB	v[64], *rec;
-	SZ	size = 0;
+	UB	v[64], *rec, *xn = NULL;
+	SZ	size = 0, xl = 0;
 	OUT	o;
 
 	KT_ASSERT_ER(take("memo.TXT", (CONST UB *)text, s_len(text), NULL, &u), E_OK);
@@ -211,8 +211,9 @@ LOCAL void test_text( void )
 	if ( rec != NULL ) Kfree(rec);
 
 	knl_memset(&o, 0, sizeof(o));
-	KT_ASSERT_ER(xf_export(&u, out_write, &o, v, sizeof(v)), E_OK);
-	KT_ASSERT(same_str(v, "memo.TXT"));
+	KT_ASSERT_ER(xf_export(&u, out_write, &o, &xn, &xl), E_OK);
+	KT_ASSERT(xn != NULL && xl == 8 && same_str(xn, "memo.TXT"));
+	if ( xn != NULL ) Kfree(xn);
 	KT_ASSERT_EQ(o.n, s_len(text));
 	KT_ASSERT(same_bytes(o.b, (CONST UB *)text, s_len(text)));
 	(void)ob_del_obj(&u);
@@ -222,8 +223,8 @@ LOCAL void test_xmltad( void )
 {
 	TS_UUID	u;
 	T_OBREF	r;
-	UB	v[64], *rec;
-	SZ	size = 0;
+	UB	v[64], *rec, *xn = NULL;
+	SZ	size = 0, xl = 0;
 	OUT	o;
 
 	KT_ASSERT_ER(take("doc.xtad", (CONST UB *)xtad, s_len(xtad), NULL, &u), E_OK);
@@ -236,8 +237,9 @@ LOCAL void test_xmltad( void )
 	KT_ASSERT(file_member(&u, "mediatype", v, sizeof(v)) > 0 && same_str(v, "application/x-xmltad"));
 
 	knl_memset(&o, 0, sizeof(o));
-	KT_ASSERT_ER(xf_export(&u, out_write, &o, v, sizeof(v)), E_OK);
-	KT_ASSERT(same_str(v, "doc.xtad"));
+	KT_ASSERT_ER(xf_export(&u, out_write, &o, &xn, &xl), E_OK);
+	KT_ASSERT(xn != NULL && same_str(xn, "doc.xtad"));
+	if ( xn != NULL ) Kfree(xn);
 	KT_ASSERT(o.n == s_len(xtad) && same_bytes(o.b, (CONST UB *)xtad, o.n));
 	(void)ob_del_obj(&u);
 }
@@ -260,7 +262,7 @@ LOCAL void test_exec( void )
 	KT_ASSERT(meta == NULL);
 	if ( meta != NULL ) Kfree(meta);
 	knl_memset(&o, 0, sizeof(o));
-	KT_ASSERT_ER(xf_export(&u, out_write, &o, NULL, 0), E_OK);
+	KT_ASSERT_ER(xf_export(&u, out_write, &o, NULL, NULL), E_OK);
 	KT_ASSERT(o.n == (INT)sizeof(elf) && same_bytes(o.b, elf, o.n));
 	(void)ob_del_obj(&u);
 }
@@ -302,6 +304,65 @@ LOCAL void test_box( void )
 	(void)ob_del_obj(&box);
 }
 
+/*
+ * A name longer than the 64 bytes of T_OBREF.name, taken by a rename
+ * whole: 300 bytes of Japanese after one ASCII letter, so that any cut at
+ * a fixed count of bytes would fall inside a letter.
+ */
+LOCAL void test_long_rename( void )
+{
+	CONST char	*k = "名";			/* three bytes */
+	TS_UUID		box, u, got_u;
+	T_JSON		f, nv;
+	UB		*fn, *own, *meta, *got;
+	SZ		len = 0;
+	INT		i, n = 0, stem;
+
+	fn = (UB *)Kmalloc(400);
+	KT_ASSERT(fn != NULL);
+	if ( fn == NULL ) return;
+	fn[n++] = 'a';
+	for ( i = 0; i < 98; i++ ) {
+		fn[n++] = (UB)k[0]; fn[n++] = (UB)k[1]; fn[n++] = (UB)k[2];
+	}
+	fn[n++] = 'b';
+	stem = n;					/* 296 bytes */
+	fn[n++] = '.'; fn[n++] = 't'; fn[n++] = 'x'; fn[n++] = 't';
+	fn[n] = 0;
+	KT_ASSERT_EQ(n, 300);
+
+	KT_ASSERT_ER(make_box(&box), E_OK);
+	KT_ASSERT_ER(take("short.txt", (CONST UB *)text, s_len(text), &box, &u), E_OK);
+	KT_ASSERT_ER(xf_rename(&u, fn), E_OK);
+
+	/* the object's own name: the stem, every byte of it */
+	own = knl_ob_name(&u, &len, NULL);
+	KT_ASSERT(own != NULL && len == stem && same_bytes(own, fn, stem) && own[stem] == 0);
+	if ( own != NULL ) Kfree(own);
+
+	/* the file's name in the metadata: the whole 300 bytes, nothing cut */
+	meta = file_of(&u, &f);
+	got = NULL;
+	if ( meta != NULL && js_get(&f, "name", &nv) >= E_OK ) {
+		got = (UB *)Kmalloc((SZ)nv.len + 1);
+		if ( got != NULL && js_str(&nv, got, nv.len + 1) != n ) {
+			Kfree(got);
+			got = NULL;
+		}
+	}
+	KT_ASSERT(got != NULL && same_bytes(got, fn, n) && got[n] == 0);
+	if ( got != NULL ) Kfree(got);
+	if ( meta != NULL ) Kfree(meta);
+
+	/* the box finds it by the whole name */
+	KT_ASSERT_ER(xf_find(&box, fn, &got_u), E_OK);
+	KT_ASSERT_EQ(ts_uuid_cmp(&got_u, &u), 0);
+	Kfree(fn);
+	(void)om_obj_link_del(&box, &u);
+	(void)ob_del_obj(&u);
+	(void)ob_del_obj(&box);
+}
+
 LOCAL ER put_file( CONST char *path, CONST char *s, INT len )
 {
 	INT	fd = fs_open(path, O_WRONLY | O_CREAT | O_TRUNC), n;
@@ -337,7 +398,7 @@ LOCAL void test_tadjs( void )
 	KT_ASSERT_ER(xf_import_tadjs("/boot/XFTJS", &u, "fat", NULL, NULL), E_OK);
 	KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);	/* under the UUID it came with */
 	KT_ASSERT_EQ(r.nrec, 2);
-	KT_ASSERT(same_str(r.name, "持込み"));
+	KT_ASSERT(kt_name_is(&u, "持込み"));
 	rec = om_obj_record(&u, 1, &size);
 	KT_ASSERT(rec != NULL && (INT)size == s_len(r1) && same_bytes(rec, (CONST UB *)r1, (INT)size));
 	if ( rec != NULL ) Kfree(rec);
@@ -366,11 +427,87 @@ LOCAL void test_tadjs( void )
 	(void)ob_del_obj(&u);
 }
 
+/*
+ * A file of a name longer than the name fields once were (256 bytes)
+ * taken in from a source of a long name: the source in "tessronos.file"
+ * whole, and given out under the whole file name (xf_export, xf_name_dup);
+ * '"' and '\' and a tab in the name kept as they were.
+ */
+LOCAL void test_long_export( void )
+{
+	CONST char	*k = "長";			/* three bytes */
+	T_XFSRC		src;
+	MEM		m;
+	TS_UUID		u;
+	char		*fn, *srcn;
+	UB		*xn = NULL, *sv;
+	SZ		xl = 0, dl = 0;
+	T_JSON		f, sj;
+	OUT		o;
+	INT		i, n = 0, sn = 0;
+
+	fn = (char *)Kmalloc(400);
+	srcn = (char *)Kmalloc(400);
+	KT_ASSERT(fn != NULL && srcn != NULL);
+	if ( fn == NULL || srcn == NULL ) {
+		if ( fn != NULL ) Kfree(fn);
+		if ( srcn != NULL ) Kfree(srcn);
+		return;
+	}
+	for ( i = 0; i < 100; i++ ) {
+		fn[n++] = k[0]; fn[n++] = k[1]; fn[n++] = k[2];
+	}
+	fn[n++] = '"'; fn[n++] = 0x5C; fn[n++] = '\t';
+	fn[n++] = '.'; fn[n++] = 't'; fn[n++] = 'x'; fn[n++] = 't';
+	fn[n] = 0;					/* 307 bytes */
+	for ( i = 0; i < 300; i++ ) srcn[sn++] = (char)( 'a' + i % 26 );
+	srcn[sn] = 0;
+
+	m.b = (CONST UB *)text;
+	m.n = s_len(text);
+	m.at = 0;
+	m.step = 7;
+	knl_memset(&src, 0, sizeof(src));
+	src.filename = (CONST UB *)fn;
+	src.source = srcn;
+	src.mtime = 1234567;
+	src.read = mem_read;
+	src.ctx = &m;
+	KT_ASSERT_ER(xf_import(&src, NULL, &u), E_OK);
+
+	/* the source whole in "tessronos.file" */
+	sv = file_of(&u, &f);
+	KT_ASSERT(sv != NULL && js_get(&f, "source", &sj) >= E_OK);
+	if ( sv != NULL ) {
+		UB	*got = (UB *)Kmalloc((SZ)sj.len + 1);
+
+		KT_ASSERT(got != NULL && js_str(&sj, got, sj.len + 1) == sn
+			  && same_bytes(got, (CONST UB *)srcn, sn));
+		if ( got != NULL ) Kfree(got);
+		Kfree(sv);
+	}
+
+	/* given out under the whole name */
+	knl_memset(&o, 0, sizeof(o));
+	KT_ASSERT_ER(xf_export(&u, out_write, &o, &xn, &xl), E_OK);
+	KT_ASSERT(xn != NULL && xl == n && same_bytes(xn, (CONST UB *)fn, n) && xn[n] == 0);
+	if ( xn != NULL ) Kfree(xn);
+	xn = xf_name_dup(&u, &dl);
+	KT_ASSERT(xn != NULL && dl == n && same_bytes(xn, (CONST UB *)fn, n));
+	if ( xn != NULL ) Kfree(xn);
+	KT_ASSERT_EQ(o.n, s_len(text));
+	(void)ob_del_obj(&u);
+	Kfree(srcn);
+	Kfree(fn);
+}
+
 EXPORT void ktest_xf( void )
 {
+	KT_RUN(test_long_export);
 	KT_RUN(test_text);
 	KT_RUN(test_xmltad);
 	KT_RUN(test_exec);
 	KT_RUN(test_box);
+	KT_RUN(test_long_rename);
 	KT_RUN(test_tadjs);
 }

@@ -6,12 +6,14 @@
 # on the system volume raised by two, and the request DISKFIX.REQ on the
 # boot volume, as the accessory leaves them before the machine starts
 # again. The start repairs the system volume before it is attached, and
-# the desktop opens the window by itself with what came of it (where
-# ui_diskfix.steps has it): one thing found and put right, the lines
+# the desktop starts the accessory (a process) by itself, which shows in
+# its window what came of it (where ui_diskfix.steps has it), given by
+# the kernel once: one thing found and put right, the lines
 # in 障害情報 opened from the menu of the second button (障害情報 three
 # rows below 閉じる under the pointer), its 終了, and the window closed
 # with 閉じる of its menu (障害情報 under the pointer, 閉じる three rows
 # above).
+expect disk: the repair at start shown by its program
 expect dfix: boot result 1 0
 wait 600
 shot df_boot
@@ -20,15 +22,16 @@ expect dfix: menu 1
 wait 300
 shot df_boot_menu
 click 648 360
-expect desktop: chosen dfix.info
+expect dfix: chosen dfix.info
 expect dfix: info 1 page 1
 wait 400
 shot df_boot_info
-click 945 658
+click 940 661
 expect dfix: info closed 1
 click 640 300 1
 expect dfix: menu 2
 wait 300
 click 648 240
-expect desktop: chosen close
+expect dfix: chosen close
 expect dfix: closed
+absent !OACV!

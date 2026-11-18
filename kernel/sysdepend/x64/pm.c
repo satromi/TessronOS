@@ -571,7 +571,7 @@ LOCAL UD lpit_read( INT index )
 			UD	v = 0;
 
 			if ( space == 0x7f ) {
-				v = rdmsr((UW)addr);
+				(void)knl_rdmsr_safe((UW)addr, &v);	/* named by the firmware: may not be there */
 			} else if ( space == 0 ) {
 				v = in_w(DEV_BASE(addr & ~0xfffULL) + ( addr & 0xfff ));
 			}

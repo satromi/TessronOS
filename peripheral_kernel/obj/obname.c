@@ -1543,19 +1543,62 @@ EXPORT INT knl_ob_key_objs( ID pid, UINT type, UINT sub, TS_UUID *buf, INT max )
  */
 typedef struct {
 	BOOL	on;
+	BOOL	bump;			/* a change of storage: its serial moves on */
 	TS_UUID	uuid;
 	INT	recno;
 } OBCHG;
 
+/*
+ * The change serials (knl_ob_chg_serial): one number for each slot the
+ * UUID's hash picks, moved on, atomically, before and after every change
+ * of the objects of the slot, whoever is waiting for notices or not.
+ * Before, so that one who read the serial and then the object while it
+ * was being changed sees the serial move once more after; after, so that
+ * one who read it before the change began sees it differ. Objects that
+ * share a slot move one another's serial: a reader only reads again more
+ * often than it must, never misses a change, so the slots are not a
+ * bound on how many objects there are.
+ */
+#define OB_CHG_SLOTS	4096		/* a power of two */
+
+LOCAL UW	ob_chg_ser[OB_CHG_SLOTS];
+
+LOCAL UW *chg_slot( CONST TS_UUID *u )
+{
+	UD	x = u->d.hi ^ u->d.lo;
+
+	x ^= x >> 31;
+	x *= 0x9E3779B97F4A7C15ULL;
+	x ^= x >> 29;
+	return &ob_chg_ser[x & ( OB_CHG_SLOTS - 1 )];
+}
+
+LOCAL void chg_bump( CONST TS_UUID *u )
+{
+	(void)__atomic_add_fetch(chg_slot(u), 1, __ATOMIC_RELEASE);
+}
+
+EXPORT UW knl_ob_chg_serial( CONST TS_UUID *uuid )
+{
+	return ( uuid != NULL ) ? __atomic_load_n(chg_slot(uuid), __ATOMIC_ACQUIRE) : 0;
+}
+
 LOCAL void chg_take( INT hi, INT recno, OBCHG *c )
 {
-	c->on = (BOOL)( ob_nntf > 0 && ob_mgr[(*ob_hndp[hi]).mgr]->type != OB_T_CHANNEL );
+	c->bump = (BOOL)( ob_mgr[(*ob_hndp[hi]).mgr]->type != OB_T_CHANNEL );
+	c->on = (BOOL)( ob_nntf > 0 && c->bump );
 	c->uuid = (*ob_hndp[hi]).uuid;
 	c->recno = recno;
+	if ( c->bump ) {
+		chg_bump(&c->uuid);
+	}
 }
 
 LOCAL void chg_post( CONST OBCHG *c )
 {
+	if ( c->bump ) {
+		chg_bump(&c->uuid);
+	}
 	if ( c->on ) {
 		knl_ob_post(&c->uuid, c->recno, OB_E_CHANGE, NULL);
 	}
@@ -2421,8 +2464,98 @@ EXPORT ER ob_ref_obj( CONST TS_UUID *uuid, T_OBREF *pk_ref )
 	pk_ref->uuid = *uuid;
 	pk_ref->type = m->type;
 	pk_ref->sub = m->sub;
+	if ( m->ref != NULL ) {
+		ER	er = m->ref(uuid, pk_ref);
 
-	return ( m->ref != NULL ) ? m->ref(uuid, pk_ref) : E_OK;
+		if ( er < E_OK ) return er;
+	}
+	{
+		SZ	need = 0;
+
+		if ( ob_ref_nam(uuid, NULL, 0, &need) >= E_OK && need > 0 ) {
+			pk_ref->namelen = (UINT)( need - 1 );
+		}
+	}
+	return E_OK;
+}
+
+EXPORT ER knl_ob_name_put( CONST UB *s, SZ len, UB *buf, SZ size, SZ *p_asize )
+{
+	SZ	n;
+
+	if ( size < 0 || ( size > 0 && buf == NULL ) ) {
+		return E_PAR;
+	}
+	if ( s == NULL ) {
+		s = (CONST UB *)"";
+		len = 0;
+	}
+	if ( len < 0 ) {
+		for ( len = 0; s[len] != 0; len++ ) ;
+	}
+	if ( p_asize != NULL ) {
+		*p_asize = len + 1;
+	}
+	if ( size > 0 ) {
+		n = knl_utf8_fit(s, len, size - 1);
+		knl_memcpy(buf, s, n);
+		buf[n] = 0;
+	}
+	return E_OK;
+}
+
+/* The name, whole, from the object's manager; a manager without refnam gives none */
+EXPORT ER ob_ref_nam( CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize )
+{
+	CONST T_OBMGR	*m;
+
+	if ( uuid == NULL || size < 0 || ( size > 0 && buf == NULL ) ) {
+		return E_PAR;
+	}
+	m = knl_ob_mgr_of(uuid);
+	if ( m == NULL ) {
+		return E_NOEXS;
+	}
+	if ( m->refnam != NULL ) {
+		return m->refnam(uuid, buf, size, p_asize);
+	}
+	/* a manager whose objects have no names (the ends of streams, poll sets, the GPU's) */
+	if ( m->find != NULL && m->find(uuid) < E_OK ) {
+		return E_NOEXS;
+	}
+	return knl_ob_name_put(NULL, 0, buf, size, p_asize);
+}
+
+EXPORT UB *knl_ob_name( CONST TS_UUID *uuid, SZ *p_len, ER *p_er )
+{
+	UB	*b;
+	SZ	cap = 64, need = 0;
+	ER	er;
+
+	for ( ;; ) {
+		b = (UB *)Kmalloc(cap);
+		if ( b == NULL ) {
+			er = E_NOMEM;
+			break;
+		}
+		er = ob_ref_nam(uuid, b, cap, &need);
+		if ( er < E_OK || need <= cap ) {
+			break;
+		}
+		Kfree(b);		/* renamed longer meanwhile, or the first room short: as much as it takes */
+		cap = need;
+	}
+	if ( er < E_OK && b != NULL ) {
+		Kfree(b);
+		b = NULL;
+	}
+	if ( p_len != NULL ) {
+		*p_len = ( b != NULL ) ? need - 1 : 0;
+	}
+	if ( p_er != NULL ) {
+		*p_er = ( b != NULL ) ? E_OK : er;
+	}
+	return b;
 }
 
 /*
@@ -2716,17 +2849,18 @@ LOCAL BOOL lnk_name_is( CONST UB *have, CONST UB *want )
 /* Whether the object is named 'name': its object name, or the file name its metadata keeps */
 LOCAL BOOL lnk_named( CONST TS_UUID *u, CONST UB *name )
 {
-	T_OBREF	r;
-	UB	file[256], *meta = NULL;
+	UB	*file, *meta = NULL, *own;
 	INT	p, len;
 	ID	key;
 	BOOL	is = FALSE;
 
-	if ( ob_ref_obj(u, &r) < E_OK ) {
+	own = knl_ob_name(u, NULL, NULL);
+	if ( own == NULL ) {
 		return FALSE;
 	}
-	r.name[OB_NAME_MAX - 1] = 0;
-	if ( lnk_name_is(r.name, name) ) {
+	is = lnk_name_is(own, name);
+	Kfree(own);
+	if ( is ) {
 		return TRUE;
 	}
 	if ( ob_acc_obj(u, OB_OP_ATRRD) < E_OK ) {
@@ -2740,9 +2874,12 @@ LOCAL BOOL lnk_named( CONST TS_UUID *u, CONST UB *name )
 	if ( len > 0 ) {
 		p = knl_oj_path(meta, len, "tessronos", "file");
 		p = ( p >= 0 && meta[p] == '{' ) ? knl_oj_member(meta, len, p, "name") : -1;
-		if ( p >= 0 && knl_oj_str(meta, len, p, file, sizeof(file)) > 0 ) {
+		/* the file name is no longer than the metadata that holds it */
+		file = ( p >= 0 ) ? (UB *)Kmalloc((SZ)len + 1) : NULL;
+		if ( file != NULL && knl_oj_str(meta, len, p, file, len + 1) > 0 ) {
 			is = lnk_name_is(file, name);
 		}
+		if ( file != NULL ) Kfree(file);
 	}
 	if ( meta != NULL ) Kfree(meta);
 	(void)ob_cls_obj(key);
@@ -3066,6 +3203,12 @@ EXPORT ER ob_dup_obj( CONST TS_UUID *uuid, CONST UB *name, TS_UUID *p_uuid )
 	return om_store_copy(uuid, name, FALSE, p_uuid);
 }
 
+/* Whether the name is the manager's own and not in the metadata copied */
+LOCAL BOOL m_name_apart( CONST T_OBMGR *m )
+{
+	return (BOOL)( m->type != OB_T_STORAGE || m->sub != OB_S_FILE );
+}
+
 /* A copy's metadata: the source's, counted by nobody yet (j holds max bytes) */
 LOCAL INT meta_for_copy( UB *j, INT len, INT max )
 {
@@ -3083,7 +3226,7 @@ EXPORT ER ob_cpy_obj( CONST TS_UUID *uuid, CONST T_OBCRE *pk_cre, TS_UUID *p_uui
 	T_OBCRE		cc;
 	T_OBREF		ref;
 	T_OBREC		*sr = NULL, *dr = NULL;
-	UB		*meta = NULL, *buf = NULL, *names = NULL;
+	UB		*meta = NULL, *buf = NULL, *names = NULL, *own = NULL;
 	SZ		mlen = 0, bsize = 0;
 	INT		sh = 0, dh = 0, sn = 0, dn = 0, i, cnt = 0, len;
 	ER		er;
@@ -3139,8 +3282,11 @@ EXPORT ER ob_cpy_obj( CONST TS_UUID *uuid, CONST T_OBCRE *pk_cre, TS_UUID *p_uui
 		cc.json = meta;
 		cc.jsonsz = (SZ)len;
 	}
-	if ( cc.name == NULL && ref.name[0] != 0 ) {
-		cc.name = ref.name;		/* a manager that keeps the name apart */
+	if ( cc.name == NULL && m_name_apart(sm) ) {
+		own = knl_ob_name(uuid, NULL, NULL);	/* a manager that keeps the name apart */
+		if ( own != NULL && own[0] != 0 ) {
+			cc.name = own;
+		}
 	}
 	if ( cc.type == OB_T_STORAGE && sm->type == OB_T_STORAGE && cc.vol == NULL
 	  && knl_ob_uuid_zero(&cc.near) && ref.sub == OB_S_FILE ) {
@@ -3219,6 +3365,7 @@ EXPORT ER ob_cpy_obj( CONST TS_UUID *uuid, CONST T_OBCRE *pk_cre, TS_UUID *p_uui
 	if ( names != NULL ) Kfree(names);
 	if ( buf != NULL ) Kfree(buf);
 	if ( meta != NULL ) Kfree(meta);
+	if ( own != NULL ) Kfree(own);
 	return er;
 }
 
@@ -3895,8 +4042,12 @@ EXPORT ER ob_att_vol( CONST char *path, UINT flags )
 		return E_OACV;
 	}
 	er = knl_obfile_attach(path, flags);
-	if ( er >= E_OK && !knl_obfile_again(path) ) {
-		/* what is emptied at each start, of what is on it; not again for a disk put back */
+	if ( er >= E_OK && !knl_obfile_again(path) && !knl_obfile_foreign(path) ) {
+		/*
+		 * what is emptied at each start, of what is on it; not again for
+		 * a disk put back, and never for another machine's system volume,
+		 * whose objects this start is not theirs
+		 */
 		knl_sys_clear_start(path);
 	}
 	if ( er >= E_OK ) {
@@ -3937,6 +4088,40 @@ LOCAL void watch_keys_drop( CONST char *path )
 		drop = (BOOL)( k->used && k->hnd == hi );
 		key = ( (ID)( (*ob_hndp[hi]).mgr + 1 ) << KEY_MGR_SHIFT ) | (ID)( i + 1 );
 		if ( drop ) {
+			k->used = FALSE;
+		}
+		UNLOCK();
+		if ( drop ) {
+			ntf_drop(key, 0);
+			(void)hnd_release(hi);
+		}
+	}
+}
+
+/*
+ * The same for the objects of a volume whose medium went (knl_obfile_revoke):
+ * the keys that read nothing but the attributes of one of the n objects
+ * closed, after their watchers were told OB_E_DETACH, so that the volume
+ * closes with the last key that reads it and the device's name goes.
+ */
+EXPORT void knl_ob_watch_keys_drop_of( CONST TS_UUID *uuids, INT n )
+{
+	ID	key;
+	INT	i, j, hi = 0;
+
+	for ( i = 0; i < OB_KEY_MAX && n > 0; i++ ) {
+		OBKEY	*k = &ob_key[i];
+		BOOL	drop = FALSE;
+
+		LOCK();
+		if ( k->used && ( k->ops & OB_OP_ALL & ~OB_OP_ATRRD ) == 0 ) {
+			hi = k->hnd;
+			for ( j = 0; j < n && !same_uuid(&(*ob_hndp[hi]).uuid, &uuids[j]); j++ ) ;
+			drop = (BOOL)( j < n );
+		}
+		key = 0;
+		if ( drop ) {
+			key = ( (ID)( (*ob_hndp[hi]).mgr + 1 ) << KEY_MGR_SHIFT ) | (ID)( i + 1 );
 			k->used = FALSE;
 		}
 		UNLOCK();

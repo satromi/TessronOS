@@ -152,9 +152,13 @@ IMPORT ER  ts_disp_ref( T_DISPSPEC *spec );
  * above it. The view is one surface; each screen shows its
  * rectangle of it. How many; and the i-th one's rectangle in view
  * coordinates, E_NOEXS past the last. With one output the screens are
- * columns of the same width, as many as knl_disp_screens sets (1 to
- * DISP_SCREENS_MAX); with more outputs (knl_disp_out_attach, disp_hw.h)
- * each output is one screen, of its own size and place.
+ * columns of the same width, as many as knl_disp_screens sets (1 or
+ * more); with more outputs (knl_disp_out_attach, disp_hw.h) each output
+ * is one screen, of its own size and place. There is no bound on how
+ * many: a caller counts them with ts_disp_screens, or asks until
+ * E_NOEXS. DISP_SCREENS_MAX bounds nothing in the screen driver; it is
+ * the room of the callers that still keep the screens in a table of
+ * that size, and they see only the first DISP_SCREENS_MAX.
  */
 #define DISP_SCREENS_MAX	4
 IMPORT INT ts_disp_screens( void );

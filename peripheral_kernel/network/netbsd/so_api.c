@@ -115,15 +115,19 @@
 #define NB_ERESTART		(-3)
 
 #define SA_MAX			128		/* bytes of an address */
+#define SO_HOST_MAX		255		/* a host or domain name (RFC 1035 2.3.4) */
 
 LOCAL BOOL		so_started = FALSE;
 EXPORT BOOL		knl_so_nb_card = FALSE;
-LOCAL char		so_hostname[32] = "tessronos";
+LOCAL char		so_hostname[SO_HOST_MAX + 1] = "tessronos";
 LOCAL BOOL		so_asking = FALSE;	/* DHCP is running on the interface */
 LOCAL UW		so_gw = 0;		/* the default route's gateway */
 LOCAL UW		ns_fixed[2];		/* name servers the settings name */
-LOCAL UW		ns_iface[2];		/* name servers the interface came with */
-LOCAL char		so_domain[80];
+/* name servers the interface came with, ns_niface of them; ns_lock held to read or change them */
+LOCAL UW		*ns_iface = NULL;
+LOCAL INT		ns_niface = 0;
+LOCAL T_SPLOCK		ns_lock;		/* zero: not held */
+LOCAL char		so_domain[SO_HOST_MAX + 1];
 /* IPv6 as the settings say (so_setip6) */
 LOCAL UINT		ip6_mode = CNF_NET_SLAAC ? SO_IP6_AUTO : SO_IP6_LINK;
 LOCAL UB		ip6_addr[16];		/* fixed: the address, its prefix length */
@@ -1413,7 +1417,6 @@ EXPORT ER so_fcntl( INT s, INT cmd, INT val )
 
 /* ---------------------------------------------------------------- names */
 
-#define RA_MAX		16		/* addresses of a name taken from the server */
 
 /* A numeric IPv4 address a.b.c.d, in network byte order */
 LOCAL BOOL ip4_parse( CONST char *s, UW *p_addr )
@@ -1653,19 +1656,56 @@ LOCAL INT scope4( CONST UB *a )
 	return SCOPE_GLOBAL;
 }
 
+/*
+ * Every IPv6 address of the card's interface, in a list of its own
+ * (*p_list, freed by the caller with Kfree; NULL for none): how many,
+ * E_OBJ for no interface, E_NOMEM for no room. The addresses are
+ * counted first and the list asked for again when more came meanwhile.
+ */
+EXPORT INT knl_so_addrs6_all( T_SOIF6 **p_list )
+{
+	T_SOIF6	*l = NULL;
+	INT	cap = 0, n;
+
+	*p_list = NULL;
+	for ( ;; ) {
+		n = rump_tsnet_addrs6(SO_IFNAME, l, cap);
+		if ( n < 0 ) {
+			if ( l != NULL ) Kfree(l);
+			return E_OBJ;
+		}
+		if ( n <= cap ) {
+			break;
+		}
+		if ( l != NULL ) Kfree(l);
+		cap = n + 4;
+		l = (T_SOIF6 *)Kmalloc(sizeof(T_SOIF6) * (size_t)cap);
+		if ( l == NULL ) {
+			tm_printf((UB *)"net: no memory for the %d IPv6 addresses of the interface\n", n);
+			return E_NOMEM;
+		}
+	}
+	if ( n == 0 && l != NULL ) {
+		Kfree(l);
+		l = NULL;
+	}
+	*p_list = l;
+	return n;
+}
+
 /* What the machine has to send from */
 typedef struct {
 	BOOL	v4;			/* an IPv4 address */
 	BOOL	gw6;			/* an IPv6 default router */
 	INT	n6;
-	T_SOIF6	a6[8];			/* the IPv6 addresses that can be used */
+	T_SOIF6	*a6;			/* the IPv6 addresses that can be used, n6 of them */
 } SOURCES;
 
 LOCAL void sources_of( SOURCES *src )
 {
 	UW	a = 0, m = 0;
 	UB	gw[16];
-	T_SOIF6	l[8];
+	T_SOIF6	*l;
 	INT	i, n;
 
 	knl_memset(src, 0, sizeof(*src));
@@ -1675,13 +1715,23 @@ LOCAL void sources_of( SOURCES *src )
 	(void)rump_tsnet_getaddr4(SO_IFNAME, &a, &m);
 	src->v4 = ( a != 0 );
 	src->gw6 = knl_so_gw6(gw);
-	n = rump_tsnet_addrs6(SO_IFNAME, l, 8);
-	for ( i = 0; i < n && i < 8; i++ ) {
+	n = knl_so_addrs6_all(&l);
+	for ( i = 0; i < n; i++ ) {
 		if ( l[i].flags & ( SO_IF6_TENTATIVE | SO_IF6_DUPLICATED | SO_IF6_DETACHED | SO_IF6_ANYCAST ) ) {
 			continue;
 		}
-		src->a6[src->n6++] = l[i];
+		l[src->n6++] = l[i];
 	}
+	src->a6 = l;
+}
+
+LOCAL void sources_free( SOURCES *src )
+{
+	if ( src->a6 != NULL ) {
+		Kfree(src->a6);
+	}
+	src->a6 = NULL;
+	src->n6 = 0;
 }
 
 /* Whether the machine has an address of the family to reach the world with */
@@ -1762,13 +1812,21 @@ LOCAL BOOL rank_before( CONST RANK *a, CONST RANK *b )
 	return FALSE;
 }
 
-/* The addresses put in order, those that tie keeping theirs */
-LOCAL void sort_addrs( T_SOADDR *l, INT n, CONST SOURCES *src )
+/* The addresses put in order, those that tie keeping theirs; E_NOMEM when there is no room to rank them */
+LOCAL ER sort_addrs( T_SOADDR *l, INT n, CONST SOURCES *src )
 {
-	RANK		r[RA_MAX], rt;
+	RANK		*r, rt;
 	T_SOADDR	t;
 	INT		i, j;
 
+	if ( n <= 1 ) {
+		return E_OK;
+	}
+	r = (RANK *)Kmalloc(sizeof(RANK) * (size_t)n);
+	if ( r == NULL ) {
+		tm_printf((UB *)"net: no memory to put %d addresses in order\n", n);
+		return E_NOMEM;
+	}
 	for ( i = 0; i < n; i++ ) {
 		rank_of(&l[i], src, &r[i]);
 	}
@@ -1782,33 +1840,41 @@ LOCAL void sort_addrs( T_SOADDR *l, INT n, CONST SOURCES *src )
 		l[j] = t;
 		r[j] = rt;
 	}
+	Kfree(r);
+	return E_OK;
 }
 
 /* ---------------------------------------------------------------- looking up */
 
-/* A name looked up, and with no dot in it looked for in the domain as well */
-LOCAL ER lookup( CONST char *name, INT family, T_SOADDR *l, INT *p_n )
+/*
+ * A name looked up, and with no dot in it looked for in the domain as
+ * well: every address, in a list of its own (*p_l, freed with Kfree).
+ * A name and domain longer together than a DNS name can be are not
+ * asked for.
+ */
+LOCAL ER lookup( CONST char *name, INT family, T_SOADDR **p_l, INT *p_n )
 {
-	char	full[160];
-	INT	i, k = 0;
+	char	full[SO_HOST_MAX + 1];
+	INT	i, d, k = 0;
 	BOOL	dot = FALSE;
 	ER	er;
 
-	er = knl_so_dns_query(name, family, l, RA_MAX, p_n);
+	er = knl_so_dns_query(name, family, p_l, p_n);
 	if ( er != E_NOEXS || so_domain[0] == '\0' ) {
 		return er;
 	}
 	for ( i = 0; name[i] != '\0'; i++ ) {
 		if ( name[i] == '.' ) dot = TRUE;
 	}
-	if ( dot || i + 1 + (INT)sizeof(so_domain) >= (INT)sizeof(full) ) {
+	d = (INT)knl_strlen(so_domain);
+	if ( dot || i + 1 + d > SO_HOST_MAX ) {
 		return er;
 	}
 	for ( i = 0; name[i] != '\0'; i++ ) full[k++] = name[i];
 	full[k++] = '.';
 	for ( i = 0; so_domain[i] != '\0'; i++ ) full[k++] = so_domain[i];
 	full[k] = '\0';
-	return knl_so_dns_query(full, family, l, RA_MAX, p_n);
+	return knl_so_dns_query(full, family, p_l, p_n);
 }
 
 LOCAL BOOL loopback( CONST T_SOADDR *a )
@@ -1818,38 +1884,45 @@ LOCAL BOOL loopback( CONST T_SOADDR *a )
 }
 
 /*
- * The addresses of a name into l (RA_MAX of room), in the order to try
- * them: a number as it is, else through the name servers. 'numeric'
- * refuses a name that is not a number.
+ * The addresses of a name, every one, in the order to try them, in a
+ * list of their own (*p_l, freed with Kfree): a number as it is, else
+ * through the name servers. 'numeric' refuses a name that is not a
+ * number.
  */
 LOCAL ER resolve_list( CONST char *name, INT family, INT flags, BOOL numeric,
-		       T_SOADDR *l, INT *p_n )
+		       T_SOADDR **p_l, INT *p_n )
 {
-	SOURCES	src;
-	UW	a4;
-	INT	n = 0, i, k;
-	ER	er;
+	SOURCES		src;
+	T_SOADDR	one, *l = NULL;
+	UW		a4;
+	INT		n = 0, i, k;
+	ER		er;
 
 	*p_n = 0;
+	*p_l = NULL;
 	if ( family != AF_UNSPEC && family != AF_INET && family != AF_INET6 ) {
 		return E_NOSPT;
 	}
-	knl_memset(l, 0, sizeof(T_SOADDR));
+	knl_memset(&one, 0, sizeof(one));
 	if ( ip4_parse(name, &a4) ) {
 		if ( family == AF_INET6 ) return E_NOEXS;
-		l[0].family = AF_INET;
-		knl_memcpy(l[0].addr, &a4, 4);
-		*p_n = 1;
-		return E_OK;
-	}
-	if ( ip6_parse(name, l[0].addr, &l[0].scope) ) {
+		one.family = AF_INET;
+		knl_memcpy(one.addr, &a4, 4);
+	} else if ( ip6_parse(name, one.addr, &one.scope) ) {
 		if ( family == AF_INET ) return E_NOEXS;
-		l[0].family = AF_INET6;
+		one.family = AF_INET6;
+	} else if ( numeric ) {
+		return E_NOEXS;
+	}
+	if ( one.family != 0 ) {
+		l = (T_SOADDR *)Kmalloc(sizeof(T_SOADDR));
+		if ( l == NULL ) {
+			return E_NOMEM;
+		}
+		*l = one;
+		*p_l = l;
 		*p_n = 1;
 		return E_OK;
-	}
-	if ( numeric ) {
-		return E_NOEXS;
 	}
 	sources_of(&src);
 	if ( ( flags & SO_RA_ADDRCONFIG ) && !family_up(&src, AF_INET) && !family_up(&src, AF_INET6) ) {
@@ -1861,38 +1934,49 @@ LOCAL ER resolve_list( CONST char *name, INT family, INT flags, BOOL numeric,
 
 		family = ( up4 && !up6 ) ? AF_INET : ( up6 && !up4 ) ? AF_INET6 : AF_UNSPEC;
 	}
-	er = lookup(name, family, l, &n);
-	if ( er < E_OK ) {
-		return er;
-	}
-	if ( flags & SO_RA_ADDRCONFIG ) {
+	er = lookup(name, family, &l, &n);
+	if ( er >= E_OK && ( flags & SO_RA_ADDRCONFIG ) ) {
 		for ( i = k = 0; i < n; i++ ) {
 			if ( loopback(&l[i]) || family_up(&src, l[i].family) ) l[k++] = l[i];
 		}
 		n = k;
-		if ( n == 0 ) return E_NOEXS;
+		if ( n == 0 ) er = E_NOEXS;
 	}
-	sort_addrs(l, n, &src);
+	if ( er >= E_OK ) {
+		er = sort_addrs(l, n, &src);
+	}
+	sources_free(&src);
+	if ( er < E_OK ) {
+		if ( l != NULL ) Kfree(l);
+		return er;
+	}
+	*p_l = l;
 	*p_n = n;
 	return E_OK;
 }
 
+/*
+ * Up to max of the addresses into addrs, the first to try first: how
+ * many were put there. A caller whose room came back full asks again
+ * with more.
+ */
 EXPORT INT so_resolveall( CONST char *name, INT family, INT flags, T_SOADDR *addrs, INT max )
 {
-	T_SOADDR	l[RA_MAX];
+	T_SOADDR	*l;
 	INT		n = 0, i;
 	ER		er;
 
 	if ( name == NULL || addrs == NULL || max <= 0 ) {
 		return E_PAR;
 	}
-	er = resolve_list(name, family, flags, FALSE, l, &n);
+	er = resolve_list(name, family, flags, FALSE, &l, &n);
 	if ( er < E_OK ) {
 		return er;
 	}
 	for ( i = 0; i < n && i < max; i++ ) {
 		addrs[i] = l[i];
 	}
+	if ( l != NULL ) Kfree(l);
 	return i;
 }
 
@@ -1953,7 +2037,7 @@ LOCAL struct addrinfo *ai_make( CONST T_SOADDR *a, INT port, CONST struct addrin
 EXPORT ER so_getaddrinfo( CONST char *node, CONST char *service,
 			  CONST struct addrinfo *hints, struct addrinfo **res )
 {
-	T_SOADDR	l[RA_MAX];
+	T_SOADDR	two[2], *l = two, *got = NULL;
 	struct addrinfo	*ai, **tail = res;
 	INT		family = AF_UNSPEC, port = 0, i, n = 0;
 	ER		er;
@@ -1986,7 +2070,7 @@ EXPORT ER so_getaddrinfo( CONST char *node, CONST char *service,
 	if ( node == NULL ) {
 		BOOL	passive = ( hints != NULL && ( hints->ai_flags & AI_PASSIVE ) != 0 );
 
-		knl_memset(l, 0, sizeof(T_SOADDR) * 2);
+		knl_memset(two, 0, sizeof(two));
 		if ( family != AF_INET6 ) {
 			UW	a = passive ? INADDR_ANY : so_htonl(INADDR_LOOPBACK);
 
@@ -2002,25 +2086,30 @@ EXPORT ER so_getaddrinfo( CONST char *node, CONST char *service,
 	} else {
 		er = resolve_list(node, family,
 				  ( hints != NULL && ( hints->ai_flags & AI_ADDRCONFIG ) ) ? SO_RA_ADDRCONFIG : 0,
-				  ( hints != NULL && ( hints->ai_flags & AI_NUMERICHOST ) != 0 ), l, &n);
+				  ( hints != NULL && ( hints->ai_flags & AI_NUMERICHOST ) != 0 ), &got, &n);
 		if ( er < E_OK ) {
 			return er;
 		}
 		if ( n < 1 ) {
+			if ( got != NULL ) Kfree(got);
 			return E_NOEXS;
 		}
+		l = got;
 	}
+	er = E_OK;
 	for ( i = 0; i < n; i++ ) {
 		ai = ai_make(&l[i], port, hints, ( i == 0 ) ? node : NULL);
 		if ( ai == NULL ) {
 			so_freeaddrinfo(*res);
 			*res = NULL;
-			return E_NOMEM;
+			er = E_NOMEM;
+			break;
 		}
 		*tail = ai;
 		tail = &ai->ai_next;
 	}
-	return E_OK;
+	if ( got != NULL ) Kfree(got);
+	return er;
 }
 
 EXPORT void so_freeaddrinfo( struct addrinfo *ai )
@@ -2202,6 +2291,7 @@ EXPORT ER so_gethostname( char *name, SZ namelen )
 	return E_OK;
 }
 
+/* A host name of up to 255 bytes (RFC 1035 2.3.4); a longer one is E_PAR */
 EXPORT ER so_sethostname( CONST char *name, SZ namelen )
 {
 	SZ	i;
@@ -2266,23 +2356,71 @@ EXPORT ER knl_so_nb_ifaddr( UW addr, UW mask, UW gw, BOOL dhcp )
 	return ( e != 0 ) ? knl_so_nb_er(e) : E_OK;
 }
 
-EXPORT void knl_so_nb_ifdns( UW dns0, UW dns1 )
+/*
+ * The name servers the interface came with, every one of them (0 for
+ * none is left out). The list is made before ns_lock is taken, and the
+ * one it takes the place of freed after.
+ */
+EXPORT void knl_so_nb_ifdns( CONST UW *dns, INT n )
 {
-	if ( ns_iface[0] == dns0 && ns_iface[1] == dns1 ) {
-		return;
+	UW	*l = NULL, *old;
+	UINT	imask;
+	INT	i, k = 0;
+	BOOL	same;
+
+	if ( n > 0 ) {
+		l = (UW *)Kmalloc(sizeof(UW) * (size_t)n);
+		if ( l == NULL ) {
+			tm_printf((UB *)"net: no memory for the %d name servers the interface came with\n", n);
+			return;
+		}
+		for ( i = 0; i < n; i++ ) {
+			if ( dns[i] != 0 ) l[k++] = dns[i];
+		}
 	}
-	ns_iface[0] = dns0;
-	ns_iface[1] = dns1;
-	knl_so_netchg();
+	ISpinLock(&ns_lock, &imask);
+	same = ( k == ns_niface );
+	for ( i = 0; same && i < k; i++ ) {
+		if ( l[i] != ns_iface[i] ) same = FALSE;
+	}
+	old = ns_iface;
+	if ( !same ) {
+		ns_iface = l;
+		ns_niface = k;
+		l = old;
+	}
+	ISpinUnlock(&ns_lock, &imask);
+	if ( l != NULL ) {
+		Kfree(l);
+	}
+	if ( !same ) {
+		knl_so_netchg();
+	}
 }
 
-/* The name server to ask: the one the settings name, else the interface's */
+/*
+ * The nth IPv4 name server to ask, 0 when there are no more: in each of
+ * the first two places the one the settings name, else the interface's;
+ * then the rest the interface came with.
+ */
 EXPORT UW knl_so_dns_server( INT n )
 {
-	if ( n < 0 || n > 1 ) {
+	UINT	imask;
+	UW	a = 0;
+	INT	i, k = 0, all;
+
+	if ( n < 0 ) {
 		return 0;
 	}
-	return ( ns_fixed[n] != 0 ) ? ns_fixed[n] : ns_iface[n];
+	ISpinLock(&ns_lock, &imask);
+	all = ( ns_niface > 2 ) ? ns_niface : 2;
+	for ( i = 0; i < all; i++ ) {
+		a = ( i < 2 && ns_fixed[i] != 0 ) ? ns_fixed[i] : ( i < ns_niface ) ? ns_iface[i] : 0;
+		if ( a != 0 && k++ == n ) break;
+		a = 0;
+	}
+	ISpinUnlock(&ns_lock, &imask);
+	return a;
 }
 
 /* The first name server, in network byte order; 0 for none */
@@ -2292,9 +2430,6 @@ EXPORT ER so_getdns( UW *p_dns )
 		return E_PAR;
 	}
 	*p_dns = knl_so_dns_server(0);
-	if ( *p_dns == 0 ) {
-		*p_dns = knl_so_dns_server(1);
-	}
 	return E_OK;
 }
 
@@ -2499,9 +2634,8 @@ EXPORT ER so_setifaddr( UW addr, UW mask, UW gw, UW dns )
 	}
 	knl_so_dhcp_stop();
 	so_asking = FALSE;
-	if ( dns != 0 && dns != ns_iface[0] ) {
-		ns_iface[0] = dns;
-		knl_so_netchg();
+	if ( dns != 0 ) {
+		knl_so_nb_ifdns(&dns, 1);
 	}
 	return knl_so_nb_ifaddr(addr, mask, gw, FALSE);
 }
@@ -2522,11 +2656,18 @@ EXPORT ER so_setdns( INT n, UW addr )
 	return E_OK;
 }
 
+/* The domain names with no dot are looked for in: up to 255 bytes (RFC 1035 2.3.4), a longer one is E_PAR */
 EXPORT ER so_setdomain( CONST char *domain )
 {
 	INT	i;
 
-	for ( i = 0; domain != NULL && domain[i] != '\0' && i < (INT)sizeof(so_domain) - 1; i++ ) {
+	for ( i = 0; domain != NULL && domain[i] != '\0'; i++ ) {
+		if ( i >= SO_HOST_MAX ) {
+			tm_printf((UB *)"net: the domain is longer than %d bytes\n", SO_HOST_MAX);
+			return E_PAR;
+		}
+	}
+	for ( i = 0; domain != NULL && domain[i] != '\0'; i++ ) {
 		so_domain[i] = domain[i];
 	}
 	so_domain[i] = '\0';

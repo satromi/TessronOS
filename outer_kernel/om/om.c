@@ -62,12 +62,11 @@ LOCAL SZ s_put( UB *dst, SZ pos, CONST char *src )
 }
 
 /*
- * A name into a place where some characters have to be written out.
- * `xml` picks which set: the text of an element and the value of an
- * attribute own & < > and ", a JSON string owns " and the backslash.
- * A control character is refused either way.
+ * A name into the value of an XML attribute, & < > and " written out
+ * (six bytes at most for one letter). A control character is refused:
+ * XML 1.0 has no way to write most of them.
  */
-LOCAL ER s_put_esc( UB *dst, SZ *p_pos, CONST UB *src, BOOL xml )
+LOCAL ER s_put_xml( UB *dst, SZ *p_pos, CONST UB *src )
 {
 	SZ	pos = *p_pos;
 
@@ -77,16 +76,12 @@ LOCAL ER s_put_esc( UB *dst, SZ *p_pos, CONST UB *src, BOOL xml )
 		if ( c < 0x20 ) {
 			return E_PAR;
 		}
-		if ( xml ) {
-			switch ( c ) {
-			case '&':	pos = s_put(dst, pos, "&amp;");		continue;
-			case '<':	pos = s_put(dst, pos, "&lt;");		continue;
-			case '>':	pos = s_put(dst, pos, "&gt;");		continue;
-			case '"':	pos = s_put(dst, pos, "&quot;");	continue;
-			default:	break;
-			}
-		} else if ( c == '"' || c == 0x5C ) {
-			dst[pos++] = 0x5C;
+		switch ( c ) {
+		case '&':	pos = s_put(dst, pos, "&amp;");		continue;
+		case '<':	pos = s_put(dst, pos, "&lt;");		continue;
+		case '>':	pos = s_put(dst, pos, "&gt;");		continue;
+		case '"':	pos = s_put(dst, pos, "&quot;");	continue;
+		default:	break;
 		}
 		dst[pos++] = c;
 	}
@@ -148,6 +143,7 @@ EXPORT ER om_fin( void )
 	om_mtxid = 0;
 	for ( i = 0; i < OM_MAX_VOBJ; i++ ) {
 		if ( om_tab[i] != NULL ) {
+			tad_vobj_clear(&om_tab[i]->v.vobj);
 			Kfree(om_tab[i]);
 			om_tab[i] = NULL;
 		}
@@ -192,17 +188,22 @@ EXPORT ER om_reg_vob( CONST T_VOBJ *vobj, CONST T_OMREG *reg, ID *p_vid )
 	}
 	e = om_tab[free_i];
 	if ( e == NULL ) {
-		e = (OMENT *)Kmalloc(sizeof(OMENT));
+		e = (OMENT *)Kcalloc(1, sizeof(OMENT));
 		if ( e == NULL ) {
 			om_unlock();
 			return E_NOMEM;
 		}
 		om_tab[free_i] = e;
 	}
+	/* the register's own copy of the link, its words with it */
+	er = tad_vobj_copy(&e->v.vobj, vobj);
+	if ( er < E_OK ) {
+		om_unlock();
+		return er;
+	}
 	e->used     = TRUE;
 	e->v.vobjid = vobj->vobjid;
 	e->v.target = vobj->target;
-	e->v.vobj   = *vobj;
 	if ( reg != NULL ) {
 		e->v.reg = *reg;
 	} else {
@@ -244,6 +245,7 @@ EXPORT ER om_del_vob( ID vid )
 		return E_NOEXS;
 	}
 	e->used = FALSE;
+	tad_vobj_clear(&e->v.vobj);
 	om_count--;
 	om_unlock();
 
@@ -295,10 +297,10 @@ EXPORT ER om_upd_vob( ID vid, CONST T_VOBJ *vobj )
 		om_unlock();
 		return E_PAR;			/* that would be another link */
 	}
-	e->v.vobj = *vobj;
+	er = tad_vobj_copy(&e->v.vobj, vobj);
 	om_unlock();
 
-	return E_OK;
+	return er;
 }
 
 EXPORT ER om_ref_vob( ID vid, T_OMVOBJ *pk_vobj )
@@ -318,10 +320,14 @@ EXPORT ER om_ref_vob( ID vid, T_OMVOBJ *pk_vobj )
 		om_unlock();
 		return E_NOEXS;
 	}
-	*pk_vobj = e->v;
+	/* a copy of its own for the caller, whose old words are let go (it was empty or held one) */
+	pk_vobj->vobjid = e->v.vobjid;
+	pk_vobj->target = e->v.target;
+	pk_vobj->reg = e->v.reg;
+	er = tad_vobj_copy(&pk_vobj->vobj, &e->v.vobj);
 	om_unlock();
 
-	return E_OK;
+	return er;
 }
 
 /* The drawing of a virtual object (om_draw_vob and the rest) is in om_vdraw.c */
@@ -332,6 +338,7 @@ EXPORT ER om_dsp_vob( INT gid, ID vid )
 	T_DPRECT	r;
 	ER		er;
 
+	tad_vobj_init(&v.vobj);
 	er = om_ref_vob(vid, &v);
 	if ( er < E_OK ) {
 		return er;
@@ -340,8 +347,9 @@ EXPORT ER om_dsp_vob( INT gid, ID vid )
 	r.top    = v.reg.top;
 	r.right  = v.reg.right;
 	r.bottom = v.reg.bottom;
-
-	return om_draw_vob(gid, &r, &v.vobj);
+	er = om_draw_vob(gid, &r, &v.vobj);
+	tad_vobj_clear(&v.vobj);
+	return er;
 }
 
 EXPORT ER om_sel_vob( INT gid, ID vid, BOOL on )
@@ -352,10 +360,12 @@ EXPORT ER om_sel_vob( INT gid, ID vid, BOOL on )
 	ER		er;
 
 	(void)on;				/* inverting twice puts it back */
+	tad_vobj_init(&v.vobj);
 	er = om_ref_vob(vid, &v);
 	if ( er < E_OK ) {
 		return er;
 	}
+	tad_vobj_clear(&v.vobj);		/* only its place is used */
 	r.left   = v.reg.left;
 	r.top    = v.reg.top;
 	r.right  = v.reg.right;
@@ -417,31 +427,37 @@ EXPORT ER om_cre_obj( CONST char *vol, CONST UB *name, UINT body, TS_UUID *p_uui
 	T_OBCRE	c;
 	TS_UUID	uuid;
 	UB	*buf;
-	SZ	pos = 0, xoff;
+	SZ	pos = 0, xoff, nl, ql, cap;
 	INT	k;
 	ER	er;
 
 	if ( p_uuid == NULL || name == NULL ) {
 		return E_PAR;
 	}
-	if ( s_len((CONST char *)name) >= OB_NAME_MAX ) {
-		return E_PAR;
+	/*
+	 * As long as the two texts come to: the name quoted as JSON quotes
+	 * it, and again in the record's attribute (six bytes a letter at
+	 * most), with the fixed text around them.
+	 */
+	nl = s_len((CONST char *)name);
+	for ( k = 0; k < (INT)nl; k++ ) {
+		if ( name[k] < 0x20 ) {
+			return E_PAR;	/* the record's attribute could not hold it */
+		}
 	}
-	buf = (UB *)Kmalloc(2048);
+	ql = om_json_quote(NULL, 0, name, nl);
+	cap = ql + nl * 6 + 512;
+	buf = (UB *)Kmalloc(cap);
 	if ( buf == NULL ) {
 		return E_NOMEM;
 	}
-	pos = s_put(buf, 0, "{\"name\":\"");
-	er = s_put_esc(buf, &pos, name, FALSE);
-	if ( er >= E_OK ) {
-		pos = s_put(buf, pos, "\",\"refCount\":0,\"recordCount\":1,"
-				      "\"editable\":true,\"deletable\":true,"
-				      "\"readable\":true}");
-	}
-	if ( er < E_OK ) {
-		Kfree(buf);
-		return er;
-	}
+	pos = s_put(buf, 0, "{\"name\":");
+	(void)om_json_quote(buf + pos, cap - pos, name, nl);
+	pos += ql;
+	buf[pos] = '\0';
+	pos = s_put(buf, pos, ",\"refCount\":0,\"recordCount\":1,"
+			      "\"editable\":true,\"deletable\":true,"
+			      "\"readable\":true}");
 	for ( k = 0; k < (INT)sizeof(c); k++ ) {
 		((UB *)&c)[k] = 0;
 	}
@@ -460,7 +476,7 @@ EXPORT ER om_cre_obj( CONST char *vol, CONST UB *name, UINT body, TS_UUID *p_uui
 	xoff = pos + 1;
 	pos = xoff;
 	pos = s_put(buf, pos, "<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"");
-	er = s_put_esc(buf, &pos, name, TRUE);
+	er = s_put_xml(buf, &pos, name);
 	if ( er >= E_OK ) {
 		pos = s_put(buf, pos, "\">\n");
 		pos = s_put(buf, pos, ( body == OM_BODY_FIG )

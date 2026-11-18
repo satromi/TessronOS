@@ -28,6 +28,7 @@
 #include <ts/dtreq.h>
 #include <ts/json.h>
 #include <ts/obatr.h>
+#include "../dtask.h"
 
 #define OPENED_MAX	64
 #define ANSWER_MS	5000
@@ -68,13 +69,19 @@ INT ms_pid_of( const TS_UUID *pu )
 	return ( n > 0 ) ? n : -1;
 }
 
-/* A request to the desktop, and the process its answer names */
-static ER ask( T_DTREQ *rq, TS_UUID *p_proc )
+/*
+ * A request to the desktop, name (NULL none) the name it carries, whole
+ * (DT_TAIL_NAME), and the process its answer names
+ */
+static ER ask( T_DTREQ *rq, const char *name, TS_UUID *p_proc )
 {
+	static UB	*abuf = NULL;	/* the answer read whole, however long */
+	static SZ	acap = 0;
 	TS_UUID	d;
 	T_DTANS	an;
 	T_OBCRE	c;
-	SZ	asz = 0;
+	SZ	asz = 0, room = ( name != NULL ) ? dt_tail_room((SZ)strlen(name)) : 0, n;
+	UB	*msg;
 	ID	k;
 	ER	er;
 	UD	until, now;
@@ -90,10 +97,20 @@ static ER ask( T_DTREQ *rq, TS_UUID *p_proc )
 	}
 	rq->seq = ++seq;
 	rq->reply = ans_ch;
+	/* the request and its tail in one message */
+	msg = (UB *)malloc(sizeof(*rq) + (size_t)room);
+	if ( msg == NULL ) return E_NOMEM;
+	rq->tailsz = 0;
+	if ( name != NULL ) (void)dt_tail_put(msg + sizeof(*rq), &rq->tailsz, room, DT_TAIL_NAME, (const UB *)name, -1);
+	memcpy(msg, rq, sizeof(*rq));
 	k = ob_opn_obj(&d, OB_OP_WRITE);
-	if ( k <= 0 ) return E_OBJ;
-	er = ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz);
+	if ( k <= 0 ) {
+		free(msg);
+		return E_OBJ;
+	}
+	er = ob_wri_rec(k, 0, 0, msg, (SZ)sizeof(*rq) + (SZ)rq->tailsz, &asz);
 	ob_cls_obj(k);
+	free(msg);
 	if ( er < E_OK ) return er;
 	/*
 	 * Outside a thread the answer is waited for on its channel; a thread
@@ -104,12 +121,15 @@ static ER ask( T_DTREQ *rq, TS_UUID *p_proc )
 	for ( BOOL again = FALSE; ( now = ms_now_ms() ) < until; again = TRUE ) {
 		TMO	wait = ( rt.cur != NULL ) ? TMO_POL : (TMO)( until - now );
 
-		while ( ob_rea_tmo(ans_key, 0, 0, &an, sizeof(an), &asz, wait) >= E_OK ) {
+		while ( ( n = dq_read(ans_key, &abuf, &acap, wait) ) >= 0 ) {
 			wait = TMO_POL;
-			if ( asz != (SZ)sizeof(an) || an.seq != rq->seq ) continue;
+			if ( n < (SZ)sizeof(an) ) continue;
+			memcpy(&an, abuf, sizeof(an));
+			if ( an.seq != rq->seq ) continue;
 			*p_proc = an.proc;
 			return an.er;
 		}
+		if ( n == E_NOMEM ) return E_NOMEM;
 		if ( rt.cur != NULL ) th_look(rt.cur, until, again);
 	}
 	return E_TMOUT;
@@ -151,7 +171,7 @@ ER ms_vopen_obj( const TS_UUID *target, INT *p_pid )
 	rq.req = DT_RQ_OPEN;
 	rq.target = *target;
 	rq.recno = -1;
-	er = ask(&rq, &pu);
+	er = ask(&rq, NULL, &pu);
 	if ( er < E_OK ) return er;
 	(void)remember(FALSE, target, NULL, &pu);
 	if ( !uuid_zero(&pu) ) *p_pid = ms_pid_of(&pu);
@@ -168,8 +188,7 @@ ER ms_vopen_tool( const char *name, INT *p_pid )
 	*p_pid = -1;
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_TOOL;
-	strncpy((char *)rq.name, name, sizeof(rq.name) - 1);
-	er = ask(&rq, &pu);
+	er = ask(&rq, name, &pu);
 	if ( er < E_OK ) return er;
 	(void)remember(TRUE, NULL, name, &pu);
 	if ( !uuid_zero(&pu) ) *p_pid = ms_pid_of(&pu);

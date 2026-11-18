@@ -32,8 +32,6 @@ extern "C" {
 #include <ts/uuid.h>
 #include <ts/ob.h>
 
-#define XF_NAME_MAX	256		/* bytes of a file's name, with its terminator */
-
 /* Where the bytes come from: read gives up to n, 0 at the end, below 0 on a fault */
 typedef INT (*XF_READ)( void *ctx, void *buf, SZ n );
 typedef INT (*XF_WRITE)( void *ctx, CONST void *buf, SZ n );
@@ -64,11 +62,21 @@ IMPORT ER  xf_import_path( CONST char *path, CONST char *source, CONST char *tes
 IMPORT ER  xf_import_tadjs( CONST char *dir, CONST TS_UUID *uuid, CONST char *source,
 			    CONST T_OBPRT *prt, CONST TS_UUID *box );
 
-/* An object given out as a file: its bytes to write, its file name to name */
+/*
+ * An object given out as a file: its bytes to write, and the whole file
+ * name it goes out as in *p_name, in memory of its own (Kfree it), its
+ * length in *p_len; p_name NULL when the name is not wanted.
+ */
 IMPORT ER  xf_export( CONST TS_UUID *uuid, XF_WRITE write, void *ctx,
-		      UB *name, INT max );
+		      UB **p_name, SZ *p_len );
 
-/* The name an object goes out as */
+/*
+ * The name an object goes out as. xf_name_dup answers it whole, in
+ * memory of its own (Kfree it), NULL when it has none. xf_name puts it
+ * in max bytes for a place that holds no more (a FAT directory entry):
+ * cut at a whole letter, its extension kept.
+ */
+IMPORT UB *xf_name_dup( CONST TS_UUID *uuid, SZ *p_len );
 IMPORT ER  xf_name( CONST TS_UUID *uuid, UB *name, INT max );
 
 /* The object in a box that was taken in from a file of this name (case ignored) */

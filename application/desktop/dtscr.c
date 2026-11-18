@@ -119,7 +119,8 @@ LOCAL BOOL	sc_drag = FALSE;
 LOCAL INT	sc_x0, sc_y0;
 LOCAL UD	sc_due;			/* when the count reaches nought (ns) */
 LOCAL INT	sc_beeped;		/* the seconds left at the last short sound */
-LOCAL UB	sc_name[TAD_NAME_MAX] = "画面印刷";
+LOCAL UB	*sc_own = NULL;		/* the name set, whole; NULL: 画面印刷 */
+#define sc_name	( ( sc_own != NULL ) ? sc_own : (UB *)"画面印刷" )
 LOCAL UB	sc_vol[SC_VOL_PATH];		/* the volume saved to, "" the first */
 LOCAL INT	sc_taken = 0;		/* pictures kept since 実行 */
 LOCAL T_PRNSET	sc_prn;
@@ -196,13 +197,10 @@ LOCAL INT put_attr( UB *b, INT at, INT max, CONST UB *s )
 
 LOCAL void say( CONST char *a, CONST UB *b, CONST char *c )
 {
-	UB	m[WM_LABEL_MAX];
-	INT	at = 0;
+	UB	*m = dt_cat(a, (CONST char *)b, c, NULL);	/* the line shows what fits */
 
-	at = put(m, at, sizeof(m), a);
-	at = put(m, at, sizeof(m), (CONST char *)b);
-	(void)put(m, at, sizeof(m), c);
-	(void)wm_msg_put((CONST char *)m);
+	(void)wm_msg_put(( m != NULL ) ? (CONST char *)m : a);
+	if ( m != NULL ) Kfree(m);
 }
 
 /* ---------------------------------------------------------------- what is set */
@@ -413,12 +411,13 @@ EXPORT ER dt_scr_save( CONST UW *px, INT w, INT h, CONST UB *name, CONST char *v
 	char	us[TS_UUID_STRLEN + 1];
 	UB	href[TS_UUID_STRLEN + 16];
 	UB	*x;
-	INT	at = 0, max = 2048 + TAD_NAME_MAX * 6;
+	INT	at = 0, max;
 	ER	er;
 
 	if ( px == NULL || w <= 0 || h <= 0 || name == NULL || p_uuid == NULL ) {
 		return E_PAR;
 	}
+	max = 2048 + 6 * (INT)knl_strlen((CONST char *)name);	/* the name escaped: 6 bytes a byte at most */
 	er = om_cre_obj(vol, name, OM_BODY_FIG, &u);
 	if ( er < E_OK ) {
 		return er;
@@ -561,8 +560,8 @@ LOCAL void take( void )
 	UW		*px = NULL;
 	T_DPRECT	at;
 	TS_UUID		u;
-	UB		name[TAD_NAME_MAX];
-	INT		w, h, k;
+	UB		*name, num[16];
+	INT		w, h;
 	ER		er;
 
 	/* nothing of this accessory's on the screen when it is read */
@@ -583,13 +582,14 @@ LOCAL void take( void )
 	tm_printf((UB *)"scrprint: taken %d %d %d %d %d\n", told(SN_TAKEN), at.left, at.top, at.right, at.bottom);
 	switch ( sc.to ) {
 	case SC_TO_FIG:
-		k = put(name, 0, sizeof(name), (CONST char *)sc_name);
+		num[0] = 0;
 		if ( sc_taken > 1 ) {
-			k = put(name, k, sizeof(name), "(");
-			k = put_num(name, k, sizeof(name), sc_taken);
-			(void)put(name, k, sizeof(name), ")");
+			(void)put_num(num, put(num, 0, sizeof(num), "("), sizeof(num), sc_taken);
+			(void)put(num, (INT)knl_strlen((CONST char *)num), sizeof(num), ")");
 		}
-		er = dt_scr_save(px, w, h, name, ( sc_vol[0] != 0 ) ? (CONST char *)sc_vol : NULL, &u);
+		name = dt_cat((CONST char *)sc_name, (CONST char *)num, NULL);
+		er = ( name != NULL ) ? dt_scr_save(px, w, h, name, ( sc_vol[0] != 0 ) ? (CONST char *)sc_vol : NULL, &u)
+				      : E_NOMEM;
 		if ( er >= E_OK ) {
 			TS_UUID	top;
 
@@ -605,6 +605,7 @@ LOCAL void take( void )
 		} else {
 			(void)wm_msg_put("画面印刷: 図形実身を作れませんでした");
 		}
+		if ( name != NULL ) Kfree(name);
 		break;
 	case SC_TO_TRAY:
 		er = dt_scr_tray(px, w, h);
@@ -884,9 +885,13 @@ LOCAL BOOL set_from( CONST UB *t )
 	i++;
 	while ( t[i] == ' ' ) i++;
 	if ( t[i] != 0 ) {
-		for ( j = 0; t[i] != 0 && j < TAD_NAME_MAX - 1; ) sc_name[j++] = t[i++];
-		while ( j > 0 && ( sc_name[j] & 0xC0 ) == 0x80 ) j--;	/* cut at a letter's edge */
-		sc_name[j] = 0;
+		UB	*nn = dt_cat((CONST char *)t + i, NULL);	/* the name whole */
+
+		if ( nn == NULL ) {
+			return FALSE;
+		}
+		if ( sc_own != NULL ) Kfree(sc_own);
+		sc_own = nn;
 	}
 	return TRUE;
 }
@@ -898,15 +903,13 @@ LOCAL BOOL set_from( CONST UB *t )
  */
 EXPORT ER dt_scr_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 {
-	UB		t[DT_TEXT_MAX];
+	CONST UB	*t = dt_rq_word(rq, DT_TAIL_TEXT, NULL);
 	UB		vols[SC_VOLS][SC_VOL_PATH];
-	INT		at, n, i;
+	INT		n, i;
 
 	if ( !sc_loaded ) {
 		settings_load();
 	}
-	knl_memcpy(t, rq->text, sizeof(t));
-	t[sizeof(t) - 1] = 0;
 	switch ( rq->recno ) {
 	case DT_SP_GET:
 		/* the panel coming up: what was under way stops, and 実行 starts it again */
@@ -921,19 +924,19 @@ EXPORT ER dt_scr_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 		sc_was = (BOOL)( sc_state != SC_IDLE );
 		stop();
 		sc_gen++;
-		at = put_num(an->text, 0, DT_TEXT_MAX, sc.to);
-		at = put(an->text, at, DT_TEXT_MAX, " ");
-		at = put_num(an->text, at, DT_TEXT_MAX, sc.pointer ? 1 : 0);
-		at = put(an->text, at, DT_TEXT_MAX, " ");
-		at = put_num(an->text, at, DT_TEXT_MAX, sc.area);
-		at = put(an->text, at, DT_TEXT_MAX, " ");
-		at = put_num(an->text, at, DT_TEXT_MAX, sc.by);
-		at = put(an->text, at, DT_TEXT_MAX, " ");
-		at = put_num(an->text, at, DT_TEXT_MAX, sc.secs);
-		at = put(an->text, at, DT_TEXT_MAX, "\t");
-		at = put(an->text, at, DT_TEXT_MAX, (CONST char *)sc_vol);
-		at = put(an->text, at, DT_TEXT_MAX, "\t");
-		(void)put(an->text, at, DT_TEXT_MAX, (CONST char *)sc_name);
+		(void)dt_ans_num(an, (D)( sc.to ));
+		(void)dt_ans_cat(an, (CONST UB *)" ", -1);
+		(void)dt_ans_num(an, (D)( sc.pointer ? 1 : 0 ));
+		(void)dt_ans_cat(an, (CONST UB *)" ", -1);
+		(void)dt_ans_num(an, (D)( sc.area ));
+		(void)dt_ans_cat(an, (CONST UB *)" ", -1);
+		(void)dt_ans_num(an, (D)( sc.by ));
+		(void)dt_ans_cat(an, (CONST UB *)" ", -1);
+		(void)dt_ans_num(an, (D)( sc.secs ));
+		(void)dt_ans_cat(an, (CONST UB *)"\t", -1);
+		(void)dt_ans_cat(an, (CONST UB *)(CONST char *)sc_vol, -1);
+		(void)dt_ans_cat(an, (CONST UB *)"\t", -1);
+		(void)dt_ans_cat(an, (CONST UB *)(CONST char *)sc_name, -1);
 		an->how = (UINT)told(SN_PANEL);
 		return E_OK;
 	case DT_SP_VOL:
@@ -944,14 +947,15 @@ EXPORT ER dt_scr_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 		if ( i < 0 || i >= n ) {
 			return E_NOEXS;
 		}
-		at = put(an->text, 0, DT_TEXT_MAX, (CONST char *)vols[i]);
-		at = put(an->text, at, DT_TEXT_MAX, "\t");
+		(void)dt_ans_cat(an, (CONST UB *)(CONST char *)vols[i], -1);
+		(void)dt_ans_cat(an, (CONST UB *)"\t", -1);
 		if ( i > 0 ) {
-			T_OBFVREF	ref;
+			UB	*lab = dt_vol_label((CONST char *)vols[i]);
 
-			/* a disk attached with ディスク操作: its name */
-			if ( knl_obfile_vol_ref((CONST char *)vols[i], &ref) >= E_OK && ref.label[0] != 0 ) {
-				(void)put(an->text, at, DT_TEXT_MAX, (CONST char *)ref.label);
+			/* a disk attached with ディスク操作: its name, whole */
+			if ( lab != NULL ) {
+				(void)dt_ans_cat(an, lab, -1);
+				Kfree(lab);
 			}
 		}
 		return E_OK;

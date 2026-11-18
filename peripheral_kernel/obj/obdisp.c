@@ -91,22 +91,42 @@ LOCAL INT put_size( UB *t, INT n, INT max, UINT w, UINT h )
 	return knl_oj_put_num(t, n, max, h);
 }
 
-#ifdef X64
-LOCAL UH	pc_modes[24][2];
-
-/* The sizes offered, into pc_modes: how many */
-LOCAL INT modes_now( void )
+/*
+ * The sizes the screen can be set to, every one, in a list taken for
+ * them (*p_m, Kfree it): how many, or E_NOMEM. The driver is asked how
+ * many first, and again with more room where it offers more meanwhile.
+ */
+LOCAL INT modes_take( UH (**p_m)[2] )
 {
-	return knl_disp_hw_modes(pc_modes, 24);
-}
-#define NMODES		modes_now()
-#define MODE_W(i)	pc_modes[i][0]
-#define MODE_H(i)	pc_modes[i][1]
+	UH	(*m)[2];
+	INT	room, n;
+
+#ifdef X64
+	room = knl_disp_hw_modes(NULL, 0);
 #else
-#define NMODES		(INT)( sizeof(modes) / sizeof(modes[0]) )
-#define MODE_W(i)	modes[i][0]
-#define MODE_H(i)	modes[i][1]
+	room = (INT)( sizeof(modes) / sizeof(modes[0]) );
 #endif
+	for ( ;; ) {
+		m = (UH (*)[2])Kmalloc(sizeof(UH) * 2 * (SZ)( ( room > 0 ) ? room : 1 ));
+		if ( m == NULL ) {
+			*p_m = NULL;
+			return E_NOMEM;
+		}
+#ifdef X64
+		n = knl_disp_hw_modes(m, room);
+#else
+		knl_memcpy(m, modes, sizeof(modes));
+		n = room;
+#endif
+		if ( n <= room ) {
+			break;
+		}
+		Kfree(m);
+		room = n;
+	}
+	*p_m = m;
+	return ( n > 0 ) ? n : 0;
+}
 
 /* ---------------------------------------------------------------- the outputs */
 
@@ -118,11 +138,10 @@ LOCAL INT modes_now( void )
  * record 1 has a line for each (OUT0, OUT1, ...) where there is more than
  * one; written with such lines, the outputs are set to them together
  * (ts_disp_commit): "OUT1 on 1024x768 right 0", "OUT1 off". The side is
- * right, below, left or above the screens before it.
+ * right, below, left or above the screens before it. The table of
+ * their objects is taken at start for as many as there are.
  */
-#define OUT_MAX		4
-
-LOCAL TS_UUID	out_uuid[OUT_MAX];
+LOCAL TS_UUID	*out_uuid = NULL;
 LOCAL INT	out_n = 0;
 
 LOCAL CONST char *side_word( INT side )
@@ -151,18 +170,88 @@ LOCAL INT put_hex( UB *t, INT n, INT max, UW v )
 	return knl_oj_put(t, n, max, h);
 }
 
+/*
+ * Every mode of output i, in a list taken for them (*p_m, Kfree it; NULL
+ * when it has none): how many, E_NOEXS, E_NOMEM. Asked how many first,
+ * and again with more room where it offers more meanwhile.
+ */
+LOCAL INT out_modes_take( INT i, T_DISPMODE **p_m )
+{
+	T_DISPMODE	*m;
+	INT		room, n;
+
+	*p_m = NULL;
+	room = ts_disp_out_modes(i, NULL, 0);
+	for ( ;; ) {
+		if ( room <= 0 ) {
+			return room;
+		}
+		m = (T_DISPMODE *)Kmalloc(sizeof(T_DISPMODE) * (SZ)room);
+		if ( m == NULL ) {
+			return E_NOMEM;
+		}
+		n = ts_disp_out_modes(i, m, room);
+		if ( n <= room ) {
+			break;
+		}
+		Kfree(m);
+		room = n;
+	}
+	if ( n <= 0 ) {
+		Kfree(m);
+		return n;
+	}
+	*p_m = m;
+	return n;
+}
+
+/* Output i's EDID, all of it, the same way: how many bytes (*p_e, Kfree it; NULL when 0), or an error */
+LOCAL INT out_edid_take( INT i, UB **p_e )
+{
+	UB	*e;
+	INT	room, n;
+
+	*p_e = NULL;
+	room = ts_disp_out_edid(i, NULL, 0);
+	for ( ;; ) {
+		if ( room <= 0 ) {
+			return room;
+		}
+		e = (UB *)Kmalloc((SZ)room);
+		if ( e == NULL ) {
+			return E_NOMEM;
+		}
+		n = ts_disp_out_edid(i, e, room);
+		if ( n <= room ) {
+			break;
+		}
+		Kfree(e);
+		room = n;
+	}
+	if ( n <= 0 ) {
+		Kfree(e);
+		return n;
+	}
+	*p_e = e;
+	return n;
+}
+
 /* The sizes of an output's modes, once each, its preferred first */
 LOCAL INT put_out_modes( UB *t, INT n, INT max, INT i )
 {
-	T_DISPMODE	m[DISP_MODES_MAX];
-	INT		nm = ts_disp_out_modes(i, m, DISP_MODES_MAX), k, j;
+	T_DISPMODE	*m;
+	INT		nm = out_modes_take(i, &m), k, j;
 
+	if ( nm == E_NOMEM ) {
+		return E_NOMEM;
+	}
 	for ( k = 0; k < nm; k++ ) {
 		for ( j = 0; j < k && ( m[j].hdisp != m[k].hdisp || m[j].vdisp != m[k].vdisp ); j++ ) ;
 		if ( j < k ) continue;
 		if ( k > 0 ) n = knl_oj_put(t, n, max, " ");
 		n = put_size(t, n, max, m[k].hdisp, m[k].vdisp);
 	}
+	if ( m != NULL ) Kfree(m);
 	return n;
 }
 
@@ -192,16 +281,20 @@ LOCAL INT outs_text( UB *t, INT n, INT max )
 	T_DISPOUTINFO	oi;
 	T_DISPSTATE	st;
 	INT		i, no = outs_usable();
-	char		key[12];
+	char		key[24];
+	ER		er;
 
-	if ( no <= 1 || ts_disp_state(&st) < E_OK ) {
+	if ( no <= 1 ) {
 		return n;
 	}
+	er = ts_disp_state(&st);
+	if ( er < E_OK ) {
+		return ( er == E_NOMEM ) ? E_NOMEM : n;
+	}
 	n = put_line(t, n, max, "OUTPUTS", no);
-	for ( i = 0; i < no && i < 4; i++ ) {
+	for ( i = 0; i < no && i < st.n; i++ ) {
 		if ( ts_disp_output(i, &oi) < E_OK ) break;
-		knl_memcpy(key, "OUT0", 5);
-		key[3] = (char)( '0' + i );
+		(void)tm_sprintf((UB *)key, (CONST UB *)"OUT%d", i);
 		n = knl_oj_put(t, n, max, key);
 		n = knl_oj_put(t, n, max, "\t");
 		n = knl_oj_put(t, n, max, oi.name);
@@ -220,25 +313,25 @@ LOCAL INT outs_text( UB *t, INT n, INT max )
 			n = knl_oj_put(t, n, max, oi.model);
 		}
 		n = knl_oj_put(t, n, max, "\n");
-		knl_memcpy(key, "OUTMODES0", 10);
-		key[8] = (char)( '0' + i );
+		(void)tm_sprintf((UB *)key, (CONST UB *)"OUTMODES%d", i);
 		n = knl_oj_put(t, n, max, key);
 		n = knl_oj_put(t, n, max, "\t");
 		n = put_out_modes(t, n, max, i);
+		if ( n < -1 ) break;
 		n = knl_oj_put(t, n, max, "\n");
 		if ( i > 0 ) {
 			/* the mode it would mirror the main screen in, and whether it can */
 			UINT	mw = 0, mh = 0;
 			ER	ok = ts_disp_mirror_mode(i, &mw, &mh);
 
-			knl_memcpy(key, "OUTMIRROR0", 11);
-			key[9] = (char)( '0' + i );
+			(void)tm_sprintf((UB *)key, (CONST UB *)"OUTMIRROR%d", i);
 			n = knl_oj_put(t, n, max, key);
 			n = knl_oj_put(t, n, max, "\t");
 			n = put_size(t, n, max, mw, mh);
 			n = knl_oj_put(t, n, max, ( ok >= E_OK ) ? " ok\n" : " no\n");
 		}
 	}
+	ts_disp_state_free(&st);
 	return n;
 }
 
@@ -291,17 +384,19 @@ LOCAL ER outs_write( CONST UB *b, SZ size )
 
 		while ( i < size && ( b[i] == '\n' || b[i] == '\r' || b[i] == ' ' ) ) i++;
 		if ( i >= size ) break;
-		if ( i + 3 >= size || b[i] != 'O' || b[i + 1] != 'U' || b[i + 2] != 'T' ) return E_PAR;
+		if ( i + 3 >= size || b[i] != 'O' || b[i + 1] != 'U' || b[i + 2] != 'T' ) goto bad;
 		i += 3;
-		if ( b[i] < '0' || b[i] > '9' ) return E_PAR;
-		o = b[i++] - '0';
-		if ( o >= st.n ) return E_NOEXS;
+		if ( b[i] < '0' || b[i] > '9' || !num_at(b, size, &i, &o) ) goto bad;
+		if ( o >= st.n ) {
+			ts_disp_state_free(&st);
+			return E_NOEXS;
+		}
 		if ( word_is(b, size, &i, "off") ) {
 			st.out[o].on = FALSE;
 		} else if ( word_is(b, size, &i, "on") ) {
-			if ( !num_at(b, size, &i, &w) || i >= size || ( b[i] != 'x' && b[i] != 'X' ) ) return E_PAR;
+			if ( !num_at(b, size, &i, &w) || i >= size || ( b[i] != 'x' && b[i] != 'X' ) ) goto bad;
 			i++;
-			if ( !num_at(b, size, &i, &h) ) return E_PAR;
+			if ( !num_at(b, size, &i, &h) ) goto bad;
 			st.out[o].on = TRUE;
 			st.out[o].w = (UH)w;
 			st.out[o].h = (UH)h;
@@ -318,14 +413,19 @@ LOCAL ER outs_write( CONST UB *b, SZ size )
 			}
 			if ( num_at(b, size, &i, &off) ) st.out[o].offset = off;
 		} else {
-			return E_PAR;
+			goto bad;
 		}
 		for ( e = i; e < size && b[e] != '\n'; e++ ) ;
 		i = e;
 	}
 	er = ts_disp_commit(&st);
+	ts_disp_state_free(&st);
 	knl_obdisp_changed();
 	return er;
+
+bad:
+	ts_disp_state_free(&st);
+	return E_PAR;
 }
 
 /* An output's record 1: what it is and its modes, as key and value lines */
@@ -365,6 +465,9 @@ LOCAL INT out_make( void *ctx, UB *t, INT max )
 	n = put_line(t, n, max, "EDID", oi.edid_len);
 	n = knl_oj_put(t, n, max, "MODES\t");
 	n = put_out_modes(t, n, max, i);
+	if ( n < -1 ) {
+		return n;
+	}
 	return knl_oj_put(t, n, max, "\n");
 }
 
@@ -393,8 +496,8 @@ LOCAL ER out_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *
 		return E_PAR;
 	}
 	if ( recno == 2 ) {
-		UB	e[DISP_EDID_MAX];
-		INT	n = ts_disp_out_edid(i, e, sizeof(e));
+		UB	*e;
+		INT	n = out_edid_take(i, &e);
 		SZ	k = 0;
 
 		if ( n < 0 ) return n;
@@ -403,6 +506,7 @@ LOCAL ER out_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *
 			if ( k > size ) k = size;
 			knl_memcpy(buf, e + off, (INT)k);
 		}
+		if ( e != NULL ) Kfree(e);
 		if ( p_asize != NULL ) *p_asize = k;
 		return E_OK;
 	}
@@ -420,11 +524,10 @@ LOCAL ER out_wri( void *ctx, UD *pos, INT recno, D off, CONST void *buf, SZ size
 
 LOCAL UD out_size( void *ctx, INT recno )
 {
-	UB	e[DISP_EDID_MAX];
 	INT	n;
 
 	if ( recno == 2 ) {
-		n = ts_disp_out_edid((INT)(UBINT)ctx, e, sizeof(e));
+		n = ts_disp_out_edid((INT)(UBINT)ctx, NULL, 0);
 		return ( n > 0 ) ? (UD)n : 0;
 	}
 	return knl_oj_make_len(out_make, ctx);
@@ -447,16 +550,35 @@ LOCAL BOOL parse_size( CONST UB *b, SZ size, UINT *p_w, UINT *p_h );
  * screen. One taken out of an output that shows a screen turned off: its
  * windows come back into the view.
  */
+LOCAL void out_policy_on( INT i, CONST T_DISPOUTINFO *pi, T_DISPSTATE *pst );
+
 LOCAL void out_policy( INT i )
 {
 	T_DISPOUTINFO	oi;
 	T_DISPSTATE	st;
-	T_DISPMODE	m[DISP_MODES_MAX];
+	ER		er_policy;
+
+	if ( i <= 0 || ts_disp_output(i, &oi) < E_OK ) return;
+	er_policy = ts_disp_state(&st);
+	if ( er_policy < E_OK ) {
+		tm_printf((UB *)"ob: %s: the outputs' state not read (%d)\n", oi.name, (INT)er_policy);
+		return;
+	}
+	if ( i < st.n ) {
+		out_policy_on(i, &oi, &st);
+	}
+	ts_disp_state_free(&st);
+}
+
+LOCAL void out_policy_on( INT i, CONST T_DISPOUTINFO *pi, T_DISPSTATE *pst )
+{
+	T_DISPOUTINFO	oi = *pi;
+	T_DISPSTATE	st = *pst;
+	T_DISPMODE	*m;
 	char		key[24], v[CF_VAL_MAX];
 	INT		nm, k;
 	ER		er = E_NOSPT;
 
-	if ( i <= 0 || ts_disp_output(i, &oi) < E_OK || ts_disp_state(&st) < E_OK || i >= st.n ) return;
 	if ( oi.status == DISP_ST_OFF && st.out[i].on ) {
 		st.out[i].on = FALSE;
 		er = ts_disp_commit(&st);
@@ -498,7 +620,11 @@ LOCAL void out_policy( INT i )
 			st.out[i].side = DISP_SIDE_RIGHT;
 		}
 	}
-	nm = ts_disp_out_modes(i, m, DISP_MODES_MAX);
+	nm = out_modes_take(i, &m);
+	if ( nm < 0 ) {
+		tm_printf((UB *)"ob: %s plugged in: its modes not read (%d)\n", oi.name, nm);
+		return;
+	}
 	for ( k = 0; k < nm; k++ ) {
 		st.out[i].w = m[k].hdisp;
 		st.out[i].h = m[k].vdisp;
@@ -506,9 +632,12 @@ LOCAL void out_policy( INT i )
 		er = ts_disp_commit(&st);
 		tm_printf((UB *)"ob: %s plugged in: %d x %d right of the main screen (%d)\n", oi.name,
 			  (INT)m[k].hdisp, (INT)m[k].vdisp, (INT)er);
-		if ( er >= E_OK ) return;
+		if ( er >= E_OK ) break;
 	}
-	tm_printf((UB *)"ob: %s plugged in: none of its %d modes could be turned on (%d)\n", oi.name, nm, (INT)er);
+	if ( m != NULL ) Kfree(m);
+	if ( k == nm ) {
+		tm_printf((UB *)"ob: %s plugged in: none of its %d modes could be turned on (%d)\n", oi.name, nm, (INT)er);
+	}
 }
 
 /* Something plugged into an output or taken out: turned on or off, and told on it and on the screen */
@@ -531,7 +660,12 @@ LOCAL void outs_start( void )
 	if ( no <= 1 ) {
 		return;
 	}
-	for ( i = 0; i < no && i < OUT_MAX; i++ ) {
+	out_uuid = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)no);
+	if ( out_uuid == NULL ) {
+		tm_printf((UB *)"ob: no room for the objects of the %d outputs\n", no);
+		return;
+	}
+	for ( i = 0; i < no; i++ ) {
 		if ( ts_disp_output(i, &oi) < E_OK ) break;
 		if ( knl_obdev_add((CONST UB *)oi.name, NULL, &out_ops, (void *)(UBINT)i, &out_uuid[i]) < E_OK ) break;
 		out_n = i + 1;
@@ -574,10 +708,18 @@ LOCAL INT mode_text( UB *t, INT n, INT max )
 	n = knl_oj_put(t, n, max, DRIVER);
 	n = knl_oj_put(t, n, max, "\n");
 	n = knl_oj_put(t, n, max, "MODES\t");
-	nm = NMODES;
-	for ( i = 0; i < nm; i++ ) {
-		if ( i > 0 ) n = knl_oj_put(t, n, max, " ");
-		n = put_size(t, n, max, MODE_W(i), MODE_H(i));
+	{
+		UH	(*ml)[2];
+
+		nm = modes_take(&ml);
+		if ( nm < 0 ) {
+			return nm;
+		}
+		for ( i = 0; i < nm; i++ ) {
+			if ( i > 0 ) n = knl_oj_put(t, n, max, " ");
+			n = put_size(t, n, max, ml[i][0], ml[i][1]);
+		}
+		Kfree(ml);
 	}
 	n = knl_oj_put(t, n, max, "\n");
 #ifdef X64
@@ -604,16 +746,23 @@ LOCAL INT mode_text( UB *t, INT n, INT max )
 		}
 	}
 	n = knl_oj_put(t, n, max, "\n");
-	/* more than one screen: how many, and each one's place and size in the view (SCREEN0 the main one) */
+	/*
+	 * more than one screen: how many, and each one's place and size in the
+	 * view (SCREEN0 the main one), with the name and the display's ident of
+	 * the output that shows it, where one output shows it (not with the
+	 * columns of one output, screens=N): what a program tells the screens
+	 * apart by and finds one again by when they change
+	 */
 	nm = ts_disp_screens();
 	if ( nm > 1 ) {
 		n = put_line(t, n, max, "SCREENS", nm);
 		for ( i = 0; i < nm; i++ ) {
-			INT	x, y, w, h;
-			char	key[8] = "SCREEN0";
+			T_DISPOUTINFO	oi;
+			INT		x, y, w, h, k;
+			char		key[24];
 
 			if ( ts_disp_screen(i, &x, &y, &w, &h) < E_OK ) break;
-			key[6] = (char)( '0' + i );
+			(void)tm_sprintf((UB *)key, (CONST UB *)"SCREEN%d", i);
 			n = knl_oj_put(t, n, max, key);
 			n = knl_oj_put(t, n, max, "\t");
 			n = knl_oj_put_num(t, n, max, x);
@@ -621,6 +770,14 @@ LOCAL INT mode_text( UB *t, INT n, INT max )
 			n = knl_oj_put_num(t, n, max, y);
 			n = knl_oj_put(t, n, max, " ");
 			n = put_size(t, n, max, (UINT)w, (UINT)h);
+			for ( k = 0; ts_disp_output(k, &oi) >= E_OK; k++ ) {
+				if ( oi.screen != i || ts_disp_outputs() <= 1 ) continue;
+				n = knl_oj_put(t, n, max, " ");
+				n = knl_oj_put(t, n, max, oi.name);
+				n = knl_oj_put(t, n, max, " ");
+				n = put_hex(t, n, max, oi.ident);
+				break;
+			}
 			n = knl_oj_put(t, n, max, "\n");
 		}
 	}
@@ -679,11 +836,19 @@ LOCAL INT disp_attr( void *ctx, UB *j, INT n, INT max )
 	n = knl_oj_put(j, n, max, ",\"driver\":\"");
 	n = knl_oj_put(j, n, max, DRIVER);
 	n = knl_oj_put(j, n, max, "\",\"modes\":[");
-	nm = NMODES;
-	for ( i = 0; i < nm; i++ ) {
-		n = knl_oj_put(j, n, max, ( i > 0 ) ? ",\"" : "\"");
-		n = put_size(j, n, max, MODE_W(i), MODE_H(i));
-		n = knl_oj_put(j, n, max, "\"");
+	{
+		UH	(*ml)[2];
+
+		nm = modes_take(&ml);
+		if ( nm < 0 ) {
+			return nm;
+		}
+		for ( i = 0; i < nm; i++ ) {
+			n = knl_oj_put(j, n, max, ( i > 0 ) ? ",\"" : "\"");
+			n = put_size(j, n, max, ml[i][0], ml[i][1]);
+			n = knl_oj_put(j, n, max, "\"");
+		}
+		Kfree(ml);
 	}
 	return knl_oj_put(j, n, max, "]");
 }

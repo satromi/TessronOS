@@ -39,6 +39,7 @@
 #include <ts/uuid.h>
 #include <ts/tadlnk.h>
 #include <ts/wm.h>
+#include <ts/conf.h>
 
 #define CP_ID_LEN	36		/* letters of an identity */
 #define CP_FIRST	32		/* objects the map has room for at first; it grows */
@@ -333,12 +334,12 @@ LOCAL void cp_drop_link( UB **p_buf, SZ *p_len, SZ start, SZ end )
 /* ---------------------------------------------------------------- the name */
 
 /* The record's own name, in the <tad> element, made the copy's */
-LOCAL void cp_set_filename( UB **p_buf, SZ *p_len, CONST UB *name )
+LOCAL ER cp_set_filename( UB **p_buf, SZ *p_len, CONST UB *name )
 {
 	UB	*buf = *p_buf;
-	UB	esc[TAD_NAME_MAX * 6];
-	SZ	i, j, n = 0;
-	INT	k;
+	UB	*esc;
+	SZ	i, j, n = 0, k;
+	ER	er;
 
 	for ( i = 0; i + 4 < *p_len; i++ ) {
 		if ( cp_same(buf + i, "<tad", 4) ) {
@@ -351,13 +352,21 @@ LOCAL void cp_set_filename( UB **p_buf, SZ *p_len, CONST UB *name )
 		}
 	}
 	if ( i + 11 >= *p_len || buf[i] == '>' ) {
-		return;				/* it has none to change */
+		return E_OK;			/* it has none to change */
 	}
 	i += 11;
 	for ( j = i; j < *p_len && buf[j] != '"'; j++ ) {
 		;
 	}
-	for ( k = 0; name[k] != 0 && n + 6 < (SZ)sizeof(esc); k++ ) {
+	/* as long as the escaped name comes to: "&quot;" is the longest, six */
+	for ( k = 0; name[k] != 0; k++ ) {
+		;
+	}
+	esc = (UB *)Kmalloc(k * 6 + 1);
+	if ( esc == NULL ) {
+		return E_NOMEM;
+	}
+	for ( k = 0; name[k] != 0; k++ ) {
 		CONST char	*e = NULL;
 
 		switch ( name[k] ) {
@@ -375,7 +384,9 @@ LOCAL void cp_set_filename( UB **p_buf, SZ *p_len, CONST UB *name )
 			esc[n++] = name[k];
 		}
 	}
-	cp_splice(p_buf, p_len, i, j - i, esc, n);
+	er = cp_splice(p_buf, p_len, i, j - i, esc, n);
+	Kfree(esc);
+	return er;
 }
 
 /* ---------------------------------------------------------------- metadata */
@@ -468,27 +479,28 @@ LOCAL SZ cp_json_extent( CONST UB *buf, SZ len, SZ at )
  * to stand in the file (quotes and all for a string). A key that is not
  * there is put in at the start.
  */
-LOCAL void cp_json_set( UB **p_buf, SZ *p_len, CONST char *key,
-			CONST UB *val, SZ vlen )
+LOCAL ER cp_json_set( UB **p_buf, SZ *p_len, CONST char *key,
+		      CONST UB *val, SZ vlen )
 {
 	INT	at = cp_json_value(*p_buf, *p_len, key);
-	UB	line[96 + TAD_NAME_MAX * 2];
+	UB	*line;
 	SZ	n = 0, i, kl;
+	ER	er;
 
 	if ( at >= 0 ) {
-		cp_splice(p_buf, p_len, (SZ)at,
-			  cp_json_extent(*p_buf, *p_len, (SZ)at), val, vlen);
-		return;
+		return cp_splice(p_buf, p_len, (SZ)at,
+				 cp_json_extent(*p_buf, *p_len, (SZ)at), val, vlen);
 	}
 	for ( i = 0; i < *p_len && (*p_buf)[i] != '{'; i++ ) {
 		;
 	}
 	if ( i >= *p_len ) {
-		return;
+		return E_OBJ;		/* not an object to put a key in */
 	}
 	kl = cp_strlen(key);
-	if ( kl + vlen + 12 > (SZ)sizeof(line) ) {
-		return;
+	line = (UB *)Kmalloc(kl + vlen + 12);
+	if ( line == NULL ) {
+		return E_NOMEM;
 	}
 	line[n++] = '\n';  line[n++] = ' ';  line[n++] = ' ';
 	line[n++] = '"';
@@ -496,7 +508,9 @@ LOCAL void cp_json_set( UB **p_buf, SZ *p_len, CONST char *key,
 	line[n++] = '"';  line[n++] = ':';  line[n++] = ' ';
 	knl_memcpy(line + n, val, vlen);  n += vlen;
 	line[n++] = ',';
-	cp_splice(p_buf, p_len, i + 1, 0, line, n);
+	er = cp_splice(p_buf, p_len, i + 1, 0, line, n);
+	Kfree(line);
+	return er;
 }
 
 /* A key and its value taken out */
@@ -560,22 +574,19 @@ LOCAL void cp_json_drop_in( UB **p_buf, SZ *p_len, CONST char *outer, CONST char
 	Kfree(inner);
 }
 
-/* A string value, quoted and with what must be escaped escaped */
-LOCAL SZ cp_json_quote( UB *out, SZ max, CONST UB *s )
+/* A key given a string value, the whole of it, quoted as JSON quotes one (om_json_quote) */
+LOCAL ER cp_json_set_str( UB **p_buf, SZ *p_len, CONST char *key, CONST UB *s )
 {
-	SZ	n = 0;
-	INT	k;
+	SZ	n;
+	UB	*q = om_json_quote_dup(s, -1, &n);
+	ER	er;
 
-	out[n++] = '"';
-	for ( k = 0; s[k] != 0 && n + 3 < max; k++ ) {
-		if ( s[k] == '"' || s[k] == '\\' ) {
-			out[n++] = '\\';
-		}
-		out[n++] = s[k];
+	if ( q == NULL ) {
+		return E_NOMEM;
 	}
-	out[n++] = '"';
-
-	return n;
+	er = cp_json_set(p_buf, p_len, key, q, n);
+	Kfree(q);
+	return er;
 }
 
 /* Now, as the metadata writes a time: "2026-09-24T10:03:12.345Z" */
@@ -721,7 +732,12 @@ LOCAL ER cp_record( CPMAP *m, INT me, INT recno, BOOL root, CONST UB *name )
 		}
 	}
 	if ( root && name != NULL ) {
-		cp_set_filename(&buf, &len, name);
+		er = cp_set_filename(&buf, &len, name);
+		if ( er < E_OK ) {
+			tm_printf((UB *)"om: no memory for the copy's name in its record\n");
+			Kfree(buf);
+			return er;
+		}
 	}
 
 	/* how many links in the copy point at each object of the copy */
@@ -968,7 +984,7 @@ LOCAL INT cp_tree( CPMAP *m, CONST TS_UUID *src, BOOL root, CONST UB *name )
  */
 LOCAL ER cp_meta( CPMAP *m, INT me, BOOL root, CONST UB *name )
 {
-	UB	*buf, val[TAD_NAME_MAX * 2 + 8];
+	UB	*buf, val[CP_ID_LEN + 40];	/* an identity or a time, quoted */
 	SZ	len = 0, n;
 	ER	er;
 	INT	refs = m->refs[me];
@@ -987,8 +1003,12 @@ LOCAL ER cp_meta( CPMAP *m, INT me, BOOL root, CONST UB *name )
 	val[n++] = '"';
 	cp_json_set(&buf, &len, "realId", val, n);
 	if ( root && name != NULL ) {
-		n = cp_json_quote(val, sizeof(val), name);
-		cp_json_set(&buf, &len, "name", val, n);
+		er = cp_json_set_str(&buf, &len, "name", name);
+		if ( er < E_OK ) {
+			tm_printf((UB *)"om: the copy's name was not written (%d)\n", er);
+			Kfree(buf);
+			return er;
+		}
 	}
 	/*
 	 * An object inside the copy is linked to from the copy. The root is
@@ -1107,8 +1127,9 @@ EXPORT ER om_store_copy( CONST TS_UUID *src, CONST UB *name, BOOL deep,
 EXPORT ER om_store_set_maker( CONST TS_UUID *id )
 {
 	T_OBCRD	*crd;
-	UB	name[TAD_NAME_MAX], val[TAD_NAME_MAX * 2 + 8], *buf;
-	SZ	len = 0, n;
+	UB	*name = NULL, *buf;
+	UB	un[CF_NAME_MAX * 4 + 1];	/* ユーザ環境設定's name: twelve letters of UTF-8 */
+	SZ	len = 0;
 	ER	er;
 
 	crd = (T_OBCRD *)Kmalloc(sizeof(T_OBCRD));
@@ -1116,10 +1137,13 @@ EXPORT ER om_store_set_maker( CONST TS_UUID *id )
 		return E_NOMEM;
 	}
 	er = ob_get_crd(crd);
-	if ( er >= E_OK && om_store_name(&crd->user, name, TAD_NAME_MAX) <= 0 ) {
-		/* a user with no object of its own: the name ユーザ環境設定 gave */
-		if ( wm_user_name(name, TAD_NAME_MAX) <= 0 ) {
-			er = E_NOEXS;
+	if ( er >= E_OK ) {
+		name = om_store_name_dup(&crd->user, NULL);
+		if ( name == NULL ) {
+			/* a user with no object of its own: the name ユーザ環境設定 gave */
+			if ( wm_user_name(un, (INT)sizeof(un)) <= 0 ) {
+				er = E_NOEXS;
+			}
 		}
 	}
 	Kfree(crd);
@@ -1128,11 +1152,14 @@ EXPORT ER om_store_set_maker( CONST TS_UUID *id )
 	}
 	buf = om_obj_meta(id, &len);
 	if ( buf == NULL ) {
+		if ( name != NULL ) Kfree(name);
 		return E_NOEXS;
 	}
-	n = cp_json_quote(val, sizeof(val), name);
-	cp_json_set(&buf, &len, "maker", val, n);
-	er = om_obj_meta_put(id, buf, len);
+	er = cp_json_set_str(&buf, &len, "maker", ( name != NULL ) ? name : un);
+	if ( name != NULL ) Kfree(name);
+	if ( er >= E_OK ) {
+		er = om_obj_meta_put(id, buf, len);
+	}
 	Kfree(buf);
 	return er;
 }
@@ -1288,7 +1315,8 @@ EXPORT void om_store_relink( CONST TS_UUID *host, CONST UB *was, SZ was_len, CON
  */
 LOCAL ER cp_vol_of( CONST TS_UUID *obj, TS_UUID *p_vol, void *arg )
 {
-	return knl_obfile_vuuid_of(obj, p_vol);
+	/* an object of the record's own volume first: another machine's system volume holds the system's UUIDs */
+	return knl_obfile_vuuid_near(obj, (CONST TS_UUID *)arg, p_vol);
 }
 
 EXPORT INT om_link_fix( UB **p_buf, SZ *p_len, CONST TS_UUID *host )
@@ -1308,7 +1336,7 @@ EXPORT INT om_link_fix( UB **p_buf, SZ *p_len, CONST TS_UUID *host )
 	if ( nb == NULL ) {
 		return E_NOMEM;
 	}
-	nlen = tad_lnk_vol_fix(*p_buf, *p_len, nb, &hv, &mine, cp_vol_of, NULL, &n);
+	nlen = tad_lnk_vol_fix(*p_buf, *p_len, nb, &hv, &mine, cp_vol_of, &hv, &n);
 	if ( n == 0 ) {
 		Kfree(nb);
 		return 0;

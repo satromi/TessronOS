@@ -87,6 +87,7 @@
 #include <ts/snd.h>
 #include <ts/disp.h>
 #include <ts/wm.h>
+#include "../dtask.h"
 
 #define TICK_MS		20
 
@@ -259,6 +260,7 @@ LOCAL UI	ui;
 LOCAL BOOL	closing;
 LOCAL TS_UUID	*ask_win = NULL;	/* the window the desktop's panels go over, when not ui's */
 LOCAL UB	*text = NULL;		/* the record last read, whole however long */
+LOCAL CONST char *desk_name = NULL;	/* the name (T_DTREQ's name) the next request to the desktop carries */
 
 /* What lists show: names kept here, as many as there are */
 typedef char	NAME64[64];
@@ -488,8 +490,8 @@ LOCAL INT box_links( CONST char *box, TS_UUID **p_ids, NAME64 **p_names )
 	for ( i = 0; i < all; i++ ) {
 		if ( ob_ref_obj(&lk[i], &r) < E_OK ) continue;
 		ids[n] = lk[i];
-		strncpy(names[n], (CONST char *)r.name, 63);
-		names[n][63] = 0;
+		/* NAME64 is the list's row: the name, what fits at a whole letter */
+		(void)ob_ref_nam(&lk[i], (UB *)names[n], (SZ)sizeof(NAME64), NULL);
 		n++;
 	}
 	free(lk);
@@ -652,7 +654,7 @@ LOCAL void pw_find( void )
 		p = &pw_obj[npw];
 		memset(p, 0, sizeof(*p));
 		p->u = ids[i];
-		snprintf(p->name, sizeof(p->name), "%s", (CONST char *)r.name);
+		(void)ob_ref_nam(&ids[i], (UB *)p->name, (SZ)sizeof(p->name), NULL);	/* "battery0": the system's short names */
 		if ( strcmp(p->name, "acpower") == 0 || strncmp(p->name, "battery", 7) == 0 ) {
 			p->key = ob_opn_obj(&p->u, OB_OP_ATRRD);
 			memset(&req, 0, sizeof(req));
@@ -1412,16 +1414,18 @@ LOCAL INT	net_nadp = -1;		/* the adapters last told of on the console, -1 none y
 LOCAL BOOL adp_find( void )
 {
 	TS_UUID		*ids = NULL;
-	T_OBREF		r;
 	INT		cnt, i;
 	BOOL		found = FALSE;
 
 	cnt = ui_lst_obj(OB_T_DEVICE, OB_S_NET, &ids);
 	for ( i = 0; i < cnt && !found; i++ ) {
-		if ( ob_ref_obj(&ids[i], &r) >= E_OK && strcmp((CONST char *)r.name, "netadp") == 0 ) {
+		UB	*nm = ui_obj_name(&ids[i]);
+
+		if ( nm != NULL && strcmp((CONST char *)nm, "netadp") == 0 ) {
 			adp_u = ids[i];
 			found = TRUE;
 		}
+		free(nm);
 	}
 	free(ids);
 	return found;
@@ -1687,22 +1691,52 @@ LOCAL void fill_usb( void )
  * Bluetooth: the devices paired and those a search found, from its device
  * object; with no adapter, a line that says so and buttons that do nothing
  */
-#define BT_LINES	32
-LOCAL T_BTLINE	bt_list[BT_LINES];
+LOCAL UB	*bt_rec = NULL;		/* the record OB_BT_LIST, read whole: its lines one after the other */
+LOCAL INT	bt_len = 0;
 LOCAL INT	nbt = 0;
 #define BT_MS		1000		/* the list read again, while a search goes */
 #define BT_START_MS	3000		/* how long a search asked for may take to show it has begun */
 LOCAL BOOL	bt_seek;		/* a search is going, or was just asked for, or a connection is being set up */
 LOCAL UD	bt_at, bt_asked;
 
+/*
+ * The line of the list at byte at of the record, NULL past its end or
+ * where a line is not well formed: its size as its name makes it, and
+ * all of it in the record.
+ */
+LOCAL CONST T_BTLINE *bt_line_at( INT at )
+{
+	CONST T_BTLINE	*l;
+
+	if ( bt_rec == NULL || at < 0 || at + BT_LINE_HEAD > bt_len ) return NULL;
+	l = (CONST T_BTLINE *)( bt_rec + at );
+	if ( l->size != BT_LINE_SIZE(l->namelen) || at + l->size > bt_len ) return NULL;
+	return l;
+}
+
+/* The v-th line of the list, NULL none */
+LOCAL CONST T_BTLINE *bt_line( INT v )
+{
+	CONST T_BTLINE	*l;
+	INT		at = 0, i;
+
+	for ( i = 0; ( l = bt_line_at(at) ) != NULL; i++ ) {
+		if ( i == v ) return l;
+		at += l->size;
+	}
+	return NULL;
+}
+
 LOCAL void fill_bt( void )
 {
-	static char	s[BT_LINES][256];
-	CONST char	*p[BT_LINES], *none = "（機器はありません。〈探す〉で探します）", *noadp = "（Bluetoothのアダプタがありません）";
+	static char	*text = NULL;
+	static CONST char **p = NULL;
+	CONST char	*none = "（機器はありません。〈探す〉で探します）", *noadp = "（Bluetoothのアダプタがありません）";
+	CONST T_BTLINE	*l;
 	TS_UUID		u;
 	SZ		asz = 0;
 	ID		k;
-	INT		i;
+	INT		i, at, tl, len;
 
 	nbt = 0;
 	bt_seek = FALSE;
@@ -1736,10 +1770,27 @@ LOCAL void fill_bt( void )
 			return;
 		}
 	}
-	if ( ob_rea_rec(k, OB_BT_LIST, 0, bt_list, sizeof(bt_list), &asz) >= E_OK ) nbt = (INT)( asz / (SZ)sizeof(T_BTLINE) );
 	ob_cls_obj(k);
-	for ( i = 0; i < nbt; i++ ) {
-		CONST T_BTLINE	*l = &bt_list[i];
+	/* the lines, all of them, each as long as its name */
+	if ( bt_rec != NULL ) free(bt_rec);
+	bt_rec = NULL;
+	bt_len = 0;
+	len = ui_rec_all(&u, OB_BT_LIST, 0, &bt_rec);
+	if ( len > 0 && bt_rec != NULL ) bt_len = len;
+	for ( at = 0, tl = 0; ( l = bt_line_at(at) ) != NULL; at += l->size ) {
+		nbt++;
+		tl += 256 + l->namelen;		/* the words of the state, the way, the address and the note, and the name */
+	}
+	if ( text != NULL ) free(text);
+	if ( p != NULL ) free(p);
+	text = NULL;
+	p = NULL;
+	if ( nbt > 0 ) {
+		text = (char *)malloc((size_t)tl + 1);
+		p = (CONST char **)malloc(sizeof(*p) * (size_t)nbt);
+		if ( text == NULL || p == NULL ) nbt = 0;
+	}
+	for ( i = 0, at = 0, tl = 0; i < nbt && ( l = bt_line_at(at) ) != NULL; i++, at += l->size ) {
 		/* 接続中 only for a device in use: a link still being set up, or one let go, is not one */
 		CONST char	*st = ( l->use == BT_USE_SOUND ) ? "接続中（音声）" : ( l->use == BT_USE_INPUT ) ? "接続中（入力）"
 				    : ( l->use == BT_USE_SETUP ) ? "接続処理中" : l->paired ? "登録済" : "未登録";
@@ -1748,13 +1799,17 @@ LOCAL void fill_bt( void )
 		CONST char	*note = ( l->note == BT_NOTE_LEA ) ? "（LE Audioはこのアダプタでは使えません。BR/EDRの側を選んでください）"
 				      : ( l->note == BT_NOTE_BREDR ) ? "（LE Audioはこのアダプタでは使えないので、BR/EDRでつなぎます）"
 				      : ( l->note == BT_NOTE_NOUSE ) ? "（この機械で使える機能がありません）" : "";
+		CONST char	*name = ( l->namelen > 0 ) ? (CONST char *)l + BT_LINE_HEAD : "（名前なし）";
+		INT		room = 256 + l->namelen, n;
 
-		snprintf(s[i], sizeof(s[i]), "%s  %s%s%02X:%02X:%02X:%02X:%02X:%02X  %s%s", st, by, by[0] != 0 ? "  " : "",
-			 l->addr[5], l->addr[4], l->addr[3], l->addr[2], l->addr[1], l->addr[0],
-			 l->name[0] != 0 ? (CONST char *)l->name : "（名前なし）", note);
-		p[i] = s[i];
+		n = snprintf(text + tl, (size_t)room + 1, "%s  %s%s%02X:%02X:%02X:%02X:%02X:%02X  %s%s", st, by, by[0] != 0 ? "  " : "",
+			     l->addr[5], l->addr[4], l->addr[3], l->addr[2], l->addr[1], l->addr[0], name, note);
+		p[i] = text + tl;
+		tl += ( n < 0 ) ? 0 : ( n > room ) ? room : n;
+		text[tl++] = 0;
 		if ( l->use == BT_USE_SETUP ) bt_seek = TRUE;	/* read again until it is set up or let go */
 	}
+	nbt = i;
 	if ( nbt == 0 ) {
 		ui_names(&ui, P_BT_LIST, &none, 1);
 	} else {
@@ -1774,8 +1829,10 @@ LOCAL void bt_cmd( UINT op )
 	memset(&m, 0, sizeof(m));
 	m.op = op;
 	if ( op != BT_C_SCAN ) {
-		if ( v < 0 || v >= nbt ) return;
-		memcpy(m.addr, bt_list[v].addr, 6);
+		CONST T_BTLINE	*l = ( v >= 0 && v < nbt ) ? bt_line(v) : NULL;
+
+		if ( l == NULL ) return;
+		memcpy(m.addr, l->addr, 6);
 	}
 	(void)ui_uuid(BT_DEV_UUID, &u);
 	k = ob_opn_obj(&u, OB_OP_WRITE);
@@ -1827,8 +1884,13 @@ LOCAL void fill_disks( void )
 			}
 			ob_cls_obj(key);
 		}
-		snprintf(disk_line[n], sizeof(disk_line[n]), "%s\t%d MB\t%s", (CONST char *)r.name,
-			 (INT)( size >> 20 ), where);
+		{
+			UB	*dn = ui_obj_name(&ids[i]);	/* a T-Kernel device's name */
+
+			snprintf(disk_line[n], sizeof(disk_line[n]), "%s\t%d MB\t%s", ( dn != NULL ) ? (CONST char *)dn : "",
+				 (INT)( size >> 20 ), where);
+			free(dn);
+		}
 		nm[n] = disk_line[n];
 		n++;
 	}
@@ -1878,9 +1940,8 @@ LOCAL void tell( CONST char *line );
 LOCAL BOOL is_code( CONST T_MNSEL *sel, CONST char *code );
 LOCAL ER desk_req( UINT req, CONST TS_UUID *target, INT recno, UINT flags, CONST char *text, T_DTANS *an );
 
-typedef char	SNDLINE[96];
-LOCAL char	(*snd_id)[SND_ID_MAX] = NULL;	/* the outputs the system has, and one chosen not there */
-LOCAL SNDLINE	*snd_line = NULL;
+LOCAL char	**snd_id = NULL;	/* the outputs the system has, and one chosen not there, ids whole */
+LOCAL char	**snd_line = NULL;	/* and each as a person reads it */
 LOCAL INT	nsnd;
 LOCAL char	*snd_said = NULL;	/* the record as last shown, whole */
 LOCAL ID	snd_key = 0;		/* the sound device's object, while a tone may play */
@@ -1897,10 +1958,14 @@ LOCAL ID snd_dev( void )
 	return snd_key;
 }
 
-/* An output as a person reads it */
-LOCAL void snd_name( CONST char *id, CONST char *kind, CONST char *name, INT flags, char *out, INT max )
+/* An output as a person reads it, allocated as long as its name and id are; NULL when there is no memory */
+LOCAL char *snd_name( CONST char *id, CONST char *kind, CONST char *name, INT flags )
 {
 	CONST char *at = strchr(id, '@');
+	INT	max = (INT)( strlen(id) + strlen(name) ) + 160;
+	char	*out = (char *)malloc((size_t)max);
+
+	if ( out == NULL ) return NULL;
 
 	if ( strcmp(id, "auto") == 0 ) {
 		snprintf(out, max, "自動（ＵＳＢ、Ｂｌｕｅｔｏｏｔｈ、Ｉ２Ｓ、ＨＤＭＩの順）");
@@ -1920,6 +1985,38 @@ LOCAL void snd_name( CONST char *id, CONST char *kind, CONST char *name, INT fla
 	if ( ( flags & SND_OF_NOSOUND ) != 0 ) {
 		strncat(out, "　音を出せません", max - strlen(out) - 1);
 	}
+	return out;
+}
+
+/* The nth value of key in the record, allocated whole; NULL when there is none or no memory */
+LOCAL char *snd_val( INT len, CONST char *key, INT nth )
+{
+	CONST UB	*p;
+	INT		n;
+	char		*v;
+
+	if ( len <= 0 || !cf_find(text, len, key, nth, &p, &n) ) return NULL;
+	v = (char *)malloc((size_t)n + 1);
+	if ( v == NULL ) return NULL;
+	memcpy(v, p, (size_t)n);
+	v[n] = 0;
+	return v;
+}
+
+/* The rows of the outputs let go */
+LOCAL void snd_free( void )
+{
+	INT	k;
+
+	for ( k = 0; k < nsnd; k++ ) {
+		if ( snd_id != NULL ) free(snd_id[k]);
+		if ( snd_line != NULL ) free(snd_line[k]);
+	}
+	free(snd_id);
+	free(snd_line);
+	snd_id = NULL;
+	snd_line = NULL;
+	nsnd = 0;
 }
 
 /* The volume of the output in use, or its part off */
@@ -1953,7 +2050,7 @@ LOCAL void snd_volume( void )
 
 LOCAL void fill_sound( void )
 {
-	char	v[CF_VAL_MAX], kind[16], name[CF_VAL_MAX], sel[SND_ID_MAX], now[SND_ID_MAX], fl[16];
+	char	v[CF_VAL_MAX], kind[16], fl[16], *sel, *now, *id, *name;
 	CONST char **nm;
 	INT	len = sys_rec(OB_SYS_SOUND), k, cur = 0, playing = 0, flags, room = 1;
 	CONST UB *fv;
@@ -1965,40 +2062,60 @@ LOCAL void fill_sound( void )
 		if ( len > 0 ) memcpy(snd_said, text, (size_t)len);
 		snd_said[( len > 0 ) ? len : 0] = 0;
 	}
-	if ( len <= 0 || !cf_get(text, len, "SELECT", 0, sel, sizeof(sel)) ) strcpy(sel, "auto");
-	if ( len <= 0 || !cf_get(text, len, "OUTPUT", 0, now, sizeof(now)) ) strcpy(now, "none");
+	/* the ids as long as they are: the record has them whole */
+	sel = snd_val(len, "SELECT", 0);
+	now = snd_val(len, "OUTPUT", 0);
+	if ( sel == NULL ) sel = strdup("auto");
+	if ( now == NULL ) now = strdup("none");
 	/* a row for each output, and one for an output chosen that is not there */
 	for ( k = 0; len > 0 && cf_find(text, len, "OUT", k, &fv, &fl_len); k++ ) {
 		room++;
 	}
-	free(snd_id);
-	free(snd_line);
-	snd_id = malloc(sizeof(*snd_id) * (size_t)room);
-	snd_line = (SNDLINE *)malloc(sizeof(SNDLINE) * (size_t)room);
+	snd_free();
+	snd_id = (char **)calloc((size_t)room, sizeof(char *));
+	snd_line = (char **)calloc((size_t)room, sizeof(char *));
 	nm = (CONST char **)malloc(sizeof(char *) * (size_t)room);
-	nsnd = 0;
-	if ( snd_id == NULL || snd_line == NULL || nm == NULL ) {
+	if ( snd_id == NULL || snd_line == NULL || nm == NULL || sel == NULL || now == NULL ) {
 		free(nm);
+		free(sel);
+		free(now);
+		snd_free();
+		tell("メモリが足りないため、出力先を表示できません。");
 		return;
 	}
-	for ( k = 0; len > 0 && nsnd < room - 1 && cf_get(text, len, "OUT", k, v, sizeof(v)); k++ ) {
+	for ( k = 0; nsnd < room - 1 && ( id = snd_val(len, "OUT", k) ) != NULL; k++ ) {
 		if ( !cf_get(text, len, "OUT_KIND", k, kind, sizeof(kind)) ) strcpy(kind, "none");
-		if ( !cf_get(text, len, "OUT_NAME", k, name, sizeof(name)) ) name[0] = 0;
+		name = snd_val(len, "OUT_NAME", k);
 		flags = cf_get(text, len, "OUT_FLAGS", k, fl, sizeof(fl)) ? cf_num(fl, 0) : 0;
-		snprintf(snd_id[nsnd], SND_ID_MAX, "%s", v);
-		snd_name(v, kind, name, flags, snd_line[nsnd], sizeof(snd_line[nsnd]));
+		snd_id[nsnd] = id;
+		snd_line[nsnd] = snd_name(id, kind, ( name != NULL ) ? name : "", flags);
+		free(name);
+		if ( snd_line[nsnd] == NULL ) {
+			free(id);
+			snd_id[nsnd] = NULL;
+			break;
+		}
 		if ( ( flags & SND_OF_CHOSEN ) != 0 ) cur = nsnd + 1;
-		if ( strcmp(v, now) == 0 ) playing = nsnd + 1;
+		if ( strcmp(id, now) == 0 ) playing = nsnd + 1;
 		nm[nsnd] = snd_line[nsnd];
 		nsnd++;
 	}
 	if ( cur == 0 && nsnd < room ) {
 		/* chosen, and not there now: shown all the same */
-		snprintf(snd_id[nsnd], SND_ID_MAX, "%s", sel);
-		snprintf(snd_line[nsnd], sizeof(snd_line[nsnd]), "%s（つながっていません）",
-			 ( strncmp(sel, "usb:", 4) == 0 ) ? "前に選んだＵＳＢ機器" : sel);
-		nm[nsnd] = snd_line[nsnd];
-		cur = ++nsnd;
+		CONST char	*what = ( strncmp(sel, "usb:", 4) == 0 ) ? "前に選んだＵＳＢ機器" : sel;
+		size_t		n = strlen(what) + 64;
+
+		snd_id[nsnd] = strdup(sel);
+		snd_line[nsnd] = (char *)malloc(n);
+		if ( snd_id[nsnd] != NULL && snd_line[nsnd] != NULL ) {
+			snprintf(snd_line[nsnd], n, "%s（つながっていません）", what);
+			nm[nsnd] = snd_line[nsnd];
+			cur = ++nsnd;
+		} else {
+			free(snd_id[nsnd]);
+			free(snd_line[nsnd]);
+			snd_id[nsnd] = snd_line[nsnd] = NULL;
+		}
 	}
 	ui_names(&ui, P_SND_OUTS, nm, nsnd);
 	free(nm);
@@ -2034,11 +2151,17 @@ LOCAL void fill_sound( void )
 	ui_set_text(&ui, ( P_SND_1 + 2 ), ( cf_num(v, 0) == 2 ) ? "ステレオ" : ( cf_num(v, 0) == 1 ) ? "モノラル" : "－");
 	snd_volume();
 	{
-		char	s[96];
+		char	s[48];
 
-		snprintf(s, sizeof(s), "sysenv: sound %d outputs, chosen %s, playing %s\n", nsnd, sel, now);
+		snprintf(s, sizeof(s), "sysenv: sound %d outputs, chosen ", nsnd);
 		tm_putstring((CONST UB *)s);
+		tm_putstring((CONST UB *)sel);
+		tm_putstring((CONST UB *)", playing ");
+		tm_putstring((CONST UB *)now);
+		tm_putstring((CONST UB *)"\n");
 	}
+	free(sel);
+	free(now);
 }
 
 /* The page read again while it shows; shown again only when the record changed */
@@ -2057,14 +2180,24 @@ LOCAL void sound_told( void )
 LOCAL void sound_set( void )
 {
 	INT	k = ui_value(&ui, P_SND_OUTS) - 1;
-	char	v[SND_ID_MAX + 8], s[96];
+	char	*v, s[24];
+	size_t	n;
 	ER	er;
 
 	if ( k < 0 || k >= nsnd ) return;
-	snprintf(v, sizeof(v), "SELECT %s", snd_id[k]);
+	n = strlen(snd_id[k]) + 8;
+	v = (char *)malloc(n);
+	if ( v == NULL ) {
+		tell("メモリが足りないため、出力先を選べません。");
+		return;
+	}
+	snprintf(v, n, "SELECT %s", snd_id[k]);
 	er = sys_write(OB_SYS_SOUND, v);
+	free(v);
 	if ( er >= E_OK ) er = dev_put("SOUND_OUT", snd_id[k]);
-	snprintf(s, sizeof(s), "sysenv: sound output %s (%d)\n", snd_id[k], (INT)er);
+	tm_putstring((CONST UB *)"sysenv: sound output ");
+	tm_putstring((CONST UB *)snd_id[k]);
+	snprintf(s, sizeof(s), " (%d)\n", (INT)er);
 	tm_putstring((CONST UB *)s);
 	if ( er == E_OACV ) {
 		tell("機器の設定を変更する権限がありません。");
@@ -2687,6 +2820,12 @@ LOCAL void scheme_set( void )
 	if ( sys_write(OB_SYS_SCHEME, v) < E_OK ) return;
 	(void)dev_put("SCHEME", v);
 	ui_set_now(&ui, P_SCHEMES, k + 1, k + 1);
+	{
+		char	m[40];
+
+		snprintf(m, sizeof(m), "sysenv: scheme %d\n", k);
+		tm_putstring((CONST UB *)m);
+	}
 }
 
 /* ---------------------------------------------------------------- 〈ウィンドウ〉 */
@@ -2715,8 +2854,17 @@ LOCAL INT	lk_was[LK_N];		/* as the window found them, for 取り消し */
 LOCAL BOOL	lk_unkept;		/* changed since last kept */
 LOCAL UD	lk_at;			/* when it is kept, the last change a second before */
 
+/* A copy's look, shown in 〈ウィンドウ〉's parts and not set (写し, cv_show): what lk_get reads while it is on */
+LOCAL INT	lk_pv_val[LK_N];
+LOCAL BOOL	lk_pv_on = FALSE;
+
 LOCAL INT lk_get( UINT num )
 {
+	INT	i;
+
+	for ( i = 0; lk_pv_on && i < cf_look_nitem && i < LK_N; i++ ) {
+		if ( cf_look_items[i].look == num ) return lk_pv_val[i];
+	}
 	return (INT)wm_look(num);
 }
 
@@ -2977,54 +3125,36 @@ LOCAL BOOL look_changed( INT id )
 
 /* ---------------------------------------------------------------- the programs */
 
+/* The words of the next request and the last answer, as long as they are (dtask.h) */
+LOCAL DTASK	desk_q;
+
+/* The text of the last answer (DT_TAIL_TEXT), "" when it has none */
+#define DESK_TEXT	( (CONST char *)dq_ans_text(&desk_q, DT_TAIL_TEXT) )
+
 /*
  * A request to the desktop (DT_RQ_INSTALL, DT_RQ_REMOVE, DT_RQ_FONT_*,
  * DT_RQ_OPEN, DT_RQ_CLOSE), waited for: what it answered, and the answer
- * itself. flags and text are the request's (text NULL: none).
+ * itself. flags and text are the request's (text NULL: none), the text
+ * and desk_name whole in its tail; with DT_F_APPLIST the text is the
+ * link's applist (DT_TAIL_APPLIST).
  */
 LOCAL ER desk_req( UINT req, CONST TS_UUID *target, INT recno, UINT flags, CONST char *text, T_DTANS *an )
 {
-	static T_DTREQ	rq;
-	T_OBCRE	c;
-	TS_UUID	d, reply;
-	SZ	asz = 0;
-	ID	k, ka;
-	ER	er;
+	T_DTREQ	rq;
 
 	memset(an, 0, sizeof(*an));
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
 	memset(&rq, 0, sizeof(rq));
 	rq.req = req;
-	rq.seq = 1;
 	rq.target = *target;
 	rq.recno = recno;
-	rq.reply = reply;
-	rq.win = ( ask_win != NULL ) ? *ask_win : ui.win;	/* the window that asks */
 	rq.flags = flags;
-	if ( text != NULL ) strncpy((char *)rq.text, text, sizeof(rq.text) - 1);
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, &rq, sizeof(rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	/* long enough for the person to type the administrator's password */
-	/* the answer waited for on its channel, at most 600000 ms */
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, 600000);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq.seq ) {
-			er = an->er;
-			break;
-		}
+	if ( text != NULL ) {
+		(void)dq_part(&desk_q, ( ( flags & DT_F_APPLIST ) != 0 ) ? DT_TAIL_APPLIST : DT_TAIL_TEXT,
+			      (CONST UB *)text, -1);
 	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
-	return er;
+	if ( desk_name != NULL ) (void)dq_part(&desk_q, DT_TAIL_NAME, (CONST UB *)desk_name, -1);
+	/* long enough for the person to type the administrator's password */
+	return dq_ask(&desk_q, &rq, an, ( ask_win != NULL ) ? ask_win : &ui.win, 600000);
 }
 
 LOCAL ER desk_ask( UINT req, CONST TS_UUID *target, INT recno, T_DTANS *an )
@@ -3157,10 +3287,8 @@ LOCAL BOOL sys_drop( CONST TS_UUID *pkg )
 	if ( er == E_OBJ || er == E_PAR ) {
 		return FALSE;
 	}
-	an.text[sizeof(an.text) - 1] = 0;
-	tab = strchr((char *)an.text, '\t');
-	if ( tab != NULL ) *tab = 0;
-	snprintf(pv, sizeof(pv), "%s", (char *)an.text);
+	tab = strchr(DESK_TEXT, '\t');
+	snprintf(pv, sizeof(pv), "%.*s", ( tab != NULL ) ? (INT)( tab - DESK_TEXT ) : (INT)strlen(DESK_TEXT), DESK_TEXT);
 	snprintf(sv, sizeof(sv), "%s", ( tab != NULL ) ? tab + 1 : "");
 	snprintf(s, sizeof(s), "sysenv: system package %s (%s) %d\n", pv, sv, (INT)er);
 	tm_putstring((CONST UB *)s);
@@ -4212,20 +4340,61 @@ LOCAL void fs_attr_take( INT id )
 
 /* ---- the documents of 見本 and 注釈 */
 
+/*
+ * Where a window of 見本 or 注釈 opens, as the "window" of its document's
+ * metadata: stepped down and across from the フォント設定 window, so that
+ * this one's title band stays in sight and a press on it brings it in
+ * front again, on the screen it is on, as large as the text editor opens
+ * one or as much of it as that screen leaves. Nothing when the window
+ * cannot be read or the screen leaves too little: the editor's own place.
+ */
+#define DOC_STEP	28		/* down and across from the window it is opened from */
+#define DOC_W		900		/* the text editor's own size of a window */
+#define DOC_H		640
+#define DOC_LEAST_W	200
+#define DOC_LEAST_H	120
+
+LOCAL void doc_window( char *s, INT max )
+{
+	T_OBWPOS	wp;
+	T_DPRECT	on, v;
+	T_WMPLACE	p;
+	SZ		asz = 0;
+
+	s[0] = 0;
+	if ( fsw.w.kw <= 0 || ob_rea_rec(fsw.w.kw, OB_WR_PLACE, 0, &wp, sizeof(wp), &asz) < E_OK ) return;
+	wm_screen_of(wp.left, wp.top, &on);
+	v.left = wp.left + DOC_STEP;
+	v.top = wp.top + DOC_STEP;
+	v.right = v.left + DOC_W;
+	v.bottom = v.top + DOC_H;
+	if ( v.right > on.right ) v.right = on.right;
+	if ( v.bottom > on.bottom ) v.bottom = on.bottom;
+	if ( v.right - v.left < DOC_LEAST_W || v.bottom - v.top < DOC_LEAST_H ) return;
+	if ( wm_place_keep(&v, &p) < E_OK ) return;
+	snprintf(s, (size_t)max, ",\"window\":{\"pos\":{\"x\":%d,\"y\":%d},\"width\":%d,\"height\":%d",
+		 (INT)p.r.left, (INT)p.r.top, (INT)( p.r.right - p.r.left ), (INT)( p.r.bottom - p.r.top ));
+	if ( p.screen != 0 ) {
+		snprintf(s + strlen(s), (size_t)max - strlen(s), ",\"screen\":\"%08x\"", (UINT)p.screen);
+	}
+	strncat(s, "}", (size_t)max - strlen(s) - 1);
+}
+
 /* A document of the text editor holding xml, made for the window and not to be edited */
 LOCAL ER doc_make( CONST char *name, CONST char *xml, TS_UUID *p_u )
 {
 	T_OBCRE	c;
-	char	json[400];
+	char	json[560], win[140];
 	INT	recno = -1;
 	SZ	asz = 0;
 	ID	k;
 	ER	er;
 
+	doc_window(win, (INT)sizeof(win));
 	snprintf(json, sizeof(json),
 		 "{\"name\":\"%s\",\"relationship\":[],\"linktype\":false,\"refCount\":0,"
 		 "\"editable\":false,\"deletable\":true,\"readable\":true,"
-		 "\"applist\":{\"basic-text-editor\":{\"name\":\"基本文章編集\",\"defaultOpen\":true}}}", name);
+		 "\"applist\":{\"basic-text-editor\":{\"name\":\"基本文章編集\",\"defaultOpen\":true}}%s}", name, win);
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_STORAGE;
 	c.sub = OB_S_FILE;
@@ -4302,7 +4471,7 @@ LOCAL void sample_show( BOOL on )
 		return;
 	}
 	fsw.tried[fsw.cur] = TRUE;
-	snprintf(face, sizeof(face), "%s", (CONST char *)an.text);
+	snprintf(face, sizeof(face), "%s", DESK_TEXT);
 	snprintf(name, sizeof(name), "見本：%s", fsw.f[fsw.cur].name);
 	snprintf(xml, sizeof(xml), "<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"");
 	xml_put(xml, sizeof(xml), name);
@@ -4920,6 +5089,957 @@ LOCAL void drop( void )
 	}
 }
 
+/* ---------------------------------------------------------------- the page asked for (固有データ) */
+
+/*
+ * The program is started, or run again while its window is open, with
+ * the 固有データ of the applist entry it was opened from (T_PRCOPEN's
+ * data, design 11.3): the name of a page, which is shown. Only the page
+ * is chosen by it; nothing else is done with it. A name it does not know,
+ * an empty one, or one that is not a name leaves the window as it is:
+ * the first tag when it has just opened. Opened on a device's object
+ * (its applist names this program and the device's page), the page shows
+ * that device where it can choose one; opened on a 写し (an object whose
+ * metadata says tessronos.confcopy), the copy's values are shown (copy_open).
+ */
+typedef struct {
+	CONST char	*name;		/* the data that asks for it */
+	INT		sheet;
+	INT		dev;		/* its row in 機器情報's list, from 0; -1 a tag of its own */
+	CONST char	*label;		/* as a copy's name says it */
+	BOOL		copies;		/* 写しを作る takes its values (cf_copy_allowed) */
+} PAGE;
+
+LOCAL CONST PAGE pages[] = {
+	{ "devices",	S_DEVS,		-1, "機器情報",			FALSE },
+	{ "power",	S_POWER,	-1, "電源管理",			TRUE },
+	{ "wallpaper",	S_WALL,		-1, "背景",			TRUE },
+	{ "colour",	S_SCHEME,	-1, "配色",			TRUE },
+	{ "window",	S_LOOK,		-1, "ウィンドウ",		TRUE },
+	{ "font",	S_FONT,		-1, "書体",			TRUE },
+	{ "version",	S_VERSION,	-1, "バージョン",		FALSE },
+	{ "screen",	S_D_SCREEN,	0,  "画面",			TRUE },
+	{ "network",	S_D_NET,	1,  "ネットワークアダプタ",	FALSE },
+	{ "usb",	S_D_USB,	2,  "ＵＳＢ接続機器",		FALSE },
+	{ "disk",	S_D_DISK,	3,  "ディスク",			FALSE },
+	{ "video",	S_D_VIDEO,	4,  "ビデオアダプタ",		FALSE },
+	{ "keyboard",	S_D_KBD,	5,  "キーボード",		TRUE },
+	{ "sound",	S_D_SOUND,	6,  "サウンド",			TRUE },
+	{ "cpu",	S_D_CPU,	7,  "プロセッサ",		FALSE },
+	{ "bluetooth",	S_D_BT,		8,  "Bluetooth",		FALSE },
+};
+#define NPAGE	( (INT)( sizeof(pages) / sizeof(pages[0]) ) )
+
+LOCAL CONST PAGE *page_named( CONST char *s )
+{
+	INT	i;
+
+	for ( i = 0; s != NULL && s[0] != 0 && i < NPAGE; i++ ) {
+		if ( strcmp(pages[i].name, s) == 0 ) return &pages[i];
+	}
+	return NULL;
+}
+
+LOCAL CONST PAGE *page_of_sheet( INT sheet )
+{
+	INT	i;
+
+	for ( i = 0; i < NPAGE; i++ ) {
+		if ( pages[i].sheet == sheet ) return &pages[i];
+	}
+	return NULL;
+}
+
+LOCAL BOOL no_uuid( CONST TS_UUID *u )
+{
+	static CONST TS_UUID	zero;
+
+	return (BOOL)( u == NULL || memcmp(u, &zero, sizeof(zero)) == 0 );
+}
+
+/* The output of 画面 that the device object dev is, chosen on the screen's page */
+LOCAL void scr_out_pick( CONST TS_UUID *dev )
+{
+	UB	*nm;
+	INT	i, n;
+
+	if ( no_uuid(dev) || ( nm = ui_obj_name(dev) ) == NULL ) return;
+	n = ( nm[0] != 0 ) ? outs_read(disp_rec()) : 0;
+	for ( i = 0; i < n; i++ ) {
+		CONST char	*at = strstr(scr_out_nm[i], "：");
+		size_t		l = strlen((CONST char *)nm);
+
+		/* "2：HDMI-A-1", the main one "1：Virtual-1（主画面）" */
+		if ( at != NULL && strncmp(at + 3, (CONST char *)nm, l) == 0
+		  && ( at[3 + l] == 0 || (UB)at[3 + l] == 0xEF ) ) {
+			scr_out = i;
+			break;
+		}
+	}
+	free(nm);
+}
+
+/* The page shown, opened as its tag or its row of 機器情報 opens it; dev the device it was opened on */
+LOCAL void page_show( CONST PAGE *pg, CONST TS_UUID *dev )
+{
+	char	s[96];
+
+	if ( pg->dev >= 0 ) {
+		ui_set_value(&ui, P_DEVS, pg->dev + 1);
+		if ( pg->sheet == S_D_SCREEN ) scr_out_pick(dev);
+		open_page(pg->sheet);
+	} else {
+		ui_show_sheet(&ui, pg->sheet);
+		if ( pg->sheet == S_POWER ) power_sheet();
+	}
+	snprintf(s, sizeof(s), "sysenv: page \"%s\"\n", pg->name);
+	tm_putstring((CONST UB *)s);
+}
+
+LOCAL BOOL is_copy( CONST TS_UUID *u, char *page, INT max );
+LOCAL void copy_open( CONST TS_UUID *u );
+
+/*
+ * Opened on target (0 none, or the program object itself) with data:
+ * a copy shows its values, anything else the page data names
+ */
+LOCAL BOOL	copy_due = FALSE;	/* a copy to be shown once the window is up */
+LOCAL TS_UUID	copy_obj;
+
+LOCAL void opened_on( CONST TS_UUID *target, CONST char *data, BOOL up )
+{
+	TS_UUID		me;
+	CONST PAGE	*pg;
+	char		page[32], s[160];
+
+	/* a note for the log: long data shown in part */
+	snprintf(s, sizeof(s), "sysenv: opened with data \"%.100s\"\n", ( data != NULL ) ? data : "");
+	tm_putstring((CONST UB *)s);
+	if ( !no_uuid(target) && ( ui_uuid(SYSDEF_PROG_SYSENV, &me) < E_OK || memcmp(&me, target, sizeof(me)) != 0 )
+	  && is_copy(target, page, (INT)sizeof(page)) ) {
+		copy_obj = *target;
+		copy_due = TRUE;
+		if ( up ) {
+			copy_due = FALSE;
+			copy_open(&copy_obj);
+		}
+		return;
+	}
+	pg = page_named(data);
+	if ( pg != NULL ) page_show(pg, target);
+}
+
+/*
+ * The channel the desktop tells (DT_RQ_TELL): run again while the window
+ * is open (DT_HOW_AGAIN), with the object and the data it was run on
+ */
+LOCAL TS_UUID	told_ch;
+LOCAL ID	told_port = 0;
+
+LOCAL void listen( void )
+{
+	T_OBCRE	c;
+	T_OBNTF	req;
+	T_DTANS	an;
+	char	t[TS_UUID_STRLEN + 1];
+
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	if ( ob_cre_obj(&c, &told_ch) < E_OK ) return;
+	told_port = ob_opn_obj(&told_ch, OB_OP_READ | OB_OP_ATRRD | OB_O_NOWAIT);
+	if ( told_port <= 0 ) {
+		told_port = 0;
+		(void)ob_del_obj(&told_ch);
+		return;
+	}
+	memset(&req, 0, sizeof(req));
+	req.events = OB_E_CHANGE;
+	req.id = 3;
+	(void)ob_ntf_evt(told_port, OB_REC_ANY, &req, ui.port);
+	ts_uuid_text(&told_ch, t);
+	desk_name = "tessronos-sysenv";
+	(void)desk_req(DT_RQ_TELL, &told_ch, 0, 0, t, &an);
+	desk_name = NULL;
+}
+
+/* What the desktop told: TRUE when the notice was of that channel */
+LOCAL BOOL told( CONST T_OBNTM *m )
+{
+	static UB	*buf = NULL;	/* each notice read whole, its tail after it */
+	static SZ	cap = 0;
+	SZ		n;
+
+	if ( told_port <= 0 || memcmp(&m->uuid, &told_ch, sizeof(TS_UUID)) != 0 ) return FALSE;
+	while ( ( n = dq_read(told_port, &buf, &cap, TMO_POL) ) >= (SZ)sizeof(T_DTANS) ) {
+		CONST T_DTANS	*an = (CONST T_DTANS *)buf;
+
+		if ( an->how == DT_HOW_AGAIN ) {
+			/* the 固有データ it was run again with, as long as it is */
+			opened_on(&an->into, (CONST char *)dq_told_text(buf, n, DT_TAIL_DATA, NULL), TRUE);
+		}
+	}
+	return TRUE;
+}
+
+/* ---------------------------------------------------------------- 写し: a page's settings as an object */
+
+/*
+ * 写しを作る (design 11.6): what a page sets, as it is now, written into
+ * a new object of the person's -- record 1 the lines of those settings
+ * in the form of the machine's settings ("KEY<tab>VALUE"), record 0 a
+ * document with a link to each object a setting names (the wallpaper),
+ * its metadata's applist this program with the page as the entry's
+ * data, and tessronos.confcopy saying what it is: the page and the kind
+ * of machine it was made on. The settings stay where they are kept; the
+ * copy is a thing to carry and keep, and a link to it is put in the
+ * desktop's first window (DT_RQ_LINK_PUT).
+ *
+ * Opened (copy_open), the page shows the copy's values in its parts --
+ * a list marking the copy's choice and underlining the one set now --
+ * and asks before anything is set: 〈設定〉 sets them as the page's own
+ * parts would, 〈取り消し〉 puts the parts back as they are. Only the
+ * lines of the page's table are read (copy_allowed); any other line a
+ * copy has is passed over, so that a copy made elsewhere sets nothing
+ * but what the page sets, and nothing at all until 〈設定〉 is pressed.
+ * What is kept for this machine alone (the processors' roles, the
+ * devices' interrupts, the clock's limit, the watchdog, NET_ADAPTER,
+ * SYSUP, the network's addresses and Wi-Fi keys) is on no table.
+ */
+#define COPY_ROWS	48
+#define COPY_KEY	40
+
+typedef struct {
+	INT	n;
+	char	key[COPY_ROWS][COPY_KEY];
+	char	val[COPY_ROWS][CF_VAL_MAX];
+	BOOL	has_wall;
+	TS_UUID	wall;			/* the object a line names by the link of record 0: the wallpaper, the system's face */
+} COPYV;
+
+LOCAL COPYV	cv_now, cv_copy, cv_tmp;
+
+LOCAL CONST char *CONST keys_power[] = { "BUTTON_SLEEP", "LID_SLEEP", NULL };
+
+/* The relationship of the link of record 0 a page's line names its object by, and its label; NULL none */
+LOCAL CONST char *copy_role( CONST PAGE *pg, CONST char **p_label )
+{
+	if ( pg->sheet == S_WALL ) {
+		if ( p_label != NULL ) *p_label = "壁紙：";
+		return CF_ROLE_WALL;
+	}
+	if ( pg->sheet == S_FONT ) {
+		if ( p_label != NULL ) *p_label = "システムの書体：";
+		return CF_ROLE_FACE;
+	}
+	return NULL;
+}
+/* A DISPLAY.<ident> line: the ident hexadecimal, as the system writes it */
+LOCAL BOOL display_key( CONST char *k )
+{
+	INT	i;
+
+	if ( strncmp(k, "DISPLAY.", 8) != 0 || k[8] == 0 ) return FALSE;
+	for ( i = 8; k[i] != 0; i++ ) {
+		char	c = k[i];
+
+		if ( !( ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ) || ( c >= 'A' && c <= 'F' ) ) ) return FALSE;
+	}
+	return (BOOL)( i < COPY_KEY );
+}
+
+/* Whether the page's table has the line (cf_copy_allowed, lib/libconf) */
+LOCAL BOOL copy_allowed( CONST PAGE *pg, CONST char *key )
+{
+	return cf_copy_allowed(pg->name, key);
+}
+
+LOCAL void cv_put( COPYV *c, CONST char *key, CONST char *val )
+{
+	INT	i;
+
+	for ( i = 0; i < c->n; i++ ) {
+		if ( strcmp(c->key[i], key) == 0 ) break;
+	}
+	if ( i == c->n ) {
+		if ( c->n >= COPY_ROWS ) return;
+		c->n++;
+	}
+	snprintf(c->key[i], COPY_KEY, "%s", key);
+	snprintf(c->val[i], CF_VAL_MAX, "%s", val);
+}
+
+LOCAL CONST char *cv_get( CONST COPYV *c, CONST char *key )
+{
+	INT	i;
+
+	for ( i = 0; i < c->n; i++ ) {
+		if ( strcmp(c->key[i], key) == 0 ) return c->val[i];
+	}
+	return NULL;
+}
+
+/*
+ * The lines of a text of settings ("KEY<tab or blank>VALUE", # a remark),
+ * those the table has, into c
+ */
+LOCAL void cv_lines( COPYV *c, CONST PAGE *pg, CONST UB *src, INT slen )
+{
+	INT	i = 0, len;
+	UB	*t = (UB *)malloc((size_t)slen + 2);
+
+	/* the lines of the page's table alone (cf_copy_lines), the rest passed over */
+	if ( t == NULL ) return;
+	len = cf_copy_lines(src, slen, pg->name, t, slen + 2);
+
+	while ( i < len ) {
+		INT	s = i, ke, vs, e;
+		char	k[COPY_KEY], v[CF_VAL_MAX];
+
+		while ( i < len && t[i] != '\n' ) i++;
+		e = i;
+		i++;
+		if ( e > s && t[e - 1] == '\r' ) e--;
+		if ( s >= e || t[s] == '#' ) continue;
+		for ( ke = s; ke < e && t[ke] != ' ' && t[ke] != '\t'; ke++ ) ;
+		for ( vs = ke; vs < e && ( t[vs] == ' ' || t[vs] == '\t' ); vs++ ) ;
+		if ( ke - s >= COPY_KEY || e - vs >= CF_VAL_MAX ) continue;
+		memcpy(k, t + s, (size_t)( ke - s ));
+		k[ke - s] = 0;
+		memcpy(v, t + vs, (size_t)( e - vs ));
+		v[e - vs] = 0;
+		if ( copy_allowed(pg, k) ) cv_put(c, k, v);
+	}
+	free(t);
+}
+
+/* What the page sets now */
+LOCAL void cv_of_now( CONST PAGE *pg, COPYV *c )
+{
+	char	v[CF_VAL_MAX], w[48];
+	INT	len, i;
+
+	memset(c, 0, sizeof(*c));
+	switch ( pg->sheet ) {
+	case S_POWER:
+		len = sys_rec(OB_SYS_POWER);
+		if ( len > 0 && cf_get(text, len, "CAN", 0, v, sizeof(v)) && strstr(v, "SLEEP") != NULL ) {
+			cv_put(c, "BUTTON_SLEEP", ( cf_get(text, len, "BUTTON_SLEEP", 0, v, sizeof(v)) && cf_num(v, 0) != 0 ) ? "1" : "0");
+			cv_put(c, "LID_SLEEP", ( cf_get(text, len, "LID_SLEEP", 0, v, sizeof(v)) && cf_num(v, 0) != 0 ) ? "1" : "0");
+		}
+		break;
+	case S_WALL:
+		len = sys_rec(OB_SYS_WALL);
+		if ( len > 0 && cf_get(text, len, "WALLPAPER", 0, v, sizeof(v)) && cf_word(v, 0, w, sizeof(w))
+		  && ui_uuid(w, &c->wall) >= E_OK ) {
+			char	m[8], line[CF_VAL_MAX];
+
+			c->has_wall = TRUE;
+			snprintf(line, sizeof(line), "%s %d", w,
+				 ( cf_get(text, len, "MODE", 0, m, sizeof(m)) ) ? cf_num(m, 2) : 2);
+			cv_put(c, "WALLPAPER", line);
+		}
+		break;
+	case S_SCHEME:
+		len = sys_rec(OB_SYS_SCHEME);
+		cv_put(c, "SCHEME", ( len > 0 && cf_get(text, len, "SCHEME", 0, v, sizeof(v)) ) ? v : "0");
+		break;
+	case S_LOOK:
+		for ( i = 0; i < cf_look_nitem; i++ ) {
+			CONST CF_ITEM	*it = &cf_look_items[i];
+			INT		n = lk_get(it->look);
+
+			if ( it->look == LK_WASH || it->look == LK_BAR_WASH ) {
+				snprintf(v, sizeof(v), "0x%06x", (UINT)n & 0x00FFFFFFU);
+			} else {
+				snprintf(v, sizeof(v), "%d", n);
+			}
+			cv_put(c, it->key, v);
+		}
+		break;
+	case S_D_SCREEN:
+		len = disp_rec();
+		if ( len > 0 && cf_get(text, len, "SIZE", 0, v, sizeof(v)) ) cv_put(c, "SIZE", v);
+		if ( len > 0 && cf_get(text, len, "FIT", 0, v, sizeof(v)) && v[0] != 0 ) cv_put(c, "FIT", v);
+		if ( len > 0 && cf_get(text, len, "SCALE", 0, v, sizeof(v)) ) cv_put(c, "SCALE", v);
+		{
+			TS_UUID	u;
+
+			if ( ui_uuid(SYSDEF_CONF_DEV, &u) >= E_OK && ( len = rec_of(&u, 1) ) > 0 ) {
+				COPYV	*d = &cv_tmp;		/* only the DISPLAY lines are taken from it */
+				INT	k;
+
+				memset(d, 0, sizeof(*d));
+				cv_lines(d, pg, text, len);
+				for ( k = 0; k < d->n; k++ ) {
+					if ( display_key(d->key[k]) ) cv_put(c, d->key[k], d->val[k]);
+				}
+			}
+		}
+		break;
+	case S_FONT:
+	{
+		TS_UUID	u;
+		UB	*t = NULL;
+
+		if ( ui_uuid(SYSDEF_CONF_DEV, &u) >= E_OK && ( len = ui_rec_all(&u, 0, 0, &t) ) > 0
+		  && cf_link_get(t, len, CF_ROLE_FACE, &c->wall) ) {
+			char	us[TS_UUID_STRLEN + 1];
+
+			c->has_wall = TRUE;
+			ts_uuid_text(&c->wall, us);
+			cv_put(c, "SYSTEMFACE", us);
+		}
+		free(t);
+		break;
+	}
+	case S_D_KBD:
+		cv_put(c, "KBTYPE", ( dev_get("KBTYPE", v, sizeof(v)) && cf_num(v, 0x41) == 0x40 ) ? "0x40" : "0x41");
+		cv_put(c, "KBMODE", ( dev_get("KBMODE", v, sizeof(v)) && ( cf_num(v, 1) & 3 ) == 0 ) ? "0" : "1");
+		break;
+	case S_D_SOUND:
+		len = sys_rec(OB_SYS_SOUND);
+		cv_put(c, "SOUND_KEEP", ( len > 0 && cf_get(text, len, "KEEP", 0, v, sizeof(v)) && cf_num(v, 0) != 0 ) ? "1" : "0");
+		break;
+	default:
+		break;
+	}
+}
+
+/* The machine's kind, as the system object says it (BOARD) */
+LOCAL void board_of( char *b, INT max )
+{
+	INT	len = sys_rec(OB_SYS_INFO), i;
+
+	b[0] = 0;
+	if ( len > 0 ) (void)cf_get(text, len, "BOARD", 0, b, max);
+	for ( i = 0; b[i] != 0; i++ ) {
+		if ( b[i] == '"' || b[i] == '\\' || (UB)b[i] < 0x20 ) b[i] = ' ';
+	}
+}
+
+/* 写しを作る: the page shown, as it is now, into a new object linked from the first window */
+LOCAL void copy_make( void )
+{
+	CONST PAGE	*pg = page_of_sheet(ui_sheet(&ui));
+	static char	json[1024], body[COPY_ROWS * ( COPY_KEY + CF_VAL_MAX + 2 ) + 128];
+	static UB	doc[1024];
+	char		name[128], board[64], s[128];
+	CONST char	*label = "";
+	T_OBCRE		c;
+	T_OBREF		r;
+	T_DTANS		an;
+	TS_UUID		u, vobj, old;
+	INT		recno = -1, i, n, dlen;
+	SZ		asz = 0;
+	ID		k;
+	ER		er;
+
+	if ( pg == NULL || !pg->copies ) {
+		tell("このページには写せる設定がありません。");
+		return;
+	}
+	cv_of_now(pg, &cv_now);
+	if ( cv_now.n == 0 ) {
+		tell("このページには写せる設定がありません。");
+		return;
+	}
+	snprintf(name, sizeof(name), "システム環境設定（%s）の写し", pg->label);
+	board_of(board, (INT)sizeof(board));
+	snprintf(json, sizeof(json),
+		 "{\"name\":\"%s\",\"relationship\":[],\"linktype\":false,\"refCount\":0,"
+		 "\"editable\":true,\"deletable\":true,\"readable\":true,"
+		 "\"applist\":{\"tessronos-sysenv\":{\"name\":\"システム環境設定\",\"defaultOpen\":true,\"data\":\"%s\"}},"
+		 "\"tessronos\":{\"confcopy\":{\"page\":\"%s\",\"machine\":\"%s\"}}}",
+		 name, pg->name, pg->name, board);
+	n = snprintf(body, sizeof(body), "# システム環境設定の写し：%s\n", pg->label);
+	for ( i = 0; i < cv_now.n && n < (INT)sizeof(body) - 1; i++ ) {
+		n += snprintf(body + n, sizeof(body) - (size_t)n, "%s\t%s\n", cv_now.key[i], cv_now.val[i]);
+	}
+	dlen = snprintf((char *)doc, sizeof(doc),
+			"<tad version=\"1.0\" encoding=\"UTF-8\">\n<document>\n<p>%s</p>\n</document>\n</tad>\n", name);
+	if ( cv_now.has_wall && copy_role(pg, &label) != NULL && ts_gen_uuid(&vobj) >= E_OK ) {
+		INT	m = cf_link_put(doc, dlen, (INT)sizeof(doc) - 1, copy_role(pg, NULL), &cv_now.wall, &vobj, label, &old);
+
+		if ( m > 0 ) dlen = m;
+	}
+	memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.json = (CONST UB *)json;
+	c.jsonsz = (SZ)strlen(json);
+	er = ob_cre_obj(&c, &u);
+	if ( er < E_OK ) {
+		tell("写しの実身を作れませんでした。");
+		return;
+	}
+	k = ob_opn_obj(&u, OB_OP_R | OB_OP_W | OB_O_EXCL);	/* filled before anyone reads it */
+	if ( k <= 0 ) {
+		(void)ob_del_obj(&u);
+		tell("写しの実身を作れませんでした。");
+		return;
+	}
+	er = ob_apd_rec(k, OB_RT_TAD, 0, &recno);
+	if ( er >= E_OK ) er = ob_wri_rec(k, recno, 0, doc, (SZ)dlen, &asz);
+	if ( er >= E_OK ) er = ob_apd_rec(k, OB_RT_SYSDATA, 0, &recno);
+	if ( er >= E_OK ) er = ob_wri_rec(k, recno, 0, body, (SZ)n, &asz);
+	ob_cls_obj(k);
+	if ( er < E_OK ) {
+		(void)ob_del_obj(&u);
+		tell("写しの実身を作れませんでした。");
+		return;
+	}
+	/* the wallpaper counted as linked from the copy, where the store does not count */
+	if ( cv_now.has_wall && ob_ref_obj(&u, &r) >= E_OK && ( r.flags & OB_F_AUTOREF ) == 0 ) {
+		(void)ob_lnk_obj(&cv_now.wall);
+	}
+	desk_name = name;
+	er = desk_req(DT_RQ_LINK_PUT, &u, 0, 0, NULL, &an);
+	desk_name = NULL;
+	snprintf(s, sizeof(s), "sysenv: copy of \"%s\" made, %d lines (%d)\n", pg->name, cv_now.n, (INT)er);
+	tm_putstring((CONST UB *)s);
+}
+
+/*
+ * このページの仮身を作る: a link to this program's object, its own applist
+ * naming this program with the page as the entry's data (固有データ),
+ * put in the desktop's first window (DT_RQ_LINK_PUT with DT_F_APPLIST).
+ * Opened, it opens this page. The link is named for the page; what its
+ * band shows is the object's name, システム環境設定, which a link does
+ * not change.
+ */
+LOCAL void page_link( void )
+{
+	CONST PAGE	*pg = page_of_sheet(ui_sheet(&ui));
+	char		name[96], appl[160], s[128];
+	TS_UUID		me;
+	T_DTANS		an;
+	ER		er;
+
+	if ( pg == NULL || ui_uuid(SYSDEF_PROG_SYSENV, &me) < E_OK ) return;
+	snprintf(name, sizeof(name), "システム環境設定（%s）", pg->label);
+	snprintf(appl, sizeof(appl), "{\"tessronos-sysenv\":{\"name\":\"システム環境設定\",\"data\":\"%s\"}}", pg->name);
+	desk_name = name;
+	er = desk_req(DT_RQ_LINK_PUT, &me, 0, DT_F_APPLIST, appl, &an);
+	desk_name = NULL;
+	snprintf(s, sizeof(s), "sysenv: link of page \"%s\" put (%d)\n", pg->name, (INT)er);
+	tm_putstring((CONST UB *)s);
+	if ( er < E_OK ) tell("このページの仮身を置けませんでした。");
+}
+
+/* Whether u is a 写し, and of which page */
+LOCAL BOOL is_copy( CONST TS_UUID *u, char *page, INT max )
+{
+	static UB	meta[4096];
+	T_JSON		root, tf, g;
+	SZ		asz = 0;
+	ID		key;
+	BOOL		is = FALSE;
+
+	page[0] = 0;
+	key = ob_opn_obj(u, OB_OP_R);
+	if ( key <= 0 ) return FALSE;
+	if ( ob_get_atr(key, meta, sizeof(meta) - 1, &asz) >= E_OK
+	  && js_parse(meta, (INT)asz, &root) >= E_OK
+	  && js_get(&root, "tessronos", &tf) >= E_OK && js_get(&tf, "confcopy", &g) >= E_OK ) {
+		is = (BOOL)( js_get_str(&g, "page", (UB *)page, max) > 0 );
+	}
+	ob_cls_obj(key);
+	return is;
+}
+
+/* A value of the copy that this machine cannot take, said and left out */
+LOCAL INT	cv_dropped;
+LOCAL char	cv_drop_said[96];
+
+LOCAL void cv_drop( CONST char *key, CONST char *why )
+{
+	INT	i;
+
+	for ( i = 0; i < cv_copy.n; i++ ) {
+		if ( strcmp(cv_copy.key[i], key) != 0 ) continue;
+		for ( ; i + 1 < cv_copy.n; i++ ) {
+			memcpy(cv_copy.key[i], cv_copy.key[i + 1], COPY_KEY);
+			memcpy(cv_copy.val[i], cv_copy.val[i + 1], CF_VAL_MAX);
+		}
+		cv_copy.n--;
+		if ( cv_dropped++ == 0 ) snprintf(cv_drop_said, sizeof(cv_drop_said), "%s", why);
+		return;
+	}
+}
+
+/*
+ * The copy's values checked as this machine can take them: a size of
+ * the screen it does not offer, a scale it does not have, a scheme or a
+ * value out of its range are left out
+ */
+LOCAL void cv_check( CONST PAGE *pg )
+{
+	CONST char	*v;
+	INT		i, a, b;
+
+	switch ( pg->sheet ) {
+	case S_POWER:
+		for ( i = 0; keys_power[i] != NULL; i++ ) {
+			if ( ( v = cv_get(&cv_copy, keys_power[i]) ) != NULL && cv_get(&cv_now, keys_power[i]) == NULL ) {
+				cv_drop(keys_power[i], "この機器はスリープできません。");
+			}
+		}
+		break;
+	case S_SCHEME:
+		if ( ( v = cv_get(&cv_copy, "SCHEME") ) != NULL && ( cf_num(v, -1) < 0 || cf_num(v, -1) >= nscheme ) ) {
+			cv_drop("SCHEME", "その配色はこの機器にありません。");
+		}
+		break;
+	case S_WALL:
+		if ( cv_get(&cv_copy, "WALLPAPER") != NULL && !cv_copy.has_wall ) {
+			cv_drop("WALLPAPER", "写しに背景の実身がありません。");
+		}
+		break;
+	case S_FONT:
+		if ( cv_get(&cv_copy, "SYSTEMFACE") != NULL && ( !cv_copy.has_wall || !in_box(&cv_copy.wall) ) ) {
+			cv_drop("SYSTEMFACE", "その書体はこの機器の書体箱にありません。");
+		}
+		break;
+	case S_LOOK:
+		for ( i = 0; i < cf_look_nitem; i++ ) {
+			CONST CF_ITEM	*it = &cf_look_items[i];
+			INT		n;
+
+			if ( ( v = cv_get(&cv_copy, it->key) ) == NULL ) continue;
+			n = cf_num(v, it->lo - 1);
+			if ( it->look != LK_WASH && it->look != LK_BAR_WASH && ( n < it->lo || n > it->hi ) ) {
+				cv_drop(it->key, "ウィンドウの値の一部が範囲の外です。");
+			}
+		}
+		break;
+	case S_D_SCREEN:
+		if ( ( v = cv_get(&cv_copy, "SIZE") ) != NULL ) {
+			a = b = 0;
+			wxh(v, &a, &b);
+			scr_out = 0;
+			fill_screen();
+			for ( i = 0; i < nmode && !( modes[i].w == a && modes[i].h == b ); i++ ) ;
+			if ( i == nmode ) cv_drop("SIZE", "この画面はその大きさにできないので、大きさを外しました。");
+		}
+		if ( ( v = cv_get(&cv_copy, "SCALE") ) != NULL ) {
+			a = cf_num(v, 100);
+			for ( i = 0; i < nscale && scale_of[i] != a; i++ ) ;
+			if ( i == nscale ) cv_drop("SCALE", "この画面にない倍率なので、倍率を外しました。");
+		}
+		if ( ( v = cv_get(&cv_copy, "FIT") ) != NULL && strcmp(v, "aspect") != 0 && strcmp(v, "stretch") != 0 ) {
+			cv_drop("FIT", "比の違う大きさの置き方が正しくありません。");
+		}
+		for ( i = 0; i < cv_copy.n; i++ ) {
+			char	w[8];
+
+			if ( display_key(cv_copy.key[i]) && ( !cf_word(cv_copy.val[i], 0, w, sizeof(w))
+							   || ( strcmp(w, "on") != 0 && strcmp(w, "off") != 0 ) ) ) {
+				cv_drop(cv_copy.key[i], "ディスプレイの配置の値が正しくありません。");
+				i--;
+			}
+		}
+		break;
+	case S_D_KBD:
+		if ( ( v = cv_get(&cv_copy, "KBTYPE") ) != NULL && cf_num(v, 0) != 0x40 && cf_num(v, 0) != 0x41 ) {
+			cv_drop("KBTYPE", "キーボード種別の値が正しくありません。");
+		}
+		if ( ( v = cv_get(&cv_copy, "KBMODE") ) != NULL && ( cf_num(v, -1) < 0 || cf_num(v, -1) > 1 ) ) {
+			cv_drop("KBMODE", "起動時の入力モードの値が正しくありません。");
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+/* The wallpaper's place in the wallpaper box's list, from 1; 0 not there */
+LOCAL INT wall_row( CONST TS_UUID *u )
+{
+	INT	i;
+
+	for ( i = 0; i < nwall; i++ ) {
+		if ( memcmp(u, &wall_id[i], sizeof(*u)) == 0 ) return i + 1;
+	}
+	return 0;
+}
+
+/*
+ * The copy's values in the page's parts, not set: a list marks the
+ * copy's choice and underlines what is set now. show FALSE puts the
+ * parts back as things are.
+ */
+LOCAL void cv_show( CONST PAGE *pg, BOOL show )
+{
+	CONST char	*v;
+	INT		i, f[2];
+
+	switch ( pg->sheet ) {
+	case S_POWER:
+		sleep_rows();
+		if ( show && ( v = cv_get(&cv_copy, "BUTTON_SLEEP") ) != NULL ) ui_set_value(&ui, P_BTN_SLEEP, cf_num(v, 0) != 0);
+		if ( show && ( v = cv_get(&cv_copy, "LID_SLEEP") ) != NULL ) ui_set_value(&ui, P_LID_SLEEP, cf_num(v, 0) != 0);
+		break;
+	case S_WALL:
+		fill_walls();
+		if ( show && ( v = cv_get(&cv_copy, "WALLPAPER") ) != NULL ) {
+			char	m[8];
+
+			ui_set_now(&ui, P_WALLS, wall_row(&cv_copy.wall), wall_cur);
+			if ( cf_word(v, 1, m, sizeof(m)) ) ui_set_value(&ui, P_WALL_MODE, cf_num(m, 2) + 1);
+		}
+		break;
+	case S_SCHEME:
+		fill_schemes();
+		if ( show && ( v = cv_get(&cv_copy, "SCHEME") ) != NULL ) {
+			INT	now = ui_value(&ui, P_SCHEMES);
+
+			ui_set_now(&ui, P_SCHEMES, cf_num(v, 0) + 1, now);
+		}
+		break;
+	case S_LOOK:
+		lk_pv_on = FALSE;
+		if ( show ) {
+			for ( i = 0; i < cf_look_nitem && i < LK_N; i++ ) {
+				v = cv_get(&cv_copy, cf_look_items[i].key);
+				lk_pv_val[i] = ( v != NULL ) ? cf_num(v, 0) : lk_get(cf_look_items[i].look);
+			}
+			lk_pv_on = TRUE;
+		}
+		look_fill();
+		lk_pv_on = FALSE;
+		break;
+	case S_D_SCREEN:
+		scr_out = 0;
+		fill_screen();
+		if ( !show ) break;
+		if ( ( v = cv_get(&cv_copy, "SIZE") ) != NULL ) {
+			f[0] = f[1] = 0;
+			wxh(v, &f[0], &f[1]);
+			ui_set_fields(&ui, P_SCR_SIZE, f, 2);
+			for ( i = 0; i < nmode; i++ ) {
+				if ( modes[i].w == f[0] && modes[i].h == f[1] ) ui_set_now(&ui, P_SCR_LIST, i + 1, mode_cur);
+			}
+		}
+		if ( ( v = cv_get(&cv_copy, "FIT") ) != NULL && scr_fit[0] != 0 ) {
+			ui_set_value(&ui, P_SCR_FIT, ( strcmp(v, "stretch") == 0 ) ? 2 : 1);
+		}
+		if ( ( v = cv_get(&cv_copy, "SCALE") ) != NULL ) {
+			for ( i = 0; i < nscale; i++ ) {
+				if ( scale_of[i] == cf_num(v, 100) ) ui_set_value(&ui, P_SCR_SCALE, i + 1);
+			}
+		}
+		break;
+	case S_D_KBD:
+		fill_kbd();
+		if ( !show ) break;
+		if ( ( v = cv_get(&cv_copy, "KBTYPE") ) != NULL ) {
+			ui_set_now(&ui, P_KBD_TYPE, ( cf_num(v, 0x41) == 0x40 ) ? 2 : 1, ( wm_look(LK_KBD_US) != 0 ) ? 2 : 1);
+		}
+		if ( ( v = cv_get(&cv_copy, "KBMODE") ) != NULL ) ui_set_value(&ui, P_KBD_MODE, ( cf_num(v, 1) == 0 ) ? 1 : 2);
+		break;
+	case S_D_SOUND:
+		fill_sound();
+		if ( show && ( v = cv_get(&cv_copy, "SOUND_KEEP") ) != NULL ) ui_set_value(&ui, P_SND_KEEP, cf_num(v, 0) != 0);
+		break;
+	default:
+		break;
+	}
+}
+
+/* 〈設定〉: the copy's values set as the page's own parts set them */
+LOCAL void cv_set( CONST PAGE *pg )
+{
+	CONST char	*v;
+	INT		i;
+	ER		er = E_OK;
+
+	switch ( pg->sheet ) {
+	case S_POWER:
+	{
+		CONST char	*b = cv_get(&cv_copy, "BUTTON_SLEEP"), *l = cv_get(&cv_copy, "LID_SLEEP");
+		INT		bi = ( b != NULL ) ? ( cf_num(b, 0) != 0 ) : ( ui_value(&ui, P_BTN_SLEEP) != 0 );
+		INT		li = ( l != NULL ) ? ( cf_num(l, 0) != 0 ) : ( ui_value(&ui, P_LID_SLEEP) != 0 );
+		char		p[32];
+
+		er = dev_put("BUTTON_SLEEP", bi ? "1" : "0");
+		if ( er >= E_OK ) er = dev_put("LID_SLEEP", li ? "1" : "0");
+		snprintf(p, sizeof(p), "POLICY %d %d", bi, li);
+		if ( er >= E_OK ) (void)sys_write(OB_SYS_POWER, p);
+		sleep_rows();
+		break;
+	}
+	case S_WALL:
+		if ( ( v = cv_get(&cv_copy, "WALLPAPER") ) != NULL && cv_copy.has_wall ) {
+			char	us[TS_UUID_STRLEN + 1], m[8], line[64];
+
+			ts_uuid_text(&cv_copy.wall, us);
+			snprintf(line, sizeof(line), "%s %d", us, cf_word(v, 1, m, sizeof(m)) ? cf_num(m, 2) : 2);
+			er = sys_write(OB_SYS_WALL, line);
+			if ( er >= E_OK ) {
+				(void)dev_link_put(CF_ROLE_WALL, &cv_copy.wall, "壁紙：");
+				er = dev_put("WALLPAPER", line);
+			} else {
+				tell("背景画面データは不正またはサポート範囲外です。");
+				er = E_OK;
+			}
+		}
+		fill_walls();
+		break;
+	case S_SCHEME:
+		if ( ( v = cv_get(&cv_copy, "SCHEME") ) != NULL ) {
+			ui_set_value(&ui, P_SCHEMES, cf_num(v, 0) + 1);
+			scheme_set();
+		}
+		break;
+	case S_FONT:
+		if ( cv_get(&cv_copy, "SYSTEMFACE") != NULL && cv_copy.has_wall ) {
+			char	m[96], us[TS_UUID_STRLEN + 1];
+
+			er = dev_link_put(CF_ROLE_FACE, &cv_copy.wall, "システムの書体：");
+			ts_uuid_text(&cv_copy.wall, us);
+			snprintf(m, sizeof(m), "sysenv: system face %s (%d)\n", us, (INT)er);
+			tm_putstring((CONST UB *)m);
+			if ( er >= E_OK ) tell("システムの書体は、次の起動から使われます。");
+		}
+		break;
+	case S_LOOK:
+		for ( i = 0; i < cf_look_nitem; i++ ) {
+			if ( ( v = cv_get(&cv_copy, cf_look_items[i].key) ) != NULL ) lk_put(cf_look_items[i].look, cf_num(v, 0));
+		}
+		look_keep();
+		look_fill();
+		break;
+	case S_D_SCREEN:
+		/* the displays' places first: kept, and taken when that display is there */
+		for ( i = 0; i < cv_copy.n && er >= E_OK; i++ ) {
+			if ( display_key(cv_copy.key[i]) ) er = dev_put(cv_copy.key[i], cv_copy.val[i]);
+		}
+		cv_show(pg, TRUE);
+		if ( cv_get(&cv_copy, "SIZE") != NULL || cv_get(&cv_copy, "SCALE") != NULL || cv_get(&cv_copy, "FIT") != NULL ) {
+			screen_set();			/* the desktop asks whether it shows right */
+		}
+		break;
+	case S_D_KBD:
+		cv_show(pg, TRUE);
+		kbd_set();
+		break;
+	case S_D_SOUND:
+		cv_show(pg, TRUE);
+		sound_keep();
+		break;
+	default:
+		break;
+	}
+	if ( er == E_OACV ) {
+		tell("機器の設定を変更する権限がありません。");
+	} else if ( er < E_OK ) {
+		tell("設定した内容が保存できません。");
+	}
+}
+
+/* The words a line of the copy is said by, in the question */
+LOCAL CONST char *cv_label( CONST char *key )
+{
+	if ( strcmp(key, "WALLPAPER") == 0 ) return "背景";
+	if ( strcmp(key, "SYSTEMFACE") == 0 ) return "システムの書体";
+	if ( strcmp(key, "SCHEME") == 0 ) return "配色";
+	if ( strcmp(key, "SIZE") == 0 ) return "画面の大きさ";
+	if ( strcmp(key, "FIT") == 0 ) return "比の違う大きさ";
+	if ( strcmp(key, "SCALE") == 0 ) return "表示の倍率";
+	if ( strncmp(key, "DISPLAY.", 8) == 0 ) return "ディスプレイの配置";
+	if ( strcmp(key, "KBTYPE") == 0 ) return "キーボード種別";
+	if ( strcmp(key, "KBMODE") == 0 ) return "起動時の入力モード";
+	if ( strcmp(key, "SOUND_KEEP") == 0 ) return "出力を止めずに流し続ける";
+	if ( strcmp(key, "BUTTON_SLEEP") == 0 ) return "電源ボタン";
+	if ( strcmp(key, "LID_SLEEP") == 0 ) return "蓋を閉じたとき";
+	return "ウィンドウの見た目";
+}
+
+/*
+ * A copy opened: its page shown with the copy's values in the parts, and
+ * asked whether to set them. Nothing is set by opening it.
+ */
+LOCAL void copy_open( CONST TS_UUID *u )
+{
+	CONST PAGE	*pg;
+	char		page[32], l1[128], l2[160], s[128];
+	UB		*t = NULL, *cname;
+	INT		len, i, differ = 0, n = 0;
+	BOOL		yes;
+
+	if ( !is_copy(u, page, (INT)sizeof(page)) || ( pg = page_named(page) ) == NULL || !pg->copies ) {
+		tell("この写しはシステム環境設定のページのものではありません。");
+		return;
+	}
+	page_show(pg, NULL);
+	memset(&cv_copy, 0, sizeof(cv_copy));
+	len = ui_rec_all(u, 1, 0, &t);
+	if ( len > 0 ) cv_lines(&cv_copy, pg, t, len);
+	free(t);
+	t = NULL;
+	if ( copy_role(pg, NULL) != NULL && ( len = ui_rec_all(u, 0, 0, &t) ) > 0 ) {
+		cv_copy.has_wall = cf_link_get(t, len, copy_role(pg, NULL), &cv_copy.wall);
+	}
+	free(t);
+	cv_of_now(pg, &cv_now);
+	cv_dropped = 0;
+	cv_check(pg);
+	l2[0] = 0;
+	for ( i = 0; i < cv_copy.n; i++ ) {
+		CONST char	*now = cv_get(&cv_now, cv_copy.key[i]), *lb = cv_label(cv_copy.key[i]);
+		BOOL		same = (BOOL)( now != NULL && strcmp(now, cv_copy.val[i]) == 0 );
+
+		if ( strcmp(cv_copy.key[i], "SYSTEMFACE") == 0 ) {
+			same = (BOOL)( cv_now.has_wall && cv_copy.has_wall
+				      && memcmp(&cv_now.wall, &cv_copy.wall, sizeof(TS_UUID)) == 0 );
+		}
+		if ( strcmp(cv_copy.key[i], "WALLPAPER") == 0 && cv_now.has_wall && cv_copy.has_wall ) {
+			char	a[8], b[8];
+
+			same = (BOOL)( memcmp(&cv_now.wall, &cv_copy.wall, sizeof(TS_UUID)) == 0 && now != NULL
+				      && cf_word(now, 1, a, sizeof(a)) && cf_word(cv_copy.val[i], 1, b, sizeof(b))
+				      && strcmp(a, b) == 0 );
+		}
+		if ( same ) continue;
+		differ++;
+		if ( strstr(l2, lb) != NULL ) continue;
+		if ( strlen(l2) + strlen(lb) + 8 < 96 ) {
+			if ( n++ > 0 ) strcat(l2, "、");
+			strcat(l2, lb);
+		} else if ( strstr(l2, " ほか") == NULL ) {
+			strcat(l2, " ほか");
+		}
+	}
+	snprintf(s, sizeof(s), "sysenv: copy of \"%s\" opened, %d lines, %d differ, %d left out\n",
+		 pg->name, cv_copy.n, differ, cv_dropped);
+	tm_putstring((CONST UB *)s);
+	if ( cv_dropped > 0 ) tell(cv_drop_said);
+	if ( cv_copy.n == 0 ) {
+		tell("この写しには、このページで設定できる値がありません。");
+		return;
+	}
+	cv_show(pg, TRUE);
+	cname = ui_obj_name(u);
+	snprintf(l1, sizeof(l1), "「%s」の値を表示しています。", ( cname != NULL ) ? (CONST char *)cname : "");
+	free(cname);
+	if ( differ == 0 ) {
+		snprintf(l2, sizeof(l2), "今の設定と同じです。");
+	} else {
+		char	w[176];
+
+		snprintf(w, sizeof(w), "違う項目：%s", l2);
+		snprintf(l2, sizeof(l2), "%s", w);
+	}
+	yes = confirm3(l1, l2, "〈設定〉を押すと、この値を設定します。", "設定");
+	if ( yes ) {
+		cv_set(pg);
+	} else {
+		cv_show(pg, FALSE);
+	}
+	snprintf(s, sizeof(s), "sysenv: copy of \"%s\" %s\n", pg->name, yes ? "set" : "put back");
+	tm_putstring((CONST UB *)s);
+}
+
 /* ---------------------------------------------------------------- the menu */
 
 LOCAL BOOL is_code( CONST T_MNSEL *sel, CONST char *code )
@@ -4948,6 +6068,12 @@ LOCAL void menu( CONST T_OBNTM *m )
 		 */
 		if ( ui_uuid(SYSDEF_MENU_SYSENV_OP, &od) >= E_OK ) {
 			(void)mn_chg_atr(mid, &od, "font.save", font ? 0 : MN_GREY);
+			{
+				CONST PAGE	*pg = page_of_sheet(ui_sheet(&ui));
+
+				(void)mn_chg_atr(mid, &od, "copy.make", ( pg != NULL && pg->copies ) ? 0 : MN_GREY);
+				(void)mn_chg_atr(mid, &od, "page.link", ( pg != NULL ) ? 0 : MN_GREY);
+			}
 			(void)mn_chg_atr(mid, &od, "delete",
 					 ( font || ( ui_sheet(&ui) == S_VERSION && k >= 0 && k < nprog
 						     && !prog_info[k].builtin && !prog_info[k].kept ) ) ? 0 : MN_GREY);
@@ -4966,6 +6092,10 @@ LOCAL void menu( CONST T_OBNTM *m )
 		}
 	} else if ( is_code(&sel, "font.save") ) {
 		font_save();
+	} else if ( is_code(&sel, "copy.make") ) {
+		copy_make();
+	} else if ( is_code(&sel, "page.link") ) {
+		page_link();
 	} else if ( is_code(&sel, "again") ) {
 		fill_power();
 		fill_walls();
@@ -5201,6 +6331,11 @@ int main( void )
 
 	ui_icon(SYSDEF_PROG_SYSENV);
 	/*
+	 * the window stands for the program object: opened again, from a
+	 * page's link, a copy or a device, this window is told ("once")
+	 */
+	ui_shows(SYSDEF_PROG_SYSENV);
+	/*
 	 * The bar down the right: the panel's sheets scroll in it when the
 	 * screen leaves the window shorter than the panel (scroll="true"
 	 * on its tags); the buttons at the sheets' foot stay in sight.
@@ -5218,8 +6353,33 @@ int main( void )
 	look_start();
 	fill_fonts();
 	fill_version();
+	/*
+	 * the object and the 固有データ it was opened with (T_PRCOPEN): the
+	 * page shown before the window comes up, a copy's question after
+	 */
+	{
+		SZ		n = ts_get_arg(NULL, 0);	/* the whole argument's size, the data after it */
+		T_PRCOPEN	*a = (T_PRCOPEN *)calloc(1, ( n > (SZ)sizeof(T_PRCOPEN) ) ? (size_t)n : sizeof(T_PRCOPEN));
+
+		if ( a == NULL ) {
+			tell("メモリが足りないため、開いたページを表示できませんでした。");
+		} else {
+			if ( n > 0 ) n = ts_get_arg(a, ( n > (SZ)sizeof(T_PRCOPEN) ) ? n : (SZ)sizeof(T_PRCOPEN));
+			if ( n >= (SZ)sizeof(TS_UUID) ) {
+				CONST UB	*data = dt_prcopen_data(a, n);
+
+				opened_on(&a->target, ( data != NULL ) ? (CONST char *)data : "", FALSE);
+			}
+			free(a);
+		}
+	}
+	listen();
 	ui_reveal(&ui);
 	tm_putstring((CONST UB *)"sysenv: ready\n");
+	if ( copy_due ) {
+		copy_due = FALSE;
+		copy_open(&copy_obj);
+	}
 
 	ksnd = sound_watch();
 	while ( !closing ) {
@@ -5228,6 +6388,7 @@ int main( void )
 				if ( ui_sheet(&ui) == S_D_SOUND ) sound_told();
 				continue;
 			}
+			if ( told(&m) ) continue;
 			if ( adp_told(&m) ) continue;
 			if ( pw_told(&m) ) continue;
 			if ( fsw.open && ui_mine(&fsw.w, &m) ) {
@@ -5269,6 +6430,10 @@ int main( void )
 		if ( !closing ) due();
 	}
 	if ( ksnd > 0 ) ob_cls_obj(ksnd);
+	if ( told_port > 0 ) {
+		ob_cls_obj(told_port);
+		(void)ob_del_obj(&told_ch);
+	}
 	if ( adp_kn > 0 ) ob_cls_obj(adp_kn);
 	if ( adp_kdevs > 0 ) ob_cls_obj(adp_kdevs);
 	pw_close();

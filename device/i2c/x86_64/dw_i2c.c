@@ -100,7 +100,7 @@
 #define PM_STATE		0x0003
 #define PM_PME_STATUS		0x8000		/* write 1 to clear: kept as it is */
 
-#define DW_MAX			8
+#define DW_FIRST		8		/* controllers the table starts with; it doubles when full */
 
 typedef struct {
 	T_I2CBUS	bus;
@@ -114,8 +114,31 @@ typedef struct {
 	UW		fw[5];		/* the firmware's counts: SS high, low, FS high, low, SDA hold */
 } DWI2C;
 
-LOCAL DWI2C	dw[DW_MAX];
-LOCAL INT	ndw = 0;
+/*
+ * The controllers set up, as many as the I2C devices ask for: the table
+ * holds a pointer to each, taken once and kept, since its bus is handed
+ * out (&d->bus). A table grown is put in place after its entries; the
+ * one before is not given back.
+ */
+LOCAL DWI2C	**dw = NULL;
+LOCAL INT	ndw = 0, dw_cap = 0;
+
+/* Room in the table for one more: E_OK or E_NOMEM */
+LOCAL ER dw_room( void )
+{
+	DWI2C	**t;
+	INT	cap, i;
+
+	if ( ndw < dw_cap ) return E_OK;
+	cap = ( dw_cap > 0 ) ? dw_cap * 2 : DW_FIRST;
+	t = (DWI2C **)Kmalloc(sizeof(DWI2C *) * (SZ)cap);
+	if ( t == NULL ) return E_NOMEM;
+	for ( i = 0; i < ndw; i++ ) t[i] = dw[i];
+	DeviceBarrier();
+	dw = t;
+	dw_cap = cap;
+	return E_OK;
+}
 
 LOCAL UW  rd( DWI2C *d, UW o ) { return in_w(d->base + o); }
 LOCAL void wr( DWI2C *d, UW o, UW v ) { out_w(d->base + o, v); }
@@ -288,8 +311,8 @@ EXPORT T_I2CBUS *knl_dwi2c_bus( UW adr, void *acpi, UW hz )
 
 	if ( hz == 0 ) hz = 100000;
 	for ( i = 0; i < ndw; i++ ) {
-		if ( dw[i].adr == adr ) {
-			d = &dw[i];
+		if ( dw[i]->adr == adr ) {
+			d = dw[i];
 			if ( hz < d->hz ) {
 				tk_loc_mtx(d->mtx, TMO_FEVR);
 				set_speed(d, hz);
@@ -298,12 +321,15 @@ EXPORT T_I2CBUS *knl_dwi2c_bus( UW adr, void *acpi, UW hz )
 			return &d->bus;
 		}
 	}
-	if ( ndw >= DW_MAX ) return NULL;
 	if ( !lpss_find(adr, &p) ) {
 		tm_printf((UB *)"i2c: no LPSS function at %d.%d\n", adr >> 16, adr & 0xffff);
 		return NULL;
 	}
-	d = &dw[ndw];
+	d = ( dw_room() >= E_OK ) ? (DWI2C *)Kmalloc(sizeof(DWI2C)) : NULL;
+	if ( d == NULL ) {
+		tm_printf((UB *)"i2c: no memory for the controller at %d.%d\n", adr >> 16, adr & 0xffff);
+		return NULL;
+	}
 	knl_memset(d, 0, sizeof(*d));
 	d->acpi = acpi;
 	(void)tm_sprintf(d->bus.name, (UB *)"i2c%d.%d", p.dev, p.fn);
@@ -313,6 +339,7 @@ EXPORT T_I2CBUS *knl_dwi2c_bus( UW adr, void *acpi, UW hz )
 	d->base = ts_pcie_bar_base(&p, 0);
 	if ( d->base == 0 || p.bar_size[0] < 0x1000 ) {
 		tm_printf((UB *)"i2c: %s %04x: no memory window\n", d->bus.name, p.device);
+		Kfree(d);
 		return NULL;
 	}
 	caps = rd(d, LPSS_CAPS);
@@ -322,6 +349,7 @@ EXPORT T_I2CBUS *knl_dwi2c_bus( UW adr, void *acpi, UW hz )
 		  d0 < 0 ? 0 : d0, caps, was);
 	if ( caps == 0xffffffff || LPSS_CAPS_TYPE(caps) != LPSS_TYPE_I2C ) {
 		tm_printf((UB *)"i2c: %s is not an I2C controller of the LPSS\n", d->bus.name);
+		Kfree(d);
 		return NULL;
 	}
 	/* the firmware's counts, when it had the controller running */
@@ -339,6 +367,7 @@ EXPORT T_I2CBUS *knl_dwi2c_bus( UW adr, void *acpi, UW hz )
 	WaitUsec(100);
 	if ( rd(d, IC_COMP_TYPE) != COMP_TYPE_DW ) {
 		tm_printf((UB *)"i2c: %s is not a DesignWare controller (%08x)\n", d->bus.name, rd(d, IC_COMP_TYPE));
+		Kfree(d);
 		return NULL;
 	}
 	d->adr = adr;
@@ -348,12 +377,17 @@ EXPORT T_I2CBUS *knl_dwi2c_bus( UW adr, void *acpi, UW hz )
 	cm.exinf = NULL;
 	cm.mtxatr = TA_TFIFO;
 	d->mtx = tk_cre_mtx(&cm);
-	if ( d->mtx <= 0 ) return NULL;
+	if ( d->mtx <= 0 ) {
+		Kfree(d);
+		return NULL;
+	}
 	set_speed(d, hz);
 	d->bus.ctx = d;
 	d->bus.xfer = dw_xfer;
 	tm_printf((UB *)"TessronOS: i2c %04x:%04x at %d:%d.%d, version %08x, FIFO %d\n", p.vendor, p.device,
 		  p.bus, p.dev, p.fn, d->ver, d->fifo);
+	dw[ndw] = d;
+	DeviceBarrier();
 	ndw++;
 	return &d->bus;
 }
@@ -367,7 +401,7 @@ LOCAL ER dw_pm_suspend( void *arg, INT how )
 {
 	INT	i;
 
-	for ( i = 0; i < ndw; i++ ) tk_loc_mtx(dw[i].mtx, TMO_FEVR);
+	for ( i = 0; i < ndw; i++ ) tk_loc_mtx(dw[i]->mtx, TMO_FEVR);
 	return E_OK;
 }
 
@@ -376,7 +410,7 @@ LOCAL void dw_pm_resume( void *arg, INT how )
 	INT	i;
 
 	for ( i = 0; i < ndw; i++ ) {
-		DWI2C	*d = &dw[i];
+		DWI2C	*d = dw[i];
 
 		if ( how == PM_S3 ) {
 			if ( d->acpi != NULL ) (void)knl_acpica_call(d->acpi, "_PS0");

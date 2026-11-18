@@ -57,18 +57,20 @@ EXPORT void mc_free( void *p )
 EXPORT INT mc_link_name( CONST UB *el, INT len, UB *out, INT max )
 {
 	TS_UUID	u;
-	T_OBREF	ref;
-	INT	n = 0;
+	UB	*nm;
+	SZ	nl = 0, n;
 
 	if ( max <= 0 ) return 0;
 	out[0] = 0;
-	if ( !ct_target(el, len, &u) || ob_ref_obj(&u, &ref) < E_OK ) return 0;
-	while ( n < max - 1 && n < OB_NAME_MAX && ref.name[n] != 0 ) {
-		out[n] = ref.name[n];
-		n++;
-	}
+	if ( !ct_target(el, len, &u) ) return 0;
+	nm = knl_ob_name(&u, &nl, NULL);
+	if ( nm == NULL ) return 0;
+	/* what fits of the whole name, cut at a whole letter */
+	n = knl_utf8_fit(nm, nl, (SZ)( max - 1 ));
+	knl_memcpy(out, nm, n);
 	out[n] = 0;
-	return n;
+	Kfree(nm);
+	return (INT)n;
 }
 
 EXPORT void mc_new_vobjid( char *out37 )

@@ -267,13 +267,13 @@ static void bar_show( void )
 		ui_show(&g_bar, B_NARROW, g_db.searching);
 		ui_show(&g_bar, B_FOFF, g_db.searching);
 	} else {
-		UB	nm[OB_NAME_MAX];
+		UB	*nm = NULL;
 		TS_UUID	u;
 
-		nm[0] = 0;
-		if ( g_dslayout != NULL && link_target(g_dslayout, &u) ) name_of(&u, nm);
-		ui_set_text(&g_bar, B_LAYOUT, g_dslayout != NULL ? ( nm[0] != 0 ? (char *)nm : "(実身がありません)" )
+		if ( g_dslayout != NULL && link_target(g_dslayout, &u) ) nm = name_of(&u);
+		ui_set_text(&g_bar, B_LAYOUT, g_dslayout != NULL ? ( nm != NULL && nm[0] != 0 ? (char *)nm : "(実身がありません)" )
 							  : "(なし)");
+		free(nm);
 		ui_off(&g_bar, B_LOPEN, (BOOL)( g_dslayout == NULL ));
 		ui_off(&g_bar, B_LTAKE, (BOOL)( g_dslayout == NULL ));
 	}
@@ -1233,7 +1233,7 @@ void card_dropped( void )
 	if ( d->n <= 0 ) return;
 	if ( g_screen == SCR_DESIGN ) {
 		if ( d->y < TB_H ) {
-			el = link_el_from_drop(&d->v[0], &len);
+			el = link_el_from_drop(d, 0, &len);
 			if ( el != NULL ) {
 				free(g_dslayout);
 				g_dslayout = el;
@@ -1256,7 +1256,7 @@ void card_dropped( void )
 		ui_drop_answer(&g_ui, d, OB_DR_REFUSE, "これ以上仮身を格納できません");
 		return;
 	}
-	el = link_el_from_drop(&d->v[0], &len);
+	el = link_el_from_drop(d, 0, &len);
 	if ( el == NULL ) {
 		ui_drop_answer(&g_ui, d, OB_DR_REFUSE, "");
 		return;
@@ -1271,7 +1271,7 @@ void card_dropped( void )
 	g_lw.dirty = TRUE;
 	{
 		char	s[100];
-		UB	nm[OB_NAME_MAX];
+		UB	nm[sizeof(s)];		/* for the note line alone */
 
 		nm[0] = 0;
 		(void)mc_shown(&g_db, cur_card(), k, nm, sizeof(nm));

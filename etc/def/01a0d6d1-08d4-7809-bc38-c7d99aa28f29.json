@@ -19,7 +19,7 @@
       "id": "base-file-manager",
       "kind": "app",
       "name": "原紙箱",
-      "version": "R1.400",
+      "version": "R1.410",
       "builtin": false,
       "openArg": "link",
       "base": [

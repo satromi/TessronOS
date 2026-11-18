@@ -33,7 +33,7 @@ from tsfs_py.check import Checker
 from tsfs_py.groups import AG_FREE, head_problems
 from tsfs_py.image import SECTOR_SIZE, TSFS_TYPE_GUID
 from tsfs_py.journal import Journal
-from tsfs_py.layout import (GroupShape, MAGIC_TBL, NIL_UUID, is_spare,
+from tsfs_py.layout import (GroupShape, LABEL_MAX, MAGIC_TBL, NIL_UUID, is_spare,
                            owner_of)
 from tsfs_py.obj import (F_GARBAGE, F_ORPHAN, F_RELINK, LK_EXTERNAL, OB_LINK,
                         OB_META, OB_NLINK, OB_REFCNT, LinkEntry,
@@ -1234,6 +1234,63 @@ class TestLevels(Base):
         rep = self.levels(vol)
         self.assertFound(rep.errors, "object index node %d: an internal node "
                          "at level 0" % child)
+
+
+class TestLabel(Base):
+    """The label is the name of the top object, of any length; the
+    superblock keeps its first bytes, cut at a whole letter (design 7.6)."""
+
+    LONG = "長いラベル" * 20          # 100 letters, 300 bytes
+
+    def test_utf8_fit(self):
+        from tsfs_py.layout import utf8_fit
+        a = "あいう".encode("utf-8")
+        self.assertEqual(utf8_fit(a, 9), a)
+        self.assertEqual(utf8_fit(a, 8), a[:6])
+        self.assertEqual(utf8_fit(a, 4), a[:3])
+        self.assertEqual(utf8_fit(a[:7], 63), a[:6])      # an older system's cut
+        self.assertEqual(utf8_fit(b"\x80\x80", 63), b"")
+        p = "\U0001F600x".encode("utf-8")
+        self.assertEqual(utf8_fit(p, 3), b"")
+        self.assertEqual(utf8_fit(p, 4), p[:4])
+
+    def test_long_label_is_cut_at_a_letter(self):
+        vol = self.make(label=self.LONG)
+        raw = vol.sb.label_raw.split(b"\0", 1)[0]
+        self.assertLessEqual(len(raw), LABEL_MAX - 1)
+        self.assertEqual(raw, self.LONG.encode("utf-8")[:63])   # 21 letters of 3 bytes
+        self.assertEqual(vol.sb.label, self.LONG[:21])
+        self.assertTrue(vol.sb.label_cut)
+        self.assertEqual(vol.label(), self.LONG[:21])            # no top: the copy
+        back = Superblock.unpack(vol.dev.read_block(0))
+        self.assertEqual(back.label, self.LONG[:21])
+
+    def test_a_copy_cut_in_a_letter_reads_whole(self):
+        sb = Superblock()
+        sb.total_blocks, sb.ag_blocks, sb.ag_count = 4096, 1024, 4
+        sb.journal_blocks = 515
+        raw = ("x" + "あ" * 30).encode("utf-8")[:63]       # as a system before cut it
+        sb.label_raw = raw + b"\0" * (LABEL_MAX - len(raw))
+        back = Superblock.unpack(sb.pack())
+        self.assertEqual(back.label, "x" + "あ" * 20)
+
+    def test_the_label_is_the_top_name(self):
+        path = self.built()
+        vol = self.reopen(path)
+        self.assertEqual(vol.sb.label, "T")
+        self.assertEqual(vol.label(), "箱")               # the --root object's name
+        c, rep = self.check(vol)
+        self.assertEqual(rep.errors, [])
+        self.assertFound(rep.notes, "the label's copy")
+
+    def test_mktsfs_long_label(self):
+        img = self.tmp.path("mk.img")
+        r = tool("mktsfs", "-q", "-L", self.LONG, "--size", "16M", img)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("cut from", r.stderr.decode("utf-8", "replace"))
+        dev = BlockImage(img)
+        self.addCleanup(dev.close)
+        self.assertEqual(Volume.open(dev).sb.label, self.LONG[:21])
 
 
 if __name__ == "__main__":

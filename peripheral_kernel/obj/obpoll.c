@@ -257,7 +257,6 @@ LOCAL ER obp_ref( CONST TS_UUID *uuid, T_OBREF *r )
 	LOCK();
 	i = index_of(uuid);
 	if ( i >= 0 ) {
-		r->name[0] = 0;
 		r->flags = OB_F_VOLATILE;
 		r->refcnt = 0;
 		r->nrec = OB_PL_NREC;

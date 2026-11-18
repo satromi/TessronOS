@@ -214,9 +214,10 @@ IMPORT INT knl_disp_hw_setmode( T_DISPHW *hw, UINT w, UINT h );
  *
  * knl_disp_out_attach adds one while the system runs: the back buffer is
  * made again round all the screens and the windows laid again, as for a
- * new size. Its number on the driver (knl_disp_screen_hw), or E_LIMIT
- * (DISP_SCREENS_MAX), E_NOSPT (an offset less than 0), E_PAR (a
- * framebuffer that cannot be sent to, a side not known), E_NOMEM.
+ * new size. There may be as many as there is memory for. Its number on
+ * the driver (knl_disp_screen_hw), or E_NOSPT (an offset less than 0),
+ * E_PAR (a framebuffer that cannot be sent to, a side not known),
+ * E_NOMEM.
  */
 IMPORT INT knl_disp_hw_more( INT i, UINT main_w, UINT main_h, T_DISPHW *hw, INT *p_side, INT *p_offset );
 IMPORT INT knl_disp_out_attach( CONST T_DISPHW *hw, INT side, INT offset );

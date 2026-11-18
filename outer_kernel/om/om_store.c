@@ -69,15 +69,16 @@ typedef struct {
 	T_TAD	*doc;
 	UB	*xml;
 	SZ	snap;			/* how long its text came to when last written out */
-	UB	name[TAD_NAME_MAX];
+	UB	*name;			/* the whole name, its escapes undone (NULL none) */
+	SZ	namelen;
 	BOOL	named;			/* the name has been looked for */
 	BOOL	has_name;		/* and was found */
 	UW	paper;			/* what it is written on */
 	BOOL	has_paper;
 	/* what a link's band says of it: its relationship, its program, its date */
 	BOOL	described;
-	UB	rel[TAD_REL_MAX * 2];
-	UB	app[OM_APP_NAME];
+	UB	*rel;			/* its relationship as the band says it, whole (NULL none) */
+	UB	*app;			/* the program it opens with, by its shown name (NULL none) */
 	TS_TIME	updated;
 	BOOL	has_updated;
 	/* its icon */
@@ -305,6 +306,30 @@ LOCAL void icon_orphan( CONST UW *px, INT pins )
 	/* no room to remember it: left allocated rather than freed under a drawing */
 }
 
+/* The name an entry keeps, let go; its bytes are counted with the entry's */
+LOCAL void name_drop( STENT *e )
+{
+	if ( e->name != NULL ) {
+		st_bytes -= e->namelen + 1;
+		Kfree(e->name);
+		e->name = NULL;
+	}
+	e->namelen = 0;
+}
+
+/* The shown name of the program it opens with, and the relationship, let go */
+LOCAL void app_drop( STENT *e )
+{
+	if ( e->app != NULL ) {
+		Kfree(e->app);
+		e->app = NULL;
+	}
+	if ( e->rel != NULL ) {
+		Kfree(e->rel);
+		e->rel = NULL;
+	}
+}
+
 /* Entry i let go: out of its chain and the order of use, onto the free list */
 LOCAL void st_release( INT i )
 {
@@ -315,6 +340,8 @@ LOCAL void st_release( INT i )
 	while ( *pp >= 0 && *pp != i ) pp = &st_tab[*pp].hnext;
 	if ( *pp == i ) *pp = e->hnext;
 	lru_unlink(i);
+	name_drop(e);
+	app_drop(e);
 	if ( e->doc != NULL ) tad_free(e->doc);
 	if ( e->xml != NULL ) Kfree(e->xml);
 	if ( e->icon != NULL ) {
@@ -551,83 +578,110 @@ LOCAL ER store_paper( CONST T_VOBJ *v, UW *p_colour, void *arg )
 	return r;
 }
 
-LOCAL INT store_name_u( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
+LOCAL INT	json_key( CONST UB *b, INT from, INT to, CONST char *key );
+
+/*
+ * The object's whole name, with the table's lock held: the one the entry
+ * keeps, or read from the metadata ("name", its escapes undone) and
+ * kept. When there is no entry to keep it in, it is answered in memory
+ * of its own in *p_own for the caller to free. NULL when it has none.
+ * A name that could not be read for want of memory is not remembered as
+ * missing, so it is looked for again.
+ */
+LOCAL CONST UB *name_of_u( CONST TS_UUID *id, SZ *p_len, UB **p_own )
 {
-	UB	*meta;
-	SZ	size = 0;
-	INT	i, n = 0, slot;
+	UB	*meta, *nm = NULL;
+	SZ	size = 0, n = 0;
+	INT	slot, at;
+	BOOL	str = FALSE;
 
-	if ( max < TAD_NAME_MAX ) {
-		/* what is kept is the whole name, whatever room this caller has */
-		UB	full[TAD_NAME_MAX];
-
-		n = store_name(v, full, TAD_NAME_MAX, arg);
-		if ( n < 0 ) {
-			return n;
-		}
-		for ( i = 0; i < n && i < max - 1; i++ ) {
-			buf[i] = full[i];
-		}
-		buf[i] = 0;
-		return i;
-	}
-	slot = slot_of(&v->target, -1);
+	*p_own = NULL;
+	*p_len = 0;
+	slot = slot_of(id, -1);
 	if ( slot >= 0 && st_tab[slot].named ) {
 		if ( !st_tab[slot].has_name ) {
-			return -1;
+			return NULL;
 		}
-		for ( n = 0; n < max - 1 && st_tab[slot].name[n] != 0; n++ ) {
-			buf[n] = st_tab[slot].name[n];
-		}
-		buf[n] = 0;
-		return n;
+		*p_len = st_tab[slot].namelen;
+		return st_tab[slot].name;
 	}
-	meta = om_obj_meta(&v->target, &size);
+	meta = om_obj_meta(id, &size);
 	if ( meta == NULL ) {
 		if ( slot >= 0 ) {
 			st_tab[slot].named = TRUE;
 		}
-		return -1;
+		return NULL;
 	}
-	for ( i = 0; i + 8 < (INT)size; i++ ) {
-		if ( meta[i] == '"' && meta[i + 1] == 'n' && meta[i + 2] == 'a'
-		  && meta[i + 3] == 'm' && meta[i + 4] == 'e'
-		  && meta[i + 5] == '"' ) {
-			INT	j = i + 6;
-
-			while ( j < (INT)size && meta[j] != '"' ) {
-				j++;		/* past the colon and the space */
-			}
-			j++;
-			while ( j < (INT)size && meta[j] != '"' && n < max - 1 ) {
-				buf[n++] = meta[j++];
-			}
-			break;
-		}
+	at = json_key(meta, 0, (INT)size, "name");
+	if ( at >= 0 && meta[at] == '"' ) {
+		str = TRUE;
+		nm = om_json_unquote(meta, at, size, &n);
 	}
-	buf[n] = 0;
 	Kfree(meta);
-	if ( slot >= 0 ) {
-		INT	k;
-
-		for ( k = 0; k < n && k < TAD_NAME_MAX - 1; k++ ) {
-			st_tab[slot].name[k] = buf[k];
-		}
-		st_tab[slot].name[k] = 0;
-		st_tab[slot].named = TRUE;
-		st_tab[slot].has_name = (BOOL)( n > 0 );
+	if ( str && nm == NULL ) {
+		tm_printf((UB *)"om: no memory for an object's name\n");
+		return NULL;
 	}
-
-	return ( n > 0 ) ? n : -1;
+	if ( nm != NULL && n == 0 ) {
+		Kfree(nm);
+		nm = NULL;
+	}
+	if ( slot < 0 ) {
+		*p_own = nm;
+		*p_len = n;
+		return nm;
+	}
+	name_drop(&st_tab[slot]);
+	st_tab[slot].name = nm;
+	st_tab[slot].namelen = ( nm != NULL ) ? n : 0;
+	st_tab[slot].named = TRUE;
+	st_tab[slot].has_name = (BOOL)( nm != NULL );
+	if ( nm != NULL ) {
+		st_bytes += n + 1;
+	}
+	*p_len = st_tab[slot].namelen;
+	return nm;
 }
 
+/* What of s fits in max bytes and a 0, cut at a whole letter; answers what was put */
+LOCAL SZ put_fit( UB *buf, SZ max, CONST UB *s, SZ len )
+{
+	SZ	k;
+
+	if ( max < 1 ) {
+		return 0;
+	}
+	k = knl_utf8_fit(s, len, max - 1);
+	knl_memcpy(buf, s, k);
+	buf[k] = 0;
+	return k;
+}
+
+/*
+ * The link's source of names (T_TVSRC.name): what fits of the name,
+ * and how many bytes that came to.
+ */
 LOCAL INT store_name( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
 {
-	INT r;
+	CONST UB	*nm;
+	UB		*own;
+	SZ		n;
+	INT		r = -1;
 
+	if ( buf == NULL || max < 1 ) {
+		return -1;
+	}
 	st_lock();
-	r = store_name_u(v, buf, max, arg);
+	nm = name_of_u(&v->target, &n, &own);
+	if ( nm != NULL ) {
+		r = (INT)put_fit(buf, (SZ)max, nm, n);
+	} else {
+		buf[0] = 0;
+	}
 	st_unlock();
+	if ( own != NULL ) {
+		Kfree(own);
+	}
 	return r;
 }
 
@@ -1624,22 +1678,221 @@ LOCAL BOOL meta_splice( UB **p_meta, SZ *p_size, INT at, INT len,
 	return TRUE;
 }
 
-/* A string, quoted, with what must be escaped escaped */
-LOCAL SZ meta_quote( UB *out, SZ max, CONST UB *s )
+/*
+ * A string written as JSON writes one (RFC 8259 7): the quote, the
+ * backslash and the control letters escaped, the short forms where
+ * there are some and \u00XX for the rest. What is not ASCII is left as
+ * the UTF-8 it is.
+ */
+EXPORT SZ om_json_quote( UB *out, SZ max, CONST UB *s, SZ len )
 {
-	SZ	n = 0;
-	INT	k;
+	CONST char	*hex = "0123456789abcdef";
+	SZ		i, n = 2;
 
-	out[n++] = '"';
-	for ( k = 0; s[k] != 0 && n + 3 < max; k++ ) {
-		if ( s[k] == '"' || s[k] == 0x5C ) {
-			out[n++] = 0x5C;
+	if ( s == NULL ) {
+		len = 0;
+	} else if ( len < 0 ) {
+		for ( len = 0; s[len] != 0; len++ ) {
+			;
 		}
-		out[n++] = s[k];
+	}
+	for ( i = 0; i < len; i++ ) {
+		UB	c = s[i];
+
+		if ( c == '"' || c == 0x5C || c == 0x08 || c == 0x09
+		  || c == 0x0A || c == 0x0C || c == 0x0D ) {
+			n += 2;
+		} else if ( c < 0x20 ) {
+			n += 6;
+		} else {
+			n += 1;
+		}
+	}
+	if ( out == NULL || max < n ) {
+		return n;
+	}
+	n = 0;
+	out[n++] = '"';
+	for ( i = 0; i < len; i++ ) {
+		UB	c = s[i];
+		UB	e = 0;
+
+		switch ( c ) {
+		case '"':	e = '"';	break;
+		case 0x5C:	e = 0x5C;	break;
+		case 0x08:	e = 'b';	break;
+		case 0x09:	e = 't';	break;
+		case 0x0A:	e = 'n';	break;
+		case 0x0C:	e = 'f';	break;
+		case 0x0D:	e = 'r';	break;
+		default:	break;
+		}
+		if ( e != 0 ) {
+			out[n++] = 0x5C;
+			out[n++] = e;
+		} else if ( c < 0x20 ) {
+			out[n++] = 0x5C;
+			out[n++] = 'u';
+			out[n++] = '0';
+			out[n++] = '0';
+			out[n++] = (UB)hex[c >> 4];
+			out[n++] = (UB)hex[c & 15];
+		} else {
+			out[n++] = c;
+		}
 	}
 	out[n++] = '"';
+	if ( max > n ) {
+		out[n] = 0;
+	}
 
 	return n;
+}
+
+EXPORT UB *om_json_quote_dup( CONST UB *s, SZ len, SZ *p_n )
+{
+	SZ	n = om_json_quote(NULL, 0, s, len);
+	UB	*out = (UB *)Kmalloc(n + 1);
+
+	if ( p_n != NULL ) {
+		*p_n = 0;
+	}
+	if ( out == NULL ) {
+		return NULL;
+	}
+	(void)om_json_quote(out, n + 1, s, len);
+	if ( p_n != NULL ) {
+		*p_n = n;
+	}
+	return out;
+}
+
+/* Four hex digits at p (n bytes there); FALSE when they are not */
+LOCAL BOOL json_hex4( CONST UB *p, SZ n, UW *p_v )
+{
+	UW	v = 0;
+	INT	i;
+
+	if ( n < 4 ) {
+		return FALSE;
+	}
+	for ( i = 0; i < 4; i++ ) {
+		UB	c = p[i];
+		UW	d;
+
+		if ( c >= '0' && c <= '9' )      d = (UW)( c - '0' );
+		else if ( c >= 'a' && c <= 'f' ) d = (UW)( c - 'a' + 10 );
+		else if ( c >= 'A' && c <= 'F' ) d = (UW)( c - 'A' + 10 );
+		else                             return FALSE;
+		v = ( v << 4 ) | d;
+	}
+	*p_v = v;
+	return TRUE;
+}
+
+/* A letter as UTF-8; answers its bytes */
+LOCAL SZ utf8_put( UB *o, UW u )
+{
+	if ( u < 0x80 ) {
+		o[0] = (UB)u;
+		return 1;
+	}
+	if ( u < 0x800 ) {
+		o[0] = (UB)( 0xC0 | ( u >> 6 ) );
+		o[1] = (UB)( 0x80 | ( u & 0x3F ) );
+		return 2;
+	}
+	if ( u < 0x10000 ) {
+		o[0] = (UB)( 0xE0 | ( u >> 12 ) );
+		o[1] = (UB)( 0x80 | ( ( u >> 6 ) & 0x3F ) );
+		o[2] = (UB)( 0x80 | ( u & 0x3F ) );
+		return 3;
+	}
+	o[0] = (UB)( 0xF0 | ( u >> 18 ) );
+	o[1] = (UB)( 0x80 | ( ( u >> 12 ) & 0x3F ) );
+	o[2] = (UB)( 0x80 | ( ( u >> 6 ) & 0x3F ) );
+	o[3] = (UB)( 0x80 | ( u & 0x3F ) );
+	return 4;
+}
+
+/*
+ * A JSON string read back. What it decodes to is never longer than how
+ * it is written (an escape of six bytes is at most three of UTF-8, a
+ * pair of twelve four), so the memory is taken once, as long as the
+ * string as written.
+ */
+EXPORT UB *om_json_unquote( CONST UB *b, SZ at, SZ to, SZ *p_len )
+{
+	SZ	i, end, n = 0;
+	UB	*out;
+
+	if ( p_len != NULL ) {
+		*p_len = 0;
+	}
+	if ( b == NULL || at < 0 || at >= to || b[at] != '"' ) {
+		return NULL;
+	}
+	for ( end = at + 1; end < to && b[end] != '"'; end++ ) {
+		if ( b[end] == 0x5C ) {
+			end++;
+		}
+	}
+	if ( end > to ) {
+		end = to;
+	}
+	out = (UB *)Kmalloc(end - at);
+	if ( out == NULL ) {
+		return NULL;
+	}
+	for ( i = at + 1; i < end; i++ ) {
+		UW	u, lo;
+
+		if ( b[i] != 0x5C ) {
+			out[n++] = b[i];
+			continue;
+		}
+		if ( ++i >= end ) {
+			break;
+		}
+		switch ( b[i] ) {
+		case 'b':	out[n++] = 0x08;	continue;
+		case 't':	out[n++] = 0x09;	continue;
+		case 'n':	out[n++] = 0x0A;	continue;
+		case 'f':	out[n++] = 0x0C;	continue;
+		case 'r':	out[n++] = 0x0D;	continue;
+		case 'u':	break;
+		default:	out[n++] = b[i];	continue;	/* '"', '\', '/' */
+		}
+		if ( !json_hex4(b + i + 1, end - i - 1, &u) ) {
+			out[n++] = 0x5C;
+			out[n++] = 'u';
+			continue;
+		}
+		i += 4;
+		if ( u >= 0xD800 && u <= 0xDBFF && i + 2 < end
+		  && b[i + 1] == 0x5C && b[i + 2] == 'u'
+		  && json_hex4(b + i + 3, end - i - 3, &lo)
+		  && lo >= 0xDC00 && lo <= 0xDFFF ) {
+			u = 0x10000 + ( ( u - 0xD800 ) << 10 ) + ( lo - 0xDC00 );
+			i += 6;
+		} else if ( ( u >= 0xD800 && u <= 0xDFFF ) || u == 0 ) {
+			u = 0xFFFD;	/* not a letter a 0 ended UTF-8 string can hold */
+		}
+		n += utf8_put(out + n, u);
+	}
+	out[n] = 0;
+	if ( p_len != NULL ) {
+		*p_len = n;
+	}
+	return out;
+}
+
+/* A string quoted into out, or nothing when it does not fit; answers what was put */
+LOCAL SZ meta_quote( UB *out, SZ max, CONST UB *s )
+{
+	SZ	n = om_json_quote(out, max, s, -1);
+
+	return ( n <= max ) ? n : 0;
 }
 
 #define meta_write	om_obj_meta_put
@@ -1651,6 +1904,8 @@ LOCAL void meta_forget_u( CONST TS_UUID *id )
 	INT	slot = slot_of(id, -1);
 
 	if ( slot >= 0 ) {
+		name_drop(&st_tab[slot]);
+		app_drop(&st_tab[slot]);
 		st_tab[slot].named = FALSE;
 		st_tab[slot].has_name = FALSE;
 		st_tab[slot].has_paper = FALSE;
@@ -1679,6 +1934,23 @@ LOCAL void meta_forget( CONST TS_UUID *id )
  */
 LOCAL ER rename_locked( CONST TS_UUID *id, CONST UB *name );
 
+/*
+ * A native volume's label is the name of its top object (design 7.6);
+ * the superblock keeps a copy, cut to its 64 bytes, for older systems
+ * and the tools that boot. When the object renamed is a volume's top,
+ * that copy is written again and the name the volume is known by
+ * follows (knl_obfile_label_sync; nothing for any other object). Done
+ * outside the table's lock, since it takes the volume's own.
+ */
+LOCAL void label_follow( CONST TS_UUID *id )
+{
+	ER	er = knl_obfile_label_sync(id);
+
+	if ( er < E_OK && er != E_NOEXS ) {
+		tm_printf((UB *)"om: the volume's label was not written again (%d)\n", er);
+	}
+}
+
 /* From any task (the file system's rename too): all of it under the table's lock */
 EXPORT ER om_store_rename( CONST TS_UUID *id, CONST UB *name )
 {
@@ -1687,15 +1959,19 @@ EXPORT ER om_store_rename( CONST TS_UUID *id, CONST UB *name )
 	st_lock();
 	er = rename_locked(id, name);
 	st_unlock();
+	if ( er >= E_OK ) {
+		label_follow(id);
+	}
 	return er;
 }
 
 LOCAL ER rename_locked( CONST TS_UUID *id, CONST UB *name )
 {
-	UB	*meta, val[TAD_NAME_MAX * 2 + 4];
+	UB	*meta, *val;
 	SZ	size = 0, n;
 	INT	at, slot;
 	ER	er;
+	BOOL	ok;
 
 	if ( id == NULL || name == NULL || name[0] == 0 ) {
 		return E_PAR;
@@ -1709,9 +1985,15 @@ LOCAL ER rename_locked( CONST TS_UUID *id, CONST UB *name )
 		Kfree(meta);
 		return E_OBJ;
 	}
-	n = meta_quote(val, sizeof(val), name);
-	if ( !meta_splice(&meta, &size, at, json_extent(meta, at, (INT)size),
-			  val, n) ) {
+	/* the whole name, every letter JSON wants escaped escaped */
+	val = om_json_quote_dup(name, -1, &n);
+	if ( val == NULL ) {
+		Kfree(meta);
+		return E_NOMEM;
+	}
+	ok = meta_splice(&meta, &size, at, json_extent(meta, at, (INT)size), val, n);
+	Kfree(val);
+	if ( !ok ) {
 		Kfree(meta);
 		return E_NOMEM;
 	}
@@ -1725,7 +2007,7 @@ LOCAL ER rename_locked( CONST TS_UUID *id, CONST UB *name )
 	/* the record's own name for itself */
 	slot = slot_of(id, 0);
 	if ( slot >= 0 && st_tab[slot].doc == NULL ) {
-		T_VOBJ	v;
+		T_VOBJ	v = { .recno = 0 };
 
 		knl_memset(&v, 0, sizeof(v));
 		v.target = *id;
@@ -1795,20 +2077,12 @@ EXPORT ER om_store_set_paper( CONST TS_UUID *id, UW colour )
  * The relationship of the object: the tags of its metadata's
  * "relationship" list, as "[tag] [tag]", one after another.
  */
-EXPORT INT om_store_relationship( CONST TS_UUID *id, UB *buf, INT max )
+/* The relationship of metadata as the band says it ("[a] [b]"), into buf of max bytes: its length */
+LOCAL INT rel_of_meta( CONST UB *meta, SZ size, UB *buf, INT max )
 {
-	UB	*meta;
-	SZ	size = 0;
 	INT	at, end, i, n = 0;
 
-	if ( id == NULL || buf == NULL || max < 1 ) {
-		return -1;
-	}
 	buf[0] = 0;
-	meta = meta_read(id, &size);
-	if ( meta == NULL ) {
-		return -1;
-	}
 	at = json_key(meta, 0, (INT)size, "relationship");
 	if ( at >= 0 && meta[at] == '[' ) {
 		end = json_close(meta, at, (INT)size);
@@ -1830,10 +2104,52 @@ EXPORT INT om_store_relationship( CONST TS_UUID *id, UB *buf, INT max )
 			}
 		}
 	}
+	/* never half a letter when the room was short */
+	while ( n > 0 && n >= max - 2 && ( buf[n - 1] & 0xC0 ) == 0x80 ) n--;
+	while ( n > 0 && ( buf[n - 1] & 0xC0 ) == 0xC0 ) n--;
 	buf[n] = 0;
-	Kfree(meta);
-
 	return n;
+}
+
+EXPORT INT om_store_relationship( CONST TS_UUID *id, UB *buf, INT max )
+{
+	UB	*meta;
+	SZ	size = 0;
+	INT	n;
+
+	if ( id == NULL || buf == NULL || max < 1 ) {
+		return -1;
+	}
+	buf[0] = 0;
+	meta = meta_read(id, &size);
+	if ( meta == NULL ) {
+		return -1;
+	}
+	n = rel_of_meta(meta, size, buf, max);
+	Kfree(meta);
+	return n;
+}
+
+/*
+ * The same, whole, in memory to Kfree (NULL when it has none): no
+ * longer than the metadata, a space and brackets for each word at most
+ */
+LOCAL UB *rel_dup( CONST TS_UUID *id )
+{
+	UB	*meta, *b;
+	SZ	size = 0;
+
+	meta = meta_read(id, &size);
+	if ( meta == NULL ) {
+		return NULL;
+	}
+	b = (UB *)Kmalloc(size * 2 + 4);
+	if ( b != NULL && rel_of_meta(meta, size, b, (INT)( size * 2 + 4 )) <= 0 ) {
+		Kfree(b);
+		b = NULL;
+	}
+	Kfree(meta);
+	return b;
 }
 
 /* The tags given as "[tag] [tag]" made the metadata's relationship list */
@@ -1909,50 +2225,32 @@ EXPORT ER om_store_set_relationship( CONST TS_UUID *id, CONST UB *tags )
 
 /*
  * The programs the object's applist names, by the names they are shown
- * under, in the order the list gives them.
+ * under, in the order the list gives them: each whole, its escapes
+ * undone, in memory of its own, in an array of its own (om_apps_free).
+ * names NULL counts them; *p_er E_NOMEM when the memory runs out.
  */
-LOCAL INT names_of( CONST UB *meta, SZ size, UB (*names)[OM_APP_NAME], INT max );
-
-EXPORT INT om_store_apps( CONST TS_UUID *id, UB (*names)[OM_APP_NAME],
-			  INT max )
+LOCAL INT names_of( CONST UB *meta, SZ size, UB **names, ER *p_er )
 {
-	UB	*meta;
-	SZ	size = 0;
-	INT	n;
-
-	if ( id == NULL || names == NULL ) {
-		return 0;
-	}
-	meta = meta_read(id, &size);
-	if ( meta == NULL ) {
-		return 0;
-	}
-	n = names_of(meta, size, names, max);
-	Kfree(meta);
-	return n;
-}
-
-/* The names an applist gives its programs, in its order; names NULL counts them all */
-LOCAL INT names_of( CONST UB *meta, SZ size, UB (*names)[OM_APP_NAME], INT max )
-{
-	INT	a, ae, i, n = 0, depth = 0;
+	INT	a, ae, i, n = 0;
 
 	a = json_key(meta, 0, (INT)size, "applist");
 	if ( a >= 0 && meta[a] == '{' ) {
 		ae = json_close(meta, a, (INT)size);
-		for ( i = a + 1; i < ae && ( names == NULL || n < max ); i++ ) {
+		for ( i = a + 1; i < ae; i++ ) {
 			if ( meta[i] == '{' ) {
 				INT	e = json_close(meta, i, ae);
 				INT	v = json_key(meta, i + 1, e, "name");
 
-				if ( depth == 0 && v >= 0 && meta[v] == '"' ) {
-					INT	k = 0;
+				if ( v >= 0 && meta[v] == '"' ) {
+					if ( names != NULL ) {
+						SZ	l = 0;
 
-					for ( v++; names != NULL && v < e && meta[v] != '"'
-						   && k < OM_APP_NAME - 1; v++ ) {
-						names[n][k++] = meta[v];
+						names[n] = om_json_unquote(meta, v, e, &l);
+						if ( names[n] == NULL ) {
+							*p_er = E_NOMEM;
+							return n;
+						}
 					}
-					if ( names != NULL ) names[n][k] = 0;
 					n++;
 				}
 				i = e - 1;
@@ -1961,6 +2259,65 @@ LOCAL INT names_of( CONST UB *meta, SZ size, UB (*names)[OM_APP_NAME], INT max )
 		}
 	}
 	return n;
+}
+
+/* The names of an applist (metadata or a link's), counted, then taken */
+LOCAL UB **apps_of( CONST UB *meta, SZ size, INT *p_n )
+{
+	INT	n = names_of(meta, size, NULL, NULL), got;
+	UB	**names;
+	ER	er = E_OK;
+
+	*p_n = 0;
+	if ( n <= 0 ) {
+		return NULL;
+	}
+	names = (UB **)Kcalloc((SZ)n, sizeof(UB *));
+	if ( names == NULL ) {
+		*p_n = E_NOMEM;
+		return NULL;
+	}
+	got = names_of(meta, size, names, &er);
+	if ( er < E_OK ) {
+		om_apps_free(names, got);
+		*p_n = E_NOMEM;
+		return NULL;
+	}
+	*p_n = got;
+	return names;
+}
+
+EXPORT void om_apps_free( UB **names, INT n )
+{
+	INT	i;
+
+	if ( names == NULL ) {
+		return;
+	}
+	for ( i = 0; i < n; i++ ) {
+		if ( names[i] != NULL ) Kfree(names[i]);
+	}
+	Kfree(names);
+}
+
+EXPORT UB **om_store_apps( CONST TS_UUID *id, INT *p_n )
+{
+	UB	*meta, **names;
+	SZ	size = 0;
+	INT	n = 0;
+
+	if ( p_n != NULL ) *p_n = 0;
+	if ( id == NULL || p_n == NULL ) {
+		return NULL;
+	}
+	meta = meta_read(id, &size);
+	if ( meta == NULL ) {
+		return NULL;
+	}
+	names = apps_of(meta, size, &n);
+	Kfree(meta);
+	*p_n = n;
+	return names;
 }
 
 /*
@@ -2075,7 +2432,12 @@ EXPORT ER om_store_set_apps( CONST TS_UUID *id, CONST UB *CONST *ids,
 	if ( id == NULL || n < 0 || ( n > 0 && ( ids == NULL || names == NULL ) ) ) {
 		return E_PAR;
 	}
-	cap = 32 + (SZ)n * ( 2 * OM_APP_ID + 2 * OM_APP_NAME + 48 );
+	/* as long as it comes to: each entry quoted whole, and its fixed text */
+	cap = 32;
+	for ( i = 0; i < n; i++ ) {
+		cap += om_json_quote(NULL, 0, ids[i], -1)
+		     + om_json_quote(NULL, 0, names[i], -1) + 48;
+	}
 	val = (UB *)Kmalloc(cap);
 	if ( val == NULL ) {
 		return E_NOMEM;
@@ -2333,22 +2695,25 @@ LOCAL UB *link_applist( CONST T_VOBJ *v, SZ *p_size )
 	INT	i, n = 0;
 	CONST char *head = "{\"applist\":";
 
-	if ( v->applist[0] == 0 ) {
+	CONST UB *a = v->vapplist;
+	SZ	len = v->vapplist_len;
+
+	if ( a == NULL || len <= 0 ) {
 		return NULL;
 	}
-	j = (UB *)Kmalloc(TAD_APPL_MAX + 16);
+	j = (UB *)Kmalloc(len + 16);
 	if ( j == NULL ) {
 		return NULL;
 	}
 	for ( i = 0; head[i] != 0; i++ ) j[n++] = (UB)head[i];
-	for ( i = 0; v->applist[i] != 0 && n < TAD_APPL_MAX + 12; ) {
-		if ( v->applist[i] == '&' && v->applist[i + 1] == 'q' && v->applist[i + 2] == 'u'
-		  && v->applist[i + 3] == 'o' && v->applist[i + 4] == 't' && v->applist[i + 5] == ';' ) {
+	for ( i = 0; i < (INT)len && a[i] != 0; ) {
+		if ( i + 5 < (INT)len && a[i] == '&' && a[i + 1] == 'q' && a[i + 2] == 'u'
+		  && a[i + 3] == 'o' && a[i + 4] == 't' && a[i + 5] == ';' ) {
 			j[n++] = '"';
 			i += 6;
 			continue;
 		}
-		j[n++] = v->applist[i++];
+		j[n++] = a[i++];
 	}
 	j[n++] = '}';
 	j[n] = 0;
@@ -2356,18 +2721,25 @@ LOCAL UB *link_applist( CONST T_VOBJ *v, SZ *p_size )
 	return j;
 }
 
-EXPORT INT om_link_apps( CONST T_VOBJ *v, UB (*names)[OM_APP_NAME], INT max )
+EXPORT UB **om_link_apps( CONST T_VOBJ *v, INT *p_n )
 {
-	INT	n = om_store_apps(&v->target, names, max);
-	UB	*j;
+	UB	*j, **names;
 	SZ	size = 0;
+	INT	n = 0;
 
-	if ( n > 0 || ( j = link_applist(v, &size) ) == NULL ) {
-		return n;
+	if ( p_n != NULL ) *p_n = 0;
+	if ( v == NULL || p_n == NULL ) {
+		return NULL;
 	}
-	n = names_of(j, size, names, max);
+	names = om_store_apps(&v->target, &n);
+	if ( n != 0 || ( j = link_applist(v, &size) ) == NULL ) {
+		*p_n = n;
+		return names;
+	}
+	names = apps_of(j, size, &n);
 	Kfree(j);
-	return n;
+	*p_n = n;
+	return names;
 }
 
 EXPORT INT om_link_napps( CONST T_VOBJ *v )
@@ -2378,13 +2750,13 @@ EXPORT INT om_link_napps( CONST T_VOBJ *v )
 
 	j = meta_read(&v->target, &size);
 	if ( j != NULL ) {
-		n = names_of(j, size, NULL, 0);
+		n = names_of(j, size, NULL, NULL);
 		Kfree(j);
 	}
 	if ( n > 0 || ( j = link_applist(v, &size) ) == NULL ) {
 		return n;
 	}
-	n = names_of(j, size, NULL, 0);
+	n = names_of(j, size, NULL, NULL);
 	Kfree(j);
 	return n;
 }
@@ -2552,18 +2924,133 @@ LOCAL INT lk_member( CONST UB *b, INT at, INT to, INT *p_ke, INT *p_vs )
 	return *p_vs + json_extent(b, *p_vs, to);
 }
 
+LOCAL BOOL same_n( CONST UB *a, CONST UB *b, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i < n && a[i] == b[i]; i++ ) ;
+	return (BOOL)( i == n );
+}
+
+/*
+ * The value of "data" of the entry of an applist keyed app (固有データ,
+ * design 11.3): where its string starts (its quote, *p_vs) and ends (past
+ * its closing quote); -1 when the entry is not there or says none.
+ */
+LOCAL INT entry_data_at( CONST UB *j, SZ size, CONST UB *app, INT alen, INT *p_vs )
+{
+	INT	a, ae, i, e, ke, vs, d;
+
+	a = json_key(j, 0, (INT)size, "applist");
+	if ( a < 0 || j[a] != '{' ) {
+		return -1;
+	}
+	ae = json_close(j, a, (INT)size);
+	for ( i = lk_next(j, a + 1, ae - 1); ( e = lk_member(j, i, ae - 1, &ke, &vs) ) >= 0;
+	      i = lk_next(j, e, ae - 1) ) {
+		if ( ke - i - 2 != alen || !same_n(j + i + 1, app, alen) || j[vs] != '{' ) {
+			continue;
+		}
+		d = json_key(j, vs + 1, e, "data");
+		if ( d < 0 || j[d] != '"' ) {
+			return -1;
+		}
+		*p_vs = d;
+		return d + json_extent(j, d, e);
+	}
+	return -1;
+}
+
+/*
+ * That data, its \" and \\ taken as the letters they stand for, in
+ * memory of its own ending in 0 (*p_len its length): NULL when there is
+ * none, *p_found FALSE then too, or no memory (*p_found TRUE)
+ */
+LOCAL UB *entry_data( CONST UB *j, SZ size, CONST UB *app, SZ *p_len, BOOL *p_found )
+{
+	INT	alen = 0, vs = 0, ve, i, n = 0;
+	UB	*d;
+
+	*p_found = FALSE;
+	while ( app[alen] != 0 ) alen++;
+	ve = entry_data_at(j, size, app, alen, &vs);
+	if ( ve < 0 ) {
+		return NULL;
+	}
+	*p_found = TRUE;
+	d = (UB *)Kmalloc((SZ)( ve - vs ) + 1);
+	if ( d == NULL ) {
+		return NULL;
+	}
+	for ( i = vs + 1; i < ve - 1; i++ ) {
+		UB	c = j[i];
+
+		if ( c == 0x5C && i + 1 < ve - 1 ) {
+			c = j[++i];
+		}
+		d[n++] = c;
+	}
+	d[n] = 0;
+	*p_len = n;
+	return d;
+}
+
+EXPORT UB *om_app_data( CONST TS_UUID *target, CONST UB *lapp, CONST UB *app, SZ *p_len )
+{
+	UB	*j, *d = NULL;
+	SZ	size = 0, len = 0;
+	BOOL	found = FALSE;
+
+	if ( p_len != NULL ) *p_len = 0;
+	if ( app == NULL || app[0] == 0 ) {
+		return NULL;
+	}
+	if ( lapp != NULL && lapp[0] != 0 ) {
+		T_VOBJ	lv = { .recno = 0 };
+
+		tad_vobj_init(&lv);
+		lv.vapplist = (UB *)lapp;		/* looked at, not owned */
+		for ( lv.vapplist_len = 0; lapp[lv.vapplist_len] != 0; lv.vapplist_len++ ) ;
+		j = link_applist(&lv, &size);
+		if ( j != NULL ) {
+			d = entry_data(j, size, app, &len, &found);
+			Kfree(j);
+		}
+	}
+	if ( !found && target != NULL && ( j = meta_read(target, &size) ) != NULL ) {
+		d = entry_data(j, size, app, &len, &found);
+		Kfree(j);
+	}
+	if ( d != NULL && p_len != NULL ) *p_len = len;
+	return d;
+}
+
+EXPORT UB *om_link_app_data( CONST T_VOBJ *v, CONST UB *app, SZ *p_len )
+{
+	if ( v == NULL ) {
+		if ( p_len != NULL ) *p_len = 0;
+		return NULL;
+	}
+	return om_app_data(&v->target, v->vapplist, app, p_len);
+}
+
 /*
  * The applist from s[0] (its brace) to s[to - 1] (its closing brace)
  * written again into out without the spaces between its parts: the
  * entry the object opens with -- the first marked defaultOpen, else the
  * first -- marked so, with "defaultOpenLock" as 'keep' says, and no
- * other entry with one. 'only' leaves out the other entries. The length,
- * -1 when the list names no program, -2 when out cannot hold it.
+ * other entry with one. An entry
+ * whose program the link's own applist (own, ownsz; NULL none) gives
+ * data to keeps that data in place of the one in s: the link's data
+ * comes first, as its applist does when it is fixed; an entry of the
+ * link's that gives data to a program s does not name is kept after them. The length, -1 when
+ * the list names no program, -2 when out cannot hold it.
  */
-LOCAL INT applist_kept( CONST UB *s, INT to, BOOL keep, BOOL only, UB *out, INT max )
+LOCAL INT applist_kept( CONST UB *s, INT to, BOOL keep, CONST UB *own, SZ ownsz,
+			 UB *out, INT max )
 {
 	INT	i, e, ke, vs, d, nth = 0, dflt = -1, n = 0;
-	INT	m, me, mke, mvs;
+	INT	m, me, mke, mvs, dvs, dve;
 	BOOL	ok = TRUE, first = TRUE, mfirst;
 
 	if ( to < 2 || s[0] != '{' ) {
@@ -2589,10 +3076,6 @@ LOCAL INT applist_kept( CONST UB *s, INT to, BOOL keep, BOOL only, UB *out, INT 
 	nth = 0;
 	for ( i = lk_next(s, 1, to - 1); ok && ( e = lk_member(s, i, to - 1, &ke, &vs) ) >= 0;
 	      i = lk_next(s, e, to - 1) ) {
-		if ( only && nth != dflt ) {
-			nth++;
-			continue;
-		}
 		if ( !first ) ok = lk_str(out, max, &n, ",");
 		first = FALSE;
 		ok = ok && lk_put(out, max, &n, s + i, ke - i) && lk_str(out, max, &n, ":");
@@ -2604,16 +3087,24 @@ LOCAL INT applist_kept( CONST UB *s, INT to, BOOL keep, BOOL only, UB *out, INT 
 		/* the entry's members, the marks of the default dropped and put back where they belong */
 		ok = ok && lk_str(out, max, &n, "{");
 		mfirst = TRUE;
+		dvs = 0;
+		dve = ( own != NULL ) ? entry_data_at(own, ownsz, s + i + 1, ke - i - 2, &dvs) : -1;
 		for ( m = lk_next(s, vs + 1, e - 1); ok && ( me = lk_member(s, m, e - 1, &mke, &mvs) ) >= 0;
 		      m = lk_next(s, me, e - 1) ) {
 			if ( key_is(s + m + 1, mke - m - 1, "defaultOpenLock")
-			  || ( nth == dflt && key_is(s + m + 1, mke - m - 1, "defaultOpen") ) ) {
+			  || ( nth == dflt && key_is(s + m + 1, mke - m - 1, "defaultOpen") )
+			  || ( dve >= 0 && key_is(s + m + 1, mke - m - 1, "data") ) ) {
 				continue;
 			}
 			if ( !mfirst ) ok = lk_str(out, max, &n, ",");
 			mfirst = FALSE;
 			ok = ok && lk_put(out, max, &n, s + m, mke - m) && lk_str(out, max, &n, ":")
 			     && lk_put(out, max, &n, s + mvs, me - mvs);
+		}
+		if ( ok && dve >= 0 ) {
+			ok = ( mfirst || lk_str(out, max, &n, ",") ) && lk_str(out, max, &n, "\"data\":")
+			     && lk_put(out, max, &n, own + dvs, dve - dvs);
+			mfirst = FALSE;
 		}
 		if ( ok && nth == dflt ) {
 			ok = ( mfirst || lk_str(out, max, &n, ",") )
@@ -2622,6 +3113,45 @@ LOCAL INT applist_kept( CONST UB *s, INT to, BOOL keep, BOOL only, UB *out, INT 
 		}
 		ok = ok && lk_str(out, max, &n, "}");
 		nth++;
+	}
+	/*
+	 * the entries of the link's own that give data to a program the list
+	 * does not name: kept, with what they say but the marks of the default
+	 */
+	if ( own != NULL ) {
+		INT	oa = json_key(own, 0, (INT)ownsz, "applist"), oe, oi, oke, ovs, ox;
+
+		oe = ( oa >= 0 && own[oa] == '{' ) ? json_close(own, oa, (INT)ownsz) : -1;
+		for ( oi = ( oe > 0 ) ? lk_next(own, oa + 1, oe - 1) : 0;
+		      ok && oe > 0 && ( ox = lk_member(own, oi, oe - 1, &oke, &ovs) ) >= 0; oi = lk_next(own, ox, oe - 1) ) {
+			INT	k, kk, kke, kvs, dd;
+			BOOL	named = FALSE;
+
+			if ( own[ovs] != '{' ) continue;
+			dd = json_key(own, ovs + 1, ox, "data");
+			if ( dd < 0 || own[dd] != '"' ) continue;
+			for ( k = lk_next(s, 1, to - 1); !named && ( kk = lk_member(s, k, to - 1, &kke, &kvs) ) >= 0;
+			      k = lk_next(s, kk, to - 1) ) {
+				named = (BOOL)( kke - k == oke - oi && same_n(s + k, own + oi, oke - oi) );
+			}
+			if ( named ) continue;
+			if ( !first ) ok = lk_str(out, max, &n, ",");
+			first = FALSE;
+			ok = ok && lk_put(out, max, &n, own + oi, oke - oi) && lk_str(out, max, &n, ":{");
+			mfirst = TRUE;
+			for ( m = lk_next(own, ovs + 1, ox - 1); ok && ( me = lk_member(own, m, ox - 1, &mke, &mvs) ) >= 0;
+			      m = lk_next(own, me, ox - 1) ) {
+				if ( key_is(own + m + 1, mke - m - 1, "defaultOpenLock")
+				  || key_is(own + m + 1, mke - m - 1, "defaultOpen") ) {
+					continue;
+				}
+				if ( !mfirst ) ok = lk_str(out, max, &n, ",");
+				mfirst = FALSE;
+				ok = ok && lk_put(out, max, &n, own + m, mke - m) && lk_str(out, max, &n, ":")
+				     && lk_put(out, max, &n, own + mvs, me - mvs);
+			}
+			ok = ok && lk_str(out, max, &n, "}");
+		}
 	}
 	ok = ok && lk_str(out, max, &n, "}");
 	if ( !ok ) {
@@ -2633,10 +3163,10 @@ LOCAL INT applist_kept( CONST UB *s, INT to, BOOL keep, BOOL only, UB *out, INT 
 
 /*
  * The applist of a JSON text (from its brace to just past its closing one)
- * made into out. A list of more programs than out holds is kept as the
- * entry the link opens with: which programs there are is the object's to say.
+ * made into out, whole: -2 when out does not hold it, for the caller to
+ * make more room.
  */
-LOCAL INT applist_kept_of( CONST UB *j, SZ size, BOOL keep, UB *out, INT max )
+LOCAL INT applist_kept_of( CONST UB *j, SZ size, BOOL keep, CONST UB *own, SZ ownsz, UB *out, INT max )
 {
 	INT	a = json_key(j, 0, (INT)size, "applist"), to, n;
 
@@ -2644,10 +3174,7 @@ LOCAL INT applist_kept_of( CONST UB *j, SZ size, BOOL keep, UB *out, INT max )
 		return -1;
 	}
 	to = json_close(j, a, (INT)size) - a;
-	n = applist_kept(j + a, to, keep, FALSE, out, max);
-	if ( n == -2 ) {
-		n = applist_kept(j + a, to, keep, TRUE, out, max);
-	}
+	n = applist_kept(j + a, to, keep, own, ownsz, out, max);
 	return n;
 }
 
@@ -2659,53 +3186,98 @@ LOCAL INT applist_kept_of( CONST UB *j, SZ size, BOOL keep, UB *out, INT max )
  */
 EXPORT ER om_link_lock( T_VOBJ *v, BOOL keep )
 {
-	UB	*j, *out;
-	SZ	size = 0;
+	UB	*j, *out = NULL, *own;
+	SZ	size = 0, ownsz = 0, cap;
 	INT	n = -1;
+	ER	er;
 
 	if ( v == NULL ) {
 		return E_PAR;
 	}
-	out = (UB *)Kmalloc(TAD_APPL_MAX);
-	if ( out == NULL ) {
-		return E_NOMEM;
-	}
+	/* the link's own applist, whose data stays the link's (固有データ) */
+	own = link_applist(v, &ownsz);
 	j = meta_read(&v->target, &size);
-	if ( j != NULL ) {
-		n = applist_kept_of(j, size, keep, out, TAD_APPL_MAX);
-		Kfree(j);
-	}
-	if ( n == -1 && ( j = link_applist(v, &size) ) != NULL ) {
-		n = applist_kept_of(j, size, keep, out, TAD_APPL_MAX);
-		Kfree(j);
-	}
-	if ( n >= 0 ) {
-		knl_memcpy(v->applist, out, (SZ)n + 1);
-	}
-	Kfree(out);
-
-	return ( n >= 0 ) ? E_OK : ( n == -2 ) ? E_LIMIT : E_NOEXS;
-}
-
-/* One string value of the metadata, or "" */
-LOCAL void meta_str( CONST UB *meta, SZ size, CONST char *key, UB *out, INT max )
-{
-	INT	at = json_key(meta, 0, (INT)size, key), n = 0;
-
-	if ( at >= 0 && meta[at] == '"' ) {
-		for ( at++; at < (INT)size && meta[at] != '"' && n < max - 1; at++ ) {
-			out[n++] = meta[at];
+	/* the whole list, in room made larger until it holds it */
+	for ( cap = size + ownsz + 256, n = -2; n == -2; cap *= 2 ) {
+		if ( out != NULL ) Kfree(out);
+		out = (UB *)Kmalloc(cap);
+		if ( out == NULL ) {
+			n = -3;
+			break;
+		}
+		n = ( j != NULL ) ? applist_kept_of(j, size, keep, own, ownsz, out, (INT)cap) : -1;
+		if ( n == -1 && own != NULL ) {
+			n = applist_kept_of(own, ownsz, keep, NULL, 0, out, (INT)cap);
 		}
 	}
-	out[n] = 0;
+	if ( j != NULL ) Kfree(j);
+	if ( own != NULL ) Kfree(own);
+	er = ( n >= 0 ) ? tad_vobj_set(v, TAD_W_APPLIST, out, n) : ( n == -3 ) ? E_NOMEM : E_NOEXS;
+	if ( out != NULL ) Kfree(out);
+	return er;
 }
 
-EXPORT ER om_store_info( CONST TS_UUID *id, T_OMINFO *info )
+/*
+ * One string value of the metadata, its escapes undone, in memory of its
+ * own ("" when the metadata does not say); NULL only for want of memory.
+ */
+LOCAL UB *meta_str_dup( CONST UB *meta, SZ size, CONST char *key, SZ *p_len )
+{
+	INT	at = json_key(meta, 0, (INT)size, key);
+	UB	*s;
+
+	*p_len = 0;
+	if ( at >= 0 && meta[at] == '"' ) {
+		return om_json_unquote(meta, at, size, p_len);
+	}
+	s = (UB *)Kmalloc(1);
+	if ( s != NULL ) {
+		s[0] = 0;
+	}
+	return s;
+}
+
+/* The counts of the metadata and the size of record 0 */
+LOCAL void info_counts( CONST TS_UUID *id, CONST UB *meta, SZ size,
+			INT *p_refs, INT *p_records, INT *p_bytes )
+{
+	T_OBREC	rec[OM_REC_MAX];
+	INT	at, n, i;
+
+	at = json_key(meta, 0, (INT)size, "refCount");
+	if ( at >= 0 ) {
+		json_int(meta, at, (INT)size, p_refs);
+	}
+	at = json_key(meta, 0, (INT)size, "recordCount");
+	if ( at >= 0 ) {
+		json_int(meta, at, (INT)size, p_records);
+	}
+	n = om_obj_records(id, rec, OM_REC_MAX);
+	for ( i = 0; i < n; i++ ) {
+		if ( rec[i].recno == 0 ) {
+			*p_bytes = (INT)rec[i].size;
+		}
+	}
+}
+
+EXPORT void om_store_info_free( T_OMINFOV *info )
+{
+	if ( info == NULL ) {
+		return;
+	}
+	if ( info->name != NULL )     Kfree(info->name);
+	if ( info->maker != NULL )    Kfree(info->maker);
+	if ( info->made != NULL )     Kfree(info->made);
+	if ( info->updated != NULL )  Kfree(info->updated);
+	if ( info->accessed != NULL ) Kfree(info->accessed);
+	info->name = info->maker = info->made = info->updated = info->accessed = NULL;
+}
+
+/* Every text whole, each in memory of its own; om_store_info_free lets them go */
+EXPORT ER om_store_info_v( CONST TS_UUID *id, T_OMINFOV *info )
 {
 	UB	*meta;
-	SZ	size = 0;
-	INT	at, n, i;
-	T_OBREC	rec[OM_REC_MAX];
+	SZ	size = 0, n;
 
 	if ( id == NULL || info == NULL ) {
 		return E_PAR;
@@ -2715,26 +3287,19 @@ EXPORT ER om_store_info( CONST TS_UUID *id, T_OMINFO *info )
 	if ( meta == NULL ) {
 		return E_NOEXS;
 	}
-	meta_str(meta, size, "name", info->name, TAD_NAME_MAX);
-	meta_str(meta, size, "maker", info->maker, OM_INFO_TEXT);
-	meta_str(meta, size, "makeDate", info->made, OM_INFO_TEXT);
-	meta_str(meta, size, "updateDate", info->updated, OM_INFO_TEXT);
-	meta_str(meta, size, "accessDate", info->accessed, OM_INFO_TEXT);
-	at = json_key(meta, 0, (INT)size, "refCount");
-	if ( at >= 0 ) {
-		json_int(meta, at, (INT)size, &info->refs);
+	info->name     = meta_str_dup(meta, size, "name", &n);
+	info->maker    = meta_str_dup(meta, size, "maker", &n);
+	info->made     = meta_str_dup(meta, size, "makeDate", &n);
+	info->updated  = meta_str_dup(meta, size, "updateDate", &n);
+	info->accessed = meta_str_dup(meta, size, "accessDate", &n);
+	if ( info->name == NULL || info->maker == NULL || info->made == NULL
+	  || info->updated == NULL || info->accessed == NULL ) {
+		Kfree(meta);
+		om_store_info_free(info);
+		return E_NOMEM;
 	}
-	at = json_key(meta, 0, (INT)size, "recordCount");
-	if ( at >= 0 ) {
-		json_int(meta, at, (INT)size, &info->records);
-	}
+	info_counts(id, meta, size, &info->refs, &info->records, &info->bytes);
 	Kfree(meta);
-	n = om_obj_records(id, rec, OM_REC_MAX);
-	for ( i = 0; i < n; i++ ) {
-		if ( rec[i].recno == 0 ) {
-			info->bytes = (INT)rec[i].size;
-		}
-	}
 
 	return E_OK;
 }
@@ -2746,19 +3311,20 @@ EXPORT ER om_store_info( CONST TS_UUID *id, T_OMINFO *info )
  * defaultOpen. Nothing when none is marked. The list is the object's
  * metadata's, or the one the link carries.
  */
-LOCAL INT default_app_name( CONST UB *j, INT size, UB *buf, INT max )
+LOCAL UB *default_app_dup( CONST UB *j, INT size )
 {
-	INT	a, ae, i, n = 0;
+	INT	a, ae, i;
+	SZ	n = 0;
+	UB	*nm = NULL;
 
-	buf[0] = 0;
 	a = json_key(j, 0, size, "applist");
 	if ( a < 0 ) {
 		a = 0;				/* the link's: the list itself */
 		while ( a < size && j[a] != '{' ) a++;
-		if ( a >= size ) return 0;
+		if ( a >= size ) return NULL;
 	}
 	if ( j[a] != '{' ) {
-		return 0;
+		return NULL;
 	}
 	ae = json_close(j, a, size);
 	for ( i = a + 1; i < ae; i++ ) {
@@ -2772,16 +3338,17 @@ LOCAL INT default_app_name( CONST UB *j, INT size, UB *buf, INT max )
 		if ( d >= 0 && j[d] == 't' ) {
 			v = json_key(j, i + 1, e, "name");
 			if ( v >= 0 && j[v] == '"' ) {
-				for ( v++; v < e && j[v] != '"' && n < max - 1; v++ ) {
-					buf[n++] = j[v];
-				}
+				nm = om_json_unquote(j, v, e, &n);	/* whole, its escapes undone */
 			}
 			break;
 		}
 		i = e - 1;
 	}
-	buf[n] = 0;
-	return n;
+	if ( nm != NULL && n == 0 ) {
+		Kfree(nm);
+		nm = NULL;
+	}
+	return nm;
 }
 
 /* A time written "YYYY-MM-DDTHH:MM:SS[.sss](Z|±HH:MM)", in system time */
@@ -2840,13 +3407,12 @@ LOCAL STENT *described( CONST TS_UUID *id )
 	if ( e->described ) {
 		return e;
 	}
-	e->rel[0] = 0;
-	e->app[0] = 0;
+	app_drop(e);
 	e->has_updated = FALSE;
-	(void)om_store_relationship(id, e->rel, sizeof(e->rel));
+	e->rel = rel_dup(id);
 	meta = meta_read(id, &size);
 	if ( meta != NULL ) {
-		(void)default_app_name(meta, (INT)size, e->app, OM_APP_NAME);
+		e->app = default_app_dup(meta, (INT)size);
 		at = json_key(meta, 0, (INT)size, "updateDate");
 		if ( at >= 0 && meta[at] == '"' ) {
 			for ( n = at + 1; n < (INT)size && meta[n] != '"'; n++ ) ;
@@ -2858,82 +3424,103 @@ LOCAL STENT *described( CONST TS_UUID *id )
 	return e;
 }
 
+/*
+ * s put after the n bytes in buf. What does not fit is cut at a whole
+ * letter, and then buf counts as full (n answered as max), so that
+ * nothing after it is put behind a cut word.
+ */
 LOCAL INT put_s( UB *buf, INT n, INT max, CONST UB *s )
 {
-	while ( *s != 0 && n < max - 1 ) {
-		buf[n++] = *s++;
+	SZ	len, k;
+
+	if ( n >= max - 1 ) {
+		return n;
 	}
-	buf[n] = 0;
-	return n;
+	for ( len = 0; s[len] != 0; len++ ) {
+		;
+	}
+	k = knl_utf8_fit(s, len, (SZ)( max - 1 - n ));
+	knl_memcpy(buf + n, s, k);
+	buf[n + (INT)k] = 0;
+	return ( k < len ) ? max : n + (INT)k;
 }
 
-/* The program the link's own applist opens with */
-LOCAL INT link_app_name( CONST T_VOBJ *v, UB *buf, INT max )
+/* The program the link's own applist opens with, by its shown name, in memory of its own; NULL none */
+LOCAL UB *link_app_dup( CONST T_VOBJ *v )
 {
-	UB	*j;
+	UB	*j, *nm;
 	SZ	size = 0;
-	INT	n;
 
-	buf[0] = 0;
 	j = link_applist(v, &size);
 	if ( j == NULL ) {
-		return 0;
+		return NULL;
 	}
-	n = default_app_name(j, (INT)size, buf, max);
+	nm = default_app_dup(j, (INT)size);
 	Kfree(j);
-	return n;
+	return nm;
 }
 
 LOCAL INT store_label_u( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
 {
 	STENT	*e = described(&v->target);
-	UB	nm[TAD_NAME_MAX];
 	INT	n = 0;
 
 	buf[0] = 0;
 	if ( ( v->disp & TAD_D_NAME ) != 0 ) {
 		/* the object's own name before what the link remembers of it */
-		if ( store_name(v, nm, TAD_NAME_MAX, arg) > 0 ) {
-			n = put_s(buf, n, max, nm);
-		} else {
-			n = put_s(buf, n, max, v->name);
+		CONST UB	*nm;
+		UB		*own;
+		SZ		nl;
+
+		nm = name_of_u(&v->target, &nl, &own);
+		n = put_s(buf, n, max, ( nm != NULL ) ? nm : TAD_VS(v->vname));
+		if ( own != NULL ) {
+			Kfree(own);
 		}
 	}
 	if ( ( v->disp & TAD_D_ROLE ) != 0 ) {
-		UB	rel[TAD_REL_MAX * 3];
-		INT	k = 0;
+		/* the object's relationship and the link's, as long as they are */
+		CONST UB	*orel = ( e != NULL && e->rel != NULL ) ? e->rel : (CONST UB *)"";
+		CONST UB	*lrel = ( v->vrel != NULL ) ? v->vrel : (CONST UB *)"";
+		INT		cap = (INT)knl_strlen((CONST char *)orel) + (INT)knl_strlen((CONST char *)lrel) + 2;
+		UB		*rel = (UB *)Kmalloc((SZ)cap);
+		INT		k = 0;
 
-		rel[0] = 0;
-		if ( e != NULL ) k = put_s(rel, k, sizeof(rel), e->rel);
-		if ( v->relationship[0] != 0 ) {
-			if ( k > 0 ) k = put_s(rel, k, sizeof(rel), (CONST UB *)" ");
-			k = put_s(rel, k, sizeof(rel), v->relationship);
-		}
-		if ( k > 0 ) {
-			n = put_s(buf, n, max, (CONST UB *)" : ");
-			n = put_s(buf, n, max, rel);
+		if ( rel != NULL ) {
+			rel[0] = 0;
+			k = put_s(rel, k, cap, orel);
+			if ( lrel[0] != 0 ) {
+				if ( k > 0 ) k = put_s(rel, k, cap, (CONST UB *)" ");
+				k = put_s(rel, k, cap, lrel);
+			}
+			if ( k > 0 ) {
+				n = put_s(buf, n, max, (CONST UB *)" : ");
+				n = put_s(buf, n, max, rel);
+			}
+			Kfree(rel);
 		}
 	}
 	if ( ( v->disp & TAD_D_TYPE ) != 0 ) {
-		UB	app[OM_APP_NAME];
-
-		SZ	size = 0;
-		UB	*j = link_applist(v, &size);
-		BOOL	locked = (BOOL)( j != NULL && app_locked(j, size) );
+		SZ		size = 0;
+		UB		*j = link_applist(v, &size), *own = NULL;
+		CONST UB	*app;
+		BOOL		locked = (BOOL)( j != NULL && app_locked(j, size) );
 
 		if ( j != NULL ) {
 			Kfree(j);
 		}
-		app[0] = 0;
-		if ( e != NULL && e->app[0] != 0 && !locked ) {
-			(void)put_s(app, 0, OM_APP_NAME, e->app);
+		if ( e != NULL && e->app != NULL && !locked ) {
+			app = e->app;
 		} else {
-			(void)link_app_name(v, app, OM_APP_NAME);
+			app = own = link_app_dup(v);
 		}
-		if ( app[0] != 0 ) {
+		if ( app != NULL && app[0] != 0 ) {
 			n = put_s(buf, n, max, (CONST UB *)" (");
 			n = put_s(buf, n, max, app);
 			n = put_s(buf, n, max, (CONST UB *)")");
+		}
+		if ( own != NULL ) {
+			Kfree(own);
 		}
 	}
 	if ( ( v->disp & TAD_D_UPDATE ) != 0 && e != NULL && e->has_updated ) {
@@ -2944,6 +3531,10 @@ LOCAL INT store_label_u( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
 		  && dt_strftime(d, sizeof(d), " %Y/%m/%d %H:%M:%S", &tm) > 0 ) {
 			n = put_s(buf, n, max, (CONST UB *)d);
 		}
+	}
+	/* what was put, a cut label counted as it stands */
+	for ( n = 0; buf[n] != 0; n++ ) {
+		;
 	}
 	return n;
 }
@@ -3136,7 +3727,7 @@ EXPORT void om_store_empty( void )
  */
 EXPORT T_TAD *om_store_get( CONST TS_UUID *id, INT recno )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 
 	if ( id == NULL ) {
 		return NULL;
@@ -3217,7 +3808,7 @@ EXPORT void om_store_forget( CONST TS_UUID *id )
  */
 LOCAL ER om_store_save_u( CONST TS_UUID *id, INT recno )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	slot;
 	UB	*buf, *was;
 	SZ	size = 0, cap, was_len = 0;
@@ -3372,7 +3963,7 @@ EXPORT T_TAD *om_store_restore( CONST TS_UUID *id, INT recno,
 /* What an object is written on, by identity */
 EXPORT ER om_store_paper( CONST TS_UUID *id, UW *p_colour )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 
 	if ( id == NULL ) {
 		return E_PAR;
@@ -3387,14 +3978,58 @@ EXPORT ER om_store_paper( CONST TS_UUID *id, UW *p_colour )
 /* And what it is called */
 EXPORT INT om_store_name( CONST TS_UUID *id, UB *buf, INT max )
 {
-	T_VOBJ	v;
+	CONST UB	*nm;
+	UB		*own;
+	SZ		n;
+	INT		r = -1;
 
-	if ( id == NULL || buf == NULL || max <= 1 ) {
+	if ( id == NULL || buf == NULL || max < 1 ) {
 		return -1;
 	}
-	knl_memset(&v, 0, sizeof(v));
-	v.target = *id;
-	v.recno  = 0;
+	st_lock();
+	nm = name_of_u(id, &n, &own);
+	if ( nm != NULL ) {
+		(void)put_fit(buf, (SZ)max, nm, n);
+		r = (INT)n;
+	} else {
+		buf[0] = 0;
+	}
+	st_unlock();
+	if ( own != NULL ) {
+		Kfree(own);
+	}
+	return r;
+}
 
-	return store_name(&v, buf, max, NULL);
+/* The whole name, in memory of the caller's own */
+EXPORT UB *om_store_name_dup( CONST TS_UUID *id, SZ *p_len )
+{
+	CONST UB	*nm;
+	UB		*own, *out = NULL;
+	SZ		n = 0;
+
+	if ( p_len != NULL ) {
+		*p_len = 0;
+	}
+	if ( id == NULL ) {
+		return NULL;
+	}
+	st_lock();
+	nm = name_of_u(id, &n, &own);
+	if ( own != NULL ) {
+		out = own;		/* already the caller's */
+	} else if ( nm != NULL ) {
+		out = (UB *)Kmalloc(n + 1);
+		if ( out != NULL ) {
+			knl_memcpy(out, nm, n);
+			out[n] = 0;
+		} else {
+			tm_printf((UB *)"om: no memory for a copy of an object's name\n");
+		}
+	}
+	st_unlock();
+	if ( out != NULL && p_len != NULL ) {
+		*p_len = n;
+	}
+	return out;
 }

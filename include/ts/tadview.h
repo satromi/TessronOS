@@ -697,7 +697,6 @@ typedef struct {
  * notices (ob_ntf_evt); the looks are asked again after it.
  */
 #define OB_RVOB_MAX	16
-#define OB_VW_LABEL_MAX	( TAD_NAME_MAX + TAD_REL_MAX * 2 + 96 )
 
 #define OB_VW_NAME	0x0001
 #define OB_VW_LABEL	0x0002
@@ -706,18 +705,28 @@ typedef struct {
 #define OB_VW_STATE	0x0010
 
 #define OB_VW_SHORT	0x0100		/* state: the icon did not fit */
+#define OB_VW_CUT	0x0200		/* state: the name or the label did not fit: name_len,
+					   label_len say how long, to ask again with that room */
 
+/*
+ * The name and the label are as long as they are: the caller gives the
+ * room (name, name_max bytes with the nought; label likewise), and is
+ * answered their whole lengths, what fits put there cut at a whole
+ * letter. With OB_VW_CUT the caller asks again with more room.
+ */
 typedef struct {
 	T_VOBJ	vobj;			/* the link */
 	TS_UUID	host;
 	UINT	want;			/* OB_VW_* */
 	ER	er;			/* E_OK, or why the object is not read */
-	UINT	state;			/* TV_ST_*, OB_VW_SHORT */
+	UINT	state;			/* TV_ST_*, OB_VW_SHORT, OB_VW_CUT */
 	UW	paper;			/* the object's paper; TV_PAPER_LOOK the system's */
-	INT	name_len;		/* below nought: no name */
-	INT	label_len;		/* below nought: the link's own name is drawn */
-	UB	name[TAD_NAME_MAX];
-	UB	label[OB_VW_LABEL_MAX];
+	INT	name_len;		/* bytes of the whole name; below nought: no name */
+	INT	label_len;		/* bytes of the whole label; below nought: the link's own name is drawn */
+	UB	*name;			/* room for name_max bytes, NULL none wanted */
+	INT	name_max;
+	UB	*label;			/* room for label_max bytes, NULL none wanted */
+	INT	label_max;
 	UW	*icon;			/* room for icon_max pixels, NULL none wanted */
 	INT	icon_max;
 	INT	icon_w, icon_h;		/* 0 when the object has no icon */

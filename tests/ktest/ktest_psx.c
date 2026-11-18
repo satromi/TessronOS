@@ -13,12 +13,18 @@
  *	handed to a child, the pseudo terminals and their line discipline,
  *	the object world as paths, signals, and a POSIX program
  *	(tests/uprog/psxtest.c, /boot/PSXTEST.ELF) started with all of them.
+ *	Names as long as NAME_MAX (767 bytes) taken whole by a rename and
+ *	one byte more refused, and an object whose name is longer than that
+ *	shown shortened at a whole letter with "~N", opened by that name.
  */
 
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 #include <ts/fs.h>
 #include <ts/psx.h>
+#include <ts/ob.h>
+#include <ts/om.h>
+#include <ts/sysdef.h>
 #include "ktest.h"
 #include "tstdlib.h"
 
@@ -138,6 +144,277 @@ LOCAL void test_paths( void )
 	KT_ASSERT_ER(fs_xstat("/tmp/改名した.txt", &x), EX_OK);
 	KT_ASSERT_ER(fs_unlink("/tmp/改名した.txt"), EX_OK);
 	KT_ASSERT(fs_xstat("/tmp/改名した.txt", &x) == EX_NOENT);
+}
+
+/* ---------------------------------------------------------------- long names */
+
+#define KT_NAME_MAX	767		/* NAME_MAX: FS_NAME_MAX less its nought */
+
+/* "/tmp/" and name into memory of its own; NULL when it cannot be had */
+LOCAL char *tmp_path( CONST UB *name, INT n )
+{
+	char	*p = (char *)Kmalloc((SZ)n + 6);
+
+	if ( p == NULL ) return NULL;
+	knl_memcpy(p, "/tmp/", 5);
+	knl_memcpy(p + 5, name, n);
+	p[5 + n] = 0;
+	return p;
+}
+
+/* n bytes of name: one ASCII letter, then 名 (three bytes) as many as fit, then ASCII */
+LOCAL INT long_name( UB *b, INT n, UB first )
+{
+	CONST char *k = "名";
+	INT	i = 0;
+
+	b[i++] = first;
+	while ( i + 3 <= n ) {
+		b[i++] = (UB)k[0]; b[i++] = (UB)k[1]; b[i++] = (UB)k[2];
+	}
+	while ( i < n ) b[i++] = 'z';
+	b[i] = 0;
+	return i;
+}
+
+/* Whether the first n bytes of a and b are the same */
+LOCAL BOOL same_n( CONST void *a, CONST void *b, INT n )
+{
+	CONST UB *x = (CONST UB *)a, *y = (CONST UB *)b;
+	INT	i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( x[i] != y[i] ) return FALSE;
+	}
+	return TRUE;
+}
+
+/* Whether the n bytes of s end on a whole letter of UTF-8 */
+LOCAL BOOL whole_letters( CONST UB *s, INT n )
+{
+	INT	i = 0, w;
+
+	while ( i < n ) {
+		w = ( s[i] < 0x80 ) ? 1 : ( s[i] < 0xE0 ) ? 2 : ( s[i] < 0xF0 ) ? 3 : 4;
+		i += w;
+	}
+	return ( i == n );
+}
+
+/*
+ * A rename to a name of 300 bytes keeps it whole, as the file's and the
+ * object's name; one of 768 bytes is refused (ENAMETOOLONG), as is a
+ * file made by such a name.
+ */
+LOCAL void test_long_rename( void )
+{
+	T_FSXSTAT x;
+	T_DIRENT *de;
+	TS_UUID	u;
+	UB	*nm, *own;
+	CONST char *pshort = "/tmp/ktest long.txt";
+	char	*p300, *p768;
+	SZ	len = 0;
+	INT	fd, n, i, found = 0;
+
+	nm = (UB *)Kmalloc(800);
+	de = (T_DIRENT *)Kmalloc(sizeof(T_DIRENT) * 4);
+	KT_ASSERT(nm != NULL && de != NULL);
+	if ( nm == NULL || de == NULL ) {
+		if ( nm != NULL ) Kfree(nm);
+		if ( de != NULL ) Kfree(de);
+		return;
+	}
+	n = long_name(nm, 296, 'a');
+	knl_memcpy(nm + n, ".txt", 5);			/* 300 bytes */
+	p300 = tmp_path(nm, 300);
+	n = long_name(nm, 768, 'b');
+	p768 = tmp_path(nm, n);
+	KT_ASSERT(p300 != NULL && p768 != NULL);
+
+	fd = fs_open(pshort, O_RDWR | O_CREAT | O_TRUNC);
+	KT_ASSERT(fd >= 0);
+	if ( fd >= 0 ) fs_close(fd);
+	if ( p300 != NULL && fd >= 0 ) {
+		KT_ASSERT_ER(fs_rename(pshort, p300), EX_OK);
+		KT_ASSERT_ER(fs_xstat(p300, &x), EX_OK);
+		KT_ASSERT_EQ(x.st.mode & FS_IFMT, FS_IFREG);
+
+		/* the object is named by the stem, every byte of it */
+		(void)knl_objfs_lookup(p300, &u);
+		own = knl_ob_name(&u, &len, NULL);
+		KT_ASSERT(own != NULL && len == 296 && same_n(own, p300 + 5, 296) && own[296] == 0
+			  && whole_letters(own, (INT)len));
+		if ( own != NULL ) Kfree(own);
+
+		/* listed whole */
+		fd = fs_open("/tmp", O_RDONLY | O_DIRECTORY);
+		KT_ASSERT(fd >= 0);
+		while ( fd >= 0 && !found && ( n = fs_getdents(fd, de, 4) ) > 0 ) {
+			for ( i = 0; i < n; i++ ) {
+				if ( s_eq(de[i].name, p300 + 5, 300) ) found = 1;
+			}
+		}
+		if ( fd >= 0 ) fs_close(fd);
+		KT_ASSERT(found);
+
+		/* one byte past NAME_MAX: refused, and the file keeps its name */
+		if ( p768 != NULL ) {
+			KT_ASSERT(fs_rename(p300, p768) == EX_NAMETOOLONG);
+			KT_ASSERT(fs_open(p768, O_RDWR | O_CREAT) == EX_NAMETOOLONG);
+			KT_ASSERT(fs_mkdir(p768) == EX_NAMETOOLONG);
+			KT_ASSERT(fs_xstat(p768, &x) == EX_NAMETOOLONG);
+			KT_ASSERT_ER(fs_xstat(p300, &x), EX_OK);
+		}
+		(void)fs_unlink(p300);
+	}
+	(void)fs_unlink(pshort);
+	if ( p300 != NULL ) Kfree(p300);
+	if ( p768 != NULL ) Kfree(p768);
+	Kfree(nm);
+	Kfree(de);
+}
+
+/* A box of tmp named name, with nothing in it; it opens as a directory */
+LOCAL ER long_box( CONST TS_UUID *tmp, CONST UB *name, TS_UUID *p_uuid )
+{
+	CONST char *a = "{\"name\":\"";
+	CONST char *b = "\",\"relationship\":[],\"linktype\":false,\"refCount\":0,\"recordCount\":1,"
+			"\"applist\":{\"virtual-object-list\":{\"name\":\"仮身一覧\",\"defaultOpen\":true}}}";
+	CONST char *r = "<tad version=\"1.0\" encoding=\"UTF-8\"><figure></figure></tad>";
+	T_OBCRE	c;
+	UB	*j;
+	INT	n = 0, k;
+	ER	er;
+
+	j = (UB *)Kmalloc((SZ)( s_len(a) + s_len((CONST char *)name) + s_len(b) + 1 ));
+	if ( j == NULL ) return E_NOMEM;
+	for ( k = 0; a[k] != 0; k++ ) j[n++] = (UB)a[k];
+	for ( k = 0; name[k] != 0; k++ ) j[n++] = name[k];	/* nothing in it to escape */
+	for ( k = 0; b[k] != 0; k++ ) j[n++] = (UB)b[k];
+	j[n] = 0;
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.json = j;
+	c.jsonsz = n;
+	c.near = *tmp;
+	er = ob_cre_obj(&c, p_uuid);
+	Kfree(j);
+	if ( er < E_OK ) return er;
+	er = om_obj_record_put(p_uuid, 0, OB_RT_TAD, 0, (CONST UB *)r, s_len(r));
+	if ( er >= E_OK ) er = om_obj_link_add(tmp, p_uuid);
+	if ( er < E_OK ) (void)ob_del_obj(p_uuid);
+	return er;
+}
+
+/*
+ * Two objects of tmp whose names, 1000 bytes each, are the same in their
+ * first 900: each is shown by a name of at most NAME_MAX bytes, ended at
+ * a whole letter and numbered, the two not the same; each name opens its
+ * own object, and the objects' names are as they were.
+ */
+LOCAL void test_long_object( void )
+{
+	T_DIRENT *de;
+	TS_UUID	tmp, u1, u2, child, look;
+	UB	*n1, *n2, *own, shown[2][FS_NAME_MAX];
+	char	*p;
+	SZ	len = 0;
+	INT	fd, n, i, k, got = 0, first = 0, dirs = 0;
+	ER	er;
+
+	knl_memset(&child, 0, sizeof(child));
+	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_TMP, &tmp), E_OK);
+	n1 = (UB *)Kmalloc(1001);
+	n2 = (UB *)Kmalloc(1001);
+	de = (T_DIRENT *)Kmalloc(sizeof(T_DIRENT) * 4);
+	KT_ASSERT(n1 != NULL && n2 != NULL && de != NULL);
+	if ( n1 == NULL || n2 == NULL || de == NULL ) goto out;
+	(void)long_name(n1, 1000, 'L');
+	(void)long_name(n2, 1000, 'L');
+	n2[999] = 'y';					/* the two differ at the end only */
+
+	er = long_box(&tmp, n1, &u1);
+	KT_ASSERT_ER(er, E_OK);
+	if ( er < E_OK ) goto out;
+	er = long_box(&tmp, n2, &u2);
+	KT_ASSERT_ER(er, E_OK);
+	if ( er < E_OK ) {
+		(void)om_obj_link_del(&tmp, &u1);
+		(void)ob_del_obj(&u1);
+		goto out;
+	}
+	/* something in the first, to know it by when it is opened */
+	KT_ASSERT_ER(long_box(&u1, (CONST UB *)"中身", &child), E_OK);
+
+	/* listed: the two by names that start as theirs do, shortened and numbered */
+	fd = fs_open("/tmp", O_RDONLY | O_DIRECTORY);
+	KT_ASSERT(fd >= 0);
+	while ( fd >= 0 && ( n = fs_getdents(fd, de, 4) ) > 0 ) {
+		for ( i = 0; i < n; i++ ) {
+			if ( !same_n(de[i].name, n1, 100) || got >= 2 ) continue;
+			k = s_len((CONST char *)de[i].name);
+			knl_memcpy(shown[got], de[i].name, k + 1);
+			got++;
+		}
+	}
+	if ( fd >= 0 ) fs_close(fd);
+	KT_ASSERT_EQ(got, 2);
+	for ( i = 0; i < got; i++ ) {
+		k = s_len((CONST char *)shown[i]);
+		while ( k > 0 && shown[i][k - 1] != '~' ) k--;
+		tm_printf((UB *)"psx: long name shown as %d bytes, ending \"%s\"\n",
+			  s_len((CONST char *)shown[i]), shown[i] + ( k > 4 ? k - 4 : 0 ));
+		KT_ASSERT(s_len((CONST char *)shown[i]) <= KT_NAME_MAX);
+		KT_ASSERT(k > 1 && shown[i][k] >= '1' && shown[i][k] <= '9');	/* "~N" */
+		KT_ASSERT(whole_letters(shown[i], k - 1));
+		KT_ASSERT(same_n(shown[i], n1, k - 1));
+	}
+	if ( got == 2 ) {
+		KT_ASSERT(!s_eq(shown[0], (CONST char *)shown[1], s_len((CONST char *)shown[0])));
+	}
+
+	/* each opened by the name shown: the one with something in it is the first */
+	for ( i = 0; i < got; i++ ) {
+		BOOL	has = FALSE;
+
+		p = tmp_path(shown[i], s_len((CONST char *)shown[i]));
+		KT_ASSERT(p != NULL);
+		if ( p == NULL ) continue;
+		fd = fs_open(p, O_RDONLY | O_DIRECTORY);
+		KT_ASSERT(fd >= 0);
+		while ( fd >= 0 && ( n = fs_getdents(fd, de, 4) ) > 0 ) {
+			for ( k = 0; k < n; k++ ) {
+				if ( s_eq(de[k].name, "中身", s_len("中身")) ) has = TRUE;
+			}
+		}
+		if ( fd >= 0 ) fs_close(fd);
+		if ( knl_objfs_lookup(p, &look) == EX_ISDIR ) dirs++;
+		Kfree(p);
+		if ( has ) first++;
+	}
+	KT_ASSERT_EQ(dirs, 2);
+	KT_ASSERT_EQ(first, 1);				/* the first, and only it */
+
+	/* the objects keep their names, all 1000 bytes */
+	own = knl_ob_name(&u1, &len, NULL);
+	KT_ASSERT(own != NULL && len == 1000 && same_n(own, n1, 1000));
+	if ( own != NULL ) Kfree(own);
+	own = knl_ob_name(&u2, &len, NULL);
+	KT_ASSERT(own != NULL && len == 1000 && same_n(own, n2, 1000));
+	if ( own != NULL ) Kfree(own);
+
+	(void)om_obj_link_del(&u1, &child);
+	(void)ob_del_obj(&child);
+	(void)om_obj_link_del(&tmp, &u1);
+	(void)om_obj_link_del(&tmp, &u2);
+	(void)ob_del_obj(&u1);
+	(void)ob_del_obj(&u2);
+    out:
+	if ( n1 != NULL ) Kfree(n1);
+	if ( n2 != NULL ) Kfree(n2);
+	if ( de != NULL ) Kfree(de);
 }
 
 /* ---------------------------------------------------------------- terminals */
@@ -325,6 +602,29 @@ LOCAL void test_exit_code( void )
 	if ( fs_stat(PSXTEST, &st) < EX_OK ) KT_SKIP("no " PSXTEST);
 	(void)run(w, 3, b, sizeof(b), &code);
 	KT_ASSERT_EQ(code, 42);
+}
+
+/*
+ * A program's view of names: pathconf's _PC_NAME_MAX, NAME_MAX and the
+ * room of struct dirent's d_name agree; a file of a name of NAME_MAX
+ * bytes is made and listed whole, and one byte more is ENAMETOOLONG.
+ */
+LOCAL void test_name_max( void )
+{
+	static CONST char *const w[] = { "psxtest", "names" };
+	UB	b[256];
+	INT	n, code = -1;
+	T_FSTAT	st;
+
+	if ( fs_stat(PSXTEST, &st) < EX_OK ) KT_SKIP("no " PSXTEST);
+	n = run(w, 2, b, sizeof(b), &code);
+	tm_printf((UB *)"psx: names said [%s] code %d\n", b, code);
+	KT_ASSERT(n > 0);
+	KT_ASSERT(s_has(b, n, "names pc 767 max 767 dname 768\n"));
+	KT_ASSERT(s_has(b, n, "names make ok\n"));
+	KT_ASSERT(s_has(b, n, "names listed 1\n"));
+	KT_ASSERT(s_has(b, n, "names long refused\n"));
+	KT_ASSERT_EQ(code, 0);
 }
 
 LOCAL void test_signals( void )
@@ -739,9 +1039,12 @@ EXPORT void ktest_psx( void )
 	KT_RUN(test_pipe);
 	KT_RUN(test_dup);
 	KT_RUN(test_paths);
+	KT_RUN(test_long_rename);
+	KT_RUN(test_long_object);
 	KT_RUN(test_pty);
 	KT_RUN(test_spawn);
 	KT_RUN(test_exit_code);
+	KT_RUN(test_name_max);
 	KT_RUN(test_signals);
 	KT_RUN(test_kill);
 	KT_RUN(test_tty_program);

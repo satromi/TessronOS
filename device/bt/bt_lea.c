@@ -48,6 +48,7 @@
 #include "../usb/usbdev.h"
 #include "../snd/sndhw.h"
 #include "btint.h"
+#include "btaudio.h"
 #include "bt_lea.h"
 #include "../../lib/liblc3/include/lc3.h"
 
@@ -302,14 +303,14 @@ LOCAL void plan( BTC *c )
 	LEADEV	*m[2];
 	INT	nm = 0, i, k;
 
-	for ( i = 0; i < NPEER && nm == 0; i++ ) {
+	for ( i = 0; i < c->npeer && nm == 0; i++ ) {
 		LEADEV	*d = knl_btbap_dev(c, i);
 
 		if ( d != NULL && d->ready && !d->failed && d->p->up ) m[nm++] = d;
 	}
 	if ( nm == 0 ) return;
 	if ( m[0]->in_set && m[0]->set_size >= 2 ) {
-		for ( i = 0; i < NPEER && nm < 2; i++ ) {
+		for ( i = 0; i < c->npeer && nm < 2; i++ ) {
 			LEADEV	*e = knl_btbap_dev(c, i);
 
 			if ( e != NULL && e != m[0] && e->ready && !e->failed && e->p->up && e->in_set
@@ -367,6 +368,16 @@ LOCAL void plan( BTC *c )
 		knl_btbap_codec(c, s->d, s->ai, g.freq, s->alloc, g.oct);
 	}
 	g.st = G_CODEC;
+	/* sink ASEs no stream uses: the output has LEA_OUT_CHANNELS channels, a stream each at most */
+	for ( k = 0; k < nm; k++ ) {
+		INT	used = 0;
+
+		for ( i = 0; i < g.n; i++ ) used += ( g.s[i].d == m[k] ) ? 1 : 0;
+		if ( m[k]->nase > used ) {
+			tm_printf((UB *)"bt: \"%s\": %d of its %d sink ASEs used: the output has %d channels\n",
+				  m[k]->p->name, used, m[k]->nase, LEA_OUT_CHANNELS);
+		}
+	}
 	tm_printf((UB *)"bt: \"%s\": LE Audio of %d stream(s) on %d device(s): LC3 %d Hz, 10 ms frames of %d bytes, %d kbit/s a channel\n",
 		  m[0]->p->name, g.n, nm, g.rate, g.oct, g.oct * 8 / 10);
 }
@@ -787,29 +798,25 @@ EXPORT void knl_btlea_gone( BTC *c )
 
 /* ---------------------------------------------------------------- the sound device's side */
 
-LOCAL BOOL id_of( UB *id )
+/* The device the output is named by: that of the first stream, NULL none */
+LOCAL PEER *out_peer( void )
 {
 	INT	i;
 
 	for ( i = 0; i < g.n; i++ ) {
-		PEER	*p = ( g.s[i].d != NULL ) ? g.s[i].d->p : NULL;
-
-		if ( p != NULL ) {
-			(void)tm_sprintf(id, (UB *)"le-%02x%02x%02x%02x%02x%02x",
-					 p->addr[5], p->addr[4], p->addr[3], p->addr[2], p->addr[1], p->addr[0]);
-			return TRUE;
-		}
+		if ( g.s[i].d != NULL && g.s[i].d->p != NULL ) return g.s[i].d->p;
 	}
-	return FALSE;
+	return NULL;
 }
 
-LOCAL INT lea_outputs( SDOut *o, INT max )
+LOCAL ER lea_outs( SNDOUTS *l )
 {
-	UB	id[SND_ID_MAX];
+	UB	id[BTA_ID_ROOM];
+	PEER	*p = out_peer();
 
-	if ( max < 1 || g.c == NULL || g.st < G_READY || !id_of(id) ) return 0;
-	knl_snd_out_set(&o[0], id, name_of(), SND_BE_BT, 0);
-	return 1;
+	if ( g.c == NULL || g.st < G_READY || p == NULL ) return E_OK;
+	knl_bta_out_id(id, "le-", p->addr, "");
+	return knl_snd_out_add(l, id, name_of(), SND_BE_BT, 0);
 }
 
 LOCAL BOOL lea_can_record( void )
@@ -819,12 +826,11 @@ LOCAL BOOL lea_can_record( void )
 
 LOCAL ER lea_play_start( CONST UB *id, UW *rate, INT *channels )
 {
-	UB	mine[SND_ID_MAX];
+	PEER	*p = out_peer();
 
-	if ( g.c == NULL || g.st < G_READY || id == NULL || !id_of(mine) ) return E_NOEXS;
-	if ( knl_strcmp((CONST char *)id, (CONST char *)mine) != 0 ) return E_NOEXS;
+	if ( g.c == NULL || g.st < G_READY || p == NULL || !knl_bta_is_out_id(id, "le-", p->addr, "") ) return E_NOEXS;
 	*rate = g.rate;
-	*channels = 2;
+	*channels = LEA_OUT_CHANNELS;
 	g.tries = 0;
 	g.want_play = TRUE;
 	(void)tk_sig_sem(g.c->sem, 1);
@@ -904,9 +910,10 @@ LOCAL ER lea_set_level( INT dn, CONST SDVol *v )
 /* Enabling and the CISes take a moment, and stopping would cut what follows soon after */
 EXPORT CONST SNDHW knl_lea_hw = {
 	SND_BE_BT,
-	lea_outputs, lea_can_record,
+	NULL, lea_can_record,
 	lea_play_start, lea_play_stop, lea_play_running,
 	lea_rec_start, lea_rec_stop, lea_rec_running,
 	lea_poll, lea_get_level, lea_set_level,
-	300, 2000
+	300, 2000,
+	lea_outs
 };

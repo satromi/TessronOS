@@ -1083,7 +1083,7 @@ QEMUにはPとEの混在が無く、MADTのx2APICの項目も255未満のIDで�
 
 起動時に`therm: start:`の2行で、ファームウェアが残した設定を出す。TjMaxとTCCの補正(`MSR_TEMPERATURE_TARGET`)、双方向のPROCHOT(`MSR_POWER_CTL`のビット0)、PL1とPL2の値、時間の窓、ロック(`MSR_PKG_POWER_LIMIT`)、倍率(`MSR_PLATFORM_INFO`)、`IA32_PERF_CTL`と今の状態、省電力の傾き(EPB)、SpeedStepとターボ、コアの電流の上限、構成できるTDPの段、HWPである。続けて、温度の区域ごとの`_TMP`、`_PSV`、`_CRT`、`_HOT`、`_AC0`、`_TC1`、`_TC2`、`_TSP`(`therm: zone`)と、DPTFの管理(INT3400)、プロセッサの参加者`\_SB.PCI0.B0D4`とセンサ(INT3403)の閾値、組込みコントローラの温度とDPTFのフィールド(ファームウェアが名付けているもの。Surface Go 2では`CTMP`、`S1TP`、`S2TP`、`S3TP`、`DPTF`、`HOTN`など)を出す(`therm: DPTF:`)。センサの`_TMP`は、ここでは読まない(`thermdptf=1`のときだけ、DPTFの受動の表が4秒ごとに読む。3.10.14)。
 
-そのあとは、毎秒、外からのPROCHOT#(`IA32_PACKAGE_THERM_STATUS`のビット2)、プロセッサ自身の温度の制御(同じビット0)、コアとGTの制限の理由のPROCHOT(`MSR_CORE_PERF_LIMIT_REASONS`、`MSR_GFX_PERF_LIMIT_REASONS`のビット0)を読む。変わったときは`therm: change`の行をすぐ出し(10秒に6行まで)、10秒ごとに`therm: 10 s`の行で、それぞれが立っていた秒数、パッケージの温度と電力、温度の状態のレジスタ、区域と組込みコントローラの温度(DPTFのビットを含む)、電池の`_BST`とACアダプタの`_PSR`を出す。続く`therm: power`の行で、同じ10秒の遊びの状態ごとの回数と時間、パッケージのC状態の割合、HWPの要求と能力、今のPL1、DPTFの受動の表の行の数と入っている数、PL1を書いた回数、センサの`_TMP`を読んだ回数と最後の値を出す(3.10.14)。`IA32_PACKAGE_THERM_STATUS`の記録のビットは10秒ごとに消す(Linuxの`therm_throt`と同じ)。
+そのあとは、毎秒、外からのPROCHOT#(`IA32_PACKAGE_THERM_STATUS`のビット2)、プロセッサ自身の温度の制御(同じビット0)、コアとGTの制限の理由のPROCHOT(`MSR_CORE_PERF_LIMIT_REASONS`、`MSR_GFX_PERF_LIMIT_REASONS`のビット0。どちらも機種で番地と有無が違い、無ければ読まない。3.10.14の「機種によるMSRの有無と安全な読み書き」)を読む。変わったときは`therm: change`の行をすぐ出し(10秒に6行まで)、10秒ごとに`therm: 10 s`の行で、それぞれが立っていた秒数、パッケージの温度と電力、温度の状態のレジスタ、区域と組込みコントローラの温度(DPTFのビットを含む)、電池の`_BST`とACアダプタの`_PSR`を出す。続く`therm: power`の行で、同じ10秒の遊びの状態ごとの回数と時間、パッケージのC状態の割合、HWPの要求と能力、今のPL1、DPTFの受動の表の行の数と入っている数、PL1を書いた回数、センサの`_TMP`を読んだ回数と最後の値を出す(3.10.14)。`IA32_PACKAGE_THERM_STATUS`の記録のビットは10秒ごとに消す(Linuxの`therm_throt`と同じ)。
 
 Surface Go 2のファームウェアには、ACPIの受動冷却の閾値(`_PSV`)を持つ温度の区域が無い(`\_TZ.TZ00`は`_TMP`と`_HOT`だけ)。温度の方針はDPTFに任されていて、受動の表`\_SB.IETM.PSVT`には、`SEN1`が55℃以上、`SEN2`が98℃以上でプロセッサ(`B0D4`)の電力の上限を8000mWに、という2行がある(刻み250mWと係数も書かれているが、Linuxのthermaldは使わない)。
 
@@ -1092,6 +1092,22 @@ Surface Go 2のファームウェアには、ACPIの受動冷却の閾値(`_PSV`
 ### 3.10.14 省電力と温度の管理
 
 3つの係を、Linuxのドライバと同じ形、同じ値、同じ順番で持つ。合わせたのはLinux 7.4-rc2(torvalds/linuxの7e1392a42ea2)とthermald(intel/thermal_daemonのc189a9ecaf20)である。3つとも仮想マシンでないIntelのプロセッサだけで働き、QEMUでは今までどおりになる。起動の設定でそれぞれを切れる(3.10.7の表)。
+
+#### 機種によるMSRの有無と安全な読み書き
+
+MSR(モデル固有レジスタ)の多くは、CPUIDで有無が分からない。無いMSRをRDMSRやWRMSRで読み書きすると、#GP(一般保護例外)になる。R1.400では、Skylake以降にしか無い`0x64F`(コアの性能の制限の理由)を機種を確かめずに毎秒読んでいたため、第3〜5世代のCore i(Ivy Bridge、Haswell、Broadwell)では起動中に#GPで止まった。そこで、機能の有無を次の2段で決める。
+
+1. 起動時に一度、機能ごとに有無を決める。CPUIDで分かるもの(パッケージの温度の状態は`CPUID.06H:EAX[6]`、EPBは`CPUID.06H:ECX[3]`、HWPは`CPUID.06H:EAX[7]`、APERFとMPERFは`CPUID.06H:ECX[0]`、TSCデッドラインとx2APICは`CPUID.01H:ECX`、`IA32_TSC_ADJUST`は`CPUID.07H:EBX[1]`)はCPUIDで決める。CPUIDで分からないものは、ファミリ6のモデル番号の表で決める(`kernel/sysdepend/cpu/core/x86_64/cpuclk.c`の`knl_x64_msr`)。
+   - RAPLのパッケージのレジスタ(`0x606`、`0x610`、`0x611`): Sandy Bridge以降のモデル。表に無いモデルでは下の安全な読み出しで確かめる。`MSR_PKG_POWER_INFO`(`0x614`)と`MSR_PP0_CURRENT_CONFIG`(`0x601`)は、RAPLがあるときに安全な読み出しで確かめる。
+   - コアの性能の制限の理由: HaswellとBroadwellは`0x690`、SkylakeからComet Lakeは`0x64F`、Sandy BridgeとIvy Bridgeには無い。表に無いモデルでは`0x64F`、`0x690`の順に確かめる。
+   - GTの性能の制限の理由(`0x6B0`): Sandy Bridge、Ivy Bridge、GTの無いサーバのモデルには無い。ほかのモデルでは確かめる。
+   - Atomの系統: Bonnell、Saltwell、Airmont(Braswell、Cherry Trail)にはRAPLが無い。Silvermontは単位の形が違うので使わない。Goldmont、Goldmont Plus、TremontはほかのモデルとおなじくRAPLを確かめて使う。性能の制限の理由は、どのAtomでも使わない。
+   - 温度: パッケージの温度の状態(`0x1B1`、`CPUID.06H:EAX[6]`)とコアの温度の状態(`0x19C`、`CPUID.01H:EDX[22]`)は、CPUIDのビットがあり、起動時の安全な読み出しが通ったときだけ使う。TjMax(`0x1A2`)は起動時に一度だけ安全な読み出しで読み、読めなければ100℃とする。
+   - パッケージのCステートの滞在時間(`0x60D`、`0x3F8`〜`0x3FA`、`0x630`〜`0x632`)とMWAITのヒント: 遊びの状態の表(`kernel/sysdepend/x64/cpuidle.c`)にあるSkylakeとKaby Lakeのクライアントのモデルだけで読む。PC8〜PC10のレジスタは、Ivy Bridgeとデスクトップ向けのHaswellには無い。
+   表で「ある」と決まったレジスタも、使う前に一度だけ安全な読み出しで確かめる。どれも、仮想マシンでないIntelのプロセッサだけで使う。無い機能は使わず、起動時の行(`cpu: model ..`、`therm: start:`)に「無い」と出す。RAPLが無いときは、PL1を書かず、DPTFの受動の表も使わない。温度はPROCHOTとプロセッサ自身の制御(TCC)のビットだけで見る。パッケージの温度の状態が無いときは、コアの`IA32_THERM_STATUS`の同じビットを見る。
+2. 安全な読み書き(`knl_rdmsr_safe`、`knl_wrmsr_safe`。`include/tk/sysdepend/cpu/core/x86_64/syslib.h`)。RDMSRとWRMSRの命令の番地を、#GPのハンドラ(`kernel/sysdepend/cpu/core/x86_64/exc_hdl.c`の`knl_kernel_fault`)が知っている。その番地で#GPになると、ハンドラは続きの番地へ戻り、呼出しは`E_NOSPT`を返す。カーネルはそのまま動き続ける。使うのは、機種の表で決まらないレジスタの初回の確認、ファームウェアが番地を与えるレジスタ(LPITの低電力の滞在時間など)、起動時の行に出すだけのレジスタ(`therm: start:`の`MISC_ENABLE`、`PERF_CTL`、`PERF_STATUS`、`POWER_CTL`、`PLATFORM_INFO`、HWPの値など。読めなければ`none`と出す)である。有無が決まったレジスタは、ふつうの`rdmsr`で読む。全部の読み出しを安全版にして機種の確認を省くことはしない。拒まれた回数は`knl_msr_refused`で数える。
+
+コンパイラの指定は`-march=x86-64-v2`(SSE4.2、POPCNT、SSSE3、CMPXCHG16B)で、Nehalem以降のIntelのプロセッサで動く命令だけを出す。AVX2(ウインドウの合成)、XSAVE、SMEP、SMAP、PCID、RDRAND、RDSEEDは、CPUIDで確かめてから使う。
 
 #### 遊んでいるときの深い眠り
 

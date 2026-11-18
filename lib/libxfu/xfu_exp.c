@@ -525,7 +525,14 @@ LOCAL ER exp_obj( XFU *x, CONST TS_UUID *u, CONST UB *dir, T_XFUNAMES *names, IN
 		} else if ( mode == M_TEXT && f->have && f->rec0 >= 0 ) {
 			(void)xfu_scpy(name, XFU_NAME_MAX, f->name);
 		} else {
-			i = xfu_scpy(name, XFU_NAME_MAX - 8, ref.name);
+			/*
+			 * the object's name, whole, as the file's: a file system's
+			 * name holds XFU_NAME_MAX bytes, cut there at a whole letter
+			 */
+			UB	*on = xfu_obj_name(u);
+
+			i = xfu_scpy(name, XFU_NAME_MAX - 8, ( on != NULL ) ? on : (CONST UB *)"");
+			if ( on != NULL ) xfu_sys_free(on);
 			if ( i == 0 ) i = xfu_scpy(name, XFU_NAME_MAX - 8, (CONST UB *)"_");
 			(void)xfu_scpy(name + i, 8, ( mode == M_TEXT ) ? (CONST UB *)".txt"
 					    : ( mode == M_IMAGE ) ? (CONST UB *)".png"

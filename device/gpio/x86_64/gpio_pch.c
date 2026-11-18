@@ -83,8 +83,8 @@
 #define DW0_RXEV_MASK		0x06000000
 
 #define MAX_COMM		4
-#define MAX_CTRL		2
-#define MAX_PADINT		4
+#define CTRL_FIRST		2	/* controllers the table starts with; it doubles when full */
+#define PADINT_FIRST		4	/* pads taken as interrupts, the same */
 #define NOMAP			0xffff		/* a group the namespace cannot name */
 
 typedef struct {
@@ -160,10 +160,34 @@ typedef struct pch_padint {
 	void		*arg;
 } PADINT;
 
-LOCAL CTRL	ctrls[MAX_CTRL];
-LOCAL INT	nctrl = 0;
-LOCAL PADINT	padints[MAX_PADINT];
-LOCAL INT	npadint = 0;
+/*
+ * The controllers set up and the pads taken as interrupts, as many as
+ * there are: each table holds a pointer to each entry, taken once and
+ * kept, since entries are handed out (a pad's handle) and the interrupt
+ * reads the tables without a lock. A table grown is put in place after
+ * its entries, and the one before is not given back.
+ */
+LOCAL CTRL	**ctrls = NULL;
+LOCAL INT	nctrl = 0, ctrl_cap = 0;
+LOCAL PADINT	**padints = NULL;
+LOCAL INT	npadint = 0, padint_cap = 0;
+
+/* Room for one more pointer in a table of n of cap: E_OK or E_NOMEM */
+LOCAL ER table_room( void ***p_tbl, INT n, INT *p_cap, INT first )
+{
+	void	**t;
+	INT	cap, i;
+
+	if ( n < *p_cap ) return E_OK;
+	cap = ( *p_cap > 0 ) ? *p_cap * 2 : first;
+	t = (void **)Kmalloc(sizeof(void *) * (SZ)cap);
+	if ( t == NULL ) return E_NOMEM;
+	for ( i = 0; i < n; i++ ) t[i] = (*p_tbl)[i];
+	DeviceBarrier();
+	*p_tbl = t;
+	*p_cap = cap;
+	return E_OK;
+}
 LOCAL T_SPLOCK	gp_lock;
 LOCAL BOOL	gp_lock_made = FALSE;
 
@@ -172,20 +196,24 @@ LOCAL CTRL *ctrl_of( CONST char *path )
 {
 	void	*h = knl_acpica_handle(path);
 	CTRL	*c;
-	INT	i, k;
+	INT	i, j, k;
 
 	if ( h == NULL ) return NULL;
 	for ( i = 0; i < nctrl; i++ ) {
-		if ( ctrls[i].dev == h ) return &ctrls[i];
+		if ( ctrls[i]->dev == h ) return ctrls[i];
 	}
-	if ( nctrl >= MAX_CTRL ) return NULL;
 	for ( i = 0; i < (INT)( sizeof(layouts) / sizeof(layouts[0]) ); i++ ) {
-		for ( k = 0; k < 4; k++ ) {
-			void	*d = knl_acpica_device(layouts[i].hid, k);
+		for ( j = 0; ; j++ ) {
+			void	*d = knl_acpica_device(layouts[i].hid, j);
 
 			if ( d == NULL ) break;
 			if ( d != h ) continue;
-			c = &ctrls[nctrl];
+			c = ( table_room((void ***)&ctrls, nctrl, &ctrl_cap, CTRL_FIRST) >= E_OK )
+				? (CTRL *)Kmalloc(sizeof(CTRL)) : NULL;
+			if ( c == NULL ) {
+				tm_printf((UB *)"gpio: %s: no memory for the controller\n", path);
+				return NULL;
+			}
 			knl_memset(c, 0, sizeof(*c));
 			c->dev = h;
 			c->lay = &layouts[i];
@@ -195,6 +223,7 @@ LOCAL CTRL *ctrl_of( CONST char *path )
 
 				if ( knl_acpica_mem(h, k, &b, &len) != 0 || len < 0x1000 ) {
 					tm_printf((UB *)"gpio: %s (%s): no memory for community %d\n", path, c->lay->name, k);
+					Kfree(c);
 					return NULL;
 				}
 				c->base[k] = (UBINT)DEV_BASE(b);
@@ -206,6 +235,8 @@ LOCAL CTRL *ctrl_of( CONST char *path )
 				InitSpinLock(&gp_lock);
 				gp_lock_made = TRUE;
 			}
+			ctrls[nctrl] = c;
+			DeviceBarrier();
 			nctrl++;
 			return c;
 		}
@@ -320,7 +351,7 @@ LOCAL void pads_inthdr( UINT intno )
 	INT	n, i, k;
 
 	for ( n = 0; n < nctrl; n++ ) {
-		CTRL		*c = &ctrls[n];
+		CTRL		*c = ctrls[n];
 		CONST LAYOUT	*l = c->lay;
 
 		if ( c->gsi < 0 || (UINT)INTVEC_GSI(c->gsi) != intno ) continue;
@@ -339,8 +370,8 @@ LOCAL void pads_inthdr( UINT intno )
 			/* masked first: a level still asserted sets its status again as soon as it is cleared */
 			mask = st;
 			for ( k = 0; k < npadint; k++ ) {
-				if ( padints[k].g == g && padints[k].c == c && !padints[k].level ) {
-					mask &= ~( 1U << padints[k].bit );
+				if ( padints[k]->g == g && padints[k]->c == c && !padints[k]->level ) {
+					mask &= ~( 1U << padints[k]->bit );
 				}
 			}
 			if ( mask != 0 ) {
@@ -349,9 +380,9 @@ LOCAL void pads_inthdr( UINT intno )
 			out_w(b + GPI_IS + g->bank * 4, st);
 			ISpinUnlock(&gp_lock, &im);
 			for ( k = 0; k < npadint; k++ ) {
-				if ( padints[k].g == g && padints[k].c == c && ( st & ( 1U << padints[k].bit ) ) ) {
-					st &= ~( 1U << padints[k].bit );
-					padints[k].fn(padints[k].arg);
+				if ( padints[k]->g == g && padints[k]->c == c && ( st & ( 1U << padints[k]->bit ) ) ) {
+					st &= ~( 1U << padints[k]->bit );
+					padints[k]->fn(padints[k]->arg);
 				}
 			}
 			if ( st != 0 ) {
@@ -373,7 +404,7 @@ EXPORT void *knl_pchgpio_int_take( CONST char *ctrl, UINT pin, UINT mode, void (
 	UW		v, want, keep;
 	UINT		im;
 
-	if ( c == NULL || !c->lay->has_int || npadint >= MAX_PADINT || !pad_of(c, pin, &r) ) {
+	if ( c == NULL || !c->lay->has_int || !pad_of(c, pin, &r) ) {
 		tm_printf((UB *)"gpio: pin %d of %s: no interrupt on this controller or no such pad\n", pin, ctrl);
 		return NULL;
 	}
@@ -421,13 +452,21 @@ EXPORT void *knl_pchgpio_int_take( CONST char *ctrl, UINT pin, UINT mode, void (
 		return NULL;
 	}
 
-	h = &padints[npadint];
+	h = ( table_room((void ***)&padints, npadint, &padint_cap, PADINT_FIRST) >= E_OK )
+		? (PADINT *)Kmalloc(sizeof(PADINT)) : NULL;
+	if ( h == NULL ) {
+		tm_printf((UB *)"gpio: pin %d of %s: no memory for its interrupt\n", pin, ctrl);
+		return NULL;
+	}
+	knl_memset(h, 0, sizeof(*h));
 	h->c = c;
 	h->g = r.g;
 	h->bit = r.bit;
 	h->level = (BOOL)( ( mode & ( PCHGPIO_EDGE | PCHGPIO_BOTH ) ) == 0 );
 	h->fn = fn;
 	h->arg = arg;
+	padints[npadint] = h;
+	DeviceBarrier();
 	npadint++;
 	tm_printf((UB *)"gpio: pin %d of %s: community %d group %d bit %d, %s, DW0 %08x, input %d\n", pin, ctrl, r.comm,
 		  r.g->bank, r.bit, h->level ? "level" : "edge", v, ( v & DW0_RXSTATE ) ? 1 : 0);

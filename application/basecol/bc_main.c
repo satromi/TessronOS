@@ -65,7 +65,7 @@ BOOL	fg_cabinet = TRUE;
 
 typedef struct {
 	TS_UUID	id;
-	UB	name[TAD_NAME_MAX];
+	UB	*name;			/* whole, of its own */
 } BCENT;
 
 static BCENT	g_ent[BC_MAX];
@@ -91,7 +91,7 @@ static void put_template( CONST TS_UUID *b )
 	for ( i = 0; i < g_n; i++ ) {
 		if ( memcmp(&g_ent[i].id, b, sizeof(*b)) == 0 ) return;
 	}
-	if ( g_n >= BC_MAX || !tl_name(b, g_ent[g_n].name, TAD_NAME_MAX) ) return;
+	if ( g_n >= BC_MAX || ( g_ent[g_n].name = tl_name_dup(b) ) == NULL ) return;
 	g_ent[g_n].id = *b;
 	g_n++;
 }
@@ -102,7 +102,7 @@ static void gather( void )
 	TS_UUID	*lk;
 	INT	n = 0, all = 0, i;
 
-	g_n = 0;
+	while ( g_n > 0 ) free(g_ent[--g_n].name);
 	g_has_box = (BOOL)( ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &g_box) >= E_OK );
 	if ( !g_has_box || ob_lst_lnk(&g_box, NULL, NULL, 0, &n) < E_OK || n <= 0 ) {
 		return;

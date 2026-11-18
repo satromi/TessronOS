@@ -19,7 +19,7 @@
       "id": "force-quit",
       "kind": "accessory",
       "name": "強制終了",
-      "version": "R1.200",
+      "version": "R1.410",
       "menu": true,
       "builtin": true,
       "base": []

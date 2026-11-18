@@ -97,9 +97,12 @@ LOCAL CONST VTAB	vics[] = {
 	{ 97, { 3840, 2160, 60, 594000, 4016, 4104, 4400, 2168, 2178, 2250, 3 } },
 };
 
+#define MLIST_FIRST	32		/* modes the list is first taken for; it doubles when full */
+
 typedef struct {
 	T_DISPMODE	*m;
 	INT		n, max;
+	BOOL		nomem;		/* a mode found no room: the parse ends with E_NOMEM */
 } MLIST;
 
 LOCAL UH refresh_of( CONST T_DISPMODE *m )
@@ -127,9 +130,22 @@ LOCAL void add( MLIST *l, CONST T_DISPMODE *m )
 			return;
 		}
 	}
-	if ( l->n < l->max ) {
-		l->m[l->n++] = *m;
+	if ( l->n >= l->max ) {
+		INT		max = ( l->max > 0 ) ? l->max * 2 : MLIST_FIRST;
+		T_DISPMODE	*b = (T_DISPMODE *)Kmalloc(sizeof(T_DISPMODE) * (SZ)max);
+
+		if ( b == NULL ) {
+			l->nomem = TRUE;
+			return;
+		}
+		if ( l->m != NULL ) {
+			knl_memcpy(b, l->m, (SZ)l->n * sizeof(T_DISPMODE));
+			Kfree(l->m);
+		}
+		l->m = b;
+		l->max = max;
 	}
+	l->m[l->n++] = *m;
 }
 
 LOCAL void from_tab( T_DISPMODE *m, CONST MTAB *t, UH flags )
@@ -245,7 +261,7 @@ LOCAL BOOL block_ok( CONST UB *b )
 	return ( s == 0 );
 }
 
-EXPORT INT knl_edid_parse( CONST UB *e, INT len, T_EDIDINFO *info, T_DISPMODE *modes, INT max )
+EXPORT INT knl_edid_parse( CONST UB *e, INT len, T_EDIDINFO *info, T_DISPMODE **p_modes )
 {
 	CONST UB	hdr[8] = { 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
 	MLIST		l;
@@ -255,9 +271,11 @@ EXPORT INT knl_edid_parse( CONST UB *e, INT len, T_EDIDINFO *info, T_DISPMODE *m
 	UH		mmw = 0, mmh = 0;
 
 	knl_memset(info, 0, sizeof(*info));
-	l.m = modes;
+	*p_modes = NULL;
+	l.m = NULL;
 	l.n = 0;
-	l.max = max;
+	l.max = 0;
+	l.nomem = FALSE;
 	if ( e == NULL || len < 128 ) {
 		return E_PAR;
 	}
@@ -370,5 +388,10 @@ EXPORT INT knl_edid_parse( CONST UB *e, INT len, T_EDIDINFO *info, T_DISPMODE *m
 	}
 	info->mm_w = mmw;
 	info->mm_h = mmh;
+	if ( l.nomem ) {
+		if ( l.m != NULL ) Kfree(l.m);
+		return E_NOMEM;
+	}
+	*p_modes = l.m;
 	return l.n;
 }

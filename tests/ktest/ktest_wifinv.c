@@ -143,9 +143,62 @@ LOCAL void test_volume( void )
 	ob_cls_obj(key);
 }
 
+/*
+ * A paragraph longer than the first room of its text (4096 bytes) and
+ * a line longer than the old room of a line (512 bytes): each comes
+ * whole, nothing of it cut or left out
+ */
+#define LONG_VAL	700		/* the value of the long line */
+#define LONG_LINES	400		/* short lines in the same paragraph */
+
+LOCAL void test_long( void )
+{
+	SZ	hl = knl_strlen(HEAD), tl = knl_strlen(TAIL), max;
+	UB	*doc, *out, *p;
+	INT	i, k, len, drop = -1, lines = 0;
+
+	max = hl + tl + 64 + LONG_VAL + (SZ)LONG_LINES * 16;
+	doc = (UB *)Kmalloc(max);
+	out = (UB *)Kmalloc(max);
+	KT_ASSERT(doc != NULL && out != NULL);
+	if ( doc == NULL || out == NULL ) goto out;
+	p = doc;
+	knl_memcpy(p, HEAD, hl);
+	p += hl;
+	knl_memcpy(p, "<p>long=", 8);
+	p += 8;
+	for ( i = 0; i < LONG_VAL; i++ ) *p++ = (UB)( 'a' + i % 26 );
+	for ( i = 0; i < LONG_LINES; i++ ) {
+		knl_memcpy(p, "<br/>k=", 7);
+		p += 7;
+		*p++ = (UB)( '0' + i % 10 );
+	}
+	knl_memcpy(p, "</p>\n", 5);
+	p += 5;
+	knl_memcpy(p, TAIL, tl);
+	p += tl;
+	len = knl_wifi_nvram(doc, (SZ)( p - doc ), out, max, &drop);
+	KT_ASSERT_EQ(len, 5 + LONG_VAL + 1 + LONG_LINES * 4);
+	KT_ASSERT_EQ(drop, 0);
+	if ( len > 5 + LONG_VAL ) {
+		KT_ASSERT(out[0] == 'l' && out[1] == 'o' && out[2] == 'n' && out[3] == 'g' && out[4] == '=');
+		for ( k = 0; k < LONG_VAL && out[5 + k] == (UB)( 'a' + k % 26 ); k++ ) ;
+		KT_ASSERT_EQ(k, LONG_VAL);
+		KT_ASSERT_EQ(out[5 + LONG_VAL], '\n');
+		for ( i = 0; i < len; i++ ) {
+			if ( out[i] == '\n' ) lines++;
+		}
+		KT_ASSERT_EQ(lines, 1 + LONG_LINES);
+	}
+out:
+	if ( doc != NULL ) Kfree(doc);
+	if ( out != NULL ) Kfree(out);
+}
+
 EXPORT void ktest_wifinv( void )
 {
 	KT_RUN(test_cases);
 	KT_RUN(test_limits);
+	KT_RUN(test_long);
 	KT_RUN(test_volume);
 }

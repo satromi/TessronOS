@@ -38,7 +38,7 @@
 #include <ts/crc32c.h>
 #include "obj.h"
 
-#define CHK_BOOT_EV	512		/* events of the repair at start kept */
+#define CHK_BOOT_EV	64		/* events the list of the repair at start is first taken for */
 #define SB_GEN		16
 #define SB_LABEL	40
 #define SB_TOTAL	112
@@ -54,6 +54,8 @@ LOCAL UB		boot_dev[TSFSCK_DEVNM_MAX];
 LOCAL T_TSFSCK		boot_res;
 LOCAL T_TSFSCKEV	*boot_ev = NULL;
 LOCAL INT		boot_nev = 0;
+LOCAL INT		boot_cap = 0;		/* events boot_ev has room for */
+LOCAL INT		boot_lost = 0;		/* events not kept for want of memory */
 
 /* ---------------------------------------------------------------- words */
 
@@ -145,8 +147,13 @@ LOCAL BOOL read_sb( CONST char *devnm, T_TSFSCKDEV *d )
 		gen = rd64(buf + SB_GEN);
 		any = TRUE;
 		if ( d != NULL ) {
-			for ( i = 0; i < TSFSBLK_LABEL_MAX - 1; i++ ) d->label[i] = buf[SB_LABEL + i];
-			d->label[TSFSBLK_LABEL_MAX - 1] = 0;
+			SZ	n;
+
+			/* a copy a system before cut in the middle of a letter is cut back to a whole one */
+			for ( n = 0; n < TSFSBLK_LABEL_MAX - 1 && buf[SB_LABEL + n] != 0; n++ ) ;
+			n = ts_label_whole(buf + SB_LABEL, n);
+			knl_memset(d->label, 0, sizeof(d->label));
+			knl_memcpy(d->label, buf + SB_LABEL, n);
 			d->blocks = rd64(buf + SB_TOTAL);
 		}
 	}
@@ -155,6 +162,29 @@ LOCAL BOOL read_sb( CONST char *devnm, T_TSFSCKDEV *d )
 	}
 	Kfree(buf);
 	return any;
+}
+
+/*
+ * The label of a volume listed: of one attached, the name of its top
+ * object, cut at a whole letter, with TSFSCK_F_LABELCUT when it is
+ * longer. One not attached keeps the copy read_sb took; its objects are
+ * not read for a list, so a copy that is full may be cut.
+ */
+LOCAL void label_of( T_TSFSCKDEV *d )
+{
+	SZ	asz = 0, n;
+
+	if ( d->attached
+	  && knl_obfile_vol_label((CONST char *)d->devnm, d->label, sizeof(d->label), &asz) >= E_OK ) {
+		if ( asz > (SZ)sizeof(d->label) ) {
+			d->flags |= TSFSCK_F_LABELCUT;
+		}
+		return;
+	}
+	for ( n = 0; n < (SZ)sizeof(d->label) && d->label[n] != 0; n++ ) ;
+	if ( n > (SZ)sizeof(d->label) - 5 ) {
+		d->flags |= TSFSCK_F_LABELCUT;	/* within a letter of full */
+	}
 }
 
 /* One device or unit looked at, and kept in the list when it is a native volume */
@@ -169,6 +199,7 @@ LOCAL INT list_one( CONST UB *name, T_TSFSCKDEV *buf, INT n, INT max )
 	}
 	d.attached = (BOOL)( knl_obfile_vol_path((CONST char *)d.devnm) > 0 );
 	d.system = is_system((CONST char *)d.devnm);
+	label_of(&d);
 	if ( n < max && buf != NULL ) {
 		buf[n] = d;
 	}
@@ -210,6 +241,60 @@ EXPORT INT ob_chk_list( T_TSFSCKDEV *buf, INT max )
 		}
 	}
 	return n;
+}
+
+/*
+ * A listed volume's label, whole: of one attached, the name of its top
+ * object (knl_obfile_vol_label); of one not attached, the same read with
+ * the volume opened for it alone, as a check opens it. While a check or
+ * a change of a volume is going on, or when it does not open, the copy
+ * in its superblock is what there is.
+ */
+EXPORT ER ob_chk_label( CONST char *devnm, UB *buf, SZ size, SZ *p_asize )
+{
+	T_TSFSCKDEV	d;
+	ID		vol;
+	BOOL		mine = FALSE;
+	ER		er;
+
+	if ( devnm == NULL || size < 0 || ( size > 0 && buf == NULL ) ) {
+		return E_PAR;
+	}
+	if ( knl_obfile_vol_path(devnm) > 0
+	  && knl_obfile_vol_label(devnm, buf, size, p_asize) >= E_OK ) {
+		return E_OK;
+	}
+	knl_memset(&d, 0, sizeof(d));
+	if ( !read_sb(devnm, &d) ) {
+		return E_NOEXS;
+	}
+	if ( chk_init() >= E_OK ) {
+		tk_loc_mtx(chk_mtx, TMO_FEVR);
+		if ( chk_busy[0] == 0 && chk_held == 0 ) {
+			name_copy(chk_busy, devnm);
+			mine = TRUE;
+		}
+		tk_unl_mtx(chk_mtx);
+	}
+	if ( mine ) {
+		er = E_NOEXS;
+		if ( knl_obfile_vol_path(devnm) <= 0 ) {
+			vol = ts_opn_vol(devnm, TSFS_STORE_BLK);
+			if ( vol > 0 ) {
+				er = knl_tsfs_vol_label(vol, buf, size, p_asize);
+				(void)ts_cls_vol(vol);
+			}
+		} else {
+			er = knl_obfile_vol_label(devnm, buf, size, p_asize);	/* attached meanwhile */
+		}
+		tk_loc_mtx(chk_mtx, TMO_FEVR);
+		chk_busy[0] = 0;
+		tk_unl_mtx(chk_mtx);
+		if ( er >= E_OK ) {
+			return er;
+		}
+	}
+	return knl_ob_name_put(d.label, -1, buf, size, p_asize);
 }
 
 /* ---------------------------------------------------------------- checking one */
@@ -409,12 +494,30 @@ EXPORT ER ob_chk_request( CONST char *devnm, UINT mode )
 	return er;
 }
 
+/*
+ * Every event of the repair at start, in a list taken twice as large
+ * each time it is full. One the memory runs out for is counted in
+ * boot_lost and told on the console when the repair ends.
+ */
 LOCAL void keep_ev( void *ctx, CONST T_TSFSCKEV *ev )
 {
 	(void)ctx;
-	if ( boot_ev != NULL && boot_nev < CHK_BOOT_EV ) {
-		boot_ev[boot_nev++] = *ev;
+	if ( boot_nev >= boot_cap ) {
+		INT		cap = ( boot_cap > 0 ) ? boot_cap * 2 : CHK_BOOT_EV;
+		T_TSFSCKEV	*b = (T_TSFSCKEV *)Kmalloc(sizeof(T_TSFSCKEV) * (SZ)cap);
+
+		if ( b == NULL ) {
+			boot_lost++;
+			return;
+		}
+		if ( boot_ev != NULL ) {
+			knl_memcpy(b, boot_ev, (INT)( sizeof(T_TSFSCKEV) * (SZ)boot_nev ));
+			Kfree(boot_ev);
+		}
+		boot_ev = b;
+		boot_cap = cap;
 	}
+	boot_ev[boot_nev++] = *ev;
 }
 
 /*
@@ -455,8 +558,13 @@ EXPORT ER knl_ob_chk_boot( CONST char *sysvol )
 		return E_PAR;
 	}
 	tm_printf((UB *)"ob: %s is repaired before it is used (mode 0x%x)\n", boot_dev, mode);
-	boot_ev = (T_TSFSCKEV *)Kmalloc(sizeof(T_TSFSCKEV) * CHK_BOOT_EV);
+	if ( boot_ev != NULL ) {
+		Kfree(boot_ev);
+		boot_ev = NULL;
+	}
 	boot_nev = 0;
+	boot_cap = 0;
+	boot_lost = 0;
 	vol = ts_opn_vol((CONST char *)boot_dev, TSFS_STORE_BLK);
 	if ( vol <= 0 ) {
 		return ( vol < 0 ) ? (ER)vol : E_SYS;
@@ -466,7 +574,29 @@ EXPORT ER knl_ob_chk_boot( CONST char *sysvol )
 	boot_done = (BOOL)( er >= E_OK );
 	tm_printf((UB *)"ob: the repair of %s: %d found, %d left (%d)\n", boot_dev,
 		  boot_res.problems, boot_res.remaining, (INT)er);
+	if ( boot_lost > 0 ) {
+		tm_printf((UB *)"ob: %d events of the repair of %s were not kept: no memory\n", boot_lost, boot_dev);
+	}
 	return er;
+}
+
+EXPORT void knl_ob_chk_boot_forget( void )
+{
+	if ( chk_init() < E_OK ) {
+		return;
+	}
+	tk_loc_mtx(chk_mtx, TMO_FEVR);
+	boot_done = FALSE;
+	boot_given = FALSE;
+	if ( boot_ev != NULL ) {
+		Kfree(boot_ev);
+		boot_ev = NULL;
+	}
+	boot_nev = 0;
+	boot_cap = 0;
+	boot_lost = 0;
+	boot_dev[0] = 0;
+	tk_unl_mtx(chk_mtx);
 }
 
 /* What the repair at start found and did: how many events were kept, 0 when there was none */

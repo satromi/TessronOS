@@ -28,7 +28,6 @@
 #include <ts/json.h>
 
 #define DEPTH_MAX	32
-#define LINKS_MAX	256
 #define SHORT_ID	8		/* hex digits a UUID is shown by when there is no name */
 
 /* What an object is, for the list and for finding a program */
@@ -39,7 +38,7 @@
 typedef struct {
 	TS_UUID	u;
 	UINT	type;
-	UB	name[OB_NAME_MAX];
+	UB	*name;			/* whole, in the line's memory (cm_name); "" none */
 	UINT	kind;			/* K_* */
 	CONST char *label;		/* what it is, in words */
 	BOOL	exec;			/* a program with an executable */
@@ -53,9 +52,7 @@ typedef struct {
 LOCAL TS_UUID	way[DEPTH_MAX];		/* way[0] "/", way[depth - 1] here */
 LOCAL INT	depth;
 LOCAL TS_UUID	sysbox, binobj;
-LOCAL UB	here[OB_NAME_MAX];
-
-LOCAL TS_UUID	links[LINKS_MAX];	/* kept off the stack: a program's is small */
+LOCAL UB	*here = NULL;		/* the place's name as shown, held (cm_hold) across lines */
 
 /* ---------------------------------------------------------------- small helpers */
 
@@ -114,16 +111,26 @@ LOCAL void ucopy( UB *d, CONST UB *s, INT max )
 	d[i] = 0;
 }
 
-/* The name of an object as it is shown: its own, or the head of its UUID when it has none */
-LOCAL void shown_name( CONST ENT *e, UB *out, INT max )
+/*
+ * The name of an object as it is shown: its own, whole, or the head of
+ * its UUID when it has none (in the line's memory)
+ */
+LOCAL CONST UB *shown_name( CONST ENT *e )
 {
+	UB	*out;
+
 	if ( e->name[0] != 0 ) {
-		ucopy(out, e->name, max);
-	} else {
-		out[0] = '(';
-		(void)uuid_text(&e->u, out + 1, SHORT_ID);
-		ucopy(out + 1 + SHORT_ID, (CONST UB *)"…)", max - 1 - SHORT_ID);
+		return e->name;
 	}
+	out = (UB *)cm_take(1 + SHORT_ID + 8);
+	if ( out == NULL ) {
+		cm_no_memory();
+		return (CONST UB *)"(…)";
+	}
+	out[0] = '(';
+	(void)uuid_text(&e->u, out + 1, SHORT_ID);
+	ucopy(out + 1 + SHORT_ID, (CONST UB *)"…)", 8);
+	return out;
 }
 
 /* ---------------------------------------------------------------- what an object is */
@@ -178,6 +185,7 @@ LOCAL void look_at( CONST TS_UUID *u, ENT *e )
 
 	memset(e, 0, sizeof(*e));
 	e->u = *u;
+	e->name = (UB *)"";
 	e->label = "実身";
 	e->execrec = 1;
 	if ( ob_ref_obj(u, &r) < E_OK ) {
@@ -185,7 +193,11 @@ LOCAL void look_at( CONST TS_UUID *u, ENT *e )
 		return;
 	}
 	e->type = r.type;
-	ucopy(e->name, r.name, OB_NAME_MAX);
+	{
+		UB	*nm = cm_name(u);
+
+		if ( nm != NULL ) e->name = nm;
+	}
 	e->nrec = r.nrec;
 	e->size = r.size;
 	if ( r.type != OB_T_STORAGE ) {
@@ -256,24 +268,43 @@ LOCAL BOOL enterable( CONST ENT *e )
 	return (BOOL)( ob_lst_lnk(&e->u, NULL, NULL, 0, &cnt) >= E_OK && cnt > 0 );
 }
 
-/* The links of a box: how many were read into links[] */
-LOCAL INT links_of( CONST TS_UUID *box )
+/*
+ * The links of a box, every one, in the line's memory: how many there
+ * are asked first, and asked again while more came between; *p_n how
+ * many. NULL with *p_n 0 when there are none or there is no memory.
+ */
+LOCAL TS_UUID *links_of( CONST TS_UUID *box, INT *p_n )
 {
-	INT	cnt = 0;
+	TS_UUID	*l;
+	INT	cnt = 0, all = 0;
 
-	if ( ob_lst_lnk(box, NULL, links, LINKS_MAX, &cnt) < E_OK ) return 0;
-	return ( cnt > LINKS_MAX ) ? LINKS_MAX : cnt;
+	*p_n = 0;
+	if ( ob_lst_lnk(box, NULL, NULL, 0, &cnt) < E_OK || cnt <= 0 ) return NULL;
+	for ( ;; ) {
+		l = (TS_UUID *)cm_take((SZ)sizeof(TS_UUID) * cnt);
+		if ( l == NULL ) {
+			cm_no_memory();
+			return NULL;
+		}
+		if ( ob_lst_lnk(box, NULL, l, cnt, &all) < E_OK ) return NULL;
+		if ( all <= cnt ) break;
+		cnt = all;
+	}
+	*p_n = all;
+	return l;
 }
 
 /* The link of a box whose object has the name: TRUE and what it is */
 LOCAL BOOL find_in( CONST TS_UUID *box, CONST UB *name, ENT *e, BOOL want_prog )
 {
-	INT	n = links_of(box), i;
-	T_OBREF	r;
+	INT	n, i;
+	TS_UUID	*links = links_of(box, &n);
 	BOOL	found = FALSE;
 
 	for ( i = 0; i < n; i++ ) {
-		if ( ob_ref_obj(&links[i], &r) < E_OK || !con_same_name(r.name, name) ) continue;
+		UB	*nm = cm_name(&links[i]);
+
+		if ( nm == NULL || !con_same_name(nm, name) ) continue;
 		look_at(&links[i], e);
 		found = TRUE;
 		if ( !want_prog || e->kind == K_PROG ) return TRUE;
@@ -308,7 +339,7 @@ LOCAL INT next_part( CONST UB **pp, UB *out, INT max )
  */
 LOCAL BOOL follow( CONST UB *path, TS_UUID *w, INT *pd, ENT *e )
 {
-	UB		part[OB_NAME_MAX * 2];
+	UB		part[CON_LINE_MAX];	/* a name typed: no longer than the line it is in */
 	CONST UB	*p = path;
 	INT		d = depth, i, n;
 	TS_UUID		u;
@@ -367,12 +398,20 @@ EXPORT INT box_quote( CONST UB *name, UB *out, INT max )
 
 /* ---------------------------------------------------------------- the place */
 
+/* The place's name, held across lines; the one before kept when there is no memory for it */
 LOCAL void set_here( void )
 {
 	ENT	e;
+	UB	*h;
 
 	look_at(&way[depth - 1], &e);
-	shown_name(&e, here, sizeof(here));
+	h = cm_hold(shown_name(&e));
+	if ( h != NULL ) {
+		cm_let_go(here);
+		here = h;
+	} else {
+		cm_no_memory();
+	}
 }
 
 EXPORT void box_init( void )
@@ -387,7 +426,7 @@ EXPORT void box_init( void )
 
 EXPORT CONST UB *box_here_name( void )
 {
-	return here;
+	return ( here != NULL ) ? here : (CONST UB *)"";
 }
 
 /* The object the console is in */
@@ -396,33 +435,41 @@ EXPORT void box_here_uuid( TS_UUID *p_u )
 	*p_u = way[( depth > 0 ) ? depth - 1 : 0];
 }
 
-EXPORT void box_where( UB *buf, INT max )
+/* The path from "/", each name whole and quoted (each letter at most two) */
+EXPORT UB *box_where( void )
 {
-	UB	nm[OB_NAME_MAX + 16];
-	INT	i, n = 0, k;
+	CONST UB *nm[DEPTH_MAX];
+	UB	*buf;
+	SZ	len = 2;
+	INT	i, n = 0;
 	ENT	e;
 
-	buf[0] = 0;
 	if ( depth <= 1 ) {
-		ucopy(buf, (CONST UB *)"/", max);
-		return;
+		return cm_dup((CONST UB *)"/");
 	}
 	for ( i = 1; i < depth; i++ ) {
 		look_at(&way[i], &e);
-		shown_name(&e, nm, OB_NAME_MAX);
-		if ( n < max - 1 ) buf[n++] = '/';
-		k = box_quote(nm, buf + n, max - n);
-		n += k;
+		nm[i] = shown_name(&e);
+		len += 1 + 2 * (SZ)ustrlen(nm[i]);
+	}
+	buf = (UB *)cm_take(len);
+	if ( buf == NULL ) {
+		cm_no_memory();
+		return NULL;
+	}
+	for ( i = 1; i < depth; i++ ) {
+		buf[n++] = '/';
+		n += box_quote(nm[i], buf + n, (INT)( len - n ));
 	}
 	buf[n] = 0;
+	return buf;
 }
 
 EXPORT void cmd_pwd( void )
 {
-	UB	p[DEPTH_MAX * ( OB_NAME_MAX + 2 )];
+	UB	*p = box_where();
 
-	box_where(p, sizeof(p));
-	say_u(p);
+	if ( p != NULL ) say_u(p);
 	say("\n");
 }
 
@@ -441,10 +488,7 @@ EXPORT void cmd_cd( INT argc, UB **argv )
 	}
 	if ( !follow(argv[1], w, &d, &e) ) return;
 	if ( !enterable(&e) ) {
-		UB	nm[OB_NAME_MAX + 16];
-
-		shown_name(&e, nm, sizeof(nm));
-		say_u(nm);
+		say_u(shown_name(&e));
 		say(": 仮身を持つ実身ではありません(");
 		say(e.label);
 		say(")\n");
@@ -457,8 +501,8 @@ EXPORT void cmd_cd( INT argc, UB **argv )
 
 EXPORT void cmd_ls( INT argc, UB **argv )
 {
-	TS_UUID	w[DEPTH_MAX], box;
-	UB	nm[OB_NAME_MAX + 16], id[TS_UUID_STRLEN + 1];
+	TS_UUID	w[DEPTH_MAX], box, *mine;
+	UB	id[TS_UUID_STRLEN + 1];
 	BOOL	lng = FALSE;
 	INT	i, n, d;
 	ENT	e;
@@ -472,33 +516,27 @@ EXPORT void cmd_ls( INT argc, UB **argv )
 	if ( path != NULL ) {
 		if ( !follow(path, w, &d, &e) ) return;
 		if ( !enterable(&e) ) {
-			shown_name(&e, nm, sizeof(nm));
 			say("  [");
 			say(e.label);
 			say("] ");
-			say_u(nm);
+			say_u(shown_name(&e));
 			say("\n");
 			return;
 		}
 		box = w[d - 1];
 	}
-	n = links_of(&box);
+	mine = links_of(&box, &n);
 	if ( n == 0 ) {
 		say("(仮身はありません)\n");
 		return;
 	}
-	/* links[] is read again inside look_at's callers: keep a copy */
 	{
-		static TS_UUID	mine[LINKS_MAX];
-
-		for ( i = 0; i < n; i++ ) mine[i] = links[i];
 		for ( i = 0; i < n; i++ ) {
 			look_at(&mine[i], &e);
-			shown_name(&e, nm, sizeof(nm));
 			say("  [");
 			say(e.label);
 			say("] ");
-			say_u(nm);
+			say_u(shown_name(&e));
 			if ( enterable(&e) ) say("/");	/* it has links: cd goes into it */
 			if ( e.noatr || e.nodata ) say("  (読めません)");
 			if ( lng ) {
@@ -518,8 +556,9 @@ EXPORT void cmd_ls( INT argc, UB **argv )
 
 /* ---------------------------------------------------------------- programs */
 
-EXPORT ER box_find_prog( CONST UB *name, TS_UUID *prog, UB *pname, INT pmax )
+EXPORT ER box_find_prog( CONST UB *name, TS_UUID *prog, UB **p_pname )
 {
+	CONST UB *pname;
 	TS_UUID	w[DEPTH_MAX];
 	INT	d, i;
 	ENT	e;
@@ -534,7 +573,7 @@ EXPORT ER box_find_prog( CONST UB *name, TS_UUID *prog, UB *pname, INT pmax )
 		if ( !follow(name, w, &d, &e) ) return E_OBJ;
 		seen = TRUE;
 	} else {
-		UB	plain[OB_NAME_MAX * 2];
+		UB	plain[CON_LINE_MAX];	/* a name typed: no longer than the line */
 		CONST UB *p = name;
 
 		(void)next_part(&p, plain, sizeof(plain));
@@ -549,7 +588,8 @@ EXPORT ER box_find_prog( CONST UB *name, TS_UUID *prog, UB *pname, INT pmax )
 		}
 		if ( !seen ) return E_NOEXS;
 	}
-	shown_name(&e, pname, pmax);
+	pname = shown_name(&e);
+	*p_pname = (UB *)pname;
 	if ( e.kind != K_PROG ) {
 		say_u(pname);
 		say(": プログラムではありません(");
@@ -566,12 +606,12 @@ EXPORT ER box_find_prog( CONST UB *name, TS_UUID *prog, UB *pname, INT pmax )
 	return E_OK;
 }
 
-EXPORT ER box_prog_named( CONST TS_UUID *u, UB *pname, INT pmax )
+EXPORT ER box_prog_named( CONST TS_UUID *u, UB **p_pname )
 {
 	ENT	e;
 
 	look_at(u, &e);
-	shown_name(&e, pname, pmax);
+	*p_pname = (UB *)shown_name(&e);
 	return ( e.kind == K_PROG && has_elf(&e) ) ? E_OK : E_OBJ;
 }
 
@@ -588,13 +628,16 @@ LOCAL INT common_len( CONST UB *a, CONST UB *b )
 	return last;
 }
 
+/* Whether the name begins with pre, both folded (in the line's memory, as long as they are) */
 LOCAL BOOL starts( CONST UB *name, CONST UB *pre )
 {
-	UB	a[OB_NAME_MAX], b[OB_NAME_MAX * 2];
+	UB	*a = cm_dup(name), *b = cm_dup(pre);
 	INT	i;
 
-	ucopy(a, name, sizeof(a));
-	ucopy(b, pre, sizeof(b));
+	if ( a == NULL || b == NULL ) {
+		cm_no_memory();
+		return FALSE;
+	}
 	con_fold(a);
 	con_fold(b);
 	for ( i = 0; b[i] != 0; i++ ) {
@@ -605,10 +648,12 @@ LOCAL BOOL starts( CONST UB *name, CONST UB *pre )
 
 EXPORT INT box_complete( CONST UB *pre, BOOL cmd, UB *common, INT cmax, BOOL list )
 {
-	static UB	names[64][OB_NAME_MAX];
-	static BOOL	boxes[64];
-	UB		dir[CON_LINE_MAX], last[OB_NAME_MAX * 2], q[OB_NAME_MAX * 2];
-	TS_UUID		w[DEPTH_MAX], from[2];
+	/* every name that begins so, in the line's memory: the table doubled when full */
+	CONST UB	**names = NULL;
+	BOOL		*boxes = NULL;
+	INT		cap = 0;
+	UB		dir[CON_LINE_MAX], last[CON_LINE_MAX], *q;
+	TS_UUID		w[DEPTH_MAX], from[2], *mine;
 	INT		cut = -1, i, k, n, nb = 0, cnt = 0, d, c;
 	CONST UB	*p;
 	ENT		e;
@@ -635,11 +680,8 @@ EXPORT INT box_complete( CONST UB *pre, BOOL cmd, UB *common, INT cmax, BOOL lis
 	(void)next_part(&p, last, sizeof(last));
 
 	for ( k = 0; k < nb; k++ ) {
-		static TS_UUID	mine[LINKS_MAX];
-
-		n = links_of(&from[k]);
-		for ( i = 0; i < n; i++ ) mine[i] = links[i];
-		for ( i = 0; i < n && cnt < 64; i++ ) {
+		mine = links_of(&from[k], &n);
+		for ( i = 0; i < n; i++ ) {
 			INT	j;
 			BOOL	dup = FALSE;
 
@@ -650,7 +692,24 @@ EXPORT INT box_complete( CONST UB *pre, BOOL cmd, UB *common, INT cmax, BOOL lis
 				if ( con_same_name(names[j], e.name) ) dup = TRUE;
 			}
 			if ( dup ) continue;
-			ucopy(names[cnt], e.name, OB_NAME_MAX);
+			if ( cnt == cap ) {
+				INT		nc = ( cap > 0 ) ? cap * 2 : 64;
+				CONST UB	**nn = (CONST UB **)cm_take((SZ)sizeof(UB *) * nc);
+				BOOL		*nbx = (BOOL *)cm_take((SZ)sizeof(BOOL) * nc);
+
+				if ( nn == NULL || nbx == NULL ) {
+					cm_no_memory();
+					return 0;
+				}
+				for ( j = 0; j < cnt; j++ ) {
+					nn[j] = names[j];
+					nbx[j] = boxes[j];
+				}
+				names = nn;
+				boxes = nbx;
+				cap = nc;
+			}
+			names[cnt] = e.name;		/* the line's memory: kept to the end of the completion */
 			boxes[cnt] = enterable(&e);
 			cnt++;
 		}
@@ -664,7 +723,12 @@ EXPORT INT box_complete( CONST UB *pre, BOOL cmd, UB *common, INT cmax, BOOL lis
 	}
 	ucopy(common, dir, cmax);
 	n = ustrlen(common);
-	ucopy(q, names[0], ( c + 1 < (INT)sizeof(q) ) ? c + 1 : (INT)sizeof(q));
+	q = (UB *)cm_take((SZ)c + 1);
+	if ( q == NULL ) {
+		cm_no_memory();
+		return 0;
+	}
+	ucopy(q, names[0], c + 1);
 	n += box_quote(q, common + n, cmax - n);
 	if ( cnt == 1 && n < cmax - 2 ) {
 		common[n++] = boxes[0] ? '/' : ' ';

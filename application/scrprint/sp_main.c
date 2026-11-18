@@ -37,6 +37,7 @@
 #include <ts/ui.h>
 #include <ts/sysdef.h>
 #include <ts/dtreq.h>
+#include "../dtask.h"
 
 /* the panels of the data box */
 #define PN_SET		1		/* 画面印刷／画面保存 */
@@ -92,40 +93,13 @@ static void say( const char *fmt, ... )
 	tm_putstring((CONST UB *)s);
 }
 
+/* The words of the next request and the last answer, as long as they are (dtask.h) */
+static DTASK	g_dq;
+
 static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
-	static UINT	seq;
-	TS_UUID		d, reply;
-	T_OBCRE		c;
-	SZ		asz = 0;
-	ID		k, ka;
-	ER		er;
-
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
 	rq->req = DT_RQ_SCRPRINT;
-	rq->seq = ++seq;
-	rq->reply = reply;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
-			er = an->er;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
-	return er;
+	return dq_ask(&g_dq, rq, an, NULL, wait_ms);
 }
 
 /* What is set, as the desktop reads it: "to pointer area by secs<tab>volume<tab>name" */
@@ -140,7 +114,15 @@ static ER step( INT what, T_DTANS *an, BOOL with_set )
 
 	memset(&rq, 0, sizeof(rq));
 	rq.recno = what;
-	if ( with_set ) set_text((char *)rq.text, sizeof(rq.text));
+	if ( with_set ) {
+		size_t	max = strlen(vol) + strlen(name) + 64;
+		char	*t = (char *)malloc(max);
+
+		if ( t == NULL ) return E_NOMEM;
+		set_text(t, max);
+		(void)dq_part(&g_dq, DT_TAIL_TEXT, (CONST UB *)t, -1);
+		free(t);
+	}
 	memset(an, 0, sizeof(*an));
 	return ask_desktop(&rq, an, 10000);
 }
@@ -218,13 +200,13 @@ static BOOL name_panel( void )
 		rq.grab_x = i;
 		memset(&an, 0, sizeof(an));
 		if ( ask_desktop(&rq, &an, 10000) < E_OK ) break;
-		an.text[DT_TEXT_MAX - 1] = 0;
 		{
-			char	*tab = strchr((char *)an.text, '\t');
-			char	*label = ( tab != NULL ) ? tab + 1 : "";
+			CONST char	*at = (CONST char *)dq_ans_text(&g_dq, DT_TAIL_TEXT);
+			CONST char	*tab = strchr(at, '\t');
+			CONST char	*label = ( tab != NULL ) ? tab + 1 : "";
+			INT		vl = ( tab != NULL ) ? (INT)( tab - at ) : (INT)strlen(at);
 
-			if ( tab != NULL ) *tab = 0;
-			snprintf(vols[n], sizeof(vols[n]), "%s", (char *)an.text);
+			snprintf(vols[n], sizeof(vols[n]), "%.*s", vl, at);
 			if ( n == 0 ) {
 				snprintf(labels[n], sizeof(labels[n]), "%s（システム）", vols[n]);
 			} else if ( label[0] != 0 ) {
@@ -270,7 +252,7 @@ int main( void )
 	T_DTANS	an;
 	T_OBCRE	c;
 	TS_UUID	ch;
-	char	*t1, *t2;
+	char	*t1, *t2, *tx;
 	INT	told;
 	ER	er;
 
@@ -284,12 +266,16 @@ int main( void )
 		return 1;
 	}
 	told = (INT)an.how;
-	an.text[DT_TEXT_MAX - 1] = 0;
-	if ( sscanf((const char *)an.text, "%d %d %d %d %d", &sc.to, &sc.pointer, &sc.area, &sc.by, &sc.secs) != 5 ) {
+	tx = dq_ans_dup(&g_dq, DT_TAIL_TEXT);
+	if ( tx == NULL ) {
+		say("scrprint: no memory\n");
+		return 1;
+	}
+	if ( sscanf(tx, "%d %d %d %d %d", &sc.to, &sc.pointer, &sc.area, &sc.by, &sc.secs) != 5 ) {
 		sc.to = sc.pointer = sc.area = sc.by = 0;
 		sc.secs = 5;
 	}
-	t1 = strchr((char *)an.text, '\t');
+	t1 = strchr(tx, '\t');
 	t2 = ( t1 != NULL ) ? strchr(t1 + 1, '\t') : NULL;
 	if ( t1 != NULL && t2 != NULL ) {
 		*t2 = 0;
@@ -298,6 +284,7 @@ int main( void )
 	} else {
 		snprintf(name, sizeof(name), "画面印刷");
 	}
+	free(tx);
 
 	memset(&g, 0, sizeof(g));
 	memset(&c, 0, sizeof(c));

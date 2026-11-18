@@ -53,8 +53,6 @@
 #define NT_TOP		40		/* the first one's top */
 #define NT_BTN_W	76
 #define NT_BTN_H	26
-#define NT_SRC_MAX	64
-#define NT_TEXT_MAX	DT_CARRY_TEXT
 
 #define ANS_OPEN	( WM_ANS_ACT + 1 )
 #define ANS_ACT1	( WM_ANS_ACT + 2 )
@@ -65,11 +63,13 @@ typedef struct {
 	TS_UUID	reply;			/* where what comes of it is answered */
 	UINT	seq;
 	INT	id;			/* the process's number for it */
-	UB	src[NT_SRC_MAX];
-	UB	title[WM_LABEL_MAX];
-	UB	line[NT_LINES][WM_LABEL_MAX];
+	SZ	anssz;			/* the size of the answers, the form it asked in */
+	/* what it says, as long as it is (Kmalloc, "" none): the panel shows what it holds */
+	UB	*src;
+	UB	*title;
+	UB	line[NT_LINES][WM_LABEL_MAX];	/* the lines laid out as they are shown */
 	INT	nline;
-	UB	act[2][WM_LABEL_MAX];
+	UB	*act[2];
 	BOOL	stay;
 	BOOL	answered;		/* what came of it was answered, or nothing is to be */
 	UW	shown;			/* when it was shown, ms */
@@ -223,7 +223,7 @@ LOCAL void build( NOTE *n )
 	(void)button(def, 1, ANS_OPEN, NT_W - 12 - 2 * NT_BTN_W - 6, y, "開く", 0);
 	(void)button(def, 2, ANS_CLOSE, NT_W - 12 - NT_BTN_W, y, "閉じる", P_EMPHAS);
 	n->pid = wm_panel_open(n->d->wid, def);
-	Kfree(def);
+	wm_panel_free(def);
 }
 
 /* The notices stood one under another from the screen's top right */
@@ -273,7 +273,7 @@ LOCAL void answer( NOTE *n, UINT how, UINT which )
 	an.er = E_OK;
 	an.how = how;
 	an.flags = which;
-	dt_answer(&n->reply, &an, (SZ)sizeof(an));
+	dt_answer(&n->reply, &an, n->anssz);
 	tm_printf((UB *)"notice %d: %s%s\n", n->id,
 		  ( how == DT_HOW_NOTE_CLICK ) ? "pressed " : ( how == DT_HOW_NOTE_CLOSED ) ? "closed" : "gone",
 		  ( how == DT_HOW_NOTE_CLICK ) ? ( which == 0 ? "開く" : (CONST char *)n->act[which - 1] ) : "");
@@ -354,6 +354,8 @@ LOCAL void nt_poll( DTWIN *d )
 }
 
 /* The window going: closed by the person unless something was answered already */
+LOCAL void words_free( NOTE *n );
+
 LOCAL void nt_close( DTWIN *d )
 {
 	NOTE	*n = note_of(d);
@@ -374,6 +376,7 @@ LOCAL void nt_close( DTWIN *d )
 	while ( k < NT_MAX ) {
 		notes[k++] = NULL;
 	}
+	words_free(n);
 	Kfree(n);
 	d->self = NULL;
 	stack();			/* those under it move up */
@@ -388,7 +391,8 @@ LOCAL CONST DTOWN	nt_own = {
 	nt_menu_do,
 	NULL,
 	nt_close,
-	nt_poll
+	nt_poll,
+	NULL
 };
 
 /* The notice of a process's number, shown now */
@@ -405,25 +409,58 @@ LOCAL NOTE *find( CONST TS_UUID *reply, INT id )
 	return NULL;
 }
 
-/* What a request says, into a notice */
-LOCAL void take( NOTE *n, CONST T_DTREQ *rq )
+/* A word of a notice kept whole (Kmalloc); NULL no memory */
+LOCAL UB *word_dup( CONST UB *s, SZ len )
 {
-	CONST UB	*t = rq->text, *nl;
-	INT		i;
+	UB	*w = (UB *)Kmalloc((size_t)( len + 1 ));
 
+	if ( w != NULL ) {
+		knl_memcpy(w, s, len);
+		w[len] = 0;
+	}
+	return w;
+}
+
+LOCAL void words_free( NOTE *n )
+{
+	INT	i;
+
+	if ( n->src != NULL ) Kfree(n->src);
+	if ( n->title != NULL ) Kfree(n->title);
+	for ( i = 0; i < 2; i++ ) {
+		if ( n->act[i] != NULL ) Kfree(n->act[i]);
+		n->act[i] = NULL;
+	}
+	n->src = n->title = NULL;
+}
+
+/* What a request says, into a notice: E_NOMEM when its words cannot be kept */
+LOCAL ER take( NOTE *n, CONST T_DTREQ *rq )
+{
+	SZ		tl, sl, a0, a1;
+	CONST UB	*t = dt_rq_word(rq, DT_TAIL_TEXT, &tl), *nl;
+	CONST UB	*src = dt_rq_word(rq, DT_TAIL_NAME, &sl);
+	CONST UB	*ask1 = dt_rq_word(rq, DT_TAIL_ASK1, &a0), *ask2 = dt_rq_word(rq, DT_TAIL_ASK2, &a1);
+
+	words_free(n);
 	n->reply = rq->reply;
 	n->seq = rq->seq;
 	n->id = rq->recno;
+	n->anssz = dt_rq_anssz();
 	n->stay = (BOOL)( ( rq->flags & DT_F_NOTE_STAY ) != 0 );
 	n->answered = FALSE;
 	n->shown = now_ms();
-	copy(n->src, NT_SRC_MAX, rq->name, (INT)sizeof(rq->name));
-	for ( nl = t; *nl != 0 && *nl != '\n' && nl < t + NT_TEXT_MAX; nl++ ) ;
-	copy(n->title, WM_LABEL_MAX, t, (INT)( nl - t ));
-	wrap(n, ( *nl == '\n' ) ? nl + 1 : nl, NT_W - 24);
-	for ( i = 0; i < 2; i++ ) {
-		copy(n->act[i], WM_LABEL_MAX, rq->ask[i], (INT)sizeof(rq->ask[i]));
+	for ( nl = t; *nl != 0 && *nl != '\n'; nl++ ) ;
+	n->src = word_dup(src, sl);
+	n->title = word_dup(t, (SZ)( nl - t ));
+	n->act[0] = word_dup(ask1, a0);
+	n->act[1] = word_dup(ask2, a1);
+	if ( n->src == NULL || n->title == NULL || n->act[0] == NULL || n->act[1] == NULL ) {
+		words_free(n);
+		return E_NOMEM;
 	}
+	wrap(n, ( *nl == '\n' ) ? nl + 1 : nl, NT_W - 24);
+	return E_OK;
 }
 
 /* The band: where it comes from */
@@ -457,8 +494,14 @@ EXPORT ER dt_note_req( CONST T_DTREQ *rq, T_DTANS *an )
 	}
 	if ( n != NULL ) {
 		/* the same number again: what it shows made anew, its time begun again */
+		ER	er;
+
 		n->answered = TRUE;
-		take(n, rq);
+		if ( ( er = take(n, rq) ) < E_OK ) {
+			dt_close(n->d);
+			stack();
+			return er;
+		}
 		band(n, title, sizeof(title));
 		(void)wm_set_title(n->d->wid, (CONST char *)title);
 		build(n);
@@ -478,7 +521,10 @@ EXPORT ER dt_note_req( CONST T_DTREQ *rq, T_DTANS *an )
 	}
 	knl_memset(n, 0, sizeof(*n));
 	n->pid = -1;
-	take(n, rq);
+	if ( take(n, rq) < E_OK ) {
+		Kfree(n);
+		return E_NOMEM;
+	}
 	band(n, title, sizeof(title));
 	wm_screen_main_rect(&m);
 	o.left = m.right - NT_EDGE - NT_W - 40;
@@ -487,6 +533,7 @@ EXPORT ER dt_note_req( CONST T_DTREQ *rq, T_DTANS *an )
 	o.bottom = o.top + 120;
 	w = dt_own_open(&nt_own, n, &o, WM_ATTR_FRAME | WM_ATTR_TITLE | WM_ATTR_NOFOCUS, (CONST char *)title, NULL);
 	if ( w == NULL ) {
+		words_free(n);
 		Kfree(n);
 		return E_LIMIT;
 	}

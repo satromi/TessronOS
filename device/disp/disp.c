@@ -134,8 +134,13 @@ LOCAL RECTS		disp_new;	/* what changed and is not sent */
  * another output's flip: while one is not yet taken, what changed waits
  * in pend, and the output task (out_task) sends it as soon as the flip is
  * taken, at that output's own refresh.
+ *
+ * There are as many as are put: the table is taken anew twice as large
+ * when it is full (out_room), under disp_mtxid. The table before is not
+ * given back, since ts_disp_screen and those that count the screens read
+ * it without the lock.
  */
-#define DISP_OUTS	( DISP_SCREENS_MAX - 1 )
+#define DISP_OUTS_FIRST	4
 
 typedef struct {
 	T_DISPHW	hw;
@@ -158,8 +163,9 @@ typedef struct {
 	UD		send_us;	/* the time that took */
 } DISPOUT;
 
-LOCAL DISPOUT		disp_out[DISP_OUTS];
+LOCAL DISPOUT		*disp_out = NULL;
 LOCAL INT		disp_nout = 0;
+LOCAL INT		disp_outcap = 0;
 LOCAL INT		disp_next_id = 1;
 
 /*
@@ -173,7 +179,7 @@ typedef struct {
 	INT	x, y, w, h;
 } DISPWAS;
 
-LOCAL DISPWAS		disp_was[DISP_SCREENS_MAX];
+LOCAL DISPWAS		*disp_was = NULL;	/* room for disp_outcap + 1, taken with disp_out */
 LOCAL INT		disp_nwas = 0;
 LOCAL ID		disp_out_tsk = 0;	/* sends what waited for an output's flip */
 
@@ -963,9 +969,11 @@ EXPORT ER ts_disp_ref( T_DISPSPEC *spec )
 
 LOCAL INT	disp_nscreens = 1;
 
+LOCAL ER out_room( void );
+
 EXPORT void knl_disp_screens( INT n )
 {
-	if ( n >= 1 && n <= DISP_SCREENS_MAX ) disp_nscreens = n;
+	if ( n >= 1 ) disp_nscreens = n;
 }
 
 /* The outputs besides the main one that are screens of their own: those that do not mirror it */
@@ -1066,6 +1074,9 @@ LOCAL void was_take( void )
 	INT	i, x, y, w, h;
 
 	disp_nwas = 0;
+	if ( disp_was == NULL && out_room() < E_OK ) {
+		return;				/* no room: the follow keeps points where they are */
+	}
 	if ( ext_count() == 0 ) {
 		disp_was[0].id = 0;
 		disp_was[0].x = disp_was[0].y = 0;
@@ -1074,7 +1085,7 @@ LOCAL void was_take( void )
 		disp_nwas = 1;
 		return;
 	}
-	for ( i = 0; i <= ext_count() && i < DISP_SCREENS_MAX; i++ ) {
+	for ( i = 0; i <= ext_count(); i++ ) {
 		if ( ts_disp_screen(i, &x, &y, &w, &h) < E_OK ) break;
 		disp_was[i].id = ( i == 0 ) ? 0 : disp_out[screen_out(i)].id;
 		disp_was[i].x = x;
@@ -1668,6 +1679,45 @@ EXPORT ER ts_disp_setmode( UINT w, UINT h )
 	return E_OK;
 }
 
+/*
+ * Room for one more output in disp_out, and for the screens before a
+ * change (disp_was) one past it: E_OK or E_NOMEM. The caller holds the
+ * lock. The tables before are not given back (disp_out above); disp_was
+ * is read under the lock only.
+ */
+LOCAL ER out_room( void )
+{
+	DISPOUT	*t;
+	DISPWAS	*w;
+	INT	cap;
+
+	if ( disp_nout < disp_outcap ) {
+		return E_OK;
+	}
+	cap = ( disp_outcap > 0 ) ? disp_outcap * 2 : DISP_OUTS_FIRST;
+	t = (DISPOUT *)Kmalloc(sizeof(DISPOUT) * (SZ)cap);
+	w = (DISPWAS *)Kmalloc(sizeof(DISPWAS) * (SZ)( cap + 1 ));
+	if ( t == NULL || w == NULL ) {
+		if ( t != NULL ) Kfree(t);
+		if ( w != NULL ) Kfree(w);
+		return E_NOMEM;
+	}
+	if ( disp_nout > 0 ) {
+		knl_memcpy(t, disp_out, sizeof(DISPOUT) * (SZ)disp_nout);
+	}
+	if ( disp_nwas > 0 ) {
+		knl_memcpy(w, disp_was, sizeof(DISPWAS) * (SZ)disp_nwas);
+	}
+	if ( disp_was != NULL ) {
+		Kfree(disp_was);
+	}
+	disp_was = w;
+	DeviceBarrier();
+	disp_out = t;
+	disp_outcap = cap;
+	return E_OK;
+}
+
 /* An output besides the main one put in the list, or why it cannot be */
 LOCAL ER out_put( CONST T_DISPHW *hw, INT side, INT offset )
 {
@@ -1681,8 +1731,8 @@ LOCAL ER out_put( CONST T_DISPHW *hw, INT side, INT offset )
 	if ( offset < 0 ) {
 		return E_NOSPT;			/* before the main screen's corner along the edge: not taken */
 	}
-	if ( disp_nout >= DISP_OUTS ) {
-		return E_LIMIT;
+	if ( out_room() < E_OK ) {
+		return E_NOMEM;
 	}
 	o = &disp_out[disp_nout++];
 	knl_memset(o, 0, sizeof(*o));
@@ -2095,7 +2145,7 @@ LOCAL void outs_found( void )
 		return;
 	}
 	tk_loc_mtx(disp_mtxid, TMO_FEVR);
-	for ( i = 0; i < DISP_OUTS; i++ ) {
+	for ( i = 0; ; i++ ) {
 		knl_memset(&hw, 0, sizeof(hw));
 		side = DISP_SIDE_RIGHT;
 		offset = 0;

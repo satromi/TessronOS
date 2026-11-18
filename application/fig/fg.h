@@ -36,6 +36,8 @@
 #include <ts/tvlist.h>
 
 /* The panels of the program's data box (SYSDEF_BOX_FIG) */
+#define FG_LOG		TA_LOG		/* a line of the log (note cuts it at a whole letter) */
+
 #define PN_ALIGN	1		/* 位置あわせ */
 #define PN_TELL		2		/* what could not be done, two lines */
 /* 3 検索/置換, 4 仮身化's name and 6 用紙設定, in a piece of text: TA_PN_* of tvapp.h */

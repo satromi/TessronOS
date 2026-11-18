@@ -1,0 +1,30 @@
+# ディスク操作の〈状態表示〉 (design 11.26) away from a link: the system's
+# disk. The panel of the program ディスク操作 stands in the middle of the
+# screen; its labels and values are shot to see how they stand (the
+# values next to their labels, nothing left empty under them, 終了 at the
+# foot under the values). The first window is made larger; ディスク操作 is
+# at 440,480 the first time the menu opens at 400,300, its submenu 接続,
+# 切り離し, 状態表示, 区画作成, 拡張, 20 pixels apart from 481.
+click 250 60
+wait 300
+drag 346 222 620 420
+wait 500
+click 400 300 1
+wait 300
+move 430 480
+wait 150
+move 440 480
+wait 300
+move 510 480
+wait 150
+move 530 481
+wait 300
+move 530 521
+wait 300
+click 530 521
+expect disk: status "TessronOS system"
+expect diskop: up status
+wait 1000
+shot disk_status
+key 28
+expect diskop: status closed

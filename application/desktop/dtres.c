@@ -488,7 +488,7 @@ LOCAL ER face_set( CONST TS_UUID *u, INT index, CONST UB *text )
 	INT	n, len = 0;
 	ER	er;
 
-	while ( len < DT_CARRY_TEXT && text[len] != 0 ) len++;
+	while ( text[len] != 0 ) len++;
 	if ( len == 0 ) {
 		return E_OK;
 	}
@@ -578,22 +578,23 @@ LOCAL ER font_save( CONST T_DTREQ *rq, T_DTANS *an )
 	DTWIN		*host = dt_host_of(&rq->win);
 	UB		(*to)[64], t[WM_LABEL_MAX];
 	T_OBFVREF	ref;
-	T_OBREF		or;
 	T_OBCRE		c;
 	T_WMPANEL	*def;
 	T_WMPART	*pt;
 	FACESET		*fs;
 	TS_UUID		top, nu;
-	UB		name[OB_NAME_MAX];
+	UB		name[WM_LABEL_MAX], *own, *lab;	/* name: what the box gives back */
+	CONST UB	*use;
 	INT		n, m = 0, i, pid = -1, w = 460, h, pick = -1;
 	UINT		ans;
 	ER		er;
 
-	if ( host == NULL || ob_ref_obj(&rq->target, &or) < E_OK ) {
-		return E_NOEXS;
+	if ( host == NULL || ( own = knl_ob_name(&rq->target, NULL, &er) ) == NULL ) {
+		return ( host == NULL || er != E_NOMEM ) ? E_NOEXS : E_NOMEM;
 	}
 	to = (UB (*)[64])Kmalloc(sizeof(UB) * 64 * FS_PN_TO_MAX);
 	if ( to == NULL ) {
+		Kfree(own);
 		return E_NOMEM;
 	}
 	n = knl_obfile_vols((UB *)to, 64, FS_PN_TO_MAX);
@@ -606,23 +607,26 @@ LOCAL ER font_save( CONST T_DTREQ *rq, T_DTANS *an )
 	h = 128 + 26 * m;
 	def = dt_pn_new(w, h);
 	if ( def == NULL || m == 0 ) {
-		if ( def != NULL ) Kfree(def);
+		wm_panel_free(def);
 		Kfree(to);
+		Kfree(own);
 		return ( m == 0 ) ? E_NOEXS : E_NOMEM;
 	}
 	dt_pn_add(def, WM_PT_LABEL, 0, 14, 4, w - 28, 22, "保存先のディスク：");
 	for ( i = 0; i < m; i++ ) {
 		INT	k = 0;
 
+		lab = NULL;
 		if ( knl_obfile_vol_ref((CONST char *)to[i], &ref) >= E_OK && ref.system ) {
 			k = bput(t, 0, sizeof(t), "システムのディスク（初期ウィンドウ）");
-		} else if ( knl_obfile_vol_ref((CONST char *)to[i], &ref) >= E_OK && ref.label[0] != 0 ) {
-			k = bput(t, 0, sizeof(t), (CONST char *)ref.label);
-		} else {
+		} else if ( ( lab = dt_vol_label((CONST char *)to[i]) ) == NULL ) {
 			k = bput(t, 0, sizeof(t), "ディスク ");
 			(void)bput(t, k, sizeof(t), (CONST char *)to[i]);
 		}
-		pt = dt_pn_add(def, WM_PT_CHOICE, FS_PN_TO + i, 24, 30 + 26 * i, w - 48, 22, (CONST char *)t);
+		/* the label whole: the choice's label keeps what fits of it */
+		pt = dt_pn_add(def, WM_PT_CHOICE, FS_PN_TO + i, 24, 30 + 26 * i, w - 48, 22,
+			       (CONST char *)( ( lab != NULL ) ? lab : t ));
+		if ( lab != NULL ) Kfree(lab);
 		if ( pt != NULL ) {
 			pt->group = FS_PN_TO;
 			pt->value = ( i == 0 ) ? 1 : 0;
@@ -631,9 +635,7 @@ LOCAL ER font_save( CONST T_DTREQ *rq, T_DTANS *an )
 	dt_pn_add(def, WM_PT_LABEL, 0, 14, 36 + 26 * m, 80, 22, "実身名：");
 	pt = dt_pn_add(def, WM_PT_BOX | P_JP, FS_PN_NAME, 96, 34 + 26 * m, w - 110, 26, "");
 	if ( pt != NULL ) {
-		for ( i = 0; or.name[i] != 0 && i < WM_LABEL_MAX - 1; i++ ) pt->text[i] = or.name[i];
-		pt->text[i] = 0;
-		pt->caret = i;
+		pt->caret = dt_fit(pt->text, WM_LABEL_MAX, own);	/* what fits of the name in the box */
 	}
 	dt_pn_buttons(def, "保存");
 	ans = dt_pn_run(host, def, &pid);
@@ -648,13 +650,12 @@ LOCAL ER font_save( CONST T_DTREQ *rq, T_DTANS *an )
 	wm_update();
 	if ( ans != WM_ANS_OK || pick < 0 ) {
 		Kfree(to);
+		Kfree(own);
 		return E_ABORT;
 	}
-	if ( name[0] == 0 ) {
-		knl_memcpy(name, or.name, sizeof(name));
-	}
+	use = ( name[0] != 0 ) ? name : own;		/* left empty: the object's own name, whole */
 	knl_memset(&c, 0, sizeof(c));
-	c.name = name;
+	c.name = use;
 	c.vol = (CONST char *)to[pick];
 	er = ob_cpy_obj(&rq->target, &c, &nu);
 	if ( er >= E_OK ) {
@@ -665,14 +666,15 @@ LOCAL ER font_save( CONST T_DTREQ *rq, T_DTANS *an )
 			if ( nf > 0 ) (void)faces_put(&nu, fs, nf);
 			Kfree(fs);
 		}
-		if ( !dt_disk_top((CONST char *)to[pick], &top) || dt_place_in(&top, &nu, name) < E_OK ) {
-			dt_place_on_desktop(&nu, name);
+		if ( !dt_disk_top((CONST char *)to[pick], &top) || dt_place_in(&top, &nu, use) < E_OK ) {
+			dt_place_on_desktop(&nu, use);
 		}
 		an->into = nu;
-		tm_printf((UB *)"desktop: font saved \"%s\" on %s\n", (CONST char *)name,
+		tm_printf((UB *)"desktop: font saved \"%s\" on %s\n", (CONST char *)use,
 			  (CONST char *)to[pick]);
 	}
 	Kfree(to);
+	Kfree(own);
 	return er;
 }
 
@@ -710,11 +712,12 @@ LOCAL ER font_try( CONST T_DTREQ *rq, T_DTANS *an )
 	}
 	if ( fid == 0 ) {
 		ID	have = fn_of_obj(&rq->target, ( rq->recno > 0 ) ? rq->recno : 0);
+		UB	hf[FN_NAME_MAX];
 
 		/* in use, and what its family names */
 		if ( have > 0 && fn_get_reg(have, &r) >= E_OK && r.use == FN_USE_ON
-		  && fn_family(have, an->text, DT_TEXT_MAX) > 0 && fn_find(an->text) == have ) {
-			return E_OK;
+		  && fn_family(have, hf, sizeof(hf)) > 0 && fn_find(hf) == have ) {
+			return dt_ans_cat(an, hf, -1);
 		}
 		if ( fn_open_obj(&rq->target, xf_data_rec(&rq->target), ( rq->recno > 0 ) ? rq->recno : 0,
 				 &fid) < E_OK || fid <= 0 ) {
@@ -725,8 +728,7 @@ LOCAL ER font_try( CONST T_DTREQ *rq, T_DTANS *an )
 		r.use = FN_USE_TRIAL;
 		(void)fn_set_reg(fid, &r);
 	}
-	(void)bput(an->text, 0, DT_TEXT_MAX, (CONST char *)fam);
-	return E_OK;
+	return dt_ans_cat(an, (CONST UB *)fam, -1);
 }
 
 EXPORT ER dt_font_req( CONST T_DTREQ *rq, T_DTANS *an )
@@ -741,27 +743,29 @@ EXPORT ER dt_font_req( CONST T_DTREQ *rq, T_DTANS *an )
 	switch ( rq->req ) {
 	case DT_RQ_FONT_REG:
 	{
-		T_OBREF	r;
+		UB	*rn;
 		T_OBCRE	c;
 		T_OBPRT	prt;
 
-		if ( ob_ref_obj(&rq->target, &r) < E_OK ) {
-			return E_NOEXS;
+		if ( ( rn = knl_ob_name(&rq->target, NULL, &er) ) == NULL ) {
+			return ( er == E_NOMEM ) ? E_NOMEM : E_NOEXS;
 		}
 		dt_sys_prt(&prt);
 		prt.attr = 0;			/* what is registered can be deleted */
 		knl_memset(&c, 0, sizeof(c));
-		c.name = r.name;
+		c.name = rn;
 		c.near = box;
 		c.prt = &prt;
 		er = ob_cpy_obj(&rq->target, &c, &u);
 		if ( er < E_OK ) {
+			Kfree(rn);
 			break;
 		}
-		er = face_set(&u, index, rq->text);
+		er = face_set(&u, index, dt_rq_word(rq, DT_TAIL_TEXT, NULL));
 		if ( er >= E_OK ) er = om_obj_link_add(&box, &u);
 		if ( er < E_OK ) {
 			(void)del_font_obj(&u);
+			Kfree(rn);
 			break;
 		}
 		(void)dt_res_faces();
@@ -770,12 +774,13 @@ EXPORT ER dt_font_req( CONST T_DTREQ *rq, T_DTANS *an )
 			(void)dt_res_faces();
 		}
 		an->into = u;
-		tm_printf((UB *)"desktop: font registered \"%s\"%s\n", (CONST char *)r.name,
+		tm_printf((UB *)"desktop: font registered \"%s\"%s\n", (CONST char *)rn,
 			  ( ( rq->flags & DT_F_FONT_UPDATE ) != 0 ) ? " (update)" : "");
+		Kfree(rn);
 		break;
 	}
 	case DT_RQ_FONT_SET:
-		er = face_set(&rq->target, index, rq->text);
+		er = face_set(&rq->target, index, dt_rq_word(rq, DT_TAIL_TEXT, NULL));
 		if ( er >= E_OK ) (void)dt_res_faces();
 		break;
 	case DT_RQ_FONT_USE:

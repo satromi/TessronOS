@@ -111,11 +111,35 @@ typedef struct {
 	 * NULL: its objects cannot be watched (E_NOSPT).
 	 */
 	INT	(*pol)( INT h, OBPWAIT *w );
+
+	/*
+	 * the object's name, as ob_ref_nam puts it: at most size bytes in
+	 * buf, cut at a whole letter, the whole size in *p_asize; NULL: the
+	 * name ref gives is the whole name
+	 */
+	ER	(*refnam)( CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize );
 } T_OBMGR;
 
 /* The name manager (obname.c) */
 IMPORT INT  knl_ob_regist( CONST T_OBMGR *mgr );	/* the manager's number */
 IMPORT CONST T_OBMGR *knl_ob_mgr_of( CONST TS_UUID *uuid );
+
+/*
+ * A number that moves on whenever the object -- its records or its
+ * metadata -- is changed through the name manager (a channel's sending
+ * is not a change). One who keeps what it read of an object reads the
+ * number before reading the object, and reads the object again once the
+ * number differs. Objects may share a number: it moves on for any of
+ * them, so it can differ without a change, never stay without one.
+ */
+IMPORT UW   knl_ob_chg_serial( CONST TS_UUID *uuid );
+
+/*
+ * A name of the manager's own put as ob_ref_nam puts one: at most size
+ * bytes of s in buf, cut at a whole letter, with its nought; the whole
+ * size in *p_asize. E_PAR for size below 0.
+ */
+IMPORT ER   knl_ob_name_put( CONST UB *s, SZ len, UB *buf, SZ size, SZ *p_asize );
 IMPORT CONST T_OBCRD *knl_ob_crd_of( ID pid );
 IMPORT ER   knl_ob_meta_read( CONST TS_UUID *uuid, UB *buf, INT max, INT *p_len );
 IMPORT ER   knl_ob_meta_write( CONST TS_UUID *uuid, CONST UB *buf, INT len );
@@ -190,11 +214,24 @@ IMPORT void knl_obpoll_gone( OBPLIST *l, BOOL tell );	/* the object goes: its wa
 /* The objects of a manager's kind process pid holds keys to: their UUIDs, at most max; how many */
 IMPORT INT  knl_ob_key_objs( ID pid, UINT type, UINT sub, TS_UUID *buf, INT max );
 
+/*
+ * Where a USB device is plugged in, as its objects are named (obusb.c
+ * knl_obusb_path, "0-4.3"), with its nought: the controller (UINT, 10
+ * digits), the root port (xHCI MaxPorts is 8 bits, 3 digits) and a port
+ * of 4 bits (the xHCI route string) for each of the 5 hubs there may be
+ * (USB 2.0 4.1.1). The names made of it: "usb" and it; "hid", it and
+ * ".i" with the interface number (8 bits).
+ */
+#define OB_USB_PATH_MAX		( 10 + 1 + 3 + 5 * 3 + 1 )
+#define OB_USB_NAME_MAX		( 3 + OB_USB_PATH_MAX )
+#define OB_HID_NAME_MAX		( 3 + OB_USB_PATH_MAX - 1 + 2 + 3 + 1 )
+
 /* Volumes of the file manager */
 IMPORT ER   knl_obfile_attach( CONST char *path, UINT flags );
 IMPORT ER   knl_obfile_detach( CONST char *path );
 IMPORT ER   knl_obfile_trx( CONST TS_UUID *on, BOOL begin, BOOL commit );
 IMPORT INT  knl_obfile_revoke( CONST UB *devnm );	/* a device's medium went: its volumes are gone */
+IMPORT void knl_ob_watch_keys_drop_of( CONST TS_UUID *uuids, INT n );	/* their keys only for notices closed */
 IMPORT INT  knl_obfile_shut( BOOL finish );		/* the machine going off */
 
 /* Protection domains (18.9): the one an object is under, E_NOEXS when none */

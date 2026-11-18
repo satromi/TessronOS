@@ -93,6 +93,46 @@ LOCAL ER str_in( CONST UB *src, UB *dst, INT max, BOOL cut )
 	return E_OK;
 }
 
+/*
+ * A name of the process's, of any length, copied into memory of the
+ * kernel's (*p, Kfree it): its length is measured a page at a time
+ * first, and it is taken at once. A name goes into an object's metadata,
+ * so one longer than the metadata a program may write (OB_META_LIMIT)
+ * is E_LIMIT; E_MACV when it leaves its pages. Never cut.
+ */
+#define NAME_IN_MAX	OB_META_LIMIT
+
+LOCAL ER str_dup_in( CONST UB *src, UB **p, SZ *p_len )
+{
+	SZ	n;
+
+	*p = NULL;
+	for ( n = 0; ; n++ ) {
+		if ( ( n == 0 || ( ( (UBINT)( src + n ) ) & ( PAGE_BYTES - 1 ) ) == 0 )
+		  && !user_ok(src + n, 1, FALSE) ) {
+			return E_MACV;
+		}
+		if ( UACCESS(src[n]) == 0 ) {
+			break;
+		}
+		if ( n >= NAME_IN_MAX ) {
+			return E_LIMIT;
+		}
+	}
+	*p = (UB *)Kmalloc(n + 1);
+	if ( *p == NULL ) {
+		return E_NOMEM;
+	}
+	if ( n > 0 ) {
+		knl_ua_get(*p, src, n);
+	}
+	(*p)[n] = 0;
+	if ( p_len != NULL ) {
+		*p_len = n;
+	}
+	return E_OK;
+}
+
 /* A UUID of the process's, copied; *pp the copy, or NULL for NULL */
 LOCAL ER uuid_in( CONST TS_UUID *u, TS_UUID *k, CONST TS_UUID **pp )
 {
@@ -148,7 +188,7 @@ LOCAL void buf_free( void *p )
 /* A T_OBCRE and everything it points to, the kernel's own */
 typedef struct {
 	T_OBCRE	c;
-	UB	name[OB_NAME_MAX];
+	UB	*name;			/* as long as the process's is */
 	char	vol[FS_PATH_MAX];
 	T_OBPRT	*prt;			/* as long as the process's is */
 	void	*json, *arg, *icon;
@@ -157,6 +197,7 @@ typedef struct {
 LOCAL void cre_free( CRECOPY *k )
 {
 	if ( k == NULL ) return;
+	buf_free(k->name);
 	buf_free(k->prt);
 	buf_free(k->json);
 	buf_free(k->arg);
@@ -182,9 +223,10 @@ LOCAL ER cre_in( CONST T_OBCRE *u, CRECOPY **pp )
 	}
 	k->json = k->arg = k->icon = NULL;
 	k->prt = NULL;
+	k->name = NULL;
 	knl_ua_get(&k->c, u, sizeof(k->c));
 	if ( k->c.name != NULL ) {
-		er = str_in(k->c.name, k->name, sizeof(k->name), TRUE);
+		er = str_dup_in(k->c.name, &k->name, NULL);
 		k->c.name = k->name;
 	}
 	if ( er >= E_OK && k->c.vol != NULL ) {
@@ -305,7 +347,7 @@ LOCAL ER svc_del_obj( CONST TS_UUID *uuid )
 	return ( er < E_OK ) ? er : ob_del_obj(u);
 }
 
-LOCAL ER svc_ref_obj( CONST TS_UUID *uuid, T_OBREF *pk_ref )
+LOCAL ER svc_ref_obj2( CONST TS_UUID *uuid, T_OBREF *pk_ref )
 {
 	CONST TS_UUID	*u;
 	TS_UUID		k;
@@ -314,6 +356,93 @@ LOCAL ER svc_ref_obj( CONST TS_UUID *uuid, T_OBREF *pk_ref )
 	if ( er < E_OK ) return er;
 	if ( !out_ok(pk_ref, sizeof(*pk_ref)) ) return E_MACV;
 	return UACCESS(ob_ref_obj(u, pk_ref));
+}
+
+/*
+ * The form before (TSN_OB_REF_OBJ): the name in the structure, 64 bytes,
+ * for a program built before the name was taken out. The name is cut at
+ * a whole letter, with OB_F_NAMECUT when it did not fit.
+ */
+#define OBREF_V1_NAME	64
+
+typedef struct {
+	TS_UUID	uuid;
+	UINT	type;
+	UINT	sub;
+	UINT	flags;
+	UB	name[OBREF_V1_NAME];
+	INT	refcnt;
+	INT	nrec;
+	UD	size;
+} T_OBREF_V1;
+
+LOCAL ER svc_ref_obj( CONST TS_UUID *uuid, T_OBREF_V1 *pk_ref )
+{
+	CONST TS_UUID	*u;
+	TS_UUID		k;
+	T_OBREF		r;
+	T_OBREF_V1	o;
+	UB		*nm;
+	SZ		len = 0, n;
+	ER		er = uuid_in(uuid, &k, &u);
+
+	if ( er < E_OK ) return er;
+	if ( !out_ok(pk_ref, sizeof(*pk_ref)) ) return E_MACV;
+	er = ob_ref_obj(u, &r);
+	if ( er < E_OK ) return er;
+	knl_memset(&o, 0, sizeof(o));
+	o.uuid = r.uuid;
+	o.type = r.type;
+	o.sub = r.sub;
+	o.flags = r.flags;
+	o.refcnt = r.refcnt;
+	o.nrec = r.nrec;
+	o.size = r.size;
+	nm = knl_ob_name(u, &len, NULL);
+	if ( nm != NULL ) {
+		n = knl_utf8_fit(nm, len, OBREF_V1_NAME - 1);
+		knl_memcpy(o.name, nm, n);
+		if ( n < len ) o.flags |= OB_F_NAMECUT;
+		Kfree(nm);
+	}
+	knl_ua_put(pk_ref, &o, sizeof(o));
+	return E_OK;
+}
+
+/* A name the kernel holds whole, put as much as the process has room for, and the size it takes */
+LOCAL ER name_out( CONST UB *nm, SZ len, UB *buf, SZ size, SZ *p_asize )
+{
+	SZ	n;
+
+	if ( size < 0 || ( size > 0 && buf == NULL ) ) return E_PAR;
+	if ( !out_ok(buf, size) || !out_ok(p_asize, sizeof(*p_asize)) ) return E_MACV;
+	if ( size > 0 ) {
+		n = knl_utf8_fit(nm, len, size - 1);
+		if ( n > 0 ) knl_ua_put(buf, nm, n);
+		knl_ua_put(buf + n, "", 1);
+	}
+	if ( p_asize != NULL ) {
+		n = len + 1;
+		knl_ua_put(p_asize, &n, sizeof(n));
+	}
+	return E_OK;
+}
+
+LOCAL ER svc_ref_nam( CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize )
+{
+	CONST TS_UUID	*u;
+	TS_UUID		k;
+	UB		*nm;
+	SZ		len = 0;
+	ER		er = uuid_in(uuid, &k, &u);
+
+	if ( er < E_OK ) return er;
+	if ( u == NULL ) return E_PAR;
+	nm = knl_ob_name(u, &len, &er);
+	if ( nm == NULL ) return er;
+	er = name_out(nm, len, buf, size, p_asize);
+	Kfree(nm);
+	return er;
 }
 
 LOCAL ER svc_acc_obj( CONST TS_UUID *uuid, UINT ops )
@@ -406,17 +535,19 @@ LOCAL ER svc_dup_obj( CONST TS_UUID *uuid, CONST UB *name, TS_UUID *p_uuid )
 {
 	CONST TS_UUID	*u;
 	TS_UUID		ku;
-	UB		kn[OB_NAME_MAX];
+	UB		*kn = NULL;
 	ER		er = uuid_in(uuid, &ku, &u);
 
 	if ( er < E_OK ) return er;
 	if ( p_uuid == NULL ) return E_PAR;
 	if ( !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
 	if ( name != NULL ) {
-		er = str_in(name, kn, sizeof(kn), FALSE);
+		er = str_dup_in(name, &kn, NULL);
 		if ( er < E_OK ) return er;
 	}
-	return UACCESS(ob_dup_obj(u, ( name != NULL ) ? kn : NULL, p_uuid));
+	er = UACCESS(ob_dup_obj(u, kn, p_uuid));
+	buf_free(kn);
+	return er;
 }
 
 /* ---------------------------------------------------------------- records */
@@ -651,25 +782,26 @@ LOCAL ER svc_set_prt( CONST TS_UUID *uuid, CONST T_OBPRT *pk_prt )
 
 LOCAL ER svc_fnd_nam( CONST UB *name, TS_UUID *p_uuid )
 {
-	UB	k[OB_NAME_MAX];
+	UB	*k;
 	ER	er;
 
 	if ( !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
 	if ( name == NULL ) {
 		return UACCESS(ob_fnd_nam(NULL, p_uuid));
 	}
-	er = str_in(name, k, sizeof(k), FALSE);
+	er = str_dup_in(name, &k, NULL);
 	if ( er < E_OK ) return er;
-	if ( !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
-	return UACCESS(ob_fnd_nam(k, p_uuid));
+	er = UACCESS(ob_fnd_nam(k, p_uuid));
+	buf_free(k);
+	return er;
 }
 
-/* A name of a link in a box: an object name or a file name */
-#define LNK_NAME_MAX	256
-
-/* The box and the name the process gives, copied; *pn NULL for no name */
-LOCAL ER lnk_in( CONST TS_UUID *box, CONST UB *name, TS_UUID *kb, UB *kn, CONST TS_UUID **pb,
-		 CONST UB **pn )
+/*
+ * The box and the name of a link in it the process gives (an object name
+ * or a file name), copied; *pn NULL for no name, else the caller's to
+ * Kfree
+ */
+LOCAL ER lnk_in( CONST TS_UUID *box, CONST UB *name, TS_UUID *kb, CONST TS_UUID **pb, UB **pn )
 {
 	ER	er = uuid_in(box, kb, pb);
 
@@ -677,51 +809,56 @@ LOCAL ER lnk_in( CONST TS_UUID *box, CONST UB *name, TS_UUID *kb, UB *kn, CONST 
 	if ( er < E_OK || name == NULL ) {
 		return er;
 	}
-	er = str_in(name, kn, LNK_NAME_MAX, FALSE);
-	*pn = kn;
-	return er;
+	return str_dup_in(name, pn, NULL);
 }
 
 LOCAL ER svc_fnd_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *p_uuid )
 {
 	CONST TS_UUID	*b;
-	CONST UB	*nm;
+	UB		*nm;
 	TS_UUID		kb;
-	UB		kn[LNK_NAME_MAX];
-	ER		er = lnk_in(box, name, &kb, kn, &b, &nm);
+	ER		er = lnk_in(box, name, &kb, &b, &nm);
 
-	if ( er < E_OK ) return er;
-	if ( !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
-	return UACCESS(ob_fnd_lnk(b, nm, p_uuid));
+	if ( er >= E_OK ) {
+		er = out_ok(p_uuid, sizeof(*p_uuid)) ? UACCESS(ob_fnd_lnk(b, nm, p_uuid)) : E_MACV;
+	}
+	buf_free(nm);
+	return er;
 }
 
 LOCAL ER svc_lst_lnk( CONST TS_UUID *box, CONST UB *name, TS_UUID *buf, INT n, INT *p_cnt )
 {
 	CONST TS_UUID	*b;
-	CONST UB	*nm;
+	UB		*nm;
 	TS_UUID		kb;
-	UB		kn[LNK_NAME_MAX];
-	ER		er = lnk_in(box, name, &kb, kn, &b, &nm);
+	ER		er = lnk_in(box, name, &kb, &b, &nm);
 
-	if ( er < E_OK ) return er;
-	if ( n < 0 ) return E_PAR;
-	if ( !out_ok(buf, (SZ)n * (SZ)sizeof(TS_UUID)) || !out_ok(p_cnt, sizeof(*p_cnt)) ) return E_MACV;
-	return UACCESS(ob_lst_lnk(b, nm, buf, n, p_cnt));
+	if ( er >= E_OK && n < 0 ) {
+		er = E_PAR;
+	} else if ( er >= E_OK
+		 && ( !out_ok(buf, (SZ)n * (SZ)sizeof(TS_UUID)) || !out_ok(p_cnt, sizeof(*p_cnt)) ) ) {
+		er = E_MACV;
+	} else if ( er >= E_OK ) {
+		er = UACCESS(ob_lst_lnk(b, nm, buf, n, p_cnt));
+	}
+	buf_free(nm);
+	return er;
 }
-
-#define SYS_ROLE_MAX	64
 
 LOCAL ER svc_fnd_sys( CONST char *role, CONST char *dflt, TS_UUID *p_uuid )
 {
-	UB	kr[SYS_ROLE_MAX], kd[TS_UUID_STRLEN + 1];
+	UB	*kr = NULL, kd[TS_UUID_STRLEN + 1];
 	ER	er;
 
 	if ( role == NULL || p_uuid == NULL ) return E_PAR;
-	er = str_in((CONST UB *)role, kr, sizeof(kr), FALSE);
+	er = str_dup_in((CONST UB *)role, &kr, NULL);
 	if ( er >= E_OK && dflt != NULL ) er = str_in((CONST UB *)dflt, kd, sizeof(kd), FALSE);
-	if ( er < E_OK ) return er;
-	if ( !out_ok(p_uuid, sizeof(*p_uuid)) ) return E_MACV;
-	return UACCESS(ob_fnd_sys((CONST char *)kr, ( dflt != NULL ) ? (CONST char *)kd : NULL, p_uuid));
+	if ( er >= E_OK && !out_ok(p_uuid, sizeof(*p_uuid)) ) er = E_MACV;
+	if ( er >= E_OK ) {
+		er = UACCESS(ob_fnd_sys((CONST char *)kr, ( dflt != NULL ) ? (CONST char *)kd : NULL, p_uuid));
+	}
+	buf_free(kr);
+	return er;
 }
 
 LOCAL ER svc_get_crd( T_OBCRD *pk_crd )
@@ -801,17 +938,22 @@ LOCAL ER svc_det_vol( CONST char *path )
 
 /* ---------------------------------------------------------------- the disk check (ts/tsfsck.h) */
 
-#define CHK_LIST_MAX	64		/* volumes told a process at one call */
-
+/*
+ * Every volume, as many as there are: the kernel's copy taken for no
+ * more than there are now (asked first) and the room the process gave,
+ * and how many there are answered, as ob_chk_list answers
+ */
 LOCAL INT svc_chk_list( T_TSFSCKDEV *buf, INT max )
 {
 	T_TSFSCKDEV	*k = NULL;
-	INT		n;
+	INT		n, have;
 
 	if ( max < 0 ) return E_PAR;
 	if ( buf == NULL ) max = 0;
-	if ( max > CHK_LIST_MAX ) max = CHK_LIST_MAX;
 	if ( !out_ok(buf, (SZ)sizeof(*buf) * max) ) return E_MACV;
+	have = ob_chk_list(NULL, 0);
+	if ( have < 0 ) return have;
+	if ( max > have ) max = have;
 	if ( max > 0 && ( k = (T_TSFSCKDEV *)Kmalloc(sizeof(*k) * (SZ)max) ) == NULL ) return E_NOMEM;
 	n = ob_chk_list(k, max);
 	if ( n > 0 && k != NULL ) {
@@ -819,6 +961,29 @@ LOCAL INT svc_chk_list( T_TSFSCKDEV *buf, INT max )
 	}
 	if ( k != NULL ) Kfree(k);
 	return n;
+}
+
+/* A listed volume's label, whole: read into the kernel's memory, then as much as the process has room for */
+LOCAL ER svc_chk_label( CONST char *devnm, UB *buf, SZ size, SZ *p_asize )
+{
+	char	kd[FS_PATH_MAX];
+	UB	*lb = NULL;
+	SZ	need = 0, cap;
+	ER	er;
+
+	if ( devnm == NULL ) return E_PAR;
+	er = str_in((CONST UB *)devnm, (UB *)kd, sizeof(kd), FALSE);
+	if ( er < E_OK ) return er;
+	for ( cap = 64; ; cap = need ) {
+		lb = (UB *)Kmalloc(cap);
+		if ( lb == NULL ) return E_NOMEM;
+		er = ob_chk_label(kd, lb, cap, &need);
+		if ( er < E_OK || need <= cap ) break;
+		Kfree(lb);
+	}
+	if ( er >= E_OK ) er = name_out(lb, need - 1, buf, size, p_asize);
+	Kfree(lb);
+	return er;
 }
 
 /* Where the events of a process's check go: its own memory, with the count after each */
@@ -984,11 +1149,87 @@ LOCAL ID svc_ntf_evt( ID key, INT recno, CONST T_OBNTF *pk_ntf, ID port )
 /* ---------------------------------------------------------------- what links show */
 
 /*
+ * The words of a link copied in from the process (its name, relationship,
+ * applist and viewMode, as long as they are): the T_VOBJ then holds its
+ * own copies, let go with tad_vobj_clear; the process's pointers are not
+ * kept. E_MACV when one is not the process's to read.
+ */
+LOCAL ER vobj_words_in( T_VOBJ *v )
+{
+	UB	*u[4];
+	SZ	l[4];
+	UB	*kb;
+	INT	i;
+	ER	er = E_OK;
+
+	u[0] = v->vname;	l[0] = v->vname_len;
+	u[1] = v->vrel;		l[1] = v->vrel_len;
+	u[2] = v->vapplist;	l[2] = v->vapplist_len;
+	u[3] = v->vview;	l[3] = v->vview_len;
+	v->vname = v->vrel = v->vapplist = v->vview = NULL;
+	v->vname_len = v->vrel_len = v->vapplist_len = v->vview_len = 0;
+	for ( i = 0; i < 4 && er >= E_OK; i++ ) {
+		if ( u[i] == NULL || l[i] <= 0 ) continue;
+		if ( !user_ok(u[i], l[i], FALSE) ) {
+			er = E_MACV;
+			break;
+		}
+		kb = (UB *)Kmalloc(l[i]);
+		if ( kb == NULL ) {
+			er = E_NOMEM;
+			break;
+		}
+		knl_ua_get(kb, u[i], l[i]);
+		er = tad_vobj_set(v, ( i == 0 ) ? TAD_W_NAME : ( i == 1 ) ? TAD_W_REL : ( i == 2 ) ? TAD_W_APPLIST : TAD_W_VIEW,
+				  kb, l[i]);
+		Kfree(kb);
+	}
+	if ( er < E_OK ) {
+		tad_vobj_clear(v);
+	}
+	return er;
+}
+
+/*
  * The looks of n links, as the store holds them for the desktop
- * (ob_ref_vob, ts/tadview.h): each link copied in, answered in the
+ * (ob_ref_vob, ts/tadview.h): each link copied in, its words with it, answered in the
  * kernel, and copied out with its icon. A link to an object the process
  * may not read is answered as a 虚身.
  */
+/* Text of len bytes put in the process's room of max bytes, cut at a whole letter: FALSE when it did not fit */
+LOCAL BOOL text_out( UB *room, INT max, CONST UB *s, SZ len )
+{
+	SZ	n;
+
+	if ( room == NULL || max <= 0 ) return (BOOL)( room == NULL );
+	n = knl_utf8_fit(s, len, max - 1);
+	if ( n > 0 ) knl_ua_put(room, s, n);
+	knl_ua_put(room + n, "", 1);
+	return (BOOL)( n == len );
+}
+
+/* What a link's band says, whole: asked again in twice the room while it fills the room (in memory to Kfree) */
+LOCAL UB *label_whole( CONST T_VOBJ *v, SZ *p_len )
+{
+	UB	*b;
+	INT	cap = 256, n;
+
+	for ( ;; ) {
+		b = (UB *)Kmalloc(cap);
+		if ( b == NULL ) return NULL;
+		n = om_store_label(v, b, cap);
+		if ( n < 0 ) {
+			Kfree(b);
+			return NULL;
+		}
+		if ( n < cap - 1 ) break;
+		Kfree(b);
+		cap *= 2;
+	}
+	*p_len = n;
+	return b;
+}
+
 LOCAL INT svc_ref_vob( T_OBRVOB *pk, INT n )
 {
 	T_OBRVOB	*k;
@@ -1006,10 +1247,20 @@ LOCAL INT svc_ref_vob( T_OBRVOB *pk, INT n )
 	knl_memset(&zero, 0, sizeof(zero));
 	for ( i = 0; i < n; i++ ) {
 		knl_ua_get(k, &pk[i], sizeof(*k));
-		if ( k->icon != NULL && ( k->icon_max < 0
-		  || !user_ok(k->icon, (SZ)k->icon_max * (SZ)sizeof(UW), TRUE) ) ) {
+		if ( ( k->icon != NULL && ( k->icon_max < 0
+		  || !user_ok(k->icon, (SZ)k->icon_max * (SZ)sizeof(UW), TRUE) ) )
+		  || ( k->name != NULL && ( k->name_max < 0 || !user_ok(k->name, k->name_max, TRUE) ) )
+		  || ( k->label != NULL && ( k->label_max < 0 || !user_ok(k->label, k->label_max, TRUE) ) ) ) {
 			Kfree(k);
 			return E_MACV;
+		}
+		{
+			ER	we = vobj_words_in(&k->vobj);
+
+			if ( we < E_OK ) {
+				Kfree(k);
+				return we;
+			}
 		}
 		k->er = E_OK;
 		k->state = 0;
@@ -1017,8 +1268,6 @@ LOCAL INT svc_ref_vob( T_OBRVOB *pk, INT n )
 		k->name_len = -1;
 		k->label_len = -1;
 		k->icon_w = k->icon_h = 0;
-		k->name[0] = 0;
-		k->label[0] = 0;
 		/*
 		 * whether it may be read, asked once a call for each object: the
 		 * links of a window are often many to few objects, and the
@@ -1039,10 +1288,20 @@ LOCAL INT svc_ref_vob( T_OBRVOB *pk, INT n )
 			k->state = TV_ST_GONE;
 		} else {
 			if ( ( k->want & OB_VW_NAME ) != 0 ) {
-				k->name_len = om_store_name(&k->vobj.target, k->name, sizeof(k->name));
+				SZ	nl = 0;
+				UB	*nm = om_store_name_dup(&k->vobj.target, &nl);
+
+				k->name_len = ( nm != NULL ) ? (INT)nl : -1;
+				if ( nm != NULL && !text_out(k->name, k->name_max, nm, nl) ) k->state |= OB_VW_CUT;
+				if ( nm != NULL ) Kfree(nm);
 			}
 			if ( ( k->want & OB_VW_LABEL ) != 0 ) {
-				k->label_len = om_store_label(&k->vobj, k->label, sizeof(k->label));
+				SZ	ll = 0;
+				UB	*lb = label_whole(&k->vobj, &ll);
+
+				k->label_len = ( lb != NULL ) ? (INT)ll : -1;
+				if ( lb != NULL && !text_out(k->label, k->label_max, lb, ll) ) k->state |= OB_VW_CUT;
+				if ( lb != NULL ) Kfree(lb);
 			}
 			if ( ( k->want & OB_VW_PAPER ) != 0 && om_store_paper(&k->vobj.target, &k->paper) < E_OK ) {
 				k->paper = TV_PAPER_LOOK;
@@ -1069,10 +1328,9 @@ LOCAL INT svc_ref_vob( T_OBRVOB *pk, INT n )
 		knl_ua_put(&pk[i].paper, &k->paper, sizeof(k->paper));
 		knl_ua_put(&pk[i].name_len, &k->name_len, sizeof(k->name_len));
 		knl_ua_put(&pk[i].label_len, &k->label_len, sizeof(k->label_len));
-		knl_ua_put(pk[i].name, k->name, sizeof(k->name));
-		knl_ua_put(pk[i].label, k->label, sizeof(k->label));
 		knl_ua_put(&pk[i].icon_w, &k->icon_w, sizeof(k->icon_w));
 		knl_ua_put(&pk[i].icon_h, &k->icon_h, sizeof(k->icon_h));
+		tad_vobj_clear(&k->vobj);
 	}
 	Kfree(k);
 	return n;
@@ -1140,4 +1398,7 @@ EXPORT const FP knl_ob_svc_tbl[TSN_OB_MAX + 1] = {
 	[TSN_NUMBER(TSN_OB_CHK_REQ)]	= F(svc_chk_request),
 	[TSN_NUMBER(TSN_OB_CHK_BOOT)]	= F(svc_chk_boot),
 	[TSN_NUMBER(TSN_OB_CRE_KEY)]	= F(svc_cre_key),
+	[TSN_NUMBER(TSN_OB_REF_NAM)]	= F(svc_ref_nam),
+	[TSN_NUMBER(TSN_OB_CHK_LABEL)]	= F(svc_chk_label),
+	[TSN_NUMBER(TSN_OB_REF_OBJ2)]	= F(svc_ref_obj2),
 };

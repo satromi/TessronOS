@@ -30,8 +30,6 @@
 extern "C" {
 #endif
 
-#define UI_PART_MAX	200		/* parts of one panel */
-
 typedef struct {
 	INT	num;			/* the definition's number for it */
 	ID	key;			/* the part opened */
@@ -43,8 +41,14 @@ typedef struct {
 	TS_UUID	win, pnl, ch;
 	ID	kw, pk, port;
 	INT	w, h;			/* the panel's size, the window's work area */
-	UIPART	p[UI_PART_MAX];
+	/*
+	 * The panel's parts, as many as it has (no bound but the memory):
+	 * np of them in a table with room for room, made as the panel is
+	 * opened (ui_parts_open) and let go as it is closed (ui_parts_close)
+	 */
+	UIPART	*p;
 	INT	np;
+	INT	room;
 	INT	tags;			/* the number of the part that is the tags, 0 none */
 	INT	last;			/* the box last typed into */
 } UI;
@@ -95,6 +99,16 @@ IMPORT void ui_icon( CONST char *prog );
 IMPORT void ui_shows( CONST char *obj );
 IMPORT void ui_close( UI *u );
 
+/*
+ * The parts of the panel placed as u->pk, opened by the links it keeps
+ * and known by number, every one of them: E_NOMEM when the table could
+ * not be made as large, and then none is kept open. ui_open and the
+ * others call it; a program that places a panel of its own calls it
+ * too, and ui_parts_close when the panel goes.
+ */
+IMPORT ER   ui_parts_open( UI *u );
+IMPORT void ui_parts_close( UI *u );
+
 /* A notice from the window's channel (u->port): what it was, and the part */
 IMPORT INT  ui_event( UI *u, CONST T_OBNTM *m, INT *p_num );
 
@@ -127,6 +141,8 @@ IMPORT void ui_set_swatch( UI *u, INT num, UW colour, BOOL chosen );	/* a swatch
 /* A volume: its value, and the ends it runs between (one across starts from its right) */
 IMPORT void ui_set_range( UI *u, INT num, INT v, INT lo, INT hi );
 IMPORT INT  ui_text( UI *u, INT num, char *buf, INT max );
+/* A part's text whole, in memory of its own (free it): read again with twice the room while it fills it; NULL without memory */
+IMPORT char *ui_text_all( UI *u, INT num );
 IMPORT void ui_set_text( UI *u, INT num, CONST char *s );	/* a box's letters, a label's words */
 IMPORT INT  ui_fields( UI *u, INT num, INT *v, INT n );
 IMPORT void ui_set_fields( UI *u, INT num, CONST INT *v, INT n );
@@ -257,6 +273,9 @@ IMPORT INT  ui_rec_all( CONST TS_UUID *u, INT recno, INT room, UB **p_buf );
 IMPORT INT  ui_key_all( ID key, INT recno, INT room, UB **p_buf, INT *p_cap );
 IMPORT INT  ui_lst_obj( UINT type, UINT sub, TS_UUID **p_ids );
 IMPORT INT  ui_lst_lnk( CONST TS_UUID *box, TS_UUID **p_ids );
+
+/* An object's name, whole (ob_ref_nam), in memory of its own (free it); NULL on an error */
+IMPORT UB  *ui_obj_name( CONST TS_UUID *u );
 
 #ifdef __cplusplus
 }

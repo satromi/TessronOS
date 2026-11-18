@@ -1823,6 +1823,7 @@ EXPORT ER kc_words_reload( void )
 }
 
 #define KW_WATCH_PRI	30		/* low: reading the words is not urgent */
+#define KW_RETRY_TICKS	20		/* the dictionary looked for again every 2 s while its disk is out */
 
 LOCAL ID	kw_watch_tsk = 0;
 
@@ -1830,8 +1831,10 @@ LOCAL ID	kw_watch_tsk = 0;
  * The user dictionary object watched: a write to its record 1 (単語登録
  * writing a word, or anyone) has the words read again. A write and the
  * cut after it come as two notices close together, which are one change.
+ * Its disk taken out (OB_E_DETACH), the key is let go at once and the
+ * object looked for again until it is back (quiet: nothing said when not).
  */
-LOCAL ID kw_watch_on( ID port )
+LOCAL ID kw_watch_on( ID port, BOOL quiet )
 {
 	TS_UUID	u;
 	T_OBNTF	req;
@@ -1841,10 +1844,10 @@ LOCAL ID kw_watch_on( ID port )
 		return 0;
 	}
 	knl_memset(&req, 0, sizeof(req));
-	req.events = OB_E_CHANGE;
+	req.events = OB_E_CHANGE | OB_E_DETACH;
 	key = ob_opn_obj(&u, OB_OP_ATRRD);
 	if ( key <= 0 || ob_ntf_evt(key, 1, &req, port) <= 0 ) {
-		tm_printf((UB *)"kconv: the user dictionary cannot be watched\n");
+		if ( !quiet ) tm_printf((UB *)"kconv: the user dictionary cannot be watched\n");
 		if ( key > 0 ) (void)ob_cls_obj(key);
 		return 0;
 	}
@@ -1858,6 +1861,7 @@ LOCAL void kw_watch( INT stacd, void *exinf )
 	T_OBNTM	m;
 	ID	port = 0, key = 0;
 	SZ	asz = 0;
+	INT	lost_ticks = 0;
 
 	(void)stacd;
 	(void)exinf;
@@ -1869,18 +1873,36 @@ LOCAL void kw_watch( INT stacd, void *exinf )
 		tk_exd_tsk();
 	}
 	who = knl_ob_session_crd()->user;
-	key = kw_watch_on(port);
+	key = kw_watch_on(port, FALSE);
 	for ( ;; ) {
 		if ( !kw_same(&who, &knl_ob_session_crd()->user) ) {
 			/* someone else at the machine: their words, and theirs watched */
 			who = knl_ob_session_crd()->user;
 			if ( key > 0 ) (void)ob_cls_obj(key);
-			key = kw_watch_on(port);
+			key = kw_watch_on(port, FALSE);
 			(void)kc_words_reload();
 			tm_printf((UB *)"kconv: the user dictionary of the person now at the machine read\n");
 		}
 		if ( ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) < E_OK || asz == 0 ) {
+			/*
+			 * its medium gone (the system's disk taken out): watched
+			 * again, and the words read, once it is back
+			 */
+			if ( key == 0 && ++lost_ticks >= KW_RETRY_TICKS ) {
+				lost_ticks = 0;
+				if ( ( key = kw_watch_on(port, TRUE) ) > 0 ) {
+					(void)kc_words_reload();
+					tm_printf((UB *)"kconv: the user dictionary watched again\n");
+				}
+			}
 			tk_dly_tsk(100);		/* nothing yet */
+			continue;
+		}
+		if ( m.event == OB_E_DETACH ) {
+			/* the disk of the dictionary went: the key let go at once, so that the volume is not held */
+			if ( key > 0 ) (void)ob_cls_obj(key);
+			key = 0;
+			lost_ticks = 0;
 			continue;
 		}
 		do {

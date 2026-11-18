@@ -18,7 +18,11 @@
  *	objects its links point at, by their names: the file's name an
  *	object taken in from a file keeps ("tessronos.file.name"), otherwise
  *	the object's own name. A second object of the same name is "name~2"
- *	and so on; a '/' in a name is shown as U+FF0F. Nothing is shown that
+ *	and so on; a '/' in a name is shown as U+FF0F. A name longer than
+ *	NAME_MAX (FS_NAME_MAX - 1 bytes) is shortened at a whole letter and
+ *	numbered "~1", "~2" ... the same way, so that every name shown is
+ *	one a program can hold and give back: opening that name reaches the
+ *	object, whose own name is never changed for it. Nothing is shown that
  *	is not an object: "/" links to bin (the commands), dev (the device
  *	objects, kept in step with the devices by devdir_task), home (the
  *	cabinet the desktop opens with) and tmp (emptied at each start, by the
@@ -44,7 +48,10 @@
  *	Every call is made with the caller's credentials -- the object layer
  *	judges them -- and no key is kept between calls: an open file may be
  *	shared by several processes, and a key belongs to the process that
- *	opened it. What a box holds is kept for OBJ_KEEP_MS, or until a call
+ *	opened it. What a box holds is kept as long as neither the box nor
+ *	any object it lists has changed (knl_ob_chg_serial, compared each
+ *	time it is used) and no volume came or went (knl_obfile_serial), or
+ *	until a call
  *	here changes it, so that listing and then looking at each name does
  *	not read every object's metadata again; the box's read right is
  *	asked each time it is used.
@@ -66,9 +73,9 @@
 #include <ts/tsfs.h>
 #include "../obj/obj.h"
 
-#define OBJ_NAME	256		/* bytes of a name shown, UTF-8, with its nought */
+#define OBJ_SHOWN	( FS_NAME_MAX - 1 )	/* bytes of a name shown at most: NAME_MAX */
+#define OBJ_NUM_ROOM	12		/* "~" and the digits of a number, kept free in a name shortened */
 #define OBJ_BOXES	16		/* boxes whose names are kept */
-#define OBJ_LINKS_MAX	4096		/* links of one box looked at */
 #define OBJ_KEEP_MS	2000
 
 /* What an object is, as a file */
@@ -82,21 +89,34 @@
 #define N_OBJ		4
 
 typedef struct {
-	UB	name[OBJ_NAME];
-	UB	oname[OB_NAME_MAX];	/* the object's own name, also found by */
+	UB	*name;			/* the name shown, at most OBJ_SHOWN bytes */
+	UB	*oname;			/* the object's own name, whole, also found by; NULL without */
 	TS_UUID	u;
 	UB	kind;
+	BOOL	cut;			/* name shortened from a longer one: it is numbered */
+	UW	ser;			/* knl_ob_chg_serial of the object before it was read */
 	INT	rec;
 	TS_TIME	mtime;
 } OENT;
 
+/*
+ * What a box holds, as one reading made it: shared by the cache and by
+ * the calls looking at it, and freed when the last lets it go
+ * (box_put), so that nothing is copied for each name looked up.
+ */
+typedef struct {
+	INT	refs;			/* under ob_mtxid */
+	INT	n;
+	OENT	*e;
+} OLIST;
+
 typedef struct {
 	BOOL	used;
 	TS_UUID	box;
-	UD	made;			/* ms */
+	UW	ser;			/* knl_ob_chg_serial of the box before it was read */
+	UW	vser;			/* knl_obfile_serial then */
 	UW	use;
-	INT	n;
-	OENT	*e;
+	OLIST	*l;
 } OBOX;
 
 typedef struct {
@@ -107,7 +127,7 @@ typedef struct {
 	UB	kind;
 	INT	rec;
 	TS_TIME	mtime;
-	UB	name[OBJ_NAME];
+	UB	name[FS_NAME_MAX];
 } ONODE;
 
 /* What an open file of objfs holds (T_FILE.obj) */
@@ -228,11 +248,11 @@ LOCAL BOOL may( CONST TS_UUID *u, UINT ops )
 /* ---------------------------------------------------------------- what an object is */
 
 /* The name of the member whose value v is, in an object that starts at base */
-LOCAL INT key_before( CONST UB *base, CONST T_JSON *v, UB *out, INT max )
+LOCAL INT key_before( CONST UB *base, CONST T_JSON *v, CONST UB **p_key )
 {
 	CONST UB *p = v->s - 1, *q;
-	INT	n = 0;
 
+	*p_key = NULL;
 	while ( p > base && ( *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ) ) p--;
 	if ( p <= base || *p != ':' ) return 0;
 	p--;
@@ -240,101 +260,54 @@ LOCAL INT key_before( CONST UB *base, CONST T_JSON *v, UB *out, INT max )
 	if ( p <= base || *p != '"' ) return 0;
 	for ( q = p - 1; q > base && *q != '"'; q-- ) ;
 	if ( *q != '"' ) return 0;
-	for ( q++; q < p && n < max - 1; q++ ) out[n++] = *q;
-	out[n] = 0;
-	return n;
+	*p_key = q + 1;
+	return (INT)( p - ( q + 1 ) );
+}
+
+/* Whether the n bytes at k are the whole of the 0 ended s */
+LOCAL BOOL key_is_n( CONST UB *k, INT n, CONST char *s )
+{
+	INT	i;
+
+	for ( i = 0; i < n && s[i] != 0 && k[i] == (UB)s[i]; i++ ) ;
+	return (BOOL)( i == n && s[i] == 0 );
+}
+
+/* The names an entry holds let go */
+LOCAL void ent_clear( OENT *e )
+{
+	if ( e->name != NULL ) Kfree(e->name);
+	if ( e->oname != NULL ) Kfree(e->oname);
+	e->name = NULL;
+	e->oname = NULL;
+}
+
+LOCAL void ents_free( OENT *e, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i < n; i++ ) ent_clear(&e[i]);
+	Kfree(e);
 }
 
 /*
- * The name, the kind and the time of an object, from its metadata. An
- * object whose metadata the caller may not read is a document named by
- * its object name.
+ * The name shown for s, in memory of its own (e->name): a '/' as U+FF0F,
+ * none, "." or ".." as "(名前なし)", and one longer than OBJ_SHOWN bytes
+ * shortened at a whole letter with room left for its number (e->cut).
  */
-LOCAL void ent_of( CONST TS_UUID *u, OENT *e )
+LOCAL ER name_show( OENT *e, CONST UB *s )
 {
-	T_JSON	root, ts, f, ex, apps, it, dflt;
-	T_OBREF	r;
-	UB	*meta, app[64], upd[40];
-	SZ	size = 0;
-	INT	n;
-	BOOL	has_file = FALSE, has_exec = FALSE;
+	CONST UB *none = (CONST UB *)"(名前なし)";
+	UB	*t;
+	INT	i, n = 0, k = 0;
 
-	knl_memset(e, 0, sizeof(*e));
-	e->u = *u;
-	e->kind = K_DOC;
-	e->rec = 0;
-	if ( ob_ref_obj(u, &r) >= E_OK ) {
-		s_cpy(e->oname, r.name, OB_NAME_MAX);
-		s_cpy(e->name, r.name, OBJ_NAME);
-		e->rec = ( r.nrec >= 2 ) ? 1 : 0;
-		if ( r.type == OB_T_DEVICE ) {
-			e->kind = K_DEV;
-			e->rec = 1;
-			return;
-		}
-		if ( r.type != OB_T_STORAGE ) {
-			return;			/* a process, a window, a channel: listed, not opened */
-		}
+	for ( i = 0; s != NULL && s[i] != 0; i++ ) n += ( s[i] == '/' ) ? 3 : 1;
+	n += s_len(none) + 1;
+	t = (UB *)Kmalloc((SZ)n);
+	if ( t == NULL ) {
+		return EX_NOMEM;
 	}
-	meta = om_obj_meta(u, &size);
-	if ( meta == NULL ) {
-		return;
-	}
-	if ( js_parse(meta, (INT)size, &root) >= E_OK ) {
-		if ( js_get_str(&root, "updateDate", upd, sizeof(upd)) > 0 ) {
-			e->mtime = iso_time(upd);
-		}
-		if ( js_get(&root, "tessronos", &ts) >= E_OK ) {
-			if ( js_get(&ts, "file", &f) >= E_OK ) {
-				has_file = TRUE;
-				n = js_get_str(&f, "name", e->name, OBJ_NAME);
-				if ( n <= 0 ) s_cpy(e->name, e->oname, OBJ_NAME);
-			}
-			if ( js_get(&ts, "exec", &ex) >= E_OK ) {
-				has_exec = TRUE;
-				e->rec = (INT)js_get_num(&ex, "record", 1);
-			}
-		}
-		/*
-		 * A directory: an object that opens in 仮身一覧, the キャビネット
-		 * or the 小物箱 -- one of its applications, not only the one it
-		 * opens in by default -- a figure of links, as the objects of the
-		 * tree are.
-		 */
-		app[0] = 0;
-		if ( js_get(&root, "applist", &apps) >= E_OK && js_type(&apps) == JS_OBJECT ) {
-			UB	key[64];
-
-			(void)dflt;
-			it.s = NULL;
-			while ( js_next(&apps, &it) ) {
-				if ( key_before(apps.s, &it, key, sizeof(key)) <= 0 ) continue;
-				if ( s_same(key, (CONST UB *)"virtual-object-list")
-				  || s_same(key, (CONST UB *)"base-file-manager")
-				  || s_same(key, (CONST UB *)"accessory-box") ) {
-					s_cpy(app, key, sizeof(app));
-				}
-			}
-		}
-		if ( app[0] != 0 && !has_exec && !has_file ) {
-			e->kind = K_DIR;
-		} else if ( has_exec ) {
-			e->kind = K_PROG;
-		} else if ( has_file ) {
-			e->kind = K_FILE;
-			e->rec = 1;
-		}
-	}
-	Kfree(meta);
-}
-
-/* A '/' in a name shown as U+FF0F; a name cut to fit */
-LOCAL void name_clean( UB *s )
-{
-	UB	t[OBJ_NAME];
-	INT	i, k = 0;
-
-	for ( i = 0; s[i] != 0 && k < OBJ_NAME - 4; i++ ) {
+	for ( i = 0; s != NULL && s[i] != 0; i++ ) {
 		if ( s[i] == '/' ) {
 			t[k++] = 0xEF; t[k++] = 0xBC; t[k++] = 0x8F;
 		} else {
@@ -343,9 +316,42 @@ LOCAL void name_clean( UB *s )
 	}
 	t[k] = 0;
 	if ( k == 0 || ( k == 1 && t[0] == '.' ) || ( k == 2 && t[0] == '.' && t[1] == '.' ) ) {
-		s_cpy(t, (CONST UB *)"(名前なし)", OBJ_NAME);
+		s_cpy(t, none, n);
+		k = s_len(t);
 	}
-	s_cpy(s, t, OBJ_NAME);
+	e->cut = FALSE;
+	if ( k > OBJ_SHOWN ) {
+		k = (INT)knl_utf8_fit(t, k, OBJ_SHOWN - OBJ_NUM_ROOM);
+		t[k] = 0;
+		e->cut = TRUE;
+	}
+	e->name = t;
+	return EX_OK;
+}
+
+/*
+ * base and "~v", in memory of its own: base cut at a whole letter as far
+ * as the whole must be at most OBJ_SHOWN bytes. NULL when it cannot be had.
+ */
+LOCAL UB *name_num( CONST UB *base, INT v )
+{
+	UB	num[12], *d;
+	INT	nn = 0, bl = s_len(base);
+
+	do {
+		num[nn++] = (UB)( '0' + v % 10 );
+		v /= 10;
+	} while ( v > 0 && nn < (INT)sizeof(num) );
+	bl = (INT)knl_utf8_fit(base, bl, OBJ_SHOWN - 1 - nn);
+	d = (UB *)Kmalloc((SZ)( bl + nn + 2 ));
+	if ( d == NULL ) {
+		return NULL;
+	}
+	knl_memcpy(d, base, bl);
+	d[bl++] = '~';
+	while ( nn > 0 ) d[bl++] = num[--nn];
+	d[bl] = 0;
+	return d;
 }
 
 /* The other way: U+FF0F typed back to '/' as it is in the object's name */
@@ -364,7 +370,123 @@ LOCAL void name_raw( CONST UB *s, UB *d, INT max )
 	d[k] = 0;
 }
 
+/*
+ * The name, the kind and the time of an object, from its metadata. An
+ * object whose metadata the caller may not read is a document named by
+ * its object name. EX_NOMEM when the names cannot be held (what *e holds
+ * then is let go by ent_clear).
+ */
+LOCAL ER ent_of( CONST TS_UUID *u, OENT *e )
+{
+	T_JSON	root, ts, f, ex, apps, it, fn;
+	T_OBREF	r;
+	UB	*meta, *fname = NULL, upd[40];	/* an ISO 8601 date: its form sets the length */
+	SZ	size = 0;
+	BOOL	has_file = FALSE, has_exec = FALSE, box_app = FALSE;
+	ER	er = EX_OK, oer = E_OK;
+
+	knl_memset(e, 0, sizeof(*e));
+	e->u = *u;
+	e->kind = K_DOC;
+	e->rec = 0;
+	if ( ob_ref_obj(u, &r) >= E_OK ) {
+		/* the whole name: T_OBREF.name holds only its first bytes */
+		e->oname = knl_ob_name(u, NULL, &oer);
+		if ( e->oname == NULL && oer == E_NOMEM ) {
+			return EX_NOMEM;
+		}
+		e->rec = ( r.nrec >= 2 ) ? 1 : 0;
+		if ( r.type == OB_T_DEVICE ) {
+			e->kind = K_DEV;
+			e->rec = 1;
+			return name_show(e, e->oname);
+		}
+		if ( r.type != OB_T_STORAGE ) {
+			return name_show(e, e->oname);	/* a process, a window, a channel: listed, not opened */
+		}
+	}
+	meta = om_obj_meta(u, &size);
+	if ( meta != NULL && js_parse(meta, (INT)size, &root) >= E_OK ) {
+		if ( js_get_str(&root, "updateDate", upd, sizeof(upd)) > 0 ) {
+			e->mtime = iso_time(upd);
+		}
+		if ( js_get(&root, "tessronos", &ts) >= E_OK ) {
+			if ( js_get(&ts, "file", &f) >= E_OK ) {
+				has_file = TRUE;
+				/* the file's name, whole: unescaped it is never longer than its text */
+				if ( js_get(&f, "name", &fn) >= E_OK && js_type(&fn) == JS_STRING ) {
+					fname = (UB *)Kmalloc((SZ)fn.len + 1);
+					if ( fname == NULL ) {
+						er = EX_NOMEM;
+					} else if ( js_str(&fn, fname, fn.len + 1) <= 0 ) {
+						Kfree(fname);
+						fname = NULL;
+					}
+				}
+			}
+			if ( js_get(&ts, "exec", &ex) >= E_OK ) {
+				has_exec = TRUE;
+				e->rec = (INT)js_get_num(&ex, "record", 1);
+			}
+		}
+		/*
+		 * A directory: an object that opens in 仮身一覧, the キャビネット
+		 * or the 小物箱 -- one of its applications, not only the one it
+		 * opens in by default -- a figure of links, as the objects of the
+		 * tree are.
+		 */
+		box_app = FALSE;
+		if ( js_get(&root, "applist", &apps) >= E_OK && js_type(&apps) == JS_OBJECT ) {
+			CONST UB	*key;
+			INT		kn;
+
+			/* each program's identity compared whole, as long as it is */
+			it.s = NULL;
+			while ( js_next(&apps, &it) ) {
+				kn = key_before(apps.s, &it, &key);
+				if ( kn <= 0 ) continue;
+				if ( key_is_n(key, kn, "virtual-object-list")
+				  || key_is_n(key, kn, "base-file-manager")
+				  || key_is_n(key, kn, "accessory-box") ) {
+					box_app = TRUE;
+				}
+			}
+		}
+		if ( box_app && !has_exec && !has_file ) {
+			e->kind = K_DIR;
+		} else if ( has_exec ) {
+			e->kind = K_PROG;
+		} else if ( has_file ) {
+			e->kind = K_FILE;
+			e->rec = 1;
+		}
+	}
+	if ( meta != NULL ) Kfree(meta);
+	if ( er >= EX_OK ) {
+		er = name_show(e, ( fname != NULL ) ? fname : e->oname);
+	}
+	if ( fname != NULL ) Kfree(fname);
+	return er;
+}
+
 /* ---------------------------------------------------------------- boxes */
+
+/* One holder of a list less, under ob_mtxid; the last frees it */
+LOCAL void list_drop( OLIST *l )
+{
+	if ( l != NULL && --l->refs <= 0 ) {
+		ents_free(l->e, l->n);
+		Kfree(l);
+	}
+}
+
+/* A list box_get gave let go */
+LOCAL void box_put( OLIST *l )
+{
+	tk_loc_mtx(ob_mtxid, TMO_FEVR);
+	list_drop(l);
+	tk_unl_mtx(ob_mtxid);
+}
 
 LOCAL void box_forget( CONST TS_UUID *box )
 {
@@ -373,12 +495,40 @@ LOCAL void box_forget( CONST TS_UUID *box )
 	tk_loc_mtx(ob_mtxid, TMO_FEVR);
 	for ( i = 0; i < OBJ_BOXES; i++ ) {
 		if ( ob_cache[i].used && ( box == NULL || ts_uuid_cmp(&ob_cache[i].box, box) == 0 ) ) {
-			Kfree(ob_cache[i].e);
-			ob_cache[i].e = NULL;
+			list_drop(ob_cache[i].l);
+			ob_cache[i].l = NULL;
 			ob_cache[i].used = FALSE;
 		}
 	}
 	tk_unl_mtx(ob_mtxid);
+}
+
+/*
+ * The name the k-th entry is shown by, made one no entry before it has:
+ * a name shortened is numbered from "~1", a name met again from "~2".
+ */
+LOCAL ER name_unique( OENT *e, INT k )
+{
+	UB	*base = e[k].name, *nm;
+	INT	j, v = e[k].cut ? 1 : 0;
+	ER	er = EX_OK;
+
+	for ( ;; ) {
+		if ( v > 0 ) {
+			nm = name_num(base, v);
+			if ( nm == NULL ) {
+				er = EX_NOMEM;
+				break;
+			}
+			if ( e[k].name != base ) Kfree(e[k].name);
+			e[k].name = nm;
+		}
+		for ( j = 0; j < k && !s_same(e[j].name, e[k].name); j++ ) ;
+		if ( j == k ) break;
+		v = ( v == 0 ) ? 2 : v + 1;
+	}
+	if ( e[k].name != base ) Kfree(base);
+	return er;
 }
 
 /* Made from the box: every link's object, named; NULL with *p_er on failure */
@@ -386,7 +536,8 @@ LOCAL OENT *box_read( CONST TS_UUID *box, INT *p_n, ER *p_er )
 {
 	TS_UUID	*ids;
 	OENT	*e;
-	INT	cnt = 0, i, j, k, dup;
+	INT	cnt = 0, i, j, k;
+	UW	s;
 	ER	er;
 
 	*p_n = 0;
@@ -395,93 +546,110 @@ LOCAL OENT *box_read( CONST TS_UUID *box, INT *p_n, ER *p_er )
 		*p_er = fx(er);
 		return NULL;
 	}
-	if ( cnt > OBJ_LINKS_MAX ) cnt = OBJ_LINKS_MAX;
-	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( cnt + 1 ));
+	/* every link, however many: read again with more room if the box grew meanwhile */
+	for ( ;; ) {
+		ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( cnt + 1 ));
+		if ( ids == NULL ) {
+			*p_er = EX_NOMEM;
+			return NULL;
+		}
+		i = 0;
+		if ( cnt > 0 ) {
+			er = ob_lst_lnk(box, NULL, ids, cnt, &i);
+			if ( er < E_OK ) {
+				Kfree(ids);
+				*p_er = fx(er);
+				return NULL;
+			}
+		}
+		if ( i <= cnt ) {
+			cnt = i;
+			break;
+		}
+		Kfree(ids);
+		cnt = i;
+	}
 	e = (OENT *)Kmalloc(sizeof(OENT) * (SZ)( cnt + 1 ));
-	if ( ids == NULL || e == NULL ) {
-		if ( ids != NULL ) Kfree(ids);
-		if ( e != NULL ) Kfree(e);
+	if ( e == NULL ) {
+		Kfree(ids);
 		*p_er = EX_NOMEM;
 		return NULL;
 	}
 	k = 0;
-	if ( cnt > 0 ) {
-		er = ob_lst_lnk(box, NULL, ids, cnt, &i);
-		if ( er < E_OK ) {
-			Kfree(ids);
-			Kfree(e);
-			*p_er = fx(er);
-			return NULL;
-		}
-		if ( i < cnt ) cnt = i;
-	}
+	er = EX_OK;
 	for ( i = 0; i < cnt; i++ ) {
 		/* the same object linked twice is one name */
 		for ( j = 0; j < k && ts_uuid_cmp(&e[j].u, &ids[i]) != 0; j++ ) ;
 		if ( j < k ) continue;
-		ent_of(&ids[i], &e[k]);
-		name_clean(e[k].name);
-		for ( dup = 1; ; dup++ ) {
-			for ( j = 0; j < k && !s_same(e[j].name, e[k].name); j++ ) ;
-			if ( j == k ) break;
-			if ( dup == 1 ) {
-				UB	base[OBJ_NAME];
-				INT	n;
-
-				s_cpy(base, e[k].name, OBJ_NAME - 8);
-				n = s_len(base);
-				base[n++] = '~';
-				base[n++] = (UB)( '0' + ( dup + 1 ) % 10 );
-				base[n] = 0;
-				s_cpy(e[k].name, base, OBJ_NAME);
-			} else {
-				INT	n = s_len(e[k].name);
-				INT	v = dup + 1;
-
-				/* "~N": the number put in again */
-				while ( n > 0 && e[k].name[n - 1] != '~' ) n--;
-				if ( v >= 10 ) e[k].name[n++] = (UB)( '0' + ( v / 10 ) % 10 );
-				e[k].name[n++] = (UB)( '0' + v % 10 );
-				e[k].name[n] = 0;
-			}
+		s = knl_ob_chg_serial(&ids[i]);		/* before: a change while it is read shows */
+		er = ent_of(&ids[i], &e[k]);
+		e[k].ser = s;
+		if ( er >= EX_OK ) {
+			er = name_unique(e, k);
+		}
+		if ( er < EX_OK ) {
+			ent_clear(&e[k]);
+			break;
 		}
 		k++;
 	}
 	Kfree(ids);
+	if ( er < EX_OK ) {
+		ents_free(e, k);
+		*p_er = er;
+		return NULL;
+	}
 	*p_n = k;
 	*p_er = EX_OK;
 	return e;
 }
 
-/*
- * What a box holds, kept or read now, copied for the caller (who frees
- * it): NULL with *p_er when it cannot be had or the caller may not read
- * the box.
- */
-LOCAL OENT *box_get( CONST TS_UUID *box, INT *p_n, ER *p_er )
+/* Whether none of the objects a list was read from has changed since (under ob_mtxid) */
+LOCAL BOOL list_same( CONST OLIST *l )
 {
-	OENT	*e, *c;
+	INT	i;
+
+	for ( i = 0; i < l->n; i++ ) {
+		if ( knl_ob_chg_serial(&l->e[i].u) != l->e[i].ser ) return FALSE;
+	}
+	return TRUE;
+}
+
+/*
+ * What a box holds, kept or read now, for the caller to look at until
+ * it lets it go (box_put): NULL with *p_er when it cannot be had or the
+ * caller may not read the box. What is kept is used only while the box,
+ * every object it lists and the volumes attached are as they were when
+ * it was read: a link added or taken out by anyone (the desktop, the
+ * object layer's own calls), or an object of it renamed, is seen at the
+ * next look. Only the serials are compared, no object is read for it.
+ */
+LOCAL OLIST *box_get( CONST TS_UUID *box, ER *p_er )
+{
+	OLIST	*l;
+	OENT	*e;
 	INT	i, n = 0, slot = -1;
-	UD	now = now_ms();
+	UW	bs, vs;
 
 	if ( !may(box, OB_OP_READ) ) {
 		*p_er = EX_ACCES;
 		return NULL;
 	}
+	/* before reading: a change while the box is read makes the next look read it again */
+	bs = knl_ob_chg_serial(box);
+	vs = knl_obfile_serial();
 	tk_loc_mtx(ob_mtxid, TMO_FEVR);
 	for ( i = 0; i < OBJ_BOXES; i++ ) {
 		OBOX	*b = &ob_cache[i];
 
-		if ( b->used && ts_uuid_cmp(&b->box, box) == 0 && now - b->made < OBJ_KEEP_MS ) {
-			c = (OENT *)Kmalloc(sizeof(OENT) * (SZ)( b->n + 1 ));
-			if ( c != NULL ) {
-				knl_memcpy(c, b->e, (INT)( sizeof(OENT) * (SZ)b->n ));
-				*p_n = b->n;
-				b->use = ++ob_use;
-			}
+		if ( b->used && ts_uuid_cmp(&b->box, box) == 0 && b->ser == bs && b->vser == vs
+		  && list_same(b->l) ) {
+			l = b->l;
+			l->refs++;
+			b->use = ++ob_use;
 			tk_unl_mtx(ob_mtxid);
-			*p_er = ( c != NULL ) ? EX_OK : EX_NOMEM;
-			return c;
+			*p_er = EX_OK;
+			return l;
 		}
 	}
 	tk_unl_mtx(ob_mtxid);
@@ -490,13 +658,15 @@ LOCAL OENT *box_get( CONST TS_UUID *box, INT *p_n, ER *p_er )
 	if ( e == NULL ) {
 		return NULL;
 	}
-	c = (OENT *)Kmalloc(sizeof(OENT) * (SZ)( n + 1 ));
-	if ( c == NULL ) {
-		Kfree(e);
+	l = (OLIST *)Kmalloc(sizeof(OLIST));
+	if ( l == NULL ) {
+		ents_free(e, n);
 		*p_er = EX_NOMEM;
 		return NULL;
 	}
-	knl_memcpy(c, e, (INT)( sizeof(OENT) * (SZ)n ));
+	l->refs = 2;			/* the cache's and the caller's */
+	l->n = n;
+	l->e = e;
 
 	tk_loc_mtx(ob_mtxid, TMO_FEVR);
 	for ( i = 0; i < OBJ_BOXES; i++ ) {
@@ -511,18 +681,18 @@ LOCAL OENT *box_get( CONST TS_UUID *box, INT *p_n, ER *p_er )
 		}
 	}
 	if ( ob_cache[slot].used ) {
-		Kfree(ob_cache[slot].e);
+		list_drop(ob_cache[slot].l);
 	}
 	ob_cache[slot].used = TRUE;
 	ob_cache[slot].box = *box;
-	ob_cache[slot].made = now;
+	ob_cache[slot].ser = bs;
+	ob_cache[slot].vser = vs;
 	ob_cache[slot].use = ++ob_use;
-	ob_cache[slot].n = n;
-	ob_cache[slot].e = e;
+	ob_cache[slot].l = l;
 	tk_unl_mtx(ob_mtxid);
 
-	*p_n = n;
-	return c;
+	*p_er = EX_OK;
+	return l;
 }
 
 /* ---------------------------------------------------------------- paths */
@@ -535,7 +705,7 @@ LOCAL void node_obj( ONODE *nd, CONST OENT *e, CONST TS_UUID *parent )
 	nd->kind = e->kind;
 	nd->rec = e->rec;
 	nd->mtime = e->mtime;
-	s_cpy(nd->name, e->name, OBJ_NAME);
+	s_cpy(nd->name, ( e->name != NULL ) ? e->name : (CONST UB *)"", FS_NAME_MAX);
 	nd->hasparent = ( parent != NULL );
 	if ( parent != NULL ) nd->parent = *parent;
 }
@@ -543,36 +713,43 @@ LOCAL void node_obj( ONODE *nd, CONST OENT *e, CONST TS_UUID *parent )
 /* One name looked for in a box: the name shown, then the object's own name */
 LOCAL ER find_in_box( CONST TS_UUID *box, CONST UB *name, INT len, ONODE *nd )
 {
-	OENT	*e;
-	UB	raw[OBJ_NAME], want[OBJ_NAME];
-	INT	n = 0, i;
+	OLIST	*l;
+	UB	*want, *raw;
+	INT	i;
 	ER	er;
 
-	if ( len >= OBJ_NAME ) {
+	if ( len >= FS_NAME_MAX ) {
 		return EX_NAMETOOLONG;
 	}
+	want = (UB *)Kmalloc((SZ)len * 2 + 2);
+	if ( want == NULL ) {
+		return EX_NOMEM;
+	}
+	raw = want + len + 1;
 	knl_memcpy(want, name, len);
 	want[len] = 0;
-	e = box_get(box, &n, &er);
-	if ( e == NULL ) {
+	l = box_get(box, &er);
+	if ( l == NULL ) {
+		Kfree(want);
 		return er;
 	}
-	for ( i = 0; i < n; i++ ) {
-		if ( s_same(e[i].name, want) ) break;
+	for ( i = 0; i < l->n; i++ ) {
+		if ( s_same(l->e[i].name, want) ) break;
 	}
-	if ( i == n ) {
-		name_raw(want, raw, sizeof(raw));
-		for ( i = 0; i < n; i++ ) {
-			if ( e[i].oname[0] != 0 && s_same(e[i].oname, raw) ) break;
+	if ( i == l->n ) {
+		name_raw(want, raw, len + 1);
+		for ( i = 0; i < l->n; i++ ) {
+			if ( l->e[i].oname != NULL && l->e[i].oname[0] != 0 && s_same(l->e[i].oname, raw) ) break;
 		}
 	}
-	if ( i < n ) {
-		node_obj(nd, &e[i], box);
+	if ( i < l->n ) {
+		node_obj(nd, &l->e[i], box);
 		er = EX_OK;
 	} else {
 		er = EX_NOENT;
 	}
-	Kfree(e);
+	box_put(l);
+	Kfree(want);
 	return er;
 }
 
@@ -591,6 +768,7 @@ LOCAL ER node_root( ONODE *nd )
 	OENT	e;
 	UD	now = now_ms();
 	BOOL	fresh;
+	ER	er;
 
 	tk_loc_mtx(ob_mtxid, TMO_FEVR);
 	u = root;
@@ -609,10 +787,13 @@ LOCAL ER node_root( ONODE *nd )
 	if ( ob_ref_obj(&u, &r) < E_OK ) {
 		return EX_NOENT;
 	}
-	ent_of(&u, &e);
-	e.kind = K_DIR;
-	node_obj(nd, &e, NULL);
-	return EX_OK;
+	er = ent_of(&u, &e);
+	if ( er >= EX_OK ) {
+		e.kind = K_DIR;
+		node_obj(nd, &e, NULL);
+	}
+	ent_clear(&e);
+	return er;
 }
 
 /*
@@ -749,20 +930,25 @@ LOCAL ER of_open( T_MOUNT *m, CONST char *path, UINT oflags, T_FILE *f )
 	(void)m;
 	er = walk(path, &nd, ( oflags & O_CREAT ) ? &last : NULL, &len);
 	if ( er == EX_NOENT && ( oflags & O_CREAT ) != 0 && last != NULL ) {
-		UB	name[OBJ_NAME];
+		UB	*name;
 		TS_UUID	u;
 
 		if ( nd.node != N_OBJ || nd.kind != K_DIR ) {
 			return EX_ACCES;
 		}
-		if ( len >= OBJ_NAME ) return EX_NAMETOOLONG;
-		knl_memcpy(name, last, len);
-		name[len] = 0;
-		name_raw(name, name, sizeof(name));
+		if ( len >= FS_NAME_MAX ) return EX_NAMETOOLONG;
 		if ( !may(&nd.u, OB_OP_WRITE) ) {
 			return EX_ACCES;
 		}
+		name = (UB *)Kmalloc((SZ)len + 1);
+		if ( name == NULL ) {
+			return EX_NOMEM;
+		}
+		knl_memcpy(name, last, len);
+		name[len] = 0;
+		name_raw(name, name, len + 1);
 		er = xf_create(name, &nd.u, &u);
+		Kfree(name);
 		box_forget(&nd.u);
 		if ( er < E_OK ) {
 			return fx(er);
@@ -1005,30 +1191,37 @@ LOCAL void dent( T_DIRENT *d, CONST UB *name, UINT mode, UD ino )
 LOCAL INT of_getdents( T_FILE *f, T_DIRENT *buf, INT nent )
 {
 	OFILE	*of = (OFILE *)f->obj;
+	OLIST	*l;
 	OENT	*e;
-	INT	n = 0, k = 0, i;
+	INT	k = 0, i;
 	ER	er = EX_OK;
 
-	e = box_get(&of->n.u, &n, &er);
-	if ( e == NULL ) {
+	l = box_get(&of->n.u, &er);
+	if ( l == NULL ) {
 		return er;
 	}
-	for ( i = (INT)f->offset; i < n && k < nent; i++ ) {
+	e = l->e;
+	for ( i = (INT)f->offset; i < l->n && k < nent; i++ ) {
 		dent(&buf[k++], e[i].name, ( e[i].kind == K_DIR ) ? FS_IFDIR : ( e[i].kind == K_DEV ) ? FS_IFCHR
 				: FS_IFREG, ino_of(&e[i].u));
 		f->offset++;
 	}
-	Kfree(e);
+	box_put(l);
 	return k;
 }
 
-/* The box a new name goes into, and the name as the object will have it */
-LOCAL ER new_name( CONST char *path, ONODE *dir, UB *name, INT max )
+/*
+ * The box a new name goes into, and the name as the object will have it,
+ * in memory of its own (*p_name, Kfree it)
+ */
+LOCAL ER new_name( CONST char *path, ONODE *dir, UB **p_name )
 {
 	CONST UB *last;
+	UB	*name;
 	INT	len;
 	ER	er;
 
+	*p_name = NULL;
 	er = walk(path, dir, &last, &len);
 	if ( er >= EX_OK ) {
 		return EX_EXIST;
@@ -1039,70 +1232,97 @@ LOCAL ER new_name( CONST char *path, ONODE *dir, UB *name, INT max )
 	if ( dir->node != N_OBJ || dir->kind != K_DIR ) {
 		return EX_ACCES;
 	}
-	if ( len >= max ) {
+	if ( len >= FS_NAME_MAX ) {
 		return EX_NAMETOOLONG;
+	}
+	name = (UB *)Kmalloc((SZ)len + 1);
+	if ( name == NULL ) {
+		return EX_NOMEM;
 	}
 	knl_memcpy(name, last, len);
 	name[len] = 0;
-	name_raw(name, name, max);
+	name_raw(name, name, len + 1);
+	*p_name = name;
 	return EX_OK;
+}
+
+/* s as the text of a JSON string, every character the rules ask escaped; the bytes put */
+LOCAL INT json_esc( UB *d, CONST UB *s )
+{
+	CONST char *hex = "0123456789abcdef";
+	INT	i, k = 0;
+
+	for ( i = 0; s[i] != 0; i++ ) {
+		UB	c = s[i];
+
+		if ( c == '"' || c == '\\' ) {
+			d[k++] = '\\';
+			d[k++] = c;
+		} else if ( c < 0x20 ) {
+			d[k++] = '\\'; d[k++] = 'u'; d[k++] = '0'; d[k++] = '0';
+			d[k++] = (UB)hex[c >> 4];
+			d[k++] = (UB)hex[c & 15];
+		} else {
+			d[k++] = c;
+		}
+	}
+	return k;
 }
 
 LOCAL ER of_mkdir( T_MOUNT *m, CONST char *path )
 {
+	CONST char *a = "{\"name\":\"";
+	CONST char *b = "\",\"relationship\":[],\"linktype\":false,\"refCount\":0,\"recordCount\":1,"
+			"\"editable\":true,\"deletable\":true,\"readable\":true,"
+			"\"applist\":{\"virtual-object-list\":{\"name\":\"仮身一覧\",\"defaultOpen\":true}}}";
+	CONST char *x = "<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"";
+	CONST char *y = "\">\n<figure>\n</figure>\n</tad>\n";
 	ONODE	dir;
-	UB	name[OB_NAME_MAX], *j, *t;
+	UB	*name, *j, *t;
 	T_OBCRE	c;
 	TS_UUID	u;
-	INT	jn, tn;
+	INT	jn, tn, nl, i;
 	ER	er;
 
 	(void)m;
-	er = new_name(path, &dir, name, sizeof(name));
+	er = new_name(path, &dir, &name);
 	if ( er < EX_OK ) {
 		return er;
 	}
 	if ( !may(&dir.u, OB_OP_WRITE) ) {
+		Kfree(name);
 		return EX_ACCES;
 	}
-	j = (UB *)Kmalloc(1024);
-	t = (UB *)Kmalloc(1024);
+	/* an escaped byte takes at most six */
+	nl = s_len(name);
+	j = (UB *)Kmalloc((SZ)( s_len((CONST UB *)a) + 6 * nl + s_len((CONST UB *)b) + 1 ));
+	t = (UB *)Kmalloc((SZ)( s_len((CONST UB *)x) + 6 * nl + s_len((CONST UB *)y) + 1 ));
 	if ( j == NULL || t == NULL ) {
 		if ( j != NULL ) Kfree(j);
 		if ( t != NULL ) Kfree(t);
+		Kfree(name);
 		return EX_NOMEM;
 	}
 	jn = 0;
-	{
-		CONST char *a = "{\"name\":\"";
-		CONST char *b = "\",\"relationship\":[],\"linktype\":false,\"refCount\":0,\"recordCount\":1,"
-				"\"editable\":true,\"deletable\":true,\"readable\":true,"
-				"\"applist\":{\"virtual-object-list\":{\"name\":\"仮身一覧\",\"defaultOpen\":true}}}";
-		CONST char *x = "<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"";
-		CONST char *y = "\">\n<figure>\n</figure>\n</tad>\n";
-		INT	i;
+	for ( i = 0; a[i] != 0; i++ ) j[jn++] = (UB)a[i];
+	jn += json_esc(j + jn, name);
+	for ( i = 0; b[i] != 0; i++ ) j[jn++] = (UB)b[i];
+	j[jn] = 0;
 
-		for ( i = 0; a[i] != 0; i++ ) j[jn++] = (UB)a[i];
-		for ( i = 0; name[i] != 0; i++ ) {
-			if ( name[i] == '"' || name[i] == '\\' ) j[jn++] = '\\';
-			j[jn++] = name[i];
+	tn = 0;
+	for ( i = 0; x[i] != 0; i++ ) t[tn++] = (UB)x[i];
+	for ( i = 0; name[i] != 0; i++ ) {
+		switch ( name[i] ) {
+		  case '&':	t[tn++] = '&'; t[tn++] = 'a'; t[tn++] = 'm'; t[tn++] = 'p'; t[tn++] = ';'; break;
+		  case '<':	t[tn++] = '&'; t[tn++] = 'l'; t[tn++] = 't'; t[tn++] = ';'; break;
+		  case '"':	t[tn++] = '&'; t[tn++] = 'q'; t[tn++] = 'u'; t[tn++] = 'o'; t[tn++] = 't'; t[tn++] = ';'; break;
+		  default:	t[tn++] = name[i]; break;
 		}
-		for ( i = 0; b[i] != 0; i++ ) j[jn++] = (UB)b[i];
-		j[jn] = 0;
-
-		tn = 0;
-		for ( i = 0; x[i] != 0; i++ ) t[tn++] = (UB)x[i];
-		for ( i = 0; name[i] != 0; i++ ) {
-			switch ( name[i] ) {
-			  case '&':	t[tn++] = '&'; t[tn++] = 'a'; t[tn++] = 'm'; t[tn++] = 'p'; t[tn++] = ';'; break;
-			  case '<':	t[tn++] = '&'; t[tn++] = 'l'; t[tn++] = 't'; t[tn++] = ';'; break;
-			  case '"':	t[tn++] = '&'; t[tn++] = 'q'; t[tn++] = 'u'; t[tn++] = 'o'; t[tn++] = 't'; t[tn++] = ';'; break;
-			  default:	t[tn++] = name[i]; break;
-			}
-		}
-		for ( i = 0; y[i] != 0; i++ ) t[tn++] = (UB)y[i];
-		t[tn] = 0;
 	}
+	for ( i = 0; y[i] != 0; i++ ) t[tn++] = (UB)y[i];
+	t[tn] = 0;
+	Kfree(name);
+
 	knl_memset(&c, 0, sizeof(c));
 	c.type = OB_T_STORAGE;
 	c.sub = OB_S_FILE;
@@ -1125,7 +1345,7 @@ LOCAL ER of_mkdir( T_MOUNT *m, CONST char *path )
 LOCAL ER unname( CONST char *path, BOOL isdir )
 {
 	ONODE	nd;
-	OENT	*e;
+	OLIST	*l;
 	INT	n = 0;
 	ER	er;
 
@@ -1138,9 +1358,10 @@ LOCAL ER unname( CONST char *path, BOOL isdir )
 	}
 	if ( isdir ) {
 		if ( nd.kind != K_DIR ) return EX_NOTDIR;
-		e = box_get(&nd.u, &n, &er);
-		if ( e == NULL ) return er;
-		Kfree(e);
+		l = box_get(&nd.u, &er);
+		if ( l == NULL ) return er;
+		n = l->n;
+		box_put(l);
 		if ( n > 0 ) return EX_NOTEMPTY;
 	} else if ( nd.kind == K_DIR ) {
 		return EX_ISDIR;
@@ -1156,7 +1377,7 @@ LOCAL ER of_unlink( T_MOUNT *m, CONST char *path )	{ (void)m; return unname(path
 LOCAL ER of_rename( T_MOUNT *m, CONST char *from, CONST char *to )
 {
 	ONODE	a, b, dir;
-	UB	name[OBJ_NAME];
+	UB	*name, *raw;
 	CONST UB *last;
 	INT	len;
 	ER	er;
@@ -1181,41 +1402,46 @@ LOCAL ER of_rename( T_MOUNT *m, CONST char *from, CONST char *to )
 		return er;
 	}
 	if ( dir.node != N_OBJ || dir.kind != K_DIR ) return EX_ACCES;
-	if ( len >= OBJ_NAME ) return EX_NAMETOOLONG;
+	if ( len >= FS_NAME_MAX ) return EX_NAMETOOLONG;
+	name = (UB *)Kmalloc((SZ)len * 2 + 2);
+	if ( name == NULL ) return EX_NOMEM;
+	raw = name + len + 1;
 	knl_memcpy(name, last, len);
 	name[len] = 0;
 
+	er = E_OK;
 	if ( ts_uuid_cmp(&dir.u, &a.parent) != 0 ) {
 		er = om_obj_link_add(&dir.u, &a.u);
 		if ( er >= E_OK ) er = om_obj_link_del(&a.parent, &a.u);
 		box_forget(&dir.u);
 		box_forget(&a.parent);
-		if ( er < E_OK ) return fx(er);
 	}
-	if ( !s_same(name, a.name) ) {
-		UB	raw[OBJ_NAME];
-
-		name_raw(name, raw, sizeof(raw));
+	if ( er >= E_OK && !s_same(name, a.name) ) {
+		/* the object takes the name whole: a long one is never cut */
+		name_raw(name, raw, len + 1);
 		er = ( a.kind == K_FILE ) ? xf_rename(&a.u, raw) : om_store_rename(&a.u, raw);
 		box_forget(NULL);
-		if ( er < E_OK ) return fx(er);
 	}
-	return EX_OK;
+	Kfree(name);
+	return ( er < E_OK ) ? fx(er) : EX_OK;
 }
 
 LOCAL ER of_link( T_MOUNT *m, CONST char *from, CONST char *to )
 {
 	ONODE	a, dir;
-	UB	name[OBJ_NAME];
+	UB	*name;
+	BOOL	same;
 	ER	er;
 
 	(void)m;
 	er = walk(from, &a, NULL, NULL);
 	if ( er < EX_OK ) return er;
 	if ( a.node != N_OBJ ) return EX_PERM;
-	er = new_name(to, &dir, name, sizeof(name));
+	er = new_name(to, &dir, &name);
 	if ( er < EX_OK ) return er;
-	if ( !s_same(name, a.name) ) {
+	same = s_same(name, a.name);
+	Kfree(name);
+	if ( !same ) {
 		return EX_NOTSUP;		/* a link shows its object's own name */
 	}
 	er = om_obj_link_add(&dir.u, &a.u);

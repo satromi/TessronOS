@@ -426,13 +426,13 @@ LOCAL void test_sysup( void )
 		KT_ASSERT(same(res, rn, "a resource"));
 		if ( res != NULL ) Kfree(res);
 		KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
-		KT_ASSERT(same(r.name, s_len((CONST char *)r.name), "更新の試験・新しいシステム"));
+		KT_ASSERT(kt_name_is(&u, "更新の試験・新しいシステム"));
 	}
 	KT_ASSERT(rec_is(SU_KEEP, 0, DOC("mine")));
 	KT_ASSERT(rec_is(SU_KEEP, 1, "PERSON'S SETTINGS"));
 	(void)ts_str_to_uuid(SU_KEEP, &u);
 	KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
-	KT_ASSERT(same(r.name, s_len((CONST char *)r.name), "更新の試験・利用者"));
+	KT_ASSERT(kt_name_is(&u, "更新の試験・利用者"));
 	KT_ASSERT(rec_is(SU_NEW, 0, DOC("brand new")));
 	KT_ASSERT(rec_is(SU_NEW, 1, "NEW OBJECT"));
 	(void)ts_str_to_uuid(SU_NEW, &u);
@@ -443,7 +443,7 @@ LOCAL void test_sysup( void )
 	KT_ASSERT(rec_is(SU_MINE, 0, DOC("mine too")));	/* not the package's: not touched */
 	(void)ts_str_to_uuid(SU_BOX, &u);
 	KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
-	KT_ASSERT(same(r.name, s_len((CONST char *)r.name), "更新の試験・箱"));
+	KT_ASSERT(kt_name_is(&u, "更新の試験・箱"));
 	dev0 = om_obj_record(&devu, 1, &dn0);
 	KT_ASSERT(dev0 != NULL && dn0 == dn1 && dev1 != NULL);
 	if ( dev0 != NULL && dev1 != NULL && dn0 == dn1 ) {

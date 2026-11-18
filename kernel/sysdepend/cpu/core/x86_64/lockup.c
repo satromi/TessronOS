@@ -133,8 +133,12 @@ LOCAL UD	lk_silent_from = 0;	/* when the loop told of had last come round */
 
 /* the circles of waits already told */
 #define LK_CIRCLES	8
-LOCAL ID	lk_circle[LK_CIRCLES];	/* found in the last round over the tasks */
-LOCAL ID	lk_found[LK_CIRCLES];	/* found so far in this one */
+LOCAL ID	lk_circle[LK_CIRCLES];	/* told, and found in the last round over the tasks */
+LOCAL ID	lk_prev[LK_CIRCLES];	/* found in the last round and not told yet, with their waits */
+LOCAL UW	lk_prev_sig[LK_CIRCLES];
+LOCAL ID	lk_found[LK_CIRCLES];	/* found so far in this one, with their waits, and whether told */
+LOCAL UW	lk_found_sig[LK_CIRCLES];
+LOCAL BOOL	lk_found_told[LK_CIRCLES];
 LOCAL INT	lk_nfound = 0;
 LOCAL INT	lk_scan_pos = 0;
 
@@ -513,11 +517,21 @@ EXPORT void knl_lockup_say_frames( CONST char *pre, UBINT fp )
 /*
  * Circles of tasks waiting for each other's mutexes. Each circle is
  * told once, by the lowest task number in it, for as long as it stands.
+ *
+ * The tasks and the mutexes are read without a lock while the other
+ * processors change them, so that a look can put together a circle that
+ * never was: a task seen waiting for a mutex it has just been handed, or
+ * an owner read before the mutex changed hands. A circle that is there
+ * waits for good, and is found again the same: it is told only once it
+ * has been found in two rounds over the tasks one after the other, with
+ * the same tasks waiting for the same mutexes (*p_sig, made from them in
+ * the circle's order from its lowest task).
  */
-LOCAL BOOL lk_circle_of( TCB *t0, ID *p_low )
+LOCAL BOOL lk_circle_of( TCB *t0, ID *p_low, UW *p_sig )
 {
 	TCB	*t = t0;
 	ID	low = t0->tskid;
+	UW	sig = 0;
 	INT	n;
 
 	for ( n = 0; n < 16; n++ ) {
@@ -527,6 +541,7 @@ LOCAL BOOL lk_circle_of( TCB *t0, ID *p_low )
 		  || !CHK_MTXID(t->wid) ) {
 			return FALSE;
 		}
+		sig = sig * 31U + ( ( (UW)t->tskid << 16 ) ^ (UW)t->wid );
 		m = get_mtxcb(t->wid);
 		t = lk_tcb_ok(m->mtxtsk);
 		if ( t == NULL ) {
@@ -535,21 +550,20 @@ LOCAL BOOL lk_circle_of( TCB *t0, ID *p_low )
 		if ( t->tskid < low ) low = t->tskid;
 		if ( t == t0 ) {
 			*p_low = low;
+			*p_sig = sig;
 			return TRUE;
 		}
 	}
 	return FALSE;
 }
 
-LOCAL BOOL lk_circle_told( ID low )
+/* Whether a circle of the lowest task low is among n of ids, and with the waits sig when sigs is given */
+LOCAL BOOL lk_circle_in( CONST ID *ids, CONST UW *sigs, INT n, ID low, UW sig )
 {
 	INT	k;
 
-	for ( k = 0; k < LK_CIRCLES; k++ ) {
-		if ( lk_circle[k] == low ) return TRUE;
-	}
-	for ( k = 0; k < lk_nfound; k++ ) {
-		if ( lk_found[k] == low ) return TRUE;
+	for ( k = 0; k < n; k++ ) {
+		if ( ids[k] == low && ( sigs == NULL || sigs[k] == sig ) ) return TRUE;
 	}
 	return FALSE;
 }
@@ -562,15 +576,27 @@ LOCAL BOOL lk_circle_told( ID low )
 LOCAL void lk_scan_waits( INT n )
 {
 	ID	low;
-	INT	k;
+	UW	sig;
+	INT	k, nc, np;
+	BOOL	tell;
 
 	while ( n-- > 0 ) {
 		TCB	*t;
 
 		if ( lk_scan_pos >= NUM_TSKID ) {
-			/* a round over: what it found is what has been told */
+			/* a round over: what it found and told stays told, the rest is to be found again */
+			nc = np = 0;
 			for ( k = 0; k < LK_CIRCLES; k++ ) {
-				lk_circle[k] = ( k < lk_nfound ) ? lk_found[k] : 0;
+				lk_circle[k] = 0;
+				lk_prev[k] = 0;
+			}
+			for ( k = 0; k < lk_nfound; k++ ) {
+				if ( lk_found_told[k] ) {
+					lk_circle[nc++] = lk_found[k];
+				} else {
+					lk_prev[np] = lk_found[k];
+					lk_prev_sig[np++] = lk_found_sig[k];
+				}
 			}
 			lk_nfound = 0;
 			lk_scan_pos = 0;
@@ -579,10 +605,16 @@ LOCAL void lk_scan_waits( INT n )
 		if ( ( t->state & TS_WAIT ) == 0 || t->wspec == NULL || t->wspec->tskwait != TTW_MTX ) {
 			continue;
 		}
-		if ( !lk_circle_of(t, &low) || low != t->tskid ) {
+		if ( !lk_circle_of(t, &low, &sig) || low != t->tskid ) {
 			continue;
 		}
-		if ( !lk_circle_told(low) ) {
+		if ( lk_circle_in(lk_found, NULL, lk_nfound, low, 0) ) {
+			continue;
+		}
+		/* told before, or found the same in the round before: it stands */
+		tell = !lk_circle_in(lk_circle, NULL, LK_CIRCLES, low, 0)
+		       && lk_circle_in(lk_prev, lk_prev_sig, LK_CIRCLES, low, sig);
+		if ( tell ) {
 			UINT	s = tm_urgent_begin();
 
 			lk_stat.deadlock++;
@@ -597,7 +629,10 @@ LOCAL void lk_scan_waits( INT n )
 			tm_urgent_end(s);
 		}
 		if ( lk_nfound < LK_CIRCLES ) {
-			lk_found[lk_nfound++] = low;
+			lk_found[lk_nfound] = low;
+			lk_found_sig[lk_nfound] = sig;
+			lk_found_told[lk_nfound] = tell || lk_circle_in(lk_circle, NULL, LK_CIRCLES, low, 0);
+			lk_nfound++;
 		}
 	}
 }
@@ -800,6 +835,7 @@ LOCAL void lk_check( INT me, UD now )
 	INT	i;
 	BOOL	failing = FALSE;
 	UW	exp = 0;
+	UD	kick_at, alive_at;
 
 	if ( !__atomic_compare_exchange_n(&lk_busy, &exp, (UW)( me + 1 ), FALSE,
 					  __ATOMIC_ACQUIRE, __ATOMIC_RELAXED) ) {
@@ -861,8 +897,15 @@ LOCAL void lk_check( INT me, UD now )
 		}
 	}
 
-	/* the desktop's kicks */
-	if ( lk_kick_at != 0 && lk_kick_at < now && now - lk_kick_at >= lk_kick_lim ) {
+	/*
+	 * the desktop's kicks. The time of the last kick, and of the loop's
+	 * last round below, is read once: the desktop's task writes it on
+	 * another processor meanwhile, and a second read taken after it
+	 * would be later than now, its distance from now going round the
+	 * counter (a loop "not come round for 0 ms")
+	 */
+	kick_at = lk_kick_at;
+	if ( kick_at != 0 && kick_at < now && now - kick_at >= lk_kick_lim ) {
 		if ( !lk_starve_told ) {
 			UINT	s = tm_urgent_begin();
 
@@ -870,7 +913,7 @@ LOCAL void lk_check( INT me, UD now )
 			lk_stat.starved++;
 			tm_printf_urgent((UB *)"\n!LOCKUP! the watchdog has not been kicked for %d ms "
 					 "(it is kicked by task %d, which waits or does not get to run)\n",
-					 lk_ago(now, lk_kick_at), lk_kick_tsk);
+					 lk_ago(now, kick_at), lk_kick_tsk);
 			if ( CHK_TSKID(lk_kick_tsk) ) {
 				lk_say_waiting_task(" ", get_tcb(lk_kick_tsk));
 				lk_say_chain(" ", get_tcb(lk_kick_tsk), TRUE);
@@ -893,14 +936,15 @@ LOCAL void lk_check( INT me, UD now )
 	if ( lk_watch_idle ) {
 		lk_alive_at = now;
 	}
-	if ( lk_watch_tsk > 0 && lk_alive_at != 0 && lk_alive_at < now && now - lk_alive_at >= lk_silent_lim ) {
+	alive_at = lk_alive_at;
+	if ( lk_watch_tsk > 0 && alive_at != 0 && alive_at < now && now - alive_at >= lk_silent_lim ) {
 		if ( !lk_silent_told && CHK_TSKID(lk_watch_tsk) ) {
 			UINT	s = tm_urgent_begin();
 
 			lk_silent_told = TRUE;
 			lk_stat.silent++;
 			tm_printf_urgent((UB *)"\n!LOCKUP! the desktop's loop (task %d) has not come round for %d ms\n",
-					 lk_watch_tsk, lk_ago(now, lk_alive_at));
+					 lk_watch_tsk, lk_ago(now, alive_at));
 			lk_say_waiting_task(" ", get_tcb(lk_watch_tsk));
 			lk_say_chain(" ", get_tcb(lk_watch_tsk), TRUE);
 			lk_say_usb_lock(" ", now);

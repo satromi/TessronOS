@@ -142,7 +142,7 @@ LOCAL INT window_of( CONST char *name, TS_UUID *out )
 	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return -1;
 	for ( i = 0; i < cnt; i++ ) {
 		if ( ob_ref_obj(&list[i], &r) < E_OK || r.sub != OB_S_WINDOW
-		  || find(r.name, s_len((CONST char *)r.name), name, 0) < 0 ) continue;
+		  || !kt_name_has(&list[i], name) ) continue;
 		*out = list[i];
 		kw = ob_opn_obj(out, OB_OP_R);
 		if ( kw > 0 ) {
@@ -217,9 +217,17 @@ LOCAL BOOL superfloppy( char *name, INT max )
 		k = ob_opn_obj(&list[i], OB_OP_ATRRD);
 		if ( k <= 0 ) continue;
 		if ( ob_lst_rec(k, rc, 2, &nr) >= E_OK && nr >= 2 && rc[1].size == SF_BYTES ) {
+			UB	*nm = kt_name(&list[i]);
+			SZ	nl = ( nm != NULL ) ? knl_strlen((CONST char *)nm) : 0;
+
 			ob_cls_obj(k);
-			knl_strncpy(name, (CONST char *)r.name, max - 1);
-			name[max - 1] = 0;
+			/* the whole name or none: a cut name would name another disk */
+			if ( nm == NULL || nl == 0 || nl > (SZ)( max - 1 ) ) {
+				if ( nm != NULL ) Kfree(nm);
+				return FALSE;
+			}
+			knl_memcpy(name, nm, nl + 1);
+			Kfree(nm);
 			return TRUE;
 		}
 		ob_cls_obj(k);
@@ -251,7 +259,7 @@ LOCAL void sf_attach( CONST char *name, BOOL on )
 	}
 	if ( sf_key > 0 || ob_lst_obj(OB_T_DEVICE, OB_S_DISK, NULL, list, 64, &cnt) < E_OK ) return;
 	for ( i = 0; i < cnt && i < 64; i++ ) {
-		if ( ob_ref_obj(&list[i], &r) < E_OK || knl_strcmp((CONST char *)r.name, name) != 0 ) continue;
+		if ( ob_ref_obj(&list[i], &r) < E_OK || !kt_name_is(&list[i], name) ) continue;
 		sf_key = ob_opn_obj(&list[i], OB_OP_R | OB_OP_WRITE);
 		if ( sf_key <= 0 || fs_attach_dev(sf_key, NULL, 0) < E_OK ) {
 			tm_printf((UB *)"  %s not attached at its place\n", name);

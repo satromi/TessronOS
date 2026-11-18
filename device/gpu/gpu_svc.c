@@ -28,7 +28,14 @@
  *
  *	A shared BO has a name (gp_shr_bo) that holds a reference of its
  *	own, until the number it was made from is deleted or its context
- *	closed. Another process takes it in under a number of its own.
+ *	closed. Another process takes it in under a number of its own. A
+ *	name is a number of its own, never that of another name alive; the
+ *	names are a list with no fixed length.
+ *
+ *	The table of contexts has no fixed length either: with none free, a
+ *	table twice as large is made with the lock let go of and put in
+ *	place of the old one under it. Everything that looks at a context
+ *	does so under the lock.
  *
  *	Where the backend gives address spaces of its own (the V3D), each
  *	context has one: a page table of the GPU's that holds the context's
@@ -60,7 +67,7 @@
 
 #define GP_BO_FIRST	64		/* entries of a new context */
 #define GP_BO_MAX	16384		/* entries a context grows to */
-#define GP_NAME_MAX	64		/* shared names in all */
+#define GP_CTX_FIRST	8		/* the first room for contexts */
 #define GP_WAIT_SLICE	( 50 * 1000 )	/* us: a wait looks between slices whether its process ends */
 #define GP_JOB_AHEAD	4		/* jobs of a context queued at once */
 
@@ -82,16 +89,18 @@ typedef struct {
 	UINT	next;
 } GPCTX;
 
-typedef struct {
-	T_GPUBO	*bo;			/* NULL: a free name */
+typedef struct gpname {
+	struct gpname	*next;
+	T_GPUBO	*bo;			/* the name's own reference */
 	INT	ctx;			/* the context and number it was shared from */
 	UINT	handle;
-	UINT	gen;
+	INT	name;			/* > 0 */
 } GPNAME;
 
 LOCAL T_SPLOCK	gp_lock;
-LOCAL GPCTX	gp_ctx[GP_CTX_MAX];
-LOCAL GPNAME	gp_name[GP_NAME_MAX];
+LOCAL GPCTX	*gp_ctx = NULL;		/* gp_nctx of them; under the lock */
+LOCAL INT	gp_nctx = 0;
+LOCAL GPNAME	*gp_names = NULL;	/* under the lock */
 LOCAL UINT	gp_gen;
 
 LOCAL BOOL user_ok( CONST void *p, SZ len, BOOL write )
@@ -102,7 +111,7 @@ LOCAL BOOL user_ok( CONST void *p, SZ len, BOOL write )
 /* The context, when it is the calling process's; under the lock */
 LOCAL GPCTX *ctx_of( INT ctx, ID pid )
 {
-	if ( ctx <= 0 || ctx > GP_CTX_MAX || pid <= 0 ) return NULL;
+	if ( ctx <= 0 || ctx > gp_nctx || pid <= 0 ) return NULL;
 	if ( gp_ctx[ctx - 1].pid != pid ) return NULL;
 	return &gp_ctx[ctx - 1];
 }
@@ -171,21 +180,45 @@ LOCAL void unmap_from( ID pid, T_GPUBO *bo )
 
 /*
  * The names shared from a number (handle 0: from any of the context's)
- * taken off the table; their BOs, whose references the caller gives
- * back, into out. Under the lock.
+ * taken off the list, into a list of their own that the caller hands to
+ * names_put once the lock is let go of. Under the lock.
  */
-LOCAL INT names_drop( INT ctx, UINT handle, T_GPUBO **out )
+LOCAL GPNAME *names_drop( INT ctx, UINT handle )
 {
-	INT	i, n = 0;
+	GPNAME	**pp = &gp_names, *nm, *out = NULL;
 
-	for ( i = 0; i < GP_NAME_MAX; i++ ) {
-		if ( gp_name[i].bo != NULL && gp_name[i].ctx == ctx
-		  && ( handle == 0 || gp_name[i].handle == handle ) ) {
-			out[n++] = gp_name[i].bo;
-			gp_name[i].bo = NULL;
+	while ( ( nm = *pp ) != NULL ) {
+		if ( nm->ctx == ctx && ( handle == 0 || nm->handle == handle ) ) {
+			*pp = nm->next;
+			nm->next = out;
+			out = nm;
+		} else {
+			pp = &nm->next;
 		}
 	}
-	return n;
+	return out;
+}
+
+/* The names taken off: their references given back, and they freed */
+LOCAL void names_put( GPNAME *l )
+{
+	GPNAME	*next;
+
+	for ( ; l != NULL; l = next ) {
+		next = l->next;
+		knl_gpu_bo_put(l->bo);
+		Kfree(l);
+	}
+}
+
+/* The name of a number, NULL for none; under the lock */
+LOCAL GPNAME *name_find( INT name )
+{
+	GPNAME	*nm;
+
+	if ( name <= 0 ) return NULL;
+	for ( nm = gp_names; nm != NULL && nm->name != name; nm = nm->next ) ;
+	return nm;
 }
 
 /* ---------------------------------------------------------------- the table of a context */
@@ -257,8 +290,9 @@ LOCAL INT svc_gp_opn_gpu( void )
 {
 	ID	pid = ts_get_pid();
 	GPENT	*ent;
+	GPCTX	*grown = NULL, *old = NULL;
 	T_GPUAS	*as;
-	INT	i;
+	INT	i, want = 0;
 	UINT	imask;
 	ER	er;
 
@@ -273,22 +307,43 @@ LOCAL INT svc_gp_opn_gpu( void )
 		return E_NOMEM;
 	}
 	knl_memset(ent, 0, GP_BO_FIRST * sizeof(GPENT));
-	ISpinLock(&gp_lock, &imask);
-	for ( i = 0; i < GP_CTX_MAX; i++ ) {
-		if ( gp_ctx[i].pid == 0 ) {
-			knl_memset(&gp_ctx[i], 0, sizeof(GPCTX));
-			gp_ctx[i].pid = pid;
-			gp_ctx[i].nent = GP_BO_FIRST;
-			gp_ctx[i].ent = ent;
-			gp_ctx[i].as = as;
-			ISpinUnlock(&gp_lock, &imask);
-			return i + 1;
+	for ( ;; ) {
+		ISpinLock(&gp_lock, &imask);
+		if ( grown != NULL && want > gp_nctx ) {
+			if ( gp_nctx > 0 ) knl_memcpy(grown, gp_ctx, (SZ)gp_nctx * (SZ)sizeof(GPCTX));
+			old = gp_ctx;
+			gp_ctx = grown;
+			gp_nctx = want;
+			grown = NULL;
 		}
+		for ( i = 0; i < gp_nctx; i++ ) {
+			if ( gp_ctx[i].pid == 0 ) {
+				knl_memset(&gp_ctx[i], 0, sizeof(GPCTX));
+				gp_ctx[i].pid = pid;
+				gp_ctx[i].nent = GP_BO_FIRST;
+				gp_ctx[i].ent = ent;
+				gp_ctx[i].as = as;
+				ISpinUnlock(&gp_lock, &imask);
+				free_if(grown);
+				free_if(old);
+				return i + 1;
+			}
+		}
+		/* none free: a table twice as large, made with the lock let go of */
+		want = ( gp_nctx > 0 ) ? gp_nctx * 2 : GP_CTX_FIRST;
+		ISpinUnlock(&gp_lock, &imask);
+		free_if(grown);
+		free_if(old);
+		old = NULL;
+		grown = (GPCTX *)Kmalloc((SZ)want * (SZ)sizeof(GPCTX));
+		if ( grown == NULL ) {
+			tm_printf((UB *)"gpu: no memory for %d contexts\n", want);
+			Kfree(ent);
+			knl_gpu_as_put(as);
+			return E_NOMEM;
+		}
+		knl_memset(grown, 0, (SZ)want * (SZ)sizeof(GPCTX));
 	}
-	ISpinUnlock(&gp_lock, &imask);
-	Kfree(ent);
-	knl_gpu_as_put(as);
-	return E_LIMIT;
 }
 
 /* The context of pid closed: every BO it held let go of, with its mappings and names */
@@ -297,8 +352,8 @@ LOCAL ER ctx_close( INT ctx, ID pid )
 	GPCTX	*c;
 	GPENT	*ent;
 	T_GPUAS	*as;
-	T_GPUBO	*names[GP_NAME_MAX];
-	INT	i, n, nn;
+	GPNAME	*names;
+	INT	i, n;
 	UINT	imask;
 
 	ISpinLock(&gp_lock, &imask);
@@ -314,7 +369,7 @@ LOCAL ER ctx_close( INT ctx, ID pid )
 	c->nent = 0;
 	c->as = NULL;
 	c->pid = 0;
-	nn = names_drop(ctx, 0, names);
+	names = names_drop(ctx, 0);
 	ISpinUnlock(&gp_lock, &imask);
 
 	for ( i = 0; i < n; i++ ) {
@@ -326,7 +381,7 @@ LOCAL ER ctx_close( INT ctx, ID pid )
 #endif
 		knl_gpu_bo_put(ent[i].bo);
 	}
-	for ( i = 0; i < nn; i++ ) knl_gpu_bo_put(names[i]);
+	names_put(names);
 	free_if(ent);
 	knl_gpu_as_put(as);		/* the table goes once the queued jobs on it are over */
 	return E_OK;
@@ -442,14 +497,14 @@ LOCAL ER svc_gp_del_bo( INT ctx, UINT handle )
 {
 	ID	pid = ts_get_pid();
 	GPENT	*e;
-	T_GPUBO	*bo, *names[GP_NAME_MAX];
+	T_GPUBO	*bo;
+	GPNAME	*names;
 	T_GPUAS	*as;
 	BOOL	mapped;
 	UW	va;
 #ifdef __x86_64__
 	UD	va64;
 #endif
-	INT	i, nn;
 	UINT	imask;
 
 	ISpinLock(&gp_lock, &imask);
@@ -470,7 +525,7 @@ LOCAL ER svc_gp_del_bo( INT ctx, UINT handle )
 	e->bo = NULL;
 	e->mapped = FALSE;
 	e->va = 0;
-	nn = names_drop(ctx, handle, names);
+	names = names_drop(ctx, handle);
 	ISpinUnlock(&gp_lock, &imask);
 
 	if ( mapped ) unmap_from(pid, bo);
@@ -481,7 +536,7 @@ LOCAL ER svc_gp_del_bo( INT ctx, UINT handle )
 #endif
 	knl_gpu_as_put(as);
 	knl_gpu_bo_put(bo);
-	for ( i = 0; i < nn; i++ ) knl_gpu_bo_put(names[i]);
+	names_put(names);
 	return E_OK;
 }
 
@@ -706,45 +761,57 @@ LOCAL ER svc_gp_wai_bo( INT ctx, UINT handle, TMO_U tmout )
 LOCAL INT svc_gp_shr_bo( INT ctx, UINT handle )
 {
 	T_GPUBO	*bo = bo_take(ctx, handle);
-	INT	i, name = E_LIMIT;
+	GPNAME	*nm, *add;
+	INT	name = 0;
 	UINT	imask;
 
 	if ( bo == NULL ) return E_ID;
+	add = (GPNAME *)Kmalloc(sizeof(GPNAME));	/* made before the lock: used when there is no name yet */
+	if ( add == NULL ) {
+		knl_gpu_bo_put(bo);
+		tm_printf((UB *)"gpu: no memory for a shared name\n");
+		return E_NOMEM;
+	}
 	ISpinLock(&gp_lock, &imask);
-	for ( i = 0; i < GP_NAME_MAX; i++ ) {
-		if ( gp_name[i].bo == bo && gp_name[i].ctx == ctx && gp_name[i].handle == handle ) {
-			name = (INT)( ( gp_name[i].gen << 8 ) | (UINT)( i + 1 ) );
+	for ( nm = gp_names; nm != NULL; nm = nm->next ) {
+		if ( nm->bo == bo && nm->ctx == ctx && nm->handle == handle ) {
+			name = nm->name;
 			break;
 		}
 	}
-	for ( i = 0; name < 0 && i < GP_NAME_MAX; i++ ) {
-		if ( gp_name[i].bo == NULL ) {
-			gp_name[i].bo = bo;		/* the reference taken above */
-			gp_name[i].ctx = ctx;
-			gp_name[i].handle = handle;
-			gp_name[i].gen = ( ++gp_gen ) & 0x3FFFFF;
-			name = (INT)( ( gp_name[i].gen << 8 ) | (UINT)( i + 1 ) );
-			bo = NULL;
-		}
+	if ( name == 0 ) {
+		do {
+			name = (INT)( ( ++gp_gen ) & 0x7FFFFFFF );
+		} while ( name == 0 || name_find(name) != NULL );
+		add->bo = bo;			/* the reference taken above */
+		add->ctx = ctx;
+		add->handle = handle;
+		add->name = name;
+		add->next = gp_names;
+		gp_names = add;
+		add = NULL;
+		bo = NULL;
 	}
 	ISpinUnlock(&gp_lock, &imask);
-	if ( bo != NULL ) knl_gpu_bo_put(bo);		/* shared before, or no room */
+	if ( add != NULL ) Kfree(add);
+	if ( bo != NULL ) knl_gpu_bo_put(bo);		/* shared before */
 	return name;
 }
 
 LOCAL ER svc_gp_imp_bo( INT ctx, INT name, T_GPBO *out )
 {
 	T_GPUBO	*bo = NULL;
+	GPNAME	*nm;
 	T_GPBO	k;
-	INT	i = ( name & 0xFF ) - 1;
 	UINT	imask;
 	ER	er;
 
 	if ( !user_ok(out, sizeof(*out), TRUE) ) return E_MACV;
-	if ( name <= 0 || i < 0 || i >= GP_NAME_MAX ) return E_PAR;
+	if ( name <= 0 ) return E_PAR;
 	ISpinLock(&gp_lock, &imask);
-	if ( gp_name[i].bo != NULL && gp_name[i].gen == ( (UINT)name >> 8 ) ) {
-		bo = gp_name[i].bo;
+	nm = name_find(name);
+	if ( nm != NULL ) {
+		bo = nm->bo;
 		knl_gpu_bo_get(bo);
 	}
 	ISpinUnlock(&gp_lock, &imask);
@@ -763,18 +830,16 @@ LOCAL ER svc_gp_imp_bo( INT ctx, INT name, T_GPBO *out )
 EXPORT T_GPUBO *knl_gpu_bo_named( INT ctx, UINT handle, INT name )
 {
 	T_GPUBO	*bo = NULL;
-	INT	i = ( name & 0xFF ) - 1;
+	GPNAME	*nm;
 	UINT	imask;
 
 	if ( name <= 0 ) {
 		return bo_take(ctx, handle);
 	}
-	if ( i < 0 || i >= GP_NAME_MAX ) {
-		return NULL;
-	}
 	ISpinLock(&gp_lock, &imask);
-	if ( gp_name[i].bo != NULL && gp_name[i].gen == ( (UINT)name >> 8 ) ) {
-		bo = gp_name[i].bo;
+	nm = name_find(name);
+	if ( nm != NULL ) {
+		bo = nm->bo;
 		knl_gpu_bo_get(bo);
 	}
 	ISpinUnlock(&gp_lock, &imask);
@@ -930,14 +995,18 @@ EXPORT const FP knl_gp_svc_tbl[TSN_GP_MAX + 1] = {
 /* What a process held of the GPU, let go of as it ends (proc.c) */
 EXPORT void knl_gpu_prc_end( ID pid )
 {
-	INT	i;
+	INT	i, ctx;
+	UINT	imask;
 
 	if ( pid <= 0 ) return;
-	for ( i = 0; i < GP_CTX_MAX; i++ ) {
-		if ( gp_ctx[i].pid == pid ) {
-			(void)ctx_close(i + 1, pid);
+	do {
+		ISpinLock(&gp_lock, &imask);
+		for ( ctx = 0, i = 0; i < gp_nctx && ctx == 0; i++ ) {
+			if ( gp_ctx[i].pid == pid ) ctx = i + 1;
 		}
-	}
+		ISpinUnlock(&gp_lock, &imask);
+		if ( ctx > 0 ) (void)ctx_close(ctx, pid);
+	} while ( ctx > 0 );
 }
 
 /*
@@ -952,7 +1021,7 @@ EXPORT UD knl_gpu_prc_pages( ID pid, INT *p_bos )
 	UINT	imask;
 
 	ISpinLock(&gp_lock, &imask);
-	for ( i = 0; i < GP_CTX_MAX; i++ ) {
+	for ( i = 0; i < gp_nctx; i++ ) {
 		if ( pid <= 0 || gp_ctx[i].pid != pid ) continue;
 		for ( j = 0; j < gp_ctx[i].nent; j++ ) {
 			if ( gp_ctx[i].ent[j].bo != NULL ) {
@@ -973,7 +1042,7 @@ EXPORT INT knl_gpu_ctx_count( INT *p_bos )
 	UINT	imask;
 
 	ISpinLock(&gp_lock, &imask);
-	for ( i = 0; i < GP_CTX_MAX; i++ ) {
+	for ( i = 0; i < gp_nctx; i++ ) {
 		if ( gp_ctx[i].pid == 0 ) continue;
 		n++;
 		for ( j = 0; j < gp_ctx[i].nent; j++ ) {

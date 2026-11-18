@@ -18,6 +18,7 @@
  */
 
 #include "ktest.h"
+#include <ts/tad.h>
 #include "tstdlib.h"
 #include <ts/wm.h>
 #include <ts/disp.h>
@@ -272,7 +273,12 @@ LOCAL W	kt_stk_was;
 #define STK_AFTER(n)
 #endif
 
-#define RUN_SUITE(n)	do { if ( KT_WANTED(n) ) { KL_BEFORE(); ktest_##n(); KL_AFTER(#n); STK_AFTER(#n); } } while (0)
+/* The words of links held after a suite, against before it: one let go twice or not at all shows (tad_vobj_held) */
+#define VOBJ_BEFORE()	INT vh_ = tad_vobj_held()
+#define VOBJ_AFTER(n)	do { INT vh2_ = tad_vobj_held(); \
+		tm_printf((UB *)"vobj words: suite %s %d -> %d%s\n", n, vh_, vh2_, ( vh2_ > vh_ ) ? " (more held)" : ""); } while (0)
+
+#define RUN_SUITE(n)	do { if ( KT_WANTED(n) ) { VOBJ_BEFORE(); KL_BEFORE(); ktest_##n(); KL_AFTER(#n); STK_AFTER(#n); VOBJ_AFTER(#n); } } while (0)
 
 /*
  * A suite the Raspberry Pi 5 cannot run at all -- its PCI Express is
@@ -357,13 +363,13 @@ EXPORT BOOL kt_screen( void )
 /* A suite that draws: skipped whole when no screen was found */
 #define RUN_SUITE_SCREEN(n) \
 	do { if ( KT_WANTED(n) ) { \
-		if ( kt_screen() ) { KL_BEFORE(); ktest_##n(); KL_AFTER(#n); STK_AFTER(#n); } \
+		if ( kt_screen() ) { VOBJ_BEFORE(); KL_BEFORE(); ktest_##n(); KL_AFTER(#n); STK_AFTER(#n); VOBJ_AFTER(#n); } \
 		else kt_skip(#n, KT_NO_SCREEN); } } while (0)
 
 /* A suite that formats the scratch partition: skipped whole without one */
 #define RUN_SUITE_SCRATCH(n) \
 	do { if ( KT_WANTED(n) ) { \
-		if ( kt_scratch() != NULL ) { KL_BEFORE(); ktest_##n(); KL_AFTER(#n); STK_AFTER(#n); } \
+		if ( kt_scratch() != NULL ) { VOBJ_BEFORE(); KL_BEFORE(); ktest_##n(); KL_AFTER(#n); STK_AFTER(#n); VOBJ_AFTER(#n); } \
 		else kt_skip(#n, KT_NO_SCRATCH); } } while (0)
 
 /*
@@ -447,6 +453,62 @@ EXPORT ID kt_face( void )
 	fn_set_size(fid, 14);
 	fn_set_system(fid);
 	return fid;
+}
+
+/* ---------------------------------------------------------------- names, whole */
+
+EXPORT UB *kt_name( const TS_UUID *uuid )
+{
+	UB	*nm = knl_ob_name(uuid, NULL, NULL);
+
+	if ( nm == NULL ) {
+		nm = (UB *)Kmalloc(1);
+		if ( nm != NULL ) nm[0] = 0;
+	}
+	return nm;
+}
+
+LOCAL BOOL kt_at( const UB *s, const char *w )
+{
+	INT	k;
+
+	for ( k = 0; w[k] != 0 && s[k] == (UB)w[k]; k++ ) ;
+	return (BOOL)( w[k] == 0 );
+}
+
+EXPORT BOOL kt_name_is( const TS_UUID *uuid, const char *want )
+{
+	UB	*nm = kt_name(uuid);
+	BOOL	r = (BOOL)( nm != NULL && kt_at(nm, want) && nm[knl_strlen(want)] == 0 );
+
+	if ( nm != NULL ) Kfree(nm);
+	return r;
+}
+
+EXPORT BOOL kt_name_has( const TS_UUID *uuid, const char *part )
+{
+	UB	*nm = kt_name(uuid);
+	BOOL	r = FALSE;
+	INT	i;
+
+	for ( i = 0; nm != NULL; i++ ) {
+		if ( kt_at(nm + i, part) ) {
+			r = TRUE;
+			break;
+		}
+		if ( nm[i] == 0 ) break;
+	}
+	if ( nm != NULL ) Kfree(nm);
+	return r;
+}
+
+EXPORT BOOL kt_name_starts( const TS_UUID *uuid, const char *pre )
+{
+	UB	*nm = kt_name(uuid);
+	BOOL	r = (BOOL)( nm != NULL && kt_at(nm, pre) );
+
+	if ( nm != NULL ) Kfree(nm);
+	return r;
 }
 
 #define KT_LST_PAGE	64

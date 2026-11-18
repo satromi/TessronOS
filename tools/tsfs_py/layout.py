@@ -149,6 +149,30 @@ NIL_UUID = uuid.UUID(int=0)
 
 # ---------------------------------------------------------------- time
 
+def utf8_fit(raw, most):
+    """The first bytes of UTF-8 raw, at most most of them, ending on a
+    whole letter; a letter raw itself ends in the middle of (a copy an
+    older system cut) is left out too, as the kernel's ts_label_whole."""
+    raw = bytes(raw)
+    if len(raw) <= most:
+        n = len(raw)
+    else:
+        n = most
+    # back over the continuation bytes of a letter the cut would split
+    k = n
+    while k > 0 and (raw[k - 1] & 0xC0) == 0x80:
+        k -= 1
+    if k == 0:
+        n = 0          # nothing but continuations
+    else:
+        lead = raw[k - 1]
+        need = 1 if lead < 0x80 else 2 if (lead & 0xE0) == 0xC0 else \
+            3 if (lead & 0xF0) == 0xE0 else 4 if (lead & 0xF8) == 0xF0 else 1
+        if (k - 1) + need > n:
+            n = k - 1
+    return raw[:n]
+
+
 def now_tron():
     """Seconds since 1985-01-01 UTC, as the kernel's TS_TIME counts."""
     return int(time.time()) - TRON_EPOCH
@@ -333,9 +357,18 @@ class Superblock(object):
         return sb
 
     def set_label(self, label):
-        raw = (label or "").encode("utf-8")[:LABEL_MAX - 1]
+        """The label's copy: its first bytes, cut at a whole letter to fit
+        LABEL_MAX with the NUL. The label itself is the name of the
+        volume's top object (design 7.6), of any length."""
+        raw = utf8_fit((label or "").encode("utf-8"), LABEL_MAX - 1)
         self.label_raw = raw + b"\0" * (LABEL_MAX - len(raw))
         self.label = raw.decode("utf-8", "replace")
+
+    @property
+    def label_cut(self):
+        """Whether the copy is full to within a letter, so that it may be
+        a longer label cut."""
+        return len(self.label_raw.split(b"\0", 1)[0]) > LABEL_MAX - 5
 
     # ------------------------------------------------------------ bytes
 
@@ -387,7 +420,9 @@ class Superblock(object):
             "<IIQ", buf, SB_VERSION)
         sb.vol_uuid = uuid.UUID(bytes=buf[SB_VOLUUID:SB_VOLUUID + 16])
         sb.label_raw = buf[SB_LABEL:SB_LABEL + LABEL_MAX]
-        sb.label = sb.label_raw.split(b"\0", 1)[0].decode("utf-8", "replace")
+        # a copy a system before cut in the middle of a letter is read to the last whole one
+        sb.label = utf8_fit(sb.label_raw.split(b"\0", 1)[0],
+                            LABEL_MAX - 1).decode("utf-8", "replace")
         (sb.total_blocks, sb.free_blocks, sb.ag_blocks, sb.ag_count,
          sb.journal_start, sb.journal_blocks,
          sb.journal_seq) = struct.unpack_from("<QQQQQQQ", buf, SB_TOTAL)

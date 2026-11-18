@@ -108,6 +108,26 @@ EXPORT void ct_esc( CTBUF *b, CONST UB *s, INT n )
 	}
 }
 
+EXPORT void ct_drop_words( CTBUF *b, CONST T_OBDROP *d, INT i )
+{
+	static CONST char *CONST names[3] = { "name", "relationship", "applist" };
+	CONST UB	*w;
+	SZ		len;
+	INT		k;
+
+	if ( b == NULL || d == NULL || i < 0 || i >= d->n ) return;
+	for ( k = 0; k < 3; k++ ) {
+		w = ( k == 0 ) ? ob_drop_name(d, i, &len) : ( k == 1 ) ? ob_drop_rel(d, i, &len)
+		  : ob_drop_applist(d, i, &len);
+		if ( len <= 0 ) continue;
+		ct_put(b, " ");
+		ct_put(b, names[k]);
+		ct_put(b, "=\"");
+		ct_esc(b, w, (INT)len);
+		ct_put(b, "\"");
+	}
+}
+
 LOCAL INT s_len( CONST UB *s )
 {
 	INT	n = 0;
@@ -1045,10 +1065,12 @@ EXPORT INT ct_attr_text( CONST UB *el, INT n, CONST char *name, UB *out, INT max
 				i++;
 			}
 			for ( j = 0; j < len; j++ ) {
-				if ( k < max - 1 ) out[k++] = e[j];
+				if ( out == NULL ) k++;		/* only counted */
+				else if ( k < max - 1 ) out[k++] = e[j];
 				else cut = TRUE;
 			}
 		}
+		if ( out == NULL ) return k;
 		/* cut short: not in the middle of a letter */
 		if ( cut ) {
 			while ( k > 0 && ( out[k - 1] & 0xC0 ) == 0x80 ) k--;
@@ -1166,53 +1188,100 @@ EXPORT BOOL ct_app_locked( CONST UB *json, INT n )
 }
 
 /*
+ * An attribute of el, its escapes undone, put whole as a part of kind
+ * of the tail at tail (*p_tailsz bytes so far, cap bytes of room): its
+ * length, -1 when el has none (nothing put), E_LIMIT when the room does
+ * not hold it
+ */
+LOCAL INT attr_part( CONST UB *el, INT n, CONST char *name, UINT kind, UB *tail, UINT *p_tailsz, SZ cap )
+{
+	T_DTPART	h;
+	UB		*at;
+	INT		len = ct_attr_text(el, n, name, NULL, 0), i;
+	SZ		room;
+
+	if ( len < 0 ) return -1;
+	room = dt_tail_room(len);
+	if ( tail == NULL || (SZ)*p_tailsz + room > cap ) return E_LIMIT;
+	at = tail + *p_tailsz;
+	h.kind = kind;
+	h.len = (UINT)len;
+	for ( i = 0; i < (INT)sizeof(h); i++ ) at[i] = ((CONST UB *)&h)[i];
+	/* the bytes and the 0 after them, the rest of the room padded with 0 */
+	(void)ct_attr_text(el, n, name, at + sizeof(h), len + 1);
+	for ( i = len; i < (INT)( room - (SZ)sizeof(h) ); i++ ) at[sizeof(h) + i] = 0;
+	*p_tailsz += (UINT)room;
+	return len;
+}
+
+EXPORT SZ ct_link_room( CONST UB *el, INT n )
+{
+	INT	al = ( el != NULL ) ? ct_attr_text(el, n, "applist", NULL, 0) : -1;
+	INT	vl = ( el != NULL ) ? ct_attr_text(el, n, "viewMode", NULL, 0) : -1;
+
+	return dt_tail_room(( al > 0 ) ? al : 0) + dt_tail_room(( vl > 0 ) ? vl : 0)
+	     + dt_tail_room(3 * ( TS_UUID_STRLEN + 1 ));
+}
+
+/*
  * A request about a link to the desktop given the link's own applist
  * (DT_F_APPLIST): the desktop decides the program from it as it does for
  * a link of its own window, so that a link that keeps to its program
  * (起動アプリの固定) opens with that one when it is opened by a double
- * press. A link with no applist, or one too long to carry, is asked of
- * as before, by its object alone.
+ * press. A link with no applist is asked of by its object alone. The
+ * applist goes whole as a part of the request's tail (DT_TAIL_APPLIST).
  */
-EXPORT void ct_link_req( T_DTREQ *rq, CONST UB *el, INT n )
+EXPORT ER ct_link_req( T_DTREQ *rq, CONST UB *el, INT n, UB *tail, UINT *p_tailsz, SZ cap )
 {
 	INT	k;
 
-	if ( rq == NULL || el == NULL ) return;
-	/* one that fills the room may have been cut short: not carried */
-	k = ct_attr_text(el, n, "applist", rq->text, (INT)sizeof(rq->text));
-	if ( k > 0 && k < (INT)sizeof(rq->text) - 1 ) {
-		rq->flags |= DT_F_APPLIST;
-	} else {
-		rq->text[0] = 0;
-	}
+	if ( rq == NULL || el == NULL || p_tailsz == NULL ) return E_PAR;
+	k = attr_part(el, n, "applist", DT_TAIL_APPLIST, tail, p_tailsz, cap);
+	if ( k < -1 ) return (ER)k;
+	if ( k > 0 ) rq->flags |= DT_F_APPLIST;
+	return E_OK;
 }
 
-EXPORT BOOL ct_link_from( T_DTREQ *rq, CONST TS_UUID *parent, CONST TS_UUID *chan, CONST UB *el, INT n )
+EXPORT void ct_link_was( T_DTREQ *rq, CONST UB *el, INT n )
+{
+	if ( rq == NULL || el == NULL ) return;
+	dt_req_was(rq, ct_attr_int(el, n, "vobjleft", 0), ct_attr_int(el, n, "vobjtop", 0),
+		   ct_attr_int(el, n, "vobjright", 0), ct_attr_int(el, n, "vobjbottom", 0));
+}
+
+EXPORT ER ct_link_from( T_DTREQ *rq, CONST TS_UUID *parent, CONST TS_UUID *chan, CONST UB *el, INT n,
+			UB *tail, UINT *p_tailsz, SZ cap )
 {
 	char	ids[3][TS_UUID_STRLEN + 1];
-	UB	w[8];
-	INT	k = 0, i, j, a = 0, f = 3 * ( TS_UUID_STRLEN + 1 );
+	UB	t[3 * ( TS_UUID_STRLEN + 1 )], w[8];
+	INT	k = 0, i, j;
+	UINT	was;
+	ER	er;
 
-	ct_link_req(rq, el, n);
+	if ( rq == NULL || el == NULL || p_tailsz == NULL ) return E_PAR;
+	was = *p_tailsz;
+	er = ct_link_req(rq, el, n, tail, p_tailsz, cap);
+	if ( er < E_OK ) return er;
 	ct_uuid_str(parent, ids[0]);
-	if ( ct_attr_text(el, n, "vobjid", (UB *)ids[1], TS_UUID_STRLEN + 1) != TS_UUID_STRLEN ) return FALSE;
+	if ( ct_attr_text(el, n, "vobjid", (UB *)ids[1], TS_UUID_STRLEN + 1) != TS_UUID_STRLEN ) return E_NOEXS;
 	ct_uuid_str(chan, ids[2]);
-	if ( ( rq->flags & DT_F_APPLIST ) != 0 ) {
-		while ( rq->text[a] != 0 ) a++;
-	}
-	if ( f + a >= (INT)sizeof(rq->text) ) return FALSE;
-	/* the link in front of the applist: its record's object, its vobjid and the channel, a line */
-	for ( i = a; i >= 0; i-- ) rq->text[f + i] = rq->text[i];
+	/* the link: its record's object, its vobjid and the channel, parted by tabs */
 	for ( i = 0; i < 3; i++ ) {
-		for ( j = 0; j < TS_UUID_STRLEN; j++ ) rq->text[k++] = (UB)ids[i][j];
-		rq->text[k++] = (UB)( ( i < 2 ) ? '\t' : '\n' );
+		if ( i > 0 ) t[k++] = (UB)'\t';
+		for ( j = 0; j < TS_UUID_STRLEN; j++ ) t[k++] = (UB)ids[i][j];
+	}
+	er = dt_tail_put(tail, p_tailsz, cap, DT_TAIL_TEXT, t, k);
+	if ( er >= E_OK && attr_part(el, n, "viewMode", DT_TAIL_VIEW, tail, p_tailsz, cap) < -1 ) er = E_LIMIT;
+	if ( er < E_OK ) {
+		*p_tailsz = was;		/* the request goes as ct_link_req made it, or not at all */
+		rq->flags &= ~DT_F_APPLIST;
+		return er;
 	}
 	rq->flags |= DT_F_LINK;
-	(void)ct_attr_text(el, n, "viewMode", rq->name, (INT)sizeof(rq->name));
 	if ( ct_attr_text(el, n, "wordWrap", w, (INT)sizeof(w)) > 0 ) {
 		rq->grab_x = ( w[0] == 'f' ) ? 2 : 1;	/* TAD_WRAP_OFF, TAD_WRAP_ON */
 	}
-	return TRUE;
+	return E_OK;
 }
 
 /* A number of text after a tab at *p, moved past it */
@@ -1248,9 +1317,11 @@ static void num_text( char *out, INT v )
 
 EXPORT INT ct_link_told( CONST T_DTANS *an, TS_UUID *p_parent, TS_UUID *p_vobjid, CTVIEW *v, CTSET *set )
 {
-	CONST UB	*t = an->text;
+	CONST UB	*t = dt_tail_get(dt_ans_tail(an, (SZ)sizeof(*an) + (SZ)an->tailsz), an->tailsz,
+					 DT_TAIL_TEXT, NULL);
 	INT		at = 2 * TS_UUID_STRLEN + 1, n = 0, zoom, wrap, i = 0;
 
+	if ( t == NULL ) return -1;
 	if ( ( an->how != DT_HOW_LINK_VIEW && an->how != DT_HOW_LINK_ADD ) || !ct_uuid_parse(t, p_parent)
 	  || t[TS_UUID_STRLEN] != '\t' || !ct_uuid_parse(t + TS_UUID_STRLEN + 1, p_vobjid) ) return -1;
 	if ( an->how == DT_HOW_LINK_ADD ) return 0;
@@ -1381,16 +1452,20 @@ EXPORT INT ct_app_list( CONST UB *json, INT n, UB (*ids)[CT_APP_ID], UB (*names)
 
 EXPORT BOOL ct_app_entry( CONST T_DTANS *an, UB *id, UB *name, BOOL *p_kind )
 {
-	INT	i = 0, k;
+	CONST UB	*t;
+	INT		i = 0, k;
 
 	if ( an == NULL || an->er < E_OK ) return FALSE;
-	for ( k = 0; i < DT_TEXT_MAX && an->text[i] != 0 && an->text[i] != '\t'; i++ ) {
-		if ( k < CT_APP_ID - 1 ) id[k++] = an->text[i];
+	t = dt_tail_get(dt_ans_tail(an, (SZ)sizeof(*an) + (SZ)an->tailsz), an->tailsz, DT_TAIL_TEXT, NULL);
+	if ( t == NULL ) return FALSE;
+	for ( k = 0; t[i] != 0 && t[i] != '\t'; i++ ) {
+		if ( k >= CT_APP_ID - 1 ) return FALSE;	/* no program's id */
+		id[k++] = t[i];
 	}
 	id[k] = 0;
-	if ( k == 0 || i >= DT_TEXT_MAX || an->text[i] != '\t' ) return FALSE;
-	for ( i++, k = 0; i < DT_TEXT_MAX && an->text[i] != 0; i++ ) {
-		if ( k < CT_APP_NAME - 1 ) name[k++] = an->text[i];
+	if ( k == 0 || t[i] != '\t' ) return FALSE;
+	for ( i++, k = 0; t[i] != 0; i++ ) {
+		if ( k < CT_APP_NAME - 1 ) name[k++] = t[i];	/* shown in a menu row: a long one in part */
 	}
 	name[k] = 0;
 	if ( p_kind != NULL ) *p_kind = (BOOL)( ( an->flags & DT_F_KIND ) != 0 );

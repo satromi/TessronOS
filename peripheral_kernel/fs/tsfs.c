@@ -333,16 +333,72 @@ EXPORT INT knl_json_get_num( CONST UB *j, INT len, CONST char *key, INT dflt )
 	return neg ? -v : v;
 }
 
+/*
+ * A string member, its escapes undone, whole: in memory to Kfree, its
+ * length in *p_len; NULL when there is none (or no memory). What it
+ * decodes to is never longer than how it is written.
+ */
+LOCAL UB *json_str_dup( CONST UB *j, INT len, CONST char *key, SZ *p_len )
+{
+	INT	p = knl_json_find(j, len, key), n;
+	T_JSON	v;
+	UB	*out;
+
+	if ( p < 0 || j[p] != '"' || js_span(j, len, p, &v) < E_OK ) {
+		return NULL;
+	}
+	out = (UB *)Kmalloc((SZ)v.len + 1);
+	if ( out == NULL ) {
+		return NULL;
+	}
+	n = js_str(&v, out, v.len + 1);
+	if ( n < 0 ) {
+		Kfree(out);
+		return NULL;
+	}
+	if ( p_len != NULL ) {
+		*p_len = n;
+	}
+	return out;
+}
+
+/* What fits of s in buf of size bytes, cut at a whole letter, and the size the whole takes */
+LOCAL ER name_put( CONST UB *s, SZ len, UB *buf, SZ size, SZ *p_asize )
+{
+	SZ	n;
+
+	if ( size < 0 || ( size > 0 && buf == NULL ) ) {
+		return E_PAR;
+	}
+	if ( s == NULL ) {
+		s = (CONST UB *)"";
+		len = 0;
+	}
+	if ( p_asize != NULL ) {
+		*p_asize = len + 1;
+	}
+	if ( size > 0 ) {
+		n = knl_utf8_fit(s, len, size - 1);
+		knl_memcpy(buf, s, n);
+		buf[n] = 0;
+	}
+	return E_OK;
+}
+
 EXPORT void knl_json_get_str( CONST UB *j, INT len, CONST char *key, UB *out, INT max )
 {
-	INT	p = knl_json_find(j, len, key);
-	T_JSON	v;
+	UB	*w;
+	SZ	n = 0;
 
-	out[0] = '\0';
-	if ( p < 0 || j[p] != '"' || js_span(j, len, p, &v) < E_OK ) {
+	if ( max <= 0 ) {
 		return;
 	}
-	(void)js_str(&v, out, max);		/* what fits, when it does not all fit */
+	out[0] = '\0';
+	w = json_str_dup(j, len, key, &n);
+	if ( w != NULL ) {
+		(void)name_put(w, n, out, max, NULL);	/* what fits, cut at a whole letter */
+		Kfree(w);
+	}
 }
 
 /*
@@ -784,6 +840,34 @@ EXPORT ER ts_cls_vol( ID vol )
 	return ( bvol > 0 ) ? ts_obj_unmount(bvol) : E_OK;
 }
 
+EXPORT INT knl_tsfs_vol_opened( ID vol, TS_UUID *out, INT max )
+{
+	TSFSVOL	*v = vol_of(vol);
+	INT	i, k, n = 0;
+
+	if ( v == NULL ) {
+		return 0;
+	}
+	tk_loc_mtx(tsfs_mtxid, TMO_FEVR);
+	for ( i = 0; i < TSFS_MAX_OD; i++ ) {
+		if ( !tsfs_od[i].used || tsfs_od[i].vol != v ) {
+			continue;
+		}
+		for ( k = 0; k < n && k < max; k++ ) {
+			if ( ts_uuid_cmp(&out[k], &tsfs_od[i].uuid) == 0 ) break;
+		}
+		if ( k < n && k < max ) {
+			continue;		/* opened more than once */
+		}
+		if ( n < max ) {
+			out[n] = tsfs_od[i].uuid;
+		}
+		n++;
+	}
+	tk_unl_mtx(tsfs_mtxid);
+	return n;
+}
+
 EXPORT ER knl_tsfs_vol_info( ID vol, T_TSFSVINF *pk )
 {
 	TSFSVOL		*v = vol_of(vol);
@@ -806,13 +890,15 @@ EXPORT ER knl_tsfs_vol_info( ID vol, T_TSFSVINF *pk )
 			pk->rdonly = (BOOL)( ( sb->state & TSFSBLK_ST_ERROR ) != 0 );
 			pk->vuuid = sb->vol_uuid;
 			pk->top = sb->root_uuid;
-			for ( k = 0; k < TSFSBLK_LABEL_MAX && k < (INT)sizeof(pk->label) - 1
-				     && sb->label[k] != 0; k++ ) {
-				pk->label[k] = sb->label[k];
-			}
-			pk->label[k] = 0;
+			for ( k = 0; k < TSFSBLK_LABEL_MAX && sb->label[k] != 0; k++ ) ;
+			(void)name_put(sb->label, knl_utf8_fit(sb->label, k, TSFSBLK_LABEL_MAX - 1),
+				       pk->label, sizeof(pk->label), NULL);
 		}
 		Kfree(sb);
+		if ( er >= E_OK ) {
+			/* the label is the top's name: its first bytes, cut at a whole letter */
+			(void)knl_tsfs_vol_label(vol, pk->label, sizeof(pk->label), NULL);
+		}
 	} else {
 		pk->vuuid = v->vuuid;
 	}
@@ -821,6 +907,74 @@ EXPORT ER knl_tsfs_vol_info( ID vol, T_TSFSVINF *pk )
 		if ( tsfs_od[i].used && tsfs_od[i].vol == v ) pk->open++;
 	}
 	tk_unl_mtx(tsfs_mtxid);
+
+	return er;
+}
+
+/*
+ * The label is the name of the volume's top object, as BTRON2 names
+ * everything by an object; the superblock keeps a copy cut at a whole
+ * letter for a system before and for a volume that has no top yet. A
+ * top without a name, or none, leaves the copy as the label.
+ */
+EXPORT ER knl_tsfs_vol_label( ID vol, UB *buf, SZ size, SZ *p_asize )
+{
+	TSFSVOL		*v = vol_of(vol);
+	T_TSFSBLK_SB	*sb;
+	TS_UUID		top;
+	UB		*json = NULL, *nm = NULL, cp[TSFSBLK_LABEL_MAX];
+	SZ		nl = 0;
+	INT		len, k;
+	ER		er;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	if ( v->bvol <= 0 ) {
+		return name_put(NULL, 0, buf, size, p_asize);	/* the FAT store has none */
+	}
+	sb = (T_TSFSBLK_SB *)Kmalloc(sizeof(T_TSFSBLK_SB));
+	if ( sb == NULL ) {
+		return E_NOMEM;
+	}
+	er = ts_ref_vol_blk(v->bvol, sb);
+	top = sb->root_uuid;
+	knl_memcpy(cp, sb->label, TSFSBLK_LABEL_MAX);
+	Kfree(sb);
+	if ( er < E_OK ) {
+		return er;
+	}
+	if ( top.d.hi != 0 || top.d.lo != 0 ) {
+		len = knl_tsfs_meta_all(vol, &top, 0, &json, NULL);
+		if ( len > 0 ) {
+			nm = json_str_dup(json, len, "name", &nl);
+		}
+		if ( json != NULL ) Kfree(json);
+	}
+	if ( nm != NULL && nl > 0 ) {
+		er = name_put(nm, nl, buf, size, p_asize);
+	} else {
+		for ( k = 0; k < TSFSBLK_LABEL_MAX && cp[k] != 0; k++ ) ;
+		er = name_put(cp, knl_utf8_fit(cp, k, TSFSBLK_LABEL_MAX - 1), buf, size, p_asize);
+	}
+	if ( nm != NULL ) Kfree(nm);
+	return er;
+}
+
+EXPORT ER knl_tsfs_label_copy( ID vol, CONST UB *name )
+{
+	TSFSVOL	*v = vol_of(vol);
+	ER	er;
+
+	if ( v == NULL || name == NULL ) {
+		return E_ID;
+	}
+	if ( v->bvol <= 0 ) {
+		return E_NOSPT;
+	}
+	vol_lock(v);
+	er = ts_set_label_blk(v->bvol, name);
+	er = vol_done(v, er);
 
 	return er;
 }
@@ -1331,7 +1485,6 @@ EXPORT ER ts_ref_obj( ID vol, CONST TS_UUID *uuid, T_ROBJ *pk_robj )
 		pk_robj->uuid   = *uuid;
 		pk_robj->refcnt = knl_json_get_num(json, len, "refCount", 0);
 		pk_robj->flags  = 0;		/* the FAT store holds none */
-		knl_json_get_str(json, len, "name", pk_robj->name, TSFS_NAME_MAX);
 		pk_robj->nrec = 0;
 		pk_robj->size = 0;
 		for ( i = 0; i < TSFS_MAX_REC; i++ ) {
@@ -1344,6 +1497,28 @@ EXPORT ER ts_ref_obj( ID vol, CONST TS_UUID *uuid, T_ROBJ *pk_robj )
 	vol_unlock(v);
 	if ( json != NULL ) Kfree(json);
 
+	return er;
+}
+
+EXPORT ER ts_ref_nam( ID vol, CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize )
+{
+	UB	*json = NULL, *nm;
+	INT	len;
+	SZ	nl = 0;
+	ER	er;
+
+	if ( vol_of(vol) == NULL || uuid == NULL ) {
+		return E_ID;
+	}
+	len = knl_tsfs_meta_all(vol, uuid, 0, &json, NULL);
+	if ( len < 0 ) {
+		return ( len == E_NOMEM ) ? E_NOMEM : E_NOEXS;
+	}
+	nm = json_str_dup(json, len, "name", &nl);
+	er = ( nm == NULL && knl_json_find(json, len, "name") >= 0 && json[knl_json_find(json, len, "name")] == '"' )
+	   ? E_NOMEM : name_put(nm, nl, buf, size, p_asize);
+	if ( nm != NULL ) Kfree(nm);
+	if ( json != NULL ) Kfree(json);
 	return er;
 }
 

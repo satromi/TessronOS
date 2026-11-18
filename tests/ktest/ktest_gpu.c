@@ -597,11 +597,81 @@ out:
 	(void)ob_del_obj(&pu);
 }
 
+/*
+ * More failed jobs than the first room of the failed fences, each one a
+ * run of its own (a job that ends well between): every one of them is
+ * still said to have failed, the first as well, and the others not
+ */
+#define MANY_FAILED	40
+
+LOCAL void gpu_many_failed( void )
+{
+	T_GPUJOB	job;
+	D		bad[MANY_FAILED], good[MANY_FAILED];
+	INT		i;
+	ER		er;
+
+	KT_ASSERT_ER(knl_gpu_init(), E_OK);
+	knl_memset(&tb, 0, sizeof(tb));
+	if ( v3d_mmu_init(&tb.mmu, TEST_VA) < E_OK ) {
+		KT_ASSERT(FALSE);
+		return;
+	}
+	er = knl_gpu_register(&tb_ops, &tb);
+	if ( er == E_OBJ ) {
+		v3d_mmu_fini(&tb.mmu);
+		KT_SKIP("a GPU is registered already");
+	}
+	KT_ASSERT_ER(er, E_OK);
+	knl_memset(&job, 0, sizeof(job));
+	for ( i = 0; i < MANY_FAILED; i++ ) {
+		job.kind = GPU_JOB_TFU;
+		bad[i] = knl_gpu_submit(&job, NULL, 0);
+		job.kind = GPU_JOB_CACHE;
+		good[i] = knl_gpu_submit(&job, NULL, 0);
+		KT_ASSERT(bad[i] > 0 && good[i] == bad[i] + 1);
+	}
+	KT_ASSERT_ER(knl_gpu_wait(good[MANY_FAILED - 1], 2000 * MS), E_OK);
+	for ( i = 0; i < MANY_FAILED; i++ ) {
+		KT_ASSERT_ER(knl_gpu_wait(bad[i], TMO_POL), E_IO);
+		KT_ASSERT_ER(knl_gpu_wait(good[i], TMO_POL), E_OK);
+	}
+	KT_ASSERT_ER(knl_gpu_unregister(), E_OK);
+	v3d_mmu_fini(&tb.mmu);
+}
+
+/* A backend's lines longer than the record's old room (768 bytes) come whole */
+LOCAL void gpu_obj_long_detail( void )
+{
+	CONST TS_UUID	gu = OB_UUID_GPU_INIT;
+	UB		*d, *t;
+	INT		i, n, len = 3000;
+	CONST INT	max = 8192;
+
+	d = (UB *)Kmalloc((SZ)len + 1);
+	t = (UB *)Kmalloc((SZ)max);
+	KT_ASSERT(d != NULL && t != NULL);
+	if ( d == NULL || t == NULL ) goto out;
+	/* lines of x, the last one "LAST end" */
+	for ( i = 0; i < len - 9; i++ ) d[i] = ( i % 60 == 59 ) ? '\n' : 'x';
+	knl_memcpy(d + len - 9, "LAST end\n", 9);
+	knl_gpu_obj_detail(d, len);
+	n = tg_read(&gu, t, max);
+	KT_ASSERT(n > len);
+	KT_ASSERT(n > 0 && n < max && tg_has(t, "LAST end"));
+	knl_gpu_obj_detail((CONST UB *)"", 0);
+out:
+	if ( d != NULL ) Kfree(d);
+	if ( t != NULL ) Kfree(t);
+}
+
 EXPORT void ktest_gpu( void )
 {
 	KT_RUN(gpu_mmu_table);
 	KT_RUN(gpu_bo_pages);
 	KT_RUN(gpu_bo_map);
 	KT_RUN(gpu_jobs);
+	KT_RUN(gpu_many_failed);
 	KT_RUN(gpu_obj_told);
+	KT_RUN(gpu_obj_long_detail);
 }

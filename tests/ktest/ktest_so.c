@@ -959,8 +959,8 @@ LOCAL void test_sockobj( void )
 	KT_ASSERT_EQ(r.sub, OB_S_SOCKET);
 	KT_ASSERT_EQ(r.nrec, OB_SK_NREC);
 	KT_ASSERT(( r.flags & OB_F_VOLATILE ) != 0);
-	KT_ASSERT(text_has(r.name, OB_NAME_MAX, "socket "));
-	KT_ASSERT(text_has(r.name, OB_NAME_MAX, "(kernel)"));
+	KT_ASSERT(kt_name_has(&u, "socket "));
+	KT_ASSERT(kt_name_has(&u, "(kernel)"));
 	KT_ASSERT_ER(ob_get_prt(&u, p, KT_PRT_SIZE, NULL), E_OK);
 	KT_ASSERT_EQ(ts_uuid_cmp(&p->owner, &ob_user_system), 0);
 	KT_ASSERT_EQ(p->mode, 0600);
@@ -1142,7 +1142,7 @@ LOCAL void test_sockobj_prc( void )
 	if ( s < 0 ) return;
 	KT_ASSERT_ER(so_getobj(s, &u), E_OK);
 	KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
-	KT_ASSERT(text_has(r.name, OB_NAME_MAX, "(process 9998)"));
+	KT_ASSERT(kt_name_has(&u, "(process 9998)"));
 	KT_ASSERT_EQ(knl_so_obj_list(fake, n, l, 4), 1);
 	KT_ASSERT_EQ(n[0], s);
 	KT_ASSERT_EQ(ts_uuid_cmp(&l[0], &u), 0);
@@ -2081,6 +2081,68 @@ LOCAL void test_ecn( void )
 	KT_ASSERT_EQ(v, 0x02);
 	so_close(u);
 }
+
+/*
+ * Names and lists longer and larger than the old rooms: a host name and
+ * a domain of 200 bytes (31 and 79 before) are taken whole, and one
+ * longer than a DNS name can be (RFC 1035 2.3.4) is refused, not cut;
+ * the name servers an interface came with are all asked, not two; and
+ * every IPv6 address of the interface is counted
+ */
+IMPORT void	knl_so_nb_ifdns( CONST UW *dns, INT n );	/* so_api.c */
+IMPORT UW	knl_so_dns_server( INT n );
+IMPORT INT	knl_so_addrs6_all( T_SOIF6 **p_list );
+
+#define LONG_NAME	200
+#define MANY_DNS	6
+
+LOCAL void test_long_names( void )
+{
+	char	name[LONG_NAME + 1], *big, got[LONG_NAME + 8];
+	UW	was[16], dns[MANY_DNS];
+	T_SOIF6	*l = NULL, one[1];
+	INT	i, nwas, n, k;
+
+	for ( i = 0; i < LONG_NAME; i++ ) name[i] = (char)( 'a' + i % 26 );
+	name[LONG_NAME] = '\0';
+	KT_ASSERT_ER(so_sethostname(name, LONG_NAME), E_OK);
+	KT_ASSERT_ER(so_gethostname(got, sizeof(got)), E_OK);
+	KT_ASSERT_EQ((INT)knl_strlen(got), LONG_NAME);
+	KT_ASSERT(knl_strcmp(got, name) == 0);
+	KT_ASSERT_ER(so_setdomain(name), E_OK);
+	big = (char *)Kmalloc(300);
+	KT_ASSERT(big != NULL);
+	if ( big != NULL ) {
+		for ( i = 0; i < 299; i++ ) big[i] = 'b';
+		big[299] = '\0';
+		KT_ASSERT_ER(so_sethostname(big, 299), E_PAR);
+		KT_ASSERT_ER(so_setdomain(big), E_PAR);
+		KT_ASSERT_ER(so_sntp_server(big), E_PAR);
+		Kfree(big);
+	}
+	(void)so_setdomain("");
+	(void)so_sethostname("tessronos", 9);
+
+	/* six name servers of the interface: the sixth is asked as well */
+	for ( nwas = 0; nwas < 16 && ( was[nwas] = knl_so_dns_server(nwas) ) != 0; nwas++ ) ;
+	for ( i = 0; i < MANY_DNS; i++ ) dns[i] = so_htonl(0x0a000035U + (UW)i);	/* 10.0.0.53 on */
+	knl_so_nb_ifdns(dns, MANY_DNS);
+	for ( k = 0, i = 0; knl_so_dns_server(i) != 0 && i < 32; i++ ) {
+		if ( knl_so_dns_server(i) == dns[MANY_DNS - 1] ) k++;
+	}
+	KT_ASSERT_EQ(k, 1);
+	KT_ASSERT(i >= MANY_DNS);
+	knl_so_nb_ifdns(was, nwas);
+
+	/* the addresses of the interface: all of them, as many as a large enough room is given */
+	n = knl_so_addrs6_all(&l);
+	if ( n >= 0 ) {
+		k = so_getifaddr6(one, 1, NULL);
+		KT_ASSERT(k >= 0 && k <= 1);
+		KT_ASSERT(n == 0 || k == 1);
+		if ( l != NULL ) Kfree(l);
+	}
+}
 #endif /* TS_NETSTACK_NETBSD */
 
 EXPORT void ktest_so( void )
@@ -2105,6 +2167,7 @@ EXPORT void ktest_so( void )
 	KT_RUN(test_ip6_names);
 	KT_RUN(test_ip6_linklocal);
 	KT_RUN(test_ecn);
+	KT_RUN(test_long_names);
 #endif
 	KT_RUN(test_unsupported);
 	KT_RUN(test_errors);

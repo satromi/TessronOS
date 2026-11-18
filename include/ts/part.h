@@ -45,7 +45,6 @@ extern "C" {
 #include <ts/dp.h>
 #include <ts/wm.h>
 
-#define WM_PART_MAX	200		/* parts in one panel: the words on it are parts too */
 #define WM_SB_MAX	6		/* fields in one box along a line */
 #define WM_LABEL_MAX	128		/* bytes of a label, with its terminator:
 					   a name of 40 Japanese letters */
@@ -322,14 +321,43 @@ typedef struct {
 #define WM_PNL_SHEET	4		/* white in a thin outline: a pop-up of a few parts */
 #define WM_PNL_BARE	3		/* the ground alone: a window's own panel, framed by the window */
 
+/*
+ * A panel's parts are a table of their own, as many as the definition
+ * has: npart of them in use, room for room. There is no bound on how
+ * many a panel has but the memory. A definition is made with
+ * wm_panel_new and let go with wm_panel_free; wm_panel_part_add puts a
+ * part after the ones it has, the table made larger when it is full,
+ * so a part it answered is to be filled in before the next is added:
+ * the table may move. A part it could not add (NULL) leaves 'lost' set,
+ * and the definition is then not opened (E_NOMEM): a panel is never
+ * shown with a part missing.
+ */
 typedef struct {
 	INT		num;
 	ID		owner;		/* the process it belongs to, 0 for the system */
 	UINT		kind;		/* WM_PNL_* */
 	T_DPRECT	r;		/* in the work area of the window */
-	INT		npart;
-	T_WMPART	part[WM_PART_MAX];
+	INT		npart;		/* parts in use */
+	INT		room;		/* parts the table has room for */
+	T_WMPART	*part;		/* the table, NULL while it has no room */
+	BOOL		lost;		/* a part could not be added */
 } T_WMPANEL;
+
+/*
+ * The bytes of a definition of n parts in the data box: the definition,
+ * its parts one after another after it (its table's place and room are
+ * not read from the box).
+ */
+#define WM_PANEL_BYTES(n)	( sizeof(T_WMPANEL) + sizeof(T_WMPART) * (SZ)(n) )
+
+/*
+ * A definition with room for that many parts and none in use, all
+ * nought: NULL when there is not the memory (or room is below nought).
+ * A part put after the ones it has, nought but for what the caller
+ * fills in: NULL when the table cannot be made larger.
+ */
+IMPORT T_WMPANEL *wm_panel_new( INT room );
+IMPORT T_WMPART  *wm_panel_part_add( T_WMPANEL *def );
 
 /*
  * A name put after the names a part of a definition has, and where it
@@ -341,15 +369,19 @@ typedef struct {
 IMPORT INT wm_part_name( T_WMPART *pt, CONST UB *name );
 
 /*
- * A definition let go: the names of its parts, and the definition
- * itself (Kmalloc'd). A panel opened from it has names of its own.
+ * A definition let go: the names of its parts, its table of parts and
+ * the definition itself. A panel opened from it has names and parts of
+ * its own.
  */
 IMPORT void wm_panel_free( T_WMPANEL *def );
 
 /*
- * Open a panel in a window. The definition is copied, names and all, so
- * the caller may change or free its own at once. Answers the panel's
- * number, or an error (E_NOMEM when its names could not be copied).
+ * Open a panel in a window. The definition is copied, parts and names
+ * and all, into a table as large as it has parts, so the caller may
+ * change or free its own at once. Answers the panel's number, or an
+ * error: E_NOMEM when its parts or their names could not be copied (no
+ * part is left out), E_PAR for a definition whose count of parts is
+ * below nought or past its table.
  */
 IMPORT INT wm_panel_open( INT wid, CONST T_WMPANEL *def );
 
@@ -357,9 +389,10 @@ IMPORT INT wm_panel_open( INT wid, CONST T_WMPANEL *def );
  * The same, with the definition taken out of the data box rather than
  * passed in. This is how a program that keeps its panels as data opens
  * one: it puts the definition in the box once and opens it by number
- * afterwards. The box keeps a definition as bytes, so the names of its
- * parts do not go into it: a panel opened from it has none until they
- * are set (knl_pn_set_names).
+ * afterwards. The box keeps a definition as bytes, WM_PANEL_BYTES(npart)
+ * of them, so the names of its parts do not go into it: a panel opened
+ * from it has none until they are set (knl_pn_set_names). Bytes of
+ * another length than their count of parts says are E_PAR.
  */
 IMPORT INT wm_panel_open_box( INT wid, INT num, ID owner );
 IMPORT ER  wm_panel_close( INT pid );
@@ -594,6 +627,8 @@ IMPORT INT  knl_pn_names( INT pid, INT i, UB **p_buf );
 #if USE_KTEST
 /* For a test: the next n blocks of names are refused, as when the memory has run out */
 IMPORT void knl_pn_test_nomem( INT n );
+/* and the next n tables of parts, made or made larger */
+IMPORT void knl_pn_test_nomem_parts( INT n );
 #endif
 
 /*
@@ -619,8 +654,11 @@ IMPORT ER   knl_pn_init( void );
 
 /*
  * A panel made from a data box: definition number num of the object
- * box, whose record 0 is xmlTAD with a <databox> of <panel>s. Its name
- * (the window's title) comes back in title when asked.
+ * box, whose record 0 is xmlTAD with a <databox> of <panel>s, into def
+ * (made by wm_panel_new: whatever parts it had are let go, and its
+ * table grows to as many parts as the panel has). Its name (the
+ * window's title) comes back in title when asked. E_NOMEM when the
+ * parts could not all be kept: none is left out unsaid.
  */
 IMPORT ER   knl_pn_load( CONST TS_UUID *box, INT num, T_WMPANEL *def, UB *title, INT tmax );
 /*

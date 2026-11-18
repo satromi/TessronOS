@@ -123,33 +123,85 @@ static const struct {
 #define NUSERS	( sizeof(users) / sizeof(users[0]) )
 #define NGROUPS_	( sizeof(groups) / sizeof(groups[0]) )
 
+/*
+ * Where a name handed out is kept until the next call: an object's name
+ * has no bound, so the room grows to the longest name met (and is used
+ * again, never made smaller). NULL with errno ENOMEM when it cannot.
+ */
+typedef struct {
+	char	*s;
+	size_t	cap;
+} NAMEBUF;
+
+static char *nb_put( NAMEBUF *b, const char *s )
+{
+	size_t	n = strlen(s) + 1;
+
+	if ( n > b->cap ) {
+		char	*t = realloc(b->s, n);
+
+		if ( t == NULL ) {
+			errno = ENOMEM;
+			return NULL;
+		}
+		b->s = t;
+		b->cap = n;
+	}
+	memmove(b->s, s, n);
+	return b->s;
+}
+
 static struct passwd	pw;
-static char		pw_name[OB_NAME_MAX + 8], pw_gecos[OB_NAME_MAX + 8];
+static NAMEBUF		pw_name, pw_gecos;
 static struct group	gr;
-static char		gr_name[OB_NAME_MAX + 8];
+static NAMEBUF		gr_name;
 static char		*gr_mem[2];
 
-/* The name of the user the program acts for, as its object has it */
-static int own_name( char *buf, size_t max )
+/*
+ * The name of the user the program acts for, whole, as its object has
+ * it, in memory of its own (free it); NULL when it has none or it cannot
+ * be had.
+ */
+static char *own_name( void )
 {
 	const T_OBCRD	*c = me();
-	T_OBREF		r;
+	char		*b = NULL, *t;
+	SZ		cap = 64, need = 0;
 
-	if ( c == NULL || ob_ref_obj(&c->user, &r) < E_OK || r.name[0] == 0 ) return -1;
-	strlcpy(buf, (const char *)r.name, max);
-	return 0;
+	if ( c == NULL ) return NULL;
+	for ( ;; ) {
+		t = realloc(b, (size_t)cap);
+		if ( t == NULL ) {
+			free(b);
+			errno = ENOMEM;
+			return NULL;
+		}
+		b = t;
+		if ( ob_ref_nam(&c->user, (UB *)b, cap, &need) < E_OK ) {
+			free(b);
+			return NULL;
+		}
+		if ( need <= cap ) break;
+		cap = need;		/* the room was short: as much as the whole name takes */
+	}
+	if ( b[0] == 0 ) {
+		free(b);
+		return NULL;
+	}
+	return b;
 }
 
 static struct passwd *pw_fill( uid_t uid, const char *name, const char *gecos )
 {
-	strlcpy(pw_name, name, sizeof(pw_name));
-	strlcpy(pw_gecos, gecos, sizeof(pw_gecos));
+	if ( nb_put(&pw_name, name) == NULL || nb_put(&pw_gecos, gecos) == NULL ) {
+		return NULL;
+	}
 	memset(&pw, 0, sizeof(pw));
-	pw.pw_name = pw_name;
+	pw.pw_name = pw_name.s;
 	pw.pw_passwd = (char *)"*";
 	pw.pw_uid = uid;
 	pw.pw_gid = ( uid == PSX_UID_SYSTEM || uid == PSX_UID_ADMIN ) ? PSX_GID_ADMIN : PSX_GID_USERS;
-	pw.pw_gecos = pw_gecos;
+	pw.pw_gecos = pw_gecos.s;
 	pw.pw_dir = (char *)_PATH_HOME;
 	pw.pw_shell = (char *)"/bin/tsh";
 	return &pw;
@@ -157,14 +209,17 @@ static struct passwd *pw_fill( uid_t uid, const char *name, const char *gecos )
 
 struct passwd *getpwuid( uid_t uid )
 {
-	char	b[OB_NAME_MAX + 8];
-	size_t	i;
+	struct passwd	*p;
+	char		b[24], *own;
+	size_t		i;
 
 	for ( i = 0; i < NUSERS; i++ ) {
 		if ( users[i].id == uid ) return pw_fill(uid, users[i].name, users[i].gecos);
 	}
-	if ( uid == getuid() && own_name(b, sizeof(b)) == 0 ) {
-		return pw_fill(uid, b, b);
+	if ( uid == getuid() && ( own = own_name() ) != NULL ) {
+		p = pw_fill(uid, own, own);
+		free(own);
+		return p;
 	}
 	snprintf(b, sizeof(b), "u%u", (unsigned int)uid);
 	return pw_fill(uid, b, b);
@@ -172,14 +227,17 @@ struct passwd *getpwuid( uid_t uid )
 
 struct passwd *getpwnam( const char *name )
 {
-	char	b[OB_NAME_MAX + 8];
-	size_t	i;
+	struct passwd	*p;
+	char		*own;
+	size_t		i;
 
 	for ( i = 0; i < NUSERS; i++ ) {
 		if ( strcmp(users[i].name, name) == 0 ) return pw_fill(users[i].id, users[i].name, users[i].gecos);
 	}
-	if ( own_name(b, sizeof(b)) == 0 && strcmp(b, name) == 0 ) {
-		return pw_fill(getuid(), b, b);
+	if ( ( own = own_name() ) != NULL ) {
+		p = ( strcmp(own, name) == 0 ) ? pw_fill(getuid(), own, own) : NULL;
+		free(own);
+		if ( p != NULL ) return p;
 	}
 	if ( name[0] == 'u' && name[1] >= '0' && name[1] <= '9' ) {
 		return getpwuid((uid_t)strtoul(name + 1, NULL, 10));
@@ -193,6 +251,8 @@ int getpwuid_r( uid_t uid, struct passwd *p, char *buf, size_t len, struct passw
 
 	(void)buf;
 	(void)len;
+	*res = NULL;
+	if ( r == NULL ) return ENOMEM;
 	*p = *r;
 	*res = p;
 	return 0;
@@ -200,12 +260,14 @@ int getpwuid_r( uid_t uid, struct passwd *p, char *buf, size_t len, struct passw
 
 int getpwnam_r( const char *name, struct passwd *p, char *buf, size_t len, struct passwd **res )
 {
-	struct passwd *r = getpwnam(name);
+	struct passwd *r;
 
 	(void)buf;
 	(void)len;
+	errno = 0;
+	r = getpwnam(name);
 	*res = NULL;
-	if ( r == NULL ) return 0;
+	if ( r == NULL ) return ( errno == ENOMEM ) ? ENOMEM : 0;	/* none of that name, or no room */
 	*p = *r;
 	*res = p;
 	return 0;
@@ -223,9 +285,11 @@ struct passwd *getpwent( void )
 
 static struct group *gr_fill( gid_t gid, const char *name )
 {
-	strlcpy(gr_name, name, sizeof(gr_name));
+	if ( nb_put(&gr_name, name) == NULL ) {
+		return NULL;
+	}
 	memset(&gr, 0, sizeof(gr));
-	gr.gr_name = gr_name;
+	gr.gr_name = gr_name.s;
 	gr.gr_passwd = (char *)"*";
 	gr.gr_gid = gid;
 	gr_mem[0] = NULL;
@@ -260,21 +324,27 @@ struct group *getgrnam( const char *name )
 
 int getgrgid_r( gid_t gid, struct group *g, char *buf, size_t len, struct group **res )
 {
+	struct group *r = getgrgid(gid);
+
 	(void)buf;
 	(void)len;
-	*g = *getgrgid(gid);
+	*res = NULL;
+	if ( r == NULL ) return ENOMEM;
+	*g = *r;
 	*res = g;
 	return 0;
 }
 
 int getgrnam_r( const char *name, struct group *g, char *buf, size_t len, struct group **res )
 {
-	struct group *r = getgrnam(name);
+	struct group *r;
 
 	(void)buf;
 	(void)len;
+	errno = 0;
+	r = getgrnam(name);
 	*res = NULL;
-	if ( r == NULL ) return 0;
+	if ( r == NULL ) return ( errno == ENOMEM ) ? ENOMEM : 0;	/* none of that name, or no room */
 	*g = *r;
 	*res = g;
 	return 0;
@@ -311,29 +381,29 @@ int initgroups( const char *name, gid_t base )
 
 const char *user_from_uid( uid_t uid, int nouser )
 {
-	static char	b[OB_NAME_MAX + 8];
+	static NAMEBUF	b;
+	char		n[24];
 	struct passwd	*p = getpwuid(uid);
 
 	if ( p == NULL || nouser ) {
-		snprintf(b, sizeof(b), "%u", (unsigned int)uid);
-		return ( p == NULL && nouser ) ? NULL : b;
+		snprintf(n, sizeof(n), "%u", (unsigned int)uid);
+		return ( p == NULL && nouser ) ? NULL : nb_put(&b, n);
 	}
-	strlcpy(b, p->pw_name, sizeof(b));
-	return b;
+	return nb_put(&b, p->pw_name);
 }
 
 const char *group_from_gid( gid_t gid, int nogroup )
 {
-	static char	b[OB_NAME_MAX + 8];
+	static NAMEBUF	b;
+	char		n[24];
 	struct group	*g = getgrgid(gid);
 
 	if ( g == NULL ) {
 		if ( nogroup ) return NULL;
-		snprintf(b, sizeof(b), "%u", (unsigned int)gid);
-		return b;
+		snprintf(n, sizeof(n), "%u", (unsigned int)gid);
+		return nb_put(&b, n);
 	}
-	strlcpy(b, g->gr_name, sizeof(b));
-	return b;
+	return nb_put(&b, g->gr_name);
 }
 
 int uid_from_user( const char *name, uid_t *uid )
@@ -535,7 +605,7 @@ long pathconf( const char *path, int name )
 	(void)path;
 	switch ( name ) {
 	  case _PC_LINK_MAX:		return 32767;
-	  case _PC_NAME_MAX:		return 255;
+	  case _PC_NAME_MAX:		return NAME_MAX;	/* 767: FS_NAME_MAX less its nought */
 	  case _PC_PATH_MAX:		return PATH_MAX;
 	  case _PC_PIPE_BUF:		return 512;
 	  case _PC_MAX_CANON:		return 1023;

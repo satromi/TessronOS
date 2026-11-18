@@ -1,0 +1,31 @@
+# システム環境設定's 写しを作る of 〈書体〉 (docs/tessronos 11.6): the system's face, a link of the
+# machine's settings as the wallpaper is, carried by a link of the copy's record 0. The copy made and
+# opened: the face it names is the one set now, nothing differs, and 取り消し sets nothing. For
+# tools/ui_run.py as ui_sysenv_page.steps; the menu's 写しを作る the third line of 操作.
+openapp 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42 {"tessronos-sysenv":{"data":"font"}}
+expect sysenv: page "font"
+expect sysenv: ready
+wait 800
+click 400 300 1
+wait 500
+move 405 341
+wait 150
+move 440 341
+wait 150
+move 470 341
+wait 300
+move 495 375
+wait 150
+click 495 375
+expect sysenv: copy of "font" made, 1 lines (0)
+expect desktop: link put "システム環境設定（書体）の写し"
+wait 800
+logmark
+openput
+expectsince sysenv: copy of "font" opened, 1 lines, 0 differ, 0 left out
+wait 800
+shot sfc_ask
+click 650 452
+expectsince sysenv: copy of "font" put back
+absent sysenv: system face
+absent !OACV!

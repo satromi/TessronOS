@@ -21,6 +21,7 @@
 #define STORE	"/boot/TSFS"
 
 LOCAL ID	vol = 0;
+LOCAL UB	rnam[64];		/* an object's name, read for a test (ts_ref_nam) */
 
 LOCAL INT s_len( CONST char *s )
 {
@@ -92,8 +93,9 @@ LOCAL void test_object( void )
 	KT_ASSERT_ER(ts_ref_obj(vol, &uuid, &robj), E_OK);
 	KT_ASSERT_EQ(robj.refcnt, 0);
 	KT_ASSERT_EQ(robj.nrec, 0);
-	KT_ASSERT_EQ(robj.name[0], (UB)'f');
-	KT_ASSERT_EQ(robj.name[4], (UB)'t');
+	KT_ASSERT_ER(ts_ref_nam(vol, &uuid, rnam, sizeof(rnam), NULL), E_OK);
+	KT_ASSERT_EQ(rnam[0], (UB)'f');
+	KT_ASSERT_EQ(rnam[4], (UB)'t');
 
 	/* the exclusive modes: TFO_EXCL keeps every key out but one of the attributes alone */
 	od = ts_opn_obj(vol, &uuid, TFO_READ | TFO_WRITE | TFO_EXCL);
@@ -246,9 +248,10 @@ LOCAL void test_metadata( void )
 	/* the name changes, the rest of the metadata stays */
 	KT_ASSERT_ER(ts_set_nam(od, (CONST UB *)"after the change"), E_OK);
 	KT_ASSERT_ER(ts_ref_obj(vol, &uuid, &robj), E_OK);
-	KT_ASSERT_EQ(robj.name[0], (UB)'a');
-	KT_ASSERT_EQ(robj.name[5], (UB)' ');
-	KT_ASSERT_EQ(robj.name[6], (UB)'t');
+	KT_ASSERT_ER(ts_ref_nam(vol, &uuid, rnam, sizeof(rnam), NULL), E_OK);
+	KT_ASSERT_EQ(rnam[0], (UB)'a');
+	KT_ASSERT_EQ(rnam[5], (UB)' ');
+	KT_ASSERT_EQ(rnam[6], (UB)'t');
 	KT_ASSERT_ER(ts_get_met(od, json, sizeof(json), &asize), E_OK);
 	json[asize] = '\0';
 	tm_printf((UB*)"  metadata: %s\n", json);

@@ -109,8 +109,7 @@
 #define SIRK_PLAIN		0x01
 
 #define HCI_REMOTE_USER_ENDED	0x13
-#define NCHR			16
-#define VAL_MAX			256
+#define VAL_MAX			ATT_VAL_MAX
 #define BAP_TMO_MS		30000
 
 enum { NS_PACS, NS_ASCS, NS_CSIS, NS_VCS, NSVC };
@@ -129,8 +128,8 @@ typedef struct {
 	BOOL	used;
 	UH	mtu;
 	UH	svc_first[NSVC], svc_last[NSVC];
-	CHR	chr[NCHR];
-	INT	nchr;
+	CHR	*chr;		/* its characteristics, as many as it has */
+	INT	nchr, chr_cap;
 	UB	step;
 	INT	si, cur;
 	UH	next;
@@ -142,7 +141,6 @@ typedef struct {
 	BOOL	vol_again;
 } BAP;
 
-LOCAL BAP	bap_tab[NPEER];
 
 LOCAL UH get16( CONST UB *p )
 {
@@ -167,18 +165,25 @@ LOCAL void put24( UB *p, UW v )
 	p[2] = (UB)( v >> 16 );
 }
 
+/* A device's state here, made when first asked; NULL when there is no room for it */
 LOCAL BAP *bap_of( BTC *c, PEER *p )
 {
-	INT	i = (INT)( p - c->peer );
-
-	return ( i >= 0 && i < NPEER ) ? &bap_tab[i] : NULL;
+	(void)c;
+	if ( p->bap == NULL ) {
+		p->bap = Kcalloc(1, sizeof(BAP));
+		if ( p->bap == NULL ) tm_printf((UB *)"bt: \"%s\": no room for its LE Audio services\n", p->name);
+	}
+	return (BAP *)p->bap;
 }
 
+/* The device of the controller's entry i, NULL where it is none taken as LE Audio */
 EXPORT LEADEV *knl_btbap_dev( BTC *c, INT i )
 {
-	BAP	*b = &bap_tab[i];
+	BAP	*b;
 
-	return ( i >= 0 && i < NPEER && b->used && b->c == c ) ? &b->d : NULL;
+	if ( i < 0 || i >= c->npeer ) return NULL;
+	b = (BAP *)c->peer[i]->bap;
+	return ( b != NULL && b->used && b->c == c ) ? &b->d : NULL;
 }
 
 /*
@@ -361,7 +366,20 @@ LOCAL void value_in( BAP *b, CHR *h, CONST UB *v, INT n )
 		if ( n >= 4 ) d->sink_loc = (UW)get16(v) | ( (UW)get16(v + 2) << 16 );
 		break;
 	case CH_SINK_ASE:
-		if ( d->nase < LEA_NASE && n >= 2 ) {
+		if ( n >= 2 && d->nase >= d->ase_cap ) {
+			INT	cap = ( d->ase_cap > 0 ) ? d->ase_cap * 2 : 4;
+			LEASE	*na = (LEASE *)Kmalloc(sizeof(LEASE) * (SZ)cap);
+
+			if ( na == NULL ) {
+				tm_printf((UB *)"bt: \"%s\": no room for its sink ASE %d\n", d->p->name, d->nase + 1);
+				break;
+			}
+			if ( d->nase > 0 ) knl_memcpy(na, d->ase, (INT)( sizeof(LEASE) * (SZ)d->nase ));
+			if ( d->ase != NULL ) Kfree(d->ase);
+			d->ase = na;
+			d->ase_cap = cap;
+		}
+		if ( n >= 2 ) {
 			LEASE	*a = &d->ase[d->nase++];
 
 			knl_memset(a, 0, sizeof(*a));
@@ -540,7 +558,20 @@ LOCAL void answer( BAP *b, CONST UB *f, INT n )
 
 				decl = get16(f + i);
 				chr_close(b, (UH)( decl - 1 ));
-				if ( want_chr(u) && b->nchr < NCHR ) {
+				if ( want_chr(u) && b->nchr >= b->chr_cap ) {
+					INT	cap = ( b->chr_cap > 0 ) ? b->chr_cap * 2 : 16;
+					CHR	*nc = (CHR *)Kmalloc(sizeof(CHR) * (SZ)cap);
+
+					if ( nc == NULL ) {
+						tm_printf((UB *)"bt: \"%s\": no room for its characteristic %d\n", b->d.p->name, b->nchr + 1);
+						continue;
+					}
+					if ( b->nchr > 0 ) knl_memcpy(nc, b->chr, (INT)( sizeof(CHR) * (SZ)b->nchr ));
+					if ( b->chr != NULL ) Kfree(b->chr);
+					b->chr = nc;
+					b->chr_cap = cap;
+				}
+				if ( want_chr(u) ) {
 					CHR	*h = &b->chr[b->nchr++];
 
 					h->uuid = u;
@@ -595,7 +626,14 @@ LOCAL void answer( BAP *b, CONST UB *f, INT n )
 		if ( op == ATT_READ_RSP || op == ATT_BLOB_RSP ) {
 			INT	m = n - 1;
 
-			if ( b->vlen + m > VAL_MAX ) m = VAL_MAX - b->vlen;
+			if ( m < 0 || b->vlen + m > VAL_MAX ) {
+				/* longer than an attribute's value can be: the device is wrong, the value not used */
+				tm_printf((UB *)"bt: \"%s\": characteristic %04x longer than %d bytes, not used\n", b->d.p->name, h->uuid, VAL_MAX);
+				b->vlen = 0;
+				b->cur++;
+				next_read(b);
+				break;
+			}
 			knl_memcpy(b->val + b->vlen, f + 1, m);
 			b->vlen += m;
 			if ( n - 1 == b->mtu - 1 && b->vlen < VAL_MAX ) {
@@ -699,11 +737,24 @@ LOCAL void notified( BAP *b, CONST UB *f, INT n )
 /* A new link's services are being found: nothing is kept of the last one */
 EXPORT void knl_btbap_reset( BTC *c, PEER *p )
 {
-	BAP	*b = bap_of(c, p);
+	BAP	*b = (BAP *)p->bap;
+
+	CHR	*chr;
+	LEASE	*ase;
+	INT	cap, acap;
 
 	if ( b == NULL ) return;
 	if ( b->used && b->d.ready ) knl_btlea_dev_down(c, &b->d);
+	/* the room for its characteristics and its ASEs stays, empty */
+	chr = b->chr;
+	cap = b->chr_cap;
+	ase = b->d.ase;
+	acap = b->d.ase_cap;
 	knl_memset(b, 0, sizeof(*b));
+	b->chr = chr;
+	b->chr_cap = cap;
+	b->d.ase = ase;
+	b->d.ase_cap = acap;
 }
 
 /* A primary service of the device, as bt_le.c lists them */
@@ -743,7 +794,7 @@ EXPORT BOOL knl_btbap_start( BTC *c, PEER *p, UH mtu )
 /* Whether its services are those of an LE Audio sink, whether or not this controller can carry it */
 EXPORT BOOL knl_btbap_has_lea( BTC *c, PEER *p )
 {
-	BAP	*b = bap_of(c, p);
+	BAP	*b = (BAP *)p->bap;
 
 	return (BOOL)( b != NULL && b->svc_first[NS_PACS] != 0 && b->svc_first[NS_ASCS] != 0 );
 }
@@ -751,7 +802,7 @@ EXPORT BOOL knl_btbap_has_lea( BTC *c, PEER *p )
 /* Whether it is taken as an LE Audio device and its services are read */
 EXPORT BOOL knl_btbap_ready( BTC *c, PEER *p )
 {
-	BAP	*b = bap_of(c, p);
+	BAP	*b = (BAP *)p->bap;
 
 	return (BOOL)( b != NULL && b->used && b->d.ready );
 }
@@ -759,7 +810,7 @@ EXPORT BOOL knl_btbap_ready( BTC *c, PEER *p )
 /* What ATT brings of a device taken here: TRUE when this file has dealt with it */
 EXPORT BOOL knl_btbap_att_in( BTC *c, PEER *p, CONST UB *f, INT n )
 {
-	BAP	*b = bap_of(c, p);
+	BAP	*b = (BAP *)p->bap;
 
 	if ( b == NULL || !b->used || n < 1 ) return FALSE;
 	switch ( f[0] ) {
@@ -792,7 +843,7 @@ EXPORT BOOL knl_btbap_rsi( BTC *c, CONST UB *ad, INT n )
 		if ( ad[at + 1] == 0x2e && ad[at] == 7 ) {
 			CONST UB *rsi = ad + at + 2;
 
-			for ( i = 0; i < NPEER; i++ ) {
+			for ( i = 0; i < c->npeer; i++ ) {
 				LEADEV	*d = knl_btbap_dev(c, i);
 				UB	h[3];
 
@@ -811,12 +862,12 @@ EXPORT BOOL knl_btbap_seek( BTC *c )
 {
 	INT	i, k;
 
-	for ( i = 0; i < NPEER; i++ ) {
+	for ( i = 0; i < c->npeer; i++ ) {
 		LEADEV	*d = knl_btbap_dev(c, i);
 		INT	here = 0;
 
 		if ( d == NULL || !d->ready || !d->in_set || d->set_size < 2 ) continue;
-		for ( k = 0; k < NPEER; k++ ) {
+		for ( k = 0; k < c->npeer; k++ ) {
 			LEADEV	*e = knl_btbap_dev(c, k);
 
 			if ( e != NULL && e->ready && e->in_set && same_bt_bytes(e->sirk, d->sirk, 16) ) here++;
@@ -832,11 +883,11 @@ EXPORT void knl_btbap_tick( BTC *c )
 	UW	now = knl_btx_now();
 	INT	i;
 
-	for ( i = 0; i < NPEER; i++ ) {
-		BAP	*b = &bap_tab[i];
+	for ( i = 0; i < c->npeer; i++ ) {
+		BAP	*b = (BAP *)c->peer[i]->bap;
 		UB	r[3];
 
-		if ( !b->used || b->c != c || b->due == 0 || (W)( now - b->due ) < 0 ) continue;
+		if ( b == NULL || !b->used || b->c != c || b->due == 0 || (W)( now - b->due ) < 0 ) continue;
 		tm_printf((UB *)"bt: \"%s\": its LE Audio services did not answer, step %d\n", b->d.p->name, b->step);
 		b->due = 0;
 		put16(r, b->d.p->handle);

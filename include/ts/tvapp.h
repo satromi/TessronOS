@@ -69,7 +69,18 @@ IMPORT BOOL	g_has_parent;		/* opened from a link of a window of the desktop's: *
 IMPORT TS_UUID	g_parent, g_vobjid;	/* the object whose record holds it, and its vobjid */
 IMPORT BOOL	g_from_link;		/* opened from a link: g_start_arg is how it asks to be shown */
 IMPORT T_PRCOPEN	g_start_arg;		/* the start-up argument, with the link's bgcol, wordWrap and viewMode */
-IMPORT UB	g_name[OB_NAME_MAX];
+/*
+ * The object's name, whole (never NULL, "" before there is one): g_name,
+ * and ta_name gives the same. ta_set_name changes what this program holds
+ * as its name (a copy is taken; FALSE when there was no memory for it,
+ * the name before kept).
+ */
+IMPORT UB	*g_name;
+
+/* Bytes of a line note says on the console (a long name in it is cut at a whole letter) */
+#define TA_LOG		320
+IMPORT CONST UB *ta_name( void );
+IMPORT BOOL ta_set_name( CONST UB *name );
 IMPORT TS_UUID	g_win;
 IMPORT ID	g_kw;
 IMPORT INT	g_gid;
@@ -110,6 +121,19 @@ IMPORT void say( CONST char *s );		/* on the desktop's message line */
 /* ---------------------------------------------------------------- the desktop */
 
 IMPORT ER   ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms );
+/*
+ * The tail of a request and its answer (dtreq.h, DT_TAIL_*): a part of
+ * the next ask_desktop's tail added, as long as it is (len < 0 up to its
+ * 0); a part of the last answer's found, NULL none. The fixed fields name
+ * and text of a request and text of an answer are not used. told() is
+ * given a notice with its tail after it: dt_ans_tail(an,
+ * sizeof(T_DTANS) + an->tailsz). ta_read_whole reads one message of a
+ * channel whole into *p_buf, made as large as it must be (*p_cap): its
+ * size, or an error.
+ */
+IMPORT void ta_req_part( UINT kind, CONST UB *s, SZ len );
+IMPORT CONST UB *ta_ans_part( UINT kind, SZ *p_len );
+IMPORT SZ   ta_read_whole( ID k, UB **p_buf, SZ *p_cap, TMO tmo );
 IMPORT void link_open( CONST T_VOBJ *v );
 IMPORT void ta_link_open( CONST T_VOBJ *v, UINT flags, INT rank );	/* DT_F_AUTO: 自動起動, at place rank */
 IMPORT BOOL ta_link_named( T_DTREQ *rq, CONST TS_UUID *vobjid );	/* DT_RQ_ATTR of that link: DT_F_LINK */

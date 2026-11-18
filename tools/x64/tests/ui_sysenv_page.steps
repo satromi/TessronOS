@@ -1,0 +1,91 @@
+# システム環境設定's pages opened by the 固有データ of an applist entry, and its 写し
+# (docs/tessronos 11.3, 11.6), for tools/x64/ui_run64.py with the image of make TARGET=_X64_
+# DESKTOP=1 UITEST=1 sdimg a KTEST=1 build. "openapp UUID APPLIST" opens the
+# object as a link of a program's window opens it, carrying the link's applist; "openput" opens
+# what the last 写しを作る put in the first window. The window is at 160,80; its menu opens at
+# 400,300 with 操作 under the pointer, 写しを作る the third line of 操作.
+#
+# a link to the program object with data: the page it names
+openapp 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42 {"tessronos-sysenv":{"name":"システム環境設定","data":"colour"}}
+expect sysenv: opened with data "colour"
+expect sysenv: page "colour"
+expect sysenv: ready
+wait 800
+shot sp_colour
+nwin システム環境設定
+want ok 1
+# open already: the same window, on the page asked now
+logmark
+openapp 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42 {"tessronos-sysenv":{"data":"screen"}}
+expectsince sysenv: page "screen"
+expectsince sysenv: screen page
+wait 500
+shot sp_screen
+nwin システム環境設定
+want ok 1
+openapp 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42 {"tessronos-sysenv":{"data":"keyboard"}}
+expectsince sysenv: page "keyboard"
+# what it does not know changes nothing: a long one comes whole, and is not a page
+logmark
+openapp 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42 {"tessronos-sysenv":{"data":"no-such-page"}}
+expectsince sysenv: opened with data "no-such-page"
+openapp 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42 {"tessronos-sysenv":{"data":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+expectsince sysenv: opened with data "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+wait 300
+absent sysenv: page "no-such-page"
+# the screen's device object: its applist opens the screen's page
+logmark
+open 01a0d680-3aa9-7d84-936e-21fa0c57b84d
+expectsince sysenv: page "screen"
+wait 300
+nwin システム環境設定
+want ok 1
+# 写しを作る of 〈配色〉
+openapp 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42 {"tessronos-sysenv":{"data":"colour"}}
+expectsince sysenv: page "colour"
+wait 500
+click 400 300 1
+wait 500
+shot sp_menu
+move 405 341
+wait 150
+move 440 341
+wait 150
+move 470 341
+wait 300
+shot sp_menu_op
+move 495 375
+wait 150
+click 495 375
+expect sysenv: copy of "colour" made, 1 lines (0)
+expect desktop: link put "システム環境設定（配色）の写し"
+wait 800
+shot sp_made
+# another scheme chosen, so that the copy differs from what is set
+logmark
+click 300 201
+expectsince sysenv: scheme
+wait 800
+# the copy opened: its values shown, 取り消し puts the parts back and sets nothing
+logmark
+openput
+expectsince sysenv: copy of "colour" opened, 1 lines, 1 differ, 0 left out
+wait 800
+shot sp_copy_ask
+click 650 452
+expectsince sysenv: copy of "colour" put back
+wait 500
+shot sp_copy_back
+# opened again, and 設定: the copy's scheme set as the page sets it
+logmark
+openput
+expectsince sysenv: copy of "colour" opened, 1 lines, 1 differ, 0 left out
+wait 800
+click 775 452
+expectsince sysenv: scheme
+expectsince sysenv: copy of "colour" set
+wait 500
+shot sp_copy_set
+nwin システム環境設定
+want ok 1
+absent !OACV!

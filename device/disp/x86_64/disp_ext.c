@@ -153,7 +153,7 @@ typedef struct {
 	INT		adaptor_type;		/* a DP++ adaptor's type: 1, 2; 0 none seen */
 	UW		adaptor_tmds;		/* a type 2 adaptor's TMDS clock limit, kHz */
 	UW		hdmi_level;		/* the VBT's HDMI level (hdmi_level_shifter) */
-	UB		edid[DISP_EDID_MAX];
+	UB		*edid;			/* as long as the EDID read, NULL none */
 	INT		edid_len;
 	char		name[12];
 	T_DISPOUTHW	out;
@@ -513,18 +513,28 @@ LOCAL INT i2c_read_aux( INT ch, UB addr, INT seg, UB off, UB *buf, INT len )
 	return ( got == len ) ? got : E_IO;
 }
 
-/* The EDID through I2C over AUX, its extensions too (up to four blocks): how many bytes */
-LOCAL INT edid_aux( INT ch, UB *e )
+/*
+ * The EDID through I2C over AUX, every extension its base block names
+ * (two blocks a segment of E-DDC): how many bytes, the blocks in *p_e
+ * (Kfree it); 0 when there is none, E_NOMEM
+ */
+LOCAL INT edid_aux( INT ch, UB **p_e )
 {
-	INT	b, nb = 1;
+	UB	b0[DISP_EDID_BLOCK], *e;
+	INT	b, nb;
 
-	if ( i2c_read_aux(ch, DDC_EDID, 0, 0, e, 128) < E_OK ) return 0;
-	nb = 1 + e[126];
-	if ( nb > DISP_EDID_MAX / 128 ) nb = DISP_EDID_MAX / 128;
+	*p_e = NULL;
+	if ( i2c_read_aux(ch, DDC_EDID, 0, 0, b0, DISP_EDID_BLOCK) < E_OK ) return 0;
+	nb = 1 + b0[126];
+	e = (UB *)Kmalloc((SZ)( DISP_EDID_BLOCK * nb ));
+	if ( e == NULL ) return E_NOMEM;
+	knl_memcpy(e, b0, DISP_EDID_BLOCK);
 	for ( b = 1; b < nb; b++ ) {
-		if ( i2c_read_aux(ch, DDC_EDID, b / 2, (UB)( ( b % 2 ) * 128 ), e + 128 * b, 128) < E_OK ) break;
+		if ( i2c_read_aux(ch, DDC_EDID, b / 2, (UB)( ( b % 2 ) * 128 ), e + DISP_EDID_BLOCK * b,
+				  DISP_EDID_BLOCK) < E_OK ) break;
 	}
-	return 128 * b;
+	*p_e = e;
+	return DISP_EDID_BLOCK * b;
 }
 
 /* ---------------------------------------------------------------- GMBUS */
@@ -604,7 +614,7 @@ LOCAL void edid_say( INT port, CONST UB *e, INT len, CONST char *how )
  */
 LOCAL void port_read( EXTPORT *x )
 {
-	UB	b[16], e[DISP_EDID_MAX];
+	UB	b[16], *e = NULL, *was;
 	INT	n, len = 0;
 
 	n = knl_igfx_dpcd_read(x->aux, 0x000, b, 16);
@@ -621,8 +631,10 @@ LOCAL void port_read( EXTPORT *x )
 		}
 		n = knl_igfx_dpcd_read(x->aux, 0x200, b, 6);
 		if ( n > 0 ) bytes_say("DPCD link state", x->port, 0x200, b, n);
-		len = edid_aux(x->aux, e);
-		if ( len >= 128 ) {
+		len = edid_aux(x->aux, &e);
+		if ( len == E_NOMEM ) {
+			tm_printf((UB *)"ext: port %c: no room for its EDID\n", 'A' + x->port);
+		} else if ( len >= 128 ) {
 			edid_say(x->port, e, len, "AUX");
 		} else {
 			tm_printf((UB *)"ext: port %c: DisplayPort, no EDID through AUX\n", 'A' + x->port);
@@ -645,7 +657,11 @@ LOCAL void port_read( EXTPORT *x )
 		}
 		tm_printf((UB *)"ext: port %c: DP++ adaptor of type %d, TMDS up to %d kHz\n", 'A' + x->port, x->adaptor_type,
 			  (INT)( ( x->adaptor_type == 2 && x->adaptor_tmds != 0 ) ? x->adaptor_tmds : 165000 ));
-		if ( gmbus_read(x->ddc, DDC_EDID, 0x00, e, 256) ) {
+		/* GMBUS reads the first segment of E-DDC: the base block and one extension */
+		e = (UB *)Kmalloc(2 * DISP_EDID_BLOCK);
+		if ( e == NULL ) {
+			tm_printf((UB *)"ext: port %c: no room for its EDID\n", 'A' + x->port);
+		} else if ( gmbus_read(x->ddc, DDC_EDID, 0x00, e, 2 * DISP_EDID_BLOCK) ) {
 			len = 128 * ( 1 + ( e[126] > 0 ) );
 			edid_say(x->port, e, len, "GMBUS");
 		} else {
@@ -654,10 +670,16 @@ LOCAL void port_read( EXTPORT *x )
 	} else {
 		tm_printf((UB *)"ext: port %c: something is plugged in, AUX does not answer\n", 'A' + x->port);
 	}
+	if ( len < 128 && e != NULL ) {
+		Kfree(e);
+		e = NULL;
+	}
 	tk_loc_mtx(ext_mtx, TMO_FEVR);
-	x->edid_len = ( len >= 128 ) ? len : 0;
-	if ( x->edid_len > 0 ) knl_memcpy(x->edid, e, x->edid_len);
+	was = x->edid;
+	x->edid = e;
+	x->edid_len = ( e != NULL ) ? len : 0;
 	tk_unl_mtx(ext_mtx);
+	if ( was != NULL ) Kfree(was);
 }
 
 /* A port just plugged in, read with the wells it needs, and let go of them */

@@ -438,6 +438,52 @@ LOCAL void test_wpa3( void )
 }
 
 /*
+ * A password of WPA3 longer than WPA2's passphrase can be (63): 100
+ * letters are saved and handed to the join whole; WPA2/WPA3, which
+ * makes WPA2's key of it too, refuses it; and a request line longer
+ * than the old room of a line (1536 bytes) is read whole, not refused
+ */
+#define LONG_PW		100
+
+LOCAL void test_wpa3_long( void )
+{
+	UB	got[32];
+	char	pw[LONG_PW + 32], *line;
+	INT	i, n, pw_len = 0;
+	BOOL	have = TRUE;
+
+	line = (char *)Kmalloc(2048);
+	KT_ASSERT(line != NULL);
+	if ( line == NULL ) return;
+	n = (INT)knl_strlen("SAVE " HEX_C " wpa3 auto ");
+	knl_memcpy(line, "SAVE " HEX_C " wpa3 auto ", n);
+	for ( i = 0; i < LONG_PW; i++ ) line[n + i] = (char)( 'a' + i % 26 );
+	line[n + LONG_PW] = '\0';
+	KT_ASSERT_ER(knl_wifi_request(me, line), E_OK);
+	KT_ASSERT_EQ(secret_c(me, got, &have, NULL, NULL, pw, &pw_len), SAVED_WPA3);
+	KT_ASSERT_EQ(pw_len, LONG_PW);
+	for ( i = 0; i < pw_len && pw[i] == (char)( 'a' + i % 26 ); i++ ) ;
+	KT_ASSERT_EQ(i, LONG_PW);
+	/* WPA2/WPA3 with it: refused, the WPA3 one kept */
+	knl_memcpy(line, "SAVE " HEX_C " wpa2wpa3 auto ", n + 4);
+	n += 4;
+	for ( i = 0; i < LONG_PW; i++ ) line[n + i] = (char)( 'a' + i % 26 );
+	line[n + LONG_PW] = '\0';
+	KT_ASSERT_ER(knl_wifi_request(me, line), E_PAR);
+	KT_ASSERT_EQ(secret_c(me, got, &have, NULL, NULL, pw, &pw_len), SAVED_WPA3);
+	/* longer than the most a card takes: refused */
+	n -= 4;
+	knl_memcpy(line, "SAVE " HEX_C " wpa3 auto ", n);
+	for ( i = 0; i < 200; i++ ) line[n + i] = 'z';
+	line[n + 200] = '\0';
+	KT_ASSERT_ER(knl_wifi_request(me, line), E_PAR);
+	KT_ASSERT_ER(knl_wifi_request(me, "FORGET " HEX_C), E_OK);
+	knl_memset(pw, 0, sizeof(pw));
+	knl_memset(line, 0, 2048);
+	Kfree(line);
+}
+
+/*
  * The list of networks seen lately (wifi.c, bss_merge and bss_expire),
  * on a table of the test's own, the scans as on the Surface Go 2 while
  * joined: a full scan finds six networks; background scans that find
@@ -545,6 +591,7 @@ EXPORT void ktest_wifikey( void )
 	KT_RUN(test_forget);
 	KT_RUN(test_old);
 	KT_RUN(test_wpa3);
+	KT_RUN(test_wpa3_long);
 
 	/* the settings as they were, read again */
 	(void)knl_ob_session(NULL);

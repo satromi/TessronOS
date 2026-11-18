@@ -69,7 +69,8 @@ BOOL		g_has_parent;
 TS_UUID		g_parent, g_vobjid;
 BOOL		g_from_link;
 T_PRCOPEN	g_start_arg;
-UB		g_name[OB_NAME_MAX];
+UB		*g_name = (UB *)"";
+static BOOL	g_name_own = FALSE;	/* g_name is memory of this program's own */
 TS_UUID		g_win;
 ID		g_kw;
 INT		g_gid;
@@ -94,6 +95,8 @@ static T_OBWPOS	g_restore;
 static TS_UUID	*g_was;			/* what the record linked to as it was last read or written */
 static INT	g_nwas;
 static TS_UUID	g_watched[WATCH_MAX];
+static ID	g_watch_key[WATCH_MAX];	/* the key each is watched with */
+static ID	g_devlist;		/* the list of the devices, watched while a medium of a watched object is out */
 static INT	g_nwatched;
 
 /* the programs 実行 offers for a link */
@@ -104,11 +107,28 @@ static INT	g_napp;
 
 /* ---------------------------------------------------------------- saying things */
 
+/*
+ * A line said on the console, of TA_LOG bytes at most: what is longer
+ * (a long name in it) is cut there, and never in the middle of a letter
+ * -- what a caller cut short into its own line too
+ */
 void note( CONST char *s )
 {
-	char	line[TAD_NAME_MAX + 160];
+	char	line[TA_LOG];
+	INT	n, k, need;
 
-	snprintf(line, sizeof(line), "%s: %s\n", ( ta_host != NULL ) ? ta_host->who : "app", s);
+	n = snprintf(line, sizeof(line) - 1, "%s: %s", ( ta_host != NULL ) ? ta_host->who : "app", s);
+	if ( n > (INT)sizeof(line) - 2 ) n = (INT)sizeof(line) - 2;
+	/* a letter whose last bytes are not there is left out */
+	for ( k = n - 1; k >= 0 && ( (UB)line[k] & 0xC0 ) == 0x80; k-- ) ;
+	if ( k >= 0 && ( (UB)line[k] & 0x80 ) != 0 ) {
+		UB	c = (UB)line[k];
+
+		need = ( c >= 0xF0 ) ? 4 : ( c >= 0xE0 ) ? 3 : ( c >= 0xC0 ) ? 2 : 1;
+		if ( n - k < need ) n = k;
+	}
+	line[n++] = '\n';
+	line[n] = 0;
 	tm_putstring((CONST UB *)line);
 }
 
@@ -157,23 +177,105 @@ INT ta_stack_used( void )
 /* ---------------------------------------------------------------- the desktop */
 
 /* A request to the desktop, its panels over this window; the answer waited for */
+/*
+ * The tail of the next request (design 11.4): its parts gathered by
+ * ta_req_part, sent with it by ask_desktop and forgotten then. The
+ * answer is kept whole, its tail with it, until the next request:
+ * ta_ans_part finds a part of it.
+ */
+static UB	*rq_tail = NULL;
+static UINT	rq_tailsz = 0;
+static SZ	rq_cap = 0;
+static BOOL	rq_short = FALSE;		/* a part could not be added: the request is not sent */
+static UB	*an_whole = NULL;		/* the last answer, its tail after it */
+static SZ	an_cap = 0, an_size = 0;
+
+void ta_req_part( UINT kind, CONST UB *s, SZ len )
+{
+	SZ	need;
+
+	if ( s == NULL ) len = 0;
+	else if ( len < 0 ) len = (SZ)strlen((CONST char *)s);
+	need = (SZ)rq_tailsz + dt_tail_room(len);
+	if ( need > rq_cap ) {
+		SZ	cap = ( rq_cap == 0 ) ? 256 : rq_cap;
+		UB	*t;
+
+		while ( cap < need ) cap *= 2;
+		t = (UB *)realloc(rq_tail, (size_t)cap);
+		if ( t == NULL ) {
+			rq_short = TRUE;		/* not sent without it: ask_desktop answers E_NOMEM */
+			return;
+		}
+		rq_tail = t;
+		rq_cap = cap;
+	}
+	(void)dt_tail_put(rq_tail, &rq_tailsz, rq_cap, kind, s, len);
+}
+
+CONST UB *ta_ans_part( UINT kind, SZ *p_len )
+{
+	CONST T_DTANS	*a = (CONST T_DTANS *)an_whole;
+
+	if ( a == NULL || an_size < (SZ)sizeof(T_DTANS) ) {
+		if ( p_len != NULL ) *p_len = 0;
+		return NULL;
+	}
+	return dt_tail_get(dt_ans_tail(a, an_size), a->tailsz, kind, p_len);
+}
+
+/* A message read whole from a channel into *p_buf (as large as *p_cap, made larger as it must be): its size, or an error */
+SZ ta_read_whole( ID k, UB **p_buf, SZ *p_cap, TMO tmo )
+{
+	SZ	asz = 0;
+	ER	er;
+
+	for ( ;; ) {
+		if ( *p_buf == NULL || *p_cap < (SZ)sizeof(T_DTANS) ) {
+			UB	*b = (UB *)realloc(*p_buf, sizeof(T_DTANS) + 256);
+
+			if ( b == NULL ) return E_NOMEM;
+			*p_buf = b;
+			*p_cap = (SZ)sizeof(T_DTANS) + 256;
+		}
+		er = ob_rea_tmo(k, 0, 0, *p_buf, *p_cap, &asz, tmo);
+		if ( er == E_LIMIT && asz > *p_cap ) {
+			UB	*b = (UB *)realloc(*p_buf, (size_t)asz);
+
+			if ( b == NULL ) return E_NOMEM;
+			*p_buf = b;
+			*p_cap = asz;
+			continue;		/* the message is still there: read it again, whole */
+		}
+		return ( er < E_OK ) ? (SZ)er : asz;
+	}
+}
+
 ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
 	static UINT	seq;
 	TS_UUID		d, reply;
 	T_OBCRE		c;
-	SZ		asz = 0;
+	SZ		asz = 0, msz;
 	ID		k, ka;
 	ER		er;
+	UB		*msg;
 
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
+	er = E_OK;
+	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) er = E_NOEXS;
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
+	if ( er >= E_OK && ob_cre_obj(&c, &reply) < E_OK ) er = E_NOMEM;
+	ka = ( er >= E_OK ) ? ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT) : 0;
+	if ( er >= E_OK && ka <= 0 ) {
 		(void)ob_del_obj(&reply);
-		return E_OBJ;
+		er = E_OBJ;
+	}
+	if ( er < E_OK ) {
+		/* the tail gathered for it goes with it, not to the next request */
+		rq_tailsz = 0;
+		rq_short = FALSE;
+		return er;
 	}
 	rq->seq = ++seq;
 	rq->reply = reply;
@@ -183,12 +285,43 @@ ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 		/* asked over the program's window, unless the asker named another of the program's */
 		if ( memcmp(&rq->win, &none, sizeof(none)) == 0 ) rq->win = g_win;
 	}
+	/* a request that lost a part of its tail is not sent short */
+	if ( rq_short ) {
+		rq_short = FALSE;
+		rq_tailsz = 0;
+		ob_cls_obj(ka);
+		(void)ob_del_obj(&reply);
+		return E_NOMEM;
+	}
+	/* the request and its tail in one message */
+	rq->tailsz = rq_tailsz;
+	msz = (SZ)sizeof(*rq) + (SZ)rq_tailsz;
+	msg = (UB *)malloc((size_t)msz);
+	if ( msg != NULL ) {
+		memcpy(msg, rq, sizeof(*rq));
+		if ( rq_tailsz > 0 ) memcpy(msg + sizeof(*rq), rq_tail, rq_tailsz);
+	}
+	rq_tailsz = 0;
+	if ( msg == NULL ) {
+		ob_cls_obj(ka);
+		(void)ob_del_obj(&reply);
+		return E_NOMEM;
+	}
 	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
+	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, msg, msz, &asz) : (ER)k;
 	if ( k > 0 ) ob_cls_obj(k);
+	free(msg);
+	an_size = 0;
 	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
+		SZ	n = ta_read_whole(ka, &an_whole, &an_cap, wait_ms);
+
+		if ( n < 0 ) {
+			er = (ER)n;
+			break;
+		}
+		if ( n >= (SZ)sizeof(*an) && ((T_DTANS *)an_whole)->seq == rq->seq ) {
+			an_size = n;
+			memcpy(an, an_whole, sizeof(*an));
 			er = an->er;
 			break;
 		}
@@ -212,11 +345,10 @@ void ta_link_open( CONST T_VOBJ *v, UINT flags, INT rank )
 {
 	T_DTREQ	rq;
 	T_DTANS	an;
-	char	s[TAD_NAME_MAX + 32];
+	char	s[TA_LOG];
 	ER	er;
 
 	char	po[40], pv[40], pc[40];
-	INT	n = 0;
 
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_OPEN;
@@ -229,7 +361,8 @@ void ta_link_open( CONST T_VOBJ *v, UINT flags, INT rank )
 		ts_uuid_text(&g_obj, po);
 		ts_uuid_text(&v->vobjid, pv);
 		ts_uuid_text(&g_lch, pc);
-		n = snprintf((char *)rq.text, sizeof(rq.text), "%s\t%s\t%s\n", po, pv, pc);
+		snprintf(s, sizeof(s), "%s\t%s\t%s", po, pv, pc);
+		ta_req_part(DT_TAIL_TEXT, (CONST UB *)s, -1);
 		rq.flags |= DT_F_LINK;
 		/* shown as the link says */
 		rq.look.frcol = v->frcol;
@@ -237,14 +370,14 @@ void ta_link_open( CONST T_VOBJ *v, UINT flags, INT rank )
 		rq.look.tbcol = v->tbcol;
 		rq.look.bgcol = v->bgcol;
 		rq.grab_x = v->wordwrap;
-		snprintf((char *)rq.name, sizeof(rq.name), "%s", (CONST char *)v->viewmode);
+		ta_req_part(DT_TAIL_VIEW, v->vview, v->vview_len);
 	}
-	if ( v->applist[0] != 0 && (size_t)n + strlen((CONST char *)v->applist) < sizeof(rq.text) - 1 ) {
-		snprintf((char *)rq.text + n, sizeof(rq.text) - (size_t)n, "%s", (CONST char *)v->applist);
+	if ( v->vapplist_len > 0 ) {
+		ta_req_part(DT_TAIL_APPLIST, v->vapplist, v->vapplist_len);
 		rq.flags |= DT_F_APPLIST;
 	}
 	er = ask_desktop(&rq, &an, 3000);
-	snprintf(s, sizeof(s), "opened %s (%d)", (CONST char *)v->name, (INT)er);
+	snprintf(s, sizeof(s), "opened %.80s (%d)", (CONST char *)TAD_VS(v->vname), (INT)er);
 	note(s);
 	if ( er < E_OK ) say("開けませんでした");
 }
@@ -252,24 +385,21 @@ void ta_link_open( CONST T_VOBJ *v, UINT flags, INT rank )
 /*
  * A request about link vobjid of this record (DT_RQ_ATTR) named for the
  * desktop as DT_RQ_OPEN with DT_F_LINK names it: the record's object, the
- * vobjid and the channel in front of the applist, so that the windows
- * opened from the link are told what it changes. FALSE, and rq as it was,
- * when there is no channel or no room.
+ * vobjid and the channel, parted by tabs, as the tail's text (the applist
+ * is a part of its own), so that the windows opened from the link are
+ * told what it changes. FALSE, and rq as it was, when there is no channel.
  */
 BOOL ta_link_named( T_DTREQ *rq, CONST TS_UUID *vobjid )
 {
 	char	po[TS_UUID_STRLEN + 1], pv[TS_UUID_STRLEN + 1], pc[TS_UUID_STRLEN + 1];
-	size_t	a = ( ( rq->flags & DT_F_APPLIST ) != 0 ) ? strlen((CONST char *)rq->text) : 0;
-	size_t	f = 3 * ( TS_UUID_STRLEN + 1 );
 	char	head[3 * ( TS_UUID_STRLEN + 1 ) + 1];
 
-	if ( g_lport <= 0 || f + a >= sizeof(rq->text) ) return FALSE;
+	if ( g_lport <= 0 ) return FALSE;
 	ts_uuid_text(&g_obj, po);
 	ts_uuid_text(vobjid, pv);
 	ts_uuid_text(&g_lch, pc);
-	memmove(rq->text + f, rq->text, a + 1);
-	snprintf(head, sizeof(head), "%s\t%s\t%s\n", po, pv, pc);
-	memcpy(rq->text, head, f);
+	snprintf(head, sizeof(head), "%s\t%s\t%s", po, pv, pc);
+	ta_req_part(DT_TAIL_TEXT, (CONST UB *)head, -1);
 	rq->flags |= DT_F_LINK;
 	return TRUE;
 }
@@ -279,7 +409,7 @@ BOOL ta_link_named( T_DTREQ *rq, CONST TS_UUID *vobjid )
 /* What a record links to, every link counted */
 static INT targets_of( CONST T_TAD *rec, TS_UUID **p_out )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	n = tad_lnk_count(rec), i, k = 0;
 	TS_UUID	*t;
 
@@ -287,9 +417,11 @@ static INT targets_of( CONST T_TAD *rec, TS_UUID **p_out )
 	if ( n <= 0 ) return 0;
 	t = malloc(sizeof(TS_UUID) * (size_t)n);
 	if ( t == NULL ) return -1;
+	tad_vobj_init(&v);
 	for ( i = 0; i < n; i++ ) {
 		if ( tad_lnk_get(rec, i, &v) >= E_OK ) t[k++] = v.target;
 	}
+	tad_vobj_clear(&v);
 	*p_out = t;
 	return k;
 }
@@ -500,8 +632,11 @@ BOOL ta_disk_gone( BOOL figure )
 		}
 		free(buf);
 		if ( er >= E_OK ) {
+			char	tu[TS_UUID_STRLEN + 1];
+
 			rq.grab_x = 1;
-			ts_uuid_text(&tmp, (char *)rq.text);
+			ts_uuid_text(&tmp, tu);
+			ta_req_part(DT_TAIL_TEXT, (CONST UB *)tu, -1);
 			memset(&an, 0, sizeof(an));
 			er = ask_desktop(&rq, &an, TMO_FEVR);
 		}
@@ -536,21 +671,88 @@ void ta_watch( CONST TS_UUID *id )
 	k = ob_opn_obj(id, OB_OP_ATRRD);
 	if ( k <= 0 ) return;
 	memset(&req, 0, sizeof(req));
-	req.events = OB_E_CHANGE;
+	req.events = OB_E_CHANGE | OB_E_DETACH;
 	req.id = 1;
 	(void)ob_ntf_evt(k, OB_REC_ANY, &req, g_port);
-	/* the request goes with the key: the key is kept until the program ends */
+	/*
+	 * the request goes with the key: the key is kept until the program
+	 * ends, or until the medium the object is on goes (OB_E_DETACH,
+	 * ta_links_event), when it is closed at once so that the volume is
+	 * not held; the links watched again (ta_watch_links) watch it anew
+	 */
+	g_watch_key[g_nwatched] = k;
 	g_watched[g_nwatched++] = *id;
+}
+
+/* The medium of a watched object went: its key closed and the object no longer counted as watched */
+static BOOL watch_gone( CONST TS_UUID *id )
+{
+	INT	i;
+
+	for ( i = 0; i < g_nwatched; i++ ) {
+		if ( memcmp(&g_watched[i], id, sizeof(TS_UUID)) == 0 ) break;
+	}
+	if ( i >= g_nwatched ) return FALSE;
+	(void)ob_cls_obj(g_watch_key[i]);
+	g_nwatched--;
+	g_watched[i] = g_watched[g_nwatched];
+	g_watch_key[i] = g_watch_key[g_nwatched];
+	note("watched object gone with its medium: let go");
+	/*
+	 * the list of the devices watched until the links are watched again:
+	 * a disk that comes and a volume attached are told there (it is the
+	 * kernel's, on no medium, and holds no volume)
+	 */
+	if ( g_devlist <= 0 && g_port > 0 ) {
+		CONST TS_UUID	devlist = OB_UUID_DEVLIST_INIT;
+		T_OBNTF		req;
+
+		g_devlist = ob_opn_obj(&devlist, OB_OP_ATRRD);
+		if ( g_devlist > 0 ) {
+			memset(&req, 0, sizeof(req));
+			req.events = OB_E_CHANGE | OB_E_ATTACH;
+			req.id = 3;
+			if ( ob_ntf_evt(g_devlist, OB_REC_ANY, &req, g_port) <= 0 ) {
+				(void)ob_cls_obj(g_devlist);
+				g_devlist = 0;
+			}
+		} else {
+			g_devlist = 0;
+		}
+	}
+	return TRUE;
 }
 
 void ta_watch_links( void )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	i, n = ( g_rec != NULL ) ? tad_lnk_count(g_rec) : 0;
 
+	tad_vobj_init(&v);
 	for ( i = 0; i < n; i++ ) {
 		if ( tad_lnk_get(g_rec, i, &v) >= E_OK ) ta_watch(&v.target);
 	}
+	tad_vobj_clear(&v);
+}
+
+/*
+ * How many of the record's links point at objects not watched now (their
+ * medium out, or past WATCH_MAX): while any is, the list of the devices
+ * stays watched, and they are tried again as disks and volumes come
+ */
+static INT links_unwatched( void )
+{
+	T_VOBJ	v = { .recno = 0 };
+	INT	i, k, left = 0, n = ( g_rec != NULL ) ? tad_lnk_count(g_rec) : 0;
+
+	tad_vobj_init(&v);
+	for ( i = 0; i < n; i++ ) {
+		if ( tad_lnk_get(g_rec, i, &v) < E_OK ) continue;
+		for ( k = 0; k < g_nwatched && memcmp(&g_watched[k], &v.target, sizeof(TS_UUID)) != 0; k++ ) ;
+		if ( k >= g_nwatched ) left++;
+	}
+	tad_vobj_clear(&v);
+	return left;
 }
 
 /* The next number of text after a tab, from *p; 0 when there is none */
@@ -586,14 +788,24 @@ static void paper_shown( void );
  * none of its own. Only bgcol of the look shows here; the frame, the
  * letters and the band of the link are drawn by the window holding it.
  */
+/* The text of an answer or a notice given with its tail after it: "" when it has none */
+static CONST UB *told_text( CONST T_DTANS *an, SZ *p_len )
+{
+	CONST UB	*t = dt_tail_get(dt_ans_tail(an, (SZ)sizeof(*an) + (SZ)an->tailsz), an->tailsz, DT_TAIL_TEXT, p_len);
+
+	return ( t != NULL ) ? t : (CONST UB *)"";
+}
+
 static void link_look_told( CONST T_DTANS *an )
 {
 	TS_UUID	p, v;
 	char	s[48];
+	SZ	tl = 0;
+	CONST UB *tx = told_text(an, &tl);
 
-	if ( !g_has_parent || ts_str_to_uuid((CONST char *)an->text, &p) < E_OK
-	  || an->text[TS_UUID_STRLEN] != '\t'
-	  || ts_str_to_uuid((CONST char *)an->text + TS_UUID_STRLEN + 1, &v) < E_OK
+	if ( !g_has_parent || tl < 2 * TS_UUID_STRLEN + 1 || ts_str_to_uuid((CONST char *)tx, &p) < E_OK
+	  || tx[TS_UUID_STRLEN] != '\t'
+	  || ts_str_to_uuid((CONST char *)tx + TS_UUID_STRLEN + 1, &v) < E_OK
 	  || memcmp(&p, &g_parent, sizeof(TS_UUID)) != 0 || memcmp(&v, &g_vobjid, sizeof(TS_UUID)) != 0
 	  || memcmp(&an->into, &g_obj, sizeof(TS_UUID)) != 0 ) return;
 	g_link_bg = an->look.bgcol;
@@ -611,12 +823,14 @@ static void link_look_told( CONST T_DTANS *an )
  */
 static void link_told( CONST T_DTANS *an )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	TS_UUID	vid, id;
 	INT	at = 2 * TS_UUID_STRLEN + 1, sx, sy, zoom, wrap, i;
 	BOOL	changed = FALSE;
-	UB	vm[TAD_VIEW_MAX];
+	CONST UB *vm = NULL;
 	char	s[80];
+	SZ	tl = 0;
+	CONST UB *tx = told_text(an, &tl);
 
 	if ( an->how == DT_HOW_LINK_LOOK ) {
 		link_look_told(an);
@@ -628,29 +842,32 @@ static void link_told( CONST T_DTANS *an )
 		return;
 	}
 	/* the record's object, a tab, the link's vobjid */
-	if ( g_rec == NULL || ts_str_to_uuid((CONST char *)an->text, &id) < E_OK
-	  || memcmp(&id, &g_obj, sizeof(TS_UUID)) != 0 || an->text[TS_UUID_STRLEN] != '\t'
-	  || ts_str_to_uuid((CONST char *)an->text + TS_UUID_STRLEN + 1, &vid) < E_OK
-	  || tad_lnk_find(g_rec, &vid, &v) < E_OK ) return;
+	tad_vobj_init(&v);
+	if ( g_rec == NULL || tl < 2 * TS_UUID_STRLEN + 1 || ts_str_to_uuid((CONST char *)tx, &id) < E_OK
+	  || memcmp(&id, &g_obj, sizeof(TS_UUID)) != 0 || tx[TS_UUID_STRLEN] != '\t'
+	  || ts_str_to_uuid((CONST char *)tx + TS_UUID_STRLEN + 1, &vid) < E_OK
+	  || tad_lnk_find(g_rec, &vid, &v) < E_OK ) {
+		tad_vobj_clear(&v);
+		return;
+	}
 	if ( an->how == DT_HOW_LINK_VIEW ) {
 		if ( memcmp(&v.target, &an->into, sizeof(TS_UUID)) != 0 ) return;
-		sx = text_num(an->text, &at);
-		sy = text_num(an->text, &at);
-		zoom = text_num(an->text, &at);
-		wrap = text_num(an->text, &at);
+		sx = text_num(tx, &at);
+		sy = text_num(tx, &at);
+		zoom = text_num(tx, &at);
+		wrap = text_num(tx, &at);
 		i = 0;
-		if ( an->text[at] == '\t' ) {
-			for ( at++; an->text[at] != 0 && i < TAD_VIEW_MAX - 1; ) vm[i++] = an->text[at++];
+		if ( tx[at] == '\t' ) {
+			vm = tx + at + 1;
+			for ( ; vm[i] != 0; i++ ) ;
 		}
-		vm[i] = 0;
 		if ( v.scrollx != sx || v.scrolly != sy ) {
 			v.scrollx = sx;
 			v.scrolly = sy;
 			changed = TRUE;
 		}
-		if ( vm[0] != 0 && strcmp((CONST char *)v.viewmode, (CONST char *)vm) != 0 ) {
-			memcpy(v.viewmode, vm, (size_t)i + 1);
-			changed = TRUE;
+		if ( vm != NULL && i > 0 && strcmp((CONST char *)TAD_VS(v.vview), (CONST char *)vm) != 0 ) {
+			if ( tad_vobj_set(&v, TAD_W_VIEW, vm, i) >= E_OK ) changed = TRUE;
 		}
 		if ( wrap != TAD_WRAP_NONE && v.wordwrap != wrap ) {
 			v.wordwrap = wrap;
@@ -666,7 +883,7 @@ static void link_told( CONST T_DTANS *an )
 	} else if ( an->how == DT_HOW_LINK_ADD ) {
 		v.target = an->into;
 		memset(&v.vobjid, 0, sizeof(v.vobjid));
-		v.name[0] = 0;
+		(void)tad_vobj_set(&v, TAD_W_NAME, NULL, 0);
 		v.dlen = 0;			/* a new object has no data appended to it yet */
 		if ( ta_host != NULL && ta_host->picks_none != NULL ) ta_host->picks_none();
 		if ( tad_lnk_add(g_rec, &v, &id) >= E_OK ) {
@@ -676,15 +893,21 @@ static void link_told( CONST T_DTANS *an )
 			note("a link to the copy saved put with its link");
 		}
 	}
+	tad_vobj_clear(&v);
 }
 
 void ta_links_told( void )
 {
-	T_DTANS	an;
-	SZ	asz = 0;
+	static UB	*buf = NULL;
+	static SZ	cap = 0;
+	SZ		n;
 
-	while ( g_lport > 0 && ob_rea_tmo(g_lport, 0, 0, &an, sizeof(an), &asz, TMO_POL) >= E_OK ) {
-		if ( asz == (SZ)sizeof(an) ) link_told(&an);
+	/* each notice whole, its tail after it, as the program's told() is given it */
+	while ( g_lport > 0 && ( n = ta_read_whole(g_lport, &buf, &cap, TMO_POL) ) >= (SZ)sizeof(T_DTANS) ) {
+		T_DTANS	*an = (T_DTANS *)buf;
+
+		if ( n < (SZ)sizeof(T_DTANS) + (SZ)an->tailsz ) an->tailsz = 0;	/* not one: shorter than it says */
+		link_told(an);
 	}
 }
 
@@ -711,8 +934,13 @@ void ta_listen( CONST char *prog_id )
 	if ( !ta_told_channel(&ch) ) return;
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_TELL;
-	snprintf((char *)rq.name, sizeof(rq.name), "%s", prog_id);
-	ts_uuid_text(&ch, (char *)rq.text);
+	{
+		char	t[TS_UUID_STRLEN + 1];
+
+		ts_uuid_text(&ch, t);
+		ta_req_part(DT_TAIL_NAME, (CONST UB *)prog_id, -1);
+		ta_req_part(DT_TAIL_TEXT, (CONST UB *)t, -1);
+	}
 	memset(&an, 0, sizeof(an));
 	er = ask_desktop(&rq, &an, 5000);
 	snprintf(s, sizeof(s), "told of changes (%d)", (INT)er);
@@ -736,6 +964,27 @@ void ta_title( CONST char *title )
 
 BOOL ta_links_event( CONST T_OBNTM *m )
 {
+	CONST TS_UUID	devlist = OB_UUID_DEVLIST_INIT;
+
+	/* a watched object's medium went: its key let go, and the window drawn again */
+	if ( m->event == OB_E_DETACH && watch_gone(&m->uuid) ) {
+		tv_src_forget(&m->uuid);
+		g_dirty = TRUE;
+		return TRUE;
+	}
+	/* a disk came or a volume was attached: the links watched again, the list let go */
+	if ( g_devlist > 0 && memcmp(&m->uuid, &devlist, sizeof(TS_UUID)) == 0 ) {
+		ta_watch(&g_obj);
+		if ( g_has_parent ) ta_watch(&g_parent);
+		ta_watch_links();
+		if ( links_unwatched() == 0 ) {
+			(void)ob_cls_obj(g_devlist);
+			g_devlist = 0;
+			note("links watched again");
+		}
+		g_dirty = TRUE;
+		return TRUE;
+	}
 	if ( g_lport <= 0 || memcmp(&m->uuid, &g_lch, sizeof(TS_UUID)) != 0 ) return FALSE;
 	ta_links_told();
 	return TRUE;
@@ -933,10 +1182,15 @@ ER ta_text_away( T_DDED *e, T_DTREQ *rq, CONST UB *s, INT n )
 
 	rq->req = DT_RQ_CARRY;
 	rq->flags |= DT_F_TEXT;
-	k = ( n < DT_CARRY_TEXT - 1 ) ? n : DT_CARRY_TEXT - 1;
-	while ( k > 0 && k < n && ( s[k] & 0xC0 ) == 0x80 ) k--;	/* cut at a letter's edge */
-	for ( i = 0; i < k; i++ ) rq->text[i] = ( s[i] == '\n' || s[i] == '\t' ) ? ' ' : s[i];
-	rq->text[k] = 0;
+	/* the letters, all of them, on one line */
+	{
+		UB	*l = (UB *)malloc((size_t)n + 1);
+
+		k = 0;
+		for ( i = 0; l != NULL && i < n; i++ ) l[k++] = ( s[i] == '\n' || s[i] == '\t' ) ? ' ' : s[i];
+		ta_req_part(DT_TAIL_TEXT, l, k);
+		free(l);
+	}
 	frag = de_sel_frag(e);
 	put = ta_frag_put(frag);
 	if ( frag != NULL ) tad_free(frag);
@@ -979,7 +1233,7 @@ static void paper_shown( void )
 /* The object's paper, as the store has it */
 void ta_paper_read( void )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	UW	paper = TV_PAPER_LOOK;
 
 	memset(&v, 0, sizeof(v));
@@ -1007,13 +1261,14 @@ static BOOL link_reread( void )
 	if ( !g_has_parent ) return FALSE;
 	x = tv_src_read(&g_parent, 0, &n);
 	if ( x == NULL ) return FALSE;
-	v = (T_VOBJ *)malloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)calloc(1, sizeof(T_VOBJ));
 	if ( v != NULL && tad_parse(x, n, NULL, &rec) >= E_OK && rec != NULL
 	  && tad_lnk_find(rec, &g_vobjid, v) >= E_OK && memcmp(&v->target, &g_obj, sizeof(TS_UUID)) == 0 ) {
 		g_link_bg = v->bgcol;
 		found = TRUE;
 	}
 	if ( rec != NULL ) tad_free(rec);
+	if ( v != NULL ) tad_vobj_clear(v);
 	free(v);
 	free(x);
 	return found;
@@ -1038,7 +1293,7 @@ static BOOL link_watch( CONST char *what )
 	T_DTREQ	rq;
 	T_DTANS	an;
 	char	po[TS_UUID_STRLEN + 1], pv[TS_UUID_STRLEN + 1], pc[TS_UUID_STRLEN + 1];
-	char	s[64];
+	char	s[3 * ( TS_UUID_STRLEN + 1 ) + 64];
 	ER	er;
 
 	if ( !g_has_parent || g_lport <= 0 ) return FALSE;
@@ -1050,7 +1305,8 @@ static BOOL link_watch( CONST char *what )
 	ts_uuid_text(&g_parent, po);
 	ts_uuid_text(&g_vobjid, pv);
 	ts_uuid_text(&g_lch, pc);
-	snprintf((char *)rq.text, sizeof(rq.text), "%s\t%s\t%s\n", po, pv, pc);
+	snprintf(s, sizeof(s), "%s\t%s\t%s", po, pv, pc);
+	ta_req_part(DT_TAIL_TEXT, (CONST UB *)s, -1);
 	er = ask_desktop(&rq, &an, 3000);
 	if ( er >= E_OK && an.how == DT_HOW_LINK_LOOK ) {
 		g_link_bg = an.look.bgcol;
@@ -1112,11 +1368,36 @@ BOOL ta_paper_changed( CONST TS_UUID *u )
 /* The object opened found: what its store says of it, and the links' store made ready */
 static ER started( CONST T_OBREF *p_ref )
 {
+	UB	*whole = ui_obj_name(&g_obj);
+
 	g_autoref = (BOOL)( ( p_ref->flags & OB_F_AUTOREF ) != 0 );
-	memcpy(g_name, p_ref->name, OB_NAME_MAX);
-	g_name[OB_NAME_MAX - 1] = 0;
+	if ( whole != NULL ) {
+		(void)ta_set_name(whole);	/* no memory: the window has no name */
+	}
+	free(whole);
 	tv_src_init();
 	return E_OK;
+}
+
+CONST UB *ta_name( void )
+{
+	return g_name;
+}
+
+BOOL ta_set_name( CONST UB *name )
+{
+	size_t	n;
+	UB	*c;
+
+	if ( name == NULL ) name = (CONST UB *)"";
+	n = strlen((CONST char *)name);
+	c = (UB *)malloc(n + 1);
+	if ( c == NULL ) return FALSE;
+	memcpy(c, name, n + 1);
+	if ( g_name_own ) free(g_name);
+	g_name = c;
+	g_name_own = TRUE;
+	return TRUE;
 }
 
 ER ta_start( CONST T_TAHOST *host, T_OBREF *p_ref )
@@ -1238,7 +1519,7 @@ ER ta_win_open( UW events )
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_WINDOW;
 	c.sub = OB_S_WINDOW;
-	c.name = g_name;
+	c.name = ta_name();		/* the title, whole (the window manager shows what fits) */
 	c.json = (CONST UB *)json;
 	c.jsonsz = (SZ)strlen(json);
 	if ( ob_cre_obj(&c, &g_win) < E_OK ) return E_OBJ;
@@ -1389,7 +1670,7 @@ ER ta_print( CONST T_TAD *rec, UINT flags )
 		rq.target = up.obj;
 		rq.flags = DT_F_PR_PAPER | ( flags & ( DT_F_PR_DETAIL | DT_F_PR_HIDDEN ) );
 		rq.look.bgcol = g_paper;
-		snprintf((char *)rq.name, sizeof(rq.name), "%s", (char *)g_name);
+		ta_req_part(DT_TAIL_NAME, ta_name(), -1);
 		er = ask_desktop(&rq, &an, 60 * 60 * 1000);
 	}
 	free(x);
@@ -1405,9 +1686,12 @@ static void link_named( T_DTREQ *rq )
 {
 	char	p[TS_UUID_STRLEN + 1], v[TS_UUID_STRLEN + 1];
 
+	char	t[2 * ( TS_UUID_STRLEN + 1 )];
+
 	ts_uuid_text(&g_parent, p);
 	ts_uuid_text(&g_vobjid, v);
-	snprintf((char *)rq->text, sizeof(rq->text), "%s\t%s", p, v);
+	snprintf(t, sizeof(t), "%s\t%s", p, v);
+	ta_req_part(DT_TAIL_TEXT, (CONST UB *)t, -1);
 	rq->target = g_obj;
 	rq->recno = g_recno;
 }
@@ -1457,7 +1741,7 @@ void ta_link_view_back( INT sx, INT sy, INT zoom, INT wrap, CONST char *view )
 	rq.grab_y = sy;
 	rq.look.w = zoom;
 	rq.look.h = wrap;
-	snprintf((char *)rq.name, sizeof(rq.name), "%s", ( view != NULL ) ? view : "");
+	if ( view != NULL && view[0] != 0 ) ta_req_part(DT_TAIL_VIEW, (CONST UB *)view, -1);
 	er = ask_desktop(&rq, &an, 5000);
 	snprintf(s, sizeof(s), "link view %d,%d %d%% (%d)%s", sx, sy, zoom, (INT)er,
 		 ( wrap == TAD_WRAP_ON ) ? " wrap" : ( wrap == TAD_WRAP_OFF ) ? " nowrap" : "");
@@ -1571,8 +1855,13 @@ void ta_window_keep( void )
 	}
 	free(m);
 	ob_cls_obj(k);
-	snprintf(s, sizeof(s), "window kept %d,%d %dx%d screen %08x (%d)", p.r.left, p.r.top, p.r.right - p.r.left,
-		 p.r.bottom - p.r.top, (UINT)p.screen, (INT)er);
+	if ( p.screen != 0 ) {
+		snprintf(s, sizeof(s), "window kept %d,%d %dx%d on screen %08x (%d)", p.r.left, p.r.top, p.r.right - p.r.left,
+			 p.r.bottom - p.r.top, (UINT)p.screen, (INT)er);
+	} else {
+		snprintf(s, sizeof(s), "window kept %d,%d %dx%d (%d)", p.r.left, p.r.top, p.r.right - p.r.left,
+			 p.r.bottom - p.r.top, (INT)er);
+	}
 	note(s);
 }
 
@@ -1586,7 +1875,7 @@ void ta_trash_open( void )
 
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_TOOL;
-	strncpy((char *)rq.name, "屑実身操作", sizeof(rq.name) - 1);
+	ta_req_part(DT_TAIL_NAME, (CONST UB *)"屑実身操作", -1);
 	er = ask_desktop(&rq, &an, 5000);
 	snprintf(s, sizeof(s), "trash asked %d", (INT)( ( er < E_OK ) ? er : an.er ));
 	note(s);
@@ -1625,6 +1914,8 @@ INT ta_exec_menu( ID mid, CONST T_VOBJ *v )
 	g_napp = 0;
 	for ( k = 0; k < n && g_napp < APP_MAX; k++ ) {
 		INT	i = 0, j;
+		SZ	tl = 0;
+		CONST UB *tx;
 
 		memset(&rq, 0, sizeof(rq));
 		memset(&an, 0, sizeof(an));
@@ -1633,14 +1924,16 @@ INT ta_exec_menu( ID mid, CONST T_VOBJ *v )
 		rq.recno = k;
 		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
 		n = (INT)an.how;
-		/* "id\tname" */
-		for ( j = 0; i < DT_TEXT_MAX && an.text[i] != 0 && an.text[i] != '\t'; i++ ) {
-			if ( j < APP_ID - 1 ) g_app_id[g_napp][j++] = an.text[i];
+		/* "id\tname", the answer's text */
+		tx = ta_ans_part(DT_TAIL_TEXT, &tl);
+		if ( tx == NULL ) continue;
+		for ( j = 0; i < tl && tx[i] != '\t'; i++ ) {
+			if ( j < APP_ID - 1 ) g_app_id[g_napp][j++] = tx[i];
 		}
 		g_app_id[g_napp][j] = 0;
-		if ( j == 0 || i >= DT_TEXT_MAX || an.text[i] != '\t' ) continue;
-		for ( i++, j = 0; i < DT_TEXT_MAX && an.text[i] != 0; i++ ) {
-			if ( j < APP_NAME - 1 ) g_app_name[g_napp][j++] = an.text[i];
+		if ( j == 0 || i >= tl || tx[i] != '\t' ) continue;
+		for ( i++, j = 0; i < tl; i++ ) {
+			if ( j < APP_NAME - 1 ) g_app_name[g_napp][j++] = tx[i];
 		}
 		g_app_name[g_napp][j] = 0;
 		g_app_kind[g_napp] = (BOOL)( ( an.flags & DT_F_KIND ) != 0 );
@@ -1661,17 +1954,17 @@ void ta_exec_app( CONST T_VOBJ *v, INT index )
 	T_DTREQ	rq;
 	T_DTANS	an;
 	ER	er;
-	char	s[TAD_NAME_MAX + 64];
+	char	s[TA_LOG];
 
 	if ( index < 0 || index >= g_napp ) return;
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_EXEC;
 	rq.target = v->target;
 	rq.recno = -1;
-	snprintf((char *)rq.name, sizeof(rq.name), "%s", (char *)g_app_id[index]);
+	ta_req_part(DT_TAIL_NAME, g_app_id[index], -1);
 	if ( g_app_kind[index] ) rq.flags |= DT_F_KIND;
 	er = ask_desktop(&rq, &an, 5000);
-	snprintf(s, sizeof(s), "exec %s %s (%d)", (char *)v->name, (char *)g_app_id[index], (INT)er);
+	snprintf(s, sizeof(s), "exec %.80s %s (%d)", (char *)TAD_VS(v->vname), (char *)g_app_id[index], (INT)er);
 	note(s);
 }
 

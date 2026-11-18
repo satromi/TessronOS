@@ -39,4 +39,7 @@ IMPORT char	*knl_strncpy( char *dst, const char *src, SZ n );
 IMPORT int	knl_strcmp( const char *s1, const char *s2 );
 IMPORT char	*knl_strcat( char *dst, const char *src );
 
+/* How many of the len bytes of UTF-8 s, at most max, end on a whole letter */
+IMPORT SZ	knl_utf8_fit( const UB *s, SZ len, SZ max );
+
 #endif /* _TSTDLIB_ */

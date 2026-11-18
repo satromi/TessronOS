@@ -1,15 +1,24 @@
 # 仮身の右ボタンのメニューから管理情報を開き、ウインドウの一覧と画面を確かめる(tools/ui_run.py)
+# BTRON のウインドウ(仮身一覧のプロセス)の仮身 TADjsについて は 14,79〜144,97 にある。
+# メニューは「閉じる」を押した位置に置いて開き、実身操作は y=228、その下位の一覧の
+# 管理情報は y=308(実身名変更から 5 行目)にある。
 wins
-click 110 100
-click 110 100 1
+click 110 88
+wait 300
+logmark
+click 110 88 1
+expectsince cabinet: menu
 wait 500
-move 140 240
+move 140 228
 wait 150
-move 230 240
+move 160 228
+wait 300
+move 230 228
+wait 400
+move 230 308
 wait 150
-move 230 321
-wait 150
-click 230 321
+click 230 308
+waitwin TADjsについての管理情報 30
 win TADjsについての管理情報
 shot info_window
 click 262 93

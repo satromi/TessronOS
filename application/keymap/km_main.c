@@ -210,7 +210,7 @@ static CONST KBPLACE	kb_tron[] = {
 #define P_LATIN		11		/* panel 1: pop-ups, 1 up in the order of KM_LATIN_*, ... */
 #define P_KANA		12
 #define P_SHAPE		13
-#define P_VIEW		14
+#define KM_P_VIEW		14
 #define P_PICK		15		/* a switch */
 #define P_SAID		1		/* the line beside them */
 #define P_LHEAD		1		/* panel 2: the words over the list */
@@ -469,7 +469,7 @@ static void draw_key( CONST KBKEY *k, CONST T_DPRECT *r, void *arg )
  * back to the state).
  */
 #define P_NTOP		5
-static CONST INT	s_top_num[P_NTOP] = { P_LATIN, P_KANA, P_SHAPE, P_VIEW, P_PICK };
+static CONST INT	s_top_num[P_NTOP] = { P_LATIN, P_KANA, P_SHAPE, KM_P_VIEW, P_PICK };
 static INT		s_top_shown[P_NTOP];
 static CONST char	*s_said_shown;
 static INT		s_nmap_shown;
@@ -832,7 +832,7 @@ static void panel_event( UI *u, CONST T_OBNTM *m )
 		case P_LATIN:	if ( v >= 1 && v - 1 != g_st.latin ) set_latin(v - 1);	break;
 		case P_KANA:	if ( v >= 1 && v - 1 != g_st.kana ) set_kana(v - 1);	break;
 		case P_SHAPE:	if ( v >= 1 && v - 1 != shape() ) set_shape(v - 1);	break;
-		case P_VIEW:	if ( v >= 1 ) set_view((BOOL)( v == 2 ));		break;
+		case KM_P_VIEW:	if ( v >= 1 ) set_view((BOOL)( v == 2 ));		break;
 		case P_PICK:	set_pick((BOOL)( v != 0 ));				break;
 		default:	break;
 		}

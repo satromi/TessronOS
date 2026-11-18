@@ -38,6 +38,10 @@
 #include <ts/hid.h>
 #include <ts/tray.h>
 #include <ts/tadlnk.h>
+#include "../dtask.h"
+
+/* The words of the next request and the last answer, as long as they are (dtask.h) */
+static DTASK	g_dq;
 
 /* ---------------------------------------------------------------- records */
 
@@ -95,15 +99,11 @@ static ER rec_write( CONST TS_UUID *u, CONST UB *data, INT len )
 	return er;
 }
 
-void name_of( CONST TS_UUID *u, UB *out )
+UB *name_of( CONST TS_UUID *u )
 {
-	T_OBREF	ref;
+	UB	*nm = ui_obj_name(u);
 
-	out[0] = 0;
-	if ( ob_ref_obj(u, &ref) >= E_OK ) {
-		memcpy(out, ref.name, OB_NAME_MAX);
-		out[OB_NAME_MAX - 1] = 0;
-	}
+	return ( nm != NULL ) ? nm : (UB *)calloc(1, 1);
 }
 
 INT meta_of( CONST TS_UUID *u )
@@ -352,7 +352,7 @@ ER print_sheet( void )
 		memset(&rq, 0, sizeof(rq));
 		rq.req = DT_RQ_PRINT;
 		rq.target = up.obj;
-		snprintf((char *)rq.name, sizeof(rq.name), "%s", (char *)g_name);
+		(void)dq_part(&g_dq, DT_TAIL_NAME, g_name, -1);
 		/* the person works the desktop's panels: as long as that takes */
 		er = ask_desktop(&rq, &an, 60 * 60 * 1000);
 		snprintf(line, sizeof(line), "print answered %d", (INT)er);
@@ -364,40 +364,25 @@ ER print_sheet( void )
 
 ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
-	static UINT	seq;
-	TS_UUID		d, reply;
-	T_OBCRE		c;
-	SZ		asz = 0;
-	ID		k, ka;
-	ER		er;
+	ER	er = dq_ask(&g_dq, rq, an, &g_win, wait_ms);
 
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
-	rq->seq = ++seq;
-	rq->reply = reply;
-	rq->win = g_win;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	/* the answer waited for on its channel, at most wait_ms */
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
-			er = an->er;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
 	settle();
 	return er;
+}
+
+/* The applist of link el, whole, in the next request's tail (ct_link_req) */
+static void link_req( T_DTREQ *rq, CONST UB *el, INT n )
+{
+	if ( dq_room(&g_dq, ct_link_room(el, n)) >= E_OK ) {
+		(void)ct_link_req(rq, el, n, g_dq.tail, &g_dq.tailsz, g_dq.cap);
+	}
+}
+
+/* The same with the link named for the desktop (ct_link_from): FALSE when it cannot be */
+static BOOL link_from( T_DTREQ *rq, CONST TS_UUID *parent, CONST UB *el, INT n )
+{
+	return (BOOL)( dq_room(&g_dq, ct_link_room(el, n)) >= E_OK
+		    && ct_link_from(rq, parent, &g_lch, el, n, g_dq.tail, &g_dq.tailsz, g_dq.cap) >= E_OK );
 }
 
 /* The link in the cell in hand, and its element */
@@ -442,23 +427,40 @@ static void ask_of( CONST CXCELL *c, UINT req, T_DTREQ *rq )
 	}
 	rq->look.autoopen = ct_attr_bool(c->el, c->ellen, "autoopen", FALSE) ? 1 : 0;
 	if ( ct_attr_bool(c->el, c->ellen, "hidden", FALSE) ) rq->flags |= DT_F_HIDDEN;
+	ct_link_was(rq, c->el, c->ellen);	/* where it is in the sheet's record */
+	/* its relationship and applist, whole, in the tail: a link carried out keeps them */
+	{
+		INT	rl = ct_attr_text(c->el, c->ellen, "relationship", NULL, 0);
+
+		if ( rl > 0 ) {
+			UB	*t = (UB *)malloc((size_t)rl + 1);
+
+			if ( t == NULL ) {
+				g_dq.er = E_NOMEM;		/* the request fails rather than go without it */
+			} else {
+				(void)ct_attr_text(c->el, c->ellen, "relationship", t, rl + 1);
+				(void)dq_part(&g_dq, DT_TAIL_REL, t, rl);
+				free(t);
+			}
+		}
+	}
+	link_req(rq, c->el, c->ellen);
 }
 
 /*
  * 仮身属性変更 of a link named for the desktop as opening it names it
  * (DT_F_LINK), so that the windows opened from the link are told its new
- * look; the relationship (name) and wordWrap (grab_x) the naming writes
- * are put back as the request had them
+ * look; the wordWrap (grab_x) the naming writes is put back as the
+ * request had it
  */
 static void attr_named( T_DTREQ *rq, CONST TS_UUID *parent, CONST UB *el, INT n )
 {
-	UB	name[sizeof(rq->name)];
 	INT	gx = rq->grab_x;
+	UINT	was = g_dq.tailsz;
 
 	if ( g_lport <= 0 ) return;
-	memcpy(name, rq->name, sizeof(name));
-	(void)ct_link_from(rq, parent, &g_lch, el, n);
-	memcpy(rq->name, name, sizeof(name));
+	/* the naming's parts after ask_of's (its applist, put again, is found first either way) */
+	if ( !link_from(rq, parent, el, n) ) g_dq.tailsz = was;
 	rq->grab_x = gx;
 }
 
@@ -467,7 +469,7 @@ void link_open( INT col, INT row )
 	CXCELL	*c = cx_get(&g_s, col, row);
 	T_DTREQ	rq;
 	T_DTANS	an;
-	UB	nm[OB_NAME_MAX];
+	UB	*nm;
 	char	s[120];
 	ER	er;
 
@@ -477,15 +479,16 @@ void link_open( INT col, INT row )
 	if ( !link_target(c, &rq.target) ) return;
 	rq.recno = -1;
 	/* what the window opened does to the link comes back to be put in the sheet (DT_F_LINK) */
-	if ( g_lport > 0 && ct_link_from(&rq, &g_obj, &g_lch, c->el, c->ellen) ) {
+	if ( g_lport > 0 && link_from(&rq, &g_obj, c->el, c->ellen) ) {
 		rq.look.frcol = col_attr(c, "frcol");
 		rq.look.chcol = col_attr(c, "chcol");
 		rq.look.tbcol = col_attr(c, "tbcol");
 		rq.look.bgcol = col_attr(c, "bgcol");
 	}
 	er = ask_desktop(&rq, &an, 3000);
-	name_of(&rq.target, nm);
-	snprintf(s, sizeof(s), "opened %s (%d)", nm, (INT)er);
+	nm = name_of(&rq.target);
+	snprintf(s, sizeof(s), "opened %s (%d)", (CONST char *)NM_OR_EMPTY(nm), (INT)er);
+	free(nm);
 	note(s);
 	if ( er < E_OK ) say("開けませんでした");
 }
@@ -574,13 +577,12 @@ void exec_menu( ID mid )
 	g_napp = 0;
 	for ( k = 0; c != NULL && k < n; k++ ) {
 		ask_of(c, DT_RQ_APPS, &rq);
-		ct_link_req(&rq, c->el, c->ellen);
 		rq.recno = k;
 		memset(&an, 0, sizeof(an));
 		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
 		n = (INT)an.how;
 		if ( !app_room(n) ) break;
-		if ( ct_app_entry(&an, g_app_id[g_napp], g_app_name[g_napp], &g_app_kind[g_napp]) ) g_napp++;
+		if ( ct_app_entry((CONST T_DTANS *)g_dq.ans, g_app_id[g_napp], g_app_name[g_napp], &g_app_kind[g_napp]) ) g_napp++;
 	}
 	rows = malloc(WM_LABEL_MAX * (size_t)( g_napp + 1 ));
 	if ( rows == NULL ) g_napp = 0;
@@ -748,13 +750,14 @@ void link_op( CONST char *code, INT index )
 	CXCELL	*c = the_link();
 	T_DTREQ	rq;
 	T_DTANS	an;
-	UB	nm[OB_NAME_MAX];
+	UB	*nm;
 	char	s[160];
 	TS_UUID	u;
 	ER	er;
 
 	if ( c == NULL || !link_target(c, &u) ) return;
-	name_of(&u, nm);
+	if ( strcmp(code, "exec.app") == 0 && ( index < 0 || index >= g_napp ) ) return;
+	nm = name_of(&u);
 	memset(&an, 0, sizeof(an));
 	if ( strcmp(code, "vobj.open") == 0 ) {
 		link_open(g_col, g_row);
@@ -766,21 +769,20 @@ void link_op( CONST char *code, INT index )
 		attr_named(&rq, &g_obj, c->el, c->ellen);
 		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
 			link_look(c, &an);
-			snprintf(s, sizeof(s), "attr %s", nm);
+			snprintf(s, sizeof(s), "attr %s", (CONST char *)NM_OR_EMPTY(nm));
 			note(s);
 			say("仮身属性を変更しました");
 		}
 	} else if ( strcmp(code, "vobj.relation") == 0 ) {
 		ask_of(c, DT_RQ_RELATION, &rq);
-		(void)ct_attr_text(c->el, c->ellen, "relationship", rq.name, sizeof(rq.name));
 		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-			CTSET	set;
+			CONST UB	*t = dq_ans_text(&g_dq, DT_TAIL_TEXT);
+			CTSET		set;
 
-			an.text[DT_TEXT_MAX - 1] = 0;
 			set.name = "relationship";
-			set.value = ( an.text[0] != 0 ) ? an.text : NULL;
+			set.value = ( t[0] != 0 ) ? t : NULL;
 			(void)link_edit(c, &set, 1);
-			snprintf(s, sizeof(s), "relation %s [%s]", nm, (char *)an.text);
+			snprintf(s, sizeof(s), "relation %s [%.80s]", (CONST char *)NM_OR_EMPTY(nm), (CONST char *)t);
 			note(s);
 			say("続柄を変更しました");
 		}
@@ -791,8 +793,7 @@ void link_op( CONST char *code, INT index )
 	} else if ( strcmp(code, "real.rename") == 0 ) {
 		ask_of(c, DT_RQ_RENAME, &rq);
 		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-			an.text[DT_TEXT_MAX - 1] = 0;
-			snprintf(s, sizeof(s), "renamed %s", (char *)an.text);
+			snprintf(s, sizeof(s), "renamed %.80s", (CONST char *)dq_ans_text(&g_dq, DT_TAIL_TEXT));
 			note(s);
 		}
 	} else if ( strcmp(code, "real.duplicate") == 0 || strcmp(code, "real.newversion") == 0 ) {
@@ -803,7 +804,7 @@ void link_op( CONST char *code, INT index )
 		if ( er >= E_OK ) {
 			/* the copy is linked to by nothing yet: its link is counted when the sheet is written */
 			link_below(c, &an.into);
-			snprintf(s, sizeof(s), "%s %s", dup ? "duplicated" : "new version", nm);
+			snprintf(s, sizeof(s), "%s %s", dup ? "duplicated" : "new version", (CONST char *)NM_OR_EMPTY(nm));
 			note(s);
 			say(dup ? "実身を複製しました" : "新版を作成しました");
 		}
@@ -819,15 +820,15 @@ void link_op( CONST char *code, INT index )
 		ask_of(c, DT_RQ_SEARCH, &rq);
 		(void)ask_desktop(&rq, &an, 30 * 60 * 1000);
 	} else if ( strcmp(code, "exec.app") == 0 ) {
-		if ( index < 0 || index >= g_napp ) return;
 		ask_of(c, DT_RQ_EXEC, &rq);
-		snprintf((char *)rq.name, sizeof(rq.name), "%s", (char *)g_app_id[index]);
+		(void)dq_part(&g_dq, DT_TAIL_NAME, g_app_id[index], -1);
 		if ( app_kept() ) rq.flags |= DT_F_KEEP;
 		if ( g_app_kind[index] ) rq.flags |= DT_F_KIND;
 		er = ask_desktop(&rq, &an, 5000);
-		snprintf(s, sizeof(s), "exec %s %s (%d)", nm, (char *)g_app_id[index], (INT)er);
+		snprintf(s, sizeof(s), "exec %s %s (%d)", (CONST char *)NM_OR_EMPTY(nm), (char *)g_app_id[index], (INT)er);
 		note(s);
 	}
+	free(nm);
 	g_dirty = TRUE;
 }
 
@@ -881,6 +882,7 @@ static BOOL put_link( INT col, INT row, CONST UB *el, INT len )
 void dropped( void )
 {
 	T_OBDROP	*d;
+	CTBUF		b;
 	char		el[900], fr[8], ch[8], tb[8], bg[8], vs[40], ts[40];
 	INT		i, n = 0, col, row;
 
@@ -911,12 +913,23 @@ void dropped( void )
 			 "<link id=\"%s_0.xtad\" vobjid=\"%s\" tbcol=\"%s\" frcol=\"%s\" chcol=\"%s\" bgcol=\"%s\""
 			 " chsz=\"%d\" dlen=\"0\" framedisp=\"%s\" namedisp=\"%s\" pictdisp=\"%s\" roledisp=\"%s\""
 			 " typedisp=\"%s\" updatedisp=\"%s\" hidden=\"false\" width=\"%d\" height=\"%d\""
-			 " autoopen=\"false\" scrollx=\"0\" scrolly=\"0\" zoomratio=\"1\"/>",
+			 " autoopen=\"false\" scrollx=\"0\" scrolly=\"0\" zoomratio=\"1\"",
 			 ts, vs, tb, fr, ch, bg, ( v->chsz > 0 ) ? v->chsz : 14,
 			 ( disp & 0x10 ) ? "true" : "false", ( disp & 0x01 ) ? "true" : "false",
 			 ( disp & 0x20 ) ? "true" : "false", ( disp & 0x02 ) ? "true" : "false",
 			 ( disp & 0x04 ) ? "true" : "false", ( disp & 0x08 ) ? "true" : "false", w, h);
-		if ( put_link(col + i, row, (CONST UB *)el, (INT)strlen(el)) ) n++;
+		/* and the name, relationship and applist it was carried with, as long as they are */
+		ct_buf_grow(&b, 1024, ct_more);
+		ct_put(&b, el);
+		ct_drop_words(&b, d, i);
+		ct_put(&b, "/>");
+		if ( b.fail ) {
+			(void)ct_more(b.p, 0);
+			say("メモリが足りないため、仮身をすべては置けませんでした");
+			break;
+		}
+		if ( put_link(col + i, row, b.p, b.n) ) n++;
+		(void)ct_more(b.p, 0);
 	}
 	if ( n > 0 ) {
 		char	s[80];
@@ -945,7 +958,7 @@ void carry_out( INT x0, INT y0, BOOL twice )
 	T_DTREQ		rq;
 	T_DTANS		an;
 	T_DPRECT	r;
-	UB		nm[OB_NAME_MAX];
+	UB		*nm;
 	TS_UUID		u;
 	BOOL		copy, given;
 	char		s[120];
@@ -953,7 +966,7 @@ void carry_out( INT x0, INT y0, BOOL twice )
 	UINT		seq;
 
 	if ( c == NULL || !link_target(c, &u) ) return;
-	name_of(&u, nm);
+	nm = name_of(&u);
 	link_box(c, &r);
 	ask_of(c, DT_RQ_CARRY, &rq);
 	rq.flags |= DT_F_TO_PROG;
@@ -962,6 +975,7 @@ void carry_out( INT x0, INT y0, BOOL twice )
 	memset(&an, 0, sizeof(an));
 	er = ask_desktop(&rq, &an, 30 * 60 * 1000);
 	if ( er < E_OK ) {
+		free(nm);
 		g_dirty = TRUE;
 		return;
 	}
@@ -973,7 +987,9 @@ void carry_out( INT x0, INT y0, BOOL twice )
 	if ( twice ) rq.flags |= DT_F_DUPLICATE;
 	memset(&an, 0, sizeof(an));
 	er = ask_desktop(&rq, &an, 10 * 60 * 1000);
-	snprintf(s, sizeof(s), "carried %s (%d)%s", nm, (INT)er, twice ? " as a new object" : copy ? " as a copy" : "");
+	snprintf(s, sizeof(s), "carried %s (%d)%s", (CONST char *)NM_OR_EMPTY(nm), (INT)er,
+		 twice ? " as a new object" : copy ? " as a copy" : "");
+	free(nm);
 	note(s);
 	if ( er >= E_OK && !twice && !copy ) {
 		cell_clear(g_col, g_row);

@@ -45,7 +45,7 @@
  * in them: a name or a source escaped takes at most six bytes a byte.
  */
 #define XF_META_FIXED	4096
-#define XF_FILE_ROOM(src)	( XF_META_FIXED + 6 * ( slen((src)->filename) + XF_NAME_MAX ) )
+#define XF_FILE_ROOM(src)	( XF_META_FIXED + 6 * ( slen((src)->filename) + slen((CONST UB *)(src)->source) ) )
 
 /*
  * What taking in does to the new object. Not its deletion: an object
@@ -244,16 +244,27 @@ LOCAL void put_xml( BUF *w, CONST UB *s, INT n )
 	w->b[w->at] = 0;
 }
 
-/* Text inside a JSON string */
+/*
+ * Text inside a JSON string, escaped as JSON escapes it: '"' and '\'
+ * and every control letter (\u00XX, six bytes, as the room is counted)
+ */
 LOCAL void put_json( BUF *w, CONST UB *s, INT n )
 {
-	INT	i;
+	CONST char	*hex = "0123456789abcdef";
+	INT		i;
 
 	for ( i = 0; i < n && s[i] != 0 && w->at < w->max - 8; i++ ) {
 		if ( s[i] == '"' || s[i] == '\\' ) {
 			w->b[w->at++] = '\\';
 			w->b[w->at++] = s[i];
-		} else if ( s[i] >= 0x20 ) {
+		} else if ( s[i] < 0x20 ) {
+			w->b[w->at++] = '\\';
+			w->b[w->at++] = 'u';
+			w->b[w->at++] = '0';
+			w->b[w->at++] = '0';
+			w->b[w->at++] = (UB)hex[s[i] >> 4];
+			w->b[w->at++] = (UB)hex[s[i] & 15];
+		} else {
 			w->b[w->at++] = s[i];
 		}
 	}
@@ -290,7 +301,8 @@ LOCAL void put_file( BUF *w, CONST T_XFSRC *src, CONST char *type, UD size )
 		put(w, "\"");
 	}
 	put(w, ",\"source\":\"");
-	put_json(w, (CONST UB *)( ( src->source != NULL ) ? src->source : "" ), XF_NAME_MAX);
+	put_json(w, (CONST UB *)( ( src->source != NULL ) ? src->source : "" ),
+		 slen((CONST UB *)src->source));
 	put(w, "\"}");
 }
 
@@ -672,22 +684,27 @@ LOCAL INT tadjs_meta( CONST UB *j, INT len, CONST char *us, CONST char *source, 
 {
 	T_JSON	root, tf;
 	BUF	w, f;
-	UB	fb[512];
-	INT	at, i;
+	UB	*fb;
+	INT	at, i, r;
 	BOOL	has_tf, empty;
 
 	if ( js_parse(j, len, &root) < E_OK || js_type(&root) != JS_OBJECT ) {
 		return -1;
 	}
+	/* "tessronos.file": the fixed text, the identity, and the source escaped (six bytes a byte) */
+	f.max = 512 + 6 * slen((CONST UB *)source);
+	fb = (UB *)Kmalloc((SZ)f.max);
+	if ( fb == NULL ) {
+		return -1;
+	}
 	f.b = fb;
 	f.at = 0;
-	f.max = sizeof(fb);
 	put(&f, "{\"name\":\"");
 	put(&f, us);
 	put(&f, "_0.xtad\",\"mediatype\":\"application/x-xmltad\",\"size\":");
 	put_n(&f, size);
 	put(&f, ",\"source\":\"");
-	put_json(&f, (CONST UB *)source, XF_NAME_MAX);
+	put_json(&f, (CONST UB *)source, slen((CONST UB *)source));
 	put(&f, "\"}");
 
 	has_tf = (BOOL)( js_get(&root, "tessronos", &tf) >= E_OK && js_type(&tf) == JS_OBJECT );
@@ -706,6 +723,7 @@ LOCAL INT tadjs_meta( CONST UB *j, INT len, CONST char *us, CONST char *source, 
 	w.at = 0;
 	w.max = max;
 	if ( at >= max ) {
+		Kfree(fb);
 		return -1;
 	}
 	knl_memcpy(out, j, at);
@@ -720,9 +738,11 @@ LOCAL INT tadjs_meta( CONST UB *j, INT len, CONST char *us, CONST char *source, 
 		put(&w, (CONST char *)fb);
 		put(&w, "}");
 	}
+	Kfree(fb);
 	for ( ; at < len && w.at < w.max - 1; at++ ) out[w.at++] = j[at];
 	out[w.at] = 0;
-	return ( w.at < w.max - 1 ) ? w.at : -1;
+	r = ( w.at < w.max - 1 ) ? w.at : -1;
+	return r;
 }
 
 /* {uuid}.ico of a file set, read whole; NULL when there is none or it is no icon */
@@ -784,9 +804,13 @@ EXPORT ER xf_import_tadjs( CONST char *dir, CONST TS_UUID *uuid, CONST char *sou
 		return E_NOEXS;
 	}
 	/* the TADjs metadata, however long, and "tessronos.file" put in */
-	meta = (UB *)Kmalloc(jl + XF_META_FIXED + 6 * XF_NAME_MAX);
-	ml = ( meta != NULL ) ? tadjs_meta(j, (INT)jl, us, ( source != NULL ) ? source : "",
-					   size0, meta, (INT)jl + XF_META_FIXED + 6 * XF_NAME_MAX) : -1;
+	{
+		INT	room = (INT)jl + XF_META_FIXED + 6 * slen((CONST UB *)source);
+
+		meta = (UB *)Kmalloc((SZ)room);
+		ml = ( meta != NULL ) ? tadjs_meta(j, (INT)jl, us, ( source != NULL ) ? source : "",
+						   size0, meta, room) : -1;
+	}
 	Kfree(j);
 	if ( ml <= 0 ) {
 		if ( meta != NULL ) Kfree(meta);
@@ -835,26 +859,54 @@ EXPORT ER xf_import_tadjs( CONST char *dir, CONST TS_UUID *uuid, CONST char *sou
 
 /* ---------------------------------------------------------------- what was taken in */
 
-/* The file's name the object keeps in "tessronos.file.name", or an empty name */
-LOCAL INT file_name( CONST TS_UUID *uuid, UB *out, INT max )
+/*
+ * The file's name the object keeps in "tessronos.file.name", whole, in
+ * memory of its own (Kfree it); NULL when it has none (or the memory
+ * cannot be had).
+ */
+LOCAL UB *file_name( CONST TS_UUID *uuid )
 {
-	T_JSON	root, tf, f;
-	UB	*meta;
+	T_JSON	root, tf, f, nv;
+	UB	*meta, *out = NULL;
 	SZ	size = 0;
-	INT	n = 0;
 
-	out[0] = 0;
 	meta = om_obj_meta(uuid, &size);
 	if ( meta == NULL ) {
-		return 0;
+		return NULL;
 	}
 	if ( js_parse(meta, (INT)size, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
-	  && js_get(&tf, "file", &f) >= E_OK ) {
-		n = js_get_str(&f, "name", out, max);
-		if ( n < 0 ) n = 0;
+	  && js_get(&tf, "file", &f) >= E_OK && js_get(&f, "name", &nv) >= E_OK
+	  && js_type(&nv) == JS_STRING ) {
+		/* unescaped, a string is never longer than its text */
+		out = (UB *)Kmalloc((SZ)nv.len + 1);
+		if ( out != NULL && js_str(&nv, out, nv.len + 1) <= 0 ) {
+			Kfree(out);
+			out = NULL;
+		}
 	}
 	Kfree(meta);
-	return n;
+	return out;
+}
+
+/*
+ * The name an object goes out as, whole, in memory of its own (Kfree
+ * it): the file's name it was taken in with, or its own name as xmlTAD.
+ * NULL when it has neither or the memory cannot be had.
+ */
+LOCAL UB *name_dup( CONST TS_UUID *uuid )
+{
+	UB	*out = file_name(uuid), *own;
+	SZ	len = 0;
+
+	if ( out == NULL && ( own = knl_ob_name(uuid, &len, NULL) ) != NULL ) {
+		out = (UB *)Kmalloc(len + 6);
+		if ( out != NULL ) {
+			knl_memcpy(out, own, (INT)len);
+			knl_memcpy(out + len, ".xtad", 6);
+		}
+		Kfree(own);
+	}
+	return out;
 }
 
 EXPORT INT xf_data_rec( CONST TS_UUID *uuid )
@@ -867,31 +919,63 @@ EXPORT INT xf_data_rec( CONST TS_UUID *uuid )
 	return ( r.nrec >= 2 ) ? 1 : 0;
 }
 
+/*
+ * The name put in max bytes. One that does not fit keeps its extension
+ * and loses the end of what is before it, at a whole letter; the whole
+ * of it is name_dup's.
+ */
+EXPORT UB *xf_name_dup( CONST TS_UUID *uuid, SZ *p_len )
+{
+	UB	*full = ( uuid != NULL ) ? name_dup(uuid) : NULL;
+
+	if ( p_len != NULL ) {
+		*p_len = ( full != NULL ) ? (SZ)slen(full) : 0;
+	}
+	if ( full != NULL && full[0] == 0 ) {
+		Kfree(full);
+		full = NULL;
+	}
+	return full;
+}
+
 EXPORT ER xf_name( CONST TS_UUID *uuid, UB *name, INT max )
 {
-	T_OBREF	r;
-	INT	n;
+	UB	*full;
+	INT	len, e, x, n;
 
 	if ( name == NULL || max <= 0 ) {
 		return E_PAR;
 	}
-	n = file_name(uuid, name, max);
-	if ( n == 0 && ob_ref_obj(uuid, &r) >= E_OK ) {
-		/* made here, never a file: its name, as xmlTAD */
-		CONST char	*x = ".xtad";
-		INT		k;
-
-		for ( ; r.name[n] != 0 && n < max - 6; n++ ) name[n] = r.name[n];
-		for ( k = 0; x[k] != 0; k++ ) name[n++] = (UB)x[k];
+	name[0] = 0;
+	full = name_dup(uuid);
+	if ( full == NULL ) {
+		return E_NOEXS;
+	}
+	len = slen(full);
+	if ( len <= max - 1 ) {
+		knl_memcpy(name, full, len + 1);
+		n = len;
+	} else {
+		e = ext_at(full);
+		x = len - e;				/* the extension with its dot */
+		if ( x >= max - 1 ) {
+			x = 0;
+			e = len;
+		}
+		n = (INT)knl_utf8_fit(full, e, (SZ)( max - 1 - x ));
+		knl_memcpy(name, full, n);
+		knl_memcpy(name + n, full + e, x);
+		n += x;
 		name[n] = 0;
 	}
+	Kfree(full);
 	return ( n > 0 ) ? E_OK : E_NOEXS;
 }
 
 EXPORT ER xf_find( CONST TS_UUID *box, CONST UB *filename, TS_UUID *p_uuid )
 {
 	TS_UUID	*ids;
-	UB	name[XF_NAME_MAX];
+	UB	*name;
 	INT	n = 0, i, all;
 	ER	er = E_NOEXS;
 
@@ -906,10 +990,12 @@ EXPORT ER xf_find( CONST TS_UUID *box, CONST UB *filename, TS_UUID *p_uuid )
 	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)all);
 	if ( ids != NULL && ob_lst_lnk(box, NULL, ids, all, &n) >= E_OK ) {
 		for ( i = 0; i < n && i < all && er < E_OK; i++ ) {
-			if ( xf_name(&ids[i], name, sizeof(name)) >= E_OK && same_nocase(name, filename) ) {
+			name = name_dup(&ids[i]);
+			if ( name != NULL && name[0] != 0 && same_nocase(name, filename) ) {
 				*p_uuid = ids[i];
 				er = E_OK;
 			}
+			if ( name != NULL ) Kfree(name);
 		}
 	}
 	if ( ids != NULL ) Kfree(ids);
@@ -919,20 +1005,34 @@ EXPORT ER xf_find( CONST TS_UUID *box, CONST UB *filename, TS_UUID *p_uuid )
 EXPORT ER xf_rename( CONST TS_UUID *uuid, CONST UB *filename )
 {
 	T_JSON	root, tf, f, nv;
-	UB	*old, stem[OB_NAME_MAX];
+	UB	*old, *stem;
 	BUF	w;
 	SZ	olen = 0;
-	INT	e, i, at, n;
+	INT	e, at, n;
 	ID	key;
 	ER	er;
 
 	if ( uuid == NULL || filename == NULL || filename[0] == 0 ) {
 		return E_PAR;
 	}
+	/*
+	 * The object is named by the file's name without its extension,
+	 * whole: the stem is copied into room of its own length, so a long
+	 * name is never cut (in the middle of a letter or anywhere else).
+	 */
 	e = ext_at(filename);
-	for ( i = 0; i < e && i < OB_NAME_MAX - 1; i++ ) stem[i] = filename[i];
-	stem[i] = 0;
-	er = om_store_rename(uuid, ( i > 0 ) ? stem : filename);
+	if ( e > 0 ) {
+		stem = (UB *)Kmalloc((SZ)e + 1);
+		if ( stem == NULL ) {
+			return E_NOMEM;
+		}
+		knl_memcpy(stem, filename, e);
+		stem[e] = 0;
+		er = om_store_rename(uuid, stem);
+		Kfree(stem);
+	} else {
+		er = om_store_rename(uuid, filename);
+	}
 	if ( er < E_OK ) {
 		return er;
 	}
@@ -969,27 +1069,33 @@ EXPORT ER xf_rename( CONST TS_UUID *uuid, CONST UB *filename )
 
 /* ---------------------------------------------------------------- giving out */
 
-EXPORT ER xf_export( CONST TS_UUID *uuid, XF_WRITE write, void *ctx, UB *name, INT max )
+EXPORT ER xf_export( CONST TS_UUID *uuid, XF_WRITE write, void *ctx, UB **p_name, SZ *p_len )
 {
-	UB	*buf;
-	SZ	asz = 0;
+	UB	*buf, *name = NULL;
+	SZ	asz = 0, nl = 0;
 	D	at = 0;
 	INT	rec;
 	ID	key;
 	ER	er;
 
+	if ( p_name != NULL ) *p_name = NULL;
+	if ( p_len != NULL ) *p_len = 0;
 	if ( uuid == NULL || write == NULL ) {
 		return E_PAR;
-	}
-	if ( name != NULL && ( er = xf_name(uuid, name, max) ) < E_OK ) {
-		return er;
 	}
 	rec = xf_data_rec(uuid);
 	if ( rec < 0 ) {
 		return (ER)rec;
 	}
+	if ( p_name != NULL ) {
+		name = xf_name_dup(uuid, &nl);
+		if ( name == NULL ) {
+			return E_NOEXS;
+		}
+	}
 	key = ob_opn_obj(uuid, OB_OP_R);
 	if ( key <= 0 ) {
+		if ( name != NULL ) Kfree(name);
 		return (ER)key;
 	}
 	buf = (UB *)Kmalloc(XF_CHUNK);
@@ -1007,7 +1113,15 @@ EXPORT ER xf_export( CONST TS_UUID *uuid, XF_WRITE write, void *ctx, UB *name, I
 	if ( er == E_NOEXS && at > 0 ) er = E_OK;	/* read past the end */
 	if ( buf != NULL ) Kfree(buf);
 	ob_cls_obj(key);
-	return ( er >= E_OK ) ? E_OK : er;
+	if ( er < E_OK ) {
+		if ( name != NULL ) Kfree(name);
+		return er;
+	}
+	if ( p_name != NULL ) {
+		*p_name = name;
+		if ( p_len != NULL ) *p_len = nl;
+	}
+	return E_OK;
 }
 
 /* ---------------------------------------------------------------- made and written as a file */
@@ -1062,7 +1176,7 @@ EXPORT ER xf_refresh( CONST TS_UUID *uuid )
 {
 	T_XFSRC		src;
 	T_OBREC		recs[4];
-	UB		name[XF_NAME_MAX], *text;
+	UB		*name, *text;
 	CONST char	*type = NULL;
 	UINT		kind;
 	SZ		asz = 0;
@@ -1071,12 +1185,15 @@ EXPORT ER xf_refresh( CONST TS_UUID *uuid )
 	ID		key;
 	ER		er;
 
-	if ( uuid == NULL || file_name(uuid, name, sizeof(name)) <= 0 ) {
+	name = ( uuid != NULL ) ? file_name(uuid) : NULL;
+	if ( name == NULL || name[0] == 0 ) {
+		if ( name != NULL ) Kfree(name);
 		return E_PAR;			/* not one of the file's form */
 	}
 	/* a file the POSIX programs wrote: its record 0 and metadata made again, others still reading it */
 	key = ob_opn_obj(uuid, ( XF_OPS & ~OB_O_EXCL ) | OB_O_WEXCL);
 	if ( key <= 0 ) {
+		Kfree(name);
 		return (ER)key;
 	}
 	er = ob_lst_rec(key, recs, 4, &cnt);
@@ -1102,6 +1219,7 @@ EXPORT ER xf_refresh( CONST TS_UUID *uuid )
 		if ( er >= E_OK ) er = meta_again(key, &src, type, size);
 	}
 	if ( text != NULL ) Kfree(text);
+	Kfree(name);
 	ob_cls_obj(key);
 	return er;
 }

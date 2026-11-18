@@ -44,7 +44,7 @@ typedef struct dtwin {
 	ID		okey;		/* the window as an object, watched for OB_E_CLOSE */
 	TS_UUID		id;		/* the object it stands for; 0 none */
 	UINT		tool;		/* DT_TOOL_OWN */
-	UB		name[TAD_NAME_MAX];
+	UB		*name;		/* the title it was opened with, whole (Kmalloc); NULL for want of memory */
 
 	/* 全画面表示, and where the window stood before it */
 	BOOL		full;
@@ -184,7 +184,7 @@ IMPORT UW dt_test_loops( void );
 
 typedef struct {
 	UB	id[DT_PROG_ID];		/* what an applist names it by */
-	UB	name[TAD_NAME_MAX];
+	UB	*name;			/* whole (Kmalloc), never NULL once read: dt_prog_clear lets it go */
 	UINT	kind;			/* DT_PK_* */
 	TS_UUID	uuid;			/* the program object */
 	INT	nbase;
@@ -196,9 +196,12 @@ typedef struct {
 	INT	nalias;
 	UB	alias[DT_PROG_ALIAS][DT_PROG_ID];	/* the ids it had before ("aliases"): an applist naming one opens it */
 	BOOL	open_link;		/* "openArg": "link": started with the link it was opened from (T_PRCOPEN) */
+	BOOL	once;			/* "once": one window whatever it is run on: run again, that window told */
 } DTPROG;
 
 IMPORT ER     dt_prog_start( void );
+/* What an entry read by dt_prog_read holds let go: its name */
+IMPORT void   dt_prog_clear( DTPROG *p );
 /* The program an applist names by id: the one with that id, else the one that had it before */
 IMPORT CONST DTPROG *dt_prog_find( CONST UB *id );
 IMPORT CONST DTPROG *dt_prog_of( CONST TS_UUID *uuid );
@@ -220,10 +223,12 @@ IMPORT INT    dt_prog_count( UINT kind );		/* how many dt_prog_list has to give 
 typedef struct {
 	UB	id[DT_PROG_ID];		/* the program's id */
 	UB	raw[DT_PROG_ID];	/* as the applist writes it (another id it had); "" not in the applist */
-	UB	name[TAD_NAME_MAX];
+	UB	*name;			/* whole (Kmalloc), never NULL: dt_app_free lets it go */
 	BOOL	listed;			/* named by the applist; FALSE: offered for the object's kind */
 } DTAPP;
 IMPORT INT    dt_app_list( CONST T_VOBJ *v, DTAPP *out, INT max, INT *p_dflt );
+/* The n entries dt_app_list gave, their names and the table (Kmalloc) let go; a NULL: nothing */
+IMPORT void   dt_app_free( DTAPP *a, INT n );
 /* DT_RQ_APPS: an entry of that list for a program's link, as ts/dtreq.h says */
 IMPORT ER     dt_apps_req( CONST T_DTREQ *rq, T_DTANS *an );
 /* DT_RQ_LINK_STATE: whether a program's link's object is open, and can be fixed to a program */
@@ -249,10 +254,9 @@ IMPORT ER     dt_prog_run( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v );
 IMPORT ER     dt_prog_open( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v );
 /*
  * A program started as a process with a start-up argument of its own,
- * size bytes of arg (at most DT_PROG_ARG): ディスク操作 is told so what it
- * is to do (T_DTDISKARG)
+ * size bytes of arg (as long as a start-up argument may be,
+ * TS_SPN_ARG_MAX): ディスク操作 is told so what it is to do (T_DTDISKARG)
  */
-#define DT_PROG_ARG	64
 IMPORT ER     dt_prog_run_arg( DTWIN *from, CONST DTPROG *p, CONST void *arg, SZ size );
 IMPORT BOOL   dt_prog_opening( CONST TS_UUID *obj );
 IMPORT void   dt_prog_opening_keys( CONST TS_UUID *obj );	/* asked again: its window takes the keys when up */
@@ -276,8 +280,80 @@ IMPORT void   dt_prog_watch( BOOL on );
 /* The starts asked now are of a group opened together, at this place in it (wm_set_rank); 0 ends it */
 IMPORT void   dt_prog_rank( UINT group, UINT rank );
 IMPORT BOOL   dt_prog_settled( INT *p_drawn, INT *p_gone, INT *p_all );
-/* An answer written at a channel (desktop.c) */
+/*
+ * An answer written at a channel (desktop.c), in the form of the request
+ * it answers: 'size' is sizeof(T_DTANS) for a request that had the tail's
+ * size, and the size of an older form otherwise. dt_answer writes one
+ * with no words (any task); dt_answer_words one with the words of a
+ * DTANS (below; the desktop's task), in its tail for the form of now,
+ * in its text for an older form when they fit (E_LIMIT in the answer
+ * when they do not).
+ */
 IMPORT void   dt_answer( CONST TS_UUID *reply, CONST T_DTANS *an, SZ size );
+struct dtans;
+IMPORT void   dt_answer_words( CONST TS_UUID *reply, CONST struct dtans *a, SZ size );
+
+/*
+ * The words of a request (its tail, DT_TAIL_* of ts/dtreq.h). A request
+ * is taken in the form of now whatever form it was written in: one of a
+ * size before the tail has its fixed name, text, questions and word on
+ * the button put into the tail as it is taken, and those fields are
+ * emptied in every request, so the words are read only with dt_rq_word,
+ * "" when there is none (*p_len 0). dt_rq_applist, dt_rq_view and
+ * dt_rq_rel are the applist the request carries (DT_F_APPLIST), the
+ * viewMode and the relationship of its link: an older form's name and
+ * text are put into those parts as the request is taken. dt_rq_dup copies a request with its tail (Kfree
+ * it); dt_rq_reword puts a word in place of the one of its kind, no
+ * longer than the old (E_LIMIT otherwise). dt_rq_tailed says whether
+ * the request being done had the tail's size: only then is the one who
+ * asked answered and told with a tail.
+ */
+IMPORT CONST UB *dt_rq_word( CONST T_DTREQ *rq, UINT kind, SZ *p_len );
+IMPORT CONST UB *dt_rq_applist( CONST T_DTREQ *rq, SZ *p_len );
+IMPORT CONST UB *dt_rq_view( CONST T_DTREQ *rq, SZ *p_len );
+IMPORT CONST UB *dt_rq_rel( CONST T_DTREQ *rq, SZ *p_len );
+IMPORT T_DTREQ  *dt_rq_dup( CONST T_DTREQ *rq );
+IMPORT ER        dt_rq_reword( T_DTREQ *rq, UINT kind, CONST UB *s, SZ len );
+IMPORT BOOL      dt_rq_tailed( void );
+IMPORT SZ        dt_rq_anssz( void );		/* the size its answer is written in (dt_answer) */
+
+/*
+ * An answer being made, with its words as long as they are: the text put
+ * together piece by piece (DT_TAIL_TEXT) and the 固有データ (DT_TAIL_DATA).
+ * The handlers of the requests are given &a->an of a DTANS begun with
+ * dt_ans_begin and put the words with dt_ans_cat, dt_ans_num and
+ * dt_ans_data; dt_answer sends them with it; dt_ans_end lets them go. A
+ * word that cannot be kept (no memory) makes the answer E_NOMEM.
+ * dt_ans_text gives the text put so far ("" none), dt_ans_untext empties
+ * it. They do nothing (E_PAR) to a T_DTANS that is no begun DTANS's.
+ */
+typedef struct dtans {
+	T_DTANS		an;		/* what the handler fills in */
+	UB		*text;		/* the text so far, ending in 0; NULL none */
+	SZ		textlen, textcap;
+	UB		*data;		/* the 固有データ; NULL none */
+	SZ		datalen;
+	BOOL		hasdata;
+	ER		er;		/* E_NOMEM when a word could not be kept */
+	struct dtans	*next;		/* the answers being made */
+} DTANS;
+IMPORT void      dt_ans_begin( DTANS *a, UINT seq );
+IMPORT void      dt_ans_end( DTANS *a );
+IMPORT ER        dt_ans_cat( T_DTANS *an, CONST UB *s, SZ len );
+IMPORT ER        dt_ans_num( T_DTANS *an, D v );
+IMPORT ER        dt_ans_data( T_DTANS *an, CONST UB *s, SZ len );
+IMPORT CONST UB *dt_ans_text( CONST T_DTANS *an, SZ *p_len );
+IMPORT void      dt_ans_untext( T_DTANS *an );
+/* The answer of a as it is written in the form of now, its tail after it (Kfree it); NULL no memory */
+IMPORT T_DTANS  *dt_ans_message( CONST DTANS *a );
+/*
+ * A program told at its channel (OB_O_NOWAIT, then OB_E_CHANGE) with an
+ * and its words, in the form of now when it asked in it (tail), else in
+ * the older one (dt_answer_words); len < 0 up to the 0. *p_gone: the
+ * channel could not be opened (its process ended).
+ */
+IMPORT ER        dt_tell_words( CONST TS_UUID *chan, CONST T_DTANS *an, BOOL tail,
+				CONST UB *text, SZ tl, CONST UB *data, SZ dl, BOOL *p_gone );
 
 /* The program box read again: what the registry knows is what the box links to */
 IMPORT void   dt_prog_reread( void );
@@ -415,7 +491,7 @@ IMPORT BOOL   dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj,
 			  CONST T_VOBJ *v );
 IMPORT BOOL   dt_app_locked( CONST T_VOBJ *v );
 IMPORT BOOL   dt_app_lockable( CONST T_VOBJ *v );
-IMPORT void   dt_req_applist( CONST T_DTREQ *rq, T_VOBJ *v );	/* the applist a program carried of its link */
+IMPORT ER     dt_req_applist( CONST T_DTREQ *rq, T_VOBJ *v );	/* the applist a program carried of its link */
 
 /*
  * The 仮身操作 and 実身操作 a process asks for a link it shows itself
@@ -544,6 +620,24 @@ IMPORT void   dt_tell( DTWIN *d, CONST char *l1, CONST char *l2 );
 IMPORT void   dt_no_memory( DTWIN *d );
 IMPORT BOOL   dt_ask_text( DTWIN *d, CONST char *p1, CONST char *p2,
 			   CONST UB *start, UB *out, INT max, CONST char *ok );
+/*
+ * A text put where a part of a panel or a menu keeps fixed room
+ * (WM_LABEL_MAX and the like): at most max - 1 bytes of s, cut at a
+ * whole letter and 0 ended; s NULL puts "". Answers the bytes put.
+ */
+IMPORT INT    dt_fit( UB *dst, INT max, CONST UB *s );
+/*
+ * The texts given, up to a NULL, one after another in memory of its own
+ * (Kfree it): a message made with a name as long as it is. NULL without
+ * memory.
+ */
+IMPORT UB    *dt_cat( CONST char *s, ... );
+/*
+ * The label of the volume attached with path, whole, in memory of its
+ * own (Kfree it): NULL when it has none, or for want of memory (said on
+ * the console).
+ */
+IMPORT UB    *dt_vol_label( CONST char *path );
 
 /* One of a list of names chosen: its number, or -1 */
 IMPORT INT    dt_list_form( DTWIN *d, CONST char *title,
@@ -595,6 +689,9 @@ IMPORT void   dt_raise_pid( ID pid );		/* a process's windows in front */
 #define DT_ANS_LATER	1
 IMPORT void   dt_place_on_desktop( CONST TS_UUID *u, CONST UB *name );
 IMPORT ER     dt_place_in( CONST TS_UUID *box, CONST TS_UUID *u, CONST UB *name );
+/* The same with an applist of the link's own (固有データ with it, design 11.3) */
+IMPORT ER     dt_place_on_desktop_appl( CONST TS_UUID *u, CONST UB *name, CONST UB *applist );
+IMPORT ER     dt_place_in_appl( CONST TS_UUID *box, CONST TS_UUID *u, CONST UB *name, CONST UB *applist );
 IMPORT void   dt_print_vobj( DTWIN *from, CONST T_VOBJ *v );	/* 基本印刷 */
 IMPORT ER     dt_print_spool( CONST T_DTREQ *rq, SZ anssz );	/* DT_ANS_LATER */
 IMPORT void  *dt_spool_open( CONST TS_UUID *obj, T_PRNJOB *job, CONST UB *name );
@@ -613,9 +710,33 @@ IMPORT void   dt_winlist_poll( void );
 IMPORT void   dt_search_open( DTWIN *from );
 IMPORT void   dt_network_open( DTWIN *from, CONST T_VOBJ *v );
 IMPORT BOOL   dt_prog_again( CONST DTPROG *p, CONST T_VOBJ *v, ER *p_er );
-/* The channels a program named (DT_RQ_TELL) told how, into the object it is about: FALSE none heard */
+/*
+ * 固有データ (design 11.3): the data the applist gives program p started
+ * from v (the link's applist first, then the object's; the entry of
+ * p's id, else of an id it had before), as long as it is, ending in 0,
+ * in memory of its own (Kfree it), *p_len its length; NULL none.
+ * dt_prog_data_next(TRUE, ...) gives the next start, or the window told
+ * it is run again, data of its own (a link to the program object itself,
+ * which the program is not started on), a copy of it (E_NOMEM none
+ * kept); FALSE takes it back. dt_prog_data_take hands what it gave to
+ * the one who takes it (*p_data NULL: none, Kfree it otherwise): FALSE
+ * when nothing was given.
+ */
+IMPORT UB    *dt_prog_data( CONST DTPROG *p, CONST TS_UUID *target, CONST UB *link_applist, SZ *p_len );
+IMPORT ER     dt_prog_data_next( BOOL on, CONST UB *data, SZ len );
+IMPORT BOOL   dt_prog_data_take( UB **p_data, SZ *p_len );
+/*
+ * The channels a program named (DT_RQ_TELL) told how, into the object it
+ * is about, with text, and data (DT_TAIL_DATA; NULL none): FALSE none
+ * heard. One that asked in the form of now is told with a tail.
+ */
 IMPORT BOOL   dt_prog_tell( CONST char *prog, UINT how, CONST TS_UUID *into );
 IMPORT BOOL   dt_prog_tell_text( CONST char *prog, UINT how, CONST TS_UUID *into, CONST UB *text );
+/* The same with a link's name and applist as the tail's DT_TAIL_NAME and DT_TAIL_APPLIST (DT_HOW_LINK_PUT) */
+IMPORT BOOL   dt_prog_tell_link( CONST char *prog, UINT how, CONST TS_UUID *into,
+			       CONST UB *name, CONST UB *applist );
+IMPORT BOOL   dt_prog_tell_data( CONST char *prog, UINT how, CONST TS_UUID *into,
+				 CONST UB *text, CONST UB *data, SZ dlen );
 IMPORT void   dt_trash_tell( void );
 IMPORT ER     dt_tool_req( CONST T_DTREQ *rq, T_DTANS *an, ID asker );
 

@@ -15,6 +15,7 @@
  *	(dt_pn_*) the rest of the desktop builds its own panels with.
  */
 
+#include <stdarg.h>
 #include <sys/machine.h>
 #include "kernel.h"
 #include <tk/tkernel.h>
@@ -36,15 +37,7 @@
 /* Words copied, cut at a letter's edge when they do not fit */
 EXPORT void dt_pn_text( UB *to, INT max, CONST char *s )
 {
-	INT	i;
-
-	for ( i = 0; s != NULL && s[i] != 0 && i < max - 1; i++ ) {
-		to[i] = (UB)s[i];
-	}
-	while ( i > 0 && s != NULL && s[i] != 0 && ( (UB)s[i] & 0xC0 ) == 0x80 ) {
-		i--;
-	}
-	to[i] = 0;
+	(void)dt_fit(to, max, (CONST UB *)s);
 }
 
 /*
@@ -54,10 +47,9 @@ EXPORT void dt_pn_text( UB *to, INT max, CONST char *s )
 
 EXPORT T_WMPANEL *dt_pn_new( INT w, INT h )
 {
-	T_WMPANEL	*p = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	T_WMPANEL	*p = wm_panel_new(0);
 
 	if ( p != NULL ) {
-		knl_memset(p, 0, sizeof(*p));
 		p->num = 2;
 		p->kind = WM_PNL_PLAIN;
 		p->r.right = w + 2 * DT_PN_IN;
@@ -67,16 +59,19 @@ EXPORT T_WMPANEL *dt_pn_new( INT w, INT h )
 	return p;
 }
 
-/* One part, in the panel's own coordinates */
+/*
+ * One part, in the panel's own coordinates: NULL when the panel's table
+ * of parts could not be made larger. The part answered is to be filled
+ * in before the next is added, as the table may move.
+ */
 EXPORT T_WMPART *dt_pn_add( T_WMPANEL *p, UW type, INT num, INT l, INT t,
 			INT w, INT h, CONST char *label )
 {
-	T_WMPART	*pt;
+	T_WMPART	*pt = wm_panel_part_add(p);
 
-	if ( p->npart >= WM_PART_MAX ) {
+	if ( pt == NULL ) {
 		return NULL;
 	}
-	pt = &p->part[p->npart++];
 	pt->type = type;
 	pt->num = num;
 	pt->r.left = DT_PN_IN + l;
@@ -227,7 +222,7 @@ EXPORT BOOL dt_confirm_timed( DTWIN *d, CONST char *CONST *lines, INT nline,
 	}
 	def = dt_pn_new(pw, ph);
 	if ( def == NULL || wm_ref(d->wid, &w) < E_OK ) {
-		if ( def != NULL ) Kfree(def);
+		wm_panel_free(def);
 		return FALSE;
 	}
 	def->kind = WM_PNL_WARN;
@@ -239,7 +234,7 @@ EXPORT BOOL dt_confirm_timed( DTWIN *d, CONST char *CONST *lines, INT nline,
 	pt = dt_pn_add(def, WM_PT_BUTTON | P_EMPHAS, DT_PN_OK, pw - 108, ph - 36, 94, 26, yes);
 	if ( pt != NULL ) pt->answer = WM_ANS_OK;
 	pid = wm_panel_open_centre(d->wid, def);
-	Kfree(def);
+	wm_panel_free(def);
 	if ( pid < 0 ) {
 		return FALSE;
 	}
@@ -298,7 +293,7 @@ EXPORT void dt_identify( DTWIN *d, INT ms )
 		tm_sprintf((UB *)t, (UB *)"画面 %d", i + 1);
 		(void)dt_pn_add(def, WM_PT_LABEL, 0, 14, 20, 172, 24, t);
 		pid[i] = wm_panel_open_at(d->wid, def, x + ( w - 200 ) / 2, y + ( h - 64 ) / 2);
-		Kfree(def);
+		wm_panel_free(def);
 		if ( pid[i] >= 0 ) wm_panel_draw(pid[i]);
 	}
 	wm_update();
@@ -329,13 +324,87 @@ EXPORT INT dt_pn_value( INT pid, INT num )
 	return v;
 }
 
+EXPORT INT dt_fit( UB *dst, INT max, CONST UB *s )
+{
+	SZ	n = 0;
+
+	if ( dst == NULL || max < 1 ) {
+		return 0;
+	}
+	if ( s != NULL ) {
+		while ( s[n] != 0 ) {
+			n++;
+		}
+		n = knl_utf8_fit(s, n, (SZ)max - 1);
+		knl_memcpy(dst, s, (size_t)n);
+	}
+	dst[n] = 0;
+	return (INT)n;
+}
+
+EXPORT UB *dt_cat( CONST char *s, ... )
+{
+	va_list		ap;
+	CONST char	*t;
+	SZ		n = 0, k;
+	UB		*out;
+
+	va_start(ap, s);
+	for ( t = s; t != NULL; t = va_arg(ap, CONST char *) ) {
+		n += knl_strlen(t);
+	}
+	va_end(ap);
+	out = (UB *)Kmalloc((size_t)n + 1);
+	if ( out == NULL ) {
+		tm_printf((UB *)"desktop: no memory for a message of %d bytes\n", (INT)n);
+		return NULL;
+	}
+	n = 0;
+	va_start(ap, s);
+	for ( t = s; t != NULL; t = va_arg(ap, CONST char *) ) {
+		k = knl_strlen(t);
+		knl_memcpy(out + n, t, (size_t)k);
+		n += k;
+	}
+	va_end(ap);
+	out[n] = 0;
+	return out;
+}
+
+EXPORT UB *dt_vol_label( CONST char *path )
+{
+	UB	*lab = NULL;
+	SZ	size = 0, asz = 0;
+
+	for ( ;; ) {
+		if ( knl_obfile_vol_label(path, lab, size, &asz) < E_OK ) {
+			break;
+		}
+		if ( lab != NULL && asz <= size ) {
+			if ( lab[0] != 0 ) {
+				return lab;
+			}
+			break;
+		}
+		if ( lab != NULL ) Kfree(lab);
+		size = asz;
+		lab = (UB *)Kmalloc((size_t)size);
+		if ( lab == NULL ) {
+			tm_printf((UB *)"desktop: no memory for a volume label of %d bytes\n", (INT)size);
+			return NULL;
+		}
+	}
+	if ( lab != NULL ) Kfree(lab);
+	return NULL;
+}
+
 /* One line of text asked for: a prompt of one or two lines and a box */
 LOCAL BOOL ask_text( DTWIN *d, CONST char *p1, CONST char *p2,
 		     CONST UB *start, UB *out, INT max, CONST char *ok )
 {
 	T_WMPANEL	*def;
 	T_WMPART	*pt;
-	INT		pid, top = 10, i;
+	INT		pid, top = 10;
 	INT		w = ( p2 != NULL ) ? 620 : 460;
 	UINT		ans;
 
@@ -351,12 +420,7 @@ LOCAL BOOL ask_text( DTWIN *d, CONST char *p1, CONST char *p2,
 	}
 	pt = dt_pn_add(def, WM_PT_BOX, 1, 14, top + 2, w - 28, 26, NULL);
 	if ( pt != NULL ) {
-		for ( i = 0; start != NULL && start[i] != 0
-			     && i < WM_LABEL_MAX - 1; i++ ) {
-			pt->text[i] = start[i];
-		}
-		pt->text[i] = 0;
-		pt->caret = i;
+		pt->caret = dt_fit(pt->text, WM_LABEL_MAX, start);
 	}
 	dt_pn_buttons(def, ok);
 

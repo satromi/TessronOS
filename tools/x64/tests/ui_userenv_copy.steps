@@ -1,0 +1,42 @@
+# ユーザ環境設定's pages, their links and their 写し (docs/tessronos 11.6), for tools/ui_run.py as
+# ui_sysenv_page.steps. Opened with the data of a page, the window shows that sheet; run again with
+# another, the same window turns to it. 写しを作る of 〈表示属性〉 makes a copy of the sheet's look's
+# lines; opened, it shows them and asks, and 設定 sets them. The window is at 180,90, its menu
+# opened at 400,300.
+openapp 01a0d8c4-52b7-7c63-8e83-4f9a012c3d53 {"tessronos-userenv":{"data":"display"}}
+expect userenv: opened with data "display"
+expect userenv: page "display"
+expect userenv: ready
+wait 800
+shot uc_display
+logmark
+openapp 01a0d8c4-52b7-7c63-8e83-4f9a012c3d53 {"tessronos-userenv":{"data":"pointer"}}
+expectsince userenv: page "pointer"
+nwin ユーザ環境設定
+want ok 1
+openapp 01a0d8c4-52b7-7c63-8e83-4f9a012c3d53 {"tessronos-userenv":{"data":"display"}}
+expectsince userenv: page "display"
+wait 500
+click 400 300 1
+wait 500
+shot uc_menu
+move 410 400
+wait 150
+move 430 420
+wait 150
+click 430 420
+expect userenv: copy of "user.display" made, 10 lines (0)
+expect desktop: link put "ユーザ環境設定（表示属性）の写し"
+wait 800
+# the copy opened: the sheet's values as they are, nothing differs; 設定 sets them all the same
+logmark
+openput
+expectsince userenv: copy of "user.display" opened, 10 lines, 0 differ
+wait 800
+shot uc_ask
+click 776 451
+expectsince userenv: copy of "user.display" set
+wait 500
+nwin ユーザ環境設定
+want ok 1
+absent !OACV!

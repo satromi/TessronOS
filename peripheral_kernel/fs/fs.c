@@ -87,6 +87,33 @@ LOCAL INT str_len( CONST char *s )
 	return n;
 }
 
+/*
+ * Whether a path is one a file system may be given: EX_INVAL without
+ * one, EX_NAMETOOLONG when the whole of it takes FS_PATH_MAX bytes or
+ * more, or one of its names more than NAME_MAX (FS_NAME_MAX - 1) bytes.
+ * Every file system here holds a name of that many bytes whole, so a
+ * longer one is refused before any of them sees it, never cut.
+ */
+LOCAL ER path_check( CONST char *path )
+{
+	INT	n, k = 0;
+
+	if ( path == NULL ) {
+		return EX_INVAL;
+	}
+	for ( n = 0; path[n] != '\0'; n++ ) {
+		if ( n >= FS_PATH_MAX - 1 ) {
+			return EX_NAMETOOLONG;
+		}
+		if ( path[n] == '/' ) {
+			k = 0;
+		} else if ( ++k >= FS_NAME_MAX ) {
+			return EX_NAMETOOLONG;
+		}
+	}
+	return EX_OK;
+}
+
 LOCAL BOOL str_same( CONST char *a, CONST char *b )
 {
 	while ( *a != '\0' && *a == *b ) { a++; b++; }
@@ -715,8 +742,9 @@ EXPORT INT knl_fs_open_as( CONST char *path, UINT oflags, ID owner )
 	INT		fd = -1;
 	ER		er;
 
-	if ( path == NULL || str_len(path) >= FS_PATH_MAX ) {
-		return EX_NAMETOOLONG;
+	er = path_check(path);
+	if ( er < EX_OK ) {
+		return er;
 	}
 
 	tk_loc_mtx(fs_mtxid, TMO_FEVR);
@@ -1098,6 +1126,10 @@ EXPORT ER fs_stat( CONST char *path, T_FSTAT *st )
 	if ( path == NULL || st == NULL ) {
 		return EX_INVAL;
 	}
+	er = path_check(path);
+	if ( er < EX_OK ) {
+		return er;
+	}
 	m = mount_get(path, &rest);
 	if ( m == NULL ) {
 		return EX_NOENT;
@@ -1183,6 +1215,10 @@ EXPORT ER fs_xstat( CONST char *path, T_FSXSTAT *st )
 
 	if ( path == NULL || st == NULL ) {
 		return EX_INVAL;
+	}
+	er = path_check(path);
+	if ( er < EX_OK ) {
+		return er;
 	}
 	m = mount_get(path, &rest);
 	if ( m == NULL ) {
@@ -1366,7 +1402,8 @@ EXPORT INT fs_poll( T_FSPOLL *fds, INT n, TMO tmout )
 	CONST char *rest;						\
 	T_MOUNT	*m;							\
 	ER	er;							\
-	if ( path == NULL ) return EX_INVAL;				\
+	er = path_check(path);						\
+	if ( er < EX_OK ) return er;					\
 	m = mount_get(path, &rest);					\
 	if ( m == NULL ) return EX_NOENT;				\
 	if ( mount_rdonly(m) ) {					\
@@ -1398,7 +1435,8 @@ EXPORT ER fs_utime( CONST char *path, UD mtime )
 	T_MOUNT	*m;
 	ER	er;
 
-	if ( path == NULL ) return EX_INVAL;
+	er = path_check(path);
+	if ( er < EX_OK ) return er;
 	m = mount_get(path, &rest);
 	if ( m == NULL ) return EX_NOENT;
 	if ( mount_rdonly(m) ) {
@@ -1418,6 +1456,9 @@ EXPORT ER fs_rename( CONST char *from, CONST char *to )
 
 	if ( from == NULL || to == NULL ) {
 		return EX_INVAL;
+	}
+	if ( ( er = path_check(from) ) < EX_OK || ( er = path_check(to) ) < EX_OK ) {
+		return er;
 	}
 	mf = mount_get(from, &rfrom);
 	if ( mf == NULL ) {
@@ -1449,6 +1490,9 @@ EXPORT ER fs_link( CONST char *from, CONST char *to )
 	if ( from == NULL || to == NULL ) {
 		return EX_INVAL;
 	}
+	if ( ( er = path_check(from) ) < EX_OK || ( er = path_check(to) ) < EX_OK ) {
+		return er;
+	}
 	mf = mount_get(from, &rfrom);
 	if ( mf == NULL ) {
 		return EX_NOENT;
@@ -1475,8 +1519,9 @@ EXPORT ER fs_chmod( CONST char *path, UINT mode )
 	T_MOUNT		*m;
 	ER		er;
 
-	if ( path == NULL ) {
-		return EX_INVAL;
+	er = path_check(path);
+	if ( er < EX_OK ) {
+		return er;
 	}
 	m = mount_get(path, &rest);
 	if ( m == NULL ) {
@@ -1499,6 +1544,10 @@ EXPORT ER fs_statvfs( CONST char *path, T_FSSTAT *st )
 
 	if ( path == NULL || st == NULL ) {
 		return EX_INVAL;
+	}
+	er = path_check(path);
+	if ( er < EX_OK ) {
+		return er;
 	}
 	m = mount_get(path, &rest);
 	if ( m == NULL ) {
@@ -1687,6 +1736,9 @@ LOCAL ER below( CONST char *path, char *buf )
 		while ( path[i] == '/' ) i++;
 		if ( path[i] == '\0' ) break;
 		for ( k = 0; path[i + k] != '\0' && path[i + k] != '/'; k++ ) ;
+		if ( k >= FS_NAME_MAX ) {
+			return EX_NAMETOOLONG;		/* a name longer than NAME_MAX */
+		}
 		if ( k == 1 && path[i] == '.' ) {
 			i += k;
 			continue;

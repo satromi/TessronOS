@@ -44,11 +44,13 @@
 
 LOCAL struct netif	ts_netif;
 LOCAL BOOL		so_started = FALSE;
-LOCAL char		so_hostname[32] = "tessronos";
+#define SO_HOST_MAX		255		/* a host or domain name (RFC 1035 2.3.4) */
+
+LOCAL char		so_hostname[SO_HOST_MAX + 1] = "tessronos";
 LOCAL ID		so_owner[SO_NUM];
 LOCAL BOOL		so_asking = FALSE;	/* DHCP is running on the interface */
 LOCAL UW		so_dns_fixed[2];	/* name servers the settings name */
-LOCAL char		so_domain[80];
+LOCAL char		so_domain[SO_HOST_MAX + 1];
 
 /* The programs told that the network's configuration changed (so_prc.c, so_netwait) */
 IMPORT void	knl_so_netchg( void );
@@ -386,14 +388,17 @@ EXPORT ER so_getaddrinfo( CONST char *node, CONST char *service,
 	n = lwip_getaddrinfo(node, service, hints, res);
 	if ( n == EAI_NONAME && node != NULL && so_domain[0] != '\0' ) {
 		/* a name with no dot in it is looked for in the domain as well */
-		char	full[160];
+		char	full[SO_HOST_MAX + 1];
 		INT	i, k = 0;
 		BOOL	dot = FALSE;
 
 		for ( i = 0; node[i] != '\0'; i++ ) {
 			if ( node[i] == '.' ) dot = TRUE;
 		}
-		if ( !dot && i + 1 + (INT)sizeof(so_domain) < (INT)sizeof(full) ) {
+		/* a name and domain longer together than a DNS name can be are not asked for */
+		for ( k = 0; so_domain[k] != '\0'; k++ ) ;
+		if ( !dot && i + 1 + k <= SO_HOST_MAX ) {
+			k = 0;
 			for ( i = 0; node[i] != '\0'; i++ ) full[k++] = node[i];
 			full[k++] = '.';
 			for ( i = 0; so_domain[i] != '\0'; i++ ) full[k++] = so_domain[i];
@@ -622,6 +627,7 @@ EXPORT ER so_gethostname( char *name, SZ namelen )
 	return E_OK;
 }
 
+/* A host name of up to 255 bytes (RFC 1035 2.3.4); a longer one is E_PAR */
 EXPORT ER so_sethostname( CONST char *name, SZ namelen )
 {
 	SZ	i;
@@ -750,11 +756,18 @@ EXPORT ER so_setdns( INT n, UW addr )
 	return E_OK;
 }
 
+/* The domain names with no dot are looked for in: up to 255 bytes (RFC 1035 2.3.4), a longer one is E_PAR */
 EXPORT ER so_setdomain( CONST char *domain )
 {
 	INT	i;
 
-	for ( i = 0; domain != NULL && domain[i] != '\0' && i < (INT)sizeof(so_domain) - 1; i++ ) {
+	for ( i = 0; domain != NULL && domain[i] != '\0'; i++ ) {
+		if ( i >= SO_HOST_MAX ) {
+			tm_printf((UB *)"net: the domain is longer than %d bytes\n", SO_HOST_MAX);
+			return E_PAR;
+		}
+	}
+	for ( i = 0; domain != NULL && domain[i] != '\0'; i++ ) {
 		so_domain[i] = domain[i];
 	}
 	so_domain[i] = '\0';

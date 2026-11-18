@@ -42,8 +42,8 @@
  *	The frames are made at the pace of the clock here. A sink does not say
  *	how fast it plays, and holds a little buffer of its own: if the clocks
  *	differ by a little, it deals with that, as with any source. A packet
- *	holds as many frames as both the device's MTU and one frame of this
- *	end (TX_MAX) take.
+ *	holds as many frames as the device's MTU takes, and fifteen at most,
+ *	as the frame count of the payload's header has four bits (PKT_MAX).
  *
  *	While the hands-free profile has a voice link up, the earphones play
  *	that and not the stream: the stream is suspended, and the output says
@@ -110,7 +110,7 @@
 #define BITPOOL_MIN		2
 #define BITPOOL_WANT		53	/* the high quality the specification suggests at 44.1 kHz */
 
-#define NSEP			8
+#define NSEP			62	/* the stream ends a device may have: SEID is six bits, 0x01 to 0x3E (AVDTP 1.3) */
 
 #define AV_TMO_MS		10000
 #define AV_WAIT_MS		2000	/* the time earphones that opened the channel have to start setting up */
@@ -125,7 +125,8 @@ enum {
 #define FRAME_SLOT		256
 #define NSLOT			64	/* some 180 ms */
 #define POLL_FRAMES		8	/* the most encoded in one look, not to hold the manager's lock long */
-#define PER_PACKET_MAX		15	/* what the frame count's four bits hold */
+#define PER_PACKET_MAX		15	/* what the frame count's four bits hold (A2DP 1.3, the SBC media payload's header) */
+#define PKT_MAX			( RTP_HEAD + PER_PACKET_MAX * FRAME_SLOT )	/* the longest packet this end makes */
 
 typedef struct {
 	BTC		*c;
@@ -155,7 +156,7 @@ typedef struct {
 	UW		lost;		/* frames there was no room for */
 	UW		packets;
 	UB		ring[NSLOT][FRAME_SLOT];
-	UB		out[TX_MAX];
+	UB		out[PKT_MAX];
 } AV;
 
 LOCAL AV	*av = NULL;		/* the one device set up, with its stream */
@@ -231,9 +232,11 @@ LOCAL BOOL config_take( AV *a, CONST UB *f, INT n )
 		CONST UB	*v = f + at + 2;
 
 		if ( f[at] == AV_CAP_CODEC ) {
-			UB	r = (UB)( v[2] & 0xf0 ), m = (UB)( v[2] & 0x0f );
+			UB	r, m;
 
 			if ( l < 6 || ( v[0] >> 4 ) != AV_SEP_AUDIO || v[1] != AV_CODEC_SBC ) return FALSE;
+			r = (UB)( v[2] & 0xf0 );
+			m = (UB)( v[2] & 0x0f );
 			if ( ( r != SBC_R44 && r != SBC_R48 ) || ( m != SBC_STEREO && m != SBC_JOINT )
 			  || v[3] != ( SBC_BLOCKS16 | SBC_SUB8 | SBC_LOUDNESS )
 			  || v[5] < BITPOOL_MIN || v[5] > BITPOOL_WANT || v[4] > v[5] ) return FALSE;
@@ -417,7 +420,9 @@ LOCAL BOOL caps_look( AV *a, CONST UB *f, INT n )
 			INT	pool;
 
 			if ( ( v[2] & ( SBC_R44 | SBC_R48 ) ) == 0 || ( v[2] & ( SBC_STEREO | SBC_JOINT ) ) == 0
-			  || ( v[3] & SBC_BLOCKS16 ) == 0 || ( v[3] & SBC_SUB8 ) == 0 || ( v[3] & SBC_LOUDNESS ) == 0 ) {
+			  || ( v[3] & SBC_BLOCKS16 ) == 0 || ( v[3] & SBC_SUB8 ) == 0 || ( v[3] & SBC_LOUDNESS ) == 0
+			  || v[4] > BITPOOL_WANT || v[4] > v[5] ) {
+				/* a least bitpool above what this end encodes would make a frame longer than its slot */
 				return FALSE;
 			}
 			a->rate48 = (BOOL)( ( v[2] & SBC_R44 ) == 0 );
@@ -596,7 +601,7 @@ EXPORT void knl_bta_chan_up( BTC *c, PEER *p, UB bits )
 	}
 	if ( ( bits & CHB_AV_MEDIA ) && a->st == V_MEDIA ) {
 		/* a packet as long as both the device and this end take */
-		mtu = ( p->media_mtu < TX_MAX - 4 ) ? p->media_mtu : TX_MAX - 4;
+		mtu = ( p->media_mtu < PKT_MAX ) ? p->media_mtu : PKT_MAX;
 		knl_usb_lock();
 		sbc_enc_init(&a->enc, a->rate48, a->joint, a->bitpool);
 		a->flen = sbc_enc_frame_len(&a->enc);
@@ -841,9 +846,30 @@ EXPORT void knl_bta_tick( BTC *c )
 
 /* ---------------------------------------------------------------- the sound device's side */
 
-LOCAL void id_of( CONST PEER *p, UB *id )
+EXPORT void knl_bta_out_id( UB *id, CONST char *pre, CONST UB *addr, CONST char *post )
 {
-	(void)tm_sprintf(id, (UB *)"bt-%02x%02x%02x%02x%02x%02x", p->addr[5], p->addr[4], p->addr[3], p->addr[2], p->addr[1], p->addr[0]);
+	(void)tm_sprintf(id, (UB *)"%s%02x%02x%02x%02x%02x%02x%s", pre, addr[5], addr[4], addr[3], addr[2], addr[1], addr[0], post);
+}
+
+EXPORT BOOL knl_bta_is_out_id( CONST UB *id, CONST char *pre, CONST UB *addr, CONST char *post )
+{
+	static CONST char hex[] = "0123456789abcdef";
+	INT	i;
+
+	if ( id == NULL ) return FALSE;
+	for ( ; *pre != 0; pre++, id++ ) {
+		if ( *id != (UB)*pre ) return FALSE;
+	}
+	for ( i = 5; i >= 0; i-- ) {
+		if ( *id != (UB)hex[addr[i] >> 4] ) return FALSE;
+		id++;
+		if ( *id != (UB)hex[addr[i] & 15] ) return FALSE;
+		id++;
+	}
+	for ( ; *post != 0; post++, id++ ) {
+		if ( *id != (UB)*post ) return FALSE;
+	}
+	return (BOOL)( *id == 0 );
 }
 
 /* Whether the device's stream is set up, so that it is a sound output: what the list of devices tells */
@@ -854,18 +880,19 @@ EXPORT BOOL knl_bta_ready( CONST PEER *p )
 	return (BOOL)( a != NULL && a->p == p && a->st >= V_READY );
 }
 
-LOCAL INT bta_outputs( SDOut *o, INT max )
+/* The earphones' output, its name whole, and the voice's of the hands-free profile */
+LOCAL ER bta_outs( SNDOUTS *l )
 {
 	AV	*a = av;
-	UB	id[SND_ID_MAX];
-	INT	n = 0;
+	UB	id[BTA_ID_ROOM];
+	ER	er;
 
-	if ( a != NULL && max > 0 && a->st >= V_READY ) {
-		id_of(a->p, id);
-		knl_snd_out_set(&o[0], id, a->p->name, SND_BE_BT, knl_bth_voice() ? SND_OF_NOSOUND : 0);
-		n = 1;
+	if ( a != NULL && a->st >= V_READY ) {
+		knl_bta_out_id(id, "bt-", a->p->addr, "");
+		er = knl_snd_out_add(l, id, a->p->name, SND_BE_BT, knl_bth_voice() ? SND_OF_NOSOUND : 0);
+		if ( er < E_OK ) return er;
 	}
-	return n + knl_bth_outputs(o + n, max - n);
+	return knl_bth_outs(l);
 }
 
 LOCAL BOOL bta_can_record( void )
@@ -876,7 +903,6 @@ LOCAL BOOL bta_can_record( void )
 LOCAL ER bta_play_start( CONST UB *id, UW *rate, INT *channels )
 {
 	AV	*a = av;
-	UB	mine[SND_ID_MAX];
 
 	if ( knl_bth_is_id(id) ) {
 		ER	er = knl_bth_play_start(id, rate, channels);
@@ -885,8 +911,7 @@ LOCAL ER bta_play_start( CONST UB *id, UW *rate, INT *channels )
 		return er;
 	}
 	if ( a == NULL || a->st < V_READY || id == NULL ) return E_NOEXS;
-	id_of(a->p, mine);
-	if ( knl_strcmp((CONST char *)id, (CONST char *)mine) != 0 ) return E_NOEXS;
+	if ( !knl_bta_is_out_id(id, "bt-", a->p->addr, "") ) return E_NOEXS;
 	*rate = a->rate48 ? 48000 : 44100;
 	*channels = 2;
 	play_voice = FALSE;
@@ -964,9 +989,10 @@ LOCAL ER bta_set_level( INT dn, CONST SDVol *v )
 /* A sink takes a moment to open its sound after the start, and a suspend would cut what follows */
 EXPORT CONST SNDHW knl_bta_hw = {
 	SND_BE_BT,
-	bta_outputs, bta_can_record,
+	NULL, bta_can_record,
 	bta_play_start, bta_play_stop, bta_play_running,
 	bta_rec_start, bta_rec_stop, bta_rec_running,
 	bta_poll, bta_get_level, bta_set_level,
-	200, 2000
+	200, 2000,
+	bta_outs
 };

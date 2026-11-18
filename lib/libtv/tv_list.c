@@ -78,17 +78,21 @@ BOOL tl_meta( CONST TS_UUID *u, UB **p_buf, T_JSON *root )
 	return TRUE;
 }
 
-BOOL tl_name( CONST TS_UUID *u, UB *nm, INT max )
+UB *tl_name_dup( CONST TS_UUID *u )
 {
-	T_JSON	root;
 	UB	*m;
-	BOOL	ok;
+	T_JSON	root, v;
+	UB	*nm = NULL;
 
-	nm[0] = 0;
-	if ( !tl_meta(u, &m, &root) ) return FALSE;
-	ok = (BOOL)( js_get_str(&root, "name", nm, max) >= 0 );
+	if ( !tl_meta(u, &m, &root) ) return NULL;
+	/* the name is no longer than how it is written */
+	if ( js_get(&root, "name", &v) >= E_OK && ( nm = (UB *)malloc((size_t)v.len + 1) ) != NULL
+	  && js_str(&v, nm, v.len + 1) < 0 ) {
+		free(nm);
+		nm = NULL;
+	}
 	free(m);
-	return ok;
+	return nm;
 }
 
 /* ---------------------------------------------------------------- the list */
@@ -96,23 +100,39 @@ BOOL tl_name( CONST TS_UUID *u, UB *nm, INT max )
 T_TAD *tl_record( CONST char *title, CONST TS_UUID *ids, CONST UB *CONST *names,
 		  CONST BOOL *dim, INT n, CONST T_TLLAY *lay, INT *p_rows )
 {
-	INT	max = 512 + ( ( n > 0 ) ? n : 0 ) * ( 480 + TAD_NAME_MAX * 5 ), at, i, w;
+	INT	max = 512, at, i, w;
 	INT	x = lay->x, y = lay->y, band = tad_closed_h(lay->chsz, TAD_D_DEFAULT), rows = 0;
-	char	*xml = malloc((size_t)max), us[TS_UUID_STRLEN + 1];
+	char	*xml, us[TS_UUID_STRLEN + 1];
+	UB	**nms;
 	T_TAD	*rec = NULL;
 
 	if ( p_rows != NULL ) *p_rows = 0;
-	if ( xml == NULL ) return NULL;
+	/* every name whole first: the record is as large as they make it (each letter escaped to six at most) */
+	nms = (UB **)calloc((size_t)( ( n > 0 ) ? n : 1 ), sizeof(UB *));
+	if ( nms == NULL ) return NULL;
+	for ( i = 0; i < n; i++ ) {
+		nms[i] = ( names != NULL && names[i] != NULL ) ? (UB *)strdup((CONST char *)names[i]) : tl_name_dup(&ids[i]);
+		if ( nms[i] == NULL ) nms[i] = (UB *)strdup("");
+		if ( nms[i] == NULL || (D)max + 480 + 6 * (D)strlen((CONST char *)nms[i]) > 0x70000000 ) {
+			max = -1;
+			break;
+		}
+		max += 480 + 6 * (INT)strlen((CONST char *)nms[i]);
+	}
+	xml = ( max > 0 ) ? malloc((size_t)max) : NULL;
+	if ( xml == NULL ) {
+		for ( i = 0; i < n; i++ ) free(nms[i]);
+		free(nms);
+		return NULL;
+	}
 	at = snprintf(xml, (size_t)max, "<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"");
 	at = tl_put_x(xml, at, max, (CONST UB *)title);
 	at += snprintf(xml + at, (size_t)( max - at ), "\"><figure>");
 	for ( i = 0; i < n; i++ ) {
-		UB	nm[TAD_NAME_MAX];
-		BOOL	grey = (BOOL)( dim != NULL && dim[i] );
+		CONST UB	*nm = nms[i];
+		BOOL		grey = (BOOL)( dim != NULL && dim[i] );
 
 		if ( ob_acc_obj(&ids[i], 0) == E_NOEXS ) continue;	/* not in the store */
-		if ( names != NULL && names[i] != NULL ) snprintf((char *)nm, sizeof(nm), "%s", (CONST char *)names[i]);
-		else (void)tl_name(&ids[i], nm, TAD_NAME_MAX);
 		w = dp_text_width(nm, lay->chsz);
 		if ( w < 0 ) w = lay->chsz * 6;
 		w = tad_closed_w(lay->chsz, TAD_D_DEFAULT, w);	/* the pictogram and the edges */
@@ -140,6 +160,8 @@ T_TAD *tl_record( CONST char *title, CONST TS_UUID *ids, CONST UB *CONST *names,
 	at += snprintf(xml + at, (size_t)( max - at ), "</figure></tad>");
 	if ( tad_parse((CONST UB *)xml, (SZ)at, NULL, &rec) < E_OK ) rec = NULL;
 	free(xml);
+	for ( i = 0; i < n; i++ ) free(nms[i]);
+	free(nms);
 	if ( p_rows != NULL ) *p_rows = rows;
 	return rec;
 }

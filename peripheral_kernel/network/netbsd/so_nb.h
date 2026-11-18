@@ -30,7 +30,11 @@ IMPORT int	rump_tsnet_getaddr4( CONST char *ifname, UW *addr, UW *mask );
 IMPORT int	rump_tsnet_addrstate4( CONST char *ifname, UW addr );
 IMPORT int	rump_tsnet_defroute4( UW gw );
 
-/* The IPv6 addresses of an interface (T_SOIF6 has the layout of the kernel's list) */
+/*
+ * The IPv6 addresses of an interface (T_SOIF6 has the layout of the
+ * kernel's list): up to max into list, and how many there are, which is
+ * more than max when the list had too little room
+ */
 IMPORT int	rump_tsnet_addrs6( CONST char *ifname, T_SOIF6 *list, int max );
 IMPORT int	rump_tsnet_setaddr6( CONST char *ifname, CONST UB *addr, int plen, UINT vltime, UINT pltime,
 				     UINT flags );		/* SO_IF6_AUTOCONF, SO_IF6_TEMPORARY */
@@ -61,8 +65,14 @@ IMPORT ER	knl_so_nb_er( INT nberr );	/* a NetBSD errno value as an error code */
  */
 IMPORT ER	knl_so_nb_ifaddr( UW addr, UW mask, UW gw, BOOL dhcp );
 
-/* The name servers the interface came with (DHCP, or a fixed address) */
-IMPORT void	knl_so_nb_ifdns( UW dns0, UW dns1 );
+/* The name servers the interface came with (DHCP, or a fixed address), n of them */
+IMPORT void	knl_so_nb_ifdns( CONST UW *dns, INT n );
+
+/*
+ * Every IPv6 address of the card's interface in a list of its own
+ * (*p_list, Kfree; NULL for none): how many, or E_OBJ, E_NOMEM
+ */
+IMPORT INT	knl_so_addrs6_all( T_SOIF6 **p_list );
 
 /*
  * A receive on a socket that may not block, with the address it came
@@ -102,13 +112,13 @@ IMPORT BOOL	knl_so_gw6( UB *gw );
 
 /* ---------------------------------------------------------------- so_dns.c */
 
-/* The IPv4 name server to ask (network byte order), 0 for none */
+/* The nth IPv4 name server to ask (network byte order), 0 when there are no more */
 IMPORT UW	knl_so_dns_server( INT n );
 /*
  * The addresses of a name: family AF_INET (A records), AF_INET6
- * (AAAA) or AF_UNSPEC (both, asked at once); up to max of them, the
- * IPv4 ones first.
+ * (AAAA) or AF_UNSPEC (both, asked at once); every one of them, the
+ * IPv4 ones first, in a list of its own (*p_addrs, Kfree).
  */
-IMPORT ER	knl_so_dns_query( CONST char *name, INT family, T_SOADDR *addrs, INT max, INT *p_n );
+IMPORT ER	knl_so_dns_query( CONST char *name, INT family, T_SOADDR **p_addrs, INT *p_n );
 
 #endif /* __SO_NB_H__ */

@@ -382,16 +382,18 @@ EXPORT ER dt_pkg_install( CONST TS_UUID *pkg, BOOL force, ID pid, CONST TS_UUID 
 	}
 	{
 		/* a program object itself, as 屑実身操作 brought it back */
-		DTPROG	*q = (DTPROG *)Kmalloc(sizeof(DTPROG));
+		DTPROG	*q = (DTPROG *)Kcalloc(1, sizeof(DTPROG));
 
 		if ( q == NULL ) {
 			return E_NOMEM;
 		}
 		if ( dt_prog_read(pkg, q) ) {
 			er = prog_adopt(pkg, q, force, pid, win, p_prog, p_how);
+			dt_prog_clear(q);
 			Kfree(q);
 			return er;
 		}
+		dt_prog_clear(q);
 		Kfree(q);
 	}
 	raw = om_obj_record(pkg, 1, &size);

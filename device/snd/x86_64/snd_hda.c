@@ -192,14 +192,15 @@ IMPORT UW	knl_usb_ms( void );
 #define RATE		48000
 #define FMT_48K_16_2	0x0011			/* 48kHz, 16 bits, two channels */
 
-#define MAXW		96			/* widgets of a function group looked at */
-#define MAXCONN		16
-#define MAXPATH		8
-#define MAXOUT		4
-
 #define CORB_N		256
 #define RIRB_N		256
 
+/*
+ * The function group's widgets, as many as it has (the Subordinate Node
+ * Count's 8 bits, HDA 1.0a 7.3.4.3), and each one's connections, as many
+ * as its list is long (the Connection List Length's 7 bits, 7.3.4.11):
+ * read once as the codec is walked, never freed
+ */
 typedef struct {
 	UB	type;
 	UW	caps;
@@ -207,13 +208,17 @@ typedef struct {
 	UW	config;
 	UW	ampin, ampout;			/* amplifier capabilities */
 	INT	nconn;
-	UH	conn[MAXCONN];
+	UH	*conn;
 } WIDGET;
 
+/*
+ * A path through the widgets: no widget twice, so no longer than the
+ * group has widgets; its room is that long
+ */
 typedef struct {
 	INT	n;
-	UH	nid[MAXPATH];			/* from the pin (or converter) end */
-	UB	sel[MAXPATH];			/* the connection taken at each */
+	UH	*nid;				/* from the pin (or converter) end */
+	UB	*sel;				/* the connection taken at each */
 } PATH;
 
 LOCAL BOOL	hda_ok = FALSE;
@@ -223,8 +228,10 @@ LOCAL UH	afg;				/* its audio function group */
 LOCAL UW	codec_vendor;
 LOCAL UH	wstart, wcount;
 LOCAL WIDGET	*wid;
-LOCAL PATH	outp[MAXOUT];
+LOCAL PATH	*outp;				/* a path for every output pin that has one */
 LOCAL INT	nout = 0;
+LOCAL UB	*seen;				/* a widget's mark while a path is looked for */
+LOCAL UB	*logbuf;			/* the console's lines of a path or a list of connections */
 /*
  * The input paths: to the built-in microphone (or the one input there
  * is) and to the jack's; while recording, the jack's is taken when
@@ -254,7 +261,7 @@ LOCAL INT	out_done;			/* the oldest block played and not refilled */
 LOCAL INT	in_done;			/* the next block to hand on */
 LOCAL UH	vol_out = 0xc000, vol_in = 0xc000;
 LOCAL UW	out_blocks, in_blocks;
-LOCAL UB	out_name[SND_NAME_MAX];
+LOCAL CONST char *out_name = "";		/* the first output's, for a person */
 
 LOCAL UB  r8( UINT o )  { return *(_UB *)( base + o ); }
 LOCAL UH  r16( UINT o ) { return *(_UH *)( base + o ); }
@@ -355,16 +362,51 @@ LOCAL UW param( UINT nid, UINT p )
 
 LOCAL WIDGET *w_of( UINT nid )
 {
-	return ( nid >= wstart && nid < wstart + wcount && nid - wstart < MAXW ) ? &wid[nid - wstart] : NULL;
+	return ( wid != NULL && nid >= wstart && nid < wstart + wcount ) ? &wid[nid - wstart] : NULL;
 }
 
-LOCAL void read_widgets( void )
+/* A widget's connection list read, as long as it is; FALSE when there is no memory for it */
+LOCAL BOOL read_conns( UINT nid, WIDGET *w )
 {
-	UINT	nid, i;
+	UW	cl = param(nid, P_CONNLEN);
+	UINT	len = cl & 0x7f, i;
 
-	for ( nid = wstart; nid < wstart + wcount && nid - wstart < MAXW; nid++ ) {
+	w->nconn = 0;
+	if ( len == 0 ) {
+		return TRUE;
+	}
+	w->conn = (UH *)Kmalloc(sizeof(UH) * len);
+	if ( w->conn == NULL ) {
+		return FALSE;
+	}
+	if ( cl & 0x80 ) {
+		/* long form: two entries a response */
+		for ( i = 0; i < len; i += 2 ) {
+			UW	r = verb(nid, V_GET_CONN, i);
+
+			w->conn[w->nconn++] = (UH)( r & 0x7fff );
+			if ( i + 1 < len ) w->conn[w->nconn++] = (UH)( ( r >> 16 ) & 0x7fff );
+		}
+	} else {
+		for ( i = 0; i < len; i += 4 ) {
+			UW	r = verb(nid, V_GET_CONN, i);
+			UINT	k;
+
+			for ( k = 0; k < 4 && i + k < len; k++ ) {
+				w->conn[w->nconn++] = (UH)( ( r >> ( 8 * k ) ) & 0x7f );
+			}
+		}
+	}
+	return TRUE;
+}
+
+/* Every widget of the group read; FALSE when there is no memory for them */
+LOCAL BOOL read_widgets( void )
+{
+	UINT	nid;
+
+	for ( nid = wstart; nid < wstart + wcount; nid++ ) {
 		WIDGET	*w = w_of(nid);
-		UW	cl;
 
 		w->caps = param(nid, P_WCAPS);
 		w->type = (UB)( ( w->caps >> 20 ) & 0xf );
@@ -375,42 +417,44 @@ LOCAL void read_widgets( void )
 			w->config = verb(nid, V_GET_CONFIG, 0);
 		}
 		w->nconn = 0;
-		if ( w->caps & WC_CONN ) {
-			cl = param(nid, P_CONNLEN);
-			if ( cl & 0x80 ) {
-				/* long form: two entries a response */
-				for ( i = 0; i < ( cl & 0x7f ) && w->nconn < MAXCONN; i += 2 ) {
-					UW	r = verb(nid, V_GET_CONN, i);
-
-					w->conn[w->nconn++] = (UH)( r & 0x7fff );
-					if ( i + 1 < ( cl & 0x7f ) && w->nconn < MAXCONN ) w->conn[w->nconn++] = (UH)( ( r >> 16 ) & 0x7fff );
-				}
-			} else {
-				for ( i = 0; i < ( cl & 0x7f ) && w->nconn < MAXCONN; i += 4 ) {
-					UW	r = verb(nid, V_GET_CONN, i);
-					UINT	k;
-
-					for ( k = 0; k < 4 && i + k < ( cl & 0x7f ) && w->nconn < MAXCONN; k++ ) {
-						w->conn[w->nconn++] = (UH)( ( r >> ( 8 * k ) ) & 0x7f );
-					}
-				}
-			}
+		if ( ( w->caps & WC_CONN ) && !read_conns(nid, w) ) {
+			return FALSE;
 		}
 	}
+	return TRUE;
 }
 
-/* From nid back through what feeds it to a converter of the type wanted; depth first */
-LOCAL BOOL find_path( UINT nid, UB want, PATH *p, INT depth )
+/* Room for a path as long as the group has widgets; FALSE when there is none */
+LOCAL BOOL path_room( PATH *p )
+{
+	p->n = 0;
+	p->nid = (UH *)Kmalloc(sizeof(UH) * ( (SZ)wcount + 1 ));
+	p->sel = (UB *)Kmalloc((SZ)wcount + 1);
+	if ( p->nid == NULL || p->sel == NULL ) {
+		if ( p->nid != NULL ) Kfree(p->nid);
+		if ( p->sel != NULL ) Kfree(p->sel);
+		p->nid = NULL;
+		p->sel = NULL;
+		return FALSE;
+	}
+	return TRUE;
+}
+
+/*
+ * From nid back through what feeds it to a converter of the type wanted;
+ * depth first, each widget tried once (seen): a widget from which none
+ * was reached reaches none from elsewhere either, so a path is found if
+ * there is one, after no more tries than the group has widgets
+ */
+LOCAL BOOL find_path( UINT nid, UB want, PATH *p )
 {
 	WIDGET	*w = w_of(nid);
 	INT	i;
 
-	if ( w == NULL || depth >= MAXPATH ) {
+	if ( w == NULL || seen[nid - wstart] || p->n >= (INT)wcount ) {
 		return FALSE;
 	}
-	for ( i = 0; i < p->n; i++ ) {
-		if ( p->nid[i] == nid ) return FALSE;	/* round in a circle */
-	}
+	seen[nid - wstart] = 1;
 	p->nid[p->n] = (UH)nid;
 	p->sel[p->n] = 0;
 	p->n++;
@@ -423,7 +467,7 @@ LOCAL BOOL find_path( UINT nid, UB want, PATH *p, INT depth )
 		if ( c == NULL ) continue;
 		if ( c->type != want && c->type != W_MIXER && c->type != W_SELECT ) continue;
 		p->sel[p->n - 1] = (UB)i;
-		if ( find_path(w->conn[i], want, p, depth + 1) ) {
+		if ( find_path(w->conn[i], want, p) ) {
 			return TRUE;
 		}
 	}
@@ -474,17 +518,55 @@ LOCAL BOOL find_in_path( UINT nid, UINT pin, PATH *p, INT limit )
  * one converter where they can, and switching between them is a matter
  * of the mixer's or selector's inputs), then the others in order
  */
+/*
+ * Whether an input converter reaches the pin at all, the way
+ * find_in_path goes: from the pin back along what feeds whom, each
+ * widget looked at once
+ */
+LOCAL BOOL in_reach( UINT pin )
+{
+	UINT	nid, k;
+	BOOL	more = TRUE;
+	INT	i;
+
+	knl_memset(seen, 0, wcount);
+	seen[pin - wstart] = 1;
+	while ( more ) {
+		more = FALSE;
+		for ( nid = wstart; nid < wstart + wcount; nid++ ) {
+			WIDGET	*w = w_of(nid);
+
+			if ( seen[nid - wstart] || w->type == W_PIN ) continue;
+			if ( w->type != W_IN && w->type != W_MIXER && w->type != W_SELECT ) continue;
+			for ( i = 0; i < w->nconn; i++ ) {
+				k = w->conn[i];
+				if ( k >= wstart && k < wstart + wcount && seen[k - wstart] ) break;
+			}
+			if ( i < w->nconn ) {
+				if ( w->type == W_IN ) return TRUE;
+				seen[nid - wstart] = 1;
+				more = TRUE;
+			}
+		}
+	}
+	return FALSE;
+}
+
 LOCAL BOOL in_path_to( UINT pin, UINT prefer, PATH *p )
 {
 	INT	limit;
 	UINT	adc;
 
-	for ( limit = 2; limit <= MAXPATH; limit++ ) {
+	if ( !in_reach(pin) ) {
+		p->n = 0;
+		return FALSE;
+	}
+	for ( limit = 2; limit <= (INT)wcount; limit++ ) {
 		p->n = 0;
 		if ( prefer != 0 && find_in_path(prefer, pin, p, limit) ) {
 			return TRUE;
 		}
-		for ( adc = wstart; adc < wstart + wcount && adc - wstart < MAXW; adc++ ) {
+		for ( adc = wstart; adc < wstart + wcount; adc++ ) {
 			if ( adc == prefer || w_of(adc)->type != W_IN ) continue;
 			p->n = 0;
 			if ( find_in_path(adc, pin, p, limit) ) {
@@ -616,15 +698,15 @@ LOCAL CONST char *dev_name( UINT d )
 LOCAL void log_widget( CONST char *what, UINT nid )
 {
 	WIDGET	*w = w_of(nid);
-	UB	buf[MAXCONN * 5 + 1], *b = buf;
+	UB	*b = logbuf;
 	INT	i;
 
-	buf[0] = '\0';
+	b[0] = '\0';
 	for ( i = 0; i < w->nconn; i++ ) {
 		b += tm_sprintf(b, (UB *)" %d", w->conn[i]);
 	}
 	tm_printf((UB *)"TessronOS: hda: %s %d: caps %08x, amp in %08x, out %08x, takes%s\n",
-		  what, nid, w->caps, w->ampin, w->ampout, ( w->nconn > 0 ) ? buf : (UB *)" nothing");
+		  what, nid, w->caps, w->ampin, w->ampout, ( w->nconn > 0 ) ? logbuf : (UB *)" nothing");
 }
 
 /*
@@ -637,7 +719,7 @@ LOCAL void log_inputs( void )
 	UINT	nid;
 	INT	i;
 
-	for ( nid = wstart; nid < wstart + wcount && nid - wstart < MAXW; nid++ ) {
+	for ( nid = wstart; nid < wstart + wcount; nid++ ) {
 		WIDGET	*w = w_of(nid);
 
 		if ( w->type != W_IN ) continue;
@@ -650,7 +732,7 @@ LOCAL void log_inputs( void )
 			}
 		}
 	}
-	for ( nid = wstart; nid < wstart + wcount && nid - wstart < MAXW; nid++ ) {
+	for ( nid = wstart; nid < wstart + wcount; nid++ ) {
 		WIDGET	*w = w_of(nid);
 
 		if ( w->type == W_PIN && ( w->pincaps & PC_IN ) && ( w->config >> 30 ) != PORT_NONE ) {
@@ -664,13 +746,14 @@ LOCAL void log_inputs( void )
 
 LOCAL void log_path( CONST char *what, PATH *p )
 {
-	UB	buf[MAXPATH * 6 + 1], *b = buf;
+	UB	*b = logbuf;
 	INT	i;
 
+	b[0] = '\0';
 	for ( i = 0; i < p->n; i++ ) {
 		b += tm_sprintf(b, (UB *)( ( i == 0 ) ? "%d" : " > %d" ), p->nid[i]);
 	}
-	tm_printf((UB *)"TessronOS: hda: input path (%s): converter %s (pin)\n", what, buf);
+	tm_printf((UB *)"TessronOS: hda: input path (%s): converter %s (pin)\n", what, logbuf);
 }
 
 /*
@@ -687,7 +770,7 @@ LOCAL void in_setup( void )
 
 	pin[IN_INT] = pin[IN_JACK] = 0;
 	for ( dev = DEV_MIC; ; dev = DEV_LINEIN ) {
-		for ( nid = wstart; nid < wstart + wcount && nid - wstart < MAXW; nid++ ) {
+		for ( nid = wstart; nid < wstart + wcount; nid++ ) {
 			WIDGET	*w = w_of(nid);
 			UINT	port = w->config >> 30;
 
@@ -726,6 +809,37 @@ LOCAL void in_setup( void )
 	in_cur = IN_INT;
 }
 
+/*
+ * Room for the walk, as the group's widgets are counted: the widgets,
+ * the marks, an output path for every pin, the two input paths, and the
+ * console's line (a path's gains, 24 bytes a widget at most; a list of
+ * connections, 127 entries of 6). FALSE when there is not enough memory.
+ */
+LOCAL BOOL walk_room( void )
+{
+	INT	i, npin = 0;
+	SZ	line = (SZ)wcount * 24 + 128 * 6 + 1;
+
+	wid = (WIDGET *)Kcalloc((SZ)wcount + 1, sizeof(WIDGET));
+	seen = (UB *)Kcalloc((SZ)wcount + 1, 1);
+	logbuf = (UB *)Kmalloc(line);
+	if ( wid == NULL || seen == NULL || logbuf == NULL || !read_widgets() ) {
+		return FALSE;
+	}
+	logbuf[0] = '\0';
+	for ( i = 0; i < (INT)wcount; i++ ) {
+		if ( wid[i].type == W_PIN ) npin++;
+	}
+	outp = (PATH *)Kcalloc((SZ)npin + 1, sizeof(PATH));
+	if ( outp == NULL ) {
+		return FALSE;
+	}
+	for ( i = 0; i < npin; i++ ) {
+		if ( !path_room(&outp[i]) ) return FALSE;
+	}
+	return ( path_room(&inp[IN_INT]) && path_room(&inp[IN_JACK]) );
+}
+
 LOCAL void walk_codec( void )
 {
 	UW	n = param(0, P_NODES);
@@ -748,8 +862,12 @@ LOCAL void walk_codec( void )
 	n = param(afg, P_NODES);
 	wstart = (UH)( ( n >> 16 ) & 0xff );
 	wcount = (UH)( n & 0xff );
-	read_widgets();
-	for ( nid = wstart; nid < wstart + wcount && nid - wstart < MAXW; nid++ ) {
+	if ( !walk_room() ) {
+		tm_printf((UB *)"TessronOS: hda: no memory for the %d widgets of codec %d\n", wcount, cad);
+		afg = 0;
+		return;
+	}
+	for ( nid = wstart; nid < wstart + wcount; nid++ ) {
 		WIDGET	*w = w_of(nid);
 
 		if ( w->type == W_PIN ) {
@@ -759,20 +877,21 @@ LOCAL void walk_codec( void )
 		}
 	}
 	log_inputs();
-	/* outputs: the speaker first, headphones, line out */
+	/* outputs: the speaker first, headphones, line out; every one of them that is wired */
 	nout = 0;
-	for ( rank = 0; rank < 3 && nout < MAXOUT; rank++ ) {
+	for ( rank = 0; rank < 3; rank++ ) {
 		UINT	want = ( rank == 0 ) ? DEV_SPEAKER : ( rank == 1 ) ? DEV_HP : DEV_LINEOUT;
 
-		for ( nid = wstart; nid < wstart + wcount && nid - wstart < MAXW && nout < MAXOUT; nid++ ) {
+		for ( nid = wstart; nid < wstart + wcount; nid++ ) {
 			WIDGET	*w = w_of(nid);
 
 			if ( w->type != W_PIN || ( w->pincaps & PC_OUT ) == 0 || ( w->config >> 30 ) == 1
 			  || ( ( w->config >> 20 ) & 0xf ) != want ) continue;
 			outp[nout].n = 0;
-			if ( find_path(nid, W_OUT, &outp[nout], 0) ) {
+			knl_memset(seen, 0, wcount);
+			if ( find_path(nid, W_OUT, &outp[nout]) ) {
 				if ( nout == 0 ) {
-					tm_sprintf(out_name, (UB *)"HDA %s", dev_name(want));
+					out_name = ( rank == 0 ) ? "HDA speaker" : ( rank == 1 ) ? "HDA headphones" : "HDA line out";
 				}
 				nout++;
 			}
@@ -851,13 +970,12 @@ LOCAL void out_fill( INT k )
 
 /* ---------------------------------------------------------------- backend */
 
-LOCAL INT hda_outputs( SDOut *o, INT max )
+LOCAL ER hda_outs( SNDOUTS *l )
 {
-	if ( !hda_ok || nout == 0 || max < 1 ) {
-		return 0;
+	if ( !hda_ok || nout == 0 ) {
+		return E_OK;
 	}
-	knl_snd_out_set(o, (CONST UB *)"hda", out_name, SND_BE_HDA, SND_OF_LEVEL);
-	return 1;
+	return knl_snd_out_add(l, (CONST UB *)"hda", (CONST UB *)out_name, SND_BE_HDA, SND_OF_LEVEL);
 }
 
 LOCAL BOOL hda_can_record( void )
@@ -924,10 +1042,10 @@ LOCAL BOOL jack_sense( void )
 /* The gains a path's amplifiers were given, for the console */
 LOCAL void log_take( CONST char *why, PATH *p )
 {
-	UB	buf[MAXPATH * 24 + 1], *b = buf;
+	UB	*b = logbuf;
 	INT	i;
 
-	buf[0] = '\0';
+	b[0] = '\0';
 	for ( i = 0; i < p->n; i++ ) {
 		WIDGET	*w = w_of(p->nid[i]);
 
@@ -938,7 +1056,7 @@ LOCAL void log_take( CONST char *why, PATH *p )
 	}
 	tm_printf((UB *)"TessronOS: hda: %s: pin %d through converter %d, jack %s, level %04x, gains%s\n", why,
 		  p->nid[p->n - 1], p->nid[0], !in_have[IN_JACK] ? "not used" : jack_in ? "plugged in" : "empty",
-		  vol_in, ( buf[0] != '\0' ) ? buf : (UB *)" none");
+		  vol_in, ( logbuf[0] != '\0' ) ? logbuf : (UB *)" none");
 }
 
 /*
@@ -1136,7 +1254,7 @@ LOCAL ER hda_set_level( INT dn, CONST SDVol *v )
 
 EXPORT CONST SNDHW knl_hda_hw = {
 	SND_BE_HDA,
-	hda_outputs,
+	NULL,
 	hda_can_record,
 	hda_play_start,
 	hda_play_stop,
@@ -1148,7 +1266,8 @@ EXPORT CONST SNDHW knl_hda_hw = {
 	hda_get_level,
 	hda_set_level,
 	0,
-	0
+	0,
+	hda_outs
 };
 
 /* ---------------------------------------------------------------- start-up */
@@ -1496,8 +1615,7 @@ LOCAL ER hda_start( void )
 	bdl = (UB *)pages(0, &bdl_pa);
 	out_ring = (UB *)pages(1, &out_pa);		/* two pages: the ring of RING_BYTES */
 	in_ring = (UB *)pages(1, &in_pa);
-	wid = (WIDGET *)Kcalloc(MAXW, sizeof(WIDGET));
-	if ( pg0 == NULL || bdl == NULL || out_ring == NULL || in_ring == NULL || wid == NULL ) {
+	if ( pg0 == NULL || bdl == NULL || out_ring == NULL || in_ring == NULL ) {
 		return E_NOMEM;
 	}
 	corb = (UW *)pg0;

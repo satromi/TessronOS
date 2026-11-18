@@ -95,6 +95,7 @@ LOCAL ID	dev = 0;		/* the sound device's object */
 LOCAL SDMix	mix_none;		/* no mixer: nothing at all */
 LOCAL SDMix	*mixp = &mix_none;	/* the mixer as last read: the whole and every program */
 #define mix	(*mixp)
+LOCAL UB	*mixv = NULL;		/* the same with every name whole (OB_SND_MIXV), NULL when not read */
 LOCAL INT	top;			/* the program in the first row, from 0 */
 LOCAL INT	vis = START_ROWS;	/* rows the work area has room for */
 LOCAL UB	top_prog[16];		/* the program in the first row, to keep it there */
@@ -140,6 +141,43 @@ LOCAL ID dev_open( void )
 	return dev;
 }
 
+/*
+ * A program's name, whole: from the mixer read with every name whole, the
+ * entry of the same program and process; the fixed form's (cut at a
+ * whole letter) when there is none
+ */
+LOCAL CONST UB *app_name( CONST SDMixApp *a )
+{
+	CONST SDMixes	*h = (CONST SDMixes *)mixv;
+	CONST SDMixAppV	*e;
+	UINT		k;
+
+	if ( h != NULL ) {
+		e = SND_MIXES_FIRST(h);
+		for ( k = 0; k < h->napp && (CONST UB *)e + sizeof(SDMixAppV) <= mixv + h->size && e->size > 0; k++ ) {
+			if ( memcmp(e->prog, a->prog, 16) == 0 && e->pid == a->pid ) return e->name;
+			e = SND_MIXV_NEXT(e);
+		}
+	}
+	return a->name;
+}
+
+/* The mixer with every name whole, read beside the fixed form; kept as it was when it cannot be */
+LOCAL void mixv_read( void )
+{
+	UB	*b = NULL;
+	INT	cap = 0, len = ui_key_all(dev, OB_SND_MIXV, 0, &b, &cap);
+
+	if ( len >= (INT)sizeof(SDMixes) && (UINT)len >= ((SDMixes *)b)->size ) {
+		free(mixv);
+		mixv = b;
+	} else {
+		free(b);
+		free(mixv);
+		mixv = NULL;		/* a system before: the names of the fixed form */
+	}
+}
+
 LOCAL BOOL mix_read( void )
 {
 	SZ	asz = 0;
@@ -157,6 +195,7 @@ LOCAL BOOL mix_read( void )
 		if ( er >= E_OK ) {
 			if ( mixp != &mix_none ) free(mixp);
 			mixp = (SDMix *)b;
+			mixv_read();
 		} else {
 			free(b);
 		}
@@ -193,53 +232,75 @@ LOCAL ER mix_put( CONST SDMixSet *s )
 	return ob_wri_rec(dev, OB_SND_MIXSET, 0, s, sizeof(*s), &asz);
 }
 
-/* The output the sound plays on now, or would, for a person */
-LOCAL void out_name( char *out, INT max )
+/*
+ * The output the sound plays on now, or would, for a person: allocated
+ * as long as its name is (the device's list with the names whole,
+ * OB_SND_OUTV), for the caller to free; NULL when there is no memory
+ */
+LOCAL char *out_name( void )
 {
-	SDOut		*o;
+	SDOuts		*l;
+	SDOutV		*e, *at = NULL;
 	UB		*b = NULL;
-	INT		n, k, at = -1, cap = 0, len;
-	CONST char	*nm;
+	INT		cap = 0, len;
+	UINT		k;
+	CONST char	*nm, *head = NULL, *none = "";
+	char		*out;
+	SZ		room;
 
-	snprintf(out, max, "（なし）");
-	if ( dev_open() <= 0 || ( len = ui_key_all(dev, OB_SND_OUTS, 0, &b, &cap) ) < 0 ) return;
-	o = (SDOut *)b;
-	n = len / (INT)sizeof(SDOut);
-	for ( k = 0; k < n && at < 0; k++ ) {
-		if ( ( o[k].flags & SND_OF_PLAYING ) != 0 ) at = k;
-	}
-	for ( k = 1; k < n && at < 0; k++ ) {
-		if ( ( o[k].flags & SND_OF_NOSOUND ) == 0 ) at = k;	/* what 自動 would take */
-	}
-	if ( at < 0 ) {
+	if ( dev_open() <= 0 || ( len = ui_key_all(dev, OB_SND_OUTV, 0, &b, &cap) ) < (INT)sizeof(SDOuts) ) {
 		free(b);
-		return;
+		return strdup("（なし）");
 	}
-	nm = (CONST char *)o[at].name;
-	switch ( o[at].kind ) {
+	l = (SDOuts *)b;
+	if ( (INT)l->size > len ) {
+		l->n = 0;			/* cannot be: read whole */
+	}
+	for ( k = 0, e = SND_OUTS_FIRST(l); k < l->n && at == NULL; k++, e = SND_OUTV_NEXT(e) ) {
+		if ( ( e->flags & SND_OF_PLAYING ) != 0 ) at = e;
+	}
+	for ( k = 0, e = SND_OUTS_FIRST(l); k < l->n && at == NULL; k++, e = SND_OUTV_NEXT(e) ) {
+		if ( k > 0 && ( e->flags & SND_OF_NOSOUND ) == 0 ) at = e;	/* what 自動 would take */
+	}
+	if ( at == NULL ) {
+		free(b);
+		return strdup("（なし）");
+	}
+	nm = (CONST char *)SND_OUTV_NAME(at);
+	switch ( at->kind ) {
 	case SND_BE_USB:
-		snprintf(out, max, "ＵＳＢ：%s", ( nm[0] != 0 ) ? nm : "オーディオ機器");
+		head = "ＵＳＢ：";
+		none = "オーディオ機器";
 		break;
 	case SND_BE_I2S:
-		snprintf(out, max, "Ｉ２ＳのＤＡＣ（ＧＰＩＯ１８〜２１）");
+		head = "Ｉ２ＳのＤＡＣ（ＧＰＩＯ１８〜２１）";
+		nm = "";
 		break;
 	case SND_BE_HDMI:
-		snprintf(out, max, "%s：%s", ( strcmp((CONST char *)o[at].id, "hdmi1") == 0 ) ? "ＨＤＭＩ１" : "ＨＤＭＩ０",
-			 ( nm[0] != 0 ) ? nm : "画面");
+		head = ( strcmp((CONST char *)at->id, "hdmi1") == 0 ) ? "ＨＤＭＩ１：" : "ＨＤＭＩ０：";
+		none = "画面";
 		break;
 	case SND_BE_HDA:
-		snprintf(out, max, "内蔵のサウンド：%s", ( nm[0] != 0 ) ? nm : "ＨＤオーディオ");
+		head = "内蔵のサウンド：";
+		none = "ＨＤオーディオ";
 		break;
 	case SND_BE_BT:
-		snprintf(out, max, "Ｂｌｕｅｔｏｏｔｈ：%s", ( nm[0] != 0 ) ? nm : "イヤホン");
+		head = "Ｂｌｕｅｔｏｏｔｈ：";
+		none = "イヤホン";
 		break;
 	default:
+		head = "（なし）";
+		nm = "";
 		break;
 	}
-	if ( ( o[at].flags & SND_OF_PLAYING ) == 0 ) {
-		strncat(out, "（いまは鳴っていません）", max - strlen(out) - 1);
+	if ( nm[0] == 0 ) nm = none;
+	room = strlen(head) + strlen(nm) + strlen("（いまは鳴っていません）") + 1;
+	out = (char *)malloc(room);
+	if ( out != NULL ) {
+		snprintf(out, room, "%s%s%s", head, nm, ( ( at->flags & SND_OF_PLAYING ) == 0 ) ? "（いまは鳴っていません）" : "");
 	}
 	free(b);
+	return out;
 }
 
 /* ---------------------------------------------------------------- the page */
@@ -416,8 +477,10 @@ LOCAL void fill( void )
 		mixp = &mix_none;
 		ui_set_text(&ui, P_OUT, "（サウンドデバイスがありません）");
 	} else {
-		out_name(t, sizeof(t));
-		ui_set_text(&ui, P_OUT, t);
+		char	*o = out_name();
+
+		ui_set_text(&ui, P_OUT, ( o != NULL ) ? o : "（メモリが足りません）");
+		free(o);
 	}
 	if ( ui_now() >= hold_all && ( !shown_all.set || shown_all.vol != ( mix.lv << 16 | mix.rv )
 				       || shown_all.mute != mix.mute ) ) {
@@ -453,13 +516,13 @@ LOCAL void fill( void )
 			INT	j, same = 0;
 
 			for ( j = 0; j < n; j++ ) {
-				if ( j != i && strcmp((CONST char *)mix.app[j].name, (CONST char *)a->name) == 0 ) same++;
+				if ( j != i && strcmp((CONST char *)app_name(&mix.app[j]), (CONST char *)app_name(a)) == 0 ) same++;
 			}
 			if ( same > 0 && a->pid > 0 ) {
-				snprintf(t, sizeof(t), "%s（%d）%s", (CONST char *)a->name, (INT)a->pid,
+				snprintf(t, sizeof(t), "%s（%d）%s", (CONST char *)app_name(a), (INT)a->pid,
 					 ( a->playing > 0 ) ? "　再生中" : "");
 			} else {
-				snprintf(t, sizeof(t), "%s%s", (CONST char *)a->name, ( a->playing > 0 ) ? "　再生中" : "");
+				snprintf(t, sizeof(t), "%s%s", (CONST char *)app_name(a), ( a->playing > 0 ) ? "　再生中" : "");
 			}
 		}
 		ui_set_text(&ui, P_ROW(k) + R_NAME, t);
@@ -488,7 +551,7 @@ LOCAL void fill( void )
 	for ( i = 0; i < n; i++ ) {
 		SDMixApp	*a = &mix.app[i];
 
-		at += snprintf(s + at, sizeof(s) - at, "%s %d %d %d; ", (CONST char *)a->name,
+		at += snprintf(s + at, sizeof(s) - at, "%s %d %d %d; ", (CONST char *)app_name(a),
 			       (INT)a->vol, (INT)a->mute, (INT)a->playing);
 		if ( at >= (INT)sizeof(s) - 1 ) at = (INT)sizeof(s) - 1;
 	}
@@ -732,7 +795,7 @@ LOCAL ID mix_watch( void )
 /*
  * What plays sound, the record the output's notice is of, read whole: a
  * change after this read is told again (the page names the output from
- * the device's own list, OB_SND_OUTS)
+ * the device's own list, OB_SND_OUTV)
  */
 LOCAL void out_read( void )
 {

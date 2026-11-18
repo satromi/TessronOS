@@ -31,6 +31,7 @@ extern "C" {
 #endif
 
 #include <ts/uuid.h>
+#include <tk/errno.h>
 
 /* ---------------------------------------------------------------- kinds */
 
@@ -81,6 +82,11 @@ extern "C" {
  * between processes (memfd_create of lib/libcxxrt, design 18.6)
  */
 #define OB_F_TRANSIENT	0x0010
+/*
+ * T_OBREF.name, of the fixed form a program built before asks for: the
+ * name did not fit and is cut at a whole letter; ob_ref_nam has it whole
+ */
+#define OB_F_NAMECUT	0x0020
 
 /* ---------------------------------------------------------------- operations */
 
@@ -154,15 +160,21 @@ extern "C" {
 					   in the order of the data numbers, gain in and out,
 					   main, treble, bass, PCM, beep, mic, line, CD,
 					   music, aux 1, aux 2 */
-#define OB_SND_OUTS	24		/* SDOut[]: "auto" and the outputs there are */
-#define OB_SND_OUTSEL	25		/* SDOutSel: the output chosen and the one playing;
-					   read only here: an output is chosen through
+#define OB_SND_OUTS	24		/* SDOut[]: "auto" and the outputs there are, in the
+					   fixed form (ids and names cut, SND_OF_CUT), kept
+					   for the programs that read it so */
+#define OB_SND_OUTSEL	25		/* SDOutSel: the output chosen and the one playing,
+					   in the fixed form (E_LIMIT when an id does not
+					   fit); read only here: an output is chosen through
 					   the system object's record 8 (OB_SYS_SOUND) */
 #define OB_SND_MIX	26		/* SDMix: the whole's volume and the programs' */
 #define OB_SND_MIXSET	27		/* SDMixSet written: a volume or a mute set */
 #define OB_SND_MONITOR	28		/* SDMon: the channel records what is played */
 #define OB_SND_MIXIN	29		/* SDMixIn: the microphone's volume, how it takes it, its level */
-#define OB_SND_NREC	30
+#define OB_SND_OUTV	30		/* SDOuts: the same as record 24, ids and names whole */
+#define OB_SND_OUTSELV	31		/* SDOutSelV: the same as record 25, the ids whole; read only */
+#define OB_SND_MIXV	32		/* SDMixes: the same as record 26, every program's name whole; read only */
+#define OB_SND_NREC	33
 
 /* A camera's records (include/ts/cam.h): record 1 its frames, the rest its attributes */
 #define OB_CAM_FRAME	1		/* data number 0: T_CAMFRAME and the frame */
@@ -271,9 +283,18 @@ extern "C" {
 #define OB_RND_DATA	1
 #define OB_RND_NREC	2
 
-/* A channel: writing record 0 sends one message, reading it takes one */
-#define OB_CH_MSG_MAX	1024		/* bytes of one message */
-#define OB_CH_QLEN	16		/* messages it holds */
+/*
+ * A channel: writing record 0 sends one message, reading it takes one.
+ * A message is as long as it is written. What a channel holds is bounded
+ * by bytes, not by messages: the messages written and not yet read take
+ * at most OB_CH_BYTES, as a socket's buffer bounds what it holds. A
+ * writer waits for room (E_TMOUT with OB_O_NOWAIT); a message longer than
+ * the whole room is refused (E_LIMIT) rather than cut. A reader with less
+ * room than the message is not given part of it: E_LIMIT, *p_asize the
+ * message's length, and the message stays first, to be read again with
+ * room enough (as recvmsg tells MSG_TRUNC).
+ */
+#define OB_CH_BYTES	( 1024 * 1024 )	/* bytes the messages waiting on a channel take */
 
 /*
  * A socket (OB_S_SOCKET, design 18.8): there from so_socket or so_accept
@@ -512,7 +533,10 @@ typedef struct {
  * what both may do.
  *
  * Read, the record is a T_OBDROP whose v[] holds n entries, as many as
- * were let go: OB_DROP_SIZE(n) bytes. A program reads it whole (in
+ * were let go, and after them the words of the links (each entry says
+ * where its name, relationship and applist are, from the end of v[n],
+ * and how long; each ends in 0): OB_DROP_SIZE(n) + strsz bytes.
+ * ob_drop_name, ob_drop_rel and ob_drop_applist find them. A program reads it whole (in
  * memory of its own: ob_drop_read, ts/obdrop.h); one that reads less has
  * the first links. Written with a T_OBDRANS, it is answered: the one who
  * dropped is told whether it was taken, on the message line; a drop
@@ -528,7 +552,6 @@ typedef struct {
 #define OB_WR_DROP	4		/* a plain window: the latest drop */
 #define OB_WR_BARS	5		/* a plain window: its scroll bars, T_OBWBARS */
 #define OB_WR_CAND	6		/* a plain window: the candidates the system lists for it, T_OBWCAND */
-#define OB_DROP_NAME	64		/* bytes of a link's name, UTF-8 */
 #define OB_DROP_MSG	128		/* bytes of what an answer says */
 #define OB_DROP_OPS	( OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_OP_ATRWR | OB_OP_LINK )
 
@@ -536,7 +559,9 @@ typedef struct {
 	TS_UUID	target;			/* the object the link points at */
 	TS_UUID	vobjid;			/* the link itself */
 	UINT	ops;			/* what the taker was granted: OB_OP_*, 0 nothing */
-	UB	name[OB_DROP_NAME];	/* the name the link shows */
+	UINT	name_at, name_len;	/* the name the link shows: where in the words, how long */
+	UINT	rel_at, rel_len;	/* its relationship */
+	UINT	appl_at, appl_len;	/* its applist */
 	INT	left, top, right, bottom;	/* its box where it was */
 	UINT	frcol, chcol, tbcol, bgcol;	/* 0x00rrggbb */
 	INT	chsz;
@@ -551,12 +576,54 @@ typedef struct {
 	TS_UUID	from;			/* the window it came from; 0 none said */
 	TS_UUID	fromobj;		/* the object that window shows (the record the
 					   links are in); 0 none said */
+	UINT	strsz;			/* bytes of the links' words after v[n] */
 	T_OBDROPV v[];			/* n links; with none, the letters instead */
 } T_OBDROP;
 
-/* The bytes of a drop of n links, and the letters of a drop of letters (n 0) */
+/* The bytes of a drop of n links (before their words), and the letters of a drop of letters (n 0) */
 #define OB_DROP_SIZE(n)		( sizeof(T_OBDROP) + sizeof(T_OBDROPV) * (SZ)(n) )
 #define OB_DROP_LETTERS(d)	( (UB *)(d)->v )
+#define OB_DROP_WORDS(d)	( (UB *)&(d)->v[(d)->n] )
+
+/* A word of entry i of a drop read whole: its bytes, ending in 0 ("" when it has none), and *p_len */
+static __inline__ CONST UB *ob_drop_word( CONST T_OBDROP *d, UINT at, UINT len, SZ *p_len )
+{
+	if ( p_len != NULL ) *p_len = 0;
+	if ( len == 0 || (SZ)at + (SZ)len >= (SZ)d->strsz || OB_DROP_WORDS(d)[at + len] != 0 ) {
+		return (CONST UB *)"";
+	}
+	if ( p_len != NULL ) *p_len = (SZ)len;
+	return OB_DROP_WORDS(d) + at;
+}
+#define ob_drop_name(d, i, pl)		ob_drop_word((d), (d)->v[i].name_at, (d)->v[i].name_len, (pl))
+#define ob_drop_rel(d, i, pl)		ob_drop_word((d), (d)->v[i].rel_at, (d)->v[i].rel_len, (pl))
+#define ob_drop_applist(d, i, pl)	ob_drop_word((d), (d)->v[i].appl_at, (d)->v[i].appl_len, (pl))
+
+/*
+ * A word put after the entries of a drop being made: words is where they
+ * start, *p_strsz how many bytes there are already, cap the room; the
+ * entry's at and len set. E_LIMIT when the room does not hold it.
+ */
+static __inline__ ER ob_drop_put( UB *words, UINT *p_strsz, SZ cap, CONST UB *s, SZ len,
+				  UINT *p_at, UINT *p_len )
+{
+	SZ	i;
+
+	if ( s == NULL ) len = 0;
+	else if ( len < 0 ) for ( len = 0; s[len] != 0; len++ ) ;
+	*p_at = *p_strsz;
+	*p_len = (UINT)len;
+	if ( len == 0 ) {
+		return E_OK;
+	}
+	if ( (SZ)*p_strsz + len + 1 > cap ) {
+		return E_LIMIT;
+	}
+	for ( i = 0; i < len; i++ ) words[*p_strsz + i] = s[i];
+	words[*p_strsz + len] = 0;
+	*p_strsz += (UINT)( len + 1 );
+	return E_OK;
+}
 
 #define OB_DR_ACCEPT	1
 #define OB_DR_REFUSE	2
@@ -714,14 +781,19 @@ typedef struct {
 
 /* ---------------------------------------------------------------- objects */
 
-#define OB_NAME_MAX	64		/* bytes of a name, UTF-8 */
-
+/*
+ * What an object is. Its name is read with ob_ref_nam, as long as it is;
+ * namelen says how long it was when this was answered (bytes, the nought
+ * not counted). A program built before, with the name in the structure
+ * (64 bytes), calls the SVC of before and is given the name cut at a
+ * whole letter, with OB_F_NAMECUT when it did not fit.
+ */
 typedef struct {
 	TS_UUID	uuid;
 	UINT	type;			/* OB_T_* */
 	UINT	sub;			/* OB_S_* */
 	UINT	flags;			/* OB_F_* */
-	UB	name[OB_NAME_MAX];
+	UINT	namelen;		/* bytes of the name (ob_ref_nam) */
 	INT	refcnt;
 	INT	nrec;
 	UD	size;			/* bytes of every record together */
@@ -979,6 +1051,18 @@ IMPORT ER  ob_cre_obj( CONST T_OBCRE *pk_cre, TS_UUID *p_uuid );
 IMPORT ER  ob_cre_key( CONST T_OBCRE *pk_cre, UINT ops, ID *keys, TS_UUID *p_uuid );
 IMPORT ER  ob_del_obj( CONST TS_UUID *uuid );
 IMPORT ER  ob_ref_obj( CONST TS_UUID *uuid, T_OBREF *pk_ref );
+/*
+ * An object's name, of any length (UTF-8): at most size bytes put in
+ * buf, cut at a whole letter and ended by a nought, and the bytes the
+ * whole name takes with its nought in *p_asize. A reader whose room
+ * was short reads again with that much (size 0 asks it alone). An
+ * object without a name answers "" (*p_asize 1). Who may ask is as
+ * for ob_ref_obj. knl_ob_name gives the whole name in memory of its
+ * own (Kfree it), NULL with *p_er the error; ui_obj_name (ts/ui.h) the
+ * same for a program.
+ */
+IMPORT ER  ob_ref_nam( CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize );
+IMPORT UB *knl_ob_name( CONST TS_UUID *uuid, SZ *p_len, ER *p_er );
 /*
  * Whether the caller may do every one of ops (OB_OP_*) to an object,
  * answered without opening it, as access(2) answers: E_OK when
@@ -1310,22 +1394,42 @@ IMPORT INT  knl_obfile_nvol( void );
 
 /*
  * A volume attached, by its path (design 7.6): whether it is the native
- * store, its own UUID, its label, its top object (the object a disk is
- * shown by, zero while it has none), and how many objects of it are
- * open. 'system' is the first volume, where the system's objects are.
+ * store, its own UUID, its top object (the object a disk is shown by,
+ * zero while it has none), and how many objects of it are open.
+ * 'system' is the first volume, where the system's objects are. Its
+ * label, of any length, is read with knl_obfile_vol_label.
  */
-#define OB_VOL_LABEL	64
 typedef struct {
 	BOOL	native;
 	BOOL	system;
 	BOOL	rdonly;
 	TS_UUID	vuuid;
 	TS_UUID	top;
-	UB	label[OB_VOL_LABEL];
 	INT	open;
+	BOOL	foreign;		/* another machine's system volume (knl_obfile_foreign) */
 } T_OBFVREF;
 
 IMPORT ER   knl_obfile_vol_ref( CONST char *path, T_OBFVREF *pk );
+/*
+ * The label of a volume attached, whole: the name of its top object,
+ * or, on a volume without one, the copy the superblock keeps. As
+ * ob_ref_nam puts a name: at most size bytes, the whole size in
+ * *p_asize.
+ */
+IMPORT ER   knl_obfile_vol_label( CONST char *path, UB *buf, SZ size, SZ *p_asize );
+/*
+ * After an object was renamed: when it is the top of its native volume,
+ * the superblock's copy of the label is written again, cut at a whole
+ * letter, and the name the volume is known by follows (E_OK for an
+ * object that is no volume's top).
+ */
+IMPORT ER   knl_obfile_label_sync( CONST TS_UUID *uuid );
+/*
+ * The top of a native volume just made (knl_tsfs_format) given the
+ * default protection of an object crd makes, as ob_cre_obj gives one made
+ * with none said; a top protected already is left as it is.
+ */
+IMPORT ER   knl_obfile_top_prot( CONST char *path, CONST T_OBCRD *crd );
 
 /*
  * The top object of a native volume set: an object on it, held once so
@@ -1351,7 +1455,8 @@ IMPORT INT  knl_obfile_slots( INT *p_used );
  * is on; whether one is attached now; and this machine's UUID, as the
  * outer part of a link's id names it (its system volume's).
  */
-IMPORT ER   knl_obfile_vol_name( CONST TS_UUID *vuuid, UB *buf, INT max );
+/* The name, whole: as ob_ref_nam puts a name, at most size bytes, the whole size in *p_asize */
+IMPORT ER   knl_obfile_vol_nam( CONST TS_UUID *vuuid, UB *buf, SZ size, SZ *p_asize );
 IMPORT ER   knl_obfile_vuuid_of( CONST TS_UUID *uuid, TS_UUID *p_vuuid );
 IMPORT BOOL knl_obfile_vuuid_on( CONST TS_UUID *vuuid );
 IMPORT ER   knl_obfile_machine( TS_UUID *p_uuid );
@@ -1417,8 +1522,53 @@ IMPORT ER   knl_obxref_move( CONST TS_UUID *hvol, CONST TS_UUID *host, CONST TS_
 IMPORT void knl_obxref_drain( void );
 IMPORT ER   knl_obxref_sync( ID vol );
 IMPORT INT  knl_obxref_list( ID vol, T_OBXREF *buf, INT max );
-/* Whether an object is on the volume attached with this path */
+/*
+ * Whether the object a UUID names is on the volume attached with this
+ * path: the object found by the UUID (knl_obfile_vol_of), not merely one
+ * of the same UUID on that volume, which another machine's system
+ * volume holds for every object of the system (knl_obfile_foreign)
+ */
 IMPORT BOOL knl_obfile_on( CONST TS_UUID *uuid, CONST char *path );
+/*
+ * Whether the volume attached with this path is another machine's
+ * system volume (design 8.3): a native volume holding the system box
+ * that is not this machine's system volume. Its objects of the same
+ * UUIDs as this system's are found after those of the other volumes;
+ * nothing of it is emptied at the start.
+ */
+IMPORT BOOL knl_obfile_foreign( CONST char *path );
+/*
+ * The UUID of the volume an object a link names is on, as seen from a
+ * record of the volume 'near': an object of that UUID on 'near' itself
+ * when there is one (a link without a volume in a record means the
+ * record's own volume), else the one knl_obfile_vol_of finds.
+ */
+IMPORT ER   knl_obfile_vuuid_near( CONST TS_UUID *uuid, CONST TS_UUID *near, TS_UUID *p_vuuid );
+/*
+ * An object as the store below the object layer knows it: the volume
+ * (TSFS's number) it is on and the UUID it has there. An alias (an
+ * object of another machine's system volume that has the UUID of one of
+ * this system's, design 8.3) is that object of the other volume under
+ * its own UUID; any other UUID is itself, on the volume knl_obfile_vol_of
+ * finds. What calls knl_tsfs_* or ts_* on an object found by its UUID
+ * passes the volume and the UUID this answers. E_NOEXS on no volume.
+ */
+IMPORT ER   knl_obfile_real( CONST TS_UUID *in, ID *p_vol, TS_UUID *p_real );
+/*
+ * The alias of the object of a UUID on the volume attached with a path
+ * (another machine's system volume): E_NOEXS when that volume gives the
+ * UUID none, the object being reached by the UUID itself
+ */
+IMPORT ER   knl_obfile_alias( CONST char *path, CONST TS_UUID *orig, TS_UUID *p_alias );
+/*
+ * Whether a disk ("uda", "uda0") is a USB medium the person at the
+ * machine may attach and detach volumes of without the administrator
+ * (design 8.7.1): one the system uses nothing of -- the system volume
+ * is not on it, nor anything mounted outside FS_MEDIA_DIR (the disk
+ * the machine started from). Volumes the person attached from it do
+ * not make it the system's.
+ */
+IMPORT BOOL knl_obdev_medium_person( CONST UB *name );
 IMPORT void knl_ob_prc_start( ID pid, ID ppid, BOOL person );	/* a process was made */
 IMPORT void knl_ob_act_arm( UINT ticket );	/* what this task starts now carries wm_act_ticket's; 0 ends it */
 IMPORT UINT knl_ob_act_take( ID pid );		/* the ticket the process was started with, once; 0 none */

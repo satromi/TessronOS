@@ -51,10 +51,10 @@ IMPORT BOOL knl_hid_ext_name( UINT id, UB *name, INT max );	/* hid.c: the PC's i
 typedef struct {
 	BOOL		used;
 	T_HIDINFO	info;
-	UB		name[OB_DV_NAME];
+	UB		name[OB_HID_NAME_MAX];
 	TS_UUID		uuid;
 	UH		vendor, product;
-	UB		port[24];		/* "0-4.3" */
+	UB		port[OB_USB_PATH_MAX];	/* "0-4.3" */
 } INDEV;
 
 /*
@@ -391,14 +391,14 @@ LOCAL void name_of( CONST T_HIDINFO *h, CONST T_USBDEV *d, UB *name, UB *port )
 {
 	INT	n = 0;
 
-	(void)knl_obusb_path(d, port, 24);
-	n = knl_oj_put(name, 0, OB_DV_NAME, "hid");
-	n = knl_oj_put(name, n, OB_DV_NAME, (CONST char *)port);
+	(void)knl_obusb_path(d, port, OB_USB_PATH_MAX);
+	/* OB_HID_NAME_MAX is room for the longest there is: nothing is cut */
+	n = knl_oj_put(name, 0, OB_HID_NAME_MAX, "hid");
+	n = knl_oj_put(name, n, OB_HID_NAME_MAX, (CONST char *)port);
 	if ( h->ifno > 0 ) {
-		n = knl_oj_put(name, n, OB_DV_NAME, ".i");
-		n = knl_oj_put_num(name, n, OB_DV_NAME, h->ifno);
+		n = knl_oj_put(name, n, OB_HID_NAME_MAX, ".i");
+		(void)knl_oj_put_num(name, n, OB_HID_NAME_MAX, h->ifno);
 	}
-	if ( n < 0 ) name[OB_DV_NAME - 1] = 0;
 }
 
 /*
@@ -436,7 +436,7 @@ EXPORT void knl_obinput_sync( void )
 	T_HIDINFO	*h = NULL;
 	T_USBDEV	d;
 	T_HIDSTAT	st;
-	UB		(*gone)[OB_DV_NAME];
+	UB		(*gone)[OB_HID_NAME_MAX];
 	INT		n, i, k, ng = 0, room;
 	BOOL		changed = FALSE;
 
@@ -469,7 +469,7 @@ EXPORT void knl_obinput_sync( void )
 			in_tbl[i]->info.reports = h[k].reports;
 			continue;
 		}
-		knl_memcpy(gone[ng++], in_tbl[i]->name, OB_DV_NAME);
+		knl_memcpy(gone[ng++], in_tbl[i]->name, OB_HID_NAME_MAX);
 		in_tbl[i]->used = FALSE;
 	}
 	UNLOCK();
@@ -500,10 +500,10 @@ EXPORT void knl_obinput_sync( void )
 			e.vendor = d.vendor;
 			e.product = d.product;
 			name_of(&h[k], &d, e.name, e.port);
-		} else if ( knl_hid_ext_name(h[k].id, e.name, OB_DV_NAME) ) {
+		} else if ( knl_hid_ext_name(h[k].id, e.name, OB_HID_NAME_MAX) ) {
 			;				/* named by its driver: "ps2kbd", "ps2aux", "gt911" */
 		} else {
-			(void)knl_oj_put(e.name, 0, OB_DV_NAME, "hid?");
+			(void)knl_oj_put(e.name, 0, OB_HID_NAME_MAX, "hid?");
 		}
 		e.used = TRUE;
 		LOCK();

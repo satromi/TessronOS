@@ -63,6 +63,7 @@
 #include <ts/obatr.h>
 #include <ts/sysdef.h>
 #include <ts/dtreq.h>
+#include "../dtask.h"
 #include <ts/dt.h>
 #include <ts/time.h>
 #include <ts/hid.h>
@@ -110,10 +111,10 @@ static INT	nconn;
 static BOOL	o_tadjs, o_layout, o_sjis, o_ro, o_argbox;
 static TS_UUID	argobj;
 static BOOL	hasarg, argfig;
-static char	argname[OB_NAME_MAX];
+static char	*argname = NULL;	/* the object's name, whole; NULL none */
 static TS_UUID	lastbox, lasttop;
 static BOOL	haslast;
-static char	lastname[OB_NAME_MAX];
+static char	*lastname = NULL;	/* the first one taken in, whole; NULL none */
 
 /* a job under way */
 static BOOL	busy, cancel;
@@ -468,7 +469,12 @@ static void media_scan( XWIN *w )
 	if ( cnt > 0 ) {
 		for ( i = 0; i < cnt; i++ ) {
 			if ( ob_ref_obj(&list[i], &r) < E_OK || r.sub != OB_S_DISK ) continue;
-			e = ent_add(w, E_DISK, r.name);
+			{
+				UB	*dn = ui_obj_name(&list[i]);	/* a T-Kernel device's name */
+
+				e = ( dn != NULL ) ? ent_add(w, E_DISK, dn) : NULL;
+				free(dn);
+			}
 			if ( e == NULL ) break;
 			e->uuid = list[i];
 			e->size = (D)r.size;
@@ -1468,38 +1474,9 @@ static void job_end( void )
 /* What is asked of the desktop, and its answer waited for, at most wait_ms */
 static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
-	static UINT	seq;
-	TS_UUID		d, reply;
-	T_OBCRE		c;
-	SZ		asz = 0;
-	ID		k, ka;
-	ER		er;
+	static DTASK	q;		/* the answer read whole, however long (dtask.h) */
 
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
-	rq->seq = ++seq;
-	rq->reply = reply;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	/* the answer waited for on its channel, at most wait_ms */
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
-			er = an->er;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
-	return er;
+	return dq_ask(&q, rq, an, NULL, wait_ms);
 }
 
 /* The desktop asked to open an object as a double click would */
@@ -1621,7 +1598,7 @@ static void do_import( XWIN *w )
 	T_XFUSTAT	st;
 	XFCIMP		how;
 	TS_UUID		boxu, u, home, *tops;
-	UB		bname[OB_NAME_MAX];
+	UB		*bname;
 	char		s[400], a[40], b[40];
 	INT		i, k, n, made = 0, fails = 0, objs = 0, skipped = 0, geta = 0;
 	BOOL		newbox;
@@ -1665,8 +1642,13 @@ static void do_import( XWIN *w )
 	boxu = argobj;
 	if ( made > 0 && newbox ) {
 		/* a box of its own, put in the person's cabinet as a new object of theirs is, and opened */
-		snprintf((char *)bname, sizeof(bname), "取込 %s", shown_of(w));
-		e = xfc_uuid_parse(SYSDEF_CABINET, &home) ? xfu_make_box(bname, &home, &boxu) : E_SYS;
+		size_t	bl = strlen(shown_of(w)) + 16;
+
+		bname = (UB *)malloc(bl);
+		if ( bname != NULL ) snprintf((char *)bname, bl, "取込 %s", shown_of(w));
+		e = ( bname == NULL ) ? E_NOMEM
+		  : xfc_uuid_parse(SYSDEF_CABINET, &home) ? xfu_make_box(bname, &home, &boxu) : E_SYS;
+		free(bname);
 		if ( e >= E_OK ) e = xfu_box_link(&home, &boxu);
 		for ( k = 0; e >= E_OK && k < made; k++ ) e = xfu_box_link(&boxu, &tops[k]);
 		if ( e < E_OK ) {
@@ -1676,13 +1658,11 @@ static void do_import( XWIN *w )
 		}
 	}
 	if ( made > 0 ) {
-		T_OBREF	r;
-
 		haslast = TRUE;
 		lastbox = boxu;
 		lasttop = tops[0];
-		lastname[0] = 0;
-		if ( ob_ref_obj(&tops[0], &r) >= E_OK ) strncpy(lastname, (char *)r.name, sizeof(lastname) - 1);
+		free(lastname);
+		lastname = (char *)ui_obj_name(&tops[0]);
 	}
 	xfc_uuid_str(&boxu, a);
 	if ( made > 0 ) xfc_uuid_str(&tops[0], b);
@@ -1841,13 +1821,11 @@ static void carry_out( XWIN *w, INT px, INT py )
 		}
 	}
 	if ( made > 0 ) {
-		T_OBREF	ref;
-
 		haslast = TRUE;
 		lastbox = an.into;
 		lasttop = tops[0];
-		lastname[0] = 0;
-		if ( ob_ref_obj(&tops[0], &ref) >= E_OK ) strncpy(lastname, (char *)ref.name, sizeof(lastname) - 1);
+		free(lastname);
+		lastname = (char *)ui_obj_name(&tops[0]);
 		xfc_uuid_str(&tops[0], b);
 	} else {
 		b[0] = 0;
@@ -1936,7 +1914,8 @@ static void do_export( XWIN *w )
 		say(w, "書き出す実身がありません（仮身をこのウインドウに置くと、その実身をファイルにします）", TRUE);
 		return;
 	}
-	if ( !xfc_ask_export(w, 1, (CONST UB *)( hasarg ? argname : lastname ), w->dir, &how, o_tadjs, o_layout,
+	if ( !xfc_ask_export(w, 1, (CONST UB *)( hasarg ? ( argname != NULL ? argname : "" ) : ( lastname != NULL ? lastname : "" ) ),
+			     w->dir, &how, o_tadjs, o_layout,
 			     o_sjis) ) {
 		return;
 	}
@@ -1974,7 +1953,8 @@ static void arg_look( void )
 		hasarg = FALSE;
 		return;
 	}
-	strncpy(argname, (char *)r.name, sizeof(argname) - 1);
+	free(argname);
+	argname = (char *)ui_obj_name(&argobj);
 	key = ob_opn_obj(&argobj, OB_OP_R);
 	if ( key > 0 ) {
 		if ( ob_rea_rec(key, 0, 0, head, sizeof(head) - 1, &asz) >= E_OK ) {
@@ -2048,7 +2028,7 @@ static void dropped( XWIN *w )
 	}
 	snprintf(s, sizeof(s), "drop into %s", dir);
 	xfc_log(s);
-	if ( xfc_ask_export(w, d->n, d->v[0].name, dir, &how, o_tadjs, o_layout, o_sjis) ) {
+	if ( xfc_ask_export(w, d->n, ob_drop_name(d, 0, NULL), dir, &how, o_tadjs, o_layout, o_sjis) ) {
 		names = (UB *)malloc(2048);
 		if ( names != NULL ) names[0] = names[1] = 0;
 		(void)export_to(w, src, d->n, dir, &how, names, 2048);

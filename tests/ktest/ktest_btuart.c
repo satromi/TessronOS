@@ -297,7 +297,7 @@ LOCAL ER fk_speed( BTC *c, UW baud )
 	return E_OK;
 }
 
-LOCAL CONST BTTRANS	fk_tr = { fk_cmd, fk_acl, NULL, NULL, NULL };
+LOCAL CONST BTTRANS	fk_tr = { fk_cmd, fk_acl, NULL, NULL, NULL, NULL };
 
 /* A controller with only what the start uses: the ring and its semaphore */
 LOCAL BTC *fk_new( void )
@@ -306,12 +306,17 @@ LOCAL BTC *fk_new( void )
 	T_CSEM	cs;
 
 	if ( c == NULL ) return NULL;
+	if ( !knl_btx_ring_make(c) ) {
+		Kfree(c);
+		return NULL;
+	}
 	cs.exinf = NULL;
 	cs.sematr = TA_TFIFO | TA_FIRST;
 	cs.isemcnt = 0;
-	cs.maxsem = RING_N * 2;
+	cs.maxsem = RING_SEM_MAX;
 	c->sem = tk_cre_sem(&cs);
 	if ( c->sem <= 0 ) {
+		Kfree(c->rb);
 		Kfree(c);
 		return NULL;
 	}
@@ -323,6 +328,8 @@ LOCAL BTC *fk_new( void )
 LOCAL void fk_del( BTC *c )
 {
 	tk_del_sem(c->sem);
+	Kfree(c->rb);
+	if ( c->ri != NULL ) Kfree(c->ri);
 	Kfree(c);
 }
 
@@ -491,7 +498,7 @@ LOCAL void test_h4_sco( void )
 {
 	UB	pkt[3 + 48], out[1 + 3 + 48];
 	INT	i;
-	BTH4	*h = (BTH4 *)Kmalloc(sizeof(BTH4));
+	BTH4	*h = (BTH4 *)Kcalloc(1, sizeof(BTH4));
 
 	KT_ASSERT(h != NULL);
 	if ( h == NULL ) return;
@@ -511,12 +518,49 @@ LOCAL void test_h4_sco( void )
 	KT_ASSERT_EQ(got.type[0], H4_SCO);
 	KT_ASSERT_EQ(got.len[0], (INT)sizeof(pkt));
 	KT_ASSERT(same(got.b, pkt, sizeof(pkt)));
+	if ( h->b != NULL ) Kfree(h->b);
 	Kfree(h);
+}
+
+/*
+ * The room for a packet as long as the controller says its packets are:
+ * the packet of 1200 bytes, too long for the room at the start, taken
+ * once the room is made that long; a longer one still passed over.
+ */
+LOCAL void test_h4_room( void )
+{
+	static UB	s[1400];
+	static BTH4	h, h2, h3;
+	INT		n = make_stream(s);
+
+	KT_ASSERT_ER(knl_bth4_init(&h), E_OK);
+	KT_ASSERT(h.cap >= BTH4_FIRST);
+	KT_ASSERT_ER(knl_bth4_room(&h, 4 + 1200), E_OK);
+	KT_ASSERT_EQ(h.cap, 4 + 1200);
+	knl_memset(&got, 0, sizeof(got));
+	knl_bth4_feed(&h, s, n, got_out, NULL);
+	KT_ASSERT_EQ(h.frames, 6);
+	KT_ASSERT_EQ(h.too_long, 0);
+	/* made longer in the middle of a packet: what had come of it kept */
+	KT_ASSERT_ER(knl_bth4_init(&h2), E_OK);
+	KT_ASSERT_ER(knl_bth4_room(&h2, BTH4_FIRST), E_OK);
+	knl_bth4_feed(&h2, s, 20, got_out, NULL);
+	KT_ASSERT_ER(knl_bth4_room(&h2, 4 + 2000), E_OK);
+	knl_bth4_feed(&h2, s + 20, n - 20, got_out, NULL);
+	KT_ASSERT_EQ(h2.frames, 6);
+	KT_ASSERT_EQ(h2.too_long, 0);
+	/* the room smaller than a packet: passed over and counted */
+	KT_ASSERT_ER(knl_bth4_init(&h3), E_OK);
+	KT_ASSERT_ER(knl_bth4_room(&h3, 4 + 1199), E_OK);
+	knl_bth4_feed(&h3, s, n, got_out, NULL);
+	KT_ASSERT_EQ(h3.frames, 5);
+	KT_ASSERT_EQ(h3.too_long, 1);
 }
 
 EXPORT void ktest_btuart( void )
 {
 	KT_RUN(test_h4_pack);
+	KT_RUN(test_h4_room);
 	KT_RUN(test_h4_stream);
 	KT_RUN(test_hcd_check);
 	KT_RUN(test_bcm_start);

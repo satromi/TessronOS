@@ -22,6 +22,7 @@
 #include <ts/dt.h>
 #include <ts/proc.h>
 #include <ts/ser.h>
+#include <ts/ui.h>
 
 IMPORT ER dt_gettime( TS_TIME *p_t );
 IMPORT ER dt_localtime( CONST TS_TIME *t, TS_TM *tm );
@@ -1171,17 +1172,19 @@ static INT objs_all( UINT type, UINT sub, TS_UUID **p_ids )
 static BOOL dev_uuid( MSSTR *name, TS_UUID *u )
 {
 	TS_UUID	*ids;
-	T_OBREF	r;
 	INT	cnt, i;
 	BOOL	found = FALSE;
 
 	/* every device there is, however many */
 	cnt = objs_all(OB_T_DEVICE, 0, &ids);
 	for ( i = 0; i < cnt && !found; i++ ) {
-		if ( ob_ref_obj(&ids[i], &r) >= E_OK && strcmp((const char *)r.name, name->s) == 0 ) {
+		UB	*nm = ui_obj_name(&ids[i]);
+
+		if ( nm != NULL && strcmp((const char *)nm, name->s) == 0 ) {
 			*u = ids[i];
 			found = TRUE;
 		}
+		free(nm);
 	}
 	free(ids);
 	return found;
@@ -1567,7 +1570,6 @@ static INT	rs_cnt;
 static void rs_list( void )
 {
 	TS_UUID	*ids;
-	T_OBREF	r;
 	T_SERINFO info;
 	INT	cnt, i;
 	SZ	asz;
@@ -1578,7 +1580,13 @@ static void rs_list( void )
 	rsport = ( cnt > 0 ) ? (RSPORT **)calloc((size_t)cnt, sizeof(RSPORT *)) : NULL;
 	if ( rsport == NULL ) cnt = 0;
 	for ( i = 0; i < cnt; i++ ) {
-		if ( ob_ref_obj(&ids[i], &r) < E_OK || r.name[0] != 's' || r.name[1] != 'e' || r.name[2] != 'r' ) continue;
+		{
+			UB	*nm = ui_obj_name(&ids[i]);
+			BOOL	ser = ( nm != NULL && strncmp((const char *)nm, "ser", 3) == 0 );
+
+			free(nm);
+			if ( !ser ) continue;
+		}
 		key = ob_opn_obj(&ids[i], OB_OP_READ);
 		if ( key <= 0 ) continue;
 		asz = 0;

@@ -53,7 +53,9 @@
 
 LOCAL BOOL	sntp_synced = FALSE;
 LOCAL D		sntp_last_ms = 0;		/* the Unix time of the last setting, ms */
-LOCAL char	sntp_host[80] = CNF_NTP_SERVER;	/* "" asks none */
+#define SNTP_HOST_MAX		255		/* a DNS name (RFC 1035 2.3.4) */
+
+LOCAL char	sntp_host[SNTP_HOST_MAX + 1] = CNF_NTP_SERVER;	/* "" asks none */
 LOCAL ID	sntp_tskid = 0;
 
 /* The system clock as Unix time in ms */
@@ -222,13 +224,20 @@ EXPORT ER so_sntp_start( void )
 
 /*
  * The time server by name, "" for none. A server named is asked at once:
- * the task is started, or woken from its wait.
+ * the task is started, or woken from its wait. A name longer than a DNS
+ * name can be is E_PAR, and the server named before stays.
  */
 EXPORT ER so_sntp_server( CONST char *name )
 {
 	INT	i;
 
-	for ( i = 0; name != NULL && name[i] != '\0' && i < (INT)sizeof(sntp_host) - 1; i++ ) {
+	for ( i = 0; name != NULL && name[i] != '\0'; i++ ) {
+		if ( i >= SNTP_HOST_MAX ) {
+			tm_printf((UB *)"net: the time server's name is longer than %d bytes\n", SNTP_HOST_MAX);
+			return E_PAR;
+		}
+	}
+	for ( i = 0; name != NULL && name[i] != '\0'; i++ ) {
 		sntp_host[i] = name[i];
 	}
 	sntp_host[i] = '\0';

@@ -200,7 +200,10 @@ LOCAL UINT kind_rt( UINT kind )
 
 /* ---------------------------------------------------------------- the objects made */
 
-/* An object's name from a file's: the full width forms back, cut to fit */
+/*
+ * An object's name from a file's: the full width forms back. out has
+ * XFU_NAME_MAX bytes, the most a file's name is, so the name is whole.
+ */
 LOCAL void obj_name( CONST UB *file, INT n, UB *out )
 {
 	UB	tmp[XFU_NAME_MAX];
@@ -211,7 +214,7 @@ LOCAL void obj_name( CONST UB *file, INT n, UB *out )
 	len = xfu_name_in(tmp, tmp, sizeof(tmp));
 	for ( i = 0; i < len; i += k ) {
 		k = txc_utf8_get(tmp + i, len - i, &c);
-		if ( at + k >= OB_NAME_MAX ) break;
+		if ( at + k >= XFU_NAME_MAX ) break;
 		xfu_mcpy(out + at, tmp + i, k);
 		at += k;
 	}
@@ -292,7 +295,7 @@ LOCAL void put_apps( XFU *x, XBUF *w, INT app )
 		xb_put(w, xfu_app_id(list[i]));
 		xb_put(w, "\":{");
 		a = xfu_app(x, list[i]);
-		if ( a != NULL && a->name[0] != 0 ) {
+		if ( a != NULL && a->name != NULL && a->name[0] != 0 ) {
 			xb_put(w, "\"name\":\"");
 			xb_json(w, a->name, xfu_slen(a->name));
 			xb_put(w, "\",");
@@ -707,7 +710,7 @@ LOCAL ER imp_file( XFU *x, CONST UB *path, CONST UB *file, D mtime, UINT as, TS_
 {
 	CONST T_XFUTREE	*t = x->t;
 	CONST char	*type = NULL;
-	UB		stem[OB_NAME_MAX];
+	UB		stem[XFU_NAME_MAX];
 	FILEFACT	f;
 	XBUF		keep, r0;
 	UINT		kind, crc = 0;
@@ -1258,7 +1261,7 @@ LOCAL ER imp_dir( XFU *x, CONST UB *file, D mtime, INT level, TS_UUID *p_uuid )
 	TSET		*s = NULL;
 	XBUF		kids, r0;
 	FILEFACT	f;
-	UB		stem[OB_NAME_MAX];
+	UB		stem[XFU_NAME_MAX];
 	INT		plen = xfu_slen(x->path), i, k, ns = 0, nk, pos, col, row;
 	TS_UUID		u;
 	T_OBREF		ref;

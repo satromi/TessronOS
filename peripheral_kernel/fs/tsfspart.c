@@ -27,6 +27,7 @@
 #include <tm/tmonitor.h>
 #include <ts/blk.h>
 #include <ts/gpt.h>
+#include <ts/tsfs.h>
 #include <ts/tsfsblk.h>
 
 #ifndef CNF_SYSVOL_GROW_MB
@@ -135,6 +136,158 @@ EXPORT ER knl_tsfs_part_grow( CONST char *part, UD bytes, UD *p_from, UD *p_to )
 	return er;
 }
 
+/* ---------------------------------------------------------------- the top object of a volume made */
+
+#define TOP_RT_TAD	1		/* the record type of xmlTAD */
+
+/*
+ * The bytes of s quoted for a JSON string (xml FALSE) or for an XML
+ * attribute (xml TRUE), put at to when to is not NULL; answers how many
+ * there are, so that the caller asks once for the size and once more to
+ * write. Every control character is escaped, as JSON wants.
+ */
+LOCAL SZ quote_put( UB *to, CONST UB *s, BOOL xml )
+{
+	static CONST char	hex[] = "0123456789abcdef";
+	UB		u[8];
+	CONST UB	*rep;
+	SZ		n = 0;
+	INT		k;
+
+	for ( ; *s != 0; s++ ) {
+		rep = NULL;
+		if ( xml ) {
+			rep = (CONST UB *)( ( *s == '&' ) ? "&amp;" : ( *s == '<' ) ? "&lt;"
+					  : ( *s == '>' ) ? "&gt;" : ( *s == '"' ) ? "&quot;" : NULL );
+		} else if ( *s == '"' || *s == '\\' ) {
+			u[0] = '\\';
+			u[1] = *s;
+			u[2] = 0;
+			rep = u;
+		} else if ( *s < 0x20 ) {
+			u[0] = '\\'; u[1] = 'u'; u[2] = '0'; u[3] = '0';
+			u[4] = (UB)hex[*s >> 4]; u[5] = (UB)hex[*s & 15]; u[6] = 0;
+			rep = u;
+		}
+		if ( rep == NULL ) {
+			if ( to != NULL ) to[n] = *s;
+			n++;
+			continue;
+		}
+		for ( k = 0; rep[k] != 0; k++ ) {
+			if ( to != NULL ) to[n] = rep[k];
+			n++;
+		}
+	}
+	return n;
+}
+
+/* A text put at to + n (when to is not NULL); answers where it ends */
+LOCAL SZ text_put( UB *to, SZ n, CONST char *t )
+{
+	for ( ; *t != 0; t++, n++ ) {
+		if ( to != NULL ) to[n] = (UB)*t;
+	}
+	return n;
+}
+
+/*
+ * The metadata of the top object (xml FALSE), or its record, an empty
+ * figure (xml TRUE), put at to when not NULL; answers the bytes.
+ */
+LOCAL SZ top_put( UB *to, CONST UB *label, BOOL xml )
+{
+	SZ	n;
+
+	if ( xml ) {
+		n = text_put(to, 0, "<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"");
+		n += quote_put(( to != NULL ) ? to + n : NULL, label, TRUE);
+		return text_put(to, n, "\">\n<figure>\n</figure>\n</tad>\n");
+	}
+	n = text_put(to, 0, "{\"name\":\"");
+	n += quote_put(( to != NULL ) ? to + n : NULL, label, FALSE);
+	return text_put(to, n, "\",\"refCount\":0,\"recordCount\":1,"
+			       "\"editable\":true,\"deletable\":true,\"readable\":true}");
+}
+
+/*
+ * The top object of a volume just made: a figure named with the whole
+ * label, held once so that it is never garbage. The label of a native
+ * volume is the name of its top object (design 7.6); the superblock
+ * keeps only a copy of its first bytes, which the format wrote.
+ */
+LOCAL ER top_make( CONST char *part, CONST UB *label )
+{
+	T_COBJ	c;
+	TS_UUID	u;
+	UB	*json, *xml;
+	SZ	jn, xn;
+	INT	pos = 0;
+	ID	vol, od;
+	ER	er, e2;
+
+	jn = top_put(NULL, label, FALSE);
+	xn = top_put(NULL, label, TRUE);
+	json = (UB *)Kmalloc(jn + 1);
+	xml = (UB *)Kmalloc(xn + 1);
+	if ( json == NULL || xml == NULL ) {
+		if ( json != NULL ) Kfree(json);
+		if ( xml != NULL ) Kfree(xml);
+		return E_NOMEM;
+	}
+	(void)top_put(json, label, FALSE);
+	(void)top_put(xml, label, TRUE);
+	json[jn] = 0;
+	xml[xn] = 0;
+
+	vol = ts_opn_vol(part, TSFS_STORE_BLK);
+	if ( vol <= 0 ) {
+		Kfree(json);
+		Kfree(xml);
+		return ( vol < E_OK ) ? (ER)vol : E_SYS;
+	}
+	knl_memset(&c, 0, sizeof(c));
+	c.json = json;
+	c.jsonsz = jn;
+	er = ts_cre_obj(vol, &c, &u);
+	if ( er >= E_OK ) {
+		od = ts_opn_obj(vol, &u, TFO_READ | TFO_WRITE);
+		er = ( od > 0 ) ? E_OK : ( od < E_OK ) ? (ER)od : E_SYS;
+		if ( er >= E_OK ) {
+			er = ts_ins_rec(od, -1, TOP_RT_TAD, 0, &pos);
+			if ( er >= E_OK ) er = ts_rpl_rec(od, pos, xml, xn);
+			e2 = ts_cls_obj(od);
+			if ( er >= E_OK && e2 < E_OK ) er = e2;
+		}
+	}
+	if ( er >= E_OK ) er = knl_tsfs_set_top(vol, &u);
+	if ( er >= E_OK ) er = ts_lnk_obj(vol, &u);	/* the hold of the top */
+	if ( er >= E_OK ) er = ts_syn_vol(vol);
+	e2 = ts_cls_vol(vol);
+	if ( er >= E_OK && e2 < E_OK ) er = e2;
+	Kfree(json);
+	Kfree(xml);
+	return er;
+}
+
+EXPORT ER knl_tsfs_format( CONST char *part, CONST char *label )
+{
+	ER	er;
+
+	if ( part == NULL ) {
+		return E_PAR;
+	}
+	er = ts_format_blk(part, label);
+	if ( er >= E_OK ) {
+		er = top_make(part, (CONST UB *)( ( label != NULL ) ? label : "" ));
+		if ( er < E_OK ) {
+			tm_printf((UB *)"tsfs: %s: the top object that holds the label not made (%d)\n",
+				  part, (INT)er);
+		}
+	}
+	return er;
+}
+
 EXPORT ER knl_tsfs_part_make( CONST char *disk, UD first, UD bytes, CONST char *label,
 			      UB *p_part, INT max )
 {
@@ -170,7 +323,7 @@ EXPORT ER knl_tsfs_part_make( CONST char *disk, UD first, UD bytes, CONST char *
 	if ( er < E_OK ) {
 		return er;
 	}
-	er = ts_format_blk((CONST char *)p_part, label);
+	er = knl_tsfs_format((CONST char *)p_part, label);
 	tm_printf((UB *)"tsfs: %s made, %d MB \"%s\" (%d)\n", p_part,
 		  (INT)( ( last - first + 1 ) / MB_SECT ), ( label != NULL ) ? label : "", (INT)er);
 	return er;

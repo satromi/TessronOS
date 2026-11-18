@@ -496,7 +496,10 @@
 #define TSN_OB_CHK_REQ	TSN(7, 59)	/* TSN_RIGHT_ADMIN: the system volume repaired at the next start */
 #define TSN_OB_CHK_BOOT	TSN(7, 60)	/* what that repair did, once */
 #define TSN_OB_CRE_KEY	TSN(7, 61)	/* an object without a name made and opened at once */
-#define TSN_OB_MAX		61
+#define TSN_OB_REF_NAM	TSN(7, 62)	/* an object's name, of any length */
+#define TSN_OB_CHK_LABEL	TSN(7, 63)	/* a native volume's label, whole (ts/tsfsck.h) */
+#define TSN_OB_REF_OBJ2	TSN(7, 64)	/* ob_ref_obj with the name apart (TSN_OB_REF_OBJ: the form before) */
+#define TSN_OB_MAX		64
 
 /* class 6: tm_ */
 #define TSN_TM_PUTSTRING	TSN(6, 1)

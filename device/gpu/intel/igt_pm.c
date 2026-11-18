@@ -115,8 +115,6 @@ LOCAL BOOL		rc6_bad;	/* the saved context found corrupted: told by the task */
 #define MSR_PKG_POWER_LIMIT	0x610	/* PL1 14:0 (on 15), PL2 46:32 (on 47) */
 #define MSR_PKG_ENERGY_STATUS	0x611
 #define MSR_PP1_ENERGY_STATUS	0x641	/* the GT's plane */
-#define MSR_CORE_PERF_LIMIT	0x64f	/* 15:0 the reasons now, 31:16 since cleared */
-#define MSR_GFX_PERF_LIMIT	0x6b0	/* the same for the GT */
 IMPORT ER	knl_cpu_x64_temp( INT *p_deg );
 IMPORT ER	knl_cpu_x64_clock( UW *p_mean, UW *p_most );
 
@@ -125,11 +123,28 @@ IMPORT ER	knl_cpu_x64_clock( UW *p_mean, UW *p_most );
  * under a hypervisor, as the temperature's reading finds it (the test
  * of igt_pm.c runs on a virtual machine, where they are not there)
  */
+/* RAPL there (knl_x64_msr): the energy and the power limit read; the limits' reasons where each is there */
 LOCAL BOOL msr_can( void )
 {
-	INT	deg;
+	return (BOOL)( knl_x64_msr(X64M_RAPL) != 0 );
+}
 
-	return (BOOL)( knl_cpu_x64_temp(&deg) != E_NOSPT );
+/* A limit-reasons register (15:0 the reasons now, 31:16 since cleared): read and cleared, 0 when there is none */
+LOCAL UW plr_take( INT what )
+{
+	UW	m = knl_x64_msr(what), v;
+
+	if ( m == 0 ) return 0;
+	v = (UW)rdmsr(m);
+	wrmsr(m, 0);
+	return v;
+}
+
+LOCAL UW plr_now( INT what )
+{
+	UW	m = knl_x64_msr(what);
+
+	return ( m != 0 ) ? (UW)rdmsr(m) : 0;
 }
 
 LOCAL UW		up_ei;		/* what RP_UP_EI holds now */
@@ -800,10 +815,8 @@ LOCAL void why_text( char *t, UD aw, UD hw_busy, UD dt )
 	pl = rdmsr(MSR_PKG_POWER_LIMIT);
 	e_pkg = (UW)rdmsr(MSR_PKG_ENERGY_STATUS);
 	e_gt = (UW)rdmsr(MSR_PP1_ENERGY_STATUS);
-	gfx = (UW)rdmsr(MSR_GFX_PERF_LIMIT);
-	core = (UW)rdmsr(MSR_CORE_PERF_LIMIT);
-	wrmsr(MSR_GFX_PERF_LIMIT, 0);
-	wrmsr(MSR_CORE_PERF_LIMIT, 0);
+	gfx = plr_take(X64M_PLR_GFX);
+	core = plr_take(X64M_PLR_CORE);
 	if ( e_have && dt > 0 ) {
 		/* the counters wrap at 32 bits: the difference taken as such; mW */
 		w_pkg = ( (UD)(UW)( e_pkg - e_pkg0 ) * 1000000 / dt * 1000 ) >> eu;
@@ -863,7 +876,7 @@ EXPORT void igt_pm_pin( BOOL on )
 		held[0] = '\0';
 		if ( msr_can() ) {
 			(void)tm_sprintf((UB *)held, (CONST UB *)"; held down: GT %08x, cores %08x",
-					 (UW)rdmsr(MSR_GFX_PERF_LIMIT), (UW)rdmsr(MSR_CORE_PERF_LIMIT));
+					 plr_now(X64M_PLR_GFX), plr_now(X64M_PLR_CORE));
 		}
 		tm_printf((UB *)"igt: power: held at RP0 for the check: asked %d MHz, running at %d MHz (RPSTAT1 %08x)%s\n",
 			  mhz(knl_igt.f_max), mhz(( stat >> 23 ) & 0x1ff), stat, held);
@@ -906,7 +919,7 @@ EXPORT INT igt_pm_now_text( char *t )
 	if ( msr_can() ) {
 		if ( knl_cpu_x64_temp(&deg) >= E_OK ) n += tm_sprintf((UB *)t + n, (CONST UB *)"; package %d C", deg);
 		n += tm_sprintf((UB *)t + n, (CONST UB *)"; held down: GT %08x, cores %08x",
-				(UW)rdmsr(MSR_GFX_PERF_LIMIT), (UW)rdmsr(MSR_CORE_PERF_LIMIT));
+				plr_now(X64M_PLR_GFX), plr_now(X64M_PLR_CORE));
 	}
 	n += tm_sprintf((UB *)t + n, (CONST UB *)"]");
 	return n;

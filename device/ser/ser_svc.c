@@ -29,7 +29,7 @@
 #include <ts/proc.h>
 #include <ts/ser.h>
 
-#define SR_OPEN_MAX	8		/* ports open by processes in all */
+#define SR_OPEN_FIRST	8		/* entries the table of opened ports starts with; it doubles when full */
 #define SR_CHUNK	256		/* bytes moved at a time */
 
 typedef struct {
@@ -38,7 +38,14 @@ typedef struct {
 	TMO	rcvtmo;			/* the port's receive time-out as it was set last */
 } SROPEN;
 
-LOCAL SROPEN	sr_open[SR_OPEN_MAX];
+/*
+ * The ports processes opened, as many as they open: the table holds a
+ * pointer to each entry, which is taken once and kept, so that an entry
+ * a call found stays where it is when the table grows. A new table is
+ * made outside the lock, twice as large, and put in place under it.
+ */
+LOCAL SROPEN	**sr_open = NULL;
+LOCAL INT	sr_cap = 0;
 LOCAL T_SPLOCK	sr_lock;
 
 LOCAL BOOL user_ok( CONST void *p, SZ len, BOOL write )
@@ -70,14 +77,53 @@ LOCAL ID dd_of( INT pd, ID pid, SROPEN **p_ent )
 	ID	dd = 0;
 	UINT	imask;
 
-	if ( pd <= 0 || pd > SR_OPEN_MAX || pid <= 0 ) return 0;
+	if ( pd <= 0 || pid <= 0 ) return 0;
 	ISpinLock(&sr_lock, &imask);
-	if ( sr_open[pd - 1].pid == pid ) {
-		dd = sr_open[pd - 1].dd;
-		if ( p_ent != NULL ) *p_ent = &sr_open[pd - 1];
+	if ( pd <= sr_cap && sr_open[pd - 1]->pid == pid ) {
+		dd = sr_open[pd - 1]->dd;
+		if ( p_ent != NULL ) *p_ent = sr_open[pd - 1];
 	}
 	ISpinUnlock(&sr_lock, &imask);
 	return dd;
+}
+
+/*
+ * The table of opened ports made twice as large as it was when it was
+ * cap entries: E_OK (another call may have made it so first), E_NOMEM
+ */
+LOCAL ER sr_grow( INT cap )
+{
+	SROPEN	**t, **was = NULL;
+	INT	ncap = ( cap > 0 ) ? cap * 2 : SR_OPEN_FIRST, i, k;
+	UINT	imask;
+
+	t = (SROPEN **)Kmalloc(sizeof(SROPEN *) * (SZ)ncap);
+	if ( t == NULL ) return E_NOMEM;
+	for ( i = cap; i < ncap; i++ ) {
+		t[i] = (SROPEN *)Kmalloc(sizeof(SROPEN));
+		if ( t[i] == NULL ) {
+			for ( k = cap; k < i; k++ ) Kfree(t[k]);
+			Kfree(t);
+			return E_NOMEM;
+		}
+		knl_memset(t[i], 0, sizeof(SROPEN));
+	}
+	ISpinLock(&sr_lock, &imask);
+	if ( sr_cap == cap ) {
+		for ( i = 0; i < cap; i++ ) t[i] = sr_open[i];
+		was = sr_open;
+		sr_open = t;
+		sr_cap = ncap;
+		t = NULL;
+	}
+	ISpinUnlock(&sr_lock, &imask);
+	if ( t != NULL ) {
+		/* grown meanwhile by another: what was made here is not needed */
+		for ( i = cap; i < ncap; i++ ) Kfree(t[i]);
+		Kfree(t);
+	}
+	if ( was != NULL ) Kfree(was);
+	return E_OK;
 }
 
 /* sr_lst_prt: the ports, up to max of them into list; their count */
@@ -136,22 +182,31 @@ LOCAL INT svc_sr_opn_prt( CONST UB *name )
 	}
 	dd = tk_opn_dev(nm, TD_UPDATE);
 	if ( dd < E_OK ) return dd;
-	ISpinLock(&sr_lock, &imask);
-	for ( i = 0; i < SR_OPEN_MAX; i++ ) {
-		if ( sr_open[i].pid == 0 ) {
-			sr_open[i].pid = pid;
-			sr_open[i].dd = dd;
-			sr_open[i].rcvtmo = -2;		/* not set yet */
-			pd = i + 1;
-			break;
+	for ( ;; ) {
+		INT	cap;
+		ER	er;
+
+		ISpinLock(&sr_lock, &imask);
+		for ( i = 0; i < sr_cap; i++ ) {
+			if ( sr_open[i]->pid == 0 ) {
+				sr_open[i]->pid = pid;
+				sr_open[i]->dd = dd;
+				sr_open[i]->rcvtmo = -2;	/* not set yet */
+				pd = i + 1;
+				break;
+			}
+		}
+		cap = sr_cap;
+		ISpinUnlock(&sr_lock, &imask);
+		if ( pd > 0 ) {
+			return pd;
+		}
+		er = sr_grow(cap);
+		if ( er < E_OK ) {
+			(void)tk_cls_dev(dd, 0);
+			return er;
 		}
 	}
-	ISpinUnlock(&sr_lock, &imask);
-	if ( pd == 0 ) {
-		(void)tk_cls_dev(dd, 0);
-		return E_LIMIT;
-	}
-	return pd;
 }
 
 /* sr_cls_prt */
@@ -160,11 +215,11 @@ LOCAL ER svc_sr_cls_prt( INT pd )
 	ID	pid = ts_get_pid(), dd = 0;
 	UINT	imask;
 
-	if ( pd <= 0 || pd > SR_OPEN_MAX ) return E_ID;
+	if ( pd <= 0 ) return E_ID;
 	ISpinLock(&sr_lock, &imask);
-	if ( sr_open[pd - 1].pid == pid && pid > 0 ) {
-		dd = sr_open[pd - 1].dd;
-		sr_open[pd - 1].pid = 0;
+	if ( pd <= sr_cap && sr_open[pd - 1]->pid == pid && pid > 0 ) {
+		dd = sr_open[pd - 1]->dd;
+		sr_open[pd - 1]->pid = 0;
 	}
 	ISpinUnlock(&sr_lock, &imask);
 	if ( dd <= 0 ) return E_ID;
@@ -247,23 +302,26 @@ EXPORT const FP knl_sr_svc_tbl[TSN_SR_MAX + 1] = {
 	[TSN_NUMBER(TSN_SR_SET_SPD)]	= F(svc_sr_set_spd),
 };
 
-/* The ports a process opened, closed as it ends (proc.c) */
+/* The ports a process opened, closed as it ends (proc.c): one at a time, each closed outside the lock */
 EXPORT void knl_sr_prc_end( ID pid )
 {
-	ID	dd[SR_OPEN_MAX];
-	INT	i, n = 0;
+	ID	dd;
+	INT	i;
 	UINT	imask;
 
 	if ( pid <= 0 ) return;
-	ISpinLock(&sr_lock, &imask);
-	for ( i = 0; i < SR_OPEN_MAX; i++ ) {
-		if ( sr_open[i].pid == pid ) {
-			dd[n++] = sr_open[i].dd;
-			sr_open[i].pid = 0;
+	for ( ;; ) {
+		dd = 0;
+		ISpinLock(&sr_lock, &imask);
+		for ( i = 0; i < sr_cap; i++ ) {
+			if ( sr_open[i]->pid == pid ) {
+				dd = sr_open[i]->dd;
+				sr_open[i]->pid = 0;
+				break;
+			}
 		}
-	}
-	ISpinUnlock(&sr_lock, &imask);
-	for ( i = 0; i < n; i++ ) {
-		(void)tk_cls_dev(dd[i], 0);
+		ISpinUnlock(&sr_lock, &imask);
+		if ( dd <= 0 ) break;
+		(void)tk_cls_dev(dd, 0);
 	}
 }

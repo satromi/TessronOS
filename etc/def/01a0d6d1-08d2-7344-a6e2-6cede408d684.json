@@ -19,7 +19,7 @@
       "id": "basic-figure-editor",
       "kind": "app",
       "name": "基本図形編集",
-      "version": "R1.400",
+      "version": "R1.410",
       "builtin": false,
       "openArg": "link",
       "base": [

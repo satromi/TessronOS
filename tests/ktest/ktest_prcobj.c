@@ -300,7 +300,7 @@ LOCAL BOOL window_named( CONST char *name, TS_UUID *out )
 	if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) < 0 ) return FALSE;
 	for ( i = 0; i < cnt && !found; i++ ) {
 		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_WINDOW
-		  && knl_strcmp((CONST char *)r.name, name) == 0 ) {
+		  && kt_name_is(&list[i], name) ) {
 			*out = list[i];
 			found = TRUE;
 		}
@@ -519,6 +519,69 @@ LOCAL void test_dt_ptr( void )
 	KT_ASSERT_EQ(psts.exitcd, 0);
 	KT_ASSERT(said_since(pos, "xyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdef"));
 	KT_ASSERT(said_since(pos, "dtptr end"));
+}
+
+/*
+ * Thirty processes more than are running already: the list of process
+ * objects, asked a few at a time from the last one answered (as the
+ * console's ps asks), holds every one of them, and the record of each
+ * reads, beyond the 16 the list was once made of.
+ */
+#define SP_BGWAIT	33		/* as tests/uprog/svcprog.c */
+#define PL_N		30
+#define PL_PAGE		7
+
+LOCAL void test_many_listed( void )
+{
+	ID	pid[PL_N];
+	TS_UUID	u[PL_N], ids[PL_PAGE], last;
+	BOOL	seen[PL_N];
+	T_PSTS	psts;
+	INT	started = 0, i, k, cnt, all = 0, found = 0, nread = 0;
+	UB	t[256];
+	SZ	asz;
+
+	if ( !have_prog ) KT_SKIP("no program");
+	for ( i = 0; i < PL_N; i++ ) {
+		pid[i] = start_prog(SP_BGWAIT);
+		KT_ASSERT(pid[i] > 0);
+		if ( pid[i] <= 0 ) break;
+		started++;
+		seen[i] = FALSE;
+		KT_ASSERT_ER(knl_prc_uuid(pid[i], &u[i], NULL), E_OK);
+	}
+	do {
+		cnt = 0;
+		KT_ASSERT_ER(ob_lst_obj(OB_T_PROCESS, 0, ( all > 0 ) ? &last : NULL, ids, PL_PAGE, &cnt), E_OK);
+		for ( k = 0; k < cnt; k++ ) {
+			for ( i = 0; i < started; i++ ) {
+				if ( !seen[i] && ts_uuid_cmp(&ids[k], &u[i]) == 0 ) {
+					seen[i] = TRUE;
+					found++;
+				}
+			}
+		}
+		if ( cnt > 0 ) last = ids[cnt - 1];
+		all += cnt;
+	} while ( cnt == PL_PAGE );
+	tm_printf((UB *)"  %d process objects listed, %d of the %d started\n", all, found, started);
+	KT_ASSERT(all >= started);
+	KT_ASSERT(all > 16);
+	KT_ASSERT_EQ(found, started);
+	for ( i = 0; i < started; i++ ) {
+		ID	key = ob_opn_obj(&u[i], OB_OP_READ);
+
+		if ( key <= 0 ) continue;
+		asz = 0;
+		if ( ob_rea_rec(key, 0, 0, t, sizeof(t) - 1, &asz) >= E_OK && asz > 0 ) nread++;
+		(void)ob_cls_obj(key);
+	}
+	KT_ASSERT_EQ(nread, started);
+	for ( i = 0; i < started; i++ ) {
+		if ( ts_ter_prc(pid[i], -1) >= E_OK ) {
+			(void)ts_wai_prc(pid[i], &psts, 5000);
+		}
+	}
 }
 
 /*
@@ -792,6 +855,7 @@ EXPORT void ktest_prcobj( void )
 	KT_RUN_SCREEN(test_kill_win);
 	KT_RUN_SCREEN(test_surf);
 	KT_RUN(test_dt_ptr);
+	KT_RUN(test_many_listed);
 	KT_RUN(test_parallel);
 	KT_RUN(test_task_churn);
 	KT_RUN(test_slice);

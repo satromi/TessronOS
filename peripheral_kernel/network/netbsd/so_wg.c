@@ -17,7 +17,9 @@
  *	  DOWN
  *
  *	Keys and addresses are in hexadecimal (addresses as the 4 bytes of the
- *	network's order), the ports and cidr in decimal. The kernel keeps no
+ *	network's order), the ports and cidr in decimal. The line and the
+ *	list of networks may be as long as they are: they are read into
+ *	room made for them. The kernel keeps no
  *	key: the program holds it sealed in the person's objects and hands it
  *	over for each connection; the driver holds it until the interface goes.
  */
@@ -31,9 +33,8 @@
 #include <ts/conf.h>
 #include "so_nb.h"
 
-#define WG_LINE_MAX	1024
 #define WG_KEY		32
-#define WG_NETS		16
+#define WG_NET_TEXT	10		/* the shortest network: "xxxxxxxx/0" */
 
 typedef struct {
 	UW	addr;
@@ -111,11 +112,18 @@ LOCAL BOOL num_word( CONST char **pp, INT *pv, INT max )
 
 LOCAL ER wg_do_up( CONST char *p )
 {
-	static T_WGNET	nets[WG_NETS];
+	T_WGNET	*nets;
 	UB	priv[WG_KEY], pub[WG_KEY], psk[WG_KEY];
 	UW	addr, mask, ep, gw = 0;
-	INT	port, ep_port, n = 0, e;
+	INT	port, ep_port, n = 0, e, room;
 	BOOL	have_psk = TRUE, ok;
+
+	room = (INT)( knl_strlen(p) / WG_NET_TEXT ) + 1;
+	nets = (T_WGNET *)Kmalloc(sizeof(T_WGNET) * (size_t)room);
+	if ( nets == NULL ) {
+		tm_printf((UB *)"wg: no memory for %d networks\n", room);
+		return E_NOMEM;
+	}
 
 	ok = hex_word(&p, priv, WG_KEY) && num_word(&p, &port, 65535) && hex_word(&p, (UB *)&addr, 4)
 	  && hex_word(&p, (UB *)&mask, 4) && hex_word(&p, pub, WG_KEY);
@@ -134,7 +142,7 @@ LOCAL ER wg_do_up( CONST char *p )
 
 		while ( *p == ' ' || *p == ',' ) p++;
 		if ( *p == '\0' ) break;
-		if ( n >= WG_NETS ) {
+		if ( n >= room ) {
 			ok = FALSE;
 			break;
 		}
@@ -144,12 +152,14 @@ LOCAL ER wg_do_up( CONST char *p )
 	if ( !ok || n == 0 || ep_port == 0 ) {
 		knl_memset(priv, 0, sizeof(priv));
 		knl_memset(psk, 0, sizeof(psk));
+		Kfree(nets);
 		return E_PAR;
 	}
 	if ( wg_up ) (void)rump_tswg_down();
 	wg_up = FALSE;
 	(void)so_getifaddr(NULL, NULL, &gw);
 	e = rump_tswg_up(priv, port, addr, mask, pub, have_psk ? psk : NULL, ep, ep_port, nets, n, gw);
+	Kfree(nets);
 	knl_memset(priv, 0, sizeof(priv));
 	knl_memset(psk, 0, sizeof(psk));
 	tm_printf((UB *)"wg: wg0 %s (%d)\n", ( e == 0 ) ? "up" : "not up", e);
@@ -182,17 +192,22 @@ LOCAL ER wg_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *p
 
 LOCAL ER wg_wri( void *ctx, UD *pos, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize )
 {
-	static char	line[WG_LINE_MAX];
-	INT		i;
+	char		*line;
+	SZ		i;
 	ER		er;
 
 	(void)ctx;
 	(void)pos;
 	(void)off;
 	if ( recno != OB_NET_STATE ) return E_RONLY;
-	if ( size <= 0 || size >= WG_LINE_MAX ) return E_PAR;
+	if ( size <= 0 ) return E_PAR;
+	line = (char *)Kmalloc((size_t)size + 1);
+	if ( line == NULL ) {
+		tm_printf((UB *)"wg: no memory for a line of %d bytes\n", (INT)size);
+		return E_NOMEM;
+	}
 	tk_loc_mtx(wg_mtx, TMO_FEVR);
-	for ( i = 0; i < (INT)size && ((CONST char *)buf)[i] != '\n' && ((CONST char *)buf)[i] != '\0'; i++ ) {
+	for ( i = 0; i < size && ((CONST char *)buf)[i] != '\n' && ((CONST char *)buf)[i] != '\0'; i++ ) {
 		line[i] = ((CONST char *)buf)[i];
 	}
 	line[i] = '\0';
@@ -207,7 +222,8 @@ LOCAL ER wg_wri( void *ctx, UD *pos, INT recno, D off, CONST void *buf, SZ size,
 	} else {
 		er = E_PAR;
 	}
-	knl_memset(line, 0, sizeof(line));	/* it may have held a key */
+	knl_memset(line, 0, (SZ)size + 1);	/* it may have held a key */
+	Kfree(line);
 	wg_last = er;
 	tk_unl_mtx(wg_mtx);
 	if ( er >= E_OK && p_asize != NULL ) *p_asize = size;

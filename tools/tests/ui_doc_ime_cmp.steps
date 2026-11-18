@@ -76,6 +76,8 @@ logmark
 key 16 01
 expectsince document: saved (0)
 sum show
-want ok 5561 1cf8949a4d58eb93
+# what the desktop's own editor saved with these keys in R1.300 (docproc kernel, its record kept
+# and compared with the process's then): 5547 bytes, かな converted to かな twice
+want ok 5547 3b7ce26e64eae64f
 key 08 01
 expect document: closed

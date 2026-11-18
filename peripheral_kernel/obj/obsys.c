@@ -485,7 +485,7 @@ LOCAL INT net6_text( UB *t, INT n, INT max )
 			break;
 		}
 		k = so_getifaddr6(l, cap, gw);
-		if ( k < cap || cap >= 4096 ) break;
+		if ( k < cap ) break;		/* the addresses are finite: the room comes to be larger than their number */
 		Kfree(l);
 	}
 	for ( i = 0; i < k; i++ ) {
@@ -510,7 +510,8 @@ LOCAL INT net6_text( UB *t, INT n, INT max )
 		cf_ip6str(gw, s);
 		n = put(t, n, max, "GATEWAY6", s);
 	}
-	for ( i = 0; i < 4 && so_getdns6(i, gw) == E_OK; i++ ) {
+	/* every name server there is: the list ends where so_getdns6 answers E_NOEXS */
+	for ( i = 0; so_getdns6(i, gw) == E_OK; i++ ) {
 		cf_ip6str(gw, s);
 		n = put(t, n, max, "DNS6", s);
 	}
@@ -598,39 +599,49 @@ LOCAL INT sound_text( UB *t, INT max )
 	}
 	tk_cls_dev(dd, 0);
 	{
-		SDOutSel	s;
-		SDOut		*o = NULL;
-		INT		k, m, room = 0;
+		SDOutSelV	*s = NULL;
+		SDOuts		*l = NULL;
+		SDOutV		*e;
+		SZ		room = 0, need;
+		UINT		k;
 		LOCAL CONST char *CONST kind[] = { "none", "usb", "i2s", "hdmi", "hda", "bt" };
 
 		knl_snd_arm();			/* a change after this read is told (device/snd/snd.c) */
-		dd = tk_opn_dev((UB *)SND_DEVNM, TD_READ);
-		knl_memset(&s, 0, sizeof(s));
-		if ( dd >= E_OK ) {
-			(void)tk_srea_dev(dd, DN_SDOUTSEL, &s, sizeof(s), &asz);
-			tk_cls_dev(dd, 0);
+		/* the choice and every output, ids and names whole: read again with the room they say they need */
+		while ( ( need = knl_snd_sel_v(s, room) ) > room ) {
+			if ( s != NULL ) Kfree(s);
+			room = need;
+			s = (SDOutSelV *)Kmalloc(room);
+			if ( s == NULL ) break;
 		}
-		n = put(t, n, max, "OUTPUT", ( s.now[0] != 0 ) ? (CONST char *)s.now : "none");
-		n = put(t, n, max, "SELECT", ( s.id[0] != 0 ) ? (CONST char *)s.id : SND_ID_AUTO);
+		if ( s == NULL || need < 0 ) {
+			if ( s != NULL ) Kfree(s);
+			return put(t, n, max, "ERROR", "no memory for the outputs");
+		}
+		n = put(t, n, max, "OUTPUT", ( SND_OUTSELV_NOW(s)[0] != 0 ) ? (CONST char *)SND_OUTSELV_NOW(s) : "none");
+		n = put(t, n, max, "SELECT", (CONST char *)s->id);
+		Kfree(s);
 		n = put(t, n, max, "KEEP", knl_snd_keeping() ? "1" : "0");
 		n = put_num(t, n, max, "HW_NOTE", (D)knl_snd_note());
 		/* every output: its id, kind, flags (SND_OF_*) and name, a line of each */
-		while ( ( m = knl_snd_outputs(o, room) ) > room ) {
-			if ( o != NULL ) Kfree(o);
-			room = m + 4;
-			o = (SDOut *)Kmalloc(sizeof(SDOut) * (SZ)room);
-			if ( o == NULL ) {
-				room = 0;
-				break;
-			}
+		room = 0;
+		while ( ( need = knl_snd_outputs_v(l, room) ) > room ) {
+			if ( l != NULL ) Kfree(l);
+			room = need;
+			l = (SDOuts *)Kmalloc(room);
+			if ( l == NULL ) break;
 		}
-		for ( k = 0; k < m && k < room; k++ ) {
-			n = put(t, n, max, "OUT", (CONST char *)o[k].id);
-			n = put(t, n, max, "OUT_KIND", kind[( o[k].kind <= SND_BE_BT ) ? o[k].kind : 0]);
-			n = put_num(t, n, max, "OUT_FLAGS", (D)o[k].flags);
-			n = put(t, n, max, "OUT_NAME", (CONST char *)o[k].name);
+		if ( l == NULL || need < 0 ) {
+			if ( l != NULL ) Kfree(l);
+			return put(t, n, max, "ERROR", "no memory for the outputs");
 		}
-		if ( o != NULL ) Kfree(o);
+		for ( k = 0, e = SND_OUTS_FIRST(l); k < l->n; k++, e = SND_OUTV_NEXT(e) ) {
+			n = put(t, n, max, "OUT", (CONST char *)e->id);
+			n = put(t, n, max, "OUT_KIND", kind[( e->kind <= SND_BE_BT ) ? e->kind : 0]);
+			n = put_num(t, n, max, "OUT_FLAGS", (D)e->flags);
+			n = put(t, n, max, "OUT_NAME", (CONST char *)SND_OUTV_NAME(e));
+		}
+		Kfree(l);
 	}
 	return n;
 }
@@ -736,7 +747,7 @@ EXPORT ER knl_obsys_write( INT recno, CONST UB *buf, SZ size )
 	}
 	case OB_SYS_SOUND:
 	{
-		char	id[SND_ID_MAX];
+		char	a[16];			/* the word after PLAY, KEEP or TESTIN: none is longer; a longer one is no word of them */
 
 		/* "PLAY what [tone]": one of the system's sounds, on the output chosen */
 		if ( knl_strcmp(w, "PLAY") == 0 ) {
@@ -744,9 +755,9 @@ EXPORT ER knl_obsys_write( INT recno, CONST UB *buf, SZ size )
 			char	t[16];
 			UINT	k;
 
-			first_word(buf, size, 1, id, sizeof(id));
+			first_word(buf, size, 1, a, sizeof(a));
 			first_word(buf, size, 2, t, sizeof(t));
-			for ( k = 0; k < sizeof(what) / sizeof(what[0]) && knl_strcmp(id, what[k]) != 0; k++ ) {
+			for ( k = 0; k < sizeof(what) / sizeof(what[0]) && knl_strcmp(a, what[k]) != 0; k++ ) {
 				;
 			}
 			if ( k >= sizeof(what) / sizeof(what[0]) ) {
@@ -757,28 +768,42 @@ EXPORT ER knl_obsys_write( INT recno, CONST UB *buf, SZ size )
 #ifdef USE_UITEST
 		/* "TESTIN 1" or "TESTIN 0": for the tests of the screen, an input that makes a tone */
 		if ( knl_strcmp(w, "TESTIN") == 0 ) {
-			first_word(buf, size, 1, id, sizeof(id));
-			knl_snd_test_in(knl_strcmp(id, "1") == 0);
+			first_word(buf, size, 1, a, sizeof(a));
+			knl_snd_test_in(knl_strcmp(a, "1") == 0);
 			return E_OK;
 		}
 #endif
 		/* "KEEP 1" or "KEEP 0": the stream kept going, or let stop */
 		if ( knl_strcmp(w, "KEEP") == 0 ) {
-			first_word(buf, size, 1, id, sizeof(id));
-			if ( knl_strcmp(id, "1") != 0 && knl_strcmp(id, "0") != 0 ) {
+			first_word(buf, size, 1, a, sizeof(a));
+			if ( knl_strcmp(a, "1") != 0 && knl_strcmp(a, "0") != 0 ) {
 				return E_PAR;
 			}
-			er = knl_snd_keep(knl_strcmp(id, "1") == 0);
+			er = knl_snd_keep(knl_strcmp(a, "1") == 0);
 			if ( er >= E_OK ) knl_obsys_changed(OB_SYS_SOUND);
 			return er;
 		}
-		/* "SELECT id", or the id alone */
-		if ( knl_strcmp(w, "SELECT") == 0 ) {
-			first_word(buf, size, 1, id, sizeof(id));
-		} else {
-			first_word(buf, size, 0, id, sizeof(id));
+		/* "SELECT id", or the id alone: the id as long as it is written, up to the line's end */
+		{
+			CONST UB	*v;
+			UB		*sel;
+			INT		len, vlen;
+
+			for ( vlen = 0; vlen < (INT)size && buf[vlen] != '\n' && buf[vlen] != 0; vlen++ ) {
+				;
+			}
+			if ( !cf_wfind(buf, vlen, ( knl_strcmp(w, "SELECT") == 0 ) ? 1 : 0, &v, &len) || len <= 0 ) {
+				return E_PAR;
+			}
+			sel = (UB *)Kmalloc((SZ)len + 1);
+			if ( sel == NULL ) {
+				return E_NOMEM;
+			}
+			knl_memcpy(sel, v, (SZ)len);
+			sel[len] = 0;
+			er = knl_snd_select(sel);
+			Kfree(sel);
 		}
-		er = knl_snd_select((CONST UB *)id);
 		if ( er >= E_OK ) knl_obsys_changed(OB_SYS_SOUND);
 		return er;
 	}

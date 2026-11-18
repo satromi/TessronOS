@@ -48,6 +48,10 @@
 #include <ts/json.h>
 #include <ts/obatr.h>
 #include <ts/obdrop.h>
+#include "../dtask.h"
+
+/* The words of the next request and the last answer, as long as they are (dtask.h) */
+static DTASK	g_dq;
 
 /* The panels of the data box */
 #define PN_FIND		1		/* 検索パネル */
@@ -69,7 +73,7 @@
 
 TCDB	g_db;
 TS_UUID	g_obj;
-UB	g_name[OB_NAME_MAX];
+UB	*g_name = (UB *)"";
 TCWIN	g_w[W_N];
 UI	g_ui;
 ID	g_port;
@@ -435,11 +439,16 @@ static ER win_open( INT k )
 	T_OBNTF		req;
 	T_OBWPOS	wp;
 	SZ		asz = 0;
-	char		json[280], title[OB_NAME_MAX + 32];
+	char		json[280], *title;
 	char		shown[TS_UUID_STRLEN + 1];
+	size_t		tl;
+	ER		made;
 
 	if ( w->open ) return E_OK;
-	snprintf(title, sizeof(title), "%s（%s）", (char *)g_name, win_title[k]);
+	tl = strlen((char *)g_name) + strlen(win_title[k]) + 8;
+	title = (char *)malloc(tl);
+	if ( title == NULL ) return E_NOMEM;
+	snprintf(title, tl, "%s（%s）", (char *)g_name, win_title[k]);
 	ts_uuid_text(&g_obj, shown);	/* what it shows, for ウインドウ一覧 */
 	snprintf(json, sizeof(json), "{\"rect\":[%d,%d,%d,%d],\"attr\":%d,\"icon\":\"%s\",\"shows\":\"%s\"}",
 		 w->x, w->y, w->x + win_w[k] + FRAME_W, w->y + win_h[k] + TITLE_H,
@@ -450,7 +459,9 @@ static ER win_open( INT k )
 	c.name = (CONST UB *)title;
 	c.json = (CONST UB *)json;
 	c.jsonsz = (SZ)strlen(json);
-	if ( ob_cre_obj(&c, &w->win) < E_OK ) return E_OBJ;
+	made = ob_cre_obj(&c, &w->win);
+	free(title);
+	if ( made < E_OK ) return E_OBJ;
 	w->kw = ob_opn_obj(&w->win, OB_OP_R | OB_OP_W | OB_OP_PROT);
 	w->gid = ( w->kw > 0 ) ? wm_obj_gid(w->kw) : E_ID;
 	memset(&req, 0, sizeof(req));
@@ -471,8 +482,8 @@ static ER win_open( INT k )
 	w->open = TRUE;
 	w->dirty = TRUE;
 	work_size(w);
-	snprintf(title, sizeof(title), "window %s on", ( k == W_SCHED ) ? "sched" : ( k == W_CAL ) ? "cal" : "addr");
-	note(title);
+	snprintf(json, sizeof(json), "window %s on", ( k == W_SCHED ) ? "sched" : ( k == W_CAL ) ? "cal" : "addr");
+	note(json);
 	return E_OK;
 }
 
@@ -571,13 +582,18 @@ static BOOL kept_places( T_JSON *root )
 	return TRUE;
 }
 
-/* A screen's identity as a kept place writes it: 8 hex digits, none for the main screen (one buffer for each window) */
+/*
+ * The screen of a kept place as a member written after the window's x and
+ * y: ,"screen":"8 hex digits"; nothing for the main screen, so that a
+ * place on it is written as it was before screens were named (one buffer
+ * for each window)
+ */
 static CONST char *screen_text( UW screen, INT k )
 {
-	static char	t[W_N][12];
+	static char	t[W_N][24];
 
 	if ( screen == 0 ) t[k][0] = 0;
-	else snprintf(t[k], sizeof(t[k]), "%08x", (UINT)screen);
+	else snprintf(t[k], sizeof(t[k]), ",\"screen\":\"%08x\"", (UINT)screen);
 	return t[k];
 }
 
@@ -616,9 +632,9 @@ static void places_keep( void )
 		py[k] = p.r.top;
 		ps[k] = p.screen;
 	}
-	vn = snprintf(v, sizeof(v), "{\"windows\":[{\"x\":%d,\"y\":%d,\"screen\":\"%s\",\"open\":%s},"
-		      "{\"x\":%d,\"y\":%d,\"screen\":\"%s\",\"open\":%s},"
-		      "{\"x\":%d,\"y\":%d,\"screen\":\"%s\",\"open\":%s}]}",
+	vn = snprintf(v, sizeof(v), "{\"windows\":[{\"x\":%d,\"y\":%d%s,\"open\":%s},"
+		      "{\"x\":%d,\"y\":%d%s,\"open\":%s},"
+		      "{\"x\":%d,\"y\":%d%s,\"open\":%s}]}",
 		      px[W_SCHED], py[W_SCHED], screen_text(ps[W_SCHED], 0), g_w[W_SCHED].open ? "true" : "false",
 		      px[W_CAL], py[W_CAL], screen_text(ps[W_CAL], 1), g_w[W_CAL].open ? "true" : "false",
 		      px[W_ADDR], py[W_ADDR], screen_text(ps[W_ADDR], 2), g_w[W_ADDR].open ? "true" : "false");
@@ -753,38 +769,10 @@ static void settle( void )
 
 static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
-	static UINT	seq;
-	TS_UUID		d, reply;
-	T_OBCRE		c;
-	SZ		asz = 0;
-	ID		k, ka;
-	ER		er;
+	ER	er;
 
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
-	rq->seq = ++seq;
-	rq->reply = reply;
 	rq->win = g_w[g_last].open ? g_w[g_last].win : g_w[win_frontmost() >= 0 ? win_frontmost() : 0].win;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	/* the answer waited for on its channel, at most wait_ms */
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
-			er = an->er;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
+	er = dq_ask(&g_dq, rq, an, NULL, wait_ms);
 	settle();
 	return er;
 }
@@ -1058,7 +1046,18 @@ static void print( void )
 		memset(&rq, 0, sizeof(rq));
 		rq.req = DT_RQ_PRINT;
 		rq.target = up.obj;
-		snprintf((char *)rq.name, sizeof(rq.name), "%s（%s）", (char *)g_name, win_title[k]);
+		{
+			size_t	max = strlen((char *)g_name) + strlen(win_title[k]) + 8;
+			char	*nm = (char *)malloc(max);
+
+			if ( nm != NULL ) {
+				snprintf(nm, max, "%s（%s）", (char *)g_name, win_title[k]);
+				(void)dq_part(&g_dq, DT_TAIL_NAME, (CONST UB *)nm, -1);
+				free(nm);
+			} else {
+				g_dq.er = E_NOMEM;
+			}
+		}
 		/* the person works the desktop's panels: as long as that takes */
 		er = ask_desktop(&rq, &an, 60 * 60 * 1000);
 		snprintf(s, sizeof(s), "print answered %d", (INT)er);
@@ -1641,11 +1640,11 @@ static void carry_out( INT w )
 	if ( !ed_has_sel() || sw != w ) return;
 	n = ed_sel_text(t, sizeof(t));
 	lo = ed_sel_from();
-	if ( n <= 0 || n >= DT_CARRY_TEXT ) return;
+	if ( n <= 0 ) return;
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_CARRY;
 	rq.flags = DT_F_TEXT;
-	memcpy(rq.text, t, (size_t)n);
+	(void)dq_part(&g_dq, DT_TAIL_TEXT, t, n);	/* the letters, all of them */
 	tw = dp_text_width(t, FIELD_PX) + 8;
 	rq.look.w = ( tw < 24 ) ? 24 : ( tw > 320 ) ? 320 : tw;
 	rq.look.h = ROW_H;
@@ -1770,8 +1769,11 @@ int main( void )
 		return 1;
 	}
 	memcpy(&g_obj, arg, sizeof(g_obj));
-	memcpy(g_name, ref.name, OB_NAME_MAX);
-	g_name[OB_NAME_MAX - 1] = 0;
+	{
+		UB	*nm = ui_obj_name(&g_obj);
+
+		if ( nm != NULL ) g_name = nm;	/* the name whole, kept while it runs */
+	}
 	tc_init(&g_db);
 	for ( k = 0; k < W_N; k++ ) g_w[k].gid = -1;
 	memset(&c, 0, sizeof(c));

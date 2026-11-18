@@ -48,13 +48,16 @@ static ER wl_load( T_TAD **p_rec )
 	T_DTREQ	rq;
 	T_DTANS	an;
 	TS_UUID	*ids = NULL;
-	UB	(*names)[WM_TITLE_MAX] = NULL;
+	UB	**names = NULL;		/* each title as long as the desktop says it */
 	CONST UB **np = NULL;
 	INT	i, n = 1, k = 0;
 	ER	er = E_OK;
 	char	s[48];
 
 	for ( i = 0; i < n; i++ ) {
+		SZ		tl = 0;
+		CONST UB	*t;
+
 		memset(&rq, 0, sizeof(rq));
 		rq.req = DT_RQ_WIN_LIST;
 		rq.recno = i;
@@ -64,21 +67,29 @@ static ER wl_load( T_TAD **p_rec )
 		if ( i == 0 ) {
 			n = (INT)an.how;
 			ids = malloc(sizeof(TS_UUID) * (size_t)( n + 1 ));
-			names = malloc(sizeof(*names) * (size_t)( n + 1 ));
+			names = calloc((size_t)( n + 1 ), sizeof(*names));
 			np = malloc(sizeof(*np) * (size_t)( n + 1 ));
 			if ( ids == NULL || names == NULL || np == NULL ) {
 				er = E_NOMEM;
 				break;
 			}
 		}
-		an.text[DT_TEXT_MAX - 1] = 0;
+		if ( k >= n ) break;
+		t = ta_ans_part(DT_TAIL_TEXT, &tl);
+		names[k] = malloc((size_t)tl + 1);
+		if ( names[k] == NULL ) {
+			er = E_NOMEM;
+			break;
+		}
+		if ( tl > 0 ) memcpy(names[k], t, (size_t)tl);
+		names[k][tl] = 0;
 		ids[k] = an.into;
-		snprintf((char *)names[k], WM_TITLE_MAX, "%s", (CONST char *)an.text);
 		np[k] = names[k];
 		k++;
 	}
 	if ( er == E_NOEXS ) er = E_OK;		/* fewer than there were when it began, or none */
 	*p_rec = ( er >= E_OK ) ? st_list_record("ウインドウ一覧", ids, np, k) : NULL;
+	for ( i = 0; names != NULL && i < k; i++ ) free(names[i]);
 	free(ids);
 	free(names);
 	free((void *)np);
@@ -124,7 +135,7 @@ static BOOL wl_open( CONST T_VOBJ *v )
 {
 	T_DTREQ	rq;
 	T_DTANS	an;
-	char	s[TAD_NAME_MAX + 32];
+	char	s[TA_LOG];
 	ER	er;
 
 	memset(&rq, 0, sizeof(rq));
@@ -134,7 +145,7 @@ static BOOL wl_open( CONST T_VOBJ *v )
 	rq.flags = DT_F_OPEN;
 	memset(&an, 0, sizeof(an));
 	er = ask_desktop(&rq, &an, 3000);
-	snprintf(s, sizeof(s), "to the front %s (%d)", (CONST char *)v->name, (INT)er);
+	snprintf(s, sizeof(s), "to the front %.120s (%d)", (CONST char *)TAD_VS(v->vname), (INT)er);
 	note(s);
 	return TRUE;
 }

@@ -144,19 +144,21 @@
  * A network of 802.1X, as its $$WIFIEAP line has it: the words of EAP and
  * where the certificates are. They are objects of the person's, read
  * with the path at each join and handed to the process for that join.
+ * Each word is a string of its own length (Kmalloc; NULL while the
+ * method is 0, "" for a word of nothing), freed by eap_clear.
  */
-#define EAP_STR		64
-#define EAP_PATH	160
 typedef struct {
 	INT	method;			/* WPAG_EAP_* */
-	char	id[EAP_STR];
-	char	pw[EAP_STR];
-	char	domain[EAP_STR];
-	char	ca[EAP_PATH];
-	char	cert[EAP_PATH];
-	char	key[EAP_PATH];
-	char	keypw[EAP_STR];
+	char	*id;
+	char	*pw;
+	char	*domain;
+	char	*ca;
+	char	*cert;
+	char	*key;
+	char	*keypw;
 } EAPCONF;
+
+#define ES(s)	( ( (s) != NULL ) ? (s) : "" )
 
 typedef struct {
 	W	state;			/* 0 init, 1 scan, 2 auth, 3 assoc, 4 run */
@@ -188,7 +190,7 @@ typedef struct {
 	UH	capinfo;
 	W	rssi;
 	UH	ie_len;
-	UB	ie[256];
+	UB	ie[3 * WPAG_ELEM_MAX];		/* three whole elements: RSN, RSNXE and WPA (or WPA and WME) */
 } TSWIFI_BSS;
 
 IMPORT int	rump_tswifi_start( UB *mac );
@@ -227,10 +229,10 @@ typedef struct {
 	UB	bssid[6];
 	UH	alg, seq, status;
 	W	len;
-	UB	body[512];
+	UB	body[WPAG_SAE_MAX];		/* the frame's body (tswifi_obsd.c has the same layout) */
 } TSWIFI_EV;
 
-#define TSW_IE_RSN_MAX		64
+#define TSW_IE_RSN_MAX		WPAG_ELEM_MAX	/* a whole RSN element or RSNXE */
 #define TSW_AKM_PSK		0x01
 #define TSW_AKM_PSK_SHA256	0x02
 #define TSW_AKM_SAE		0x04
@@ -362,8 +364,15 @@ IMPORT int	rump_tswifi_take( UB *mac );
 typedef enum { WS_OFF, WS_STARTING, WS_NOFW, WS_IDLE, WS_SCANNING, WS_JOINING, WS_HANDSHAKE, WS_CONNECTED } WSTATE;
 LOCAL CONST char *CONST ws_name[] = { "off", "starting", "nofirmware", "idle", "scanning", "joining", "handshake", "connected" };
 
-/* A saved network */
-#define PW_MAX		63		/* a password of WPA3: 8 to 63 characters, as WPA2's passphrase */
+/*
+ * A saved network. SAE's password has no length of its own in the
+ * standard; the most the card's firmware takes when it makes SAE itself
+ * (TSWIFI_SAE_PW_MAX of the drivers) is the most kept, and a longer one
+ * is refused when it is saved (E_PAR). WPA2's passphrase is 8 to 63
+ * characters (IEEE 802.11-2020 J.4.1), checked where its key is made.
+ */
+#define PW_MAX		WPAG_SAE_PW_MAX
+#define PSK_PW_MAX	63		/* WPA2's passphrase */
 
 typedef struct {
 	UB	ssid[32];
@@ -374,7 +383,7 @@ typedef struct {
 	BOOL	keyed;		/* pmk holds its key */
 	UB	pmk[32];	/* the key: what the passphrase and the SSID make (PBKDF2-SHA1) */
 	INT	pw_len;		/* the password for SAE (sec WPA3 or WPA2WPA3), 0 none */
-	char	pw[PW_MAX + 1];
+	char	pw[PW_MAX + 1];	/* SAE's: 8 to PW_MAX characters */
 	TS_UUID	owner;		/* the user who saved it: theirs alone */
 	EAPCONF	eap;		/* sec WPAG_SAVED_EAP: what it joins with; method 0 not told yet */
 	UD failed_at;	/* when it last failed, 0 never */
@@ -473,16 +482,15 @@ LOCAL INT		stlen = 0;
 #define F_CONF		0x04
 #define F_REQ		0x08
 
-#define CMD_MAX		1536		/* a line written to record 1: SAVE with its passphrase, EAP with its words */
-
-LOCAL char		cmd[CMD_MAX];	/* the command written, until the manager takes it */
+/* The command written to record 1, until the manager takes it: a string of its own (Kmalloc), NULL none; LOCK */
+LOCAL char		*cmd = NULL;
 LOCAL TS_UUID		cmd_user;	/* who wrote it */
 LOCAL TS_UUID		cur_user;	/* the person logged in, as the manager last looked */
 
 /* A change of the saved networks asked through record 1, done by the manager */
 LOCAL ID		rq_free = 0;	/* the one slot for it: 1 while free */
 LOCAL ID		rq_done = 0;	/* given once the manager has done it */
-LOCAL char		rq_line[CMD_MAX];
+LOCAL char		*rq_line = NULL;	/* the line asked, a copy of its own (Kmalloc) */
 LOCAL TS_UUID		rq_user;
 LOCAL ER		rq_er;
 LOCAL volatile BOOL	w_serving = FALSE;	/* the manager takes the changes */
@@ -510,6 +518,43 @@ LOCAL UD		t_keys = 0;
 
 #define LOCK()		tk_loc_mtx(wmtx, TMO_FEVR)
 #define UNLOCK()	tk_unl_mtx(wmtx)
+
+/* A copy of len bytes of s as a string of its own; NULL when there is no memory, said on the console */
+LOCAL char *str_copy( CONST char *s, SZ len )
+{
+	char	*c = (char *)Kmalloc((size_t)len + 1);
+
+	if ( c == NULL ) {
+		tm_printf((UB *)"wifi: no memory for a line of %d bytes\n", (INT)len);
+		return NULL;
+	}
+	knl_memcpy(c, s, len);
+	c[len] = '\0';
+	return c;
+}
+
+/* A string of the kernel's cleared and freed: it may have held a key */
+LOCAL void str_drop( char **ps )
+{
+	if ( *ps != NULL ) {
+		knl_memset(*ps, 0, knl_strlen(*ps));
+		Kfree(*ps);
+		*ps = NULL;
+	}
+}
+
+/* The command for the manager, in place of one it has not taken; FALSE when there is no memory */
+LOCAL BOOL cmd_put( CONST char *line, SZ len )
+{
+	char	*c = str_copy(line, len);
+
+	if ( c == NULL ) return FALSE;
+	LOCK();
+	str_drop(&cmd);
+	cmd = c;
+	UNLOCK();
+	return TRUE;
+}
 
 LOCAL UD now_ms( void )
 {
@@ -693,9 +738,7 @@ LOCAL void pm_ask( CONST char *what )
 	UD	t0;
 
 	pm_ack = FALSE;
-	LOCK();
-	knl_strcpy(cmd, what);
-	UNLOCK();
+	if ( !cmd_put(what, knl_strlen(what)) ) return;
 	(void)tk_set_flg(wflg, F_CMD);
 	for ( t0 = now_ms(); !pm_ack && now_ms() - t0 < 5000; ) (void)tk_dly_tsk(10);
 	tm_printf((UB *)"wifi: %s %s\n", what, pm_ack ? "done" : "not answered in time");
@@ -733,9 +776,7 @@ EXPORT void knl_wifi_shutdown( void )
 
 	if ( !w_serving || wflg <= 0 || ws < WS_JOINING ) return;
 	tm_printf((UB *)"wifi: the machine goes off: the network is left\n");
-	LOCK();
-	knl_strcpy(cmd, "SHUTDOWN");
-	UNLOCK();
+	if ( !cmd_put("SHUTDOWN", 8) ) return;
 	(void)tk_set_flg(wflg, F_CMD);
 	for ( t0 = now_ms(); ws >= WS_JOINING && now_ms() - t0 < 1000; ) {
 		(void)tk_dly_tsk(20);
@@ -891,6 +932,8 @@ EXPORT void knl_wifi_rx( CONST UB *frame, INT len )
 			s->len = (UH)len;
 			eq_tail++;
 			put = TRUE;
+		} else {
+			n_drop++;
 		}
 		ISpinUnlock(&rx_lock, &imask);
 		if ( put ) (void)tk_set_flg(wflg, F_EAPOL);
@@ -1289,28 +1332,29 @@ LOCAL BOOL starts( CONST char *s, CONST char *head )
 LOCAL ER w_wri( void *ctx, UD *pos, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize )
 {
 	CONST T_OBCRD	*crd = knl_ob_crd_of(ts_get_pid());
-	char		line[CMD_MAX];
-	INT		i;
+	char		*line;
+	SZ		i;
 	ER		er = E_OK;
 
 	(void)ctx;
 	(void)pos;
 	if ( recno != OB_NET_STATE ) return E_RONLY;
-	if ( size <= 0 || size >= (SZ)sizeof(line) ) return E_PAR;
-	for ( i = 0; i < (INT)size && ((CONST UB *)buf)[i] != '\n' && ((CONST UB *)buf)[i] != '\0'; i++ ) {
-		line[i] = ((CONST char *)buf)[i];
-	}
-	line[i] = '\0';
+	if ( size <= 0 ) return E_PAR;
+	for ( i = 0; i < size && ((CONST UB *)buf)[i] != '\n' && ((CONST UB *)buf)[i] != '\0'; i++ ) ;
+	line = str_copy((CONST char *)buf, i);
+	if ( line == NULL ) return E_NOMEM;
 	if ( starts(line, "SAVE ") || starts(line, "FORGET ") || starts(line, "EAP ") ) {
 		er = req_pass(&crd->user, line);
-		knl_memset(line, 0, sizeof(line));	/* the passphrase is not left about */
 	} else {
 		LOCK();
-		knl_memcpy(cmd, line, sizeof(cmd));
+		str_drop(&cmd);
+		cmd = line;
+		line = NULL;
 		cmd_user = crd->user;
 		UNLOCK();
 		(void)tk_set_flg(wflg, F_CMD);
 	}
+	str_drop(&line);			/* the passphrase is not left about */
 	if ( er >= E_OK && p_asize != NULL ) *p_asize = size;
 	return er;
 }
@@ -1455,42 +1499,69 @@ LOCAL CONST TS_UUID *session_user( void )
 }
 
 
-/* One word of a $$WIFIEAP line or an EAP request into a field: hexadecimal, "-" for nothing */
-LOCAL BOOL eap_word( CONST UB *val, INT vl, INT nth, char *out, INT max )
+/* The words of an EAPCONF cleared and freed, the method 0 */
+LOCAL void eap_clear( EAPCONF *e )
+{
+	str_drop(&e->id);
+	str_drop(&e->pw);
+	str_drop(&e->domain);
+	str_drop(&e->ca);
+	str_drop(&e->cert);
+	str_drop(&e->key);
+	str_drop(&e->keypw);
+	e->method = 0;
+}
+
+/*
+ * One word of a $$WIFIEAP line or an EAP request into a string of its
+ * own (*out): hexadecimal, "-" for nothing. FALSE when it is not one or
+ * there is no memory.
+ */
+LOCAL BOOL eap_word( CONST UB *val, INT vl, INT nth, char **out )
 {
 	CONST UB *w;
 	INT	wl, d;
+	char	*s;
 
-	out[0] = '\0';
+	*out = NULL;
 	if ( !cf_wfind(val, vl, nth, &w, &wl) ) return FALSE;
-	if ( wl == 1 && w[0] == '-' ) return TRUE;
-	if ( ( wl & 1 ) != 0 || wl / 2 >= max ) return FALSE;
+	if ( wl == 1 && w[0] == '-' ) wl = 0;
+	if ( ( wl & 1 ) != 0 ) return FALSE;
+	s = (char *)Kmalloc((size_t)( wl / 2 ) + 1);
+	if ( s == NULL ) {
+		tm_printf((UB *)"wifi: no memory for a word of %d bytes of the enterprise settings\n", wl / 2);
+		return FALSE;
+	}
 	for ( d = 0; d < wl; d += 2 ) {
 		INT	h = hexval((char)w[d]), l = hexval((char)w[d + 1]);
 
-		if ( h < 0 || l < 0 ) return FALSE;
-		out[d / 2] = (char)( h * 16 + l );
+		if ( h < 0 || l < 0 ) {
+			Kfree(s);
+			return FALSE;
+		}
+		s[d / 2] = (char)( h * 16 + l );
 	}
-	out[wl / 2] = '\0';
+	s[wl / 2] = '\0';
+	*out = s;
 	return TRUE;
 }
 
-/* The words from the nth on: the method, then the fields */
+/* The words from the nth on: the method, then the fields; what e had before is freed */
 LOCAL BOOL eap_from_words( EAPCONF *e, CONST UB *val, INT vl, INT nth )
 {
 	CONST UB *w;
 	INT	wl;
 
-	knl_memset(e, 0, sizeof(*e));
+	eap_clear(e);
 	if ( !cf_wfind(val, vl, nth, &w, &wl) ) return FALSE;
 	if ( wl == 3 && w[0] == 't' && w[1] == 'l' && w[2] == 's' ) e->method = WPAG_EAP_TLS;
 	else if ( wl == 4 && w[0] == 'p' && w[1] == 'e' && w[2] == 'a' && w[3] == 'p' ) e->method = WPAG_EAP_PEAP;
 	else return FALSE;
-	if ( !eap_word(val, vl, nth + 1, e->id, EAP_STR) || !eap_word(val, vl, nth + 2, e->pw, EAP_STR)
-	  || !eap_word(val, vl, nth + 3, e->domain, EAP_STR) || !eap_word(val, vl, nth + 4, e->ca, EAP_PATH)
-	  || !eap_word(val, vl, nth + 5, e->cert, EAP_PATH) || !eap_word(val, vl, nth + 6, e->key, EAP_PATH)
-	  || !eap_word(val, vl, nth + 7, e->keypw, EAP_STR) ) {
-		knl_memset(e, 0, sizeof(*e));
+	if ( !eap_word(val, vl, nth + 1, &e->id) || !eap_word(val, vl, nth + 2, &e->pw)
+	  || !eap_word(val, vl, nth + 3, &e->domain) || !eap_word(val, vl, nth + 4, &e->ca)
+	  || !eap_word(val, vl, nth + 5, &e->cert) || !eap_word(val, vl, nth + 6, &e->key)
+	  || !eap_word(val, vl, nth + 7, &e->keypw) ) {
+		eap_clear(e);
 		return FALSE;
 	}
 	return TRUE;
@@ -1538,6 +1609,7 @@ LOCAL BOOL conf_read( void )
 		return FALSE;
 	}
 	if ( nets != NULL ) {
+		for ( i = 0; i < nnet; i++ ) eap_clear(&nets[i].eap);
 		knl_memset(nets, 0, sizeof(WNET) * (SZ)( ( nnet > 0 ) ? nnet : 1 ));	/* the keys are not left about */
 		Kfree(nets);
 	}
@@ -1630,6 +1702,7 @@ LOCAL BOOL conf_read( void )
 			knl_memcpy(nets[i].pw, nets[k].pw, sizeof(nets[i].pw));
 			nets[i].pw_len = nets[k].pw_len;
 		}
+		eap_clear(&nets[k].eap);
 		for ( i = k; i < nnet - 1; i++ ) nets[i] = nets[i + 1];
 		nnet--;
 		knl_memset(&nets[nnet], 0, sizeof(WNET));
@@ -1684,13 +1757,13 @@ LOCAL INT conf_make( void *ctx, UB *t, INT max )
 		n = knl_oj_put(t, n, max, "$$WIFIEAP\t");
 		n = knl_oj_put(t, n, max, num);
 		n = knl_oj_put(t, n, max, ( e->method == WPAG_EAP_TLS ) ? " tls" : " peap");
-		n = eap_put(t, n, max, e->id);
-		n = eap_put(t, n, max, e->pw);
-		n = eap_put(t, n, max, e->domain);
-		n = eap_put(t, n, max, e->ca);
-		n = eap_put(t, n, max, e->cert);
-		n = eap_put(t, n, max, e->key);
-		n = eap_put(t, n, max, e->keypw);
+		n = eap_put(t, n, max, ES(e->id));
+		n = eap_put(t, n, max, ES(e->pw));
+		n = eap_put(t, n, max, ES(e->domain));
+		n = eap_put(t, n, max, ES(e->ca));
+		n = eap_put(t, n, max, ES(e->cert));
+		n = eap_put(t, n, max, ES(e->key));
+		n = eap_put(t, n, max, ES(e->keypw));
 		n = knl_oj_put(t, n, max, "\n");
 	}
 	return n;
@@ -1783,15 +1856,25 @@ LOCAL ER req_apply( CONST TS_UUID *user, CONST char *line )
 		}
 		if ( line[at] != '\0' ) pass = line + at;
 		if ( pass != NULL && SEC_SAE(sec) ) {
-			/* a password, which SAE takes as it is: not 64 hexadecimal digits of a PSK */
+			/*
+			 * A password, which SAE takes as it is: not 64 hexadecimal
+			 * digits of a PSK. WPA3 alone takes up to PW_MAX characters;
+			 * WPA2/WPA3 makes WPA2's key of it too, whose passphrase is
+			 * 8 to 63 characters (IEEE 802.11-2020 J.4.1).
+			 */
+			INT	hx;
+
 			for ( pl = 0; pass[pl] >= 0x20 && pass[pl] <= 0x7e; pl++ ) ;
-			if ( pass[pl] != '\0' || pl < 8 || pl > PW_MAX ) return E_PAR;
+			for ( hx = 0; hx < pl && hexval(pass[hx]) >= 0; hx++ ) ;
+			if ( pass[pl] != '\0' || pl < 8 || pl > ( ( sec == WPAG_SAVED_WPA3 ) ? PW_MAX : PSK_PW_MAX )
+			  || ( pl == 64 && hx == 64 ) ) return E_PAR;
 		}
 	}
 	conf_take();				/* the networks as they are saved now */
 	k = net_find(ssid, len, user);
 	if ( !save ) {
 		if ( k < 0 ) return E_NOEXS;
+		eap_clear(&nets[k].eap);
 		knl_memset(&nets[k], 0, sizeof(WNET));
 		for ( i = k; i < nnet - 1; i++ ) nets[i] = nets[i + 1];
 		nnet--;
@@ -1880,26 +1963,31 @@ LOCAL ER eap_apply( CONST TS_UUID *user, CONST char *line )
 	keep = ( cf_wfind(val, vl, 4, &pw, &pl) && pl == 1 && pw[0] == '=' );
 	if ( keep ) {
 		/* the word stands for the saved one: read as nothing */
-		static char	l2[CMD_MAX];
+		char	*l2 = str_copy(line, (SZ)vl);
 
-		knl_memcpy(l2, line, vl + 1);
+		if ( l2 == NULL ) return E_NOMEM;
 		l2[pw - val] = '-';
 		ok = eap_from_words(&e, (CONST UB *)l2, vl, 2);
-		knl_memset(l2, 0, sizeof(l2));
+		str_drop(&l2);
 	} else {
 		ok = eap_from_words(&e, val, vl, 2);
 	}
-	if ( !ok || e.id[0] == '\0' || e.ca[0] == '\0' ) {
-		knl_memset(&e, 0, sizeof(e));
+	if ( !ok || ES(e.id)[0] == '\0' || ES(e.ca)[0] == '\0' ) {
+		eap_clear(&e);
 		return E_PAR;
 	}
 	conf_take();
 	k = net_find(ssid, len, user);
 	if ( k < 0 || nets[k].sec != WPAG_SAVED_EAP ) {
-		knl_memset(&e, 0, sizeof(e));
+		eap_clear(&e);
 		return E_NOEXS;
 	}
-	if ( keep ) knl_memcpy(e.pw, nets[k].eap.pw, sizeof(e.pw));
+	if ( keep ) {
+		str_drop(&e.pw);
+		e.pw = nets[k].eap.pw;
+		nets[k].eap.pw = NULL;
+	}
+	eap_clear(&nets[k].eap);
 	nets[k].eap = e;
 	knl_memset(&e, 0, sizeof(e));
 	er = conf_write();
@@ -1922,8 +2010,12 @@ LOCAL ER req_pass( CONST TS_UUID *user, CONST char *line )
 		return req_apply(user, line);
 	}
 	if ( tk_wai_sem(rq_free, 1, 10000) < E_OK ) return E_BUSY;
-	knl_strncpy(rq_line, line, sizeof(rq_line) - 1);
-	rq_line[sizeof(rq_line) - 1] = '\0';
+	/* a copy of the line, the manager's to free once it has done it */
+	rq_line = str_copy(line, knl_strlen(line));
+	if ( rq_line == NULL ) {
+		(void)tk_sig_sem(rq_free, 1);
+		return E_NOMEM;
+	}
 	rq_user = *user;
 	rq_er = E_TMOUT;
 	rq_pending = TRUE;
@@ -1937,10 +2029,13 @@ LOCAL ER req_pass( CONST TS_UUID *user, CONST char *line )
 /* The change asked, done by the manager */
 LOCAL void take_req( void )
 {
+	char	*l = rq_line;
+
 	if ( !rq_pending ) return;
 	rq_pending = FALSE;
-	rq_er = req_apply(&rq_user, rq_line);
-	knl_memset(rq_line, 0, sizeof(rq_line));
+	rq_line = NULL;
+	rq_er = ( l != NULL ) ? req_apply(&rq_user, l) : E_NOMEM;
+	str_drop(&l);				/* the passphrase is not left about */
 	if ( ws == WS_IDLE ) t_scan = 0;	/* a network saved now is looked for at once */
 	state_refresh();
 	(void)tk_sig_sem(rq_done, 1);
@@ -2473,7 +2568,7 @@ LOCAL INT ob_akms( INT saved )
 LOCAL BOOL ob_join( INT k, CONST TSWIFI_BSS *b )
 {
 	UB	pmk[32];
-	char	pw[64], s[33];
+	char	pw[PW_MAX + 1], s[33];
 	INT	er, c = sec_of(b), pt_len, pw_len;
 	BOOL	have_pmk;
 
@@ -2616,11 +2711,11 @@ LOCAL INT eap_prepare( CONST EAPCONF *e )
 	UB	*ca = NULL, *cert = NULL, *key = NULL;
 	INT	cl, cel, kl, r = -1;
 
-	if ( eap_file(e->ca, &ca, &cl) >= E_OK && ca != NULL && eap_file(e->cert, &cert, &cel) >= E_OK
-	  && eap_file(e->key, &key, &kl) >= E_OK ) {
-		r = knl_wpa_eap_set(e->method, e->id, (INT)knl_strlen(e->id), e->pw, (INT)knl_strlen(e->pw),
-				    ca, cl, e->domain, (INT)knl_strlen(e->domain), cert, cel, key, kl,
-				    e->keypw, (INT)knl_strlen(e->keypw));
+	if ( eap_file(ES(e->ca), &ca, &cl) >= E_OK && ca != NULL && eap_file(ES(e->cert), &cert, &cel) >= E_OK
+	  && eap_file(ES(e->key), &key, &kl) >= E_OK ) {
+		r = knl_wpa_eap_set(e->method, ES(e->id), (INT)knl_strlen(ES(e->id)), ES(e->pw), (INT)knl_strlen(ES(e->pw)),
+				    ca, cl, ES(e->domain), (INT)knl_strlen(ES(e->domain)), cert, cel, key, kl,
+				    ES(e->keypw), (INT)knl_strlen(ES(e->keypw)));
 	}
 	if ( key != NULL ) {
 		knl_memset(key, 0, kl);
@@ -2635,8 +2730,9 @@ LOCAL INT eap_prepare( CONST EAPCONF *e )
 
 LOCAL void ob_auth( CONST UB *bssid )
 {
-	UB	pmk[32], pt[WPAG_SAE_PT_MAX], ie[WPAG_IE_MAX], out[WPAG_SAE_MAX];
-	char	pw[64], a[18], o[18];
+	static UB	ie[WPAG_IE_MAX], out[WPAG_SAE_MAX];	/* large: not on the stack (the manager's task alone) */
+	UB	pmk[32], pt[WPAG_SAE_PT_MAX];
+	char	pw[PW_MAX + 1], a[18], o[18];
 	INT	saved, pt_len, pw_len, ie_len = 0, out_len = 0, status = 0, er;
 	BOOL	have_pmk, was = ( ws == WS_CONNECTED || ws == WS_HANDSHAKE || ob_lost );
 
@@ -2718,7 +2814,8 @@ LOCAL void ob_auth( CONST UB *bssid )
 /* SAE's next step with the frame the access point sent, or with none (sent again in time) */
 LOCAL void ob_sae_step( CONST TSWIFI_EV *ev )
 {
-	UB	out[WPAG_SAE_MAX], pmk[32], pmkid[16], ie[WPAG_IE_MAX];
+	static UB	out[WPAG_SAE_MAX], ie[WPAG_IE_MAX];	/* large: not on the stack (the manager's task alone) */
+	UB	pmk[32], pmkid[16];
 	INT	r, out_len = 0, seq = 0, status = 0, ie_len = 0, er;
 
 	if ( !ob_sae ) return;
@@ -3013,7 +3110,7 @@ LOCAL void step_obsd( void )
 LOCAL BOOL join( INT k, CONST TSWIFI_BSS *b )
 {
 	WNET	*p = &nets[k];
-	UB	pmk[32], ie[64];
+	UB	pmk[32], ie[WPAG_ELEM_MAX];
 	INT	ie_len = 0, er, c = sec_of(b), reset = 0;
 	CONST UB *rsn;
 	char	s[33];
@@ -3296,17 +3393,21 @@ LOCAL INT choose( TSWIFI_BSS *out )
 
 LOCAL void take_cmd( void )
 {
-	char	c[sizeof(cmd)];
+	char	*c;
 	UB	ssid[32];
 	INT	i, n;
 	TS_UUID	who;
 
 	LOCK();
-	knl_memcpy(c, cmd, sizeof(c));
+	c = cmd;
 	who = cmd_user;
-	cmd[0] = '\0';
+	cmd = NULL;
 	UNLOCK();
-	if ( c[0] == '\0' ) return;
+	if ( c == NULL ) return;
+	if ( c[0] == '\0' ) {
+		Kfree(c);
+		return;
+	}
 	tm_printf((UB *)"wifi: asked: %s\n", c);
 	if ( knl_strcmp(c, "SCAN") == 0 ) {
 		if ( ws == WS_IDLE || ws == WS_CONNECTED ) {
@@ -3365,6 +3466,7 @@ LOCAL void take_cmd( void )
 		if ( ws >= WS_JOINING && want_net >= 0 && want_net != cur_net ) fail("asked");
 		if ( ws == WS_IDLE ) scan_start();
 	}
+	Kfree(c);
 }
 
 /* ---------------------------------------------------------------- the task */
@@ -3711,7 +3813,7 @@ LOCAL void serve_only( void )
 		(void)tk_wai_flg(wflg, F_REQ | F_CMD, TWF_ORW | TWF_BITCLR, &ptn, TMO_FEVR);
 		take_req();
 		LOCK();
-		cmd[0] = '\0';
+		str_drop(&cmd);
 		UNLOCK();
 	}
 }
@@ -3938,7 +4040,7 @@ LOCAL INT test_scan_make( void *ctx, UB *t, INT max )
 LOCAL void w_test_task( INT stacd, void *exinf )
 {
 	UINT	ptn;
-	char	c[sizeof(cmd)], s[33];
+	char	*c, s[33];
 	UB	ssid[32];
 	INT	i, n, k;
 	TS_UUID	who;
@@ -3958,10 +4060,14 @@ LOCAL void w_test_task( INT stacd, void *exinf )
 		(void)tk_wai_flg(wflg, F_REQ | F_CMD, TWF_ORW | TWF_BITCLR, &ptn, TMO_FEVR);
 		take_req();
 		LOCK();
-		knl_memcpy(c, cmd, sizeof(c));
+		c = cmd;
 		who = cmd_user;
-		cmd[0] = '\0';
+		cmd = NULL;
 		UNLOCK();
+		if ( c == NULL ) {
+			state_refresh();
+			continue;
+		}
 		if ( c[0] == 'C' && c[1] == 'O' && c[2] == 'N' ) {
 			for ( i = 0; c[i] != '\0' && c[i] != ' '; i++ ) ;
 			n = ( c[i] == ' ' ) ? unhex(c + i + 1, ssid, 32) : -1;
@@ -3982,6 +4088,7 @@ LOCAL void w_test_task( INT stacd, void *exinf )
 		} else if ( c[0] != '\0' ) {
 			tm_printf((UB *)"wifi: test: asked: %s\n", c);
 		}
+		Kfree(c);
 		state_refresh();
 	}
 }

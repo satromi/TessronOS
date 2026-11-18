@@ -41,12 +41,13 @@
 #include <ts/hid.h>
 #include <ts/json.h>
 #include <ts/tray.h>
+#include "../dtask.h"
 
 /* ---------------------------------------------------------------- state */
 
 CXSHEET	g_s;
 TS_UUID	g_obj;
-UB	g_name[OB_NAME_MAX];
+UB	*g_name = (UB *)"";
 BOOL	g_autoref;
 UW	g_bg = C_PAPER;
 
@@ -559,8 +560,9 @@ static INT find_from( CONST UB *pat, BOOL re, INT c0, INT r0, INT lc, INT lr, BO
 	for ( row = r0; row <= g_s.maxrow; row++ ) {
 		for ( col = ( row == r0 ) ? c0 : 1; col <= g_s.maxcol; col++ ) {
 			CONST CXCELL	*c;
-			UB		nm[OB_NAME_MAX];
+			UB		*nm = NULL;
 			CONST UB	*t;
+			BOOL		hit;
 
 			if ( limit && ( row > lr || ( row == lr && col >= lc ) ) ) return 0;
 			c = cx_get(&g_s, col, row);
@@ -568,14 +570,14 @@ static INT find_from( CONST UB *pat, BOOL re, INT c0, INT r0, INT lc, INT lr, BO
 			if ( c->kind == CX_LINK ) {
 				TS_UUID	u;
 
-				nm[0] = 0;
-				if ( link_target(c, &u) ) name_of(&u, nm);
-				t = nm;
+				if ( link_target(c, &u) ) nm = name_of(&u);
+				t = NM_OR_EMPTY(nm);
 			} else {
 				t = ( c->text[0] == '=' ) ? (CONST UB *)"" : c->text;
 			}
-			if ( t[0] == 0 ) continue;
-			if ( ce_test(t, pat, re) > 0 ) {
+			hit = ( t[0] != 0 && ce_test(t, pat, re) > 0 );
+			free(nm);
+			if ( hit ) {
 				take_cell(col, row, FALSE);
 				return 1;
 			}
@@ -1579,11 +1581,16 @@ static void scrolled( CONST T_OBNTM *m )
 
 void links_told( void )
 {
-	T_DTANS	an;
-	SZ	asz = 0;
+	static UB	*buf = NULL;
+	static SZ	cap = 0;
+	SZ		n;
 
-	while ( g_lport > 0 && ob_rea_tmo(g_lport, 0, 0, &an, sizeof(an), &asz, TMO_POL) >= E_OK ) {
-		if ( asz == (SZ)sizeof(an) ) link_told(&an);
+	/* each notice whole, its tail after it */
+	while ( g_lport > 0 && ( n = dq_read(g_lport, &buf, &cap, TMO_POL) ) >= (SZ)sizeof(T_DTANS) ) {
+		T_DTANS	*an = (T_DTANS *)buf;
+
+		if ( n < (SZ)sizeof(T_DTANS) + (SZ)an->tailsz ) an->tailsz = 0;	/* not one: shorter than it says */
+		link_told(an);
 	}
 }
 
@@ -1675,7 +1682,7 @@ int main( void )
 	T_OBNTM	m;
 	T_OBREF	ref;
 	SZ	asz = 0, argn;
-	char	title[OB_NAME_MAX + 8], s[160], arg[32];
+	char	*title, s[160], arg[32];
 	ER	er;
 
 	memset(arg, 0, sizeof(arg));
@@ -1688,9 +1695,12 @@ int main( void )
 	}
 	memcpy(&g_obj, arg, sizeof(g_obj));
 	g_autoref = (BOOL)( ( ref.flags & OB_F_AUTOREF ) != 0 );
-	memcpy(g_name, ref.name, OB_NAME_MAX);
-	g_name[OB_NAME_MAX - 1] = 0;
-	snprintf(title, sizeof(title), "%s", (char *)ref.name);
+	{
+		UB	*nm = ui_obj_name(&g_obj);
+
+		if ( nm != NULL ) g_name = nm;	/* the name whole, kept while it runs */
+	}
+	title = (char *)g_name;
 	cx_init(&g_s);
 	if ( ce_start() < 0 ) {
 		note("the engine cannot be started");

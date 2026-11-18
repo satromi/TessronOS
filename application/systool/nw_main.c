@@ -213,13 +213,13 @@ static void nw_build( NWNET *g, CONST TS_UUID *start )
 static void link_of( char *xml, INT *p_at, INT max, CONST NWNODE *nd, INT l, INT t, INT w, INT band, BOOL first )
 {
 	char	us[TS_UUID_STRLEN + 1];
-	UB	nm[TAD_NAME_MAX];
+	UB	*nm = tl_name_dup(&nd->id);
 	INT	at = *p_at;
 
 	ts_uuid_text(&nd->id, us);
-	(void)tl_name(&nd->id, nm, TAD_NAME_MAX);
 	at += snprintf(xml + at, (size_t)( max - at ), "<link id=\"%s_0.xtad\" name=\"", us);
-	at = tl_put_x(xml, at, max, nm);
+	at = tl_put_x(xml, at, max, ( nm != NULL ) ? nm : (CONST UB *)"");
+	free(nm);
 	/* the one it starts from stands out */
 	at += snprintf(xml + at, (size_t)( max - at ),
 		       "\" vobjleft=\"%d\" vobjtop=\"%d\" vobjright=\"%d\" vobjbottom=\"%d\" height=\"%d\" chsz=\"%d\""
@@ -229,14 +229,31 @@ static void link_of( char *xml, INT *p_at, INT max, CONST NWNODE *nd, INT l, INT
 	*p_at = at;
 }
 
+/* The window's title: what fits of it (a title is shown, not kept) */
 static void title_of( CONST NWNET *g, CONST char *what )
 {
-	UB	nm[TAD_NAME_MAX];
+	UB	*nm = tl_name_dup(&g->node[0].id);
 	INT	at;
 
-	(void)tl_name(&g->node[0].id, nm, TAD_NAME_MAX);
 	at = st_cat(g_title, 0, sizeof(g_title), what);
-	(void)st_cat(g_title, at, sizeof(g_title), (CONST char *)nm);
+	(void)st_cat(g_title, at, sizeof(g_title), ( nm != NULL ) ? (CONST char *)nm : "");
+	free(nm);
+}
+
+/* The bytes the objects' names take in a record, each letter escaped to six at most; -1 too many */
+static D names_room( CONST NWNET *g )
+{
+	D	total = 0;
+	INT	i;
+
+	for ( i = 0; i < g->n; i++ ) {
+		UB	*nm = tl_name_dup(&g->node[i].id);
+
+		if ( nm != NULL ) total += 6 * (D)strlen((CONST char *)nm);
+		free(nm);
+		if ( total > 0x70000000 ) return -1;
+	}
+	return total;
 }
 
 /*
@@ -262,8 +279,12 @@ static T_TAD *nw_record( NWNET *g )
 		row[dp]++;
 	}
 	free(row);
-	if ( (D)g->n * ( 480 + TAD_NAME_MAX * 5 ) + (D)g->nedge * 200 > 0x70000000 ) return NULL;
-	max = 512 + g->n * ( 480 + TAD_NAME_MAX * 5 ) + g->nedge * 200;
+	{
+		D	nr = names_room(g);
+
+		if ( nr < 0 || (D)g->n * 480 + nr + (D)g->nedge * 200 > 0x70000000 ) return NULL;
+		max = 512 + g->n * 480 + (INT)nr + g->nedge * 200;
+	}
 	xml = malloc((size_t)max);
 	if ( xml == NULL ) return NULL;
 	title_of(g, "仮身ネットワーク: ");
@@ -506,11 +527,15 @@ static T_TAD *gr_record( NWNET *g )
 	}
 	free(px);
 
-	if ( (D)g->n * ( 700 + TAD_NAME_MAX * 5 ) + (D)g->nedge * 160 > 0x70000000 ) {
-		free(in);
-		return NULL;
+	{
+		D	nr = names_room(g);
+
+		if ( nr < 0 || (D)g->n * 700 + nr + (D)g->nedge * 160 > 0x70000000 ) {
+			free(in);
+			return NULL;
+		}
+		max = 512 + g->n * 700 + (INT)nr + g->nedge * 160;
 	}
-	max = 512 + g->n * ( 700 + TAD_NAME_MAX * 5 ) + g->nedge * 160;
 	xml = malloc((size_t)max);
 	if ( xml == NULL ) {
 		free(in);

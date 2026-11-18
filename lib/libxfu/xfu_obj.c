@@ -120,6 +120,24 @@ EXPORT ER xfu_meta_file( ID key, CONST UB *file, SZ n )
 	return er;
 }
 
+EXPORT UB *xfu_obj_name( CONST TS_UUID *u )
+{
+	UB	*b;
+	SZ	cap = 64, need = 0;
+
+	for ( ;; ) {
+		b = (UB *)xfu_sys_alloc(cap);
+		if ( b == NULL ) return NULL;
+		if ( ob_ref_nam(u, b, cap, &need) < E_OK ) {
+			xfu_sys_free(b);
+			return NULL;
+		}
+		if ( need <= cap ) return b;
+		xfu_sys_free(b);
+		cap = need;		/* renamed longer meanwhile, or the room short */
+	}
+}
+
 EXPORT BOOL xfu_counts( CONST TS_UUID *u )
 {
 	T_OBREF	r;
@@ -340,6 +358,7 @@ EXPORT void xfu_finish( XFU *x )
 
 	for ( i = 0; i < XFU_NAPP; i++ ) {
 		if ( x->app[i].icon != NULL ) xfu_sys_free(x->app[i].icon);
+		if ( x->app[i].name != NULL ) xfu_sys_free(x->app[i].name);
 	}
 	if ( x->chunk != NULL ) xfu_sys_free(x->chunk);
 	if ( x->seen != NULL ) xfu_sys_free(x->seen);
@@ -487,8 +506,14 @@ LOCAL void read_prog( XFU *x, CONST TS_UUID *u )
 
 			if ( !xfu_same(id, app_id[a]) || p->have ) continue;
 			p->have = TRUE;
-			if ( js_get_str(&g, "name", p->name, sizeof(p->name)) <= 0 ) {
-				(void)js_get_str(&root, "name", p->name, sizeof(p->name));
+			/* the name whole: never longer than the metadata it is in */
+			p->name = (UB *)xfu_sys_alloc(size + 1);
+			if ( p->name != NULL ) {
+				p->name[0] = 0;
+				if ( js_get_str(&g, "name", p->name, (INT)size + 1) <= 0
+				  && js_get_str(&root, "name", p->name, (INT)size + 1) <= 0 ) {
+					p->name[0] = 0;
+				}
 			}
 			if ( js_get(&g, "base", &base) >= E_OK ) {
 				it.s = NULL;
@@ -560,7 +585,7 @@ EXPORT ER xfu_make_box( CONST UB *name, CONST TS_UUID *near, TS_UUID *p_uuid )
 		   "\"editable\":true,\"deletable\":true,\"readable\":true,\"applist\":{");
 	a = xfu_app(x, XFU_APP_LIST);
 	xb_put(&w, "\"virtual-object-list\":{");
-	if ( a != NULL && a->name[0] != 0 ) {
+	if ( a != NULL && a->name != NULL && a->name[0] != 0 ) {
 		xb_put(&w, "\"name\":\"");
 		xb_json(&w, a->name, xfu_slen(a->name));
 		xb_put(&w, "\",");

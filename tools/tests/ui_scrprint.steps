@@ -115,7 +115,9 @@ wait 800
 shot sp_pasted
 # ファイル変換 started, /boot (vblka1) opened and its list moved to the
 # right; the link of the figure object carried onto the list: the panel of
-# 実身からファイルへ (a press long after the last, or it would be a copy)
+# 実身からファイルへ (a press long after the last, or it would be a copy).
+# The link stands 186 to 206 in the first window and is chosen: pressed in
+# its middle, since a press on its lower edge resizes it
 open 01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91
 expect xfconv: ready
 wait 1000
@@ -131,12 +133,14 @@ wait 300
 win vblka1
 click 20 120
 wait 1000
-drag 70 203 900 450
+drag 70 196 900 450
 expect xfconv: asked how to export 1:
 wait 600
 shot sp_xfc_export
-# 画像（PNG）: the figure's picture written as 画面印刷.png in /boot
-click 840 409
+# 画像（PNG）: the figure's picture written as 画面印刷.png in /boot. The
+# panel is in the middle of the screen (420,222 to 860,578), 画像（PNG） the
+# sixth of the ways, at 620,437
+click 620 437
 wait 300
 shot sp_xfc_png
 key 28

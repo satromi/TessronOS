@@ -31,6 +31,10 @@
  *	- a line with anything else than printable ASCII left, or without
  *	  '=', is said on the console and dropped.
  *
+ *	A paragraph and a line may be as long as they are: the paragraph's
+ *	text is read into room made twice as large as it fills, and a line
+ *	into room of its own length.
+ *
  *	tools/rpi5/wifi/nvram.py does the same on the host; the two are tested
  *	with the same documents (test_nvram.py, tests/ktest/ktest_wifinv.c).
  */
@@ -47,8 +51,7 @@
 
 /* The mark a note's paragraph starts with: 【注記】 */
 #define WIFI_NV_NOTE	"\xe3\x80\x90\xe6\xb3\xa8\xe8\xa8\x98\xe3\x80\x91"
-#define WIFI_NV_PARA	4096		/* bytes of one paragraph's text */
-#define WIFI_NV_LINE	512		/* bytes of one line */
+#define WIFI_NV_PARA	4096		/* the first room for a paragraph's text */
 
 typedef struct {
 	UB	*out;
@@ -56,10 +59,32 @@ typedef struct {
 	SZ	len;
 	INT	drop;			/* lines dropped as not settings */
 	BOOL	full;
-	UB	para[WIFI_NV_PARA];
+	BOOL	nomem;
+	UB	*para;			/* room for pcap bytes */
+	SZ	pcap;
 	SZ	plen;
-	BOOL	plong;
 } NV;
+
+/* One byte more of the paragraph, the room made twice as large when it is full */
+LOCAL BOOL nv_put( NV *nv, UB c )
+{
+	UB	*p;
+	SZ	cap;
+
+	if ( nv->plen + 1 >= nv->pcap ) {
+		cap = ( nv->pcap > 0 ) ? nv->pcap * 2 : WIFI_NV_PARA;
+		p = (UB *)Krealloc(nv->para, (size_t)cap);
+		if ( p == NULL ) {
+			tm_printf((UB *)"wifi: nvram: no memory for a paragraph of %d bytes\n", (INT)cap);
+			nv->nomem = TRUE;
+			return FALSE;
+		}
+		nv->para = p;
+		nv->pcap = cap;
+	}
+	nv->para[nv->plen++] = c;
+	return TRUE;
+}
 
 /* The text of a node and of what is under it, line breaks as '\n' */
 LOCAL void nv_text( NV *nv, CONST T_TADNODE *nd )
@@ -67,22 +92,14 @@ LOCAL void nv_text( NV *nv, CONST T_TADNODE *nd )
 	CONST T_TADNODE	*c;
 	CONST UB	*t;
 
-	for ( c = nd->first; c != NULL; c = c->next ) {
+	for ( c = nd->first; c != NULL && !nv->nomem; c = c->next ) {
 		if ( c->kind == TAD_ND_TEXT && c->text != NULL ) {
 			for ( t = c->text; *t != '\0'; t++ ) {
-				if ( nv->plen + 1 >= WIFI_NV_PARA ) {
-					nv->plong = TRUE;
-					return;
-				}
-				nv->para[nv->plen++] = ( *t == '\r' ) ? '\n' : *t;
+				if ( !nv_put(nv, ( *t == '\r' ) ? '\n' : *t) ) return;
 			}
 		} else if ( c->kind == TAD_ND_ELEM && c->name != NULL ) {
 			if ( knl_strcmp((CONST char *)c->name, "br") == 0 ) {
-				if ( nv->plen + 1 >= WIFI_NV_PARA ) {
-					nv->plong = TRUE;
-					return;
-				}
-				nv->para[nv->plen++] = '\n';
+				if ( !nv_put(nv, '\n') ) return;
 			} else {
 				nv_text(nv, c);
 			}
@@ -96,11 +113,18 @@ LOCAL void nv_text( NV *nv, CONST T_TADNODE *nd )
  */
 LOCAL void nv_line( NV *nv, CONST UB *s, CONST UB *e )
 {
-	UB	ln[WIFI_NV_LINE];
+	UB	*ln;
 	INT	n = 0, i, k, eq = -1;
 	BOOL	bad = FALSE;
-	CONST char *why = NULL;
 	CONST UB *s0 = s;
+
+	/* what is put in ln is never longer than the line it comes from */
+	ln = (UB *)Kmalloc((size_t)( e - s ) + 1);
+	if ( ln == NULL ) {
+		tm_printf((UB *)"wifi: nvram: no memory for a line of %d bytes\n", (INT)( e - s ));
+		nv->nomem = TRUE;
+		return;
+	}
 
 	/* the full-width ones as ASCII; anything else above ASCII stays as a mark */
 	while ( s < e ) {
@@ -129,20 +153,17 @@ LOCAL void nv_line( NV *nv, CONST UB *s, CONST UB *e )
 			bad = TRUE;
 			continue;
 		}
-		if ( n >= WIFI_NV_LINE - 1 ) {
-			bad = TRUE;
-			why = "too long";
-			break;
-		}
 		ln[n++] = c;
 	}
 	/* trimmed */
 	for ( i = 0; i < n && ln[i] == ' '; i++ ) ;
 	for ( ; n > i && ln[n - 1] == ' '; n-- ) ;
 	if ( n == i && !bad ) {
+		Kfree(ln);
 		return;				/* an empty line */
 	}
 	if ( n > i && ln[i] == '#' ) {
+		Kfree(ln);
 		return;				/* a comment */
 	}
 	for ( k = i; k < n; k++ ) {
@@ -154,10 +175,11 @@ LOCAL void nv_line( NV *nv, CONST UB *s, CONST UB *e )
 	if ( bad || eq < 0 ) {
 		nv->drop++;
 		/* said as it was written */
-		for ( n = 0; s0 + n < e && n < WIFI_NV_LINE - 1; n++ ) ln[n] = s0[n];
+		for ( n = 0; s0 + n < e; n++ ) ln[n] = s0[n];
 		ln[n] = '\0';
 		tm_printf((UB *)"wifi: nvram: \"%s\" is not a setting (%s): left out\n", ln,
-			  ( why != NULL ) ? why : bad ? "not ASCII" : "no '='");
+			  bad ? "not ASCII" : "no '='");
+		Kfree(ln);
 		return;
 	}
 	/* name = value, without the blanks around '=' */
@@ -168,6 +190,7 @@ LOCAL void nv_line( NV *nv, CONST UB *s, CONST UB *e )
 		while ( vs < n && ln[vs] == ' ' ) vs++;
 		if ( nv->len + ( ke - i ) + 1 + ( n - vs ) + 1 >= nv->max ) {
 			nv->full = TRUE;
+			Kfree(ln);
 			return;
 		}
 		knl_memcpy(nv->out + nv->len, &ln[i], (SZ)( ke - i ));
@@ -177,6 +200,7 @@ LOCAL void nv_line( NV *nv, CONST UB *s, CONST UB *e )
 		nv->len += n - vs;
 		nv->out[nv->len++] = '\n';
 	}
+	Kfree(ln);
 }
 
 /* Whether the paragraph's text starts with the note's mark (blanks before it allowed) */
@@ -197,7 +221,7 @@ LOCAL BOOL nv_note( CONST NV *nv )
  * 'max' bytes), the lines "name=value\n" and a NUL after them. Answers
  * the bytes of the lines; *p_drop (when not NULL) the lines left out as
  * not settings. E_PAR: not a document; E_LIMIT: the settings do not fit
- * in 'out', or a paragraph is too long; E_NOMEM.
+ * in 'out'; E_NOMEM.
  */
 EXPORT INT knl_wifi_nvram( CONST UB *xml, SZ len, UB *out, SZ max, INT *p_drop )
 {
@@ -228,25 +252,29 @@ EXPORT INT knl_wifi_nvram( CONST UB *xml, SZ len, UB *out, SZ max, INT *p_drop )
 	knl_memset(nv, 0, sizeof(NV));
 	nv->out = out;
 	nv->max = max;
-	for ( p = body->first; p != NULL && !nv->full && !nv->plong; p = p->next ) {
+	for ( p = body->first; p != NULL && !nv->full && !nv->nomem; p = p->next ) {
 		if ( p->kind != TAD_ND_ELEM || p->name == NULL || knl_strcmp((CONST char *)p->name, "p") != 0 ) {
 			continue;
 		}
 		nv->plen = 0;
 		nv_text(nv, p);
-		if ( nv->plong || nv_note(nv) ) {
+		if ( nv->nomem || nv_note(nv) ) {
 			continue;
 		}
 		for ( a = 0; a <= nv->plen; a = b + 1 ) {
 			for ( b = a; b < nv->plen && nv->para[b] != '\n'; b++ ) ;
 			nv_line(nv, &nv->para[a], &nv->para[b]);
-			if ( nv->full ) break;
+			if ( nv->full || nv->nomem ) break;
 		}
 	}
 	tad_free(doc);
-	if ( nv->full || nv->plong ) {
+	if ( nv->para != NULL ) {
+		Kfree(nv->para);
+	}
+	if ( nv->full || nv->nomem ) {
+		res = nv->nomem ? E_NOMEM : E_LIMIT;
 		Kfree(nv);
-		return E_LIMIT;
+		return res;
 	}
 	out[nv->len] = '\0';
 	if ( p_drop != NULL ) *p_drop = nv->drop;

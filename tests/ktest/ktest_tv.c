@@ -126,7 +126,7 @@ LOCAL struct {
 	INT	recno;
 	T_TAD	*doc;
 	UB	*xml;
-	UB	name[TAD_NAME_MAX];
+	UB	*name;			/* the whole name, its escapes undone (NULL none) */
 	BOOL	named;			/* the name has been looked for */
 	BOOL	has_name;		/* and was found */
 } tv_open_tab[OPEN_MAX];
@@ -171,6 +171,7 @@ LOCAL INT tv_slot( CONST TS_UUID *id, INT recno )
 	tv_open_tab[free].recno    = recno;
 	tv_open_tab[free].doc      = NULL;
 	tv_open_tab[free].xml      = NULL;
+	tv_open_tab[free].name     = NULL;
 	tv_open_tab[free].named    = FALSE;
 	tv_open_tab[free].has_name = FALSE;
 
@@ -192,6 +193,10 @@ LOCAL void tv_store_empty( void )
 		if ( tv_open_tab[i].xml != NULL ) {
 			Kfree(tv_open_tab[i].xml);
 		}
+		if ( tv_open_tab[i].name != NULL ) {
+			Kfree(tv_open_tab[i].name);
+		}
+		tv_open_tab[i].name = NULL;
 		tv_open_tab[i].used = FALSE;
 		tv_open_tab[i].doc = NULL;
 		tv_open_tab[i].xml = NULL;
@@ -222,24 +227,34 @@ LOCAL void uuid_path( CONST T_VOBJ *v, CONST char *tail, INT recno, char *out )
 	out[i] = 0;
 }
 
-/* The name out of the metadata: "name" is the first thing it says */
+/* What fits of a name in max bytes, cut at a whole letter; how many were put */
+LOCAL INT tv_put_name( UB *buf, INT max, CONST UB *nm )
+{
+	SZ	n = knl_utf8_fit(nm, (SZ)knl_strlen((CONST char *)nm), (SZ)( max - 1 ));
+
+	knl_memcpy(buf, nm, n);
+	buf[n] = 0;
+	return (INT)n;
+}
+
+/* The name out of the metadata: "name" is the first thing it says, read whole */
 LOCAL INT tv_name_of( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
 {
 	char	path[96];
-	UB	*meta;
-	SZ	size = 0;
-	INT	i, n = 0, slot;
+	UB	*meta, *nm = NULL;
+	SZ	size = 0, nl = 0;
+	INT	i, slot;
 
+	if ( max < 1 ) {
+		return -1;
+	}
+	buf[0] = 0;
 	slot = tv_slot(&v->target, -2);		/* -2: the metadata, not a record */
 	if ( slot >= 0 && tv_open_tab[slot].named ) {
 		if ( !tv_open_tab[slot].has_name ) {
 			return -1;
 		}
-		for ( n = 0; n < max - 1 && tv_open_tab[slot].name[n] != 0; n++ ) {
-			buf[n] = tv_open_tab[slot].name[n];
-		}
-		buf[n] = 0;
-		return n;
+		return tv_put_name(buf, max, tv_open_tab[slot].name);
 	}
 	uuid_path(v, ".json", -1, path);
 	if ( path[0] == 0 ) {
@@ -260,27 +275,31 @@ LOCAL INT tv_name_of( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
 			while ( j < (INT)size && meta[j] != '"' ) {
 				j++;		/* past the colon and the space */
 			}
-			j++;
-			while ( j < (INT)size && meta[j] != '"' && n < max - 1 ) {
-				buf[n++] = meta[j++];
-			}
+			nm = om_json_unquote(meta, j, size, &nl);	/* whole, its escapes undone */
 			break;
 		}
 	}
-	buf[n] = 0;
 	Kfree(meta);
-	if ( slot >= 0 ) {
-		INT	k;
-
-		for ( k = 0; k < n && k < TAD_NAME_MAX - 1; k++ ) {
-			tv_open_tab[slot].name[k] = buf[k];
-		}
-		tv_open_tab[slot].name[k] = 0;
-		tv_open_tab[slot].named = TRUE;
-		tv_open_tab[slot].has_name = (BOOL)( n > 0 );
+	if ( nm != NULL && nl == 0 ) {
+		Kfree(nm);
+		nm = NULL;
 	}
-
-	return ( n > 0 ) ? n : -1;
+	if ( slot >= 0 ) {
+		if ( tv_open_tab[slot].name != NULL ) {
+			Kfree(tv_open_tab[slot].name);
+		}
+		tv_open_tab[slot].name = nm;
+		tv_open_tab[slot].named = TRUE;
+		tv_open_tab[slot].has_name = (BOOL)( nm != NULL );
+	}
+	if ( nm == NULL ) {
+		return -1;
+	}
+	i = tv_put_name(buf, max, nm);
+	if ( slot < 0 ) {
+		Kfree(nm);
+	}
+	return i;
 }
 
 LOCAL T_TAD *tv_open_of( CONST T_VOBJ *v, void *arg )
@@ -1592,7 +1611,7 @@ LOCAL void test_bpk_draw( void )
 		INT	k = 0;
 
 		for ( i = 0; i < model->nrun; i++ ) {
-			T_VOBJ		v;
+			T_VOBJ		v = { .recno = 0 };
 			T_DPRECT	box;
 			INT		band, tw, w, h;
 			ID		fid = fn_system();
@@ -1604,7 +1623,7 @@ LOCAL void test_bpk_draw( void )
 			KT_ASSERT_ER(tad_lnk_get(doc, model->run[i].link, &v), E_OK);
 			band = om_band_h(&v);
 			(void)fn_set_size(fid, v.chsz);
-			tw = fn_width(fid, (CONST UB *)v.name);
+			tw = fn_width(fid, TAD_VS(v.vname));
 			w = box.right - box.left;
 			h = box.bottom - box.top;
 			tm_printf((UB *)"  link %d: %dx%d band %d name %d\n", k, w, h, band, tw);
@@ -1612,6 +1631,7 @@ LOCAL void test_bpk_draw( void )
 			/* the object closed, and the picture beside the name */
 			KT_ASSERT(h >= band);
 			KT_ASSERT(w - band - 7 >= tw);
+			tad_vobj_clear(&v);
 			k++;
 		}
 		KT_ASSERT_EQ(k, 2);
@@ -1657,7 +1677,7 @@ LOCAL void test_least( void )
 	CONST INT	want_fig[] = { 19, 37, 80, 4 };
 	CONST INT	want_doc[] = { 37, 19 };
 
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	if ( v == NULL ) return;
 
@@ -1684,7 +1704,7 @@ LOCAL void test_least( void )
 
 	/* a figure */
 	KT_ASSERT_ER(tad_parse((CONST UB *)least_fig, s_len(least_fig), NULL, &doc), E_OK);
-	if ( doc == NULL ) { Kfree(v); return; }
+	if ( doc == NULL ) { tad_vobj_clear(v); Kfree(v); return; }
 	KT_ASSERT_ER(tv_fig(doc, &f), E_OK);
 	if ( f != NULL ) {
 		for ( i = 0, k = 0; i < f->nsh; i++ ) {
@@ -1735,7 +1755,7 @@ LOCAL void test_least( void )
 	/* a text */
 	doc = NULL;
 	KT_ASSERT_ER(tad_parse((CONST UB *)least_doc, s_len(least_doc), NULL, &doc), E_OK);
-	if ( doc == NULL ) { Kfree(v); return; }
+	if ( doc == NULL ) { tad_vobj_clear(v); Kfree(v); return; }
 	KT_ASSERT_ER(tv_doc(doc, &model), E_OK);
 	if ( model != NULL ) {
 		r.left = 0;  r.top = 0;  r.right = PX_W;  r.bottom = PX_H;
@@ -1750,6 +1770,7 @@ LOCAL void test_least( void )
 		tv_doc_free(model);
 	}
 	tad_free(doc);
+	tad_vobj_clear(v);
 	Kfree(v);
 }
 
@@ -1796,7 +1817,7 @@ LOCAL void test_lid( void )
 	TS_UUID	zero;
 
 	knl_memset(&zero, 0, sizeof(zero));
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ) * 2);
+	v = (T_VOBJ *)Kcalloc(2, sizeof(T_VOBJ));
 	out = (UB *)Kmalloc(4096);
 	KT_ASSERT(v != NULL && out != NULL);
 	if ( v == NULL || out == NULL ) goto done;
@@ -1849,7 +1870,11 @@ LOCAL void test_lid( void )
 done:
 	if ( doc != NULL ) tad_free(doc);
 	if ( out != NULL ) Kfree(out);
-	if ( v != NULL ) Kfree(v);
+	if ( v != NULL ) {
+		tad_vobj_clear(v);
+		tad_vobj_clear(v + 1);
+		Kfree(v);
+	}
 }
 
 /* 検索の正規表現: where a pattern matches, its groups, and what replaces it */

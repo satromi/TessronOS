@@ -66,16 +66,18 @@ LOCAL int v_rng( void *ctx, unsigned char *out, size_t n )
 LOCAL BOOL v_find( void )
 {
 	TS_UUID	*ids = NULL;
-	T_OBREF	r;
 	INT	cnt, i;
 
 	v_have = FALSE;
 	cnt = ui_lst_obj(OB_T_DEVICE, OB_S_NET, &ids);
 	for ( i = 0; i < cnt && !v_have; i++ ) {
-		if ( ob_ref_obj(&ids[i], &r) >= E_OK && strcmp((CONST char *)r.name, "wg0") == 0 ) {
+		UB	*nm = ui_obj_name(&ids[i]);
+
+		if ( nm != NULL && strcmp((CONST char *)nm, "wg0") == 0 ) {
 			v_dev = ids[i];
 			v_have = TRUE;
 		}
+		free(nm);
 	}
 	free(ids);
 	return v_have;

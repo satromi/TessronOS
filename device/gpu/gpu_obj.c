@@ -42,12 +42,16 @@
 IMPORT T_GPUBO *knl_gpu_bo_named( INT ctx, UINT handle, INT name );	/* gpu_svc.c */
 IMPORT ER knl_gpu_bo_import( INT ctx, T_GPUBO *bo, T_GPBO *out );
 
-#define GB_MAX		1024		/* objects at once */
-#define GB_H_SHIFT	12
-
-typedef struct {
+/*
+ * The objects, as many as there are, in a list of their own under
+ * gb_lock. The handle of an opened one is a number of its own (h),
+ * never 0 and never that of another object alive, so that a handle of
+ * one gone is not taken for a new one until the numbers come round.
+ */
+typedef struct gbobj {
+	struct gbobj	*next;
 	TS_UUID	uuid;
-	UINT	gen;
+	INT	h;
 	T_GPUBO	*bo;
 	T_OBPRT	*prt;
 	ID	maker;
@@ -55,7 +59,7 @@ typedef struct {
 	BOOL	opened;
 } GBOBJ;
 
-LOCAL GBOBJ	*gb[GB_MAX];
+LOCAL GBOBJ	*gb = NULL;
 LOCAL T_SPLOCK	gb_lock;
 LOCAL UINT	gb_gen;
 
@@ -64,22 +68,52 @@ LOCAL BOOL same_uuid( CONST TS_UUID *a, CONST TS_UUID *b )
 	return (BOOL)( a->d.hi == b->d.hi && a->d.lo == b->d.lo );
 }
 
-LOCAL INT index_of( CONST TS_UUID *uuid )
+/* The object of a UUID; under the lock */
+LOCAL GBOBJ *find_of( CONST TS_UUID *uuid )
 {
-	INT	i;
+	GBOBJ	*o;
 
-	for ( i = 0; i < GB_MAX; i++ ) {
-		if ( gb[i] != NULL && same_uuid(&gb[i]->uuid, uuid) ) return i;
+	for ( o = gb; o != NULL; o = o->next ) {
+		if ( same_uuid(&o->uuid, uuid) ) return o;
 	}
-	return -1;
+	return NULL;
 }
 
+/* The object of a handle; under the lock */
 LOCAL GBOBJ *obj_of( INT h )
 {
-	INT	i = ( h & ( ( 1 << GB_H_SHIFT ) - 1 ) ) - 1;
+	GBOBJ	*o;
 
-	if ( h <= 0 || i < 0 || i >= GB_MAX || gb[i] == NULL ) return NULL;
-	return ( gb[i]->gen == ( (UINT)h >> GB_H_SHIFT ) ) ? gb[i] : NULL;
+	if ( h <= 0 ) return NULL;
+	for ( o = gb; o != NULL; o = o->next ) {
+		if ( o->h == h ) return o;
+	}
+	return NULL;
+}
+
+/* An object taken off the list; under the lock */
+LOCAL void unlink_obj( GBOBJ *o )
+{
+	GBOBJ	**pp;
+
+	for ( pp = &gb; *pp != NULL; pp = &(*pp)->next ) {
+		if ( *pp == o ) {
+			*pp = o->next;
+			o->next = NULL;
+			return;
+		}
+	}
+}
+
+/* A handle no live object has; under the lock */
+LOCAL INT new_handle( void )
+{
+	INT	h;
+
+	do {
+		h = (INT)( ( ++gb_gen ) & 0x7FFFFFFF );
+	} while ( h == 0 || obj_of(h) != NULL );
+	return h;
 }
 
 LOCAL void obj_free( GBOBJ *o )
@@ -92,24 +126,23 @@ LOCAL void obj_free( GBOBJ *o )
 LOCAL ER gb_find( CONST TS_UUID *uuid )
 {
 	UINT	imask;
-	INT	i;
+	BOOL	there;
 
 	ISpinLock(&gb_lock, &imask);
-	i = index_of(uuid);
+	there = ( find_of(uuid) != NULL );
 	ISpinUnlock(&gb_lock, &imask);
-	return ( i >= 0 ) ? E_OK : E_NOEXS;
+	return there ? E_OK : E_NOEXS;
 }
 
 LOCAL ER gb_ref( CONST TS_UUID *uuid, T_OBREF *r )
 {
 	UINT	imask;
-	INT	i;
+	BOOL	there;
 
 	ISpinLock(&gb_lock, &imask);
-	i = index_of(uuid);
+	there = ( find_of(uuid) != NULL );
 	ISpinUnlock(&gb_lock, &imask);
-	if ( i < 0 ) return E_NOEXS;
-	r->name[0] = 0;
+	if ( !there ) return E_NOEXS;
 	r->flags = OB_F_VOLATILE;
 	r->refcnt = 0;
 	r->nrec = OB_GB_NREC;
@@ -120,21 +153,21 @@ LOCAL ER gb_ref( CONST TS_UUID *uuid, T_OBREF *r )
 LOCAL ER gb_prot( CONST TS_UUID *uuid, T_OBPRT **p_prt )
 {
 	T_OBPRT	*p = knl_ob_prt_new(0, 0), *mine = NULL;
+	GBOBJ	*o;
 	UINT	imask;
-	INT	i;
 
 	if ( p == NULL ) return E_NOMEM;
 	ISpinLock(&gb_lock, &imask);
-	i = index_of(uuid);
-	if ( i >= 0 ) {
-		mine = gb[i]->prt;
+	o = find_of(uuid);
+	if ( o != NULL ) {
+		mine = o->prt;
 		p->owner = mine->owner;
 		p->group = mine->group;
 		p->mode = mine->mode;
 		p->attr = mine->attr;
 	}
 	ISpinUnlock(&gb_lock, &imask);
-	if ( i < 0 ) {
+	if ( o == NULL ) {
 		Kfree(p);
 		return E_NOEXS;
 	}
@@ -147,7 +180,6 @@ LOCAL ER gb_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	T_OBGBMAKE	mk;
 	GBOBJ		*o;
 	UINT		imask;
-	INT		i;
 	ER		er;
 
 	if ( c->arg == NULL || c->argsz < (SZ)sizeof(mk) ) {
@@ -178,32 +210,21 @@ LOCAL ER gb_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 		return E_ID;			/* not a BO of the caller's, nor a name */
 	}
 	ISpinLock(&gb_lock, &imask);
-	for ( i = 0; i < GB_MAX && gb[i] != NULL; i++ ) ;
-	if ( i < GB_MAX ) {
-		o->gen = ( ++gb_gen ) & 0x7FFFF;
-		gb[i] = o;
-	}
+	o->next = gb;
+	gb = o;
 	ISpinUnlock(&gb_lock, &imask);
-	if ( i >= GB_MAX ) {
-		obj_free(o);
-		return E_LIMIT;
-	}
 	*p_uuid = o->uuid;
 	return E_OK;
 }
 
 LOCAL ER gb_remove( CONST TS_UUID *uuid )
 {
-	GBOBJ	*o = NULL;
+	GBOBJ	*o;
 	UINT	imask;
-	INT	i;
 
 	ISpinLock(&gb_lock, &imask);
-	i = index_of(uuid);
-	if ( i >= 0 ) {
-		o = gb[i];
-		gb[i] = NULL;
-	}
+	o = find_of(uuid);
+	if ( o != NULL ) unlink_obj(o);
 	ISpinUnlock(&gb_lock, &imask);
 	if ( o == NULL ) return E_NOEXS;
 	obj_free(o);
@@ -212,16 +233,18 @@ LOCAL ER gb_remove( CONST TS_UUID *uuid )
 
 LOCAL INT gb_open( CONST TS_UUID *uuid, UINT ops )
 {
+	GBOBJ	*o;
 	UINT	imask;
-	INT	i, h = E_NOEXS;
+	INT	h = E_NOEXS;
 
 	(void)ops;
 	ISpinLock(&gb_lock, &imask);
-	i = index_of(uuid);
-	if ( i >= 0 ) {
-		gb[i]->opens++;
-		gb[i]->opened = TRUE;
-		h = (INT)( ( gb[i]->gen << GB_H_SHIFT ) | (UINT)( i + 1 ) );
+	o = find_of(uuid);
+	if ( o != NULL ) {
+		o->opens++;
+		o->opened = TRUE;
+		if ( o->h == 0 ) o->h = new_handle();
+		h = o->h;
 	}
 	ISpinUnlock(&gb_lock, &imask);
 	return h;
@@ -236,7 +259,7 @@ LOCAL ER gb_close( INT h )
 	o = obj_of(h);
 	if ( o != NULL && --o->opens <= 0 ) {
 		gone = o;
-		gb[( h & ( ( 1 << GB_H_SHIFT ) - 1 ) ) - 1] = NULL;
+		unlink_obj(o);
 	}
 	ISpinUnlock(&gb_lock, &imask);
 	if ( gone != NULL ) obj_free(gone);
@@ -300,21 +323,20 @@ LOCAL ER gb_gat( INT h, UB *json, SZ size, SZ *p_asize )
 
 LOCAL ER gb_lst( CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt )
 {
+	GBOBJ	*o, *best;
 	UINT	imask;
-	INT	cnt = 0, i;
+	INT	cnt = 0;
 
 	ISpinLock(&gb_lock, &imask);
 	while ( cnt < n ) {
-		INT	best = -1;
-
-		for ( i = 0; i < GB_MAX; i++ ) {
-			if ( gb[i] == NULL ) continue;
-			if ( cnt > 0 && ts_uuid_cmp(&gb[i]->uuid, &buf[cnt - 1]) <= 0 ) continue;
-			if ( cnt == 0 && from != NULL && ts_uuid_cmp(&gb[i]->uuid, from) <= 0 ) continue;
-			if ( best < 0 || ts_uuid_cmp(&gb[i]->uuid, &gb[best]->uuid) < 0 ) best = i;
+		best = NULL;
+		for ( o = gb; o != NULL; o = o->next ) {
+			if ( cnt > 0 && ts_uuid_cmp(&o->uuid, &buf[cnt - 1]) <= 0 ) continue;
+			if ( cnt == 0 && from != NULL && ts_uuid_cmp(&o->uuid, from) <= 0 ) continue;
+			if ( best == NULL || ts_uuid_cmp(&o->uuid, &best->uuid) < 0 ) best = o;
 		}
-		if ( best < 0 ) break;
-		buf[cnt++] = gb[best]->uuid;
+		if ( best == NULL ) break;
+		buf[cnt++] = best->uuid;
 	}
 	ISpinUnlock(&gb_lock, &imask);
 	*p_cnt = cnt;
@@ -333,8 +355,8 @@ EXPORT ER knl_gpu_bo_of_key( ID key, UINT need, T_GPUBO **p_bo )
 	T_OBKHOLD	h;
 	TS_UUID		u;
 	T_GPUBO		*bo = NULL;
+	GBOBJ		*o;
 	UINT		imask;
-	INT		i;
 	ER		er;
 
 	if ( p_bo == NULL ) return E_PAR;
@@ -347,9 +369,9 @@ EXPORT ER knl_gpu_bo_of_key( ID key, UINT need, T_GPUBO **p_bo )
 		er = E_OACV;
 	} else {
 		ISpinLock(&gb_lock, &imask);
-		i = index_of(&u);
-		if ( i >= 0 && gb[i]->bo != NULL ) {
-			bo = gb[i]->bo;
+		o = find_of(&u);
+		if ( o != NULL && o->bo != NULL ) {
+			bo = o->bo;
 			knl_gpu_bo_get(bo);
 		}
 		ISpinUnlock(&gb_lock, &imask);
@@ -360,23 +382,20 @@ EXPORT ER knl_gpu_bo_of_key( ID key, UINT need, T_GPUBO **p_bo )
 	return er;
 }
 
+/* The objects the process made and nobody opened, gone with it: one at a time, each freed with the lock let go */
 EXPORT void knl_gpbo_prc_end( ID pid )
 {
-	INT	i;
+	GBOBJ	*o;
+	UINT	imask;
 
 	if ( pid <= 0 ) return;
-	for ( i = 0; i < GB_MAX; i++ ) {
-		GBOBJ	*o = NULL;
-		UINT	imask;
-
+	do {
 		ISpinLock(&gb_lock, &imask);
-		if ( gb[i] != NULL && !gb[i]->opened && gb[i]->maker == pid ) {
-			o = gb[i];
-			gb[i] = NULL;
-		}
+		for ( o = gb; o != NULL && ( o->opened || o->maker != pid ); o = o->next ) ;
+		if ( o != NULL ) unlink_obj(o);
 		ISpinUnlock(&gb_lock, &imask);
 		if ( o != NULL ) obj_free(o);
-	}
+	} while ( o != NULL );
 }
 
 LOCAL CONST T_OBMGR gb_mgr = {
@@ -401,13 +420,10 @@ EXPORT ER knl_gpbo_init( void )
 
 /* ---------------------------------------------------------------- the GPU's device object */
 
-#define GD_DETAIL	768
-#define GD_TEXT		( GD_DETAIL + 160 )
-
 LOCAL CONST TS_UUID	gd_uuid = OB_UUID_GPU_INIT;
 LOCAL T_SPLOCK		gd_lock;
 LOCAL volatile BOOL	gd_added;
-LOCAL UB		gd_detail[GD_DETAIL];
+LOCAL UB		*gd_detail = NULL;	/* the backend's lines, as long as it gave them (Kmalloc) */
 LOCAL INT		gd_dlen;
 
 LOCAL CONST char *gd_kind( UINT kind )
@@ -421,13 +437,14 @@ LOCAL CONST char *gd_kind( UINT kind )
 	return "unknown";
 }
 
-/* Record 1 whole: what the common layer knows, then the backend's lines */
-LOCAL INT gd_build( UB *t, INT max )
+/* Record 1 whole: what the common layer knows, then the backend's lines; -1 when it does not fit in max */
+LOCAL INT gd_build( void *ctx, UB *t, INT max )
 {
 	T_GPUINFO	info;
 	UINT		imask;
 	INT		n = 0, d;
 
+	(void)ctx;
 	if ( knl_gpu_ref(&info) >= E_OK ) {
 		n = knl_oj_put(t, n, max, "BACKEND registered\nKIND ");
 		n = knl_oj_put(t, n, max, gd_kind(info.kind));
@@ -437,9 +454,14 @@ LOCAL INT gd_build( UB *t, INT max )
 	} else {
 		n = knl_oj_put(t, n, max, "BACKEND none\n");
 	}
+	if ( n < 0 ) {
+		return -1;
+	}
 	ISpinLock(&gd_lock, &imask);
 	d = gd_dlen;
-	if ( n + d <= max ) {
+	if ( n + d > max ) {
+		n = -1;			/* made again in more room */
+	} else if ( d > 0 ) {
 		knl_memcpy(t + n, gd_detail, d);
 		n += d;
 	}
@@ -457,27 +479,27 @@ LOCAL INT gd_text( void *ctx, UB *t, INT n, INT max )
 
 LOCAL ER gd_rea( void *ctx, UD *pos, INT recno, D off, void *buf, SZ size, SZ *p_asize )
 {
-	UB	t[GD_TEXT];
+	UB	*t;
 	INT	n;
 	SZ	k;
 
 	(void)ctx;
 	(void)pos;
 	if ( recno != OB_GP_STATE ) return E_NOEXS;
-	n = gd_build(t, GD_TEXT);
+	n = knl_oj_make(gd_build, NULL, &t);
+	if ( n < 0 ) return (ER)n;
 	k = ( off >= 0 && off < n ) ? n - off : 0;
 	if ( size >= 0 && k > size ) k = size;
 	if ( size > 0 && k > 0 ) knl_memcpy(buf, t + off, (INT)k);
 	if ( p_asize != NULL ) *p_asize = ( size == 0 ) ? n : k;
+	Kfree(t);
 	return E_OK;
 }
 
 LOCAL UD gd_size( void *ctx, INT recno )
 {
-	UB	t[GD_TEXT];
-
 	(void)ctx;
-	return ( recno == OB_GP_STATE ) ? (UD)gd_build(t, GD_TEXT) : 0;
+	return ( recno == OB_GP_STATE ) ? knl_oj_make_len(gd_build, NULL) : 0;
 }
 
 LOCAL CONST T_OBDVOPS	gd_ops = { OB_S_GPU, "gpu", OB_GP_NREC, 0644, 0, 0, gd_text, NULL, gd_rea, NULL, gd_size, NULL };
@@ -497,15 +519,26 @@ EXPORT void knl_gpu_obj_told( void )
 	if ( gd_added ) knl_obdev_post(&gd_uuid, OB_GP_STATE, OB_E_CHANGE, NULL);
 }
 
+/* The backend's lines, however long: a copy of their own put in place of the ones before */
 EXPORT void knl_gpu_obj_detail( CONST UB *text, INT len )
 {
+	UB	*c = NULL, *old;
 	UINT	imask;
 
 	if ( len < 0 ) len = 0;
-	if ( len > GD_DETAIL ) len = GD_DETAIL;
+	if ( len > 0 ) {
+		c = (UB *)Kmalloc((SZ)len);
+		if ( c == NULL ) {
+			tm_printf((UB *)"gpu: no memory for the %d bytes of the backend's lines: those before stay\n", len);
+			return;
+		}
+		knl_memcpy(c, text, len);
+	}
 	ISpinLock(&gd_lock, &imask);
-	knl_memcpy(gd_detail, text, len);
+	old = gd_detail;
+	gd_detail = c;
 	gd_dlen = len;
 	ISpinUnlock(&gd_lock, &imask);
+	if ( old != NULL ) Kfree(old);
 	knl_gpu_obj_told();
 }

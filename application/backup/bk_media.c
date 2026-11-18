@@ -25,6 +25,7 @@
 
 #include "bk.h"
 #include "bk_vol.h"
+#include <ts/ui.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,17 +62,22 @@ LOCAL BOOL mounted_at( const TS_UUID *obj, const char *dev, char *dir, INT max )
 LOCAL void boot_name( char *out, INT max, TS_UUID *p_obj )
 {
 	T_FSMNT	*mt;
-	T_OBREF	r;
+	UB	*nm;
 	INT	n = fs_mounts(NULL, 0), got, i;
 
 	snprintf(out, (size_t)max, "起動ディスク");
 	if ( n <= 0 || ( mt = (T_FSMNT *)malloc(sizeof(T_FSMNT) * (size_t)( n + 4 )) ) == NULL ) return;
 	got = fs_mounts(mt, n + 4);
 	for ( i = 0; i < got && i < n + 4; i++ ) {
-		if ( strcmp((const char *)mt[i].path, "/boot") == 0 && ob_ref_obj(&mt[i].obj, &r) >= E_OK && r.name[0] != 0 ) {
-			snprintf(out, (size_t)max, "%s（起動ディスク）", (const char *)r.name);
-			*p_obj = mt[i].obj;
-			break;
+		if ( strcmp((const char *)mt[i].path, "/boot") == 0 && ( nm = ui_obj_name(&mt[i].obj) ) != NULL ) {
+			BOOL	named = ( nm[0] != 0 );
+
+			if ( named ) {
+				snprintf(out, (size_t)max, "%s（起動ディスク）", (const char *)nm);
+				*p_obj = mt[i].obj;
+			}
+			free(nm);
+			if ( named ) break;
 		}
 	}
 	free(mt);
@@ -119,14 +125,24 @@ EXPORT INT bk_media_list( BKMEDIA **p_m )
 		for ( i = 0; i < cnt; i++ ) {
 			/* the device manager lists every kind of device */
 			if ( ob_ref_obj(&ids[i], &r) < E_OK || r.sub != OB_S_DISK ) continue;
+			/* the disk's name, whole: a T-Kernel device's */
+			UB	*dn = ui_obj_name(&ids[i]);
+			BOOL	held;
+
+			if ( dn == NULL ) continue;
 			/* a disk the system holds for itself is not offered */
-			if ( mounted_at(&ids[i], (const char *)r.name, dir, sizeof(dir))
-			  && strncmp(dir, FS_MEDIA_DIR "/", strlen(FS_MEDIA_DIR) + 1) != 0 ) continue;
-			if ( !media_room(&m, &cap, n + 1) ) break;
+			held = ( mounted_at(&ids[i], (const char *)dn, dir, sizeof(dir))
+			  && strncmp(dir, FS_MEDIA_DIR "/", strlen(FS_MEDIA_DIR) + 1) != 0 );
+			if ( held || !media_room(&m, &cap, n + 1) ) {
+				free(dn);
+				if ( held ) continue;
+				break;
+			}
 			memset(&m[n], 0, sizeof(BKMEDIA));
 			m[n].kind = BK_MED_DIR;
 			m[n].obj = ids[i];
-			strncpy(m[n].dev, (const char *)r.name, sizeof(m[n].dev) - 1);
+			strncpy(m[n].dev, (const char *)dn, sizeof(m[n].dev) - 1);
+			free(dn);
 			snprintf(m[n].label, sizeof(m[n].label), "%s", m[n].dev);
 			n++;
 		}

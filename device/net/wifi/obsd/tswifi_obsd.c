@@ -104,10 +104,11 @@
 #include "tsw_drv.h"
 
 #define TSW_FRAME	1514
-#define TSW_IE_MAX	256
-#define TSW_EV_BODY	512
-#define TSW_NEV		8
-#define TSW_NAPS	128
+#define TSW_ELEM_MAX	257	/* an element: its id, its length and 255 bytes (IEEE 802.11-2020 9.4.2.1) */
+#define TSW_IE_MAX	( 3 * TSW_ELEM_MAX )	/* an access point's RSN, RSNXE and WPA elements */
+#define TSW_EV_BODY	2304	/* a management frame's body (WPAG_SAE_MAX: wifi.c has the same layout) */
+#define TSW_NEV		8	/* the first room for events; twice as much each time it fills */
+#define TSW_NAPS	128	/* the first room for the access points' elements */
 #define RXS_SEC		10	/* how often the counts of what was received are looked at */
 
 #ifndef IEEE80211_AUTH_ALG_SAE
@@ -254,17 +255,39 @@ static int	run_seen;
 
 /* ---------------------------------------------------------------- the events */
 
-static struct tswifi_ev	*evq;
+static struct tswifi_ev	*evq;	/* a ring of nev, made twice as large when it fills */
+static unsigned int	nev;
 static unsigned int	ev_head, ev_tail;
 
+/*
+ * The place of a new event; with the ring full a ring twice as large
+ * is made (the layer's lock is held: it may not sleep) and the events
+ * waiting moved into it in their order. NULL when there is no memory.
+ */
 static struct tswifi_ev *
 ev_put(int type, const uint8_t *bssid)
 {
-	struct tswifi_ev *ev;
+	struct tswifi_ev *ev, *q;
+	unsigned int i, n;
 
-	if (evq == NULL || ev_tail - ev_head >= TSW_NEV)
+	if (evq == NULL)
 		return NULL;
-	ev = &evq[ev_tail % TSW_NEV];
+	if (ev_tail - ev_head >= nev) {
+		q = malloc(sizeof(*q) * nev * 2, M_DEVBUF, M_NOWAIT | M_ZERO);
+		if (q == NULL) {
+			printf("wifi: no memory for %u events: one is lost\n", nev * 2);
+			return NULL;
+		}
+		n = ev_tail - ev_head;
+		for (i = 0; i < n; i++)
+			q[i] = evq[(ev_head + i) % nev];
+		free(evq, M_DEVBUF, sizeof(*evq) * nev);
+		evq = q;
+		nev *= 2;
+		ev_head = 0;
+		ev_tail = n;
+	}
+	ev = &evq[ev_tail % nev];
 	memset(ev, 0, sizeof(*ev));
 	ev->type = type;
 	memcpy(ev->bssid, bssid, IEEE80211_ADDR_LEN);
@@ -286,7 +309,7 @@ rump_tswifi_event(struct tswifi_ev *out)
 
 	obsd_lock();
 	if (evq != NULL && ev_head != ev_tail) {
-		*out = evq[ev_head % TSW_NEV];
+		*out = evq[ev_head % nev];
 		ev_head++;
 		got = 1;
 	}
@@ -303,14 +326,56 @@ struct ap_ies {
 	uint8_t		ie[TSW_IE_MAX];
 };
 
-static struct ap_ies	*aps;
+static struct ap_ies	*aps;	/* naps places; one not seen has seen 0 */
+static int		naps;
+
+/*
+ * The place for an access point's elements: its own, a free one, one
+ * of an access point the layer no longer has a node of (it cannot be
+ * chosen), else one of the table made twice as large. NULL when there
+ * is no memory: the elements are not kept, and none of another access
+ * point is lost for them.
+ */
+static struct ap_ies *
+aps_place(const uint8_t *bssid)
+{
+	struct ap_ies *a, *t, *gone = NULL, *free_one = NULL;
+	int i;
+
+	for (i = 0; i < naps; i++) {
+		a = &aps[i];
+		if (a->seen != 0 && IEEE80211_ADDR_EQ(a->bssid, bssid))
+			return a;
+		if (a->seen == 0) {
+			if (free_one == NULL)
+				free_one = a;
+		} else if (gone == NULL && tsw_ic != NULL && ieee80211_find_node(tsw_ic, a->bssid) == NULL) {
+			gone = a;
+		}
+	}
+	if (free_one != NULL)
+		return free_one;
+	if (gone != NULL)
+		return gone;
+	t = malloc(sizeof(*t) * naps * 2, M_DEVBUF, M_NOWAIT | M_ZERO);
+	if (t == NULL) {
+		printf("wifi: no memory for the elements of %d access points\n", naps * 2);
+		return NULL;
+	}
+	memcpy(t, aps, sizeof(*t) * naps);
+	free(aps, M_DEVBUF, sizeof(*aps) * naps);
+	aps = t;
+	a = &aps[naps];
+	naps *= 2;
+	return a;
+}
 
 static void
 aps_take(const uint8_t *bssid, const uint8_t *frm, const uint8_t *efrm)
 {
-	struct ap_ies *a, *old = NULL;
+	struct ap_ies *a;
 	uint8_t buf[TSW_IE_MAX];
-	int n = 0, i;
+	int n = 0;
 
 	if (aps == NULL)
 		return;
@@ -333,15 +398,9 @@ aps_take(const uint8_t *bssid, const uint8_t *frm, const uint8_t *efrm)
 		}
 		frm += 2 + frm[1];
 	}
-	for (i = 0; i < TSW_NAPS; i++) {
-		a = &aps[i];
-		if (IEEE80211_ADDR_EQ(a->bssid, bssid))
-			break;
-		if (old == NULL || a->seen < old->seen)
-			old = a;
-	}
-	if (i == TSW_NAPS)
-		a = old;	/* the one heard longest ago gives its place */
+	a = aps_place(bssid);
+	if (a == NULL)
+		return;
 	memcpy(a->bssid, bssid, IEEE80211_ADDR_LEN);
 	a->seen = obsd_hc_nsec();
 	memcpy(a->ie, buf, n);
@@ -355,7 +414,7 @@ aps_find(const uint8_t *bssid)
 
 	if (aps == NULL)
 		return NULL;
-	for (i = 0; i < TSW_NAPS; i++) {
+	for (i = 0; i < naps; i++) {
 		if (aps[i].seen != 0 && IEEE80211_ADDR_EQ(aps[i].bssid, bssid))
 			return &aps[i];
 	}
@@ -881,7 +940,9 @@ rump_tswifi_start(uint8_t *mac)
 	obsd_init();
 	obsd_lock();
 	evq = malloc(sizeof(*evq) * TSW_NEV, M_DEVBUF, M_WAITOK | M_ZERO);
+	nev = TSW_NEV;
 	aps = malloc(sizeof(*aps) * TSW_NAPS, M_DEVBUF, M_WAITOK | M_ZERO);
+	naps = TSW_NAPS;
 	ic = obsd_sim_attach();
 	if (evq == NULL || aps == NULL || ic == NULL) {
 		obsd_unlock();
@@ -895,7 +956,9 @@ rump_tswifi_start(uint8_t *mac)
 	obsd_init();
 	obsd_lock();
 	evq = malloc(sizeof(*evq) * TSW_NEV, M_DEVBUF, M_WAITOK | M_ZERO);
+	nev = TSW_NEV;
 	aps = malloc(sizeof(*aps) * TSW_NAPS, M_DEVBUF, M_WAITOK | M_ZERO);
+	naps = TSW_NAPS;
 	if (evq == NULL || aps == NULL) {
 		obsd_unlock();
 		return ENOMEM;
@@ -920,7 +983,9 @@ rump_tswifi_start(uint8_t *mac)
 	obsd_init();
 	obsd_lock();
 	evq = malloc(sizeof(*evq) * TSW_NEV, M_DEVBUF, M_WAITOK | M_ZERO);
+	nev = TSW_NEV;
 	aps = malloc(sizeof(*aps) * TSW_NAPS, M_DEVBUF, M_WAITOK | M_ZERO);
+	naps = TSW_NAPS;
 	memset(&pa, 0, sizeof(pa));
 	pa.pa_dmat = &obsd_dma_tag;
 	pa.pa_bus = bus;

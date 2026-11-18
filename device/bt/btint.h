@@ -18,17 +18,21 @@
 #ifndef __BTINT_H__
 #define __BTINT_H__
 
-#define RING_N			32
-#define RING_LEN		( 300 )
-#define NPEER			8
-#define NFOUND			BT_FOUND_MAX
-#define NQCMD			16
+/*
+ * What comes from the controller waits in a ring of bytes, each item a
+ * head of four bytes (its kind, its length in 24 bits) and its bytes. The
+ * ring starts at RING_FIRST and is doubled by the controller's task once
+ * it is half full; RING_LIMIT is what it may take, so that a controller
+ * gone wrong does not take all the memory: past it what does not fit is
+ * counted and said on the console.
+ */
+#define RING_FIRST		( 16 * 1024 )
+#define RING_LIMIT		( 1024 * 1024 )
+#define RING_SEM_MAX		0x7fffffff	/* the ring's semaphore counts every item */
+#define HCI_PARAM_MAX		255	/* a command's parameters: their length is one byte (Core 5.4 Vol 4 Part E 5.4.1) */
 #define L2_MTU			672
-#define TX_N			16	/* L2CAP frames waiting for the controller's room */
-#define TX_MAX			1100
-
-#define HID_RD_MAX		1024
-#define SDP_BUF			1400
+#define TX_PACE			15	/* frames waiting past which a stream waits for the controller (knl_btx_tx_room) */
+#define ATT_VAL_MAX		512	/* an attribute's value (Core 5.4 Vol 3 Part F 3.2.9) */
 
 /* Commands: ogf << 10 | ocf */
 #define C_DISCONNECT		0x0406
@@ -80,21 +84,20 @@ typedef struct {
 	INT	bm_off, bm_min, bm_n;	/* a bit for each usage from bm_min, -1 none */
 } KBDLAY;
 
-typedef struct {
-	UB	len_hi;			/* unused room kept with the bytes */
-	UB	kind;			/* 0 event, 1 ACL */
-	UH	len;
-	UB	b[RING_LEN];
-} RINGITEM;
+/* The kinds of what comes in the ring */
+#define RK_EVENT		0
+#define RK_ACL			1
+#define RK_SCO			2
 
 /* A device that was paired, or is being; its object keeps it across a restart */
 typedef struct {
 	BOOL	used;
+	INT	idx;			/* its place in the controller's table, which does not change */
 	UB	addr[6];
 	UB	key[16];
 	BOOL	have_key;
 	UW	cod;
-	UB	name[32];
+	UB	name[BT_NAME_MAX + 1];
 	/* connected */
 	UH	handle;			/* 0xffff none */
 	BOOL	up;
@@ -112,9 +115,10 @@ typedef struct {
 	UH	sdp_tid;
 	UW	sdp_due;		/* when to stop waiting, in the low word of the operating time */
 	INT	sdp_got;
-	UB	sdp_buf[SDP_BUF];
-	UB	rd[HID_RD_MAX];		/* its report descriptor, kept while the machine is on */
-	INT	rdlen;
+	UB	*sdp_buf;		/* the answer of its service records, as long as it comes */
+	INT	sdp_cap;
+	UB	*rd;			/* its report descriptor, kept while the machine is on */
+	INT	rdlen, rd_cap;
 	KBDLAY	lay;
 	UB	acl[L2_MTU + 8];	/* an L2CAP frame coming in pieces */
 	INT	acl_have, acl_want;
@@ -142,6 +146,7 @@ typedef struct {
 	UH	mtu_x[NCIDX];		/* and what it takes on each */
 	UB	cfgx_in, cfgx_out;	/* a bit for each: config answered that way */
 	UB	x_on;			/* and told up */
+	void	*bap;			/* its LE Audio services (bt_bap.c), NULL none yet */
 } PEER;
 
 /*
@@ -160,8 +165,11 @@ typedef struct {
 	UH	ediv;
 	UB	has_irk, audio;
 	UB	irk[16];
+	/* its whole name: name above has as much of it as fits, for a kernel of the forms before */
+	UB	lname[BT_NAME_MAX + 1];
 } T_BTKEPT;
 #define BTKEPT_OLD_SIZE		60	/* its size before the LE fields */
+#define BTKEPT_LE_SIZE		offsetof(T_BTKEPT, lname)	/* and before the whole name */
 
 /*
  * What is known of a device found, beside its T_BTFOUND: where it was
@@ -174,6 +182,29 @@ typedef struct {
 #define FH_LEAUDIO		0x10	/* it says it serves LE Audio: ASCS, PACS or CAS */
 #define FH_AUDIO		0x20	/* its appearance is one of sound: an audio sink, earphones */
 #define FH_NAMED		0x40	/* its name has been asked of it (Remote Name Request) */
+
+typedef struct {
+	T_BTFOUND	f;
+	UB		hint;		/* FH_* */
+	UB		note;		/* BT_NOTE_*: what became of a try with it */
+	UB		psrm;		/* its page scan repetition mode, from the inquiry */
+	UH		clk;		/* and its clock offset */
+} BTFOUND;
+
+/* A command waiting its turn, and an L2CAP frame waiting for the controller's room */
+typedef struct btcmdq {
+	struct btcmdq	*next;
+	INT		n;
+	UB		b[3];		/* the opcode and the length, then the parameters: n in all */
+} BTCMDQ;
+
+typedef struct btframe {
+	struct btframe	*next;
+	UH		handle;
+	BOOL		le;
+	INT		n;
+	UB		b[4];		/* the L2CAP header, then the rest: n in all */
+} BTFRAME;
 
 /*
  * How the controller is reached: on USB (bt.c), or on a UART in H4
@@ -190,6 +221,7 @@ typedef struct {
 	BOOL	(*prep)( struct bt_ctl *c );
 	ER	(*iso)( struct bt_ctl *c, UB *b, INT n );	/* an ISO data packet, NULL where none can go */
 	ER	(*sco)( struct bt_ctl *c, UB *b, INT n );	/* an SCO data packet on the HCI, NULL where none can go */
+	void	(*rx_size)( struct bt_ctl *c, INT n );	/* the longest packet the controller sends is n bytes; NULL nothing to do */
 } BTTRANS;
 
 /* Where a voice link's packets go (knl_bth_way) */
@@ -205,12 +237,18 @@ typedef struct bt_ctl {
 	USBEP		ep_out;
 	BOOL		gone;
 	ID		sem, tsk;
-	RINGITEM	ring[RING_N];
-	volatile UW	head, tail;
-	UB		ev[260];	/* an event coming in pieces */
+	T_SPLOCK	rlk;		/* the ring's writers, and its growing */
+	UB		*rb;		/* the ring: items of a head and their bytes */
+	UW		rcap;		/* its bytes, a power of two */
+	volatile UW	head, tail;	/* where its items are, in bytes, running on past rcap */
+	volatile BOOL	rgrow;		/* half full: the task makes it bigger */
+	volatile UW	rlost;		/* items that did not fit */
+	UB		*ri;		/* the item taken out of it, whole */
+	INT		ri_cap;
+	UB		ev[2 + 255];	/* an event coming in pieces: its length is one byte */
 	INT		ev_have;
-	UB		acl[1100];	/* and a piece of ACL data */
-	INT		acl_have;
+	UB		*acl;		/* and an ACL packet, as long as its header says */
+	INT		acl_have, acl_cap;
 	/* the start */
 	INT		step;
 	BOOL		ready;
@@ -221,10 +259,8 @@ typedef struct bt_ctl {
 	UB		sco_mtu;	/* the data of one SCO packet on the HCI (Read Buffer Size) */
 	UH		sco_num;	/* and the packets it holds */
 	BOOL		sco_hci;	/* its SCO goes to the host on the HCI, not to pins of its own (bt_bcm.c) */
-	/* what a command waiting its turn will say: a small queue */
-	UB		q[NQCMD][64];
-	UB		qn[NQCMD];
-	INT		qh, qt;
+	/* the commands waiting their turn, in order */
+	BTCMDQ		*q_first, *q_last;
 	UB		addr[6];
 	BOOL		intel;
 	UB		addr_status;	/* what asking its address answered */
@@ -239,12 +275,15 @@ typedef struct bt_ctl {
 	BOOL		scanning;	/* a search: the inquiry, then the names it did not tell */
 	BOOL		inq_on;		/* the inquiry itself */
 	UW		scan_at;	/* when the scan was asked of the controller (ms) */
-	INT		nfound;
-	T_BTFOUND	found[NFOUND];
-	UB		found_hint[NFOUND];	/* FH_* */
-	UB		found_note[NFOUND];	/* BT_NOTE_*: what became of a try with it */
-	UB		found_psrm[NFOUND];	/* its page scan repetition mode, from the inquiry */
-	UH		found_clk[NFOUND];	/* and its clock offset */
+	/*
+	 * The devices the search found, as many as it finds. Each is room
+	 * of its own, never let go: a new search uses them again. The table
+	 * is made anew twice as big when full, the old one kept, so that a
+	 * reader in another task that took nfound and then found stays in it.
+	 */
+	volatile INT	nfound;
+	BTFOUND		* volatile *found;
+	INT		found_cap, found_made;
 	BOOL		naming;		/* a Remote Name Request of the search is out */
 	UB		name_addr[6];
 	UW		name_due;
@@ -252,18 +291,18 @@ typedef struct bt_ctl {
 	BOOL		fb_on;
 	UH		fb_handle;
 	UB		fb_addr[6];
-	UB		fb_name[32];
-	PEER		peer[NPEER];
+	UB		fb_name[BT_NAME_MAX + 1];
+	/* the devices paired or being, grown as the found ones are */
+	volatile INT	npeer;
+	PEER		* volatile *peer;
+	INT		peer_cap;
 	/* what goes out: frames in order, as the controller has room for their packets */
 	UH		acl_len, le_len;	/* the data of one packet */
 	INT		acl_room, le_room;	/* the packets it can hold now */
-	struct {
-		UH	handle;
-		BOOL	le;
-		INT	n;
-		UB	b[TX_MAX];
-	}		tx[TX_N];
-	INT		tx_h, tx_t, tx_off;
+	BTFRAME		*tx_first, *tx_last;
+	INT		tx_count, tx_off;
+	UB		*txp;		/* one packet going out */
+	INT		txp_cap;
 	/* LE */
 	BOOL		le_scan_on, le_scan_active;
 	BOOL		le_user_scan;
@@ -285,8 +324,8 @@ typedef struct bt_ctl {
 IMPORT BOOL same_bt_bytes( CONST void *a, CONST void *b, INT n );
 
 /* bt.c */
-IMPORT void knl_btx_cmd( BTC *c, UH op, CONST UB *p, INT n );
-IMPORT void knl_btx_l2_send( BTC *c, PEER *p, UH cid, CONST UB *data, INT n );
+IMPORT ER   knl_btx_cmd( BTC *c, UH op, CONST UB *p, INT n );	/* E_PAR past HCI_PARAM_MAX */
+IMPORT ER   knl_btx_l2_send( BTC *c, PEER *p, UH cid, CONST UB *data, INT n );
 IMPORT BOOL knl_btx_tx_room( BTC *c, INT frames );
 IMPORT void knl_btx_tx_pump( BTC *c );
 IMPORT void knl_btx_sig_send( BTC *c, PEER *p, UB code, UB ident, CONST UB *d, INT n );
@@ -295,10 +334,15 @@ IMPORT PEER *knl_btx_peer_new( BTC *c, CONST UB *a );
 IMPORT ER   knl_btx_keep( PEER *p );
 IMPORT void knl_btx_rd_layout( CONST UB *rd, INT n, KBDLAY *l );
 IMPORT void knl_btx_report_in( PEER *p, CONST UB *r, INT m );
-IMPORT T_BTFOUND *knl_btx_found_add( BTC *c, CONST UB *addr, UW cod, CONST UB *name, INT nlen );
+IMPORT BTFOUND *knl_btx_found_add( BTC *c, CONST UB *addr, UW cod, CONST UB *name, INT nlen );	/* NULL only with no memory for it */
 IMPORT void knl_btx_le_unused( BTC *c, PEER *p, BOOL lea );
 IMPORT UW   knl_btx_now( void );
 IMPORT void knl_btx_ring_in( BTC *c, UB kind, CONST UB *b, INT len );
+IMPORT BOOL knl_btx_ring_make( BTC *c );	/* FALSE: no room for it */
+IMPORT BOOL knl_btx_ring_take( BTC *c, UB *p_kind, CONST UB **p_b, INT *p_len );
+IMPORT void knl_btx_ring_grow( BTC *c );
+IMPORT BOOL knl_btx_rd_room( PEER *p, INT n );	/* room for n bytes of its descriptor */
+IMPORT BTFOUND *knl_btx_found_at( BTC *c, CONST UB *addr );
 IMPORT BTC  *knl_btx_open( CONST BTTRANS *tr, void *ctx );
 IMPORT BTC  *knl_btx_ctl( void );		/* the controller in use, NULL none: for the tests */
 

@@ -81,7 +81,7 @@
 #define FLG_END			0x0002	/* the backend says the running job is over */
 #define FLG_DONE		0x0004	/* a fence is over */
 
-#define NFAILED			16	/* failed fences remembered */
+#define FAILED_FIRST		16	/* the first room for the runs of failed fences */
 
 /*
  * A process's view of a BO: uncached, read and write, never executed
@@ -135,8 +135,19 @@ LOCAL D			fence_run;	/* that job's, while q_running */
 LOCAL UD		n_wait_run, n_wait_queued;	/* waits that slept, on a running job, on queued ones */
 LOCAL D			fence_next;	/* last fence handed out */
 LOCAL volatile D	fence_done;	/* last fence that is over */
-LOCAL D			failed[NFAILED];
-LOCAL INT		failed_at;
+/*
+ * The fences whose jobs failed, every one, as runs of fences in a row
+ * (a reset fails the jobs queued with it together), in the order of the
+ * fences. Added to by the task alone; the table is made larger outside
+ * the lock and put in place under it.
+ */
+typedef struct {
+	D	first, last;
+} FRUN;
+
+LOCAL FRUN		failed_first[FAILED_FIRST];	/* the first room, so that a few cost no memory */
+LOCAL FRUN		*failed = failed_first;
+LOCAL INT		nfailed = 0, failed_cap = FAILED_FIRST;
 LOCAL volatile ER	end_result;	/* what the backend said of the running job */
 LOCAL UINT		bound_bos;	/* live BOs in the backend's MMU */
 LOCAL UINT		live_as;	/* address spaces of the backend's that are alive */
@@ -469,14 +480,52 @@ EXPORT void knl_gpu_bo_kunmap( T_GPUBO *bo, void *va )
 
 /* ---------------------------------------------------------------- fences */
 
+/* Whether the job of a fence failed; under the lock */
 LOCAL BOOL fence_failed( D fence )
 {
-	INT	i;
+	INT	lo = 0, hi = nfailed - 1, mid;
 
-	for ( i = 0; i < NFAILED; i++ ) {
-		if ( failed[i] == fence ) return TRUE;
+	while ( lo <= hi ) {
+		mid = ( lo + hi ) / 2;
+		if ( fence < failed[mid].first ) {
+			hi = mid - 1;
+		} else if ( fence > failed[mid].last ) {
+			lo = mid + 1;
+		} else {
+			return TRUE;
+		}
 	}
 	return FALSE;
+}
+
+/*
+ * Room for one more run of failed fences, made by the task before it
+ * takes the lock (it alone adds to the table); FALSE when there is no
+ * memory, said on the console: a wait for that fence then sees it over
+ */
+LOCAL BOOL failed_room( void )
+{
+	FRUN	*t, *old;
+	UINT	imask;
+	INT	cap;
+
+	if ( nfailed < failed_cap ) {
+		return TRUE;
+	}
+	cap = failed_cap * 2;
+	t = (FRUN *)Kmalloc(sizeof(FRUN) * (SZ)cap);
+	if ( t == NULL ) {
+		tm_printf((UB *)"gpu: no memory to remember %d failed jobs: a wait may see one as done\n", cap);
+		return FALSE;
+	}
+	ISpinLock(&gpu_lock, &imask);
+	if ( nfailed > 0 ) knl_memcpy(t, failed, sizeof(FRUN) * (SZ)nfailed);
+	old = failed;
+	failed = t;
+	failed_cap = cap;
+	ISpinUnlock(&gpu_lock, &imask);
+	if ( old != failed_first ) Kfree(old);
+	return TRUE;
 }
 
 EXPORT D knl_gpu_done( void )
@@ -595,13 +644,18 @@ EXPORT void knl_gpu_wait_counts( UD *p_running, UD *p_queued )
 
 EXPORT ER knl_gpu_wait( D fence, TMO_U tmout )
 {
+	UINT	imask;
+	BOOL	bad;
 	ER	er;
 
 	if ( fence <= 0 || fence > fence_next || gpu_flg <= 0 ) return E_PAR;
 	if ( tmout != TMO_POL ) boost_queued(fence, NULL, TRUE);
 	er = wait_until(fence_reached, &fence, tmout);
 	if ( er < E_OK ) return er;
-	return fence_failed(fence) ? E_IO : E_OK;
+	ISpinLock(&gpu_lock, &imask);
+	bad = fence_failed(fence);
+	ISpinUnlock(&gpu_lock, &imask);
+	return bad ? E_IO : E_OK;
 }
 
 LOCAL BOOL bo_idle( void *arg )
@@ -838,6 +892,7 @@ LOCAL void gpu_task( INT stacd, void *exinf )
 		QJOB	*q;
 		UINT	ptn, imask;
 		INT	i;
+		BOOL	room;
 		ER	er;
 
 		tk_wai_flg(gpu_flg, FLG_JOB, TWF_ORW | TWF_BITCLR, &ptn, TMO_FEVR);
@@ -854,11 +909,16 @@ LOCAL void gpu_task( INT stacd, void *exinf )
 			if ( q == NULL ) break;
 
 			er = run_job(q);
+			room = ( er < E_OK ) ? failed_room() : FALSE;
 
 			ISpinLock(&gpu_lock, &imask);
 			if ( er < E_OK ) {
-				failed[failed_at] = q->fence;
-				failed_at = ( failed_at + 1 ) % NFAILED;
+				if ( nfailed > 0 && failed[nfailed - 1].last + 1 == q->fence ) {
+					failed[nfailed - 1].last = q->fence;
+				} else if ( room ) {
+					failed[nfailed].first = failed[nfailed].last = q->fence;
+					nfailed++;
+				}
 			}
 			for ( i = 0; i < q->nbo; i++ ) q->bo[i]->busy--;
 			ISpinUnlock(&gpu_lock, &imask);

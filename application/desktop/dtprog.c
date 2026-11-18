@@ -142,6 +142,27 @@ LOCAL BOOL same( CONST UB *a, CONST char *b )
 	return (BOOL)( a[i] == 0 && b[i] == 0 );
 }
 
+/* A member's string, whole and unescaped, in memory of its own (Kfree it); NULL: none, or no memory */
+LOCAL UB *js_dup( CONST T_JSON *obj, CONST char *key )
+{
+	T_JSON	v;
+	UB	*s;
+
+	if ( js_get(obj, key, &v) < E_OK || js_type(&v) != JS_STRING ) {
+		return NULL;
+	}
+	s = (UB *)Kmalloc((size_t)v.len + 1);	/* unescaped it is never longer than written */
+	if ( s == NULL ) {
+		tm_printf((UB *)"dtprog: no memory for \"%s\" of %d bytes\n", key, (INT)v.len);
+		return NULL;
+	}
+	if ( js_str(&v, s, (INT)v.len + 1) < 0 ) {
+		Kfree(s);
+		return NULL;
+	}
+	return s;
+}
+
 /* ---------------------------------------------------------------- what a program says */
 
 /*
@@ -170,7 +191,7 @@ LOCAL BOOL is_carried( CONST UB *id )
 LOCAL BOOL read_prog( CONST TS_UUID *uuid, DTPROG *p )
 {
 	T_JSON	root, tf, g, base, it;
-	UB	*meta, s[TAD_NAME_MAX];
+	UB	*meta, *nm, s[32];
 	SZ	size = 0;
 	BOOL	ok;
 
@@ -183,8 +204,24 @@ LOCAL BOOL read_prog( CONST TS_UUID *uuid, DTPROG *p )
 		  && js_get_str(&g, "id", p->id, DT_PROG_ID) > 0 );
 	if ( ok ) {
 		p->uuid = *uuid;
-		if ( js_get_str(&g, "name", p->name, TAD_NAME_MAX) <= 0 ) {
-			(void)js_get_str(&root, "name", p->name, TAD_NAME_MAX);
+		/* the program's name, whole; else the object's */
+		nm = js_dup(&g, "name");
+		if ( nm == NULL || nm[0] == 0 ) {
+			if ( nm != NULL ) Kfree(nm);
+			nm = js_dup(&root, "name");
+		}
+		if ( nm == NULL ) {
+			nm = dt_cat("", NULL);
+		}
+		if ( nm == NULL ) {
+			Kfree(meta);
+			return FALSE;		/* said on the console */
+		}
+		if ( p->name != NULL && knl_strcmp((CONST char *)p->name, (CONST char *)nm) == 0 ) {
+			Kfree(nm);		/* read again unchanged: the one held stays */
+		} else {
+			if ( p->name != NULL ) Kfree(p->name);
+			p->name = nm;
 		}
 		p->kind = DT_PK_APP;
 		if ( js_get_str(&g, "kind", s, sizeof(s)) > 0 ) {
@@ -198,6 +235,7 @@ LOCAL BOOL read_prog( CONST TS_UUID *uuid, DTPROG *p )
 		p->builtin = (BOOL)( js_get_bool(&g, "builtin", FALSE) && is_carried(p->id) );
 		p->menu = js_get_bool(&g, "menu", FALSE);
 		p->open_link = (BOOL)( js_get_str(&g, "openArg", s, sizeof(s)) > 0 && same(s, "link") );
+		p->once = js_get_bool(&g, "once", FALSE);
 
 		/* the kinds of object it opens from 実行: "fileTypes": ["xtad", "tad"] */
 		p->types[0] = 0;
@@ -370,15 +408,29 @@ LOCAL ER plugin_base( CONST TS_UUID *brought, CONST T_OBPRT *prt, TS_UUID *p_bas
 	return ob_cpy_obj(brought, &c, p_base);
 }
 
+LOCAL ER plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UUID *win,
+			 TS_UUID *p_prog, UINT *p_how, UB **p_name );
+
+/* The plugin's name, read whole, let go whatever way the install went */
 EXPORT ER dt_plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UUID *win,
 			     TS_UUID *p_prog, UINT *p_how )
 {
+	UB	*name = NULL;
+	ER	er = plugin_install(dir, force, pid, win, p_prog, p_how, &name);
+
+	if ( name != NULL ) Kfree(name);
+	return er;
+}
+
+LOCAL ER plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UUID *win,
+			 TS_UUID *p_prog, UINT *p_how, UB **p_name )
+{
 	T_JSON		root, bf, cm, it, ft, t1;
-	UB		id[DT_PROG_ID], name[TAD_NAME_MAX], type[32], ver[32], jf[128];
+	UB		id[DT_PROG_ID], *name, type[32], ver[32], jf[128];
 	UB		types[DT_TYPES_MAX];
-	UB		*j, *m;
-	SZ		size = 0;
-	INT		n;
+	UB		*j, *m, *from;
+	SZ		size = 0, fl = 0;
+	INT		n, mmax;
 	TS_UUID		base, brought, prog, box, pj, old;
 	T_OBREF		r, dr;
 	CONST DTPROG	*have;
@@ -402,7 +454,7 @@ EXPORT ER dt_plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UU
 	}
 	if ( js_parse(j, (INT)size, &root) < E_OK
 	  || js_get_str(&root, "id", id, sizeof(id)) <= 0
-	  || js_get_str(&root, "name", name, sizeof(name)) <= 0 ) {
+	  || ( *p_name = name = js_dup(&root, "name") ) == NULL || name[0] == 0 ) {
 		Kfree(j);
 		return E_OBJ;
 	}
@@ -472,11 +524,19 @@ EXPORT ER dt_plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UU
 			return er;
 		}
 	}
-	m = (UB *)Kmalloc(1024 + OB_NAME_MAX * 2);
+	/* the directory's whole name, and room for every text of the metadata escaped (6 bytes a byte at most) */
+	from = knl_ob_name(dir, &fl, &er);
+	m = NULL;
+	mmax = 0;
+	if ( from != NULL ) {
+		mmax = 1024 + 6 * (INT)( fl + 2 * knl_strlen((CONST char *)name) + knl_strlen((CONST char *)id)
+					 + knl_strlen((CONST char *)ver) ) + 2 * DT_TYPES_MAX;
+		m = (UB *)Kmalloc((size_t)mmax);
+	}
 	if ( m == NULL ) {
-		er = E_NOMEM;
+		if ( from != NULL || er >= E_OK ) er = E_NOMEM;
 	} else {
-		n = plugin_meta(m, 1024 + OB_NAME_MAX * 2, dr.name, id, name, kind, ver,
+		n = plugin_meta(m, mmax, from, id, name, kind, ver,
 				has_base ? &base : NULL, types);
 		knl_memset(&c, 0, sizeof(c));
 		c.type = OB_T_STORAGE;
@@ -489,6 +549,9 @@ EXPORT ER dt_plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UU
 		}
 		er = ( n > 0 ) ? ob_cre_obj(&c, &prog) : E_LIMIT;
 		Kfree(m);
+	}
+	if ( from != NULL ) {
+		Kfree(from);
 	}
 	if ( er >= E_OK ) {
 		er = ( ob_fnd_sys(SYSROLE_PROGS, SYSDEF_PROG_BOX, &box) >= E_OK ) ? om_obj_link_add(&box, &prog)
@@ -594,7 +657,7 @@ EXPORT INT dt_prog_list( UINT kind, CONST DTPROG **out, INT max )
 LOCAL BOOL obj_type( CONST T_VOBJ *v, UB *t, INT max )
 {
 	T_JSON	root, tf, f;
-	UB	*meta, name[TAD_NAME_MAX];
+	UB	*meta, *name = NULL;
 	SZ	size = 0;
 	INT	n, i, k = 0;
 	T_OBREC	r[2];
@@ -602,14 +665,17 @@ LOCAL BOOL obj_type( CONST T_VOBJ *v, UB *t, INT max )
 	t[0] = 0;
 	meta = om_obj_meta(&v->target, &size);
 	if ( meta != NULL ) {
+		/* the file's name whole: its extension is what follows the last dot */
 		if ( js_parse(meta, (INT)size, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
-		  && js_get(&tf, "file", &f) >= E_OK && ( n = js_get_str(&f, "name", name, sizeof(name)) ) > 0 ) {
+		  && js_get(&tf, "file", &f) >= E_OK && ( name = js_dup(&f, "name") ) != NULL
+		  && ( n = (INT)knl_strlen((CONST char *)name) ) > 0 ) {
 			for ( i = n - 1; i >= 0 && name[i] != '.'; i-- ) ;
 			for ( i++; i > 0 && i < n && k < max - 1; i++ ) {
 				t[k++] = ( name[i] >= 'A' && name[i] <= 'Z' ) ? (UB)( name[i] - 'A' + 'a' ) : name[i];
 			}
 			t[k] = 0;
 		}
+		if ( name != NULL ) Kfree(name);
 		Kfree(meta);
 		if ( k > 0 ) return TRUE;
 	}
@@ -657,17 +723,39 @@ LOCAL INT app_put( DTAPP *out, INT max, INT *n, CONST UB *id, CONST UB *raw, CON
 		if ( same(out[i].id, (CONST char *)id) ) return i;
 	}
 	if ( *n >= max ) return -1;
+	out[i].name = dt_cat(( name != NULL ) ? (CONST char *)name : "", NULL);	/* whole */
+	if ( out[i].name == NULL ) return -1;		/* said on the console */
 	(void)copy_s(out[i].id, DT_PROG_ID, id);
 	(void)copy_s(out[i].raw, DT_PROG_ID, raw);
-	(void)copy_s(out[i].name, TAD_NAME_MAX, name);
 	out[i].listed = listed;
 	(*n)++;
 	return i;
 }
 
+EXPORT void dt_app_free( DTAPP *a, INT n )
+{
+	INT	i;
+
+	if ( a == NULL ) {
+		return;
+	}
+	for ( i = 0; i < n; i++ ) {
+		if ( a[i].name != NULL ) Kfree(a[i].name);
+	}
+	Kfree(a);
+}
+
+EXPORT void dt_prog_clear( DTPROG *p )
+{
+	if ( p != NULL && p->name != NULL ) {
+		Kfree(p->name);
+		p->name = NULL;
+	}
+}
+
 EXPORT INT dt_app_list( CONST T_VOBJ *v, DTAPP *out, INT max, INT *p_dflt )
 {
-	UB		(*names)[OM_APP_NAME] = NULL, id[DT_PROG_ID], dflt[DT_PROG_ID], t[16];
+	UB		**names = NULL, id[DT_PROG_ID], dflt[DT_PROG_ID], t[16];
 	CONST DTPROG	*p;
 	INT		na, i, n = 0;
 
@@ -678,14 +766,14 @@ EXPORT INT dt_app_list( CONST T_VOBJ *v, DTAPP *out, INT max, INT *p_dflt )
 	if ( out == NULL ) return na + nprog;
 
 	/* the applist, each name as the system has the program */
-	if ( na > 0 ) names = (UB (*)[OM_APP_NAME])Kmalloc(sizeof(UB) * OM_APP_NAME * (SZ)na);
-	na = ( names != NULL ) ? om_link_apps(v, names, na) : 0;
+	names = ( na > 0 ) ? om_link_apps(v, &na) : NULL;
+	if ( names == NULL ) na = 0;
 	for ( i = 0; i < na; i++ ) {
 		if ( om_link_app_id(v, i, id, DT_PROG_ID) <= 0 ) continue;
 		p = dt_prog_find(id);
 		(void)app_put(out, max, &n, ( p != NULL ) ? p->id : id, id, ( p != NULL ) ? p->name : names[i], TRUE);
 	}
-	if ( names != NULL ) Kfree(names);
+	om_apps_free(names, na);
 
 	/*
 	 * An object that names no program (a file taken in): what opens an
@@ -778,6 +866,7 @@ EXPORT void dt_base_box_put( CONST TS_UUID *prog, BOOL add )
 				  k, p->id, add ? "linked from" : "taken out of", (INT)er);
 		}
 	}
+	dt_prog_clear(p);
 	Kfree(p);
 }
 
@@ -839,7 +928,7 @@ EXPORT void dt_template_made( CONST TS_UUID *tmpl, CONST TS_UUID *made )
 	CONST DTPROG	*bb;
 	TS_UUID		box, *ids = NULL;
 	T_TAD		*doc = NULL;
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	UB		*rec;
 	SZ		size = 0;
 	INT		i, k, n = 0, all;
@@ -864,6 +953,7 @@ EXPORT void dt_template_made( CONST TS_UUID *tmpl, CONST TS_UUID *made )
 	if ( er < E_OK || doc == NULL ) {
 		return;
 	}
+	tad_vobj_init(&v);
 	all = tad_lnk_count(doc);
 	ids = ( all > 0 ) ? (TS_UUID *)Kcalloc((size_t)all, sizeof(TS_UUID)) : NULL;
 	for ( i = 0; ids != NULL && i < all; i++ ) {
@@ -871,6 +961,7 @@ EXPORT void dt_template_made( CONST TS_UUID *tmpl, CONST TS_UUID *made )
 			ids[n++] = v.target;
 		}
 	}
+	tad_vobj_clear(&v);
 	tad_free(doc);
 	er = ( n > 0 ) ? om_obj_links_set(made, ids, n) : E_OK;
 	if ( ids != NULL ) Kfree(ids);
@@ -908,10 +999,22 @@ typedef struct {
 	INT	watch;			/* its place in watch_proc, from 1; 0 not watched */
 	INT	opening;		/* its place in opening, from 1; 0 none */
 	INT	info;			/* a 管理情報 started: its place in dtinfo.c's table, from 1; 0 none */
-	UB	name[TAD_NAME_MAX];	/* the program, for the message line */
+	UB	*name;			/* the program, for the message line, whole (Kmalloc); NULL none */
 	SZ	rawsz;			/* a start-up argument of the program's own (dt_prog_run_arg), 0 none */
-	UB	raw[DT_PROG_ARG];
+	UB	*raw;			/* (Kmalloc) */
+	UB	*data;			/* the 固有データ given after arg (Kmalloc); NULL none */
+	SZ	datalen;
 } DTSTART;
+
+/* What a start holds let go, once it is over: whoever has the DTSTART then */
+LOCAL void start_free( DTSTART *s )
+{
+	if ( s->raw != NULL ) Kfree(s->raw);
+	if ( s->data != NULL ) Kfree(s->data);
+	if ( s->name != NULL ) Kfree(s->name);
+	s->raw = s->data = s->name = NULL;
+	s->rawsz = s->datalen = 0;
+}
 
 LOCAL ID	start_mbf = 0;
 LOCAL ID	start_tsk = 0;
@@ -1124,6 +1227,7 @@ EXPORT BOOL dt_prog_reply_taken( void )
 LOCAL ER start_now( CONST DTSTART *s, TS_UUID *pu )
 {
 	T_OBCRE	c;
+	UB	*arg = NULL;
 	ER	er;
 
 	knl_memset(&c, 0, sizeof(c));
@@ -1132,6 +1236,19 @@ LOCAL ER start_now( CONST DTSTART *s, TS_UUID *pu )
 	if ( s->rawsz > 0 ) {
 		c.arg = s->raw;
 		c.argsz = s->rawsz;
+	} else if ( s->has_arg && s->link_arg && s->data != NULL && s->datalen > 0 ) {
+		/* the link, and after it the 固有データ as long as it is, ending in 0 (dt_prcopen_data) */
+		SZ	size = (SZ)sizeof(T_PRCOPEN) + s->datalen + 1;
+
+		arg = (UB *)Kmalloc((size_t)size);
+		if ( arg == NULL ) {
+			return E_NOMEM;
+		}
+		knl_memcpy(arg, &s->arg, sizeof(T_PRCOPEN));
+		knl_memcpy(arg + sizeof(T_PRCOPEN), s->data, s->datalen);
+		arg[size - 1] = 0;
+		c.arg = arg;
+		c.argsz = size;
 	} else if ( s->has_arg ) {
 		c.arg = &s->arg;
 		c.argsz = s->link_arg ? sizeof(s->arg) : sizeof(s->arg.target);
@@ -1141,6 +1258,7 @@ LOCAL ER start_now( CONST DTSTART *s, TS_UUID *pu )
 	er = ob_cre_obj(&c, pu);
 	knl_ob_rank_arm(0, 0);
 	knl_ob_act_arm(0);
+	if ( arg != NULL ) Kfree(arg);
 	return er;
 }
 
@@ -1167,12 +1285,12 @@ LOCAL void start_done( CONST DTSTART *s, ER er, CONST TS_UUID *pu )
 		dt_answer(&s->reply, &an, s->anssz);
 	}
 	if ( er < E_OK && !( asked && s->with_er ) ) {
-		UB	msg[TAD_NAME_MAX + 48];
-		INT	n = put(msg, 0, sizeof(msg), (CONST char *)s->name);
+		CONST char	*pn = ( s->name != NULL ) ? (CONST char *)s->name : "プログラム";
+		UB		*msg = dt_cat(pn, "を起動できませんでした", NULL);	/* the line shows what fits */
 
-		(void)put(msg, n, sizeof(msg), "を起動できませんでした");
-		(void)wm_msg_put((CONST char *)msg);
-		tm_printf((UB *)"TessronOS desktop: %s not started (%d)\n", s->name, (INT)er);
+		(void)wm_msg_put(( msg != NULL ) ? (CONST char *)msg : "プログラムを起動できませんでした");
+		if ( msg != NULL ) Kfree(msg);
+		tm_printf((UB *)"TessronOS desktop: %s not started (%d)\n", pn, (INT)er);
 	}
 	if ( s->watch > 0 ) {
 		if ( er >= E_OK && pu != NULL ) {
@@ -1208,6 +1326,7 @@ LOCAL void start_task( INT stacd, void *exinf )
 		knl_memset(&pu, 0, sizeof(pu));
 		er = start_now(&s, &pu);
 		start_done(&s, er, &pu);
+		start_free(&s);
 	}
 }
 
@@ -1256,23 +1375,90 @@ LOCAL BOOL starter( void )
  * process is to show the object arg in its window, which is kept in
  * opening until it does.
  */
-LOCAL UB	raw_next[DT_PROG_ARG];		/* the argument dt_prog_run_arg gives the next start */
+LOCAL UB	*raw_next = NULL;		/* the argument dt_prog_run_arg gives the next start (Kmalloc) */
 LOCAL SZ	raw_next_sz = 0;
 
 LOCAL INT	start_info = 0;		/* the place of the 管理情報 dt_prog_start_info starts */
+
+/*
+ * 固有データ (design 11.3). The system does not read it: it is the
+ * string "data" of the applist entry of the program started, given to
+ * the program as it is, as long as it is (after T_PRCOPEN). A link's own
+ * entry comes before the object's, as a link fixed to its program does;
+ * whether it is fixed does not matter.
+ */
+LOCAL UB	*data_next = NULL;		/* dt_prog_data_next's, for the next start (Kmalloc) */
+LOCAL SZ	data_next_len = 0;
+LOCAL BOOL	data_next_on = FALSE;
+
+EXPORT UB *dt_prog_data( CONST DTPROG *p, CONST TS_UUID *target, CONST UB *link_applist, SZ *p_len )
+{
+	UB	*d;
+	INT	i;
+
+	*p_len = 0;
+	if ( p == NULL ) {
+		return NULL;
+	}
+	d = om_app_data(target, link_applist, p->id, p_len);
+	for ( i = 0; d == NULL && i < p->nalias; i++ ) {
+		d = om_app_data(target, link_applist, p->alias[i], p_len);
+	}
+	if ( d == NULL ) {
+		*p_len = 0;
+	}
+	return d;
+}
+
+EXPORT ER dt_prog_data_next( BOOL on, CONST UB *data, SZ len )
+{
+	if ( data_next != NULL ) {
+		Kfree(data_next);
+		data_next = NULL;
+	}
+	data_next_len = 0;
+	data_next_on = on;
+	if ( on && data != NULL ) {
+		data_next = (UB *)Kmalloc((size_t)( len + 1 ));
+		if ( data_next == NULL ) {
+			data_next_on = FALSE;
+			return E_NOMEM;
+		}
+		knl_memcpy(data_next, data, len);
+		data_next[len] = 0;
+		data_next_len = len;
+	}
+	return E_OK;
+}
+
+/* The data dt_prog_data_next gave, taken: FALSE when none was given */
+EXPORT BOOL dt_prog_data_take( UB **p_data, SZ *p_len )
+{
+	if ( !data_next_on ) {
+		*p_data = NULL;
+		*p_len = 0;
+		return FALSE;
+	}
+	*p_data = data_next;
+	*p_len = data_next_len;
+	data_next = NULL;
+	data_next_len = 0;
+	data_next_on = FALSE;
+	return TRUE;
+}
 
 LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg, CONST DTWIN *from, CONST T_VOBJ *v, BOOL opens )
 {
 	DTSTART	s;
 	TS_UUID	pu;
-	INT	i;
 	ER	er;
 
 	knl_memset(&s, 0, sizeof(s));
 	s.info = start_info;
 	if ( raw_next_sz > 0 ) {
-		knl_memcpy(s.raw, raw_next, raw_next_sz);
+		s.raw = raw_next;		/* the start's now */
 		s.rawsz = raw_next_sz;
+		raw_next = NULL;
 		raw_next_sz = 0;
 	}
 	s.prog = p->uuid;
@@ -1296,8 +1482,12 @@ LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg, CONST DTWIN *from, 
 		s.arg.fromlink = TRUE;
 		s.arg.bgcol = (UINT)v->bgcol;
 		s.arg.wordwrap = v->wordwrap;
-		for ( i = 0; i < DT_VIEW_MAX - 1 && i < TAD_VIEW_MAX && v->viewmode[i] != 0; i++ ) {
-			s.arg.viewmode[i] = v->viewmode[i];
+		/* a viewMode longer than the field is no keyword a window knows: given as one (dtreq.h) */
+		if ( v->vview_len > 0 && v->vview_len < DT_VIEW_MAX ) {
+			knl_memcpy(s.arg.viewmode, v->vview, v->vview_len);
+			s.arg.viewmode[v->vview_len] = 0;
+		} else if ( v->vview_len >= DT_VIEW_MAX ) {
+			knl_strcpy((char *)s.arg.viewmode, DT_VIEW_UNKNOWN);
 		}
 		if ( from != NULL && from->used ) {
 			s.arg.parent = from->id;
@@ -1306,9 +1496,17 @@ LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg, CONST DTWIN *from, 
 			s.arg.vobjid = v->vobjid;	/* a link of a program's window, written through it */
 		}
 	}
-	for ( i = 0; i < TAD_NAME_MAX - 1 && p->name[i] != 0; i++ ) {
-		s.name[i] = p->name[i];
+	/* the applist's data for the program: given with the link (openArg "link") */
+	if ( !dt_prog_data_take(&s.data, &s.datalen) ) {
+		s.data = dt_prog_data(p, ( v != NULL ) ? &v->target : arg, ( v != NULL ) ? v->vapplist : NULL,
+				      &s.datalen);
 	}
+	if ( s.data != NULL && s.datalen > 0 && p->open_link && !s.has_arg && s.rawsz == 0 ) {
+		/* no object: target 0, the data alone */
+		s.has_arg = TRUE;
+		s.link_arg = TRUE;
+	}
+	s.name = dt_cat(( p->name != NULL ) ? (CONST char *)p->name : "", NULL);	/* NULL: said as プログラム */
 	if ( start_reply.on && !start_reply.taken ) {
 		s.reply = start_reply.reply;
 		s.seq = start_reply.seq;
@@ -1319,10 +1517,11 @@ LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg, CONST DTWIN *from, 
 	if ( starter() ) {
 		er = tk_snd_mbf(start_mbf, &s, (INT)sizeof(s), TMO_POL);
 		if ( er >= E_OK ) {
-			return E_OK;
+			return E_OK;		/* what it holds is the starter's to let go */
 		}
 		if ( er != E_TMOUT ) {
 			start_done(&s, er, NULL);
+			start_free(&s);
 			return er;
 		}
 	}
@@ -1330,6 +1529,7 @@ LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg, CONST DTWIN *from, 
 	knl_memset(&pu, 0, sizeof(pu));
 	er = start_now(&s, &pu);
 	start_done(&s, er, &pu);
+	start_free(&s);
 	return er;
 }
 
@@ -1341,7 +1541,7 @@ LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg, CONST DTWIN *from, 
  */
 EXPORT ER dt_command_run( CONST TS_UUID *target )
 {
-	DTPROG		*p = (DTPROG *)Kmalloc(sizeof(DTPROG));
+	DTPROG		*p = (DTPROG *)Kcalloc(1, sizeof(DTPROG));
 	CONST DTPROG	*con;
 	TS_UUID		cu;
 	BOOL		is;
@@ -1350,6 +1550,7 @@ EXPORT ER dt_command_run( CONST TS_UUID *target )
 		return E_NOMEM;
 	}
 	is = (BOOL)( read_prog(target, p) && p->kind == DT_PK_COMMAND && !p->builtin );
+	dt_prog_clear(p);
 	Kfree(p);
 	if ( !is || ts_str_to_uuid(SYSDEF_PROG_CONSOLE, &cu) < E_OK || ( con = dt_prog_of(&cu) ) == NULL ) {
 		return E_NOEXS;
@@ -1386,6 +1587,14 @@ EXPORT ER dt_prog_open( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v )
 	if ( p->builtin || p->kind == DT_PK_COMMAND ) {
 		return dt_prog_run(from, p, v);
 	}
+	/* a program of one window, up already: that window told, with the object and its data */
+	if ( p->once ) {
+		ER	er;
+
+		if ( dt_prog_again(p, v, &er) ) {
+			return er;
+		}
+	}
 	return start_process(p, &v->target, from, v, TRUE);
 }
 
@@ -1397,7 +1606,7 @@ EXPORT ER dt_prog_run_arg( DTWIN *from, CONST DTPROG *p, CONST void *arg, SZ siz
 {
 	INT	wid;
 
-	if ( p == NULL || p->builtin || size <= 0 || size > DT_PROG_ARG ) {
+	if ( p == NULL || p->builtin || size <= 0 ) {
 		return E_PAR;
 	}
 	/* a window of it standing for its program object ("shows"): brought to the front, as dt_prog_run does */
@@ -1406,6 +1615,12 @@ EXPORT ER dt_prog_run_arg( DTWIN *from, CONST DTPROG *p, CONST void *arg, SZ siz
 		(void)wm_focus(wid);
 		wm_update();
 		return E_OK;
+	}
+	if ( raw_next != NULL ) Kfree(raw_next);
+	raw_next = (UB *)Kmalloc((size_t)size);
+	if ( raw_next == NULL ) {
+		raw_next_sz = 0;
+		return E_NOMEM;
 	}
 	knl_memcpy(raw_next, arg, size);
 	raw_next_sz = size;
@@ -1431,17 +1646,22 @@ EXPORT ER dt_prog_run( DTWIN *from, CONST DTPROG *p, CONST T_VOBJ *v )
 		 * own program object: the system's 原紙箱 or 小物箱 opened with
 		 * it, in one window, as a double click on its link opens it
 		 */
-		T_VOBJ	bv;
+		T_VOBJ	bv = { .recno = 0 };
 		BOOL	bb = same(p->id, "base-file-manager");
+		ER	er;
 
-		knl_memset(&bv, 0, sizeof(bv));
+		tad_vobj_init(&bv);
 		if ( v != NULL && ts_uuid_cmp(&v->target, &p->uuid) != 0 ) {
-			bv = *v;
+			if ( ( er = tad_vobj_copy(&bv, v) ) < E_OK ) {
+				return er;
+			}
 		} else if ( bb ? !dt_base_box(&bv.target) : !knl_sys_find(SYSROLE_ACCS, SYSDEF_ACC_BOX, &bv.target) ) {
 			(void)wm_msg_put(bb ? "システムの原紙箱がありません" : "システムの小物箱がありません");
 			return E_NOEXS;
 		}
-		return dt_open_as(from, &bv, p->id);
+		er = dt_open_as(from, &bv, p->id);
+		tad_vobj_clear(&bv);
+		return er;
 	}
 	if ( !p->builtin ) {
 		/*

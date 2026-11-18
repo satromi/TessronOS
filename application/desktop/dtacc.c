@@ -346,19 +346,19 @@ EXPORT void dt_acc_boxes_tell( void )
 EXPORT ER dt_acc_req( CONST T_DTREQ *rq, T_DTANS *an )
 {
 	INT	i, k, n;
-	UB	nm[TAD_NAME_MAX];
+	UB	probe[1], *nm;
+	ER	er;
 
 	if ( rq->req == DT_RQ_ACC_SET ) {
-		UB	code[sizeof(rq->name)];
-		TS_UUID	before;
-		BOOL	has_before;
+		CONST UB	*code = dt_rq_word(rq, DT_TAIL_NAME, NULL);
+		CONST UB	*t = dt_rq_word(rq, DT_TAIL_TEXT, NULL);
+		TS_UUID		before;
+		BOOL		has_before;
 
-		for ( i = 0; i < (INT)sizeof(code) - 1 && rq->name[i] != 0; i++ ) code[i] = rq->name[i];
-		code[i] = 0;
 		if ( knl_strcmp((CONST char *)code, "acc.place") != 0 ) {
 			return acc_do(code, &rq->target);
 		}
-		has_before = (BOOL)( rq->text[0] != 0 && ts_str_to_uuid((CONST char *)rq->text, &before) >= E_OK );
+		has_before = (BOOL)( t[0] != 0 && ts_str_to_uuid((CONST char *)t, &before) >= E_OK );
 		dt_acc_place(&rq->target, has_before ? &before : NULL);
 		return E_OK;
 	}
@@ -367,7 +367,7 @@ EXPORT ER dt_acc_req( CONST T_DTREQ *rq, T_DTANS *an )
 		n = acc_read(&acc_e, NULL);
 		/* those of the store alone, as a list of the store's objects shows them */
 		for ( i = k = 0; acc_e != NULL && i < n; i++ ) {
-			if ( om_store_name(&acc_e[i].p->uuid, nm, TAD_NAME_MAX) >= 0 ) acc_e[k++] = acc_e[i];
+			if ( om_store_name(&acc_e[i].p->uuid, probe, 1) >= 0 ) acc_e[k++] = acc_e[i];	/* it has a name */
 		}
 		acc_en = k;
 	}
@@ -383,8 +383,8 @@ EXPORT ER dt_acc_req( CONST T_DTREQ *rq, T_DTANS *an )
 	}
 	an->into = acc_e[rq->recno].p->uuid;
 	an->flags = acc_e[rq->recno].show ? 0 : DT_F_HIDDEN;
-	if ( om_store_name(&an->into, nm, TAD_NAME_MAX) < 0 ) nm[0] = 0;
-	for ( k = 0; nm[k] != 0 && k < DT_TEXT_MAX - 1; k++ ) an->text[k] = nm[k];
-	an->text[k] = 0;
-	return E_OK;
+	nm = om_store_name_dup(&an->into, NULL);
+	er = dt_ans_cat(an, ( nm != NULL ) ? nm : (CONST UB *)"", -1);
+	if ( nm != NULL ) Kfree(nm);
+	return er;
 }

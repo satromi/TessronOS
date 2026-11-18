@@ -165,7 +165,8 @@ LOCAL void test_devices( void )
 			want[k] = 0;
 			found = FALSE;
 			for ( k = 0; k < cnt && k < LIST_MAX && !found; k++ ) {
-				found = (BOOL)( ob_ref_obj(&buf[k], &r) >= E_OK && same_name(r.name, want) );
+				found = (BOOL)( ob_ref_obj(&buf[k], &r) >= E_OK
+					     && kt_name_is(&buf[k], (CONST char *)want) );
 			}
 			if ( !found ) {
 				tm_printf((UB *)"  no object for device %s\n", want);

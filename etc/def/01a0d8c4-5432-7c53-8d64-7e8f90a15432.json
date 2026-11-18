@@ -19,7 +19,7 @@
       "id": "real-object-info",
       "kind": "utility",
       "name": "管理情報",
-      "version": "R1.400",
+      "version": "R1.410",
       "menu": false,
       "builtin": false,
       "openArg": "link",

@@ -76,6 +76,17 @@ IMPORT UB  *kt_obj_data( const TS_UUID *uuid, SZ *p_size );
 IMPORT INT  kt_lst_obj( UINT type, UINT sub, TS_UUID **p_list );
 
 /*
+ * An object's name, whole (knl_ob_name), in memory to be freed with
+ * Kfree: "" when it has none or cannot be read, NULL only for want of
+ * memory. kt_name_is: whether it is want, every byte of it; kt_name_has:
+ * whether part is in it; kt_name_starts: whether it begins with pre.
+ */
+IMPORT UB  *kt_name( const TS_UUID *uuid );
+IMPORT BOOL kt_name_is( const TS_UUID *uuid, const char *want );
+IMPORT BOOL kt_name_has( const TS_UUID *uuid, const char *part );
+IMPORT BOOL kt_name_starts( const TS_UUID *uuid, const char *pre );
+
+/*
  * The system's face, as the desktop sets it when it starts: the suite
  * that sets it (fn) runs only when the whole book is run, so a suite
  * that draws letters, or starts a process that does, opens the face of

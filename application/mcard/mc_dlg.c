@@ -230,31 +230,32 @@ void dlg_export( void )
 {
 	UI	q;
 	INT	a, form = 0;
-	char	name[OB_NAME_MAX + 8];
+	char	*name;
 
 	ed_commit();
 	if ( ui_dlg_open(&g_ui, PN_EXPORT, &q) < E_OK ) return;
 	ui_set_value(&q, 11, 1);
-	snprintf(name, sizeof(name), "%sのコピー", (char *)g_name);
-	ui_set_text(&q, 12, name);
+	name = name_with(g_name, "のコピー");
+	ui_set_text(&q, 12, ( name != NULL ) ? name : "");
+	free(name);
+	name = NULL;
 	note("export panel");
 	a = work(&q, NULL);
 	if ( a == B_OK ) {
-		INT	n;
-
 		form = ui_value(&q, 11) - 1;
-		n = ui_text(&q, 12, name, OB_NAME_MAX);
-		if ( n < 0 ) n = 0;
-		name[( n < OB_NAME_MAX ) ? n : OB_NAME_MAX - 1] = 0;
+		name = ui_text_all(&q, 12);	/* the name typed, whole */
 	}
 	ui_dlg_close(&q);
 	if ( a == B_OK ) {
-		if ( name[0] == 0 ) {
+		if ( name == NULL ) {
+			warn("名前を読めませんでした。", NULL);
+		} else if ( name[0] == 0 ) {
 			warn("新しい実身の名前を入力してください。", NULL);
 		} else if ( export_obj(( form >= 0 && form <= EX_CSV ) ? form : 0, (CONST UB *)name) < E_OK ) {
 			warn("新しい実身に書き出せませんでした。", NULL);
 		}
 	}
+	free(name);
 	redraw_all();
 }
 

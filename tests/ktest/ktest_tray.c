@@ -238,7 +238,7 @@ LOCAL void test_frag( void )
 			       "</figure></tad>";
 	T_TAD		*src = NULL, *frag, *back;
 	T_TADNODE	*body, *copy;
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	TS_UUID		id;
 	INT		links = -1, n = 0;
 

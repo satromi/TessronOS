@@ -313,7 +313,7 @@ int knl_wpa_start(const unsigned char *own, const unsigned char *bssid,
 	static u8 ssid_kept[SSID_MAX_LEN];
 	struct rsn_supp_config conf;
 	struct wpa_ie_data d;
-	size_t len = 64;
+	size_t len = WPAG_ELEM_MAX;
 	int pairwise, group;
 
 	if (sm_make() != 0)
@@ -537,7 +537,7 @@ static int		sae_groups[] = { 19, 20, 21, 0 };
 static int		sae_gi;			/* which of them now */
 static int		sae_h2e;
 static struct sae_pt	*sae_pts;		/* H2E's password elements, one for each group */
-static u8		sae_pw[64];		/* hunting and pecking's password, while SAE goes on */
+static u8		sae_pw[WPAG_SAE_PW_MAX];	/* hunting and pecking's password, while SAE goes on */
 static int		sae_pw_len;
 static u8		sae_own[ETH_ALEN], sae_peer[ETH_ALEN];
 static struct wpabuf	*sae_token;

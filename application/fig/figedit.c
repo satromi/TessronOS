@@ -812,9 +812,11 @@ LOCAL BOOL is_bg( T_FGED *d, INT i )
 	if ( d->fig->sh[i].kind != TV_SH_LINK || d->fig->sh[i].link < 0 ) {
 		return FALSE;
 	}
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	if ( v != NULL ) {
+		tad_vobj_init(v);
 		bg = (BOOL)( tad_lnk_get(d->rec, d->fig->sh[i].link, v) >= E_OK && v->background );
+		tad_vobj_clear(v);
 		Kfree(v);
 	}
 	return bg;
@@ -1033,13 +1035,15 @@ EXPORT void fe_dup_picked( T_FGED *d )
 			continue;
 		}
 		if ( d->fig->sh[i].kind == TV_SH_LINK && d->fig->sh[i].link >= 0 ) {
-			T_VOBJ	v;
+			T_VOBJ	v = { .recno = 0 };
 			TS_UUID	id;
 
+			tad_vobj_init(&v);
 			if ( tad_lnk_get(d->rec, d->fig->sh[i].link, &v) >= E_OK ) {
 				knl_memset(&v.vobjid, 0, sizeof(v.vobjid));
 				(void)tad_lnk_add(rec, &v, &id);
 			}
+			tad_vobj_clear(&v);
 			continue;
 		}
 		if ( !fe_is(d) || !fe_takeable(d, i) || d->fig->sh[i].node == NULL ) {
@@ -1313,10 +1317,11 @@ EXPORT UINT fe_prot_can( CONST T_TAD *rec, CONST T_TVFIG *fig, CONST UINT *pick 
 	if ( rec == NULL || fig == NULL || pick == NULL ) {
 		return 0;
 	}
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	if ( v == NULL ) {
 		return 0;
 	}
+	tad_vobj_init(v);
 	for ( i = 0; i < fig->nsh; i++ ) {
 		if ( pick[i] == 0 || fig->sh[i].kind != TV_SH_LINK || fig->sh[i].link < 0
 		  || tad_lnk_get(rec, fig->sh[i].link, v) < E_OK ) {
@@ -1325,6 +1330,7 @@ EXPORT UINT fe_prot_can( CONST T_TAD *rec, CONST T_TVFIG *fig, CONST UINT *pick 
 		can |= v->fixed ? FE_PROT_UNFIX : FE_PROT_FIX;
 		can |= v->background ? FE_PROT_UNBG : FE_PROT_BG;
 	}
+	tad_vobj_clear(v);
 	Kfree(v);
 
 	return can;
@@ -1522,10 +1528,19 @@ LOCAL INT ar_cmp_text( CONST UB *a, CONST UB *b )
 }
 
 /* How the objects of two links compare for 整列順 */
+/* What info() filled in of an object let go */
+EXPORT void fe_ar_info_clear( T_FEARINFO *inf )
+{
+	if ( inf->name != NULL ) Kfree(inf->name);
+	if ( inf->label != NULL ) Kfree(inf->label);
+	if ( inf->rel != NULL ) Kfree(inf->rel);
+	inf->name = inf->label = inf->rel = NULL;
+}
+
 LOCAL INT ar_cmp( CONST T_FEARINFO *ia, CONST T_FEARINFO *ib, INT by )
 {
 	switch ( by ) {
-	case FE_AR_BY_NAME:	return ar_cmp_text(ia->name, ib->name);
+	case FE_AR_BY_NAME:	return ar_cmp_text(TAD_VS(ia->name), TAD_VS(ib->name));
 	case FE_AR_BY_MADE:	return ar_cmp_text(ia->made, ib->made);
 	case FE_AR_BY_UPDATED:	return ar_cmp_text(ia->updated, ib->updated);
 	case FE_AR_BY_SIZE:	return ia->bytes - ib->bytes;
@@ -1545,30 +1560,38 @@ LOCAL INT ar_width( CONST T_VOBJ *v, CONST T_FEARINFO *inf, INT what )
 	ID	fid = fn_system();
 	INT	chsz = ( v->chsz > 0 ) ? v->chsz : 14;
 	INT	w = 10 + chsz + 4, i, k;
-	UB	text[TAD_NAME_MAX + 8];
+	UB	text[FE_AR_APP_NAME + 8];
 
 	if ( fid <= 0 ) {
 		return v->right - v->left;
 	}
 	fn_set_size(fid, chsz);
-	if ( inf->has_label ) {
+	if ( inf->has_label && inf->label != NULL ) {
 		w += fn_width(fid, inf->label);
 	}
-	if ( what != FE_AR_W_NAME && inf->rel[0] != 0 ) {
-		k = 0;
-		text[k++] = ' ';  text[k++] = ':';  text[k++] = ' ';
-		for ( i = 0; inf->rel[i] != 0 && k < TAD_NAME_MAX; i++ ) {
-			if ( inf->rel[i] != '[' && inf->rel[i] != ']' ) {
-				text[k++] = inf->rel[i];
+	if ( what != FE_AR_W_NAME && inf->rel != NULL && inf->rel[0] != 0 ) {
+		/* " : " and the tags without their brackets, however long */
+		UB	*t;
+
+		for ( i = 0; inf->rel[i] != 0; i++ ) ;
+		t = (UB *)Kmalloc((SZ)i + 4);
+		if ( t != NULL ) {
+			k = 0;
+			t[k++] = ' ';  t[k++] = ':';  t[k++] = ' ';
+			for ( i = 0; inf->rel[i] != 0; i++ ) {
+				if ( inf->rel[i] != '[' && inf->rel[i] != ']' ) {
+					t[k++] = inf->rel[i];
+				}
 			}
+			t[k] = 0;
+			w += fn_width(fid, t);
+			Kfree(t);
 		}
-		text[k] = 0;
-		w += fn_width(fid, text);
 	}
 	if ( ( what == FE_AR_W_NODATE || what == FE_AR_W_FULL ) && inf->has_app ) {
 		k = 0;
 		text[k++] = ' ';  text[k++] = '(';
-		for ( i = 0; inf->app[i] != 0 && k < TAD_NAME_MAX; i++ ) {
+		for ( i = 0; inf->app[i] != 0 && i < FE_AR_APP_NAME; i++ ) {
 			text[k++] = inf->app[i];
 		}
 		text[k++] = ')';
@@ -1591,11 +1614,15 @@ EXPORT INT fe_arrange( T_FEARITEM *it, INT n, CONST T_FEARRANGE *o, FE_ARINFO in
 	T_FEARLAY	lay;
 	INT		i, k, m = 0, top, left, right;
 
-	/* one that is 固定化 or 背景化 stays where it is */
+	/*
+	 * One that is 固定化 or 背景化 stays where it is: put behind the rest,
+	 * swapped rather than written over, so that every entry still owns
+	 * the words of one link and the caller clears all it gave
+	 */
 	for ( i = 0; i < n; i++ ) {
 		if ( !it[i].v.fixed && !it[i].v.background ) {
 			if ( m != i ) {
-				it[m] = it[i];
+				tmp = it[m];  it[m] = it[i];  it[i] = tmp;
 			}
 			m++;
 		}
@@ -1660,6 +1687,7 @@ EXPORT INT fe_arrange( T_FEARITEM *it, INT n, CONST T_FEARRANGE *o, FE_ARINFO in
 		}
 	}
 	if ( inf != NULL ) {
+		for ( i = 0; i < n; i++ ) fe_ar_info_clear(&inf[i]);
 		Kfree(inf);
 	}
 

@@ -57,6 +57,13 @@
 #include <ts/uuid.h>
 #include <ts/ob.h>
 #include <ts/dtreq.h>
+#include "../dtask.h"
+
+/* The words of the next request and the last answer, as long as they are (dtask.h) */
+static DTASK	g_dq;
+
+/* The text of the last answer (DT_TAIL_TEXT), "" when it has none */
+#define ANS_TEXT	dq_ans_text(&g_dq, DT_TAIL_TEXT)
 
 #define SW_W		620		/* the window's panel */
 #define SW_H		724
@@ -121,40 +128,9 @@ static void note( CONST char *s )
 /* One request to the desktop and its answer, waited for at most wait_ms */
 static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
-	static UINT	seq;
-	TS_UUID		d, reply;
-	T_OBCRE		c;
-	SZ		asz = 0;
-	ID		k, ka;
-	ER		er;
-
 	memset(an, 0, sizeof(*an));
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
 	rq->req = DT_RQ_SYSINST;
-	rq->seq = ++seq;
-	rq->reply = reply;
-	rq->win = sw.win;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
-			er = an->er;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
-	return er;
+	return dq_ask(&g_dq, rq, an, &sw.win, wait_ms);
 }
 
 /* What op asks, with its numbers; the answer in *an */
@@ -166,7 +142,7 @@ static ER ask( UINT op, INT x, INT y, CONST char *name, T_DTANS *an, INT wait_ms
 	rq.recno = (INT)op;
 	rq.grab_x = x;
 	rq.grab_y = y;
-	if ( name != NULL ) snprintf((char *)rq.name, sizeof(rq.name), "%s", name);
+	if ( name != NULL ) (void)dq_part(&g_dq, DT_TAIL_NAME, (CONST UB *)name, -1);
 	return ask_desktop(&rq, an, wait_ms);
 }
 
@@ -208,7 +184,7 @@ static void lines_take( INT which )
 	for ( i = 0; i < n && i < SW_ROWS; i++ ) {
 		if ( ask(DT_SI_LINE, which, i, NULL, &an, 3000) < E_OK ) break;
 		n = (INT)an.how;
-		line_set(i, (CONST char *)an.text);
+		line_set(i, (CONST char *)ANS_TEXT);
 	}
 }
 
@@ -240,7 +216,7 @@ static void list_parts( void )
 	for ( i = 0; sw_sel < sw_ndisk && i < n && i < SW_PART_MAX; i++ ) {
 		if ( ask(DT_SI_PART, sw_sel, i, NULL, &an, 5000) < E_OK ) break;
 		n = (INT)an.how;
-		split(an.text, unit, sizeof(unit), sw_prow[i], ROW_MAX);
+		split(ANS_TEXT, unit, sizeof(unit), sw_prow[i], ROW_MAX);
 		sw_punit[i] = atoi(unit);
 		sw_prows[i] = sw_prow[i];
 		if ( ( an.flags & DT_F_SI_BEST ) != 0 ) sw_psel = i;
@@ -263,7 +239,7 @@ static BOOL list_disks( void )
 		er = ask(DT_SI_DISK, i, 0, NULL, &an, 30000);
 		if ( er < E_OK ) break;
 		n = (INT)an.how;
-		split(an.text, sw_dname[i], ROW_MAX, sw_drow[i], ROW_MAX);
+		split(ANS_TEXT, sw_dname[i], ROW_MAX, sw_drow[i], ROW_MAX);
 		sw_drows[i] = sw_drow[i];
 		sw_ndisk++;
 	}
@@ -322,7 +298,7 @@ static void keep_refresh( BOOL again )
 		sw_kq = DT_SI_K_NONE;
 	} else {
 		sw_kq = (INT)an.how;
-		snprintf(sw_ktext, sizeof(sw_ktext), "%s", (CONST char *)an.text);
+		snprintf(sw_ktext, sizeof(sw_ktext), "%s", (CONST char *)ANS_TEXT);
 	}
 	if ( sw_kq != 0 && sw_kq != DT_SI_K_NONE && sw_keep == 1 ) sw_keep = -1;
 	if ( sw_kq == 0 && sw_keep < 0 ) sw_keep = 1;
@@ -390,7 +366,7 @@ static BOOL confirm( INT nline, BOOL warn )
 
 	for ( i = 0; i < nline && i < DT_SI_ROWS; i++ ) {
 		if ( ask(DT_SI_LINE, DT_SI_L_ASK, i, NULL, &an, 3000) < E_OK ) break;
-		snprintf(l[i], sizeof(l[i]), "%s", (CONST char *)an.text);
+		snprintf(l[i], sizeof(l[i]), "%s", (CONST char *)ANS_TEXT);
 		lines[i] = l[i];
 		n++;
 	}
@@ -431,7 +407,7 @@ static void start( void )
 	}
 	if ( an.how != 0 ) {
 		lines_clear();
-		line_set(0, (CONST char *)an.text);
+		line_set(0, (CONST char *)ANS_TEXT);
 		show();
 		return;
 	}

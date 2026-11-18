@@ -509,17 +509,11 @@ LOCAL SPOOL *spool_read( CONST TS_UUID *obj, T_PRNJOB *job, CONST UB *name,
 
 /* ---------------------------------------------------------------- the file on the desktop */
 
-/* A link to an object as a figure keeps one: its band, at the system's size */
-LOCAL void link_of( T_VOBJ *v, CONST TS_UUID *u, CONST UB *name )
+/* A link to an object as a figure keeps one: its band, at the system's size; v made empty first */
+LOCAL ER link_of( T_VOBJ *v, CONST TS_UUID *u, CONST UB *name )
 {
-	INT	k;
-
-	knl_memset(v, 0, sizeof(*v));
+	tad_vobj_clear(v);
 	v->target = *u;
-	for ( k = 0; name[k] != 0 && k < TAD_NAME_MAX - 1; k++ ) {
-		v->name[k] = name[k];
-	}
-	v->name[k] = 0;
 	v->chsz = 14;
 	v->frcol = 0x000000;
 	v->chcol = 0x000000;
@@ -530,6 +524,7 @@ LOCAL void link_of( T_VOBJ *v, CONST TS_UUID *u, CONST UB *name )
 	v->right = 200;
 	v->bottom = 24;
 	v->height = 24;
+	return tad_vobj_set(v, TAD_W_NAME, name, -1);
 }
 
 /*
@@ -539,14 +534,26 @@ LOCAL void link_of( T_VOBJ *v, CONST TS_UUID *u, CONST UB *name )
  */
 EXPORT void dt_place_on_desktop( CONST TS_UUID *u, CONST UB *name )
 {
+	(void)dt_place_on_desktop_appl(u, name, NULL);
+}
+
+/*
+ * The same, the link given an applist of its own (applist; NULL or empty
+ * none): told to the program of the window with the name and the applist
+ * as parts of the answer's tail (DT_TAIL_NAME, DT_TAIL_APPLIST), each as
+ * long as it is (dt_prog_tell_link)
+ */
+EXPORT ER dt_place_on_desktop_appl( CONST TS_UUID *u, CONST UB *name, CONST UB *applist )
+{
 	TS_UUID	cab;
 
-	if ( dt_prog_tell_text(DT_TELL_FIRST, DT_HOW_LINK_PUT, u, name) ) {
-		return;
+	if ( dt_prog_tell_link(DT_TELL_FIRST, DT_HOW_LINK_PUT, u, name, applist) ) {
+		return E_OK;
 	}
 	if ( ts_str_to_uuid(SYSDEF_CABINET, &cab) >= E_OK ) {
-		(void)dt_place_in(&cab, u, name);
+		return dt_place_in_appl(&cab, u, name, applist);
 	}
+	return E_NOEXS;
 }
 
 /*
@@ -555,6 +562,11 @@ EXPORT void dt_place_on_desktop( CONST TS_UUID *u, CONST UB *name )
  * window's by its program, as dt_place_on_desktop puts it.
  */
 EXPORT ER dt_place_in( CONST TS_UUID *box, CONST TS_UUID *u, CONST UB *name )
+{
+	return dt_place_in_appl(box, u, name, NULL);
+}
+
+EXPORT ER dt_place_in_appl( CONST TS_UUID *box, CONST TS_UUID *u, CONST UB *name, CONST UB *applist )
 {
 	T_TAD	*doc;
 	T_VOBJ	*v, *e;
@@ -566,6 +578,7 @@ EXPORT ER dt_place_in( CONST TS_UUID *box, CONST TS_UUID *u, CONST UB *name )
 		TS_UUID	cab;
 
 		if ( ts_str_to_uuid(SYSDEF_CABINET, &cab) >= E_OK && ts_uuid_cmp(&cab, box) == 0
+		  && ( applist == NULL || applist[0] == 0 )
 		  && dt_prog_tell_text(DT_TELL_FIRST, DT_HOW_LINK_PUT, u, name) ) {
 			return E_OK;
 		}
@@ -574,7 +587,7 @@ EXPORT ER dt_place_in( CONST TS_UUID *box, CONST TS_UUID *u, CONST UB *name )
 	if ( doc == NULL ) {
 		return E_NOEXS;
 	}
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ) * 2);
+	v = (T_VOBJ *)Kcalloc(2, sizeof(T_VOBJ));
 	if ( v == NULL ) {
 		return E_NOMEM;
 	}
@@ -585,15 +598,22 @@ EXPORT ER dt_place_in( CONST TS_UUID *box, CONST TS_UUID *u, CONST UB *name )
 			bottom = e->bottom + 8;
 		}
 	}
-	link_of(v, u, name);
+	er = link_of(v, u, name);
+	if ( er >= E_OK ) {
+		er = tad_vobj_set(v, TAD_W_APPLIST, applist, -1);
+	}
 	v->left = 16;
 	v->right = v->left + 200;
 	v->top = bottom;
 	v->bottom = bottom + 24;
-	er = tad_lnk_add(doc, v, &id);
+	if ( er >= E_OK ) {
+		er = tad_lnk_add(doc, v, &id);
+	}
 	if ( er >= E_OK ) {
 		er = om_store_save(box, 0);
 	}
+	tad_vobj_clear(v);
+	tad_vobj_clear(e);
 	Kfree(v);
 	return er;
 }
@@ -713,9 +733,7 @@ LOCAL ER print_write( CONST T_PRNJOB *job, CONST T_PRNSET *set )
 	TS_UUID		u;
 	ER		er;
 	T_PRNSTAT	st;
-	UB		msg[WM_LABEL_MAX];
-	UB		fname[TAD_NAME_MAX];
-	INT		k, i, at;
+	UB		*fname, *msg, num[12];
 
 	(void)wm_msg_put("印刷しています");
 	wm_update();
@@ -728,21 +746,21 @@ LOCAL ER print_write( CONST T_PRNJOB *job, CONST T_PRNSET *set )
 		(void)wm_msg_put("印刷できませんでした");
 		return er;
 	}
-	/* the name the object was given: the job's and ".pdf" */
-	for ( k = 0, i = 0; job->name != NULL && job->name[i] != 0 && k < TAD_NAME_MAX - 6; i++ ) {
-		fname[k++] = job->name[i];
+	/* the name the object was given, whole; else the job's and ".pdf" */
+	fname = om_store_name_dup(&u, NULL);
+	if ( fname == NULL ) {
+		fname = dt_cat(( job->name != NULL ) ? (CONST char *)job->name : "", ".pdf", NULL);
 	}
-	fname[k] = 0;
-	if ( om_store_name(&u, fname, TAD_NAME_MAX) < 0 ) {
-		(void)put(fname, k, TAD_NAME_MAX, ".pdf");
+	if ( fname == NULL ) {
+		(void)wm_msg_put("メモリが足りません");
+		return E_NOMEM;
 	}
 	dt_place_on_desktop(&u, fname);
-	at = put(msg, 0, WM_LABEL_MAX, "「");
-	at = put(msg, at, WM_LABEL_MAX, (CONST char *)fname);
-	at = put(msg, at, WM_LABEL_MAX, "」を作りました (");
-	at = put_num(msg, at, WM_LABEL_MAX, st.pages);
-	(void)put(msg, at, WM_LABEL_MAX, "ページ)");
-	(void)wm_msg_put((CONST char *)msg);
+	(void)put_num(num, 0, sizeof(num), st.pages);
+	msg = dt_cat("「", (CONST char *)fname, "」を作りました (", (CONST char *)num, "ページ)", NULL);
+	(void)wm_msg_put(( msg != NULL ) ? (CONST char *)msg : "印刷しました");	/* the line shows what fits */
+	if ( msg != NULL ) Kfree(msg);
+	Kfree(fname);
 	wm_update();
 
 	return E_OK;
@@ -803,7 +821,7 @@ typedef struct {
 	T_TVDOC		*doc;
 	T_TVFIG		*fig;
 	BOOL		links;		/* the pages as made: with their links */
-	UB		name[TAD_NAME_MAX];
+	UB		*name;		/* the job's, whole: pj_clear lets it go */
 	TS_UUID		reply;		/* PJ_SPOOL: answered when the job ends */
 	UINT		seq;
 	SZ		anssz;
@@ -842,9 +860,19 @@ LOCAL T_PRNJOB *pj_job( PJOB *J )
 	return ( J->own != NULL ) ? J->own : &J->job;
 }
 
+/* A job's place made free */
+LOCAL void pj_clear( PJOB *J )
+{
+	if ( J->name != NULL ) {
+		Kfree(J->name);
+	}
+	knl_memset(J, 0, sizeof(*J));
+}
+
 LOCAL PJOB *pj_take( UINT kind, UINT how, CONST UB *name )
 {
-	INT	i, k;
+	UB	*own;
+	INT	i;
 
 	for ( i = 0; i < PJ_MAX; i++ ) {
 		if ( !pj[i].used ) break;
@@ -852,16 +880,17 @@ LOCAL PJOB *pj_take( UINT kind, UINT how, CONST UB *name )
 	if ( i == PJ_MAX ) {
 		return NULL;
 	}
+	own = dt_cat(( name != NULL ) ? (CONST char *)name : "", NULL);
+	if ( own == NULL ) {
+		return NULL;
+	}
 	knl_memset(&pj[i], 0, sizeof(pj[i]));
+	pj[i].name = own;
 	pj[i].used = TRUE;
 	pj[i].serial = ++pj_serial;
 	pj[i].kind = kind;
 	pj[i].how = how;
 	pj[i].links = TRUE;
-	for ( k = 0; name != NULL && name[k] != 0 && k < TAD_NAME_MAX - 1; k++ ) {
-		pj[i].name[k] = name[k];
-	}
-	pj[i].name[k] = 0;
 	return &pj[i];
 }
 
@@ -978,7 +1007,7 @@ LOCAL void pj_end( PJOB *J, ER er, CONST T_PRNSET *set )
 	if ( J->done != NULL ) {
 		J->done(J->arg, er, set);
 	}
-	knl_memset(J, 0, sizeof(*J));
+	pj_clear(J);
 	tm_printf((UB *)"print: job %u ended (%d)\n", serial, (INT)er);
 	wm_update();
 	pj_next();
@@ -1084,7 +1113,7 @@ EXPORT void dt_print_vobj( DTWIN *from, CONST T_VOBJ *v )
 	DTWIN		*host = ( from != NULL ) ? from : dt_first_win();
 	CONST T_TAD	*rec = om_store_get(&v->target, ( v->recno > 0 ) ? v->recno : 0);
 	PJOB		*J;
-	UB		name[TAD_NAME_MAX];
+	UB		*name;
 	UW		paper = TV_PAPER_LOOK;
 	BOOL		links = pr_last_ok ? pr_last.links : TRUE;
 
@@ -1092,15 +1121,14 @@ EXPORT void dt_print_vobj( DTWIN *from, CONST T_VOBJ *v )
 		(void)wm_msg_put("実身を読めませんでした");
 		return;
 	}
-	if ( om_store_name(&v->target, name, TAD_NAME_MAX) < 0 ) {
-		name[0] = 0;
-	}
 	(void)om_store_paper(&v->target, &paper);
 	if ( tv_kind(rec) != TV_KIND_DOC && tv_kind(rec) != TV_KIND_FIG ) {
 		dt_tell(host, "この実身は基本印刷できません", "文章か図形の実身を選んでください");
 		return;
 	}
+	name = om_store_name_dup(&v->target, NULL);	/* the job keeps its own copy */
 	J = pj_take(PJ_OBJ, DT_PRINT_SHOW, name);
+	if ( name != NULL ) Kfree(name);
 	if ( J == NULL ) {
 		(void)wm_msg_put("印刷を待っているものが多すぎます");
 		return;
@@ -1117,7 +1145,7 @@ EXPORT void dt_print_vobj( DTWIN *from, CONST T_VOBJ *v )
 		dt_print_src_free(&J->src);
 		if ( J->doc != NULL ) tv_doc_free(J->doc);
 		if ( J->fig != NULL ) tv_fig_free(J->fig);
-		knl_memset(J, 0, sizeof(*J));
+		pj_clear(J);
 		return;
 	}
 	pj_next();
@@ -1133,15 +1161,10 @@ EXPORT ER dt_print_spool( CONST T_DTREQ *rq, SZ anssz )
 {
 	PJOB		*J;
 	SPOOL		*sp;
-	UB		name[sizeof(rq->name) + 1];
+	CONST UB	*name = dt_rq_word(rq, DT_TAIL_NAME, NULL);
 	UW		paper;
 	BOOL		links = pr_last_ok ? pr_last.links : TRUE;
-	INT		k;
 
-	for ( k = 0; k < (INT)sizeof(rq->name) && rq->name[k] != 0; k++ ) {
-		name[k] = rq->name[k];
-	}
-	name[k] = 0;
 	paper = ( ( rq->flags & DT_F_PR_PAPER ) != 0 ) ? (UW)rq->look.bgcol : 0x00FFFFFFU;
 	if ( paper == TV_PAPER_LOOK ) {
 		paper = wm_look(WM_LOOK_WORK);		/* the paper of the scheme, as the window shows it */
@@ -1152,7 +1175,7 @@ EXPORT ER dt_print_spool( CONST T_DTREQ *rq, SZ anssz )
 	}
 	sp = spool_read(&rq->target, &J->job, J->name, paper, rq->flags & ( DT_F_PR_DETAIL | DT_F_PR_HIDDEN ), links);
 	if ( sp == NULL ) {
-		knl_memset(J, 0, sizeof(*J));
+		pj_clear(J);
 		return E_NOEXS;
 	}
 	J->sp = sp;
@@ -1299,7 +1322,7 @@ EXPORT ER dt_print_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 	T_PRNSET	set;
 	TS_UUID		pu;
 	UB		t[DT_TEXT_MAX];
-	INT		at, w, h, pct;
+	INT		w, h, pct;
 	ER		er;
 
 	if ( rq->recno == DT_PJ_JOB ) {
@@ -1323,9 +1346,11 @@ EXPORT ER dt_print_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 		}
 		pj_links(J, set.links);
 		job = pj_job(J);
-		at = set_text(&set, an->text, DT_TEXT_MAX);
-		at = put(an->text, at, DT_TEXT_MAX, "\t");
-		(void)put(an->text, at, DT_TEXT_MAX, (CONST char *)J->name);
+		/* the setting, a tab, the job's name */
+		(void)set_text(&set, t, sizeof(t));
+		(void)dt_ans_cat(an, t, -1);
+		(void)dt_ans_cat(an, (CONST UB *)"\t", 1);
+		(void)dt_ans_cat(an, J->name, -1);
 		an->how = (UINT)job->npage;
 		an->flags = ( ( J->how & DT_PRINT_SHOW ) ? DT_F_PJ_SHOW : 0 ) | ( ( J->how & DT_PRINT_SET ) ? DT_F_PJ_SET : 0 );
 		tm_printf((UB *)"print: job %u taken by process %d\n", J->serial, (INT)pid);
@@ -1334,9 +1359,7 @@ EXPORT ER dt_print_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 	if ( J == NULL || J->pid != pid ) {
 		return E_NOEXS;
 	}
-	knl_memcpy(t, rq->text, sizeof(t));
-	t[sizeof(t) - 1] = 0;
-	if ( !text_set(t, &set) ) {
+	if ( !text_set(dt_rq_word(rq, DT_TAIL_TEXT, NULL), &set) ) {
 		return E_PAR;
 	}
 	pj_links(J, set.links);
@@ -1344,17 +1367,17 @@ EXPORT ER dt_print_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 	switch ( rq->recno ) {
 	case DT_PJ_PAPER:
 		prn_paper(job, &set, &w, &h, &pct);
-		at = put_num(an->text, 0, DT_TEXT_MAX, w);
-		at = put(an->text, at, DT_TEXT_MAX, " ");
-		at = put_num(an->text, at, DT_TEXT_MAX, h);
-		at = put(an->text, at, DT_TEXT_MAX, " ");
-		at = put_num(an->text, at, DT_TEXT_MAX, pct);
-		at = put(an->text, at, DT_TEXT_MAX, " ");
-		at = put_num(an->text, at, DT_TEXT_MAX, prn_sheets(job, &set));
-		at = put(an->text, at, DT_TEXT_MAX, " ");
-		at = put_num(an->text, at, DT_TEXT_MAX, job->lw * job->unit);
-		at = put(an->text, at, DT_TEXT_MAX, " ");
-		(void)put_num(an->text, at, DT_TEXT_MAX, job->lh * job->unit);
+		(void)dt_ans_num(an, w);
+		(void)dt_ans_cat(an, (CONST UB *)" ", 1);
+		(void)dt_ans_num(an, h);
+		(void)dt_ans_cat(an, (CONST UB *)" ", 1);
+		(void)dt_ans_num(an, pct);
+		(void)dt_ans_cat(an, (CONST UB *)" ", 1);
+		(void)dt_ans_num(an, prn_sheets(job, &set));
+		(void)dt_ans_cat(an, (CONST UB *)" ", 1);
+		(void)dt_ans_num(an, job->lw * job->unit);
+		(void)dt_ans_cat(an, (CONST UB *)" ", 1);
+		(void)dt_ans_num(an, job->lh * job->unit);
 		an->how = (UINT)job->npage;
 		return E_OK;
 	case DT_PJ_SHOW:

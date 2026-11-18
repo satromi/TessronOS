@@ -283,6 +283,77 @@ LOCAL void test_setup( void )
 }
 
 /*
+ * A request of a size a program built for an older form writes, as one of
+ * the releases did (R1.000: 368 bytes, answered in 48; R1.100 to R1.400:
+ * 904, answered in 280) or as the forms between did: taken, and answered
+ * in the size that form read. One of a size of no form is answered E_PAR
+ * in the size of the form most programs read, not left unanswered.
+ */
+LOCAL ER ask_sized( ID ans, TS_UUID *reply, SZ size, UINT seq, SZ *p_asz )
+{
+	TS_UUID	d;
+	UB	*buf = (UB *)Kcalloc(1, ( size > (SZ)sizeof(T_DTANS) ) ? (size_t)size : sizeof(T_DTANS));
+	T_DTREQ	*rq = (T_DTREQ *)buf;
+	T_DTANS	*an = (T_DTANS *)Kcalloc(1, sizeof(T_DTANS) + 64);
+	SZ	asz = 0;
+	ID	k;
+	ER	er;
+
+	if ( buf == NULL || an == NULL ) {
+		if ( buf != NULL ) Kfree(buf);
+		if ( an != NULL ) Kfree(an);
+		return E_NOMEM;
+	}
+	rq->req = DT_RQ_WIN_LIST;
+	rq->seq = seq;
+	rq->recno = -1;
+	rq->reply = *reply;
+	er = ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d);
+	k = ( er >= E_OK ) ? ob_opn_obj(&d, OB_OP_WRITE) : (ID)er;
+	if ( k > 0 ) {
+		er = ob_wri_rec(k, 0, 0, buf, size, &asz);
+		ob_cls_obj(k);
+	} else {
+		er = (ER)k;
+	}
+	if ( er >= E_OK ) er = ob_rea_tmo(ans, 0, 0, an, sizeof(T_DTANS) + 64, p_asz, 5000);
+	if ( er >= E_OK ) er = ( an->seq == seq ) ? an->er : E_SYS;
+	Kfree(buf);
+	Kfree(an);
+	return er;
+}
+
+LOCAL void test_old_forms( void )
+{
+	static CONST SZ	taken[] = { 368, 392, 388, 904, 900, 920, 916 };
+	static CONST SZ	ansz[]  = {  48, 280, 280, 280, 280, 280, 280 };
+	T_OBCRE		c;
+	TS_UUID		reply;
+	ID		ans;
+	SZ		asz;
+	INT		i;
+
+	if ( !up ) KT_SKIP("no desktop");
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	KT_ASSERT_ER(ob_cre_obj(&c, &reply), E_OK);
+	ans = ob_opn_obj(&reply, OB_OP_READ);
+	KT_ASSERT(ans > 0);
+	if ( ans <= 0 ) return;
+	for ( i = 0; i < (INT)( sizeof(taken) / sizeof(taken[0]) ); i++ ) {
+		asz = 0;
+		KT_ASSERT_ER(ask_sized(ans, &reply, taken[i], 100 + (UINT)i, &asz), E_OK);
+		KT_ASSERT_EQ(asz, ansz[i]);
+	}
+	/* no form is 500 bytes long */
+	asz = 0;
+	KT_ASSERT_ER(ask_sized(ans, &reply, (SZ)500, 200, &asz), E_PAR);
+	KT_ASSERT_EQ(asz, (SZ)280);
+	ob_cls_obj(ans);
+	(void)ob_del_obj(&reply);
+}
+
+/*
  * ディスク修復 (a process, application/diskfix): its menu, which the
  * program says it opened ("dfix: menu"); ドライブの一覧を更新 and 完全
  * chosen in it, the window carried and sized, and closed with Ctrl+E
@@ -511,7 +582,7 @@ LOCAL T_TAD *shown_rec( INT wid, BOOL save )
 LOCAL BOOL link_screen( INT wid, CONST T_TAD *rec, INT lk, T_DPRECT *b, T_DPRECT *in )
 {
 	T_WMWIN	w;
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 
 	if ( rec == NULL || tad_lnk_get(rec, lk, &v) < E_OK || wm_ref(wid, &w) < E_OK ) return FALSE;
 	if ( in != NULL ) {
@@ -705,6 +776,7 @@ EXPORT void ktest_dtwin( void )
 	if ( logb == NULL ) return;
 	knl_ob_make_for_person(TRUE);
 	KT_RUN(test_setup);
+	KT_RUN(test_old_forms);
 	KT_RUN(test_diskfix);
 	KT_RUN(test_slide);
 	KT_RUN(test_player);

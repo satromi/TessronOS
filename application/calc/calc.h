@@ -124,7 +124,7 @@
 
 extern CXSHEET	g_s;
 extern TS_UUID	g_obj;			/* the sheet's object */
-extern UB	g_name[OB_NAME_MAX];
+extern UB	*g_name;		/* the object's name, whole; never NULL */
 extern BOOL	g_autoref;		/* its store counts the links of its records itself */
 extern UW	g_bg;			/* the object's paper (backgroundColor) */
 
@@ -213,7 +213,9 @@ extern void cell_clear( INT col, INT row );
 extern ER   load( void );
 extern ER   save( void );
 extern INT  meta_of( CONST TS_UUID *u );
-extern void name_of( CONST TS_UUID *u, UB *out );
+/* an object's name, whole, to free; "" in memory of its own when it cannot be read, NULL without memory */
+extern UB *name_of( CONST TS_UUID *u );
+#define NM_OR_EMPTY(p)	( ( (p) != NULL ) ? (CONST UB *)(p) : (CONST UB *)"" )
 extern BOOL link_target( CONST CXCELL *c, TS_UUID *u );
 extern ER   ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms );
 extern void link_open( INT col, INT row );

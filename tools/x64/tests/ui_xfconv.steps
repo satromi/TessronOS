@@ -5,8 +5,9 @@
 # started by opening its program object, as a double press on its link
 # in the program box starts it, the disks and
 # ネットワーク(FTP) listed as blue 仮身; the FTP panel opened and put away;
-# nvmea0 (/boot) opened in a window of its own.
-dclick 80 141
+# nvmea0 (/boot) opened in a window of its own. 仮身サンプル (its link 119 to
+# 137 in the first window) is opened first, as in tools/tests/ui_xfconv.steps.
+dclick 80 131
 wait 1500
 open 01a0d8c4-52b1-7c21-9a31-4f5e6d7c8b91
 expect xfconv: ready

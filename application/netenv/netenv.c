@@ -782,16 +782,18 @@ LOCAL void w_hex( CONST char *s, char *out, INT max )
 LOCAL BOOL w_find( void )
 {
 	TS_UUID		*ids = NULL;
-	T_OBREF		r;
 	INT		cnt, i;
 	BOOL		found = FALSE;
 
 	cnt = ui_lst_obj(OB_T_DEVICE, OB_S_NET, &ids);
 	for ( i = 0; i < cnt && !found; i++ ) {
-		if ( ob_ref_obj(&ids[i], &r) >= E_OK && strcmp((CONST char *)r.name, "wlan0") == 0 ) {
+		UB	*nm = ui_obj_name(&ids[i]);
+
+		if ( nm != NULL && strcmp((CONST char *)nm, "wlan0") == 0 ) {
 			w_dev = ids[i];
 			found = TRUE;
 		}
+		free(nm);
 	}
 	free(ids);
 	return found;

@@ -40,6 +40,7 @@
 #include <ts/tsfsjrnl.h>
 #include <ts/tsfsobj.h>
 #include <ts/tsfsck.h>
+#include <ts/om.h>
 #include "../../peripheral_kernel/fs/tsfsfmt.h"
 #include "../../peripheral_kernel/obj/obj.h"
 
@@ -592,8 +593,13 @@ LOCAL void test_boot( void )
 	KT_ASSERT_ER(run(0, &r), E_OK);
 	KT_ASSERT_EQ(r.problems, 0);
 
-	/* the partition left as the other suites find it */
+	/*
+	 * the partition left as the other suites find it, and the kernel too:
+	 * a desktop started later shows no repair at start (dt_fix_boot)
+	 */
 	(void)ts_format_blk(DEV, "DFIX");
+	knl_ob_chk_boot_forget();
+	KT_ASSERT_EQ(ob_chk_boot_result(NULL, 0, NULL, NULL, 0), 0);
 }
 
 /* ---------------------------------------------------------------- what is made again */
@@ -1088,6 +1094,309 @@ LOCAL void test_attached( void )
 	(void)ts_format_blk(DEV, "DFIX");
 }
 
+/* ---------------------------------------------------------------- the label (design 7.6) */
+
+/* 100 letters of 3 bytes: longer than the superblock's 64 bytes */
+LOCAL CONST char LB_LONG[] =
+	"長いラベル長いラベル長いラベル長いラベル長いラベル長いラベル長いラベル長いラベル長いラベル長いラベル"
+	"長いラベル長いラベル長いラベル長いラベル長いラベル長いラベル長いラベル長いラベル長いラベル長いラベル";
+#define LB_COPY		63		/* 21 letters: the copy, cut at a whole letter */
+
+/* The superblock's copy of the label, as the device has it now */
+LOCAL BOOL lb_copy( UB *out, TS_UUID *p_top )
+{
+	T_TSFSBLK_SB	*sb = (T_TSFSBLK_SB *)Kmalloc(sizeof(T_TSFSBLK_SB));
+	ID		v;
+	BOOL		mine = FALSE, ok = FALSE;
+
+	if ( sb == NULL ) {
+		return FALSE;
+	}
+	v = ts_vol_blk_of(DEV);
+	if ( v <= 0 ) {
+		v = ts_opn_vol_blk(DEV);
+		mine = TRUE;
+	}
+	if ( v > 0 && ts_ref_vol_blk(v, sb) >= E_OK ) {
+		knl_memcpy(out, sb->label, TSFSBLK_LABEL_MAX);
+		if ( p_top != NULL ) *p_top = sb->root_uuid;
+		ok = TRUE;
+	}
+	if ( mine && v > 0 ) {
+		(void)ts_cls_vol_blk(v);
+	}
+	Kfree(sb);
+	return ok;
+}
+
+/* Whether the copy is the first n bytes of s, nought after them */
+LOCAL BOOL lb_is( CONST UB *copy, CONST char *s, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( copy[i] != (UB)s[i] ) return FALSE;
+	}
+	for ( ; i < TSFSBLK_LABEL_MAX; i++ ) {
+		if ( copy[i] != 0 ) return FALSE;
+	}
+	return TRUE;
+}
+
+/* The entry of ob_chk_list for the scratch volume */
+LOCAL BOOL lb_listed( T_TSFSCKDEV *out )
+{
+	T_TSFSCKDEV	*d;
+	INT		n, i, cap = 8;
+	BOOL		hit = FALSE;
+
+	for ( ;; ) {
+		d = (T_TSFSCKDEV *)Kmalloc(sizeof(T_TSFSCKDEV) * (SZ)cap);
+		if ( d == NULL ) {
+			return FALSE;
+		}
+		n = ob_chk_list(d, cap);
+		if ( n <= cap ) {
+			break;
+		}
+		Kfree(d);
+		cap = n;
+	}
+	for ( i = 0; i < n && !hit; i++ ) {
+		if ( knl_strcmp((char *)d[i].devnm, DEV) == 0 ) {
+			*out = d[i];
+			hit = TRUE;
+		}
+	}
+	Kfree(d);
+	return hit;
+}
+
+/* The label of the volume attached, read whole into memory of its own */
+LOCAL UB *lb_attached( SZ *p_asize )
+{
+	UB	*b;
+	SZ	asz = 0;
+
+	if ( knl_obfile_vol_label(DEV, NULL, 0, &asz) < E_OK || asz <= 0 ) {
+		return NULL;
+	}
+	b = (UB *)Kmalloc(asz);
+	if ( b != NULL && knl_obfile_vol_label(DEV, b, asz, p_asize) < E_OK ) {
+		Kfree(b);
+		b = NULL;
+	}
+	return b;
+}
+
+/*
+ * A volume made with a label of 100 letters: the superblock keeps its
+ * first 63 bytes, cut at a whole letter; the top object carries it whole,
+ * read whole before the volume is attached, while it is, and after it is
+ * attached again
+ */
+LOCAL void test_label_long( void )
+{
+	T_TSFSCKDEV	e;
+	T_OBFVREF	ref;
+	UB		copy[TSFSBLK_LABEL_MAX], b10[10], *got;
+	TS_UUID		top;
+	SZ		asz = 0, whole = (SZ)sizeof(LB_LONG);
+	INT		round;
+
+	(void)ob_det_vol(DEV);
+	KT_ASSERT_ER(knl_tsfs_format(DEV, LB_LONG), E_OK);
+	KT_ASSERT(lb_copy(copy, &top));
+	KT_ASSERT(lb_is(copy, LB_LONG, LB_COPY));
+	KT_ASSERT_EQ(ts_label_whole(copy, LB_COPY), LB_COPY);
+	KT_ASSERT(!( top.d.hi == 0 && top.d.lo == 0 ));
+
+	/* not attached: the top read with the volume opened for it */
+	got = (UB *)Kmalloc(whole);
+	KT_ASSERT(got != NULL);
+	if ( got == NULL ) return;
+	KT_ASSERT_ER(ob_chk_label(DEV, got, whole, &asz), E_OK);
+	KT_ASSERT_EQ(asz, whole);
+	KT_ASSERT_EQ(knl_strcmp((char *)got, LB_LONG), 0);
+	KT_ASSERT_ER(ob_chk_label(DEV, b10, sizeof(b10), &asz), E_OK);
+	KT_ASSERT_EQ(asz, whole);
+	KT_ASSERT_EQ(knl_strlen((char *)b10), 9);	/* three letters: a fourth does not fit */
+	Kfree(got);
+	KT_ASSERT(lb_listed(&e));
+	KT_ASSERT(lb_is(e.label, LB_LONG, LB_COPY));
+	KT_ASSERT(( e.flags & TSFSCK_F_LABELCUT ) != 0);
+
+	for ( round = 0; round < 2; round++ ) {
+		KT_ASSERT_ER(ob_att_vol(DEV, TSFS_STORE_BLK), E_OK);
+		got = lb_attached(&asz);
+		KT_ASSERT(got != NULL);
+		if ( got != NULL ) {
+			KT_ASSERT_EQ(asz, whole);
+			KT_ASSERT_EQ(knl_strcmp((char *)got, LB_LONG), 0);
+			Kfree(got);
+		}
+		KT_ASSERT_ER(knl_obfile_vol_ref(DEV, &ref), E_OK);
+		KT_ASSERT(ref.native);
+		KT_ASSERT(lb_listed(&e));
+		KT_ASSERT(e.attached);
+		KT_ASSERT(( e.flags & TSFSCK_F_LABELCUT ) != 0);
+		KT_ASSERT(lb_copy(copy, NULL));
+		KT_ASSERT(lb_is(copy, LB_LONG, LB_COPY));	/* the copy agreed: not written again */
+		KT_ASSERT_ER(ob_det_vol(DEV), E_OK);
+	}
+}
+
+/* A volume of a system before: no top object, the label only in the superblock */
+LOCAL void test_label_old( void )
+{
+	T_TSFSCKDEV	e;
+	T_OBFVREF	ref;
+	UB		copy[TSFSBLK_LABEL_MAX], buf[32], *got;
+	TS_UUID		top;
+	SZ		asz = 0;
+
+	(void)ob_det_vol(DEV);
+	KT_ASSERT_ER(ts_format_blk(DEV, "OLD DISK"), E_OK);
+	KT_ASSERT(lb_copy(copy, &top));
+	KT_ASSERT(top.d.hi == 0 && top.d.lo == 0);
+	KT_ASSERT_ER(ob_chk_label(DEV, buf, sizeof(buf), &asz), E_OK);
+	KT_ASSERT_EQ(asz, 9);
+	KT_ASSERT_EQ(knl_strcmp((char *)buf, "OLD DISK"), 0);
+	KT_ASSERT(lb_listed(&e));
+	KT_ASSERT(( e.flags & TSFSCK_F_LABELCUT ) == 0);
+
+	KT_ASSERT_ER(ob_att_vol(DEV, TSFS_STORE_BLK), E_OK);
+	got = lb_attached(&asz);
+	KT_ASSERT(got != NULL);
+	if ( got != NULL ) {
+		KT_ASSERT_EQ(knl_strcmp((char *)got, "OLD DISK"), 0);
+		Kfree(got);
+	}
+	KT_ASSERT_ER(knl_obfile_vol_ref(DEV, &ref), E_OK);
+	KT_ASSERT(ref.native && ref.top.d.hi == 0 && ref.top.d.lo == 0);
+	KT_ASSERT(lb_copy(copy, NULL));
+	KT_ASSERT(lb_is(copy, "OLD DISK", 8));
+	KT_ASSERT_ER(ob_det_vol(DEV), E_OK);
+}
+
+/* The top renamed: the name is the label, and the superblock's copy follows it */
+LOCAL ER lb_rename( ID vol, CONST TS_UUID *top, CONST char *name )
+{
+	ID	od = ts_opn_obj(vol, top, TFO_READ | TFO_WRITE);
+	ER	er;
+
+	if ( od <= 0 ) {
+		return ( od < E_OK ) ? (ER)od : E_SYS;
+	}
+	er = ts_set_nam(od, (CONST UB *)name);
+	(void)ts_cls_obj(od);
+	return er;
+}
+
+/*
+ * The top's name and the copy disagree -- a system before renamed the top
+ * -- the top's name is the label, and attaching writes the copy again; a
+ * rename while attached is followed by knl_obfile_label_sync
+ */
+LOCAL void test_label_differ( void )
+{
+	UB	copy[TSFSBLK_LABEL_MAX], *got;
+	TS_UUID	top, other;
+	SZ	asz = 0;
+	ID	vol;
+
+	(void)ob_det_vol(DEV);
+	KT_ASSERT_ER(knl_tsfs_format(DEV, "AAA"), E_OK);
+	KT_ASSERT(lb_copy(copy, &top));
+	vol = ts_opn_vol(DEV, TSFS_STORE_BLK);
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) return;
+	KT_ASSERT_ER(lb_rename(vol, &top, LB_LONG), E_OK);
+	(void)ts_cls_vol(vol);
+	KT_ASSERT(lb_copy(copy, NULL));
+	KT_ASSERT(lb_is(copy, "AAA", 3));		/* as a system before leaves it */
+
+	KT_ASSERT_ER(ob_att_vol(DEV, TSFS_STORE_BLK), E_OK);
+	got = lb_attached(&asz);
+	KT_ASSERT(got != NULL);
+	if ( got != NULL ) {
+		KT_ASSERT_EQ(knl_strcmp((char *)got, LB_LONG), 0);
+		Kfree(got);
+	}
+	KT_ASSERT(lb_copy(copy, NULL));
+	KT_ASSERT(lb_is(copy, LB_LONG, LB_COPY));	/* written again on attaching */
+
+	vol = knl_obfile_vol_path(DEV);
+	KT_ASSERT(vol > 0);
+	if ( vol > 0 ) {
+		KT_ASSERT_ER(lb_rename(vol, &top, "BBB"), E_OK);
+		KT_ASSERT_ER(knl_obfile_label_sync(&top), E_OK);
+		KT_ASSERT(lb_copy(copy, NULL));
+		KT_ASSERT(lb_is(copy, "BBB", 3));
+		KT_ASSERT_ER(ts_gen_uuid(&other), E_OK);
+		KT_ASSERT_ER(knl_obfile_label_sync(&other), E_NOEXS);	/* on no volume attached */
+	}
+	KT_ASSERT_ER(ob_det_vol(DEV), E_OK);
+	(void)ts_format_blk(DEV, "DFIX");
+}
+
+/* Whether two protections say the same: owner, group, mode, attributes, ACL and limits */
+LOCAL BOOL lb_same_prt( CONST T_OBPRT *a, CONST T_OBPRT *b )
+{
+	INT	i;
+
+	if ( a == NULL || b == NULL ) {
+		return FALSE;
+	}
+	if ( ts_uuid_cmp(&a->owner, &b->owner) != 0 || ts_uuid_cmp(&a->group, &b->group) != 0
+	  || a->mode != b->mode || a->attr != b->attr || a->nacl != b->nacl || a->nrmask != b->nrmask ) {
+		return FALSE;
+	}
+	for ( i = 0; i < (INT)( OB_PRT_SIZE(a->nacl, a->nrmask) - sizeof(T_OBPRT) ); i++ ) {
+		if ( ((CONST UB *)a->acl)[i] != ((CONST UB *)b->acl)[i] ) return FALSE;
+	}
+	return TRUE;
+}
+
+/*
+ * The top of a volume 区画作成 makes is made below the object layer; given
+ * the person's protection (knl_obfile_top_prot, as the desktop does), it
+ * has the protection the desktop gave the top it made before (om_cre_obj
+ * in a task that makes for the person): owner, group, mode, ACL the same
+ */
+LOCAL void test_label_prot( void )
+{
+	UB	copy[TSFSBLK_LABEL_MAX];
+	TS_UUID	top, old;
+	T_OBPRT	*a = NULL, *b = NULL, *c = NULL;
+
+	(void)ob_det_vol(DEV);
+	KT_ASSERT_ER(knl_tsfs_format(DEV, "PROT"), E_OK);
+	KT_ASSERT(lb_copy(copy, &top));
+	KT_ASSERT_ER(ob_att_vol(DEV, TSFS_STORE_BLK), E_OK);
+	knl_ob_make_for_person(TRUE);
+	KT_ASSERT_ER(knl_obfile_top_prot(DEV, knl_ob_session_crd()), E_OK);
+	KT_ASSERT_ER(om_cre_obj(DEV, (CONST UB *)"PROT", OM_BODY_FIG, &old), E_OK);
+	knl_ob_make_for_person(FALSE);
+	a = knl_ob_prt_get(&top);
+	b = knl_ob_prt_get(&old);
+	KT_ASSERT(a != NULL && b != NULL);
+	KT_ASSERT(lb_same_prt(a, b));
+	if ( a != NULL ) {
+		tm_printf((UB *)"  the top: mode %o, %d ACL entries\n", a->mode, a->nacl);
+	}
+	/* a top protected already is left as it is */
+	KT_ASSERT_ER(knl_obfile_top_prot(DEV, &knl_ob_crd_system), E_OK);
+	c = knl_ob_prt_get(&top);
+	KT_ASSERT(lb_same_prt(a, c));
+	if ( a != NULL ) Kfree(a);
+	if ( b != NULL ) Kfree(b);
+	if ( c != NULL ) Kfree(c);
+	(void)ob_del_obj(&old);
+	KT_ASSERT_ER(ob_det_vol(DEV), E_OK);
+	(void)ts_format_blk(DEV, "DFIX");
+}
+
 EXPORT void ktest_dfix( void )
 {
 	KT_RUN(test_clean);
@@ -1101,4 +1410,8 @@ EXPORT void ktest_dfix( void )
 	KT_RUN(test_salvage);
 	KT_RUN(test_cycles);
 	KT_RUN(test_attached);
+	KT_RUN(test_label_long);
+	KT_RUN(test_label_old);
+	KT_RUN(test_label_differ);
+	KT_RUN(test_label_prot);
 }

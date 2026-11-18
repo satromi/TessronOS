@@ -19,7 +19,7 @@
       "id": "tessronos-worddic",
       "kind": "accessory",
       "name": "単語登録",
-      "version": "R1.400",
+      "version": "R1.410",
       "menu": true,
       "builtin": false,
       "base": []

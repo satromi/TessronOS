@@ -199,6 +199,24 @@ IMPORT CONST INT	cf_look_nitem;
 
 IMPORT CONST CF_ITEM *cf_look_look( UINT look );
 
+/* ------------------------------------------------------------ 写し: a page's settings as an object */
+
+/*
+ * システム環境設定's 写し (design 11.6): an object of the person's whose
+ * record 1 holds lines in the form of the machine's settings, of the
+ * page its metadata names (tessronos.confcopy.page). Only the lines of
+ * that page's table are read from it: cf_copy_allowed says whether the
+ * page (its name, as the applist's data names it: "screen", "window"...)
+ * takes the line, and cf_copy_lines writes the lines of text it takes
+ * into out, "KEY<tab>VALUE" each with a line end, and leaves out every
+ * other line, a remark (#) and a line too long: the length, -1 when out
+ * has no room. A page with no table takes nothing.
+ */
+IMPORT BOOL cf_copy_allowed( CONST char *page, CONST char *key );
+/* The page of ユーザ環境設定 ("user.pointer"...) the entry look is set on; NULL for 〈個人属性〉 or none */
+IMPORT CONST char *cf_user_page( UINT look );
+IMPORT INT  cf_copy_lines( CONST UB *text, INT len, CONST char *page, UB *out, INT max );
+
 /* ------------------------------------------------------------ links in a settings object */
 
 /*

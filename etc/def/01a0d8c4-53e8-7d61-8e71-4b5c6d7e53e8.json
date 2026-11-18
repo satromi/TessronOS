@@ -19,7 +19,7 @@
       "id": "disk-operation",
       "kind": "utility",
       "name": "ディスク操作",
-      "version": "R1.400",
+      "version": "R1.410",
       "menu": false,
       "builtin": false,
       "base": []

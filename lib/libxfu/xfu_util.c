@@ -50,6 +50,8 @@ EXPORT INT xfu_scpy( UB *d, INT max, CONST UB *s )
 		d[n] = s[n];
 		n++;
 	}
+	/* cut short: never half a letter */
+	while ( n > 0 && s != NULL && s[n] != 0 && ( s[n] & 0xC0 ) == 0x80 ) n--;
 	d[n] = 0;
 	return n;
 }

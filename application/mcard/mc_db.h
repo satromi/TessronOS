@@ -53,7 +53,7 @@
 #define MC_CARD_MAX	30000		/* cards of one object */
 #define MC_WIDTH_MAX	50		/* letters a field is shown in the list */
 #define MC_VALUE_MAX	( MC_TEXT_MAX * 4 + 1 )	/* bytes of a text, with its terminator */
-#define MC_OBJ_NAME	64		/* bytes of an object's name (OB_NAME_MAX) */
+#define MC_OBJ_NAME	64		/* bytes of an object's name kept for %N: cut at a whole letter */
 
 /* The kinds of field */
 #define MC_T_TEXT	0

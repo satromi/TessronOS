@@ -370,11 +370,12 @@ LOCAL void command_in( UB tl, CONST UB *f, INT n )
 
 LOCAL void answer_in( UB tl, CONST UB *f, INT n )
 {
-	UB	pdu, rs = (UB)( f[0] & 0x0f );
+	UB	pdu, rs;
 	CONST UB *prm;
 	INT	plen, i;
 
 	if ( n < 10 || f[2] != OP_VENDOR ) return;
+	rs = (UB)( f[0] & 0x0f );
 	pdu = f[6];
 	plen = ( f[8] << 8 ) | f[9];
 	prm = f + 10;

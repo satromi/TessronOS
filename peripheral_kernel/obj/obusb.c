@@ -42,8 +42,8 @@
 typedef struct {
 	BOOL		used;
 	T_USBDEV	d;
-	UB		name[OB_DV_NAME];
-	UB		port[24];
+	UB		name[OB_USB_NAME_MAX];
+	UB		port[OB_USB_PATH_MAX];
 	TS_UUID		uuid;
 } UODEV;
 
@@ -351,7 +351,7 @@ LOCAL INT uo_grow( void )
 LOCAL void sync( void )
 {
 	T_USBDEV	*d = NULL;
-	UB		(*gone)[OB_DV_NAME];
+	UB		(*gone)[OB_USB_NAME_MAX];
 	INT		n, i, k, ng = 0, room;
 
 	/* every device of the tree: asked how many, and asked again while more came than there was room for */
@@ -379,7 +379,7 @@ LOCAL void sync( void )
 			uo_tbl[i]->d = d[k];		/* a role or a disk's name that came since */
 			continue;
 		}
-		knl_memcpy(gone[ng++], uo_tbl[i]->name, OB_DV_NAME);
+		knl_memcpy(gone[ng++], uo_tbl[i]->name, OB_USB_NAME_MAX);
 		uo_tbl[i]->used = FALSE;
 	}
 	UNLOCK();
@@ -407,8 +407,8 @@ LOCAL void sync( void )
 		knl_memset(&e, 0, sizeof(e));
 		e.d = d[k];
 		(void)knl_obusb_path(&d[k], e.port, sizeof(e.port));
-		i = knl_oj_put(e.name, 0, OB_DV_NAME, "usb");
-		(void)knl_oj_put(e.name, i, OB_DV_NAME, (CONST char *)e.port);
+		i = knl_oj_put(e.name, 0, OB_USB_NAME_MAX, "usb");
+		(void)knl_oj_put(e.name, i, OB_USB_NAME_MAX, (CONST char *)e.port);
 		e.used = TRUE;
 		LOCK();
 		*uo_tbl[slot] = e;

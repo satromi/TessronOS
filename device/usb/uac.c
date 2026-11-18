@@ -589,8 +589,13 @@ LOCAL UAC *uac_playback( void )
 /*
  * A function's output id (include/ts/snd.h): "usb:VVVV:PPPP@C-R.h.h",
  * the controller, its root port from 1 and then the hub port of each
- * tier on the way down.
+ * tier on the way down. Its room is what the form can take at most:
+ * "usb:VVVV:PPPP@" 14 bytes, the controller and the root port as INTs
+ * (11 each) with the '-', the five tiers of hubs USB has (USB 2.0
+ * 4.1.1) as ".h" with h a nibble of the route string (3 each), the NUL.
  */
+#define UAC_ID_ROOM	( 14 + 11 + 1 + 11 + 5 * 3 + 1 )
+
 LOCAL void uac_id( CONST UAC *u, UB *id )
 {
 	CONST USBDEV	*d = u->dev;
@@ -618,7 +623,7 @@ LOCAL BOOL same_kind( CONST UB *a, CONST UB *b )
 /* The function of output id: the one at its port, else the first of its ids, else none */
 LOCAL UAC *uac_of( CONST UB *id )
 {
-	UB	mine[SND_ID_MAX];
+	UB	mine[UAC_ID_ROOM];
 	UAC	*like = NULL;
 	INT	i;
 
@@ -640,24 +645,24 @@ LOCAL UAC *uac_of( CONST UB *id )
 	return like;
 }
 
-LOCAL INT uac_outputs( SDOut *o, INT max )
+LOCAL ER uac_outs( SNDOUTS *l )
 {
-	UB	id[SND_ID_MAX];
-	INT	i, n = 0;
+	UB	id[UAC_ID_ROOM];
+	INT	i;
+	ER	er = E_OK;
 
-	for ( i = 0; i < UAC_N && n < max; i++ ) {
+	for ( i = 0; i < UAC_N && er >= E_OK; i++ ) {
 		UAC	*u = UAC_AT(i);
 
 		if ( !u->used || u->play.nalt == 0 ) {
 			continue;
 		}
 		uac_id(u, id);
-		knl_snd_out_set(&o[n], id, u->dev->product, SND_BE_USB,
-				( u->play.fu_id != 0 && u->play.vol_max > u->play.vol_min ) ? SND_OF_LEVEL : 0);
-		n++;
+		er = knl_snd_out_add(l, id, u->dev->product, SND_BE_USB,
+				     ( u->play.fu_id != 0 && u->play.vol_max > u->play.vol_min ) ? SND_OF_LEVEL : 0);
 	}
 
-	return n;
+	return er;
 }
 
 /* ---------------------------------------------------------------- streams */
@@ -959,7 +964,7 @@ LOCAL ER uac_set_level( INT dn, CONST SDVol *v )
 
 EXPORT CONST SNDHW knl_uac_hw = {
 	SND_BE_USB,
-	uac_outputs,
+	NULL,
 	uac_can_record,
 	uac_play_start,
 	uac_play_stop,
@@ -971,5 +976,6 @@ EXPORT CONST SNDHW knl_uac_hw = {
 	uac_get_level,
 	uac_set_level,
 	0,
-	0
+	0,
+	uac_outs
 };

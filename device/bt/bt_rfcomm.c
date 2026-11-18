@@ -75,7 +75,7 @@
 #define CREDITS_GIVE		7
 #define CREDITS_LOW		3
 #define RFC_TMO_MS		10000
-#define TXQ_MAX			1024
+#define TXQ_FIRST		512	/* the room for what waits for credits at the start, made bigger as needed */
 
 enum { S_NONE, S_L2, S_SABM0, S_MUX, S_DISC0 };
 enum { D_NONE, D_PN, D_SABM, D_OPEN };
@@ -95,8 +95,8 @@ typedef struct {
 	BOOL	fc_off;			/* the earphones said to stop */
 	BOOL	msc_sent;
 	UW	due;
-	UB	txq[TXQ_MAX];		/* what waits for credits */
-	INT	txn;
+	UB	*txq;			/* what waits for credits and the flow: txn bytes from txh */
+	INT	txh, txn, txcap;
 } RFC;
 
 LOCAL RFC	rfc;
@@ -163,8 +163,9 @@ LOCAL void frame( UB dlci, UB ctrl, BOOL command, INT credits, CONST UB *d, INT 
 /* A message on the multiplexer's channel */
 LOCAL void mux_msg( UB type, BOOL command, CONST UB *d, INT n )
 {
-	UB	b[2 + 16];
+	UB	b[N1_MINE];
 
+	if ( n < 0 || 2 + n > N1_MINE ) return;
 	b[0] = (UB)( type | ( command ? M_CR : 0 ) | M_EA );
 	b[1] = (UB)( ( n << 1 ) | 1 );
 	if ( n > 0 ) knl_memcpy(b + 2, d, n);
@@ -214,23 +215,50 @@ LOCAL void tx_pump( void )
 
 		if ( !knl_btx_tx_room(rfc.c, 2) ) return;
 		if ( rfc.cfc ) rfc.tx_cred--;
-		frame(rfc.dlci, F_UIH, TRUE, -1, rfc.txq, k);
+		frame(rfc.dlci, F_UIH, TRUE, -1, rfc.txq + rfc.txh, k);
+		rfc.txh += k;
 		rfc.txn -= k;
-		if ( rfc.txn > 0 ) knl_memcpy(rfc.txq, rfc.txq + k, rfc.txn);
+		if ( rfc.txn == 0 ) rfc.txh = 0;
 	}
 }
 
-EXPORT void knl_btf_send( BTC *c, CONST UB *d, INT n )
+EXPORT ER knl_btf_send( BTC *c, CONST UB *d, INT n )
 {
+	INT	i;
+
 	(void)c;
-	if ( rfc.dst != D_OPEN ) return;
-	if ( rfc.txn + n > TXQ_MAX ) {
-		tm_printf((UB *)"bt: RFCOMM: %d bytes lost, the earphones take no more\n", n);
-		return;
+	if ( rfc.dst != D_OPEN ) return E_OBJ;
+	if ( n <= 0 ) return E_OK;
+	if ( rfc.txn + n > RFC_TXQ_LIMIT ) {
+		/* the earphones have taken nothing for long: the one sending is told, nothing is let go */
+		tm_printf((UB *)"bt: RFCOMM: %d bytes wait for the earphones, who take nothing now: %d more not taken\n", rfc.txn, n);
+		return E_BUSY;
 	}
-	knl_memcpy(rfc.txq + rfc.txn, d, n);
+	if ( rfc.txh + rfc.txn + n > rfc.txcap ) {
+		if ( rfc.txn + n <= rfc.txcap ) {
+			/* room at the front: what waits moved there, first byte first */
+			for ( i = 0; i < rfc.txn; i++ ) rfc.txq[i] = rfc.txq[rfc.txh + i];
+		} else {
+			INT	cap = ( rfc.txcap > 0 ) ? rfc.txcap * 2 : TXQ_FIRST;
+			UB	*nb;
+
+			while ( cap < rfc.txn + n ) cap *= 2;
+			nb = (UB *)Kmalloc((SZ)cap);
+			if ( nb == NULL ) {
+				tm_printf((UB *)"bt: RFCOMM: no room for %d bytes to the earphones\n", rfc.txn + n);
+				return E_NOMEM;
+			}
+			if ( rfc.txn > 0 ) knl_memcpy(nb, rfc.txq + rfc.txh, rfc.txn);
+			if ( rfc.txq != NULL ) Kfree(rfc.txq);
+			rfc.txq = nb;
+			rfc.txcap = cap;
+		}
+		rfc.txh = 0;
+	}
+	knl_memcpy(rfc.txq + rfc.txh + rfc.txn, d, n);
 	rfc.txn += n;
 	tx_pump();
+	return E_OK;
 }
 
 /* ---------------------------------------------------------------- the session */
@@ -241,7 +269,7 @@ LOCAL void dlc_down( void )
 
 	rfc.dlci = 0;
 	rfc.dst = D_NONE;
-	rfc.txn = 0;
+	rfc.txh = rfc.txn = 0;
 	rfc.msc_sent = FALSE;
 	if ( was ) knl_bth_dlc_down(rfc.c, rfc.p);
 }
@@ -370,6 +398,7 @@ LOCAL void mux_in( CONST UB *d, INT n )
 		if ( command ) {
 			UB	r[8];
 
+			if ( len < 1 ) break;		/* no DLCI: nothing to answer about */
 			if ( len >= 8 ) {
 				knl_memcpy(r, v, 8);
 			} else {
@@ -390,7 +419,7 @@ LOCAL void mux_in( CONST UB *d, INT n )
 		if ( command && len >= 2 ) mux_msg(M_RLS, FALSE, v, 2);
 		break;
 	case M_TEST:
-		if ( command && len <= 16 ) mux_msg(M_TEST, FALSE, v, len);
+		if ( command && 2 + len <= N1_MINE ) mux_msg(M_TEST, FALSE, v, len);	/* what came back as it came */
 		break;
 	case M_FCON:
 	case M_FCOFF:

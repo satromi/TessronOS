@@ -1,14 +1,18 @@
 # ディスク操作 on the x64 PC (tools/x64/ui_run64.py --vols DIR): tools/tests/ui_vols.steps with
-# the disks of the q35 machine: the 接続 panel lists nvmea0 (/boot), nvmea2 (/tslog)
-# and then uda0, uda1, uda2, five rows where QEMU virt has seven, so it is 26 pixels
-# shorter: uda0 at 430,380, uda2 at 430,432 and 接続 at 822,490; the rest as there.
+# the disks of the q35 machine: the list of ディスク操作 has nvmea0 (/boot) and nvmea2 (/tslog)
+# before uda0, uda1, uda2, two rows where QEMU virt has four, so uda0 is at 430,368 and uda2
+# at 430,404 (rows 18 pixels apart from 332); the rest as there.
 # ディスク操作 (design 11.26), for tools/ui_run.py --vols DIR, DIR made by
 # tools/tests/mkvoldisk.py: volc.img plugged into the hub (VOLC1 a TSFS
 # partition uda0, a blank one uda1, a FAT16 one uda2). The first window
 # (BTRON) is made larger; 接続 from its menu (ディスク操作 at 440,480 when
-# the menu opens at 400,300, 接続 to its right) offers the partitions in a
-# panel in the middle of the screen, a row 26 pixels apart from 303. The
-# FAT partition is refused as files. VOLC1 attached: its link at the foot
+# the menu opens at 400,300, 接続 to its right) starts the program ディスク操作
+# (a process), which offers the partitions in a window of its own in the
+# middle of the screen, a list whose rows are 18 pixels apart from 332, its
+# 接続 at 823,498. The FAT partition is refused as files. A USB medium the
+# system uses nothing of is the person's to attach and take away: no
+# administrator's password is asked for (design 8.7.1); formerly the desktop asked for the password in
+# a panel of its own (chosen the first time, typed twice with Tab between). VOLC1 attached: its link at the foot
 # of the first window (120,205), marked as on another volume; opened, its
 # window keeps 切り離し from being done; closed, 切り離し leaves the link
 # pale, and opening it says the volume is not attached. 接続 again, then
@@ -39,9 +43,9 @@ click 530 481
 expect disk: connect offers
 wait 800
 shot vol_connect
-click 430 432
+click 430 404
 wait 200
-click 822 490
+click 823 498
 expect disk: uda2 is files, not objects
 wait 600
 shot vol_fat
@@ -61,16 +65,20 @@ wait 300
 click 530 301
 expect disk: connect offers
 wait 800
-click 430 380
+click 430 368
 wait 200
-click 822 490
+click 823 498
+expect disk: uda0 is the person's medium
 expect disk: attached uda0 "VOLC1"
 wait 1000
 shot vol_attached
-# its top object opened: 切り離し refused
+# its top object opened: 切り離し refused. Its window (a process's) stands
+# over the first window, which is brought forward by its band first
 dclick 120 205
 wait 1500
 shot vol_top
+click 300 12
+wait 300
 click 60 205 1
 wait 300
 move 90 205
@@ -130,9 +138,9 @@ wait 300
 click 190 206
 expect disk: connect offers
 wait 800
-click 430 380
+click 430 368
 wait 200
-click 822 490
+click 823 498
 expect disk: attached uda0
 wait 1000
 click 60 205 1
@@ -190,12 +198,13 @@ expect disk: uda0 is back
 expect disk: attached uda0
 wait 1500
 shot vol_back
-# Pulled out with changes not saved (the link in VOLC1's top moved): asked
+# Pulled out with changes not saved (the link in VOLC1's top moved; its
+# window, a process's, stands at 62,42 with the link 画面印刷 at 86,76): asked
 # where they go; Enter takes the first, the system's volume, as an object
 # of its own with a link in the first window.
 dclick 120 205
 wait 1500
-drag 270 172 420 300
+drag 200 85 350 213
 wait 500
 hmp device_del uvcd
 expect disk: VOLC1 has changes not saved; 1 volumes to save to
@@ -213,7 +222,7 @@ wait 1500
 # again, kept until the disk is put back
 dclick 120 205
 wait 1500
-drag 270 172 420 360
+drag 200 85 350 273
 wait 500
 hmp device_del uvcd
 expect disk: VOLC1 has changes not saved

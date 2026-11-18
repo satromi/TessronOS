@@ -291,6 +291,78 @@ EXPORT void knl_exception_handler( void *frame, UD esr, UD far )
 }
 
 /*
+ * knl_rdmsr_safe and knl_wrmsr_safe (syslib.h): the RDMSR or WRMSR at a
+ * label of its own. A general protection fault taken there (the
+ * processor has no such register, or refuses the value) goes on at the
+ * label after it with R8 set, and the call returns E_NOSPT; R8 is free
+ * across a call. The arguments: the register in EDI, the place of the
+ * value read in RSI, the value to write in RSI.
+ */
+__asm__(
+"	.text\n"
+"	.globl	knl_rdmsr_safe\n"
+"	.type	knl_rdmsr_safe, @function\n"
+"knl_rdmsr_safe:\n"
+"	mov	%edi, %ecx\n"
+"	xor	%r8d, %r8d\n"
+"	.globl	knl_msr_rd_at\n"
+"knl_msr_rd_at:\n"
+"	rdmsr\n"
+"	.globl	knl_msr_rd_back\n"
+"knl_msr_rd_back:\n"
+"	test	%r8d, %r8d\n"
+"	jnz	1f\n"
+"	shl	$32, %rdx\n"
+"	mov	%eax, %eax\n"
+"	or	%rdx, %rax\n"
+"	mov	%rax, (%rsi)\n"
+"	xor	%eax, %eax\n"
+"	ret\n"
+"1:	mov	$-9, %eax\n"			/* E_NOSPT */
+"	ret\n"
+"	.size	knl_rdmsr_safe, . - knl_rdmsr_safe\n"
+"	.globl	knl_wrmsr_safe\n"
+"	.type	knl_wrmsr_safe, @function\n"
+"knl_wrmsr_safe:\n"
+"	mov	%edi, %ecx\n"
+"	mov	%esi, %eax\n"
+"	mov	%rsi, %rdx\n"
+"	shr	$32, %rdx\n"
+"	xor	%r8d, %r8d\n"
+"	.globl	knl_msr_wr_at\n"
+"knl_msr_wr_at:\n"
+"	wrmsr\n"
+"	.globl	knl_msr_wr_back\n"
+"knl_msr_wr_back:\n"
+"	xor	%eax, %eax\n"
+"	test	%r8d, %r8d\n"
+"	jz	2f\n"
+"	mov	$-9, %eax\n"
+"2:	ret\n"
+"	.size	knl_wrmsr_safe, . - knl_wrmsr_safe\n"
+);
+
+IMPORT CONST UB	knl_msr_rd_at[], knl_msr_rd_back[], knl_msr_wr_at[], knl_msr_wr_back[];
+EXPORT volatile UW	knl_msr_refused = 0;	/* the safe reads and writes refused, for the records */
+
+LOCAL BOOL msr_refused( T_EXCFRAME *f )
+{
+	if ( f->vec != 13 ) {
+		return FALSE;
+	}
+	if ( f->rip == (UD)(UBINT)knl_msr_rd_at ) {
+		f->rip = (UD)(UBINT)knl_msr_rd_back;
+	} else if ( f->rip == (UD)(UBINT)knl_msr_wr_at ) {
+		f->rip = (UD)(UBINT)knl_msr_wr_back;
+	} else {
+		return FALSE;
+	}
+	f->r8 = 1;
+	__atomic_add_fetch(&knl_msr_refused, 1, __ATOMIC_RELAXED);
+	return TRUE;
+}
+
+/*
  * A page fault taken in the kernel. An access refused by SMAP to a page
  * a process may reach, met while the kernel works for it in a call, is
  * recorded, and the call goes on to its end with the way open (it would
@@ -345,6 +417,9 @@ EXPORT void knl_kernel_fault( void *frame, UD esr, UD far )
 {
 	T_EXCFRAME	*f = (T_EXCFRAME *)frame;
 
+	if ( msr_refused(f) ) {
+		return;
+	}
 	if ( f->vec == VEC_PF ) {
 		if ( knl_stack_guard_hit(knl_ctxtsk, (UBINT)far) ) {
 			stack_out_say(far, f);

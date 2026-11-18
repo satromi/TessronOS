@@ -421,7 +421,7 @@ LOCAL BOOL pick_at( INT owner, UW *io, INT x, INT y, BOOL *p_same )
 		return FALSE;
 	}
 	pid = wm_panel_open_at(owner, def, x, y);
-	Kfree(def);
+	wm_panel_free(def);
 	if ( pid < 0 ) {
 		return FALSE;
 	}

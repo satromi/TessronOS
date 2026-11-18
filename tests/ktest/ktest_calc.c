@@ -210,7 +210,7 @@ LOCAL void test_sample( void )
 	KT_ASSERT(cl != NULL && cl->kind == CX_LINK);
 	if ( cl != NULL && cl->kind == CX_LINK ) {
 		KT_ASSERT(ct_target(cl->el, cl->ellen, &t));
-		KT_ASSERT_EQ(ct_attr_int(cl->el, cl->ellen, "width", 0), 143);
+		KT_ASSERT_EQ(ct_attr_int(cl->el, cl->ellen, "width", 0), 77);	/* the link's width as the sample on the system volume has it */
 	}
 	cl = cx_get(&s, 5, 7);
 	KT_ASSERT(cl != NULL && s_eq(cl->text, "A"));

@@ -14,7 +14,12 @@
  *
  *	Writing record 0 puts one message on the queue, reading it takes
  *	one off; a full queue holds the writer back and an empty one the
- *	reader, unless the key was opened not to wait. Deleting the channel
+ *	reader, unless the key was opened not to wait. A message is as long
+ *	as it was written, in memory of its own; the queue is full when the
+ *	messages on it take OB_CH_BYTES, as a socket's buffer is, however
+ *	many they are. A message longer than that is refused (E_LIMIT), and
+ *	a reader with less room than the message is told its length
+ *	(E_LIMIT) and finds it first again, nothing of it cut or lost. Deleting the channel
  *	wakes whoever waits on it with E_DLT. A channel made with a name
  *	is found by it, among the same names as the global names.
  */
@@ -27,19 +32,24 @@
 
 #define OBC_MAX		8192
 
-typedef struct {
+typedef struct obcmsg {
+	struct obcmsg *next;
 	SZ	size;
 	ID	from;			/* the process that wrote it, 0 the kernel */
-	UB	body[OB_CH_MSG_MAX];
+	UB	body[];			/* size bytes */
 } OBCMSG;
+
+#define OBC_SEM_MAX	0x7FFFFFFF
 
 typedef struct {
 	TS_UUID	uuid;
-	UB	name[OB_NAME_MAX];
+	UB	*name;			/* as long as it was given, "" for none; never NULL once made */
+	SZ	namelen;
 	T_OBPRT	*prt;			/* its own copy */
-	OBCMSG	*q;
-	INT	head, tail, count;
-	ID	sem_free;		/* room on the queue */
+	OBCMSG	*head, *tail;		/* the queue, first to last */
+	INT	count;			/* messages on it */
+	SZ	bytes;			/* and the bytes they take (OB_CH_BYTES at most) */
+	ID	sem_free;		/* room on the queue may have come: a writer looks again */
 	ID	sem_used;		/* messages waiting */
 	INT	refcnt;
 	INT	opens;
@@ -124,9 +134,9 @@ EXPORT BOOL knl_obchan_merge_move( CONST TS_UUID *port, CONST T_OBNTM *msg )
 	}
 	LOCK();
 	i = index_of(port);
-	if ( i >= 0 && obc[i]->count > 0 ) {
+	if ( i >= 0 && obc[i]->count > 0 && obc[i]->tail != NULL ) {
 		c = obc[i];
-		q = &c->q[( c->tail + OB_CH_QLEN - 1 ) % OB_CH_QLEN];
+		q = c->tail;
 		if ( q->size == (SZ)sizeof(T_OBNTM) && q->from == ts_get_pid() ) {
 			knl_memcpy(&was, q->body, (INT)sizeof(was));
 			if ( was.event == OB_E_MOVE && was.nid == msg->nid && was.id == msg->id
@@ -149,8 +159,14 @@ LOCAL void ch_free( INT i )
 
 	if ( c->sem_free > 0 ) tk_del_sem(c->sem_free);
 	if ( c->sem_used > 0 ) tk_del_sem(c->sem_used);
-	if ( c->q != NULL ) Kfree(c->q);
+	while ( c->head != NULL ) {
+		OBCMSG	*m = c->head;
+
+		c->head = m->next;
+		Kfree(m);
+	}
 	if ( c->prt != NULL ) Kfree(c->prt);
+	if ( c->name != NULL ) Kfree(c->name);
 	Kfree(c);
 	obc[i] = NULL;
 }
@@ -175,7 +191,6 @@ LOCAL ER obc_ref( CONST TS_UUID *uuid, T_OBREF *r )
 	LOCK();
 	i = index_of(uuid);
 	if ( i >= 0 ) {
-		knl_memcpy(r->name, obc[i]->name, OB_NAME_MAX);
 		r->flags = OB_F_VOLATILE | ( obc[i]->name[0] != 0 ? OB_F_GLOBAL : 0 );
 		r->refcnt = obc[i]->refcnt;
 		r->nrec = 1;
@@ -235,24 +250,29 @@ LOCAL ER obc_create( CONST T_OBCRE *cr, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 		Kfree(c);
 		return er;
 	}
-	for ( n = 0; cr->name != NULL && cr->name[n] != 0 && n < OB_NAME_MAX - 1; n++ ) {
-		c->name[n] = cr->name[n];
-	}
-	c->prt = knl_ob_prt_dup(prt);
-	if ( c->prt == NULL ) {
+	for ( n = 0; cr->name != NULL && cr->name[n] != 0; n++ ) ;
+	c->name = (UB *)Kmalloc((SZ)n + 1);
+	if ( c->name == NULL ) {
 		Kfree(c);
 		return E_NOMEM;
 	}
-	c->q = (OBCMSG *)Kmalloc(sizeof(OBCMSG) * OB_CH_QLEN);
+	if ( n > 0 ) knl_memcpy(c->name, cr->name, n);
+	c->name[n] = 0;
+	c->namelen = n;
+	c->prt = knl_ob_prt_dup(prt);
+	if ( c->prt == NULL ) {
+		Kfree(c->name);
+		Kfree(c);
+		return E_NOMEM;
+	}
 	csem.exinf = NULL;
 	csem.sematr = TA_TFIFO | TA_FIRST;
-	csem.isemcnt = OB_CH_QLEN;
-	csem.maxsem = OB_CH_QLEN;
-	c->sem_free = tk_cre_sem(&csem);
 	csem.isemcnt = 0;
+	csem.maxsem = OBC_SEM_MAX;
+	c->sem_free = tk_cre_sem(&csem);
 	c->sem_used = tk_cre_sem(&csem);
-	if ( c->q == NULL || c->sem_free <= 0 || c->sem_used <= 0 ) {
-		er = ( c->q == NULL ) ? E_NOMEM : E_LIMIT;
+	if ( c->sem_free <= 0 || c->sem_used <= 0 ) {
+		er = E_LIMIT;
 		goto err;
 	}
 
@@ -285,8 +305,8 @@ LOCAL ER obc_create( CONST T_OBCRE *cr, CONST T_OBPRT *prt, TS_UUID *p_uuid )
     err:
 	if ( c->sem_free > 0 ) tk_del_sem(c->sem_free);
 	if ( c->sem_used > 0 ) tk_del_sem(c->sem_used);
-	if ( c->q != NULL ) Kfree(c->q);
 	if ( c->prt != NULL ) Kfree(c->prt);
+	Kfree(c->name);
 	Kfree(c);
 	return er;
 }
@@ -414,10 +434,15 @@ LOCAL ER ch_wait( INT h, BOOL room, TMO tmo, OBCH **p_c, ID *p_sf, ID *p_su )
 	}
 }
 
-/* One message taken off, waited for up to tmo */
+/*
+ * One message taken off, waited for up to tmo. With less room than it
+ * takes, nothing is taken: E_LIMIT and its length in *p_asize, the
+ * message still first, for the reader to read again with room enough.
+ */
 LOCAL ER obc_rtm( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, TMO tmo )
 {
 	OBCH	*c;
+	OBCMSG	*m;
 	ID	sf, su;
 	SZ	n;
 	ER	er;
@@ -430,13 +455,28 @@ LOCAL ER obc_rtm( INT h, INT recno, D off, void *buf, SZ size, SZ *p_asize, TMO 
 		return er;
 	}
 	LOCK();
-	n = c->q[c->head].size;
-	if ( n > size ) n = size;
-	knl_memcpy(buf, c->q[c->head].body, (INT)n);
-	c->last_from = c->q[c->head].from;
-	c->head = ( c->head + 1 ) % OB_CH_QLEN;
+	m = c->head;
+	if ( m == NULL ) {
+		UNLOCK();
+		return E_SYS;
+	}
+	n = m->size;
+	if ( n > size ) {
+		UNLOCK();
+		tk_sig_sem(su, 1);		/* still there for the next read */
+		if ( p_asize != NULL ) {
+			*p_asize = n;
+		}
+		return E_LIMIT;
+	}
+	c->head = m->next;
+	if ( c->head == NULL ) c->tail = NULL;
 	c->count--;
+	c->bytes -= n;
+	c->last_from = m->from;
 	UNLOCK();
+	knl_memcpy(buf, m->body, (INT)n);
+	Kfree(m);
 	tk_sig_sem(sf, 1);
 	if ( p_asize != NULL ) {
 		*p_asize = n;
@@ -458,20 +498,46 @@ LOCAL ER obc_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize
 	ID	sf, su;
 	ER	er;
 
-	if ( recno != 0 || off != 0 || size < 0 || size > OB_CH_MSG_MAX ) {
+	OBCMSG	*m;
+
+	if ( recno != 0 || off != 0 || size < 0 ) {
 		return E_PAR;
 	}
-	er = ch_wait(h, TRUE, nowait ? TMO_POL : TMO_FEVR, &c, &sf, &su);
-	if ( er < E_OK ) {
-		return er;
+	if ( size > OB_CH_BYTES ) {
+		return E_LIMIT;			/* more than the whole room: never to go on */
 	}
-	LOCK();
-	c->q[c->tail].size = size;
-	c->q[c->tail].from = ts_get_pid();
-	knl_memcpy(c->q[c->tail].body, buf, (INT)size);
-	c->tail = ( c->tail + 1 ) % OB_CH_QLEN;
-	c->count++;
-	UNLOCK();
+	m = (OBCMSG *)Kmalloc(sizeof(OBCMSG) + (SZ)size);
+	if ( m == NULL ) {
+		return E_NOMEM;
+	}
+	m->next = NULL;
+	m->size = size;
+	m->from = ts_get_pid();
+	knl_memcpy(m->body, buf, (INT)size);
+	for ( ;; ) {
+		c = ch_of(h, &sf, &su);
+		if ( c == NULL ) {
+			Kfree(m);
+			return E_DLT;
+		}
+		LOCK();
+		if ( !c->doomed && c->bytes + size <= OB_CH_BYTES ) {
+			if ( c->tail != NULL ) c->tail->next = m;
+			else c->head = m;
+			c->tail = m;
+			c->count++;
+			c->bytes += size;
+			UNLOCK();
+			break;
+		}
+		UNLOCK();
+		/* no room: until a reader has taken something, and then looked at again */
+		er = ch_wait(h, TRUE, nowait ? TMO_POL : TMO_FEVR, &c, &sf, &su);
+		if ( er < E_OK ) {
+			Kfree(m);
+			return er;
+		}
+	}
 	tk_sig_sem(su, 1);
 	if ( p_asize != NULL ) {
 		*p_asize = size;
@@ -566,6 +632,22 @@ LOCAL ER obc_lst( CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt )
 	return E_OK;
 }
 
+/* The name, whole */
+LOCAL ER obc_refnam( CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize )
+{
+	INT	i;
+	ER	er = E_NOEXS;
+
+	LOCK();
+	i = index_of(uuid);
+	if ( i >= 0 ) {
+		er = knl_ob_name_put(obc[i]->name, obc[i]->namelen, buf, size, p_asize);
+	}
+	UNLOCK();
+
+	return er;
+}
+
 LOCAL ER obc_fndnam( CONST UB *name, TS_UUID *p_uuid )
 {
 	INT	i;
@@ -613,7 +695,9 @@ LOCAL CONST T_OBMGR obc_mgr = {
 	NULL, NULL,
 	NULL,			/* records replaced by writing over them */
 	NULL,			/* nothing to wait for */
-	obc_rtm
+	obc_rtm,
+	NULL,
+	obc_refnam
 };
 
 EXPORT ER knl_obchan_init( void )

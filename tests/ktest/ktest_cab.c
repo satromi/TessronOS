@@ -122,7 +122,7 @@ LOCAL void test_make( void )
 	KT_ASSERT_ER(om_cre_obj(CABDEV, (CONST UB *)"nakami", OM_BODY_DOC,
 				&target), E_OK);
 
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	if ( v == NULL ) return;
 
@@ -371,7 +371,7 @@ LOCAL void test_save( void )
 	Kfree(after);
 
 	/* and what the record now says is where the entry now is */
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	if ( v == NULL ) return;
 	KT_ASSERT_ER(cab_ref(1, &e), E_OK);
@@ -872,7 +872,7 @@ LOCAL void test_look( void )
 
 	/* the colour reaches the record when it is written */
 	KT_ASSERT_ER(cab_save(), E_OK);
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	if ( v == NULL ) return;
 	for ( i = 0; i < (INT)sizeof(T_VOBJ); i++ ) ((UB *)v)[i] = 0;

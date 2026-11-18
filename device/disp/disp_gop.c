@@ -306,7 +306,7 @@ EXPORT CONST char *knl_disp_hw_driver( void )
 	}
 }
 
-/* The sizes it can be set to, up to max: how many */
+/* The sizes it can be set to: how many there are, of which up to max are put in m */
 EXPORT INT knl_disp_hw_modes( UH (*m)[2], INT max )
 {
 	CONST UH	usual[][2] = {
@@ -320,17 +320,21 @@ EXPORT INT knl_disp_hw_modes( UH (*m)[2], INT max )
 		return knl_igfx_modes(m, max);
 	}
 	if ( hw_kind == HW_STDVGA ) {
-		for ( i = 0; i < (INT)( sizeof(usual) / sizeof(usual[0]) ) && n < max; i++ ) {
+		for ( i = 0; i < (INT)( sizeof(usual) / sizeof(usual[0]) ); i++ ) {
 			if ( (UD)usual[i][0] * usual[i][1] * 4 > vbe_fb_size ) continue;
-			m[n][0] = usual[i][0];
-			m[n][1] = usual[i][1];
+			if ( n < max ) {
+				m[n][0] = usual[i][0];
+				m[n][1] = usual[i][1];
+			}
 			n++;
 		}
 		return n;
 	}
-	if ( max > 0 && ts_disp_ref(&s) >= E_OK ) {
-		m[0][0] = (UH)s.width;
-		m[0][1] = (UH)s.height;
+	if ( ts_disp_ref(&s) >= E_OK ) {
+		if ( max > 0 ) {
+			m[0][0] = (UH)s.width;
+			m[0][1] = (UH)s.height;
+		}
 		return 1;
 	}
 	return 0;

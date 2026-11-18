@@ -607,14 +607,13 @@ LOCAL void i2s_run( void )
 /* ---------------------------------------------------------------- backend */
 
 /* One output while the block is there: whether a DAC listens cannot be told */
-LOCAL INT i2s_outputs( SDOut *o, INT max )
+LOCAL ER i2s_outs( SNDOUTS *l )
 {
-	if ( !i2s_ok || max < 1 ) {
-		return 0;
+	if ( !i2s_ok ) {
+		return E_OK;
 	}
-	knl_snd_out_set(o, (CONST UB *)"i2s", (CONST UB *)"", SND_BE_I2S, 0);
 
-	return 1;
+	return knl_snd_out_add(l, (CONST UB *)"i2s", (CONST UB *)"", SND_BE_I2S, 0);
 }
 
 LOCAL BOOL i2s_can_record( void )
@@ -808,7 +807,7 @@ LOCAL ER i2s_set_level( INT dn, CONST SDVol *v )
 
 EXPORT CONST SNDHW knl_i2s_hw = {
 	SND_BE_I2S,
-	i2s_outputs,
+	NULL,
 	i2s_can_record,
 	i2s_play_start,
 	i2s_play_stop,
@@ -820,7 +819,8 @@ EXPORT CONST SNDHW knl_i2s_hw = {
 	i2s_get_level,
 	i2s_set_level,
 	0,			/* a DAC sounds what it is given at once */
-	2000
+	2000,
+	i2s_outs
 };
 
 /*

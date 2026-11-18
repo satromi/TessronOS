@@ -31,11 +31,12 @@
 #define NEW_VERSION_STEP	8	/* 新版作成: the copy's link over the old, so much down and across */
 #define DUPLICATE_STEP		16	/* 実身複製 */
 
-/* A request about the object of link v, its look and its applist said */
+/*
+ * A request about the object of link v, its look said; its relationship
+ * and its applist go in the tail of the next ask_desktop
+ */
 void fg_ask_of( CONST T_VOBJ *v, UINT req, T_DTREQ *rq )
 {
-	size_t	n = strlen((CONST char *)v->applist);
-
 	memset(rq, 0, sizeof(*rq));
 	rq->req = req;
 	rq->target = v->target;
@@ -49,27 +50,29 @@ void fg_ask_of( CONST T_VOBJ *v, UINT req, T_DTREQ *rq )
 	rq->look.bgcol = v->bgcol;
 	rq->look.disp = v->disp;
 	rq->look.autoopen = v->autoopen ? 1 : 0;
-	snprintf((char *)rq->name, sizeof(rq->name), "%s", (CONST char *)v->relationship);
+	dt_req_was(rq, v->left, v->top, v->right, v->bottom);	/* where it is in the figure's record */
+	if ( v->vrel_len > 0 ) ta_req_part(DT_TAIL_REL, v->vrel, v->vrel_len);
 	if ( v->hidden ) rq->flags |= DT_F_HIDDEN;
-	/* one that does not fit is asked of by its object alone */
-	if ( n > 0 && n < sizeof(rq->text) - 1 ) {
-		memcpy(rq->text, v->applist, n + 1);
+	if ( v->vapplist_len > 0 ) {
+		ta_req_part(DT_TAIL_APPLIST, v->vapplist, v->vapplist_len);
 		rq->flags |= DT_F_APPLIST;
 	}
 }
 
-/* The name a link shows: its object's, as the store has it now, else what the record says */
+/*
+ * The name a link shows: its object's, whole, as the store has it now,
+ * else what the record says. Kept until the next call.
+ */
 CONST char *fg_link_name( CONST T_VOBJ *v )
 {
-	static UB	name[OB_NAME_MAX];
-	T_OBREF		ref;
+	static UB	*name = NULL;
 
-	if ( ob_ref_obj(&v->target, &ref) >= E_OK && ref.name[0] != 0 ) {
-		memcpy(name, ref.name, OB_NAME_MAX);
-		name[OB_NAME_MAX - 1] = 0;
+	free(name);
+	name = ui_obj_name(&v->target);
+	if ( name != NULL && name[0] != 0 ) {
 		return (CONST char *)name;
 	}
-	return (CONST char *)v->name;
+	return (CONST char *)TAD_VS(v->vname);
 }
 
 /* ---------------------------------------------------------------- applists */
@@ -99,76 +102,53 @@ static BOOL app_default( CONST UB *json, INT n, T_JSON *entry )
 BOOL fg_app_locked( CONST T_VOBJ *v )
 {
 	T_JSON	e;
-	INT	n = (INT)strlen((CONST char *)v->applist);
 
-	return (BOOL)( app_default(v->applist, n, &e) && js_get_bool(&e, "defaultOpenLock", FALSE) );
+	return (BOOL)( app_default(TAD_VS(v->vapplist), (INT)v->vapplist_len, &e)
+		    && js_get_bool(&e, "defaultOpenLock", FALSE) );
 }
 
-/* Bytes put at out[*at], while they fit in max (with a terminator) */
-static BOOL put( UB *out, INT max, INT *at, CONST UB *s, INT n )
+/* n bytes of s put at out[*at], and a terminator after them */
+static void put( UB *out, INT *at, CONST UB *s, INT n )
 {
-	if ( *at + n >= max ) return FALSE;
 	memcpy(out + *at, s, (size_t)n);
 	*at += n;
 	out[*at] = 0;
-	return TRUE;
 }
 
 /*
  * The applist json with "defaultOpenLock" as keep says on its default
- * entry, into out: the whole, or, when that does not fit, the default
- * entry alone, under its key. The length, E_NOEXS when it has no default
- * entry, E_LIMIT when not even that fits.
+ * entry, in memory of its own (*p_out, to be freed): the length,
+ * E_NOEXS when it has no default entry, E_NOMEM.
  */
-static INT app_lock( CONST UB *json, INT n, BOOL keep, UB *out, INT max )
+static INT app_lock( CONST UB *json, INT n, BOOL keep, UB **p_out )
 {
 	T_JSON		e, old;
 	CONST UB	*word = (CONST UB *)( keep ? "true" : "false" );
-	CONST UB	*from, *p;
 	INT		at, end, k = 0, wn = (INT)strlen((CONST char *)word);
-	BOOL		ok;
+	UB		*out;
 
+	*p_out = NULL;
 	if ( !app_default(json, n, &e) ) return E_NOEXS;
+	out = (UB *)malloc((size_t)n + 32);	/* the json, its key and the word added */
+	if ( out == NULL ) return E_NOMEM;
 	if ( js_get(&e, "defaultOpenLock", &old) >= E_OK ) {
 		at = (INT)( old.s - json );
 		end = at + old.len;
-		ok = put(out, max, &k, json, at) && put(out, max, &k, word, wn)
-		  && put(out, max, &k, json + end, n - end);
+		put(out, &k, json, at);
+		put(out, &k, word, wn);
+		put(out, &k, json + end, n - end);
 	} else {
 		/* before the entry's closing brace, after what it has */
 		end = (INT)( e.s - json ) + e.len - 1;
 		for ( at = end; at > 0 && space(json[at - 1]); at-- ) ;
-		ok = put(out, max, &k, json, at)
-		  && put(out, max, &k, (CONST UB *)( ( json[at - 1] == '{' ) ? "\"defaultOpenLock\":" : ",\"defaultOpenLock\":" ),
-			 ( json[at - 1] == '{' ) ? 18 : 19)
-		  && put(out, max, &k, word, wn) && put(out, max, &k, json + end, n - end);
+		put(out, &k, json, at);
+		put(out, &k, (CONST UB *)( ( json[at - 1] == '{' ) ? "\"defaultOpenLock\":" : ",\"defaultOpenLock\":" ),
+		    ( json[at - 1] == '{' ) ? 18 : 19);
+		put(out, &k, word, wn);
+		put(out, &k, json + end, n - end);
 	}
-	if ( ok ) return k;
-
-	/* the default entry alone: its key is the string before its colon */
-	for ( p = e.s; p > json && space(p[-1]); p-- ) ;
-	if ( p <= json || p[-1] != ':' ) return E_LIMIT;
-	for ( p--; p > json && space(p[-1]); p-- ) ;
-	if ( p <= json || p[-1] != '"' ) return E_LIMIT;
-	for ( from = p - 1; from > json && from[-1] != '"'; from-- ) ;
-	if ( from <= json ) return E_LIMIT;
-	from--;
-	{
-		UB	*one = malloc((size_t)( p - from ) + (size_t)e.len + 3);
-		INT	m = 0, r;
-
-		if ( one == NULL ) return E_NOMEM;
-		one[m++] = '{';
-		memcpy(one + m, from, (size_t)( p - from ));
-		m += (INT)( p - from );
-		one[m++] = ':';
-		memcpy(one + m, e.s, (size_t)e.len);
-		m += e.len;
-		one[m++] = '}';
-		r = ( m < n ) ? app_lock(one, m, keep, out, max) : E_LIMIT;
-		free(one);
-		return r;
-	}
+	*p_out = out;
+	return k;
 }
 
 /*
@@ -179,32 +159,42 @@ static INT app_lock( CONST UB *json, INT n, BOOL keep, UB *out, INT max )
 static void app_keep( T_VOBJ *v )
 {
 	T_JSON	root, al;
-	UB	*m = NULL, out[TAD_APPL_MAX];
+	UB	*m = NULL, *out = NULL;
 	BOOL	keep = (BOOL)!fg_app_locked(v);
 	INT	n = -1, mn;
 	ID	k = ob_opn_obj(&v->target, OB_OP_ATRRD);
-	char	s[TAD_NAME_MAX + 32];
+	char	s[96];
+	ER	er;
 
 	if ( k > 0 ) {
 		mn = ob_atr_read(k, 0, &m);
 		ob_cls_obj(k);
 		if ( mn > 0 && js_parse(m, mn, &root) >= E_OK && js_get(&root, "applist", &al) >= E_OK ) {
-			n = app_lock(al.s, al.len, keep, out, (INT)sizeof(out));
+			n = app_lock(al.s, al.len, keep, &out);
 		}
 		free(m);
 	}
 	if ( n == E_NOEXS || n == -1 ) {
-		n = app_lock(v->applist, (INT)strlen((CONST char *)v->applist), keep, out, (INT)sizeof(out));
+		n = app_lock(TAD_VS(v->vapplist), (INT)v->vapplist_len, keep, &out);
+	}
+	if ( n == E_NOMEM ) {
+		tell("メモリが足りないため、この操作をできませんでした", "データは操作の前のままです");
+		return;
 	}
 	if ( n < 0 ) {
 		tell("起動アプリを持たない実身です", NULL);
 		return;
 	}
+	er = tad_vobj_set(v, TAD_W_APPLIST, out, n);
+	free(out);
+	if ( er < E_OK ) {
+		tell("メモリが足りないため、この操作をできませんでした", "データは操作の前のままです");
+		return;
+	}
 	fg_before();
-	memcpy(v->applist, out, (size_t)n + 1);
 	(void)tad_lnk_set(g_rec, v);
 	fg_after();
-	snprintf(s, sizeof(s), "%s %s", keep ? "kept" : "let go", fg_link_name(v));
+	snprintf(s, sizeof(s), "%s %.60s", keep ? "kept" : "let go", fg_link_name(v));
 	note(s);
 }
 
@@ -251,20 +241,27 @@ void fg_link_menu( ID mid, CONST T_VOBJ *v )
 /* A link to a copy of v's object put a step down and across from v, as one change */
 void fg_link_copy_put( CONST T_VOBJ *v, CONST TS_UUID *copy, INT dx, INT dy )
 {
-	T_VOBJ	c = *v;
+	T_VOBJ	c = { .recno = 0 };
 	TS_UUID	id;
 	ER	er;
 	char	s[80];
 
+	tad_vobj_init(&c);
+	er = tad_vobj_copy(&c, v);
+	if ( er < E_OK ) {
+		tell("メモリが足りないため、この操作をできませんでした", "データは操作の前のままです");
+		return;
+	}
 	c.target = *copy;
 	memset(&c.vobjid, 0, sizeof(c.vobjid));
-	c.name[0] = 0;
+	(void)tad_vobj_set(&c, TAD_W_NAME, NULL, 0);
 	c.dlen = 0;			/* a new object has no data appended to it yet */
 	c.left += dx;  c.right += dx;
 	c.top += dy;   c.bottom += dy;
 	fg_before();
 	fg_pick_none();
 	er = tad_lnk_add(g_rec, &c, &id);
+	tad_vobj_clear(&c);
 	/*
 	 * The copy is linked to by nothing yet: the link put to it is counted
 	 * when the record is saved, as every link that came since is
@@ -294,7 +291,7 @@ void fg_link_op( CONST char *code, T_VOBJ *v )
 {
 	T_DTREQ	rq;
 	T_DTANS	an;
-	char	s[TAD_NAME_MAX + 48];
+	char	s[FG_LOG];
 	ER	er;
 
 	memset(&an, 0, sizeof(an));
@@ -328,12 +325,17 @@ void fg_link_op( CONST char *code, T_VOBJ *v )
 	} else if ( strcmp(code, "vobj.relation") == 0 ) {
 		fg_ask_of(v, DT_RQ_RELATION, &rq);
 		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-			an.text[DT_TEXT_MAX - 1] = 0;
+			SZ		tl = 0;
+			CONST UB	*t = ta_ans_part(DT_TAIL_TEXT, &tl);
+
+			if ( tad_vobj_set(v, TAD_W_REL, t, tl) < E_OK ) {
+				tell("メモリが足りないため、この操作をできませんでした", "データは操作の前のままです");
+				return;
+			}
 			fg_before();
-			snprintf((char *)v->relationship, TAD_REL_MAX, "%s", (CONST char *)an.text);
 			(void)tad_lnk_set(g_rec, v);
 			fg_after();
-			snprintf(s, sizeof(s), "relation %s [%s]", fg_link_name(v), (CONST char *)an.text);
+			snprintf(s, sizeof(s), "relation %.80s [%.80s]", fg_link_name(v), (CONST char *)TAD_VS(v->vrel));
 			note(s);
 		}
 	} else if ( strcmp(code, "vobj.reconnect") == 0 ) {
@@ -344,9 +346,10 @@ void fg_link_op( CONST char *code, T_VOBJ *v )
 	} else if ( strcmp(code, "real.rename") == 0 ) {
 		fg_ask_of(v, DT_RQ_RENAME, &rq);
 		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-			an.text[DT_TEXT_MAX - 1] = 0;
+			CONST UB	*t = ta_ans_part(DT_TAIL_TEXT, NULL);
+
 			tv_src_forget(&v->target);
-			snprintf(s, sizeof(s), "renamed %s", (CONST char *)an.text);
+			snprintf(s, sizeof(s), "renamed %.120s", (CONST char *)TAD_VS(t));
 			note(s);
 		}
 	} else if ( strcmp(code, "real.duplicate") == 0 || strcmp(code, "real.newversion") == 0 ) {
@@ -383,12 +386,25 @@ void fg_link_op( CONST char *code, T_VOBJ *v )
  * makeDate, updateDate, relationship, the first program the applist
  * names) and the size of its record 0, as the desktop reads them
  */
+/* A string of the metadata as long as it is, in memory of its own: NULL when it is none */
+static UB *js_dup( CONST T_JSON *v )
+{
+	UB	*d;
+
+	if ( js_type(v) != JS_STRING || ( d = (UB *)malloc((size_t)v->len + 1) ) == NULL ) return NULL;
+	if ( js_str(v, d, v->len + 1) < 0 ) {
+		free(d);
+		return NULL;
+	}
+	return d;
+}
+
 static BOOL ar_info( void *arg, CONST TS_UUID *id, T_FEARINFO *inf )
 {
-	T_JSON	root, rel, al, t, e;
+	T_JSON	root, rel, al, t, e, nm;
 	T_OBREC	rec[16];
-	UB	*m = NULL, tag[TAD_NAME_MAX];
-	INT	n, cnt = 0, i, k = 0, len;
+	UB	*m = NULL;
+	INT	n, cnt = 0, i, k = 0, len, room = 0;
 	ID	key = ob_opn_obj(id, OB_OP_ATRRD);
 
 	(void)arg;
@@ -404,24 +420,29 @@ static BOOL ar_info( void *arg, CONST TS_UUID *id, T_FEARINFO *inf )
 		free(m);
 		return FALSE;
 	}
-	len = js_get_str(&root, "name", inf->name, TAD_NAME_MAX);
-	if ( len >= 0 || len == E_LIMIT ) {
-		memcpy(inf->label, inf->name, TAD_NAME_MAX);
-		inf->has_label = TRUE;
+	if ( js_get(&root, "name", &nm) >= E_OK && ( inf->name = js_dup(&nm) ) != NULL ) {
+		inf->label = js_dup(&nm);
+		inf->has_label = (BOOL)( inf->label != NULL );
 	}
 	(void)js_get_str(&root, "makeDate", inf->made, FE_AR_INFO_TEXT);
 	(void)js_get_str(&root, "updateDate", inf->updated, FE_AR_INFO_TEXT);
 	if ( js_get(&root, "relationship", &rel) >= E_OK && js_type(&rel) == JS_ARRAY ) {
+		/* "[tag] [tag]", every tag whole: room for all of them first */
 		t.s = NULL;
-		while ( js_next(&rel, &t) ) {
-			len = js_str(&t, tag, (INT)sizeof(tag));
-			if ( len < 0 ) continue;
-			if ( k > 0 && k < TAD_NAME_MAX - 1 ) inf->rel[k++] = ' ';
-			if ( k < TAD_NAME_MAX - 1 ) inf->rel[k++] = '[';
-			for ( i = 0; tag[i] != 0 && k < TAD_NAME_MAX - 2; i++ ) inf->rel[k++] = tag[i];
-			if ( k < TAD_NAME_MAX - 1 ) inf->rel[k++] = ']';
+		while ( js_next(&rel, &t) ) room += t.len + 3;
+		inf->rel = (UB *)malloc((size_t)room + 1);
+		t.s = NULL;
+		while ( inf->rel != NULL && js_next(&rel, &t) ) {
+			UB	*tag = js_dup(&t);
+
+			if ( tag == NULL ) continue;
+			if ( k > 0 ) inf->rel[k++] = ' ';
+			inf->rel[k++] = '[';
+			for ( i = 0; tag[i] != 0; i++ ) inf->rel[k++] = tag[i];
+			inf->rel[k++] = ']';
+			free(tag);
 		}
-		inf->rel[k] = 0;
+		if ( inf->rel != NULL ) inf->rel[k] = 0;
 	}
 	if ( js_get(&root, "applist", &al) >= E_OK && js_type(&al) == JS_OBJECT ) {
 		e.s = NULL;
@@ -438,13 +459,16 @@ static BOOL ar_info( void *arg, CONST TS_UUID *id, T_FEARINFO *inf )
 void fg_arrange( CONST T_FEARRANGE *o )
 {
 	T_FEARITEM	*it;
-	INT		i, n = 0;
+	INT		i, n = 0, got;
 	ER		er;
-	char		s[TAD_NAME_MAX + 48];
+	char		s[FG_LOG];
 
 	if ( g_fig == NULL || g_npick <= 0 ) return;
-	it = malloc(sizeof(T_FEARITEM) * (size_t)g_npick);
-	if ( it == NULL ) return;
+	it = calloc((size_t)g_npick, sizeof(T_FEARITEM));	/* zeroed: each link empty */
+	if ( it == NULL ) {
+		tell("メモリが足りないため、この操作をできませんでした", "データは操作の前のままです");
+		return;
+	}
 	/* the templates of the 原紙箱 stay where they were laid out: 整頓 leaves them */
 	for ( i = 0; i < g_fig->nsh && n < g_npick && !FG_TEMPLATES; i++ ) {
 		if ( g_pick[i] != 0 && fg_is_link(i) && tad_lnk_get(g_rec, g_fig->sh[i].link, &it[n].v) >= E_OK ) {
@@ -452,18 +476,21 @@ void fg_arrange( CONST T_FEARRANGE *o )
 			n++;
 		}
 	}
+	got = n;
 	n = fe_arrange(it, n, o, ar_info, NULL);
 	if ( n > 0 ) {
 		fg_before();
 		for ( i = 0; i < n; i++ ) {
 			er = tad_lnk_set(g_rec, &it[i].v);
 			if ( er < E_OK ) {
-				snprintf(s, sizeof(s), "the link \"%s\" was not changed (%d)", (char *)it[i].v.name, (INT)er);
+				snprintf(s, sizeof(s), "the link \"%.120s\" was not changed (%d)", (char *)TAD_VS(it[i].v.vname), (INT)er);
 				note(s);
 			}
 		}
 		fg_after();
 	}
+	/* fe_arrange keeps every link it was given in it[], laid out or not */
+	for ( i = 0; i < got; i++ ) tad_vobj_clear(&it[i].v);
 	free(it);
 	snprintf(s, sizeof(s), "arranged %d", n);
 	note(s);

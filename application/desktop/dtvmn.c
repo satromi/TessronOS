@@ -111,15 +111,12 @@ LOCAL void acc_fill( ID mid )
 	TS_UUID		ad = sys_def(SYSDEF_MENU_ACC);
 	CONST DTPROG	**acc;
 	UB		(*names)[WM_LABEL_MAX];
-	INT		n = menu_accessories(&acc), i, k;
+	INT		n = menu_accessories(&acc), i;
 
 	names = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * (SZ)( n + 1 ));
 	if ( names != NULL ) {
 		for ( i = 0; i < n; i++ ) {
-			for ( k = 0; acc[i]->name[k] != 0 && k < WM_LABEL_MAX - 1; k++ ) {
-				names[i][k] = acc[i]->name[k];
-			}
-			names[i][k] = 0;
+			(void)dt_fit(names[i], WM_LABEL_MAX, acc[i]->name);	/* a menu line's room */
 		}
 		(void)mn_set_lst(mid, &ad, "acc.item", (CONST UB *)names, WM_LABEL_MAX, n);
 		Kfree(names);
@@ -145,7 +142,7 @@ LOCAL void tray_state( ID mid )
 	TS_UUID	td = sys_def(SYSDEF_MENU_TRAY);
 	T_TRSTS	*sts;
 	UB	(*rows)[WM_LABEL_MAX];
-	INT	i, k, at;
+	INT	i, at;
 
 	sts = (T_TRSTS *)Kmalloc(sizeof(T_TRSTS));
 	rows = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * TR_LEVELS);
@@ -155,10 +152,7 @@ LOCAL void tray_state( ID mid )
 			if ( i >= 10 ) rows[i - 1][at++] = (UB)( '0' + i / 10 );
 			rows[i - 1][at++] = (UB)( '0' + i % 10 );
 			rows[i - 1][at++] = ' ';
-			for ( k = 0; sts->set[i].name[k] != 0 && at < WM_LABEL_MAX - 1; k++ ) {
-				rows[i - 1][at++] = sts->set[i].name[k];
-			}
-			rows[i - 1][at] = 0;
+			(void)dt_fit(rows[i - 1] + at, WM_LABEL_MAX - at, sts->set[i].name);	/* a menu line's room */
 		}
 		(void)mn_set_lst(mid, &td, "tray.level", (CONST UB *)rows, WM_LABEL_MAX,
 				 sts->nlevel);
@@ -171,12 +165,14 @@ LOCAL void tray_state( ID mid )
 	if ( rows != NULL ) Kfree(rows);
 }
 
+#define VMN_APP_LINE	64		/* bytes of a line of the menu's list 実行 */
+
 EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 {
 	TS_UUID		obj = sys_def(SYSDEF_MENU_OBJECT), vd = sys_def(SYSDEF_MENU_VOBJ);
 	TS_UUID		rd = sys_def(SYSDEF_MENU_REAL);
 	TS_UUID		ed = sys_def(SYSDEF_MENU_EXEC);
-	UB		(*apps)[OM_APP_NAME];
+	UB		*apps;
 	BOOL		open, cut, locked, sealed = TRUE;	/* a part's window keeps no record: nothing of a link is changed in it */
 	INT		n, i;
 
@@ -242,24 +238,30 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 		return;
 	}
 	{
-		INT	room = dt_app_list(v, NULL, 0, NULL), q;
+		INT	room = dt_app_list(v, NULL, 0, NULL);
 		DTAPP	*a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
 
-		apps = (UB (*)[OM_APP_NAME])Kmalloc(sizeof(UB) * OM_APP_NAME * (SZ)( room + 1 ));
+		INT	na = 0;
+
+		/*
+		 * The names are whole in the list; the menu's lines are of a
+		 * fixed room (mn_set_lst) for now, so each is cut to it at a
+		 * whole letter just before it is handed on.
+		 */
+		apps = (UB *)Kmalloc((SZ)VMN_APP_LINE * (SZ)( room + 1 ));
 		if ( apps != NULL && a != NULL ) {
-			n = dt_app_list(v, a, room, NULL);
+			n = na = dt_app_list(v, a, room, NULL);
 			for ( i = 0; i < n; i++ ) {
-				for ( q = 0; a[i].name[q] != 0 && q < OM_APP_NAME - 1; q++ ) apps[i][q] = a[i].name[q];
-				apps[i][q] = 0;
+				(void)dt_fit(apps + (SZ)i * VMN_APP_LINE, VMN_APP_LINE, a[i].name);
 			}
-			(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)apps, OM_APP_NAME, n);
+			(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)apps, VMN_APP_LINE, n);
 			atr(mid, &ed, "exec.app", cut);
 #ifdef USE_UITEST
 			tm_printf((UB *)"desktop: exec menu on %d\n", n);	/* for the tests */
 #endif
 		}
 		if ( apps != NULL ) Kfree(apps);
-		if ( a != NULL ) Kfree(a);
+		dt_app_free(a, na);
 	}
 }
 
@@ -450,17 +452,23 @@ LOCAL BOOL attr_ask( DTWIN *d, T_VOBJ *io )
 	CONST INT	tenths[] = { 5, 7, 10, 15, 20, 30, 40 };
 	T_WMPANEL	*def;
 	T_WMPART	*pt;
-	T_VOBJ		v = *io;
+	T_VOBJ		v = { .recno = 0 };
 	CONST UW	*colp[4];
 	UW		shown[4];
-	INT		pid, i, r0 = 2, chsz = ( v.chsz > 0 ) ? v.chsz : 14;
+	INT		pid, i, r0 = 2, chsz = ( io->chsz > 0 ) ? io->chsz : 14;
 	UINT		ans;
 
+	/* what is chosen is put in a copy of its own, and into *io only when it is agreed to */
+	tad_vobj_init(&v);
+	if ( tad_vobj_copy(&v, io) < E_OK ) {
+		return FALSE;
+	}
 	colp[0] = &v.frcol;  colp[1] = &v.chcol;
 	colp[2] = &v.tbcol;  colp[3] = &v.bgcol;
 
 	def = dt_pn_new(640, 300);
 	if ( def == NULL ) {
+		tad_vobj_clear(&v);
 		return FALSE;
 	}
 	dt_pn_add(def, WM_PT_LABEL, 0, 14, 8, 300, 20, "仮身属性変更");
@@ -578,10 +586,12 @@ LOCAL BOOL attr_ask( DTWIN *d, T_VOBJ *io )
 			}
 		}
 		dt_pn_done(d, pid);
-		*io = v;
-		return TRUE;
+		ans = ( tad_vobj_copy(io, &v) >= E_OK ) ? WM_ANS_OK : WM_ANS_CANCEL;
+		tad_vobj_clear(&v);
+		return (BOOL)( ans == WM_ANS_OK );
 	}
 	dt_pn_done(d, pid);
+	tad_vobj_clear(&v);
 	return FALSE;
 }
 
@@ -593,26 +603,34 @@ LOCAL BOOL attr_ask( DTWIN *d, T_VOBJ *io )
  */
 LOCAL BOOL rel_ask( DTWIN *d, T_VOBJ *io )
 {
-	UB	text[WM_LABEL_MAX], out[WM_LABEL_MAX], tags[WM_LABEL_MAX];
-	T_VOBJ	v = *io;
+	UB	*text, out[WM_LABEL_MAX], tags[WM_LABEL_MAX], rel[WM_LABEL_MAX];
+	CONST UB *lr = TAD_VS(io->vrel);
 	INT	n, i, k = 0, t = 0;
+	BOOL	ok;
 
-	n = om_store_relationship(&v.target, text, WM_LABEL_MAX);
+	/* what the object's tags and the link's relationship are now, however long, to start from */
+	text = (UB *)Kmalloc((size_t)( WM_LABEL_MAX + io->vrel_len + 2 ));
+	if ( text == NULL ) {
+		return FALSE;
+	}
+	n = om_store_relationship(&io->target, text, WM_LABEL_MAX);
 	if ( n < 0 ) {
 		n = 0;
 	}
-	if ( v.relationship[0] != 0 ) {
-		if ( n > 0 && n < WM_LABEL_MAX - 1 ) {
+	if ( lr[0] != 0 ) {
+		if ( n > 0 ) {
 			text[n++] = ' ';
 		}
-		for ( i = 0; v.relationship[i] != 0 && n < WM_LABEL_MAX - 1; i++ ) {
-			text[n++] = v.relationship[i];
+		for ( i = 0; lr[i] != 0; i++ ) {
+			text[n++] = lr[i];
 		}
 	}
 	text[n] = 0;
-	if ( !dt_ask_text(d, "続柄（リレーションタグ名）を入力してください",
-		       "[タグ]形式は実身用、それ以外は仮身用（半角スペース区切りで複数設定可）",
-		       text, out, WM_LABEL_MAX, "設定") ) {
+	ok = dt_ask_text(d, "続柄（リレーションタグ名）を入力してください",
+			 "[タグ]形式は実身用、それ以外は仮身用（半角スペース区切りで複数設定可）",
+			 text, out, WM_LABEL_MAX, "設定");
+	Kfree(text);
+	if ( !ok ) {
 		return FALSE;
 	}
 	/* the bracketed words for the object, the others for the link */
@@ -627,20 +645,20 @@ LOCAL BOOL rel_ask( DTWIN *d, T_VOBJ *io )
 			}
 			continue;
 		}
-		if ( out[i] == ' ' && ( k == 0 || v.relationship[k - 1] == ' ' ) ) {
+		if ( out[i] == ' ' && ( k == 0 || rel[k - 1] == ' ' ) ) {
 			continue;
 		}
-		if ( k < TAD_REL_MAX - 1 ) {
-			v.relationship[k++] = out[i];
-		}
+		rel[k++] = out[i];		/* no longer than what was typed */
 	}
-	while ( k > 0 && v.relationship[k - 1] == ' ' ) {
+	while ( k > 0 && rel[k - 1] == ' ' ) {
 		k--;
 	}
-	v.relationship[k] = 0;
+	rel[k] = 0;
 	tags[t] = 0;
-	om_store_set_relationship(&v.target, tags);
-	*io = v;
+	if ( tad_vobj_set(io, TAD_W_REL, rel, k) < E_OK ) {
+		return FALSE;
+	}
+	om_store_set_relationship(&io->target, tags);
 	return TRUE;
 }
 
@@ -648,14 +666,17 @@ LOCAL BOOL rel_ask( DTWIN *d, T_VOBJ *io )
 
 LOCAL void rename_real( DTWIN *d, CONST T_VOBJ *v )
 {
-	UB	start[WM_LABEL_MAX], name[WM_LABEL_MAX];
+	UB	*start, name[WM_LABEL_MAX];
 	INT	wid;
+	BOOL	ok;
 
-	if ( om_store_name(&v->target, start, WM_LABEL_MAX) < 0 ) {
-		start[0] = 0;
+	start = om_store_name_dup(&v->target, NULL);	/* the box shows what fits of it */
+	ok = dt_ask_text(d, "実身名を入力してください", NULL, start, name,
+			 WM_LABEL_MAX, "決定");
+	if ( start != NULL ) {
+		Kfree(start);
 	}
-	if ( !dt_ask_text(d, "実身名を入力してください", NULL, start, name,
-		       WM_LABEL_MAX, "決定") || name[0] == 0 ) {
+	if ( !ok || name[0] == 0 ) {
 		return;
 	}
 	if ( om_store_rename(&v->target, name) < E_OK ) {
@@ -670,14 +691,14 @@ LOCAL void rename_real( DTWIN *d, CONST T_VOBJ *v )
 /* The object copied under a name asked for, the copy in *p_nid; FALSE when it was not */
 LOCAL BOOL dup_ask( DTWIN *d, CONST T_VOBJ *v, TS_UUID *p_nid )
 {
-	UB	start[WM_LABEL_MAX], name[WM_LABEL_MAX];
-	INT	n = 0, k;
+	UB	start[WM_LABEL_MAX], name[WM_LABEL_MAX], *own;
+	INT	n, k;
 
-	if ( om_store_name(&v->target, start, WM_LABEL_MAX - 16) < 0 ) {
-		start[0] = 0;
-	}
-	while ( start[n] != 0 ) {
-		n++;
+	/* what fits of the name in the box, with room left for のコピー */
+	own = om_store_name_dup(&v->target, NULL);
+	n = dt_fit(start, WM_LABEL_MAX - 16, own);
+	if ( own != NULL ) {
+		Kfree(own);
 	}
 	{
 		CONST UB	*tail = (CONST UB *)"のコピー";
@@ -730,26 +751,26 @@ EXPORT BOOL dt_app_lockable( CONST T_VOBJ *v )
  * then decided as for a link of the desktop's own (om_link_default_app),
  * the one it keeps to when it is fixed (起動アプリの固定).
  */
-EXPORT void dt_req_applist( CONST T_DTREQ *rq, T_VOBJ *v )
+EXPORT ER dt_req_applist( CONST T_DTREQ *rq, T_VOBJ *v )
 {
-	INT	i;
+	CONST UB	*a;
+	SZ		len;
 
-	v->applist[0] = 0;
 	if ( ( rq->flags & DT_F_APPLIST ) == 0 ) {
-		return;
+		return tad_vobj_set(v, TAD_W_APPLIST, NULL, 0);
 	}
-	for ( i = 0; rq->text[i] != 0 && i < TAD_APPL_MAX - 1 && i < DT_CARRY_TEXT - 1; i++ ) {
-		v->applist[i] = rq->text[i];
-	}
-	v->applist[i] = 0;
+	a = dt_rq_applist(rq, &len);
+	return tad_vobj_set(v, TAD_W_APPLIST, a, len);
 }
 
 /* A link as a program says it looks, at the corner of a box of its size */
-LOCAL void link_of_req( CONST T_DTREQ *rq, T_VOBJ *v )
+LOCAL ER link_of_req( CONST T_DTREQ *rq, T_VOBJ *v )
 {
-	INT	i;
+	CONST UB	*rel;
+	SZ		len;
+	ER		er;
 
-	knl_memset(v, 0, sizeof(*v));
+	tad_vobj_init(v);
 	v->target = rq->target;
 	v->recno = -1;
 	v->right = rq->look.w;
@@ -764,21 +785,22 @@ LOCAL void link_of_req( CONST T_DTREQ *rq, T_VOBJ *v )
 	v->autoopen = (BOOL)( rq->look.autoopen != 0 );
 	v->hidden = (BOOL)( ( rq->flags & DT_F_HIDDEN ) != 0 );
 	v->zoom = 100;
-	dt_req_applist(rq, v);
-	for ( i = 0; rq->name[i] != 0 && i < TAD_REL_MAX - 1 && i < (INT)sizeof(rq->name) - 1; i++ ) {
-		v->relationship[i] = rq->name[i];
+	er = dt_req_applist(rq, v);
+	rel = dt_rq_rel(rq, &len);
+	if ( er >= E_OK ) {
+		er = tad_vobj_set(v, TAD_W_REL, rel, len);
 	}
-	v->relationship[i] = 0;
+	if ( er < E_OK ) {
+		tad_vobj_clear(v);
+	}
+	return er;
 }
 
-LOCAL void text_out( UB *out, CONST UB *s )
+/* A link made by link_of_req let go */
+LOCAL void link_free( T_VOBJ *v )
 {
-	INT	i;
-
-	for ( i = 0; s[i] != 0 && i < DT_TEXT_MAX - 1; i++ ) {
-		out[i] = s[i];
-	}
-	out[i] = 0;
+	tad_vobj_clear(v);
+	Kfree(v);
 }
 
 /*
@@ -790,26 +812,30 @@ LOCAL void text_out( UB *out, CONST UB *s )
  */
 EXPORT ER dt_apps_req( CONST T_DTREQ *rq, T_DTANS *an )
 {
-	T_VOBJ	*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	T_VOBJ	*v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	DTAPP	*a = NULL;
-	INT	room, n = 0, k = 0, i;
+	INT	room, n = 0;
 	ER	er = E_NOEXS;
 
 	if ( v == NULL ) {
 		return E_NOMEM;
 	}
-	link_of_req(rq, v);
+	if ( ( er = link_of_req(rq, v) ) < E_OK ) {
+		Kfree(v);
+		return er;
+	}
+	er = E_NOEXS;
 	/* open already: 実行 of the program's menu is grey, as the desktop's is (dt_get_vmn) */
 	if ( dt_obj_open(v, NULL) ) {
 		an->how = 0;
 		an->flags = DT_F_OPEN;
-		Kfree(v);
+		link_free(v);
 		return E_NOEXS;
 	}
 	room = dt_app_list(v, NULL, 0, NULL);
 	a = (DTAPP *)Kmalloc(sizeof(DTAPP) * (SZ)( room + 1 ));
 	if ( a == NULL ) {
-		Kfree(v);
+		link_free(v);
 		return E_NOMEM;
 	}
 	n = dt_app_list(v, a, room, NULL);
@@ -819,15 +845,13 @@ EXPORT ER dt_apps_req( CONST T_DTREQ *rq, T_DTANS *an )
 		CONST DTAPP	*e = &a[rq->recno];
 		CONST UB	*id = ( e->listed && e->raw[0] != 0 ) ? e->raw : e->id;
 
-		for ( i = 0; id[i] != 0 && k < DT_TEXT_MAX - 2; i++ ) an->text[k++] = id[i];
-		an->text[k++] = '\t';
-		for ( i = 0; e->name[i] != 0 && k < DT_TEXT_MAX - 1; i++ ) an->text[k++] = e->name[i];
-		an->text[k] = 0;
+		er = dt_ans_cat(an, id, -1);
+		if ( er >= E_OK ) er = dt_ans_cat(an, (CONST UB *)"\t", 1);
+		if ( er >= E_OK ) er = dt_ans_cat(an, e->name, -1);
 		if ( !e->listed ) an->flags = DT_F_KIND;
-		er = E_OK;
 	}
-	Kfree(a);
-	Kfree(v);
+	dt_app_free(a, n);
+	link_free(v);
 	return er;
 }
 
@@ -838,12 +862,16 @@ EXPORT ER dt_apps_req( CONST T_DTREQ *rq, T_DTANS *an )
  */
 EXPORT ER dt_link_state_req( CONST T_DTREQ *rq, T_DTANS *an )
 {
-	T_VOBJ	*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	T_VOBJ	*v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
+	ER	er;
 
 	if ( v == NULL ) {
 		return E_NOMEM;
 	}
-	link_of_req(rq, v);
+	if ( ( er = link_of_req(rq, v) ) < E_OK ) {
+		Kfree(v);
+		return er;
+	}
 	an->flags = 0;
 	if ( dt_obj_open(v, NULL) ) {
 		an->flags |= DT_F_OPEN;
@@ -857,26 +885,29 @@ EXPORT ER dt_link_state_req( CONST T_DTREQ *rq, T_DTANS *an )
 	if ( dt_disk_growable(v) ) {
 		an->flags |= DT_F_GROWABLE;	/* and its 拡張 */
 	}
-	Kfree(v);
+	link_free(v);
 	return E_OK;
 }
 
 EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
 {
 	DTWIN	*host = dt_host_of(&rq->win);
-	T_VOBJ	*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
-	UB	name[WM_LABEL_MAX];
+	T_VOBJ	*v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
+	UB	*name;
 	ER	er = E_OK;
 
 	if ( v == NULL ) {
 		return E_NOMEM;
 	}
-	link_of_req(rq, v);
+	if ( ( er = link_of_req(rq, v) ) < E_OK ) {
+		Kfree(v);
+		return er;
+	}
 	wm_obj_quiet(TRUE);		/* what answers the panels is theirs, not the program's */
 	if ( host == NULL && rq->req != DT_RQ_CLOSE && rq->req != DT_RQ_EXEC
 	  && rq->req != DT_RQ_NETWORK && rq->req != DT_RQ_FULL ) {
 		wm_obj_quiet(FALSE);
-		Kfree(v);
+		link_free(v);
 		return E_NOEXS;			/* nowhere to ask in */
 	}
 	switch ( rq->req ) {
@@ -904,12 +935,13 @@ EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
 			er = E_ABORT;
 			break;
 		}
-		text_out(an->text, v->relationship);
+		er = dt_ans_cat(an, TAD_VS(v->vrel), v->vrel_len);
 		break;
 	case DT_RQ_RENAME:
 		rename_real(host, v);
-		if ( om_store_name(&v->target, name, WM_LABEL_MAX) >= 0 ) {
-			text_out(an->text, name);
+		if ( ( name = om_store_name_dup(&v->target, NULL) ) != NULL ) {
+			er = dt_ans_cat(an, name, -1);
+			Kfree(name);
 		}
 		break;
 	case DT_RQ_DUPLICATE:
@@ -918,9 +950,12 @@ EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
 		}
 		break;
 	case DT_RQ_NEWVER:
-		if ( om_store_name(&v->target, name, WM_LABEL_MAX) < 0
-		  || om_store_copy(&v->target, name, FALSE, &an->into) < E_OK ) {
+		name = om_store_name_dup(&v->target, NULL);
+		if ( name == NULL || om_store_copy(&v->target, name, FALSE, &an->into) < E_OK ) {
 			er = E_IO;
+		}
+		if ( name != NULL ) {
+			Kfree(name);
 		}
 		break;
 	case DT_RQ_INFO:
@@ -932,22 +967,24 @@ EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
 	case DT_RQ_SEARCH:
 		dt_search_open(host);
 		break;
-	case DT_RQ_EXEC:
-		text_out(name, rq->name);
-		if ( name[0] == 0 ) {
+	case DT_RQ_EXEC: {
+		CONST UB	*app = dt_rq_word(rq, DT_TAIL_NAME, NULL);
+
+		if ( app[0] == 0 ) {
 			er = E_PAR;
 			break;
 		}
 		if ( ( rq->flags & DT_F_KIND ) != 0 ) {
 			/* one offered for the object's kind: the program it opens with stays */
 		} else if ( ( rq->flags & DT_F_APPLIST ) != 0 ) {
-			(void)om_link_ran(v, name);	/* the link's applist says whether it keeps to its program */
+			(void)om_link_ran(v, app);	/* the link's applist says whether it keeps to its program */
 		} else if ( ( rq->flags & DT_F_KEEP ) == 0 ) {
-			(void)om_store_set_default_app(&v->target, name);
+			(void)om_store_set_default_app(&v->target, app);
 		}
 		v->frcol = v->chcol = v->tbcol = v->bgcol = TAD_COL_NONE;
-		er = dt_open_as(NULL, v, name);
+		er = dt_open_as(NULL, v, app);
 		break;
+	}
 	case DT_RQ_COLOUR: {
 		UW	col = ( rq->look.bgcol == TAD_COL_NONE ) ? 0x00FFFFFFU : rq->look.bgcol;
 
@@ -1003,7 +1040,7 @@ EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
 		break;
 	}
 	wm_obj_quiet(FALSE);
-	Kfree(v);
+	link_free(v);
 	wm_update();
 	return er;
 }
@@ -1022,7 +1059,7 @@ EXPORT ER dt_proc_link_op( CONST T_DTREQ *rq, T_DTANS *an )
  */
 LOCAL BOOL new_link_size( CONST T_VOBJ *v, INT h, CONST TS_UUID *target, INT *p_w, INT *p_h )
 {
-	UB		nm[TAD_NAME_MAX];
+	UB		*nm;
 	T_FNSTATE	st;
 	ID		fid;
 	INT		chsz = ( v->chsz > 0 ) ? v->chsz : 14;
@@ -1031,7 +1068,8 @@ LOCAL BOOL new_link_size( CONST T_VOBJ *v, INT h, CONST TS_UUID *target, INT *p_
 	if ( band <= 0 || h > band + TAD_OPEN_SLACK ) {
 		return FALSE;
 	}
-	if ( om_store_name(target, nm, sizeof(nm)) > 0 ) {
+	nm = om_store_name_dup(target, NULL);
+	if ( nm != NULL && nm[0] != 0 ) {
 		fn_hold();
 		fid = fn_system();
 		if ( fid > 0 && fn_state_get(fid, &st) >= E_OK ) {
@@ -1083,26 +1121,28 @@ EXPORT void dt_link_fit( T_VOBJ *c )
 EXPORT ER dt_save_new_of( DTWIN *ask, CONST TS_UUID *id, CONST TS_UUID *parent,
 			  CONST TS_UUID *parent_vobj, CONST TS_UUID *target, TS_UUID *p_new )
 {
-	UB	start[WM_LABEL_MAX], name[WM_LABEL_MAX];
+	UB	start[WM_LABEL_MAX], name[WM_LABEL_MAX], *own;
 	TS_UUID	nid, lid;
 	T_TAD	*prec;
-	T_VOBJ	pv;
-	INT	n = 0, k;
+	T_VOBJ	pv = { .recno = 0 };
+	INT	n, k;
 	BOOL	held;
 	ER	er;
 
 	/* the link it goes with, in the record that holds it: a program's, while it runs, is its own to change */
 	held = dt_plink_has(parent, parent_vobj, target);
 	prec = om_store_get(parent, 0);
+	tad_vobj_init(&pv);
 	if ( !held && ( prec == NULL || tad_lnk_find(prec, parent_vobj, &pv) < E_OK
 		       || ( target != NULL && ts_uuid_cmp(&pv.target, target) != 0 ) ) ) {
+		tad_vobj_clear(&pv);
 		return E_NOEXS;
 	}
-	if ( om_store_name(id, start, WM_LABEL_MAX - 16) < 0 ) {
-		start[0] = 0;
-	}
-	while ( start[n] != 0 ) {
-		n++;
+	tad_vobj_clear(&pv);
+	own = om_store_name_dup(id, NULL);	/* what fits of it in the box, with room for のコピー */
+	n = dt_fit(start, WM_LABEL_MAX - 16, own);
+	if ( own != NULL ) {
+		Kfree(own);
 	}
 	{
 		CONST UB	*tail = (CONST UB *)"のコピー";
@@ -1129,15 +1169,17 @@ EXPORT ER dt_save_new_of( DTWIN *ask, CONST TS_UUID *id, CONST TS_UUID *parent,
 	/* the parent's record read again: the panel let the person work in the meantime */
 	prec = om_store_get(parent, 0);
 	if ( prec == NULL || tad_lnk_find(prec, parent_vobj, &pv) < E_OK ) {
+		tad_vobj_clear(&pv);
 		return E_OK;		/* the copy stands as a 屑実身 until it is linked */
 	}
 	pv.target = nid;
 	knl_memset(&pv.vobjid, 0, sizeof(pv.vobjid));
-	pv.name[0] = 0;
+	(void)tad_vobj_set(&pv, TAD_W_NAME, NULL, 0);
 	pv.dlen = 0;			/* a new object has no data appended to it yet */
 	dt_link_fit(&pv);		/* named anew: closed, as wide as that name */
 	if ( tad_lnk_add(prec, &pv, &lid) >= E_OK ) {
 		om_store_save(parent, 0);
 	}
+	tad_vobj_clear(&pv);
 	return E_OK;
 }

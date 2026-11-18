@@ -5,7 +5,9 @@
 #   stays open both times (shots mc_quick, mc_slow), and Esc puts it away;
 # - the first button pressed and let go while the second is held, as a pointer out of step
 #   reports a button nobody pressed (the TrackPoint of the ThinkPad X1 Yoga): not the menu's,
-#   and 閉じる is not chosen -- the window stays in front;
+#   and 閉じる is not chosen -- the window stays in front. The window is 基本文章編集's, a
+#   process, which opens its menu after it hears of the press (wmobj.c works it): the first
+#   button is pressed once the menu is up;
 # - システム環境設定's pop-up 表示の倍率 (at 658,455; 150% a row of 20 two rows down, 設定 at
 #   706,554, as tools/tests/ui_scale.steps works them) pressed and let go 800 ms later without
 #   moving: its list stays open, and a click on 150% in it chooses it. Enter keeps the scale.
@@ -28,14 +30,16 @@ shot mc_slow
 key 29
 wait 800
 move 600 420
+logmark
 down 1
+expectsince document: menu
 wait 30
 down 0
 wait 30
 up 0
 wait 30
 up 1
-expect desktop: menu: button 0 pressed while the menu's is held: not taken
+expectsince wmobj: menu: button 0 pressed while the menu's is held: not taken
 wait 1000
 key 29
 wait 800

@@ -626,7 +626,6 @@ LOCAL void test_screens( void )
 	if ( n0 > 1 && was.width == was.main_w && was.height == was.main_h ) {
 		KT_SKIP("the screen is shown as columns (screens=N)");
 	}
-	if ( n0 + 2 > DISP_SCREENS_MAX ) KT_SKIP("no room for two more screens");
 	m1 = mem_out(&hw, SC_W, SC_H);
 	KT_ASSERT(m1 != NULL);
 	if ( m1 == NULL ) return;
@@ -1111,7 +1110,6 @@ LOCAL void test_out_flip( void )
 	if ( !have_disp ) KT_SKIP("no screen");
 	KT_ASSERT_ER(ts_disp_ref(&was), E_OK);
 	if ( ts_disp_screens() > 1 && was.width == was.main_w ) KT_SKIP("the screen is shown as columns (screens=N)");
-	if ( ts_disp_screens() + 1 > DISP_SCREENS_MAX ) KT_SKIP("no room for another screen");
 	m = (UW *)knl_vmap(pages, 0);
 	KT_ASSERT(m != NULL);
 	if ( m == NULL ) return;
@@ -1203,6 +1201,26 @@ LOCAL INT fo_modes( void *ctx, T_DISPMODE *m, INT max )
 	return 2;
 }
 
+/* Every mode of output k, in a list taken for them (Kfree it): how many */
+LOCAL INT modes_all( INT k, T_DISPMODE **p_m )
+{
+	INT	n = ts_disp_out_modes(k, NULL, 0), got;
+
+	*p_m = NULL;
+	if ( n <= 0 ) return n;
+	*p_m = (T_DISPMODE *)Kmalloc(sizeof(T_DISPMODE) * (SZ)n);
+	if ( *p_m == NULL ) return E_NOMEM;
+	got = ts_disp_out_modes(k, *p_m, n);
+	return ( got < n ) ? got : n;
+}
+
+/* to made into a copy of from, the entries it held before given back */
+LOCAL void st_set( T_DISPSTATE *to, CONST T_DISPSTATE *from )
+{
+	ts_disp_state_free(to);
+	KT_ASSERT_ER(ts_disp_state_copy(to, from), E_OK);
+}
+
 /* It takes only its first mode: another is refused, as hardware that cannot drive it would */
 LOCAL ER fo_commit( void *ctx, CONST T_DISPMODE *m, T_DISPHW *hw )
 {
@@ -1221,10 +1239,10 @@ LOCAL CONST T_DISPOUTHW	fo_out = {
 LOCAL void test_outputs( void )
 {
 	T_DISPOUTINFO	oi;
-	T_DISPMODE	md[DISP_MODES_MAX];
-	T_DISPSTATE	st, st2;
+	T_DISPMODE	*md = NULL;
+	T_DISPSTATE	st = { 0, NULL }, st2 = { 0, NULL };
 	T_DISPSPEC	s;
-	UB		edid[DISP_EDID_MAX];
+	UB		*edid;
 	INT		n, nm, k, sc, fo;
 	UW		*m;
 
@@ -1235,7 +1253,8 @@ LOCAL void test_outputs( void )
 	KT_ASSERT(n >= 1);
 	for ( k = 0; k < n; k++ ) {
 		KT_ASSERT_ER(ts_disp_output(k, &oi), E_OK);
-		nm = ts_disp_out_modes(k, md, DISP_MODES_MAX);
+		if ( md != NULL ) Kfree(md);
+		nm = modes_all(k, &md);
 		tm_printf((UB *)"  output %d: %s, kind %d, screen %d, EDID %d bytes, %s %s %04x, %d x %d mm, %d modes%s%s\n",
 			  k, oi.name, (INT)oi.kind, oi.screen, (INT)oi.edid_len, oi.maker, oi.model, (INT)oi.product,
 			  (INT)oi.mm_w, (INT)oi.mm_h, nm, oi.hdmi ? ", HDMI" : "", oi.audio ? ", sound" : "");
@@ -1251,8 +1270,14 @@ LOCAL void test_outputs( void )
 			}
 		}
 		if ( oi.edid_len >= 128 ) {
-			KT_ASSERT_EQ(ts_disp_out_edid(k, edid, sizeof(edid)), (INT)oi.edid_len);
-			KT_ASSERT(edid[0] == 0x00 && edid[1] == 0xFF);
+			KT_ASSERT_EQ(ts_disp_out_edid(k, NULL, 0), (INT)oi.edid_len);
+			edid = (UB *)Kmalloc(oi.edid_len);
+			KT_ASSERT(edid != NULL);
+			if ( edid != NULL ) {
+				KT_ASSERT_EQ(ts_disp_out_edid(k, edid, (INT)oi.edid_len), (INT)oi.edid_len);
+				KT_ASSERT(edid[0] == 0x00 && edid[1] == 0xFF);
+				Kfree(edid);
+			}
 			KT_ASSERT(oi.maker[0] >= 'A' && oi.maker[0] <= 'Z');
 			KT_ASSERT(( md[0].flags & DISP_MODE_PREFERRED ) != 0);
 		}
@@ -1267,13 +1292,14 @@ LOCAL void test_outputs( void )
 	KT_ASSERT_EQ(st.n, n);
 	KT_ASSERT(st.out[0].on);
 	KT_ASSERT_ER(ts_disp_check(&st), E_OK);
-	st2 = st;
+	st_set(&st2, &st);
 	st2.out[0].on = FALSE;
 	KT_ASSERT_ER(ts_disp_check(&st2), E_NOSPT);	/* the main screen stays on */
-	st2 = st;
+	st_set(&st2, &st);
 	st2.n = n + 1;
 	KT_ASSERT_ER(ts_disp_check(&st2), E_PAR);
-	st2 = st;
+	st2.n = n;
+	st_set(&st2, &st);
 	st2.out[0].w = 123;
 	KT_ASSERT_ER(ts_disp_check(&st2), E_NOSPT);	/* not a mode it offers */
 	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
@@ -1281,13 +1307,14 @@ LOCAL void test_outputs( void )
 	KT_ASSERT_ER(ts_disp_commit(&st), E_OK);	/* as it is */
 
 	/* the main screen to another of its modes, and back */
-	nm = ts_disp_out_modes(0, md, DISP_MODES_MAX);
+	if ( md != NULL ) Kfree(md);
+	nm = modes_all(0, &md);
 	for ( k = 0; k < nm; k++ ) {
 		if ( md[k].hdisp >= 800 && md[k].vdisp >= 600 && md[k].hdisp <= 1600 && md[k].vdisp <= 1200
 		  && ( md[k].hdisp != st.out[0].w || md[k].vdisp != st.out[0].h ) ) break;
 	}
 	if ( k < nm ) {
-		st2 = st;
+		st_set(&st2, &st);
 		st2.out[0].w = md[k].hdisp;
 		st2.out[0].h = md[k].vdisp;
 		KT_ASSERT_ER(ts_disp_commit(&st2), E_OK);
@@ -1301,31 +1328,33 @@ LOCAL void test_outputs( void )
 	}
 
 	/* an output that refuses a mode: the state put back as it was */
-	if ( ts_disp_screens() + 1 > DISP_SCREENS_MAX ) return;
+	if ( md != NULL ) Kfree(md);
 	m = mem_out(&fo_hw, SC_W, SC_H);		/* kept: the output stays listed after the test */
 	KT_ASSERT(m != NULL);
-	if ( m == NULL ) return;
+	if ( m == NULL ) goto out;
 	fo_hw.out = &fo_out;
 	sc = knl_disp_out_attach(&fo_hw, DISP_SIDE_RIGHT, 0);
 	KT_ASSERT(sc >= 1);
-	if ( sc < 1 ) return;
+	if ( sc < 1 ) goto out;
 	KT_ASSERT_EQ(ts_disp_outputs(), n + 1);
 	fo = n;
 	KT_ASSERT_ER(ts_disp_output(fo, &oi), E_OK);
 	KT_ASSERT_EQ(oi.screen, sc);
 	KT_ASSERT_EQ(oi.nmodes, 2);
+	ts_disp_state_free(&st);
 	KT_ASSERT_ER(ts_disp_state(&st), E_OK);
 	KT_ASSERT(st.out[fo].on && st.out[fo].w == SC_W);
-	st2 = st;
+	st_set(&st2, &st);
 	st2.out[fo].w = 640;
 	st2.out[fo].h = 480;
 	KT_ASSERT_ER(ts_disp_check(&st2), E_OK);	/* it offers it */
 	KT_ASSERT_ER(ts_disp_commit(&st2), E_IO);	/* and does not take it */
+	ts_disp_state_free(&st2);
 	KT_ASSERT_ER(ts_disp_state(&st2), E_OK);
 	KT_ASSERT(st2.out[fo].on && st2.out[fo].w == SC_W && st2.out[fo].h == SC_H);
 	KT_ASSERT_EQ(ts_disp_screens(), sc + 1);
 	/* off: no screen, still listed */
-	st2 = st;
+	st_set(&st2, &st);
 	st2.out[fo].on = FALSE;
 	KT_ASSERT_ER(ts_disp_commit(&st2), E_OK);
 	KT_ASSERT_EQ(ts_disp_screens(), sc);
@@ -1338,6 +1367,260 @@ LOCAL void test_outputs( void )
 	KT_ASSERT_ER(ts_disp_commit(&st2), E_OK);
 	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
 	spec = s;
+	(void)wm_flush();
+	KT_ASSERT_ER(ts_disp_clear(0x00000000), E_OK);
+out:
+	ts_disp_state_free(&st);
+	ts_disp_state_free(&st2);
+}
+
+/*
+ * More outputs, screens, modes and EDID blocks than the tables of fixed
+ * size there were held (4 outputs, 4 screens, 48 modes, 4 EDID blocks):
+ * none is cut off. Six screens of memory are put right of the others,
+ * each an output of its own, all on in one state that passes the check;
+ * an output offers 60 modes of its own and another an EDID of six
+ * blocks, whose last extension's modes are among those it offers.
+ */
+#define MN_SCREENS	6
+#define MN_MODES	60
+#define MN_BLOCKS	6
+
+LOCAL INT mn_modes( void *ctx, T_DISPMODE *m, INT max )
+{
+	INT	k;
+
+	(void)ctx;
+	for ( k = 0; k < MN_MODES && k < max; k++ ) {
+		knl_memset(&m[k], 0, sizeof(m[k]));
+		m[k].hdisp = m[k].hss = m[k].hse = m[k].htotal = (UH)( k == 0 ? SC_W : 1000 + k );
+		m[k].vdisp = m[k].vss = m[k].vse = m[k].vtotal = (UH)( k == 0 ? SC_H : 700 );
+		m[k].clock_khz = (UW)m[k].hdisp * m[k].vdisp * 60 / 1000;
+		m[k].vrefresh = 60;
+		m[k].flags = DISP_MODE_DRIVER | ( k == 0 ? DISP_MODE_PREFERRED : 0 );
+	}
+	return MN_MODES;
+}
+
+LOCAL ER mn_commit( void *ctx, CONST T_DISPMODE *m, T_DISPHW *hw )
+{
+	(void)ctx; (void)hw;
+	return ( m == NULL || ( m->hdisp == SC_W && m->vdisp == SC_H ) ) ? E_OK : E_NOSPT;
+}
+
+LOCAL INT mn_off( void *ctx )
+{
+	(void)ctx;
+	return DISP_ST_OFF;
+}
+
+LOCAL CONST T_DISPOUTHW	mn_out[MN_SCREENS] = {
+	{ DISP_CON_USB, "Test-M1", NULL, NULL, mn_modes, NULL, mn_commit, NULL, NULL, NULL, NULL, NULL, NULL, NULL },
+	{ DISP_CON_USB, "Test-M2", NULL, NULL, mn_modes, NULL, mn_commit, NULL, NULL, NULL, NULL, NULL, NULL, NULL },
+	{ DISP_CON_USB, "Test-M3", NULL, NULL, mn_modes, NULL, mn_commit, NULL, NULL, NULL, NULL, NULL, NULL, NULL },
+	{ DISP_CON_USB, "Test-M4", NULL, NULL, mn_modes, NULL, mn_commit, NULL, NULL, NULL, NULL, NULL, NULL, NULL },
+	{ DISP_CON_USB, "Test-M5", NULL, NULL, mn_modes, NULL, mn_commit, NULL, NULL, NULL, NULL, NULL, NULL, NULL },
+	{ DISP_CON_USB, "Test-M6", NULL, NULL, mn_modes, NULL, mn_commit, NULL, NULL, NULL, NULL, NULL, NULL, NULL },
+};
+
+/* A detailed timing descriptor of w x 600 at about 60 Hz */
+LOCAL void mn_dtd( UB *d, UINT w )
+{
+	UINT	ht = w + 160, vt = 600 + 30, clk = ht * vt * 60 / 10000;
+
+	knl_memset(d, 0, 18);
+	d[0] = (UB)clk;
+	d[1] = (UB)( clk >> 8 );
+	d[2] = (UB)w;
+	d[3] = 160;
+	d[4] = (UB)( ( ( w >> 8 ) << 4 ) | 0 );
+	d[5] = (UB)600;
+	d[6] = 30;
+	d[7] = (UB)( ( 600 >> 8 ) << 4 );
+	d[8] = 48;
+	d[9] = 32;
+	d[10] = ( 3 << 4 ) | 5;
+	d[17] = 0x1e;
+}
+
+LOCAL void mn_sum( UB *b )
+{
+	UINT	k, sum = 0;
+
+	for ( k = 0; k < 127; k++ ) sum += b[k];
+	b[127] = (UB)( 256 - ( sum & 0xFF ) );
+}
+
+/* An EDID of MN_BLOCKS blocks: a mode in the base block, six in each extension, all of other widths */
+LOCAL UB	mn_edid[DISP_EDID_BLOCK * MN_BLOCKS];
+
+LOCAL void mn_edid_make( void )
+{
+	CONST UB	hdr[8] = { 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
+	INT		b, k, w = 800;
+
+	knl_memset(mn_edid, 0, sizeof(mn_edid));
+	knl_memcpy(mn_edid, hdr, 8);
+	mn_edid[8] = 0x50;			/* "TES" */
+	mn_edid[9] = 0xB3;
+	mn_edid[10] = 0x34;
+	mn_edid[18] = 1;
+	mn_edid[19] = 4;
+	for ( k = 0; k < 8; k++ ) {
+		mn_edid[38 + 2 * k] = 0x01;
+		mn_edid[39 + 2 * k] = 0x01;
+	}
+	mn_dtd(mn_edid + 54, (UINT)w);
+	w += 16;
+	for ( k = 1; k < 4; k++ ) {
+		mn_edid[54 + 18 * k + 3] = 0x10;	/* a descriptor of nothing */
+	}
+	mn_edid[126] = MN_BLOCKS - 1;
+	mn_sum(mn_edid);
+	for ( b = 1; b < MN_BLOCKS; b++ ) {
+		UB	*x = mn_edid + DISP_EDID_BLOCK * b;
+
+		x[0] = 0x02;
+		x[1] = 3;
+		x[2] = 4;
+		for ( k = 0; k < 6; k++ ) {
+			mn_dtd(x + 4 + 18 * k, (UINT)w);
+			w += 16;
+		}
+		mn_sum(x);
+	}
+}
+
+LOCAL INT mn_get_edid( void *ctx, UB *buf, INT max )
+{
+	INT	n = ( max < (INT)sizeof(mn_edid) ) ? max : (INT)sizeof(mn_edid);
+
+	(void)ctx;
+	knl_memcpy(buf, mn_edid, n);
+	return n;
+}
+
+LOCAL CONST T_DISPOUTHW	mn_edid_out = {
+	DISP_CON_HDMI, "Test-E1", mn_off, mn_get_edid, NULL, NULL, NULL,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+
+LOCAL CONST T_DISPOUTHW	mn_modes_out = {
+	DISP_CON_USB, "Test-L1", mn_off, NULL, mn_modes, NULL, NULL,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+
+LOCAL void test_many_outputs( void )
+{
+	T_DISPHW	hw;
+	T_DISPSPEC	was, s;
+	T_DISPOUTINFO	oi;
+	T_DISPSTATE	st = { 0, NULL };
+	T_DISPMODE	*md = NULL;
+	UW		*mem[MN_SCREENS];
+	INT		n0, no0, k, i, sc, nm, put = 0, x, y, w, h;
+	UB		*e;
+	BOOL		last_seen;
+
+	if ( !have_disp ) KT_SKIP("no screen");
+	KT_ASSERT_ER(ts_disp_ref(&was), E_OK);
+	n0 = ts_disp_screens();
+	if ( n0 > 1 && was.width == was.main_w ) KT_SKIP("the screen is shown as columns (screens=N)");
+	no0 = ts_disp_outputs();
+
+	/* six screens more, beyond the four there once were room for */
+	for ( k = 0; k < MN_SCREENS; k++ ) {
+		mem[k] = mem_out(&hw, SC_W, SC_H);
+		KT_ASSERT(mem[k] != NULL);
+		if ( mem[k] == NULL ) break;
+		hw.out = &mn_out[k];
+		sc = knl_disp_out_attach(&hw, DISP_SIDE_RIGHT, 0);
+		KT_ASSERT_EQ(sc, n0 + k);
+		if ( sc < 1 ) {
+			knl_vunmap((UB *)mem[k], ( SC_W * SC_H * 4 + 4095 ) / 4096);
+			break;
+		}
+		put++;
+	}
+	KT_ASSERT_EQ(put, MN_SCREENS);
+	KT_ASSERT_EQ(ts_disp_screens(), n0 + put);
+	KT_ASSERT(n0 + put > DISP_SCREENS_MAX);
+	KT_ASSERT_ER(ts_disp_screen(n0 + put - 1, &x, &y, &w, &h), E_OK);
+	if ( was.scale == 100 ) {
+		KT_ASSERT_EQ(w, SC_W);
+	}
+	KT_ASSERT_ER(ts_disp_screen(n0 + put, &x, &y, &w, &h), E_NOEXS);
+	KT_ASSERT(ts_disp_outputs() >= no0 + put);
+	KT_ASSERT(ts_disp_outputs() > 4);
+
+	/* the state: an entry for every output, all of them on passing the check, set again as it is */
+	KT_ASSERT_ER(ts_disp_state(&st), E_OK);
+	KT_ASSERT_EQ(st.n, ts_disp_outputs());
+	for ( i = 0, k = 0; i < st.n; i++ ) {
+		if ( st.out[i].on ) k++;
+	}
+	KT_ASSERT(k >= put + 1);
+	KT_ASSERT_ER(ts_disp_check(&st), E_OK);
+	KT_ASSERT_ER(ts_disp_commit(&st), E_OK);
+	KT_ASSERT_EQ(ts_disp_screens(), n0 + put);
+	ts_disp_state_free(&st);
+	tm_printf((UB *)"  %d screens on %d outputs, all of them on in one state\n", ts_disp_screens(), ts_disp_outputs());
+
+	/* every one of them taken away again, the last first */
+	for ( k = put; k >= 1; k-- ) {
+		KT_ASSERT_ER(knl_disp_out_detach(n0 + k - 1), E_OK);
+		knl_vunmap((UB *)mem[k - 1], ( SC_W * SC_H * 4 + 4095 ) / 4096);
+	}
+	KT_ASSERT_EQ(ts_disp_screens(), n0);
+	KT_ASSERT_ER(ts_disp_ref(&s), E_OK);
+	KT_ASSERT_EQ(s.width, was.width);
+	spec = s;
+
+	/* an output that offers 60 modes of its own: all of them */
+	KT_ASSERT_ER(knl_disp_out_add(&mn_modes_out), E_OK);
+	for ( i = 0; i < ts_disp_outputs() && ts_disp_output(i, &oi) >= E_OK; i++ ) {
+		if ( knl_strcmp(oi.name, "Test-L1") == 0 ) break;
+	}
+	KT_ASSERT(i < ts_disp_outputs());
+	if ( i < ts_disp_outputs() ) {
+		KT_ASSERT_EQ(oi.nmodes, MN_MODES);
+		KT_ASSERT_EQ(ts_disp_out_modes(i, NULL, 0), MN_MODES);
+		nm = modes_all(i, &md);
+		KT_ASSERT_EQ(nm, MN_MODES);
+		if ( nm == MN_MODES ) {
+			KT_ASSERT_EQ((INT)md[MN_MODES - 1].hdisp, 1000 + MN_MODES - 1);
+		}
+		if ( md != NULL ) Kfree(md);
+		md = NULL;
+	}
+
+	/* an output whose EDID is six blocks: all of it, and the modes of its last extension */
+	mn_edid_make();
+	KT_ASSERT_ER(knl_disp_out_add(&mn_edid_out), E_OK);
+	for ( i = 0; i < ts_disp_outputs() && ts_disp_output(i, &oi) >= E_OK; i++ ) {
+		if ( knl_strcmp(oi.name, "Test-E1") == 0 ) break;
+	}
+	KT_ASSERT(i < ts_disp_outputs());
+	if ( i < ts_disp_outputs() ) {
+		KT_ASSERT_EQ((INT)oi.edid_len, DISP_EDID_BLOCK * MN_BLOCKS);
+		KT_ASSERT_EQ(ts_disp_out_edid(i, NULL, 0), DISP_EDID_BLOCK * MN_BLOCKS);
+		e = (UB *)Kmalloc(DISP_EDID_BLOCK * MN_BLOCKS);
+		KT_ASSERT(e != NULL);
+		if ( e != NULL ) {
+			KT_ASSERT_EQ(ts_disp_out_edid(i, e, DISP_EDID_BLOCK * MN_BLOCKS), DISP_EDID_BLOCK * MN_BLOCKS);
+			KT_ASSERT_EQ(e[DISP_EDID_BLOCK * ( MN_BLOCKS - 1 )], 0x02);
+			Kfree(e);
+		}
+		KT_ASSERT_EQ(oi.nmodes, 1 + 6 * ( MN_BLOCKS - 1 ));
+		nm = modes_all(i, &md);
+		last_seen = FALSE;
+		for ( k = 0; k < nm; k++ ) {
+			if ( md[k].hdisp == 800 + 16 * ( 6 * ( MN_BLOCKS - 1 ) ) ) last_seen = TRUE;
+		}
+		KT_ASSERT(last_seen);
+		tm_printf((UB *)"  an EDID of %d bytes read whole: %d modes\n", (INT)oi.edid_len, nm);
+		if ( md != NULL ) Kfree(md);
+	}
 	(void)wm_flush();
 	KT_ASSERT_ER(ts_disp_clear(0x00000000), E_OK);
 }
@@ -1573,6 +1856,7 @@ EXPORT void ktest_disp( void )
 	KT_RUN(test_mirror);
 	KT_RUN(test_out_flip);
 	KT_RUN(test_outputs);
+	KT_RUN(test_many_outputs);
 #ifdef X64
 	KT_RUN(test_igfx_calc);
 #endif

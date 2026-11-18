@@ -43,6 +43,7 @@
 #include <ts/dtreq.h>
 #include <ts/print.h>
 #include <ts/look.h>
+#include "../dtask.h"
 
 /* the panels of the data box */
 #define PN_PRINT	1		/* 印刷設定 */
@@ -158,39 +159,12 @@ static void note( const char *fmt, ... )
 
 /* ---------------------------------------------------------------- asking the desktop */
 
+/* The words of the next request and the last answer, as long as they are (dtask.h) */
+static DTASK	g_dq;
+
 static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
-	static UINT	seq;
-	TS_UUID		d, reply;
-	T_OBCRE		c;
-	SZ		asz = 0;
-	ID		k, ka;
-	ER		er;
-
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
-	rq->seq = ++seq;
-	rq->reply = reply;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
-			er = an->er;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
-	return er;
+	return dq_ask(&g_dq, rq, an, NULL, wait_ms);
 }
 
 /* The setting as the desktop reads it: thirteen numbers in the order of T_PRNSET */
@@ -231,7 +205,12 @@ static ER job_ask( INT step, T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
 	rq->req = DT_RQ_PRJOB;
 	rq->recno = step;
-	if ( step != DT_PJ_JOB ) set_text(&set, (char *)rq->text, sizeof(rq->text));
+	if ( step != DT_PJ_JOB ) {
+		char	t[160];
+
+		set_text(&set, t, sizeof(t));
+		(void)dq_part(&g_dq, DT_TAIL_TEXT, (CONST UB *)t, -1);
+	}
 	memset(an, 0, sizeof(*an));
 	return ask_desktop(rq, an, wait_ms);
 }
@@ -244,8 +223,8 @@ static void paper_ask( void )
 
 	memset(&rq, 0, sizeof(rq));
 	if ( job_ask(DT_PJ_PAPER, &rq, &an, 30000) < E_OK ) return;
-	an.text[DT_TEXT_MAX - 1] = 0;
-	(void)sscanf((const char *)an.text, "%d %d %d %d %d %d", &pp_w, &pp_h, &pp_pct, &pp_sheets, &pp_lw, &pp_lh);
+	(void)sscanf((const char *)dq_ans_text(&g_dq, DT_TAIL_TEXT), "%d %d %d %d %d %d",
+		     &pp_w, &pp_h, &pp_pct, &pp_sheets, &pp_lw, &pp_lh);
 	npage = (INT)an.how;
 }
 
@@ -644,7 +623,8 @@ int main( void )
 	T_DTANS	an;
 	T_OBCRE	c;
 	TS_UUID	ch;
-	char	*tab;
+	char	*tab, *jt;
+	BOOL	ok;
 	INT	ans;
 	ER	er;
 
@@ -658,11 +638,17 @@ int main( void )
 		note("no job (%d)", (INT)er);
 		return 0;
 	}
-	an.text[DT_TEXT_MAX - 1] = 0;
-	tab = strchr((char *)an.text, '\t');
+	jt = dq_ans_dup(&g_dq, DT_TAIL_TEXT);
+	if ( jt == NULL ) {
+		note("no memory for the job");
+		return 0;
+	}
+	tab = strchr(jt, '\t');
 	snprintf(jname, sizeof(jname), "%s", ( tab != NULL ) ? tab + 1 : "");
 	if ( tab != NULL ) *tab = 0;
-	if ( !text_set((const char *)an.text, &set) ) {
+	ok = text_set(jt, &set);
+	free(jt);
+	if ( !ok ) {
 		/* what prn_default sets */
 		memset(&set, 0, sizeof(set));
 		set.all = TRUE;

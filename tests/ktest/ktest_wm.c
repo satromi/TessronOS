@@ -2302,6 +2302,67 @@ LOCAL INT as_whole( CONST char *what )
 }
 
 /* The pointer brought to (x, y) by an event put in, and the events taken again */
+/*
+ * The ticket of an act (wm_act_ticket) is ended by the next press, and by
+ * one that has come and waits unread as well: a key typed after a double
+ * press, while the reader is held up, before the window it opens comes,
+ * leaves that window without the keys (design 10.4). The test reads the
+ * input itself, so a press is left in the input layer for as long as it
+ * likes; a let go, a move or a modifier waiting ends nothing.
+ */
+LOCAL void act_in( UINT type, UINT code )
+{
+	T_HIDEV	in;
+
+	knl_memset(&in, 0, sizeof(in));
+	in.type = type;
+	in.code = code;
+	in.x = 40;
+	in.y = 40;
+	KT_ASSERT_ER(kt_inject(&in), E_OK);
+}
+
+LOCAL void test_act_waiting( void )
+{
+	T_WMEV	ev;
+	UINT	t;
+
+	while ( wm_read_event(&ev, 30) >= E_OK ) ;	/* nothing left from before */
+	KT_ASSERT(!ts_hid_press_waiting());
+
+	/* a press read: its ticket is good */
+	act_in(HID_EV_BTN_DOWN, 0);
+	KT_ASSERT_ER(wm_read_event(&ev, 500), E_OK);
+	KT_ASSERT_EQ(ev.type, HID_EV_BTN_DOWN);
+	t = wm_act_ticket();
+	KT_ASSERT(wm_act_good(t));
+
+	/* a let go and a move waiting, and a modifier: still good */
+	act_in(HID_EV_BTN_UP, 0);
+	act_in(HID_EV_MOVE, 0);
+	act_in(HID_EV_KEY_DOWN, 0xE1);			/* left shift */
+	KT_ASSERT(!ts_hid_press_waiting());
+	KT_ASSERT(wm_act_good(t));
+
+	/* a key that is not a modifier, come and not read: the ticket ends at once */
+	act_in(HID_EV_KEY_DOWN, 0x04);
+	KT_ASSERT(ts_hid_press_waiting());
+	KT_ASSERT(!wm_act_good(t));
+	KT_ASSERT_EQ(wm_act_ticket(), t);		/* not read: the count is as it was */
+
+	/* read: the count goes on, and the old ticket stays ended */
+	while ( wm_read_event(&ev, 30) >= E_OK ) ;
+	KT_ASSERT(!ts_hid_press_waiting());
+	KT_ASSERT(wm_act_ticket() != t);
+	KT_ASSERT(!wm_act_good(t));
+	KT_ASSERT(wm_act_good(wm_act_ticket()));
+
+	/* the keys let go again */
+	act_in(HID_EV_KEY_UP, 0x04);
+	act_in(HID_EV_KEY_UP, 0xE1);
+	while ( wm_read_event(&ev, 30) >= E_OK ) ;
+}
+
 LOCAL BOOL pt_to( INT x, INT y )
 {
 	T_HIDEV	in;
@@ -4522,12 +4583,21 @@ LOCAL void test_place_kept( void )
 			tm_printf((UB *)"  no second display with an identity: the rest is for two displays\n");
 			return;
 		}
-		keep = st;
+		er = ts_disp_state_copy(&keep, &st);
+		KT_ASSERT_ER(er, E_OK);
+		if ( er < E_OK ) {
+			ts_disp_state_free(&st);
+			return;
+		}
 		st.out[out].side = DISP_SIDE_LEFT;
 		st.out[out].offset = 0;
 		er = ts_disp_commit(&st);
 		KT_ASSERT_ER(er, E_OK);
-		if ( er < E_OK ) return;
+		if ( er < E_OK ) {
+			ts_disp_state_free(&st);
+			ts_disp_state_free(&keep);
+			return;
+		}
 		(void)ts_disp_output(out, &oi);
 		KT_ASSERT_ER(ts_disp_screen(oi.screen, &sx, &sy, &sww, &shh), E_OK);
 		wm_screen_main_rect(&mr);
@@ -4551,6 +4621,8 @@ LOCAL void test_place_kept( void )
 		KT_ASSERT_EQ(v.left, mr.left + 30);
 		KT_ASSERT_EQ(v.top, mr.top + 40);
 		KT_ASSERT_ER(ts_disp_commit(&keep), E_OK);
+		ts_disp_state_free(&st);
+		ts_disp_state_free(&keep);
 	}
 }
 
@@ -4811,7 +4883,10 @@ LOCAL void test_mirror_wm( void )
 		KT_ASSERT(ts_disp_mirror_mode(out, &mw2, &mh2) >= E_OK);
 		k = ob_opn_obj(&ob_uuid_display, OB_OP_R | OB_OP_WRITE);
 		KT_ASSERT(k > 0);
-		if ( k <= 0 ) return;
+		if ( k <= 0 ) {
+			ts_disp_state_free(&st);
+			return;
+		}
 		tm_sprintf((UB *)line, (UB *)"OUT%d on %dx%d mirror 0", out, (INT)mw2, (INT)mh2);
 		KT_ASSERT_ER(ob_wri_rec(k, OB_DSP_MODE, 0, line, (SZ)knl_strlen(line), &asz), E_OK);
 		KT_ASSERT_EQ(ts_disp_screens(), 1);
@@ -4851,6 +4926,7 @@ LOCAL void test_mirror_wm( void )
 		KT_ASSERT_ER(ts_disp_output(out, &oi), E_OK);
 		KT_ASSERT(oi.screen > 0);
 		(void)ob_cls_obj(k);
+		ts_disp_state_free(&st);
 		KT_ASSERT_ER(ts_disp_ref(&spec), E_OK);
 	}
 }
@@ -5262,6 +5338,7 @@ EXPORT void ktest_wm( void )
 	KT_RUN(test_many);
 	KT_RUN(test_beyond);
 	KT_RUN(test_events);
+	KT_RUN(test_act_waiting);
 	KT_RUN(test_volume_keys);
 	KT_RUN(test_frame);
 	KT_RUN(test_bars);

@@ -33,6 +33,7 @@
 
 #include "console.h"
 #include <ts/wm.h>
+#include <ts/umem.h>
 
 #define TICK_MS		40
 #define HIST_MAX	16
@@ -99,6 +100,140 @@ EXPORT void say_num( D v )
 	tm_putstring(b);
 }
 
+/* ---------------------------------------------------------------- memory for names */
+
+#define CM_STRETCH	( 1024 * 1024 )	/* a line's memory taken this much at a time, more for more */
+#define CM_PAGE		4096
+#define CM_ALIGN(n)	( ( (n) + 15 ) & ~(SZ)15 )
+
+typedef struct CMSTR {
+	struct CMSTR	*next;
+	SZ		size;		/* bytes of the stretch, this head with them */
+	SZ		used;
+} CMSTR;
+
+LOCAL CMSTR	*cm_first = NULL, *cm_last = NULL;
+LOCAL BOOL	cm_said = FALSE;
+
+LOCAL CMSTR *cm_stretch( SZ need )
+{
+	void	*p = NULL;
+	SZ	size = CM_ALIGN(sizeof(CMSTR)) + need;
+	CMSTR	*s;
+
+	size = ( size < CM_STRETCH ) ? CM_STRETCH : ( size + CM_PAGE - 1 ) & ~(SZ)( CM_PAGE - 1 );
+	if ( ts_map_mem(&p, size, 0, TS_MEM_RW) < E_OK || p == NULL ) return NULL;
+	s = (CMSTR *)p;
+	s->next = NULL;
+	s->size = size;
+	s->used = CM_ALIGN(sizeof(CMSTR));
+	return s;
+}
+
+EXPORT void *cm_take( SZ n )
+{
+	CMSTR	*s;
+	void	*p;
+
+	if ( n < 0 ) return NULL;
+	n = CM_ALIGN(( n > 0 ) ? n : 1);
+	if ( cm_first == NULL ) {
+		cm_first = cm_last = cm_stretch(n);
+		if ( cm_first == NULL ) return NULL;
+	}
+	if ( cm_last->used + n > cm_last->size ) {
+		s = cm_stretch(n);
+		if ( s == NULL ) return NULL;
+		cm_last->next = s;
+		cm_last = s;
+	}
+	p = (UB *)cm_last + cm_last->used;
+	cm_last->used += n;
+	return p;
+}
+
+EXPORT void cm_line_reset( void )
+{
+	CMSTR	*s, *nx;
+
+	if ( cm_first == NULL ) return;
+	for ( s = cm_first->next; s != NULL; s = nx ) {
+		nx = s->next;
+		(void)ts_unm_mem(s, s->size);
+	}
+	cm_first->next = NULL;
+	cm_last = cm_first;
+	/* the pages the line used given back, made again (zeros) when touched */
+	if ( cm_first->used > CM_PAGE ) {
+		(void)ts_ctl_mem((UB *)cm_first + CM_PAGE, cm_first->size - CM_PAGE, TS_MEM_DISCARD);
+	}
+	cm_first->used = CM_ALIGN(sizeof(CMSTR));
+	cm_said = FALSE;
+}
+
+EXPORT UB *cm_dup( CONST UB *s )
+{
+	SZ	n = (SZ)strlen((CONST char *)s);
+	UB	*d = (UB *)cm_take(n + 1);
+
+	if ( d != NULL ) memcpy(d, s, n + 1);
+	return d;
+}
+
+EXPORT UB *cm_name( CONST TS_UUID *u )
+{
+	UB	*b;
+	SZ	need = 0, have;
+
+	if ( ob_ref_nam(u, NULL, 0, &need) < E_OK ) return NULL;
+	for ( ;; ) {
+		have = need;
+		b = (UB *)cm_take(have);
+		if ( b == NULL ) {
+			cm_no_memory();
+			return NULL;
+		}
+		if ( ob_ref_nam(u, b, have, &need) < E_OK ) return NULL;
+		if ( need <= have ) return b;
+		/* renamed longer meanwhile: the line's memory is given back at its end */
+	}
+}
+
+EXPORT UB *cm_room( SZ n )
+{
+	SZ	size;
+	void	*p = NULL;
+
+	size = ( CM_ALIGN(sizeof(SZ)) + n + CM_PAGE - 1 ) & ~(SZ)( CM_PAGE - 1 );
+	if ( ts_map_mem(&p, size, 0, TS_MEM_RW) < E_OK || p == NULL ) return NULL;
+	*(SZ *)p = size;
+	return (UB *)p + CM_ALIGN(sizeof(SZ));
+}
+
+EXPORT UB *cm_hold( CONST UB *s )
+{
+	SZ	n = (SZ)strlen((CONST char *)s);
+	UB	*d = cm_room(n + 1);
+
+	if ( d != NULL ) memcpy(d, s, n + 1);
+	return d;
+}
+
+EXPORT void cm_let_go( UB *p )
+{
+	UB	*h;
+
+	if ( p == NULL ) return;
+	h = p - CM_ALIGN(sizeof(SZ));
+	(void)ts_unm_mem(h, *(SZ *)h);
+}
+
+EXPORT void cm_no_memory( void )
+{
+	if ( !cm_said ) say("メモリが足りません\n");
+	cm_said = TRUE;
+}
+
 /* ---------------------------------------------------------------- letters */
 
 /*
@@ -129,19 +264,39 @@ EXPORT void con_fold( UB *s )
 	s[o] = 0;
 }
 
+/* The next letter of s at *pi as con_fold would leave it: a byte, the full-width forms of ASCII as ASCII */
+LOCAL UB fold_next( CONST UB *s, INT *pi )
+{
+	INT	i = *pi;
+
+	if ( s[i] == 0xEF && ( s[i + 1] == 0xBC || s[i + 1] == 0xBD ) && s[i + 2] >= 0x80 && s[i + 2] <= 0xBF ) {
+		UW	cp = 0xF000 | ( (UW)( s[i + 1] & 0x3F ) << 6 ) | ( s[i + 2] & 0x3F );
+
+		if ( cp >= 0xFF01 && cp <= 0xFF5E ) {
+			*pi = i + 3;
+			return (UB)( cp - 0xFF01 + 0x21 );
+		}
+	}
+	if ( s[i] == 0xE3 && s[i + 1] == 0x80 && s[i + 2] == 0x80 ) {
+		*pi = i + 3;
+		return ' ';
+	}
+	if ( s[i] != 0 ) *pi = i + 1;
+	return s[i];
+}
+
+/* Compared as they are folded, letter by letter: names of any length, nothing copied */
 EXPORT BOOL con_same_name( CONST UB *a, CONST UB *b )
 {
-	UB	x[OB_NAME_MAX * 2], y[OB_NAME_MAX * 2];
-	INT	i;
+	INT	i = 0, k = 0;
+	UB	x, y;
 
-	for ( i = 0; a[i] != 0 && i < (INT)sizeof(x) - 1; i++ ) x[i] = a[i];
-	x[i] = 0;
-	for ( i = 0; b[i] != 0 && i < (INT)sizeof(y) - 1; i++ ) y[i] = b[i];
-	y[i] = 0;
-	con_fold(x);
-	con_fold(y);
-	for ( i = 0; x[i] != 0 && x[i] == y[i]; i++ ) ;
-	return (BOOL)( x[i] == 0 && y[i] == 0 );
+	do {
+		x = fold_next(a, &i);
+		y = fold_next(b, &k);
+		if ( x != y ) return FALSE;
+	} while ( x != 0 );
+	return TRUE;
 }
 
 /* Letters onto the end of the line, as many whole ones as fit */
@@ -176,10 +331,14 @@ LOCAL INT prompt( UB *out, INT max )
 	return n;
 }
 
+/* The prompt and the line, in a stretch held for them: as long as the place's name makes them */
+LOCAL UB	*tail_room = NULL;
+LOCAL INT	tail_cap = 0;
+
 LOCAL void redraw( void )
 {
-	static UB	tail[OB_NAME_MAX + 4 + CON_LINE_MAX];
-	INT		n, i;
+	UB		*tail = NULL;
+	INT		n, i, need;
 	BOOL		running = job_running();
 
 	if ( vtmode ) {
@@ -191,9 +350,18 @@ LOCAL void redraw( void )
 	}
 
 	if ( !running ) {
-		n = prompt(tail, OB_NAME_MAX + 4);
-		for ( i = 0; i < ninput; i++ ) tail[n++] = input[i];
-		tail[n] = 0;
+		need = (INT)strlen((CONST char *)box_here_name()) + (INT)sizeof(PROMPT_END) + CON_LINE_MAX + 4;
+		if ( need > tail_cap ) {
+			cm_let_go(tail_room);
+			tail_room = cm_room((SZ)need);
+			tail_cap = ( tail_room != NULL ) ? need : 0;
+		}
+		tail = tail_room;
+		if ( tail != NULL ) {
+			n = prompt(tail, need);
+			for ( i = 0; i < ninput; i++ ) tail[n++] = input[i];
+			tail[n] = 0;
+		}
 	}
 	term.hold = TRUE;
 	lt_draw(&term, &win, running ? NULL : tail, (BOOL)( !running && !ime_busy() ));
@@ -232,16 +400,17 @@ LOCAL BOOL take_log( void )
 LOCAL void list_names( UINT type, CONST char *none )
 {
 	TS_UUID	ids[LIST_PAGE], last;
-	T_OBREF	r;
 	INT	cnt, i, all = 0;
 
 	do {
 		cnt = 0;
 		if ( ob_lst_obj(type, 0, ( all > 0 ) ? &last : NULL, ids, LIST_PAGE, &cnt) < E_OK ) break;
 		for ( i = 0; i < cnt; i++ ) {
-			if ( ob_ref_obj(&ids[i], &r) >= E_OK ) {
+			UB	*nm = cm_name(&ids[i]);
+
+			if ( nm != NULL ) {
 				say("  ");
-				tm_putstring(( r.name[0] != 0 ) ? r.name : (CONST UB *)"(名前なし)");
+				tm_putstring(( nm[0] != 0 ) ? nm : (CONST UB *)"(名前なし)");
 				say("\n");
 			}
 		}
@@ -260,24 +429,24 @@ LOCAL void list_names( UINT type, CONST char *none )
 LOCAL void cmd_ps( void )
 {
 	TS_UUID	ids[LIST_PAGE], last, prog;
-	T_OBREF	r, pr;
+	UB	*nm, *pn;
 	INT	cnt, i, k, n, all = 0;
 
 	do {
 		cnt = 0;
 		if ( ob_lst_obj(OB_T_PROCESS, 0, ( all > 0 ) ? &last : NULL, ids, LIST_PAGE, &cnt) < E_OK ) break;
 		for ( i = 0; i < cnt; i++ ) {
-			if ( ob_ref_obj(&ids[i], &r) < E_OK ) continue;
-			for ( k = 0; r.name[k] != 0 && r.name[k] != ' '; k++ ) ;
+			if ( ( nm = cm_name(&ids[i]) ) == NULL ) continue;
+			for ( k = 0; nm[k] != 0 && nm[k] != ' '; k++ ) ;
 			say("  ");
-			say_u(( r.name[k] == ' ' ) ? r.name + k + 1 : r.name);
+			say_u(( nm[k] == ' ' ) ? nm + k + 1 : nm);
 			say("  ");
 			n = 0;
 			if ( ob_acc_obj(&ids[i], OB_OP_READ) < E_OK ) {
 				say("(読めません)");	/* asked, not opened to be refused */
 			} else if ( ob_lst_lnk(&ids[i], NULL, &prog, 1, &n) >= E_OK && n > 0
-			  && ob_ref_obj(&prog, &pr) >= E_OK && pr.name[0] != 0 ) {
-				say_u(pr.name);
+			  && ( pn = cm_name(&prog) ) != NULL && pn[0] != 0 ) {
+				say_u(pn);
 			} else {
 				say("(プログラムの実身はありません)");
 			}
@@ -490,8 +659,8 @@ LOCAL void vt_key( CONST T_OBNTM *m )
 LOCAL void run_prog( INT argc, UB **argv )
 {
 	TS_UUID	prog;
-	UB	pname[OB_NAME_MAX + 16];
-	ER	er = box_find_prog(argv[0], &prog, pname, sizeof(pname));
+	UB	*pname = NULL;
+	ER	er = box_find_prog(argv[0], &prog, &pname);
 
 	if ( er == E_NOEXS ) {
 		say_u(argv[0]);
@@ -507,12 +676,13 @@ LOCAL void run_prog( INT argc, UB **argv )
 LOCAL void run( void )
 {
 	static UB	line[CON_LINE_MAX], store[CON_LINE_MAX * 2];
-	UB		*argv[CON_ARGS_MAX], p[OB_NAME_MAX + 4];
+	UB		*argv[CON_ARGS_MAX];
 	INT		k, argc;
 
+	cm_line_reset();		/* a new line: what the one before took is given back */
 	input[ninput] = 0;
-	(void)prompt(p, sizeof(p));
-	say_u(p);
+	say_u(box_here_name());
+	say(PROMPT_END);
 	tm_putstring(input);
 	say("\n");
 	if ( ninput > 0 ) {
@@ -573,6 +743,7 @@ LOCAL void complete( void )
 	INT		ws = 0, i, n, k;
 	BOOL		first = TRUE, quote = FALSE;
 
+	cm_line_reset();
 	input[ninput] = 0;
 	for ( i = 0; i < ninput; i++ ) {
 		if ( input[i] == '\\' && i + 1 < ninput ) {
@@ -718,14 +889,15 @@ LOCAL void menu( CONST T_OBNTM *m, BOOL *p_done )
 LOCAL void run_given( void )
 {
 	TS_UUID	u;
-	UB	pname[OB_NAME_MAX + 16], p[OB_NAME_MAX + 4];
+	UB	*pname = NULL;
 	UB	*argv[1];
 
-	if ( ts_get_arg(&u, sizeof(u)) != (SZ)sizeof(u) || box_prog_named(&u, pname, sizeof(pname)) < E_OK ) {
+	cm_line_reset();
+	if ( ts_get_arg(&u, sizeof(u)) != (SZ)sizeof(u) || box_prog_named(&u, &pname) < E_OK ) {
 		return;
 	}
-	(void)prompt(p, sizeof(p));
-	say_u(p);
+	say_u(box_here_name());
+	say(PROMPT_END);
 	say_u(pname);
 	say("\n");
 	argv[0] = pname;

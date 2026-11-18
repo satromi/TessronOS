@@ -123,12 +123,14 @@ EXPORT INT sl_pages( CONST T_TAD *rec, TS_UUID *ids, INT max, INT *p_w, INT *p_h
 	if ( s != NULL ) Kfree(s);
 
 	/* the links, in the order they stand */
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	if ( v == NULL ) return 0;
+	tad_vobj_init(v);
 	n = tad_lnk_count(rec);
 	for ( i = 0; i < n && k < max; i++ ) {
 		if ( tad_lnk_get(rec, i, v) >= E_OK ) ids[k++] = v->target;
 	}
+	tad_vobj_clear(v);
 	Kfree(v);
 	return k;
 }

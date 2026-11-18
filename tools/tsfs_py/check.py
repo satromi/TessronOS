@@ -38,7 +38,7 @@ from .layout import (AG_MAX_BLOCKS, AG_MIN_BLOCKS, BLOCK_SIZE, COMPAT_GROWN,
                      INCOMPAT_GROWING, INCOMPAT_XT2, JRNL_AREA_BLOCKS, JRNL_MAX_BLOCKS,
                      KNOWN_INCOMPAT, KNOWN_ROCOMPAT, LABEL_MAX, MAGIC_NODE,
                      ERR_NAMES, NIL_UUID, ST_CLEAN, ST_ERROR, Superblock,
-                     grown_count, layout)
+                     grown_count, layout, utf8_fit)
 from . import meta as metamod
 from .obj import ICON_MAX, OB_ICON, is_icon
 from .obj import (DATA_INLINE_MAX, F_DELETABLE, F_EDITABLE, F_GARBAGE,
@@ -230,6 +230,12 @@ class Checker(object):
                      % (vol.dev.nblk - sb.total_blocks))
         if b"\0" not in sb.label_raw:
             rep.warn(where, "the label fills its %d bytes with no NUL" % LABEL_MAX)
+        whole = vol.label()
+        copy = sb.label_raw.split(b"\0", 1)[0]
+        if utf8_fit(whole.encode("utf-8"), LABEL_MAX - 1) != copy:
+            rep.note(where, "the label's copy %r is not the first bytes of the "
+                     "label %r, the top object's name; the kernel writes it "
+                     "again when it attaches the volume" % (sb.label, whole))
         if sb.incompat & ~KNOWN_INCOMPAT:
             rep.error(where, "incompatible features 0x%x: the kernel will not "
                       "open it" % sb.incompat)

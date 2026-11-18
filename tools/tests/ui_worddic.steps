@@ -5,8 +5,10 @@
 # both, one changed and the other deleted.
 open 01a0d8c4-5312-7c23-8d34-5e6f7b8c9d12
 expect worddic: ready
-# mozc is up some seconds after the desktop: letters typed while it starts do not all arrive
-expect kconv: mozc started
+# mozc is up some seconds after the desktop: letters typed while it starts do not all arrive.
+# It is asked whether it is up rather than looked for on the console: it may have come up
+# before the machine was kept (ui_run's kept state), and said so only on that first run
+kanji 60
 wait 800
 win 単語登録
 # 読み: てすろん, typed in 日本語 and committed as kana

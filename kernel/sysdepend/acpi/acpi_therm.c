@@ -90,8 +90,6 @@ IMPORT ER	knl_cpu_x64_temp( INT *p_deg );		/* cpuclk.c */
 #define MSR_PKG_POWER_LIMIT	0x610
 #define MSR_PKG_ENERGY_STATUS	0x611
 #define MSR_CONFIG_TDP_CONTROL	0x64b
-#define MSR_CORE_PERF_LIMIT	0x64f
-#define MSR_GFX_PERF_LIMIT	0x6b0
 #define MSR_PM_ENABLE		0x770
 #define MSR_HWP_CAPABILITIES	0x771
 #define MSR_HWP_REQUEST		0x774
@@ -103,6 +101,26 @@ IMPORT ER	knl_cpu_x64_temp( INT *p_deg );		/* cpuclk.c */
 #define ST_N		4
 
 #define MSR_PKG_POWER_INFO	0x614
+
+/*
+ * What this processor has (decided at the start): the package's thermal
+ * status (CPUID 6 EAX bit 6) and this core's (CPUID 1 EDX bit 22), each
+ * read once with knl_rdmsr_safe before it is used, the energy bias
+ * (CPUID 6 ECX bit 3),
+ * RAPL's package registers and the limits' reasons of the cores and the
+ * GT (knl_x64_msr: by the model, and a look where it does not settle
+ * it). What is not there is told as none, and the power limit is not
+ * used without RAPL: the temperature is then watched through PROCHOT
+ * and the processor's own thermal control alone.
+ */
+LOCAL BOOL	has_ptm = FALSE, has_therm = FALSE, has_epb = FALSE, has_rapl = FALSE, has_info = FALSE;
+LOCAL UW	msr_plr_core = 0, msr_plr_gfx = 0, msr_pp0 = 0;
+
+/* A register that may be absent, for the lines: its value, or 0 when there is none */
+LOCAL UD rd_if( UW msr )
+{
+	return ( msr != 0 ) ? rdmsr(msr) : 0;
+}
 
 #define PERIOD_S	10
 #define CHG_MAX		6
@@ -180,59 +198,102 @@ LOCAL UW ms_window( UD field, INT tu )
 	return (UW)( ( ( (UD)1000 * ( 4 + z ) ) << y ) >> ( tu + 2 ) );
 }
 
+/*
+ * A register for the start's lines only: read with knl_rdmsr_safe, its
+ * value as hex in b, or "none" when the processor refuses it (then 0).
+ * TRUE when it was read.
+ */
+LOCAL BOOL shown( UW msr, UD *p_v, char *b )
+{
+	if ( knl_rdmsr_safe(msr, p_v) == E_OK ) {
+		tm_sprintf((UB *)b, (CONST UB *)"%08x", (UW)*p_v);
+		return TRUE;
+	}
+	*p_v = 0;
+	tm_sprintf((UB *)b, (CONST UB *)"none");
+	return FALSE;
+}
+
 LOCAL void tell_msrs( void )
 {
 	UW	a, b, c, d;
-	UD	tt, pc, pl, unit, pi, misc, cur;
+	UD	tt, pc, pl, unit, pi, misc, cur, v, ct;
 	INT	pu, tu, tj, off, k;
-	char	t[LINE];
+	BOOL	have_tt, have_misc;
+	char	t[LINE], s_pc[12], s_pi[12], s_ctl[12], s_st[12], s_epb[12], s_ts[12], s_pts[12], s_x[12];
 
-	tt = rdmsr(MSR_TEMPERATURE_TARGET);
-	pc = rdmsr(MSR_POWER_CTL);
-	unit = rdmsr(MSR_RAPL_POWER_UNIT);
-	pl = rdmsr(MSR_PKG_POWER_LIMIT);
-	pi = rdmsr(MSR_PLATFORM_INFO);
-	misc = rdmsr(MSR_MISC_ENABLE);
-	cur = rdmsr(MSR_PP0_CURRENT_CONFIG);
+	have_tt = shown(MSR_TEMPERATURE_TARGET, &tt, s_x);
+	(void)shown(MSR_POWER_CTL, &pc, s_pc);
+	(void)shown(MSR_PLATFORM_INFO, &pi, s_pi);
+	have_misc = shown(MSR_MISC_ENABLE, &misc, s_x);
+	(void)shown(MSR_PERF_CTL, &v, s_ctl);
+	(void)shown(MSR_PERF_STATUS, &v, s_st);
+	(void)shown(MSR_ENERGY_PERF_BIAS, &v, s_epb);
+	(void)shown(MSR_THERM_STATUS, &v, s_ts);
+	(void)shown(MSR_PKG_THERM_STATUS, &v, s_pts);
+	unit = has_rapl ? rdmsr(MSR_RAPL_POWER_UNIT) : 0;
+	pl = has_rapl ? rdmsr(MSR_PKG_POWER_LIMIT) : 0;
+	cur = rd_if(msr_pp0);
 	pu = (INT)( unit & 0xf );
 	eu = (INT)( ( unit >> 8 ) & 0x1f );
 	tu = (INT)( ( unit >> 16 ) & 0xf );
 	tj = (INT)( ( tt >> 16 ) & 0xff );
 	off = (INT)( ( tt >> 24 ) & 0x3f );
-	k = tm_sprintf((UB *)t, (CONST UB *)"therm: start: TjMax %d C, TCC offset %d (the processor's own control from %d C); "
-		       "bidirectional PROCHOT %s (POWER_CTL %08x); ", tj, off, tj - off, ( pc & 1 ) ? "on" : "off", (UW)pc);
-	k += tm_sprintf((UB *)t + k, (CONST UB *)"PL1 %d mW %s clamp %d window %d ms, PL2 %d mW %s clamp %d window %d ms, %slocked "
-			"(PKG_POWER_LIMIT %08x%08x); ",
-			(INT)( ( ( pl & 0x7fff ) * 1000 ) >> pu ), ( pl & 0x8000 ) ? "on" : "off", (INT)( ( pl >> 16 ) & 1 ),
-			(INT)ms_window(pl >> 17, tu),
-			(INT)( ( ( ( pl >> 32 ) & 0x7fff ) * 1000 ) >> pu ), ( pl & ( 1ULL << 47 ) ) ? "on" : "off",
-			(INT)( ( pl >> 48 ) & 1 ), (INT)ms_window(pl >> 49, tu), ( pl & ( 1ULL << 63 ) ) ? "" : "not ",
-			(UW)( pl >> 32 ), (UW)pl);
-	k += tm_sprintf((UB *)t + k, (CONST UB *)"ratios least %d, most efficient %d, most without turbo %d (PLATFORM_INFO %08x%08x); "
-			"PERF_CTL %04x, PERF_STATUS %04x; energy bias %d; SpeedStep %s, turbo %s; "
-			"the cores' current limit %d A %slocked\n",
-			(INT)( ( pi >> 48 ) & 0xff ), (INT)( ( pi >> 40 ) & 0xff ), (INT)( ( pi >> 8 ) & 0xff ), (UW)( pi >> 32 ), (UW)pi,
-			(UW)( rdmsr(MSR_PERF_CTL) & 0xffff ), (UW)( ( rdmsr(MSR_PERF_STATUS) >> 0 ) & 0xffff ),
-			(INT)( rdmsr(MSR_ENERGY_PERF_BIAS) & 0xf ), ( misc & ( 1ULL << 16 ) ) ? "on" : "off",
-			( misc & ( 1ULL << 38 ) ) ? "off" : "on", (INT)( ( cur & 0x1fff ) / 8 ), ( cur & 0x80000000ULL ) ? "" : "not ");
+	if ( have_tt ) {
+		k = tm_sprintf((UB *)t, (CONST UB *)"therm: start: TjMax %d C, TCC offset %d (the processor's own control from %d C); ",
+			       tj, off, tj - off);
+	} else {
+		k = tm_sprintf((UB *)t, (CONST UB *)"therm: start: TjMax none (no TEMPERATURE_TARGET); ");
+	}
+	k += tm_sprintf((UB *)t + k, (CONST UB *)"bidirectional PROCHOT %s (POWER_CTL %s); ", ( pc & 1 ) ? "on" : "off", s_pc);
+	if ( !has_rapl ) {
+		k += tm_sprintf((UB *)t + k, (CONST UB *)"no RAPL (no power limits nor energy); ");
+	} else {
+		k += tm_sprintf((UB *)t + k, (CONST UB *)"PL1 %d mW %s clamp %d window %d ms, PL2 %d mW %s clamp %d window %d ms, "
+				"%slocked (PKG_POWER_LIMIT %08x%08x); ",
+				(INT)( ( ( pl & 0x7fff ) * 1000 ) >> pu ), ( pl & 0x8000 ) ? "on" : "off", (INT)( ( pl >> 16 ) & 1 ),
+				(INT)ms_window(pl >> 17, tu),
+				(INT)( ( ( ( pl >> 32 ) & 0x7fff ) * 1000 ) >> pu ), ( pl & ( 1ULL << 47 ) ) ? "on" : "off",
+				(INT)( ( pl >> 48 ) & 1 ), (INT)ms_window(pl >> 49, tu), ( pl & ( 1ULL << 63 ) ) ? "" : "not ",
+				(UW)( pl >> 32 ), (UW)pl);
+	}
+	k += tm_sprintf((UB *)t + k, (CONST UB *)"ratios least %d, most efficient %d, most without turbo %d (PLATFORM_INFO %s); "
+			"PERF_CTL %s, PERF_STATUS %s; energy bias %s%s; SpeedStep %s, turbo %s; ",
+			(INT)( ( pi >> 48 ) & 0xff ), (INT)( ( pi >> 40 ) & 0xff ), (INT)( ( pi >> 8 ) & 0xff ), s_pi, s_ctl, s_st,
+			s_epb, has_epb ? "" : " (CPUID: none)", !have_misc ? "none" : ( misc & ( 1ULL << 16 ) ) ? "on" : "off",
+			!have_misc ? "none" : ( misc & ( 1ULL << 38 ) ) ? "off" : "on");
+	if ( msr_pp0 != 0 ) {
+		k += tm_sprintf((UB *)t + k, (CONST UB *)"the cores' current limit %d A %slocked; ", (INT)( ( cur & 0x1fff ) / 8 ),
+				( cur & 0x80000000ULL ) ? "" : "not ");
+	} else {
+		k += tm_sprintf((UB *)t + k, (CONST UB *)"the cores' current limit none; ");
+	}
+	k += tm_sprintf((UB *)t + k, (CONST UB *)"the limits' reasons: cores %x, GT %x (0: none)\n", msr_plr_core, msr_plr_gfx);
 	tm_printf((UB *)"%s", t);
 
 	cpuid(6, 0, &a, &b, &c, &d);
-	k = tm_sprintf((UB *)t, (CONST UB *)"therm: start: thermal status of this core %08x, of the package %08x",
-		       (UW)rdmsr(MSR_THERM_STATUS), (UW)rdmsr(MSR_PKG_THERM_STATUS));
+	k = tm_sprintf((UB *)t, (CONST UB *)"therm: start: thermal status of this core %s%s, of the package %s%s", s_ts,
+		       has_therm ? "" : " (not used)", s_pts, has_ptm ? "" : " (not used)");
 	if ( ( pi >> 33 ) & 3 ) {
-		UD	ct = rdmsr(MSR_CONFIG_TDP_CONTROL);
+		char	s_ct[12];
 
-		k += tm_sprintf((UB *)t + k, (CONST UB *)"; configurable TDP level %d of %d, %slocked",
-				(INT)( ct & 3 ), (INT)( ( pi >> 33 ) & 3 ), ( ct & 0x80000000ULL ) ? "" : "not ");
+		if ( shown(MSR_CONFIG_TDP_CONTROL, &ct, s_ct) ) {
+			k += tm_sprintf((UB *)t + k, (CONST UB *)"; configurable TDP level %d of %d, %slocked",
+					(INT)( ct & 3 ), (INT)( ( pi >> 33 ) & 3 ), ( ct & 0x80000000ULL ) ? "" : "not ");
+		} else {
+			k += tm_sprintf((UB *)t + k, (CONST UB *)"; configurable TDP none");
+		}
 	}
 	if ( ( a & 0x80U ) == 0 ) {
 		k += tm_sprintf((UB *)t + k, (CONST UB *)"; no HWP");
-	} else if ( ( rdmsr(MSR_PM_ENABLE) & 1 ) == 0 ) {
+	} else if ( knl_rdmsr_safe(MSR_PM_ENABLE, &v) != E_OK || ( v & 1 ) == 0 ) {
 		k += tm_sprintf((UB *)t + k, (CONST UB *)"; HWP off");
 	} else {
-		k += tm_sprintf((UB *)t + k, (CONST UB *)"; HWP on, capabilities %08x, request %08x%08x",
-				(UW)rdmsr(MSR_HWP_CAPABILITIES), (UW)( rdmsr(MSR_HWP_REQUEST) >> 32 ), (UW)rdmsr(MSR_HWP_REQUEST));
+		char	s_cap[12], s_req[12];
+
+		(void)shown(MSR_HWP_CAPABILITIES, &v, s_cap);
+		(void)shown(MSR_HWP_REQUEST, &v, s_req);
+		k += tm_sprintf((UB *)t + k, (CONST UB *)"; HWP on, capabilities %s, request %08x%s", s_cap, (UW)( v >> 32 ), s_req);
 	}
 	tm_printf((UB *)"%s\n", t);
 }
@@ -559,12 +620,17 @@ LOCAL void dptf_setup( void )
 		nrow++;
 	}
 	if ( nrow == 0 ) return;
+	if ( !has_rapl ) {
+		tm_printf((UB *)"therm: DPTF policy: no RAPL on this processor: the table not used\n");
+		nrow = 0;
+		return;
+	}
 
 	v = rdmsr(MSR_RAPL_POWER_UNIT);
 	pl.pu = (INT)( v & 0xf );
 	pl.tu = (INT)( ( v >> 16 ) & 0xf );
 	v = rdmsr(MSR_PKG_POWER_LIMIT);
-	info = rdmsr(MSR_PKG_POWER_INFO);
+	info = rd_if(has_info ? MSR_PKG_POWER_INFO : 0);
 	spec = uw_of(info);
 	/* the most is the PL1 the firmware set: never written above it, even where the design power is more */
 	pl.min_state = uw_of(v);
@@ -583,6 +649,9 @@ LOCAL INT dptf_text( char *t )
 {
 	INT	i, n = 0, on = 0;
 
+	if ( !has_rapl ) {
+		return tm_sprintf((UB *)t, (CONST UB *)"; no RAPL: no PL1, DPTF policy not used");
+	}
 	if ( !dptf_on ) {
 		return tm_sprintf((UB *)t, (CONST UB *)"; PL1 %d mW; DPTF policy off (thermdptf=1 turns it on)",
 				  (INT)( uw_of(rdmsr(MSR_PKG_POWER_LIMIT)) / 1000 ));
@@ -612,13 +681,14 @@ LOCAL INT dptf_text( char *t )
 
 LOCAL UW state_now( UD *p_pkg )
 {
-	UD	pkg = rdmsr(MSR_PKG_THERM_STATUS);
+	UD	pkg = has_ptm ? rdmsr(MSR_PKG_THERM_STATUS) : rd_if(has_therm ? MSR_THERM_STATUS : 0);
 	UW	s = 0;
 
+	/* the same bits in this core's status where there is no package's: 2 PROCHOT# from outside, 0 its own control */
 	if ( pkg & 4 ) s |= ST_OUT;
 	if ( pkg & 1 ) s |= ST_TCC;
-	if ( rdmsr(MSR_CORE_PERF_LIMIT) & 1 ) s |= ST_CORE;
-	if ( rdmsr(MSR_GFX_PERF_LIMIT) & 1 ) s |= ST_GT;
+	if ( rd_if(msr_plr_core) & 1 ) s |= ST_CORE;
+	if ( rd_if(msr_plr_gfx) & 1 ) s |= ST_GT;
 	*p_pkg = pkg;
 	return s;
 }
@@ -684,7 +754,7 @@ LOCAL void therm_task( INT stacd, void *exinf )
 	(void)exinf;
 	if ( nrow > 0 ) dptf_poll(t0 / 1000);
 	last = state_now(&pkg);
-	e0 = (UW)rdmsr(MSR_PKG_ENERGY_STATUS);
+	e0 = (UW)rd_if(has_rapl ? MSR_PKG_ENERGY_STATUS : 0);
 	knl_memset(on, 0, sizeof(on));
 	k = tm_sprintf((UB *)t, (CONST UB *)"therm: at %d s: ", (INT)( t0 / 1000 ));
 	st_put(t, &k, last);
@@ -712,8 +782,8 @@ LOCAL void therm_task( INT stacd, void *exinf )
 				k += tm_sprintf((UB *)t + k, (CONST UB *)" (were ");
 				st_put(t, &k, last);
 				k += tm_sprintf((UB *)t + k, (CONST UB *)"); package %d C, thermal status %08x; cores %04x, GT %04x",
-						deg, (UW)pkg, (UW)( rdmsr(MSR_CORE_PERF_LIMIT) & 0xffff ),
-						(UW)( rdmsr(MSR_GFX_PERF_LIMIT) & 0xffff ));
+						deg, (UW)pkg, (UW)( rd_if(msr_plr_core) & 0xffff ),
+						(UW)( rd_if(msr_plr_gfx) & 0xffff ));
 				k += ec_text(t + k);
 				tm_printf((UB *)"%s\n", t);
 				n_chg++;
@@ -725,14 +795,14 @@ LOCAL void therm_task( INT stacd, void *exinf )
 		}
 		if ( sec < PERIOD_S ) continue;
 
-		e = (UW)rdmsr(MSR_PKG_ENERGY_STATUS);
+		e = (UW)rd_if(has_rapl ? MSR_PKG_ENERGY_STATUS : 0);
 		k = tm_sprintf((UB *)t, (CONST UB *)"therm: %d s at %d s: seconds outside %d, own %d, cores %d, GT %d; changes %d "
 			       "(%d not told); package %d C (most %d), %d mW; thermal status of the package %08x, of this core %08x",
 			       sec, (INT)( now / 1000 ), on[0], on[1], on[2], on[3], n_chg + (INT)chg_lost, (INT)chg_lost,
 			       deg, most, (INT)( ( (UD)(UW)( e - e0 ) * 1000 / (UD)sec ) >> eu ), (UW)pkg,
-			       (UW)rdmsr(MSR_THERM_STATUS));
+			       (UW)rd_if(has_therm ? MSR_THERM_STATUS : 0));
 		/* the logs of the package's status, cleared: each line tells what happened in its own seconds */
-		wrmsr(MSR_PKG_THERM_STATUS, 0);
+		if ( has_ptm ) wrmsr(MSR_PKG_THERM_STATUS, 0);
 		k += zones_text(t + k);
 		k += power_text(t + k);
 		tm_printf((UB *)"%s\n", t);
@@ -773,9 +843,27 @@ EXPORT void knl_acpi_therm_start( void )
 	if ( knl_bootarg(knl_bootargs, "thermdptf", v, sizeof(v)) && v[0] == '1' ) {
 		dptf_on = TRUE;
 	}
+	{
+		UW	a, b, c, d;
+
+		UD	v;
+
+		cpuid(1, 0, &a, &b, &c, &d);
+		has_therm = (BOOL)( ( d & ( 1U << 22 ) ) != 0 && knl_rdmsr_safe(MSR_THERM_STATUS, &v) == E_OK );
+		cpuid(6, 0, &a, &b, &c, &d);
+		has_ptm = (BOOL)( ( a & 0x40U ) != 0 && knl_rdmsr_safe(MSR_PKG_THERM_STATUS, &v) == E_OK );
+		has_epb = (BOOL)( ( c & 0x08U ) != 0 );
+	}
+	has_rapl = (BOOL)( knl_x64_msr(X64M_RAPL) != 0 );
+	has_info = (BOOL)( knl_x64_msr(X64M_PKG_INFO) != 0 );
+	msr_plr_core = knl_x64_msr(X64M_PLR_CORE);
+	msr_plr_gfx = knl_x64_msr(X64M_PLR_GFX);
+	msr_pp0 = knl_x64_msr(X64M_PP0_CUR);
 	/* the power and time units, for telling PL1 whether or not the passive table is used */
-	pl.pu = (INT)( rdmsr(MSR_RAPL_POWER_UNIT) & 0xf );
-	pl.tu = (INT)( ( rdmsr(MSR_RAPL_POWER_UNIT) >> 16 ) & 0xf );
+	if ( has_rapl ) {
+		pl.pu = (INT)( rdmsr(MSR_RAPL_POWER_UNIT) & 0xf );
+		pl.tu = (INT)( ( rdmsr(MSR_RAPL_POWER_UNIT) >> 16 ) & 0xf );
+	}
 	ec_dev = knl_acpica_device("PNP0C09", 0);
 	bat_dev = knl_acpica_device("PNP0C0A", 0);
 	ac_dev = knl_acpica_device("ACPI0003", 0);

@@ -299,10 +299,14 @@ BOOL fg_takeable( INT i )
 /* 固定化 or 背景化: taken, but not carried, sized, cut or thrown away */
 static BOOL is_protected( INT i )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
+	BOOL	r;
 
-	return (BOOL)( fg_is_link(i) && tad_lnk_get(g_rec, g_fig->sh[i].link, &v) >= E_OK
+	tad_vobj_init(&v);
+	r = (BOOL)( fg_is_link(i) && tad_lnk_get(g_rec, g_fig->sh[i].link, &v) >= E_OK
 		    && ( v.fixed || v.background ) );
+	tad_vobj_clear(&v);
+	return r;
 }
 
 static void pick_add( INT i )
@@ -549,11 +553,16 @@ static BOOL shape_box( INT i, T_DPRECT *b )
 /* A link is never lower than it is closed */
 static INT least_h( INT i )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	h;
 
-	if ( !fg_is_link(i) || tad_lnk_get(g_rec, g_fig->sh[i].link, &v) < E_OK ) return ED_MIN;
+	tad_vobj_init(&v);
+	if ( !fg_is_link(i) || tad_lnk_get(g_rec, g_fig->sh[i].link, &v) < E_OK ) {
+		tad_vobj_clear(&v);
+		return ED_MIN;
+	}
 	h = fz(tad_lnk_closed_h(&v));
+	tad_vobj_clear(&v);
 	return ( h > ED_MIN ) ? h : ED_MIN;
 }
 
@@ -616,14 +625,17 @@ static BOOL has_joins( void )
 /* A link in the figure to the figure itself: what it shows changes with every change */
 static BOOL shows_itself( void )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	i;
+	BOOL	r = FALSE;
 
-	for ( i = 0; g_fig != NULL && i < g_fig->nsh; i++ ) {
+	tad_vobj_init(&v);
+	for ( i = 0; g_fig != NULL && i < g_fig->nsh && !r; i++ ) {
 		if ( fg_is_link(i) && tad_lnk_get(g_rec, g_fig->sh[i].link, &v) >= E_OK
-		  && memcmp(&v.target, &g_obj, sizeof(TS_UUID)) == 0 ) return TRUE;
+		  && memcmp(&v.target, &g_obj, sizeof(TS_UUID)) == 0 ) r = TRUE;
 	}
-	return FALSE;
+	tad_vobj_clear(&v);
+	return r;
 }
 
 /* ---------------------------------------------------------------- drawing */
@@ -1051,10 +1063,21 @@ void fg_hold_cancel( void )
 	g_dirty = TRUE;
 }
 
+static void press( CONST T_OBNTM *m, T_VOBJ *pv );
+
+/* A press: the link under it, if any, held in a T_VOBJ of its own while it is seen to */
 void fg_press( CONST T_OBNTM *m )
 {
+	T_VOBJ	v = { .recno = 0 };
+
+	tad_vobj_init(&v);
+	press(m, &v);
+	tad_vobj_clear(&v);
+}
+
+static void press( CONST T_OBNTM *m, T_VOBJ *pv )
+{
 	T_DPRECT	page, box;
-	T_VOBJ		v;
 	INT		x = m->x, y = m->y, which, slop = wm_hit_slop(m->when);
 	INT		near = (INT)wm_look(LK_DBL_W) / 2, gap_ms = (INT)wm_look(WM_LOOK_DBLTIME);
 	BOOL		add = (BOOL)( ( m->mods & ( HID_MOD_LSHIFT | HID_MOD_RSHIFT | HID_MOD_LCTRL | HID_MOD_RCTRL ) ) != 0 );
@@ -1080,7 +1103,7 @@ void fg_press( CONST T_OBNTM *m )
 		return;
 	}
 	which = -1;
-	er = tv_fig_at(g_fig, &page, g_sx, g_sy, g_rec, x, y, &v, &box, &which);
+	er = tv_fig_at(g_fig, &page, g_sx, g_sy, g_rec, x, y, pv, &box, &which);
 	if ( er < E_OK ) {
 		fg_sync();
 		if ( tv_fig_shape_at(g_fig, &page, g_sx, g_sy, x, y, &which) >= E_OK
@@ -1103,7 +1126,7 @@ void fg_press( CONST T_OBNTM *m )
 	if ( er >= E_OK ) {
 		if ( twice && !shape ) {
 			hold(HOLD_TWICE, which, &box, x, y);
-			hold_v = v;
+			if ( tad_vobj_copy(&hold_v, pv) < E_OK ) hold_how = HOLD_NONE;	/* no memory: the double press is not taken */
 			return;
 		}
 		/* a finger reaches the edges farther in only of one taken before the press */
@@ -1191,7 +1214,16 @@ static BOOL follow( INT x, INT y )
 		cx = hold_cx;
 		cy = hold_cy;
 		grid_snap(&cx, &cy);
-		least = ( hold_how == HOLD_H || hold_how == HOLD_WH ) ? least_h(hold_which) : ED_MIN;
+		/*
+		 * a link has no other side to be turned over to: its foot and
+		 * right edge stop at the edges that stay, and it is then as small
+		 * as it is closed (least_h), its top left corner where it was
+		 */
+		if ( fg_is_link(hold_which) ) {
+			if ( cx < hold_was.left ) cx = hold_was.left;
+			if ( cy < hold_was.top ) cy = hold_was.top;
+		}
+		least =( hold_how == HOLD_H || hold_how == HOLD_WH ) ? least_h(hold_which) : ED_MIN;
 		fe_size_box(&hold_was, cx, cy, (BOOL)( hold_how != HOLD_H ), (BOOL)( hold_how != HOLD_W ),
 			    ED_MIN, least, &hold_box, &hold_flip);
 		break;
@@ -1245,17 +1277,28 @@ static void let_go( void )
  */
 static void base_out( void );
 
+static void carry_out_v( BOOL twice, T_VOBJ *pv );
+
+/* The links taken carried out, read one at a time into a T_VOBJ of its own */
 static void carry_out( BOOL twice )
+{
+	T_VOBJ	v = { .recno = 0 };
+
+	tad_vobj_init(&v);
+	carry_out_v(twice, &v);
+	tad_vobj_clear(&v);
+}
+
+static void carry_out_v( BOOL twice, T_VOBJ *pv )
 {
 	T_DTREQ		rq;
 	T_DTANS		an;
 	T_DPRECT	o, b;
-	T_VOBJ		v;
 	INT		i, k, n = 0, last = -1, done = 0, px = hold_x0, py = hold_y0;
 	BOOL		copy, given;
 	UINT		seq;
 	ER		er;
-	char		s[TAD_NAME_MAX + 64];
+	char		s[FG_LOG];
 
 	/* out of the 原紙箱 or 原紙集め: a new object made of the template where it is let go */
 	if ( FG_TEMPLATES ) {
@@ -1278,8 +1321,8 @@ static void carry_out( BOOL twice )
 		n++;
 	}
 	if ( n == 0 ) return;
-	if ( n == 1 && tad_lnk_get(g_rec, g_fig->sh[last].link, &v) >= E_OK ) {
-		fg_ask_of(&v, DT_RQ_CARRY, &rq);
+	if ( n == 1 && tad_lnk_get(g_rec, g_fig->sh[last].link, pv) >= E_OK ) {
+		fg_ask_of(pv, DT_RQ_CARRY, &rq);
 	} else {
 		memset(&rq, 0, sizeof(rq));
 		rq.req = DT_RQ_CARRY;
@@ -1304,15 +1347,15 @@ static void carry_out( BOOL twice )
 	given = (BOOL)( ( an.flags & DT_F_TO_PROG ) != 0 );
 	for ( i = 0, k = 0; g_fig != NULL && i < g_fig->nsh; i++ ) {
 		if ( g_pick[i] == 0 || !fg_is_link(i) || is_protected(i) || !shape_box(i, &b)
-		  || tad_lnk_get(g_rec, g_fig->sh[i].link, &v) < E_OK ) continue;
-		fg_ask_of(&v, ( ++k < n ) ? DT_RQ_PLACE_MORE : DT_RQ_PLACE, &rq);
+		  || tad_lnk_get(g_rec, g_fig->sh[i].link, pv) < E_OK ) continue;
+		fg_ask_of(pv, ( ++k < n ) ? DT_RQ_PLACE_MORE : DT_RQ_PLACE, &rq);
 		rq.grab_x = b.left - o.left;
 		rq.grab_y = b.top - o.top;
 		rq.carry = seq;
 		if ( twice ) rq.flags |= DT_F_DUPLICATE;
 		memset(&an, 0, sizeof(an));
 		er = ask_desktop(&rq, &an, 10 * 60 * 1000);
-		snprintf(s, sizeof(s), "carried %s (%d)%s", fg_link_name(&v), (INT)er,
+		snprintf(s, sizeof(s), "carried %s (%d)%s", fg_link_name(pv), (INT)er,
 			 twice ? " as a new object" : copy ? " as a copy" : "");
 		note(s);
 		if ( er >= E_OK ) done++;
@@ -1348,12 +1391,16 @@ static void base_out( void )
 	T_DTREQ		rq;
 	T_DTANS		an;
 	T_DPRECT	b;
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	ER		er;
-	char		s[TAD_NAME_MAX + 64];
+	char		s[FG_LOG];
 
+	tad_vobj_init(&v);
 	if ( g_fig == NULL || hold_which < 0 || !fg_is_link(hold_which) || !shape_box(hold_which, &b)
-	  || tad_lnk_get(g_rec, g_fig->sh[hold_which].link, &v) < E_OK ) return;
+	  || tad_lnk_get(g_rec, g_fig->sh[hold_which].link, &v) < E_OK ) {
+		tad_vobj_clear(&v);
+		return;
+	}
 	fg_ask_of(&v, DT_RQ_CARRY, &rq);
 	rq.flags |= DT_F_BASE | DT_F_TO_PROG;
 	rq.look.w = b.right - b.left;
@@ -1362,8 +1409,9 @@ static void base_out( void )
 	rq.grab_y = hold_y0 - b.top;
 	memset(&an, 0, sizeof(an));
 	er = ask_desktop(&rq, &an, 30 * 60 * 1000);
-	snprintf(s, sizeof(s), "carried %s (%d) as a new object", fg_link_name(&v), (INT)er);
+	snprintf(s, sizeof(s), "carried %.120s (%d) as a new object", fg_link_name(&v), (INT)er);
 	note(s);
+	tad_vobj_clear(&v);
 	g_dirty = TRUE;
 }
 
@@ -1377,12 +1425,15 @@ static void base_out( void )
  */
 static void box_let_go( INT y )
 {
-	T_VOBJ	v, b;
+	T_VOBJ	v = { .recno = 0 }, b = { .recno = 0 };
 	INT	i, fy = unz(y + g_sy);
 	BOOL	has_b = FALSE;
 
+	tad_vobj_init(&v);
+	tad_vobj_init(&b);
 	if ( !FG_ACCBOX || hold_copy || g_fig == NULL || hold_which < 0 || !fg_is_link(hold_which)
 	  || tad_lnk_get(g_rec, g_fig->sh[hold_which].link, &v) < E_OK ) {
+		tad_vobj_clear(&v);
 		note("let go within the box: nothing moved");
 		return;
 	}
@@ -1394,6 +1445,8 @@ static void box_let_go( INT y )
 		}
 	}
 	fg_box->place(&v.target, has_b ? &b.target : NULL);
+	tad_vobj_clear(&v);
+	tad_vobj_clear(&b);
 }
 
 /* The pointer went out of the window with the hand down: links carried on by the desktop */
@@ -1423,7 +1476,7 @@ static void dup_here( void )
 	T_DTREQ	rq;
 	T_DTANS	an;
 	ER	er;
-	char	s[TAD_NAME_MAX + 48];
+	char	s[FG_LOG];
 
 	fg_ask_of(&hold_v, DT_RQ_DUPLICATE, &rq);
 	memset(&an, 0, sizeof(an));
@@ -1438,10 +1491,10 @@ static void dup_here( void )
 static void link_put( CONST T_VOBJ *v )
 {
 	ER	er = tad_lnk_set(g_rec, v);
-	char	s[TAD_NAME_MAX + 48];
+	char	s[FG_LOG];
 
 	if ( er < E_OK ) {
-		snprintf(s, sizeof(s), "the link \"%s\" was not changed (%d)", (char *)v->name, (INT)er);
+		snprintf(s, sizeof(s), "the link \"%.120s\" was not changed (%d)", (char *)TAD_VS(v->vname), (INT)er);
 		note(s);
 	}
 }
@@ -1449,11 +1502,12 @@ static void link_put( CONST T_VOBJ *v )
 static void moved_picked( void )
 {
 	T_TADNODE	**keep = NULL;
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	INT		i, k, nkeep = 0, n = 0, dx = unz(hold_dx), dy = unz(hold_dy);
 	char		s[64];
 	T_DPRECT	was;
 
+	tad_vobj_init(&v);
 	picks_bound(&was);
 	fg_before();
 	fg_sync();
@@ -1492,14 +1546,16 @@ static void moved_picked( void )
 	}
 	snprintf(s, sizeof(s), "%s %d by %d,%d", hold_copy ? "copied" : "moved", n, dx, dy);
 	note(s);
+	tad_vobj_clear(&v);
 }
 
 static void sized_picked( void )
 {
 	T_DPRECT	nb, was;
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	char		s[80];
 
+	tad_vobj_init(&v);
 	picks_bound(&was);
 	nb.left = unz(hold_box.left + g_sx);
 	nb.top = unz(hold_box.top + g_sy);
@@ -1522,10 +1578,12 @@ static void sized_picked( void )
 		link_put(&v);
 		after_part(&was);
 	} else {
+		tad_vobj_clear(&v);
 		return;
 	}
 	snprintf(s, sizeof(s), "sized %d to %dx%d", hold_which, nb.right - nb.left, nb.bottom - nb.top);
 	note(s);
+	tad_vobj_clear(&v);
 }
 
 static void banded( void )
@@ -1659,13 +1717,20 @@ BOOL	(*fg_link_going)( CONST T_VOBJ *v ) = NULL;
 void fg_delete( void )
 {
 	TS_UUID	*gone;
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	i, n = 0;
 	char	s[40];
 
-	if ( g_fig == NULL || g_npick == 0 ) return;
+	tad_vobj_init(&v);
+	if ( g_fig == NULL || g_npick == 0 ) {
+		tad_vobj_clear(&v);
+		return;
+	}
 	gone = malloc(sizeof(TS_UUID) * (size_t)g_npick);
-	if ( gone == NULL ) return;
+	if ( gone == NULL ) {
+		tad_vobj_clear(&v);
+		return;
+	}
 	/* the identities first: deleting one moves the others' numbers */
 	for ( i = 0; i < g_fig->nsh && n < g_npick; i++ ) {
 		if ( g_pick[i] != 0 && fg_is_link(i) && !is_protected(i)
@@ -1690,6 +1755,7 @@ void fg_delete( void )
 		note(s);
 	}
 	free(gone);
+	tad_vobj_clear(&v);
 }
 
 /* An empty fragment of the kind given, to fill */
@@ -1717,7 +1783,7 @@ static void set_name( UB *out, CONST char *what, INT n )
 BOOL fg_copy( void )
 {
 	T_TAD	*frag;
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	TS_UUID	id;
 	T_TRREC	r;
 	UB	name[TR_NAME_MAX], *buf;
@@ -1726,10 +1792,15 @@ BOOL fg_copy( void )
 	ER	er = E_OK;
 	char	s[48];
 
-	if ( g_fig == NULL || g_npick == 0 ) return TRUE;
+	tad_vobj_init(&v);
+	if ( g_fig == NULL || g_npick == 0 ) {
+		tad_vobj_clear(&v);
+		return TRUE;
+	}
 	frag = frag_new("figure");
 	if ( frag == NULL ) {
 		h_no_memory(&g_ed);
+		tad_vobj_clear(&v);
 		return FALSE;
 	}
 	pasted = 0;
@@ -1738,6 +1809,7 @@ BOOL fg_copy( void )
 	if ( ns < 0 ) {
 		tad_free(frag);
 		h_no_memory(&g_ed);
+		tad_vobj_clear(&v);
 		return FALSE;
 	}
 	for ( i = 0; i < g_fig->nsh; i++ ) {
@@ -1763,10 +1835,12 @@ BOOL fg_copy( void )
 	tad_free(frag);
 	if ( er < E_OK ) {
 		tell("トレーに入れられませんでした", ( er == E_NOMEM ) ? "メモリが足りません。図形は元のままです" : "図形は元のままです");
+		tad_vobj_clear(&v);
 		return FALSE;
 	}
 	snprintf(s, sizeof(s), "copied to the tray %d", nl + ns);
 	note(s);
+	tad_vobj_clear(&v);
 	return TRUE;
 }
 
@@ -1857,14 +1931,19 @@ INT fg_tray_links( void )
 void fg_paste( BOOL take )
 {
 	T_TAD	*frag = tray_frag(NULL);
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	TS_UUID	id;
 	INT	i, off, first, nlinks;
 	char	s[48];
 
-	if ( frag == NULL ) return;
+	tad_vobj_init(&v);
+	if ( frag == NULL ) {
+		tad_vobj_clear(&v);
+		return;
+	}
 	if ( tad_body(frag) == NULL || tad_body(frag)->name == NULL || tad_body(frag)->name[0] != 'f' || g_fig == NULL ) {
 		tad_free(frag);
+		tad_vobj_clear(&v);
 		return;
 	}
 	fg_before();
@@ -1892,6 +1971,7 @@ void fg_paste( BOOL take )
 	fg_after();
 	snprintf(s, sizeof(s), "pasted, %d shapes %d picked", ( g_fig != NULL ) ? g_fig->nsh : 0, g_npick);
 	note(s);
+	tad_vobj_clear(&v);
 }
 
 /* ---------------------------------------------------------------- the order of the links */
@@ -1909,9 +1989,13 @@ static BOOL link_picked( INT k )
 
 static BOOL link_background( INT k )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
+	BOOL	r;
 
-	return (BOOL)( tad_lnk_get(g_rec, k, &v) >= E_OK && v.background );
+	tad_vobj_init(&v);
+	r = (BOOL)( tad_lnk_get(g_rec, k, &v) >= E_OK && v.background );
+	tad_vobj_clear(&v);
+	return r;
 }
 
 static BOOL moving_front( INT k )
@@ -1934,11 +2018,15 @@ static ER regroup( BOOL (*first)( INT ), BOOL (*mid)( INT ) )
 	TS_UUID	*ids, *order;
 	BOOL	*placed;
 	UINT	*taken;
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	n = tad_lnk_count(g_rec), i, k = 0, pass;
 	ER	er;
 
-	if ( n <= 0 ) return E_NOEXS;
+	tad_vobj_init(&v);
+	if ( n <= 0 ) {
+		tad_vobj_clear(&v);
+		return E_NOEXS;
+	}
 	ids = malloc(sizeof(TS_UUID) * (size_t)n);
 	order = malloc(sizeof(TS_UUID) * (size_t)n);
 	placed = malloc(sizeof(BOOL) * (size_t)n);
@@ -1946,6 +2034,7 @@ static ER regroup( BOOL (*first)( INT ), BOOL (*mid)( INT ) )
 		free(ids);
 		free(order);
 		free(placed);
+		tad_vobj_clear(&v);
 		return E_NOMEM;
 	}
 	for ( i = 0; i < n; i++ ) {
@@ -1953,6 +2042,7 @@ static ER regroup( BOOL (*first)( INT ), BOOL (*mid)( INT ) )
 			free(ids);
 			free(order);
 			free(placed);
+			tad_vobj_clear(&v);
 			return E_NOEXS;
 		}
 		ids[i] = v.vobjid;
@@ -1982,6 +2072,7 @@ static ER regroup( BOOL (*first)( INT ), BOOL (*mid)( INT ) )
 		free(ids);
 		free(order);
 		free(placed);
+		tad_vobj_clear(&v);
 		return E_NOMEM;
 	}
 	for ( i = 0; g_fig != NULL && i < g_fig->nsh && i < g_maxpick; i++ ) {
@@ -2011,6 +2102,7 @@ static ER regroup( BOOL (*first)( INT ), BOOL (*mid)( INT ) )
 	free(placed);
 	free(order);
 	free(ids);
+	tad_vobj_clear(&v);
 	return er;
 }
 
@@ -2032,13 +2124,17 @@ void fg_link_order( BOOL front )
 /* 固定化, 背景化 and taking them off: what the links taken are. What goes into the background goes behind the rest too */
 void fg_protect( BOOL background, BOOL on )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	i, n = 0;
 
+	tad_vobj_init(&v);
 	for ( i = 0; g_fig != NULL && i < g_fig->nsh; i++ ) {
 		if ( g_pick[i] != 0 && fg_is_link(i) ) n++;
 	}
-	if ( n == 0 ) return;
+	if ( n == 0 ) {
+		tad_vobj_clear(&v);
+		return;
+	}
 	fg_before();
 	for ( i = 0; i < g_fig->nsh; i++ ) {
 		if ( g_pick[i] == 0 || !fg_is_link(i) || tad_lnk_get(g_rec, g_fig->sh[i].link, &v) < E_OK ) continue;
@@ -2048,26 +2144,47 @@ void fg_protect( BOOL background, BOOL on )
 	}
 	if ( background && on ) (void)regroup(link_background, NULL);
 	fg_after();
+	tad_vobj_clear(&v);
 }
 
-/* Links dropped on the window: put where they were let go, taken */
+/*
+ * Links dropped on the window: put where they were let go, taken, each
+ * with the name, relationship and applist it was carried with
+ */
 void fg_dropped( CONST T_OBDROP *dr )
 {
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	TS_UUID	id;
-	INT	i, first, x, y, n = 0;
+	INT	i, first, x, y, mx, my, n = 0;
+	ER	er = E_OK;
 	char	s[48];
 
 	if ( g_fig == NULL || dr->n <= 0 ) return;
+	tad_vobj_init(&v);
 	fg_before();
 	first = tad_lnk_count(g_rec);
 	x = unz(dr->x + g_sx);
 	y = unz(dr->y + g_sy);
-	for ( i = 0; i < dr->n; i++ ) {
+	/* the least corner of the boxes: where the outline's corner was, which is let go at x, y */
+	mx = dr->v[0].left;
+	my = dr->v[0].top;
+	for ( i = 1; i < dr->n; i++ ) {
+		if ( dr->v[i].left < mx ) mx = dr->v[i].left;
+		if ( dr->v[i].top < my ) my = dr->v[i].top;
+	}
+	for ( i = 0; i < dr->n && er >= E_OK; i++ ) {
 		CONST T_OBDROPV	*d = &dr->v[i];
 		INT		w = d->right - d->left, h = d->bottom - d->top;
+		CONST UB	*nm, *rl, *al;
+		SZ		nl, rll, all;
 
-		memset(&v, 0, sizeof(v));
+		tad_vobj_clear(&v);
+		nm = ob_drop_name(dr, i, &nl);
+		rl = ob_drop_rel(dr, i, &rll);
+		al = ob_drop_applist(dr, i, &all);
+		if ( ( er = tad_vobj_set(&v, TAD_W_NAME, nm, nl) ) < E_OK
+		  || ( er = tad_vobj_set(&v, TAD_W_REL, rl, rll) ) < E_OK
+		  || ( er = tad_vobj_set(&v, TAD_W_APPLIST, al, all) ) < E_OK ) break;
 		v.target = d->target;
 		v.recno = 0;
 		v.frcol = d->frcol;
@@ -2080,17 +2197,19 @@ void fg_dropped( CONST T_OBDROP *dr )
 		/* the box it had where it was, no smaller than a link with its letters is; closed when it was */
 		if ( w < tad_lnk_least_w(&v) ) w = tad_lnk_least_w(&v);
 		h = ( h > 0 ) ? tad_lnk_fit_h(&v, h) : tad_lnk_closed_h(&v);
-		/* each where it stood from the first, as they were carried */
-		v.left = x + ( d->left - dr->v[0].left );
-		v.top = y + ( d->top - dr->v[0].top );
+		/* each where it stood in the outline, as they were carried */
+		v.left = x + ( d->left - mx );
+		v.top = y + ( d->top - my );
 		v.right = v.left + w;
 		v.bottom = v.top + h;
 		v.height = h;
 		if ( tad_lnk_add(g_rec, &v, &id) >= E_OK ) n++;
 	}
+	tad_vobj_clear(&v);
 	fg_model();
 	pick_from(first);
 	fg_after();
+	if ( er == E_NOMEM ) tell("メモリが足りないため、仮身をすべては置けませんでした", NULL);
 	snprintf(s, sizeof(s), "dropped %d", n);
 	note(s);
 }

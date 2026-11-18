@@ -139,7 +139,12 @@ LOCAL void check_banks( void )
 			if ( txt[i] == '\n' ) lines++;
 		}
 		if ( lines == pins[k] ) right++;
-		tm_printf((UB *)"objtest:   %s %d pins\n", r.name, lines);
+		{
+			UB	*nm = knl_ob_name(&u, NULL, NULL);
+
+			tm_printf((UB *)"objtest:   %s %d pins\n", ( nm != NULL ) ? nm : (UB *)"?", lines);
+			if ( nm != NULL ) Kfree(nm);
+		}
 	}
 	tm_sprintf((UB *)s, (UB *)"%d of 5 banks, %d with every pin", there, right);
 	note("gpio banks", there == 5 && right == 5, s);

@@ -120,6 +120,13 @@ typedef struct {
  * Make a volume on a block device. Everything on it is lost.
  */
 IMPORT ER ts_format_blk( CONST char *devnm, CONST char *label );
+/*
+ * A native volume made on a device with its label (design 7.6): the
+ * format, and the top object, a figure named with the whole label and
+ * held once. The superblock keeps the label's first bytes, cut at a whole
+ * letter. knl_tsfs_part_make makes its volume so.
+ */
+IMPORT ER knl_tsfs_format( CONST char *part, CONST char *label );
 
 /*
  * Volume: opened by device name. A volume that has an error recorded
@@ -156,6 +163,19 @@ IMPORT ER ts_grow_vol_blk( ID vol, UD blocks, UD *p_from, UD *p_to );
  * that does not write.
  */
 IMPORT ER ts_set_top_blk( ID vol, CONST TS_UUID *uuid );
+
+/*
+ * The label's copy in the superblock, set: cut at a whole letter to fit
+ * TSFSBLK_LABEL_MAX with its nought; the label itself is the name of
+ * the volume's top object (design 7.6).
+ */
+IMPORT ER  ts_set_label_blk( ID vol, CONST UB *label );
+/*
+ * How many of the len bytes of UTF-8 s end on a whole letter: a letter
+ * the end cuts in the middle of (a copy of the label a system before cut
+ * at a byte) is left out.
+ */
+IMPORT SZ  ts_label_whole( CONST UB *s, SZ len );
 
 /*
  * The object that keeps the links other volumes make to objects of this

@@ -55,8 +55,12 @@ typedef struct {
 #define DISP_ST_ON		1
 #define DISP_ST_OFF		2
 
-#define DISP_EDID_MAX		512	/* the base block and three extensions */
-#define DISP_MODES_MAX		48
+/*
+ * An EDID is its base block and as many extensions as its byte 126 says
+ * (VESA E-EDID 1.4 3.1): 128 bytes each, 256 blocks at most
+ */
+#define DISP_EDID_BLOCK		128
+#define DISP_EDID_LEN(e)	( DISP_EDID_BLOCK * ( 1 + (INT)(e)[126] ) )
 
 /* What an output is (ts_disp_output) */
 typedef struct {
@@ -89,7 +93,7 @@ typedef struct {
 
 typedef struct {
 	INT	n;			/* entries, one for each output, in the order ts_disp_output numbers them */
-	T_DISPSET out[4];
+	T_DISPSET *out;			/* n of them, taken by ts_disp_state or ts_disp_state_copy */
 } T_DISPSTATE;
 
 /* The outputs there are, shown or not */
@@ -98,20 +102,30 @@ IMPORT INT ts_disp_outputs( void );
 /* What the i-th is: E_NOEXS past the last */
 IMPORT ER  ts_disp_output( INT i, T_DISPOUTINFO *info );
 
-/* Its modes, the display's preferred first: how many, up to max */
+/*
+ * Its modes, the display's preferred first: how many it offers, of which
+ * up to max are copied into modes (NULL with max 0 only asks how many).
+ * A caller whose room is as many or fewer asks again with more.
+ */
 IMPORT INT ts_disp_out_modes( INT i, T_DISPMODE *modes, INT max );
 
-/* Its EDID as it gave it: how many bytes, up to max */
+/* Its EDID as it gave it: how many bytes it is, of which up to max are copied (NULL with max 0 only asks) */
 IMPORT INT ts_disp_out_edid( INT i, UB *buf, INT max );
 
-/* The state now */
-IMPORT ER  ts_disp_state( T_DISPSTATE *st );
+/*
+ * The state now, an entry for every output, in st->out taken for it
+ * (E_NOMEM when there is no room); ts_disp_state_free gives it back.
+ * ts_disp_state_copy gives to entries of its own, copied from from.
+ */
+IMPORT ER   ts_disp_state( T_DISPSTATE *st );
+IMPORT ER   ts_disp_state_copy( T_DISPSTATE *to, CONST T_DISPSTATE *from );
+IMPORT void ts_disp_state_free( T_DISPSTATE *st );
 
 /*
  * Whether the outputs can be set to st, nothing touched: E_OK, or E_PAR
  * (an entry that does not make sense), E_NOSPT (a mode an output does not
- * offer, a side or place not taken), E_LIMIT (more than the drivers can
- * drive at once)
+ * offer, a side or place not taken), or what an output's driver answers
+ * when it cannot drive its part
  */
 IMPORT ER  ts_disp_check( CONST T_DISPSTATE *st );
 

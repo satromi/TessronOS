@@ -2127,7 +2127,7 @@ EXPORT ER ts_obj_salvage( ID vol, UD blk, TS_UUID *p_new, INT *p_recs )
 	T_TSFSBLK_SB	*sb;
 	OBJ		o;
 	RECE		*ord = NULL;
-	UB		*tab = NULL, *j = NULL, *json = NULL, *data, name[256];
+	UB		*tab = NULL, *j = NULL, *json = NULL, *data, *name = NULL;
 	SZ		jlen = 0, asz;
 	TS_UUID		u;
 	INT		ntab = 0, nord = 0, i, k, got = 0, pos, nl = 0, at;
@@ -2138,8 +2138,7 @@ EXPORT ER ts_obj_salvage( ID vol, UD blk, TS_UUID *p_new, INT *p_recs )
 	sb = (T_TSFSBLK_SB *)Kmalloc(sizeof(T_TSFSBLK_SB));
 	o.hdr = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
 	ord = (RECE *)Kmalloc(sizeof(RECE) * ( TSFSO_MAX_REC + 1 ));
-	json = (UB *)Kmalloc(512);
-	if ( sb == NULL || o.hdr == NULL || ord == NULL || json == NULL ) {
+	if ( sb == NULL || o.hdr == NULL || ord == NULL ) {
 		er = E_NOMEM;
 		goto exit;
 	}
@@ -2153,15 +2152,15 @@ EXPORT ER ts_obj_salvage( ID vol, UD blk, TS_UUID *p_new, INT *p_recs )
 	o.blk = blk;
 	o.owner = rd64(o.hdr + OB_UUID + 8);
 
-	/* the name, when the metadata still reads */
-	name[0] = 0;
+	/* the name, whole, when the metadata still reads: never longer than the metadata */
 	if ( salv_place(o.hdr + OB_META, total, TSFSO_META_MAX) ) {
 		j = meta_all(&o, 0, &jlen);
 		if ( j != NULL ) {
 			T_JSON	root;
 
-			if ( js_span(j, (INT)jlen, 0, &root) >= E_OK && js_type(&root) == JS_OBJECT ) {
-				nl = js_get_str(&root, "name", name, (INT)sizeof(name) - 1);
+			if ( js_span(j, (INT)jlen, 0, &root) >= E_OK && js_type(&root) == JS_OBJECT
+			  && ( name = (UB *)Kmalloc(jlen + 1) ) != NULL ) {
+				nl = js_get_str(&root, "name", name, (INT)jlen + 1);
 				if ( nl < 0 ) nl = 0;
 				name[nl] = 0;
 			}
@@ -2174,10 +2173,16 @@ EXPORT ER ts_obj_salvage( ID vol, UD blk, TS_UUID *p_new, INT *p_recs )
 		nord = order_of(&o, tab, ntab, ord);
 	}
 
+	/* what is left out of the name below only makes it shorter */
+	json = (UB *)Kmalloc(9 + sizeof(SALV_NAME) + (SZ)nl + 6 + 15 + 1);
+	if ( json == NULL ) {
+		er = E_NOMEM;
+		goto exit;
+	}
 	at = 0;
 	knl_memcpy(json, "{\"name\":\"" SALV_NAME, 9 + sizeof(SALV_NAME) - 1);
 	at = 9 + (INT)sizeof(SALV_NAME) - 1;
-	for ( i = 0; i < nl && at < 400; i++ ) {
+	for ( i = 0; i < nl; i++ ) {
 		if ( name[i] == '"' || name[i] == '\\' || name[i] < 0x20 ) continue;
 		json[at++] = name[i];
 	}
@@ -2226,6 +2231,7 @@ EXPORT ER ts_obj_salvage( ID vol, UD blk, TS_UUID *p_new, INT *p_recs )
 	if ( j != NULL ) Kfree(j);
 	if ( tab != NULL ) Kfree(tab);
 	if ( json != NULL ) Kfree(json);
+	if ( name != NULL ) Kfree(name);
 	if ( ord != NULL ) Kfree(ord);
 	if ( o.hdr != NULL ) Kfree(o.hdr);
 	if ( sb != NULL ) Kfree(sb);
@@ -2247,8 +2253,7 @@ EXPORT ER ts_obj_exists( ID vol, CONST TS_UUID *uuid )
 EXPORT ER ts_obj_ref( ID vol, CONST TS_UUID *uuid, T_ROBJ *pk_robj )
 {
 	OBJ	o;
-	UB	*tab = NULL, *j;
-	SZ	len = 0;
+	UB	*tab = NULL;
 	INT	i, n = 0;
 	ER	er;
 
@@ -2262,12 +2267,6 @@ EXPORT ER ts_obj_ref( ID vol, CONST TS_UUID *uuid, T_ROBJ *pk_robj )
 	pk_robj->uuid   = *uuid;
 	pk_robj->refcnt = (INT)rd32(o.hdr + OB_REFCNT);
 	pk_robj->flags  = (UINT)rd32(o.hdr + OB_FLAGS) | TSFSO_F_AUTOREF;
-	pk_robj->name[0] = '\0';
-	j = meta_all(&o, 0, &len);
-	if ( j != NULL ) {
-		knl_json_get_str(j, (INT)len, "name", pk_robj->name, TSFS_NAME_MAX);
-		Kfree(j);
-	}
 	pk_robj->nrec = (INT)rd32(o.hdr + OB_NPLACE);
 	pk_robj->size = 0;
 	er = PLACE_LOAD(&o, &tab, &n);

@@ -33,7 +33,9 @@
 #include "disp_hw.h"
 #include "edid.h"
 
-#define DOUT_MAX	4
+#define DOUT_FIRST	4		/* outputs the table is first taken for; it doubles when full */
+#define EDID_FIRST	512		/* bytes an EDID is first read into: the base block and three extensions */
+#define DMODES_FIRST	16		/* modes a driver's own list is first asked into */
 
 typedef struct {
 	CONST T_DISPOUTHW *ops;
@@ -41,11 +43,11 @@ typedef struct {
 	T_DISPHW	hw;			/* the framebuffer it last had */
 	INT		side, offset;		/* where it goes when on (not the main one) */
 	UH		mode_w, mode_h;		/* the mode it was set to, where its framebuffer is of another size (a scaler's); 0 */
-	UB		edid[DISP_EDID_MAX];
+	UB		*edid;			/* as long as the EDID; NULL none */
 	INT		edid_len;
 	T_EDIDINFO	info;
-	T_DISPMODE	modes[DISP_MODES_MAX];
-	INT		nmodes;
+	T_DISPMODE	*modes;			/* nmodes of them, room for mcap */
+	INT		nmodes, mcap;
 	UINT		status;
 } DOUT;
 
@@ -53,8 +55,14 @@ typedef struct {
 #define MODE_W(o)	( ( (o)->mode_w != 0 ) ? (UINT)(o)->mode_w : (o)->hw.width )
 #define MODE_H(o)	( ( (o)->mode_h != 0 ) ? (UINT)(o)->mode_h : (o)->hw.height )
 
-LOCAL DOUT	dout[DOUT_MAX];
+/*
+ * The outputs, as many as there are: the table is taken anew twice as
+ * large when it is full, under dout_mtx, which everything that reads it
+ * holds
+ */
+LOCAL DOUT	*dout = NULL;
 LOCAL INT	dout_n = 0;
+LOCAL INT	dout_cap = 0;
 LOCAL void	(*dout_watch)( INT out ) = NULL;
 LOCAL ID	dout_mtx = 0;
 LOCAL ID	dout_holder = 0;		/* the task that holds dout_mtx */
@@ -65,41 +73,147 @@ LOCAL CONST T_DISPOUTHW	fw_out = {
 	NULL, NULL, NULL, NULL, NULL, NULL, NULL
 };
 
-/* An output's modes and what its EDID says, read again */
-LOCAL void dout_read( DOUT *o )
+/* Room for n modes in o's list, the ones there kept: E_OK or E_NOMEM */
+LOCAL ER modes_room( DOUT *o, INT n )
+{
+	T_DISPMODE	*b;
+	INT		cap;
+
+	if ( n <= o->mcap ) {
+		return E_OK;
+	}
+	cap = ( o->mcap > 0 ) ? o->mcap : DMODES_FIRST;
+	while ( cap < n ) cap *= 2;
+	b = (T_DISPMODE *)Kmalloc(sizeof(T_DISPMODE) * (SZ)cap);
+	if ( b == NULL ) {
+		return E_NOMEM;
+	}
+	if ( o->modes != NULL ) {
+		knl_memcpy(b, o->modes, (SZ)o->nmodes * sizeof(T_DISPMODE));
+		Kfree(o->modes);
+	}
+	o->modes = b;
+	o->mcap = cap;
+	return E_OK;
+}
+
+/* What an output read holds given back */
+LOCAL void dout_drop( DOUT *o )
+{
+	if ( o->edid != NULL ) Kfree(o->edid);
+	if ( o->modes != NULL ) Kfree(o->modes);
+	o->edid = NULL;
+	o->modes = NULL;
+	o->edid_len = o->nmodes = o->mcap = 0;
+}
+
+/*
+ * The EDID of an output, the whole of it: read into EDID_FIRST bytes
+ * first, and again into as many as its extensions say where that is more
+ * and the driver filled what it was given. How many bytes, the buffer in
+ * *p_buf (Kfree it); 0 when it gave none, E_NOMEM.
+ */
+LOCAL INT edid_all( CONST T_DISPOUTHW *p, UB **p_buf )
+{
+	UB	*b;
+	INT	cap = EDID_FIRST, n, need;
+
+	*p_buf = NULL;
+	for ( ;; ) {
+		b = (UB *)Kmalloc((SZ)cap);
+		if ( b == NULL ) {
+			return E_NOMEM;
+		}
+		n = p->get_edid(p->ctx, b, cap);
+		if ( n < DISP_EDID_BLOCK ) {
+			Kfree(b);
+			return 0;
+		}
+		need = DISP_EDID_LEN(b);
+		if ( need <= cap || n < cap ) {
+			break;
+		}
+		Kfree(b);
+		cap = need;
+	}
+	*p_buf = b;
+	return n;
+}
+
+/* The driver's own modes, all of them: asked again with twice the room while it fills what it was given */
+LOCAL ER driver_modes( DOUT *o )
 {
 	CONST T_DISPOUTHW *p = o->ops;
-	INT		n = 0;
+	INT		want = DMODES_FIRST, n;
+	ER		er;
 
-	o->edid_len = 0;
-	o->nmodes = 0;
+	for ( ;; ) {
+		er = modes_room(o, want);
+		if ( er < E_OK ) {
+			return er;
+		}
+		n = p->modes(p->ctx, o->modes, o->mcap);
+		if ( n < o->mcap ) {
+			break;
+		}
+		want = o->mcap * 2;
+	}
+	o->nmodes = ( n > 0 ) ? n : 0;
+	return E_OK;
+}
+
+/* An output's modes and what its EDID says, read again: E_OK, or E_NOMEM (told on the console) */
+LOCAL ER dout_read( DOUT *o )
+{
+	CONST T_DISPOUTHW *p = o->ops;
+	UB		*e = NULL;
+	INT		n = 0;
+	ER		er = E_OK;
+
+	dout_drop(o);
 	knl_memset(&o->info, 0, sizeof(o->info));
 	o->status = ( p->detect != NULL ) ? (UINT)p->detect(p->ctx) : DISP_ST_UNKNOWN;
 	if ( p->get_edid != NULL ) {
-		n = p->get_edid(p->ctx, o->edid, DISP_EDID_MAX);
-		if ( n >= 128 ) {
-			INT	m = knl_edid_parse(o->edid, n, &o->info, o->modes, DISP_MODES_MAX);
+		n = edid_all(p, &e);
+		if ( n < 0 ) {
+			er = (ER)n;
+		} else if ( n >= DISP_EDID_BLOCK ) {
+			T_DISPMODE	*ml;
+			INT		m = knl_edid_parse(e, n, &o->info, &ml);
 
 			if ( m >= 0 ) {
-				o->edid_len = o->info.blocks * 128;
-				o->nmodes = m;
+				o->edid = e;
+				o->edid_len = o->info.blocks * DISP_EDID_BLOCK;
+				o->modes = ml;
+				o->nmodes = o->mcap = m;
+				e = NULL;
+			} else if ( m == E_NOMEM ) {
+				er = E_NOMEM;
 			}
 		}
+		if ( e != NULL ) Kfree(e);
 	}
-	if ( o->nmodes == 0 && p->modes != NULL ) {
-		o->nmodes = p->modes(p->ctx, o->modes, DISP_MODES_MAX);
-		if ( o->nmodes < 0 ) o->nmodes = 0;
+	if ( er >= E_OK && o->nmodes == 0 && p->modes != NULL ) {
+		er = driver_modes(o);
 	}
-	if ( o->nmodes == 0 && o->hw.width != 0 ) {
+	if ( er >= E_OK && o->nmodes == 0 && o->hw.width != 0 ) {
 		/* none known: the one it is in */
-		knl_memset(&o->modes[0], 0, sizeof(o->modes[0]));
-		o->modes[0].hdisp = o->modes[0].hss = o->modes[0].hse = o->modes[0].htotal = (UH)o->hw.width;
-		o->modes[0].vdisp = o->modes[0].vss = o->modes[0].vse = o->modes[0].vtotal = (UH)o->hw.height;
-		o->modes[0].clock_khz = (UW)o->hw.width * o->hw.height * 60 / 1000;
-		o->modes[0].vrefresh = 60;
-		o->modes[0].flags = DISP_MODE_PREFERRED | DISP_MODE_DRIVER;
-		o->nmodes = 1;
+		er = modes_room(o, 1);
+		if ( er >= E_OK ) {
+			knl_memset(&o->modes[0], 0, sizeof(o->modes[0]));
+			o->modes[0].hdisp = o->modes[0].hss = o->modes[0].hse = o->modes[0].htotal = (UH)o->hw.width;
+			o->modes[0].vdisp = o->modes[0].vss = o->modes[0].vse = o->modes[0].vtotal = (UH)o->hw.height;
+			o->modes[0].clock_khz = (UW)o->hw.width * o->hw.height * 60 / 1000;
+			o->modes[0].vrefresh = 60;
+			o->modes[0].flags = DISP_MODE_PREFERRED | DISP_MODE_DRIVER;
+			o->nmodes = 1;
+		}
 	}
+	if ( er < E_OK ) {
+		tm_printf((UB *)"disp: outputs: no room for the EDID and modes of %s (%d)\n",
+			  ( p->name != NULL ) ? p->name : "?", (INT)er);
+	}
+	return er;
 }
 
 /*
@@ -107,19 +221,21 @@ LOCAL void dout_read( DOUT *o )
  * does not offer it (a driver's size, as Linux keeps the mode a CRTC is
  * in): a state as it is then passes the check
  */
-LOCAL void mode_keep( DOUT *o )
+LOCAL ER mode_keep( DOUT *o )
 {
 	T_DISPMODE	*m;
 	INT		k;
+	ER		er;
 
 	if ( MODE_W(o) == 0 ) {
-		return;
+		return E_OK;
 	}
 	for ( k = 0; k < o->nmodes; k++ ) {
-		if ( o->modes[k].hdisp == MODE_W(o) && o->modes[k].vdisp == MODE_H(o) ) return;
+		if ( o->modes[k].hdisp == MODE_W(o) && o->modes[k].vdisp == MODE_H(o) ) return E_OK;
 	}
-	if ( o->nmodes >= DISP_MODES_MAX ) {
-		o->nmodes = DISP_MODES_MAX - 1;
+	er = modes_room(o, o->nmodes + 1);
+	if ( er < E_OK ) {
+		return er;
 	}
 	m = &o->modes[o->nmodes++];
 	knl_memset(m, 0, sizeof(*m));
@@ -128,38 +244,76 @@ LOCAL void mode_keep( DOUT *o )
 	m->clock_khz = (UW)MODE_W(o) * MODE_H(o) * 60 / 1000;
 	m->vrefresh = 60;
 	m->flags = ( o->nmodes == 1 ) ? DISP_MODE_PREFERRED | DISP_MODE_DRIVER : DISP_MODE_DRIVER;
+	return E_OK;
 }
 
-/* The outputs the screens show now taken into the list, in the order of their screens; the caller holds dout_mtx */
-LOCAL void dout_scan( void )
+/* Room for one more output in the table: E_OK or E_NOMEM. The caller holds dout_mtx */
+LOCAL ER dout_room( void )
+{
+	DOUT	*t;
+	INT	cap;
+
+	if ( dout_n < dout_cap ) {
+		return E_OK;
+	}
+	cap = ( dout_cap > 0 ) ? dout_cap * 2 : DOUT_FIRST;
+	t = (DOUT *)Kmalloc(sizeof(DOUT) * (SZ)cap);
+	if ( t == NULL ) {
+		return E_NOMEM;
+	}
+	if ( dout != NULL ) {
+		knl_memcpy(t, dout, (SZ)dout_n * sizeof(DOUT));
+		Kfree(dout);
+	}
+	dout = t;
+	dout_cap = cap;
+	return E_OK;
+}
+
+/*
+ * The outputs the screens show now taken into the list, in the order of
+ * their screens, every one the screen driver has: E_OK, or E_NOMEM where
+ * there was no room for one (told on the console). The caller holds
+ * dout_mtx.
+ */
+LOCAL ER dout_scan( void )
 {
 	T_DISPHW	hw;
 	INT		s, k, side, off;
+	ER		er, ret = E_OK;
 
 	for ( k = 0; k < dout_n; k++ ) {
 		dout[k].slot = -1;
 	}
-	for ( s = 0; s < DISP_SCREENS_MAX; s++ ) {
+	for ( s = 0; knl_disp_screen_hw(s, &hw, &side, &off) >= E_OK; s++ ) {
 		CONST T_DISPOUTHW *ops;
 
-		if ( knl_disp_screen_hw(s, &hw, &side, &off) < E_OK ) break;
 		ops = ( hw.out != NULL ) ? hw.out : ( s == 0 ) ? &fw_out : NULL;
 		if ( ops == NULL ) continue;
 		for ( k = 0; k < dout_n && dout[k].ops != ops; k++ ) ;
 		if ( k == dout_n ) {
-			if ( dout_n >= DOUT_MAX ) continue;
+			er = dout_room();
+			if ( er < E_OK ) {
+				tm_printf((UB *)"disp: outputs: no room to list %s (%d)\n",
+					  ( ops->name != NULL ) ? ops->name : "?", (INT)er);
+				ret = er;
+				continue;
+			}
 			knl_memset(&dout[k], 0, sizeof(dout[k]));
 			dout[k].ops = ops;
 			dout[k].hw = hw;
 			dout_n++;
-			dout_read(&dout[k]);
+			er = dout_read(&dout[k]);
+			if ( er < E_OK ) ret = er;
 		}
 		dout[k].slot = s;
 		dout[k].hw = hw;
 		dout[k].side = side;
 		dout[k].offset = off;
-		mode_keep(&dout[k]);
+		er = mode_keep(&dout[k]);
+		if ( er < E_OK ) ret = er;
 	}
+	return ret;
 }
 
 LOCAL ER dout_lock( void )
@@ -177,7 +331,7 @@ LOCAL ER dout_lock( void )
 	}
 	tk_loc_mtx(dout_mtx, TMO_FEVR);
 	dout_holder = tk_get_tid();
-	dout_scan();
+	(void)dout_scan();		/* an output there was no room for is told and left off the list */
 	return E_OK;
 }
 
@@ -254,14 +408,15 @@ EXPORT INT ts_disp_out_modes( INT i, T_DISPMODE *modes, INT max )
 {
 	INT	n;
 
-	if ( modes == NULL || max < 0 ) return E_PAR;
+	if ( max < 0 || ( modes == NULL && max > 0 ) ) return E_PAR;
 	if ( dout_lock() < E_OK ) return E_LIMIT;
 	if ( i < 0 || i >= dout_n ) {
 		dout_unlock();
 		return E_NOEXS;
 	}
 	n = ( dout[i].nmodes < max ) ? dout[i].nmodes : max;
-	knl_memcpy(modes, dout[i].modes, (SZ)n * sizeof(T_DISPMODE));
+	if ( n > 0 ) knl_memcpy(modes, dout[i].modes, (SZ)n * sizeof(T_DISPMODE));
+	n = dout[i].nmodes;
 	dout_unlock();
 	return n;
 }
@@ -270,25 +425,59 @@ EXPORT INT ts_disp_out_edid( INT i, UB *buf, INT max )
 {
 	INT	n;
 
-	if ( buf == NULL || max < 0 ) return E_PAR;
+	if ( max < 0 || ( buf == NULL && max > 0 ) ) return E_PAR;
 	if ( dout_lock() < E_OK ) return E_LIMIT;
 	if ( i < 0 || i >= dout_n ) {
 		dout_unlock();
 		return E_NOEXS;
 	}
 	n = ( dout[i].edid_len < max ) ? dout[i].edid_len : max;
-	knl_memcpy(buf, dout[i].edid, (SZ)n);
+	if ( n > 0 ) knl_memcpy(buf, dout[i].edid, (SZ)n);
+	n = dout[i].edid_len;
 	dout_unlock();
 	return n;
 }
 
-/* The state now; the caller holds dout_mtx */
-LOCAL void state_now( T_DISPSTATE *st )
+/* Entries for n outputs taken for st, all 0: E_OK or E_NOMEM */
+LOCAL ER state_take( T_DISPSTATE *st, INT n )
+{
+	st->n = 0;
+	st->out = (T_DISPSET *)Kmalloc(sizeof(T_DISPSET) * (SZ)( ( n > 0 ) ? n : 1 ));
+	if ( st->out == NULL ) {
+		return E_NOMEM;
+	}
+	knl_memset(st->out, 0, sizeof(T_DISPSET) * (SZ)( ( n > 0 ) ? n : 1 ));
+	st->n = n;
+	return E_OK;
+}
+
+EXPORT void ts_disp_state_free( T_DISPSTATE *st )
+{
+	if ( st == NULL ) return;
+	if ( st->out != NULL ) Kfree(st->out);
+	st->out = NULL;
+	st->n = 0;
+}
+
+EXPORT ER ts_disp_state_copy( T_DISPSTATE *to, CONST T_DISPSTATE *from )
+{
+	ER	er;
+
+	if ( to == NULL || from == NULL || from->n < 0 || ( from->n > 0 && from->out == NULL ) ) return E_PAR;
+	er = state_take(to, from->n);
+	if ( er < E_OK ) return er;
+	if ( from->n > 0 ) knl_memcpy(to->out, from->out, sizeof(T_DISPSET) * (SZ)from->n);
+	return E_OK;
+}
+
+/* The state now, its entries taken for it: E_OK or E_NOMEM. The caller holds dout_mtx */
+LOCAL ER state_now( T_DISPSTATE *st )
 {
 	INT	k;
+	ER	er;
 
-	knl_memset(st, 0, sizeof(*st));
-	st->n = dout_n;
+	er = state_take(st, dout_n);
+	if ( er < E_OK ) return er;
 	for ( k = 0; k < dout_n; k++ ) {
 		st->out[k].on = (BOOL)( dout[k].slot >= 0 );
 		st->out[k].w = (UH)MODE_W(&dout[k]);
@@ -296,15 +485,20 @@ LOCAL void state_now( T_DISPSTATE *st )
 		st->out[k].side = dout[k].side;
 		st->out[k].offset = dout[k].offset;
 	}
+	return E_OK;
 }
 
 EXPORT ER ts_disp_state( T_DISPSTATE *st )
 {
+	ER	er;
+
 	if ( st == NULL ) return E_PAR;
+	st->n = 0;
+	st->out = NULL;
 	if ( dout_lock() < E_OK ) return E_LIMIT;
-	state_now(st);
+	er = state_now(st);
 	dout_unlock();
-	return E_OK;
+	return er;
 }
 
 /* The first of an output's modes of a size, or NULL */
@@ -321,10 +515,10 @@ LOCAL CONST T_DISPMODE *mode_of( CONST DOUT *o, UINT w, UINT h )
 /* Whether st makes sense and every output can take its part; nothing is touched. The caller holds dout_mtx */
 LOCAL ER check_locked( CONST T_DISPSTATE *st )
 {
-	INT	k, on = 0;
+	INT	k;
 	ER	er;
 
-	if ( st == NULL || st->n != dout_n || st->n < 1 ) {
+	if ( st == NULL || st->n != dout_n || st->n < 1 || st->out == NULL ) {
 		return E_PAR;
 	}
 	if ( !st->out[0].on ) {
@@ -336,7 +530,6 @@ LOCAL ER check_locked( CONST T_DISPSTATE *st )
 		CONST T_DISPMODE *m;
 
 		if ( !e->on ) continue;
-		on++;
 		if ( k > 0 ) {
 			if ( e->side != DISP_SIDE_RIGHT && e->side != DISP_SIDE_BELOW
 			  && e->side != DISP_SIDE_LEFT && e->side != DISP_SIDE_ABOVE && e->side != DISP_SIDE_MIRROR ) return E_PAR;
@@ -357,7 +550,7 @@ LOCAL ER check_locked( CONST T_DISPSTATE *st )
 			if ( er < E_OK ) return er;
 		}
 	}
-	return ( on > DISP_SCREENS_MAX ) ? E_LIMIT : E_OK;
+	return E_OK;
 }
 
 EXPORT ER ts_disp_check( CONST T_DISPSTATE *st )
@@ -397,9 +590,25 @@ LOCAL BOOL mirror_size( CONST DOUT *o, UINT mw, UINT mh, UH *p_w, UH *p_h )
  * is made again. The first that does not take its part ends it with its
  * error. The caller holds dout_mtx.
  */
+LOCAL ER apply_steps( T_DISPSTATE *st, BOOL again );
+
 LOCAL ER apply_locked( CONST T_DISPSTATE *want, BOOL again )
 {
-	T_DISPSTATE	sts = *want, *st = &sts;
+	T_DISPSTATE	sts;
+	ER		er;
+
+	er = ts_disp_state_copy(&sts, want);
+	if ( er < E_OK ) {
+		return er;
+	}
+	er = apply_steps(&sts, again);
+	ts_disp_state_free(&sts);
+	return er;
+}
+
+/* apply_locked's work on st, a state of its own that the mirrors' modes are written in */
+LOCAL ER apply_steps( T_DISPSTATE *st, BOOL again )
+{
 	INT		k, s;
 	ER		er;
 
@@ -491,7 +700,11 @@ EXPORT ER ts_disp_mirror_mode( INT i, UINT *p_w, UINT *p_h )
 	o = &dout[i];
 	mw = MODE_W(&dout[0]);
 	mh = MODE_H(&dout[0]);
-	state_now(&st);
+	er = state_now(&st);
+	if ( er < E_OK ) {
+		dout_unlock();
+		return er;
+	}
 	(void)mirror_size(o, mw, mh, &st.out[i].w, &st.out[i].h);
 	*p_w = st.out[i].w;
 	*p_h = st.out[i].h;
@@ -500,6 +713,7 @@ EXPORT ER ts_disp_mirror_mode( INT i, UINT *p_w, UINT *p_h )
 	st.out[i].offset = 0;
 	er = check_locked(&st);
 	dout_unlock();
+	ts_disp_state_free(&st);
 	return er;
 }
 
@@ -511,12 +725,15 @@ EXPORT ER ts_disp_commit( CONST T_DISPSTATE *st )
 	if ( dout_lock() < E_OK ) return E_LIMIT;
 	er = check_locked(st);
 	if ( er >= E_OK ) {
-		state_now(&was);
+		er = state_now(&was);
+	}
+	if ( er >= E_OK ) {
 		er = apply_locked(st, FALSE);
 		if ( er < E_OK ) {
 			tm_printf((UB *)"disp: outputs: the new state did not take (%d): put back as it was\n", (INT)er);
 			(void)apply_locked(&was, FALSE);
 		}
+		ts_disp_state_free(&was);
 	}
 	dout_unlock();
 	return er;
@@ -536,8 +753,11 @@ EXPORT void knl_disp_out_main_changed( void )
 	ER		er;
 
 	if ( dout_mtx == 0 || dout_holder == tk_get_tid() || dout_lock() < E_OK ) return;
-	state_now(&st);
-	er = apply_locked(&st, TRUE);
+	er = state_now(&st);
+	if ( er >= E_OK ) {
+		er = apply_locked(&st, TRUE);
+		ts_disp_state_free(&st);
+	}
 	if ( er < E_OK ) {
 		tm_printf((UB *)"disp: outputs: mirroring not made again for the main screen's new size (%d)\n", (INT)er);
 	}
@@ -552,14 +772,16 @@ EXPORT ER knl_disp_out_add( CONST T_DISPOUTHW *ops )
 	if ( dout_lock() < E_OK ) return E_LIMIT;
 	for ( k = 0; k < dout_n && dout[k].ops != ops; k++ ) ;
 	if ( k == dout_n ) {
-		if ( dout_n >= DOUT_MAX ) {
+		ER	er = dout_room();
+
+		if ( er < E_OK ) {
 			dout_unlock();
-			return E_LIMIT;
+			return er;
 		}
 		knl_memset(&dout[k], 0, sizeof(dout[k]));
 		dout[k].ops = ops;
 		dout[k].slot = -1;
-		dout_read(&dout[k]);
+		(void)dout_read(&dout[k]);	/* no room for its modes: told, and it is listed off */
 		dout_n++;
 	}
 	dout_unlock();

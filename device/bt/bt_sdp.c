@@ -97,38 +97,51 @@
 #define U_HANDSFREE_AG		0x111f
 #define U_GENERIC_AUDIO		0x1203
 
-#define NREC			4
-#define REC_MAX			200
-#define REC_UUIDS		12
+#define NREC			4	/* the records this end has: the four rec_make makes */
 #define FIRST_HANDLE		0x00010001
 
 #define PATTERN_MAX		12	/* the UUIDs a search may name */
 #define RANGES_MAX		16	/* and the attributes or their ranges a question may */
-#define ANSWER_MAX		( NREC * ( REC_MAX + 3 ) + 3 )
-#define PIECE_ROOM		600	/* the most of an answer in one frame of this end */
-#define HF_BUF			512
+#define PIECE_ROOM		600	/* the most of an answer in one frame of this end: the rest follows in pieces */
+#define HF_ASK_MAX		512	/* the attribute bytes asked in one answer: the rest follows in pieces */
+#define SDP_CONT_MAX		16	/* the continuation state (Core 5.4 Vol 3 Part B 4.3) */
 #define HF_TMO_MS		5000
 
 typedef struct {
 	UW	handle;
-	UB	b[REC_MAX];		/* (attribute ID, value) pairs, in the order of their IDs */
-	INT	n;
-	UH	uuid[REC_UUIDS];	/* every UUID in it, for the searches */
-	INT	nuuid;
+	UB	*b;			/* (attribute ID, value) pairs, in the order of their IDs */
+	INT	n, cap;
+	UH	*uuid;			/* every UUID in it, for the searches */
+	INT	nuuid, ucap;
+	BOOL	short_of;		/* no room for all of it */
 } REC;
 
 LOCAL REC	rec[NREC];
 LOCAL BOOL	rec_made = FALSE;
 LOCAL INT	ag_feat_at;		/* where the audio gateway's features are in its record */
-LOCAL UB	answer[ANSWER_MAX];
+LOCAL UB	*answer;		/* room for an answer of every record whole */
 
 /* ---------------------------------------------------------------- making the records */
 
 LOCAL REC	*mk;			/* the record being made */
 
+/* A byte of the record being made, its room made bigger as it goes */
 LOCAL void put1( UB v )
 {
-	if ( mk->n < REC_MAX ) mk->b[mk->n++] = v;
+	if ( mk->n >= mk->cap ) {
+		INT	cap = ( mk->cap > 0 ) ? mk->cap * 2 : 128;
+		UB	*nb = (UB *)Kmalloc((SZ)cap);
+
+		if ( nb == NULL ) {
+			mk->short_of = TRUE;
+			return;
+		}
+		if ( mk->n > 0 ) knl_memcpy(nb, mk->b, mk->n);
+		if ( mk->b != NULL ) Kfree(mk->b);
+		mk->b = nb;
+		mk->cap = cap;
+	}
+	mk->b[mk->n++] = v;
 }
 
 LOCAL void put_u16( UH v )
@@ -149,7 +162,20 @@ LOCAL void put_uuid( UH u )
 	put1(DE_UUID16);
 	put1((UB)( u >> 8 ));
 	put1((UB)u);
-	if ( mk->nuuid < REC_UUIDS ) mk->uuid[mk->nuuid++] = u;
+	if ( mk->nuuid >= mk->ucap ) {
+		INT	cap = ( mk->ucap > 0 ) ? mk->ucap * 2 : 8;
+		UH	*nu = (UH *)Kmalloc(sizeof(UH) * (SZ)cap);
+
+		if ( nu == NULL ) {
+			mk->short_of = TRUE;
+			return;
+		}
+		if ( mk->nuuid > 0 ) knl_memcpy(nu, mk->uuid, (INT)( sizeof(UH) * (SZ)mk->nuuid ));
+		if ( mk->uuid != NULL ) Kfree(mk->uuid);
+		mk->uuid = nu;
+		mk->ucap = cap;
+	}
+	mk->uuid[mk->nuuid++] = u;
 }
 
 LOCAL void put_attr( UH id )
@@ -185,6 +211,8 @@ LOCAL void rec_begin( INT i, UH cls1, UH cls2 )
 	INT	s;
 
 	mk = &rec[i];
+	if ( mk->b != NULL ) Kfree(mk->b);
+	if ( mk->uuid != NULL ) Kfree(mk->uuid);
 	knl_memset(mk, 0, sizeof(*mk));
 	mk->handle = (UW)( FIRST_HANDLE + i );
 	put_attr(AT_HANDLE);
@@ -248,9 +276,13 @@ LOCAL void put_profile( UH profile, UH ver )
 	seq_close(s);
 }
 
-LOCAL void rec_make( void )
+/*
+ * The records made, once: FALSE when there was no room for all of them,
+ * said on the console, and made again at the next question.
+ */
+LOCAL BOOL rec_make( void )
 {
-	INT	s, s1;
+	INT	s, s1, i, all = 3;
 
 	/* A2DP 1.3, its source: AVDTP 1.3, a player */
 	rec_begin(0, U_AUDIO_SOURCE, 0);
@@ -303,7 +335,22 @@ LOCAL void rec_make( void )
 	put_attr(AT_FEATURES);
 	put_u16(0x0000);
 	ag_feat_at = mk->n - 2;
+	/* an answer of every record whole: each in a sequence of three bytes' head, and the sequence of them */
+	for ( i = 0; i < NREC; i++ ) {
+		if ( rec[i].short_of ) {
+			tm_printf((UB *)"bt: no room for this end's service records\n");
+			return FALSE;
+		}
+		all += 3 + rec[i].n;
+	}
+	if ( answer != NULL ) Kfree(answer);
+	answer = (UB *)Kmalloc((SZ)all);
+	if ( answer == NULL ) {
+		tm_printf((UB *)"bt: no room for an answer of this end's service records\n");
+		return FALSE;
+	}
 	rec_made = TRUE;
+	return TRUE;
 }
 
 /* ---------------------------------------------------------------- reading a question */
@@ -472,6 +519,12 @@ LOCAL void sdp_piece( BTC *c, PEER *p, UB pdu, CONST UB *q, CONST UB *all, INT n
 	UB	d[2 + PIECE_ROOM + 3];
 	INT	from = 0, k, room = (INT)p->mtu_x[XI_SDP_SRV] - 5 - 2 - 3;
 
+	/* the device's MTU is at least 48 (bt.c), so there is room for a piece */
+	if ( room < 1 ) {
+		sdp_error(c, p, q, SDPE_PDU_SIZE);
+		return;
+	}
+
 	if ( cont[0] == 2 ) {
 		from = ( cont[1] << 8 ) | cont[2];
 	} else if ( cont[0] != 0 ) {
@@ -503,7 +556,7 @@ LOCAL void sdp_piece( BTC *c, PEER *p, UB pdu, CONST UB *q, CONST UB *all, INT n
 /* The continuation: the byte of its length and what it has, which must be in the question */
 LOCAL BOOL cont_of( CONST UB *b, INT n, CONST UB **p_cont )
 {
-	if ( n < 1 || b[0] > 16 || 1 + b[0] != n ) return FALSE;
+	if ( n < 1 || b[0] > SDP_CONT_MAX || 1 + b[0] != n ) return FALSE;
 	*p_cont = b;
 	return TRUE;
 }
@@ -515,7 +568,7 @@ EXPORT void knl_btsd_serve( BTC *c, PEER *p, CONST UB *f, INT n )
 	INT		nu, nr, used, used2, at, i, max, len = 0;
 	CONST UB	*cont;
 
-	if ( !rec_made ) rec_make();
+	if ( !rec_made && !rec_make() ) return;
 	/* the audio gateway's features are the controller's: wide band speech or not */
 	{
 		UH	af = knl_bth_sdp_features(c);
@@ -616,17 +669,24 @@ typedef struct {
 	BOOL	asked;			/* the question is out */
 	UH	tid;
 	UW	due;
-	UB	got[HF_BUF];
-	INT	n;
+	UB	*got;			/* the answer, as long as it comes */
+	INT	n, cap;
 } HFQ;
 
 LOCAL HFQ	hfq;
+
+/* The question over: what it kept let go */
+LOCAL void hfq_clear( void )
+{
+	if ( hfq.got != NULL ) Kfree(hfq.got);
+	knl_memset(&hfq, 0, sizeof(hfq));
+}
 
 /* After bt.c's question: a channel of its own for this one */
 EXPORT void knl_btsd_hf_ask( BTC *c, PEER *p )
 {
 	if ( hfq.p != NULL || p->rcid_x[XI_SDP_HF] != 0 ) return;
-	knl_memset(&hfq, 0, sizeof(hfq));
+	hfq_clear();
 	hfq.c = c;
 	hfq.p = p;
 	hfq.due = knl_btx_now() + HF_TMO_MS;
@@ -635,8 +695,10 @@ EXPORT void knl_btsd_hf_ask( BTC *c, PEER *p )
 
 LOCAL void hf_ask( CONST UB *cont, INT nc )
 {
-	UB	b[32];
+	UB	b[21 + SDP_CONT_MAX];	/* the question's 21 bytes, then the continuation */
 	INT	k = 5;
+
+	if ( nc < 0 || nc > SDP_CONT_MAX ) return;
 
 	hfq.tid++;
 	hfq.asked = TRUE;
@@ -648,8 +710,8 @@ LOCAL void hf_ask( CONST UB *cont, INT nc )
 	b[k++] = DE_UUID16;
 	b[k++] = (UB)( U_HANDSFREE >> 8 );
 	b[k++] = (UB)U_HANDSFREE;
-	b[k++] = (UB)( HF_BUF >> 8 );
-	b[k++] = (UB)HF_BUF;
+	b[k++] = (UB)( HF_ASK_MAX >> 8 );
+	b[k++] = (UB)HF_ASK_MAX;
 	b[k++] = DE_SEQ8;
 	b[k++] = 6;
 	b[k++] = DE_UINT16;
@@ -717,7 +779,7 @@ LOCAL void hf_done( BOOL ok )
 		}
 	}
 	if ( p->rcid_x[XI_SDP_HF] != 0 ) knl_bta_x_close(c, p, CID_SDP_HF);
-	knl_memset(&hfq, 0, sizeof(hfq));
+	hfq_clear();
 	tm_printf((UB *)"bt: \"%s\": its hands-free service: %s %d, features %04x\n", p->name,
 		  ( ch != 0 ) ? "server channel" : "none", ch, feat);
 	knl_bth_hf_found(c, p, ch, feat);
@@ -734,14 +796,31 @@ EXPORT void knl_btsd_hf_in( BTC *c, PEER *p, CONST UB *f, INT n )
 		return;
 	}
 	cnt = ( f[5] << 8 ) | f[6];
-	if ( 7 + cnt >= n || hfq.n + cnt > HF_BUF ) {
+	if ( 7 + cnt >= n ) {
+		tm_printf((UB *)"bt: \"%s\": an answer about hands-free cut short\n", p->name);
 		hf_done(FALSE);
 		return;
+	}
+	if ( hfq.n + cnt > hfq.cap ) {
+		INT	cap = ( hfq.cap > 0 ) ? hfq.cap : 512;
+		UB	*nb;
+
+		while ( cap < hfq.n + cnt ) cap *= 2;
+		nb = (UB *)Kmalloc((SZ)cap);
+		if ( nb == NULL ) {
+			tm_printf((UB *)"bt: \"%s\": no room for %d bytes of its answer about hands-free\n", p->name, hfq.n + cnt);
+			hf_done(FALSE);
+			return;
+		}
+		if ( hfq.n > 0 ) knl_memcpy(nb, hfq.got, hfq.n);
+		if ( hfq.got != NULL ) Kfree(hfq.got);
+		hfq.got = nb;
+		hfq.cap = cap;
 	}
 	knl_memcpy(hfq.got + hfq.n, f + 7, cnt);
 	hfq.n += cnt;
 	nc = f[7 + cnt];
-	if ( nc > 0 && nc <= 16 && 8 + cnt + nc <= n ) {
+	if ( nc > 0 && nc <= SDP_CONT_MAX && 8 + cnt + nc <= n ) {
 		hf_ask(f + 8 + cnt, nc);
 		return;
 	}
@@ -761,7 +840,7 @@ EXPORT void knl_btsd_hf_closed( BTC *c, PEER *p )
 /* The controller gone: the question with it */
 EXPORT void knl_btsd_gone( BTC *c )
 {
-	if ( hfq.c == c ) knl_memset(&hfq, 0, sizeof(hfq));
+	if ( hfq.c == c ) hfq_clear();
 }
 
 EXPORT void knl_btsd_tick( BTC *c )

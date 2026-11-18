@@ -45,12 +45,12 @@
 #define PSX_MAGIC	"\0TSPX1\0"	/* lib/libposix/psx_start.c: the spawn's form */
 #define PSX_AF_SETCTTY	0x0002		/* the slave on descriptor 0 the session's terminal */
 #define PSX_HOME	"/home"		/* the object home: the cabinet the desktop opens with is in it */
-#define PLACE_MAX	1024
 #define BLOB_MAX	4096
 
 LOCAL ID	pid;			/* the program running, 0 none */
 LOCAL TS_UUID	proc;
-LOCAL UB	pname[OB_NAME_MAX];
+LOCAL UB	*pname = (UB *)"";	/* the program running, whole: held while it runs (cm_hold) */
+LOCAL BOOL	pname_held = FALSE;
 LOCAL BOOL	stopping;
 LOCAL UB	arg[CON_LINE_MAX];
 LOCAL INT	ptm = -1;		/* the pty's master, a POSIX program running on it; -1 none */
@@ -99,16 +99,17 @@ LOCAL void unwatch( ID *p_key )
 LOCAL BOOL dev_named( CONST UB *name, TS_UUID *u )
 {
 	TS_UUID	ids[16], last;
-	T_OBREF	r;
 	INT	cnt, i, k, all = 0;
 
 	do {
 		cnt = 0;
 		if ( ob_lst_obj(OB_T_DEVICE, 0, ( all > 0 ) ? &last : NULL, ids, 16, &cnt) < E_OK ) break;
 		for ( i = 0; i < cnt; i++ ) {
-			if ( ob_ref_obj(&ids[i], &r) < E_OK ) continue;
-			for ( k = 0; name[k] != 0 && r.name[k] == name[k]; k++ ) ;
-			if ( name[k] == 0 && r.name[k] == 0 ) {
+			UB	*nm = cm_name(&ids[i]);
+
+			if ( nm == NULL ) continue;
+			for ( k = 0; name[k] != 0 && nm[k] == name[k]; k++ ) ;
+			if ( name[k] == 0 && nm[k] == 0 ) {
 				*u = ids[i];
 				return TRUE;
 			}
@@ -198,13 +199,12 @@ LOCAL INT put_str( INT at, CONST UB *s, BOOL unescape )
  */
 LOCAL CONST UB *start_place( void )
 {
-	static UB	p[PLACE_MAX];
+	UB		*p = box_where();	/* the line's memory: it goes into the argument made now */
 	TS_UUID		here, at;
 	INT		i;
 
-	box_where(p, sizeof(p));
 	box_here_uuid(&here);
-	if ( p[0] != '/' || ts_lkp_obj((CONST char *)p, &at) < E_OK ) return (CONST UB *)PSX_HOME;
+	if ( p == NULL || p[0] != '/' || ts_lkp_obj((CONST char *)p, &at) < E_OK ) return (CONST UB *)PSX_HOME;
 	for ( i = 0; i < (INT)sizeof(at); i++ ) {
 		if ( at.b[i] != here.b[i] ) return (CONST UB *)PSX_HOME;
 	}
@@ -371,8 +371,17 @@ EXPORT ER job_start( CONST TS_UUID *prog, CONST UB *name, INT argc, UB **argv, I
 	INT	i, n = 0;
 	ER	er;
 
-	for ( i = 0; name[i] != 0 && i < OB_NAME_MAX - 1; i++ ) pname[i] = name[i];
-	pname[i] = 0;
+	{
+		UB	*h = cm_hold(name);
+
+		if ( h == NULL ) {
+			cm_no_memory();
+			return E_NOMEM;
+		}
+		if ( pname_held ) cm_let_go(pname);
+		pname = h;
+		pname_held = TRUE;
+	}
 	stopping = FALSE;
 
 	if ( is_posix(prog) && pty_start(prog, name, argc, argv, rows, cols) >= E_OK ) {

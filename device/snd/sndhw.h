@@ -34,12 +34,20 @@
 
 #include <ts/snd.h>
 
+/*
+ * The outputs being gathered (snd.c): a backend adds each it has with
+ * knl_snd_out_add(), its id and name whole. The room is the sound
+ * device's and is kept from one gathering to the next, so that a
+ * gathering while a stream plays takes no memory once it has had enough.
+ */
+typedef struct SNDOUTS SNDOUTS;
+
 typedef struct {
 	INT	kind;				/* SND_BE_* */
 	/*
-	 * The outputs it has now, up to max of them: id, name, kind and
-	 * the flags SND_OF_NOSOUND and SND_OF_LEVEL. Cheap: it is asked
-	 * every few hundred milliseconds while a stream plays.
+	 * The outputs it has now, in the fixed form, up to max of them:
+	 * id, name, kind and the flags SND_OF_NOSOUND and SND_OF_LEVEL.
+	 * For the backends written before outs; NULL in one that has outs.
 	 */
 	INT	(*outputs)( SDOut *o, INT max );
 	BOOL	(*can_record)( void );
@@ -69,6 +77,14 @@ typedef struct {
 	 */
 	UW	lead_ms;
 	UW	tail_ms;
+	/*
+	 * The outputs it has now, each added to l by knl_snd_out_add():
+	 * id, name, kind and the flags SND_OF_NOSOUND and SND_OF_LEVEL.
+	 * Cheap: it is asked every few hundred milliseconds while a stream
+	 * plays. E_NOMEM when an add failed (knl_snd_out_add's answer).
+	 * NULL: outputs is asked instead.
+	 */
+	ER	(*outs)( SNDOUTS *l );
 } SNDHW;
 
 /*
@@ -95,7 +111,14 @@ IMPORT void knl_snd_in_rate( UW rate );
 IMPORT UH knl_snd_mic_level( UW vol );
 IMPORT UW knl_snd_mic_vol( UH level );
 
-/* An id and a name into an output entry, cut to fit */
+/* An output added to l, its id and name whole; E_NOMEM when there is no room for it */
+IMPORT ER   knl_snd_out_add( SNDOUTS *l, CONST UB *id, CONST UB *name, UW kind, UW flags );
+
+/*
+ * An id and a name into an entry of the fixed form (SDOut), cut at a
+ * whole letter to fit, SND_OF_CUT set when they did not: for the
+ * backends that still answer outputs
+ */
 IMPORT void knl_snd_out_set( SDOut *o, CONST UB *id, CONST UB *name, UW kind, UW flags );
 
 /* The backends there are */

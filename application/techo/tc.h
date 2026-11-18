@@ -112,7 +112,7 @@ typedef struct {
 
 IMPORT TCDB	g_db;
 IMPORT TS_UUID	g_obj;
-IMPORT UB	g_name[OB_NAME_MAX];
+IMPORT UB	*g_name;		/* the object's name, whole; never NULL */
 IMPORT TCWIN	g_w[W_N];
 IMPORT UI	g_ui;
 IMPORT ID	g_port;

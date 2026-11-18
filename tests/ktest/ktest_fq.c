@@ -77,6 +77,7 @@
 LOCAL BOOL	have_prog = FALSE;
 LOCAL BOOL	up = FALSE;
 LOCAL T_WMWIN	wr;
+LOCAL INT	own_wid = 0;		/* the window of the system's own the tests put in front */
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -98,6 +99,49 @@ LOCAL BOOL has( CONST char *hay, CONST char *w )
 	}
 	return FALSE;
 }
+
+/* Where the console's log ends now: what log_wait looks after */
+LOCAL UD log_now( void )
+{
+	UB	b[256];
+	UD	pos = 0;
+
+	while ( tm_log_read(&pos, b, sizeof(b)) > 0 ) ;
+	return pos;
+}
+
+/*
+ * Whether the console said w after pos, looked at for up to tries tenths
+ * of a second. The log is read on in pieces, the end of each kept in
+ * front of the next so that a line cut between two is still found.
+ */
+LOCAL BOOL log_wait( UD pos, CONST char *w, INT tries )
+{
+	UB	*b = (UB *)Kmalloc(4096);
+	INT	t, k, n, keep = 0, m = s_len(w), i;
+	UD	p = pos;
+
+	if ( b == NULL ) return FALSE;
+	for ( t = 0; t < tries; t++ ) {
+		while ( ( k = tm_log_read(&p, b + keep, 4095 - keep) ) > 0 ) {
+			n = keep + k;
+			b[n] = 0;
+			if ( has((CONST char *)b, w) ) {
+				Kfree(b);
+				return TRUE;
+			}
+			keep = ( n < m - 1 ) ? n : m - 1;
+			for ( i = 0; i < keep; i++ ) b[i] = b[n - keep + i];
+		}
+		tk_dly_tsk(100);
+	}
+	Kfree(b);
+	tm_printf((UB *)"  the console did not say \"%s\"\n", w);
+	return FALSE;
+}
+
+/* The desktop's start over: what it opened by itself up, the first window with the keys */
+#define DT_SETTLED	"TessronOS desktop: settled"
 
 LOCAL ID start( UW mode, ATR atr )
 {
@@ -276,7 +320,34 @@ LOCAL ID window_process( ATR atr, INT *p_wid )
 	return pid;
 }
 
+/*
+ * A window of the system's own in front, with the keys: one the test
+ * opens, which no process made. The desktop's first window is not one,
+ * since 仮身一覧 shows it as a process of its own.
+ */
 LOCAL INT kernel_window( void )
+{
+	T_DPRECT	o;
+	INT		wid;
+
+	if ( own_wid > 0 && wm_ref(own_wid, &wr) < E_OK ) {
+		own_wid = 0;
+	}
+	if ( own_wid <= 0 ) {
+		o.left = 40;  o.top = 60;  o.right = 300;  o.bottom = 220;
+		own_wid = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "ktdesk");
+	}
+	wid = own_wid;
+	if ( wid > 0 ) {
+		wm_raise(wid);
+		wm_focus(wid);
+		wm_composite();
+	}
+	return wid;
+}
+
+/* The desktop's first window in front, with the keys: the one its panels for a process stand over (dtadmin.c) */
+LOCAL INT first_window( void )
 {
 	DTWIN	*d = dt_first_win();
 	INT	wid = ( d != NULL ) ? d->wid : 0;
@@ -362,24 +433,27 @@ LOCAL void test_setup( void )
 {
 	T_FSTAT	st;
 	UW	turns;
+	UD	pos;
 	INT	i;
 
 	knl_lockup_tune(0, 0, SILENT_MS);
 	if ( fs_stat(SVCPROG, &st) < EX_OK ) KT_SKIP("no " SVCPROG);
 	have_prog = TRUE;
 	turns = dt_test_loops();
+	pos = log_now();
 	KT_ASSERT_ER(dt_start(), E_OK);
 	for ( i = 0; i < 100 && dt_first_win() == NULL; i++ ) tk_dly_tsk(100);
 	up = (BOOL)( dt_first_win() != NULL );
 	KT_ASSERT(up);
 	/*
 	 * The first window comes before the last steps of the start, which
-	 * raise it and give it the keys, and windows of ended processes go
-	 * away only in the loop: what these tests look at holds from its first turn
+	 * raise it and give it the keys, and the windows the start opens by
+	 * itself come up in front later still: what these tests put in front
+	 * stays there only once the start is over
 	 */
 	for ( i = 0; i < 600 && dt_test_loops() == turns; i++ ) tk_dly_tsk(100);
 	KT_ASSERT(dt_test_loops() != turns);
-	tk_dly_tsk(500);
+	KT_ASSERT(log_wait(pos, DT_SETTLED, 600));
 }
 
 LOCAL void test_front( void )
@@ -395,7 +469,7 @@ LOCAL void test_front( void )
 	(void)wm_msg_put(NULL);
 	shift_pause();
 	KT_ASSERT_EQ(ended(a, 5000), TS_ABORT_TERM);
-	KT_ASSERT(window_titled("ktpause", 0) == 0);
+	KT_ASSERT(window_gone("ktpause", 30));		/* closed by the desktop's loop once it sees the end */
 	(void)tm_sprintf((UB *)w, (CONST UB *)"SVCPROG.ELF(pid %d)を強制終了しました", a);
 	KT_ASSERT(msg_says(w, 30));
 }
@@ -666,10 +740,12 @@ LOCAL void test_delegate( void )
 {
 	T_DPRECT	o;
 	TS_UUID		prog;
-	char		w[64];
-	INT		pw, kw, ow;
+	char		w[96];
+	INT		pw, kw, ow, t;
 	ID		p, q;
 	ER		er;
+	UD		pos;
+	UW		turns;
 
 	if ( !up || !have_prog ) KT_SKIP("no desktop or no program");
 
@@ -677,7 +753,7 @@ LOCAL void test_delegate( void )
 	er = make_prog(&prog);
 	KT_ASSERT_ER(er, E_OK);
 	if ( er < E_OK ) return;
-	kw = kernel_window();
+	kw = first_window();
 	p = start_obj(&prog, SP_ADMINASK);
 	KT_ASSERT(p > 0);
 	if ( p > 0 ) {
@@ -689,8 +765,21 @@ LOCAL void test_delegate( void )
 		KT_ASSERT(ended(p, 10000) != 1);
 		(void)tm_sprintf((UB *)w, (CONST UB *)"(pid %d)を強制終了しました", p);
 		KT_ASSERT(fq_says(w, 30));
-		press(KEY_ESC, 0);				/* the panel put away */
-		KT_ASSERT(panel_for(p, 30) == 0);
+		/* the panel put away: once the desktop has read the key it says so, and the panel is gone */
+		pos = log_now();
+		press(KEY_ESC, 0);
+		(void)tm_sprintf((UB *)w, (CONST UB *)"the administrator's rights for process %d: not asked", p);
+		KT_ASSERT(log_wait(pos, w, 100));
+		KT_ASSERT(panel_for(p, 1) == 0);
+		/*
+		 * and the request done to its end: the desktop's task says that it
+		 * acts for none (knl_wmobj_act_for(0)) once the request is over,
+		 * before the loop comes round again, and that would undo what this
+		 * task says below in its place
+		 */
+		turns = dt_test_loops();
+		for ( t = 0; t < 100 && dt_test_loops() == turns; t++ ) tk_dly_tsk(100);
+		KT_ASSERT(dt_test_loops() != turns);
 	}
 	(void)ob_del_obj(&prog);
 
@@ -733,7 +822,7 @@ LOCAL void test_sys( void )
 }
 
 /* Started again: a new task, its first window again, and the count gone up from n */
-LOCAL BOOL restarted( ID old, INT n )
+LOCAL BOOL restarted( ID old, INT n, UD pos )
 {
 	T_FQSTAT	st;
 	INT		t;
@@ -742,7 +831,11 @@ LOCAL BOOL restarted( ID old, INT n )
 		knl_fq_stat(&st);
 		if ( st.restarts > n && knl_wdog_watched() > 0 && knl_wdog_watched() != old
 		  && dt_first_win() != NULL ) {
-			return TRUE;
+			/*
+			 * and its start over: the first window it starts again comes
+			 * up in front with the keys only then, over what a test puts there
+			 */
+			return log_wait(pos, DT_SETTLED, 600);
 		}
 		tk_dly_tsk(100);
 	}
@@ -756,6 +849,7 @@ LOCAL void test_restart( void )
 	T_FQSTAT	st;
 	INT		wa, n0, t;
 	ID		a, old;
+	UD		pos;
 
 	if ( !up || !have_prog ) KT_SKIP("no desktop or no program");
 	a = window_process(0, &wa);
@@ -774,8 +868,9 @@ LOCAL void test_restart( void )
 	KT_ASSERT(st.armed);
 	KT_ASSERT(running(a));
 	tk_dly_tsk(300);
+	pos = log_now();
 	shift_pause();
-	KT_ASSERT(restarted(old, n0));
+	KT_ASSERT(restarted(old, n0, pos));
 	KT_ASSERT(fq_says("デスクトップを立ち上げ直しました", 50));
 	KT_ASSERT(!knl_wdog_stuck(NULL, NULL));
 
@@ -800,6 +895,7 @@ LOCAL void test_restart_button( void )
 	T_WMWIN		w;
 	INT		n0, x, y, t;
 	ID		old;
+	UD		pos;
 
 	if ( !up ) KT_SKIP("no desktop");
 	old = knl_wdog_watched();
@@ -820,8 +916,9 @@ LOCAL void test_restart_button( void )
 	if ( st.askwid <= 0 || wm_ref(st.askwid, &w) < E_OK ) return;
 	x = w.work.left + FQW_ASK_X;
 	y = w.work.top + FQW_ASK_Y;
+	pos = log_now();
 	click(x, y);
-	KT_ASSERT(restarted(old, n0));
+	KT_ASSERT(restarted(old, n0, pos));
 	KT_ASSERT(list_up(TRUE, 5));			/* the window stays up */
 	ctrl_shift_pause();
 	KT_ASSERT(list_up(FALSE, 30));
@@ -847,5 +944,9 @@ EXPORT void ktest_fq( void )
 		up = FALSE;
 	}
 	knl_lockup_tune(0, 0, 0);
+	if ( own_wid > 0 ) {
+		(void)wm_close(own_wid);
+		own_wid = 0;
+	}
 	wm_update();
 }

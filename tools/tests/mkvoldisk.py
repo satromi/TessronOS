@@ -26,6 +26,10 @@ partition with nothing on it. The sizes, none of them that of a disk the test ma
   volg.img  96MB  blank: ktest_grow lays its own tables down on it (design 7.7)
   volh.img  64MB  GPT:  1 TSFS "VOLH" 8MB, the rest free: the desktop's
                   拡張 and 区画作成 (tools/tests/ui_disk_grow.steps)
+  vols.img  48MB  GPT:  1 TSFS "TessronOS system" 40MB holding etc/def and
+                  etc/xtad and the system box: another machine's system
+                  volume, of the UUIDs of this system's objects
+                  (tools/tests/ui_disk_foreign.steps)
 
 The TSFS volumes are made by tools/mktsfs, the FAT ones by tools/mkfat.py.
 """
@@ -44,12 +48,20 @@ from mkdisk import crc32, gpt_header, TSFS_GUID, BASIC_DATA_GUID, \
     ENTRIES, ENTRY_SIZE, SECTOR                 # noqa: E402
 
 MB = 2048                                       # sectors of a megabyte
+SYSTEM_BOX = "01a0d8c4-5211-7c52-9e0a-3b61d27f4c85"     # SYSDEF_SYSTEM_BOX
 EXFAT_GUID = BASIC_DATA_GUID
 
 
-def mktsfs(path, start, nsect, label):
+def mktsfs(path, start, nsect, label, system=False):
+    """system: the objects of etc/def and etc/xtad with the system box, as
+    another machine's system volume has them (its own UUID, a new one)"""
+    more = []
+    if system:
+        top = os.path.dirname(TOOLS)
+        more = ["--from", os.path.join(top, "etc", "def"), "--from", os.path.join(top, "etc", "xtad"),
+                "--sysbox", SYSTEM_BOX]
     subprocess.run([sys.executable, os.path.join(TOOLS, "mktsfs"), "-q", "-L", label,
-                    "--offset", str(start * SECTOR), "--size", str(nsect * SECTOR), path],
+                    "--offset", str(start * SECTOR), "--size", str(nsect * SECTOR)] + more + [path],
                    check=True)
 
 
@@ -65,7 +77,7 @@ def gpt_disk(path, size_mb, parts):
     placed = []
     for i, (kind, n, label) in enumerate(parts):
         assert at + n - 1 <= last_usable, "image too small"
-        guid = TSFS_GUID if kind == "tsfs" else BASIC_DATA_GUID
+        guid = TSFS_GUID if kind in ("tsfs", "tsfssys") else BASIC_DATA_GUID
         e = struct.pack("<16s16sQQQ72s", guid.bytes_le, uuid.uuid4().bytes_le,
                         at, at + n - 1, 0, label.encode("utf-16-le").ljust(72, b"\0"))
         entries[i * ENTRY_SIZE:(i + 1) * ENTRY_SIZE] = e
@@ -89,6 +101,8 @@ def gpt_disk(path, size_mb, parts):
     for kind, start, n, label in placed:
         if kind == "tsfs":
             mktsfs(path, start, n, label)
+        elif kind == "tsfssys":
+            mktsfs(path, start, n, label, system=True)
 
 
 def fill(img, placed):
@@ -236,7 +250,8 @@ def main():
     with open(os.path.join(out, "volg.img"), "wb") as f:
         f.truncate(96 * MB * 512)
     gpt_disk(os.path.join(out, "volh.img"), 64, [("tsfs", 8 * MB, "VOLH")])
-    print("%s: vola.img volb.img volc.img vold.img volp.img volx00..21.img volg.img volh.img" % out)
+    gpt_disk(os.path.join(out, "vols.img"), 48, [("tsfssys", 40 * MB, "TessronOS system")])
+    print("%s: vola.img volb.img volc.img vold.img volp.img volx00..21.img volg.img volh.img vols.img" % out)
 
 
 if __name__ == "__main__":

@@ -163,7 +163,7 @@ static INT day_of( CONST UB *s )
 static BOOL match( CONST TS_UUID *id, CONST QUERY *q )
 {
 	T_JSON	root, tags, it;
-	UB	*m, s[TAD_NAME_MAX];
+	UB	*m, s[64];		/* a date, as ISO 8601 writes one */
 	BOOL	hit = FALSE;
 
 	if ( !tl_meta(id, &m, &root) ) return FALSE;	/* not one the person may read */

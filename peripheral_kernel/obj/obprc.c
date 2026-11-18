@@ -44,6 +44,21 @@ LOCAL INT put_name( UB *out, INT max, ID pid )
 	return knl_oj_put_num(out, n, max, pid);
 }
 
+/* "process " and a number of an ID: the most such a name takes */
+#define OBP_NAME_ROOM	24
+
+LOCAL ER obp_refnam( CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize )
+{
+	UB	t[OBP_NAME_ROOM];
+	ID	pid = knl_prc_of_uuid(uuid);
+
+	if ( pid <= 0 ) {
+		return E_NOEXS;
+	}
+	(void)put_name(t, (INT)sizeof(t), pid);
+	return knl_ob_name_put(t, -1, buf, size, p_asize);
+}
+
 LOCAL ER obp_ref( CONST TS_UUID *uuid, T_OBREF *r )
 {
 	T_RPRC	rp;
@@ -52,7 +67,6 @@ LOCAL ER obp_ref( CONST TS_UUID *uuid, T_OBREF *r )
 	if ( pid <= 0 || ts_ref_prc(pid, &rp) < E_OK ) {
 		return E_NOEXS;
 	}
-	(void)put_name(r->name, OB_NAME_MAX, pid);
 	r->flags = OB_F_VOLATILE;
 	r->nrec = 1;
 	r->size = rp.memsz;
@@ -148,10 +162,12 @@ EXPORT BOOL knl_ob_trusted( CONST TS_UUID *prog )
  * as the system; one a process starts acts as the process does.
  */
 LOCAL INT says_withpar( CONST UB *json, INT len );
+LOCAL INT says_role( CONST UB *json, INT len, UB *role );
 
 /*
  * The metadata given may say that it ends with its maker
- * (tessronos.process.withParent, TS_PRC_WITHPARENT).
+ * (tessronos.process.withParent, TS_PRC_WITHPARENT), and its role among
+ * the processes of its program (tessronos.process.role).
  */
 LOCAL ER obp_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 {
@@ -176,6 +192,14 @@ LOCAL ER obp_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	pid = ts_cre_prc_obj(vol, &c->prog, &cprc);
 	if ( pid <= 0 ) {
 		return ( pid < 0 ) ? (ER)pid : E_SYS;
+	}
+	if ( c->json != NULL && c->jsonsz > 0 && c->jsonsz < 0x3FFFFFFF ) {
+		UB	role[TS_PRC_ROLE];
+		INT	rl = says_role(c->json, (INT)c->jsonsz, role);
+
+		if ( rl > 0 ) {
+			(void)knl_prc_set_role(pid, role, rl);
+		}
 	}
 	return knl_prc_uuid(pid, p_uuid, NULL);
 }
@@ -212,45 +236,76 @@ LOCAL CONST char *state_name( UINT st )
 	}
 }
 
-/* A paragraph with a link for each socket the process has open */
+/*
+ * A paragraph with a link for each socket the process has open: the
+ * table is asked how many there are first and taken as large, asked
+ * again larger when more were opened in between. Answers the position,
+ * -1 when t is full, or E_NOMEM.
+ */
 LOCAL INT socket_links( ID pid, UB *t, INT n, INT max )
 {
-	struct {
-		INT	nums[SO_MAX];
-		TS_UUID	u[SO_MAX];
-	}	*l;
+	INT	*nums;
+	TS_UUID	*u;
 	UB	name[24];
-	INT	k, i;
+	INT	room, k, i;
 
-	l = Kmalloc(sizeof(*l));
-	if ( l == NULL ) {
-		return n;
+	room = knl_so_obj_list(pid, NULL, NULL, 0);
+	for ( ;; ) {
+		if ( room <= 0 ) {
+			return n;
+		}
+		nums = (INT *)Kmalloc(sizeof(INT) * (SZ)room);
+		u = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)room);
+		if ( nums == NULL || u == NULL ) {
+			if ( nums != NULL ) Kfree(nums);
+			if ( u != NULL ) Kfree(u);
+			return E_NOMEM;
+		}
+		k = knl_so_obj_list(pid, nums, u, room);
+		if ( k <= room ) {
+			break;
+		}
+		Kfree(nums);
+		Kfree(u);
+		room = k;
 	}
-	k = knl_so_obj_list(pid, l->nums, l->u, SO_MAX);
-	for ( i = 0; i < k && i < SO_MAX; i++ ) {
+	for ( i = 0; i < k; i++ ) {
 		INT	p = knl_oj_put(name, 0, sizeof(name), "socket ");
 
-		(void)knl_oj_put_num(name, p, sizeof(name), l->nums[i]);
-		n = knl_obdev_link(t, n, max, &l->u[i], name);
+		(void)knl_oj_put_num(name, p, sizeof(name), nums[i]);
+		n = knl_obdev_link(t, n, max, &u[i], name);
 	}
-	Kfree(l);
+	Kfree(nums);
+	Kfree(u);
 	return n;
 }
 
-/* A paragraph with a link for each end of a stream the process holds a key to (obstrm.c) */
-#define STREAM_LINKS	64
-
+/*
+ * A paragraph with a link for each end of a stream the process holds a
+ * key to (obstrm.c), as many as there are, taken the same way
+ */
 LOCAL INT stream_links( ID pid, UB *t, INT n, INT max )
 {
 	TS_UUID	*u;
-	INT	k, i;
+	INT	room, k, i;
 
-	u = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * STREAM_LINKS);
-	if ( u == NULL ) {
-		return n;
+	room = knl_ob_key_objs(pid, OB_T_CHANNEL, OB_S_STREAM, NULL, 0);
+	for ( ;; ) {
+		if ( room <= 0 ) {
+			return n;
+		}
+		u = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)room);
+		if ( u == NULL ) {
+			return E_NOMEM;
+		}
+		k = knl_ob_key_objs(pid, OB_T_CHANNEL, OB_S_STREAM, u, room);
+		if ( k <= room ) {
+			break;
+		}
+		Kfree(u);
+		room = k;
 	}
-	k = knl_ob_key_objs(pid, OB_T_CHANNEL, OB_S_STREAM, u, STREAM_LINKS);
-	for ( i = 0; i < k && i < STREAM_LINKS; i++ ) {
+	for ( i = 0; i < k; i++ ) {
 		n = knl_obdev_link(t, n, max, &u[i], (CONST UB *)"stream");
 	}
 	Kfree(u);
@@ -291,7 +346,13 @@ LOCAL INT status_text( ID pid, UB *t, INT max )
 		n = knl_oj_put(t, n, max, "_0.xtad\"/></p>");
 	}
 	n = socket_links(pid, t, n, max);
+	if ( n < -1 ) {
+		return n;
+	}
 	n = stream_links(pid, t, n, max);
+	if ( n < -1 ) {
+		return n;
+	}
 	return knl_oj_put(t, n, max, "</document></tad>");
 }
 
@@ -389,29 +450,79 @@ LOCAL INT says_withpar( CONST UB *json, INT len )
 }
 
 /*
+ * tessronos.process.role of metadata: its length put in role (at most
+ * TS_PRC_ROLE - 1 bytes, ending in 0), 0 for an empty one, -1 not said
+ */
+LOCAL INT says_role( CONST UB *json, INT len, UB *role )
+{
+	UB	buf[TS_PRC_ROLE * 2];
+	INT	v, n;
+
+	role[0] = 0;
+	if ( json == NULL || len <= 0 ) {
+		return -1;
+	}
+	v = knl_oj_path(json, len, "tessronos", "process");
+	v = ( v >= 0 ) ? knl_oj_member(json, len, v, "role") : -1;
+	n = ( v >= 0 ) ? knl_oj_str(json, len, v, buf, (INT)sizeof(buf)) : -1;
+	if ( n < 0 ) {
+		return -1;
+	}
+	n = (INT)knl_utf8_fit(buf, (SZ)n, TS_PRC_ROLE - 1);	/* never half a character */
+	knl_memcpy(role, buf, n);
+	role[n] = 0;
+	return n;
+}
+
+/*
  * What of the attributes may be changed: whether it ends with its
- * parent (tessronos.process.withParent). The rest is made from the
- * process each time it is read and is not kept.
+ * parent (tessronos.process.withParent) and its role
+ * (tessronos.process.role). The rest is made from the process each time
+ * it is read and is not kept.
  */
 LOCAL ER obp_sat( INT h, CONST UB *json, SZ size )
 {
 	INT	w = says_withpar(json, (INT)size);
+	UB	role[TS_PRC_ROLE];
+	INT	rl = says_role(json, (INT)size, role);
+	ER	er = E_OK;
 
-	return ( w < 0 ) ? E_OK : knl_prc_set_withpar((ID)h, (BOOL)( w == 1 ));
+	if ( rl >= 0 ) {
+		er = knl_prc_set_role((ID)h, role, rl);
+	}
+	if ( er >= E_OK && w >= 0 ) {
+		er = knl_prc_set_withpar((ID)h, (BOOL)( w == 1 ));
+	}
+	return er;
 }
 
+/*
+ * The process objects after from, in the order of their UUIDs: every
+ * process there is is looked at, so that asking on from the last one
+ * answered reaches them all
+ */
 LOCAL ER obp_lst( CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt )
 {
-	ID	pids[16];
-	TS_UUID	u[16];
+	ID	*pids;
+	TS_UUID	*u;
 	INT	np, nu = 0, i, cnt = 0;
 
-	np = knl_prc_list(pids, 16);
+	*p_cnt = 0;
+	np = knl_prc_list_all(&pids);
+	if ( pids == NULL ) {
+		return E_NOMEM;
+	}
+	u = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)( np > 0 ? np : 1 ));
+	if ( u == NULL ) {
+		Kfree(pids);
+		return E_NOMEM;
+	}
 	for ( i = 0; i < np; i++ ) {
 		if ( knl_prc_uuid(pids[i], &u[nu], NULL) >= E_OK && !knl_ob_uuid_zero(&u[nu]) ) {
 			nu++;
 		}
 	}
+	Kfree(pids);
 	while ( cnt < n ) {
 		INT	best = -1;
 
@@ -423,6 +534,7 @@ LOCAL ER obp_lst( CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt )
 		if ( best < 0 ) break;
 		buf[cnt++] = u[best];
 	}
+	Kfree(u);
 	*p_cnt = cnt;
 
 	return E_OK;
@@ -474,7 +586,9 @@ LOCAL CONST T_OBMGR obp_mgr = {
 	NULL, NULL,
 	NULL,			/* records replaced by writing over them */
 	NULL,			/* nothing to wait for */
-	NULL			/* nothing comes in to wait for (ob_rea_tmo) */
+	NULL,			/* nothing comes in to wait for (ob_rea_tmo) */
+	NULL,
+	obp_refnam
 };
 
 EXPORT ER knl_obprc_init( void )

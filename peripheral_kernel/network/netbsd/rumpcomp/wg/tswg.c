@@ -39,7 +39,6 @@
 
 #define TSWG_IF		"wg0"
 #define TSWG_KEY	32
-#define TSWG_NETS	16
 
 struct tswg_net {
 	uint32_t	addr;
@@ -52,9 +51,10 @@ int	rump_tswg_up(const uint8_t *, int, uint32_t, uint32_t, const uint8_t *, cons
 int	rump_tswg_down(void);
 int	rump_tswg_stat(unsigned long long *, unsigned long long *);
 
-/* The routes made, for taking them away */
-static struct tswg_net	routes[TSWG_NETS + 2];
+/* The routes made, for taking them away: room for routes_cap, as many as the peer's networks ask for */
+static struct tswg_net	*routes;
 static int		nroutes;
+static int		routes_cap;
 static uint32_t		host_route;
 static uint32_t		local_addr;
 
@@ -159,9 +159,22 @@ rump_tswg_up(const uint8_t *priv, int port, uint32_t addr, uint32_t mask, const 
 	int			error, i;
 	bool			everything = false;
 
-	if (nnets > TSWG_NETS)
+	if (nnets < 0)
 		return EINVAL;
 	rump_schedule();
+	/* each network one route, the whole Internet two halves; a table made larger keeps the routes there were */
+	if (nnets + 1 > routes_cap) {
+		struct tswg_net	*r;
+		int		cap = (nnets + 1) * 2;
+
+		r = malloc(sizeof(*r) * cap, M_TEMP, M_WAITOK | M_ZERO);
+		if (routes != NULL) {
+			memcpy(r, routes, sizeof(*r) * nroutes);
+			free(routes, M_TEMP);
+		}
+		routes = r;
+		routes_cap = cap;
+	}
 	error = wg_socket(&so);
 	if (error)
 		goto out;
@@ -247,6 +260,8 @@ rump_tswg_up(const uint8_t *priv, int port, uint32_t addr, uint32_t mask, const 
 	nroutes = 0;
 	for (i = 0; i < nnets; i++) {
 		if (nets[i].cidr == 0) {
+			if (everything)
+				continue;	/* the two halves are there already */
 			everything = true;
 			routes[nroutes].addr = 0;
 			routes[nroutes++].cidr = 1;

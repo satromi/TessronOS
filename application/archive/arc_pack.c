@@ -170,7 +170,11 @@ LOCAL void read_meta( ARCOBJ *o, const UB *meta, SZ size, const char *refname )
 	INT	n, i;
 	UB	col[16];
 
-	strncpy(o->name, refname, sizeof(o->name) - 1);
+	if ( refname != NULL ) {
+		strncpy(o->name, refname, sizeof(o->name) - 1);
+	} else {
+		(void)ob_ref_nam(&o->uuid, (UB *)o->name, (SZ)sizeof(o->name), NULL);	/* at a whole letter */
+	}
 	o->ftype = BPK_F_FILE;
 	o->ltime = NO_TIME;
 	if ( meta == NULL || js_parse(meta, (INT)size, &root) < E_OK ) return;
@@ -385,7 +389,7 @@ EXPORT ER arc_find( ARCJOB *j, const TS_UUID *archive, const TS_UUID *root )
 		}
 		/* the metadata read first: the size it gives is an argument of the same call */
 		asz = ob_atr_read(k, 0, &meta);
-		read_meta(o, ( asz >= 0 ) ? meta : NULL, ( asz >= 0 ) ? asz : 0, (const char *)ref.name);
+		read_meta(o, ( asz >= 0 ) ? meta : NULL, ( asz >= 0 ) ? asz : 0, NULL);
 		free(meta);
 		er = E_OK;
 		r = ob_rec_read(k, &cnt);

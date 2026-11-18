@@ -130,6 +130,7 @@ LOCAL BOOL stands( INFOPROC *e )
 		}
 	}
 	__atomic_store_n(&e->state, IS_FREE, __ATOMIC_RELEASE);
+	tad_vobj_clear(&e->link);	/* the place's copy of the link let go */
 	return FALSE;
 }
 
@@ -186,8 +187,12 @@ EXPORT void dt_real_info( DTWIN *d, CONST T_VOBJ *v )
 		dt_tell(d, "管理情報のプログラムがありません", NULL);
 		return;
 	}
+	tad_vobj_clear(&e->link);
 	knl_memset(e, 0, sizeof(*e));
-	e->link = *v;
+	if ( tad_vobj_copy(&e->link, v) < E_OK ) {
+		dt_tell(d, "メモリが足りないため、管理情報を開けません", NULL);
+		return;
+	}
 	e->parent = d;
 	e->parent_wid = ( d != NULL ) ? d->wid : 0;
 	e->parent_sealed = FALSE;
@@ -196,6 +201,7 @@ EXPORT void dt_real_info( DTWIN *d, CONST T_VOBJ *v )
 	er = dt_prog_start_info(d, p, v, (INT)( e - info_tab ) + 1);
 	if ( er < E_OK ) {
 		__atomic_store_n(&e->state, IS_FREE, __ATOMIC_RELEASE);
+		tad_vobj_clear(&e->link);
 	}
 }
 
@@ -231,20 +237,28 @@ LOCAL INT text_num( CONST UB *t, INT *p )
  */
 LOCAL ER apps_set( CONST INFOPROC *e, CONST T_DTREQ *rq )
 {
-	UB	*buf = (UB *)Kmalloc(DT_CARRY_TEXT + 1);
-	CONST UB **ids = (CONST UB **)Kmalloc(sizeof(UB *) * ( DT_CARRY_TEXT / 2 ));
-	CONST UB **names = (CONST UB **)Kmalloc(sizeof(UB *) * ( DT_CARRY_TEXT / 2 ));
-	INT	i = 0, n = 0, dflt;
-	ER	er = E_OK;
+	SZ		tl;
+	CONST UB	*t = dt_rq_word(rq, DT_TAIL_TEXT, &tl);
+	INT		lines = 1, i = 0, n = 0, dflt;
+	UB		*buf;
+	CONST UB	**ids, **names;
+	ER		er = E_OK;
 
+	/* as many programs as the text has lines, however many */
+	for ( i = 0; i < (INT)tl; i++ ) {
+		if ( t[i] == '\n' ) lines++;
+	}
+	i = 0;
+	buf = (UB *)Kmalloc((size_t)( tl + 1 ));
+	ids = (CONST UB **)Kmalloc(sizeof(UB *) * (size_t)lines);
+	names = (CONST UB **)Kmalloc(sizeof(UB *) * (size_t)lines);
 	if ( buf == NULL || ids == NULL || names == NULL ) {
 		er = E_NOMEM;
 		goto done;
 	}
-	knl_memcpy(buf, rq->text, DT_CARRY_TEXT);
-	buf[DT_CARRY_TEXT] = 0;
+	knl_memcpy(buf, t, tl + 1);
 	dflt = text_num(buf, &i);
-	while ( buf[i] == '\n' && n < DT_CARRY_TEXT / 2 ) {
+	while ( buf[i] == '\n' && n < lines ) {
 		buf[i++] = 0;
 		ids[n] = &buf[i];
 		while ( buf[i] != 0 && buf[i] != '\t' && buf[i] != '\n' ) i++;
@@ -281,7 +295,7 @@ done:
 LOCAL ER apps_list( CONST INFOPROC *e, CONST T_DTREQ *rq, T_DTANS *an )
 {
 	DTAPP	*a;
-	INT	room, n, k = 0, i, dflt = -1;
+	INT	room, n, dflt = -1;
 	ER	er = E_NOEXS;
 
 	room = dt_app_list(&e->link, NULL, 0, NULL);
@@ -295,15 +309,13 @@ LOCAL ER apps_list( CONST INFOPROC *e, CONST T_DTREQ *rq, T_DTANS *an )
 	if ( rq->recno >= 0 && rq->recno < n ) {
 		CONST DTAPP	*p = &a[rq->recno];
 
-		for ( i = 0; p->id[i] != 0 && k < DT_TEXT_MAX - 2; i++ ) an->text[k++] = p->id[i];
-		an->text[k++] = '	';
-		for ( i = 0; p->name[i] != 0 && k < DT_TEXT_MAX - 1; i++ ) an->text[k++] = p->name[i];
-		an->text[k] = 0;
+		er = dt_ans_cat(an, p->id, -1);
+		if ( er >= E_OK ) er = dt_ans_cat(an, (CONST UB *)"\t", 1);
+		if ( er >= E_OK ) er = dt_ans_cat(an, p->name, -1);
 		if ( !p->listed ) an->flags |= DT_F_KIND;
 		if ( rq->recno == dflt ) an->flags |= DT_F_DEFAULT;
-		er = E_OK;
 	}
-	Kfree(a);
+	dt_app_free(a, n);
 	return er;
 }
 

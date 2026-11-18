@@ -608,20 +608,20 @@ LOCAL BOOL can_sound( INT h )
 
 /* ---------------------------------------------------------------- backend */
 
-LOCAL INT hdmi_outputs( SDOut *o, INT max )
+LOCAL ER hdmi_outs( SNDOUTS *l )
 {
-	INT	h, n = 0;
+	INT	h;
+	ER	er = E_OK;
 
-	for ( h = 0; h < 2 && n < max && hdmi_ok; h++ ) {
+	for ( h = 0; h < 2 && hdmi_ok && er >= E_OK; h++ ) {
 		if ( !out[h].driven ) {
 			continue;
 		}
-		knl_snd_out_set(&o[n], (CONST UB *)( h == 0 ? "hdmi0" : "hdmi1" ), out[h].name,
-				SND_BE_HDMI, can_sound(h) ? 0 : SND_OF_NOSOUND);
-		n++;
+		er = knl_snd_out_add(l, (CONST UB *)( h == 0 ? "hdmi0" : "hdmi1" ), out[h].name,
+				     SND_BE_HDMI, can_sound(h) ? 0 : SND_OF_NOSOUND);
 	}
 
-	return n;
+	return er;
 }
 
 LOCAL BOOL hdmi_can_record( void )
@@ -793,7 +793,7 @@ LOCAL ER hdmi_set_level( INT dn, CONST SDVol *v )
 
 EXPORT CONST SNDHW knl_hdmi_hw = {
 	SND_BE_HDMI,
-	hdmi_outputs,
+	NULL,
 	hdmi_can_record,
 	hdmi_play_start,
 	hdmi_play_stop,
@@ -805,7 +805,8 @@ EXPORT CONST SNDHW knl_hdmi_hw = {
 	hdmi_get_level,
 	hdmi_set_level,
 	HDMI_LEAD_MS,
-	HDMI_TAIL_MS
+	HDMI_TAIL_MS,
+	hdmi_outs
 };
 
 /*

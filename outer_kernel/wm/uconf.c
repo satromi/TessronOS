@@ -549,6 +549,71 @@ LOCAL UW snd_lines_sum( CONST UB *text, INT len )
 
 LOCAL void snd_keep( void );
 
+/*
+ * The lines of the output chosen and of the stream kept going (SOUND_OUT,
+ * SOUND_KEEP), as the mixer's: taken for a write the watcher heard of
+ * only when the line is not the one taken last. Choosing an output or
+ * keeping the stream through the system object's record 8 does not write
+ * the settings, so a write of another line (the mixer's keeper saving
+ * SOUND_VOL) would otherwise set them back to what the settings hold.
+ * A sum of the line's value, read whole (an id has no length of its own),
+ * and another for no line.
+ */
+LOCAL UW	snd_out_last = 0, snd_keep_last = 0;
+
+LOCAL UW line_sum( CONST UB *text, INT len, CONST char *key, CONST UB **p_v, INT *p_vlen )
+{
+	UW	h = 2166136261U;
+	INT	i;
+
+	if ( !cf_find(text, len, key, 0, p_v, p_vlen) ) {
+		*p_v = NULL;
+		*p_vlen = 0;
+		return 1;			/* no line */
+	}
+	for ( i = 0; i < *p_vlen; i++ ) {
+		h = ( h ^ (*p_v)[i] ) * 16777619U;
+	}
+	return ( h == 1 ) ? 2 : h;
+}
+
+/* SOUND_OUT and SOUND_KEEP taken; when 'changed' only, only a line that is not the one taken last */
+LOCAL void snd_out_conf( CONST UB *text, INT len, BOOL changed )
+{
+	CONST UB	*v;
+	INT		n;
+	UW		sum;
+
+	/* the output the sound plays on (include/ts/snd.h); no line leaves it as it is */
+	sum = line_sum(text, len, "SOUND_OUT", &v, &n);
+	if ( !changed || sum != snd_out_last ) {
+		snd_out_last = sum;
+		if ( v != NULL && n > 0 ) {
+			UB	*id = (UB *)Kmalloc((SZ)n + 1);
+
+			if ( id == NULL ) {
+				tm_printf((UB *)"settings: no memory for SOUND_OUT\n");
+				snd_out_last = 0;	/* taken again at the next write */
+			} else {
+				knl_memcpy(id, v, (SZ)n);
+				id[n] = 0;
+				(void)knl_snd_select(id);
+				Kfree(id);
+			}
+		}
+	}
+	/* whether the stream is kept going in silence; no line leaves it as it is */
+	sum = line_sum(text, len, "SOUND_KEEP", &v, &n);
+	if ( !changed || sum != snd_keep_last ) {
+		char	kv[CF_VAL_MAX];
+
+		snd_keep_last = sum;
+		if ( cf_get(text, len, "SOUND_KEEP", 0, kv, sizeof(kv)) && kv[0] != 0 ) {
+			(void)knl_snd_keep(cf_num(kv, 0) != 0);	/* a number: no longer than a value */
+		}
+	}
+}
+
 /* The mixer's lines taken; when 'changed' only, only when they are not those last kept or taken */
 LOCAL void snd_conf( CONST UB *text, INT len, BOOL changed )
 {
@@ -769,14 +834,7 @@ LOCAL ER dev_conf_apply( BOOL watched )
 
 		if ( b >= 0 || l >= 0 ) knl_pm_policy(b, l);
 	}
-	/* the output the sound plays on (include/ts/snd.h); no line leaves it as it is */
-	if ( cf_get(text, len, "SOUND_OUT", 0, v, sizeof(v)) && v[0] != 0 ) {
-		(void)knl_snd_select((CONST UB *)v);
-	}
-	/* whether the stream is kept going in silence; no line: it is let stop */
-	if ( cf_get(text, len, "SOUND_KEEP", 0, v, sizeof(v)) && v[0] != 0 ) {
-		(void)knl_snd_keep(cf_num(v, 0) != 0);
-	}
+	snd_out_conf(text, len, watched);
 	snd_conf(text, len, watched);
 	if ( cf_get(text, len, "KBTYPE", 0, v, sizeof(v)) ) {
 		(void)knl_look_setting(LK_KBD_US, ( cf_num(v, 0x41) == 0x40 ) ? 1 : 0);
@@ -919,7 +977,10 @@ EXPORT void knl_sys_clear_start( CONST char *path )
 			continue;		/* on another volume, emptied as that one is attached */
 		}
 		if ( om_obj_links_set(&u, NULL, 0) >= E_OK ) {
-			tm_printf((UB *)"uconf: %s emptied at the start\n", r.name);
+			UB	*nm = knl_ob_name(&u, NULL, NULL);
+
+			tm_printf((UB *)"uconf: %s emptied at the start\n", ( nm != NULL ) ? nm : (UB *)"");
+			if ( nm != NULL ) Kfree(nm);
 		}
 	}
 	if ( text != NULL ) Kfree(text);
@@ -929,19 +990,42 @@ EXPORT void knl_sys_clear_start( CONST char *path )
 
 #define WATCH_PRI	30		/* low, and within 1..CNF_MAX_TSKPRI: beyond it the task is not made */
 
+#define WATCH_RETRY	10		/* rounds of 200 ms: an object whose disk is out looked for again every 2 s */
+
 LOCAL ID	watch_tsk = 0;
 
+/* Settings object u watched at port: its key, 0 when it cannot be */
+LOCAL ID conf_watch_one( CONST TS_UUID *u, ID port )
+{
+	T_OBNTF	req;
+	ID	key;
+
+	knl_memset(&req, 0, sizeof(req));
+	req.events = OB_E_CHANGE | OB_E_DETACH;
+	key = ob_opn_obj(u, OB_OP_ATRRD);
+	if ( key > 0 && ob_ntf_evt(key, 1, &req, port) <= 0 ) {
+		(void)ob_cls_obj(key);
+		key = 0;
+	}
+	return ( key > 0 ) ? key : 0;
+}
+
+/*
+ * The three settings objects watched. Their disk taken out (the system's,
+ * OB_E_DETACH), each key is let go at once so that the volume is not held,
+ * and the objects are looked for again until they are back.
+ */
 LOCAL void conf_watch( INT stacd, void *exinf )
 {
 	CONST char *CONST which[3] = { SYSDEF_CONF_NET, SYSDEF_CONF_USER, SYSDEF_CONF_DEV };
 	CONST char *CONST role[3] = { SYSROLE_CONF_NET, SYSROLE_CONF_USER, SYSROLE_CONF_DEV };
 	TS_UUID	u[3], ch;
 	T_OBCRE	c;
-	T_OBNTF	req;
 	T_OBNTM	m;
 	ID	port = 0, key[3];
 	SZ	asz = 0;
-	INT	i;
+	INT	i, lost_rounds = 0;
+	BOOL	found[3];
 
 	knl_memset(&c, 0, sizeof(c));
 	c.type = OB_T_CHANNEL;
@@ -958,28 +1042,41 @@ LOCAL void conf_watch( INT stacd, void *exinf )
 #if !USE_KTEST
 	(void)so_conf(SO_CONF_APPLY);
 #endif
-	knl_memset(&req, 0, sizeof(req));
-	req.events = OB_E_CHANGE;
 	for ( i = 0; i < 3; i++ ) {
 		key[i] = 0;
-		if ( !knl_sys_find(role[i], which[i], &u[i]) ) continue;
-		key[i] = ob_opn_obj(&u[i], OB_OP_ATRRD);
-		if ( key[i] > 0 && ob_ntf_evt(key[i], 1, &req, port) <= 0 ) {
-			(void)ob_cls_obj(key[i]);
-			key[i] = 0;
-		}
+		found[i] = knl_sys_find(role[i], which[i], &u[i]);
+		if ( found[i] ) key[i] = conf_watch_one(&u[i], port);
 	}
 	for ( ;; ) {
 		BOOL	got[3] = { FALSE, FALSE, FALSE };
+		BOOL	lost = FALSE;
 
 		if ( ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) < E_OK || asz == 0 ) {
+			for ( i = 0; i < 3; i++ ) {
+				if ( found[i] && key[i] == 0 ) lost = TRUE;
+			}
+			if ( lost && ++lost_rounds >= WATCH_RETRY ) {
+				lost_rounds = 0;
+				for ( i = 0; i < 3; i++ ) {
+					if ( found[i] && key[i] == 0 && ( key[i] = conf_watch_one(&u[i], port) ) > 0 ) {
+						tm_printf((UB *)"settings: %s watched again\n", which[i]);
+					}
+				}
+			}
 			tk_dly_tsk(200);		/* nothing yet */
 			continue;
 		}
 		/* a write and the cut after it are one change: what else comes soon is the same */
 		for ( ;; ) {
 			for ( i = 0; i < 3; i++ ) {
-				if ( ts_uuid_cmp(&m.uuid, &u[i]) == 0 ) got[i] = TRUE;
+				if ( ts_uuid_cmp(&m.uuid, &u[i]) != 0 ) continue;
+				if ( m.event == OB_E_DETACH ) {
+					if ( key[i] > 0 ) (void)ob_cls_obj(key[i]);
+					key[i] = 0;
+					lost_rounds = 0;
+				} else {
+					got[i] = TRUE;
+				}
 			}
 			tk_dly_tsk(100);
 			if ( ob_rea_rec(port, 0, 0, &m, sizeof(m), &asz) < E_OK || asz == 0 ) break;

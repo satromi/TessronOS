@@ -6,7 +6,8 @@
 # is at 160,80: 「プロセッサ」 is the eighth line of 〈機器情報〉 at 230,303 and 表示 at 706,185; on the page
 # the second line of the processors at 316,205, the roles 普通 and 雑務 at 506,220 and 506,251, the role's 設定
 # at 708,355; the first line of the interrupts at 356,467, the processor's field at 604,495 and its 設定 at
-# 708,495; the panel's 確認 at 627,372. Ctrl+E closes.
+# 708,495; the panel that tells it is not allowed stands in the middle of the screen
+# the window is on, its 確認 at 802,429. Ctrl+E closes.
 open 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42
 expect sysenv: ready
 wait 3000
@@ -48,7 +49,7 @@ click 708 495
 expect sysenv: interrupts of nvmea to 2
 wait 800
 shot cpu_irq
-click 627 372
+click 802 429
 wait 500
 key 08 01
 expect sysenv: closed

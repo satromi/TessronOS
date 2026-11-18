@@ -28,6 +28,8 @@
 #include <ts/tad.h>
 #include <ts/dt.h>
 #include <ts/dtreq.h>
+#include <ts/conf.h>
+#include <ts/ob.h>
 #include "../../application/calendar/cal_tad.h"
 #include "../../application/desktop/desktop.h"
 
@@ -58,6 +60,11 @@ LOCAL void id_of( CONST char *s, TS_UUID *id )
 
 #define ST_SAMPLE	"019a4370-3819-79a2-9758-881e1e0de90a"	/* 仮身サンプル */
 
+LOCAL void set_appl( T_VOBJ *v, CONST char *s )
+{
+	(void)tad_vobj_set(v, TAD_W_APPLIST, (CONST UB *)s, -1);
+}
+
 LOCAL BOOL same_z( CONST UB *a, CONST char *b )
 {
 	INT	i;
@@ -74,7 +81,7 @@ LOCAL BOOL same_z( CONST UB *a, CONST char *b )
 LOCAL void test_label( void )
 {
 	T_VOBJ		*v;
-	UB		buf[OM_LOOK_TEXT], want[OM_LOOK_TEXT];
+	UB		buf[512], want[512];	/* room for the whole label of these links */
 	TS_TIME		t;
 	TS_TM		tm;
 	CONST UW	*px = NULL;
@@ -82,9 +89,9 @@ LOCAL void test_label( void )
 	CONST char	*head = "仮身サンプル : 資料 (仮身一覧)";
 
 	if ( !ready ) KT_SKIP("no records on the disk");
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	if ( v == NULL ) KT_SKIP("no memory");
-	knl_memset(v, 0, sizeof(*v));
+	tad_vobj_clear(v);
 	id_of(ST_SAMPLE, &v->target);
 	v->disp = TAD_D_NAME;
 	KT_ASSERT(om_store_label(v, buf, sizeof(buf)) > 0);
@@ -92,7 +99,7 @@ LOCAL void test_label( void )
 
 	/* the relationship, the program and the date */
 	v->disp = TAD_D_NAME | TAD_D_ROLE | TAD_D_TYPE | TAD_D_UPDATE;
-	knl_strcpy((char *)v->relationship, "資料");
+	(void)tad_vobj_set(v, TAD_W_REL, (CONST UB *)"資料", -1);
 	KT_ASSERT(om_store_label(v, buf, sizeof(buf)) > 0);
 	/* updateDate 2026-01-25T04:43:22.199Z, in the system's time zone */
 	knl_memset(&tm, 0, sizeof(tm));
@@ -109,10 +116,10 @@ LOCAL void test_label( void )
 	KT_ASSERT_EQ(om_store_label(v, buf, sizeof(buf)), 0);
 
 	/* an object with no applist of its own: the program the link names */
-	knl_memset(v, 0, sizeof(*v));
+	tad_vobj_clear(v);
 	id_of("019a0000-0000-7000-8000-000000000001", &v->target);
 	v->disp = TAD_D_TYPE;
-	knl_strcpy((char *)v->applist,
+	set_appl(v,
 		   "{&quot;basic-text-editor&quot;:{&quot;name&quot;:&quot;基本文章編集&quot;,&quot;defaultOpen&quot;:true}}");
 	KT_ASSERT(om_store_label(v, buf, sizeof(buf)) > 0);
 	KT_ASSERT(same_z(buf, " (基本文章編集)"));
@@ -120,10 +127,10 @@ LOCAL void test_label( void )
 	KT_ASSERT(same_z(want, "basic-text-editor"));
 
 	/* 起動アプリの固定: the link's own program, whatever the object says */
-	knl_memset(v, 0, sizeof(*v));
+	tad_vobj_clear(v);
 	id_of(ST_SAMPLE, &v->target);
 	v->disp = TAD_D_TYPE;
-	knl_strcpy((char *)v->applist,
+	set_appl(v,
 		   "{&quot;basic-figure-editor&quot;:{&quot;name&quot;:&quot;基本図形編集&quot;,"
 		   "&quot;defaultOpen&quot;:true,&quot;defaultOpenLock&quot;:true}}");
 	KT_ASSERT(om_store_label(v, buf, sizeof(buf)) > 0);
@@ -131,17 +138,18 @@ LOCAL void test_label( void )
 	KT_ASSERT(om_link_default_app(v, want, sizeof(want)) > 0);
 	KT_ASSERT(same_z(want, "basic-figure-editor"));
 	/* not fixed: the object's own */
-	knl_strcpy((char *)v->applist,
+	set_appl(v,
 		   "{&quot;basic-figure-editor&quot;:{&quot;name&quot;:&quot;基本図形編集&quot;,&quot;defaultOpen&quot;:true}}");
 	KT_ASSERT(om_link_default_app(v, want, sizeof(want)) > 0);
 	KT_ASSERT(same_z(want, "virtual-object-list"));
 
 	/* the icon beside the record, 32 by 32 */
-	knl_memset(v, 0, sizeof(*v));
+	tad_vobj_clear(v);
 	id_of(ST_SAMPLE, &v->target);
 	KT_ASSERT_ER(om_store_icon(v, &px, &w, &h), E_OK);
 	KT_ASSERT(px != NULL && w == 32 && h == 32);
 	om_store_icon_done(px);
+	tad_vobj_clear(v);
 	Kfree(v);
 }
 
@@ -281,7 +289,8 @@ LOCAL void test_copy_new( void )
 	TS_UUID	base, nid;
 	UB	*meta, *ic;
 	SZ	len = 0, ilen = 0;
-	UB	names[2][OM_APP_NAME];
+	UB	**names;
+	INT	nn = 0;
 	char	us[40];
 	UB	rec[96];
 	SZ	rl = 0;
@@ -300,7 +309,9 @@ LOCAL void test_copy_new( void )
 		KT_ASSERT(!holds(meta, len, "\"file\""));
 		Kfree(meta);
 	}
-	KT_ASSERT(om_store_apps(&nid, names, 2) >= 1);
+	names = om_store_apps(&nid, &nn);
+	KT_ASSERT(names != NULL && nn >= 1);
+	om_apps_free(names, nn);
 
 	/* its applist written anew (付箋指定): two programs, the second the one it opens with */
 	{
@@ -309,8 +320,10 @@ LOCAL void test_copy_new( void )
 		UB		aid[OM_APP_ID];
 
 		KT_ASSERT_ER(om_store_set_apps(&nid, ids, nms, 2, 1), E_OK);
-		KT_ASSERT_EQ(om_store_apps(&nid, names, 2), 2);
-		KT_ASSERT(names[0][0] == 0xE5 && names[1][0] == 0xE5);
+		names = om_store_apps(&nid, &nn);
+		KT_ASSERT_EQ(nn, 2);
+		KT_ASSERT(names != NULL && nn == 2 && names[0][0] == 0xE5 && names[1][0] == 0xE5);
+		om_apps_free(names, nn);
 		KT_ASSERT(om_store_default_app(&nid, aid, sizeof(aid)) > 0);
 		KT_ASSERT(aid[6] == 'f');		/* basic-figure-editor */
 		KT_ASSERT(om_store_app_id(&nid, 0, aid, sizeof(aid)) > 0);
@@ -319,13 +332,43 @@ LOCAL void test_copy_new( void )
 		KT_ASSERT_ER(om_store_set_default_app(&nid, (CONST UB *)"basic-text-editor"), E_OK);
 		KT_ASSERT(om_store_default_app(&nid, aid, sizeof(aid)) > 0);
 		KT_ASSERT(aid[6] == 't');
-		KT_ASSERT_EQ(om_store_apps(&nid, names, 2), 2);
+		names = om_store_apps(&nid, &nn);
+		KT_ASSERT_EQ(nn, 2);
+		om_apps_free(names, nn);
 		KT_ASSERT_ER(om_store_set_default_app(&nid, (CONST UB *)"no-such-program"), E_NOEXS);
 		KT_ASSERT_ER(om_store_set_default_app(&nid, (CONST UB *)"basic-figure-editor"), E_OK);
 		KT_ASSERT(om_store_default_app(&nid, aid, sizeof(aid)) > 0);
 		KT_ASSERT(aid[6] == 'f');
 		KT_ASSERT_ER(om_store_set_apps(&nid, ids, nms, 1, 0), E_OK);
-		KT_ASSERT_EQ(om_store_apps(&nid, names, 2), 1);
+		names = om_store_apps(&nid, &nn);
+		KT_ASSERT_EQ(nn, 1);
+		om_apps_free(names, nn);
+	}
+
+	/*
+	 * A program shown under a name of 100 letters (300 bytes) with '"'
+	 * and '\' in it: written escaped, read back whole
+	 */
+	{
+		static CONST char	k3[] = "長";
+		CONST UB	*ids[1] = { (CONST UB *)"basic-text-editor" };
+		CONST UB	*nms[1];
+		UB		*ln = (UB *)Kmalloc(400);
+		INT		j, m = 0;
+
+		KT_ASSERT(ln != NULL);
+		if ( ln != NULL ) {
+			for ( j = 0; j < 100; j++ ) {
+				ln[m++] = (UB)k3[0]; ln[m++] = (UB)k3[1]; ln[m++] = (UB)k3[2];
+			}
+			ln[m++] = '"'; ln[m++] = 0x5C; ln[m] = 0;
+			nms[0] = ln;
+			KT_ASSERT_ER(om_store_set_apps(&nid, ids, nms, 1, 0), E_OK);
+			names = om_store_apps(&nid, &nn);
+			KT_ASSERT(names != NULL && nn == 1 && same_z(names[0], (CONST char *)ln));
+			om_apps_free(names, nn);
+			Kfree(ln);
+		}
 	}
 
 	/* its icon, the template's */
@@ -376,7 +419,7 @@ LOCAL void test_open_app( void )
 	UB		aid[OM_APP_ID];
 
 	if ( !ready ) KT_SKIP("no records on the disk");
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ) * 2);
+	v = (T_VOBJ *)Kcalloc(2, sizeof(T_VOBJ));
 	KT_ASSERT(v != NULL);
 	if ( v == NULL ) return;
 	w = v + 1;
@@ -384,7 +427,8 @@ LOCAL void test_open_app( void )
 	KT_ASSERT_ER(om_store_copy(&base, (CONST UB *)"起動の試験", FALSE, &nid), E_OK);
 	KT_ASSERT_ER(om_store_set_apps(&nid, ids, nms, 2, 0), E_OK);
 	/* two links to it with no applist of their own, as the desktop makes them */
-	knl_memset(v, 0, sizeof(T_VOBJ) * 2);
+	tad_vobj_clear(v);
+	tad_vobj_clear(v + 1);
 	v->target = nid;
 	w->target = nid;
 
@@ -402,7 +446,7 @@ LOCAL void test_open_app( void )
 	/* fixed: to the one it opens with now, and so it stays */
 	KT_ASSERT_ER(om_link_lock(v, TRUE), E_OK);
 	KT_ASSERT(om_link_locked(v));
-	KT_ASSERT(v->applist[0] == '{');
+	KT_ASSERT(TAD_VS(v->vapplist)[0] == '{');
 	KT_ASSERT(opens_with(v, "basic-text-editor"));
 	KT_ASSERT_ER(om_link_ran(v, (CONST UB *)"basic-figure-editor"), E_OK);
 	KT_ASSERT(om_store_default_app(&nid, aid, sizeof(aid)) > 0 && same_z(aid, "basic-text-editor"));
@@ -418,25 +462,27 @@ LOCAL void test_open_app( void )
 	KT_ASSERT(opens_with(v, "basic-figure-editor"));
 
 	/* a link carrying an old copy of the applist is fixed to what the object opens with now */
-	knl_strcpy((char *)w->applist,
+	set_appl(w,
 		   "{\"basic-text-editor\":{\"name\":\"基本文章編集\",\"defaultOpen\":true},"
 		   " \"basic-figure-editor\":{\"name\":\"基本図形編集\",\"defaultOpen\":false,\"defaultOpenLock\":true}}");
 	KT_ASSERT(!om_link_locked(w));
 	KT_ASSERT_ER(om_link_lock(w, TRUE), E_OK);
 	KT_ASSERT(om_link_locked(w));
 	KT_ASSERT(opens_with(w, "basic-figure-editor"));
-	KT_ASSERT(same_z(w->applist,
+	KT_ASSERT(same_z(TAD_VS(w->vapplist),
 		   "{\"basic-text-editor\":{\"name\":\"基本文章編集\",\"defaultOpen\":false},"
 		   "\"basic-figure-editor\":{\"name\":\"基本図形編集\",\"defaultOpen\":true,\"defaultOpenLock\":true}}"));
 
 	/* an object whose applist names nothing, and a link with none: nothing to fix */
 	KT_ASSERT_ER(om_store_set_apps(&nid, ids, nms, 0, -1), E_OK);
-	knl_memset(v, 0, sizeof(T_VOBJ));
+	tad_vobj_clear(v);
 	v->target = nid;
 	KT_ASSERT_ER(om_link_lock(v, TRUE), E_NOEXS);
 	KT_ASSERT(!om_link_locked(v));
 
 	KT_ASSERT_ER(ob_del_obj(&nid), E_OK);
+	tad_vobj_clear(v);
+	tad_vobj_clear(v + 1);
 	Kfree(v);
 }
 
@@ -460,12 +506,14 @@ LOCAL void test_proc_open( void )
 	T_DTREQ		*rq;
 	T_VOBJ		*v;
 	UB		*el;
+	CONST UB	*w;
 	char		us[40];
-	INT		n, i;
+	INT		n;
+	SZ		cap = 1024;		/* the room of the request's tail */
 
 	if ( !ready ) KT_SKIP("no records on the disk");
-	rq = (T_DTREQ *)Kmalloc(sizeof(T_DTREQ));
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	rq = (T_DTREQ *)Kmalloc(sizeof(T_DTREQ) + cap);
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	el = (UB *)Kmalloc(1024);
 	KT_ASSERT(rq != NULL && v != NULL && el != NULL);
 	if ( rq == NULL || v == NULL || el == NULL ) goto done;
@@ -481,12 +529,14 @@ LOCAL void test_proc_open( void )
 	knl_memset(rq, 0, sizeof(T_DTREQ));
 	rq->req = DT_RQ_OPEN;
 	rq->target = nid;
-	ct_link_req(rq, el, n);
+	KT_ASSERT(ct_link_room(el, n) <= cap);
+	KT_ASSERT_ER(ct_link_req(rq, el, n, (UB *)( rq + 1 ), &rq->tailsz, cap), E_OK);
 	KT_ASSERT(( rq->flags & DT_F_APPLIST ) != 0);
-	KT_ASSERT(rq->text[0] == '{' && rq->text[1] == '"');
-	knl_memset(v, 0, sizeof(T_VOBJ));
+	w = dt_tail_get((CONST UB *)( rq + 1 ), rq->tailsz, DT_TAIL_APPLIST, NULL);
+	KT_ASSERT(w != NULL && w[0] == '{' && w[1] == '"');
+	tad_vobj_clear(v);
 	v->target = rq->target;
-	dt_req_applist(rq, v);
+	KT_ASSERT_ER(dt_req_applist(rq, v), E_OK);
 	KT_ASSERT(om_link_locked(v));
 	KT_ASSERT(opens_with(v, "basic-figure-editor"));
 	/* 実行 from it with 基本文章編集 does not move the object's default, nor the link */
@@ -498,11 +548,11 @@ LOCAL void test_proc_open( void )
 	n += s_copy(el + n, us);
 	n += s_copy(el + n, free_);
 	knl_memset(rq, 0, sizeof(T_DTREQ));
-	ct_link_req(rq, el, n);
+	KT_ASSERT_ER(ct_link_req(rq, el, n, (UB *)( rq + 1 ), &rq->tailsz, cap), E_OK);
 	KT_ASSERT(( rq->flags & DT_F_APPLIST ) != 0);
-	knl_memset(v, 0, sizeof(T_VOBJ));
+	tad_vobj_clear(v);
 	v->target = nid;
-	dt_req_applist(rq, v);
+	KT_ASSERT_ER(dt_req_applist(rq, v), E_OK);
 	KT_ASSERT(!om_link_locked(v));
 	KT_ASSERT(opens_with(v, "basic-text-editor"));
 
@@ -511,20 +561,240 @@ LOCAL void test_proc_open( void )
 	n += s_copy(el + n, us);
 	n += s_copy(el + n, "\"/>");
 	knl_memset(rq, 0, sizeof(T_DTREQ));
-	ct_link_req(rq, el, n);
+	KT_ASSERT_ER(ct_link_req(rq, el, n, (UB *)( rq + 1 ), &rq->tailsz, cap), E_OK);
 	KT_ASSERT_EQ(rq->flags & DT_F_APPLIST, 0U);
-	knl_memset(v, 0, sizeof(T_VOBJ));
+	KT_ASSERT_EQ(rq->tailsz, 0U);
+	tad_vobj_clear(v);
 	v->target = nid;
-	for ( i = 0; i < 8; i++ ) v->applist[i] = 'x';	/* what was there is not left */
-	dt_req_applist(rq, v);
-	KT_ASSERT_EQ(v->applist[0], 0);
+	set_appl(v, "xxxxxxxx");	/* what was there is not left */
+	KT_ASSERT_ER(dt_req_applist(rq, v), E_OK);
+	KT_ASSERT_EQ(v->vapplist_len, 0);
 	KT_ASSERT(opens_with(v, "basic-text-editor"));
 
 	KT_ASSERT_ER(ob_del_obj(&nid), E_OK);
 done:
 	if ( rq != NULL ) Kfree(rq);
-	if ( v != NULL ) Kfree(v);
+	if ( v != NULL ) {
+		tad_vobj_clear(v);
+		Kfree(v);
+	}
 	if ( el != NULL ) Kfree(el);
+}
+
+/*
+ * 固有データ (design 11.3): the "data" of an applist entry is given to the
+ * program started as it is. The link's own entry comes first, whether
+ * or not the link is fixed to its program; the object's otherwise. Data
+ * longer than DT_DATA_MAX - 1 bytes is left out whole. A link fixed or
+ * let go (om_link_lock) keeps its own data; a link of a process's
+ * window carries it with its request. A device object's applist names
+ * システム環境設定 with the device's page, and a 写し of a page has
+ * only the lines of that page's table read from it (cf_copy_lines).
+ */
+LOCAL ER make_with( CONST char *json, TS_UUID *p_u )
+{
+	T_OBCRE	c;
+	INT	n = 0;
+
+	while ( json[n] != 0 ) n++;
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.json = (CONST UB *)json;
+	c.jsonsz = (SZ)n;
+	return ob_cre_obj(&c, p_u);
+}
+
+LOCAL BOOL has_word( CONST UB *b, SZ size, CONST char *w )
+{
+	INT	i, k;
+
+	for ( i = 0; i < (INT)size; i++ ) {
+		for ( k = 0; w[k] != 0 && i + k < (INT)size && b[i + k] == (UB)w[k]; k++ ) ;
+		if ( w[k] == 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
+LOCAL void test_app_data( void )
+{
+	CONST char	*copy = "# システム環境設定の写し\nSCHEME\t2\nWALLPAPER\t0\nCPU_MHZ\t2200\nWATCHDOG\t30\n"
+				"WIN_ROUND 6\nNET_ADAPTER\tauto\nDISPLAY.0a1b2c\ton 1024x768 right 0\n"
+				"DISPLAY.zz\toff\nSIZE\t1280x800\nSYSUP\t1\nSYSTEMFACE\tx\n";
+	INT		held0 = tad_vobj_held();
+	T_VOBJ		*v;
+	UB		*js, *big, *d, out[256], *meta;
+	TS_UUID		nid;
+	SZ		size = 0, dl = 0;
+	INT		n, i;
+
+	if ( !ready ) KT_SKIP("no records on the disk");
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
+	js = (UB *)Kmalloc(2048);
+	big = (UB *)Kmalloc(8192);
+	KT_ASSERT(v != NULL && js != NULL && big != NULL);
+	if ( v == NULL || js == NULL || big == NULL ) goto done;
+
+	/* the object's data, three hundred bytes of it, given whole */
+	n = s_copy(js, "{\"name\":\"固有データの試験\",\"relationship\":[],\"linktype\":false,\"refCount\":0,"
+		       "\"applist\":{\"basic-text-editor\":{\"name\":\"基本文章編集\",\"defaultOpen\":true,\"data\":\"");
+	for ( i = 0; i < 300; i++ ) js[n++] = (UB)( 'a' + i % 26 );
+	n += s_copy(js + n, "\"},\"basic-figure-editor\":{\"name\":\"基本図形編集\"}}}");
+	KT_ASSERT_ER(make_with((CONST char *)js, &nid), E_OK);
+	v->target = nid;
+	d = om_link_app_data(v, (CONST UB *)"basic-text-editor", &dl);
+	KT_ASSERT(d != NULL && dl == 300 && d[299] == (UB)( 'a' + 299 % 26 ) && d[300] == 0);
+	if ( d != NULL ) Kfree(d);
+	/* and to no other program */
+	KT_ASSERT(om_link_app_data(v, (CONST UB *)"basic-figure-editor", &dl) == NULL && dl == 0);
+
+	/* the link's own first, fixed or not; its quotes and backslashes read */
+	(void)tad_vobj_set(v, TAD_W_APPLIST, (CONST UB *)
+		   "{\"basic-text-editor\":{\"name\":\"基本文章編集\",\"defaultOpen\":true,\"data\":\"of-link \\\"q\\\" \\\\\"}}", -1);
+	KT_ASSERT(!om_link_locked(v));
+	d = om_link_app_data(v, (CONST UB *)"basic-text-editor", &dl);
+	KT_ASSERT(d != NULL && same_z(d, "of-link \"q\" \\"));
+	if ( d != NULL ) Kfree(d);
+	/* fixed and let go: the link keeps its data, and opens as before */
+	KT_ASSERT_ER(om_link_lock(v, TRUE), E_OK);
+	KT_ASSERT(om_link_locked(v));
+	KT_ASSERT(opens_with(v, "basic-text-editor"));
+	d = om_link_app_data(v, (CONST UB *)"basic-text-editor", &dl);
+	KT_ASSERT(d != NULL && same_z(d, "of-link \"q\" \\"));
+	if ( d != NULL ) Kfree(d);
+	KT_ASSERT_ER(om_link_lock(v, FALSE), E_OK);
+	KT_ASSERT(!om_link_locked(v));
+	d = om_link_app_data(v, (CONST UB *)"basic-text-editor", &dl);
+	KT_ASSERT(d != NULL && same_z(d, "of-link \"q\" \\"));
+	if ( d != NULL ) Kfree(d);
+	/* a link with no data of its own, fixed: the object's whole list, its data with it */
+	(void)tad_vobj_set(v, TAD_W_APPLIST, NULL, 0);
+	KT_ASSERT_ER(om_link_lock(v, TRUE), E_OK);
+	KT_ASSERT(om_link_locked(v));
+	d = om_link_app_data(v, (CONST UB *)"basic-text-editor", &dl);
+	KT_ASSERT(d != NULL && dl == 300);
+	if ( d != NULL ) Kfree(d);
+	/* data alone, no entry fixed: the data is the link's, the object's program opens */
+	(void)tad_vobj_set(v, TAD_W_APPLIST, (CONST UB *)"{\"basic-text-editor\":{\"data\":\"only\"}}", -1);
+	KT_ASSERT(!om_link_locked(v));
+	KT_ASSERT(opens_with(v, "basic-text-editor"));
+	d = om_link_app_data(v, (CONST UB *)"basic-text-editor", &dl);
+	KT_ASSERT(d != NULL && same_z(d, "only"));
+	if ( d != NULL ) Kfree(d);
+
+	/*
+	 * a link's applist of several kilobytes -- a hundred programs, each with
+	 * data -- fixed and let go whole, every entry's data kept
+	 */
+	n = s_copy(big, "{");
+	for ( i = 0; i < 100; i++ ) {
+		n += s_copy(big + n, ( i > 0 ) ? ",\"prog-" : "\"prog-");
+		big[n++] = (UB)( '0' + i / 10 );
+		big[n++] = (UB)( '0' + i % 10 );
+		n += s_copy(big + n, "\":{\"name\":\"プログラム\",\"data\":\"page-");
+		big[n++] = (UB)( '0' + i / 10 );
+		big[n++] = (UB)( '0' + i % 10 );
+		n += s_copy(big + n, "\"}");
+	}
+	n += s_copy(big + n, "}");
+	KT_ASSERT(n > 5000);
+	(void)tad_vobj_set(v, TAD_W_APPLIST, big, n);
+	KT_ASSERT_EQ(v->vapplist_len, n);
+	d = om_link_app_data(v, (CONST UB *)"prog-99", &dl);
+	KT_ASSERT(d != NULL && same_z(d, "page-99"));
+	if ( d != NULL ) Kfree(d);
+	KT_ASSERT_ER(om_link_lock(v, TRUE), E_OK);	/* the object's list, the link's data on its entries */
+	d = om_link_app_data(v, (CONST UB *)"basic-text-editor", &dl);
+	KT_ASSERT(d != NULL && dl == 300);
+	if ( d != NULL ) Kfree(d);
+	d = om_link_app_data(v, (CONST UB *)"prog-99", &dl);		/* and the link's own entries that give data */
+	KT_ASSERT(d != NULL && same_z(d, "page-99"));
+	if ( d != NULL ) Kfree(d);
+	ob_del_obj(&nid);
+	/* an object whose list is the link's own: fixed, all of it kept */
+	KT_ASSERT_ER(make_with("{\"name\":\"固有データの試験２\",\"relationship\":[],\"refCount\":0}", &nid), E_OK);
+	tad_vobj_clear(v);
+	v->target = nid;
+	(void)tad_vobj_set(v, TAD_W_APPLIST, big, n);
+	KT_ASSERT_ER(om_link_lock(v, TRUE), E_OK);
+	KT_ASSERT(om_link_locked(v));
+	KT_ASSERT(v->vapplist_len >= n);
+	for ( i = 0; i < 100; i += 33 ) {
+		UB	app[8] = "prog-00", want[8] = "page-00";
+
+		app[5] = want[5] = (UB)( '0' + i / 10 );
+		app[6] = want[6] = (UB)( '0' + i % 10 );
+		d = om_link_app_data(v, app, &dl);
+		KT_ASSERT(d != NULL && same_z(d, (CONST char *)want));
+		if ( d != NULL ) Kfree(d);
+	}
+	KT_ASSERT_ER(ob_del_obj(&nid), E_OK);
+
+	/* a device: the screen's object opens システム環境設定's page of the screen */
+	meta = om_obj_meta(&ob_uuid_display, &size);
+	KT_ASSERT(meta != NULL);
+	if ( meta != NULL ) {
+		tad_vobj_clear(v);
+		v->target = ob_uuid_display;
+		KT_ASSERT(opens_with(v, "tessronos-sysenv"));
+		d = om_link_app_data(v, (CONST UB *)"tessronos-sysenv", &dl);
+		KT_ASSERT(d != NULL && same_z(d, "screen"));
+		if ( d != NULL ) Kfree(d);
+		Kfree(meta);
+	}
+
+	/* a 写し: the lines of the page's table, none of what is the machine's own */
+	n = 0;
+	while ( copy[n] != 0 ) n++;
+	KT_ASSERT(cf_copy_lines((CONST UB *)copy, n, "colour", out, sizeof(out)) > 0);
+	KT_ASSERT(same_z(out, "SCHEME\t2\n"));
+	KT_ASSERT(cf_copy_lines((CONST UB *)copy, n, "screen", out, sizeof(out)) > 0);
+	KT_ASSERT(same_z(out, "DISPLAY.0a1b2c\ton 1024x768 right 0\nSIZE\t1280x800\n"));
+	KT_ASSERT(cf_copy_lines((CONST UB *)copy, n, "window", out, sizeof(out)) > 0);
+	KT_ASSERT(same_z(out, "WIN_ROUND\t6\n"));
+	KT_ASSERT(cf_copy_lines((CONST UB *)copy, n, "font", out, sizeof(out)) > 0);
+	KT_ASSERT(same_z(out, "SYSTEMFACE\tx\n"));
+	KT_ASSERT_EQ(cf_copy_lines((CONST UB *)copy, n, "power", out, sizeof(out)), 0);
+	KT_ASSERT_EQ(cf_copy_lines((CONST UB *)copy, n, "cpu", out, sizeof(out)), 0);
+	KT_ASSERT_EQ(cf_copy_lines((CONST UB *)copy, n, "network", out, sizeof(out)), 0);
+	KT_ASSERT(!cf_copy_allowed("power", "WATCHDOG") && !cf_copy_allowed("power", "CPU_MHZ"));
+	KT_ASSERT(!cf_copy_allowed("cpu", "CPU_CHORE") && !cf_copy_allowed("screen", "NET_ADAPTER"));
+	KT_ASSERT(!cf_copy_allowed("screen", "SYSUP") && !cf_copy_allowed("nosuch", "SCHEME"));
+	KT_ASSERT(cf_copy_allowed("keyboard", "KBTYPE") && cf_copy_allowed("sound", "SOUND_KEEP"));
+	/* ユーザ環境設定's pages: their own sheet's lines, never the person's own (個人属性) */
+	KT_ASSERT(cf_copy_allowed("user.pointer", "PD_SPEED") && !cf_copy_allowed("user.key", "PD_SPEED"));
+	KT_ASSERT(cf_copy_allowed("user.display", "TITLE_SIZE") && cf_copy_allowed("user.editkeys", "EDIT_KEYS"));
+	KT_ASSERT(!cf_copy_allowed("user.pointer", "USER_NAME") && !cf_copy_allowed("user.key", "KANA_INPUT"));
+	KT_ASSERT_EQ(cf_copy_lines((CONST UB *)copy, n, "screen", out, 8), -1);
+
+	/* a 写し opened: システム環境設定, given the page as the entry's data */
+	KT_ASSERT_ER(make_with("{\"name\":\"システム環境設定（配色）の写し\",\"relationship\":[],\"refCount\":0,"
+			       "\"applist\":{\"tessronos-sysenv\":{\"name\":\"システム環境設定\",\"defaultOpen\":true,"
+			       "\"data\":\"colour\"}},\"tessronos\":{\"confcopy\":{\"page\":\"colour\",\"machine\":\"ktest\"}}}",
+			       &nid), E_OK);
+	tad_vobj_clear(v);
+	v->target = nid;
+	KT_ASSERT(opens_with(v, "tessronos-sysenv"));
+	d = om_link_app_data(v, (CONST UB *)"tessronos-sysenv", &dl);
+	KT_ASSERT(d != NULL && same_z(d, "colour"));
+	if ( d != NULL ) Kfree(d);
+	meta = om_obj_meta(&nid, &size);
+	KT_ASSERT(meta != NULL);
+	if ( meta != NULL ) {
+		KT_ASSERT(has_word(meta, size, "\"confcopy\""));
+		KT_ASSERT(has_word(meta, size, "\"access\""));
+		Kfree(meta);
+	}
+	KT_ASSERT_ER(ob_del_obj(&nid), E_OK);
+done:
+	if ( v != NULL ) {
+		tad_vobj_clear(v);
+		tad_vobj_clear(v);
+		Kfree(v);
+	}
+	if ( js != NULL ) Kfree(js);
+	if ( big != NULL ) Kfree(big);
+	KT_ASSERT_EQ(tad_vobj_held(), held0);
 }
 
 LOCAL void test_delete( void )
@@ -600,8 +870,8 @@ LOCAL void many_name( UB *out, INT i )
 /* Named and given its icon, objects 0 to n - 1, twice: the time of each pass */
 LOCAL void many_passes( CONST TS_UUID *ids, INT n, CONST char *what )
 {
-	T_VOBJ		v;
-	UB		got[TAD_NAME_MAX];
+	T_VOBJ		v = { .recno = 0 };
+	UB		got[96];		/* a label: what fits is enough here, it is only drawn */
 	CONST UW	*px;
 	INT		i, pass, w, h, used, docs, max;
 	UW		ev0, ev1;
@@ -614,7 +884,7 @@ LOCAL void many_passes( CONST TS_UUID *ids, INT n, CONST char *what )
 		for ( i = 0; i < n; i++ ) {
 			knl_memset(&v, 0, sizeof(v));
 			v.target = ids[i];
-			(void)om_store_label(&v, got, TAD_NAME_MAX);
+			(void)om_store_label(&v, got, (INT)sizeof(got));
 			if ( om_store_icon(&v, &px, &w, &h) >= E_OK ) om_store_icon_done(px);
 		}
 		tk_get_otm(&t1);
@@ -631,9 +901,9 @@ LOCAL void test_many( void )
 {
 	TS_UUID		base, extra, doc;
 	TS_UUID		*ids;
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	T_TAD		*held;
-	UB		want[TAD_NAME_MAX], got[TAD_NAME_MAX];
+	UB		want[64], *got;
 	CONST UW	*px, *px2;
 	INT		made, i, w, h, bad = 0, used, docs, max;
 	UW		ev0, ev1;
@@ -668,9 +938,11 @@ LOCAL void test_many( void )
 	many_passes(ids, ( made < MANY_SMALL ) ? made : MANY_SMALL, "held to 100");
 	for ( i = 0; i < made; i++ ) {
 		many_name(want, i);
-		if ( om_store_name(&ids[i], got, TAD_NAME_MAX) <= 0 || !same_z(got, (CONST char *)want) ) {
+		got = om_store_name_dup(&ids[i], NULL);
+		if ( got == NULL || !same_z(got, (CONST char *)want) ) {
 			bad++;
 		}
+		if ( got != NULL ) Kfree(got);
 	}
 	KT_ASSERT_EQ(bad, 0);
 	om_store_stat(&used, &docs, &max, &ev1, NULL, NULL);
@@ -733,7 +1005,7 @@ LOCAL BOOL pic_is( CONST UW *px, INT w, INT h, UW colour )
 LOCAL void test_pictures( void )
 {
 	TS_UUID		base, ids[PIC_N];
-	UB		href[PIC_N][64], want[TAD_NAME_MAX];
+	UB		href[PIC_N][64], want[64];
 	UW		*fill;
 	CONST UW	*px, *held, *again;
 	INT		made, i, k, w, h, hw, hh, n, bad = 0, pass;
@@ -796,8 +1068,131 @@ LOCAL void test_pictures( void )
 	Kfree(fill);
 }
 
+/*
+ * Names longer than any table of the store once held (64 bytes) and
+ * names with what JSON escapes. A name of 100 letters of Japanese (300
+ * bytes) is read whole by om_store_name, om_store_name_dup and
+ * om_store_info_v; om_store_name with less room puts what fits, cut at
+ * a whole letter, and still answers the whole length. A name with '"', '\', a tab, a newline
+ * and a control letter is written escaped as JSON writes it and read
+ * back as it was, from the cache and from the disk. The cache follows
+ * every rename, and a copy (om_store_copy) keeps a long name and the
+ * special letters whole.
+ */
+#define LN_LETTERS	100
+
+LOCAL BOOL same_n( CONST UB *a, CONST UB *b, SZ n )
+{
+	SZ	i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( a[i] != b[i] ) return FALSE;
+	}
+	return TRUE;
+}
+
+LOCAL SZ z_len( CONST UB *s )
+{
+	SZ	n = 0;
+
+	while ( s[n] != 0 ) n++;
+	return n;
+}
+
+LOCAL void test_long_name( void )
+{
+	static CONST char	kana[] = "あいうえおかきくけこ";	/* ten letters of three bytes */
+	static CONST char	odd[] = "KT\"引用\"と\\逆\tタブ\n改行\x01制御/";
+	static CONST char	odd_json[] = "\"KT\\\"引用\\\"と\\\\逆\\tタブ\\n改行\\u0001制御/\"";
+	TS_UUID		base, a, b, c;
+	UB		*nm, *got, *meta, small[10];
+	T_OMINFOV	iv;
+	SZ		nl, len = 0, glen = 0;
+	INT		i, r;
+
+	if ( !ready ) KT_SKIP("no records on the disk");
+	nm = (UB *)Kmalloc(LN_LETTERS * 3 + 1);
+	got = (UB *)Kmalloc(LN_LETTERS * 3 + 64);
+	KT_ASSERT(nm != NULL && got != NULL);
+	if ( nm == NULL || got == NULL ) {
+		if ( nm != NULL ) Kfree(nm);
+		if ( got != NULL ) Kfree(got);
+		return;
+	}
+	for ( i = 0; i < LN_LETTERS; i++ ) {
+		knl_memcpy(nm + i * 3, kana + ( i % 10 ) * 3, 3);
+	}
+	nl = LN_LETTERS * 3;
+	nm[nl] = 0;
+	id_of(ST_TEXT_BASE, &base);
+
+	/* made with the long name: read whole every way */
+	KT_ASSERT_ER(om_store_copy(&base, nm, FALSE, &a), E_OK);
+	r = om_store_name(&a, got, (INT)( nl + 64 ));
+	KT_ASSERT_EQ(r, (INT)nl);
+	KT_ASSERT(z_len(got) == nl && same_n(got, nm, nl));
+	r = om_store_name(&a, small, (INT)sizeof(small));
+	KT_ASSERT_EQ(r, (INT)nl);				/* the whole length, as snprintf answers */
+	KT_ASSERT(z_len(small) == 9 && same_n(small, nm, 9));	/* three whole letters */
+	om_store_forget(&a);					/* and from the disk, not the cache */
+	r = om_store_name(&a, got, (INT)( nl + 64 ));
+	KT_ASSERT_EQ(r, (INT)nl);
+	KT_ASSERT(same_n(got, nm, nl));
+	meta = om_store_name_dup(&a, &glen);
+	KT_ASSERT(meta != NULL);
+	if ( meta != NULL ) {
+		KT_ASSERT(glen == nl && z_len(meta) == nl && same_n(meta, nm, nl));
+		Kfree(meta);
+	}
+	KT_ASSERT_ER(om_store_info_v(&a, &iv), E_OK);
+	KT_ASSERT(iv.name != NULL && z_len(iv.name) == nl && same_n(iv.name, nm, nl));
+	KT_ASSERT(iv.maker != NULL && iv.made != NULL && iv.updated != NULL && iv.accessed != NULL);
+	om_store_info_free(&iv);
+	KT_ASSERT(iv.name == NULL);
+
+	/* renamed to the odd name: escaped on the disk, read back as it was */
+	KT_ASSERT_ER(om_store_rename(&a, (CONST UB *)odd), E_OK);
+	r = om_store_name(&a, got, (INT)( nl + 64 ));
+	KT_ASSERT_EQ(r, (INT)z_len((CONST UB *)odd));
+	KT_ASSERT(same_z(got, odd));
+	meta = om_obj_meta(&a, &len);
+	KT_ASSERT(meta != NULL);
+	if ( meta != NULL ) {
+		KT_ASSERT(holds(meta, len, odd_json));
+		Kfree(meta);
+	}
+	om_store_forget(&a);
+	KT_ASSERT(om_store_name(&a, got, (INT)( nl + 64 )) > 0 && same_z(got, odd));
+	KT_ASSERT_ER(om_store_info_v(&a, &iv), E_OK);
+	KT_ASSERT(iv.name != NULL && same_z(iv.name, odd));
+	om_store_info_free(&iv);
+
+	/* a copy keeps the odd name whole */
+	KT_ASSERT_ER(om_store_copy(&a, NULL, FALSE, &b), E_OK);
+	KT_ASSERT(om_store_name(&b, got, (INT)( nl + 64 )) > 0 && same_z(got, odd));
+	/* and one given the odd name too */
+	KT_ASSERT_ER(om_store_copy(&base, (CONST UB *)odd, FALSE, &c), E_OK);
+	KT_ASSERT(om_store_name(&c, got, (INT)( nl + 64 )) > 0 && same_z(got, odd));
+	(void)om_store_delete(&c);
+
+	/* back to the long name: the cache follows; a copy of it keeps it whole */
+	KT_ASSERT_ER(om_store_rename(&a, nm), E_OK);
+	KT_ASSERT_EQ(om_store_name(&a, got, (INT)( nl + 64 )), (INT)nl);
+	KT_ASSERT(same_n(got, nm, nl));
+	KT_ASSERT_ER(om_store_copy(&a, NULL, FALSE, &c), E_OK);
+	KT_ASSERT_EQ(om_store_name(&c, got, (INT)( nl + 64 )), (INT)nl);
+	KT_ASSERT(same_n(got, nm, nl));
+	(void)om_store_delete(&c);
+
+	(void)om_store_delete(&b);
+	(void)om_store_delete(&a);
+	Kfree(got);
+	Kfree(nm);
+}
+
 EXPORT void ktest_store( void )
 {
+	KT_RUN(test_long_name);
 	KT_RUN(test_open);
 	KT_RUN(test_links);
 	KT_RUN(test_relink);
@@ -808,6 +1203,7 @@ EXPORT void ktest_store( void )
 	KT_RUN(test_copy_new);
 	KT_RUN(test_open_app);
 	KT_RUN(test_proc_open);
+	KT_RUN(test_app_data);
 	KT_RUN(test_many);
 	KT_RUN(test_pictures);
 }

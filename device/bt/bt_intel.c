@@ -38,6 +38,7 @@
 #include <ts/uuid.h>
 #include <ts/bt.h>
 #include "../usb/usbdev.h"
+#include "../../peripheral_kernel/obj/obj.h"
 #include "btint.h"
 
 #define C_INTEL_RESET	0xfc01
@@ -67,7 +68,6 @@
 #define CSS_VERSION_AT	8
 #define CSS_RSA		0x00010000
 
-#define FW_MAX		( 1200 * 1024 )
 #define CMD_TMO		2000
 #define FRAG_TMO	2000
 #define LOAD_TMO	5000
@@ -114,22 +114,26 @@ LOCAL BOOL next_event( BTC *c, INT tmo )
 	UW	due = knl_btx_now() + (UW)tmo;
 
 	for ( ;; ) {
-		while ( c->head != c->tail ) {
-			RINGITEM	*r = &c->ring[c->head];
-			INT		n = r->len;
-			BOOL		whole = FALSE;
+		CONST UB	*b;
+		INT		n;
+		UB		kind;
 
-			if ( c->ev_have + n <= (INT)sizeof(c->ev) ) {
-				knl_memcpy(c->ev + c->ev_have, r->b, n);
-				c->ev_have += n;
-			} else {
-				c->ev_have = 0;
-			}
-			c->head = ( c->head + 1 ) % RING_N;
-			whole = (BOOL)( c->ev_have >= 2 && c->ev_have >= c->ev[1] + 2 );
-			if ( whole ) {
-				c->ev_have = 0;
-				return TRUE;
+		knl_btx_ring_grow(c);
+		while ( knl_btx_ring_take(c, &kind, &b, &n) ) {
+			/* the event's bytes as far as its length says: c->ev holds any, as that is one byte */
+			while ( n > 0 ) {
+				INT	want = ( c->ev_have < 2 ) ? 2 : 2 + c->ev[1];
+				INT	k = want - c->ev_have;
+
+				if ( k > n ) k = n;
+				knl_memcpy(c->ev + c->ev_have, b, k);
+				c->ev_have += k;
+				b += k;
+				n -= k;
+				if ( c->ev_have >= 2 && c->ev_have == 2 + c->ev[1] ) {
+					c->ev_have = 0;
+					return TRUE;
+				}
 			}
 		}
 		if ( c->gone || (W)( knl_btx_now() - due ) >= 0 ) return FALSE;
@@ -139,9 +143,13 @@ LOCAL BOOL next_event( BTC *c, INT tmo )
 
 LOCAL ER send_control( BTC *c, UH op, CONST UB *p, INT n )
 {
-	UB	b[3 + 255];
+	UB	b[3 + HCI_PARAM_MAX];
 	ER	er;
 
+	if ( n < 0 || n > HCI_PARAM_MAX ) {
+		tm_printf((UB *)"bt: Intel command %04x of %d bytes of parameters refused\n", op, n);
+		return E_PAR;
+	}
 	b[0] = (UB)op;
 	b[1] = (UB)( op >> 8 );
 	b[2] = (UB)n;
@@ -187,10 +195,9 @@ LOCAL BOOL fail( BTC *c, UW state, CONST char *why, CONST char *file )
 LOCAL UB *fw_read( CONST char *name, INT *p_n )
 {
 	TS_UUID	u;
-	UB	*b;
-	SZ	asz = 0;
+	UB	*b = NULL;
 	ID	key;
-	INT	i, waited = 0;
+	INT	i, len, waited = 0;
 	CONST char *id = NULL;
 
 	for ( i = 0; i < (INT)( sizeof(fw_objs) / sizeof(fw_objs[0]) ); i++ ) {
@@ -205,13 +212,14 @@ LOCAL UB *fw_read( CONST char *name, INT *p_n )
 		waited += 500;
 	}
 	if ( key <= 0 ) return NULL;
-	b = (UB *)Kmalloc(FW_MAX);
-	if ( b != NULL && ob_rea_rec(key, 1, 0, b, FW_MAX, &asz) < E_OK ) {
-		Kfree(b);
-		b = NULL;
-	}
+	/* the record whole, however long the file is */
+	len = knl_ob_rea_all(key, 1, 0, &b, NULL);
 	(void)ob_cls_obj(key);
-	*p_n = (INT)asz;
+	if ( len < 0 ) {
+		tm_printf((UB *)"bt: a firmware's record not read (%d)\n", len);
+		return NULL;
+	}
+	*p_n = len;
 	return b;
 }
 
@@ -222,6 +230,7 @@ LOCAL BOOL send_frag( BTC *c, UB type, CONST UB *d, INT n, BOOL *p_loaded, UB *p
 	INT	got = 0;
 	ER	er;
 
+	if ( n < 0 || n > FRAG_MAX ) return FALSE;
 	b[0] = (UB)C_SECURE_SEND;
 	b[1] = (UB)( C_SECURE_SEND >> 8 );
 	b[2] = (UB)( n + 1 );
@@ -239,14 +248,14 @@ LOCAL BOOL send_frag( BTC *c, UB type, CONST UB *d, INT n, BOOL *p_loaded, UB *p
 			tm_printf((UB *)"bt: Intel secure send not answered\n");
 			return FALSE;
 		}
-		if ( c->ev[0] == E_CMD_DONE ) {
+		if ( c->ev[0] == E_CMD_DONE && c->ev[1] >= 4 ) {
 			if ( c->ev[5] != 0 ) {
 				tm_printf((UB *)"bt: Intel secure send answered status %02x\n", c->ev[5]);
 				return FALSE;
 			}
 			return TRUE;
 		}
-		if ( c->ev[0] == E_VENDOR && c->ev[2] == EV_LOADED ) {
+		if ( c->ev[0] == E_VENDOR && c->ev[1] >= 2 && c->ev[2] == EV_LOADED ) {
 			*p_loaded = TRUE;
 			*p_result = c->ev[3];
 			return TRUE;
@@ -288,6 +297,9 @@ LOCAL BOOL send_file( BTC *c, CONST UB *fw, INT n, UW *p_boot, CONST char *name 
 		CONST UB	*h = fw + sent + ready;
 		UH		op = (UH)( h[0] | ( h[1] << 8 ) );
 
+		if ( sent + ready + 3 + h[2] > n ) {
+			return fail(c, BT_ST_FWFAILED, "a command cut short at its end:", name);
+		}
 		if ( op == C_BOOT_ADDR && h[2] >= 4 ) {
 			*p_boot = (UW)h[3] | ( (UW)h[4] << 8 ) | ( (UW)h[5] << 16 ) | ( (UW)h[6] << 24 );
 		}
@@ -309,7 +321,7 @@ LOCAL BOOL send_file( BTC *c, CONST UB *fw, INT n, UW *p_boot, CONST char *name 
 	}
 	while ( !loaded ) {
 		if ( !next_event(c, LOAD_TMO) ) return fail(c, BT_ST_FWFAILED, "no word that the load ended:", name);
-		if ( c->ev[0] == E_VENDOR && c->ev[2] == EV_LOADED ) {
+		if ( c->ev[0] == E_VENDOR && c->ev[1] >= 2 && c->ev[2] == EV_LOADED ) {
 			loaded = TRUE;
 			result = c->ev[3];
 		}
@@ -397,6 +409,8 @@ EXPORT BOOL knl_bti_load( BTC *c )
 			INT	i, m = 0, l = r[at + 1];
 			char	v[3 * 32 + 1];
 
+			v[0] = 0;
+
 			for ( i = 0; i < l && i < 32; i++ ) m += tm_sprintf((UB *)v + m, (UB *)" %02x", r[at + 2 + i]);
 			tm_printf((UB *)"bt: Intel, type %02x:%s\n", r[at], v);
 			if ( r[at] == TLV_IMAGE && l >= 1 && r[at + 2] == IMAGE_BOOT ) in_boot = TRUE;
@@ -442,7 +456,7 @@ EXPORT BOOL knl_bti_load( BTC *c )
 	if ( send_control(c, C_INTEL_RESET, p, 8) < E_OK ) return fail(c, BT_ST_FWFAILED, "its reset was not taken:", file);
 	for ( ;; ) {
 		if ( !next_event(c, BOOT_TMO) ) return fail(c, BT_ST_FWFAILED, "no word that it started:", file);
-		if ( c->ev[0] == E_VENDOR && c->ev[2] == EV_BOOTED ) break;
+		if ( c->ev[0] == E_VENDOR && c->ev[1] >= 1 && c->ev[2] == EV_BOOTED ) break;
 	}
 	tm_printf((UB *)"bt: Intel firmware started\n");
 

@@ -82,7 +82,13 @@ struct tswifi_status {
 	uint8_t		pad;
 };
 
-/* One network a scan found (wifi.c has the same layout) */
+/*
+ * One network a scan found (wifi.c has the same layout). The room for
+ * the elements is that of three whole elements of IEEE 802.11-2020
+ * 9.4.2.1 (an id, a length and 255 bytes), as OpenBSD's layer gives
+ * RSN, RSNXE and WPA; here the WPA and WME ones go in it.
+ */
+#define TSWIFI_ELEM_MAX	257
 struct tswifi_bss {
 	uint8_t		bssid[6];
 	uint8_t		ssid_len;
@@ -92,7 +98,7 @@ struct tswifi_bss {
 	uint16_t	capinfo;
 	int32_t		rssi;
 	uint16_t	ie_len;
-	uint8_t		ie[256];	/* its information elements (RSN, WPA) */
+	uint8_t		ie[3 * TSWIFI_ELEM_MAX];	/* its information elements (WPA, WME) */
 };
 
 int	rump_tswifi_start(uint8_t *);
@@ -475,7 +481,7 @@ rump_tswifi_results(struct tswifi_bss *list, int max)
 			ielen += 2 + ni->ni_wpa_ie[1];
 		if (ni->ni_wme_ie != NULL)
 			ielen += 2 + ni->ni_wme_ie[1];
-		if (ielen <= 255 && ielen <= (int)sizeof(b->ie)) {
+		if (ielen <= (int)sizeof(b->ie)) {
 			if (ni->ni_wpa_ie != NULL) {
 				memcpy(b->ie, ni->ni_wpa_ie, 2 + ni->ni_wpa_ie[1]);
 				b->ie_len = 2 + ni->ni_wpa_ie[1];

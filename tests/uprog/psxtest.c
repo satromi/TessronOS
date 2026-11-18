@@ -21,12 +21,16 @@
  *	psxtest sig		a signal caught, held back and let through, an alarm
  *	psxtest kill		waits for a signal that ends it by default
  *	psxtest tty		reads a line from its terminal, as given
+ *	psxtest names		NAME_MAX as pathconf, limits.h and struct dirent
+ *				have it; a name that long made, one longer refused
  */
 
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -118,6 +122,40 @@ static int t_sig( void )
 	return 0;
 }
 
+static int t_names( void )
+{
+	static char	path[NAME_MAX + 8];
+	struct dirent	*e;
+	DIR		*d;
+	long		pc = pathconf("/tmp", _PC_NAME_MAX);
+	int		fd, found = 0, i;
+
+	printf("names pc %ld max %d dname %d\n", pc, (int)NAME_MAX, (int)sizeof(e->d_name));
+	strcpy(path, "/tmp/");
+	for ( i = 0; i < NAME_MAX; i++ ) path[5 + i] = (char)( 'a' + i % 26 );
+	path[5 + NAME_MAX] = 0;
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	printf("names make %s\n", ( fd >= 0 ) ? "ok" : strerror(errno));
+	if ( fd >= 0 ) close(fd);
+	d = opendir("/tmp");
+	while ( d != NULL && ( e = readdir(d) ) != NULL ) {
+		if ( strcmp(e->d_name, path + 5) == 0 ) found = 1;
+	}
+	if ( d != NULL ) closedir(d);
+	printf("names listed %d\n", found);
+	(void)unlink(path);
+
+	path[5 + NAME_MAX] = 'z';			/* one byte more */
+	path[6 + NAME_MAX] = 0;
+	fd = open(path, O_WRONLY | O_CREAT, 0644);
+	printf("names long %s\n", ( fd < 0 && errno == ENAMETOOLONG ) ? "refused" : "taken");
+	if ( fd >= 0 ) {
+		close(fd);
+		(void)unlink(path);
+	}
+	return 0;
+}
+
 int main( int argc, char **argv )
 {
 	int	i;
@@ -169,6 +207,9 @@ int main( int argc, char **argv )
 		b[n] = 0;
 		printf("line [%s]\n", b);
 		return 0;
+	}
+	if ( strcmp(argv[1], "names") == 0 ) {
+		return t_names();
 	}
 	printf("ng what is %s\n", argv[1]);
 	return 2;

@@ -70,10 +70,11 @@ IMPORT INT  tl_objects( TS_UUID **p_ids );
 /*
  * An object's metadata parsed: FALSE when the person may not read it or
  * it cannot be (*p_buf, which root points into, to free when TRUE).
- * tl_name: its name, "" when it cannot be read.
+ * tl_name_dup: its name, whole, in memory of its own (free it); NULL
+ * when it cannot be read or there is no memory.
  */
 IMPORT BOOL tl_meta( CONST TS_UUID *u, UB **p_buf, T_JSON *root );
-IMPORT BOOL tl_name( CONST TS_UUID *u, UB *nm, INT max );
+IMPORT UB  *tl_name_dup( CONST TS_UUID *u );
 
 /* Words put into an attribute of a record, with what would end it made safe: where it ends */
 IMPORT INT  tl_put_x( char *x, INT at, INT max, CONST UB *s );

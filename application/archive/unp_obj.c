@@ -36,6 +36,7 @@
 #include <ts/json.h>
 #include <ts/obatr.h>
 #include <ts/dtreq.h>
+#include "../dtask.h"
 
 /* bytes read from and written to a record at a time: each write is made
    durable when it returns, so the fewer they are the less the medium waits
@@ -700,7 +701,8 @@ EXPORT void unp_job_undo( UNPJOB *j )
 
 /* ---------------------------------------------------------------- the desktop */
 
-LOCAL UINT	ask_seq = 0;
+/* The words of the next request and the last answer, as long as they are (dtask.h) */
+LOCAL DTASK	unp_dq;
 
 /*
  * A request written to the desktop's channel and its answer waited for,
@@ -709,37 +711,7 @@ LOCAL UINT	ask_seq = 0;
  */
 LOCAL ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
-	TS_UUID	d, ch;
-	T_OBCRE	c;
-	SZ	asz = 0;
-	ID	k, ka;
-	ER	er;
-
-	if ( ob_fnd_nam((const UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &ch) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&ch, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&ch);
-		return E_OBJ;
-	}
-	rq->seq = ++ask_seq;
-	rq->reply = ch;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	/* the answer waited for on its channel, at most wait_ms */
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
-			er = an->er;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&ch);
-	return er;
+	return dq_ask(&unp_dq, rq, an, NULL, wait_ms);
 }
 
 EXPORT ER unp_carry( UNPJOB *j, const T_DTLOOK *look, INT grab_x, INT grab_y, TS_UUID *into, UINT *p_seq )
@@ -763,15 +735,15 @@ EXPORT ER unp_carry( UNPJOB *j, const T_DTLOOK *look, INT grab_x, INT grab_y, TS
 	rq.grab_x = grab_x;
 	rq.grab_y = grab_y;
 	{
-		/* the root's name, cut at a letter's edge so that the line fits */
-		char	nm[60];
-		INT	l = 0;
+		/* the root's name whole: the panel shows what of the line it has room for */
+		CONST char	*nm = (CONST char *)a->file[a->root].name;
+		size_t		l = strlen(nm) + 32;
+		char		*q = (char *)malloc(l);
 
-		while ( a->file[a->root].name[l] != 0 && l < (INT)sizeof(nm) - 1 ) l++;
-		while ( l > 0 && a->file[a->root].name[l] != 0 && ( a->file[a->root].name[l] & 0xC0 ) == 0x80 ) l--;
-		memcpy(nm, a->file[a->root].name, (size_t)l);
-		nm[l] = 0;
-		snprintf((char *)rq.ask[0], sizeof(rq.ask[0]), "「%s」を解凍します。", nm);
+		if ( q == NULL ) return E_NOMEM;
+		snprintf(q, l, "「%s」を解凍します。", nm);
+		(void)dq_part(&unp_dq, DT_TAIL_ASK1, (CONST UB *)q, -1);
+		free(q);
 	}
 	/* 147780 as "147,780" */
 	m = snprintf(size, sizeof(size), "%u", v);
@@ -783,9 +755,14 @@ EXPORT ER unp_carry( UNPJOB *j, const T_DTLOOK *look, INT grab_x, INT grab_y, TS
 			g[k++] = size[n];
 		}
 		g[k] = 0;
-		snprintf((char *)rq.ask[1], sizeof(rq.ask[1]), "実身 %u 個、%s バイト", a->nfiles, g);
+		{
+			char	l2[96];
+
+			snprintf(l2, sizeof(l2), "実身 %u 個、%s バイト", a->nfiles, g);
+			(void)dq_part(&unp_dq, DT_TAIL_ASK2, (CONST UB *)l2, -1);
+		}
 	}
-	snprintf((char *)rq.yes, sizeof(rq.yes), "解凍");
+	(void)dq_part(&unp_dq, DT_TAIL_YES, (CONST UB *)"解凍", -1);
 	memset(&an, 0, sizeof(an));
 	er = ask_desktop(&rq, &an, 30 * 60 * 1000);
 	if ( er >= E_OK ) {

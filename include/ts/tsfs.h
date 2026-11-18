@@ -38,7 +38,6 @@ extern "C" {
  * carries (design 7.3), kept well inside what a program reads of it.
  */
 #define TSFS_MAX_REC	256
-#define TSFS_NAME_MAX	64		/* bytes of the name held in the metadata */
 #define TSFS_EXT_MAX	16		/* the file name extension of a resource */
 
 /*
@@ -86,9 +85,9 @@ typedef struct {
 /*
  * The items of the metadata the store keeps at hand
  */
+/* (the name is read whole with ts_ref_nam) */
 typedef struct {
 	TS_UUID	uuid;
-	UB	name[TSFS_NAME_MAX];
 	INT	refcnt;
 	INT	nrec;
 	UD	size;			/* bytes of every record together */
@@ -114,6 +113,13 @@ IMPORT ER  ts_cls_vol( ID vol );
 IMPORT ER  ts_ref_vol( ID vol, T_RVOL *pk_rvol );
 
 /*
+ * The objects of a volume open now, each once, up to max of them into
+ * out: how many there are (more than max when the room is short). The
+ * object layer tells their watchers when the volume's medium goes.
+ */
+IMPORT INT knl_tsfs_vol_opened( ID vol, TS_UUID *out, INT max );
+
+/*
  * Objects
  */
 IMPORT ER  ts_cre_obj( ID vol, CONST T_COBJ *pk_cobj, TS_UUID *p_uuid );
@@ -132,6 +138,8 @@ IMPORT ER  ts_syn_vol( ID vol );
 IMPORT ER  ts_finish_vol( ID vol );
 IMPORT ER  ts_od_uuid( ID od, TS_UUID *p_uuid );	/* what an open object is */
 IMPORT ER  ts_ref_obj( ID vol, CONST TS_UUID *uuid, T_ROBJ *pk_robj );
+/* The name the metadata holds, as ob_ref_nam puts it */
+IMPORT ER  ts_ref_nam( ID vol, CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize );
 IMPORT ER  ts_lst_obj( ID vol, CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt );
 /*
  * A hold on an object that no link of the volume makes: the root, the
@@ -306,6 +314,15 @@ typedef struct {
 } T_TSFSVINF;
 
 IMPORT ER  knl_tsfs_vol_info( ID vol, T_TSFSVINF *pk );
+/*
+ * A native volume's label, whole (design 7.6): the name of its top
+ * object, or, when it has none or the top has no name, the copy in the
+ * superblock. As ob_ref_nam puts a name. knl_tsfs_label_copy writes the
+ * superblock's copy again from a name, cut at a whole letter, when it
+ * differs (E_NOSPT on the FAT store).
+ */
+IMPORT ER  knl_tsfs_vol_label( ID vol, UB *buf, SZ size, SZ *p_asize );
+IMPORT ER  knl_tsfs_label_copy( ID vol, CONST UB *name );
 
 /* The top object of a native volume set (NULL to take it away); E_NOSPT on the FAT store */
 IMPORT ER  knl_tsfs_set_top( ID vol, CONST TS_UUID *uuid );

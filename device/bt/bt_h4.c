@@ -52,17 +52,46 @@ LOCAL INT h4_len( UB type, CONST UB *h )
 	}
 }
 
-EXPORT void knl_bth4_init( BTH4 *h )
+EXPORT ER knl_bth4_init( BTH4 *h )
 {
+	InitSpinLock(&h->lk);
 	h->type = 0;
 	h->hlen = h->have = h->want = h->skip = 0;
 	h->frames = h->bad_type = h->too_long = 0;
+	if ( h->b == NULL || h->cap < BTH4_FIRST ) {
+		if ( h->b != NULL ) Kfree(h->b);
+		h->cap = 0;
+		h->b = (UB *)Kmalloc(BTH4_FIRST);
+		if ( h->b == NULL ) return E_NOMEM;
+		h->cap = BTH4_FIRST;
+	}
+	return E_OK;
+}
+
+EXPORT ER knl_bth4_room( BTH4 *h, INT n )
+{
+	UB	*nb, *ob;
+	UINT	im;
+
+	if ( n <= h->cap ) return E_OK;
+	nb = (UB *)Kmalloc((SZ)n);
+	if ( nb == NULL ) return E_NOMEM;
+	ISpinLock(&h->lk, &im);
+	if ( h->have > 0 ) knl_memcpy(nb, h->b, h->have);
+	ob = h->b;
+	h->b = nb;
+	h->cap = n;
+	ISpinUnlock(&h->lk, &im);
+	if ( ob != NULL ) Kfree(ob);
+	return E_OK;
 }
 
 EXPORT void knl_bth4_feed( BTH4 *h, CONST UB *b, INT n, BTH4_OUT out, void *ctx )
 {
 	INT	i;
+	UINT	im;
 
+	ISpinLock(&h->lk, &im);
 	for ( i = 0; i < n; i++ ) {
 		UB	x = b[i];
 
@@ -85,7 +114,7 @@ EXPORT void knl_bth4_feed( BTH4 *h, CONST UB *b, INT n, BTH4_OUT out, void *ctx 
 		h->b[h->have++] = x;
 		if ( h->want == 0 && h->have == h->hlen ) {
 			h->want = h4_len(h->type, h->b);
-			if ( h->want > BTH4_MAX ) {
+			if ( h->want > h->cap ) {
 				/* passed over to its end: what comes after it is still a packet */
 				h->too_long++;
 				h->skip = h->want - h->have;
@@ -99,13 +128,23 @@ EXPORT void knl_bth4_feed( BTH4 *h, CONST UB *b, INT n, BTH4_OUT out, void *ctx 
 			h->type = 0;
 		}
 	}
+	ISpinUnlock(&h->lk, &im);
+}
+
+/* Whether n bytes at pkt are one packet of the type, as its header says */
+EXPORT BOOL knl_bth4_ok( UB type, CONST UB *pkt, INT n )
+{
+	INT	hl = knl_bth4_hlen(type);
+
+	return (BOOL)( hl != 0 && n >= hl && h4_len(type, pkt) == n );
 }
 
 EXPORT INT knl_bth4_pack( UB type, CONST UB *pkt, INT n, UB *out, INT max )
 {
 	INT	hl = knl_bth4_hlen(type);
 
-	if ( hl == 0 || n < hl || h4_len(type, pkt) != n || n + 1 > max ) return E_PAR;
+	if ( !knl_bth4_ok(type, pkt, n) || n + 1 > max ) return E_PAR;
+	(void)hl;
 	out[0] = type;
 	knl_memcpy(out + 1, pkt, n);
 	return n + 1;

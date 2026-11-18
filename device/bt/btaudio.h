@@ -21,6 +21,16 @@
 #ifndef __BTAUDIO_H__
 #define __BTAUDIO_H__
 
+/*
+ * The ids of the outputs here: a word ("bt-", "le-"), the address's twelve
+ * hex digits, its highest byte first, and perhaps a word after ("-hfp").
+ * An id made fits in BTA_ID_ROOM, the longest of these forms with its 0;
+ * an id asked is compared as long as it is (knl_bta_is_out_id).
+ */
+#define BTA_ID_ROOM		( 3 + 12 + 4 + 1 )
+IMPORT void knl_bta_out_id( UB *id, CONST char *pre, CONST UB *addr, CONST char *post );
+IMPORT BOOL knl_bta_is_out_id( CONST UB *id, CONST char *pre, CONST UB *addr, CONST char *post );
+
 #define PSM_SDP_A		0x0001
 #define PSM_RFCOMM		0x0003
 #define PSM_AVCTP		0x0017
@@ -67,7 +77,14 @@ IMPORT void knl_btf_up( BTC *c, PEER *p );
 IMPORT void knl_btf_in( BTC *c, PEER *p, CONST UB *f, INT n );
 IMPORT void knl_btf_closed( BTC *c, PEER *p );
 IMPORT void knl_btf_open( BTC *c, PEER *p, UB ch );
-IMPORT void knl_btf_send( BTC *c, CONST UB *d, INT n );
+#define RFC_TXQ_LIMIT		( 64 * 1024 )	/* what may wait for the earphones on RFCOMM (B) */
+/*
+ * Bytes to the earphones on the channel, kept until their credits and
+ * their flow let them go: E_OBJ with no channel, E_BUSY while they take
+ * nothing and RFC_TXQ_LIMIT bytes wait already, E_NOMEM with no room.
+ * Nothing is let go of what was taken; it never waits.
+ */
+IMPORT ER   knl_btf_send( BTC *c, CONST UB *d, INT n );
 IMPORT void knl_btf_down( BTC *c, PEER *p );
 IMPORT void knl_btf_tick( BTC *c );
 IMPORT void knl_btf_gone( BTC *c );
@@ -85,7 +102,8 @@ IMPORT void knl_bth_tick( BTC *c );
 IMPORT BOOL knl_bth_voice( void );		/* a voice link is up or being set up: A2DP stands aside */
 IMPORT BOOL knl_bth_vol_outside( void );
 /* the sound device's side, with the manager's lock held */
-IMPORT INT  knl_bth_outputs( SDOut *o, INT max );
+struct SNDOUTS;
+IMPORT ER   knl_bth_outs( struct SNDOUTS *l );	/* its output added to l, if it has one */
 IMPORT BOOL knl_bth_is_id( CONST UB *id );
 IMPORT ER   knl_bth_play_start( CONST UB *id, UW *rate, INT *channels );
 IMPORT void knl_bth_play_stop( void );

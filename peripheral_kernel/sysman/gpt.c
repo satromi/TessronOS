@@ -636,7 +636,12 @@ EXPORT ER knl_gpt_grow( CONST char *part, UD last )
 	return er;
 }
 
-/* A partition's name in UTF-16, from UTF-8: what is past the plane of 16 bits is left out */
+/*
+ * A partition's name in UTF-16LE, from UTF-8: a letter past the plane
+ * of 16 bits as a surrogate pair. The field holds GPT_NAME_MAX units
+ * (UEFI 5.3.3), so a longer name ends at the last whole letter that
+ * fits; a pair is never split. Bytes that are not UTF-8 are skipped.
+ */
 LOCAL void set_name( UB *e, CONST char *name )
 {
 	INT	k, m;
@@ -648,14 +653,39 @@ LOCAL void set_name( UB *e, CONST char *name )
 
 		if ( c < 0x80 ) {
 			ch = c; k += 1;
-		} else if ( ( c & 0xE0 ) == 0xC0 && name[k + 1] != '\0' ) {
+		} else if ( ( c & 0xE0 ) == 0xC0 && ( (UB)name[k + 1] & 0xC0 ) == 0x80 ) {
 			ch = ( (UW)( c & 0x1F ) << 6 ) | ( (UB)name[k + 1] & 0x3F ); k += 2;
-		} else if ( ( c & 0xF0 ) == 0xE0 && name[k + 1] != '\0' && name[k + 2] != '\0' ) {
+		} else if ( ( c & 0xF0 ) == 0xE0 && ( (UB)name[k + 1] & 0xC0 ) == 0x80
+			 && ( (UB)name[k + 2] & 0xC0 ) == 0x80 ) {
 			ch = ( (UW)( c & 0x0F ) << 12 ) | ( (UW)( (UB)name[k + 1] & 0x3F ) << 6 )
 			   | ( (UB)name[k + 2] & 0x3F );
 			k += 3;
+		} else if ( ( c & 0xF8 ) == 0xF0 && ( (UB)name[k + 1] & 0xC0 ) == 0x80
+			 && ( (UB)name[k + 2] & 0xC0 ) == 0x80 && ( (UB)name[k + 3] & 0xC0 ) == 0x80 ) {
+			ch = ( (UW)( c & 0x07 ) << 18 ) | ( (UW)( (UB)name[k + 1] & 0x3F ) << 12 )
+			   | ( (UW)( (UB)name[k + 2] & 0x3F ) << 6 ) | ( (UB)name[k + 3] & 0x3F );
+			k += 4;
 		} else {
 			k++;
+			continue;
+		}
+		if ( ch >= 0x10000 ) {
+			UW	hi, lo;
+
+			if ( ch > 0x10FFFF ) {
+				continue;		/* not a letter of Unicode */
+			}
+			if ( m + 2 > GPT_NAME_MAX ) {
+				break;			/* the pair does not fit: the name ends before it */
+			}
+			ch -= 0x10000;
+			hi = 0xD800 | ( ch >> 10 );
+			lo = 0xDC00 | ( ch & 0x3FF );
+			e[E_NAME + 2 * m] = (UB)hi;
+			e[E_NAME + 2 * m + 1] = (UB)( hi >> 8 );
+			e[E_NAME + 2 * m + 2] = (UB)lo;
+			e[E_NAME + 2 * m + 3] = (UB)( lo >> 8 );
+			m += 2;
 			continue;
 		}
 		e[E_NAME + 2 * m] = (UB)ch;

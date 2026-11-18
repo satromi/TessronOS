@@ -73,7 +73,7 @@
 #define WPP_CB_SAY	5
 
 /* The most an answer carries of each output (the callers' buffers are this large) */
-#define WPP_START_IE_MAX	64	/* knl_wpa_start's element */
+#define WPP_START_IE_MAX	257	/* knl_wpa_start's element: a whole one (IEEE 802.11-2020 9.4.2.1) */
 #define WPP_PMK_LEN		32
 #define WPP_PMKID_LEN		16
 #define WPP_ADDR_LEN		6

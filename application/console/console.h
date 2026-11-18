@@ -38,13 +38,32 @@ IMPORT void say_num( D v );
 
 /* Bytes compared with the full-width forms of ASCII taken as ASCII */
 IMPORT BOOL con_same_name( CONST UB *a, CONST UB *b );
+
+/*
+ * Memory for names of any length (console.c): the console keeps no
+ * heap, so it takes stretches of its address space (ts_map_mem), each
+ * page made only when it is touched, and another stretch whenever one
+ * is full. A line's memory (cm_take, cm_dup, cm_name) lasts until the
+ * next line begins (cm_line_reset, at a command and at a completion):
+ * nothing keeps a pointer into it across lines. A held string
+ * (cm_hold) has a stretch of its own, kept until cm_let_go. NULL when no
+ * memory is left: the caller says so and the command goes no further.
+ */
+IMPORT void *cm_take( SZ n );
+IMPORT void cm_line_reset( void );
+IMPORT UB   *cm_dup( CONST UB *s );
+IMPORT UB   *cm_name( CONST TS_UUID *u );	/* an object's name, whole; NULL when it cannot be read */
+IMPORT UB   *cm_hold( CONST UB *s );
+IMPORT UB   *cm_room( SZ n );		/* held room of n bytes */
+IMPORT void cm_let_go( UB *p );
+IMPORT void cm_no_memory( void );		/* said once a command */
 /* s turned so in place: full-width ASCII and the ideographic space to ASCII */
 IMPORT void con_fold( UB *s );
 
 /* ---------------------------------------------------------------- con_box.c */
 
 IMPORT void box_init( void );
-IMPORT void box_where( UB *buf, INT max );	/* the path of the place from "/" */
+IMPORT UB  *box_where( void );		/* the path of the place from "/", in a line's memory; NULL none */
 IMPORT void box_here_uuid( TS_UUID *p_u );	/* the object of the place */
 IMPORT CONST UB *box_here_name( void );	/* the name of the box it is in */
 IMPORT void cmd_pwd( void );
@@ -57,10 +76,10 @@ IMPORT void cmd_cd( INT argc, UB **argv );
  * E_NOEXS when nothing has the name, E_OBJ when what has it is not a
  * program with an executable (the reason said then).
  */
-IMPORT ER   box_find_prog( CONST UB *name, TS_UUID *prog, UB *pname, INT pmax );
+IMPORT ER   box_find_prog( CONST UB *name, TS_UUID *prog, UB **p_pname );	/* *p_pname: the name shown, in the line's memory */
 
 /* Whether an object is a program with an executable: E_OK, and its name shown */
-IMPORT ER   box_prog_named( CONST TS_UUID *u, UB *pname, INT pmax );
+IMPORT ER   box_prog_named( CONST TS_UUID *u, UB **p_pname );
 
 /*
  * The names of the links that start with `pre`, in the place or (cmd)

@@ -764,7 +764,8 @@ IMPORT ER  wm_lit( INT wid, BOOL on );
  * A window opened because of what a person did takes the keys; one that
  * opens by itself does not (design 10). A ticket is the count of what
  * has been pressed: it stays good until the next press, which says the
- * person has gone on to something else, and for WM_ACT_MS at most.
+ * person has gone on to something else -- one that came and is not yet
+ * read as well (ts_hid_press_waiting) -- and for WM_ACT_MS at most.
  * wm_act_age says how long ago the last press was, in milliseconds.
  */
 #define WM_ACT_MS	60000
@@ -1269,12 +1270,14 @@ IMPORT void wm_obj_quiet( BOOL on );
  * Links let go of over a window that belongs to someone else (design
  * 16.5.21): the drop becomes the window's record OB_WR_DROP and is told
  * with OB_E_DROP, at (sx, sy) on the screen. The caller fills in each
- * link's target, identity, name and look; the taker is granted on each
+ * link's target, identity and look, and its words -- name, relationship,
+ * applist -- in words (strsz bytes, each word ending in 0), each entry
+ * saying where its are (ob_drop_put); the taker is granted on each
  * object what the caller may do to it, within OB_DROP_OPS (T_OBDROPV
  * ops). E_NOSPT: nobody takes drops on that window.
  */
 IMPORT ER   wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
-			 CONST T_OBDROPV *v, INT n );
+			 CONST T_OBDROPV *v, INT n, CONST UB *words, SZ strsz );
 
 /*
  * The same for links carried out of the window of the process giver: the
@@ -1286,7 +1289,7 @@ IMPORT ER   wm_obj_drop( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from
  * target NULL asks only whether anyone takes them.
  */
 IMPORT ER   wm_obj_drop_for( INT wid, INT sx, INT sy, UINT mods, CONST TS_UUID *from,
-			     ID giver, CONST T_OBDROPV *v, INT n );
+			     ID giver, CONST T_OBDROPV *v, INT n, CONST UB *words, SZ strsz );
 IMPORT ER   wm_obj_drop_may( INT wid, ID giver, CONST TS_UUID *target );
 
 /*

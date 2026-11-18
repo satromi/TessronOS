@@ -367,6 +367,9 @@ LOCAL void test_memory( void )
 
 /* ---------------------------------------------------------------- channels */
 
+/* The notices a port holds before it is full: its room in bytes, a notice each */
+#define KT_PORT_ROOM	( (INT)( OB_CH_BYTES / sizeof(T_OBNTM) ) )
+
 LOCAL void test_channel( void )
 {
 	T_OBCRE	c;
@@ -397,8 +400,28 @@ LOCAL void test_channel( void )
 	KT_ASSERT_EQ(buf[0], 's');
 	/* empty: the key that does not wait says so */
 	KT_ASSERT_ER(ob_rea_rec(nw, 0, 0, buf, sizeof(buf), &asz), E_TMOUT);
-	/* a message too big for it */
-	KT_ASSERT_ER(ob_wri_rec(key, 0, 0, buf, OB_CH_MSG_MAX + 1, &asz), E_PAR);
+	/* a message as long as it is: not cut for a reader with less room, read again whole */
+	{
+		UB	*big = (UB *)Kmalloc(5000);
+		INT	q;
+
+		KT_ASSERT(big != NULL);
+		if ( big != NULL ) {
+			for ( q = 0; q < 5000; q++ ) big[q] = (UB)q;
+			KT_ASSERT_ER(ob_wri_rec(key, 0, 0, big, 5000, &asz), E_OK);
+			asz = 0;
+			KT_ASSERT_ER(ob_rea_rec(key, 0, 0, buf, sizeof(buf), &asz), E_LIMIT);
+			KT_ASSERT_EQ(asz, 5000);
+			knl_memset(big, 0, 5000);
+			KT_ASSERT_ER(ob_rea_rec(key, 0, 0, big, 5000, &asz), E_OK);
+			KT_ASSERT_EQ(asz, 5000);
+			for ( q = 0; q < 5000 && big[q] == (UB)q; q++ ) ;
+			KT_ASSERT_EQ(q, 5000);
+			Kfree(big);
+		}
+	}
+	/* more than the whole room a channel has: refused, not cut */
+	KT_ASSERT_ER(ob_wri_rec(key, 0, 0, buf, OB_CH_BYTES + 1, &asz), E_LIMIT);
 
 	KT_ASSERT_ER(ob_cls_obj(nw), E_OK);
 	KT_ASSERT_ER(ob_cls_obj(key), E_OK);
@@ -484,7 +507,7 @@ LOCAL void test_file( void )
 
 	KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
 	KT_ASSERT_EQ(r.sub, OB_S_FILE);
-	KT_ASSERT_EQ(r.name[0], 'o');
+	KT_ASSERT(kt_name_is(&u, "ob file"));
 
 	/* made by the system: its owner, rw-r--r-- */
 	KT_ASSERT_ER(ob_get_prt(&u, p, KT_PRT_SIZE, NULL), E_OK);
@@ -531,7 +554,7 @@ LOCAL void test_file( void )
 		KT_ASSERT_ER(ob_get_prt(&u, p, KT_PRT_SIZE, NULL), E_OK);
 		KT_ASSERT_EQ(p->mode, 0644);
 		KT_ASSERT_ER(ob_ref_obj(&u, &r), E_OK);
-		KT_ASSERT_EQ(r.name[0], 'r');
+		KT_ASSERT(kt_name_is(&u, "renamed"));
 		KT_ASSERT_ER(ob_cls_obj(k2), E_OK);
 	}
 	/* two records declared: taking the last away takes its declaration */
@@ -1049,7 +1072,7 @@ LOCAL void test_transfer( void )
 	KT_ASSERT_ER(ob_ref_obj(&cp, &r), E_OK);
 	KT_ASSERT_EQ(r.sub, OB_S_MEMORY);
 	KT_ASSERT_EQ(r.nrec, 4);
-	KT_ASSERT(has(r.name, s_len((CONST char *)r.name), "ob from"));
+	KT_ASSERT(kt_name_has(&cp, "ob from"));
 	kc = ob_opn_obj(&cp, OB_OP_R);
 	KT_ASSERT(kc > 0);
 	if ( kc > 0 ) {
@@ -1159,12 +1182,16 @@ LOCAL void test_notice( void )
 	req.flags = 0;
 	KT_ASSERT_ER(ob_can_evt(nid), E_OK);
 	nid = ob_ntf_evt(ko, OB_REC_ANY, &req, port);
-	for ( i = 0; i < OB_CH_QLEN + 3; i++ ) {
+	/* full when the notices waiting take the channel's room (OB_CH_BYTES) */
+	for ( i = 0; i < KT_PORT_ROOM + 3; i++ ) {
 		(void)ob_wri_rec(ko, 0, 0, "f", 1, &asz);
 	}
-	for ( i = 0; i < OB_CH_QLEN; i++ ) {
+	for ( i = 0; i < KT_PORT_ROOM; i++ ) {
 		KT_ASSERT_ER(take(port, &m), E_OK);
-		KT_ASSERT_EQ(m.lost, 0);
+		if ( m.lost != 0 ) {
+			KT_ASSERT_EQ(m.lost, 0);
+			break;
+		}
 	}
 	KT_ASSERT_ER(take(port, &m), E_TMOUT);
 	KT_ASSERT_ER(ob_wri_rec(ko, 0, 0, "g", 1, &asz), E_OK);
@@ -1357,7 +1384,7 @@ LOCAL void test_window( void )
 	T_OBWPOS	wp;
 	T_OBNTF		req;
 	T_OBNTM		m;
-	T_OBREC		rec[8];
+	T_OBREC		rec[OB_WR_GSURF + 1];
 	T_WMEV		ev;
 	TS_UUID		w, ch, pnl, part1, menu;
 	T_WMPANEL	*def;
@@ -1381,9 +1408,9 @@ LOCAL void test_window( void )
 	KT_ASSERT_ER(ob_ref_obj(&w, &r), E_OK);
 	KT_ASSERT_EQ(r.type, OB_T_WINDOW);
 	KT_ASSERT_EQ(r.sub, OB_S_WINDOW);
-	KT_ASSERT_EQ(r.nrec, OB_WR_KIND + 3);		/* and the drop record, the bars, the candidates */
+	KT_ASSERT_EQ(r.nrec, OB_WR_GSURF + 1);		/* and the drop record, the bars, the candidates, the question, the BOs */
 	KT_ASSERT(( r.flags & OB_F_VOLATILE ) != 0);
-	KT_ASSERT(has(r.name, s_len((CONST char *)r.name), "ob window"));
+	KT_ASSERT(kt_name_has(&w, "ob window"));
 	KT_ASSERT_ER(ob_get_prt(&w, p, KT_PRT_SIZE, NULL), E_OK);
 	KT_ASSERT_EQ(ts_uuid_cmp(&p->owner, &ob_user_system), 0);
 	KT_ASSERT_EQ(p->mode, 0644);			/* the creator's default was given */
@@ -1415,8 +1442,8 @@ LOCAL void test_window( void )
 	KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_DRAW, 0, buf, sizeof(buf), &asz), E_OK);
 	KT_ASSERT_EQ(asz, sizeof(ob_win_draw) - 1);
 	KT_ASSERT(has(buf, (INT)asz, "<p>window</p>"));
-	KT_ASSERT_ER(ob_lst_rec(kw, rec, 8, &cnt), E_OK);
-	KT_ASSERT_EQ(cnt, OB_WR_KIND + 3);
+	KT_ASSERT_ER(ob_lst_rec(kw, rec, OB_WR_GSURF + 1, &cnt), E_OK);
+	KT_ASSERT_EQ(cnt, OB_WR_GSURF + 1);
 	KT_ASSERT_EQ(rec[OB_WR_BARS].size, sizeof(T_OBWBARS));
 	KT_ASSERT_EQ(rec[OB_WR_CAND].size, 0);		/* written only */
 	KT_ASSERT_EQ(rec[OB_WR_DROP].size, 0);		/* nothing dropped yet */
@@ -1451,22 +1478,25 @@ LOCAL void test_window( void )
 	/* links dropped on it: refused while nobody asked for drops */
 	{
 		T_OBDROPV	dv[2];
-		T_OBDROP	*dr = (T_OBDROP *)Kmalloc(OB_DROP_SIZE(KT_DROP_MANY));
+		T_OBDROP	*dr = (T_OBDROP *)Kmalloc(OB_DROP_SIZE(KT_DROP_MANY) + KT_DROP_MANY * 2);
 		T_OBDRANS	an;
 		T_OBNTF		rq;
 		T_WMWIN		ww;
 
 		KT_ASSERT(dr != NULL && wm_ref(wid, &ww) >= E_OK);
+		UB		words[64];
+		UINT		wsz = 0;
+
 		knl_memset(dv, 0, sizeof(dv));
 		dv[0].target = w;			/* any objects will do: themselves */
 		dv[1].target = ch;
-		dv[0].name[0] = 'a';
-		KT_ASSERT_ER(wm_obj_drop(wid, ww.work.left + 7, ww.work.top + 9, 0, NULL, dv, 2), E_NOSPT);
+		(void)ob_drop_put(words, &wsz, sizeof(words), (CONST UB *)"a", -1, &dv[0].name_at, &dv[0].name_len);
+		KT_ASSERT_ER(wm_obj_drop(wid, ww.work.left + 7, ww.work.top + 9, 0, NULL, dv, 2, words, wsz), E_NOSPT);
 		knl_memset(&rq, 0, sizeof(rq));
 		rq.events = OB_E_DROP;
 		rq.id = 6;
 		KT_ASSERT(ob_ntf_evt(kw, OB_REC_ANY, &rq, port) > 0);
-		KT_ASSERT_ER(wm_obj_drop(wid, ww.work.left + 7, ww.work.top + 9, 0, NULL, dv, 2), E_OK);
+		KT_ASSERT_ER(wm_obj_drop(wid, ww.work.left + 7, ww.work.top + 9, 0, NULL, dv, 2, words, wsz), E_OK);
 		KT_ASSERT_ER(take(port, &m), E_OK);
 		KT_ASSERT_EQ(m.event, OB_E_DROP);
 		KT_ASSERT_EQ(m.id, 6);
@@ -1476,12 +1506,12 @@ LOCAL void test_window( void )
 		KT_ASSERT_EQ(m.y, 9);
 		if ( dr != NULL ) {
 			/* the record: the drop, the kernel's grants none (it needs none) */
-			KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_DROP, 0, dr, OB_DROP_SIZE(KT_DROP_MANY), &asz), E_OK);
-			KT_ASSERT_EQ(asz, OB_DROP_SIZE(2));
+			KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_DROP, 0, dr, OB_DROP_SIZE(KT_DROP_MANY) + KT_DROP_MANY * 2, &asz), E_OK);
+			KT_ASSERT_EQ(asz, OB_DROP_SIZE(2) + wsz);
 			KT_ASSERT_EQ(dr->n, 2);
 			KT_ASSERT_EQ(dr->x, 7);
 			KT_ASSERT_EQ(ts_uuid_cmp(&dr->v[1].target, &ch), 0);
-			KT_ASSERT_EQ(dr->v[0].name[0], 'a');
+			KT_ASSERT_EQ(ob_drop_name(dr, 0, NULL)[0], 'a');
 			KT_ASSERT_EQ(dr->v[0].ops, OB_DROP_OPS);	/* the system may do it all */
 			/* answered once, and only the drop there is */
 			knl_memset(&an, 0, sizeof(an));
@@ -1498,29 +1528,36 @@ LOCAL void test_window( void )
 		 */
 		if ( dr != NULL ) {
 			T_OBDROPV	*many = (T_OBDROPV *)Kcalloc(KT_DROP_MANY, sizeof(T_OBDROPV));
+			UB		*mw = (UB *)Kmalloc(KT_DROP_MANY * 2);
+			UINT		mwsz = 0;
 			T_OBNTM		m2;
 			INT		k;
 			ER		er2;
 
-			KT_ASSERT(many != NULL);
-			for ( k = 0; many != NULL && k < KT_DROP_MANY; k++ ) {
+			KT_ASSERT(many != NULL && mw != NULL);
+			for ( k = 0; many != NULL && mw != NULL && k < KT_DROP_MANY; k++ ) {
+				UB	nm[2];
+
 				many[k].target = ( k % 2 ) ? ch : w;
 				many[k].left = k;
-				many[k].name[0] = (UB)( 'A' + k % 26 );
+				nm[0] = (UB)( 'A' + k % 26 );
+				nm[1] = 0;
+				(void)ob_drop_put(mw, &mwsz, KT_DROP_MANY * 2, nm, 1, &many[k].name_at, &many[k].name_len);
 			}
-			if ( many != NULL ) {
-				KT_ASSERT_ER(wm_obj_drop(wid, ww.work.left + 3, ww.work.top + 4, 0, NULL, many, KT_DROP_MANY), E_OK);
+			if ( many != NULL && mw != NULL ) {
+				KT_ASSERT_ER(wm_obj_drop(wid, ww.work.left + 3, ww.work.top + 4, 0, NULL, many, KT_DROP_MANY, mw, mwsz), E_OK);
 				do {
 					er2 = take(port, &m2);		/* past the answers' changes */
 				} while ( er2 >= E_OK && m2.event != OB_E_DROP );
 				KT_ASSERT_ER(er2, E_OK);
 				KT_ASSERT_EQ(m2.event, OB_E_DROP);
 				KT_ASSERT_EQ(m2.code, KT_DROP_MANY);
-				KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_DROP, 0, dr, OB_DROP_SIZE(KT_DROP_MANY), &asz), E_OK);
-				KT_ASSERT_EQ(asz, OB_DROP_SIZE(KT_DROP_MANY));
+				KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_DROP, 0, dr, OB_DROP_SIZE(KT_DROP_MANY) + KT_DROP_MANY * 2, &asz), E_OK);
+				KT_ASSERT_EQ(asz, OB_DROP_SIZE(KT_DROP_MANY) + mwsz);
 				KT_ASSERT_EQ(dr->n, KT_DROP_MANY);
+				KT_ASSERT_EQ(dr->strsz, mwsz);
 				KT_ASSERT_EQ(dr->v[KT_DROP_MANY - 1].left, KT_DROP_MANY - 1);
-				KT_ASSERT_EQ(dr->v[KT_DROP_MANY - 1].name[0], (UB)( 'A' + ( KT_DROP_MANY - 1 ) % 26 ));
+				KT_ASSERT_EQ(ob_drop_name(dr, KT_DROP_MANY - 1, NULL)[0], (UB)( 'A' + ( KT_DROP_MANY - 1 ) % 26 ));
 				KT_ASSERT_EQ(ts_uuid_cmp(&dr->v[KT_DROP_MANY - 1].target, ( ( KT_DROP_MANY - 1 ) % 2 ) ? &ch : &w), 0);
 				KT_ASSERT_ER(ob_rea_rec(kw, OB_WR_DROP, 0, dr, OB_DROP_SIZE(3), &asz), E_OK);
 				KT_ASSERT_EQ(asz, OB_DROP_SIZE(3));
@@ -1530,8 +1567,9 @@ LOCAL void test_window( void )
 				an.seq = dr->seq;
 				an.answer = OB_DR_REFUSE;
 				KT_ASSERT_ER(ob_wri_rec(kw, OB_WR_DROP, 0, &an, sizeof(an), &asz), E_OK);
-				Kfree(many);
 			}
+			if ( many != NULL ) Kfree(many);
+			if ( mw != NULL ) Kfree(mw);
 		}
 		if ( dr != NULL ) {
 			Kfree(dr);
@@ -1604,10 +1642,9 @@ LOCAL void test_window( void )
 	}
 
 	/* a panel in it: an object, and each of its parts one */
-	def = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	def = wm_panel_new(2);
 	KT_ASSERT(def != NULL);
 	if ( def == NULL ) return;
-	knl_memset(def, 0, sizeof(*def));
 	def->num = 1;
 	def->r.left = 10;  def->r.top = 10;  def->r.right = 200;  def->r.bottom = 100;
 	def->npart = 2;
@@ -1622,7 +1659,7 @@ LOCAL void test_window( void )
 	def->part[1].r.right = 80;  def->part[1].r.bottom = 50;
 	def->part[1].label[0] = 'c';  def->part[1].label[1] = 'k';
 	pid = wm_panel_open(wid, def);
-	Kfree(def);
+	wm_panel_free(def);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 
@@ -1642,7 +1679,7 @@ LOCAL void test_window( void )
 
 	KT_ASSERT_ER(ob_ref_obj(&part1, &r), E_OK);
 	KT_ASSERT_EQ(r.sub, OB_S_PART);
-	KT_ASSERT_EQ(r.name[0], 'c');
+	KT_ASSERT(kt_name_starts(&part1, "c"));
 	kpart = ob_opn_obj(&part1, OB_OP_ALL);
 	KT_ASSERT(kpart > 0);
 	if ( kpart > 0 ) {
@@ -1957,7 +1994,7 @@ LOCAL void test_parts( void )
 	KT_ASSERT_ER(ob_ref_obj(&part, &r), E_OK);
 	KT_ASSERT_EQ(r.type, OB_T_WINDOW);
 	KT_ASSERT_EQ(r.sub, OB_S_PART);
-	KT_ASSERT(has(r.name, s_len((CONST char *)r.name), "push"));
+	KT_ASSERT(kt_name_has(&part, "push"));
 	kpart = ob_opn_obj(&part, OB_OP_ALL);
 	KT_ASSERT(kpart > 0);
 	if ( kpart <= 0 ) return;
@@ -2222,6 +2259,7 @@ LOCAL void test_media( void )
 {
 	TS_UUID		list[16], ch, dev;
 	T_OBREF		r;
+	UB		*dn = NULL;		/* the disk's name, whole */
 	T_OBNTF		req;
 	T_OBNTM		m;
 	INT		cnt = 0, i;
@@ -2232,10 +2270,14 @@ LOCAL void test_media( void )
 	for ( i = 0; i < cnt && !found; i++ ) {
 		/* a medium said to go takes its mounts with it: one with none (design 12.2.3),
 		   and not the system volume's, which would go with it */
-		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_DISK && !mounted_under(r.name)
-		  && !on_sysvol_disk(r.name) ) {
+		if ( ob_ref_obj(&list[i], &r) < E_OK || r.sub != OB_S_DISK ) continue;
+		dn = kt_name(&list[i]);
+		if ( dn != NULL && !mounted_under(dn) && !on_sysvol_disk(dn) ) {
 			dev = list[i];
 			found = TRUE;
+		} else if ( dn != NULL ) {
+			Kfree(dn);
+			dn = NULL;
 		}
 	}
 	if ( !found ) KT_SKIP("no disk");
@@ -2248,9 +2290,9 @@ LOCAL void test_media( void )
 	KT_ASSERT(ob_ntf_evt(key, OB_REC_ANY, &req, port) > 0);
 
 	/* a driver says the medium went, and came back */
-	knl_obdev_media(r.name, FALSE);
+	knl_obdev_media(dn, FALSE);
 	KT_ASSERT(take_one(port, OB_E_DETACH, &dev));
-	knl_obdev_media(r.name, TRUE);
+	knl_obdev_media(dn, TRUE);
 	KT_ASSERT(take_one(port, OB_E_ATTACH, &dev));
 	/* nothing came or went: nothing is told */
 	knl_obdev_changed();
@@ -2259,6 +2301,7 @@ LOCAL void test_media( void )
 	ob_cls_obj(key);
 	ob_cls_obj(port);
 	(void)ob_del_obj(&ch);
+	Kfree(dn);
 }
 
 /* ---------------------------------------------------------------- shared memory */
@@ -3092,10 +3135,15 @@ LOCAL void test_sound_object( void )
 
 	KT_ASSERT_ER(ob_lst_obj(OB_T_DEVICE, OB_S_SOUND, NULL, list, 32, &cnt), E_OK);
 	for ( i = 0; i < cnt && !found; i++ ) {
-		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_SOUND
-		  && r.name[0] == 's' && r.name[4] == 0 ) {
-			snd = list[i];
-			found = TRUE;
+		if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_SOUND ) {
+			/* a device of four letters from 's' ("snda"), not a stream of it */
+			UB	*nm = kt_name(&list[i]);
+
+			if ( nm != NULL && nm[0] == 's' && knl_strlen((CONST char *)nm) == 4 ) {
+				snd = list[i];
+				found = TRUE;
+			}
+			if ( nm != NULL ) Kfree(nm);
 		}
 	}
 	if ( !found ) KT_SKIP("no sound device");
@@ -3169,7 +3217,7 @@ LOCAL BOOL wait_window( CONST char *name, TS_UUID *out, INT ms )
 		if ( ( cnt = kt_lst_obj(OB_T_WINDOW, 0, &list) ) >= 0 ) {
 			for ( i = 0; i < cnt && !found; i++ ) {
 				if ( ob_ref_obj(&list[i], &r) >= E_OK && r.sub == OB_S_WINDOW
-				  && has(r.name, s_len((CONST char *)r.name), name) ) {
+				  && kt_name_has(&list[i], name) ) {
 					*out = list[i];
 					found = TRUE;
 				}
@@ -3537,6 +3585,157 @@ out:
 	}
 }
 
+/* ---------------------------------------------------------------- names longer than 63 bytes */
+
+#define LN_CHARS	150		/* letters of three bytes: 450 bytes, well past the 63 of before */
+
+/* n letters of hiragana from start, UTF-8, in memory to Kfree */
+LOCAL UB *ln_make( INT n, UW start )
+{
+	UB	*s = (UB *)Kmalloc((SZ)n * 3 + 1);
+	INT	i;
+
+	if ( s == NULL ) return NULL;
+	for ( i = 0; i < n; i++ ) {
+		UW	c = 0x3042 + ( start + (UW)i ) % 80;	/* あ to ゐ */
+
+		s[i * 3] = (UB)( 0xE0 | ( c >> 12 ) );
+		s[i * 3 + 1] = (UB)( 0x80 | ( ( c >> 6 ) & 0x3F ) );
+		s[i * 3 + 2] = (UB)( 0x80 | ( c & 0x3F ) );
+	}
+	s[n * 3] = 0;
+	return s;
+}
+
+/* Whether p is how s begins */
+LOCAL BOOL ln_prefix( CONST UB *p, CONST UB *s )
+{
+	while ( *p != 0 && *p == *s ) { p++; s++; }
+	return (BOOL)( *p == 0 );
+}
+
+/* Whether the object is named want, whole, through ob_ref_nam; and the fixed form cut at a whole letter */
+LOCAL BOOL ln_named( CONST TS_UUID *u, CONST UB *want )
+{
+	UB	*nm, small[10];
+	SZ	len = 0, need = 0;
+	T_OBREF	r;
+	BOOL	ok;
+
+	nm = knl_ob_name(u, &len, NULL);
+	ok = (BOOL)( nm != NULL && len == (SZ)knl_strlen((CONST char *)want)
+		     && knl_strcmp((CONST char *)nm, (CONST char *)want) == 0 );
+	if ( nm != NULL ) Kfree(nm);
+
+	/* a room too small: what fits, at a whole letter, and the size it takes */
+	if ( ob_ref_nam(u, small, sizeof(small), &need) < E_OK || need != (SZ)knl_strlen((CONST char *)want) + 1
+	  || knl_strlen((CONST char *)small) != 9 ) {
+		ok = FALSE;
+	}
+	/* T_OBREF says how long the name is */
+	if ( ob_ref_obj(u, &r) < E_OK || r.namelen != (UINT)knl_strlen((CONST char *)want) ) {
+		ok = FALSE;
+	}
+	return ok;
+}
+
+/* An object of a volume named long: made, read, renamed, listed, and read again from the medium */
+LOCAL void ln_on( CONST char *vol, UINT store )
+{
+	T_OBCRE	c;
+	TS_UUID	u, *ids = NULL, from;
+	UB	*a = ln_make(LN_CHARS, 0), *b = ln_make(LN_CHARS + 50, 7);
+	INT	cnt = 0, k;
+	BOOL	listed = FALSE, first = TRUE;
+
+	if ( a == NULL || b == NULL ) {
+		if ( a != NULL ) Kfree(a);
+		if ( b != NULL ) Kfree(b);
+		KT_SKIP("no memory");
+	}
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_FILE;
+	c.vol = vol;
+	c.name = a;
+	KT_ASSERT_ER(ob_cre_obj(&c, &u), E_OK);
+	KT_ASSERT(ln_named(&u, a));
+
+	/* renamed longer still */
+	KT_ASSERT_ER(om_store_rename(&u, b), E_OK);
+	KT_ASSERT(ln_named(&u, b));
+
+	/* listed: every object, a page at a time, until it comes */
+	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * 64);
+	while ( ids != NULL && !listed ) {
+		if ( ob_lst_obj(OB_T_STORAGE, 0, first ? NULL : &from, ids, 64, &cnt) < E_OK || cnt <= 0 ) break;
+		for ( k = 0; k < cnt && k < 64; k++ ) {
+			if ( ts_uuid_cmp(&ids[k], &u) == 0 ) listed = TRUE;
+		}
+		if ( cnt < 64 ) break;
+		from = ids[63];
+		first = FALSE;
+	}
+	KT_ASSERT(listed);
+	if ( ids != NULL ) Kfree(ids);
+
+	/* from the medium: the volume taken off and put back */
+	KT_ASSERT_ER(ob_det_vol(vol), E_OK);
+	KT_ASSERT_ER(ob_att_vol(vol, store), E_OK);
+	KT_ASSERT(ln_named(&u, b));
+
+	KT_ASSERT_ER(ob_del_obj(&u), E_OK);
+	Kfree(a);
+	Kfree(b);
+}
+
+LOCAL void test_long_name( void )
+{
+	T_OBCRE	c;
+	TS_UUID	u, f;
+	UB	*n = ln_make(LN_CHARS, 3);
+
+	if ( n == NULL ) KT_SKIP("no memory");
+
+	/* a channel found by its name: the whole of it, not its first 63 bytes */
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_CHANNEL;
+	c.sub = OB_S_QUEUE;
+	c.flags = OB_F_GLOBAL;
+	c.name = n;
+	KT_ASSERT_ER(ob_cre_obj(&c, &u), E_OK);
+	KT_ASSERT(ln_named(&u, n));
+	KT_ASSERT_ER(ob_fnd_nam(n, &f), E_OK);
+	KT_ASSERT_EQ(ts_uuid_cmp(&f, &u), 0);
+	n[63] = 0;			/* the 63 bytes a name was cut to before find nothing now */
+	KT_ASSERT_ER(ob_fnd_nam(n, &f), E_NOEXS);
+	KT_ASSERT_ER(ob_del_obj(&u), E_OK);
+	Kfree(n);
+
+	/* memory, its name given with its metadata */
+	n = ln_make(LN_CHARS, 11);
+	if ( n == NULL ) KT_SKIP("no memory");
+	knl_memset(&c, 0, sizeof(c));
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_MEMORY;
+	c.name = n;
+	KT_ASSERT_ER(ob_cre_obj(&c, &u), E_OK);
+	KT_ASSERT(ln_named(&u, n));
+	KT_ASSERT_ER(ob_del_obj(&u), E_OK);
+	Kfree(n);
+
+	/* the FAT store's objects, and the native store's */
+	if ( ob_att_vol(STORE, 0) >= E_OK || store_up ) {
+		store_up = TRUE;
+		ln_on(STORE, 0);
+	}
+	if ( NATDEV != NULL && ( ob_att_vol(NATDEV, TSFS_STORE_BLK) >= E_OK
+	  || ( ts_format_blk(NATDEV, "OBJECTS") >= E_OK && ob_att_vol(NATDEV, TSFS_STORE_BLK) >= E_OK ) ) ) {
+		ln_on(NATDEV, TSFS_STORE_BLK);
+		(void)ob_det_vol(NATDEV);
+	}
+}
+
 EXPORT void ktest_ob( void )
 {
 	KT_RUN(test_hash);
@@ -3567,6 +3766,7 @@ EXPORT void ktest_ob( void )
 	KT_RUN_SCREEN(test_app_from_box);
 	KT_RUN(test_fs_guard);
 	KT_RUN(test_native);
+	KT_RUN(test_long_name);
 	KT_RUN(test_icon);
 	KT_RUN(test_domain);
 	KT_RUN_SCREEN(test_plugin);

@@ -131,6 +131,11 @@
  *	  sync [S]		the desktop's own task come round its loop and found no
  *				input left (all that was put in before taken and done),
  *				waited for up to S seconds (60): "ok MS" since the mark
+ *	  kanji [S]		the かな漢字変換 engine (mozc) up, waited for up to S seconds
+ *				(60): "ok MS" since the mark; "err no kanji" when it is not
+ *				there or did not come up. It starts behind the desktop and
+ *				may be up before the machine was kept, which a console line
+ *				of a later run cannot tell
  */
 
 #include <sys/machine.h>
@@ -144,11 +149,13 @@
 #include <ts/ob.h>
 #include <ts/uuid.h>
 #include <ts/dtreq.h>
+#include <ts/sysdef.h>
 #include <ts/proc.h>
 #include <ts/om.h>
 #include <ts/fs.h>
 #include <ts/lockup.h>
 #include <ts/figtool.h>
+#include <ts/kconv.h>
 #include "desktop.h"
 
 #ifdef USE_UITEST
@@ -210,10 +217,19 @@ LOCAL void say( CONST char *s )
 #define UT_ROM_NES	"01a0d8c4-5500-7f01-8b12-3c4d5e6f7b70"
 #define UT_ROM_SFC	"01a0d8c4-5501-7f01-8b12-3c4d5e6f7b71"
 
-/* An object of the given UUID holding the ROM in a record of its own, made if not there */
+/*
+ * An object of the given UUID holding the ROM in a record of its own, made
+ * if not there. It is the person's, as a game the person keeps is: an
+ * emulator given its link from a process's window (a figure) acts on it
+ * with its own rights, and writes the states it keeps into it. The
+ * protection is given, since an object made with a UUID of its own is the
+ * system's otherwise.
+ */
 LOCAL ER ut_rom_store( CONST char *id, CONST char *json, CONST UB *rom, SZ n )
 {
+	CONST T_OBCRD	*pc = knl_ob_session_crd();
 	T_OBCRE	c;
+	T_OBPRT	prt;
 	TS_UUID	u, got;
 	INT	recno = -1;
 	SZ	asz = 0;
@@ -233,9 +249,14 @@ LOCAL ER ut_rom_store( CONST char *id, CONST char *json, CONST UB *rom, SZ n )
 	c.uuid = u;
 	c.json = (CONST UB *)json;
 	c.jsonsz = (SZ)knl_strlen(json);
-	knl_ob_make_for_person(TRUE);
+	knl_memset(&prt, 0, sizeof(prt));
+	prt.mode = 0644;
+	if ( pc != NULL ) {
+		prt.owner = pc->user;
+		if ( pc->ngrp > 0 ) prt.group = pc->grp[0];
+	}
+	c.prt = &prt;
 	er = ob_cre_obj(&c, &got);
-	knl_ob_make_for_person(FALSE);
 	if ( er >= E_OK ) {
 		key = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE | OB_OP_RECORD | OB_O_EXCL);
 		er = ( key > 0 ) ? E_OK : (ER)key;
@@ -761,7 +782,7 @@ LOCAL BOOL link_named( CONST char *title, CONST char *name, T_DPRECT *p_box )
 	T_TAD		*rec = NULL, *own = NULL;
 	T_TVFIG		*fig = NULL, *made = NULL;
 	TS_UUID		shown;
-	UB		nm[TAD_NAME_MAX];
+	UB		*nm;
 	INT		wid = 0, tries, x, y, which, cw, ch, sx = 0, sy = 0;
 	BOOL		found = FALSE;
 
@@ -787,22 +808,27 @@ LOCAL BOOL link_named( CONST char *title, CONST char *name, T_DPRECT *p_box )
 		page.right = cw;
 		page.bottom = ch;
 	}
-	v = ( fig != NULL ) ? (T_VOBJ *)Kmalloc(sizeof(T_VOBJ)) : NULL;
+	v = ( fig != NULL ) ? (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ)) : NULL;
 	for ( y = 0; v != NULL && y < ch && !found; y += 4 ) {
 		for ( x = 0; x < cw && !found; x += 8 ) {
 			if ( tv_fig_at(fig, &page, sx, sy, rec, x, y, v, &box, &which) < E_OK ) {
 				continue;
 			}
-			if ( om_store_name(&v->target, nm, sizeof(nm)) > 0 && same_title((CONST char *)nm, name) ) {
+			nm = om_store_name_dup(&v->target, NULL);	/* compared whole */
+			if ( nm != NULL && nm[0] != 0 && same_title((CONST char *)nm, name) ) {
 				p_box->left = w.work.left + box.left;
 				p_box->top = w.work.top + box.top;
 				p_box->right = w.work.left + box.right;
 				p_box->bottom = w.work.top + box.bottom;
 				found = TRUE;
 			}
+			if ( nm != NULL ) Kfree(nm);
 		}
 	}
-	if ( v != NULL ) Kfree(v);
+	if ( v != NULL ) {
+		tad_vobj_clear(v);
+		Kfree(v);
+	}
 	if ( made != NULL ) tv_fig_free(made);
 	if ( own != NULL ) tad_free(own);
 	return found;
@@ -1001,7 +1027,7 @@ LOCAL BOOL big_of( CONST char *us, TS_UUID *u )
 LOCAL void pfig( CONST char *prog, CONST char *us )
 {
 	CONST DTPROG	*p = dt_prog_find((CONST UB *)prog);
-	T_VOBJ		*v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	T_VOBJ		*v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	ER		er = E_NOEXS;
 
 	if ( v == NULL ) {
@@ -1021,6 +1047,7 @@ LOCAL void pfig( CONST char *prog, CONST char *us )
 	if ( er >= E_OK ) {
 		er = dt_prog_run(NULL, p, v);
 	}
+	tad_vobj_clear(v);
 	Kfree(v);
 	say(( er >= E_OK ) ? "ok\n" : "err not started\n");
 }
@@ -1040,22 +1067,27 @@ LOCAL void linkbig( CONST char *s )
 		say("err linkbig X Y, after mkbig\n");
 		return;
 	}
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	UB	*nm;
+
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	if ( v == NULL ) {
 		say("err no memory\n");
 		return;
 	}
-	knl_memset(v, 0, sizeof(*v));
 	v->target = ut_big;
 	v->recno = -1;
 	v->frcol = v->chcol = v->tbcol = v->bgcol = TAD_COL_NONE;
 	v->disp = TAD_D_DEFAULT;
 	v->zoom = 100;
-	(void)om_store_name(&ut_big, v->name, TAD_NAME_MAX);
+	if ( ( nm = om_store_name_dup(&ut_big, NULL) ) != NULL ) {
+		(void)tad_vobj_set(v, TAD_W_NAME, nm, -1);
+		Kfree(nm);
+	}
 	v->right = tad_lnk_least_w(v) * 4;
 	v->bottom = tad_lnk_closed_h(v);
 	v->height = v->bottom;
 	ok = dt_drop_links_at(NULL, x, y, x, y, v, 1);
+	tad_vobj_clear(v);
 	Kfree(v);
 	say(ok ? "ok\n" : "err no window there takes links\n");
 }
@@ -1086,6 +1118,103 @@ LOCAL void open_obj( CONST char *us )
 	if ( k > 0 ) ob_cls_obj(k);
 	Kfree(rq);
 	say(( er >= E_OK ) ? "ok\n" : "err not opened\n");
+}
+
+/*
+ * "openapp UUID APPLIST": the object opened as a link of a program's
+ * window opens it, carrying its applist (DT_F_APPLIST, design 11.3):
+ * the rest of the line is the link's applist, its 固有データ with it.
+ * "openput": the object the last DT_RQ_LINK_PUT put on the desktop
+ * opened, as a double press on its link opens it.
+ */
+IMPORT TS_UUID	dt_ut_put_last;
+
+LOCAL void open_app( CONST char *s )
+{
+	T_DTREQ	*rq;
+	TS_UUID	d;
+	char	us[40];
+	SZ	asz = 0, al, cap;
+	ID	k;
+	INT	i;
+	ER	er;
+
+	s = skip(s);
+	for ( i = 0; i < (INT)sizeof(us) - 1 && s[i] != 0 && s[i] != ' '; i++ ) us[i] = s[i];
+	us[i] = 0;
+	s = skip(s + i);
+	for ( al = 0; s[al] != 0; al++ ) ;
+	/* the applist in the request's tail (DT_TAIL_APPLIST), as long as it is */
+	cap = dt_tail_room(al);
+	rq = (T_DTREQ *)Kmalloc(sizeof(T_DTREQ) + (size_t)cap);
+	if ( rq == NULL ) {
+		say("err no memory\n");
+		return;
+	}
+	knl_memset(rq, 0, sizeof(*rq));
+	rq->req = DT_RQ_OPEN;
+	rq->recno = -1;
+	er = ts_str_to_uuid(us, &rq->target);
+	if ( al > 0 ) {
+		rq->flags |= DT_F_APPLIST;
+		(void)dt_tail_put((UB *)( rq + 1 ), &rq->tailsz, cap, DT_TAIL_APPLIST, (CONST UB *)s, al);
+	}
+	if ( er >= E_OK ) er = ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d);
+	k = ( er >= E_OK ) ? ob_opn_obj(&d, OB_OP_WRITE) : (ID)er;
+	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, (SZ)sizeof(T_DTREQ) + (SZ)rq->tailsz, &asz) : (ER)k;
+	if ( k > 0 ) ob_cls_obj(k);
+	Kfree(rq);
+	say(( er >= E_OK ) ? "ok\n" : "err not opened\n");
+}
+
+LOCAL void open_put( void )
+{
+	char	us[40];
+
+	(void)ts_uuid_to_str(&dt_ut_put_last, us, sizeof(us));
+	open_obj(us);
+}
+
+/*
+ * "openputlink": the link the last DT_RQ_LINK_PUT put in the first window,
+ * read back from the cabinet's record as the first window saved it (its
+ * own applist with it), opened as a double press on it opens it
+ */
+LOCAL void open_put_link( void )
+{
+	TS_UUID	cab;
+	UB	*x;
+	SZ	n = 0;
+	T_TAD	*doc = NULL;
+	T_VOBJ	v = { .recno = 0 }, e = { .recno = 0 };
+	INT	i, k;
+	BOOL	found = FALSE;
+
+	tad_vobj_init(&v);
+	tad_vobj_init(&e);
+	if ( ts_str_to_uuid(SYSDEF_CABINET, &cab) < E_OK || ( x = om_obj_record(&cab, 0, &n) ) == NULL ) {
+		say("err no cabinet\n");
+		return;
+	}
+	if ( tad_parse(x, n, NULL, &doc) >= E_OK && doc != NULL ) {
+		k = tad_lnk_count(doc);
+		for ( i = 0; i < k; i++ ) {
+			if ( tad_lnk_get(doc, i, &e) >= E_OK && ts_uuid_cmp(&e.target, &dt_ut_put_last) == 0 ) {
+				found = ( tad_vobj_copy(&v, &e) >= E_OK );
+			}
+		}
+		tad_free(doc);
+	}
+	Kfree(x);
+	tad_vobj_clear(&e);
+	if ( !found ) {
+		say("err not there\n");
+		return;
+	}
+	tm_printf((UB *)"uitest: link put has applist of %d bytes\n", (INT)v.vapplist_len);
+	dt_open_vobj(NULL, &v);
+	tad_vobj_clear(&v);
+	say("ok\n");
 }
 
 /*
@@ -1478,7 +1607,7 @@ LOCAL ER xml_made( T_TAD *rec, CONST char *title, CONST T_DPRECT *o )
 		return er;
 	}
 	om_store_set_window(&u, o);
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	if ( v == NULL ) {
 		return E_NOMEM;
 	}
@@ -1487,6 +1616,7 @@ LOCAL ER xml_made( T_TAD *rec, CONST char *title, CONST T_DPRECT *o )
 	v->recno = -1;
 	v->frcol = v->chcol = v->tbcol = v->bgcol = TAD_COL_NONE;
 	er = dt_open_as(NULL, v, (CONST UB *)"virtual-object-list");
+	tad_vobj_clear(v);
 	Kfree(v);
 	return er;
 }
@@ -2095,7 +2225,7 @@ LOCAL BOOL last_link( CONST TS_UUID *u, TS_UUID *p_to )
 	UB	*x;
 	SZ	n = 0;
 	T_TAD	*doc = NULL;
-	T_VOBJ	v;
+	T_VOBJ	v = { .recno = 0 };
 	INT	c;
 	BOOL	got = FALSE;
 
@@ -2103,6 +2233,7 @@ LOCAL BOOL last_link( CONST TS_UUID *u, TS_UUID *p_to )
 	if ( x == NULL ) {
 		return FALSE;
 	}
+	tad_vobj_init(&v);
 	if ( tad_parse(x, n, NULL, &doc) >= E_OK && doc != NULL ) {
 		c = tad_lnk_count(doc);
 		if ( c > 0 && tad_lnk_get(doc, c - 1, &v) >= E_OK ) {
@@ -2111,6 +2242,7 @@ LOCAL BOOL last_link( CONST TS_UUID *u, TS_UUID *p_to )
 		}
 		tad_free(doc);
 	}
+	tad_vobj_clear(&v);
 	Kfree(x);
 	return got;
 }
@@ -2142,12 +2274,12 @@ LOCAL void rec_sum( CONST char *us )
 	UB	*buf;
 	SZ	at = 0, asz = 0;
 	UD	h = 0xCBF29CE484222325ULL;
-	char	b[64 + TAD_NAME_MAX];
-	UB	nm[TAD_NAME_MAX];
+	char	b[64];
+	UB	*nm;
 	INT	n = 0, i;
 	ER	er = E_OK;
 	BOOL	show = FALSE, anon = FALSE, link = FALSE, res = FALSE, pdf = FALSE, keys = FALSE;
-	UB	rn[TAD_NAME_MAX];
+	UB	rn[UT_LINE];
 
 	for ( ;; ) {
 		if ( word(&us, "pdf") ) {
@@ -2262,13 +2394,16 @@ read:
 	for ( i = 15; i >= 0; i-- ) {
 		b[n++] = "0123456789abcdef"[( h >> ( i * 4 ) ) & 0xF];
 	}
-	if ( link && om_store_name(&u, nm, sizeof(nm)) > 0 ) {
-		b[n++] = ' ';
-		for ( i = 0; nm[i] != 0 && n < (INT)sizeof(b) - 2; i++ ) b[n++] = (char)nm[i];
-	}
-	b[n++] = '\n';
 	b[n] = 0;
 	say(b);
+	/* the object's name, whole, after it */
+	nm = link ? om_store_name_dup(&u, NULL) : NULL;
+	if ( nm != NULL && nm[0] != 0 ) {
+		say(" ");
+		say((CONST char *)nm);
+	}
+	if ( nm != NULL ) Kfree(nm);
+	say("\n");
 }
 
 /* "objects [new]": how many objects the volumes keep, or how many more than at the last count */
@@ -2379,6 +2514,23 @@ LOCAL void sync_desk( CONST char *s )
 		return;
 	}
 	ut_sync = 0;
+	say_ms(ut_now() - ut_mark);
+}
+
+/* Up to S seconds for the かな漢字変換 engine to be up */
+LOCAL void kanji_up( CONST char *s )
+{
+	INT	secs = 60;
+	UW	start = ut_now();
+
+	(void)num(&s, &secs, FALSE);
+	while ( !kc_kanji() && (INT)( ut_now() - start ) < secs * 1000 ) {
+		tk_dly_tsk(20);
+	}
+	if ( !kc_kanji() ) {
+		say("err no kanji\n");
+		return;
+	}
 	say_ms(ut_now() - ut_mark);
 }
 
@@ -2536,7 +2688,7 @@ LOCAL void line( CONST char *s )
 		 * NAME in the window WINDOW dragged from its middle to X, Y,
 		 * wherever it stands among the others
 		 */
-		char		title[WM_TITLE_MAX], name[TAD_NAME_MAX];
+		char		title[WM_TITLE_MAX], name[UT_LINE];
 		T_DPRECT	box;
 
 		if ( !token(&s, title, sizeof(title)) || !token(&s, name, sizeof(name))
@@ -2631,6 +2783,12 @@ LOCAL void line( CONST char *s )
 		pfig("basic-text-editor", skip(s));
 	} else if ( word(&s, "pcab") ) {
 		pfig("virtual-object-list", skip(s));
+	} else if ( word(&s, "openapp") ) {
+		open_app(s);
+	} else if ( word(&s, "openputlink") ) {
+		open_put_link();
+	} else if ( word(&s, "openput") ) {
+		open_put();
 	} else if ( word(&s, "open") ) {
 		open_obj(skip(s));
 	} else if ( word(&s, "apps") ) {
@@ -2725,6 +2883,8 @@ LOCAL void line( CONST char *s )
 		wait_win(s);
 	} else if ( word(&s, "sync") ) {
 		sync_desk(s);
+	} else if ( word(&s, "kanji") ) {
+		kanji_up(s);
 	} else if ( word(&s, "wifitest") ) {
 		if ( knl_wifi_test_card != NULL ) {
 			knl_wifi_test_card();

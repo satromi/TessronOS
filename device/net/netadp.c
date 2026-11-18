@@ -104,7 +104,6 @@ IMPORT void	knl_so_slaac_relink( void ) __attribute__((weak));
 #define ADP_FIRST_TRIES	50		/* at the start, the setting asked for again while it is being written, */
 #define ADP_FIRST_MS	100		/* every 100 ms, up to 5 seconds */
 #define ADP_LOOK_MS	1000		/* a card that says nothing of its link, looked at */
-#define ADP_TEXT	1024
 #define ADP_F_LINK	1		/* a driver said a link or a card changed */
 
 #ifdef X64
@@ -115,9 +114,10 @@ LOCAL CONST char *CONST adp_name[NETSEL_N] = { "eth", "e1k", "cdcnet", "wifi", "
 
 LOCAL ID	adp_mtx;
 LOCAL ID	adp_flg = 0;
-LOCAL UB	adp_text[ADP_TEXT];
+/* the record, made as long as it needs (knl_oj_make; Kfree), and changed with LOCK held */
+LOCAL UB	*adp_text = NULL;
 LOCAL INT	adp_tlen = 0;
-LOCAL UB	adp_told[ADP_TEXT];		/* the record without the measured values, as last told */
+LOCAL UB	*adp_told = NULL;		/* the record without the measured values, as last told */
 LOCAL INT	adp_toldlen = -1;
 LOCAL TS_UUID	adp_uuid;
 LOCAL BOOL	adp_obj = FALSE;
@@ -144,7 +144,7 @@ LOCAL BOOL differ( CONST UB *a, CONST UB *b, INT n )
 
 /* ---------------------------------------------------------------- the device object */
 
-LOCAL INT put_mac( UB *t, INT n, CONST UB *m )
+LOCAL INT put_mac( UB *t, INT n, INT max, CONST UB *m )
 {
 	static CONST char hex[] = "0123456789abcdef";
 	char	s[18];
@@ -155,14 +155,15 @@ LOCAL INT put_mac( UB *t, INT n, CONST UB *m )
 		s[i * 3 + 1] = hex[m[i] & 15];
 		s[i * 3 + 2] = ( i == NET_MAC_LEN - 1 ) ? '\0' : ':';
 	}
-	return knl_oj_put(t, n, ADP_TEXT, s);
+	return knl_oj_put(t, n, max, s);
 }
 
 /*
- * The record as the cards are now: its length. Without measured (what
- * is told of), the Wi-Fi's signal and rate are left out.
+ * The record as the cards are now, into t of max bytes: its length, or
+ * -1 when it does not fit (knl_oj_make makes the room larger). Without
+ * measured (what is told of), the Wi-Fi's signal and rate are left out.
  */
-LOCAL INT adp_make( UB *t, BOOL measured )
+LOCAL INT adp_make( UB *t, INT max, BOOL measured )
 {
 	T_NETSTAT	st;
 	UB		m[NET_MAC_LEN];
@@ -171,16 +172,16 @@ LOCAL INT adp_make( UB *t, BOOL measured )
 	char		num[16];
 	CONST T_NETDRV	*d;
 
-	n = knl_oj_put(t, n, ADP_TEXT, "SELECT ");
-	n = knl_oj_put(t, n, ADP_TEXT, ( adp_select < 0 ) ? "auto" : adp_name[adp_select]);
-	n = knl_oj_put(t, n, ADP_TEXT, "\nUSING ");
-	n = knl_oj_put(t, n, ADP_TEXT, adp_name[knl_netsel_card()]);
-	n = knl_oj_put(t, n, ADP_TEXT, "\n");
+	n = knl_oj_put(t, n, max, "SELECT ");
+	n = knl_oj_put(t, n, max, ( adp_select < 0 ) ? "auto" : adp_name[adp_select]);
+	n = knl_oj_put(t, n, max, "\nUSING ");
+	n = knl_oj_put(t, n, max, adp_name[knl_netsel_card()]);
+	n = knl_oj_put(t, n, max, "\n");
 	for ( c = 0; c < NETSEL_N; c++ ) {
 		if ( knl_netsel_mac(c, m) < E_OK ) continue;
 		if ( c == NETSEL_WIFI ) {
 #if USE_WIFI
-			n = knl_wifi_line(t, n, ADP_TEXT, measured);
+			n = knl_wifi_line(t, n, max, measured);
 #endif
 			continue;
 		}
@@ -194,34 +195,39 @@ LOCAL INT adp_make( UB *t, BOOL measured )
 		} else if ( d != NULL ) {
 			speed = d->speed(d->ctx);
 		}
-		n = knl_oj_put(t, n, ADP_TEXT, "ADAPTER ");
-		n = knl_oj_put(t, n, ADP_TEXT, adp_name[c]);
-		n = knl_oj_put(t, n, ADP_TEXT, st.up ? " wired up " : " wired down ");
+		n = knl_oj_put(t, n, max, "ADAPTER ");
+		n = knl_oj_put(t, n, max, adp_name[c]);
+		n = knl_oj_put(t, n, max, st.up ? " wired up " : " wired down ");
 		(void)cf_itoa(speed, num);
-		n = knl_oj_put(t, n, ADP_TEXT, num);
-		n = knl_oj_put(t, n, ADP_TEXT, " ");
-		n = put_mac(t, n, m);
+		n = knl_oj_put(t, n, max, num);
+		n = knl_oj_put(t, n, max, " ");
+		n = put_mac(t, n, max, m);
 		if ( c == NETSEL_VNET ) {
 #if defined(X64) || defined(QEMU_VIRT)
-			n = knl_oj_put(t, n, ADP_TEXT, " virtio-net\n");
+			n = knl_oj_put(t, n, max, " virtio-net\n");
 #else
-			n = knl_oj_put(t, n, ADP_TEXT, " Ethernet\n");
+			n = knl_oj_put(t, n, max, " Ethernet\n");
 #endif
 		} else if ( c == NETSEL_E1K ) {
-			n = knl_oj_put(t, n, ADP_TEXT, " Intel Ethernet 8086:");
+			n = knl_oj_put(t, n, max, " Intel Ethernet 8086:");
 			num[0] = "0123456789abcdef"[( devid >> 12 ) & 15];
 			num[1] = "0123456789abcdef"[( devid >> 8 ) & 15];
 			num[2] = "0123456789abcdef"[( devid >> 4 ) & 15];
 			num[3] = "0123456789abcdef"[devid & 15];
 			num[4] = '\0';
-			n = knl_oj_put(t, n, ADP_TEXT, num);
-			n = knl_oj_put(t, n, ADP_TEXT, "\n");
+			n = knl_oj_put(t, n, max, num);
+			n = knl_oj_put(t, n, max, "\n");
 		} else if ( d != NULL ) {
-			n = knl_oj_put(t, n, ADP_TEXT, " ");
-			n += d->label(d->ctx, t + n, ADP_TEXT - n);
-			n = knl_oj_put(t, n, ADP_TEXT, "\n");
+			n = knl_oj_put(t, n, max, " ");
+			if ( n >= 0 ) {
+				/* a label that filled the room may have been cut: made again in more */
+				INT	k = d->label(d->ctx, t + n, max - n);
+
+				n = ( n + k >= max - 1 ) ? -1 : n + k;
+			}
+			n = knl_oj_put(t, n, max, "\n");
 		} else {
-			n = knl_oj_put(t, n, ADP_TEXT, " USB LAN\n");
+			n = knl_oj_put(t, n, max, " USB LAN\n");
 		}
 	}
 	return n;
@@ -308,28 +314,50 @@ LOCAL CONST T_OBDVOPS adp_ops = { OB_S_NET, "adapters", 2, 0644, 0, 0, adp_text_
  * reader told reads what made it, and what changes after that read is
  * told again.
  */
+LOCAL INT adp_make_all( void *ctx, UB *t, INT max )
+{
+	(void)ctx;
+	return adp_make(t, max, TRUE);
+}
+
+LOCAL INT adp_make_told( void *ctx, UB *t, INT max )
+{
+	(void)ctx;
+	return adp_make(t, max, FALSE);
+}
+
 LOCAL void adp_refresh( void )
 {
-	UB	*t = (UB *)Kmalloc(ADP_TEXT * 2), *k;
+	UB	*t = NULL, *k = NULL, *old_t = NULL, *old_k = NULL;
 	INT	n, kn;
 	BOOL	told;
 
-	if ( t == NULL ) return;
-	k = t + ADP_TEXT;
-	n = adp_make(t, TRUE);
-	kn = adp_make(k, FALSE);
-	LOCK();
-	if ( n != adp_tlen || differ(t, adp_text, n) ) {
-		knl_memcpy(adp_text, t, n);
-		adp_tlen = n;
+	n = knl_oj_make(adp_make_all, NULL, &t);
+	kn = ( n >= 0 ) ? knl_oj_make(adp_make_told, NULL, &k) : n;
+	if ( n < 0 || kn < 0 ) {
+		tm_printf((UB *)"netadp: the record of the adapters could not be made (%d)\n", ( n < 0 ) ? n : kn);
+		if ( t != NULL ) Kfree(t);
+		return;
 	}
-	told = ( kn != adp_toldlen || differ(k, adp_told, kn) );
+	LOCK();
+	if ( n != adp_tlen || adp_text == NULL || differ(t, adp_text, n) ) {
+		old_t = adp_text;
+		adp_text = t;
+		adp_tlen = n;
+		t = NULL;
+	}
+	told = ( kn != adp_toldlen || adp_told == NULL || differ(k, adp_told, kn) );
 	if ( told ) {
-		knl_memcpy(adp_told, k, kn);
+		old_k = adp_told;
+		adp_told = k;
 		adp_toldlen = kn;
+		k = NULL;
 	}
 	UNLOCK();
-	Kfree(t);
+	if ( t != NULL ) Kfree(t);
+	if ( k != NULL ) Kfree(k);
+	if ( old_t != NULL ) Kfree(old_t);
+	if ( old_k != NULL ) Kfree(old_k);
 	if ( told && adp_obj ) knl_obdev_post(&adp_uuid, OB_NET_STATE, OB_E_CHANGE, NULL);
 }
 

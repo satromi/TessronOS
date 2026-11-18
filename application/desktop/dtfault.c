@@ -320,7 +320,7 @@ LOCAL T_WMPANEL *build( void )
 	BOOL		kcall = (BOOL)( f->kind == TS_FLT_KCALL || kpan );
 	T_WMPANEL	*def = dt_pn_new(FT_W, FT_H);
 	T_WMPART	*pt;
-	UB		b[WM_LABEL_MAX], nm[OB_NAME_MAX + 1];
+	UB		b[WM_LABEL_MAX], nm[WM_LABEL_MAX - 24];	/* what fits in the row with "(pid N)" */
 	CONST char	*head;
 	INT		n;
 
@@ -466,7 +466,7 @@ LOCAL void show( CONST T_PRCFLT *f, UW others )
 		o.bottom = o.top + ph + 40;
 		ft->wid = wm_open(&o, WM_ATTR_FRAME | WM_ATTR_TITLE, "プログラムの異常終了");
 		if ( ft->wid < 0 ) {
-			Kfree(def);
+			wm_panel_free(def);
 			Kfree(ft);
 			ft = NULL;
 			return;
@@ -487,7 +487,7 @@ LOCAL void show( CONST T_PRCFLT *f, UW others )
 	def->r.right = pw;
 	def->r.bottom = ph;
 	ft->pid = wm_panel_open(ft->wid, def);
-	Kfree(def);
+	wm_panel_free(def);
 	if ( ft->pid < 0 ) {
 		ft_close();
 		return;

@@ -81,6 +81,12 @@ IMPORT ER om_set_vob( ID vid, CONST T_OMREG *reg );
  * because those make it the link it is.
  */
 IMPORT ER om_upd_vob( ID vid, CONST T_VOBJ *vobj );
+/*
+ * The register keeps a copy of the link, its words with it (tad_vobj_copy).
+ * om_ref_vob gives the caller a copy of its own in pk_vobj->vobj, which
+ * is to be empty or hold a link (its old words are let go), and which
+ * the caller clears (tad_vobj_clear) when done with it.
+ */
 IMPORT ER om_ref_vob( ID vid, T_OMVOBJ *pk_vobj );
 IMPORT ER om_fnd_vob( CONST TS_UUID *vobjid, ID *p_vid );
 IMPORT INT om_cnt_vob( void );
@@ -166,7 +172,36 @@ IMPORT T_TAD *om_store_get( CONST TS_UUID *id, INT recno );
  * 9.1.1) is that object's resource "_0_1.png". NULL: none.
  */
 IMPORT void  om_store_self( CONST TS_UUID *id );
+/*
+ * What an object is called. om_store_name puts what fits of it in buf,
+ * cut at a whole letter and 0 ended, and answers the length of the
+ * whole name as snprintf does (more than max - 1 when it was cut); -1
+ * when it has none. om_store_name_dup answers the whole name in memory
+ * of its own (Kfree it), its length in *p_len; NULL when it has none or
+ * there is no memory for it.
+ */
 IMPORT INT   om_store_name( CONST TS_UUID *id, UB *buf, INT max );
+IMPORT UB   *om_store_name_dup( CONST TS_UUID *id, SZ *p_len );
+
+/*
+ * A string written as a JSON string, its quotes and all: '"', '\' and
+ * every control letter (below 0x20) escaped, \uXXXX for those without a
+ * short form. len < 0: s is 0 ended. Answers how many bytes that comes
+ * to; they are put in out only when max holds them all (out NULL, or max
+ * too small, only asks), and a 0 follows when there is room for it.
+ * om_json_quote_dup answers it in memory of its own, 0 ended (Kfree it),
+ * its length in *p_n; NULL when there is no memory.
+ */
+IMPORT SZ    om_json_quote( UB *out, SZ max, CONST UB *s, SZ len );
+IMPORT UB   *om_json_quote_dup( CONST UB *s, SZ len, SZ *p_n );
+/*
+ * The JSON string whose opening quote is at b[at], looking no further
+ * than b[to], its escapes undone (\uXXXX, surrogate pairs too, made
+ * UTF-8; \u0000 and a lone surrogate become U+FFFD): in memory of its
+ * own, 0 ended (Kfree it), its length in *p_len. NULL when b[at] is not
+ * a quote or there is no memory.
+ */
+IMPORT UB   *om_json_unquote( CONST UB *b, SZ at, SZ to, SZ *p_len );
 
 /*
  * A record written back to its file, as it now stands: what was changed,
@@ -203,10 +238,14 @@ IMPORT ER    om_store_set_paper( CONST TS_UUID *id, UW colour );
 IMPORT INT   om_store_relationship( CONST TS_UUID *id, UB *buf, INT max );
 IMPORT ER    om_store_set_relationship( CONST TS_UUID *id, CONST UB *tags );
 
-/* The programs the applist names, by the names they are shown under */
-#define OM_APP_NAME	64
-IMPORT INT   om_store_apps( CONST TS_UUID *id, UB (*names)[OM_APP_NAME],
-			    INT max );
+/*
+ * The programs the applist names, by the names they are shown under, in
+ * its order: each whole, in memory of its own, in an array of its own;
+ * *p_n how many (0 and NULL when it names none, E_NOMEM and NULL when
+ * the memory runs out). om_apps_free lets the array and its names go.
+ */
+IMPORT UB  **om_store_apps( CONST TS_UUID *id, INT *p_n );
+IMPORT void  om_apps_free( UB **names, INT n );
 
 /*
  * The identity of the program at a place of the applist (the order of
@@ -237,26 +276,30 @@ IMPORT ER    om_store_set_default_app( CONST TS_UUID *id, CONST UB *app );
  */
 IMPORT UB   *om_store_app_icon( CONST UB *app, SZ *p_size );
 
-/* What the metadata says of an object, for 管理情報 */
-#define OM_INFO_TEXT	40
+/*
+ * What the metadata says of an object, for 管理情報, every text whole: in
+ * memory of the structure's own, "" for what the metadata does not say;
+ * om_store_info_free lets it go.
+ */
 typedef struct {
-	UB	name[TAD_NAME_MAX];
-	UB	maker[OM_INFO_TEXT];
-	UB	made[OM_INFO_TEXT];
-	UB	updated[OM_INFO_TEXT];
-	UB	accessed[OM_INFO_TEXT];
+	UB	*name;
+	UB	*maker;
+	UB	*made;
+	UB	*updated;
+	UB	*accessed;
 	INT	refs;
 	INT	records;
 	INT	bytes;			/* of record 0 */
-} T_OMINFO;
-IMPORT ER    om_store_info( CONST TS_UUID *id, T_OMINFO *info );
+} T_OMINFOV;
+IMPORT ER    om_store_info_v( CONST TS_UUID *id, T_OMINFOV *info );
+IMPORT void  om_store_info_free( T_OMINFOV *info );
 
 /*
  * The programs a link opens with: those of the object's applist, or,
  * when the object has none, those of the applist the link carries.
  */
-IMPORT INT   om_link_apps( CONST T_VOBJ *v, UB (*names)[OM_APP_NAME], INT max );
-/* How many programs om_link_apps gives: room for all of them */
+IMPORT UB  **om_link_apps( CONST T_VOBJ *v, INT *p_n );
+/* How many programs om_link_apps gives */
 IMPORT INT  om_link_napps( CONST T_VOBJ *v );
 IMPORT INT   om_link_app_id( CONST T_VOBJ *v, INT index, UB *buf, INT max );
 IMPORT INT   om_link_default_app( CONST T_VOBJ *v, UB *buf, INT max );
@@ -275,6 +318,19 @@ IMPORT INT   om_link_default_app( CONST T_VOBJ *v, UB *buf, INT max );
 IMPORT BOOL  om_link_locked( CONST T_VOBJ *v );
 IMPORT ER    om_link_ran( CONST T_VOBJ *v, CONST UB *app );
 IMPORT ER    om_link_lock( T_VOBJ *v, BOOL keep );
+
+/*
+ * 固有データ of an applist entry (design 11.3): the string "data" of the
+ * entry keyed app, which the system does not read but gives the program
+ * as it is started. The link's own applist comes first (lapp, as the
+ * link holds it: T_VOBJ's vapplist; NULL none), then the object's;
+ * whether the link is fixed to its program (defaultOpenLock) does not
+ * matter. The data as long as it is, its \" and \ read, ending in 0, in
+ * memory of its own (Kfree it), *p_len its length; NULL when neither
+ * says any (or no memory). om_link_lock keeps the link's own data.
+ */
+IMPORT UB   *om_app_data( CONST TS_UUID *target, CONST UB *lapp, CONST UB *app, SZ *p_len );
+IMPORT UB   *om_link_app_data( CONST T_VOBJ *v, CONST UB *app, SZ *p_len );
 
 /*
  * What a link's band says, as the link asks (the name, " : " and the
@@ -452,7 +508,6 @@ IMPORT ER om_draw_open( INT gid, CONST T_DPRECT *rect, CONST T_VOBJ *vobj,
  * IMG_CLEAR where it is clear. NULL for either draws the link's own
  * name, or the turned leaf.
  */
-#define OM_LOOK_TEXT	( TAD_NAME_MAX + TAD_REL_MAX * 2 + 96 )
 typedef struct {
 	CONST UB	*text;
 	CONST UW	*icon;

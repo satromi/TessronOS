@@ -233,6 +233,42 @@ LOCAL TS_TIME now_time( void )
 
 /* ---------------------------------------------------------------- superblock */
 
+EXPORT SZ ts_label_whole( CONST UB *s, SZ len )
+{
+	SZ	k = len, need;
+	UB	lead;
+
+	while ( k > 0 && ( s[k - 1] & 0xC0 ) == 0x80 ) {
+		k--;				/* back over what continues the last letter */
+	}
+	if ( k == 0 ) {
+		return 0;			/* nothing but continuations */
+	}
+	lead = s[k - 1];
+	need = ( lead < 0x80 ) ? 1 : ( ( lead & 0xE0 ) == 0xC0 ) ? 2 : ( ( lead & 0xF0 ) == 0xE0 ) ? 3
+	     : ( ( lead & 0xF8 ) == 0xF0 ) ? 4 : 1;
+	return ( k - 1 + need > len ) ? k - 1 : len;
+}
+
+/*
+ * The label's copy the superblock keeps: its first bytes, cut at a whole
+ * letter, nought filled. The label itself is the name of the volume's
+ * top object (design 7.6); the copy is for a system before and for
+ * what reads the superblock alone.
+ */
+LOCAL void label_put( UB *to, CONST UB *label )
+{
+	SZ	n = 0;
+
+	knl_memset(to, 0, TSFSBLK_LABEL_MAX);
+	if ( label == NULL ) {
+		return;
+	}
+	while ( label[n] != 0 ) n++;
+	n = knl_utf8_fit(label, n, TSFSBLK_LABEL_MAX - 1);
+	knl_memcpy(to, label, n);
+}
+
 LOCAL void sb_pack( CONST T_TSFSBLK_SB *sb, UB *buf )
 {
 	INT	i;
@@ -294,6 +330,14 @@ LOCAL ER sb_unpack( CONST UB *buf, T_TSFSBLK_SB *sb )
 	sb->generation    = rd64(buf + SB_GEN);
 	cpy16(sb->vol_uuid.b, buf + SB_VOLUUID);
 	for ( i = 0; i < TSFSBLK_LABEL_MAX; i++ ) sb->label[i] = buf[SB_LABEL + i];
+	{
+		SZ	n, w;
+
+		/* a copy a system before cut in the middle of a letter is read to the last whole one */
+		for ( n = 0; n < TSFSBLK_LABEL_MAX - 1 && sb->label[n] != 0; n++ ) ;
+		w = ts_label_whole(sb->label, n);
+		knl_memset(sb->label + w, 0, (INT)( TSFSBLK_LABEL_MAX - w ));
+	}
 	sb->total_blocks  = rd64(buf + SB_TOTAL);
 	sb->free_blocks   = rd64(buf + SB_FREE);
 	sb->ag_blocks     = rd64(buf + SB_AGBLOCKS);
@@ -1184,9 +1228,7 @@ EXPORT ER ts_format_blk( CONST char *devnm, CONST char *label )
 	sb.state          = TSFSBLK_ST_CLEAN;
 	sb.mkfs_time      = (UD)now_time();
 	ts_gen_uuid(&sb.vol_uuid);		/* an unset clock only costs the UUID */
-	for ( i = 0; i < TSFSBLK_LABEL_MAX - 1 && label != NULL && label[i] != '\0'; i++ ) {
-		sb.label[i] = (UB)label[i];
-	}
+	label_put(sb.label, (CONST UB *)label);
 
 	/* the journal holds no record */
 	knl_memset(buf, 0, TSFSBLK_BLOCK_SIZE);
@@ -2048,6 +2090,33 @@ EXPORT ER ts_blk_xt2( ID vol )
 	} else if ( ( v->sb.incompat & TSFSBLK_INCOMPAT_XT2 ) == 0 ) {
 		v->sb.incompat |= TSFSBLK_INCOMPAT_XT2;
 		v->sb_dirty = TRUE;
+	}
+	tk_unl_mtx(v->mtxid);
+
+	return er;
+}
+
+EXPORT ER ts_set_label_blk( ID vol, CONST UB *label )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	UB		cp[TSFSBLK_LABEL_MAX];
+	INT		i;
+	ER		er = E_OK;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	label_put(cp, label);
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	for ( i = 0; i < TSFSBLK_LABEL_MAX && v->sb.label[i] == cp[i]; i++ ) ;
+	if ( i == TSFSBLK_LABEL_MAX ) {
+		;				/* the copy says it already */
+	} else if ( v->rdonly ) {
+		er = E_RONLY;
+	} else {
+		knl_memcpy(v->sb.label, cp, TSFSBLK_LABEL_MAX);
+		v->sb_dirty = TRUE;
+		er = cache_flush(v);
 	}
 	tk_unl_mtx(v->mtxid);
 

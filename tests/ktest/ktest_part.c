@@ -35,6 +35,9 @@
 LOCAL INT	wid = 0;
 LOCAL BOOL	ready = FALSE;
 
+/* the parts a test definition has room for: more than any test here puts in one */
+#define KT_PN_ROOM	16
+
 LOCAL void ev_at( T_WMEV *ev, UINT type, INT x, INT y )
 {
 	ev->type = type;
@@ -120,7 +123,7 @@ LOCAL void test_copied( void )
 
 	if ( !ready ) KT_SKIP("no window");
 
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 
@@ -133,14 +136,14 @@ LOCAL void test_copied( void )
 
 	pid = wm_panel_open(wid, d);
 	KT_ASSERT(pid > 0);
-	if ( pid <= 0 ) { Kfree(d); return; }
+	if ( pid <= 0 ) { wm_panel_free(d); return; }
 
 	/* changing the caller's own definition afterwards changes nothing */
 	d->part[0].value = 0;
 	d->npart = 0;
 	KT_ASSERT_ER(wm_panel_get(pid, 7, &v), E_OK);
 	KT_ASSERT_EQ(v, 1);
-	Kfree(d);				/* and freeing it is safe */
+	wm_panel_free(d);				/* and freeing it is safe */
 
 	KT_ASSERT_ER(wm_panel_get(pid, 7, &v), E_OK);
 	KT_ASSERT_EQ(v, 1);
@@ -160,7 +163,7 @@ LOCAL void test_choice( void )
 
 	if ( !ready ) KT_SKIP("no window");
 
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 
@@ -174,7 +177,7 @@ LOCAL void test_choice( void )
 	d->part[0].value = 1;
 
 	pid = wm_panel_open(wid, d);
-	Kfree(d);
+	wm_panel_free(d);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 	KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
@@ -223,7 +226,7 @@ LOCAL void test_answer( void )
 
 	if ( !ready ) KT_SKIP("no window");
 
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 
@@ -237,7 +240,7 @@ LOCAL void test_answer( void )
 	part_set(&d->part[2], WM_PT_LABEL, 3, 10, 10, 150, 30);
 
 	pid = wm_panel_open(wid, d);
-	Kfree(d);
+	wm_panel_free(d);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 
@@ -259,7 +262,7 @@ LOCAL void test_answer( void )
 	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
 
 	/* a button that acts answers once and leaves the panel going */
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 	d->num = 2;  d->owner = 0;
@@ -268,7 +271,7 @@ LOCAL void test_answer( void )
 	part_set(&d->part[0], WM_PT_BUTTON, 1, 10, 50, 70, 80);
 	d->part[0].answer = WM_ANS_ACT + 3;
 	pid = wm_panel_open(wid, d);
-	Kfree(d);
+	wm_panel_free(d);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 	ev_at(&ev, HID_EV_BTN_DOWN, 30 + 20, 30 + 60);
@@ -282,7 +285,7 @@ LOCAL void test_answer( void )
 	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
 
 	/* a label takes nothing, so pressing one answers nothing */
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 	d->num = 2;  d->owner = 0;
@@ -290,7 +293,7 @@ LOCAL void test_answer( void )
 	d->npart = 1;
 	part_set(&d->part[0], WM_PT_LABEL, 1, 10, 10, 150, 30);
 	pid = wm_panel_open(wid, d);
-	Kfree(d);
+	wm_panel_free(d);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 	ev_at(&ev, HID_EV_BTN_DOWN, 30 + 20, 30 + 20);
@@ -311,7 +314,7 @@ LOCAL void test_escape( void )
 
 	if ( !ready ) KT_SKIP("no window");
 
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 	d->num = 5;  d->owner = 0;
@@ -320,7 +323,7 @@ LOCAL void test_escape( void )
 	part_set(&d->part[0], WM_PT_BUTTON, 1, 10, 10, 70, 40);
 	d->part[0].answer = WM_ANS_OK;
 	pid = wm_panel_open(wid, d);
-	Kfree(d);
+	wm_panel_free(d);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 
@@ -558,6 +561,70 @@ LOCAL void test_menu_many( void )
 	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
 }
 
+/*
+ * A panel has as many parts as its definition gives: a definition built
+ * a part at a time, past any number a table might once have been fixed
+ * at, opens with all of them; one whose table cannot be made, or that
+ * lost a part as it was built, is not opened and says why.
+ */
+#define KT_MANY_PARTS	300
+#define KT_MANY_COLS	24
+
+LOCAL void test_many( void )
+{
+	T_WMPANEL	*d, *e;
+	T_WMPART	*pt;
+	INT		pid, i, x, y, v = -1;
+
+	if ( !ready ) KT_SKIP("no window");
+	d = wm_panel_new(0);
+	KT_ASSERT(d != NULL);
+	if ( d == NULL ) return;
+	d->num = 41;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
+	d->r.left = 0;  d->r.top = 0;  d->r.right = 470;  d->r.bottom = 260;
+	for ( i = 0; i < KT_MANY_PARTS; i++ ) {
+		pt = wm_panel_part_add(d);
+		KT_ASSERT(pt != NULL);
+		if ( pt == NULL ) break;
+		x = 2 + ( i % KT_MANY_COLS ) * 19;
+		y = 2 + ( i / KT_MANY_COLS ) * 19;
+		part_set(pt, WM_PT_CHECK, i + 1, x, y, x + 18, y + 18);
+		pt->value = ( i == KT_MANY_PARTS - 1 ) ? 1 : 0;
+	}
+	KT_ASSERT_EQ(d->npart, KT_MANY_PARTS);
+	KT_ASSERT(!d->lost);
+
+	pid = wm_panel_open(wid, d);
+	KT_ASSERT(pid > 0);
+	if ( pid > 0 ) {
+		KT_ASSERT_ER(wm_panel_get(pid, KT_MANY_PARTS, &v), E_OK);	/* the last is there */
+		KT_ASSERT_EQ(v, 1);
+		KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
+		KT_ASSERT_EQ(wm_panel_self_check(), 0);
+		KT_ASSERT_ER(wm_panel_close(pid), E_OK);
+	}
+
+	/* the panel's own table cannot be made: not opened, E_NOMEM */
+	knl_pn_test_nomem_parts(1);
+	KT_ASSERT_EQ(wm_panel_open(wid, d), E_NOMEM);
+	knl_pn_test_nomem_parts(0);
+	KT_ASSERT_EQ(wm_panel_self_check(), 0);
+	wm_panel_free(d);
+
+	/* a part that could not be added leaves the definition one that is not opened */
+	e = wm_panel_new(0);
+	KT_ASSERT(e != NULL);
+	if ( e == NULL ) return;
+	e->num = 42;
+	e->r.left = 0;  e->r.top = 0;  e->r.right = 100;  e->r.bottom = 60;
+	knl_pn_test_nomem_parts(1);
+	KT_ASSERT(wm_panel_part_add(e) == NULL);
+	knl_pn_test_nomem_parts(0);
+	KT_ASSERT(e->lost);
+	KT_ASSERT_EQ(wm_panel_open(wid, e), E_NOMEM);
+	wm_panel_free(e);
+}
+
 /* the table fills up and says so rather than overwriting something */
 LOCAL void test_limit( void )
 {
@@ -567,7 +634,7 @@ LOCAL void test_limit( void )
 
 	if ( !ready ) KT_SKIP("no window");
 
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 	d->num = 9;  d->owner = 0;
@@ -585,9 +652,12 @@ LOCAL void test_limit( void )
 	d->r.right = d->r.left;
 	KT_ASSERT_EQ(wm_panel_open(wid, d), E_PAR);
 	d->r.right = 60;
-	d->npart = WM_PART_MAX + 1;
+	d->npart = -1;
 	KT_ASSERT_EQ(wm_panel_open(wid, d), E_PAR);
-	Kfree(d);
+	d->npart = d->room + 1;				/* more parts than its table holds */
+	KT_ASSERT_EQ(wm_panel_open(wid, d), E_PAR);
+	d->npart = 0;
+	wm_panel_free(d);
 
 	for ( i = 0; i < n; i++ ) {
 		KT_ASSERT_ER(wm_panel_close(pid[i]), E_OK);
@@ -614,7 +684,7 @@ LOCAL void test_label( void )
 	if ( fn_system() == 0 ) KT_SKIP("no system font");
 	if ( ts_disp_ref(&spec) < E_OK ) KT_SKIP("the machine has no screen");
 
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 	d->num = 8;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
@@ -626,7 +696,7 @@ LOCAL void test_label( void )
 	d->part[0].label[2] = 0;
 
 	pid = wm_panel_open(wid, d);
-	Kfree(d);
+	wm_panel_free(d);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 	KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
@@ -683,7 +753,7 @@ LOCAL void test_list( void )
 
 	if ( !ready ) KT_SKIP("no window");
 
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 	d->num = 11;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
@@ -841,7 +911,7 @@ LOCAL void test_names_big( void )
 
 	u0 = knl_Iused(&a0);
 	for ( round = 0; round < 3; round++ ) {
-		d = (T_WMPANEL *)Kcalloc(1, sizeof(T_WMPANEL));
+		d = wm_panel_new(KT_PN_ROOM);
 		KT_ASSERT(d != NULL);
 		if ( d == NULL ) break;
 		d->num = 40;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
@@ -972,7 +1042,7 @@ LOCAL void test_box( void )
 
 	if ( !ready ) KT_SKIP("no window");
 
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 	d->num = 12;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
@@ -981,7 +1051,7 @@ LOCAL void test_box( void )
 	part_set(&d->part[0], WM_PT_BOX, 1, 10, 10, 200, 36);
 
 	pid = wm_panel_open(wid, d);
-	Kfree(d);
+	wm_panel_free(d);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 
@@ -1170,14 +1240,22 @@ LOCAL void test_menu_look( void )
 LOCAL void test_dbox( void )
 {
 	T_WMPANEL	*d, *back;
+	UB		*flat;
 	INT		n, pid;
+	SZ		fs = WM_PANEL_BYTES(1);
 
 	KT_ASSERT(knl_db_init() != 0);
 
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
-	back = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
-	KT_ASSERT(d != NULL && back != NULL);
-	if ( d == NULL || back == NULL ) return;
+	d = wm_panel_new(KT_PN_ROOM);
+	flat = (UB *)Kcalloc(1, fs);
+	back = (T_WMPANEL *)Kcalloc(1, fs);
+	KT_ASSERT(d != NULL && flat != NULL && back != NULL);
+	if ( d == NULL || flat == NULL || back == NULL ) {
+		wm_panel_free(d);
+		if ( flat != NULL ) Kfree(flat);
+		if ( back != NULL ) Kfree(back);
+		return;
+	}
 
 	d->num = 30;  d->owner = 7;  d->kind = WM_PNL_PLAIN;
 	d->r.left = 10;  d->r.top = 10;  d->r.right = 210;  d->r.bottom = 90;
@@ -1185,23 +1263,25 @@ LOCAL void test_dbox( void )
 	part_set(&d->part[0], WM_PT_BUTTON, 1, 10, 10, 90, 40);
 	d->part[0].answer = WM_ANS_OK;
 
-	KT_ASSERT_ER(db_put(DB_PANEL, 30, 7, d, sizeof(T_WMPANEL)), E_OK);
-	KT_ASSERT_EQ(db_size(DB_PANEL, 30, 7), (INT)sizeof(T_WMPANEL));
+	/* the box keeps the definition as bytes: the definition, its parts after it */
+	cpy(flat, (CONST char *)d, (INT)sizeof(T_WMPANEL));
+	cpy(flat + sizeof(T_WMPANEL), (CONST char *)&d->part[0], (INT)sizeof(T_WMPART));
+	KT_ASSERT_ER(db_put(DB_PANEL, 30, 7, flat, fs), E_OK);
+	KT_ASSERT_EQ(db_size(DB_PANEL, 30, 7), (INT)fs);
 
 	/* what comes back is a copy, not the caller's own */
-	d->npart = 99;
-	n = db_get(DB_PANEL, 30, 7, back, sizeof(T_WMPANEL));
-	KT_ASSERT_EQ(n, (INT)sizeof(T_WMPANEL));
+	((T_WMPANEL *)flat)->npart = 99;
+	n = db_get(DB_PANEL, 30, 7, back, fs);
+	KT_ASSERT_EQ(n, (INT)fs);
 	KT_ASSERT_EQ(back->npart, 1);
 
 	/* a number is not a name: another owner's 30 is another panel */
-	KT_ASSERT_EQ(db_get(DB_PANEL, 30, 8, back, sizeof(T_WMPANEL)), E_NOEXS);
+	KT_ASSERT_EQ(db_get(DB_PANEL, 30, 8, back, fs), E_NOEXS);
 
 	/* the system's own is what a program falls back on */
-	d->npart = 1;
-	KT_ASSERT_ER(db_put(DB_PANEL, 31, 0, d, sizeof(T_WMPANEL)), E_OK);
-	KT_ASSERT_EQ(db_get(DB_PANEL, 31, 8, back, sizeof(T_WMPANEL)),
-		     (INT)sizeof(T_WMPANEL));
+	((T_WMPANEL *)flat)->npart = 1;
+	KT_ASSERT_ER(db_put(DB_PANEL, 31, 0, flat, fs), E_OK);
+	KT_ASSERT_EQ(db_get(DB_PANEL, 31, 8, back, fs), (INT)fs);
 
 	/* too little room says so and writes nothing */
 	KT_ASSERT_EQ(db_get(DB_PANEL, 30, 7, back, 8), E_LIMIT);
@@ -1214,15 +1294,23 @@ LOCAL void test_dbox( void )
 			KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
 			KT_ASSERT_ER(wm_panel_close(pid), E_OK);
 		}
+		/* bytes that say more parts than they hold, or fewer than none, are not a definition */
+		((T_WMPANEL *)flat)->npart = 2;
+		KT_ASSERT_ER(db_put(DB_PANEL, 32, 7, flat, fs), E_OK);
+		KT_ASSERT_EQ(wm_panel_open_box(wid, 32, 7), E_PAR);
+		((T_WMPANEL *)flat)->npart = -1;
+		KT_ASSERT_ER(db_put(DB_PANEL, 32, 7, flat, fs), E_OK);
+		KT_ASSERT_EQ(wm_panel_open_box(wid, 32, 7), E_PAR);
 	}
 
 	/* what a program owned goes when it does */
-	KT_ASSERT_EQ(db_del_owner(7), 1);
-	KT_ASSERT_EQ(db_get(DB_PANEL, 30, 7, back, sizeof(T_WMPANEL)), E_NOEXS);
+	KT_ASSERT(db_del_owner(7) >= 1);
+	KT_ASSERT_EQ(db_get(DB_PANEL, 30, 7, back, fs), E_NOEXS);
 	KT_ASSERT_ER(db_del(DB_PANEL, 31, 0), E_OK);
 	KT_ASSERT_ER(db_del(DB_PANEL, 31, 0), E_NOEXS);
 
-	Kfree(d);
+	wm_panel_free(d);
+	Kfree(flat);
 	Kfree(back);
 }
 
@@ -1234,7 +1322,7 @@ LOCAL void test_volume( void )
 
 	if ( !ready ) KT_SKIP("no window");
 
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 	d->num = 13;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
@@ -1247,7 +1335,7 @@ LOCAL void test_volume( void )
 	d->part[0].value = 50;
 
 	pid = wm_panel_open(wid, d);
-	Kfree(d);
+	wm_panel_free(d);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 	KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
@@ -1272,7 +1360,7 @@ LOCAL void test_boxes( void )
 
 	if ( !ready ) KT_SKIP("no window");
 
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 	d->num = 14;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
@@ -1294,7 +1382,7 @@ LOCAL void test_boxes( void )
 	}
 
 	pid = wm_panel_open(wid, d);
-	Kfree(d);
+	wm_panel_free(d);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 	KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
@@ -1379,7 +1467,7 @@ LOCAL void test_popup_warn( void )
 
 	if ( !ready ) KT_SKIP("no window");
 
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 	d->num = 15;  d->owner = 0;  d->kind = WM_PNL_WARN;
@@ -1499,12 +1587,12 @@ LOCAL void test_popup_box( void )
 	ER		er;
 
 	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_BOX_SYSENV, &box), E_OK);
-	d = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 	er = knl_pn_load(&box, 14, d, NULL, 0);
 	if ( er == E_NOEXS ) {
-		Kfree(d);
+		wm_panel_free(d);
 		KT_SKIP("no system data box");
 	}
 	KT_ASSERT_ER(er, E_OK);
@@ -1536,15 +1624,9 @@ LOCAL void test_centre( void )
 	UB		txt[8];
 
 	if ( !ready ) KT_SKIP("no window");
-	def = (T_WMPANEL *)Kmalloc(sizeof(T_WMPANEL));
+	def = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(def != NULL);
 	if ( def == NULL ) return;
-	{
-		UB	*z = (UB *)def;
-		SZ	k;
-
-		for ( k = 0; k < (SZ)sizeof(*def); k++ ) z[k] = 0;
-	}
 	def->num = 7;
 	def->r.left = 10;  def->r.top = 10;
 	def->r.right = 310;  def->r.bottom = 130;	/* only the size counts */
@@ -1553,7 +1635,7 @@ LOCAL void test_centre( void )
 	part_set(&def->part[1], WM_PT_BUTTON, 2, 200, 80, 280, 106);
 	def->part[1].answer = WM_ANS_OK;
 	pid = wm_panel_open_centre(wid, def);
-	Kfree(def);
+	wm_panel_free(def);
 	KT_ASSERT(pid > 0);
 	if ( pid <= 0 ) return;
 
@@ -1639,7 +1721,7 @@ LOCAL void test_scroll_draw( void )
 	INT		gid, i, k, at;
 
 	if ( !ready ) KT_SKIP("no window");
-	d = (T_WMPANEL *)Kcalloc(1, sizeof(T_WMPANEL));
+	d = wm_panel_new(KT_PN_ROOM);
 	KT_ASSERT(d != NULL);
 	if ( d == NULL ) return;
 	d->num = 30;  d->owner = 0;  d->kind = WM_PNL_BARE;
@@ -1722,5 +1804,6 @@ EXPORT void ktest_part( void )
 	KT_RUN(test_popup_warn);
 	KT_RUN(test_popup_box);
 	KT_RUN(test_scroll_draw);
+	KT_RUN(test_many);
 	KT_RUN(test_limit);
 }

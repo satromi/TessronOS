@@ -19,7 +19,7 @@
       "id": "virtual-object-network",
       "kind": "utility",
       "name": "仮身ネットワーク",
-      "version": "R1.400",
+      "version": "R1.410",
       "builtin": false,
       "base": []
     },

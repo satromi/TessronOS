@@ -104,16 +104,31 @@ typedef struct t_tad T_TAD;		/* one parsed document */
 
 /*
  * A virtual object: what a <link> element says (design 16.3.2, xmlTAD
- * specification 5.2). Lengths are the bytes kept here, not a limit of
- * the format; an attribute longer than its field is refused rather than
- * cut short, so that nothing is lost without being said. The applist
- * alone is not refused: the link's copy too long to keep is kept as the
- * entry the link opens with, the list being the object's.
+ * specification 5.2). Its words -- the name, the relationship, the
+ * applist and the viewMode -- are kept as long as the element has them,
+ * each a string of its own ending in 0 with its length beside it (vname
+ * and vname_len, vrel, vapplist, vview; NULL and 0 are an empty one:
+ * read them with TAD_VS). The T_VOBJ owns them:
+ *
+ *   tad_vobj_init	a T_VOBJ made empty (as zeroing it makes it), before
+ *			anything else is done with it
+ *   tad_vobj_clear	its words let go, and it empty again; whoever holds
+ *			a T_VOBJ clears it before letting it go or using it
+ *			for another link
+ *   tad_vobj_copy	dst made a copy of src, its own words, after its old
+ *			ones are let go: a T_VOBJ is never copied by
+ *			assignment, which would leave two owning the same
+ *			words. E_NOMEM leaves dst empty
+ *   tad_vobj_set	one of the words (TAD_W_NAME, TAD_W_REL, TAD_W_APPLIST,
+ *			TAD_W_VIEW) set to len bytes of s (len < 0: up to its
+ *			0), the old one let go; s NULL or len 0 makes it empty
+ *
+ * tad_lnk_get and tad_lnk_find fill a T_VOBJ that is empty or holds a
+ * link already (its words are let go first); tad_lnk_add and tad_lnk_set
+ * take copies of the words and leave the caller's T_VOBJ its own.
+ * The name, the relationship, the applist and the viewMode of a link are
+ * as long as they are (vname, vrel, vapplist, vview and their lengths).
  */
-#define TAD_NAME_MAX	192		/* the displayed name */
-#define TAD_REL_MAX	64		/* the relationship of this link */
-#define TAD_APPL_MAX	512		/* the applist of this link: the whole, or the entry it opens with */
-#define TAD_VIEW_MAX	16		/* viewMode */
 #define TAD_WRAP_NONE	0		/* wordWrap not said */
 #define TAD_WRAP_ON	1
 #define TAD_WRAP_OFF	2
@@ -142,9 +157,12 @@ typedef struct {
 	 */
 	TS_UUID	tvol;
 	TS_UUID	tmach;
-	UB	name[TAD_NAME_MAX];
-	UB	relationship[TAD_REL_MAX];
-	UB	applist[TAD_APPL_MAX];
+	UB	*vname;			/* the displayed name */
+	SZ	vname_len;
+	UB	*vrel;			/* the relationship of this link */
+	SZ	vrel_len;
+	UB	*vapplist;		/* the applist of this link, the whole of it */
+	SZ	vapplist_len;
 	INT	left, top, right, bottom, height;	/* a figure holds these */
 	INT	width, heightpx;			/* a document holds these */
 	UW	frcol, chcol, tbcol, bgcol;		/* 0x00rrggbb, or TAD_COL_NONE */
@@ -164,12 +182,28 @@ typedef struct {
 	 * "xml" for a figure; empty when it does not say) and wordWrap
 	 * (TAD_WRAP_*).
 	 */
-	UB	viewmode[TAD_VIEW_MAX];
+	UB	*vview;			/* viewMode */
+	SZ	vview_len;
 	INT	wordwrap;
 	INT	vobjheight;		/* the height a binary TAD gave it, kept as it is; 0 none */
 	BOOL	has_zindex;		/* zIndex: its place among the shapes of a figure */
 	INT	zindex;
 } T_VOBJ;
+
+#define TAD_VS(p)	( ( (p) != NULL ) ? (CONST UB *)(p) : (CONST UB *)"" )
+
+IMPORT void tad_vobj_init( T_VOBJ *v );
+IMPORT void tad_vobj_clear( T_VOBJ *v );
+IMPORT ER   tad_vobj_copy( T_VOBJ *dst, CONST T_VOBJ *src );
+#define TAD_W_NAME	0
+#define TAD_W_REL	1
+#define TAD_W_APPLIST	2
+#define TAD_W_VIEW	3
+IMPORT ER   tad_vobj_set( T_VOBJ *v, UINT word, CONST UB *s, SZ len );
+#if USE_KTEST
+/* The words held by T_VOBJs now, for the tests that look for one let go twice or not at all */
+IMPORT INT  tad_vobj_held( void );
+#endif
 
 /*
  * Reading and writing a document.

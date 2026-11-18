@@ -558,25 +558,37 @@ LOCAL ER svc_so_resolve( CONST char *name, UW *p_addr )
 	return er;
 }
 
-/* The addresses go through a list of the kernel's: up to RESOLVE_MAX of them */
-#define RESOLVE_MAX	16
+/*
+ * The addresses go through a list of the kernel's, as many as the
+ * program has room for: the list starts small and is made twice as
+ * large while it comes back full and the program has more room
+ */
+#define RESOLVE_FIRST	16
 
 LOCAL INT svc_so_resolveall( CONST char *name, INT family, INT flags, T_SOADDR *addrs, INT max )
 {
-	T_SOADDR	l[RESOLVE_MAX];
+	T_SOADDR	*l;
 	char		n[NAME_MAX];
-	INT		k;
+	INT		k, cap;
 	ER		er;
 
 	if ( name == NULL || addrs == NULL || max <= 0 ) return E_PAR;
-	if ( max > RESOLVE_MAX ) max = RESOLVE_MAX;
 	if ( !user_ok(addrs, (SZ)max * (SZ)sizeof(T_SOADDR), TRUE) ) return E_MACV;
 	er = name_in(name, n);
 	if ( er < E_OK ) return er;
-	k = so_resolveall(n, family, flags, l, max);
+	cap = ( max < RESOLVE_FIRST ) ? max : RESOLVE_FIRST;
+	for ( ;; ) {
+		l = (T_SOADDR *)Kmalloc((size_t)cap * sizeof(T_SOADDR));
+		if ( l == NULL ) return E_NOMEM;
+		k = so_resolveall(n, family, flags, l, cap);
+		if ( k < cap || cap >= max ) break;
+		Kfree(l);
+		cap = ( cap > max / 2 ) ? max : cap * 2;
+	}
 	if ( k > 0 ) {
 		knl_ua_put(addrs, l, (SZ)k * (SZ)sizeof(T_SOADDR));
 	}
+	Kfree(l);
 	return k;
 }
 

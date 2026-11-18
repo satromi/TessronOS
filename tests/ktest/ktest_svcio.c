@@ -209,7 +209,7 @@ LOCAL ER dev_obj( CONST char *name, TS_UUID *p_uuid )
 	}
 	if ( ob_lst_obj(OB_T_DEVICE, 0, NULL, list, 128, &cnt) >= E_OK ) {
 		for ( i = 0; i < cnt; i++ ) {
-			if ( ob_ref_obj(&list[i], &r) >= E_OK && str_is(r.name, name) ) {
+			if ( ob_ref_obj(&list[i], &r) >= E_OK && kt_name_is(&list[i], name) ) {
 				*p_uuid = list[i];
 				er = E_OK;
 				break;

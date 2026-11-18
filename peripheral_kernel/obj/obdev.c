@@ -72,11 +72,17 @@
 #define ENT_CLOCK	( -1 )		/* OBDHND.ent: the clock */
 #define ENT_LIST	( -2 )		/* the list of the devices */
 #define ENT_SYSTEM	( -3 )		/* the system (obsys.c) */
+/*
+ * Room for the name of a device the device management has (a T-Kernel
+ * device name, L_DEVNM bytes, and a subunit's number). A device added by
+ * name (knl_obdev_add) has a name of any length.
+ */
 #define OBD_NAME	OB_DV_NAME
 
 typedef struct {
 	BOOL	used;
-	UB	name[OBD_NAME];
+	UB	*name;			/* never NULL once the entry is used */
+	SZ	ncap;			/* the bytes name has room for */
 	TS_UUID	uuid;
 	BOOL	kept;			/* written in the device box */
 	BOOL	seen;			/* the device management has it now, or it was added */
@@ -117,7 +123,9 @@ LOCAL CONST W snd_dn[OB_SND_NREC] = {
 	-141, -142,			/* the outputs, and the one chosen */
 	-143, -144,			/* the mixer, and a volume set */
 	-145,				/* the monitor */
-	-146				/* the microphone */
+	-146,				/* the microphone */
+	-147, -148,			/* the outputs and the one chosen, ids and names whole */
+	-149				/* the mixer, every name whole */
 };
 
 /* A camera's records and the data numbers they are (OB_CAM_*, include/ts/cam.h) */
@@ -272,11 +280,27 @@ LOCAL INT ent_new( CONST UB *name )
 			obd_tbl = t;		/* the table before is not freed */
 		}
 		if ( !OBD(i).used ) {
+			UB	*nb = OBD(i).name;
+			SZ	cap = OBD(i).ncap;
+
+			for ( k = 0; name[k] != 0; k++ ) ;
+			if ( nb == NULL || cap < (SZ)k + 1 ) {
+				/*
+				 * room for the longer name; the room before is not
+				 * freed, as one who took the name without the lock
+				 * may read it still (an entry keeps its name)
+				 */
+				cap = ( (SZ)k + 1 > OBD_NAME ) ? (SZ)k + 1 : OBD_NAME;
+				nb = (UB *)Kmalloc(cap);
+				if ( nb == NULL ) {
+					return -1;
+				}
+			}
 			knl_memset(&OBD(i), 0, sizeof(OBDENT));
 			if ( i >= obd_hi ) obd_hi = i + 1;
-			for ( k = 0; name[k] != 0 && k < OBD_NAME - 1; k++ ) {
-				OBD(i).name[k] = name[k];
-			}
+			knl_memcpy(nb, name, (SZ)k + 1);
+			OBD(i).name = nb;
+			OBD(i).ncap = cap;
 			OBD(i).used = TRUE;
 			return i;
 		}
@@ -297,14 +321,22 @@ LOCAL void box_load( ID vol )
 		arr = knl_oj_path(j, len, "tessronos", "devices");
 		pos = arr;
 		while ( arr >= 0 && ( e = knl_oj_next(j, len, arr, &pos) ) >= 0 ) {
-			UB	name[OBD_NAME], us[TS_UUID_STRLEN + 1];
+			UB	*name, us[TS_UUID_STRLEN + 1];
 			TS_UUID	u;
 			INT	i;
 
-			if ( j[e] != '{'
-			  || knl_oj_str(j, len, knl_oj_member(j, len, e, "name"), name, sizeof(name)) < 0
+			if ( j[e] != '{' ) {
+				continue;
+			}
+			name = (UB *)Kmalloc((SZ)len + 1);	/* never longer than the text it is in */
+			if ( name == NULL ) {
+				tm_printf((UB *)"obdev: no memory for a name of the device box\n");
+				break;
+			}
+			if ( knl_oj_str(j, len, knl_oj_member(j, len, e, "name"), name, len + 1) < 0
 			  || knl_oj_str(j, len, knl_oj_member(j, len, e, "uuid"), us, sizeof(us)) < 0
 			  || ts_str_to_uuid((CONST char *)us, &u) < E_OK ) {
+				Kfree(name);
 				continue;
 			}
 			i = ent_by_name(name);
@@ -324,6 +356,7 @@ LOCAL void box_load( ID vol )
 					(void)knl_int_dev_target(name, (ID)v);
 				}
 			}
+			Kfree(name);
 		}
 	}
 	if ( j != NULL ) Kfree(j);
@@ -522,9 +555,9 @@ LOCAL void revoke( CONST UB *devnm )
 
 	for ( i = 0; i < obd_hi; i++ ) {
 		LOCK();
-		hit = ( OBD(i).used && name_under(OBD(i).name, devnm) );
+		hit = ( OBD(i).used && OBD(i).ops == NULL && name_under(OBD(i).name, devnm) );
 		if ( hit ) {
-			knl_memcpy(name, OBD(i).name, OBD_NAME);
+			(void)knl_ob_name_put(OBD(i).name, -1, name, OBD_NAME, NULL);
 			u = OBD(i).uuid;
 		}
 		UNLOCK();
@@ -811,7 +844,7 @@ EXPORT INT knl_obdev_disks( UB *buf, INT max )
 		LOCK();
 		if ( i == 0 ) refresh();
 		take = (BOOL)( OBD(i).used && OBD(i).seen && OBD(i).ops == NULL );
-		if ( take ) knl_memcpy(name, OBD(i).name, OBD_NAME);
+		if ( take ) (void)knl_ob_name_put(OBD(i).name, -1, name, OBD_NAME, NULL);	/* a T-Kernel device's */
 		UNLOCK();
 		if ( take && tk_ref_dev(name, &rd) >= E_OK && rd.blksz > 1 && !dev_is_sound(name) ) {
 			if ( buf != NULL ) knl_memcpy(buf + n * OBD_NAME, name, OBD_NAME);
@@ -1131,21 +1164,18 @@ LOCAL ER obd_ref( CONST TS_UUID *uuid, T_OBREF *r )
 	INT	i;
 
 	if ( is_clock(uuid) ) {
-		(void)knl_oj_put(r->name, 0, OB_NAME_MAX, "clock");
 		r->sub = OB_S_CLOCK;
 		r->flags = OB_F_VIRTUAL;
 		r->nrec = 2;
 		return E_OK;
 	}
 	if ( is_list(uuid) ) {
-		(void)knl_oj_put(r->name, 0, OB_NAME_MAX, "devices");
 		r->sub = OB_S_DEVLIST;
 		r->flags = OB_F_VIRTUAL;
 		r->nrec = 1;
 		return E_OK;
 	}
 	if ( is_system(uuid) ) {
-		(void)knl_oj_put(r->name, 0, OB_NAME_MAX, "system");
 		r->sub = OB_S_SYSTEM;
 		r->flags = OB_F_VIRTUAL;
 		r->nrec = OB_SYS_NREC;
@@ -1154,12 +1184,10 @@ LOCAL ER obd_ref( CONST TS_UUID *uuid, T_OBREF *r )
 	LOCK();
 	i = ent_by_uuid(uuid);
 	if ( i >= 0 && OBD(i).ops != NULL ) {
-		knl_memcpy(r->name, OBD(i).name, OBD_NAME);
 		r->sub = OBD(i).ops->sub;
 		r->flags = OB_F_VIRTUAL;
 		r->nrec = OBD(i).ops->nrec;
 	} else if ( i >= 0 ) {
-		knl_memcpy(r->name, OBD(i).name, OBD_NAME);
 		if ( dev_is_sound(OBD(i).name) ) {
 			r->sub = OB_S_SOUND;
 			r->nrec = OB_SND_NREC;
@@ -1253,6 +1281,66 @@ LOCAL BOOL medium_free( CONST UB *name )
 	return free;
 }
 
+/* Whether a device's name is the disk's or one of its partitions' ("uda", "uda0"; not "udab") */
+LOCAL BOOL of_disk( CONST UB *dev, CONST UB *base, INT nb )
+{
+	return (BOOL)( on_disk(dev, base, nb) && ( dev[nb] == 0 || ( dev[nb] >= '0' && dev[nb] <= '9' ) ) );
+}
+
+EXPORT BOOL knl_obdev_medium_person( CONST UB *name )
+{
+	T_FSMNT		*mt;
+	T_OBFVREF	*ref;
+	UB		*vp;
+	INT		nb = 0, n, i, k;
+	BOOL		free = TRUE;
+	CONST INT	stride = 32;
+
+	if ( name == NULL || name[0] != 'u' || name[1] != 'd' ) {
+		return FALSE;
+	}
+	while ( nb < OBD_NAME && name[nb] != 0 && ( name[nb] < '0' || name[nb] > '9' ) ) nb++;
+
+	/* mounted outside where a program mounts a medium: the disk the machine started from */
+	n = fs_mounts(NULL, 0);
+	if ( n > 0 ) {
+		mt = (T_FSMNT *)Kmalloc(sizeof(T_FSMNT) * (SZ)( n + 4 ));
+		if ( mt == NULL ) {
+			return FALSE;
+		}
+		n = fs_mounts(mt, n + 4);
+		for ( i = 0; i < n && free; i++ ) {
+			if ( mt[i].dev[0] != 0 && of_disk(mt[i].dev, name, nb)
+			  && !on_disk(mt[i].path, (CONST UB *)FS_MEDIA_DIR "/", (INT)sizeof(FS_MEDIA_DIR)) ) {
+				free = FALSE;
+			}
+		}
+		Kfree(mt);
+	}
+	/* the system volume on it */
+	k = knl_obfile_nvol() + 8;
+	vp = (UB *)Kmalloc(stride * k);
+	ref = (T_OBFVREF *)Kmalloc(sizeof(T_OBFVREF));
+	if ( vp == NULL || ref == NULL ) {
+		if ( vp != NULL ) Kfree(vp);
+		if ( ref != NULL ) Kfree(ref);
+		return FALSE;
+	}
+	n = knl_obfile_vols(vp, stride, k);
+	if ( n >= k ) {
+		free = FALSE;		/* more came meanwhile: taken as the system's rather than looked past */
+	}
+	for ( i = 0; i < n && free; i++ ) {
+		if ( of_disk(vp + i * stride, name, nb)
+		  && ( knl_obfile_vol_ref((CONST char *)( vp + i * stride ), ref) < E_OK || ref->system ) ) {
+			free = FALSE;
+		}
+	}
+	Kfree(ref);
+	Kfree(vp);
+	return free;
+}
+
 LOCAL ER obd_prot( CONST TS_UUID *uuid, T_OBPRT **p_prt )
 {
 	CONST T_OBDVOPS	*ops = NULL;
@@ -1267,7 +1355,9 @@ LOCAL ER obd_prot( CONST TS_UUID *uuid, T_OBPRT **p_prt )
 		i = ent_by_uuid(uuid);
 		if ( i >= 0 ) {
 			ops = OBD(i).ops;
-			knl_memcpy(name, OBD(i).name, OBD_NAME);
+			if ( ops == NULL ) {
+				(void)knl_ob_name_put(OBD(i).name, -1, name, OBD_NAME, NULL);	/* a T-Kernel device's */
+			}
 		}
 		UNLOCK();
 		if ( ops != NULL ) {
@@ -1560,20 +1650,31 @@ LOCAL ER clock_set( CONST UB *s, SZ len )
 /* ---------------------------------------------------------------- a device added by name */
 
 /* What it is, its ops, and whether it is still there */
-LOCAL BOOL vdev_take( OBDHND *o, UB *name, CONST T_OBDVOPS **p_ops, void **p_ctx )
+/* p_name: its name too, whole, in memory to Kfree */
+LOCAL BOOL vdev_take( OBDHND *o, UB **p_name, CONST T_OBDVOPS **p_ops, void **p_ctx )
 {
 	BOOL	there;
 
-	if ( name == NULL ) {
+	if ( p_name == NULL ) {
 		/* a record read or written: whether it is still there is enough, and it is a word */
 		there = added_there(o);
 	} else {
+		SZ	n;
+
+		*p_name = NULL;
 		LOCK();
 		there = added_there(o);
 		if ( there ) {
-			knl_memcpy(name, OBD(o->ent).name, OBD_NAME);
+			n = (SZ)knl_strlen((CONST char *)OBD(o->ent).name);
+			*p_name = (UB *)Kmalloc(n + 1);
+			if ( *p_name != NULL ) {
+				knl_memcpy(*p_name, OBD(o->ent).name, n + 1);
+			}
 		}
 		UNLOCK();
+		if ( there && *p_name == NULL ) {
+			there = FALSE;		/* no memory for it: answered as not there */
+		}
 	}
 	*p_ops = o->vops;
 	*p_ctx = o->vctx;
@@ -1585,16 +1686,17 @@ LOCAL INT vdev_describe( OBDHND *o, UB *t, INT max )
 {
 	CONST T_OBDVOPS	*ops;
 	void		*ctx;
-	UB		name[OBD_NAME];
+	UB		*name;
 	INT		n;
 
-	if ( !vdev_take(o, name, &ops, &ctx) ) {
+	if ( !vdev_take(o, &name, &ops, &ctx) ) {
 		return E_NOEXS;
 	}
 	n = knl_oj_put(t, 0, max, "<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"");
 	n = knl_oj_put(t, n, max, (CONST char *)name);
 	n = knl_oj_put(t, n, max, "\"><document><p>");
 	n = knl_oj_put(t, n, max, (CONST char *)name);
+	Kfree(name);
 	n = knl_oj_put(t, n, max, ": ");
 	n = knl_oj_put(t, n, max, ops->kind);
 	n = knl_oj_put(t, n, max, "</p>");
@@ -1694,24 +1796,71 @@ LOCAL ER vdev_lrc( OBDHND *o, T_OBREC *buf, INT n, INT *p_cnt )
 	return E_OK;
 }
 
+/*
+ * The page of システム環境設定 that shows a device of this kind (design
+ * 11.6): the device object's applist names that program, with the page
+ * as the entry's 固有データ (design 11.3), so that opening the object
+ * opens the page, and the program is given the object to choose the
+ * device on it. NULL for a kind no page shows.
+ */
+#define DEV_SYSENV	"tessronos-sysenv"
+
+LOCAL CONST char *dev_page( CONST char *kind )
+{
+	static CONST char *CONST map[][2] = {
+		{ "display", "screen" }, { "display output", "screen" }, { "gpu", "video" },
+		{ "keyboard", "keyboard" }, { "adapters", "network" }, { "wifi", "network" },
+		{ "usb", "usb" }, { "bluetooth", "bluetooth" }, { "disk", "disk" }, { "sound", "sound" },
+		{ "ac", "power" }, { "battery", "power" }, { "lid", "power" }, { "button", "power" },
+	};
+	INT	i, k;
+
+	for ( i = 0; kind != NULL && i < (INT)( sizeof(map) / sizeof(map[0]) ); i++ ) {
+		for ( k = 0; map[i][0][k] != 0 && map[i][0][k] == kind[k]; k++ ) ;
+		if ( map[i][0][k] == 0 && kind[k] == 0 ) {
+			return map[i][1];
+		}
+	}
+	return NULL;
+}
+
+LOCAL INT dev_applist( UB *json, INT n, INT size, CONST char *kind )
+{
+	CONST char	*page = dev_page(kind);
+
+	if ( page == NULL ) {
+		return n;
+	}
+	n = knl_oj_put(json, n, size, ",\"applist\":{\"" DEV_SYSENV "\":{\"name\":\"システム環境設定\","
+			  "\"defaultOpen\":true,\"data\":");
+	n = knl_oj_put_str(json, n, size, (CONST UB *)page);
+	return knl_oj_put(json, n, size, "}}");
+}
+
 LOCAL ER vdev_gat( OBDHND *o, UB *json, SZ size, SZ *p_asize )
 {
 	CONST T_OBDVOPS	*ops;
 	void		*ctx;
-	UB		name[OBD_NAME];
+	UB		*name;
 	INT		n;
 
-	if ( !vdev_take(o, name, &ops, &ctx) ) {
+	if ( !vdev_take(o, &name, &ops, &ctx) ) {
 		return E_NOEXS;
 	}
 	n = knl_oj_put(json, 0, (INT)size, "{\"name\":");
 	n = knl_oj_put_str(json, n, (INT)size, name);
+	Kfree(name);
 	n = knl_oj_put(json, n, (INT)size, ",\"device\":{\"kind\":");
 	n = knl_oj_put_str(json, n, (INT)size, (CONST UB *)ops->kind);
 	if ( ops->attr != NULL ) {
 		n = ops->attr(ctx, json, n, (INT)size);
+		if ( n < -1 ) {
+			return (ER)n;		/* the device's own error (E_NOMEM), not a buffer too small */
+		}
 	}
-	n = knl_oj_put(json, n, (INT)size, "}}");
+	n = knl_oj_put(json, n, (INT)size, "}");
+	n = dev_applist(json, n, (INT)size, ops->kind);
+	n = knl_oj_put(json, n, (INT)size, "}");
 	if ( n < 0 ) {
 		return E_LIMIT;
 	}
@@ -1836,7 +1985,8 @@ LOCAL ER obd_wri( INT h, INT recno, D off, CONST void *buf, SZ size, SZ *p_asize
 		if ( off != 0 ) {
 			return E_PAR;		/* sound is written as it comes, an attribute whole */
 		}
-		if ( recno == OB_SND_OUTS || recno == OB_SND_OUTSEL ) {
+		if ( recno == OB_SND_OUTS || recno == OB_SND_OUTSEL || recno == OB_SND_OUTV || recno == OB_SND_OUTSELV
+		  || recno == OB_SND_MIXV ) {
 			/* the output is the system's: chosen through its record 8, which is protected */
 			return E_RONLY;
 		}
@@ -2082,6 +2232,9 @@ LOCAL ER obd_gat( INT h, UB *json, SZ size, SZ *p_asize )
 		if ( pr != NULL ) Kfree(pr);
 		n = knl_oj_put(json, n, (INT)size, "}");
 	}
+	if ( o->ent >= 0 && !o->serial && !o->camera && ( o->sound || o->blksz > 1 ) ) {
+		n = dev_applist(json, n, (INT)size, o->sound ? "sound" : "disk");
+	}
 	n = knl_oj_put(json, n, (INT)size, "}");
 	if ( n < 0 ) {
 		return E_LIMIT;
@@ -2193,8 +2346,10 @@ LOCAL ER disk_of_key( ID key, UINT ops, UB *name, TS_UUID *p_uuid )
 	}
 	LOCK();
 	e = ent_by_uuid(p_uuid);
-	if ( e >= 0 ) {
-		knl_memcpy(name, OBD(e).name, OBD_NAME);
+	if ( e >= 0 && OBD(e).ops == NULL ) {
+		(void)knl_ob_name_put(OBD(e).name, -1, name, OBD_NAME, NULL);	/* a T-Kernel device's */
+	} else {
+		e = -1;			/* one added by name is no disk */
 	}
 	UNLOCK();
 	if ( e < 0 || tk_ref_dev(name, &rd) < E_OK || rd.blksz <= 1 || dev_is_sound(name) ) {
@@ -2312,6 +2467,23 @@ EXPORT ER fs_detach_dev( ID devkey )
 	return er;
 }
 
+LOCAL ER obd_refnam( CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize )
+{
+	INT	i;
+	ER	er = E_NOEXS;
+
+	if ( is_clock(uuid) ) return knl_ob_name_put((CONST UB *)"clock", -1, buf, size, p_asize);
+	if ( is_list(uuid) ) return knl_ob_name_put((CONST UB *)"devices", -1, buf, size, p_asize);
+	if ( is_system(uuid) ) return knl_ob_name_put((CONST UB *)"system", -1, buf, size, p_asize);
+	LOCK();
+	i = ent_by_uuid(uuid);
+	if ( i >= 0 ) {
+		er = knl_ob_name_put(OBD(i).name, -1, buf, size, p_asize);
+	}
+	UNLOCK();
+	return er;
+}
+
 LOCAL CONST T_OBMGR obd_mgr = {
 	OB_T_DEVICE, 0, "device",
 	obd_find, obd_ref, obd_prot, NULL, NULL, NULL,
@@ -2323,7 +2495,9 @@ LOCAL CONST T_OBMGR obd_mgr = {
 	NULL, NULL,
 	NULL,			/* records replaced by writing over them */
 	NULL,			/* nothing to wait for */
-	NULL			/* nothing comes in to wait for (ob_rea_tmo) */
+	NULL,			/* nothing comes in to wait for (ob_rea_tmo) */
+	NULL,
+	obd_refnam
 };
 
 EXPORT ER knl_obdev_init( void )

@@ -20,10 +20,12 @@ open 01a0d6d1-08d6-7896-adb0-7469517f6b4b
 expectsince trash: run again
 nwin 屑実身操作
 want ok 1
-# a program deleted: its program object becomes a 屑実身, and the list is told
+# a program deleted: its program object becomes a 屑実身, and so does its
+# template, taken out of the 原紙箱; the list is told, and has the two
 logmark
 progrm 01a0f638-4c5a-78a9-9bbd-adfbafa3466a
 want ok 0
+expectsince dtprog: template 0 of mpeg-player taken out of the 原紙箱 (0)
 expectsince trash: told to make the list again
 wait 800
 shot st_trash
@@ -48,7 +50,7 @@ wait 300
 key 28
 expectsince the administrator's password was set
 expectsince trash: purge (
-expectsince trash: purged 1 of 1
+expectsince trash: purged 2 of 2
 expectsince trash: 0 objects
 refs 01a0f638-4c5a-78a9-9bbd-adfbafa3466a
 want ok -1

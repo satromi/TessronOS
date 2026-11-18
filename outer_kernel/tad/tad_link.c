@@ -49,110 +49,111 @@ LOCAL BOOL uuid_zero( CONST TS_UUID *u )
 	return TRUE;
 }
 
-/* The value of an attribute into a field of the caller, whole or not at all */
-LOCAL ER cpy_attr( CONST T_TADNODE *nd, CONST char *name, UB *out, SZ max )
+/* ---------------------------------------------------------------- the words of a link */
+
+#if USE_KTEST
+LOCAL INT	vobj_held = 0;		/* words given out and not let go */
+EXPORT INT tad_vobj_held( void )
 {
-	CONST UB	*v = tad_attr(nd, name);
-	SZ		len;
+	return __atomic_load_n(&vobj_held, __ATOMIC_ACQUIRE);
+}
+#define HELD(d)	( (void)__atomic_add_fetch(&vobj_held, (d), __ATOMIC_ACQ_REL) )
+#else
+#define HELD(d)	( (void)0 )
+#endif
 
-	out[0] = '\0';
-	if ( v == NULL ) {
-		return E_OK;
-	}
-	len = tad_slen((CONST char *)v);
-	if ( len >= max ) {
-		return E_LIMIT;
-	}
-	cpy(out, v, len);
-	out[len] = '\0';
+/* A word of a link set (tad_vobj_set) in its field and its length's */
+LOCAL ER word_set( UB **p_word, SZ *p_len, CONST UB *s, SZ len )
+{
+	UB	*w = NULL;
 
+	if ( s != NULL && len < 0 ) {
+		len = tad_slen((CONST char *)s);
+	}
+	if ( s != NULL && len > 0 ) {
+		w = (UB *)Kmalloc(len + 1);
+		if ( w == NULL ) {
+			return E_NOMEM;
+		}
+		cpy(w, s, len);
+		w[len] = '\0';
+		HELD(1);
+	}
+	if ( *p_word != NULL ) {
+		Kfree(*p_word);
+		HELD(-1);
+	}
+	*p_word = w;
+	*p_len = ( w != NULL ) ? len : 0;
 	return E_OK;
 }
 
-/* Where the member of the JSON object begun at s[0] that starts at i ends: its comma or closing brace */
-LOCAL SZ applist_member_end( CONST UB *s, SZ i, SZ len )
+EXPORT ER tad_vobj_set( T_VOBJ *v, UINT word, CONST UB *s, SZ len )
 {
-	INT	depth = 0;
-	BOOL	str = FALSE;
-
-	for ( ; i < len; i++ ) {
-		if ( str ) {
-			if ( s[i] == '\\' ) i++;
-			else if ( s[i] == '"' ) str = FALSE;
-		} else if ( s[i] == '"' ) {
-			str = TRUE;
-		} else if ( s[i] == '{' || s[i] == '[' ) {
-			depth++;
-		} else if ( ( s[i] == '}' || s[i] == ']' ) && depth > 0 ) {
-			depth--;
-		} else if ( depth == 0 && ( s[i] == ',' || s[i] == '}' ) ) {
-			return i;
-		}
+	if ( v == NULL ) {
+		return E_PAR;
 	}
-	return len;
+	switch ( word ) {
+	case TAD_W_NAME:	return word_set(&v->vname, &v->vname_len, s, len);
+	case TAD_W_REL:		return word_set(&v->vrel, &v->vrel_len, s, len);
+	case TAD_W_APPLIST:	return word_set(&v->vapplist, &v->vapplist_len, s, len);
+	case TAD_W_VIEW:	return word_set(&v->vview, &v->vview_len, s, len);
+	default:		return E_PAR;
+	}
 }
 
-/* Whether a member of an applist says "defaultOpen": true */
-LOCAL BOOL applist_member_default( CONST UB *s, SZ from, SZ to )
+EXPORT void tad_vobj_init( T_VOBJ *v )
 {
-	CONST char	*key = "\"defaultOpen\"";
-	SZ		i, k, n = 13;
+	INT	i;
 
-	for ( i = from; i + n < to; i++ ) {
-		for ( k = 0; k < n && s[i + k] == (UB)key[k]; k++ ) ;
-		if ( k == n ) {
-			for ( i += n; i < to && ( s[i] == ' ' || s[i] == ':' ); i++ ) ;
-			return (BOOL)( i < to && s[i] == 't' );
-		}
+	for ( i = 0; i < (INT)sizeof(T_VOBJ); i++ ) {
+		((UB *)v)[i] = 0;
 	}
-	return FALSE;
 }
 
-/*
- * The applist of a link. The list of programs is the object's: what the
- * link's own copy is needed for is the program it opens with and whether
- * it keeps to it. A copy too long for the field, however many programs it
- * names, is kept as that one entry, so that the link is still a link.
- * An object with no applist of its own then offers that one program.
- */
-LOCAL void applist_attr( CONST T_TADNODE *nd, UB *out, SZ max )
+EXPORT void tad_vobj_clear( T_VOBJ *v )
 {
-	CONST UB	*v = tad_attr(nd, "applist");
-	SZ		len, i = 0, e, fs = 0, fe = 0;
-
-	out[0] = '\0';
 	if ( v == NULL ) {
 		return;
 	}
-	len = tad_slen((CONST char *)v);
-	if ( len < max ) {
-		cpy(out, v, len);
-		out[len] = '\0';
-		return;
+	(void)tad_vobj_set(v, TAD_W_NAME, NULL, 0);
+	(void)tad_vobj_set(v, TAD_W_REL, NULL, 0);
+	(void)tad_vobj_set(v, TAD_W_APPLIST, NULL, 0);
+	(void)tad_vobj_set(v, TAD_W_VIEW, NULL, 0);
+	tad_vobj_init(v);
+}
+
+EXPORT ER tad_vobj_copy( T_VOBJ *dst, CONST T_VOBJ *src )
+{
+	T_VOBJ	w = { .recno = 0 };
+	ER	er;
+
+	if ( dst == NULL || src == NULL ) {
+		return E_PAR;
 	}
-	while ( i < len && v[i] != '{' ) i++;
-	for ( i++; i < len; i = e + 1 ) {
-		while ( i < len && ( v[i] == ' ' || v[i] == '\n' || v[i] == '\r' || v[i] == '\t' ) ) i++;
-		e = applist_member_end(v, i, len);
-		if ( e <= i ) {
-			break;
-		}
-		if ( fe == 0 ) {
-			fs = i;
-			fe = e;
-		}
-		if ( applist_member_default(v, i, e) ) {
-			fs = i;
-			fe = e;
-			break;
-		}
+	if ( dst == src ) {
+		return E_OK;
 	}
-	if ( fe > fs && fe - fs + 3 <= max ) {
-		out[0] = '{';
-		cpy(out + 1, v + fs, fe - fs);
-		out[fe - fs + 1] = '}';
-		out[fe - fs + 2] = '\0';
+	w = *src;		/* the numbers; the words are made anew below */
+	w.vname = w.vrel = w.vapplist = w.vview = NULL;
+	w.vname_len = w.vrel_len = w.vapplist_len = w.vview_len = 0;
+	er = tad_vobj_set(&w, TAD_W_NAME, src->vname, src->vname_len);
+	if ( er >= E_OK ) er = tad_vobj_set(&w, TAD_W_REL, src->vrel, src->vrel_len);
+	if ( er >= E_OK ) er = tad_vobj_set(&w, TAD_W_APPLIST, src->vapplist, src->vapplist_len);
+	if ( er >= E_OK ) er = tad_vobj_set(&w, TAD_W_VIEW, src->vview, src->vview_len);
+	tad_vobj_clear(dst);
+	if ( er < E_OK ) {
+		tad_vobj_clear(&w);
+		return er;
 	}
+	*dst = w;
+	return E_OK;
+}
+
+/* The value of an attribute as one of the words of a link, whole */
+LOCAL ER cpy_attr( CONST T_TADNODE *nd, CONST char *name, T_VOBJ *pk, UINT word )
+{
+	return tad_vobj_set(pk, word, tad_attr(nd, name), -1);
 }
 
 LOCAL INT to_num( CONST UB *s, INT dflt )
@@ -403,11 +404,8 @@ LOCAL ER vobj_of( CONST T_TAD *doc, CONST T_TADNODE *nd, T_VOBJ *pk )
 {
 	CONST UB	*v;
 	ER		er;
-	INT		i;
 
-	for ( i = 0; i < (INT)sizeof(T_VOBJ); i++ ) {
-		((UB *)pk)[i] = 0;
-	}
+	tad_vobj_clear(pk);
 	er = id_of(nd, pk);
 	if ( er < E_OK ) {
 		return er;
@@ -428,23 +426,17 @@ LOCAL ER vobj_of( CONST T_TAD *doc, CONST T_TADNODE *nd, T_VOBJ *pk )
 		}
 	}
 
-	er = cpy_attr(nd, "name", pk->name, TAD_NAME_MAX);
-	if ( er >= E_OK ) er = cpy_attr(nd, "relationship", pk->relationship,
-					TAD_REL_MAX);
-	if ( er < E_OK ) {
-		return er;
-	}
-	applist_attr(nd, pk->applist, TAD_APPL_MAX);
-	if ( pk->name[0] == '\0' && nd->first != NULL
+	er = cpy_attr(nd, "name", pk, TAD_W_NAME);
+	if ( er >= E_OK ) er = cpy_attr(nd, "relationship", pk, TAD_W_REL);
+	if ( er >= E_OK ) er = cpy_attr(nd, "applist", pk, TAD_W_APPLIST);
+	if ( er >= E_OK && pk->vname == NULL && nd->first != NULL
 	  && nd->first->kind == TAD_ND_TEXT && nd->first->text != NULL ) {
 		/* with no name attribute the text of the element is the name */
-		SZ len = tad_slen((CONST char *)nd->first->text);
-
-		if ( len >= TAD_NAME_MAX ) {
-			return E_LIMIT;
-		}
-		cpy(pk->name, nd->first->text, len);
-		pk->name[len] = '\0';
+		er = tad_vobj_set(pk, TAD_W_NAME, nd->first->text, -1);
+	}
+	if ( er < E_OK ) {
+		tad_vobj_clear(pk);
+		return er;
 	}
 
 	pk->left     = to_num(tad_attr(nd, "vobjleft"), 0);
@@ -486,13 +478,9 @@ LOCAL ER vobj_of( CONST T_TAD *doc, CONST T_TADNODE *nd, T_VOBJ *pk )
 	/* both spellings are in the records */
 	v = tad_attr(nd, "viewMode");
 	if ( v == NULL ) v = tad_attr(nd, "viewmode");
-	if ( v != NULL ) {
-		SZ len = tad_slen((CONST char *)v);
-
-		if ( len < TAD_VIEW_MAX ) {
-			cpy(pk->viewmode, v, len);
-			pk->viewmode[len] = '\0';
-		}
+	if ( v != NULL && tad_vobj_set(pk, TAD_W_VIEW, v, -1) < E_OK ) {
+		tad_vobj_clear(pk);
+		return E_NOMEM;
 	}
 	v = tad_attr(nd, "wordWrap");
 	if ( v == NULL ) v = tad_attr(nd, "wordwrap");
@@ -785,8 +773,8 @@ LOCAL ER build_link( T_TAD *doc, CONST T_VOBJ *pk, T_TADNODE **p_nd )
 	id[n] = '\0';
 	put_attr(&b, "id", id);
 
-	if ( pk->name[0] != '\0' ) {
-		put_attr(&b, "name", pk->name);
+	if ( pk->vname != NULL && pk->vname[0] != '\0' ) {
+		put_attr(&b, "name", pk->vname);
 	}
 	put_attr_col(&b, "tbcol", pk->tbcol);
 	put_attr_col(&b, "frcol", pk->frcol);
@@ -828,14 +816,14 @@ LOCAL ER build_link( T_TAD *doc, CONST T_VOBJ *pk, T_TADNODE **p_nd )
 	put_attr_num(&b, "scrolly", pk->scrolly);
 	put_zoom(num, ( pk->zoom > 0 ) ? pk->zoom : 100);
 	put_attr(&b, "zoomratio", num);
-	if ( pk->applist[0] != '\0' ) {
-		put_attr(&b, "applist", pk->applist);
+	if ( pk->vapplist != NULL && pk->vapplist[0] != '\0' ) {
+		put_attr(&b, "applist", pk->vapplist);
 	}
-	if ( pk->relationship[0] != '\0' ) {
-		put_attr(&b, "relationship", pk->relationship);
+	if ( pk->vrel != NULL && pk->vrel[0] != '\0' ) {
+		put_attr(&b, "relationship", pk->vrel);
 	}
-	if ( pk->viewmode[0] != '\0' ) {
-		put_attr(&b, "viewMode", pk->viewmode);
+	if ( pk->vview != NULL && pk->vview[0] != '\0' ) {
+		put_attr(&b, "viewMode", pk->vview);
 	}
 	if ( pk->wordwrap != TAD_WRAP_NONE ) {
 		put_attr_bool(&b, "wordWrap", pk->wordwrap == TAD_WRAP_ON);
@@ -1355,7 +1343,7 @@ EXPORT INT tad_lnk_vol_doc( T_TAD *doc, CONST TS_UUID *hv, CONST TS_UUID *mine,
 	if ( doc == NULL || hv == NULL || vol_of == NULL ) {
 		return E_PAR;
 	}
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	if ( v == NULL ) {
 		return E_NOMEM;
 	}
@@ -1385,6 +1373,7 @@ EXPORT INT tad_lnk_vol_doc( T_TAD *doc, CONST TS_UUID *hv, CONST TS_UUID *mine,
 			changed++;
 		}
 	}
+	tad_vobj_clear(v);
 	Kfree(v);
 	if ( p_failed != NULL ) {
 		*p_failed = failed;

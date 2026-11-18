@@ -18,7 +18,7 @@ from .btree import BTree, TREE_GC, TREE_OBJ, TREE_ORPHAN
 from .error import TsfsError
 from .groups import Maps, fresh_map, head_fields, head_problems, map_crcs
 from .journal import Journal
-from .layout import (BLOCK_SIZE, COMPAT_GROWN, INCOMPAT_GROWING, LABEL_MAX,
+from .layout import (BLOCK_SIZE, COMPAT_GROWN, INCOMPAT_GROWING, NIL_UUID,
                      ST_CLEAN, Superblock, gen_uuid7, grown_count, layout,
                      now_tron)
 from .obj import ObjectBlock
@@ -138,8 +138,8 @@ class Volume(object):
         (generation 2), and a copy of A in each spare."""
         nblk = dev.nblk
         jblocks, agb, agn = layout(nblk)
-        if len((label or "").encode("utf-8")) > LABEL_MAX - 1:
-            raise TsfsError("the label is longer than %d bytes" % (LABEL_MAX - 1))
+        # the superblock keeps the label's first bytes, cut at a whole letter
+        # (Superblock.set_label); the whole is the name of the top object
         sb = Superblock()
         sb.total_blocks = nblk
         sb.ag_blocks = agb
@@ -354,6 +354,20 @@ class Volume(object):
         return False
 
     # ------------------------------------------------------------ objects
+
+    def label(self):
+        """The label, whole (design 7.6): the name of the top object, or,
+        when there is none or it has no name, the copy in the superblock."""
+        from . import meta as metamod
+        if self.sb.root_uuid != NIL_UUID:
+            try:
+                d = metamod.loads(self.object(self.sb.root_uuid).meta())
+                name = d.get("name")
+                if isinstance(name, str) and name:
+                    return name
+            except (TsfsError, ValueError, UnicodeDecodeError):
+                pass
+        return self.sb.label
 
     def lookup(self, obj_uuid):
         return self.btree.lookup(obj_uuid)

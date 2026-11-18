@@ -19,7 +19,7 @@
       "id": "web-browser",
       "kind": "app",
       "name": "ブラウザ",
-      "version": "R1.400",
+      "version": "R1.410",
       "menu": false,
       "builtin": false,
       "base": [

@@ -51,6 +51,7 @@
 #include "../../device/bt/bt_crypto.h"
 #include "../../device/bt/sbc_enc.h"
 #include "../../device/bt/bt_msbc.h"
+#include "../../peripheral_kernel/obj/obj.h"
 #include "../../device/bt/btint.h"
 #include "../../device/bt/btaudio.h"
 #include "../../device/snd/sndhw.h"
@@ -225,6 +226,7 @@ LOCAL INT	n_name_req;
 LOCAL UB	mock_evmask[8] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0, 0 };	/* a controller's mask after a reset */
 LOCAL INT	mock_inq_mode = 0;	/* standard results until the host asks for another form */
 LOCAL INT	n_ext_inq;		/* inquiry results sent in the extended form */
+LOCAL INT	mock_inq_many;		/* an inquiry finds that many devices in place of the keyboard, 0 none */
 LOCAL UH	mock_acl_len = 64;
 LOCAL CONST UB	*intel_answer = NULL;
 LOCAL INT	intel_answer_n, n_intel_ver, n_intel_boot;
@@ -350,6 +352,24 @@ LOCAL void sdp_answer( CONST UB *q2, INT n )
 
 LOCAL BOOL serve_le( UH op, CONST UB *p );
 LOCAL BOOL sco_cmd( UH op, CONST UB *p );
+
+/* A device of the many an inquiry finds, by its number: its address, and its name of six bytes */
+LOCAL void many_addr( INT k, UB *a )
+{
+	a[0] = (UB)k;
+	a[1] = (UB)( k >> 8 );
+	a[2] = a[3] = a[4] = a[5] = 0x7d;
+}
+
+LOCAL void many_name( INT k, UB *nm )
+{
+	nm[0] = 'D';
+	nm[1] = 'e';
+	nm[2] = 'v';
+	nm[3] = (UB)( '0' + ( k / 100 ) % 10 );
+	nm[4] = (UB)( '0' + ( k / 10 ) % 10 );
+	nm[5] = (UB)( '0' + k % 10 );
+}
 
 LOCAL void serve_cmd( UH op, CONST UB *p )
 {
@@ -518,7 +538,29 @@ LOCAL void serve_cmd( UH op, CONST UB *p )
 			 * A controller drops the event when the mask does not let it
 			 * through (bit 46), and nothing of the device comes.
 			 */
-			if ( ( mock_evmask[5] & 0x40 ) != 0 ) {
+			if ( ( mock_evmask[5] & 0x40 ) != 0 && mock_inq_many > 0 ) {
+				INT	k;
+
+				/* many devices, each telling its name, and the first seen twice */
+				for ( k = 0; k <= mock_inq_many; k++ ) {
+					INT	d = ( k < mock_inq_many ) ? k : 0;
+
+					knl_memset(big, 0, sizeof(big));
+					big[0] = 0x2f;
+					big[1] = 255;
+					big[2] = 1;
+					many_addr(d, big + 3);
+					big[9] = 1;
+					big[11] = 0x40;
+					big[12] = 0x05;
+					big[17] = 7;
+					big[18] = 0x09;
+					many_name(d, big + 19);
+					ev(big, sizeof(big));
+					n_ext_inq++;
+					tk_dly_tsk(10);		/* the USB side takes 32 pieces at a time: one event of 17 at a time */
+				}
+			} else if ( ( mock_evmask[5] & 0x40 ) != 0 ) {
 				knl_memset(big, 0, sizeof(big));
 				big[0] = 0x2f;
 				big[1] = 255;
@@ -579,7 +621,7 @@ LOCAL void serve_cmd( UH op, CONST UB *p )
 		big[1] = 255;
 		big[2] = 0;
 		knl_memcpy(big + 3, p, 6);
-		for ( k = 0; mock_name[k] != 0 && k < 247; k++ ) big[9 + k] = (UB)mock_name[k];
+		for ( k = 0; mock_name[k] != 0 && k < 248; k++ ) big[9 + k] = (UB)mock_name[k];
 		ev(big, sizeof(big));
 		break;
 	}
@@ -827,7 +869,7 @@ LOCAL void la_att( CONST UB *f, INT n );
 IMPORT void knl_btbap_sef( CONST UB *k, CONST UB *sirk, UB *out );
 
 /* A packet out: the room back, and a frame given on when its last piece has come */
-LOCAL UB	acl_buf[1200];
+LOCAL UB	acl_buf[8 + 65535];	/* a frame as long as L2CAP's length says */
 LOCAL INT	acl_have;
 
 LOCAL void serve_acl( CONST UB *b, INT n )
@@ -2250,7 +2292,10 @@ LOCAL void a2dp_run( UH media_mtu )
 		tm_printf((UB *)"  %d packets of the stream in about a second, %d bytes the longest\n", av_media, av_max_len);
 		KT_ASSERT(av_media >= 10);
 		KT_ASSERT_EQ(av_bad, 0);
-		KT_ASSERT(av_max_len <= 1100 - 4);
+		/* as long as the device takes, fifteen frames at most */
+		KT_ASSERT(av_max_len <= ( ( media_mtu != 0 ) ? media_mtu : 672 ));
+		KT_ASSERT(av_max_len <= 13 + 15 * 119);
+		if ( media_mtu >= 13 + 15 * 119 ) KT_ASSERT_EQ(av_max_len, 13 + 15 * 119);
 		knl_usb_lock();
 		knl_bta_hw.play_stop();
 		knl_usb_unlock();
@@ -2603,6 +2648,63 @@ LOCAL void test_a2dp_dev( void )
 		}
 		av_unpair();
 	}
+}
+
+/*
+ * Earphones whose name is the 248 bytes a name may be: their output in
+ * the sound device's list with the name whole (DN_SDOUTV's form), played
+ * on by its id; an id longer or shorter by a byte is not theirs.
+ */
+LOCAL void test_a2dp_long_name( void )
+{
+	static char	nm[BT_NAME_MAX + 1];
+	static UW	ob[4096];
+	CONST char	*keep_name = mock_name;
+	CONST SDOutV	*e, *bt = NULL;
+	UB		id[BTA_ID_ROOM + 2];
+	UW		rate = 0;
+	INT		i, ch = 0;
+	SZ		len;
+
+	for ( i = 0; i < BT_NAME_MAX; i++ ) nm[i] = (char)( 'A' + i % 26 );
+	nm[BT_NAME_MAX] = 0;
+	mock_name = nm;
+	mock_eir_noname = TRUE;
+	if ( av_pair() ) {
+		pump(500);
+		len = knl_snd_outputs_v((SDOuts *)ob, sizeof(ob));
+		KT_ASSERT(len > 0 && len <= (SZ)sizeof(ob));
+		if ( len > 0 && len <= (SZ)sizeof(ob) ) {
+			for ( i = 0, e = SND_OUTS_FIRST(ob); i < (INT)( (SDOuts *)ob )->n; i++, e = SND_OUTV_NEXT(e) ) {
+				if ( e->kind == SND_BE_BT && knl_strcmp((CONST char *)e->id, "bt-665544332211") == 0 ) bt = e;
+			}
+		}
+		KT_ASSERT(bt != NULL);
+		if ( bt != NULL ) {
+			KT_ASSERT_EQ((INT)knl_strlen((CONST char *)SND_OUTV_NAME(bt)), BT_NAME_MAX);
+			KT_ASSERT(same_bytes(SND_OUTV_NAME(bt), nm, BT_NAME_MAX + 1));
+		}
+		/* the id compared as long as it is */
+		knl_bta_out_id(id, "bt-", kb_addr, "");
+		KT_ASSERT(knl_strcmp((CONST char *)id, "bt-665544332211") == 0);
+		KT_ASSERT(knl_bta_is_out_id(id, "bt-", kb_addr, ""));
+		KT_ASSERT(!knl_bta_is_out_id((CONST UB *)"bt-66554433221", "bt-", kb_addr, ""));
+		KT_ASSERT(!knl_bta_is_out_id((CONST UB *)"bt-665544332211x", "bt-", kb_addr, ""));
+		KT_ASSERT(!knl_bta_is_out_id((CONST UB *)"bt-665544332211", "bt-", kb_addr, "-hfp"));
+		KT_ASSERT(knl_bta_is_out_id((CONST UB *)"bt-665544332211-hfp", "bt-", kb_addr, "-hfp"));
+		knl_usb_lock();
+		KT_ASSERT_EQ(knl_bta_hw.play_start((CONST UB *)"bt-665544332211x", &rate, &ch), E_NOEXS);
+		KT_ASSERT_ER(knl_bta_hw.play_start(id, &rate, &ch), E_OK);
+		knl_usb_unlock();
+		pump(100);
+		knl_usb_lock();
+		knl_bta_hw.play_stop();
+		knl_usb_unlock();
+		pump(200);
+		av_unpair();
+	}
+	mock_name = keep_name;
+	mock_eir_noname = FALSE;
 }
 
 /* This end's service records, as a device asks them: whole, and in pieces */
@@ -3444,16 +3546,36 @@ LOCAL void test_lea_stream( void )
 /* The list's line of a device, by its address: FALSE when it is not listed */
 LOCAL BOOL la_line( CONST UB *a, T_BTLINE *out )
 {
-	T_BTLINE	l[16];
-	INT		i, n = knl_bt_lines(l, 16);
+	static UW	b[1024];
+	INT		at, n = knl_bt_lines((UB *)b, (INT)sizeof(b));
 
-	for ( i = 0; i < n && i < 16; i++ ) {
-		if ( same_bytes(l[i].addr, a, 6) ) {
-			*out = l[i];
+	for ( at = 0; at + BT_LINE_HEAD < n && at + BT_LINE_HEAD < (INT)sizeof(b); ) {
+		T_BTLINE	*l = (T_BTLINE *)( (UB *)b + at );
+
+		if ( l->size < BT_LINE_HEAD || at + l->size > (INT)sizeof(b) ) break;
+		if ( same_bytes(l->addr, a, 6) ) {
+			*out = *l;		/* its fields: the name is not looked at here */
 			return TRUE;
 		}
+		at += l->size;
 	}
 	return FALSE;
+}
+
+/* The lines of the list in b of size bytes: how many whole ones there are, -1 one not well formed */
+LOCAL INT lines_count( CONST UB *b, INT n )
+{
+	INT	at = 0, k = 0;
+
+	while ( at < n ) {
+		CONST T_BTLINE	*l = (CONST T_BTLINE *)( b + at );
+
+		if ( at + BT_LINE_HEAD > n || l->size != BT_LINE_SIZE(l->namelen) || at + l->size > n
+		  || b[at + BT_LINE_HEAD + l->namelen] != 0 ) return -1;
+		at += l->size;
+		k++;
+	}
+	return k;
 }
 
 /* Until the line of a device says note: the LE link let go, with what became of it */
@@ -3732,6 +3854,7 @@ LOCAL BOOL	hfm_open, hfm_msc_ok, hfm_msc_in, hfm_slc;
 LOCAL INT	hfm_bad, hfm_ok, hfm_step, hfm_err;
 LOCAL char	hfm_got[600];
 LOCAL INT	hfm_n;
+LOCAL INT	hfm_rx;			/* the bytes this end sent on the hands-free channel */
 LOCAL UB	hfm_ch;			/* their channel in their records, 0 none */
 LOCAL INT	hfm_sdp_asks;
 LOCAL BOOL	hfm_codecs;		/* they negotiate codecs and list CVSD and mSBC */
@@ -3879,6 +4002,7 @@ LOCAL void hfm_in( CONST UB *f, INT n )
 		} else if ( dlci == hfm_dlci && len > 0 ) {
 			INT	i;
 
+			hfm_rx += len;
 			for ( i = 0; i < len && hfm_n < (INT)sizeof(hfm_got) - 1; i++ ) hfm_got[hfm_n++] = (char)f[i];
 			hfm_got[hfm_n] = 0;
 			if ( len == 6 && same_bytes(f, "\r\nOK\r\n", 6) ) {
@@ -4082,7 +4206,7 @@ LOCAL void hfm_clear( void )
 	hfm_init = FALSE;
 	hfm_dlci = hfm_pn_cl = 0;
 	hfm_open = hfm_msc_ok = hfm_msc_in = hfm_slc = FALSE;
-	hfm_bad = hfm_ok = hfm_step = hfm_err = hfm_n = 0;
+	hfm_bad = hfm_ok = hfm_step = hfm_err = hfm_n = hfm_rx = 0;
 	hfm_got[0] = 0;
 	hfm_sdp_asks = 0;
 	sco_setups = sco_disc = sco_tx = sco_tx_bad = sco_accepts = sco_have = 0;
@@ -4314,6 +4438,40 @@ LOCAL void hfp_voice( void )
 	/* nothing uses it: taken down a while after */
 	pump(2200);
 	KT_ASSERT_EQ(sco_disc, 1);
+}
+
+/*
+ * The earphones stop the flow (FCOFF) and then ask 300 commands, each
+ * answered OK: nothing is sent meanwhile and nothing let go; once the
+ * flow is on again (FCON), all 1800 bytes of the answers come.
+ */
+LOCAL void test_hfp_stall( void )
+{
+	INT	i, rx0;
+
+	hfm_clear();
+	hfm_ch = 0;
+	hfm_init = TRUE;
+	rfc_dev_first = TRUE;
+	if ( av_pair() ) {
+		for ( i = 0; i < 40 && !hfm_slc; i++ ) pump(50);
+		KT_ASSERT(hfm_slc);
+		hfm_mux(0x60, TRUE, NULL, 0);		/* FCOFF */
+		pump(100);
+		rx0 = hfm_rx;
+		for ( i = 0; i < 300; i++ ) {
+			hfm_at("AT+CMEE=1\r");
+			if ( ( i % 20 ) == 19 ) pump(20);
+		}
+		pump(300);
+		KT_ASSERT_EQ(hfm_rx, rx0);		/* held back while the flow is off */
+		hfm_mux(0xa0, TRUE, NULL, 0);		/* FCON */
+		for ( i = 0; i < 60 && hfm_rx < rx0 + 300 * 6; i++ ) pump(50);
+		KT_ASSERT_EQ(hfm_rx, rx0 + 300 * 6);
+		KT_ASSERT_EQ(hfm_err, 0);
+		av_unpair();
+	}
+	rfc_dev_first = FALSE;
 }
 
 /* Earphones that open the hands-free channel themselves */
@@ -4992,6 +5150,334 @@ LOCAL void le_refuse_run( void )
 	pump(300);
 	mock_adv = FALSE;
 }
+
+/* ---------------------------------------------------------------- no fixed limits, lengths checked */
+
+#define MANY_FOUND	40		/* more than the 16 the search once kept */
+
+/* Until a search has ended, its findings in f: how many there are */
+LOCAL INT many_search( T_BTFOUND *f, INT max, INT want )
+{
+	INT	i, n = 0;
+
+	KT_ASSERT_ER(knl_bt_scan(1), E_OK);
+	for ( i = 0; i < 100; i++ ) {
+		pump(50);
+		n = knl_bt_found(f, max);
+		if ( n >= want && knl_btx_ctl() != NULL && !knl_btx_ctl()->scanning ) break;
+	}
+	pump(200);
+	return knl_bt_found(f, max);
+}
+
+/*
+ * A search that finds 40 devices: every one listed, once each though one
+ * is seen twice, by knl_bt_found and in the device object's list read
+ * whole; a search again lists only what it finds.
+ */
+LOCAL void test_bt_many_found( void )
+{
+	T_BTFOUND	*f;
+	T_HIDSTAT	s0;
+	TS_UUID		u;
+	UB		*rec = NULL, a[6], nm[6];
+	INT		i, k, n, got, len;
+	ID		key;
+
+	qh = qt = 0;
+	dev_rd = NULL;
+	KT_ASSERT_ER(ts_hid_stat(&s0), E_OK);
+	f = (T_BTFOUND *)Kmalloc(sizeof(T_BTFOUND) * ( MANY_FOUND + 8 ));
+	KT_ASSERT(f != NULL);
+	if ( f == NULL ) return;
+	KT_ASSERT_ER(knl_vhc_plug(1, &bt_dev), E_OK);
+	for ( i = 0; i < 100 && !knl_bt_ready(); i++ ) pump(50);
+	KT_ASSERT(knl_bt_ready());
+	if ( !knl_bt_ready() ) {
+		(void)knl_vhc_unplug(1);
+		Kfree(f);
+		return;
+	}
+	mock_inq_many = MANY_FOUND;
+	n = many_search(f, MANY_FOUND + 8, MANY_FOUND);
+	KT_ASSERT_EQ(n, MANY_FOUND);
+	for ( k = 0; k < MANY_FOUND; k++ ) {
+		many_addr(k, a);
+		many_name(k, nm);
+		for ( i = 0, got = 0; i < n && i < MANY_FOUND + 8; i++ ) {
+			if ( !same_bytes(f[i].addr, a, 6) ) continue;
+			got++;
+			KT_ASSERT(same_bytes(f[i].name, nm, 6) && f[i].name[6] == 0);
+			KT_ASSERT_EQ(f[i].cod, 0x000540);
+		}
+		KT_ASSERT_EQ(got, 1);
+	}
+	/* fewer asked than there are: as many written, the number there are answered */
+	KT_ASSERT_EQ(knl_bt_found(f, 4), MANY_FOUND);
+	KT_ASSERT_EQ(knl_bt_lines(NULL, 0), MANY_FOUND * BT_LINE_SIZE(6));
+
+	/* the device object's list, read whole: every device, the last one too */
+	KT_ASSERT_ER(ts_str_to_uuid(BT_DEV_UUID, &u), E_OK);
+	key = ob_opn_obj(&u, OB_OP_R);
+	KT_ASSERT(key > 0);
+	if ( key > 0 ) {
+		len = knl_ob_rea_all(key, OB_BT_LIST, 0, &rec, NULL);
+		(void)ob_cls_obj(key);
+		KT_ASSERT_EQ(len, MANY_FOUND * BT_LINE_SIZE(6));
+		KT_ASSERT_EQ(lines_count(rec, len), MANY_FOUND);
+		if ( rec != NULL && lines_count(rec, len) == MANY_FOUND ) {
+			T_BTLINE	*l = (T_BTLINE *)rec;
+
+			many_addr(MANY_FOUND - 1, a);
+			many_name(MANY_FOUND - 1, nm);
+			for ( i = 0, got = 0; i < MANY_FOUND; i++, l = BT_LINE_NEXT(l) ) {
+				if ( !same_bytes(l->addr, a, 6) ) continue;
+				got++;
+				KT_ASSERT_EQ(l->namelen, 6);
+				KT_ASSERT(same_bytes((UB *)l + BT_LINE_HEAD, nm, 6));
+			}
+			KT_ASSERT_EQ(got, 1);
+		}
+		if ( rec != NULL ) Kfree(rec);
+	}
+
+	/* a search again: what the last one found is gone */
+	mock_inq_many = 3;
+	n = many_search(f, MANY_FOUND + 8, 3);
+	KT_ASSERT_EQ(n, 3);
+	mock_inq_many = 0;
+	Kfree(f);
+	bt_finish(&s0, FALSE);
+}
+
+/* The kept object of the keyboard's address, its record 1 read into k: its length, -1 none */
+LOCAL INT kept_of( T_BTKEPT *k )
+{
+	TS_UUID		*ids;
+	char		idb[TS_UUID_STRLEN + 1];
+	CONST char	*conf = knl_sys_id(SYSROLE_CONF_DEV, SYSDEF_CONF_DEV, idb);
+	INT		i, n, got = -1;
+
+	n = knl_conf_links_get(conf, CF_ROLE_BTDEV, NULL, 0);
+	if ( n <= 0 ) return -1;
+	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)n);
+	if ( ids == NULL ) return -1;
+	n = knl_conf_links_get(conf, CF_ROLE_BTDEV, ids, n);
+	for ( i = 0; i < n && got < 0; i++ ) {
+		SZ	asz = 0;
+		ID	key = ob_opn_obj(&ids[i], OB_OP_R);
+
+		if ( key <= 0 ) continue;
+		knl_memset(k, 0, sizeof(*k));
+		if ( ob_rea_rec(key, 1, 0, k, sizeof(*k), &asz) >= E_OK && asz >= BTKEPT_OLD_SIZE
+		  && same_bytes(k->addr, kb_addr, 6) ) got = (INT)asz;
+		(void)ob_cls_obj(key);
+	}
+	Kfree(ids);
+	return got;
+}
+
+/*
+ * A name of the 248 bytes a name may be, asked of the device: whole in
+ * what the search found, in its line of the list, and in the object the
+ * device is kept in, whose first form's field has as much as fits.
+ */
+LOCAL void test_bt_long_name( void )
+{
+	static char	nm[BT_NAME_MAX + 1];
+	static UW	lb[1024];
+	CONST char	*keep_name = mock_name;
+	T_BTFOUND	f[4];
+	T_BTKEPT	k;
+	T_HIDSTAT	s0;
+	T_BTLINE	*l;
+	INT		i, n;
+
+	for ( i = 0; i < BT_NAME_MAX; i++ ) nm[i] = (char)( 'a' + i % 26 );
+	nm[BT_NAME_MAX] = 0;
+	qh = qt = 0;
+	dev_rd = NULL;
+	KT_ASSERT_ER(ts_hid_stat(&s0), E_OK);
+	KT_ASSERT_ER(knl_vhc_plug(1, &bt_dev), E_OK);
+	for ( i = 0; i < 100 && !knl_bt_ready(); i++ ) pump(50);
+	KT_ASSERT(knl_bt_ready());
+	if ( !knl_bt_ready() ) {
+		(void)knl_vhc_unplug(1);
+		return;
+	}
+	mock_name = nm;
+	mock_eir_noname = TRUE;
+	KT_ASSERT_ER(knl_bt_scan(1), E_OK);
+	for ( i = 0; i < 100; i++ ) {
+		pump(50);
+		if ( knl_bt_found(f, 4) >= 1 && f[0].name[0] != 0 ) break;
+	}
+	n = knl_bt_found(f, 4);
+	KT_ASSERT_EQ(n, 1);
+	KT_ASSERT_EQ((INT)knl_strlen((CONST char *)f[0].name), BT_NAME_MAX);
+	KT_ASSERT(same_bytes(f[0].name, nm, BT_NAME_MAX + 1));
+
+	n = knl_bt_lines((UB *)lb, (INT)sizeof(lb));
+	KT_ASSERT_EQ(n, BT_LINE_SIZE(BT_NAME_MAX));
+	l = (T_BTLINE *)lb;
+	KT_ASSERT_EQ(l->size, BT_LINE_SIZE(BT_NAME_MAX));
+	KT_ASSERT_EQ(l->namelen, BT_NAME_MAX);
+	KT_ASSERT(same_bytes((UB *)l + BT_LINE_HEAD, nm, BT_NAME_MAX + 1));
+	/* room for less than the line: nothing of it written, its length said */
+	knl_memset(lb, 0xee, 64);
+	KT_ASSERT_EQ(knl_bt_lines((UB *)lb, 64), BT_LINE_SIZE(BT_NAME_MAX));
+	KT_ASSERT_EQ(((UB *)lb)[0], 0xee);
+
+	KT_ASSERT_ER(knl_bt_pair(kb_addr), E_OK);
+	pump(1500);
+	n = kept_of(&k);
+	KT_ASSERT_EQ(n, (INT)sizeof(T_BTKEPT));
+	if ( n > 0 ) {
+		KT_ASSERT(same_bytes(k.lname, nm, BT_NAME_MAX + 1));
+		KT_ASSERT_EQ((INT)knl_strlen((CONST char *)k.name), (INT)sizeof(k.name) - 1);
+		KT_ASSERT(same_bytes(k.name, nm, sizeof(k.name) - 1));
+	}
+	mock_name = keep_name;
+	mock_eir_noname = FALSE;
+	bt_end(&s0);
+}
+
+/* A command whose parameters are longer than their one byte of length can say: refused, nothing sent */
+LOCAL void test_bt_cmd_long( void )
+{
+	static UB	prm[HCI_PARAM_MAX + 8];
+	T_BTFOUND	f[4];
+	T_HIDSTAT	s0;
+	BTC		*c;
+	INT		i;
+
+	qh = qt = 0;
+	dev_rd = NULL;
+	KT_ASSERT_ER(ts_hid_stat(&s0), E_OK);
+	KT_ASSERT_ER(knl_vhc_plug(1, &bt_dev), E_OK);
+	for ( i = 0; i < 100 && !knl_bt_ready(); i++ ) pump(50);
+	KT_ASSERT(knl_bt_ready());
+	c = knl_btx_ctl();
+	KT_ASSERT(c != NULL);
+	if ( !knl_bt_ready() || c == NULL ) {
+		(void)knl_vhc_unplug(1);
+		return;
+	}
+	knl_memset(prm, 0x41, sizeof(prm));
+	KT_ASSERT_EQ(knl_btx_cmd(c, 0x0c13, prm, HCI_PARAM_MAX + 1), E_PAR);
+	KT_ASSERT_EQ(knl_btx_cmd(c, 0x0c13, prm, HCI_PARAM_MAX + 8), E_PAR);
+	KT_ASSERT_EQ(knl_btx_cmd(c, 0x0c13, prm, -1), E_PAR);
+	KT_ASSERT_EQ(knl_btx_cmd(c, 0x0c13, NULL, 4), E_PAR);
+	KT_ASSERT(c->q_first == NULL);
+	/* the controller goes on as before: a search finds its device */
+	KT_ASSERT_EQ(many_search(f, 4, 1), 1);
+	KT_ASSERT(same_bytes(f[0].addr, kb_addr, 6));
+	bt_finish(&s0, FALSE);
+}
+
+/* An L2CAP frame from the device on its connection (handle 5), as given */
+LOCAL void bad_acl( CONST UB *l2, INT n )
+{
+	UB	b[64];
+
+	b[0] = 5;
+	b[1] = 0x20;
+	b[2] = (UB)n;
+	b[3] = 0;
+	knl_memcpy(b + 4, l2, n);
+	KT_ASSERT_ER(knl_vhc_in(1, EP_ACL, b, n + 4), E_OK);
+	pump(50);
+}
+
+/*
+ * Packets whose length fields say more than came, or less than their
+ * fields: let go, nothing read past them, the device still working. And
+ * a packet longer than the ring is: counted, the ring made bigger, the
+ * same packet taken the next time.
+ */
+LOCAL void test_bt_bad_len( void )
+{
+	static CONST UB	key_a[] = { 1, 0x02, 0, 0x04, 0, 0, 0, 0, 0 };
+	static CONST UB	key_off[] = { 1, 0, 0, 0, 0, 0, 0, 0, 0 };
+	/* events: Command Complete of one byte, an inquiry result of 200 devices in 15 bytes,
+	   a link key of no key, a connection of three bytes */
+	static CONST UB	e_done[] = { 0x0e, 1, 1 };
+	static CONST UB	e_inq[] = { 0x02, 15, 200, 1, 2, 3, 4, 5, 6, 1, 0, 0, 0x40, 0x05, 0, 0, 0 };
+	static CONST UB	e_key[] = { 0x18, 6, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
+	static CONST UB	e_conn[] = { 0x03, 3, 0, 5, 0 };
+	/* signalling: a Connection Response of no fields; a Configuration Request saying 127 bytes in 4 */
+	static CONST UB	s_rsp[] = { 4, 0, 1, 0, 0x03, 0x77, 0, 0 };
+	static CONST UB	s_conf[] = { 8, 0, 1, 0, 0x04, 0x78, 0x7f, 0, 0x40, 0, 0, 0 };
+	/* a frame on the interrupt channel saying 0xfff0 bytes in 2 */
+	static CONST UB	l_long[] = { 0xf0, 0xff, 0x41, 0, 0xa1, 1 };
+	T_HIDATTR	a, keep;
+	T_HIDEV		e;
+	T_HIDSTAT	s0;
+	T_BTFOUND	f[4];
+	BTC		*c;
+	UB		*big;
+	UW		cap0;
+	INT		k;
+
+	KT_ASSERT_ER(ts_hid_getattr(&keep), E_OK);
+	a = keep;
+	a.key_on = a.key_off = a.key_sim = 0;
+	a.krp = 0;
+	(void)ts_hid_setattr(&a);
+	KT_ASSERT_ER(ts_hid_stat(&s0), E_OK);
+	if ( bt_up(rd_combo, sizeof(rd_combo)) ) {
+		c = knl_btx_ctl();
+		KT_ASSERT(c != NULL);
+		ev(e_done, sizeof(e_done));
+		ev(e_inq, sizeof(e_inq));
+		ev(e_key, sizeof(e_key));
+		ev(e_conn, sizeof(e_conn));
+		pump(100);
+		KT_ASSERT_EQ(knl_bt_found(f, 4), 0);		/* the inquiry result cut short listed nothing */
+		bad_acl(s_rsp, sizeof(s_rsp));
+		bad_acl(s_conf, sizeof(s_conf));
+		bad_acl(l_long, sizeof(l_long));
+
+		/* longer than the ring at its start: lost once and said, then taken */
+		big = ( c != NULL ) ? (UB *)Kmalloc(RING_FIRST + 4096) : NULL;
+		if ( big != NULL ) {
+			INT	n = RING_FIRST + 4096;
+
+			knl_memset(big, 0, n);
+			big[0] = 0xee;		/* a handle no device has */
+			big[1] = 0x2e;
+			big[2] = (UB)( n - 4 );
+			big[3] = (UB)( ( n - 4 ) >> 8 );
+			cap0 = c->rcap;
+			knl_usb_lock();
+			knl_btx_ring_in(c, RK_ACL, big, n);
+			knl_usb_unlock();
+			pump(200);
+			KT_ASSERT(c->rcap > cap0);
+			knl_usb_lock();
+			knl_btx_ring_in(c, RK_ACL, big, n);
+			knl_usb_unlock();
+			pump(200);
+			KT_ASSERT(c->acl_cap >= n);
+			KT_ASSERT_EQ(c->acl_have, 0);
+			Kfree(big);
+		}
+
+		/* and the keyboard goes on */
+		while ( ts_hid_read(&e, TMO_POL) >= E_OK ) ;
+		hid_in(key_a, sizeof(key_a));
+		for ( k = 0; k < 3; k++ ) {
+			KT_ASSERT_ER(ts_hid_read(&e, 500), E_OK);
+			if ( !( e.type == HID_EV_KEY_DOWN && e.code == 0xe1 ) ) break;
+		}
+		KT_ASSERT_EQ(e.type, HID_EV_KEY_DOWN);
+		KT_ASSERT_EQ(e.code, 0x04);
+		hid_in(key_off, sizeof(key_off));
+		while ( ts_hid_read(&e, 100) >= E_OK ) ;
+		bt_end(&s0);
+	}
+	(void)ts_hid_setattr(&keep);
+}
 #endif
 
 EXPORT void ktest_bt( void )
@@ -5001,6 +5487,10 @@ EXPORT void ktest_bt( void )
 	KT_RUN(test_bt_pair);
 	KT_RUN(test_bt_report);
 	KT_RUN(test_bt_report_bits);
+	KT_RUN(test_bt_many_found);
+	KT_RUN(test_bt_cmd_long);
+	KT_RUN(test_bt_long_name);
+	KT_RUN(test_bt_bad_len);
 	KT_RUN(test_bt_crypto);
 	KT_RUN(test_bt_sbc);
 	KT_RUN(test_bt_msbc);
@@ -5010,10 +5500,12 @@ EXPORT void ktest_bt( void )
 	KT_RUN(test_a2dp);
 	KT_RUN(test_a2dp_mtu);
 	KT_RUN(test_a2dp_dev);
+	KT_RUN(test_a2dp_long_name);
 	KT_RUN(test_sdp_serve);
 	KT_RUN(test_avrcp);
 	KT_RUN(test_hfp);
 	KT_RUN(test_hfp_ag_first);
+	KT_RUN(test_hfp_stall);
 	KT_RUN(test_hfp_msbc);
 	KT_RUN(test_hfp_codec_back);
 	KT_RUN(test_hfp_hci);

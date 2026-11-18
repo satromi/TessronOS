@@ -391,7 +391,7 @@ def export(vol, outdir, problems=None):
     sb = vol.sb
     info = {
         "format": VOLUME_FORMAT,
-        "label": sb.label,
+        "label": vol.label(),
         "uuid": str(sb.vol_uuid),
         "root": str(sb.root_uuid) if sb.root_uuid != NIL_UUID else None,
         "sysbox": str(sb.sysbox_uuid) if sb.sysbox_uuid != NIL_UUID else None,

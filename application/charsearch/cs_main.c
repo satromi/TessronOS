@@ -42,6 +42,7 @@
 #include <ts/tray.h>
 #include <ts/sysdef.h>
 #include <ts/dtreq.h>
+#include "../dtask.h"
 #include "cs_dic.h"
 
 #define TICK_MS		20
@@ -753,44 +754,16 @@ LOCAL BOOL to_tray( CONST char *s, CONST char *name )
 /* The desktop asked to type s into the window the keys went to before */
 LOCAL ER ask_type( CONST char *s, UINT *p_how )
 {
-	static UINT	seq;
+	static DTASK	q;		/* the letters and the answer, as long as they are (dtask.h) */
 	T_DTREQ		rq;
 	T_DTANS		an;
-	TS_UUID		d, reply;
-	T_OBCRE		c;
-	SZ		asz = 0;
-	ID		k, ka;
 	ER		er;
 
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
 	memset(&rq, 0, sizeof(rq));
 	rq.req = DT_RQ_TYPE;
-	rq.seq = ++seq;
-	rq.reply = reply;
-	rq.win = ui.win;
-	strncpy((char *)rq.name, s, sizeof(rq.name) - 1);
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, &rq, sizeof(rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	/* the answer waited for on its channel, at most 3000 ms */
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, &an, sizeof(an), &asz, 3000);
-		if ( er >= E_OK && asz == (SZ)sizeof(an) && an.seq == rq.seq ) {
-			er = an.er;
-			*p_how = an.how;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
+	(void)dq_part(&q, DT_TAIL_NAME, (CONST UB *)s, -1);	/* the letters, all of them */
+	er = dq_ask(&q, &rq, &an, &ui.win, 3000);
+	if ( q.asz > 0 ) *p_how = an.how;
 	return er;
 }
 

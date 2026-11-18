@@ -49,8 +49,8 @@ typedef struct {
 	UW	paper;
 	BOOL	has_paper;		/* the paper was asked for */
 	INT	name_len, label_len;
-	UB	name[TAD_NAME_MAX];
-	UB	label[OB_VW_LABEL_MAX];
+	UB	*name;			/* whole, of its own; NULL none */
+	UB	*label;
 	UW	*icon;
 	INT	icon_w, icon_h;
 } LOOK;
@@ -67,7 +67,7 @@ typedef struct {
 
 typedef struct {
 	BOOL	used;
-	UB	name[TAD_NAME_MAX];
+	UB	*name;			/* the picture's href, whole, of its own */
 	UINT	clock;
 	BOOL	bad;
 	UW	*px;
@@ -95,6 +95,8 @@ LOCAL BOOL same( CONST TS_UUID *a, CONST TS_UUID *b )
 LOCAL void look_free( LOOK *k )
 {
 	if ( k->icon != NULL ) free(k->icon);
+	free(k->name);
+	free(k->label);
 	memset(k, 0, sizeof(*k));
 }
 
@@ -130,6 +132,24 @@ LOCAL LOOK *look_slot( void )
 	return &tvs_look[old];
 }
 
+/*
+ * A copy of a text the kernel wrote into room of max bytes: read no
+ * further than the room, whether the kernel ended it there or not
+ */
+LOCAL UB *text_dup( CONST UB *s, INT max )
+{
+	UB	*d;
+	INT	n;
+
+	if ( s == NULL || max <= 0 ) return NULL;
+	for ( n = 0; n < max - 1 && s[n] != 0; n++ ) ;
+	d = (UB *)malloc((size_t)n + 1);
+	if ( d == NULL ) return NULL;
+	memcpy(d, s, (size_t)n);
+	d[n] = 0;
+	return d;
+}
+
 /* The answer of the kernel for one link kept */
 LOCAL void look_keep( CONST T_OBRVOB *q )
 {
@@ -146,8 +166,10 @@ LOCAL void look_keep( CONST T_OBRVOB *q )
 	k->has_paper = (BOOL)( ( q->want & OB_VW_PAPER ) != 0 );
 	k->name_len = q->name_len;
 	k->label_len = q->label_len;
-	memcpy(k->name, q->name, sizeof(k->name));
-	memcpy(k->label, q->label, sizeof(k->label));
+	k->name = ( q->name_len >= 0 ) ? text_dup(q->name, q->name_max) : NULL;
+	k->label = ( q->label_len >= 0 ) ? text_dup(q->label, q->label_max) : NULL;
+	if ( k->name == NULL ) k->name_len = -1;
+	if ( k->label == NULL ) k->label_len = -1;
 	if ( q->icon != NULL && q->icon_w > 0 && q->icon_h > 0
 	  && (INT)( q->icon_w * q->icon_h ) <= q->icon_max ) {
 		SZ	n = (SZ)q->icon_w * q->icon_h;
@@ -165,18 +187,23 @@ LOCAL void look_keep( CONST T_OBRVOB *q )
  * The looks of n links asked for in one call of the kernel; an icon too
  * large for the room first given is asked for again with room for it
  */
+#define TVS_TEXT_FIRST	256	/* bytes asked for of a name and of a label at first */
+
 LOCAL void look_ask( CONST T_VOBJ *const *v, INT n )
 {
 	T_OBRVOB	*q;
 	UW		*room;
+	UB		*texts;
 	INT		i, got;
 
 	if ( n <= 0 ) return;
 	q = (T_OBRVOB *)calloc((size_t)n, sizeof(T_OBRVOB));
 	room = (UW *)malloc(sizeof(UW) * TVS_ICON_MAX * (size_t)n);
-	if ( q == NULL || room == NULL ) {
+	texts = (UB *)malloc((size_t)TVS_TEXT_FIRST * 2 * (size_t)n);
+	if ( q == NULL || room == NULL || texts == NULL ) {
 		free(q);
 		free(room);
+		free(texts);
 		return;
 	}
 	for ( i = 0; i < n; i++ ) {
@@ -190,25 +217,48 @@ LOCAL void look_ask( CONST T_VOBJ *const *v, INT n )
 			  | ( ( v[i]->bgcol == TAD_COL_NONE ) ? OB_VW_PAPER : 0 );
 		q[i].icon = room + (SZ)TVS_ICON_MAX * i;
 		q[i].icon_max = TVS_ICON_MAX;
+		q[i].name = texts + (SZ)TVS_TEXT_FIRST * 2 * i;
+		q[i].name_max = TVS_TEXT_FIRST;
+		q[i].label = q[i].name + TVS_TEXT_FIRST;
+		q[i].label_max = TVS_TEXT_FIRST;
 	}
 	got = ob_ref_vob(q, n);
 	tvs_stat.asks++;
 	for ( i = 0; i < got; i++ ) {
-		if ( ( q[i].state & OB_VW_SHORT ) != 0 && q[i].icon_w > 0 && q[i].icon_h > 0 ) {
-			T_OBRVOB	one = q[i];
-			UW		*big = (UW *)malloc(sizeof(UW) * (size_t)q[i].icon_w * q[i].icon_h);
+		BOOL	icon_short = (BOOL)( ( q[i].state & OB_VW_SHORT ) != 0 && q[i].icon_w > 0 && q[i].icon_h > 0 );
+		BOOL	text_cut = (BOOL)( ( q[i].state & OB_VW_CUT ) != 0 );
 
-			if ( big != NULL ) {
-				one.icon = big;
-				one.icon_max = q[i].icon_w * q[i].icon_h;
+		if ( icon_short || text_cut ) {
+			/* asked again alone, with room for all of it */
+			T_OBRVOB	one = q[i];
+			UW		*big = icon_short ? (UW *)malloc(sizeof(UW) * (size_t)q[i].icon_w * q[i].icon_h) : NULL;
+			INT		nm = ( q[i].name_len > 0 ) ? q[i].name_len + 1 : 1;
+			INT		lm = ( q[i].label_len > 0 ) ? q[i].label_len + 1 : 1;
+			UB		*tx = text_cut ? (UB *)malloc((size_t)nm + (size_t)lm) : NULL;
+
+			if ( ( !icon_short || big != NULL ) && ( !text_cut || tx != NULL ) ) {
+				if ( icon_short ) {
+					one.icon = big;
+					one.icon_max = q[i].icon_w * q[i].icon_h;
+				}
+				if ( text_cut ) {
+					one.name = tx;
+					one.name_max = nm;
+					one.label = tx + nm;
+					one.label_max = lm;
+				}
 				if ( ob_ref_vob(&one, 1) == 1 ) look_keep(&one);
 				tvs_stat.asks++;
 				free(big);
+				free(tx);
 				continue;
 			}
+			free(big);
+			free(tx);
 		}
 		look_keep(&q[i]);
 	}
+	free(texts);
 	free(room);
 	free(q);
 }
@@ -233,7 +283,7 @@ EXPORT void tv_src_prefetch( CONST T_TAD *rec )
 	if ( rec == NULL ) return;
 	total = tad_lnk_count(rec);
 	if ( total <= 0 ) return;
-	v = (T_VOBJ *)malloc(sizeof(T_VOBJ) * OB_RVOB_MAX);
+	v = (T_VOBJ *)calloc(OB_RVOB_MAX, sizeof(T_VOBJ));
 	if ( v == NULL ) return;
 	for ( i = 0; i < total; i++ ) {
 		if ( tad_lnk_get(rec, i, &v[k]) < E_OK || look_find(&v[k]) != NULL ) continue;
@@ -244,6 +294,7 @@ EXPORT void tv_src_prefetch( CONST T_TAD *rec )
 		}
 	}
 	if ( k > 0 ) look_ask(want, k);
+	for ( i = 0; i < OB_RVOB_MAX; i++ ) tad_vobj_clear(&v[i]);
 	free(v);
 }
 
@@ -255,11 +306,13 @@ LOCAL INT src_name( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
 	INT	n;
 
 	(void)arg;
-	if ( k == NULL || k->name_len < 0 || max <= 0 ) return -1;
+	if ( k == NULL || k->name_len < 0 || k->name == NULL || max <= 0 ) return -1;
+	/* what fits, at a whole letter; the whole length answered, as snprintf does */
 	n = ( k->name_len < max - 1 ) ? k->name_len : max - 1;
+	while ( n > 0 && n < k->name_len && ( k->name[n] & 0xC0 ) == 0x80 ) n--;
 	memcpy(buf, k->name, (size_t)n);
 	buf[n] = 0;
-	return n;
+	return k->name_len;
 }
 
 LOCAL INT src_label( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
@@ -268,8 +321,9 @@ LOCAL INT src_label( CONST T_VOBJ *v, UB *buf, INT max, void *arg )
 	INT	n;
 
 	(void)arg;
-	if ( k == NULL || k->label_len < 0 || max <= 0 ) return -1;
+	if ( k == NULL || k->label_len < 0 || k->label == NULL || max <= 0 ) return -1;
 	n = ( k->label_len < max - 1 ) ? k->label_len : max - 1;
+	while ( n > 0 && n < k->label_len && ( k->label[n] & 0xC0 ) == 0x80 ) n--;
 	memcpy(buf, k->label, (size_t)n);
 	buf[n] = 0;
 	return n;
@@ -482,25 +536,39 @@ LOCAL UB *res_read( CONST TS_UUID *id, CONST UB *name, SZ *p_size )
 	return buf;
 }
 
+LOCAL ER pic_of( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h );
+
 LOCAL ER src_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h, void *arg )
 {
-	UB	whole[TAD_NAME_MAX];
+	UB	*whole = NULL;
+	ER	er;
+
+	(void)arg;
+	if ( href == NULL || href[0] == 0 ) return E_PAR;
+	/* "{realId}_0_1.png": a resource of the object being drawn, as long as its name is */
+	if ( tvs_has_self && strncmp((CONST char *)href, "{realId}", 8) == 0 ) {
+		size_t	rest = strlen((CONST char *)href + 8);
+
+		whole = (UB *)malloc(TS_UUID_STRLEN + rest + 1);
+		if ( whole == NULL ) return E_NOMEM;
+		ts_uuid_text(&tvs_self, (char *)whole);
+		memcpy(whole + TS_UUID_STRLEN, href + 8, rest + 1);
+		href = whole;
+	}
+	er = pic_of(href, p_px, p_w, p_h);
+	free(whole);
+	return er;
+}
+
+LOCAL ER pic_of( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h )
+{
 	PIC	*pc = NULL;
 	TS_UUID	id;
 	CONST UB *name;
 	UB	*data;
 	SZ	size = 0;
-	INT	i, k, old = 0, w = 0, h = 0;
+	INT	i, old = 0, w = 0, h = 0;
 
-	(void)arg;
-	if ( href == NULL || href[0] == 0 ) return E_PAR;
-	/* "{realId}_0_1.png": a resource of the object being drawn */
-	if ( tvs_has_self && strncmp((CONST char *)href, "{realId}", 8) == 0 ) {
-		ts_uuid_text(&tvs_self, (char *)whole);
-		for ( k = TS_UUID_STRLEN, i = 8; k < (INT)sizeof(whole) - 1 && href[i] != 0; ) whole[k++] = href[i++];
-		whole[k] = 0;
-		href = whole;
-	}
 	for ( i = 0; i < TVS_PIC_MAX; i++ ) {
 		if ( tvs_pic[i].used && strcmp((CONST char *)tvs_pic[i].name, (CONST char *)href) == 0 ) {
 			tvs_pic[i].clock = ++tvs_clock;
@@ -518,12 +586,14 @@ LOCAL ER src_picture( CONST UB *href, CONST UW **p_px, INT *p_w, INT *p_h, void 
 	if ( pc == NULL ) {
 		pc = &tvs_pic[old];
 		free(pc->px);
+		free(pc->name);
 	}
 	memset(pc, 0, sizeof(*pc));
+	pc->name = (UB *)strdup((CONST char *)href);
+	if ( pc->name == NULL ) return E_NOMEM;
 	pc->used = TRUE;
 	pc->bad = TRUE;
 	pc->clock = ++tvs_clock;
-	strncpy((char *)pc->name, (CONST char *)href, sizeof(pc->name) - 1);
 	if ( !href_of(href, &id, &name) || ( data = res_read(&id, name, &size) ) == NULL ) return E_NOEXS;
 	if ( dp_img_decode(data, size, NULL, 0, &w, &h) >= E_OK && w > 0 && h > 0 ) {
 		pc->px = (UW *)malloc(sizeof(UW) * (size_t)w * h);
@@ -603,6 +673,7 @@ EXPORT void tv_src_forget( CONST TS_UUID *id )
 		  || ( strncmp((CONST char *)tvs_pic[i].name, txt, TS_UUID_STRLEN) == 0
 		    && ( tvs_pic[i].name[TS_UUID_STRLEN] == '_' || tvs_pic[i].name[TS_UUID_STRLEN] == '.' ) ) ) ) {
 			free(tvs_pic[i].px);
+			free(tvs_pic[i].name);
 			memset(&tvs_pic[i], 0, sizeof(tvs_pic[i]));
 		}
 	}
@@ -619,8 +690,10 @@ EXPORT INT tv_src_look( CONST T_VOBJ *v, UB *name, INT max, UW *p_paper )
 		*p_paper = k->paper;
 	}
 	if ( name == NULL || max <= 0 ) return k->name_len;
+	/* what fits, at a whole letter; the whole length is told with no room */
 	n = ( k->name_len >= 0 && k->name_len < max - 1 ) ? k->name_len : ( k->name_len < 0 ? 0 : max - 1 );
-	memcpy(name, k->name, (size_t)n);
+	while ( n > 0 && n < k->name_len && ( k->name[n] & 0xC0 ) == 0x80 ) n--;
+	if ( n > 0 ) memcpy(name, k->name, (size_t)n);
 	name[n] = 0;
 	return n;
 }

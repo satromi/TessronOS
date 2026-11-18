@@ -298,6 +298,23 @@ LOCAL UB	wbuf[BIG_SZ + 64] __attribute__((aligned(4096)));
 LOCAL UB	rbuf[BIG_SZ + 64] __attribute__((aligned(4096)));
 LOCAL UB	kbuf[KILL_SZ];
 
+/*
+ * Whether an object's whole name is name: read with room for one byte
+ * more than name, so that a longer name is seen as longer, not cut
+ */
+LOCAL BOOL same( CONST UB *a, CONST char *b );
+
+LOCAL BOOL name_is( CONST TS_UUID *u, CONST char *name )
+{
+	UB	buf[64];
+	SZ	n = 0, asize = 0;
+
+	while ( name[n] != '\0' ) n++;
+	if ( n + 2 > (SZ)sizeof(buf) ) return FALSE;
+	if ( ob_ref_nam(u, buf, n + 2, &asize) != E_OK || asize != n + 1 ) return FALSE;
+	return same(buf, name);
+}
+
 LOCAL BOOL same( CONST UB *a, CONST char *b )
 {
 	while ( *b != '\0' && *a == (UB)*b ) {
@@ -492,7 +509,7 @@ LOCAL INT mount( void )
 	if ( ob_lst_obj(OB_T_DEVICE, 0, NULL, list, LIST_MAX, &cnt) != E_OK ) return 40;
 	for ( i = 0; i < cnt && i < LIST_MAX; i++ ) {
 		if ( ob_ref_obj(&list[i], &r) != E_OK ) continue;
-		if ( same(r.name, name) && r.sub == OB_S_DISK ) {
+		if ( r.sub == OB_S_DISK && name_is(&list[i], name) ) {
 			u = list[i];
 			found = TRUE;
 		}
@@ -612,7 +629,7 @@ LOCAL BOOL disk_named( CONST char *name, TS_UUID *u )
 
 	if ( ob_lst_obj(OB_T_DEVICE, 0, NULL, list, LIST_MAX, &cnt) != E_OK ) return FALSE;
 	for ( i = 0; i < cnt && i < LIST_MAX; i++ ) {
-		if ( ob_ref_obj(&list[i], &r) == E_OK && same(r.name, name) && r.sub == OB_S_DISK ) {
+		if ( ob_ref_obj(&list[i], &r) == E_OK && r.sub == OB_S_DISK && name_is(&list[i], name) ) {
 			*u = list[i];
 			return TRUE;
 		}
@@ -1617,9 +1634,11 @@ LOCAL ER ask_dt( T_DTREQ *rq, UINT seq )
 }
 
 /*
- * A link carried to a window of the desktop's and asked placed, for each
- * object the test sends while the hand is down: the first one this user
- * may not read, the second one it may.
+ * A link carried to a figure's window and asked placed, for each object
+ * the test sends while the hand is down: the first one this user may not
+ * read, the second one it may. The window is its program's, and no window
+ * of the desktop's takes links, so the carry goes to another program's
+ * window (DT_F_TO_PROG).
  */
 LOCAL INT placed( void )
 {
@@ -1636,6 +1655,7 @@ LOCAL INT placed( void )
 		if ( ts_rcv_msg(&msg, 30000) != E_OK ) return 4101 + i;
 		memset(&rq, 0, sizeof(rq));
 		rq.req = DT_RQ_CARRY;
+		rq.flags = DT_F_TO_PROG;
 		rq.recno = -1;
 		rq.look.w = 100;
 		rq.look.h = 20;
@@ -3002,10 +3022,72 @@ LOCAL INT fnface( UW n_k, UW first_k )
  * and this machine, and refuses what is wrong. ob_dup_obj copies the
  * template of a document under a name, and refuses what is wrong.
  */
+/* The form of T_OBREF before the name was taken out, as the SVC of then answers it */
+typedef struct {
+	TS_UUID	uuid;
+	UINT	type, sub, flags;
+	UB	name[64];
+	INT	refcnt, nrec;
+	UD	size;
+} OBREF_V1;
+IMPORT ER ob_ref_obj_v1( CONST TS_UUID *uuid, OBREF_V1 *pk_ref );
+
+LOCAL BOOL same_bytes( CONST UB *a, CONST UB *b, INT n )
+{
+	INT	i;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( a[i] != b[i] ) return FALSE;
+	}
+	return TRUE;
+}
+
+/*
+ * A name longer than the 63 bytes of before (150 letters of three
+ * bytes): ob_ref_nam has it whole, T_OBREF says its length, and the SVC
+ * of before cuts it at a whole letter and says so with OB_F_NAMECUT
+ */
+LOCAL INT longname( void )
+{
+	static UB	nm[150 * 3 + 1], got[150 * 3 + 1];
+	T_OBCRE		c;
+	T_OBREF		r;
+	OBREF_V1	o;
+	TS_UUID		u;
+	SZ		need = 0;
+	INT		i, n, er = 0;
+
+	for ( i = 0; i < 150; i++ ) {
+		UW	ch = 0x3042 + (UW)( i % 80 );
+
+		nm[i * 3] = (UB)( 0xE0 | ( ch >> 12 ) );
+		nm[i * 3 + 1] = (UB)( 0x80 | ( ( ch >> 6 ) & 0x3F ) );
+		nm[i * 3 + 2] = (UB)( 0x80 | ( ch & 0x3F ) );
+	}
+	nm[150 * 3] = 0;
+	for ( i = 0; i < (INT)sizeof(c); i++ ) ((UB *)&c)[i] = 0;
+	c.type = OB_T_STORAGE;
+	c.sub = OB_S_MEMORY;
+	c.name = nm;
+	if ( ob_cre_obj(&c, &u) < E_OK ) return 4620;
+	if ( ob_ref_nam(&u, got, sizeof(got), &need) < E_OK || need != (SZ)sizeof(got)
+	  || !same_bytes(got, nm, (INT)sizeof(got)) ) er = 4621;
+	if ( er == 0 && ( ob_ref_obj(&u, &r) < E_OK || r.namelen != 150 * 3 ) ) er = 4622;
+	if ( er == 0 && ob_ref_obj_v1(&u, &o) < E_OK ) er = 4623;
+	if ( er == 0 && ( o.flags & OB_F_NAMECUT ) == 0 ) er = 4624;
+	for ( n = 0; er == 0 && n < 64 && o.name[n] != 0; n++ ) ;
+	if ( er == 0 && ( n == 0 || n > 63 || n % 3 != 0 || !same_bytes(o.name, nm, n) ) ) er = 4625;
+	if ( er == 0 && o.type != r.type ) er = 4626;
+	say("  svcprog: tvsvc long name, the form before kept bytes ", n);
+	(void)ob_del_obj(&u);
+	return er;
+}
+
 LOCAL INT tvsvc( void )
 {
 	static T_OBRVOB	q[2];
 	static UW	icon[64 * 64];
+	static UB	nm[256], lb[256];
 	static CONST UB	three[] = "あいう";
 	T_FNTXT		pk;
 	ID		fid = fn_system();
@@ -3020,6 +3102,10 @@ LOCAL INT tvsvc( void )
 	q[0].want = OB_VW_NAME | OB_VW_LABEL | OB_VW_ICON | OB_VW_PAPER | OB_VW_STATE;
 	q[0].icon = icon;
 	q[0].icon_max = 64 * 64;
+	q[0].name = nm;
+	q[0].name_max = (INT)sizeof(nm);
+	q[0].label = lb;
+	q[0].label_max = (INT)sizeof(lb);
 	for ( i = 0; i < 16; i++ ) q[1].vobj.target.b[i] = (UB)( 0xA0 + i );	/* no such object */
 	q[1].want = OB_VW_NAME | OB_VW_STATE;
 	if ( ob_ref_vob(q, 2) != 2 ) return 4606;
@@ -3029,6 +3115,11 @@ LOCAL INT tvsvc( void )
 	if ( q[0].er != E_OK || q[0].name_len <= 0 ) return 4607;
 	if ( ( q[0].state & TV_ST_GONE ) != 0 ) return 4608;
 	if ( ( q[1].state & TV_ST_GONE ) == 0 || q[1].er >= E_OK ) return 4609;
+	{
+		INT	lr = longname();
+
+		if ( lr != 0 ) return lr;
+	}
 
 	if ( fid <= 0 ) return 4610;
 	pk.op = FN_OP_WIDTH;

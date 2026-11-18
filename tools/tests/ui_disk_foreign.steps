@@ -1,0 +1,166 @@
+# ディスク操作 with USB disks of the person's and another machine's system
+# disk (design 11.26, 7.6, 8.3), for tools/ui_run.py --vols DIR, DIR made by
+# tools/tests/mkvoldisk.py: volc.img (VOLC1, a TSFS partition uda0) and
+# vols.img (a TessronOS system volume of another machine: the objects of
+# etc/def and etc/xtad and the system box, under a volume UUID of its own).
+# The first window is made larger; 接続 from its menu (ディスク操作 at 440,480
+# the first time the menu opens at 400,300 and under the pointer after,
+# 接続 to its right) starts the program ディスク操作, whose list has the
+# TSFS partition chosen already, so Enter attaches it.
+#
+# A USB medium the system uses nothing of is the person's to attach and
+# detach: no administrator's password is asked for. VOLC1 attached, its
+# link deleted from the first window (取り外し), and attached again: its
+# link is put in the first window again.
+#
+# Then another machine's system disk: told as such, with aliases for the
+# objects of this system's UUIDs; its top holds a link to that machine's
+# first window. 切り離し is not refused for this system's first window being
+# open, nor is the 一時 box of this system emptied by the attach. Opened,
+# the disk's window shows that link, and that link opens the other
+# machine's first window, which shows its links.
+hmp drive_add 0 if=none,id=uvc,file=$VOLS/volc.img,format=raw
+hmp device_add usb-storage,drive=uvc,id=uvcd,bus=xhci.0
+wait 3000
+click 250 60
+wait 300
+drag 346 222 620 420
+wait 500
+# 接続 of VOLC1: the person's medium, no password
+click 400 300 1
+wait 300
+move 430 480
+wait 150
+move 440 480
+wait 300
+move 510 480
+wait 150
+move 530 481
+wait 300
+click 530 481
+expect disk: connect offers
+wait 800
+key 28
+expect disk: uda0 is the person's medium
+expect disk: attached uda0 "VOLC1"
+wait 1500
+shot fo_volc_attached
+# 取り外し: its link deleted, then 接続 again: the link comes back
+click 60 205
+wait 300
+key 4C
+expect disk: detached uda0
+expect disk: removed uda0
+wait 1000
+shot fo_volc_removed
+logmark
+click 400 300 1
+wait 300
+move 430 300
+wait 150
+move 440 301
+wait 300
+move 510 301
+wait 150
+move 530 301
+wait 300
+click 530 301
+expect disk: connect offers
+wait 800
+key 28
+expectsince disk: attached uda0 "VOLC1"
+expectsince put on the desktop: VOLC1
+wait 1500
+shot fo_volc_again
+# 切り離し of VOLC1 through the menu on its link, no password
+click 60 205 1
+wait 300
+move 90 205
+wait 150
+move 100 206
+wait 300
+move 170 206
+wait 150
+move 190 206
+wait 300
+move 185 226
+wait 300
+click 185 226
+expect disk: detached uda0
+wait 1000
+hmp device_del uvcd
+wait 1500
+# another machine's system disk
+hmp drive_add 0 if=none,id=uvs,file=$VOLS/vols.img,format=raw
+hmp device_add usb-storage,drive=uvs,id=uvsd,bus=xhci.0
+wait 3000
+logmark
+click 400 300 1
+wait 300
+move 430 300
+wait 150
+move 440 301
+wait 300
+move 510 301
+wait 150
+move 530 301
+wait 300
+click 530 301
+expect disk: connect offers
+wait 800
+shot fo_sys_connect
+key 28
+expectsince is another machine's system volume
+expectsince disk: another machine's system: its first window put in the top (0)
+expectsince disk: attached
+wait 1500
+shot fo_sys_attached
+# 切り離し with this system's first window open: not refused
+logmark
+click 60 223 1
+wait 300
+move 90 223
+wait 150
+move 100 224
+wait 300
+move 170 224
+wait 150
+move 190 224
+wait 300
+move 185 244
+wait 300
+click 185 244
+expectsince disk: detached uda0
+wait 1000
+shot fo_sys_detached
+# 接続 again from the menu on its link, now pale
+logmark
+click 60 223 1
+wait 300
+move 90 223
+wait 150
+move 100 224
+wait 300
+move 170 224
+wait 150
+move 190 224
+wait 300
+click 190 224
+expectsince disk: connect offers
+wait 800
+key 28
+expectsince disk: attached
+expectsince put on the desktop: there already
+wait 1500
+# the disk's window: the link to that machine's first window (BTRON);
+# opened, that machine's first window shows its links
+logmark
+dclick 120 223
+expectsince cabinet: opened TessronOS system (0)
+wait 2000
+shot fo_sys_top
+dclick 186 86
+expectsince cabinet: opened BTRON (0)
+wait 2500
+shot fo_sys_cabinet
+absent refused: a window is open

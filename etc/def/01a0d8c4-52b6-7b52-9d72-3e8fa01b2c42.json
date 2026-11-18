@@ -19,9 +19,11 @@
       "id": "tessronos-sysenv",
       "kind": "accessory",
       "name": "システム環境設定",
-      "version": "R1.400",
+      "version": "R1.410",
       "menu": true,
       "builtin": false,
+      "openArg": "link",
+      "once": true,
       "base": []
     },
     "exec": {

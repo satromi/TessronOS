@@ -115,10 +115,16 @@ void knl_wifi_say( const char *line )
 	(void)cb(&w, WPP_CB_SAY);
 }
 
-/* Outputs of the glue's functions, in the sizes the kernel's callers have */
-static unsigned char	o_buf[WPAG_SAE_MAX];
+/*
+ * Outputs of the glue's functions, in the sizes the kernel's callers
+ * have: o_buf is as large as the largest of them (an SAE frame, the RSN
+ * element and RSNXE of a join, H2E's element, a PMK)
+ */
+#define O_MAX2(a, b)	( (a) > (b) ? (a) : (b) )
+#define O_BUF_SIZE	O_MAX2(O_MAX2(WPAG_SAE_MAX, WPAG_IE_MAX), O_MAX2(O_MAX2(WPP_START_IE_MAX, WPAG_SAE_PT_MAX), WPP_PMK_LEN))
+static unsigned char	o_buf[O_BUF_SIZE];
 static unsigned char	o_pmkid[WPP_PMKID_LEN];
-static char		s_pass[128];
+static char		s_pass[WPAG_SAE_PW_MAX + 1];
 
 /* A passphrase or a password as the glue takes it: its bytes, kept with a terminating zero */
 /* The certificates and the key of a join of 802.1X, until knl_wpa_eap_set has taken them */
@@ -230,7 +236,7 @@ int wps_serve( const unsigned char *in, int n, unsigned char *out )
 		break;
 	case WPP_SAE_PT:
 		a = wpp_r_bytes(&r, &la, 32);
-		b = wpp_r_bytes(&r, &lb, 64);
+		b = wpp_r_bytes(&r, &lb, WPAG_SAE_PW_MAX);
 		pw = text_of(b, lb);
 		if ( r.bad || a == NULL || pw == NULL ) return 0;
 		ret = knl_wpa_sae_pt(a, la, pw, lb, o_buf, &olen);
@@ -241,7 +247,7 @@ int wps_serve( const unsigned char *in, int n, unsigned char *out )
 		a = wpp_r_bytes(&r, &la, WPP_ADDR_LEN);
 		b = wpp_r_bytes(&r, &lb, WPP_ADDR_LEN);
 		i1 = wpp_r_int(&r);
-		c = wpp_r_bytes(&r, &lc, 64);
+		c = wpp_r_bytes(&r, &lc, WPAG_SAE_PW_MAX);
 		d = wpp_r_bytes(&r, &ld, WPAG_SAE_PT_MAX);
 		pw = ( c != NULL ) ? text_of(c, lc) : NULL;
 		if ( r.bad || la != WPP_ADDR_LEN || lb != WPP_ADDR_LEN || ( c != NULL && pw == NULL ) ) return 0;
@@ -305,10 +311,11 @@ int wps_serve( const unsigned char *in, int n, unsigned char *out )
 		break;
 	case WPP_EAP_SET:
 		i1 = wpp_r_int(&r);
-		a = wpp_r_bytes(&r, &la, 256);
-		b = wpp_r_bytes(&r, &lb, 256);
-		c = wpp_r_bytes(&r, &lc, 256);
-		d = wpp_r_bytes(&r, &ld, 256);
+		/* the words as long as they came: the message's own length bounds them */
+		a = wpp_r_bytes(&r, &la, WPP_ARGS_MAX);
+		b = wpp_r_bytes(&r, &lb, WPP_ARGS_MAX);
+		c = wpp_r_bytes(&r, &lc, WPP_ARGS_MAX);
+		d = wpp_r_bytes(&r, &ld, WPP_ARGS_MAX);
 		if ( r.bad ) return 0;
 		ret = knl_wpa_eap_set(i1, (const char *)a, la, (const char *)b, lb, eb[0], eb_len[0],
 				      (const char *)c, lc, eb[1], eb_len[1], eb[2], eb_len[2],

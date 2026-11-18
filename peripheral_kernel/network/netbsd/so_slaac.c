@@ -52,7 +52,12 @@
  *
  *	All of the tables are worked by the task alone while it runs;
  *	stopping it waits until it has stopped, so that whoever stopped it
- *	may then take the addresses away.
+ *	may then take the addresses away. The tables of routers, prefixes,
+ *	name servers and temporary addresses have no fixed size: a table
+ *	with no free place is made twice as large (RFC 4861 and RFC 8106 set
+ *	no limit on how many there are). The name servers are read by other
+ *	tasks under sl_lock, so their larger table is made first and put in
+ *	place of the old one with the lock held.
  */
 
 #include "kernel.h"
@@ -84,12 +89,7 @@
 #define PI_ONLINK		0x80
 #define PI_AUTO			0x40
 
-#define ROUTERS			3
-#define PREFIXES		4
-#define SERVERS			3
-
 /* Temporary addresses (RFC 8981 3.8) */
-#define TEMPS			( PREFIXES * 2 )
 #define TEMP_VALID_S		( 2 * 24 * 3600 )
 #define TEMP_PREFERRED_S	( 24 * 3600 )
 #define MAX_DESYNC_S		( TEMP_PREFERRED_S * 2 / 5 )
@@ -98,7 +98,7 @@
 #define TEMP_CHECK_S		10		/* how long a new one is watched for a duplicate */
 #define TEMP_RETRY_S		60		/* after one could not be put on the interface */
 
-/* A router or a name server, and when it stops being one (monotonic ns) */
+/* A router or a name server, and when it stops being one (monotonic ns); used first, as in each table */
 typedef struct {
 	BOOL	used;
 	UB	addr[16];
@@ -128,10 +128,14 @@ typedef struct {
 	UD	cap_until, cap_pref;	/* the most it may have, from when it was made */
 } TEMP;
 
-LOCAL TIMED		sl_rtr[ROUTERS];
-LOCAL TIMED		sl_ns[SERVERS];
-LOCAL MADE		sl_made[PREFIXES];
-LOCAL TEMP		sl_temp[TEMPS];
+LOCAL TIMED		*sl_rtr = NULL;		/* sl_nrtr places, free ones not used */
+LOCAL INT		sl_nrtr = 0;
+LOCAL TIMED		*sl_ns = NULL;		/* sl_nns places; changed with sl_lock held */
+LOCAL INT		sl_nns = 0;
+LOCAL MADE		*sl_made = NULL;	/* sl_nmade places */
+LOCAL INT		sl_nmade = 0;
+LOCAL TEMP		*sl_temp = NULL;	/* sl_ntemp places */
+LOCAL INT		sl_ntemp = 0;
 LOCAL UB		sl_gw[16];
 LOCAL BOOL		sl_have_gw = FALSE;
 LOCAL T_SPLOCK		sl_lock;		/* sl_ns, sl_gw and the task's state, which other tasks read */
@@ -214,6 +218,76 @@ LOCAL void say( CONST char *what, CONST UB *a, UW life )
 	}
 }
 
+/* ---------------------------------------------------------------- the tables */
+
+/*
+ * A free place in a table worked by the task alone (*tab of *n places
+ * of sz bytes, each beginning with its BOOL used): the first free one,
+ * else one of the places added by making the table twice as large; -1
+ * when there is no memory, said on the console.
+ */
+LOCAL INT tab_free( void **tab, INT *n, SZ sz, CONST char *what )
+{
+	UB	*t = (UB *)*tab;
+	INT	i, cap;
+
+	for ( i = 0; i < *n; i++ ) {
+		if ( !*(BOOL *)( t + (SZ)i * sz ) ) return i;
+	}
+	cap = ( *n > 0 ) ? *n * 2 : 4;
+	t = (UB *)Krealloc(*tab, (size_t)( (SZ)cap * sz ));
+	if ( t == NULL ) {
+		tm_printf((UB *)"net: IPv6: no memory for %d %s\n", cap, what);
+		return -1;
+	}
+	knl_memset(t + (SZ)*n * sz, 0, (SZ)( cap - *n ) * sz);
+	i = *n;
+	*tab = t;
+	*n = cap;
+	return i;
+}
+
+/*
+ * At least 'more' free places in the table of name servers, which other
+ * tasks read: a larger table is made and filled first, put in place of
+ * the old one under sl_lock, and the old one freed after. FALSE when
+ * there is no memory.
+ */
+LOCAL BOOL ns_room( INT more )
+{
+	TIMED	*t, *old;
+	UINT	imask;
+	INT	i, free = 0, cap;
+
+	for ( i = 0; i < sl_nns; i++ ) {
+		if ( !sl_ns[i].used ) free++;
+	}
+	if ( free >= more ) {
+		return TRUE;
+	}
+	cap = ( sl_nns > 0 ) ? sl_nns * 2 : 4;
+	if ( cap < sl_nns + more - free ) {
+		cap = sl_nns + more - free;
+	}
+	t = (TIMED *)Kcalloc((size_t)cap, sizeof(TIMED));
+	if ( t == NULL ) {
+		tm_printf((UB *)"net: IPv6: no memory for %d name servers\n", cap);
+		return FALSE;
+	}
+	if ( sl_nns > 0 ) {
+		knl_memcpy(t, sl_ns, sizeof(TIMED) * (SZ)sl_nns);
+	}
+	ISpinLock(&sl_lock, &imask);
+	old = sl_ns;
+	sl_ns = t;
+	sl_nns = cap;
+	ISpinUnlock(&sl_lock, &imask);
+	if ( old != NULL ) {
+		Kfree(old);
+	}
+	return TRUE;
+}
+
 /* ---------------------------------------------------------------- the interface */
 
 /*
@@ -224,28 +298,35 @@ LOCAL void say( CONST char *what, CONST UB *a, UW life )
  */
 LOCAL BOOL take_iid( UINT gen )
 {
-	T_SOIF6	l[8];
+	T_SOIF6	*l;
 	UB	mac[NET_MAC_LEN];
-	INT	n, i, t;
+	INT	n, i, t, got;
 
 	for ( t = 0; t < LL_WAIT_MS; t += 200 ) {
 		if ( sl_gen != gen ) {
 			return FALSE;
 		}
-		n = rump_tsnet_addrs6(SO_IFNAME, l, 8);
-		for ( i = 0; i < n && i < 8; i++ ) {
+		n = knl_so_addrs6_all(&l);
+		got = -1;			/* -1 still tentative, 0 another machine's, 1 taken */
+		for ( i = 0; i < n; i++ ) {
 			if ( !link_local(l[i].addr) ) continue;
 			if ( l[i].flags & SO_IF6_DUPLICATED ) {
-				tm_printf((UB *)"net: IPv6 link-local address in use by another machine\n");
-				return FALSE;
-			}
-			if ( ( l[i].flags & SO_IF6_TENTATIVE ) == 0 ) {
+				got = 0;
+			} else if ( ( l[i].flags & SO_IF6_TENTATIVE ) == 0 ) {
 				knl_memcpy(sl_iid, l[i].addr + 8, 8);
-				return TRUE;
+				got = 1;
 			}
 			break;
 		}
-		if ( n == 0 ) {
+		if ( l != NULL ) Kfree(l);
+		if ( got == 0 ) {
+			tm_printf((UB *)"net: IPv6 link-local address in use by another machine\n");
+			return FALSE;
+		}
+		if ( got == 1 ) {
+			return TRUE;
+		}
+		if ( n <= 0 ) {
 			break;			/* none will come */
 		}
 		(void)tk_dly_tsk(200);
@@ -272,7 +353,7 @@ LOCAL void route_again( void )
 	UINT	imask;
 	INT	i;
 
-	for ( i = 0; i < ROUTERS && !have; i++ ) {
+	for ( i = 0; i < sl_nrtr && !have; i++ ) {
 		if ( sl_rtr[i].used ) {
 			knl_memcpy(gw, sl_rtr[i].addr, 16);
 			have = TRUE;
@@ -365,7 +446,7 @@ LOCAL void temp_drop( TEMP *p )
 LOCAL void temp_new( INT pi, INT tries, UD now )
 {
 	MADE	*m = &sl_made[pi];
-	TEMP	*p = NULL;
+	TEMP	*p;
 	UD	cap_until = now + (UD)TEMP_VALID_S * NS_PER_S;
 	UD	cap_pref = now + (UD)( TEMP_PREFERRED_S - sl_desync ) * NS_PER_S;
 	UD	until = min_ud(cap_until, m->until), pref = min_ud(cap_pref, m->pref_until);
@@ -376,17 +457,12 @@ LOCAL void temp_new( INT pi, INT tries, UD now )
 		m->temp_try = now + (UD)TEMP_RETRY_S * NS_PER_S;
 		return;
 	}
-	for ( i = 0; i < TEMPS && p == NULL; i++ ) {
-		if ( !sl_temp[i].used ) p = &sl_temp[i];
+	i = tab_free((void **)&sl_temp, &sl_ntemp, sizeof(TEMP), "temporary addresses");
+	if ( i < 0 ) {
+		m->temp_try = now + (UD)TEMP_RETRY_S * NS_PER_S;
+		return;
 	}
-	if ( p == NULL ) {
-		/* full: the one that would have gone first goes now */
-		p = &sl_temp[0];
-		for ( i = 1; i < TEMPS; i++ ) {
-			if ( !sl_temp[i].current && ( p->current || sl_temp[i].until < p->until ) ) p = &sl_temp[i];
-		}
-		temp_drop(p);
-	}
+	p = &sl_temp[i];
 	knl_memset(p, 0, sizeof(*p));
 	knl_memcpy(p->addr, m->addr, 8);
 	knl_memcpy(p->addr + 8, iid, 8);
@@ -395,7 +471,7 @@ LOCAL void temp_new( INT pi, INT tries, UD now )
 		m->temp_try = now + (UD)TEMP_RETRY_S * NS_PER_S;
 		return;
 	}
-	for ( i = 0; i < TEMPS; i++ ) {
+	for ( i = 0; i < sl_ntemp; i++ ) {
 		if ( sl_temp[i].used && sl_temp[i].from == pi ) sl_temp[i].current = FALSE;
 	}
 	p->used = TRUE;
@@ -420,7 +496,7 @@ LOCAL void temp_prefix( INT pi, UD now )
 	UD	until, pref;
 	INT	i;
 
-	for ( i = 0; i < TEMPS; i++ ) {
+	for ( i = 0; i < sl_ntemp; i++ ) {
 		p = &sl_temp[i];
 		if ( !p->used || p->from != pi ) continue;
 		until = min_ud(p->cap_until, m->until);
@@ -445,47 +521,53 @@ LOCAL void temp_prefix( INT pi, UD now )
  */
 LOCAL void temp_tick( UD now )
 {
-	T_SOIF6	l[16];
+	T_SOIF6	*l = NULL;
 	TEMP	*p;
 	BOOL	young = FALSE;
 	INT	i, j, n;
 
-	for ( i = 0; i < TEMPS; i++ ) {
+	for ( i = 0; i < sl_ntemp; i++ ) {
 		p = &sl_temp[i];
 		if ( p->used && p->until <= now ) p->used = FALSE;	/* the kernel took it away */
 		if ( p->used && !p->checked ) young = TRUE;
 	}
 	if ( young ) {
-		n = rump_tsnet_addrs6(SO_IFNAME, l, 16);
-		for ( i = 0; i < TEMPS; i++ ) {
+		n = knl_so_addrs6_all(&l);
+		if ( n < 0 ) {
+			n = 0;
+		}
+		/* a place freed by temp_drop is the one temp_new takes: the table does not move under p */
+		for ( i = 0; i < sl_ntemp; i++ ) {
 			p = &sl_temp[i];
 			if ( !p->used || p->checked ) continue;
-			for ( j = 0; j < n && j < 16 && !same(l[j].addr, p->addr, 16); j++ ) ;
-			if ( j < n && j < 16 && ( l[j].flags & SO_IF6_DUPLICATED ) ) {
+			for ( j = 0; j < n && !same(l[j].addr, p->addr, 16); j++ ) ;
+			if ( j < n && ( l[j].flags & SO_IF6_DUPLICATED ) ) {
 				INT	pi = p->from, tries = p->tries + 1;
 				BOOL	cur = p->current;
 
 				say("temporary address in use by another machine:", p->addr, LIFE_INFINITE);
 				temp_drop(p);
 				if ( cur && tries <= TEMP_IDGEN_RETRIES && sl_made[pi].used ) temp_new(pi, tries, now);
-			} else if ( j < n && j < 16 && !( l[j].flags & SO_IF6_TENTATIVE ) ) {
+			} else if ( j < n && !( l[j].flags & SO_IF6_TENTATIVE ) ) {
 				p->checked = TRUE;
 			} else if ( now - p->made > (UD)TEMP_CHECK_S * NS_PER_S ) {
 				p->checked = TRUE;
 			}
 		}
+		if ( l != NULL ) Kfree(l);
 	}
-	for ( i = 0; i < PREFIXES; i++ ) {
+	for ( i = 0; i < sl_nmade; i++ ) {
 		if ( !sl_made[i].used ) continue;
-		for ( j = 0; j < TEMPS; j++ ) {
+		for ( j = 0; j < sl_ntemp; j++ ) {
 			p = &sl_temp[j];
 			if ( p->used && p->from == i && p->current ) break;
 		}
-		if ( j == TEMPS ) {
+		if ( j == sl_ntemp ) {
 			if ( now >= sl_made[i].temp_try ) temp_new(i, 0, now);
 		} else if ( p->pref_until != UNTIL_NEVER
 			 && p->pref_until <= now + (UD)REGEN_ADVANCE_S * NS_PER_S ) {
 			temp_new(i, 0, now);
+			p = &sl_temp[j];	/* temp_new may have made the table larger */
 			if ( p->current ) {
 				p->current = FALSE;	/* none could be made: this one is let run out */
 				sl_made[i].temp_try = now + (UD)TEMP_RETRY_S * NS_PER_S;
@@ -505,13 +587,13 @@ LOCAL void temp_turn( void )
 	}
 	sl_temp_on = sl_temp_want;
 	if ( !sl_temp_on ) {
-		for ( i = 0; i < TEMPS; i++ ) temp_drop(&sl_temp[i]);
+		for ( i = 0; i < sl_ntemp; i++ ) temp_drop(&sl_temp[i]);
 		tm_printf((UB *)"net: IPv6 temporary addresses ended\n");
 		return;
 	}
 	(void)ts_get_random(&r, sizeof(r));
 	sl_desync = r % ( MAX_DESYNC_S + 1 );
-	for ( i = 0; i < PREFIXES; i++ ) sl_made[i].temp_try = 0;
+	for ( i = 0; i < sl_nmade; i++ ) sl_made[i].temp_try = 0;
 	tm_printf((UB *)"net: IPv6 temporary addresses begun\n");
 }
 
@@ -523,16 +605,16 @@ LOCAL void expire( UD now )
 	UINT	imask;
 	INT	i;
 
-	for ( i = 0; i < ROUTERS; i++ ) {
+	for ( i = 0; i < sl_nrtr; i++ ) {
 		if ( sl_rtr[i].used && sl_rtr[i].until <= now ) sl_rtr[i].used = FALSE;
 	}
 	route_again();
 	ISpinLock(&sl_lock, &imask);
-	for ( i = 0; i < SERVERS; i++ ) {
+	for ( i = 0; i < sl_nns; i++ ) {
 		if ( sl_ns[i].used && sl_ns[i].until <= now ) sl_ns[i].used = FALSE;
 	}
 	ISpinUnlock(&sl_lock, &imask);
-	for ( i = 0; i < PREFIXES; i++ ) {
+	for ( i = 0; i < sl_nmade; i++ ) {
 		if ( sl_made[i].used && sl_made[i].until <= now ) sl_made[i].used = FALSE;
 	}
 	temp_turn();
@@ -552,17 +634,17 @@ LOCAL void forget( void )
 	UINT	imask;
 	INT	i;
 
-	for ( i = 0; i < TEMPS; i++ ) temp_drop(&sl_temp[i]);
-	for ( i = 0; i < PREFIXES; i++ ) {
+	for ( i = 0; i < sl_ntemp; i++ ) temp_drop(&sl_temp[i]);
+	for ( i = 0; i < sl_nmade; i++ ) {
 		if ( sl_made[i].used ) {
 			(void)rump_tsnet_deladdr6(SO_IFNAME, sl_made[i].addr);
 			sl_made[i].used = FALSE;
 		}
 	}
-	for ( i = 0; i < ROUTERS; i++ ) sl_rtr[i].used = FALSE;
+	for ( i = 0; i < sl_nrtr; i++ ) sl_rtr[i].used = FALSE;
 	route_again();
 	ISpinLock(&sl_lock, &imask);
-	for ( i = 0; i < SERVERS; i++ ) sl_ns[i].used = FALSE;
+	for ( i = 0; i < sl_nns; i++ ) sl_ns[i].used = FALSE;
 	ISpinUnlock(&sl_lock, &imask);
 	sl_temp_on = FALSE;
 }
@@ -571,15 +653,15 @@ LOCAL void forget( void )
 
 LOCAL void take_router( CONST UB *from, UW life, UD now )
 {
-	INT	i, free = -1;
+	INT	i;
 
-	for ( i = 0; i < ROUTERS; i++ ) {
+	for ( i = 0; i < sl_nrtr; i++ ) {
 		if ( sl_rtr[i].used && same(sl_rtr[i].addr, from, 16) ) break;
-		if ( !sl_rtr[i].used && free < 0 ) free = i;
 	}
-	if ( i == ROUTERS ) {
-		if ( life == 0 || free < 0 ) return;
-		i = free;
+	if ( i == sl_nrtr ) {
+		if ( life == 0 ) return;
+		i = tab_free((void **)&sl_rtr, &sl_nrtr, sizeof(TIMED), "routers");
+		if ( i < 0 ) return;
 		knl_memcpy(sl_rtr[i].addr, from, 16);
 	}
 	if ( life == 0 ) {
@@ -595,20 +677,20 @@ LOCAL void take_prefix( CONST UB *o, UD now )
 {
 	UB	a[16];
 	UW	valid = get32(o + 4), pref = get32(o + 8), left;
-	INT	plen = o[2], i, free = -1, e;
+	INT	plen = o[2], i, e;
 
 	if ( ( o[3] & PI_AUTO ) == 0 || plen != 64 || link_local(o + 16) || pref > valid ) {
 		return;
 	}
 	knl_memcpy(a, o + 16, 8);
 	knl_memcpy(a + 8, sl_iid, 8);
-	for ( i = 0; i < PREFIXES; i++ ) {
+	for ( i = 0; i < sl_nmade; i++ ) {
 		if ( sl_made[i].used && same(sl_made[i].addr, a, 16) ) break;
-		if ( !sl_made[i].used && free < 0 ) free = i;
 	}
-	if ( i == PREFIXES ) {
-		if ( valid == 0 || free < 0 ) return;
-		i = free;
+	if ( i == sl_nmade ) {
+		if ( valid == 0 ) return;
+		i = tab_free((void **)&sl_made, &sl_nmade, sizeof(MADE), "addresses from the routers' prefixes");
+		if ( i < 0 ) return;
 		knl_memcpy(sl_made[i].addr, a, 16);
 		sl_made[i].plen = ( o[3] & PI_ONLINK ) ? 64 : 128;
 		e = rump_tsnet_setaddr6(SO_IFNAME, a, sl_made[i].plen, valid, pref, SO_IF6_AUTOCONF);
@@ -653,14 +735,18 @@ LOCAL void take_servers( CONST UB *o, INT len, UD now )
 	UINT	imask;
 	INT	at, i, free;
 
+	/* room for every server of the option first: the table cannot be made larger with the lock held */
+	if ( life != 0 && !ns_room(( len - 8 ) / 16) ) {
+		return;
+	}
 	ISpinLock(&sl_lock, &imask);
 	for ( at = 8; at + 16 <= len; at += 16 ) {
 		free = -1;
-		for ( i = 0; i < SERVERS; i++ ) {
+		for ( i = 0; i < sl_nns; i++ ) {
 			if ( sl_ns[i].used && same(sl_ns[i].addr, o + at, 16) ) break;
 			if ( !sl_ns[i].used && free < 0 ) free = i;
 		}
-		if ( i == SERVERS ) {
+		if ( i == sl_nns ) {
 			if ( life == 0 || free < 0 ) continue;
 			i = free;
 			knl_memcpy(sl_ns[i].addr, o + at, 16);
@@ -772,15 +858,15 @@ LOCAL UW shape( void )
 	UW	h = 2166136261U;
 	INT	i;
 
-	for ( i = 0; i < PREFIXES; i++ ) {
+	for ( i = 0; i < sl_nmade; i++ ) {
 		if ( sl_made[i].used ) h = fnv(h, sl_made[i].addr, 16);
 	}
-	for ( i = 0; i < TEMPS; i++ ) {
+	for ( i = 0; i < sl_ntemp; i++ ) {
 		if ( sl_temp[i].used ) h = fnv(h, sl_temp[i].addr, 16);
 	}
 	ISpinLock(&sl_lock, &imask);
 	if ( sl_have_gw ) h = fnv(h, sl_gw, 16);
-	for ( i = 0; i < SERVERS; i++ ) {
+	for ( i = 0; i < sl_nns; i++ ) {
 		if ( sl_ns[i].used ) h = fnv(h, sl_ns[i].addr, 16);
 	}
 	ISpinUnlock(&sl_lock, &imask);
@@ -988,7 +1074,7 @@ EXPORT BOOL knl_so_slaac_dns( INT n, UB *addr )
 		return FALSE;
 	}
 	ISpinLock(&sl_lock, &imask);
-	for ( i = 0; i < SERVERS && !yes; i++ ) {
+	for ( i = 0; i < sl_nns && !yes; i++ ) {
 		if ( sl_ns[i].used && k++ == n ) {
 			knl_memcpy(addr, sl_ns[i].addr, 16);
 			yes = TRUE;

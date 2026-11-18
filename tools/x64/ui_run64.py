@@ -14,6 +14,12 @@ UI_EXTRA adds its words, split at the spaces, to QEMU's arguments as
 they are (as ktest64.sh's EXTRA): "-acpitable file=X.aml" gives the
 machine the battery and the AC adapter of tools/x64/tests/acpi_battery.asl.
 
+UI_SCREENS=2 gives the machine a second display (QEMU's secondary-vga, id
+disp2), which the kernel puts right of the first, as ui_run.py does with
+a second bochs-display (docs/tessronos 10.4.8): the steps written for two
+screens (ui_screens_*.steps, ui_place_kept.steps, ui_new_place.steps)
+need it.
+
 UI_ACCEL=whpx runs the machine on Windows' hypervisor (WHPX) rather than
 QEMU's own translation, many times as fast. A state is not kept between
 runs: QEMU cannot take the NVMe controller's state along.
@@ -41,6 +47,8 @@ def machine_args(elf, disk, con_log, ut_port, mon_port, net="socket", wav=None, 
     if cdrom:
         extra += ["-drive", "file=%s,if=none,id=btcd,format=raw,media=cdrom,readonly=on" % cdrom,
                   "-device", "usb-storage,bus=xhci.0,drive=btcd,removable=on"]
+    if os.environ.get("UI_SCREENS") == "2":
+        extra += ["-device", "secondary-vga,id=disp2"]	# a second display, right of the first (10.4.8)
     extra += os.environ.get("UI_EXTRA", "").split()
     accel = []
     cpu = "max"

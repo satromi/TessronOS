@@ -98,7 +98,7 @@ static INT bo_test( void )
 	/* numbers of another context, and of none, refused */
 	if ( gp_del_bo(ctx2, b.handle == d.handle ? b.handle + 1 : b.handle) != E_ID ) return 30;
 	if ( gp_map_bo(ctx, 999, (void **)&q) != E_ID ) return 31;
-	if ( gp_ref_bo(GP_CTX_MAX + 1, a.handle, &c) != E_ID ) return 32;
+	if ( gp_ref_bo(0x7FFF0000, a.handle, &c) != E_ID ) return 32;	/* a context nobody has */
 	if ( gp_cls_gpu(0) != E_ID ) return 33;
 	if ( gp_map_bo(ctx, a.handle, (void **)0x10) != E_MACV ) return 34;
 
@@ -165,7 +165,7 @@ static INT job_test( void )
 	h[1] = 777;
 	if ( gp_sub_job(ctx, &job, h, 2) != E_ID ) return 109;
 	if ( gp_sub_job(ctx, &job, h, GP_JOB_BO_MAX + 1) != E_PAR ) return 110;
-	if ( gp_wai_fen(GP_CTX_MAX, f2, 0) != E_ID ) return 111;
+	if ( gp_wai_fen(0x7FFF0000, f2, 0) != E_ID ) return 111;
 
 	/* a job of each of two contexts, both naming the kernel's BO */
 	for ( i = 4; arg[i] != '\0'; i++ ) {

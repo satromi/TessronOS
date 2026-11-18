@@ -750,8 +750,9 @@ static void wnext_write( void )
 
 	mb_init(&a);
 	mb_printf(&a, "{\"mode\":%d,\"base\":[%d,%d,%d,%d]", wnext.mode, wbase[0], wbase[1], wbase[2], wbase[3]);
-	if ( wnext.saved ) mb_printf(&a, ",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"screen\":\"%s\"", wnext.x, wnext.y,
-				     wnext.w, wnext.h, wnext.scr);
+	if ( wnext.saved ) mb_printf(&a, ",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d", wnext.x, wnext.y, wnext.w, wnext.h);
+	/* the screen only where it is not the main one: a place on the main screen as it was written before */
+	if ( wnext.saved && wnext.scr[0] != 0 ) mb_printf(&a, ",\"screen\":\"%s\"", wnext.scr);
 	mb_putc(&a, '}');
 	meta_put("microscriptWindow", &a);
 	mb_free(&a);

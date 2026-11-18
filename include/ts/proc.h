@@ -169,6 +169,16 @@ IMPORT ER  knl_prc_set_withpar( ID pid, BOOL on );
 IMPORT ER  knl_prc_withpar( ID pid );
 
 /*
+ * The role of a process among those of its program
+ * (tessronos.process.role), as a person reads it: a program that runs
+ * as several processes names those it starts (a browser's renderer), and
+ * the process's name for a person says it after the program's
+ * (knl_prc_name). len bytes of role, UTF-8, at most TS_PRC_ROLE - 1 kept;
+ * 0 takes it away.
+ */
+IMPORT ER  knl_prc_set_role( ID pid, CONST UB *role, INT len );
+
+/*
  * Pages mapped into a process at an address of the shared window, and
  * taken away again; the physical address a process has at an address
  * (~0 for none). Done under the process table's lock, so a process
@@ -234,6 +244,7 @@ IMPORT INT knl_prc_end_all( UW term_ms, void (*tick)( void ) );
 #define TS_FLT_KPAN		3	/* the kernel, at a page of the program's it had not made sure of (PAN) */
 
 #define TS_FLT_FILE		32	/* bytes of the file name kept */
+#define TS_PRC_ROLE		32	/* bytes of a process's role kept (knl_prc_set_role), UTF-8 */
 #define TS_FLT_CODE		32	/* bytes of the program's code kept, from elr - TS_FLT_CODE_BACK */
 #define TS_FLT_CODE_BACK	16
 
@@ -257,6 +268,7 @@ typedef struct {
 	UB	code[TS_FLT_CODE];	/* from elr - TS_FLT_CODE_BACK */
 	UW	codeok;			/* bit i: code[i * 4] to code[i * 4 + 3] were read */
 	UD	codepa;			/* the physical address elr maps to, ~0 when none */
+	UB	role[TS_PRC_ROLE];	/* its role among the processes of its program, "" none */
 } T_PRCFLT;
 
 /*
@@ -333,10 +345,14 @@ IMPORT BOOL knl_prc_fault_take( T_PRCFLT *f, UW *p_lost );
 
 /*
  * A process's name for a person: its program object's name, or the
- * file it was started from, or "pid N". The bytes written, UTF-8.
+ * file it was started from, or "pid N", with its role after it in
+ * parentheses when it has one ("ブラウザ(レンダラ)"). The bytes written,
+ * UTF-8.
  * knl_prc_flt_name says the same of a recorded exception.
  */
 IMPORT INT  knl_prc_name( ID pid, UB *buf, INT max );
+/* The same, whole, in memory of its own (Kfree it), its length in *p_len; NULL without memory */
+IMPORT UB  *knl_prc_name_dup( ID pid, SZ *p_len );
 IMPORT INT  knl_prc_flt_name( CONST T_PRCFLT *f, UB *buf, INT max );
 /* The file it was started from, without a lock or memory: for the lockup report */
 IMPORT INT  knl_prc_file_peek( ID pid, UB *buf, INT max );

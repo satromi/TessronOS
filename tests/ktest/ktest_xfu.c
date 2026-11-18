@@ -1415,7 +1415,7 @@ LOCAL BOOL by_name( TS_UUID *ids, INT n, CONST char *name, TS_UUID *p )
 	INT	i;
 
 	for ( i = 0; i < n; i++ ) {
-		if ( ob_ref_obj(&ids[i], &r) >= E_OK && same_str(r.name, name) ) {
+		if ( ob_ref_obj(&ids[i], &r) >= E_OK && kt_name_is(&ids[i], name) ) {
 			*p = ids[i];
 			return TRUE;
 		}

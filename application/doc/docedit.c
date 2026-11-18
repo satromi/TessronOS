@@ -47,6 +47,8 @@
 #include <ts/figedit.h>
 #include <ts/docedit.h>
 
+#define DE_LOG		256		/* a note for the log: a long name in it is cut at a whole letter */
+
 #define KEY_A		0x04
 #define KEY_B		0x05
 #define KEY_C		0x06
@@ -416,9 +418,11 @@ LOCAL BOOL run_protected( T_DDED *d, CONST T_TVRUN *r )
 	if ( r->kind != TV_RUN_LINK || r->link < 0 ) {
 		return FALSE;
 	}
-	v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
+	v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
 	if ( v != NULL ) {
+		tad_vobj_init(v);
 		yes = (BOOL)( tad_lnk_get((*d->rec), r->link, v) >= E_OK && ( v->fixed || v->background ) );
+		tad_vobj_clear(v);
 		Kfree(v);
 	}
 	return yes;
@@ -3612,7 +3616,7 @@ EXPORT void de_link_after( T_DDED *d, CONST TS_UUID *orig )
 {
 	T_TAD		*rec = (*d->rec);
 	T_TADNODE	*was = NULL, *now = NULL;
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	INT		i, n;
 
 	d->host->model(d);
@@ -3620,6 +3624,7 @@ EXPORT void de_link_after( T_DDED *d, CONST TS_UUID *orig )
 	if ( (*d->doc) == NULL || n < 1 ) {
 		return;
 	}
+	tad_vobj_init(&v);
 	for ( i = 0; i < (*d->doc)->nrun; i++ ) {
 		CONST T_TVRUN	*r = &(*d->doc)->run[i];
 
@@ -3633,6 +3638,7 @@ EXPORT void de_link_after( T_DDED *d, CONST TS_UUID *orig )
 			was = r->node;
 		}
 	}
+	tad_vobj_clear(&v);
 	if ( was != NULL && now != NULL && was != now ) {
 		tad_node_move(now, was->parent, was->next);
 	}
@@ -3811,14 +3817,16 @@ EXPORT void de_link_follow( INT sx, INT sy )
 		}
 		{
 			/* a link is never lower than it is closed */
-			T_VOBJ	v;
+			T_VOBJ	v = { .recno = 0 };
 			INT	least = 8;
 
+			tad_vobj_init(&v);
 			if ( lc_kind == TV_RUN_LINK
 			  && tad_lnk_get((*lc_win->rec), lc_link, &v) >= E_OK
 			  && tad_lnk_closed_h(&v) > least ) {
 				least = tad_lnk_closed_h(&v);
 			}
+			tad_vobj_clear(&v);
 			if ( lc_now.bottom - lc_now.top < least ) {
 				lc_now.bottom = lc_now.top + least;
 			}
@@ -3976,31 +3984,40 @@ LOCAL void thing_here( T_DDED *d, INT sx, INT sy, T_TADNODE *node, UINT kind, T_
  */
 EXPORT void de_thing_back( T_DDED *d, INT sx, INT sy, CONST T_DDTHING *th )
 {
-	T_VOBJ	v = th->v;
+	T_VOBJ	v = { .recno = 0 };
 
 	if ( !(*d->used) || (*d->doc) == NULL || th->node == NULL || (*d->sealed) ) {
 		d->host->update(d);
 		return;
 	}
+	tad_vobj_init(&v);
+	if ( th->kind == TV_RUN_LINK && tad_vobj_copy(&v, &th->v) < E_OK ) {
+		d->host->update(d);
+		return;
+	}
 	thing_here(d, sx, sy, th->node, th->kind, &v, th->copy);
+	tad_vobj_clear(&v);
 }
 
 EXPORT void de_link_release( INT sx, INT sy )
 {
 	T_DDED		*d = lc_win, *t = NULL;
 	T_TADNODE	*node;
-	T_VOBJ		v;
+	T_VOBJ		v = { .recno = 0 };
 	T_DDTHING	th;
 	INT		pi, pos;
 	UINT		at;
 
+	tad_vobj_init(&v);
 	lc_win = NULL;
 	if ( d == NULL ) {
+		tad_vobj_clear(&v);
 		return;
 	}
 	d->host->drag(d, NULL, FALSE, 0, 0);
 	if ( !(*d->used) || (*d->doc) == NULL || lc_run >= (*d->doc)->nrun ) {
 		d->host->update(d);
+		tad_vobj_clear(&v);
 		return;
 	}
 	node = (*d->doc)->run[lc_run].node;
@@ -4016,6 +4033,7 @@ EXPORT void de_link_release( INT sx, INT sy )
 			d->host->draw(d);
 			shown(d);
 		}
+		tad_vobj_clear(&v);
 		return;
 	}
 	if ( lc_size != 0 ) {
@@ -4029,11 +4047,17 @@ EXPORT void de_link_release( INT sx, INT sy )
 			v.heightpx = tad_lnk_fit_h(&v, h);
 			if ( tad_lnk_set((T_TAD *)(*d->rec), &v) < E_OK ) {
 				CONST char	*head = "the link \"", *tail = "\" was not sized";
-				char		say[TAD_NAME_MAX + 32];
-				INT		k = 0, i;
+				CONST UB	*nm = TAD_VS(v.vname);
+				char		say[DE_LOG];
+				INT		k = 0, i, part;
 
+				/* a note for the log: a long name is shown in part, cut at a whole letter */
 				for ( i = 0; head[i] != 0; i++ ) say[k++] = head[i];
-				for ( i = 0; v.name[i] != 0 && i < TAD_NAME_MAX; i++ ) say[k++] = (char)v.name[i];
+				part = (INT)sizeof(say) - k - (INT)knl_strlen(tail) - 1;
+				for ( i = 0; nm[i] != 0 && i < part; i++ ) ;
+				while ( i > 0 && nm[i] != 0 && ( nm[i] & 0xC0 ) == 0x80 ) i--;
+				knl_memcpy(say + k, nm, (SZ)i);
+				k += i;
 				for ( i = 0; tail[i] != 0; i++ ) say[k++] = tail[i];
 				say[k] = 0;
 				d->host->note(d, say);
@@ -4051,19 +4075,23 @@ EXPORT void de_link_release( INT sx, INT sy )
 			(void)tad_set_attr(rec, node, "bottom", num);
 		}
 		changed(d);
+		tad_vobj_clear(&v);
 		return;
 	}
 	if ( lc_kind == TV_RUN_LINK && tad_lnk_get((*d->rec), lc_link, &v) < E_OK ) {
 		d->host->update(d);
+		tad_vobj_clear(&v);
 		return;
 	}
 	at = d->host->at(d, sx, sy, &t);
 	if ( at != DE_AT_TEXT ) {
 		/* to whatever else is there, which takes it as it does */
-		knl_memset(&th, 0, sizeof(th));
+		knl_memset(&th, 0, sizeof(th));		/* th.v empty */
 		th.kind = lc_kind;
-		if ( lc_kind == TV_RUN_LINK ) {
-			th.v = v;
+		if ( lc_kind == TV_RUN_LINK && tad_vobj_copy(&th.v, &v) < E_OK ) {
+			d->host->update(d);
+			tad_vobj_clear(&v);
+			return;
 		}
 		th.node = node;
 		th.box = lc_box;
@@ -4074,29 +4102,36 @@ EXPORT void de_link_release( INT sx, INT sy )
 			changed(d);
 			d->host->draw_all(d);
 		}
+		tad_vobj_clear(&th.v);
 		d->host->update(d);
+		tad_vobj_clear(&v);
 		return;
 	}
 	if ( node == NULL || (*t->sealed) ) {
 		d->host->update(d);
+		tad_vobj_clear(&v);
 		return;
 	}
 	if ( t == d ) {
 		thing_here(d, sx, sy, node, lc_kind, &v, lc_copy);
+		tad_vobj_clear(&v);
 		return;
 	}
 	/* an object is not put inside itself */
 	if ( lc_kind == TV_RUN_LINK && ts_uuid_cmp(&v.target, t->id) == 0 ) {
 		d->host->update(d);
+		tad_vobj_clear(&v);
 		return;
 	}
 	d->host->focus(d, t);
 	if ( (*t->kind) != TV_KIND_DOC || (*t->xml_view) ) {
 		d->host->update(d);
+		tad_vobj_clear(&v);
 		return;
 	}
 	/* into another text, where it was let go */
 	if ( !text_place(t, sx, sy, &pi, &pos) ) {
+		tad_vobj_clear(&v);
 		return;
 	}
 	t->host->before(t);
@@ -4124,6 +4159,7 @@ EXPORT void de_link_release( INT sx, INT sy )
 	}
 	changed(t);
 	changed(d);
+	tad_vobj_clear(&v);
 }
 
 /* A thing picked alone: its frame, and the handle it is sized by */
@@ -4282,7 +4318,7 @@ LOCAL void virtualize( T_DDED *d )
 	TS_UUID		nid, vid;
 	T_TAD		*nrec;
 	T_DDED		*f;
-	T_VOBJ		c;
+	T_VOBJ		c = { .recno = 0 };
 	INT		pa, a, pb, b, i, k, n, chars = 0;
 
 	if ( !has_sel(d) || (*d->xml_view) ) {
@@ -4668,7 +4704,10 @@ LOCAL void cr_clear( void )
 	for ( i = 0; cr != NULL && i < ncr; i++ ) {
 		if ( cr[i].text != NULL ) Kfree(cr[i].text);
 		if ( cr[i].face != NULL ) Kfree(cr[i].face);
-		if ( cr[i].v != NULL ) Kfree(cr[i].v);
+		if ( cr[i].v != NULL ) {
+			tad_vobj_clear(cr[i].v);
+			Kfree(cr[i].v);
+		}
 	}
 	ncr = 0;
 	cr_short = FALSE;
@@ -4770,8 +4809,17 @@ LOCAL void cr_from( CONST T_TVDOC *doc, CONST T_TAD *rec, INT pa, INT a, INT pb,
 			case TV_RUN_LINK:
 				c = cr_add(TV_RUN_LINK, r);
 				if ( c != NULL ) {
-					c->v = (T_VOBJ *)Kmalloc(sizeof(T_VOBJ));
-					if ( c->v == NULL || tad_lnk_get(rec, r->link, c->v) < E_OK ) {
+					c->v = (T_VOBJ *)Kcalloc(1, sizeof(T_VOBJ));
+					if ( c->v != NULL ) {
+						tad_vobj_init(c->v);
+					}
+					if ( c->v == NULL ) {
+						cr_short = TRUE;
+						ncr--;
+					} else if ( tad_lnk_get(rec, r->link, c->v) < E_OK ) {
+						tad_vobj_clear(c->v);
+						Kfree(c->v);
+						c->v = NULL;
 						ncr--;
 					}
 				}
@@ -5056,20 +5104,24 @@ LOCAL void cr_paste( T_DDED *d )
 			break;
 		}
 		case TV_RUN_LINK: {
-			T_VOBJ	v;
+			T_VOBJ	v = { .recno = 0 };
 			TS_UUID	id;
 
 			if ( c->v == NULL || (*d->xml_view)
 			  || ts_uuid_cmp(&c->v->target, &(*d->id)) == 0 ) {
 				break;		/* not inside itself */
 			}
-			v = *c->v;
+			tad_vobj_init(&v);
+			if ( tad_vobj_copy(&v, c->v) < E_OK ) {
+				break;
+			}
 			knl_memset(&v.vobjid, 0, sizeof(v.vobjid));
 			if ( tad_lnk_add((T_TAD *)(*d->rec), &v, &id) >= E_OK ) {
 				link_to(d, d->cpara, d->cpos);
 				d->host->model(d);
 				d->cpos++;
 			}
+			tad_vobj_clear(&v);
 			break;
 		}
 		case TV_RUN_IMAGE:
@@ -5179,10 +5231,12 @@ LOCAL void links_paste( T_DDED *d, CONST T_TAD *frag )
 		}
 	}
 	for ( i = 0; i < n; i++ ) {
-		T_VOBJ	c;
+		T_VOBJ	c = { .recno = 0 };
 		TS_UUID	id;
 
+		tad_vobj_init(&c);
 		if ( tad_lnk_get(frag, i, &c) < E_OK || ts_uuid_cmp(&c.target, &(*d->id)) == 0 ) {
+			tad_vobj_clear(&c);
 			continue;
 		}
 		knl_memset(&c.vobjid, 0, sizeof(c.vobjid));
@@ -5194,6 +5248,7 @@ LOCAL void links_paste( T_DDED *d, CONST T_TAD *frag )
 			d->host->model(d);
 			d->cpos++;
 		}
+		tad_vobj_clear(&c);
 	}
 	d->apara = d->cpara;
 	d->apos = d->cpos;

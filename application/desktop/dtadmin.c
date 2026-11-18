@@ -44,23 +44,35 @@
 #define AD_PW_MAX	WM_LABEL_MAX
 #define AD_W		520
 
-/* "「name」が" for the asking process: the name of the program it runs */
-LOCAL void who_asks( ID pid, UB *out, INT max )
+/*
+ * "「name」が…" for the asking process, the name of the program it runs
+ * whole, in memory of its own (Kfree it); NULL without memory
+ */
+LOCAL UB *who_asks( ID pid )
 {
-	TS_UUID	prog;
-	UB	name[TAD_NAME_MAX];
-	INT	n = 0, i;
+	CONST char	*head = "「", *tail = "」が管理者の権限を求めています";
+	TS_UUID		prog;
+	UB		*name = NULL, *out;
+	SZ		nl = 0;
 
-	name[0] = 0;
-	if ( knl_prc_uuid(pid, NULL, &prog) < E_OK || om_store_name(&prog, name, sizeof(name)) <= 0 ) {
-		dt_pn_text(name, sizeof(name), "プログラム");
+	if ( knl_prc_uuid(pid, NULL, &prog) >= E_OK ) {
+		name = om_store_name_dup(&prog, &nl);
 	}
-	for ( i = 0; "「"[i] != 0 && n < max - 1; i++ ) out[n++] = (UB)"「"[i];
-	for ( i = 0; name[i] != 0 && n < max - 1; i++ ) out[n++] = name[i];
-	for ( i = 0; "」が管理者の権限を求めています"[i] != 0 && n < max - 1; i++ ) {
-		out[n++] = (UB)"」が管理者の権限を求めています"[i];
+	if ( name != NULL && nl == 0 ) {
+		Kfree(name);
+		name = NULL;
 	}
-	out[n] = 0;
+	out = (UB *)Kmalloc((size_t)( knl_strlen(head) + ( ( name != NULL ) ? nl : 32 )
+				       + knl_strlen(tail) + 1 ));
+	if ( out != NULL ) {
+		knl_strcpy((char *)out, head);
+		knl_strcat((char *)out, ( name != NULL ) ? (CONST char *)name : "プログラム");
+		knl_strcat((char *)out, tail);
+	}
+	if ( name != NULL ) {
+		Kfree(name);
+	}
+	return out;
 }
 
 LOCAL INT	admin_panels = 0;		/* how many have been shown, for the tests */
@@ -215,10 +227,15 @@ LOCAL ER admin_ask( CONST UB *who, CONST UB *what, CONST TS_UUID *win, ID pid );
 
 EXPORT ER dt_admin_ask( ID pid, CONST UB *what, CONST TS_UUID *win )
 {
-	UB	who[160];
+	UB	*who = who_asks(pid);
+	ER	er;
 
-	who_asks(pid, who, sizeof(who));
-	return admin_ask(who, what, win, pid);
+	er = admin_ask(( who != NULL ) ? who : (CONST UB *)"「プログラム」が管理者の権限を求めています",
+		       what, win, pid);
+	if ( who != NULL ) {
+		Kfree(who);
+	}
+	return er;
 }
 
 /*
@@ -292,16 +309,12 @@ LOCAL ER admin_ask( CONST UB *who, CONST UB *what, CONST TS_UUID *win, ID pid )
  */
 EXPORT ER dt_admin_req( CONST T_DTREQ *rq, ID pid )
 {
-	UB	what[sizeof(rq->name) + 1];
-	INT	i;
 	ER	er;
 
 	if ( pid <= 0 || knl_ob_pid_admin(pid) ) {
 		return E_OK;
 	}
-	for ( i = 0; i < (INT)sizeof(rq->name) && rq->name[i] != 0; i++ ) what[i] = rq->name[i];
-	what[i] = 0;
-	er = dt_admin_ask(pid, what, &rq->win);
+	er = dt_admin_ask(pid, dt_rq_word(rq, DT_TAIL_NAME, NULL), &rq->win);
 	if ( er >= E_OK ) {
 		er = knl_ob_adm_give(pid, 0);
 	}

@@ -1,0 +1,39 @@
+# システム環境設定's このページの仮身を作る (docs/tessronos 11.6): a link to the program object with
+# the page in its own applist, put in the first window; opened from there, the page opens. For
+# tools/ui_run.py with the kernel of make TARGET=_QEMU_VIRT_ DESKTOP=1 UITEST=1 and the test disk of
+# a KTEST=1 build. The window is at 160,80; its menu opens at 400,300 with 操作 under the pointer,
+# このページの仮身を作る the fourth line of 操作. "openputlink" reads the link back from the
+# cabinet's record as the first window saved it and opens it as a double press does.
+openapp 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42 {"tessronos-sysenv":{"data":"screen"}}
+expect sysenv: page "screen"
+expect sysenv: ready
+wait 800
+click 400 300 1
+wait 500
+move 405 341
+wait 150
+move 440 341
+wait 150
+move 470 341
+wait 300
+shot spl_menu_op
+move 495 392
+wait 150
+click 495 392
+expect sysenv: link of page "screen" put (0)
+expect desktop: link put "システム環境設定（画面）" with its applist (0)
+wait 1200
+shot spl_put
+# another page shown, then the link opened: the screen's page again, in the same window
+openapp 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42 {"tessronos-sysenv":{"data":"colour"}}
+expect sysenv: page "colour"
+wait 500
+logmark
+openputlink
+expectsince uitest: link put has applist of
+expectsince sysenv: opened with data "screen"
+expectsince sysenv: page "screen"
+wait 500
+nwin システム環境設定
+want ok 1
+absent !OACV!

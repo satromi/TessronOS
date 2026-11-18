@@ -424,7 +424,7 @@ EXPORT ER prn_object( CONST T_PRNJOB *job, CONST T_PRNSET *set, CONST TS_UUID *b
 {
 	PRNDOC		*doc;
 	T_XFSRC		src;
-	UB		name[XF_NAME_MAX];
+	UB		*name = NULL;
 	INT		k = 0, i;
 	TS_TIME		now = 0;
 	ER		er;
@@ -438,13 +438,18 @@ EXPORT ER prn_object( CONST T_PRNJOB *job, CONST T_PRNSET *set, CONST TS_UUID *b
 	}
 	er = build(job, set, doc);
 	if ( er >= E_OK ) {
-		/* the job's name, cut at a letter's edge, and the ending that says what it is */
-		for ( i = 0; job->name != NULL && job->name[i] != 0 && k < XF_NAME_MAX - 8; i++ ) {
-			name[k++] = job->name[i];
+		/* the job's name whole, and the ending that says what it is */
+		INT	jl = 0;
+
+		while ( job->name != NULL && job->name[jl] != 0 ) jl++;
+		name = (UB *)Kmalloc((SZ)jl + 16);
+		if ( name == NULL ) {
+			er = E_NOMEM;
 		}
-		while ( k > 0 && job->name != NULL && job->name[k] != 0
-		     && ( job->name[k] & 0xC0 ) == 0x80 ) {
-			k--;			/* not half a letter */
+	}
+	if ( er >= E_OK ) {
+		for ( i = 0; job->name != NULL && job->name[i] != 0; i++ ) {
+			name[k++] = job->name[i];
 		}
 		if ( k == 0 ) {
 			CONST char	*d = "印刷";
@@ -466,6 +471,7 @@ EXPORT ER prn_object( CONST T_PRNJOB *job, CONST T_PRNSET *set, CONST TS_UUID *b
 		pdf_rewind(&doc->pdf);
 		er = xf_import(&src, box, p_uuid);
 	}
+	if ( name != NULL ) Kfree(name);
 	prn_doc_free(doc);
 	Kfree(doc);
 

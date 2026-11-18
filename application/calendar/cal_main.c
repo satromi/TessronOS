@@ -61,6 +61,7 @@
 #include <ts/tray.h>
 #include <ts/tadlnk.h>
 #include "cal_tad.h"
+#include "../dtask.h"
 
 #define TICK_MS		20
 #define DBL_NS		( 450ULL * 1000000ULL )	/* a second press within this is a double one */
@@ -129,7 +130,7 @@ typedef struct {
 	UB		*el;			/* its element, as read or made */
 	INT		len;
 	TS_UUID		target;
-	UB		name[OB_NAME_MAX];	/* its object's */
+	UB		*name;			/* its object's, whole; never NULL while listed */
 	T_DPRECT	r;			/* where it is on the screen */
 	BOOL		shown;
 	BOOL		day;			/* a day's of this month: kept in its cell */
@@ -321,16 +322,15 @@ static ER rec_write( CONST TS_UUID *u, CONST UB *data, INT len )
 	return er;
 }
 
-static void name_of( CONST TS_UUID *u, UB *out )
+/* An object's name, whole, to free: "" of its own when it cannot be read, NULL without memory */
+static UB *name_of( CONST TS_UUID *u )
 {
-	T_OBREF	ref;
+	UB	*nm = ui_obj_name(u);
 
-	out[0] = 0;
-	if ( ob_ref_obj(u, &ref) >= E_OK ) {
-		memcpy(out, ref.name, OB_NAME_MAX);
-		out[OB_NAME_MAX - 1] = 0;
-	}
+	return ( nm != NULL ) ? nm : (UB *)calloc(1, 1);
 }
+
+#define NM_OR_EMPTY(p)	( ( (p) != NULL ) ? (CONST UB *)(p) : (CONST UB *)"" )
 
 static BOOL name_is( CONST UB *a, CONST char *b )
 {
@@ -525,10 +525,11 @@ static void cal_read( void )
 	}
 	for ( i = 0; i < n && ( !g_has_hol || !g_has_tpl ); i++ ) {
 		TS_UUID	u;
-		UB	nm[OB_NAME_MAX];
+		UB	*nm;
 
 		if ( !ct_target(g_calx + el[i].at, el[i].len, &u) ) continue;
-		name_of(&u, nm);
+		nm = name_of(&u);
+		if ( nm == NULL ) continue;
 		if ( !g_has_hol && name_is(nm, "休日") ) {
 			g_hol = u;
 			g_has_hol = TRUE;
@@ -538,6 +539,7 @@ static void cal_read( void )
 			g_has_tpl = TRUE;
 			tpl_by_name = i;
 		}
+		free(nm);
 	}
 	/* found by their names: given the words, one after the other (the record is read again between) */
 	if ( hol_by_name >= 0 ) {
@@ -568,16 +570,19 @@ static void paper_read( void )
 static BOOL month_find( INT y, INT m, TS_UUID *p_u )
 {
 	CTEL	el[LINK_MAX];
-	UB	want[8], nm[OB_NAME_MAX];
+	UB	want[8], *nm;
 	INT	n, i;
+	BOOL	is;
 
 	if ( g_calx == NULL ) return FALSE;
 	ct_month_name(want, y, m);
 	n = ct_links(g_calx, g_caln, el, LINK_MAX);
 	for ( i = 0; i < n; i++ ) {
 		if ( !ct_target(g_calx + el[i].at, el[i].len, p_u) ) continue;
-		name_of(p_u, nm);
-		if ( strcmp((char *)nm, (char *)want) == 0 ) return TRUE;
+		nm = name_of(p_u);
+		is = ( nm != NULL && strcmp((char *)nm, (char *)want) == 0 );
+		free(nm);
+		if ( is ) return TRUE;
 	}
 	return FALSE;
 }
@@ -628,7 +633,10 @@ static void links_free( void )
 {
 	INT	i;
 
-	for ( i = 0; i < g_nl; i++ ) free(g_l[i].el);
+	for ( i = 0; i < g_nl; i++ ) {
+		free(g_l[i].el);
+		free(g_l[i].name);
+	}
 	g_nl = 0;
 }
 
@@ -645,7 +653,11 @@ static BOOL link_add( CONST UB *el, INT len, CONST TS_UUID *target )
 	l->el[len] = 0;
 	l->len = len;
 	l->target = *target;
-	name_of(target, l->name);
+	l->name = name_of(target);
+	if ( l->name == NULL ) {
+		free(l->el);
+		return FALSE;
+	}
 	l->shown = FALSE;
 	l->day = FALSE;
 	l->pick = FALSE;
@@ -669,10 +681,26 @@ static BOOL link_set( INT i, CONST CTBUF *b )
 	return TRUE;
 }
 
+/* Every link's object's name read again (a name changed); one that cannot be read keeps its own */
+static void names_again( void )
+{
+	INT	k;
+
+	for ( k = 0; k < g_nl; k++ ) {
+		UB	*nm = name_of(&g_l[k].target);
+
+		if ( nm != NULL ) {
+			free(g_l[k].name);
+			g_l[k].name = nm;
+		}
+	}
+}
+
 /* A link taken out of the list; its object's count is the caller's */
 static void link_drop( INT i )
 {
 	free(g_l[i].el);
+	free(g_l[i].name);
 	memmove(&g_l[i], &g_l[i + 1], sizeof(CLINK) * (size_t)( g_nl - i - 1 ));
 	g_nl--;
 }
@@ -927,43 +955,31 @@ static void settle( void )
 	}
 }
 
+/* The words of the next request and the last answer, as long as they are (dtask.h) */
+static DTASK	g_dq;
+
 /* A request to the desktop, its panels over this window; the answer waited for */
 static ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 {
-	static UINT	seq;
-	TS_UUID		d, reply;
-	T_OBCRE		c;
-	SZ		asz = 0;
-	ID		k, ka;
-	ER		er;
+	ER	er = dq_ask(&g_dq, rq, an, &g_win, wait_ms);
 
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ | OB_O_NOWAIT);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
-	rq->seq = ++seq;
-	rq->reply = reply;
-	rq->win = g_win;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : (ER)k;
-	if ( k > 0 ) ob_cls_obj(k);
-	/* the answer waited for on its channel, at most wait_ms */
-	while ( er >= E_OK ) {
-		er = ob_rea_tmo(ka, 0, 0, an, sizeof(*an), &asz, wait_ms);
-		if ( er >= E_OK && asz == (SZ)sizeof(*an) && an->seq == rq->seq ) {
-			er = an->er;
-			break;
-		}
-	}
-	ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
 	settle();
 	return er;
+}
+
+/* The applist of link el, whole, in the next request's tail (ct_link_req) */
+static void link_req( T_DTREQ *rq, CONST UB *el, INT n )
+{
+	if ( dq_room(&g_dq, ct_link_room(el, n)) >= E_OK ) {
+		(void)ct_link_req(rq, el, n, g_dq.tail, &g_dq.tailsz, g_dq.cap);
+	}
+}
+
+/* The same with the link named for the desktop (ct_link_from): FALSE when it cannot be */
+static BOOL link_from( T_DTREQ *rq, CONST TS_UUID *parent, CONST UB *el, INT n )
+{
+	return (BOOL)( dq_room(&g_dq, ct_link_room(el, n)) >= E_OK
+		    && ct_link_from(rq, parent, &g_lch, el, n, g_dq.tail, &g_dq.tailsz, g_dq.cap) >= E_OK );
 }
 
 /* ---------------------------------------------------------------- 印刷 */
@@ -1020,12 +1036,15 @@ static ER print_months( BOOL all )
 		n = ct_links(g_calx, g_caln, el, LINK_MAX);
 		for ( i = 0; i < n; i++ ) {
 			TS_UUID	u;
-			UB	nm[OB_NAME_MAX];
+			UB	*nm;
 			INT	y, m;
+			BOOL	month;
 
 			if ( !ct_target(g_calx + el[i].at, el[i].len, &u) ) continue;
-			name_of(&u, nm);
-			if ( !ct_is_month(nm, &y, &m) ) continue;
+			nm = name_of(&u);
+			month = ( nm != NULL && ct_is_month(nm, &y, &m) );
+			free(nm);
+			if ( !month ) continue;
 			for ( k = cnt; k > 0 && key[k - 1] > y * 12 + m; k-- ) {
 				key[k] = key[k - 1];
 				us[k] = us[k - 1];
@@ -1055,7 +1074,12 @@ static ER print_months( BOOL all )
 		memset(&rq, 0, sizeof(rq));
 		rq.req = DT_RQ_PRINT;
 		rq.target = up.obj;
-		name_of(&g_cal, rq.name);
+		{
+			UB	*nm = name_of(&g_cal);
+
+			(void)dq_part(&g_dq, DT_TAIL_NAME, NM_OR_EMPTY(nm), -1);
+			free(nm);
+		}
 		/* the person works the desktop's panels: as long as that takes */
 		er = ask_desktop(&rq, &an, 60 * 60 * 1000);
 		snprintf(s, sizeof(s), "print answered %d", (INT)er);
@@ -1106,32 +1130,50 @@ static void look_of( CONST CLINK *l, T_DTLOOK *k )
 	k->autoopen = ct_attr_bool(l->el, l->len, "autoopen", FALSE) ? 1 : 0;
 }
 
-/* A request about the object of link i, its look said */
+/*
+ * A request about the object of link i, its look said; its relationship
+ * and its applist, whole, go in the tail of the next ask_desktop, so that
+ * a link carried out keeps them (and the 固有データ in the applist)
+ */
 static void ask_of( INT i, UINT req, T_DTREQ *rq )
 {
+	INT	rl = ct_attr_text(g_l[i].el, g_l[i].len, "relationship", NULL, 0);
+
 	memset(rq, 0, sizeof(*rq));
 	rq->req = req;
 	rq->target = g_l[i].target;
 	rq->recno = -1;
 	look_of(&g_l[i], &rq->look);
 	if ( ct_attr_bool(g_l[i].el, g_l[i].len, "hidden", FALSE) ) rq->flags |= DT_F_HIDDEN;
+	ct_link_was(rq, g_l[i].el, g_l[i].len);	/* where it is in the month's record */
+	if ( rl > 0 && dq_room(&g_dq, dt_tail_room(rl)) >= E_OK ) {
+		UB	*r = (UB *)malloc((size_t)rl + 1);
+
+		if ( r == NULL ) {
+			g_dq.er = E_NOMEM;		/* the request fails rather than go without it */
+		} else {
+			(void)ct_attr_text(g_l[i].el, g_l[i].len, "relationship", r, rl + 1);
+			(void)dq_part(&g_dq, DT_TAIL_REL, r, rl);
+			free(r);
+		}
+	}
+	link_req(rq, g_l[i].el, g_l[i].len);
 }
 
 /*
  * 仮身属性変更 of a link named for the desktop as opening it names it
  * (DT_F_LINK), so that the windows opened from the link are told its new
- * look; the relationship (name) and wordWrap (grab_x) the naming writes
- * are put back as the request had them
+ * look; the wordWrap (grab_x) the naming writes is put back as the
+ * request had it
  */
 static void attr_named( T_DTREQ *rq, CONST TS_UUID *parent, CONST UB *el, INT n )
 {
-	UB	name[sizeof(rq->name)];
 	INT	gx = rq->grab_x;
+	UINT	was = g_dq.tailsz;
 
 	if ( g_lport <= 0 ) return;
-	memcpy(name, rq->name, sizeof(name));
-	(void)ct_link_from(rq, parent, &g_lch, el, n);
-	memcpy(rq->name, name, sizeof(name));
+	/* the naming's parts after ask_of's (its applist, put again, is found first either way) */
+	if ( !link_from(rq, parent, el, n) ) g_dq.tailsz = was;
 	rq->grab_x = gx;
 }
 
@@ -1149,7 +1191,7 @@ static void link_open( INT i )
 	rq.target = g_l[i].target;
 	rq.recno = -1;
 	/* what the window opened does to the link comes back to be put in the month (DT_F_LINK) */
-	if ( g_lport > 0 && g_has_month && ct_link_from(&rq, &g_month, &g_lch, g_l[i].el, g_l[i].len) ) {
+	if ( g_lport > 0 && g_has_month && link_from(&rq, &g_month, g_l[i].el, g_l[i].len) ) {
 		T_DTLOOK	k;
 
 		look_of(&g_l[i], &k);
@@ -1260,7 +1302,9 @@ static void day_make( INT d )
 	er = month_save();
 	if ( er >= E_OK && !g_autoref ) er = ob_lnk_obj(&u);
 	if ( er < E_OK ) {
-		free(g_l[--g_nl].el);
+		g_nl--;
+		free(g_l[g_nl].el);
+		free(g_l[g_nl].name);
 		(void)ob_del_obj(&u);
 		return;
 	}
@@ -1633,9 +1677,7 @@ static ER strip_open( void )
 	T_OBCRE	c;
 	T_OBMAP	mp;
 	T_OBNTF	req;
-	SZ	asz = 0;
 	char	json[200];
-	INT	i;
 
 	snprintf(json, sizeof(json), "{\"tessronos\":{\"part\":{\"sub\":\"panel\",\"box\":\"%s\",\"num\":%d}}}",
 		 SYSDEF_BOX_CALENDAR, PN_STRIP);
@@ -1658,26 +1700,12 @@ static ER strip_open( void )
 		g_ui.pk = 0;
 		return E_OBJ;
 	}
-	g_ui.np = 0;
-	for ( i = 0; i < UI_PART_MAX; i++ ) {
-		UIPART	*p = &g_ui.p[i];
-		TS_UUID	pu;
-		char	j[512];
-
-		if ( ob_rea_rec(g_ui.pk, OB_WR_KIND + i, 0, &pu, sizeof(pu), &asz) < E_OK || asz < (SZ)sizeof(pu) ) break;
-		p->key = ob_opn_obj(&pu, OB_OP_R | OB_OP_W | OB_OP_PROT);
-		p->num = 0;
-		p->kind = 0;
-		if ( p->key > 0 && ob_get_atr(p->key, (UB *)j, sizeof(j) - 1, &asz) >= E_OK ) {
-			j[( asz < (SZ)sizeof(j) ) ? asz : (SZ)sizeof(j) - 1] = 0;
-			p->num = json_int(j, "part");
-			p->kind = (UINT)json_int(j, "kind");
-		}
-		if ( p->key > 0 && p->num == 0 ) {
-			ob_cls_obj(p->key);
-			p->key = 0;
-		}
-		g_ui.np = i + 1;
+	/* its parts, every one, known by number as a window's are */
+	if ( ui_parts_open(&g_ui) < E_OK ) {
+		ob_cls_obj(g_ui.pk);
+		(void)ob_del_obj(&g_ui.pnl);
+		g_ui.pk = 0;
+		return E_NOMEM;
 	}
 	memset(&req, 0, sizeof(req));
 	req.events = OB_E_CHANGE;
@@ -1689,13 +1717,7 @@ static ER strip_open( void )
 
 static void strip_close( void )
 {
-	INT	i;
-
-	for ( i = 0; i < g_ui.np; i++ ) {
-		if ( g_ui.p[i].key > 0 ) ob_cls_obj(g_ui.p[i].key);
-		g_ui.p[i].key = 0;
-	}
-	g_ui.np = 0;
+	ui_parts_close(&g_ui);
 	if ( g_ui.pk > 0 ) {
 		ob_cls_obj(g_ui.pk);
 		(void)ob_del_obj(&g_ui.pnl);
@@ -1918,10 +1940,21 @@ static BOOL link_put( CONST UB *el, INT len, CONST TS_UUID *target, INT *box )
 	return TRUE;
 }
 
+/* Room for an element made as long as it is */
+static void *grow( void *p, SZ size )
+{
+	if ( size == 0 ) {
+		free(p);
+		return NULL;
+	}
+	return realloc(p, (size_t)size);
+}
+
 /* Links dropped on the window: put in the month where they were let go */
 static void dropped( void )
 {
 	T_OBDROP	*d;
+	CTBUF		b;
 	char		el[700], fr[8], ch[8], tb[8], bg[8], vs[40], ts[40];
 	INT		i, n = 0, x, y;
 	ER		er;
@@ -1965,17 +1998,28 @@ static void dropped( void )
 			 " vobjbottom=\"%d\" height=\"%d\" chsz=\"%d\" frcol=\"%s\" chcol=\"%s\" tbcol=\"%s\""
 			 " bgcol=\"%s\" dlen=\"0\" pictdisp=\"%s\" namedisp=\"%s\" roledisp=\"%s\" typedisp=\"%s\""
 			 " updatedisp=\"%s\" framedisp=\"%s\" autoopen=\"false\" hidden=\"false\""
-			 " scrollx=\"0\" scrolly=\"0\" zoomratio=\"1\"/>",
+			 " scrollx=\"0\" scrolly=\"0\" zoomratio=\"1\"",
 			 ts, vs, box[0], box[1], box[2], box[3], h, ( v->chsz > 0 ) ? v->chsz : 14,
 			 fr, ch, tb, bg,
 			 ( disp & 0x20 ) ? "true" : "false", ( disp & 0x01 ) ? "true" : "false",
 			 ( disp & 0x02 ) ? "true" : "false", ( disp & 0x04 ) ? "true" : "false",
 			 ( disp & 0x08 ) ? "true" : "false", ( disp & 0x10 ) ? "true" : "false");
-		if ( link_add((CONST UB *)el, (INT)strlen(el), &v->target) ) {
+		/* and the name, relationship and applist it was carried with, as long as they are */
+		ct_buf_grow(&b, 1024, grow);
+		ct_put(&b, el);
+		ct_drop_words(&b, d, i);
+		ct_put(&b, "/>");
+		if ( b.fail ) {
+			free(b.p);
+			say("メモリが足りないため、仮身をすべては置けませんでした");
+			break;
+		}
+		if ( link_add(b.p, b.n, &v->target) ) {
 			if ( !g_autoref ) (void)ob_lnk_obj(&v->target);
 			g_l[g_nl - 1].pick = TRUE;
 			n++;
 		}
+		free(b.p);
 	}
 	if ( n > 0 ) {
 		char	s[80];
@@ -2535,11 +2579,16 @@ static void link_told( CONST T_DTANS *an )
 
 static void links_told( void )
 {
-	T_DTANS	an;
-	SZ	asz = 0;
+	static UB	*buf = NULL;
+	static SZ	cap = 0;
+	SZ		n;
 
-	while ( g_lport > 0 && ob_rea_tmo(g_lport, 0, 0, &an, sizeof(an), &asz, TMO_POL) >= E_OK ) {
-		if ( asz == (SZ)sizeof(an) ) link_told(&an);
+	/* each notice whole, its tail after it */
+	while ( g_lport > 0 && ( n = dq_read(g_lport, &buf, &cap, TMO_POL) ) >= (SZ)sizeof(T_DTANS) ) {
+		T_DTANS	*an = (T_DTANS *)buf;
+
+		if ( n < (SZ)sizeof(T_DTANS) + (SZ)an->tailsz ) an->tailsz = 0;	/* not one: shorter than it says */
+		link_told(an);
 	}
 }
 
@@ -2624,13 +2673,12 @@ static void exec_menu( ID mid, INT i )
 	g_napp = 0;
 	for ( k = 0; k < n; k++ ) {
 		ask_of(i, DT_RQ_APPS, &rq);
-		ct_link_req(&rq, g_l[i].el, g_l[i].len);
 		rq.recno = k;
 		memset(&an, 0, sizeof(an));
 		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
 		n = (INT)an.how;
 		if ( !app_room(n) ) break;
-		if ( ct_app_entry(&an, g_app_id[g_napp], g_app_name[g_napp], &g_app_kind[g_napp]) ) g_napp++;
+		if ( ct_app_entry((CONST T_DTANS *)g_dq.ans, g_app_id[g_napp], g_app_name[g_napp], &g_app_kind[g_napp]) ) g_napp++;
 	}
 	rows = malloc(WM_LABEL_MAX * (size_t)( g_napp + 1 ));
 	if ( rows == NULL ) g_napp = 0;
@@ -2694,7 +2742,6 @@ static void link_op( CONST char *code, INT i, INT index )
 	T_DTREQ	rq;
 	T_DTANS	an;
 	char	s[160];
-	INT	k;
 	ER	er;
 
 	if ( i < 0 || i >= g_nl ) return;
@@ -2715,11 +2762,11 @@ static void link_op( CONST char *code, INT i, INT index )
 		}
 	} else if ( strcmp(code, "vobj.relation") == 0 ) {
 		ask_of(i, DT_RQ_RELATION, &rq);
-		(void)ct_attr_text(g_l[i].el, g_l[i].len, "relationship", rq.name, sizeof(rq.name));
 		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-			an.text[DT_TEXT_MAX - 1] = 0;
-			(void)link_attr(i, "relationship", ( an.text[0] != 0 ) ? an.text : NULL);
-			snprintf(s, sizeof(s), "relation %s [%s]", g_l[i].name, (char *)an.text);
+			CONST UB	*t = dq_ans_text(&g_dq, DT_TAIL_TEXT);
+
+			(void)link_attr(i, "relationship", ( t[0] != 0 ) ? t : NULL);
+			snprintf(s, sizeof(s), "relation %s [%.80s]", g_l[i].name, (CONST char *)t);
 			note(s);
 			say("続柄を変更しました");
 		}
@@ -2729,14 +2776,13 @@ static void link_op( CONST char *code, INT i, INT index )
 		if ( ob_ref_obj(&g_l[i].target, &ref) < E_OK ) {
 			say("実身に接続できませんでした");
 		}
-		for ( k = 0; k < g_nl; k++ ) name_of(&g_l[k].target, g_l[k].name);
+		names_again();
 		layout();
 	} else if ( strcmp(code, "real.rename") == 0 ) {
 		ask_of(i, DT_RQ_RENAME, &rq);
 		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-			for ( k = 0; k < g_nl; k++ ) name_of(&g_l[k].target, g_l[k].name);
-			an.text[DT_TEXT_MAX - 1] = 0;
-			snprintf(s, sizeof(s), "renamed %s", (char *)an.text);
+			names_again();
+			snprintf(s, sizeof(s), "renamed %.80s", (CONST char *)dq_ans_text(&g_dq, DT_TAIL_TEXT));
 			note(s);
 			(void)month_save();	/* a day's link that is a day's no more keeps its place */
 			layout();
@@ -2766,7 +2812,7 @@ static void link_op( CONST char *code, INT i, INT index )
 	} else if ( strcmp(code, "exec.app") == 0 ) {
 		if ( index < 0 || index >= g_napp ) return;
 		ask_of(i, DT_RQ_EXEC, &rq);
-		snprintf((char *)rq.name, sizeof(rq.name), "%s", (char *)g_app_id[index]);
+		(void)dq_part(&g_dq, DT_TAIL_NAME, g_app_id[index], -1);
 		if ( app_kept(i) ) rq.flags |= DT_F_KEEP;
 		if ( g_app_kind[index] ) rq.flags |= DT_F_KIND;
 		er = ask_desktop(&rq, &an, 5000);
@@ -3189,7 +3235,7 @@ int main( void )
 	T_OBNTM	m;
 	T_OBREF	ref;
 	SZ	asz = 0;
-	char	title[OB_NAME_MAX + 8], s[120];
+	char	*title, s[120];
 
 	if ( ts_get_arg(&g_cal, sizeof(g_cal)) < (SZ)sizeof(g_cal) || ob_ref_obj(&g_cal, &ref) < E_OK ) {
 		note("no object to open");
@@ -3197,7 +3243,8 @@ int main( void )
 		return 1;
 	}
 	g_autoref = (BOOL)( ( ref.flags & OB_F_AUTOREF ) != 0 );
-	snprintf(title, sizeof(title), "%s", (char *)ref.name);
+	title = (char *)ui_obj_name(&g_cal);	/* the name whole, kept while it runs */
+	if ( title == NULL ) title = (char *)"";
 	memset(&c, 0, sizeof(c));
 	c.type = OB_T_CHANNEL;
 	g_port = ( ob_cre_obj(&c, &g_ch) >= E_OK ) ? ob_opn_obj(&g_ch, OB_OP_READ | OB_OP_WRITE | OB_O_NOWAIT) : E_NOEXS;

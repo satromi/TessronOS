@@ -57,6 +57,7 @@
 #include <ts/uuid.h>
 #include <ts/ob.h>
 #include <ts/dtreq.h>
+#include "../dtask.h"
 #include <ts/tsfsck.h>
 #include <ts/uiprn.h>
 
@@ -68,7 +69,6 @@
 #define FI_ROWS		18
 #define FX_EV_MAX	4000		/* things told, kept for 障害情報 */
 #define FX_STACK	(32 * 1024)
-#define FX_DEV_MAX	64		/* volumes listed */
 
 /* the panels and their parts */
 #define PN_MAIN		1
@@ -100,9 +100,9 @@ static UI		fx, fi;			/* the window, and 障害情報's */
 static BOOL		fi_up = FALSE;
 static INT		fi_page = 0;
 
-static T_TSFSCKDEV	fx_dev[FX_DEV_MAX];
-static char		*fx_rows[FX_DEV_MAX];
-static char		fx_rowtext[FX_DEV_MAX][96];
+/* every volume there is, as many as ob_chk_list says, and the rows shown for them */
+static T_TSFSCKDEV	*fx_dev = NULL;
+static char		**fx_rows = NULL;
 static INT		fx_ndev = 0, fx_sel = 0;
 static BOOL		fx_repair = FALSE;
 static INT		fx_depth = 1;		/* 簡易 0, 通常 1, 完全 2 */
@@ -257,16 +257,18 @@ static CONST char *part_name( D off )
 static INT put_obj( char *b, INT n, INT max, CONST TS_UUID *u )
 {
 	char	s[TS_UUID_STRLEN + 1];
-	T_OBREF	ref;
+	UB	*nm;
 
 	ts_uuid_text(u, s);
 	s[18] = 0;
 	n = put(b, n, max, "実身");
-	if ( fx_run_named && ob_ref_obj(u, &ref) >= E_OK && ref.name[0] != 0 ) {
-		ref.name[OB_NAME_MAX - 1] = 0;
-		n = put(b, n, max, "「");
-		n = put(b, n, max, (CONST char *)ref.name);
-		n = put(b, n, max, "」");
+	if ( fx_run_named && ( nm = ui_obj_name(u) ) != NULL ) {
+		if ( nm[0] != 0 ) {
+			n = put(b, n, max, "「");
+			n = put(b, n, max, (CONST char *)nm);	/* the line's room, at a whole letter */
+			n = put(b, n, max, "」");
+		}
+		free(nm);
 	}
 	n = put(b, n, max, "(");
 	n = put(b, n, max, s);
@@ -606,25 +608,63 @@ static void show( void )
 }
 
 /* Every volume there is, in the list, the one chosen kept when it is still there */
+/* A volume's label, whole: the list's copy, or, when that was cut, the whole asked for */
+static char *label_of( CONST T_TSFSCKDEV *d )
+{
+	char	*b = NULL;
+	SZ	cap = 64, need = 0;
+
+	if ( ( d->flags & TSFSCK_F_LABELCUT ) == 0 ) {
+		return strdup((CONST char *)d->label);
+	}
+	for ( ;; ) {
+		b = (char *)malloc((size_t)cap);
+		if ( b == NULL ) return NULL;
+		if ( ob_chk_label((CONST char *)d->devnm, (UB *)b, cap, &need) < E_OK ) {
+			free(b);
+			return strdup((CONST char *)d->label);	/* the list's copy, at a whole letter */
+		}
+		if ( need <= cap ) return b;
+		free(b);
+		cap = need;
+	}
+}
+
 static void list_devices( void )
 {
-	INT	i, n;
+	INT	i, n, room;
 
-	n = ob_chk_list(fx_dev, FX_DEV_MAX);
-	fx_ndev = ( n < 0 ) ? 0 : ( n > FX_DEV_MAX ) ? FX_DEV_MAX : n;
+	/* how many first, then all of them, again while more came between */
+	n = ob_chk_list(NULL, 0);
+	do {
+		room = ( n > 0 ) ? n : 1;
+		free(fx_dev);
+		fx_dev = (T_TSFSCKDEV *)calloc((size_t)room, sizeof(T_TSFSCKDEV));
+		n = ( fx_dev != NULL ) ? ob_chk_list(fx_dev, room) : 0;
+	} while ( fx_dev != NULL && n > room );
+	for ( i = 0; fx_rows != NULL && i < fx_ndev; i++ ) free(fx_rows[i]);
+	free(fx_rows);
+	fx_ndev = ( n < 0 || fx_dev == NULL ) ? 0 : n;
+	fx_rows = (char **)calloc((size_t)( ( fx_ndev > 0 ) ? fx_ndev : 1 ), sizeof(char *));
+	if ( fx_rows == NULL ) fx_ndev = 0;
 	for ( i = 0; i < fx_ndev; i++ ) {
 		CONST T_TSFSCKDEV	*d = &fx_dev[i];
-		INT			k;
+		char			*lb = label_of(d), num[32];
+		size_t			len;
 
-		k = put(fx_rowtext[i], 0, sizeof(fx_rowtext[i]), (CONST char *)d->devnm);
-		k = put(fx_rowtext[i], k, sizeof(fx_rowtext[i]), "  ");
-		k = put(fx_rowtext[i], k, sizeof(fx_rowtext[i]), ( d->label[0] != 0 ) ? (CONST char *)d->label : "(名前なし)");
-		k = put(fx_rowtext[i], k, sizeof(fx_rowtext[i]), "  ");
-		k = put_num(fx_rowtext[i], k, sizeof(fx_rowtext[i]), (D)( d->blocks * TSFSBLK_BLOCK_SIZE / ( 1024 * 1024 ) ));
-		k = put(fx_rowtext[i], k, sizeof(fx_rowtext[i]), "MB");
-		if ( d->system ) (void)put(fx_rowtext[i], k, sizeof(fx_rowtext[i]), "  システム");
-		else if ( d->attached ) (void)put(fx_rowtext[i], k, sizeof(fx_rowtext[i]), "  使用中");
-		fx_rows[i] = fx_rowtext[i];
+		(void)put_num(num, 0, sizeof(num), (D)( d->blocks * TSFSBLK_BLOCK_SIZE / ( 1024 * 1024 ) ));
+		len = strlen((CONST char *)d->devnm) + ( ( lb != NULL ) ? strlen(lb) : 0 ) + strlen(num) + 64;
+		fx_rows[i] = (char *)malloc(len);
+		if ( fx_rows[i] != NULL ) {
+			snprintf(fx_rows[i], len, "%s  %s  %sMB%s", (CONST char *)d->devnm,
+				 ( lb != NULL && lb[0] != 0 ) ? lb : "(名前なし)", num,
+				 d->system ? "  システム" : d->attached ? "  使用中" : "");
+		}
+		free(lb);
+		if ( fx_rows[i] == NULL ) {
+			fx_ndev = i;		/* no memory for more: those before are shown */
+			break;
+		}
 	}
 	if ( fx_sel >= fx_ndev ) fx_sel = 0;
 	ui_names(&fx, DF_DEV, (CONST char *const *)fx_rows, fx_ndev);
@@ -909,42 +949,10 @@ static INT put_text( char *b, INT n, INT max, CONST char *s )
 /* The desktop asked, and its answer waited for */
 static ER ask_desktop( T_DTREQ *rq )
 {
-	T_DTANS	an;
-	T_OBCRE	c;
-	TS_UUID	d, reply;
-	SZ	asz = 0;
-	ID	k, ka;
-	ER	er;
+	static DTASK	q;		/* the answer read whole, however long (dtask.h) */
+	T_DTANS		an;
 
-	if ( ob_fnd_nam((CONST UB *)DT_REQ_NAME, &d) < E_OK ) return E_NOEXS;
-	memset(&c, 0, sizeof(c));
-	c.type = OB_T_CHANNEL;
-	if ( ob_cre_obj(&c, &reply) < E_OK ) return E_NOMEM;
-	ka = ob_opn_obj(&reply, OB_OP_READ);
-	if ( ka <= 0 ) {
-		(void)ob_del_obj(&reply);
-		return E_OBJ;
-	}
-	rq->seq = 1;
-	rq->reply = reply;
-	rq->win = fx.win;
-	k = ob_opn_obj(&d, OB_OP_WRITE);
-	er = ( k > 0 ) ? ob_wri_rec(k, 0, 0, rq, sizeof(*rq), &asz) : E_NOEXS;
-	if ( k > 0 ) (void)ob_cls_obj(k);
-	while ( er >= E_OK ) {
-		memset(&an, 0, sizeof(an));
-		if ( ob_rea_tmo(ka, 0, 0, &an, sizeof(an), &asz, 60 * 1000) < E_OK ) {
-			er = E_TMOUT;
-			break;
-		}
-		if ( asz == (SZ)sizeof(an) && an.seq == rq->seq ) {
-			er = an.er;
-			break;
-		}
-	}
-	(void)ob_cls_obj(ka);
-	(void)ob_del_obj(&reply);
-	return er;
+	return dq_ask(&q, rq, &an, &fx.win, 60 * 1000);
 }
 
 /* 保存: what was told, handed to the desktop to be written as ディスク修復記録 of the system box */
