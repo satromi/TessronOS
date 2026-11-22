@@ -339,5 +339,13 @@
 <button num="102" rect="196,114,284,138" answer="cancel">取り消し</button>
 <button num="4" rect="296,114,436,138" answer="ok" emph="true"> </button>
 </panel>
+<panel num="25" rect="0,0,680,172" title="システム環境設定">
+<text num="1" x="24" y="40"> </text>
+<text num="2" x="24" y="62"> </text>
+<text num="3" x="24" y="84"> </text>
+<text num="4" x="24" y="106"> </text>
+<button num="102" rect="416,136,504,160" answer="cancel">取り消し</button>
+<button num="5" rect="516,136,656,160" answer="ok" emph="true"> </button>
+</panel>
 </databox>
 </tad>

@@ -240,10 +240,37 @@ LOCAL void str_desc( USBDEV *dev, UB idx, UH lang, UB *dst, INT max )
 	if ( buf[0] < n ) {
 		n = buf[0];
 	}
-	for ( i = 2; i + 1 < n && o < max - 1; i += 2 ) {
-		UH	c = GET16(buf + i);
+	/* UTF-16 into UTF-8: max (USB_STR_MAX) holds the longest a descriptor carries */
+	for ( i = 2; i + 1 < n; i += 2 ) {
+		UW	c = GET16(buf + i);
 
-		dst[o++] = ( c >= 0x20 && c < 0x7f ) ? (UB)c : '?';
+		if ( c >= 0xd800 && c < 0xdc00 && i + 3 < n
+		  && GET16(buf + i + 2) >= 0xdc00 && GET16(buf + i + 2) < 0xe000 ) {
+			c = 0x10000 + ( ( c - 0xd800 ) << 10 ) + ( GET16(buf + i + 2) - 0xdc00 );
+			i += 2;
+		} else if ( c >= 0xd800 && c < 0xe000 ) {
+			c = 0xfffd;		/* a surrogate alone */
+		}
+		if ( c < 0x20 || c == 0x7f ) {
+			c = '?';		/* a control character is not shown */
+		}
+		if ( c < 0x80 && o + 1 < max ) {
+			dst[o++] = (UB)c;
+		} else if ( c < 0x800 && o + 2 < max ) {
+			dst[o++] = (UB)( 0xc0 | ( c >> 6 ) );
+			dst[o++] = (UB)( 0x80 | ( c & 0x3f ) );
+		} else if ( c < 0x10000 && o + 3 < max ) {
+			dst[o++] = (UB)( 0xe0 | ( c >> 12 ) );
+			dst[o++] = (UB)( 0x80 | ( ( c >> 6 ) & 0x3f ) );
+			dst[o++] = (UB)( 0x80 | ( c & 0x3f ) );
+		} else if ( c >= 0x10000 && o + 4 < max ) {
+			dst[o++] = (UB)( 0xf0 | ( c >> 18 ) );
+			dst[o++] = (UB)( 0x80 | ( ( c >> 12 ) & 0x3f ) );
+			dst[o++] = (UB)( 0x80 | ( ( c >> 6 ) & 0x3f ) );
+			dst[o++] = (UB)( 0x80 | ( c & 0x3f ) );
+		} else {
+			break;			/* not reached: max is the most a descriptor needs */
+		}
 	}
 	dst[o] = 0;
 }

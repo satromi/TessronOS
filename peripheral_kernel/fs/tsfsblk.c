@@ -35,13 +35,17 @@
 #include <ts/crc32c.h>
 #include <ts/tsfsblk.h>
 #include <ts/tsfsjrnl.h>
+#include <ts/tsfsobj.h>
 #include <ts/dt.h>
 #include <ts/blk.h>
+#include "tsfsfmt.h"
 
 /*
- * Map blocks a transaction may change before it becomes real. A change
- * usually touches one, because the blocks it takes lie together; one
- * that would touch more than this many is refused (E_LIMIT).
+ * Map blocks a transaction may change before it becomes real are held
+ * in a table that starts with room for this many and grows: a change
+ * usually touches one, because the blocks it takes lie together, and
+ * one that frees many runs touches as many as the journal's budget lets
+ * it put in the transaction.
  */
 #define TSFSBLK_HELD_MAP		16
 
@@ -112,12 +116,24 @@
 #define AG_SPARE	108
 #define AG_MAPCRC	128
 
-/* Features beyond what version 4 is: a volume grown, and one being grown */
-#define KNOWN_COMPAT	TSFSBLK_COMPAT_GROWN
+/*
+ * Features beyond what version 4 is: a volume grown, one being grown,
+ * one whose user agreed to its conversion, trees of two levels, and the
+ * format of version 5
+ */
+#define KNOWN_COMPAT	( TSFSBLK_COMPAT_GROWN | TSFSBLK_COMPAT_CONVREQ )
 #define KNOWN_ROCOMPAT	0ULL
-#define KNOWN_INCOMPAT	( TSFSBLK_INCOMPAT_GROWING | TSFSBLK_INCOMPAT_XT2 )
+#define KNOWN_INCOMPAT	( TSFSBLK_INCOMPAT_GROWING | TSFSBLK_INCOMPAT_XT2 | TSFSBLK_INCOMPAT_FMT5 )
 
-#define AG_RETIRED	8		/* tables of groups a grow replaced, kept until the volume closes */
+#define EXT_API_MAX	767		/* bytes of an extension the API takes: FS_NAME_MAX less its NUL */
+
+/* A map block held back by the open transaction */
+typedef struct {
+	UB	*buf;
+	UD	blk;
+	UD	ag;
+	UW	k;
+} HELD;
 
 typedef struct {
 	UD	first;			/* first block of the group */
@@ -129,6 +145,12 @@ typedef struct {
 	UW	crc[AG_MAX_MAP];	/* of each map block */
 	BOOL	dirty;			/* the head on the medium is behind */
 } TSFSAG;
+
+/* A table of the groups a grow replaced, kept until the volume closes */
+typedef struct agold {
+	struct agold	*next;
+	TSFSAG		*ag;
+} AGOLD;
 
 typedef struct {
 	ID		dd;		/* the block device */
@@ -144,11 +166,8 @@ typedef struct {
 	UD		hint;		/* where the next search starts */
 	BOOL		cache_dirty;
 	BOOL		jrnl_on;	/* a transaction is open on this volume */
-	UB		*held_buf[TSFSBLK_HELD_MAP];
-	UD		held_blk[TSFSBLK_HELD_MAP];
-	UD		held_ag[TSFSBLK_HELD_MAP];
-	UW		held_k[TSFSBLK_HELD_MAP];
-	INT		held_n;	/* map blocks waiting for the record */
+	HELD		*held;		/* map blocks waiting for the record, room for held_max */
+	INT		held_n, held_max;
 	BOOL		sb_dirty;
 	BOOL		rdonly;		/* an error was found, or a feature is not known */
 	BOOL		nofua;		/* the device answered TDN_FUAWRITE with E_PAR */
@@ -167,11 +186,16 @@ typedef struct {
 	BOOL		used;
 	UB		devnm[L_DEVNM + 4];	/* the device it was opened on */
 	UD		ag_n;		/* entries of ag */
-	TSFSAG		*ag_old[AG_RETIRED];	/* read without the lock (in_group_meta): freed at close */
-	INT		ag_nold;
+	AGOLD		*ag_old;	/* read without the lock (in_group_meta): freed at close */
 	struct busy	*busy;		/* runs freed by transactions not in the log yet (bc_mtx) */
 	INT		nbusy, maxbusy;
+	BOOL		lim_set;	/* ts_blk_lim_test: lim is answered */
+	T_TSFSLIM	lim;
+	UINT		cnv_fault;	/* ts_blk_convert_fault: where the next conversion stops */
 } TSFSBLKVOL;
+
+/* Whether the volume is of version 5 */
+#define IS_FMT5(v)	( ( (v)->sb.incompat & TSFSBLK_INCOMPAT_FMT5 ) != 0 )
 
 /*
  * A volume's entry is made the first time one more volume is opened
@@ -369,8 +393,13 @@ LOCAL ER sb_unpack( CONST UB *buf, T_TSFSBLK_SB *sb )
 	sb->mkfs_time     = rd64(buf + SB_MKFSTIME);
 	sb->grow_to       = rd64(buf + SB_GROWTO);
 
-	if ( sb->version != TSFSBLK_VERSION || sb->block_size != TSFSBLK_BLOCK_SIZE ) {
+	/* version 4 without FMT5, version 5 with it */
+	if ( ( sb->version != TSFSBLK_VERSION && sb->version != TSFSBLK_VERSION5 )
+	  || sb->block_size != TSFSBLK_BLOCK_SIZE ) {
 		return E_NOSPT;
+	}
+	if ( ( sb->version == TSFSBLK_VERSION5 ) != ( ( sb->incompat & TSFSBLK_INCOMPAT_FMT5 ) != 0 ) ) {
+		return E_OBJ;
 	}
 	if ( sb->ag_blocks == 0 || sb->ag_count == 0 || sb->total_blocks < TSFSBLK_MIN_BLOCKS ) {
 		return E_OBJ;
@@ -972,12 +1001,18 @@ LOCAL BOOL ag_is_spare( UD n )
  * up to a gigabyte that still makes four of them, and no smaller than
  * AG_MIN_BLOCKS.
  */
-LOCAL ER layout( UD nblk, UD *p_jblocks, UD *p_ag_blocks, UD *p_ag_count )
+LOCAL ER layout( UD nblk, UD jwant, UD *p_jblocks, UD *p_ag_blocks, UD *p_ag_count )
 {
 	UD	j = nblk / 256, first, data, agb, n, tail;
 
 	if ( j < TSFSJ_AREA_BLOCKS ) j = TSFSJ_AREA_BLOCKS;
 	if ( j > JRNL_MAX_BLOCKS ) j = JRNL_MAX_BLOCKS;
+	if ( jwant != 0 ) {
+		if ( jwant < TSFSJ_AREA_BLOCKS || jwant > JRNL_MAX_BLOCKS ) {
+			return E_PAR;
+		}
+		j = jwant;			/* asked for (ts_format_blk_opt) */
+	}
 	first = 2 + j;
 	if ( nblk < TSFSBLK_MIN_BLOCKS || first + AG_MIN_TAIL >= nblk ) {
 		return E_PAR;
@@ -1169,21 +1204,53 @@ LOCAL ER sb_write( TSFSBLKVOL *v )
 	return E_OK;
 }
 
+/* The superblock as memory holds it, into every group's spare copy; then the device's cache emptied */
+LOCAL ER sb_spares( TSFSBLKVOL *v )
+{
+	UB	*buf;
+	UD	n;
+	ER	er = E_OK;
+
+	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	if ( buf == NULL ) {
+		return E_NOMEM;
+	}
+	err_merge(v);
+	sb_pack(&v->sb, buf);
+	for ( n = 1; n < v->sb.ag_count && er >= E_OK; n++ ) {
+		if ( v->ag[n].spare && meta_write(VOL_ID(v), v->dd, v->ag[n].first + 1, buf) < E_OK ) {
+			note_error(v, v->ag[n].first + 1, TSFSBLK_ERR_IO);
+			er = E_IO;
+		}
+	}
+	Kfree(buf);
+	if ( er >= E_OK ) {
+		(void)dev_flush(v->dd);
+	}
+	return er;
+}
+
 /* ---------------------------------------------------------------- format */
 
 EXPORT ER ts_format_blk( CONST char *devnm, CONST char *label )
+{
+	return ts_format_blk_opt(devnm, label, NULL);
+}
+
+EXPORT ER ts_format_blk_opt( CONST char *devnm, CONST char *label, CONST T_TSFSFMT *opt )
 {
 	T_TSFSBLK_SB	sb;
 	TSFSAG		a;
 	DiskInfo	info;
 	UB		*buf, *sbbuf;
 	UD		nblk, jblocks, agb, agn, n, k, bit, meta;
+	UINT		ver = ( opt != NULL && opt->version != 0 ) ? opt->version : TSFSBLK_VERSION5;
 	SZ		asize;
 	ID		dd;
 	ER		er = E_OK;
 	INT		i;
 
-	if ( devnm == NULL ) {
+	if ( devnm == NULL || ( ver != TSFSBLK_VERSION && ver != TSFSBLK_VERSION5 ) ) {
 		return E_PAR;
 	}
 	dd = tk_opn_dev((UB *)devnm, TD_UPDATE);
@@ -1196,7 +1263,7 @@ EXPORT ER ts_format_blk( CONST char *devnm, CONST char *label )
 		return E_IO;
 	}
 	nblk = (UD)info.blockcont_d / TSFSBLK_SECT_PER_BLK;
-	if ( layout(nblk, &jblocks, &agb, &agn) < E_OK ) {
+	if ( layout(nblk, ( opt != NULL ) ? opt->jblocks : 0, &jblocks, &agb, &agn) < E_OK ) {
 		tk_cls_dev(dd, 0);
 		return E_PAR;			/* too small to be a volume */
 	}
@@ -1210,7 +1277,10 @@ EXPORT ER ts_format_blk( CONST char *devnm, CONST char *label )
 
 	knl_memset(&sb, 0, sizeof(sb));
 	for ( i = 0; i < 8; i++ ) sb.magic[i] = (UB)TSFSBLK_MAGIC[i];
-	sb.version        = TSFSBLK_VERSION;
+	sb.version        = (UW)ver;
+	if ( ver == TSFSBLK_VERSION5 ) {
+		sb.incompat = TSFSBLK_INCOMPAT_FMT5;
+	}
 	sb.block_size     = TSFSBLK_BLOCK_SIZE;
 	sb.total_blocks   = nblk;
 	sb.ag_blocks      = agb;
@@ -1329,23 +1399,37 @@ LOCAL ER ag_load( TSFSBLKVOL *v, UD n, UB *buf )
 /*
  * A new table of the groups in place of the one there was. The old one
  * may still be read by a reader that took the pointer without the lock
- * (in_group_meta), so it is kept until the volume closes; past
- * AG_RETIRED of them the oldest goes.
+ * (in_group_meta), so it is kept until the volume closes, however many
+ * grows there are. With no memory to note it the old one is kept for
+ * good rather than freed under a reader.
  */
 LOCAL void ag_retire( TSFSBLKVOL *v, TSFSAG *a, UD n )
 {
-	INT	i;
+	AGOLD	*o;
 
 	if ( v->ag != NULL ) {
-		if ( v->ag_nold == AG_RETIRED ) {
-			Kfree(v->ag_old[0]);
-			for ( i = 1; i < AG_RETIRED; i++ ) v->ag_old[i - 1] = v->ag_old[i];
-			v->ag_nold--;
+		o = (AGOLD *)Kmalloc(sizeof(AGOLD));
+		if ( o != NULL ) {
+			o->ag = v->ag;
+			o->next = v->ag_old;
+			v->ag_old = o;
 		}
-		v->ag_old[v->ag_nold++] = v->ag;
 	}
 	__atomic_store_n(&v->ag, a, __ATOMIC_RELEASE);
 	v->ag_n = n;
+}
+
+/* The tables a grow replaced, given back when the volume closes */
+LOCAL void ag_old_free( TSFSBLKVOL *v )
+{
+	AGOLD	*o;
+
+	while ( v->ag_old != NULL ) {
+		o = v->ag_old;
+		v->ag_old = o->next;
+		Kfree(o->ag);
+		Kfree(o);
+	}
 }
 
 /*
@@ -1421,9 +1505,51 @@ LOCAL INT held_of( CONST TSFSBLKVOL *v, UD mapblk )
 	INT	i;
 
 	for ( i = 0; i < v->held_n; i++ ) {
-		if ( v->held_blk[i] == mapblk ) return i;
+		if ( v->held[i].blk == mapblk ) return i;
 	}
 	return -1;
+}
+
+/* The held map blocks given back, when the volume closes */
+LOCAL void held_free( TSFSBLKVOL *v )
+{
+	INT	i;
+
+	for ( i = 0; i < v->held_max; i++ ) {
+		if ( v->held[i].buf != NULL ) Kfree(v->held[i].buf);
+	}
+	if ( v->held != NULL ) Kfree(v->held);
+	v->held = NULL;
+	v->held_n = v->held_max = 0;
+}
+
+/* One more entry of the held map blocks, with its buffer: -1 when there is no memory */
+LOCAL INT held_add( TSFSBLKVOL *v )
+{
+	HELD	*n;
+	INT	m, i = v->held_n;
+
+	if ( i >= v->held_max ) {
+		m = ( v->held_max == 0 ) ? TSFSBLK_HELD_MAP : v->held_max * 2;
+		n = (HELD *)Kcalloc((SZ)m, sizeof(HELD));
+		if ( n == NULL ) {
+			return -1;
+		}
+		if ( v->held != NULL ) {
+			knl_memcpy(n, v->held, sizeof(HELD) * (SZ)v->held_max);
+			Kfree(v->held);
+		}
+		v->held = n;
+		v->held_max = m;
+	}
+	if ( v->held[i].buf == NULL ) {
+		v->held[i].buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+		if ( v->held[i].buf == NULL ) {
+			return -1;
+		}
+	}
+	v->held_n = i + 1;
+	return i;
 }
 
 /*
@@ -1432,9 +1558,8 @@ LOCAL INT held_of( CONST TSFSBLKVOL *v, UD mapblk )
  * transaction is open it goes nowhere yet: it is held in memory until
  * the record that makes the transaction real is written, so that a
  * machine whose power goes first comes back with the map it had.
- * Holding it costs a buffer; a transaction that changes more map blocks
- * than there are buffers is refused room (E_LIMIT) rather than let one
- * out ahead of its record.
+ * Holding it costs a buffer; with no memory for one the change is
+ * refused (E_NOMEM) rather than let one out ahead of its record.
  */
 LOCAL ER map_evict( TSFSBLKVOL *v )
 {
@@ -1450,20 +1575,13 @@ LOCAL ER map_evict( TSFSBLKVOL *v )
 	if ( v->jrnl_on ) {
 		i = held_of(v, v->cache_blk);
 		if ( i < 0 ) {
-			if ( v->held_n >= TSFSBLK_HELD_MAP ) {
-				return E_LIMIT;
-			}
-			i = v->held_n;
-			if ( v->held_buf[i] == NULL ) {
-				v->held_buf[i] = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
-				if ( v->held_buf[i] == NULL ) return E_NOMEM;
-			}
-			v->held_n = i + 1;
+			i = held_add(v);
+			if ( i < 0 ) return E_NOMEM;
 		}
-		knl_memcpy(v->held_buf[i], v->cache, TSFSBLK_BLOCK_SIZE);
-		v->held_blk[i] = v->cache_blk;
-		v->held_ag[i] = v->cache_ag;
-		v->held_k[i] = v->cache_k;
+		knl_memcpy(v->held[i].buf, v->cache, TSFSBLK_BLOCK_SIZE);
+		v->held[i].blk = v->cache_blk;
+		v->held[i].ag = v->cache_ag;
+		v->held[i].k = v->cache_k;
 		v->cache_dirty = FALSE;
 		return E_OK;
 	}
@@ -1514,7 +1632,7 @@ LOCAL ER cache_load( TSFSBLKVOL *v, UD n, UW k )
 	}
 	i = held_of(v, mapblk);
 	if ( i >= 0 ) {
-		knl_memcpy(v->cache, v->held_buf[i], TSFSBLK_BLOCK_SIZE);
+		knl_memcpy(v->cache, v->held[i].buf, TSFSBLK_BLOCK_SIZE);
 	} else {
 		if ( meta_read(VOL_ID(v), v->dd, mapblk, v->cache) < E_OK ) {
 			v->cache_blk = ~(UD)0;
@@ -1955,6 +2073,15 @@ EXPORT ID ts_opn_vol_blk( CONST char *devnm )
 	if ( !v->rdonly && ( v->sb.incompat & TSFSBLK_INCOMPAT_GROWING ) != 0 ) {
 		(void)grow_finish(v);
 	}
+	/* a conversion the power cut short after its superblock: the log's
+	   head is of version 5 now; the spares and the other copy (written
+	   below) say version 5 too */
+	if ( !v->rdonly && knl_jrnl_conv_left(vol) ) {
+		tk_loc_mtx(v->mtxid, TMO_FEVR);
+		(void)sb_spares(v);
+		tk_unl_mtx(v->mtxid);
+		tm_printf((UB *)"tsfs: %s: convert: finished at opening (version 5)\n", v->devnm);
+	}
 	v->hint = v->ag_first;
 	if ( !v->rdonly ) {
 		tm_printf((UB *)"tsfs: %s: %s\n", v->devnm, ( v->sb.state & TSFSBLK_ST_CLEAN ) != 0
@@ -1973,7 +2100,8 @@ EXPORT ID ts_opn_vol_blk( CONST char *devnm )
 	if ( v->mtxid > 0 ) tk_del_mtx(v->mtxid);
 	if ( v->cache != NULL ) Kfree(v->cache);
 	if ( v->ag != NULL ) Kfree(v->ag);
-	for ( i = 0; i < v->ag_nold; i++ ) Kfree(v->ag_old[i]);
+	ag_old_free(v);
+	held_free(v);
 	io_close(dd);
 	tk_cls_dev(dd, 0);
 	v->used = FALSE;
@@ -2023,7 +2151,6 @@ EXPORT ER ts_cls_vol_blk( ID vol )
 {
 	TSFSBLKVOL	*v = vol_of(vol);
 	ER		er = E_OK;
-	INT		i;
 
 	if ( v == NULL ) {
 		return E_ID;
@@ -2046,13 +2173,10 @@ EXPORT ER ts_cls_vol_blk( ID vol )
 	if ( v->busy != NULL ) Kfree(v->busy);
 	v->busy = NULL;
 	v->nbusy = v->maxbusy = 0;
-	for ( i = 0; i < TSFSBLK_HELD_MAP; i++ ) {
-		if ( v->held_buf[i] != NULL ) Kfree(v->held_buf[i]);
-	}
+	held_free(v);
 	Kfree(v->cache);
 	Kfree(v->ag);
-	for ( i = 0; i < v->ag_nold; i++ ) Kfree(v->ag_old[i]);
-	v->ag_nold = 0;
+	ag_old_free(v);
 	io_close(v->dd);
 	tk_cls_dev(v->dd, 0);
 	v->used = FALSE;
@@ -2073,6 +2197,238 @@ EXPORT INT knl_tsfsblk_slots( INT *p_used, UD *p_cached )
 	if ( p_used != NULL ) *p_used = used;
 	if ( p_cached != NULL ) *p_cached = __atomic_load_n(&bc_all, __ATOMIC_RELAXED);
 	return n;
+}
+
+/*
+ * The limits of the volume, by its version. Version 4: the format
+ * before; the metadata is what one transaction holds: each block of it
+ * may change a block of a free map besides, and room is kept for the
+ * object block and the part's own blocks. Version 5: no count and no
+ * bound on the metadata, the extension the API takes, run trees of any
+ * depth. The budget is the journal's either way.
+ */
+EXPORT ER ts_blk_lim( ID vol, T_TSFSLIM *pk_lim )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	INT		budget;
+	BOOL		v5;
+
+	if ( v == NULL || pk_lim == NULL ) {
+		return E_ID;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	if ( v->lim_set ) {
+		*pk_lim = v->lim;
+		tk_unl_mtx(v->mtxid);
+		return E_OK;
+	}
+	v5 = IS_FMT5(v);
+	tk_unl_mtx(v->mtxid);
+	budget = ts_jrnl_budget(vol);
+	if ( v5 ) {
+		pk_lim->max_rec = 0;
+		pk_lim->max_res = 0;
+		pk_lim->max_link = 0;
+		pk_lim->ext_max = EXT_API_MAX;
+		pk_lim->meta_max = 0;
+		pk_lim->xt_form = F_TREEN;
+	} else {
+		pk_lim->max_rec = TSFSO_MAX_REC;
+		pk_lim->max_res = TSFSO_MAX_RES;
+		pk_lim->max_link = TSFSO_MAX_LINK;
+		pk_lim->ext_max = TSFSO_EXT_LEN - 1;
+		pk_lim->meta_max = (UD)( ( TSFSJ_MAX_BLOCKS - 8 ) / 2 * TSFSBLK_BLOCK_SIZE );
+		pk_lim->xt_form = F_TREE2;
+	}
+	pk_lim->txn_budget = ( budget > 0 ) ? (UINT)budget : (UINT)TSFSJ_MAX_BLOCKS;
+
+	return E_OK;
+}
+
+EXPORT ER ts_blk_lim_test( ID vol, CONST T_TSFSLIM *lim )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	v->lim_set = (BOOL)( lim != NULL );
+	if ( lim != NULL ) {
+		v->lim = *lim;
+	}
+	tk_unl_mtx(v->mtxid);
+
+	return E_OK;
+}
+
+/*
+ * A stop of the conversion set by ts_blk_convert_fault, reached: the
+ * power goes, as far as the medium is concerned. The caller holds the
+ * volume's lock.
+ */
+LOCAL BOOL cnv_stop( TSFSBLKVOL *v, UINT where )
+{
+	if ( v->cnv_fault != where ) {
+		return FALSE;
+	}
+	v->cnv_fault = TSFSBLK_CNV_NONE;
+	tk_loc_mtx(v->bc_mtx, TMO_FEVR);
+	v->cut = TRUE;
+	v->cut_after = 0;
+	tk_unl_mtx(v->bc_mtx);
+	tm_printf((UB *)"tsfs: %s: convert: stopped after step %d (a test)\n", v->devnm, (INT)where);
+	return TRUE;
+}
+
+/*
+ * Steps 4 to 6 of the conversion (7.3). The volume is frozen, which
+ * waits for the transactions running and puts every committed one in
+ * place: the ring is empty (4). One copy of the superblock is then
+ * written with FMT5, without CONVREQ and with version 5, and the
+ * device's cache emptied: that is the conversion made (5); a cut in
+ * the power before it leaves a volume of version 4. The other copy and
+ * the spares follow. Last the journal's head is written as version 5
+ * (6); a cut before that leaves a volume of version 5 with a head of
+ * version 4 and an empty ring, which opening finishes. Nothing else is
+ * written: the blocks of the objects stay where they are.
+ */
+EXPORT ER ts_blk_convert( ID vol )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	T_TSFSBLK_SB	was;
+	BOOL		stopped = FALSE, done;
+	ER		er = E_OK;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	done = IS_FMT5(v);			/* of version 5 already: nothing to do */
+	if ( done ) {
+		;
+	} else if ( v->rdonly ) {
+		er = E_RONLY;
+	} else if ( v->err_kind != 0 || ( v->sb.state & TSFSBLK_ST_ERROR ) != 0
+		 || ( v->sb.incompat & ~TSFSBLK_INCOMPAT_XT2 ) != 0 ) {
+		er = E_OBJ;
+	}
+	tk_unl_mtx(v->mtxid);
+	if ( done || er < E_OK ) {
+		return er;
+	}
+	tm_printf((UB *)"tsfs: %s: convert: to version 5\n", v->devnm);
+
+	/* 4: no transaction runs, every committed one in place, the ring empty */
+	er = knl_jrnl_freeze(vol, TRUE);
+	if ( er < E_OK ) {
+		return er;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	if ( v->jrnl_on ) {
+		er = E_BUSY;
+	} else {
+		er = cache_flush(v);
+	}
+	if ( er >= E_OK && dev_flush(v->dd) < E_OK && ( v->sb.state & TSFSBLK_ST_NOFLUSH ) == 0 ) {
+		er = E_IO;
+	}
+	if ( er >= E_OK ) {
+		stopped = cnv_stop(v, TSFSBLK_CNV_RING);
+	}
+
+	/* 5: one copy of the superblock makes it, then the other and the spares */
+	if ( er >= E_OK && !stopped ) {
+		was = v->sb;
+		v->sb.incompat |= TSFSBLK_INCOMPAT_FMT5;
+		v->sb.compat &= ~TSFSBLK_COMPAT_CONVREQ;
+		v->sb.version = TSFSBLK_VERSION5;
+		v->sb_dirty = TRUE;
+		er = sb_write(v);
+		if ( er < E_OK ) {
+			/* whether the copy reached the medium is not known; memory stays at 4 */
+			v->sb.incompat = was.incompat;
+			v->sb.compat = was.compat;
+			v->sb.version = was.version;
+			note_error(v, v->sb.generation & 1, TSFSBLK_ERR_IO);
+		}
+	}
+	if ( er >= E_OK && !stopped ) {
+		stopped = cnv_stop(v, TSFSBLK_CNV_SB);
+	}
+	if ( er >= E_OK && !stopped ) {
+		v->sb_dirty = TRUE;
+		er = sb_write(v);
+		if ( er >= E_OK ) stopped = cnv_stop(v, TSFSBLK_CNV_PAIR);
+	}
+	if ( er >= E_OK && !stopped ) {
+		er = sb_spares(v);
+		if ( er >= E_OK ) stopped = cnv_stop(v, TSFSBLK_CNV_SPARE);
+	}
+	tk_unl_mtx(v->mtxid);
+
+	/* 6: the journal's head of version 5 */
+	if ( er >= E_OK && !stopped ) {
+		er = knl_jrnl_fmt5(vol);
+	}
+	(void)knl_jrnl_freeze(vol, FALSE);
+	if ( !stopped ) {
+		tm_printf((UB *)"tsfs: %s: convert: %s (%d)\n", v->devnm,
+			  ( er >= E_OK ) ? "version 5" : "failed", (INT)er);
+	}
+	return er;
+}
+
+EXPORT ER ts_blk_convert_fault( ID vol, UINT where )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	if ( where > TSFSBLK_CNV_SPARE ) {
+		return E_PAR;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	v->cnv_fault = where;
+	tk_unl_mtx(v->mtxid);
+	return E_OK;
+}
+
+/*
+ * CONVREQ set or taken off, in the superblock: written at once, or with
+ * the transaction when one is open, as the top object is
+ */
+EXPORT ER ts_blk_convreq( ID vol, BOOL on )
+{
+	TSFSBLKVOL	*v = vol_of(vol);
+	UD		was;
+	ER		er = E_OK;
+
+	if ( v == NULL ) {
+		return E_ID;
+	}
+	tk_loc_mtx(v->mtxid, TMO_FEVR);
+	was = v->sb.compat;
+	if ( on && IS_FMT5(v) ) {
+		er = E_OBJ;			/* nothing to convert */
+	} else if ( on ) {
+		v->sb.compat |= TSFSBLK_COMPAT_CONVREQ;
+	} else {
+		v->sb.compat &= ~TSFSBLK_COMPAT_CONVREQ;
+	}
+	if ( er >= E_OK && v->sb.compat != was ) {
+		if ( v->rdonly ) {
+			v->sb.compat = was;
+			er = E_RONLY;
+		} else {
+			v->sb_dirty = TRUE;
+			er = cache_flush(v);
+		}
+	}
+	tk_unl_mtx(v->mtxid);
+
+	return er;
 }
 
 /* The volume's top object: kept in the superblock, written with the next change of it */
@@ -2840,8 +3196,7 @@ EXPORT ER ts_blk_jrnl_discard( ID vol )
 EXPORT ER ts_blk_jrnl_flush( ID vol )
 {
 	TSFSBLKVOL	*v = vol_of(vol);
-	UB		*blocks[TSFSBLK_HELD_MAP + 1];
-	UD		where[TSFSBLK_HELD_MAP + 1];
+	HELD		*held = NULL;
 	UB		*agbuf = NULL, *sbbuf = NULL;
 	UD		sbwhere = 0, n;
 	INT		nb = 0, i;
@@ -2858,17 +3213,26 @@ EXPORT ER ts_blk_jrnl_flush( ID vol )
 		tk_unl_mtx(v->mtxid);
 		return er;
 	}
+	/* the buffers stay the volume's; the table is copied, since it may grow meanwhile */
+	if ( v->held_n > 0 ) {
+		held = (HELD *)Kmalloc(sizeof(HELD) * (SZ)v->held_n);
+		if ( held == NULL ) {
+			tk_unl_mtx(v->mtxid);
+			return E_NOMEM;
+		}
+	}
 	for ( i = 0; i < v->held_n; i++ ) {
-		v->ag[v->held_ag[i]].crc[v->held_k[i]] = ts_crc32c(v->held_buf[i], TSFSBLK_BLOCK_SIZE);
-		blocks[nb] = v->held_buf[i];
-		where[nb] = v->held_blk[i];
-		nb++;
+		v->ag[v->held[i].ag].crc[v->held[i].k] = ts_crc32c(v->held[i].buf, TSFSBLK_BLOCK_SIZE);
+		held[nb++] = v->held[i];
 	}
 	v->held_n = 0;
 	tk_unl_mtx(v->mtxid);
 
 	for ( i = 0; i < nb && er >= E_OK; i++ ) {
-		er = ts_jrnl_write(vol, where[i], blocks[i]);
+		er = ts_jrnl_write(vol, held[i].blk, held[i].buf);
+	}
+	if ( held != NULL ) {
+		Kfree(held);
 	}
 
 	/* the heads of the groups the maps belong to */
@@ -3516,7 +3880,7 @@ LOCAL ER map_copy( TSFSBLKVOL *v, UD n, UW k, UB *buf )
 	}
 	i = held_of(v, mapblk);
 	if ( i >= 0 ) {
-		knl_memcpy(buf, v->held_buf[i], TSFSBLK_BLOCK_SIZE);
+		knl_memcpy(buf, v->held[i].buf, TSFSBLK_BLOCK_SIZE);
 		return E_OK;
 	}
 	if ( meta_read(VOL_ID(v), v->dd, mapblk, buf) < E_OK ) {

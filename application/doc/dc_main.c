@@ -87,9 +87,15 @@ static UD	g_key_in, g_key_done;	/* when it came to the program, and when the edi
 static UD	g_blink_at;		/* when the caret's turn last changed, or a key or a press showed it */
 static INT	g_settle_turns, g_settle_left;
 
-/* the link under the pointer when the menu was opened, for 実行 */
+/*
+ * The link under the pointer when the menu was opened, or the link picked
+ * alone, for 仮身操作, 実身操作 and 実行; where it is drawn when it was under
+ * the pointer
+ */
 static T_VOBJ	g_link;
 static BOOL	g_has_link;
+static T_DPRECT	g_link_box;
+static BOOL	g_has_box;
 
 /* ---------------------------------------------------------------- saying things */
 
@@ -605,7 +611,14 @@ static void command( CONST T_MNSEL *sel )
 	else if ( strcmp((CONST char *)sel->code, "trash") == 0 ) ta_trash_open();
 	else if ( strcmp((CONST char *)sel->code, "tray.level") == 0 ) (void)tr_sel_dat(sel->index + 1);
 	else if ( strcmp((CONST char *)sel->code, "tray.clear") == 0 ) (void)tr_clr_tra();
-	else if ( strcmp((CONST char *)sel->code, "exec.app") == 0 && g_has_link ) ta_exec_app(&g_link, sel->index);
+	else if ( tv_vop_disk(dc_vop(), (CONST char *)sel->code, g_has_link ? &g_link.target : NULL) ) {
+		/* ディスク操作: done by the program of that name, on the link the menu was opened on */
+	} else if ( g_has_link ) {
+		T_TVLINK	l;
+
+		dc_tvlink(&l, &g_link, g_has_box ? &g_link_box : NULL);
+		(void)tv_vop_command(dc_vop(), &l, (CONST char *)sel->code, sel->index);
+	}
 	g_dirty = TRUE;
 	/* where the caret and the other end are after it, for the tests */
 	snprintf(s, sizeof(s), "caret %d,%d other %d,%d", g_de.cpara, g_de.cpos, g_de.apara, g_de.apos);
@@ -616,9 +629,11 @@ static void menu( CONST T_OBNTM *m )
 {
 	T_DOCMENU	st;
 	T_MNSEL		sel;
-	T_DPRECT	page, box;
+	T_DPRECT	page;
+	T_TVLINK	l;
 	ID		mid;
-	INT		which = -1, ex;
+	INT		which = -1;
+	BOOL		ex;
 	char		s[MN_CODE_MAX + 16];
 
 	memset(&st, 0, sizeof(st));
@@ -636,12 +651,13 @@ static void menu( CONST T_OBNTM *m )
 	ta_tray_menu(mid);
 	dc_work_rect(&page);
 	g_has_link = (BOOL)( g_doc != NULL
-			  && tv_doc_at(g_doc, &page, g_sy, g_rec, m->x, m->y, &g_link, &box, &which) >= E_OK );
-	/* away from a link, 実行 is for the link the selection is alone */
+			  && tv_doc_at(g_doc, &page, g_sy, g_rec, m->x, m->y, &g_link, &g_link_box, &which) >= E_OK );
+	g_has_box = g_has_link;
+	/* away from a link, the items are for the link the selection is alone */
 	if ( !g_has_link ) g_has_link = de_link_picked(&g_de, &g_link);
-	ex = ( g_has_link && ta_exec_menu(mid, &g_link) > 0 ) ? 0 : MN_GREY;
-	(void)mn_chg_atr(mid, NULL, "exec", (UINT)ex);
-	note(( ex == 0 ) ? "exec menu on" : "exec menu grey");	/* for the tests */
+	if ( g_has_link ) dc_tvlink(&l, &g_link, g_has_box ? &g_link_box : NULL);
+	ex = (BOOL)( tv_vop_menu(dc_vop(), mid, g_has_link ? &l : NULL) > 0 );
+	note(ex ? "exec menu on" : "exec menu grey");	/* for the tests */
 	note("menu");
 	if ( mn_pop_men(mid, g_kw, m->x, m->y, m->when, &sel) >= E_OK ) {
 		(void)mn_del_men(mid);
@@ -720,8 +736,14 @@ static void press( CONST T_OBNTM *m )
 	dc_work_rect(&page);
 	tad_vobj_init(&v);
 	if ( g_doc != NULL && tv_doc_at(g_doc, &page, g_sy, g_rec, m->x, m->y, &v, &box, &which) >= E_OK ) {
-		if ( twice ) link_open(&v);
-		else de_link_take(&g_de, which, &box, m->x, m->y, m->when);
+		if ( twice ) {
+			T_TVLINK	l;
+
+			dc_tvlink(&l, &v, &box);
+			(void)tv_vop_open(dc_vop(), &l);
+		} else {
+			de_link_take(&g_de, which, &box, m->x, m->y, m->when);
+		}
 		tad_vobj_clear(&v);
 		g_dirty = TRUE;
 		return;

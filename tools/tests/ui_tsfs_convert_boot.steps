@@ -1,0 +1,15 @@
+# The conversion of the system volume at start (design 7.3, 更新と登録の流れ),
+# for tools/ui_run.py --fresh with a test disk whose system volume
+# is of version 4 (tools/tests/mkv4disk.py makes one from the build's, or
+# tools/mktsfs --format 4): the kernel checks it whole and converts it
+# before it is attached, and the desktop shows in a notice of its own
+# (ディスクの形式, from システム) that it did. Nothing asks the person
+# first. The notice stands at the screen's top right; 閉じる puts it away.
+expect tsfs: vblka2: convert: checking
+expect tsfs: vblka2: convert: done
+expect disk: the conversion at start of vblka2 shown: state 1
+expect notice 1 shown: ディスクの形式
+wait 600
+shot tsfs_convert_notice
+absent disk: the check before the conversion shown by its program
+absent !OACV!

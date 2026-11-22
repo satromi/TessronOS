@@ -211,7 +211,7 @@ bash tools/chk_isa.sh ~/tessronos-mozc-v80/tsmozc.o ~/tessronos-netbsd-v80/rumpn
 make -j12 TARGET=_RPI4_ DESKTOP=1 MOZC=1 BUILD_ID=pi4 sdimg
 ```
 
-`build_make/obj/_RPI4_pi4/sd.img`ができる。区画1にはRaspberry Pi 5のイメージと同じもののほか、Raspberry Pi 4系のファームウェア(`start4.elf`、`fixup4.dat`)、3つのデバイスツリー(`bcm2711-rpi-4-b.dtb`、`bcm2711-rpi-400.dtb`、`bcm2711-rpi-cm4.dtb`)、`overlays/disable-bt.dtbo`を置く。これらは最初に一度だけRaspberry Piのファームウェアの配布物から`build_make/obj/boot/`に取得する。同じイメージがRaspberry Pi 4 Model B、400、CM4のどれでも起動する。ブラウザ(`BROWSER=1`)は組み込めない。プログラムと実身のレコードは`build_make/obj/v80/`にできる。
+`build_make/obj/_RPI4_pi4/sd.img`ができる。区画1にはRaspberry Pi 5のイメージと同じもののほか、Raspberry Pi 4系のファームウェア(`start4.elf`、`fixup4.dat`)、3つのデバイスツリー(`bcm2711-rpi-4-b.dtb`、`bcm2711-rpi-400.dtb`、`bcm2711-rpi-cm4.dtb`)、`overlays/disable-bt.dtbo`を置く。これらは最初に一度だけRaspberry Piのファームウェアの配布物から`build_make/obj/boot/`に取得する。同じイメージがRaspberry Pi 4 Model B、400、CM4のどれでも起動する。ブラウザ(`BROWSER=1`)は組み込めない。プログラムと実身のレコードは、中間の生成物の置き場の`v80/`(`~/tessronos-obj-ts/<ツリー>/user_<BUILD_ID>/v80/`、12章12.2.1)にできる。
 
 | 目的 | コマンド |
 | --- | --- |

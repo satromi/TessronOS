@@ -107,17 +107,20 @@ ER ts_admin_ask( CONST char *what, CONST TS_UUID *win )
 /* The person told, on the message line, that what could not be done for want of the rights */
 void ts_no_right( CONST char *what )
 {
-	char	line[160];
-	CONST char *tail = "権限がありません";
-	INT	n = 0, i;
+	CONST char *tail = "権限がありません", *suru = "する";
+	INT	w = 0, n = 0, i;
 
-	for ( i = 0; what != NULL && what[i] != 0 && n < (INT)sizeof(line) - 40; i++ ) {
-		line[n++] = what[i];
+	/* the line as long as what it says (this library allocates nothing: it is on the stack) */
+	while ( what != NULL && what[w] != 0 ) w++;
+	{
+		char	line[w + 32];
+
+		for ( i = 0; i < w; i++ ) line[n++] = what[i];
+		if ( n > 0 ) {
+			for ( i = 0; suru[i] != 0; i++ ) line[n++] = suru[i];
+		}
+		for ( i = 0; tail[i] != 0; i++ ) line[n++] = tail[i];
+		line[n] = 0;
+		(void)wm_msg_put(line);
 	}
-	if ( n > 0 ) {
-		for ( i = 0; "する"[i] != 0; i++ ) line[n++] = "する"[i];
-	}
-	for ( i = 0; tail[i] != 0 && n < (INT)sizeof(line) - 1; i++ ) line[n++] = tail[i];
-	line[n] = 0;
-	(void)wm_msg_put(line);
 }

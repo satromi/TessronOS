@@ -56,10 +56,21 @@ typedef struct {
 	UB	reserved[3];
 } __attribute__((packed)) T_RSDP;
 
-#define ACPI_MAX_TABLES	64
+/*
+ * The root table's entries are looked through each time a table is asked
+ * for, rather than copied into a table of a fixed size: as many tables as
+ * the firmware lists are found.
+ */
+LOCAL CONST T_SDTHDR	*sdt = NULL;	/* the XSDT, or the RSDT */
+LOCAL INT		sdt_w = 0;	/* bytes of an entry: 8 or 4 */
+LOCAL INT		sdt_n = 0;	/* its entries */
+LOCAL INT		ntables = 0;	/* of them, the ones that are good */
 
-LOCAL CONST T_SDTHDR	*tables[ACPI_MAX_TABLES];
-LOCAL INT		ntables = 0;
+/* What the MADT and the MCFG hold is counted as the kernel starts and kept once there is memory */
+LOCAL CONST T_SDTHDR	*madt = NULL;
+LOCAL CONST T_SDTHDR	*mcfg = NULL;
+LOCAL INT		cpu_room = 0;	/* enabled processor entries, a processor listed twice counted twice */
+LOCAL INT		ioapic_room = 0, iso_room = 0, mcfg_room = 0;
 
 Inline UB rd8( CONST void *p, INT off )
 {
@@ -121,13 +132,25 @@ LOCAL CONST T_SDTHDR *table_at( UD pa )
 	return h;
 }
 
+LOCAL UD sdt_entry( INT i )
+{
+	return ( sdt_w == 8 ) ? rd64(sdt, sizeof(T_SDTHDR) + i * 8) : rd32(sdt, sizeof(T_SDTHDR) + i * 4);
+}
+
 EXPORT CONST void *knl_acpi_table( CONST char *sig, INT index )
 {
-	INT	i;
+	INT		i;
+	UD		pa;
+	CONST T_SDTHDR	*h;
 
-	for ( i = 0; i < ntables; i++ ) {
-		if ( sig_is(tables[i]->sig, sig, 4) && index-- == 0 ) {
-			return tables[i];
+	for ( i = 0; i < sdt_n; i++ ) {
+		pa = sdt_entry(i);
+		if ( pa == 0 || !sig_is(((CONST T_SDTHDR *)PA2VA(pa))->sig, sig, 4) ) {
+			continue;
+		}
+		h = table_at(pa);		/* its sum checked: the one asked for only */
+		if ( h != NULL && index-- == 0 ) {
+			return h;
 		}
 	}
 	return NULL;
@@ -135,7 +158,12 @@ EXPORT CONST void *knl_acpi_table( CONST char *sig, INT index )
 
 /* ------------------------------------------------------------------------ */
 
-LOCAL void read_madt( CONST T_SDTHDR *h )
+/*
+ * The MADT: with fill FALSE (as the kernel starts, before there is
+ * memory to keep a list in) the entries are counted; with fill TRUE they
+ * are kept in the lists knl_acpi_take made room for.
+ */
+LOCAL void read_madt( CONST T_SDTHDR *h, BOOL fill )
 {
 	CONST UB	*p = (CONST UB *)h, *e = p + h->length;
 	UW		a, b, c, d, boot;
@@ -178,7 +206,11 @@ LOCAL void read_madt( CONST T_SDTHDR *h )
 			 * twice (as a local APIC and as an x2APIC) once.
 			 */
 			if ( ( flags & 1 ) == 0 ) {
-				if ( ( flags & 2 ) != 0 ) knl_acpi.ncpu_later++;
+				if ( ( flags & 2 ) != 0 && fill ) knl_acpi.ncpu_later++;
+				break;
+			}
+			if ( !fill ) {
+				cpu_room++;
 				break;
 			}
 			{
@@ -187,8 +219,8 @@ LOCAL void read_madt( CONST T_SDTHDR *h )
 				for ( k = 0; k < knl_acpi.ncpu && knl_acpi.cpu[k].apic_id != id; k++ ) ;
 				if ( k < knl_acpi.ncpu ) break;
 			}
-			if ( knl_acpi.ncpu >= ACPI_MAX_CPU ) {
-				knl_acpi.ncpu_over++;
+			if ( knl_acpi.ncpu >= cpu_room ) {
+				knl_acpi.ncpu_over++;	/* no room was made: no memory */
 				break;
 			}
 			if ( id == boot && knl_acpi.ncpu > 0 ) {
@@ -202,7 +234,9 @@ LOCAL void read_madt( CONST T_SDTHDR *h )
 			knl_acpi.ncpu++;
 			break;
 		case 1:				/* I/O APIC */
-			if ( knl_acpi.nioapic < ACPI_MAX_IOAPIC ) {
+			if ( !fill ) {
+				ioapic_room++;
+			} else if ( knl_acpi.nioapic < ioapic_room ) {
 				T_ACPIIOAPIC	*a = &knl_acpi.ioapic[knl_acpi.nioapic++];
 
 				a->id = p[2];
@@ -211,7 +245,9 @@ LOCAL void read_madt( CONST T_SDTHDR *h )
 			}
 			break;
 		case 2:				/* Interrupt Source Override */
-			if ( knl_acpi.niso < ACPI_MAX_ISO ) {
+			if ( !fill ) {
+				iso_room++;
+			} else if ( knl_acpi.niso < iso_room ) {
 				T_ACPIISO	*o = &knl_acpi.iso[knl_acpi.niso++];
 
 				o->irq = p[3];
@@ -234,12 +270,21 @@ LOCAL void read_madt( CONST T_SDTHDR *h )
 	}
 }
 
-LOCAL void read_mcfg( CONST T_SDTHDR *h )
+LOCAL void read_mcfg( CONST T_SDTHDR *h, BOOL fill )
 {
 	CONST UB	*p = (CONST UB *)h + 44, *e = (CONST UB *)h + h->length;
 
-	for ( ; p + 16 <= e && knl_acpi.nmcfg < ACPI_MAX_MCFG; p += 16 ) {
-		T_ACPIMCFG	*m = &knl_acpi.mcfg[knl_acpi.nmcfg++];
+	for ( ; p + 16 <= e; p += 16 ) {
+		T_ACPIMCFG	*m;
+
+		if ( !fill ) {
+			mcfg_room++;
+			continue;
+		}
+		if ( knl_acpi.nmcfg >= mcfg_room ) {
+			break;
+		}
+		m = &knl_acpi.mcfg[knl_acpi.nmcfg++];
 
 		m->base = rd64(p, 0);
 		m->seg = rd16(p, 8);
@@ -361,17 +406,24 @@ EXPORT ER knl_acpi_init( UD rsdp_pa )
 		return E_OBJ;
 	}
 	n = (INT)( ( x->length - sizeof(T_SDTHDR) ) / w );
-	for ( i = 0; i < n && ntables < ACPI_MAX_TABLES; i++ ) {
-		UD	pa = ( w == 8 ) ? rd64(x, sizeof(T_SDTHDR) + i * 8) : rd32(x, sizeof(T_SDTHDR) + i * 4);
-		CONST T_SDTHDR	*h = table_at(pa);
-
-		if ( h != NULL ) {
-			tables[ntables++] = h;
+	sdt = x;
+	sdt_w = w;
+	sdt_n = n;
+	for ( i = 0; i < n; i++ ) {
+		if ( table_at(sdt_entry(i)) != NULL ) {
+			ntables++;
 		}
 	}
 
-	if ( ( t = knl_acpi_table("APIC", 0) ) != NULL ) read_madt(t);
-	if ( ( t = knl_acpi_table("MCFG", 0) ) != NULL ) read_mcfg(t);
+	/* counted now; kept by knl_acpi_take, once there is memory */
+	if ( ( t = knl_acpi_table("APIC", 0) ) != NULL ) {
+		madt = t;
+		read_madt(t, FALSE);
+	}
+	if ( ( t = knl_acpi_table("MCFG", 0) ) != NULL ) {
+		mcfg = t;
+		read_mcfg(t, FALSE);
+	}
 	if ( ( t = knl_acpi_table("FACP", 0) ) != NULL ) read_fadt(t);
 	if ( ( t = knl_acpi_table("HPET", 0) ) != NULL ) {
 		T_ACPIGAS	g;
@@ -381,12 +433,44 @@ EXPORT ER knl_acpi_init( UD rsdp_pa )
 	}
 	knl_acpi.present = TRUE;
 
-	tm_printf((UB *)"TessronOS x64: ACPI %s: %d tables, %d CPUs, %d IOAPICs, %d overrides, "
+	tm_printf((UB *)"TessronOS x64: ACPI %s: %d tables, %d CPU entries, %d IOAPICs, %d overrides, "
 		  "MCFG %d, HPET %lx, PM timer %x, S5 %d/%d\n",
-		  knl_acpi.oem, ntables, knl_acpi.ncpu, knl_acpi.nioapic, knl_acpi.niso,
-		  knl_acpi.nmcfg, knl_acpi.hpet_addr, knl_acpi.pm_tmr,
+		  knl_acpi.oem, ntables, cpu_room, ioapic_room, iso_room,
+		  mcfg_room, knl_acpi.hpet_addr, knl_acpi.pm_tmr,
 		  knl_acpi.s5_typa, knl_acpi.s5_typb);
 	return E_OK;
+}
+
+/*
+ * The lists of the MADT and the MCFG kept, each as long as the table
+ * counted (knl_init_device, once Imalloc is there, before the interrupt
+ * controllers and the other processors are started). A list there is no
+ * memory for stays empty, and that is said.
+ */
+EXPORT ER knl_acpi_take( void )
+{
+	ER	er = E_OK;
+
+	if ( !knl_acpi.present ) {
+		return E_NOEXS;
+	}
+	if ( cpu_room > 0 ) knl_acpi.cpu = (T_ACPICPU *)Kmalloc(sizeof(T_ACPICPU) * (SZ)cpu_room);
+	if ( ioapic_room > 0 ) knl_acpi.ioapic = (T_ACPIIOAPIC *)Kmalloc(sizeof(T_ACPIIOAPIC) * (SZ)ioapic_room);
+	if ( iso_room > 0 ) knl_acpi.iso = (T_ACPIISO *)Kmalloc(sizeof(T_ACPIISO) * (SZ)iso_room);
+	if ( mcfg_room > 0 ) knl_acpi.mcfg = (T_ACPIMCFG *)Kmalloc(sizeof(T_ACPIMCFG) * (SZ)mcfg_room);
+	if ( knl_acpi.cpu == NULL ) cpu_room = 0;
+	if ( knl_acpi.ioapic == NULL ) ioapic_room = 0;
+	if ( knl_acpi.iso == NULL ) iso_room = 0;
+	if ( knl_acpi.mcfg == NULL ) mcfg_room = 0;
+	if ( madt != NULL ) read_madt(madt, TRUE);
+	if ( mcfg != NULL ) read_mcfg(mcfg, TRUE);
+	if ( knl_acpi.ncpu_over > 0 || ( madt != NULL && ( knl_acpi.cpu == NULL || knl_acpi.ioapic == NULL ) ) ) {
+		tm_printf((UB *)"TessronOS x64: ACPI: no memory to keep the MADT's lists\n");
+		er = E_NOMEM;
+	}
+	tm_printf((UB *)"TessronOS x64: ACPI: %d CPUs, %d IOAPICs, %d overrides, MCFG %d\n",
+		  knl_acpi.ncpu, knl_acpi.nioapic, knl_acpi.niso, knl_acpi.nmcfg);
+	return er;
 }
 
 EXPORT UW knl_acpi_isa_gsi( UB irq, UH *p_flags )

@@ -46,17 +46,26 @@ extern "C" {
 #include <ts/wm.h>
 
 #define WM_SB_MAX	6		/* fields in one box along a line */
-#define WM_LABEL_MAX	128		/* bytes of a label, with its terminator:
-					   a name of 40 Japanese letters */
-#define WM_KEY_MAX	12		/* bytes of the keys that do the same */
 /*
- * Panels open at once. A menu standing in a menu standing in a menu is
- * three of these, so this is what sets how deep a chain of menus may
- * go: nothing else does. It is not a shape the system imposes on what a
- * program may write -- a menu is a tree of whatever depth its author
- * gave it -- it is only how many can be on the screen together.
+ * The fields a part keeps its words in: a label of 127 bytes, the keys
+ * that do the same of 11. They are where short words are kept, not how
+ * long words may be: longer ones are kept whole beside the part
+ * (T_WMLONG), the field then holding their head cut at a letter's end.
  */
-#define WM_PANEL_MAX	32
+#define WM_LABEL_MAX	128
+#define WM_KEY_MAX	12
+/*
+ * Panels open at once are as many as the memory holds: the table of
+ * them grows as they open. A menu standing in a menu is two of them;
+ * what stops a chain of menus whose definition points at itself is the
+ * depth a definition may take another in (mn.c), not a count of panels.
+ * wm_panel_last answers the highest panel number there may be now, for
+ * a caller that goes through them all (1 to it).
+ */
+IMPORT INT wm_panel_last( void );
+
+/* Whether name idx (1 up) of a panel part's list, selector or tags cannot be chosen */
+IMPORT BOOL knl_pn_name_off( INT pid, INT i, INT idx );
 
 /*
  * What a part is, and how it is to be drawn: one word, the kind in its
@@ -218,6 +227,24 @@ extern "C" {
  */
 typedef struct T_WMNAMES	T_WMNAMES;
 
+/*
+ * A part's words longer than its field: its label, its keys and a box's
+ * letters, each whole and allocated, the part's own. A part has this only
+ * when one of them is longer than its field holds (lng NULL otherwise):
+ * the label and the keys then keep their head in label[] and key[], cut
+ * at a letter's end, and a box's letters are in text here alone, room
+ * bytes of it. A panel opened from a definition has a copy of its own;
+ * a definition is let go with wm_panel_free, which lets this go too.
+ * What reads a part's words reads them through WM_PT_LABEL_S,
+ * WM_PT_KEY_S and WM_PT_TEXT_S.
+ */
+typedef struct {
+	UB	*label;			/* NULL: label[] holds it */
+	UB	*key;			/* NULL: key[] holds it */
+	UB	*text;			/* NULL: text[] holds it */
+	INT	room;			/* the bytes text has room for */
+} T_WMLONG;
+
 typedef struct {
 	UW		type;		/* the kind, and the flags above */
 	INT		num;		/* how the caller knows this part */
@@ -251,7 +278,6 @@ typedef struct {
 	INT		top;		/* the first one shown (1 up) */
 	INT		rows;		/* how many fit, worked out when drawn */
 	INT		now;		/* the name in use now, underlined (1 up), 0 none */
-	UW		inact;		/* names that cannot be chosen, a bit each from bit 0 */
 
 	/* a box: what has been typed into it, and where the caret is */
 	UB		text[WM_LABEL_MAX];
@@ -302,7 +328,36 @@ typedef struct {
 	 */
 	T_DPRECT	inner;
 	INT		sheet;
+
+	T_WMLONG	*lng;		/* words longer than their fields, NULL none */
 } T_WMPART;
+
+#define WM_PT_LABEL_S(pt)	( ( (pt)->lng != NULL && (pt)->lng->label != NULL ) \
+				  ? (CONST UB *)(pt)->lng->label : (CONST UB *)(pt)->label )
+#define WM_PT_KEY_S(pt)		( ( (pt)->lng != NULL && (pt)->lng->key != NULL ) \
+				  ? (CONST UB *)(pt)->lng->key : (CONST UB *)(pt)->key )
+#define WM_PT_TEXT_S(pt)	( ( (pt)->lng != NULL && (pt)->lng->text != NULL ) \
+				  ? (CONST UB *)(pt)->lng->text : (CONST UB *)(pt)->text )
+
+/*
+ * A part's label, keys or a box's letters set: n bytes of s (n below
+ * nought: up to its nought), as long as they are, kept in the field when
+ * they fit and whole beside it when not. E_NOMEM when there is not the
+ * memory for them, the words then as they were. A box's caret goes to
+ * the end of its letters.
+ */
+IMPORT ER wm_part_set_label( T_WMPART *pt, CONST UB *s, INT n );
+IMPORT ER wm_part_set_key( T_WMPART *pt, CONST UB *s, INT n );
+IMPORT ER wm_part_set_text( T_WMPART *pt, CONST UB *s, INT n );
+
+/*
+ * A part's own words copied for another part that is a copy of it (dst
+ * a byte copy of src: its lng is made its own), or let go. FALSE when
+ * there was not the memory: dst then has no long words, its fields their
+ * heads.
+ */
+IMPORT BOOL wm_part_long_dup( T_WMPART *dst );
+IMPORT void wm_part_long_free( T_WMPART *pt );
 
 /*
  * A panel: where it sits, what is in it, and who it belongs to. The
@@ -438,8 +493,16 @@ IMPORT ER  wm_panel_part_screen( INT pid, INT num, T_DPRECT *out );
 IMPORT ER  wm_panel_field( INT pid, INT num, INT field, INT *p_value );
 IMPORT ER  wm_panel_set_field( INT pid, INT num, INT field, INT value );
 
-/* A box's letters read or set; set on words alone, they are what the words say */
+/*
+ * A box's letters read or set; set on words alone, they are what the
+ * words say. wm_panel_text copies as many whole letters as max has room
+ * for, and the nought. wm_panel_text_all answers them whole, in a copy
+ * made for the caller (*p_buf, to be Kfree'd, ending in a nought), and
+ * how many bytes they are. wm_panel_set_text is E_NOMEM when there is
+ * not the memory for words as long as they are, the part then as it was.
+ */
 IMPORT ER  wm_panel_text( INT pid, INT num, UB *buf, INT max );
+IMPORT INT wm_panel_text_all( INT pid, INT num, UB **p_buf );
 IMPORT ER  wm_panel_set_text( INT pid, INT num, CONST UB *s );
 
 /*
@@ -453,6 +516,14 @@ IMPORT BOOL wm_panel_type( INT wid, CONST UB *s, INT n );
 
 /* ---------------------------------------------------------------- menus */
 
+/*
+ * An item's words are in label[] and key[] when they fit. Longer ones
+ * are kept whole after the items, in the same bytes as the menu: llabel
+ * and lkey say where, in bytes from the menu's start (0 none), and the
+ * fields then hold their head. The bytes of such a menu are
+ * WM_MENU_SIZE(nitem) and the words after; WM_ITEM_LABEL and WM_ITEM_KEY
+ * read the words whole.
+ */
 typedef struct {
 	INT	cmd;			/* what choosing it means, 0 for a line */
 	UB	label[WM_LABEL_MAX];
@@ -460,6 +531,7 @@ typedef struct {
 	INT	sub;			/* the menu that opens beside it, or 0 */
 	BOOL	grey;			/* shown, but cannot be chosen */
 	BOOL	tick;			/* shown with a mark */
+	UINT	llabel, lkey;		/* the words whole, after the items; 0 none */
 } T_WMITEM;
 
 typedef struct {
@@ -482,6 +554,8 @@ typedef struct {
  * gives: one taller than the screen is laid in columns side by side.
  */
 #define WM_MENU_SIZE(n)	( sizeof(T_WMMENU) + sizeof(T_WMITEM) * (SZ)(n) )
+#define WM_ITEM_LABEL(m, it)	( ( (it)->llabel != 0 ) ? (CONST UB *)(m) + (it)->llabel : (CONST UB *)(it)->label )
+#define WM_ITEM_KEY(m, it)	( ( (it)->lkey != 0 ) ? (CONST UB *)(m) + (it)->lkey : (CONST UB *)(it)->key )
 
 /*
  * Open a menu at a place in a window's work area. It is a panel of one
@@ -567,16 +641,16 @@ IMPORT INT wm_menu_row_h( void );
  *
  * **A menu is a tree of any depth.** A menu opened from a row is a menu
  * like any other, so its own rows may carry menus in turn, and so on
- * for as long as the definitions go. Nothing here says how deep that
- * may be; what ends it is running out of panels to open (WM_PANEL_MAX),
- * and a menu that cannot be opened simply does not open, leaving the
+ * for as long as the definitions go. A list opens only as the pointer
+ * reaches its row, one at a time, and a menu that cannot be opened (no
+ * memory for its panel or its window) simply does not open, leaving the
  * one it came from standing.
  *
- * A definition that points at itself, directly or round a ring, is
- * therefore not a hang: each turn of the ring costs a panel and the
- * chain stops when the panels run out. It is still a fault in the
- * definition; this layer does not correct it, it only refuses to be
- * hung by it.
+ * A definition that points at itself, directly or round a ring, is not
+ * a hang: the menu manager reads a definition taken in no deeper than it
+ * allows (mn.c, MN_DEPTH), and the lists are only those it read. It is
+ * still a fault in the definition; this layer does not correct it, it
+ * only refuses to be hung by it.
  *
  * Nothing has to be done to take part in this: a menu put in the data
  * box under a number is a menu a row may point at, and wm_menu_event on
@@ -616,7 +690,9 @@ IMPORT INT  knl_pn_list( INT *p_wid );
  * many and as long as they are, E_NOMEM only when there is not the
  * memory, the names it had then left as they were). knl_pn_names
  * answers how many bytes its names take, in a copy made for the caller
- * (*p_buf, to be Kfree'd; NULL when it has none).
+ * (*p_buf, to be Kfree'd; NULL when it has none). knl_pn_state answers
+ * how many bytes the state is whole, and copies no more than max of
+ * them: a caller whose room was short asks again with as much.
  */
 IMPORT INT  knl_pn_state( INT pid, INT i, UB *buf, INT max );
 IMPORT ER   knl_pn_set_state( INT pid, INT i, CONST UB *buf, INT len );
@@ -624,6 +700,8 @@ IMPORT UINT knl_pn_flags( INT pid, INT i );
 IMPORT ER   knl_pn_set_flags( INT pid, INT i, UINT f );
 IMPORT ER   knl_pn_set_names( INT pid, INT i, CONST UB *names, INT len );
 IMPORT INT  knl_pn_names( INT pid, INT i, UB **p_buf );
+/* A part's label whole, in a copy made for the caller (*p_buf, Kfree): its bytes */
+IMPORT INT  knl_pn_label( INT pid, INT i, UB **p_buf );
 #if USE_KTEST
 /* For a test: the next n blocks of names are refused, as when the memory has run out */
 IMPORT void knl_pn_test_nomem( INT n );

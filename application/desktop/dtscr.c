@@ -94,8 +94,7 @@
 #define SC_GROUP_MAX	16		/* windows of the group in front */
 #define SC_DRAG_LEAST	4		/* a rectangle dragged out is at least this wide and high */
 #define SC_WHITE	0x00FFFFFFU
-#define SC_VOLS		12		/* volumes offered: as many as a panel holds on the screen */
-#define SC_VOL_PATH	64		/* bytes of a volume's path kept */
+#define SC_VOL_PATH	FS_PATH_MAX	/* bytes of a volume's path: as long as a volume keeps one */
 
 /* what is under way */
 #define SC_IDLE		0
@@ -904,7 +903,7 @@ LOCAL BOOL set_from( CONST UB *t )
 EXPORT ER dt_scr_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 {
 	CONST UB	*t = dt_rq_word(rq, DT_TAIL_TEXT, NULL);
-	UB		vols[SC_VOLS][SC_VOL_PATH];
+	UB		(*vols)[FS_PATH_MAX] = NULL;
 	INT		n, i;
 
 	if ( !sc_loaded ) {
@@ -941,10 +940,14 @@ EXPORT ER dt_scr_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 		return E_OK;
 	case DT_SP_VOL:
 		/* 保存先ディスク: the volumes attached, the first the system's */
-		n = knl_obfile_vols(&vols[0][0], SC_VOL_PATH, SC_VOLS);
+		n = dt_vols(&vols);
+		if ( vols == NULL ) {
+			return E_NOMEM;
+		}
 		an->how = (UINT)( ( n > 0 ) ? n : 0 );
 		i = rq->grab_x;
 		if ( i < 0 || i >= n ) {
+			Kfree(vols);
 			return E_NOEXS;
 		}
 		(void)dt_ans_cat(an, (CONST UB *)(CONST char *)vols[i], -1);
@@ -958,6 +961,7 @@ EXPORT ER dt_scr_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 				Kfree(lab);
 			}
 		}
+		Kfree(vols);
 		return E_OK;
 	case DT_SP_ARM:
 		if ( pid != sc_panel_pid || !set_from(t) ) {

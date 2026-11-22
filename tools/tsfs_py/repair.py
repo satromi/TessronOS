@@ -9,9 +9,12 @@ The journal has been replayed by the time the volume is open.
 
 tidy: what the kernel finishes when it mounts a volume (ts_obj_tidy),
 walking the orphan tree in key order: an object deleted while open is
-taken away, its links given up first; an object whose link table has to
-be made again gets it, and the counts of what it points at move by the
-difference; an entry for an object with neither mark is dropped.
+taken away, its links given up first; on a volume of version 5 the spare
+place of an object marked F_SPARE is emptied (the runs it holds given
+back, or for F_TRIM the runs of the record past its kept bytes); an
+object whose link table has to be made again gets it, and the counts of
+what it points at move by the difference; an entry for an object with
+none of the marks is dropped.
 
 relink: every object's link table made again from its xmlTAD records,
 and every reference count from the link tables and the holds. An object
@@ -30,9 +33,9 @@ from .error import TsfsError
 from .groups import count_free
 from .layout import ST_CLEAN, ST_ERROR, now_tron
 from . import meta as metamod
-from .obj import (F_GARBAGE, F_ORPHAN, F_RELINK, LK_EXTERNAL, MAX_LINK,
-                  OB_LINK, OB_META, OB_NLINK, OB_PLACE, OB_RES, LinkEntry,
-                  ObjectBlock, sort_links)
+from .obj import (F_GARBAGE, F_ORPHAN, F_RELINK, F_SPARE, LK_EXTERNAL,
+                  OB_ICON, OB_LINK, OB_META, OB_NLINK, OB_PLACE, OB_RES,
+                  LinkEntry, ObjectBlock, sort_links)
 
 
 def fix(vol, checker):
@@ -83,6 +86,10 @@ def fix(vol, checker):
     if j is not None and j.head_state == "damaged":
         j.write_head(sb.journal_seq, 0)
         done.append("the journal head was written afresh")
+    elif j is not None and j.head_state == "old" and not j.old_ring:
+        j.write_head(j.head_seq, j.head)
+        done.append("the journal head was written at version 5, the last "
+                    "step of a conversion")
     vol.sb_dirty = True
     vol.flush(both=True, spares=True)
     done.append("both superblocks and the spares were written")
@@ -97,13 +104,15 @@ def links_of(o, raw, places, here):
     each holds, a vobjid met before in the object left out; a target not
     in `here` (the object index) external; the whole in the order of the
     entries' first 40 bytes."""
-    order, _named = metamod.order_of(raw, places)
+    lim = o.vol.sb.limits()
+    order, _named = metamod.order_of(raw, places, lim.max_rec)
     found = []
     for e, rt, _sub in order:
         if rt != metamod.RT_XTAD or e.nbytes == 0:
             continue
-        if not metamod.scan_links(o.read_data(e.place), e.rid, found, MAX_LINK):
-            raise TsfsError("more than %d links" % MAX_LINK)
+        if not metamod.scan_links(o.read_data(e.place), e.rid, found,
+                                  lim.max_link or None):
+            raise TsfsError("more than %d links" % lim.max_link)
     return sort_links([LinkEntry(v, t, rid, 0 if t in here else LK_EXTERNAL)
                        for (v, t, rid) in found])
 
@@ -179,11 +188,13 @@ class Objects(object):
         for e in reversed(o.links()):
             if e.counted:
                 self.ref_move(e.target, -1)
+        if o.flags & F_SPARE or not o.spare_raw_empty():
+            o.empty_spare()
         for e in o.placements():
             o.dseg_free(e.place)
         for e in o.resources():
             o.dseg_free(e.place)
-        for off in (OB_PLACE, OB_RES, OB_LINK, OB_META):
+        for off in (OB_PLACE, OB_RES, OB_LINK, OB_META, OB_ICON):
             o.mseg_free(off)
         if o.flags & F_GARBAGE and self.gc.pop(u, None) is not None:
             self.gc_changed = True
@@ -194,6 +205,17 @@ class Objects(object):
         self.vol.free_ext(o.blk, 1)
         del self.cache[u]
         self.dirty.discard(u)
+
+    def unspare(self, u):
+        """The spare place of u emptied and the mark taken off; it
+        leaves the orphan tree unless its link table is still to be made
+        again."""
+        o = self.cache[u]
+        n = o.empty_spare()
+        if not o.flags & F_RELINK and self.orphans.pop(u, None) is not None:
+            self.or_changed = True
+        self.dirty.add(u)
+        return n
 
     def relink(self, u):
         """The link table of u made again and the counts moved by the
@@ -255,7 +277,7 @@ def tidy_needed(checker):
     """Whether the orphan tree holds anything, or an object is marked for
     its link table to be made again."""
     return bool(checker.orphan_tree) or any(
-        i.flags & F_RELINK for i in checker.objs.values())
+        i.flags & (F_RELINK | F_SPARE) or i.spare for i in checker.objs.values())
 
 
 def tidy(vol, checker):
@@ -266,7 +288,7 @@ def tidy(vol, checker):
                        "orphans are left alone")
     done = []
     objs = Objects(vol, checker)
-    reaped = relinked = dropped = 0
+    reaped = relinked = dropped = spared = 0
     for u in sorted(checker.orphan_tree, key=lambda x: x.bytes):
         if u not in objs.orphans:
             continue
@@ -276,9 +298,15 @@ def tidy(vol, checker):
             if flags & F_ORPHAN:
                 objs.reap(u)
                 reaped += 1
-            elif flags & F_RELINK:
+                continue
+            if flags & F_SPARE or (o is not None and not o.spare_raw_empty()):
+                objs.unspare(u)
+                spared += 1
+            if flags & F_RELINK:
                 objs.relink(u)
                 relinked += 1
+            elif flags & F_SPARE:
+                pass
             else:
                 objs.orphans.pop(u, None)
                 objs.or_changed = True
@@ -289,15 +317,23 @@ def tidy(vol, checker):
     for u, info in sorted(checker.objs.items(), key=lambda kv: kv[0].bytes):
         if info.orphan or u in checker.orphan_tree:
             continue
-        if info.flags & F_RELINK and not info.flags & F_ORPHAN:
-            try:
+        if info.flags & F_ORPHAN:
+            continue
+        try:
+            if info.flags & F_SPARE or info.spare:
+                objs.load(u)
+                objs.unspare(u)
+                spared += 1
+            if info.flags & F_RELINK:
                 objs.load(u)
                 objs.relink(u)
                 relinked += 1
-            except TsfsError as e:
-                done.append("object %s left alone: %s" % (u, e))
+        except TsfsError as e:
+            done.append("object %s left alone: %s" % (u, e))
     if reaped:
         done.append("%d object(s) deleted while open were taken away" % reaped)
+    if spared:
+        done.append("the spare place of %d object(s) was emptied" % spared)
     if relinked:
         done.append("%d link table(s) marked to be made again were made"
                     % relinked)

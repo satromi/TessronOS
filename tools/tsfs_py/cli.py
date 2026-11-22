@@ -70,6 +70,30 @@ def open_device(path, args, writable=False, length=None, create=False):
                       create=create)
 
 
+def add_format_arg(parser):
+    """--format: the version of the format a volume is made in."""
+    parser.add_argument("--format", type=int, choices=(4, 5), default=None,
+                        metavar="{4,5}",
+                        help="the version of the format to make the volume "
+                             "in (5 unless the environment says otherwise)")
+
+
+def format_version(args, make_default=5):
+    """The version a volume is made in: --format; else TSFS_FORMAT in
+    the environment; else, under make (MAKELEVEL is set), make_default;
+    else 5."""
+    if getattr(args, "format", None):
+        return args.format
+    env = os.environ.get("TSFS_FORMAT", "").strip()
+    if env:
+        if env not in ("4", "5"):
+            raise TsfsError("TSFS_FORMAT is %r, not 4 or 5" % env)
+        return int(env)
+    if os.environ.get("MAKELEVEL"):
+        return make_default
+    return 5
+
+
 def uuid_arg(text):
     """A UUID on the command line, in its text form."""
     u = parse_uuid(text.strip().lower())

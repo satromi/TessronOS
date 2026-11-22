@@ -86,13 +86,42 @@ LOCAL INT rec( CONST TS_UUID *u, INT recno )
 	return (INT)asz;
 }
 
+/*
+ * Whether the list of the devices links to u. The list is read whole: it
+ * has a line for every device and every partition, and with many disks
+ * it is longer than txt, the device added last at its end.
+ */
 LOCAL BOOL in_list( CONST TS_UUID *u )
 {
 	char	us[TS_UUID_STRLEN + 1];
-	INT	n = rec(&ob_uuid_devlist, 0);
+	UB	*b = NULL, *nb;
+	SZ	cap = TEXT_MAX, len = 0, asz;
+	BOOL	yes = FALSE;
+	ID	k = ob_opn_obj(&ob_uuid_devlist, OB_OP_R);
 
-	(void)ts_uuid_to_str(u, us, sizeof(us));
-	return (BOOL)( n > 0 && has(txt, n, us) );
+	if ( k <= 0 ) return FALSE;
+	for ( ;; ) {
+		nb = (UB *)Kmalloc(cap);
+		if ( nb == NULL ) break;
+		if ( b != NULL ) {
+			knl_memcpy(nb, b, (INT)len);
+			Kfree(b);
+		}
+		b = nb;
+		asz = 0;
+		if ( ob_rea_rec(k, 0, (D)len, b + len, cap - len, &asz) < E_OK ) break;
+		len += asz;
+		if ( len < cap ) {
+			(void)ts_uuid_to_str(u, us, sizeof(us));
+			yes = has(b, (INT)len, us);
+			tm_printf((UB *)"  the list of the devices: %ld bytes\n", (D)len);
+			break;
+		}
+		cap *= 2;
+	}
+	if ( b != NULL ) Kfree(b);
+	(void)ob_cls_obj(k);
+	return yes;
 }
 
 /* The device object of a name among those of a subtype; FALSE when there is none */

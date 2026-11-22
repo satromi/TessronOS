@@ -14,7 +14,7 @@
  *
  *	The desktop starts it with the item chosen and the link it was
  *	chosen on (T_DTDISKARG of ts/dtreq.h): 接続, 切り離し, 状態表示,
- *	区画作成 or 拡張. Run by itself, from the program box, it is 状態表示 of
+ *	区画作成, 拡張 or 形式を新しくする. Run by itself, from the program box, it is 状態表示 of
  *	the system's disk. It does that one thing and ends.
  *
  *	The disks, the volumes and the windows open on them are the
@@ -43,6 +43,7 @@
 #include <ts/uuid.h>
 #include <ts/ob.h>
 #include <ts/dtreq.h>
+#include <ts/tsfsck.h>
 #include "../dtask.h"
 
 /* The panels of the data box */
@@ -50,6 +51,7 @@
 #define PN_STATUS	2
 #define PN_CREATE	3
 #define PN_GROW		4
+#define PN_CONVERT	5
 #define PN_TELL		10
 
 /* Their parts */
@@ -71,6 +73,8 @@
 #define PH_CREATE	302
 #define PW_GROW		480
 #define PH_GROW		206
+#define PW_CONVERT	560
+#define PH_CONVERT	150
 
 #define KEY_ENTER	0x28
 #define KEY_ESCAPE	0x29
@@ -556,6 +560,98 @@ static void do_grow( CONST TS_UUID *target )
 	}
 }
 
+/* ---------------------------------------------------------------- 形式を新しくする */
+
+/*
+ * The volume of the link converted to the format's version 5 (design
+ * 7.3): asked of the person in a panel, then done by this program in
+ * its own task through the kernel (ob_cnv_vol), which checks the whole
+ * volume first and writes nothing when the check finds damage. The
+ * system's volume is converted at start, not here.
+ */
+static void do_convert( CONST TS_UUID *target )
+{
+	T_DTREQ		rq;
+	T_DTANS		an;
+	T_TSFSCNV	r;
+	UI		w;
+	char		b[DT_TEXT_MAX + 96], name[DT_TEXT_MAX], path[TSFSCK_DEVNM_MAX], *p;
+	INT		told = 0, form;
+	BOOL		go;
+	ER		er;
+
+	req_init(&rq, DT_DISK_FORM, target);
+	er = ask(&rq, &an);
+	if ( er < E_OK ) {
+		tell("このディスクの形式は変えられません", "実身のディスク(TSFS)ではありません");
+		return;
+	}
+	p = ANS_TEXT;
+	snprintf(name, sizeof(name), "%s", field(&p));
+	snprintf(path, sizeof(path), "%s", field(&p));
+	form = (INT)an.how;
+	snprintf(b, sizeof(b), "convert %s is of version %d%s", path, form,
+		 ( an.flags & DT_F_DISK_SYS ) ? ", the system's" : "");
+	note(b);
+	if ( form >= 5 ) {
+		snprintf(b, sizeof(b), "ディスク「%s」は新しい形式です", name);
+		tell(b, NULL);
+		return;
+	}
+	if ( ( an.flags & DT_F_DISK_SYS ) != 0 ) {
+		tell("システムのディスクは、起動のときに新しい形式に変わります",
+		     "障害があるときは、ディスク修復で修復してから再起動してください");
+		return;
+	}
+	if ( panel_open(&w, PN_CONVERT, PW_CONVERT, PH_CONVERT) < E_OK ) return;
+	snprintf(b, sizeof(b), "ディスク「%s」(%s)を新しい形式に変えます。", name, path);
+	ui_set_text(&w, DK_HEAD, b);
+	ui_set_text(&w, DK_HEAD + 1, "変える前にディスク全体を検査し、障害があれば変えません。");
+	ui_set_text(&w, DK_HEAD + 2, "変えたあとは、R1.410までのシステムでは使えません。");
+	note("up convert");
+	go = (BOOL)( panel_run(&w) == B_OK );
+	if ( go ) {
+		er = ts_admin_ask("ディスクの形式の変換", &w.win);
+		snprintf(b, sizeof(b), "administrator %d", (INT)er);
+		note(b);
+		if ( er < E_OK ) {
+			panel_close(&w);
+			if ( er != E_ABORT ) ts_no_right("ディスクの形式を変換");
+			return;
+		}
+	}
+	panel_close(&w);
+	if ( !go ) {
+		note("convert cancelled");
+		return;
+	}
+	snprintf(b, sizeof(b), "ディスク「%s」を検査しています", name);
+	(void)wm_msg_put(b);
+	memset(&r, 0, sizeof(r));
+	er = ob_cnv_vol(path, 0, &r, NULL, 0, &told);
+	snprintf(b, sizeof(b), "convert answered %d: state %u, %d found, %d ms", (INT)er, (UINT)r.state,
+		 r.ck.problems, (INT)r.total_ms);
+	note(b);
+	if ( er == E_BUSY && r.ck.inuse ) {
+		snprintf(b, sizeof(b), "ディスク「%s」の実身が開いています", name);
+		tell(b, "閉じてから変えてください");
+	} else if ( er == E_BUSY ) {
+		tell("ディスク修復で検査中のため、形式を変えられません", "検査が終わってから変えてください");
+	} else if ( er == E_OACV ) {
+		ts_no_right("ディスクの形式を変換");
+	} else if ( r.state == TSFSCNV_S_DONE ) {
+		said("ディスク「", name, "」を新しい形式に変えました");
+	} else if ( r.state == TSFSCNV_S_NOTV4 ) {
+		snprintf(b, sizeof(b), "ディスク「%s」は新しい形式です", name);
+		tell(b, NULL);
+	} else if ( r.state == TSFSCNV_S_DAMAGE ) {
+		tell("ディスクに障害が見つかったので、形式を変えませんでした。",
+		     "ディスク修復で修復してから、もう一度変えてください。");
+	} else {
+		tell("ディスクの形式を変えられませんでした", "ディスクの読み書きに失敗しました");
+	}
+}
+
 /* ---------------------------------------------------------------- start */
 
 /* The channel the panels are told to, and the data box they come from */
@@ -606,6 +702,8 @@ int main( void )
 		do_create();
 	} else if ( strcmp((char *)a.code, "disk.grow") == 0 ) {
 		do_grow(t);
+	} else if ( strcmp((char *)a.code, "disk.convert") == 0 ) {
+		do_convert(t);
 	}
 	dq_free(&g_dq);
 	(void)ob_cls_obj(g_base.port);

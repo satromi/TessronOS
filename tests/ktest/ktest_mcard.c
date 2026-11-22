@@ -60,17 +60,18 @@ EXPORT INT mc_link_name( CONST UB *el, INT len, UB *out, INT max )
 	UB	*nm;
 	SZ	nl = 0, n;
 
-	if ( max <= 0 ) return 0;
-	out[0] = 0;
+	if ( max > 0 ) out[0] = 0;
 	if ( !ct_target(el, len, &u) ) return 0;
 	nm = knl_ob_name(&u, &nl, NULL);
 	if ( nm == NULL ) return 0;
-	/* what fits of the whole name, cut at a whole letter */
-	n = knl_utf8_fit(nm, nl, (SZ)( max - 1 ));
-	knl_memcpy(out, nm, n);
-	out[n] = 0;
+	/* what fits of the whole name, cut at a whole letter; the whole's length */
+	if ( max > 0 ) {
+		n = knl_utf8_fit(nm, nl, (SZ)( max - 1 ));
+		knl_memcpy(out, nm, n);
+		out[n] = 0;
+	}
 	Kfree(nm);
-	return (INT)n;
+	return (INT)nl;
 }
 
 EXPORT void mc_new_vobjid( char *out37 )
@@ -765,6 +766,70 @@ LOCAL void test_sort( void )
 	Kfree(db);
 }
 
+/*
+ * Links to objects whose names are longer than a buffer of a fixed size
+ * held (64 bytes) and differ only after their first 200 bytes: sorted and
+ * searched by the whole names, and the whole name read back
+ */
+LOCAL void test_link_long_names( void )
+{
+	static CONST char *CONST names[1] = { "写真" };
+	static CONST INT types[1] = { MC_T_LINK };
+	static CONST INT maxes[1] = { 20 };
+	MCDB	*db = Kmalloc(sizeof(MCDB));
+	UB	*nm = Kmalloc(400), *whole;
+	TS_UUID	u[2];
+	char	el[300], us[TS_UUID_STRLEN + 1];
+	INT	i, k, n, len;
+	MCCARD	*c;
+
+	KT_ASSERT(db != NULL && nm != NULL);
+	if ( db == NULL || nm == NULL ) {
+		if ( db != NULL ) Kfree(db);
+		if ( nm != NULL ) Kfree(nm);
+		return;
+	}
+	db_fields(db, names, types, maxes, 1);
+	for ( k = 0; k < 2; k++ ) {
+		/* 70 letters of 3 bytes alike, then one that tells them apart: 213 bytes */
+		for ( i = 0, n = 0; i < 70; i++ ) {
+			knl_memcpy(nm + n, "長", 3);
+			n += 3;
+		}
+		knl_memcpy(nm + n, ( k == 0 ) ? "前" : "後", 3);	/* 後 (JIS 3865) sorts before 前 (JIS 4130) */
+		n += 3;
+		nm[n] = 0;
+		KT_ASSERT_ER(om_cre_obj(NULL, nm, OM_BODY_DOC, &u[k]), E_OK);
+		(void)ts_uuid_to_str(&u[k], us, sizeof(us));
+		knl_strcpy(el, "<link id=\"");
+		knl_strcpy(el + s_len((CONST UB *)el), us);
+		knl_strcpy(el + s_len((CONST UB *)el), "_0.xtad\" vobjid=\"v\" vobjleft=\"0\" vobjtop=\"0\" "
+			   "vobjright=\"150\" vobjbottom=\"25\" chsz=\"14\"/>");
+		c = mc_card_new(db, db->n);
+		KT_ASSERT(c != NULL);
+		if ( c != NULL ) KT_ASSERT_ER(mc_set(db, c, 0, (CONST UB *)el, s_len((CONST UB *)el)), E_OK);
+	}
+	/* the whole name, longer than a buffer of 64 bytes */
+	whole = mc_link_name_all(val(db, 0, 0), mc_len(val(db, 0, 0)), &len);
+	KT_ASSERT(whole != NULL);
+	KT_ASSERT_EQ(len, 213);
+	KT_ASSERT_EQ(mc_link_name(val(db, 0, 0), mc_len(val(db, 0, 0)), NULL, 0), 213);
+	if ( whole != NULL ) mc_free(whole);
+	/* the first card links to the one ending in 前: sorted by the whole names, it goes after the other */
+	KT_ASSERT_ER(mc_sort(db, 0, FALSE), E_OK);
+	whole = mc_link_name_all(val(db, 0, 0), mc_len(val(db, 0, 0)), &len);
+	KT_ASSERT(whole != NULL && len == 213 && whole[210] == (UB)"後"[0] && whole[211] == (UB)"後"[1] && whole[212] == (UB)"後"[2]);
+	if ( whole != NULL ) mc_free(whole);
+	/* a search for the end of a name finds the card */
+	KT_ASSERT_EQ(find1(db, 0, "*後", MC_S_NEW), 1);
+	mc_search_off(db);
+	mc_clear(db);
+	Kfree(db);
+	Kfree(nm);
+	(void)om_store_delete(&u[0]);
+	(void)om_store_delete(&u[1]);
+}
+
 /* ---------------------------------------------------------------- out and in */
 
 LOCAL void test_out_in( void )
@@ -908,7 +973,7 @@ LOCAL void test_merge( void )
 	if ( db == NULL || t == NULL || work == NULL ) return;
 	people(db);
 	knl_memset(&mi, 0, sizeof(mi));
-	knl_strcpy((char *)mi.name, "名簿");
+	mi.name = (UB *)"名簿";
 	mi.y = 1995;
 	mi.m = 8;
 	mi.d = 9;
@@ -1063,6 +1128,7 @@ EXPORT void ktest_mcard( void )
 	KT_RUN(test_search);
 	KT_RUN(test_marks);
 	KT_RUN(test_sort);
+	KT_RUN(test_link_long_names);
 	KT_RUN(test_out_in);
 	KT_RUN(test_merge);
 	KT_RUN_SCREEN(test_program);

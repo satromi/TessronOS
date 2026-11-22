@@ -1277,26 +1277,21 @@ static void let_go( void )
  */
 static void base_out( void );
 
-static void carry_out_v( BOOL twice, T_VOBJ *pv );
-
-/* The links taken carried out, read one at a time into a T_VOBJ of its own */
-static void carry_out( BOOL twice )
+/* Whether shape i is a link that goes when the links taken are carried out, and where it is drawn */
+static BOOL goes_out( INT i, T_DPRECT *b )
 {
-	T_VOBJ	v = { .recno = 0 };
-
-	tad_vobj_init(&v);
-	carry_out_v(twice, &v);
-	tad_vobj_clear(&v);
+	return (BOOL)( g_pick[i] != 0 && fg_is_link(i) && !is_protected(i) && shape_box(i, b) );
 }
 
-static void carry_out_v( BOOL twice, T_VOBJ *pv )
+static void carry_out( BOOL twice )
 {
-	T_DTREQ		rq;
-	T_DTANS		an;
+	T_TVVOP		h = *fg_vop();
+	T_TVCARRY	r;
 	T_DPRECT	o, b;
-	INT		i, k, n = 0, last = -1, done = 0, px = hold_x0, py = hold_y0;
-	BOOL		copy, given;
-	UINT		seq;
+	T_VOBJ		*v;
+	T_TVLINK	*l;
+	BOOL		*placed;
+	INT		*at, i, n = 0, k = 0;
 	ER		er;
 	char		s[FG_LOG];
 
@@ -1307,61 +1302,45 @@ static void carry_out_v( BOOL twice, T_VOBJ *pv )
 	}
 	/* out of the 小物箱: the accessory pressed copied there, as a 実身複製 of it; the list keeps it */
 	if ( FG_ACCBOX ) twice = TRUE;
-	memset(&o, 0, sizeof(o));
 	if ( twice ) {
 		/* the one pressed, alone */
 		fg_pick_none();
 		if ( hold_which >= 0 ) pick_add(hold_which);
 	}
-	for ( i = 0; g_fig != NULL && i < g_fig->nsh; i++ ) {
-		if ( g_pick[i] == 0 || !fg_is_link(i) || is_protected(i) || !shape_box(i, &b) ) continue;
-		if ( n == 0 ) o = b;
-		grow(&o, &b);
-		last = i;
-		n++;
-	}
+	for ( i = 0; g_fig != NULL && i < g_fig->nsh; i++ ) if ( goes_out(i, &b) ) n++;
 	if ( n == 0 ) return;
-	if ( n == 1 && tad_lnk_get(g_rec, g_fig->sh[last].link, pv) >= E_OK ) {
-		fg_ask_of(pv, DT_RQ_CARRY, &rq);
-	} else {
-		memset(&rq, 0, sizeof(rq));
-		rq.req = DT_RQ_CARRY;
-		rq.look.frcol = rq.look.chcol = rq.look.tbcol = rq.look.bgcol = 0xFFFFFFFFU;
+	v = calloc((size_t)n, sizeof(T_VOBJ));		/* zeroed: each link empty */
+	l = calloc((size_t)n, sizeof(T_TVLINK));
+	placed = calloc((size_t)n, sizeof(BOOL));
+	at = calloc((size_t)n, sizeof(INT));
+	if ( v == NULL || l == NULL || placed == NULL || at == NULL ) {
+		say("メモリが足りないため、この操作をできませんでした");
+		n = 0;
 	}
-	rq.flags |= DT_F_TO_PROG;
-	rq.look.w = o.right - o.left;
-	rq.look.h = o.bottom - o.top;
-	rq.grab_x = px - o.left;
-	rq.grab_y = py - o.top;
-	memset(&an, 0, sizeof(an));
-	er = ask_desktop(&rq, &an, 30 * 60 * 1000);
+	memset(&o, 0, sizeof(o));
+	for ( i = 0; k < n && i < g_fig->nsh; i++ ) {
+		if ( !goes_out(i, &b) || tad_lnk_get(g_rec, g_fig->sh[i].link, &v[k]) < E_OK ) continue;
+		fg_tvlink(&l[k], &v[k], &b);
+		if ( k == 0 ) o = b;
+		grow(&o, &b);
+		at[k++] = i;
+	}
+	/* out of a tool's list: put there as a copy, for the list is the store's as it is */
+	if ( hold_copy || FG_TOOL ) h.flags |= TV_VOP_F_COPY;
+	er = ( k > 0 ) ? tv_vop_carry_out(&h, l, k, &o, hold_x0, hold_y0, twice, placed, &r) : E_NOEXS;
 	if ( er < E_OK ) {
 		snprintf(s, sizeof(s), "carried nowhere (%d)", (INT)er);
 		note(s);
-		g_dirty = TRUE;
-		return;
+	} else {
+		/* what was not put there stays here, and is not taken away */
+		for ( i = 0; i < k; i++ ) if ( !placed[i] ) g_pick[at[i]] = 0;
 	}
-	seq = rq.seq;
-	/* out of a tool's list: put there as a copy, for the list is the store's as it is */
-	copy = (BOOL)( an.how == DT_HOW_COPY || hold_copy || FG_TOOL );
-	given = (BOOL)( ( an.flags & DT_F_TO_PROG ) != 0 );
-	for ( i = 0, k = 0; g_fig != NULL && i < g_fig->nsh; i++ ) {
-		if ( g_pick[i] == 0 || !fg_is_link(i) || is_protected(i) || !shape_box(i, &b)
-		  || tad_lnk_get(g_rec, g_fig->sh[i].link, pv) < E_OK ) continue;
-		fg_ask_of(pv, ( ++k < n ) ? DT_RQ_PLACE_MORE : DT_RQ_PLACE, &rq);
-		rq.grab_x = b.left - o.left;
-		rq.grab_y = b.top - o.top;
-		rq.carry = seq;
-		if ( twice ) rq.flags |= DT_F_DUPLICATE;
-		memset(&an, 0, sizeof(an));
-		er = ask_desktop(&rq, &an, 10 * 60 * 1000);
-		snprintf(s, sizeof(s), "carried %s (%d)%s", fg_link_name(pv), (INT)er,
-			 twice ? " as a new object" : copy ? " as a copy" : "");
-		note(s);
-		if ( er >= E_OK ) done++;
-		else g_pick[i] = 0;		/* not put there: it stays here, and is not taken away */
-	}
-	if ( done > 0 && !twice && !copy ) {
+	for ( i = 0; v != NULL && i < n; i++ ) tad_vobj_clear(&v[i]);
+	free(v);
+	free(l);
+	free(placed);
+	free(at);
+	if ( er >= E_OK && r.moved ) {
 		/* what was put there leaves the figure; the shapes that are not links stay */
 		for ( i = 0; g_fig != NULL && i < g_fig->nsh; i++ ) {
 			if ( g_pick[i] != 0 && !fg_is_link(i) ) g_pick[i] = 0;
@@ -1370,11 +1349,6 @@ static void carry_out_v( BOOL twice, T_VOBJ *pv )
 		for ( i = 0; g_fig != NULL && i < g_fig->nsh; i++ ) if ( g_pick[i] != 0 ) g_npick++;
 		fg_sync();
 		fg_delete();
-		snprintf(s, sizeof(s), "%d個の仮身を移動しました", done);
-		say(s);
-	} else if ( done > 0 && !given ) {
-		snprintf(s, sizeof(s), "%d個の仮身を%s", done, twice ? "実身複製しました" : "複写しました");
-		say(s);
 	}
 	g_dirty = TRUE;
 }
@@ -1392,6 +1366,7 @@ static void base_out( void )
 	T_DTANS		an;
 	T_DPRECT	b;
 	T_VOBJ		v = { .recno = 0 };
+	T_TVLINK	l;
 	ER		er;
 	char		s[FG_LOG];
 
@@ -1401,7 +1376,8 @@ static void base_out( void )
 		tad_vobj_clear(&v);
 		return;
 	}
-	fg_ask_of(&v, DT_RQ_CARRY, &rq);
+	fg_tvlink(&l, &v, &b);
+	tv_vop_req(fg_vop(), &l, DT_RQ_CARRY, &rq);
 	rq.flags |= DT_F_BASE | DT_F_TO_PROG;
 	rq.look.w = b.right - b.left;
 	rq.look.h = b.bottom - b.top;
@@ -1473,12 +1449,14 @@ void fg_left( void )
  */
 static void dup_here( void )
 {
-	T_DTREQ	rq;
-	T_DTANS	an;
-	ER	er;
-	char	s[FG_LOG];
+	T_DTREQ		rq;
+	T_DTANS		an;
+	T_TVLINK	l;
+	ER		er;
+	char		s[FG_LOG];
 
-	fg_ask_of(&hold_v, DT_RQ_DUPLICATE, &rq);
+	fg_tvlink(&l, &hold_v, NULL);
+	tv_vop_req(fg_vop(), &l, DT_RQ_DUPLICATE, &rq);
 	memset(&an, 0, sizeof(an));
 	er = ask_desktop(&rq, &an, 30 * 60 * 1000);
 	if ( er >= E_OK ) fg_link_copy_put(&hold_v, &an.into, unz(hold_dx), unz(hold_dy));

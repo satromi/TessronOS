@@ -33,6 +33,7 @@
 #include <sys/machine.h>
 #include "kernel.h"
 #include <tk/tkernel.h>
+#include <tm/tmonitor.h>
 #include <ts/ob.h>
 #include <ts/part.h>
 #include <ts/dbox.h>
@@ -60,12 +61,18 @@
 /* An item's own marks, besides its state (MN_GREY, MN_TICK, MN_HIDE) */
 #define MN_LINE		0x0100		/* a line between groups */
 #define MN_LIST_HOLE	0x0200		/* where the program's list goes */
+#define MN_DECIDED	0x0400		/* its state was set by a program (mn_chg_atr, mn_chg_idx) */
 
+/*
+ * An item: its code (never longer than T_MNSEL holds, mn.h), and its
+ * words and keys as long as they are, allocated and the item's own (NULL
+ * for none).
+ */
 typedef struct {
 	TS_UUID	def;
 	UB	code[MN_CODE_MAX];
-	UB	label[WM_LABEL_MAX];
-	UB	key[WM_KEY_MAX];
+	UB	*label;
+	UB	*key;
 	INT	sub;			/* the node it opens, or -1 */
 	UINT	atr;
 	INT	index;
@@ -243,23 +250,65 @@ EXPORT void knl_mn_reap( BOOL (*gone)( ID pid ) )
 	}
 }
 
-LOCAL INT str_cpy( UB *dst, INT max, CONST UB *src )
-{
-	INT	i;
-
-	for ( i = 0; src[i] != 0 && i < max - 1; i++ ) {
-		dst[i] = src[i];
-	}
-	dst[i] = 0;
-	return i;
-}
-
 LOCAL BOOL str_same( CONST UB *a, CONST char *b )
 {
 	INT	i;
 
 	for ( i = 0; a[i] != 0 && a[i] == (UB)b[i]; i++ ) ;
 	return (BOOL)( a[i] == (UB)b[i] );
+}
+
+LOCAL INT str_len( CONST UB *s )
+{
+	INT	n = 0;
+
+	while ( s != NULL && s[n] != 0 ) n++;
+	return n;
+}
+
+/* n bytes of s and a nought, allocated: NULL for none (n 0) or no memory */
+LOCAL UB *str_dup( CONST UB *s, INT n, BOOL *p_nomem )
+{
+	UB	*d;
+
+	if ( n <= 0 ) {
+		return NULL;
+	}
+	d = (UB *)Kmalloc((SZ)n + 1);
+	if ( d == NULL ) {
+		*p_nomem = TRUE;
+		return NULL;
+	}
+	knl_memcpy(d, s, (SZ)n);
+	d[n] = 0;
+	return d;
+}
+
+/* A copy of s into max bytes, cut at a letter's end: the bytes copied */
+LOCAL INT str_cut( UB *dst, INT max, CONST UB *src )
+{
+	INT	n = str_len(src);
+
+	if ( n > max - 1 ) {
+		n = max - 1;
+		while ( n > 0 && ( src[n] & 0xC0 ) == 0x80 ) n--;
+	}
+	knl_memcpy(dst, src, (SZ)n);
+	dst[n] = 0;
+	return n;
+}
+
+LOCAL CONST UB	mn_none[1] = { 0 };
+
+#define ITEM_LABEL(e)	( ( (e)->label != NULL ) ? (CONST UB *)(e)->label : mn_none )
+#define ITEM_KEY(e)	( ( (e)->key != NULL ) ? (CONST UB *)(e)->key : mn_none )
+
+LOCAL void item_free( MNITEM *e )
+{
+	if ( e->label != NULL ) Kfree(e->label);
+	if ( e->key != NULL ) Kfree(e->key);
+	e->label = NULL;
+	e->key = NULL;
 }
 
 /* ---------------------------------------------------------------- reading */
@@ -293,15 +342,12 @@ LOCAL BOOL link_in( CONST T_TADNODE *nd, TS_UUID *p_uuid )
 	return FALSE;
 }
 
-/* An attribute copied out, or an empty string */
-LOCAL void attr_of( CONST T_TADNODE *nd, CONST char *name, UB *out, INT max )
+/* An attribute, whole and allocated: NULL when it is empty or not there */
+LOCAL UB *attr_dup( CONST T_TADNODE *nd, CONST char *name, BOOL *p_nomem )
 {
 	CONST UB *v = tad_attr(nd, name);
 
-	out[0] = 0;
-	if ( v != NULL ) {
-		(void)str_cpy(out, max, v);
-	}
+	return ( v != NULL ) ? str_dup(v, str_len(v), p_nomem) : NULL;
 }
 
 LOCAL BOOL attr_true( CONST T_TADNODE *nd, CONST char *name )
@@ -330,18 +376,36 @@ LOCAL D attr_num( CONST T_TADNODE *nd, CONST char *name )
 	return neg ? -x : x;
 }
 
-/* The words of an item: its text, the <link> in it left out */
-LOCAL void label_of( CONST T_TADNODE *nd, UB *out, INT max )
+/* The words of an item: its text, the <link> in it left out, whole and allocated (NULL none) */
+LOCAL UB *label_of( CONST T_TADNODE *nd, BOOL *p_nomem )
 {
 	CONST T_TADNODE	*c;
-	INT		n = 0;
+	INT		n = 0, k;
+	UB		*out;
 
-	for ( c = nd->first; c != NULL && n < max - 1; c = c->next ) {
+	for ( c = nd->first; c != NULL; c = c->next ) {
 		if ( c->kind == TAD_ND_TEXT && c->text != NULL ) {
-			n += str_cpy(out + n, max - n, c->text);
+			n += str_len(c->text);
+		}
+	}
+	if ( n == 0 ) {
+		return NULL;
+	}
+	out = (UB *)Kmalloc((SZ)n + 1);
+	if ( out == NULL ) {
+		*p_nomem = TRUE;
+		return NULL;
+	}
+	n = 0;
+	for ( c = nd->first; c != NULL; c = c->next ) {
+		if ( c->kind == TAD_ND_TEXT && c->text != NULL ) {
+			k = str_len(c->text);
+			knl_memcpy(out + n, c->text, (SZ)k);
+			n += k;
 		}
 	}
 	out[n] = 0;
+	return out;
 }
 
 /* Room for want items in a list: FALSE for no memory, or more than a command holds */
@@ -373,6 +437,11 @@ LOCAL BOOL node_room( MNNODE *n, INT want )
 
 LOCAL void node_free( MNNODE *n )
 {
+	INT	i;
+
+	for ( i = 0; n->item != NULL && i < n->nitem; i++ ) {
+		item_free(&n->item[i]);
+	}
 	if ( n->item != NULL ) Kfree(n->item);
 	Kfree(n);
 }
@@ -439,13 +508,35 @@ LOCAL ER read_item( MNMENU *m, INT k, CONST TS_UUID *def, CONST T_TADNODE *it,
 		e->atr = MN_LINE;
 		return E_OK;
 	}
-	attr_of(it, "code", e->code, MN_CODE_MAX);
+	{
+		/* a code is compared whole, and a process is given it whole: one longer than that holds is a fault */
+		CONST UB *c = tad_attr(it, "code");
+		INT	cn = str_len(c);
+
+		if ( cn >= MN_CODE_MAX ) {
+			n->nitem--;
+			tm_printf((UB *)"mn: a code of %d bytes is longer than an item's code may be (%d): the menu is not made\n",
+				  cn, MN_CODE_MAX - 1);
+			return E_OBJ;
+		}
+		if ( cn > 0 ) knl_memcpy(e->code, c, (SZ)cn);
+		e->code[cn] = 0;
+	}
 	if ( name_is(it, "list") ) {
 		e->atr = MN_LIST_HOLE | MN_HIDE;
 		return E_OK;
 	}
-	label_of(it, e->label, WM_LABEL_MAX);
-	attr_of(it, "key", e->key, WM_KEY_MAX);
+	{
+		BOOL	nomem = FALSE;
+
+		e->label = label_of(it, &nomem);
+		e->key = attr_dup(it, "key", &nomem);
+		if ( nomem ) {
+			item_free(e);
+			n->nitem--;
+			return E_NOMEM;
+		}
+	}
 	e->value = attr_num(it, "value");
 	if ( attr_true(it, "grey") ) e->atr |= MN_GREY;
 	if ( attr_true(it, "tick") ) e->atr |= MN_TICK;
@@ -570,7 +661,7 @@ EXPORT INT mn_chg_atr( ID mid, CONST TS_UUID *def, CONST char *code, UINT atr )
 
 			if ( item_is(e, def, code) && ( e->atr & MN_LIST_HOLE ) == 0 ) {
 				e->atr = ( e->atr & ~( MN_GREY | MN_TICK | MN_HIDE ) )
-				       | ( atr & ( MN_GREY | MN_TICK | MN_HIDE ) );
+				       | ( atr & ( MN_GREY | MN_TICK | MN_HIDE ) ) | MN_DECIDED;
 				n++;
 			}
 		}
@@ -601,6 +692,29 @@ EXPORT INT mn_get_atr( ID mid, CONST TS_UUID *def, CONST char *code )
 	return E_NOEXS;
 }
 
+EXPORT INT mn_atr_decided( ID mid, CONST TS_UUID *def, CONST char *code )
+{
+	MNMENU	*m = menu_of(mid);
+	INT	k, i;
+
+	if ( m == NULL ) {
+		return E_ID;
+	}
+	if ( code == NULL ) {
+		return E_PAR;
+	}
+	for ( k = 0; k < m->nnode; k++ ) {
+		for ( i = 0; i < m->node[k]->nitem; i++ ) {
+			MNITEM	*e = &m->node[k]->item[i];
+
+			if ( item_is(e, def, code) && ( e->atr & MN_LIST_HOLE ) == 0 ) {
+				return (INT)( ( e->atr & MN_DECIDED ) != 0 );
+			}
+		}
+	}
+	return E_NOEXS;
+}
+
 EXPORT ER mn_chg_idx( ID mid, CONST TS_UUID *def, CONST char *code, INT index,
 		      UINT atr )
 {
@@ -620,7 +734,7 @@ EXPORT ER mn_chg_idx( ID mid, CONST TS_UUID *def, CONST char *code, INT index,
 			if ( item_is(e, def, code) && ( e->atr & MN_LIST_HOLE ) == 0
 			  && e->index == index ) {
 				e->atr = ( e->atr & ~( MN_GREY | MN_TICK | MN_HIDE ) )
-				       | ( atr & ( MN_GREY | MN_TICK | MN_HIDE ) );
+				       | ( atr & ( MN_GREY | MN_TICK | MN_HIDE ) ) | MN_DECIDED;
 				return E_OK;
 			}
 		}
@@ -634,12 +748,15 @@ EXPORT ER mn_set_lst( ID mid, CONST TS_UUID *def, CONST char *code,
 	MNMENU	*m = menu_of(mid);
 	MNNODE	*nd;
 	MNITEM	hole;
-	INT	k, i, j, at = -1;
+	UB	**ls = NULL;
+	CONST UB *l;
+	BOOL	nomem = FALSE;
+	INT	k, i, j, at = -1, len;
 
 	if ( m == NULL ) {
 		return E_ID;
 	}
-	if ( code == NULL || n < 0 || ( n > 0 && ( labels == NULL || stride <= 0 ) ) ) {
+	if ( code == NULL || n < 0 || ( n > 0 && ( labels == NULL || stride < 0 ) ) ) {
 		return E_PAR;
 	}
 	for ( k = 0; k < m->nnode && at < 0; k++ ) {
@@ -657,9 +774,29 @@ EXPORT ER mn_set_lst( ID mid, CONST TS_UUID *def, CONST char *code,
 	}
 	nd = m->node[--k];
 	hole = nd->item[at];
-	if ( !node_room(nd, nd->nitem - 1 + n) ) {
+	/* the labels whole, each the item's own, made before anything moves */
+	if ( n > 0 ) {
+		ls = (UB **)Kcalloc((SZ)n, sizeof(UB *));
+		if ( ls == NULL ) {
+			return E_NOMEM;
+		}
+		for ( j = 0, l = labels; j < n && !nomem; j++ ) {
+			if ( stride > 0 ) {
+				l = labels + (SZ)j * stride;
+				for ( len = 0; len < stride && l[len] != 0; len++ ) ;
+			} else {
+				len = str_len(l);
+			}
+			ls[j] = str_dup(l, len, &nomem);
+			if ( stride == 0 ) l += len + 1;
+		}
+	}
+	if ( nomem || !node_room(nd, nd->nitem - 1 + n) ) {
+		for ( j = 0; j < n; j++ ) if ( ls[j] != NULL ) Kfree(ls[j]);
+		if ( ls != NULL ) Kfree(ls);
 		return E_NOMEM;
 	}
+	item_free(&nd->item[at]);		/* the hole's: it goes */
 	/*
 	 * The items after the hole move to make room, the hole goes: from the
 	 * far end when they move on, from the near end when an empty list
@@ -679,9 +816,11 @@ EXPORT ER mn_set_lst( ID mid, CONST TS_UUID *def, CONST char *code,
 		*e = hole;
 		e->atr &= ~( MN_LIST_HOLE | MN_HIDE );
 		e->index = j;
-		(void)str_cpy(e->label, WM_LABEL_MAX, labels + j * stride);
+		e->label = ls[j];
+		e->key = NULL;
 	}
 	nd->nitem += n - 1;
+	if ( ls != NULL ) Kfree(ls);
 
 	return E_OK;
 }
@@ -708,24 +847,54 @@ LOCAL BOOL node_live( MNMENU *m, INT k, INT depth )
 }
 
 /*
- * Node k as the window layer's list, in a T_WMMENU of its own as large
- * as the node needs (free it); rows, when given, gets each item's row
+ * Words put in an item: in its field when they fit, and otherwise whole
+ * after the items (at *p_at of the menu's bytes, moved on past them),
+ * the field keeping their head
  */
-LOCAL T_WMMENU *node_list( MNMENU *m, ID mid, INT k, INT *rows )
+LOCAL void item_words( T_WMMENU *w, UB *field, INT fmax, UINT *p_off, CONST UB *s, SZ *p_at )
+{
+	INT	n = str_len(s);
+
+	(void)str_cut(field, fmax, s);
+	*p_off = 0;
+	if ( n >= fmax ) {
+		knl_memcpy((UB *)w + *p_at, s, (SZ)n + 1);
+		*p_off = (UINT)*p_at;
+		*p_at += (SZ)n + 1;
+	}
+}
+
+/*
+ * Node k as the window layer's list, in a T_WMMENU of its own as large
+ * as the node needs (free it), its bytes in *p_size; rows, when given,
+ * gets each item's row
+ */
+LOCAL T_WMMENU *node_list( MNMENU *m, ID mid, INT k, INT *rows, SZ *p_size )
 {
 	MNNODE		*n = m->node[k];
 	T_WMMENU	*w;
-	INT		i;
+	INT		i, ln, kn;
 	BOOL		prev_line = TRUE;
+	SZ		size = WM_MENU_SIZE(n->nitem), at;
 
 	for ( i = 0; rows != NULL && i < n->nitem; i++ ) {
 		rows[i] = -1;
 	}
-
-	w = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(n->nitem));
+	/* the words that do not fit their fields, after the items */
+	for ( i = 0; i < n->nitem; i++ ) {
+		ln = str_len(n->item[i].label);
+		kn = str_len(n->item[i].key);
+		if ( ln >= WM_LABEL_MAX ) size += (SZ)ln + 1;
+		if ( kn >= WM_KEY_MAX ) size += (SZ)kn + 1;
+	}
+	if ( size > (SZ)0x7FFFFFFF ) {
+		return NULL;
+	}
+	w = (T_WMMENU *)Kcalloc(1, size);
 	if ( w == NULL ) {
 		return NULL;
 	}
+	at = WM_MENU_SIZE(n->nitem);
 	w->num = MN_LIST(mid - 1, k);
 	w->owner = 0;
 	for ( i = 0; i < n->nitem; i++ ) {
@@ -747,8 +916,8 @@ LOCAL T_WMMENU *node_list( MNMENU *m, ID mid, INT k, INT *rows )
 			continue;			/* a line: command 0, no words */
 		}
 		it->cmd = MN_CMD(k, i);
-		(void)str_cpy(it->label, WM_LABEL_MAX, e->label);
-		(void)str_cpy(it->key, WM_KEY_MAX, e->key);
+		item_words(w, it->label, WM_LABEL_MAX, &it->llabel, ITEM_LABEL(e), &at);
+		item_words(w, it->key, WM_KEY_MAX, &it->lkey, ITEM_KEY(e), &at);
 		it->grey = (BOOL)( ( e->atr & MN_GREY ) != 0 );
 		it->tick = (BOOL)( ( e->atr & MN_TICK ) != 0 );
 		if ( e->sub >= 0 ) {
@@ -759,9 +928,10 @@ LOCAL T_WMMENU *node_list( MNMENU *m, ID mid, INT k, INT *rows )
 			}
 		}
 	}
-	if ( w->nitem > 0 && w->item[w->nitem - 1].label[0] == 0 ) {
+	if ( w->nitem > 0 && w->item[w->nitem - 1].cmd == 0 ) {
 		w->nitem--;				/* no line at the foot */
 	}
+	*p_size = size;
 	return w;
 }
 
@@ -804,13 +974,14 @@ EXPORT INT mn_opn_men( ID mid, INT wid, INT x, INT y )
 	MNLAST		*l;
 	INT		k, pid;
 	ER		er = E_OK;
+	SZ		size = 0;
 
 	if ( m == NULL ) {
 		return E_ID;
 	}
 	for ( k = 1; k < m->nnode && er >= E_OK; k++ ) {
-		w = node_list(m, mid, k, NULL);
-		er = ( w == NULL ) ? E_NOMEM : db_put(DB_MENU, w->num, 0, w, WM_MENU_SIZE(w->nitem));
+		w = node_list(m, mid, k, NULL, &size);
+		er = ( w == NULL ) ? E_NOMEM : db_put(DB_MENU, w->num, 0, w, size);
 		if ( w != NULL ) Kfree(w);
 	}
 	if ( er < E_OK ) {
@@ -827,7 +998,7 @@ EXPORT INT mn_opn_men( ID mid, INT wid, INT x, INT y )
 		m->row = r;
 		m->nrow = m->node[0]->nitem;
 	}
-	w = node_list(m, mid, 0, m->row);
+	w = node_list(m, mid, 0, m->row, &size);
 	if ( w == NULL ) {
 		return E_NOMEM;
 	}
@@ -850,8 +1021,8 @@ LOCAL ER sel_of( MNMENU *m, INT k, INT i, T_MNSEL *sel )
 	}
 	e = &m->node[k]->item[i];
 	sel->def = e->def;
-	(void)str_cpy(sel->code, MN_CODE_MAX, e->code);
-	(void)str_cpy(sel->label, WM_LABEL_MAX, e->label);
+	(void)str_cut(sel->code, MN_CODE_MAX, e->code);		/* whole: no longer code is read */
+	(void)str_cut(sel->label, WM_LABEL_MAX, ITEM_LABEL(e));
 	sel->index = e->index;
 	sel->value = e->value;
 
@@ -918,7 +1089,7 @@ EXPORT ER mn_fnd_key( ID mid, UB key, T_MNSEL *sel )
 		for ( i = 0; i < m->node[k]->nitem; i++ ) {
 			MNITEM	*e = &m->node[k]->item[i];
 
-			if ( e->key[0] == key && e->key[1] == 0
+			if ( e->key != NULL && e->key[0] == key && e->key[1] == 0
 			  && ( e->atr & ( MN_GREY | MN_HIDE | MN_LINE ) ) == 0 ) {
 				return sel_of(m, k, i, sel);
 			}
@@ -951,9 +1122,11 @@ LOCAL BOOL winlist_def( TS_UUID *u )
 
 EXPORT void mn_winlist_fill( ID mid )
 {
-	UB	(*names)[WM_LABEL_MAX];
+	UB	*names, *t;
+	char	probe[1];
 	TS_UUID	wd;
-	INT	i, k;
+	INT	i, k, n;
+	SZ	size = 0, at = 0;
 	CONST char *none = "（名前のないウインドウ）";
 
 	if ( !winlist_def(&wd) ) return;
@@ -970,15 +1143,25 @@ EXPORT void mn_winlist_fill( ID mid )
 		mn_wins_cap = cap;
 	}
 	if ( mn_nwin > mn_wins_cap ) mn_nwin = mn_wins_cap;
-	names = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * (SZ)( mn_nwin + 1 ));
+	/* the titles whole, one after another: how long each is asked first (wm_title answers its length) */
+	for ( i = 0; i < mn_nwin; i++ ) {
+		n = wm_title(mn_wins[i], probe, 1);
+		size += (SZ)( ( n > 0 ) ? n : str_len((CONST UB *)none) ) + 1;
+	}
+	names = (UB *)Kmalloc(size + 1);
 	if ( names == NULL ) return;
 	for ( i = 0; i < mn_nwin; i++ ) {
-		if ( wm_title(mn_wins[i], (char *)names[i], WM_LABEL_MAX) <= 0 ) {
-			for ( k = 0; none[k] != 0 && k < WM_LABEL_MAX - 1; k++ ) names[i][k] = (UB)none[k];
-			names[i][k] = 0;
+		t = names + at;
+		n = wm_title(mn_wins[i], probe, 1);
+		if ( n <= 0 || at + n + 1 > size || wm_title(mn_wins[i], (char *)t, n + 1) != n ) {
+			n = str_len((CONST UB *)none);
+			if ( at + n + 1 > size ) n = 0;
+			for ( k = 0; k < n; k++ ) t[k] = (UB)none[k];
 		}
+		t[n] = 0;
+		at += (SZ)n + 1;
 	}
-	(void)mn_set_lst(mid, &wd, "win.item", (CONST UB *)names, WM_LABEL_MAX, mn_nwin);
+	(void)mn_set_lst(mid, &wd, "win.item", names, 0, mn_nwin);
 	Kfree(names);
 }
 

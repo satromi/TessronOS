@@ -401,7 +401,7 @@ LOCAL void test_igt_layout( void )
 	KT_ASSERT(pg != NULL);
 	if ( pg == NULL ) return;
 	for ( eng = 0; eng < IGT_NENG; eng++ ) {
-		UW	b = ( eng == IGT_RCS ) ? RCS_BASE : BCS_BASE;
+		UW	b = ( eng == IGT_RCS ) ? RCS_BASE : ( eng == IGT_VCS ) ? VCS_BASE : BCS_BASE;
 
 		igt_test_layout(eng, pg);
 		KT_ASSERT_EQ(pg[0], MI_NOOP);
@@ -441,6 +441,8 @@ LOCAL INT cmd_len( UW dw )
 		switch ( ( dw >> 23 ) & 0x3f ) {
 		case 0x00: case 0x02: case 0x05: case 0x08: case 0x0a:
 			return 1;
+		case 0x26:			/* MI_FLUSH_DW: its length in bits 5:0, flags above (the video engine's bit 7) */
+			return (INT)( dw & 0x3f ) + 2;
 		default:
 			return (INT)( dw & 0xff ) + 2;
 		}
@@ -460,7 +462,7 @@ LOCAL void test_igt_emit( void )
 		for ( first = 0; first < 2; first++ ) {
 			UW	from = IGT_RING_BYTES - 40, tail, seq, n, i, k;
 			UD	start = ( first == 0 ) ? 0x0000123456789000ULL : 0;
-			INT	bbs = 0, seqw = 0, lri_regs = 0, last = -1;
+			INT	bbs = 0, seqw = 0, lri_regs = 0, last = -1, bsd = 0;
 
 			knl_memset(ring, 0xee, IGT_RING_BYTES);
 			tail = igt_test_emit(eng, (BOOL)first, start, ring, from, 0x10000000, &seq);
@@ -476,6 +478,7 @@ LOCAL void test_igt_emit( void )
 				UW	c = cmd[i];
 
 				last = (INT)i;
+				if ( ( c >> 23 ) == 0x26 && ( c & FLUSH_DW_INVALIDATE_BSD ) ) bsd++;
 				if ( ( c >> 23 ) == 0x31 ) {
 					bbs++;
 					KT_ASSERT_EQ(c, MI_BATCH_BUFFER_START | MI_BATCH_PPGTT);
@@ -506,6 +509,7 @@ LOCAL void test_igt_emit( void )
 			KT_ASSERT_EQ(i, n);					/* the lengths add up to the tail */
 			KT_ASSERT_EQ(bbs, ( start != 0 ) ? 1 : 0);
 			KT_ASSERT_EQ(seqw, 1);
+			KT_ASSERT_EQ(bsd, ( eng == IGT_VCS ) ? 1 : 0);	/* the video engine invalidates its caches with the TLB */
 			if ( eng == IGT_RCS ) {
 				KT_ASSERT_EQ(lri_regs, 3 + ( first ? 10 : 0 ));	/* the context's and the workarounds' */
 			} else {
@@ -1491,6 +1495,94 @@ LOCAL void test_igt12_fmt( void )
 }
 #endif /* IGT12 */
 
+/* ---------------------------------------------------------------- the H.264 decoder (igt_vdec.c) */
+
+#include "../../../device/gpu/intel/igt_vtest.h"
+
+IMPORT UD igt_vdec_test_ytile( UW pitch, UW x, UW y );
+IMPORT ER igt_vdec_test_read( UB *surf, UW w, UW h, D off, void *buf, SZ size, SZ *p_asize );
+IMPORT ER igt_vdec_test_check( CONST T_H264JOB *j, SZ size, UW w, UW h, UW nslots );
+
+/*
+ * The check's jobs as the decoder takes them, what it refuses, and a
+ * slot's picture untiled: a surface laid by hand from the samples in
+ * Y tiles reads back as the NV12 of them, from any offset
+ */
+LOCAL void test_igt_vdec( void )
+{
+	UW	w = IGT_VTEST_W, h = IGT_VTEST_H, pitch = 256, uv = 64, k, x, y;
+	SZ	max = 64 * 1024, len, got;
+	UB	*buf = (UB *)Kmalloc(max), *surf = (UB *)Kmalloc(pitch * ( uv + 32 )), *nv = (UB *)Kmalloc(w * h * 3 / 2);
+	T_H264JOB *j = (T_H264JOB *)buf;
+	UD	i, bad = 0;
+
+	KT_ASSERT(buf != NULL && surf != NULL && nv != NULL);
+	if ( buf == NULL || surf == NULL || nv == NULL ) goto out;
+	for ( k = 0; k < IGT_VTEST_PICS; k++ ) {
+		len = igt_vtest_job(buf, max, k, k, ( k + 2 ) % 3);
+		KT_ASSERT(len > (SZ)sizeof(T_H264JOB));
+		KT_ASSERT_EQ(igt_vdec_test_check(j, len, w, h, 3), E_OK);
+		KT_ASSERT_EQ(j->nslice, ( k == 0 ) ? 2U : 1U);
+		KT_ASSERT_EQ(j->ndpb, ( k == 0 ) ? 0U : 1U);
+	}
+	/* what it refuses: a size not the job's, a slot past the slots, interlaced, a slice past the bytes */
+	len = igt_vtest_job(buf, max, 1, 1, 0);
+	KT_ASSERT_EQ(igt_vdec_test_check(j, len - 1, w, h, 3), E_PAR);
+	KT_ASSERT_EQ(igt_vdec_test_check(j, len, w, h, 1), E_PAR);
+	j->dpb[0].slot = 1;					/* its own slot */
+	KT_ASSERT_EQ(igt_vdec_test_check(j, len, w, h, 3), E_PAR);
+	j->dpb[0].slot = 0;
+	KT_ASSERT_EQ(igt_vdec_test_check(j, len, w / 2, h, 3), E_PAR);	/* larger than the slots */
+	j->sps.flags &= ~H264_SPS_FRAME_MBS_ONLY;
+	KT_ASSERT_EQ(igt_vdec_test_check(j, len, w, h, 3), E_NOSPT);
+	j->sps.flags |= H264_SPS_FRAME_MBS_ONLY;
+	j->pps.num_slice_groups_minus1 = 1;
+	KT_ASSERT_EQ(igt_vdec_test_check(j, len, w, h, 3), E_NOSPT);
+	j->pps.num_slice_groups_minus1 = 0;
+	( (T_H264SLICE *)( j + 1 ) )[0].data_size += 1;
+	KT_ASSERT_EQ(igt_vdec_test_check(j, len, w, h, 3), E_PAR);
+
+	/* the Y tiles: 128 bytes × 32 rows in columns of 16, tiles in rows of pitch / 128 */
+	KT_ASSERT_EQ(igt_vdec_test_ytile(pitch, 0, 0), 0);
+	KT_ASSERT_EQ(igt_vdec_test_ytile(pitch, 15, 0), 15);
+	KT_ASSERT_EQ(igt_vdec_test_ytile(pitch, 16, 0), 512);
+	KT_ASSERT_EQ(igt_vdec_test_ytile(pitch, 0, 1), 16);
+	KT_ASSERT_EQ(igt_vdec_test_ytile(pitch, 128, 0), 4096);
+	KT_ASSERT_EQ(igt_vdec_test_ytile(pitch, 0, 32), 8192);
+	KT_ASSERT_EQ(igt_vdec_test_ytile(pitch, 255, 63), 3 * 4096 + 7 * 512 + 31 * 16 + 15);
+	knl_memset(surf, 0xee, pitch * ( uv + 32 ));
+	for ( y = 0; y < h; y++ ) {
+		for ( x = 0; x < w; x++ ) surf[igt_vdec_test_ytile(pitch, x, y)] = igt_vtest_sample(0, x, y);
+	}
+	for ( y = 0; y < h / 2; y++ ) {
+		for ( x = 0; x < w; x++ ) {
+			surf[igt_vdec_test_ytile(pitch, x, uv + y)] = igt_vtest_sample(( x & 1 ) ? 2 : 1, x / 2, y);
+		}
+	}
+	for ( k = 0; k < 3; k++ ) {
+		D	off = ( k == 0 ) ? 0 : ( k == 1 ) ? 7 : (D)w * h - 5;	/* whole, unaligned, across the planes */
+		SZ	want = (SZ)w * h * 3 / 2 - (SZ)off;
+
+		knl_memset(nv, 0, w * h * 3 / 2);
+		got = 0;
+		KT_ASSERT_EQ(igt_vdec_test_read(surf, w, h, off, nv, want, &got), E_OK);
+		KT_ASSERT_EQ(got, want);
+		for ( i = 0; i < (UD)want; i++ ) {
+			UD	at = i + (UD)off;
+			UB	e = ( at < (UD)w * h ) ? igt_vtest_sample(0, (UW)( at % w ), (UW)( at / w ))
+				  : igt_vtest_sample(( ( at - w * h ) % w ) & 1 ? 2 : 1, (UW)( ( at - w * h ) % w ) / 2,
+						     (UW)( ( at - w * h ) / w ));
+
+			if ( nv[i] != e ) bad++;
+		}
+	}
+	KT_ASSERT_EQ(bad, 0);
+out:
+	if ( buf != NULL ) Kfree(buf);
+	if ( surf != NULL ) Kfree(surf);
+	if ( nv != NULL ) Kfree(nv);
+}
+
 EXPORT void ktest_igt( void )
 {
 	if ( knl_igt.ready ) {
@@ -1504,6 +1596,7 @@ EXPORT void ktest_igt( void )
 	KT_RUN(test_igt_kva);
 	KT_RUN(test_igt_layout);
 	KT_RUN(test_igt_emit);
+	KT_RUN(test_igt_vdec);
 	KT_RUN(test_igt_plan);
 	KT_RUN(test_igt_place);
 	KT_RUN(test_igt_irispath);

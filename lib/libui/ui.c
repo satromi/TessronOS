@@ -520,7 +520,7 @@ LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y )
 	TS_UUID		pnl;
 	ID		pk;
 	UINT		attr;
-	BOOL		hidden;
+	BOOL		hidden, pull;
 
 	memset(u, 0, sizeof(*u));
 	if ( ui_uuid(box, &u->box) < E_OK ) return E_PAR;
@@ -547,6 +547,8 @@ LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y )
 	attr = ui_more_attr;
 	ui_more_attr = 0;			/* what ui_attr asked was for this window alone */
 	hidden = (BOOL)( ( attr & UI_ATTR_HIDDEN ) != 0 );
+	pull = (BOOL)( ( attr & UI_ATTR_TAGPULL ) != 0 );
+	attr &= ~UI_ATTR_TAGPULL;
 	{
 		/* framed, with a title bar unless asked not to */
 		UINT	wa = ( ( attr & UI_ATTR_UNTITLED ) != 0 ) ? WM_ATTR_FRAME : WM_ATTR_FRAME | WM_ATTR_TITLE;
@@ -635,7 +637,8 @@ LOCAL ER open_win( UI *u, ID port, CONST char *box, INT num, INT x, INT y )
 		ui_close(u);
 		return E_OBJ;
 	}
-	req.events = OB_E_CHANGE;
+	/* its tags pulled out only when the program said it carries them (UI_ATTR_TAGPULL): else a press that moves still chooses */
+	req.events = pull ? OB_E_CHANGE | OB_E_PULL : OB_E_CHANGE;
 	req.id = 1;
 	if ( ob_ntf_evt(u->pk, OB_REC_ANY, &req, u->port) <= 0 ) {
 		ui_close(u);
@@ -775,9 +778,57 @@ EXPORT INT ui_event( UI *u, CONST T_OBNTM *m, INT *p_num )
 		}
 		if ( p->kind == TB_PARTS || p->kind == SB_PARTS || p->kind == XB_PARTS ) u->last = num;
 		return UI_EV_CHANGE;
+	case OB_E_PULL:
+		num = num_of(u, m);
+		p = part(u, num);
+		if ( p == NULL || p->kind != TG_PARTS || m->code == 0 ) return UI_EV_NONE;
+		*p_num = (INT)m->code;
+		return UI_EV_TAGPULL;
 	default:
 		return UI_EV_NONE;
 	}
+}
+
+EXPORT ER ui_tag_pull( UI *u, CONST T_OBNTM *m, UI_PULL *pl )
+{
+	T_OBTAG	one[OB_TAG_MAX], *t = one;
+	UIPART	*p = part(u, num_of(u, m));
+	SZ	asz = 0;
+	INT	n, i, at = -1;
+	ER	er = E_OK;
+
+	memset(pl, 0, sizeof(*pl));
+	if ( m->event != OB_E_PULL || p == NULL || p->kind != TG_PARTS
+	  || ob_rea_rec(p->key, OB_WR_TAGS, 0, one, sizeof(one), &asz) < E_OK ) {
+		return E_NOEXS;
+	}
+	if ( asz > (SZ)sizeof(one) ) {
+		/* more tags than the first room: all of them read again, as many as they are */
+		t = (T_OBTAG *)malloc((size_t)asz);
+		if ( t == NULL ) return E_NOMEM;
+		if ( ob_rea_rec(p->key, OB_WR_TAGS, 0, t, asz, &asz) < E_OK ) er = E_NOEXS;
+	}
+	n = ( er < E_OK ) ? 0 : (INT)( asz / (SZ)sizeof(T_OBTAG) );
+	/* an upper tag may have the number of the lower one it stands for: the one pressed is the one under the press */
+	for ( i = 0; i < n; i++ ) {
+		if ( t[i].num != (INT)m->code ) continue;
+		if ( at < 0 ) at = i;
+		if ( m->x >= t[i].left && m->x < t[i].right && m->y >= t[i].top && m->y < t[i].bottom ) {
+			at = i;
+			break;
+		}
+	}
+	if ( at >= 0 ) {
+		pl->tag = (INT)m->code;
+		pl->x = m->x;
+		pl->y = m->y;
+		pl->left = t[at].fleft;
+		pl->top = t[at].ftop;
+		pl->right = t[at].fright;
+		pl->bottom = t[at].fbottom;
+	}
+	if ( t != one ) free(t);
+	return ( at >= 0 ) ? E_OK : ( er < E_OK ) ? er : E_NOEXS;
 }
 
 /* ---------------------------------------------------------------- what the parts hold */

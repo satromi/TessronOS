@@ -491,15 +491,20 @@ int knl_wpa_eap_set( int method, const char *id, int id_len, const char *pw, int
 	const WPP_HDR	*h;
 	int		ret = -1;
 
-	if ( eap_blob(0, ca, ca_len) != 0 || eap_blob(1, cert, cert_len) != 0 || eap_blob(2, key, key_len) != 0 ) {
+	if ( eap_blob(WPP_EB_CA, ca, ca_len) != 0 || eap_blob(WPP_EB_CERT, cert, cert_len) != 0
+	  || eap_blob(WPP_EB_KEY, key, key_len) != 0
+	  || eap_blob(WPP_EB_ID, (const unsigned char *)id, ( id != 0 ) ? id_len : 0) != 0
+	  || eap_blob(WPP_EB_PW, (const unsigned char *)pw, ( pw != 0 ) ? pw_len : 0) != 0
+	  || eap_blob(WPP_EB_DOMAIN, (const unsigned char *)domain, ( domain != 0 ) ? domain_len : 0) != 0
+	  || eap_blob(WPP_EB_KEYPW, (const unsigned char *)key_pw, ( key_pw != 0 ) ? key_pw_len : 0) != 0 ) {
 		return -1;
 	}
 	if ( !begin(&w, WPP_EAP_SET) ) return -1;
 	wpp_w_int(&w, method);
-	wpp_w_bytes(&w, id, id_len);
-	wpp_w_bytes(&w, pw, pw_len);
-	wpp_w_bytes(&w, domain, domain_len);
-	wpp_w_bytes(&w, key_pw, key_pw_len);
+	wpp_w_int(&w, ( id != 0 ) ? 1 : 0);
+	wpp_w_int(&w, ( pw != 0 ) ? 1 : 0);
+	wpp_w_int(&w, ( domain != 0 ) ? 1 : 0);
+	wpp_w_int(&w, ( key_pw != 0 ) ? 1 : 0);
 	h = call(WPP_EAP_SET, wpp_w_end(&w), &r);
 	if ( h != 0 ) ret = h->ret;
 	done();

@@ -493,6 +493,29 @@ LOCAL INT svc_so_poll( struct pollfd *fds, INT nfds, TMO tmout )
 }
 
 /*
+ * The limits of processes as the system's limit allows them (include/ts/
+ * so.h): the most a hard limit may be is what the processes may have in
+ * all; the first hard limit is SO_PRC_HARD_WANT, or three quarters of
+ * that when it is fewer, so that a program at it leaves the others a
+ * quarter; the first soft limit SO_PRC_SOFT_WANT, no more than the hard.
+ */
+EXPORT INT knl_so_prc_ceil( void )
+{
+	INT	n = knl_so_sysmax() - SO_KERNEL_RESERVE;
+
+	return ( n > 0 ) ? n : 0;
+}
+
+EXPORT void knl_so_prc_first( INT *p_cur, INT *p_max )
+{
+	INT	max = knl_so_prc_ceil() / 4 * 3;
+
+	if ( max > SO_PRC_HARD_WANT ) max = SO_PRC_HARD_WANT;
+	if ( p_max != NULL ) *p_max = max;
+	if ( p_cur != NULL ) *p_cur = ( max < SO_PRC_SOFT_WANT ) ? max : SO_PRC_SOFT_WANT;
+}
+
+/*
  * The sockets the process may hold (include/ts/soapp.h). The hard limit
  * goes up only for an administrator, as Linux's only for CAP_SYS_RESOURCE.
  */

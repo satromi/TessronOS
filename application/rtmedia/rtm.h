@@ -44,7 +44,6 @@
 #define LATENCY_NS	80000000LL	/* every sound is heard this long after its time */
 #define BLOCK		240		/* frames mixed at a time: 5 ms */
 #define DEV_BUF		8192		/* bytes of the device's buffer: 43 ms */
-#define MAX_MEDIA	RT_MEDIA_MAX
 #define MAX_VOICE	48
 #define MAX_STREAM	32
 #define MAX_EVQ		512		/* sounds waiting for their sample */

@@ -221,8 +221,7 @@ extern ER   ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms );
 extern void link_open( INT col, INT row );
 extern void link_told( CONST T_DTANS *an );	/* what a window opened from a link did to it (DT_F_LINK) */
 extern void link_op( CONST char *code, INT index );
-extern void exec_menu( ID mid );
-extern BOOL app_kept( void );
+extern void link_menu( ID mid, BOOL on );	/* 仮身操作, 実身操作 and 実行 for the link in hand, or none */
 extern void dropped( void );
 extern void carry_out( INT x0, INT y0, BOOL twice );
 extern void copy_cells( BOOL cut );

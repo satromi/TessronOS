@@ -295,7 +295,7 @@ LOCAL void name_in( char *out, CONST char *w, INT max, INT which )
 
 EXPORT void cf_net_read( CONST UB *text, INT len, T_CFNET *net )
 {
-	char	v[CF_VAL_MAX], w[80];
+	char	v[CF_NETLINE_MAX], w[CF_HOST_MAX + 8];
 	INT	i, j;
 
 	for ( i = 0; i < (INT)sizeof(*net); i++ ) ((UB *)net)[i] = 0;
@@ -330,7 +330,7 @@ LOCAL void host_line( char *out, CONST char *name, INT which, UW mask, UW addr, 
 {
 	INT	at;
 
-	scopy(out, ( name[0] != 0 ) ? name : cf_noname[which], 80);
+	scopy(out, ( name[0] != 0 ) ? name : cf_noname[which], CF_HOST_MAX);
 	at = slen(out);
 	scopy(out + at, " cnet ", 8);
 	at = slen(out);
@@ -341,13 +341,13 @@ LOCAL void host_line( char *out, CONST char *name, INT which, UW mask, UW addr, 
 	at = slen(out);
 	if ( tail != NULL && tail[0] != 0 ) {
 		out[at++] = ' ';
-		scopy(out + at, tail, CF_VAL_MAX * 2 - at);
+		scopy(out + at, tail, CF_NETLINE_MAX - at);
 	}
 }
 
 EXPORT INT cf_net_write( UB *text, INT len, INT max, CONST T_CFNET *net )
 {
-	char	v[CF_VAL_MAX * 2], tail[CF_VAL_MAX];
+	char	v[CF_NETLINE_MAX], tail[CF_HOST_MAX + 8];
 	INT	j;
 
 	host_line(v, net->host, 0, net->mask, net->addr, "NETDRV DEVICE=neta");
@@ -970,6 +970,9 @@ EXPORT BOOL cf_link_nth( CONST UB *text, INT len, CONST char *role, INT nth, TS_
 }
 
 /* The link with the role written: in place of the one there, or (anew) always as a paragraph of its own */
+#define LK_WORD_MAX	128	/* bytes of a role or a label (a longer one is refused, -1) */
+#define LK_FIXED_MAX	480	/* the element's own words, the ids and the numbers, the most of the two forms */
+
 LOCAL INT link_set( UB *text, INT len, INT max, CONST char *role, CONST TS_UUID *u,
 		    CONST TS_UUID *vobj, CONST char *label, TS_UUID *p_old, BOOL anew )
 {
@@ -981,7 +984,7 @@ LOCAL INT link_set( UB *text, INT len, INT max, CONST char *role, CONST TS_UUID 
 	};
 	INT	a, e, nl, i, k, shift, rl = slen(role), ll = slen(label);
 	BOOL	para = FALSE, fig = FALSE;
-	UB	el[600];
+	UB	el[LK_FIXED_MAX + 2 * LK_WORD_MAX];	/* the fixed words, the role and the label */
 	TS_UUID	old;
 
 	if ( p_old != NULL ) for ( i = 0; i < 16; i++ ) p_old->b[i] = 0;

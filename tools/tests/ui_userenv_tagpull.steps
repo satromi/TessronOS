@@ -1,0 +1,41 @@
+# ユーザ環境設定's tags pulled out (docs/tessronos 10.6, 11.6), as ui_sysenv_tagpull.steps does for
+# システム環境設定: 〈音属性〉 pressed and moved past LK_DRAG_W is carried into BTRON, where the object
+# ユーザ環境設定：音属性 is made and a link to it put, as このページの仮身を作る makes one; the sheet shown stays 〈キー属性〉, and the link opened shows
+# 〈音属性〉 in the same window. For tools/ui_run.py with the kernel of make TARGET=_QEMU_VIRT_ DESKTOP=1
+# UITEST=1 and the test disk of a KTEST=1 build. The window is at 180,90; BTRON shows at 100,200.
+openapp 01a0d8c4-52b7-7c63-8e83-4f9a012c3d53 {"tessronos-userenv":{"data":"key"}}
+expect userenv: page "key"
+wait 1200
+win ユーザ環境設定
+want ok 180 90 772 652
+move 900 700
+wait 300
+shot up_before
+logmark
+move 520 134
+down
+move 526 136
+expectsince tvpage: tag 5 pulled out, page "sound", outline
+move 300 170
+wait 300
+move 100 200
+wait 500
+up
+expectsince userenv: link of page "sound" carried (0)
+expectsince tvpage: object "ユーザ環境設定：音属性" of page "sound" made (0)
+expectsince tvpage: link of page "sound" carried, named "ユーザ環境設定：音属性" (0)
+expectsince cabinet: dropped 1
+wait 800
+shot up_put
+# the link put shows the name of the page's object, ユーザ環境設定：音属性, in its band (the letters
+# right of the pointer, recorded from a run that put it)
+shotsum up_put 126 191 256 205
+want ok 578627089f302b2a
+shotsame up_before up_put 200 230 760 630
+logmark
+dclick 100 200
+expectsince userenv: page "sound"
+wait 500
+nwin ユーザ環境設定
+want ok 1
+absent !OACV!

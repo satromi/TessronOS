@@ -1493,3 +1493,110 @@ EXPORT UW ct_json_colour( CONST UB *json, INT n, CONST char *outer, CONST char *
 	}
 	return c;
 }
+
+/* ---------------------------------------------------------------- 仮身操作 (ts/tvvop.h) */
+
+static CONST char *CONST vop_disp[6] = { "namedisp", "roledisp", "typedisp", "updatedisp", "framedisp", "pictdisp" };
+
+/* A colour "#rrggbb" of el, 0xFFFFFFFF when it says none */
+LOCAL UINT vop_col( CONST UB *el, INT n, CONST char *name )
+{
+	UB	col[16];
+	UINT	c = 0;
+	INT	i, h;
+
+	if ( ct_attr(el, n, name, col, sizeof(col)) != 7 || col[0] != '#' ) return 0xFFFFFFFFU;
+	for ( i = 1; i < 7 && ( h = hexv(col[i]) ) >= 0; i++ ) c = ( c << 4 ) | (UINT)h;
+	return c;
+}
+
+/* An attribute's text into the room at *p_at, as long as it is: its length, 0 when there is none or no room */
+LOCAL SZ vop_word( CONST UB *el, INT n, CONST char *name, UB *words, INT room, INT *p_at, CONST UB **p_s )
+{
+	INT	len = ct_attr_text(el, n, name, NULL, 0);
+
+	*p_s = NULL;
+	if ( len <= 0 || *p_at + len + 1 > room ) return 0;
+	(void)ct_attr_text(el, n, name, words + *p_at, len + 1);
+	*p_s = words + *p_at;
+	*p_at += len + 1;
+	return len;
+}
+
+EXPORT BOOL ct_vop_link( T_TVLINK *l, CONST UB *el, INT n, UB *words, INT room )
+{
+	UB	v[TS_UUID_STRLEN + 1], w[8];
+	INT	i, at = 0;
+	BOOL	got;
+	UB	*p = (UB *)l;
+
+	for ( i = 0; i < (INT)sizeof(*l); i++ ) p[i] = 0;
+	got = ct_target(el, n, &l->target);
+	if ( ct_attr_text(el, n, "vobjid", v, (INT)sizeof(v)) == TS_UUID_STRLEN ) (void)ct_uuid_parse(v, &l->vobjid);
+	l->was_left = ct_attr_int(el, n, "vobjleft", 0);
+	l->was_top = ct_attr_int(el, n, "vobjtop", 0);
+	l->was_right = ct_attr_int(el, n, "vobjright", 0);
+	l->was_bottom = ct_attr_int(el, n, "vobjbottom", 0);
+	l->look.chsz = ct_attr_int(el, n, "chsz", 0);
+	l->look.frcol = vop_col(el, n, "frcol");
+	l->look.chcol = vop_col(el, n, "chcol");
+	l->look.tbcol = vop_col(el, n, "tbcol");
+	l->look.bgcol = vop_col(el, n, "bgcol");
+	for ( i = 0; i < 6; i++ ) {
+		if ( ct_attr_bool(el, n, vop_disp[i], (BOOL)( i == 0 || i == 5 )) ) l->look.disp |= 1U << i;
+	}
+	l->look.autoopen = ct_attr_bool(el, n, "autoopen", FALSE) ? 1 : 0;
+	l->hidden = ct_attr_bool(el, n, "hidden", FALSE);
+	if ( ct_attr_text(el, n, "wordWrap", w, (INT)sizeof(w)) > 0 ) {
+		l->wordwrap = ( w[0] == 'f' ) ? 2 : 1;	/* TAD_WRAP_OFF, TAD_WRAP_ON */
+	}
+	if ( words != NULL ) {
+		l->rel_len = vop_word(el, n, "relationship", words, room, &at, &l->rel);
+		l->applist_len = vop_word(el, n, "applist", words, room, &at, &l->applist);
+		l->view_len = vop_word(el, n, "viewMode", words, room, &at, &l->view);
+	}
+	return got;
+}
+
+/* A colour as "#rrggbb" */
+LOCAL void vop_hex( char *out, UINT c )
+{
+	static CONST char	hex[] = "0123456789abcdef";
+	INT			i;
+
+	out[0] = '#';
+	for ( i = 0; i < 6; i++ ) out[1 + i] = hex[( c >> ( 20 - 4 * i ) ) & 15];
+	out[7] = 0;
+}
+
+EXPORT INT ct_vop_look( CONST T_DTANS *an, CTSET *set, CTVOPTXT *t )
+{
+	CONST UINT		*v[4];
+	static CONST char *CONST cn[4] = { "frcol", "chcol", "tbcol", "bgcol" };
+	INT			n = 0, k;
+
+	v[0] = &an->look.frcol;
+	v[1] = &an->look.chcol;
+	v[2] = &an->look.tbcol;
+	v[3] = &an->look.bgcol;
+	if ( an->look.chsz > 0 ) {
+		num_text(t->chsz, an->look.chsz);
+		set[n].name = "chsz";
+		set[n++].value = (CONST UB *)t->chsz;
+	}
+	for ( k = 0; k < 4; k++ ) {
+		if ( *v[k] == 0xFFFFFFFFU ) continue;
+		vop_hex(t->col[k], *v[k] & 0x00FFFFFFU);
+		set[n].name = cn[k];
+		set[n++].value = (CONST UB *)t->col[k];
+	}
+	for ( k = 0; k < 6; k++ ) {
+		set[n].name = vop_disp[k];
+		set[n++].value = (CONST UB *)( ( ( an->look.disp >> k ) & 1 ) ? "true" : "false" );
+	}
+	set[n].name = "autoopen";
+	set[n++].value = (CONST UB *)( an->look.autoopen ? "true" : "false" );
+	set[n].name = "hidden";
+	set[n++].value = (CONST UB *)( ( an->flags & DT_F_HIDDEN ) ? "true" : "false" );
+	return n;
+}

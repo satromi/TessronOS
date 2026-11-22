@@ -34,24 +34,27 @@ from .btree import (INTERNAL, LEAF, TREE_GC, TREE_OBJ, TREE_ORPHAN,
                     TREE_NAMES, Node)
 from .error import TsfsError
 from .groups import fresh_map
-from .layout import (AG_MAX_BLOCKS, AG_MIN_BLOCKS, BLOCK_SIZE, COMPAT_GROWN,
-                     INCOMPAT_GROWING, INCOMPAT_XT2, JRNL_AREA_BLOCKS, JRNL_MAX_BLOCKS,
+from .layout import (AG_MAX_BLOCKS, AG_MIN_BLOCKS, BLOCK_SIZE, COMPAT_CONVREQ,
+                     COMPAT_GROWN, INCOMPAT_FMT5, INCOMPAT_GROWING, INCOMPAT_XT2,
+                     JRNL_AREA_BLOCKS, JRNL_MAX_BLOCKS, KNOWN_COMPAT,
                      KNOWN_INCOMPAT, KNOWN_ROCOMPAT, LABEL_MAX, MAGIC_NODE,
-                     ERR_NAMES, NIL_UUID, ST_CLEAN, ST_ERROR, Superblock,
-                     grown_count, layout, utf8_fit)
+                     ERR_NAMES, NIL_UUID, ST_CLEAN, ST_ERROR, VERSION, VERSION5,
+                     Limits, Superblock, grown_count, layout, utf8_fit)
 from . import meta as metamod
 from .obj import ICON_MAX, OB_ICON, is_icon
-from .obj import (DATA_INLINE_MAX, F_DELETABLE, F_EDITABLE, F_GARBAGE,
-                  F_ORPHAN, F_READABLE, F_RELINK, F_TRASH, FORM_INLINE, FORM_NONE,
-                  FORM_RUN, FORM_TREE, FORM_TREE2, INL_MASK, INL_UNITS, INLINE_UNIT,
-                  LK_EXTERNAL, LK_SIZE, LinkEntry, MAX_EXTENTS, MAX_LINK,
-                  MAX_REC, MAX_RES, MB_PAY, OB_INLINE, OB_LINK, OB_META,
-                  OB_NLINK, OB_NPLACE, OB_NRES, OB_PLACE, OB_RES, ObjectBlock,
-                  PE_SIZE, PART_NAMES, PlaceEntry, REC_BIN, REC_XTAD, RID_ICON,
-                  RID_PLACE, RS_SIZE, ResEntry, blks_for, unpack_table)
+from .obj import (DATA_INLINE_MAX, EXT_LEN, F_DELETABLE, F_EDITABLE, F_GARBAGE,
+                  F_ORPHAN, F_READABLE, F_RELINK, F_SPARE, F_TRASH, FORM_INLINE,
+                  FORM_NAMES, FORM_NONE, FORM_RUN, FORM_TREE, FORM_TREE2,
+                  FORM_TREEN, FORM_TRIM, INL_MASK, INL_UNITS, INLINE_UNIT,
+                  LK_EXTERNAL, LK_SIZE, LinkEntry, MAX_EXTENTS, MB_PAY,
+                  OB_INLINE, OB_LINK, OB_META, OB_NLINK, OB_NPLACE, OB_NRES,
+                  OB_PLACE, OB_RES, OB_SPARE, ObjectBlock, PE_SIZE, PART_NAMES,
+                  PL_SIZE, PlaceEntry, REC_BIN, REC_XTAD, RID_ICON, RID_PLACE,
+                  RSX_MARK, RS_SIZE, RUN_FORMS, ResEntry, blks_for,
+                  unpack_res_table, unpack_table)
 
 KNOWN_FLAGS = (F_EDITABLE | F_DELETABLE | F_READABLE | F_GARBAGE | F_ORPHAN
-               | F_RELINK | F_TRASH)
+               | F_RELINK | F_TRASH | F_SPARE)
 
 
 class Report(object):
@@ -99,6 +102,7 @@ class ObjInfo(object):
         self.links = []
         self.has_links = False
         self.struct_keys = []
+        self.spare = False              # its spare place is not empty
 
 
 class Checker(object):
@@ -117,6 +121,8 @@ class Checker(object):
         self.objs = {}
         self.tree_nodes = {TREE_OBJ: 0, TREE_GC: 0, TREE_ORPHAN: 0}
         self.leaked = []
+        self.lim = Limits.of(vol.sb)
+        self.v5 = vol.sb.v5
 
     def where(self, info):
         return ("orphan %s" if info.orphan else "object %s") % info.uuid
@@ -236,6 +242,25 @@ class Checker(object):
             rep.note(where, "the label's copy %r is not the first bytes of the "
                      "label %r, the top object's name; the kernel writes it "
                      "again when it attaches the volume" % (sb.label, whole))
+        if sb.v5 and sb.version != VERSION5:
+            rep.error(where, "FMT5 with version %d" % sb.version)
+        elif not sb.v5 and sb.version != VERSION:
+            rep.error(where, "version %d without FMT5" % sb.version)
+        else:
+            rep.note(where, "version %d" % sb.version)
+        if sb.v5 and sb.incompat & INCOMPAT_XT2:
+            rep.note(where, "XT2 on a volume of version 5, where it means "
+                     "nothing")
+        if sb.compat & COMPAT_CONVREQ:
+            if sb.v5:
+                rep.warn(where, "CONVREQ on a volume of version 5: a "
+                         "conversion takes it off")
+            else:
+                rep.note(where, "CONVREQ: the volume is converted to version "
+                         "5 at the next start")
+        if sb.compat & ~KNOWN_COMPAT:
+            rep.note(where, "compatible features 0x%x this does not know"
+                     % (sb.compat & ~KNOWN_COMPAT))
         if sb.incompat & ~KNOWN_INCOMPAT:
             rep.error(where, "incompatible features 0x%x: the kernel will not "
                       "open it" % sb.incompat)
@@ -279,11 +304,22 @@ class Checker(object):
         if j.head_state == "empty":
             rep.note(where, "the head block has not been written yet (the "
                      "kernel writes it when the volume is first opened)")
+        elif j.head_state == "old":
+            if j.old_ring:
+                rep.error(where, "the head is of version 4 on a volume of "
+                          "version 5 and the ring is not empty")
+            else:
+                rep.warn(where, "the head is of version 4 with an empty ring, "
+                         "as a conversion cut before its last step leaves it; "
+                         "the kernel writes it at version 5 when it opens the "
+                         "volume, fsck.tsfs --fix does it now")
         elif j.head_state == "damaged":
             rep.warn(where, "the head block cannot be used; the kernel starts "
                      "an empty ring at transaction %d" % j.seq_sb)
         else:
-            rep.note(where, "head at %d, transaction %d" % (j.head, j.head_seq))
+            rep.note(where, "head at %d, transaction %d, version %d, a "
+                     "transaction takes up to %d copies"
+                     % (j.head, j.head_seq, j.version, j.budget))
         if j.txns:
             rep.warn(where, "%d committed transaction(s) (%d to %d) are not in "
                      "place; the kernel puts them back when it opens the "
@@ -462,8 +498,60 @@ class Checker(object):
 
     # ------------------------------------------------------------ objects
 
-    def check_place_data(self, o, pl, what, where, inl):
-        """A data part's place: its blocks claimed, its inline units noted."""
+    def check_form(self, pl, what, where):
+        """Whether the form of a place kept in runs is one this volume may
+        hold; reported when it is not."""
+        rep = self.rep
+        if pl.form == FORM_TREEN and not self.v5:
+            rep.error(where, "%s is a run tree on a volume of version 4" % what)
+            self.broken = True
+            return False
+        if pl.form == FORM_TREE2 and not self.v5 \
+                and not (self.sb.incompat & INCOMPAT_XT2):
+            rep.error(where, "%s is a tree of two levels on a volume that does not "
+                      "say it has them" % what)
+            self.broken = True
+        return True
+
+    def tree_runs(self, o, pl, what, where, kind="extent"):
+        """The runs of a place kept in runs, with the blocks of its tree
+        claimed; None when they cannot be read."""
+        rep = self.rep
+        nodes = []
+        problems = []
+        try:
+            runs = o.extents(pl, check=lambda b, why: problems.append((b, why)),
+                             nodes=nodes)
+        except TsfsError as e:
+            rep.error(where, "%s: %s" % (what, e))
+            self.broken = True
+            for b in nodes:
+                if b < self.sb.total_blocks:
+                    self.claim(b, "a node of the tree of %s" % what, where)
+            return None
+        for b, why in problems:
+            rep.error(where, "the %s tree block %d of %s: %s" % (kind, b, what, why))
+            self.broken = True
+        for b in nodes:
+            if not self.claim(b, "a node of the tree of %s" % what, where):
+                return None
+        if pl.form in (FORM_TREE, FORM_TREE2, FORM_TREEN) and pl.b != len(runs):
+            rep.warn(where, "%s says %d runs, its tree %d" % (what, pl.b, len(runs)))
+        if not self.v5:
+            most = MAX_EXTENTS * MAX_EXTENTS if pl.form == FORM_TREE2 else MAX_EXTENTS
+            if len(runs) > most:
+                rep.error(where, "%s lies in %d runs" % (what, len(runs)))
+        if pl.form == FORM_TREEN:
+            self.rep.stats["run_trees"] = self.rep.stats.get("run_trees", 0) + 1
+            depth = o.tree_depth(pl)
+            if depth > self.rep.stats.get("run_tree_depth", 0):
+                self.rep.stats["run_tree_depth"] = depth
+        return runs
+
+    def check_place_data(self, o, pl, what, where, inl, keep=None):
+        """A data part's place: its blocks claimed, its inline units
+        noted. `keep`, for a record whose runs past its bytes the spare
+        place gives back (F_TRIM), is the blocks it keeps."""
         rep = self.rep
         if pl.form == FORM_NONE:
             if pl.nbytes != 0:
@@ -475,41 +563,15 @@ class Checker(object):
                 rep.warn(where, "%s holds %d bytes inline, more than %d"
                          % (what, pl.nbytes, DATA_INLINE_MAX))
             return
-        if pl.form not in (FORM_RUN, FORM_TREE, FORM_TREE2):
+        if pl.form not in RUN_FORMS:
             rep.error(where, "%s has form %d" % (what, pl.form))
             self.broken = True
             return
-        if pl.form == FORM_TREE2 and not ( self.vol.sb.incompat & INCOMPAT_XT2 ):
-            rep.error(where, "%s is a tree of two levels on a volume that does not "
-                      "say it has them" % what)
-            self.broken = True
-        if pl.form in (FORM_TREE, FORM_TREE2):
-            if not self.claim(pl.a, "the extent %s of %s"
-                              % ("leaf" if pl.form == FORM_TREE else "index", what), where):
-                return
-        if pl.form == FORM_TREE2:
-            try:
-                for (first, leaf, cnt) in o.leaves(pl):
-                    if not self.claim(leaf, "an extent leaf of %s" % what, where):
-                        return
-            except TsfsError as e:
-                rep.error(where, "%s: %s" % (what, e))
-                self.broken = True
-                return
-        problems = []
-        try:
-            runs = o.extents(pl, check=lambda b, why: problems.append((b, why)))
-        except TsfsError as e:
-            rep.error(where, "%s: %s" % (what, e))
-            self.broken = True
+        if not self.check_form(pl, what, where):
             return
-        for b, why in problems:
-            rep.error(where, "the extent leaf %d of %s: %s" % (b, what, why))
-            self.broken = True
-        if pl.form in (FORM_TREE, FORM_TREE2) and pl.b != len(runs):
-            rep.warn(where, "%s says %d runs, its tree %d" % (what, pl.b, len(runs)))
-        if len(runs) > ( MAX_EXTENTS * MAX_EXTENTS if pl.form == FORM_TREE2 else MAX_EXTENTS ):
-            rep.error(where, "%s lies in %d runs" % (what, len(runs)))
+        runs = self.tree_runs(o, pl, what, where)
+        if runs is None:
+            return
         have = 0
         for (l, s, c) in runs:
             if l != have:
@@ -524,8 +586,14 @@ class Checker(object):
         if have < need:
             rep.error(where, "%s is %d bytes in %d blocks" % (what, pl.nbytes, have))
         elif have > need:
-            rep.warn(where, "%s is %d bytes and keeps %d blocks"
-                     % (what, pl.nbytes, have))
+            if keep is not None and need <= keep:
+                rep.warn(where, "%s keeps %d blocks past its %d bytes, which its "
+                         "spare place gives back; the kernel does it when it "
+                         "mounts the volume, fsck.tsfs --fix does it now"
+                         % (what, have - need, pl.nbytes))
+            else:
+                rep.warn(where, "%s is %d bytes and keeps %d blocks"
+                         % (what, pl.nbytes, have))
 
     def check_inline(self, pl, what, where, inl):
         rep = self.rep
@@ -560,10 +628,10 @@ class Checker(object):
             if pl.nbytes:
                 rep.error(where, "the %s is nowhere but %d bytes" % (what, pl.nbytes))
             return b""
+        want = blks_for(pl.nbytes, MB_PAY)
         if pl.form == FORM_INLINE:
             self.check_inline(pl, "the " + what, where, inl)
         elif pl.form == FORM_RUN:
-            want = blks_for(pl.nbytes, MB_PAY)
             if pl.b != want:
                 rep.error(where, "the %s of %d bytes has a run of %d blocks"
                           % (what, pl.nbytes, pl.b))
@@ -571,8 +639,29 @@ class Checker(object):
                 if pl.b < want:
                     return None
             self.claim_run(pl.a, pl.b, "the " + what, where)
+        elif pl.form in (FORM_TREE, FORM_TREEN) and self.v5:
+            runs = self.tree_runs(o, pl, "the " + what, where)
+            if runs is None:
+                return None
+            have = 0
+            for (l, s, c) in runs:
+                if l != have:
+                    rep.error(where, "the %s: a run starts at block %d of the "
+                              "part, not %d" % (what, l, have))
+                    self.broken = True
+                    return None
+                self.claim_run(s, c, "the " + what, where)
+                have = l + c
+            if have != want:
+                rep.error(where, "the %s of %d bytes lies in %d blocks"
+                          % (what, pl.nbytes, have))
+                self.broken = True
+                if have < want:
+                    return None
         else:
-            rep.error(where, "the %s has form %d" % (what, pl.form))
+            rep.error(where, "the %s has form %d%s"
+                      % (what, pl.form, "" if self.v5 else
+                         " on a volume of version 4"))
             self.broken = True
             return None
         problems = []
@@ -586,6 +675,92 @@ class Checker(object):
             rep.error(where, "block %d of the %s: %s" % (b, what, why))
             self.broken = True
         return None if problems else raw
+
+    def check_spare(self, o, info, where, places):
+        """The spare place: its form, the mark, its runs claimed. Answers
+        {rid: blocks kept} for a record whose runs past its bytes it
+        gives back (F_TRIM)."""
+        rep = self.rep
+        raw_empty = o.spare_raw_empty()
+        pl = o.spare()
+        flag = bool(o.flags & F_SPARE)
+        if not self.v5:
+            if not raw_empty:
+                rep.error(where, "the spare place at %d is not empty on a volume "
+                          "of version 4" % OB_SPARE)
+            if flag:
+                rep.error(where, "is marked F_SPARE on a volume of version 4")
+            return {}
+        info.spare = not raw_empty
+        if raw_empty:
+            if flag:
+                rep.warn(where, "is marked F_SPARE but its spare place is empty; "
+                         "the kernel takes the mark off when it mounts the "
+                         "volume, fsck.tsfs --fix does it now")
+            return {}
+        if not flag:
+            rep.error(where, "its spare place holds %s but it is not marked "
+                      "F_SPARE" % FORM_NAMES.get(pl.form, "form %d" % pl.form))
+        else:
+            rep.warn(where, "its spare place holds %s, what an operation cut "
+                     "short leaves; the kernel gives it back when it mounts "
+                     "the volume, fsck.tsfs --fix does it now"
+                     % FORM_NAMES.get(pl.form, "form %d" % pl.form))
+        self.rep.stats["spare"] = self.rep.stats.get("spare", 0) + 1
+        what = "the spare place"
+        if pl.form in RUN_FORMS:
+            if not self.check_form(pl, what, where):
+                return {}
+            runs = self.tree_runs(o, pl, what, where)
+            for (_l, s, c) in runs or []:
+                self.claim_run(s, c, what, where)
+            return {}
+        if pl.form == FORM_TRIM:
+            rid = pl.a & 0xFFFFFFFF
+            ent = None
+            for e in places or []:
+                if e.rid == rid:
+                    ent = e
+            if places is not None and ent is None:
+                rep.error(where, "the spare place gives back the runs of rid %d, "
+                          "which is no record" % rid)
+                return {}
+            if ent is not None and ent.nbytes > pl.nbytes:
+                rep.error(where, "the spare place keeps %d bytes of rid %d, "
+                          "which is %d bytes" % (pl.nbytes, rid, ent.nbytes))
+                self.broken = True
+            return {rid: blks_for(pl.nbytes, BLOCK_SIZE)}
+        rep.error(where, "the spare place has form %d" % pl.form)
+        self.broken = True
+        return {}
+
+    def check_res_table(self, raw, cnt, where):
+        """The entries of a resource table, its string area checked on a
+        volume of version 5; None when it cannot be read."""
+        rep = self.rep
+        try:
+            ents, area = unpack_res_table(raw, cnt, self.v5)
+        except TsfsError as e:
+            rep.error(where, str(e))
+            return None
+        if self.v5:
+            longs = sorted(e.ext_long for e in ents if e.ext_long is not None)
+            total = sum(n for (_o, n) in longs)
+            if total != len(area):
+                rep.error(where, "the string area of the resource table is %d "
+                          "bytes, its extensions %d" % (len(area), total))
+            else:
+                at = 0
+                for (xo, xl) in longs:
+                    if xo != at:
+                        rep.error(where, "the extensions of the string area "
+                                  "overlap or leave a gap at %d" % at)
+                        break
+                    at += xl
+            if longs:
+                self.rep.stats["long_extensions"] = (
+                    self.rep.stats.get("long_extensions", 0) + len(longs))
+        return ents
 
     def object_list(self):
         """(UUID, block, held by the orphan tree only) of every object."""
@@ -644,10 +819,11 @@ class Checker(object):
                 rep.warn(where, "its link table is marked to be made again; "
                          "the kernel does it when it mounts the volume, "
                          "fsck.tsfs --fix does it now")
-            if o.nplace > MAX_REC:
-                rep.error(where, "%d records, more than %d" % (o.nplace, MAX_REC))
-            if o.nres > MAX_RES:
-                rep.error(where, "%d resources, more than %d" % (o.nres, MAX_RES))
+            lim = self.lim
+            if Limits.over(o.nplace, lim.max_rec):
+                rep.error(where, "%d records, more than %d" % (o.nplace, lim.max_rec))
+            if Limits.over(o.nres, lim.max_res):
+                rep.error(where, "%d resources, more than %d" % (o.nres, lim.max_res))
             if o.inlmap & ~INL_MASK:
                 rep.error(where, "the inline map has bits past unit %d" % INL_UNITS)
             inl = {}
@@ -660,6 +836,9 @@ class Checker(object):
                               % (len(raw_icon), ICON_MAX))
                 if not is_icon(raw_icon):
                     rep.error(where, "the icon is neither an ICO nor a PNG")
+            if raw_meta is not None and Limits.over(len(raw_meta), lim.meta_max):
+                rep.error(where, "the metadata is %d bytes, more than %d"
+                          % (len(raw_meta), lim.meta_max))
             parts = {}
             for off, cnt_off, size, cls in ((OB_PLACE, OB_NPLACE, PE_SIZE, PlaceEntry),
                                             (OB_RES, OB_NRES, RS_SIZE, ResEntry),
@@ -668,6 +847,11 @@ class Checker(object):
                 cnt = struct.unpack_from("<I", o.hdr, cnt_off)[0]
                 if raw is None:
                     parts[off] = None
+                    continue
+                if off == OB_RES:
+                    parts[off] = self.check_res_table(raw, cnt, where)
+                    if parts[off] is None:
+                        self.broken = True
                     continue
                 if len(raw) != cnt * size:
                     rep.error(where, "the %s is %d bytes for %d entries"
@@ -694,13 +878,17 @@ class Checker(object):
                              "order")
                 else:
                     rep.warn(where, "the metadata is not JSON")
-            recs = metamod.order_parse(raw_meta) if raw_meta is not None else None
+            recs = (metamod.order_parse(raw_meta, lim.max_rec)
+                    if raw_meta is not None else None)
             if d is not None and "records" in d and recs is None:
                 rep.warn(where, "\"records\" is not a list the kernel reads "
                          "(of {rid, rt, sub}, rid not 0, at most %d); the "
-                         "records are taken in rid order" % MAX_REC)
+                         "records are taken in rid order"
+                         % (lim.max_rec or 0x7FFFFFFF))
             if d is not None:
                 info.struct_keys = metamod.structural(d)
+
+            trims = self.check_spare(o, info, where, places)
 
             # records
             rids = []
@@ -720,7 +908,8 @@ class Checker(object):
                     if e.nbytes != e.place.nbytes:
                         rep.error(where, "%s says %d bytes, its place %d"
                                   % (w, e.nbytes, e.place.nbytes))
-                    self.check_place_data(o, e.place, w, where, inl)
+                    self.check_place_data(o, e.place, w, where, inl,
+                                          keep=trims.get(e.rid))
                     last = max(last, e.rid)
                     rids.append(e.rid)
             if recs is not None and places is not None:
@@ -757,8 +946,19 @@ class Checker(object):
                     if (e.owner != RID_ICON and not e.owner & RID_PLACE
                             and e.owner not in rids and places is not None):
                         rep.warn(where, "%s belongs to no record" % w)
-                    if e.ext_raw is not None and b"\0" not in e.ext_raw:
+                    if e.ext_long is not None and e.ext_long[1] > lim.ext_max:
+                        rep.error(where, "%s: an extension of %d bytes, more "
+                                  "than %d" % (w, e.ext_long[1], lim.ext_max))
+                    if e.ext_long is not None:
+                        if (e.ext_long[1] <= EXT_LEN - 1
+                                and e.ext_bytes[:1] != bytes([RSX_MARK])):
+                            rep.warn(where, "%s: an extension of %d bytes in the "
+                                     "string area" % (w, e.ext_long[1]))
+                    elif e.ext_raw is not None and b"\0" not in e.ext_raw:
                         rep.warn(where, "%s: the extension has no NUL" % w)
+                    elif e.ext_raw is not None and e.ext_raw[0] == RSX_MARK:
+                        rep.warn(where, "%s: the extension starts with 0xFF on a "
+                                 "volume of version 4" % w)
                     if e.nbytes != e.place.nbytes:
                         rep.error(where, "%s says %d bytes, its place %d"
                                   % (w, e.nbytes, e.place.nbytes))
@@ -769,9 +969,9 @@ class Checker(object):
                 nlink += len(links)
                 info.links = links
                 info.has_links = bool(links)
-                if len(links) > MAX_LINK:
+                if Limits.over(len(links), lim.max_link):
                     rep.warn(where, "%d links, more than the kernel makes (%d)"
-                             % (len(links), MAX_LINK))
+                             % (len(links), lim.max_link))
                 for i in range(1, len(links)):
                     if links[i].key() < links[i - 1].key():
                         rep.error(where, "the link table is not in order at "
@@ -833,11 +1033,17 @@ class Checker(object):
             if v != info.blk:
                 rep.error(w, "%s points at block %d, the index at %d"
                           % (u, v, info.blk))
-            if (info.ok or info.flags) and not info.flags & (F_RELINK | F_ORPHAN):
+            if (info.ok or info.flags) and not info.flags & (F_RELINK | F_ORPHAN
+                                                             | F_SPARE):
                 rep.warn(w, "holds %s, which has nothing to be finished; the "
                          "kernel drops the entry when it mounts the volume, "
                          "fsck.tsfs --fix does it now" % u)
         for u, info in sorted(self.objs.items(), key=lambda kv: kv[0].bytes):
+            if info.flags & F_SPARE and not info.flags & F_ORPHAN \
+                    and u not in tree:
+                rep.warn("object %s" % u, "is marked F_SPARE but is not on the "
+                         "orphan tree; fsck.tsfs --fix gives back what its "
+                         "spare place holds")
             if info.flags & F_RELINK and not info.flags & F_ORPHAN \
                     and u not in tree:
                 rep.warn("object %s" % u, "is marked for its link table to be "

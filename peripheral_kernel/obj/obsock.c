@@ -30,10 +30,12 @@
  *	closes the socket.
  *
  *	The table has an entry for each socket number, the object's UUID
- *	in it. A handle carries the number and which of the sockets that
- *	have had that number it was opened on, so a key kept past so_close
- *	finds nothing (E_NOEXS) rather than the socket that has the number
- *	now.
+ *	in it. It grows with the stack's table, a block of SO_BLK numbers at
+ *	a time made before the stack gives out a number of it
+ *	(knl_so_obj_room), and a block once made stays where it is. A handle
+ *	carries the number and which of the sockets that have had that
+ *	number it was opened on, so a key kept past so_close finds nothing
+ *	(E_NOEXS) rather than the socket that has the number now.
  */
 
 #include <sys/machine.h>
@@ -50,10 +52,10 @@
  * A handle is the number + 1 in its low SK_NUM_BITS bits and the low bits
  * of the socket's count above them, short of the sign bit
  */
-#define SK_NUM_BITS	12
+#define SK_NUM_BITS	15
 #define SK_NUM_MASK	( ( 1U << SK_NUM_BITS ) - 1 )
 #define SK_GEN_MASK	( 0x7FFFFFFFU >> SK_NUM_BITS )	/* the part of the count a handle carries */
-#if SO_MAX > ( 1 << SK_NUM_BITS ) - 1
+#if SO_NUM_CEIL > ( 1 << SK_NUM_BITS ) - 1
 #error "obsock.c: a handle has no room for the socket numbers (SK_NUM_BITS)"
 #endif
 
@@ -65,8 +67,56 @@ typedef struct {
 	INT	domain, type, protocol;
 } OBSK;
 
-LOCAL OBSK	obsk[SO_MAX];
+#define OBSK_NBLK	( SO_NUM_CEIL / SO_BLK )
+
+LOCAL OBSK	*obsk_blk[OBSK_NBLK];
+LOCAL INT	obsk_n = 0;		/* numbers with an entry: obsk_n / SO_BLK blocks, made in order */
 LOCAL T_SPLOCK	obsk_lock;		/* zero, as it starts, is unlocked */
+
+/* The entry of number s, which is below obsk_n */
+#define OBSK_AT(s)	( &obsk_blk[(s) / SO_BLK][(s) % SO_BLK] )
+
+/* The numbers with an entry now */
+LOCAL INT obsk_room( void )
+{
+	return __atomic_load_n(&obsk_n, __ATOMIC_ACQUIRE);
+}
+
+/* The entry of number s, NULL when it has none */
+LOCAL OBSK *obsk_of( INT s )
+{
+	return ( s >= 0 && s < obsk_room() ) ? OBSK_AT(s) : NULL;
+}
+
+/* Room made for numbers 0 .. n - 1: a block at a time, in order */
+EXPORT ER knl_so_obj_room( INT n )
+{
+	OBSK	*b;
+	UINT	imask;
+	INT	at;
+
+	if ( n > SO_NUM_CEIL ) {
+		return E_PAR;
+	}
+	while ( ( at = obsk_room() ) < n ) {
+		b = (OBSK *)Kmalloc(sizeof(OBSK) * SO_BLK);
+		if ( b == NULL ) {
+			return E_NOMEM;
+		}
+		knl_memset(b, 0, sizeof(OBSK) * SO_BLK);
+		ISpinLock(&obsk_lock, &imask);
+		if ( obsk_n == at ) {
+			obsk_blk[at / SO_BLK] = b;
+			__atomic_store_n(&obsk_n, at + SO_BLK, __ATOMIC_RELEASE);
+			b = NULL;
+		}
+		ISpinUnlock(&obsk_lock, &imask);
+		if ( b != NULL ) {
+			Kfree(b);	/* another task made it first */
+		}
+	}
+	return E_OK;
+}
 LOCAL UINT	obsk_gen = 0;
 LOCAL BOOL	obsk_up = FALSE;	/* the object layer is up: objects are made */
 
@@ -78,10 +128,10 @@ LOCAL BOOL same_uuid( CONST TS_UUID *a, CONST TS_UUID *b )
 /* The number whose object this is, -1 none (under the lock) */
 LOCAL INT index_of( CONST TS_UUID *uuid )
 {
-	INT	s;
+	INT	s, n = obsk_room();
 
-	for ( s = 0; s < SO_MAX; s++ ) {
-		if ( obsk[s].used && same_uuid(&obsk[s].uuid, uuid) ) {
+	for ( s = 0; s < n; s++ ) {
+		if ( OBSK_AT(s)->used && same_uuid(&OBSK_AT(s)->uuid, uuid) ) {
 			return s;
 		}
 	}
@@ -97,7 +147,7 @@ LOCAL INT entry_of( CONST TS_UUID *uuid, OBSK *e )
 	ISpinLock(&obsk_lock, &imask);
 	s = index_of(uuid);
 	if ( s >= 0 ) {
-		*e = obsk[s];
+		*e = *OBSK_AT(s);
 	}
 	ISpinUnlock(&obsk_lock, &imask);
 	return s;
@@ -108,16 +158,17 @@ LOCAL INT entry_of_handle( INT h, OBSK *e )
 {
 	UINT	imask;
 	INT	s = (INT)( (UINT)h & SK_NUM_MASK ) - 1;
+	OBSK	*k = obsk_of(s);
 	BOOL	ok;
 
-	if ( h <= 0 || s < 0 || s >= SO_MAX ) {
+	if ( h <= 0 || k == NULL ) {
 		return -1;
 	}
 	ISpinLock(&obsk_lock, &imask);
-	ok = (BOOL)( obsk[s].used && !knl_ob_uuid_zero(&obsk[s].uuid)
-		     && ( obsk[s].gen & SK_GEN_MASK ) == ( (UINT)h >> SK_NUM_BITS ) );
+	ok = (BOOL)( k->used && !knl_ob_uuid_zero(&k->uuid)
+		     && ( k->gen & SK_GEN_MASK ) == ( (UINT)h >> SK_NUM_BITS ) );
 	if ( ok ) {
-		*e = obsk[s];
+		*e = *k;
 	}
 	ISpinUnlock(&obsk_lock, &imask);
 	return ok ? s : -1;
@@ -139,12 +190,13 @@ EXPORT void knl_so_obj_made( INT s, ID owner, INT domain, INT type, INT protocol
 	UINT	imask;
 	OBSK	*e;
 
-	if ( s < 0 || s >= SO_MAX ) {
+	/* the stack's table made room first; a stack that does not has it made here */
+	if ( s < 0 || s >= SO_NUM_CEIL || knl_so_obj_room(( s / SO_BLK + 1 ) * SO_BLK) < E_OK ) {
 		return;
 	}
+	e = OBSK_AT(s);
 	new_uuid(&u);
 	ISpinLock(&obsk_lock, &imask);
-	e = &obsk[s];
 	e->used = TRUE;
 	e->uuid = u;
 	e->owner = owner;
@@ -158,15 +210,16 @@ EXPORT void knl_so_obj_made( INT s, ID owner, INT domain, INT type, INT protocol
 /* A connection taken from socket 'from': its family, type and protocol are that socket's */
 EXPORT void knl_so_obj_accepted( INT s, INT from, ID owner )
 {
+	OBSK	*f = obsk_of(from);
 	UINT	imask;
 	INT	domain = 0, type = 0, protocol = 0;
 
-	if ( from >= 0 && from < SO_MAX ) {
+	if ( f != NULL ) {
 		ISpinLock(&obsk_lock, &imask);
-		if ( obsk[from].used ) {
-			domain = obsk[from].domain;
-			type = obsk[from].type;
-			protocol = obsk[from].protocol;
+		if ( f->used ) {
+			domain = f->domain;
+			type = f->type;
+			protocol = f->protocol;
 		}
 		ISpinUnlock(&obsk_lock, &imask);
 	}
@@ -178,16 +231,17 @@ EXPORT void knl_so_obj_gone( INT s )
 {
 	TS_UUID	u;
 	UINT	imask;
+	OBSK	*e = obsk_of(s);
 
-	if ( s < 0 || s >= SO_MAX ) {
+	if ( e == NULL ) {
 		return;
 	}
 	knl_memset(&u, 0, sizeof(u));
 	ISpinLock(&obsk_lock, &imask);
-	if ( obsk[s].used ) {
-		u = obsk[s].uuid;
-		obsk[s].used = FALSE;
-		knl_memset(&obsk[s].uuid, 0, sizeof(obsk[s].uuid));
+	if ( e->used ) {
+		u = e->uuid;
+		e->used = FALSE;
+		knl_memset(&e->uuid, 0, sizeof(e->uuid));
 	}
 	ISpinUnlock(&obsk_lock, &imask);
 	if ( !knl_ob_uuid_zero(&u) ) {
@@ -198,21 +252,22 @@ EXPORT void knl_so_obj_gone( INT s )
 EXPORT ER so_getobj( INT s, TS_UUID *p_uuid )
 {
 	UINT	imask;
+	OBSK	*e = obsk_of(s);
 	ER	er;
 
 	if ( p_uuid == NULL ) {
 		return E_PAR;
 	}
-	if ( s < 0 || s >= SO_MAX ) {
+	if ( e == NULL ) {
 		return E_ID;
 	}
 	ISpinLock(&obsk_lock, &imask);
-	if ( !obsk[s].used ) {
+	if ( !e->used ) {
 		er = E_ID;
-	} else if ( knl_ob_uuid_zero(&obsk[s].uuid) ) {
+	} else if ( knl_ob_uuid_zero(&e->uuid) ) {
 		er = E_NOEXS;
 	} else {
-		*p_uuid = obsk[s].uuid;
+		*p_uuid = e->uuid;
 		er = E_OK;
 	}
 	ISpinUnlock(&obsk_lock, &imask);
@@ -222,16 +277,18 @@ EXPORT ER so_getobj( INT s, TS_UUID *p_uuid )
 EXPORT INT knl_so_obj_list( ID pid, INT *nums, TS_UUID *uuids, INT max )
 {
 	UINT	imask;
-	INT	s, n = 0;
+	OBSK	*e;
+	INT	s, n = 0, room = obsk_room();
 
 	ISpinLock(&obsk_lock, &imask);
-	for ( s = 0; s < SO_MAX; s++ ) {
-		if ( !obsk[s].used || obsk[s].owner != pid || knl_ob_uuid_zero(&obsk[s].uuid) ) {
+	for ( s = 0; s < room; s++ ) {
+		e = OBSK_AT(s);
+		if ( !e->used || e->owner != pid || knl_ob_uuid_zero(&e->uuid) ) {
 			continue;
 		}
 		if ( n < max ) {
 			if ( nums != NULL ) nums[n] = s;
-			if ( uuids != NULL ) uuids[n] = obsk[s].uuid;
+			if ( uuids != NULL ) uuids[n] = e->uuid;
 		}
 		n++;
 	}
@@ -676,22 +733,24 @@ LOCAL ER obk_gat( INT h, UB *json, SZ size, SZ *p_asize )
 LOCAL ER obk_lst( CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt )
 {
 	UINT	imask;
-	INT	cnt = 0, s;
+	OBSK	*e;
+	INT	cnt = 0, s, room = obsk_room();
 
 	ISpinLock(&obsk_lock, &imask);
 	while ( cnt < n ) {
 		INT	best = -1;
 
-		for ( s = 0; s < SO_MAX; s++ ) {
-			if ( !obsk[s].used || knl_ob_uuid_zero(&obsk[s].uuid) ) continue;
-			if ( cnt > 0 && ts_uuid_cmp(&obsk[s].uuid, &buf[cnt - 1]) <= 0 ) continue;
-			if ( cnt == 0 && from != NULL && ts_uuid_cmp(&obsk[s].uuid, from) <= 0 ) continue;
-			if ( best < 0 || ts_uuid_cmp(&obsk[s].uuid, &obsk[best].uuid) < 0 ) {
+		for ( s = 0; s < room; s++ ) {
+			e = OBSK_AT(s);
+			if ( !e->used || knl_ob_uuid_zero(&e->uuid) ) continue;
+			if ( cnt > 0 && ts_uuid_cmp(&e->uuid, &buf[cnt - 1]) <= 0 ) continue;
+			if ( cnt == 0 && from != NULL && ts_uuid_cmp(&e->uuid, from) <= 0 ) continue;
+			if ( best < 0 || ts_uuid_cmp(&e->uuid, &OBSK_AT(best)->uuid) < 0 ) {
 				best = s;
 			}
 		}
 		if ( best < 0 ) break;
-		buf[cnt++] = obsk[best].uuid;
+		buf[cnt++] = OBSK_AT(best)->uuid;
 	}
 	ISpinUnlock(&obsk_lock, &imask);
 	*p_cnt = cnt;
@@ -724,24 +783,27 @@ EXPORT ER knl_obsock_init( void )
 {
 	TS_UUID	u;
 	UINT	imask, gen;
-	INT	no, s;
+	OBSK	*e;
+	INT	no, s, room;
 
 	no = knl_ob_regist(&obk_mgr);
 	if ( no <= 0 ) {
 		return (ER)no;
 	}
 	obsk_up = TRUE;
-	for ( s = 0; s < SO_MAX; s++ ) {
+	room = obsk_room();
+	for ( s = 0; s < room; s++ ) {
+		e = OBSK_AT(s);
 		ISpinLock(&obsk_lock, &imask);
-		gen = ( obsk[s].used && knl_ob_uuid_zero(&obsk[s].uuid) ) ? obsk[s].gen : 0;
+		gen = ( e->used && knl_ob_uuid_zero(&e->uuid) ) ? e->gen : 0;
 		ISpinUnlock(&obsk_lock, &imask);
 		if ( gen == 0 ) {
 			continue;
 		}
 		new_uuid(&u);
 		ISpinLock(&obsk_lock, &imask);
-		if ( obsk[s].used && obsk[s].gen == gen ) {
-			obsk[s].uuid = u;
+		if ( e->used && e->gen == gen ) {
+			e->uuid = u;
 		}
 		ISpinUnlock(&obsk_lock, &imask);
 	}

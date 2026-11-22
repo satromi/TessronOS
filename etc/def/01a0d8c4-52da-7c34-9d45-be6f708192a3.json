@@ -20,7 +20,7 @@
       "id": "rtmedia",
       "kind": "utility",
       "name": "実時間メディア",
-      "version": "R1.410",
+      "version": "R1.500",
       "menu": false,
       "builtin": false,
       "base": []

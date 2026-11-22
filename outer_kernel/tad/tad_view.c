@@ -29,10 +29,10 @@
 #include <ts/tadview.h>
 #include "tad_local.h"
 
-#define DOC_MAX_FIG	16		/* figures standing in one text */
+#define DOC_FIG_FIRST	16		/* figures room is made for first; doubled when full */
 #define DOC_MAX_PARA	512
 #define DOC_MAX_RUN	2048
-#define FONT_DEPTH	32
+#define FONT_FIRST	32		/* looks kept in the builder itself; more are allocated */
 
 /* ---------------------------------------------------------------- what a link points at */
 
@@ -207,9 +207,12 @@ typedef struct {
 typedef struct {
 	T_TVDOC	*d;
 	INT	maxpara, maxrun;
-	FONTST	st[FONT_DEPTH];
+	FONTST	st0[FONT_FIRST];	/* the first looks, without an allocation */
+	FONTST	*st;			/* st0, or an allocated copy when nested deeper */
+	INT	stcap;			/* looks st has room for */
 	INT	depth;
 	INT	link_no;		/* links seen so far, to number them */
+	INT	figcap;			/* figures d->figs has room for */
 	PARAST	ps;
 	INT	ruby_next;		/* the next ruby group's number */
 	BOOL	page_next;		/* a page break waits for the next paragraph */
@@ -757,8 +760,21 @@ LOCAL INT vpx( CONST DOCBUILD *b, INT v )
 /* A new look for what an element holds; the old one back after */
 LOCAL BOOL push( DOCBUILD *b )
 {
-	if ( b->depth + 1 >= FONT_DEPTH ) {
-		return FALSE;
+	if ( b->depth + 1 >= b->stcap ) {
+		/* nested deeper than the room: as deep as the record goes */
+		INT	cap = b->stcap * 2;
+		FONTST	*ns = (FONTST *)Kmalloc(sizeof(FONTST) * (SZ)cap);
+
+		if ( ns == NULL ) {
+			b->nomem = TRUE;
+			return FALSE;
+		}
+		knl_memcpy(ns, b->st, sizeof(FONTST) * (SZ)(b->depth + 1));
+		if ( b->st != b->st0 ) {
+			Kfree(b->st);
+		}
+		b->st = ns;
+		b->stcap = cap;
 	}
 	b->depth++;
 	b->st[b->depth] = b->st[b->depth - 1];
@@ -1138,12 +1154,25 @@ LOCAL void doc_walk( DOCBUILD *b, CONST T_TADNODE *nd )
 		T_TVDOC		*d = b->d;
 		T_TVFIG		*f = NULL;
 
-		if ( d->figs == NULL ) {
-			d->figs = (T_TVFIG **)Kmalloc(sizeof(T_TVFIG *) * DOC_MAX_FIG);
-			d->nfig = 0;
+		if ( d->figs == NULL || d->nfig >= b->figcap ) {
+			/* as many figures as the text has: the room doubles when full */
+			INT		cap = ( b->figcap > 0 ) ? b->figcap * 2 : DOC_FIG_FIRST;
+			T_TVFIG		**nf = (T_TVFIG **)Kmalloc(sizeof(T_TVFIG *) * (SZ)cap);
+
+			if ( nf == NULL ) {
+				b->nomem = TRUE;
+				return;
+			}
+			if ( d->figs != NULL ) {
+				knl_memcpy(nf, d->figs, sizeof(T_TVFIG *) * (SZ)d->nfig);
+				Kfree(d->figs);
+			} else {
+				d->nfig = 0;
+			}
+			d->figs = nf;
+			b->figcap = cap;
 		}
-		if ( d->figs == NULL || d->nfig >= DOC_MAX_FIG
-		  || tv_fig_of(nd, &f) < E_OK || f == NULL ) {
+		if ( tv_fig_of(nd, &f) < E_OK || f == NULL ) {
 			return;
 		}
 		d->figs[d->nfig] = f;
@@ -1329,6 +1358,8 @@ LOCAL T_TVDOC *doc_build( CONST T_TADNODE *body, CONST T_TVDOC *old )
 	b.maxrun = nr;
 	b.depth = 0;
 	b.link_no = 0;
+	b.st = b.st0;
+	b.stcap = FONT_FIRST;
 	b.st[0].size = 14;
 	b.st[0].colour = 0x00000000U;
 	b.st[0].style = 0;
@@ -1341,6 +1372,9 @@ LOCAL T_TVDOC *doc_build( CONST T_TADNODE *body, CONST T_TVDOC *old )
 	b.ps.khead_kind = b.ps.ktail_kind = -1;
 
 	doc_children(&b, body);
+	if ( b.st != b.st0 ) {
+		Kfree(b.st);
+	}
 	if ( b.nomem ) {
 		tv_doc_free(d);
 		return NULL;

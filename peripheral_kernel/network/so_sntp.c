@@ -81,7 +81,7 @@ LOCAL UW be32( CONST UB *p )
 LOCAL ER sntp_ask( CONST struct sockaddr_in *srv, D *p_ms )
 {
 	UB		pkt[NTP_PACKET];
-	fd_set		rd;
+	struct pollfd	pf;
 	SYSTIM		t0, t1;
 	INT		s, n, i;
 	UD		sec, frac;
@@ -100,9 +100,11 @@ LOCAL ER sntp_ask( CONST struct sockaddr_in *srv, D *p_ms )
 		so_close(s);
 		return E_IO;
 	}
-	FD_ZERO(&rd);
-	FD_SET(s, &rd);
-	if ( so_select(s + 1, &rd, NULL, NULL, SNTP_ANSWER_MS) == 1 ) {
+	/* so_poll, not so_select: the socket may have any number of the table, past FD_SETSIZE too */
+	pf.fd = s;
+	pf.events = POLLIN;
+	pf.revents = 0;
+	if ( so_poll(&pf, 1, SNTP_ANSWER_MS) == 1 ) {
 		n = so_recv(s, pkt, NTP_PACKET, 0);
 		(void)tk_get_otm(&t1);
 		if ( n < NTP_PACKET ) {

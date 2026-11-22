@@ -46,6 +46,7 @@
 #include <ts/obatr.h>
 #include <ts/json.h>
 #include <ts/ui.h>
+#include <stdarg.h>
 
 #define WORK_W		520
 #define WORK_H		300
@@ -83,7 +84,8 @@ enum { S_EMPTY, S_FOUND, S_BUSY, S_BOOK, S_BROKEN };
 #define PT_OK		101
 
 static TS_UUID	archive, win, ch;
-static char	arcname[ARC_NAME_MAX];
+static char	*arcname;		/* the archive object's name, whole (malloc, or the default) */
+static char	arc_default[] = "書庫管理";
 static ID	kw, port;
 static INT	gid = -1;
 static INT	state;
@@ -370,14 +372,49 @@ static void log_place( void )
 
 static void ask_make( void );
 
+/*
+ * A line made as printf makes one, as long as it comes (malloc): NULL
+ * only for want of memory
+ */
+static char *line_of( const char *fmt, ... )
+{
+	va_list	ap;
+	int	n;
+	char	*s;
+
+	va_start(ap, fmt);
+	n = vsnprintf(NULL, 0, fmt, ap);
+	va_end(ap);
+	if ( n < 0 ) return NULL;
+	s = (char *)malloc((size_t)n + 1);
+	if ( s == NULL ) return NULL;
+	va_start(ap, fmt);
+	(void)vsnprintf(s, (size_t)n + 1, fmt, ap);
+	va_end(ap);
+	return s;
+}
+
+/* What fits of t in the status line, cut at a whole letter */
+static void status_put( const char *t )
+{
+	size_t	n = strlen(t);
+
+	if ( n > sizeof(status) - 1 ) {
+		n = sizeof(status) - 1;
+		while ( n > 0 && ( (unsigned char)t[n] & 0xc0 ) == 0x80 ) n--;
+	}
+	memcpy(status, t, n);
+	status[n] = 0;
+}
+
 static void pack_tell( ARCJOB *j, INT n, INT total, const char *what )
 {
-	char	s[ARC_NAME_MAX + 64];
+	char	*s = line_of("%s %d/%d", what, n, total);
 
 	done_n = n;
 	done_total = total;
-	snprintf(s, sizeof(s), "%s %d/%d", what, n, total);
-	strncpy(status, s, sizeof(status) - 1);
+	status_put(( s != NULL ) ? s : what);
+	free(s);
 	draw();
 }
 
@@ -623,25 +660,27 @@ static void ui_place( void )
  */
 static void ask_make( void )
 {
-	char		l[6][ARC_NAME_MAX + 96], a[32];
+	char		*l[6], a[32];
 	const char	*lines[6];
 	INT		i, n = 0, answer;
 
 	draw();
 	grouped(job.total, a);
-	snprintf(l[n++], sizeof(l[0]), "「%s」から辿れる実身：%d 個（%s バイト）", job.obj[0].name, job.nobj, a);
+	/* the lines as long as the names: the panel's label shows what fits */
+	l[n++] = line_of("「%s」から辿れる実身：%d 個（%s バイト）", job.obj[0].name, job.nobj, a);
 	for ( i = 0; i < job.nobj && n < 5; i++ ) {
 		if ( n == 4 && job.nobj > 4 ) {
-			snprintf(l[n++], sizeof(l[0]), "  ほか %d 個", job.nobj - 3);
+			l[n++] = line_of("  ほか %d 個", job.nobj - 3);
 			break;
 		}
-		snprintf(l[n++], sizeof(l[0]), "  %s", job.obj[i].name);
+		l[n++] = line_of("  %s", job.obj[i].name);
 	}
-	snprintf(l[n++], sizeof(l[0]), "圧縮：%s", store ? "しない" : "LH5");
-	for ( i = 0; i < 6; i++ ) lines[i] = ( i < n ) ? l[i] : " ";
+	l[n++] = line_of("圧縮：%s", store ? "しない" : "LH5");
+	for ( i = 0; i < 6; i++ ) lines[i] = ( i < n && l[i] != NULL ) ? l[i] : " ";
 	ui_place();
 	log_line("asked to make");
 	answer = ui_ask(&ui, PN_MAKE, lines, 6);
+	for ( i = 0; i < n; i++ ) free(l[i]);
 	if ( answer == PT_MAKE ) {
 		start();
 	} else {
@@ -655,12 +694,13 @@ static void ask_make( void )
 static void show_info( void )
 {
 	const BPKARC	*a = &book.arc;
-	char		l[7][ARC_NAME_MAX + 96], v[32], p[16];
+	char		l[7][96], *l0, v[32], p[16];
 	const char	*lines[7];
 	INT		i;
 
 	if ( state != S_BOOK ) return;
-	snprintf(l[0], sizeof(l[0]), "書籍名：%s", a->name);
+	l0 = line_of("書籍名：%s", a->name);		/* the name whole; the others are figures */
+	snprintf(l[0], sizeof(l[0]), "書籍名：");
 	local_time(a->head.time, v);
 	snprintf(l[1], sizeof(l[0]), "書籍作成日時：%s", v);
 	grouped(a->head.filesize, v);
@@ -674,9 +714,11 @@ static void show_info( void )
 	snprintf(l[5], sizeof(l[0]), "圧縮方式：%s", ( a->method == BPK_LH5 ) ? "LH5" : "無圧縮");
 	snprintf(l[6], sizeof(l[0]), "CRC：%s", a->crcok ? "一致" : "不一致");
 	for ( i = 0; i < 7; i++ ) lines[i] = l[i];
+	if ( l0 != NULL ) lines[0] = l0;
 	ui_place();
 	log_line("info shown");
 	(void)ui_ask(&ui, PN_INFO, lines, 7);
+	free(l0);
 	log_line("info put away");
 	dirty = TRUE;
 }
@@ -806,11 +848,22 @@ static void read_archive( void )
 	INT		asz;
 	ID		k = ob_opn_obj(&archive, OB_OP_ATRRD);
 
-	strncpy(arcname, "書庫管理", sizeof(arcname) - 1);
+	arcname = arc_default;
 	if ( k <= 0 ) return;
 	asz = ob_atr_read(k, 0, &meta);
 	if ( asz >= 0 && js_parse(meta, asz, &root) >= E_OK ) {
-		(void)js_get_str(&root, "name", (UB *)arcname, sizeof(arcname));
+		T_JSON	nv;
+		char	*nm;
+
+		/* the name whole: unescaped, a string is never longer than its text */
+		if ( js_get(&root, "name", &nv) >= E_OK && js_type(&nv) == JS_STRING
+		  && ( nm = (char *)malloc((size_t)nv.len + 1) ) != NULL ) {
+			if ( js_str(&nv, (UB *)nm, nv.len + 1) > 0 ) {
+				arcname = nm;
+			} else {
+				free(nm);
+			}
+		}
 		if ( js_get(&root, "window", &w) >= E_OK && js_get_str(&w, "backgroundColor", col, sizeof(col)) > 0
 		  && col[0] == '#' ) {
 			ground = (UINT)strtoul((const char *)col + 1, NULL, 16) & 0xFFFFFF;

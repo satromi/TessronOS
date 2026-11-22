@@ -9,15 +9,14 @@
 
 /*
  *	fg_link.c
- *	基本図形編集 as a process: the 仮身操作 and 実身操作 of a link in the
- *	figure (design 11.3)
+ *	基本図形編集 as a process: the 仮身操作, 実身操作 and 実行 of a link in
+ *	the figure (design 11.3, 11.2.6)
  *
- *	What needs the desktop -- its panels, the store's names and copies
- *	-- is asked of it (ts/dtreq.h) as for any program's link; what comes
- *	back the link is to become is written into the record here, as one
- *	change that can be taken back. 起動アプリの固定 is the link's own
- *	applist, written here: fixed, it is given the applist its object has
- *	now (else its own) with "defaultOpenLock" on the entry it opens with.
+ *	The items, the requests to the desktop and what is done with its
+ *	answers are the shared part's (lib/libtv/tv_vop.c). What is the
+ *	figure's is here: a link of the record made a T_TVLINK, what the
+ *	desktop answers written into the record as one change that can be
+ *	taken back, and where a link to a new copy goes.
  */
 
 #include "fg.h"
@@ -30,34 +29,6 @@
 
 #define NEW_VERSION_STEP	8	/* 新版作成: the copy's link over the old, so much down and across */
 #define DUPLICATE_STEP		16	/* 実身複製 */
-
-/*
- * A request about the object of link v, its look said; its relationship
- * and its applist go in the tail of the next ask_desktop
- */
-void fg_ask_of( CONST T_VOBJ *v, UINT req, T_DTREQ *rq )
-{
-	memset(rq, 0, sizeof(*rq));
-	rq->req = req;
-	rq->target = v->target;
-	rq->recno = -1;
-	rq->look.w = v->right - v->left;
-	rq->look.h = v->bottom - v->top;
-	rq->look.chsz = v->chsz;
-	rq->look.frcol = v->frcol;
-	rq->look.chcol = v->chcol;
-	rq->look.tbcol = v->tbcol;
-	rq->look.bgcol = v->bgcol;
-	rq->look.disp = v->disp;
-	rq->look.autoopen = v->autoopen ? 1 : 0;
-	dt_req_was(rq, v->left, v->top, v->right, v->bottom);	/* where it is in the figure's record */
-	if ( v->vrel_len > 0 ) ta_req_part(DT_TAIL_REL, v->vrel, v->vrel_len);
-	if ( v->hidden ) rq->flags |= DT_F_HIDDEN;
-	if ( v->vapplist_len > 0 ) {
-		ta_req_part(DT_TAIL_APPLIST, v->vapplist, v->vapplist_len);
-		rq->flags |= DT_F_APPLIST;
-	}
-}
 
 /*
  * The name a link shows: its object's, whole, as the store has it now,
@@ -75,167 +46,93 @@ CONST char *fg_link_name( CONST T_VOBJ *v )
 	return (CONST char *)TAD_VS(v->vname);
 }
 
-/* ---------------------------------------------------------------- applists */
+/* ---------------------------------------------------------------- the figure's part */
 
-static BOOL space( UB c )
+/* What the desktop answered, written into the link and the record, as one change */
+static BOOL vop_put( T_TVLINK *l, UINT what, CONST T_TVPUT *p )
 {
-	return (BOOL)( c == ' ' || c == '\t' || c == '\r' || c == '\n' );
-}
+	T_VOBJ		*v = (T_VOBJ *)l->app;
+	CONST T_DTANS	*an = p->an;
 
-/* The entry an applist opens with: the member whose "defaultOpen" is true */
-static BOOL app_default( CONST UB *json, INT n, T_JSON *entry )
-{
-	T_JSON	root, it;
-
-	if ( n <= 0 || js_parse(json, n, &root) < E_OK || js_type(&root) != JS_OBJECT ) return FALSE;
-	it.s = NULL;
-	it.len = 0;
-	while ( js_next(&root, &it) ) {
-		if ( js_type(&it) == JS_OBJECT && js_get_bool(&it, "defaultOpen", FALSE) ) {
-			*entry = it;
-			return TRUE;
-		}
-	}
-	return FALSE;
-}
-
-BOOL fg_app_locked( CONST T_VOBJ *v )
-{
-	T_JSON	e;
-
-	return (BOOL)( app_default(TAD_VS(v->vapplist), (INT)v->vapplist_len, &e)
-		    && js_get_bool(&e, "defaultOpenLock", FALSE) );
-}
-
-/* n bytes of s put at out[*at], and a terminator after them */
-static void put( UB *out, INT *at, CONST UB *s, INT n )
-{
-	memcpy(out + *at, s, (size_t)n);
-	*at += n;
-	out[*at] = 0;
-}
-
-/*
- * The applist json with "defaultOpenLock" as keep says on its default
- * entry, in memory of its own (*p_out, to be freed): the length,
- * E_NOEXS when it has no default entry, E_NOMEM.
- */
-static INT app_lock( CONST UB *json, INT n, BOOL keep, UB **p_out )
-{
-	T_JSON		e, old;
-	CONST UB	*word = (CONST UB *)( keep ? "true" : "false" );
-	INT		at, end, k = 0, wn = (INT)strlen((CONST char *)word);
-	UB		*out;
-
-	*p_out = NULL;
-	if ( !app_default(json, n, &e) ) return E_NOEXS;
-	out = (UB *)malloc((size_t)n + 32);	/* the json, its key and the word added */
-	if ( out == NULL ) return E_NOMEM;
-	if ( js_get(&e, "defaultOpenLock", &old) >= E_OK ) {
-		at = (INT)( old.s - json );
-		end = at + old.len;
-		put(out, &k, json, at);
-		put(out, &k, word, wn);
-		put(out, &k, json + end, n - end);
-	} else {
-		/* before the entry's closing brace, after what it has */
-		end = (INT)( e.s - json ) + e.len - 1;
-		for ( at = end; at > 0 && space(json[at - 1]); at-- ) ;
-		put(out, &k, json, at);
-		put(out, &k, (CONST UB *)( ( json[at - 1] == '{' ) ? "\"defaultOpenLock\":" : ",\"defaultOpenLock\":" ),
-		    ( json[at - 1] == '{' ) ? 18 : 19);
-		put(out, &k, word, wn);
-		put(out, &k, json + end, n - end);
-	}
-	*p_out = out;
-	return k;
-}
-
-/*
- * 起動アプリの固定 turned over: the applist the object has now, or the
- * link's own when the object has none, written into the link with the
- * default entry fixed or let go
- */
-static void app_keep( T_VOBJ *v )
-{
-	T_JSON	root, al;
-	UB	*m = NULL, *out = NULL;
-	BOOL	keep = (BOOL)!fg_app_locked(v);
-	INT	n = -1, mn;
-	ID	k = ob_opn_obj(&v->target, OB_OP_ATRRD);
-	char	s[96];
-	ER	er;
-
-	if ( k > 0 ) {
-		mn = ob_atr_read(k, 0, &m);
-		ob_cls_obj(k);
-		if ( mn > 0 && js_parse(m, mn, &root) >= E_OK && js_get(&root, "applist", &al) >= E_OK ) {
-			n = app_lock(al.s, al.len, keep, &out);
-		}
-		free(m);
-	}
-	if ( n == E_NOEXS || n == -1 ) {
-		n = app_lock(TAD_VS(v->vapplist), (INT)v->vapplist_len, keep, &out);
-	}
-	if ( n == E_NOMEM ) {
-		tell("メモリが足りないため、この操作をできませんでした", "データは操作の前のままです");
-		return;
-	}
-	if ( n < 0 ) {
-		tell("起動アプリを持たない実身です", NULL);
-		return;
-	}
-	er = tad_vobj_set(v, TAD_W_APPLIST, out, n);
-	free(out);
-	if ( er < E_OK ) {
-		tell("メモリが足りないため、この操作をできませんでした", "データは操作の前のままです");
-		return;
+	if ( what == TV_VOP_W_LOOK ) {
+		v->right = v->left + an->look.w;
+		v->bottom = v->top + an->look.h;
+		v->height = an->look.h;
+		v->chsz = an->look.chsz;
+		v->frcol = an->look.frcol;
+		v->chcol = an->look.chcol;
+		v->tbcol = an->look.tbcol;
+		v->bgcol = an->look.bgcol;
+		v->disp = an->look.disp;
+		v->autoopen = (BOOL)( an->look.autoopen != 0 );
+		v->hidden = (BOOL)( ( an->flags & DT_F_HIDDEN ) != 0 );
+	} else if ( tad_vobj_set(v, ( what == TV_VOP_W_REL ) ? TAD_W_REL : TAD_W_APPLIST,
+				 ( p->len > 0 ) ? p->text : NULL, ( p->len > 0 ) ? p->len : 0) < E_OK ) {
+		return FALSE;
 	}
 	fg_before();
 	(void)tad_lnk_set(g_rec, v);
 	fg_after();
-	snprintf(s, sizeof(s), "%s %.60s", keep ? "kept" : "let go", fg_link_name(v));
-	note(s);
+	return TRUE;
+}
+
+/* 実身複製 and 新版作成: the copy's link a step down and across from the link */
+static void vop_put_copy( T_TVLINK *l, CONST TS_UUID *copy, UINT why )
+{
+	INT	step = ( why == TV_VOP_C_DUP ) ? DUPLICATE_STEP : NEW_VERSION_STEP;
+
+	fg_link_copy_put((CONST T_VOBJ *)l->app, copy, step, step);
+}
+
+static void vop_changed( void )
+{
+	g_changed = TRUE;
+}
+
+/* The box's own way of opening a link (ウインドウ一覧 brings the window that shows it to the front) */
+static BOOL vop_open( T_TVLINK *l )
+{
+	return (BOOL)( fg_box != NULL && fg_box->open != NULL && fg_box->open((CONST T_VOBJ *)l->app) );
+}
+
+CONST T_TVVOP *fg_vop( void )
+{
+	static T_TVVOP	h;
+
+	if ( h.put == NULL ) {
+		ta_tv_asker(&h.ask);
+		/*
+		 * the figure is drawn scaled: the desktop is told the links' sizes
+		 * in the record, and asked how they stand before the menu shows
+		 */
+		h.flags = TV_VOP_F_STATE | TV_VOP_F_DISK | TV_VOP_F_REC_SIZE;
+		h.note = note;
+		h.say = say;
+		h.named = ta_tv_named;
+		h.put = vop_put;
+		h.put_copy = vop_put_copy;
+		h.changed = vop_changed;
+		h.open = vop_open;
+		h.forget = tv_src_forget;
+	}
+	return &h;
+}
+
+void fg_tvlink( T_TVLINK *l, CONST T_VOBJ *v, CONST T_DPRECT *box )
+{
+	tv_vop_vobj(l, v, box);
+	l->app = (void *)v;
 }
 
 /* ---------------------------------------------------------------- the menu */
 
-/* 仮身操作 and 実身操作 set for link v under the pointer, or grey when there is none */
-void fg_link_menu( ID mid, CONST T_VOBJ *v )
+INT fg_link_menu( ID mid, CONST T_VOBJ *v )
 {
-	T_OBREF	ref;
-	T_DTREQ	rq;
-	T_DTANS	an;
-	BOOL	cut, kept, open = FALSE, lockable = TRUE, detach = FALSE, grow = FALSE;
+	T_TVLINK	l;
 
-	if ( v == NULL ) {
-		(void)mn_chg_atr(mid, NULL, "vobj", MN_GREY);
-		(void)mn_chg_atr(mid, NULL, "real", MN_GREY);
-		/* ディスク操作 away from a link: 切り離し is of a disk's link, 拡張 of the system's volume */
-		(void)mn_chg_atr(mid, NULL, "disk.detach", MN_GREY);
-		return;
-	}
-	cut = (BOOL)( ob_ref_obj(&v->target, &ref) < E_OK );
-	kept = fg_app_locked(v);
-	/* whether the object is open, and has a program to be fixed to, as the desktop sees it */
-	fg_ask_of(v, DT_RQ_LINK_STATE, &rq);
-	memset(&an, 0, sizeof(an));
-	if ( ask_desktop(&rq, &an, 3000) >= E_OK ) {
-		open = (BOOL)( ( an.flags & DT_F_OPEN ) != 0 );
-		lockable = (BOOL)( ( an.flags & DT_F_LOCKABLE ) != 0 );
-		detach = (BOOL)( ( an.flags & DT_F_DETACHABLE ) != 0 );
-		grow = (BOOL)( ( an.flags & DT_F_GROWABLE ) != 0 );
-	}
-	(void)mn_chg_atr(mid, NULL, "disk.detach", detach ? 0 : MN_GREY);
-	(void)mn_chg_atr(mid, NULL, "disk.grow", grow ? 0 : MN_GREY);
-	(void)mn_chg_atr(mid, NULL, "vobj.open", ( open || cut ) ? MN_GREY : 0);
-	(void)mn_chg_atr(mid, NULL, "vobj.close", open ? 0 : MN_GREY);
-	(void)mn_chg_atr(mid, NULL, "vobj.reconnect", cut ? 0 : MN_HIDE);
-	(void)mn_chg_atr(mid, NULL, "real.rename", cut ? MN_GREY : 0);
-	(void)mn_chg_atr(mid, NULL, "real.duplicate", cut ? MN_GREY : 0);
-	(void)mn_chg_atr(mid, NULL, "real.newversion", cut ? MN_GREY : 0);
-	(void)mn_chg_atr(mid, NULL, "real.lock", kept ? MN_HIDE : ( cut || !lockable ) ? MN_GREY : 0);
-	(void)mn_chg_atr(mid, NULL, "real.unlock", !kept ? MN_HIDE : cut ? MN_GREY : 0);
+	if ( v == NULL ) return tv_vop_menu(fg_vop(), mid, NULL);
+	fg_tvlink(&l, v, NULL);
+	return tv_vop_menu(fg_vop(), mid, &l);
 }
 
 /* A link to a copy of v's object put a step down and across from v, as one change */
@@ -249,7 +146,7 @@ void fg_link_copy_put( CONST T_VOBJ *v, CONST TS_UUID *copy, INT dx, INT dy )
 	tad_vobj_init(&c);
 	er = tad_vobj_copy(&c, v);
 	if ( er < E_OK ) {
-		tell("メモリが足りないため、この操作をできませんでした", "データは操作の前のままです");
+		say("メモリが足りないため、この操作をできませんでした");
 		return;
 	}
 	c.target = *copy;
@@ -273,110 +170,23 @@ void fg_link_copy_put( CONST T_VOBJ *v, CONST TS_UUID *copy, INT dx, INT dy )
 	note(s);
 }
 
-/*
- * A link opened: as a double press opens it, unless the box opens it its
- * own way (ウインドウ一覧 brings the window that shows it to the front)
- */
+/* A link opened: as a double press opens it, unless the box opens it its own way */
 void fg_open( CONST T_VOBJ *v )
 {
-	if ( fg_box != NULL && fg_box->open != NULL && fg_box->open(v) ) return;
-	link_open(v);
+	T_TVLINK	l;
+
+	fg_tvlink(&l, v, NULL);
+	(void)tv_vop_open(fg_vop(), &l);
 }
 
-/*
- * One of the 仮身操作 and 実身操作 on link v, by its code (the link as the
- * menu found it under the pointer)
- */
-void fg_link_op( CONST char *code, T_VOBJ *v )
+BOOL fg_link_op( CONST char *code, INT index, T_VOBJ *v )
 {
-	T_DTREQ	rq;
-	T_DTANS	an;
-	char	s[FG_LOG];
-	ER	er;
+	T_TVLINK	l;
 
-	memset(&an, 0, sizeof(an));
-	if ( strcmp(code, "vobj.open") == 0 ) {
-		fg_open(v);
-	} else if ( strcmp(code, "vobj.close") == 0 ) {
-		fg_ask_of(v, DT_RQ_CLOSE, &rq);
-		(void)ask_desktop(&rq, &an, 5000);
-	} else if ( strcmp(code, "vobj.attr") == 0 ) {
-		fg_ask_of(v, DT_RQ_ATTR, &rq);
-		(void)ta_link_named(&rq, &v->vobjid);	/* the windows opened from it told its new look */
-		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-			fg_before();
-			v->right = v->left + an.look.w;
-			v->bottom = v->top + an.look.h;
-			v->height = an.look.h;
-			v->chsz = an.look.chsz;
-			v->frcol = an.look.frcol;
-			v->chcol = an.look.chcol;
-			v->tbcol = an.look.tbcol;
-			v->bgcol = an.look.bgcol;
-			v->disp = an.look.disp;
-			v->autoopen = (BOOL)( an.look.autoopen != 0 );
-			v->hidden = (BOOL)( ( an.flags & DT_F_HIDDEN ) != 0 );
-			(void)tad_lnk_set(g_rec, v);
-			fg_after();
-			snprintf(s, sizeof(s), "attr %s chsz %d bgcol %06x", fg_link_name(v), (INT)v->chsz,
-				 (UINT)( v->bgcol & 0x00FFFFFFU ));
-			note(s);
-		}
-	} else if ( strcmp(code, "vobj.relation") == 0 ) {
-		fg_ask_of(v, DT_RQ_RELATION, &rq);
-		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-			SZ		tl = 0;
-			CONST UB	*t = ta_ans_part(DT_TAIL_TEXT, &tl);
-
-			if ( tad_vobj_set(v, TAD_W_REL, t, tl) < E_OK ) {
-				tell("メモリが足りないため、この操作をできませんでした", "データは操作の前のままです");
-				return;
-			}
-			fg_before();
-			(void)tad_lnk_set(g_rec, v);
-			fg_after();
-			snprintf(s, sizeof(s), "relation %.80s [%.80s]", fg_link_name(v), (CONST char *)TAD_VS(v->vrel));
-			note(s);
-		}
-	} else if ( strcmp(code, "vobj.reconnect") == 0 ) {
-		T_OBREF	ref;
-
-		tv_src_forget(&v->target);
-		if ( ob_ref_obj(&v->target, &ref) < E_OK ) tell("実身に接続できませんでした", NULL);
-	} else if ( strcmp(code, "real.rename") == 0 ) {
-		fg_ask_of(v, DT_RQ_RENAME, &rq);
-		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-			CONST UB	*t = ta_ans_part(DT_TAIL_TEXT, NULL);
-
-			tv_src_forget(&v->target);
-			snprintf(s, sizeof(s), "renamed %.120s", (CONST char *)TAD_VS(t));
-			note(s);
-		}
-	} else if ( strcmp(code, "real.duplicate") == 0 || strcmp(code, "real.newversion") == 0 ) {
-		BOOL	dup = (BOOL)( code[5] == 'd' );
-
-		fg_ask_of(v, dup ? DT_RQ_DUPLICATE : DT_RQ_NEWVER, &rq);
-		er = ask_desktop(&rq, &an, 30 * 60 * 1000);
-		if ( er >= E_OK ) {
-			INT	step = dup ? DUPLICATE_STEP : NEW_VERSION_STEP;
-
-			fg_link_copy_put(v, &an.into, step, step);
-			snprintf(s, sizeof(s), "%s %s", dup ? "duplicated" : "new version", fg_link_name(v));
-			note(s);
-		}
-	} else if ( strcmp(code, "real.lock") == 0 || strcmp(code, "real.unlock") == 0 ) {
-		app_keep(v);
-	} else if ( strcmp(code, "real.info") == 0 ) {
-		fg_ask_of(v, DT_RQ_INFO, &rq);
-		(void)ask_desktop(&rq, &an, 5000);
-	} else if ( strcmp(code, "real.network") == 0 ) {
-		fg_ask_of(v, DT_RQ_NETWORK, &rq);
-		(void)ask_desktop(&rq, &an, 5000);
-	} else if ( strcmp(code, "real.search") == 0 ) {
-		fg_ask_of(v, DT_RQ_SEARCH, &rq);
-		(void)ask_desktop(&rq, &an, 30 * 60 * 1000);
-	}
+	fg_tvlink(&l, v, NULL);
+	if ( !tv_vop_command(fg_vop(), &l, code, index) ) return FALSE;
 	g_dirty = TRUE;
+	return TRUE;
 }
 
 /* ---------------------------------------------------------------- 整頓 */

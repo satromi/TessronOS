@@ -49,7 +49,8 @@ typedef struct {
 LOCAL EV	*ev;
 LOCAL INT	nev;
 LOCAL RT_TIME	clk;
-LOCAL SIM	sim[RT_MEDIA_MAX];
+#define SIM_MAX	300
+LOCAL SIM	sim[SIM_MAX];
 
 LOCAL INT s_len( CONST char *s )
 {
@@ -170,7 +171,7 @@ LOCAL void media_tick( RT *rt )
 {
 	INT	k;
 
-	for ( k = 0; k < rt_nmedia(rt) && k < RT_MEDIA_MAX; k++ ) {
+	for ( k = 0; k < rt_nmedia(rt) && k < SIM_MAX; k++ ) {
 		RT_MEDIA *m = rt_media(rt, k);
 
 		if ( sim[k].state == 1 && clk >= sim[k].until ) {
@@ -935,6 +936,224 @@ LOCAL void test_binary( void )
 	Kfree(w);
 }
 
+/* ---------------------------------------------------------------- more than the old tables held */
+
+typedef struct {
+	char	*s;
+	INT	n, max;
+} SB;
+
+LOCAL void sb_add( SB *b, CONST char *t )
+{
+	while ( *t != 0 && b->n < b->max - 1 ) b->s[b->n++] = *t++;
+	b->s[b->n] = 0;
+}
+
+LOCAL void sb_num( SB *b, INT v )
+{
+	char	t[12];
+	INT	i = 0, j;
+
+	if ( v == 0 ) t[i++] = '0';
+	while ( v > 0 ) {
+		t[i++] = (char)( '0' + v % 10 );
+		v /= 10;
+	}
+	for ( j = i - 1; j >= 0 && b->n < b->max - 1; j-- ) b->s[b->n++] = t[j];
+	b->s[b->n] = 0;
+}
+
+/* name + number */
+LOCAL void sb_id( SB *b, CONST char *name, INT k )
+{
+	sb_add(b, name);
+	sb_num(b, k);
+}
+
+/*
+ * A program with 20 <realData>, 40 streams, 20 unit systems of 20
+ * auxiliary units, 100 media, 20 error handlers, 100 triggers, 100
+ * groups waiting at once, 200 changes over time at once, a <keyframes>
+ * of 40 and an <interpolate> of 40 values, an <if> 40 deep: every one of
+ * them is past what the tables of the engine used to hold.
+ */
+LOCAL INT make_many( SB *b )
+{
+	INT	k;
+
+	sb_add(b, "<tad version=\"1.0\" encoding=\"UTF-8\">\n<realtime autoplay=\"true\">\n");
+	for ( k = 0; k < 100; k++ ) {
+		sb_add(b, "<audio trigger=\"manual\" preload=\"none\" id=\"");
+		sb_id(b, "a", k);
+		sb_add(b, "\" href=\"");
+		sb_id(b, "m", k);
+		sb_add(b, ".mp3\"/>\n");
+	}
+	sb_add(b, "<realData>\n");
+	for ( k = 0; k < 40; k++ ) {
+		sb_add(b, "<stream number=\"");
+		sb_num(b, k + 1);
+		sb_add(b, "\"><deviceName>inst:Piano</deviceName></stream>\n");
+	}
+	for ( k = 0; k < 20; k++ ) {
+		INT	j;
+
+		sb_add(b, "<unitSystem id=\"");
+		sb_num(b, k);
+		sb_add(b, "\"><primaryUnit><dimension>s</dimension><derivation ratio=\"1/1\" sexp=\"0\"/></primaryUnit>\n");
+		for ( j = 0; j < 20; j++ ) {
+			sb_add(b, "<auxiliaryUnit number=\"");
+			sb_num(b, j);
+			sb_add(b, "\" name=\"u\" derivation=\"1/10\"/>");
+		}
+		sb_add(b, "</unitSystem>\n");
+	}
+	/* 20 handlers of the block: the 20th is the one that takes a medium not found */
+	for ( k = 0; k < 20; k++ ) {
+		sb_add(b, ( k < 19 ) ? "<onerror type=\"timeout\">" : "<onerror type=\"notfound\">");
+		sb_add(b, "<assign var=\"0x0010\"><expr><const value=\"7\"/></expr></assign></onerror>\n");
+	}
+	sb_add(b, "<audio id=\"bad\" href=\"missing.mp3\"/>\n");
+	for ( k = 0; k < 100; k++ ) {
+		sb_add(b, "<trigger event=\"keydown\" key=\"Space\" id=\"");
+		sb_id(b, "t", k);
+		sb_add(b, "\"><assign var=\"0x0001\"><expr><var id=\"0x0001\"/><const value=\"1\"/><op type=\"add\"/></expr></assign></trigger>\n");
+	}
+	/* 100 groups alive together, each to sound a note at 50 ms */
+	for ( k = 0; k < 100; k++ ) {
+		sb_add(b, "<realGroup type=\"parallel\"><timeDelta value=\"50\"/><note pitch=\"");
+		sb_num(b, 30 + k % 20);
+		sb_add(b, "\" duration=\"5\" unit=\"ms\"/></realGroup>\n");
+	}
+	/* 200 changes of 200 shapes at once */
+	for ( k = 0; k < 200; k++ ) {
+		sb_add(b, "<realGroup type=\"parallel\"><shapeControl ref=\"");
+		sb_id(b, "s", k);
+		sb_add(b, "\" command=\"setAlpha\" value=\"0.0\" duration=\"100\"/></realGroup>\n");
+	}
+	/* 40 keyframes */
+	sb_add(b, "<keyframes ref=\"box1\" property=\"left\" duration=\"100\" function=\"linear\">\n");
+	for ( k = 0; k < 40; k++ ) {
+		sb_add(b, "<keyframe offset=\"");
+		sb_num(b, ( k < 39 ) ? k * 2 : 100);
+		sb_add(b, "%\" value=\"");
+		sb_num(b, k * 10);
+		sb_add(b, "\"/>\n");
+	}
+	sb_add(b, "</keyframes>\n");
+	/* 40 values of one interpolation */
+	sb_add(b, "<interpolate function=\"linear\" divisions=\"2\"><timeDelta value=\"1\" unit=\"ms\"/>\n");
+	for ( k = 1; k <= 40; k++ ) {
+		sb_add(b, "<shapeControl ref=\"s250\" command=\"setAlpha\" value=\"0.");
+		sb_add(b, ( k < 10 ) ? "0" : "");
+		sb_num(b, k);
+		sb_add(b, "\"/>\n");
+	}
+	sb_add(b, "</interpolate>\n");
+	/* a unit of the 20th system's 20th auxiliary unit: 1/10 s */
+	sb_add(b, "<realGroup type=\"parallel\"><unitSpec unitId=\"19\" unitNumber=\"19\"/><timeDelta value=\"1\"/>"
+		  "<note pitch=\"55\" duration=\"5\" unit=\"ms\"/></realGroup>\n");
+	/* an <if> 40 deep */
+	for ( k = 0; k < 40; k++ ) sb_add(b, "<if><expr><const value=\"1\"/></expr><then>");
+	sb_add(b, "<note pitch=\"99\" duration=\"5\" unit=\"ms\"/>");
+	for ( k = 0; k < 40; k++ ) sb_add(b, "</then></if>");
+	sb_add(b, "\n<timeDelta value=\"500\" unit=\"ms\"/><note pitch=\"98\" duration=\"5\" unit=\"ms\"/>\n</realData>\n");
+	for ( k = 1; k < 20; k++ ) sb_add(b, "<realData><note pitch=\"60\" duration=\"5\" unit=\"ms\"/></realData>\n");
+	sb_add(b, "</realtime>\n</tad>\n");
+	return b->n;
+}
+
+LOCAL void test_many( void )
+{
+	static CONST INPUT in[1] = { { 300 * MS, RT_IN_KEYDOWN, "Space" } };
+	SB	b;
+	/* 40 <if> inside each other is deeper than the parser's default of 32 */
+	char	(*ids)[8];
+	T_TADLIM	lim = { 128, TAD_DEF_NODES, TAD_DEF_ATTRS, TAD_DEF_ATTRLEN, TAD_DEF_DOCSIZE };
+	T_TAD	*doc = NULL;
+	RT	*rt = NULL;
+	RT_OBJ	*o;
+	CONST EV *e;
+	INT	k, n99 = 0, n55 = 0, nnote = 0;
+
+	b.max = 128 * 1024;
+	b.n = 0;
+	b.s = (char *)Kmalloc(b.max);
+	if ( b.s == NULL ) return;
+	b.s[0] = 0;
+	make_many(&b);
+
+	reset();
+	KT_ASSERT_ER(tad_parse((CONST UB *)b.s, b.n, &lim, &doc), E_OK);
+	if ( doc == NULL ) {
+		Kfree(b.s);
+		return;
+	}
+	KT_ASSERT_ER(rt_new(rt_find(doc), &host, &rt), E_OK);
+	if ( rt == NULL ) {
+		tad_free(doc);
+		Kfree(b.s);
+		return;
+	}
+	KT_ASSERT_EQ(rt_nmedia(rt), 101);		/* the 100 and the one not found */
+	KT_ASSERT_EQ(rt_nstream(rt), 40);
+	KT_ASSERT(rt_stream_of(rt, 40) != NULL);
+	/* an object keeps the address of its id, so each id has a place that lasts */
+	ids = (char (*)[8])Kmalloc(sizeof(char[8]) * 300);
+	if ( ids == NULL ) {
+		unload(doc, rt);
+		Kfree(b.s);
+		return;
+	}
+	for ( k = 0; k < 300; k++ ) {
+		SB	t;
+		T_DPRECT r;
+
+		t.s = ids[k];
+		t.n = 0;
+		t.max = 8;
+		sb_id(&t, "s", k);
+		if ( !rt_wants(rt, (CONST UB *)ids[k]) ) continue;
+		r.left = 100; r.top = 100; r.right = 200; r.bottom = 200;
+		(void)rt_bind(rt, (CONST UB *)ids[k], RT_OB_SHAPE, &r, 10, NULL);
+	}
+	{
+		T_DPRECT r;
+
+		r.left = 100; r.top = 100; r.right = 200; r.bottom = 200;
+		(void)rt_bind(rt, (CONST UB *)"box1", RT_OB_SHAPE, &r, 10, NULL);
+	}
+	KT_ASSERT(rt_nobj(rt) >= 202);		/* the 200 changed, s250 and box1 */
+	rt_start(rt, 0);
+	/* the variables last one <realData>: they are read while the first is still playing */
+	run_to(rt, 450 * MS, in, 1);
+	KT_ASSERT_EQ(rt_var(rt, 1), 100);		/* 100 triggers answered the key */
+	KT_ASSERT_EQ(rt_var(rt, 0x10), 7);		/* the 20th handler took the error */
+	run_to(rt, 5000 * MS, in, 1);
+	KT_ASSERT(rt_done(rt));
+	KT_ASSERT_EQ(rt_var(rt, RT_SV_BLOCK), 20);	/* and all 20 blocks played */
+	o = rt_obj(rt, rt_obj_find(rt, (CONST UB *)"s199"));
+	KT_ASSERT(o != NULL && o->p[RT_P_ALPHA] == 0);		/* the 200th change took place */
+	o = rt_obj(rt, rt_obj_find(rt, (CONST UB *)"box1"));
+	KT_ASSERT(o != NULL && o->p[RT_P_LEFT] == 390 * RT_ONE);	/* the 40th keyframe */
+	o = rt_obj(rt, rt_obj_find(rt, (CONST UB *)"s250"));
+	KT_ASSERT(o != NULL && o->p[RT_P_ALPHA] == 400000);	/* the 40th value */
+	for ( k = 0; ( e = note(k) ) != NULL; k++ ) {
+		nnote++;
+		if ( e->a == 99 ) n99++;
+		if ( e->a == 55 ) {
+			n55++;
+			KT_ASSERT_EQ(e->at, 100 * MS);	/* 1 of the 20th auxiliary unit of the 20th system */
+		}
+	}
+	KT_ASSERT_EQ(n99, 1);				/* the note 40 blocks deep */
+	KT_ASSERT_EQ(n55, 1);
+	KT_ASSERT_EQ(nnote, 100 + 1 + 1 + 1 + 19);	/* 100 groups, 99, 55, 98, one in each of the 19 others */
+	unload(doc, rt);
+	Kfree(ids);
+	Kfree(b.s);
+}
+
 EXPORT void ktest_rt( void )
 {
 	ev = (EV *)Kmalloc(sizeof(EV) * NEV);
@@ -951,6 +1170,7 @@ EXPORT void ktest_rt( void )
 	KT_RUN(test_clock);
 	KT_RUN(test_slide);
 	KT_RUN(test_binary);
+	KT_RUN(test_many);
 	Kfree(ev);
 	ev = NULL;
 }

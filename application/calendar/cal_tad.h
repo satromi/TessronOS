@@ -41,6 +41,7 @@
 #include <ts/dtreq.h>
 #include <ts/ob.h>
 #include <ts/vobjsz.h>
+#include <ts/tvvop.h>
 
 /* The month's grid as the record has it */
 #define CT_BASE_W	800
@@ -320,5 +321,30 @@ IMPORT BOOL ct_link_of( CONST UB *x, INT n, CONST TS_UUID *vobjid, CTEL *p_el );
 
 /* A colour "#rrggbb" of a JSON object's member by its path ("window", "backgroundColor"), or dflt */
 IMPORT UW   ct_json_colour( CONST UB *json, INT n, CONST char *outer, CONST char *name, UW dflt );
+
+/* ---------------------------------------------------------------- 仮身操作 (ts/tvvop.h) */
+
+/*
+ * The link el (n bytes) as T_TVLINK says it, for the 仮身操作 of the
+ * program's window: its object and vobjid, its box in the record, its
+ * look, and its relationship, applist and viewMode with their escapes
+ * undone, written into words (room bytes; CT_VOP_ROOM(n) holds them
+ * all), which the T_TVLINK borrows. Its box in the window and the
+ * program's own (box, app) are the caller's to set. FALSE when it names
+ * no object.
+ */
+#define CT_VOP_ROOM(n)	( (n) + 4 )
+IMPORT BOOL ct_vop_link( T_TVLINK *l, CONST UB *el, INT n, UB *words, INT room );
+
+/*
+ * The look the desktop's 仮身属性変更 answered (TV_VOP_W_LOOK) as the
+ * attributes to set in the link, for ct_link_edit: their texts in t; how
+ * many (at most CT_VOP_LOOK_SET)
+ */
+#define CT_VOP_LOOK_SET	13
+typedef struct {
+	char	col[4][8], chsz[12];
+} CTVOPTXT;
+IMPORT INT  ct_vop_look( CONST T_DTANS *an, CTSET *set, CTVOPTXT *t );
 
 #endif /* __CAL_TAD_H__ */

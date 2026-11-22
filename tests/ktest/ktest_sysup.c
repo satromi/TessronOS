@@ -384,6 +384,14 @@ LOCAL void test_sysup( void )
 	KT_ASSERT(text[0] == 'R' && text[1] == '9' && text[6] == '\t' && text[7] == 'R');
 	knl_strncpy(ver, (CONST char *)text + 7, sizeof(ver) - 1);
 	ver[sizeof(ver) - 1] = 0;
+	/* "PACKAGE<tab>SYSTEM<tab>CONVERT" (11.8.1): the package names no "tsfs_format", so nothing is converted */
+	{
+		char	*t = ver;
+
+		while ( *t != 0 && *t != '\t' ) t++;
+		KT_ASSERT(t[0] == '\t' && t[1] == '0' && t[2] == 0);
+		*t = 0;
+	}
 	tm_printf((UB *)"ktest sysup: package R9.999, system %s\n", ver);
 
 	/* refused: another machine, another processor, the same version, not a system's */

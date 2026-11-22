@@ -838,6 +838,93 @@ LOCAL void test_tad_doc( void )
 	}
 }
 
+/*
+ * A memo longer than the 511 bytes it was cut at, and a ruler of more
+ * tabs than the 64 it kept: the memo's segment holds every letter (one
+ * TRON character for each of the 300 letters, after its first word) and
+ * the ruler every tab
+ */
+#define KT_MEMO_N	300
+#define KT_TABS_N	80
+
+/* The body of the first segment id in a record, its length in *p_body; NULL none */
+LOCAL CONST UB *seg_of( CONST UB *s, INT len, UINT want, UINT *p_body )
+{
+	INT	at = 0;
+	UINT	id, body;
+
+	while ( at + 4 <= len ) {
+		id = rd16(s + at);
+		if ( id < 0xFF80 ) {
+			at += 2;
+			continue;
+		}
+		body = rd16(s + at + 2);
+		at += 4;
+		if ( body == 0xFFFF ) {
+			body = rd32(s + at);
+			at += 4;
+		}
+		if ( id == want ) {
+			*p_body = body;
+			return s + at;
+		}
+		at += (INT)body;
+	}
+	return NULL;
+}
+
+LOCAL void test_tad_long( void )
+{
+	static CONST char head[] = "<tad version=\"1.0\" encoding=\"UTF-8\"><document>"
+				   "<docView viewleft=\"0\" viewtop=\"0\" viewright=\"100\" viewbottom=\"100\"/>"
+				   "<docDraw drawleft=\"0\" drawtop=\"0\" drawright=\"100\" drawbottom=\"100\"/>"
+				   "<docScale hunit=\"-72\" vunit=\"-72\"/><text>"
+				   "<docmemo text=\"";
+	static CONST char mid[] = "\"/><tab-format R=\"0\" P=\"0\" height=\"abs:34\" pargap=\"abs:0\" left=\"0\""
+				  " right=\"0\" indent=\"0\" tabs=\"";
+	static CONST char tail[] = "\"/>a</text></document></tad>";
+	BK_TADSTAT	st;
+	UB		*x, *b;
+	CONST UB	*g;
+	UINT		body = 0;
+	INT		n = 0, len, i, k;
+
+	x = (UB *)Kmalloc(sizeof(head) + KT_MEMO_N * 3 + sizeof(mid) + KT_TABS_N * 6 + sizeof(tail));
+	KT_ASSERT(x != NULL);
+	if ( x == NULL ) return;
+	for ( k = 0; head[k] != 0; k++ ) x[n++] = (UB)head[k];
+	for ( i = 0; i < KT_MEMO_N; i++ ) {
+		x[n++] = 0xE3;  x[n++] = 0x81;  x[n++] = 0x82;	/* あ */
+	}
+	for ( k = 0; mid[k] != 0; k++ ) x[n++] = (UB)mid[k];
+	for ( i = 0; i < KT_TABS_N; i++ ) {
+		INT	v = ( i + 1 ) * 10;
+
+		if ( i > 0 ) x[n++] = ',';
+		if ( v >= 100 ) x[n++] = (UB)( '0' + v / 100 );
+		x[n++] = (UB)( '0' + ( v / 10 ) % 10 );
+		x[n++] = '0';
+	}
+	for ( k = 0; tail[k] != 0; k++ ) x[n++] = (UB)tail[k];
+	b = to_tad(x, n, &len, &st);
+	Kfree(x);
+	KT_ASSERT(b != NULL);
+	if ( b == NULL ) return;
+	KT_ASSERT_ER(bk_tad_check(b, len, NULL, NULL), E_OK);
+	g = seg_of(b, len, 0xFFAE, &body);		/* TS_TMEMO */
+	KT_ASSERT(g != NULL);
+	KT_ASSERT_EQ((INT)body, 2 + 2 * KT_MEMO_N);
+	g = seg_of(b, len, 0xFFA1, &body);		/* TS_TRULER */
+	KT_ASSERT(g != NULL);
+	KT_ASSERT_EQ((INT)body, 14 + 2 * KT_TABS_N);
+	if ( g != NULL && body >= 14 ) {
+		KT_ASSERT_EQ((INT)rd16(g + 12), KT_TABS_N);		/* the count of them */
+		KT_ASSERT_EQ((INT)rd16(g + 14 + 2 * ( KT_TABS_N - 1 )), KT_TABS_N * 10);	/* and the last */
+	}
+	Kfree(b);
+}
+
 EXPORT void ktest_btbk( void )
 {
 	KT_RUN(test_tokens);
@@ -850,6 +937,7 @@ EXPORT void ktest_btbk( void )
 	KT_RUN(test_tad_link_id);
 	KT_RUN(test_tad_box);
 	KT_RUN(test_tad_doc);
+	KT_RUN(test_tad_long);
 
 	if ( outs != NULL ) Kfree(outs);
 	if ( wr != NULL ) Kfree(wr);

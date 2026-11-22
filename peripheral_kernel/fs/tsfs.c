@@ -32,6 +32,7 @@
 #include <ts/tsfsobj.h>
 #include <ts/tsfsck.h>
 #include <ts/tsfsjrnl.h>
+#include <ts/tsfsblk.h>
 #include <ts/json.h>
 #include <ts/proc.h>
 #include <tk/smem.h>
@@ -1054,6 +1055,18 @@ EXPORT ER knl_tsfs_lst_lnk( ID vol, CONST TS_UUID *uuid, T_RLNK *buf, INT n, INT
 	er = ts_obj_lst_lnk(v->bvol, uuid, buf, n, p_cnt);
 	vol_runlock(v);
 	return er;
+}
+
+/* The links one object of the volume may have, 0 for no limit (the FAT store keeps none) */
+EXPORT UINT knl_tsfs_max_link( ID vol )
+{
+	TSFSVOL		*v = vol_of(vol);
+	T_TSFSLIM	lim;
+
+	if ( v == NULL || v->bvol <= 0 || ts_blk_lim(v->bvol, &lim) < E_OK ) {
+		return TSFSO_MAX_LINK;
+	}
+	return lim.max_link;
 }
 
 EXPORT INT knl_tsfs_slots( INT *p_used )
@@ -2283,18 +2296,24 @@ EXPORT ER ts_lst_rec( ID od, T_RREC *buf, INT n, INT *p_cnt )
 	INT	i, got = 0;
 	UD	size;
 
-	if ( o == NULL || buf == NULL || n <= 0 || p_cnt == NULL ) {
+	if ( o == NULL || p_cnt == NULL || n < 0 || ( buf == NULL ) != ( n == 0 ) ) {
 		return E_PAR;
 	}
 	if ( o->vol->bvol > 0 ) {
 		ER er;
 
+		/* with buf NULL and n 0, how many there are */
 		vol_rlock(o->vol);
 		er = ts_obj_lst_rec(o->vol->bvol, &o->uuid, buf, n, p_cnt);
 		vol_runlock(o->vol);
 		return er;
 	}
 	vol_lock(o->vol);
+	if ( buf == NULL ) {
+		*p_cnt = rec_count(o->vol, &o->uuid);
+		vol_unlock(o->vol);
+		return E_OK;
+	}
 
 	for ( i = 0; i < TSFS_MAX_REC && got < n; i++ ) {
 		INT t = rec_type(o->vol, &o->uuid, i, &size);
@@ -2408,12 +2427,11 @@ EXPORT ER ts_del_res( ID od, INT recno, INT resno )
  * number, "_0_bgm.mp3", keeps that part whole as its extension under a
  * number made from it, below 0 so it meets no numbered one.
  */
-LOCAL ER res_key( CONST UB *name, INT *p_rec, INT *p_res, UB *ext )
+LOCAL ER res_key( CONST UB *name, INT *p_rec, INT *p_res, CONST UB **p_ext )
 {
 	CONST UB *rest;
 	INT	i, k, rec = 0, res = 0;
 
-	knl_memset(ext, 0, TSFSO_EXT_LEN);
 	if ( name[0] == '.' ) {
 		/* the icon, and nothing else is named so */
 		if ( !( name[1] == 'i' && name[2] == 'c' && name[3] == 'o' && name[4] == 0 ) ) {
@@ -2447,18 +2465,18 @@ LOCAL ER res_key( CONST UB *name, INT *p_rec, INT *p_res, UB *ext )
 		return E_PAR;
 	}
 	for ( k = 0; rest[k] != 0; k++ ) {
-		if ( k >= TSFSO_EXT_LEN - 1 ) {
-			return E_PAR;			/* no room to keep it */
+		if ( k >= TSFSO_EXT_MAX ) {
+			return E_PAR;			/* longer than any volume keeps */
 		}
-		ext[k] = rest[k];
 	}
 	*p_rec = rec;
 	*p_res = res;
+	*p_ext = rest;				/* what the volume takes, the store decides */
 	return E_OK;
 }
 
-/* And back: the name a native resource is listed by */
-LOCAL INT res_name( CONST T_TSFSRES *r, UB *out, INT max )
+/* And back: the name a native resource is listed by, its extension `ext` */
+LOCAL INT res_name( CONST T_TSFSRES *r, CONST UB *ext, UB *out, INT max )
 {
 	INT	n;
 
@@ -2473,15 +2491,15 @@ LOCAL INT res_name( CONST T_TSFSRES *r, UB *out, INT max )
 			n = s_put(out, n, max, ".");
 		}
 	}
-	return s_put(out, n, max, (CONST char *)r->ext);
+	return s_put(out, n, max, (CONST char *)ext);
 }
 
 LOCAL ER nres_rea( TSFSVOL *v, CONST TS_UUID *uuid, CONST UB *name, D off,
 		   void *buf, SZ size, SZ *p_asize )
 {
-	UB	ext[TSFSO_EXT_LEN];
+	CONST UB *ext;
 	INT	rec, res;
-	ER	er = res_key(name, &rec, &res, ext);
+	ER	er = res_key(name, &rec, &res, &ext);
 
 	if ( er < E_OK ) return er;
 	vol_rlock(v);
@@ -2492,9 +2510,9 @@ LOCAL ER nres_rea( TSFSVOL *v, CONST TS_UUID *uuid, CONST UB *name, D off,
 
 LOCAL ER nres_wri( TSFSVOL *v, CONST TS_UUID *uuid, CONST UB *name, CONST void *buf, SZ size )
 {
-	UB	ext[TSFSO_EXT_LEN];
+	CONST UB *ext;
 	INT	rec, res;
-	ER	er = res_key(name, &rec, &res, ext);
+	ER	er = res_key(name, &rec, &res, &ext);
 
 	if ( er < E_OK ) return er;
 	vol_lock(v);
@@ -2505,9 +2523,9 @@ LOCAL ER nres_wri( TSFSVOL *v, CONST TS_UUID *uuid, CONST UB *name, CONST void *
 
 LOCAL ER nres_del( TSFSVOL *v, CONST TS_UUID *uuid, CONST UB *name )
 {
-	UB	ext[TSFSO_EXT_LEN];
+	CONST UB *ext;
 	INT	rec, res;
-	ER	er = res_key(name, &rec, &res, ext);
+	ER	er = res_key(name, &rec, &res, &ext);
 
 	if ( er < E_OK ) return er;
 	vol_lock(v);
@@ -2516,23 +2534,40 @@ LOCAL ER nres_del( TSFSVOL *v, CONST TS_UUID *uuid, CONST UB *name )
 	return er;
 }
 
+/*
+ * The names of a native object's resources, one after another, each
+ * ending in 0, as many as fit; with buf NULL, how many there are, and
+ * the answer is the bytes all of them take.
+ */
 LOCAL ER nres_lst( TSFSVOL *v, CONST TS_UUID *uuid, UB *buf, SZ size, INT *p_cnt )
 {
-	T_TSFSRES	*r;
-	UB		nm[TSFSO_EXT_LEN + 32];
+	T_TSFSRES	*r = NULL;
+	UB		*nm, *ext = NULL;
 	INT		n = 0, i, got = 0, k;
-	SZ		at = 0;
+	SZ		at = 0, all = 0, xl;
 	ER		er;
 
-	r = (T_TSFSRES *)Kmalloc(sizeof(T_TSFSRES) * TSFSO_MAX_RES);
-	if ( r == NULL ) {
-		return E_NOMEM;
+	nm = (UB *)Kmalloc(TSFSO_EXT_MAX + 64);
+	ext = (UB *)Kmalloc(TSFSO_EXT_MAX + 1);
+	if ( nm == NULL || ext == NULL ) {
+		er = E_NOMEM;
+		goto exit;
 	}
 	vol_rlock(v);
-	er = ts_obj_lst_res(v->bvol, uuid, r, TSFSO_MAX_RES, &n);
-	vol_runlock(v);
+	er = ts_obj_lst_res(v->bvol, uuid, NULL, 0, &n);
+	if ( er >= E_OK && n > 0 ) {
+		r = (T_TSFSRES *)Kmalloc(sizeof(T_TSFSRES) * (SZ)n);
+		er = ( r == NULL ) ? E_NOMEM : ts_obj_lst_res(v->bvol, uuid, r, n, &n);
+	}
 	for ( i = 0; er >= E_OK && i < n; i++ ) {
-		k = res_name(&r[i], nm, sizeof(nm));
+		if ( r[i].extlen < TSFSO_EXT_LEN ) {
+			knl_memcpy(ext, r[i].ext, TSFSO_EXT_LEN);
+		} else if ( ts_obj_res_ext(v->bvol, uuid, r[i].recno, r[i].resno, ext,
+					   TSFSO_EXT_MAX + 1, &xl) < E_OK ) {
+			continue;		/* gone meanwhile */
+		}
+		k = res_name(&r[i], ext, nm, TSFSO_EXT_MAX + 64);
+		all += k + 1;
 		if ( buf == NULL ) {
 			got++;			/* only how many there are */
 		} else if ( at + k + 1 <= size ) {
@@ -2541,10 +2576,16 @@ LOCAL ER nres_lst( TSFSVOL *v, CONST TS_UUID *uuid, UB *buf, SZ size, INT *p_cnt
 			got++;
 		}
 	}
-	Kfree(r);
+	vol_runlock(v);
 	if ( er >= E_OK && p_cnt != NULL ) {
 		*p_cnt = got;
 	}
+	if ( er >= E_OK && buf == NULL ) er = (ER)all;
+
+    exit:
+	if ( r != NULL ) Kfree(r);
+	if ( nm != NULL ) Kfree(nm);
+	if ( ext != NULL ) Kfree(ext);
 	return er;
 }
 
@@ -2663,7 +2704,7 @@ EXPORT ER knl_tsfs_res_lst( ID vol, CONST TS_UUID *uuid, UB *buf, SZ size, INT *
 	T_DIRENT	*de;
 	char		us[TS_UUID_STRLEN + 1];
 	INT		fd, cnt, i, got = 0;
-	SZ		at = 0;
+	SZ		at = 0, all = 0;
 
 	if ( v == NULL ) {
 		return E_ID;
@@ -2690,6 +2731,7 @@ EXPORT ER knl_tsfs_res_lst( ID vol, CONST TS_UUID *uuid, UB *buf, SZ size, INT *
 
 			if ( !res_file(de[i].name, us, &rest) ) continue;
 			for ( k = 0; rest[k] != 0; k++ ) ;
+			all += k + 1;
 			if ( buf == NULL ) {
 				got++;		/* only how many there are */
 			} else if ( at + k + 1 <= size ) {
@@ -2703,7 +2745,7 @@ EXPORT ER knl_tsfs_res_lst( ID vol, CONST TS_UUID *uuid, UB *buf, SZ size, INT *
 	Kfree(de);
 	if ( p_cnt != NULL ) *p_cnt = got;
 
-	return E_OK;
+	return ( buf == NULL ) ? (ER)all : E_OK;
 }
 
 /*
@@ -2939,7 +2981,7 @@ EXPORT INT knl_tsfs_exec_rec( ID vol, CONST TS_UUID *uuid )
 	  && json_sub(json, len, "tessronos", &off, &sublen)
 	  && json_sub(json + off, sublen, "exec", &off2, &sublen2) ) {
 		rec = knl_json_get_num(json + off + off2, sublen2, "record", -1);
-		if ( rec < 0 || rec >= TSFS_MAX_REC ) rec = E_NOEXS;
+		if ( rec < 0 ) rec = E_NOEXS;
 	}
 	if ( json != NULL ) Kfree(json);
 

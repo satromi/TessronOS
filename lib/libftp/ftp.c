@@ -199,8 +199,48 @@ LOCAL ER send_all( T_FTP *f, INT c, CONST UB *b, INT n )
 	return E_OK;
 }
 
-/* A line of the control connection, its end taken off; its length */
-LOCAL INT read_line( T_FTP *f, UB *line, INT max )
+/*
+ * A buffer of the session made to hold at least need bytes: the memory
+ * is the caller's (T_FTPNET.mem), so that the library keeps no limit of
+ * its own on how long a line of the server is.
+ */
+LOCAL ER room( T_FTP *f, UB **p, INT *p_cap, INT need )
+{
+	INT	cap = *p_cap;
+	UB	*q;
+
+	if ( need <= cap && *p != NULL ) {
+		return E_OK;
+	}
+	if ( need < 0 || f->net->mem == NULL ) {
+		return E_PAR;
+	}
+	if ( cap < 64 ) cap = 64;
+	while ( cap < need ) {
+		if ( cap > 0x3FFFFFFF ) return E_NOMEM;
+		cap *= 2;
+	}
+	q = (UB *)f->net->mem(f->net->ctx, *p, (SZ)cap);
+	if ( q == NULL ) {
+		return E_NOMEM;
+	}
+	*p = q;
+	*p_cap = cap;
+	return E_OK;
+}
+
+/* The buffers of the session given back */
+LOCAL void ftp_free( T_FTP *f )
+{
+	if ( f->text != NULL ) (void)f->net->mem(f->net->ctx, f->text, 0);
+	if ( f->cmd != NULL ) (void)f->net->mem(f->net->ctx, f->cmd, 0);
+	if ( f->line != NULL ) (void)f->net->mem(f->net->ctx, f->line, 0);
+	f->text = f->cmd = f->line = NULL;
+	f->ntext = f->ncmd = f->nline = 0;
+}
+
+/* A line of the control connection into f->text, its end taken off; its whole length */
+LOCAL INT read_line( T_FTP *f )
 {
 	INT	n = 0, got;
 	UB	c;
@@ -218,11 +258,19 @@ LOCAL INT read_line( T_FTP *f, UB *line, INT max )
 		if ( c == '\n' ) {
 			break;
 		}
-		if ( c != '\r' && n < max - 1 ) {
-			line[n++] = c;
+		if ( c != '\r' ) {
+			ER	er = room(f, &f->text, &f->ntext, n + 2);
+
+			if ( er < E_OK ) {
+				return er;
+			}
+			f->text[n++] = c;
 		}
 	}
-	line[n] = 0;
+	if ( room(f, &f->text, &f->ntext, n + 1) < E_OK ) {
+		return E_NOMEM;
+	}
+	f->text[n] = 0;
 	return n;
 }
 
@@ -247,7 +295,7 @@ LOCAL INT get_reply_x( T_FTP *f, LINECB cb, void *arg, BOOL tail )
 	BOOL	stray = tail;
 
 	for (;;) {
-		n = read_line(f, f->text, sizeof(f->text));
+		n = read_line(f);
 		if ( n < 0 ) {
 			return n;
 		}
@@ -290,35 +338,51 @@ LOCAL BOOL tail_waits( T_FTP *f )
 	return (BOOL)( f->rat < f->rlen && f->rbuf[f->rat] == ' ' );
 }
 
-/* A command line sent: "CMD arg", the argument in the server's encoding */
-LOCAL ER send_cmd( T_FTP *f, CONST char *cmd, CONST UB *arg )
+/* A command line sent: "CMD pre" and arg, arg in the server's encoding; pre is ASCII or NULL */
+LOCAL ER send_cmd_x( T_FTP *f, CONST char *cmd, CONST char *pre, CONST UB *arg )
 {
-	INT	n = 0, i, max = (INT)sizeof(f->cmd) - 3;
+	INT	n = 0, i, clen = 0, plen = 0, len = 0;
+	ER	er;
 
 	if ( f->ctl < 0 ) {
 		return E_OBJ;
 	}
-	for ( i = 0; cmd[i] != 0 && n < max; i++ ) f->cmd[n++] = (UB)cmd[i];
+	while ( cmd[clen] != 0 ) clen++;
+	if ( pre != NULL ) {
+		while ( pre[plen] != 0 ) plen++;
+	}
 	if ( arg != NULL ) {
-		INT	len = s_len(arg);
-
+		len = s_len(arg);
 		for ( i = 0; i < len; i++ ) {
 			if ( arg[i] == '\r' || arg[i] == '\n' ) return E_PAR;
 		}
+	}
+	er = room(f, &f->cmd, &f->ncmd, clen + plen + len * 2 + 4);
+	if ( er < E_OK ) {
+		return er;
+	}
+	for ( i = 0; i < clen; i++ ) f->cmd[n++] = (UB)cmd[i];
+	if ( arg != NULL ) {
 		f->cmd[n++] = ' ';
+		for ( i = 0; i < plen; i++ ) f->cmd[n++] = (UB)pre[i];
 		if ( f->enc != TXC_UTF8 && f->enc != TXC_AUTO ) {
+			INT	max = f->ncmd - 3;
 			SZ	w = txc_from_utf8(f->enc, arg, len, f->cmd + n, max - n, NULL);
 
 			if ( (INT)w >= max - n ) return E_LIMIT;
 			n += (INT)w;
 		} else {
-			if ( len >= max - n ) return E_LIMIT;
 			for ( i = 0; i < len; i++ ) f->cmd[n++] = arg[i];
 		}
 	}
 	f->cmd[n++] = '\r';
 	f->cmd[n++] = '\n';
 	return send_all(f, f->ctl, f->cmd, n);
+}
+
+LOCAL ER send_cmd( T_FTP *f, CONST char *cmd, CONST UB *arg )
+{
+	return send_cmd_x(f, cmd, NULL, arg);
 }
 
 EXPORT INT ftp_cmd( T_FTP *f, CONST char *cmd, CONST UB *arg )
@@ -370,10 +434,15 @@ EXPORT ER ftp_open( T_FTP *f, CONST T_FTPNET *net, CONST char *host, UINT port,
 	INT	code;
 	ER	er;
 
-	if ( f == NULL || net == NULL || host == NULL ) {
+	if ( f == NULL || net == NULL || host == NULL || net->mem == NULL ) {
 		return E_PAR;
 	}
 	f->net = net;
+	f->text = f->cmd = f->line = NULL;
+	f->ntext = f->ncmd = f->nline = 0;
+	if ( room(f, &f->text, &f->ntext, FTP_LINE_MAX) < E_OK ) {
+		return E_NOMEM;
+	}
 	f->data = -1;
 	f->lsn = -1;
 	f->feat = 0;
@@ -388,6 +457,7 @@ EXPORT ER ftp_open( T_FTP *f, CONST T_FTPNET *net, CONST char *host, UINT port,
 	f->rat = f->rlen = 0;
 	f->ctl = net->open(net->ctx, host, ( port != 0 ) ? port : FTP_PORT, -1);
 	if ( f->ctl < 0 ) {
+		ftp_free(f);
 		return (ER)f->ctl;
 	}
 
@@ -432,6 +502,7 @@ EXPORT ER ftp_open( T_FTP *f, CONST T_FTPNET *net, CONST char *host, UINT port,
 	if ( er < E_OK ) {
 		net->close(net->ctx, f->ctl);
 		f->ctl = -1;
+		ftp_free(f);
 	}
 	return er;
 }
@@ -456,6 +527,7 @@ EXPORT ER ftp_close( T_FTP *f )
 	}
 	f->net->close(f->net->ctx, f->ctl);
 	f->ctl = -1;
+	ftp_free(f);
 	return er;
 }
 
@@ -526,6 +598,9 @@ EXPORT ER ftp_pwd( T_FTP *f, UB *path, INT max )
 	if ( *t == 0 ) {
 		return E_IO;
 	}
+	if ( room(f, &f->cmd, &f->ncmd, s_len(t) + 1) < E_OK ) {
+		return E_NOMEM;
+	}
 	for ( i = 1; t[i] != 0; i++ ) {
 		if ( t[i] == '"' ) {
 			if ( t[i + 1] != '"' ) break;
@@ -533,6 +608,7 @@ EXPORT ER ftp_pwd( T_FTP *f, UB *path, INT max )
 		}
 		f->cmd[n++] = t[i];
 	}
+	f->cmd[n] = 0;
 	from_server(f, f->cmd, n, path, max);
 	return E_OK;
 }
@@ -602,8 +678,9 @@ LOCAL void put_stamp( UB *s, D t )
 
 EXPORT ER ftp_mfmt( T_FTP *f, CONST UB *path, D time )
 {
-	UB	arg[FTP_PATH_MAX + 16];
-	INT	n;
+	UB	st[16];
+	INT	code;
+	ER	er;
 
 	if ( f == NULL || path == NULL ) {
 		return E_PAR;
@@ -611,13 +688,18 @@ EXPORT ER ftp_mfmt( T_FTP *f, CONST UB *path, D time )
 	if ( ( f->feat & FTP_F_MFMT ) == 0 ) {
 		return E_NOSPT;
 	}
-	put_stamp(arg, time);
-	arg[14] = ' ';
-	n = s_cpy(arg + 15, sizeof(arg) - 15, path);
-	if ( n != s_len(path) ) {
-		return E_LIMIT;
+	put_stamp(st, time);
+	st[14] = ' ';
+	st[15] = 0;
+	er = send_cmd_x(f, "MFMT", (CONST char *)st, path);
+	if ( er < E_OK ) {
+		return er;
 	}
-	return cmd_want(f, "MFMT", arg, 213);
+	code = get_reply(f, NULL, NULL);
+	if ( code < 0 ) {
+		return (ER)code;
+	}
+	return ( code == 213 ) ? E_OK : ( code < 400 ) ? E_IO : ftp_error(code);
 }
 
 /* ---------------------------------------------------------------- data */
@@ -1238,8 +1320,16 @@ LOCAL ER listing( T_FTP *f, CONST UB *path, INT how, FTP_ENTCB cb, void *arg )
 
 			if ( c == '\r' ) continue;
 			if ( c != '\n' ) {
-				if ( n < (INT)sizeof(f->line) - 1 ) f->line[n++] = c;
+				if ( room(f, &f->line, &f->nline, n + 2) < E_OK ) {
+					er = E_NOMEM;
+					break;
+				}
+				f->line[n++] = c;
 				continue;
+			}
+			if ( room(f, &f->line, &f->nline, n + 1) < E_OK ) {
+				er = E_NOMEM;
+				break;
 			}
 			f->line[n] = 0;
 			n = 0;
@@ -1267,7 +1357,7 @@ LOCAL ER listing( T_FTP *f, CONST UB *path, INT how, FTP_ENTCB cb, void *arg )
 				stop = cb(arg, &f->ent);
 			}
 		}
-		if ( got == 0 ) {
+		if ( er < E_OK || got == 0 ) {
 			break;
 		}
 	}

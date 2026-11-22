@@ -187,6 +187,8 @@ IMPORT INT ts_obj_drop_cycles( ID bvol, CONST TS_UUID *from, INT nfrom );
  * whole.
  */
 #define TSFSCK_F_LABELCUT	0x0001
+/* TSFSCK_F_CONVREQ: the volume is to be converted to version 5 at the next start (TSFSBLK_COMPAT_CONVREQ) */
+#define TSFSCK_F_CONVREQ	0x0002
 
 typedef struct {
 	UB	devnm[TSFSCK_DEVNM_MAX];
@@ -195,6 +197,7 @@ typedef struct {
 	BOOL	attached;		/* its objects are in use */
 	BOOL	system;			/* the volume the system runs on */
 	UINT	flags;			/* TSFSCK_F_* */
+	UINT	format;			/* the version of its format: TSFSBLK_VERSION (4) or TSFSBLK_VERSION5 */
 } T_TSFSCKDEV;
 
 /* Every volume there is: up to max of them into buf, and how many there are (ask again with more room when more) */
@@ -252,6 +255,92 @@ IMPORT void knl_ob_chk_boot_forget( void );
 
 /* Whether a device is being checked alone, and must not be attached meanwhile */
 IMPORT BOOL knl_ob_chk_busy( CONST char *devnm );
+
+/*
+ * The conversion of a version 4 volume to version 5 (docs/tessronos 7.3):
+ * what it did, the check it made first (step 3) and how long it took.
+ */
+#define TSFSCNV_S_NONE		0	/* nothing was tried */
+#define TSFSCNV_S_DONE		1	/* converted: the volume is of version 5 now */
+#define TSFSCNV_S_NOTV4		2	/* not converted: not a version 4 volume (version 5 already, or a feature not known) */
+#define TSFSCNV_S_DAMAGE	3	/* not converted: the check found damage, nothing was written */
+#define TSFSCNV_S_FAILED	4	/* the device failed (er): before step 5 the volume is as it was, after it converted */
+
+typedef struct {
+	UINT	state;			/* TSFSCNV_S_* */
+	ER	er;			/* what went wrong, E_OK when nothing did */
+	T_TSFSCK ck;			/* the check of step 3 */
+	UD	check_ms;		/* steps 1 to 3: opening, the log, the orphans and the check */
+	UD	total_ms;		/* every step */
+} T_TSFSCNV;
+
+/*
+ * A volume of the block layer (ts_obj_mount: its log replayed and its
+ * orphans finished, steps 1 and 2) that nothing else has open, checked
+ * whole without a repair (step 3) and converted to version 5 (steps 4
+ * to 6, ts_blk_convert). mode is the check's (TSFSCK_QUICK,
+ * TSFSCK_FULL; 0 the usual one), events of the check go to fn. A volume
+ * the check finds anything on is not written at all (TSFSCNV_S_DAMAGE),
+ * nor one that is not of version 4 (TSFSCNV_S_NOTV4). Answers what
+ * res->er says; a volume not converted is E_OK with res->state saying
+ * why.
+ */
+IMPORT ER  ts_cnv_vol( ID bvol, UINT mode, T_TSFSCNV *res, FP_TSFSCK fn, void *ctx );
+
+/*
+ * At start, after knl_ob_chk_boot and before the system volume is
+ * attached: the system volume converted when it is of version 4, with
+ * or without CONVREQ, and every other native volume there is that has
+ * TSFSBLK_COMPAT_CONVREQ. A volume not converted has CONVREQ taken off,
+ * so that it is attached as it is and not tried at every start; the
+ * system volume is tried again at the next start all the same (after a
+ * repair). ob_cnv_boot_result gives what was done to the system volume
+ * (to another volume when the system volume was not tried), as
+ * ob_chk_boot_result does: how many events of the check were kept, with
+ * res->state TSFSCNV_S_NONE when nothing was tried. Each step is told on
+ * the console ("tsfs: DEVICE: convert ...").
+ */
+IMPORT ER  knl_ob_conv_boot( CONST char *sysvol );
+IMPORT INT ob_cnv_boot_result( UB *devnm, INT nmax, T_TSFSCNV *res, T_TSFSCKEV *ev, INT max );
+
+/*
+ * What the conversion at start did forgotten, as knl_ob_chk_boot_forget
+ * does for the repair; knl_ob_cnv_boot_once is TRUE the first time it is
+ * asked (the SVC gives the result once).
+ */
+IMPORT void knl_ob_cnv_boot_forget( void );
+IMPORT BOOL knl_ob_cnv_boot_once( void );
+
+/*
+ * ディスク操作's 形式を新しくする: a native volume other than the
+ * system's converted now, as ts_cnv_vol converts one. An attached one is
+ * taken off for it and put back after, as a repair takes one off;
+ * while an object of it is open it is not converted (E_BUSY,
+ * res->ck.inuse). E_RONLY for the system volume, which the start
+ * converts, E_BUSY while a volume is being checked or changed.
+ */
+IMPORT ER  ob_cnv_run( CONST char *devnm, UINT mode, T_TSFSCNV *res, FP_TSFSCK fn, void *ctx );
+
+/*
+ * For a program, through the SVC (an administrator's): ob_cnv_run in
+ * the task that calls it, the events of the check put into ev as
+ * ob_chk_vol puts them, *res written at the end. Through the SVC,
+ * ob_cnv_boot_result gives the conversion at start to the first program
+ * that asks, and 0 after it.
+ */
+IMPORT ER  ob_cnv_vol( CONST char *devnm, UINT mode, T_TSFSCNV *res, T_TSFSCKEV *ev, INT max, INT *p_told );
+
+/*
+ * CONVREQ set (on) or taken off on a native volume of version 4, open or
+ * not: the next start that has the volume converts it. The update of
+ * the system (to a package of a newer format) and システム登録's 上書き set
+ * it. E_OBJ on a volume of version 5, E_NOEXS when the device has no
+ * native volume.
+ */
+IMPORT ER  ob_cnv_request( CONST char *devnm, BOOL on );
+
+/* The version of the format of a native volume (4, 5), E_NOEXS when there is none; *p_req whether CONVREQ is set */
+IMPORT INT knl_ob_cnv_form( CONST char *devnm, BOOL *p_req );
 
 /*
  * The record of links from other volumes of a volume (TSFS's number)

@@ -66,7 +66,7 @@ IMPORT UW	knl_prc_ter_inside;
 #define SP_SOLIM	50
 #define NET_PORT	17100
 #define LOOPBACK	0x7f000001UL
-#define SO_NUM		SO_MAX
+#define SO_NUM		SO_NUM_CEIL	/* every number the table may ever have */
 
 LOCAL BOOL	have_prog = FALSE;
 LOCAL BOOL	have_stack = FALSE;
@@ -1182,36 +1182,120 @@ LOCAL void test_prc_limits( void )
 }
 
 /*
- * The two limits on sockets (design 9.2). Two processes each lower their
+ * The two limits on sockets (design 9.2.2). Two processes each lower their
  * soft limit and make sockets to it, the one past it refused (EMFILE),
  * neither in the other's way. Then the system's table is filled by
  * owners that are no process, each to its limit, until a socket for any
- * of them is refused (E_LIMIT, ENFILE) while the kernel still makes one
- * of the numbers kept for it; the process that is left, its soft limit
- * raised again, is refused by the full table too. All of it goes when
- * the owners end.
+ * of them is refused (E_LIMIT, ENFILE): the table grows past FD_SETSIZE
+ * on the way, where so_select refuses a set as long as the number
+ * (E_PAR) while so_poll waits on it; the kernel still makes one of the
+ * sockets kept for it, and still looks a name up through a name server
+ * (one of the test's own, on the loopback interface), which takes the
+ * kernel's sockets too. The process that is left, its soft limit raised
+ * again, is refused by the full table. All of it goes when the owners
+ * end, and the table keeps the room it grew to.
  */
 #define SOLIM_N		24
 #define SOLIM_FAKE	9900		/* process numbers no process has */
+#define SOLIM_DNS_PORT	53
+#define SOLIM_NAME	"sock2-limit.test"
+#define SOLIM_ADDR	0x0a010203UL	/* 10.1.2.3, what the test's name server answers */
+
+LOCAL volatile BOOL	dns_stop;
+LOCAL volatile INT	dns_asked;
+
+/*
+ * The test's name server: every question answered at once, an A question
+ * with SOLIM_ADDR (RFC 1035 4.1), any other with no answer
+ */
+LOCAL void dns_serve( INT stacd, void *exinf )
+{
+	struct sockaddr_in	from;
+	struct pollfd		p;
+	socklen_t		flen;
+	UB			q[512], a[512 + 16];
+	INT			s = (INT)(UBINT)exinf, n, i, qt;
+
+	(void)stacd;
+	while ( !dns_stop ) {
+		p.fd = s;
+		p.events = POLLIN;
+		p.revents = 0;
+		if ( so_poll(&p, 1, 200) <= 0 ) continue;
+		flen = sizeof(from);
+		n = so_recvfrom(s, q, sizeof(q), 0, (struct sockaddr *)&from, &flen);
+		if ( n < 17 ) continue;
+		for ( i = 12; i < n && q[i] != 0; i += q[i] + 1 ) ;
+		if ( i + 5 > n ) continue;
+		qt = ( q[i + 1] << 8 ) | q[i + 2];
+		i += 5;				/* the question's end */
+		knl_memcpy(a, q, i);
+		a[2] = 0x81; a[3] = 0x80;	/* an answer, recursion asked and there */
+		a[4] = 0; a[5] = 1;
+		a[6] = 0; a[7] = ( qt == 1 ) ? 1 : 0;
+		a[8] = a[9] = a[10] = a[11] = 0;
+		if ( qt == 1 ) {
+			static CONST UB	rr[12] = { 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4 };
+
+			knl_memcpy(a + i, rr, sizeof(rr));
+			a[i + 12] = (UB)( SOLIM_ADDR >> 24 );
+			a[i + 13] = (UB)( SOLIM_ADDR >> 16 );
+			a[i + 14] = (UB)( SOLIM_ADDR >> 8 );
+			a[i + 15] = (UB)SOLIM_ADDR;
+			i += 16;
+		}
+		dns_asked++;
+		(void)so_sendto(s, a, i, 0, (struct sockaddr *)&from, flen);
+	}
+	tk_exd_tsk();
+}
 
 LOCAL void test_prc_solim( void )
 {
-	T_TSMSG	*m;
-	UW	arg[8];
-	INT	*fill, nfill = 0, s = E_OK, k = 0, i, t;
-	ID	pa, pb;
+	struct sockaddr_in	me;
+	struct pollfd		p;
+	fd_set			rd;
+	T_CTSK			ct;
+	T_TSMSG			*m;
+	UW			arg[8], got = 0;
+	INT			*fill = NULL, nfill = 0, s = E_OK, k = 0, i, t, big = -1;
+	INT			cur, max, room0, room, sysmax = knl_so_sysmax(), dsock = -1;
+	ID			pa, pb, dt = 0;
 
 	if ( !have_prog ) KT_SKIP("no program");
 	if ( !have_stack ) KT_SKIP("no stack");
+	knl_so_prc_first(&cur, &max);
+	tm_printf((UB *)"  the system's limit %d (%d kept for the kernel), a process's %d (%d at most)\n",
+		  sysmax, SO_KERNEL_RESERVE, cur, max);
+	KT_ASSERT(sysmax > SO_KERNEL_RESERVE && sysmax <= SO_NUM_CEIL);
+	KT_ASSERT(max <= knl_so_prc_ceil() && cur <= max);
 	m = (T_TSMSG *)Kmalloc(sizeof(T_TSMSG));
-	fill = (INT *)Kmalloc(sizeof(INT) * SO_MAX);
+	fill = (INT *)Kmalloc(sizeof(INT) * (SZ)sysmax);
 	KT_ASSERT(m != NULL && fill != NULL);
 	if ( m == NULL || fill == NULL ) goto done;
+
+	/* the name server, made before the table is full */
+	dsock = so_socket(AF_INET, SOCK_DGRAM, 0);
+	KT_ASSERT(dsock >= 0);
+	addr_set(&me, LOOPBACK, SOLIM_DNS_PORT);
+	if ( dsock >= 0 ) KT_ASSERT_ER(so_bind(dsock, (struct sockaddr *)&me, sizeof(me)), E_OK);
+	dns_stop = FALSE;
+	dns_asked = 0;
+	knl_memset(&ct, 0, sizeof(ct));
+	ct.exinf = (void *)(UBINT)dsock;
+	ct.tskatr = TA_HLNG;
+	ct.task = (FP)dns_serve;
+	ct.itskpri = KT_PRI_HIGH;
+	ct.stksz = 16 * 1024;
+	dt = ( dsock >= 0 ) ? tk_cre_tsk(&ct) : 0;
+	KT_ASSERT(dt > 0);
+	if ( dt > 0 ) (void)tk_sta_tsk(dt, 0);
+
 	knl_memset(arg, 0, sizeof(arg));
 	arg[0] = SP_SOLIM;
 	arg[1] = SOLIM_N;
-	arg[2] = (UW)SO_PRC_SOFT;
-	arg[3] = (UW)SO_PRC_HARD;
+	arg[2] = (UW)cur;
+	arg[3] = (UW)max;
 	pa = start_args(arg);
 	pb = start_args(arg);
 	KT_ASSERT(pa > 0 && pb > 0);
@@ -1229,23 +1313,53 @@ LOCAL void test_prc_solim( void )
 	run_to_end(pb, 10000);
 	KT_ASSERT_EQ(owned_socks(pb), 0);
 
-	/* the table filled, each owner to its own limit */
-	while ( nfill < SO_MAX ) {
+	/* the table filled, each owner to its own limit; it grows as it goes */
+	(void)knl_so_count(&room0);
+	while ( nfill < sysmax ) {
 		s = knl_so_socket_as(AF_INET, SOCK_DGRAM, 0, SOLIM_FAKE + k);
 		if ( s == EX_MFILE ) {
 			k++;
 			continue;
 		}
 		if ( s < 0 ) break;
+		if ( s >= FD_SETSIZE && big < 0 ) big = s;
 		fill[nfill++] = s;
 	}
 	KT_ASSERT_ER(s, E_LIMIT);
 	KT_ASSERT(k >= 1);			/* the first owner met its limit before the table ran out */
-	tm_printf((UB *)"  %d sockets of %d owners that are no process fill the table\n", nfill, k + 1);
+	i = knl_so_count(&room);
+	tm_printf((UB *)"  %d sockets of %d owners that are no process fill the table: %d open, room for %d (%d before)\n",
+		  nfill, k + 1, i, room, room0);
+	KT_ASSERT_EQ(i, sysmax - SO_KERNEL_RESERVE);
+	KT_ASSERT(room >= i && room > room0 && room < sysmax + SO_BLK);
 	KT_ASSERT_ER(knl_so_socket_as(AF_INET, SOCK_DGRAM, 0, SOLIM_FAKE + k + 1), E_LIMIT);
-	s = so_socket(AF_INET, SOCK_DGRAM, 0);	/* the kernel's numbers are still there */
+
+	/* a number past the sets: so_select refuses it, so_poll waits on it */
+	if ( sysmax > FD_SETSIZE + SO_KERNEL_RESERVE ) {
+		KT_ASSERT(big >= FD_SETSIZE);
+		if ( big >= FD_SETSIZE ) {
+			FD_ZERO(&rd);
+			FD_SET(big, &rd);		/* past the set: nothing is written */
+			KT_ASSERT(!FD_ISSET(big, &rd));
+			KT_ASSERT_ER(so_select(big + 1, &rd, NULL, NULL, TMO_POL), E_PAR);
+			KT_ASSERT_ER(so_select(FD_SETSIZE + 1, NULL, NULL, NULL, TMO_POL), E_PAR);
+			p.fd = big;
+			p.events = POLLOUT;
+			p.revents = 0;
+			KT_ASSERT_EQ(so_poll(&p, 1, TMO_POL), 1);	/* a datagram socket may send */
+			KT_ASSERT((p.revents & POLLOUT) != 0);
+		}
+	}
+
+	/* the kernel's own: a socket, and a name looked up */
+	s = so_socket(AF_INET, SOCK_DGRAM, 0);
 	KT_ASSERT(s >= 0);
 	if ( s >= 0 ) KT_ASSERT_ER(so_close(s), E_OK);
+	KT_ASSERT_ER(so_setdns(0, lwip_htonl(LOOPBACK)), E_OK);
+	KT_ASSERT_ER(so_resolve(SOLIM_NAME, &got), E_OK);
+	KT_ASSERT_EQ(lwip_ntohl(got), SOLIM_ADDR);
+	KT_ASSERT(dns_asked >= 1);
+	(void)so_setdns(0, 0);
 
 	/* the first, its limit back, is refused by the table */
 	m->body[0] = 1;
@@ -1259,7 +1373,18 @@ LOCAL void test_prc_solim( void )
 	s = so_socket(AF_INET, SOCK_DGRAM, 0);
 	KT_ASSERT(s >= 0);
 	if ( s >= 0 ) KT_ASSERT_ER(so_close(s), E_OK);
+	(void)knl_so_count(&i);
+	KT_ASSERT(i >= room);			/* the blocks made stay */
     done:
+	dns_stop = TRUE;
+	for ( t = 0; dt > 0 && t < 20; t++ ) {
+		T_RTSK	r;
+
+		if ( tk_ref_tsk(dt, &r) < E_OK || r.tskstat == TTS_DMT ) break;
+		tk_dly_tsk(100);
+	}
+	if ( dt > 0 ) (void)tk_del_tsk(dt);
+	if ( dsock >= 0 ) (void)so_close(dsock);
 	if ( m != NULL ) Kfree(m);
 	if ( fill != NULL ) Kfree(fill);
 }

@@ -52,6 +52,9 @@
 #include <ts/snd.h>
 #include <ts/dtreq.h>
 #include <ts/uuid.h>
+#include <ts/vobjsz.h>
+#include <ts/tvvop.h>
+#include <ts/tvpage.h>
 #include "../dtask.h"
 #include <stdlib.h>
 
@@ -1027,9 +1030,10 @@ LOCAL BOOL no_uuid( CONST TS_UUID *u )
  * DT_TAIL_TEXT); with DT_F_APPLIST the text is the link's applist
  * (DT_TAIL_APPLIST).
  */
+LOCAL DTASK	desk_q;			/* the words and the answer, as long as they are (dtask.h) */
+
 LOCAL ER desk_req( UINT req, CONST TS_UUID *target, UINT flags, CONST char *name, CONST char *text, T_DTANS *an )
 {
-	static DTASK	q;		/* the words and the answer, as long as they are (dtask.h) */
 	T_DTREQ		rq;
 
 	memset(an, 0, sizeof(*an));
@@ -1038,11 +1042,11 @@ LOCAL ER desk_req( UINT req, CONST TS_UUID *target, UINT flags, CONST char *name
 	if ( target != NULL ) rq.target = *target;
 	rq.recno = -1;
 	rq.flags = flags;
-	if ( name != NULL ) (void)dq_part(&q, DT_TAIL_NAME, (CONST UB *)name, -1);
+	if ( name != NULL ) (void)dq_part(&desk_q, DT_TAIL_NAME, (CONST UB *)name, -1);
 	if ( text != NULL ) {
-		(void)dq_part(&q, ( ( flags & DT_F_APPLIST ) != 0 ) ? DT_TAIL_APPLIST : DT_TAIL_TEXT, (CONST UB *)text, -1);
+		(void)dq_part(&desk_q, ( ( flags & DT_F_APPLIST ) != 0 ) ? DT_TAIL_APPLIST : DT_TAIL_TEXT, (CONST UB *)text, -1);
 	}
-	return dq_ask(&q, &rq, an, &ui.win, 10000);
+	return dq_ask(&desk_q, &rq, an, &ui.win, 10000);
 }
 
 LOCAL void page_show( CONST UPAGE *pg )
@@ -1217,22 +1221,59 @@ LOCAL void copy_make( void )
 	tm_putstring((CONST UB *)s);
 }
 
-/* このページの仮身を作る: a link to the program's object, the sheet in its applist's data */
+/*
+ * このページの仮身を作る, and a tag pulled out (UI_EV_TAGPULL): the
+ * object of the page, named ユーザ環境設定：<the page>, made and a link to
+ * it put -- in the desktop's first window, or where the tag was let go
+ * (lib/libtv/tv_page.c). Opened, it opens this program on the sheet (its
+ * applist's 固有データ, opened_on). The sheet shown stays.
+ */
+LOCAL void page_of( CONST UPAGE *pg, T_TVPAGE *p )
+{
+	p->key = "tessronos-userenv";
+	p->prog = "ユーザ環境設定";
+	p->progobj = SYSDEF_PROG_USERENV;
+	p->page = pg->name;
+	p->label = pg->label;
+}
+
 LOCAL void page_link( void )
 {
 	CONST UPAGE	*pg = upage_of_tag(ui_sheet(&ui));
-	char		name[96], appl[160], s[96];
-	TS_UUID		me;
-	T_DTANS		an;
+	T_TVPAGE	p;
+	T_TVASK		ask;
+	DQTV		dt;
+	char		s[96];
 	ER		er;
 
-	if ( pg == NULL || ui_uuid(SYSDEF_PROG_USERENV, &me) < E_OK ) return;
-	snprintf(name, sizeof(name), "ユーザ環境設定（%s）", pg->label);
-	snprintf(appl, sizeof(appl), "{\"tessronos-userenv\":{\"name\":\"ユーザ環境設定\",\"data\":\"%s\"}}", pg->name);
-	er = desk_req(DT_RQ_LINK_PUT, &me, DT_F_APPLIST, name, appl, &an);
+	if ( pg == NULL ) return;
+	page_of(pg, &p);
+	dq_tv_asker(&ask, &dt, &desk_q, &ui.win, NULL);
+	er = tv_page_put(&ask, &p);
 	snprintf(s, sizeof(s), "userenv: link of page \"%s\" put (%d)\n", pg->name, (INT)er);
 	tm_putstring((CONST UB *)s);
 	if ( er < E_OK ) warn("このページの仮身を置けませんでした。");
+}
+
+LOCAL void page_carry( CONST T_OBNTM *m, INT tag )
+{
+	CONST UPAGE	*pg = upage_of_tag(tag);
+	T_TVPAGE	p;
+	T_TVASK		ask;
+	DQTV		dt;
+	char		s[160];
+	ER		er;
+
+	if ( pg == NULL ) {
+		snprintf(s, sizeof(s), "userenv: tag %d pulled out, not a page\n", tag);
+		tm_putstring((CONST UB *)s);
+		return;
+	}
+	page_of(pg, &p);
+	dq_tv_asker(&ask, &dt, &desk_q, &ui.win, NULL);
+	er = tv_page_pull(&ask, &ui, m, &p);
+	snprintf(s, sizeof(s), "userenv: link of page \"%s\" carried (%d)\n", pg->name, (INT)er);
+	tm_putstring((CONST UB *)s);
 }
 
 /* Opened on target (0 none, or the program object itself) with data */
@@ -1396,7 +1437,7 @@ int main( void )
 	ui_icon(SYSDEF_PROG_USERENV);
 	/* the window stands for the program object: opened again, from a page's link or a copy, it is told ("once") */
 	ui_shows(SYSDEF_PROG_USERENV);
-	ui_attr(UI_ATTR_HIDDEN);		/* filled hidden, and shown once (ui_reveal) */
+	ui_attr(UI_ATTR_HIDDEN | UI_ATTR_TAGPULL);	/* filled hidden, and shown once (ui_reveal); its tags pulled out */
 	if ( ui_open(&ui, SYSDEF_BOX_USERENV, PN_MAIN, wm_new_x(180), wm_new_y(90)) < E_OK ) {
 		tm_putstring((CONST UB *)"userenv: no window\n");
 		return 1;
@@ -1450,6 +1491,9 @@ int main( void )
 				break;
 			case UI_EV_CHANGE:
 				changed(id);
+				break;
+			case UI_EV_TAGPULL:
+				page_carry(&m, id);
 				break;
 			case UI_EV_BUTTON:
 				if ( id == P_BEEP ) (void)play(0);

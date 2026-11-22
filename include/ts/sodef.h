@@ -252,19 +252,28 @@ struct pollfd {
 #define POLLHUP		0x200
 
 /*
- * The system's table of sockets: SO_MAX of them, numbered 0 .. SO_MAX - 1,
- * shared by the kernel and every process (design 9.2). A process holds
- * no more than its own limit of them (so_getlimit), and the last
- * SO_KERNEL_RESERVE (include/ts/so.h) are the kernel's alone.
+ * The system's table of sockets, shared by the kernel and every process
+ * (design 9.2.2). It grows as sockets are made, SO_BLK numbers at a time,
+ * the lowest free number given first, up to the system's limit
+ * (knl_so_sysmax, include/ts/so.h); a process holds no more than its own
+ * limit of them (so_getlimit), and the last SO_KERNEL_RESERVE are the
+ * kernel's alone. No number is ever SO_NUM_CEIL or more: the system's
+ * limit is held below it, and a process's own per-number flags
+ * (lib/libcxxrt/ts_socket.c) reach as far.
  */
-#define SO_MAX		1024
+#define SO_BLK		64
+#define SO_NUM_CEIL	16384
 
 /*
- * so_select, which only the kernel calls: one bit for each number of the
- * table, since a kernel's socket may have any of them. A process waits
- * with so_poll, whose list is as long as the caller makes it.
+ * so_select, which only the kernel calls: the sets have the standard
+ * FD_SETSIZE bits, fewer than the table may have numbers. A larger
+ * maxfdp1 is refused (E_PAR, as EINVAL), and FD_SET and FD_ISSET do
+ * nothing past the set, so a socket numbered past it is never written
+ * beyond the set; the kernel's own code waits with so_poll, which takes
+ * any number. A process waits with so_poll, whose list is as long as the
+ * caller makes it.
  */
-#define FD_SETSIZE	SO_MAX
+#define FD_SETSIZE	1024
 
 /*
  * so_socket and so_accept of a process that holds as many sockets as its

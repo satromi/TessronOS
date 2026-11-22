@@ -855,15 +855,18 @@ EXPORT UW knl_prc_sbx_of( ID pid )
 }
 
 /*
- * The limits on the sockets of a process (include/ts/so.h, design 9.2).
+ * The limits on the sockets of a process (include/ts/so.h, design 9.2.2).
  * An owner that is no process -- the kernel's tests make sockets for
- * such -- has the first ones.
+ * such -- has the first ones. Both are held to what the system's limit
+ * allows now, which is known only once the stack is up: a process made
+ * before that has the first ones as they were reckoned then.
  */
 EXPORT ER knl_prc_so_limit( ID pid, INT *p_cur, INT *p_max )
 {
 	T_PCB	*p = cur_pcb();
-	INT	cur = SO_PRC_SOFT, max = SO_PRC_HARD;
+	INT	cur, max, ceil = knl_so_prc_ceil();
 
+	knl_so_prc_first(&cur, &max);
 	if ( p != NULL && p->pid == pid ) {
 		/* the caller's own, as every poll asks: it stays while the caller runs */
 		cur = __atomic_load_n(&p->so_cur, __ATOMIC_RELAXED);
@@ -877,6 +880,8 @@ EXPORT ER knl_prc_so_limit( ID pid, INT *p_cur, INT *p_max )
 		}
 		tk_unl_mtx(prc_mtxid);
 	}
+	if ( max > ceil ) max = ceil;
+	if ( cur > max ) cur = max;
 	if ( p_cur != NULL ) *p_cur = cur;
 	if ( p_max != NULL ) *p_max = max;
 	return E_OK;
@@ -893,7 +898,7 @@ EXPORT INT knl_prc_so_cur( ID pid )
 /*
  * Both set. The soft one no higher than the hard one (E_PAR); the hard
  * one above what it is only when raise (an administrator: E_OACV
- * otherwise), and never past SO_PRC_CEIL (E_PAR). Lowering the soft one
+ * otherwise), and never past knl_so_prc_ceil (E_PAR). Lowering the soft one
  * below what the process holds closes nothing: it makes no more until
  * it holds fewer.
  */
@@ -902,7 +907,7 @@ EXPORT ER knl_prc_so_setlimit( ID pid, INT cur, INT max, BOOL raise )
 	T_PCB	*p;
 	ER	er = E_OK;
 
-	if ( cur < 0 || max < 0 || cur > max || max > SO_PRC_CEIL ) {
+	if ( cur < 0 || max < 0 || cur > max || max > knl_so_prc_ceil() ) {
 		return E_PAR;
 	}
 	if ( prc_mtxid <= 0 ) {
@@ -1357,8 +1362,12 @@ LOCAL ID cre_prc( CONST PRCIMG *img, CONST T_CPRC *pk_cprc, CONST T_SPAWN *sp )
 	/* a restricted parent's child is as restricted from its first instruction */
 	p->sbx = ( parent != NULL ) ? __atomic_load_n(&parent->sbx, __ATOMIC_SEQ_CST) : 0;
 	/* the limits on its sockets are its parent's, as a Linux child's rlimits are */
-	p->so_cur = ( parent != NULL ) ? parent->so_cur : SO_PRC_SOFT;
-	p->so_max = ( parent != NULL ) ? parent->so_max : SO_PRC_HARD;
+	if ( parent != NULL ) {
+		p->so_cur = parent->so_cur;
+		p->so_max = parent->so_max;
+	} else {
+		knl_so_prc_first(&p->so_cur, &p->so_max);
+	}
 	if ( pk_cprc->arg != NULL && pk_cprc->argsz > 0 ) {
 		p->argsz = pk_cprc->argsz;
 	}

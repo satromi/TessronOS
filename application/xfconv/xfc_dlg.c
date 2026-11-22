@@ -238,16 +238,31 @@ static void ftp_changed( UI *q, INT num, void *arg )
 	if ( ui_value(q, F_SSH) == 0 && ( p[0] == 0 || strcmp(p, "22") == 0 ) ) ui_set_text(q, F_PORT, "21");
 }
 
+/* A box's letters whole into a field; with no memory the field is left as it was, and that is said */
+static void field_all( UI *q, INT num, UB **field )
+{
+	char	*t = ui_text_all(q, num);
+
+	if ( t == NULL || !xfc_conn_set(field, t) ) {
+		xfc_log("a field of the FTP form not taken: no memory");
+	}
+	if ( t != NULL ) {
+		memset(t, 0, strlen(t));		/* it may be the password */
+		free(t);
+	}
+}
+
 static void ftp_fields( UI *q, XFCCONN *c )
 {
 	INT	v;
 
-	(void)ui_text(q, F_HOST, (char *)c->host, sizeof(c->host));
+	/* the host, the user, the password and the name as long as they were typed */
+	field_all(q, F_HOST, &c->host);
 	(void)ui_text(q, F_PORT, (char *)c->port, sizeof(c->port));
-	(void)ui_text(q, F_USER, (char *)c->user, sizeof(c->user));
-	(void)ui_text(q, F_PASS, (char *)c->pass, sizeof(c->pass));
+	field_all(q, F_USER, &c->user);
+	field_all(q, F_PASS, &c->pass);
 	(void)ui_text(q, F_LPORT, (char *)c->lport, sizeof(c->lport));
-	(void)ui_text(q, F_NAME, (char *)c->name, sizeof(c->name));
+	field_all(q, F_NAME, &c->name);
 	c->ssh = (BOOL)( ui_value(q, F_SSH) != 0 );
 	c->keep = (BOOL)( ui_value(q, F_KEEP) != 0 );
 	c->mode = ( ui_value(q, F_PASV) != 0 ) ? ( ( c->mode == XFC_DM_PASV ) ? XFC_DM_PASV : XFC_DM_EPSV )
@@ -267,16 +282,16 @@ EXPORT BOOL xfc_ask_ftp( XWIN *w, XFCCONN *c, XFC_TRY try_connect )
 		xfc_log("no FTP panel");
 		return FALSE;
 	}
-	ui_set_text(&q, F_HOST, (CONST char *)c->host);
+	ui_set_text(&q, F_HOST, XS(c->host));
 	ui_set_text(&q, F_PORT, c->port[0] != 0 ? (CONST char *)c->port : "21");
 	ui_set_value(&q, F_SSH, c->ssh ? 1 : 0);
-	ui_set_text(&q, F_USER, (CONST char *)c->user);
-	ui_set_text(&q, F_PASS, (CONST char *)c->pass);
+	ui_set_text(&q, F_USER, XS(c->user));
+	ui_set_text(&q, F_PASS, XS(c->pass));
 	ui_set_value(&q, F_KEEP, c->keep ? 1 : 0);
 	ui_set_value(&q, F_PASV, ( c->mode == XFC_DM_ACTIVE ) ? 0 : 1);
 	ui_set_text(&q, F_LPORT, (CONST char *)c->lport);
 	ui_set_value(&q, F_ENC, ( c->enc == TXC_SJIS ) ? 2 : ( c->enc == TXC_EUCJP ) ? 3 : 1);
-	ui_set_text(&q, F_NAME, (CONST char *)c->name);
+	ui_set_text(&q, F_NAME, XS(c->name));
 	ui_set_text(&q, F_NOTE, "ユーザ名を空けると anonymous で接続します");
 	xfc_log("asked for an FTP connection");
 	for (;;) {
@@ -287,7 +302,7 @@ EXPORT BOOL xfc_ask_ftp( XWIN *w, XFCCONN *c, XFC_TRY try_connect )
 			return FALSE;
 		}
 		ftp_fields(&q, c);
-		if ( c->host[0] == 0 ) {
+		if ( XS(c->host)[0] == 0 ) {
 			ui_set_text(&q, F_NOTE, "接続先を入れてください");
 			continue;
 		}

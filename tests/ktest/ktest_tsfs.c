@@ -15,6 +15,7 @@
  */
 
 #include "ktest.h"
+#include "tstdlib.h"
 #include <ts/tsfs.h>
 #include <ts/fs.h>
 
@@ -413,6 +414,53 @@ LOCAL void test_run_from_object( void )
 	KT_ASSERT_ER(ts_del_obj(vol, &uuid), E_OK);
 }
 
+/*
+ * Resources of long extensions on the FAT store: the name is a file
+ * name, so one that does not fit a long file name of the store's path is
+ * refused (E_PAR); the list answers the bytes all names take.
+ */
+LOCAL void test_res_names( void )
+{
+	T_COBJ	cobj;
+	TS_UUID	u;
+	UB	*nm, *buf, b = 7;
+	SZ	asize = 0;
+	INT	i, cnt = 0, len;
+	ER	er;
+
+	if ( vol <= 0 ) KT_SKIP("no store");
+	nm = (UB *)Kmalloc(512);
+	buf = (UB *)Kmalloc(1024);
+	KT_ASSERT(nm != NULL && buf != NULL);
+	if ( nm == NULL || buf == NULL ) goto out;
+	cobj.json   = (CONST UB *)"{\"name\":\"res\",\"refCount\":0}";
+	cobj.jsonsz = s_len("{\"name\":\"res\",\"refCount\":0}");
+	KT_ASSERT_ER(ts_cre_obj(vol, &cobj, &u), E_OK);
+	knl_memcpy(nm, "_0_1.", 5);
+	for ( i = 0; i < 100; i++ ) nm[5 + i] = (UB)( 'a' + i % 26 );
+	nm[105] = 0;
+	KT_ASSERT_ER(knl_tsfs_res_wri(vol, &u, nm, &b, 1), E_OK);
+	er = knl_tsfs_res_lst(vol, &u, NULL, 0, &cnt);
+	KT_ASSERT_EQ(cnt, 1);
+	KT_ASSERT_EQ(er, 106);			/* the name and its 0 */
+	len = (INT)er;
+	if ( len > 0 && len <= 1024 ) {
+		KT_ASSERT(knl_tsfs_res_lst(vol, &u, buf, len, &cnt) >= E_OK);
+		KT_ASSERT_EQ(cnt, 1);
+		KT_ASSERT_EQ(buf[104], nm[104]);
+	}
+	b = 0;
+	KT_ASSERT_ER(knl_tsfs_res_rea(vol, &u, nm, 0, &b, 1, &asize), E_OK);
+	KT_ASSERT_EQ(b, 7);
+	for ( i = 0; i < 300; i++ ) nm[5 + i] = (UB)( 'a' + i % 26 );
+	nm[305] = 0;
+	KT_ASSERT_ER(knl_tsfs_res_wri(vol, &u, nm, &b, 1), E_PAR);
+	KT_ASSERT_ER(ts_del_obj(vol, &u), E_OK);
+    out:
+	if ( nm != NULL ) Kfree(nm);
+	if ( buf != NULL ) Kfree(buf);
+}
+
 EXPORT void ktest_tsfs( void )
 {
 	KT_RUN(test_volume);
@@ -422,6 +470,7 @@ EXPORT void ktest_tsfs( void )
 	KT_RUN(test_refcount);
 	KT_RUN(test_list);
 	KT_RUN(test_run_from_object);
+	KT_RUN(test_res_names);
 
 	if ( vol > 0 ) {
 		ts_cls_vol(vol);

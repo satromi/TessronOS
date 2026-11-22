@@ -530,7 +530,7 @@ LOCAL ER make_private( BKJOB *j, INT i, ID k, BPKBUF *b )
 	UB		*meta = NULL;
 	BPKBUF		m, x;
 	UB		*ico = NULL, *xml = NULL, *names = NULL;
-	SZ		asz = 0, icolen = 0;
+	SZ		asz = 0, icolen = 0, room = 0;
 	UINT		xlen = 0;
 	T_OBREC		*r;
 	INT		cnt = 0, nres = 0, q, nother = 0;
@@ -573,10 +573,14 @@ LOCAL ER make_private( BKJOB *j, INT i, ID k, BPKBUF *b )
 	for ( q = 0; q < cnt; q++ ) {
 		if ( r[q].recno != 0 && r[q].recno != extra[i].execrec ) nother++;
 	}
-	/* how many resources, then room for every name */
-	if ( ob_lst_res(k, NULL, 0, &nres) < E_OK || nres < 0 ) nres = 0;
-	names = malloc((size_t)( nres + 1 ) * OB_RES_NAME);
-	if ( names == NULL || ob_lst_res(k, names, (SZ)( nres + 1 ) * OB_RES_NAME, &nres) < E_OK ) nres = 0;
+	/* how many resources and the room their names take, then the names */
+	room = ob_lst_res(k, NULL, 0, &nres);
+	if ( room < E_OK || nres < 0 ) {
+		nres = 0;
+		room = 0;
+	}
+	names = malloc((size_t)room + 1);
+	if ( names == NULL || ob_lst_res(k, names, room + 1, &nres) < E_OK ) nres = 0;
 
 	bpk_buf_puts(b, BK_TS_MAGIC);
 	put32le(b, (UINT)m.n);

@@ -611,6 +611,23 @@ LOCAL void test_conf_text( void )
 	KT_ASSERT(b.usegw && b.gw == a.gw && b.dns[0] == a.dns[0] && b.dns[1] == 0);
 	KT_ASSERT(knl_strcmp(b.domain, "example.test") == 0 && knl_strcmp(b.ntp, "ntp.example.test") == 0);
 	KT_ASSERT(b.dnsname[0][0] == 0);			/* ___1 read back as no name */
+
+	/* names as long as a domain name may be (253 octets) come back whole */
+	knl_memset(&a, 0, sizeof(a));
+	(void)cf_ip("255.255.255.0", &a.mask);
+	for ( n = 0; n < 253; n++ ) {
+		a.domain[n] = ( n % 64 == 63 ) ? '.' : (char)( 'a' + n % 26 );
+		a.ntp[n] = ( n % 64 == 63 ) ? '.' : (char)( 'b' + n % 25 );
+		a.dnsname[0][n] = ( n % 64 == 63 ) ? '.' : (char)( 'c' + n % 24 );
+		a.host[n] = ( n % 64 == 63 ) ? '.' : (char)( 'd' + n % 23 );
+	}
+	(void)cf_ip("10.0.2.3", &a.dns[0]);
+	n = cf_net_write(t, 0, sizeof(t), &a);
+	KT_ASSERT(n > 0);
+	cf_net_read(t, n, &b);
+	KT_ASSERT(knl_strcmp(b.domain, a.domain) == 0 && knl_strcmp(b.ntp, a.ntp) == 0);
+	KT_ASSERT(knl_strcmp(b.dnsname[0], a.dnsname[0]) == 0 && knl_strcmp(b.host, a.host) == 0);
+	KT_ASSERT(b.dns[0] == a.dns[0] && b.mask == a.mask);
 }
 
 /*
@@ -888,14 +905,15 @@ LOCAL BOOL text_has( CONST UB *t, SZ len, CONST char *want )
 /* Whether u is among the objects listed: room for every socket there can be, and the channels besides */
 LOCAL BOOL listed( UINT sub, CONST TS_UUID *u )
 {
-	TS_UUID	*l = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * ( SO_MAX + 16 ));
+	INT	room = knl_so_sysmax() + 16;
+	TS_UUID	*l = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)room);
 	INT	cnt = 0, i;
 	BOOL	found = FALSE;
 
 	if ( l == NULL ) {
 		return FALSE;
 	}
-	if ( ob_lst_obj(OB_T_CHANNEL, sub, NULL, l, SO_MAX + 16, &cnt) >= E_OK ) {
+	if ( ob_lst_obj(OB_T_CHANNEL, sub, NULL, l, room, &cnt) >= E_OK ) {
 		for ( i = 0; i < cnt && !found; i++ ) {
 			found = ( ts_uuid_cmp(&l[i], u) == 0 );
 		}
@@ -950,7 +968,8 @@ LOCAL void test_sockobj( void )
 	KT_ASSERT_ER(so_getobj(c, &x), E_OK);
 	KT_ASSERT(ts_uuid_cmp(&u, &x) != 0);
 	KT_ASSERT_ER(so_getobj(-1, &x), E_ID);
-	KT_ASSERT_ER(so_getobj(SO_MAX, &x), E_ID);
+	KT_ASSERT_ER(so_getobj(SO_NUM_CEIL, &x), E_ID);
+	KT_ASSERT_ER(so_getobj(SO_NUM_CEIL - 1, &x), E_ID);	/* a number the table has not grown to */
 	KT_ASSERT_ER(so_getobj(s, NULL), E_PAR);
 
 	/* a channel of the subtype socket, the kernel's, rw------- for the system */

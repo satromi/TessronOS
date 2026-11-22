@@ -105,7 +105,7 @@ static ID	port;
 static ID	klist;			/* the list of the devices, watched */
 static BOOL	closing;
 
-static XFCCONN	conn[XFC_CONN_MAX];
+static XFCCONN	*conn;		/* the connections kept, as many as the settings have */
 static INT	nconn;
 
 static BOOL	o_tadjs, o_layout, o_sjis, o_ro, o_argbox;
@@ -210,8 +210,6 @@ static ER win_open( XWIN *w, CONST char *title, INT x, INT y, INT ww, INT wh )
 	char		json[192];
 	TS_UUID		prog;
 
-	if ( w->ent == NULL ) w->ent = (XFCENT *)malloc(sizeof(XFCENT) * XFC_ENT_MAX);
-	if ( w->ent == NULL ) return E_NOMEM;
 	if ( xfc_uuid_parse(SYSDEF_PROG_XFCONV, &prog) ) {
 		char	ps[40];
 
@@ -295,16 +293,51 @@ static INT ent_cmp( CONST void *a, CONST void *b )
 	return strcmp((CONST char *)x->name, (CONST char *)y->name);
 }
 
+/* The entries of a list let go: the list is empty, its room kept */
+static void ent_clear( XWIN *w )
+{
+	INT	i;
+
+	for ( i = 0; i < w->nent; i++ ) {
+		free(w->ent[i].name);
+		w->ent[i].name = NULL;
+	}
+	w->nent = 0;
+}
+
+/*
+ * An entry added: the list holds as many as the directory or the medium
+ * has, its room doubling when full. NULL only when there is no memory,
+ * which the list then says (w->nomem).
+ */
 static XFCENT *ent_add( XWIN *w, UINT kind, CONST UB *name )
 {
 	XFCENT	*e;
+	UB	*nm;
+	size_t	len = strlen((CONST char *)name);
 
-	if ( w->nent >= XFC_ENT_MAX ) return NULL;
+	if ( w->nent >= w->entcap ) {
+		INT	cap = ( w->entcap > 0 ) ? w->entcap * 2 : XFC_ENT_FIRST;
+		XFCENT	*ne = (XFCENT *)realloc(w->ent, sizeof(XFCENT) * (size_t)cap);
+
+		if ( ne == NULL ) {
+			w->nomem = TRUE;
+			return NULL;
+		}
+		w->ent = ne;
+		w->entcap = cap;
+	}
+	nm = (UB *)malloc(len + 1);
+	if ( nm == NULL ) {
+		w->nomem = TRUE;
+		return NULL;
+	}
+	memcpy(nm, name, len + 1);
 	e = &w->ent[w->nent++];
 	memset(e, 0, sizeof(*e));
 	e->kind = kind;
 	e->size = -1;
-	strncpy((char *)e->name, (CONST char *)name, sizeof(e->name) - 1);
+	e->name = nm;
 	e->hidden = (BOOL)( name[0] == '.' );
 	return e;
 }
@@ -447,9 +480,17 @@ static void watch_devices( void )
 /* The name a connection kept is shown by */
 static void conn_label( CONST XFCCONN *c, UB *out, INT max )
 {
-	if ( c->name[0] != 0 ) snprintf((char *)out, max, "%s", c->name);
-	else snprintf((char *)out, max, "%s://%s%s%s", c->ssh ? "sftp" : "ftp", c->user, c->user[0] != 0 ? "@" : "",
-		      c->host);
+	INT	n;
+
+	if ( XS(c->name)[0] != 0 ) n = snprintf((char *)out, max, "%s", XS(c->name));
+	else n = snprintf((char *)out, max, "%s://%s%s%s", c->ssh ? "sftp" : "ftp", XS(c->user),
+			  XS(c->user)[0] != 0 ? "@" : "", XS(c->host));
+	if ( n >= max && max > 0 ) {
+		/* a label shown in the room there is: cut at a letter's end, never inside one */
+		n = max - 1;
+		while ( n > 0 && ( out[n] & 0xC0 ) == 0x80 ) n--;
+		out[n] = 0;
+	}
 }
 
 static void media_scan( XWIN *w )
@@ -458,12 +499,13 @@ static void media_scan( XWIN *w )
 	T_OBREF	r;
 	XFCENT	*e;
 	INT	cnt = 0, i, n0;
-	UB	nm[XFC_FIELD + 32];
+	UB	nm[256 + 32];
 	ID	key;
 	char	s[160], sz[40];
 	UINT	sum = 0;
 
-	w->nent = 0;
+	ent_clear(w);
+	w->nomem = FALSE;
 	/* every disk and partition, a page at a time (ui_lst_obj) */
 	cnt = ui_lst_obj(OB_T_DEVICE, OB_S_DISK, &list);
 	if ( cnt > 0 ) {
@@ -598,7 +640,8 @@ static ER files_scan( XWIN *w, CONST UB *keep )
 	ER	er;
 	CONST UB *k;
 
-	w->nent = 0;
+	ent_clear(w);
+	w->nomem = FALSE;
 	(void)ent_add(w, E_VOL, w->dev);
 	if ( w->dir[0] != 0 ) (void)ent_add(w, E_UP, (CONST UB *)"..");
 	n0 = w->nent;
@@ -649,6 +692,13 @@ static ER files_scan( XWIN *w, CONST UB *keep )
 		snprintf(s, sizeof(s), "- %s%s %d", w->ent[i].name, ( w->ent[i].kind == E_DIR ) ? "/" : "",
 			 (INT)w->ent[i].size);
 		xfc_log(s);
+	}
+	if ( w->nomem ) {
+		/* the list could not hold every entry: said, not left to look whole */
+		snprintf(w->status, sizeof(w->status), "%s：メモリが足りないため、%d 個までしか出せません", where, w->nent - n0);
+		w->status_err = TRUE;
+		xfc_log("dir short of memory");
+		return E_NOMEM;
 	}
 	if ( er >= E_OK ) {
 		snprintf(w->status, sizeof(w->status), "%s（%d 個）", where, w->nent - n0);
@@ -743,6 +793,7 @@ static XWIN *files_new( CONST char *title )
 	if ( w->fsx == NULL || w->hist == NULL || win_open(w, title, x, y, FILES_W, FILES_H) < E_OK ) {
 		free(w->fsx);
 		free(w->hist);
+		ent_clear(w);
 		free(w->ent);
 		memset(w, 0, sizeof(*w));
 		say(media, "ウインドウを開けません", TRUE);
@@ -756,6 +807,7 @@ static void files_free( XWIN *w )
 {
 	if ( w->kw > 0 ) ob_cls_obj(w->kw);
 	(void)ob_del_obj(&w->win);
+	ent_clear(w);
 	free(w->ent);
 	free(w->fsx);
 	free(w->ftx);
@@ -1128,9 +1180,9 @@ static XFCCONN	pconn;
 /* Whether two connections are the same one: the same server, port and user */
 static BOOL conn_same( CONST XFCCONN *a, CONST XFCCONN *b )
 {
-	return (BOOL)( strcmp((CONST char *)a->host, (CONST char *)b->host) == 0
+	return (BOOL)( strcmp(XS(a->host), XS(b->host)) == 0
 		    && strcmp((CONST char *)a->port, (CONST char *)b->port) == 0
-		    && strcmp((CONST char *)a->user, (CONST char *)b->user) == 0
+		    && strcmp(XS(a->user), XS(b->user)) == 0
 		    && a->ssh == b->ssh );
 }
 
@@ -1143,15 +1195,31 @@ static void conn_keep( CONST XFCCONN *c )
 		if ( conn_same(&conn[i], c) ) break;
 	}
 	if ( i == nconn ) {
-		if ( nconn == XFC_CONN_MAX ) {
-			memmove(&conn[0], &conn[1], sizeof(XFCCONN) * ( XFC_CONN_MAX - 1 ));
-			i = XFC_CONN_MAX - 1;
-		} else {
-			nconn++;
+		/* a new one added: none kept before is dropped to make room */
+		XFCCONN	*nc = (XFCCONN *)realloc(conn, sizeof(XFCCONN) * (size_t)( nconn + 1 ));
+
+		if ( nc == NULL ) {
+			xfc_log("connection not kept: no memory");
+			say(media, "メモリが足りないため、接続を保存できません", TRUE);
+			return;
 		}
+		conn = nc;
+		memset(&conn[nconn], 0, sizeof(XFCCONN));
+		nconn++;
 	}
-	conn[i] = *c;
-	if ( !c->keep ) conn[i].pass[0] = 0;
+	{
+		XFCCONN	k;
+
+		if ( !xfc_conn_copy(&k, c) ) {
+			xfc_log("connection not kept: no memory");
+			say(media, "メモリが足りないため、接続を保存できません", TRUE);
+			if ( i == nconn - 1 && conn[i].host == NULL ) nconn--;
+			return;
+		}
+		xfc_conn_free(&conn[i]);
+		conn[i] = k;
+	}
+	if ( !c->keep ) (void)xfc_conn_set(&conn[i].pass, NULL);
 	if ( xfc_conf_save(conn, nconn) < E_OK ) xfc_log("settings not kept");
 }
 
@@ -1163,19 +1231,20 @@ static void conn_keep( CONST XFCCONN *c )
 static void conn_drop( INT i )
 {
 	XFCCONN	c;
-	UB	lb[XFC_FIELD + 32];
-	char	s[XFC_FIELD + 96];
+	UB	lb[256 + 32];
+	char	s[256 + 96];
 	INT	k;
 
 	if ( i < 0 || i >= nconn ) return;
-	c = conn[i];
+	c = conn[i];			/* the fields are conn[i]'s, let go once the windows are closed */
 	conn_label(&c, lb, sizeof(lb));
 	for ( k = 1; k < XFC_WIN_MAX; k++ ) {
 		if ( xw[k].used && xw[k].is_ftp && conn_same(&xw[k].fc, &c) ) files_close(&xw[k]);
 	}
+	xfc_conn_free(&c);
 	memmove(&conn[i], &conn[i + 1], sizeof(XFCCONN) * (size_t)( nconn - i - 1 ));
 	nconn--;
-	memset(&conn[nconn], 0, sizeof(XFCCONN));
+	memset(&conn[nconn], 0, sizeof(XFCCONN));	/* the password it held cleared */
 	if ( xfc_conf_save(conn, nconn) < E_OK ) {
 		xfc_log("settings not kept");
 		snprintf(s, sizeof(s), "%s の接続を設定から消せません", lb);
@@ -1205,9 +1274,9 @@ static ER ssh_try( XFCCONN *c, UINT p, char *why, INT max )
 	INT	i;
 	ER	er;
 
-	er = ssh_connect(&s, &ssh_net_so, (CONST char *)c->host, p, h);
+	er = ssh_connect(&s, &ssh_net_so, XS(c->host), p, h);
 	if ( er < E_OK ) {
-		snprintf(why, max, "%s に接続できません（%d）", c->host, (INT)er);
+		snprintf(why, max, "%s に接続できません（%d）", XS(c->host), (INT)er);
 		xfc_log(why);
 		return er;
 	}
@@ -1233,19 +1302,19 @@ static ER ssh_try( XFCCONN *c, UINT p, char *why, INT max )
 		static char	pem[SSH_KEY_MAX + 1];
 		INT		klen = ssh_key_load(pem, SSH_KEY_MAX);
 
-		er = ( klen > 0 ) ? ssh_login_key(s, (CONST char *)c->user, pem, klen) : E_OACV;
+		er = ( klen > 0 ) ? ssh_login_key(s, XS(c->user), pem, klen) : E_OACV;
 		memset(pem, 0, sizeof(pem));
 	}
-	if ( er < E_OK ) er = ssh_login(s, (CONST char *)c->user, (CONST char *)c->pass);
+	if ( er < E_OK ) er = ssh_login(s, XS(c->user), XS(c->pass));
 	if ( er < E_OK ) {
-		snprintf(why, max, "%s の名前かパスワードが違います", c->host);
+		snprintf(why, max, "%s の名前かパスワードが違います", XS(c->host));
 		xfc_log(why);
 		ssh_close(s);
 		return er;
 	}
 	er = sftp_start(s);
 	if ( er < E_OK ) {
-		snprintf(why, max, "%s は SFTP を受け付けません（%d）", c->host, (INT)er);
+		snprintf(why, max, "%s は SFTP を受け付けません（%d）", XS(c->host), (INT)er);
 		xfc_log(why);
 		ssh_close(s);
 		return er;
@@ -1288,10 +1357,10 @@ static ER ftp_try( XFCCONN *c, char *why, INT max )
 	memset(pend->ftp, 0, sizeof(T_FTP));
 	pend->ftp->ctl = -1;
 	xfc_net_init(&pend->xnet, &pend->fnet, 20000, (UINT)atoi((char *)c->lport));
-	er = ftp_open(pend->ftp, &pend->fnet, (CONST char *)c->host, p, c->user[0] != 0 ? c->user : NULL,
-		      c->user[0] != 0 ? c->pass : NULL, c->enc);
+	er = ftp_open(pend->ftp, &pend->fnet, XS(c->host), p, XS(c->user)[0] != 0 ? c->user : NULL,
+		      XS(c->user)[0] != 0 ? (CONST UB *)XS(c->pass) : NULL, c->enc);
 	if ( er < E_OK ) {
-		snprintf(why, max, "%s に接続できません：%s（%d %s）", c->host, err_text(er), pend->ftp->code,
+		snprintf(why, max, "%s に接続できません：%s（%d %s）", XS(c->host), err_text(er), pend->ftp->code,
 			 pend->ftp->text);
 		xfc_log(why);
 		return er;
@@ -1304,11 +1373,15 @@ static void open_ftp( CONST XFCCONN *from )
 {
 	XWIN	*w;
 	char	s[300];
-	UB	lb[XFC_FIELD + 32];
+	UB	lb[256 + 32];
 
+	xfc_conn_free(&pconn);
 	memset(&pconn, 0, sizeof(pconn));
 	if ( from != NULL ) {
-		pconn = *from;
+		if ( !xfc_conn_copy(&pconn, from) ) {
+			say(media, "メモリが足りないため、接続できません", TRUE);
+			return;
+		}
 	} else {
 		strcpy((char *)pconn.port, "21");
 		pconn.enc = TXC_UTF8;
@@ -1329,7 +1402,7 @@ static void open_ftp( CONST XFCCONN *from )
 	if ( pconn.mode == XFC_DM_ACTIVE ) pend->ftp->active = TRUE;
 	(void)dt_gettime(&pend->ftp->now);
 	conn_keep(&pconn);
-	snprintf(s, sizeof(s), "connected %s %s %s", pconn.host, ( pend->ftp->enc == TXC_UTF8 ) ? "utf-8"
+	snprintf(s, sizeof(s), "connected %s %s %s", XS(pconn.host), ( pend->ftp->enc == TXC_UTF8 ) ? "utf-8"
 		 : txc_name(pend->ftp->enc), pconn.ssh ? "sftp" : pend->ftp->active ? "active" : pend->ftp->pasv ? "pasv" : "epsv");
 	xfc_log(s);
 
@@ -1347,10 +1420,12 @@ static void open_ftp( CONST XFCCONN *from )
 		memcpy(w->xnet.addr, pend->xnet.addr, sizeof(w->xnet.addr));
 		w->ftp->net = &w->fnet;
 		w->is_ftp = TRUE;
-		w->fc = pconn;
-		w->fc.pass[0] = 0;
+		if ( !xfc_conn_copy(&w->fc, &pconn) ) {
+			memset(&w->fc, 0, sizeof(w->fc));	/* no memory: the window knows no connection to close with */
+		}
+		(void)xfc_conn_set(&w->fc.pass, NULL);
 		snprintf((char *)w->dev, sizeof(w->dev), "%s", lb);
-		snprintf(w->label, sizeof(w->label), "%s://%s", pconn.ssh ? "sftp" : "ftp", pconn.host);
+		snprintf(w->label, sizeof(w->label), "%s://%s", pconn.ssh ? "sftp" : "ftp", XS(pconn.host));
 		strcpy(w->source, "ftp");
 		(void)xfu_ftp_tree(w->ftx, w->ftp, (CONST UB *)"", &w->tree);
 		pend->ftp = NULL;
@@ -1358,7 +1433,7 @@ static void open_ftp( CONST XFCCONN *from )
 		snprintf(s, sizeof(s), "window %s", w->label);
 		xfc_log(s);
 		go_to(w, (CONST UB *)"");
-		snprintf(s, sizeof(s), "%s に接続しました（%s）", pconn.host, pconn.ssh ? (CONST UB *)"SFTP" : w->ftp->syst);
+		snprintf(s, sizeof(s), "%s に接続しました（%s）", XS(pconn.host), pconn.ssh ? (CONST UB *)"SFTP" : w->ftp->syst);
 		say(w, s, FALSE);
 	}
 	free(pend->ftp);
@@ -2512,7 +2587,7 @@ int main( void )
 	xfc_dlg_init(port);
 	hasarg = (BOOL)( ts_get_arg(&argobj, sizeof(argobj)) >= (SZ)sizeof(argobj) );
 	if ( hasarg ) arg_look();
-	nconn = xfc_conf_load(conn, XFC_CONN_MAX);
+	nconn = xfc_conf_load(&conn);
 	media->kind = W_MEDIA;
 	if ( win_open(media, "ファイル変換", 120, 90, MEDIA_W, MEDIA_H) < E_OK ) {
 		xfc_log("no window");

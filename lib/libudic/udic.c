@@ -154,9 +154,16 @@ LOCAL BOOL wide_space( CONST UB *s, INT n )
 	return (BOOL)( n >= 3 && s[0] == 0xE3 && s[1] == 0x80 && s[2] == 0x80 );
 }
 
-EXPORT INT ud_yomi( CONST UB *in, INT n, UB *out, INT max )
+/*
+ * A reading as it is typed: where it starts and how long it is with the
+ * spaces round it taken off; its length, or E_PAR when it is empty or has
+ * a letter a reading cannot have. Nothing is copied, so no length is
+ * too long for it.
+ */
+LOCAL INT yomi_span( CONST UB **p_in, INT n )
 {
-	INT	i;
+	CONST UB	*in = *p_in;
+	INT		i;
 
 	while ( n > 0 && ( in[0] == ' ' || wide_space(in, n) ) ) {
 		i = ( in[0] == ' ' ) ? 1 : 3;
@@ -167,18 +174,59 @@ EXPORT INT ud_yomi( CONST UB *in, INT n, UB *out, INT max )
 		|| ( n >= 3 && wide_space(in + n - 3, 3) ) ) ) {
 		n -= ( in[n - 1] == 0x80 ) ? 3 : 1;
 	}
-	if ( n <= 0 || n >= max || n >= UD_YOMI_MAX ) {
+	if ( n <= 0 ) {
 		return E_PAR;
 	}
 	for ( i = 0; i < n; i++ ) {
 		if ( in[i] <= 0x20 || in[i] == 0x7F || wide_space(in + i, n - i) ) {
 			return E_PAR;
 		}
-		out[i] = in[i];
 	}
+	*p_in = in;
+	return n;
+}
+
+EXPORT INT ud_yomi( CONST UB *in, INT n, UB *out, INT max )
+{
+	INT	i;
+
+	n = yomi_span(&in, n);
+	if ( n < 0 || n >= max ) {
+		return E_PAR;
+	}
+	for ( i = 0; i < n; i++ ) out[i] = in[i];
 	out[n] = 0;
 	ud_hira(out, n);
 	return n;
+}
+
+/*
+ * A kept reading (already in hiragana) against one as typed, whose
+ * katakana are taken as hiragana as they are met: below 0, 0, above 0.
+ */
+LOCAL INT cmp_hira( CONST UB *a, INT na, CONST UB *b, INT nb )
+{
+	INT	i = 0, j = 0, k;
+
+	while ( i < na && j < nb ) {
+		UB	t[3];
+		INT	len = 1;
+
+		t[0] = b[j];
+		if ( j + 2 < nb && ( b[j] & 0xF0 ) == 0xE0 ) {
+			t[1] = b[j + 1];
+			t[2] = b[j + 2];
+			ud_hira(t, 3);
+			len = 3;
+		}
+		for ( k = 0; k < len; k++ ) {
+			if ( i + k >= na ) return -1;
+			if ( a[i + k] != t[k] ) return (INT)a[i + k] - (INT)t[k];
+		}
+		i += len;
+		j += len;
+	}
+	return ( na - i ) - ( nb - j );
 }
 
 /* A word as it can be kept: the spaces round it taken off; its length, or E_PAR */
@@ -192,7 +240,7 @@ LOCAL INT word_ok( CONST UB **p_w, INT n )
 		n--;
 	}
 	while ( n > 0 && ( w[n - 1] == ' ' || w[n - 1] == '\r' ) ) n--;
-	if ( n <= 0 || n >= UD_WORD_MAX ) {
+	if ( n <= 0 ) {
 		return E_PAR;
 	}
 	for ( i = 0; i < n; i++ ) {
@@ -250,16 +298,15 @@ EXPORT INT ud_count( CONST UB *text, INT len )
 
 EXPORT INT ud_lookup( CONST UB *text, INT len, CONST UB *yomi, INT nyomi, UDENT *e, INT max )
 {
-	UB	key[UD_YOMI_MAX];
 	UDENT	w;
 	INT	at = 0, n = 0, k;
 
-	k = ud_yomi(yomi, nyomi, key, sizeof(key));
+	k = yomi_span(&yomi, nyomi);
 	if ( k <= 0 ) {
 		return 0;
 	}
 	while ( ud_next(text, len, &at, &w) ) {
-		if ( cmp(w.yomi, w.nyomi, key, k) != 0 ) continue;
+		if ( cmp_hira(w.yomi, w.nyomi, yomi, k) != 0 ) continue;
 		if ( n < max ) e[n] = w;
 		n++;
 	}
@@ -267,59 +314,54 @@ EXPORT INT ud_lookup( CONST UB *text, INT len, CONST UB *yomi, INT nyomi, UDENT 
 }
 
 /*
- * Letters as they are compared in a search: the full-width forms of
- * ASCII as ASCII, the ideographic space as a space, katakana as
- * hiragana. Its length, at most max.
+ * The letter at byte i as it is compared in a search: the full-width
+ * forms of ASCII as ASCII, the ideographic space as a space, katakana as
+ * hiragana. Its bytes taken in *p_len. Nothing is copied, so the words
+ * compared have no length limit.
  */
-LOCAL INT fold( CONST UB *s, INT n, UB *out, INT max )
+LOCAL UINT fold_at( CONST UB *s, INT n, INT i, INT *p_len )
 {
-	INT	i = 0, o = 0;
+	if ( i + 2 < n && ( s[i] & 0xF0 ) == 0xE0 ) {
+		UINT	u = ( (UINT)( s[i] & 0x0F ) << 12 ) | ( (UINT)( s[i + 1] & 0x3F ) << 6 ) | ( s[i + 2] & 0x3F );
 
-	while ( i < n && o < max ) {
-		if ( i + 2 < n && ( s[i] & 0xF0 ) == 0xE0 ) {
-			UINT	u = ( (UINT)( s[i] & 0x0F ) << 12 ) | ( (UINT)( s[i + 1] & 0x3F ) << 6 ) | ( s[i + 2] & 0x3F );
-
-			if ( u >= 0xFF01 && u <= 0xFF5E ) {
-				out[o++] = (UB)( u - 0xFF01 + 0x21 );
-				i += 3;
-				continue;
-			}
-			if ( u == 0x3000 ) {
-				out[o++] = ' ';
-				i += 3;
-				continue;
-			}
-			if ( o + 3 > max ) break;
-			out[o] = s[i];
-			out[o + 1] = s[i + 1];
-			out[o + 2] = s[i + 2];
-			ud_hira(out + o, 3);
-			o += 3;
-			i += 3;
-			continue;
-		}
-		out[o++] = s[i++];
+		*p_len = 3;
+		if ( u >= 0xFF01 && u <= 0xFF5E ) return u - 0xFF01 + 0x21;
+		if ( u == 0x3000 ) return ' ';
+		if ( u >= 0x30A1 && u <= 0x30F6 ) u -= 0x60;
+		return 0x10000 | u;
 	}
-	return o;
+	*p_len = 1;
+	return s[i];
+}
+
+/* Whether a, from byte i on, starts with k, the letters folded */
+LOCAL BOOL fold_starts( CONST UB *a, INT na, INT i, CONST UB *k, INT nk )
+{
+	INT	j = 0, la, lk;
+
+	while ( j < nk ) {
+		if ( i >= na ) return FALSE;
+		if ( fold_at(a, na, i, &la) != fold_at(k, nk, j, &lk) ) return FALSE;
+		i += la;
+		j += lk;
+	}
+	return TRUE;
 }
 
 EXPORT BOOL ud_match( CONST UDENT *e, CONST UB *key, INT nkey )
 {
-	UB	k[UD_WORD_MAX], y[UD_YOMI_MAX], w[UD_WORD_MAX];
-	INT	nk, ny, nw, i, j;
+	INT	i = 0, l;
 
 	if ( nkey <= 0 ) {
 		return TRUE;
 	}
-	nk = fold(key, nkey, k, sizeof(k));
-	ny = fold(e->yomi, e->nyomi, y, sizeof(y));
-	nw = fold(e->word, e->nword, w, sizeof(w));
-	if ( ny >= nk && cmp(y, nk, k, nk) == 0 ) {
+	if ( fold_starts(e->yomi, e->nyomi, 0, key, nkey) ) {
 		return TRUE;
 	}
-	for ( i = 0; i + nk <= nw; i++ ) {
-		for ( j = 0; j < nk && w[i + j] == k[j]; j++ ) ;
-		if ( j == nk ) return TRUE;
+	while ( i < e->nword ) {
+		if ( fold_starts(e->word, e->nword, i, key, nkey) ) return TRUE;
+		(void)fold_at(e->word, e->nword, i, &l);
+		i += l;
 	}
 	return FALSE;
 }
@@ -344,12 +386,11 @@ LOCAL BOOL room( UB *text, INT *p_len, INT max, INT at, INT n )
 EXPORT ER ud_put( UB *text, INT *p_len, INT max, CONST UB *yomi, INT nyomi,
 		  CONST UB *word, INT nword, INT pos )
 {
-	UB		y[UD_YOMI_MAX];
 	CONST char	*pn = ud_pos_name(pos);
 	UDENT		e;
 	INT		ny, at = 0, place = -1, i, n, line;
 
-	ny = ud_yomi(yomi, nyomi, y, sizeof(y));
+	ny = yomi_span(&yomi, nyomi);
 	nword = word_ok(&word, nword);
 	if ( ny <= 0 || nword <= 0 || pn == NULL ) {
 		return E_PAR;
@@ -360,7 +401,7 @@ EXPORT ER ud_put( UB *text, INT *p_len, INT max, CONST UB *yomi, INT nyomi,
 	line = ny + 1 + nword + 1 + slen(pn) + 1;
 	/* where it goes: its own line when it is there, else before the first after it */
 	while ( ud_next(text, *p_len, &at, &e) ) {
-		INT	c = cmp(e.yomi, e.nyomi, y, ny);
+		INT	c = cmp_hira(e.yomi, e.nyomi, yomi, ny);
 
 		if ( c == 0 ) c = cmp(e.word, e.nword, word, nword);
 		if ( c == 0 ) {
@@ -386,7 +427,8 @@ EXPORT ER ud_put( UB *text, INT *p_len, INT max, CONST UB *yomi, INT nyomi,
 		return E_LIMIT;
 	}
 	n = place;
-	for ( i = 0; i < ny; i++ ) text[n++] = y[i];
+	for ( i = 0; i < ny; i++ ) text[n++] = yomi[i];
+	ud_hira(text + place, ny);
 	text[n++] = '\t';
 	for ( i = 0; i < nword; i++ ) text[n++] = word[i];
 	text[n++] = '\t';
@@ -397,17 +439,16 @@ EXPORT ER ud_put( UB *text, INT *p_len, INT max, CONST UB *yomi, INT nyomi,
 
 EXPORT ER ud_del( UB *text, INT *p_len, CONST UB *yomi, INT nyomi, CONST UB *word, INT nword )
 {
-	UB	y[UD_YOMI_MAX];
 	UDENT	e;
 	INT	ny, at = 0;
 
-	ny = ud_yomi(yomi, nyomi, y, sizeof(y));
+	ny = yomi_span(&yomi, nyomi);
 	nword = word_ok(&word, nword);
 	if ( ny <= 0 || nword <= 0 ) {
 		return E_NOEXS;
 	}
 	while ( ud_next(text, *p_len, &at, &e) ) {
-		if ( cmp(e.yomi, e.nyomi, y, ny) == 0 && cmp(e.word, e.nword, word, nword) == 0 ) {
+		if ( cmp_hira(e.yomi, e.nyomi, yomi, ny) == 0 && cmp(e.word, e.nword, word, nword) == 0 ) {
 			(void)room(text, p_len, *p_len, e.at, -( e.end - e.at ));
 			return E_OK;
 		}
@@ -475,11 +516,45 @@ LOCAL INT utf8( UB *t, UINT u )
 	return 4;
 }
 
+/*
+ * One line of UTF-16 from *p_at to its LF, as UTF-8: how many bytes it
+ * takes, and with out, written there. *p_at is left past the LF. An odd
+ * last byte is passed over.
+ */
+LOCAL INT w16_line( CONST UB *in, INT nin, INT *p_at, BOOL big, UB *out )
+{
+	INT	at = *p_at, n = 0, k;
+
+	while ( at + 1 < nin ) {
+		UB	b[4];
+		UINT	u = big ? ( ( (UINT)in[at] << 8 ) | in[at + 1] ) : ( ( (UINT)in[at + 1] << 8 ) | in[at] );
+		INT	nb;
+
+		at += 2;
+		if ( u >= 0xD800 && u < 0xDC00 && at + 1 < nin ) {
+			UINT	lo = big ? ( ( (UINT)in[at] << 8 ) | in[at + 1] )
+					 : ( ( (UINT)in[at + 1] << 8 ) | in[at] );
+
+			if ( lo >= 0xDC00 && lo < 0xE000 ) {
+				u = 0x10000 + ( ( u - 0xD800 ) << 10 ) + ( lo - 0xDC00 );
+				at += 2;
+			}
+		}
+		if ( u == '\n' ) break;
+		nb = utf8(b, u);
+		if ( out != NULL ) {
+			for ( k = 0; k < nb; k++ ) out[n + k] = b[k];
+		}
+		n += nb;
+	}
+	*p_at = at;
+	return n;
+}
+
 EXPORT INT ud_import( UB *text, INT *p_len, INT max, CONST UB *in, INT nin, INT *p_bad )
 {
-	UB	line[UD_LINE_MAX * 2];
-	INT	at = 0, nl = 0, put = 0, r;
-	BOOL	wide = FALSE, big = FALSE, over = FALSE;
+	INT	at = 0, put = 0, r;
+	BOOL	wide = FALSE, big = FALSE;
 
 	*p_bad = 0;
 	if ( nin >= 2 && in[0] == 0xFF && in[1] == 0xFE ) {
@@ -491,48 +566,35 @@ EXPORT INT ud_import( UB *text, INT *p_len, INT max, CONST UB *in, INT nin, INT 
 	} else if ( nin >= 3 && in[0] == 0xEF && in[1] == 0xBB && in[2] == 0xBF ) {
 		at = 3;
 	}
-	for ( ;; ) {
-		UB	b[4];
-		INT	nb = 1, k;
+	if ( !wide ) {
+		/* UTF-8: each line is read where it lies, whatever its length */
+		while ( at < nin ) {
+			INT	end = at;
 
-		if ( at >= nin ) {
-			b[0] = '\n';				/* the last line, with no end of its own */
-		} else if ( wide ) {
-			UINT	u;
+			while ( end < nin && in[end] != '\n' ) end++;
+			r = import_line(text, p_len, max, in + at, end - at, p_bad);
+			if ( r == E_LIMIT ) return E_LIMIT;
+			put += r;
+			at = end + 1;
+		}
+		return put;
+	}
+	/*
+	 * UTF-16: a line is made into UTF-8 in the free end of the text,
+	 * which the words put keep clear of. A line that does not fit there
+	 * could not be put either.
+	 */
+	while ( at + 1 < nin ) {
+		INT	from = at, nl = w16_line(in, nin, &at, big, NULL);
+		UB	*line;
 
-			if ( at + 1 >= nin ) break;
-			u = big ? ( ( (UINT)in[at] << 8 ) | in[at + 1] ) : ( ( (UINT)in[at + 1] << 8 ) | in[at] );
-			at += 2;
-			if ( u >= 0xD800 && u < 0xDC00 && at + 1 < nin ) {
-				UINT	lo = big ? ( ( (UINT)in[at] << 8 ) | in[at + 1] )
-						 : ( ( (UINT)in[at + 1] << 8 ) | in[at] );
-
-				if ( lo >= 0xDC00 && lo < 0xE000 ) {
-					u = 0x10000 + ( ( u - 0xD800 ) << 10 ) + ( lo - 0xDC00 );
-					at += 2;
-				}
-			}
-			nb = utf8(b, u);
-		} else {
-			b[0] = in[at++];
-		}
-		if ( b[0] == '\n' && nb == 1 ) {
-			if ( !over ) {
-				r = import_line(text, p_len, max, line, nl, p_bad);
-				if ( r == E_LIMIT ) return E_LIMIT;
-				put += r;
-			} else {
-				( *p_bad )++;
-			}
-			nl = 0;
-			over = FALSE;
-			if ( at >= nin ) break;
-			continue;
-		}
-		for ( k = 0; k < nb; k++ ) {
-			if ( nl < (INT)sizeof(line) ) line[nl++] = b[k];
-			else over = TRUE;
-		}
+		if ( nl <= 0 ) continue;
+		if ( *p_len > max - nl ) return E_LIMIT;
+		line = text + ( max - nl );
+		(void)w16_line(in, nin, &from, big, line);
+		r = import_line(text, p_len, max - nl, line, nl, p_bad);
+		if ( r == E_LIMIT ) return E_LIMIT;
+		put += r;
 	}
 	return put;
 }

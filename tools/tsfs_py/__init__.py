@@ -1,5 +1,5 @@
-"""Host side reader and writer for the TSFS native volume, version 4
-(design 11.6).
+"""Host side reader and writer for the TSFS native volume, versions 4
+and 5 (design 11.6, 7.3).
 
 The format is the one peripheral_kernel/fs/tsfsblk.c, tsfsjrnl.c,
 tsfsbtree.c and tsfsobj.c put on the medium: little endian throughout, a
@@ -26,8 +26,9 @@ from .error import TsfsError
 from .crc import crc32c
 from .image import (BlockImage, Partition, read_partitions, find_tsfs_partition,
                     TSFS_TYPE_GUID)
-from .layout import (BLOCK_SIZE, SECTOR_SIZE, MAGIC, VERSION, LABEL_MAX,
-                     MIN_BLOCKS, Superblock, gen_uuid7, layout, owner_of)
+from .layout import (BLOCK_SIZE, SECTOR_SIZE, MAGIC, VERSION, VERSION5,
+                     LABEL_MAX, MIN_BLOCKS, Limits, Superblock, gen_uuid7,
+                     layout, owner_of)
 from .btree import BTree, Node, MAX_KEYS, TREE_OBJ, TREE_GC, TREE_ORPHAN
 from .obj import ObjectBlock, Place, PlaceEntry, ResEntry, LinkEntry
 from .journal import Journal
@@ -38,8 +39,8 @@ __all__ = [
     "TsfsError", "crc32c",
     "BlockImage", "Partition", "read_partitions", "find_tsfs_partition",
     "TSFS_TYPE_GUID",
-    "BLOCK_SIZE", "SECTOR_SIZE", "MAGIC", "VERSION", "LABEL_MAX",
-    "MIN_BLOCKS", "Superblock", "gen_uuid7", "layout", "owner_of",
+    "BLOCK_SIZE", "SECTOR_SIZE", "MAGIC", "VERSION", "VERSION5", "LABEL_MAX",
+    "MIN_BLOCKS", "Limits", "Superblock", "gen_uuid7", "layout", "owner_of",
     "BTree", "Node", "MAX_KEYS", "TREE_OBJ", "TREE_GC", "TREE_ORPHAN",
     "ObjectBlock", "Place", "PlaceEntry", "ResEntry", "LinkEntry",
     "Journal", "Volume", "Checker", "Report",

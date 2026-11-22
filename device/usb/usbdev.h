@@ -120,6 +120,14 @@ typedef struct usb_hc	USBHC;
 typedef struct usb_dev	USBDEV;
 typedef struct usb_pipe	USBPIPE;
 
+/*
+ * Bytes of a string of a device (its maker's and its product's names),
+ * UTF-8 with its terminator: a string descriptor is at most 255 bytes
+ * (bLength is one byte, USB 2.0 9.6.7), so at most 126 UTF-16 units,
+ * each at most 3 bytes of UTF-8 (a pair of surrogates, 4 bytes for two).
+ */
+#define USB_STR_MAX	( 126 * 3 + 1 )
+
 struct usb_dev {
 	USBHC	*hc;
 	USBDEV	*parent;	/* the hub it hangs off, NULL on a root port */
@@ -134,8 +142,8 @@ struct usb_dev {
 	UB	*cfg;		/* its whole configuration descriptor */
 	INT	cfglen;
 	UB	cfg_value;
-	UB	product[32];
-	UB	maker[32];
+	UB	product[USB_STR_MAX];	/* its product string, UTF-8, whole */
+	UB	maker[USB_STR_MAX];	/* its maker's */
 	INT	role;		/* USB_ROLE_* */
 	INT	handle;		/* what the interface calls it */
 	UB	devnm[8];	/* a disk: its device name */

@@ -65,10 +65,7 @@
 
 #define RT_TASK_STK	( 64 * 1024 )
 #define MARGIN		6		/* round a sprite, at life size: strokes reach past the box */
-#define MAX_ITEM	512
-#define MAX_FIG		16
-#define MAX_DOC		32
-#define MAX_ALT		8		/* pictures a sprite may be changed to */
+#define FIRST_ITEM	64		/* the things of a scene: room made first, twice as much when it is full */
 #define MAX_DIRTY	8
 #define OUTQ		256		/* commands not yet taken by a helper */
 #define VOUTQ		32
@@ -105,7 +102,7 @@ typedef struct {
 	T_DPRECT	at;		/* where px stands, zoomed scene pixels */
 	T_DPRECT	base;		/* a sprite: its object's box when it was drawn, zoomed */
 	T_DPRECT	was;		/* where it was put last; empty none */
-	ALT		alt[MAX_ALT];
+	ALT		*alt;	/* the pictures it may be changed to, as many as the program names */
 	INT		nalt;
 	INT		cur;		/* the alternative shown, -1 its own */
 	BOOL		video;
@@ -155,11 +152,12 @@ struct rtplay {
 	T_TAD		*rec;		/* the player's own: what the program's nodes point into */
 	UB		*xml;		/* and the bytes it was read from */
 	RT		*rt;
-	ITEM		*item;
-	INT		nitem;
-	T_TVFIG		*fig[MAX_FIG];
+	ITEM		*item;		/* the scene's things, as many as it has: room for nroom */
+	INT		nitem, nroom;
+	BOOL		nomem;		/* one of them could not be kept: said once the scene is laid out */
+	T_TVFIG		**fig;		/* its figures and texts, as many as it has */
 	INT		nfig;
-	T_TVDOC		*doc[MAX_DOC];
+	T_TVDOC		**doc;
 	INT		ndoc;
 	LAYER		*layer;
 	INT		nlayer;
@@ -178,7 +176,8 @@ struct rtplay {
 	TS_UUID		rep_u;
 	ID		rep;
 	HELPER		snd;
-	HELPER		vid[RT_MEDIA_MAX];
+	HELPER		*vid;		/* a video helper for each medium of the program, made when it is read in and not moved after */
+	INT		nvid;
 	BOOL		hold_start;	/* the program waits for 実時間メディア */
 	RT_TIME		hold_until;
 	/* what the program asked the desktop to do, done in the desktop's task */
@@ -607,7 +606,7 @@ LOCAL BOOL via_video( CONST RT_MEDIA *m )
 
 LOCAL HELPER *helper_of( DTRT *p, RT_MEDIA *m, INT k )
 {
-	if ( via_video(m) ) return ( k < RT_MEDIA_MAX ) ? &p->vid[k] : NULL;
+	if ( via_video(m) ) return ( k >= 0 && k < p->nvid ) ? &p->vid[k] : NULL;
 	return &p->snd;
 }
 
@@ -666,12 +665,12 @@ LOCAL void h_media( void *arg, RT *rt, INT k, UINT op, RT_V v )
 	RTM_CMD		c;
 
 	if ( m == NULL ) return;
-	if ( via_video(m) && op == RT_MO_LOAD && ( k >= RT_MEDIA_MAX || !p->vid[k].used ) ) {
+	if ( via_video(m) && op == RT_MO_LOAD && ( k >= p->nvid || !p->vid[k].used ) ) {
 		TS_UUID	pu;
 		T_OBREF	r;
 		BOOL	there = (BOOL)( ts_str_to_uuid(RTM_VIDEO_UUID, &pu) >= E_OK && ob_ref_obj(&pu, &r) >= E_OK );
 
-		if ( !there || k >= RT_MEDIA_MAX || !helper_make(p, &p->vid[k], &pu, TRUE, VOUTQ) ) {
+		if ( !there || k >= p->nvid || !helper_make(p, &p->vid[k], &pu, TRUE, VOUTQ) ) {
 			/* nothing here decodes it */
 			if ( !p->said_novideo ) {
 				tell("realtime: no MPEG Player to play a video");
@@ -686,6 +685,7 @@ LOCAL void h_media( void *arg, RT *rt, INT k, UINT op, RT_V v )
 		return;
 	}
 	h = helper_of(p, m, k);
+	if ( h == NULL ) return;
 	knl_memset(&c, 0, sizeof(c));
 	c.inst = k;
 	c.gen = m->gen;
@@ -905,7 +905,7 @@ LOCAL void answers( DTRT *p )
 				oq_flush(&p->snd);
 				h = &p->snd;
 			}
-			for ( k = 0; h == NULL && k < RT_MEDIA_MAX; k++ ) {
+			for ( k = 0; h == NULL && k < p->nvid; k++ ) {
 				if ( p->vid[k].used && !p->vid[k].up && a.inst == k ) {
 					p->vid[k].up = TRUE;
 					oq_flush(&p->vid[k]);
@@ -923,14 +923,14 @@ LOCAL void answers( DTRT *p )
 		case RTM_A_ERROR:	rt_media_event(p->rt, a.inst, a.gen, RT_ME_ERROR, a.v, p->step_now); break;
 		case RTM_A_TIME:	rt_media_event(p->rt, a.inst, a.gen, RT_ME_TIME, a.v, p->step_now); break;
 		case RTM_A_FRAME:
-			if ( a.inst < RT_MEDIA_MAX && rt_media(p->rt, a.inst)->gen == a.gen ) frame_take(p, a.inst, &a);
+			if ( a.inst < p->nvid && rt_media(p->rt, a.inst)->gen == a.gen ) frame_take(p, a.inst, &a);
 			break;
 		default:
 			break;
 		}
 	}
 	oq_flush(&p->snd);
-	for ( n = 0; n < RT_MEDIA_MAX; n++ ) {
+	for ( n = 0; n < p->nvid; n++ ) {
 		if ( p->vid[n].used ) oq_flush(&p->vid[n]);
 	}
 }
@@ -966,11 +966,34 @@ LOCAL BOOL named( CONST T_TADNODE *nd, CONST char *name )
 	return (BOOL)( nd->name[i] == 0 );
 }
 
+/* A pointer put after the n a table has, the table one larger: FALSE for no memory */
+LOCAL BOOL ptr_add( void ***p_tab, INT *p_n, void *v )
+{
+	void	**t = (void **)Krealloc(*p_tab, sizeof(void *) * (size_t)( *p_n + 1 ));
+
+	if ( t == NULL ) return FALSE;
+	t[*p_n] = v;
+	*p_tab = t;
+	(*p_n)++;
+	return TRUE;
+}
+
 LOCAL ITEM *item_new( DTRT *p, UINT kind, INT z )
 {
 	ITEM	*it;
 
-	if ( p->nitem >= MAX_ITEM ) return NULL;
+	if ( p->nitem == p->nroom ) {
+		/* as many things as the scene has: twice the room */
+		INT	room = ( p->nroom > 0 ) ? p->nroom * 2 : FIRST_ITEM;
+		ITEM	*ni = (ITEM *)Krealloc(p->item, sizeof(ITEM) * (size_t)room);
+
+		if ( ni == NULL ) {
+			p->nomem = TRUE;
+			return NULL;
+		}
+		p->item = ni;
+		p->nroom = room;
+	}
 	it = &p->item[p->nitem];
 	knl_memset(it, 0, sizeof(*it));
 	it->kind = kind;
@@ -996,8 +1019,12 @@ LOCAL void add_figure( DTRT *p, T_TVFIG *f )
 {
 	INT	i;
 
-	if ( f == NULL || p->nfig >= MAX_FIG ) return;
-	p->fig[p->nfig++] = f;
+	if ( f == NULL ) return;
+	if ( !ptr_add((void ***)&p->fig, &p->nfig, f) ) {
+		tv_fig_free(f);
+		p->nomem = TRUE;
+		return;
+	}
 	for ( i = 0; i < f->nsh; i++ ) {
 		CONST T_TVSHAPE	*s = &f->sh[i];
 		ITEM		*it = item_new(p, IT_FIGSH, s->z);
@@ -1025,8 +1052,12 @@ LOCAL void add_document( DTRT *p, CONST T_TADNODE *nd )
 	CONST T_TADNODE	*c;
 	INT		z = 0;
 
-	if ( p->ndoc >= MAX_DOC || tv_doc_of(nd, &d) < E_OK || d == NULL ) return;
-	p->doc[p->ndoc++] = d;
+	if ( tv_doc_of(nd, &d) < E_OK || d == NULL ) return;
+	if ( !ptr_add((void ***)&p->doc, &p->ndoc, d) ) {
+		tv_doc_free(d);
+		p->nomem = TRUE;
+		return;
+	}
 	for ( c = nd->first; c != NULL; c = c->next ) {
 		if ( named(c, "text") && tad_attr(c, "zIndex") != NULL ) z = rt_int(tad_attr(c, "zIndex"), 0);
 	}
@@ -1294,9 +1325,10 @@ LOCAL void layer_free( LAYER *L )
 
 	if ( L->px != NULL ) Kfree(L->px);
 	if ( L->frame != NULL ) Kfree(L->frame);
-	for ( k = 0; k < L->nalt; k++ ) {
+	for ( k = 0; L->alt != NULL && k < L->nalt; k++ ) {
 		if ( L->alt[k].px != NULL ) Kfree(L->alt[k].px);
 	}
+	if ( L->alt != NULL ) Kfree(L->alt);
 	knl_memset(L, 0, sizeof(*L));
 }
 
@@ -1371,7 +1403,7 @@ LOCAL BOOL layers_make( DTRT *p )
 				L->h = L->at.bottom - L->at.top;
 			}
 			/* the pictures a replace may put in its place, ready now */
-			for ( j = 0; L->nalt < MAX_ALT; j++ ) {
+			for ( j = 0; ; j++ ) {
 				CONST UB	*ref = NULL;
 				CONST UB	*href = rt_replace_href(p->rt, j, &ref);
 				INT		q;
@@ -1380,6 +1412,16 @@ LOCAL BOOL layers_make( DTRT *p )
 				if ( !same_str(rt_obj(p->rt, L->obj)->id, ref) ) continue;
 				for ( q = 0; q < L->nalt && !same_str(L->alt[q].href, href); q++ ) ;
 				if ( q < L->nalt ) continue;
+				{
+					/* one more picture: the table one larger */
+					ALT	*na = (ALT *)Krealloc(L->alt, sizeof(ALT) * (size_t)( L->nalt + 1 ));
+
+					if ( na == NULL ) {
+						p->nomem = TRUE;
+						break;
+					}
+					L->alt = na;
+				}
 				L->alt[L->nalt].href = href;
 				L->alt[L->nalt].px = render(p, L->first, 1, &L->at, href);
 				L->alt[L->nalt].w = L->w;
@@ -1759,7 +1801,7 @@ LOCAL void play_body( void *exinf )
 		INT	k;
 
 		if ( p->snd.used && p->snd.start ) helper_start(p, &p->snd);
-		for ( k = 0; k < RT_MEDIA_MAX; k++ ) {
+		for ( k = 0; k < p->nvid; k++ ) {
 			if ( p->vid[k].used && p->vid[k].start ) helper_start(p, &p->vid[k]);
 		}
 		now = now_us();
@@ -1957,24 +1999,31 @@ EXPORT RTPLAY *rtp_open( CONST TS_UUID *obj, INT recno, CONST RTP_OPEN *o )
 		close_all(p);
 		return NULL;
 	}
+	/* the video helpers: a place for each medium the program declares */
+	p->nvid = rt_nmedia(p->rt);
+	if ( p->nvid > 0 ) {
+		p->vid = (HELPER *)Kmalloc(sizeof(HELPER) * (SZ)p->nvid);
+		if ( p->vid == NULL ) {
+			p->nvid = 0;
+			close_all(p);
+			return NULL;
+		}
+		knl_memset(p->vid, 0, sizeof(HELPER) * (SZ)p->nvid);
+	}
 	rt_set_var(p->rt, RT_SV_SLIDE, p->slide_no);
 	fit_to(p, &o->area);
 
 	/* what is shown: the page or figure round the <realtime>, its own figures and texts */
-	p->item = (ITEM *)Kmalloc(sizeof(ITEM) * MAX_ITEM);
-	if ( p->item == NULL ) {
-		close_all(p);
-		return NULL;
-	}
+	p->item = NULL;			/* made as the scene's things are found */
+	p->nroom = 0;
 	tv_src_self(obj);
 	body = tad_body(rec);
 	if ( named(body, "document") ) {
 		T_TVDOC	*d = NULL;
 
-		if ( tv_doc(rec, &d) >= E_OK && d != NULL && p->ndoc < MAX_DOC ) {
+		if ( tv_doc(rec, &d) >= E_OK && d != NULL && ptr_add((void ***)&p->doc, &p->ndoc, d) ) {
 			ITEM	*it = item_new(p, IT_PAGE, -0x7FFFFFFF);
 
-			p->doc[p->ndoc++] = d;
 			if ( it != NULL ) {
 				it->doc = d;
 				it->box.right = tw;
@@ -1991,6 +2040,12 @@ EXPORT RTPLAY *rtp_open( CONST TS_UUID *obj, INT recno, CONST RTP_OPEN *o )
 	sort_items(p);
 	tv_src_prefetch(rec);
 	if ( !layers_make(p) ) {
+		close_all(p);
+		return NULL;
+	}
+	if ( p->nomem ) {
+		/* no scene stands with things left out unsaid */
+		tell("realtime: no memory for all the scene holds: not played");
 		close_all(p);
 		return NULL;
 	}
@@ -2041,7 +2096,10 @@ LOCAL void close_all( DTRT *p )
 
 	if ( p->rt != NULL ) rt_stop(p->rt);
 	helper_end(&p->snd);
-	for ( i = 0; i < RT_MEDIA_MAX; i++ ) helper_end(&p->vid[i]);
+	for ( i = 0; i < p->nvid; i++ ) helper_end(&p->vid[i]);
+	if ( p->vid != NULL ) Kfree(p->vid);
+	p->vid = NULL;
+	p->nvid = 0;
 	if ( p->rep > 0 ) {
 		(void)ob_cls_obj(p->rep);
 		(void)ob_del_obj(&p->rep_u);
@@ -2052,6 +2110,8 @@ LOCAL void close_all( DTRT *p )
 	if ( p->fb != NULL ) Kfree(p->fb);
 	for ( i = 0; i < p->nfig; i++ ) tv_fig_free(p->fig[i]);
 	for ( i = 0; i < p->ndoc; i++ ) tv_doc_free(p->doc[i]);
+	if ( p->fig != NULL ) Kfree(p->fig);
+	if ( p->doc != NULL ) Kfree(p->doc);
 	if ( p->item != NULL ) Kfree(p->item);
 	if ( p->rt != NULL ) rt_delete(p->rt);
 	if ( p->rec != NULL ) tad_free(p->rec);
@@ -2255,51 +2315,59 @@ LOCAL void seek_by( DTRT *p, INT ms )
 	wake(p);
 }
 
-/* A label cut to at most max bytes with its terminator, not in the middle of a letter */
-LOCAL void label_cut( UB *dst, INT max, CONST UB *src )
-{
-	INT	n = 0;
-
-	while ( src[n] != 0 && n < max - 1 ) n++;
-	if ( src[n] != 0 ) {
-		while ( n > 0 && ( src[n] & 0xC0 ) == 0x80 ) n--;
-	}
-	knl_memcpy(dst, src, n);
-	dst[n] = 0;
-}
-
-/* The media of the program as a list, with what their titles say */
-LOCAL INT tracks( DTRT *p, UB (*names)[WM_LABEL_MAX], INT *idx, INT max )
+/*
+ * The media of the program as a list: the indexes of those that are
+ * tracks (everything but a PCM written in the record), in order. idx has
+ * room for rt_nmedia() entries.
+ */
+LOCAL INT tracks( DTRT *p, INT *idx )
 {
 	INT	k, n = 0;
 
 	lock(p);
-	for ( k = 0; k < rt_nmedia(p->rt) && n < max; k++ ) {
-		RT_MEDIA	*m = rt_media(p->rt, k);
-		UB		line[WM_LABEL_MAX * 2];
-		INT		j = 0, q;
-		CONST UB	*t = ( m->title != NULL ) ? m->title : ( m->id != NULL ) ? m->id : m->href;
-
-		if ( m->kind == RT_MK_PCM ) continue;
-		if ( m->trackno > 0 ) {
-			line[j++] = (UB)( '0' + m->trackno / 10 % 10 );
-			line[j++] = (UB)( '0' + m->trackno % 10 );
-			line[j++] = '.';
-			line[j++] = ' ';
-		}
-		for ( q = 0; t != NULL && t[q] != 0 && j < (INT)sizeof(line) - 4; q++ ) line[j++] = t[q];
-		if ( m->artist != NULL && j < (INT)sizeof(line) - 8 ) {
-			line[j++] = ' ';
-			line[j++] = ':';
-			line[j++] = ' ';
-			for ( q = 0; m->artist[q] != 0 && j < (INT)sizeof(line) - 1; q++ ) line[j++] = m->artist[q];
-		}
-		line[j] = 0;
-		label_cut(names[n], WM_LABEL_MAX, line);
-		idx[n++] = k;
+	for ( k = 0; k < rt_nmedia(p->rt); k++ ) {
+		if ( rt_media(p->rt, k)->kind != RT_MK_PCM ) idx[n++] = k;
 	}
 	unlock(p);
 	return n;
+}
+
+/*
+ * What a track is called in the list: its number, title and artist, as
+ * long as they are. Taken with Kmalloc (the caller gives it back), NULL
+ * when there is no memory.
+ */
+LOCAL char *track_label( DTRT *p, INT k )
+{
+	RT_MEDIA	*m;
+	CONST UB	*t;
+	char		*line;
+	INT		j = 0, q, tl = 0, al = 0;
+
+	lock(p);
+	m = rt_media(p->rt, k);
+	t = ( m->title != NULL ) ? m->title : ( m->id != NULL ) ? m->id : m->href;
+	while ( t != NULL && t[tl] != 0 ) tl++;
+	while ( m->artist != NULL && m->artist[al] != 0 ) al++;
+	line = (char *)Kmalloc((SZ)tl + (SZ)al + 8);
+	if ( line != NULL ) {
+		if ( m->trackno > 0 ) {
+			line[j++] = (char)( '0' + m->trackno / 10 % 10 );
+			line[j++] = (char)( '0' + m->trackno % 10 );
+			line[j++] = '.';
+			line[j++] = ' ';
+		}
+		for ( q = 0; q < tl; q++ ) line[j++] = (char)t[q];
+		if ( m->artist != NULL ) {
+			line[j++] = ' ';
+			line[j++] = ':';
+			line[j++] = ' ';
+			for ( q = 0; q < al; q++ ) line[j++] = (char)m->artist[q];
+		}
+		line[j] = 0;
+	}
+	unlock(p);
+	return line;
 }
 
 /* The medium playing (or paused) now, -1 none */
@@ -2380,7 +2448,7 @@ LOCAL void relayout( DTRT *p, CONST T_DPRECT *area )
 		all.bottom = p->fh;
 		compose(p, &all);
 		/* the videos make their frames for the new size */
-		for ( i = 0; i < RT_MEDIA_MAX && i < rt_nmedia(p->rt); i++ ) {
+		for ( i = 0; i < p->nvid && i < rt_nmedia(p->rt); i++ ) {
 			RT_MEDIA	*m = rt_media(p->rt, i);
 			RTM_CMD		c;
 
@@ -2471,47 +2539,56 @@ LOCAL INT choose( DTRT *p, INT panel, CONST char *CONST *names, INT n, INT at, B
 	return ( got >= 0 && got < n ) ? got : -1;
 }
 
-#define TRACKS		64
-
 /* The medium so many after (before) the one playing, or the one chosen last */
 LOCAL void step_track( DTRT *p, INT by )
 {
-	UB	(*names)[WM_LABEL_MAX] = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * TRACKS);
-	INT	idx[TRACKS], n, k, now;
+	INT	*idx = (INT *)Kmalloc(sizeof(INT) * (SZ)( rt_nmedia(p->rt) + 1 ));
+	INT	n, k, now;
 
-	if ( names == NULL ) return;
-	n = tracks(p, names, idx, TRACKS);
-	Kfree(names);
-	if ( n <= 0 ) return;
+	if ( idx == NULL ) return;
+	n = tracks(p, idx);
+	if ( n <= 0 ) {
+		Kfree(idx);
+		return;
+	}
 	now = playing(p);
 	for ( k = 0; k < n && idx[k] != now; k++ ) ;
 	if ( k < n ) p->track = k;
 	p->track = ( p->track < 0 ) ? 0 : ( ( p->track + by ) % n + n ) % n;
 	play_track(p, idx[p->track]);
+	Kfree(idx);
 }
 
 /* プレイリスト表示: the media of the program in a panel, the one chosen played */
 LOCAL void list_pick( DTRT *p, BOOL *p_closed )
 {
-	UB		(*names)[WM_LABEL_MAX] = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * TRACKS);
-	CONST char	**list = (CONST char **)Kmalloc(sizeof(char *) * TRACKS);
-	INT		idx[TRACKS], n, i, at;
+	INT		nm = rt_nmedia(p->rt) + 1;
+	INT		*idx = (INT *)Kmalloc(sizeof(INT) * (SZ)nm);
+	char		**names = (char **)Kmalloc(sizeof(char *) * (SZ)nm);
+	INT		n = 0, i, at, made = 0;
 
-	if ( names != NULL && list != NULL ) {
-		n = tracks(p, names, idx, TRACKS);
-		if ( n == 0 ) {
+	if ( idx != NULL && names != NULL ) {
+		n = tracks(p, idx);
+		for ( i = 0; i < n; i++ ) {
+			names[i] = track_label(p, idx[i]);
+			if ( names[i] == NULL ) break;
+			made++;
+		}
+		if ( made < n ) {
+			(void)wm_msg_put("メモリが足りないため、プレイリストを出せません");
+		} else if ( n == 0 ) {
 			(void)wm_msg_put("プレイリストに曲がありません");
 		} else {
-			for ( i = 0; i < n; i++ ) list[i] = (CONST char *)names[i];
-			at = choose(p, PN_LIST, list, n, p->track, p_closed);
+			at = choose(p, PN_LIST, (CONST char *CONST *)names, n, p->track, p_closed);
 			if ( at >= 0 && at < n ) {
 				p->track = at;
 				play_track(p, idx[at]);
 			}
 		}
+		for ( i = 0; i < made; i++ ) Kfree(names[i]);
 	}
 	if ( names != NULL ) Kfree(names);
-	if ( list != NULL ) Kfree((void *)list);
+	if ( idx != NULL ) Kfree(idx);
 }
 
 /* 背景色変更: what is round the scene, chosen in a panel */
@@ -2556,11 +2633,10 @@ LOCAL void state_of( DTRT *p, RTP_HOW *st )
 	}
 	st->ms = (INT)( t / 1000 );
 	{
-		UB	(*names)[WM_LABEL_MAX] = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * TRACKS);
-		INT	idx[TRACKS];
+		INT	*idx = (INT *)Kmalloc(sizeof(INT) * (SZ)( rt_nmedia(p->rt) + 1 ));
 
-		st->media = ( names != NULL ) ? tracks(p, names, idx, TRACKS) : 0;
-		if ( names != NULL ) Kfree(names);
+		st->media = ( idx != NULL ) ? tracks(p, idx) : 0;
+		if ( idx != NULL ) Kfree(idx);
 	}
 	now_playing(p, st->now, RTP_TEXT_MAX);
 }

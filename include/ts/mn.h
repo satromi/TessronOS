@@ -31,14 +31,26 @@ extern "C" {
 #include <ts/uuid.h>
 #include <ts/part.h>
 
-#define MN_CODE_MAX	32		/* bytes of an item's code, with its terminator */
+/*
+ * An item's code is a name a program compares whole with its own
+ * (mn_is, or strcmp on T_MNSEL.code, which a process is given), so it is
+ * never cut: a definition with a longer code than T_MNSEL.code holds is
+ * not read (mn_cre_men E_OBJ, the code said on the console), and a code
+ * asked for that is longer is E_PAR. 31 bytes, with its terminator 32.
+ */
+#define MN_CODE_MAX	32
 
 /* The state of an item (mn_chg_atr) */
 #define MN_GREY		0x0001		/* shown, but cannot be chosen */
 #define MN_TICK		0x0002		/* shown with a mark */
 #define MN_HIDE		0x0010		/* not shown */
 
-/* Which item was chosen */
+/*
+ * Which item was chosen. Its form is what a process is handed (mn_pop_men)
+ * and is kept as it is; the label is the item's words as far as they go
+ * in it, cut at a letter's end -- a program tells its items apart by the
+ * code and the index, never by the words, which the menu shows whole.
+ */
 typedef struct {
 	TS_UUID	def;			/* the definition the item is in */
 	UB	code[MN_CODE_MAX];
@@ -61,9 +73,17 @@ IMPORT INT  mn_chg_atr( ID mid, CONST TS_UUID *def, CONST char *code, UINT atr )
 IMPORT INT  mn_get_atr( ID mid, CONST TS_UUID *def, CONST char *code );
 
 /*
+ * Whether a program has set the state of the first item with a code
+ * (mn_chg_atr, mn_chg_idx) since the menu was made: 1 when it has, 0 when
+ * the item is as its definition has it; E_NOEXS when there is none.
+ */
+IMPORT INT  mn_atr_decided( ID mid, CONST TS_UUID *def, CONST char *code );
+
+/*
  * A list the definition leaves to the program ("list": true), filled
- * with n labels, each stride bytes apart. The items keep the list's
- * code and are told apart by T_MNSEL.index.
+ * with n labels, each stride bytes apart, or (stride 0) one after another,
+ * each ending in its nought, as long as each is. The items keep the
+ * list's code and are told apart by T_MNSEL.index.
  */
 IMPORT ER   mn_set_lst( ID mid, CONST TS_UUID *def, CONST char *code,
 			CONST UB *labels, INT stride, INT n );

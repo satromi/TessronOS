@@ -211,7 +211,8 @@ LOCAL INT one_subst( CTBUF *b, CONST UB *s, INT n, CONST MCDB *db, CONST MCCARD 
 			if ( s[i] == 'C' && two == 'N' ) { put_num(b, all_i + 1, 0); return i + 2; }
 			if ( s[i] == 'C' && two == 'n' ) { put_num(b, tgt_i + 1, 0); return i + 2; }
 			switch ( s[i] ) {
-			case 'N':	put_text(b, mi->name, mc_len(mi->name), esc);	return i + 1;
+			case 'N':	if ( mi->name != NULL ) put_text(b, mi->name, mc_len(mi->name), esc);
+					return i + 1;
 			case 'P':	put_num(b, page, 0);				return i + 1;
 			case 'T':	put_num(b, mi->pages, 0);			return i + 1;
 			case 'Y':	put_num(b, mi->y % 100, 2);			return i + 1;

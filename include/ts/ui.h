@@ -62,6 +62,26 @@ typedef struct {
 #define UI_EV_MENU	5		/* the second button: the program's menu, at the notice's place */
 #define UI_EV_KEY	6		/* a key no part took */
 #define UI_EV_DROP	7		/* links were dropped on the window: ui_drop reads them */
+/*
+ * A tag of the window's tags pulled out (OB_E_PULL), for a window made
+ * with UI_ATTR_TAGPULL (ui_attr before ui_open): pressed and moved
+ * further than LK_DRAG_W from where it went down, *p_num the tag. The
+ * tag is not chosen, the sheet shown stays, and the press is no longer
+ * the panel's: the program asks the desktop to carry what the tag stands
+ * for (DT_RQ_CARRY) while the button is still down, and the desktop
+ * follows the pointer from there. ui_tag_pull reads, for that notice,
+ * where the button went down and the frame of the tag as drawn, in the
+ * window's work area: the outline carried and where the pointer holds
+ * it (look.w, look.h, grab_x, grab_y). E_NOEXS when the tag is not to
+ * be seen any more.
+ */
+#define UI_EV_TAGPULL	12
+typedef struct {
+	INT	tag;			/* the tag's number */
+	INT	x, y;			/* where the button went down */
+	INT	left, top, right, bottom;	/* the tag as drawn, its frame */
+} UI_PULL;
+IMPORT ER   ui_tag_pull( UI *u, CONST T_OBNTM *m, UI_PULL *p );
 
 /*
  * The window with panel num of the data box (its UUID as text) filling
@@ -218,6 +238,12 @@ IMPORT INT  ui_ask( UI *u, INT num, CONST char *const *lines, INT nline );
  * one sees it, and it comes up once, as it is to be, with ui_reveal.
  */
 #define UI_ATTR_HIDDEN		0x40000000U
+/*
+ * UI_ATTR_TAGPULL: the window's tags can be pulled out (UI_EV_TAGPULL).
+ * Without it the panel's tags are chosen as they always were, however
+ * far a press moves on them before it is let go.
+ */
+#define UI_ATTR_TAGPULL		0x20000000U
 IMPORT void ui_reveal( UI *u );
 #define UI_EV_WHEEL	9
 #define UI_EV_SCROLL	10

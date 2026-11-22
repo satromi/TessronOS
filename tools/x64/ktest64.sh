@@ -24,10 +24,18 @@
 #                  xhci2 にディスク3台とキーボード)。ディスクはイメージの隣の usb_disk.img などで、
 #                  make TARGET=_X64_ KTEST=1 BUILD_ID=<名前> で作る(12.3)。QMP を開き、試験が
 #                  コンソールに出す抜き差しの頼みを tools/qemu_qmp.py が QEMU に渡す
-#     NVME2、NVME3、NVME4 ほかの NVMe のディスクのイメージ(nvmeb、nvmec、nvmed。システム登録の試験の
-#                  tools/tests/mkwindisk.py が作る Windows の形のディスク、12.3)
+#     NVME2、NVME3、NVME4、NVME5 ほかの NVMe のディスクのイメージ(nvmeb、nvmec、nvmed、nvmee。
+#                  システム登録の試験の tools/tests/mkwindisk.py が作る Windows の形のディスクと、
+#                  前のシステムを全体に登録した形でボリュームがバージョン4のディスク(make-ts4)、12.3)
 #     VARS         OVMF の変数の書ける写し(edk2-i386-vars.fd を写したもの)。起動の項目
-#                  (Boot####、BootOrder、BootNext)が次の起動に残る。無ければ変数はその起動の間だけ
+#                  (Boot####、BootOrder、BootNext)が次の起動に残る。無ければ変数はその起動の間だけ。
+#                  無いときは、システム登録の試験が起動したディスクの ESP に残す起動の項目の頼み
+#                  (\EFI\TESSRON\BOOTREG.TXT)を、起動の前と終わった後にイメージから消す。頼みが
+#                  あるとローダが項目を書いて起動し直し、-no-reboot の QEMU がそこで終わるが、
+#                  変数が残らないので項目も残らない。VARS があるときは、次の起動でローダが頼みを
+#                  受けて登録したディスクから起動し直せるように残す
+#     NVME5BOOT=1 NVME5(nvmee)を起動の最初の候補にする。1台目以外のディスクから起動する試験(起動ディスクの探索が
+#                  登録デバイスの台数に合わせて探すこと)で、1台目は空のイメージにしておく
 #     NVME4K=<img> 2台目の NVMe(nvmeb)として、論理ブロックが4096バイトの装置にそのイメージを
 #                  挿す(pcdev の群の test_nvme_4k が書き込む。中身は消える)
 #     OFFWAIT=1    KTEST SUMMARY の後も、マシンが電源を切るまで(秒の残りの間)待つ。電源を切る
@@ -98,8 +106,16 @@ NVX=""
 [ -n "${NVME2:-}" ] && NVX="$NVX -drive file=$(cygpath -m "$NVME2"),if=none,format=raw,id=nvd2 -device nvme,serial=tessronos2,drive=nvd2"
 [ -n "${NVME3:-}" ] && NVX="$NVX -drive file=$(cygpath -m "$NVME3"),if=none,format=raw,id=nvd3 -device nvme,serial=tessronos3,drive=nvd3"
 [ -n "${NVME4:-}" ] && NVX="$NVX -drive file=$(cygpath -m "$NVME4"),if=none,format=raw,id=nvd4 -device nvme,serial=tessronos4,drive=nvd4"
+[ -n "${NVME5:-}" ] && NVX="$NVX -drive file=$(cygpath -m "$NVME5"),if=none,format=raw,id=nvd5 -device nvme,serial=tessronos5,drive=nvd5${NVME5BOOT:+,bootindex=0}"
 VARSDRV=""
 [ -n "${VARS:-}" ] && VARSDRV="-drive if=pflash,format=raw,file=$(cygpath -m "$VARS")"
+
+# the request for the boot entry left on the image's ESP: followed only when the entry can stay (VARS)
+unask() {
+	[ -n "${VARS:-}" ] && return
+	python "$TOP/tools/tests/mkwindisk.py" rm-esp "$(cygpath -m "$IMG")" EFI/TESSRON/BOOTREG.TXT | tr -d "\r" | grep -a " deleted$"
+}
+unask
 
 rm -f "$LOG"
 # 内蔵時計(CMOS の RTC)はローカル時刻で、Windows の入った PC と同じ形(9.5.1)
@@ -129,6 +145,7 @@ kill $QP 2>/dev/null
 wait $QP 2>/dev/null
 [ -n "$QH" ] && kill $QH 2>/dev/null
 [ -n "$SRV" ] && kill $SRV 2>/dev/null
+unask
 
 tr -d '\r' < "$LOG" | grep -a -E "KTEST .* FAIL|EXCEPTION|LOCKUP|KTEST SUMMARY"
 S=$(tr -d '\r' < "$LOG" | grep -a -o "KTEST SUMMARY [0-9]*/[0-9]*" | tail -1)

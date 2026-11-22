@@ -42,7 +42,8 @@ extern "C" {
 
 #define TSFSO_MAX_REC	TSFS_MAX_REC	/* records of one object */
 #define TSFSO_MAX_RES	64		/* resources of one object */
-#define TSFSO_EXT_LEN	16		/* the file name extension of a resource */
+#define TSFSO_EXT_LEN	16		/* the room of an extension in a table entry and T_TSFSRES */
+#define TSFSO_EXT_MAX	767		/* bytes of an extension the calls take (FS_NAME_MAX less its 0) */
 #define TSFSO_MAX_EXTENTS 165		/* runs one record's bytes may lie in */
 #define TSFSO_MAX_LINK	1024		/* links of one object */
 
@@ -55,6 +56,7 @@ extern "C" {
 #define TSFSO_F_RELINK	0x0400		/* its link table has to be made again */
 #define TSFSO_F_TRASH	0x1000		/* TRASH, the cabinet the disk repair gathers 隠れ屑実身 in:
 					   what only it reaches goes when it goes */
+#define TSFSO_F_SPARE	0x2000		/* its spare place (OB_SPARE) holds runs: it is on the orphan tree */
 #define TSFSO_F_AUTOREF	TSFS_F_AUTOREF	/* given out by ts_obj_ref only: never stored */
 
 /* The record number of the icon, which belongs to no record */
@@ -67,6 +69,20 @@ extern "C" {
 IMPORT ID ts_obj_mount( CONST char *devnm );
 IMPORT ER ts_obj_unmount( ID vol );
 IMPORT ER ts_obj_ref_vol( ID vol, T_RVOL *pk_rvol );
+
+/*
+ * For a test: the nodes of the run trees written from now on hold `n`
+ * entries (2 to TSFSO_MAX_EXTENTS, 0 for the format's) until the volume
+ * is closed, so that trees of several levels come of few runs.
+ */
+IMPORT ER ts_obj_fan( ID vol, INT n );
+
+/*
+ * For a test: the power pretended to go (TSFSJ_FAULT_AFTER_COMMIT) as
+ * the k-th transaction closed from now on is closed, so that a change of
+ * several transactions can be cut after any of them; 0 takes it off.
+ */
+IMPORT ER ts_obj_cut( ID vol, INT k );
 
 /*
  * Objects. Making one takes an object block, writes it and puts the UUID
@@ -226,15 +242,24 @@ IMPORT ER ts_obj_del_res( ID vol, CONST TS_UUID *uuid, INT recno, INT resno );
 IMPORT ER ts_obj_rea_res_at( ID vol, CONST TS_UUID *uuid, INT recno, INT resno,
 			     D off, void *buf, SZ size, SZ *p_asize, UB *ext );
 
-/* What resources an object has */
+/*
+ * What resources an object has: at most n; with buf NULL and n 0, how
+ * many there are. ext holds the extension when it is shorter than its
+ * room, else its start cut at a whole letter; extlen is its whole length
+ * and ts_obj_res_ext gives it whole (at most size bytes, the length in
+ * *p_asize; size 0 and buf NULL to ask only that).
+ */
 typedef struct {
 	INT	recno;
 	INT	resno;
 	UB	ext[TSFSO_EXT_LEN];
+	UINT	extlen;
 	UD	size;
 } T_TSFSRES;
 
 IMPORT ER ts_obj_lst_res( ID vol, CONST TS_UUID *uuid, T_TSFSRES *buf, INT n, INT *p_cnt );
+IMPORT ER ts_obj_res_ext( ID vol, CONST TS_UUID *uuid, INT recno, INT resno,
+			  UB *buf, SZ size, SZ *p_asize );
 
 /*
  * Several changes as one transaction. Calls between a begin and its end

@@ -128,13 +128,54 @@ static char		s_pass[WPAG_SAE_PW_MAX + 1];
 
 /* A passphrase or a password as the glue takes it: its bytes, kept with a terminating zero */
 /* The certificates and the key of a join of 802.1X, until knl_wpa_eap_set has taken them */
-static unsigned char	eb[3][WPP_EAP_BLOB_MAX];
-static int		eb_len[3];
+static unsigned char	*eb[WPP_EB_N];	/* as long as each came (malloc) */
+static int		eb_len[WPP_EB_N];
+static int		eb_cap[WPP_EB_N];
 
 static void eb_wipe( void )
 {
-	memset(eb, 0, sizeof(eb));
-	memset(eb_len, 0, sizeof(eb_len));
+	int	i;
+
+	for ( i = 0; i < WPP_EB_N; i++ ) {
+		if ( eb[i] != NULL ) {
+			memset(eb[i], 0, (size_t)eb_cap[i]);	/* a key or a password: not left in memory */
+			free(eb[i]);
+		}
+		eb[i] = NULL;
+		eb_len[i] = eb_cap[i] = 0;
+	}
+}
+
+/* A piece added to what WPP_EAP_BLOB puts together: -1 when there is no memory for it */
+static int eb_add( int i, const unsigned char *a, int la )
+{
+	if ( eb_len[i] + la > eb_cap[i] ) {
+		int		cap = ( eb_cap[i] > 0 ) ? eb_cap[i] : 4096;
+		unsigned char	*nb;
+
+		while ( cap < eb_len[i] + la ) cap *= 2;
+		nb = (unsigned char *)malloc((size_t)cap);
+		if ( nb == NULL ) return -1;
+		if ( eb[i] != NULL ) {
+			memcpy(nb, eb[i], (size_t)eb_len[i]);
+			memset(eb[i], 0, (size_t)eb_cap[i]);
+			free(eb[i]);
+		}
+		eb[i] = nb;
+		eb_cap[i] = cap;
+	}
+	memcpy(eb[i] + eb_len[i], a, (size_t)la);
+	eb_len[i] += la;
+	return 0;
+}
+
+/* A word put together by WPP_EAP_BLOB, or NULL when the call gave none */
+static const char *eb_word( int i, int given )
+{
+	static const char	none[1] = { 0 };
+
+	if ( !given ) return NULL;
+	return ( eb[i] != NULL ) ? (const char *)eb[i] : none;
 }
 
 static const char *text_of( const unsigned char *p, int len )
@@ -161,7 +202,7 @@ int wps_serve( const unsigned char *in, int n, unsigned char *out )
 	WPP_W	w;
 	const WPP_HDR *h = wpp_r_begin(&r, in, n, WPP_CALL);
 	const unsigned char *a, *b, *c, *d, *e, *f;
-	int	la, lb, lc, ld, le, lf, i1, i2, i3, i4, ret = -1;
+	int	la, lb, lc, ld, le, lf, i1, i2, i3, i4, i5, ret = -1;
 	int	olen = 0, oseq = 0, ost = 0;
 	const char *pw;
 
@@ -300,26 +341,24 @@ int wps_serve( const unsigned char *in, int n, unsigned char *out )
 	case WPP_EAP_BLOB:
 		i1 = wpp_r_int(&r);
 		a = wpp_r_bytes(&r, &la, WPP_EAP_PIECE);
-		if ( r.bad || a == NULL || i1 < 0 || i1 > 2 ) return 0;
-		ret = -1;
-		if ( eb_len[i1] + la <= WPP_EAP_BLOB_MAX ) {
-			memcpy(eb[i1] + eb_len[i1], a, la);
-			eb_len[i1] += la;
-			ret = 0;
-		}
+		if ( r.bad || a == NULL || i1 < 0 || i1 >= WPP_EB_N ) return 0;
+		ret = eb_add(i1, a, la);	/* -1: no memory, and the join is not made */
 		wpp_w_begin(&w, out, WPP_RET, h->op, ret);
 		break;
 	case WPP_EAP_SET:
 		i1 = wpp_r_int(&r);
-		/* the words as long as they came: the message's own length bounds them */
-		a = wpp_r_bytes(&r, &la, WPP_ARGS_MAX);
-		b = wpp_r_bytes(&r, &lb, WPP_ARGS_MAX);
-		c = wpp_r_bytes(&r, &lc, WPP_ARGS_MAX);
-		d = wpp_r_bytes(&r, &ld, WPP_ARGS_MAX);
+		/* the words came as pieces (WPP_EAP_BLOB), as long as they are */
+		i2 = wpp_r_int(&r);
+		i3 = wpp_r_int(&r);
+		i4 = wpp_r_int(&r);
+		i5 = wpp_r_int(&r);
 		if ( r.bad ) return 0;
-		ret = knl_wpa_eap_set(i1, (const char *)a, la, (const char *)b, lb, eb[0], eb_len[0],
-				      (const char *)c, lc, eb[1], eb_len[1], eb[2], eb_len[2],
-				      (const char *)d, ld);
+		ret = knl_wpa_eap_set(i1, eb_word(WPP_EB_ID, i2), eb_len[WPP_EB_ID],
+				      eb_word(WPP_EB_PW, i3), eb_len[WPP_EB_PW],
+				      eb[WPP_EB_CA], eb_len[WPP_EB_CA],
+				      eb_word(WPP_EB_DOMAIN, i4), eb_len[WPP_EB_DOMAIN],
+				      eb[WPP_EB_CERT], eb_len[WPP_EB_CERT], eb[WPP_EB_KEY], eb_len[WPP_EB_KEY],
+				      eb_word(WPP_EB_KEYPW, i5), eb_len[WPP_EB_KEYPW]);
 		eb_wipe();
 		wpp_w_begin(&w, out, WPP_RET, h->op, ret);
 		break;

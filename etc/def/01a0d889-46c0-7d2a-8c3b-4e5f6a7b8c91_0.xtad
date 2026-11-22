@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="ディスク操作">
 <document>
 <p>ディスク操作</p>
-<p>ディスクの接続と切り離し、押した位置の仮身が指す実身のディスクの状態、区画の作成と拡張。メニューの定義。</p>
+<p>ディスクの接続と切り離し、押した位置の仮身が指す実身のディスクの状態、区画の作成と拡張、ディスクの形式の変換。メニューの定義。</p>
 </document>
 <menu>
 <item code="disk.connect">接続</item>
@@ -9,5 +9,6 @@
 <item code="disk.status">状態表示</item>
 <item code="disk.create">区画作成</item>
 <item code="disk.grow">拡張</item>
+<item code="disk.convert">形式を新しくする</item>
 </menu>
 </tad>

@@ -32,10 +32,10 @@ extern "C" {
 #include <ts/uuid.h>
 
 /*
- * Records of one object. The native store counts them in 32 bits and keeps
- * the placement table as a management part of as many blocks as it needs;
- * the bound is that of the order of the records, which the metadata text
- * carries (design 7.3), kept well inside what a program reads of it.
+ * Records of one object: the bound of a native volume of the format's
+ * version 4 and of the FAT store. A native volume of version 5 has none
+ * (ts_blk_lim); a caller asks how many there are first (ts_lst_rec with
+ * buf NULL and n 0) rather than taking room for this many.
  */
 #define TSFS_MAX_REC	256
 #define TSFS_EXT_MAX	16		/* the file name extension of a resource */
@@ -224,6 +224,7 @@ IMPORT ER  ts_del_rec( ID od, INT recno );	/* any place; the last only on FAT */
 IMPORT ER  ts_ins_rec( ID od, INT pos, UINT rt, UINT sub, INT *p_pos );
 IMPORT ER  ts_mov_rec( ID od, INT from, INT to );
 IMPORT ER  ts_set_rtp( ID od, INT recno, UINT rt, UINT sub );
+/* At most n records; with buf NULL and n 0, how many there are */
 IMPORT ER  ts_lst_rec( ID od, T_RREC *buf, INT n, INT *p_cnt );
 
 /*
@@ -288,6 +289,7 @@ IMPORT ER  knl_tsfs_res_rea( ID vol, CONST TS_UUID *uuid, CONST UB *name, D off,
 IMPORT ER  knl_tsfs_res_wri( ID vol, CONST TS_UUID *uuid, CONST UB *name,
 			    CONST void *buf, SZ size );
 IMPORT ER  knl_tsfs_res_del( ID vol, CONST TS_UUID *uuid, CONST UB *name );
+/* The names, each ending in 0, as many as fit; with buf NULL, how many, and the answer is the bytes they take */
 IMPORT ER  knl_tsfs_res_lst( ID vol, CONST TS_UUID *uuid, UB *buf, SZ size, INT *p_cnt );
 
 /*
@@ -334,7 +336,10 @@ IMPORT ER  knl_tsfs_set_top( ID vol, CONST TS_UUID *uuid );
  */
 IMPORT ER  knl_tsfs_xref_obj( ID vol, TS_UUID *p_uuid );
 IMPORT ER  knl_tsfs_set_xref( ID vol, CONST TS_UUID *uuid );
+/* At most n links; with buf NULL and n 0, how many there are */
 IMPORT ER  knl_tsfs_lst_lnk( ID vol, CONST TS_UUID *uuid, T_RLNK *buf, INT n, INT *p_cnt );
+/* The links one object of the volume may have, 0 for no limit */
+IMPORT UINT knl_tsfs_max_link( ID vol );
 
 /* Entries of the volume table made so far, and how many are volumes open now */
 IMPORT INT knl_tsfs_slots( INT *p_used );

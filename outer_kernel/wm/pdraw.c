@@ -343,6 +343,8 @@ EXPORT T_WMNAMES *pd_names_new( INT n )
 		nm->len = 0;
 		nm->ncol = 0;
 		nm->colfid = 0;
+		nm->off = NULL;
+		nm->noff = 0;
 		nm->b[0] = 0;
 	}
 	return nm;
@@ -368,16 +370,65 @@ EXPORT T_WMNAMES *pd_names_dup( CONST T_WMNAMES *nm, ER *p_er )
 	c->ncol = nm->ncol;
 	c->colfid = nm->colfid;
 	for ( k = 0; k < PD_COL_MAX; k++ ) c->nat[k] = nm->nat[k];
+	if ( nm->off != NULL && nm->noff > 0 ) {
+		c->off = (UW *)Kmalloc((SZ)nm->noff * sizeof(UW));
+		if ( c->off == NULL ) {
+			Kfree(c);
+			*p_er = E_NOMEM;
+			return NULL;
+		}
+		knl_memcpy(c->off, nm->off, (SZ)nm->noff * sizeof(UW));
+		c->noff = nm->noff;
+	}
 	return c;
 }
 
 EXPORT void pd_names_free( T_WMNAMES *nm )
 {
 	if ( nm != NULL ) {
+		if ( nm->off != NULL ) {
+			Kfree(nm->off);
+		}
 		Kfree(nm);
 	}
 }
 
+EXPORT BOOL pd_name_off( CONST T_WMPART *pt, INT idx )
+{
+	CONST T_WMNAMES	*nm = pt->names;
+
+	if ( nm == NULL || nm->off == NULL || idx < 1 || idx > nm->noff * 32 ) {
+		return FALSE;
+	}
+	return (BOOL)( ( nm->off[( idx - 1 ) / 32] & ( 1U << ( ( idx - 1 ) % 32 ) ) ) != 0 );
+}
+
+EXPORT ER pd_names_set_off( T_WMPART *pt, CONST UW *w, INT nw )
+{
+	T_WMNAMES	*nm = pt->names;
+	UW		*c = NULL;
+	INT		k;
+
+	for ( k = 0; k < nw && w[k] == 0; k++ ) ;
+	if ( k < nw ) {
+		if ( nm == NULL ) {
+			return E_OK;		/* no names yet: nothing to be off */
+		}
+		c = (UW *)Kmalloc((SZ)nw * sizeof(UW));
+		if ( c == NULL ) {
+			return E_NOMEM;
+		}
+		knl_memcpy(c, w, (SZ)nw * sizeof(UW));
+	}
+	if ( nm != NULL ) {
+		if ( nm->off != NULL ) {
+			Kfree(nm->off);
+		}
+		nm->off = c;
+		nm->noff = ( c != NULL ) ? nw : 0;
+	}
+	return E_OK;
+}
 EXPORT CONST UB *pd_name_at( CONST T_WMPART *pt, INT at, INT i )
 {
 	CONST T_WMNAMES	*nm = pt->names;
@@ -594,7 +645,7 @@ LOCAL void cols_part( CONST T_WMPART *pt, INT room, PDCOLS *c )
 	for ( k = 0; k < COL_MAX; k++ ) nat[k] = 0;
 	nm = pd_name(pt, 0);
 	for ( i = 0; i < pt->count && nm != NULL; i++ ) {
-		INT	len = s_len(nm, WM_LABEL_MAX), m = col_count(nm, len);
+		INT	len = s_len(nm, 0x7FFFFFFF), m = col_count(nm, len);
 
 		if ( m > n ) n = m;
 		for ( k = 1; k < m; k++ ) {
@@ -623,7 +674,7 @@ LOCAL void cols_part( CONST T_WMPART *pt, INT room, PDCOLS *c )
 LOCAL INT col_put( INT gid, INT x, INT y, INT w, CONST UB *s, INT n, BOOL right,
 		   UW fg, UW lt, INT top, INT bottom )
 {
-	UB		buf[WM_LABEL_MAX + 8];
+	UB		one[WM_LABEL_MAX + 8], *buf = NULL;
 	INT		tw = width(s, n, 0), m = n, i = 0, at = 0, ew;
 	T_DPRECT	q, was;
 
@@ -631,7 +682,7 @@ LOCAL INT col_put( INT gid, INT x, INT y, INT w, CONST UB *s, INT n, BOOL right,
 		return 0;
 	}
 	if ( tw > w ) {
-		/* the letters that fit before "…" */
+		/* the letters that fit before "…", in room as large as they are */
 		ew = width(ellipsis, 3, 0);
 		while ( i < n && s[i] != 0 ) {
 			INT	k = u8len(s + i);
@@ -639,7 +690,10 @@ LOCAL INT col_put( INT gid, INT x, INT y, INT w, CONST UB *s, INT n, BOOL right,
 			if ( width(s, i + k, 0) + ew > w ) break;
 			i += k;
 		}
-		if ( i > WM_LABEL_MAX ) i = WM_LABEL_MAX;
+		buf = ( i + 4 <= (INT)sizeof(one) ) ? one : (UB *)Kmalloc((SZ)i + 4);
+		if ( buf == NULL ) {
+			return 0;
+		}
 		knl_memcpy(buf, s, i);
 		knl_memcpy(buf + i, ellipsis, 3);
 		m = i + 3;
@@ -655,6 +709,7 @@ LOCAL INT col_put( INT gid, INT x, INT y, INT w, CONST UB *s, INT n, BOOL right,
 	}
 	(void)text(gid, x + at, y, s, m, 0, fg);
 	clip_back(gid, &was);
+	if ( buf != NULL && buf != one ) Kfree(buf);
 	return ( tw < w ) ? tw : w;
 }
 
@@ -674,7 +729,7 @@ LOCAL void name_in( INT gid, CONST T_DPRECT *part, CONST T_DPRECT *cell, CONST U
 		    INT sel, BOOL off, BOOL held, INT xoff, BOOL now, UINT ground, CONST PDCOLS *cols )
 {
 	INT		y = ( cell->top + cell->bottom + PD_FH ) / 2 - 1;
-	INT		x = cell->left + xoff + MARGIN, gap = 0, n = s_len(name, WM_LABEL_MAX), uw = 0;
+	INT		x = cell->left + xoff + MARGIN, gap = 0, n = s_len(name, 0x7FFFFFFF), uw = 0;
 	UW		fg = wm_look(off ? LK_INACTPARTSCOL : LK_ACTPARTSCOL);
 	UW		lt = wm_look(LK_LIGHTPARTSCOL);
 	T_DPRECT	was;
@@ -1171,7 +1226,7 @@ LOCAL void draw_scroll( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 	nm = pd_name(pt, pt->top - 1);
 	for ( i = 0; i < rows && pt->top + i <= pt->count; i++, nm = pd_name_next(pt, nm) ) {
 		INT		idx = pt->top + i;
-		BOOL		noff = off || ( idx <= 32 && ( pt->inact & ( 1U << ( idx - 1 ) ) ) );
+		BOOL		noff = off || pd_name_off(pt, idx);
 
 		if ( nm == NULL ) {
 			break;
@@ -1276,11 +1331,12 @@ LOCAL INT tb_width( CONST T_WMPART *pt, CONST UB *s, INT n )
 
 EXPORT INT pd_tb_at( CONST T_WMPART *pt, CONST T_DPRECT *r, INT x )
 {
-	INT	n = s_len(pt->text, WM_LABEL_MAX), i = 0, best = 0, bd = 0x7FFFFFFF;
-	INT	x0 = tb_x(pt, r, pt->text, n);
+	CONST UB *t = WM_PT_TEXT_S(pt);
+	INT	n = s_len(t, 0x7FFFFFFF), i = 0, best = 0, bd = 0x7FFFFFFF;
+	INT	x0 = tb_x(pt, r, t, n);
 
 	for ( ;; ) {
-		INT	d = x - ( x0 + tb_width(pt, pt->text, i) );
+		INT	d = x - ( x0 + tb_width(pt, t, i) );
 
 		if ( d < 0 ) d = -d;
 		if ( d <= bd ) {
@@ -1290,7 +1346,7 @@ EXPORT INT pd_tb_at( CONST T_WMPART *pt, CONST T_DPRECT *r, INT x )
 		if ( i >= n ) {
 			break;
 		}
-		i += u8len(pt->text + i);
+		i += u8len(t + i);
 	}
 	return best;
 }
@@ -1312,7 +1368,7 @@ LOCAL void draw_box( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 	BOOL		off = ( pt->type & ( P_DISABLE | P_INACT ) ) != 0;
 	UW		fg = wm_look(off ? LK_INACTPARTSCOL : LK_ACTPARTSCOL);
 	UB		numb[16];
-	CONST UB	*s = pt->text;
+	CONST UB	*s = WM_PT_TEXT_S(pt);
 	INT		n, x, y = tb_y(r), cx, caret;
 	T_DPRECT	in, was;
 
@@ -1320,7 +1376,7 @@ LOCAL void draw_box( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 		n = num_text(pt->value, numb, sizeof(numb));
 		s = numb;
 	} else {
-		n = s_len(pt->text, WM_LABEL_MAX);
+		n = s_len(s, 0x7FFFFFFF);
 	}
 	pfill(gid, r->left, r->top, r->right, r->bottom,
 	      ( c->focus && !( pt->type & P_INACT ) ) ? LK_ACTPARTS : LK_INACTPARTS);
@@ -1623,7 +1679,7 @@ LOCAL INT tag_column( CONST T_WMPART *pt, PDTAG *t )
 {
 	INT	i, wide = 0, w, y = pt->inner.top;
 
-	for ( i = 0; i < pt->count && i < PD_TAG_MAX; i++ ) {
+	for ( i = 0; i < pt->count; i++ ) {
 		CONST UB	*s = pd_name(pt, i);
 
 		if ( s == NULL ) {
@@ -1659,7 +1715,7 @@ LOCAL INT tag_layout( CONST T_WMPART *pt, PDTAG *t )
 	if ( ( pt->type & P_DOWN ) != 0 ) {
 		return tag_column(pt, t);
 	}
-	for ( k = 0; k < pt->count && i < PD_TAG_MAX; k++ ) {
+	for ( k = 0; k < pt->count && i < pt->count; k++ ) {
 		CONST UB	*s = pd_name(pt, k);
 		INT		parent = -1;
 
@@ -1692,7 +1748,7 @@ LOCAL INT tag_layout( CONST T_WMPART *pt, PDTAG *t )
 			x += 3;
 			t[i].r.bottom = ( ( grp > 0 ) ? top2 : pt->inner.top ) - 3;
 			t[i].r.top = t[i].r.bottom - PD_FH;
-			if ( grp >= 0 || i + 1 >= PD_TAG_MAX || k + 1 >= pt->count ) {
+			if ( grp >= 0 || i + 1 >= pt->count || k + 1 >= pt->count ) {
 				i++;
 				break;
 			}
@@ -1721,9 +1777,30 @@ LOCAL INT tag_layout( CONST T_WMPART *pt, PDTAG *t )
 	return i;
 }
 
+/*
+ * The tags laid out, in a table as large as the part has names (a tag
+ * is one of them), to be Kfree'd: NULL with *p_n nought when it has none
+ * or there is not the memory -- the tags then are not drawn or worked,
+ * and no tag stands for another.
+ */
+LOCAL PDTAG *tags( CONST T_WMPART *pt, INT *p_n )
+{
+	PDTAG	*t;
+
+	*p_n = 0;
+	if ( pt->count <= 0 ) {
+		return NULL;
+	}
+	t = (PDTAG *)Kmalloc(sizeof(PDTAG) * (SZ)pt->count);
+	if ( t != NULL ) {
+		*p_n = tag_layout(pt, t);
+	}
+	return t;
+}
+
 LOCAL BOOL tag_off( CONST T_WMPART *pt, INT num )
 {
-	return (BOOL)( num >= 1 && num <= 32 && ( pt->inact & ( 1U << ( num - 1 ) ) ) != 0 );
+	return pd_name_off(pt, num);
 }
 
 /*
@@ -1830,11 +1907,11 @@ LOCAL void draw_tag( INT gid, CONST T_WMPART *pt, CONST PDTAG *e, CONST T_DPRECT
 LOCAL void draw_tags( T_WMPART *pt, CONST T_DPRECT *F, T_PDCTX *c )
 {
 	INT		gid = c->gid, n, k, w, lower = -1;
-	PDTAG		t[PD_TAG_MAX];
+	PDTAG		*t;
 	T_DPRECT	I = pt->inner, I2 = pt->inner, top;
 	T_DPPAT		fr;
 
-	n = tag_layout(pt, t);
+	t = tags(pt, &n);
 	I2.top += PD_FH + 10;
 	/* the frame as wide as the widest of the sides the tags do not stand on */
 	if ( ( pt->type & P_DOWN ) != 0 ) {
@@ -1875,6 +1952,7 @@ LOCAL void draw_tags( T_WMPART *pt, CONST T_DPRECT *F, T_PDCTX *c )
 			}
 		}
 	}
+	if ( t != NULL ) Kfree(t);
 }
 
 EXPORT void pd_tag_turn( INT gid, CONST T_DPRECT *tab )
@@ -1891,8 +1969,8 @@ EXPORT void pd_tag_turn( INT gid, CONST T_DPRECT *tab )
  */
 EXPORT INT pd_tag_at( T_WMPART *pt, INT x, INT y, T_DPRECT *p_tab )
 {
-	PDTAG	t[PD_TAG_MAX];
-	INT	n = tag_layout(pt, t), k;
+	INT	n, k, at = 0;
+	PDTAG	*t = tags(pt, &n);
 
 	for ( k = 0; k < n; k++ ) {
 		if ( t[k].name == NULL ) {
@@ -1902,16 +1980,51 @@ EXPORT INT pd_tag_at( T_WMPART *pt, INT x, INT y, T_DPRECT *p_tab )
 			continue;		/* a lower row not shown */
 		}
 		if ( x >= t[k].r.left && x < t[k].r.right && y >= t[k].r.top && y < t[k].r.bottom ) {
-			if ( tag_off(pt, t[k].num) ) {
-				return 0;
+			if ( !tag_off(pt, t[k].num) ) {
+				if ( p_tab != NULL ) {
+					*p_tab = t[k].r;
+				}
+				at = t[k].num;
 			}
-			if ( p_tab != NULL ) {
-				*p_tab = t[k].r;
-			}
-			return t[k].num;
+			break;
 		}
 	}
-	return 0;
+	if ( t != NULL ) Kfree(t);
+	return at;
+}
+
+/*
+ * The tags that can be seen: of the upper row, and of the lower row of
+ * the upper tag shown, as pd_tag_at finds them, at most max; frame is
+ * each one as drawn (the box of its name widened to the outline)
+ */
+EXPORT INT pd_tag_list( T_WMPART *pt, INT *num, T_DPRECT *r, T_DPRECT *frame, BOOL *off, INT max )
+{
+	INT	n, k, m = 0;
+	PDTAG	*t = tags(pt, &n);
+	BOOL	down = (BOOL)( ( pt->type & P_DOWN ) != 0 );
+
+	for ( k = 0; k < n && m < max; k++ ) {
+		if ( t[k].name == NULL ) {
+			continue;
+		}
+		if ( t[k].sub > 0 && t[t[k].sub - 1].num != pt->value ) {
+			continue;		/* a lower row not shown */
+		}
+		num[m] = t[k].num;
+		r[m] = t[k].r;
+		/* the frame draw_tag outlines: 4 dots beyond the name's box along and across its head, 3 on the sheet's side */
+		frame[m] = t[k].r;
+		if ( down ) {
+			frame[m].left -= 4;  frame[m].top -= 4;  frame[m].right += 3;  frame[m].bottom += 4;
+		} else {
+			frame[m].left -= 4;  frame[m].top -= 4;  frame[m].right += 4;  frame[m].bottom += 3;
+		}
+		off[m] = tag_off(pt, t[k].num);
+		m++;
+	}
+	if ( t != NULL ) Kfree(t);
+	return m;
 }
 
 /*
@@ -1920,8 +2033,8 @@ EXPORT INT pd_tag_at( T_WMPART *pt, INT x, INT y, T_DPRECT *p_tab )
  */
 EXPORT void pd_tag_sheet( T_WMPART *pt, T_DPRECT *out )
 {
-	PDTAG	t[PD_TAG_MAX];
-	INT	n = tag_layout(pt, t), k;
+	INT	n, k;
+	PDTAG	*t = tags(pt, &n);
 
 	*out = pt->inner;
 	for ( k = 0; k < n; k++ ) {
@@ -1930,6 +2043,7 @@ EXPORT void pd_tag_sheet( T_WMPART *pt, T_DPRECT *out )
 			break;
 		}
 	}
+	if ( t != NULL ) Kfree(t);
 }
 
 /*
@@ -1938,8 +2052,8 @@ EXPORT void pd_tag_sheet( T_WMPART *pt, T_DPRECT *out )
  */
 EXPORT INT pd_tag_show( T_WMPART *pt, INT num )
 {
-	PDTAG	t[PD_TAG_MAX];
-	INT	n = tag_layout(pt, t), k;
+	INT	n, k, res = E_PAR;
+	PDTAG	*t = tags(pt, &n);
 
 	for ( k = 0; k < n; k++ ) {
 		if ( t[k].num != num || t[k].sub < 0 || t[k].name == NULL ) {
@@ -1953,12 +2067,15 @@ EXPORT INT pd_tag_show( T_WMPART *pt, INT num )
 			}
 		}
 		if ( num == pt->value ) {
-			return 0;
+			res = 0;
+		} else {
+			pt->value = num;
+			res = num;
 		}
-		pt->value = num;
-		return num;
+		break;
 	}
-	return E_PAR;
+	if ( t != NULL ) Kfree(t);
+	return res;
 }
 
 /* ---------------------------------------------------------------- candidates */
@@ -2140,7 +2257,7 @@ LOCAL void draw_switch( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 				rrc_raised(gid, &g, LK_INACTPARTS);
 			}
 		}
-		name_in(gid, r, r, pt->label, pt->value != 0 ? 1 : 0, off || ( pt->type & P_INACT ),
+		name_in(gid, r, r, WM_PT_LABEL_S(pt), pt->value != 0 ? 1 : 0, off || ( pt->type & P_INACT ),
 			(BOOL)( c->held != 0 ), 0, (BOOL)( ( pt->type & P_NOW ) != 0 ), LK_INACTPARTS, NULL);
 		return;
 	}
@@ -2157,11 +2274,11 @@ LOCAL void draw_switch( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 	}
 	switch ( kind ) {
 	case AS_PARTS:
-		name_in(gid, r, r, pt->label, pt->value ? 1 : 0, off, (BOOL)( c->held != 0 ), 0,
+		name_in(gid, r, r, WM_PT_LABEL_S(pt), pt->value ? 1 : 0, off, (BOOL)( c->held != 0 ), 0,
 			FALSE, LK_INACTPARTS, NULL);
 		break;
 	case MS_PARTS:
-		name_in(gid, r, r, pt->label, 0, off, FALSE, -1, FALSE, LK_INACTPARTS, NULL);
+		name_in(gid, r, r, WM_PT_LABEL_S(pt), 0, off, FALSE, -1, FALSE, LK_INACTPARTS, NULL);
 		if ( c->held != 0 && !( pt->type & P_NOFRAME ) ) {
 			xor_round(gid, r);
 		} else if ( c->held != 0 ) {
@@ -2173,7 +2290,7 @@ LOCAL void draw_switch( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 		CONST UB	*nm = pd_name(pt, 0);
 
 		for ( i = 0; i < pt->count; i++, nm = pd_name_next(pt, nm) ) {
-			BOOL		noff = off || ( i < 32 && ( pt->inact & ( 1U << i ) ) );
+			BOOL		noff = off || pd_name_off(pt, i + 1);
 
 			if ( nm == NULL ) {
 				break;
@@ -2263,11 +2380,11 @@ LOCAL void draw_label( T_WMPART *pt, CONST T_DPRECT *r, T_PDCTX *c )
 	(void)face(&met);
 	clip_in(c->gid, r, &was);
 	if ( pt->type & P_BASE ) {
-		(void)text(c->gid, r->left, r->bottom - 4, pt->label, -1, 0, fg);
+		(void)text(c->gid, r->left, r->bottom - 4, WM_PT_LABEL_S(pt), -1, 0, fg);
 	} else {
 		(void)text(c->gid, r->left + 4,
 			   r->top + ( r->bottom - r->top + met.ascent - met.descent ) / 2,
-			   pt->label, -1, 0, fg);
+			   WM_PT_LABEL_S(pt), -1, 0, fg);
 	}
 	clip_back(c->gid, &was);
 }

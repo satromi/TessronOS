@@ -636,18 +636,7 @@ static void menu( CONST T_OBNTM *m, MCWIN *w )
 	(void)mn_chg_atr(mid, NULL, "moveback", tray_has() ? 0 : MN_GREY);
 	(void)mn_chg_atr(mid, NULL, "print", g_db.nf > 0 ? 0 : MN_GREY);
 	tray_menu(mid);
-	if ( !link ) {
-		(void)mn_chg_atr(mid, NULL, "vobj", MN_GREY);
-		(void)mn_chg_atr(mid, NULL, "real", MN_GREY);
-		(void)mn_chg_atr(mid, NULL, "exec", MN_GREY);
-	} else {
-		BOOL	kept = app_kept();
-
-		(void)mn_chg_atr(mid, NULL, "vobj.reconnect", MN_HIDE);
-		(void)mn_chg_atr(mid, NULL, "real.lock", kept ? MN_HIDE : 0);
-		(void)mn_chg_atr(mid, NULL, "real.unlock", kept ? 0 : MN_HIDE);
-		exec_menu(mid);
-	}
+	link_menu(mid, link);		/* 仮身操作, 実身操作 and 実行 of the link in hand (ts/tvvop.h) */
 	chosen = (BOOL)( mn_pop_men(mid, w->kw, m->x, m->y, m->when, &s) >= E_OK );
 	(void)mn_del_men(mid);
 	if ( chosen ) {
@@ -802,12 +791,16 @@ INT mc_link_name( CONST UB *el, INT len, UB *out, INT max )
 	T_OBREF	ref;
 	INT	n;
 
-	if ( max <= 0 ) return 0;
-	out[0] = 0;
+	SZ	whole = 0;
+
+	if ( max > 0 ) out[0] = 0;
 	if ( !ct_target(el, len, &u) || ob_ref_obj(&u, &ref) < E_OK ) return 0;
-	/* what fits of the name whole, at a whole letter */
-	if ( ob_ref_nam(&u, out, max, NULL) < E_OK ) return 0;
-	n = (INT)strlen((CONST char *)out);
+	/* what fits of the name, at a whole letter; the length of the whole */
+	if ( ob_ref_nam(&u, ( max > 0 ) ? out : NULL, ( max > 0 ) ? max : 0, &whole) < E_OK ) {
+		if ( max > 0 ) out[0] = 0;
+		return 0;
+	}
+	n = ( whole > 1 ) ? (INT)( whole - 1 ) : 0;	/* *p_asize counts the terminator */
 	return n;
 }
 

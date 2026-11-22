@@ -29,7 +29,6 @@
 #include "unp.h"
 #include "arc_arg.h"
 
-#define ARC_NAME_MAX	128		/* bytes of a name, UTF-8 */
 #define ARC_ERR_MAX	200
 #define ARC_APPL_MAX	4		/* programs of one object's applist written */
 
@@ -41,7 +40,7 @@
 /* One object found from the root */
 typedef struct {
 	TS_UUID	uuid;
-	char	name[ARC_NAME_MAX];
+	char	*name;			/* its name, UTF-8, whole (malloc); never NULL once found */
 	INT	kind;			/* K_* */
 	BPKAPPL	appl[ARC_APPL_MAX];	/* the programs that open it, the first first */
 	INT	nappl;

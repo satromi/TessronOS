@@ -3,7 +3,18 @@
 #
 
 TOP     := ..
-OBJDIR  := obj/$(TARGET)$(if $(filter 1,$(KTEST)),_ktest)$(BUILD_ID)
+# 出力の置き場(docs/tessronos/12-development.md 12.2.1)。中間の生成物(オブジェクト、システムの
+# ボリューム、利用者のプログラムとレコード)は、/mnt/c より読み書きの速い WSL の ext4 の OBJ_ROOT に、
+# ビルドごと(TARGET と BUILD_ID)に分けて置く。Windows から使うもの(カードとディスクのイメージ、
+# システムとアプリのパッケージ、x64 の ESP、試験用のディスク)は OUTDIR(build_make/obj/<マシン><BUILD_ID>/)
+# に置く。OBJ_ROOT はソースツリーごとに分ける(/mnt/c/home/TessronOS なら ~/tessronos-obj-ts/home_TessronOS)。
+# OBJ_ROOT=obj では、中間の生成物も build_make/obj の下の前と同じ場所に置く
+OBJ_ROOT ?= $(HOME)/tessronos-obj-ts/$(subst /,_,$(patsubst mnt/c/%,%,$(patsubst /%,%,$(abspath $(TOP)))))
+OBJNAME  := $(TARGET)$(if $(filter 1,$(KTEST)),_ktest)$(BUILD_ID)
+OUTDIR   := obj/$(OBJNAME)
+OBJDIR   := $(OBJ_ROOT)/$(OBJNAME)
+# イメージとパッケージを書くスクリプト(mksd.py、mktpk.py)は置き場を作らないので、先に作っておく
+$(shell mkdir -p $(OUTDIR))
 INCPATH := -I$(TOP)/include -I$(TOP)/config -I$(TOP)/kernel/knlinc \
 	-I$(TOP)/kernel -I$(TOP)/peripheral_kernel \
 	-I$(TOP)/kernel/sysdepend/cpu/core/$(ARCH_CORE) -I$(OBJDIR) \
@@ -60,15 +71,30 @@ USER_LD_DIR := user
 UARCH_LIBC  :=
 endif
 
-# 利用者のプログラムと実身のレコード、それらが結ぶライブラリの置き場。命令セットの基準が
-# 違うターゲットのものは混ぜない
+# 利用者のプログラムと実身のレコード、それらが結ぶライブラリの置き場。BUILD_ID ごとに分け、
+# 同時に走る別のビルドと取り合わない。命令セットの基準が違うターゲットのものは混ぜない。
+# UOUT は、そのうち Windows から取り出すもの(make pkg などのアプリのパッケージ)の置き場
 ifeq ($(TARGET),_RPI4_)
-UOBJ := obj/v80
+UOBJ_SUB := /v80
 else ifeq ($(ARCH),x86_64)
-UOBJ := obj/x64
+UOBJ_SUB := /x64
 else
-UOBJ := obj
+UOBJ_SUB :=
 endif
+ifeq ($(OBJ_ROOT),obj)
+UOBJ_BASE := obj
+else
+UOBJ_BASE := $(OBJ_ROOT)/user$(if $(BUILD_ID),_$(BUILD_ID))
+endif
+UOBJ := $(UOBJ_BASE)$(UOBJ_SUB)
+UOUT := obj$(UOBJ_SUB)
+
+# ビルドの間で共有する、ホームの下の生成物(NetBSD のスタック、Mesa、ACPICA、OpenBSD の Wi-Fi の層、
+# wpa_supplicant、コマンド、ファームウェア)。作り直す規則は SHARED_X で排他に、それを結ぶ規則は
+# SHARED_S で共有にロックを取り、同時に走る別のビルドが作りかけのものを結ばないようにする
+SHARED_LOCK ?= $(HOME)/.tessronos-shared.lock
+SHARED_X := flock -x $(SHARED_LOCK)
+SHARED_S := flock -s $(SHARED_LOCK)
 
 # カーネルのタスクのスタックは小さく、下にガードページがないので、4096 バイトを超える
 # フレームは警告にする(設計書 4.7.7)
@@ -240,3 +266,10 @@ $(OBJDIR)/%.o: $(TOP)/%.S
 	@mkdir -p $(dir $@)
 	@echo 'AS  $<'
 	@$(AS) $(ASFLAGS) $(INCPATH) -c -o $@ $<
+
+# 前の置き場の名前で頼まれた目的物(make obj/<マシン><BUILD_ID>/lib/libftp/ftp.o、make obj/docedit.elf
+# など)は、今の置き場のものを作る
+ifneq ($(OBJ_ROOT),obj)
+$(OUTDIR)/%: $(OBJDIR)/% ;
+$(UOUT)/%: $(UOBJ)/% ;
+endif

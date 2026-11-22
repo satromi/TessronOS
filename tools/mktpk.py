@@ -79,9 +79,15 @@ The file, all of it little endian:
   {"format":1,"program":"UUID","id":"...","name":"...","version":"R1.000",
    "objects":["UUID",...]}
   {"format":1,"kind":"system","id":"tessronos","name":"TessronOS",
-   "version":"R1.200","machine":"rpi5","arch":"aarch64",
+   "version":"R1.200","machine":"rpi5","arch":"aarch64","tsfs_format":5,
    "objects":["UUID",...],"keep":["UUID",...],"links":["UUID",...],
    "boot":["PATH",...],"bootkeep":["PATH",...]}
+"tsfs_format" is the version of the format of the native volume (TSFS)
+the system's kernel makes and converts its system volume to
+(docs/tessronos 7.3). An update to a package whose format is newer than
+the running system volume's tells the person that the disk is
+converted at the next start, and asks for it (CONVREQ); a package
+without it is taken to be of the volume's own format.
 """
 
 import argparse
@@ -96,6 +102,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 MAGIC = b"TSPK"
 FORMAT = 1
+TSFS_FORMAT = 5                 # TSFSBLK_VERSION5 of include/ts/tsfsblk.h
 HEAD = 16
 ENTRY = 64
 NAME_MAX = 48
@@ -298,6 +305,7 @@ def system_manifest(args, picked):
     files, as the record MANIFEST_REC of the system box holds it too"""
     return {"format": FORMAT, "kind": "system", "id": "tessronos", "name": "TessronOS",
             "version": args.version, "machine": args.machine, "arch": args.arch,
+            "tsfs_format": TSFS_FORMAT,
             "objects": [us for us, _s, _h in picked],
             "keep": [us for us, _s, h in picked if h == "keep"],
             "links": [us for us, _s, h in picked if h == "links"]}

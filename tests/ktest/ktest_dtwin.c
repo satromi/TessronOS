@@ -770,6 +770,47 @@ LOCAL void test_touch_reach( void )
 }
 #endif
 
+/*
+ * The changes of windows whose disk went, kept until the disk is back:
+ * more of them than room is made for first (16), every one kept
+ */
+IMPORT INT dt_disk_wait_test( INT n );
+
+LOCAL void test_disk_wait_many( void )
+{
+	KT_ASSERT_EQ(dt_disk_wait_test(40), 40);
+	KT_ASSERT_EQ(dt_disk_wait_test(3), 3);		/* the room grown before is used again */
+}
+
+/*
+ * More links of programs' windows than the 64 kept once (the oldest was
+ * written over, its window's changes no longer going back to the
+ * program), and more of the desktop's own windows than its 32: all kept
+ */
+IMPORT INT dt_tables_test( INT n );
+
+LOCAL void test_tables_many( void )
+{
+	KT_ASSERT_EQ(dt_tables_test(100), 100);
+	KT_ASSERT_EQ(dt_tables_test(5), 5);		/* the room grown before is used again */
+}
+
+/*
+ * More notices than the eight that fitted (the oldest was put away),
+ * and more lines than the three shown: every one kept
+ */
+IMPORT INT dt_notes_test( INT n, INT nlines, INT *p_lines );
+
+LOCAL void test_notes_many( void )
+{
+	INT	lines = 0;
+
+	KT_ASSERT_EQ(dt_notes_test(12, 2, &lines), 12);
+	KT_ASSERT_EQ(lines, 2);
+	KT_ASSERT_EQ(dt_notes_test(2, 30, &lines), 2);
+	KT_ASSERT_EQ(lines, 30);
+}
+
 EXPORT void ktest_dtwin( void )
 {
 	logb = (UB *)Kmalloc(LOG_MAX);
@@ -780,6 +821,9 @@ EXPORT void ktest_dtwin( void )
 	KT_RUN(test_diskfix);
 	KT_RUN(test_slide);
 	KT_RUN(test_player);
+	KT_RUN(test_disk_wait_many);
+	KT_RUN(test_tables_many);
+	KT_RUN(test_notes_many);
 #if defined(_QEMU_VIRT_) || defined(X64)
 	KT_RUN(test_touch_reach);
 #endif

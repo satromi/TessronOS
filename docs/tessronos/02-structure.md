@@ -8,7 +8,7 @@ TessronOSはBTRONのレイヤ構成を採用している。下から、モニタ
  アプリケーション   デスクトップ(カーネル内) / プロセスの小物とアプリ       application/  lib/
  ─────────────── SVCゲートウェイ(機能コード表) ───────────────
  外核              描画 dp_  ウインドウ wm_  フォント fn_  仮身 om_  xmlTAD tad_  outer_kernel/
-                   画像 img_  ファイル変換 xf_
+                   画像 img_  ファイル変換 xf_  印刷
  周辺核            システム管理  プロセス  ファイル fs_  TSFS  カレンダ dt_  peripheral_kernel/
                    ネットワーク so_  実身 ob_
  中心核            μT-Kernel 3.0(64bit・SMP化)                          kernel/tkernel/
@@ -16,7 +16,7 @@ TessronOSはBTRONのレイヤ構成を採用している。下から、モニタ
  ハードウェア      Raspberry Pi 5、4 / QEMU virt / x64のPC(UEFI)
 ```
 
-呼び出しは上位から下位への一方向である。下位のレイヤが上位のレイヤを直接呼ぶことはない。ただし、上位のレイヤが登録した関数を下位のレイヤがコールバックとして呼ぶことはある。たとえば実身マネージャは、ウインドウの実身を扱う関数をウインドウマネージャから登録してもらい、ウインドウに対する実身の操作が来たときにそれを呼ぶ。
+呼び出しは上位から下位への一方向である。下位のレイヤが上位のレイヤを直接呼ぶことはない。ただし、上位のレイヤが登録した関数を下位のレイヤがコールバックとして呼ぶことはある。たとえば実身マネージャはウインドウの実身を扱う関数をウインドウマネージャから登録してもらい、ウインドウに対する実身の操作が来たときにそれを呼ぶ。
 
 ## 2.2 保護レベルと例外レベル
 
@@ -29,7 +29,7 @@ TessronOSはBTRONのレイヤ構成を採用している。下から、モニタ
 
 AArch64にはEL1が1つしかないので、保護レベル0と1は同じ権限で動く。0と1の区別は用途の区別として残している。保護レベル2と3の違いは固有空間を持つかどうかだけで、3のタスクは必ずどれかのプロセスに属する。
 
-EL0からカーネルを呼ぶ手段はSVC命令だけである。SVCの即値に機能コードを置き、カーネルは機能コードからクラスと番号を取り出してテーブルを参照する(第5章)。
+EL0からカーネルを呼ぶ手段はSVC命令だけである。プログラムは機能コードを`x8`に置いて`svc #0`を実行し、カーネルは機能コードからクラスと番号を取り出してテーブルを参照する(第5章)。
 
 x64のPCでは、表のEL1がリング0、EL0がリング3に当たる。プロセスは`syscall`命令でカーネルを呼び、機能コードを`rax`に置く。機能コードの表と、その先の処理はAArch64と同じである(4.8)。
 
@@ -47,8 +47,9 @@ x64のPCでは、表のEL1がリング0、EL0がリング3に当たる。プロ�
 | 外核 | ウインドウマネージャ | 描画`dp_`、フォント`fn_`(FreeType)、ウインドウ、部品、パネル、メニュー、データボックス、外観設定テーブル、ポインタ、メッセージ行 | `outer_kernel/dp/`、`font/`、`wm/` |
 | 外核 | 実身/仮身マネージャ | 仮身の描画と登録テーブル`om_`、xmlTADの解析・編集・表示`tad_` | `outer_kernel/om/`、`tad/` |
 | 外核 | 画像、ファイル変換 | PNG、JPEG、BMP、GIF、ICOのデコード`img_`、ファイルと実身の相互変換`xf_` | `outer_kernel/img/`、`xf/` |
+| 外核 | 印刷 | プログラムのページを印刷用紙に配置し、PDFのファイルに書き出す | `outer_kernel/print/` |
 | モニタ層 | 機種依存部 | 起動、例外ベクタ、ディスパッチャ、MMUとキャッシュの操作、GIC、Generic Timer、PSCI。x64ではUEFIのローダから受け取る起動、x2APICとIOAPIC、HPETとTSC、ACPI(表とACPICAの解釈系) | `kernel/sysdepend/` |
-| モニタ層 | ドライバ | シリアル、SD、GPIO、virtio、Ethernet、画面、USB、サウンド、カメラ、GPU、Wi-Fi。x64ではNVMe、SATA、PS/2、I2CのHID、IntelのLANとHDAの音 | `device/` |
+| モニタ層 | ドライバ | シリアル、SD、GPIO、virtio、Ethernet、画面、USB、サウンド、カメラ、GPU、Wi-Fi、Bluetooth。x64ではNVMe、SATA、PS/2、I2CのHID、IntelのLANとHDAのサウンド | `device/` |
 | アプリ | デスクトップ | 操作環境、仮身一覧、基本文章編集、基本図形編集、スライド、実時間制御TADの実行系`rt_`と再生部(第15章)、かな漢字変換の入力処理(カーネル内で動く) | `application/desktop/`、`lib/librtad/`ほか |
 | アプリ | プロセスのプログラム | 小物、書庫管理、バックアップ、ファイル変換、予定表、かな入力練習、実時間メディアなど | `application/` |
 | ライブラリ | ユーザ側 | SVCのスタブ`libts`、JSON、書庫、文字コード、C++ランタイム、スレッドなど | `lib/` |
@@ -61,7 +62,7 @@ x64のPCでは、表のEL1がリング0、EL0がリング3に当たる。プロ�
 | --- | --- | --- |
 | `tk_` | T-Kernel標準とSMP T-Kernelの追加 | `tk_cre_tsk`、`tk_get_prc` |
 | `ts_` | TessronOSで追加したもの | `ts_cre_prc`、`ts_map_mem` |
-| `fs_` `dt_` `pm_` `so_` | T2EX互換 | `fs_open`、`dt_localtime`、`so_socket` |
+| `fs_` `dt_` `so_` | T2EX互換 | `fs_open`、`dt_localtime`、`so_socket` |
 | `ob_` | 実身の基本操作 | `ob_opn_obj`、`ob_rea_rec` |
 | `dp_` `wm_` `fn_` `om_` `tad_` `mn_` | 外核 | `dp_fill_rect`、`wm_open`、`mn_pop_men` |
 | `tm_` | T-Monitor互換 | `tm_printf` |
@@ -73,19 +74,22 @@ x64のPCでは、表のEL1がリング0、EL0がリング3に当たる。プロ�
 tessronos/
 ├── config/              上限値と機能の切替え(config.h)
 ├── include/             tk/ sys/ tm/(上流由来) ts/(TessronOS) tsposix/ tscxx/(POSIXとC++の互換)
+│                        posix/(コマンドとシェル用に、newlibのヘッダを拡張したもの)
 ├── kernel/              中心核とモニタ層の機種依存部
 │   ├── tkernel/         μT-Kernel 3.0の本体(64bit・SMP化)
 │   └── sysdepend/       cpu/core/armv8a/(AArch64共通、アーキテクチャの層は4.8) cpu/core/x86_64/(x86-64)
-│                        rpi5/ rpi4/ qemu_virt/ x64/(マシンごと) acpi/(ACPIの表)
+│                        rpi5/ rpi4/ qemu_virt/ x64/(マシンごと) rpi/(2つのRaspberry Piに共通) acpi/(ACPIの表)
 ├── peripheral_kernel/   sysman/ fs/ obj/ network/ libc/
-│   └── network/         so_prc.c so_sntp.c so_conf.c(両方のスタックで共通) netbsd/(NetBSDのスタックの受け、
+│   └── network/         so_prc.c so_sntp.c so_conf.c(両方のスタックで共通) netbsd/(NetBSDのスタックのホスト側。
 │                        rumpcomp/はrumpカーネルの中に入る部品) lwip/ port/ so_api.c(NETSTACK=lwip)
-├── outer_kernel/        dp/ wm/ font/ om/ tad/ img/ xf/
-├── device/              ahci/ cam/ disp/ gpio/ gpu/ hevc/ i2c/ net/ nvme/ ps2/ sd/ ser/ snd/ usb/ vblk/ virtio/ vnet/
+├── outer_kernel/        dp/ wm/ font/ om/ tad/ img/ xf/ print/
+├── device/              ahci/ bt/ cam/ disp/ gpio/ gpu/ hevc/ i2c/ net/ nvme/ ps2/ sd/ ser/ snd/ usb/ vblk/ virtio/ vnet/
 ├── application/         desktop/ cab/ doc/ fig/ kconv/ と各プログラム
 ├── lib/                 libts/ libjson/ libconf/ libui/ libbpk/ libbtbk/ libtxc/ libxfu/ libftp/
 │                        libcxxrt/ libpthread/ libposix/ libgl/ libtls/ libtk/ libtm/ librtad/(実時間制御TADの実行系)
+│                        librtplay/ libtv/ libbtfs/ libkbmap/ liblc3/ libsftp/ libudic/ mbedtls/
 ├── etc/                 def/(定義実身) xtad/(サンプルの実身) font/ wall/(フォントと壁紙) linker/ boot/(config.txt)
+│                        pkg/ pkgdef/(パッケージ)
 ├── tests/               ktest/(カーネル内の試験) uprog/(試験用のプロセス)
 ├── tools/               イメージの作成、TSFSのツール、試験の実行、netbsd/(NetBSDのスタックのビルド)、
 │                        x64/(UEFIのローダ、x64のツールチェーン)
@@ -98,12 +102,12 @@ tessronos/
 
 | 変数 | 意味 |
 | --- | --- |
-| `TARGET` | `_RPI5_`、`_RPI4_`、`_QEMU_VIRT_`、`_X64_`(x64のPC、3.10)のいずれか。必須 |
+| `TARGET` | `_RPI5_`、`_RPI4_`、`_QEMU_VIRT_`、`_X64_`(x64のPC、3.10)のいずれか。省略すると`_QEMU_VIRT_` |
 | `DESKTOP=1` | デスクトップが起動する構成でビルドする |
 | `KTEST=1` | カーネル内の試験を組み込む。`KTONLY`、`KTGROUP`で実行する試験を絞り込む |
 | `MOZC=1` | かな漢字変換にMozcの変換エンジンをリンクする。指定しなければローマ字からかなへの変換だけになる |
 | `NETSTACK` | TCP/IPスタック。`netbsd`(デフォルト)はNetBSDのスタック、`lwip`は以前のlwIP(第9章) |
 | `BUILD_ID` | 生成物と中間ファイルの出力先を分ける名前。`KTONLY`などを変えるときは必ず別の名前にする |
 | `BROWSER=1`、`BROWSER_BLINK=1` | 別のリポジトリ`tessron-chromium`からブラウザを取り込む(第14章) |
-| `GL=1` | MesaのOpenGL ESとEGLをプロセス用にビルドして結ぶ(第13章) |
+| `GL=1` | MesaのOpenGL ESとEGLをプロセス用にビルドしてリンクする(第13章) |
 | `WIFI` | Wi-Fiを入れるかどうか。Raspberry Pi 5とx64は既定で入れ(`WIFI=1`)、`WIFI=0`で除く(9.6) |

@@ -23,9 +23,7 @@
 #include <ts/ui.h>
 #include <ts/vobjsz.h>
 
-#define XFC_ENT_MAX	2048		/* entries a list holds */
-#define XFC_CONN_MAX	8		/* FTP connections kept */
-#define XFC_FIELD	128		/* bytes of a field of the FTP form */
+#define XFC_ENT_FIRST	64		/* entries a list makes room for first; doubled when full */
 #define XFC_WIN_MAX	8		/* windows at once: the media and the file lists */
 #define XFC_HIST	8		/* directories a file list remembers */
 
@@ -42,7 +40,7 @@ typedef struct xfcbt XFCBT;		/* a disk of the BTRON file system (xfc_btron.c) */
 
 typedef struct {
 	UINT	kind;			/* E_* */
-	UB	name[256];		/* what is shown and, for a file, its name */
+	UB	*name;			/* what is shown and, for a file, its name: allocated, whole */
 	D	size;			/* bytes, -1 unknown */
 	D	mtime;
 	TS_UUID	uuid;			/* E_DISK: the device object */
@@ -61,13 +59,20 @@ typedef struct {
 					   directory there, not a 実身 */
 } XFCENT;
 
-/* An FTP connection as the panel and the settings have it */
+/*
+ * An FTP connection as the panel and the settings have it. Its host, user,
+ * password and name are as long as they were typed: each allocated and
+ * the connection's own, NULL for none, read through XS and set with
+ * xfc_conn_set. A connection is copied with xfc_conn_copy (the copy has
+ * its own) and let go with xfc_conn_free; one copied byte by byte shares
+ * them and is not let go.
+ */
 typedef struct {
-	UB	host[XFC_FIELD];
+	UB	*host;
 	UB	port[8];
-	UB	user[XFC_FIELD];
-	UB	pass[XFC_FIELD];
-	UB	name[XFC_FIELD];	/* what the connection is called, "" the host */
+	UB	*user;
+	UB	*pass;
+	UB	*name;			/* what the connection is called, NULL the host */
 	INT	enc;			/* TXC_UTF8, TXC_SJIS, TXC_EUCJP */
 	INT	mode;			/* how data goes: XFC_DM_* */
 	UB	lport[8];		/* the active way: the port listened on, "" any */
@@ -76,6 +81,15 @@ typedef struct {
 	UB	hostkey[65];		/* SSH: the SHA-256 of the server's key once accepted, in hex */
 	UB	newkey[65];		/* one shown to the user and not yet accepted */
 } XFCCONN;
+
+#define XS(s)		( ( (s) != NULL ) ? (CONST char *)(s) : "" )
+
+/* A field set to s (NULL or "" none), the one before let go: FALSE for no memory, the field then as it was */
+IMPORT BOOL xfc_conn_set( UB **field, CONST char *s );
+/* dst a copy of src with fields of its own (dst holds nothing before): FALSE for no memory, dst then empty */
+IMPORT BOOL xfc_conn_copy( XFCCONN *dst, CONST XFCCONN *src );
+/* Its fields let go, the password cleared first */
+IMPORT void xfc_conn_free( XFCCONN *c );
 
 /* How the data of FTP goes */
 #define XFC_DM_EPSV	0		/* EPSV, PASV when it is refused */
@@ -109,6 +123,7 @@ typedef struct {
 	BOOL		dirty;
 	XFCENT		*ent;
 	INT		nent;
+	INT		entcap;			/* entries ent has room for */
 	INT		cur;			/* the entry the keys are on */
 	INT		anchor;			/* where a run chosen with Shift starts */
 	INT		top;			/* the first row shown */
@@ -121,6 +136,7 @@ typedef struct {
 	BOOL		thumb;			/* the scroll bar's knob is held */
 	char		status[300];
 	BOOL		status_err;
+	BOOL		nomem;			/* an entry of the list could not be kept: the list says so */
 	UINT		sum;			/* what the list said last */
 
 	/* W_FILES */
@@ -155,7 +171,7 @@ IMPORT void xfc_net_init( XFCNET *n, T_FTPNET *net, UINT tmo, UINT lport );
 IMPORT ER   xfc_net_up( void );		/* an address for the interface, by DHCP when it has none */
 
 /* The settings kept in the program object's metadata (tessronos.xfconv) */
-IMPORT INT  xfc_conf_load( XFCCONN *c, INT max );
+IMPORT INT  xfc_conf_load( XFCCONN **p_c );
 IMPORT ER   xfc_conf_save( CONST XFCCONN *c, INT n );
 
 IMPORT void xfc_uuid_str( CONST TS_UUID *u, char *out );

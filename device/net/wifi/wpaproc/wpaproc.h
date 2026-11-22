@@ -58,12 +58,25 @@
 #define WPP_STATE	14
 #define WPP_DISASSOC	15
 #define WPP_TICK	16
-#define WPP_EAP_BLOB	17		/* a piece of a certificate or key of knl_wpa_eap_set */
+#define WPP_EAP_BLOB	17		/* a piece of a certificate, a key or a word of knl_wpa_eap_set */
 #define WPP_EAP_SET	18
 #define WPP_EAP_RESULT	19
 #define WPP_EAP_END	20
-#define WPP_EAP_PIECE	3072		/* bytes of a certificate in one message */
-#define WPP_EAP_BLOB_MAX 16384		/* bytes of one certificate or key */
+#define WPP_EAP_PIECE	3072		/* bytes of a piece in one message */
+
+/*
+ * What WPP_EAP_BLOB carries: each is put together from its pieces, as
+ * long as it is, and WPP_EAP_SET takes them all. The words go the same
+ * way as the files, so that none of them is bounded by a message.
+ */
+#define WPP_EB_CA	0
+#define WPP_EB_CERT	1
+#define WPP_EB_KEY	2
+#define WPP_EB_ID	3
+#define WPP_EB_PW	4
+#define WPP_EB_DOMAIN	5
+#define WPP_EB_KEYPW	6
+#define WPP_EB_N	7
 
 /* Operations of CB: the kernel's functions the glue calls */
 #define WPP_CB_EAPOL_TX	1

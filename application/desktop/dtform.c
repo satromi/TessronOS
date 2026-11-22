@@ -78,7 +78,10 @@ EXPORT T_WMPART *dt_pn_add( T_WMPANEL *p, UW type, INT num, INT l, INT t,
 	pt->r.top = DT_PN_IN + t;
 	pt->r.right = DT_PN_IN + l + w;
 	pt->r.bottom = DT_PN_IN + t + h;
-	dt_pn_text(pt->label, WM_LABEL_MAX, label);
+	/* the words whole: a part keeps those longer than its field beside it */
+	if ( label != NULL && wm_part_set_label(pt, (CONST UB *)label, -1) < E_OK ) {
+		p->lost = TRUE;			/* the panel is then not opened: never with its words cut */
+	}
 
 	return pt;
 }
@@ -398,9 +401,14 @@ EXPORT UB *dt_vol_label( CONST char *path )
 	return NULL;
 }
 
-/* One line of text asked for: a prompt of one or two lines and a box */
+/*
+ * One line of text asked for: a prompt of one or two lines and a box
+ * starting with start whole. The letters agreed to, whole, in *p_all
+ * (Kfree) when it is given; otherwise as many whole letters as out has
+ * room for. TRUE when it was agreed to.
+ */
 LOCAL BOOL ask_text( DTWIN *d, CONST char *p1, CONST char *p2,
-		     CONST UB *start, UB *out, INT max, CONST char *ok )
+		     CONST UB *start, UB *out, INT max, CONST char *ok, UB **p_all )
 {
 	T_WMPANEL	*def;
 	T_WMPART	*pt;
@@ -419,15 +427,23 @@ LOCAL BOOL ask_text( DTWIN *d, CONST char *p1, CONST char *p2,
 		top += 24;
 	}
 	pt = dt_pn_add(def, WM_PT_BOX, 1, 14, top + 2, w - 28, 26, NULL);
-	if ( pt != NULL ) {
-		pt->caret = dt_fit(pt->text, WM_LABEL_MAX, start);
+	if ( pt != NULL && start != NULL && wm_part_set_text(pt, start, -1) < E_OK ) {
+		def->lost = TRUE;		/* not opened rather than shown with the name cut */
 	}
 	dt_pn_buttons(def, ok);
 
 	ans = dt_pn_run(d, def, &pid);
-	out[0] = 0;
+	if ( out != NULL && max > 0 ) out[0] = 0;
+	if ( p_all != NULL ) *p_all = NULL;
 	if ( ans == WM_ANS_OK && pid >= 0 ) {
-		wm_panel_text(pid, 1, out, max);
+		if ( p_all != NULL ) {
+			if ( wm_panel_text_all(pid, 1, p_all) < 0 ) {
+				ans = WM_ANS_CANCEL;
+				dt_no_memory(d);
+			}
+		} else {
+			wm_panel_text(pid, 1, out, max);
+		}
 	}
 	dt_pn_done(d, pid);
 
@@ -437,7 +453,35 @@ LOCAL BOOL ask_text( DTWIN *d, CONST char *p1, CONST char *p2,
 EXPORT BOOL dt_ask_text( DTWIN *d, CONST char *p1, CONST char *p2,
 			 CONST UB *start, UB *out, INT max, CONST char *ok )
 {
-	return ask_text(d, p1, p2, start, out, max, ok);
+	return ask_text(d, p1, p2, start, out, max, ok, NULL);
+}
+
+EXPORT UB *dt_ask_text_all( DTWIN *d, CONST char *p1, CONST char *p2,
+			    CONST UB *start, CONST char *ok )
+{
+	UB	*all = NULL;
+
+	if ( !ask_text(d, p1, p2, start, NULL, 0, ok, &all) || all == NULL || all[0] == 0 ) {
+		if ( all != NULL ) Kfree(all);
+		return NULL;
+	}
+	return all;
+}
+
+EXPORT UB *dt_copy_name( CONST UB *name )
+{
+	CONST UB	*tail = (CONST UB *)"のコピー";
+	INT		n = 0, t = 0;
+	UB		*s;
+
+	while ( name != NULL && name[n] != 0 ) n++;
+	while ( tail[t] != 0 ) t++;
+	s = (UB *)Kmalloc((SZ)( n + t + 1 ));
+	if ( s != NULL ) {
+		if ( n > 0 ) knl_memcpy(s, name, (SZ)n);
+		knl_memcpy(s + n, tail, (SZ)t + 1);
+	}
+	return s;
 }
 
 /*

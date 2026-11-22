@@ -796,6 +796,23 @@ LOCAL UVC *uvc_slot( void )
 	return UVC_AT(i);
 }
 
+/*
+ * A name of the device into the camera's record (T_CAMINFO, a record of a
+ * fixed size the programs read): what fits, cut at a whole letter
+ */
+LOCAL void name_copy( UB *dst, INT max, CONST UB *src )
+{
+	INT	k;
+
+	for ( k = 0; k < max - 1 && src[k] != 0; k++ ) {
+		dst[k] = src[k];
+	}
+	while ( k > 0 && src[k] != 0 && ( src[k] & 0xc0 ) == 0x80 ) {
+		k--;
+	}
+	dst[k] = 0;
+}
+
 EXPORT ER knl_uvc_attach( USBDEV *dev )
 {
 	UVC	*u;
@@ -833,8 +850,8 @@ EXPORT ER knl_uvc_attach( USBDEV *dev )
 	u->src.info.vid = GET16(dev->ddesc + 8);
 	u->src.info.pid = GET16(dev->ddesc + 10);
 	u->src.info.bcdUVC = u->bcd;
-	knl_memcpy(u->src.info.product, dev->product, sizeof(dev->product));
-	knl_memcpy(u->src.info.manufacturer, dev->maker, sizeof(dev->maker));
+	name_copy(u->src.info.product, sizeof(u->src.info.product), dev->product);
+	name_copy(u->src.info.manufacturer, sizeof(u->src.info.manufacturer), dev->maker);
 	if ( u->src.info.product[0] == 0 ) {
 		knl_strcpy((char *)u->src.info.product, "USB camera");
 	}

@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Convert a TSFS native volume of version 4 to version 5 (design 7.3,
+"変換"), on an image file or a partition within one.
+
+  tools/tsfs-convert [-n] [--partition N | --offset N | --whole] image
+
+The steps are the kernel's (ts_cnv_vol), in the same order:
+
+  1. the volume has to be of version 4 (no FMT5, no incompatible feature
+     but XT2), not marked as growing and with no error recorded
+  2. the journal replayed and the orphan tree finished (objects deleted
+     while open taken away, marked link tables made again), as a mount
+     does; the format does not change
+  3. the whole volume checked; anything wrong (an error, blocks taken
+     that nothing uses, something the orphan tree still has to finish)
+     and nothing more is written
+  4. the ring empty and the device's cache flushed
+  5. one superblock with FMT5, version 5 and CONVREQ taken off, a
+     generation up, flushed: the conversion is made; then the other
+     superblock and the spares
+  6. the head of the journal at version 5 (the ring empty, the next
+     number where it was), flushed
+
+No block of the objects moves; only the superblocks, their spares and
+the journal head are written, so no free space is needed. A volume cut
+off after 5 and before 6 is opened by the kernel (and this tool, and
+fsck.tsfs --fix) as one whose last step is left: the head is written at
+version 5. With -n only 1 and 3 are done, on what the journal will
+leave, and nothing is written.
+
+--stop-after STEP (2, 3, 4, 5a, 5, 6) stops there, as a cut in the
+power would, for the tests of the steps.
+
+Exit status: 0 when the volume is of version 5 (converted now, or
+already), 1 when it was not converted (it is damaged, or not a volume
+of version 4 that can be), 2 when it could not be read.
+"""
+
+import argparse
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from tsfs_py import TsfsError, Volume
+from tsfs_py.check import Checker
+from tsfs_py.cli import add_volume_args, open_device
+from tsfs_py.journal import Journal
+from tsfs_py import repair
+from tsfs_py.layout import (COMPAT_CONVREQ, INCOMPAT_FMT5, INCOMPAT_GROWING,
+                            INCOMPAT_V4, ST_ERROR, VERSION5)
+
+STEPS = ("2", "3", "4", "5a", "5", "6")
+
+
+class Stop(Exception):
+    pass
+
+
+def say(args, msg):
+    if not args.quiet:
+        print("tsfs-convert: %s: convert %s" % (args.image, msg))
+
+
+def faults(checker):
+    """What the check found that keeps a volume from being converted."""
+    rep = checker.rep
+    out = ["%s: %s" % (w, t) for (w, t) in rep.errors]
+    if checker.leaked:
+        out.append("%d block(s) are taken but nothing uses them"
+                   % len(checker.leaked))
+    if repair.tidy_needed(checker):
+        out.append("the orphan tree still has something to finish")
+    return out
+
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="tsfs-convert",
+        description="convert a TSFS native volume to version 5")
+    p.add_argument("image", help="image file holding the volume")
+    p.add_argument("-n", "--dry-run", action="store_true",
+                   help="check whether it can be converted; write nothing")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.add_argument("--stop-after", choices=STEPS, help=argparse.SUPPRESS)
+    add_volume_args(p)
+    args = p.parse_args()
+    t0 = time.time()
+
+    def stop(step):
+        if args.stop_after == step:
+            raise Stop(step)
+
+    # 1. what the volume is
+    try:
+        with Volume.open(open_device(args.image, args, writable=False),
+                         replay=False) as probe:
+            sb = probe.sb
+            if sb.incompat & INCOMPAT_FMT5:
+                head_old = probe.journal.head_state == "old"
+                say(args, "the volume is of version 5 already")
+                if not head_old or args.dry_run:
+                    return 0
+            elif sb.incompat & ~INCOMPAT_V4:
+                sys.stderr.write("tsfs-convert: incompatible features 0x%x: "
+                                 "not a volume of version 4\n" % sb.incompat)
+                return 1
+            elif sb.incompat & INCOMPAT_GROWING:
+                sys.stderr.write("tsfs-convert: a grow was cut short; let the "
+                                 "kernel finish it (it does when it opens the "
+                                 "volume), then convert\n")
+                return 1
+            elif sb.state & ST_ERROR:
+                sys.stderr.write("tsfs-convert: an error is recorded; check "
+                                 "and repair the volume first\n")
+                return 1
+            else:
+                head_old = False
+                c = Checker(probe)
+                c.run()
+                bad = [f for f in faults(c) if "orphan tree" not in f]
+                if bad:
+                    for f in bad:
+                        sys.stderr.write("tsfs-convert: %s\n" % f)
+                    sys.stderr.write("tsfs-convert: the volume is damaged: not "
+                                     "converted, nothing written\n")
+                    return 1
+                if args.dry_run:
+                    say(args, "can be converted (%d objects)"
+                        % c.rep.stats.get("objects", 0))
+                    return 0
+    except (TsfsError, OSError) as e:
+        sys.stderr.write("tsfs-convert: %s\n" % e)
+        return 2
+
+    try:
+        dev = open_device(args.image, args, writable=True)
+        vol = Volume.open(dev, replay=True)
+    except (TsfsError, OSError) as e:
+        sys.stderr.write("tsfs-convert: %s\n" % e)
+        return 2
+
+    try:
+        with vol:
+            if head_old:
+                # 6 of a conversion cut short: only the head is left
+                vol.journal = Journal(vol)
+                vol.journal.scan()
+                if vol.journal.head_state == "old":
+                    vol.journal.write_head(vol.journal.head_seq, vol.journal.head)
+                    vol.dev.flush()
+                say(args, "the journal head written at version 5")
+                return 0
+
+            # 2. the journal is in place; the orphan tree finished
+            if vol.replayed[0]:
+                vol.reload_sb()
+                say(args, "%d transaction(s) of the journal put in place"
+                    % vol.replayed[0])
+            c = Checker(vol)
+            c.run()
+            if repair.tidy_needed(c):
+                if c.rep.errors:
+                    raise TsfsError("the volume has errors: not converted")
+                for a in repair.tidy(vol, c):
+                    say(args, a)
+            vol.flush()
+            stop("2")
+
+            # 3. the whole volume checked
+            vol.reload_sb()
+            vol.maps = None
+            c = Checker(vol)
+            c.run()
+            bad = faults(c)
+            if bad:
+                for f in bad:
+                    sys.stderr.write("tsfs-convert: %s\n" % f)
+                sys.stderr.write("tsfs-convert: the volume is damaged: not "
+                                 "converted\n")
+                return 1
+            say(args, "checked: %d objects, %d records, no errors"
+                % (c.rep.stats.get("objects", 0), c.rep.stats.get("records", 0)))
+            stop("3")
+
+            # 4. the ring empty (the replay left it so) and the cache flushed
+            j = vol.journal
+            if j.head_state != "good" or j.txns:
+                j.replay()
+            vol.sb.journal_seq = j.head_seq
+            vol.dev.flush()
+            stop("4")
+
+            # 5. the superblock: one copy, flushed, then the other and the spares
+            sb = vol.sb
+            sb.incompat |= INCOMPAT_FMT5
+            sb.compat &= ~COMPAT_CONVREQ
+            sb.version = VERSION5
+            vol.write_sb()
+            vol.dev.flush()
+            stop("5a")
+            vol.write_sb(spares=True)
+            vol.dev.flush()
+            stop("5")
+
+            # 6. the journal head at version 5
+            vol.journal = Journal(vol)
+            vol.journal.scan()
+            vol.journal.write_head(vol.journal.head_seq, vol.journal.head)
+            vol.dev.flush()
+            stop("6")
+    except Stop as s:
+        say(args, "stopped after step %s" % s.args[0])
+        return 1
+    except (TsfsError, OSError) as e:
+        sys.stderr.write("tsfs-convert: %s\n" % e)
+        return 1
+    say(args, "done in %.1f s: the volume is of version 5"
+        % (time.time() - t0))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

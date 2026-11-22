@@ -87,6 +87,9 @@
 #include <ts/snd.h>
 #include <ts/disp.h>
 #include <ts/wm.h>
+#include <ts/vobjsz.h>
+#include <ts/tvvop.h>
+#include <ts/tvpage.h>
 #include "../dtask.h"
 
 #define TICK_MS		20
@@ -230,6 +233,8 @@
 #define PN_TELL2	23		/* told in two lines */
 #define PN_ASK3		24		/* asked in three lines */
 #define B_ASK3		4
+#define PN_ASK4		25		/* asked in four lines: the update that converts the system's disk */
+#define B_ASK4		5
 #define B_POWER		3
 #define B_RESTART	105
 
@@ -3280,16 +3285,22 @@ LOCAL BOOL sys_drop( CONST TS_UUID *pkg )
 	char		pv[24], sv[24], l1[160], s[160], *tab;
 	INT		done = 0, total = 0, num = 0;
 	UINT		force = 0;
-	BOOL		shown;
+	BOOL		shown, conv;
 	ER		er;
 
 	er = desk_ask(DT_RQ_SYSUP, pkg, DT_SYSUP_CHECK, &an);
 	if ( er == E_OBJ || er == E_PAR ) {
 		return FALSE;
 	}
+	/* "PACKAGE<tab>SYSTEM<tab>CONVERT": CONVERT 1 when the update converts the system's disk at the next start */
 	tab = strchr(DESK_TEXT, '\t');
 	snprintf(pv, sizeof(pv), "%.*s", ( tab != NULL ) ? (INT)( tab - DESK_TEXT ) : (INT)strlen(DESK_TEXT), DESK_TEXT);
 	snprintf(sv, sizeof(sv), "%s", ( tab != NULL ) ? tab + 1 : "");
+	conv = FALSE;
+	if ( ( tab = strchr(sv, '\t') ) != NULL ) {
+		conv = (BOOL)( tab[1] == '1' );
+		*tab = 0;
+	}
 	snprintf(s, sizeof(s), "sysenv: system package %s (%s) %d\n", pv, sv, (INT)er);
 	tm_putstring((CONST UB *)s);
 	if ( er == E_NOSPT ) {
@@ -3297,7 +3308,17 @@ LOCAL BOOL sys_drop( CONST TS_UUID *pkg )
 		tell2(l1, "この機械には入れられません。");
 		return TRUE;
 	}
-	if ( er == E_OK ) {
+	if ( er == E_OK && conv ) {
+		CONST char *l[5];
+
+		snprintf(l1, sizeof(l1), "システムを%sから%sに更新します。", sv, pv);
+		l[0] = l1;
+		l[1] = "更新のあとの最初の起動で、システムのディスクを検査し、新しい形式に変えます。";
+		l[2] = "変えたあとは、前のバージョンでは起動できません。";
+		l[3] = "更新が終わったら、システムを再起動します。";
+		l[4] = "更新";
+		if ( ui_ask(&ui, PN_ASK4, l, 5) != B_ASK4 ) return TRUE;
+	} else if ( er == E_OK ) {
 		snprintf(l1, sizeof(l1), "システムを%sから%sに更新します。", sv, pv);
 		if ( !confirm(l1, "更新が終わったら、システムを再起動します。", "更新") ) return TRUE;
 	} else if ( er == E_LIMIT ) {
@@ -5600,30 +5621,59 @@ LOCAL void copy_make( void )
 }
 
 /*
- * このページの仮身を作る: a link to this program's object, its own applist
- * naming this program with the page as the entry's data (固有データ),
- * put in the desktop's first window (DT_RQ_LINK_PUT with DT_F_APPLIST).
- * Opened, it opens this page. The link is named for the page; what its
- * band shows is the object's name, システム環境設定, which a link does
- * not change.
+ * このページの仮身を作る, and a tag pulled out (UI_EV_TAGPULL): the
+ * object of the page, named システム環境設定：<the page>, made and a link
+ * to it put -- in the desktop's first window, or where the tag was let go
+ * (lib/libtv/tv_page.c). Opened, it opens this program on the page (its
+ * applist's 固有データ, opened_on). The page shown stays. A tag that is a
+ * device's row of 機器情報 rather than a page of its own carries nothing.
  */
+LOCAL void page_of( CONST PAGE *pg, T_TVPAGE *p )
+{
+	p->key = "tessronos-sysenv";
+	p->prog = "システム環境設定";
+	p->progobj = SYSDEF_PROG_SYSENV;
+	p->page = pg->name;
+	p->label = pg->label;
+}
+
 LOCAL void page_link( void )
 {
 	CONST PAGE	*pg = page_of_sheet(ui_sheet(&ui));
-	char		name[96], appl[160], s[128];
-	TS_UUID		me;
-	T_DTANS		an;
+	T_TVPAGE	p;
+	T_TVASK		ask;
+	DQTV		dt;
+	char		s[128];
 	ER		er;
 
-	if ( pg == NULL || ui_uuid(SYSDEF_PROG_SYSENV, &me) < E_OK ) return;
-	snprintf(name, sizeof(name), "システム環境設定（%s）", pg->label);
-	snprintf(appl, sizeof(appl), "{\"tessronos-sysenv\":{\"name\":\"システム環境設定\",\"data\":\"%s\"}}", pg->name);
-	desk_name = name;
-	er = desk_req(DT_RQ_LINK_PUT, &me, 0, DT_F_APPLIST, appl, &an);
-	desk_name = NULL;
+	if ( pg == NULL ) return;
+	page_of(pg, &p);
+	dq_tv_asker(&ask, &dt, &desk_q, &ui.win, NULL);
+	er = tv_page_put(&ask, &p);
 	snprintf(s, sizeof(s), "sysenv: link of page \"%s\" put (%d)\n", pg->name, (INT)er);
 	tm_putstring((CONST UB *)s);
 	if ( er < E_OK ) tell("このページの仮身を置けませんでした。");
+}
+
+LOCAL void page_carry( CONST T_OBNTM *m, INT tag )
+{
+	CONST PAGE	*pg = page_of_sheet(tag);
+	T_TVPAGE	p;
+	T_TVASK		ask;
+	DQTV		dt;
+	char		s[160];
+	ER		er;
+
+	if ( pg == NULL || pg->dev >= 0 ) {
+		snprintf(s, sizeof(s), "sysenv: tag %d pulled out, not a page\n", tag);
+		tm_putstring((CONST UB *)s);
+		return;
+	}
+	page_of(pg, &p);
+	dq_tv_asker(&ask, &dt, &desk_q, &ui.win, NULL);
+	er = tv_page_pull(&ask, &ui, m, &p);
+	snprintf(s, sizeof(s), "sysenv: link of page \"%s\" carried (%d)\n", pg->name, (INT)er);
+	tm_putstring((CONST UB *)s);
 }
 
 /* Whether u is a 写し, and of which page */
@@ -6340,7 +6390,7 @@ int main( void )
 	 * screen leaves the window shorter than the panel (scroll="true"
 	 * on its tags); the buttons at the sheets' foot stay in sight.
 	 */
-	ui_attr(WM_ATTR_RBAR | UI_ATTR_HIDDEN);	/* filled hidden, and shown once (ui_reveal) */
+	ui_attr(WM_ATTR_RBAR | UI_ATTR_HIDDEN | UI_ATTR_TAGPULL);	/* filled hidden, and shown once (ui_reveal); its tags pulled out */
 	if ( ui_open(&ui, SYSDEF_BOX_SYSENV, PN_MAIN, wm_new_x(160), wm_new_y(80)) < E_OK ) {
 		tm_putstring((CONST UB *)"sysenv: no window\n");
 		return 1;
@@ -6422,6 +6472,9 @@ int main( void )
 				break;
 			case UI_EV_SHEET:
 				if ( id == S_POWER ) power_sheet();
+				break;
+			case UI_EV_TAGPULL:
+				page_carry(&m, id);
 				break;
 			default:
 				break;

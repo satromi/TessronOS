@@ -54,6 +54,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <sys/mman.h>
 #include <tk/typedef.h>
 #include <tk/errno.h>
@@ -161,6 +162,7 @@ static int		gfd[GPUFD_MAX];		/* the GCTX index + 1; 0: free */
 static GCTX		gctx[GPUFD_MAX];
 static int		pfd[PRIMEFD_MAX];	/* the name a PRIME descriptor carries; -1 a key only; 0: free */
 static ID		pkey[PRIMEFD_MAX];	/* the key of its BO object, 0 none yet */
+static uint64_t		psize[PRIMEFD_MAX];	/* the size of its BO, 0 not known yet */
 static SYNC		sync_tab[SYNC_MAX];
 static SYNCFD		sfd_tab[SYNCFD_MAX];
 
@@ -295,6 +297,9 @@ int ts_gl_drm_open( void )
 		}
 		ctx = gp_opn_gpu();
 		if ( ctx <= 0 ) {
+			/* E_OBJ: the check of the spaces at start failed; E_NOMEM: no table of 4MB */
+			ts_gl_note_error(ctx < 0 ? ctx : E_SYS);
+			errno = ( ctx == E_NOMEM ) ? ENOMEM : ( ctx == E_OACV ) ? EACCES : ENODEV;
 			return -1;
 		}
 	}
@@ -411,6 +416,7 @@ int ts_gpu_fd_close( int fd )
 
 		pfd[i] = 0;
 		pkey[i] = 0;
+		psize[i] = 0;
 		pthread_mutex_unlock(&mu);
 		if ( k > 0 ) (void)ob_cls_obj(k);
 		return 0;
@@ -483,6 +489,39 @@ int ts_gpu_fd_fcntl( int fd, int cmd, int arg )
 	}
 	pthread_mutex_unlock(&mu);
 	return r;
+}
+
+/*
+ * lseek of a PRIME descriptor: its end is the size of its BO, as a
+ * DMA-BUF of Linux answers it (the driver v3d reads a BO's size so when
+ * it takes one in, v3d_bo_open_dmabuf). -1 when fd is none of the shim's
+ * PRIME descriptors; otherwise 0, with the position or -1 and errno in
+ * *pos.
+ */
+int ts_gpu_fd_lseek( int fd, off_t off, int whence, off_t *pos )
+{
+	int		i = fd - PRIMEFD_BASE;
+	uint64_t	size;
+
+	pthread_mutex_lock(&mu);
+	if ( i < 0 || i >= PRIMEFD_MAX || pfd[i] == 0 ) {
+		pthread_mutex_unlock(&mu);
+		return -1;
+	}
+	size = psize[i];
+	pthread_mutex_unlock(&mu);
+	if ( size == 0 ) {
+		errno = ESPIPE;			/* a key received and not taken in yet */
+		*pos = -1;
+	} else if ( whence == SEEK_END && off == 0 ) {
+		*pos = (off_t)size;
+	} else if ( whence == SEEK_SET && off == 0 ) {
+		*pos = 0;
+	} else {
+		errno = EINVAL;
+		*pos = -1;
+	}
+	return 0;
 }
 
 void *ts_gpu_fd_mmap( int fd, size_t len, off_t off )
@@ -1300,6 +1339,7 @@ int drmPrimeHandleToFD( int fd, uint32_t handle, uint32_t flags, int *prime_fd )
 {
 	int	ctx = fd_ctx(fd), i;
 	INT	name;
+	T_GPBO	b;
 
 	(void)flags;
 	if ( ctx <= 0 ) {
@@ -1310,10 +1350,14 @@ int drmPrimeHandleToFD( int fd, uint32_t handle, uint32_t flags, int *prime_fd )
 	if ( name <= 0 ) {
 		return set_errno(name);
 	}
+	if ( gp_ref_bo(ctx, handle, &b) < E_OK ) {
+		b.size = 0;
+	}
 	pthread_mutex_lock(&mu);
 	for ( i = 0; i < PRIMEFD_MAX; i++ ) {
 		if ( pfd[i] == 0 ) {
 			pfd[i] = name;
+			psize[i] = (uint64_t)b.size;
 			*prime_fd = PRIMEFD_BASE + i;
 			pthread_mutex_unlock(&mu);
 			return 0;
@@ -1356,6 +1400,11 @@ int drmPrimeFDToHandle( int fd, int prime_fd, uint32_t *handle )
 		return set_errno(er);
 	}
 	bo_note(fd, &b);
+	pthread_mutex_lock(&mu);
+	if ( i >= 0 && i < PRIMEFD_MAX && pfd[i] != 0 ) {
+		psize[i] = (uint64_t)b.size;
+	}
+	pthread_mutex_unlock(&mu);
 	*handle = b.handle;
 	return 0;
 }
@@ -1416,6 +1465,7 @@ int ts_gpu_fd_from_key( ID key )
 		if ( pfd[i] == 0 ) {
 			pfd[i] = -1;
 			pkey[i] = key;
+			psize[i] = 0;
 			pthread_mutex_unlock(&mu);
 			return PRIMEFD_BASE + i;
 		}

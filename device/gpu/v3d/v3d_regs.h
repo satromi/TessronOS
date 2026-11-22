@@ -22,7 +22,7 @@
  *	  [hw]	no published layout; to be read back on the board before
  *		anything depends on it (13-gpu.md 13.8). The driver writes
  *		these only at CNF_V3D >= 2.
- *	Nothing is written to the SMS window.
+ *	The SMS window and the PM block are written only by the reset.
  */
 
 #ifndef _DEVICE_GPU_V3D_REGS_H_
@@ -100,6 +100,9 @@
 #define V3D_PTB_BPOA		0x0308
 #define V3D_PTB_BPOS		0x030c
 
+/* [doc] errors the core latched, read for the log at a reset */
+#define V3D_ERR_STAT		0x0f20
+
 /* ---------------------------------------------------------------- hub */
 
 /*
@@ -159,6 +162,28 @@
 #define V3D_MMU_DEBUG_INFO	0x1238	/* 7:4 and 11:8: address widths less 30 */
 #define   V3D_MMU_VA_WIDTH(v)	( 30 + ( ( (v) >> 4 ) & 0xF ) )
 #define   V3D_MMU_PA_WIDTH(v)	( 30 + ( ( (v) >> 8 ) & 0xF ) )
+
+/* ---------------------------------------------------------------- reset */
+
+/*
+ * [doc] The power state manager (SMS) of 7.1. Writing the command 4 to
+ * the state field of REE_CS resets the hub and the core: the state goes
+ * through "isolating for reset" and "resetting" and comes back.
+ */
+#define V3D_SMS_REE_CS		0x0000
+#define   V3D_SMS_STATE_MASK	0x0000000FU
+#define   V3D_SMS_CMD_RESET	0x4
+#define   V3D_SMS_ISOLATING_FOR_RESET 0xA
+#define   V3D_SMS_RESETTING	0xB
+
+/*
+ * [doc] The V3D's reset line in the PM block of the BCM2712 (PM_PA):
+ * bit 6 low holds the block in reset. Every write carries the password
+ * in the top byte, or the block ignores it.
+ */
+#define PM_GRAFX_2712		0x0304
+#define   PM_V3DRSTN		0x00000040U
+#define   PM_PASSWORD		0x5A000000U
 
 /* ---------------------------------------------------------------- page table */
 

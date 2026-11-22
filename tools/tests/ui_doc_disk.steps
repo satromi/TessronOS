@@ -1,0 +1,44 @@
+# 基本文章編集 (design 11.2.6, 11.26): ディスク操作 chosen in the text's menu is done by the program
+# ディスク操作, as the figure editor does it. The menu opens at 400,400 (閉じる under the pointer
+# the first time; ディスク操作 260 below, at 440,660; its submenu to the right, 接続, 切り離し and
+# 状態表示 20 pixels apart from 661), and 状態表示 shows the system's disk.
+# Keys: Esc 29, Ctrl+E 08 01.
+waitwin 原紙箱
+click 1000 48
+wait 300
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>仮身の前<link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" vobjid="01a10000-0000-7000-8000-000000000001" width="160" heightpx="19" chsz="14"/>仮身の後</p>
+xml <p>後の段落</p>
+xml </document></tad>
+xmlbig
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 2
+wait 800
+logmark
+click 400 400 1
+expectsince document: menu
+wait 500
+move 430 660
+wait 150
+move 440 660
+wait 300
+shot dd_menu
+move 510 660
+wait 150
+move 530 661
+wait 300
+move 530 701
+wait 300
+click 530 701
+expect disk: status "TessronOS system"
+expect diskop: up status
+wait 1000
+shot dd_status
+key 28
+expect diskop: status closed
+wait 500
+key 08 01
+expect document: closed
+absent !OACV!

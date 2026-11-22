@@ -314,7 +314,7 @@ LOCAL INT panels( void )
 {
 	INT	pid, n = 0;
 
-	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) {
+	for ( pid = 1; pid <= kt_panel_last(); pid++ ) {
 		if ( wm_panel_wid(pid) > 0 ) n++;
 	}
 	return n;

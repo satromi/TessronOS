@@ -5052,7 +5052,7 @@ LOCAL void ly_click_row( INT pid, INT lw, INT row )
 	T_DPRECT	mr;
 	INT		cmd = 0, k, lp = 0;
 
-	for ( k = 1; k <= WM_PANEL_MAX; k++ ) {
+	for ( k = 1; k <= kt_panel_last(); k++ ) {
 		if ( wm_panel_wid(k) == lw ) lp = k;
 	}
 	mr.left = mr.top = mr.right = mr.bottom = 0;
@@ -5072,7 +5072,7 @@ LOCAL INT ly_new_list( INT pid, CONST INT *had, INT n )
 {
 	INT	k, j, w;
 
-	for ( k = 1; k <= WM_PANEL_MAX; k++ ) {
+	for ( k = 1; k <= kt_panel_last(); k++ ) {
 		w = wm_panel_wid(k);
 		if ( w <= 0 || !wm_menu_has(pid, w) ) continue;
 		for ( j = 0; j < n && had[j] != w; j++ ) ;

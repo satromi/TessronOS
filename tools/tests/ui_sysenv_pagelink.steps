@@ -1,5 +1,6 @@
-# システム環境設定's このページの仮身を作る (docs/tessronos 11.6): a link to the program object with
-# the page in its own applist, put in the first window; opened from there, the page opens. For
+# システム環境設定's このページの仮身を作る (docs/tessronos 11.6): the object of the page, named
+# システム環境設定：画面, made and a link to it put in the first window (lib/libtv/tv_page.c); opened
+# from there, its applist opens the page. For
 # tools/ui_run.py with the kernel of make TARGET=_QEMU_VIRT_ DESKTOP=1 UITEST=1 and the test disk of
 # a KTEST=1 build. The window is at 160,80; its menu opens at 400,300 with 操作 under the pointer,
 # このページの仮身を作る the fourth line of 操作. "openputlink" reads the link back from the
@@ -21,7 +22,8 @@ move 495 392
 wait 150
 click 495 392
 expect sysenv: link of page "screen" put (0)
-expect desktop: link put "システム環境設定（画面）" with its applist (0)
+expect tvpage: object "システム環境設定：画面" of page "screen" made (0)
+expect desktop: link put "システム環境設定：画面" (0)
 wait 1200
 shot spl_put
 # another page shown, then the link opened: the screen's page again, in the same window

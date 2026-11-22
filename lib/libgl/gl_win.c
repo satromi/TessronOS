@@ -69,36 +69,82 @@ int ts_gl_win_put( const void *native_window, const int *rects, int n )
 
 static int	probe_step = TS_GL_PROBE_NONE;
 static char	probe_driver[16];
+static char	probe_why[160];
+static int	last_er;		/* the last refusal of gp_ref_gpu or gp_opn_gpu */
 
-void ts_gl_probe_note( int step, const char *driver )
+static void copy_str( char *to, int n, const char *from )
 {
 	int i = 0;
 
-	probe_step = step;
-	if ( driver != NULL ) {
-		for ( ; i < (int)sizeof(probe_driver) - 1 && driver[i] != '\0'; i++ ) {
-			probe_driver[i] = driver[i];
-		}
+	for ( ; from != NULL && i < n - 1 && from[i] != '\0'; i++ ) {
+		to[i] = from[i];
 	}
-	probe_driver[i] = '\0';
+	if ( n > 0 ) {
+		to[i] = '\0';
+	}
+}
+
+void ts_gl_probe_note( int step, const char *driver )
+{
+	probe_step = step;
+	copy_str(probe_driver, sizeof(probe_driver), driver);
+	probe_why[0] = '\0';
 }
 
 int ts_gl_probe_result( char *driver, int n )
 {
-	int i;
-
-	for ( i = 0; driver != NULL && i < n - 1 && probe_driver[i] != '\0'; i++ ) {
-		driver[i] = probe_driver[i];
-	}
-	if ( driver != NULL && n > 0 ) {
-		driver[i] = '\0';
+	if ( driver != NULL ) {
+		copy_str(driver, n, probe_driver);
 	}
 	return probe_step;
+}
+
+void ts_gl_probe_why( const char *why )
+{
+	copy_str(probe_why, sizeof(probe_why), why);
+}
+
+int ts_gl_probe_reason( char *why, int n )
+{
+	if ( why != NULL ) {
+		copy_str(why, n, probe_why);
+	}
+	return probe_step;
+}
+
+void ts_gl_note_error( int er )
+{
+	last_er = er;
+}
+
+int ts_gl_last_error( void )
+{
+	return last_er;
+}
+
+const char *ts_gl_error_name( int er )
+{
+	switch ( er ) {
+	case 0:		return "none";
+	case E_NOEXS:	return "E_NOEXS";
+	case E_NOMEM:	return "E_NOMEM";
+	case E_OBJ:	return "E_OBJ";
+	case E_OACV:	return "E_OACV";
+	case E_NOSPT:	return "E_NOSPT";
+	case E_LIMIT:	return "E_LIMIT";
+	case E_PAR:	return "E_PAR";
+	case E_ID:	return "E_ID";
+	case E_IO:	return "E_IO";
+	case E_SYS:	return "E_SYS";
+	case E_RSFN:	return "E_RSFN";
+	default:	return "another error";
+	}
 }
 
 int ts_gl_gpu_kind( void )
 {
 	T_GPUINFO	info;
+	ER		er;
 
 	if ( ts_gl_drm_faked() ) {
 #ifdef __x86_64__
@@ -108,7 +154,9 @@ int ts_gl_gpu_kind( void )
 #endif
 		return TS_GL_GPU_V3D;		/* the shim pretends one */
 	}
-	if ( gp_ref_gpu(&info) < E_OK ) {
+	er = gp_ref_gpu(&info);
+	if ( er < E_OK ) {
+		last_er = er;
 		return TS_GL_GPU_NONE;
 	}
 	return (int)info.kind;

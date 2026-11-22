@@ -59,20 +59,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define LEVEL_MAX	16
-#define SPAN_MAX	24
-#define ATTR_MAX	192
+#define ATTR_MAX	192		/* the attributes one element of a rule writes, built in place */
 #define TCHAR_MAX	64		/* codes of one <tchar> */
 #define KEEP_PART	2000		/* bytes of a kept segment in one element */
-#define KEEP_MAX	( 16 * 1024 )	/* and in all */
 #define APPL_CALC	0x0009		/* 基本表計算's application ID, the middle word */
 #define RT_DEPTH	32		/* elements of 実時間制御TAD open at once */
 #define RT_NAMELEN	32
 
-/* An element open in the text: a decoration or a span with attributes */
+/* An element open in the text: a decoration or a span with its attributes, as long as they are (malloc) */
 typedef struct {
 	char	name[16];
-	char	attrs[ATTR_MAX];
+	char	*attrs;
 } SPAN;
 
 /* A text or a figure being written */
@@ -80,8 +77,8 @@ typedef struct {
 	char	kind;			/* 'T' text, 'F' figure */
 	BOOL	para;			/* a <p> is open */
 	INT	plane;			/* the TRON plane outside it */
-	INT	nspan;
-	SPAN	span[SPAN_MAX];
+	INT	nspan, nroom;	/* the elements open, as many as are: room for nroom */
+	SPAN	*span;
 	INT		head;			/* where its first <p> was written, -1 when that is past */
 	INT		hunit, vunit;		/* its coordinates' units (UNITS) */
 	INT	rtp, rtq;		/* a <p> opened after an element of 実時間制御TAD: where, and the end of it */
@@ -96,7 +93,8 @@ typedef struct {
 	UINT		len;		/* its bytes */
 	UINT		id;
 	INT		sp;
-	LEVEL		lv[LEVEL_MAX];
+	LEVEL		**lv;		/* the levels open, as deep as the record goes: each allocated once */
+	INT		lvroom;
 	BOOL		started;	/* a text or figure start was seen */
 	BOOL		figtad;		/* the record began with a figure */
 	INT		z;		/* the zIndex of a figure's next element */
@@ -117,6 +115,13 @@ typedef struct {
 } TX;
 
 LOCAL void walk( TX *t, const UB *rec, UINT n, BOOL chars, void (*fn)( TX * ) );
+
+/* No memory for what the record holds: the conversion says so rather than leave it out */
+LOCAL void no_memory( TX *t )
+{
+	if ( t->cv != NULL ) t->cv->er = E_NOMEM;
+	if ( t->o != NULL ) t->o->fail = TRUE;
+}
 LOCAL void segment( TX *t );
 LOCAL BOOL in_text( TX *t );
 LOCAL void calc_close( TX *t );
@@ -177,7 +182,6 @@ LOCAL BOOL keep( TX *t, const char *name, const char *attrs )
 {
 	UINT	at = 0, n, i, part = 0;
 
-	if ( t->len > KEEP_MAX ) return FALSE;
 	do {
 		n = ( t->len - at > KEEP_PART ) ? KEEP_PART : t->len - at;
 		bpk_buf_printf(t->o, "<%s%s", name, attrs);
@@ -266,7 +270,7 @@ LOCAL INT units_milli( INT unit, INT v )
 
 LOCAL LEVEL *top( TX *t )
 {
-	return ( t->sp > 0 ) ? &t->lv[t->sp - 1] : NULL;
+	return ( t->sp > 0 ) ? t->lv[t->sp - 1] : NULL;
 }
 
 LOCAL BOOL in_text( TX *t )
@@ -374,6 +378,31 @@ LOCAL INT span_lined( TX *t )
 	return l->nspan;
 }
 
+/* The attributes of a level's elements let go, none open */
+LOCAL void spans_drop( LEVEL *l )
+{
+	INT	i;
+
+	for ( i = 0; i < l->nspan; i++ ) free(l->span[i].attrs);
+	l->nspan = 0;
+}
+
+/* The levels, their elements and their attributes let go, as the conversion ends */
+LOCAL void levels_free( TX *t )
+{
+	INT	i;
+
+	for ( i = 0; i < t->lvroom; i++ ) {
+		if ( t->lv[i] == NULL ) continue;
+		spans_drop(t->lv[i]);
+		free(t->lv[i]->span);
+		free(t->lv[i]);
+	}
+	free(t->lv);
+	t->lv = NULL;
+	t->lvroom = t->sp = 0;
+}
+
 /* An element opened: in a text, and not open already unless it may repeat */
 LOCAL void span_on( TX *t, const char *name, const char *attrs, BOOL again )
 {
@@ -382,12 +411,33 @@ LOCAL void span_on( TX *t, const char *name, const char *attrs, BOOL again )
 
 	if ( l == NULL || l->kind != 'T' ) return;
 	if ( !again && span_find(l, name) >= 0 ) return;
-	if ( l->nspan >= SPAN_MAX ) return;
-	s = &l->span[l->nspan++];
+	if ( l->nspan == l->nroom ) {
+		/* as many open as there are: twice the room */
+		INT	room = ( l->nroom > 0 ) ? l->nroom * 2 : 16;
+		SPAN	*ns = (SPAN *)realloc(l->span, sizeof(SPAN) * (size_t)room);
+
+		if ( ns == NULL ) {
+			no_memory(t);
+			return;
+		}
+		l->span = ns;
+		l->nroom = room;
+	}
+	s = &l->span[l->nspan];
+	{
+		const char	*a = ( attrs != NULL ) ? attrs : "";
+		size_t		an = strlen(a) + 1;
+
+		s->attrs = (char *)malloc(an);
+		if ( s->attrs != NULL ) memcpy(s->attrs, a, an);
+	}
+	if ( s->attrs == NULL ) {
+		no_memory(t);
+		return;
+	}
+	l->nspan++;
 	strncpy(s->name, name, sizeof(s->name) - 1);
 	s->name[sizeof(s->name) - 1] = 0;
-	strncpy(s->attrs, ( attrs != NULL ) ? attrs : "", sizeof(s->attrs) - 1);
-	s->attrs[sizeof(s->attrs) - 1] = 0;
 	if ( l->para ) span_emit(t, s);
 }
 
@@ -399,11 +449,13 @@ LOCAL void span_off( TX *t, const char *name )
 
 	if ( l == NULL || ( k = span_find(l, name) ) < 0 ) return;
 	if ( l->kind == 'T' && !l->para ) {
+		free(l->span[k].attrs);
 		memmove(&l->span[k], &l->span[k + 1], sizeof(SPAN) * (size_t)( l->nspan - k - 1 ));
 		l->nspan--;
 		return;
 	}
 	for ( i = l->nspan - 1; i >= k; i-- ) bpk_buf_printf(t->o, "</%s>", l->span[i].name);
+	free(l->span[k].attrs);
 	memmove(&l->span[k], &l->span[k + 1], sizeof(SPAN) * (size_t)( l->nspan - k - 1 ));
 	l->nspan--;
 	for ( i = k; i < l->nspan; i++ ) span_emit(t, &l->span[i]);
@@ -413,8 +465,24 @@ LOCAL void level_push( TX *t, char kind )
 {
 	LEVEL	*l;
 
-	if ( t->sp >= LEVEL_MAX ) return;
-	l = &t->lv[t->sp++];
+	if ( t->sp == t->lvroom ) {
+		/* as deep as the record goes: room for one more level, each allocated once */
+		LEVEL	**nl = (LEVEL **)realloc(t->lv, sizeof(LEVEL *) * (size_t)( t->lvroom + 1 ));
+
+		if ( nl == NULL ) {
+			no_memory(t);
+			return;
+		}
+		t->lv = nl;
+		t->lv[t->lvroom] = (LEVEL *)calloc(1, sizeof(LEVEL));
+		if ( t->lv[t->lvroom] == NULL ) {
+			no_memory(t);
+			return;
+		}
+		t->lvroom++;
+	}
+	l = t->lv[t->sp++];
+	spans_drop(l);
 	l->kind = kind;
 	l->para = FALSE;
 	l->plane = t->cv->plane;
@@ -422,14 +490,15 @@ LOCAL void level_push( TX *t, char kind )
 	l->head = -1;
 	l->rtp = l->rtq = -1;
 	/* the units of what it is in, until its own start says */
-	l->hunit = ( t->sp > 1 ) ? t->lv[t->sp - 2].hunit : -120;
-	l->vunit = ( t->sp > 1 ) ? t->lv[t->sp - 2].vunit : -120;
+	l->hunit = ( t->sp > 1 ) ? t->lv[t->sp - 2]->hunit : -120;
+	l->vunit = ( t->sp > 1 ) ? t->lv[t->sp - 2]->vunit : -120;
 }
 
 LOCAL void level_pop( TX *t )
 {
 	if ( t->sp <= 0 ) return;
-	t->cv->plane = t->lv[t->sp - 1].plane;
+	t->cv->plane = t->lv[t->sp - 1]->plane;
+	spans_drop(t->lv[t->sp - 1]);
 	t->sp--;
 }
 
@@ -2198,6 +2267,7 @@ EXPORT ER bpk_tad_to_xml( BPKCONV *cv, const char *name, const char *self, INT r
 		else fig_end(t);
 	}
 	bpk_buf_puts(out, "</tad>\n");
+	levels_free(t);
 	free(t);
 	if ( out->fail ) return E_NOMEM;
 	return cv->er;
@@ -2240,6 +2310,7 @@ LOCAL void scan( const UB *rec, UINT len, SCAN *s )
 	s->first = TRUE;
 	scan_now = s;
 	walk(t, rec, len, FALSE, scan_seg);
+	levels_free(t);
 	free(t);
 }
 

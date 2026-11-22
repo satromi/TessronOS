@@ -264,6 +264,7 @@ IMPORT void ktest_nicring( void );
 IMPORT void ktest_tsfsbtree( void );
 IMPORT void ktest_tsfsjrnl( void );
 IMPORT void ktest_tsfsobj( void );
+IMPORT void ktest_tsfsconv( void );
 IMPORT void ktest_dfix( void );
 IMPORT void ktest_ob( void );
 IMPORT void ktest_tad( void );
@@ -348,5 +349,13 @@ IMPORT ID kt_cre_on( T_CTSK *c, ID prc );
  * room (the length is the whole one).
  */
 #define KT_META_ROOM	16384
+
+/*
+ * The panels a test looks through for one that opened (ts/part.h): the
+ * table of panels grows as they open, so a test that keeps which were
+ * open keeps it for no more than KT_PANEL_SEEN, more than a test opens.
+ */
+#define KT_PANEL_SEEN	1024
+#define kt_panel_last()	( ( wm_panel_last() < KT_PANEL_SEEN ) ? wm_panel_last() : KT_PANEL_SEEN )
 
 #endif /* _KTEST_H_ */

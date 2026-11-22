@@ -31,20 +31,23 @@ typedef struct {
 	UB	*data;
 } DBENT;
 
-LOCAL DBENT	db_tab[DB_MAX_ENT];
+/*
+ * The definitions, as many as have been put: db_n entries in use or
+ * free, the table made twice as large when every one is in use. Every
+ * look at it is under the box's lock.
+ */
+#define DB_FIRST	64
+
+LOCAL DBENT	*db_tab = NULL;
+LOCAL INT	db_n = 0;
 LOCAL ID	db_mtxid = 0;
 
 EXPORT INT knl_db_init( void )
 {
 	T_CMTX	cmtx;
-	INT	i;
 
 	if ( db_mtxid > 0 ) {
 		return 1;
-	}
-	for ( i = 0; i < DB_MAX_ENT; i++ ) {
-		db_tab[i].used = FALSE;
-		db_tab[i].data = NULL;
 	}
 	cmtx.exinf = NULL;
 	cmtx.mtxatr = TA_TFIFO;
@@ -58,7 +61,7 @@ LOCAL DBENT *find( UINT kind, INT num, ID owner )
 {
 	INT	i;
 
-	for ( i = 0; i < DB_MAX_ENT; i++ ) {
+	for ( i = 0; i < db_n; i++ ) {
 		if ( db_tab[i].used && db_tab[i].kind == kind
 		  && db_tab[i].num == num && db_tab[i].owner == owner ) {
 			return &db_tab[i];
@@ -80,14 +83,42 @@ LOCAL DBENT *look_up( UINT kind, INT num, ID owner )
 	return e;
 }
 
+/* A free entry, the table made larger when it has none: NULL for no memory */
+LOCAL DBENT *free_entry( void )
+{
+	DBENT	*t;
+	INT	i, n;
+
+	for ( i = 0; i < db_n; i++ ) {
+		if ( !db_tab[i].used ) {
+			return &db_tab[i];
+		}
+	}
+	if ( db_n > 0x3FFFFFFF / (INT)sizeof(DBENT) ) {
+		return NULL;
+	}
+	n = ( db_n > 0 ) ? db_n * 2 : DB_FIRST;
+	t = (DBENT *)Kcalloc((SZ)n, sizeof(DBENT));
+	if ( t == NULL ) {
+		return NULL;
+	}
+	if ( db_tab != NULL ) {
+		knl_memcpy(t, db_tab, sizeof(DBENT) * (SZ)db_n);
+		Kfree(db_tab);
+	}
+	db_tab = t;
+	i = db_n;
+	db_n = n;
+
+	return &db_tab[i];
+}
+
 EXPORT ER db_put( UINT kind, INT num, ID owner, CONST void *data, SZ size )
 {
 	DBENT	*e;
 	UB	*copy;
-	INT	i;
-	SZ	k;
 
-	if ( kind == 0 || data == NULL || size <= 0 || size > DB_MAX_SIZE ) {
+	if ( kind == 0 || data == NULL || size <= 0 || size > (SZ)0x7FFFFFFF ) {
 		return E_PAR;
 	}
 	if ( knl_db_init() == 0 ) {
@@ -97,22 +128,15 @@ EXPORT ER db_put( UINT kind, INT num, ID owner, CONST void *data, SZ size )
 	if ( copy == NULL ) {
 		return E_NOMEM;
 	}
-	for ( k = 0; k < size; k++ ) {
-		copy[k] = ((CONST UB *)data)[k];
-	}
+	knl_memcpy(copy, data, size);
 	tk_loc_mtx(db_mtxid, TMO_FEVR);
 	e = find(kind, num, owner);
 	if ( e == NULL ) {
-		for ( i = 0; i < DB_MAX_ENT; i++ ) {
-			if ( !db_tab[i].used ) {
-				e = &db_tab[i];
-				break;
-			}
-		}
+		e = free_entry();
 		if ( e == NULL ) {
 			tk_unl_mtx(db_mtxid);
 			Kfree(copy);
-			return E_LIMIT;
+			return E_NOMEM;
 		}
 		e->used  = TRUE;
 		e->kind  = kind;
@@ -150,7 +174,6 @@ EXPORT INT db_get( UINT kind, INT num, ID owner, void *buf, SZ max )
 {
 	DBENT	*e;
 	INT	n;
-	SZ	k;
 
 	if ( buf == NULL || max <= 0 ) {
 		return E_PAR;
@@ -165,9 +188,7 @@ EXPORT INT db_get( UINT kind, INT num, ID owner, void *buf, SZ max )
 	} else if ( e->size > max ) {
 		n = E_LIMIT;		/* nothing written: the caller asks again */
 	} else {
-		for ( k = 0; k < e->size; k++ ) {
-			((UB *)buf)[k] = e->data[k];
-		}
+		knl_memcpy(buf, e->data, e->size);
 		n = (INT)e->size;
 	}
 	tk_unl_mtx(db_mtxid);
@@ -206,7 +227,7 @@ EXPORT INT db_del_owner( ID owner )
 		return 0;
 	}
 	tk_loc_mtx(db_mtxid, TMO_FEVR);
-	for ( i = 0; i < DB_MAX_ENT; i++ ) {
+	for ( i = 0; i < db_n; i++ ) {
 		if ( db_tab[i].used && db_tab[i].owner == owner ) {
 			if ( db_tab[i].data != NULL ) {
 				Kfree(db_tab[i].data);
@@ -225,11 +246,16 @@ EXPORT INT db_count( void )
 {
 	INT	i, n = 0;
 
-	for ( i = 0; i < DB_MAX_ENT; i++ ) {
+	if ( db_mtxid <= 0 ) {
+		return 0;
+	}
+	tk_loc_mtx(db_mtxid, TMO_FEVR);
+	for ( i = 0; i < db_n; i++ ) {
 		if ( db_tab[i].used ) {
 			n++;
 		}
 	}
+	tk_unl_mtx(db_mtxid);
 
 	return n;
 }

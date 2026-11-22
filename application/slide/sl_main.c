@@ -30,7 +30,8 @@
  *	asked for every tenth of a second while it plays.
  *
  *	The second button opens the slides' menu (SYSDEF_MENU_SLIDE), 実行
- *	for the link under the pointer; ジャンプ and 背景色変更 choose from a
+ *	for the link under the pointer as the shared part of the programs
+ *	does it (lib/libtv/tv_vop.c, ts/tvvop.h); ジャンプ and 背景色変更 choose from a
  *	panel of the slides' data box (SYSDEF_BOX_SLIDE); 印刷 hands each
  *	slide's record to the desktop as a page (ts/uiprn.h). Nothing in the
  *	slides is changed.
@@ -56,6 +57,7 @@
 #include <ts/rtplay.h>
 #include <ts/slide.h>
 #include <ts/wm.h>
+#include <ts/tvvop.h>
 #include "../dtask.h"
 
 #define SL_PAD		16		/* round a document on the slide, at life size */
@@ -90,9 +92,6 @@
 #define C_FAIL		0x00FF0000U
 #define C_WHITE		0x00FFFFFFU
 
-#define APP_MAX		32		/* programs offered in 実行 */
-#define APP_ID		64
-#define APP_NAME	WM_LABEL_MAX
 
 /* ---------------------------------------------------------------- what it holds */
 
@@ -117,12 +116,9 @@ static RTPLAY	*g_rt;			/* the player, NULL none */
 static INT	g_rt_page;
 static UINT	g_rt_flags;		/* RTP_S_* as it said last */
 
-/* the programs 実行 offers for the link under the pointer */
-static UB	g_app_id[APP_MAX][APP_ID];
-static UB	g_app_name[APP_MAX][APP_NAME];
-static BOOL	g_app_kind[APP_MAX];
-static INT	g_napp;
-static T_VOBJ	g_link;			/* that link */
+/* the link under the pointer when the menu was opened, for 実行, and where it is drawn */
+static T_VOBJ	g_link;
+static T_DPRECT	g_link_box;
 static BOOL	g_has_link;
 
 /* when the key or press being answered happened (the notice's time, ns since start), 0 none */
@@ -312,8 +308,8 @@ static BOOL draw_page( INT gid, CONST TS_UUID *page, CONST T_DPRECT *area, INT z
 	return TRUE;
 }
 
-/* The link a slide shows at a place of the window, when there is one */
-static BOOL link_at( INT x, INT y, T_VOBJ *v )
+/* The link a slide shows at a place of the window, when there is one, and where it is drawn (box NULL: not wanted) */
+static BOOL link_at( INT x, INT y, T_VOBJ *v, T_DPRECT *box )
 {
 	T_DPRECT	area, r;
 	T_TAD		*rec;
@@ -329,7 +325,7 @@ static BOOL link_at( INT x, INT y, T_VOBJ *v )
 	if ( f != NULL ) {
 		f->zoom = z;
 		f->zoom_den = den;
-		er = tv_fig_at(f, &area, 0, 0, rec, x, y, v, NULL, NULL);
+		er = tv_fig_at(f, &area, 0, 0, rec, x, y, v, box, NULL);
 		tv_fig_free(f);
 	} else {
 		INT	pad = SL_PAD * z / den;
@@ -340,7 +336,7 @@ static BOOL link_at( INT x, INT y, T_VOBJ *v )
 		r.right -= pad;
 		d->zoom = z;
 		d->zoom_den = den;
-		er = tv_doc_at(d, &r, 0, rec, x, y, v, NULL, NULL);
+		er = tv_doc_at(d, &r, 0, rec, x, y, v, box, NULL);
 		tv_doc_free(d);
 	}
 	return (BOOL)( er >= E_OK );
@@ -568,56 +564,44 @@ static void sl_print( void )
 
 /* ---------------------------------------------------------------- the menu */
 
-/* 実行 for the link under the pointer: the programs the desktop offers for it */
-static void exec_menu( ID mid )
+/*
+ * 実行 for a link of a slide, as the shared part does it for every
+ * program (ts/tvvop.h): the slides are only shown, so nothing of a link
+ * is written back, and the menu has 実行 alone of its items
+ */
+static BOOL vop_put( T_TVLINK *l, UINT what, CONST T_TVPUT *p )
 {
-	UB	(*rows)[WM_LABEL_MAX];
-	TS_UUID	ed;
-	T_DTREQ	rq;
-	T_DTANS	an;
-	INT	n = 1, k;
+	(void)l; (void)what; (void)p;
+	return FALSE;
+}
 
-	g_napp = 0;
-	for ( k = 0; k < n && g_napp < APP_MAX; k++ ) {
-		INT		i = 0, j;
-		CONST UB	*t;
+static void vop_put_copy( T_TVLINK *l, CONST TS_UUID *copy, UINT why )
+{
+	(void)l; (void)copy; (void)why;
+}
 
-		memset(&rq, 0, sizeof(rq));
-		memset(&an, 0, sizeof(an));
-		rq.req = DT_RQ_APPS;
-		rq.target = g_link.target;
-		rq.recno = k;
-		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
-		n = (INT)an.how;
-		/* "id\tname" */
-		t = dq_ans_text(&g_dq, DT_TAIL_TEXT);
-		for ( j = 0; t[i] != 0 && t[i] != '\t'; i++ ) {
-			if ( j < APP_ID - 1 ) g_app_id[g_napp][j++] = t[i];
-		}
-		g_app_id[g_napp][j] = 0;
-		if ( j == 0 || t[i] != '\t' ) continue;
-		for ( i++, j = 0; t[i] != 0; i++ ) {
-			if ( j < APP_NAME - 1 ) g_app_name[g_napp][j++] = t[i];
-		}
-		g_app_name[g_napp][j] = 0;
-		g_app_kind[g_napp] = (BOOL)( ( an.flags & DT_F_KIND ) != 0 );
-		g_napp++;
+static CONST T_TVVOP *sl_vop( void )
+{
+	static T_TVVOP	h;
+	static DQTV	d;
+
+	if ( h.put == NULL ) {
+		dq_tv_asker(&h.ask, &d, &g_dq, &g_win, NULL);
+		h.note = note;
+		h.put = vop_put;
+		h.put_copy = vop_put_copy;
 	}
-	rows = malloc(WM_LABEL_MAX * (size_t)( g_napp + 1 ));
-	if ( rows == NULL ) g_napp = 0;
-	for ( k = 0; k < g_napp; k++ ) {
-		snprintf((char *)rows[k], WM_LABEL_MAX, "%s", (char *)g_app_name[k]);
-	}
-	if ( rows != NULL && ui_uuid(SYSDEF_MENU_EXEC, &ed) >= E_OK ) {
-		(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)rows, WM_LABEL_MAX, g_napp);
-	}
-	free(rows);
+	return &h;
+}
+
+static void sl_tvlink( T_TVLINK *l )
+{
+	tv_vop_vobj(l, &g_link, &g_link_box);
+	l->app = (void *)&g_link;
 }
 
 static void command( CONST char *code, INT index )
 {
-	char	s[SL_LOG];
-
 	if ( strcmp(code, "close") == 0 ) g_closing = TRUE;
 	else if ( strcmp(code, "slide.next") == 0 ) sl_next();
 	else if ( strcmp(code, "slide.prev") == 0 ) sl_prev();
@@ -630,20 +614,11 @@ static void command( CONST char *code, INT index )
 	else if ( strcmp(code, "slide.print") == 0 ) {
 		rt_end();
 		sl_print();
-	} else if ( strcmp(code, "exec.app") == 0 && g_has_link && index >= 0 && index < g_napp ) {
-		T_DTREQ	rq;
-		T_DTANS	an;
-		ER	er;
+	} else if ( g_has_link ) {
+		T_TVLINK	l;
 
-		memset(&rq, 0, sizeof(rq));
-		rq.req = DT_RQ_EXEC;
-		rq.target = g_link.target;
-		rq.recno = -1;
-		(void)dq_part(&g_dq, DT_TAIL_NAME, g_app_id[index], -1);
-		if ( g_app_kind[index] ) rq.flags |= DT_F_KIND;
-		er = ask_desktop(&rq, &an, 5000);
-		snprintf(s, sizeof(s), "exec %.120s %s (%d)", (char *)TAD_VS(g_link.vname), (char *)g_app_id[index], (INT)er);
-		note(s);
+		sl_tvlink(&l);
+		(void)tv_vop_command(sl_vop(), &l, code, index);
 	}
 }
 
@@ -656,12 +631,15 @@ static void menu( CONST T_OBNTM *m )
 	char	s[MN_CODE_MAX + 16];
 
 	if ( ui_uuid(SYSDEF_MENU_SLIDE, &def) < E_OK || mn_cre_men(&def, &mid) < E_OK ) return;
-	g_has_link = link_at(m->x, m->y, &g_link);
+	g_has_link = link_at(m->x, m->y, &g_link, &g_link_box);
 	if ( g_has_link ) {
-		exec_menu(mid);
-		(void)mn_chg_atr(mid, NULL, "exec", ( g_napp == 0 ) ? MN_GREY : 0);
+		T_TVLINK	l;
+
+		sl_tvlink(&l);
+		note( tv_vop_menu(sl_vop(), mid, &l) > 0 ? "exec menu on" : "exec menu grey" );
 	} else {
-		(void)mn_chg_atr(mid, NULL, "exec", MN_GREY);
+		(void)tv_vop_menu(sl_vop(), mid, NULL);
+		note("exec menu grey");
 	}
 	note("menu");
 	chosen = (BOOL)( mn_pop_men(mid, g_kw, m->x, m->y, m->when, &sel) >= E_OK );
@@ -746,7 +724,7 @@ static void press( CONST T_OBNTM *m )
 	}
 	/* a press on a link does not turn the page */
 	tad_vobj_init(&v);
-	if ( link_at(m->x, m->y, &v) ) {
+	if ( link_at(m->x, m->y, &v, NULL) ) {
 		tad_vobj_clear(&v);
 		return;
 	}

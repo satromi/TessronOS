@@ -1,4 +1,5 @@
-"""The superblock of a version 4 volume and where everything else sits.
+"""The superblock of a volume of version 4 or 5 and where everything
+else sits.
 
 Layout of a volume (peripheral_kernel/fs/tsfsblk.c):
 
@@ -13,7 +14,7 @@ group head holds a CRC of each.
 
 Superblock fields, little endian:
 
-      0  magic "TFSVOL02"            8  version (4)
+      0  magic "TFSVOL02"            8  version (4, or 5 with FMT5)
      12  block size (4096)          16  generation
      24  volume UUID                40  label, 64 bytes, NUL padded
     112  total blocks              120  free blocks (sum of the groups)
@@ -39,6 +40,12 @@ made with; the last group is made whole and groups are added after it.
 compat GROWN says so, since its groups are then not what layout() makes
 for its size; incompat GROWING is set while a grow is being written, and
 the kernel finishes the grow when it opens such a volume (design 7.7).
+
+A volume of version 5 carries incompat FMT5 and version 5 (design 7.3):
+no limit of the format on the records, resources and links of an object,
+the length of an extension or the size of the metadata, a transaction
+of any number of descriptor blocks, and run trees of any depth. compat
+CONVREQ asks for a volume of version 4 to be converted at the next start.
 """
 
 import os
@@ -80,9 +87,25 @@ COMPAT_GROWN = 0x1
 INCOMPAT_GROWING = 0x1
 INCOMPAT_XT2 = 0x2          # a record's runs in a tree of two levels (design 7.3)
 
-KNOWN_COMPAT = COMPAT_GROWN
+# Version 5 of the format (docs/tessronos 7.3, tsfsblk.h, tsfsfmt.h)
+VERSION5 = 5                # the superblock's version with INCOMPAT_FMT5
+INCOMPAT_FMT5 = 0x4         # a volume of version 5; never taken off
+COMPAT_CONVREQ = 0x2        # converted to version 5 at the next start
+JRNL_VERSION5 = 5           # the journal's head and ring blocks of version 5
+FORM_TREEN = 5              # a place: a run tree of any depth
+FORM_TRIM = 6               # the spare place: the runs of record PL_A past its bytes
+OB_SPARE = 320              # the object block: the spare place (32 bytes)
+F_SPARE = 0x2000            # the object's spare place holds runs: on the orphan tree
+XN_LEVEL = 68               # a node of a run tree: its level, 0 at the leaves
+RSX_MARK = 0xFF             # a resource entry's extension field: in the string area
+RSX_OFF = 4                 # from the field: offset in the string area (32 bits)
+RSX_LEN = 8                 # from the field: length (32 bits)
+
+KNOWN_COMPAT = COMPAT_GROWN | COMPAT_CONVREQ
 KNOWN_ROCOMPAT = 0
-KNOWN_INCOMPAT = INCOMPAT_GROWING | INCOMPAT_XT2
+KNOWN_INCOMPAT = INCOMPAT_GROWING | INCOMPAT_XT2 | INCOMPAT_FMT5
+# what a volume of version 4 may carry
+INCOMPAT_V4 = INCOMPAT_GROWING | INCOMPAT_XT2
 
 # Geometry
 AG_MAX_BLOCKS = 1 << 18
@@ -307,6 +330,79 @@ class GroupShape(object):
         return self.first + 1 if self.spare else None
 
 
+# ---------------------------------------------------------------- limits
+
+# The limits a volume of version 4 keeps (tsfsobj.h, tsfsjrnl.h); a volume
+# of version 5 has none of them
+V4_MAX_REC = 256
+V4_MAX_RES = 64
+V4_MAX_LINK = 1024
+V4_EXT_MAX = 15
+# the metadata of one object goes in one transaction of 254 copies; a
+# free-map block may change with each block written, and the head and
+# the segment are kept room for (TSFSO_META_MAX)
+V4_META_MAX = (JRNL_MAX_BLOCKS_TXN - 8) // 2 * 4096
+# what the API takes as an extension on any volume (FS_NAME_MAX less its NUL)
+EXT_API_MAX = 767
+
+
+def txn_budget(journal_blocks, v5):
+    """The copies one transaction may hold (ts_jrnl_budget): 254 on a
+    volume of version 4; a quarter of the ring and no less than 254 on
+    one of version 5, as long as two of the largest, each with a revoke
+    block, still fit in the ring."""
+    if not v5:
+        return JRNL_MAX_BLOCKS_TXN
+    ring = max(0, journal_blocks - 1)
+    b = max(JRNL_MAX_BLOCKS_TXN, ring // 4)
+    while b > JRNL_MAX_BLOCKS_TXN and 2 * txn_foot(b, 1) > ring:
+        b -= 1
+    return b
+
+
+def txn_foot(copies, revokes=0):
+    """Ring blocks a transaction of version 5 takes: its descriptors and
+    copies, its revoke blocks and the commit."""
+    nd = max(1, (copies + JRNL_MAX_BLOCKS_TXN - 1) // JRNL_MAX_BLOCKS_TXN)
+    nr = (revokes + JRNL_MAX_REVOKE - 1) // JRNL_MAX_REVOKE
+    return nd + copies + nr + 1
+
+
+class Limits(object):
+    """The limits of one volume, as ts_blk_lim answers them: 0 is no
+    limit. A volume of version 5 has none but the 767 bytes of an
+    extension the API takes. xt_form is the deepest form of a place it
+    may hold."""
+
+    __slots__ = ("max_rec", "max_res", "max_link", "ext_max", "meta_max",
+                 "xt_form", "txn_budget", "v5")
+
+    def __init__(self, v5, journal_blocks=0):
+        self.v5 = v5
+        if v5:
+            self.max_rec = self.max_res = self.max_link = 0
+            self.ext_max = EXT_API_MAX
+            self.meta_max = 0
+            self.xt_form = FORM_TREEN
+        else:
+            self.max_rec = V4_MAX_REC
+            self.max_res = V4_MAX_RES
+            self.max_link = V4_MAX_LINK
+            self.ext_max = V4_EXT_MAX
+            self.meta_max = V4_META_MAX
+            self.xt_form = 4
+        self.txn_budget = txn_budget(journal_blocks, v5)
+
+    @classmethod
+    def of(cls, sb):
+        return cls(sb.v5, sb.journal_blocks)
+
+    @staticmethod
+    def over(n, most):
+        """Whether n is past a limit (0: none)."""
+        return most != 0 and n > most
+
+
 # ---------------------------------------------------------------- superblock
 
 class Superblock(object):
@@ -441,15 +537,30 @@ class Superblock(object):
          sb.err_blk) = struct.unpack_from("<IIQQQ", buf, SB_STATE)
         (sb.mount_count, sb.mount_time, sb.fsck_time,
          sb.mkfs_time) = struct.unpack_from("<QQQQ", buf, SB_MOUNTS)
-        if sb.version != VERSION or sb.block_size != BLOCK_SIZE:
-            raise TsfsError("version %d with blocks of %d: this reads version "
-                           "%d with blocks of %d"
-                           % (sb.version, sb.block_size, VERSION, BLOCK_SIZE))
+        if sb.version not in (VERSION, VERSION5) or sb.block_size != BLOCK_SIZE:
+            raise TsfsError("version %d with blocks of %d: this reads versions "
+                           "%d and %d with blocks of %d"
+                           % (sb.version, sb.block_size, VERSION, VERSION5,
+                              BLOCK_SIZE))
         if sb.ag_blocks == 0 or sb.ag_count == 0 or sb.total_blocks < MIN_BLOCKS:
             raise TsfsError("the geometry is impossible (%d groups of %d, %d "
                            "blocks)" % (sb.ag_count, sb.ag_blocks,
                                         sb.total_blocks))
         return sb
+
+    # ------------------------------------------------------------ version
+
+    @property
+    def v5(self):
+        """Whether the volume is of version 5 (it carries FMT5)."""
+        return bool(self.incompat & INCOMPAT_FMT5)
+
+    @property
+    def format_version(self):
+        return VERSION5 if self.v5 else VERSION
+
+    def limits(self):
+        return Limits.of(self)
 
     # ------------------------------------------------------------ geometry
 

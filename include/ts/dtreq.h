@@ -130,8 +130,10 @@ extern "C" {
  *                   same version or an older one, E_NOSPT when it is
  *                   for another machine or processor, E_OBJ when it is
  *                   not a system package. text says the package's
- *                   version, a tab, and the system's version now; with
- *                   E_NOSPT, the machine the package is for.
+ *                   version, a tab, the system's version now, a tab,
+ *                   and 1 when the update converts the system volume to
+ *                   a newer format at the next start (0 otherwise);
+ *                   with E_NOSPT, the machine the package is for.
  *   DT_SYSUP_BEGIN  the update begun (flags 1: even when it is not
  *                   newer); only an administrator, as DT_RQ_INSTALL.
  *                   how is the steps there are, nothing done yet.
@@ -815,6 +817,12 @@ extern "C" {
  *			forgets it. E_OK when the link may go (one that is no
  *			disk's too), else why not, the person told in a panel
  *			over win, and the link stays. Only the first window's
+ *   DT_DISK_FORM	the format of the volume of target (the system's for
+ *			0): text "NAME<tab>PATH", how the version of its
+ *			format (4, 5), DT_F_DISK_SYS for the system's.
+ *			E_NOSPT when it is not a native volume. 形式を新しくする
+ *			converts it with ob_cnv_vol (ts/tsfsck.h), as an
+ *			administrator (ts_admin_ask)
  *   DT_DISK_RESCUE	a program whose window was asked to close because the
  *			disk of its object went, holding changes not saved:
  *			grab_x 0 asks for an object to hand them over in
@@ -904,6 +912,7 @@ extern "C" {
 #define DT_DISK_MENU	9
 #define DT_DISK_REMOVE	10
 #define DT_DISK_RESCUE	11
+#define DT_DISK_FORM	12
 #define DT_F_DISK_PICK	0x2000000
 #define DT_F_DISK_SYS	0x4000000
 #define DT_HOW_DISK_WIN		20
@@ -914,7 +923,7 @@ extern "C" {
 /*
  * The start-up argument of ディスク操作 (dt_disk_menu): the code of the
  * item of the menu ディスク操作 chosen (disk.connect, disk.detach,
- * disk.status, disk.create, disk.grow), and the object of the link it was
+ * disk.status, disk.create, disk.grow, disk.convert), and the object of the link it was
  * chosen on, 0 away from a link.
  */
 typedef struct {

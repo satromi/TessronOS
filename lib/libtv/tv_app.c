@@ -56,10 +56,7 @@
 #include <ts/fn.h>
 #include <ts/uiprn.h>
 
-#define WATCH_MAX	64		/* the objects the record links to, watched for changes */
-#define APP_MAX		32		/* programs offered in 実行 */
-#define APP_ID		64
-#define APP_NAME	WM_LABEL_MAX
+#define WATCH_FIRST	64		/* objects watched room is made for first; doubled when full */
 
 CONST T_TAHOST	*ta_host;
 
@@ -94,16 +91,11 @@ static BOOL	g_autoref;		/* its store counts the links of its records itself */
 static T_OBWPOS	g_restore;
 static TS_UUID	*g_was;			/* what the record linked to as it was last read or written */
 static INT	g_nwas;
-static TS_UUID	g_watched[WATCH_MAX];
-static ID	g_watch_key[WATCH_MAX];	/* the key each is watched with */
+static TS_UUID	*g_watched;		/* the objects the record links to, watched for changes */
+static ID	*g_watch_key;		/* the key each is watched with */
+static INT	g_watch_cap;		/* entries both have room for */
 static ID	g_devlist;		/* the list of the devices, watched while a medium of a watched object is out */
 static INT	g_nwatched;
-
-/* the programs 実行 offers for a link */
-static UB	g_app_id[APP_MAX][APP_ID];
-static UB	g_app_name[APP_MAX][APP_NAME];
-static BOOL	g_app_kind[APP_MAX];
-static INT	g_napp;
 
 /* ---------------------------------------------------------------- saying things */
 
@@ -331,15 +323,9 @@ ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	return er;
 }
 
-/* A link in the record opened as a double press opens it */
-void link_open( CONST T_VOBJ *v )
-{
-	ta_link_open(v, 0, 0);
-}
-
 /*
- * The same with DT_F_AUTO in flags (自動起動): opened by no act of the
- * person, at place rank of the links of the record opened so
+ * A link in the record opened with DT_F_AUTO in flags (自動起動): by no
+ * act of the person, at place rank of the links of the record opened so
  */
 void ta_link_open( CONST T_VOBJ *v, UINT flags, INT rank )
 {
@@ -382,25 +368,46 @@ void ta_link_open( CONST T_VOBJ *v, UINT flags, INT rank )
 	if ( er < E_OK ) say("開けませんでした");
 }
 
-/*
- * A request about link vobjid of this record (DT_RQ_ATTR) named for the
- * desktop as DT_RQ_OPEN with DT_F_LINK names it: the record's object, the
- * vobjid and the channel, parted by tabs, as the tail's text (the applist
- * is a part of its own), so that the windows opened from the link are
- * told what it changes. FALSE, and rq as it was, when there is no channel.
- */
-BOOL ta_link_named( T_DTREQ *rq, CONST TS_UUID *vobjid )
-{
-	char	po[TS_UUID_STRLEN + 1], pv[TS_UUID_STRLEN + 1], pc[TS_UUID_STRLEN + 1];
-	char	head[3 * ( TS_UUID_STRLEN + 1 ) + 1];
+/* ---------------------------------------------------------------- the 仮身操作 (ts/tvvop.h) */
 
+static ER tv_ask( void *arg, T_DTREQ *rq, T_DTANS *an, INT wait_ms )
+{
+	(void)arg;
+	return ask_desktop(rq, an, wait_ms);
+}
+
+/* a part that cannot be kept fails the request it goes with (ask_desktop answers E_NOMEM) */
+static ER tv_part( void *arg, UINT kind, CONST UB *s, SZ len )
+{
+	(void)arg;
+	ta_req_part(kind, s, len);
+	return E_OK;
+}
+
+static CONST UB *tv_ans( void *arg, UINT kind, SZ *p_len )
+{
+	(void)arg;
+	return ta_ans_part(kind, p_len);
+}
+
+void ta_tv_asker( T_TVASK *a )
+{
+	a->ask = tv_ask;
+	a->part = tv_part;
+	a->ans = tv_ans;
+	a->arg = NULL;
+}
+
+/*
+ * The record's object and the channel where the desktop tells what a
+ * window opened from one of its links did to it: FALSE while there is
+ * no channel
+ */
+BOOL ta_tv_named( TS_UUID *p_parent, TS_UUID *p_chan )
+{
 	if ( g_lport <= 0 ) return FALSE;
-	ts_uuid_text(&g_obj, po);
-	ts_uuid_text(vobjid, pv);
-	ts_uuid_text(&g_lch, pc);
-	snprintf(head, sizeof(head), "%s\t%s\t%s", po, pv, pc);
-	ta_req_part(DT_TAIL_TEXT, (CONST UB *)head, -1);
-	rq->flags |= DT_F_LINK;
+	*p_parent = g_obj;
+	*p_chan = g_lch;
 	return TRUE;
 }
 
@@ -662,7 +669,25 @@ void ta_watch( CONST TS_UUID *id )
 	for ( i = 0; i < g_nwatched; i++ ) {
 		if ( memcmp(&g_watched[i], id, sizeof(TS_UUID)) == 0 ) return;
 	}
-	if ( g_nwatched >= WATCH_MAX ) return;
+	if ( g_nwatched >= g_watch_cap ) {
+		/* as many as the record links to: the room doubled */
+		INT	cap = ( g_watch_cap > 0 ) ? g_watch_cap * 2 : WATCH_FIRST;
+		TS_UUID	*nu = (TS_UUID *)realloc(g_watched, sizeof(TS_UUID) * (size_t)cap);
+		ID	*nk;
+
+		if ( nu == NULL ) {
+			note("watch: no memory: the object is not watched");
+			return;
+		}
+		g_watched = nu;
+		nk = (ID *)realloc(g_watch_key, sizeof(ID) * (size_t)cap);
+		if ( nk == NULL ) {
+			note("watch: no memory: the object is not watched");
+			return;
+		}
+		g_watch_key = nk;
+		g_watch_cap = cap;
+	}
 	/*
 	 * told to one who may read its attributes; a key that reads no
 	 * records keeps nobody out who opens the object alone to write it
@@ -737,7 +762,7 @@ void ta_watch_links( void )
 
 /*
  * How many of the record's links point at objects not watched now (their
- * medium out, or past WATCH_MAX): while any is, the list of the devices
+ * medium out, or no memory to watch it): while any is, the list of the devices
  * stays watched, and they are tried again as disks and volumes come
  */
 static INT links_unwatched( void )
@@ -1900,72 +1925,6 @@ void ta_tray_menu( ID mid )
 		(void)mn_chg_atr(mid, &td, "tray.clear", ( s->nlevel == 0 ) ? MN_GREY : 0);
 	}
 	free(s);
-}
-
-/* 実行 for a link: the programs the desktop offers for it */
-INT ta_exec_menu( ID mid, CONST T_VOBJ *v )
-{
-	UB	(*rows)[WM_LABEL_MAX];
-	TS_UUID	ed;
-	T_DTREQ	rq;
-	T_DTANS	an;
-	INT	n = 1, k;
-
-	g_napp = 0;
-	for ( k = 0; k < n && g_napp < APP_MAX; k++ ) {
-		INT	i = 0, j;
-		SZ	tl = 0;
-		CONST UB *tx;
-
-		memset(&rq, 0, sizeof(rq));
-		memset(&an, 0, sizeof(an));
-		rq.req = DT_RQ_APPS;
-		rq.target = v->target;
-		rq.recno = k;
-		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
-		n = (INT)an.how;
-		/* "id\tname", the answer's text */
-		tx = ta_ans_part(DT_TAIL_TEXT, &tl);
-		if ( tx == NULL ) continue;
-		for ( j = 0; i < tl && tx[i] != '\t'; i++ ) {
-			if ( j < APP_ID - 1 ) g_app_id[g_napp][j++] = tx[i];
-		}
-		g_app_id[g_napp][j] = 0;
-		if ( j == 0 || i >= tl || tx[i] != '\t' ) continue;
-		for ( i++, j = 0; i < tl; i++ ) {
-			if ( j < APP_NAME - 1 ) g_app_name[g_napp][j++] = tx[i];
-		}
-		g_app_name[g_napp][j] = 0;
-		g_app_kind[g_napp] = (BOOL)( ( an.flags & DT_F_KIND ) != 0 );
-		g_napp++;
-	}
-	rows = malloc(WM_LABEL_MAX * (size_t)( g_napp + 1 ));
-	if ( rows == NULL ) g_napp = 0;
-	for ( k = 0; k < g_napp; k++ ) snprintf((char *)rows[k], WM_LABEL_MAX, "%s", (char *)g_app_name[k]);
-	if ( rows != NULL && ui_uuid(SYSDEF_MENU_EXEC, &ed) >= E_OK ) {
-		(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)rows, WM_LABEL_MAX, g_napp);
-	}
-	free(rows);
-	return g_napp;
-}
-
-void ta_exec_app( CONST T_VOBJ *v, INT index )
-{
-	T_DTREQ	rq;
-	T_DTANS	an;
-	ER	er;
-	char	s[TA_LOG];
-
-	if ( index < 0 || index >= g_napp ) return;
-	memset(&rq, 0, sizeof(rq));
-	rq.req = DT_RQ_EXEC;
-	rq.target = v->target;
-	rq.recno = -1;
-	ta_req_part(DT_TAIL_NAME, g_app_id[index], -1);
-	if ( g_app_kind[index] ) rq.flags |= DT_F_KIND;
-	er = ask_desktop(&rq, &an, 5000);
-	snprintf(s, sizeof(s), "exec %.80s %s (%d)", (char *)TAD_VS(v->vname), (char *)g_app_id[index], (INT)er);
-	note(s);
 }
 
 /* ---------------------------------------------------------------- かな漢字変換 */

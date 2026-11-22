@@ -1183,6 +1183,52 @@ LOCAL void test_infigure( void )
 	tad_free(doc);
 }
 
+/* More figures in a text than room is first made for: every one is kept, in order */
+#define MANY_FIG	40
+
+LOCAL void test_many_figures( void )
+{
+	static CONST char	head[] = "<tad version=\"1.0\" encoding=\"UTF-8\"><document><p>";
+	static CONST char	one[] = "<figure><figView left=\"0\" top=\"0\" right=\"20\" bottom=\"10\"/>"
+		"<figDraw left=\"0\" top=\"0\" right=\"20\" bottom=\"10\"/>"
+		"<rect l_pat=\"1\" left=\"0\" top=\"0\" right=\"20\" bottom=\"10\"/></figure>x";
+	static CONST char	tail[] = "</p></document></tad>";
+	SZ		len = s_len(head) + s_len(one) * MANY_FIG + s_len(tail);
+	UB		*x = (UB *)Kmalloc(len + 1), *at;
+	T_TAD		*doc = NULL;
+	T_TVDOC		*model = NULL;
+	INT		i, nfr = 0, last = -1;
+
+	start();
+	if ( fn_system() <= 0 ) { if ( x != NULL ) Kfree(x); KT_SKIP("no face"); }
+	KT_ASSERT(x != NULL);
+	if ( x == NULL ) return;
+	at = x;
+	knl_memcpy(at, head, s_len(head));  at += s_len(head);
+	for ( i = 0; i < MANY_FIG; i++ ) {
+		knl_memcpy(at, one, s_len(one));  at += s_len(one);
+	}
+	knl_memcpy(at, tail, s_len(tail));  at += s_len(tail);
+	*at = '\0';
+	KT_ASSERT_ER(tad_parse(x, (SZ)(at - x), NULL, &doc), E_OK);
+	Kfree(x);
+	if ( doc == NULL ) return;
+	KT_ASSERT_ER(tv_doc(doc, &model), E_OK);
+	if ( model == NULL ) { tad_free(doc); return; }
+	KT_ASSERT_EQ(model->nfig, MANY_FIG);
+	for ( i = 0; i < model->nrun; i++ ) {
+		if ( model->run[i].kind == TV_RUN_FIGURE ) {
+			KT_ASSERT_EQ(model->run[i].link, last + 1);
+			last = model->run[i].link;
+			nfr++;
+		}
+	}
+	KT_ASSERT_EQ(nfr, MANY_FIG);
+	KT_ASSERT_EQ(model->figs[MANY_FIG - 1]->nsh, 1);
+	tv_doc_free(model);
+	tad_free(doc);
+}
+
 /* 詳細: a tab format shows as a ruler with its markers, settings as flags */
 LOCAL CONST char marks_doc[] =
 "<tad version=\"1.0\" encoding=\"UTF-8\"><document>"
@@ -2077,6 +2123,7 @@ EXPORT void ktest_tv( void )
 	KT_RUN(test_patterns);
 	KT_RUN(test_elements);
 	KT_RUN(test_infigure);
+	KT_RUN(test_many_figures);
 	KT_RUN(test_marks);
 	KT_RUN(test_overlays);
 	KT_RUN(test_bpk_forms);

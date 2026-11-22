@@ -1,0 +1,47 @@
+# 基本文章編集 (design 11.2.6): 実身複製 puts the copy's link right after the link it was made
+# from, and the caret and the other end of the selection, when they stood after that link in its
+# paragraph, move on by the one place put in. The first paragraph holds 4 letters, a link and 4
+# letters, with the caret at its end (End 4d): a letter is 3 places (its
+# bytes) and a link one, 25. The menu is opened on the link (閉じる under the pointer at 230,135
+# the first time, 実身操作 220 below, 実身複製 20 below that, to the
+# right), and the console says where the caret and the other end are after it: 26, 26.
+# Keys: Enter 28, Esc 29, Ctrl+E 08 01.
+waitwin 原紙箱
+click 1000 48
+wait 300
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>仮身の前<link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" vobjid="01a10000-0000-7000-8000-000000000001" width="160" heightpx="19" chsz="14"/>仮身の後</p>
+xml <p>後の段落</p>
+xml </document></tad>
+xmlbig
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 2
+wait 800
+click 125 141
+wait 200
+key 4d
+wait 200
+logmark
+click 230 135 1
+expectsince document: menu
+wait 1000
+move 240 355
+wait 150
+move 300 355
+wait 800
+shot dc_menu
+move 370 375
+wait 300
+click 370 375
+expectsince document: chosen real.duplicate
+wait 1500
+key 28
+expectsince document: linked a copy after the link (0), 2 links
+expectsince document: caret 0,26 other 0,26
+wait 500
+shot dc_after
+key 08 01
+expect document: closed
+absent !OACV!

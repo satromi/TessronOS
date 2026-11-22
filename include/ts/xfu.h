@@ -55,7 +55,6 @@ extern "C" {
 #define XFU_PATH_MAX	1024		/* bytes of a path in a tree, with its nought */
 #define XFU_NAME_U16	255		/* UTF-16 units a name may take */
 #define XFU_DEPTH	16		/* directories followed, when not said */
-#define XFU_OBJ_MAX	4096		/* objects one call goes through at most */
 
 /* ---------------------------------------------------------------- a tree of files */
 

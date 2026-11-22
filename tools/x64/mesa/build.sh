@@ -168,8 +168,19 @@ ts_args() {
 # meson only links its probes: x86_64-elf newlib has no crt0.o, so a probe links as a program
 # does, with _start of libcxxrt, its crti and crtn (_init, _fini) and the program layout
 # (which places __bss_end and the TLS sizes)
+# the C++ runtime a probe links with: the one make passes (LIBDIR), or the
+# one of the build of build_make without a BUILD_ID
+cxxrt_dir() {
+	if [ -n "${LIBDIR:-}" ]; then
+		echo "$LIBDIR"
+	else
+		( . "$TOP/tools/x64/env.sh" && make -s -C "$TOP/build_make" --no-print-directory TARGET=_X64_ print-cxxrt-dir )
+	fi
+}
+
 ts_link_args() {
-	local a L=$TOP/build_make/obj/x64/lib
+	local a L
+	L=$(cxxrt_dir)
 	for a in -nostartfiles -specs=nosys.specs -T$TOP/etc/linker/x64/program_cxx.ld $L/cxxrt/crti.o $L/cxxrt/crtn.o -L$WORK/stublib -Wl,--start-group $L/libcxxrt.a $L/libpthread.a \
 		-lc -Wl,--end-group; do
 		printf "'%s', " "$a"
@@ -182,7 +193,7 @@ setup() {
 	mkdir -p "$WORK/pkgconfig" "$WORK/stublib"
 	# the C runtime and the threads of a TessronOS program, which meson's
 	# checks link with, so that a function is found where a program has it
-	( . "$TOP/tools/x64/env.sh" && make -s -C "$TOP/build_make" TARGET=_X64_ obj/x64/lib/libcxxrt.a obj/x64/lib/libpthread.a obj/x64/lib/cxxrt/crti.o obj/x64/lib/cxxrt/crtn.o >/dev/null )
+	[ -n "${LIBDIR:-}" ] || ( . "$TOP/tools/x64/env.sh" && make -s -C "$TOP/build_make" TARGET=_X64_ obj/x64/lib/libcxxrt.a obj/x64/lib/libpthread.a obj/x64/lib/cxxrt/crti.o obj/x64/lib/cxxrt/crtn.o >/dev/null )
 	# libdl and librt, which meson looks for when the C library lacks dlopen
 	# and clock_gettime: empty, so that it finds them and the functions stay absent
 	for l in dl rt; do

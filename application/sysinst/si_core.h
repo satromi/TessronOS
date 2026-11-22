@@ -65,7 +65,6 @@
 #define SI_REPLACE		2
 #define SI_KEEP			0x100	/* or'd in a way: the TessronOS there kept, its system put on as an update does */
 
-#define SI_DISK_MAX		8
 #define SI_PART_MAX		32
 #define SI_NAME_MAX		( GPT_NAME_MAX * 3 + 1 )	/* a partition's name in UTF-8 */
 
@@ -164,6 +163,7 @@ typedef struct {
 	UB	ver[24], tver[24];	/* the running system's version, the one there ("" not known) */
 	UD	vol_need, vol_free;
 	INT	nobj;
+	INT	ts_form;		/* SI_KEEP: the version of the format of the volume there (4: converted at its first start) */
 } T_SIPLAN;
 
 /* The steps, as the progress says them */
@@ -193,9 +193,10 @@ typedef struct {
 
 /*
  * The disks the system may be put on: NVMe and SATA, neither the one
- * the system was started from nor a USB one. Answers how many.
+ * the system was started from nor a USB one. Answers how many, in a table
+ * made for as many as the device manager has (*p_buf, Kfree; NULL for none).
  */
-IMPORT INT si_disks( T_SIDISK *buf, INT max );
+IMPORT INT si_disks( T_SIDISK **p_buf );
 
 /* One disk read: E_NOEXS when it is not there, E_NOSPT for sectors not of 512 bytes */
 IMPORT ER si_disk_read( CONST char *disk, T_SIDISK *pk );

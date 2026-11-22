@@ -34,7 +34,36 @@
 
 static ID	cmd = -1, ans = -1;
 static ID	host_key = -1, host_port = -1;
-static MEDIA	media[MAX_MEDIA];
+static MEDIA	*media;		/* a place for each medium of the program, grown as its numbers come */
+static INT	cmedia;
+
+/* Room for medium inst (under the mix lock: the loader reads them under it). FALSE when there is no memory */
+static BOOL media_room( INT inst )
+{
+	MEDIA	*nm;
+	INT	c;
+	BOOL	ok = TRUE;
+
+	mix_lock();
+	if ( inst >= cmedia ) {
+		c = ( cmedia < 16 ) ? 16 : cmedia;
+		while ( c <= inst ) c *= 2;
+		nm = (MEDIA *)malloc(sizeof(MEDIA) * (size_t)c);
+		if ( nm == NULL ) {
+			ok = FALSE;
+		} else {
+			memset(nm, 0, sizeof(MEDIA) * (size_t)c);
+			if ( media != NULL ) {
+				memcpy(nm, media, sizeof(MEDIA) * (size_t)cmedia);
+				free(media);
+			}
+			media = nm;
+			cmedia = c;
+		}
+	}
+	mix_unlock();
+	return ok;
+}
 
 /* What the loader is to read */
 #define LQ	32
@@ -172,7 +201,7 @@ static void loader_task( INT stacd, void *exinf )
 			continue;
 		}
 		mix_lock();
-		if ( inst >= 0 && inst < MAX_MEDIA && media[inst].gen == gen && media[inst].loading ) {
+		if ( inst >= 0 && inst < cmedia && media[inst].gen == gen && media[inst].loading ) {
 			if ( media[inst].pcm != NULL ) free(media[inst].pcm);
 			media[inst].pcm = pcm;
 			media[inst].frames = frames;
@@ -195,6 +224,10 @@ static void media_drop( INT inst )
 {
 	mix_file_ctl(inst, RTM_CLOSE, 0);
 	mix_lock();
+	if ( inst < 0 || inst >= cmedia ) {
+		mix_unlock();
+		return;
+	}
 	if ( media[inst].pcm != NULL ) free(media[inst].pcm);
 	media[inst].pcm = NULL;
 	media[inst].frames = 0;
@@ -242,7 +275,11 @@ static BOOL command( CONST RTM_CMD *c )
 
 	switch ( c->op ) {
 	case RTM_OPEN:
-		if ( i < 0 || i >= MAX_MEDIA ) break;
+		if ( i < 0 || i >= 0x100000 ) break;	/* a number the sender made: indexes of its program */
+		if ( !media_room(i) ) {
+			rtm_answer(RTM_A_ERROR, i, c->gen, RT_ERR_ABORTED, 0, 0);
+			break;
+		}
 		media_drop(i);
 		mix_lock();
 		media[i].used = TRUE;
@@ -265,7 +302,7 @@ static BOOL command( CONST RTM_CMD *c )
 		}
 		break;
 	case RTM_PLAY:
-		if ( i < 0 || i >= MAX_MEDIA || !media[i].used || media[i].pcm == NULL ) {
+		if ( i < 0 || i >= cmedia || !media[i].used || media[i].pcm == NULL ) {
 			rtm_answer(RTM_A_ERROR, i, c->gen, RT_ERR_ABORTED, 0, 0);
 			break;
 		}
@@ -289,7 +326,7 @@ static BOOL command( CONST RTM_CMD *c )
 		mix_file_ctl(i, c->op, c->v);
 		break;
 	case RTM_CLOSE:
-		if ( i >= 0 && i < MAX_MEDIA ) media_drop(i);
+		if ( i >= 0 && i < cmedia ) media_drop(i);
 		break;
 	case RTM_NOTE:
 		mix_note(c->stream, c->u.note.channel, c->u.note.pitch, c->u.note.velocity, c->u.note.dur, c->at);

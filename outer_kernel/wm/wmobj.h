@@ -77,6 +77,10 @@ IMPORT void knl_wmobj_press_seen( CONST T_WMEV *ev );
 IMPORT ER   knl_wmobj_panel( INT pid );
 IMPORT void knl_wmobj_panel_close( INT pid );
 IMPORT void knl_wmobj_part( INT pid, INT i, UINT event, CONST T_WMEV *ev );
+/* Whether a program hears a tag of part i of panel pid pulled out (OB_E_PULL) */
+IMPORT BOOL knl_wmobj_pulls( INT pid, INT i );
+/* A panel of tags: the tags that can be seen (OB_WR_TAGS), at most max; 0 for a part of another kind */
+IMPORT INT  knl_pn_tags( INT pid, INT i, T_OBTAG *out, INT max );
 
 /* The process that made a window: 0 for one of the system's own */
 IMPORT ID   knl_wmobj_maker( INT wid );

@@ -47,6 +47,8 @@ extern "C" {
  */
 #define CF_TEXT_MAX	4096		/* bytes a record of fixed lines is first read into */
 #define CF_VAL_MAX	128		/* bytes of a value bounded by what it is */
+#define CF_HOST_MAX	256		/* bytes of a host name, a domain or a time server, with its nought: a domain name is 253 octets at most (RFC 1035 2.3.4) */
+#define CF_NETLINE_MAX	( CF_HOST_MAX * 2 + 128 )	/* a line of the network record: a name, the masks and addresses, DOMAIN= and a name */
 
 /*
  * The value of the nth (0 up) line with this key: *p_val points into
@@ -109,13 +111,13 @@ IMPORT INT  cf_itoa( INT v, char *out );
  * clock. The ___n names stand for a name left empty.
  */
 typedef struct {
-	char	host[80];		/* the machine's name, "" none */
+	char	host[CF_HOST_MAX];	/* the machine's name, "" none */
 	UW	addr, mask, gw;		/* network byte order; addr 0: DHCP */
 	BOOL	usegw;
-	char	dnsname[2][80];
+	char	dnsname[2][CF_HOST_MAX];
 	UW	dns[2];
-	char	domain[80];
-	char	ntp[80];		/* the time server, "" none */
+	char	domain[CF_HOST_MAX];
+	char	ntp[CF_HOST_MAX];		/* the time server, "" none */
 } T_CFNET;
 
 IMPORT void cf_net_read( CONST UB *text, INT len, T_CFNET *net );

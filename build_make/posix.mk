@@ -103,10 +103,10 @@ $(CMD_DONE): $(if $(filter 1,$(SSH)),$(SSH_LIB) $(TLS_LIB)) $(PSX_LIB) $(PSX_CRT
 	     $(wildcard $(TOP)/tools/netbsd/port/*.c) $(wildcard $(TOP)/application/tsh/*) $(wildcard $(TOP)/application/tsh/bltin/*) \
 	     $(PSX_HDRS) $(CMD_BOX) $(CMD_ICO)
 	@echo 'CMDS $(CMD_OUT)'
-	@ARCH=$(ARCH) $(if $(filter x86_64,$(ARCH)),MARCH=$(ARCH_MARCH)) OUT=$(CMD_OUT) PSX_LIB=$(PSX_LIB) PSX_CRT=$(PSX_CRT) USER_LD=$(USER_LD) bash $(TOP)/tools/netbsd/cmds.sh all
-	$(if $(filter 1,$(SSH)),@$(CC) $(PSX_KCFLAGS) $(SSH_INC) $(PSX_LDFLAGS) -o $(CMD_OUT)/bin/ssh $(PSX_CRT) 	  $(TOP)/application/ssh/ssh.c $(SFTP_SRCS) $(TOP)/lib/libui/ui.c $(TOP)/lib/libjson/json.c $(SSH_LIB) $(TLS_LIB) $(PSX_LIBS))
-	$(if $(filter 1,$(SSH)),@printf 'ssh\tlibssh2 and application/ssh\n' >> $(CMD_OUT)/origin.txt)
-	@python3 -I $(TOP)/tools/netbsd/mkcmdobj.py --bin $(CMD_OUT)/bin --box $(CMD_BOX) --ico $(CMD_ICO) \
+	@ARCH=$(ARCH) $(if $(filter x86_64,$(ARCH)),MARCH=$(ARCH_MARCH)) OUT=$(CMD_OUT) PSX_LIB=$(PSX_LIB) PSX_CRT=$(PSX_CRT) USER_LD=$(USER_LD) $(SHARED_X) bash $(TOP)/tools/netbsd/cmds.sh all
+	$(if $(filter 1,$(SSH)),@$(SHARED_X) $(CC) $(PSX_KCFLAGS) $(SSH_INC) $(PSX_LDFLAGS) -o $(CMD_OUT)/bin/ssh $(PSX_CRT) 	  $(TOP)/application/ssh/ssh.c $(SFTP_SRCS) $(TOP)/lib/libui/ui.c $(TOP)/lib/libjson/json.c $(SSH_LIB) $(TLS_LIB) $(PSX_LIBS))
+	$(if $(filter 1,$(SSH)),@$(SHARED_X) sh -c "printf 'ssh\tlibssh2 and application/ssh\n' >> $(CMD_OUT)/origin.txt")
+	@$(SHARED_S) python3 -I $(TOP)/tools/netbsd/mkcmdobj.py --bin $(CMD_OUT)/bin --box $(CMD_BOX) --ico $(CMD_ICO) \
 	  --out $(CMD_STAGE) --origin $(CMD_OUT)/origin.txt
 	@touch $@
 else

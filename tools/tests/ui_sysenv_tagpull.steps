@@ -1,0 +1,55 @@
+# システム環境設定's tags pulled out (docs/tessronos 10.6, 11.6): a tag pressed and moved further
+# than LK_DRAG_W is pulled out (OB_E_PULL) rather than chosen, its outline is carried by the desktop
+# (DT_RQ_CARRY), and where it is let go the object of its page, named システム環境設定：背景, is made
+# and a link to it put (DT_RQ_PLACE, lib/libtv/tv_page.c). For tools/ui_run.py with the kernel of make TARGET=_QEMU_VIRT_ DESKTOP=1 UITEST=1 and
+# the test disk of a KTEST=1 build. The window is at 160,80, opened on 〈画面〉〈配色〉; 〈背景〉 is
+# the first tag of the lower row, at 192,151. BTRON, the first window, shows left of it at 100,200.
+openapp 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42 {"tessronos-sysenv":{"data":"colour"}}
+expect sysenv: page "colour"
+expect sysenv: ready
+wait 800
+move 900 700
+wait 300
+shot stp_before
+# 〈背景〉 pressed, moved past LK_DRAG_W on the tag, carried into BTRON and let go there
+logmark
+move 192 151
+down
+move 197 152
+expectsince tvpage: tag 3 pulled out, page "wallpaper", outline
+move 170 170
+wait 300
+move 130 190
+wait 300
+move 100 200
+wait 500
+up
+expectsince sysenv: link of page "wallpaper" carried (0)
+expectsince tvpage: object "システム環境設定：背景" of page "wallpaper" made (0)
+expectsince tvpage: link of page "wallpaper" carried, named "システム環境設定：背景" (0)
+expectsince cabinet: dropped 1
+wait 800
+shot stp_put
+# the link put shows the name of the page's object, システム環境設定：背景, whole in its band (the
+# letters right of the pointer, recorded from a run that put it)
+shotsum stp_put 128 191 262 205
+want ok 32902fa4cc82fbcd
+# the page shown stays 〈配色〉: the tag was not chosen
+absent sysenv: page "wallpaper"
+shotsame stp_before stp_put 180 230 730 560
+# the link put opened as a double press opens it: the page of its applist in the same window
+logmark
+dclick 100 200
+expectsince sysenv: opened with data "wallpaper"
+expectsince sysenv: page "wallpaper"
+wait 500
+shot stp_open
+nwin システム環境設定
+want ok 1
+# a press let go on the tag without moving still chooses it, and carries nothing
+logmark
+click 235 151
+wait 500
+absent sysenv: tag 4 pulled out
+shot stp_click
+absent !OACV!

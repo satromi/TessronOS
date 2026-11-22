@@ -29,6 +29,9 @@
 #include <ts/xfu.h>
 #include <ts/fs.h>
 #include <ts/tsfs.h>
+#include <ts/tsfsblk.h>
+#include <ts/tsfsobj.h>
+#include <ts/tsfsck.h>
 #include <ts/proc.h>
 #include <ts/wm.h>
 #include <ts/part.h>
@@ -2536,9 +2539,36 @@ LOCAL void test_native( void )
 		KT_ASSERT_ER(ob_lst_res(key, names, sizeof(names), &cnt), E_OK);
 		KT_ASSERT_EQ(cnt, 2);
 		KT_ASSERT_ER(ob_rea_res(key, (CONST UB *)"_0_bgm.mp3", 0, back, 10, &asz), E_NOEXS);
-		/* a name too long to keep */
-		KT_ASSERT_ER(ob_wri_res(key, (CONST UB *)"_0_a-very-long-resource-name.bin", data, 4),
-			     E_PAR);
+		/*
+		 * an extension of 26 bytes: past the 15 bytes of a volume of
+		 * version 4, kept in the table's text area on version 5; one
+		 * past TSFSO_EXT_MAX is refused on either
+		 */
+		if ( knl_ob_cnv_form((CONST char *)NATDEV, NULL) == TSFSBLK_VERSION5 ) {
+			UB	*ln = (UB *)Kmalloc(3 + TSFSO_EXT_MAX + 2);
+
+			KT_ASSERT_ER(ob_wri_res(key, (CONST UB *)"_0_a-very-long-resource-name.bin",
+						data, 4), E_OK);
+			KT_ASSERT_ER(ob_rea_res(key, (CONST UB *)"_0_a-very-long-resource-name.bin", 0,
+						back, 10, &asz), E_OK);
+			KT_ASSERT_EQ(asz, 4);
+			KT_ASSERT_EQ(back[3], data[3]);
+			KT_ASSERT_ER(ob_lst_res(key, names, sizeof(names), &cnt), E_OK);
+			KT_ASSERT_EQ(cnt, 3);
+			KT_ASSERT(has(names, sizeof(names), "_0_a-very-long-resource-name.bin"));
+			KT_ASSERT_ER(ob_del_res(key, (CONST UB *)"_0_a-very-long-resource-name.bin"),
+				     E_OK);
+			if ( ln != NULL ) {
+				knl_memcpy(ln, "_0_", 3);
+				knl_memset(ln + 3, 'x', TSFSO_EXT_MAX + 1);
+				ln[3 + TSFSO_EXT_MAX + 1] = 0;
+				KT_ASSERT_ER(ob_wri_res(key, ln, data, 4), E_PAR);
+				Kfree(ln);
+			}
+		} else {
+			KT_ASSERT_ER(ob_wri_res(key, (CONST UB *)"_0_a-very-long-resource-name.bin",
+						data, 4), E_PAR);
+		}
 		ob_cls_obj(key);
 	}
 	KT_ASSERT_ER(ob_del_obj(&fixed), E_OK);
@@ -2796,6 +2826,11 @@ LOCAL ER put_file( CONST char *path, CONST char *text, INT len )
 	return ( n == len ) ? E_OK : E_IO;
 }
 
+LOCAL BOOL same_s( CONST UB *a, CONST char *b )
+{
+	return (BOOL)( a != NULL && knl_strcmp((CONST char *)a, b) == 0 );
+}
+
 LOCAL void test_plugin( void )
 {
 	CONST char	*pj =
@@ -2919,6 +2954,131 @@ LOCAL void test_plugin( void )
 	KT_ASSERT_ER(dt_pkg_install(&brought, FALSE, 0, NULL, &prog, &how), E_OBJ);
 	KT_ASSERT_ER(dt_prog_remove(&again), E_OK);
 	KT_ASSERT(dt_prog_find((CONST UB *)"ktest-plugin") == NULL);
+
+	/*
+	 * a type, a version and a kind of file longer than the old fields
+	 * (32, 32 and 16 bytes) are read whole: the plugin goes in, with the
+	 * version and the kind of file it names written whole
+	 */
+	{
+		CONST char	*lj =
+			"{\"id\":\"ktest-long\",\"name\":\"長い値のプラグイン\","
+			"\"version\":\"1.2.3-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+			"\"type\":\"accessory-with-a-type-name-of-over-thirty-two-bytes\","
+			"\"contextMenu\":[{\"fileTypes\":[\"Ktest-Long-Extension\"]}]}";
+		TS_UUID		ldir, lprog;
+		T_XFUFS		*lfs = (T_XFUFS *)Kmalloc(sizeof(T_XFUFS));
+		T_XFUTREE	lt;
+
+		(void)fs_mkdir("/boot/PLUGLONG");
+		KT_ASSERT_ER(put_file("/boot/PLUGLONG/plugin.json", lj, s_len(lj)), E_OK);
+		KT_ASSERT(lfs != NULL);
+		if ( lfs == NULL ) return;
+		KT_ASSERT_ER(xfu_fs_tree(lfs, "/boot", &lt), E_OK);
+		KT_ASSERT_ER(xfu_import(&lt, (CONST UB *)"PLUGLONG", NULL, NULL, &ldir), E_OK);
+		Kfree(lfs);
+		KT_ASSERT_ER(dt_pkg_install(&ldir, FALSE, 0, NULL, &lprog, &how), E_OK);
+		pp = dt_prog_find((CONST UB *)"ktest-long");
+		KT_ASSERT(pp != NULL);
+		if ( pp != NULL ) {
+			SZ	msz = 0;
+			UB	*mt = om_obj_meta(&pp->uuid, &msz);
+
+			/* the metadata the install wrote holds them whole */
+			KT_ASSERT(mt != NULL);
+			if ( mt != NULL ) {
+				KT_ASSERT(has(mt, (INT)msz, "1.2.3-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+				KT_ASSERT(has(mt, (INT)msz, "ktest-long-extension"));
+				Kfree(mt);
+			}
+			/* the registry holds the kind of file whole, and again after it is read anew; no program version here */
+			KT_ASSERT(same_s(pp->types, "ktest-long-extension") && same_s(pp->version, ""));
+			dt_prog_reread();
+			pp = dt_prog_find((CONST UB *)"ktest-long");
+			KT_ASSERT(pp != NULL && same_s(pp->types, "ktest-long-extension"));
+		}
+		pp = dt_prog_find((CONST UB *)"ktest-long");
+		if ( pp != NULL ) KT_ASSERT_ER(dt_prog_remove(&pp->uuid), E_OK);
+		(void)ob_del_obj(&ldir);
+	}
+
+	/* a program object whose version and kinds of file are far longer than the old fields: read whole, and read again as it is */
+	{
+		CONST char	*vj =
+			"{\"name\":\"長い版の試験\",\"tessronos\":{\"program\":{\"id\":\"ktest-ver\","
+			"\"kind\":\"app\",\"version\":\"R1.000-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+			"\"fileTypes\":[\"Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"tad\",\"TAD\",\"xtad\"]}}}";
+		T_OBCRE		vc;
+		TS_UUID		vu;
+		DTPROG		*vp = (DTPROG *)Kcalloc(1, sizeof(DTPROG));
+		INT		pass;
+
+		KT_ASSERT(vp != NULL);
+		if ( vp == NULL ) return;
+		knl_memset(&vc, 0, sizeof(vc));
+		vc.type = OB_T_STORAGE;
+		vc.sub = OB_S_FILE;
+		vc.json = (CONST UB *)vj;
+		vc.jsonsz = (SZ)s_len(vj);
+		KT_ASSERT_ER(ob_cre_obj(&vc, &vu), E_OK);
+		for ( pass = 0; pass < 2; pass++ ) {
+			KT_ASSERT(dt_prog_read(&vu, vp));
+			KT_ASSERT(vp->version != NULL && s_len((CONST char *)vp->version) > 60
+				  && vp->version[0] == 'R' && vp->version[s_len((CONST char *)vp->version) - 1] == 'b');
+			KT_ASSERT(s_len((CONST char *)vp->types) > 30 && vp->types[0] == 'a'
+				  && has(vp->types, s_len((CONST char *)vp->types), "a,tad,xtad")
+				  && vp->types[s_len((CONST char *)vp->types) - 1] == 'd');
+		}
+		dt_prog_clear(vp);
+		KT_ASSERT(vp->version == NULL && vp->types == NULL);
+		Kfree(vp);
+		(void)ob_del_obj(&vu);
+	}
+
+	/* forty kinds of file: every one is read, in the order written, none dropped */
+	{
+		char		mj[1400];
+		TS_UUID		mdir, mprog;
+		T_XFUFS		*mfs = (T_XFUFS *)Kmalloc(sizeof(T_XFUFS));
+		T_XFUTREE	mt;
+		INT		i, nt = 0, k_pass;
+
+		knl_strcpy(mj, "{\"id\":\"ktest-many\",\"name\":\"種類の多いプラグイン\",\"version\":\"1.0.0\","
+			       "\"type\":\"accessory\",\"contextMenu\":[{\"fileTypes\":[");
+		for ( i = 0; i < 40; i++ ) {
+			char	w[24];
+
+			w[0] = '"'; w[1] = 'K'; w[2] = 't'; w[3] = 'y'; w[4] = 'p'; w[5] = 'e';
+			w[6] = (char)( '0' + i / 10 ); w[7] = (char)( '0' + i % 10 );
+			w[8] = '"'; w[9] = ( i < 39 ) ? ',' : 0; w[10] = 0;
+			knl_strcat(mj, w);
+		}
+		knl_strcat(mj, "]}]}");
+		(void)fs_mkdir("/boot/PLUGMANY");
+		KT_ASSERT_ER(put_file("/boot/PLUGMANY/plugin.json", mj, s_len(mj)), E_OK);
+		KT_ASSERT(mfs != NULL);
+		if ( mfs == NULL ) return;
+		KT_ASSERT_ER(xfu_fs_tree(mfs, "/boot", &mt), E_OK);
+		KT_ASSERT_ER(xfu_import(&mt, (CONST UB *)"PLUGMANY", NULL, NULL, &mdir), E_OK);
+		Kfree(mfs);
+		KT_ASSERT_ER(dt_pkg_install(&mdir, FALSE, 0, NULL, &mprog, &how), E_OK);
+		for ( k_pass = 0; k_pass < 2; k_pass++ ) {
+			pp = dt_prog_find((CONST UB *)"ktest-many");
+			KT_ASSERT(pp != NULL);
+			if ( pp == NULL ) break;
+			nt = 1;
+			for ( i = 0; pp->types[i] != 0; i++ ) if ( pp->types[i] == ',' ) nt++;
+			KT_ASSERT_EQ(nt, 40);
+			KT_ASSERT_EQ(s_len((CONST char *)pp->types), 40 * 7 + 39);
+			KT_ASSERT(has(pp->types, s_len((CONST char *)pp->types), "ktype00,ktype01,"));
+			KT_ASSERT(has(pp->types, s_len((CONST char *)pp->types), ",ktype39"));
+			KT_ASSERT(same_s(pp->version, ""));
+			dt_prog_reread();		/* the second pass is what the registry reads anew */
+		}
+		pp = dt_prog_find((CONST UB *)"ktest-many");
+		if ( pp != NULL ) KT_ASSERT_ER(dt_prog_remove(&pp->uuid), E_OK);
+		(void)ob_del_obj(&mdir);
+	}
 }
 
 /* ---------------------------------------------------------------- the system's faces and pictures */

@@ -352,6 +352,7 @@ SRCS_APP += \
 	tests/ktest/ktest_tsfsbtree.c \
 	tests/ktest/ktest_tsfsjrnl.c \
 	tests/ktest/ktest_tsfsobj.c \
+	tests/ktest/ktest_tsfsconv.c \
 	tests/ktest/ktest_iob.c \
 	tests/ktest/ktest_nicring.c \
 	tests/ktest/ktest_dfix.c \

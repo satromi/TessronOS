@@ -625,19 +625,63 @@ long fpathconf( int fd, int name )
 	return pathconf("/", name);
 }
 
+/*
+ * The limits of the process. RLIMIT_NOFILE is the kernel's limit on the
+ * process's sockets (so_getlimit, so_setlimit, include/ts/soapp.h; design
+ * 9.2.2): the soft limit, which is the one that holds, and the hard one it
+ * may be raised to. The files have a table of their own here (PSX_FD_MAX)
+ * and the file layer's limit (FS_PRC_FILE). setrlimit refuses a soft
+ * limit above the hard one (EINVAL), and a hard limit above what there is
+ * that only an administrator may raise it to, or past what the system
+ * holds at all, which RLIM_INFINITY is (EPERM); the kernel's E_PAR for a
+ * hard limit past the system's is EINVAL. Every other resource is not
+ * limited, and setting one changes nothing.
+ */
+extern ER	so_getlimit( INT *p_cur, INT *p_max );
+extern ER	so_setlimit( INT cur, INT max );
+
 int getrlimit( int res, struct rlimit *r )
 {
+	INT	cur, max;
+
+	if ( r == NULL ) {
+		errno = EFAULT;
+		return -1;
+	}
 	r->rlim_cur = r->rlim_max = RLIM_INFINITY;
-	if ( res == RLIMIT_NOFILE ) r->rlim_cur = r->rlim_max = PSX_FD_MAX;
+	if ( res == RLIMIT_NOFILE && so_getlimit(&cur, &max) >= E_OK ) {
+		r->rlim_cur = (rlim_t)cur;
+		r->rlim_max = (rlim_t)max;
+	}
 	if ( res == RLIMIT_STACK ) r->rlim_cur = r->rlim_max = 1024 * 1024;
 	return 0;
 }
 
 int setrlimit( int res, const struct rlimit *r )
 {
-	(void)res;
-	(void)r;
-	return 0;
+	ER	er;
+
+	if ( r == NULL ) {
+		errno = EFAULT;
+		return -1;
+	}
+	if ( res != RLIMIT_NOFILE ) {
+		return 0;
+	}
+	if ( r->rlim_cur > r->rlim_max ) {
+		errno = EINVAL;
+		return -1;
+	}
+	if ( r->rlim_max > 0x7fffffffULL ) {	/* more than any count the system holds */
+		errno = EPERM;
+		return -1;
+	}
+	er = so_setlimit((INT)r->rlim_cur, (INT)r->rlim_max);
+	if ( er >= E_OK ) {
+		return 0;
+	}
+	errno = ( er == E_OACV ) ? EPERM : EINVAL;
+	return -1;
 }
 
 int getrusage( int who, struct rusage *ru )

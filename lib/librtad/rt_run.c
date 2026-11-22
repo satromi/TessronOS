@@ -47,14 +47,23 @@ LOCAL void anim_apply( RT *rt, RTANIM *a, RT_TIME T );
 
 LOCAL void say( RT *rt, CONST char *a, CONST UB *b )
 {
-	char	line[160];
-	INT	n = 0, i;
+	char	*line;
+	INT	n = 0, i, la = 0, lb = 0;
 
 	if ( rt->host.log == NULL ) return;
-	for ( i = 0; a != NULL && a[i] != 0 && n < 150; i++ ) line[n++] = a[i];
-	for ( i = 0; b != NULL && b[i] != 0 && n < 158; i++ ) line[n++] = (char)b[i];
+	while ( a != NULL && a[la] != 0 ) la++;
+	while ( b != NULL && b[lb] != 0 ) lb++;
+	line = (char *)rt->host.alloc(rt->host.arg, (SZ)la + (SZ)lb + 1);
+	if ( line == NULL ) {
+		/* no room for the whole line: what a says */
+		rt->host.log(rt->host.arg, ( a != NULL ) ? a : "realtime");
+		return;
+	}
+	for ( i = 0; i < la; i++ ) line[n++] = a[i];
+	for ( i = 0; i < lb; i++ ) line[n++] = (char)b[i];
 	line[n] = 0;
 	rt->host.log(rt->host.arg, line);
+	rt->host.free(rt->host.arg, line);
 }
 
 LOCAL void mop( RT *rt, INT k, UINT op, RT_V v )
@@ -134,9 +143,9 @@ EXPORT RT_TIME rt_time_of( RT *rt, CONST UB *value, CONST UB *unit )
 	INT	i;
 
 	unit_reset(&u);
-	for ( i = 0; i < RT_MAX_THR; i++ ) {
-		if ( rt->thr[i].st != TS_FREE ) {
-			u = rt->thr[i].u;
+	for ( i = 0; i < rt->cthr; i++ ) {
+		if ( rt->thr[i]->st != TS_FREE ) {
+			u = rt->thr[i]->u;
 			break;
 		}
 	}
@@ -344,15 +353,26 @@ LOCAL INT thr_new( RT *rt, INT parent, RTN *first, RTN *group, UINT kind, RTN *f
 	INT	i;
 	RTTHR	*th;
 
-	for ( i = 0; i < RT_MAX_THR; i++ ) {
-		if ( rt->thr[i].st == TS_FREE ) break;
+	for ( i = 0; i < rt->cthr; i++ ) {
+		if ( rt->thr[i]->st == TS_FREE ) break;
 	}
-	if ( i == RT_MAX_THR ) {
-		say(rt, "realtime: too many groups at once", NULL);
+	if ( i == rt->cthr && !rt_room_slots(rt, &rt->thr, &rt->cthr, i + 1, sizeof(RTTHR)) && i >= rt->cthr ) {
+		say(rt, "realtime: not enough memory for another group", NULL);
 		return -1;
 	}
-	th = &rt->thr[i];
-	rt_zero(th, sizeof(*th));
+	th = rt->thr[i];
+	{
+		RTFRAME	*fr = th->fr;
+		INT	cfr = th->cfr;
+
+		rt_zero(th, sizeof(*th));
+		th->fr = fr;
+		th->cfr = cfr;
+	}
+	if ( !rt_frames(rt, th, 1) ) {
+		say(rt, "realtime: not enough memory for another group", NULL);
+		return -1;
+	}
 	th->st = TS_RUN;
 	th->pc = first;
 	th->nfr = 1;
@@ -368,7 +388,7 @@ LOCAL INT thr_new( RT *rt, INT parent, RTN *first, RTN *group, UINT kind, RTN *f
 	th->until = RT_NEVER;
 	unit_reset(&th->u);
 	if ( parent >= 0 ) {
-		RTTHR	*p = &rt->thr[parent];
+		RTTHR	*p = rt->thr[parent];
 
 		th->stream = p->stream;
 		th->u = p->u;
@@ -384,18 +404,18 @@ LOCAL INT thr_new( RT *rt, INT parent, RTN *first, RTN *group, UINT kind, RTN *f
 
 LOCAL void thr_end( RT *rt, INT i )
 {
-	RTTHR	*th = &rt->thr[i];
+	RTTHR	*th = rt->thr[i];
 	INT	p = th->parent, k;
 
 	if ( th->st == TS_FREE ) return;
-	if ( p >= 0 && rt->thr[p].st == TS_CHILD && rt->thr[p].child == i ) {
+	if ( p >= 0 && rt->thr[p]->st == TS_CHILD && rt->thr[p]->child == i ) {
 		/* a serial group's time is the time of the one that met it */
-		rt->thr[p].st = TS_RUN;
-		rt->thr[p].child = -1;
-		if ( th->t > rt->thr[p].t ) rt->thr[p].t = th->t;
+		rt->thr[p]->st = TS_RUN;
+		rt->thr[p]->child = -1;
+		if ( th->t > rt->thr[p]->t ) rt->thr[p]->t = th->t;
 	}
-	for ( k = 0; k < RT_MAX_THR; k++ ) {
-		if ( rt->thr[k].st != TS_FREE && rt->thr[k].parent == i ) rt->thr[k].parent = p;
+	for ( k = 0; k < rt->cthr; k++ ) {
+		if ( rt->thr[k]->st != TS_FREE && rt->thr[k]->parent == i ) rt->thr[k]->parent = p;
 	}
 	th->st = TS_FREE;
 	/* a group that ends may have been what a label was waited at for */
@@ -407,9 +427,9 @@ LOCAL BOOL descends( RT *rt, INT i, INT a )
 {
 	INT	n = 0;
 
-	while ( i >= 0 && n++ < RT_MAX_THR ) {
+	while ( i >= 0 && n++ < rt->cthr ) {
 		if ( i == a ) return TRUE;
-		i = rt->thr[i].parent;
+		i = rt->thr[i]->parent;
 	}
 	return FALSE;
 }
@@ -419,25 +439,25 @@ LOCAL void thr_kill( RT *rt, INT a )
 {
 	INT	k;
 
-	for ( k = 0; k < RT_MAX_THR; k++ ) {
-		if ( k != a && rt->thr[k].st != TS_FREE && descends(rt, k, a) ) {
-			rt->thr[k].parent = -1;
-			rt->thr[k].st = TS_FREE;
+	for ( k = 0; k < rt->cthr; k++ ) {
+		if ( k != a && rt->thr[k]->st != TS_FREE && descends(rt, k, a) ) {
+			rt->thr[k]->parent = -1;
+			rt->thr[k]->st = TS_FREE;
 		}
 	}
-	for ( k = 0; k < RT_MAX_ANIM; k++ ) {
-		if ( rt->anim[k].used && rt->anim[k].thr == a ) rt->anim[k].thr = -1;
+	for ( k = 0; k < rt->canim; k++ ) {
+		if ( rt->anim[k]->used && rt->anim[k]->thr == a ) rt->anim[k]->thr = -1;
 	}
-	rt->thr[a].parent = -1;		/* nobody waits for it */
-	rt->thr[a].st = TS_FREE;
+	rt->thr[a]->parent = -1;		/* nobody waits for it */
+	rt->thr[a]->st = TS_FREE;
 }
 
 LOCAL BOOL push( RT *rt, RTTHR *th, UINT kind, RTN *node, RTN *ret, RTN *first, RTN *end )
 {
 	RTFRAME	*f;
 
-	if ( th->nfr >= RT_DEPTH ) {
-		say(rt, "realtime: blocks too deep", NULL);
+	if ( !rt_frames(rt, th, th->nfr + 1) ) {
+		say(rt, "realtime: not enough memory for a deeper block", NULL);
 		return FALSE;
 	}
 	f = &th->fr[th->nfr++];
@@ -453,7 +473,7 @@ LOCAL BOOL push( RT *rt, RTTHR *th, UINT kind, RTN *node, RTN *ret, RTN *first, 
 /* The end of the block a thread is in: what follows it */
 LOCAL void block_end( RT *rt, INT i )
 {
-	RTTHR	*th = &rt->thr[i];
+	RTTHR	*th = rt->thr[i];
 	RTFRAME	*f = &th->fr[th->nfr - 1];
 
 	switch ( f->kind ) {
@@ -489,7 +509,7 @@ LOCAL void block_end( RT *rt, INT i )
 
 LOCAL void sound_out( RT *rt, RT_SND *s, RT_TIME t, INT thr )
 {
-	RTTHR	*th = ( thr >= 0 ) ? &rt->thr[thr] : NULL;
+	RTTHR	*th = ( thr >= 0 ) ? rt->thr[thr] : NULL;
 
 	if ( rt->ffwd && t < rt->ffwd_to ) return;		/* past, in a seek */
 	if ( th != NULL && t < th->ff_until ) return;
@@ -501,7 +521,10 @@ LOCAL void sound_out( RT *rt, RT_SND *s, RT_TIME t, INT thr )
 /* A sound for later (an interpolation's notes) */
 LOCAL void sound_later( RT *rt, CONST RT_SND *s, RT_TIME t, INT thr )
 {
-	if ( rt->nsndq >= RT_MAX_SNDQ ) return;
+	if ( !rt_room(rt, &rt->sndq, &rt->csndq, rt->nsndq + 1, sizeof(RTSNDQ)) ) {
+		say(rt, "realtime: not enough memory for a sound to wait", NULL);
+		return;
+	}
 	rt->sndq[rt->nsndq].s = *s;
 	rt->sndq[rt->nsndq].t = t;
 	rt->sndq[rt->nsndq].thr = thr;
@@ -522,7 +545,7 @@ LOCAL void note_out( RT *rt, INT i, RTN *n, INT pitch, INT vel, RT_TIME dur, RT_
 	if ( pitch < 0 ) return;
 	rt_zero(&s, sizeof(s));
 	s.kind = RT_SND_NOTE;
-	s.stream = rt->thr[i].stream;
+	s.stream = rt->thr[i]->stream;
 	s.pitch = pitch;
 	s.velocity = ( vel < 0 ) ? 0 : ( vel > 127 ) ? 127 : vel;
 	s.channel = n->i3;
@@ -539,8 +562,8 @@ LOCAL RTANIM *anim_new( RT *rt, UINT kind, INT target, INT prop, INT thr, RT_TIM
 	INT	i;
 
 	/* one change of a property at a time: a new one takes over from the old */
-	for ( i = 0; i < RT_MAX_ANIM; i++ ) {
-		RTANIM	*a = &rt->anim[i];
+	for ( i = 0; i < rt->canim; i++ ) {
+		RTANIM	*a = rt->anim[i];
 
 		if ( a->used && a->kind == kind && a->target == target
 		  && ( a->prop == prop || kind == AN_BOX
@@ -551,25 +574,43 @@ LOCAL RTANIM *anim_new( RT *rt, UINT kind, INT target, INT prop, INT thr, RT_TIM
 			a->used = FALSE;
 		}
 	}
-	for ( i = 0; i < RT_MAX_ANIM; i++ ) {
-		if ( !rt->anim[i].used ) {
-			RTANIM	*a = &rt->anim[i];
-
-			rt_zero(a, sizeof(*a));
-			a->used = TRUE;
-			a->kind = kind;
-			a->target = target;
-			a->prop = prop;
-			a->thr = thr;
-			a->t0 = t0;
-			a->iter = 1;
-			a->fill = FILL_FWD;
-			a->last = -1;
-			return a;
-		}
+	for ( i = 0; i < rt->canim; i++ ) {
+		if ( !rt->anim[i]->used ) break;
 	}
-	say(rt, "realtime: too many changes at once", NULL);
-	return NULL;
+	if ( i == rt->canim && !rt_room_slots(rt, &rt->anim, &rt->canim, i + 1, sizeof(RTANIM)) && i >= rt->canim ) {
+		say(rt, "realtime: not enough memory for another change", NULL);
+		return NULL;
+	}
+	{
+		RTANIM	*a = rt->anim[i];
+		RT_V	*val = a->val;
+		INT	*off = a->off;
+		RT_EASE	*ease = a->ease;
+		INT	ckey = a->ckey;
+
+		rt_zero(a, sizeof(*a));
+		a->val = val;
+		a->off = off;
+		a->ease = ease;
+		a->ckey = ckey;
+		rt_zero(a->val, sizeof(RT_V) * ckey);
+		rt_zero(a->off, sizeof(INT) * ckey);
+		rt_zero(a->ease, sizeof(RT_EASE) * ckey);
+		if ( !rt_anim_keys(rt, a, 2) ) {
+			say(rt, "realtime: not enough memory for another change", NULL);
+			return NULL;
+		}
+		a->used = TRUE;
+		a->kind = kind;
+		a->target = target;
+		a->prop = prop;
+		a->thr = thr;
+		a->t0 = t0;
+		a->iter = 1;
+		a->fill = FILL_FWD;
+		a->last = -1;
+		return a;
+	}
 }
 
 /* A value along a run of keyframes at p (65536ths of one time through) */
@@ -700,7 +741,7 @@ LOCAL BOOL media_live( CONST RT_MEDIA *m )
 /* An element of audio or video met: made ready, and played when its trigger says */
 LOCAL void media_meet( RT *rt, INT i, RTN *n, RT_TIME T )
 {
-	RTTHR		*th = &rt->thr[i];
+	RTTHR		*th = rt->thr[i];
 	RT_MEDIA	*m;
 	BOOL		now;
 
@@ -778,7 +819,7 @@ LOCAL void media_play( RT *rt, INT k, RT_TIME at, INT thr )
 	  || m->state == RT_MS_ERROR ) {
 		/* never met, or met before and done: as its element says */
 		unit_reset(&u);
-		if ( thr >= 0 && rt->thr[thr].st != TS_FREE ) u = rt->thr[thr].u;
+		if ( thr >= 0 && rt->thr[thr]->st != TS_FREE ) u = rt->thr[thr]->u;
 		rt_media_attrs(rt, m, m->nd, &u);
 		m->gen++;
 		m->nfall = 0;
@@ -820,7 +861,7 @@ LOCAL void handler_run( RT *rt, RTN *body, RTN *node, RT_TIME T )
 	if ( body == NULL ) return;
 	c = thr_new(rt, -1, body, NULL, FR_TOP, node, T);
 	if ( c < 0 ) return;
-	rt->thr[c].trig = TRUE;
+	rt->thr[c]->trig = TRUE;
 	run_thread(rt, c, T);
 }
 
@@ -918,7 +959,7 @@ LOCAL void media_error( RT *rt, INT k, UINT err, RT_TIME T )
 		RTBLOCK	*b = &rt->blk[rt->cur];
 
 		for ( i = 0; i < b->nonerr; i++ ) {
-			RTN	*e = rt->onerr[b->onerr[i]];
+			RTN	*e = rt->onerr[b->onerr0 + i];
 
 			if ( err_takes(rt_attr(e->nd, "type"), err) ) {
 				handler_run(rt, e->body, e, T);
@@ -933,20 +974,35 @@ LOCAL void media_ev( RT *rt, INT k, UINT ev, RT_V v, RT_TIME T );
 
 /* ---------------------------------------------------------------- waits */
 
-/* The next id of a comma separated list, into w */
-LOCAL CONST UB *next_id( CONST UB *s, UB *w, INT max )
+/* The next id of a comma separated list: where it starts and how long it is (spaces round it left out) */
+LOCAL CONST UB *next_id( CONST UB *s, CONST UB **p_id, INT *p_len )
 {
 	INT	n = 0;
 
 	if ( s == NULL ) return NULL;
 	while ( *s == ' ' || *s == ',' ) s++;
 	if ( *s == 0 ) return NULL;
-	while ( *s != 0 && *s != ',' && n < max - 1 ) {
-		if ( *s != ' ' ) w[n++] = *s;
-		s++;
-	}
-	w[n] = 0;
+	*p_id = s;
+	while ( s[n] != 0 && s[n] != ',' ) n++;
+	s += n;
+	while ( n > 0 && (*p_id)[n - 1] == ' ' ) n--;
+	*p_len = n;
 	return s;
+}
+
+/* The medium whose id is the n bytes at s, -1 none */
+LOCAL INT media_of_span( CONST RT *rt, CONST UB *s, INT n )
+{
+	INT	i, k;
+
+	for ( i = 0; i < rt->nmedia; i++ ) {
+		CONST UB	*id = rt->media[i].id;
+
+		if ( id == NULL ) continue;
+		for ( k = 0; k < n && id[k] == s[k]; k++ ) ;
+		if ( k == n && id[k] == 0 ) return i;
+	}
+	return -1;
 }
 
 LOCAL BOOL ended( CONST RT_MEDIA *m )
@@ -964,11 +1020,11 @@ LOCAL BOOL wait_met( RT *rt, RTTHR *th, RT_TIME T )
 	if ( th->woken ) return TRUE;
 	if ( rt_same(ev, "any") || rt_same(ev, "all") ) {
 		BOOL		any = FALSE, all = TRUE, one = FALSE;
-		UB		w[64];
-		CONST UB	*s = ( n->s2 != NULL ) ? n->s2 : n->s1;
+		CONST UB	*w, *s = ( n->s2 != NULL ) ? n->s2 : n->s1;
+		INT		wl;
 
-		while ( ( s = next_id(s, w, sizeof(w)) ) != NULL ) {
-			k = rt_media_of(rt, w);
+		while ( ( s = next_id(s, &w, &wl) ) != NULL ) {
+			k = media_of_span(rt, w, wl);
 			if ( k < 0 ) continue;
 			one = TRUE;
 			if ( ended(&rt->media[k]) && rt->media[k].gen > 0 ) any = TRUE;
@@ -1001,8 +1057,8 @@ LOCAL void waits_check( RT *rt, RT_TIME T )
 {
 	INT	i;
 
-	for ( i = 0; i < RT_MAX_THR; i++ ) {
-		RTTHR	*th = &rt->thr[i];
+	for ( i = 0; i < rt->cthr; i++ ) {
+		RTTHR	*th = rt->thr[i];
 
 		if ( th->st != TS_WAIT || th->held ) continue;
 		if ( wait_met(rt, th, T) || T >= th->until ) {
@@ -1044,7 +1100,7 @@ LOCAL BOOL ends_at( CONST UB *onended, CONST RTN *label )
 /* An element of audio or video from n on, or inside what follows, that ends by jumping to the label */
 LOCAL BOOL ahead( CONST RTN *n, CONST RTN *label, INT depth )
 {
-	for ( ; n != NULL && depth < RT_DEPTH; n = n->next ) {
+	for ( ; n != NULL; n = n->next ) {
 		if ( ( n->op == OP_AUDIO || n->op == OP_VIDEO || n->op == OP_PCM )
 		  && ends_at(rt_attr(n->nd, "onended"), label) ) {
 			return TRUE;
@@ -1068,8 +1124,8 @@ LOCAL BOOL awaited( RT *rt, CONST RTN *label )
 	for ( k = 0; k < rt->nmedia; k++ ) {
 		if ( media_live(&rt->media[k]) && ends_at(rt->media[k].onended, label) ) return TRUE;
 	}
-	for ( k = 0; k < RT_MAX_THR; k++ ) {
-		RTTHR	*th = &rt->thr[k];
+	for ( k = 0; k < rt->cthr; k++ ) {
+		RTTHR	*th = rt->thr[k];
 
 		if ( th->st == TS_FREE || th->st == TS_LABEL || th->trig || th->group == NULL ) continue;
 		if ( ahead(th->pc, label, 0) ) return TRUE;
@@ -1085,8 +1141,8 @@ LOCAL void labels_check( RT *rt, RT_TIME T )
 {
 	INT	i;
 
-	for ( i = 0; i < RT_MAX_THR; i++ ) {
-		RTTHR	*th = &rt->thr[i];
+	for ( i = 0; i < rt->cthr; i++ ) {
+		RTTHR	*th = rt->thr[i];
 		RTN	*l;
 
 		if ( th->st != TS_LABEL ) continue;
@@ -1133,7 +1189,7 @@ LOCAL INT frame_of( RTTHR *th, CONST RTN *l )
 /* Thread j goes on from just after label l, at time t */
 LOCAL void go_from( RT *rt, INT j, INT f, RTN *l, RT_TIME t )
 {
-	RTTHR	*th = &rt->thr[j];
+	RTTHR	*th = rt->thr[j];
 
 	th->nfr = f + 1;
 	th->pc = l->next;
@@ -1149,12 +1205,12 @@ LOCAL void jump_label( RT *rt, INT i, RTN *l, RT_TIME t )
 	INT	j, f, k;
 
 	/* the thread itself, or one it was started from */
-	for ( j = i; j >= 0; j = rt->thr[j].parent ) {
-		f = frame_of(&rt->thr[j], l);
+	for ( j = i; j >= 0; j = rt->thr[j]->parent ) {
+		f = frame_of(rt->thr[j], l);
 		if ( f >= 0 ) {
 			/* those between end: their groups are left */
 			for ( k = i; k >= 0 && k != j; ) {
-				INT	p = rt->thr[k].parent;
+				INT	p = rt->thr[k]->parent;
 
 				thr_kill(rt, k);
 				k = p;
@@ -1164,11 +1220,11 @@ LOCAL void jump_label( RT *rt, INT i, RTN *l, RT_TIME t )
 		}
 	}
 	/* elsewhere: the thread whose block it is, or the top made to go on there */
-	for ( j = 0; j < RT_MAX_THR; j++ ) {
-		if ( rt->thr[j].st == TS_FREE || rt->thr[j].trig ) continue;
-		f = frame_of(&rt->thr[j], l);
+	for ( j = 0; j < rt->cthr; j++ ) {
+		if ( rt->thr[j]->st == TS_FREE || rt->thr[j]->trig ) continue;
+		f = frame_of(rt->thr[j], l);
 		if ( f >= 0 ) {
-			if ( i >= 0 && i != j && rt->thr[i].trig ) thr_end(rt, i);
+			if ( i >= 0 && i != j && rt->thr[i]->trig ) thr_end(rt, i);
 			go_from(rt, j, f, l, t);
 			return;
 		}
@@ -1176,8 +1232,8 @@ LOCAL void jump_label( RT *rt, INT i, RTN *l, RT_TIME t )
 	if ( l->up == NULL ) {
 		j = thr_new(rt, -1, l->next, NULL, FR_TOP, NULL, t);
 		if ( j >= 0 ) {
-			rt->thr[j].block = l->block;
-			if ( i >= 0 && rt->thr[i].trig && rt->thr[i].st != TS_FREE ) thr_end(rt, i);
+			rt->thr[j]->block = l->block;
+			if ( i >= 0 && rt->thr[i]->trig && rt->thr[i]->st != TS_FREE ) thr_end(rt, i);
 		}
 		return;
 	}
@@ -1186,7 +1242,7 @@ LOCAL void jump_label( RT *rt, INT i, RTN *l, RT_TIME t )
 
 LOCAL void do_jump( RT *rt, INT i, CONST UB *target, RT_TIME T )
 {
-	RTTHR	*th = ( i >= 0 ) ? &rt->thr[i] : NULL;
+	RTTHR	*th = ( i >= 0 ) ? rt->thr[i] : NULL;
 	RTN	*l;
 	RT_TIME	t = ( th != NULL ) ? th->t : T;
 
@@ -1272,10 +1328,10 @@ LOCAL void onended( RT *rt, INT k, RT_TIME T )
 		INT	i;
 
 		/* a thread standing at it goes on; else the program goes there */
-		for ( i = 0; l != NULL && i < RT_MAX_THR; i++ ) {
-			if ( rt->thr[i].st == TS_LABEL && rt_eq(rt->thr[i].label, arg) ) {
-				rt->thr[i].st = TS_RUN;
-				if ( rt->thr[i].t < T ) rt->thr[i].t = T;
+		for ( i = 0; l != NULL && i < rt->cthr; i++ ) {
+			if ( rt->thr[i]->st == TS_LABEL && rt_eq(rt->thr[i]->label, arg) ) {
+				rt->thr[i]->st = TS_RUN;
+				if ( rt->thr[i]->t < T ) rt->thr[i]->t = T;
 				return;
 			}
 		}
@@ -1353,7 +1409,11 @@ EXPORT void rt_play_only( RT *rt, INT inst, RT_TIME now )
 EXPORT void rt_media_event( RT *rt, INT inst, INT gen, UINT ev, RT_V v, RT_TIME now )
 {
 	(void)now;
-	if ( rt == NULL || inst < 0 || inst >= rt->nmedia || rt->nmev >= 64 ) return;
+	if ( rt == NULL || inst < 0 || inst >= rt->nmedia ) return;
+	if ( !rt_room(rt, &rt->mev, &rt->cmev, rt->nmev + 1, sizeof(*rt->mev)) ) {
+		say(rt, "realtime: not enough memory for an event of a medium", NULL);
+		return;
+	}
 	rt->mev[rt->nmev].inst = inst;
 	rt->mev[rt->nmev].gen = gen;
 	rt->mev[rt->nmev].ev = ev;
@@ -1380,7 +1440,7 @@ LOCAL void obj_to( RT *rt, INT i, INT k, INT prop, RT_V v, RT_TIME dur )
 	RT_OBJ	*o = &rt->obj[k];
 
 	if ( dur > 0 ) {
-		RTANIM	*a = anim_new(rt, AN_OBJ, k, prop, i, rt->thr[i].t);
+		RTANIM	*a = anim_new(rt, AN_OBJ, k, prop, i, rt->thr[i]->t);
 
 		if ( a != NULL ) {
 			a->n = 2;
@@ -1398,7 +1458,7 @@ LOCAL void obj_to( RT *rt, INT i, INT k, INT prop, RT_V v, RT_TIME dur )
 
 LOCAL void ctrl_obj( RT *rt, INT i, RTN *n, INT k )
 {
-	RTTHR		*th = &rt->thr[i];
+	RTTHR		*th = rt->thr[i];
 	RT_OBJ		*o = &rt->obj[k];
 	CONST UB	*c = n->s2;
 	RT_TIME		dur = dur_of(rt, th, n->s3);
@@ -1476,7 +1536,7 @@ LOCAL void media_to( RT *rt, INT i, INT k, INT prop, RT_V from, RT_V v, RT_TIME 
 		mop(rt, k, ( prop == MP_VOLUME ) ? RT_MO_VOLUME : ( prop == MP_PAN ) ? RT_MO_PAN : RT_MO_RATE, v);
 		return;
 	}
-	a = anim_new(rt, AN_MEDIA, k, prop, i, ( i >= 0 ) ? rt->thr[i].t : rt->now);
+	a = anim_new(rt, AN_MEDIA, k, prop, i, ( i >= 0 ) ? rt->thr[i]->t : rt->now);
 	if ( a == NULL ) return;
 	a->n = 2;
 	a->val[0] = from;
@@ -1489,7 +1549,7 @@ LOCAL void media_to( RT *rt, INT i, INT k, INT prop, RT_V from, RT_V v, RT_TIME 
 
 LOCAL void ctrl_media1( RT *rt, INT i, RTN *n, INT k )
 {
-	RTTHR		*th = &rt->thr[i];
+	RTTHR		*th = rt->thr[i];
 	RT_MEDIA	*m = &rt->media[k];
 	CONST UB	*c = n->s2;
 	RT_TIME		dur = dur_of(rt, th, n->s3);
@@ -1588,8 +1648,8 @@ LOCAL INT top_thread( RT *rt )
 {
 	INT	i;
 
-	for ( i = 0; i < RT_MAX_THR; i++ ) {
-		if ( rt->thr[i].st != TS_FREE && !rt->thr[i].trig && rt->thr[i].fr[0].kind == FR_TOP ) return i;
+	for ( i = 0; i < rt->cthr; i++ ) {
+		if ( rt->thr[i]->st != TS_FREE && !rt->thr[i]->trig && rt->thr[i]->fr[0].kind == FR_TOP ) return i;
 	}
 	return -1;
 }
@@ -1598,8 +1658,8 @@ LOCAL void group_hold( RT *rt, INT g, BOOL on, RT_TIME T )
 {
 	INT	k;
 
-	for ( k = 0; k < RT_MAX_THR; k++ ) {
-		RTTHR	*th = &rt->thr[k];
+	for ( k = 0; k < rt->cthr; k++ ) {
+		RTTHR	*th = rt->thr[k];
 
 		if ( th->st == TS_FREE || !descends(rt, k, g) ) continue;
 		if ( on && !th->held ) {
@@ -1612,8 +1672,8 @@ LOCAL void group_hold( RT *rt, INT g, BOOL on, RT_TIME T )
 			if ( th->until != RT_NEVER ) th->until += T - th->held_at;
 		}
 	}
-	for ( k = 0; k < RT_MAX_ANIM; k++ ) {
-		RTANIM	*a = &rt->anim[k];
+	for ( k = 0; k < rt->canim; k++ ) {
+		RTANIM	*a = rt->anim[k];
 
 		if ( !a->used || a->thr < 0 || !descends(rt, a->thr, g) ) continue;
 		if ( on && a->held_at == 0 ) {
@@ -1630,14 +1690,14 @@ LOCAL void group_start( RT *rt, RTN *g, INT parent, RT_TIME t, RT_TIME ff )
 	INT	c = thr_new(rt, parent, g->body, g, FR_GROUP, g, t);
 
 	if ( c < 0 ) return;
-	if ( g->i2 >= 0 ) rt->thr[c].stream = g->i2;
-	if ( ff > 0 ) rt->thr[c].ff_until = ff;
+	if ( g->i2 >= 0 ) rt->thr[c]->stream = g->i2;
+	if ( ff > 0 ) rt->thr[c]->ff_until = ff;
 	run_thread(rt, c, t);
 }
 
 LOCAL void ctrl_group( RT *rt, INT i, RTN *n )
 {
-	RTTHR		*th = &rt->thr[i];
+	RTTHR		*th = rt->thr[i];
 	CONST UB	*c = n->s2;
 	RT_TIME		T = th->t;
 	INT		k, found = 0;
@@ -1645,8 +1705,8 @@ LOCAL void ctrl_group( RT *rt, INT i, RTN *n )
 
 	if ( rt->cur >= 0 && rt->cur < rt->nblk ) g = group_in(rt->blk[rt->cur].body, n->s1);
 	if ( g == NULL ) g = group_in(rt->pre, n->s1);
-	for ( k = 0; k < RT_MAX_THR; k++ ) {
-		RTTHR	*gt = &rt->thr[k];
+	for ( k = 0; k < rt->cthr; k++ ) {
+		RTTHR	*gt = rt->thr[k];
 
 		if ( gt->st == TS_FREE || gt->group == NULL || !rt_eq(gt->group->s1, n->s1) ) continue;
 		found++;
@@ -1660,19 +1720,19 @@ LOCAL void ctrl_group( RT *rt, INT i, RTN *n )
 			RT_V	s = ( n->v[0] > 0 ) ? n->v[0] : RT_ONE;
 			INT	q;
 
-			for ( q = 0; q < RT_MAX_THR; q++ ) {
-				RTTHR	*d = &rt->thr[q];
+			for ( q = 0; q < rt->cthr; q++ ) {
+				RTTHR	*d = rt->thr[q];
 
 				if ( d->st == TS_FREE || !descends(rt, q, k) ) continue;
 				if ( d->t > T ) d->t = T + rt_muldiv(d->t - T, d->speed, s);
 				d->speed = s;
 			}
-			for ( q = 0; q < RT_MAX_ANIM; q++ ) {
-				RTANIM	*a = &rt->anim[q];
+			for ( q = 0; q < rt->canim; q++ ) {
+				RTANIM	*a = rt->anim[q];
 
 				if ( a->used && a->thr >= 0 && descends(rt, a->thr, k) && a->dur > 0 ) {
 					RT_TIME	e = T - a->t0;
-					RT_V	old = ( rt->thr[a->thr].speed > 0 ) ? rt->thr[a->thr].speed : RT_ONE;
+					RT_V	old = ( rt->thr[a->thr]->speed > 0 ) ? rt->thr[a->thr]->speed : RT_ONE;
 
 					a->dur = rt_muldiv(a->dur, old, s);
 					a->t0 = T - rt_muldiv(e, old, s);
@@ -1681,8 +1741,8 @@ LOCAL void ctrl_group( RT *rt, INT i, RTN *n )
 		} else if ( rt_same(c, "reverse") ) {
 			INT	q;
 
-			for ( q = 0; q < RT_MAX_ANIM; q++ ) {
-				RTANIM	*a = &rt->anim[q];
+			for ( q = 0; q < rt->canim; q++ ) {
+				RTANIM	*a = rt->anim[q];
 
 				if ( a->used && a->thr >= 0 && descends(rt, a->thr, k) && a->dur > 0 ) {
 					RT_TIME	e = ( T - a->t0 ) % a->dur;
@@ -1712,9 +1772,9 @@ LOCAL void ctrl_trigger( RT *rt, RTN *n )
 	INT	k;
 
 	for ( k = 0; k < rt->ntrig; k++ ) {
-		if ( rt_eq(rt->trig[k].node->s4, n->s1) ) {
-			if ( rt_same(n->s2, "enable") ) rt->trig[k].enabled = TRUE;
-			else if ( rt_same(n->s2, "disable") ) rt->trig[k].enabled = FALSE;
+		if ( rt_eq(rt->trig[k]->node->s4, n->s1) ) {
+			if ( rt_same(n->s2, "enable") ) rt->trig[k]->enabled = TRUE;
+			else if ( rt_same(n->s2, "disable") ) rt->trig[k]->enabled = FALSE;
 		}
 	}
 }
@@ -1776,9 +1836,13 @@ LOCAL void interp_anim( RT *rt, INT i, UINT kind, INT target, INT prop, CONST RT
 	INT	k;
 
 	if ( n < 2 ) return;
-	if ( n > RT_MAX_KEY ) n = RT_MAX_KEY;
-	a = anim_new(rt, kind, target, prop, i, rt->thr[i].t);
+	a = anim_new(rt, kind, target, prop, i, rt->thr[i]->t);
 	if ( a == NULL ) return;
+	if ( !rt_anim_keys(rt, a, n) ) {
+		a->used = FALSE;
+		say(rt, "realtime: not enough memory for the values of a change", NULL);
+		return;
+	}
 	a->n = n;
 	for ( k = 0; k < n; k++ ) {
 		a->val[k] = val[k];
@@ -1792,15 +1856,13 @@ LOCAL void interp_anim( RT *rt, INT i, UINT kind, INT target, INT prop, CONST RT
 	a->before = val[0];
 }
 
-LOCAL void interp( RT *rt, INT i, RTN *ip, RT_TIME T )
+LOCAL void interp_run( RT *rt, INT i, RTN *ip, RT_TIME T, RT_V *val )
 {
-	RTTHR	*th = &rt->thr[i];
+	RTTHR	*th = rt->thr[i];
 	RTN	*p, *first = NULL;
 	RT_TIME	step = 0, seg;
-	RT_V	val[RT_MAX_KEY];
 	INT	np = 0, d = ip->i1;
 
-	rt_zero(val, sizeof(val));
 	for ( p = ip->body; p != NULL; p = p->next ) {
 		if ( p->op == OP_TDELTA ) {
 			if ( step == 0 ) step = dur_of(rt, th, p->s1);
@@ -1857,8 +1919,7 @@ LOCAL void interp( RT *rt, INT i, RTN *ip, RT_TIME T )
 				for ( e = 0; e < 4; e++ ) {
 					n = 0;
 					for ( q = p; q != NULL; q = q->next ) {
-						if ( q->op == OP_CTRL && rt_eq(q->s1, p->s1) && rt_eq(q->s2, p->s2)
-						  && n < RT_MAX_KEY ) {
+						if ( q->op == OP_CTRL && rt_eq(q->s1, p->s1) && rt_eq(q->s2, p->s2) ) {
 							val[n++] = rt_val(rt_attr(q->nd, edge[e]), rt->obj[obj].p[e]);
 						}
 					}
@@ -1868,7 +1929,7 @@ LOCAL void interp( RT *rt, INT i, RTN *ip, RT_TIME T )
 				continue;
 			}
 			for ( q = p; q != NULL; q = q->next ) {
-				if ( q->op == OP_CTRL && rt_eq(q->s1, p->s1) && rt_eq(q->s2, p->s2) && n < RT_MAX_KEY ) {
+				if ( q->op == OP_CTRL && rt_eq(q->s1, p->s1) && rt_eq(q->s2, p->s2) ) {
 					val[n++] = q->v[0];
 				}
 			}
@@ -1877,8 +1938,8 @@ LOCAL void interp( RT *rt, INT i, RTN *ip, RT_TIME T )
 
 				media_to(rt, i, med, prop, val[0], val[0], 0, FALSE);
 				interp_anim(rt, i, AN_MEDIA, med, prop, val, n, ip, seg);
-				for ( k = 0; k < RT_MAX_ANIM; k++ ) {
-					a = &rt->anim[k];
+				for ( k = 0; k < rt->canim; k++ ) {
+					a = rt->anim[k];
 					if ( a->used && a->kind == AN_MEDIA && a->target == med ) a->last = -1;
 				}
 			} else if ( obj >= 0 && prop >= 0 ) {
@@ -1912,7 +1973,7 @@ LOCAL void interp( RT *rt, INT i, RTN *ip, RT_TIME T )
 			for ( e = 0; e < 6; e++ ) {
 				n = 0;
 				for ( p = ip->body; p != NULL; p = p->next ) {
-					if ( p->op == OP_IMAGE && p->i1 == obj && n < RT_MAX_KEY ) {
+					if ( p->op == OP_IMAGE && p->i1 == obj ) {
 						val[n++] = rt_val(rt_attr(p->nd, nm[e]), o->base[pp[e]]);
 					}
 				}
@@ -1928,7 +1989,7 @@ LOCAL void interp( RT *rt, INT i, RTN *ip, RT_TIME T )
 			for ( e = 0; e < 2; e++ ) {
 				n = 0;
 				for ( p = ip->body; p != NULL; p = p->next ) {
-					if ( p->op == OP_FIGREF && rt_eq(p->s1, first->s1) && n < RT_MAX_KEY ) {
+					if ( p->op == OP_FIGREF && rt_eq(p->s1, first->s1) ) {
 						val[n++] = p->v[e];
 					}
 				}
@@ -1972,6 +2033,23 @@ LOCAL void interp( RT *rt, INT i, RTN *ip, RT_TIME T )
 	}
 }
 
+/* An <interpolation>: the values it gathers need room for as many as it has events */
+LOCAL void interp( RT *rt, INT i, RTN *ip, RT_TIME T )
+{
+	RTN	*p;
+	INT	n = 1;
+	RT_V	*val;
+
+	for ( p = ip->body; p != NULL; p = p->next ) n++;
+	val = (RT_V *)rt->host.alloc(rt->host.arg, sizeof(RT_V) * (SZ)n);
+	if ( val == NULL ) {
+		say(rt, "realtime: not enough memory for an interpolation", NULL);
+		return;
+	}
+	interp_run(rt, i, ip, T, val);
+	rt->host.free(rt->host.arg, val);
+}
+
 /* ---------------------------------------------------------------- keyframes */
 
 LOCAL INT kf_prop( CONST UB *s )
@@ -2007,9 +2085,17 @@ LOCAL BOOL kf_read( RT *rt, RTN *n, RTANIM *a )
 {
 	CONST T_TADNODE	*c;
 	CONST UB	*s;
+	INT		nk;
 
 	a->n = 0;
-	for ( c = n->nd->first; c != NULL && a->n < RT_MAX_KEY; c = c->next ) {
+	for ( c = n->nd->first, nk = 0; c != NULL; c = c->next ) {
+		if ( rt_is(c, "keyframe") ) nk++;
+	}
+	if ( !rt_anim_keys(rt, a, nk) ) {
+		say(rt, "realtime: not enough memory for the keyframes", NULL);
+		return FALSE;
+	}
+	for ( c = n->nd->first; c != NULL; c = c->next ) {
 		if ( !rt_is(c, "keyframe") ) continue;
 		a->off[a->n] = kf_off(rt_attr(c, "offset"));
 		a->val[a->n] = rt_val(rt_attr(c, "value"), 0);
@@ -2030,7 +2116,7 @@ LOCAL BOOL kf_read( RT *rt, RTN *n, RTANIM *a )
 
 LOCAL void keyframes( RT *rt, INT i, RTN *n )
 {
-	RTTHR	*th = &rt->thr[i];
+	RTTHR	*th = rt->thr[i];
 	RTANIM	*a;
 	INT	k, med = -1, prop;
 
@@ -2068,8 +2154,12 @@ LOCAL void trig_add( RT *rt, RTN *n )
 {
 	RTTRIG	*tr;
 
-	if ( n->trig >= 0 || rt->ntrig >= RT_MAX_TRIG ) return;
-	tr = &rt->trig[rt->ntrig];
+	if ( n->trig >= 0 ) return;
+	if ( rt->ntrig >= rt->ctrig && !rt_room_slots(rt, &rt->trig, &rt->ctrig, rt->ntrig + 1, sizeof(RTTRIG)) && rt->ntrig >= rt->ctrig ) {
+		say(rt, "realtime: not enough memory for another trigger", NULL);
+		return;
+	}
+	tr = rt->trig[rt->ntrig];
 	tr->node = n;
 	tr->enabled = rt_bool(rt_attr(n->nd, "enabled"), TRUE);
 	tr->inside = FALSE;
@@ -2085,7 +2175,7 @@ LOCAL BOOL is_user_event( CONST UB *ev )
 
 LOCAL void wait_meet( RT *rt, INT i, RTN *n )
 {
-	RTTHR		*th = &rt->thr[i];
+	RTTHR		*th = rt->thr[i];
 	CONST UB	*to = rt_attr(n->nd, "timeout");
 	RT_TIME		d = ( to != NULL ) ? dur_of(rt, th, to) : 0;
 
@@ -2127,7 +2217,7 @@ LOCAL void image_meet( RT *rt, RTN *n )
 
 LOCAL void exec( RT *rt, INT i, RTN *n )
 {
-	RTTHR	*th = &rt->thr[i];
+	RTTHR	*th = rt->thr[i];
 	RT_TIME	d;
 	INT	k, c;
 
@@ -2135,8 +2225,8 @@ LOCAL void exec( RT *rt, INT i, RTN *n )
 	case OP_GROUP:
 		c = thr_new(rt, i, n->body, n, FR_GROUP, n, th->t);
 		if ( c < 0 ) return;
-		th = &rt->thr[i];
-		if ( n->i2 >= 0 ) rt->thr[c].stream = n->i2;
+		th = rt->thr[i];
+		if ( n->i2 >= 0 ) rt->thr[c]->stream = n->i2;
 		if ( n->i1 ) {
 			th->st = TS_CHILD;
 			th->child = c;
@@ -2305,7 +2395,7 @@ LOCAL void exec( RT *rt, INT i, RTN *n )
 /* One node of a thread, or the end of the block it is in */
 LOCAL void one( RT *rt, INT i )
 {
-	RTTHR	*th = &rt->thr[i];
+	RTTHR	*th = rt->thr[i];
 	RTFRAME	*f = &th->fr[th->nfr - 1];
 	RTN	*n = th->pc;
 
@@ -2328,7 +2418,7 @@ LOCAL void one( RT *rt, INT i )
 	}
 	th->pc = n->next;
 	exec(rt, i, n);
-	th = &rt->thr[i];
+	th = rt->thr[i];
 	if ( n->op != OP_USPECT && th->st != TS_FREE ) th->u.tsys = -2;
 }
 
@@ -2336,7 +2426,7 @@ LOCAL void run_thread( RT *rt, INT i, RT_TIME limit )
 {
 	INT	guard = 0;
 
-	while ( rt->thr[i].st == TS_RUN && !rt->thr[i].held && rt->thr[i].t <= limit && guard++ < 100000 ) {
+	while ( rt->thr[i]->st == TS_RUN && !rt->thr[i]->held && rt->thr[i]->t <= limit && guard++ < 100000 ) {
 		one(rt, i);
 	}
 }
@@ -2346,11 +2436,11 @@ LOCAL INT earliest( RT *rt, RT_TIME T )
 {
 	INT	i, best = -1;
 
-	for ( i = 0; i < RT_MAX_THR; i++ ) {
-		RTTHR	*th = &rt->thr[i];
+	for ( i = 0; i < rt->cthr; i++ ) {
+		RTTHR	*th = rt->thr[i];
 
 		if ( th->st != TS_RUN || th->held || th->t > T ) continue;
-		if ( best < 0 || th->t < rt->thr[best].t ) best = i;
+		if ( best < 0 || th->t < rt->thr[best]->t ) best = i;
 	}
 	return best;
 }
@@ -2361,7 +2451,7 @@ LOCAL void reset_trig( RT *rt )
 {
 	INT	k;
 
-	for ( k = 0; k < rt->ntrig; k++ ) rt->trig[k].node->trig = -1;
+	for ( k = 0; k < rt->ntrig; k++ ) rt->trig[k]->node->trig = -1;
 	rt->ntrig = 0;
 }
 
@@ -2372,7 +2462,7 @@ LOCAL void start_block( RT *rt, INT b, RT_TIME t, BOOL user )
 	RTUNIT	u;
 
 	rt->cur = b;
-	for ( i = 0; i < RT_MAX_THR; i++ ) rt->thr[i].st = TS_FREE;
+	for ( i = 0; i < rt->cthr; i++ ) rt->thr[i]->st = TS_FREE;
 	reset_trig(rt);
 	if ( rt->var != NULL ) rt_zero(rt->var, sizeof(H) * RT_NVAR);	/* variables last one <realData> */
 	play = ( blk->autoplay < 0 ) ? (INT)rt->autoplay : blk->autoplay;
@@ -2385,10 +2475,10 @@ LOCAL void start_block( RT *rt, INT b, RT_TIME t, BOOL user )
 	blk->delay = ( blk->delay_s != NULL ) ? rt_utime(rt, &u, blk->delay_s, NULL) : 0;
 	if ( b == 0 && rt->pre != NULL && rt->loops == 0 && rt->all_loops == 0 ) {
 		i = thr_new(rt, -1, rt->pre, NULL, FR_TOP, NULL, t);
-		if ( i >= 0 ) rt->thr[i].trig = FALSE;
+		if ( i >= 0 ) rt->thr[i]->trig = FALSE;
 	}
 	i = thr_new(rt, -1, blk->body, NULL, FR_TOP, NULL, t + blk->delay);
-	if ( i >= 0 ) rt->thr[i].block = b;
+	if ( i >= 0 ) rt->thr[i]->block = b;
 }
 
 /* Is anything of the <realData> still going? */
@@ -2396,16 +2486,16 @@ LOCAL BOOL block_busy( RT *rt )
 {
 	INT	i;
 
-	for ( i = 0; i < RT_MAX_THR; i++ ) {
-		if ( rt->thr[i].st != TS_FREE && !rt->thr[i].trig ) return TRUE;
+	for ( i = 0; i < rt->cthr; i++ ) {
+		if ( rt->thr[i]->st != TS_FREE && !rt->thr[i]->trig ) return TRUE;
 	}
 	for ( i = 0; i < rt->nmedia; i++ ) {
 		RT_MEDIA	*m = &rt->media[i];
 
 		if ( m->state == RT_MS_PLAYING || ( m->state == RT_MS_LOADING && m->play_on_load ) ) return TRUE;
 	}
-	for ( i = 0; i < RT_MAX_ANIM; i++ ) {
-		if ( rt->anim[i].used && rt->anim[i].iter > 0 ) return TRUE;
+	for ( i = 0; i < rt->canim; i++ ) {
+		if ( rt->anim[i]->used && rt->anim[i]->iter > 0 ) return TRUE;
 	}
 	/* and the last note still sounding */
 	return (BOOL)( rt->nsndq > 0 || rt->sound_until > rt->now );
@@ -2485,12 +2575,19 @@ LOCAL void preroll_in( RT *rt, RTN *n, UW *done )
 
 LOCAL void preroll( RT *rt )
 {
-	UW	done[RT_MAX_OBJ];
+	UW	*done;
 	INT	b;
 
-	rt_zero(done, sizeof(done));
+	/* a word of property bits for each object: which of its properties have been put where they start */
+	done = (UW *)rt->host.alloc(rt->host.arg, sizeof(UW) * (SZ)( rt->nobj + 1 ));
+	if ( done == NULL ) {
+		say(rt, "realtime: not enough memory to make the pictures ready", NULL);
+		return;
+	}
+	rt_zero(done, sizeof(UW) * (SZ)( rt->nobj + 1 ));
 	preroll_in(rt, rt->pre, done);
 	for ( b = 0; b < rt->nblk; b++ ) preroll_in(rt, rt->blk[b].body, done);
+	rt->host.free(rt->host.arg, done);
 }
 
 /* ---------------------------------------------------------------- the calls */
@@ -2546,8 +2643,8 @@ LOCAL void reset_run( RT *rt )
 {
 	INT	k, j;
 
-	for ( k = 0; k < RT_MAX_THR; k++ ) rt->thr[k].st = TS_FREE;
-	for ( k = 0; k < RT_MAX_ANIM; k++ ) rt->anim[k].used = FALSE;
+	for ( k = 0; k < rt->cthr; k++ ) rt->thr[k]->st = TS_FREE;
+	for ( k = 0; k < rt->canim; k++ ) rt->anim[k]->used = FALSE;
 	reset_trig(rt);
 	rt->nsndq = 0;
 	rt->nmev = 0;
@@ -2659,10 +2756,10 @@ EXPORT RT_TIME rt_step( RT *rt, RT_TIME now )
 		}
 	}
 	/* and what moves */
-	for ( k = 0; k < RT_MAX_ANIM; k++ ) {
-		if ( rt->anim[k].used ) {
-			anim_apply(rt, &rt->anim[k], T);
-			if ( rt->anim[k].used && rt->anim[k].held_at == 0 ) next = T + RT_FRAME_US;
+	for ( k = 0; k < rt->canim; k++ ) {
+		if ( rt->anim[k]->used ) {
+			anim_apply(rt, rt->anim[k], T);
+			if ( rt->anim[k]->used && rt->anim[k]->held_at == 0 ) next = T + RT_FRAME_US;
 		}
 	}
 	if ( rt->ffwd && T >= rt->ffwd_to ) rt->ffwd = FALSE;
@@ -2672,8 +2769,8 @@ EXPORT RT_TIME rt_step( RT *rt, RT_TIME now )
 		if ( !rt->finished && !rt->waiting_user ) next = T;
 	}
 
-	for ( i = 0; i < RT_MAX_THR; i++ ) {
-		RTTHR	*th = &rt->thr[i];
+	for ( i = 0; i < rt->cthr; i++ ) {
+		RTTHR	*th = rt->thr[i];
 
 		if ( th->held ) continue;
 		if ( th->st == TS_RUN && th->t < next ) next = th->t;
@@ -2856,18 +2953,18 @@ EXPORT BOOL rt_input( RT *rt, CONST RT_IN *in, RT_TIME now )
 		rt->ptr_x = in->x;
 		rt->ptr_y = in->y;
 	}
-	for ( k = 0; k < RT_MAX_THR; k++ ) {
-		if ( wait_match(rt, &rt->thr[k], in) ) {
-			rt->thr[k].woken = TRUE;
-			rt->thr[k].st = TS_RUN;
-			rt->thr[k].wait = NULL;
-			if ( rt->thr[k].t < T ) rt->thr[k].t = T;
+	for ( k = 0; k < rt->cthr; k++ ) {
+		if ( wait_match(rt, rt->thr[k], in) ) {
+			rt->thr[k]->woken = TRUE;
+			rt->thr[k]->st = TS_RUN;
+			rt->thr[k]->wait = NULL;
+			if ( rt->thr[k]->t < T ) rt->thr[k]->t = T;
 			took = TRUE;
 		}
 	}
 	n = rt->ntrig;
 	for ( k = 0; k < n; k++ ) {
-		RTTRIG	*tr = &rt->trig[k];
+		RTTRIG	*tr = rt->trig[k];
 
 		if ( trig_match(rt, tr, in, FALSE) ) {
 			tr->fired++;
@@ -2885,11 +2982,11 @@ EXPORT BOOL rt_would_take( CONST RT *rt, CONST RT_IN *in )
 	INT	k;
 
 	if ( rt == NULL || in == NULL || !rt->running ) return FALSE;
-	for ( k = 0; k < RT_MAX_THR; k++ ) {
-		if ( wait_match((RT *)rt, (RTTHR *)&rt->thr[k], in) ) return TRUE;
+	for ( k = 0; k < rt->cthr; k++ ) {
+		if ( wait_match((RT *)rt, (RTTHR *)rt->thr[k], in) ) return TRUE;
 	}
 	for ( k = 0; k < rt->ntrig; k++ ) {
-		if ( trig_match((RT *)rt, (RTTRIG *)&rt->trig[k], in, TRUE) ) return TRUE;
+		if ( trig_match((RT *)rt, (RTTRIG *)rt->trig[k], in, TRUE) ) return TRUE;
 	}
 	return FALSE;
 }

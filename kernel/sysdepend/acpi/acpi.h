@@ -19,11 +19,6 @@
 #ifndef _SYSDEPEND_ACPI_ACPI_
 #define _SYSDEPEND_ACPI_ACPI_
 
-#define ACPI_MAX_CPU		64	/* more than are started (CNF_MAX_PRCID), to count what is left */
-#define ACPI_MAX_IOAPIC		4
-#define ACPI_MAX_ISO		16
-#define ACPI_MAX_MCFG		4
-
 typedef struct {
 	UW	apic_id;
 	UW	uid;		/* the processor's UID in the namespace */
@@ -64,17 +59,17 @@ typedef struct {
 	BOOL		present;	/* the tables were there and good */
 	UB		oem[7];		/* the OEM ID of the RSDP */
 	INT		ncpu;			/* the enabled processors, threads included */
-	T_ACPICPU	cpu[ACPI_MAX_CPU];	/* the boot processor first */
+	T_ACPICPU	*cpu;			/* the boot processor first; as many as the MADT has (knl_acpi_take) */
 	INT		ncpu_later;		/* listed as able to come online later, not started */
-	INT		ncpu_over;		/* enabled ones beyond ACPI_MAX_CPU */
+	INT		ncpu_over;		/* enabled ones not kept for want of memory */
 	UD		lapic_addr;
 	INT		nioapic;
-	T_ACPIIOAPIC	ioapic[ACPI_MAX_IOAPIC];
+	T_ACPIIOAPIC	*ioapic;		/* as many as the MADT has */
 	INT		niso;
-	T_ACPIISO	iso[ACPI_MAX_ISO];
+	T_ACPIISO	*iso;			/* as many as the MADT has */
 	INT		lint_nmi;	/* the LINT input wired to NMI (0 or 1), -1 none */
 	INT		nmcfg;
-	T_ACPIMCFG	mcfg[ACPI_MAX_MCFG];
+	T_ACPIMCFG	*mcfg;			/* as many as the MCFG has */
 	UD		hpet_addr;	/* 0 when there is none */
 	/* FADT */
 	UH		sci_irq;
@@ -100,6 +95,8 @@ IMPORT T_ACPIINFO	knl_acpi;
 
 /* The tables at rsdp_pa read (reset_main.c, before the interrupt controllers are set up) */
 IMPORT ER	knl_acpi_init( UD rsdp_pa );
+/* The lists of the MADT and the MCFG kept, as long as they are, once Kmalloc works (knl_init_device) */
+IMPORT ER	knl_acpi_take( void );
 /* The index'th table with the signature, NULL when there is none (linear map) */
 IMPORT CONST void *knl_acpi_table( CONST char *sig, INT index );
 /* The input an ISA interrupt is wired to, and its MPS flags */

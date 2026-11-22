@@ -44,10 +44,13 @@
 extern "C" {
 #endif
 
-#define UD_YOMI_MAX	64		/* bytes of a reading, UTF-8 */
-#define UD_WORD_MAX	128		/* bytes of a word */
-#define UD_LINE_MAX	( UD_YOMI_MAX + UD_WORD_MAX + 32 )
-#define UD_TEXT_MAX	( 512 * 1024 )	/* bytes of the dictionary */
+/*
+ * A reading, a word and the dictionary have no length limit here: the
+ * functions below work on the lengths they are given and copy nothing
+ * but into the buffer the caller sizes (the dictionary's own buffer
+ * with its max, the buffer ud_yomi writes a reading into: the reading's
+ * length plus 1 is enough).
+ */
 
 /*
  * The letters chosen in a text to be registered, handed to 単語登録 as
@@ -107,15 +110,16 @@ IMPORT BOOL ud_match( CONST UDENT *e, CONST UB *key, INT nkey );
 
 /*
  * A reading as it is kept: katakana as hiragana, the spaces round it
- * taken off. Its length, or E_PAR when it is empty, too long, or has a
- * letter a reading cannot have (a space, a tab, a control).
+ * taken off. Its length, or E_PAR when it is empty, does not fit in max
+ * (its length is below max), or has a letter a reading cannot have (a
+ * space, a tab, a control).
  */
 IMPORT INT  ud_yomi( CONST UB *in, INT n, UB *out, INT max );
 
 /*
  * A word put in its place: under the same reading the same word has its
  * part of speech changed. E_OK, E_PAR for a reading or word that cannot
- * be (empty, too long, a tab or a line's end in it, a part unknown),
+ * be (empty, a tab or a line's end in it, a part unknown),
  * E_LIMIT when the text would not fit in max.
  */
 IMPORT ER   ud_put( UB *text, INT *p_len, INT max, CONST UB *yomi, INT nyomi,
@@ -128,7 +132,9 @@ IMPORT ER   ud_del( UB *text, INT *p_len, CONST UB *yomi, INT nyomi, CONST UB *w
  * A file of words read in (another converter's, or one written out
  * here) and every word in it put: how many were put. *p_bad says how
  * many lines were not words (left out). E_LIMIT when the dictionary
- * filled up before the end; what was put stays.
+ * filled up before the end; what was put stays. A line of any length is
+ * read; a UTF-16 file needs a free place at the end of text as long as
+ * its longest line in UTF-8, and is E_LIMIT without it.
  */
 IMPORT INT  ud_import( UB *text, INT *p_len, INT max, CONST UB *in, INT nin, INT *p_bad );
 

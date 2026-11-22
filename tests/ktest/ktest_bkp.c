@@ -1574,12 +1574,12 @@ LOCAL void test_window( void )
  */
 LOCAL BOOL menu_choose( INT wid, CONST char *label )
 {
-	BOOL		had[WM_PANEL_MAX + 1];
+	BOOL		had[KT_PANEL_SEEN + 1];
 	T_WMPART	pt;
 	T_WMEV		ev;
 	INT		pid, mp = 0, i;
 
-	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) had[pid] = (BOOL)( wm_panel_wid(pid) > 0 );
+	for ( pid = 1; pid <= kt_panel_last(); pid++ ) had[pid] = (BOOL)( wm_panel_wid(pid) > 0 );
 	knl_memset(&ev, 0, sizeof(ev));
 	ev.wid = wid;
 	ev.x = 224;				/* the panel's ground between its buttons, on either sheet */
@@ -1592,7 +1592,7 @@ LOCAL BOOL menu_choose( INT wid, CONST char *label )
 	knl_wmobj_event(&ev);
 	for ( i = 0; i < 30 && mp == 0; i++ ) {
 		tk_dly_tsk(100);
-		for ( pid = 1; pid <= WM_PANEL_MAX && mp == 0; pid++ ) {
+		for ( pid = 1; pid <= kt_panel_last() && mp == 0; pid++ ) {
 			if ( !had[pid] && wm_panel_wid(pid) > 0 ) mp = pid;
 		}
 	}

@@ -525,12 +525,13 @@ EXPORT void igt_test_start( void )
 	for ( k = 0; k < IGT_NENG; k++ ) {
 		IGTENG	*e = &knl_igt.eng[k];
 
+		if ( !e->up ) continue;
 		tm_printf((UB *)"igt test: interrupts %s: jobs %ld, user %ld, context switch %ld, errors %ld; "
 			  "ended by the look %ld, without word of idle %ld; resets %ld\n", e->name, e->jobs, e->irq_user,
 			  e->irq_ctx, e->irq_err, e->by_poll, e->no_idle, e->resets);
 		tm_printf((UB *)"igt test: interrupts %s: RING_IMR %08x HWSTAM %08x, its bits of GT IER %04x IMR %04x ISR %04x\n",
-			  e->name, igt_erd(e, RING_IMR), igt_erd(e, RING_HWSTAM), ( igt_rd(GT_IER(0)) >> e->shift ) & 0xffff,
-			  ( igt_rd(GT_IMR(0)) >> e->shift ) & 0xffff, ( igt_rd(GT_ISR(0)) >> e->shift ) & 0xffff);
+			  e->name, igt_erd(e, RING_IMR), igt_erd(e, RING_HWSTAM), ( igt_rd(GT_IER(e->iir)) >> e->shift ) & 0xffff,
+			  ( igt_rd(GT_IMR(e->iir)) >> e->shift ) & 0xffff, ( igt_rd(GT_ISR(e->iir)) >> e->shift ) & 0xffff);
 	}
 	tm_printf((UB *)"igt test: interrupt %d taken %ld times (spurious %ld, the display's %ld%s)\n", knl_igt.intno,
 		  knl_igt.irq_n, knl_igt.irq_spurious, knl_igt.irq_display,

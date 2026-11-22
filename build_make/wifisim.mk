@@ -57,7 +57,7 @@ $(WSAP_OBJ): $(TOP)/tools/wpa/build.sh $(wildcard $(TOP)/device/net/wifi/sim/wsa
 	     $(wildcard $(TOP)/device/net/wifi/wpa/*.[ch]) \
 	     $(wildcard $(TOP)/device/net/wifi/wpa/include/*.h $(TOP)/device/net/wifi/wpa/include/*/*.h)
 	@echo 'WPAAP $@'
-	@$(WSAP_ENV) OUT=$(patsubst %/,%,$(dir $(WSAP_OBJ))) bash $(TOP)/tools/wpa/build.sh ap
+	@$(WSAP_ENV) OUT=$(patsubst %/,%,$(dir $(WSAP_OBJ))) $(SHARED_X) bash $(TOP)/tools/wpa/build.sh ap
 endif
 
 ifeq ($(KTEST),1)

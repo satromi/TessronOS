@@ -589,12 +589,33 @@ EXPORT INT mc_shown( CONST MCDB *db, CONST MCCARD *c, INT f, UB *out, INT max )
 	if ( max <= 0 ) return 0;
 	out[0] = 0;
 	if ( v == NULL || f >= db->nf ) return 0;
-	if ( db->f[f].type == MC_T_LINK ) return mc_link_name(v, mc_len(v), out, max);
+	if ( db->f[f].type == MC_T_LINK ) {
+		(void)mc_link_name(v, mc_len(v), out, max);	/* what fits, for showing */
+		return (INT)mc_len(out);
+	}
 	n = mc_len(v);
 	if ( n > max - 1 ) n = mc_cut(v, n, max / 4);
 	m_copy(out, v, n);
 	out[n] = 0;
 	return n;
+}
+
+EXPORT UB *mc_link_name_all( CONST UB *el, INT len, INT *p_n )
+{
+	INT	n = mc_link_name(el, len, NULL, 0), got;
+	UB	*b;
+
+	*p_n = 0;
+	if ( n <= 0 ) return NULL;
+	b = (UB *)mc_alloc(n + 1);
+	if ( b == NULL ) return NULL;
+	got = mc_link_name(el, len, b, n + 1);
+	if ( got <= 0 ) {
+		mc_free(b);
+		return NULL;
+	}
+	*p_n = mc_len(b);
+	return b;
 }
 
 EXPORT INT mc_link_count( CONST MCDB *db )
@@ -668,6 +689,10 @@ LOCAL INT convert( CONST MCDB *db, CONST MCCARD *c, INT of, CONST MCFIELD *nf, U
 			return 0;
 		}
 		n = mc_link_name(v, n, out, max);
+		if ( n > mc_len(out) ) {
+			*p_lost = TRUE;		/* the name is longer than the field takes */
+			n = mc_len(out);
+		}
 		v = out;
 	} else if ( ot == MC_T_TEXT && nf->type == MC_T_NUM ) {
 		UB	t[MC_NUM_MAX * 2 + 8];
@@ -899,25 +924,12 @@ EXPORT ER mc_cond_make( MCCOND *k, INT type, CONST UB *s, INT n )
 	return E_OK;
 }
 
-EXPORT BOOL mc_cond_test( CONST MCDB *db, CONST MCCARD *c, INT f, CONST MCCOND *k )
+/* A condition tested on the value v (vn bytes) of a field of the type */
+LOCAL BOOL cond_on( INT type, CONST MCCOND *k, CONST UB *v, INT vn )
 {
-	UB		name[MC_OBJ_NAME + 8];
-	CONST UB	*v = mc_get(c, f);
-	INT		vn, r;
-	INT		type = db->f[f].type;
+	INT		r;
 	BOOL		eq;
 
-	if ( k->op == MC_OP_NONE ) return TRUE;
-	if ( v != NULL && type == MC_T_LINK ) {
-		vn = mc_link_name(v, mc_len(v), name, sizeof(name));
-		v = name;
-	} else {
-		vn = mc_len(v);
-	}
-	if ( v == NULL ) {
-		v = (CONST UB *)"";
-		vn = 0;
-	}
 	switch ( k->op ) {
 	case MC_OP_RX:
 		return mc_rx_find(k->rx, v, vn);
@@ -940,6 +952,31 @@ EXPORT BOOL mc_cond_test( CONST MCDB *db, CONST MCCARD *c, INT f, CONST MCCOND *
 	case MC_OP_GE:	return (BOOL)( r >= 0 );
 	default:	return FALSE;
 	}
+}
+
+EXPORT BOOL mc_cond_test( CONST MCDB *db, CONST MCCARD *c, INT f, CONST MCCOND *k )
+{
+	UB		*name = NULL;
+	CONST UB	*v = mc_get(c, f);
+	INT		vn = 0;
+	INT		type = db->f[f].type;
+	BOOL		yes;
+
+	if ( k->op == MC_OP_NONE ) return TRUE;
+	if ( v != NULL && type == MC_T_LINK ) {
+		/* the name whole: a condition on its end is met as on its start */
+		name = mc_link_name_all(v, mc_len(v), &vn);
+		v = name;
+	} else {
+		vn = mc_len(v);
+	}
+	if ( v == NULL ) {
+		v = (CONST UB *)"";
+		vn = 0;
+	}
+	yes = cond_on(type, k, v, vn);
+	mc_free(name);
+	return yes;
 }
 
 EXPORT INT mc_search( MCDB *db, CONST UB *CONST *cond, INT how, INT *p_at )
@@ -1072,11 +1109,15 @@ EXPORT INT mc_val_cmp( CONST MCDB *db, INT f, CONST MCCARD *a, CONST MCCARD *b )
 	}
 	if ( db->f[f].type == MC_T_NUM ) return mc_num_cmp(va, vb);
 	if ( db->f[f].type == MC_T_LINK ) {
-		UB	na[MC_OBJ_NAME + 8], nb[MC_OBJ_NAME + 8];
-		INT	la = mc_link_name(va, mc_len(va), na, sizeof(na));
-		INT	lb = mc_link_name(vb, mc_len(vb), nb, sizeof(nb));
+		INT	la = 0, lb = 0, r;
+		UB	*na = mc_link_name_all(va, mc_len(va), &la);
+		UB	*nb = mc_link_name_all(vb, mc_len(vb), &lb);
 
-		return mc_text_cmp(na, la, nb, lb);
+		/* the names whole: two that differ only after their first letters are told apart */
+		r = mc_text_cmp(( na != NULL ) ? na : (CONST UB *)"", la, ( nb != NULL ) ? nb : (CONST UB *)"", lb);
+		mc_free(na);
+		mc_free(nb);
+		return r;
 	}
 	return mc_text_cmp(va, mc_len(va), vb, mc_len(vb));
 }

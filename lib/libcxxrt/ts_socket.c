@@ -174,11 +174,12 @@ extern int so_resolveall( const char *name, int family, int flags, SO_ADDR *addr
  * have any of; the flags are kept in blocks of SOCK_BLK numbers, each
  * made when a number in it first comes into use and kept from then on,
  * so that a thread looking at one never meets a block moved or freed
- * under it. The blocks reach far past the table's size (SO_MAX of
- * include/ts/sodef.h).
+ * under it. The blocks reach as far as any number of the system's table
+ * can be (SO_NUM_CEIL of include/ts/sodef.h, 16384), however large the
+ * table grows below it.
  */
 #define SOCK_BLK	64
-#define SOCK_BLKS	256
+#define SOCK_BLKS	( 16384 / SOCK_BLK )
 
 static unsigned char	*sock_blk[SOCK_BLKS];
 

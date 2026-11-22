@@ -21,7 +21,8 @@
  *	NetBSD's on the way in and back on the way out. A socket number is
  *	the index of an entry here that holds the rump kernel's descriptor
  *	and the socket's owner -- the process it was made for, or 0 for the
- *	kernel -- so the numbers stay 0 .. SO_MAX - 1 as before. The owner is
+ *	kernel -- in a table that grows as sockets are made, up to the
+ *	system's limit (design 9.2.2). The owner is
  *	written when the socket is made and cleared when it is closed, so a
  *	number that comes round again is never taken for the one before it.
  *	The socket's real object is made and taken away at the same two
@@ -268,37 +269,194 @@ LOCAL INT nb_call( INT num, D *args, INT nargs, D *rv )
 
 /* ---------------------------------------------------------------- sockets and owners */
 
+/*
+ * The system's table of sockets (include/ts/sodef.h, design 9.2.2), as
+ * NetBSD's and Linux's tables of open files: an entry for each socket
+ * number, holding the rump kernel's descriptor and the socket's owner.
+ * It is made in blocks of SO_BLK numbers as the sockets come to need
+ * them, the lowest free number given first, so that it is as large as
+ * the most sockets there have been at once and never more than the
+ * system's limit (so_sysmax). A block once made stays where it is: a
+ * call reads its socket's entry without the lock (so_fd) and never
+ * meets one moved or freed under it.
+ *
+ * Each block counts the numbers of it in use, so that a free one is
+ * found without looking into full blocks; the owners that are processes
+ * count theirs in a list of their own (so_own), so that a process's
+ * count is had without a walk of the table. The list is made longer, in
+ * memory of its own, when an owner more comes; it is short, as there are
+ * few processes with sockets at once.
+ */
 typedef struct {
 	INT	fdp1;			/* the rump kernel's descriptor + 1; 0: free */
 	ID	owner;
 } SO_ENT;
 
-LOCAL SO_ENT		so_tab[SO_MAX];
+typedef struct {
+	SO_ENT	e[SO_BLK];
+	INT	used;			/* entries of it in use */
+} SO_BLOCK;
+
+typedef struct {
+	ID	owner;
+	INT	n;			/* its sockets: 1 or more */
+} SO_OWN;
+
+#define SO_NBLK		( SO_NUM_CEIL / SO_BLK )
+#define SO_OWN_MORE	8		/* owners the list grows by */
+
+LOCAL SO_BLOCK		*so_blk[SO_NBLK];
+LOCAL INT		so_nblk = 0;		/* blocks made, in order: numbers 0 .. so_nblk * SO_BLK - 1 */
+LOCAL INT		so_nused = 0;		/* sockets open */
+LOCAL INT		so_sysmax = SO_SYS_WANT;	/* the system's limit, as the stack comes up (nb_nofile) */
+LOCAL SO_OWN		*so_own = NULL;		/* so_nown of them, room for so_own_room */
+LOCAL INT		so_nown = 0, so_own_room = 0;
 LOCAL T_SPLOCK		so_lock;
+
+/* The entry of number s, NULL when it has none */
+LOCAL SO_ENT *so_ent( INT s )
+{
+	SO_BLOCK	*b;
+
+	if ( s < 0 || s >= SO_NUM_CEIL ) {
+		return NULL;
+	}
+	b = __atomic_load_n(&so_blk[s / SO_BLK], __ATOMIC_ACQUIRE);
+	return ( b != NULL ) ? &b->e[s % SO_BLK] : NULL;
+}
 
 /* The descriptor of socket s, -1 for none */
 LOCAL INT so_fd( INT s )
 {
-	if ( s < 0 || s >= SO_MAX ) {
-		return -1;
+	SO_ENT	*e = so_ent(s);
+
+	return ( e != NULL ) ? e->fdp1 - 1 : -1;
+}
+
+/* The numbers the table has room for now; every entry below it is made */
+LOCAL INT so_room( void )
+{
+	return __atomic_load_n(&so_nblk, __ATOMIC_ACQUIRE) * SO_BLK;
+}
+
+EXPORT INT knl_so_sysmax( void )
+{
+	return so_sysmax;
+}
+
+EXPORT INT knl_so_count( INT *p_room )
+{
+	if ( p_room != NULL ) {
+		*p_room = so_room();
 	}
-	return so_tab[s].fdp1 - 1;
+	return __atomic_load_n(&so_nused, __ATOMIC_RELAXED);
+}
+
+/* The owner's entry of the list, NULL when it holds none (under the lock) */
+LOCAL SO_OWN *own_find( ID owner )
+{
+	INT	i;
+
+	for ( i = 0; i < so_nown; i++ ) {
+		if ( so_own[i].owner == owner ) {
+			return &so_own[i];
+		}
+	}
+	return NULL;
+}
+
+/* Room in the list for want owners: a longer one made, the old one given back */
+LOCAL ER own_room( INT want )
+{
+	SO_OWN	*n, *old = NULL;
+	UINT	imask;
+	INT	room;
+
+	if ( __atomic_load_n(&so_own_room, __ATOMIC_RELAXED) >= want ) {
+		return E_OK;
+	}
+	room = want + SO_OWN_MORE;
+	n = (SO_OWN *)Kmalloc(sizeof(SO_OWN) * (SZ)room);
+	if ( n == NULL ) {
+		return E_NOMEM;
+	}
+	ISpinLock(&so_lock, &imask);
+	if ( so_own_room < room ) {
+		if ( so_nown > 0 ) {
+			knl_memcpy(n, so_own, sizeof(SO_OWN) * (SZ)so_nown);
+		}
+		old = so_own;
+		so_own = n;
+		__atomic_store_n(&so_own_room, room, __ATOMIC_RELAXED);
+		n = NULL;
+	}
+	ISpinUnlock(&so_lock, &imask);
+	if ( n != NULL ) Kfree(n);
+	if ( old != NULL ) Kfree(old);
+	return E_OK;
+}
+
+/* One socket of owner's taken back (under the lock) */
+LOCAL void own_less( ID owner )
+{
+	SO_OWN	*o;
+
+	if ( owner <= 0 || ( o = own_find(owner) ) == NULL ) {
+		return;
+	}
+	if ( --o->n <= 0 ) {
+		*o = so_own[--so_nown];
+	}
+}
+
+/*
+ * Block b of the table made, when it is the next one to be: the socket
+ * objects' entries for its numbers first (obsock.c), so that a number
+ * given out always has one
+ */
+LOCAL ER so_grow( INT b )
+{
+	SO_BLOCK	*nb;
+	UINT		imask;
+	ER		er;
+
+	er = knl_so_obj_room(( b + 1 ) * SO_BLK);
+	if ( er < E_OK ) {
+		return er;
+	}
+	nb = (SO_BLOCK *)Kmalloc(sizeof(SO_BLOCK));
+	if ( nb == NULL ) {
+		return E_NOMEM;
+	}
+	knl_memset(nb, 0, sizeof(SO_BLOCK));
+	ISpinLock(&so_lock, &imask);
+	if ( so_nblk == b ) {
+		__atomic_store_n(&so_blk[b], nb, __ATOMIC_RELEASE);
+		__atomic_store_n(&so_nblk, b + 1, __ATOMIC_RELEASE);
+		nb = NULL;
+	}
+	ISpinUnlock(&so_lock, &imask);
+	if ( nb != NULL ) {
+		Kfree(nb);		/* another task made it first */
+	}
+	return E_OK;
 }
 
 IMPORT ER	ts_get_mono( UD *p_ns );
 
 /*
- * The two limits (include/ts/so.h, design 9.2). The last SO_KERNEL_RESERVE
- * numbers are the kernel's own: a process is not given one of them, so
- * that the system's work -- its name lookups (two sockets each), DHCP,
- * SLAAC, the clock -- goes on when the programs have taken all the rest.
- * Linux and NetBSD keep the last entries of the system's file table for
- * the privileged in the same way. And a process is given no more than
- * its own soft limit (knl_prc_so_cur), as RLIMIT_NOFILE limits a process's
- * descriptors there, so that no one program takes the table from the
- * others. The owner's count is taken in the same walk of the table that
- * finds the free number, under the same lock, so that tasks of one
- * process making sockets at once never take it past its limit.
+ * The two limits (include/ts/so.h, design 9.2.2). The last
+ * SO_KERNEL_RESERVE sockets of the system's limit are the kernel's own:
+ * a process is not given one of them, so that the system's work -- its
+ * name lookups (two sockets each), DHCP, SLAAC, the clock -- goes on
+ * when the programs have taken all the rest. Linux and NetBSD keep the
+ * last entries of the system's file table for the privileged in the
+ * same way. And a process is given no more than its own soft limit
+ * (knl_prc_so_cur), as RLIMIT_NOFILE limits a process's descriptors
+ * there, so that no one program takes the table from the others. The
+ * owner's count is read and the number taken under the same lock, so
+ * that tasks of one process making sockets at once never take it past
+ * its limit.
  *
  * Either refusal is said on the console, at most every five seconds:
  * the table full with who holds it (the kernel, and the three processes
@@ -323,51 +481,44 @@ LOCAL BOOL say_now( UD *p_last )
 LOCAL void said_full( ID owner )
 {
 	static UD	last;
-	ID		*who;
-	INT		*cnt, n = 0, kern = 0, i, j, k, best, at;
+	SO_OWN		*l;
+	INT		room, n = 0, used, kern, i, k, best, at;
 	UINT		imask;
 	char		line[128];
 
 	if ( !say_now(&last) ) {
 		return;
 	}
-	/* the owners counted into memory of their own: as many as the table has numbers at most */
-	who = (ID *)Kmalloc(sizeof(ID) * SO_MAX);
-	cnt = (INT *)Kmalloc(sizeof(INT) * SO_MAX);
+	/* the owners' counts copied out, into memory of their own */
+	room = __atomic_load_n(&so_own_room, __ATOMIC_RELAXED) + SO_OWN_MORE;
+	l = (SO_OWN *)Kmalloc(sizeof(SO_OWN) * (SZ)room);
 	ISpinLock(&so_lock, &imask);
-	for ( i = 0; i < SO_MAX; i++ ) {
-		if ( so_tab[i].fdp1 == 0 ) continue;
-		if ( so_tab[i].owner <= 0 ) {
-			kern++;
-			continue;
+	used = so_nused;
+	kern = used;
+	for ( i = 0; i < so_nown; i++ ) {
+		kern -= so_own[i].n;
+		if ( l != NULL && n < room ) {
+			l[n++] = so_own[i];
 		}
-		if ( who == NULL || cnt == NULL ) continue;
-		for ( j = 0; j < n && who[j] != so_tab[i].owner; j++ ) ;
-		if ( j == n ) {
-			who[n] = so_tab[i].owner;
-			cnt[n++] = 0;
-		}
-		cnt[j]++;
 	}
 	ISpinUnlock(&so_lock, &imask);
 	at = 0;
 	line[0] = '\0';
 	for ( k = 0; k < FULL_SAY_PRC && n > 0; k++ ) {
 		best = 0;
-		for ( j = 1; j < n; j++ ) {
-			if ( cnt[j] > cnt[best] ) best = j;
+		for ( i = 1; i < n; i++ ) {
+			if ( l[i].n > l[best].n ) best = i;
 		}
-		if ( cnt[best] == 0 ) break;
-		at += tm_sprintf((UB *)line + at, (UB *)", pid %d %d", (INT)who[best], cnt[best]);
-		cnt[best] = 0;
+		if ( l[best].n == 0 ) break;
+		at += tm_sprintf((UB *)line + at, (UB *)", pid %d %d", (INT)l[best].owner, l[best].n);
+		l[best].n = 0;
 	}
-	if ( who != NULL ) Kfree(who);
-	if ( cnt != NULL ) Kfree(cnt);
+	if ( l != NULL ) Kfree(l);
 	if ( owner > 0 ) {
 		tm_printf((UB *)"net: all %d sockets are in use for the processes (%d more kept for the kernel): the kernel %d%s\n",
-			  SO_MAX - SO_KERNEL_RESERVE, SO_KERNEL_RESERVE, kern, line);
+			  so_sysmax - SO_KERNEL_RESERVE, SO_KERNEL_RESERVE, kern, line);
 	} else {
-		tm_printf((UB *)"net: all %d sockets are in use: the kernel %d%s\n", SO_MAX, kern, line);
+		tm_printf((UB *)"net: all %d sockets are in use: the kernel %d%s\n", so_sysmax, kern, line);
 	}
 }
 
@@ -381,43 +532,79 @@ LOCAL void said_limit( ID owner, INT lim )
 }
 
 /*
- * A number for a new descriptor: the lowest free one; E_LIMIT when none
- * is free, or, for a process, when only the kernel's are; EX_MFILE when
- * the process holds as many as its limit allows
+ * A number for a new descriptor: the lowest free one; E_LIMIT when the
+ * system's limit is reached, or, for a process, when only the kernel's
+ * are left; EX_MFILE when the process holds as many as its limit
+ * allows; E_NOMEM when the table could not be made larger. A block more
+ * is made, outside the lock, when every one there is is full.
  */
 LOCAL INT so_slot( INT fd, ID owner )
 {
 	UINT	imask;
-	INT	s, at = SO_MAX, nfree = 0, held = 0, lim = 0;
-	ER	er = E_OK;
+	INT	s, b, i, lim = 0, left, grow;
+	SO_OWN	*o;
+	SO_BLOCK *k;
+	ER	er;
 
 	if ( owner > 0 ) {
 		lim = knl_prc_so_cur(owner);
 	}
-	ISpinLock(&so_lock, &imask);
-	for ( s = 0; s < SO_MAX; s++ ) {
-		if ( so_tab[s].fdp1 == 0 ) {
-			if ( at == SO_MAX ) at = s;
-			nfree++;
-		} else if ( owner > 0 && so_tab[s].owner == owner ) {
-			held++;
+	for ( ;; ) {
+		if ( owner > 0 && own_room(__atomic_load_n(&so_nown, __ATOMIC_RELAXED) + 1) < E_OK ) {
+			return E_NOMEM;
+		}
+		er = E_OK;
+		s = -1;
+		grow = -1;
+		ISpinLock(&so_lock, &imask);
+		o = ( owner > 0 ) ? own_find(owner) : NULL;
+		left = so_sysmax - so_nused;
+		if ( owner > 0 && ( ( o != NULL ) ? o->n : 0 ) >= lim ) {
+			er = EX_MFILE;
+		} else if ( left <= 0 || ( owner > 0 && left <= SO_KERNEL_RESERVE ) ) {
+			er = E_LIMIT;
+		} else if ( owner > 0 && o == NULL && so_nown >= so_own_room ) {
+			;			/* another owner took the room meanwhile: made again */
+		} else {
+			for ( b = 0; b < so_nblk && so_blk[b]->used >= SO_BLK; b++ ) ;
+			if ( b >= so_nblk ) {
+				grow = b;
+			} else {
+				k = so_blk[b];
+				for ( i = 0; k->e[i].fdp1 != 0; i++ ) ;
+				k->e[i].fdp1 = fd + 1;
+				k->e[i].owner = owner;
+				k->used++;
+				so_nused++;
+				s = b * SO_BLK + i;
+				if ( owner > 0 ) {
+					if ( o == NULL ) {
+						o = &so_own[so_nown++];
+						o->owner = owner;
+						o->n = 0;
+					}
+					o->n++;
+				}
+			}
+		}
+		ISpinUnlock(&so_lock, &imask);
+		if ( er < E_OK || s >= 0 ) {
+			break;
+		}
+		if ( grow >= 0 ) {
+			/* every block full and the limit not reached: grow is below SO_NBLK */
+			er = so_grow(grow);
+			if ( er < E_OK ) {
+				break;
+			}
 		}
 	}
-	if ( owner > 0 && held >= lim ) {
-		er = EX_MFILE;
-	} else if ( at >= SO_MAX || ( owner > 0 && nfree <= SO_KERNEL_RESERVE ) ) {
-		er = E_LIMIT;
-	} else {
-		so_tab[at].fdp1 = fd + 1;
-		so_tab[at].owner = owner;
-	}
-	ISpinUnlock(&so_lock, &imask);
 	if ( er == EX_MFILE ) {
 		said_limit(owner, lim);
 	} else if ( er == E_LIMIT ) {
 		said_full(owner);
 	}
-	return ( er < E_OK ) ? (INT)er : at;
+	return ( er < E_OK ) ? (INT)er : s;
 }
 
 LOCAL void nb_close( INT fd )
@@ -447,32 +634,67 @@ LOCAL INT so_new( INT fd, ID owner )
 
 EXPORT BOOL knl_so_mine( INT s, ID owner )
 {
-	return ( s >= 0 && s < SO_MAX && so_tab[s].fdp1 != 0 && so_tab[s].owner == owner );
+	SO_ENT	*e = so_ent(s);
+
+	return ( e != NULL && e->fdp1 != 0 && e->owner == owner );
 }
 
-/* A process is ending: whatever sockets it left open are closed */
+/* The sockets owner holds */
+LOCAL INT own_count( ID owner )
+{
+	SO_OWN	*o;
+	UINT	imask;
+	INT	n;
+
+	ISpinLock(&so_lock, &imask);
+	o = own_find(owner);
+	n = ( o != NULL ) ? o->n : 0;
+	ISpinUnlock(&so_lock, &imask);
+	return n;
+}
+
+/*
+ * A process is ending: whatever sockets it left open are closed. Its
+ * tasks are gone by now, so none of them makes another; the table is
+ * walked again while the count says some are left -- one being closed
+ * by a call of its own when the walk passed it -- a few times at most.
+ */
+#define PRC_END_WALKS	4
+
 EXPORT void knl_so_prc_end( ID pid )
 {
-	INT	s;
+	SO_ENT	*e;
+	INT	s, n, w;
 
 	if ( pid <= 0 ) {
 		return;
 	}
-	for ( s = 0; s < SO_MAX; s++ ) {
-		if ( so_tab[s].fdp1 != 0 && so_tab[s].owner == pid ) {
-			(void)so_close(s);
+	for ( w = 0; w < PRC_END_WALKS && own_count(pid) > 0; w++ ) {
+		n = so_room();
+		for ( s = 0; s < n; s++ ) {
+			e = so_ent(s);
+			if ( e != NULL && e->fdp1 != 0 && e->owner == pid ) {
+				(void)so_close(s);
+			}
 		}
+	}
+	n = own_count(pid);
+	if ( n > 0 ) {
+		tm_printf((UB *)"net: pid %d ended with %d sockets that could not be closed\n", (INT)pid, n);
 	}
 }
 
 /* Sockets of processes other than 'but' that are open */
 EXPORT INT so_busy( ID but )
 {
+	UINT	imask;
 	INT	i, n = 0;
 
-	for ( i = 0; i < SO_MAX; i++ ) {
-		if ( so_tab[i].fdp1 != 0 && so_tab[i].owner > 0 && so_tab[i].owner != but ) n++;
+	ISpinLock(&so_lock, &imask);
+	for ( i = 0; i < so_nown; i++ ) {
+		if ( so_own[i].owner != but ) n += so_own[i].n;
 	}
+	ISpinUnlock(&so_lock, &imask);
 	return n;
 }
 
@@ -655,6 +877,7 @@ EXPORT INT so_accept( INT s, struct sockaddr *addr, socklen_t *addrlen )
  */
 EXPORT ER so_close( INT s )
 {
+	SO_ENT	*e;
 	UINT	imask;
 	INT	fd;
 
@@ -662,11 +885,15 @@ EXPORT ER so_close( INT s )
 		return E_ID;
 	}
 	knl_so_obj_gone(s);
+	e = so_ent(s);
 	ISpinLock(&so_lock, &imask);
-	fd = so_fd(s);
+	fd = e->fdp1 - 1;
 	if ( fd >= 0 ) {
-		so_tab[s].fdp1 = 0;
-		so_tab[s].owner = 0;
+		own_less(e->owner);
+		e->fdp1 = 0;
+		e->owner = 0;
+		so_blk[s / SO_BLK]->used--;
+		so_nused--;
 	}
 	ISpinUnlock(&so_lock, &imask);
 	if ( fd < 0 ) {
@@ -1050,9 +1277,11 @@ EXPORT INT so_poll( struct pollfd *fds, INT nfds, TMO tmout )
 /*
  * The timeout is the kernel's, so TMO_FEVR is no limit at all and
  * TMO_POL is a look without waiting. The answer is how many of the bits
- * asked for are set. The sets are as wide as the table (FD_SETSIZE); the
- * wait is over the sockets asked for alone, a few on the stack and more
- * in memory of their own for the call.
+ * asked for are set. The sets have FD_SETSIZE bits, fewer than the
+ * table may have numbers: a maxfdp1 past them is refused (E_PAR, as
+ * EINVAL) rather than read past the sets, and a socket numbered past them
+ * is waited for with so_poll. The wait is over the sockets asked for
+ * alone, a few on the stack and more in memory of their own for the call.
  */
 #define SEL_LOCAL	16
 
@@ -1081,7 +1310,7 @@ EXPORT INT so_select( INT maxfdp1, fd_set *readset, fd_set *writeset,
 	} else {
 		ms = (INT)tmout;
 	}
-	if ( maxfdp1 < 0 || maxfdp1 > SO_MAX ) {
+	if ( maxfdp1 < 0 || maxfdp1 > FD_SETSIZE ) {
 		return E_PAR;
 	}
 	for ( s = 0; s < maxfdp1; s++ ) {
@@ -2682,37 +2911,47 @@ EXPORT BOOL so_dhcp_on( void )
 /* ---------------------------------------------------------------- start-up */
 
 /*
- * The rump kernel's own limit on the descriptors of the process that
- * holds every socket (RLIMIT_NOFILE), raised to the table's size: NetBSD
- * starts a process at OPEN_MAX (128) soft, with the system's maxfiles as
- * the hard limit, and the table has more numbers than that. Said once
- * with what the stack had, so that a stack built with a smaller maxfiles
- * is seen.
+ * The system's limit (so_sysmax), from the rump kernel's own limit on the
+ * descriptors of the process that holds every socket (RLIMIT_NOFILE):
+ * NetBSD starts a process at OPEN_MAX (128) soft, with the system's
+ * maxfiles as the hard limit, and maxfiles bounds the open files of the
+ * whole rump kernel too (ENFILE). The soft limit is raised to
+ * SO_SYS_WANT and a margin, or to the hard one when that is fewer, and
+ * the system's limit is what the stack then holds less the margin. Said
+ * once, with what the stack had, so that a stack built with a smaller
+ * maxfiles is seen.
  */
 #define NB_RLIMIT_NOFILE	8
-#define NB_FD_SPARE		16		/* descriptors past the table's: none is made, a margin */
+#define NB_OPEN_MAX		128		/* the soft limit NetBSD starts a process at */
+#define NB_FD_SPARE		16		/* the stack's descriptors past the system's limit: none is made, a margin */
 
 LOCAL void nb_nofile( void )
 {
 	UD	rl[2];				/* NetBSD's struct rlimit: soft, hard */
-	UD	was, want = (UD)SO_MAX + NB_FD_SPARE;
+	UD	was, want = (UD)SO_SYS_WANT + NB_FD_SPARE, have;
 	D	a[2];
-	INT	e;
+	INT	e, cur, max;
 
 	a[0] = NB_RLIMIT_NOFILE; a[1] = A(rl);
 	e = nb_call(NB_SYS_getrlimit, a, 2, NULL);
 	if ( e != 0 ) {
-		tm_printf((UB *)"net: the stack's limit on descriptors not read (%d)\n", e);
+		so_sysmax = NB_OPEN_MAX - NB_FD_SPARE;
+		tm_printf((UB *)"net: the stack's limit on descriptors not read (%d): %d sockets\n", e, so_sysmax);
 		return;
 	}
 	was = rl[0];
 	rl[0] = ( want < rl[1] ) ? want : rl[1];
 	e = ( rl[0] > was ) ? nb_call(NB_SYS_setrlimit, a, 2, NULL) : 0;
-	tm_printf((UB *)"net: %d sockets, %d of them kept for the kernel, %d a process may hold (%d at most);"
+	have = ( e == 0 ) ? rl[0] : was;
+	have = ( have > (UD)NB_FD_SPARE + SO_KERNEL_RESERVE + SO_BLK ) ? have - NB_FD_SPARE
+	       : (UD)SO_KERNEL_RESERVE + SO_BLK;
+	so_sysmax = ( have < (UD)SO_NUM_CEIL ) ? (INT)have : SO_NUM_CEIL;
+	knl_so_prc_first(&cur, &max);
+	tm_printf((UB *)"net: %d sockets at most, %d of them kept for the kernel, %d a process may hold (%d at most);"
 		  " the stack's descriptors %d (was %d, the most %d)%s\n",
-		  SO_MAX, SO_KERNEL_RESERVE, SO_PRC_SOFT, SO_PRC_HARD,
+		  so_sysmax, SO_KERNEL_RESERVE, cur, max,
 		  (INT)( ( e == 0 ) ? rl[0] : was ), (INT)was, (INT)rl[1],
-		  ( rl[1] < (UD)SO_MAX ) ? ": fewer than the table" : "");
+		  ( so_sysmax < SO_SYS_WANT ) ? ": fewer than asked for, the stack's maxfiles" : "");
 }
 
 #define RUMP_SIGMODEL_IGNORE	1

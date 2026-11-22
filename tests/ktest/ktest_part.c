@@ -420,7 +420,7 @@ LOCAL INT menu_child( INT pid )
 {
 	INT	k, w, pw = wm_panel_wid(pid);
 
-	for ( k = 1; k <= WM_PANEL_MAX; k++ ) {
+	for ( k = 1; k <= wm_panel_last(); k++ ) {
 		w = wm_panel_wid(k);
 		if ( k != pid && w > 0 && w != pw && wm_menu_has(pid, w) ) {
 			return k;
@@ -625,28 +625,41 @@ LOCAL void test_many( void )
 	wm_panel_free(e);
 }
 
-/* the table fills up and says so rather than overwriting something */
+/*
+ * More panels at once than the 32 the table once had: each opens, none
+ * is refused, and they close again; then what says nothing sensible is
+ * still refused
+ */
+#define KT_PANELS_MANY	100
+
 LOCAL void test_limit( void )
 {
 	T_WMPANEL	*d;
-	INT		pid[WM_PANEL_MAX + 1];
+	INT		*pid;
 	INT		i, n = 0;
 
 	if ( !ready ) KT_SKIP("no window");
 
 	d = wm_panel_new(KT_PN_ROOM);
-	KT_ASSERT(d != NULL);
-	if ( d == NULL ) return;
+	pid = (INT *)Kcalloc(KT_PANELS_MANY, sizeof(INT));
+	KT_ASSERT(d != NULL && pid != NULL);
+	if ( d == NULL || pid == NULL ) {
+		wm_panel_free(d);
+		if ( pid != NULL ) Kfree(pid);
+		return;
+	}
 	d->num = 9;  d->owner = 0;
 	d->r.left = 10;  d->r.top = 10;  d->r.right = 60;  d->r.bottom = 60;
 	d->npart = 0;
 
-	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
+	for ( i = 0; i < KT_PANELS_MANY; i++ ) {
 		pid[i] = wm_panel_open(wid, d);
 		KT_ASSERT(pid[i] > 0);
 		if ( pid[i] > 0 ) n++;
 	}
-	KT_ASSERT_EQ(wm_panel_open(wid, d), E_LIMIT);
+	KT_ASSERT_EQ(n, KT_PANELS_MANY);
+	KT_ASSERT(wm_panel_last() >= KT_PANELS_MANY);
+	KT_ASSERT_EQ(wm_panel_self_check(), 0);
 
 	/* a definition that says nothing sensible is refused */
 	d->r.right = d->r.left;
@@ -659,9 +672,10 @@ LOCAL void test_limit( void )
 	d->npart = 0;
 	wm_panel_free(d);
 
-	for ( i = 0; i < n; i++ ) {
-		KT_ASSERT_ER(wm_panel_close(pid[i]), E_OK);
+	for ( i = 0; i < KT_PANELS_MANY; i++ ) {
+		if ( pid[i] > 0 ) KT_ASSERT_ER(wm_panel_close(pid[i]), E_OK);
 	}
+	Kfree(pid);
 	KT_ASSERT_EQ(wm_panel_self_check(), 0);
 
 	if ( wid > 0 ) {
@@ -669,6 +683,287 @@ LOCAL void test_limit( void )
 		wid = 0;
 		ready = FALSE;
 	}
+}
+
+/*
+ * Tags that cannot be chosen: 70 names and the bits for names 5, 40 and
+ * 66 in a state record of three words. Before, the bits were one word,
+ * and the names from the 33rd on could not be made unchoosable.
+ */
+LOCAL void test_tags_off_many( void )
+{
+	T_WMPANEL	*d;
+	UB		*names, *w;
+	INT		pid, i, k, len = 0, v[4];
+	BOOL		ok = TRUE;
+
+	if ( !ready ) KT_SKIP("no window");
+	d = wm_panel_new(KT_PN_ROOM);
+	names = (UB *)Kmalloc(70 * 8);
+	KT_ASSERT(d != NULL && names != NULL);
+	if ( d == NULL || names == NULL ) {
+		wm_panel_free(d);
+		if ( names != NULL ) Kfree(names);
+		return;
+	}
+	d->num = 53;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
+	d->r.left = 0;  d->r.top = 0;  d->r.right = 400;  d->r.bottom = 120;
+	d->npart = 1;
+	part_set(&d->part[0], TG_PARTS, 1, 4, 4, 390, 100);
+	pid = wm_panel_open(wid, d);
+	wm_panel_free(d);
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) {
+		Kfree(names);
+		return;
+	}
+	w = names;
+	for ( i = 1; i <= 70; i++ ) {
+		INT	l = 0;
+
+		if ( i >= 10 ) w[l++] = (UB)( '0' + i / 10 );
+		w[l++] = (UB)( '0' + i % 10 );
+		w[l++] = 0;
+		w += l;
+		len += l;
+	}
+	KT_ASSERT_ER(knl_pn_set_names(pid, 0, names, len), E_OK);
+	v[0] = 1;
+	v[1] = 1 << 4;				/* name 5 */
+	v[2] = 1 << 7;				/* name 40: bit 39, bit 7 of the second word */
+	v[3] = 1 << 1;				/* name 66: bit 65, bit 1 of the third word */
+	KT_ASSERT(knl_pn_set_state(pid, 0, (UB *)v, sizeof(v)) >= E_OK);
+	for ( k = 1; k <= 70; k++ ) {
+		BOOL	want = (BOOL)( k == 5 || k == 40 || k == 66 );
+
+		if ( knl_pn_name_off(pid, 0, k) != want ) ok = FALSE;
+	}
+	KT_ASSERT(ok);
+	/* other names clear them (the same names written again change nothing) */
+	KT_ASSERT_ER(knl_pn_set_names(pid, 0, names, len - 3), E_OK);
+	KT_ASSERT(!knl_pn_name_off(pid, 0, 40));
+	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
+	Kfree(names);
+	KT_ASSERT_EQ(wm_panel_self_check(), 0);
+}
+
+/*
+ * Words longer than a part's field (127 bytes): a box typed into past
+ * 127 bytes takes every letter, its letters set and read whole, a
+ * label's words and a menu row's words and keys whole. Before, typing
+ * stopped at 126 bytes and the words were cut at 127.
+ */
+#define KT_LONG_N	300
+
+/* Whether n bytes are the same */
+LOCAL BOOL kt_same( CONST void *a, CONST void *b, SZ n )
+{
+	CONST UB	*x = (CONST UB *)a, *y = (CONST UB *)b;
+	SZ		k;
+
+	for ( k = 0; k < n; k++ ) {
+		if ( x[k] != y[k] ) return FALSE;
+	}
+	return TRUE;
+}
+
+LOCAL void kt_cpy( void *d, CONST void *s, SZ n )
+{
+	SZ	k;
+
+	for ( k = 0; k < n; k++ ) ((UB *)d)[k] = ((CONST UB *)s)[k];
+}
+
+LOCAL INT kt_len( CONST char *s )
+{
+	INT	n = 0;
+
+	while ( s[n] != 0 ) n++;
+	return n;
+}
+
+LOCAL void long_words( UB *s, INT n, UB c )
+{
+	INT	i;
+
+	/* three-byte letters (あ...), the bytes left over a mark, n bytes in all */
+	for ( i = 0; i + 3 <= n; i += 3 ) {
+		s[i] = 0xE3;  s[i + 1] = 0x81;  s[i + 2] = (UB)( 0x82 + ( ( i / 3 ) % 8 ) * 2 );
+	}
+	for ( ; i < n; i++ ) s[i] = c;
+	s[n] = 0;
+}
+
+LOCAL void test_long_words( void )
+{
+	T_WMPANEL	*d;
+	T_WMMENU	*m;
+	UB		*s, *got = NULL, small[16];
+	INT		pid, n, i, mp;
+	CONST char	*key = "Ctrl+Shift+F12";
+	SZ		size;
+
+	if ( !ready ) KT_SKIP("no window");
+	s = (UB *)Kmalloc(KT_LONG_N * 2 + 1);
+	d = wm_panel_new(KT_PN_ROOM);
+	KT_ASSERT(s != NULL && d != NULL);
+	if ( s == NULL || d == NULL ) {
+		if ( s != NULL ) Kfree(s);
+		wm_panel_free(d);
+		return;
+	}
+	d->num = 51;  d->owner = 0;  d->kind = WM_PNL_PLAIN;
+	d->r.left = 0;  d->r.top = 0;  d->r.right = 400;  d->r.bottom = 120;
+	d->npart = 2;
+	part_set(&d->part[0], WM_PT_BOX, 1, 10, 10, 380, 36);
+	part_set(&d->part[1], WM_PT_LABEL, 2, 10, 50, 380, 76);
+	long_words(s, KT_LONG_N, 'x');
+	KT_ASSERT_ER(wm_part_set_label(&d->part[1], s, -1), E_OK);
+	KT_ASSERT(d->part[1].lng != NULL);
+	pid = wm_panel_open(wid, d);
+	wm_panel_free(d);				/* the panel has its own copy */
+	KT_ASSERT(pid > 0);
+	if ( pid <= 0 ) {
+		Kfree(s);
+		return;
+	}
+
+	/* typed in past the field, a letter at a time as a converter commits them */
+	for ( i = 0; i < KT_LONG_N; i += 3 ) {
+		KT_ASSERT(wm_panel_type(wm_panel_wid(pid), s + i, ( i + 3 <= KT_LONG_N ) ? 3 : KT_LONG_N - i));
+	}
+	n = wm_panel_text_all(pid, 1, &got);
+	KT_ASSERT_EQ(n, KT_LONG_N);
+	if ( got != NULL ) {
+		KT_ASSERT(kt_same(got, s, KT_LONG_N));
+		Kfree(got);
+		got = NULL;
+	}
+	/* what a short room gets is whole letters only */
+	KT_ASSERT_ER(wm_panel_text(pid, 1, small, sizeof(small)), E_OK);
+	KT_ASSERT_EQ(kt_len((CONST char *)small), 15);
+	/* set whole, and short again */
+	long_words(s, KT_LONG_N * 2, 'y');
+	KT_ASSERT_ER(wm_panel_set_text(pid, 1, s), E_OK);
+	n = wm_panel_text_all(pid, 1, &got);
+	KT_ASSERT_EQ(n, KT_LONG_N * 2);
+	if ( got != NULL ) {
+		KT_ASSERT(kt_same(got, s, KT_LONG_N * 2));
+		Kfree(got);
+		got = NULL;
+	}
+	KT_ASSERT_ER(wm_panel_set_text(pid, 1, (CONST UB *)"abc"), E_OK);
+	n = wm_panel_text_all(pid, 1, &got);
+	KT_ASSERT_EQ(n, 3);
+	if ( got != NULL ) Kfree(got);
+	got = NULL;
+	/* the label as its record carries it: the whole */
+	long_words(s, KT_LONG_N, 'x');
+	n = knl_pn_label(pid, 1, &got);
+	KT_ASSERT_EQ(n, KT_LONG_N);
+	if ( got != NULL ) {
+		KT_ASSERT(kt_same(got, s, KT_LONG_N));
+		Kfree(got);
+		got = NULL;
+	}
+	KT_ASSERT_EQ(knl_pn_state(pid, 1, small, sizeof(small)), KT_LONG_N);
+	KT_ASSERT_ER(wm_panel_draw(pid), E_OK);
+	KT_ASSERT_EQ(wm_panel_self_check(), 0);
+	KT_ASSERT_ER(wm_panel_close(pid), E_OK);
+
+	/* a menu row: its words after the items, and keys longer than their field */
+	n = kt_len(key);
+	size = WM_MENU_SIZE(2) + KT_LONG_N + 1 + (SZ)n + 1;
+	m = (T_WMMENU *)Kcalloc(1, size);
+	KT_ASSERT(m != NULL);
+	if ( m != NULL ) {
+		m->num = 52;
+		m->nitem = 2;
+		m->item[0].cmd = 1;
+		kt_cpy(m->item[0].label, s, WM_LABEL_MAX - 3);	/* the head, as a field keeps it */
+		m->item[0].llabel = (UINT)WM_MENU_SIZE(2);
+		kt_cpy((UB *)m + WM_MENU_SIZE(2), s, KT_LONG_N + 1);
+		m->item[0].lkey = (UINT)( WM_MENU_SIZE(2) + KT_LONG_N + 1 );
+		kt_cpy((UB *)m + m->item[0].lkey, key, (SZ)n + 1);
+		m->item[1].cmd = 2;
+		kt_cpy(m->item[1].label, "short", 6);
+		mp = wm_menu_open(wid, m, 50, 50);
+		KT_ASSERT(mp > 0);
+		if ( mp > 0 ) {
+			i = knl_pn_label(mp, 0, &got);
+			KT_ASSERT_EQ(i, KT_LONG_N);
+			if ( got != NULL ) {
+				KT_ASSERT(kt_same(got, s, KT_LONG_N));
+				Kfree(got);
+				got = NULL;
+			}
+			KT_ASSERT_ER(wm_panel_close(mp), E_OK);
+		}
+		Kfree(m);
+	}
+	Kfree(s);
+}
+
+/* More definitions in the data box than its 64, and one larger than its 128KB */
+#define KT_DB_MANY	100
+#define KT_DB_BIG	( 200 * 1024 )
+
+LOCAL void test_dbox_many( void )
+{
+	UB	*big, *back;
+	INT	i, n0 = db_count(), v;
+
+	for ( i = 0; i < KT_DB_MANY; i++ ) {
+		v = i * 7;
+		KT_ASSERT_ER(db_put(DB_PICT, 0x7000 + i, 77, &v, sizeof(v)), E_OK);
+	}
+	KT_ASSERT_EQ(db_count(), n0 + KT_DB_MANY);
+	for ( i = 0; i < KT_DB_MANY; i++ ) {
+		v = -1;
+		KT_ASSERT_EQ(db_get(DB_PICT, 0x7000 + i, 77, &v, sizeof(v)), (INT)sizeof(v));
+		KT_ASSERT_EQ(v, i * 7);
+	}
+	KT_ASSERT_EQ(db_del_owner(77), KT_DB_MANY);
+	KT_ASSERT_EQ(db_count(), n0);
+
+	big = (UB *)Kmalloc(KT_DB_BIG);
+	back = (UB *)Kmalloc(KT_DB_BIG);
+	KT_ASSERT(big != NULL && back != NULL);
+	if ( big != NULL && back != NULL ) {
+		for ( i = 0; i < KT_DB_BIG; i++ ) big[i] = (UB)( i * 13 );
+		KT_ASSERT_ER(db_put(DB_PICT, 0x7FFF, 78, big, KT_DB_BIG), E_OK);
+		KT_ASSERT_EQ(db_size(DB_PICT, 0x7FFF, 78), KT_DB_BIG);
+		KT_ASSERT_EQ(db_get(DB_PICT, 0x7FFF, 78, back, KT_DB_BIG), KT_DB_BIG);
+		KT_ASSERT(kt_same(big, back, KT_DB_BIG));
+		KT_ASSERT_ER(db_del(DB_PICT, 0x7FFF, 78), E_OK);
+	}
+	if ( big != NULL ) Kfree(big);
+	if ( back != NULL ) Kfree(back);
+}
+
+/* A message longer than the 255 bytes the line kept is kept whole */
+LOCAL void test_msg_long( void )
+{
+	UB	*s, *back;
+	INT	n;
+
+	s = (UB *)Kmalloc(601);
+	back = (UB *)Kmalloc(1024);
+	KT_ASSERT(s != NULL && back != NULL);
+	if ( s != NULL && back != NULL ) {
+		long_words(s, 600, 'z');
+		KT_ASSERT_ER(wm_msg_put((CONST char *)s), E_OK);
+		n = wm_msg_text((char *)back, 1024);
+		KT_ASSERT_EQ(n, 600);
+		KT_ASSERT(kt_same(back, s, 600));
+		/* a short room: whole letters */
+		n = wm_msg_text((char *)back, 10);
+		KT_ASSERT_EQ(n, 9);
+		KT_ASSERT_ER(wm_msg_put(NULL), E_OK);
+		KT_ASSERT_EQ(wm_msg_text((char *)back, 1024), 0);
+	}
+	if ( s != NULL ) Kfree(s);
+	if ( back != NULL ) Kfree(back);
 }
 
 /* a label is drawn when there is a font to draw it with */
@@ -1805,5 +2100,9 @@ EXPORT void ktest_part( void )
 	KT_RUN(test_popup_box);
 	KT_RUN(test_scroll_draw);
 	KT_RUN(test_many);
+	KT_RUN(test_tags_off_many);
+	KT_RUN(test_long_words);
+	KT_RUN(test_dbox_many);
+	KT_RUN(test_msg_long);
 	KT_RUN(test_limit);
 }

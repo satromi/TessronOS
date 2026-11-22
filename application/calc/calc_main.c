@@ -1031,24 +1031,7 @@ static void menu( CONST T_OBNTM *m )
 	(void)mn_chg_atr(mid, NULL, "moveback", tray_has() ? 0 : MN_GREY);
 	(void)mn_chg_atr(mid, NULL, "unmerge", cx_merge_of(&g_s, g_col, g_row) >= 0 ? 0 : MN_GREY);
 	tray_menu(mid);
-	if ( !link ) {
-		(void)mn_chg_atr(mid, NULL, "vobj", MN_GREY);
-		(void)mn_chg_atr(mid, NULL, "real", MN_GREY);
-		(void)mn_chg_atr(mid, NULL, "exec", MN_GREY);
-	} else {
-		BOOL	kept = app_kept();
-		T_OBREF	ref;
-		TS_UUID	u;
-		BOOL	cut = (BOOL)( !link_target(cx_get(&g_s, g_col, g_row), &u) || ob_ref_obj(&u, &ref) < E_OK );
-
-		(void)mn_chg_atr(mid, NULL, "vobj.reconnect", cut ? 0 : MN_HIDE);
-		(void)mn_chg_atr(mid, NULL, "real.lock", kept ? MN_HIDE : cut ? MN_GREY : 0);
-		(void)mn_chg_atr(mid, NULL, "real.unlock", !kept ? MN_HIDE : cut ? MN_GREY : 0);
-		(void)mn_chg_atr(mid, NULL, "real.rename", cut ? MN_GREY : 0);
-		(void)mn_chg_atr(mid, NULL, "real.duplicate", cut ? MN_GREY : 0);
-		(void)mn_chg_atr(mid, NULL, "real.newversion", cut ? MN_GREY : 0);
-		exec_menu(mid);
-	}
+	link_menu(mid, link);
 	chosen = (BOOL)( mn_pop_men(mid, g_kw, m->x, m->y, m->when, &s) >= E_OK );
 	(void)mn_del_men(mid);
 	if ( chosen ) command((CONST char *)s.code, s.index, s.value);

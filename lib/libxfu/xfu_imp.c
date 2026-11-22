@@ -925,14 +925,13 @@ LOCAL void dl_free( DLIST *d )
 
 /* ---------------------------------------------------------------- TADjs objects */
 
-#define SET_REC		16		/* record types remembered of a set */
-
 typedef struct {
 	TS_UUID	u;
 	INT	json;			/* its entry */
 	BOOL	made;			/* made now, not there before */
 	BOOL	linked;			/* another of the sets links to it */
-	UB	rt[SET_REC];		/* the type of each byte record, 0 when not said */
+	UB	*rt;			/* the type of each byte record, 0 when not said (xfu_sys_alloc) */
+	INT	nrt;			/* records rt says of: as many as the metadata names */
 } TSET;
 
 /* What a name is of a TADjs object: its part, the UUID, the position */
@@ -953,7 +952,7 @@ LOCAL INT tadjs_part( CONST UB *s, TS_UUID *u, INT *p_pos )
 	if ( xfu_same(s + i, ".bin") ) return P_BIN;
 	if ( s[i] == '_' && s[i + 1] != 0 ) {
 		for ( k = i + 1; s[k] != 0; k++ ) ;
-		return ( k - i < OB_RES_NAME - 4 ) ? P_RES : P_NONE;
+		return ( k - i < OB_RES_NAME_MAX - 4 ) ? P_RES : P_NONE;
 	}
 	return P_NONE;
 }
@@ -1014,9 +1013,34 @@ LOCAL ER tadjs_meta( XFU *x, XBUF *in, CONST UB *jsonname, D mtime, XBUF *out, T
 		return E_PAR;
 	}
 	/* the types the byte records are said to have */
-	xfu_mset(s->rt, 0, sizeof(s->rt));
+	{
+		/* as many records as the metadata says of: counted first */
+		INT	want = 0;
+
+		if ( js_get(&root, "records", &recs) >= E_OK ) {
+			for ( it.s = NULL; js_next(&recs, &it); ) want++;
+		}
+		if ( js_get(&root, "tessronos", &tf) >= E_OK && js_get(&tf, "records", &recs) >= E_OK ) {
+			for ( it.s = NULL; js_next(&recs, &it); ) {
+				D	n = js_get_num(&it, "n", -1);
+
+				if ( n >= want && n < 0x7fffffff ) want = (INT)n + 1;
+			}
+		}
+		if ( s->rt != NULL ) xfu_sys_free(s->rt);
+		s->rt = NULL;
+		s->nrt = 0;
+		if ( want > 0 ) {
+			s->rt = (UB *)xfu_sys_alloc((SZ)want);
+			if ( s->rt == NULL ) {
+				return E_NOMEM;
+			}
+			xfu_mset(s->rt, 0, (SZ)want);
+			s->nrt = want;
+		}
+	}
 	if ( js_get(&root, "records", &recs) >= E_OK ) {
-		for ( it.s = NULL, i = 0; i < SET_REC && js_next(&recs, &it); i++ ) {
+		for ( it.s = NULL, i = 0; i < s->nrt && js_next(&recs, &it); i++ ) {
 			if ( js_get(&it, "rt", &v) >= E_OK ) s->rt[i] = (UB)js_get_num(&it, "rt", 0);
 		}
 	}
@@ -1024,7 +1048,7 @@ LOCAL ER tadjs_meta( XFU *x, XBUF *in, CONST UB *jsonname, D mtime, XBUF *out, T
 		for ( it.s = NULL; js_next(&recs, &it); ) {
 			D	n = js_get_num(&it, "n", -1), rt = js_get_num(&it, "rt", 0);
 
-			if ( n >= 0 && n < SET_REC && rt > 0 ) s->rt[n] = (UB)rt;
+			if ( n >= 0 && n < s->nrt && rt > 0 ) s->rt[n] = (UB)rt;
 		}
 	}
 
@@ -1082,8 +1106,9 @@ LOCAL ER tadjs_meta( XFU *x, XBUF *in, CONST UB *jsonname, D mtime, XBUF *out, T
 typedef struct {
 	TSET	*s;
 	INT	n;
-	TS_UUID	*t;			/* the targets met, to be counted */
+	TS_UUID	*t;			/* the targets met, to be counted: as many as there are */
 	INT	nt, maxt;
+	BOOL	nomem;			/* one could not be kept */
 } LNKS;
 
 LOCAL void set_linked( void *arg, CONST TS_UUID *u )
@@ -1094,9 +1119,11 @@ LOCAL void set_linked( void *arg, CONST TS_UUID *u )
 	for ( i = 0; i < l->n; i++ ) {
 		if ( xfu_uuid_eq(&l->s[i].u, u) ) l->s[i].linked = TRUE;
 	}
-	if ( l->t != NULL && l->nt < l->maxt ) {
-		l->t[l->nt++] = *u;
+	if ( !xfu_uuids_room(&l->t, l->nt, &l->maxt, 256) ) {
+		l->nomem = TRUE;
+		return;
 	}
+	l->t[l->nt++] = *u;
 }
 
 /* The entry of a set's part, or -1 */
@@ -1176,9 +1203,10 @@ LOCAL ER imp_sets( XFU *x, INT plen, DLIST *d, TSET *s, INT ns )
 	l.s = s;
 	l.n = ns;
 	l.nt = 0;
-	l.maxt = XFU_OBJ_MAX;
-	l.t = (TS_UUID *)xfu_sys_alloc(sizeof(TS_UUID) * l.maxt);
-	if ( l.t == NULL ) {
+	l.maxt = 0;
+	l.t = NULL;
+	l.nomem = FALSE;
+	if ( !xfu_uuids_room(&l.t, 0, &l.maxt, 256) ) {
 		return E_NOMEM;
 	}
 	for ( i = 0; i < ns; i++ ) {
@@ -1199,7 +1227,7 @@ LOCAL ER imp_sets( XFU *x, INT plen, DLIST *d, TSET *s, INT ns )
 			if ( er >= E_OK ) er = read_all(x, x->path, &in, XFU_WHOLE_MAX);
 			if ( er >= E_OK ) {
 				UINT	rt = tad ? OB_RT_TAD
-					   : ( pos < SET_REC && s[i].rt[pos] != 0 ) ? s[i].rt[pos]
+					   : ( pos >= 0 && pos < s[i].nrt && s[i].rt[pos] != 0 ) ? s[i].rt[pos]
 					   : OB_RT_SYSDATA;
 
 				er = ob_apd_rec(key, rt, 0, &recno);
@@ -1232,7 +1260,7 @@ LOCAL ER imp_sets( XFU *x, INT plen, DLIST *d, TSET *s, INT ns )
 		}
 	}
 	xfu_sys_free(l.t);
-	return E_OK;
+	return l.nomem ? E_NOMEM : E_OK;	/* a link not counted for want of memory is said */
 }
 
 /* ---------------------------------------------------------------- a directory */
@@ -1405,7 +1433,12 @@ LOCAL ER imp_dir( XFU *x, CONST UB *file, D mtime, INT level, TS_UUID *p_uuid )
 	}
 	xb_free(&r0);
 	xb_free(&kids);
-	if ( s != NULL ) xfu_sys_free(s);
+	if ( s != NULL ) {
+		for ( i = 0; i < ns; i++ ) {
+			if ( s[i].rt != NULL ) xfu_sys_free(s[i].rt);
+		}
+		xfu_sys_free(s);
+	}
 	dl_free(&d);
 	return er;
 }

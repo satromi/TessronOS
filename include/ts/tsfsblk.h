@@ -31,6 +31,7 @@ extern "C" {
 
 #define TSFSBLK_MAGIC		"TFSVOL02"	/* eight bytes, no NUL */
 #define TSFSBLK_VERSION		4
+#define TSFSBLK_VERSION5	5	/* the superblock's version of a volume with TSFSBLK_INCOMPAT_FMT5 */
 #define TSFSBLK_BLOCK_SIZE	4096
 #define TSFSBLK_SECT_PER_BLK	(TSFSBLK_BLOCK_SIZE / 512)
 #define TSFSBLK_LABEL_MAX	64
@@ -77,6 +78,86 @@ extern "C" {
 IMPORT ER ts_blk_xt2( ID vol );
 
 /*
+ * FMT5: a volume of the format's version 5 (docs/tessronos 7.3): tables
+ * of any number of entries, management parts in run trees, extensions
+ * in a string area of the resource table, the spare place of an object
+ * block, a journal whose transactions take any number of descriptor and
+ * revoke blocks, and run trees of any depth (F_TREEN). mktsfs and the
+ * conversion set it, and nothing takes it off. The superblock's version
+ * is TSFSBLK_VERSION5. A kernel that does not know it does not open the
+ * volume.
+ *
+ * CONVREQ: the user agreed to the conversion, which the next start does
+ * before the volume is attached (knl_ob_conv_boot). A compatible
+ * feature: a kernel that does not know it uses the volume as it is.
+ */
+#define TSFSBLK_INCOMPAT_FMT5		0x0004ULL
+#define TSFSBLK_COMPAT_CONVREQ		0x0002ULL
+
+/*
+ * The limits of one volume, which its version decides. 0 is no limit.
+ * A version 4 volume has the limits of the format before: 256 records,
+ * 64 resources and 1024 links of an object, 15 bytes of an extension,
+ * the metadata one transaction holds, places up to F_TREE2, and 254
+ * copies in a transaction. A version 5 volume has none of the counts
+ * and no bound on the metadata, 767 bytes of an extension (what the API
+ * takes, FS_NAME_MAX less its NUL), places up to F_TREEN, and the budget
+ * of its journal. xt_form is the deepest form of a place the
+ * volume may hold (F_TREE2 or F_TREEN of tsfsfmt.h); txn_budget is what
+ * ts_jrnl_budget answers.
+ */
+typedef struct {
+	UINT	max_rec;		/* records of one object */
+	UINT	max_res;		/* resources of one object */
+	UINT	max_link;		/* links of one object */
+	UINT	ext_max;		/* bytes of a resource's extension, the NUL not counted */
+	UD	meta_max;		/* bytes of one object's metadata */
+	UINT	xt_form;		/* the deepest place form */
+	UINT	txn_budget;		/* copies one transaction holds */
+} T_TSFSLIM;
+
+IMPORT ER ts_blk_lim( ID vol, T_TSFSLIM *pk_lim );
+
+/*
+ * For a test: the limits ts_blk_lim answers for this volume replaced
+ * with *lim until the volume is closed or NULL is given, so that the
+ * code above the block layer can be tried with the limits of version 5
+ * on a volume that is not.
+ */
+IMPORT ER ts_blk_lim_test( ID vol, CONST T_TSFSLIM *lim );
+
+/*
+ * The conversion made final (steps 4 to 6 of the conversion, 7.3): the
+ * ring emptied, the superblock written with FMT5, without CONVREQ and
+ * with version 5 (first one copy, which is the moment the conversion is
+ * made, then the other and the spares), then the journal's head of
+ * version 5. The volume is one opened for the conversion alone, checked
+ * whole before. E_OK on a volume of version 5 already, which is left as
+ * it is; E_RONLY on one that does not write; E_OBJ on one with an error
+ * recorded or an incompatible feature other than XT2; E_BUSY while a
+ * transaction runs.
+ *
+ * ts_blk_convreq sets CONVREQ (on) or takes it off, and writes the
+ * superblock. E_OBJ to set it on a volume of version 5.
+ */
+IMPORT ER ts_blk_convert( ID vol );
+IMPORT ER ts_blk_convreq( ID vol, BOOL on );
+
+/*
+ * For a test: the next ts_blk_convert of the volume stops as a machine
+ * whose power went, after the step named: every write after it is
+ * thrown away until the volume is opened again, and ts_blk_convert
+ * answers E_OK. TSFSBLK_CNV_NONE takes it off.
+ */
+#define TSFSBLK_CNV_NONE	0
+#define TSFSBLK_CNV_RING	1	/* after 4: the ring emptied, the superblock not touched */
+#define TSFSBLK_CNV_SB		2	/* after the first copy of the superblock: the conversion is made */
+#define TSFSBLK_CNV_PAIR	3	/* after the other copy */
+#define TSFSBLK_CNV_SPARE	4	/* after the spares, before the journal's head */
+
+IMPORT ER ts_blk_convert_fault( ID vol, UINT where );
+
+/*
  * Superblock, as it is held in memory. Two copies sit in blocks 0 and 1;
  * each write goes to the one the last write did not touch, with the
  * generation one higher, and a volume is opened from the valid copy of
@@ -117,9 +198,24 @@ typedef struct {
 } T_TSFSBLK_SB;
 
 /*
- * Make a volume on a block device. Everything on it is lost.
+ * Make a volume on a block device. Everything on it is lost. The volume
+ * is of version 5 (TSFSBLK_INCOMPAT_FMT5).
  */
 IMPORT ER ts_format_blk( CONST char *devnm, CONST char *label );
+
+/*
+ * The same, as `opt` says: the version (TSFSBLK_VERSION for a volume of
+ * the format before, for a test; TSFSBLK_VERSION5; 0 is 5) and the
+ * blocks of the journal area (0: a 256th of the volume, as
+ * ts_format_blk; no fewer than TSFSJ_AREA_BLOCKS, and room left for the
+ * groups). NULL is ts_format_blk.
+ */
+typedef struct {
+	UINT	version;
+	UD	jblocks;
+} T_TSFSFMT;
+
+IMPORT ER ts_format_blk_opt( CONST char *devnm, CONST char *label, CONST T_TSFSFMT *opt );
 /*
  * A native volume made on a device with its label (design 7.6): the
  * format, and the top object, a figure named with the whole label and

@@ -2687,7 +2687,7 @@ LOCAL ER eap_file( CONST char *path, UB **pb, INT *plen )
 	*pb = NULL;
 	*plen = 0;
 	if ( path[0] == '\0' ) return E_OK;
-	if ( fs_stat(path, &st) < EX_OK || st.size == 0 || st.size > 16384 ) {
+	if ( fs_stat(path, &st) < EX_OK || st.size == 0 || st.size > (UD)0x7fffffff ) {	/* its length is an INT */
 		tm_printf((UB *)"wifi: the file %s cannot be used\n", path);
 		return E_NOEXS;
 	}

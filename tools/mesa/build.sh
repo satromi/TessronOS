@@ -153,8 +153,19 @@ ts_args() {
 	done
 }
 
+# the C++ runtime a probe links with: the one make passes (LIBDIR), or the
+# one of the build of build_make without a BUILD_ID
+cxxrt_dir() {
+	if [ -n "${LIBDIR:-}" ]; then
+		echo "$LIBDIR"
+	else
+		( make -s -C "$TOP/build_make" --no-print-directory print-cxxrt-dir )
+	fi
+}
+
 ts_link_args() {
-	local a L=$TOP/build_make/obj/lib
+	local a L
+	L=$(cxxrt_dir)
 	for a in -specs=nosys.specs -L$WORK/stublib -Wl,--start-group $L/libcxxrt.a $L/libpthread.a \
 		-lc -Wl,--end-group; do
 		printf "'%s', " "$a"
@@ -167,7 +178,7 @@ setup() {
 	mkdir -p "$WORK/pkgconfig" "$WORK/stublib"
 	# the C runtime and the threads of a TessronOS program, which meson's
 	# checks link with, so that a function is found where a program has it
-	make -s -C "$TOP/build_make" obj/lib/libcxxrt.a obj/lib/libpthread.a >/dev/null
+	[ -n "${LIBDIR:-}" ] || make -s -C "$TOP/build_make" obj/lib/libcxxrt.a obj/lib/libpthread.a >/dev/null
 	# libdl and librt, which meson looks for when the C library lacks dlopen
 	# and clock_gettime: empty, so that it finds them and the functions stay absent
 	for l in dl rt; do

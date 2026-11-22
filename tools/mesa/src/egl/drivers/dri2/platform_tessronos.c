@@ -877,26 +877,50 @@ ts_probe_gpu(_EGLDisplay *disp)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    const char *want = os_get_option("TS_GL_DRIVER");
-   char why[96], line[160];
+   char why[128], line[200];
    int64_t t0;
 
    struct pipe_loader_device *dev = NULL;
 
    ts_gl_probe_note(TS_GL_PROBE_NONE, NULL);
    if (disp->Options.ForceSoftware || (want != NULL && strcmp(want, "softpipe") == 0)) {
+      ts_gl_probe_why("softpipe was asked for (TS_GL_DRIVER=softpipe or EGL's ForceSoftware)");
       ts_gl_log("egl: softpipe, as asked\n");
       return false;
    }
+   int kind = ts_gl_gpu_kind();
 #ifdef __x86_64__
-   if (ts_gl_gpu_kind() != TS_GL_GPU_V3D && ts_gl_gpu_kind() != TS_GL_GPU_INTEL)
+   if (kind != TS_GL_GPU_V3D && kind != TS_GL_GPU_INTEL) {
 #else
-   if (ts_gl_gpu_kind() != TS_GL_GPU_V3D)
+   if (kind != TS_GL_GPU_V3D) {
 #endif
-      return false;                  /* no GPU: softpipe, nothing to tell */
+      /* no GPU the platform has a driver for: why, on one line, as the board's log is read */
+      if (kind == TS_GL_GPU_NONE)
+         snprintf(why, sizeof(why), "no GPU registered (gp_ref_gpu %s)", ts_gl_error_name(ts_gl_last_error()));
+      else
+         snprintf(why, sizeof(why), "the GPU is of kind %d, which has no driver here", kind);
+      ts_gl_probe_why(why);
+      snprintf(line, sizeof(line), "egl: %s, softpipe\n", why);
+      ts_gl_log(line);
+      return false;
+   }
    dri2_dpy->fd_render_gpu = ts_gl_drm_open();
    if (dri2_dpy->fd_render_gpu < 0) {
+      const char *name = ts_gl_error_name(ts_gl_last_error());
+
       ts_gl_probe_note(TS_GL_PROBE_NOOPEN, NULL);
-      ts_gl_log("egl: " TS_GPU_NAME " is not open to this process (no address space), softpipe\n");
+      /*
+       * E_OBJ: the kernel's check of the address spaces at start did not
+       * pass; E_NOMEM: no 4MB below 4GB for the process's table; E_OACV:
+       * the process's sandbox shuts it out of the GPU
+       */
+      snprintf(why, sizeof(why), "gp_opn_gpu %s%s", name,
+               strcmp(name, "E_OBJ") == 0 ? ": the check of the address spaces at start failed"
+               : strcmp(name, "E_NOMEM") == 0 ? ": no table of 4MB below 4GB"
+               : strcmp(name, "E_OACV") == 0 ? ": shut out by the sandbox" : "");
+      ts_gl_probe_why(why);
+      snprintf(line, sizeof(line), "egl: " TS_GPU_NAME " is not open to this process (%s), softpipe\n", why);
+      ts_gl_log(line);
       return false;
    }
    dri2_dpy->fd_display_gpu = dri2_dpy->fd_render_gpu;
@@ -927,10 +951,14 @@ ts_probe_gpu(_EGLDisplay *disp)
          t0 = os_time_get_nano();
          if (ts_gpu_check(dri2_dpy->dri_screen_render_gpu->base.screen, dri2_dpy->driver_name, why,
                           sizeof(why))) {
+            int ms = (int)((os_time_get_nano() - t0) / 1000000);
+
             snprintf(line, sizeof(line), "egl: " TS_GPU_NAME " (%s), a frame cleared and read back in %d ms\n",
-                     dri2_dpy->driver_name, (int)((os_time_get_nano() - t0) / 1000000));
+                     dri2_dpy->driver_name, ms);
             ts_gl_log(line);
             ts_gl_probe_note(TS_GL_PROBE_DRAWS, dri2_dpy->driver_name);
+            snprintf(why, sizeof(why), "the check frame cleared on the GPU and read back right in %d ms", ms);
+            ts_gl_probe_why(why);
             disp->Device = _eglFindDevice(-1, true);
             return true;
          }
@@ -949,6 +977,7 @@ ts_probe_gpu(_EGLDisplay *disp)
 fail:
    snprintf(line, sizeof(line), "egl: " TS_GPU_NAME " did not draw (%s), softpipe\n", why);
    ts_gl_log(line);
+   ts_gl_probe_why(why);
 #ifdef __x86_64__
    /* the requests of i915 the driver made and those refused: where it stopped */
    if (dri2_dpy->driver_name != NULL && strcmp(dri2_dpy->driver_name, "iris") == 0)

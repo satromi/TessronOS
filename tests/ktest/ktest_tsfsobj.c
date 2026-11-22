@@ -192,7 +192,12 @@ LOCAL void test_mount( void )
 {
 	T_RVOL	rvol;
 
-	if ( ts_format_blk(ODEV, "OBJECTS") < E_OK ) {
+	T_TSFSFMT	fmt;
+
+	/* of the format's version 4: the tests up to test_v4_refuse try its limits */
+	knl_memset(&fmt, 0, sizeof(fmt));
+	fmt.version = TSFSBLK_VERSION;
+	if ( ts_format_blk_opt(ODEV, "OBJECTS", &fmt) < E_OK ) {
 		KT_SKIP("no block device to make a volume on");
 	}
 	bvol = ts_obj_mount(ODEV);
@@ -2149,6 +2154,501 @@ LOCAL void test_shared_program( void )
 	KT_ASSERT_ER(ts_cls_vol(vol), E_OK);
 }
 
+/* ---------------------------------------------------------------- the format's version 5 (design 7.3) */
+
+/*
+ * The tests above run on a volume of version 4 (test_mount). Those below
+ * make the scratch volume again, of version 5, and try what that version
+ * allows: more records, resources and links than before, long
+ * extensions, large metadata, run trees of many levels, and changes made
+ * of several transactions through the spare place.
+ */
+
+/* What a step left behind: the object is not marked for its spare place */
+LOCAL BOOL no_spare( CONST TS_UUID *u )
+{
+	T_ROBJ	robj;
+
+	return (BOOL)( ts_obj_ref(bvol, u, &robj) >= E_OK && ( robj.flags & TSFSO_F_SPARE ) == 0 );
+}
+
+LOCAL BOOL is_v5( void )
+{
+	T_TSFSLIM	l;
+
+	return (BOOL)( ts_blk_lim(bvol, &l) >= E_OK && l.xt_form >= 5 && l.max_rec == 0 );
+}
+
+/* The volume made again, of version 5 */
+LOCAL void test_v5_mount( void )
+{
+	if ( bvol > 0 ) {
+		(void)ts_obj_unmount(bvol);
+		bvol = 0;
+	}
+	KT_ASSERT_ER(ts_format_blk(ODEV, "OBJECTS5"), E_OK);
+	bvol = ts_obj_mount(ODEV);
+	KT_ASSERT(bvol > 0);
+	if ( bvol > 0 ) KT_ASSERT(is_v5());
+}
+
+/* Version 4 refuses what it always did: the 257th record, the 65th resource, 16 bytes of extension, 493KB of metadata */
+LOCAL void test_v4_refuse( void )
+{
+	TS_UUID	u;
+	UB	*j, b = 1;
+	SZ	asize = 0;
+	INT	i, pos;
+	char	ext[20];
+
+	if ( bvol <= 0 ) KT_SKIP("no volume");
+	if ( is_v5() ) KT_SKIP("the volume is of version 5");
+	KT_ASSERT_ER(ts_obj_create(bvol, (CONST UB *)"{\"name\":\"v4\"}", 13, &u), E_OK);
+	KT_ASSERT_ER(ts_obj_ins_rec(bvol, &u, -1, 5, 0, &pos), E_OK);
+	for ( i = 0; i < TSFSO_MAX_RES; i++ ) {
+		KT_ASSERT_ER(ts_obj_wri_res(bvol, &u, 0, i, (CONST UB *)"png", &b, 1), E_OK);
+	}
+	KT_ASSERT_ER(ts_obj_wri_res(bvol, &u, 0, TSFSO_MAX_RES, (CONST UB *)"png", &b, 1), E_LIMIT);
+	knl_memcpy(ext, "abcdefghijklmnop", 17);		/* 16 bytes */
+	KT_ASSERT_ER(ts_obj_wri_res(bvol, &u, 0, 0, (CONST UB *)ext, &b, 1), E_PAR);
+	ext[15] = 0;					/* 15 */
+	KT_ASSERT_ER(ts_obj_wri_res(bvol, &u, 0, 0, (CONST UB *)ext, &b, 1), E_OK);
+	j = (UB *)Kmalloc(493 * 1024);
+	KT_ASSERT(j != NULL);
+	if ( j != NULL ) {
+		knl_memset(j, ' ', 493 * 1024);
+		j[0] = '{';
+		j[493 * 1024 - 1] = '}';
+		KT_ASSERT_ER(ts_obj_set_meta(bvol, &u, j, 493 * 1024), E_PAR);
+		Kfree(j);
+	}
+	(void)asize;
+	KT_ASSERT_ER(ts_obj_delete(bvol, &u), E_OK);
+}
+
+/*
+ * Records, resources, links and metadata past the limits of version 4,
+ * read again after the volume is opened again.
+ */
+#define V5_RECS		300
+#define V5_RES		200
+#define V5_LINKS	2000
+
+LOCAL void test_v5_tables( void )
+{
+	T_TSFSRES	*rl = NULL;
+	T_RREC		*rr = NULL;
+	TS_UUID		a, b, d, tgt[4], *to = NULL;
+	UB		*j = NULL, *t = NULL, *ext = NULL, by;
+	SZ		asize = 0, ml;
+	UD		free0;
+	INT		i, k, pos, cnt = 0, bad;
+	ER		er;
+
+	if ( bvol <= 0 ) KT_SKIP("no volume");
+	if ( !is_v5() ) KT_SKIP("the volume is not of version 5");
+	free0 = free_blocks();
+	rr = (T_RREC *)Kmalloc(sizeof(T_RREC) * V5_RECS);
+	rl = (T_TSFSRES *)Kmalloc(sizeof(T_TSFSRES) * ( V5_RES + 1 ));
+	ext = (UB *)Kmalloc(TSFSO_EXT_MAX + 1);
+	to = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * V5_LINKS);
+	t = (UB *)Kmalloc(V5_LINKS * 128 + 64);
+	KT_ASSERT(rr != NULL && rl != NULL && ext != NULL && to != NULL && t != NULL);
+	if ( rr == NULL || rl == NULL || ext == NULL || to == NULL || t == NULL ) goto out;
+
+	/* 300 records */
+	KT_ASSERT_ER(ts_obj_create(bvol, (CONST UB *)"{\"name\":\"recs\"}", 15, &a), E_OK);
+	for ( i = 0, bad = 0; i < V5_RECS; i++ ) {
+		by = pat(i);
+		if ( ts_obj_ins_rec(bvol, &a, -1, 5, (UINT)i, &pos) < E_OK || pos != i
+		  || ts_obj_wri_rec(bvol, &a, i, 0, &by, 1, &asize) < E_OK ) bad++;
+	}
+	KT_ASSERT_EQ(bad, 0);
+	KT_ASSERT_ER(ts_obj_lst_rec(bvol, &a, NULL, 0, &cnt), E_OK);
+	KT_ASSERT_EQ(cnt, V5_RECS);
+
+	/* 200 resources, extensions of 15, 200 and 767 bytes */
+	KT_ASSERT_ER(ts_obj_create(bvol, (CONST UB *)"{\"name\":\"res\"}", 14, &b), E_OK);
+	KT_ASSERT_ER(ts_obj_ins_rec(bvol, &b, -1, 5, 0, &pos), E_OK);
+	for ( i = 0, bad = 0; i < V5_RES; i++ ) {
+		INT	n = ( i == 1 ) ? 15 : ( i == 2 ) ? 200 : ( i == 3 ) ? TSFSO_EXT_MAX : 3;
+
+		for ( k = 0; k < n; k++ ) ext[k] = (UB)( 'a' + ( k + i ) % 26 );
+		ext[n] = 0;
+		by = pat(i);
+		if ( ts_obj_wri_res(bvol, &b, 0, i, ext, &by, 1) < E_OK ) bad++;
+	}
+	KT_ASSERT_EQ(bad, 0);
+	knl_memset(ext, 'x', TSFSO_EXT_MAX + 1);
+	ext[TSFSO_EXT_MAX] = 'y';
+	KT_ASSERT_ER(ts_obj_wri_res(bvol, &b, 0, 999, ext, &by, 1), E_PAR);	/* 768 bytes */
+
+	/* 2000 links to four objects */
+	for ( i = 0; i < 4; i++ ) KT_ASSERT_ER(ts_obj_create(bvol, NULL, 0, &tgt[i]), E_OK);
+	for ( i = 0; i < V5_LINKS; i++ ) to[i] = tgt[i % 4];
+	KT_ASSERT_ER(make_doc(&d, to, V5_LINKS, t), E_OK);
+	KT_ASSERT_ER(ts_obj_relink(bvol, &d), E_OK);
+	KT_ASSERT_EQ(refs(&tgt[0]), V5_LINKS / 4);
+	KT_ASSERT_ER(ts_obj_lst_lnk(bvol, &d, NULL, 0, &cnt), E_OK);
+	KT_ASSERT_EQ(cnt, V5_LINKS);
+
+	/* metadata of 1MB */
+	ml = 1024 * 1024;
+	j = (UB *)Kmalloc(ml + 64);
+	KT_ASSERT(j != NULL);
+	if ( j != NULL ) {
+		knl_memset(j, 'm', ml);
+		knl_memcpy(j, "{\"name\":\"big\",\"pad\":\"", 21);
+		j[ml - 2] = '"';
+		j[ml - 1] = '}';
+		KT_ASSERT_ER(ts_obj_set_meta(bvol, &a, j, ml), E_OK);
+	}
+
+	/* all of it again from the medium */
+	KT_ASSERT_ER(ts_obj_unmount(bvol), E_OK);
+	bvol = ts_obj_mount(ODEV);
+	KT_ASSERT(bvol > 0);
+	if ( bvol <= 0 ) goto out;
+	KT_ASSERT_ER(ts_obj_lst_rec(bvol, &a, rr, V5_RECS, &cnt), E_OK);
+	KT_ASSERT_EQ(cnt, V5_RECS);
+	for ( i = 0, bad = 0; i < V5_RECS; i++ ) {
+		by = 0;
+		if ( ts_obj_rea_rec(bvol, &a, i, 0, &by, 1, &asize) < E_OK || by != pat(i) || rr[i].sub != (UINT)i ) bad++;
+	}
+	KT_ASSERT_EQ(bad, 0);
+	KT_ASSERT_ER(ts_obj_lst_res(bvol, &b, NULL, 0, &cnt), E_OK);
+	KT_ASSERT_EQ(cnt, V5_RES);
+	KT_ASSERT_ER(ts_obj_lst_res(bvol, &b, rl, V5_RES + 1, &cnt), E_OK);
+	KT_ASSERT_EQ(cnt, V5_RES);
+	for ( i = 0, bad = 0; i < cnt; i++ ) {
+		INT	r = rl[i].resno;
+		INT	n = ( r == 1 ) ? 15 : ( r == 2 ) ? 200 : ( r == 3 ) ? TSFSO_EXT_MAX : 3;
+
+		asize = 0;
+		er = ts_obj_res_ext(bvol, &b, 0, r, ext, TSFSO_EXT_MAX + 1, &asize);
+		if ( er < E_OK || asize != n || rl[i].extlen != (UINT)n ) bad++;
+		for ( k = 0; er >= E_OK && k < n; k++ ) {
+			if ( ext[k] != (UB)( 'a' + ( k + r ) % 26 ) ) { bad++; break; }
+		}
+		by = 0;
+		if ( ts_obj_rea_res(bvol, &b, 0, r, &by, 1, &asize, NULL) < E_OK || by != pat(r) ) bad++;
+	}
+	KT_ASSERT_EQ(bad, 0);
+	KT_ASSERT_EQ(refs(&tgt[1]), V5_LINKS / 4);
+	if ( j != NULL ) {
+		UB	*g = (UB *)Kmalloc(ml + 1024);
+
+		KT_ASSERT(g != NULL);
+		if ( g != NULL ) {
+			KT_ASSERT_ER(ts_obj_get_meta(bvol, &a, g, ml + 1024, &asize), E_OK);
+			KT_ASSERT(asize >= ml && has(g, (INT)asize, "\"pad\":\"mmmm"));
+			Kfree(g);
+		}
+	}
+
+	/* and given back */
+	KT_ASSERT_ER(ts_obj_delete(bvol, &a), E_OK);
+	KT_ASSERT_ER(ts_obj_delete(bvol, &b), E_OK);
+	KT_ASSERT_ER(ts_obj_delete(bvol, &d), E_OK);
+	for ( i = 0; i < 4; i++ ) KT_ASSERT_ER(ts_obj_delete(bvol, &tgt[i]), E_OK);
+	KT_ASSERT_EQ(free_blocks(), free0);
+    out:
+	if ( rr != NULL ) Kfree(rr);
+	if ( rl != NULL ) Kfree(rl);
+	if ( ext != NULL ) Kfree(ext);
+	if ( to != NULL ) Kfree(to);
+	if ( t != NULL ) Kfree(t);
+	if ( j != NULL ) Kfree(j);
+}
+
+/* Every block of record 0 of `u` holds what write_runs put there: block i starts with i and `mark` */
+LOCAL INT runs_bad( CONST TS_UUID *u, INT n, UB mark, UB *r )
+{
+	SZ	asize = 0;
+	INT	i, bad = 0;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( ts_obj_rea_rec(bvol, u, 0, (D)i * TSFSBLK_BLOCK_SIZE, r, TSFSBLK_BLOCK_SIZE, &asize) < E_OK
+		  || asize != TSFSBLK_BLOCK_SIZE || r[0] != (UB)i || r[1] != (UB)( i >> 8 ) || r[2] != mark
+		  || r[TSFSBLK_BLOCK_SIZE - 1] != pat(i) ) {
+			bad++;
+		}
+	}
+	return bad;
+}
+
+/* Two records grown a block at a time in turn, from block `from` to `to`: a run per block each */
+LOCAL INT write_runs( CONST TS_UUID *a, CONST TS_UUID *b, INT from, INT to, UB *w )
+{
+	SZ	asize = 0;
+	INT	i, bad = 0;
+
+	for ( i = from; i < to; i++ ) {
+		knl_memset(w, 0, TSFSBLK_BLOCK_SIZE);
+		w[0] = (UB)i;
+		w[1] = (UB)( i >> 8 );
+		w[TSFSBLK_BLOCK_SIZE - 1] = pat(i);
+		w[2] = 'A';
+		if ( ts_obj_wri_rec(bvol, a, 0, (D)i * TSFSBLK_BLOCK_SIZE, w, TSFSBLK_BLOCK_SIZE, &asize) < E_OK ) bad++;
+		w[2] = 'B';
+		if ( b != NULL && ts_obj_wri_rec(bvol, b, 0, (D)i * TSFSBLK_BLOCK_SIZE, w, TSFSBLK_BLOCK_SIZE, &asize) < E_OK ) bad++;
+	}
+	return bad;
+}
+
+/*
+ * Run trees of three and four levels (nodes of four entries), read,
+ * grown, cut short and read again after the volume is opened again; and
+ * a tree of two levels of version 4 written again as a run tree.
+ */
+#define TREE_RUNS	300		/* 75 leaves of 4: four levels above the leaves */
+
+LOCAL void test_run_tree( void )
+{
+	TS_UUID	a, b;
+	UB	*w, *r;
+	UD	free0;
+	INT	pos;
+
+	if ( bvol <= 0 ) KT_SKIP("no volume");
+	if ( !is_v5() ) KT_SKIP("the volume is not of version 5");
+	w = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	r = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	KT_ASSERT(w != NULL && r != NULL);
+	if ( w == NULL || r == NULL ) goto out;
+	free0 = free_blocks();
+	KT_ASSERT_ER(ts_obj_fan(bvol, 4), E_OK);
+	KT_ASSERT_ER(ts_obj_create(bvol, (CONST UB *)"{\"name\":\"tree a\"}", 17, &a), E_OK);
+	KT_ASSERT_ER(ts_obj_create(bvol, (CONST UB *)"{\"name\":\"tree b\"}", 17, &b), E_OK);
+	KT_ASSERT_ER(ts_obj_ins_rec(bvol, &a, -1, 5, 0, &pos), E_OK);
+	KT_ASSERT_ER(ts_obj_ins_rec(bvol, &b, -1, 5, 0, &pos), E_OK);
+
+	/* three levels at 40 runs, four at 300 */
+	KT_ASSERT_EQ(write_runs(&a, &b, 0, 40, w), 0);
+	KT_ASSERT_EQ(runs_bad(&a, 40, 'A', r), 0);
+	KT_ASSERT_EQ(write_runs(&a, &b, 40, TREE_RUNS, w), 0);
+	KT_ASSERT_EQ(runs_bad(&a, TREE_RUNS, 'A', r), 0);
+	KT_ASSERT_EQ(runs_bad(&b, TREE_RUNS, 'B', r), 0);
+
+	/* cut short, into the middle of a leaf, and grown again */
+	KT_ASSERT_ER(ts_obj_trn_rec(bvol, &a, 0, (UD)123 * TSFSBLK_BLOCK_SIZE), E_OK);
+	KT_ASSERT_EQ(runs_bad(&a, 123, 'A', r), 0);
+	KT_ASSERT(no_spare(&a));
+	KT_ASSERT_EQ(write_runs(&a, &b, 123, 200, w), 0);
+	KT_ASSERT_EQ(runs_bad(&a, 200, 'A', r), 0);
+
+	KT_ASSERT_ER(ts_obj_unmount(bvol), E_OK);
+	bvol = ts_obj_mount(ODEV);
+	KT_ASSERT(bvol > 0);
+	if ( bvol <= 0 ) goto out;
+	KT_ASSERT_EQ(runs_bad(&a, 200, 'A', r), 0);
+	KT_ASSERT_EQ(runs_bad(&b, 200, 'B', r), 0);
+	KT_ASSERT_ER(ts_obj_trn_rec(bvol, &b, 0, 1), E_OK);
+	KT_ASSERT_ER(ts_obj_delete(bvol, &a), E_OK);
+	KT_ASSERT_ER(ts_obj_delete(bvol, &b), E_OK);
+	KT_ASSERT_EQ(free_blocks(), free0);
+    out:
+	if ( w != NULL ) Kfree(w);
+	if ( r != NULL ) Kfree(r);
+}
+
+/* A tree of two levels a volume of version 4 made, written again as a run tree once the volume takes version 5's forms */
+LOCAL void test_tree2_to_n( void )
+{
+	T_TSFSLIM	v4, v5;
+	TS_UUID		a, b;
+	UB		*w, *r;
+	UD		free0;
+	INT		pos, n = TSFSO_MAX_EXTENTS + 30;
+
+	if ( bvol <= 0 ) KT_SKIP("no volume");
+	if ( !is_v5() ) KT_SKIP("the volume is not of version 5");
+	w = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	r = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	KT_ASSERT(w != NULL && r != NULL);
+	if ( w == NULL || r == NULL ) goto out;
+	free0 = free_blocks();
+	KT_ASSERT_ER(ts_blk_lim(bvol, &v5), E_OK);
+	v4 = v5;
+	v4.max_rec = TSFSO_MAX_REC;
+	v4.max_res = TSFSO_MAX_RES;
+	v4.max_link = TSFSO_MAX_LINK;
+	v4.ext_max = TSFSO_EXT_LEN - 1;
+	v4.xt_form = 4;
+	KT_ASSERT_ER(ts_blk_lim_test(bvol, &v4), E_OK);
+	KT_ASSERT_ER(ts_obj_create(bvol, (CONST UB *)"{\"name\":\"t2 a\"}", 15, &a), E_OK);
+	KT_ASSERT_ER(ts_obj_create(bvol, (CONST UB *)"{\"name\":\"t2 b\"}", 15, &b), E_OK);
+	KT_ASSERT_ER(ts_obj_ins_rec(bvol, &a, -1, 5, 0, &pos), E_OK);
+	KT_ASSERT_ER(ts_obj_ins_rec(bvol, &b, -1, 5, 0, &pos), E_OK);
+	KT_ASSERT_EQ(write_runs(&a, &b, 0, n, w), 0);		/* a tree of two levels */
+	KT_ASSERT_ER(ts_blk_lim_test(bvol, NULL), E_OK);
+	KT_ASSERT_ER(ts_obj_fan(bvol, 4), E_OK);
+	KT_ASSERT_EQ(runs_bad(&a, n, 'A', r), 0);
+	KT_ASSERT_EQ(write_runs(&a, NULL, n, n + 1, w), 0);	/* written again as a run tree */
+	KT_ASSERT_EQ(runs_bad(&a, n + 1, 'A', r), 0);
+	KT_ASSERT_ER(ts_obj_trn_rec(bvol, &a, 0, (UD)50 * TSFSBLK_BLOCK_SIZE), E_OK);
+	KT_ASSERT_EQ(runs_bad(&a, 50, 'A', r), 0);
+	KT_ASSERT_ER(ts_obj_fan(bvol, 0), E_OK);
+	KT_ASSERT_ER(ts_obj_delete(bvol, &a), E_OK);
+	KT_ASSERT_ER(ts_obj_delete(bvol, &b), E_OK);
+	KT_ASSERT_EQ(free_blocks(), free0);
+    out:
+	if ( w != NULL ) Kfree(w);
+	if ( r != NULL ) Kfree(r);
+}
+
+/*
+ * Changes in several transactions through the spare place, on a budget
+ * of 16 copies: a record replaced, cut short and taken out, and large
+ * metadata written, each in more than one transaction; and the power
+ * cut after each of the first transactions of each, where the volume
+ * opened again has the old bytes or the new, an empty spare place, and
+ * as many free blocks as either of them leaves.
+ */
+#define SP_BLOCKS	40		/* the record in runs of a block, a tree */
+#define SP_NEW		( 30 * TSFSBLK_BLOCK_SIZE + 100 )
+#define BLKS_OF(n)	( ( (UD)(n) + TSFSBLK_BLOCK_SIZE - 1 ) / TSFSBLK_BLOCK_SIZE )
+
+LOCAL ER sp_remount( void )
+{
+	(void)ts_jrnl_fault(bvol, TSFSJ_FAULT_NONE);
+	(void)ts_obj_cut(bvol, 0);
+	(void)ts_sync_blk(bvol);
+	(void)ts_obj_unmount(bvol);
+	bvol = ts_obj_mount(ODEV);
+	if ( bvol <= 0 ) {
+		return E_IO;
+	}
+	return ts_jrnl_fault(bvol, TSFSJ_FAULT_BUDGET | 16);
+}
+
+/* A record of SP_BLOCKS runs of a block, with a second object taking every other block */
+LOCAL ER sp_make( TS_UUID *a, TS_UUID *b, UB *w )
+{
+	INT	pos;
+	ER	er;
+
+	er = ts_obj_create(bvol, (CONST UB *)"{\"name\":\"spare a\"}", 18, a);
+	if ( er >= E_OK ) er = ts_obj_create(bvol, (CONST UB *)"{\"name\":\"spare b\"}", 18, b);
+	if ( er >= E_OK ) er = ts_obj_ins_rec(bvol, a, -1, 5, 0, &pos);
+	if ( er >= E_OK ) er = ts_obj_ins_rec(bvol, b, -1, 5, 0, &pos);
+	if ( er >= E_OK && write_runs(a, b, 0, SP_BLOCKS, w) != 0 ) er = E_IO;
+	return er;
+}
+
+LOCAL UD rec_bytes( CONST TS_UUID *u )
+{
+	T_RREC	rr;
+	INT	cnt = 0;
+
+	return ( ts_obj_lst_rec(bvol, u, &rr, 1, &cnt) >= E_OK && cnt == 1 ) ? rr.size : ~(UD)0;
+}
+
+LOCAL void test_spare( void )
+{
+	TS_UUID	a, b;
+	UB	*w, *r, *nb, *j;
+	UD	seq, fb;
+	SZ	asize;
+	INT	cut, i, bad;
+
+	if ( bvol <= 0 ) KT_SKIP("no volume");
+	if ( !is_v5() ) KT_SKIP("the volume is not of version 5");
+	w = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	r = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	nb = (UB *)Kmalloc(SP_NEW);
+	j = (UB *)Kmalloc(64 * 1024);
+	KT_ASSERT(w != NULL && r != NULL && nb != NULL && j != NULL);
+	if ( w == NULL || r == NULL || nb == NULL || j == NULL ) goto out;
+	for ( i = 0; i < SP_NEW; i++ ) nb[i] = pat(i * 3);
+	KT_ASSERT_ER(ts_jrnl_fault(bvol, TSFSJ_FAULT_BUDGET | 16), E_OK);
+	fb = free_blocks();
+
+	/* replaced: more than one transaction, the old runs given back */
+	KT_ASSERT_ER(sp_make(&a, &b, w), E_OK);
+	seq = ts_jrnl_next(bvol);
+	KT_ASSERT_ER(ts_obj_rpl_rec(bvol, &a, 0, nb, SP_NEW), E_OK);
+	KT_ASSERT(ts_jrnl_next(bvol) >= seq + 3);
+	KT_ASSERT(no_spare(&a));
+	KT_ASSERT_ER(ts_obj_rea_rec(bvol, &a, 0, SP_NEW - 100, r, 200, &asize), E_OK);
+	KT_ASSERT_EQ(asize, 100);
+	KT_ASSERT_EQ(r[99], nb[SP_NEW - 1]);
+
+	/* cut short: the size at once, the runs a step at a time */
+	seq = ts_jrnl_next(bvol);
+	KT_ASSERT_ER(ts_obj_trn_rec(bvol, &b, 0, (UD)5 * TSFSBLK_BLOCK_SIZE), E_OK);
+	KT_ASSERT(ts_jrnl_next(bvol) >= seq + 2);
+	KT_ASSERT(no_spare(&b));
+	KT_ASSERT_EQ(rec_bytes(&b), (UD)5 * TSFSBLK_BLOCK_SIZE);
+	KT_ASSERT_EQ(runs_bad(&b, 5, 'B', r), 0);
+
+	/* metadata larger than a transaction of 16 holds */
+	knl_memset(j, 'q', 64 * 1024);
+	knl_memcpy(j, "{\"name\":\"q\",\"pad\":\"", 19);
+	j[64 * 1024 - 2] = '"';
+	j[64 * 1024 - 1] = '}';
+	KT_ASSERT_ER(ts_obj_set_meta(bvol, &a, j, 64 * 1024), E_OK);
+	KT_ASSERT_ER(ts_obj_set_meta(bvol, &a, j, 60 * 1024), E_OK);	/* and again, the old part given back */
+
+	/* taken out: its runs a step at a time */
+	KT_ASSERT_ER(ts_obj_del_rec(bvol, &a, 0), E_OK);
+	KT_ASSERT(no_spare(&a));
+	KT_ASSERT_ER(ts_obj_delete(bvol, &a), E_OK);
+	KT_ASSERT_ER(ts_obj_delete(bvol, &b), E_OK);
+	KT_ASSERT_EQ(free_blocks(), fb);
+
+	/* the power cut after each of the first transactions of a replacement */
+	for ( cut = 1; cut <= 3; cut++ ) {
+		KT_ASSERT_ER(sp_make(&a, &b, w), E_OK);
+		KT_ASSERT_ER(ts_obj_cut(bvol, cut), E_OK);
+		(void)ts_obj_rpl_rec(bvol, &a, 0, nb, SP_NEW);
+		KT_ASSERT_ER(sp_remount(), E_OK);
+		if ( bvol <= 0 ) goto out;
+		KT_ASSERT(no_spare(&a));
+		if ( rec_bytes(&a) == (UD)SP_NEW ) {
+			KT_ASSERT_ER(ts_obj_rea_rec(bvol, &a, 0, 0, r, TSFSBLK_BLOCK_SIZE, &asize), E_OK);
+			KT_ASSERT_EQ(r[5], nb[5]);
+		} else {
+			KT_ASSERT_EQ(rec_bytes(&a), (UD)SP_BLOCKS * TSFSBLK_BLOCK_SIZE);
+			KT_ASSERT_EQ(runs_bad(&a, SP_BLOCKS, 'A', r), 0);
+		}
+		/* and the same of a cut short */
+		KT_ASSERT_ER(ts_obj_cut(bvol, cut), E_OK);
+		(void)ts_obj_trn_rec(bvol, &b, 0, (UD)7 * TSFSBLK_BLOCK_SIZE);
+		KT_ASSERT_ER(sp_remount(), E_OK);
+		if ( bvol <= 0 ) goto out;
+		KT_ASSERT(no_spare(&b));
+		bad = ( rec_bytes(&b) == (UD)7 * TSFSBLK_BLOCK_SIZE || rec_bytes(&b) == (UD)SP_BLOCKS * TSFSBLK_BLOCK_SIZE ) ? 0 : 1;
+		KT_ASSERT_EQ(bad, 0);
+		KT_ASSERT_EQ(runs_bad(&b, 7, 'B', r), 0);
+		KT_ASSERT_ER(ts_obj_delete(bvol, &a), E_OK);
+		KT_ASSERT_ER(ts_obj_delete(bvol, &b), E_OK);
+		KT_ASSERT_EQ(free_blocks(), fb);	/* nothing left taken, whichever it was */
+	}
+	KT_ASSERT_ER(ts_jrnl_fault(bvol, TSFSJ_FAULT_BUDGET | 0), E_OK);
+    out:
+	if ( w != NULL ) Kfree(w);
+	if ( r != NULL ) Kfree(r);
+	if ( nb != NULL ) Kfree(nb);
+	if ( j != NULL ) Kfree(j);
+}
+
+/*
+ * The volume of version 5 taken off and the scratch partition made again,
+ * for the suites after this one: one still attached would write its own
+ * group heads and maps over the volume they make there.
+ */
+LOCAL void test_v5_done( void )
+{
+	if ( bvol > 0 ) {
+		(void)ts_jrnl_fault(bvol, TSFSJ_FAULT_NONE);
+		(void)ts_obj_cut(bvol, 0);
+		KT_ASSERT_ER(ts_obj_unmount(bvol), E_OK);
+		bvol = 0;
+	}
+	KT_ASSERT(ts_format_blk(ODEV, "TessronOS test") >= E_OK);
+}
+
 EXPORT void ktest_tsfsobj( void )
 {
 	KT_RUN(test_mount);
@@ -2160,6 +2660,7 @@ EXPORT void ktest_tsfsobj( void )
 	KT_RUN(test_replace);
 	KT_RUN(test_order);
 	KT_RUN(test_many_records);
+	KT_RUN(test_v4_refuse);
 	KT_RUN(test_many_runs);
 	KT_RUN(test_refcount);
 	KT_RUN(test_collect);
@@ -2174,4 +2675,10 @@ EXPORT void ktest_tsfsobj( void )
 	KT_RUN(test_cut_sweep);
 	KT_RUN(test_scrub);
 	KT_RUN(test_shared_program);
+	KT_RUN(test_v5_mount);
+	KT_RUN(test_v5_tables);
+	KT_RUN(test_run_tree);
+	KT_RUN(test_tree2_to_n);
+	KT_RUN(test_spare);
+	KT_RUN(test_v5_done);
 }

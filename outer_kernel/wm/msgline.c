@@ -43,9 +43,7 @@
 #include <ts/dt.h>
 #include <ts/hid.h>
 
-#define ML_TEXT_MAX	256		/* bytes of a message */
 #define ML_DATE_HOLD	3000		/* ms the date stays after a press */
-#define ML_NOTE_MAX	64		/* bytes of a note */
 #define ML_NOTE_HOLD	2000		/* ms a note stays */
 
 LOCAL BOOL	ml_on = FALSE;
@@ -69,8 +67,15 @@ LOCAL INT	ml_margin;			/* the rules above the letters */
 LOCAL INT	ml_x0, ml_lim;			/* where a message starts and ends */
 LOCAL INT	ml_modex, ml_sepx, ml_clkx;
 
-LOCAL char	ml_text[ML_TEXT_MAX];
-LOCAL char	ml_note[ML_NOTE_MAX];
+/*
+ * The message and the note, as long as they are: each allocated, NULL
+ * for none, put in place and read under ml_lock, which is held only to
+ * swap a pointer or copy out of one, so that a message put by one task
+ * while another draws the band is never read after it was let go.
+ */
+LOCAL char	*ml_text = NULL;
+LOCAL char	*ml_note = NULL;
+LOCAL T_SPLOCK	ml_lock;
 LOCAL UD	ml_note_at = 0;			/* when the note was put, or 0: none */
 LOCAL UINT	ml_mode = WM_MODE_ALPH | WM_MODE_ROMAN;
 LOCAL UD	ml_date_at = 0;			/* when the date was asked for, or 0 */
@@ -166,31 +171,90 @@ LOCAL void ml_rules( void )
 	ml_fill(ml_sepx + 1, 1, ml_sepx + 2, ml_h, wm_look(LK_LIGHT));
 }
 
-/* The message, from the left; cut with … when it does not fit */
+/*
+ * What is shown now -- the note while it is up, else the message --
+ * copied into buf, no more than max - 1 bytes and at a letter's end:
+ * the bytes it is whole
+ */
+LOCAL INT ml_copy( char *buf, INT max )
+{
+	CONST char	*s;
+	INT		n = 0, whole = 0;
+	UINT		imask;
+
+	ISpinLock(&ml_lock, &imask);
+	s = ( ml_note_at != 0 ) ? ml_note : ml_text;
+	if ( s != NULL ) {
+		while ( s[whole] != 0 ) whole++;
+		n = ( whole < max - 1 ) ? whole : max - 1;
+		while ( n > 0 && n < whole && ( (UB)s[n] & 0xC0 ) == 0x80 ) n--;
+		if ( n > 0 ) knl_memcpy(buf, s, (SZ)n);
+	}
+	ISpinUnlock(&ml_lock, &imask);
+	if ( max > 0 ) buf[( n > 0 ) ? n : 0] = 0;
+	return whole;
+}
+
+/*
+ * The message, from the left; cut with … when it does not fit. No more
+ * of it is taken than the band could show at its narrowest letters (a
+ * quarter of the letters' height, four bytes each).
+ */
 LOCAL void ml_message( void )
 {
 	ID		fid = fn_system();
-	char		buf[ML_TEXT_MAX + 4];
-	CONST char	*s = ( ml_note_at != 0 ) ? ml_note : ml_text;
-	INT		n, room;
+	char		*buf;
+	INT		n, room, take, whole;
 
 	ml_clip(0, ml_lim);
 	ml_fill(0, ml_margin + 2, ml_lim, ml_h, wm_look(LK_MSGGREY));
-	if ( s[0] == 0 || fid <= 0 ) {
+	room = ml_lim - ml_x0;
+	if ( fid <= 0 || room <= 0 ) {
 		return;
 	}
-	room = ml_lim - ml_x0;
-	for ( n = 0; s[n] != 0; n++ ) {
-		buf[n] = s[n];
+	take = ( room / ( ( ml_fh > 4 ) ? ml_fh / 4 : 1 ) + 2 ) * 4 + 1;
+	buf = (char *)Kmalloc((SZ)take + sizeof("…"));
+	if ( buf == NULL ) {
+		return;
 	}
-	buf[n] = 0;
-	if ( ml_width(buf) > room ) {
+	whole = ml_copy(buf, take);
+	if ( buf[0] == 0 ) {
+		Kfree(buf);
+		return;
+	}
+	if ( whole >= take || ml_width(buf) > room ) {
 		n = fn_fit(fid, (CONST UB *)buf, room - ml_width("…"));
 		if ( n < 0 ) n = 0;
 		buf[n] = 0;
 		knl_memcpy(buf + n, "…", sizeof("…"));
 	}
 	(void)ml_words(ml_x0, buf, wm_look(LK_MSGCOL), FALSE, FALSE);
+	Kfree(buf);
+}
+
+/*
+ * A copy of n bytes of s put in *slot under the lock, the one before let
+ * go: FALSE when there was not the memory (the one before then stays)
+ */
+LOCAL BOOL ml_set( char **slot, CONST char *s, INT n )
+{
+	char	*d = NULL, *old;
+	UINT	imask;
+
+	if ( n > 0 ) {
+		d = (char *)Kmalloc((SZ)n + 1);
+		if ( d == NULL ) {
+			return FALSE;
+		}
+		knl_memcpy(d, s, (SZ)n);
+		d[n] = 0;
+	}
+	ISpinLock(&ml_lock, &imask);
+	old = *slot;
+	*slot = d;
+	ISpinUnlock(&ml_lock, &imask);
+	if ( old != NULL ) Kfree(old);
+	return TRUE;
 }
 
 /*
@@ -395,24 +459,24 @@ EXPORT INT wm_msg_height( void )
 	return ml_on ? ml_h : 0;
 }
 
+/*
+ * The message put, as long as it is (the band shows what fits its width,
+ * ending in …): E_NOMEM when there is not the memory for it, the message
+ * before then left standing.
+ */
 EXPORT ER wm_msg_put( CONST char *utf8 )
 {
 	INT	n = 0;
 
-	if ( utf8 != NULL ) {
-		while ( utf8[n] != 0 && n < ML_TEXT_MAX - 1 ) {
-			n++;
-		}
-		/* never half a character */
-		while ( n > 0 && utf8[n] != 0 && ( (UB)utf8[n] & 0xC0 ) == 0x80 ) {
-			n--;
-		}
-		knl_memcpy(ml_text, utf8, (SZ)n);
+	while ( utf8 != NULL && utf8[n] != 0 ) {
+		n++;
 	}
-	if ( n == 0 && ml_text[0] == 0 ) {
+	if ( n == 0 && ml_text == NULL ) {
 		return E_OK;			/* nothing was there, nothing is */
 	}
-	ml_text[n] = 0;
+	if ( !ml_set(&ml_text, utf8, n) ) {
+		return E_NOMEM;
+	}
 	if ( ml_on && ml_note_at == 0 ) {	/* under a note: shown when the note goes */
 		ml_message();
 		ml_show(0, ml_lim);
@@ -429,14 +493,12 @@ EXPORT void knl_msg_note( CONST char *utf8 )
 {
 	INT	n = 0;
 
-	while ( utf8 != NULL && utf8[n] != 0 && n < ML_NOTE_MAX - 1 ) {
+	while ( utf8 != NULL && utf8[n] != 0 ) {
 		n++;
 	}
-	while ( n > 0 && utf8[n] != 0 && ( (UB)utf8[n] & 0xC0 ) == 0x80 ) {
-		n--;
+	if ( !ml_set(&ml_note, utf8, n) ) {
+		return;				/* no memory: the note is not shown */
 	}
-	if ( n > 0 ) knl_memcpy(ml_note, utf8, (SZ)n);
-	ml_note[n] = 0;
 	ml_note_at = ( n > 0 ) ? ( ml_now() | 1 ) : 0;
 	if ( ml_on ) {
 		ml_message();
@@ -444,20 +506,16 @@ EXPORT void knl_msg_note( CONST char *utf8 )
 	}
 }
 
-/* The message shown, "" for none: the bytes written; a note while it is up */
+/* The message shown, "" for none: the bytes written, whole letters; a note while it is up */
 EXPORT INT wm_msg_text( char *buf, INT max )
 {
-	INT		n = 0;
-	CONST char	*s = ( ml_note_at != 0 ) ? ml_note : ml_text;
+	INT	n = 0;
 
 	if ( buf == NULL || max <= 0 ) {
 		return 0;
 	}
-	while ( n < max - 1 && s[n] != 0 ) {
-		buf[n] = s[n];
-		n++;
-	}
-	buf[n] = 0;
+	(void)ml_copy(buf, max);
+	while ( buf[n] != 0 ) n++;
 	return n;
 }
 

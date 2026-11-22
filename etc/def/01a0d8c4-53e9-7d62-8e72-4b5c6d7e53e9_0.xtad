@@ -1,7 +1,7 @@
 <tad version="1.0" encoding="UTF-8" filename="ディスク操作のデータボックス">
 <document>
 <p>ディスク操作のデータボックス</p>
-<p>ディスク操作のパネルの定義。接続するディスクを選ぶパネル、ディスクの状態を示すパネル、区画を作る空き領域と大きさとラベルを決めるパネル、ボリュームを広げる大きさを決めるパネルと、できないことを知らせるパネル。</p>
+<p>ディスク操作のパネルの定義。接続するディスクを選ぶパネル、ディスクの状態を示すパネル、区画を作る空き領域と大きさとラベルを決めるパネル、ボリュームを広げる大きさを決めるパネル、ディスクの形式を新しくするか尋ねるパネルと、できないことを知らせるパネル。</p>
 </document>
 <databox>
 <panel num="1" rect="0,0,480,230" title="接続">
@@ -48,6 +48,13 @@
 <text x="308" y="112">MB</text>
 <button num="102" rect="284,170,370,196" answer="cancel">取消</button>
 <button num="101" rect="380,170,466,196" answer="ok" emph="true">拡張</button>
+</panel>
+<panel num="5" rect="0,0,560,150" title="形式を新しくする">
+<text num="1" x="14" y="28"> </text>
+<text num="2" x="14" y="52"> </text>
+<text num="3" x="14" y="76"> </text>
+<button num="102" rect="364,114,450,140" answer="cancel">取消</button>
+<button num="101" rect="460,114,546,140" answer="ok" emph="true">変える</button>
 </panel>
 <panel num="10" rect="0,0,480,110" title="ディスク操作" kind="warn">
 <text num="1" x="14" y="28"> </text>

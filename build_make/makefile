@@ -17,7 +17,9 @@
 
 #   make TARGET=_QEMU_VIRT_ BUILD_ID=b2 test
 #       別の目的物一式で建てる。同じ木で 2 つの作業を並行させるときに使う。
-#       目的物も試験用ディスクも obj/<target><id>/ と tessronos<id>.* に分かれる。
+#       中間の生成物は $(OBJ_ROOT)/<target><id>/ と $(OBJ_ROOT)/user_<id>/(WSL の ext4)に、
+#       イメージ・パッケージ・試験用ディスクは obj/<target><id>/ に、カーネルは tessronos<id>.* に分かれる。
+#       BUILD_ID の違うビルドは同時に走らせてよい(tools/mklock.sh build、docs/tessronos/12-development.md 12.2.1)
 
 TARGET   ?= _QEMU_VIRT_
 BUILD_ID ?=
@@ -86,8 +88,8 @@ $(OBJDIR)/outer_kernel/wm/compose_simd.o: CFLAGS := $(filter-out -mgeneral-regs-
 $(LC3_OBJS): CFLAGS := $(filter-out -mgeneral-regs-only -ffreestanding -fno-builtin,$(CFLAGS)) $(LC3_FLAGS)
 
 # TARGET を切り替えたら再リンクする(成果物名が共通のため)
-TARGET_STAMP := obj/target.stamp
-$(shell mkdir -p obj; [ "$$(cat $(TARGET_STAMP) 2>/dev/null)" = "$(TARGET)$(KTEST)" ] || echo "$(TARGET)$(KTEST)" > $(TARGET_STAMP))
+TARGET_STAMP := $(OBJ_ROOT)/target$(BUILD_ID).stamp
+$(shell mkdir -p $(OBJ_ROOT); [ "$$(cat $(TARGET_STAMP) 2>/dev/null)" = "$(TARGET)$(KTEST)" ] || echo "$(TARGET)$(KTEST)" > $(TARGET_STAMP))
 
 .PHONY: all image clean qemu gdb test sd sdimg docs-check pkg
 
@@ -117,12 +119,12 @@ ifeq ($(NETSTACK),netbsd)
 NETBSD_BUILD ?= $(TOP)/tools/netbsd/build.sh
 $(NETBSD_OBJ): $(NETBSD_BUILD) $(wildcard $(TOP)/peripheral_kernel/network/netbsd/rumpcomp/*.c) $(wildcard $(TOP)/peripheral_kernel/network/netbsd/rumpcomp/wg/*.c)
 	@echo 'NETBSD $@'
-	@OUT=$(patsubst %/,%,$(dir $(NETBSD_OBJ))) MARCH=$(ARCH_MARCH) $(if $(filter 1,$(WG)),WG=1 NBSRC=$(HOME)/netbsd/netbsd-11.0-wg$(if $(filter x86_64,$(ARCH)),-x64)) bash $(NETBSD_BUILD) all
+	@OUT=$(patsubst %/,%,$(dir $(NETBSD_OBJ))) MARCH=$(ARCH_MARCH) $(if $(filter 1,$(WG)),WG=1 NBSRC=$(HOME)/netbsd/netbsd-11.0-wg$(if $(filter x86_64,$(ARCH)),-x64)) $(SHARED_X) bash $(NETBSD_BUILD) all
 endif
 
 $(EXE_FILE).elf: $(OBJS) $(EXTRA_OBJS) $(LNKFILE) $(TARGET_STAMP)
 	@echo 'LD  $@'
-	@$(LD) $(LDFLAGS) -o $@ $(OBJS) $(EXTRA_OBJS) -lgcc
+	@$(SHARED_S) $(LD) $(LDFLAGS) -o $@ $(OBJS) $(EXTRA_OBJS) -lgcc
 	@$(SIZE) $@
 
 $(EXE_FILE).img: $(EXE_FILE).elf
@@ -146,7 +148,7 @@ ifeq ($(KTEST),1)
 # QMP 係: 試験が USB 機器の抜き差しや鍵の押下を頼む(tools/qemu_qmp.py)
 TEST_EXPECT := -t $(TEST_TMO) -e "KTEST SUMMARY" -f "FAIL" -q $(TOP)/tools/qemu_qmp.py
 # 区画表(GPT)を持つ試験用ディスク。ブロックデバイスの試験が使う
-TEST_DISK  := $(OBJDIR)/test_disk.img
+TEST_DISK  := $(OUTDIR)/test_disk.img
 TEST_DISK_MB ?= 256
 # TEST_DISK_ROOM=N: the test disk is written as a card written with a smaller image has it, N MB
 # past its tables, the system volume's partition last, so that the start grows it (design 7.7)
@@ -157,18 +159,18 @@ $(shell mkdir -p $(OBJDIR); [ -f $(TEST_DISK_STAMP) ] && [ "$$(cat $(TEST_DISK_S
 # SuperSpeed の口に(usbss。ktest_svcio が最後に抜く)、usb_disk2.img は空で High-Speed だけの二台目の制御器に、
 # usb_disk3.img は空でハブの先(Full-Speed)に挿す(usbfs。ktest_usb と ktest_svcio が抜いて差し直すので、
 # 中身は -blockdev で機器と別に持ち、機器を消しても残す)
-USB_DISK   := $(OBJDIR)/usb_disk.img
-USB_DISK2  := $(OBJDIR)/usb_disk2.img
-USB_DISK3  := $(OBJDIR)/usb_disk3.img
+USB_DISK   := $(OUTDIR)/usb_disk.img
+USB_DISK2  := $(OUTDIR)/usb_disk2.img
+USB_DISK3  := $(OUTDIR)/usb_disk3.img
 # 区画表の無い媒体(スーパーフロッピー形式)。usb_sf32.img は34MBのFAT32、
 # usb_fd.img は1.44MBのフロッピーの形のFAT12で、どちらもセクタ0がブート
 # セクタ。二台目の制御器の3番と4番の口(High-Speed)に挿す
-USB_DISK4  := $(OBJDIR)/usb_sf32.img
-USB_DISK5  := $(OBJDIR)/usb_fd.img
+USB_DISK4  := $(OUTDIR)/usb_sf32.img
+USB_DISK5  := $(OUTDIR)/usb_fd.img
 # SDカード(sdhci-pciに挿す)。RPi5のカードと同じ作り(mksd.py、試験用の区画付き)で、
 # 4GBのSDHCに見えるよう後ろを疎に伸ばす(控えのGPTは、実機のカードに焼いたときと同じく途中に残る)。
 # ktest_sdが大きさと区画と読み書きを確かめる
-SD_CARD    := $(OBJDIR)/sd_card.img
+SD_CARD    := $(OUTDIR)/sd_card.img
 SD_CARD_SECTORS := 8388608
 # SD_EMMC=1: 同じ像を SD カードではなく eMMC(QEMU の emmc)として挿す。
 # Compute Module 5 の eMMC と同じ MMC の初期化(sdhci.c)を ktest_sd で通す。
@@ -203,7 +205,7 @@ FTP_PORT ?= 2121
 # 届かないので、サーバは PORT・EPRT が言う所の代わりにそこへ繋ぐ(--active-via)
 FTP_ACT_PORT ?= 2020
 FTP_ACT_HOST ?= 2122
-FTP_DIR  := $(OBJDIR)/ftp
+FTP_DIR  := $(OUTDIR)/ftp
 # マイクロスクリプトの網の試験のための HTTP サーバ(tools/httpd_test.py): ホストの
 # 127.0.0.1:$(HTTP_PORT) が JSON で、その次の口がイベントの流れで答える。ftpd.py が一緒に起こす
 HTTP_PORT ?= 2180
@@ -285,7 +287,7 @@ TEST_DEPS  := $(TEST_DISK) $(USB_DISK) $(USB_DISK2) $(USB_DISK3) $(USB_DISK4) $(
 # BTRON の CD-ROM の像(tools/tests/mkbtcd.py、設計書 11.9)。起動時には挿さず、ktest_btcd が
 # QMP 係に頼んで USB の CD-ROM 装置として挿し(drive_add の media=cdrom と usb-storage、ハブの 4.4)、
 # 試験の後で抜く。ほかの試験が数える USB の機器はそのまま
-BTCD_IMG   := $(OBJDIR)/btcd.iso
+BTCD_IMG   := $(OUTDIR)/btcd.iso
 TEST_DEPS  += $(BTCD_IMG)
 $(OBJDIR)/tests/ktest/ktest_btcd.o: CFLAGS += -DKT_BTCD_IMG='"$(abspath $(BTCD_IMG))"'
 # iob の群(ktest_iob.c)が使うディスクの名前と、抜き差しの試験の FAT のイメージ(-DKT_IOB_FAT=... -DKT_IOB_PULL=... など)。既定は無し
@@ -293,7 +295,7 @@ KT_IOB_CFLAGS ?=
 $(OBJDIR)/tests/ktest/ktest_iob.o: CFLAGS += $(KT_IOB_CFLAGS)
 # 多くのディスクと区画の試験(ktest_vols、docs/tessronos 7.6)の USB ディスク 4 台(tools/tests/mkvoldisk.py)。
 # 起動時には挿さず、試験が QMP 係に頼んでハブの 4.5〜4.8 に挿し、抜き差しを繰り返して、最後に抜く
-VOL_DIR    := $(OBJDIR)/vols
+VOL_DIR    := $(OUTDIR)/vols
 VOL_STAMP  := $(VOL_DIR)/vola.img
 TEST_DEPS  += $(VOL_STAMP)
 # KT_VOL_DIR: where the QEMU that runs the test finds them, when not where they were built (a copy on C:)
@@ -567,7 +569,7 @@ XFC_SSH_LIBS := $(SSH_LIB) $(TLS_LIB)
 XFC_SRCS    += $(SFTP_SRCS)
 $(SSH_LIB): $(TOP)/tools/ssh/build.sh $(TOP)/tools/ssh/libssh2_config.h $(TOP)/tools/ssh/ts_ssh_shim.h
 	@mkdir -p $(dir $@)
-	@ARCH=$(if $(filter x86_64,$(ARCH)),x86_64,aarch64) UFLAGS="$(ARCHFLAGS) $(UARCH_FP)" OUT=$(SSH_OUT) bash $(TOP)/tools/ssh/build.sh all
+	@ARCH=$(if $(filter x86_64,$(ARCH)),x86_64,aarch64) UFLAGS="$(ARCHFLAGS) $(UARCH_FP)" OUT=$(SSH_OUT) $(SHARED_X) bash $(TOP)/tools/ssh/build.sh all
 else
 XFC_SSH_LIBS :=
 endif
@@ -622,10 +624,11 @@ $(NETENV_REC): $(NETENV_ELF)
 USERENV_ELF  := $(UOBJ)/userenv.elf
 USERENV_REC  := $(UOBJ)/rec/01a0d8c4-52b7-7c63-8e83-4f9a012c3d53_1.bin
 
-$(USERENV_ELF): $(ENV_HDRS) $(TOP)/application/userenv/userenv.c $(TOP)/include/ts/look.h
+$(USERENV_ELF): $(ENV_HDRS) $(TOP)/application/userenv/userenv.c $(TOP)/include/ts/look.h \
+		$(TOP)/lib/libtv/tv_vop.c $(TOP)/include/ts/tvvop.h $(TOP)/lib/libtv/tv_page.c $(TOP)/include/ts/tvpage.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
-	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(UI_SRCS) $(TOP)/application/userenv/userenv.c -lc -lgcc
+	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(UI_SRCS) $(TOP)/application/userenv/userenv.c $(TOP)/lib/libtv/tv_vop.c $(TOP)/lib/libtv/tv_page.c -lc -lgcc
 
 $(USERENV_REC): $(USERENV_ELF)
 	@mkdir -p $(dir $@)
@@ -634,10 +637,11 @@ $(USERENV_REC): $(USERENV_ELF)
 SYSENV_ELF   := $(UOBJ)/sysenv.elf
 SYSENV_REC   := $(UOBJ)/rec/01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42_1.bin
 
-$(SYSENV_ELF): $(ENV_HDRS) $(TOP)/application/sysenv/sysenv.c $(TOP)/include/ts/look.h
+$(SYSENV_ELF): $(ENV_HDRS) $(TOP)/application/sysenv/sysenv.c $(TOP)/include/ts/look.h \
+		$(TOP)/lib/libtv/tv_vop.c $(TOP)/include/ts/tvvop.h $(TOP)/lib/libtv/tv_page.c $(TOP)/include/ts/tvpage.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
-	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(UI_SRCS) $(TOP)/application/sysenv/sysenv.c -lc -lgcc
+	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(UI_SRCS) $(TOP)/application/sysenv/sysenv.c $(TOP)/lib/libtv/tv_vop.c $(TOP)/lib/libtv/tv_page.c -lc -lgcc
 
 $(SYSENV_REC): $(SYSENV_ELF)
 	@mkdir -p $(dir $@)
@@ -664,12 +668,13 @@ ENV_RECS     := $(NETENV_REC) $(USERENV_REC) $(SYSENV_REC) $(SNDMIX_REC)
 CAL_DIR      := $(TOP)/application/calendar
 CAL_SRCS     := $(CAL_DIR)/cal_tad.c $(CAL_DIR)/cal_main.c $(TOP)/lib/libui/ui_libc.c \
 		$(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c \
-		$(TOP)/outer_kernel/tad/tad_lnkvol.c $(TOP)/peripheral_kernel/sysman/uuidtext.c
+		$(TOP)/outer_kernel/tad/tad_lnkvol.c $(TOP)/peripheral_kernel/sysman/uuidtext.c \
+		$(TOP)/lib/libtv/tv_vop.c
 CAL_ELF      := $(UOBJ)/calendar.elf
 CAL_REC      := $(UOBJ)/rec/01a0d8c4-52d4-7b31-9c42-5d6e7f809a12_1.bin
 
 $(CAL_ELF): $(APP_HDRS) $(MS_LIBTS) $(CAL_SRCS) $(CAL_DIR)/cal_tad.h $(TOP)/include/ts/ui.h $(TOP)/include/ts/tadlnk.h \
-	    $(TOP)/include/ts/sysdef.h $(TOP)/include/ts/dtreq.h $(USER_LD) $(TOP)/include/ts/svc.h
+	    $(TOP)/include/ts/sysdef.h $(TOP)/include/ts/dtreq.h $(TOP)/include/ts/tvvop.h $(USER_LD) $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
 	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(CAL_SRCS) -lc -lgcc
@@ -694,7 +699,7 @@ TV_LIB_SRCS  := $(TOP)/outer_kernel/tad/tad.c $(TOP)/outer_kernel/tad/tad_link.c
 		$(TOP)/outer_kernel/om/om_vdraw.c $(TOP)/outer_kernel/dp/dp_pat.c \
 		$(TOP)/outer_kernel/img/img_scale.c $(TOP)/peripheral_kernel/sysman/uuidtext.c \
 		$(TOP)/lib/libtv/tv_fn.c $(TOP)/lib/libtv/tv_src.c
-SL_SRCS      := $(SL_DIR)/sl_deck.c $(SL_DIR)/sl_main.c $(TV_LIB_SRCS) \
+SL_SRCS      := $(SL_DIR)/sl_deck.c $(SL_DIR)/sl_main.c $(TV_LIB_SRCS) $(TOP)/lib/libtv/tv_vop.c \
 		$(TOP)/lib/librtad/rt_num.c $(TOP)/lib/librtad/rt_prog.c $(TOP)/lib/librtad/rt_run.c \
 		$(TOP)/lib/librtplay/rtplay.c $(TOP)/lib/librtplay/rtp_mlock.c \
 		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c
@@ -720,7 +725,7 @@ EXTRA_RECS += $(SL_REC)
 FG_DIR       := $(TOP)/application/fig
 FG_SRCS      := $(FG_DIR)/fg_main.c $(FG_DIR)/fg_edit.c $(FG_DIR)/fg_link.c $(FG_DIR)/fg_text.c $(FG_DIR)/fg_tool.c $(FG_DIR)/figedit.c $(FG_DIR)/figtool.c $(FG_DIR)/figcanvas.c $(FG_DIR)/figpat.c $(FG_DIR)/fg_pat.c \
 		$(TOP)/outer_kernel/img/png.c $(TOP)/outer_kernel/img/deflate.c $(TOP)/outer_kernel/img/inflate.c \
-		$(TOP)/application/doc/docedit.c $(TOP)/application/doc/docfind.c $(TV_LIB_SRCS) $(TOP)/lib/libtv/tv_app.c $(TOP)/lib/libtv/tv_list.c 		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c
+		$(TOP)/application/doc/docedit.c $(TOP)/application/doc/docfind.c $(TV_LIB_SRCS) $(TOP)/lib/libtv/tv_app.c $(TOP)/lib/libtv/tv_list.c $(TOP)/lib/libtv/tv_vop.c 		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c
 FG_ELF       := $(UOBJ)/figedit.elf
 FG_REC       := $(UOBJ)/rec/01a0d6d1-08d2-7344-a6e2-6cede408d684_1.bin
 
@@ -739,9 +744,9 @@ EXTRA_RECS += $(FG_REC)
 # (デスクトップの基本文章編集も結ぶ)、メニューは docmenu.c、図形編集と共通の部分は lib/libtv/tv_app.c。
 # 表示は TV_USER で結ぶ。パネルは lib/libui。newlib を使う。プログラム実身のレコード1(設計書 11.3)
 DC_DIR       := $(TOP)/application/doc
-DC_SRCS      := $(DC_DIR)/dc_main.c $(DC_DIR)/dc_host.c $(DC_DIR)/docedit.c $(DC_DIR)/docfind.c $(DC_DIR)/docmenu.c $(TOP)/application/fig/figedit.c \
+DC_SRCS      := $(DC_DIR)/dc_main.c $(DC_DIR)/dc_host.c $(DC_DIR)/dc_link.c $(DC_DIR)/docedit.c $(DC_DIR)/docfind.c $(DC_DIR)/docmenu.c $(TOP)/application/fig/figedit.c \
 		$(TOP)/outer_kernel/img/png.c $(TOP)/outer_kernel/img/deflate.c $(TOP)/outer_kernel/img/inflate.c \
-		$(TV_LIB_SRCS) $(TOP)/lib/libtv/tv_app.c \
+		$(TV_LIB_SRCS) $(TOP)/lib/libtv/tv_app.c $(TOP)/lib/libtv/tv_vop.c \
 		$(TOP)/lib/libui/ui_libc.c $(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c
 DC_ELF       := $(UOBJ)/docedit.elf
 DC_REC       := $(UOBJ)/rec/01a0d6d1-08d1-781f-8f58-35c45aeacef9_1.bin
@@ -1087,22 +1092,22 @@ $(BESFC_REC): $(BESFC_ELF)
 	@mkdir -p $(dir $@)
 	@cp $< $@
 
-# BeFCはイメージに入るが、更新用に単独でも配布できる。make befcpkg で $(UOBJ)/pkg/befc.tpk を作る
+# BeFCはイメージに入るが、更新用に単独でも配布できる。make befcpkg で $(UOUT)/pkg/befc.tpk を作る
 befcpkg: $(BEFC_REC)
-	@mkdir -p $(UOBJ)/pkg
-	@python3 $(TOP)/tools/mktpk.py --from $(TOP)/etc/def --from $(UOBJ)/rec --program befc -o $(UOBJ)/pkg/befc.tpk
+	@mkdir -p $(UOUT)/pkg
+	@python3 $(TOP)/tools/mktpk.py --from $(TOP)/etc/def --from $(UOBJ)/rec --program befc -o $(UOUT)/pkg/befc.tpk
 
-# BeSFCはイメージとシステムの.tpkに入れない。make besfcpkg で $(UOBJ)/pkg/besfc.tpk を作る(設計書 11.32)
+# BeSFCはイメージとシステムの.tpkに入れない。make besfcpkg で $(UOUT)/pkg/besfc.tpk を作る(設計書 11.32)
 ifeq ($(wildcard $(BESFC_EXT)/superfx.c),)
 besfcpkg:
 	@echo 'besfcpkg: BeSFCのソースがありません: $(BESFC_EXT)。BESFC_EXT=<BeSFCのリポジトリ> で指定してください'
 	@exit 1
 else
 besfcpkg: $(BESFC_REC)
-	@mkdir -p $(UOBJ)/pkg
-	@python3 $(TOP)/tools/mktpk.py --from $(TOP)/etc/pkgdef/besfc --from $(UOBJ)/besfcrec --program besfc -o $(UOBJ)/pkg/besfc.tpk
-	@mkdir -p $(UOBJ)/pkg/besfc-LICENSES
-	@cp $(BESFC_EXT)/LICENSES/* $(UOBJ)/pkg/besfc-LICENSES/
+	@mkdir -p $(UOUT)/pkg
+	@python3 $(TOP)/tools/mktpk.py --from $(TOP)/etc/pkgdef/besfc --from $(UOBJ)/besfcrec --program besfc -o $(UOUT)/pkg/besfc.tpk
+	@mkdir -p $(UOUT)/pkg/besfc-LICENSES
+	@cp $(BESFC_EXT)/LICENSES/* $(UOUT)/pkg/besfc-LICENSES/
 endif
 
 # 単語登録: かな漢字変換のユーザ辞書に単語を登録する小物。辞書の行の読み書きは lib/libudic
@@ -1196,12 +1201,12 @@ MC_ENG       := $(addprefix $(MC_DIR)/,mc_db.c mc_bin.c mc_rx.c mc_var.c mc_io.c
 MC_SRCS      := $(addprefix $(MC_DIR)/,mc_main.c mc_card.c mc_list.c mc_edit.c mc_dlg.c mc_obj.c mc_libc.c) \
 		$(MC_ENG) $(TOP)/application/calc/calc_tad.c $(TOP)/application/calendar/cal_tad.c \
 		$(LIBBPK_DIR)/bpk_tron.c $(LIBBPK_DIR)/bpk_jis.c $(TOP)/lib/libtxc/txc.c $(TOP)/lib/libtxc/txc_tab.c \
-		$(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c
+		$(TOP)/lib/libui/ui.c $(TOP)/lib/libui/ui_prn.c $(TOP)/lib/libjson/json.c $(TOP)/lib/libtv/tv_vop.c
 MC_ELF       := $(UOBJ)/mcard.elf
 MC_REC       := $(UOBJ)/rec/01a0d8c4-5330-7a51-8c62-7d8e9fab3030_1.bin
 
 $(MC_ELF): $(APP_HDRS) $(MS_LIBTS) $(MC_SRCS) $(MC_DIR)/mc.h $(MC_DIR)/mc_db.h $(TOP)/application/calc/calc_tad.h \
-	   $(TOP)/application/calendar/cal_tad.h $(USER_LD) $(TOP)/include/ts/svc.h
+	   $(TOP)/application/calendar/cal_tad.h $(TOP)/include/ts/tvvop.h $(USER_LD) $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
 	@$(CC) $(ENV_CFLAGS) -o $@ $(MS_LIBTS) $(MC_SRCS) -lc -lgcc
@@ -1310,8 +1315,8 @@ endif
 include $(CHROMIUM)/build_make/browser.mk
 endif
 
-# コマンドの v8prog(実身 bin に仮身がある、設計書 16.5.19): browser.mk が作る obj/v8prog.elf を strip してレコード1にする。
-# (x86-64 では $(BROWSER_OUT) すなわち obj/x64 の v8prog.elf)
+# コマンドの v8prog(実身 bin に仮身がある、設計書 16.5.19): browser.mk が作る $(BROWSER_OUT)/v8prog.elf を strip してレコード1にする。
+# ($(BROWSER_OUT) は $(UOBJ))
 # システムのボリュームだけに載せる(strip 後で約47MB)。CMD_V8=0 で外す。外すと実身は実行形式なしで残る
 CMD_V8 ?= $(BROWSER)
 ifeq ($(CMD_V8)$(filter v8prog,$(BROWSER_PROGS)),1v8prog)
@@ -1333,9 +1338,9 @@ endif
 CALC_V8      ?= $(BROWSER)
 CALC_DIR     := $(TOP)/application/calc
 CALC_COBJ    := $(patsubst %,$(UOBJ)/calc/%.o,calc_main calc_draw calc_edit calc_panel calc_obj calc_chart calc_test \
-		calc_print calc_tad cal_tad ui ui_prn json tad_lnkvol uuidtext)
+		calc_print calc_tad cal_tad ui ui_prn json tad_lnkvol uuidtext tv_vop)
 CALC_HDRS    := $(CALC_DIR)/calc.h $(CALC_DIR)/calc_tad.h $(CALC_DIR)/calc_eng.h $(CALC_DIR)/calc_cases.h \
-		$(TOP)/application/calendar/cal_tad.h $(TOP)/include/ts/tadlnk.h $(APP_HDRS)
+		$(TOP)/application/calendar/cal_tad.h $(TOP)/include/ts/tadlnk.h $(TOP)/include/ts/tvvop.h $(APP_HDRS)
 CALC_CFLAGS  := $(TSPOSIX_CFLAGS) -Wall -Wno-unused-parameter -Wno-format-truncation -Wno-stringop-truncation
 CALC_REC     := $(UOBJ)/rec/01a0d8c4-52e5-7e86-8f97-0a1b2c3d4e51_1.bin
 CALC_STAMP   := $(UOBJ)/calc.stamp
@@ -1367,6 +1372,11 @@ $(UOBJ)/calc/json.o: $(TOP)/lib/libjson/json.c $(APP_HDRS)
 	@$(CC) $(CALC_CFLAGS) -c -o $@ $<
 
 $(UOBJ)/calc/tad_lnkvol.o: $(TOP)/outer_kernel/tad/tad_lnkvol.c $(TOP)/include/ts/tadlnk.h $(APP_HDRS)
+	@mkdir -p $(dir $@)
+	@echo 'CC  $@'
+	@$(CC) $(CALC_CFLAGS) -c -o $@ $<
+
+$(UOBJ)/calc/tv_vop.o: $(TOP)/lib/libtv/tv_vop.c $(TOP)/include/ts/tvvop.h $(APP_HDRS)
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
 	@$(CC) $(CALC_CFLAGS) -c -o $@ $<
@@ -1428,7 +1438,7 @@ $(DICT_REC): $(MOZC_DATA)
 	@cp -f $< $@
 
 # システムのボリューム: 定義実身と試験用の記録、書体・壁紙・時計・辞書のレコードを
-# tools/mktsfs で TSFS の版数4のボリュームにしたもの。試験用ディスクの区画3になり、
+# tools/mktsfs で TSFS の版数5のボリュームにしたもの。試験用ディスクの区画3になり、
 # 起動時に実身の置き場として付く(設計書 11.15、11.17 の T7)。同じファイルは
 # 区画2の FAT にも載せたままにしてある(FAT の試験と、区画3が無いときの置き場)
 SYS_VOL    := $(OBJDIR)/sysvol.img
@@ -1445,19 +1455,19 @@ TSFS_TOOLS  := $(TOP)/tools/mktsfs $(wildcard $(TOP)/tools/tsfs_py/*.py)
 # 版(R1.000 の形: R、桁数の決まらない整数、点、3桁)。プログラムの版はプログラム実身の
 # メタデータ tessronos.program.version に書く(etc/def)。TS_VERSION はシステムの版で、
 # システムの実身の OB_SYS_INFO に VERSION として出る
-TS_VERSION   ?= R1.410
-VER_STAMP    := obj/version.stamp
-$(shell mkdir -p obj; [ -f $(VER_STAMP) ] && [ "$$(cat $(VER_STAMP))" = "$(TS_VERSION)" ] || echo "$(TS_VERSION)" > $(VER_STAMP))
+TS_VERSION   ?= R1.500
+VER_STAMP    := $(OBJDIR)/version.stamp
+$(shell mkdir -p $(OBJDIR); [ -f $(VER_STAMP) ] && [ "$$(cat $(VER_STAMP))" = "$(TS_VERSION)" ] || echo "$(TS_VERSION)" > $(VER_STAMP))
 $(OBJDIR)/peripheral_kernel/obj/obsys.o: $(VER_STAMP)
 $(OBJDIR)/peripheral_kernel/obj/obsys.o: CFLAGS += -DTS_VERSION='"$(TS_VERSION)"'
 
-# アプリのパッケージ(.tpk): make pkg PKG=<プログラムの id か UUID> で $(UOBJ)/pkg/<id>.tpk。
+# アプリのパッケージ(.tpk): make pkg PKG=<プログラムの id か UUID> で $(UOUT)/pkg/<id>.tpk。
 # 版はプログラム実身のメタデータに書いてあるもの
 PKG ?=
 pkg: $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) $(XFC_REC) $(BKP_REC) $(ENV_RECS) $(CAL_REC) $(RTM_REC) $(CALC_REC)
 	@test -n "$(PKG)" || { echo 'usage: make pkg PKG=<program id>'; exit 1; }
-	@mkdir -p $(UOBJ)/pkg
-	@python3 $(TOP)/tools/mktpk.py --from $(TOP)/etc/def --from $(TOP)/etc/xtad --from $(UOBJ)/rec --program $(PKG) -o $(UOBJ)/pkg/$(PKG).tpk
+	@mkdir -p $(UOUT)/pkg
+	@python3 $(TOP)/tools/mktpk.py --from $(TOP)/etc/def --from $(TOP)/etc/xtad --from $(UOBJ)/rec --program $(PKG) -o $(UOUT)/pkg/$(PKG).tpk
 
 # イメージに組み込むアプリのパッケージ(.tpk)。既定は etc/pkg/ に置いたもので、
 # make PKGS="a.tpk b.tpk" で直に指定もできる。tools/pkgstage.py が実身を $(PKG_STAGE) に
@@ -1571,7 +1581,7 @@ RPI_D0_DTB  ?= obj/boot/bcm2712d0-rpi-5-b.dtb
 RPI500_DTB  ?= obj/boot/bcm2712-rpi-500.dtb
 CM5_DTB     ?= obj/boot/bcm2712-rpi-cm5-cm5io.dtb
 CM5L_DTB    ?= obj/boot/bcm2712-rpi-cm5l-cm5io.dtb
-SD_IMG      := $(OBJDIR)/sd.img
+SD_IMG      := $(OUTDIR)/sd.img
 SD_STAGE    := $(OBJDIR)/sdboot
 ifeq ($(KTEST),1)
 SD_SCRATCH_MB ?= 16
@@ -1655,7 +1665,7 @@ sd: $(EXE_FILE).img $(RPI4_FW_FILES) $(RPI4_CONFIG)
 # 大きさに後ろを疎に伸ばした写しにする(控えの GPT は、実機に焼いたときと同じく途中に残る)。
 # make TARGET=_RPI4_ [KTEST=1] BUILD_ID=<id> qemu-rpi4 で起動し(Ctrl-A X で終了)、
 # make TARGET=_RPI4_ KTEST=1 BUILD_ID=<id> test-rpi4 で試験を走らせる
-RPI4_QEMU_SD := $(OBJDIR)/sd_qemu.img
+RPI4_QEMU_SD := $(OUTDIR)/sd_qemu.img
 RPI4_QEMU_SD_MB ?= 512
 
 $(RPI4_QEMU_SD): $(SD_IMG)
@@ -1775,7 +1785,7 @@ SYSUP_NAME := QEMU
 SYSUP_BOOT_DEPS :=
 SYSUP_BOOT = --boot init.elf=$(USER_ELF)
 endif
-SYSUP_TPK := $(OBJDIR)/TessronOS-$(SYSUP_NAME)-$(TS_VERSION).tpk
+SYSUP_TPK := $(OUTDIR)/TessronOS-$(SYSUP_NAME)-$(TS_VERSION).tpk
 
 # システムの実身の集め方: .tpk と、システムのボリュームが持つ一覧(システムの箱のレコード1)で同じにする
 SYS_SET_DEPS := $(TOP)/tools/mktpk.py $(TSFS_TOOLS) $(CLOCK_REC) $(CONSOLE_REC) $(SERIAL_REC) $(MS_REC) \
@@ -1805,7 +1815,7 @@ sysup: $(SYSUP_TPK)
 
 # 配布用に圧縮した SD カード・ディスクのイメージ: $(OBJDIR)/TessronOS-<機種の名前>-$(TS_VERSION).zip。
 # 中身は TessronOS-<機種の名前>-$(TS_VERSION).img の 1 つ($(SD_IMG) と同じ内容)。名前の規則は .tpk と同じ
-SD_ZIP := $(OBJDIR)/TessronOS-$(SYSUP_NAME)-$(TS_VERSION).zip
+SD_ZIP := $(OUTDIR)/TessronOS-$(SYSUP_NAME)-$(TS_VERSION).zip
 $(SD_ZIP): $(SD_IMG)
 	@echo 'ZIP $@'
 	@rm -f $@
@@ -1816,6 +1826,6 @@ sdzip: $(SD_ZIP)
 .PHONY: sysup sdzip
 
 clean:
-	rm -rf obj $(EXE_FILE).elf $(EXE_FILE).img $(EXE_FILE).map $(EXE_FILE).lst
+	rm -rf obj $(filter-out obj,$(OBJ_ROOT)) $(EXE_FILE).elf $(EXE_FILE).img $(EXE_FILE).map $(EXE_FILE).lst
 
 -include $(DEPS)

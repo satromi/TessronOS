@@ -143,24 +143,50 @@ LOCAL BOOL same( CONST UB *a, CONST char *b )
 }
 
 /* A member's string, whole and unescaped, in memory of its own (Kfree it); NULL: none, or no memory */
-LOCAL UB *js_dup( CONST T_JSON *obj, CONST char *key )
+LOCAL UB *js_val_dup( CONST T_JSON *v, CONST char *key )
 {
-	T_JSON	v;
 	UB	*s;
 
-	if ( js_get(obj, key, &v) < E_OK || js_type(&v) != JS_STRING ) {
+	if ( js_type(v) != JS_STRING ) {
 		return NULL;
 	}
-	s = (UB *)Kmalloc((size_t)v.len + 1);	/* unescaped it is never longer than written */
+	s = (UB *)Kmalloc((size_t)v->len + 1);	/* unescaped it is never longer than written */
 	if ( s == NULL ) {
-		tm_printf((UB *)"dtprog: no memory for \"%s\" of %d bytes\n", key, (INT)v.len);
+		tm_printf((UB *)"dtprog: no memory for \"%s\" of %d bytes\n", key, (INT)v->len);
 		return NULL;
 	}
-	if ( js_str(&v, s, (INT)v.len + 1) < 0 ) {
+	if ( js_str(v, s, (INT)v->len + 1) < 0 ) {
 		Kfree(s);
 		return NULL;
 	}
 	return s;
+}
+
+LOCAL UB *js_dup( CONST T_JSON *obj, CONST char *key )
+{
+	T_JSON	v;
+
+	if ( js_get(obj, key, &v) < E_OK ) {
+		return NULL;
+	}
+	return js_val_dup(&v, key);
+}
+
+/*
+ * A string member that may be absent, as js_dup reads it: *p_s is NULL
+ * when the member is not there or is not a string, and E_NOMEM answers
+ * when it is there but could not be read for lack of memory.
+ */
+LOCAL ER js_dup_opt( CONST T_JSON *obj, CONST char *key, UB **p_s )
+{
+	T_JSON	v;
+
+	*p_s = NULL;
+	if ( js_get(obj, key, &v) < E_OK || js_type(&v) != JS_STRING ) {
+		return E_OK;
+	}
+	*p_s = js_dup(obj, key);
+	return ( *p_s != NULL ) ? E_OK : E_NOMEM;
 }
 
 /* ---------------------------------------------------------------- what a program says */
@@ -187,12 +213,55 @@ LOCAL BOOL is_carried( CONST UB *id )
 	return FALSE;
 }
 
+/* A word of a file type in lower case, added to a comma separated list that grows as it needs (Kfree it) */
+LOCAL ER types_add( UB **p_t, INT *p_cap, UB *w )
+{
+	INT	q, len = (INT)knl_strlen((CONST char *)w), k;
+	UB	*t;
+
+	for ( q = 0; q < len; q++ ) if ( w[q] >= 'A' && w[q] <= 'Z' ) w[q] = (UB)( w[q] - 'A' + 'a' );
+	if ( len <= 0 || ( *p_t != NULL && has_type(*p_t, w) ) ) {
+		return E_OK;
+	}
+	k = ( *p_t != NULL ) ? (INT)knl_strlen((CONST char *)*p_t) : 0;
+	if ( *p_t == NULL || k + len + 2 > *p_cap ) {
+		INT	cap = ( *p_cap > 0 ) ? *p_cap : 32;
+
+		while ( cap < k + len + 2 ) cap *= 2;
+		t = (UB *)Krealloc(*p_t, (size_t)cap);
+		if ( t == NULL ) {
+			tm_printf((UB *)"dtprog: no memory for the file types of %d bytes\n", k + len + 2);
+			return E_NOMEM;
+		}
+		if ( *p_t == NULL ) t[0] = 0;
+		*p_t = t;
+		*p_cap = cap;
+	}
+	t = *p_t;
+	if ( k > 0 ) t[k++] = ',';
+	for ( q = 0; q < len; q++ ) t[k++] = w[q];
+	t[k] = 0;
+	return E_OK;
+}
+
+/* A string the entry holds, replaced by a new one (taken over); the one held stays when they read alike */
+LOCAL void swap_str( UB **p_held, UB *nw )
+{
+	if ( *p_held != NULL && knl_strcmp((CONST char *)*p_held, (CONST char *)nw) == 0 ) {
+		Kfree(nw);
+		return;
+	}
+	if ( *p_held != NULL ) Kfree(*p_held);
+	*p_held = nw;
+}
+
 /* A program object's metadata read into an entry; FALSE when it is not a program */
 LOCAL BOOL read_prog( CONST TS_UUID *uuid, DTPROG *p )
 {
 	T_JSON	root, tf, g, base, it;
-	UB	*meta, *nm, s[32];
+	UB	*meta, *nm, *ver, *types = NULL, s[32];
 	SZ	size = 0;
+	INT	tcap = 0;
 	BOOL	ok;
 
 	meta = om_obj_meta(uuid, &size);
@@ -229,31 +298,47 @@ LOCAL BOOL read_prog( CONST TS_UUID *uuid, DTPROG *p )
 				: same(s, "utility") ? DT_PK_UTILITY
 				: same(s, "command") ? DT_PK_COMMAND : DT_PK_APP;
 		}
-		if ( js_get_str(&g, "version", p->version, DT_VER_MAX) <= 0 ) {
-			p->version[0] = 0;
+		/* the version as long as it is written; empty when there is none */
+		ver = js_dup(&g, "version");
+		if ( ver == NULL ) ver = dt_cat("", NULL);
+		if ( ver == NULL ) {
+			Kfree(meta);
+			return FALSE;		/* said on the console */
 		}
+		swap_str(&p->version, ver);
 		p->builtin = (BOOL)( js_get_bool(&g, "builtin", FALSE) && is_carried(p->id) );
 		p->menu = js_get_bool(&g, "menu", FALSE);
 		p->open_link = (BOOL)( js_get_str(&g, "openArg", s, sizeof(s)) > 0 && same(s, "link") );
 		p->once = js_get_bool(&g, "once", FALSE);
 
-		/* the kinds of object it opens from 実行: "fileTypes": ["xtad", "tad"] */
-		p->types[0] = 0;
+		/* the kinds of object it opens from 実行: "fileTypes": ["xtad", "tad"], every one of them */
 		if ( js_get(&g, "fileTypes", &base) >= E_OK ) {
-			INT	k = 0;
-
 			for ( it.s = NULL; js_next(&base, &it); ) {
-				UB	t[16];
-				INT	q, n = js_str(&it, t, sizeof(t));
+				UB	*w;
+				ER	er;
 
-				if ( n <= 0 || k + n + 2 >= DT_TYPES_MAX ) continue;
-				if ( k > 0 ) p->types[k++] = ',';
-				for ( q = 0; q < n; q++ ) {
-					p->types[k++] = ( t[q] >= 'A' && t[q] <= 'Z' ) ? (UB)( t[q] - 'A' + 'a' ) : t[q];
+				if ( js_type(&it) != JS_STRING ) continue;
+				w = js_val_dup(&it, "fileTypes");
+				if ( w == NULL ) {
+					if ( types != NULL ) Kfree(types);
+					Kfree(meta);
+					return FALSE;	/* said on the console */
 				}
-				p->types[k] = 0;
+				er = types_add(&types, &tcap, w);
+				Kfree(w);
+				if ( er < E_OK ) {
+					if ( types != NULL ) Kfree(types);
+					Kfree(meta);
+					return FALSE;
+				}
 			}
 		}
+		if ( types == NULL ) types = dt_cat("", NULL);
+		if ( types == NULL ) {
+			Kfree(meta);
+			return FALSE;
+		}
+		swap_str(&p->types, types);
 
 		/* the ids it had before */
 		p->nalias = 0;
@@ -339,8 +424,6 @@ LOCAL void read_box( void )
  * list of the 〈バージョン〉 sheet of システム環境設定 (dt_pkg_install,
  * design 18.12).
  */
-#define PLUGIN_JSON_MAX	( 64 * 1024 )
-
 /*
  * The program's metadata: what plugin.json says, as a program, and in
  * "tessronos.file" what it was installed from.
@@ -426,8 +509,9 @@ LOCAL ER plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UUID *
 			 TS_UUID *p_prog, UINT *p_how, UB **p_name )
 {
 	T_JSON		root, bf, cm, it, ft, t1;
-	UB		id[DT_PROG_ID], *name, type[32], ver[32], jf[128];
-	UB		types[DT_TYPES_MAX];
+	UB		id[DT_PROG_ID], *name, *type = NULL, *ver = NULL, nul[1] = { 0 }, jf[128];
+	UB		*types = NULL;
+	INT		tcap = 0;
 	UB		*j, *m, *from;
 	SZ		size = 0, fl = 0;
 	INT		n, mmax;
@@ -448,7 +532,7 @@ LOCAL ER plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UUID *
 		return E_OBJ;
 	}
 	j = om_obj_record(&pj, 1, &size);
-	if ( j == NULL || size <= 0 || size > PLUGIN_JSON_MAX ) {
+	if ( j == NULL || size <= 0 ) {
 		if ( j != NULL ) Kfree(j);
 		return E_OBJ;
 	}
@@ -458,27 +542,38 @@ LOCAL ER plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UUID *
 		Kfree(j);
 		return E_OBJ;
 	}
-	if ( js_get_str(&root, "type", type, sizeof(type)) <= 0 ) type[0] = 0;
+	/* type and version as long as they are written, let go at the end */
+	er = js_dup_opt(&root, "type", &type);
+	if ( er >= E_OK ) er = js_dup_opt(&root, "version", &ver);
+	if ( er < E_OK ) {
+		Kfree(j);
+		goto done;
+	}
 	/* the kinds of file its menu entries are for, lower case, each once */
-	types[0] = 0;
 	if ( js_get(&root, "contextMenu", &cm) >= E_OK ) {
-		INT	k = 0;
-
 		for ( it.s = NULL; js_next(&cm, &it); ) {
 			if ( js_get(&it, "fileTypes", &ft) < E_OK ) continue;
 			for ( t1.s = NULL; js_next(&ft, &t1); ) {
-				UB	w[16];
-				INT	q, len = js_str(&t1, w, sizeof(w));
+				UB	*w;
 
-				for ( q = 0; q < len; q++ ) if ( w[q] >= 'A' && w[q] <= 'Z' ) w[q] = (UB)( w[q] - 'A' + 'a' );
-				if ( len <= 0 || has_type(types, w) || k + len + 2 >= DT_TYPES_MAX ) continue;
-				if ( k > 0 ) types[k++] = ',';
-				for ( q = 0; q < len; q++ ) types[k++] = w[q];
-				types[k] = 0;
+				if ( js_type(&t1) != JS_STRING ) continue;
+				w = js_val_dup(&t1, "fileTypes");
+				if ( w == NULL ) {
+					er = E_NOMEM;
+					break;
+				}
+				er = types_add(&types, &tcap, w);
+				Kfree(w);
 			}
+			if ( er < E_OK ) break;
 		}
 	}
-	if ( js_get_str(&root, "version", ver, sizeof(ver)) <= 0 ) ver[0] = 0;
+	if ( er < E_OK ) {
+		Kfree(j);
+		goto done;
+	}
+	if ( type == NULL ) type = nul;		/* absent: empty; nul is not let go */
+	if ( ver == NULL ) ver = nul;
 	kind = same(type, "base") ? "app" : same(type, "accessory") ? "accessory" : "utility";
 
 	/* its template: the TADjs object of the directory, named by its UUID */
@@ -496,32 +591,34 @@ LOCAL ER plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UUID *
 	}
 	Kfree(j);
 	if ( er < E_OK ) {
-		return er;
+		goto done;
 	}
 
 	/* a program the system has by that id: replaced only when asked to all the same */
 	have = dt_prog_find(id);
 	if ( have != NULL ) {
 		if ( have->builtin ) {
-			return E_PAR;		/* the desktop's own is not replaced */
+			er = E_PAR;		/* the desktop's own is not replaced */
+			goto done;
 		}
 		if ( !force ) {
 			if ( p_prog != NULL ) *p_prog = have->uuid;
-			return E_LIMIT;
+			er = E_LIMIT;
+			goto done;
 		}
 		had = TRUE;
 		old = have->uuid;
 	}
 	er = dt_pkg_admin(pid, win);
 	if ( er < E_OK ) {
-		return er;
+		goto done;
 	}
 
 	dt_sys_prt(&prt);
 	if ( has_base ) {
 		er = plugin_base(&brought, &prt, &base);
 		if ( er < E_OK ) {
-			return er;
+			goto done;
 		}
 	}
 	/* the directory's whole name, and room for every text of the metadata escaped (6 bytes a byte at most) */
@@ -530,7 +627,8 @@ LOCAL ER plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UUID *
 	mmax = 0;
 	if ( from != NULL ) {
 		mmax = 1024 + 6 * (INT)( fl + 2 * knl_strlen((CONST char *)name) + knl_strlen((CONST char *)id)
-					 + knl_strlen((CONST char *)ver) ) + 2 * DT_TYPES_MAX;
+					 + knl_strlen((CONST char *)ver)
+					 + ( types != NULL ? knl_strlen((CONST char *)types) : 0 ) ) + 16;
 		m = (UB *)Kmalloc((size_t)mmax);
 	}
 	if ( m == NULL ) {
@@ -559,7 +657,7 @@ LOCAL ER plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UUID *
 	}
 	if ( er < E_OK ) {
 		if ( has_base ) (void)ob_del_obj(&base);
-		return er;
+		goto done;
 	}
 	if ( had ) {
 		(void)dt_prog_drop(&old);		/* the version it replaces, and its template */
@@ -569,7 +667,12 @@ LOCAL ER plugin_install( CONST TS_UUID *dir, BOOL force, ID pid, CONST TS_UUID *
 	if ( p_prog != NULL ) *p_prog = prog;
 	if ( p_how != NULL ) *p_how = had ? DT_HOW_UPDATED : DT_HOW_NEW;
 	tm_printf((UB *)"dtprog: the plugin %s installed\n", id);
-	return E_OK;
+	er = E_OK;
+done:
+	if ( type != NULL && type != nul ) Kfree(type);
+	if ( ver != NULL && ver != nul ) Kfree(ver);
+	if ( types != NULL ) Kfree(types);
+	return er;
 }
 
 /* The box read again: what shows the accessories shows them as they are now */
@@ -751,6 +854,14 @@ EXPORT void dt_prog_clear( DTPROG *p )
 		Kfree(p->name);
 		p->name = NULL;
 	}
+	if ( p != NULL && p->version != NULL ) {
+		Kfree(p->version);
+		p->version = NULL;
+	}
+	if ( p != NULL && p->types != NULL ) {
+		Kfree(p->types);
+		p->types = NULL;
+	}
 }
 
 EXPORT INT dt_app_list( CONST T_VOBJ *v, DTAPP *out, INT max, INT *p_dflt )
@@ -894,14 +1005,13 @@ LOCAL void made_place( CONST TS_UUID *made )
 {
 	T_DPRECT	r;
 	T_WMWIN		w;
-	INT		wids[64], n, i, k;
+	INT		*wids, n, i, k;
 	BOOL		over = TRUE, moved = FALSE;
 
 	if ( om_store_window(made, &r) < E_OK ) {
 		return;				/* no place of its own: it opens where a new window opens */
 	}
-	n = wm_list(wids, 64);
-	if ( n > 64 ) n = 64;
+	n = dt_wins(&wids);			/* every window, however many are open */
 	for ( k = 0; k < MADE_STEPS && over; k++ ) {
 		over = FALSE;
 		for ( i = 0; i < n && !over; i++ ) {
@@ -916,6 +1026,7 @@ LOCAL void made_place( CONST TS_UUID *made )
 			moved = TRUE;
 		}
 	}
+	if ( wids != NULL ) Kfree(wids);
 	if ( moved ) {
 		(void)om_store_set_window(made, &r);
 		tm_printf((UB *)"dtprog: made from a template, kept at %d,%d beside the window there\n",
@@ -996,8 +1107,8 @@ typedef struct {
 	BOOL	with_er;		/* the answer says whether the start failed */
 	UINT	ticket;			/* of the person's act that asked for it, 0 none */
 	UINT	rgroup, rank;		/* of a group opened together (dt_prog_rank), 0 none */
-	INT	watch;			/* its place in watch_proc, from 1; 0 not watched */
-	INT	opening;		/* its place in opening, from 1; 0 none */
+	struct watchent	*watch;		/* its place in the watched starts; NULL not watched */
+	struct openent	*opening;	/* its place in the objects being opened; NULL none */
 	INT	info;			/* a 管理情報 started: its place in dtinfo.c's table, from 1; 0 none */
 	UB	*name;			/* the program, for the message line, whole (Kmalloc); NULL none */
 	SZ	rawsz;			/* a start-up argument of the program's own (dt_prog_run_arg), 0 none */
@@ -1025,11 +1136,15 @@ LOCAL ID	start_tsk = 0;
  * start is over then (dt_prog_settled). Each start has its own place,
  * given as it is asked; the task that starts it fills it in.
  */
-#define WATCH_MAX	16
+typedef struct watchent {
+	struct watchent	*next;
+	TS_UUID		proc;		/* the process; 0 for a start that failed */
+	UINT		done;		/* proc is filled in */
+} WATCHENT;
+
 LOCAL BOOL	watch_on = FALSE;		/* the starts asked now are watched */
 LOCAL INT	watch_asked = 0;		/* of the desktop's task */
-LOCAL TS_UUID	watch_proc[WATCH_MAX];		/* the process; 0 for a start that failed */
-LOCAL UINT	watch_done[WATCH_MAX];		/* watch_proc[i] filled in */
+LOCAL WATCHENT	*watch_head, *watch_tail;	/* in the order asked: only the desktop's task adds, a start's place is filled by the starter */
 
 EXPORT void dt_prog_watch( BOOL on )
 {
@@ -1065,45 +1180,58 @@ EXPORT void dt_prog_rank( UINT group, UINT rank )
  * the desktop's task alone frees the place again. The state is read and
  * written with __atomic, the process written before OP_STARTED is.
  */
-#define OPENING_MAX	16
-
 #define OP_FREE		0
 #define OP_STARTING	1		/* handed to the starter */
 #define OP_STARTED	2		/* the process is there */
 #define OP_FAILED	3
 
-LOCAL UINT	opening_state[OPENING_MAX];
-LOCAL TS_UUID	opening_obj[OPENING_MAX];
-LOCAL TS_UUID	opening_proc[OPENING_MAX];
-LOCAL UINT	opening_keys[OPENING_MAX];	/* asked again: the ticket of that act (wm_act_ticket), 0 none */
+typedef struct openent {
+	struct openent	*next;
+	UINT		state;
+	TS_UUID		obj;
+	TS_UUID		proc;
+	UINT		keys;		/* asked again: the ticket of that act (wm_act_ticket), 0 none */
+} OPENENT;
 
-/* A place taken for an object about to be opened: from 1, 0 when all are taken */
-LOCAL INT opening_take( CONST TS_UUID *obj )
+/* A place is kept once made and used again when it is free, so the table is as long as the most opened at once */
+LOCAL OPENENT	*opening_head;
+
+/* A place taken for an object about to be opened: NULL for no memory */
+LOCAL OPENENT *opening_take( CONST TS_UUID *obj )
 {
-	INT	i;
+	OPENENT	*e;
 
-	for ( i = 0; i < OPENING_MAX; i++ ) {
-		if ( __atomic_load_n(&opening_state[i], __ATOMIC_ACQUIRE) == OP_FREE ) {
-			opening_obj[i] = *obj;
-			opening_keys[i] = 0;
-			__atomic_store_n(&opening_state[i], OP_STARTING, __ATOMIC_RELEASE);
-			return i + 1;
+	for ( e = opening_head; e != NULL; e = e->next ) {
+		if ( __atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == OP_FREE ) {
+			break;
 		}
 	}
-	return 0;
+	if ( e == NULL ) {
+		e = (OPENENT *)Kcalloc(1, sizeof(OPENENT));
+		if ( e == NULL ) {
+			tm_printf((UB *)"TessronOS desktop: no memory to watch an object being opened\n");
+			return NULL;
+		}
+		e->next = opening_head;
+		opening_head = e;
+	}
+	e->obj = *obj;
+	e->keys = 0;
+	__atomic_store_n(&e->state, OP_STARTING, __ATOMIC_RELEASE);
+	return e;
 }
 
-/* Whether place i still stands for an object being opened; freed when not */
-LOCAL BOOL opening_stands( INT i )
+/* Whether a place still stands for an object being opened; freed when not */
+LOCAL BOOL opening_stands( OPENENT *e )
 {
-	UINT	st = __atomic_load_n(&opening_state[i], __ATOMIC_ACQUIRE);
+	UINT	st = __atomic_load_n(&e->state, __ATOMIC_ACQUIRE);
 	ID	pid;
 
 	if ( st == OP_FREE || st == OP_STARTING ) {
 		return (BOOL)( st == OP_STARTING );
 	}
 	if ( st == OP_STARTED ) {
-		pid = knl_prc_of_uuid(&opening_proc[i]);
+		pid = knl_prc_of_uuid(&e->proc);
 		if ( pid > 0 && !wm_prc_drawn(pid) ) {
 			return TRUE;
 		}
@@ -1113,8 +1241,8 @@ LOCAL BOOL opening_stands( INT i )
 		 * the window is given the keys here, unless the person has
 		 * gone on to something else since
 		 */
-		if ( pid > 0 && opening_keys[i] != 0 && wm_act_good(opening_keys[i]) ) {
-			INT	wid = wm_obj_showing(&opening_obj[i]);
+		if ( pid > 0 && e->keys != 0 && wm_act_good(e->keys) ) {
+			INT	wid = wm_obj_showing(&e->obj);
 
 			if ( wid > 0 ) {
 				wm_raise(wid);
@@ -1123,17 +1251,17 @@ LOCAL BOOL opening_stands( INT i )
 			}
 		}
 	}
-	__atomic_store_n(&opening_state[i], OP_FREE, __ATOMIC_RELEASE);
+	__atomic_store_n(&e->state, OP_FREE, __ATOMIC_RELEASE);
 	return FALSE;
 }
 
 EXPORT BOOL dt_prog_opening( CONST TS_UUID *obj )
 {
-	INT	i;
+	OPENENT	*e;
 	BOOL	is = FALSE;
 
-	for ( i = 0; i < OPENING_MAX; i++ ) {
-		if ( opening_stands(i) && ts_uuid_cmp(&opening_obj[i], obj) == 0 ) {
+	for ( e = opening_head; e != NULL; e = e->next ) {
+		if ( opening_stands(e) && ts_uuid_cmp(&e->obj, obj) == 0 ) {
 			is = TRUE;
 		}
 	}
@@ -1142,21 +1270,21 @@ EXPORT BOOL dt_prog_opening( CONST TS_UUID *obj )
 
 EXPORT void dt_prog_opening_keys( CONST TS_UUID *obj )
 {
-	INT	i;
+	OPENENT	*e;
 
-	for ( i = 0; i < OPENING_MAX; i++ ) {
-		if ( opening_stands(i) && ts_uuid_cmp(&opening_obj[i], obj) == 0 ) {
-			opening_keys[i] = ( dt_opens_quiet > 0 ) ? 0 : wm_act_ticket();
+	for ( e = opening_head; e != NULL; e = e->next ) {
+		if ( opening_stands(e) && ts_uuid_cmp(&e->obj, obj) == 0 ) {
+			e->keys = ( dt_opens_quiet > 0 ) ? 0 : wm_act_ticket();
 		}
 	}
 }
 
 EXPORT void dt_prog_opening_poll( void )
 {
-	INT	i;
+	OPENENT	*e;
 
-	for ( i = 0; i < OPENING_MAX; i++ ) {
-		(void)opening_stands(i);
+	for ( e = opening_head; e != NULL; e = e->next ) {
+		(void)opening_stands(e);
 	}
 }
 
@@ -1167,16 +1295,17 @@ EXPORT void dt_prog_opening_poll( void )
  */
 EXPORT BOOL dt_prog_settled( INT *p_drawn, INT *p_gone, INT *p_all )
 {
-	TS_UUID	none;
-	INT	i, drawn = 0, gone = 0;
-	ID	pid;
+	TS_UUID		none;
+	INT		n = 0, drawn = 0, gone = 0;
+	ID		pid;
+	WATCHENT	*e;
 
 	knl_memset(&none, 0, sizeof(none));
-	for ( i = 0; i < watch_asked; i++ ) {
-		if ( __atomic_load_n(&watch_done[i], __ATOMIC_ACQUIRE) == 0 ) {
+	for ( e = watch_head; e != NULL; e = e->next ) {
+		if ( __atomic_load_n(&e->done, __ATOMIC_ACQUIRE) == 0 ) {
 			break;
 		}
-		pid = ( ts_uuid_cmp(&watch_proc[i], &none) != 0 ) ? knl_prc_of_uuid(&watch_proc[i]) : 0;
+		pid = ( ts_uuid_cmp(&e->proc, &none) != 0 ) ? knl_prc_of_uuid(&e->proc) : 0;
 		if ( pid <= 0 ) {
 			gone++;
 		} else if ( wm_prc_drawn(pid) ) {
@@ -1184,12 +1313,13 @@ EXPORT BOOL dt_prog_settled( INT *p_drawn, INT *p_gone, INT *p_all )
 		} else {
 			break;
 		}
+		n++;
 	}
 	*p_drawn = drawn;
 	*p_gone = gone;
 	*p_all = watch_asked;
 	/* over once every start watched is up, and none is to be asked any more */
-	return (BOOL)( i == watch_asked && !watch_on );
+	return (BOOL)( n == watch_asked && !watch_on );
 }
 
 /* The answer the next start takes over (dt_prog_reply) */
@@ -1292,21 +1422,21 @@ LOCAL void start_done( CONST DTSTART *s, ER er, CONST TS_UUID *pu )
 		if ( msg != NULL ) Kfree(msg);
 		tm_printf((UB *)"TessronOS desktop: %s not started (%d)\n", pn, (INT)er);
 	}
-	if ( s->watch > 0 ) {
+	if ( s->watch != NULL ) {
 		if ( er >= E_OK && pu != NULL ) {
-			watch_proc[s->watch - 1] = *pu;
+			s->watch->proc = *pu;
 		}
-		__atomic_store_n(&watch_done[s->watch - 1], 1, __ATOMIC_RELEASE);
+		__atomic_store_n(&s->watch->done, 1, __ATOMIC_RELEASE);
 	}
 	if ( s->info > 0 ) {
 		dt_info_started(s->info, er, pu);
 	}
-	if ( s->opening > 0 ) {
+	if ( s->opening != NULL ) {
 		if ( er >= E_OK && pu != NULL ) {
-			opening_proc[s->opening - 1] = *pu;
-			__atomic_store_n(&opening_state[s->opening - 1], OP_STARTED, __ATOMIC_RELEASE);
+			s->opening->proc = *pu;
+			__atomic_store_n(&s->opening->state, OP_STARTED, __ATOMIC_RELEASE);
 		} else {
-			__atomic_store_n(&opening_state[s->opening - 1], OP_FAILED, __ATOMIC_RELEASE);
+			__atomic_store_n(&s->opening->state, OP_FAILED, __ATOMIC_RELEASE);
 		}
 	}
 }
@@ -1465,8 +1595,18 @@ LOCAL ER start_process( CONST DTPROG *p, CONST TS_UUID *arg, CONST DTWIN *from, 
 	s.ticket = ( dt_opens_quiet > 0 ) ? 0 : wm_act_ticket();
 	s.rgroup = rank_group;
 	s.rank = rank_place;
-	if ( watch_on && watch_asked < WATCH_MAX ) {
-		s.watch = ++watch_asked;
+	if ( watch_on ) {
+		WATCHENT	*we = (WATCHENT *)Kcalloc(1, sizeof(WATCHENT));
+
+		if ( we != NULL ) {
+			if ( watch_tail != NULL ) watch_tail->next = we;
+			else watch_head = we;
+			watch_tail = we;
+			watch_asked++;
+			s.watch = we;
+		} else {
+			tm_printf((UB *)"TessronOS desktop: no memory to watch a start\n");
+		}
 	}
 	s.arg.recno = -1;
 	if ( arg != NULL ) {

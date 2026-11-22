@@ -1,0 +1,34 @@
+# ディスク操作の〈形式を新しくする〉 (design 11.26, 7.3) away from a link:
+# the system's disk, of version 5 as a build makes it (and as the start
+# leaves one of version 4, converting it before it is attached), so the
+# program says in its panel that its format is the new one and does
+# nothing. The first window is made larger; ディスク操作 is at 440,480
+# the first time the menu opens at 400,300, its submenu 接続, 切り離し, 状態表示, 区画作成, 拡張,
+# 形式を新しくする, 20 pixels apart from 481.
+click 250 60
+wait 300
+drag 346 222 620 420
+wait 500
+click 400 300 1
+wait 300
+move 430 480
+wait 150
+move 440 480
+wait 300
+move 510 480
+wait 150
+move 530 481
+wait 300
+move 530 581
+wait 300
+shot disk_convert_menu
+click 530 581
+expect diskop: started disk.convert
+expect disk: form vblka2 is of version 5
+expect diskop: convert vblka2 is of version 5, the system's
+expect diskop: ディスク「TessronOS system」は新しい形式です
+wait 800
+shot disk_convert_system
+key 28
+absent diskop: up convert
+absent !OACV!

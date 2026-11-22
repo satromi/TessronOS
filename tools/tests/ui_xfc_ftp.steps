@@ -1,6 +1,7 @@
 # ファイル変換 and an FTP server (design 11.9), for tools/ui_run.py --net user,
 # on a test disk as the build made it (a KTEST run keeps a connection on it),
-# with a server on this machine's 127.0.0.1:2131 (10.0.2.2 inside): connected
+# with a server on this machine's 127.0.0.1:2131 (10.0.2.2 inside) serving a
+# directory of BIG.BIN (8388608 bytes) and KTEST.TXT (24 bytes) only: connected
 # through the panel, the files listed; two of them (one of 8 MB) carried into
 # the BTRON window, which is a 仮身一覧's process: the panel asks how, Enter
 # downloads them and makes them 実身 there. The connection kept is then taken
@@ -32,8 +33,10 @@ expect xfconv: - BIG.BIN 8388608
 expect xfconv: connections 1
 wait 800
 shot xff_list
-# BIG.BIN and KTEST.TXT chosen and carried into the BTRON window
-click 262 248
+# BIG.BIN and KTEST.TXT chosen and carried into the BTRON window. The server's
+# directory holds those two files only: the list is the server (184), BIG.BIN
+# (216) and KTEST.TXT (248); BIG.BIN is clicked and Shift+↓ takes KTEST.TXT too
+click 262 216
 key 51 2
 expect xfconv: selected 2:
 wait 600

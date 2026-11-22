@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Make a TSFS native volume, version 4 (design 11.6), on an image file or
-a partition within one, and optionally put objects on it.
+"""Make a TSFS native volume (design 11.6, 7.3), on an image file or a
+partition within one, and optionally put objects on it.
 
-  tools/mktsfs [-L label] [--size N] [--uuid UUID]
+  tools/mktsfs [-L label] [--size N] [--uuid UUID] [--format 4|5]
               [--from DIR ...] [--over DIR ...] [--root UUID] [--sysbox UUID] [--domain UUID]
               [--partition N | --offset N | --whole] image
 
@@ -27,6 +27,13 @@ records of a program a build does not have, which a shared directory may
 hold from another build). --size auto makes the volume as big as the
 files it is made of need, with room to spare, in steps of 16M.
 
+--format gives the version of the format: 5 (no limit of the format on
+the records, resources and links of an object, long extensions, large
+metadata) or 4 (the format R1.410 and before make and read). Without it
+the volume is of version 5, unless TSFS_FORMAT in the environment says 4
+or 5, or mktsfs is run by make (MAKELEVEL is set): then MAKE_FORMAT below
+decides, so that the system volume a build makes is one its kernel opens.
+
 Exit status: 0 when every object went on, 1 when the volume was made but
 some object was left out, 2 when no volume was made.
 """
@@ -38,8 +45,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from tsfs_py import BLOCK_SIZE, LABEL_MAX, TsfsError, Volume
-from tsfs_py.cli import add_volume_args, open_device, parse_size, uuid_arg
+from tsfs_py.cli import (add_format_arg, add_volume_args, format_version,
+                         open_device, parse_size, uuid_arg)
 from tsfs_py import transfer
+
+# The version a build makes the system volume in (mktsfs run by make with
+# no --format): the version the kernel makes and converts to. A test disk
+# of version 4 is made by tools/tests/mkv4disk.py.
+MAKE_FORMAT = 5
 
 
 def main():
@@ -66,6 +79,7 @@ def main():
     p.add_argument("--sysbox", type=uuid_arg, help="the system box")
     p.add_argument("--domain", type=uuid_arg, help="the protection domain")
     p.add_argument("-q", "--quiet", action="store_true")
+    add_format_arg(p)
     add_volume_args(p)
     args = p.parse_args()
 
@@ -76,6 +90,10 @@ def main():
     if (args.root or args.sysbox or args.domain) and not args.dirs:
         return die("--root, --sysbox and --domain need --from")
 
+    try:
+        version = format_version(args, MAKE_FORMAT)
+    except TsfsError as e:
+        return die(str(e))
     need = transfer.content_bytes(args.over + args.dirs, args.exclude)
     try:
         if args.size == "auto":
@@ -96,7 +114,8 @@ def main():
     skipped, problems = [], []
     try:
         with dev:
-            vol = Volume.format(dev, label=args.label, vol_uuid=args.uuid)
+            vol = Volume.format(dev, label=args.label, vol_uuid=args.uuid,
+                                version=version)
             written = 0
             if args.dirs:
                 roots = {"root": args.root, "sysbox": args.sysbox,
@@ -123,8 +142,9 @@ def main():
                                     "--root an object of that name to keep it whole"
                                     % args.label))
             if not args.quiet:
-                print("%s: a volume of %d blocks at offset %d, label \"%s\""
-                      % (args.image, vol.sb.total_blocks, dev.offset, whole))
+                print("%s: a volume of version %d, %d blocks at offset %d, "
+                      "label \"%s\"" % (args.image, version, vol.sb.total_blocks,
+                                        dev.offset, whole))
                 print(str(vol.sb))
                 if args.dirs:
                     print("%d objects put on, %d left out"

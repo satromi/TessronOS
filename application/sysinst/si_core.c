@@ -63,6 +63,7 @@
 #include <ts/uuid.h>
 #include <ts/tsfsblk.h>
 #include <ts/tsfsjrnl.h>
+#include <ts/tsfsck.h>
 #include <ts/ob.h>
 #include "tstdlib.h"
 #include "../desktop/desktop.h"
@@ -84,13 +85,12 @@ IMPORT unsigned char	knl_bootvol_name[];
 #define REQ_PATH	BOOT_DIR "/BOOTREG.TXT"
 #define LOADER_MARK	"TessronOS loader"
 
-/* The disks a PC has inside, in the order the kernel looks at them */
-LOCAL CONST char * CONST cands[] = {
-	"nvmea", "nvmeb", "nvmec", "nvmed",
-	"sataa", "satab", "satac", "satad",
-	"sda",
-	NULL
-};
+/*
+ * The names of the disks a PC has inside: a stem and the letters of the
+ * disk's number ("nvmea", "nvmeaa"); a name with a digit is a partition.
+ * The stems are in the order the disks are offered.
+ */
+LOCAL CONST char * CONST stems[] = { "nvme", "sata", "sd", NULL };
 
 /* ---------------------------------------------------------------- small things */
 
@@ -450,21 +450,106 @@ out:
 	return er;
 }
 
-EXPORT INT si_disks( T_SIDISK *buf, INT max )
+/* The place of a disk's name in the order offered: its stem, then the shorter name, then the letters; -1 for a name of no disk */
+LOCAL INT disk_rank( CONST UB *nm )
+{
+	INT	s, k, len = 0;
+
+	while ( len < L_DEVNM && nm[len] != 0 ) len++;
+	for ( s = 0; stems[s] != NULL; s++ ) {
+		INT	sl = (INT)knl_strlen((char *)stems[s]);
+
+		if ( len <= sl || !same_n(nm, (CONST UB *)stems[s], sl) ) continue;
+		for ( k = sl; k < len; k++ ) {
+			if ( nm[k] < 'a' || nm[k] > 'z' ) return -1;
+		}
+		return s;
+	}
+	return -1;
+}
+
+LOCAL BOOL disk_before( CONST UB *a, CONST UB *b )
+{
+	INT	ra = disk_rank(a), rb = disk_rank(b), la = 0, lb = 0;
+
+	if ( ra != rb ) return (BOOL)( ra < rb );
+	while ( la < L_DEVNM && a[la] != 0 ) la++;
+	while ( lb < L_DEVNM && b[lb] != 0 ) lb++;
+	if ( la != lb ) return (BOOL)( la < lb );
+	for ( la = 0; la < lb; la++ ) {
+		if ( a[la] != b[la] ) return (BOOL)( a[la] < b[la] );
+	}
+	return FALSE;
+}
+
+EXPORT INT si_disks( T_SIDISK **p_buf )
 {
 	UB	boot[L_DEVNM + 1];
-	INT	i, n = 0;
+	T_LDEV	*ld = NULL;
+	T_SIDISK *buf;
+	INT	i, k, nl, na = 0, n = 0;
 
+	*p_buf = NULL;
 	boot_disk(boot);
-	for ( i = 0; cands[i] != NULL && n < max; i++ ) {
-		if ( knl_strcmp(cands[i], (CONST char *)boot) == 0 ) {
-			continue;		/* the one the system runs from */
+
+	/* the devices the device manager has, however many; asked again when more came in between */
+	for ( ;; ) {
+		nl = tk_lst_dev(NULL, 0, 0);
+		if ( nl <= 0 ) {
+			return 0;
 		}
-		if ( si_disk_read(cands[i], &buf[n]) >= E_OK ) {
-			n++;
+		na = nl + 8;
+		ld = (T_LDEV *)Kmalloc(sizeof(T_LDEV) * (SZ)na);
+		if ( ld == NULL ) {
+			return 0;
+		}
+		nl = tk_lst_dev(ld, 0, na);
+		if ( nl >= 0 && nl < na ) break;
+		Kfree(ld);
+		ld = NULL;
+		if ( nl < 0 ) {
+			return 0;
 		}
 	}
-	return n;
+
+	/* the names of the disks, in order */
+	for ( i = 0; i < nl; i++ ) {
+		T_LDEV	t;
+
+		if ( disk_rank(ld[i].devnm) < 0 ) continue;
+		ld[n++] = ld[i];
+		for ( k = n - 1; k > 0 && disk_before(ld[k].devnm, ld[k - 1].devnm); k-- ) {
+			t = ld[k]; ld[k] = ld[k - 1]; ld[k - 1] = t;
+		}
+	}
+	if ( n == 0 ) {
+		Kfree(ld);
+		return 0;
+	}
+	buf = (T_SIDISK *)Kmalloc(sizeof(T_SIDISK) * (SZ)n);
+	if ( buf == NULL ) {
+		Kfree(ld);
+		return 0;
+	}
+	for ( i = 0, k = 0; i < n; i++ ) {
+		UB	nm[L_DEVNM + 1];
+
+		knl_memcpy(nm, ld[i].devnm, L_DEVNM);
+		nm[L_DEVNM] = 0;
+		if ( knl_strcmp((CONST char *)nm, (CONST char *)boot) == 0 ) {
+			continue;		/* the one the system runs from */
+		}
+		if ( si_disk_read((CONST char *)nm, &buf[k]) >= E_OK ) {
+			k++;
+		}
+	}
+	Kfree(ld);
+	if ( k == 0 ) {
+		Kfree(buf);
+		return 0;
+	}
+	*p_buf = buf;
+	return k;
 }
 
 /* Whether a partition of the disk is in use: a volume of objects open on it, or a file system mounted */
@@ -792,6 +877,8 @@ EXPORT ER si_plan( CONST char *disk, INT mode, INT unit, T_SIPLAN *pl )
 			pl->why = keep_onto(pl, FALSE, NULL, NULL, &ker);
 			if ( pl->why == SI_R_OK && ker < E_OK ) pl->why = SI_R_NOVOL;
 			if ( pl->why != SI_R_OK ) goto out;
+			name_of(dev, dk->name, pl->ts_unit);
+			pl->ts_form = knl_ob_cnv_form((CONST char *)dev, NULL);
 		} else {
 			if ( pl->ts_last == 0 || pl->ts_last - pl->ts_first + 1 < need ) {
 				pl->why = SI_R_NOROOM;
@@ -1854,6 +1941,16 @@ EXPORT ER si_run( T_SIPLAN *pl, SI_PROG cb, void *ctx, T_SIRES *res )
 			goto fail;
 		}
 		res->nobj = pl->nobj;
+		if ( knl_ob_cnv_form((CONST char *)part, NULL) == TSFSBLK_VERSION ) {
+			/*
+			 * a volume of version 4 kept: converted at the first start from it, before it
+			 * is attached (that start converts its system volume all the same; CONVREQ
+			 * says the person agreed to it)
+			 */
+			ER	ec = ob_cnv_request((CONST char *)part, TRUE);
+
+			tm_printf((UB *)"sysinst: %s: to be converted at its first start (%d)\n", part, (INT)ec);
+		}
 	} else if ( pl->mode == SI_COEXIST || pl->mode == SI_REPLACE ) {
 		/* the partition: added after those in use, the one there is, or the one chosen made another */
 		res->failed_step = SI_ST_TABLE;

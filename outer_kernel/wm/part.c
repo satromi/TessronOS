@@ -107,6 +107,8 @@ typedef struct {
 	INT		held_half;
 	BOOL		held_in;
 	BOOL		held_knob;
+	/* where a tag held went down, and its press as it came: a tag moved from there is pulled out (OB_E_PULL) */
+	T_WMEV		held_ev;
 
 	/*
 	 * Beside what the program draws itself: a panel that is not the
@@ -136,7 +138,60 @@ typedef struct {
 	BOOL		vvalid;
 } PANEL;
 
-LOCAL PANEL	pn_tab[WM_PANEL_MAX];
+/*
+ * The panels, by number (1 up): pn_n of them in use or free, as many as
+ * have been open at once. Each is allocated once and never freed, and a
+ * larger table is made whole before it is put in place, the one before
+ * kept, so that pn_of reads it without the panels' lock. The table grows
+ * under that lock, as panels open.
+ */
+#define PN_FIRST	32
+
+LOCAL PANEL	*pn_tab0[1];
+LOCAL PANEL	**volatile pn_tab = pn_tab0;
+LOCAL volatile INT	pn_n = 0;
+
+/* A free panel's place (0 up), the table made larger when none is: E_NOMEM */
+LOCAL INT pn_slot( void )
+{
+	PANEL	**t;
+	INT	i, n = pn_n, nn;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( !pn_tab[i]->used ) {
+			return i;
+		}
+	}
+	if ( n > 0x0FFFFFFF / 2 ) {
+		return E_NOMEM;
+	}
+	nn = ( n > 0 ) ? n * 2 : PN_FIRST;
+	t = (PANEL **)Kmalloc(sizeof(PANEL *) * (SZ)nn);
+	if ( t == NULL ) {
+		return E_NOMEM;
+	}
+	for ( i = 0; i < n; i++ ) {
+		t[i] = pn_tab[i];
+	}
+	for ( i = n; i < nn; i++ ) {
+		t[i] = (PANEL *)Kcalloc(1, sizeof(PANEL));
+		if ( t[i] == NULL ) {
+			while ( --i >= n ) Kfree(t[i]);
+			Kfree(t);
+			return E_NOMEM;
+		}
+	}
+	__sync_synchronize();
+	pn_tab = t;			/* the table before is not freed: it may be being read */
+	__sync_synchronize();
+	pn_n = nn;
+	return n;
+}
+
+EXPORT INT wm_panel_last( void )
+{
+	return pn_n;
+}
 
 /*
  * What draws a panel, and what moves its sheet, one task at a time. A
@@ -217,6 +272,9 @@ LOCAL void pn_names_drop( T_WMPANEL *def );
 LOCAL ER   pn_room( T_WMPANEL *def, INT want );
 LOCAL void pn_def_drop( T_WMPANEL *def );
 LOCAL INT  tlen( CONST UB *t );
+LOCAL UB  *tx( T_WMPART *pt );
+LOCAL UB  *bytes_dup( CONST UB *s, SZ n, SZ room );
+LOCAL BOOL text_room( T_WMPART *pt, INT len );
 
 /*
  * The caret of the box with the keys blinks, and one conversion at a
@@ -312,11 +370,16 @@ LOCAL BOOL rect_has( CONST T_DPRECT *r, INT x, INT y )
 
 LOCAL PANEL *pn_of( INT pid )
 {
-	if ( pid < 1 || pid > WM_PANEL_MAX ) {
+	INT	n = pn_n;		/* first: a table is in place before its count is */
+	PANEL	**t;
+
+	__sync_synchronize();
+	t = pn_tab;
+	if ( pid < 1 || pid > n ) {
 		return NULL;
 	}
 
-	return ( pn_tab[pid - 1].used ) ? &pn_tab[pid - 1] : NULL;
+	return ( t[pid - 1]->used ) ? t[pid - 1] : NULL;
 }
 
 LOCAL T_WMPART *part_of( PANEL *p, INT num )
@@ -535,8 +598,8 @@ EXPORT BOOL knl_pn_scroll( INT wid, INT pos )
 {
 	INT	i;
 
-	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
-		PANEL	*p = &pn_tab[i];
+	for ( i = 0; i < pn_n; i++ ) {
+		PANEL	*p = pn_tab[i];
 
 		if ( !p->used || p->is_menu || p->wid != wid || p->scr < 0 ) {
 			continue;
@@ -606,9 +669,15 @@ LOCAL INT knl_pn_add_u( INT pid, CONST T_WMPART *pt )
 	if ( er < E_OK ) {
 		return er;
 	}
-	i = p->def.npart++;
+	i = p->def.npart;
 	p->def.part[i] = *pt;
 	p->def.part[i].names = nm;
+	if ( !wm_part_long_dup(&p->def.part[i]) ) {
+		pd_names_free(nm);
+		knl_memset(&p->def.part[i], 0, sizeof(T_WMPART));
+		return E_NOMEM;
+	}
+	p->def.npart++;
 	pn_find_scroller(p);
 
 	return i;
@@ -642,6 +711,7 @@ LOCAL ER knl_pn_del_u( INT pid, INT i )
 		pop_close(FALSE);		/* its part goes, or moves up one */
 	}
 	pd_names_free(p->def.part[i].names);
+	wm_part_long_free(&p->def.part[i]);
 	for ( k = i; k + 1 < p->def.npart; k++ ) {
 		p->def.part[k] = p->def.part[k + 1];
 	}
@@ -657,6 +727,20 @@ LOCAL ER knl_pn_del_u( INT pid, INT i )
 
 /* A part moved within its panel: the rectangle is the panel's own coordinates */
 LOCAL ER knl_pn_set_rect_u( INT pid, INT i, CONST T_DPRECT *r );
+
+EXPORT BOOL knl_pn_name_off( INT pid, INT i, INT idx )
+{
+	PANEL	*p;
+	BOOL	off = FALSE;
+
+	pn_lock();
+	p = pn_of(pid);
+	if ( p != NULL && i >= 0 && i < p->def.npart ) {
+		off = pd_name_off(&p->def.part[i], idx);
+	}
+	pn_unlock();
+	return off;
+}
 
 EXPORT ER knl_pn_set_rect( INT pid, INT i, CONST T_DPRECT *r )
 {
@@ -757,6 +841,16 @@ LOCAL ER knl_pn_part_u( INT pid, INT i, T_WMPART *out )
 	}
 	*out = p->def.part[i];
 	out->names = NULL;		/* the names stay the panel's: knl_pn_names copies them */
+	out->lng = NULL;		/* and the long words: the fields hold their heads, knl_pn_state the whole */
+	if ( p->def.part[i].lng != NULL && p->def.part[i].lng->text != NULL ) {
+		INT	k;
+		CONST UB *t = p->def.part[i].lng->text;
+
+		for ( k = 0; k < WM_LABEL_MAX - 1 && t[k] != 0; k++ ) ;
+		while ( k > 0 && t[k] != 0 && ( t[k] & 0xC0 ) == 0x80 ) k--;
+		knl_memcpy(out->text, t, (SZ)k);
+		out->text[k] = 0;
+	}
 
 	return E_OK;
 }
@@ -792,21 +886,17 @@ LOCAL INT wm_panel_open_u( INT wid, CONST T_WMPANEL *def )
 	if ( def->r.right <= def->r.left || def->r.bottom <= def->r.top ) {
 		return E_PAR;
 	}
-	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
-		if ( !pn_tab[i].used ) {
-			break;
-		}
+	i = pn_slot();
+	if ( i < 0 ) {
+		return i;
 	}
-	if ( i == WM_PANEL_MAX ) {
-		return E_LIMIT;
-	}
-	p = &pn_tab[i];
+	p = pn_tab[i];
 	p->def = *def;				/* the copy: see the head of this file */
 	p->def.npart = 0;
 	p->def.room = 0;
 	p->def.part = NULL;
 	{
-		/* its parts, in a table as large as it has them, and their names, a block of the panel's own for each */
+		/* its parts, in a table as large as it has them, and their names and long words, the panel's own */
 		INT	k;
 		ER	er = pn_room(&p->def, def->npart);
 
@@ -819,6 +909,11 @@ LOCAL INT wm_panel_open_u( INT wid, CONST T_WMPANEL *def )
 		p->def.npart = def->npart;
 		for ( k = 0; k < p->def.npart; k++ ) {
 			p->def.part[k].names = ( er >= E_OK ) ? pd_names_dup(def->part[k].names, &er) : NULL;
+			if ( er >= E_OK && !wm_part_long_dup(&p->def.part[k]) ) {
+				er = E_NOMEM;
+			} else if ( er < E_OK ) {
+				p->def.part[k].lng = NULL;
+			}
 		}
 		if ( er < E_OK ) {
 			pn_def_drop(&p->def);
@@ -850,7 +945,7 @@ LOCAL INT wm_panel_open_u( INT wid, CONST T_WMPANEL *def )
 				p->focus = k;
 				/* a box with all its letters chosen, what is typed first taking their place */
 				if ( WM_PT_KIND(pt->type) == TB_PARTS ) {
-					pt->caret = tlen(pt->text);
+					pt->caret = tlen(tx(pt));
 					pt->sb_at = 0;
 				}
 				break;
@@ -972,6 +1067,7 @@ EXPORT INT wm_panel_open_box( INT wid, INT num, ID owner )
 		UINT		k = WM_PT_KIND(pt->type);
 
 		pt->names = NULL;
+		pt->lng = NULL;		/* nor the long words: the fields hold their heads */
 		if ( k == WS_PARTS || k == SS_PARTS || k == WM_PT_POPUP || k == TG_PARTS ) {
 			pt->count = 0;
 		}
@@ -1030,8 +1126,8 @@ EXPORT INT wm_panel_front( void )
 	T_WMWIN	w;
 	INT	i, best = 0, bz = 0;
 
-	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
-		PANEL	*p = &pn_tab[i];
+	for ( i = 0; i < pn_n; i++ ) {
+		PANEL	*p = pn_tab[i];
 
 		if ( !p->used || p->is_menu || p->popup <= 0
 		  || wm_ref(p->popup, &w) < E_OK || !w.visible ) {
@@ -1129,8 +1225,8 @@ EXPORT void knl_pn_wins_gone( CONST INT *wids, INT n )
 {
 	INT	i, k;
 
-	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
-		PANEL	*p = &pn_tab[i];
+	for ( i = 0; i < pn_n; i++ ) {
+		PANEL	*p = pn_tab[i];
 
 		if ( !p->used ) {
 			continue;
@@ -1326,10 +1422,8 @@ LOCAL BOOL group_first( CONST PANEL *p, INT i )
  */
 #define ICON_KEEP	24
 
-#define ICON_ID		64
-
 typedef struct {
-	UB	id[ICON_ID];		/* the UUID as it was given, or a picture's href */
+	UB	*id;			/* the UUID as it was given, or a picture's href, whole (NULL: empty) */
 	UW	*px;			/* NULL: the object has no icon */
 	INT	w, h;
 	UW	used_at;		/* for letting the oldest go */
@@ -1342,7 +1436,7 @@ LOCAL BOOL icon_same( CONST UB *a, CONST UB *b )
 {
 	INT	i;
 
-	for ( i = 0; i < ICON_ID - 1 && a[i] == b[i] && a[i] != 0; i++ ) {
+	for ( i = 0; a[i] == b[i] && a[i] != 0; i++ ) {
 		;
 	}
 	return ( a[i] == b[i] );
@@ -1353,7 +1447,7 @@ LOCAL ICONKEEP *icon_find( CONST UB *id )
 	INT	i;
 
 	for ( i = 0; i < ICON_KEEP; i++ ) {
-		if ( icon_keep[i].id[0] != 0 && icon_same(icon_keep[i].id, id) ) {
+		if ( icon_keep[i].id != NULL && icon_same(icon_keep[i].id, id) ) {
 			icon_keep[i].used_at = ++icon_tick;
 			return &icon_keep[i];
 		}
@@ -1390,9 +1484,15 @@ LOCAL void icon_load( CONST UB *id )
 	if ( k->px != NULL ) {
 		Kfree(k->px);
 	}
+	if ( k->id != NULL ) {
+		Kfree(k->id);
+	}
 	knl_memset(k, 0, sizeof(*k));
-	for ( i = 0; i < ICON_ID - 1 && id[i] != 0; i++ ) {
-		k->id[i] = id[i];
+	for ( i = 0; id[i] != 0; i++ ) ;
+	k->id = bytes_dup(id, (SZ)i, (SZ)i + 1);	/* none kept when there is not the memory */
+	if ( k->id == NULL ) {
+		if ( px != NULL ) Kfree(px);
+		return;
 	}
 	k->px = px;
 	k->w = w;
@@ -1413,6 +1513,9 @@ LOCAL ICONKEEP *icon_slot( void )
 	}
 	if ( k->px != NULL ) {
 		Kfree(k->px);
+	}
+	if ( k->id != NULL ) {
+		Kfree(k->id);
 	}
 	knl_memset(k, 0, sizeof(*k));
 	return k;
@@ -1439,8 +1542,11 @@ EXPORT void knl_pn_pict_load( CONST UB *href )
 		Kfree(png);
 	}
 	k = icon_slot();
-	for ( i = 0; i < ICON_ID - 1 && href[i] != 0; i++ ) {
-		k->id[i] = href[i];
+	for ( i = 0; href[i] != 0; i++ ) ;
+	k->id = bytes_dup(href, (SZ)i, (SZ)i + 1);	/* the href whole: one cut short would be another picture's */
+	if ( k->id == NULL ) {
+		if ( px != NULL ) Kfree(px);
+		return;
 	}
 	k->px = px;
 	k->w = w;
@@ -1707,7 +1813,7 @@ LOCAL void draw_part_body( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margi
 	}
 	switch ( kind ) {
 	case WM_PT_ICON:
-		icon_draw(gid, &r, pt->label);
+		icon_draw(gid, &r, WM_PT_LABEL_S(pt));
 		break;
 
 	case WM_PT_SVMAP:
@@ -1761,13 +1867,13 @@ LOCAL void draw_part_body( PANEL *p, INT pid, INT gid, INT i, INT rad, INT margi
 			c.conv = pn_conv;
 		}
 		pd_part(pt, &r, &c);
-		if ( kind == MS_PARTS && pt->text[0] != 0 ) {
+		if ( kind == MS_PARTS && WM_PT_TEXT_S(pt)[0] != 0 ) {
 			/* a button with a picture: in the middle, inside its edge */
 			T_DPRECT	in = r;
 
 			in.left += 3;  in.top += 3;
 			in.right -= 3; in.bottom -= 3;
-			icon_draw(gid, &in, pt->text);
+			icon_draw(gid, &in, WM_PT_TEXT_S(pt));
 		}
 		return;
 	}
@@ -2040,7 +2146,7 @@ LOCAL BOOL box_key( T_WMPART *pt, UINT code, UINT mods )
 	if ( WM_PT_KIND(pt->type) != WM_PT_BOX ) {
 		return FALSE;
 	}
-	while ( len < WM_LABEL_MAX - 1 && pt->text[len] != 0 ) {
+	while ( tx(pt)[len] != 0 ) {
 		len++;
 	}
 	if ( pt->caret > len ) {
@@ -2054,13 +2160,13 @@ LOCAL BOOL box_key( T_WMPART *pt, UINT code, UINT mods )
 	switch ( code ) {
 	case 0x50:				/* left */
 		if ( pt->caret > 0 ) {
-			pt->caret = utf8_back(pt->text, pt->caret);
+			pt->caret = utf8_back(tx(pt), pt->caret);
 			return TRUE;
 		}
 		return FALSE;
 	case 0x4F:				/* right */
 		if ( pt->caret < len ) {
-			pt->caret = utf8_next(pt->text, pt->caret, len);
+			pt->caret = utf8_next(tx(pt), pt->caret, len);
 			return TRUE;
 		}
 		return FALSE;
@@ -2075,11 +2181,11 @@ LOCAL BOOL box_key( T_WMPART *pt, UINT code, UINT mods )
 			return FALSE;
 		}
 		{
-			INT	from = utf8_back(pt->text, pt->caret);
+			INT	from = utf8_back(tx(pt), pt->caret);
 			INT	gone = pt->caret - from;
 
 			for ( i = from; i + gone <= len; i++ ) {
-				pt->text[i] = pt->text[i + gone];
+				tx(pt)[i] = tx(pt)[i + gone];
 			}
 			pt->caret = from;
 		}
@@ -2089,11 +2195,11 @@ LOCAL BOOL box_key( T_WMPART *pt, UINT code, UINT mods )
 			return FALSE;
 		}
 		{
-			INT	gone = utf8_next(pt->text, pt->caret, len)
+			INT	gone = utf8_next(tx(pt), pt->caret, len)
 				     - pt->caret;
 
 			for ( i = pt->caret; i + gone <= len; i++ ) {
-				pt->text[i] = pt->text[i + gone];
+				tx(pt)[i] = tx(pt)[i + gone];
 			}
 		}
 		return TRUE;
@@ -2101,14 +2207,14 @@ LOCAL BOOL box_key( T_WMPART *pt, UINT code, UINT mods )
 		break;
 	}
 	c = wm_key_char(code, mods);
-	if ( c < 0x20 || c == 0x7F || len >= WM_LABEL_MAX - 1 ) {
+	if ( c < 0x20 || c == 0x7F || !text_room(pt, len + 1) ) {
 		return FALSE;
 	}
 	for ( i = len; i > pt->caret; i-- ) {
-		pt->text[i] = pt->text[i - 1];
+		tx(pt)[i] = tx(pt)[i - 1];
 	}
-	pt->text[pt->caret] = c;
-	pt->text[len + 1] = 0;
+	tx(pt)[pt->caret] = c;
+	tx(pt)[len + 1] = 0;
 	pt->caret++;
 
 	return TRUE;
@@ -2411,7 +2517,7 @@ LOCAL INT tlen( CONST UB *t )
 {
 	INT	n = 0;
 
-	while ( n < WM_LABEL_MAX - 1 && t[n] != 0 ) n++;
+	while ( t[n] != 0 ) n++;
 	return n;
 }
 
@@ -2428,18 +2534,18 @@ LOCAL INT tletters( CONST UB *t, INT n )
 /* Letters put into a box at its caret, whole letters and as many as it may hold */
 LOCAL BOOL box_put( T_WMPART *pt, CONST UB *s, INT n )
 {
-	INT	len = tlen(pt->text), have = tletters(pt->text, len), i, k = 0;
+	INT	len = tlen(tx(pt)), have = tletters(tx(pt), len), i, k = 0;
 
 	if ( pt->caret < 0 || pt->caret > len ) pt->caret = len;
 	while ( k < n ) {
 		INT	m = 1;
 
 		while ( k + m < n && ( s[k + m] & 0xC0 ) == 0x80 ) m++;
-		if ( ( pt->max > 0 && have >= pt->max ) || len + m >= WM_LABEL_MAX - 1 ) {
+		if ( ( pt->max > 0 && have >= pt->max ) || !text_room(pt, len + m) ) {
 			break;
 		}
-		for ( i = len; i >= pt->caret; i-- ) pt->text[i + m] = pt->text[i];
-		for ( i = 0; i < m; i++ ) pt->text[pt->caret + i] = s[k + i];
+		for ( i = len; i >= pt->caret; i-- ) tx(pt)[i + m] = tx(pt)[i];
+		for ( i = 0; i < m; i++ ) tx(pt)[pt->caret + i] = s[k + i];
 		pt->caret += m;
 		len += m;
 		have++;
@@ -2451,7 +2557,7 @@ LOCAL BOOL box_put( T_WMPART *pt, CONST UB *s, INT n )
 /* The letters chosen in a box taken out */
 LOCAL BOOL box_cut( T_WMPART *pt )
 {
-	INT	len = tlen(pt->text), a = pt->sb_at, b = pt->caret, i;
+	INT	len = tlen(tx(pt)), a = pt->sb_at, b = pt->caret, i;
 
 	if ( a < 0 || a == b ) {
 		pt->sb_at = -1;
@@ -2459,7 +2565,7 @@ LOCAL BOOL box_cut( T_WMPART *pt )
 	}
 	if ( a > b ) { INT t = a; a = b; b = t; }
 	if ( b > len ) b = len;
-	for ( i = a; i + ( b - a ) <= len; i++ ) pt->text[i] = pt->text[i + ( b - a )];
+	for ( i = a; i + ( b - a ) <= len; i++ ) tx(pt)[i] = tx(pt)[i + ( b - a )];
 	pt->caret = a;
 	pt->sb_at = -1;
 	return TRUE;
@@ -2505,7 +2611,7 @@ LOCAL BOOL pn_box_key( T_WMPART *pt, UINT code, UINT mods )
 {
 	UINT	kind = WM_PT_KIND(pt->type);
 	UB	c = wm_key_char(code, mods);
-	INT	len = tlen(pt->text), f;
+	INT	len = tlen(tx(pt)), f;
 
 	if ( PART_GREY(pt) ) return FALSE;
 	if ( kind == NB_PARTS ) return num_key(pt, code, mods);
@@ -2564,8 +2670,8 @@ LOCAL BOOL pn_box_key( T_WMPART *pt, UINT code, UINT mods )
 		 * password saved): the first key takes them all away, and what is
 		 * typed then is the new letters
 		 */
-		if ( len > 0 && pt->text[0] == XB_STANDIN && ( code == K_BS || ( c >= 0x20 && c < 0x7F ) ) ) {
-			pt->text[0] = 0;
+		if ( len > 0 && tx(pt)[0] == XB_STANDIN && ( code == K_BS || ( c >= 0x20 && c < 0x7F ) ) ) {
+			tx(pt)[0] = 0;
 			len = 0;
 			pt->caret = 0;
 			if ( code == K_BS ) return TRUE;
@@ -2576,8 +2682,8 @@ LOCAL BOOL pn_box_key( T_WMPART *pt, UINT code, UINT mods )
 			INT	i = len;
 
 			if ( len == 0 ) return FALSE;
-			while ( i > 0 && ( pt->text[--i] & 0xC0 ) == 0x80 ) ;
-			pt->text[i] = 0;
+			while ( i > 0 && ( tx(pt)[--i] & 0xC0 ) == 0x80 ) ;
+			tx(pt)[i] = 0;
 			pt->caret = i;
 			return TRUE;
 		}
@@ -2588,11 +2694,11 @@ LOCAL BOOL pn_box_key( T_WMPART *pt, UINT code, UINT mods )
 	switch ( code ) {
 	case K_LEFT:
 		pt->sb_at = -1;
-		if ( pt->caret > 0 ) pt->caret = utf8_back(pt->text, pt->caret);
+		if ( pt->caret > 0 ) pt->caret = utf8_back(tx(pt), pt->caret);
 		return FALSE;
 	case K_RIGHT:
 		pt->sb_at = -1;
-		if ( pt->caret < len ) pt->caret = utf8_next(pt->text, pt->caret, len);
+		if ( pt->caret < len ) pt->caret = utf8_next(tx(pt), pt->caret, len);
 		return FALSE;
 	case K_HOME:
 		pt->sb_at = -1;
@@ -2609,16 +2715,16 @@ LOCAL BOOL pn_box_key( T_WMPART *pt, UINT code, UINT mods )
 			INT	from, i;
 
 			if ( pt->caret <= 0 ) return FALSE;
-			from = utf8_back(pt->text, pt->caret);
-			for ( i = from; i + ( pt->caret - from ) <= len; i++ ) pt->text[i] = pt->text[i + pt->caret - from];
+			from = utf8_back(tx(pt), pt->caret);
+			for ( i = from; i + ( pt->caret - from ) <= len; i++ ) tx(pt)[i] = tx(pt)[i + pt->caret - from];
 			pt->caret = from;
 			return TRUE;
 		} else {
 			INT	gone, i;
 
 			if ( pt->caret >= len ) return FALSE;
-			gone = utf8_next(pt->text, pt->caret, len) - pt->caret;
-			for ( i = pt->caret; i + gone <= len; i++ ) pt->text[i] = pt->text[i + gone];
+			gone = utf8_next(tx(pt), pt->caret, len) - pt->caret;
+			for ( i = pt->caret; i + gone <= len; i++ ) tx(pt)[i] = tx(pt)[i + gone];
 			return TRUE;
 		}
 	default:
@@ -2779,8 +2885,8 @@ LOCAL BOOL wm_panel_type_u( INT wid, CONST UB *s, INT n )
 	INT	i, k;
 
 	if ( s == NULL || n <= 0 ) return FALSE;
-	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
-		PANEL		*p = &pn_tab[i];
+	for ( i = 0; i < pn_n; i++ ) {
+		PANEL		*p = pn_tab[i];
 		T_WMPART	*pt;
 
 		if ( !p->used || p->is_menu || p->wid != wid || p->focus < 0 || p->focus >= p->def.npart ) {
@@ -2825,10 +2931,10 @@ LOCAL void pn_focus( PANEL *p, INT i, BOOL choose )
 		UINT		k = WM_PT_KIND(pt->type);
 
 		if ( k == TB_PARTS ) {
-			pt->caret = tlen(pt->text);
+			pt->caret = tlen(tx(pt));
 			pt->sb_at = 0;
 		} else if ( k == XB_PARTS ) {
-			pt->caret = tlen(pt->text);
+			pt->caret = tlen(tx(pt));
 			pt->sb_at = -1;
 		} else if ( k == SB_PARTS ) {
 			pt->sb_at = 0;
@@ -2868,7 +2974,7 @@ LOCAL void pn_focus_first( PANEL *p )
 
 LOCAL BOOL name_off( CONST T_WMPART *pt, INT idx )
 {
-	return (BOOL)( idx >= 1 && idx <= 32 && ( pt->inact & ( 1U << ( idx - 1 ) ) ) != 0 );
+	return pd_name_off(pt, idx);
 }
 
 /* A volume's number box, told what the volume is set to */
@@ -2925,7 +3031,7 @@ LOCAL void pn_press( PANEL *p, INT pid, CONST T_WMEV *ev )
 	case XB_PARTS:
 	case NB_PARTS:
 		pn_focus(p, i, FALSE);
-		pt->caret = tlen(pt->text);
+		pt->caret = tlen(tx(pt));
 		break;
 	case SB_PARTS:
 		if ( p->focus != i ) {
@@ -2971,6 +3077,7 @@ LOCAL void pn_press( PANEL *p, INT pid, CONST T_WMEV *ev )
 		k = pd_tag_at(pt, ev->x, ev->y, NULL);
 		if ( k > 0 ) {
 			p->held_at = k;
+			p->held_ev = *ev;
 		} else {
 			p->pressed = -1;
 		}
@@ -3061,6 +3168,28 @@ LOCAL void pn_move( PANEL *p, INT pid, CONST T_WMEV *ev )
 		p->held_in = in;
 		break;
 	case TG_PARTS:
+		if ( p->held_at > 0 && knl_wmobj_pulls(pid, i) ) {
+			INT	d = wm_num(LK_DRAG_W, 2);
+			INT	dx = ev->x - p->held_ev.x, dy = ev->y - p->held_ev.y;
+
+			if ( dx > d || dx < -d || dy > d || dy < -d ) {
+				/*
+				 * Pulled out: the tag is not chosen, it is drawn as
+				 * it was, and the program is told once where it went
+				 * down. The press is the panel's no longer, so its
+				 * release chooses nothing.
+				 */
+				T_WMEV	e = p->held_ev;
+
+				e.code = (UINT)p->held_at;
+				p->pressed = -1;
+				p->held_at = 0;
+				p->held_in = FALSE;
+				wm_panel_draw(pid);
+				knl_wmobj_part(pid, i, OB_E_PULL, &e);
+				return;
+			}
+		}
 		in = (BOOL)( pd_tag_at(pt, ev->x, ev->y, NULL) == p->held_at );
 		draw = ( in != p->held_in );
 		p->held_in = in;
@@ -3318,8 +3447,8 @@ EXPORT INT knl_pn_wait( void )
 	UD	now = 0, due;
 
 	if ( blink <= 0 ) return -1;
-	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
-		PANEL	*p = &pn_tab[i];
+	for ( i = 0; i < pn_n; i++ ) {
+		PANEL	*p = pn_tab[i];
 
 		if ( p->used && !p->is_menu && p->focus >= 0 && p->wid == wm_focused() ) {
 			(void)ts_get_mono(&now);
@@ -3346,8 +3475,8 @@ EXPORT void knl_pn_tick( void )
 	}
 	pn_lit_at = now;
 	pn_lit = (BOOL)!pn_lit;
-	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
-		PANEL		*p = &pn_tab[i];
+	for ( i = 0; i < pn_n; i++ ) {
+		PANEL		*p = pn_tab[i];
 		INT		gid;
 		UINT		k;
 		T_DPRECT	r;
@@ -3382,6 +3511,59 @@ EXPORT void knl_pn_tick( void )
  */
 LOCAL INT knl_pn_state_u( INT pid, INT i, UB *buf, INT max );
 
+/* A panel of tags: the tags that can be seen (OB_WR_TAGS), at most max; 0 for a part of another kind */
+EXPORT INT knl_pn_tags( INT pid, INT i, T_OBTAG *out, INT max )
+{
+	PANEL		*p;
+	T_WMPART	*pt;
+	INT		*num = NULL, n = 0, k;
+	T_DPRECT	*r = NULL, *fr = NULL;
+	BOOL		*off = NULL;
+
+	if ( max <= 0 ) {
+		return 0;
+	}
+	/* room for max of them, outside the lock */
+	num = (INT *)Kmalloc(sizeof(INT) * (SZ)max);
+	r = (T_DPRECT *)Kmalloc(sizeof(T_DPRECT) * (SZ)max);
+	fr = (T_DPRECT *)Kmalloc(sizeof(T_DPRECT) * (SZ)max);
+	off = (BOOL *)Kmalloc(sizeof(BOOL) * (SZ)max);
+	if ( num == NULL || r == NULL || fr == NULL || off == NULL ) {
+		n = E_NOMEM;
+		goto done;
+	}
+	pn_lock();
+	p = pn_of(pid);
+	if ( p == NULL || p->is_menu || i < 0 || i >= p->def.npart ) {
+		pn_unlock();
+		n = E_ID;
+		goto done;
+	}
+	pt = &p->def.part[i];
+	if ( WM_PT_KIND(pt->type) == TG_PARTS ) {
+		n = pd_tag_list(pt, num, r, fr, off, max);
+	}
+	pn_unlock();
+	for ( k = 0; k < n; k++ ) {
+		out[k].num = num[k];
+		out[k].left = r[k].left;
+		out[k].top = r[k].top;
+		out[k].right = r[k].right;
+		out[k].bottom = r[k].bottom;
+		out[k].fleft = fr[k].left;
+		out[k].ftop = fr[k].top;
+		out[k].fright = fr[k].right;
+		out[k].fbottom = fr[k].bottom;
+		out[k].flags = off[k] ? OB_TAG_OFF : 0;
+	}
+done:
+	if ( num != NULL ) Kfree(num);
+	if ( r != NULL ) Kfree(r);
+	if ( fr != NULL ) Kfree(fr);
+	if ( off != NULL ) Kfree(off);
+	return n;
+}
+
 EXPORT INT knl_pn_state( INT pid, INT i, UB *buf, INT max )
 {
 	INT	res;
@@ -3396,20 +3578,20 @@ LOCAL INT knl_pn_state_u( INT pid, INT i, UB *buf, INT max )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
-	INT		n = 0, v[2];
+	INT		n = 0, v[2], whole;
 	UINT		k;
+	CONST UB	*s;
 
 	if ( p == NULL || i < 0 || i >= p->def.npart ) return E_ID;
 	pt = &p->def.part[i];
 	k = WM_PT_KIND(pt->type);
-	if ( k == TB_PARTS || k == XB_PARTS ) {
-		n = tlen(pt->text);
-		if ( n > max ) n = max;
-		knl_memcpy(buf, pt->text, n);
-	} else if ( k == WM_PT_LABEL || k == MS_PARTS ) {
-		n = tlen(pt->label);
-		if ( n > max ) n = max;
-		knl_memcpy(buf, pt->label, n);
+	if ( k == TB_PARTS || k == XB_PARTS || k == WM_PT_LABEL || k == MS_PARTS ) {
+		/* words: as many bytes as they are whole, max of them copied */
+		s = ( k == TB_PARTS || k == XB_PARTS ) ? WM_PT_TEXT_S(pt) : WM_PT_LABEL_S(pt);
+		whole = tlen(s);
+		n = ( whole > max ) ? max : whole;
+		if ( n > 0 ) knl_memcpy(buf, s, n);
+		return whole;
 	} else if ( k == SB_PARTS ) {
 		n = pt->sb_n * (INT)sizeof(INT);
 		if ( n > max ) n = max;
@@ -3430,53 +3612,106 @@ LOCAL ER knl_pn_set_state_u( INT pid, INT i, CONST UB *buf, INT len );
 
 /*
  * What a part was before it is written, to tell whether the write changed
- * anything drawn: the part whole, which part has the keys, and whether a
- * conversion is under way in it (its letters are committed by the write).
- * knl_pn_set_state and knl_pn_set_flags return 1 when the part changed
- * and E_OK when it is as it was, so that a program that writes again
- * what a part already holds -- a page read again every second, a window
- * filled as it opens -- does not have the panel drawn again and built.
+ * anything drawn: the part whole, its words longer than their fields,
+ * which part has the keys, and whether a conversion is under way in it
+ * (its letters are committed by the write). knl_pn_set_state and
+ * knl_pn_set_flags return 1 when the part changed and E_OK when it is as
+ * it was, so that a program that writes again what a part already holds
+ * -- a page read again every second, a window filled as it opens -- does
+ * not have the panel drawn again and built. Long words that could not be
+ * copied to compare count as changed.
  */
 typedef struct {
 	T_WMPART	part;
+	UB		*lab, *key, *txt;	/* copies of the long words, NULL none */
+	BOOL		lost;			/* one could not be copied */
 	INT		focus;
 	BOOL		conv;
 	BOOL		ok;
 } PNWAS;
 
+LOCAL UB *was_dup( CONST UB *s, BOOL *p_lost )
+{
+	UB	*d;
+	INT	n;
+
+	if ( s == NULL ) {
+		return NULL;
+	}
+	n = tlen(s);
+	d = bytes_dup(s, (SZ)n, (SZ)n + 1);
+	if ( d == NULL ) *p_lost = TRUE;
+	return d;
+}
+
 LOCAL void pn_was_take( INT pid, INT i, PNWAS *w )
 {
-	PANEL	*p = pn_of(pid);
+	PANEL		*p = pn_of(pid);
+	T_WMLONG	*l;
 
+	w->lab = w->key = w->txt = NULL;
+	w->lost = FALSE;
 	w->ok = (BOOL)( p != NULL && i >= 0 && i < p->def.npart );
 	if ( !w->ok ) {
 		return;
 	}
 	knl_memcpy(&w->part, &p->def.part[i], sizeof(w->part));
+	l = p->def.part[i].lng;
+	if ( l != NULL ) {
+		w->lab = was_dup(l->label, &w->lost);
+		w->key = was_dup(l->key, &w->lost);
+		w->txt = was_dup(l->text, &w->lost);
+	}
 	w->focus = p->focus;
 	w->conv = (BOOL)( pn_conv_pid == pid && pn_conv_i == i );
 }
 
-LOCAL ER pn_was_res( INT pid, INT i, CONST PNWAS *w, ER res )
+/* Whether two long words are the same: both none, or the same bytes */
+LOCAL BOOL was_same( CONST UB *a, CONST UB *b )
+{
+	INT	k;
+
+	if ( a == NULL || b == NULL ) {
+		return (BOOL)( a == b );
+	}
+	for ( k = 0; a[k] != 0 && a[k] == b[k]; k++ ) ;
+	return (BOOL)( a[k] == b[k] );
+}
+
+LOCAL ER pn_was_res( INT pid, INT i, PNWAS *w, ER res )
 {
 	PANEL		*p = pn_of(pid);
 	CONST UB	*a, *b;
-	SZ		k;
+	T_WMLONG	*l;
+	SZ		k, at = (SZ)( (UB *)&w->part.lng - (UB *)&w->part );
+	BOOL		same = TRUE;
 
+	if ( res >= E_OK ) {
+		if ( !w->ok || p == NULL || w->conv || p->focus != w->focus || w->lost ) {
+			same = FALSE;
+		} else {
+			a = (CONST UB *)&w->part;
+			b = (CONST UB *)&p->def.part[i];
+			for ( k = 0; k < (SZ)sizeof(w->part) && same; k++ ) {
+				/* the long words compared by what they say, not where they are */
+				if ( k >= at && k < at + (SZ)sizeof(w->part.lng) ) continue;
+				if ( a[k] != b[k] ) same = FALSE;
+			}
+			l = p->def.part[i].lng;
+			if ( same && !( was_same(w->lab, ( l != NULL ) ? l->label : NULL )
+				     && was_same(w->key, ( l != NULL ) ? l->key : NULL )
+				     && was_same(w->txt, ( l != NULL ) ? l->text : NULL ) ) ) {
+				same = FALSE;
+			}
+		}
+	}
+	if ( w->lab != NULL ) Kfree(w->lab);
+	if ( w->key != NULL ) Kfree(w->key);
+	if ( w->txt != NULL ) Kfree(w->txt);
 	if ( res < E_OK ) {
 		return res;
 	}
-	if ( !w->ok || p == NULL || w->conv || p->focus != w->focus ) {
-		return 1;
-	}
-	a = (CONST UB *)&w->part;
-	b = (CONST UB *)&p->def.part[i];
-	for ( k = 0; k < (SZ)sizeof(w->part); k++ ) {
-		if ( a[k] != b[k] ) {
-			return 1;
-		}
-	}
-	return E_OK;
+	return same ? E_OK : 1;
 }
 
 EXPORT ER knl_pn_set_state( INT pid, INT i, CONST UB *buf, INT len )
@@ -3521,22 +3756,30 @@ LOCAL ER knl_pn_set_state_u( INT pid, INT i, CONST UB *buf, INT len )
 		return E_OK;
 	}
 	if ( k == TB_PARTS || k == XB_PARTS || k == WM_PT_LABEL || k == MS_PARTS || k == WM_PT_ICON ) {
-		UB	*t = ( k == TB_PARTS || k == XB_PARTS ) ? pt->text : pt->label;
+		BOOL	box = (BOOL)( k == TB_PARTS || k == XB_PARTS );
 		/*
 		 * a box that has the keys with all of its letters chosen, as one
 		 * has when the panel comes up, keeps the letters it is given chosen
 		 */
 		BOOL	whole = (BOOL)( k == TB_PARTS && p->focus == i && pt->sb_at == 0
-				     && pt->caret == tlen(pt->text) );
+				     && pt->caret == tlen(WM_PT_TEXT_S(pt)) );
+		ER	er;
 
-		n = ( len < WM_LABEL_MAX - 1 ) ? len : WM_LABEL_MAX - 1;
-		knl_memcpy(t, buf, n);
-		t[n] = 0;
+		for ( n = 0; n < len && buf[n] != 0; n++ ) ;	/* the words, to a nought in them */
 		if ( k == WM_PT_ICON ) {
-			icon_load(t);		/* read now, in the caller's task: drawing only shows it */
+			/* an object's UUID: no more than the field */
+			n = ( n < WM_LABEL_MAX - 1 ) ? n : WM_LABEL_MAX - 1;
+			knl_memcpy(pt->label, buf, n);
+			pt->label[n] = 0;
+			icon_load(pt->label);	/* read now, in the caller's task: drawing only shows it */
 			return E_OK;
 		}
-		if ( t == pt->text ) {
+		/* as long as they are; E_NOMEM leaves the part as it was */
+		er = box ? wm_part_set_text(pt, buf, n) : wm_part_set_label(pt, buf, n);
+		if ( er < E_OK ) {
+			return er;
+		}
+		if ( box ) {
 			pt->caret = n;
 			pt->sb_at = whole ? 0 : -1;
 			if ( pn_conv_pid == pid && pn_conv_i == i ) pn_commit();
@@ -3555,10 +3798,25 @@ LOCAL ER knl_pn_set_state_u( INT pid, INT i, CONST UB *buf, INT len )
 		return E_OK;
 	}
 	if ( len < (INT)sizeof(INT) ) return E_PAR;
+	if ( k == TG_PARTS && len > 2 * (INT)sizeof(INT) ) {
+		/* the tags that cannot be chosen: the bits after the first INT, as many words as the record has */
+		UW	*w = (UW *)Kmalloc((SZ)( len / (INT)sizeof(INT) - 1 ) * sizeof(UW));
+		ER	er;
+
+		if ( w == NULL ) return E_NOMEM;
+		knl_memcpy(w, buf + sizeof(INT), (SZ)( len / (INT)sizeof(INT) - 1 ) * sizeof(UW));
+		er = pd_names_set_off(pt, w, len / (INT)sizeof(INT) - 1);
+		Kfree(w);
+		if ( er < E_OK ) return er;
+	}
 	knl_memcpy(v, buf, ( len >= 2 * (INT)sizeof(INT) ) ? 2 * (INT)sizeof(INT) : (INT)sizeof(INT));
 	if ( k == TG_PARTS ) {
 		/* with a second INT, the tags that cannot be chosen: a bit each from bit 0 for tag 1 */
-		if ( len >= 2 * (INT)sizeof(INT) ) pt->inact = (UW)v[1];
+		if ( len == 2 * (INT)sizeof(INT) ) {
+			UW	w = (UW)v[1];
+
+			if ( pd_names_set_off(pt, &w, 1) < E_OK ) return E_NOMEM;
+		}
 		/* a sheet no tag names -- a page opened from another -- is shown as well */
 		if ( pd_tag_show(pt, v[0]) < 0 ) pt->value = v[0];
 		pn_focus_first(p);
@@ -3641,7 +3899,7 @@ LOCAL ER knl_pn_set_flags_u( INT pid, INT i, UINT f )
 	if ( ( f & OB_WP_FOCUS ) != 0 && p->focus != i && pn_takes_keys(p, pt) ) {
 		pn_focus(p, i, FALSE);
 		if ( WM_PT_KIND(pt->type) == TB_PARTS || WM_PT_KIND(pt->type) == XB_PARTS ) {
-			pt->caret = tlen(pt->text);
+			pt->caret = tlen(tx(pt));
 			pt->sb_at = -1;
 		}
 	}
@@ -3953,6 +4211,39 @@ LOCAL BOOL mn_is_rule( CONST T_WMITEM *it )
 }
 
 /*
+ * A menu read out of the data box, size bytes: an item's whole words are
+ * read only where they lie after its items and end inside its bytes; any
+ * other place is not followed, the field's head shown instead
+ */
+LOCAL BOOL mn_words_in( CONST T_WMMENU *def, SZ size, UINT off )
+{
+	CONST UB	*b = (CONST UB *)def;
+	SZ		k;
+
+	if ( off < (UINT)WM_MENU_SIZE(def->nitem) || (SZ)off >= size ) {
+		return FALSE;
+	}
+	for ( k = off; k < size; k++ ) {
+		if ( b[k] == 0 ) return TRUE;
+	}
+	return FALSE;
+}
+
+LOCAL void mn_words_keep( T_WMMENU *def, SZ size )
+{
+	INT	i;
+
+	for ( i = 0; i < def->nitem; i++ ) {
+		T_WMITEM	*it = &def->item[i];
+
+		if ( it->llabel != 0 && !mn_words_in(def, size, it->llabel) ) it->llabel = 0;
+		if ( it->lkey != 0 && !mn_words_in(def, size, it->lkey) ) it->lkey = 0;
+		it->label[WM_LABEL_MAX - 1] = 0;
+		it->key[WM_KEY_MAX - 1] = 0;
+	}
+}
+
+/*
  * How wide a list's body is: its widest name, and room for the key
  * letters a name carries, and for a mark when any name in the list is
  * set.
@@ -3970,9 +4261,9 @@ LOCAL INT mn_body_width( CONST T_WMMENU *def, CONST MNMET *m, BOOL *p_marks )
 		if ( mn_is_rule(it) ) {
 			continue;
 		}
-		w = ( fid > 0 ) ? fn_width(fid, it->label) : 8 * m->cw;
+		w = ( fid > 0 ) ? fn_width(fid, WM_ITEM_LABEL(def, it)) : 8 * m->cw;
 		if ( it->key[0] != 0 ) {
-			w += m->cw + ( ( fid > 0 ) ? fn_width(fid, it->key) : 2 * m->cw );
+			w += m->cw + ( ( fid > 0 ) ? fn_width(fid, WM_ITEM_KEY(def, it)) : 2 * m->cw );
 		}
 		if ( it->tick ) {
 			marks = TRUE;
@@ -4090,7 +4381,7 @@ LOCAL INT mn_open_body( INT owner, CONST T_WMMENU *def, CONST T_DPRECT *body,
 	for ( i = 0; i < def->nitem; i++ ) {
 		T_WMPART	*pt = &pn->part[n];
 		CONST T_WMITEM	*it = &def->item[i];
-		INT		k, c = i / rows;
+		INT		c = i / rows;
 
 		pt->type   = mn_is_rule(it) ? WM_PT_LABEL : WM_PT_BUTTON;
 		if ( it->grey ) {
@@ -4105,13 +4396,13 @@ LOCAL INT mn_open_body( INT owner, CONST T_WMMENU *def, CONST T_DPRECT *body,
 		pt->r.top    = gy + ( i % rows ) * m->row;
 		pt->r.right  = ( c == cols - 1 ) ? pn->r.right - MN_FRAME : gx + ( c + 1 ) * colw;
 		pt->r.bottom = pt->r.top + m->row;
-		for ( k = 0; k < WM_LABEL_MAX; k++ ) {
-			pt->label[k] = it->label[k];
-		}
-		for ( k = 0; k < WM_KEY_MAX; k++ ) {
-			pt->key[k] = it->key[k];
-		}
+		/* the words whole: a row is never shown with its words cut short */
 		n++;
+		pn->npart = n;
+		if ( wm_part_set_label(pt, WM_ITEM_LABEL(def, it), -1) < E_OK
+		  || wm_part_set_key(pt, WM_ITEM_KEY(def, it), -1) < E_OK ) {
+			pn->lost = TRUE;
+		}
 	}
 	pn->npart = n;
 	pid = wm_panel_open(pop, pn);
@@ -4214,10 +4505,11 @@ LOCAL void menu_sub_open( INT pid, INT row )
 		return;
 	}
 	if ( db_get(DB_MENU, p->def.part[row].sub, p->def.owner, def, (SZ)size) < 0
-	  || (SZ)size < (SZ)WM_MENU_SIZE(def->nitem) || def->nitem <= 0 ) {
+	  || def->nitem <= 0 || (SZ)size < (SZ)WM_MENU_SIZE(def->nitem) ) {
 		Kfree(def);
 		return;
 	}
+	mn_words_keep(def, (SZ)size);
 	def->owner = p->def.owner;
 	mn_metrics(&m);
 	wide = mn_body_width(def, &m, &marks) + 2 * m.hpad;
@@ -4298,7 +4590,7 @@ LOCAL void menu_sub_keep( INT pid, INT row )
 		return;				/* nothing to open: the row stays lit */
 	}
 	/* the lists it hangs from stay as they are, too */
-	for ( a = p; a != NULL && depth < WM_PANEL_MAX; depth++ ) {
+	for ( a = p; a != NULL && depth < pn_n; depth++ ) {
 		a->kept = TRUE;
 		a = ( a->parent > 0 ) ? pn_of(a->parent) : NULL;
 	}
@@ -4391,11 +4683,11 @@ LOCAL void menu_paint_body( PANEL *p )
 			continue;
 		}
 		col = wm_look(grey ? LK_MENUINACT : LK_MENUCHCOL);
-		fn_draw(gid, fid, l, r.top + m.base - 1, pt->label, col);
-		if ( pt->key[0] != 0 ) {
-			INT	kw = fn_width(fid, pt->key);
+		fn_draw(gid, fid, l, r.top + m.base - 1, WM_PT_LABEL_S(pt), col);
+		if ( WM_PT_KEY_S(pt)[0] != 0 ) {
+			INT	kw = fn_width(fid, WM_PT_KEY_S(pt));
 
-			fn_draw(gid, fid, rr - kw - 2, r.top + m.base - 1, pt->key,
+			fn_draw(gid, fid, rr - kw - 2, r.top + m.base - 1, WM_PT_KEY_S(pt),
 				wm_look(grey ? LK_MENUKEYINACT : LK_MENUKEYCOL));
 		}
 	}
@@ -4429,7 +4721,7 @@ LOCAL INT menu_deepest( INT pid )
 
 	/* the count is what stops a ring of panels, not a limit on menus:
 	   a chain cannot be longer than there are panels to make it of */
-	while ( p != NULL && p->child > 0 && depth < WM_PANEL_MAX ) {
+	while ( p != NULL && p->child > 0 && depth < pn_n ) {
 		pid = p->child;
 		p = pn_of(pid);
 		depth++;
@@ -4443,7 +4735,7 @@ LOCAL BOOL menu_in_child( CONST PANEL *p, INT wid )
 {
 	INT	depth = 0;
 
-	while ( p != NULL && p->child > 0 && depth < WM_PANEL_MAX ) {
+	while ( p != NULL && p->child > 0 && depth < pn_n ) {
 		p = pn_of(p->child);
 		if ( p != NULL && p->wid == wid ) {
 			return TRUE;
@@ -4461,8 +4753,8 @@ EXPORT INT knl_menu_wait( void )
 	INT	i, left = -1;
 
 	(void)ts_get_mono(&now);
-	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
-		PANEL	*p = &pn_tab[i];
+	for ( i = 0; i < pn_n; i++ ) {
+		PANEL	*p = pn_tab[i];
 
 		if ( !p->used || !p->is_menu || p->pend < 0 || p->pend != p->hot || p->child > 0 ) {
 			continue;
@@ -4481,8 +4773,8 @@ EXPORT void knl_menu_tick( void )
 	INT	i;
 
 	(void)ts_get_mono(&now);
-	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
-		PANEL	*p = &pn_tab[i];
+	for ( i = 0; i < pn_n; i++ ) {
+		PANEL	*p = pn_tab[i];
 
 		if ( !p->used || !p->is_menu || p->pend < 0 || p->pend != p->hot || p->child > 0 ) {
 			continue;
@@ -4599,22 +4891,19 @@ LOCAL ER wm_menu_event_u( INT pid, CONST T_WMEV *ev, INT *p_cmd )
  * sets against its right end as a pop-up's body sets them against its
  * mark.
  */
-LOCAL void pop_row_words( CONST UB *s, UB *label, UB *key )
+LOCAL BOOL pop_row_words( CONST UB *s, T_WMPART *r )
 {
-	INT	i = 0, k = 0;
+	INT	i = 0;
 
-	while ( s[i] != 0 && s[i] != 0x09 && i < WM_LABEL_MAX - 1 ) {
-		label[i] = s[i];
-		i++;
+	while ( s[i] != 0 && s[i] != 0x09 ) i++;
+	if ( wm_part_set_label(r, s, i) < E_OK ) {
+		return FALSE;
 	}
-	label[i] = 0;
 	if ( s[i] == 0x09 ) {
-		i++;
-		while ( s[i] != 0 && k < WM_KEY_MAX - 1 ) {
-			key[k++] = s[i++];
-		}
+		return (BOOL)( wm_part_set_key(r, s + i + 1, -1) >= E_OK );
 	}
-	key[k] = 0;
+	r->key[0] = 0;
+	return TRUE;
 }
 
 /*
@@ -4677,18 +4966,19 @@ LOCAL void pop_open( INT pid, INT i, CONST T_WMEV *ev )
 		if ( nm == NULL ) {
 			break;
 		}
-		pop_row_words(nm, r->label, r->key);
+		pn->npart = k + 1;		/* its words let go with the definition, however this ends */
+		if ( !pop_row_words(nm, r) ) pn->lost = TRUE;
 		r->type = WM_PT_BUTTON;
-		if ( first + k < 32 && ( pt->inact & ( 1U << ( first + k ) ) ) != 0 ) {
+		if ( pd_name_off(pt, first + k + 1) ) {
 			r->type |= P_DISABLE;
 		}
 		r->num = first + k + 1;
 		r->answer = WM_ANS_OK;
 		r->group = 1;			/* the list keeps room for the mark */
 		r->value = ( pt->value == first + k + 1 ) ? 1 : 0;
-		ww = ( fid > 0 ) ? fn_width(fid, r->label) : 8 * m.cw;
-		if ( r->key[0] != 0 ) {
-			ww += m.cw + ( ( fid > 0 ) ? fn_width(fid, r->key) : 2 * m.cw );
+		ww = ( fid > 0 ) ? fn_width(fid, WM_PT_LABEL_S(r)) : 8 * m.cw;
+		if ( WM_PT_KEY_S(r)[0] != 0 ) {
+			ww += m.cw + ( ( fid > 0 ) ? fn_width(fid, WM_PT_KEY_S(r)) : 2 * m.cw );
 		}
 		if ( ww > wide ) wide = ww;
 	}
@@ -5074,7 +5364,230 @@ EXPORT INT wm_part_name( T_WMPART *pt, CONST UB *name )
 	return at;
 }
 
-/* The names of a definition's parts let go */
+/* ---------------------------------------------------------------- words longer than their fields */
+
+/* n bytes of s into a field of max, cut at a letter's end */
+LOCAL void field_put( UB *f, INT max, CONST UB *s, INT n )
+{
+	if ( n > max - 1 ) {
+		n = max - 1;
+		while ( n > 0 && ( s[n] & 0xC0 ) == 0x80 ) n--;
+	}
+	if ( n > 0 ) knl_memcpy(f, s, (SZ)n);
+	f[( n > 0 ) ? n : 0] = 0;
+}
+
+LOCAL UB *bytes_dup( CONST UB *s, SZ n, SZ room )
+{
+	UB	*d = (UB *)Kmalloc(room);
+
+	if ( d != NULL ) {
+		knl_memcpy(d, s, n);
+		d[n] = 0;
+	}
+	return d;
+}
+
+LOCAL INT s_len( CONST UB *s )
+{
+	INT	n = 0;
+
+	while ( s[n] != 0 ) n++;
+	return n;
+}
+
+/* The part's long words, made when it has none: NULL for no memory */
+LOCAL T_WMLONG *long_of( T_WMPART *pt )
+{
+	if ( pt->lng == NULL ) {
+		pt->lng = (T_WMLONG *)Kcalloc(1, sizeof(T_WMLONG));
+	}
+	return pt->lng;
+}
+
+/* The long words let go once none is left */
+LOCAL void long_tidy( T_WMPART *pt )
+{
+	T_WMLONG	*l = pt->lng;
+
+	if ( l != NULL && l->label == NULL && l->key == NULL && l->text == NULL ) {
+		Kfree(l);
+		pt->lng = NULL;
+	}
+}
+
+/*
+ * Words into the label (key FALSE) or the keys: into the field or,
+ * longer, whole beside the part. FALSE for no memory, nothing then
+ * changed.
+ */
+LOCAL BOOL words_put( T_WMPART *pt, BOOL key, CONST UB *s, INT n )
+{
+	UB	*field = key ? pt->key : pt->label, *d, **slot;
+	INT	fmax = key ? WM_KEY_MAX : WM_LABEL_MAX;
+
+	d = NULL;
+	if ( n >= fmax ) {
+		if ( long_of(pt) == NULL ) {
+			return FALSE;
+		}
+		d = bytes_dup(s, (SZ)n, (SZ)n + 1);
+		if ( d == NULL ) {
+			long_tidy(pt);
+			return FALSE;
+		}
+	}
+	if ( pt->lng != NULL ) {
+		slot = key ? &pt->lng->key : &pt->lng->label;
+		if ( *slot != NULL ) Kfree(*slot);
+		*slot = d;
+		long_tidy(pt);
+	}
+	field_put(field, fmax, s, n);
+	return TRUE;
+}
+
+EXPORT ER wm_part_set_label( T_WMPART *pt, CONST UB *s, INT n )
+{
+	if ( pt == NULL || s == NULL ) return E_PAR;
+	if ( n < 0 ) n = s_len(s);
+	return words_put(pt, FALSE, s, n) ? E_OK : E_NOMEM;
+}
+
+EXPORT ER wm_part_set_key( T_WMPART *pt, CONST UB *s, INT n )
+{
+	if ( pt == NULL || s == NULL ) return E_PAR;
+	if ( n < 0 ) n = s_len(s);
+	return words_put(pt, TRUE, s, n) ? E_OK : E_NOMEM;
+}
+
+/*
+ * Room in a box for len bytes of letters and a nought, the letters there
+ * kept: in text[] while they fit, and moved whole beside the part when
+ * they do not. FALSE for no memory, the box then as it was.
+ */
+LOCAL BOOL text_room( T_WMPART *pt, INT len )
+{
+	T_WMLONG	*l = pt->lng;
+	INT		room;
+	UB		*d;
+
+	if ( l != NULL && l->text != NULL ) {
+		if ( len < l->room ) return TRUE;
+		if ( len > 0x3FFFFFFE ) return FALSE;
+		room = l->room * 2;
+		if ( room <= len ) room = len + 1;
+		d = bytes_dup(l->text, (SZ)s_len(l->text), (SZ)room);
+		if ( d == NULL ) return FALSE;
+		Kfree(l->text);
+		l->text = d;
+		l->room = room;
+		return TRUE;
+	}
+	if ( len < WM_LABEL_MAX ) return TRUE;
+	if ( len > 0x3FFFFFFE || long_of(pt) == NULL ) return FALSE;
+	room = WM_LABEL_MAX * 2;
+	while ( room <= len ) room *= 2;
+	d = bytes_dup(pt->text, (SZ)s_len(pt->text), (SZ)room);
+	if ( d == NULL ) {
+		long_tidy(pt);
+		return FALSE;
+	}
+	pt->lng->text = d;
+	pt->lng->room = room;
+	return TRUE;
+}
+
+/* A box's letters, where they are kept now, and the bytes they have room for */
+LOCAL UB *tx( T_WMPART *pt )
+{
+	return ( pt->lng != NULL && pt->lng->text != NULL ) ? pt->lng->text : pt->text;
+}
+
+EXPORT ER wm_part_set_text( T_WMPART *pt, CONST UB *s, INT n )
+{
+	UB	*t, *copy = NULL;
+	INT	k;
+
+	if ( pt == NULL || s == NULL ) return E_PAR;
+	if ( n < 0 ) n = s_len(s);
+	if ( n < WM_LABEL_MAX ) {
+		/* in the field, the long letters (which s may be) let go after */
+		for ( k = 0; k < n; k++ ) pt->text[k] = s[k];
+		pt->text[n] = 0;
+		if ( pt->lng != NULL && pt->lng->text != NULL ) {
+			Kfree(pt->lng->text);
+			pt->lng->text = NULL;
+			pt->lng->room = 0;
+			long_tidy(pt);
+		}
+		pt->caret = n;
+		return E_OK;
+	}
+	if ( pt->lng != NULL && pt->lng->text != NULL && s >= pt->lng->text && s < pt->lng->text + pt->lng->room ) {
+		copy = bytes_dup(s, (SZ)n, (SZ)n + 1);	/* the box's own letters: kept while the room moves */
+		if ( copy == NULL ) return E_NOMEM;
+		s = copy;
+	}
+	if ( !text_room(pt, n) ) {
+		if ( copy != NULL ) Kfree(copy);
+		return E_NOMEM;
+	}
+	t = tx(pt);
+	for ( k = 0; k < n; k++ ) t[k] = s[k];
+	t[n] = 0;
+	pt->caret = n;
+	if ( copy != NULL ) Kfree(copy);
+	return E_OK;
+}
+
+EXPORT BOOL wm_part_long_dup( T_WMPART *dst )
+{
+	T_WMLONG	*s = dst->lng, *d;
+
+	if ( s == NULL ) {
+		return TRUE;
+	}
+	dst->lng = NULL;
+	d = (T_WMLONG *)Kcalloc(1, sizeof(T_WMLONG));
+	if ( d == NULL ) {
+		return FALSE;
+	}
+	if ( s->label != NULL ) d->label = bytes_dup(s->label, (SZ)s_len(s->label), (SZ)s_len(s->label) + 1);
+	if ( s->key != NULL ) d->key = bytes_dup(s->key, (SZ)s_len(s->key), (SZ)s_len(s->key) + 1);
+	if ( s->text != NULL ) {
+		d->text = bytes_dup(s->text, (SZ)s_len(s->text), (SZ)s->room);
+		d->room = s->room;
+	}
+	if ( ( s->label != NULL && d->label == NULL ) || ( s->key != NULL && d->key == NULL )
+	  || ( s->text != NULL && d->text == NULL ) ) {
+		dst->lng = d;
+		wm_part_long_free(dst);
+		return FALSE;
+	}
+	dst->lng = d;
+	return TRUE;
+}
+
+EXPORT void wm_part_long_free( T_WMPART *pt )
+{
+	T_WMLONG	*l = pt->lng;
+
+	if ( l == NULL ) {
+		return;
+	}
+	if ( l->text != NULL ) {
+		/* the head of the letters back in the field, for whoever reads it after */
+		field_put(pt->text, WM_LABEL_MAX, l->text, s_len(l->text));
+		Kfree(l->text);
+	}
+	if ( l->label != NULL ) Kfree(l->label);
+	if ( l->key != NULL ) Kfree(l->key);
+	Kfree(l);
+	pt->lng = NULL;
+}
+
+/* The names and long words of a definition's parts let go */
 LOCAL void pn_names_drop( T_WMPANEL *def )
 {
 	INT	k;
@@ -5082,6 +5595,7 @@ LOCAL void pn_names_drop( T_WMPANEL *def )
 	for ( k = 0; def->part != NULL && k < def->npart && k < def->room; k++ ) {
 		pd_names_free(def->part[k].names);
 		def->part[k].names = NULL;
+		wm_part_long_free(&def->part[k]);
 	}
 }
 
@@ -5270,7 +5784,6 @@ LOCAL ER wm_panel_text_u( INT pid, INT num, UB *buf, INT max )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
-	INT		i;
 
 	if ( p == NULL ) {
 		return E_ID;
@@ -5279,12 +5792,60 @@ LOCAL ER wm_panel_text_u( INT pid, INT num, UB *buf, INT max )
 	if ( pt == NULL || buf == NULL || max <= 0 ) {
 		return E_PAR;
 	}
-	for ( i = 0; i < max - 1 && pt->text[i] != 0; i++ ) {
-		buf[i] = pt->text[i];
-	}
-	buf[i] = 0;
+	field_put(buf, max, WM_PT_TEXT_S(pt), tlen(WM_PT_TEXT_S(pt)));
 
 	return E_OK;
+}
+
+EXPORT INT knl_pn_label( INT pid, INT i, UB **p_buf )
+{
+	PANEL		*p;
+	INT		n;
+	UB		*b;
+
+	*p_buf = NULL;
+	pn_lock();
+	p = pn_of(pid);
+	if ( p == NULL || i < 0 || i >= p->def.npart ) {
+		pn_unlock();
+		return E_ID;
+	}
+	n = tlen(WM_PT_LABEL_S(&p->def.part[i]));
+	b = bytes_dup(WM_PT_LABEL_S(&p->def.part[i]), (SZ)n, (SZ)n + 1);
+	pn_unlock();
+	if ( b == NULL ) {
+		return E_NOMEM;
+	}
+	*p_buf = b;
+	return n;
+}
+
+EXPORT INT wm_panel_text_all( INT pid, INT num, UB **p_buf )
+{
+	PANEL		*p;
+	T_WMPART	*pt;
+	INT		n;
+	UB		*b;
+
+	if ( p_buf == NULL ) {
+		return E_PAR;
+	}
+	*p_buf = NULL;
+	pn_lock();
+	p = pn_of(pid);
+	pt = ( p != NULL ) ? part_of(p, num) : NULL;
+	if ( pt == NULL ) {
+		pn_unlock();
+		return ( p == NULL ) ? E_ID : E_PAR;
+	}
+	n = tlen(WM_PT_TEXT_S(pt));
+	b = bytes_dup(WM_PT_TEXT_S(pt), (SZ)n, (SZ)n + 1);
+	pn_unlock();
+	if ( b == NULL ) {
+		return E_NOMEM;
+	}
+	*p_buf = b;
+	return n;
 }
 
 LOCAL ER wm_panel_set_text_u( INT pid, INT num, CONST UB *str );
@@ -5303,7 +5864,6 @@ LOCAL ER wm_panel_set_text_u( INT pid, INT num, CONST UB *str )
 {
 	PANEL		*p = pn_of(pid);
 	T_WMPART	*pt;
-	INT		i = 0;
 
 	if ( p == NULL ) {
 		return E_ID;
@@ -5313,22 +5873,9 @@ LOCAL ER wm_panel_set_text_u( INT pid, INT num, CONST UB *str )
 		return E_PAR;
 	}
 	if ( WM_PT_KIND(pt->type) == WM_PT_LABEL ) {
-		/* words alone: what they say */
-		while ( i < WM_LABEL_MAX - 1 && str[i] != 0 ) {
-			pt->label[i] = str[i];
-			i++;
-		}
-		pt->label[i] = 0;
-		return E_OK;
+		return wm_part_set_label(pt, str, -1);	/* words alone: what they say */
 	}
-	while ( i < WM_LABEL_MAX - 1 && str[i] != 0 ) {
-		pt->text[i] = str[i];
-		i++;
-	}
-	pt->text[i] = 0;
-	pt->caret = i;
-
-	return E_OK;
+	return wm_part_set_text(pt, str, -1);
 }
 
 EXPORT INT wm_panel_self_check( void )
@@ -5337,8 +5884,8 @@ EXPORT INT wm_panel_self_check( void )
 	INT	i, j, k;
 
 	pn_lock();
-	for ( i = 0; i < WM_PANEL_MAX; i++ ) {
-		PANEL	*p = &pn_tab[i];
+	for ( i = 0; i < pn_n; i++ ) {
+		PANEL	*p = pn_tab[i];
 		INT	w, h;
 
 		if ( !p->used ) {

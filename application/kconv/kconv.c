@@ -134,12 +134,27 @@ LOCAL BOOL kw_is_of( CONST TS_UUID *u, CONST TS_UUID *user )
 	return yes;
 }
 
+/* The size of an object's record 1: what the dictionary holds, whatever it is */
+LOCAL SZ kw_rec_size( ID key )
+{
+	T_OBREC	rec[4];
+	INT	cnt = 0, i;
+	SZ	size = 0;
+
+	if ( ob_lst_rec(key, rec, 4, &cnt) >= E_OK ) {
+		for ( i = 0; i < cnt && i < 4; i++ ) {
+			if ( rec[i].recno == 1 ) size = (SZ)rec[i].size;
+		}
+	}
+	return size;
+}
+
 /* The words the dictionary there has been holds, put in the new one's record */
 LOCAL ER kw_copy_words( ID to, INT recno )
 {
 	TS_UUID	u;
 	UB	*t;
-	SZ	asz = 0;
+	SZ	asz = 0, size;
 	ID	key;
 	ER	er = E_OK;
 
@@ -150,15 +165,18 @@ LOCAL ER kw_copy_words( ID to, INT recno )
 	if ( key <= 0 ) {
 		return E_OK;			/* none: it starts with no words */
 	}
-	t = (UB *)Kmalloc(UD_TEXT_MAX);
-	if ( t == NULL ) {
-		er = E_NOMEM;
-	} else if ( ob_rea_rec(key, 1, 0, t, UD_TEXT_MAX, &asz) >= E_OK && asz > 0 ) {
-		SZ	wr = 0;
+	size = kw_rec_size(key);
+	if ( size > 0 ) {
+		t = (UB *)Kmalloc(size);
+		if ( t == NULL ) {
+			er = E_NOMEM;
+		} else if ( ob_rea_rec(key, 1, 0, t, size, &asz) >= E_OK && asz > 0 ) {
+			SZ	wr = 0;
 
-		er = ob_wri_rec(to, recno, 0, t, ( asz > UD_TEXT_MAX ) ? UD_TEXT_MAX : asz, &wr);
+			er = ob_wri_rec(to, recno, 0, t, ( asz > size ) ? size : asz, &wr);
+		}
+		if ( t != NULL ) Kfree(t);
 	}
-	if ( t != NULL ) Kfree(t);
 	(void)ob_cls_obj(key);
 	return er;
 }
@@ -266,11 +284,9 @@ EXPORT ER kc_words_dict( TS_UUID *u )
 LOCAL UB *kw_read( INT *p_len )
 {
 	TS_UUID	u;
-	T_OBREC	rec[4];
 	UB	*t;
-	SZ	size = 0, asz = 0;
+	SZ	size, asz = 0;
 	D	at = 0;
-	INT	cnt = 0, i;
 	ID	key;
 
 	*p_len = 0;
@@ -281,14 +297,7 @@ LOCAL UB *kw_read( INT *p_len )
 	if ( key <= 0 ) {
 		return NULL;
 	}
-	if ( ob_lst_rec(key, rec, 4, &cnt) >= E_OK ) {
-		for ( i = 0; i < cnt; i++ ) {
-			if ( rec[i].recno == 1 ) size = (SZ)rec[i].size;
-		}
-	}
-	if ( size > UD_TEXT_MAX ) {
-		size = UD_TEXT_MAX;
-	}
+	size = kw_rec_size(key);
 	t = (UB *)Kmalloc(size + 1);
 	while ( t != NULL && at < (D)size ) {
 		if ( ob_rea_rec(key, 1, at, t + at, size - at, &asz) < E_OK || asz <= 0 ) break;
@@ -351,7 +360,6 @@ LOCAL UB *kw_engine( INT *p_n )
 #define RK_SESS		8
 #define RK_TEXT		256
 #define RK_CAND		9		/* a reading's candidates: the list shows nine */
-#define RK_CANDBUF	( RK_CAND * ( UD_WORD_MAX + 4 ) )
 
 typedef struct {
 	BOOL	used;
@@ -363,7 +371,8 @@ typedef struct {
 	BOOL	listed;			/* ... and the list of them is shown */
 	INT	ncand, sel;
 	INT	coff[RK_CAND + 1];	/* where each candidate starts in cand */
-	UB	cand[RK_CANDBUF];
+	UB	*cand;			/* the candidates' words, end to end; grown as they need */
+	INT	candcap;
 } RKSESS;
 
 LOCAL RKSESS	rk_sess[RK_SESS];
@@ -583,8 +592,25 @@ LOCAL void rk_cand_add( RKSESS *s, CONST UB *w, INT n )
 {
 	INT	k, i, at = s->coff[s->ncand];
 
-	if ( s->ncand >= RK_CAND || n <= 0 || at + n > RK_CANDBUF ) {
+	/* the composition handed out holds TSMOZC_TEXT_MAX bytes: a longer word could not be committed whole */
+	if ( s->ncand >= RK_CAND || n <= 0 || n >= TSMOZC_TEXT_MAX ) {
 		return;
+	}
+	if ( at + n > s->candcap ) {
+		INT	cap = ( s->candcap > 0 ) ? s->candcap : 256;
+		UB	*nb;
+
+		while ( cap < at + n ) cap *= 2;
+		nb = (UB *)Kmalloc(cap);
+		if ( nb == NULL ) {
+			return;
+		}
+		if ( s->cand != NULL ) {
+			knl_memcpy(nb, s->cand, at);
+			Kfree(s->cand);
+		}
+		s->cand = nb;
+		s->candcap = cap;
 	}
 	for ( k = 0; k < s->ncand; k++ ) {
 		if ( s->coff[k + 1] - s->coff[k] != n ) continue;
@@ -607,7 +633,7 @@ LOCAL BOOL rk_convert( RKSESS *s )
 	UB	y[RK_TEXT];
 	INT	n, i;
 
-	if ( s->nk <= 0 || s->nk >= UD_YOMI_MAX ) {
+	if ( s->nk <= 0 ) {
 		return FALSE;
 	}
 	for ( i = 0; i < s->nk; i++ ) y[i] = s->kana[i];
@@ -755,7 +781,7 @@ LOCAL RKSESS *rk_of( INT kid )
  */
 LOCAL INT rk_conv_key( RKSESS *s, UINT code, T_KCOUT *out )
 {
-	UB	done[UD_WORD_MAX + 4];
+	UB	done[TSMOZC_TEXT_MAX];
 	INT	n;
 
 	switch ( code ) {
@@ -806,7 +832,7 @@ LOCAL INT rk_key( INT kid, UINT code, UINT stat, T_KCOUT *out )
 {
 	RKSESS	*s = rk_of(kid);
 	BOOL	busy, kata = (BOOL)( ( stat & TSMOZC_S_KANA ) != 0 );
-	UB	done[UD_WORD_MAX + 4];
+	UB	done[TSMOZC_TEXT_MAX];
 	INT	was, nd = 0, r;
 	UINT	u, also;
 
@@ -938,7 +964,7 @@ LOCAL INT rk_list( INT kid, UB *buf, INT size, INT *p_count, INT *p_first, INT *
 LOCAL INT rk_choose( INT kid, INT n, T_KCOUT *out )
 {
 	RKSESS	*s = rk_of(kid);
-	UB	done[UD_WORD_MAX + 4];
+	UB	done[TSMOZC_TEXT_MAX];
 	INT	nd;
 
 	if ( s == NULL || !s->conv ) {
@@ -2028,6 +2054,9 @@ EXPORT void kc_close( INT kid )
 		RKSESS	*s = rk_of(kid - RK_BASE);
 
 		if ( s != NULL ) {
+			if ( s->cand != NULL ) Kfree(s->cand);
+			s->cand = NULL;
+			s->candcap = 0;
 			s->used = FALSE;
 		}
 		return;

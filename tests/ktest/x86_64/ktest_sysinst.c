@@ -20,7 +20,7 @@
  *	a stretch nothing takes and the recovery partition at the end --
  *	told apart by the name of the basic data partition, KTWIN-C to be
  *	put beside, KTWIN-E to be erased, KTWIN-R to be made TessronOS's
- *	(NVME4=). Then:
+ *	(any of NVME2= to NVME5=). Then:
  *
  *	  - the disk started from is never offered, nor the plan made on
  *	    it; a way that cannot be taken says why;
@@ -49,11 +49,23 @@
  *	    the running system's again, the kernel on the ESP is /boot's, the
  *	    volume is checked whole; a newer system there is not put over,
  *	    and a disk with no TessronOS (or one erased whole) offers no
- *	    keeping.
+ *	    keeping. That volume is of version 5: nothing asks it to be
+ *	    converted, and the panel says nothing of it;
+ *	  - the system put over a disk an earlier system (R1.410) was put on
+ *	    whole, its volume of version 4 (tools/tests/mkwindisk.py make-ts4,
+ *	    on any of the disks システム登録 offers, nvmeb to nvmee, NVME2= to
+ *	    NVME5=; found by the format of its TessronOS partition): the
+ *	    panel's line of the conversion at its first start,
+ *	    CONVREQ on the volume afterwards, still of version 4, the person's
+ *	    object and link there, the loader of \EFI\BOOT\ and the kernel the
+ *	    ones of /boot.
  *
  *	A machine started from a disk the system was put on (its ESP has
  *	\EFI\TESSRON\INSTALL.TXT) only looks at itself: /boot and the system
- *	volume on that disk, the volume grown to its partition.
+ *	volume on that disk, the volume grown to its partition, of version 5,
+ *	with no CONVREQ; when the start converted it (the disk of version 4
+ *	put over), what the conversion at start keeps for the desktop's
+ *	notice says it was done on that volume.
  */
 
 #include <sys/machine.h>
@@ -72,6 +84,8 @@
 #include <ts/uuid.h>
 #include "tstdlib.h"
 #include "../ktest.h"
+#include <ts/dtreq.h>
+#include "../../../application/desktop/desktop.h"
 #include "../../../application/sysinst/si_core.h"
 
 IMPORT unsigned char	knl_sysvol_name[];
@@ -81,6 +95,9 @@ IMPORT unsigned char	knl_bootvol_name[];
 #define REQ		"/boot/EFI/TESSRON/BOOTREG.TXT"
 #define NFILE_WIN	3
 
+/* The line of the panel of 上書き when the volume there is of version 4 (application/sysinst/sysinst.c) */
+#define ASK_CONV	"登録先のディスクは、登録のあとの最初の起動で検査し、新しい形式に変えます。"
+
 LOCAL CONST char * CONST win_files[NFILE_WIN] = {
 	"EFI/Microsoft/Boot/bootmgfw.efi", "EFI/Boot/bootx64.efi", "EFI/Microsoft/Boot/BCD"
 };
@@ -88,6 +105,7 @@ LOCAL CONST char * CONST win_files[NFILE_WIN] = {
 LOCAL T_SIDISK	dk;
 LOCAL T_SIPLAN	pl;
 LOCAL UB	dc[L_DEVNM + 1], de[L_DEVNM + 1], dr[L_DEVNM + 1];	/* the disks of the three kinds */
+LOCAL UB	d4[L_DEVNM + 1];	/* a disk an earlier system was put on, its volume of version 4 */
 
 LOCAL BOOL same_b( CONST void *a, CONST void *b, INT n )
 {
@@ -169,13 +187,18 @@ LOCAL BOOL both_tables( CONST UB *disk, UD nsect )
 	return ok;
 }
 
-/* The disks mkwindisk.py made, by the name of their basic data partition */
+/*
+ * The disks mkwindisk.py made: those as Windows leaves them by the name of
+ * their basic data partition, the one of an earlier system by the format
+ * of the volume of its TessronOS partition
+ */
 LOCAL void find_disks( void )
 {
-	static CONST char * CONST names[] = { "nvmeb", "nvmec", "nvmed", NULL };
+	static CONST char * CONST names[] = { "nvmeb", "nvmec", "nvmed", "nvmee", NULL };
+	UB	part[L_DEVNM + 1];
 	INT	i, k;
 
-	dc[0] = de[0] = dr[0] = 0;
+	dc[0] = de[0] = dr[0] = d4[0] = 0;
 	for ( i = 0; names[i] != NULL; i++ ) {
 		if ( si_disk_read(names[i], &dk) < E_OK ) continue;
 		for ( k = 0; k < dk.nparts; k++ ) {
@@ -183,10 +206,70 @@ LOCAL void find_disks( void )
 			if ( knl_strcmp((CONST char *)dk.parts[k].name, "KTWIN-E") == 0 ) knl_strcpy((char *)de, names[i]);
 			if ( knl_strcmp((CONST char *)dk.parts[k].name, "KTWIN-R") == 0 ) knl_strcpy((char *)dr, names[i]);
 		}
+		if ( dk.tsfs >= 0 && dk.esp >= 0 ) {
+			part_name(part, (CONST UB *)names[i], dk.parts[dk.tsfs].unit);
+			if ( knl_ob_cnv_form((CONST char *)part, NULL) == TSFSBLK_VERSION ) knl_strcpy((char *)d4, names[i]);
+		}
 	}
-	tm_printf((UB *)"  the disks to be put on: beside %s, over the whole %s, in a partition of %s\n",
+	tm_printf((UB *)"  the disks to be put on: beside %s, over the whole %s, in a partition of %s, over version 4 on %s\n",
 		  ( dc[0] != 0 ) ? (char *)dc : "(none)", ( de[0] != 0 ) ? (char *)de : "(none)",
-		  ( dr[0] != 0 ) ? (char *)dr : "(none)");
+		  ( dr[0] != 0 ) ? (char *)dr : "(none)", ( d4[0] != 0 ) ? (char *)d4 : "(none)");
+}
+
+/*
+ * The panel of 上書き as システム登録 puts it (dt_sysinst_req: DT_SI_DISK,
+ * DT_SI_PLAN with DT_SI_KEEP, DT_SI_LINE of DT_SI_L_ASK): its lines told,
+ * how many there are (*p_n), whether one of them is `line`. The answer to
+ * the plan is its SI_R_*, or the error of the request (E_NOEXS for a disk
+ * システム登録 does not offer).
+ */
+LOCAL INT ask_keep( CONST UB *disk, INT way, CONST char *line, INT *p_n, BOOL *p_has )
+{
+	T_DTREQ		*rq = (T_DTREQ *)Kmalloc(sizeof(T_DTREQ) + 256);
+	DTANS		*da = (DTANS *)Kmalloc(sizeof(DTANS));
+	CONST UB	*t;
+	SZ		len;
+	INT		why = -1, n = 0, i;
+
+	*p_n = 0;
+	*p_has = FALSE;
+	if ( rq == NULL || da == NULL ) goto out;
+	knl_memset(rq, 0, sizeof(T_DTREQ));
+	rq->req = DT_RQ_SYSINST;
+	rq->recno = DT_SI_DISK;
+	rq->grab_x = 0;
+	dt_ans_begin(da, 0);
+	da->an.er = dt_sysinst_req(rq, &da->an, 0);
+	dt_ans_end(da);
+
+	rq->recno = DT_SI_PLAN;
+	rq->grab_x = way | DT_SI_KEEP;
+	rq->grab_y = -1;
+	(void)dt_tail_put((UB *)( rq + 1 ), &rq->tailsz, 256, DT_TAIL_NAME, disk, -1);
+	dt_ans_begin(da, 0);
+	da->an.er = dt_sysinst_req(rq, &da->an, 0);
+	why = ( da->an.er >= E_OK ) ? (INT)da->an.how : (INT)da->an.er;
+	n = ( da->an.er >= E_OK ) ? da->an.look.w : 0;
+	dt_ans_end(da);
+
+	rq->recno = DT_SI_LINE;
+	rq->grab_x = DT_SI_L_ASK;
+	for ( i = 0; i < n; i++ ) {
+		rq->grab_y = i;
+		dt_ans_begin(da, 0);
+		da->an.er = dt_sysinst_req(rq, &da->an, 0);
+		t = dt_ans_text(&da->an, &len);
+		if ( da->an.er >= E_OK ) {
+			tm_printf((UB *)"  ask %d: %s\n", i, t);
+			if ( knl_strcmp((CONST char *)t, line) == 0 ) *p_has = TRUE;
+		}
+		dt_ans_end(da);
+	}
+	*p_n = n;
+out:
+	if ( rq != NULL ) Kfree(rq);
+	if ( da != NULL ) Kfree(da);
+	return why;
 }
 
 LOCAL void prog( void *ctx, INT step, UD done, UD total )
@@ -199,22 +282,33 @@ LOCAL void prog( void *ctx, INT step, UD done, UD total )
 	}
 }
 
+/* What the check of a volume written finds, each thing told, so that a failing count says what it is */
+LOCAL void ck_note( void *ctx, CONST T_TSFSCKEV *ev )
+{
+	char	id[40];
+
+	(void)ctx;
+	if ( ev->kind == TSFSCK_K_PHASE ) return;
+	id[0] = 0;
+	if ( ev->has_uuid ) (void)ts_uuid_to_str(&ev->uuid, id, sizeof(id));
+	tm_printf((UB *)"  ev ph %d kind %d blk %ld a %ld b %ld %s\n", ev->phase, ev->kind, (D)ev->blk,
+		  (D)ev->a, (D)ev->b, id);
+}
+
 /* ---------------------------------------------------------------- the plans */
 
 LOCAL void test_plans( void )
 {
-	T_SIDISK	*all = (T_SIDISK *)Kmalloc(sizeof(T_SIDISK) * SI_DISK_MAX);
+	T_SIDISK	*all = NULL;
 	INT		n, i;
 
-	KT_ASSERT(all != NULL);
-	if ( all == NULL ) return;
-	n = si_disks(all, SI_DISK_MAX);
+	n = si_disks(&all);
 	KT_ASSERT(n >= ( ( dc[0] != 0 ) ? 1 : 0 ) + ( ( de[0] != 0 ) ? 1 : 0 ));
 	for ( i = 0; i < n; i++ ) {
 		KT_ASSERT(knl_strcmp((CONST char *)all[i].name, KT_DISK) != 0);	/* the one started from */
 		KT_ASSERT(all[i].name[0] != 'u');				/* no USB disk */
 	}
-	Kfree(all);
+	if ( all != NULL ) Kfree(all);
 	KT_ASSERT_ER(si_plan(KT_DISK, SI_COEXIST, -1, &pl), E_OK);
 	KT_ASSERT_EQ(pl.why, SI_R_BOOTDISK);
 	KT_ASSERT_ER(si_plan(KT_DISK, SI_ERASE, -1, &pl), E_OK);
@@ -401,7 +495,7 @@ LOCAL void test_coexist( void )
 		(void)ts_cls_vol_blk(vol);
 	}
 	knl_memset(&ck, 0, sizeof(ck));
-	KT_ASSERT_ER(ob_chk_run((CONST char *)res.part, 0, &ck, NULL, NULL), E_OK);
+	KT_ASSERT_ER(ob_chk_run((CONST char *)res.part, 0, &ck, ck_note, NULL), E_OK);
 	KT_ASSERT_EQ(ck.problems, 0);
 	KT_ASSERT(ck.objects > 0);
 	tm_printf((UB *)"  the copy checked: %d problems, %ld objects, %ld records\n", ck.problems,
@@ -430,7 +524,7 @@ LOCAL void test_replace( void )
 	UD		wsz[NFILE_WIN], s1;
 	INT		vd, i, k, last = -1, esp_i, dat = -1;
 
-	if ( dr[0] == 0 ) KT_SKIP("no disk KTWIN-R (tools/x64/ktest64.sh NVME4=, tools/tests/mkwindisk.py)");
+	if ( dr[0] == 0 ) KT_SKIP("no disk KTWIN-R (tools/x64/ktest64.sh NVME2= to NVME5=, tools/tests/mkwindisk.py)");
 	KT_ASSERT(was != NULL);
 	if ( was == NULL ) return;
 	KT_ASSERT_ER(si_disk_read((CONST char *)dr, was), E_OK);
@@ -521,7 +615,7 @@ LOCAL void test_replace( void )
 		fs_close(vd);
 	}
 	knl_memset(&ck, 0, sizeof(ck));
-	KT_ASSERT_ER(ob_chk_run((CONST char *)res.part, 0, &ck, NULL, NULL), E_OK);
+	KT_ASSERT_ER(ob_chk_run((CONST char *)res.part, 0, &ck, ck_note, NULL), E_OK);
 	KT_ASSERT_EQ(ck.problems, 0);
 	tm_printf((UB *)"  the copy %s checked: %d problems, %ld objects; volume %ld -> %ld bytes\n", res.part,
 		  ck.problems, (D)ck.objects, (D)res.vol_from, (D)res.vol_to);
@@ -626,63 +720,21 @@ LOCAL BOOL same_as_running( ID vol, CONST char *us, INT recno )
 }
 
 /*
- * The system put over the TessronOS that test_coexist put on KTWIN-C,
- * keeping it: the person's object made there, a link the person added to
- * システム, a record of the system's own made stale and the list of the
- * system's objects taken away (a disk put on before it was kept). After
- * it, the person's object and link are there, the stale record and the
- * list are the running system's, the kernel on its ESP is /boot's, and
- * the volume is checked whole. A list of a newer system there is refused.
+ * What the person did on a disk the system was put on, made on its volume:
+ * an object of the person's with a record, a link to it the person added
+ * to システム, and a record of the system's own of an earlier version
  */
-LOCAL void test_keep( void )
+LOCAL void mine_put( ID vol, CONST char *us )
 {
-	T_SIDISK	*now = (T_SIDISK *)Kmalloc(sizeof(T_SIDISK));
-	T_SIRES		res;
-	T_TSFSCK	ck;
-	TS_UUID		mine, box;
-	T_TAD		*doc = NULL;
-	UB		part[L_DEVNM + 1], esp[L_DEVNM + 1], *b, *out;
-	char		path[SI_NFILE][64];
-	UD		size[SI_NFILE], s1, s2;
-	UW		c1, c2;
-	SZ		n = 0, osz = 0;
-	TS_UUID		ids[64];
-	INT		last = -1, k, nl, vd;
-	ID		vol;
-	BOOL		linked;
-	T_FSTAT		st;
+	static CONST char	meta[] = "{\"name\":\"登録先の利用者の実身\"}";
+	TS_UUID			mine;
+	T_TAD			*doc = NULL;
+	UB			*b, *out;
+	SZ			n = 0, osz = 0;
 
-	if ( dc[0] == 0 ) KT_SKIP("no disk KTWIN-C (tools/x64/ktest64.sh NVME2=, tools/tests/mkwindisk.py)");
-	KT_ASSERT(now != NULL);
-	if ( now == NULL ) return;
-	KT_ASSERT_ER(si_disk_read((CONST char *)dc, now), E_OK);
-	if ( now->tsfs < 0 ) {
-		Kfree(now);
-		KT_SKIP("no TessronOS on KTWIN-C (test_coexist did not put it there)");
-	}
-	part_name(part, dc, now->parts[now->tsfs].unit);
-	part_name(esp, dc, now->parts[now->esp].unit);
-	(void)ts_str_to_uuid(KP_MINE, &mine);
-	(void)ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &box);
-
-	/* the running system keeps the list of its objects */
-	b = om_obj_record(&box, 1, &n);
-	KT_ASSERT(b != NULL && n > 0);
-	if ( b != NULL ) Kfree(b);
-
-	/* what the person did there, and a disk put on before the list was kept */
-	vol = ts_opn_vol((CONST char *)part, TSFS_STORE_BLK);
-	KT_ASSERT(vol > 0);
-	if ( vol <= 0 ) {
-		Kfree(now);
-		return;
-	}
-	{
-		static CONST char	meta[] = "{\"name\":\"登録先の利用者の実身\"}";
-
-		KT_ASSERT_ER(knl_tsfs_cre_as(vol, &mine, (CONST UB *)meta, (INT)knl_strlen(meta)), E_OK);
-	}
-	KT_ASSERT_ER(vrec_put(vol, KP_MINE, 0, KP_TEXT, (SZ)knl_strlen(KP_TEXT)), E_OK);
+	(void)ts_str_to_uuid(us, &mine);
+	KT_ASSERT_ER(knl_tsfs_cre_as(vol, &mine, (CONST UB *)meta, (INT)knl_strlen(meta)), E_OK);
+	KT_ASSERT_ER(vrec_put(vol, us, 0, KP_TEXT, (SZ)knl_strlen(KP_TEXT)), E_OK);
 	KT_ASSERT_ER(ts_lnk_obj(vol, &mine), E_OK);
 	b = vrec(vol, SYSDEF_SYSTEM_BOX, 0, &n);
 	KT_ASSERT(b != NULL && tad_parse(b, n, NULL, &doc) >= E_OK && doc != NULL);
@@ -699,6 +751,122 @@ LOCAL void test_keep( void )
 		tad_free(doc);
 	}
 	KT_ASSERT_ER(vrec_put(vol, SYSDEF_BOX_SYSINST, 0, KP_STALE, (SZ)knl_strlen(KP_STALE)), E_OK);
+}
+
+/*
+ * After 上書き: what the person had stays; the system's own record and the
+ * list are the running system's; the volume is checked whole
+ */
+LOCAL void mine_kept( CONST UB *part, CONST char *us )
+{
+	TS_UUID		mine, ids[64];
+	T_TSFSCK	ck;
+	UB		*b;
+	SZ		n = 0;
+	INT		nl, k;
+	BOOL		linked;
+	ID		vol;
+
+	(void)ts_str_to_uuid(us, &mine);
+	vol = ts_opn_vol((CONST char *)part, TSFS_STORE_BLK);
+	KT_ASSERT(vol > 0);
+	if ( vol > 0 ) {
+		b = vrec(vol, us, 0, &n);
+		KT_ASSERT(b != NULL && n == (SZ)knl_strlen(KP_TEXT) && same_b(b, KP_TEXT, (INT)n));
+		if ( b != NULL ) Kfree(b);
+		b = vrec(vol, SYSDEF_SYSTEM_BOX, 0, &n);
+		nl = ( b != NULL ) ? om_store_links(b, n, ids, 64) : 0;
+		for ( linked = FALSE, k = 0; k < nl; k++ ) {
+			if ( ts_uuid_cmp(&ids[k], &mine) == 0 ) linked = TRUE;
+		}
+		KT_ASSERT(linked);
+		if ( b != NULL ) Kfree(b);
+		KT_ASSERT(same_as_running(vol, SYSDEF_BOX_SYSINST, 0));
+		KT_ASSERT(same_as_running(vol, SYSDEF_SYSTEM_BOX, 1));
+		KT_ASSERT_ER(ts_cls_vol(vol), E_OK);
+	}
+	knl_memset(&ck, 0, sizeof(ck));
+	KT_ASSERT_ER(ob_chk_run((CONST char *)part, 0, &ck, ck_note, NULL), E_OK);
+	KT_ASSERT_EQ(ck.problems, 0);
+	tm_printf((UB *)"  kept %s checked: %d problems, %ld objects\n", part, ck.problems, (D)ck.objects);
+}
+
+/*
+ * After 上書き, the ESP: the kernel and the loader /boot has, the note of the
+ * install, nothing left half put; with `fallback` (a disk taken whole) the
+ * loader of \EFI\BOOT\ too, which the firmware starts with no entry
+ */
+LOCAL void esp_kept( CONST UB *esp, BOOL fallback )
+{
+	char	path[SI_NFILE][64];
+	UD	size[SI_NFILE], s1, s2;
+	UW	c1, c2;
+	T_FSTAT	st;
+	INT	vd;
+
+	KT_ASSERT_ER(si_boot_files(path, size), E_OK);
+	vd = knl_fs_open_vol("fatfs", (CONST char *)esp, FS_MNT_RDONLY, 0);
+	KT_ASSERT(vd >= 0);
+	if ( vd < 0 ) return;
+	KT_ASSERT_ER(file_crc(vd, "EFI/TESSRON/tessronos.elf", &c1, &s1), E_OK);
+	KT_ASSERT_ER(file_crc(-1, path[SI_F_KERNEL], &c2, &s2), E_OK);
+	KT_ASSERT(c1 == c2 && s1 == s2);
+	KT_ASSERT_ER(file_crc(vd, "EFI/TESSRON/BOOTX64.EFI", &c1, &s1), E_OK);
+	KT_ASSERT_ER(file_crc(-1, path[SI_F_LOADER], &c2, &s2), E_OK);
+	KT_ASSERT(c1 == c2 && s1 == s2);
+	if ( fallback ) {
+		KT_ASSERT_ER(file_crc(vd, "EFI/BOOT/BOOTX64.EFI", &c1, &s1), E_OK);
+		KT_ASSERT(c1 == c2 && s1 == s2);
+	}
+	KT_ASSERT(fs_statat(vd, "EFI/TESSRON/INSTALL.TXT", &st) >= EX_OK);
+	KT_ASSERT(fs_statat(vd, "EFI/TESSRON/tessronos.elf.new", &st) < EX_OK);
+	fs_close(vd);
+}
+
+/*
+ * The system put over the TessronOS that test_coexist put on KTWIN-C,
+ * keeping it: the person's object made there, a link the person added to
+ * システム, a record of the system's own made stale and the list of the
+ * system's objects taken away (a disk put on before it was kept). After
+ * it, the person's object and link are there, the stale record and the
+ * list are the running system's, the kernel on its ESP is /boot's, and
+ * the volume is checked whole. A list of a newer system there is refused.
+ */
+LOCAL void test_keep( void )
+{
+	T_SIDISK	*now = (T_SIDISK *)Kmalloc(sizeof(T_SIDISK));
+	T_SIRES		res;
+	TS_UUID		box;
+	UB		part[L_DEVNM + 1], esp[L_DEVNM + 1], *b;
+	SZ		n = 0;
+	INT		last = -1;
+	ID		vol;
+
+	if ( dc[0] == 0 ) KT_SKIP("no disk KTWIN-C (tools/x64/ktest64.sh NVME2=, tools/tests/mkwindisk.py)");
+	KT_ASSERT(now != NULL);
+	if ( now == NULL ) return;
+	KT_ASSERT_ER(si_disk_read((CONST char *)dc, now), E_OK);
+	if ( now->tsfs < 0 ) {
+		Kfree(now);
+		KT_SKIP("no TessronOS on KTWIN-C (test_coexist did not put it there)");
+	}
+	part_name(part, dc, now->parts[now->tsfs].unit);
+	part_name(esp, dc, now->parts[now->esp].unit);
+	(void)ts_str_to_uuid(SYSDEF_SYSTEM_BOX, &box);
+
+	/* the running system keeps the list of its objects */
+	b = om_obj_record(&box, 1, &n);
+	KT_ASSERT(b != NULL && n > 0);
+	if ( b != NULL ) Kfree(b);
+
+	/* what the person did there, and a disk put on before the list was kept */
+	vol = ts_opn_vol((CONST char *)part, TSFS_STORE_BLK);
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) {
+		Kfree(now);
+		return;
+	}
+	mine_put(vol, KP_MINE);
 	{
 		ID	od = ts_opn_obj(vol, &box, TFO_READ | TFO_WRITE);
 
@@ -720,9 +888,18 @@ LOCAL void test_keep( void )
 	KT_ASSERT_EQ(pl.why, SI_R_OK);
 	KT_ASSERT(pl.keep && pl.nobj > 0 && pl.ver[0] == 'R' && pl.tver[0] == 0);
 	KT_ASSERT(pl.vol_need > 0 && pl.vol_need <= pl.vol_free);
+	KT_ASSERT_EQ(pl.ts_form, TSFSBLK_VERSION5);	/* the copy of the running volume, converted at its start */
 	tm_printf((UB *)"  kept %s: %s over %s, %d objects, %ld KB of %ld KB free\n", part, pl.ver,
 		  ( pl.tver[0] != 0 ) ? (char *)pl.tver : "(no list)", pl.nobj, (D)( pl.vol_need >> 10 ),
 		  (D)( pl.vol_free >> 10 ));
+	{
+		BOOL	has;
+		INT	nask;
+
+		KT_ASSERT_EQ(ask_keep(dc, DT_SI_COEXIST, ASK_CONV, &nask, &has), SI_R_OK);
+		KT_ASSERT(nask > 0);
+		KT_ASSERT(!has);			/* nothing to convert there */
+	}
 
 	KT_ASSERT_ER(si_run(&pl, prog, &last, &res), E_OK);
 	KT_ASSERT_EQ(res.failed_step, -1);
@@ -731,49 +908,24 @@ LOCAL void test_keep( void )
 	KT_ASSERT(res.entry_asked);
 	KT_ASSERT(knl_strcmp((CONST char *)res.part, (CONST char *)part) == 0);
 
+	/* a volume of version 5 kept is not asked to be converted */
+	{
+		BOOL	req = TRUE;
+		INT	f = knl_ob_cnv_form((CONST char *)part, &req);
+
+		tm_printf((UB *)"  kept %s: format %d, conversion %s\n", part, f, req ? "asked" : "not asked");
+		KT_ASSERT_EQ(f, TSFSBLK_VERSION5);
+		KT_ASSERT(!req);
+	}
+
 	/* the table as it was */
 	KT_ASSERT_ER(si_disk_read((CONST char *)dc, &dk), E_OK);
 	KT_ASSERT_EQ(dk.nparts, now->nparts);
 	KT_ASSERT(both_tables(dc, dk.nsect));
 
 	/* what the person had stays; the system's own and the list are the running system's */
-	vol = ts_opn_vol((CONST char *)part, TSFS_STORE_BLK);
-	KT_ASSERT(vol > 0);
-	if ( vol > 0 ) {
-		b = vrec(vol, KP_MINE, 0, &n);
-		KT_ASSERT(b != NULL && n == (SZ)knl_strlen(KP_TEXT) && same_b(b, KP_TEXT, (INT)n));
-		if ( b != NULL ) Kfree(b);
-		b = vrec(vol, SYSDEF_SYSTEM_BOX, 0, &n);
-		nl = ( b != NULL ) ? om_store_links(b, n, ids, 64) : 0;
-		for ( linked = FALSE, k = 0; k < nl; k++ ) {
-			if ( ts_uuid_cmp(&ids[k], &mine) == 0 ) linked = TRUE;
-		}
-		KT_ASSERT(linked);
-		if ( b != NULL ) Kfree(b);
-		KT_ASSERT(same_as_running(vol, SYSDEF_BOX_SYSINST, 0));
-		KT_ASSERT(same_as_running(vol, SYSDEF_SYSTEM_BOX, 1));
-		KT_ASSERT_ER(ts_cls_vol(vol), E_OK);
-	}
-	knl_memset(&ck, 0, sizeof(ck));
-	KT_ASSERT_ER(ob_chk_run((CONST char *)part, 0, &ck, NULL, NULL), E_OK);
-	KT_ASSERT_EQ(ck.problems, 0);
-	tm_printf((UB *)"  kept %s checked: %d problems, %ld objects\n", part, ck.problems, (D)ck.objects);
-
-	/* the ESP: the kernel /boot has, the note of the install, nothing left half put */
-	KT_ASSERT_ER(si_boot_files(path, size), E_OK);
-	vd = knl_fs_open_vol("fatfs", (CONST char *)esp, FS_MNT_RDONLY, 0);
-	KT_ASSERT(vd >= 0);
-	if ( vd >= 0 ) {
-		KT_ASSERT_ER(file_crc(vd, "EFI/TESSRON/tessronos.elf", &c1, &s1), E_OK);
-		KT_ASSERT_ER(file_crc(-1, path[SI_F_KERNEL], &c2, &s2), E_OK);
-		KT_ASSERT(c1 == c2 && s1 == s2);
-		KT_ASSERT_ER(file_crc(vd, "EFI/TESSRON/BOOTX64.EFI", &c1, &s1), E_OK);
-		KT_ASSERT_ER(file_crc(-1, path[SI_F_LOADER], &c2, &s2), E_OK);
-		KT_ASSERT(c1 == c2 && s1 == s2);
-		KT_ASSERT(fs_statat(vd, "EFI/TESSRON/INSTALL.TXT", &st) >= EX_OK);
-		KT_ASSERT(fs_statat(vd, "EFI/TESSRON/tessronos.elf.new", &st) < EX_OK);
-		fs_close(vd);
-	}
+	mine_kept(part, KP_MINE);
+	esp_kept(esp, FALSE);
 
 	/* now with the list: the version there is this one's; a newer one there is not put over */
 	KT_ASSERT_ER(si_plan((CONST char *)dc, SI_COEXIST | SI_KEEP, -1, &pl), E_OK);
@@ -792,6 +944,102 @@ LOCAL void test_keep( void )
 		if ( vol > 0 ) (void)ts_cls_vol(vol);
 		if ( b != NULL ) Kfree(b);
 	}
+	Kfree(now);
+}
+
+/* ---------------------------------------------------------------- over a volume of version 4 */
+
+#define KP_MINE4	"01a0d8c4-5fb0-7b01-8c01-00000005fb04"	/* the person's, on the disk of version 4 */
+
+/*
+ * The system put over a disk an earlier system was put on whole, its
+ * volume of version 4 (as R1.410 leaves one): the panel says the disk is
+ * converted at its first start, and the volume is left of version 4 with
+ * CONVREQ for that start (sysinst: SI_KEEP), the person's object and link
+ * kept, the system's objects the running system's, the boot files of the
+ * ESP those of /boot, \EFI\BOOT\BOOTX64.EFI among them.
+ */
+LOCAL void test_keep4( void )
+{
+	T_SIDISK	*now = (T_SIDISK *)Kmalloc(sizeof(T_SIDISK));
+	T_SIRES		res;
+	UB		part[L_DEVNM + 1], esp[L_DEVNM + 1];
+	INT		last = -1, nask, f;
+	BOOL		has, req;
+	ID		vol;
+
+	if ( d4[0] == 0 ) KT_SKIP("no disk with TessronOS of version 4 (tools/tests/mkwindisk.py make-ts4, ktest64.sh NVME2= to NVME5=)");
+	KT_ASSERT(now != NULL);
+	if ( now == NULL ) return;
+	KT_ASSERT_ER(si_disk_read((CONST char *)d4, now), E_OK);
+	KT_ASSERT(now->tsfs >= 0 && now->esp >= 0);
+	if ( now->tsfs < 0 || now->esp < 0 ) {
+		Kfree(now);
+		return;
+	}
+	{
+		T_SIDISK	*all = NULL;
+		INT		n = si_disks(&all), i;
+		BOOL		offered = FALSE;
+
+		for ( i = 0; i < n; i++ ) {
+			if ( knl_strcmp((CONST char *)all[i].name, (CONST char *)d4) == 0 ) offered = TRUE;
+		}
+		if ( all != NULL ) Kfree(all);
+		if ( !offered ) {
+			Kfree(now);
+			KT_SKIP("the disk of version 4 is not one システム登録 offers (ktest64.sh NVME2= to NVME5=)");
+		}
+	}
+	part_name(part, d4, now->parts[now->tsfs].unit);
+	part_name(esp, d4, now->parts[now->esp].unit);
+	req = TRUE;
+	KT_ASSERT_EQ(knl_ob_cnv_form((CONST char *)part, &req), TSFSBLK_VERSION);
+	KT_ASSERT(!req);
+
+	vol = ts_opn_vol((CONST char *)part, TSFS_STORE_BLK);
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) {
+		Kfree(now);
+		return;
+	}
+	mine_put(vol, KP_MINE4);
+	KT_ASSERT_ER(ts_cls_vol(vol), E_OK);
+
+	KT_ASSERT_ER(si_plan((CONST char *)d4, SI_ERASE | SI_KEEP, -1, &pl), E_OK);
+	KT_ASSERT_EQ(pl.why, SI_R_NOTSFS);
+	KT_ASSERT_ER(si_plan((CONST char *)d4, SI_COEXIST | SI_KEEP, -1, &pl), E_OK);
+	KT_ASSERT_EQ(pl.why, SI_R_OK);
+	KT_ASSERT(pl.keep && pl.had_ts && pl.nobj > 0);
+	KT_ASSERT_EQ(pl.ts_unit, now->parts[now->tsfs].unit);
+	KT_ASSERT_EQ(pl.ts_form, TSFSBLK_VERSION);
+	tm_printf((UB *)"  kept %s: %s over %s, format %d, %d objects, %ld KB of %ld KB free\n", part, pl.ver,
+		  ( pl.tver[0] != 0 ) ? (char *)pl.tver : "(no list)", pl.ts_form, pl.nobj, (D)( pl.vol_need >> 10 ),
+		  (D)( pl.vol_free >> 10 ));
+
+	/* the panel says it: the disk checked and converted at the first start after */
+	KT_ASSERT_EQ(ask_keep(d4, DT_SI_COEXIST, ASK_CONV, &nask, &has), SI_R_OK);
+	KT_ASSERT(nask > 0);
+	KT_ASSERT(has);
+
+	KT_ASSERT_ER(si_run(&pl, prog, &last, &res), E_OK);
+	KT_ASSERT_EQ(res.failed_step, -1);
+	KT_ASSERT_EQ(res.copied, 0);
+	KT_ASSERT(res.nobj > 0);
+	KT_ASSERT(knl_strcmp((CONST char *)res.part, (CONST char *)part) == 0);
+
+	/* left of version 4, with the request of the conversion for its next start */
+	req = FALSE;
+	f = knl_ob_cnv_form((CONST char *)part, &req);
+	tm_printf((UB *)"  kept %s: format %d, conversion %s\n", part, f, req ? "asked" : "not asked");
+	KT_ASSERT_EQ(f, TSFSBLK_VERSION);
+	KT_ASSERT(req);
+
+	KT_ASSERT_ER(si_disk_read((CONST char *)d4, &dk), E_OK);
+	KT_ASSERT_EQ(dk.nparts, now->nparts);
+	KT_ASSERT(both_tables(d4, dk.nsect));
+	mine_kept(part, KP_MINE4);
+	esp_kept(esp, TRUE);
 	Kfree(now);
 }
 
@@ -814,6 +1062,34 @@ LOCAL void test_booted_copy( void )
 	knl_sysvol_grown(&from, &to);
 	tm_printf((UB *)"  the system volume at this start: %ld -> %ld bytes\n", (D)from, (D)to);
 	KT_ASSERT(to >= from && to > 0);
+
+	/*
+	 * of version 5, with no request left; when this start converted it (a disk
+	 * of version 4 put over), the result the desktop's notice is made from
+	 * names it, and the person's object there is still there
+	 */
+	{
+		T_TSFSCNV	cr;
+		UB		cdev[TSFSCK_DEVNM_MAX];
+		BOOL		req = TRUE;
+		TS_UUID		mine;
+		UB		*b;
+		SZ		nb = 0;
+
+		KT_ASSERT_EQ(knl_ob_cnv_form((CONST char *)sys, &req), TSFSBLK_VERSION5);
+		KT_ASSERT(!req);
+		(void)ob_cnv_boot_result(cdev, sizeof(cdev), &cr, NULL, 0);
+		tm_printf((UB *)"  the conversion at this start: state %d on %s\n", (INT)cr.state,
+			  ( cr.state != TSFSCNV_S_NONE ) ? (char *)cdev : "(none)");
+		if ( cr.state != TSFSCNV_S_NONE ) {
+			KT_ASSERT_EQ(cr.state, TSFSCNV_S_DONE);
+			KT_ASSERT(knl_strcmp((CONST char *)cdev, (CONST char *)sys) == 0);
+			(void)ts_str_to_uuid(KP_MINE4, &mine);
+			b = om_obj_record(&mine, 0, &nb);
+			KT_ASSERT(b != NULL && nb == (SZ)knl_strlen(KP_TEXT) && same_b(b, KP_TEXT, (INT)nb));
+			if ( b != NULL ) Kfree(b);
+		}
+	}
 }
 
 EXPORT void ktest_sysinst( void )
@@ -829,5 +1105,6 @@ EXPORT void ktest_sysinst( void )
 	KT_RUN(test_erase);
 	KT_RUN(test_coexist);
 	KT_RUN(test_keep);
+	KT_RUN(test_keep4);
 	KT_RUN(test_replace);
 }

@@ -667,47 +667,66 @@ LOCAL ER svc_set_ico( ID key, CONST UB *buf, SZ size )
 }
 
 /* A resource's name, copied; *pp the copy, or NULL for NULL */
-LOCAL ER res_name_in( CONST UB *name, UB *k, CONST UB **pp )
+/*
+ * The name of a resource copied in from the caller, into room of its own
+ * (Kfree *pp): up to OB_RES_NAME_MAX, the extension of a native volume
+ * of version 5 being up to 767 bytes. NULL stays NULL.
+ */
+LOCAL ER res_name_in( CONST UB *name, UB **pp )
 {
+	ER	er;
+
 	*pp = NULL;
 	if ( name == NULL ) {
 		return E_OK;
 	}
-	*pp = k;
-	return str_in(name, k, OB_RES_NAME, FALSE);
+	*pp = (UB *)Kmalloc(OB_RES_NAME_MAX);
+	if ( *pp == NULL ) {
+		return E_NOMEM;
+	}
+	er = str_in(name, *pp, OB_RES_NAME_MAX, FALSE);
+	if ( er < E_OK ) {
+		Kfree(*pp);
+		*pp = NULL;
+	}
+	return er;
 }
 
 LOCAL ER svc_rea_res( ID key, CONST UB *name, D off, void *buf, SZ size, SZ *p_asize )
 {
-	UB		k[OB_RES_NAME];
-	CONST UB	*n;
-	ER		er = res_name_in(name, k, &n);
+	UB	*n;
+	ER	er = res_name_in(name, &n);
 
 	if ( er < E_OK ) return er;
-	if ( size < 0 ) return E_PAR;
-	if ( !out_ok(buf, size) || !out_ok(p_asize, sizeof(*p_asize)) ) return E_MACV;
-	return UACCESS(ob_rea_res(key, n, off, buf, size, p_asize));
+	if ( size < 0 ) er = E_PAR;
+	else if ( !out_ok(buf, size) || !out_ok(p_asize, sizeof(*p_asize)) ) er = E_MACV;
+	else er = UACCESS(ob_rea_res(key, n, off, buf, size, p_asize));
+	if ( n != NULL ) Kfree(n);
+	return er;
 }
 
 LOCAL ER svc_wri_res( ID key, CONST UB *name, CONST void *buf, SZ size )
 {
-	UB		k[OB_RES_NAME];
-	CONST UB	*n;
-	ER		er = res_name_in(name, k, &n);
+	UB	*n;
+	ER	er = res_name_in(name, &n);
 
 	if ( er < E_OK ) return er;
-	if ( size < 0 ) return E_PAR;
-	if ( !in_ok(buf, size) ) return E_MACV;
-	return UACCESS(ob_wri_res(key, n, buf, size));
+	if ( size < 0 ) er = E_PAR;
+	else if ( !in_ok(buf, size) ) er = E_MACV;
+	else er = UACCESS(ob_wri_res(key, n, buf, size));
+	if ( n != NULL ) Kfree(n);
+	return er;
 }
 
 LOCAL ER svc_del_res( ID key, CONST UB *name )
 {
-	UB		k[OB_RES_NAME];
-	CONST UB	*n;
-	ER		er = res_name_in(name, k, &n);
+	UB	*n;
+	ER	er = res_name_in(name, &n);
 
-	return ( er < E_OK ) ? er : ob_del_res(key, n);
+	if ( er < E_OK ) return er;
+	er = ob_del_res(key, n);
+	if ( n != NULL ) Kfree(n);
+	return er;
 }
 
 LOCAL ER svc_lst_res( ID key, UB *buf, SZ size, INT *p_cnt )
@@ -1087,6 +1106,76 @@ LOCAL INT svc_chk_boot( UB *devnm, INT nmax, T_TSFSCK *res, T_TSFSCKEV *ev, INT 
 	return n;
 }
 
+/* A volume converted to version 5 in the calling task, the events of its check told as svc_chk_vol tells them */
+LOCAL ER svc_cnv_vol( CONST char *devnm, UINT mode, T_TSFSCNV *res, T_TSFSCKEV *ev, INT max, INT *p_told )
+{
+	char		k[TSFSCK_DEVNM_MAX];
+	T_TSFSCNV	*r;
+	CHKOUT		o;
+	ER		er;
+
+	if ( devnm == NULL || res == NULL || max < 0 || ( ev == NULL && max > 0 ) ) return E_PAR;
+	er = str_in((CONST UB *)devnm, (UB *)k, sizeof(k), FALSE);
+	if ( er < E_OK ) return er;
+	if ( !out_ok(res, sizeof(*res)) || !out_ok(ev, (SZ)sizeof(*ev) * max) || !out_ok(p_told, sizeof(INT)) ) {
+		return E_MACV;
+	}
+	r = (T_TSFSCNV *)Kcalloc(1, sizeof(*r));
+	if ( r == NULL ) return E_NOMEM;
+	o.pid = ts_get_pid();
+	o.ev = ev;
+	o.max = max;
+	o.told = p_told;
+	o.n = 0;
+	er = ob_cnv_run(k, mode, r, chk_put, &o);
+	if ( knl_prc_user_ok(o.pid, res, sizeof(*res), TRUE) ) {
+		knl_ua_put(res, r, sizeof(*r));
+	}
+	Kfree(r);
+	return er;
+}
+
+/* What the conversion at start did: to the first process that asks, once */
+LOCAL INT svc_cnv_boot( UB *devnm, INT nmax, T_TSFSCNV *res, T_TSFSCKEV *ev, INT max )
+{
+	UB		d[TSFSCK_DEVNM_MAX];
+	T_TSFSCNV	*r;
+	T_TSFSCKEV	*k = NULL;
+	INT		n;
+
+	if ( nmax < 0 || max < 0 ) return E_PAR;
+	if ( devnm == NULL ) nmax = 0;
+	if ( ev == NULL ) max = 0;
+	if ( !out_ok(devnm, nmax) || !out_ok(res, sizeof(*res)) || !out_ok(ev, (SZ)sizeof(*ev) * max) ) {
+		return E_MACV;
+	}
+	r = (T_TSFSCNV *)Kcalloc(1, sizeof(*r));
+	if ( max > 0 ) k = (T_TSFSCKEV *)Kmalloc(sizeof(*k) * (SZ)max);
+	if ( r == NULL || ( max > 0 && k == NULL ) ) {
+		if ( r != NULL ) Kfree(r);
+		if ( k != NULL ) Kfree(k);
+		return E_NOMEM;
+	}
+	n = ob_cnv_boot_result(d, sizeof(d), r, k, max);
+	if ( r->state == TSFSCNV_S_NONE || !knl_ob_cnv_boot_once() ) {
+		knl_memset(r, 0, sizeof(*r));
+		d[0] = 0;
+		n = 0;
+	}
+	if ( nmax > 0 ) {
+		INT	i;
+
+		for ( i = 0; d[i] != 0 && i < nmax - 1 && i < (INT)sizeof(d) - 1; i++ ) ;
+		knl_ua_put(devnm, d, i);
+		knl_ua_put(devnm + i, "", 1);
+	}
+	if ( res != NULL ) knl_ua_put(res, r, sizeof(*r));
+	if ( max > 0 && n > 0 ) knl_ua_put(ev, k, (SZ)sizeof(*k) * ( ( n < max ) ? n : max ));
+	Kfree(r);
+	if ( k != NULL ) Kfree(k);
+	return n;
+}
+
 LOCAL ER svc_get_dom( CONST char *vol, T_OBPRT *pk_prt, SZ size, SZ *p_asize )
 {
 	char		k[FS_PATH_MAX];
@@ -1401,4 +1490,6 @@ EXPORT const FP knl_ob_svc_tbl[TSN_OB_MAX + 1] = {
 	[TSN_NUMBER(TSN_OB_REF_NAM)]	= F(svc_ref_nam),
 	[TSN_NUMBER(TSN_OB_CHK_LABEL)]	= F(svc_chk_label),
 	[TSN_NUMBER(TSN_OB_REF_OBJ2)]	= F(svc_ref_obj2),
+	[TSN_NUMBER(TSN_OB_CNV_VOL)]	= F(svc_cnv_vol),
+	[TSN_NUMBER(TSN_OB_CNV_BOOT)]	= F(svc_cnv_boot),
 };

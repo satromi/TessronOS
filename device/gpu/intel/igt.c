@@ -9,10 +9,10 @@
 
 /*
  *	igt.c
- *	The render and copy engines of Intel's integrated graphics of the
- *	9th generation (Kaby Lake and Amber Lake: UHD 620 8086:5917, UHD 615
- *	8086:591C), as a backend of the GPU's common layer
- *	(docs/tessronos/13-gpu.md 13.11).
+ *	The render, copy and video engines of Intel's integrated graphics of
+ *	the 9th generation (Kaby Lake and Amber Lake: UHD 620 8086:5917, UHD
+ *	615 8086:591C), as a backend of the GPU's common layer
+ *	(docs/tessronos/13-gpu.md 13.11, 13.12).
  *
  *	The display engine is not driven here; the device and its global
  *	GTT are shared with the display's driver through igt_ggtt.c.
@@ -32,7 +32,10 @@
  *	4. Each engine: its status page, execlists on, its interrupts.
  *	5. Each engine's first context: run once with the context
  *	   workarounds written by the ring, and its saved image kept as the
- *	   one every new context of that engine starts from.
+ *	   one every new context of that engine starts from. The video
+ *	   engine comes last and alone: when it does not start, it is left
+ *	   down and the render and copy engines go on as before
+ *	   (cmdline.txt "igtvcs=0" leaves it down).
  *	6. RC6 and the frequency as the load asks (RPS) set up, as
  *	   cmdline.txt says ("igtrc6=0", "igtrps=0" turn them off; igt_pm.c).
  *	   From here on a job holds forcewake from before it is submitted
@@ -230,9 +233,7 @@ LOCAL UW mocs_l3( INT i )
 LOCAL void mocs( IGTENG *e )
 {
 	INT	i;
-	UW	base = ( e == &knl_igt.eng[IGT_RCS] ) ? GFX_MOCS(0) : BLT_MOCS(0);
-
-	for ( i = 0; i < 64; i++ ) igt_wr(base + i * 4, mocs_ctl(i));
+	for ( i = 0; i < 64; i++ ) igt_wr(e->mocs + i * 4, mocs_ctl(i));
 	if ( e == &knl_igt.eng[IGT_RCS] ) {
 		for ( i = 0; i < 32; i++ ) igt_wr(LNCFCMOCS(i), mocs_l3(2 * i) | ( mocs_l3(2 * i + 1) << 16 ));
 	}
@@ -287,9 +288,9 @@ LOCAL INT ctx_workarounds( REGVAL *w )
 /*
  * The register state of a context image, as the engine lays it: blocks
  * of MI_LOAD_REGISTER_IMM with the registers (from the engine's base),
- * with gaps of no-ops between. The render and copy engines of this
- * generation lay theirs alike but for the one register of the third
- * block.
+ * with gaps of no-ops between. The render engine and the others (copy,
+ * video) of this generation lay theirs alike but for the one register of
+ * the third block.
  */
 LOCAL CONST UH	lrc_b1[] = { 0x244, 0x034, 0x030, 0x038, 0x03c, 0x168, 0x140, 0x110, 0x11c, 0x114, 0x118,
 			     0x1c0, 0x1c4, 0x1c8 };
@@ -308,9 +309,15 @@ LOCAL UW *lrc_block( UW *r, UW base, CONST UH *reg, INT n, BOOL posted )
 	return r;
 }
 
+/* The base of an engine's registers, by its index */
+LOCAL UW eng_base( INT eng )
+{
+	return ( eng == IGT_RCS ) ? RCS_BASE : ( eng == IGT_VCS ) ? VCS_BASE : BCS_BASE;
+}
+
 LOCAL void lrc_layout( UW *r, INT eng )
 {
-	UW	base = ( eng == IGT_RCS ) ? RCS_BASE : BCS_BASE;
+	UW	base = eng_base(eng);
 	UH	b3 = ( eng == IGT_RCS ) ? 0x0c8 : 0x200;
 	UH	b4[44];
 	INT	i;
@@ -510,7 +517,10 @@ LOCAL UW emit( IGTENG *e, IGTCTX *c, UD start, BOOL first )
 		pipe_control(c, PC_CS_STALL | PC_TLB_INVALIDATE | PC_RT_FLUSH | PC_DEPTH_FLUSH | PC_DC_FLUSH, 0, 0);
 		pipe_control(c, PC_FLUSH_ENABLE | PC_CS_STALL | PC_QW_WRITE | PC_GLOBAL_GTT, seq_at, e->seqno);
 	} else {
-		flush_dw(c, FLUSH_DW_INVALIDATE_TLB | FLUSH_DW_STORE_INDEX | FLUSH_DW_OP_STOREDW, scratch, 0);
+		/* the video engine's own caches go with the TLB */
+		UW	inv = FLUSH_DW_INVALIDATE_TLB | ( ( c->eng == IGT_VCS ) ? FLUSH_DW_INVALIDATE_BSD : 0 );
+
+		flush_dw(c, inv | FLUSH_DW_STORE_INDEX | FLUSH_DW_OP_STOREDW, scratch, 0);
 		if ( start != 0 ) {
 			put(c, MI_ARB_ON_OFF | MI_ARB_ENABLE);
 			put(c, MI_BATCH_BUFFER_START | MI_BATCH_PPGTT);
@@ -648,7 +658,7 @@ LOCAL void look( void *exinf )
 
 LOCAL void isr( UINT intno, UW iar )
 {
-	UW	master, iir = 0, pm = 0;
+	UW	master, iir[2] = { 0, 0 }, pm = 0;
 	INT	k;
 	UINT	imask;
 	BOOL	over = FALSE, pm_wake = FALSE;
@@ -658,8 +668,12 @@ LOCAL void isr( UINT intno, UW iar )
 	igt_wr(MASTER_IRQ, 0);
 	knl_igt.irq_n++;
 	if ( master & MASTER_GT0 ) {
-		iir = igt_rd(GT_IIR(0));
-		if ( iir != 0 ) igt_wr(GT_IIR(0), iir);
+		iir[0] = igt_rd(GT_IIR(0));
+		if ( iir[0] != 0 ) igt_wr(GT_IIR(0), iir[0]);
+	}
+	if ( master & MASTER_GT1 ) {
+		iir[1] = igt_rd(GT_IIR(1));
+		if ( iir[1] != 0 ) igt_wr(GT_IIR(1), iir[1]);
 	}
 	if ( master & MASTER_GT2 ) {
 		pm = igt_rd(GT_IIR(2));
@@ -669,7 +683,7 @@ LOCAL void isr( UINT intno, UW iar )
 	if ( pm != 0 ) pm_wake = igt_pm_irq(pm);
 	for ( k = 0; k < IGT_NENG; k++ ) {
 		IGTENG	*e = &knl_igt.eng[k];
-		UW	b = ( iir >> e->shift ) & 0xffff;
+		UW	b = ( iir[e->iir] >> e->shift ) & 0xffff;
 
 		if ( b & GT_USER ) e->irq_user++;
 		if ( b & GT_CTX_SWITCH ) e->irq_ctx++;
@@ -706,7 +720,7 @@ LOCAL void isr( UINT intno, UW iar )
 			ISpinUnlock(&knl_igt.lock, &imask);
 		}
 	}
-	if ( ( master & ( MASTER_GT0 | MASTER_GT2 | MASTER_DISPLAY ) ) == 0 ) knl_igt.irq_spurious++;
+	if ( ( master & ( MASTER_GT0 | MASTER_GT1 | MASTER_GT2 | MASTER_DISPLAY ) ) == 0 ) knl_igt.irq_spurious++;
 	if ( !knl_igt.irq_off ) igt_wr(MASTER_IRQ, MASTER_IRQ_CONTROL);
 	EndOfInt(intno);
 	if ( pm_wake ) igt_pm_wake();
@@ -727,7 +741,7 @@ EXPORT void igt_eng_dump( CONST char *why, IGTENG *e )
 		  igt_erd(e, RING_CSB_PTR), e->hwsp[HWS_SEQNO], e->seqno);
 	tm_printf((UB *)"igt: %s %s: fault %08x, error %08x, TLB %08x %08x; GT ISR %08x IIR %08x; master %08x\n",
 		  e->name, why, igt_rd(RING_FAULT_REG), igt_rd(ERROR_GEN6), igt_rd(FAULT_TLB_DATA1),
-		  igt_rd(FAULT_TLB_DATA0), igt_rd(GT_ISR(0)), igt_rd(GT_IIR(0)), igt_rd(MASTER_IRQ));
+		  igt_rd(FAULT_TLB_DATA0), igt_rd(GT_ISR(e->iir)), igt_rd(GT_IIR(e->iir)), igt_rd(MASTER_IRQ));
 }
 
 /* The value of an engine's RING_IMR with its user, context switch and error interrupts let through */
@@ -779,7 +793,8 @@ LOCAL ER eng_init( IGTENG *e )
 	pa = knl_pf_to_pa(e->hwsp_pf);
 	e->hwsp = (UW *)PA2VA(pa);
 	er = knl_igt_ggtt_alloc(PAGE_SIZE, PAGE_SIZE, 0, IGT_GGTT_RENDER,
-				( e == &knl_igt.eng[IGT_RCS] ) ? "rcs status" : "bcs status", &e->hwsp_ggtt);
+				( e == &knl_igt.eng[IGT_RCS] ) ? "rcs status"
+				: ( e == &knl_igt.eng[IGT_VCS] ) ? "vcs status" : "bcs status", &e->hwsp_ggtt);
 	if ( er < E_OK ) return er;
 	knl_igt_ggtt_set(e->hwsp_ggtt, &pa, 1, TRUE);
 	eng_resume(e);
@@ -924,6 +939,9 @@ LOCAL ER igt_kick( void *priv, CONST T_GPUJOB *job, void *as )
 	(void)priv;
 	if ( job->kind != GPU_JOB_BATCH ) return E_NOSPT;
 	if ( b->engine >= IGT_NENG || b->hwc >= GPU_HWC_MAX || b->len == 0 ) return E_PAR;
+	/* the video engine runs the kernel's decoder only (igt_vdec.c) */
+	if ( b->engine == IGT_VCS && as != NULL ) return E_PAR;
+	if ( !knl_igt.eng[b->engine].up ) return E_NOSPT;
 	start = ( ( (UD)b->start_hi << 32 ) | b->start_lo ) & ( ( 1ULL << 48 ) - 1 );
 	if ( start == 0 || ( start & 3 ) != 0 ) return E_PAR;
 	e = &knl_igt.eng[b->engine];
@@ -1122,6 +1140,7 @@ EXPORT void igt_to_kernel( void )
 	for ( k = 0; k < IGT_NENG; k++ ) {
 		IGTENG	*e = &knl_igt.eng[k];
 
+		if ( !e->up ) continue;
 		ISpinLock(&knl_igt.lock, &imask);
 		ask = ( e->last != NULL && e->last->vm != knl_igt.kvm && !e->to_kernel );
 		if ( ask ) e->to_kernel = TRUE;
@@ -1244,8 +1263,11 @@ LOCAL void obj_text( void )
 	n = kv(t, n, "RC6", knl_igt.rc6_on ? "on" : "off");
 	n = kv(t, n, "RPS", knl_igt.rps_on ? "on" : "off");
 	for ( k = 0; k < IGT_NENG; k++ ) {
-		n = kv_num(t, n, ( k == IGT_RCS ) ? "RENDER_JOBS" : "COPY_JOBS", (D)knl_igt.eng[k].jobs);
-		n = kv_num(t, n, ( k == IGT_RCS ) ? "RENDER_RESETS" : "COPY_RESETS", (D)knl_igt.eng[k].resets);
+		if ( k == IGT_VCS && !knl_igt.eng[k].up ) continue;
+		n = kv_num(t, n, ( k == IGT_RCS ) ? "RENDER_JOBS" : ( k == IGT_VCS ) ? "VIDEO_JOBS" : "COPY_JOBS",
+			   (D)knl_igt.eng[k].jobs);
+		n = kv_num(t, n, ( k == IGT_RCS ) ? "RENDER_RESETS" : ( k == IGT_VCS ) ? "VIDEO_RESETS" : "COPY_RESETS",
+			   (D)knl_igt.eng[k].resets);
 	}
 	n = kv(t, n, "INTERRUPT", ( knl_igt.intno != 0 && !knl_igt.irq_off ) ? "message" : "polled");
 	n = kv(t, n, "COMPOSE", ( gob.compose == 2 ) ? "render engine" : ( gob.compose == 1 ) ? "copy engine"
@@ -1280,6 +1302,73 @@ LOCAL void keep( void )
 	}
 }
 
+/*
+ * The GT interrupts the engines raise let through: the user interrupt,
+ * the context switch and the command error of the render and copy
+ * engines, and of the video engine while it is up (in register 1)
+ */
+LOCAL void gt_irq_masks( void )
+{
+	UW	want[2] = { 0, 0 };
+	INT	k;
+
+	for ( k = 0; k < IGT_NENG; k++ ) {
+		IGTENG	*e = &knl_igt.eng[k];
+
+		if ( e->up || k != IGT_VCS ) want[e->iir] |= ( GT_USER | GT_CTX_SWITCH | GT_CS_ERROR ) << e->shift;
+	}
+	for ( k = 0; k < 2; k++ ) {
+		igt_wr(GT_IMR(k), ~want[k]);
+		igt_wr(GT_IER(k), want[k]);
+		igt_wr(GT_IIR(k), 0xffffffff);
+		igt_wr(GT_IIR(k), 0xffffffff);
+	}
+}
+
+/*
+ * The video engine, once the render and copy engines run: its status
+ * page, its interrupts, its first context. Whatever fails leaves it down
+ * (stopped, reset, its interrupts masked) and the others as they are.
+ */
+LOCAL void vcs_bring_up( void )
+{
+	IGTENG	*e = &knl_igt.eng[IGT_VCS];
+	UINT	imask;
+	ER	er;
+
+	tm_printf((UB *)"igt: video engine: as found: RING_MODE %08x, MI_MODE %08x, HWS_PGA %08x, media forcewake ack %08x, "
+		  "GDRST %08x\n", igt_rd(VCS_BASE + RING_MODE), igt_rd(VCS_BASE + RING_MI_MODE),
+		  igt_rd(VCS_BASE + RING_HWS_PGA), igt_rd(FW_MEDIA_ACK), igt_rd(GDRST));
+	if ( igt_setting("igtvcs", 1) == 0 ) {
+		tm_printf((UB *)"igt: video engine: left down (igtvcs=0)\n");
+		return;
+	}
+	er = eng_init(e);
+	if ( er >= E_OK ) {
+		e->up = TRUE;			/* for the masks and the first context; taken back below on failure */
+		gt_irq_masks();
+		er = golden(e);
+	}
+	if ( er >= E_OK ) {
+		tm_printf((UB *)"igt: video engine: up; interrupt mask after its first context reads %08x%s, "
+			  "user interrupts %ld, context switches %ld\n", igt_erd(e, RING_IMR),
+			  ( igt_erd(e, RING_IMR) == eng_imr(e) ) ? "" : " (changed)", e->irq_user, e->irq_ctx);
+		return;
+	}
+	tm_printf((UB *)"igt: video engine: did NOT start (%d): left down, H.264 is decoded by the processor\n", er);
+	if ( e->hwsp != NULL ) igt_eng_dump("did not start", e);
+	ISpinLock(&knl_igt.lock, &imask);
+	if ( knl_igt.active == IGT_VCS ) knl_igt.active = -1;
+	e->cur = NULL;
+	ISpinUnlock(&knl_igt.lock, &imask);
+	e->up = FALSE;
+	gt_irq_masks();
+	igt_ewr(e, RING_MI_MODE, MASK_EN(STOP_RING));
+	(void)wait_for(e->base + RING_MI_MODE, MODE_IDLE, MODE_IDLE, 100000);
+	igt_wr(GDRST, e->grdom);
+	(void)wait_for(GDRST, e->grdom, 0, 2000);
+}
+
 LOCAL ER bring_up( void )
 {
 	T_CCYC	cc;
@@ -1302,19 +1391,32 @@ LOCAL ER bring_up( void )
 
 	knl_igt.eng[IGT_RCS].name = "rcs";
 	knl_igt.eng[IGT_RCS].base = RCS_BASE;
+	knl_igt.eng[IGT_RCS].iir = 0;
 	knl_igt.eng[IGT_RCS].shift = GT_RCS_SHIFT;
 	knl_igt.eng[IGT_RCS].grdom = GRDOM_RENDER;
+	knl_igt.eng[IGT_RCS].mocs = GFX_MOCS(0);
 	knl_igt.eng[IGT_RCS].img_bytes = 22 * PAGE_SIZE;
 	knl_igt.eng[IGT_BCS].name = "bcs";
 	knl_igt.eng[IGT_BCS].base = BCS_BASE;
+	knl_igt.eng[IGT_BCS].iir = 0;
 	knl_igt.eng[IGT_BCS].shift = GT_BCS_SHIFT;
 	knl_igt.eng[IGT_BCS].grdom = GRDOM_BLT;
+	knl_igt.eng[IGT_BCS].mocs = BLT_MOCS(0);
 	knl_igt.eng[IGT_BCS].img_bytes = 2 * PAGE_SIZE;
+	/* its context is laid as the copy engine's, of the same size (two pages) */
+	knl_igt.eng[IGT_VCS].name = "vcs";
+	knl_igt.eng[IGT_VCS].base = VCS_BASE;
+	knl_igt.eng[IGT_VCS].iir = 1;
+	knl_igt.eng[IGT_VCS].shift = GT_VCS_SHIFT;
+	knl_igt.eng[IGT_VCS].grdom = GRDOM_MEDIA;
+	knl_igt.eng[IGT_VCS].mocs = VCS_MOCS(0);
+	knl_igt.eng[IGT_VCS].img_bytes = 2 * PAGE_SIZE;
 	knl_igt.active = -1;
-	for ( k = 0; k < IGT_NENG; k++ ) {
+	for ( k = IGT_RCS; k <= IGT_BCS; k++ ) {
 		step(( k == IGT_RCS ) ? "render engine" : "copy engine");
 		er = eng_init(&knl_igt.eng[k]);
 		if ( er < E_OK ) return er;
+		knl_igt.eng[k].up = TRUE;
 	}
 
 	/* a look every millisecond while the GT is unparked (igt_look_set) */
@@ -1337,15 +1439,7 @@ LOCAL ER bring_up( void )
 		igt_wr(GT_IMR(k), 0xffffffff);
 		igt_wr(GT_IIR(k), 0xffffffff);
 	}
-	{
-		UW	want = ( ( GT_USER | GT_CTX_SWITCH | GT_CS_ERROR ) << GT_RCS_SHIFT )
-			     | ( ( GT_USER | GT_CTX_SWITCH | GT_CS_ERROR ) << GT_BCS_SHIFT );
-
-		igt_wr(GT_IMR(0), ~want);
-		igt_wr(GT_IER(0), want);
-		igt_wr(GT_IIR(0), 0xffffffff);
-		igt_wr(GT_IIR(0), 0xffffffff);
-	}
+	gt_irq_masks();
 	if ( ts_pcie_msi_plain_alloc(&knl_igt.dev.pci, &knl_igt.intno) >= E_OK ) {
 		knl_define_inthdr((INT)knl_igt.intno, TA_HLNG, (FP)isr);
 		EnableInt(knl_igt.intno, INTPRI_DEVICE);
@@ -1357,7 +1451,7 @@ LOCAL ER bring_up( void )
 	}
 	keep();
 
-	for ( k = 0; k < IGT_NENG; k++ ) {
+	for ( k = IGT_RCS; k <= IGT_BCS; k++ ) {
 		step(( k == IGT_RCS ) ? "the render engine's first context" : "the copy engine's first context");
 		er = golden(&knl_igt.eng[k]);
 		if ( er < E_OK ) return er;
@@ -1369,6 +1463,10 @@ LOCAL ER bring_up( void )
 				  e->name, igt_erd(e, RING_IMR), ( igt_erd(e, RING_IMR) == eng_imr(e) ) ? "" : " (changed)");
 		}
 	}
+
+	step("video engine");
+	keep();
+	vcs_bring_up();
 
 	step("RC6 and RPS");
 	keep();
@@ -1445,16 +1543,10 @@ LOCAL void igt_pm_resume( void *arg, INT how )
 		ppat();
 		knl_igt.active = -1;
 		igt_wr(MASTER_IRQ, 0);
-		for ( k = 0; k < IGT_NENG; k++ ) eng_resume(&knl_igt.eng[k]);
-		{
-			UW	want = ( ( GT_USER | GT_CTX_SWITCH | GT_CS_ERROR ) << GT_RCS_SHIFT )
-				     | ( ( GT_USER | GT_CTX_SWITCH | GT_CS_ERROR ) << GT_BCS_SHIFT );
-
-			igt_wr(GT_IMR(0), ~want);
-			igt_wr(GT_IER(0), want);
-			igt_wr(GT_IIR(0), 0xffffffff);
-			igt_wr(GT_IIR(0), 0xffffffff);
+		for ( k = 0; k < IGT_NENG; k++ ) {
+			if ( knl_igt.eng[k].up ) eng_resume(&knl_igt.eng[k]);
 		}
+		gt_irq_masks();
 		if ( knl_igt.intno != 0 ) igt_wr(MASTER_IRQ, MASTER_IRQ_CONTROL);
 		igt_pm_again();
 		igt_fw_put();
@@ -1472,20 +1564,6 @@ LOCAL void igt_pm_resume( void *arg, INT how )
 }
 
 LOCAL CONST T_PMDEV	igt_pm_dev = { "igt", PM_ORD_GPU, igt_pm_suspend, igt_pm_resume, NULL };
-
-/*
- * The video engine as it stands, for the records: nothing drives it yet
- * (docs/tessronos/13-gpu.md 13.12). Read with the media well awake, these
- * say that the engine answers before anything is asked of it.
- */
-LOCAL void vcs_report( void )
-{
-	igt_fw_get();
-	tm_printf((UB *)"igt: video engine: RING_MODE %08x, MI_MODE %08x, HWS_PGA %08x, media forcewake ack %08x\n",
-		  igt_rd(VCS_BASE + RING_MODE), igt_rd(VCS_BASE + RING_MI_MODE), igt_rd(VCS_BASE + RING_HWS_PGA),
-		  igt_rd(0x0d88));
-	igt_fw_put();
-}
 
 LOCAL void start_task( INT stacd, void *exinf )
 {
@@ -1514,12 +1592,12 @@ LOCAL void start_task( INT stacd, void *exinf )
 		tk_ext_tsk();
 	}
 	obj_state("running");
-	tm_printf((UB *)"igt: ready: render and copy engines, %d execution units, %s\n", knl_igt.eu_total,
+	tm_printf((UB *)"igt: ready: render and copy engines%s, %d execution units, %s\n",
+		  knl_igt.eng[IGT_VCS].up ? ", video engine" : "", knl_igt.eu_total,
 		  ( knl_igt.intno != 0 ) ? "interrupts" : "no interrupts");
 	if ( igt_mode == 2 ) {
 		igt_test_start();
 	}
-	vcs_report();
 	if ( igt_compose_init() >= E_OK ) {
 		/*
 		 * The engines are timed against the processor at one known
@@ -1531,6 +1609,8 @@ LOCAL void start_task( INT stacd, void *exinf )
 		igt_pm_pin(FALSE);
 		gob.compose = igt_compose_used();
 	}
+	/* the H.264 decoder: checked on the video engine, offered as the object only when it passed */
+	if ( knl_igt.eng[IGT_VCS].up ) igt_vdec_start();
 	obj_state(NULL);
 	knl_bootlog_soon();
 	tk_ext_tsk();

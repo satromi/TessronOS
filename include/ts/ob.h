@@ -496,6 +496,25 @@ typedef struct {
 #define OB_WR_OFF	4		/* a switch: how it looks released */
 #define OB_WR_ON	5		/* and pressed */
 
+/*
+ * A panel of tags: record OB_WR_TAGS of its part, read only, the tags
+ * that can be seen now -- the upper row and the lower row of the upper
+ * tag shown -- one T_OBTAG each, in the window's work area as the
+ * notices have it. An upper tag with a lower row has the number of the
+ * tag of that row it stands for, so two may have the same number; the
+ * one under a point is the one whose rectangle holds it. Empty on a
+ * part of any other kind.
+ */
+#define OB_WR_TAGS	5
+typedef struct {
+	INT	num;			/* the tag's number, 1 up */
+	INT	left, top, right, bottom;	/* the box of its name: what a press is taken in */
+	INT	fleft, ftop, fright, fbottom;	/* the tag as drawn, its frame, up to the sheet it joins */
+	UINT	flags;			/* OB_TAG_* */
+} T_OBTAG;
+#define OB_TAG_OFF	0x0001		/* it cannot be chosen (inact) */
+#define OB_TAG_MAX	32		/* tags read at most */
+
 /* A menu item's state, in its record's subtype */
 #define OB_MI_GREY	0x0001		/* shown, but cannot be chosen */
 #define OB_MI_TICK	0x0002		/* shown with a mark */
@@ -980,7 +999,19 @@ typedef struct {
 #define OB_E_PRESSED	0x20000
 /* Asked whether links would be taken where the hand is (OB_WR_ASK) */
 #define OB_E_ASK	0x40000
-#define OB_E_ALL	0x7FFFF
+/*
+ * A tag of a panel of tags pulled out: pressed, and moved further than
+ * LK_DRAG_W from where it went down before it was let go. Told once, to
+ * the part and to its panel, in place of choosing the tag: the press is
+ * let go of there, the tag drawn as it was, and what the pointer does
+ * from then on is the desktop's to carry (DT_RQ_CARRY). code is the tag's
+ * number, x and y where the button went down, in the window's work area;
+ * the tag's rectangle is read from the part's record OB_WR_TAGS. Only
+ * the tags of a panel someone asked OB_E_PULL of, of the panel or of the
+ * part, are pulled out; on any other a press that moves still chooses.
+ */
+#define OB_E_PULL	0x80000
+#define OB_E_ALL	0xFFFFF
 
 #define OB_E_INPUT	( OB_E_PRESS | OB_E_RELEASE | OB_E_MOVE | OB_E_KEY \
 			| OB_E_ENTER | OB_E_LEAVE | OB_E_REDRAW | OB_E_CLOSE | OB_E_DROP \
@@ -1219,9 +1250,13 @@ IMPORT ER  ob_can_evt( ID nid );
  * TADjs Desktop gives them: "_0_1.png", "_0_bgm.mp3", ".ico". A record
  * or the metadata is not a resource. ob_lst_res gives the names one
  * after another, each ending in 0, as many as fit; with buf NULL, how
- * many there are (room for them all: that many OB_RES_NAME).
+ * many there are, and the answer is the bytes all of them take.
+ * The extension may be up to 767 bytes on a native volume of version 5,
+ * so the room is taken from the answer: OB_RES_NAME is the room of a
+ * name of the usual length, OB_RES_NAME_MAX that of the longest.
  */
-#define OB_RES_NAME	64		/* bytes of a resource's name */
+#define OB_RES_NAME	64		/* bytes of a resource's name of the usual length */
+#define OB_RES_NAME_MAX	800		/* "_", two numbers, ".", 767 bytes of extension, 0 */
 
 IMPORT ER  ob_rea_res( ID key, CONST UB *name, D off, void *buf, SZ size, SZ *p_asize );
 IMPORT ER  ob_wri_res( ID key, CONST UB *name, CONST void *buf, SZ size );
@@ -1230,9 +1265,10 @@ IMPORT ER  ob_lst_res( ID key, UB *buf, SZ size, INT *p_cnt );
 
 /*
  * The attributes: the metadata, JSON, as long as the object's is. The
- * native store keeps what one transaction of its journal holds (about
- * 492KB, peripheral_kernel/fs/tsfsobj.c); the other managers keep any
- * length. ob_get_atr copies at most size bytes from the start and says
+ * native store keeps, on a volume of version 4, what one transaction of
+ * its journal holds (about 492KB; longer is E_PAR), and on one of version
+ * 5 any length (peripheral_kernel/fs/tsfsobj.c, the volume's
+ * ts_blk_lim); the other managers keep any length. ob_get_atr copies at most size bytes from the start and says
  * how many: a reader that fills its room reads again with more (ts/
  * obatr.h, knl_ob_atr_all). OB_META_LIMIT is where such a reader stops,
  * as a reader of a record does (knl_ob_rea_all).

@@ -358,16 +358,7 @@ static BOOL first_link_going( CONST T_VOBJ *v )
 /* An item of ディスク操作: the program ディスク操作 started with it, on the link the menu was opened on */
 static void disk_item( CONST char *code )
 {
-	T_DTREQ	rq;
-	T_DTANS	an;
-
-	memset(&rq, 0, sizeof(rq));
-	rq.req = DT_RQ_DISK;
-	rq.recno = DT_DISK_MENU;
-	ta_req_part(DT_TAIL_NAME, (CONST UB *)code, -1);
-	if ( g_has_link ) rq.target = g_link.target;
-	memset(&an, 0, sizeof(an));
-	(void)ask_desktop(&rq, &an, 5000);
+	(void)tv_vop_disk(fg_vop(), code, g_has_link ? &g_link.target : NULL);
 }
 
 /* ---------------------------------------------------------------- the menu */
@@ -526,10 +517,7 @@ static void command( CONST char *code, INT index )
 	else if ( FG_MADE && sealed_cmd(code) ) ;	/* nothing in a list made is put, taken or saved */
 	else if ( strcmp(code, "save") == 0 ) (void)ta_save();
 	else if ( strcmp(code, "save.new") == 0 ) ta_save_new();
-	else if ( ( strncmp(code, "vobj.", 5) == 0 || strncmp(code, "real.", 5) == 0 ) && g_has_link ) {
-		fg_link_op(code, &g_link);
-		ta_watch_links();
-	}
+	else if ( g_has_link && fg_link_op(code, index, &g_link) ) ta_watch_links();	/* vobj.*, real.*, exec.app */
 	else if ( strcmp(code, "fullscreen") == 0 ) ta_fullscreen();
 	else if ( strcmp(code, "panel") == 0 ) fgt_toggle();
 	else if ( strcmp(code, "trash") == 0 ) ta_trash_open();
@@ -579,7 +567,6 @@ static void command( CONST char *code, INT index )
 	else if ( strcmp(code, "unbg") == 0 ) fg_protect(TRUE, FALSE);
 	else if ( strcmp(code, "print") == 0 ) print();
 	else if ( strcmp(code, "open") == 0 ) open_picked();
-	else if ( strcmp(code, "exec.app") == 0 && g_has_link ) ta_exec_app(&g_link, index);
 	g_dirty = TRUE;
 	/* how many shapes there are and are picked after it, for the tests */
 	if ( g_fig != NULL ) {
@@ -650,10 +637,8 @@ static void menu( CONST T_OBNTM *m )
 	(void)mn_chg_atr(mid, NULL, "paste", (UINT)i);
 	(void)mn_chg_atr(mid, NULL, "moveback", (UINT)i);
 	ta_tray_menu(mid);
-	i = ( g_has_link && ta_exec_menu(mid, &g_link) > 0 ) ? 0 : MN_GREY;
-	(void)mn_chg_atr(mid, NULL, "exec", (UINT)i);
-	note(( i == 0 ) ? "exec menu on" : "exec menu grey");	/* for the tests */
-	fg_link_menu(mid, g_has_link ? &g_link : NULL);
+	i = fg_link_menu(mid, g_has_link ? &g_link : NULL);
+	note(( i > 0 ) ? "exec menu on" : "exec menu grey");	/* for the tests */
 	if ( fg_box != NULL && fg_box->menu != NULL ) fg_box->menu(mid, g_has_link ? &g_link : NULL);
 	note("menu");
 	chosen = (BOOL)( mn_pop_men(mid, g_kw, m->x, m->y, m->when, &sel) >= E_OK );

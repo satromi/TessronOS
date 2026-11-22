@@ -34,6 +34,7 @@
 #include <ts/ob.h>
 #include <ts/uuid.h>
 #include <ts/dtreq.h>
+#include <ts/tsfsblk.h>
 #include "../desktop/desktop.h"
 
 #ifdef X64
@@ -48,7 +49,7 @@
 #define SW_RUN		1
 #define SW_DONE		2
 
-LOCAL T_SIDISK		*sw_disk = NULL;	/* SI_DISK_MAX of them */
+LOCAL T_SIDISK		*sw_disk = NULL;	/* as many as the device manager has */
 LOCAL INT		sw_ndisk = 0;
 LOCAL INT		sw_pmap[SI_PART_MAX];	/* the partitions of a disk that can go: indices in its parts */
 LOCAL INT		sw_npmap = 0, sw_pbest = 0, sw_pdisk = -1;
@@ -235,15 +236,12 @@ LOCAL void part_map( INT disk )
 
 LOCAL void list_disks( void )
 {
-	if ( sw_disk == NULL ) {
-		sw_disk = (T_SIDISK *)Kmalloc(sizeof(T_SIDISK) * SI_DISK_MAX);
-		if ( sw_disk == NULL ) {
-			sw_ndisk = 0;
-			return;
-		}
+	if ( sw_disk != NULL ) {
+		Kfree(sw_disk);
+		sw_disk = NULL;
 	}
-	sw_ndisk = si_disks(sw_disk, SI_DISK_MAX);
-	if ( sw_ndisk < 0 ) sw_ndisk = 0;
+	sw_ndisk = si_disks(&sw_disk);
+	if ( sw_ndisk < 0 || sw_disk == NULL ) sw_ndisk = 0;
 	sw_pdisk = -1;
 	sw_planned = FALSE;
 	tm_printf((UB *)"sysinst: %d disks\n", sw_ndisk);
@@ -263,6 +261,9 @@ LOCAL void confirm_lines( CONST T_SIDISK *dk )
 		(void)put(l[n], k, WM_LABEL_MAX, ")に、システムを上書きします。");
 		n++;
 		(void)put(l[n++], 0, WM_LABEL_MAX, "実身は残ります。登録先の実身・仮身、設定、入れたアプリはそのままです。");
+		if ( sw_plan.ts_form == TSFSBLK_VERSION ) {
+			(void)put(l[n++], 0, WM_LABEL_MAX, "登録先のディスクは、登録のあとの最初の起動で検査し、新しい形式に変えます。");
+		}
 		(void)put(l[n++], 0, WM_LABEL_MAX, "システムの実身(プログラム、メニュー、書体など)を入れ替えます。");
 		k = put(l[n], 0, WM_LABEL_MAX, "登録先のシステム: ");
 		k = put(l[n], k, WM_LABEL_MAX, ( sw_plan.tver[0] != 0 ) ? (CONST char *)sw_plan.tver : "(一覧なし、前のバージョン)");

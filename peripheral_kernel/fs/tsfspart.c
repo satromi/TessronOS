@@ -291,23 +291,38 @@ EXPORT ER knl_tsfs_format( CONST char *part, CONST char *label )
 EXPORT ER knl_tsfs_part_make( CONST char *disk, UD first, UD bytes, CONST char *label,
 			      UB *p_part, INT max )
 {
-	T_GPTFREE	fr[32];
+	T_GPTFREE	*fr = NULL;
 	UD		last;
-	INT		n, i;
+	INT		n, i, room = 32;
 	ER		er;
 
 	if ( disk == NULL || p_part == NULL ) {
 		return E_PAR;
 	}
-	n = knl_gpt_free(disk, fr, 32, NULL, NULL);
+	/* every free stretch of the disk: the list asked again with twice the room while it fills it */
+	for ( ;; ) {
+		fr = (T_GPTFREE *)Kmalloc(sizeof(T_GPTFREE) * (SZ)room);
+		if ( fr == NULL ) {
+			return E_NOMEM;
+		}
+		n = knl_gpt_free(disk, fr, room, NULL, NULL);
+		if ( n < room ) {
+			break;
+		}
+		Kfree(fr);
+		room *= 2;
+	}
 	if ( n < E_OK ) {
+		Kfree(fr);
 		return n;
 	}
 	for ( i = 0; i < n && fr[i].first != first; i++ ) ;
 	if ( i == n ) {
+		Kfree(fr);
 		return E_PAR;			/* not where a free stretch starts */
 	}
 	last = fr[i].last;
+	Kfree(fr);
 	if ( bytes > 0 ) {
 		UD	want = first + ( bytes / 512 ) / MB_SECT * MB_SECT - 1;
 

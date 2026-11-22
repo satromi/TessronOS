@@ -225,6 +225,17 @@ LOCAL void n_close( void *ctx, INT c )
 	n->s[c] = -1;
 }
 
+/* Memory for the lines of an FTP session: realloc, and size 0 gives back */
+static void *n_mem( void *ctx, void *old, SZ size )
+{
+	(void)ctx;
+	if ( size == 0 ) {
+		free(old);
+		return NULL;
+	}
+	return realloc(old, size);
+}
+
 EXPORT void xfc_net_init( XFCNET *n, T_FTPNET *net, UINT tmo, UINT lport )
 {
 	INT	i;
@@ -239,6 +250,7 @@ EXPORT void xfc_net_init( XFCNET *n, T_FTPNET *net, UINT tmo, UINT lport )
 	net->close = n_close;
 	net->listen = n_listen;
 	net->accept = n_accept;
+	net->mem = n_mem;
 }
 
 EXPORT ER xfc_net_up( void )
@@ -353,26 +365,98 @@ LOCAL BOOL conf_find( TS_UUID *p_u )
 	return hit;
 }
 
+/* A member's string whole into a field (none when it is not there): FALSE for no memory */
+LOCAL BOOL js_field( CONST T_JSON *obj, CONST char *name, UB **field )
+{
+	T_JSON	v;
+	UB	*t;
+	BOOL	ok;
+
+	if ( js_get(obj, name, &v) < E_OK ) {
+		return TRUE;
+	}
+	/* unescaped, a string is never longer than the text it is in */
+	t = (UB *)malloc((size_t)v.len + 1);
+	if ( t == NULL ) {
+		return FALSE;
+	}
+	ok = (BOOL)( js_str(&v, t, v.len + 1) < 0 || xfc_conn_set(field, (CONST char *)t) );
+	memset(t, 0, (size_t)v.len + 1);
+	free(t);
+	return ok;
+}
+
+EXPORT BOOL xfc_conn_set( UB **field, CONST char *s )
+{
+	UB	*d = NULL;
+	size_t	n = ( s != NULL ) ? strlen(s) : 0;
+
+	if ( n > 0 ) {
+		d = (UB *)malloc(n + 1);
+		if ( d == NULL ) return FALSE;
+		memcpy(d, s, n + 1);
+	}
+	if ( *field != NULL ) {
+		memset(*field, 0, strlen((char *)*field));	/* it may be a password */
+		free(*field);
+	}
+	*field = d;
+	return TRUE;
+}
+
+EXPORT void xfc_conn_free( XFCCONN *c )
+{
+	(void)xfc_conn_set(&c->host, NULL);
+	(void)xfc_conn_set(&c->user, NULL);
+	(void)xfc_conn_set(&c->pass, NULL);
+	(void)xfc_conn_set(&c->name, NULL);
+}
+
+EXPORT BOOL xfc_conn_copy( XFCCONN *dst, CONST XFCCONN *src )
+{
+	*dst = *src;
+	dst->host = dst->user = dst->pass = dst->name = NULL;
+	if ( !xfc_conn_set(&dst->host, XS(src->host)) || !xfc_conn_set(&dst->user, XS(src->user))
+	  || !xfc_conn_set(&dst->pass, XS(src->pass)) || !xfc_conn_set(&dst->name, XS(src->name)) ) {
+		xfc_conn_free(dst);
+		memset(dst, 0, sizeof(*dst));
+		return FALSE;
+	}
+	return TRUE;
+}
+
 /* The connections of a list of JSON ({"ftp": [...]}) */
-LOCAL INT conf_parse( CONST T_JSON *xc, XFCCONN *c, INT max )
+LOCAL INT conf_parse( CONST T_JSON *xc, XFCCONN **p_c )
 {
 	T_JSON	list, it;
-	INT	n = 0;
+	XFCCONN	*c;
+	INT	n = 0, max = 0;
 
+	*p_c = NULL;
 	if ( js_get(xc, "ftp", &list) < E_OK ) return 0;
+	/* as many as the list has: counted, then read */
+	for ( it.s = NULL; js_next(&list, &it); ) max++;
+	if ( max == 0 ) return 0;
+	c = (XFCCONN *)calloc((size_t)max, sizeof(XFCCONN));
+	if ( c == NULL ) {
+		xfc_log("connections not read: no memory");
+		return 0;
+	}
+	*p_c = c;
 	for ( it.s = NULL; n < max && js_next(&list, &it); n++ ) {
 		XFCCONN	*k = &c[n];
 		UB	e[24];
 
 		memset(k, 0, sizeof(*k));
-		(void)js_get_str(&it, "host", k->host, sizeof(k->host));
-		(void)js_get_str(&it, "name", k->name, sizeof(k->name));
+		if ( !js_field(&it, "host", &k->host) || !js_field(&it, "name", &k->name) ) {
+			xfc_log("a connection not read whole: no memory");
+		}
 		k->ssh = js_get_bool(&it, "ssh", FALSE);
 		(void)js_get_str(&it, "hostkey", k->hostkey, sizeof(k->hostkey));
 		snprintf((char *)k->port, sizeof(k->port), "%d", (INT)js_get_num(&it, "port", FTP_PORT));
-		(void)js_get_str(&it, "user", k->user, sizeof(k->user));
+		if ( !js_field(&it, "user", &k->user) ) xfc_log("a connection's user not read: no memory");
 		k->keep = js_get_bool(&it, "keep", FALSE);
-		if ( k->keep ) (void)js_get_str(&it, "pass", k->pass, sizeof(k->pass));
+		if ( k->keep && !js_field(&it, "pass", &k->pass) ) xfc_log("a connection's password not read: no memory");
 		k->enc = ( js_get_str(&it, "encoding", e, sizeof(e)) > 0 ) ? txc_by_name(e) : TXC_UTF8;
 		if ( k->enc == TXC_AUTO ) k->enc = TXC_UTF8;
 		k->mode = js_get_bool(&it, "pasv", FALSE) ? XFC_DM_PASV : XFC_DM_EPSV;
@@ -388,7 +472,7 @@ LOCAL INT conf_parse( CONST T_JSON *xc, XFCCONN *c, INT max )
 }
 
 /* The list a system before kept in the metadata of the box (prog FALSE) or of the program object */
-LOCAL INT conf_load_old( BOOL prog, XFCCONN *c, INT max )
+LOCAL INT conf_load_old( BOOL prog, XFCCONN **p_c )
 {
 	T_JSON	root, tf, xc;
 	UB	*meta = NULL;
@@ -400,29 +484,33 @@ LOCAL INT conf_load_old( BOOL prog, XFCCONN *c, INT max )
 	len = ob_atr_read(key, 0, &meta);
 	if ( len >= 0 && js_parse(meta, len, &root) >= E_OK && js_get(&root, "tessronos", &tf) >= E_OK
 	  && js_get(&tf, "xfconv", &xc) >= E_OK ) {
-		n = conf_parse(&xc, c, max);
+		n = conf_parse(&xc, p_c);
 	}
 	free(meta);
 	ob_cls_obj(key);
 	return n;
 }
 
-EXPORT INT xfc_conf_load( XFCCONN *c, INT max )
+EXPORT INT xfc_conf_load( XFCCONN **p_c )
 {
 	T_JSON	root;
 	TS_UUID	u;
 	UB	*b = NULL;
 	INT	len, n;
 
+	*p_c = NULL;
 	if ( conf_find(&u) ) {
 		len = ui_rec_all(&u, 1, 0, &b);
-		n = ( len >= 0 && js_parse(b, len, &root) >= E_OK ) ? conf_parse(&root, c, max) : 0;
+		n = ( len >= 0 && js_parse(b, len, &root) >= E_OK ) ? conf_parse(&root, p_c) : 0;
 		free(b);
 		return n;
 	}
-	n = conf_load_old(FALSE, c, max);
-	if ( n <= 0 ) n = conf_load_old(TRUE, c, max);
-	if ( n > 0 && xfc_conf_save(c, n) < E_OK ) {
+	n = conf_load_old(FALSE, p_c);
+	if ( n <= 0 ) {
+		free(*p_c);
+		n = conf_load_old(TRUE, p_c);
+	}
+	if ( n > 0 && xfc_conf_save(*p_c, n) < E_OK ) {
 		xfc_log("the connections were not moved to the person's own settings");
 	}
 	return n;
@@ -441,22 +529,27 @@ LOCAL INT jstr( char *o, INT at, INT max, CONST UB *s )
 /* The list as JSON, {"ftp": [...]}, in a buffer the caller frees; its length in *p_w */
 LOCAL char *conf_text( CONST XFCCONN *c, INT n, INT *p_w )
 {
-	INT	vcap = 64 + n * ( 4 * 2 * XFC_FIELD + 256 );	/* each text escaped at most twice as long */
-	char	*v = (char *)malloc((size_t)vcap);
-	INT	w, i;
+	INT	vcap = 64, w, i;
+	char	*v;
 
+	/* each text escaped at most twice as long, and the rest of an entry */
+	for ( i = 0; i < n; i++ ) {
+		vcap += 2 * (INT)( strlen(XS(c[i].host)) + strlen(XS(c[i].name)) + strlen(XS(c[i].user))
+				   + strlen(XS(c[i].pass)) ) + 512;
+	}
+	v = (char *)malloc((size_t)vcap);
 	if ( v == NULL ) return NULL;
 	w = snprintf(v, vcap, "{\"ftp\":[");
 	for ( i = 0; i < n; i++ ) {
 		if ( i > 0 ) v[w++] = ',';
 		w += snprintf(v + w, vcap - w, "{\"host\":\"");
-		w = jstr(v, w, vcap, c[i].host);
+		w = jstr(v, w, vcap, (CONST UB *)XS(c[i].host));
 		w += snprintf(v + w, vcap - w, "\",\"name\":\"");
-		w = jstr(v, w, vcap, c[i].name);
+		w = jstr(v, w, vcap, (CONST UB *)XS(c[i].name));
 		w += snprintf(v + w, vcap - w, "\",\"ssh\":%s,\"hostkey\":\"%s\"", c[i].ssh ? "true" : "false",
 			      (CONST char *)c[i].hostkey);
 		w += snprintf(v + w, vcap - w, ",\"port\":%d,\"user\":\"", atoi((CONST char *)c[i].port));
-		w = jstr(v, w, vcap, c[i].user);
+		w = jstr(v, w, vcap, (CONST UB *)XS(c[i].user));
 		w += snprintf(v + w, vcap - w, "\",\"encoding\":\"%s\",\"pasv\":%s,\"data\":\"%s\","
 			      "\"dataport\":%d,\"keep\":%s",
 			      txc_name(c[i].enc), ( c[i].mode == XFC_DM_PASV ) ? "true" : "false",
@@ -464,7 +557,7 @@ LOCAL char *conf_text( CONST XFCCONN *c, INT n, INT *p_w )
 			      atoi((CONST char *)c[i].lport), c[i].keep ? "true" : "false");
 		if ( c[i].keep ) {
 			w += snprintf(v + w, vcap - w, ",\"pass\":\"");
-			w = jstr(v, w, vcap, c[i].pass);
+			w = jstr(v, w, vcap, (CONST UB *)XS(c[i].pass));
 			v[w++] = '"';
 		}
 		v[w++] = '}';

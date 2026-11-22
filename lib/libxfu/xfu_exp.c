@@ -273,7 +273,7 @@ LOCAL ER put_file( XFU *x, CONST UB *path, CONST UB *b, SZ n )
 LOCAL UB *first_picture( CONST TS_UUID *self, CONST UB *r0, SZ n0, SZ *p_len )
 {
 	INT	a = xfu_find(r0, n0, "<image ", 0), b = xfu_find(r0, n0, "<pixelmap ", 0), at, e, k;
-	UB	href[OB_RES_NAME + 48];
+	UB	href[OB_RES_NAME_MAX + 48];
 	TS_UUID	u;
 	CONST UB *rest;
 	UB	*buf = NULL, *nb;
@@ -444,7 +444,6 @@ LOCAL ER exp_obj( XFU *x, CONST TS_UUID *u, CONST UB *dir, T_XFUNAMES *names, IN
 	CONST T_XFUOPT	*opt = x->opt;
 	UINT		flags = ( opt != NULL ) ? opt->flags : 0;
 	T_OBREF		ref;
-	T_OBREC		rec[16];
 	FFACT		*f = NULL;
 	UB		*meta = NULL, *r0 = NULL, *name = NULL, *path = NULL, *pic = NULL;
 	SZ		mlen = 0, n0 = 0, plen = 0;
@@ -456,8 +455,8 @@ LOCAL ER exp_obj( XFU *x, CONST TS_UUID *u, CONST UB *dir, T_XFUNAMES *names, IN
 	ID		key;
 	ER		er;
 
-	if ( x->nseen >= XFU_OBJ_MAX ) {
-		return E_LIMIT;
+	if ( !xfu_uuids_room(&x->seen, x->nseen, &x->seencap, 256) ) {
+		return E_NOMEM;
 	}
 	x->seen[x->nseen++] = *u;
 	er = ob_ref_obj(u, &ref);
@@ -475,7 +474,11 @@ LOCAL ER exp_obj( XFU *x, CONST TS_UUID *u, CONST UB *dir, T_XFUNAMES *names, IN
 	if ( er >= E_OK ) {
 		meta = xfu_meta_all(key, &mlen);
 		read_fact(meta, mlen, f, &updated);
-		if ( ob_lst_rec(key, rec, 16, &nrec) < E_OK ) nrec = 0;
+		{
+			T_OBREC	*rl = xfu_recs(key, &nrec);	/* how many records: all of them counted */
+
+			if ( rl != NULL ) xfu_sys_free(rl);
+		}
 		r0 = ( nrec > 0 ) ? xfu_rec_all(key, 0, &n0) : NULL;
 	}
 
@@ -645,7 +648,7 @@ LOCAL ER exp_obj( XFU *x, CONST TS_UUID *u, CONST UB *dir, T_XFUNAMES *names, IN
 /* The file of an object's set: <dir>/<uuid><tail> */
 LOCAL ER set_path( UB *out, CONST UB *dir, CONST TS_UUID *u, CONST UB *tail )
 {
-	UB	nm[40 + OB_RES_NAME + 16];
+	UB	nm[40 + OB_RES_NAME_MAX + 16];
 	INT	n;
 
 	xfu_uuid_str(u, (char *)nm);
@@ -681,7 +684,12 @@ LOCAL void seen_put( void *arg, CONST TS_UUID *u )
 	for ( i = 0; i < x->nseen; i++ ) {
 		if ( xfu_uuid_eq(&x->seen[i], u) ) return;
 	}
-	if ( x->nseen < XFU_OBJ_MAX && ob_ref_obj(u, &r) >= E_OK ) {
+	if ( ob_ref_obj(u, &r) >= E_OK ) {
+		if ( !xfu_uuids_room(&x->seen, x->nseen, &x->seencap, 256) ) {
+			x->st.last = E_NOMEM;		/* the object linked to would be left out: the work stops */
+			x->stop = TRUE;
+			return;
+		}
 		x->seen[x->nseen++] = *u;
 	}
 }
@@ -689,7 +697,7 @@ LOCAL void seen_put( void *arg, CONST TS_UUID *u )
 LOCAL ER exp_set( XFU *x, CONST TS_UUID *u, CONST UB *dir )
 {
 	CONST T_XFUTREE	*t = x->t;
-	T_OBREC		rec[16];
+	T_OBREC		*rec = NULL;
 	UB		*path, *names = NULL, *b;
 	UB		tail[24];
 	SZ		len = 0, asz;
@@ -714,8 +722,11 @@ LOCAL ER exp_set( XFU *x, CONST TS_UUID *u, CONST UB *dir )
 	}
 
 	/* each record; the links of an xmlTAD one followed */
-	if ( er >= E_OK && ob_lst_rec(key, rec, 16, &nrec) < E_OK ) nrec = 0;
-	for ( i = 0; er >= E_OK && i < nrec && i < 16; i++ ) {
+	if ( er >= E_OK ) {
+		rec = xfu_recs(key, &nrec);		/* every record, however many */
+		if ( rec == NULL ) er = E_NOMEM;
+	}
+	for ( i = 0; er >= E_OK && i < nrec; i++ ) {
 		BOOL	tad = (BOOL)( rec[i].rt == OB_RT_TAD );
 
 		rec_tail(tail, i, tad);
@@ -746,9 +757,17 @@ LOCAL ER exp_set( XFU *x, CONST TS_UUID *u, CONST UB *dir )
 
 	/* the resources */
 	if ( er >= E_OK ) {
-		names = (UB *)xfu_sys_alloc(4096);
+		/* every resource: how many and the room their names take asked first */
+		SZ	room = ob_lst_res(key, NULL, 0, &cnt);
+
+		if ( room < E_OK ) {
+			cnt = 0;
+			room = 0;
+		}
+		room += 1;
+		names = (UB *)xfu_sys_alloc(room);
 		er = ( names != NULL ) ? E_OK : E_NOMEM;
-		if ( er >= E_OK && ob_lst_res(key, names, 4096, &cnt) < E_OK ) cnt = 0;
+		if ( er >= E_OK && ob_lst_res(key, names, room, &cnt) < E_OK ) cnt = 0;
 	}
 	for ( i = 0, k = 0; er >= E_OK && i < cnt; i++ ) {
 		CONST UB	*nm = names + k;
@@ -777,6 +796,7 @@ LOCAL ER exp_set( XFU *x, CONST TS_UUID *u, CONST UB *dir )
 	if ( er >= E_OK ) x->st.objects++;
 	ob_cls_obj(key);
 	if ( names != NULL ) xfu_sys_free(names);
+	if ( rec != NULL ) xfu_sys_free(rec);
 	if ( path != NULL ) xfu_sys_free(path);
 	return er;
 }
@@ -801,9 +821,10 @@ EXPORT ER xfu_export( CONST TS_UUID *uuid, CONST T_XFUTREE *t, CONST UB *dir,
 	}
 	er = xfu_begin(x, t, opt);
 	if ( er >= E_OK ) {
-		x->seen = (TS_UUID *)xfu_sys_alloc(sizeof(TS_UUID) * XFU_OBJ_MAX);
+		x->seen = NULL;			/* made as objects are met (xfu_uuids_room) */
+		x->seencap = 0;
 		x->stack = (TS_UUID *)xfu_sys_alloc(sizeof(TS_UUID) * ( XFU_DEPTH * 4 + 4 ));
-		if ( x->seen == NULL || x->stack == NULL ) er = E_NOMEM;
+		if ( x->stack == NULL || !xfu_uuids_room(&x->seen, 0, &x->seencap, 256) ) er = E_NOMEM;
 		if ( x->depth > XFU_DEPTH * 4 ) x->depth = XFU_DEPTH * 4;
 	}
 	if ( dir == NULL ) {

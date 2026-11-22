@@ -209,7 +209,7 @@ LOCAL DTWIN *admin_host( void )
 	DTWIN	*d = dt_first_win();
 	INT	i;
 
-	for ( i = 0; d == NULL && i < DT_MAX_WIN; i++ ) {
+	for ( i = 0; d == NULL && i < dt_win_room(); i++ ) {
 		if ( dt_win_at(i) != NULL && dt_win_at(i)->used ) d = dt_win_at(i);
 	}
 	return d;

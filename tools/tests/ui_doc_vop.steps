@@ -1,0 +1,246 @@
+# 基本文章編集 as a process (design 11.3, 11.2.6), for tools/ui_run.py: the 仮身操作,
+# 実身操作 and 実行 of a link in the text, done by the shared part of lib/libtv (tv_vop.c).
+# A copy of 基本文章編集 (mkbig doc) holds a text of two paragraphs, the first with a link
+# to 実身/仮身 of the 原紙箱; it is opened with the process (pdoc). The menu is opened on the
+# link (閉じる under the pointer at 230,135, its rows 20 apart: 仮身操作 200 below, 実身操作
+# 220, 実行 320), and its 仮身操作, 実身操作 and 実行 shown; then once away from the link.
+# The pictures of 実行 on the link and of the link carried out are the ones recorded before
+# the text was moved to the shared part (dc_main.c called ta_exec_menu itself then). Those of
+# 仮身操作 and 実身操作 are not: the text did none of their items then and left them all as
+# the menu's definition has them, and now the shared part sets them for the link (閉じる
+# grey, its object not open; 接続 and 起動アプリを最新にする hidden, the link reaching its
+# object and keeping to no program). Then, in a new text, the items are done on the link
+# picked: 属性変更, 続柄設定, 実身複製 and 新版作成 (the copies' links put right after the
+# link), 起動アプリの固定 (the menu then offers 起動アプリを最新にする), and 実行's list.
+# The message line (the bottom band) is left out: the shared part says what was done there.
+# Keys: Esc 29, Enter 28, Ctrl+S 16 01, Ctrl+E 08 01.
+waitwin 原紙箱
+click 1000 48
+wait 300
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>仮身の前<link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" vobjid="01a10000-0000-7000-8000-000000000001" width="160" heightpx="19" chsz="14"/>仮身の後</p>
+xml <p>後の段落</p>
+xml </document></tad>
+xmlbig
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 2
+wait 800
+# 仮身操作 on the link
+logmark
+click 230 135 1
+expectsince document: exec menu on
+expectsince document: menu
+wait 1000
+move 240 335
+wait 150
+move 300 335
+wait 800
+shot dv_vobj
+shotsum dv_vobj 0 0 1280 780
+want ok 4844429079828876
+key 29
+wait 200
+key 29
+wait 500
+# 実身操作 on the link
+logmark
+click 230 135 1
+expectsince document: menu
+wait 1000
+move 240 355
+wait 150
+move 300 355
+wait 800
+shot dv_real
+shotsum dv_real 0 0 1280 780
+want ok ee1e143fa5786bb5
+key 29
+wait 200
+key 29
+wait 500
+# 実行 on the link: the programs the desktop offers
+logmark
+click 230 135 1
+expectsince document: menu
+wait 1000
+move 240 455
+wait 150
+move 300 455
+wait 800
+shot dv_exec
+shotsum dv_exec 0 0 1280 780
+want ok ad0dbfb02bb84c12
+key 29
+wait 200
+key 29
+wait 500
+# away from the link: 実行 grey
+logmark
+click 400 400 1
+expectsince document: exec menu grey
+wait 1000
+move 410 600
+wait 150
+move 470 600
+wait 800
+shot dv_none
+key 29
+wait 200
+key 29
+wait 500
+# carried out of the window into the 原紙箱: it leaves the text
+logmark
+drag 200 138 1000 560
+expectsince document: link carried out (0)
+wait 800
+click 500 217
+wait 300
+move 690 490
+wait 300
+shot dv_out
+shotsum dv_out 0 0 1280 780
+want ok 8b4d48d18738c406
+key 08 01
+expect document: closed
+wait 500
+#
+# The items done, in a new text of the same words, on the link picked: the menu is opened
+# away from it, at 400,400 (閉じる there the first time, 仮身操作 200 below; then the item
+# chosen last under the pointer, the rows of its menu from there down).
+mkbig doc 1
+xml <tad version="1.0" encoding="UTF-8"><document>
+xml <p>仮身の前<link id="019a6c9b-e67e-7a35-a461-0d199550e4cf_0.xtad" vobjid="01a10000-0000-7000-8000-000000000001" width="160" heightpx="19" chsz="14"/>仮身の後</p>
+xml <p>後の段落</p>
+xml </document></tad>
+xmlbig
+logmark
+pdoc big
+expectsincein 60 document: opened 基本文章編集 paragraphs 2
+wait 800
+click 230 135
+wait 600
+# 仮身操作 > 属性変更, taken as it is
+logmark
+click 400 400 1
+expectsince document: exec menu on
+expectsince document: menu
+wait 1000
+move 410 600
+wait 150
+move 470 600
+wait 800
+move 540 660
+wait 300
+click 540 660
+expectsince document: chosen vobj.attr
+wait 1500
+key 28
+expectsince document: attr 実身/仮身
+wait 1500
+shot dv_attr
+# 仮身操作 > 続柄設定 (仮身操作 at 400, 続柄設定 80 below)
+logmark
+click 400 400 1
+expectsince document: menu
+wait 1000
+move 410 400
+wait 150
+move 470 400
+wait 800
+move 540 480
+wait 300
+click 540 480
+expectsince document: chosen vobj.relation
+wait 1500
+text abc
+wait 300
+key 28
+expectsince document: relation 実身/仮身 [abc]
+wait 1500
+shot dv_rel
+# 実身操作 > 実身複製 (実身操作 20 below 仮身操作): the copy's link right after the link
+logmark
+click 400 400 1
+expectsince document: menu
+wait 1000
+move 410 420
+wait 150
+move 470 420
+wait 800
+shot dv_real2
+move 540 440
+wait 300
+click 540 440
+expectsince document: chosen real.duplicate
+wait 1500
+key 28
+expectsince document: duplicated 実身/仮身
+expectsince document: linked a copy after the link (0), 2 links
+wait 1500
+shot dv_dup
+# 実身操作 > 新版作成 (実身操作 at 400, 新版作成 40 below), with no panel
+logmark
+click 400 400 1
+expectsince document: menu
+wait 1000
+move 410 400
+wait 150
+move 470 400
+wait 800
+move 540 440
+wait 300
+click 540 440
+expectsince document: chosen real.newversion
+expectsince document: new version 実身/仮身
+expectsince document: linked a copy after the link (0), 3 links
+wait 1500
+shot dv_newver
+shotsum dv_newver 0 0 1280 780
+want ok 544263acbde7de55
+# 実身操作 > 起動アプリを固定する (60 below), and the menu then offers 起動アプリを最新にする
+logmark
+click 400 400 1
+expectsince document: menu
+wait 1000
+move 410 400
+wait 150
+move 470 400
+wait 800
+move 540 460
+wait 300
+click 540 460
+expectsince document: chosen real.lock
+expectsince document: kept
+wait 1000
+logmark
+click 400 400 1
+expectsince document: exec menu on
+expectsince document: menu
+wait 1000
+move 410 400
+wait 150
+move 470 400
+wait 800
+shot dv_kept
+shotsum dv_kept 0 0 1280 780
+want ok 7e8262cd307e81c0
+# 実行, 100 below 実身操作
+move 420 500
+wait 150
+move 480 500
+wait 800
+shot dv_exec2
+shotsum dv_exec2 0 0 1280 780
+want ok b4acce2b039e7e57
+key 29
+wait 200
+key 29
+wait 500
+logmark
+key 16 01
+expectsince document: saved (0)
+key 08 01
+expect document: closed
+absent !OACV!

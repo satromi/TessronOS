@@ -12,6 +12,23 @@
       entry. Every partition is filled with bytes of its own; what each
       holds is written to <image>.json (SHA-256 of each partition and of
       each file of the ESP).
+  mkwindisk.py make-ts4 <image> <volume> {<disk>|<esp dir>}
+      a GPT disk as an earlier system (R1.410) leaves one it was put on
+      whole, for システム登録's 上書き over a volume of version 4: an EFI
+      system partition (FAT32, 200 MB) with the loader at
+      EFI/BOOT/BOOTX64.EFI and EFI/TESSRON/BOOTX64.EFI, and
+      EFI/TESSRON/tessronos.elf, cmdline.txt (when the directory has
+      it) and INSTALL.TXT, then a TSFS partition, TessronOS, as large as
+      the volume (a system volume of version 4,
+      tools/tests/mkv4disk.py --volume) and holding it. The boot files
+      are taken from a build's disk (the ESP of its sd.img) or from a
+      directory (BOOTX64.EFI wherever it is below it, tessronos.elf,
+      cmdline.txt).
+  mkwindisk.py rm-esp <image> <path>
+      a file deleted from the EFI system partition of a disk (FAT32),
+      as the request for the boot entry システム登録 leaves on the disk
+      started from (EFI/TESSRON/BOOTREG.TXT) when nothing is to follow
+      it (tools/x64/ktest64.sh with no VARS). Says whether it was there.
   mkwindisk.py check <image>
       after the system was put beside Windows: the four partitions there
       were have the same entries, and but for the ESP the same bytes; the
@@ -324,6 +341,107 @@ def ifind(files, path):
     return None
 
 
+def fat32_remove(f, start, path):
+    """A file of a FAT32 volume deleted, its long name with it: its entries
+    marked free, its clusters freed in every FAT and counted in FSInfo.
+    False when there is no such file."""
+    f.seek(start * SECT)
+    b = f.read(SECT)
+    assert b[82:90] == b"FAT32   " and b[510:512] == b"\x55\xaa", "not a FAT32 volume"
+    bps, spc, rsvd, nfat = struct.unpack_from("<HBHB", b, 11)
+    fatsz, = struct.unpack_from("<I", b, 36)
+    rootc, = struct.unpack_from("<I", b, 44)
+    fsinfo, = struct.unpack_from("<H", b, 48)
+    f.seek((start + rsvd) * bps)
+    fat = list(struct.unpack("<%dI" % (fatsz * bps // 4), f.read(fatsz * bps)))
+    data = start + rsvd + nfat * fatsz
+    csz = spc * bps
+
+    def clusters(c):
+        out = []
+        while 2 <= c < 0x0FFFFFF8:
+            out.append(c)
+            c = fat[c] & 0x0FFFFFFF
+        return out
+
+    def read_dir(c):
+        cl = clusters(c)
+        raw = bytearray()
+        for x in cl:
+            f.seek((data + (x - 2) * spc) * bps)
+            raw += f.read(csz)
+        return cl, raw
+
+    def lookup(raw, name):
+        """(first entry, short entry, its first cluster) of a name in a directory."""
+        lfn, at = [], None
+        for i in range(0, len(raw), 32):
+            e = raw[i:i + 32]
+            if e[0] == 0:
+                break
+            if e[0] == 0xE5:
+                lfn, at = [], None
+                continue
+            if e[11] == 0x0F:
+                if at is None:
+                    at = i
+                u = struct.unpack_from("<5H", e, 1) + struct.unpack_from("<6H", e, 14) + struct.unpack_from("<2H", e, 28)
+                lfn.insert(0, u)
+                continue
+            if e[11] & 0x08:
+                lfn, at = [], None
+                continue
+            stem, ext = e[0:8].decode("latin-1").rstrip(), e[8:11].decode("latin-1").rstrip()
+            names = [stem + ("." + ext if ext else "")]
+            if lfn:
+                units = [x for p in lfn for x in p]
+                if 0 in units:
+                    units = units[:units.index(0)]
+                names.append(struct.pack("<%dH" % len(units), *units).decode("utf-16-le"))
+            first = at if at is not None else i
+            lfn, at = [], None
+            if any(n.lower() == name.lower() for n in names):
+                c2 = struct.unpack_from("<H", e, 20)[0] << 16 | struct.unpack_from("<H", e, 26)[0]
+                return first, i, c2
+        return None
+
+    parts = path.strip("/").split("/")
+    c = rootc
+    for d in parts[:-1]:
+        _, raw = read_dir(c)
+        hit = lookup(raw, d)
+        if hit is None:
+            return False
+        c = hit[2]
+    cl, raw = read_dir(c)
+    hit = lookup(raw, parts[-1])
+    if hit is None:
+        return False
+    first, short, fc = hit
+    for i in range(first, short + 32, 32):
+        raw[i] = 0xE5
+    for k, x in enumerate(cl):
+        f.seek((data + (x - 2) * spc) * bps)
+        f.write(raw[k * csz:(k + 1) * csz])
+    freed = clusters(fc) if fc >= 2 else []
+    for x in freed:
+        fat[x] = (fat[x] & 0xF0000000)
+    fb = struct.pack("<%dI" % len(fat), *fat)
+    for k in range(nfat):
+        f.seek((start + rsvd + k * fatsz) * bps)
+        f.write(fb)
+    if fsinfo not in (0, 0xFFFF):
+        f.seek((start + fsinfo) * bps)
+        fi = bytearray(f.read(bps))
+        if struct.unpack_from("<I", fi, 0)[0] == 0x41615252:
+            nfree, = struct.unpack_from("<I", fi, 488)
+            if nfree != 0xFFFFFFFF:
+                struct.pack_into("<I", fi, 488, nfree + len(freed))
+                f.seek((start + fsinfo) * bps)
+                f.write(fi)
+    return True
+
+
 # ---------------------------------------------------------------- the commands
 
 def fill(f, first, last, seed):
@@ -384,6 +502,93 @@ def make(img, kind, free_mb):
     with open(img + ".json", "w") as f:
         json.dump(info, f, indent=1)
     print("mkwindisk: %s: %d MB, free %d MB between sectors %d and %d" % (img, total, free_mb, p_dat[1] + 1, p_rec[0] - 1))
+
+
+def find_file(top, name):
+    """The first file of that name below a directory, case not minded."""
+    for d, _, fs in sorted(os.walk(top)):
+        for f in sorted(fs):
+            if f.lower() == name.lower():
+                return os.path.join(d, f)
+    return None
+
+
+def make_ts4(img, vol, espdir):
+    with open(vol, "rb") as f:
+        sb = f.read(4096)
+    if sb[0:8] != b"TFSVOL02" or struct.unpack_from("<I", sb, 8)[0] != 4:
+        raise SystemExit("mkwindisk: %s is not a TSFS volume of version 4" % vol)
+    vbytes = struct.unpack_from("<Q", sb, 112)[0] * 4096
+    vsect = -(-vbytes // SECT)
+    vmb = -(-vsect // MB)
+    if os.path.isdir(espdir):
+        have = {}
+        for name in ("BOOTX64.EFI", "tessronos.elf", "cmdline.txt"):
+            src = find_file(espdir, name)
+            if src is not None:
+                with open(src, "rb") as f:
+                    have[name] = f.read()
+    else:
+        with open(espdir, "rb") as f:
+            tbl = gpt_read(f, os.path.getsize(espdir) // SECT)
+            esps = [p for p in tbl if p["type"] == str(ESP_T).upper()]
+            if not esps:
+                raise SystemExit("mkwindisk: %s has no EFI system partition" % espdir)
+            got = fat32_files(f, esps[0]["first"])
+        have = {}
+        for name, at in (("BOOTX64.EFI", ["EFI/TESSRON/BOOTX64.EFI", "EFI/BOOT/BOOTX64.EFI"]),
+                         ("tessronos.elf", ["EFI/TESSRON/tessronos.elf", "tessronos.elf"]),
+                         ("cmdline.txt", ["EFI/TESSRON/cmdline.txt", "cmdline.txt"])):
+            for p in at:
+                v = ifind(got, p)
+                if v is not None:
+                    have[name] = v
+                    break
+    files = {}
+    for name, dst in (("BOOTX64.EFI", ["EFI/BOOT/BOOTX64.EFI", "EFI/TESSRON/BOOTX64.EFI"]),
+                      ("tessronos.elf", ["EFI/TESSRON/tessronos.elf"]),
+                      ("cmdline.txt", ["EFI/TESSRON/cmdline.txt"])):
+        if name not in have:
+            if name == "cmdline.txt":
+                continue
+            raise SystemExit("mkwindisk: no %s in %s" % (name, espdir))
+        for d in dst:
+            files[d] = have[name]
+    files["EFI/TESSRON/INSTALL.TXT"] = ("TessronOS installed by \u30b7\u30b9\u30c6\u30e0\u767b\u9332\r\nmode=erase\r\n"
+                                        "from=mkwindisk.py make-ts4\r\nto=TessronOS\r\n"
+                                        "date=2026-11-01 00:00:00\r\n").encode("utf-8")
+    esp = 200
+    total = 1 + esp + vmb + 1
+    nsect = total * MB
+    p_esp = (MB, MB + esp * MB - 1)
+    p_ts = (p_esp[1] + 1, p_esp[1] + vmb * MB)
+    parts = [(p_esp[0], p_esp[1], ESP_T, "EFI system partition"),
+             (p_ts[0], p_ts[1], TSFS_T, "TessronOS")]
+    with open(img, "wb") as f:
+        f.truncate(nsect * SECT)
+        fat32_make(f, p_esp[0], p_esp[1] - p_esp[0] + 1, files)
+        with open(vol, "rb") as src:
+            f.seek(p_ts[0] * SECT)
+            while True:
+                b = src.read(1 << 20)
+                if not b:
+                    break
+                f.write(b)
+        gpt_write(f, nsect, parts)
+    print("mkwindisk: %s: %d MB, an ESP of %d MB and TessronOS of version 4 (%d MB) at sector %d"
+          % (img, total, esp, vmb, p_ts[0]))
+
+
+def rm_esp(img, path):
+    with open(img, "r+b") as f:
+        tbl = gpt_read(f, os.path.getsize(img) // SECT)
+        esps = [p for p in tbl if p["type"] == str(ESP_T).upper()]
+        if not esps:
+            print("mkwindisk: %s has no EFI system partition" % img)
+            return 1
+        gone = fat32_remove(f, esps[0]["first"], path)
+    print("mkwindisk: %s: %s %s" % (img, path, "deleted" if gone else "not there"))
+    return 0
 
 
 def check(img):
@@ -511,6 +716,11 @@ def main():
         free = int(a[a.index("--free-mb") + 1]) if "--free-mb" in a else 1200
         make(a[1], a[2], free)
         return 0
+    if len(a) == 4 and a[0] == "make-ts4":
+        make_ts4(a[1], a[2], a[3])
+        return 0
+    if len(a) == 3 and a[0] == "rm-esp":
+        return rm_esp(a[1], a[2])
     if len(a) == 2 and a[0] == "check":
         return check(a[1])
     if len(a) == 2 and a[0] == "check-replace":

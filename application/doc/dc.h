@@ -10,7 +10,7 @@
 /*
  *	dc.h
  *	基本文章編集 as a program running as a process: what its parts share
- *	(application/doc/dc_main.c, dc_host.c, design 11.3)
+ *	(application/doc/dc_main.c, dc_host.c, dc_link.c, design 11.3, 11.2.6)
  *
  *	The document is record g_recno of the object opened, read and parsed
  *	into the program's memory (g_rec, tvapp.h) and made into a model
@@ -71,5 +71,14 @@ IMPORT void dc_undo_clear( void );
 IMPORT T_TAD *dc_tray_frag( void );	/* the set in hand, freed by the caller; NULL none */
 
 IMPORT CONST T_DDHOST	dc_host;
+
+/* ---------------------------------------------------------------- 仮身操作 (dc_link.c, ts/tvvop.h) */
+
+IMPORT CONST T_TVVOP *dc_vop( void );
+/*
+ * Link v of the record, drawn in box (NULL: where its width and height
+ * put it), as the shared part takes it: v is the one written back
+ */
+IMPORT void dc_tvlink( T_TVLINK *l, CONST T_VOBJ *v, CONST T_DPRECT *box );
 
 #endif /* __DC_H__ */

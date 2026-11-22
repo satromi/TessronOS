@@ -1261,7 +1261,7 @@ LOCAL BOOL menu_row( INT row, INT *x, INT *y )
 	T_WMWIN		w;
 	INT		pid, wid, best = 0x7fffffff;
 
-	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) {
+	for ( pid = 1; pid <= kt_panel_last(); pid++ ) {
 		if ( wm_panel_rect(pid, &r) < E_OK ) continue;
 		wid = wm_panel_wid(pid);
 		if ( wid <= 0 || wm_ref(wid, &w) < E_OK || ( w.attr & WM_ATTR_POPUP ) == 0 ) continue;
@@ -1281,7 +1281,7 @@ LOCAL BOOL menu_sub_row( INT *x, INT *y )
 	T_WMWIN		w;
 	INT		pid, wid, best = -1, lists = 0;
 
-	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) {
+	for ( pid = 1; pid <= kt_panel_last(); pid++ ) {
 		if ( wm_panel_rect(pid, &r) < E_OK ) continue;
 		wid = wm_panel_wid(pid);
 		if ( wid <= 0 || wm_ref(wid, &w) < E_OK || ( w.attr & WM_ATTR_POPUP ) == 0 ) continue;

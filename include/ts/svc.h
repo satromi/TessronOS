@@ -499,7 +499,9 @@
 #define TSN_OB_REF_NAM	TSN(7, 62)	/* an object's name, of any length */
 #define TSN_OB_CHK_LABEL	TSN(7, 63)	/* a native volume's label, whole (ts/tsfsck.h) */
 #define TSN_OB_REF_OBJ2	TSN(7, 64)	/* ob_ref_obj with the name apart (TSN_OB_REF_OBJ: the form before) */
-#define TSN_OB_MAX		64
+#define TSN_OB_CNV_VOL	TSN(7, 65)	/* TSN_RIGHT_ADMIN: a volume converted to the format's version 5 (ts/tsfsck.h) */
+#define TSN_OB_CNV_BOOT	TSN(7, 66)	/* what the conversion at start did, once */
+#define TSN_OB_MAX		66
 
 /* class 6: tm_ */
 #define TSN_TM_PUTSTRING	TSN(6, 1)

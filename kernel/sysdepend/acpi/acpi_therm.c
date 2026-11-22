@@ -124,13 +124,10 @@ LOCAL UD rd_if( UW msr )
 
 #define PERIOD_S	10
 #define CHG_MAX		6
-#define TZ_MAX		8
-#define SEN_MAX		6
 #define LINE		1536
 
 #define POLL_S		4		/* the sensors read */
 #define DEBOUNCE_S	2		/* PL1 not set again within */
-#define ROW_MAX		8
 #define PL1_WINDOW_US	1000000ULL	/* the time window of a limit below the most */
 #define PL_SANE_UW	1000000000ULL	/* more is not a power the processor can take */
 
@@ -316,7 +313,7 @@ LOCAL void tell_acpi( void )
 	void	*d;
 	INT	i, k;
 
-	for ( i = 0; i < TZ_MAX && ( d = knl_acpica_thermal_zone(i) ) != NULL; i++ ) {
+	for ( i = 0; ( d = knl_acpica_thermal_zone(i) ) != NULL; i++ ) {
 		if ( knl_acpica_path(d, path, sizeof(path)) != 0 ) path[0] = '\0';
 		k = tm_sprintf((UB *)t, (CONST UB *)"therm: zone %s:", path);
 		k += item(t + k, d, "_TMP", TRUE);
@@ -343,11 +340,15 @@ LOCAL void tell_acpi( void )
 		k += tm_sprintf((UB *)t + k, (CONST UB *)"; the processor's B0D4:");
 		k += trips(t + k, d);
 	}
-	for ( i = 0; i < SEN_MAX && ( d = knl_acpica_device("INT3403", i) ) != NULL; i++ ) {
+	/* every sensor: the line said and another begun when it is full */
+	for ( i = 0; ( d = knl_acpica_device("INT3403", i) ) != NULL; i++ ) {
+		if ( k > LINE - 200 ) {
+			tm_printf((UB *)"%s\n", t);
+			k = tm_sprintf((UB *)t, (CONST UB *)"therm: DPTF (more)");
+		}
 		if ( knl_acpica_path(d, path, sizeof(path)) != 0 ) path[0] = '\0';
 		k += tm_sprintf((UB *)t + k, (CONST UB *)"; %s:", path);
 		k += trips(t + k, d);
-		if ( k > LINE - 120 ) break;
 	}
 	k += ec_text(t + k);
 	tm_printf((UB *)"%s\n", t);
@@ -367,7 +368,7 @@ typedef struct {
 	INT	read_mc;		/* the sensor's last reading, INT_MIN none */
 } PSVROW;
 
-LOCAL PSVROW	row[ROW_MAX];
+LOCAL PSVROW	*row = NULL;		/* the rows taken, nrow of them: as many as the table has */
 LOCAL INT	nrow = 0;
 LOCAL UW	n_tmp = 0, n_set = 0;	/* _TMP read, PL1 written */
 
@@ -558,8 +559,8 @@ LOCAL CONST char *last_name( CONST char *path )
 /* The table taken, when the manager offers the passive policy 2 */
 LOCAL void dptf_setup( void )
 {
-	static TSACPI_PSVT	t[ROW_MAX];
-	UB			u[16][16];
+	TSACPI_PSVT		*t = NULL;
+	UB			(*u)[16];
 	char			path[64], src[64];
 	void			*ietm;
 	UD			v, info, spec;
@@ -570,9 +571,20 @@ LOCAL void dptf_setup( void )
 		tm_printf((UB *)"therm: DPTF policy: no manager (INT3400)\n");
 		return;
 	}
-	n = knl_acpica_uuids(ietm, "IDSP", u, 16);
-	if ( n > 16 ) n = 16;
+	/* every UUID the manager lists, read again with room for them all when there were more */
+	for ( i = 16; ; i = n ) {
+		u = (UB (*)[16])Kmalloc(sizeof(UB) * 16 * (SZ)i);
+		if ( u == NULL ) {
+			tm_printf((UB *)"therm: DPTF policy: no memory for %d UUIDs: not used\n", i);
+			return;
+		}
+		n = knl_acpica_uuids(ietm, "IDSP", u, i);
+		if ( n <= i || n > 0x10000 ) break;
+		Kfree(u);
+	}
+	if ( n > i ) n = i;
 	if ( n < 0 || !uuid_listed(u, n, uuid_passive2) ) {
+		Kfree(u);
 		tm_printf((UB *)"therm: DPTF policy: %s does not list the passive policy 2 (IDSP, %d UUIDs): not used\n", path, n);
 		return;
 	}
@@ -582,12 +594,33 @@ LOCAL void dptf_setup( void )
 
 		if ( knl_acpica_pkg(ietm, "_TRT", dummy, ds, 0) >= 0 || knl_acpica_pkg(ietm, "_ART", dummy, ds, 0) >= 0 ) {
 			tm_printf((UB *)"therm: DPTF policy: %s has _TRT or _ART for the passive policy 1: not used\n", path);
+			Kfree(u);
 			return;
 		}
 	}
-	n = knl_acpica_psvt(ietm, t, ROW_MAX);
+	Kfree(u);
+	/* every row of the table: read again with twice the room while the room was filled */
+	for ( i = 8; ; i *= 2 ) {
+		t = (TSACPI_PSVT *)Kmalloc(sizeof(TSACPI_PSVT) * (SZ)i);
+		row = (PSVROW *)Kcalloc((SZ)i, sizeof(PSVROW));
+		if ( t == NULL || row == NULL ) {
+			tm_printf((UB *)"therm: DPTF policy: no memory for a PSVT of %d rows: not used\n", i);
+			if ( t != NULL ) Kfree(t);
+			if ( row != NULL ) Kfree(row);
+			row = NULL;
+			return;
+		}
+		n = knl_acpica_psvt(ietm, t, i);
+		if ( n < i || i >= 0x10000 ) break;
+		Kfree(t);
+		Kfree(row);
+		row = NULL;
+	}
 	if ( n <= 0 ) {
 		tm_printf((UB *)"therm: DPTF policy: %s has no PSVT of revision 2: not used\n", path);
+		Kfree(t);
+		Kfree(row);
+		row = NULL;
 		return;
 	}
 	for ( i = 0; i < n; i++ ) {
@@ -619,6 +652,7 @@ LOCAL void dptf_setup( void )
 			  (INT)t[i].limit_coeff, (INT)t[i].unlimit_coeff);
 		nrow++;
 	}
+	Kfree(t);
 	if ( nrow == 0 ) return;
 	if ( !has_rapl ) {
 		tm_printf((UB *)"therm: DPTF policy: no RAPL on this processor: the table not used\n");
@@ -708,10 +742,18 @@ LOCAL INT zones_text( char *t )
 	void	*d;
 	INT	i, n = 0;
 
-	for ( i = 0; i < TZ_MAX && ( d = knl_acpica_thermal_zone(i) ) != NULL; i++ ) {
+	for ( i = 0; ( d = knl_acpica_thermal_zone(i) ) != NULL; i++ ) {
 		unsigned long long	v = 0;
 		BOOL			had;
 
+		if ( n > LINE / 3 ) {
+			/* the line is one of many parts: the zones past its share counted, each said at the start */
+			INT	more = 0;
+
+			while ( knl_acpica_thermal_zone(i + more) != NULL ) more++;
+			n += tm_sprintf((UB *)t + n, (CONST UB *)"; %d zones more", more);
+			break;
+		}
 		if ( knl_acpica_path(d, path, sizeof(path)) != 0 ) path[0] = '\0';
 		had = (BOOL)( knl_acpica_int(d, "_TMP", &v) == 0 );
 		n += tm_sprintf((UB *)t + n, (CONST UB *)"; %s ", path);

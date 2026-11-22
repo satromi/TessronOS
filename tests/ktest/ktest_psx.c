@@ -839,6 +839,61 @@ LOCAL void test_tsh_script( void )
 	(void)fs_unlink("/tmp/日本語の名前");
 }
 
+IMPORT void knl_so_prc_first( INT *p_cur, INT *p_max );	/* so_prc.c: the first limits on a process's sockets */
+
+/*
+ * RLIMIT_NOFILE of lib/libposix is the kernel's limit on the process's
+ * sockets (design 9.2.2), read and set through the shell's ulimit: the
+ * first limits are the system's, the soft one is lowered and raised
+ * again up to the hard one, the hard one is lowered; a soft limit past
+ * the hard one is refused (EINVAL), and so is an unlimited hard one
+ * (EPERM). Each refusal is in a subshell, so that its error does not end
+ * the script.
+ */
+LOCAL void test_tsh_ulimit( void )
+{
+	static CONST char *const w[] = { "tsh", "-c",
+		"echo \"a=$(ulimit -n) h=$(ulimit -Hn)\"; "
+		"ulimit -Sn 100; echo \"s=$(ulimit -n)\"; "
+		"ulimit -Sn 200; echo \"r=$(ulimit -Sn)\"; "
+		"( ulimit -Sn 99999 ) || echo big-refused; "
+		"( ulimit -Hn unlimited ) || echo inf-refused; "
+		"ulimit -Hn 300; echo \"h2=$(ulimit -Hn)\"; "
+		"( ulimit -Sn 301 ) || echo over-refused; "
+		"echo \"s2=$(ulimit -Sn) h3=$(ulimit -Hn)\"; "
+		"exit 3" };
+	T_FSTAT	st;
+	T_PSTS	ps;
+	UB	b[1024];
+	char	want[64];
+	INT	p[2], in[2], n, code = -1, cur, max;
+	ID	pid;
+
+	if ( fs_stat("/bin/tsh", &st) < EX_OK ) KT_SKIP("no /bin/tsh (make CMDS=1)");
+	knl_so_prc_first(&cur, &max);
+	KT_ASSERT_ER(fs_pipe(p), EX_OK);
+	KT_ASSERT_ER(fs_pipe(in), EX_OK);
+	pid = start_prog("/bin/tsh", w, 3, in[0], p[1]);
+	fs_close(p[1]);
+	fs_close(in[0]);
+	fs_close(in[1]);
+	KT_ASSERT(pid > 0);
+	n = read_all(p[0], b, sizeof(b), 20000);
+	fs_close(p[0]);
+	if ( pid > 0 && ts_wai_prc(pid, &ps, 20000) >= E_OK ) code = ps.exitcd;
+	tm_printf((UB *)"psx: ulimit said [%s] code %d\n", b, code);
+	tm_sprintf((UB *)want, (UB *)"a=%d h=%d\n", cur, max);
+	KT_ASSERT(s_has(b, n, want));
+	KT_ASSERT(s_has(b, n, "s=100\n"));
+	KT_ASSERT(s_has(b, n, "r=200\n"));
+	KT_ASSERT(s_has(b, n, "big-refused\n"));
+	KT_ASSERT(s_has(b, n, "inf-refused\n"));
+	KT_ASSERT(s_has(b, n, "h2=300\n"));
+	KT_ASSERT(s_has(b, n, "over-refused\n"));
+	KT_ASSERT(s_has(b, n, "s2=200 h3=300\n"));
+	KT_ASSERT_EQ(code, 3);
+}
+
 #ifdef KT_SSH_PORT
 IMPORT ER  so_dhcp_start( void );
 IMPORT ER  so_getifaddr( UW *p_addr, UW *p_mask, UW *p_gw );
@@ -1051,6 +1106,7 @@ EXPORT void ktest_psx( void )
 	KT_RUN(test_cmd_pipeline);
 	KT_RUN(test_cmd_ps);
 	KT_RUN(test_tsh_script);
+	KT_RUN(test_tsh_ulimit);
 #ifdef KT_SSH_PORT
 	KT_RUN(test_ssh);
 #endif

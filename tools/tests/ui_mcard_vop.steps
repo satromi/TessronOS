@@ -1,0 +1,181 @@
+# マイクロカード (design 11.18, 11.2.6), for tools/ui_run.py: the 仮身操作,
+# 実身操作 and 実行 of a link in a field of a card, done by the shared part
+# of lib/libtv (tv_vop.c). The template カード用紙 gets one field of the kind
+# 仮身 on 設計画面, a link of 仮身サンプル is dropped in it, and its
+# 属性変更, 続柄設定, 実身複製, 新版作成, 起動アプリの固定 (the menu then
+# offering 起動アプリを最新にする) and 実行's list are done; at last it is
+# carried out of the window into the window it came from. The pictures are
+# checked against the ones recorded when the program did these itself,
+# before they were moved to lib/libtv.
+open 01a0d8c4-5334-7e95-8a06-b1c2d3e4f534
+expect mcard: ready カード用紙
+wait 800
+win カード用紙
+# 設計画面: one field りんく of the kind 仮身
+click 220 195
+key 88
+text rinku
+key 28
+key 28
+expect mcard: design name 1 りんく
+key 29
+wait 300
+hold 320 195
+wait 500
+move 305 228
+wait 200
+move 300 248
+wait 300
+up
+expect mcard: design kind link
+wait 300
+shot mcv_design
+click 615 136
+expect mcard: designed 1 fields
+wait 800
+shot mcv_card
+# a link of 仮身サンプル dropped in the field
+open 019a4370-3819-79a2-9758-881e1e0de90a
+win TADjsについて
+wait 2000
+drag 400 414 300 172
+expect mcard: link put 1
+wait 1000
+shot mcv_dropped
+# 仮身操作 > 属性変更: 続柄 shown, the desktop's answer written into the field's link
+click 300 172 1
+wait 1500
+shot mcv_menu
+move 310 353
+wait 150
+move 370 353
+wait 800
+move 400 353
+wait 150
+move 420 413
+wait 300
+click 420 413
+wait 1500
+shot mcv_attr_panel
+click 420 367
+wait 300
+key 28
+expect mcard: attr
+wait 3000
+shot mcv_attr
+shotsum mcv_attr 130 118 690 560
+want ok 5808dccc6ddd416b
+# the menu opens with the last chosen under the pointer, held at the top of the
+# screen: 仮身操作 at 191, 実身操作 at 211, 実行 at 291
+# 仮身操作 > 続柄設定
+click 300 172 1
+wait 1500
+move 310 191
+wait 150
+move 370 191
+wait 800
+move 400 191
+wait 150
+move 420 271
+wait 300
+click 420 271
+expect mcard: menu vobj.relation
+wait 1500
+shot mcv_rel_panel
+text abc
+wait 300
+key 28
+wait 3000
+shot mcv_rel
+shotsum mcv_rel 130 118 690 560
+want ok 315d880df9acd9f3
+# 実身操作 > 実身複製: the field points at the copy
+click 300 172 1
+wait 1500
+move 310 211
+wait 150
+move 370 211
+wait 800
+move 400 211
+wait 150
+move 420 231
+wait 300
+click 420 231
+wait 1500
+shot mcv_dup_panel
+key 28
+expect mcard: duplicated
+wait 3000
+shot mcv_dup
+shotsum mcv_dup 130 118 690 560
+want ok 7c8abd0998fc7700
+# 実身操作 > 新版作成, with no panel
+click 300 172 1
+wait 1500
+move 310 211
+wait 150
+move 370 211
+wait 800
+move 400 211
+wait 150
+move 420 251
+wait 300
+click 420 251
+expect mcard: menu real.newversion
+wait 3000
+shot mcv_newver
+shotsum mcv_newver 130 118 690 560
+want ok d319bb918bc643d0
+# 実身操作 > 起動アプリを固定する, and the menu then offers 起動アプリを最新にする
+click 300 172 1
+wait 1500
+move 310 211
+wait 150
+move 370 211
+wait 800
+move 400 211
+wait 150
+move 420 271
+wait 300
+click 420 271
+expect mcard: menu real.lock
+wait 1000
+click 300 172 1
+wait 1500
+move 310 211
+wait 150
+move 370 211
+wait 800
+shot mcv_real_kept
+shotsum mcv_real_kept 280 0 700 400
+want ok c935e2430392cfc9
+# 実行: the programs the desktop offers
+move 310 291
+wait 150
+move 370 291
+wait 800
+shot mcv_exec_list
+shotsum mcv_exec_list 280 0 700 400
+want ok 8512399a25069401
+key 29
+wait 200
+key 29
+wait 300
+# carried out of the window into the window of 仮身サンプル on the left: moved there
+move 300 172
+wait 200
+down
+wait 200
+move 280 172
+wait 200
+move 200 300
+wait 300
+move 60 600
+wait 1500
+up
+expect mcard: carried
+wait 3000
+shot mcv_carried
+shotsum mcv_carried 130 118 690 560
+want ok cb6feb4b3c7dbcb8
+absent !OACV!

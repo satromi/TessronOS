@@ -105,20 +105,36 @@ LOCAL CONST DTPROG *menu_accessory( INT i )
 	return p;
 }
 
+/* The bytes of a name, without its nought */
+LOCAL SZ name_len( CONST UB *s )
+{
+	SZ	n = 0;
+
+	while ( s[n] != 0 ) n++;
+	return n;
+}
+
 /* 小物's list: a line for each accessory */
 LOCAL void acc_fill( ID mid )
 {
 	TS_UUID		ad = sys_def(SYSDEF_MENU_ACC);
 	CONST DTPROG	**acc;
-	UB		(*names)[WM_LABEL_MAX];
+	UB		*names, *w;
 	INT		n = menu_accessories(&acc), i;
+	SZ		total = 1;
 
-	names = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * (SZ)( n + 1 ));
+	/* the names one after another, each whole (stride 0) */
+	for ( i = 0; i < n; i++ ) total += name_len((CONST UB *)acc[i]->name) + 1;
+	names = (UB *)Kmalloc(total);
 	if ( names != NULL ) {
+		w = names;
 		for ( i = 0; i < n; i++ ) {
-			(void)dt_fit(names[i], WM_LABEL_MAX, acc[i]->name);	/* a menu line's room */
+			SZ	l = name_len((CONST UB *)acc[i]->name) + 1;
+
+			knl_memcpy(w, acc[i]->name, l);
+			w += l;
 		}
-		(void)mn_set_lst(mid, &ad, "acc.item", (CONST UB *)names, WM_LABEL_MAX, n);
+		(void)mn_set_lst(mid, &ad, "acc.item", names, 0, n);
 		Kfree(names);
 	}
 	if ( acc != NULL ) Kfree(acc);
@@ -131,7 +147,6 @@ LOCAL void atr( ID mid, CONST TS_UUID *def, CONST char *code, BOOL grey )
 	(void)mn_chg_atr(mid, def, code, grey ? MN_GREY : 0);
 }
 
-
 /*
  * The tray's history: a row for each level, "1 仮身3個", the one in hand
  * marked. With nothing in the tray the list is empty and 空にする grey,
@@ -141,21 +156,28 @@ LOCAL void tray_state( ID mid )
 {
 	TS_UUID	td = sys_def(SYSDEF_MENU_TRAY);
 	T_TRSTS	*sts;
-	UB	(*rows)[WM_LABEL_MAX];
+	UB	*rows = NULL, *w;
 	INT	i, at;
+	SZ	total = 1;
 
 	sts = (T_TRSTS *)Kmalloc(sizeof(T_TRSTS));
-	rows = (UB (*)[WM_LABEL_MAX])Kmalloc(sizeof(UB) * WM_LABEL_MAX * TR_LEVELS);
-	if ( sts != NULL && rows != NULL && tr_get_sts(sts) >= E_OK ) {
+	if ( sts != NULL && tr_get_sts(sts) >= E_OK ) {
+		/* a row for each level, one after another and each whole (stride 0) */
+		for ( i = 1; i <= sts->nlevel; i++ ) total += 3 + name_len(sts->set[i].name) + 1;
+		rows = (UB *)Kmalloc(total);
+	}
+	if ( sts != NULL && rows != NULL ) {
+		w = rows;
 		for ( i = 1; i <= sts->nlevel; i++ ) {
 			at = 0;
-			if ( i >= 10 ) rows[i - 1][at++] = (UB)( '0' + i / 10 );
-			rows[i - 1][at++] = (UB)( '0' + i % 10 );
-			rows[i - 1][at++] = ' ';
-			(void)dt_fit(rows[i - 1] + at, WM_LABEL_MAX - at, sts->set[i].name);	/* a menu line's room */
+			if ( i >= 10 ) w[at++] = (UB)( '0' + i / 10 );
+			w[at++] = (UB)( '0' + i % 10 );
+			w[at++] = ' ';
+			for ( total = 0; sts->set[i].name[total] != 0; total++ ) w[at + total] = sts->set[i].name[total];
+			w[at + total] = 0;
+			w += at + total + 1;
 		}
-		(void)mn_set_lst(mid, &td, "tray.level", (CONST UB *)rows, WM_LABEL_MAX,
-				 sts->nlevel);
+		(void)mn_set_lst(mid, &td, "tray.level", rows, 0, sts->nlevel);
 		if ( sts->hand > 0 ) {
 			(void)mn_chg_idx(mid, &td, "tray.level", sts->hand - 1, MN_TICK);
 		}
@@ -165,7 +187,6 @@ LOCAL void tray_state( ID mid )
 	if ( rows != NULL ) Kfree(rows);
 }
 
-#define VMN_APP_LINE	64		/* bytes of a line of the menu's list 実行 */
 
 EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 {
@@ -190,6 +211,7 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 
 		atr(mid, &dd, "disk.detach", (BOOL)( !on_vobj || !dt_disk_detachable(v) ));
 		atr(mid, &dd, "disk.grow", (BOOL)( on_vobj && !dt_disk_growable(v) ));
+		atr(mid, &dd, "disk.convert", (BOOL)( on_vobj && !dt_disk_growable(v) ));	/* a native volume, as for 拡張 */
 	}
 
 	/* away from a virtual object, what is about one cannot be chosen */
@@ -243,18 +265,24 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
 
 		INT	na = 0;
 
-		/*
-		 * The names are whole in the list; the menu's lines are of a
-		 * fixed room (mn_set_lst) for now, so each is cut to it at a
-		 * whole letter just before it is handed on.
-		 */
-		apps = (UB *)Kmalloc((SZ)VMN_APP_LINE * (SZ)( room + 1 ));
-		if ( apps != NULL && a != NULL ) {
+		/* the names one after another, each whole (stride 0) */
+		SZ	total = 1;
+		UB	*w;
+
+		if ( a != NULL ) {
 			n = na = dt_app_list(v, a, room, NULL);
+			for ( i = 0; i < n; i++ ) total += name_len(a[i].name) + 1;
+			apps = (UB *)Kmalloc(total);
+		}
+		if ( apps != NULL && a != NULL ) {
+			w = apps;
 			for ( i = 0; i < n; i++ ) {
-				(void)dt_fit(apps + (SZ)i * VMN_APP_LINE, VMN_APP_LINE, a[i].name);
+				SZ	l = name_len(a[i].name) + 1;
+
+				knl_memcpy(w, a[i].name, l);
+				w += l;
 			}
-			(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)apps, VMN_APP_LINE, n);
+			(void)mn_set_lst(mid, &ed, "exec.app", apps, 0, n);
 			atr(mid, &ed, "exec.app", cut);
 #ifdef USE_UITEST
 			tm_printf((UB *)"desktop: exec menu on %d\n", n);	/* for the tests */
@@ -272,7 +300,8 @@ EXPORT void dt_get_vmn( DTWIN *d, ID mid, BOOL on_vobj, CONST T_VOBJ *v )
  * with a part of its own (DTOWN), ends with ウインドウ, 小物 and 実行 as
  * every window's does (SYSDEF_MENU_TAIL). 小物 lists the accessories;
  * 実行 is shown grey, as there is no virtual object under the pointer to
- * run (a link in a slide is one: its 実行 is set for it).
+ * run, unless the program has set its state itself (mn_chg_atr), as a
+ * program does for the link it was asked on: then that is kept.
  * An accessory chosen there is started from the desktop's own loop: the
  * choice is made in the task of whoever opened the menu.
  */
@@ -283,7 +312,9 @@ EXPORT void dt_tail_fill( ID mid )
 	TS_UUID		td = sys_def(SYSDEF_MENU_TAIL);
 
 	acc_fill(mid);
-	atr(mid, &td, "exec", TRUE);
+	if ( mn_atr_decided(mid, &td, "exec") != 1 ) {
+		atr(mid, &td, "exec", TRUE);
+	}
 }
 
 EXPORT BOOL dt_tail_do( CONST T_MNSEL *sel )
@@ -377,7 +408,7 @@ EXPORT BOOL dt_exe_vmn( DTWIN *d, CONST T_MNSEL *sel, BOOL on_vobj, CONST T_VOBJ
 			(void)dt_prog_run(d, a, on_vobj ? v : NULL);
 		}
 	} else if ( mn_is(sel, "disk.connect") || mn_is(sel, "disk.status") || mn_is(sel, "disk.create")
-		 || mn_is(sel, "disk.grow") || ( mn_is(sel, "disk.detach") && on_vobj ) ) {
+		 || mn_is(sel, "disk.grow") || mn_is(sel, "disk.convert") || ( mn_is(sel, "disk.detach") && on_vobj ) ) {
 		/* ディスク操作: the program does it, told the item and the link */
 		dt_disk_menu(d, (CONST char *)sel->code, on_vobj ? v : NULL);
 	} else if ( mn_is(sel, "tray.level") ) {
@@ -666,53 +697,49 @@ LOCAL BOOL rel_ask( DTWIN *d, T_VOBJ *io )
 
 LOCAL void rename_real( DTWIN *d, CONST T_VOBJ *v )
 {
-	UB	*start, name[WM_LABEL_MAX];
+	UB	*start, *name;
 	INT	wid;
-	BOOL	ok;
 
-	start = om_store_name_dup(&v->target, NULL);	/* the box shows what fits of it */
-	ok = dt_ask_text(d, "実身名を入力してください", NULL, start, name,
-			 WM_LABEL_MAX, "決定");
+	/* the name whole in the box, and the one agreed to whole */
+	start = om_store_name_dup(&v->target, NULL);
+	name = dt_ask_text_all(d, "実身名を入力してください", NULL, start, "決定");
 	if ( start != NULL ) {
 		Kfree(start);
 	}
-	if ( !ok || name[0] == 0 ) {
+	if ( name == NULL ) {
 		return;
 	}
-	if ( om_store_rename(&v->target, name) < E_OK ) {
-		return;
+	if ( om_store_rename(&v->target, name) >= E_OK ) {
+		/* a window showing it is called by the new name too */
+		if ( ( wid = wm_obj_showing(&v->target) ) > 0 ) {
+			wm_set_title(wid, (CONST char *)name);
+		}
 	}
-	/* a window showing it is called by the new name too */
-	if ( ( wid = wm_obj_showing(&v->target) ) > 0 ) {
-		wm_set_title(wid, (CONST char *)name);
-	}
+	Kfree(name);
 }
 
 /* The object copied under a name asked for, the copy in *p_nid; FALSE when it was not */
 LOCAL BOOL dup_ask( DTWIN *d, CONST T_VOBJ *v, TS_UUID *p_nid )
 {
-	UB	start[WM_LABEL_MAX], name[WM_LABEL_MAX], *own;
-	INT	n, k;
+	UB	*start, *name, *own;
+	BOOL	ok;
 
-	/* what fits of the name in the box, with room left for のコピー */
+	/* the name whole in the box, のコピー after it */
 	own = om_store_name_dup(&v->target, NULL);
-	n = dt_fit(start, WM_LABEL_MAX - 16, own);
+	start = dt_copy_name(own);
 	if ( own != NULL ) {
 		Kfree(own);
 	}
-	{
-		CONST UB	*tail = (CONST UB *)"のコピー";
-
-		for ( k = 0; tail[k] != 0 && n < WM_LABEL_MAX - 1; k++ ) {
-			start[n++] = tail[k];
-		}
-		start[n] = 0;
+	name = dt_ask_text_all(d, "新しい実身の名称を入力してください", NULL, start, "設定");
+	if ( start != NULL ) {
+		Kfree(start);
 	}
-	if ( !dt_ask_text(d, "新しい実身の名称を入力してください", NULL, start,
-		       name, WM_LABEL_MAX, "設定") || name[0] == 0 ) {
+	if ( name == NULL ) {
 		return FALSE;
 	}
-	return (BOOL)( om_store_copy(&v->target, name, TRUE, p_nid) >= E_OK );
+	ok = (BOOL)( om_store_copy(&v->target, name, TRUE, p_nid) >= E_OK );
+	Kfree(name);
+	return ok;
 }
 
 /* Whether the object a link points at can be reached: a cut link's cannot */
@@ -1121,11 +1148,10 @@ EXPORT void dt_link_fit( T_VOBJ *c )
 EXPORT ER dt_save_new_of( DTWIN *ask, CONST TS_UUID *id, CONST TS_UUID *parent,
 			  CONST TS_UUID *parent_vobj, CONST TS_UUID *target, TS_UUID *p_new )
 {
-	UB	start[WM_LABEL_MAX], name[WM_LABEL_MAX], *own;
+	UB	*start, *name, *own;
 	TS_UUID	nid, lid;
 	T_TAD	*prec;
 	T_VOBJ	pv = { .recno = 0 };
-	INT	n, k;
 	BOOL	held;
 	ER	er;
 
@@ -1139,24 +1165,20 @@ EXPORT ER dt_save_new_of( DTWIN *ask, CONST TS_UUID *id, CONST TS_UUID *parent,
 		return E_NOEXS;
 	}
 	tad_vobj_clear(&pv);
-	own = om_store_name_dup(id, NULL);	/* what fits of it in the box, with room for のコピー */
-	n = dt_fit(start, WM_LABEL_MAX - 16, own);
+	own = om_store_name_dup(id, NULL);	/* the name whole in the box, のコピー after it */
+	start = dt_copy_name(own);
 	if ( own != NULL ) {
 		Kfree(own);
 	}
-	{
-		CONST UB	*tail = (CONST UB *)"のコピー";
-
-		for ( k = 0; tail[k] != 0 && n < WM_LABEL_MAX - 1; k++ ) {
-			start[n++] = tail[k];
-		}
-		start[n] = 0;
+	name = dt_ask_text_all(ask, "新しい実身の名称を入力してください", NULL, start, "設定");
+	if ( start != NULL ) {
+		Kfree(start);
 	}
-	if ( !dt_ask_text(ask, "新しい実身の名称を入力してください", NULL, start,
-		       name, WM_LABEL_MAX, "設定") || name[0] == 0 ) {
+	if ( name == NULL ) {
 		return E_ABORT;
 	}
 	er = om_store_copy(id, name, FALSE, &nid);
+	Kfree(name);
 	if ( er < E_OK ) {
 		return er;
 	}

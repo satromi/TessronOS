@@ -31,7 +31,6 @@
 
 #define OBF_VOL_MAX	CNF_MAX_VOL	/* volumes at once: the disks times their partitions */
 #define OBF_HND_MAX	4096
-#define OBF_DECL_MAX	TSFS_MAX_REC
 
 /*
  * A volume attached. Its entry is made the first time one more volume
@@ -1663,6 +1662,7 @@ EXPORT INT knl_obfile_slots( INT *p_used )
 
 /* ---------------------------------------------------------------- record types */
 
+/* The declarations of the metadata, at most max into d; with d NULL, how many there are */
 LOCAL INT decl_read( CONST UB *j, INT len, OBFDECL *d, INT max )
 {
 	INT	arr = knl_oj_path(j, len, "tessronos", "records"), pos = arr, e, n = 0;
@@ -1672,6 +1672,10 @@ LOCAL INT decl_read( CONST UB *j, INT len, OBFDECL *d, INT max )
 
 		if ( j[e] != '{' ) continue;
 		if ( !knl_oj_num(j, len, knl_oj_member(j, len, e, "n"), &v) ) continue;
+		if ( d == NULL ) {
+			n++;
+			continue;
+		}
 		d[n].n = (INT)v;
 		d[n].rt = knl_oj_num(j, len, knl_oj_member(j, len, e, "rt"), &v)
 			? (UINT)v : OB_RT_SYSDATA;
@@ -1682,7 +1686,8 @@ LOCAL INT decl_read( CONST UB *j, INT len, OBFDECL *d, INT max )
 	return n;
 }
 
-#define DECL_TEXT_MAX	( OBF_DECL_MAX * 40 + 8 )
+/* The room the text of `n` declarations takes: three numbers of up to 11 letters each */
+#define DECL_TEXT_MAX	( ( n ) * 56 + 8 )
 
 LOCAL INT decl_write( UB *j, INT len, INT max, CONST OBFDECL *d, INT n )
 {
@@ -2130,17 +2135,22 @@ LOCAL ER decl_change( OBFHND *o, INT recno, BOOL add, UINT rt, UINT sub )
 	INT	n, i, k, len, cap = 0;
 	ER	er;
 
-	d = (OBFDECL *)Kmalloc(sizeof(OBFDECL) * OBF_DECL_MAX);
-	if ( d == NULL ) {
-		return E_NOMEM;
-	}
 	/* the metadata whole, with room for the declarations written again */
-	len = od_meta_all(o, DECL_TEXT_MAX, &j, &cap);
+	len = od_meta_all(o, 0, &j, NULL);
 	if ( len < 0 ) {
-		Kfree(d);
 		return (ER)len;
 	}
-	n = decl_read(j, len, d, OBF_DECL_MAX);
+	n = decl_read(j, len, NULL, 0x7FFFFFFF) + 1;
+	Kfree(j);
+	j = NULL;
+	len = od_meta_all(o, DECL_TEXT_MAX, &j, &cap);
+	d = ( len >= 0 ) ? (OBFDECL *)Kmalloc(sizeof(OBFDECL) * (SZ)n) : NULL;
+	if ( len < 0 || d == NULL ) {
+		if ( j != NULL ) Kfree(j);
+		return ( len < 0 ) ? (ER)len : E_NOMEM;
+	}
+	k = n;
+	n = decl_read(j, len, d, k - 1);
 	for ( i = 0, k = 0; i < n; i++ ) {
 		if ( d[i].n != recno ) {
 			d[k++] = d[i];
@@ -2152,7 +2162,7 @@ LOCAL ER decl_change( OBFHND *o, INT recno, BOOL add, UINT rt, UINT sub )
 		return E_OK;			/* nothing declared for it */
 	}
 	n = k;
-	if ( add && n < OBF_DECL_MAX ) {
+	if ( add ) {
 		d[n].n = recno;
 		d[n].rt = rt;
 		d[n].sub = sub;
@@ -2264,7 +2274,7 @@ LOCAL ER obf_lrc( INT h, T_OBREC *buf, INT n, INT *p_cnt )
 {
 	OBFHND	*o = hnd_of(h);
 	T_RREC	*r;
-	OBFDECL	*d;
+	OBFDECL	*d = NULL;
 	UB	*j = NULL;
 	SZ	asz = 0;
 	INT	got = 0, nd = 0, i, k, ex = -1;
@@ -2277,15 +2287,19 @@ LOCAL ER obf_lrc( INT h, T_OBREC *buf, INT n, INT *p_cnt )
 		return E_PAR;
 	}
 	r = (T_RREC *)Kmalloc(sizeof(T_RREC) * (SZ)n);
-	d = (OBFDECL *)Kmalloc(sizeof(OBFDECL) * OBF_DECL_MAX);
-	if ( r == NULL || d == NULL ) {
-		if ( r != NULL ) Kfree(r);
-		if ( d != NULL ) Kfree(d);
+	if ( r == NULL ) {
 		return E_NOMEM;
 	}
 	er = ts_lst_rec(o->od, r, n, &got);
 	if ( er >= E_OK && ( asz = od_meta_all(o, 0, &j, NULL) ) >= 0 ) {
-		nd = decl_read(j, (INT)asz, d, OBF_DECL_MAX);
+		nd = decl_read(j, (INT)asz, NULL, 0x7FFFFFFF);
+		d = (OBFDECL *)Kmalloc(sizeof(OBFDECL) * (SZ)( nd + 1 ));
+		if ( d == NULL ) {
+			er = E_NOMEM;
+			nd = 0;
+		} else {
+			nd = decl_read(j, (INT)asz, d, nd);
+		}
 		ex = exec_rec(j, (INT)asz);
 	}
 	for ( i = 0; er >= E_OK && i < got; i++ ) {
@@ -2309,7 +2323,7 @@ LOCAL ER obf_lrc( INT h, T_OBREC *buf, INT n, INT *p_cnt )
 	}
 	Kfree(r);
 	if ( j != NULL ) Kfree(j);
-	Kfree(d);
+	if ( d != NULL ) Kfree(d);
 
 	return er;
 }

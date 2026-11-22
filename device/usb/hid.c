@@ -3142,7 +3142,7 @@ EXPORT void knl_hid_mt_sync( INT hd )
  * not taken, and is left to the programs (SVC class 12, WebHID); NULL
  * takes them all again.
  */
-LOCAL UB	hid_leave_name[32];
+LOCAL UB	hid_leave_name[USB_STR_MAX];
 
 EXPORT void knl_hid_leave( CONST UB *product )
 {

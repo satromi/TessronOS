@@ -1,0 +1,101 @@
+# スライド (design 11.11, 11.2.6), for tools/ui_run.py: 実行 for a link of a slide, done by
+# the shared part of lib/libtv (tv_vop.c). A slide document made from the template in the
+# 原紙箱, a link to a text (TADjsについて, copied out of 仮身サンプル) pasted into it, is
+# shown with スライド (the steps of ui_slide_text.steps), and the menu opened on two links of
+# the text the slide lays out: 実身/仮身 at 100,139 and 基本文章編集 at 215,504 (閉じる under
+# the pointer, 実行 the twelfth row, 240 below; 再表示, chosen to put the menu away, 120
+# below, and under the pointer the next time). 実行 is on and opens its list of programs (the
+# console says "exec menu on"): the menu's tail, ウインドウ, 小物 and 実行, is the common one
+# (SYSDEF_MENU_TAIL); its 実行 is left as the program set it (dt_tail_fill greys it only when
+# the program did not). The pictures were recorded with that list shown.
+click 990 48
+wait 300
+linkdrag 原紙箱 スライド 250 60
+wait 1000
+key 28
+wait 800
+click 270 62 1
+wait 500
+move 275 290
+wait 150
+move 280 302
+wait 150
+move 300 302
+wait 300
+move 360 302
+wait 150
+move 395 322
+wait 150
+click 395 322
+wait 1000
+open 019a4370-3819-79a2-9758-881e1e0de90a
+wait 1000
+click 400 414
+wait 300
+key 06 01
+wait 300
+click 300 240
+key 08 01
+wait 800
+click 800 180
+wait 200
+key 19 01
+wait 800
+shot slide_doc_edited
+key 08 01
+wait 800
+# the menu opens with 実行, chosen last, under the pointer
+click 270 62 1
+wait 500
+move 275 242
+wait 150
+move 280 252
+wait 150
+move 300 252
+wait 300
+move 360 252
+wait 150
+move 380 252
+wait 150
+click 380 252
+expect slide: 1 of 1
+wait 500
+shot slide_text
+logmark
+click 100 139 1
+expectsince slide: exec menu on
+expectsince slide: menu
+wait 800
+move 110 379
+wait 150
+move 160 379
+wait 800
+shot sv_exec1
+shotsum sv_exec1 0 0 1280 800
+want ok 3ef703769e13b767
+# put away by choosing 再表示 (120 below 閉じる): the next menu opens with it under the pointer
+move 130 259
+wait 150
+click 130 259
+expectsince slide: chosen slide.refresh
+wait 800
+logmark
+click 215 504 1
+expectsince slide: exec menu on
+expectsince slide: menu
+wait 800
+move 220 624
+wait 150
+move 270 624
+wait 800
+shot sv_exec2
+shotsum sv_exec2 0 0 1280 800
+want ok b7311e0121c41bc1
+move 240 504
+wait 150
+click 240 504
+expectsince slide: chosen slide.refresh
+wait 800
+key 29
+expect slide: closed
+absent !OACV!

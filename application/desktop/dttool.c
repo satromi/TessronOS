@@ -70,24 +70,25 @@ LOCAL BOOL is_tool( CONST UB *id )
 /*
  * The channels the programs named (DT_RQ_TELL), each with the program's
  * id, until it can no longer be opened (the process ended and its
- * channel went). The oldest gives way when there is no room.
+ * channel went). The table holds as many as there are: none gives way.
  */
-#define TOLD_MAX	32
-#define TOLD_ID		32
+#define TOLD_FIRST	32		/* entries room is made for first; doubled when full */
 
 typedef struct {
 	TS_UUID	ch;
-	UB	prog[TOLD_ID];
+	UB	*prog;			/* the program's id, whole (Kmalloc) */
 	BOOL	tail;			/* it asked in the form of now: told with a tail */
 } TOLD;
 
-LOCAL TOLD	told[TOLD_MAX];
+LOCAL TOLD	*told;
 LOCAL INT	ntold = 0;
+LOCAL INT	told_cap = 0;
 
 LOCAL void told_drop( INT i )
 {
 	INT	j;
 
+	if ( told[i].prog != NULL ) Kfree(told[i].prog);
 	for ( j = i + 1; j < ntold; j++ ) told[j - 1] = told[j];
 	ntold--;
 }
@@ -101,9 +102,6 @@ LOCAL ER tool_listen( CONST T_DTREQ *rq, ID asker )
 
 	if ( ts_str_to_uuid((CONST char *)dt_rq_word(rq, DT_TAIL_TEXT, NULL), &u) < E_OK ) {
 		return E_PAR;
-	}
-	if ( nl >= TOLD_ID ) {
-		return E_PAR;			/* longer than any program's id */
 	}
 	if ( same_id(name, DT_TELL_FIRST) ) {
 		/* the first window's: only the process of the window of the cabinet */
@@ -123,7 +121,24 @@ LOCAL ER tool_listen( CONST T_DTREQ *rq, ID asker )
 			return E_OK;
 		}
 	}
-	if ( ntold >= TOLD_MAX ) told_drop(0);
+	if ( ntold >= told_cap ) {
+		INT	cap = ( told_cap > 0 ) ? told_cap * 2 : TOLD_FIRST;
+		TOLD	*nt = (TOLD *)Kmalloc(sizeof(TOLD) * (SZ)cap);
+
+		if ( nt == NULL ) {
+			return E_NOMEM;
+		}
+		if ( told != NULL ) {
+			knl_memcpy(nt, told, sizeof(TOLD) * (SZ)ntold);
+			Kfree(told);
+		}
+		told = nt;
+		told_cap = cap;
+	}
+	told[ntold].prog = (UB *)Kmalloc(nl + 1);
+	if ( told[ntold].prog == NULL ) {
+		return E_NOMEM;
+	}
 	told[ntold].ch = u;
 	knl_memcpy(told[ntold].prog, name, nl + 1);
 	told[ntold].tail = dt_rq_tailed();

@@ -102,6 +102,7 @@
 
 #define GDRST			0x941c
 #define  GRDOM_RENDER		0x0002
+#define  GRDOM_MEDIA		0x0004	/* the (first) video engine */
 #define  GRDOM_BLT		0x0008
 
 #define GFX_FLSH_CNTL		0x101008
@@ -118,6 +119,7 @@
 #define  PPAT_AGE(a)		( (a) << 4 )
 
 #define GFX_MOCS(i)		( 0xc800 + (i) * 4 )
+#define VCS_MOCS(i)		( 0xc900 + (i) * 4 )	/* the first video engine's (MFX0) */
 #define BLT_MOCS(i)		( 0xcc00 + (i) * 4 )
 #define LNCFCMOCS(i)		( 0xb020 + (i) * 4 )
 #define  LE_PAGETABLE		0
@@ -151,6 +153,7 @@
 #define GT_IER(n)		( 0x4430c + (n) * 0x10 )
 #define  GT_RCS_SHIFT		0
 #define  GT_BCS_SHIFT		16
+#define  GT_VCS_SHIFT		0	/* the first video engine, in GT interrupt register 1 */
 #define  GT_USER		0x0001	/* MI_USER_INTERRUPT */
 #define  GT_CS_ERROR		0x0008
 #define  GT_CTX_SWITCH		0x0100	/* a context status was written */
@@ -163,7 +166,7 @@
 /* ---------------------------------------------------------------- an engine, from its base */
 #define RCS_BASE		0x02000
 #define BCS_BASE		0x22000
-#define VCS_BASE		0x12000	/* the video engine: not driven, its idle time for RC6 only */
+#define VCS_BASE		0x12000	/* the first video engine (VCS0, MFX) */
 #define VECS_BASE		0x1a000	/* the video enhancement engine: likewise */
 
 #define RING_TAIL		0x030
@@ -348,6 +351,7 @@
 #define  FLUSH_DW_STORE_INDEX	( 1 << 21 )
 #define  FLUSH_DW_INVALIDATE_TLB ( 1 << 18 )
 #define  FLUSH_DW_OP_STOREDW	( 1 << 14 )
+#define  FLUSH_DW_INVALIDATE_BSD ( 1 << 7 )	/* the video engine's caches, as its TLB is */
 #define  FLUSH_DW_USE_GTT	( 1 << 2 )	/* in the address */
 #define MI_BATCH_BUFFER_START	MI(0x31, 1)	/* + address low, high */
 #define  MI_BATCH_PPGTT		( 1 << 8 )

@@ -1,0 +1,182 @@
+# 予定表 (design 11.10, 11.2.6), for tools/ui_run.py: the 仮身操作, 実身操作
+# and 実行 of a link of the month, done by the shared part of lib/libtv
+# (tv_vop.c). A link of 仮身サンプル is dropped on 2026/10, its 属性変更,
+# 続柄設定, 実身複製, 新版作成, 起動アプリの固定 (the menu then offering
+# 起動アプリを最新にする) and 実行's list are done, and the link and the two
+# links to the copies, taken together, are carried out of the window at once.
+# The pictures are checked against the ones recorded when the program did
+# these itself, before they were moved to lib/libtv.
+open 019d6f00-1a2b-7c3d-8e4f-a1b2c3d4e5f6
+expect calendar: ready
+wait 800
+win 予定表
+click 425 148
+wait 500
+text 202610
+key 28
+expect calendar: month 2026/10 links
+wait 500
+logmark
+open 019a4370-3819-79a2-9758-881e1e0de90a
+expectsince cabinet: opened 仮身サンプル
+wait 500
+drag 400 414 852 537
+expect calendar: dropped 1
+click 1000 148
+wait 2000
+key 08 01
+wait 1500
+shot cv_dropped
+# moved up into the 8th, where the menu opens whole below it
+drag 820 532 620 312
+expect calendar: moved 1
+wait 1000
+# 仮身操作 > 属性変更: 続柄 shown, the desktop's answer written into the link
+click 640 316 1
+wait 2000
+move 650 436
+wait 150
+move 720 436
+wait 800
+move 740 436
+wait 150
+move 760 496
+wait 300
+click 760 496
+wait 1500
+shot cv_attr_panel
+click 420 367
+wait 300
+click 770 384
+wait 300
+key 28
+expect calendar: attr
+wait 2000
+shot cv_attr
+shotsum cv_attr 110 165 910 728
+want ok 45cccabd9af20e00
+# the menu opens with the last chosen under the pointer: 仮身操作 at 316
+# 仮身操作 > 続柄設定
+click 640 316 1
+wait 2000
+move 650 316
+wait 150
+move 720 316
+wait 800
+move 740 316
+wait 150
+move 760 396
+wait 300
+click 760 396
+wait 1500
+shot cv_rel_panel
+text abc
+wait 300
+key 28
+expect calendar: relation
+wait 2000
+shot cv_rel
+shotsum cv_rel 110 165 910 728
+want ok 8cd0dd02cd2a837e
+# 実身操作 > 実身複製: a link to the copy put a step down and across
+click 640 316 1
+wait 2000
+move 650 336
+wait 150
+move 720 336
+wait 800
+move 740 336
+wait 150
+move 760 356
+wait 300
+click 760 356
+wait 1500
+shot cv_dup_panel
+key 28
+expect calendar: duplicated
+wait 2000
+shot cv_dup
+shotsum cv_dup 110 165 910 728
+want ok fd6a2a7c0020df31
+# 実身操作 > 新版作成, with no panel, of the first link (pressed where the copy's link is not)
+click 600 310 1
+wait 2000
+move 610 310
+wait 150
+move 680 310
+wait 800
+move 700 310
+wait 150
+move 720 350
+wait 300
+click 720 350
+expect calendar: new version
+wait 2000
+shot cv_newver
+shotsum cv_newver 110 165 910 728
+want ok 9a2af7d61cc0ab80
+# 実身操作 > 起動アプリを固定する, and the menu then offers 起動アプリを最新にする
+click 600 310 1
+wait 2000
+move 610 310
+wait 150
+move 680 310
+wait 800
+move 700 310
+wait 150
+move 720 370
+wait 300
+click 720 370
+expect calendar: kept
+wait 1000
+click 600 310 1
+wait 2000
+move 610 310
+wait 150
+move 680 310
+wait 800
+shot cv_real_kept
+shotsum cv_real_kept 560 160 1000 600
+want ok 0b94ef96c174a3a2
+# 実行: the programs the desktop offers
+move 610 390
+wait 150
+move 680 390
+wait 800
+shot cv_exec_list
+shotsum cv_exec_list 560 160 1000 600
+want ok 26a1b26b9f3281a7
+key 29
+wait 200
+key 29
+wait 300
+# the menu's Esc let go of what was taken: with Shift held, the three links are taken,
+# each pressed where only it is and away from its right and lower edges (which size
+# it); then carried out together into 仮身サンプル
+keydown E1 02
+click 600 308
+click 586 334
+click 650 343
+keyup E1 00
+wait 2000
+shot cv_picked
+shotsum cv_picked 110 165 910 728
+want ok 45ca4f98138c23ff
+move 600 308
+wait 200
+down
+wait 200
+move 560 308
+wait 200
+move 300 400
+wait 300
+move 60 600
+wait 1500
+up
+expect calendar: moved out
+expect calendar: carried TADjsについて (0)
+wait 2000
+shot cv_carried
+shotsum cv_carried 110 165 910 728
+want ok 82a075dbc5119b6d
+absent !OACV!

@@ -615,6 +615,53 @@ LOCAL void put_tcode( BK_TADW *w, INT plane, UINT code )
 	put16(w, code);
 }
 
+LOCAL void tcode_put( BK_TADW *w, INT x, INT plane )
+{
+	put_tcode(w, plane, (UINT)x & 0xFFFF);
+}
+
+/*
+ * An attribute's text as TRON characters, read where it lies, its
+ * entities undone as they come: written as words when w is given, and
+ * counted. The plane goes back to 1 at the end. As tc_of does, for a
+ * text as long as it is.
+ */
+LOCAL INT attr_tron( BK_TADW *w, CONST UB *tag, INT n, CONST char *name )
+{
+	INT	v, e, len, m = 0, plane = 1;
+
+#define AT_OUT(x)	do { if ( w != NULL ) put16(w, (x)); m++; } while ( 0 )
+	v = attr_span(tag, n, name, &len);
+	if ( v < 0 ) return 0;
+	e = v + len;
+	while ( v < e ) {
+		UINT	cp, nx, code;
+		UH	tc[8];
+		INT	d = next_cp(tag + v, e - v, TRUE, &cp), k, c;
+
+		if ( v + d < e && ( next_cp(tag + v + d, e - v - d, TRUE, &nx), code = seq_code(cp, nx) ) != 0 ) {
+			if ( plane != 1 ) { AT_OUT(0xFE21); plane = 1; }
+			AT_OUT(code);
+			v += d;
+			v += next_cp(tag + v, e - v, TRUE, &nx);
+			continue;
+		}
+		if ( cp >= 0x20 ) {
+			if ( cp == 0x20 ) {
+				if ( plane != 1 ) { AT_OUT(0xFE21); plane = 1; }
+				AT_OUT(0x2121);
+			} else {
+				c = bpk_ucs_tron(cp, tc, 8, &plane);
+				for ( k = 0; k < c; k++ ) AT_OUT(tc[k]);
+			}
+		}
+		v += d;
+	}
+	if ( plane != 1 ) AT_OUT(0xFE21);
+#undef AT_OUT
+	return m;
+}
+
 /* One character of the text */
 LOCAL void put_char( BK_TADW *w, UINT cp )
 {
@@ -703,12 +750,13 @@ LOCAL void para_touch( BK_TADW *w )
 
 LOCAL UINT hash_attr( CONST UB *tag, INT n, CONST char *name )
 {
-	UB	b[256];
-	INT	k = bk_tad_attr(tag, n, name, b, sizeof(b)), i;
+	INT	len, v = attr_span(tag, n, name, &len), i;
 	UINT	h = 2166136261U;
 
-	for ( i = 0; i < k && i < (INT)sizeof(b) - 1; i++ ) h = ( h ^ b[i] ) * 16777619U;
-	return h ^ (UINT)k;
+	/* the value as it is written, all of it */
+	if ( v < 0 ) return h;
+	for ( i = 0; i < len; i++ ) h = ( h ^ tag[v + i] ) * 16777619U;
+	return h ^ (UINT)len;
 }
 
 LOCAL BOOL deco_same( CONST BK_TADDECO *a, CONST BK_TADDECO *b )
@@ -720,15 +768,12 @@ LOCAL BOOL deco_same( CONST BK_TADDECO *a, CONST BK_TADDECO *b )
 LOCAL void deco_start( BK_TADW *w, CONST BK_TADDECO *d )
 {
 	if ( d->seg == TS_TATTR && d->sub == 6 ) {
-		/* ルビ: its text after the first word */
-		UB	b[256];
-		UH	tc[128];
-		INT	n = bk_tad_attr(d->tag, d->taglen, "text", b, sizeof(b)), m, i;
+		/* ルビ: its text after the first word, as long as it is */
+		INT	m = attr_tron(NULL, d->tag, d->taglen, "text");
 
-		m = ( n > 0 ) ? tc_of(b, n, tc, 128) : 0;
 		seg_raw(w, TS_TATTR, 2 + 2 * m);
 		put16(w, ( 6 << 8 ) | d->attr);
-		for ( i = 0; i < m; i++ ) put16(w, tc[i]);
+		(void)attr_tron(w, d->tag, d->taglen, "text");
 		return;
 	}
 	if ( d->seg == TS_TATTR && ( d->sub == 2 || d->sub == 4 ) ) {
@@ -1128,36 +1173,73 @@ LOCAL void ruler( BK_TADW *w, CONST TOK *t )
 }
 
 /* A list of numbers "1,2,3" into v[max]; how many */
-LOCAL INT list_of( CONST TOK *t, CONST char *name, INT *v, INT max, BOOL hex )
+/*
+ * The numbers of a list attribute, read where the value lies (its
+ * digits need no entities undone), as many as it has: each given to fn
+ * (with w and arg) when fn is given, the first max into v when v is
+ * given. Answers how many there are.
+ */
+LOCAL INT list_each( CONST TOK *t, CONST char *name, BOOL hex, INT *v, INT max,
+		     void (*fn)( BK_TADW *w, INT x, INT arg ), BK_TADW *w, INT arg )
 {
-	UB	b[1024];
-	INT	n = 0, i = 0, x, sign, h;
+	INT	n = 0, len, x, sign, h, i, e;
+	CONST UB *b;
 
-	if ( bk_tad_attr(t->p, t->n, name, b, sizeof(b)) < 0 ) return 0;
-	while ( b[i] != 0 && n < max ) {
-		while ( b[i] == ',' || is_space(b[i]) ) i++;
-		if ( b[i] == 0 ) break;
+	i = attr_span(t->p, t->n, name, &len);
+	if ( i < 0 ) return 0;
+	b = t->p;
+	e = i + len;
+	while ( i < e ) {
+		while ( i < e && ( b[i] == ',' || is_space(b[i]) ) ) i++;
+		if ( i >= e ) break;
 		sign = 1;
 		if ( b[i] == '-' ) { sign = -1; i++; }
+		if ( i >= e ) break;
 		if ( hex ) {
 			if ( hexv(b[i]) < 0 ) break;
-			for ( x = 0; ( h = hexv(b[i]) ) >= 0; i++ ) x = x * 16 + h;
+			for ( x = 0; i < e && ( h = hexv(b[i]) ) >= 0; i++ ) x = x * 16 + h;
 		} else {
 			if ( b[i] < '0' || b[i] > '9' ) break;
-			for ( x = 0; b[i] >= '0' && b[i] <= '9'; i++ ) x = x * 10 + ( b[i] - '0' );
+			for ( x = 0; i < e && b[i] >= '0' && b[i] <= '9'; i++ ) x = x * 10 + ( b[i] - '0' );
 		}
-		v[n++] = sign * x;
-		while ( b[i] != 0 && b[i] != ',' && !is_space(b[i]) ) i++;
+		if ( v != NULL && n < max ) v[n] = sign * x;
+		if ( fn != NULL ) fn(w, sign * x, arg);
+		n++;
+		while ( i < e && b[i] != ',' && !is_space(b[i]) ) i++;
 	}
 	return n;
+}
+
+LOCAL INT list_of( CONST TOK *t, CONST char *name, INT *v, INT max, BOOL hex )
+{
+	INT	n = list_each(t, name, hex, v, max, NULL, NULL, 0);
+
+	return ( n < max ) ? n : max;
+}
+
+/* How many numbers a list has, and each written as a word */
+LOCAL INT list_count( CONST TOK *t, CONST char *name, BOOL hex )
+{
+	return list_each(t, name, hex, NULL, 0, NULL, NULL, 0);
+}
+
+LOCAL void word_put( BK_TADW *w, INT x, INT arg )
+{
+	(void)arg;
+	put16(w, (UH)x);
+}
+
+LOCAL void list_put16( BK_TADW *w, CONST TOK *t, CONST char *name, BOOL hex )
+{
+	(void)list_each(t, name, hex, NULL, 0, word_put, w, 0);
 }
 
 /* <tab-format>: TT_TAB */
 LOCAL void tab_format( BK_TADW *w, CONST TOK *t )
 {
-	INT	tabs[64], n, i;
+	INT	n;
 
-	n = list_of(t, "tabs", tabs, 64, FALSE);
+	n = list_count(t, "tabs", FALSE);	/* every tab: a ruler holds as many as are written */
 	fusen(w, TS_TRULER, 2, ( ( num(t, "R", 0) & 1 ) << 7 ) | ( num(t, "P", 0) & 3 ), 14 + 2 * n);
 	put16(w, scale_of(t, "height", 0x8000));
 	put16(w, scale_of(t, "pargap", 0x8000));
@@ -1165,7 +1247,7 @@ LOCAL void tab_format( BK_TADW *w, CONST TOK *t )
 	put16(w, (UH)num(t, "right", 0));
 	put16(w, (UH)num(t, "indent", 0));
 	put16(w, (UH)n);
-	for ( i = 0; i < n; i++ ) put16(w, (UH)tabs[i]);
+	list_put16(w, t, "tabs", FALSE);
 }
 
 /* <field-format> and its <field>s: TT_FIELD, the fields looked for ahead */
@@ -1295,13 +1377,11 @@ LOCAL BOOL fig_page( BK_TADW *w, CONST TOK *t )
 /* A memo, or 充填文字: the attribute's text as TRON characters after the first word */
 LOCAL void text_seg_a( BK_TADW *w, UINT id, UINT sub, UINT attr, CONST TOK *t, CONST char *name )
 {
-	UB	b[512];
-	UH	tc[256];
-	INT	n = bk_tad_attr(t->p, t->n, name, b, sizeof(b)), m, i;
+	/* the text as long as it is: counted, then written */
+	INT	m = attr_tron(NULL, t->p, t->n, name);
 
-	m = ( n > 0 ) ? tc_of(b, n, tc, 256) : 0;
 	fusen(w, id, sub, attr, 2 + 2 * m);
-	for ( i = 0; i < m; i++ ) put16(w, tc[i]);
+	(void)attr_tron(w, t->p, t->n, name);
 }
 
 LOCAL void text_seg( BK_TADW *w, UINT id, UINT sub, CONST TOK *t, CONST char *name )
@@ -2070,7 +2150,7 @@ LOCAL BOOL shape( BK_TADW *w, CONST TOK *t )
 		return TRUE;
 	}
 	if ( same(t->name, t->nlen, "freefig") ) {
-		INT	h[512], nh = list_of(t, "h", h, 512, FALSE);
+		INT	nh = list_count(t, "h", FALSE);	/* every one of them */
 
 		prim_head(w, 11, mode, 12 + 2 * nh);
 		put16(w, (UH)num(t, "f_pat", 0));
@@ -2078,7 +2158,7 @@ LOCAL BOOL shape( BK_TADW *w, CONST TOK *t )
 		put16(w, (UH)num(t, "nr", 0));
 		put16(w, (UH)num(t, "bx", 0));
 		put16(w, (UH)nh);
-		for ( i = 0; i < nh; i++ ) put16(w, (UH)h[i]);
+		list_put16(w, t, "h", FALSE);
 		return TRUE;
 	}
 	return FALSE;
@@ -2124,13 +2204,13 @@ LOCAL void pattern_def( BK_TADW *w, CONST TOK *t )
 /* <mask>: TS_MASK, its words as they are written */
 LOCAL void mask_def( BK_TADW *w, CONST TOK *t )
 {
-	INT	d[1024], n = list_of(t, "data", d, 1024, TRUE), i;
+	INT	n = list_count(t, "data", TRUE);	/* every word of it */
 
 	fusen(w, TS_FDEF, 1, (UINT)num(t, "type", 0), 8 + 2 * n);
 	put16(w, (UH)num(t, "id", 0));
 	put16(w, (UH)num(t, "width", 16));
 	put16(w, (UH)num(t, "height", 16));
-	for ( i = 0; i < n; i++ ) put16(w, (UH)d[i]);
+	list_put16(w, t, "data", TRUE);
 }
 
 /* <markerDefine>: TS_MARKPAT */
@@ -2591,10 +2671,8 @@ LOCAL void on_start2( BK_TADW *w, CONST UB *s, INT len, INT at, CONST TOK *t, BO
 		}
 		if ( same(t->name, t->nlen, "tchar") ) {
 			/* letters with no Unicode, as their plane and codes */
-			INT	code[64], n = list_of(t, "code", code, 64, TRUE), i;
-
 			para_touch(w);
-			for ( i = 0; i < n; i++ ) put_tcode(w, num(t, "plane", 1), (UINT)code[i] & 0xFFFF);
+			(void)list_each(t, "code", TRUE, NULL, 0, tcode_put, w, num(t, "plane", 1));	/* every code */
 			if ( !empty ) (void)push(w, t, LV_SKIP);
 			return;
 		}

@@ -1277,7 +1277,7 @@ LOCAL INT open_panels( void )
 {
 	INT	pid, n = 0;
 
-	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) {
+	for ( pid = 1; pid <= kt_panel_last(); pid++ ) {
 		if ( wm_panel_wid(pid) > 0 ) n++;
 	}
 	return n;
@@ -1374,6 +1374,22 @@ LOCAL INT walk_root( CONST TS_UUID *root, TS_UUID *objs, INT *nref, INT max )
 	return nobj;
 }
 
+/* The links of an object given up: its xmlTAD records emptied, its link table made again on close */
+LOCAL void links_let_go( CONST TS_UUID *u )
+{
+	T_OBREC	r[32];
+	INT	cnt = 0, i;
+	ID	k = ob_opn_obj(u, OB_OP_ALL);
+
+	if ( k <= 0 ) return;
+	if ( ob_lst_rec(k, r, 32, &cnt) >= E_OK ) {
+		for ( i = 0; i < cnt && i < 32; i++ ) {
+			if ( r[i].rt == OB_RT_TAD ) (void)ob_trn_rec(k, r[i].recno, 0);
+		}
+	}
+	ob_cls_obj(k);
+}
+
 /*
  * 書庫管理 on an archive taken in from a .bpk file: the book's 付箋,
  * shown in the program's window, carried into the cabinet and let go;
@@ -1438,6 +1454,13 @@ LOCAL void test_unpack( void )
 		}
 		tad_free(d);
 	}
+	/*
+	 * The book's objects link to one another (two of them to each other),
+	 * so their counts stay above zero when they are deleted one by one,
+	 * and those two would be left on the system volume as 隠れ屑実身
+	 * for the volume's later checks to find: their links go first.
+	 */
+	for ( i = 0; i < nobj; i++ ) links_let_go(&objs[i]);
 	for ( i = nobj - 1; i >= 0; i-- ) (void)ob_del_obj(&objs[i]);
 	tad_vobj_clear(&v);
 	wm_update();
@@ -1884,7 +1907,7 @@ LOCAL INT panel_new( CONST BOOL *had )
 {
 	INT	pid;
 
-	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) {
+	for ( pid = 1; pid <= kt_panel_last(); pid++ ) {
 		if ( !had[pid] && wm_panel_wid(pid) > 0 ) return pid;
 	}
 	return 0;
@@ -1894,7 +1917,7 @@ LOCAL void panels_had( BOOL *had )
 {
 	INT	pid;
 
-	for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) had[pid] = (BOOL)( wm_panel_wid(pid) > 0 );
+	for ( pid = 1; pid <= kt_panel_last(); pid++ ) had[pid] = (BOOL)( wm_panel_wid(pid) > 0 );
 }
 
 /* The row of panel mp whose words begin with label pressed and let go; FALSE when there is none */
@@ -1927,7 +1950,7 @@ LOCAL BOOL panel_row( INT mp, CONST char *label, UD when )
 /* The menu of the second button at (x, y) of the window's work area, a row of one of its lists chosen */
 LOCAL BOOL menu_pick( INT wid, INT x, INT y, CONST char *row, CONST char *sub )
 {
-	BOOL	had[WM_PANEL_MAX + 1];
+	BOOL	had[KT_PANEL_SEEN + 1];
 	T_WMEV	ev;
 	INT	mp = 0, cp = 0, i;
 

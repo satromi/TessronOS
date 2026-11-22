@@ -2,7 +2,7 @@
 # x64.mk — x64 の PC(UEFI。QEMU q35 + OVMF と Microsoft Surface Go 2 を1つのイメージで)向けの設定
 #            (docs/tessronos/03-platform.md 3.10、docs/private/x64_surface_go2_study.md)
 #
-#   make TARGET=_X64_ BUILD_ID=<名前>          tessronos<名前>.elf と $(OBJDIR)/esp/(UEFI のローダとカーネル)
+#   make TARGET=_X64_ BUILD_ID=<名前>          tessronos<名前>.elf と $(OUTDIR)/esp/(UEFI のローダとカーネル)
 #   make TARGET=_X64_ BUILD_ID=<名前> qemu-x64 ビルドして Windows の QEMU(q35 + OVMF)で起動する
 #   make TARGET=_X64_ [DESKTOP=1] BUILD_ID=<名前> qemu-x64-disk
 #                                            ディスクのイメージ(sdimg)を NVMe として挿して起動する
@@ -17,7 +17,7 @@ LNKFILE := $(TOP)/etc/linker/x64/tkernel_map.ld
 LOAD_PA := knl_kimg_pa
 
 CFLAGS_TARGET  :=
-IMAGE_TARGETS  := $(OBJDIR)/esp/EFI/BOOT/BOOTX64.EFI $(OBJDIR)/esp/tessronos.elf
+IMAGE_TARGETS  := $(OUTDIR)/esp/EFI/BOOT/BOOTX64.EFI $(OUTDIR)/esp/tessronos.elf
 
 # AArch64 の命令で書いた共通部のファイルは、x86-64 では建てない
 SRCS := $(filter-out device/gpu/v3d/v3d_mmu.c outer_kernel/wm/compose_simd.c peripheral_kernel/libc/setjmp.S,$(SRCS)) \
@@ -66,6 +66,9 @@ SRCS += kernel/sysdepend/x64/hw_setting.c \
 	device/gpu/intel/igt_compose.c \
 	device/gpu/intel/igt_rcompose.c \
 	device/gpu/intel/igt_rplan.c \
+	device/gpu/intel/igt_mfx.c \
+	device/gpu/intel/igt_vtest.c \
+	device/gpu/intel/igt_vdec.c \
 	device/gpu/intel/igt12.c \
 	device/nvme/nvme.c \
 	device/sd/sdhci.c \
@@ -132,14 +135,14 @@ $(OBJDIR)/BOOTX64.EFI: $(EFI_SRCS) $(EFI_HDRS)
 # ESP の中身: \EFI\BOOT\BOOTX64.EFI、\tessronos.elf、\cmdline.txt(起動の設定)。
 # QEMU はこのディレクトリをそのまま FAT のディスクとして見せる(fat:rw:)
 X64_CMDLINE ?= video=1280x800
-$(OBJDIR)/esp/EFI/BOOT/BOOTX64.EFI: $(OBJDIR)/BOOTX64.EFI
+$(OUTDIR)/esp/EFI/BOOT/BOOTX64.EFI: $(OBJDIR)/BOOTX64.EFI
 	@mkdir -p $(dir $@)
 	@cp $< $@
 
-$(OBJDIR)/esp/tessronos.elf: $(EXE_FILE).elf
+$(OUTDIR)/esp/tessronos.elf: $(EXE_FILE).elf
 	@mkdir -p $(dir $@)
 	@cp $< $@
-	@printf '%s\n' "$(X64_CMDLINE)" > $(OBJDIR)/esp/cmdline.txt
+	@printf '%s\n' "$(X64_CMDLINE)" > $(OUTDIR)/esp/cmdline.txt
 
 # 試験機: Windows の QEMU の q35 と、それに付いてくる OVMF(edk2-x86_64-code.fd)。
 # WSL の apt の qemu-system-x86 と ovmf は sudo が要るので使わない
@@ -156,7 +159,7 @@ QEMU_EXTRA   ?=
 QEMU_FLAGS   := -M $(QEMU_MACHINE) -cpu $(QEMU_CPU) -smp $(QEMU_SMP) -m $(QEMU_MEM) -rtc base=localtime \
 	-drive "if=pflash,format=raw,readonly=on,file=$(OVMF_CODE)" \
 	-no-reboot -net none $(QEMU_EXTRA)
-X64_ESP_WIN   = $(shell wslpath -m $(abspath $(OBJDIR)/esp) 2>/dev/null)
+X64_ESP_WIN   = $(shell wslpath -m $(abspath $(OUTDIR)/esp) 2>/dev/null)
 X64_ESP_DRIVE = -drive format=raw,file=fat:rw:$(X64_ESP_WIN)
 
 .PHONY: qemu-x64
@@ -179,7 +182,7 @@ ACPICA_OBJ ?= $(HOME)/tessronos-acpica-x64/acpica.o
 EXTRA_OBJS += $(ACPICA_OBJ)
 $(ACPICA_OBJ): $(TOP)/tools/x64/acpica/build.sh $(wildcard $(TOP)/kernel/sysdepend/acpi/acpica/*)
 	@echo 'ACPICA $@'
-	@OUT=$(patsubst %/,%,$(dir $(ACPICA_OBJ))) bash $(TOP)/tools/x64/acpica/build.sh all
+	@OUT=$(patsubst %/,%,$(dir $(ACPICA_OBJ))) $(SHARED_X) bash $(TOP)/tools/x64/acpica/build.sh all
 
 # NetBSD のスタックの x86_64 用のもの(~/tessronos-netbsd-x64/rumpnet.o)を作る手順
 NETBSD_BUILD := $(TOP)/tools/x64/netbsd/build.sh
@@ -219,7 +222,7 @@ EXTRA_OBJS += $(OBSD_OBJ)
 $(OBSD_OBJ): $(TOP)/tools/openbsd/build.sh $(wildcard $(TOP)/device/net/wifi/obsd/*.[ch]) \
 	     $(wildcard $(TOP)/tools/openbsd/patches/*.patch)
 	@echo 'OBSD $@'
-	@OUT=$(patsubst %/,%,$(dir $(OBSD_OBJ))) MARCH=$(ARCH_MARCH) bash $(TOP)/tools/openbsd/build.sh all
+	@OUT=$(patsubst %/,%,$(dir $(OBSD_OBJ))) MARCH=$(ARCH_MARCH) $(SHARED_X) bash $(TOP)/tools/openbsd/build.sh all
 SRCS += device/net/wifi/obsd/obsd_user.c
 $(OBJDIR)/device/net/wifi/wifi.o $(OBJDIR)/peripheral_kernel/network/netbsd/wifi_user.o \
 $(OBJDIR)/device/net/wifi/obsd/obsd_user.o: CFLAGS += -DWIFI_OBSD=1
@@ -245,7 +248,7 @@ EXTRA_OBJS += $(WPA_OBJ)
 $(WPA_OBJ): $(TOP)/tools/wpa/build.sh $(wildcard $(TOP)/device/net/wifi/wpa/*.[ch]) \
 	    $(wildcard $(TOP)/device/net/wifi/wpa/include/*.h $(TOP)/device/net/wifi/wpa/include/*/*.h)
 	@echo 'WPA $@'
-	@OUT=$(patsubst %/,%,$(dir $(WPA_OBJ))) bash $(TOP)/tools/wpa/build.sh all
+	@OUT=$(patsubst %/,%,$(dir $(WPA_OBJ))) $(SHARED_X) bash $(TOP)/tools/wpa/build.sh all
 endif
 # KTEST=1 では、保存したネットワークと鍵のテスト(ktest_wifikey.c、群 wifikey)
 ifeq ($(KTEST),1)
@@ -261,8 +264,8 @@ WIFI_DONE   := $(WIFI_STAGE)/.done
 WIFI_OVER   := --over $(WIFI_STAGE)
 $(WIFI_DONE): $(TOP)/tools/x64/wifi/fw.sh $(TOP)/tools/x64/wifi/mkobj.py \
 	      $(TOP)/etc/def/01a0d8c4-5211-7c52-9e0a-3b61d27f4c85_0.xtad
-	@OUT=$(WIFI_FW_DIR) bash $(TOP)/tools/x64/wifi/fw.sh fetch
-	@python3 -I $(TOP)/tools/x64/wifi/mkobj.py --fw $(WIFI_FW_DIR) \
+	@OUT=$(WIFI_FW_DIR) $(SHARED_X) bash $(TOP)/tools/x64/wifi/fw.sh fetch
+	@$(SHARED_S) python3 -I $(TOP)/tools/x64/wifi/mkobj.py --fw $(WIFI_FW_DIR) \
 	  --box $(TOP)/etc/def/01a0d8c4-5211-7c52-9e0a-3b61d27f4c85_0.xtad --out $(WIFI_STAGE)
 	@touch $@
 $(OBJDIR)/sysvol.img: $(WIFI_DONE)
@@ -273,8 +276,8 @@ endif
 # カーネルの libgcc は -mno-red-zone の組(tools/x64/build_toolchain.sh のマルチライブ)
 LDFLAGS_COMMON += $(ARCH_KFLAGS)
 
-# ディスクのイメージ(makefile の sdimg、$(OBJDIR)/sd.img)を NVMe の SSD として挿して起動する
-X64_DISK_WIN  = $(shell wslpath -m $(abspath $(OBJDIR)/sd.img) 2>/dev/null)
+# ディスクのイメージ(makefile の sdimg、$(OUTDIR)/sd.img)を NVMe の SSD として挿して起動する
+X64_DISK_WIN  = $(shell wslpath -m $(abspath $(OUTDIR)/sd.img) 2>/dev/null)
 X64_DISK_DEV  = -drive file=$(X64_DISK_WIN),if=none,format=raw,id=nvd -device nvme,serial=tessronos,drive=nvd
 X64_DEVICES  ?= -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0 \
 	-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0

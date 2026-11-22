@@ -25,6 +25,12 @@
  *	the start carries it out before the system volume is attached, so
  *	that nothing has an object of it open while the repair writes. What
  *	that repair found and did is kept for the accessory to show.
+ *
+ *	The conversion of a volume to the format's version 5 (7.3) is done
+ *	the same way: the system volume at start, before it is attached,
+ *	when it is of version 4 (and any volume asked for with CONVREQ);
+ *	another volume at once, taken off for it when it is attached. What
+ *	the conversion at start did is kept for the desktop's notice.
  */
 
 #include <sys/machine.h>
@@ -34,14 +40,18 @@
 #include <ts/fs.h>
 #include <ts/tsfs.h>
 #include <ts/tsfsblk.h>
+#include <ts/tsfsobj.h>
 #include <ts/tsfsck.h>
 #include <ts/crc32c.h>
 #include "obj.h"
 
 #define CHK_BOOT_EV	64		/* events the list of the repair at start is first taken for */
+#define SB_VERSION	8
 #define SB_GEN		16
 #define SB_LABEL	40
 #define SB_TOTAL	112
+#define SB_COMPAT	272
+#define SB_INCOMPAT	288
 #define SB_CRC		4092
 
 LOCAL ID	chk_mtx = 0;
@@ -155,6 +165,12 @@ LOCAL BOOL read_sb( CONST char *devnm, T_TSFSCKDEV *d )
 			knl_memset(d->label, 0, sizeof(d->label));
 			knl_memcpy(d->label, buf + SB_LABEL, n);
 			d->blocks = rd64(buf + SB_TOTAL);
+			d->format = ( ( rd64(buf + SB_INCOMPAT) & TSFSBLK_INCOMPAT_FMT5 ) != 0 )
+				  ? TSFSBLK_VERSION5 : rd32(buf + SB_VERSION);
+			d->flags &= ~(UINT)TSFSCK_F_CONVREQ;
+			if ( ( rd64(buf + SB_COMPAT) & TSFSBLK_COMPAT_CONVREQ ) != 0 ) {
+				d->flags |= TSFSCK_F_CONVREQ;
+			}
 		}
 	}
 	if ( dd > 0 ) {
@@ -597,6 +613,357 @@ EXPORT void knl_ob_chk_boot_forget( void )
 	boot_lost = 0;
 	boot_dev[0] = 0;
 	tk_unl_mtx(chk_mtx);
+}
+
+/* ---------------------------------------------------------------- the conversion to version 5 */
+
+/*
+ * The events of the check the conversion at start made, kept as those
+ * of the repair at start are: a list taken twice as large each time it
+ * is full, an event the memory runs out for counted.
+ */
+LOCAL BOOL		cnv_done = FALSE;
+LOCAL BOOL		cnv_given = FALSE;	/* the conversion at start given to a program */
+LOCAL UB		cnv_dev[TSFSCK_DEVNM_MAX];
+LOCAL T_TSFSCNV		cnv_res;
+LOCAL T_TSFSCKEV	*cnv_ev = NULL;
+LOCAL INT		cnv_nev = 0;
+LOCAL INT		cnv_cap = 0;
+LOCAL INT		cnv_lost = 0;
+
+LOCAL void cnv_keep( void *ctx, CONST T_TSFSCKEV *ev )
+{
+	(void)ctx;
+	if ( cnv_nev >= cnv_cap ) {
+		INT		cap = ( cnv_cap > 0 ) ? cnv_cap * 2 : CHK_BOOT_EV;
+		T_TSFSCKEV	*b = (T_TSFSCKEV *)Kmalloc(sizeof(T_TSFSCKEV) * (SZ)cap);
+
+		if ( b == NULL ) {
+			cnv_lost++;
+			return;
+		}
+		if ( cnv_ev != NULL ) {
+			knl_memcpy(b, cnv_ev, (INT)( sizeof(T_TSFSCKEV) * (SZ)cnv_nev ));
+			Kfree(cnv_ev);
+		}
+		cnv_ev = b;
+		cnv_cap = cap;
+	}
+	cnv_ev[cnv_nev++] = *ev;
+}
+
+LOCAL void cnv_clear( void )
+{
+	if ( cnv_ev != NULL ) {
+		Kfree(cnv_ev);
+		cnv_ev = NULL;
+	}
+	cnv_nev = 0;
+	cnv_cap = 0;
+	cnv_lost = 0;
+	cnv_done = FALSE;
+	cnv_dev[0] = 0;
+	knl_memset(&cnv_res, 0, sizeof(cnv_res));
+}
+
+/*
+ * One volume converted, on its device opened for it alone: ts_obj_mount
+ * finishes a grow, replays the log and finishes the orphans, and
+ * ts_cnv_vol does the rest. A volume not converted has CONVREQ taken off
+ * when `unask` says so, so that it is not tried again at every start.
+ * Each step is told on the console.
+ */
+LOCAL ER cnv_one( CONST char *devnm, UINT mode, T_TSFSCNV *res, FP_TSFSCK fn, void *ctx, BOOL unask )
+{
+	T_TSFSBLK_SB	sb;
+	ID		bvol;
+	ER		er;
+
+	knl_memset(res, 0, sizeof(*res));
+	tm_printf((UB *)"tsfs: %s: convert: checking\n", devnm);
+	bvol = ts_obj_mount(devnm);
+	if ( bvol <= 0 ) {
+		res->state = TSFSCNV_S_FAILED;
+		res->er = ( bvol < 0 ) ? (ER)bvol : E_SYS;
+		tm_printf((UB *)"tsfs: %s: convert: not opened (%d)\n", devnm, (INT)res->er);
+		return res->er;
+	}
+	er = ts_cnv_vol(bvol, mode, res, fn, ctx);
+	tm_printf((UB *)"tsfs: %s: convert: checked in %d ms: %d objects, %d records, %d links, %d blocks read, %d found\n",
+		  devnm, (INT)res->check_ms, (INT)res->ck.objects, (INT)res->ck.records, (INT)res->ck.links,
+		  (INT)res->ck.checked, res->ck.problems);
+	switch ( res->state ) {
+	case TSFSCNV_S_DONE:
+		tm_printf((UB *)"tsfs: %s: convert: done in %d ms (%d)\n", devnm, (INT)res->total_ms, (INT)res->er);
+		break;
+	case TSFSCNV_S_NOTV4:
+		tm_printf((UB *)"tsfs: %s: convert: not a volume of version 4\n", devnm);
+		break;
+	case TSFSCNV_S_DAMAGE:
+		tm_printf((UB *)"tsfs: %s: convert: not converted, the check found %d problems\n", devnm, res->ck.problems);
+		break;
+	default:
+		tm_printf((UB *)"tsfs: %s: convert: failed (%d)\n", devnm, (INT)res->er);
+		break;
+	}
+	if ( res->state != TSFSCNV_S_DONE && unask && ts_ref_vol_blk(bvol, &sb) >= E_OK
+	  && ( sb.compat & TSFSBLK_COMPAT_CONVREQ ) != 0 && ( sb.incompat & TSFSBLK_INCOMPAT_FMT5 ) == 0 ) {
+		ER	eq = ts_blk_convreq(bvol, FALSE);
+
+		tm_printf((UB *)"tsfs: %s: convert: the request taken off (%d)\n", devnm, (INT)eq);
+	}
+	(void)ts_obj_unmount(bvol);
+	return er;
+}
+
+/*
+ * At start, before the system volume is attached: the system volume
+ * converted when it is of version 4, every other native volume when it
+ * has CONVREQ. What came of the system volume is kept (of another one
+ * when the system volume was not tried) for the desktop's notice and
+ * ディスク修復.
+ */
+EXPORT ER knl_ob_conv_boot( CONST char *sysvol )
+{
+	T_TSFSCKDEV	*d = NULL;
+	T_TSFSCNV	*r;
+	INT		n, room = 16, i;
+	BOOL		sys, kept_sys = FALSE;
+	ER		er = E_OK, e1;
+
+	(void)chk_init();
+	cnv_clear();
+	for ( ;; ) {
+		d = (T_TSFSCKDEV *)Kmalloc(sizeof(T_TSFSCKDEV) * (SZ)room);
+		if ( d == NULL ) {
+			return E_NOMEM;
+		}
+		n = ob_chk_list(d, room);
+		if ( n <= room ) {
+			break;
+		}
+		Kfree(d);
+		room = n;
+	}
+	r = (T_TSFSCNV *)Kmalloc(sizeof(T_TSFSCNV));
+	if ( r == NULL ) {
+		Kfree(d);
+		return E_NOMEM;
+	}
+	for ( i = 0; i < n; i++ ) {
+		sys = (BOOL)( sysvol != NULL && same_name(d[i].devnm, sysvol) );
+		if ( sys ? ( d[i].format != TSFSBLK_VERSION ) : ( ( d[i].flags & TSFSCK_F_CONVREQ ) == 0 ) ) {
+			continue;
+		}
+		if ( d[i].attached || knl_ob_chk_busy((CONST char *)d[i].devnm) ) {
+			continue;		/* in use already: converted only before anything uses it */
+		}
+		if ( sys || !cnv_done ) {
+			/* this one's result is the one kept: the system volume's over another's */
+			if ( cnv_done && !kept_sys ) cnv_clear();
+			name_copy(cnv_dev, (CONST char *)d[i].devnm);
+			e1 = cnv_one((CONST char *)d[i].devnm, 0, &cnv_res, cnv_keep, NULL, TRUE);
+			cnv_done = TRUE;
+			kept_sys = sys;
+			if ( cnv_lost > 0 ) {
+				tm_printf((UB *)"tsfs: %s: convert: %d events of the check not kept: no memory\n",
+					  d[i].devnm, cnv_lost);
+			}
+		} else {
+			e1 = cnv_one((CONST char *)d[i].devnm, 0, r, NULL, NULL, TRUE);
+		}
+		if ( sys ) {
+			er = e1;
+		}
+	}
+	Kfree(r);
+	Kfree(d);
+	return er;
+}
+
+EXPORT void knl_ob_cnv_boot_forget( void )
+{
+	if ( chk_init() < E_OK ) {
+		return;
+	}
+	tk_loc_mtx(chk_mtx, TMO_FEVR);
+	cnv_clear();
+	cnv_given = FALSE;
+	tk_unl_mtx(chk_mtx);
+}
+
+EXPORT BOOL knl_ob_cnv_boot_once( void )
+{
+	BOOL	first;
+
+	if ( chk_init() < E_OK ) {
+		return FALSE;
+	}
+	tk_loc_mtx(chk_mtx, TMO_FEVR);
+	first = (BOOL)!cnv_given;
+	cnv_given = TRUE;
+	tk_unl_mtx(chk_mtx);
+	return first;
+}
+
+/* What the conversion at start did: how many events of its check were kept; res->state TSFSCNV_S_NONE when nothing was tried */
+EXPORT INT ob_cnv_boot_result( UB *devnm, INT nmax, T_TSFSCNV *res, T_TSFSCKEV *ev, INT max )
+{
+	INT	i;
+
+	if ( devnm != NULL && nmax > 0 ) {
+		for ( i = 0; cnv_done && cnv_dev[i] != 0 && i < nmax - 1; i++ ) devnm[i] = cnv_dev[i];
+		devnm[cnv_done ? i : 0] = 0;
+	}
+	if ( res != NULL ) {
+		if ( cnv_done ) {
+			*res = cnv_res;
+		} else {
+			knl_memset(res, 0, sizeof(*res));
+		}
+	}
+	if ( !cnv_done ) {
+		return 0;
+	}
+	for ( i = 0; ev != NULL && i < cnv_nev && i < max; i++ ) {
+		ev[i] = cnv_ev[i];
+	}
+	return cnv_nev;
+}
+
+/* The version of the format of a native volume, from its superblock */
+EXPORT INT knl_ob_cnv_form( CONST char *devnm, BOOL *p_req )
+{
+	T_TSFSCKDEV	d;
+
+	if ( devnm == NULL ) {
+		return E_PAR;
+	}
+	knl_memset(&d, 0, sizeof(d));
+	if ( !read_sb(devnm, &d) ) {
+		return E_NOEXS;
+	}
+	if ( p_req != NULL ) {
+		*p_req = (BOOL)( ( d.flags & TSFSCK_F_CONVREQ ) != 0 );
+	}
+	return (INT)d.format;
+}
+
+/*
+ * 形式を新しくする: a volume other than the system's converted now, kept
+ * from being attached or checked meanwhile. An attached one is taken
+ * off first and put back afterwards, as a repair takes one off.
+ */
+EXPORT ER ob_cnv_run( CONST char *devnm, UINT mode, T_TSFSCNV *res, FP_TSFSCK fn, void *ctx )
+{
+	T_TSFSCKDEV	d;
+	BOOL		detached = FALSE;
+	ER		er;
+
+	if ( devnm == NULL || res == NULL ) {
+		return E_PAR;
+	}
+	knl_memset(res, 0, sizeof(*res));
+	er = chk_init();
+	if ( er < E_OK ) {
+		return er;
+	}
+	knl_memset(&d, 0, sizeof(d));
+	if ( !read_sb(devnm, &d) ) {
+		return E_NOEXS;
+	}
+	if ( is_system(devnm) ) {
+		return E_RONLY;			/* converted at start, before it is attached */
+	}
+	if ( d.format != TSFSBLK_VERSION ) {
+		res->state = TSFSCNV_S_NOTV4;
+		return E_OK;
+	}
+	tk_loc_mtx(chk_mtx, TMO_FEVR);
+	if ( chk_busy[0] != 0 || chk_held > 0 ) {
+		tk_unl_mtx(chk_mtx);
+		return E_BUSY;
+	}
+	name_copy(chk_busy, devnm);
+	tk_unl_mtx(chk_mtx);
+
+	if ( knl_obfile_vol_path(devnm) > 0 ) {
+		if ( knl_obfile_detach(devnm) < E_OK ) {
+			res->ck.inuse = TRUE;	/* an object of it is open */
+			er = E_BUSY;
+			tm_printf((UB *)"tsfs: %s: convert: in use, not converted\n", devnm);
+			goto out;
+		}
+		detached = TRUE;
+		tm_printf((UB *)"ob: %s taken off to be converted\n", devnm);
+	}
+	er = cnv_one(devnm, mode, res, fn, ctx, TRUE);
+
+    out:
+	tk_loc_mtx(chk_mtx, TMO_FEVR);
+	chk_busy[0] = 0;
+	tk_unl_mtx(chk_mtx);
+	if ( detached ) {
+		ER	ea = knl_obfile_attach(devnm, TSFS_STORE_BLK);
+
+		tm_printf((UB *)"ob: %s put back (%d)\n", devnm, (INT)ea);
+		if ( er >= E_OK && ea < E_OK ) {
+			er = ea;
+		}
+	}
+	res->ck.detached = detached;
+	return er;
+}
+
+/*
+ * CONVREQ set or taken off: on the volume open on the device when there
+ * is one (the system's, one attached), else on the device opened for it
+ * alone, kept from being attached or checked meanwhile.
+ */
+EXPORT ER ob_cnv_request( CONST char *devnm, BOOL on )
+{
+	T_TSFSCKDEV	d;
+	ID		bvol;
+	ER		er;
+
+	if ( devnm == NULL ) {
+		return E_PAR;
+	}
+	er = chk_init();
+	if ( er < E_OK ) {
+		return er;
+	}
+	knl_memset(&d, 0, sizeof(d));
+	if ( !read_sb(devnm, &d) ) {
+		return E_NOEXS;
+	}
+	if ( d.format != TSFSBLK_VERSION ) {
+		return E_OBJ;
+	}
+	bvol = ts_vol_blk_of(devnm);
+	if ( bvol > 0 ) {
+		er = ts_blk_convreq(bvol, on);
+	} else {
+		tk_loc_mtx(chk_mtx, TMO_FEVR);
+		if ( chk_busy[0] != 0 ) {
+			tk_unl_mtx(chk_mtx);
+			return E_BUSY;
+		}
+		name_copy(chk_busy, devnm);
+		tk_unl_mtx(chk_mtx);
+		bvol = ts_obj_mount(devnm);
+		if ( bvol > 0 ) {
+			er = ts_blk_convreq(bvol, on);
+			(void)ts_obj_unmount(bvol);
+		} else {
+			er = ( bvol < 0 ) ? (ER)bvol : E_SYS;
+		}
+		tk_loc_mtx(chk_mtx, TMO_FEVR);
+		chk_busy[0] = 0;
+		tk_unl_mtx(chk_mtx);
+	}
+	tm_printf((UB *)"tsfs: %s: convert: the request %s (%d)\n", devnm, on ? "set" : "taken off", (INT)er);
+	return er;
 }
 
 /* What the repair at start found and did: how many events were kept, 0 when there was none */

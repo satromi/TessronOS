@@ -254,4 +254,48 @@ static __inline__ CONST UB *dq_told_text( CONST void *m, SZ n, UINT kind, SZ *p_
 	return ( t != NULL ) ? t : (CONST UB *)"";
 }
 
+/*
+ * A DTASK as the 仮身操作 of lib/libtv ask the desktop (T_TVASK): over
+ * the window win, and after each answer 'after' (NULL none), for the
+ * program to take what came while it waited. There for a program that
+ * includes <ts/tvvop.h> before this.
+ */
+#ifdef __TS_TVVOP_H__
+typedef struct {
+	DTASK		*q;
+	CONST TS_UUID	*win;
+	void		(*after)( void );
+} DQTV;
+
+static __inline__ ER dq_tv_ask( void *arg, T_DTREQ *rq, T_DTANS *an, INT wait_ms )
+{
+	DQTV	*d = (DQTV *)arg;
+	ER	er = dq_ask(d->q, rq, an, d->win, wait_ms);
+
+	if ( d->after != NULL ) d->after();
+	return er;
+}
+
+static __inline__ ER dq_tv_part( void *arg, UINT kind, CONST UB *s, SZ len )
+{
+	return dq_part(((DQTV *)arg)->q, kind, s, len);
+}
+
+static __inline__ CONST UB *dq_tv_ans( void *arg, UINT kind, SZ *p_len )
+{
+	return dq_ans_part(((DQTV *)arg)->q, kind, p_len);
+}
+
+static __inline__ void dq_tv_asker( T_TVASK *a, DQTV *d, DTASK *q, CONST TS_UUID *win, void (*after)( void ) )
+{
+	d->q = q;
+	d->win = win;
+	d->after = after;
+	a->ask = dq_tv_ask;
+	a->part = dq_tv_part;
+	a->ans = dq_tv_ans;
+	a->arg = d;
+}
+#endif /* __TS_TVVOP_H__ */
+
 #endif /* __APP_DTASK_H__ */

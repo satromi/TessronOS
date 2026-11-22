@@ -224,6 +224,9 @@ IMPORT INT  knl_ob_key_objs( ID pid, UINT type, UINT sub, TS_UUID *buf, INT max 
  */
 #define OB_USB_PATH_MAX		( 10 + 1 + 3 + 5 * 3 + 1 )
 #define OB_USB_NAME_MAX		( 3 + OB_USB_PATH_MAX )
+/* A device's product string, UTF-8, whole: as long as a string descriptor can be (USB_STR_MAX, usbdev.h) */
+#define OB_USB_PRODUCT_MAX	( 126 * 3 + 1 )
+IMPORT INT  knl_usb_dev_product( INT dev, UB *buf, INT max );	/* device/usb/usbman.c */
 #define OB_HID_NAME_MAX		( 3 + OB_USB_PATH_MAX - 1 + 2 + 3 + 1 )
 
 /* Volumes of the file manager */

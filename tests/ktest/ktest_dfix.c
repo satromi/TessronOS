@@ -1047,6 +1047,72 @@ LOCAL void test_cycles( void )
 }
 
 /*
+ * More 隠れ屑実身 than an object of the volume may link to: gathered into
+ * as many TRASH cabinets as that takes, each within the limit (the
+ * volume's limits made small for the test, ts_blk_lim_test), and the
+ * look after the repair finds nothing
+ */
+#define PAIRS		3
+
+LOCAL void test_trash_split( void )
+{
+	T_TSFSCK	*r;
+	T_TSFSLIM	lim;
+	TS_UUID		p[PAIRS * 2];
+	UD		before;
+	ID		vol, bvol;
+	INT		i;
+
+	if ( !fresh_volume() ) KT_SKIP("no volume");
+	r = (T_TSFSCK *)Kmalloc(sizeof(T_TSFSCK));
+	KT_ASSERT(r != NULL);
+	if ( r == NULL ) return;
+	vol = ts_opn_vol(DEV, TSFS_STORE_BLK);
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) goto out;
+	/* pairs that link only to each other */
+	for ( i = 0; i < PAIRS; i++ ) {
+		ID	od;
+		UB	*x = (UB *)Kmalloc(4096);
+
+		KT_ASSERT_ER(make_doc(vol, "P", NULL, 0, FALSE, &p[i * 2]), E_OK);
+		KT_ASSERT_ER(make_doc(vol, "Q", &p[i * 2], 1, FALSE, &p[i * 2 + 1]), E_OK);
+		od = ts_opn_obj(vol, &p[i * 2], TFO_READ | TFO_WRITE);
+		KT_ASSERT(od > 0 && x != NULL);
+		if ( od > 0 && x != NULL ) {
+			KT_ASSERT_ER(ts_rpl_rec(od, 0, x, (SZ)doc_text(x, 4096, "P", &p[i * 2 + 1], 1)), E_OK);
+		}
+		if ( x != NULL ) Kfree(x);
+		if ( od > 0 ) ts_cls_obj(od);
+	}
+	KT_ASSERT_ER(ts_cls_vol(vol), E_OK);
+	KT_ASSERT_ER(run(0, r), E_OK);
+	KT_ASSERT_EQ(r->found[TSFSCK_K_HIDDEN], PAIRS * 2);
+	before = r->objects;
+
+	bvol = ts_obj_mount(DEV);
+	KT_ASSERT(bvol > 0);
+	if ( bvol <= 0 ) goto out;
+	KT_ASSERT_ER(ts_blk_lim(bvol, &lim), E_OK);
+	lim.max_link = 2;
+	KT_ASSERT_ER(ts_blk_lim_test(bvol, &lim), E_OK);
+	ev_n = ev_fixed = 0;
+	KT_ASSERT_ER(ts_obj_check(bvol, TSFSCK_REPAIR | TSFSCK_ALONE, r, note, NULL), E_OK);
+	(void)ts_blk_lim_test(bvol, NULL);
+	(void)ts_obj_unmount(bvol);
+	tm_printf((UB *)"  %d hidden, %d gathered, %d objects before, %d after\n", r->found[TSFSCK_K_HIDDEN],
+		  r->fixed[TSFSCK_K_HIDDEN], (INT)before, (INT)r->objects);
+	KT_ASSERT_EQ(r->fixed[TSFSCK_K_HIDDEN], PAIRS * 2);
+	KT_ASSERT_EQ(r->remaining, 0);
+	KT_ASSERT(r->has_trash);
+	KT_ASSERT_EQ(r->objects, before + ( PAIRS * 2 + 1 ) / 2);	/* a TRASH for every two */
+	KT_ASSERT_ER(run(TSFSCK_FULL, r), E_OK);
+	KT_ASSERT_EQ(r->problems, 0);
+    out:
+	Kfree(r);
+}
+
+/*
  * A data volume attached with an error recorded: while an object of it
  * is open it cannot be taken off and is not repaired; closed, it is taken
  * off, repaired and put back
@@ -1409,6 +1475,7 @@ EXPORT void ktest_dfix( void )
 	KT_RUN(test_both);
 	KT_RUN(test_salvage);
 	KT_RUN(test_cycles);
+	KT_RUN(test_trash_split);
 	KT_RUN(test_attached);
 	KT_RUN(test_label_long);
 	KT_RUN(test_label_old);

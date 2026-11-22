@@ -108,6 +108,7 @@ static BOOL		fx_repair = FALSE;
 static INT		fx_depth = 1;		/* 簡易 0, 通常 1, 完全 2 */
 static INT		fx_state = FX_SETUP;
 static BOOL		fx_boot = FALSE;	/* what is shown is the repair at start */
+static BOOL		fx_boot_cnv = FALSE;	/* what is shown is the check before the conversion at start */
 static char		fx_run_dev[TSFSCK_DEVNM_MAX];
 static UINT		fx_run_mode = 0;
 static BOOL		fx_run_named = FALSE;	/* its objects can be named: the volume is attached */
@@ -478,7 +479,7 @@ static void result_lines( void )
 		line_set(0, b);
 		return;
 	}
-	n = put(b, 0, sizeof(b), fx_boot ? "再起動の前に依頼された" : "");
+	n = put(b, 0, sizeof(b), fx_boot ? "再起動の前に依頼された" : fx_boot_cnv ? "起動のときに形式を変える前の" : "");
 	n = put(b, n, sizeof(b), ( ( fx_res.mode & TSFSCK_REPAIR ) != 0 ) ? "修復が終わりました。" : "検査が終わりました。");
 	line_set(0, b);
 	if ( fx_res.problems == 0 ) {
@@ -517,6 +518,9 @@ static void result_lines( void )
 			line_set(i++, b);
 		}
 	} else if ( fx_res.problems > 0 ) {
+		if ( fx_boot_cnv ) {
+			line_set(i++, "障害があるため、ディスクの形式を変えませんでした。");
+		}
 		line_set(i++, "〈修復〉を選んで開始すると、修復を試みます。");
 	}
 	n = put(b, 0, sizeof(b), "実身");
@@ -782,6 +786,7 @@ static void start( void )
 	fx_er = E_OK;
 	fx_phase = 0;
 	fx_boot = FALSE;
+	fx_boot_cnv = FALSE;
 	memset(&fx_res, 0, sizeof(fx_res));
 
 	memset(&ct, 0, sizeof(ct));
@@ -1209,7 +1214,18 @@ static BOOL boot_result( void )
 	if ( fx_ev == NULL ) return FALSE;
 	n = ob_chk_boot_result((UB *)dev, sizeof(dev), &fx_res, fx_ev, FX_EV_MAX);
 	if ( n <= 0 ) {
-		return FALSE;
+		/* the check the conversion of the format at start made, when it found damage and converted nothing */
+		T_TSFSCNV	c;
+
+		memset(&c, 0, sizeof(c));
+		n = ob_cnv_boot_result((UB *)dev, sizeof(dev), &c, fx_ev, FX_EV_MAX);
+		if ( n <= 0 || c.state != TSFSCNV_S_DAMAGE ) {
+			return FALSE;
+		}
+		fx_res = c.ck;
+		fx_boot_cnv = TRUE;
+	} else {
+		fx_boot = TRUE;
 	}
 	for ( i = 0; i < fx_ndev; i++ ) {
 		if ( strcmp((char *)fx_dev[i].devnm, dev) == 0 ) fx_sel = i;
@@ -1218,12 +1234,11 @@ static BOOL boot_result( void )
 	(void)put(fx_run_dev, 0, sizeof(fx_run_dev), dev);
 	fx_nev = fx_told = ( n < FX_EV_MAX ) ? n : FX_EV_MAX;
 	fx_er = E_OK;
-	fx_boot = TRUE;
 	fx_run_named = TRUE;		/* attached since */
-	fx_repair = TRUE;
+	fx_repair = !fx_boot_cnv;	/* the check before a conversion repaired nothing: 〈修復〉 is offered */
 	fx_state = FX_DONE;
 	result_lines();
-	snprintf(b, sizeof(b), "boot result %d %d", fx_res.problems, fx_res.remaining);
+	snprintf(b, sizeof(b), "%s %d %d", fx_boot_cnv ? "conversion check result" : "boot result", fx_res.problems, fx_res.remaining);
 	note(b);
 	return TRUE;
 }

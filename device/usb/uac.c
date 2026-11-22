@@ -396,7 +396,7 @@ LOCAL void load_volume( UAC *u, UACDIR *d )
  * not taken, and is left to the programs (SVC class 12, WebUSB); NULL
  * takes them all again.
  */
-LOCAL UB	uac_leave_name[32];
+LOCAL UB	uac_leave_name[USB_STR_MAX];
 
 EXPORT void knl_uac_leave( CONST UB *product )
 {

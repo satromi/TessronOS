@@ -26,13 +26,13 @@ WPAP_HDRS   := $(TOP)/device/net/wifi/wpaproc/wpaproc.h $(TOP)/device/net/wifi/w
 $(WPAP_LIB): $(TOP)/tools/wpa/proc.sh $(WPAP_HDRS) $(TOP)/device/net/wifi/wpa/wpa_glue.c $(WPAP_DIR)/wps_eap.c \
 	     $(WPAP_DIR)/wps_serve.c $(WPAP_DIR)/include/dirent.h
 	@echo 'WPAP $@'
-	@ARCH=$(ARCH) UFLAGS="$(ARCHFLAGS) $(UARCH_FP)" OUT=$(WPAP_OUT) bash $(TOP)/tools/wpa/proc.sh all
+	@ARCH=$(ARCH) UFLAGS="$(ARCHFLAGS) $(UARCH_FP)" OUT=$(WPAP_OUT) $(SHARED_X) bash $(TOP)/tools/wpa/proc.sh all
 
 $(WPAP_ELF): $(APP_HDRS) $(MS_LIBTS) $(WPAP_DIR)/wps_main.c $(WPAP_DIR)/wps_libc.c $(WPAP_HDRS) \
 	     $(WPAP_LIB) $(USER_LD) $(TOP)/include/ts/svc.h
 	@mkdir -p $(dir $@)
 	@echo 'CC  $@'
-	@$(CC) $(MS_CFLAGS) -I$(TOP)/device/net/wifi/wpaproc -I$(WPAP_DIR)/include -o $@ $(MS_LIBTS) \
+	@$(SHARED_S) $(CC) $(MS_CFLAGS) -I$(TOP)/device/net/wifi/wpaproc -I$(WPAP_DIR)/include -o $@ $(MS_LIBTS) \
 	  $(WPAP_DIR)/wps_main.c $(WPAP_DIR)/wps_libc.c $(WPAP_LIB) -lc -lgcc
 
 $(WPAP_DONE): $(WPAP_ELF) $(WPAP_DIR)/def/$(WPAP_UUID).json $(WPAP_DIR)/def/$(WPAP_UUID)_0.xtad

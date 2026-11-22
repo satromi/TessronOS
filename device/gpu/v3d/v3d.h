@@ -84,6 +84,10 @@ typedef struct {
 	UW	fault_addr;
 	UW	fault_id;
 	UD	scratch_pa;	/* the page invalid accesses go to */
+	UW	ovf_made;	/* overflow pieces made */
+	UW	ovf_waits;	/* out-of-memory requests no piece was ready for */
+	UW	ovf_most;	/* the most pieces one job's binner took */
+	UW	resets;		/* resets of the block */
 } T_V3DSTAT;
 
 IMPORT void	v3d_stat( T_V3DSTAT *st );

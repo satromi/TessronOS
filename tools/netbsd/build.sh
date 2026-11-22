@@ -596,7 +596,14 @@ CFLAGS="-march=$MARCH -mgeneral-regs-only -mno-outline-atomics -O2 -g
  -Wno-use-after-free -Wno-int-in-bool-context -Wno-builtin-declaration-mismatch
  -Werror=implicit-function-declaration -Werror=int-conversion
  -Werror=incompatible-pointer-types"
-CPPFLAGS="-nostdinc -D_RUMPKERNEL -DDIAGNOSTIC
+# The rump kernel's maxfiles: the bound on all its open files (ENFILE) and
+# the hard limit on a process's descriptors. Every socket is a descriptor
+# of the one process of the stack, so it is past SO_SYS_WANT (4096,
+# include/ts/so.h) and the margin so_api.c keeps (16), with room for the
+# stack's own. Only this limit is set: the rest MAXUSERS gives
+# (opt_rumpkernel.h, sys/param.h) stays as it is
+NB_MAXFILES=4608
+CPPFLAGS="-nostdinc -D_RUMPKERNEL -DDIAGNOSTIC -DMAXFILES=$NB_MAXFILES
  -DINET -DINET6 -DPORTALGO_INET4_DEFAULT=PORTALGO_RANDOM_START
  -DPORTALGO_INET6_DEFAULT=PORTALGO_RANDOM_START
  -imacros $R/include/opt/opt_rumpkernel.h

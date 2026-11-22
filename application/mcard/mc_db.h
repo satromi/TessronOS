@@ -53,7 +53,6 @@
 #define MC_CARD_MAX	30000		/* cards of one object */
 #define MC_WIDTH_MAX	50		/* letters a field is shown in the list */
 #define MC_VALUE_MAX	( MC_TEXT_MAX * 4 + 1 )	/* bytes of a text, with its terminator */
-#define MC_OBJ_NAME	64		/* bytes of an object's name kept for %N: cut at a whole letter */
 
 /* The kinds of field */
 #define MC_T_TEXT	0
@@ -128,8 +127,15 @@ typedef struct {
 IMPORT void *mc_alloc( INT size );
 IMPORT void mc_free( void *p );
 
-/* The name of the object a link points at, as UTF-8 in out; its length, 0 when it has none */
+/*
+ * The name of the object a link points at, as UTF-8 in out: what fits
+ * of it, cut at a whole letter. Answers the length of the whole name
+ * (bytes, 0 when it has none), which is more than out holds when it was
+ * cut; mc_link_name_all has it whole.
+ */
 IMPORT INT  mc_link_name( CONST UB *el, INT len, UB *out, INT max );
+/* The same name whole, in memory of mc_alloc (mc_free it), its length in *p_n; NULL for none */
+IMPORT UB   *mc_link_name_all( CONST UB *el, INT len, INT *p_n );
 
 /* ---------------------------------------------------------------- letters */
 
@@ -363,7 +369,7 @@ IMPORT INT  mc_in_rows( MCDB *db, CONST UB *t, INT n, INT at );
 
 /* What the % letters of a layout say besides a card's values */
 typedef struct {
-	UB	name[MC_OBJ_NAME];	/* %N: the object's name */
+	UB	*name;			/* %N: the object's name, whole (mc_alloc), NULL for none */
 	INT	y, m, d;		/* the day it is put on paper */
 	INT	pages;			/* %T */
 } MCMINFO;

@@ -59,20 +59,22 @@
 /*
  * A handle: the kind in bits 28 to 30, then a window's number in the 28
  * bits below (WM_WIN_LAST), a panel's or a made one's place the same,
- * or for a part its panel's number in bits 20 to 27 and its place on
- * the panel in the 20 below. A panel's parts are as many as its
- * definition has; a handle names the first WO_PART_H of them, more than
- * the memory holds (a part is 512 bytes).
+ * or for a part its panel's number in bits 16 to 27 and its place on
+ * the panel in the 16 below. A handle is what the objects' layer keeps
+ * of an open object, an INT of 31 bits, and this is how the two numbers
+ * share it: a part's handle names the parts of the first WO_PNL_H - 1
+ * panels open at once, and the first WO_PART_H of a panel's parts (a
+ * part is 600 bytes: 40MB of parts on one panel). A panel opened past
+ * them is not opened (E_LIMIT, said on the console); a part put past
+ * them is not put (E_LIMIT). Neither stands without its object.
  */
-#define H_MAKE(k, a, b)	( ( (k) == H_PART ) ? ( ( (k) << 28 ) | ( (a) << 20 ) | (b) ) \
+#define H_MAKE(k, a, b)	( ( (k) == H_PART ) ? ( ( (k) << 28 ) | ( (a) << 16 ) | (b) ) \
 					    : ( ( (k) << 28 ) | (a) ) )
 #define H_KIND(h)	( (h) >> 28 )
-#define H_A(h)		( ( H_KIND(h) == H_PART ) ? ( ( (h) >> 20 ) & 0xFF ) : ( (h) & 0x0FFFFFFF ) )
-#define H_B(h)		( ( H_KIND(h) == H_PART ) ? ( (h) & 0xFFFFF ) : 0 )
-#define WO_PART_H	0x100000
-#if WM_PANEL_MAX > 0xFF
-#error "a part's handle has eight bits for its panel's number"
-#endif
+#define H_A(h)		( ( H_KIND(h) == H_PART ) ? ( ( (h) >> 16 ) & 0xFFF ) : ( (h) & 0x0FFFFFFF ) )
+#define H_B(h)		( ( H_KIND(h) == H_PART ) ? ( (h) & 0xFFFF ) : 0 )
+#define WO_PNL_H	0x1000
+#define WO_PART_H	0x10000
 
 #define WO_REC_MAX	( 1024 * 1024 )	/* bytes of a drawing or a shape */
 #define WO_NREC		OB_WR_KIND	/* the records every window has */
@@ -124,10 +126,11 @@ typedef struct {
 	TS_UUID	*part;			/* each part's, as many as the panel has (NULL none) */
 } WOPNL;
 
-#define WO_FREE_MAX	64
 
+
+/* A menu's item: its words as long as they are, allocated (NULL none) */
 typedef struct {
-	UB	label[WM_LABEL_MAX];
+	UB	*label;
 	UINT	state;			/* OB_MI_* */
 } WOITEM;
 
@@ -154,7 +157,17 @@ typedef struct {
 	ID	maker;			/* the process that made it, 0 the system */
 } WOFREE;
 
-LOCAL WOFREE		wo_free[WO_FREE_MAX];
+/*
+ * What is made on its own (panels, menus and parts a program makes), by
+ * place (0 up): wo_nfr of them in use or free, the table twice as large
+ * when every one is in use. An entry is allocated once and never freed,
+ * and the table before a larger one is kept, so that an entry a pointer
+ * was taken to stays where it is. Grown under the lock.
+ */
+LOCAL WOFREE		*wo_ftbl0[1];
+LOCAL WOFREE		**wo_ftbl = wo_ftbl0;
+LOCAL INT		wo_nfr = 0;
+#define WOF(i)		( *wo_ftbl[(i)] )
 LOCAL INT		wo_nfree = 0;
 /*
  * The windows, by number (1 up): as many as the window layer has room
@@ -169,7 +182,16 @@ LOCAL WOWIN		**wo_wtbl = wo_tbl0;
 LOCAL INT		wo_nwin = 0;
 
 #define WOW(i)		( *wo_wtbl[(i)] )
-LOCAL WOPNL		wo_pnl[WM_PANEL_MAX + 1];	/* by panel number */
+/*
+ * The panels' objects, by panel number (1 up): as many as there have been
+ * panels open at once (wo_npnl), grown as a panel of a higher number
+ * opens, in the same way as the windows' table.
+ */
+LOCAL WOPNL		wo_pnone;			/* number 0: never used */
+LOCAL WOPNL		*wo_ptbl0[1] = { &wo_pnone };
+LOCAL WOPNL		**wo_ptbl = wo_ptbl0;
+LOCAL INT		wo_npnl = 0;
+#define WOP(i)		( *wo_ptbl[(i)] )
 LOCAL ID		wo_mtx = 0;
 LOCAL ER key_put_one( UINT type, UINT code, UINT mods );
 LOCAL FP_WMPAINT	wo_paint = NULL;
@@ -443,13 +465,13 @@ LOCAL ER fr_remove( INT h );
  * fault or by ts_ter_prc, or ending while a thread of it still had a
  * window up, cannot, and what it made would stay -- on the screen with
  * nobody to draw it or to close it, in the list of the windows
- * (ob_lst_obj), and in the room for panels (WO_FREE_MAX). The surfaces
+ * (ob_lst_obj), and in the table of what is made on its own. The surfaces
  * it drew any window in go first.
  */
 EXPORT void knl_wmobj_prc_end( ID pid )
 {
 	INT	*wids, n = 0, i;
-	INT	frees[WO_FREE_MAX], nf = 0;
+	INT	*frees, nf = 0;
 
 	if ( wo_mtx <= 0 || pid <= 0 ) {
 		return;
@@ -463,8 +485,9 @@ EXPORT void knl_wmobj_prc_end( ID pid )
 			wids[n++] = i;
 		}
 	}
-	for ( i = 0; i < WO_FREE_MAX; i++ ) {
-		if ( wo_free[i].used && wo_free[i].maker == pid ) {
+	frees = ( wo_nfr > 0 ) ? (INT *)Kmalloc(sizeof(INT) * (SZ)wo_nfr) : NULL;
+	for ( i = 0; frees != NULL && i < wo_nfr; i++ ) {
+		if ( WOF(i).used && WOF(i).maker == pid ) {
 			frees[nf++] = i;
 		}
 	}
@@ -479,6 +502,7 @@ EXPORT void knl_wmobj_prc_end( ID pid )
 		(void)fr_remove(H_MAKE(H_FREE, frees[i], 0));
 	}
 	if ( wids != NULL ) Kfree(wids);
+	if ( frees != NULL ) Kfree(frees);
 	if ( n > 0 || nf > 0 ) {
 		wm_update();
 	}
@@ -566,18 +590,55 @@ EXPORT ID knl_wmobj_maker( INT wid )
 	return pid;
 }
 
+/* Room in the panels' table for panel pid, under the lock: FALSE for no memory */
+LOCAL BOOL pnl_slot( INT pid )
+{
+	INT	cap, i;
+	WOPNL	**t, *e;
+
+	if ( pid <= wo_npnl ) {
+		return TRUE;
+	}
+	cap = ( wo_npnl > 0 ) ? wo_npnl * 2 : 32;
+	if ( cap < pid ) cap = pid;
+	t = (WOPNL **)Kcalloc((SZ)cap + 1, sizeof(WOPNL *));
+	e = (WOPNL *)Kcalloc((SZ)( cap - wo_npnl ), sizeof(WOPNL));
+	if ( t == NULL || e == NULL ) {
+		if ( t != NULL ) Kfree(t);
+		if ( e != NULL ) Kfree(e);
+		return FALSE;
+	}
+	t[0] = &wo_pnone;
+	for ( i = 1; i <= cap; i++ ) {
+		t[i] = ( i <= wo_npnl ) ? wo_ptbl[i] : &e[i - wo_npnl - 1];
+	}
+	__sync_synchronize();
+	wo_ptbl = t;			/* the table before is not freed */
+	__sync_synchronize();
+	wo_npnl = cap;
+	return TRUE;
+}
+
 EXPORT ER knl_wmobj_panel( INT pid )
 {
 	WOPNL	p;
 	TS_UUID	*old;
 	INT	n, i;
 
-	if ( wo_mtx <= 0 || pid < 1 || pid > WM_PANEL_MAX ) {
+	if ( wo_mtx <= 0 || pid < 1 ) {
 		return E_OK;			/* no objects' layer: nothing to be */
+	}
+	if ( pid >= WO_PNL_H ) {
+		tm_printf((UB *)"wmobj: %d panels open at once: panel %d is not opened, its parts could have no handles\n",
+			  pid - 1, pid);
+		return E_LIMIT;
 	}
 	n = knl_pn_count(pid, NULL);
 	if ( n < 0 ) {
 		return (ER)n;
+	}
+	if ( n > WO_PART_H ) {
+		return E_LIMIT;
 	}
 	knl_memset(&p, 0, sizeof(p));
 	prt_of_maker(&p.prt);
@@ -601,8 +662,13 @@ EXPORT ER knl_wmobj_panel( INT pid )
 	}
 	p.used = TRUE;
 	LOCK();
-	old = wo_pnl[pid].part;
-	wo_pnl[pid] = p;
+	if ( !pnl_slot(pid) ) {
+		UNLOCK();
+		if ( p.part != NULL ) Kfree(p.part);
+		return E_NOMEM;
+	}
+	old = WOP(pid).part;
+	WOP(pid) = p;
 	UNLOCK();
 	if ( old != NULL ) {
 		Kfree(old);
@@ -624,7 +690,7 @@ LOCAL ER pnl_room( WOPNL *p, INT want )
 		return E_OK;
 	}
 	if ( want > WO_PART_H ) {
-		return E_NOMEM;			/* past what a handle names: the memory is long gone */
+		return E_LIMIT;			/* past what a part's handle names (WO_PART_H) */
 	}
 	room = ( p->room > 0 ) ? p->room * 2 : 8;
 	if ( room < want ) {
@@ -659,30 +725,30 @@ EXPORT void knl_wmobj_panel_close( INT pid )
 	BOOL	was = FALSE, own = FALSE;
 	INT	i;
 
-	if ( wo_mtx <= 0 || pid < 1 || pid > WM_PANEL_MAX ) {
+	if ( wo_mtx <= 0 || pid < 1 || pid > wo_npnl ) {
 		return;
 	}
-	for ( i = 0; i < WO_FREE_MAX && wo_nfree > 0; i++ ) {
-		if ( wo_free[i].used && wo_free[i].pid == pid && wo_free[i].sub == OB_S_PART ) {
+	for ( i = 0; i < wo_nfr && wo_nfree > 0; i++ ) {
+		if ( WOF(i).used && WOF(i).pid == pid && WOF(i).sub == OB_S_PART ) {
 			fr_keep_state(i);
 		}
 	}
 	LOCK();
-	if ( wo_pnl[pid].used ) {
-		u = wo_pnl[pid].uuid;
-		wo_pnl[pid].used = FALSE;
+	if ( WOP(pid).used ) {
+		u = WOP(pid).uuid;
+		WOP(pid).used = FALSE;
 		was = TRUE;
 	}
-	parts = wo_pnl[pid].part;		/* the parts' UUIDs go with the panel */
-	wo_pnl[pid].part = NULL;
-	wo_pnl[pid].room = 0;
-	wo_pnl[pid].npart = 0;
-	for ( i = 0; i < WO_FREE_MAX; i++ ) {
-		if ( wo_free[i].used && wo_free[i].pid == pid ) {
-			if ( wo_free[i].sub != OB_S_PART ) {
+	parts = WOP(pid).part;		/* the parts' UUIDs go with the panel */
+	WOP(pid).part = NULL;
+	WOP(pid).room = 0;
+	WOP(pid).npart = 0;
+	for ( i = 0; i < wo_nfr; i++ ) {
+		if ( WOF(i).used && WOF(i).pid == pid ) {
+			if ( WOF(i).sub != OB_S_PART ) {
 				own = TRUE;
 			}
-			wo_free[i].pid = 0;
+			WOF(i).pid = 0;
 		}
 	}
 	UNLOCK();
@@ -738,21 +804,34 @@ LOCAL void win_post( INT wid, UINT event, CONST T_WMEV *ev )
  * placed this way closes once something is chosen in it, or when a
  * button goes down anywhere else.
  */
+/* The panels that are objects now, in a table made for the caller (Kfree; NULL none or no memory) */
+LOCAL INT *used_pids( INT *p_n )
+{
+	INT	*pids, i, n = 0;
+
+	LOCK();
+	pids = ( wo_npnl > 0 ) ? (INT *)Kmalloc(sizeof(INT) * (SZ)wo_npnl) : NULL;
+	for ( i = 1; pids != NULL && i <= wo_npnl; i++ ) {
+		if ( WOP(i).used ) {
+			pids[n++] = i;
+		}
+	}
+	UNLOCK();
+	*p_n = n;
+	return pids;
+}
+
 LOCAL void drive_panels( CONST T_WMEV *ev )
 {
-	INT	pids[WM_PANEL_MAX], n = 0, i, cmd;
+	INT	*pids, n = 0, i, cmd;
 	UINT	ans;
 	BOOL	menu, drive = FALSE;
 
 	if ( ev->wid < 1 || ev->wid > wo_nwin ) {
 		return;
 	}
+	pids = used_pids(&n);
 	LOCK();
-	for ( i = 1; i <= WM_PANEL_MAX; i++ ) {
-		if ( wo_pnl[i].used ) {
-			pids[n++] = i;
-		}
-	}
 	drive = WOW(ev->wid).used && WOW(ev->wid).drive;
 	UNLOCK();
 	for ( i = 0; i < n; i++ ) {
@@ -790,6 +869,7 @@ LOCAL void drive_panels( CONST T_WMEV *ev )
 			wm_update();
 		}
 	}
+	if ( pids != NULL ) Kfree(pids);
 }
 
 /*
@@ -801,7 +881,6 @@ LOCAL void drive_panels( CONST T_WMEV *ev )
  * elsewhere or Escape puts it away. The process waits for the
  * answer.
  */
-#define WO_MSESS	4
 #define KEY_ESCAPE	0x29
 
 typedef struct {
@@ -815,7 +894,40 @@ typedef struct {
 	UD	skip;			/* the opening release, taken before the menu was: not the menu's, 0 none */
 } WOMSESS;
 
-LOCAL WOMSESS	wo_ms[WO_MSESS];
+/*
+ * The menus of processes waited for, as many as are open at once: each
+ * entry allocated once and never freed (its waiter holds it), the table
+ * before a larger one kept, so that the input's task reads it without
+ * the lock. Grown under the lock.
+ */
+LOCAL WOMSESS	*wo_mtbl0[1];
+LOCAL WOMSESS	**wo_mtbl = wo_mtbl0;
+LOCAL INT	wo_nms = 0;
+#define WOM(i)		( *wo_mtbl[(i)] )
+
+/* A free menu's place, the table made larger when none is: NULL for no memory. Under the lock. */
+LOCAL WOMSESS *ms_slot( void )
+{
+	WOMSESS	**t, *e;
+	INT	i, cap = ( wo_nms > 0 ) ? wo_nms * 2 : 4;
+
+	t = (WOMSESS **)Kcalloc((SZ)cap, sizeof(WOMSESS *));
+	e = (WOMSESS *)Kcalloc((SZ)( cap - wo_nms ), sizeof(WOMSESS));
+	if ( t == NULL || e == NULL ) {
+		if ( t != NULL ) Kfree(t);
+		if ( e != NULL ) Kfree(e);
+		return NULL;
+	}
+	for ( i = 0; i < cap; i++ ) {
+		t[i] = ( i < wo_nms ) ? wo_mtbl[i] : &e[i - wo_nms];
+	}
+	__sync_synchronize();
+	wo_mtbl = t;			/* the table before is not freed */
+	__sync_synchronize();
+	i = wo_nms;
+	wo_nms = cap;
+	return wo_mtbl[i];
+}
 LOCAL ID	wo_ms_flg = 0;
 
 /*
@@ -843,8 +955,8 @@ LOCAL BOOL menu_open( void )
 	INT	i;
 
 	LOCK();
-	for ( i = 0; i < WO_MSESS && !open; i++ ) {
-		open = ( wo_ms[i].used && !wo_ms[i].done );
+	for ( i = 0; i < wo_nms && !open; i++ ) {
+		open = ( WOM(i).used && !WOM(i).done );
 	}
 	UNLOCK();
 
@@ -856,8 +968,8 @@ LOCAL void drive_menus( CONST T_WMEV *ev )
 	BOOL	on;
 	INT	i, cmd, k;
 
-	for ( i = 0; i < WO_MSESS; i++ ) {
-		WOMSESS	*s = &wo_ms[i];
+	for ( i = 0; i < wo_nms; i++ ) {
+		WOMSESS	*s = &WOM(i);
 
 		if ( !s->used || s->done ) {
 			continue;
@@ -920,14 +1032,17 @@ EXPORT INT knl_wmobj_menu_run( INT pid, UD when )
 		cflg.iflgptn = 0;
 		wo_ms_flg = tk_cre_flg(&cflg);
 	}
-	for ( i = 0; i < WO_MSESS; i++ ) {
+	for ( i = 0; i < wo_nms; i++ ) {
 		/* a slot whose waiter has gone may be taken again */
-		if ( wo_ms[i].used && tk_ref_tsk(wo_ms[i].tskid, &rt) < E_OK ) {
-			wo_ms[i].used = FALSE;
+		if ( WOM(i).used && tk_ref_tsk(WOM(i).tskid, &rt) < E_OK ) {
+			WOM(i).used = FALSE;
 		}
-		if ( !wo_ms[i].used && s == NULL ) {
-			s = &wo_ms[i];
+		if ( !WOM(i).used && s == NULL ) {
+			s = &WOM(i);
 		}
+	}
+	if ( s == NULL ) {
+		s = ms_slot();			/* every one waited for: room for one more */
 	}
 	if ( s != NULL ) {
 		s->used = TRUE;
@@ -946,7 +1061,7 @@ EXPORT INT knl_wmobj_menu_run( INT pid, UD when )
 	}
 	UNLOCK();
 	if ( s == NULL || wo_ms_flg <= 0 ) {
-		return E_LIMIT;
+		return ( s == NULL ) ? E_NOMEM : E_SYS;
 	}
 	while ( !s->done ) {
 		(void)tk_wai_flg(wo_ms_flg, 1, TWF_ORW, &ptn, 200);
@@ -961,8 +1076,8 @@ EXPORT INT knl_wmobj_menu_run( INT pid, UD when )
 	LOCK();
 	cmd = s->cmd;
 	s->used = FALSE;
-	for ( i = 0; i < WO_MSESS && ( !wo_ms[i].used || wo_ms[i].done ); i++ ) ;
-	if ( i == WO_MSESS ) {
+	for ( i = 0; i < wo_nms && ( !WOM(i).used || WOM(i).done ); i++ ) ;
+	if ( i == wo_nms ) {
 		tk_clr_flg(wo_ms_flg, 0);	/* nobody else is waiting */
 	}
 	UNLOCK();
@@ -1308,7 +1423,7 @@ EXPORT void knl_wmobj_event( CONST T_WMEV *ev )
  * lights the keys held with it. A window that is not shown hears
  * nothing, so what is typed is told only to a keyboard on the screen.
  */
-#define WO_SEEN_MAX	8		/* screen keyboards told at once */
+#define WO_SEEN_MAX	8		/* windows taken at a time, so that the lock is not held while they are told */
 
 EXPORT void knl_wmobj_key_seen( CONST T_WMEV *ev )
 {
@@ -1316,33 +1431,34 @@ EXPORT void knl_wmobj_key_seen( CONST T_WMEV *ev )
 	INT	wid[WO_SEEN_MAX];
 	T_OBNTM	n;
 	T_WMWIN	w;
-	INT	i, cnt = 0;
+	INT	i, at = 1, cnt;
 
 	if ( wo_mtx <= 0 || ev == NULL
 	  || ( ev->type != HID_EV_KEY_DOWN && ev->type != HID_EV_KEY_UP ) ) {
-		return;
-	}
-	LOCK();
-	for ( i = 1; i <= wo_nwin && cnt < WO_SEEN_MAX; i++ ) {
-		if ( WOW(i).used && WOW(i).nofocus ) {
-			to[cnt] = WOW(i).uuid;
-			wid[cnt] = i;
-			cnt++;
-		}
-	}
-	UNLOCK();
-	if ( cnt == 0 ) {
 		return;
 	}
 	notice_of(ev, &n);
 	n.x = 0;
 	n.y = 0;
 	n.mods |= OB_KEY_SEEN | ( ( ev->type == HID_EV_KEY_UP ) ? OB_KEY_UP : 0 );
-	for ( i = 0; i < cnt; i++ ) {
-		if ( wm_ref(wid[i], &w) >= E_OK && w.visible ) {
-			knl_ob_post(&to[i], -1, OB_E_KEY, &n);
+	/* every screen keyboard, a few at a time */
+	do {
+		cnt = 0;
+		LOCK();
+		for ( ; at <= wo_nwin && cnt < WO_SEEN_MAX; at++ ) {
+			if ( WOW(at).used && WOW(at).nofocus ) {
+				to[cnt] = WOW(at).uuid;
+				wid[cnt] = at;
+				cnt++;
+			}
 		}
-	}
+		UNLOCK();
+		for ( i = 0; i < cnt; i++ ) {
+			if ( wm_ref(wid[i], &w) >= E_OK && w.visible ) {
+				knl_ob_post(&to[i], -1, OB_E_KEY, &n);
+			}
+		}
+	} while ( cnt == WO_SEEN_MAX );
 }
 
 /*
@@ -1490,7 +1606,7 @@ EXPORT void knl_wmobj_moved( INT wid, BOOL resized )
 
 		win_post(wid, OB_E_REDRAW, NULL);
 		/* the panels placed on it are drawn again: what was drawn went with the old size */
-		for ( pid = 1; pid <= WM_PANEL_MAX; pid++ ) {
+		for ( pid = 1; pid <= wo_npnl; pid++ ) {
 			if ( wm_panel_wid(pid) == wid ) {
 				knl_pn_fit(pid);	/* one whose sheets scroll takes the new height */
 				wm_panel_draw(pid);
@@ -1524,18 +1640,18 @@ EXPORT void knl_wmobj_part( INT pid, INT i, UINT event, CONST T_WMEV *ev )
 	BOOL	menu = FALSE, known = FALSE;
 	INT	recno = -1;
 
-	if ( wo_mtx <= 0 || pid < 1 || pid > WM_PANEL_MAX || i < 0 ) {
+	if ( wo_mtx <= 0 || pid < 1 || pid > wo_npnl || i < 0 ) {
 		return;
 	}
 	(void)knl_pn_count(pid, &menu);
 	LOCK();
-	if ( wo_pnl[pid].used ) {
+	if ( WOP(pid).used ) {
 		if ( menu ) {
-			u = wo_pnl[pid].uuid;
+			u = WOP(pid).uuid;
 			recno = OB_WR_KIND + i;
 			known = TRUE;
-		} else if ( i < wo_pnl[pid].npart ) {
-			u = wo_pnl[pid].part[i];
+		} else if ( i < WOP(pid).npart ) {
+			u = WOP(pid).part[i];
 			known = TRUE;
 		}
 	}
@@ -1551,14 +1667,38 @@ EXPORT void knl_wmobj_part( INT pid, INT i, UINT event, CONST T_WMEV *ev )
 	 */
 	if ( known && !menu ) {
 		LOCK();
-		known = wo_pnl[pid].used;
-		u = wo_pnl[pid].uuid;
+		known = WOP(pid).used;
+		u = WOP(pid).uuid;
 		UNLOCK();
 		if ( known ) {
 			notice_of(ev, &n);
 			knl_ob_post(&u, OB_WR_KIND + i, event, &n);
 		}
 	}
+}
+
+/*
+ * Whether anyone asked to hear a tag of part i of panel pid pulled out
+ * (OB_E_PULL), of the part or of its panel. A panel no program hears it
+ * of -- the system's own -- keeps its tags as they were: a press that
+ * moves on the tag still chooses it.
+ */
+EXPORT BOOL knl_wmobj_pulls( INT pid, INT i )
+{
+	TS_UUID	pu, uu;
+	BOOL	known = FALSE;
+
+	if ( wo_mtx <= 0 || pid < 1 || pid > wo_npnl || i < 0 ) {
+		return FALSE;
+	}
+	LOCK();
+	if ( WOP(pid).used && i < WOP(pid).npart ) {
+		pu = WOP(pid).uuid;
+		uu = WOP(pid).part[i];
+		known = TRUE;
+	}
+	UNLOCK();
+	return (BOOL)( known && ( knl_ob_taker(&uu, OB_E_PULL, NULL) || knl_ob_taker(&pu, OB_E_PULL, NULL) ) );
 }
 
 /* ---------------------------------------------------------------- drops */
@@ -2241,8 +2381,8 @@ LOCAL INT locate( CONST TS_UUID *uuid )
 		return E_NOEXS;
 	}
 	LOCK();
-	for ( i = 0; i < WO_FREE_MAX && h == 0; i++ ) {
-		if ( wo_free[i].used && same_uuid(&wo_free[i].uuid, uuid) ) {
+	for ( i = 0; i < wo_nfr && h == 0; i++ ) {
+		if ( WOF(i).used && same_uuid(&WOF(i).uuid, uuid) ) {
 			h = H_MAKE(H_FREE, i, 0);	/* first: placed, it is also below */
 		}
 	}
@@ -2251,15 +2391,15 @@ LOCAL INT locate( CONST TS_UUID *uuid )
 			h = H_MAKE(H_WIN, i, 0);
 		}
 	}
-	for ( i = 1; i <= WM_PANEL_MAX && h == 0; i++ ) {
-		if ( !wo_pnl[i].used ) {
+	for ( i = 1; i <= wo_npnl && h == 0; i++ ) {
+		if ( !WOP(i).used ) {
 			continue;
 		}
-		if ( same_uuid(&wo_pnl[i].uuid, uuid) ) {
+		if ( same_uuid(&WOP(i).uuid, uuid) ) {
 			h = H_MAKE(H_PNL, i, 0);
 		}
-		for ( k = 0; k < wo_pnl[i].npart && k < WO_PART_H && h == 0; k++ ) {
-			if ( same_uuid(&wo_pnl[i].part[k], uuid) ) {
+		for ( k = 0; k < WOP(i).npart && k < WO_PART_H && h == 0; k++ ) {
+			if ( same_uuid(&WOP(i).part[k], uuid) ) {
 				h = H_MAKE(H_PART, i, k);
 			}
 		}
@@ -2281,11 +2421,11 @@ LOCAL BOOL alive( INT h )
 		break;
 	case H_PNL:
 	case H_PART:
-		yes = ( H_A(h) >= 1 && H_A(h) <= WM_PANEL_MAX && wo_pnl[H_A(h)].used
-		     && ( H_KIND(h) == H_PNL || H_B(h) < wo_pnl[H_A(h)].npart ) );
+		yes = ( H_A(h) >= 1 && H_A(h) <= wo_npnl && WOP(H_A(h)).used
+		     && ( H_KIND(h) == H_PNL || H_B(h) < WOP(H_A(h)).npart ) );
 		break;
 	case H_FREE:
-		yes = ( H_A(h) < WO_FREE_MAX && wo_free[H_A(h)].used );
+		yes = ( H_A(h) < wo_nfr && WOF(H_A(h)).used );
 		break;
 	default:
 		break;
@@ -2307,7 +2447,7 @@ LOCAL UINT sub_of( INT h )
 	switch ( H_KIND(h) ) {
 	case H_WIN:	return OB_S_WINDOW;
 	case H_PART:	return OB_S_PART;
-	case H_FREE:	return wo_free[H_A(h)].sub;
+	case H_FREE:	return WOF(H_A(h)).sub;
 	default:	return is_menu(h) ? OB_S_MENU : OB_S_PANEL;
 	}
 }
@@ -2320,14 +2460,14 @@ LOCAL INT nrec_of( INT h )
 		return OB_WR_GSURF + 1;		/* and the drop record, the bars, the candidates, the question, the BOs */
 	}
 	if ( H_KIND(h) == H_PART ) {
-		return WO_NREC + 1;		/* and a selector's names */
+		return OB_WR_TAGS + 1;		/* and a selector's names, a panel of tags' tags */
 	}
 	if ( H_KIND(h) != H_PNL ) {
 		return WO_NREC;
 	}
 	LOCK();
-	if ( wo_pnl[H_A(h)].used ) {
-		n = wo_pnl[H_A(h)].npart;
+	if ( WOP(H_A(h)).used ) {
+		n = WOP(H_A(h)).npart;
 	}
 	UNLOCK();
 
@@ -2337,7 +2477,7 @@ LOCAL INT nrec_of( INT h )
 LOCAL WOPRT *prt_slot( INT h )
 {
 	return ( H_KIND(h) == H_WIN ) ? &WOW(H_A(h)).prt
-	     : ( H_KIND(h) == H_FREE ) ? &wo_free[H_A(h)].prt : &wo_pnl[H_A(h)].prt;
+	     : ( H_KIND(h) == H_FREE ) ? &WOF(H_A(h)).prt : &WOP(H_A(h)).prt;
 }
 
 /* A part of a panel copied out, in memory the caller frees */
@@ -2470,7 +2610,7 @@ LOCAL ER rec_bytes( INT h, INT recno, UB **p_buf, SZ *p_len )
 				Kfree(pt);
 			}
 			LOCK();
-			wp->parent = wo_pnl[H_A(h)].uuid;
+			wp->parent = WOP(H_A(h)).uuid;
 			UNLOCK();
 		}
 		if ( er < E_OK ) {
@@ -2485,17 +2625,48 @@ LOCAL ER rec_bytes( INT h, INT recno, UB **p_buf, SZ *p_len )
 		if ( H_KIND(h) != H_PART ) {
 			return E_OK;
 		}
-		b = (UB *)Kmalloc(WM_LABEL_MAX);
-		if ( b == NULL ) {
-			return E_NOMEM;
-		}
-		n = knl_pn_state(H_A(h), H_B(h), b, WM_LABEL_MAX);
-		if ( n < 0 ) {
+		/* as long as the state is: asked again with room for it all when the first was short */
+		INT	room = WM_LABEL_MAX;
+
+		for ( ;; ) {
+			b = (UB *)Kmalloc((SZ)room);
+			if ( b == NULL ) {
+				return E_NOMEM;
+			}
+			n = knl_pn_state(H_A(h), H_B(h), b, room);
+			if ( n < 0 ) {
+				Kfree(b);
+				return (ER)n;
+			}
+			if ( n <= room ) {
+				break;
+			}
 			Kfree(b);
-			return (ER)n;
+			room = n;
 		}
 		*p_buf = b;
 		*p_len = n;
+		return E_OK;
+	}
+	if ( H_KIND(h) == H_PART && recno == OB_WR_TAGS ) {
+		/* a panel of tags: the tags that can be seen now, empty for another part */
+		/* as many as it has: a tag is one of its names */
+		T_WMPART *tp = part_copy(H_A(h), H_B(h));
+		INT	nt = ( tp != NULL && tp->count > 0 ) ? tp->count : 1;
+		T_OBTAG	*tg;
+
+		if ( tp != NULL ) Kfree(tp);
+		tg = (T_OBTAG *)Kmalloc(sizeof(T_OBTAG) * (SZ)nt);
+		if ( tg == NULL ) {
+			return E_NOMEM;
+		}
+		nt = knl_pn_tags(H_A(h), H_B(h), tg, nt);
+		if ( nt <= 0 ) {
+			Kfree(tg);
+			return ( nt < 0 ) ? (ER)nt : E_OK;
+		}
+		*p_buf = (UB *)tg;
+		*p_len = (SZ)sizeof(T_OBTAG) * nt;
 		return E_OK;
 	}
 	if ( H_KIND(h) == H_PART ) {
@@ -2583,20 +2754,17 @@ LOCAL ER rec_bytes( INT h, INT recno, UB **p_buf, SZ *p_len )
 
 	/* a panel's links, a menu's items */
 	if ( is_menu(h) ) {
-		pt = part_copy(H_A(h), recno - OB_WR_KIND);
-		if ( pt == NULL ) {
-			return E_NOEXS;
+		/* the item's words whole */
+		n = knl_pn_label(H_A(h), recno - OB_WR_KIND, &b);
+		if ( n < 0 ) {
+			return ( n == E_NOMEM ) ? E_NOMEM : E_NOEXS;
 		}
-		n = str_len(pt->label, WM_LABEL_MAX);
-		b = (UB *)Kmalloc(n + 1);
-		if ( b != NULL ) knl_memcpy(b, pt->label, (INT)n);
-		Kfree(pt);
 	} else {
 		n = sizeof(TS_UUID);
 		b = (UB *)Kmalloc(n);
 		if ( b != NULL ) {
 			LOCK();
-			knl_memcpy(b, &wo_pnl[H_A(h)].part[recno - OB_WR_KIND], (INT)n);
+			knl_memcpy(b, &WOP(H_A(h)).part[recno - OB_WR_KIND], (INT)n);
 			UNLOCK();
 		}
 	}
@@ -3149,23 +3317,18 @@ LOCAL BOOL panel_seen( INT pid )
 LOCAL void panels_draw_on( INT wid )
 {
 	T_WMWIN	w;
-	INT	pids[WM_PANEL_MAX], n = 0, i;
+	INT	*pids, n = 0, i;
 
 	if ( wm_ref(wid, &w) < E_OK || w.visible ) {
 		return;				/* drawn already, as each part was set */
 	}
-	LOCK();
-	for ( i = 1; i <= WM_PANEL_MAX; i++ ) {
-		if ( wo_pnl[i].used ) {
-			pids[n++] = i;
-		}
-	}
-	UNLOCK();
+	pids = used_pids(&n);
 	for ( i = 0; i < n; i++ ) {
 		if ( wm_panel_wid(pids[i]) == wid ) {
 			wm_panel_draw(pids[i]);
 		}
 	}
+	if ( pids != NULL ) Kfree(pids);
 }
 
 LOCAL ER wo_trn( INT h, INT recno, UD size )
@@ -3204,7 +3367,7 @@ LOCAL ER wo_trn( INT h, INT recno, UD size )
 
 LOCAL WOFREE *fr_of( INT h )
 {
-	return &wo_free[H_A(h)];
+	return &WOF(H_A(h));
 }
 
 /* The handle of what it is placed as, 0 while it is not placed */
@@ -3226,7 +3389,7 @@ LOCAL INT fr_placed( INT h )
 /* What a placed part holds now, kept for when it is taken off */
 LOCAL void fr_keep_state( INT fi )
 {
-	WOFREE		*e = &wo_free[fi];
+	WOFREE		*e = &WOF(fi);
 	T_WMPART	*pt;
 	INT		pid, idx;
 
@@ -3237,12 +3400,32 @@ LOCAL void fr_keep_state( INT fi )
 	if ( pid <= 0 || ( pt = part_copy(pid, idx) ) == NULL ) {
 		return;
 	}
-	LOCK();
-	if ( e->used ) {
-		e->pt.value = pt->value;
-		knl_memcpy(e->pt.text, pt->text, WM_LABEL_MAX);
+	{
+		/* a box's letters whole, as the part holds them now */
+		UB	*t = NULL;
+		INT	n = 0, room = WM_LABEL_MAX;
+
+		while ( WM_PT_KIND(pt->type) == TB_PARTS || WM_PT_KIND(pt->type) == XB_PARTS ) {
+			t = (UB *)Kmalloc((SZ)room + 1);
+			if ( t == NULL ) break;
+			n = knl_pn_state(pid, idx, t, room);
+			if ( n < 0 || n <= room ) break;
+			Kfree(t);
+			t = NULL;
+			room = n;
+		}
+		LOCK();
+		if ( e->used ) {
+			e->pt.value = pt->value;
+			if ( t != NULL && n >= 0 && wm_part_set_text(&e->pt, t, n) >= E_OK ) {
+				/* kept whole */
+			} else {
+				knl_memcpy(e->pt.text, pt->text, WM_LABEL_MAX);	/* no memory: its head */
+			}
+		}
+		UNLOCK();
+		if ( t != NULL ) Kfree(t);
 	}
-	UNLOCK();
 	Kfree(pt);
 }
 
@@ -3316,7 +3499,7 @@ LOCAL ER fr_bytes( INT h, INT recno, UB **p_buf, SZ *p_len )
 		if ( e->sub != OB_S_PART ) {
 			er = E_OK;
 		} else if ( part_is_text(&e->pt) ) {
-			er = fr_copy(e->pt.text, str_len(e->pt.text, WM_LABEL_MAX), p_buf, p_len);
+			er = fr_copy(WM_PT_TEXT_S(&e->pt), str_len(WM_PT_TEXT_S(&e->pt), 0x7FFFFFFF), p_buf, p_len);
 		} else {
 			er = fr_copy((CONST UB *)&e->pt.value, sizeof(INT), p_buf, p_len);
 		}
@@ -3327,7 +3510,7 @@ LOCAL ER fr_bytes( INT h, INT recno, UB **p_buf, SZ *p_len )
 	} else if ( e->sub == OB_S_MENU ) {
 		CONST UB *l = e->item[recno - OB_WR_KIND].label;
 
-		er = fr_copy(l, str_len(l, WM_LABEL_MAX), p_buf, p_len);
+		er = ( l != NULL ) ? fr_copy(l, str_len(l, 0x7FFFFFFF), p_buf, p_len) : E_OK;
 	} else {
 		er = E_NOEXS;
 	}
@@ -3379,7 +3562,7 @@ LOCAL ER fr_lrc( INT h, T_OBREC *buf, INT n, INT *p_cnt )
  */
 LOCAL ER fr_keep( INT fi, INT which, D off, CONST void *buf, SZ size )
 {
-	WOFREE	*e = &wo_free[fi];
+	WOFREE	*e = &WOF(fi);
 	UB	**pp;
 	SZ	*pl, need = (SZ)off + size;
 	UB	*nb = NULL;
@@ -3502,7 +3685,13 @@ LOCAL ER fr_wri( INT h, INT recno, D off, CONST void *buf, SZ size )
 			return E_PAR;
 		}
 		LOCK();
-		if ( part_is_text(&e->pt) ) {
+		if ( WM_PT_KIND(e->pt.type) == TB_PARTS || WM_PT_KIND(e->pt.type) == XB_PARTS ) {
+			/* a box's letters as long as they are, to a nought in them */
+			INT	n = str_len((CONST UB *)buf, ( size < 0x7FFFFFFF ) ? (INT)size : 0x7FFFFFFF);
+
+			er = wm_part_set_text(&e->pt, (CONST UB *)buf, n);
+		} else if ( part_is_text(&e->pt) ) {
+			/* a number's or fields' state, kept as its bytes until it is placed */
 			SZ	n = ( size < WM_LABEL_MAX - 1 ) ? size : WM_LABEL_MAX - 1;
 
 			knl_memcpy(e->pt.text, buf, (INT)n);
@@ -3524,15 +3713,24 @@ LOCAL ER fr_wri( INT h, INT recno, D off, CONST void *buf, SZ size )
 				fr_redraw(h);
 			}
 		} else if ( e->sub == OB_S_MENU ) {
-			SZ	n = ( size < WM_LABEL_MAX - 1 ) ? size : WM_LABEL_MAX - 1;
+			/* the item's words as long as they are */
+			INT	n = str_len((CONST UB *)buf, ( size < 0x7FFFFFFF ) ? (INT)size : 0x7FFFFFFF);
+			UB	*l, *old;
 
 			if ( off != 0 ) {
 				return E_PAR;
 			}
+			l = (UB *)Kmalloc((SZ)n + 1);
+			if ( l == NULL ) {
+				return E_NOMEM;
+			}
+			knl_memcpy(l, buf, (SZ)n);
+			l[n] = 0;
 			LOCK();
-			knl_memcpy(e->item[recno - OB_WR_KIND].label, buf, (INT)n);
-			e->item[recno - OB_WR_KIND].label[n] = 0;
+			old = e->item[recno - OB_WR_KIND].label;
+			e->item[recno - OB_WR_KIND].label = l;
 			UNLOCK();
+			if ( old != NULL ) Kfree(old);
 			er = E_OK;
 		}
 	}
@@ -3598,8 +3796,11 @@ LOCAL ER fr_trn( INT h, INT recno, UD size )
 	} else if ( e->sub == OB_S_PART && recno - OB_WR_KIND < e->nlook ) {
 		pl = &e->looklen[recno - OB_WR_KIND];
 	} else if ( e->sub == OB_S_MENU && recno - OB_WR_KIND < e->nitem ) {
-		if ( size < WM_LABEL_MAX ) {
-			e->item[recno - OB_WR_KIND].label[size] = 0;
+		UB	*l = e->item[recno - OB_WR_KIND].label;
+
+		if ( l != NULL && size < (UD)str_len(l, 0x7FFFFFFF) ) {
+			l[size] = 0;		/* cut where it was asked to be, at a letter's end */
+			while ( size > 0 && ( l[size] & 0xC0 ) == 0x80 ) l[--size] = 0;
 		}
 		UNLOCK();
 		return E_OK;
@@ -3663,6 +3864,11 @@ LOCAL ER fr_map( INT h, INT target, CONST T_OBMAP *m )
 		}
 		LOCK();
 		*pt = e->pt;
+		if ( !wm_part_long_dup(pt) ) {		/* its own copy of the long words, taken under the lock */
+			UNLOCK();
+			Kfree(pt);
+			return E_NOMEM;
+		}
 		UNLOCK();
 		w = pt->r.right - pt->r.left;
 		hgt = pt->r.bottom - pt->r.top;
@@ -3674,27 +3880,29 @@ LOCAL ER fr_map( INT h, INT target, CONST T_OBMAP *m )
 		/* its UUID's room first: a part on the panel is always an object */
 		i = knl_pn_count(pid, NULL);
 		LOCK();
-		er = pnl_room(&wo_pnl[pid], i + 1);
+		er = pnl_room(&WOP(pid), i + 1);
 		UNLOCK();
 		if ( er < E_OK ) {
+			wm_part_long_free(pt);
 			Kfree(pt);
 			return er;
 		}
 		i = knl_pn_add(pid, pt);
+		wm_part_long_free(pt);
 		Kfree(pt);
 		if ( i < 0 ) {
 			return (ER)i;
 		}
 		LOCK();
-		er = pnl_room(&wo_pnl[pid], i + 1);	/* the panel had more parts by then */
+		er = pnl_room(&WOP(pid), i + 1);	/* the panel had more parts by then */
 		if ( er < E_OK ) {
 			UNLOCK();
 			(void)knl_pn_del(pid, i);
 			return er;
 		}
-		wo_pnl[pid].part[i] = e->uuid;
-		if ( i >= wo_pnl[pid].npart ) {
-			wo_pnl[pid].npart = i + 1;
+		WOP(pid).part[i] = e->uuid;
+		if ( i >= WOP(pid).npart ) {
+			WOP(pid).npart = i + 1;
 		}
 		e->pid = pid;
 		e->idx = i;
@@ -3751,19 +3959,38 @@ LOCAL ER fr_map( INT h, INT target, CONST T_OBMAP *m )
 	} else {
 		T_WMMENU	*md;
 
+		SZ		size, at;
+
 		LOCK();
-		md = (T_WMMENU *)Kcalloc(1, WM_MENU_SIZE(e->nitem));
+		/* the items, and after them the words too long for their fields (T_WMITEM) */
+		size = WM_MENU_SIZE(e->nitem);
+		for ( i = 0; i < e->nitem; i++ ) {
+			INT	ln = ( e->item[i].label != NULL ) ? str_len(e->item[i].label, 0x7FFFFFFF) : 0;
+
+			if ( ln >= WM_LABEL_MAX ) size += (SZ)ln + 1;
+		}
+		md = (T_WMMENU *)Kcalloc(1, size);
 		if ( md == NULL ) {
 			UNLOCK();
 			return E_NOMEM;
 		}
+		at = WM_MENU_SIZE(e->nitem);
 		md->nitem = e->nitem;
 		for ( i = 0; i < e->nitem; i++ ) {
 			WOITEM	*it = &e->item[i];
 
 			if ( ( it->state & OB_MI_LINE ) == 0 ) {
+				INT	ln = ( it->label != NULL ) ? str_len(it->label, 0x7FFFFFFF) : 0, k;
+
 				md->item[i].cmd = i + 1;
-				knl_memcpy(md->item[i].label, it->label, WM_LABEL_MAX);
+				for ( k = 0; k < ln && k < WM_LABEL_MAX - 1; k++ ) md->item[i].label[k] = it->label[k];
+				while ( k > 0 && k < ln && ( it->label[k] & 0xC0 ) == 0x80 ) k--;
+				md->item[i].label[k] = 0;
+				if ( ln >= WM_LABEL_MAX ) {
+					knl_memcpy((UB *)md + at, it->label, (SZ)ln + 1);
+					md->item[i].llabel = (UINT)at;
+					at += (SZ)ln + 1;
+				}
 			}
 			md->item[i].grey = ( it->state & OB_MI_GREY ) != 0;
 			md->item[i].tick = ( it->state & OB_MI_TICK ) != 0;
@@ -3776,8 +4003,8 @@ LOCAL ER fr_map( INT h, INT target, CONST T_OBMAP *m )
 		return (ER)pid;
 	}
 	LOCK();
-	wo_pnl[pid].uuid = e->uuid;
-	wo_pnl[pid].prt = e->prt;
+	WOP(pid).uuid = e->uuid;
+	WOP(pid).prt = e->prt;
 	e->pid = pid;
 	UNLOCK();
 	if ( e->sub == OB_S_MENU ) {
@@ -3821,16 +4048,16 @@ LOCAL ER fr_unm( INT h, INT target )
 		return er;
 	}
 	LOCK();
-	for ( k = idx; k + 1 < wo_pnl[pid].npart; k++ ) {
-		wo_pnl[pid].part[k] = wo_pnl[pid].part[k + 1];
+	for ( k = idx; k + 1 < WOP(pid).npart; k++ ) {
+		WOP(pid).part[k] = WOP(pid).part[k + 1];
 	}
-	if ( wo_pnl[pid].npart > 0 ) {
-		wo_pnl[pid].npart--;
+	if ( WOP(pid).npart > 0 ) {
+		WOP(pid).npart--;
 	}
-	for ( i = 0; i < WO_FREE_MAX; i++ ) {
-		if ( wo_free[i].used && wo_free[i].pid == pid && wo_free[i].sub == OB_S_PART
-		  && wo_free[i].idx > idx ) {
-			wo_free[i].idx--;
+	for ( i = 0; i < wo_nfr; i++ ) {
+		if ( WOF(i).used && WOF(i).pid == pid && WOF(i).sub == OB_S_PART
+		  && WOF(i).idx > idx ) {
+			WOF(i).idx--;
 		}
 	}
 	e->pid = 0;
@@ -3851,8 +4078,8 @@ EXPORT BOOL knl_wmobj_part_look( INT pid, INT i, INT gid, CONST T_DPRECT *r, BOO
 		return FALSE;
 	}
 	LOCK();
-	for ( k = 0; k < WO_FREE_MAX; k++ ) {
-		WOFREE	*e = &wo_free[k];
+	for ( k = 0; k < wo_nfr; k++ ) {
+		WOFREE	*e = &WOF(k);
 		INT	which;
 
 		if ( !e->used || e->sub != OB_S_PART || e->pid != pid || e->idx != i
@@ -3901,6 +4128,43 @@ LOCAL BOOL json_rect( CONST UB *j, INT len, INT v, T_DPRECT *r )
  *   {"name":"OK","tessronos":{"part":{"kind":6,"rect":[0,0,80,24]}}}
  * and a plain {"rect":[...]} does as well. The name is its label.
  */
+
+/*
+ * A free place for one made on its own, the table made larger when none
+ * is: E_NOMEM. Under the lock.
+ */
+LOCAL INT fr_slot( void )
+{
+	WOFREE	**t, *e;
+	INT	i, cap;
+
+	for ( i = 0; i < wo_nfr; i++ ) {
+		if ( !WOF(i).used ) {
+			return i;
+		}
+	}
+	if ( wo_nfr >= 0x0FFFFFFF / 2 ) {
+		return E_NOMEM;
+	}
+	cap = ( wo_nfr > 0 ) ? wo_nfr * 2 : 64;
+	t = (WOFREE **)Kcalloc((SZ)cap, sizeof(WOFREE *));
+	e = (WOFREE *)Kcalloc((SZ)( cap - wo_nfr ), sizeof(WOFREE));
+	if ( t == NULL || e == NULL ) {
+		if ( t != NULL ) Kfree(t);
+		if ( e != NULL ) Kfree(e);
+		return E_NOMEM;
+	}
+	for ( i = 0; i < cap; i++ ) {
+		t[i] = ( i < wo_nfr ) ? wo_ftbl[i] : &e[i - wo_nfr];
+	}
+	__sync_synchronize();
+	wo_ftbl = t;			/* the table before is not freed */
+	__sync_synchronize();
+	i = wo_nfr;
+	wo_nfr = cap;
+	return i;
+}
+
 LOCAL ER fr_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 {
 	WOFREE	*e = NULL;
@@ -3979,12 +4243,8 @@ LOCAL ER fr_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	}
 	maker = knl_prc_self(NULL, NULL);
 	LOCK();
-	for ( i = 0; i < WO_FREE_MAX; i++ ) {
-		if ( !wo_free[i].used ) {
-			e = &wo_free[i];
-			break;
-		}
-	}
+	i = fr_slot();
+	e = ( i >= 0 ) ? &WOF(i) : NULL;
 	if ( e != NULL ) {
 		knl_memset(e, 0, sizeof(*e));
 		e->uuid = u;
@@ -3995,11 +4255,18 @@ LOCAL ER fr_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 		e->pt.type = kind;
 		e->pt.r = r;
 		e->pt.answer = WM_ANS_NONE;
-		for ( n = 0; c->name != NULL && c->name[n] != 0 && n < WM_LABEL_MAX - 1; n++ ) {
-			e->pt.label[n] = c->name[n];
+		/* its name whole: the one it was made with, else its panel's title */
+		if ( c->name != NULL && c->name[0] != 0 ) {
+			n = wm_part_set_label(&e->pt, c->name, -1);
+		} else if ( boxnum > 0 && title[0] != 0 ) {
+			n = wm_part_set_label(&e->pt, title, -1);
+		} else {
+			n = E_OK;
 		}
-		for ( n = 0; boxnum > 0 && title[n] != 0 && ( c->name == NULL || c->name[0] == 0 ); n++ ) {
-			e->pt.label[n] = title[n];
+		if ( n < E_OK ) {
+			UNLOCK();
+			if ( items != NULL ) Kfree(items);
+			return E_NOMEM;
 		}
 		e->boxnum = boxnum;
 		e->beside = beside;
@@ -4014,7 +4281,7 @@ LOCAL ER fr_create( CONST T_OBCRE *c, CONST T_OBPRT *prt, TS_UUID *p_uuid )
 	UNLOCK();
 	if ( e == NULL ) {
 		if ( items != NULL ) Kfree(items);
-		return E_LIMIT;
+		return E_NOMEM;
 	}
 	*p_uuid = u;
 
@@ -4043,6 +4310,14 @@ LOCAL ER fr_remove( INT h )
 	sh = e->shape;
 	dr = e->draw;
 	it = e->item;
+	if ( it != NULL ) {
+		INT	k;
+
+		for ( k = 0; k < e->nitem; k++ ) {
+			if ( it[k].label != NULL ) Kfree(it[k].label);
+		}
+	}
+	wm_part_long_free(&e->pt);
 	e->used = FALSE;
 	wo_nfree--;
 	UNLOCK();
@@ -4068,47 +4343,74 @@ LOCAL CONST char *sub_name( UINT sub )
 	}
 }
 
-/* The name a thing shows: a window's title, a part's label */
-LOCAL void name_of( INT h, UB *out, INT max )
+/*
+ * The name a thing shows, whole: a window's title, a part's label, in a
+ * copy made for the caller (*p_out, Kfree, ending in a nought), and its
+ * bytes; E_NOMEM
+ */
+LOCAL INT name_all( INT h, UB **p_out )
 {
-	out[0] = 0;
+	UB	*b = NULL;
+	INT	n = 0;
+	char	probe[1];
+
+	*p_out = NULL;
 	if ( H_KIND(h) == H_WIN ) {
-		(void)knl_wm_title(H_A(h), (char *)out, max);
+		/* the title's length asked first, then the title in room for it all */
+		n = wm_title(H_A(h), probe, 1);
+		if ( n < 0 ) n = 0;
+		b = (UB *)Kmalloc((SZ)n + 1);
+		if ( b == NULL ) return E_NOMEM;
+		b[0] = 0;
+		if ( n > 0 && wm_title(H_A(h), (char *)b, n + 1) < 0 ) b[0] = 0;
+		n = str_len(b, n);
 	} else if ( H_KIND(h) == H_FREE ) {
-		INT	n;
+		CONST UB *l;
 
 		LOCK();
-		n = str_len(wo_free[H_A(h)].pt.label, max - 1);
-		knl_memcpy(out, wo_free[H_A(h)].pt.label, n);
-		out[n] = 0;
-		UNLOCK();
-	} else if ( H_KIND(h) == H_PART ) {
-		T_WMPART	*pt = part_copy(H_A(h), H_B(h));
-		INT		n;
-
-		if ( pt != NULL ) {
-			n = str_len(pt->label, max - 1);
-			knl_memcpy(out, pt->label, n);
-			out[n] = 0;
-			Kfree(pt);
+		l = WM_PT_LABEL_S(&WOF(H_A(h)).pt);
+		n = str_len(l, 0x7FFFFFFF);
+		b = (UB *)Kmalloc((SZ)n + 1);
+		if ( b != NULL ) {
+			knl_memcpy(b, l, (SZ)n);
+			b[n] = 0;
 		}
+		UNLOCK();
+		if ( b == NULL ) return E_NOMEM;
+	} else if ( H_KIND(h) == H_PART ) {
+		n = knl_pn_label(H_A(h), H_B(h), &b);
+		if ( n == E_NOMEM ) return E_NOMEM;
 	}
+	if ( b == NULL ) {
+		b = (UB *)Kmalloc(1);
+		if ( b == NULL ) return E_NOMEM;
+		b[0] = 0;
+		n = 0;
+	}
+	*p_out = b;
+	return n;
 }
 
 LOCAL ER wo_gat( INT h, UB *json, SZ size, SZ *p_asize )
 {
-	UB	name[WM_LABEL_MAX];
+	UB	*name;
 	UB	*j;
-	INT	n, max = WM_LABEL_MAX * 2 + 512;	/* a name and a few numbers: no more */
+	INT	n, max;
 
 	if ( !alive(h) ) {
 		return E_NOEXS;
 	}
+	n = name_all(h, &name);
+	if ( n < 0 ) {
+		return (ER)n;
+	}
+	/* the name, each byte of it escaped at most six wide, and a few numbers */
+	max = ( n < ( 0x7FFFFFFF - 1024 ) / 6 ) ? n * 6 + 1024 : 0x7FFFFFFF;
 	j = (UB *)Kmalloc(max);
 	if ( j == NULL ) {
+		Kfree(name);
 		return E_NOMEM;
 	}
-	name_of(h, name, sizeof(name));
 	n = knl_oj_put(j, 0, max, "{\"name\":");
 	n = knl_oj_put_str(j, n, max, name);
 	n = knl_oj_put(j, n, max, ",\"tessronos\":{\"window\":{\"sub\":\"");
@@ -4133,9 +4435,9 @@ LOCAL ER wo_gat( INT h, UB *json, SZ size, SZ *p_asize )
 
 		n = knl_oj_put(j, n, max, ",\"placed\":");
 		n = knl_oj_put(j, n, max, ( pl > 0 ) ? "true" : "false");
-		if ( wo_free[H_A(h)].sub == OB_S_PART ) {
+		if ( WOF(H_A(h)).sub == OB_S_PART ) {
 			n = knl_oj_put(j, n, max, ",\"kind\":");
-			n = knl_oj_put_num(j, n, max, (D)WM_PT_KIND(wo_free[H_A(h)].pt.type));
+			n = knl_oj_put_num(j, n, max, (D)WM_PT_KIND(WOF(H_A(h)).pt.type));
 		}
 	}
 	if ( H_KIND(h) == H_PART ) {
@@ -4150,24 +4452,26 @@ LOCAL ER wo_gat( INT h, UB *json, SZ size, SZ *p_asize )
 		}
 	}
 	n = knl_oj_put(j, n, max, "}}}");
+	Kfree(name);
 	if ( n < 0 ) {
 		Kfree(j);
 		return E_LIMIT;
 	}
+	if ( p_asize != NULL ) {
+		*p_asize = n;		/* as long as it is: a caller whose room was short knows */
+	}
 	if ( n > size ) n = (INT)size;
 	knl_memcpy(json, j, n);
 	Kfree(j);
-	if ( p_asize != NULL ) {
-		*p_asize = n;
-	}
 	return E_OK;
 }
 
 /* A window's title comes from the name written; nothing else is kept */
 LOCAL ER wo_sat( INT h, CONST UB *json, SZ size )
 {
-	UB	name[WM_TITLE_MAX];
-	INT	root, v;
+	UB	*name;
+	INT	root, v, n;
+	ER	er = E_OK;
 
 	if ( !alive(h) ) {
 		return E_NOEXS;
@@ -4177,19 +4481,26 @@ LOCAL ER wo_sat( INT h, CONST UB *json, SZ size )
 	}
 	root = knl_oj_root(json, (INT)size);
 	v = ( root >= 0 ) ? knl_oj_member(json, (INT)size, root, "name") : -1;
-	if ( v >= 0 && knl_oj_str(json, (INT)size, v, name, sizeof(name)) >= 0 ) {
-		if ( H_KIND(h) == H_FREE ) {
-			LOCK();
-			knl_memcpy(wo_free[H_A(h)].pt.label, name, sizeof(name));
-			wo_free[H_A(h)].pt.label[sizeof(name) - 1] = 0;
-			UNLOCK();
-			fr_redraw(h);
-			return E_OK;
-		}
-		wm_set_title(H_A(h), (CONST char *)name);
+	if ( v < 0 ) {
+		return E_OK;
+	}
+	/* the name whole: unescaped, a string is never longer than the text it is in */
+	name = (UB *)Kmalloc(size + 1);
+	if ( name == NULL ) {
+		return E_NOMEM;
+	}
+	n = knl_oj_str(json, (INT)size, v, name, (INT)size + 1);
+	if ( n >= 0 && H_KIND(h) == H_FREE ) {
+		LOCK();
+		er = wm_part_set_label(&WOF(H_A(h)).pt, name, n);	/* whole: E_NOMEM leaves it as it was */
+		UNLOCK();
+		if ( er >= E_OK ) fr_redraw(h);
+	} else if ( n >= 0 ) {
+		er = wm_set_title(H_A(h), (CONST char *)name);
 		wm_update();		/* the band, drawn through the frames' watched environment */
 	}
-	return E_OK;
+	Kfree(name);
+	return er;
 }
 
 /* ---------------------------------------------------------------- objects */
@@ -4215,9 +4526,6 @@ LOCAL ER wo_close( INT h )
 	return E_OK;
 }
 
-/* The name whole: the title or the label, as long as the window manager keeps it */
-#define WO_NAME_ROOM	( ( WM_TITLE_MAX > WM_LABEL_MAX ) ? WM_TITLE_MAX : WM_LABEL_MAX )
-
 LOCAL ER wo_refnam( CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize )
 {
 	UB	*nm;
@@ -4227,11 +4535,11 @@ LOCAL ER wo_refnam( CONST TS_UUID *uuid, UB *buf, SZ size, SZ *p_asize )
 	if ( h < 0 ) {
 		return (ER)h;
 	}
-	nm = (UB *)Kmalloc(WO_NAME_ROOM);
-	if ( nm == NULL ) {
-		return E_NOMEM;
+	/* the name whole: the title or the label, as long as the window manager keeps it */
+	er = name_all(h, &nm);
+	if ( er < E_OK ) {
+		return er;
 	}
-	name_of(h, nm, WO_NAME_ROOM);
 	er = knl_ob_name_put(nm, -1, buf, size, p_asize);
 	Kfree(nm);
 	return er;
@@ -4532,26 +4840,26 @@ LOCAL ER wo_lst( CONST TS_UUID *from, TS_UUID *buf, INT n, INT *p_cnt )
 	INT	cnt = 0, i, k;
 
 	LOCK();
-	max = WO_FREE_MAX + wo_nwin;
-	for ( i = 1; i <= WM_PANEL_MAX; i++ ) {
-		if ( wo_pnl[i].used ) max += 1 + wo_pnl[i].npart;
+	max = wo_nfr + wo_nwin;
+	for ( i = 1; i <= wo_npnl; i++ ) {
+		if ( WOP(i).used ) max += 1 + WOP(i).npart;
 	}
 	all = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)max);
 	if ( all == NULL ) {
 		UNLOCK();
 		return E_NOMEM;
 	}
-	for ( i = 0; i < WO_FREE_MAX; i++ ) {
-		if ( wo_free[i].used ) all[cnt++] = wo_free[i].uuid;
+	for ( i = 0; i < wo_nfr; i++ ) {
+		if ( WOF(i).used ) all[cnt++] = WOF(i).uuid;
 	}
 	for ( i = 1; i <= wo_nwin; i++ ) {
 		if ( WOW(i).used ) all[cnt++] = WOW(i).uuid;
 	}
-	for ( i = 1; i <= WM_PANEL_MAX; i++ ) {
-		if ( !wo_pnl[i].used ) continue;
-		all[cnt++] = wo_pnl[i].uuid;
-		for ( k = 0; k < wo_pnl[i].npart; k++ ) {
-			all[cnt++] = wo_pnl[i].part[k];
+	for ( i = 1; i <= wo_npnl; i++ ) {
+		if ( !WOP(i).used ) continue;
+		all[cnt++] = WOP(i).uuid;
+		for ( k = 0; k < WOP(i).npart; k++ ) {
+			all[cnt++] = WOP(i).part[k];
 		}
 	}
 	UNLOCK();

@@ -32,8 +32,14 @@
 #include <ts/mn.h>
 #include <ts/ob.h>
 #include <ts/print.h>
+#include <ts/fs.h>
 
-#define DT_MAX_WIN	32		/* windows this program may have open */
+/*
+ * The desktop's windows are as many as are open (the table grows):
+ * dt_win_room is how many places it has now, for a caller that goes
+ * through them (dt_win_at, 0 up).
+ */
+IMPORT INT dt_win_room( void );
 #define DT_PAPER_W	595		/* A4, when a document names no paper */
 #define DT_PAPER_H	842
 
@@ -174,8 +180,7 @@ IMPORT UW dt_test_loops( void );
 /* The programs as real objects (dtprog.c, design 18.12) */
 #define DT_PROG_ID	40
 #define DT_PROG_BASE	4
-#define DT_VER_MAX	16		/* R, a number, a point and three digits */
-#define DT_TYPES_MAX	64
+#define DT_VER_MAX	16		/* the system's version as a list or a package gives it (dtpkg.c, dtsysup.c) */
 #define DT_PROG_ALIAS	2		/* ids a program was known by before */
 #define DT_PK_APP	1		/* an application: templates, opens objects */
 #define DT_PK_ACCESSORY	2		/* 小物: no data of its own */
@@ -191,8 +196,8 @@ typedef struct {
 	TS_UUID	base[DT_PROG_BASE];	/* its templates (原紙) */
 	BOOL	builtin;		/* carried in the desktop: not replaced or deleted */
 	BOOL	menu;			/* an accessory shown in the 小物 menu */
-	UB	version[DT_VER_MAX];	/* R1.000; empty when its metadata says none */
-	UB	types[DT_TYPES_MAX];	/* the kinds of object 実行 offers it for (fileTypes): "xtad,tad" */
+	UB	*version;		/* R1.000, whole (Kmalloc), never NULL once read; empty when its metadata says none */
+	UB	*types;			/* the kinds of object 実行 offers it for (fileTypes): "xtad,tad"; whole (Kmalloc), never NULL once read */
 	INT	nalias;
 	UB	alias[DT_PROG_ALIAS][DT_PROG_ID];	/* the ids it had before ("aliases"): an applist naming one opens it */
 	BOOL	open_link;		/* "openArg": "link": started with the link it was opened from (T_PRCOPEN) */
@@ -200,7 +205,7 @@ typedef struct {
 } DTPROG;
 
 IMPORT ER     dt_prog_start( void );
-/* What an entry read by dt_prog_read holds let go: its name */
+/* What an entry read by dt_prog_read holds let go: its name, version and kinds of object */
 IMPORT void   dt_prog_clear( DTPROG *p );
 /* The program an applist names by id: the one with that id, else the one that had it before */
 IMPORT CONST DTPROG *dt_prog_find( CONST UB *id );
@@ -563,7 +568,9 @@ IMPORT DTWIN *dt_win_at( INT i );		/* the table's place i, used or not */
  * (DT_RQ_DISK), started from the menu with the item chosen
  * (dt_disk_menu); and the top object of a volume, where a link to what
  * is saved on it goes. dt_fix_boot starts ディスク修復 at the start when
- * the system volume was repaired before it was attached.
+ * the system volume was repaired before it was attached, and shows in a
+ * notice what the conversion of its format at that start came to (with
+ * ディスク修復 for the check when the volume was not converted).
  */
 IMPORT void   dt_disk_poll( void );
 IMPORT ER     dt_disk_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid );
@@ -614,12 +621,24 @@ IMPORT BOOL   dt_pick_paper( INT owner, UW *io, BOOL *p_same );
 IMPORT T_WMPART *dt_pn_colour( T_WMPANEL *p, INT num, INT l, INT t, INT w, INT h, UW col );
 IMPORT BOOL   dt_ask_name( DTWIN *d, CONST char *prompt, CONST UB *start,
 			   UB *out, INT max );
+/* The same, the name whole in memory the caller Kfree's: NULL abandoned, empty or no memory */
+IMPORT UB    *dt_ask_name_all( DTWIN *d, CONST char *prompt, CONST UB *start );
 IMPORT BOOL   dt_confirm( DTWIN *d, CONST char *l1, CONST char *l2,
 			  CONST char *no, CONST char *yes );
 IMPORT void   dt_tell( DTWIN *d, CONST char *l1, CONST char *l2 );
 IMPORT void   dt_no_memory( DTWIN *d );
 IMPORT BOOL   dt_ask_text( DTWIN *d, CONST char *p1, CONST char *p2,
 			   CONST UB *start, UB *out, INT max, CONST char *ok );
+/*
+ * The same, the box starting with start whole and the letters agreed to
+ * answered whole, in memory the caller Kfree's: NULL when it was
+ * abandoned, when it is empty, or when there was not the memory (said
+ * with dt_no_memory).
+ */
+IMPORT UB    *dt_ask_text_all( DTWIN *d, CONST char *p1, CONST char *p2,
+			       CONST UB *start, CONST char *ok );
+/* A name followed by のコピー, whole, in memory the caller Kfree's (NULL: no memory; name NULL: のコピー alone) */
+IMPORT UB    *dt_copy_name( CONST UB *name );
 /*
  * A text put where a part of a panel or a menu keeps fixed room
  * (WM_LABEL_MAX and the like): at most max - 1 bytes of s, cut at a
@@ -638,6 +657,8 @@ IMPORT UB    *dt_cat( CONST char *s, ... );
  * the console).
  */
 IMPORT UB    *dt_vol_label( CONST char *path );
+IMPORT INT   dt_vols( UB (**p_to)[FS_PATH_MAX] );	/* every volume's path (Kmalloc): how many */
+IMPORT INT   dt_wins( INT **p_wids );		/* every window of wm_list (Kmalloc): how many */
 
 /* One of a list of names chosen: its number, or -1 */
 IMPORT INT    dt_list_form( DTWIN *d, CONST char *title,
@@ -756,6 +777,7 @@ IMPORT BOOL   dt_scr_event( CONST T_WMEV *ev );
 /* dtnotify.c: 通知, notices of processes in small windows of the desktop's (DT_RQ_NOTIFY) */
 IMPORT ER     dt_note_req( CONST T_DTREQ *rq, T_DTANS *an );
 IMPORT INT    dt_note_wid( INT i );
+IMPORT ER     dt_note_own( INT id, CONST char *name, CONST char *text );
 
 /*
  * application/sysinst/sysinst.c: what システム登録 (a process, x64 only)

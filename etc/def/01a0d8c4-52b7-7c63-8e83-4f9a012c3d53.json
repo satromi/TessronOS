@@ -19,7 +19,7 @@
       "id": "tessronos-userenv",
       "kind": "accessory",
       "name": "ユーザ環境設定",
-      "version": "R1.410",
+      "version": "R1.500",
       "menu": true,
       "builtin": false,
       "openArg": "link",

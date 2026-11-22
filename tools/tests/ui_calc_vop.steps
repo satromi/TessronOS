@@ -1,0 +1,166 @@
+# 基本表計算 (design 11.13, 11.2.6), for tools/ui_run.py: the 仮身操作,
+# 実身操作 and 実行 of a link in a cell, done by the shared part of
+# lib/libtv (tv_vop.c). A link dropped in G4 of the template is shown the
+# menu, its 属性変更 and 実身複製 are done, 起動アプリの固定 turned on, and
+# it is carried out of the window into the window it came from. The
+# pictures are checked against the ones recorded when the program did
+# these itself, before they were moved to lib/libtv.
+open 019b54a4-6ccf-72f7-e320-c98e4a0bab4e
+expect calc: ready
+wait 800
+# the text 「TADjsについて」 opens over the sheet; its link in 仮身サンプル is dropped in the sheet
+open 019a4370-3819-79a2-9758-881e1e0de90a
+win TADjsについて
+wait 2000
+drag 400 414 820 240
+expect calc: dropped 1
+# the text closed (its window pressed first: the drop gave the keys to the sheet)
+click 1000 148
+wait 2000
+key 08 01
+wait 2000
+win 基本表計算
+click 760 228
+wait 300
+click 760 228 1
+wait 1500
+shot vop_menu
+# 仮身操作 > 属性変更: 続柄 shown, the desktop's answer written into the cell's link
+move 770 428
+wait 150
+move 840 428
+wait 800
+move 870 428
+wait 150
+move 880 488
+wait 300
+click 880 488
+wait 1500
+shot vop_attr_panel
+click 420 367
+wait 300
+key 28
+expect calc: attr
+# the sheet drawn again whole after the panel
+wait 3000
+shot vop_attr
+shotsum vop_attr 110 130 910 730
+want ok 7e6ed3b988a1de18
+# the menu opens with the last chosen under the pointer: 仮身操作 at 228
+# 仮身操作 > 続柄設定
+click 760 228 1
+wait 1500
+move 770 228
+wait 150
+move 840 228
+wait 800
+move 870 228
+wait 150
+move 880 308
+wait 300
+click 880 308
+wait 1500
+shot vop_rel_panel
+text abc
+wait 300
+key 28
+expect calc: relation
+# the sheet drawn again whole after the panel
+wait 3000
+shot vop_rel
+shotsum vop_rel 110 130 910 730
+want ok 1972b983b91cfa30
+# 実身操作 > 実身複製: the copy's link in the first empty cell under it (H5)
+click 760 228 1
+wait 1500
+move 770 248
+wait 150
+move 840 248
+wait 800
+move 870 248
+wait 150
+move 880 268
+wait 300
+click 880 268
+wait 1500
+shot vop_dup_panel
+key 28
+expect calc: duplicated
+# the sheet drawn again whole after the panel
+wait 3000
+shot vop_dup
+shotsum vop_dup 110 130 910 730
+want ok 485abf652a90d299
+# 実身操作 > 新版作成 (H6), with no panel; 実身操作 is at 228 now
+click 760 228 1
+wait 1500
+move 770 228
+wait 150
+move 840 228
+wait 800
+move 870 228
+wait 150
+move 880 268
+wait 300
+click 880 268
+wait 1500
+expect calc: new version
+# the sheet drawn again whole after the panel
+wait 3000
+shot vop_newver
+shotsum vop_newver 110 130 910 730
+want ok cc5f86c0f3c7f0a7
+# 実身操作 > 起動アプリを固定する, and the menu then offers 起動アプリを最新にする
+click 760 228 1
+wait 1500
+move 770 228
+wait 150
+move 840 228
+wait 800
+move 870 228
+wait 150
+move 880 288
+wait 300
+click 880 288
+expect calc: kept
+wait 1000
+click 760 228 1
+wait 1500
+move 770 228
+wait 150
+move 840 228
+wait 800
+shot vop_real_kept
+shotsum vop_real_kept 740 200 1040 600
+want ok 3c77e6ebced7447c
+# 実行: the programs the desktop offers
+move 770 308
+wait 150
+move 840 308
+wait 800
+shot vop_exec_list
+shotsum vop_exec_list 740 200 1040 600
+want ok 6446e8de15212522
+key 29
+wait 200
+key 29
+wait 300
+# carried out of the window into the text's window on the left: moved there
+move 735 228
+wait 200
+down
+wait 200
+move 700 228
+wait 200
+move 400 400
+wait 300
+move 60 600
+wait 1500
+up
+expect calc: carried
+# the sheet drawn again whole after the panel
+wait 3000
+shot vop_carried
+shotsum vop_carried 110 130 910 730
+want ok f01feb3f598e9ba2
+absent !OACV!

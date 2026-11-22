@@ -20,8 +20,10 @@
  *	The journal area is a head block followed by a ring. A transaction
  *	goes into the ring as a descriptor naming where its blocks belong,
  *	the copies, a revoke block when it freed blocks the ring still holds
- *	copies of, and a commit block that checks all of them. The commit
- *	block going down is the moment the transaction becomes real.
+ *	copies of, and a commit block that checks all of them; on a version
+ *	5 volume as many descriptors, each followed by its copies, and as
+ *	many revoke blocks as the transaction needs, numbered in order. The
+ *	commit block going down is the moment the transaction becomes real.
  *
  *	A committed transaction's blocks are kept in memory and put where
  *	they belong later, all together (a checkpoint): when the ring or the
@@ -54,13 +56,19 @@ extern "C" {
 #include <ts/tsfsblk.h>
 
 #define TSFSJ_VERSION		2
+#define TSFSJ_VERSION5		5	/* the head and the ring blocks of a version 5 volume */
 #define TSFSJ_HDR_SIZE		32
 #define TSFSJ_DESC_ENT		16	/* where a block goes (8), its CRC (4), spare (4) */
 
-/* Blocks one transaction may change: what one descriptor names */
+/*
+ * Blocks one descriptor names. A transaction of a version 4 volume has
+ * one descriptor, so this is all it may change; one of a version 5
+ * volume has as many descriptors as it needs, and its budget is the
+ * larger of this and a quarter of the ring (ts_jrnl_budget).
+ */
 #define TSFSJ_MAX_BLOCKS		( ( TSFSBLK_BLOCK_SIZE - TSFSJ_HDR_SIZE ) / TSFSJ_DESC_ENT )
 
-/* Blocks one revoke block names */
+/* Blocks one revoke block names (a version 4 transaction has one revoke block at most) */
 #define TSFSJ_MAX_REVOKE		( ( TSFSBLK_BLOCK_SIZE - TSFSJ_HDR_SIZE ) / 8 )
 
 /*
@@ -85,6 +93,10 @@ typedef struct {
 	UD	queued;			/* ring blocks the closed ones not yet in it will take */
 	UD	closed;			/* transactions closed since the volume was opened */
 	UD	batches;		/* times the queue was written into the ring */
+	UINT	budget;			/* copies one transaction may hold (ts_jrnl_budget) */
+	UINT	last_desc;		/* descriptor blocks of the last transaction closed */
+	UINT	last_rvk;		/* revoke blocks of it */
+	BOOL	v5;			/* the ring is of version 5 (TSFSJ_VERSION5) */
 } T_TSFSJRNL;
 
 IMPORT ER ts_jrnl_begin( ID vol );
@@ -130,8 +142,39 @@ IMPORT ER ts_jrnl_replay( ID vol );
 #define TSFSJ_FAULT_BEFORE_COMMIT 1	/* the ring is written, the commit block is not */
 #define TSFSJ_FAULT_AFTER_COMMIT	2	/* the commit block is written, nothing is put in place */
 #define TSFSJ_FAULT_HOLD		3	/* nothing goes into the ring until the fault is taken off */
+#define TSFSJ_FAULT_SKIP		4	/* as AFTER_COMMIT, with the second descriptor numbered 2
+					   (a ring whose descriptors skip a number; version 5) */
 
 IMPORT ER ts_jrnl_fault( ID vol, UINT where );
+
+/*
+ * TSFSJ_FAULT_BUDGET | n: the budget of a transaction made n copies
+ * (n 0: the volume's own), until the volume is closed, so that work
+ * split over several transactions can be tried on a small budget. It
+ * does not change the fault set with the other values.
+ */
+#define TSFSJ_FAULT_BUDGET	0x40000000U
+#define TSFSJ_FAULT_ARG		0x00FFFFFFU
+
+/*
+ * TSFSJ_FAULT_NOCKPT | 1: committed copies stay in the ring and in
+ * memory until a transaction finds no room in the ring, or the volume is
+ * synced or closed; the checkpointer leaves the volume alone, so that a
+ * test knows what the ring holds. | 0 takes it off.
+ */
+#define TSFSJ_FAULT_NOCKPT	0x20000000U
+
+/*
+ * The budget: the copies one transaction may hold (a version 4 volume:
+ * TSFSJ_MAX_BLOCKS; a version 5 volume: the larger of that and a quarter
+ * of the ring, so long as two of the largest transactions fit in the
+ * ring), and what is left of it in the running transaction
+ * (the budget when none is running). A step of work split over
+ * transactions looks at ts_jrnl_room before it goes on. E_ID for a
+ * volume that is not.
+ */
+IMPORT INT ts_jrnl_budget( ID vol );
+IMPORT INT ts_jrnl_room( ID vol );
 
 /* ---------------------------------------------------------------- for the block layer */
 
@@ -159,6 +202,21 @@ IMPORT BOOL knl_jrnl_ready( ID vol );
  * committed in place; E_BUSY when one does not end.
  */
 IMPORT ER knl_jrnl_freeze( ID vol, BOOL on );
+
+/*
+ * The last step of the conversion to version 5: the head block written
+ * as version 5, the ring empty, the next number where it was; the
+ * transactions from here on are laid out as version 5. The volume is
+ * frozen (knl_jrnl_freeze) and its ring empty.
+ */
+IMPORT ER knl_jrnl_fmt5( ID vol );
+
+/*
+ * Whether opening found a version 5 volume whose head was still of
+ * version 4 with an empty ring (a conversion cut short after its
+ * superblock) and wrote the head as version 5.
+ */
+IMPORT BOOL knl_jrnl_conv_left( ID vol );
 
 #ifdef __cplusplus
 }

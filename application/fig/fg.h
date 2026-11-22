@@ -131,11 +131,14 @@ IMPORT void tell( CONST char *l1, CONST char *l2 );
 
 /* ---------------------------------------------------------------- links (fg_link.c) */
 
-IMPORT void fg_ask_of( CONST T_VOBJ *v, UINT req, T_DTREQ *rq );
+/* What the figure gives the shared 仮身操作 (ts/tvvop.h), and a link of the record as they take it */
+IMPORT CONST T_TVVOP *fg_vop( void );
+IMPORT void fg_tvlink( T_TVLINK *l, CONST T_VOBJ *v, CONST T_DPRECT *box );	/* box NULL: v's own */
 IMPORT CONST char *fg_link_name( CONST T_VOBJ *v );
-IMPORT BOOL fg_app_locked( CONST T_VOBJ *v );
-IMPORT void fg_link_menu( ID mid, CONST T_VOBJ *v );
-IMPORT void fg_link_op( CONST char *code, T_VOBJ *v );
+/* 仮身操作, 実身操作 and 実行 set for link v under the pointer (NULL none): how many programs 実行 offers */
+IMPORT INT  fg_link_menu( ID mid, CONST T_VOBJ *v );
+/* One of those items done for link v, of code and index in 実行's list: FALSE when it is none of them */
+IMPORT BOOL fg_link_op( CONST char *code, INT index, T_VOBJ *v );
 IMPORT void fg_link_copy_put( CONST T_VOBJ *v, CONST TS_UUID *copy, INT dx, INT dy );
 IMPORT void fg_open( CONST T_VOBJ *v );	/* opened as a double press opens it, or as the box opens it */
 

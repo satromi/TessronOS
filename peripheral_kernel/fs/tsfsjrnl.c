@@ -26,6 +26,15 @@
  *		commit		the number, the time, and one CRC over the
  *				CRCs of everything before it
  *
+ *	On a volume of version 5 (TSFSBLK_INCOMPAT_FMT5) a transaction has
+ *	as many descriptors as its copies need, each followed by the copies
+ *	it names, and as many revoke blocks, each numbered in the
+ *	transaction from 0; the commit block says how many of each there
+ *	were. One transaction may hold a quarter of the ring (no fewer than
+ *	one descriptor names), and the head and every block of the ring say
+ *	version 5. A volume of version 4 keeps one descriptor and one
+ *	revoke block, written as before.
+ *
  *	A transaction goes through three states. It is built while handles
  *	are on it; when the last handle lets go it is closed: its copies
  *	join the committed blocks in memory, where every later read finds
@@ -69,7 +78,8 @@
 #define TSFSJ_MAX_VOL		TSFSBLK_MAX_VOL
 #define CACHE_BUCKETS		256
 #define CACHE_MAX		512	/* committed blocks held before the checkpointer is woken */
-#define REPLAY_MAX_REVOKE	4096
+#define REPLAY_RVK_FIRST	512	/* revokes the replay makes room for first; the table grows */
+#define LAY_PIECE		64	/* blocks laid out at once when a transaction is too large for memory */
 
 /* ---------------------------------------------------------------- layout */
 
@@ -89,10 +99,30 @@
 #define JB_SEQ		8
 #define JB_COUNT	16
 #define JB_CRC		24
+#define JB_INDEX	28		/* version 5: the descriptor's or revoke block's number in its transaction */
 #define JB_ENT		TSFSJ_HDR_SIZE
 #define JC_TIME		32
 #define JC_CHAIN	40
-#define JC_BLOCKS	44
+#define JC_BLOCKS	44		/* ring blocks of the transaction before the commit block */
+#define JC_NDESC	48		/* version 5: its descriptor blocks */
+#define JC_NRVK		52		/* version 5: its revoke blocks */
+
+/*
+ * The chain of a commit block: the CRC of the first descriptor's CRC,
+ * then for each block after it, in the order of the ring, the CRC of
+ * its CRC plus a term that says what it is: the copy's number in the
+ * transaction (counted over every descriptor), DESC_SALT plus the
+ * number of a descriptor after the first, REVOKE_SALT plus the number
+ * of a revoke block, every term put in by exclusive or. A version 4
+ * transaction has one descriptor and one revoke block at most, so it is
+ * chained as before.
+ */
+#define DESC_SALT	0xA5A5A5A5U
+#define REVOKE_SALT	0x5A5A5A5AU
+
+/* The ring blocks a transaction of n copies and r revokes takes, and its descriptor blocks */
+#define NDESC(n)	( ( (n) == 0 ) ? 1 : ( (n) + TSFSJ_MAX_BLOCKS - 1 ) / TSFSJ_MAX_BLOCKS )
+#define NRVKB(r)	( ( (r) + TSFSJ_MAX_REVOKE - 1 ) / TSFSJ_MAX_REVOKE )
 
 typedef struct cnode {
 	struct cnode	*next;
@@ -114,6 +144,7 @@ typedef struct ptxn {
 	JENT		*ent;		/* its copies, its own */
 	INT		nrevoke;
 	UD		*revoke;
+	BOOL		skip;		/* TSFSJ_FAULT_SKIP: its second descriptor is numbered 2 */
 } PTXN;
 
 /* A buffer let go while a checkpoint may still be writing it */
@@ -137,11 +168,13 @@ typedef struct {
 	BOOL	committing;		/* the last handle let go; it is being closed */
 	BOOL	frozen;			/* no transaction begins: the volume is being grown */
 	BOOL	doomed;			/* a handle gave up: the whole of it goes */
-	JENT	txn[TSFSJ_MAX_BLOCKS];
-	INT	ntxn;
-	UD	revoke[TSFSJ_MAX_REVOKE];
-	INT	nrevoke;
-	BOOL	revoke_over;		/* more than one block of revokes */
+	BOOL	v5;			/* the ring and the head are of version 5 */
+	UD	vbudget;		/* copies a transaction of this volume may hold */
+	JENT	*txn;			/* the running transaction's copies, room for txn_max */
+	INT	ntxn, txn_max;
+	UD	*revoke;		/* its revokes, room for rvk_max */
+	INT	nrevoke, rvk_max;
+	BOOL	revoke_over;		/* more revokes than the ring has room for */
 	PTXN	*pend;			/* closed, not in the ring yet, oldest first */
 	PTXN	**pend_end;
 	UD	pend_foot;		/* ring blocks they will take */
@@ -152,6 +185,10 @@ typedef struct {
 	UD	nsnap;
 	DFREE	*dfree;			/* buffers let go meanwhile */
 	UINT	fault;
+	UD	budget;			/* TSFSJ_FAULT_BUDGET: copies of a transaction, 0 the volume's own */
+	BOOL	nockpt;			/* TSFSJ_FAULT_NOCKPT: the checkpointer leaves the volume alone */
+	BOOL	conv_left;		/* opening wrote the head of a conversion cut short */
+	UINT	last_desc, last_rvk;	/* blocks of the last transaction closed, for ts_jrnl_ref */
 	BOOL	dead;			/* after TSFSJ_FAULT_AFTER_COMMIT */
 	BOOL	failed;			/* the ring could not be written: nothing goes in place */
 	BOOL	told_nolog;		/* a change refused for want of the log, told once */
@@ -210,21 +247,33 @@ LOCAL UW crc_at( CONST TSFSJRNL *j, UB *buf, INT off )
 	return c;
 }
 
-LOCAL BOOL is_kind( CONST UB *buf, CONST char *magic )
+/* The version the head and the ring blocks carry: that of the ring (v5) */
+LOCAL UW ring_ver( BOOL v5 )
+{
+	return v5 ? TSFSJ_VERSION5 : TSFSJ_VERSION;
+}
+
+LOCAL BOOL is_kind( CONST UB *buf, CONST char *magic, BOOL v5 )
 {
 	return (BOOL)( buf[0] == (UB)magic[0] && buf[1] == (UB)magic[1]
 		    && buf[2] == (UB)magic[2] && buf[3] == (UB)magic[3]
-		    && rd32(buf + JB_VERSION) == TSFSJ_VERSION );
+		    && rd32(buf + JB_VERSION) == ring_ver(v5) );
 }
 
-LOCAL void make_kind( UB *buf, CONST char *magic, UD seq, UW count )
+LOCAL void make_kind( UB *buf, CONST char *magic, BOOL v5, UD seq, UW count )
 {
 	knl_memset(buf, 0, TSFSBLK_BLOCK_SIZE);
 	buf[0] = (UB)magic[0]; buf[1] = (UB)magic[1];
 	buf[2] = (UB)magic[2]; buf[3] = (UB)magic[3];
-	wr32(buf + JB_VERSION, TSFSJ_VERSION);
+	wr32(buf + JB_VERSION, ring_ver(v5));
 	wr64(buf + JB_SEQ, seq);
 	wr32(buf + JB_COUNT, count);
+}
+
+/* One term of a commit block's chain: the CRC of a block's CRC, plus what tells it apart */
+LOCAL UW chain_term( UW c, UW plus )
+{
+	return ts_crc32c((CONST UB *)&c, 4) + plus;
 }
 
 /* ---------------------------------------------------------------- the table */
@@ -310,6 +359,16 @@ LOCAL void txn_drop( TSFSJRNL *j )
 	j->nrevoke = 0;
 	j->revoke_over = FALSE;
 	j->doomed = FALSE;
+}
+
+/* The tables of the running transaction given back, at closing */
+LOCAL void txn_tables_free( TSFSJRNL *j )
+{
+	if ( j->txn != NULL ) Kfree(j->txn);
+	if ( j->revoke != NULL ) Kfree(j->revoke);
+	j->txn = NULL;
+	j->revoke = NULL;
+	j->txn_max = j->rvk_max = 0;
 }
 
 LOCAL void ptxn_free( PTXN *t )
@@ -456,7 +515,7 @@ LOCAL ER head_write( TSFSJRNL *j, UD head, UD head_seq )
 	knl_memset(buf, 0, TSFSBLK_BLOCK_SIZE);
 	buf[0] = (UB)JH_MAGIC[0]; buf[1] = (UB)JH_MAGIC[1];
 	buf[2] = (UB)JH_MAGIC[2]; buf[3] = (UB)JH_MAGIC[3];
-	wr32(buf + JH_VERSION, TSFSJ_VERSION);
+	wr32(buf + JH_VERSION, ring_ver(j->v5));
 	wr64(buf + JH_SEQ, head_seq);
 	wr64(buf + JH_POS, head);
 	wr32(buf + JH_CRC, crc_at(j, buf, JH_CRC));
@@ -466,59 +525,157 @@ LOCAL ER head_write( TSFSJRNL *j, UD head, UD head_seq )
 }
 
 /*
- * One closed transaction laid out as the ring holds it, in `out` (foot
- * blocks): descriptor, copies, revoke block when it has revokes, and
- * the commit block unless `commit` is FALSE (a pretended cut before it).
+ * Laying a closed transaction out as the ring holds it, one block after
+ * another: a descriptor, the copies it names, the next descriptor and
+ * its copies (version 5), the revoke blocks, and the commit block. The
+ * layout is made as it goes, so that a transaction too large to lay out
+ * whole in memory goes out in pieces.
  */
-LOCAL void txn_lay( CONST TSFSJRNL *j, CONST PTXN *t, UB *out, BOOL commit )
+typedef struct {
+	CONST PTXN	*t;
+	BOOL	v5;
+	INT	ci;			/* copies laid out */
+	INT	dleft;			/* copies the last descriptor names still to come */
+	INT	nd;			/* descriptors laid out */
+	INT	ri;			/* revokes laid out */
+	INT	nr;			/* revoke blocks laid out */
+	UW	chain;
+} LAY;
+
+LOCAL void lay_start( LAY *L, CONST TSFSJRNL *j, CONST PTXN *t )
 {
-	UB	*b = out;
-	UW	chain, c;
-	INT	i;
+	knl_memset(L, 0, sizeof(*L));
+	L->t = t;
+	L->v5 = j->v5;
+}
 
-	/* descriptor */
-	make_kind(b, JB_DESC, t->seq, (UW)t->n);
-	for ( i = 0; i < t->n; i++ ) {
-		wr64(b + JB_ENT + i * TSFSJ_DESC_ENT, t->ent[i].blk);
-		wr32(b + JB_ENT + i * TSFSJ_DESC_ENT + 8,
-		     ts_crc32c(t->ent[i].buf, TSFSBLK_BLOCK_SIZE));
-	}
-	c = crc_at(j, b, JB_CRC);
-	wr32(b + JB_CRC, c);
-	chain = ts_crc32c((CONST UB *)&c, 4);
-	b += TSFSBLK_BLOCK_SIZE;
+/* The next block of the transaction into `b`; FALSE when only the commit block is left */
+LOCAL BOOL lay_next( CONST TSFSJRNL *j, LAY *L, UB *b )
+{
+	CONST PTXN	*t = L->t;
+	UW		c;
+	INT		i, k;
 
-	/* copies */
-	for ( i = 0; i < t->n; i++ ) {
-		knl_memcpy(b, t->ent[i].buf, TSFSBLK_BLOCK_SIZE);
+	if ( L->dleft > 0 ) {
+		/* a copy */
+		knl_memcpy(b, t->ent[L->ci].buf, TSFSBLK_BLOCK_SIZE);
 		c = ts_crc32c(b, TSFSBLK_BLOCK_SIZE);
-		chain ^= ts_crc32c((CONST UB *)&c, 4) + (UW)i;
-		b += TSFSBLK_BLOCK_SIZE;
+		L->chain ^= chain_term(c, (UW)L->ci);
+		L->ci++;
+		L->dleft--;
+		return TRUE;
 	}
-
-	/* revokes */
-	if ( t->nrevoke > 0 ) {
-		make_kind(b, JB_REVOKE, t->seq, (UW)t->nrevoke);
-		for ( i = 0; i < t->nrevoke; i++ ) {
-			wr64(b + JB_ENT + i * 8, t->revoke[i]);
+	if ( L->nd == 0 || L->ci < t->n ) {
+		/* a descriptor, naming as many of the copies as it holds */
+		k = t->n - L->ci;
+		if ( k > (INT)TSFSJ_MAX_BLOCKS ) k = (INT)TSFSJ_MAX_BLOCKS;
+		make_kind(b, JB_DESC, L->v5, t->seq, (UW)k);
+		if ( L->v5 ) {
+			wr32(b + JB_INDEX, (UW)( ( t->skip && L->nd == 1 ) ? 2 : L->nd ));
+		}
+		for ( i = 0; i < k; i++ ) {
+			wr64(b + JB_ENT + i * TSFSJ_DESC_ENT, t->ent[L->ci + i].blk);
+			wr32(b + JB_ENT + i * TSFSJ_DESC_ENT + 8,
+			     ts_crc32c(t->ent[L->ci + i].buf, TSFSBLK_BLOCK_SIZE));
 		}
 		c = crc_at(j, b, JB_CRC);
 		wr32(b + JB_CRC, c);
-		chain ^= ts_crc32c((CONST UB *)&c, 4) + 0x5A5A5A5AU;
+		if ( L->nd == 0 ) {
+			L->chain = ts_crc32c((CONST UB *)&c, 4);
+		} else {
+			L->chain ^= chain_term(c, DESC_SALT + (UW)L->nd);
+		}
+		L->nd++;
+		L->dleft = k;
+		return TRUE;
+	}
+	if ( L->ri < t->nrevoke ) {
+		/* a revoke block */
+		k = t->nrevoke - L->ri;
+		if ( k > (INT)TSFSJ_MAX_REVOKE ) k = (INT)TSFSJ_MAX_REVOKE;
+		make_kind(b, JB_REVOKE, L->v5, t->seq, (UW)k);
+		if ( L->v5 ) {
+			wr32(b + JB_INDEX, (UW)L->nr);
+		}
+		for ( i = 0; i < k; i++ ) {
+			wr64(b + JB_ENT + i * 8, t->revoke[L->ri + i]);
+		}
+		c = crc_at(j, b, JB_CRC);
+		wr32(b + JB_CRC, c);
+		L->chain ^= chain_term(c, REVOKE_SALT + (UW)L->nr);
+		L->nr++;
+		L->ri += k;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+/* The commit block, after every other block of the transaction */
+LOCAL void lay_commit( CONST TSFSJRNL *j, CONST LAY *L, UB *b )
+{
+	TS_TIME	tm = 0;
+
+	make_kind(b, JB_COMMIT, L->v5, L->t->seq, 0);
+	(void)dt_gettime(&tm);
+	wr64(b + JC_TIME, (UD)tm);
+	wr32(b + JC_CHAIN, L->chain);
+	wr32(b + JC_BLOCKS, (UW)( L->t->foot - 1 ));
+	if ( L->v5 ) {
+		wr32(b + JC_NDESC, (UW)L->nd);
+		wr32(b + JC_NRVK, (UW)L->nr);
+	}
+	wr32(b + JB_CRC, crc_at(j, b, JB_CRC));
+}
+
+/*
+ * One closed transaction laid out whole in `out` (foot blocks), the
+ * commit block last unless `commit` is FALSE (a pretended cut before it).
+ */
+LOCAL void txn_lay( CONST TSFSJRNL *j, CONST PTXN *t, UB *out, BOOL commit )
+{
+	LAY	L;
+	UB	*b = out;
+
+	lay_start(&L, j, t);
+	while ( lay_next(j, &L, b) ) {
 		b += TSFSBLK_BLOCK_SIZE;
 	}
-
-	/* commit */
 	if ( commit ) {
-		TS_TIME	tm = 0;
-
-		make_kind(b, JB_COMMIT, t->seq, 0);
-		(void)dt_gettime(&tm);
-		wr64(b + JC_TIME, (UD)tm);
-		wr32(b + JC_CHAIN, chain);
-		wr32(b + JC_BLOCKS, (UW)( t->foot - 1 ));
-		wr32(b + JB_CRC, crc_at(j, b, JB_CRC));
+		lay_commit(j, &L, b);
 	}
+}
+
+/*
+ * One transaction written from `pos` of the ring on through a buffer of
+ * `room` blocks, a piece at a time: for one too large to lay out whole.
+ */
+LOCAL ER txn_pieces( TSFSJRNL *j, CONST PTXN *t, UD pos, BOOL commit, UB *buf, UD room )
+{
+	LAY	L;
+	UD	k = 0;
+	BOOL	more = TRUE;
+	ER	er = E_OK;
+
+	lay_start(&L, j, t);
+	while ( er >= E_OK && ( more || commit ) ) {
+		if ( more ) {
+			more = lay_next(j, &L, buf + k * TSFSBLK_BLOCK_SIZE);
+			if ( more ) {
+				k++;
+			}
+		}
+		if ( !more && commit ) {
+			lay_commit(j, &L, buf + k * TSFSBLK_BLOCK_SIZE);
+			k++;
+			commit = FALSE;
+		}
+		if ( k > 0 && ( k == room || ( !more && !commit ) ) ) {
+			er = ring_put(j, pos, buf, k, FALSE, NULL);
+			pos += k;
+			k = 0;
+		}
+	}
+	return er;
 }
 
 /*
@@ -527,7 +684,8 @@ LOCAL void txn_lay( CONST TSFSJRNL *j, CONST PTXN *t, UB *out, BOOL commit )
  * one request (two where the ring wraps), on the medium when it
  * completes when the device can: *p_fua says whether it was, and when
  * it was, the cache need not be emptied after (pend_write). One that
- * is too large for memory, and those of a pretended cut, go one by one.
+ * is too large for memory, and those of a pretended cut, go one by one,
+ * in pieces when one is too large even alone.
  */
 LOCAL ER ring_txns( TSFSJRNL *j, PTXN *t, UD pos, BOOL commit, BOOL *p_fua )
 {
@@ -558,13 +716,21 @@ LOCAL ER ring_txns( TSFSJRNL *j, PTXN *t, UD pos, BOOL commit, BOOL *p_fua )
 			if ( buf != NULL ) Kfree(buf);
 			buf = (UB *)Kmalloc((SZ)( t->foot * TSFSBLK_BLOCK_SIZE ));
 			room = ( buf != NULL ) ? t->foot : 0;
+		}
+		if ( buf == NULL ) {
+			buf = (UB *)Kmalloc((SZ)( LAY_PIECE * TSFSBLK_BLOCK_SIZE ));
 			if ( buf == NULL ) {
 				er = E_NOMEM;
 				break;
 			}
+			room = 0;			/* the next one tries whole again */
+			er = txn_pieces(j, t, pos, commit, buf, LAY_PIECE);
+			Kfree(buf);
+			buf = NULL;
+		} else {
+			txn_lay(j, t, buf, commit);
+			er = ring_put(j, pos, buf, n, FALSE, NULL);
 		}
-		txn_lay(j, t, buf, commit);
-		er = ring_put(j, pos, buf, n, FALSE, NULL);
 		pos += t->foot;
 	}
 	if ( buf != NULL ) Kfree(buf);
@@ -768,7 +934,7 @@ LOCAL void checkpointer( INT stacd, void *exinf )
 		for ( i = 0; i < TSFSJ_MAX_VOL; i++ ) {
 			TSFSJRNL	*j = __atomic_load_n(&jrnl_tbl[i], __ATOMIC_ACQUIRE);
 
-			if ( j == NULL || j->vol <= 0 || ( j->ncached == 0 && j->pend == NULL ) ) continue;
+			if ( j == NULL || j->vol <= 0 || j->nockpt || ( j->ncached == 0 && j->pend == NULL ) ) continue;
 			if ( tk_loc_mtx(j->iomtx, TMO_POL) < E_OK ) continue;	/* a writer is at it */
 			if ( j->vol > 0 ) {
 				(void)ckpt_io(j);
@@ -838,6 +1004,89 @@ EXPORT ER ts_jrnl_begin( ID vol )
 	return E_OK;
 }
 
+/* The ring blocks of a transaction of n copies and r revokes, laid out as the ring of j is */
+LOCAL UD txn_foot( CONST TSFSJRNL *j, UD n, UD r )
+{
+	if ( !j->v5 ) {
+		return 1 + n + ( r > 0 ? 1 : 0 ) + 1;
+	}
+	return NDESC(n) + n + NRVKB(r) + 1;
+}
+
+/*
+ * The copies a transaction of the volume may hold. Version 4: what one
+ * descriptor names. Version 5: a quarter of the ring and no fewer than
+ * one descriptor names, so long as two of the largest transactions,
+ * each with a revoke block, fit in the ring together; a ring smaller
+ * than the journal area's least (TSFSJ_AREA_BLOCKS) is not opened.
+ */
+LOCAL UD vol_budget( CONST TSFSJRNL *j )
+{
+	UD	b;
+
+	if ( !j->v5 ) {
+		return (UD)TSFSJ_MAX_BLOCKS;
+	}
+	b = j->len / 4;
+	if ( b < (UD)TSFSJ_MAX_BLOCKS ) b = (UD)TSFSJ_MAX_BLOCKS;
+	while ( b > (UD)TSFSJ_MAX_BLOCKS && 2 * txn_foot(j, b, 1) > j->len ) {
+		b--;
+	}
+	return b;
+}
+
+/*
+ * The copies one transaction may hold: the volume's budget, or less
+ * while TSFSJ_FAULT_BUDGET says so.
+ */
+LOCAL UD txn_budget( TSFSJRNL *j )
+{
+	UD	b = j->budget, v = ( j->vbudget > 0 ) ? j->vbudget : (UD)TSFSJ_MAX_BLOCKS;
+
+	return ( b == 0 || b > v ) ? v : b;
+}
+
+/*
+ * The revokes one transaction may hold. Version 4: one block of them.
+ * Version 5: what is left of half the ring beside the largest
+ * transaction's copies, so that two transactions still fit. More than
+ * that and the running transaction does without them: everything before
+ * it is put in place first (ts_jrnl_close), and nothing older is left
+ * to come back.
+ */
+LOCAL UD rvk_cap( TSFSJRNL *j )
+{
+	UD	b, half, used;
+
+	if ( !j->v5 ) {
+		return (UD)TSFSJ_MAX_REVOKE;
+	}
+	b = txn_budget(j);
+	half = j->len / 2;
+	used = NDESC(b) + b + 1;
+	return ( half > used + 1 ) ? ( half - used ) * (UD)TSFSJ_MAX_REVOKE : (UD)TSFSJ_MAX_REVOKE;
+}
+
+/* Room for one more entry of a table that grows: FALSE when there is no memory for it */
+LOCAL BOOL grow_tbl( void **p_tbl, INT *p_max, INT need, SZ esize )
+{
+	void	*n;
+	INT	m;
+
+	if ( need <= *p_max ) {
+		return TRUE;
+	}
+	m = ( *p_max < 32 ) ? 32 : *p_max * 2;
+	while ( m < need ) m *= 2;
+	n = ( *p_tbl == NULL ) ? Kmalloc((SZ)m * esize) : Krealloc(*p_tbl, (SZ)m * esize);
+	if ( n == NULL ) {
+		return FALSE;
+	}
+	*p_tbl = n;
+	*p_max = m;
+	return TRUE;
+}
+
 /*
  * Put one metadata block in the running transaction. A block put in
  * twice is kept once, as it was last put.
@@ -869,8 +1118,12 @@ EXPORT ER ts_jrnl_write( ID vol, UD blk, CONST void *buf )
 			goto exit;
 		}
 	}
-	if ( j->ntxn >= (INT)TSFSJ_MAX_BLOCKS ) {
-		er = E_LIMIT;			/* more than one descriptor can name */
+	if ( (UD)j->ntxn >= txn_budget(j) ) {
+		er = E_LIMIT;			/* more than the budget */
+		goto exit;
+	}
+	if ( !grow_tbl((void **)&j->txn, &j->txn_max, j->ntxn + 1, sizeof(JENT)) ) {
+		er = E_NOMEM;
 		goto exit;
 	}
 	copy = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
@@ -890,37 +1143,32 @@ EXPORT ER ts_jrnl_write( ID vol, UD blk, CONST void *buf )
 
 /*
  * The running transaction, with no handle left, made into a queued one:
- * its copies, its revokes and the ring blocks it will take. The caller
- * holds mtx; on success the running transaction is empty.
+ * its copies, its revokes and the ring blocks it will take. The tables
+ * go with it, and the next transaction makes new ones. The caller holds
+ * mtx; on success the running transaction is empty.
  */
 LOCAL PTXN *txn_queue( TSFSJRNL *j, UD foot )
 {
 	PTXN	*t = (PTXN *)Kcalloc(1, sizeof(PTXN));
-	INT	i;
 
 	if ( t == NULL ) {
 		return NULL;
 	}
 	if ( j->ntxn > 0 ) {
-		t->ent = (JENT *)Kmalloc(sizeof(JENT) * (SZ)j->ntxn);
-	}
-	if ( j->nrevoke > 0 ) {
-		t->revoke = (UD *)Kmalloc(sizeof(UD) * (SZ)j->nrevoke);
-	}
-	if ( ( j->ntxn > 0 && t->ent == NULL ) || ( j->nrevoke > 0 && t->revoke == NULL ) ) {
-		ptxn_free(t);
-		return NULL;
-	}
-	for ( i = 0; i < j->ntxn; i++ ) {
-		t->ent[i] = j->txn[i];
+		t->ent = j->txn;
+		j->txn = NULL;
+		j->txn_max = 0;
 	}
 	t->n = j->ntxn;
-	for ( i = 0; i < j->nrevoke; i++ ) {
-		t->revoke[i] = j->revoke[i];
+	if ( j->nrevoke > 0 ) {
+		t->revoke = j->revoke;
+		j->revoke = NULL;
+		j->rvk_max = 0;
 	}
 	t->nrevoke = j->nrevoke;
 	t->seq = j->seq;
 	t->foot = foot;
+	t->skip = (BOOL)( j->fault == TSFSJ_FAULT_SKIP );
 	j->ntxn = 0;
 	j->nrevoke = 0;
 	return t;
@@ -1069,8 +1317,8 @@ EXPORT ER ts_jrnl_close( ID vol, UD *p_seq )
 		return E_OK;			/* nothing changed */
 	}
 
-	/* revokes that fit in one block, and room in the ring behind the queue */
-	foot = 1 + (UD)j->ntxn + ( j->nrevoke > 0 ? 1 : 0 ) + 1;
+	/* revokes the ring has room for, and room in the ring behind the queue */
+	foot = txn_foot(j, (UD)j->ntxn, (UD)j->nrevoke);
 	while ( er >= E_OK && ( j->revoke_over || j->used + j->pend_foot + foot > j->len ) ) {
 		tk_unl_mtx(j->mtx);
 		er = ckpt_all(j);
@@ -1078,7 +1326,7 @@ EXPORT ER ts_jrnl_close( ID vol, UD *p_seq )
 		if ( er >= E_OK && j->revoke_over ) {
 			j->nrevoke = 0;		/* nothing older is left to come back */
 			j->revoke_over = FALSE;
-			foot = 1 + (UD)j->ntxn + 1;
+			foot = txn_foot(j, (UD)j->ntxn, 0);
 		}
 		if ( er >= E_OK && j->used + j->pend_foot + foot > j->len ) {
 			er = E_LIMIT;		/* the ring cannot hold it even empty */
@@ -1093,9 +1341,12 @@ EXPORT ER ts_jrnl_close( ID vol, UD *p_seq )
 		ts_blk_error(vol, j->start, TSFSBLK_ERR_IO);
 		return ( er < E_OK ) ? er : E_NOMEM;
 	}
+	j->last_desc = j->v5 ? (UINT)NDESC((UD)t->n) : 1;
+	j->last_rvk = j->v5 ? (UINT)NRVKB((UD)t->nrevoke) : ( t->nrevoke > 0 ? 1 : 0 );
 
-	if ( j->fault == TSFSJ_FAULT_BEFORE_COMMIT || j->fault == TSFSJ_FAULT_AFTER_COMMIT ) {
-		BOOL	after = (BOOL)( j->fault == TSFSJ_FAULT_AFTER_COMMIT );
+	if ( j->fault == TSFSJ_FAULT_BEFORE_COMMIT || j->fault == TSFSJ_FAULT_AFTER_COMMIT
+	  || j->fault == TSFSJ_FAULT_SKIP ) {
+		BOOL	after = (BOOL)( j->fault != TSFSJ_FAULT_BEFORE_COMMIT );
 
 		tk_unl_mtx(j->mtx);
 		er = close_cut(j, t, after);
@@ -1116,7 +1367,7 @@ EXPORT ER ts_jrnl_close( ID vol, UD *p_seq )
 	j->seq++;
 	j->closed++;
 	seq = t->seq;
-	wake = (BOOL)( j->ncached > CACHE_MAX || j->used + j->pend_foot > j->len / 2 );
+	wake = (BOOL)( !j->nockpt && ( j->ncached > CACHE_MAX || j->used + j->pend_foot > j->len / 2 ) );
 	if ( er < E_OK ) {
 		ring_failed(j);			/* what reads see is not what the ring holds */
 	}
@@ -1382,6 +1633,10 @@ EXPORT ER ts_jrnl_ref( ID vol, T_TSFSJRNL *p_jrnl )
 	p_jrnl->queued = j->pend_foot;
 	p_jrnl->closed = j->closed;
 	p_jrnl->batches = j->batches;
+	p_jrnl->budget = (UINT)txn_budget(j);
+	p_jrnl->last_desc = j->last_desc;
+	p_jrnl->last_rvk = j->last_rvk;
+	p_jrnl->v5 = j->v5;
 	tk_unl_mtx(j->mtx);
 
 	return E_OK;
@@ -1394,11 +1649,62 @@ EXPORT ER ts_jrnl_fault( ID vol, UINT where )
 	if ( j == NULL ) {
 		return E_LIMIT;
 	}
+	if ( ( where & TSFSJ_FAULT_BUDGET ) != 0 ) {
+		tk_loc_mtx(j->mtx, TMO_FEVR);
+		j->budget = (UD)( where & TSFSJ_FAULT_ARG );
+		tk_unl_mtx(j->mtx);
+		return E_OK;
+	}
+	if ( ( where & TSFSJ_FAULT_NOCKPT ) != 0 ) {
+		tk_loc_mtx(j->mtx, TMO_FEVR);
+		j->nockpt = (BOOL)( ( where & TSFSJ_FAULT_ARG ) != 0 );
+		tk_unl_mtx(j->mtx);
+		return E_OK;
+	}
 	if ( where != TSFSJ_FAULT_NONE ) {
 		(void)ts_jrnl_durable(vol, ~(UD)0);	/* what was closed before is not part of it */
 	}
 	j->fault = where;
 	return E_OK;
+}
+
+EXPORT INT ts_jrnl_budget( ID vol )
+{
+	TSFSJRNL	*j;
+	UD	b;
+
+	if ( vol < 1 || vol > TSFSJ_MAX_VOL ) {
+		return E_ID;
+	}
+	j = jrnl_find(vol);
+	if ( j == NULL ) {
+		return (INT)TSFSJ_MAX_BLOCKS;
+	}
+	tk_loc_mtx(j->mtx, TMO_FEVR);
+	b = txn_budget(j);
+	tk_unl_mtx(j->mtx);
+
+	return (INT)b;
+}
+
+EXPORT INT ts_jrnl_room( ID vol )
+{
+	TSFSJRNL	*j;
+	UD	b, n;
+
+	if ( vol < 1 || vol > TSFSJ_MAX_VOL ) {
+		return E_ID;
+	}
+	j = jrnl_find(vol);
+	if ( j == NULL ) {
+		return (INT)TSFSJ_MAX_BLOCKS;
+	}
+	tk_loc_mtx(j->mtx, TMO_FEVR);
+	b = txn_budget(j);
+	n = (UD)j->ntxn;
+	tk_unl_mtx(j->mtx);
+
+	return ( n >= b ) ? 0 : (INT)( b - n );
 }
 
 /* ---------------------------------------------------------------- for the block layer */
@@ -1482,7 +1788,10 @@ EXPORT void knl_jrnl_revoke( ID vol, UD start, UD count )
 			continue;
 		}
 		if ( j->handles > 0 || j->committing ) {
-			if ( j->nrevoke < (INT)TSFSJ_MAX_REVOKE ) {
+			if ( j->revoke_over ) {
+				;			/* the transaction does without them */
+			} else if ( (UD)j->nrevoke < rvk_cap(j)
+				 && grow_tbl((void **)&j->revoke, &j->rvk_max, j->nrevoke + 1, sizeof(UD)) ) {
 				j->revoke[j->nrevoke++] = b;
 			} else {
 				j->revoke_over = TRUE;
@@ -1545,6 +1854,7 @@ EXPORT ER knl_jrnl_close( ID vol )
 	j->pend_end = &j->pend;
 	j->pend_foot = 0;
 	cache_clear(j);
+	txn_tables_free(j);
 	j->vol = 0;
 	tk_unl_mtx(j->mtx);
 	tk_unl_mtx(j->iomtx);
@@ -1554,29 +1864,274 @@ EXPORT ER knl_jrnl_close( ID vol )
 	return er;
 }
 
+/*
+ * The head written as version 5 where the ring is now empty, the next
+ * number where it was, and the device's cache emptied. From here on the
+ * transactions are laid out as version 5 and have its budget. Anything
+ * still waiting is put in place first, so that no transaction of
+ * version 4 is left in the ring behind a head of version 5.
+ */
+EXPORT ER knl_jrnl_fmt5( ID vol )
+{
+	TSFSJRNL	*j = jrnl_find(vol);
+	ER		er;
+
+	if ( j == NULL || j->len == 0 ) {
+		return E_OBJ;			/* the log was not read at opening */
+	}
+	tk_loc_mtx(j->iomtx, TMO_FEVR);
+	er = ckpt_io(j);
+	tk_loc_mtx(j->mtx, TMO_FEVR);
+	if ( er >= E_OK && ( j->handles > 0 || j->committing || j->pend != NULL || j->used != 0 ) ) {
+		er = E_BUSY;
+	}
+	if ( er >= E_OK && j->dead ) {
+		er = E_IO;			/* a pretended cut in the power */
+	}
+	if ( er >= E_OK ) {
+		j->v5 = TRUE;
+		j->vbudget = vol_budget(j);
+		j->head = j->tail;
+		j->head_seq = j->dseq;
+	}
+	tk_unl_mtx(j->mtx);
+	if ( er >= E_OK ) {
+		er = head_write(j, j->head, j->head_seq);
+		if ( er >= E_OK ) er = knl_tsfsblk_raw_flush(vol);
+		if ( er < E_OK ) {
+			/* a head of version 4 must not be left in front of a ring of version 5 */
+			tk_loc_mtx(j->mtx, TMO_FEVR);
+			ring_failed(j);
+			tk_unl_mtx(j->mtx);
+		}
+	}
+	tk_unl_mtx(j->iomtx);
+
+	return er;
+}
+
+EXPORT BOOL knl_jrnl_conv_left( ID vol )
+{
+	TSFSJRNL	*j = jrnl_find(vol);
+
+	return (BOOL)( j != NULL && j->conv_left );
+}
+
 /* ---------------------------------------------------------------- replay */
 
 typedef struct {
-	UD	pos;			/* its descriptor */
+	UD	pos;			/* its first descriptor */
 	UD	seq;
+	INT	ndesc;			/* its descriptors */
 } TXREC;
+
+typedef struct {
+	UD	blk;			/* a block revoked */
+	UD	seq;			/* by this transaction */
+} RVK;
+
+/* What a scan of the ring found: the transactions that became real, and their revokes */
+typedef struct {
+	TXREC	*tx;
+	INT	ntx, maxtx;
+	RVK	*rvk;
+	INT	nrvk, rvk_max;
+	UD	end;			/* past the commit block of the last good one */
+	UD	next;			/* the number after it */
+	BOOL	short_mem;		/* the revokes did not fit in memory: the scan stopped there */
+} SCAN;
+
+/* The revokes in the order of their blocks, then of their numbers */
+LOCAL void rvk_sort( RVK *r, INT n )
+{
+	INT	gap, i, k;
+	RVK	x;
+
+	for ( gap = n / 2; gap > 0; gap /= 2 ) {
+		for ( i = gap; i < n; i++ ) {
+			x = r[i];
+			for ( k = i; k >= gap && ( r[k - gap].blk > x.blk
+				|| ( r[k - gap].blk == x.blk && r[k - gap].seq > x.seq ) ); k -= gap ) {
+				r[k] = r[k - gap];
+			}
+			r[k] = x;
+		}
+	}
+}
+
+/* Whether `blk` was revoked by transaction `seq` or one after it (the table sorted) */
+LOCAL BOOL rvk_has( CONST RVK *r, INT n, UD blk, UD seq )
+{
+	INT	lo = 0, hi = n, mid;
+
+	while ( lo < hi ) {
+		mid = lo + ( hi - lo ) / 2;
+		if ( r[mid].blk < blk ) lo = mid + 1;
+		else hi = mid;
+	}
+	for ( ; lo < n && r[lo].blk == blk; lo++ ) {
+		if ( r[lo].seq >= seq ) return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * The ring read from the head on, as a ring of version 5 (v5) or 4:
+ * every transaction whose blocks are all there and whose commit block
+ * is good, until the first that is not. A version 5 transaction is its
+ * descriptors, numbered from 0, each followed by its copies, then its
+ * revoke blocks, numbered from 0, then the commit block, which says how
+ * many of each there were. A block that is none of what may come next
+ * ends the scan, so a descriptor whose number skips one does too.
+ */
+LOCAL void ring_scan( TSFSJRNL *j, BOOL v5, UB *buf, UB *blk, SCAN *s )
+{
+	UD	pos = j->head, cur = j->head_seq, scanned, txpos = 0;
+	INT	nd = 0, nc = 0, nr = 0, nrvk_good = 0, i, n;
+	UW	chain = 0, c;
+	BOOL	in_tx = FALSE;
+
+	s->ntx = 0;
+	s->nrvk = 0;
+	s->end = pos;
+	s->next = cur;
+	for ( scanned = 0; scanned < j->len && s->ntx < s->maxtx; ) {
+		if ( knl_tsfsblk_raw_read(j->vol, ring_blk(j, pos), buf) < E_OK ) {
+			break;
+		}
+		if ( rd64(buf + JB_SEQ) != cur || rd32(buf + JB_CRC) != crc_at(j, buf, JB_CRC) ) {
+			break;
+		}
+		if ( is_kind(buf, JB_DESC, v5)
+		  && ( !in_tx ? ( !v5 || rd32(buf + JB_INDEX) == 0 )
+			      : ( v5 && nr == 0 && rd32(buf + JB_INDEX) == (UW)nd ) ) ) {
+			n = (INT)rd32(buf + JB_COUNT);
+			if ( n > (INT)TSFSJ_MAX_BLOCKS ) break;
+			c = rd32(buf + JB_CRC);
+			if ( !in_tx ) {
+				chain = ts_crc32c((CONST UB *)&c, 4);
+				txpos = pos;
+				nd = nc = nr = 0;
+			} else {
+				chain ^= chain_term(c, DESC_SALT + (UW)nd);
+			}
+			for ( i = 0; i < n; i++ ) {
+				if ( knl_tsfsblk_raw_read(j->vol, ring_blk(j, pos + 1 + (UD)i), blk) < E_OK ) break;
+				c = ts_crc32c(blk, TSFSBLK_BLOCK_SIZE);
+				if ( c != rd32(buf + JB_ENT + i * TSFSJ_DESC_ENT + 8) ) break;
+				chain ^= chain_term(c, (UW)( nc + i ));
+			}
+			if ( i < n ) break;		/* a copy did not reach the medium */
+			nc += n;
+			nd++;
+			pos += 1 + (UD)n;
+			scanned += 1 + (UD)n;
+			in_tx = TRUE;
+			continue;
+		}
+		if ( in_tx && is_kind(buf, JB_REVOKE, v5) && ( !v5 || rd32(buf + JB_INDEX) == (UW)nr ) ) {
+			n = (INT)rd32(buf + JB_COUNT);
+			if ( n > (INT)TSFSJ_MAX_REVOKE ) break;
+			if ( !grow_tbl((void **)&s->rvk, &s->rvk_max, s->nrvk + n, sizeof(RVK)) ) {
+				s->short_mem = TRUE;
+				break;
+			}
+			for ( i = 0; i < n; i++ ) {
+				s->rvk[s->nrvk].blk = rd64(buf + JB_ENT + i * 8);
+				s->rvk[s->nrvk].seq = cur;
+				s->nrvk++;
+			}
+			chain ^= chain_term(rd32(buf + JB_CRC), REVOKE_SALT + ( v5 ? (UW)nr : 0 ));
+			nr++;
+			pos++;
+			scanned++;
+			continue;
+		}
+		if ( in_tx && is_kind(buf, JB_COMMIT, v5) ) {
+			if ( rd32(buf + JC_CHAIN) != chain ) break;
+			if ( v5 && ( rd32(buf + JC_NDESC) != (UW)nd || rd32(buf + JC_NRVK) != (UW)nr ) ) break;
+			s->tx[s->ntx].pos = txpos;
+			s->tx[s->ntx].seq = cur;
+			s->tx[s->ntx].ndesc = nd;
+			s->ntx++;
+			cur++;
+			pos++;
+			scanned++;
+			s->end = pos;
+			s->next = cur;
+			nrvk_good = s->nrvk;	/* its revokes count from now */
+			in_tx = FALSE;
+			continue;
+		}
+		break;
+	}
+	/* one whose commit is not there never happened, nor did its revokes */
+	s->nrvk = nrvk_good;
+}
+
+/* The transactions a scan found put back in order, leaving out what was revoked later */
+LOCAL ER ring_apply( TSFSJRNL *j, SCAN *s, UB *buf, UB *blk )
+{
+	UD	p, home;
+	INT	k, d, i, n;
+	ER	er = E_OK;
+
+	rvk_sort(s->rvk, s->nrvk);
+	for ( k = 0; k < s->ntx && er >= E_OK; k++ ) {
+		p = s->tx[k].pos;
+		for ( d = 0; d < s->tx[k].ndesc && er >= E_OK; d++ ) {
+			er = knl_tsfsblk_raw_read(j->vol, ring_blk(j, p), buf);
+			n = ( er >= E_OK ) ? (INT)rd32(buf + JB_COUNT) : 0;
+			for ( i = 0; i < n && er >= E_OK; i++ ) {
+				home = rd64(buf + JB_ENT + i * TSFSJ_DESC_ENT);
+				if ( rvk_has(s->rvk, s->nrvk, home, s->tx[k].seq) ) continue;
+				er = knl_tsfsblk_raw_read(j->vol, ring_blk(j, p + 1 + (UD)i), blk);
+				if ( er >= E_OK ) er = knl_tsfsblk_raw_write(j->vol, home, blk);
+			}
+			p += 1 + (UD)n;
+		}
+	}
+	return er;
+}
+
+/*
+ * A head and a ring that do not go with the volume: a volume of version
+ * 5 whose head is of version 4 with transactions in the ring, or one of
+ * version 4 whose head is of version 5. Nothing of the ring is put back
+ * and the volume is marked damaged; it is read only until checked.
+ */
+LOCAL ER ring_wrong( TSFSJRNL *j, CONST char *what )
+{
+	tm_printf((UB *)"tsfs: volume %d: %s: its log is not put back, and the volume is marked damaged\n",
+		  (INT)j->vol, what);
+	ts_blk_error(j->vol, j->start, TSFSBLK_ERR_CSUM);
+	j->len = 0;
+	j->blocks = 0;
+	return E_OBJ;
+}
 
 /*
  * Put back whatever a cut in the power left behind: every transaction
  * from the head on whose commit block is good, in order, leaving out a
  * copy of a block that the same or a later transaction revoked. Then the
  * head moves past them, so they are not put back twice.
+ *
+ * The ring is of the volume's version: 5 when the superblock has FMT5.
+ * A volume of version 5 whose head is still of version 4 is one whose
+ * conversion the power cut short after its superblock; its ring was
+ * emptied before, so when nothing in it reads as a transaction of
+ * version 4 the head is written as version 5 and the conversion is
+ * done.
  */
 EXPORT ER ts_jrnl_replay( ID vol )
 {
 	TSFSJRNL	*j;
+	T_TSFSBLK_SB	sb;
+	SCAN		s;
 	UB	*buf, *blk;
-	TXREC	*tx = NULL;
-	UD	*rvk_blk = NULL, *rvk_seq = NULL;
-	UD	start = 0, blocks = 0, seq = 1, pos, cur, scanned, txpos = 0, good_end;
-	INT	ntx = 0, maxtx, nrvk = 0, nrvk_good = 0, i, k, n;
-	UW	chain = 0, c;
-	BOOL	in_tx = FALSE;
+	UD	start = 0, blocks = 0, seq = 1;
+	BOOL	fmt5 = FALSE, good;
+	UW	hv;
 	ER	er = E_OK;
 
 	j = jrnl_find(vol);
@@ -1594,21 +2149,20 @@ EXPORT ER ts_jrnl_replay( ID vol )
 	j->start = start;
 	j->blocks = blocks;
 	j->len = blocks - 1;
-	{
-		T_TSFSBLK_SB	sb;
-
-		if ( ts_ref_vol_blk(vol, &sb) >= E_OK ) {
-			j->salt = ts_crc32c(sb.vol_uuid.b, 16) ^ (UW)sb.mkfs_time;
-		}
+	if ( ts_ref_vol_blk(vol, &sb) >= E_OK ) {
+		j->salt = ts_crc32c(sb.vol_uuid.b, 16) ^ (UW)sb.mkfs_time;
+		fmt5 = (BOOL)( ( sb.incompat & TSFSBLK_INCOMPAT_FMT5 ) != 0 );
 	}
+	j->v5 = fmt5;
+	j->vbudget = vol_budget(j);
 
+	knl_memset(&s, 0, sizeof(s));
 	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
 	blk = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
-	maxtx = (INT)( j->len / 2 + 1 );
-	tx = (TXREC *)Kmalloc(sizeof(TXREC) * (SZ)maxtx);
-	rvk_blk = (UD *)Kmalloc(sizeof(UD) * REPLAY_MAX_REVOKE);
-	rvk_seq = (UD *)Kmalloc(sizeof(UD) * REPLAY_MAX_REVOKE);
-	if ( buf == NULL || blk == NULL || tx == NULL || rvk_blk == NULL || rvk_seq == NULL ) {
+	s.maxtx = (INT)( j->len / 2 + 1 );
+	s.tx = (TXREC *)Kmalloc(sizeof(TXREC) * (SZ)s.maxtx);
+	if ( buf == NULL || blk == NULL || s.tx == NULL
+	  || !grow_tbl((void **)&s.rvk, &s.rvk_max, REPLAY_RVK_FIRST, sizeof(RVK)) ) {
 		er = E_NOMEM;
 		goto exit;
 	}
@@ -1618,9 +2172,37 @@ EXPORT ER ts_jrnl_replay( ID vol )
 		er = E_IO;
 		goto exit;
 	}
-	if ( buf[0] == (UB)JH_MAGIC[0] && buf[1] == (UB)JH_MAGIC[1] && buf[2] == (UB)JH_MAGIC[2]
-	  && buf[3] == (UB)JH_MAGIC[3] && rd32(buf + JH_VERSION) == TSFSJ_VERSION
-	  && rd32(buf + JH_CRC) == crc_at(j, buf, JH_CRC) && rd64(buf + JH_POS) < j->len ) {
+	good = (BOOL)( buf[0] == (UB)JH_MAGIC[0] && buf[1] == (UB)JH_MAGIC[1] && buf[2] == (UB)JH_MAGIC[2]
+		    && buf[3] == (UB)JH_MAGIC[3] && rd32(buf + JH_CRC) == crc_at(j, buf, JH_CRC)
+		    && rd64(buf + JH_POS) < j->len );
+	hv = rd32(buf + JH_VERSION);
+	if ( good && fmt5 && hv == TSFSJ_VERSION ) {
+		/* a conversion whose last step the power cut short */
+		j->head = rd64(buf + JH_POS);
+		j->head_seq = rd64(buf + JH_SEQ);
+		ring_scan(j, FALSE, buf, blk, &s);
+		if ( s.ntx > 0 ) {
+			er = ring_wrong(j, "version 5, its log's head of version 4 with transactions after it");
+			goto exit;
+		}
+		j->tail = j->head;
+		j->used = 0;
+		j->seq = j->head_seq;
+		j->dseq = j->head_seq;
+		er = head_write(j, j->head, j->head_seq);
+		if ( er >= E_OK ) er = knl_tsfsblk_raw_flush(vol);
+		if ( er >= E_OK ) {
+			j->conv_left = TRUE;
+			tm_printf((UB *)"tsfs: volume %d: convert: the last step finished (the log's head of version 5)\n",
+				  (INT)vol);
+		}
+		goto exit;
+	}
+	if ( good && !fmt5 && hv == TSFSJ_VERSION5 ) {
+		er = ring_wrong(j, "version 4, its log's head of version 5");
+		goto exit;
+	}
+	if ( good && hv == ring_ver(fmt5) ) {
 		j->head = rd64(buf + JH_POS);
 		j->head_seq = rd64(buf + JH_SEQ);
 	} else {
@@ -1633,97 +2215,23 @@ EXPORT ER ts_jrnl_replay( ID vol )
 		goto exit;
 	}
 
-	/* find the transactions that became real */
-	pos = j->head;
-	cur = j->head_seq;
-	good_end = pos;
-	for ( scanned = 0; scanned < j->len && ntx < maxtx; ) {
-		if ( knl_tsfsblk_raw_read(vol, ring_blk(j, pos), buf) < E_OK ) {
-			break;
-		}
-		if ( rd64(buf + JB_SEQ) != cur || rd32(buf + JB_CRC) != crc_at(j, buf, JB_CRC) ) {
-			break;
-		}
-		if ( !in_tx && is_kind(buf, JB_DESC) ) {
-			n = (INT)rd32(buf + JB_COUNT);
-			if ( n > (INT)TSFSJ_MAX_BLOCKS ) break;
-			c = rd32(buf + JB_CRC);
-			chain = ts_crc32c((CONST UB *)&c, 4);
-			txpos = pos;
-			for ( i = 0; i < n; i++ ) {
-				if ( knl_tsfsblk_raw_read(vol, ring_blk(j, pos + 1 + (UD)i), blk) < E_OK ) break;
-				c = ts_crc32c(blk, TSFSBLK_BLOCK_SIZE);
-				if ( c != rd32(buf + JB_ENT + i * TSFSJ_DESC_ENT + 8) ) break;
-				chain ^= ts_crc32c((CONST UB *)&c, 4) + (UW)i;
-			}
-			if ( i < n ) break;		/* a copy did not reach the medium */
-			pos += 1 + (UD)n;
-			scanned += 1 + (UD)n;
-			in_tx = TRUE;
-			continue;
-		}
-		if ( in_tx && is_kind(buf, JB_REVOKE) ) {
-			n = (INT)rd32(buf + JB_COUNT);
-			if ( n > (INT)TSFSJ_MAX_REVOKE || nrvk + n > REPLAY_MAX_REVOKE ) break;
-			for ( i = 0; i < n; i++ ) {
-				rvk_blk[nrvk] = rd64(buf + JB_ENT + i * 8);
-				rvk_seq[nrvk] = cur;
-				nrvk++;
-			}
-			c = rd32(buf + JB_CRC);
-			chain ^= ts_crc32c((CONST UB *)&c, 4) + 0x5A5A5A5AU;
-			pos++;
-			scanned++;
-			continue;
-		}
-		if ( in_tx && is_kind(buf, JB_COMMIT) ) {
-			if ( rd32(buf + JC_CHAIN) != chain ) break;
-			tx[ntx].pos = txpos;
-			tx[ntx].seq = cur;
-			ntx++;
-			cur++;
-			pos++;
-			scanned++;
-			good_end = pos;
-			nrvk_good = nrvk;	/* its revokes count from now */
-			in_tx = FALSE;
-			continue;
-		}
-		break;
+	/* find the transactions that became real, and put them back */
+	ring_scan(j, fmt5, buf, blk, &s);
+	if ( s.short_mem ) {
+		tm_printf((UB *)"tsfs: volume %d: no memory for the log's revokes: put back up to transaction %ld\n",
+			  (INT)vol, (D)s.next);
 	}
-	/* one whose commit is not there never happened, nor did its revokes */
-	nrvk = nrvk_good;
-
-	/* put them back in order, leaving out what was revoked later */
-	for ( k = 0; k < ntx && er >= E_OK; k++ ) {
-		er = knl_tsfsblk_raw_read(vol, ring_blk(j, tx[k].pos), buf);
-		n = ( er >= E_OK ) ? (INT)rd32(buf + JB_COUNT) : 0;
-		for ( i = 0; i < n && er >= E_OK; i++ ) {
-			UD	home = rd64(buf + JB_ENT + i * TSFSJ_DESC_ENT);
-			INT	r;
-			BOOL	skip = FALSE;
-
-			for ( r = 0; r < nrvk; r++ ) {
-				if ( rvk_blk[r] == home && rvk_seq[r] >= tx[k].seq ) {
-					skip = TRUE;
-					break;
-				}
-			}
-			if ( skip ) continue;
-			er = knl_tsfsblk_raw_read(vol, ring_blk(j, tx[k].pos + 1 + (UD)i), blk);
-			if ( er >= E_OK ) er = knl_tsfsblk_raw_write(vol, home, blk);
-		}
-	}
+	er = ring_apply(j, &s, buf, blk);
 	if ( er >= E_OK ) er = knl_tsfsblk_raw_flush(vol);
 
 	/* the head past what was put back; the ring is empty */
 	if ( er >= E_OK ) {
-		j->head = good_end % j->len;		/* past the commit of the last good one */
+		j->head = s.end % j->len;		/* past the commit of the last good one */
 		j->tail = j->head;
 		j->used = 0;
-		j->head_seq = cur;
-		j->seq = cur;
-		j->dseq = cur;
+		j->head_seq = s.next;
+		j->seq = s.next;
+		j->dseq = s.next;
 		er = head_write(j, j->head, j->head_seq);
 		if ( er >= E_OK ) er = knl_tsfsblk_raw_flush(vol);
 	}
@@ -1731,9 +2239,8 @@ EXPORT ER ts_jrnl_replay( ID vol )
     exit:
 	if ( buf != NULL ) Kfree(buf);
 	if ( blk != NULL ) Kfree(blk);
-	if ( tx != NULL ) Kfree(tx);
-	if ( rvk_blk != NULL ) Kfree(rvk_blk);
-	if ( rvk_seq != NULL ) Kfree(rvk_seq);
+	if ( s.tx != NULL ) Kfree(s.tx);
+	if ( s.rvk != NULL ) Kfree(s.rvk);
 	if ( er >= E_OK && j->seq != 0 ) {
 		ts_set_jrnl_blk(vol, start, blocks, j->seq);
 	}

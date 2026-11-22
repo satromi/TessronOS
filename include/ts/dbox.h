@@ -65,13 +65,13 @@ typedef struct {
 	UH	next;
 } T_DBPICT;
 
-#define DB_MAX_ENT	64		/* definitions the box holds at once */
 /*
- * The largest definition the box holds; a larger one is refused
- * (E_PAR) when it is put. A panel of a couple of hundred parts, each
- * with its label, its words and its fields, fits.
+ * The box holds as many definitions as the memory does, each as large as
+ * it is (its bytes counted in an INT, as db_get answers them): the table
+ * of them grows as they are put. A definition put when there is not the
+ * memory for it, or for the table, is E_NOMEM, and what stood under its
+ * name stays.
  */
-#define DB_MAX_SIZE	131072
 
 /*
  * Put a definition in, replacing whatever stood under that name. The

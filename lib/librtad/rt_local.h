@@ -27,21 +27,12 @@
 #include <tk/errno.h>
 #include <ts/rtad.h>
 
-/* What one program may hold */
-#define RT_MAX_OBJ	256		/* display objects */
-#define RT_MAX_MEDIA	RT_MEDIA_MAX
-#define RT_MAX_THR	64		/* threads running at once */
-#define RT_MAX_ANIM	128		/* changes over time running at once */
-#define RT_MAX_TRIG	64
-#define RT_MAX_ONERR	16		/* global error handlers */
-#define RT_MAX_USYS	16		/* unit systems */
-#define RT_MAX_AUX	16		/* auxiliary units of one */
-#define RT_MAX_STREAM	32
-#define RT_MAX_BLOCK	16		/* <realData> blocks */
-#define RT_MAX_REPL	64		/* imageControl replace pictures */
-#define RT_MAX_SNDQ	256		/* sounds waiting for their time */
-#define RT_MAX_KEY	32		/* keyframes of one <keyframes> */
-#define RT_DEPTH	32		/* blocks one thread is inside */
+/*
+ * The tables of a program (objects, media, threads, changes over time,
+ * triggers, sounds waiting, ...) grow as it needs them. What stays fixed
+ * is the format's: the user variables below.
+ */
+#define RT_DEPTH0	8		/* blocks one thread is inside: the room it starts with */
 #define RT_NVAR		0x4000		/* user variables 0 .. 0x3FFF */
 #define RT_SPIN		20000		/* nodes a thread may do without time going on */
 
@@ -122,8 +113,9 @@ typedef struct {
 	INT	id;
 	D	pn, pd;			/* the primary unit: pn/pd seconds */
 	INT	naux;
-	INT	auxno[RT_MAX_AUX];
-	D	an[RT_MAX_AUX], ad[RT_MAX_AUX];	/* an/ad of the primary */
+	INT	caux;			/* room in the three below */
+	INT	*auxno;
+	D	*an, *ad;		/* an/ad of the primary */
 } RTUSYS;
 
 /* The units in force for a thread */
@@ -159,7 +151,8 @@ typedef struct {
 typedef struct {
 	UINT		st;
 	RTN		*pc;
-	RTFRAME		fr[RT_DEPTH];
+	RTFRAME		*fr;
+	INT		cfr;		/* room in fr */
 	INT		nfr;
 	RT_TIME		t;		/* when what it does next happens */
 	RT_TIME		t0;		/* when its group began */
@@ -215,9 +208,10 @@ typedef struct {
 	INT		target;		/* object or medium */
 	INT		prop;
 	INT		n;		/* keyframes */
-	RT_V		val[RT_MAX_KEY];
-	INT		off[RT_MAX_KEY];	/* where each stands, 65536ths of the whole */
-	RT_EASE		ease[RT_MAX_KEY];	/* into each */
+	INT		ckey;		/* room in the three below */
+	RT_V		*val;
+	INT		*off;		/* where each stands, 65536ths of the whole */
+	RT_EASE		*ease;		/* into each */
 	RT_EASE		all;		/* across the whole (an interpolation's function) */
 	BOOL		spline;		/* an interpolation through its points */
 	INT		steps;		/* an interpolation's: values in each part, 0 smooth */
@@ -260,8 +254,8 @@ typedef struct {
 	CONST UB	*delay_s;
 	BOOL		loop;
 	INT		count;		/* loopCount, 0 for ever */
-	INT		onerr[RT_MAX_ONERR];	/* its <onerror> nodes, by index in errs */
-	INT		nonerr;
+	INT		onerr0;		/* its <onerror> nodes: rt->onerr from here, */
+	INT		nonerr;		/* this many */
 } RTBLOCK;
 
 /* imageControl replace: a picture an object may be given */
@@ -277,27 +271,28 @@ struct rt {
 	BOOL		loop;
 	UINT		preload;
 	BOOL		sounds;		/* notes, MIDI, PCM or audio in it */
+	BOOL		oom;		/* a table could not grow while the program was read */
 
 	/* the program */
 	RTN		*pre;		/* the media written outside every <realData> */
-	RTBLOCK		blk[RT_MAX_BLOCK];
-	INT		nblk;
-	RTN		*onerr[RT_MAX_ONERR * RT_MAX_BLOCK];
-	INT		nonerr;
-	RTUSYS		usys[RT_MAX_USYS];
-	INT		nusys;
-	RT_STREAM	stream[RT_MAX_STREAM];
-	INT		nstream;
-	RT_OBJ		obj[RT_MAX_OBJ];
-	INT		nobj;
-	RT_MEDIA	media[RT_MAX_MEDIA];
-	RTN		*mnode[RT_MAX_MEDIA];	/* the element of each met last: its handlers */
-	BOOL		upaused[RT_MAX_MEDIA];	/* paused with the whole program */
-	INT		nmedia;
-	RTREPL		repl[RT_MAX_REPL];
-	INT		nrepl;
-	CONST UB	*want[RT_MAX_OBJ];	/* the ids the program moves */
-	INT		nwant;
+	RTBLOCK		*blk;
+	INT		nblk, cblk;
+	RTN		**onerr;
+	INT		nonerr, conerr;
+	RTUSYS		*usys;
+	INT		nusys, cusys;
+	RT_STREAM	*stream;
+	INT		nstream, cstream;
+	RT_OBJ		*obj;
+	INT		nobj, cobj;
+	RT_MEDIA	*media;
+	RTN		**mnode;	/* the element of each met last: its handlers */
+	BOOL		*upaused;	/* paused with the whole program */
+	INT		nmedia, cmedia, cmnode, cupaused;
+	RTREPL		*repl;
+	INT		nrepl, crepl;
+	CONST UB	**want;		/* the ids the program moves */
+	INT		nwant, cwant;
 
 	/* the run */
 	BOOL		running;
@@ -310,12 +305,14 @@ struct rt {
 	INT		loops;		/* times it has gone round */
 	INT		all_loops;
 	BOOL		waiting_user;	/* a block that does not play by itself waits for a start */
-	RTTHR		thr[RT_MAX_THR];
-	RTANIM		anim[RT_MAX_ANIM];
-	RTTRIG		trig[RT_MAX_TRIG];
-	INT		ntrig;
-	RTSNDQ		sndq[RT_MAX_SNDQ];
-	INT		nsndq;
+	RTTHR		**thr;		/* each slot a place of its own, which does not move */
+	INT		cthr;
+	RTANIM		**anim;
+	INT		canim;
+	RTTRIG		**trig;
+	INT		ntrig, ctrig;
+	RTSNDQ		*sndq;
+	INT		nsndq, csndq;
 	H		*var;
 	UINT		seed;
 	INT		last_key;
@@ -327,12 +324,12 @@ struct rt {
 	RT_TIME		sound_until;	/* when the last note started ends */
 	INT		gen;
 	/* media events, kept until the next step */
-	struct {
+	struct rt_mev {
 		INT	inst, gen;
 		UINT	ev;
 		RT_V	v;
-	}		mev[64];
-	INT		nmev;
+	}		*mev;
+	INT		nmev, cmev;
 };
 
 /* rt_num.c */
@@ -354,6 +351,10 @@ IMPORT INT     rt_rand_n( RT *rt, INT n );
 /* rt_prog.c */
 IMPORT ER   rt_compile( RT *rt );
 IMPORT void rt_free_prog( RT *rt );
+IMPORT BOOL rt_room( RT *rt, void *pp, INT *cap, INT need, SZ esz );
+IMPORT BOOL rt_room_slots( RT *rt, void *pp, INT *cap, INT need, SZ esz );
+IMPORT BOOL rt_anim_keys( RT *rt, RTANIM *a, INT n );
+IMPORT BOOL rt_frames( RT *rt, RTTHR *th, INT n );
 IMPORT INT  rt_obj_add( RT *rt, CONST UB *id, UINT kind, CONST T_TADNODE *nd );
 IMPORT INT  rt_media_of( CONST RT *rt, CONST UB *id );
 IMPORT RTN *rt_label_find( RT *rt, CONST UB *name );

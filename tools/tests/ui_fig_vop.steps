@@ -1,0 +1,191 @@
+# 基本図形編集 as a process (design 11.3, 11.2.6), for tools/ui_run.py: the 仮身操作,
+# 実身操作 and 実行 of a link in the figure, done by the shared part of lib/libtv
+# (tv_vop.c). A copy of 画用紙 (mkbig fig) and of 基本文章編集 (mkbig doc) are linked
+# into BTRON; the figure is opened from its link and the text's link pasted into it. Its
+# menu is shown, 属性変更 (続柄 shown) and 続柄設定 are done, 実身複製 and 新版作成 put
+# links to the copies beside it, 起動アプリの固定 is turned on (the menu then offers
+# 起動アプリを最新にする), 実行's list is shown, and the link is carried out of the
+# window into BTRON. The pictures are checked against the ones recorded when fg_link.c
+# did these itself, before they were moved to lib/libtv. The link is pressed at 310,188,
+# left of where the copies' links go. The message line (the bottom band) is left out:
+# the shared part says what was done there. Keys with Ctrl (01): C 06, V 19; Enter 28,
+# Esc 29.
+mkbig fig 30 4
+linkbig 180 45
+mkbig doc 5
+linkbig 190 70
+wait 300
+logmark
+dclick 190 52
+expectsincein 60 figure: opened 画用紙 shapes 32 links 0 autoref 1 parent 1
+wait 800
+# the text's link copied in BTRON and pasted into the figure
+click 50 14
+wait 300
+click 230 78
+wait 300
+key 06 01
+wait 300
+click 600 500
+wait 300
+logmark
+key 19 01
+expectsince figure: pasted, 33 shapes 1 picked
+wait 500
+click 600 500
+wait 300
+# the menu: 閉じる at the pointer, 仮身操作 eight rows down
+logmark
+click 310 188 1
+expectsince figure: exec menu on
+expectsince figure: menu
+wait 1500
+move 320 348
+wait 150
+move 390 348
+wait 800
+shot fv_menu
+shotsum fv_menu 0 0 1280 780
+want ok 30e96aada01aa2e7
+# 仮身操作 > 属性変更: 続柄 shown
+move 420 408
+wait 300
+click 430 408
+expectsince figure: chosen vobj.attr
+wait 1500
+click 420 367
+wait 300
+key 28
+expectsince figure: attr 基本文章編集
+wait 2000
+shot fv_attr
+shotsum fv_attr 0 0 1280 780
+want ok c4bbdae9b468a821
+# the menu opens with the last chosen under the pointer: 仮身操作 at 188
+# 仮身操作 > 続柄設定
+logmark
+click 310 188 1
+expectsince figure: menu
+wait 1500
+move 320 188
+wait 150
+move 390 188
+wait 800
+shot fv_menu2
+move 420 268
+wait 300
+click 430 268
+expectsince figure: chosen vobj.relation
+wait 1500
+text abc
+wait 300
+key 28
+expectsince figure: relation
+wait 2000
+shot fv_rel
+shotsum fv_rel 0 0 1280 780
+want ok 47294bb041f15da5
+# 実身操作 > 実身複製, a row under 仮身操作
+logmark
+click 310 188 1
+expectsince figure: menu
+wait 1500
+move 320 208
+wait 150
+move 390 208
+wait 800
+shot fv_real
+shotsum fv_real 0 0 1280 780
+want ok 0e0e7e4a35a57c0f
+move 420 228
+wait 300
+click 430 228
+expectsince figure: chosen real.duplicate
+wait 1500
+key 28
+expectsince figure: duplicated
+wait 2000
+shot fv_dup
+shotsum fv_dup 0 0 1280 780
+want ok d7f276dc00a4afc1
+# 実身操作 > 新版作成, with no panel; 実身操作 at 188 now
+logmark
+click 310 188 1
+expectsince figure: menu
+wait 1500
+move 320 188
+wait 150
+move 390 188
+wait 800
+move 420 228
+wait 300
+click 430 228
+expectsince figure: chosen real.newversion
+expectsince figure: new version
+wait 2000
+shot fv_newver
+shotsum fv_newver 0 0 1280 780
+want ok 61bff38891f70d1b
+# 実身操作 > 起動アプリを固定する, and the menu then offers 起動アプリを最新にする
+logmark
+click 310 188 1
+expectsince figure: menu
+wait 1500
+move 320 188
+wait 150
+move 390 188
+wait 800
+move 420 248
+wait 300
+click 430 248
+expectsince figure: chosen real.lock
+expectsince figure: kept
+wait 1000
+logmark
+click 310 188 1
+expectsince figure: exec menu on
+expectsince figure: menu
+wait 1500
+move 320 188
+wait 150
+move 390 188
+wait 800
+shot fv_real_kept
+shotsum fv_real_kept 0 0 1280 780
+want ok 5768920e64404659
+# 実行: the programs the desktop offers
+move 320 288
+wait 150
+move 390 288
+wait 800
+shot fv_exec
+shotsum fv_exec 0 0 1280 780
+want ok e700dd6888fd8aa1
+key 29
+wait 200
+key 29
+wait 200
+key 29
+wait 500
+# carried out of the window into BTRON: it leaves the figure
+click 600 500
+wait 300
+logmark
+move 310 188
+down
+move 280 190
+wait 500
+move 150 200
+wait 500
+move 90 200
+wait 1000
+move 50 190
+wait 1000
+up
+expectsince figure: carried 基本文章編集 (0)
+expectsince figure: deleted
+wait 2000
+shot fv_carried
+shotsum fv_carried 0 0 1280 780
+want ok e84513f76601ffe2
+absent !OACV!

@@ -56,7 +56,6 @@
 
 #define CK_DEPTH	32		/* levels a tree may have */
 #define CK_TREES	3
-#define CK_TRASH_MAX	TSFSO_MAX_LINK	/* objects one TRASH gathers */
 #define CK_TRASH_NAME	"TRASH"
 #define HD_OWNER	32		/* the owner in the common head */
 #define KNOWN_FLAGS	( TSFSO_F_EDITABLE | TSFSO_F_DELETABLE | TSFSO_F_READABLE \
@@ -97,6 +96,7 @@ typedef struct {
 	BOOL	reached;
 	BOOL	hidden;
 	BOOL	damaged;		/* its block reads but does not pass its check: what reads of it is saved */
+	BOOL	spare;			/* version 5: its spare place is not empty */
 } CKOBJ;
 
 typedef struct {
@@ -138,6 +138,9 @@ typedef struct {
 	UD		*stale;		/* blocks of object blocks found to be old copies */
 	INT		nstale, maxstale;
 	BOOL		xt2;		/* the volume says it has trees of two levels */
+	T_TSFSLIM	lim;		/* the limits of the volume's version (ts_blk_lim) */
+	BOOL		v5;		/* a volume of version 5: the forms of 7.3 may be on it */
+	BOOL		spare_left;	/* the repair put spare places on the orphan tree to be emptied */
 } CK;
 
 /* ---------------------------------------------------------------- bytes */
@@ -567,6 +570,12 @@ LOCAL void list_objects( CK *c )
 	}
 }
 
+/* More than a limit of the volume allows: 0 is no limit */
+LOCAL BOOL over( UINT limit, UW n )
+{
+	return (BOOL)( limit != 0 && n > (UW)limit );
+}
+
 /* ファイルヘッダー: each object block, where the index says it is */
 LOCAL void check_heads( CK *c, UB *buf )
 {
@@ -610,9 +619,9 @@ LOCAL void check_heads( CK *c, UB *buf )
 		o->flags = rd32(buf + OB_FLAGS);
 		o->refcnt = (INT)rd32(buf + OB_REFCNT);
 		o->pins = (INT)rd32(buf + OB_PINS);
-		if ( rd32(buf + OB_NPLACE) > TSFSO_MAX_REC || rd32(buf + OB_NRES) > TSFSO_MAX_RES
-		  || rd32(buf + OB_NLINK) > TSFSO_MAX_LINK || ( rd64(buf + OB_INLMAP) >> INL_UNITS ) != 0
-		  || ( o->flags & ~(UW)KNOWN_FLAGS ) != 0 ) {
+		if ( over(c->lim.max_rec, rd32(buf + OB_NPLACE)) || over(c->lim.max_res, rd32(buf + OB_NRES))
+		  || over(c->lim.max_link, rd32(buf + OB_NLINK)) || ( rd64(buf + OB_INLMAP) >> INL_UNITS ) != 0
+		  || ( o->flags & ~(UW)( KNOWN_FLAGS | ( c->v5 ? TSFSO_F_SPARE : 0 ) ) ) != 0 ) {
 			found(c, TSFSCK_K_HEAD, &o->u, NULL, o->blk, 0, TSFSCK_W_FORM, 1);
 			c->broken = TRUE;
 			continue;
@@ -629,7 +638,7 @@ LOCAL void check_heads( CK *c, UB *buf )
 			o->gc_v = o->blk;
 		}
 		if ( c->tree_bad[TSFSBT_ORPHAN] ) {
-			o->on_orphan = (BOOL)( ( o->flags & ( TSFSO_F_ORPHAN | TSFSO_F_RELINK ) ) != 0 );
+			o->on_orphan = (BOOL)( ( o->flags & ( TSFSO_F_ORPHAN | TSFSO_F_RELINK | TSFSO_F_SPARE ) ) != 0 );
 		}
 	}
 }
@@ -659,6 +668,276 @@ LOCAL BOOL inline_take( CK *c, CKOBJ *o, CONST UB *pl, INT kind )
 	}
 	o->inl |= want;
 	return TRUE;
+}
+
+/*
+ * The runs of a place in the order of their first block, as a part is
+ * read through them: a table that grows (CKRUNS).
+ */
+typedef struct {
+	UD	l, p, n;
+} CKRUN;
+
+typedef struct {
+	CKRUN	*r;
+	INT	n, max;
+} CKRUNS;
+
+LOCAL BOOL runs_add( CKRUNS *s, UD l, UD p, UD n )
+{
+	if ( s == NULL ) {
+		return TRUE;
+	}
+	if ( !grow((void **)&s->r, &s->max, s->n + 1, sizeof(CKRUN)) ) {
+		return FALSE;
+	}
+	s->r[s->n].l = l;
+	s->r[s->n].p = p;
+	s->r[s->n].n = n;
+	s->n++;
+	return TRUE;
+}
+
+LOCAL void runs_free( CKRUNS *s )
+{
+	if ( s->r != NULL ) Kfree(s->r);
+	knl_memset(s, 0, sizeof(*s));
+}
+
+/*
+ * A node of a run tree (F_TREEN, version 5) and what is under it: a
+ * block with the common head, from 1 to TSFSO_MAX_EXTENTS entries, the
+ * level the node above says (want, -1 at the root) and no deeper than
+ * CK_RUN_DEPTH; an index entry starts where the one before ended and
+ * the child under it holds exactly the blocks it says; a leaf's runs
+ * start where the one before ended, none empty. On the first look
+ * (`first`) every node and every block of the runs is claimed and what
+ * is wrong told as `kind`; a later look only reads. The runs go into s
+ * when it is given, *p_runs counts them.
+ */
+#define CK_RUN_DEPTH	8		/* 165^8 is past 2^58: deeper is not a tree of a volume */
+
+LOCAL BOOL treen_node( CK *c, CKOBJ *o, UD blk, INT want, INT kind, BOOL first,
+		       UD *p_have, UD *p_runs, CKRUNS *s )
+{
+	UB	*b;
+	UD	l, p, cnt, i, at;
+	INT	n, lvl, k;
+	BOOL	ok = TRUE;
+
+	if ( first && !claim(c, blk, kind, &o->u) ) {
+		return FALSE;
+	}
+	b = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	if ( b == NULL ) {
+		c->broken = TRUE;
+		return FALSE;
+	}
+	if ( !mread(c, blk, b, TSFSBLK_MAGIC_TBL) ) {
+		if ( first ) found(c, kind, &o->u, NULL, blk, 0, TSFSCK_W_DAMAGED, 1);
+		c->broken = TRUE;
+		Kfree(b);
+		return FALSE;
+	}
+	n = (INT)rd32(b + XL_N);
+	lvl = (INT)rd32(b + XN_LEVEL);
+	if ( n < 1 || n > TSFSO_MAX_EXTENTS || lvl > CK_RUN_DEPTH || ( want >= 0 && lvl != want ) ) {
+		if ( first ) found(c, kind, &o->u, NULL, blk, 0, ( want >= 0 && lvl != want ) ? TSFSCK_W_WRONG
+										: TSFSCK_W_COUNT, 1);
+		c->broken = TRUE;
+		Kfree(b);
+		return FALSE;
+	}
+	for ( k = 0; k < n && ok; k++ ) {
+		l = rd64(b + XL_ENT + k * XL_ESZ);
+		p = rd64(b + XL_ENT + k * XL_ESZ + 8);
+		cnt = rd64(b + XL_ENT + k * XL_ESZ + 16);
+		if ( l != *p_have || cnt == 0 || cnt > c->sb.total_blocks ) {
+			if ( first ) found(c, kind, &o->u, NULL, ( lvl == 0 ) ? p : blk, 0, TSFSCK_W_ORDER, 1);
+			c->broken = TRUE;
+			ok = FALSE;
+			break;
+		}
+		if ( lvl == 0 ) {
+			for ( i = 0; first && i < cnt && ok; i++ ) {
+				ok = claim(c, p + i, kind, &o->u);
+			}
+			if ( ok && !runs_add(s, l, p, cnt) ) {
+				c->broken = TRUE;
+				ok = FALSE;
+			}
+			*p_have = l + cnt;
+			( *p_runs )++;
+			continue;
+		}
+		at = *p_have;
+		ok = treen_node(c, o, p, lvl - 1, kind, first, p_have, p_runs, s);
+		if ( ok && *p_have != at + cnt ) {
+			if ( first ) found(c, kind, &o->u, NULL, p, 0, TSFSCK_W_COUNT, 1);
+			c->broken = TRUE;
+			ok = FALSE;
+		}
+	}
+	Kfree(b);
+	return ok;
+}
+
+/*
+ * The runs of a place of blocks: one run (F_RUN), the runs of one leaf
+ * (F_TREE), of a tree of two levels (F_TREE2) or of a run tree
+ * (F_TREEN, its count of runs in PL_B), claimed on the first look.
+ * *p_have is the blocks they cover.
+ */
+LOCAL BOOL place_runs( CK *c, CKOBJ *o, CONST UB *pl, INT kind, BOOL first, CKRUNS *s, UD *p_have )
+{
+	UB	*blk;
+	UD	runs = 0, p, cnt, i;
+	BOOL	ok = TRUE;
+
+	*p_have = 0;
+	switch ( pl[PL_FORM] ) {
+	case F_RUN:
+		p = rd64(pl + PL_A);
+		cnt = rd64(pl + PL_B);
+		if ( cnt == 0 ) return TRUE;
+		if ( cnt > c->sb.total_blocks ) {
+			if ( first ) found(c, kind, &o->u, NULL, p, 0, TSFSCK_W_SIZE, 1);
+			c->broken = TRUE;
+			return FALSE;
+		}
+		for ( i = 0; first && i < cnt; i++ ) {
+			if ( !claim(c, p + i, kind, &o->u) ) return FALSE;
+		}
+		*p_have = cnt;
+		if ( !runs_add(s, 0, p, cnt) ) {
+			c->broken = TRUE;
+			return FALSE;
+		}
+		return TRUE;
+	case F_TREE:
+		p = rd64(pl + PL_A);
+		if ( first && !claim(c, p, kind, &o->u) ) {
+			return FALSE;
+		}
+		blk = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+		if ( blk == NULL ) {
+			c->broken = TRUE;
+			return FALSE;
+		}
+		if ( !mread(c, p, blk, TSFSBLK_MAGIC_TBL) ) {
+			if ( first ) found(c, kind, &o->u, NULL, p, 0, TSFSCK_W_DAMAGED, 1);
+			c->broken = TRUE;
+			Kfree(blk);
+			return FALSE;
+		}
+		cnt = rd32(blk + XL_N);
+		if ( cnt > TSFSO_MAX_EXTENTS ) {
+			if ( first ) found(c, kind, &o->u, NULL, p, 0, TSFSCK_W_COUNT, 1);
+			c->broken = TRUE;
+			Kfree(blk);
+			return FALSE;
+		}
+		for ( i = 0; i < cnt && ok; i++ ) {
+			UD	l = rd64(blk + XL_ENT + i * XL_ESZ), q = rd64(blk + XL_ENT + i * XL_ESZ + 8);
+			UD	m = rd64(blk + XL_ENT + i * XL_ESZ + 16), j;
+
+			if ( l != *p_have || m == 0 || m > c->sb.total_blocks ) {
+				if ( first ) found(c, kind, &o->u, NULL, q, 0, TSFSCK_W_ORDER, 1);
+				c->broken = TRUE;
+				ok = FALSE;
+				break;
+			}
+			for ( j = 0; first && j < m && ok; j++ ) {
+				ok = claim(c, q + j, kind, &o->u);
+			}
+			if ( ok && !runs_add(s, l, q, m) ) {
+				c->broken = TRUE;
+				ok = FALSE;
+			}
+			*p_have = l + m;
+		}
+		Kfree(blk);
+		return ok;
+	case F_TREEN:
+		ok = treen_node(c, o, rd64(pl + PL_A), -1, kind, first, p_have, &runs, s);
+		if ( ok && runs != rd64(pl + PL_B) ) {
+			if ( first ) found(c, kind, &o->u, NULL, rd64(pl + PL_A), (D)runs, TSFSCK_W_COUNT, 1);
+			c->broken = TRUE;
+			ok = FALSE;
+		}
+		return ok;
+	default:
+		if ( first ) found(c, kind, &o->u, NULL, o->blk, 0, TSFSCK_W_FORM, 1);
+		c->broken = TRUE;
+		return FALSE;
+	}
+}
+
+/*
+ * The most bytes a management part is taken to hold: of version 4, what
+ * a transaction can write (16MB is past it); of version 5, the metadata
+ * limit of the volume, or 1GB when it sets none, which no table of the
+ * entries an object may have reaches.
+ */
+LOCAL UD part_max( CK *c )
+{
+	if ( !c->v5 ) {
+		return 16 * 1024 * 1024;
+	}
+	return ( c->lim.meta_max > 0 && c->lim.meta_max > 16 * 1024 * 1024 ) ? c->lim.meta_max : (UD)1 << 30;
+}
+
+/*
+ * A management part of version 5 in the runs of a leaf or a run tree:
+ * its blocks, each with the common head, as many as its bytes need and
+ * no more, read in the order of the runs.
+ */
+LOCAL UB *part_runs_read( CK *c, CKOBJ *o, CONST UB *pl, INT off, BOOL first, SZ *p_len )
+{
+	CKRUNS	s;
+	UD	len = rd64(pl + PL_BYTES), have = 0, b;
+	UB	*out = NULL, *blk = NULL;
+	SZ	done = 0, n;
+	INT	k;
+
+	knl_memset(&s, 0, sizeof(s));
+	if ( !place_runs(c, o, pl, TSFSCK_K_PART, first, &s, &have) ) {
+		runs_free(&s);
+		return NULL;
+	}
+	if ( have != BLKS_FOR(len, MB_PAY) || len > part_max(c) ) {
+		if ( first ) found(c, TSFSCK_K_PART, &o->u, NULL, rd64(pl + PL_A), off, TSFSCK_W_SIZE, 1);
+		runs_free(&s);
+		return NULL;
+	}
+	out = (UB *)Kmalloc((SZ)len + 1);
+	blk = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	if ( out == NULL || blk == NULL ) {
+		c->broken = TRUE;
+		goto bad;
+	}
+	for ( k = 0; k < s.n; k++ ) {
+		for ( b = 0; b < s.r[k].n; b++ ) {
+			if ( !mread(c, s.r[k].p + b, blk, TSFSBLK_MAGIC_TBL) ) {
+				if ( first ) found(c, TSFSCK_K_PART, &o->u, NULL, s.r[k].p + b, off, TSFSCK_W_DAMAGED, 1);
+				goto bad;
+			}
+			n = MB_PAY;
+			if ( n > (SZ)len - done ) n = (SZ)len - done;
+			knl_memcpy(out + done, blk + TSFSBLK_HDR_SIZE, (INT)n);
+			done += n;
+		}
+	}
+	Kfree(blk);
+	runs_free(&s);
+	*p_len = (SZ)len;
+	return out;
+
+    bad:
+	if ( out != NULL ) Kfree(out);
+	if ( blk != NULL ) Kfree(blk);
+	runs_free(&s);
+	return NULL;
 }
 
 /*
@@ -693,13 +972,20 @@ LOCAL UB *part_read( CK *c, CKOBJ *o, CONST UB *hdr, INT off, BOOL first, SZ *p_
 		return out;
 	case F_RUN:
 		break;
+	case F_TREE:
+	case F_TREEN:
+		if ( c->v5 ) {
+			return part_runs_read(c, o, pl, off, first, p_len);
+		}
+		/* a form a volume of version 4 does not give a management part */
+		/* fall through */
 	default:
 		if ( first ) found(c, TSFSCK_K_PART, &o->u, NULL, o->blk, off, TSFSCK_W_FORM, 1);
 		return NULL;
 	}
 	start = rd64(pl + PL_A);
 	cnt = rd64(pl + PL_B);
-	if ( cnt != BLKS_FOR(len, MB_PAY) || len > 16 * 1024 * 1024 ) {
+	if ( cnt != BLKS_FOR(len, MB_PAY) || len > part_max(c) ) {
 		if ( first ) found(c, TSFSCK_K_PART, &o->u, NULL, start, off, TSFSCK_W_SIZE, 1);
 		return NULL;
 	}
@@ -748,6 +1034,43 @@ LOCAL void tabs_free( CKTABS *t )
 	knl_memset(t, 0, sizeof(*t));
 }
 
+/*
+ * The bytes of a resource table against its entries: of version 4 the
+ * entries alone; of version 5 the entries and the string area behind
+ * them, which holds the extensions of the entries that start with
+ * RSX_MARK, packed in the order of the entries, each within the area and
+ * no longer than an extension may be.
+ */
+#define CK_EXT_MAX	767		/* bytes of an extension: FS_NAME_MAX less its NUL */
+
+LOCAL BOOL res_size_ok( CK *c, CONST UB *res, INT nres, SZ len )
+{
+	UD	sl, at = 0, off, n;
+	INT	k;
+
+	if ( len == (SZ)nres * RS_SIZE && !c->v5 ) {
+		return TRUE;
+	}
+	if ( !c->v5 || len < (SZ)nres * RS_SIZE ) {
+		return FALSE;
+	}
+	sl = (UD)len - (UD)nres * RS_SIZE;
+	for ( k = 0; k < nres; k++ ) {
+		CONST UB	*e = res + k * RS_SIZE;
+
+		if ( e[RS_EXT] != RSX_MARK ) {
+			continue;
+		}
+		off = rd32(e + RS_EXT + RSX_OFF);
+		n = rd32(e + RS_EXT + RSX_LEN);
+		if ( off != at || n > CK_EXT_MAX || off + n > sl ) {
+			return FALSE;
+		}
+		at += n;
+	}
+	return (BOOL)( at == sl );
+}
+
 LOCAL BOOL tabs_read( CK *c, CKOBJ *o, CONST UB *hdr, BOOL first, CKTABS *t )
 {
 	SZ	len;
@@ -771,7 +1094,7 @@ LOCAL BOOL tabs_read( CK *c, CKOBJ *o, CONST UB *hdr, BOOL first, CKTABS *t )
 		t->place = NULL;
 	}
 	t->res = part_read(c, o, hdr, OB_RES, first, &len);
-	if ( t->res != NULL && len != (SZ)t->nres * RS_SIZE ) {
+	if ( t->res != NULL && !res_size_ok(c, t->res, t->nres, len) ) {
 		if ( first ) found(c, TSFSCK_K_TABLE, &o->u, NULL, o->blk, OB_RES, TSFSCK_W_COUNT, 1);
 		Kfree(t->res);
 		t->res = NULL;
@@ -784,6 +1107,8 @@ LOCAL BOOL tabs_read( CK *c, CKOBJ *o, CONST UB *hdr, BOOL first, CKTABS *t )
 	}
 	return (BOOL)( ok && t->place != NULL && t->res != NULL && t->link != NULL );
 }
+
+LOCAL void spare_check( CK *c, CKOBJ *o, CONST UB *hdr, CONST CKTABS *t );
 
 /* 通常インデックスと接続インデックス: the parts of each object and its three tables */
 LOCAL void check_tables( CK *c, UB *hdr )
@@ -805,6 +1130,7 @@ LOCAL void check_tables( CK *c, UB *hdr )
 		if ( !ok ) {
 			c->broken = TRUE;
 		}
+		spare_check(c, o, hdr, &t);
 		if ( t.place != NULL ) {
 			UW	last = 0;
 
@@ -958,6 +1284,56 @@ LOCAL BOOL tree2_runs( CK *c, CKOBJ *o, CONST UB *pl, UB *blk, UD *p_have )
 	return ok;
 }
 
+/*
+ * The spare place of an object block (OB_SPARE, version 5): empty, or
+ * runs the object owns that no record and no part does (claimed as its
+ * parts' are), or F_TRIM, the runs of record PL_A past PL_BYTES, which
+ * its own place still names. One that is not empty has the object on the
+ * orphan tree with TSFSO_F_SPARE, so that the next mount gives it back;
+ * else the orphan tree and the object disagree (TSFSCK_K_ORPHAN, b 4).
+ */
+LOCAL void spare_check( CK *c, CKOBJ *o, CONST UB *hdr, CONST CKTABS *t )
+{
+	CONST UB	*sp = hdr + OB_SPARE;
+	UD		have = 0;
+	INT		k;
+
+	o->spare = FALSE;
+	if ( !c->v5 || sp[PL_FORM] == F_NONE ) {
+		return;
+	}
+	o->spare = TRUE;
+	if ( sp[PL_FORM] == F_TRIM ) {
+		for ( k = 0; t->place != NULL && k < t->nplace; k++ ) {
+			CONST UB	*e = t->place + k * PE_SIZE;
+
+			if ( rd32(e + PE_RID) == (UW)rd64(sp + PL_A) ) break;
+		}
+		if ( t->place != NULL && k == t->nplace ) {
+			found(c, TSFSCK_K_TABLE, &o->u, NULL, o->blk, OB_SPARE, TSFSCK_W_WRONG, 1);
+			c->broken = TRUE;
+		} else if ( t->place != NULL && rd64(t->place + k * PE_SIZE + PE_BYTES) > rd64(sp + PL_BYTES) ) {
+			found(c, TSFSCK_K_TABLE, &o->u, NULL, o->blk, OB_SPARE, TSFSCK_W_SIZE, 1);
+			c->broken = TRUE;
+		}
+	} else if ( sp[PL_FORM] == F_INLINE ) {
+		found(c, TSFSCK_K_PART, &o->u, NULL, o->blk, OB_SPARE, TSFSCK_W_FORM, 1);
+		c->broken = TRUE;
+	} else if ( sp[PL_FORM] == F_TREE2 ) {
+		/* a record's place of two levels, given up as it was (spare_take) */
+		UB	*blk = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+
+		if ( blk == NULL ) {
+			c->broken = TRUE;
+			return;
+		}
+		(void)tree2_runs(c, o, sp, blk, &have);
+		Kfree(blk);
+	} else {
+		(void)place_runs(c, o, sp, TSFSCK_K_PART, TRUE, NULL, &have);
+	}
+}
+
 /* A data part's place: its units, or its blocks claimed and the runs looked at */
 LOCAL void data_place( CK *c, CKOBJ *o, CONST UB *pl, UB *blk )
 {
@@ -993,8 +1369,18 @@ LOCAL void data_place( CK *c, CKOBJ *o, CONST UB *pl, UB *blk )
 			return;
 		}
 		break;
+	case F_TREEN:
+		if ( c->lim.xt_form < F_TREEN || !place_runs(c, o, pl, TSFSCK_K_DATA, TRUE, NULL, &have) ) {
+			if ( c->lim.xt_form < F_TREEN ) {
+				found(c, TSFSCK_K_DATA, &o->u, NULL, o->blk, 0, TSFSCK_W_FORM, 1);
+				c->broken = TRUE;
+			}
+			return;
+		}
+		n = 0;				/* the runs are looked at */
+		break;
 	case F_TREE2:
-		if ( !c->xt2 ) {
+		if ( !c->xt2 && !c->v5 ) {
 			/* the form, on a volume that does not say it has it */
 			found(c, TSFSCK_K_DATA, &o->u, NULL, o->blk, 0, TSFSCK_W_FORM, 1);
 			c->broken = TRUE;
@@ -1068,6 +1454,26 @@ LOCAL void data_read( CK *c, CKOBJ *o, CONST UB *pl, UB *blk, UB *buf )
 		Kfree(ib);
 		return;
 	}
+	if ( pl[PL_FORM] == F_TREEN ) {
+		/* the runs the tree's leaves name, gathered first without claiming them again */
+		CKRUNS	s;
+		UD	have = 0;
+		INT	j;
+
+		knl_memset(&s, 0, sizeof(s));
+		if ( place_runs(c, o, pl, TSFSCK_K_DATA, FALSE, &s, &have) ) {
+			for ( j = 0; j < s.n; j++ ) {
+				for ( i = 0; i < s.r[j].n && s.r[j].p + i < c->sb.total_blocks; i++ ) {
+					c->checked++;
+					if ( knl_tsfsblk_raw_read(c->vol, s.r[j].p + i, buf) < E_OK ) {
+						found(c, TSFSCK_K_UNREAD, &o->u, NULL, s.r[j].p + i, 0, 0, 1);
+					}
+				}
+			}
+		}
+		runs_free(&s);
+		return;
+	}
 	if ( pl[PL_FORM] == F_RUN ) {
 		n = 1;
 	} else if ( pl[PL_FORM] == F_TREE && ts_jrnl_read(c->vol, rd64(pl + PL_A), blk) >= E_OK ) {
@@ -1136,13 +1542,18 @@ LOCAL void check_data( CK *c, UB *hdr )
 	Kfree(buf);
 }
 
-/* The "records" of a metadata text against the rids of its placement table */
-LOCAL BOOL records_agree( CONST UB *j, INT len, CONST UB *place, INT nplace )
+/*
+ * The "records" of a metadata text against the rids of its placement
+ * table: a mark for each entry, as many as the table has. Without the
+ * memory for the marks nothing is judged and the picture is not whole.
+ */
+LOCAL BOOL records_agree( CK *c, CONST UB *j, INT len, CONST UB *place, INT nplace )
 {
 	T_JSON	root, arr, it;
-	UB	seen[TSFSO_MAX_REC];
+	UB	*seen;
 	INT	n = 0, k;
 	UW	rid;
+	BOOL	ok = FALSE;
 
 	if ( js_span(j, len, 0, &root) < E_OK || js_type(&root) != JS_OBJECT
 	  || js_get(&root, "records", &arr) < E_OK ) {
@@ -1151,21 +1562,29 @@ LOCAL BOOL records_agree( CONST UB *j, INT len, CONST UB *place, INT nplace )
 	if ( js_type(&arr) != JS_ARRAY ) {
 		return FALSE;
 	}
-	knl_memset(seen, 0, sizeof(seen));
+	seen = (UB *)Kmalloc((SZ)nplace + 1);
+	if ( seen == NULL ) {
+		c->broken = TRUE;
+		return TRUE;
+	}
+	knl_memset(seen, 0, nplace + 1);
 	it.s = NULL;
 	while ( js_next(&arr, &it) ) {
 		if ( js_type(&it) != JS_OBJECT || n >= nplace ) {
-			return FALSE;
+			goto out;
 		}
 		rid = (UW)js_get_num(&it, "rid", 0);
 		for ( k = 0; k < nplace && rd32(place + k * PE_SIZE + PE_RID) != rid; k++ ) ;
 		if ( k == nplace || seen[k] ) {
-			return FALSE;
+			goto out;
 		}
 		seen[k] = 1;
 		n++;
 	}
-	return (BOOL)( n == nplace );
+	ok = (BOOL)( n == nplace );
+    out:
+	Kfree(seen);
+	return ok;
 }
 
 /* ファイルヘッダー情報: the metadata, the counts, the garbage list and the orphan tree */
@@ -1190,7 +1609,7 @@ LOCAL void check_info( CK *c, UB *hdr )
 		if ( t.metalen > 0 && ( js_span(t.meta, (INT)t.metalen, 0, &root) < E_OK
 					|| js_type(&root) != JS_OBJECT ) ) {
 			found(c, TSFSCK_K_META, &o->u, NULL, o->blk, 0, TSFSCK_W_FORM, 1);
-		} else if ( t.metalen > 0 && !records_agree(t.meta, (INT)t.metalen, t.place, t.nplace) ) {
+		} else if ( t.metalen > 0 && !records_agree(c, t.meta, (INT)t.metalen, t.place, t.nplace) ) {
 			found(c, TSFSCK_K_META, &o->u, NULL, o->blk, 0, TSFSCK_W_ORDER, 1);
 		}
 		tabs_free(&t);
@@ -1243,11 +1662,15 @@ LOCAL void check_info( CK *c, UB *hdr )
 
 			if ( r != NULL && r->v != o->blk ) {
 				found(c, TSFSCK_K_ORPHAN, &o->u, NULL, r->v, 0, 0, 1);
-			} else if ( ( o->flags & TSFSO_F_RELINK ) == 0 ) {
+			} else if ( ( o->flags & ( TSFSO_F_RELINK | TSFSO_F_SPARE ) ) == 0 && !o->spare ) {
 				found(c, TSFSCK_K_ORPHAN, &o->u, NULL, o->blk, 0, 1, 1);
 			}
 		} else if ( ( o->flags & TSFSO_F_RELINK ) != 0 ) {
 			found(c, TSFSCK_K_RELINK, &o->u, NULL, o->blk, 0, 0, 1);
+		}
+		/* a spare place that holds runs: the object marked and on the orphan tree, for the mount to empty it */
+		if ( o->spare && ( !o->on_orphan || ( o->flags & TSFSO_F_SPARE ) == 0 ) ) {
+			found(c, TSFSCK_K_ORPHAN, &o->u, NULL, o->blk, 0, 4, 1);
 		}
 		if ( !o->ok ) {
 			continue;
@@ -1527,7 +1950,7 @@ LOCAL void derive_trees( CK *c )
 			in = ( t == TSFSBT_OBJ ) ? (BOOL)( ( o->flags & TSFSO_F_ORPHAN ) == 0 )
 			   : ( t == TSFSBT_GC ) ? (BOOL)( ( o->flags & TSFSO_F_GARBAGE ) != 0
 							&& ( o->flags & TSFSO_F_ORPHAN ) == 0 )
-			   : (BOOL)( ( o->flags & ( TSFSO_F_ORPHAN | TSFSO_F_RELINK ) ) != 0 );
+			   : (BOOL)( ( o->flags & ( TSFSO_F_ORPHAN | TSFSO_F_RELINK | TSFSO_F_SPARE ) ) != 0 );
 			if ( in && !tree_add(tr, o->u.b, o->blk) ) {
 				c->broken = TRUE;
 			}
@@ -1729,6 +2152,14 @@ LOCAL ER check_super( CK *c )
 		return E_ID;
 	}
 	c->xt2 = (BOOL)( ( c->sb.incompat & TSFSBLK_INCOMPAT_XT2 ) != 0 );
+	if ( ts_blk_lim(c->vol, &c->lim) < E_OK ) {
+		/* the limits of version 4, which every volume the block layer cannot say of keeps */
+		knl_memset(&c->lim, 0, sizeof(c->lim));
+		c->lim.max_rec = TSFSO_MAX_REC;
+		c->lim.max_res = TSFSO_MAX_RES;
+		c->lim.max_link = TSFSO_MAX_LINK;
+	}
+	c->v5 = (BOOL)( ( c->sb.incompat & TSFSBLK_INCOMPAT_FMT5 ) != 0 );
 	c->ag_first = c->sb.journal_start + c->sb.journal_blocks;
 	c->claim = (UB *)Kmalloc((SZ)( c->sb.total_blocks / 8 + 1 ));
 	c->ag = (T_TSFSAGREF *)Kmalloc(sizeof(T_TSFSAGREF) * (SZ)c->sb.ag_count);
@@ -1864,11 +2295,11 @@ LOCAL ER pass( CK *c )
  * whoever looks there decides what to keep. A link to the old object
  * points at nothing from then on, and its link table says so.
  */
-LOCAL ER make_trash( CK *c, CONST TS_UUID *list, INT nlist, TS_UUID *p_u );
+LOCAL ER trash_all( CK *c, CONST TS_UUID *list, INT nlist );
 
 LOCAL void fix_damaged( CK *c )
 {
-	TS_UUID	*saved, trash;
+	TS_UUID	*saved;
 	INT	i, n = 0, recs;
 	BOOL	sv;
 	ER	er;
@@ -1901,9 +2332,8 @@ LOCAL void fix_damaged( CK *c )
 			mended(c, TSFSCK_K_HEAD, &o->u, o->blk, recs, sv ? 1 : 0, 1);
 		}
 	}
-	if ( n > 0 && make_trash(c, saved, n, &trash) >= E_OK ) {
-		c->res->has_trash = TRUE;
-		c->res->trash = trash;
+	if ( n > 0 ) {
+		(void)trash_all(c, saved, n);
 	}
 	Kfree(saved);
 }
@@ -2004,6 +2434,32 @@ LOCAL void fix_links( CK *c )
 			}
 		}
 	}
+	/*
+	 * a spare place that holds runs, of an object not marked for it or not
+	 * on the orphan tree: marked and put there, for its runs to be given
+	 * back as the mount gives them back (below, on a volume nothing else
+	 * has open; else at the next mount)
+	 */
+	for ( i = 0; i < c->nobj; i++ ) {
+		CKOBJ	*o = &c->obj[i];
+		ER	er = E_OK;
+
+		if ( !o->ok || o->orphan || !o->spare
+		  || ( o->on_orphan && ( o->flags & TSFSO_F_SPARE ) != 0 ) ) {
+			continue;
+		}
+		if ( ( o->flags & TSFSO_F_SPARE ) == 0 ) {
+			er = ts_obj_set_flags(c->vol, &o->u, TSFSO_F_SPARE, TSFSO_F_SPARE);
+		}
+		if ( er >= E_OK && !o->on_orphan && ts_obj_begin(c->vol) >= E_OK ) {
+			er = ts_btree_insert_t(c->vol, TSFSBT_ORPHAN, &o->u, o->blk);
+			er = ts_obj_end(c->vol, (BOOL)( er >= E_OK ));
+		}
+		if ( er >= E_OK ) {
+			mended(c, TSFSCK_K_ORPHAN, &o->u, o->blk, 0, 4, 1);
+			c->spare_left = TRUE;
+		}
+	}
 	/* entries of the orphan tree with nothing to finish, or at the wrong block */
 	for ( k = 0; k < c->tree[TSFSBT_ORPHAN].n; k++ ) {
 		CKITEM	*r = &c->tree[TSFSBT_ORPHAN].it[k];
@@ -2016,7 +2472,7 @@ LOCAL void fix_links( CK *c )
 		if ( r->v != o->blk ) {
 			if ( ts_obj_begin(c->vol) < E_OK ) continue;
 			er = ts_btree_update_t(c->vol, TSFSBT_ORPHAN, &r->u, o->blk);
-		} else if ( ( o->flags & TSFSO_F_RELINK ) == 0 ) {
+		} else if ( ( o->flags & ( TSFSO_F_RELINK | TSFSO_F_SPARE ) ) == 0 && !o->spare ) {
 			if ( ts_obj_begin(c->vol) < E_OK ) continue;
 			er = ts_btree_delete_t(c->vol, TSFSBT_ORPHAN, &r->u);
 		} else {
@@ -2054,8 +2510,12 @@ LOCAL void fix_links( CK *c )
 			if ( ts_obj_tidy(c->vol, &n) >= E_OK ) {
 				mended(c, TSFSCK_K_ORPHAN, NULL, 0, n, 3, 1);
 			}
+		} else if ( c->spare_left ) {
+			/* the spare places put on the orphan tree above, emptied as the mount empties them */
+			(void)ts_obj_tidy(c->vol, NULL);
 		}
 	}
+	c->spare_left = FALSE;
 }
 
 /* Each count made what the link tables and holds make it, and the garbage list with it */
@@ -2123,62 +2583,42 @@ LOCAL INT put_num( UB *b, INT at, INT max, D v )
  * moved into a window it becomes an ordinary object again, and deleted
  * it takes its links with it.
  */
-LOCAL ER make_trash( CK *c, CONST TS_UUID *list, INT nlist, TS_UUID *p_u )
+LOCAL ER make_trash( CK *c, CONST TS_UUID *list, INT n, TS_UUID *p_u )
 {
 	static CONST char	json[] = "{\"name\":\"" CK_TRASH_NAME "\",\"refCount\":0,\"recordCount\":1,"
 					 "\"editable\":true,\"deletable\":true,\"readable\":true}";
 	TS_UUID	u, vid;
 	char	us[TS_UUID_STRLEN + 1];
 	UB	*x;
-	INT	i, n = 0, at, pos = 0, max, k;
+	INT	i, at, pos = 0, max;
 	ER	er;
 
-	if ( list == NULL ) {
-		for ( i = 0; i < c->nobj; i++ ) {
-			if ( c->obj[i].hidden ) n++;
-		}
-	} else {
-		n = nlist;
-	}
-	if ( n > CK_TRASH_MAX ) n = CK_TRASH_MAX;
 	max = 256 + n * 400;
 	x = (UB *)Kmalloc((SZ)max);
 	if ( x == NULL ) {
 		return E_NOMEM;
 	}
 	at = put(x, 0, max, "<tad version=\"1.0\" encoding=\"UTF-8\" filename=\"" CK_TRASH_NAME "\">\n<figure>\n");
-	for ( i = 0, k = 0, n = 0; n < CK_TRASH_MAX && ( ( list == NULL && i < c->nobj ) || ( list != NULL && k < nlist ) ); ) {
-		CONST TS_UUID	*one;
-
-		if ( list == NULL ) {
-			if ( !c->obj[i].hidden ) {
-				i++;
-				continue;
-			}
-			one = &c->obj[i++].u;
-		} else {
-			one = &list[k++];
-		}
+	for ( i = 0; i < n; i++ ) {
 		if ( ts_gen_uuid(&vid) < E_OK ) {
 			Kfree(x);
 			return E_SYS;
 		}
 		at = put(x, at, max, "<link id=\"");
-		(void)ts_uuid_to_str(one, us, sizeof(us));
+		(void)ts_uuid_to_str(&list[i], us, sizeof(us));
 		at = put(x, at, max, us);
 		at = put(x, at, max, "_0.xtad\" vobjid=\"");
 		(void)ts_uuid_to_str(&vid, us, sizeof(us));
 		at = put(x, at, max, us);
 		at = put(x, at, max, "\" vobjleft=\"8\" vobjtop=\"");
-		at = put_num(x, at, max, 8 + n * ( VOBJ_CLOSED_H(14, 1, 1) + 8 ));
+		at = put_num(x, at, max, 8 + i * ( VOBJ_CLOSED_H(14, 1, 1) + 8 ));
 		at = put(x, at, max, "\" vobjright=\"248\" vobjbottom=\"");
-		at = put_num(x, at, max, 8 + n * ( VOBJ_CLOSED_H(14, 1, 1) + 8 ) + VOBJ_CLOSED_H(14, 1, 1));
+		at = put_num(x, at, max, 8 + i * ( VOBJ_CLOSED_H(14, 1, 1) + 8 ) + VOBJ_CLOSED_H(14, 1, 1));
 		at = put(x, at, max, "\" height=\"");
 		at = put_num(x, at, max, VOBJ_CLOSED_H(14, 1, 1));	/* closed, at 14 */
 		at = put(x, at, max, "\" chsz=\"14\" frcol=\"#000000\" chcol=\"#000000\""
 				     " tbcol=\"#ffffff\" bgcol=\"#ffffff\" pictdisp=\"true\" namedisp=\"true\""
 				     " framedisp=\"true\"/>\n");
-		n++;
 	}
 	at = put(x, at, max, "</figure>\n</tad>\n");
 
@@ -2194,25 +2634,64 @@ LOCAL ER make_trash( CK *c, CONST TS_UUID *list, INT nlist, TS_UUID *p_u )
 	return er;
 }
 
-LOCAL void fix_hidden( CK *c )
+/*
+ * The objects given gathered into TRASH cabinets: as many in one as the
+ * volume lets an object link to (every one in a single cabinet when its
+ * version sets no limit), and as many cabinets as that takes. The first
+ * made is the one T_TSFSCK.trash names. Answers how many objects went
+ * into one; those past a cabinet that could not be made are left as
+ * they were, for the look after the repair to find.
+ */
+LOCAL ER trash_all( CK *c, CONST TS_UUID *list, INT nlist )
 {
 	TS_UUID	u;
-	INT	i, n = 0;
+	INT	per = ( c->lim.max_link > 0 ) ? (INT)c->lim.max_link : nlist, at, k, done = 0;
+	ER	er = E_OK;
+
+	if ( per <= 0 ) {
+		per = 1;
+	}
+	for ( at = 0; at < nlist; at += k ) {
+		k = ( nlist - at < per ) ? nlist - at : per;
+		er = make_trash(c, list + at, k, &u);
+		if ( er < E_OK ) {
+			break;
+		}
+		if ( !c->res->has_trash ) {
+			c->res->has_trash = TRUE;
+			c->res->trash = u;
+		}
+		done += k;
+	}
+	return ( done > 0 ) ? (ER)done : er;
+}
+
+LOCAL void fix_hidden( CK *c )
+{
+	TS_UUID	*list;
+	INT	i, n = 0, done;
 
 	for ( i = 0; i < c->nobj; i++ ) {
 		if ( c->obj[i].hidden ) n++;
 	}
-	if ( n == 0 || make_trash(c, NULL, 0, &u) < E_OK ) {
+	if ( n == 0 ) {
 		return;
 	}
-	c->res->has_trash = TRUE;
-	c->res->trash = u;
-	for ( i = 0, n = 0; i < c->nobj && n < CK_TRASH_MAX; i++ ) {
+	list = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * (SZ)n);
+	if ( list == NULL ) {
+		return;
+	}
+	for ( i = 0, n = 0; i < c->nobj; i++ ) {
+		if ( c->obj[i].hidden ) list[n++] = c->obj[i].u;
+	}
+	done = (INT)trash_all(c, list, n);
+	for ( i = 0, n = 0; i < c->nobj && n < done; i++ ) {
 		if ( c->obj[i].hidden ) {
 			mended(c, TSFSCK_K_HIDDEN, &c->obj[i].u, c->obj[i].blk, 0, 0, 1);
 			n++;
 		}
 	}
+	Kfree(list);
 }
 
 /* A run of the map put right, in a transaction of its own; `arg` says which kind is done now */
@@ -2494,5 +2973,77 @@ EXPORT ER ts_obj_check( ID bvol, UINT mode, T_TSFSCK *res, FP_TSFSCK fn, void *c
 	}
 	all_free(c);
 	Kfree(c);
+	return er;
+}
+
+/* ---------------------------------------------------------------- the conversion to version 5 */
+
+LOCAL UD ms_now( void )
+{
+	SYSTIM	t;
+
+	if ( tk_get_otm(&t) < E_OK ) {
+		return 0;
+	}
+	return ( (UD)(UW)t.hi << 32 ) | (UD)t.lo;
+}
+
+/*
+ * The conversion of a version 4 volume (docs/tessronos 7.3). Opening it
+ * with ts_obj_mount did steps 1 and 2 already as far as the block layer
+ * goes: a grow cut short finished, the log replayed, the orphans
+ * finished. Here the features are looked at (1), the whole volume is
+ * checked without a repair (3), and only a volume found clean is made
+ * of version 5 by the block layer (4 to 6). A check that finds anything
+ * -- an error recorded, orphans or a link table to make again that the
+ * opening did not finish -- leaves the volume as it was, not a block
+ * written.
+ */
+EXPORT ER ts_cnv_vol( ID bvol, UINT mode, T_TSFSCNV *res, FP_TSFSCK fn, void *ctx )
+{
+	T_TSFSBLK_SB	sb;
+	UD		t0 = ms_now();
+	ER		er;
+
+	if ( res == NULL ) {
+		return E_PAR;
+	}
+	knl_memset(res, 0, sizeof(*res));
+	er = ts_ref_vol_blk(bvol, &sb);
+	if ( er < E_OK ) {
+		res->state = TSFSCNV_S_FAILED;
+		res->er = er;
+		return er;
+	}
+	if ( ( sb.incompat & TSFSBLK_INCOMPAT_FMT5 ) != 0 || ( sb.incompat & ~TSFSBLK_INCOMPAT_XT2 ) != 0
+	  || sb.version != TSFSBLK_VERSION ) {
+		res->state = TSFSCNV_S_NOTV4;
+		return E_OK;
+	}
+
+	er = ts_obj_check(bvol, ( mode & ( TSFSCK_QUICK | TSFSCK_FULL ) ) | TSFSCK_ALONE, &res->ck, fn, ctx);
+	res->check_ms = ms_now() - t0;
+	if ( er < E_OK ) {
+		res->state = TSFSCNV_S_FAILED;
+		res->er = er;
+		res->total_ms = res->check_ms;
+		return er;
+	}
+	if ( res->ck.problems > 0 || ( sb.state & TSFSBLK_ST_ERROR ) != 0 ) {
+		res->state = TSFSCNV_S_DAMAGE;
+		res->total_ms = ms_now() - t0;
+		return E_OK;
+	}
+
+	er = ts_blk_convert(bvol);
+	res->er = er;
+	if ( er >= E_OK ) {
+		res->state = TSFSCNV_S_DONE;
+	} else {
+		/* a failure after the superblock was written (step 5) leaves a volume of version 5 */
+		res->state = ( ts_ref_vol_blk(bvol, &sb) >= E_OK && ( sb.incompat & TSFSBLK_INCOMPAT_FMT5 ) != 0 )
+			   ? TSFSCNV_S_DONE : TSFSCNV_S_FAILED;
+	}
+	res->total_ms = ms_now() - t0;
 	return er;
 }

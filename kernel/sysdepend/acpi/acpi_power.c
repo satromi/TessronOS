@@ -50,7 +50,6 @@
 #include "obj/obj.h"
 #include "acpi.h"
 
-#define PW_MAX		6
 #define PW_TEXT		512
 #define BAT_POLL_MS	30000
 
@@ -71,7 +70,16 @@ typedef struct {
 	UW	presses;
 } PWDEV;
 
-LOCAL PWDEV	pw[PW_MAX];
+/*
+ * The devices, as many as the namespace has: each allocated once, its
+ * place kept (the object layer holds it), in a table of n_pw that grows
+ * as they are found; the table before a larger one is kept, so that a
+ * notification read while the devices are found reads a whole one.
+ */
+LOCAL PWDEV	*pw0[1];
+LOCAL PWDEV	**pwt = pw0;
+LOCAL INT	n_pw = 0;
+#define pw(i)	( *pwt[(i)] )
 LOCAL ID	pw_mtx = 0, pw_flg = 0;
 
 #define LOCK()		tk_loc_mtx(pw_mtx, TMO_FEVR)
@@ -263,13 +271,24 @@ LOCAL void add( INT kind, void *dev, CONST char *name )
 	INT	i;
 	ER	er;
 
-	for ( i = 0; i < PW_MAX; i++ ) {
-		if ( !pw[i].used ) {
-			p = &pw[i];
-			break;
+	{
+		/* one more: the table one larger, the one before kept */
+		PWDEV	**t = (PWDEV **)Kmalloc(sizeof(PWDEV *) * (SZ)( n_pw + 1 ));
+
+		p = (PWDEV *)Kcalloc(1, sizeof(PWDEV));
+		if ( t == NULL || p == NULL ) {
+			if ( t != NULL ) Kfree(t);
+			if ( p != NULL ) Kfree(p);
+			tm_printf((UB *)"acpi: no memory for %s\n", name);
+			return;
 		}
+		for ( i = 0; i < n_pw; i++ ) t[i] = pwt[i];
+		t[n_pw] = p;
+		__sync_synchronize();
+		pwt = t;
+		__sync_synchronize();
+		n_pw++;
 	}
-	if ( p == NULL ) return;
 	knl_memset(p, 0, sizeof(*p));
 	p->kind = kind;
 	p->dev = dev;
@@ -449,22 +468,22 @@ EXPORT void knl_acpi_os_notify( void *dev, unsigned int value )
 	if ( ba_notified(dev, value) ) {
 		return;
 	}
-	for ( i = 0; i < PW_MAX; i++ ) {
-		if ( pw[i].used && pw[i].dev == dev && pw[i].kind == K_LID ) {
+	for ( i = 0; i < n_pw; i++ ) {
+		if ( pw(i).used && pw(i).dev == dev && pw(i).kind == K_LID ) {
 			unsigned long long	v = 1;
 
 			(void)knl_acpica_int(dev, "_LID", &v);
 			knl_pm_lid(v != 0);
 		}
-		if ( pw[i].used && pw[i].dev == dev && pw[i].kind != K_BUTTON ) {
-			tell(&pw[i]);
-			if ( pw[i].kind == K_BATTERY ) battery = TRUE;
+		if ( pw(i).used && pw(i).dev == dev && pw(i).kind != K_BUTTON ) {
+			tell(&pw(i));
+			if ( pw(i).kind == K_BATTERY ) battery = TRUE;
 		}
 	}
 	/* a battery that starts or stops discharging: the adapter may have been plugged without a word of its own */
 	if ( battery && value == 0x80 ) {
-		for ( i = 0; i < PW_MAX; i++ ) {
-			if ( pw[i].used && pw[i].kind == K_AC ) tell(&pw[i]);
+		for ( i = 0; i < n_pw; i++ ) {
+			if ( pw(i).used && pw(i).kind == K_AC ) tell(&pw(i));
 		}
 	}
 	/* the batteries read again by their task: the adapter's change starts or stops their charging */
@@ -500,10 +519,10 @@ EXPORT BOOL knl_acpi_power_pressed( BOOL array )
 	}
 	pw_last_at = now | 1;
 	pw_last_array = array;
-	for ( i = 0; i < PW_MAX; i++ ) {
-		if ( pw[i].used && pw[i].kind == K_BUTTON ) {
-			pw[i].presses++;
-			tell(&pw[i]);
+	for ( i = 0; i < n_pw; i++ ) {
+		if ( pw(i).used && pw(i).kind == K_BUTTON ) {
+			pw(i).presses++;
+			tell(&pw(i));
 		}
 	}
 	return TRUE;
@@ -518,8 +537,8 @@ LOCAL void pw_task( INT stacd, void *exinf )
 	(void)exinf;
 	for ( ;; ) {
 		(void)tk_wai_flg(pw_flg, 1, TWF_ORW | TWF_BITCLR, &ptn, BAT_POLL_MS);
-		for ( i = 0; i < PW_MAX; i++ ) {
-			if ( pw[i].used && pw[i].kind == K_BATTERY ) tell(&pw[i]);
+		for ( i = 0; i < n_pw; i++ ) {
+			if ( pw(i).used && pw(i).kind == K_BATTERY ) tell(&pw(i));
 		}
 	}
 }
@@ -549,10 +568,23 @@ EXPORT void knl_acpi_power_start( void )
 	cf.iflgptn = 0;
 	pw_flg = tk_cre_flg(&cf);
 	if ( pw_mtx <= 0 || pw_flg <= 0 ) return;
-	for ( i = 0; i < 2 && ( d = knl_acpica_device("PNP0C0A", i) ) != NULL; i++ ) {
-		add(K_BATTERY, d, ( i == 0 ) ? "battery0" : "battery1");
+	/* every battery and adapter the namespace has */
+	for ( i = 0; ( d = knl_acpica_device("PNP0C0A", i) ) != NULL; i++ ) {
+		UB	nm[24];
+
+		(void)knl_oj_put_num(nm, knl_oj_put(nm, 0, sizeof(nm), "battery"), sizeof(nm), (D)i);
+		add(K_BATTERY, d, (CONST char *)nm);
 	}
-	if ( ( d = knl_acpica_device("ACPI0003", 0) ) != NULL ) add(K_AC, d, "acpower");
+	for ( i = 0; ( d = knl_acpica_device("ACPI0003", i) ) != NULL; i++ ) {
+		UB	nm[24];
+
+		if ( i == 0 ) {
+			add(K_AC, d, "acpower");
+		} else {
+			(void)knl_oj_put_num(nm, knl_oj_put(nm, 0, sizeof(nm), "acpower"), sizeof(nm), (D)i);
+			add(K_AC, d, (CONST char *)nm);
+		}
+	}
 	if ( ( d = knl_acpica_device("PNP0C0D", 0) ) != NULL ) add(K_LID, d, "lid");
 	if ( ( d = knl_acpica_device("PNP0C0C", 0) ) != NULL
 	  || ( d = knl_acpica_device("MSHW0040", 0) ) != NULL || ( d = knl_acpica_device("MSHW0028", 0) ) != NULL ) {

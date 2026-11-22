@@ -70,19 +70,20 @@
 #define B_YES		103
 
 #define ROWS		20		/* words a page of the list shows */
-#define ROW_MAX		72		/* bytes of a row */
 
 LOCAL UI	ui;
 LOCAL BOOL	closing;
 
-LOCAL UB	dic[UD_TEXT_MAX];	/* the dictionary's text */
-LOCAL INT	dlen;
-LOCAL UB	work[UD_TEXT_MAX];	/* a copy changed before it is kept */
+/* The dictionary's text and a copy changed before it is kept: both as long as the words need */
+LOCAL UB	*dic;
+LOCAL INT	dlen, dcap;
+LOCAL UB	*work;
+LOCAL INT	wcap;
 
 /* The page of the list shown: the words on it, as they were when it was made */
 typedef struct {
-	UB	yomi[UD_YOMI_MAX];
-	UB	word[UD_WORD_MAX];
+	char	*yomi;
+	char	*word;
 	INT	pos;
 } ROW;
 
@@ -90,11 +91,60 @@ LOCAL ROW	row[ROWS];
 LOCAL INT	nrow;
 LOCAL INT	first;			/* the first word of the page, among those found */
 LOCAL INT	nfound;
-LOCAL char	key[UD_YOMI_MAX * 2];	/* what is looked for; "" all */
+LOCAL char	key_none[1];
+LOCAL char	*key = key_none;	/* what is looked for; "" all */
 
 /* The word picked in the list, which 変更 and 削除 act on */
 LOCAL BOOL	picked;
 LOCAL ROW	pick;
+
+LOCAL void warn( CONST char *a, CONST char *b );
+
+/* A string made by printf's rules, in memory of its own (free it); NULL without memory */
+LOCAL char *fmt_new( CONST char *fmt, ... )
+{
+	va_list	ap;
+	char	*s;
+	int	n;
+
+	va_start(ap, fmt);
+	n = vsnprintf(NULL, 0, fmt, ap);
+	va_end(ap);
+	if ( n < 0 || ( s = (char *)malloc((size_t)n + 1) ) == NULL ) return NULL;
+	va_start(ap, fmt);
+	vsnprintf(s, (size_t)n + 1, fmt, ap);
+	va_end(ap);
+	return s;
+}
+
+/* n bytes of s as a string of its own; NULL without memory */
+LOCAL char *dup_n( CONST UB *s, INT n )
+{
+	char	*t = (char *)malloc((size_t)n + 1);
+
+	if ( t != NULL ) {
+		memcpy(t, s, (size_t)n);
+		t[n] = 0;
+	}
+	return t;
+}
+
+LOCAL void row_set( ROW *r, CONST UB *y, INT ny, CONST UB *w, INT nw, INT pos )
+{
+	free(r->yomi);
+	free(r->word);
+	r->yomi = dup_n(y, ny);
+	r->word = dup_n(w, nw);
+	r->pos = pos;
+}
+
+LOCAL void key_set( CONST char *s )
+{
+	char	*t = dup_n((CONST UB *)s, (INT)strlen(s));
+
+	if ( key != key_none ) free(key);
+	key = ( t != NULL ) ? t : key_none;
+}
 
 /*
  * The dictionary of whoever runs this: a person logged in has their own,
@@ -140,20 +190,47 @@ LOCAL ER dic_uuid( TS_UUID *u )
 
 /* ---------------------------------------------------------------- the dictionary object */
 
+/* The size of record 1 of an object: the words in it */
+LOCAL SZ rec1_size( ID k )
+{
+	T_OBREC	r[8];
+	INT	cnt = 0, i;
+	SZ	size = 0;
+
+	if ( ob_lst_rec(k, r, 8, &cnt) >= E_OK ) {
+		for ( i = 0; i < cnt && i < 8; i++ ) {
+			if ( r[i].recno == 1 ) size = (SZ)r[i].size;
+		}
+	}
+	return size;
+}
+
 LOCAL ER dic_read( void )
 {
 	TS_UUID	u;
 	ID	k;
-	SZ	asz = 0;
-	ER	er;
+	SZ	asz = 0, size;
+	UB	*b;
+	ER	er = E_OK;
 
 	dlen = 0;
 	if ( dic_uuid(&u) < E_OK ) return E_SYS;
 	k = ob_opn_obj(&u, OB_OP_R);
 	if ( k < E_OK ) return (ER)k;
-	er = ob_rea_rec(k, 1, 0, dic, sizeof(dic), &asz);
+	size = rec1_size(k);
+	b = (UB *)malloc((size_t)size + 1);
+	if ( b == NULL ) {
+		ob_cls_obj(k);
+		return E_NOMEM;
+	}
+	if ( size > 0 ) {
+		er = ob_rea_rec(k, 1, 0, b, size, &asz);
+	}
 	ob_cls_obj(k);
-	if ( er >= E_OK ) dlen = (INT)( ( asz > (SZ)sizeof(dic) ) ? (SZ)sizeof(dic) : asz );
+	free(dic);
+	dic = b;
+	dcap = (INT)size + 1;
+	if ( er >= E_OK ) dlen = (INT)( ( asz > size ) ? size : asz );
 	return ( er == E_NOEXS ) ? E_OK : er;		/* no record yet: no words */
 }
 
@@ -162,27 +239,52 @@ LOCAL ER dic_keep( INT len )
 {
 	TS_UUID	u;
 	ID	k;
-	SZ	asz = 0;
+	UB	*nd = NULL;
 	ER	er;
 
 	if ( dic_uuid(&u) < E_OK ) return E_SYS;
+	if ( len + 1 > dcap && ( nd = (UB *)malloc((size_t)len + 1 + 4096) ) == NULL ) return E_NOMEM;
 	k = ob_opn_obj(&u, OB_OP_R | OB_OP_WRITE);
-	if ( k < E_OK ) return (ER)k;
+	if ( k < E_OK ) {
+		free(nd);
+		return (ER)k;
+	}
 	/* replaced in one change: a cut in the power leaves the old record or the new one */
 	er = ob_rpl_rec(k, 1, work, (SZ)len);
-	(void)asz;
 	ob_cls_obj(k);
 	if ( er >= E_OK ) {
+		if ( nd != NULL ) {
+			free(dic);
+			dic = nd;
+			dcap = len + 1 + 4096;
+			nd = NULL;
+		}
 		memcpy(dic, work, (size_t)len);
 		dlen = len;
 	}
+	free(nd);
 	return er;
 }
 
-LOCAL void to_work( INT *p_len )
+/* The dictionary copied to work, with room for extra bytes more; FALSE, said, without memory */
+LOCAL BOOL to_work( INT *p_len, INT extra )
 {
+	INT	need = dlen + extra + 1;
+
+	if ( need < dlen || need > wcap ) {
+		UB	*nw = ( need > dlen ) ? (UB *)malloc((size_t)need + 1024) : NULL;
+
+		if ( nw == NULL ) {
+			warn("メモリが足りません。", NULL);
+			return FALSE;
+		}
+		free(work);
+		work = nw;
+		wcap = need + 1024;
+	}
 	memcpy(work, dic, (size_t)dlen);
 	*p_len = dlen;
+	return TRUE;
 }
 
 /* ---------------------------------------------------------------- words to the person */
@@ -190,13 +292,19 @@ LOCAL void to_work( INT *p_len )
 /* A line to the console, which the tests read */
 LOCAL void say( CONST char *fmt, ... )
 {
-	char	s[UD_LINE_MAX * 2];
 	va_list	ap;
+	char	*s;
+	int	n;
 
 	va_start(ap, fmt);
-	vsnprintf(s, sizeof(s), fmt, ap);
+	n = vsnprintf(NULL, 0, fmt, ap);
+	va_end(ap);
+	if ( n < 0 || ( s = (char *)malloc((size_t)n + 1) ) == NULL ) return;
+	va_start(ap, fmt);
+	vsnprintf(s, (size_t)n + 1, fmt, ap);
 	va_end(ap);
 	tm_putstring((CONST UB *)s);
+	free(s);
 }
 
 LOCAL void status( CONST char *s )
@@ -209,22 +317,6 @@ LOCAL void warn( CONST char *a, CONST char *b )
 	CONST char	*l[3] = { a, ( b != NULL ) ? b : " ", " " };
 
 	(void)ui_ask(&ui, PN_WARN, l, 3);
-}
-
-/* The bytes of s that fit in max with a 0 after them, cut at a letter's edge */
-LOCAL INT fit( CONST UB *s, INT n, INT max )
-{
-	if ( n < max ) return n;
-	n = max - 1;
-	while ( n > 0 && ( s[n] & 0xC0 ) == 0x80 ) n--;
-	return n;
-}
-
-LOCAL void copy_to( UB *to, INT max, CONST UB *s, INT n )
-{
-	n = fit(s, n, max);
-	memcpy(to, s, (size_t)n);
-	to[n] = 0;
 }
 
 /* ---------------------------------------------------------------- the parts of speech */
@@ -269,13 +361,18 @@ LOCAL INT pos_chosen( void )
 
 LOCAL void list_show( void )
 {
-	static char	text[ROWS][ROW_MAX + 8];
+	char		*text[ROWS];
 	CONST char	*nm[ROWS];
 	char		s[96];
 	UDENT		e;
-	INT		at = 0, n = 0, total = 0;
+	INT		at = 0, n = 0, total = 0, i;
 	INT		nk = (INT)strlen(key);
 
+	for ( i = 0; i < nrow; i++ ) {
+		free(row[i].yomi);
+		free(row[i].word);
+		row[i].yomi = row[i].word = NULL;
+	}
 	nrow = 0;
 	while ( ud_next(dic, dlen, &at, &e) ) {
 		total++;
@@ -283,23 +380,19 @@ LOCAL void list_show( void )
 		if ( n >= first && nrow < ROWS ) {
 			ROW		*r = &row[nrow];
 			CONST char	*pn = ud_pos_name(e.pos);
-			INT		k;
 
-			copy_to(r->yomi, sizeof(r->yomi), e.yomi, e.nyomi);
-			copy_to(r->word, sizeof(r->word), e.word, e.nword);
-			r->pos = e.pos;
-			/* よみ　単語　〔品詞〕, cut to what a row holds */
-			snprintf(s, sizeof(s), "%s　%s", (char *)r->yomi, (char *)r->word);
-			k = fit((CONST UB *)s, (INT)strlen(s), ROW_MAX - 24);
-			memcpy(text[nrow], s, (size_t)k);
-			snprintf(text[nrow] + k, ROW_MAX + 8 - k, "　〔%s〕", pn != NULL ? pn : "");
-			nm[nrow] = text[nrow];
+			row_set(r, e.yomi, e.nyomi, e.word, e.nword, e.pos);
+			/* よみ　単語　〔品詞〕: whole, the list clips what its width does not show */
+			text[nrow] = ( r->yomi != NULL && r->word != NULL )
+				? fmt_new("%s　%s　〔%s〕", r->yomi, r->word, pn != NULL ? pn : "") : NULL;
+			nm[nrow] = ( text[nrow] != NULL ) ? text[nrow] : "";
 			nrow++;
 		}
 		n++;
 	}
 	nfound = n;
 	ui_names(&ui, P_LIST, nm, nrow);
+	for ( i = 0; i < nrow; i++ ) free(text[i]);
 	ui_set_value(&ui, P_LIST, 0);
 	ui_off(&ui, B_PREV, first == 0);
 	ui_off(&ui, B_NEXT, first + nrow >= nfound);
@@ -337,10 +430,15 @@ LOCAL void list_picked( void )
 {
 	INT	k = ui_value(&ui, P_LIST) - 1;
 
-	if ( k < 0 || k >= nrow ) {
+	if ( k < 0 || k >= nrow || row[k].yomi == NULL || row[k].word == NULL ) {
 		return;
 	}
-	pick = row[k];
+	row_set(&pick, (CONST UB *)row[k].yomi, (INT)strlen(row[k].yomi),
+		(CONST UB *)row[k].word, (INT)strlen(row[k].word), row[k].pos);
+	if ( pick.yomi == NULL || pick.word == NULL ) {
+		picked = FALSE;
+		return;
+	}
 	picked = TRUE;
 	ui_set_text(&ui, P_YOMI, (CONST char *)pick.yomi);
 	ui_set_text(&ui, P_WORD, (CONST char *)pick.word);
@@ -359,37 +457,42 @@ LOCAL void clear( void )
 
 /* ---------------------------------------------------------------- 登録, 変更, 削除 */
 
-/* The reading and the word in the boxes; FALSE, said why, when they cannot be a word */
-LOCAL BOOL boxes( UB *yomi, UB *word )
+/*
+ * The reading and the word in the boxes, each in memory of its own (free
+ * both); FALSE, said why, when they cannot be a word
+ */
+LOCAL BOOL boxes( UB **p_y, UB **p_w )
 {
-	char	y[UD_YOMI_MAX * 2], w[UD_WORD_MAX + 8];
+	char	*y = ui_text_all(&ui, P_YOMI), *w = ui_text_all(&ui, P_WORD);
+	UB	*yo = NULL;
 	INT	ny, nw;
 
-	ny = ui_text(&ui, P_YOMI, y, sizeof(y));
-	nw = ui_text(&ui, P_WORD, w, sizeof(w));
-	if ( ny < 0 ) ny = 0;
-	if ( nw < 0 ) nw = 0;
-	y[( ny < (INT)sizeof(y) ) ? ny : (INT)sizeof(y) - 1] = 0;
-	w[( nw < (INT)sizeof(w) ) ? nw : (INT)sizeof(w) - 1] = 0;
+	if ( y == NULL || w == NULL ) {
+		free(y);
+		free(w);
+		warn("メモリが足りません。", NULL);
+		return FALSE;
+	}
 	ny = (INT)strlen(y);
 	nw = (INT)strlen(w);
 	if ( ny == 0 ) {
 		warn("読みを入れてください。", NULL);
-		return FALSE;
-	}
-	if ( nw == 0 ) {
+	} else if ( nw == 0 ) {
 		warn("単語を入れてください。", NULL);
+	} else if ( ( yo = (UB *)malloc((size_t)ny + 1) ) == NULL ) {
+		warn("メモリが足りません。", NULL);
+	} else if ( ud_yomi((CONST UB *)y, ny, yo, ny + 1) < 0 ) {
+		free(yo);
+		yo = NULL;
+		warn("読みに使えない文字（空白など）があります。", NULL);
+	}
+	free(y);
+	if ( yo == NULL ) {
+		free(w);
 		return FALSE;
 	}
-	if ( ud_yomi((CONST UB *)y, ny, yomi, UD_YOMI_MAX) < 0 ) {
-		warn("読みが長すぎるか、読みに使えない文字（空白など）があります。", NULL);
-		return FALSE;
-	}
-	if ( nw >= UD_WORD_MAX ) {
-		warn("単語が長すぎます。", NULL);
-		return FALSE;
-	}
-	memcpy(word, w, (size_t)nw + 1);
+	*p_y = yo;
+	*p_w = (UB *)w;
 	return TRUE;
 }
 
@@ -412,85 +515,88 @@ LOCAL void keep_failed( ER er )
 	warn("ユーザ辞書に書き込めませんでした。", s);
 }
 
+/* The room a word takes in the text: its two parts, the name of a part of speech and the marks between */
+#define LINE_EXTRA	64
+
 LOCAL void word_put( void )
 {
-	UB	y[UD_YOMI_MAX], w[UD_WORD_MAX];
-	INT	pos = pos_chosen(), len;
+	UB	*y, *w;
+	INT	pos = pos_chosen(), len, ny, nw;
 	ER	er;
 
-	if ( !boxes(y, w) ) return;
-	to_work(&len);
-	if ( !put_ok(ud_put(work, &len, sizeof(work), y, (INT)strlen((char *)y), w,
-			    (INT)strlen((char *)w), pos)) ) {
-		return;
-	}
+	if ( !boxes(&y, &w) ) return;
+	ny = (INT)strlen((char *)y);
+	nw = (INT)strlen((char *)w);
+	if ( !to_work(&len, ny + nw + LINE_EXTRA) ) goto done;
+	if ( !put_ok(ud_put(work, &len, wcap, y, ny, w, nw, pos)) ) goto done;
 	er = dic_keep(len);
 	if ( er < E_OK ) {
 		keep_failed(er);
-		return;
+		goto done;
 	}
 	say("worddic: put %s %s %s\n", y, w, ud_pos_name(pos));
 	list_at(y, w);
-	pick.pos = pos;
-	memcpy(pick.yomi, y, sizeof(pick.yomi));
-	memcpy(pick.word, w, sizeof(pick.word));
-	picked = TRUE;
+	row_set(&pick, y, ny, w, nw, pos);
+	picked = ( pick.yomi != NULL && pick.word != NULL );
 	status("登録しました");
+done:
+	free(y);
+	free(w);
 }
 
 LOCAL void word_change( void )
 {
-	UB	y[UD_YOMI_MAX], w[UD_WORD_MAX];
-	INT	pos = pos_chosen(), len;
+	UB	*y, *w;
+	INT	pos = pos_chosen(), len, ny, nw;
 	ER	er;
 
 	if ( !picked ) {
 		warn("変更する単語を一覧で選んでください。", NULL);
 		return;
 	}
-	if ( !boxes(y, w) ) return;
-	to_work(&len);
-	(void)ud_del(work, &len, pick.yomi, (INT)strlen((char *)pick.yomi), pick.word,
-		     (INT)strlen((char *)pick.word));
-	if ( !put_ok(ud_put(work, &len, sizeof(work), y, (INT)strlen((char *)y), w,
-			    (INT)strlen((char *)w), pos)) ) {
-		return;
-	}
+	if ( !boxes(&y, &w) ) return;
+	ny = (INT)strlen((char *)y);
+	nw = (INT)strlen((char *)w);
+	if ( !to_work(&len, ny + nw + LINE_EXTRA) ) goto done;
+	(void)ud_del(work, &len, (CONST UB *)pick.yomi, (INT)strlen(pick.yomi), (CONST UB *)pick.word,
+		     (INT)strlen(pick.word));
+	if ( !put_ok(ud_put(work, &len, wcap, y, ny, w, nw, pos)) ) goto done;
 	er = dic_keep(len);
 	if ( er < E_OK ) {
 		keep_failed(er);
-		return;
+		goto done;
 	}
 	say("worddic: changed %s %s to %s %s %s\n", pick.yomi, pick.word, y, w, ud_pos_name(pos));
-	memcpy(pick.yomi, y, sizeof(pick.yomi));
-	memcpy(pick.word, w, sizeof(pick.word));
-	pick.pos = pos;
+	row_set(&pick, y, ny, w, nw, pos);
+	picked = ( pick.yomi != NULL && pick.word != NULL );
 	list_at(y, w);
 	status("変更しました");
+done:
+	free(y);
+	free(w);
 }
 
-LOCAL void word_delete( void )
+/* The word y/w taken out of the dictionary after asking */
+LOCAL void delete_word( CONST UB *y, CONST UB *w )
 {
-	UB		y[UD_YOMI_MAX], w[UD_WORD_MAX];
-	char		s[UD_YOMI_MAX + UD_WORD_MAX + 32];
+	char		*s = fmt_new("「%s」（%s）", (CONST char *)w, (CONST char *)y);
 	CONST char	*l[2];
 	INT		len;
 	ER		er;
 
-	if ( picked ) {
-		memcpy(y, pick.yomi, sizeof(y));
-		memcpy(w, pick.word, sizeof(w));
-	} else if ( !boxes(y, w) ) {
+	if ( s == NULL ) {
+		warn("メモリが足りません。", NULL);
 		return;
 	}
-	snprintf(s, sizeof(s), "「%s」（%s）", (char *)w, (char *)y);
 	l[0] = s;
 	l[1] = "をユーザ辞書から削除します。";
-	if ( ui_ask(&ui, PN_DELETE, l, 2) != B_YES ) {
+	er = ui_ask(&ui, PN_DELETE, l, 2);
+	free(s);
+	if ( er != B_YES ) {
 		return;
 	}
-	to_work(&len);
-	if ( ud_del(work, &len, y, (INT)strlen((char *)y), w, (INT)strlen((char *)w)) < E_OK ) {
+	if ( !to_work(&len, 0) ) return;
+	if ( ud_del(work, &len, y, (INT)strlen((CONST char *)y), w, (INT)strlen((CONST char *)w)) < E_OK ) {
 		warn("その単語は登録されていません。", NULL);
 		return;
 	}
@@ -506,17 +612,37 @@ LOCAL void word_delete( void )
 	status("削除しました");
 }
 
+LOCAL void word_delete( void )
+{
+	UB	*y, *w;
+
+	if ( picked ) {
+		y = (UB *)dup_n((CONST UB *)pick.yomi, (INT)strlen(pick.yomi));
+		w = (UB *)dup_n((CONST UB *)pick.word, (INT)strlen(pick.word));
+		if ( y == NULL || w == NULL ) {
+			free(y);
+			free(w);
+			warn("メモリが足りません。", NULL);
+			return;
+		}
+	} else if ( !boxes(&y, &w) ) {
+		return;
+	}
+	delete_word(y, w);
+	free(y);
+	free(w);
+}
+
 LOCAL void find( BOOL all )
 {
-	INT	n;
-
 	if ( all ) {
-		key[0] = 0;
+		key_set("");
 		ui_set_text(&ui, P_FIND, "");
 	} else {
-		n = ui_text(&ui, P_FIND, key, sizeof(key));
-		if ( n < 0 ) n = 0;
-		key[( n < (INT)sizeof(key) ) ? n : (INT)sizeof(key) - 1] = 0;
+		char	*t = ui_text_all(&ui, P_FIND);
+
+		key_set(( t != NULL ) ? t : "");
+		free(t);
 	}
 	first = 0;
 	list_show();
@@ -563,11 +689,16 @@ LOCAL INT tad_lines( CONST UB *s, INT n, UB *out, INT max )
 /* The words read in from bytes, put among those there are; how many, or below 0 */
 LOCAL INT take_in( CONST UB *in, INT n, INT *p_bad )
 {
-	INT	len, put;
+	INT	len, put, extra = n + 4096;
 	ER	er;
 
-	to_work(&len);
-	put = ud_import(work, &len, sizeof(work), in, n, p_bad);
+	/* a line takes a part of speech's name more than it had: room is made again, larger, until all fit */
+	for ( ;; ) {
+		if ( !to_work(&len, extra) ) return E_NOMEM;
+		put = ud_import(work, &len, wcap, in, n, p_bad);
+		if ( put != E_LIMIT || (long long)extra > 32LL * n + 65536 ) break;
+		extra *= 2;
+	}
 	if ( put == E_LIMIT ) {
 		warn("ユーザ辞書がいっぱいになりました。", "入りきった単語までを登録します。");
 		put = ud_count(work, len) - ud_count(dic, dlen);
@@ -603,7 +734,7 @@ LOCAL INT take_obj( CONST TS_UUID *u, INT *p_bad )
 			if ( r[i].recno == 0 && recno == 0 ) size = (SZ)r[i].size;
 		}
 	}
-	if ( size <= 0 || size > (SZ)UD_TEXT_MAX * 2 ) {
+	if ( size <= 0 || size > (SZ)0x3FFFFFFF ) {		/* lengths are INT */
 		ob_cls_obj(k);
 		return 0;
 	}
@@ -635,7 +766,7 @@ LOCAL void taken( INT put, INT bad )
 	char	s[96];
 
 	first = 0;
-	key[0] = 0;
+	key_set("");
 	list_show();
 	snprintf(s, sizeof(s), "%d 語を読み込みました", put > 0 ? put : 0);
 	if ( bad > 0 ) {
@@ -695,7 +826,7 @@ LOCAL void tray_in( void )
 
 	for ( i = 0; i < TR_REC_MAX; i++ ) {
 		if ( tr_ref_rec(TR_HAND, i, &inf) < E_OK ) break;
-		if ( inf.size <= 0 || inf.size > (SZ)UD_TEXT_MAX * 4 ) continue;
+		if ( inf.size <= 0 || inf.size > (SZ)0x3FFFFFFF ) continue;	/* lengths are INT */
 		if ( inf.kind != TR_TAD && inf.kind != TR_REC ) continue;
 		b = malloc((size_t)inf.size + 8);
 		if ( b == NULL ) break;
@@ -815,19 +946,19 @@ LOCAL void tray_out( void )
 LOCAL void handed( void )
 {
 	T_TRINF	inf;
-	UB	b[UD_WORD_MAX * 2];
+	UB	*b;
 	SZ	asz = 0;
-	INT	n;
 
 	if ( tr_ref_rec(TR_PUT, 0, &inf) < E_OK || inf.kind != TR_REC || inf.sub != UD_TRAY_SUB ) {
 		return;
 	}
-	if ( inf.size > 0 && inf.size < (SZ)sizeof(b)
-	  && tr_rea_rec(TR_PUT, 0, b, inf.size, &asz) >= E_OK ) {
-		n = fit(b, (INT)asz, UD_WORD_MAX);
-		b[n] = 0;
-		ui_set_text(&ui, P_WORD, (CONST char *)b);
-		say("worddic: handed %s\n", b);
+	if ( inf.size > 0 && inf.size < (SZ)0x3FFFFFFF && ( b = (UB *)malloc((size_t)inf.size + 1) ) != NULL ) {
+		if ( tr_rea_rec(TR_PUT, 0, b, inf.size, &asz) >= E_OK ) {
+			b[( asz < inf.size ) ? asz : inf.size] = 0;
+			ui_set_text(&ui, P_WORD, (CONST char *)b);
+			say("worddic: handed %s\n", b);
+		}
+		free(b);
 	}
 	(void)tr_set_dat(NULL, 0);
 }

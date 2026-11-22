@@ -836,10 +836,12 @@ LOCAL ER cp_resources( CPMAP *m, INT me )
 	if ( key < E_OK ) {
 		return (ER)key;
 	}
-	er = ob_lst_res(key, NULL, 0, &cnt);
+	er = ob_lst_res(key, NULL, 0, &cnt);		/* the room all the names take */
 	if ( er >= E_OK && cnt > 0 ) {
-		names = (UB *)Kmalloc((SZ)cnt * OB_RES_NAME);
-		er = ( names == NULL ) ? E_NOMEM : ob_lst_res(key, names, (SZ)cnt * OB_RES_NAME, &cnt);
+		SZ	room = ( er > 0 ) ? (SZ)er : (SZ)cnt * OB_RES_NAME;
+
+		names = (UB *)Kmalloc(room);
+		er = ( names == NULL ) ? E_NOMEM : ob_lst_res(key, names, room, &cnt);
 	}
 	ob_cls_obj(key);
 	if ( er == E_NOSPT ) {

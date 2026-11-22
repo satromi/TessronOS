@@ -44,6 +44,7 @@
 #include <ts/obatr.h>
 #include <ts/btbk.h>
 #include <ts/vobjsz.h>
+#include <ts/ui.h>
 
 #define LINK_GROW	16
 #define OBJ_GROW	32
@@ -89,6 +90,8 @@ LOCAL INT find_obj( ARCJOB *j, const TS_UUID *u )
 	return -1;
 }
 
+LOCAL char	arc_noname[1];		/* the name of one found without one, or without memory for it */
+
 LOCAL INT add_obj( ARCJOB *j, const TS_UUID *u )
 {
 	if ( j->nobj >= j->maxobj ) {
@@ -101,6 +104,7 @@ LOCAL INT add_obj( ARCJOB *j, const TS_UUID *u )
 	}
 	memset(&j->obj[j->nobj], 0, sizeof(ARCOBJ));
 	j->obj[j->nobj].uuid = *u;
+	j->obj[j->nobj].name = arc_noname;	/* until its metadata is read */
 	return j->nobj++;
 }
 
@@ -162,6 +166,39 @@ LOCAL UINT time_of( const T_JSON *root, const char *key, UINT none )
 	return bpk_iso_stime((const char *)t);
 }
 
+/* A name given to an object found: kept whole; "" when there is none or no memory */
+LOCAL void name_set( ARCOBJ *o, char *nm )
+{
+	if ( nm == NULL ) return;
+	if ( o->name != arc_noname ) free(o->name);
+	o->name = nm;
+}
+
+LOCAL UB *str_dup( const char *s )
+{
+	size_t	n = strlen(s);
+	UB	*d = (UB *)malloc(n + 1);
+
+	if ( d != NULL ) memcpy(d, s, n + 1);
+	return d;
+}
+
+/* The metadata's "name", unescaped, whole (malloc); NULL for none */
+LOCAL char *name_of_json( const T_JSON *root )
+{
+	T_JSON	v;
+	UB	*b;
+
+	if ( js_get(root, "name", &v) < E_OK || js_type(&v) != JS_STRING ) return NULL;
+	b = (UB *)malloc((size_t)v.len + 1);		/* unescaped, a string is never longer than its text */
+	if ( b == NULL ) return NULL;
+	if ( js_str(&v, b, v.len + 1) < 0 || b[0] == 0 ) {
+		free(b);
+		return NULL;
+	}
+	return (char *)b;
+}
+
 /* What the metadata says of an object: its name, programs, window, times, protection */
 LOCAL void read_meta( ARCOBJ *o, const UB *meta, SZ size, const char *refname )
 {
@@ -170,15 +207,17 @@ LOCAL void read_meta( ARCOBJ *o, const UB *meta, SZ size, const char *refname )
 	INT	n, i;
 	UB	col[16];
 
-	if ( refname != NULL ) {
-		strncpy(o->name, refname, sizeof(o->name) - 1);
-	} else {
-		(void)ob_ref_nam(&o->uuid, (UB *)o->name, (SZ)sizeof(o->name), NULL);	/* at a whole letter */
-	}
 	o->ftype = BPK_F_FILE;
 	o->ltime = NO_TIME;
-	if ( meta == NULL || js_parse(meta, (INT)size, &root) < E_OK ) return;
-	(void)js_get_str(&root, "name", (UB *)o->name, sizeof(o->name));
+	if ( meta != NULL && js_parse(meta, (INT)size, &root) >= E_OK ) {
+		name_set(o, name_of_json(&root));		/* the metadata's name, whole */
+	} else {
+		meta = NULL;
+	}
+	if ( o->name == arc_noname ) {
+		name_set(o, ( refname != NULL ) ? (char *)str_dup(refname) : (char *)ui_obj_name(&o->uuid));
+	}
+	if ( meta == NULL ) return;
 	if ( js_get(&root, "applist", &al) >= E_OK ) {
 		for ( it.s = NULL; js_next(&al, &it); ) {
 			if ( key_of(meta, it.s, &k, &n) ) appl_add(o, k, n, js_get_bool(&it, "defaultOpen", FALSE));
@@ -720,10 +759,12 @@ EXPORT ER arc_pack( ARCJOB *j, INT method, const ARCLOOK *look )
 	for ( i = 0; i < j->nobj && er >= E_OK; i++ ) {
 		er = object_recs(j, i, &s[i]);
 		if ( er < E_OK ) {
-			char	m[ARC_NAME_MAX + 32];
+			size_t	ml = strlen(j->obj[i].name) + 32;
+			char	*m = (char *)malloc(ml);
 
-			snprintf(m, sizeof(m), "%s を読めません", j->obj[i].name);
-			seterr(j, m, er);
+			if ( m != NULL ) snprintf(m, ml, "%s を読めません", j->obj[i].name);
+			seterr(j, ( m != NULL ) ? m : "実身を読めません", er);
+			free(m);
 			break;
 		}
 		lhead_of(&j->obj[i], i, &f[i].head);
@@ -782,6 +823,7 @@ EXPORT void arc_free( ARCJOB *j )
 	for ( i = 0; i < j->nobj; i++ ) {
 		free(j->obj[i].target);
 		free(j->obj[i].latr);
+		if ( j->obj[i].name != arc_noname ) free(j->obj[i].name);
 	}
 	free(j->obj);
 	j->obj = NULL;

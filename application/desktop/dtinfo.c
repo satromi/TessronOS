@@ -16,7 +16,7 @@
  *	for each object, started on the link 管理情報 was chosen on: the
  *	link is its start-up argument (openArg "link": the object, the
  *	object whose record holds the link, the link's vobjid). Several can
- *	be open, each of its own object, IF_WIN_MAX at most as before; asked
+ *	be open, each of its own object, as many as the person opens; asked
  *	again for an object whose 管理情報 is open, its window is brought to
  *	the front with the keys, and while its process is still being
  *	started nothing more is started.
@@ -42,7 +42,6 @@
 #include <ts/dtreq.h>
 #include "desktop.h"
 
-#define IF_WIN_MAX	8		/* 管理情報 open at once */
 #define IF_START_MS	30000		/* a start that has not shown a window by then is forgotten */
 
 /* What a place of the table is */
@@ -57,7 +56,9 @@
  * (dt_info_started), with __atomic as dtprog.c's opening does; the
  * desktop's task alone frees a place again.
  */
-typedef struct {
+typedef struct infoproc {
+	struct infoproc	*next;		/* the places are a list that only grows, new ones at its head */
+	INT	slot;			/* its number, from 1: what the start is told by */
 	UINT	state;
 	TS_UUID	proc;			/* the process, once IS_STARTED */
 	UW	asked;			/* when it was started, in ms */
@@ -67,7 +68,8 @@ typedef struct {
 	BOOL	parent_sealed;
 } INFOPROC;
 
-LOCAL INFOPROC	info_tab[IF_WIN_MAX];
+LOCAL INFOPROC	*info_head;
+LOCAL INT	info_slots;
 
 LOCAL UW now_ms( void )
 {
@@ -81,10 +83,13 @@ EXPORT void dt_info_started( INT slot, ER er, CONST TS_UUID *proc )
 {
 	INFOPROC	*e;
 
-	if ( slot < 1 || slot > IF_WIN_MAX ) {
+	if ( slot < 1 ) {
 		return;
 	}
-	e = &info_tab[slot - 1];
+	for ( e = info_head; e != NULL && e->slot != slot; e = e->next ) ;
+	if ( e == NULL ) {
+		return;
+	}
 	if ( er >= E_OK && proc != NULL ) {
 		e->proc = *proc;
 		__atomic_store_n(&e->state, IS_STARTED, __ATOMIC_RELEASE);
@@ -96,19 +101,20 @@ EXPORT void dt_info_started( INT slot, ER er, CONST TS_UUID *proc )
 /* The window the process of place e shows, 0 none yet */
 LOCAL INT window_of( CONST INFOPROC *e )
 {
-	INT	wids[64], n, i;
+	INT	*wids, n, i, wid = 0;
 	ID	pid = knl_prc_of_uuid(&e->proc);
 
 	if ( pid <= 0 ) {
 		return 0;
 	}
-	n = wm_list(wids, 64);
-	for ( i = 0; i < n && i < 64; i++ ) {
+	n = dt_wins(&wids);		/* every window, however many are open */
+	for ( i = 0; i < n && wid == 0; i++ ) {
 		if ( wm_obj_maker(wids[i]) == pid ) {
-			return wids[i];
+			wid = wids[i];
 		}
 	}
-	return 0;
+	if ( wids != NULL ) Kfree(wids);
+	return wid;
 }
 
 /* Whether place e still stands for a 管理情報 open or being started; freed when not */
@@ -137,11 +143,9 @@ LOCAL BOOL stands( INFOPROC *e )
 /* The place of the process that asked from, standing for target; NULL none */
 LOCAL INFOPROC *asker( ID from, CONST TS_UUID *target )
 {
-	INT	i;
+	INFOPROC	*e;
 
-	for ( i = 0; i < IF_WIN_MAX; i++ ) {
-		INFOPROC	*e = &info_tab[i];
-
+	for ( e = info_head; e != NULL; e = e->next ) {
 		if ( __atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == IS_STARTED && stands(e)
 		  && from > 0 && knl_prc_of_uuid(&e->proc) == from
 		  && ts_uuid_cmp(&e->link.target, target) == 0 ) {
@@ -156,18 +160,16 @@ EXPORT void dt_real_info( DTWIN *d, CONST T_VOBJ *v )
 	CONST DTPROG	*p;
 	INFOPROC	*e = NULL;
 	TS_UUID		pu;
-	INT		i, n = 0, wid;
+	INFOPROC	*t;
+	INT		wid;
 	ER		er;
 
 	/* the object's 管理情報 open already: brought to the front */
-	for ( i = 0; i < IF_WIN_MAX; i++ ) {
-		INFOPROC	*t = &info_tab[i];
-
+	for ( t = info_head; t != NULL; t = t->next ) {
 		if ( !stands(t) ) {
 			if ( e == NULL ) e = t;
 			continue;
 		}
-		n++;
 		if ( ts_uuid_cmp(&t->link.target, &v->target) == 0 ) {
 			if ( __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == IS_STARTED
 			  && ( wid = window_of(t) ) > 0 ) {
@@ -179,16 +181,30 @@ EXPORT void dt_real_info( DTWIN *d, CONST T_VOBJ *v )
 			return;			/* or being started: it comes up by itself */
 		}
 	}
-	if ( n >= IF_WIN_MAX || e == NULL ) {
-		dt_tell(d, "管理情報のウインドウをこれ以上開けません", NULL);
-		return;
-	}
 	if ( ts_str_to_uuid(SYSDEF_PROG_INFO, &pu) < E_OK || ( p = dt_prog_of(&pu) ) == NULL ) {
 		dt_tell(d, "管理情報のプログラムがありません", NULL);
 		return;
 	}
+	if ( e == NULL ) {
+		/* every place is in use: one more, kept for the next */
+		e = (INFOPROC *)Kcalloc(1, sizeof(INFOPROC));
+		if ( e == NULL ) {
+			dt_tell(d, "メモリが足りないため、管理情報を開けません", NULL);
+			return;
+		}
+		e->slot = ++info_slots;
+		e->next = info_head;
+		info_head = e;
+	}
 	tad_vobj_clear(&e->link);
-	knl_memset(e, 0, sizeof(*e));
+	{
+		INFOPROC	*nx = e->next;
+		INT		sl = e->slot;
+
+		knl_memset(e, 0, sizeof(*e));
+		e->next = nx;
+		e->slot = sl;
+	}
 	if ( tad_vobj_copy(&e->link, v) < E_OK ) {
 		dt_tell(d, "メモリが足りないため、管理情報を開けません", NULL);
 		return;
@@ -198,7 +214,7 @@ EXPORT void dt_real_info( DTWIN *d, CONST T_VOBJ *v )
 	e->parent_sealed = FALSE;
 	e->asked = now_ms();
 	__atomic_store_n(&e->state, IS_STARTING, __ATOMIC_RELEASE);
-	er = dt_prog_start_info(d, p, v, (INT)( e - info_tab ) + 1);
+	er = dt_prog_start_info(d, p, v, e->slot);
 	if ( er < E_OK ) {
 		__atomic_store_n(&e->state, IS_FREE, __ATOMIC_RELEASE);
 		tad_vobj_clear(&e->link);

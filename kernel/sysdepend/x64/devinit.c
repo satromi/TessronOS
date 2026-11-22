@@ -89,6 +89,7 @@ EXPORT INT knl_pcie_init( void )
 /* Before the kernel starts (no kernel objects available yet) */
 EXPORT ER knl_init_device( void )
 {
+	(void)knl_acpi_take();	/* the processors and interrupt controllers the MADT lists, as many as there are */
 	return E_OK;
 }
 

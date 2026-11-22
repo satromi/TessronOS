@@ -13,7 +13,7 @@
  *
  *	The system's package (.tpk, made by tools/mktpk.py --system) is an
  *	application's package of another kind: package.json says "kind":
- *	"system", the version (TS_VERSION, R1.410), the machine and the
+ *	"system", the version (TS_VERSION, R1.500), the machine and the
  *	processor it is for, and the objects it holds, each as the files of
  *	the TADjs form, and the files of the boot partition (/boot: the Pi's
  *	FAT partition, the PC's EFI system partition) as entries
@@ -116,6 +116,7 @@
 #include <ts/fs.h>
 #include <ts/tsfs.h>
 #include <ts/tsfsobj.h>
+#include <ts/tsfsck.h>
 #include <ts/tad.h>
 #include <ts/json.h>
 #include <ts/uuid.h>
@@ -144,7 +145,6 @@
 #define LOADER_MARK	"TessronOS loader"	/* a text TessronOS's UEFI loader holds */
 #define SU_MAN_REC	1		/* the record of the system box that lists the system's objects */
 #define SU_ENAME	64		/* an entry's name: the package's, or a resource's of the volume */
-#define SU_NBSRC	8		/* boot files taken from the tree at most */
 #define SU_ROOM_SLACK	( 16ULL * 1024 * 1024 )	/* a record replaced in one change is written beside the old */
 #define SU_OBJ_ROOM	8192		/* an object made: its head, metadata and index entry, at most */
 
@@ -210,6 +210,7 @@ LOCAL struct {
 	SUBOOT	*boot;			/* where each boot file goes, those the firmware reads first */
 	INT	total, done;
 	UB	ver[DT_VER_MAX];
+	UINT	tsfs;			/* the version of the format of the system volume the package is made for, 0 not said */
 	/* the source and the target: the package and the running system, or (dt_sysup_onto) volumes */
 	ID	svol;			/* the native store's volume the objects are read from, 0 the package */
 	ID	dvol;			/* the one they are put on, 0 the running system's objects */
@@ -217,8 +218,33 @@ LOCAL struct {
 	INT	bvd;
 	UB	*man;			/* the list of the system's objects written last, the session's */
 	SZ	mansz;
-	char	bsrc[SU_NBSRC][SU_PATH_MAX];	/* the boot files of the tree */
+	char	**bsrc;			/* the boot files of the tree, nbsrc of them, each whole (Kmalloc) */
+	INT	nbsrc;
 } su;
+
+/* The device of the system volume */
+LOCAL CONST char *sys_vol( void )
+{
+#ifdef CNF_OB_SYSVOL
+	return (CONST char *)CNF_OB_SYSVOL;
+#else
+	return "";
+#endif
+}
+
+/*
+ * Whether the package is made for a format of the system volume newer
+ * than the running one's: the update then asks for the volume to be
+ * converted at the next start (CONVREQ), and the person is told so
+ * before it begins. A package that says nothing of it is of the format
+ * the volume has.
+ */
+LOCAL BOOL su_convert( void )
+{
+	INT	f = knl_ob_cnv_form(sys_vol(), NULL);
+
+	return (BOOL)( su.tsfs > 0 && f > 0 && su.tsfs > (UINT)f );
+}
 
 /* The boot partition's root, and for the tests a cut in the power after so many renames */
 LOCAL char	su_root[SU_ROOT_MAX] = "/boot";
@@ -370,6 +396,7 @@ LOCAL ER ent_read( CONST SUENT *e, UD at, void *buf, SZ size )
 	if ( at + size > (UD)e->size ) return E_OBJ;
 	switch ( e->what ) {
 	case E_BOOT:
+		if ( e->off >= (UW)su.nbsrc || su.bsrc[e->off] == NULL ) return E_OBJ;
 		fd = fs_open(su.bsrc[e->off], O_RDONLY);
 		if ( fd < 0 ) return (ER)fd;
 		if ( fs_lseek(fd, (D)at, SEEK_SET_) != (D)at ) er = E_IO;
@@ -483,6 +510,14 @@ LOCAL void su_end( void )
 	if ( su.obj != NULL ) Kfree(su.obj);
 	if ( su.boot != NULL ) Kfree(su.boot);
 	if ( su.man != NULL ) Kfree(su.man);
+	if ( su.bsrc != NULL ) {
+		INT	i;
+
+		for ( i = 0; i < su.nbsrc; i++ ) {
+			if ( su.bsrc[i] != NULL ) Kfree(su.bsrc[i]);
+		}
+		Kfree(su.bsrc);
+	}
 	knl_memset(&su, 0, sizeof(su));
 }
 
@@ -502,8 +537,9 @@ LOCAL BOOL listed( CONST T_JSON *root, CONST char *list, CONST UB *what )
  * The package opened and its table and package.json read: E_OK when it
  * is a newer system for this machine, E_LIMIT the same or older,
  * E_NOSPT another machine's, E_OBJ not a system package. text: the
- * package's version, a tab and the system's (E_NOSPT: its machine and
- * processor). The session is left open only for E_OK and E_LIMIT.
+ * package's version, a tab, the system's, a tab and 1 when the update
+ * converts the system volume's format at the next start, else 0
+ * (E_NOSPT: its machine and processor). The session is left open only for E_OK and E_LIMIT.
  */
 LOCAL ER su_open( CONST TS_UUID *pkg, UB *text, INT max )
 {
@@ -614,8 +650,11 @@ LOCAL ER su_open( CONST TS_UUID *pkg, UB *text, INT max )
 	}
 	su.done = 0;
 
+	/* the format of the system volume the package is made for (tools/mktpk.py "tsfs_format") */
+	su.tsfs = (UINT)js_get_num(&root, "tsfs_format", 0);
+
 	sys_version(now, sizeof(now));
-	if ( text != NULL ) tm_sprintf(text, (UB *)"%s\t%s", su.ver, now);
+	if ( text != NULL ) tm_sprintf(text, (UB *)"%s\t%s\t%d", su.ver, now, su_convert() ? 1 : 0);
 	er = ( dt_ver_num(su.ver) > dt_ver_num(now) ) ? E_OK : E_LIMIT;
 	su.man = man;			/* the list the system box is given with the holds */
 	return er;
@@ -1510,6 +1549,13 @@ LOCAL ER su_do( INT k )
 		return boot_stage(&su.boot[k]);
 	}
 	er = boot_commit();
+	if ( er >= E_OK && !su.onto && su_convert() ) {
+		/* the system volume converted at the next start, which the new kernel does before it attaches it */
+		ER	ec = ob_cnv_request(sys_vol(), TRUE);
+
+		tm_printf((UB *)"TessronOS desktop: system update: the system volume to be converted to version %d (%d)\n",
+			  (INT)su.tsfs, (INT)ec);
+	}
 	if ( er >= E_OK && !su.onto ) {
 		(void)wm_dev_conf_put(SU_KEY, "");
 		dt_prog_reread();
@@ -1568,8 +1614,15 @@ EXPORT ER dt_sysup_need( CONST TS_UUID *pkg, UD *p_need, UD *p_free )
 
 EXPORT void dt_sysup_test( CONST char *root, INT cut )
 {
-	knl_strncpy(su_root, ( root != NULL && root[0] != 0 ) ? root : "/boot", SU_ROOT_MAX - 1);
-	su_root[SU_ROOT_MAX - 1] = 0;
+	CONST char	*r = ( root != NULL && root[0] != 0 ) ? root : "/boot";
+
+	/* a root for the tests: one longer than the paths built below it allow for is not taken */
+	if ( knl_strlen(r) >= SU_ROOT_MAX ) {
+		tm_printf((UB *)"TessronOS desktop: system update: the root %s is longer than %d bytes: not taken\n",
+			  r, SU_ROOT_MAX - 1);
+		r = "/boot";
+	}
+	knl_strcpy(su_root, r);
 	su_cut = cut;
 }
 
@@ -1678,7 +1731,7 @@ EXPORT ER dt_sysup_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 
 	switch ( rq->recno ) {
 	case DT_SYSUP_CHECK: {
-		/* two versions and a tab: what the check writes is that short */
+		/* two versions and the convert flag, tab-separated: what the check writes is that short */
 		UB	t[DT_TEXT_MAX];
 
 		t[0] = 0;
@@ -1924,16 +1977,30 @@ LOCAL ER su_open_vol( CONST T_SUBOOTF *bf, INT nbf, T_SUONTO *res )
 				    : listed(&root, "links", us) ? U_LINKS : U_SYSTEM;
 		su.nobj++;
 	}
-	for ( i = 0; i < nbf && i < SU_NBSRC; i++ ) {
+	/* every boot file the caller names, its source path whole */
+	if ( nbf > 0 ) {
+		su.bsrc = (char **)Kcalloc((SZ)nbf, sizeof(char *));
+		if ( su.bsrc == NULL ) return E_NOMEM;
+		su.nbsrc = nbf;
+	}
+	for ( i = 0; i < nbf; i++ ) {
 		char	nm[PKG_NAME];
+		INT	sl = (INT)knl_strlen(bf[i].name);
 
 		if ( fs_stat(bf[i].src, &st) < E_OK || ( st.mode & FS_IFMT ) != FS_IFREG ) continue;
+		if ( sl > PKG_NAME - 6 ) {
+			/* the name an entry of the package's table holds (PKG_NAME): said, not cut */
+			tm_printf((UB *)"TessronOS desktop: system update: the boot file %s has a name longer than %d bytes\n",
+				  bf[i].name, PKG_NAME - 6);
+			return E_PAR;
+		}
 		knl_strcpy(nm, "boot/");
-		knl_strncpy(nm + 5, bf[i].name, PKG_NAME - 6);
-		nm[PKG_NAME - 1] = 0;
+		knl_strcpy(nm + 5, bf[i].name);
 		e = ent_new(NULL, nm, E_BOOT, st.size);
 		if ( e == NULL ) return E_NOMEM;
-		knl_strncpy(su.bsrc[i], bf[i].src, SU_PATH_MAX - 1);
+		su.bsrc[i] = (char *)Kmalloc(knl_strlen(bf[i].src) + 1);
+		if ( su.bsrc[i] == NULL ) return E_NOMEM;
+		knl_strcpy(su.bsrc[i], bf[i].src);
 		e->off = (UW)i;
 		e->keep = bf[i].keep;
 		e->put = TRUE;

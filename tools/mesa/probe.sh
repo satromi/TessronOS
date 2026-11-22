@@ -73,7 +73,7 @@ cle() {
 
 	make -s -C "$TOP/build_make" obj/lib/libcxxrt.a obj/lib/libpthread.a >/dev/null
 	${CROSS}gcc $TS_CFLAGS $MESA_DEFS $MESA_INC -c -o "$WORK/cle_probe.o" "$TOP/tools/mesa/cle_probe.c"
-	L=$TOP/build_make/obj/lib
+	L=$(make -s -C "$TOP/build_make" --no-print-directory print-cxxrt-dir)
 	${CROSS}g++ -march=armv8.2-a -nostdlib -nostartfiles -static -T "$TOP/etc/linker/user/program_cxx.ld" \
 		-Wl,--build-id=none -Wl,--gc-sections -o "$WORK/cle_probe.elf" \
 		"$(${CROSS}gcc -print-file-name=crti.o)" "$(${CROSS}gcc -print-file-name=crtbegin.o)" \

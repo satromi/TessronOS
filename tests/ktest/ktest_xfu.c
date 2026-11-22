@@ -339,7 +339,7 @@ typedef struct {
 	INT		n, at;
 	SZ		off;
 	INT		piece;		/* bytes a read gives at most */
-	UB		line[512];
+	UB		line[2048];
 	INT		ln;
 	UB		wbuf[256];
 	INT		wn;
@@ -500,6 +500,16 @@ LOCAL void fk_close( void *ctx, INT c )
 	k->wn = 0;
 }
 
+LOCAL void *fk_mem( void *ctx, void *old, SZ size )
+{
+	(void)ctx;
+	if ( size == 0 ) {
+		if ( old != NULL ) Kfree(old);
+		return NULL;
+	}
+	return Krealloc(old, size);
+}
+
 LOCAL void fk_init( FAKE *k, T_FTPNET *net, CONST char * CONST *step, INT n, INT piece )
 {
 	knl_memset(k, 0, sizeof(*k));
@@ -513,6 +523,7 @@ LOCAL void fk_init( FAKE *k, T_FTPNET *net, CONST char * CONST *step, INT n, INT
 	net->close = fk_close;
 	net->listen = fk_listen;
 	net->accept = fk_accept;
+	net->mem = fk_mem;
 }
 
 #define NSTEP(a)	( (INT)( sizeof(a) / sizeof(a[0]) ) )
@@ -665,6 +676,90 @@ LOCAL void test_ftp_new( void )
 	KT_ASSERT_EQ(k.at, k.n);
 	if ( k.fails > 0 ) tm_printf((UB *)"  fake: first fault at step %d\n", k.failat);
 	Kfree(f);
+}
+
+/*
+ * Lines longer than the room a session first has: a greeting of 3000
+ * bytes, a path of 1500 in PWD and in a command, and a listing line of
+ * 1500 bytes (a long fact before the name) -- each taken whole
+ */
+LOCAL void test_ftp_long_lines( void )
+{
+	T_FTP		*f;
+	T_FTPNET	net;
+	FAKE		k;
+	SEEN		s;
+	CONST char	*step[22];
+	char		*g, *pw, *path, *cwd, *ml;
+	UB		*b;
+	INT		i;
+
+	f = (T_FTP *)Kmalloc(sizeof(T_FTP));
+	g = (char *)Kmalloc(3100);
+	pw = (char *)Kmalloc(1600);
+	path = (char *)Kmalloc(1600);
+	cwd = (char *)Kmalloc(1600);
+	ml = (char *)Kmalloc(1700);
+	b = (UB *)Kmalloc(2048);
+	if ( f == NULL || g == NULL || pw == NULL || path == NULL || cwd == NULL || ml == NULL || b == NULL ) {
+		KT_SKIP("no memory");
+	}
+	knl_strcpy(g, "R:220 ");
+	for ( i = 0; i < 3000; i++ ) g[6 + i] = (char)( 'a' + i % 26 );
+	knl_strcpy(g + 3006, "\r\n");
+	knl_strcpy(pw, "R:257 \"/");
+	for ( i = 0; i < 1500; i++ ) pw[8 + i] = (char)( 'a' + i % 26 );
+	knl_strcpy(pw + 1508, "\" is here\r\n");
+	knl_strcpy(path, "/");
+	for ( i = 0; i < 1500; i++ ) path[1 + i] = (char)( 'a' + i % 26 );
+	path[1501] = 0;
+	knl_strcpy(cwd, "S:CWD ");
+	knl_strcpy(cwd + 6, path);
+	knl_strcpy(ml, "D:type=file;size=7;x.long=");
+	for ( i = 0; i < 1400; i++ ) ml[26 + i] = 'z';
+	knl_strcpy(ml + 1426, "; after.txt\r\n");
+	i = 0;
+	step[i++] = g;
+	step[i++] = "S:USER anonymous";
+	step[i++] = "R:230 in\r\n";
+	step[i++] = "S:SYST";
+	step[i++] = "R:215 UNIX\r\n";
+	step[i++] = "S:FEAT";
+	step[i++] = "R:211-Features:\r\n MLST type*;size*;\r\n211 End\r\n";
+	step[i++] = "S:TYPE I";
+	step[i++] = "R:200 binary\r\n";
+	step[i++] = "S:PWD";
+	step[i++] = pw;
+	step[i++] = cwd;
+	step[i++] = "R:250 ok\r\n";
+	step[i++] = "S:EPSV";
+	step[i++] = "R:229 (|||40001|)\r\n";
+	step[i++] = "O:40001";
+	step[i++] = "S:MLSD";
+	step[i++] = "R:150 here\r\n";
+	step[i++] = ml;
+	step[i++] = "R:226 done\r\n";
+	step[i++] = "S:QUIT";
+	step[i++] = "R:221 bye\r\n";
+	fk_init(&k, &net, step, i, 7);
+	KT_ASSERT_ER(ftp_open(f, &net, "ftp.example", 0, NULL, NULL, TXC_UTF8), E_OK);
+	KT_ASSERT_ER(ftp_pwd(f, b, 2048), E_OK);
+	KT_ASSERT(b[0] == '/' && b[1500] == (UB)( 'a' + 1499 % 26 ) && b[1501] == 0);
+	KT_ASSERT_ER(ftp_cwd(f, (CONST UB *)path), E_OK);
+	knl_memset(&s, 0, sizeof(s));
+	KT_ASSERT_ER(ftp_list(f, NULL, seen_ent, &s), E_OK);
+	KT_ASSERT_EQ(s.n, 1);
+	KT_ASSERT(same_str(s.name[0], "after.txt") && s.size[0] == 7);
+	KT_ASSERT_ER(ftp_close(f), E_OK);
+	KT_ASSERT_EQ(k.fails, 0);
+	KT_ASSERT_EQ(k.at, k.n);
+	Kfree(f);
+	Kfree(g);
+	Kfree(pw);
+	Kfree(path);
+	Kfree(cwd);
+	Kfree(ml);
+	Kfree(b);
 }
 
 /* A server of old: no FEAT, no EPSV, names in Shift_JIS, listings as ls and dir print them */
@@ -1993,6 +2088,7 @@ EXPORT void ktest_xfu( void )
 	KT_RUN(test_ftp_old);
 	KT_RUN(test_ftp_active);
 	KT_RUN(test_ftp_fallback);
+	KT_RUN(test_ftp_long_lines);
 	KT_RUN(test_xfu_fat);
 	KT_RUN(test_xfu_native);
 	KT_RUN(test_xfu_stop);

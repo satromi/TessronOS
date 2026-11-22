@@ -278,14 +278,13 @@ EXPORT void dt_print_src_free( DTPRSRC *s )
  * document as 詳細 and the hidden letters show it when it says so, and
  * without its links when the setting last made says 仮身: 印刷 off.
  */
-#define SPOOL_MAX	PRN_PAGE_MAX
-
+/* The page records of a spool, as many as the object has (each table nrec long, first one more) */
 typedef struct {
 	TS_UUID		obj;
 	INT		nrec;
-	INT		recno[SPOOL_MAX];
-	SZ		size[SPOOL_MAX];
-	INT		first[SPOOL_MAX + 1];	/* the first page of each record */
+	INT		*recno;
+	SZ		*size;
+	INT		*first;			/* the first page of each record, and the end */
 	UW		paper;			/* what the pages lie on */
 	UINT		flags;			/* DT_F_PR_DETAIL, DT_F_PR_HIDDEN */
 	BOOL		links;			/* FALSE: drawn without them */
@@ -428,6 +427,9 @@ LOCAL ER draw_spool( void *arg, INT gid, INT page, CONST T_DPRECT *sheet )
 LOCAL void spool_free( SPOOL *sp )
 {
 	spool_drop(sp);
+	if ( sp->recno != NULL ) Kfree(sp->recno);
+	if ( sp->size != NULL ) Kfree(sp->size);
+	if ( sp->first != NULL ) Kfree(sp->first);
 	Kfree(sp);
 }
 
@@ -440,9 +442,9 @@ LOCAL SPOOL *spool_read( CONST TS_UUID *obj, T_PRNJOB *job, CONST UB *name,
 			 UW paper, UINT flags, BOOL links )
 {
 	SPOOL	*sp = (SPOOL *)Kmalloc(sizeof(SPOOL));
-	T_OBREC	*rl;
+	T_OBREC	*rl = NULL;
 	ID	key;
-	INT	i, nrec = 0, pages = 0;
+	INT	i, nrec = 0, pages = 0, room = 64;
 
 	if ( sp == NULL ) {
 		return NULL;
@@ -454,21 +456,34 @@ LOCAL SPOOL *spool_read( CONST TS_UUID *obj, T_PRNJOB *job, CONST UB *name,
 	sp->paper = paper;
 	sp->flags = flags;
 	sp->links = links;
-	rl = (T_OBREC *)Kmalloc(sizeof(T_OBREC) * SPOOL_MAX);
-	key = ( rl != NULL ) ? ob_opn_obj(obj, OB_OP_R) : E_NOMEM;
+	key = ob_opn_obj(obj, OB_OP_R);
 	if ( key <= 0 ) {
-		if ( rl != NULL ) Kfree(rl);
 		Kfree(sp);
 		return NULL;
 	}
-	if ( ob_lst_rec(key, rl, SPOOL_MAX, &nrec) < E_OK ) {
-		nrec = 0;
+	/* every record: listed again with room for them all when there were more */
+	for ( ;; ) {
+		rl = (T_OBREC *)Kmalloc(sizeof(T_OBREC) * (SZ)room);
+		if ( rl == NULL || ob_lst_rec(key, rl, room, &nrec) < E_OK ) {
+			nrec = 0;
+			break;
+		}
+		if ( nrec <= room ) break;
+		Kfree(rl);
+		rl = NULL;
+		room = nrec;
 	}
-	if ( nrec > SPOOL_MAX ) {
-		nrec = SPOOL_MAX;
+	sp->recno = (INT *)Kmalloc(sizeof(INT) * (SZ)( nrec + 1 ));
+	sp->size = (SZ *)Kmalloc(sizeof(SZ) * (SZ)( nrec + 1 ));
+	sp->first = (INT *)Kmalloc(sizeof(INT) * (SZ)( nrec + 1 ));
+	if ( rl == NULL || sp->recno == NULL || sp->size == NULL || sp->first == NULL ) {
+		ob_cls_obj(key);
+		if ( rl != NULL ) Kfree(rl);
+		spool_free(sp);
+		return NULL;
 	}
 	/* each page record made a model once, to know its paper and how many pages */
-	for ( i = 0; i < nrec && sp->nrec < SPOOL_MAX; i++ ) {
+	for ( i = 0; i < nrec; i++ ) {
 		INT	k = sp->nrec;
 
 		if ( rl[i].rt != OB_RT_TAD || !spool_load(sp, key, rl[i].recno, (SZ)rl[i].size) ) {
@@ -791,7 +806,6 @@ EXPORT ER dt_print_out( DTWIN *host, CONST T_PRNJOB *job, CONST T_PRNSET *set )
  * its turn, as a program that asked waited while the panels were the
  * desktop's own.
  */
-#define PJ_MAX		8
 #define PJ_START_MS	60000		/* 基本印刷 has not asked in this long: it did not start */
 #define PJ_POLL_MS	500		/* how often the process working the job is looked for */
 
@@ -833,7 +847,43 @@ typedef struct {
 	T_PRNSET	pxset;
 } PJOB;
 
-LOCAL PJOB	pj[PJ_MAX];
+/*
+ * The jobs, as many as are asked for while one is worked: each entry
+ * allocated once and never freed (a job is held by pointer while it is
+ * worked), in a table of npj that grows, the one before kept.
+ */
+LOCAL PJOB	*pjt0[1];
+LOCAL PJOB	**pjt = pjt0;
+LOCAL INT	npj = 0;
+#define PJ(i)	( *pjt[(i)] )
+
+/* A free job's place, the table made larger when none is: -1 for no memory */
+LOCAL INT pj_slot( void )
+{
+	PJOB	**t, *e;
+	INT	i, n;
+
+	for ( i = 0; i < npj; i++ ) {
+		if ( !pjt[i]->used ) return i;
+	}
+	n = ( npj > 0 ) ? npj * 2 : 8;
+	t = (PJOB **)Kmalloc(sizeof(PJOB *) * (SZ)n);
+	e = (PJOB *)Kcalloc((SZ)( n - npj ), sizeof(PJOB));
+	if ( t == NULL || e == NULL ) {
+		if ( t != NULL ) Kfree(t);
+		if ( e != NULL ) Kfree(e);
+		return -1;
+	}
+	for ( i = 0; i < n; i++ ) {
+		t[i] = ( i < npj ) ? pjt[i] : &e[i - npj];
+	}
+	__sync_synchronize();
+	pjt = t;			/* the table before is not freed */
+	__sync_synchronize();
+	i = npj;
+	npj = n;
+	return i;
+}
 LOCAL UINT	pj_serial = 0;
 LOCAL UD	pj_looked = 0;
 
@@ -849,8 +899,8 @@ LOCAL PJOB *pj_active( void )
 {
 	INT	i;
 
-	for ( i = 0; i < PJ_MAX; i++ ) {
-		if ( pj[i].used && pj[i].active ) return &pj[i];
+	for ( i = 0; i < npj; i++ ) {
+		if ( PJ(i).used && PJ(i).active ) return &PJ(i);
 	}
 	return NULL;
 }
@@ -874,24 +924,22 @@ LOCAL PJOB *pj_take( UINT kind, UINT how, CONST UB *name )
 	UB	*own;
 	INT	i;
 
-	for ( i = 0; i < PJ_MAX; i++ ) {
-		if ( !pj[i].used ) break;
-	}
-	if ( i == PJ_MAX ) {
-		return NULL;
+	i = pj_slot();
+	if ( i < 0 ) {
+		return NULL;			/* no memory: the caller says so */
 	}
 	own = dt_cat(( name != NULL ) ? (CONST char *)name : "", NULL);
 	if ( own == NULL ) {
 		return NULL;
 	}
-	knl_memset(&pj[i], 0, sizeof(pj[i]));
-	pj[i].name = own;
-	pj[i].used = TRUE;
-	pj[i].serial = ++pj_serial;
-	pj[i].kind = kind;
-	pj[i].how = how;
-	pj[i].links = TRUE;
-	return &pj[i];
+	knl_memset(&PJ(i), 0, sizeof(PJOB));
+	PJ(i).name = own;
+	PJ(i).used = TRUE;
+	PJ(i).serial = ++pj_serial;
+	PJ(i).kind = kind;
+	PJ(i).how = how;
+	PJ(i).links = TRUE;
+	return &PJ(i);
 }
 
 /* An object's pages made from its record, with their links or without them */
@@ -1024,8 +1072,8 @@ LOCAL void pj_next( void )
 	if ( pj_active() != NULL ) {
 		return;
 	}
-	for ( i = 0; i < PJ_MAX; i++ ) {
-		if ( pj[i].used && ( J == NULL || pj[i].serial < J->serial ) ) J = &pj[i];
+	for ( i = 0; i < npj; i++ ) {
+		if ( PJ(i).used && ( J == NULL || PJ(i).serial < J->serial ) ) J = &PJ(i);
 	}
 	if ( J == NULL ) {
 		return;
@@ -1094,7 +1142,7 @@ EXPORT ER dt_print_start( T_PRNJOB *job, CONST TS_UUID *win, UINT how,
 	}
 	J = pj_take(PJ_OWN, how, job->name);
 	if ( J == NULL ) {
-		return E_LIMIT;
+		return E_NOMEM;
 	}
 	J->own = job;
 	J->done = done;
@@ -1130,7 +1178,7 @@ EXPORT void dt_print_vobj( DTWIN *from, CONST T_VOBJ *v )
 	J = pj_take(PJ_OBJ, DT_PRINT_SHOW, name);
 	if ( name != NULL ) Kfree(name);
 	if ( J == NULL ) {
-		(void)wm_msg_put("印刷を待っているものが多すぎます");
+		(void)wm_msg_put("メモリが足りないため、印刷できません");
 		return;
 	}
 	J->target = v->target;
@@ -1171,7 +1219,7 @@ EXPORT ER dt_print_spool( CONST T_DTREQ *rq, SZ anssz )
 	}
 	J = pj_take(PJ_SPOOL, DT_PRINT_SHOW, name);
 	if ( J == NULL ) {
-		return E_LIMIT;
+		return E_NOMEM;
 	}
 	sp = spool_read(&rq->target, &J->job, J->name, paper, rq->flags & ( DT_F_PR_DETAIL | DT_F_PR_HIDDEN ), links);
 	if ( sp == NULL ) {

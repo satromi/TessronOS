@@ -81,6 +81,12 @@ LOCAL void test_open( void )
 	KT_ASSERT_ER(ts_jrnl_ref(vol, &j), E_OK);
 	KT_ASSERT_EQ(j.start, sb.journal_start);
 
+	/* a volume made now is of version 5; on this small one the budget is what one descriptor names */
+	KT_ASSERT_EQ(sb.version, TSFSBLK_VERSION5);
+	KT_ASSERT(( sb.incompat & TSFSBLK_INCOMPAT_FMT5 ) != 0);
+	KT_ASSERT(j.v5);
+	KT_ASSERT_EQ(j.budget, (UINT)TSFSJ_MAX_BLOCKS);
+
 	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
 
 	KT_ASSERT_ER(ts_jrnl_ref(vol, &j), E_OK);
@@ -370,7 +376,22 @@ LOCAL void test_limit( void )
 	}
 	KT_ASSERT_EQ(i, (INT)TSFSJ_MAX_BLOCKS);
 	KT_ASSERT_ER(ts_jrnl_write(vol, blk_a + TSFSJ_MAX_BLOCKS, buf), E_LIMIT);
+	KT_ASSERT_EQ(ts_jrnl_room(vol), 0);
 	KT_ASSERT_ER(ts_jrnl_abort(vol), E_OK);
+
+	/* a budget made small for a test, and the volume's own again */
+	KT_ASSERT_EQ(ts_jrnl_budget(vol), (INT)TSFSJ_MAX_BLOCKS);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_BUDGET | 16), E_OK);
+	KT_ASSERT_EQ(ts_jrnl_budget(vol), 16);
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	for ( i = 0; i < 16; i++ ) {
+		KT_ASSERT_ER(ts_jrnl_write(vol, blk_a + (UD)i, buf), E_OK);
+	}
+	KT_ASSERT_EQ(ts_jrnl_room(vol), 0);
+	KT_ASSERT_ER(ts_jrnl_write(vol, blk_a + 16, buf), E_LIMIT);
+	KT_ASSERT_ER(ts_jrnl_abort(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_BUDGET | 0), E_OK);
+	KT_ASSERT_EQ(ts_jrnl_room(vol), (INT)TSFSJ_MAX_BLOCKS);
 
 	Kfree(buf);
 
@@ -710,6 +731,317 @@ LOCAL void test_nolog( void )
 	KT_ASSERT_ER(ts_jrnl_abort(vol), E_OK);
 }
 
+/* ---------------------------------------------------------------- version 5 */
+
+/*
+ * A volume with a larger journal than its size would give it, so that
+ * a transaction of version 5 may hold more than one descriptor names:
+ * 2500 blocks of the 16MB, a ring of 2499 and a budget of 624.
+ */
+#define BIG_JBLOCKS	2500
+#define BIG_N		1500		/* blocks of our own */
+#define BIG_TXN		600		/* copies of one large transaction: three descriptors */
+
+LOCAL UD	*big = NULL;		/* the blocks, BIG_N of them */
+LOCAL UD	big_run[64], big_cnt[64];
+LOCAL INT	big_runs = 0;
+
+LOCAL void reopen( void )
+{
+	(void)ts_cls_vol_blk(vol);
+	vol = ts_opn_vol_blk(JDEV);
+}
+
+/* Put `n` of the blocks, from `from`, in the running transaction, each filled with pat + its number */
+LOCAL ER put_many( INT from, INT n, UB pat )
+{
+	UB	*buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	INT	i;
+	ER	er = E_OK;
+
+	if ( buf == NULL ) return E_NOMEM;
+	for ( i = 0; i < n && er >= E_OK; i++ ) {
+		fill(buf, (UB)( pat + ( from + i ) ));
+		er = ts_jrnl_write(vol, big[from + i], buf);
+	}
+	Kfree(buf);
+	return er;
+}
+
+/* How many of the n blocks from `from` hold pat + their number */
+LOCAL INT holding( INT from, INT n, UB pat )
+{
+	INT	i, k = 0;
+
+	for ( i = 0; i < n; i++ ) {
+		if ( holds(big[from + i], (UB)( pat + ( from + i ) )) ) k++;
+	}
+	return k;
+}
+
+LOCAL void test_big_open( void )
+{
+	T_TSFSFMT	fmt = { TSFSBLK_VERSION5, BIG_JBLOCKS };
+	T_TSFSJRNL	j;
+	UD		start, count;
+	INT		k;
+
+	if ( ts_format_blk_opt(JDEV, "JOURNAL5", &fmt) < E_OK ) {
+		KT_SKIP("no block device to make a volume on");
+	}
+	vol = ts_opn_vol_blk(JDEV);
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) return;
+	KT_ASSERT_ER(ts_jrnl_ref(vol, &j), E_OK);
+	KT_ASSERT(j.v5);
+	KT_ASSERT_EQ(j.blocks, BIG_JBLOCKS);
+	KT_ASSERT_EQ(j.budget, ( BIG_JBLOCKS - 1 ) / 4);	/* a quarter of the ring */
+	KT_ASSERT_EQ(ts_jrnl_budget(vol), ( BIG_JBLOCKS - 1 ) / 4);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_NOCKPT | 1), E_OK);	/* the ring holds what the tests put */
+
+	big = (UD *)Kmalloc(sizeof(UD) * BIG_N);
+	KT_ASSERT(big != NULL);
+	if ( big == NULL ) return;
+	for ( k = 0, big_runs = 0; k < BIG_N && big_runs < 64; big_runs++ ) {
+		if ( ts_alloc_ext(vol, (UD)( BIG_N - k ), &start, &count) < E_OK ) break;
+		big_run[big_runs] = start;
+		big_cnt[big_runs] = count;
+		while ( count-- > 0 ) big[k++] = start++;
+	}
+	KT_ASSERT_EQ(k, BIG_N);
+	if ( k < BIG_N ) {
+		Kfree(big);
+		big = NULL;
+	}
+}
+
+/*
+ * 600 copies in one transaction: three descriptors. In place after a
+ * commit, none of it after a cut before the commit, all of it after a
+ * cut after the commit.
+ */
+LOCAL void test_big_txn( void )
+{
+	T_TSFSJRNL	j;
+
+	if ( vol <= 0 || big == NULL ) KT_SKIP("no volume");
+
+	KT_ASSERT_ER(ts_jrnl_checkpoint(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	KT_ASSERT_ER(put_many(0, BIG_TXN, 0x10), E_OK);
+	KT_ASSERT_EQ(ts_jrnl_room(vol), ( BIG_JBLOCKS - 1 ) / 4 - BIG_TXN);
+	KT_ASSERT_ER(ts_jrnl_commit(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_ref(vol, &j), E_OK);
+	KT_ASSERT_EQ(j.last_desc, 3);
+	KT_ASSERT_EQ(j.last_rvk, 0);
+	KT_ASSERT_EQ(j.used, 3 + BIG_TXN + 1);
+	KT_ASSERT_EQ(holding(0, BIG_TXN, 0x10), BIG_TXN);
+
+	/* cut before the commit: coming back leaves what the last one put */
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_BEFORE_COMMIT), E_OK);
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	KT_ASSERT_ER(put_many(0, BIG_TXN, 0x20), E_OK);
+	KT_ASSERT_ER(ts_jrnl_commit(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_NONE), E_OK);
+	reopen();
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) return;
+	KT_ASSERT_EQ(holding(0, BIG_TXN, 0x10), BIG_TXN);
+
+	/* cut after the commit, nothing in place: coming back puts all 600 there */
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_AFTER_COMMIT), E_OK);
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	KT_ASSERT_ER(put_many(0, BIG_TXN, 0x30), E_OK);
+	KT_ASSERT_ER(ts_jrnl_commit(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_NONE), E_OK);
+	KT_ASSERT_EQ(holding(0, 1, 0x10), 1);			/* not in place yet */
+	reopen();
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) return;
+	KT_ASSERT_EQ(holding(0, BIG_TXN, 0x30), BIG_TXN);
+
+	/* one more than the budget is refused */
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	KT_ASSERT_ER(put_many(0, ( BIG_JBLOCKS - 1 ) / 4, 0x40), E_OK);
+	KT_ASSERT_EQ(ts_jrnl_room(vol), 0);
+	KT_ASSERT_ER(put_many(( BIG_JBLOCKS - 1 ) / 4, 1, 0x40), E_LIMIT);
+	KT_ASSERT_ER(ts_jrnl_abort(vol), E_OK);
+}
+
+/*
+ * 1500 blocks the ring holds copies of, freed by one transaction: three
+ * revoke blocks. The blocks then hold data; a cut in the power after
+ * that must not bring the old copies back.
+ */
+LOCAL void test_big_revoke( void )
+{
+	T_TSFSJRNL	j;
+	T_TSFSBLK_SB	sb;
+	UB		*buf;
+	UD		fresh;
+	INT		i, bad = 0;
+
+	if ( vol <= 0 || big == NULL ) KT_SKIP("no volume");
+
+	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	KT_ASSERT(buf != NULL);
+	if ( buf == NULL ) return;
+	KT_ASSERT_ER(ts_jrnl_checkpoint(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_NOCKPT | 1), E_OK);
+	for ( i = 0; i < 3; i++ ) {
+		KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+		KT_ASSERT_ER(put_many(i * 500, 500, 0x50), E_OK);
+		KT_ASSERT_ER(ts_jrnl_commit(vol), E_OK);
+	}
+	KT_ASSERT_ER(ts_jrnl_ref(vol, &j), E_OK);
+	KT_ASSERT(j.cached >= BIG_N);
+	KT_ASSERT_ER(ts_ref_vol_blk(vol, &sb), E_OK);
+	fresh = sb.free_blocks;
+
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	for ( i = 0; i < big_runs; i++ ) {
+		KT_ASSERT_ER(ts_free_ext(vol, big_run[i], big_cnt[i]), E_OK);
+	}
+	KT_ASSERT_ER(ts_jrnl_commit(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_ref(vol, &j), E_OK);
+	KT_ASSERT_EQ(j.last_rvk, ( BIG_N + TSFSJ_MAX_REVOKE - 1 ) / TSFSJ_MAX_REVOKE);
+	KT_ASSERT_EQ(j.last_desc, 1);
+
+	/* the blocks hold data now, written in place */
+	for ( i = 0; i < BIG_N; i++ ) {
+		fill(buf, (UB)( 0x60 + i ));
+		if ( ts_write_blk(vol, big[i], buf) < E_OK ) bad++;
+	}
+	KT_ASSERT_EQ(bad, 0);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_AFTER_COMMIT), E_OK);
+	KT_ASSERT_ER(put(big[0], 0x77), E_OK);		/* the power goes */
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_NONE), E_OK);
+	reopen();
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) { Kfree(buf); return; }
+	KT_ASSERT(holds(big[0], 0x77));
+	KT_ASSERT_EQ(holding(1, BIG_N - 1, 0x60), BIG_N - 1);	/* none of the old copies */
+	KT_ASSERT_ER(ts_ref_vol_blk(vol, &sb), E_OK);
+	KT_ASSERT_EQ(sb.free_blocks, fresh + BIG_N);
+
+	/* taken again for what follows */
+	for ( i = 0; i < big_runs; i++ ) {
+		UD	got = 0;
+
+		KT_ASSERT_ER(ts_alloc_ext_at(vol, big_run[i], big_cnt[i], &got), E_OK);
+		KT_ASSERT_EQ(got, big_cnt[i]);
+	}
+	Kfree(buf);
+}
+
+/*
+ * A ring whose second descriptor is numbered 2: the replay stops there,
+ * so that transaction is not put back, and what came before it is.
+ */
+LOCAL void test_big_skip( void )
+{
+	if ( vol <= 0 || big == NULL ) KT_SKIP("no volume");
+
+	KT_ASSERT_ER(ts_jrnl_checkpoint(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	KT_ASSERT_ER(put_many(0, 300, 0x80), E_OK);
+	KT_ASSERT_ER(ts_jrnl_commit(vol), E_OK);	/* in the ring, not in place */
+
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_SKIP), E_OK);
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	KT_ASSERT_ER(put_many(0, 300, 0x90), E_OK);
+	KT_ASSERT_ER(ts_jrnl_commit(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_NONE), E_OK);
+	reopen();
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) return;
+	KT_ASSERT_EQ(holding(0, 300, 0x80), 300);
+	KT_ASSERT_EQ(holding(0, 300, 0x90), 0);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_NOCKPT | 0), E_OK);
+}
+
+/*
+ * A volume of version 4 keeps the ring as it was: one descriptor, the
+ * budget of one descriptor, the head and the blocks of version 2.
+ */
+LOCAL void test_v4( void )
+{
+	T_TSFSFMT	fmt = { TSFSBLK_VERSION, BIG_JBLOCKS };
+	T_TSFSJRNL	j;
+	T_TSFSBLK_SB	sb;
+	UB		*buf;
+	INT		i;
+
+	if ( big != NULL ) {
+		Kfree(big);
+		big = NULL;
+	}
+	if ( vol > 0 ) {
+		(void)ts_cls_vol_blk(vol);
+		vol = 0;
+	}
+	if ( ts_format_blk_opt(JDEV, "JOURNAL4", &fmt) < E_OK ) KT_SKIP("no block device");
+	vol = ts_opn_vol_blk(JDEV);
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) return;
+	KT_ASSERT_ER(ts_ref_vol_blk(vol, &sb), E_OK);
+	KT_ASSERT_EQ(sb.version, TSFSBLK_VERSION);
+	KT_ASSERT_EQ(sb.incompat & TSFSBLK_INCOMPAT_FMT5, 0);
+	KT_ASSERT_ER(ts_jrnl_ref(vol, &j), E_OK);
+	KT_ASSERT(!j.v5);
+	KT_ASSERT_EQ(j.budget, (UINT)TSFSJ_MAX_BLOCKS);	/* however large the ring */
+
+	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	KT_ASSERT(buf != NULL);
+	if ( buf == NULL ) return;
+	{
+		UD	start = 0, count = 0;
+
+		KT_ASSERT_ER(ts_alloc_ext(vol, TSFSJ_MAX_BLOCKS, &start, &count), E_OK);
+		KT_ASSERT_EQ(count, (UD)TSFSJ_MAX_BLOCKS);
+		blk_a = start;
+	}
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_AFTER_COMMIT), E_OK);
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	for ( i = 0; i < (INT)TSFSJ_MAX_BLOCKS; i++ ) {
+		fill(buf, (UB)( 0xB0 + i ));
+		KT_ASSERT_ER(ts_jrnl_write(vol, blk_a + (UD)i, buf), E_OK);
+	}
+	KT_ASSERT_ER(ts_jrnl_write(vol, blk_a + TSFSJ_MAX_BLOCKS, buf), E_LIMIT);
+	KT_ASSERT_ER(ts_jrnl_commit(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_NONE), E_OK);
+	KT_ASSERT_ER(ts_jrnl_ref(vol, &j), E_OK);
+	KT_ASSERT_EQ(j.last_desc, 1);
+
+	/* the head is still of version 2 on the medium */
+	{
+		SZ	asz;
+		ID	dd = tk_opn_dev((UB *)JDEV, TD_READ);
+
+		KT_ASSERT(dd > 0);
+		if ( dd > 0 ) {
+			KT_ASSERT(tk_srea_dev(dd, (W)( sb.journal_start * TSFSBLK_SECT_PER_BLK ), buf,
+					      TSFSBLK_BLOCK_SIZE, &asz) >= E_OK);
+			KT_ASSERT_EQ(buf[4] | ( buf[5] << 8 ), TSFSJ_VERSION);
+			tk_cls_dev(dd, 0);
+		}
+	}
+	reopen();
+	KT_ASSERT(vol > 0);
+	if ( vol > 0 ) {
+		for ( i = 0; i < (INT)TSFSJ_MAX_BLOCKS; i++ ) {
+			if ( !holds(blk_a + (UD)i, (UB)( 0xB0 + i )) ) break;
+		}
+		KT_ASSERT_EQ(i, (INT)TSFSJ_MAX_BLOCKS);
+		KT_ASSERT_ER(ts_ref_vol_blk(vol, &sb), E_OK);
+		KT_ASSERT_EQ(sb.version, TSFSBLK_VERSION);
+		ts_cls_vol_blk(vol);
+	}
+	Kfree(buf);
+	vol = 0;
+	(void)ts_format_blk(JDEV, "JOURNAL");		/* as the suites after this one expect */
+}
+
 EXPORT void ktest_tsfsjrnl( void )
 {
 	KT_RUN(test_open);
@@ -728,4 +1060,9 @@ EXPORT void ktest_tsfsjrnl( void )
 	KT_RUN(test_nolog);
 	KT_RUN(test_limit);
 	KT_RUN(test_stale_ring);
+	KT_RUN(test_big_open);
+	KT_RUN(test_big_txn);
+	KT_RUN(test_big_revoke);
+	KT_RUN(test_big_skip);
+	KT_RUN(test_v4);
 }

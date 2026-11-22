@@ -152,6 +152,26 @@ EXPORT BOOL knl_so_mine( INT s, ID owner )
 	return ( s >= 0 && s < SO_NUM && so_owner[s] == owner );
 }
 
+/* lwIP's table is fixed: the system's limit is its size, all of it there from the start */
+EXPORT INT knl_so_sysmax( void )
+{
+	return SO_NUM;
+}
+
+/* lwIP keeps no owner for the kernel's own: the processes' sockets alone are counted */
+EXPORT INT knl_so_count( INT *p_room )
+{
+	INT	i, n = 0;
+
+	for ( i = 0; i < SO_NUM; i++ ) {
+		if ( so_owner[i] != 0 ) n++;
+	}
+	if ( p_room != NULL ) {
+		*p_room = SO_NUM;
+	}
+	return n;
+}
+
 /* A process is ending: whatever sockets it left open are closed */
 EXPORT void knl_so_prc_end( ID pid )
 {

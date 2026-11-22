@@ -125,12 +125,14 @@ typedef struct {
 	T_XFUENT	ent;
 	XFUAPP		app[XFU_NAPP];
 	BOOL		apps;			/* the programs have been looked up */
-	TS_UUID		*seen;			/* given out: objects met, XFU_OBJ_MAX */
+	TS_UUID		*seen;			/* given out: objects met, as many as there are */
 	INT		nseen;
+	INT		seencap;		/* entries seen has room for */
 	TS_UUID		*stack;			/* the objects being given out, outermost first */
 	INT		nstack;
 	TS_UUID		*made;			/* taken in: the objects made, in order */
 	INT		nmade;
+	INT		madecap;		/* entries made has room for */
 	BOOL		stop;			/* the caller asked to stop */
 	BOOL		zen;			/* the text at work is made full width */
 } XFU;
@@ -143,6 +145,11 @@ IMPORT void xfu_tick( XFU *x, D bytes );
 /* An object made by the call noted, forgotten, and all of them thrown away again */
 IMPORT void xfu_made( XFU *x, CONST TS_UUID *u );
 IMPORT void xfu_unmade( XFU *x, CONST TS_UUID *u );
+/*
+ * A list of UUIDs (xfu_sys_alloc) with room for one more: doubled when
+ * full, from 'first'. FALSE when there is no memory (the list as it was).
+ */
+IMPORT BOOL xfu_uuids_room( TS_UUID **p_list, INT n, INT *p_cap, INT first );
 IMPORT void xfu_undo( XFU *x );
 
 /* The program's name and template icon, looked up once in the program box */
@@ -154,5 +161,8 @@ IMPORT ER   xfu_join( UB *out, INT max, CONST UB *dir, CONST UB *name );
 
 /* The width of a name in UTF-16 units */
 IMPORT INT  xfu_u16( CONST UB *s, INT n );
+
+/* Every record of an object open as key (xfu_sys_alloc), how many in *p_cnt (xfu_obj.c) */
+IMPORT T_OBREC *xfu_recs( ID key, INT *p_cnt );
 
 #endif /* __XFU_IN_H__ */

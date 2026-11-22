@@ -47,9 +47,8 @@ extern "C" {
 #endif
 
 #define FTP_PORT	21
-#define FTP_LINE_MAX	512		/* bytes of a reply's line kept */
+#define FTP_LINE_MAX	512		/* bytes a reply's line is first given room for (it grows) */
 #define FTP_NAME_MAX	768		/* bytes of a name, UTF-8, with its nought */
-#define FTP_PATH_MAX	1024		/* bytes of a path, UTF-8, with its nought */
 
 /*
  * The connections. open makes one to host:port, or, with peer 0 or
@@ -75,6 +74,14 @@ typedef struct {
 	 */
 	INT	(*listen)( void *ctx, INT peer, UB addr[4], UINT *p_port );
 	INT	(*accept)( void *ctx, INT l, INT tmo );
+
+	/*
+	 * Memory for the session's lines (a reply's, a command's, a line of
+	 * a listing), which grow to the length the server sends: realloc
+	 * of old to size bytes (old NULL: new), NULL when there is none;
+	 * size 0 gives old back. Required.
+	 */
+	void	*(*mem)( void *ctx, void *old, SZ size );
 } T_FTPNET;
 
 #define FTP_ACCEPT_TMO	20000		/* ms the active way waits for the server */
@@ -109,15 +116,18 @@ typedef struct {
 	INT		atmo;		/* ms accept waits; 0 FTP_ACCEPT_TMO */
 	INT		enc;		/* names on the server: TXC_UTF8, or the caller's */
 	INT		code;		/* the last reply's code */
-	UB		text[FTP_LINE_MAX];	/* its last line */
+	UB		*text;		/* its last line, whole (ntext bytes of room) */
+	INT		ntext;
 	UB		syst[64];	/* what SYST said */
 	D		now;		/* the time now (TS_TIME), for a listing that
 					   leaves out the year; 0 when not known */
 	BOOL		done;		/* the transfer's last reply came already */
 	INT		rat, rlen;	/* what was read of the control connection */
 	UB		rbuf[512];
-	UB		cmd[FTP_PATH_MAX * 2 + 16];	/* a command being sent */
-	UB		line[FTP_PATH_MAX];	/* a line of a listing */
+	UB		*cmd;		/* a command being sent */
+	INT		ncmd;
+	UB		*line;		/* a line of a listing */
+	INT		nline;
 	T_FTPENT	ent;		/* the name it gives */
 } T_FTP;
 

@@ -128,6 +128,7 @@ extern int	ts_memfd_fcntl( int fd, int cmd, int arg );
 /* the GPU's descriptors (lib/libgl/gl_drm.c), when OpenGL ES is linked in */
 extern int	ts_gpu_fd_close( int fd ) __attribute__((weak));
 extern int	ts_gpu_fd_fcntl( int fd, int cmd, int arg ) __attribute__((weak));
+extern int	ts_gpu_fd_lseek( int fd, off_t off, int whence, off_t *pos ) __attribute__((weak));
 #ifdef __x86_64__
 extern int	ts_gpu_fd_fstat( int fd, struct stat *st ) __attribute__((weak));
 #endif
@@ -329,9 +330,14 @@ int _close( int fd )
 off_t _lseek( int fd, off_t off, int whence )
 {
 	D	r;
+	off_t	pos;
 
 	if ( fd < FD_BASE || ts_rnd_is(fd) ) {
 		return 0;
+	}
+	/* a BO's PRIME descriptor: its end is the BO's size */
+	if ( ts_gpu_fd_lseek != NULL && ts_gpu_fd_lseek(fd, off, whence, &pos) == 0 ) {
+		return pos;
 	}
 	r = fs_lseek(fd - FD_BASE, (D)off, whence);
 	if ( r < 0 ) {

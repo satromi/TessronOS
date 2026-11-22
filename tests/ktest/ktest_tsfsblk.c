@@ -42,7 +42,8 @@ LOCAL void test_format( void )
 	if ( vol <= 0 ) return;
 
 	KT_ASSERT_ER(ts_ref_vol_blk(vol, &sb), E_OK);
-	KT_ASSERT_EQ(sb.version, TSFSBLK_VERSION);
+	KT_ASSERT_EQ(sb.version, TSFSBLK_VERSION5);	/* made as version 5 */
+	KT_ASSERT(( sb.incompat & TSFSBLK_INCOMPAT_FMT5 ) != 0);
 	KT_ASSERT_EQ(sb.block_size, TSFSBLK_BLOCK_SIZE);
 	KT_ASSERT(sb.total_blocks > 0);
 	KT_ASSERT(sb.ag_count >= 4);			/* even a small volume has four */
@@ -492,6 +493,326 @@ LOCAL void test_damage( void )
 	vol = 0;
 }
 
+/* ---------------------------------------------------------------- version 5 and the conversion */
+
+#define SBV(b)		( (UW)(b)[8] | ( (UW)(b)[9] << 8 ) )		/* a superblock's version */
+#define JHV(b)		( (UW)(b)[4] | ( (UW)(b)[5] << 8 ) )		/* the journal head's version */
+#define CNV_PAT		0xC5
+
+LOCAL UD	cnv_blk = 0;		/* a block a transaction wrote before the conversion */
+
+/* Read one block of the device past the volume */
+LOCAL ER raw_get( UD blk, UB *buf )
+{
+	SZ	asize;
+	ID	dd;
+	ER	er;
+
+	dd = tk_opn_dev((UB *)TSFSDEV, TD_READ);
+	if ( dd < E_OK ) return (ER)dd;
+	er = tk_srea_dev(dd, (W)( blk * TSFSBLK_SECT_PER_BLK ), buf, TSFSBLK_BLOCK_SIZE, &asize);
+	tk_cls_dev(dd, 0);
+	return ( er >= E_OK ) ? E_OK : er;
+}
+
+LOCAL ER raw_put( UD blk, CONST UB *buf )
+{
+	SZ	asize;
+	ID	dd;
+	ER	er;
+
+	dd = tk_opn_dev((UB *)TSFSDEV, TD_UPDATE);
+	if ( dd < E_OK ) return (ER)dd;
+	er = tk_swri_dev(dd, (W)( blk * TSFSBLK_SECT_PER_BLK ), buf, TSFSBLK_BLOCK_SIZE, &asize);
+	tk_cls_dev(dd, 0);
+	return ( er >= E_OK ) ? E_OK : er;
+}
+
+/* The superblock copies, the first spare and the journal's head, as their versions on the medium */
+LOCAL void versions( UW *p_a, UW *p_b, UW *p_spare, UW *p_head )
+{
+	T_TSFSBLK_SB	sb;
+	UB		*buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+
+	*p_a = *p_b = *p_spare = *p_head = 0;
+	if ( buf == NULL || ts_ref_vol_blk(vol, &sb) < E_OK ) {
+		if ( buf != NULL ) Kfree(buf);
+		return;
+	}
+	if ( raw_get(0, buf) >= E_OK ) *p_a = SBV(buf);
+	if ( raw_get(1, buf) >= E_OK ) *p_b = SBV(buf);
+	if ( raw_get(sb.journal_start + sb.journal_blocks + sb.ag_blocks + 1, buf) >= E_OK ) *p_spare = SBV(buf);
+	if ( raw_get(sb.journal_start, buf) >= E_OK ) *p_head = JHV(buf);
+	Kfree(buf);
+}
+
+/* A volume of version 4 with CONVREQ and a block written by a transaction, still in the ring */
+LOCAL BOOL make_v4( void )
+{
+	T_TSFSFMT	fmt = { TSFSBLK_VERSION, 0 };
+	T_TSFSBLK_SB	sb;
+	UB		*buf;
+	UD		count = 0;
+	ER		er;
+
+	if ( vol > 0 ) {
+		(void)ts_cls_vol_blk(vol);
+		vol = 0;
+	}
+	if ( ts_format_blk_opt(TSFSDEV, "OLD FORMAT", &fmt) < E_OK ) return FALSE;
+	vol = ts_opn_vol_blk(TSFSDEV);
+	if ( vol <= 0 ) return FALSE;
+	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	if ( buf == NULL ) return FALSE;
+	knl_memset(buf, CNV_PAT, TSFSBLK_BLOCK_SIZE);
+	er = ts_jrnl_begin(vol);
+	if ( er >= E_OK ) er = ts_alloc_ext(vol, 1, &cnv_blk, &count);
+	if ( er >= E_OK ) er = ts_jrnl_write(vol, cnv_blk, buf);
+	if ( er >= E_OK ) er = ts_jrnl_commit(vol);
+	if ( er >= E_OK ) er = ts_blk_convreq(vol, TRUE);
+	Kfree(buf);
+	if ( er < E_OK || ts_ref_vol_blk(vol, &sb) < E_OK ) return FALSE;
+	return (BOOL)( sb.version == TSFSBLK_VERSION && ( sb.compat & TSFSBLK_COMPAT_CONVREQ ) != 0 );
+}
+
+LOCAL BOOL cnv_data( void )
+{
+	UB	*buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	BOOL	ok;
+	INT	i;
+
+	if ( buf == NULL ) return FALSE;
+	ok = (BOOL)( ts_read_blk(vol, cnv_blk, buf) >= E_OK );
+	for ( i = 0; ok && i < TSFSBLK_BLOCK_SIZE; i++ ) {
+		if ( buf[i] != CNV_PAT ) ok = FALSE;
+	}
+	Kfree(buf);
+	return ok;
+}
+
+/* What a volume of either version is allowed */
+LOCAL void test_lim( void )
+{
+	T_TSFSLIM	lim;
+
+	if ( !make_v4() ) KT_SKIP("no block device for the native volume");
+	KT_ASSERT_ER(ts_blk_lim(vol, &lim), E_OK);
+	KT_ASSERT_EQ(lim.max_rec, 256);
+	KT_ASSERT_EQ(lim.max_res, 64);
+	KT_ASSERT_EQ(lim.max_link, 1024);
+	KT_ASSERT_EQ(lim.ext_max, 15);
+	KT_ASSERT(lim.meta_max > 0);
+	KT_ASSERT_EQ(lim.xt_form, 4);
+	KT_ASSERT_EQ(lim.txn_budget, (UINT)TSFSJ_MAX_BLOCKS);
+	KT_ASSERT_ER(ts_cls_vol_blk(vol), E_OK);
+
+	KT_ASSERT(ts_format_blk(TSFSDEV, "NEW FORMAT") >= E_OK);
+	vol = ts_opn_vol_blk(TSFSDEV);
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) return;
+	KT_ASSERT_ER(ts_blk_lim(vol, &lim), E_OK);
+	KT_ASSERT_EQ(lim.max_rec, 0);
+	KT_ASSERT_EQ(lim.max_res, 0);
+	KT_ASSERT_EQ(lim.max_link, 0);
+	KT_ASSERT_EQ(lim.ext_max, 767);
+	KT_ASSERT_EQ(lim.meta_max, 0);
+	KT_ASSERT_EQ(lim.xt_form, 5);
+	KT_ASSERT_EQ(lim.txn_budget, (UINT)ts_jrnl_budget(vol));
+	KT_ASSERT_ER(ts_blk_convreq(vol, TRUE), E_OBJ);		/* nothing to convert */
+	KT_ASSERT_ER(ts_blk_convert(vol), E_OK);		/* nothing done */
+}
+
+/*
+ * The conversion of a volume of version 4: the superblock copies, the
+ * spares and the journal's head say version 5, CONVREQ is gone, what
+ * was in the ring is in place, and the volume opens again as version 5
+ * with a journal of version 5 that comes back from a cut in the power.
+ */
+LOCAL void test_convert( void )
+{
+	T_TSFSBLK_SB	sb;
+	T_TSFSJRNL	j;
+	UW		a, b, sp, hd;
+
+	if ( !make_v4() ) KT_SKIP("no block device for the native volume");
+	versions(&a, &b, &sp, &hd);
+	KT_ASSERT_EQ(a, TSFSBLK_VERSION);
+	KT_ASSERT_EQ(hd, TSFSJ_VERSION);
+	KT_ASSERT_ER(ts_blk_convreq(vol, FALSE), E_OK);		/* off and on again */
+	KT_ASSERT_ER(ts_blk_convreq(vol, TRUE), E_OK);
+
+	KT_ASSERT_ER(ts_blk_convert(vol), E_OK);
+	KT_ASSERT_ER(ts_ref_vol_blk(vol, &sb), E_OK);
+	KT_ASSERT_EQ(sb.version, TSFSBLK_VERSION5);
+	KT_ASSERT(( sb.incompat & TSFSBLK_INCOMPAT_FMT5 ) != 0);
+	KT_ASSERT_EQ(sb.compat & TSFSBLK_COMPAT_CONVREQ, 0);
+	KT_ASSERT_EQ(sb.state & TSFSBLK_ST_ERROR, 0);
+	KT_ASSERT_ER(ts_jrnl_ref(vol, &j), E_OK);
+	KT_ASSERT(j.v5);
+	KT_ASSERT_EQ(j.used, 0);
+	versions(&a, &b, &sp, &hd);
+	KT_ASSERT_EQ(a, TSFSBLK_VERSION5);
+	KT_ASSERT_EQ(b, TSFSBLK_VERSION5);
+	KT_ASSERT_EQ(sp, TSFSBLK_VERSION5);
+	KT_ASSERT_EQ(hd, TSFSJ_VERSION5);
+	KT_ASSERT(cnv_data());
+
+	/* a transaction of version 5, cut after its commit */
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_AFTER_COMMIT), E_OK);
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	{
+		UB	*buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+
+		KT_ASSERT(buf != NULL);
+		if ( buf != NULL ) {
+			knl_memset(buf, CNV_PAT ^ 0xFF, TSFSBLK_BLOCK_SIZE);
+			KT_ASSERT_ER(ts_jrnl_write(vol, cnv_blk, buf), E_OK);
+			Kfree(buf);
+		}
+	}
+	KT_ASSERT_ER(ts_jrnl_commit(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_NONE), E_OK);
+	KT_ASSERT_ER(ts_cls_vol_blk(vol), E_OK);
+	vol = ts_opn_vol_blk(TSFSDEV);
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) return;
+	KT_ASSERT(!knl_jrnl_conv_left(vol));
+	KT_ASSERT_ER(ts_ref_vol_blk(vol, &sb), E_OK);
+	KT_ASSERT_EQ(sb.version, TSFSBLK_VERSION5);
+	KT_ASSERT_EQ(sb.state & TSFSBLK_ST_ERROR, 0);
+	{
+		UB	*buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+
+		KT_ASSERT(buf != NULL);
+		if ( buf != NULL ) {
+			KT_ASSERT_ER(ts_read_blk(vol, cnv_blk, buf), E_OK);
+			KT_ASSERT_EQ(buf[0], (UB)( CNV_PAT ^ 0xFF ));
+			Kfree(buf);
+		}
+	}
+	KT_ASSERT_ER(ts_blk_convert(vol), E_OK);			/* once is enough */
+}
+
+/*
+ * The conversion stopped as the power would stop it after each of its
+ * writes. Before the superblock: version 4 and CONVREQ, and converting
+ * again finishes it. After the first copy of the superblock: version 5,
+ * and opening writes the head of version 5, the other copy and the
+ * spares.
+ */
+LOCAL void test_convert_cut( void )
+{
+	static CONST UINT	where[] = { TSFSBLK_CNV_RING, TSFSBLK_CNV_SB, TSFSBLK_CNV_PAIR, TSFSBLK_CNV_SPARE };
+	T_TSFSBLK_SB	sb;
+	T_TSFSJRNL	j;
+	UW		a, b, sp, hd;
+	INT		w;
+
+	for ( w = 0; w < (INT)( sizeof(where) / sizeof(where[0]) ); w++ ) {
+		if ( !make_v4() ) KT_SKIP("no block device for the native volume");
+		KT_ASSERT_ER(ts_blk_convert_fault(vol, where[w]), E_OK);
+		KT_ASSERT_ER(ts_blk_convert(vol), E_OK);
+		KT_ASSERT_ER(ts_cls_vol_blk(vol), E_OK);
+		vol = ts_opn_vol_blk(TSFSDEV);
+		KT_ASSERT(vol > 0);
+		if ( vol <= 0 ) return;
+		KT_ASSERT_ER(ts_ref_vol_blk(vol, &sb), E_OK);
+		KT_ASSERT_EQ(sb.state & TSFSBLK_ST_ERROR, 0);
+		KT_ASSERT_ER(ts_jrnl_ref(vol, &j), E_OK);
+		KT_ASSERT(cnv_data());
+		versions(&a, &b, &sp, &hd);
+		if ( where[w] == TSFSBLK_CNV_RING ) {
+			KT_ASSERT_EQ(sb.version, TSFSBLK_VERSION);
+			KT_ASSERT(( sb.compat & TSFSBLK_COMPAT_CONVREQ ) != 0);
+			KT_ASSERT(!j.v5);
+			KT_ASSERT(!knl_jrnl_conv_left(vol));
+			KT_ASSERT_EQ(hd, TSFSJ_VERSION);
+			KT_ASSERT_ER(ts_blk_convert(vol), E_OK);	/* again, to the end */
+			KT_ASSERT_ER(ts_ref_vol_blk(vol, &sb), E_OK);
+			KT_ASSERT_EQ(sb.version, TSFSBLK_VERSION5);
+			versions(&a, &b, &sp, &hd);
+		} else {
+			KT_ASSERT_EQ(sb.version, TSFSBLK_VERSION5);
+			KT_ASSERT_EQ(sb.compat & TSFSBLK_COMPAT_CONVREQ, 0);
+			KT_ASSERT(j.v5);
+			KT_ASSERT(knl_jrnl_conv_left(vol));
+		}
+		KT_ASSERT_EQ(a, TSFSBLK_VERSION5);
+		KT_ASSERT_EQ(b, TSFSBLK_VERSION5);
+		KT_ASSERT_EQ(sp, TSFSBLK_VERSION5);
+		KT_ASSERT_EQ(hd, TSFSJ_VERSION5);
+
+		/* and the next opening finds nothing left */
+		KT_ASSERT_ER(ts_cls_vol_blk(vol), E_OK);
+		vol = ts_opn_vol_blk(TSFSDEV);
+		KT_ASSERT(vol > 0);
+		if ( vol <= 0 ) return;
+		KT_ASSERT(!knl_jrnl_conv_left(vol));
+		KT_ASSERT(cnv_data());
+		tm_printf((UB *)"  stopped after %d: opened again as version 5\n", (INT)where[w]);
+	}
+}
+
+/*
+ * A volume of version 5 whose journal's head is of version 4 with a
+ * transaction in the ring after it is not one a conversion left: it is
+ * marked damaged and the ring is not put back. Made by hand: a volume of
+ * version 4 cut after a commit, its superblock then said to be version 5.
+ */
+LOCAL void test_convert_wrong( void )
+{
+	T_TSFSBLK_SB	sb;
+	UB		*buf;
+	UD		gen, g;
+	INT		c, i;
+
+	if ( !make_v4() ) KT_SKIP("no block device for the native volume");
+	KT_ASSERT_ER(ts_jrnl_checkpoint(vol), E_OK);		/* the pattern in place */
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_AFTER_COMMIT), E_OK);
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_OK);
+	buf = (UB *)Kmalloc(TSFSBLK_BLOCK_SIZE);
+	KT_ASSERT(buf != NULL);
+	if ( buf == NULL ) return;
+	knl_memset(buf, 0x3D, TSFSBLK_BLOCK_SIZE);
+	KT_ASSERT_ER(ts_jrnl_write(vol, cnv_blk, buf), E_OK);
+	KT_ASSERT_ER(ts_jrnl_commit(vol), E_OK);
+	KT_ASSERT_ER(ts_jrnl_fault(vol, TSFSJ_FAULT_NONE), E_OK);
+	KT_ASSERT_ER(ts_cls_vol_blk(vol), E_OK);
+	vol = 0;
+
+	/* the newer copy of the superblock, made version 5 with FMT5 */
+	gen = 0;
+	c = 0;
+	for ( i = 0; i < 2; i++ ) {
+		KT_ASSERT_ER(raw_get((UD)i, buf), E_OK);
+		g = (UD)buf[16] | ( (UD)buf[17] << 8 ) | ( (UD)buf[18] << 16 ) | ( (UD)buf[19] << 24 );
+		if ( g >= gen ) { gen = g; c = i; }
+	}
+	KT_ASSERT_ER(raw_get((UD)c, buf), E_OK);
+	buf[8] = (UB)TSFSBLK_VERSION5;
+	buf[288] |= (UB)TSFSBLK_INCOMPAT_FMT5;
+	{
+		UW	crc = ts_crc32c(buf, 4092);
+
+		buf[4092] = (UB)crc; buf[4093] = (UB)( crc >> 8 );
+		buf[4094] = (UB)( crc >> 16 ); buf[4095] = (UB)( crc >> 24 );
+	}
+	KT_ASSERT_ER(raw_put((UD)c, buf), E_OK);
+	Kfree(buf);
+
+	vol = ts_opn_vol_blk(TSFSDEV);
+	KT_ASSERT(vol > 0);
+	if ( vol <= 0 ) return;
+	KT_ASSERT_ER(ts_ref_vol_blk(vol, &sb), E_OK);
+	KT_ASSERT_EQ(sb.version, TSFSBLK_VERSION5);
+	KT_ASSERT(( sb.state & TSFSBLK_ST_ERROR ) != 0);
+	KT_ASSERT(!knl_jrnl_ready(vol));
+	KT_ASSERT(cnv_data());					/* the ring was not put back */
+	KT_ASSERT_ER(ts_jrnl_begin(vol), E_RONLY);
+	KT_ASSERT_ER(ts_cls_vol_blk(vol), E_OK);
+	vol = 0;
+}
+
 EXPORT void ktest_tsfsblk( void )
 {
 	KT_RUN(test_crc32c);
@@ -507,9 +828,15 @@ EXPORT void ktest_tsfsblk( void )
 	KT_RUN(test_two_superblocks);
 	KT_RUN(test_seal);
 	KT_RUN(test_damage);
+	KT_RUN(test_lim);
+	KT_RUN(test_convert);
+	KT_RUN(test_convert_cut);
+	KT_RUN(test_convert_wrong);
 
 	if ( vol > 0 ) {
 		ts_cls_vol_blk(vol);
 		vol = 0;
 	}
+	/* made again, for the suites after this one */
+	(void)ts_format_blk(TSFSDEV, "TessronOS test");
 }

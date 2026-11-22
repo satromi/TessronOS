@@ -77,6 +77,26 @@ int	ts_gl_drm_faked( void );
 void	ts_gl_probe_note( int step, const char *driver );
 int	ts_gl_probe_result( char *driver, int n );
 
+/*
+ * Why the platform drew where it did, in a line of text (the reason it
+ * fell back on softpipe, or what the GPU's check took), set after
+ * ts_gl_probe_note; ts_gl_probe_reason copies it and answers the step.
+ * The programs print it on their own lines at start (the browser's
+ * "browser: gpu: OpenGL ES:"), where a log of the board is read.
+ */
+void	ts_gl_probe_why( const char *why );
+int	ts_gl_probe_reason( char *why, int n );
+
+/*
+ * The system's error (an ER of include/tk/errno.h, negative) of the last
+ * refusal of the calls that find and open the GPU (gp_ref_gpu in
+ * ts_gl_gpu_kind, gp_opn_gpu in ts_gl_drm_open), 0 when none was
+ * refused; and its name ("E_NOMEM" ...)
+ */
+void	ts_gl_note_error( int er );
+int	ts_gl_last_error( void );
+const char *ts_gl_error_name( int er );
+
 /* Text on the console, for the platform's own messages */
 void	ts_gl_log( const char *s );
 

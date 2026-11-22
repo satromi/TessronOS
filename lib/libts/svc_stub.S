@@ -172,6 +172,8 @@
 	SVCSTUB	ob_chk_vol,	TSN_OB_CHK_VOL
 	SVCSTUB	ob_chk_request,	TSN_OB_CHK_REQ
 	SVCSTUB	ob_chk_boot_result,	TSN_OB_CHK_BOOT
+	SVCSTUB	ob_cnv_vol,	TSN_OB_CNV_VOL
+	SVCSTUB	ob_cnv_boot_result,	TSN_OB_CNV_BOOT
 	SVCSTUB	ob_chk_label,	TSN_OB_CHK_LABEL
 	SVCSTUB	ob_wip_vol,	TSN_OB_WIP_VOL
 	SVCSTUB	ob_get_atv,	TSN_OB_GET_ATV

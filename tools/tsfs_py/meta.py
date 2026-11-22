@@ -30,7 +30,8 @@ import time
 import uuid
 
 from .layout import TRON_EPOCH
-from .obj import EXT_LEN, ICON_REC, REC_BIN, REC_XTAD, MAX_REC
+from .layout import V4_EXT_MAX
+from .obj import ICON_REC, REC_BIN, REC_XTAD, MAX_REC
 
 STRUCT_KEYS = ("refCount", "recordCount", "makeDate", "updateDate",
                "accessDate")
@@ -353,11 +354,12 @@ def js_num(v, dflt):
     return -x if neg else x
 
 
-def order_parse(raw):
+def order_parse(raw, most=MAX_REC):
     """The "records" of a text as the kernel's order_parse reads it:
     [(rid, rt, sub)], or None when the text is not an object, has no
     "records" array, or an entry is not an object, has rid 0 or is past
-    the most records an object has."""
+    the most records an object has (`most`, 0 for a volume of version 5,
+    which has no such limit)."""
     s = _text(raw)
     try:
         d = json.JSONDecoder(object_pairs_hook=_first_pairs,
@@ -369,7 +371,7 @@ def order_parse(raw):
         return None
     out = []
     for r in d["records"]:
-        if len(out) >= MAX_REC or not isinstance(r, dict):
+        if (most and len(out) >= most) or not isinstance(r, dict):
             return None
         rid = js_num(r.get("rid"), 0) & 0xFFFFFFFF
         rt = js_num(r.get("rt"), 1) & 0xFFFFFFFF
@@ -384,13 +386,13 @@ def default_rt(kind):
     return RT_XTAD if kind == REC_XTAD else RT_BIN_DEFAULT
 
 
-def order_of(raw, places):
+def order_of(raw, places, most=MAX_REC):
     """The records in order as [(PlaceEntry, rt, sub)], as the kernel's
     order_of makes it: the "records" of the text when it names as many
     records as the placement table has and each of them is there, else
     the table's own (rid) order with the default types. The second
     value says whether "records" was taken."""
-    recs = order_parse(raw) if raw is not None else None
+    recs = order_parse(raw, most) if raw is not None else None
     byrid = {}
     for e in places:
         byrid.setdefault(e.rid, e)
@@ -570,7 +572,7 @@ RE_ICON = re.compile(r"^" + _UUID + r"\.ico$")
 RE_RES = re.compile(r"^" + _UUID + r"_(\d+)_(.+)$")
 
 
-def classify(name):
+def classify(name, ext_max=V4_EXT_MAX):
     """What a file of a TADjs set is: (kind, UUID, details) or None.
     kind is "json", "rec" (position, REC_XTAD/REC_BIN), "res" (position,
     number, extension) or "icon"."""
@@ -586,19 +588,20 @@ def classify(name):
         return "icon", uuid.UUID(m.group(1)), (ICON_REC, 0, "ico")
     m = RE_RES.match(name)
     if m:
-        key = res_key("_%s_%s" % (m.group(2), m.group(3)))
+        key = res_key("_%s_%s" % (m.group(2), m.group(3)), ext_max)
         if key is None:
             return "bad", uuid.UUID(m.group(1)), "the extension is too long"
         return "res", uuid.UUID(m.group(1)), key
     return None
 
 
-def res_key(tail):
+def res_key(tail, ext_max=V4_EXT_MAX):
     """(position, number, extension) of a resource from what follows the
     UUID in its name, as the kernel's res_key reads it: "_2_1.png" is
     (2, 1, "png"); a second part that is not a number keeps the whole of
     it as the extension under a number below 0 made from it. None when
-    the extension does not fit its field."""
+    the extension is longer than ext_max bytes (15 on a volume of
+    version 4, 767 as the API takes it on one of version 5)."""
     b = tail.encode("utf-8")
     if not b.startswith(b"_"):
         return None
@@ -626,7 +629,7 @@ def res_key(tail):
             h = ((h ^ c) * 16777619) & 0xFFFFFFFF
         res = -2 - (h & 0x3FFFFFFF)
         rest = b[i:]
-    if len(rest) > EXT_LEN - 1:
+    if len(rest) > ext_max:
         return None
     return rec, res, rest.decode("utf-8")
 

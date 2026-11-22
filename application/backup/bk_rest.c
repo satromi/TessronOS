@@ -673,10 +673,10 @@ LOCAL ER finish_tf( BKJOB *j, CONV *c, BPKBUF *xml )
 	at += xl + nr * 4;
 	for ( i = 0; er >= E_OK && i < nres && at + 2 <= len; i++ ) {
 		UINT	nl = p[at] | ( p[at + 1] << 8 ), dl;
-		char	name[OB_RES_NAME];
+		char	name[OB_RES_NAME_MAX];
 
 		at += 2;
-		if ( at + nl + 4 > len || nl >= OB_RES_NAME ) break;
+		if ( at + nl + 4 > len || nl >= OB_RES_NAME_MAX ) break;
 		memcpy(name, p + at, nl);
 		name[nl] = 0;
 		at += nl;

@@ -179,6 +179,7 @@ LOCAL INT	ut_big_nwas = 0;
 LOCAL INT	ut_objects = 0;			/* how many objects there were at the last "objects" */
 LOCAL volatile INT ut_sync = 0;		/* 1 asked, 3 seen by the loop, 2 no input left after that */
 LOCAL INT	ut_x = 0, ut_y = 0;
+LOCAL UINT	ut_held = 0;		/* the modifiers of the keys held by keydown, put on the pointer's events too */
 
 /*
  * An answer goes out on the console, each line marked "@ut ", which the
@@ -537,7 +538,7 @@ LOCAL void ev( UINT type, UINT code, UINT mods )
 	knl_memset(&e, 0, sizeof(e));
 	e.type = type;
 	e.code = code;
-	e.mods = mods;
+	e.mods = ( type == HID_EV_KEY_DOWN || type == HID_EV_KEY_UP ) ? mods : ( mods | ut_held );
 	e.x = ut_x;
 	e.y = ut_y;
 	inject(&e);
@@ -2719,12 +2720,14 @@ LOCAL void line( CONST char *s )
 		ev(HID_EV_KEY_UP, (UINT)x, (UINT)m);
 		say("ok\n");
 	} else if ( word(&s, "keydown") && num(&s, &x, TRUE) ) {
-		/* held until its keyup: keys pressed together, a shift held over others */
+		/* held until its keyup: keys pressed together, a shift held over others and over the pointer's presses */
 		(void)num(&s, &m, TRUE);
+		ut_held = (UINT)m;
 		ev(HID_EV_KEY_DOWN, (UINT)x, (UINT)m);
 		say("ok\n");
 	} else if ( word(&s, "keyup") && num(&s, &x, TRUE) ) {
 		(void)num(&s, &m, TRUE);
+		ut_held = (UINT)m;		/* the modifiers still held after it */
 		ev(HID_EV_KEY_UP, (UINT)x, (UINT)m);
 		say("ok\n");
 	} else if ( word(&s, "text") ) {

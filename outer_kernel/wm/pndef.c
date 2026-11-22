@@ -56,6 +56,7 @@
 #include <sys/machine.h>
 #include "kernel.h"
 #include <tk/tkernel.h>
+#include <tm/tmonitor.h>
 #include <ts/ob.h>
 #include <ts/part.h>
 #include <ts/tad.h>
@@ -136,8 +137,12 @@ LOCAL BOOL rect( CONST T_TADNODE *nd, CONST char *name, T_DPRECT *r )
 	return TRUE;
 }
 
-/* The words directly inside an element */
-LOCAL INT words( CONST T_TADNODE *nd, UB *out, INT max )
+/*
+ * The words directly inside an element, line ends and tabs left out,
+ * into out when it is given (room for them all and a nought): how many
+ * bytes they are
+ */
+LOCAL INT words_in( CONST T_TADNODE *nd, UB *out )
 {
 	CONST T_TADNODE	*c;
 	INT		n = 0;
@@ -148,25 +153,37 @@ LOCAL INT words( CONST T_TADNODE *nd, UB *out, INT max )
 		if ( c->kind != TAD_ND_TEXT || t == NULL ) {
 			continue;
 		}
-		while ( *t != 0 && n < max - 1 ) {
+		for ( ; *t != 0; t++ ) {
 			if ( *t != '\n' && *t != '\r' && *t != '\t' ) {
-				out[n++] = *t;
+				if ( out != NULL ) out[n] = *t;
+				n++;
 			}
-			t++;
 		}
 	}
-	out[n] = 0;
+	if ( out != NULL ) out[n] = 0;
 	return n;
+}
+
+/* The words as long as they are, allocated (Kfree): NULL when there is not the memory */
+LOCAL UB *words( CONST T_TADNODE *nd )
+{
+	UB	*w = (UB *)Kmalloc((SZ)words_in(nd, NULL) + 1);
+
+	if ( w != NULL ) {
+		(void)words_in(nd, w);
+	}
+	return w;
 }
 
 /*
  * The <name>s of an element put after the part's names: how many, and
- * in *p_at where the first of them went
+ * in *p_at where the first of them went; *p_lost set when one could not
+ * be kept
  */
-LOCAL INT names( T_WMPART *pt, CONST T_TADNODE *nd, INT *p_at, CONST char *tag )
+LOCAL INT names( T_WMPART *pt, CONST T_TADNODE *nd, INT *p_at, CONST char *tag, BOOL *p_lost )
 {
 	CONST T_TADNODE	*c;
-	UB		w[WM_LABEL_MAX];
+	UB		*w;
 	INT		n = 0, at;
 
 	*p_at = 0;
@@ -174,9 +191,11 @@ LOCAL INT names( T_WMPART *pt, CONST T_TADNODE *nd, INT *p_at, CONST char *tag )
 		if ( !is(c, tag) ) {
 			continue;
 		}
-		(void)words(c, w, sizeof(w));
-		at = wm_part_name(pt, w);
+		w = words(c);
+		at = ( w != NULL ) ? wm_part_name(pt, w) : E_NOMEM;
+		if ( w != NULL ) Kfree(w);
 		if ( at < 0 ) {
+			*p_lost = TRUE;
 			break;
 		}
 		if ( n == 0 ) {
@@ -187,18 +206,18 @@ LOCAL INT names( T_WMPART *pt, CONST T_TADNODE *nd, INT *p_at, CONST char *tag )
 	return n;
 }
 
-LOCAL void label( T_WMPART *pt, CONST UB *s )
+/* The words of an element as the part's label, whole: FALSE for no memory */
+LOCAL BOOL label( T_WMPART *pt, CONST T_TADNODE *nd )
 {
-	INT	i;
+	UB	*w = words(nd);
+	ER	er = ( w != NULL ) ? wm_part_set_label(pt, w, -1) : E_NOMEM;
 
-	for ( i = 0; i < WM_LABEL_MAX - 1 && s[i] != 0; i++ ) {
-		pt->label[i] = s[i];
-	}
-	pt->label[i] = 0;
+	if ( w != NULL ) Kfree(w);
+	return (BOOL)( er >= E_OK );
 }
 
 /* Fields along a line: the label with a run of hashes for each field */
-LOCAL void serial( T_WMPART *pt, CONST T_TADNODE *nd )
+LOCAL void serial( T_WMPART *pt, CONST T_TADNODE *nd, BOOL *p_lost )
 {
 	CONST T_TADNODE	*c;
 	INT		n = 0, f = 0, k;
@@ -215,8 +234,13 @@ LOCAL void serial( T_WMPART *pt, CONST T_TADNODE *nd )
 			}
 			continue;
 		}
-		if ( ( !is(c, "f") && !is(c, "n") ) || f >= WM_SB_MAX ) {
+		if ( !is(c, "f") && !is(c, "n") ) {
 			continue;
+		}
+		if ( f >= WM_SB_MAX ) {
+			/* a box of fields holds WM_SB_MAX: the rest are said, not left out unsaid */
+			tm_printf((UB *)"pndef: a box of fields has more than %d fields: those after are not shown\n", WM_SB_MAX);
+			break;
 		}
 		pt->sbw[f] = num(c, "w", 2);
 		for ( k = 0; k < pt->sbw[f] && n < WM_LABEL_MAX - 1; k++ ) {
@@ -229,7 +253,7 @@ LOCAL void serial( T_WMPART *pt, CONST T_TADNODE *nd )
 			if ( yes(c, "zero") ) pt->sbf[f] |= SBF_ZERO;
 			if ( yes(c, "left") ) pt->sbf[f] |= SBF_LEFT;
 		} else {
-			INT	at, cnt = names(pt, c, &at, "name");
+			INT	at, cnt = names(pt, c, &at, "name", p_lost);
 
 			pt->sbf[f] = SBF_NAMES;
 			pt->sbpool[f] = at;
@@ -268,6 +292,10 @@ LOCAL void cols( T_WMPART *pt, CONST T_TADNODE *nd )
 		k++;
 		if ( *v == ',' ) v++;
 	}
+	if ( v != NULL && *v != 0 ) {
+		tm_printf((UB *)"pndef: a list's columns are given more than %d widths: those after are not given theirs\n",
+			  WM_SB_MAX);
+	}
 	pt->sb_n = k;
 }
 
@@ -277,6 +305,7 @@ LOCAL void unadd( T_WMPANEL *def )
 	T_WMPART	*pt = &def->part[def->npart - 1];
 
 	pd_names_free(pt->names);
+	wm_part_long_free(pt);
 	knl_memset(pt, 0, sizeof(*pt));
 	def->npart--;
 }
@@ -289,7 +318,7 @@ LOCAL void unadd( T_WMPANEL *def )
 LOCAL ER part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 {
 	T_WMPART	*pt;
-	UB		w[WM_LABEL_MAX];
+	BOOL		lost = FALSE;
 	INT		at;
 
 	if ( nd->kind != TAD_ND_ELEM ) {
@@ -312,8 +341,7 @@ LOCAL ER part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 		INT	x = num(nd, "x", 0), y = num(nd, "y", 0);
 
 		pt->type |= WM_PT_LABEL | P_BASE;
-		(void)words(nd, w, sizeof(w));
-		label(pt, w);
+		if ( !label(pt, nd) ) lost = TRUE;
 		pt->r.left = x;
 		pt->r.top = y - 16;
 		pt->r.right = def->r.right - def->r.left;
@@ -322,15 +350,14 @@ LOCAL ER part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 	} else if ( is(nd, "label") ) {
 		/* words in the middle of the rectangle's height, four in from its left */
 		pt->type |= WM_PT_LABEL;
-		(void)words(nd, w, sizeof(w));
-		label(pt, w);
+		if ( !label(pt, nd) ) lost = TRUE;
 	} else if ( is(nd, "tags") ) {
 		pt->type |= TG_PARTS;
 		if ( yes(nd, "scroll") ) pt->type |= P_SCROLL;
 		if ( yes(nd, "down") ) pt->type |= P_DOWN;
 		if ( yes(nd, "view") ) pt->type |= P_VIEW;
 		(void)rect(nd, "inner", &pt->inner);
-		pt->count = names(pt, nd, &at, "tag");
+		pt->count = names(pt, nd, &at, "tag", &lost);
 		pt->value = num(nd, "value", 1);
 	} else if ( is(nd, "box") || is(nd, "secret") ) {
 		pt->type |= is(nd, "box") ? TB_PARTS : XB_PARTS;
@@ -338,7 +365,12 @@ LOCAL ER part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 		if ( yes(nd, "jp") ) pt->type |= P_JP;
 		if ( yes(nd, "digits") ) pt->type |= P_DIGITS;
 		if ( yes(nd, "ascii") ) pt->type |= P_ASCII;
-		(void)words(nd, pt->text, WM_LABEL_MAX);
+		{
+			UB	*w = words(nd);
+
+			if ( w == NULL || wm_part_set_text(pt, w, -1) < E_OK ) lost = TRUE;
+			if ( w != NULL ) Kfree(w);
+		}
 	} else if ( is(nd, "number") ) {
 		pt->type |= NB_PARTS;
 		pt->value = num(nd, "value", 0);
@@ -346,34 +378,43 @@ LOCAL ER part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 		pt->type |= SB_PARTS;
 		if ( yes(nd, "zero") ) pt->type |= P_ZERO;
 		if ( yes(nd, "blank") ) pt->type |= P_BLANK;
-		serial(pt, nd);
+		serial(pt, nd, &lost);
 	} else if ( is(nd, "switch") ) {
 		pt->type |= AS_PARTS;
 		pt->value = num(nd, "value", 0);
-		(void)words(nd, w, sizeof(w));
-		label(pt, w);
+		if ( !label(pt, nd) ) lost = TRUE;
 	} else if ( is(nd, "button") ) {
 		CONST UB *a = tad_attr(nd, "answer");
 		CONST UB *pict = tad_attr(nd, "pict");
 
 		pt->type |= MS_PARTS;
-		(void)words(nd, w, sizeof(w));
-		label(pt, w);
+		if ( !label(pt, nd) ) lost = TRUE;
 		pt->answer = ( a == NULL ) ? WM_ANS_NONE : str_same(a, "ok") ? WM_ANS_OK
 			   : str_same(a, "cancel") ? WM_ANS_CANCEL : WM_ANS_NONE;
 		if ( pict != NULL && pict[0] != 0 ) {
 			/* its picture, kept where a box keeps its letters: the resource's href */
 			char	us[TS_UUID_STRLEN + 1];
-			INT	k = 0, i;
+			INT	k = 0, i, pn;
+			UB	*h;
 
-			if ( ts_uuid_to_str(box, us, sizeof(us)) >= E_OK ) {
-				for ( i = 0; us[i] != 0 && k < WM_LABEL_MAX - 2; i++ ) pt->text[k++] = (UB)us[i];
-				pt->text[k++] = '_';
-				for ( i = 0; pict[i] != 0 && k < WM_LABEL_MAX - 1; i++ ) pt->text[k++] = pict[i];
-				pt->text[k] = 0;
+			for ( pn = 0; pict[pn] != 0; pn++ ) ;
+			h = (UB *)Kmalloc(sizeof(us) + 1 + (SZ)pn + 1);
+			if ( h == NULL ) {
+				lost = TRUE;
+			} else if ( ts_uuid_to_str(box, us, sizeof(us)) >= E_OK ) {
+				/* "<uuid>_<pict>", whole: a name cut short would be another picture's */
+				for ( i = 0; us[i] != 0; i++ ) h[k++] = (UB)us[i];
+				h[k++] = '_';
+				for ( i = 0; i < pn; i++ ) h[k++] = pict[i];
+				h[k] = 0;
 				pt->label[0] = 0;
-				knl_pn_pict_load(pt->text);
+				if ( wm_part_set_text(pt, h, k) < E_OK ) {
+					lost = TRUE;
+				} else {
+					knl_pn_pict_load(WM_PT_TEXT_S(pt));
+				}
 			}
+			if ( h != NULL ) Kfree(h);
 		}
 	} else if ( is(nd, "choice") ) {
 		/* one of a group of selector switches, each its own part, one of them on (WM_PT_CHOICE) */
@@ -381,8 +422,7 @@ LOCAL ER part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 		pt->count = 0;
 		pt->group = num(nd, "group", 0);
 		pt->value = num(nd, "value", 0);
-		(void)words(nd, w, sizeof(w));
-		label(pt, w);
+		if ( !label(pt, nd) ) lost = TRUE;
 	} else if ( is(nd, "swatch") ) {
 		pt->type |= WM_PT_SWATCH;
 		pt->group = num(nd, "group", 0);
@@ -391,7 +431,7 @@ LOCAL ER part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 		pt->type |= is(nd, "select") ? WS_PARTS : SS_PARTS;
 		if ( yes(nd, "nosel") ) pt->type |= P_NOSEL;
 		if ( yes(nd, "double") ) pt->type |= P_DOUBLE;
-		pt->count = names(pt, nd, &at, "name");
+		pt->count = names(pt, nd, &at, "name", &lost);
 		pt->value = num(nd, "value", 0);
 		pt->now = num(nd, "now", 0);
 		pt->top = 1;
@@ -403,7 +443,7 @@ LOCAL ER part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 	} else if ( is(nd, "popup") ) {
 		/* its names may also be set only once the panel is open */
 		pt->type |= WM_PT_POPUP;
-		pt->count = names(pt, nd, &at, "name");
+		pt->count = names(pt, nd, &at, "name", &lost);
 		pt->value = num(nd, "value", ( pt->count > 0 ) ? 1 : 0);
 		cols(pt, nd);
 	} else if ( is(nd, "volume") ) {
@@ -414,14 +454,17 @@ LOCAL ER part( T_WMPANEL *def, CONST T_TADNODE *nd, CONST TS_UUID *box )
 		pt->sub = num(nd, "box", 0);
 	} else if ( is(nd, "icon") ) {
 		pt->type |= WM_PT_ICON;
-		(void)words(nd, w, sizeof(w));
-		label(pt, w);
+		if ( !label(pt, nd) ) lost = TRUE;
 	} else if ( is(nd, "line") ) {
 		pt->type |= WM_PT_LINE;
 		if ( pt->r.bottom <= pt->r.top ) pt->r.bottom = pt->r.top + 1;
 		if ( pt->r.right <= pt->r.left ) pt->r.right = pt->r.left + 1;
 	} else {
 		unadd(def);			/* not a part */
+	}
+	if ( lost ) {
+		def->lost = TRUE;		/* opening it says so: no panel stands with its words cut */
+		return E_NOMEM;
 	}
 	return E_OK;
 }
@@ -450,6 +493,7 @@ EXPORT ER knl_pn_load( CONST TS_UUID *box, INT n, T_WMPANEL *def, UB *title, INT
 
 		for ( k = 0; t != NULL && k < def->npart; k++ ) {
 			pd_names_free(t[k].names);
+			wm_part_long_free(&t[k]);
 			knl_memset(&t[k], 0, sizeof(t[k]));
 		}
 		knl_memset(def, 0, sizeof(*def));
@@ -489,6 +533,7 @@ EXPORT ER knl_pn_load( CONST TS_UUID *box, INT n, T_WMPANEL *def, UB *title, INT
 				title[i] = t[i];
 				i++;
 			}
+			while ( i > 0 && t != NULL && t[i] != 0 && ( t[i] & 0xC0 ) == 0x80 ) i--;	/* at a letter's end */
 			title[i] = 0;
 		}
 		for ( c = pn->first; er >= E_OK && c != NULL; c = c->next ) {

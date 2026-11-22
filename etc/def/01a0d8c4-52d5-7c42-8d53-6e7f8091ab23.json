@@ -19,7 +19,7 @@
       "id": "basic-slide",
       "kind": "app",
       "name": "スライド",
-      "version": "R1.410",
+      "version": "R1.500",
       "builtin": false,
       "base": [
         "01a0d8c4-52d7-7e64-8f75-8091a2b3cd45"

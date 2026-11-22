@@ -37,7 +37,10 @@ LOCAL RTN *node( RT *rt, UH op, CONST T_TADNODE *nd, RTN *up, INT blk )
 {
 	RTN	*n = (RTN *)get(rt, sizeof(RTN));
 
-	if ( n == NULL ) return NULL;
+	if ( n == NULL ) {
+		rt->oom = TRUE;
+		return NULL;
+	}
 	n->op = op;
 	n->nd = nd;
 	n->up = up;
@@ -61,6 +64,108 @@ LOCAL void free_nodes( RT *rt, RTN *n )
 	}
 }
 
+/*
+ * A table made room in for 'need' entries of esz bytes: it doubles (from
+ * 8) and what it held is moved. pp is the address of the table's
+ * pointer. FALSE when the memory is not there (the table is as it was).
+ */
+EXPORT BOOL rt_room( RT *rt, void *pp, INT *cap, INT need, SZ esz )
+{
+	void	**p = (void **)pp;
+	void	*t;
+	INT	c = *cap;
+
+	if ( need <= c ) return TRUE;
+	if ( c < 8 ) c = 8;
+	while ( c < need ) {
+		if ( c > 0x3FFFFFFF ) return FALSE;
+		c *= 2;
+	}
+	if ( (SZ)c > (SZ)0x7FFFFFFF / esz ) return FALSE;
+	t = get(rt, (SZ)c * esz);
+	if ( t == NULL ) return FALSE;
+	if ( *p != NULL ) {
+		SZ	k, n = (SZ)*cap * esz;
+
+		for ( k = 0; k < n; k++ ) ((UB *)t)[k] = ((UB *)*p)[k];
+		rt->host.free(rt->host.arg, *p);
+	}
+	*p = t;
+	*cap = c;
+	return TRUE;
+}
+
+/*
+ * A table of slots, each a place of its own that does not move once
+ * made (a thread is pointed to while others are started). Room for need
+ * slots; if the memory runs out half way, the slots there are stay and
+ * FALSE is answered.
+ */
+EXPORT BOOL rt_room_slots( RT *rt, void *pp, INT *cap, INT need, SZ esz )
+{
+	void	***p = (void ***)pp;
+	void	**t;
+	INT	c = *cap, k;
+
+	if ( need <= c ) return TRUE;
+	if ( c < 8 ) c = 8;
+	while ( c < need ) {
+		if ( c > 0x3FFFFFFF ) return FALSE;
+		c *= 2;
+	}
+	if ( (SZ)c > (SZ)0x7FFFFFFF / (SZ)sizeof(void *) ) return FALSE;
+	t = (void **)get(rt, (SZ)c * sizeof(void *));
+	if ( t == NULL ) return FALSE;
+	for ( k = 0; k < *cap; k++ ) t[k] = (*p)[k];
+	for ( k = *cap; k < c; k++ ) {
+		t[k] = get(rt, esz);
+		if ( t[k] == NULL ) break;
+	}
+	if ( *p != NULL ) rt->host.free(rt->host.arg, *p);
+	*p = t;
+	*cap = k;
+	return (BOOL)( k >= need );
+}
+
+/* Room for n keyframes in an animation */
+EXPORT BOOL rt_anim_keys( RT *rt, RTANIM *a, INT n )
+{
+	INT	c = a->ckey, c2 = c, c3 = c;
+
+	if ( n <= c ) return TRUE;
+	if ( !rt_room(rt, &a->val, &c, n, sizeof(RT_V)) ) return FALSE;
+	if ( !rt_room(rt, &a->off, &c2, n, sizeof(INT)) ) return FALSE;
+	if ( !rt_room(rt, &a->ease, &c3, n, sizeof(RT_EASE)) ) return FALSE;
+	a->ckey = c;			/* the three grew by the same steps */
+	return TRUE;
+}
+
+/* Room for n blocks in a thread */
+EXPORT BOOL rt_frames( RT *rt, RTTHR *th, INT n )
+{
+	INT	c = th->cfr;
+
+	if ( n <= c ) return TRUE;
+	if ( c == 0 && n <= RT_DEPTH0 ) n = RT_DEPTH0;
+	if ( !rt_room(rt, &th->fr, &c, n, sizeof(RTFRAME)) ) return FALSE;
+	th->cfr = c;
+	return TRUE;
+}
+
+LOCAL void drop( RT *rt, void *p )
+{
+	if ( p != NULL ) rt->host.free(rt->host.arg, p);
+}
+
+/* The tables of the run, given back */
+LOCAL void free_slots( RT *rt, void **t, INT c )
+{
+	INT	i;
+
+	for ( i = 0; t != NULL && i < c; i++ ) drop(rt, t[i]);
+	drop(rt, t);
+}
+
 EXPORT void rt_free_prog( RT *rt )
 {
 	INT	i;
@@ -71,6 +176,49 @@ EXPORT void rt_free_prog( RT *rt )
 		free_nodes(rt, rt->blk[i].body);
 		rt->blk[i].body = NULL;
 	}
+	for ( i = 0; i < rt->nusys; i++ ) {
+		drop(rt, rt->usys[i].auxno);
+		drop(rt, rt->usys[i].an);
+		drop(rt, rt->usys[i].ad);
+	}
+	for ( i = 0; i < rt->cthr; i++ ) drop(rt, rt->thr[i]->fr);
+	for ( i = 0; i < rt->canim; i++ ) {
+		drop(rt, rt->anim[i]->val);
+		drop(rt, rt->anim[i]->off);
+		drop(rt, rt->anim[i]->ease);
+	}
+	free_slots(rt, (void **)rt->thr, rt->cthr);
+	free_slots(rt, (void **)rt->anim, rt->canim);
+	free_slots(rt, (void **)rt->trig, rt->ctrig);
+	drop(rt, rt->blk);
+	drop(rt, rt->onerr);
+	drop(rt, rt->usys);
+	drop(rt, rt->stream);
+	drop(rt, rt->obj);
+	drop(rt, rt->media);
+	drop(rt, rt->mnode);
+	drop(rt, rt->upaused);
+	drop(rt, rt->repl);
+	drop(rt, rt->want);
+	drop(rt, rt->sndq);
+	drop(rt, rt->mev);
+	rt->thr = NULL;
+	rt->anim = NULL;
+	rt->trig = NULL;
+	rt->blk = NULL;
+	rt->onerr = NULL;
+	rt->usys = NULL;
+	rt->stream = NULL;
+	rt->obj = NULL;
+	rt->media = NULL;
+	rt->mnode = NULL;
+	rt->upaused = NULL;
+	rt->repl = NULL;
+	rt->want = NULL;
+	rt->sndq = NULL;
+	rt->mev = NULL;
+	rt->cthr = rt->canim = rt->ctrig = 0;
+	rt->nblk = rt->nusys = rt->nstream = rt->nobj = rt->nmedia = rt->nrepl = rt->nwant = 0;
 }
 
 /* ---------------------------------------------------------------- what it moves */
@@ -83,7 +231,8 @@ LOCAL void want( RT *rt, CONST UB *id )
 	for ( i = 0; i < rt->nwant; i++ ) {
 		if ( rt_eq(rt->want[i], id) ) return;
 	}
-	if ( rt->nwant < RT_MAX_OBJ ) rt->want[rt->nwant++] = id;
+	if ( rt_room(rt, &rt->want, &rt->cwant, rt->nwant + 1, sizeof(CONST UB *)) ) rt->want[rt->nwant++] = id;
+	else rt->oom = TRUE;
 }
 
 EXPORT BOOL rt_wants( CONST RT *rt, CONST UB *id )
@@ -114,7 +263,10 @@ EXPORT INT rt_obj_add( RT *rt, CONST UB *id, UINT kind, CONST T_TADNODE *nd )
 	INT	i = rt_obj_find(rt, id);
 
 	if ( i >= 0 ) return i;
-	if ( rt->nobj >= RT_MAX_OBJ ) return -1;
+	if ( !rt_room(rt, &rt->obj, &rt->cobj, rt->nobj + 1, sizeof(RT_OBJ)) ) {
+		rt->oom = TRUE;
+		return -1;
+	}
 	i = rt->nobj++;
 	o = &rt->obj[i];
 	o->id = id;
@@ -158,7 +310,7 @@ EXPORT INT rt_bind( RT *rt, CONST UB *id, UINT kind, CONST T_DPRECT *box, INT z,
 
 	if ( rt == NULL || id == NULL || box == NULL ) return E_PAR;
 	i = rt_obj_add(rt, id, kind, nd);
-	if ( i < 0 ) return E_LIMIT;
+	if ( i < 0 ) return E_NOMEM;
 	o = &rt->obj[i];
 	if ( o->bound ) return i;		/* the first element with the id is the one */
 	o->kind = kind;
@@ -271,7 +423,15 @@ LOCAL INT media_decl( RT *rt, CONST T_TADNODE *nd, UINT kind )
 	INT		i = ( id != NULL ) ? rt_media_of(rt, id) : -1;
 
 	if ( i >= 0 ) return i;
-	if ( rt->nmedia >= RT_MAX_MEDIA ) return -1;
+	if ( !rt_room(rt, &rt->media, &rt->cmedia, rt->nmedia + 1, sizeof(RT_MEDIA)) ) {
+		rt->oom = TRUE;
+		return -1;
+	}
+	if ( !rt_room(rt, &rt->mnode, &rt->cmnode, rt->nmedia + 1, sizeof(RTN *))
+	  || !rt_room(rt, &rt->upaused, &rt->cupaused, rt->nmedia + 1, sizeof(BOOL)) ) {
+		rt->oom = TRUE;
+		return -1;
+	}
 	i = rt->nmedia++;
 	m = &rt->media[i];
 	m->id = id;
@@ -361,7 +521,10 @@ LOCAL void unit_system( RT *rt, CONST T_TADNODE *nd )
 	if ( id < 0 ) return;
 	for ( i = 0; i < rt->nusys && rt->usys[i].id != id; i++ ) ;
 	if ( i == rt->nusys ) {
-		if ( rt->nusys >= RT_MAX_USYS ) return;
+		if ( !rt_room(rt, &rt->usys, &rt->cusys, rt->nusys + 1, sizeof(RTUSYS)) ) {
+			rt->oom = TRUE;
+			return;
+		}
 		rt->nusys++;
 	}
 	u = &rt->usys[i];
@@ -377,8 +540,20 @@ LOCAL void unit_system( RT *rt, CONST T_TADNODE *nd )
 		u->pd = 1;
 	}
 	for ( c = nd->first; c != NULL; c = c->next ) {
-		if ( rt_is(c, "auxiliaryUnit") && u->naux < RT_MAX_AUX ) {
+		if ( rt_is(c, "auxiliaryUnit") ) {
 			D	n = 1, dd = 1;
+
+			if ( u->naux >= u->caux ) {
+				INT	c1 = u->caux, c2 = u->caux, c3 = u->caux;
+
+				if ( !rt_room(rt, &u->auxno, &c1, u->naux + 1, sizeof(INT))
+				  || !rt_room(rt, &u->an, &c2, u->naux + 1, sizeof(D))
+				  || !rt_room(rt, &u->ad, &c3, u->naux + 1, sizeof(D)) ) {
+					rt->oom = TRUE;
+					break;
+				}
+				u->caux = c1;
+			}
 
 			if ( !rt_ratio(rt_attr(c, "derivation"), &n, &dd) || n <= 0 || dd <= 0 ) {
 				n = 1;
@@ -415,7 +590,7 @@ LOCAL void ctrl( RT *rt, RTN *n, UINT kind )
 		want(rt, n->s1);
 	}
 	if ( kind == CT_IMAGE && rt_same(n->s2, "replace") && n->s4 != NULL
-	  && rt->nrepl < RT_MAX_REPL ) {
+	  && rt_room(rt, &rt->repl, &rt->crepl, rt->nrepl + 1, sizeof(RTREPL)) ) {
 		rt->repl[rt->nrepl].href = n->s4;
 		rt->repl[rt->nrepl].ref = n->s1;
 		rt->nrepl++;
@@ -684,7 +859,7 @@ LOCAL RTN *element( RT *rt, CONST T_TADNODE *nd, RTN *up, INT blk )
 		if ( n == NULL ) return NULL;
 		n->body = block(rt, nd->first, n, blk);
 	} else if ( rt_is(nd, "stream") ) {
-		if ( rt->nstream < RT_MAX_STREAM ) {
+		if ( rt_room(rt, &rt->stream, &rt->cstream, rt->nstream + 1, sizeof(RT_STREAM)) ) {
 			RT_STREAM	*s = &rt->stream[rt->nstream++];
 
 			s->number = rt_int(rt_attr(nd, "number"), rt->nstream);
@@ -763,7 +938,7 @@ EXPORT ER rt_compile( RT *rt )
 			CONST UB	*a;
 			RTN		*n;
 
-			if ( rt->nblk >= RT_MAX_BLOCK ) return E_LIMIT;
+			if ( !rt_room(rt, &rt->blk, &rt->cblk, rt->nblk + 1, sizeof(RTBLOCK)) ) return E_NOMEM;
 			b = &rt->blk[rt->nblk];
 			b->nd = c;
 			a = rt_attr(c, "autoplay");
@@ -777,11 +952,14 @@ EXPORT ER rt_compile( RT *rt )
 			}
 			b->body = block(rt, c->first, NULL, rt->nblk);
 			for ( n = b->body; n != NULL; n = n->next ) {
-				if ( n->op == OP_ONERROR && b->nonerr < RT_MAX_ONERR
-				  && rt->nonerr < RT_MAX_ONERR * RT_MAX_BLOCK ) {
-					b->onerr[b->nonerr++] = rt->nonerr;
-					rt->onerr[rt->nonerr++] = n;
+				if ( n->op != OP_ONERROR ) continue;
+				if ( !rt_room(rt, &rt->onerr, &rt->conerr, rt->nonerr + 1, sizeof(RTN *)) ) {
+					rt->oom = TRUE;
+					break;
 				}
+				if ( b->nonerr == 0 ) b->onerr0 = rt->nonerr;
+				b->nonerr++;
+				rt->onerr[rt->nonerr++] = n;
 			}
 			rt->nblk++;
 		} else if ( rt_is(c, "audio") || rt_is(c, "video") || rt_is(c, "image")
@@ -799,6 +977,7 @@ EXPORT ER rt_compile( RT *rt )
 	}
 	if ( rt->nblk == 0 ) {
 		/* only media outside: an empty block to play them in */
+		if ( !rt_room(rt, &rt->blk, &rt->cblk, 1, sizeof(RTBLOCK)) ) return E_NOMEM;
 		rt->blk[0].nd = NULL;
 		rt->blk[0].autoplay = -1;
 		rt->nblk = 1;
@@ -806,7 +985,7 @@ EXPORT ER rt_compile( RT *rt )
 	for ( i = 0; i < rt->nblk; i++ ) {
 		rt->blk[i].delay = 0;
 	}
-	return E_OK;
+	return rt->oom ? E_NOMEM : E_OK;
 }
 
 /* ---------------------------------------------------------------- finding it */

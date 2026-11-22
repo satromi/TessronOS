@@ -1867,7 +1867,7 @@ LOCAL BOOL res_name_ok( CONST UB *name )
 		return is_icon_name(name);
 	}
 	for ( n = 0; name[n] != 0; n++ ) {
-		if ( name[n] == '/' || n >= OB_RES_NAME - 1 ) return FALSE;
+		if ( name[n] == '/' || n >= OB_RES_NAME_MAX - 1 ) return FALSE;
 	}
 	if ( n == 5 && name[1] == 'j' && name[2] == 's' && name[3] == 'o' && name[4] == 'n' ) {
 		return FALSE;			/* .json */
@@ -3318,12 +3318,14 @@ EXPORT ER ob_cpy_obj( CONST TS_UUID *uuid, CONST T_OBCRE *pk_cre, TS_UUID *p_uui
 
 	/* and what is kept beside them */
 	if ( er >= E_OK && sm->lres != NULL && dm->wres != NULL && sm->rres != NULL ) {
-		/* the names of all of them: how many asked first */
-		if ( sm->lres(sh, NULL, 0, &cnt) < E_OK ) cnt = 0;
-		names = (UB *)Kmalloc(( cnt > 0 ? (SZ)cnt : 1 ) * OB_RES_NAME);
+		/* the names of all of them: the room they take asked first */
+		SZ	room = sm->lres(sh, NULL, 0, &cnt);
+
+		if ( room < E_OK ) cnt = 0;
+		names = (UB *)Kmalloc(( cnt > 0 && room > 0 ) ? room : 1);
 		if ( names == NULL ) {
 			er = E_NOMEM;
-		} else if ( cnt > 0 && sm->lres(sh, names, (SZ)cnt * OB_RES_NAME, &cnt) >= E_OK ) {
+		} else if ( cnt > 0 && sm->lres(sh, names, room, &cnt) >= E_OK ) {
 			CONST UB	*nm = names;
 
 			for ( i = 0; i < cnt && er >= E_OK; i++ ) {
@@ -3890,6 +3892,7 @@ EXPORT ER knl_ob_meta_read( CONST TS_UUID *uuid, UB *buf, INT max, INT *p_len )
 	er = m->gat(h, buf, (SZ)max - 1, &asz);
 	if ( m->close != NULL ) (void)m->close(h);
 	if ( er >= E_OK ) {
+		if ( asz > (SZ)max - 1 ) asz = (SZ)max - 1;	/* a manager answers the whole size: what was copied is max - 1 */
 		buf[asz] = 0;
 		*p_len = (INT)asz;
 	}
@@ -4222,6 +4225,7 @@ EXPORT ER knl_ob_init( void )
 	er = E_NOEXS;
 #ifdef CNF_OB_SYSVOL
 	(void)knl_ob_chk_boot(CNF_OB_SYSVOL);	/* a repair asked for: before anything uses it */
+	(void)knl_ob_conv_boot(CNF_OB_SYSVOL);	/* a conversion to version 5 agreed to (CONVREQ) */
 	knl_sysvol_grow(CNF_OB_SYSVOL);		/* the card's room taken in, the first time */
 	er = knl_obfile_attach(CNF_OB_SYSVOL, TSFS_STORE_BLK);
 	if ( er >= E_OK ) {

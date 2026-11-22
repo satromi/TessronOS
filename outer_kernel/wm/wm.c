@@ -132,7 +132,7 @@ typedef struct {
 	 * shown again when its group is. visible is FALSE while it is.
 	 */
 	BOOL		away;
-	char		title[WM_TITLE_MAX];
+	char		*title;		/* the name in its band, whole (Kmalloc), NULL for none */
 	INT		pict;		/* the picture in the band, by number */
 	ID		owner;		/* whose pictures and panels are looked in */
 	UW		*icon;		/* the icon of the object it stands for, or NULL */
@@ -1362,6 +1362,41 @@ LOCAL void subs_away( void );
 LOCAL void screen_win( BOOL opened );
 LOCAL BOOL main_screen( CONST T_DPRECT *on );
 
+/* A title kept whole (Kmalloc): NULL for none, or for want of memory */
+LOCAL char *title_dup( CONST char *t )
+{
+	SZ	n;
+	char	*d;
+
+	if ( t == NULL || t[0] == '\0' ) {
+		return NULL;
+	}
+	n = (SZ)knl_strlen(t);
+	d = (char *)Kmalloc(n + 1);
+	if ( d != NULL ) {
+		knl_memcpy(d, t, n + 1);
+	}
+	return d;
+}
+
+/* What fits of a title in buf (max bytes, with its terminator), cut at a whole letter: the bytes put */
+LOCAL INT title_put( CONST char *t, char *buf, INT max )
+{
+	INT	k;
+
+	if ( max <= 0 ) {
+		return 0;
+	}
+	for ( k = 0; t != NULL && k < max - 1 && t[k] != '\0'; k++ ) {
+		buf[k] = t[k];
+	}
+	while ( k > 0 && t != NULL && t[k] != '\0' && ( (UB)t[k] & 0xC0 ) == 0x80 ) {
+		k--;
+	}
+	buf[k] = '\0';
+	return k;
+}
+
 EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 {
 	WMWIN		*w;
@@ -1459,8 +1494,9 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 	w->owner = 0;
 	w->mktsk = tk_get_tid();
 	w->mkpid = ( ts_get_pid() > 0 ) ? ts_get_pid() : 0;
-	for ( k = 0; k < WM_TITLE_MAX - 1 && title != NULL && title[k] != '\0'; k++ ) {
-		w->title[k] = title[k];
+	w->title = title_dup(title);
+	if ( w->title == NULL && title != NULL && title[0] != '\0' ) {
+		tm_printf((UB *)"wm: no memory for the title of window %d\n", (INT)w->wid);
 	}
 
 	/* it comes up in front of everything else (of the windows that do not float, when it does not) */
@@ -1494,6 +1530,10 @@ EXPORT INT wm_open( CONST T_DPRECT *outer, UINT attr, CONST char *title )
 		INT	er = w->gid;		/* no memory for its drawing environment */
 
 		knl_vunmap(w->pixels, pages);
+		if ( w->title != NULL ) {
+			Kfree(w->title);
+			w->title = NULL;
+		}
 		w->used = FALSE;
 		wm_nwin--;
 		z_close_gap(0);
@@ -1836,6 +1876,10 @@ EXPORT ER wm_close( INT wid )
 		Kfree(w->icon);
 		w->icon = NULL;
 	}
+	if ( w->title != NULL ) {
+		Kfree(w->title);
+		w->title = NULL;
+	}
 	w->own = NULL;
 	w->used = FALSE;
 	w->away = FALSE;
@@ -1899,7 +1943,7 @@ EXPORT ER wm_close( INT wid )
 	return E_OK;
 }
 
-/* A window's title, for what reads it as the object's name */
+/* A window's title, for what reads it as the object's name: what fits, at a whole letter */
 EXPORT ER knl_wm_title( INT wid, char *buf, INT max )
 {
 	WMWIN	*w;
@@ -1911,9 +1955,7 @@ EXPORT ER knl_wm_title( INT wid, char *buf, INT max )
 	tk_loc_mtx(wm_mtxid, TMO_FEVR);
 	w = win_of(wid);
 	if ( w != NULL ) {
-		for ( k = 0; k < max - 1 && w->title[k] != '\0'; k++ ) {
-			buf[k] = w->title[k];
-		}
+		k = title_put(w->title, buf, max);
 	}
 	buf[k] = '\0';
 	tk_unl_mtx(wm_mtxid);
@@ -2506,10 +2548,9 @@ EXPORT INT wm_title( INT wid, char *buf, INT max )
 		tk_unl_mtx(wm_mtxid);
 		return E_ID;
 	}
-	for ( n = 0; w->title[n] != 0 && n < max - 1; n++ ) {
-		buf[n] = w->title[n];
-	}
-	buf[n] = 0;
+	/* what fits, at a whole letter; the length of the whole, as snprintf answers */
+	(void)title_put(w->title, buf, max);
+	n = ( w->title != NULL ) ? (INT)knl_strlen(w->title) : 0;
 	tk_unl_mtx(wm_mtxid);
 	return n;
 }
@@ -3259,26 +3300,23 @@ LOCAL void draw_title( INT gid, CONST WMWIN *w, INT fw )
 				     wm_look(WM_LOOK_TITLE_BACK));
 		}
 	}
-	if ( fid <= 0 || w->title[0] == '\0' || room <= 0 ) {
+	if ( fid <= 0 || w->title == NULL || w->title[0] == '\0' || room <= 0 ) {
 		return;
 	}
 	fn_set_size(fid, th);
-	n = fn_fit(fid, (CONST UB *)w->title, room);
+	n = fn_fit(fid, (CONST UB *)w->title, room);	/* what the band's width shows */
 	if ( n <= 0 ) {
 		return;
 	}
 	{
-		char	cut[WM_TITLE_MAX];
-		INT	i;
+		char	c = w->title[n];
 
-		for ( i = 0; i < n && i < WM_TITLE_MAX - 1; i++ ) {
-			cut[i] = w->title[i];
-		}
-		cut[i] = '\0';
-		fn_draw(gid, fid, x, y, (CONST UB *)cut,
+		w->title[n] = '\0';			/* drawn up to there, the title kept whole */
+		fn_draw(gid, fid, x, y, (CONST UB *)w->title,
 			wm_look(WM_LOOK_TITLE_BACK));
-		fn_draw(gid, fid, x + 1, y + 1, (CONST UB *)cut,
+		fn_draw(gid, fid, x + 1, y + 1, (CONST UB *)w->title,
 			wm_look(WM_LOOK_TITLE_TEXT));
+		w->title[n] = c;
 	}
 }
 
@@ -3622,28 +3660,26 @@ EXPORT ER wm_set_pict( INT wid, INT num, ID owner )
 }
 
 /*
- * A new name in the title band. It is cut at a letter's edge when it is
- * longer than a window keeps: half a letter is no letter.
+ * A new name in the title band, kept whole: the band shows what its
+ * width holds. E_NOMEM when there is no memory for it (the old one stays).
  */
 EXPORT ER wm_set_title( INT wid, CONST char *title )
 {
 	WMWIN	*w;
-	INT	k;
+	char	*t = title_dup(title);
 
+	if ( t == NULL && title != NULL && title[0] != '\0' ) {
+		return E_NOMEM;
+	}
 	tk_loc_mtx(wm_mtxid, TMO_FEVR);
 	w = win_of(wid);
 	if ( w == NULL ) {
 		tk_unl_mtx(wm_mtxid);
+		if ( t != NULL ) Kfree(t);
 		return E_ID;
 	}
-	for ( k = 0; k < WM_TITLE_MAX - 1 && title != NULL && title[k] != '\0'; k++ ) {
-		w->title[k] = title[k];
-	}
-	while ( k > 0 && title != NULL && title[k] != '\0'
-	     && ( (UB)title[k] & 0xC0 ) == 0x80 ) {
-		k--;
-	}
-	w->title[k] = '\0';
+	if ( w->title != NULL ) Kfree(w->title);
+	w->title = t;
 	draw_frame(w);
 	if ( w->visible ) gone_add(&w->outer);
 	tk_unl_mtx(wm_mtxid);
@@ -4558,7 +4594,8 @@ LOCAL INT front_any( void )
 
 /*
  * For 強制終了 (fquit.c): the window a person works in -- the one with
- * the keys, or else the one nearest the viewer that is not a popup -- in
+ * the keys, unless an ordinary window stands in front of it, or else the
+ * one nearest the viewer that is not a popup -- in
  * *p_wid (0 none), and the popups shown in front of it, nearest first:
  * a panel the desktop shows for a program stands there. E_TMOUT when
  * the lock of the windows is not had within tmo: a task that holds it
@@ -4566,7 +4603,7 @@ LOCAL INT front_any( void )
  */
 EXPORT ER knl_wm_front_pick( TMO tmo, INT *p_wid, INT *pops, INT max, INT *p_npop )
 {
-	WMWIN	*f, *w;
+	WMWIN	*f, *fw, *w;
 	INT	wid, z, n = 0;
 
 	*p_wid = 0;
@@ -4581,8 +4618,27 @@ EXPORT ER knl_wm_front_pick( TMO tmo, INT *p_wid, INT *pops, INT max, INT *p_npo
 	if ( wid != 0 && win_of(wid) == NULL ) {
 		wid = 0;
 	}
-	if ( wid == 0 ) {
+	f = win_of(wid);
+	if ( f == NULL ) {
 		wid = front_any();
+	} else {
+		/*
+		 * An ordinary window brought in front of the one with the keys
+		 * is the one the person sees in front: a process's window does
+		 * not take the keys when it is pressed, and the keys may stay
+		 * with a window of another process behind it (the desktop's
+		 * first window is 仮身一覧's process). Floating windows and those
+		 * that never have the keys (a screen keyboard, a palette) are
+		 * not looked at: they stand in front of the window worked in.
+		 */
+		for ( z = 0; z < f->z; z++ ) {
+			fw = win_at_z(z);
+			if ( fw != NULL && fw->visible
+			  && ( fw->attr & ( WM_ATTR_POPUP | WM_ATTR_NOFOCUS | WM_ATTR_FLOAT ) ) == 0 ) {
+				wid = fw->wid;
+				break;
+			}
+		}
 	}
 	f = win_of(wid);
 	for ( z = 0; z < wm_nwin && n < max; z++ ) {
@@ -7696,8 +7752,7 @@ EXPORT INT wm_share_list( T_WMSHARE *v, INT max )
 			s->w = w->work.right - w->work.left;
 			s->h = w->work.bottom - w->work.top;
 			s->flags = 0;
-			knl_memcpy(s->title, w->title, WM_TITLE_MAX);
-			s->title[WM_TITLE_MAX - 1] = 0;
+			(void)title_put(w->title, s->title, (INT)sizeof(s->title));	/* the record's room, at a whole letter */
 			n++;
 		}
 	}

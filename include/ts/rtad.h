@@ -49,7 +49,6 @@ typedef D	RT_V;			/* millionths */
 
 typedef struct rt	RT;		/* a program and its run */
 
-#define RT_MEDIA_MAX	64		/* media one program may declare */
 
 /* ---------------------------------------------------------------- what is on the screen */
 

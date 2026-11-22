@@ -35,9 +35,11 @@
  *	record of each volume there is made to agree, for the links of each
  *	other volume there, with what their link tables say.
  *
- *	A record says at most TSFSO_MAX_LINK links, the links one object
- *	has; a link beyond that is not recorded (E_LIMIT, said on the
- *	console), and is found again by the next matching.
+ *	A record says at most the links one object of its volume may have
+ *	(1024 on a volume of the format's version 4, any number on one of
+ *	version 5, knl_tsfs_max_link); a link beyond that is not recorded
+ *	(E_LIMIT, said on the console), and is found again by the next
+ *	matching.
  */
 
 #include <sys/machine.h>
@@ -51,7 +53,6 @@
 #include <ts/uuid.h>
 #include "obj.h"
 
-#define XR_MAX		TSFSO_MAX_LINK	/* links one record says */
 #define XR_VOLS		64		/* native volumes matched at once */
 #define XR_TAKE		64		/* queued changes taken at once */
 #define XR_LIST		64		/* objects listed at once */
@@ -65,10 +66,44 @@ typedef struct {
 	INT	n;
 } XRENT;
 
+/* The entries, as many as there are, the table twice as large each time it fills */
 typedef struct {
-	XRENT	e[XR_MAX];
-	INT	n;
+	XRENT	*e;
+	INT	n, cap;
+	UINT	max;			/* links the record may say, 0 for no limit */
 } XRTAB;
+
+LOCAL XRTAB *xr_new( void )
+{
+	return (XRTAB *)Kcalloc(1, sizeof(XRTAB));
+}
+
+LOCAL void xr_free( XRTAB *x )
+{
+	if ( x != NULL ) {
+		if ( x->e != NULL ) Kfree(x->e);
+		Kfree(x);
+	}
+}
+
+/* One entry put at the end; FALSE when there is no memory for it */
+LOCAL BOOL xr_push( XRTAB *x, CONST XRENT *e )
+{
+	if ( x->n >= x->cap ) {
+		INT	cap = ( x->cap > 0 ) ? x->cap * 2 : 64;
+		XRENT	*ne = (XRENT *)Kmalloc(sizeof(XRENT) * (SZ)cap);
+
+		if ( ne == NULL ) {
+			return FALSE;
+		}
+		if ( x->n > 0 ) knl_memcpy(ne, x->e, sizeof(XRENT) * (SZ)x->n);
+		if ( x->e != NULL ) Kfree(x->e);
+		x->e = ne;
+		x->cap = cap;
+	}
+	x->e[x->n++] = *e;
+	return TRUE;
+}
 
 LOCAL ID	xr_mtx = 0;		/* the records, one change at a time */
 LOCAL ID	xr_dmtx = 0;		/* the queue, taken in by one task at a time */
@@ -149,22 +184,26 @@ LOCAL XRENT *ent_of( XRTAB *x, CONST TS_UUID *v, CONST TS_UUID *h, CONST TS_UUID
 /* So many more links (or fewer) in the table; FALSE when it is full */
 LOCAL BOOL ent_add( XRTAB *x, CONST TS_UUID *v, CONST TS_UUID *h, CONST TS_UUID *t, INT d )
 {
-	XRENT	*e = ent_of(x, v, h, t);
-	INT	i, sum = 0;
+	XRENT	*e = ent_of(x, v, h, t), z;
+	UD	sum = 0;
+	INT	i;
 
-	for ( i = 0; i < x->n; i++ ) sum += x->e[i].n;
-	if ( d > 0 && sum + d > XR_MAX ) {
+	for ( i = 0; i < x->n && x->max != 0; i++ ) sum += (UD)x->e[i].n;
+	if ( d > 0 && x->max != 0 && sum + (UD)d > x->max ) {
 		return FALSE;
 	}
 	if ( e == NULL ) {
-		if ( d <= 0 || x->n >= XR_MAX ) {
-			return ( d <= 0 );
+		if ( d <= 0 ) {
+			return TRUE;
 		}
-		e = &x->e[x->n++];
-		e->v = *v;
-		e->h = *h;
-		e->t = *t;
-		e->n = 0;
+		z.v = *v;
+		z.h = *h;
+		z.t = *t;
+		z.n = 0;
+		if ( !xr_push(x, &z) ) {
+			return FALSE;
+		}
+		e = &x->e[x->n - 1];
 	}
 	e->n += d;
 	if ( e->n <= 0 ) {
@@ -246,6 +285,7 @@ LOCAL ER rec_load( ID vol, CONST TS_UUID *obj, XRTAB *x )
 	ER	er;
 
 	x->n = 0;
+	x->max = knl_tsfs_max_link(vol);
 	if ( is_zero(obj) ) {
 		return E_OK;
 	}
@@ -360,7 +400,7 @@ EXPORT ER knl_obxref_move( CONST TS_UUID *hvol, CONST TS_UUID *host, CONST TS_UU
 	if ( vol_uuid(vol, &tv) < E_OK || ts_uuid_cmp(&tv, hvol) == 0 ) {
 		return E_OK;			/* on the volume of the link after all */
 	}
-	x = (XRTAB *)Kmalloc(sizeof(XRTAB));
+	x = xr_new();
 	if ( x == NULL ) {
 		return E_NOMEM;
 	}
@@ -380,7 +420,7 @@ EXPORT ER knl_obxref_move( CONST TS_UUID *hvol, CONST TS_UUID *host, CONST TS_UU
 		}
 	}
 	tk_unl_mtx(xr_mtx);
-	Kfree(x);
+	xr_free(x);
 	if ( er < E_OK && er != E_PAR ) {
 		tm_printf((UB *)"ob: link from another volume not recorded (%d)\n", (INT)er);
 	}
@@ -430,12 +470,13 @@ LOCAL ER links_of( ID hv, CONST TS_UUID *hu, ID tv, XRTAB *x )
 	TS_UUID	*ids, from, own, rt;
 	T_RLNK	*lk;
 	ID	rv;
-	INT	got, nl, i, k;
+	INT	got, nl, i, k, cap;
 	BOOL	first = TRUE;
 	ER	er = E_OK;
 
 	ids = (TS_UUID *)Kmalloc(sizeof(TS_UUID) * XR_LIST);
-	lk = (T_RLNK *)Kmalloc(sizeof(T_RLNK) * TSFSO_MAX_LINK);
+	cap = 64;
+	lk = (T_RLNK *)Kmalloc(sizeof(T_RLNK) * (SZ)cap);
 	if ( ids == NULL || lk == NULL ) {
 		if ( ids != NULL ) Kfree(ids);
 		if ( lk != NULL ) Kfree(lk);
@@ -456,8 +497,23 @@ LOCAL ER links_of( ID hv, CONST TS_UUID *hu, ID tv, XRTAB *x )
 			if ( ts_uuid_cmp(&ids[i], &own) == 0 ) {
 				continue;		/* the record of hv itself */
 			}
+			/* how many links it has first, then room for them */
 			nl = 0;
-			if ( knl_tsfs_lst_lnk(hv, &ids[i], lk, TSFSO_MAX_LINK, &nl) < E_OK ) {
+			if ( knl_tsfs_lst_lnk(hv, &ids[i], NULL, 0, &nl) < E_OK ) {
+				continue;
+			}
+			if ( nl > cap ) {
+				T_RLNK	*nk = (T_RLNK *)Kmalloc(sizeof(T_RLNK) * (SZ)nl);
+
+				if ( nk == NULL ) {
+					er = E_NOMEM;
+					break;
+				}
+				Kfree(lk);
+				lk = nk;
+				cap = nl;
+			}
+			if ( nl == 0 || knl_tsfs_lst_lnk(hv, &ids[i], lk, cap, &nl) < E_OK ) {
 				continue;
 			}
 			for ( k = 0; k < nl; k++ ) {
@@ -476,13 +532,13 @@ LOCAL ER links_of( ID hv, CONST TS_UUID *hu, ID tv, XRTAB *x )
 				}
 			}
 		}
-		if ( got < XR_LIST ) {
+		if ( got < XR_LIST || er == E_NOMEM ) {
 			break;
 		}
 	}
 	Kfree(ids);
 	Kfree(lk);
-	return ( er == E_LIMIT || er >= E_OK ) ? er : E_OK;
+	return ( er == E_LIMIT || er == E_NOMEM || er >= E_OK ) ? er : E_OK;
 }
 
 /*
@@ -496,11 +552,11 @@ LOCAL ER sync_pair( ID hv, CONST TS_UUID *hu, ID tv )
 	INT	i;
 	ER	er;
 
-	now = (XRTAB *)Kmalloc(sizeof(XRTAB));
-	want = (XRTAB *)Kmalloc(sizeof(XRTAB));
+	now = xr_new();
+	want = xr_new();
 	if ( now == NULL || want == NULL ) {
-		if ( now != NULL ) Kfree(now);
-		if ( want != NULL ) Kfree(want);
+		xr_free(now);
+		xr_free(want);
 		return E_NOMEM;
 	}
 	er = rec_obj(tv, FALSE, &obj);
@@ -508,10 +564,11 @@ LOCAL ER sync_pair( ID hv, CONST TS_UUID *hu, ID tv )
 	if ( er >= E_OK ) {
 		/* what the others link stays; what hv links is what its tables say */
 		want->n = 0;
-		for ( i = 0; i < now->n; i++ ) {
-			if ( ts_uuid_cmp(&now->e[i].v, hu) != 0 ) want->e[want->n++] = now->e[i];
+		want->max = now->max;
+		for ( i = 0; i < now->n && er >= E_OK; i++ ) {
+			if ( ts_uuid_cmp(&now->e[i].v, hu) != 0 && !xr_push(want, &now->e[i]) ) er = E_NOMEM;
 		}
-		er = links_of(hv, hu, tv, want);
+		if ( er >= E_OK ) er = links_of(hv, hu, tv, want);
 		if ( er == E_LIMIT ) {
 			tm_printf((UB *)"ob: more links from another volume than one record says\n");
 			er = E_OK;
@@ -522,8 +579,8 @@ LOCAL ER sync_pair( ID hv, CONST TS_UUID *hu, ID tv )
 		if ( er >= E_OK ) er = rec_store(tv, &obj, want);
 		tm_printf((UB *)"ob: links from another volume put right (%d)\n", (INT)er);
 	}
-	Kfree(now);
-	Kfree(want);
+	xr_free(now);
+	xr_free(want);
 	return er;
 }
 
@@ -560,7 +617,7 @@ EXPORT INT knl_obxref_list( ID vol, T_OBXREF *buf, INT max )
 	TS_UUID	obj;
 	INT	i, n = 0;
 
-	if ( xr_mtx <= 0 || ( x = (XRTAB *)Kmalloc(sizeof(XRTAB)) ) == NULL ) {
+	if ( xr_mtx <= 0 || ( x = xr_new() ) == NULL ) {
 		return 0;
 	}
 	tk_loc_mtx(xr_mtx, TMO_FEVR);
@@ -574,7 +631,7 @@ EXPORT INT knl_obxref_list( ID vol, T_OBXREF *buf, INT max )
 		}
 	}
 	tk_unl_mtx(xr_mtx);
-	Kfree(x);
+	xr_free(x);
 	return n;
 }
 
@@ -614,13 +671,13 @@ EXPORT ER knl_obxref_check( ID vol, BOOL fix, T_TSFSCK *res, FP_TSFSCK fn, void 
 	if ( xr_mtx <= 0 || vol_uuid(vol, &mine) < E_OK ) {
 		return E_PAR;
 	}
-	now = (XRTAB *)Kmalloc(sizeof(XRTAB));
-	want = (XRTAB *)Kmalloc(sizeof(XRTAB));
-	theirs = (XRTAB *)Kmalloc(sizeof(XRTAB));
+	now = xr_new();
+	want = xr_new();
+	theirs = xr_new();
 	if ( now == NULL || want == NULL || theirs == NULL ) {
-		if ( now != NULL ) Kfree(now);
-		if ( want != NULL ) Kfree(want);
-		if ( theirs != NULL ) Kfree(theirs);
+		xr_free(now);
+		xr_free(want);
+		xr_free(theirs);
 		return E_NOMEM;
 	}
 	nv = knl_obfile_natives(ids, vu, XR_VOLS);
@@ -638,6 +695,7 @@ EXPORT ER knl_obxref_check( ID vol, BOOL fix, T_TSFSCK *res, FP_TSFSCK fn, void 
 	}
 	if ( er >= E_OK ) er = rec_load(vol, &obj, now);
 	want->n = 0;
+	want->max = theirs->max = now->max;
 	for ( i = 0; er >= E_OK && i < now->n; i++ ) {
 		XRENT	*e = &now->e[i];
 
@@ -654,7 +712,7 @@ EXPORT ER knl_obxref_check( ID vol, BOOL fix, T_TSFSCK *res, FP_TSFSCK fn, void 
 					continue;
 				}
 			}
-			want->e[want->n++] = *e;
+			if ( !xr_push(want, e) ) er = E_NOMEM;
 			continue;
 		}
 		if ( knl_tsfs_exists(ids[k], &e->h) < E_OK ) {
@@ -716,9 +774,9 @@ EXPORT ER knl_obxref_check( ID vol, BOOL fix, T_TSFSCK *res, FP_TSFSCK fn, void 
 		}
 	}
 	tk_unl_mtx(xr_mtx);
-	Kfree(now);
-	Kfree(want);
-	Kfree(theirs);
+	xr_free(now);
+	xr_free(want);
+	xr_free(theirs);
 	knl_obxref_drain();
 	return er;
 }

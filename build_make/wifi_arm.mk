@@ -52,7 +52,7 @@ EXTRA_OBJS += $(OBSD_OBJ)
 $(OBSD_OBJ): $(TOP)/tools/openbsd/build.sh $(wildcard $(TOP)/device/net/wifi/obsd/*.[ch]) \
 	     $(wildcard $(TOP)/tools/openbsd/patches/*.patch)
 	@echo 'OBSD $@'
-	@ARCH=aarch64 OUT=$(patsubst %/,%,$(dir $(OBSD_OBJ))) MARCH=$(ARCH_MARCH) bash $(TOP)/tools/openbsd/build.sh all
+	@ARCH=aarch64 OUT=$(patsubst %/,%,$(dir $(OBSD_OBJ))) MARCH=$(ARCH_MARCH) $(SHARED_X) bash $(TOP)/tools/openbsd/build.sh all
 SRCS += device/net/wifi/obsd/obsd_user.c
 WIFI5_OBJS := $(OBJDIR)/device/net/wifi/obsd/obsd_user.o
 endif
@@ -101,7 +101,7 @@ EXTRA_OBJS += $(WPA_OBJ)
 $(WPA_OBJ): $(TOP)/tools/wpa/build.sh $(wildcard $(TOP)/device/net/wifi/wpa/*.[ch]) \
 	    $(wildcard $(TOP)/device/net/wifi/wpa/include/*.h $(TOP)/device/net/wifi/wpa/include/*/*.h)
 	@echo 'WPA $@'
-	@ARCH=aarch64 MARCH=$(ARCH_MARCH) OUT=$(patsubst %/,%,$(dir $(WPA_OBJ))) bash $(TOP)/tools/wpa/build.sh all
+	@ARCH=aarch64 MARCH=$(ARCH_MARCH) OUT=$(patsubst %/,%,$(dir $(WPA_OBJ))) $(SHARED_X) bash $(TOP)/tools/wpa/build.sh all
 endif
 ifeq ($(KTEST),1)
 SRCS += tests/ktest/ktest_wifinv.c tests/ktest/ktest_wifikey.c
@@ -121,8 +121,8 @@ WIFI_DONE   := $(WIFI_STAGE)/.done
 WIFI_OVER   := --over $(WIFI_STAGE)
 $(WIFI_DONE): $(TOP)/tools/rpi5/wifi/fw.sh $(TOP)/tools/rpi5/wifi/mkobj.py $(TOP)/tools/rpi5/wifi/nvram.py \
 	      $(TOP)/etc/def/01a0d8c4-5211-7c52-9e0a-3b61d27f4c85_0.xtad
-	@OUT=$(WIFI_FW_DIR) bash $(TOP)/tools/rpi5/wifi/fw.sh fetch
-	@python3 -I $(TOP)/tools/rpi5/wifi/mkobj.py $(WIFI_OBJ_ARGS) --fw $(WIFI_FW_DIR) \
+	@OUT=$(WIFI_FW_DIR) $(SHARED_X) bash $(TOP)/tools/rpi5/wifi/fw.sh fetch
+	@$(SHARED_S) python3 -I $(TOP)/tools/rpi5/wifi/mkobj.py $(WIFI_OBJ_ARGS) --fw $(WIFI_FW_DIR) \
 	  --box $(TOP)/etc/def/01a0d8c4-5211-7c52-9e0a-3b61d27f4c85_0.xtad --out $(WIFI_STAGE)
 	@touch $@
 $(OBJDIR)/sysvol.img: $(WIFI_DONE)

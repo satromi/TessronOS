@@ -442,34 +442,6 @@ static ER h_text_away( T_DDED *e, INT sx, INT sy, INT cx, INT cy, UB *s, INT n )
 }
 
 /*
- * What the desktop is asked of a link, carried or put, as it shows here;
- * its relationship and its applist go in the tail of the next ask_desktop
- */
-static void link_ask( CONST T_VOBJ *v, UINT req, T_DTREQ *rq )
-{
-	memset(rq, 0, sizeof(*rq));
-	rq->req = req;
-	rq->target = v->target;
-	rq->recno = -1;
-	rq->look.chsz = v->chsz;
-	rq->look.frcol = v->frcol;
-	rq->look.chcol = v->chcol;
-	rq->look.tbcol = v->tbcol;
-	rq->look.bgcol = v->bgcol;
-	rq->look.disp = v->disp;
-	rq->look.autoopen = v->autoopen ? 1 : 0;
-	/* where it is in the text's record: a link in a text has its width and height, not a right and foot */
-	if ( v->right > v->left ) dt_req_was(rq, v->left, v->top, v->right, v->bottom);
-	else dt_req_was(rq, v->left, v->top, v->left + v->width, v->top + v->heightpx);
-	if ( v->vrel_len > 0 ) ta_req_part(DT_TAIL_REL, v->vrel, v->vrel_len);
-	if ( v->hidden ) rq->flags |= DT_F_HIDDEN;
-	if ( v->vapplist_len > 0 ) {
-		ta_req_part(DT_TAIL_APPLIST, v->vapplist, v->vapplist_len);
-		rq->flags |= DT_F_APPLIST;
-	}
-}
-
-/*
  * A thing that went out let go back over this window (DT_F_BACK): moved,
  * or copied, within the text where the answer says, as th says with copy
  */
@@ -548,7 +520,8 @@ static BOOL piece_away( T_DDED *e, CONST T_DDTHING *th, INT w, INT h )
 }
 
 /*
- * A link carried out of the window: the desktop follows the hand on
+ * A link carried out of the window, as the shared part carries one
+ * (tv_vop_carry_out, ts/tvvop.h): the desktop follows the hand on
  * (DT_RQ_CARRY) and it is put where it is let go (DT_RQ_PLACE), in a
  * figure, a cabinet or a text of the desktop's or on another program's
  * window. It leaves the text unless it was a copy: the second button on
@@ -559,31 +532,25 @@ static BOOL piece_away( T_DDED *e, CONST T_DDTHING *th, INT w, INT h )
  */
 static BOOL h_thing_away( T_DDED *e, INT sx, INT sy, CONST T_DDTHING *th )
 {
-	T_DTREQ	rq;
-	T_DTANS	an;
-	UINT	seq;
-	BOOL	copy, given;
-	INT	w = th->box.right - th->box.left, h = th->box.bottom - th->box.top;
-	ER	er;
-	char	m[DC_LOG];
+	T_TVVOP		h = *dc_vop();
+	T_TVLINK	l;
+	T_TVCARRY	r;
+	INT		w = th->box.right - th->box.left, ht = th->box.bottom - th->box.top;
+	ER		er;
+	char		m[DC_LOG];
 
-	if ( th->kind != TV_RUN_LINK ) {
-		return piece_away(e, th, w, h);
-	}
-	link_ask(&th->v, DT_RQ_CARRY, &rq);
-	rq.flags |= DT_F_TO_PROG;
-	rq.look.w = w;
-	rq.look.h = h;
-	rq.grab_x = th->x0 - th->box.left;
-	rq.grab_y = th->y0 - th->box.top;
-	rq.win = g_win;
 	(void)sx; (void)sy;
+	if ( th->kind != TV_RUN_LINK ) {
+		return piece_away(e, th, w, ht);
+	}
+	/* the second button on the way: a copy is put, and the link stays in the text */
+	if ( th->copy ) h.flags |= TV_VOP_F_COPY;
+	dc_tvlink(&l, &th->v, &th->box);
 	memset(&drag_box, 0, sizeof(drag_box));
-	memset(&an, 0, sizeof(an));
-	er = ask_desktop(&rq, &an, 30 * 60 * 1000);
-	if ( er < E_OK && ( an.flags & DT_F_BACK ) != 0 ) {
+	er = tv_vop_carry_out(&h, &l, 1, NULL, th->x0, th->y0, FALSE, NULL, &r);
+	if ( er < E_OK && ( r.an.flags & DT_F_BACK ) != 0 ) {
 		note("link carried back here");
-		thing_back(e, th, (BOOL)( an.how == DT_HOW_COPY || th->copy ), &an);
+		thing_back(e, th, (BOOL)( r.an.how == DT_HOW_COPY || th->copy ), &r.an);
 		return FALSE;
 	}
 	if ( er < E_OK ) {
@@ -591,18 +558,10 @@ static BOOL h_thing_away( T_DDED *e, INT sx, INT sy, CONST T_DDTHING *th )
 		note(m);
 		return FALSE;
 	}
-	seq = rq.seq;
-	copy = (BOOL)( an.how == DT_HOW_COPY || th->copy );
-	given = (BOOL)( ( an.flags & DT_F_TO_PROG ) != 0 );
-	link_ask(&th->v, DT_RQ_PLACE, &rq);
-	rq.look.w = w;
-	rq.look.h = h;
-	rq.carry = seq;
-	memset(&an, 0, sizeof(an));
-	er = ask_desktop(&rq, &an, 10 * 60 * 1000);
-	snprintf(m, sizeof(m), "link carried out (%d)%s%s", (INT)er, copy ? " as a copy" : "", given ? " to a program" : "");
+	snprintf(m, sizeof(m), "link carried out%s%s%s", ( r.done > 0 ) ? " (0)" : ", not put",
+		 r.copy ? " as a copy" : "", r.given ? " to a program" : "");
 	note(m);
-	if ( er < E_OK || copy ) return FALSE;
+	if ( !r.moved ) return FALSE;
 	/* put there: it leaves the text */
 	dc_before();
 	return (BOOL)( tad_lnk_del(g_rec, &th->v.vobjid) >= E_OK );
@@ -691,7 +650,6 @@ static void h_word_register( T_DDED *e, CONST UB *w, INT n )
 	char	s[48];
 
 	(void)e;
-	if ( n > UD_WORD_MAX ) n = UD_WORD_MAX;
 	if ( n > 0 ) {
 		memset(&r, 0, sizeof(r));
 		r.kind = TR_REC;

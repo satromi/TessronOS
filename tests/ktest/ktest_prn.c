@@ -1211,7 +1211,7 @@ LOCAL void test_mcard( void )
 	n = mc_targets(db, FALSE, 0, idx, 8);
 	KT_ASSERT_EQ(n, 3);
 	knl_memset(&mi, 0, sizeof(mi));
-	knl_strcpy((char *)mi.name, "名簿");
+	mi.name = (UB *)"名簿";			/* %N: the name whole, the caller's */
 	mi.y = 2026;
 	mi.m = 10;
 	mi.d = 4;

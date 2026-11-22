@@ -12,6 +12,12 @@ fsck.tsfs --fix --relink puts right what a cut may leave -- blocks given
 up by a transaction that never became real, objects still to be relinked
 or reaped -- and a last fsck.tsfs must find the volume clean.
 
+The volume may be of version 4 or 5 (the kernel's ts_format_blk says
+which); the work says it ("PCUT READY v5"), and each run checks that
+the image is of that version. On version 5 the work makes the budget of
+a transaction small, so that a cut may fall between the transactions of
+one operation and leave a spare place for fsck.tsfs to find.
+
 The image is put back as it was before each run, and the copy kept for
 that is removed at the end.
 
@@ -28,6 +34,7 @@ import sys
 import time
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, TOOLS)
 
 
 def fsck(image, *opts):
@@ -38,6 +45,21 @@ def fsck(image, *opts):
     return r.returncode, r.stdout
 
 
+def version_of(image):
+    """The version of the format of the volume in partition 1, or None."""
+    from tsfs_py import Volume
+    from tsfs_py.image import BlockImage, read_partitions
+    for part in read_partitions(image):
+        if part.index == 1:
+            try:
+                with Volume.open(BlockImage(image, offset=part.offset,
+                                            length=part.length)) as vol:
+                    return vol.sb.version
+            except Exception:
+                return None
+    return None
+
+
 def one_run(qemu, qargs, image, rng, n):
     """Start, wait for the work, kill at a random moment; the rounds done"""
     p = subprocess.Popen([qemu, "-serial", "stdio"] + qargs + ["-monitor", "none"],
@@ -45,6 +67,7 @@ def one_run(qemu, qargs, image, rng, n):
                          stderr=subprocess.STDOUT)
     rounds = 0
     ready = None
+    version = None
     deadline = time.time() + 600
     cut_at = None
     os.set_blocking(p.stdout.fileno(), False)
@@ -57,9 +80,15 @@ def one_run(qemu, qargs, image, rng, n):
             buf = lines[-1]
             for ln in lines[:-1]:
                 ln = ln.strip()
-                if ln == b"PCUT READY":
+                if ln == b"PCUT READY" or ln.startswith(b"PCUT READY "):
                     ready = time.time()
                     cut_at = ready + rng.uniform(1.0, 8.0)
+                    tail = ln[len(b"PCUT READY"):].strip()
+                    if tail.startswith(b"v"):
+                        try:
+                            version = int(tail[1:])
+                        except ValueError:
+                            pass
                 elif ln.startswith(b"PCUT "):
                     try:
                         rounds = int(ln.split()[1])
@@ -75,7 +104,7 @@ def one_run(qemu, qargs, image, rng, n):
     p.wait()
     if ready is None:
         raise RuntimeError("run %d: the work never started" % n)
-    return rounds
+    return rounds, version
 
 
 def main():
@@ -95,15 +124,20 @@ def main():
     try:
         for n in range(1, args.runs + 1):
             shutil.copyfile(keep, args.disk)
-            rounds = one_run(qemu, qargs, args.disk, rng, n)
+            rounds, want = one_run(qemu, qargs, args.disk, rng, n)
+            have = version_of(args.disk)
             code, out = fsck(args.disk)
             ok = code == 0
+            if want is not None and have != want:
+                ok = False
+                out += "the work said version %s, the image is of %s\n" % (want, have)
             code2, out2 = fsck(args.disk, "--fix", "--relink")
             code3, out3 = fsck(args.disk)
             ok = ok and code3 == 0
             last = [ln for ln in out.splitlines() if ln.strip()]
-            print("PCUT run %d: cut after %d rounds: %s -- %s"
-                  % (n, rounds, "ok" if ok else "FAILED", last[-1] if last else ""))
+            print("PCUT run %d: version %s, cut after %d rounds: %s -- %s"
+                  % (n, have, rounds, "ok" if ok else "FAILED",
+                     last[-1] if last else ""))
             if not ok:
                 failed += 1
                 sys.stdout.write(out)

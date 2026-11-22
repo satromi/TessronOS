@@ -37,14 +37,101 @@ EXPORT unsigned char	knl_bootdisk_note[256] = "";		/* what was found, for the bo
 
 IMPORT CONST UB	knl_tsfs_type_guid[16];
 
-/* The disks a PC starts from: the NVMe SSDs, the SATA ones, then USB memories */
-LOCAL CONST char * CONST cands[] = {
-	"nvmea", "nvmeb", "nvmec", "nvmed",
-	"sataa", "satab", "satac", "satad",
-	"sda",
-	"uda", "udb", "udc", "udd", "ude", "udf", "udg", "udh",
-	NULL
-};
+/*
+ * The disks a PC starts from, in the order they are tried: the NVMe SSDs,
+ * the SATA ones, SCSI-style disks, then USB memories. A device is a disk
+ * when its name is one of these stems followed by letters only
+ * ("nvmea", "nvmeaa"); a name with a digit is a partition.
+ */
+LOCAL CONST char * CONST stems[] = { "nvme", "sata", "sd", "ud", NULL };
+
+typedef UB	DISKNM[L_DEVNM + 1];
+
+LOCAL INT disk_rank( CONST UB *nm, INT len )
+{
+	INT	s, k;
+
+	for ( s = 0; stems[s] != NULL; s++ ) {
+		INT	sl = (INT)knl_strlen(stems[s]);
+
+		if ( len <= sl ) continue;
+		for ( k = 0; k < sl && nm[k] == (UB)stems[s][k]; k++ ) ;
+		if ( k < sl ) continue;
+		for ( k = sl; k < len; k++ ) {
+			if ( nm[k] < 'a' || nm[k] > 'z' ) return -1;
+		}
+		return s;
+	}
+	return -1;
+}
+
+/* Whether disk a is tried before disk b: its stem, then the shorter name, then the letters */
+LOCAL BOOL disk_before( CONST UB *a, CONST UB *b )
+{
+	INT	la = (INT)knl_strlen((CONST char *)a), lb = (INT)knl_strlen((CONST char *)b);
+	INT	ra = disk_rank(a, la), rb = disk_rank(b, lb);
+
+	if ( ra != rb ) return (BOOL)( ra < rb );
+	if ( la != lb ) return (BOOL)( la < lb );
+	return (BOOL)( knl_strcmp((CONST char *)a, (CONST char *)b) < 0 );
+}
+
+/*
+ * The names of the disks the device manager has, however many, in the
+ * order they are tried: counted first, and asked again when more came in
+ * between. The number of names, with *p_names the array to Kfree; 0 for none.
+ */
+LOCAL INT list_disks( DISKNM **p_names )
+{
+	T_LDEV	*ld;
+	DISKNM	*names;
+	INT	i, k, nl, na, n = 0;
+
+	*p_names = NULL;
+	for ( ;; ) {
+		nl = tk_lst_dev(NULL, 0, 0);
+		if ( nl <= 0 ) {
+			return 0;
+		}
+		na = nl + 8;
+		ld = (T_LDEV *)Kmalloc(sizeof(T_LDEV) * (SZ)na);
+		if ( ld == NULL ) {
+			return 0;
+		}
+		nl = tk_lst_dev(ld, 0, na);
+		if ( nl >= 0 && nl < na ) break;
+		Kfree(ld);
+		if ( nl < 0 ) {
+			return 0;
+		}
+	}
+	names = (DISKNM *)Kmalloc(sizeof(DISKNM) * (SZ)nl);
+	if ( names == NULL ) {
+		Kfree(ld);
+		return 0;
+	}
+	for ( i = 0; i < nl; i++ ) {
+		DISKNM	nm;
+
+		knl_memcpy(nm, ld[i].devnm, L_DEVNM);
+		nm[L_DEVNM] = '\0';
+		if ( disk_rank(nm, (INT)knl_strlen((CONST char *)nm)) < 0 ) continue;
+		knl_memcpy(names[n], nm, sizeof(DISKNM));
+		n++;
+		for ( k = n - 1; k > 0 && disk_before(names[k], names[k - 1]); k-- ) {
+			knl_memcpy(nm, names[k], sizeof(DISKNM));
+			knl_memcpy(names[k], names[k - 1], sizeof(DISKNM));
+			knl_memcpy(names[k - 1], nm, sizeof(DISKNM));
+		}
+	}
+	Kfree(ld);
+	if ( n == 0 ) {
+		Kfree(names);
+		return 0;
+	}
+	*p_names = names;
+	return n;
+}
 
 LOCAL UW le32( CONST UB *p )
 {
@@ -183,7 +270,8 @@ LOCAL void name_of( UB *out, CONST char *disk, INT unit )
  */
 EXPORT BOOL knl_bootdisk_find( CONST T_BOOTINFO *bi, TMO tmo )
 {
-	INT	waited = 0, i, esp, sys, log;
+	INT	waited = 0, i, nd, esp, sys, log;
+	DISKNM	*cands;
 	ER	er;
 
 	knl_sysvol_name[0] = knl_bootvol_name[0] = knl_logvol_name[0] = '\0';
@@ -194,21 +282,24 @@ EXPORT BOOL knl_bootdisk_find( CONST T_BOOTINFO *bi, TMO tmo )
 		return FALSE;
 	}
 	for ( ;; ) {
-		for ( i = 0; cands[i] != NULL; i++ ) {
-			er = scan(cands[i], bi->esp_guid, &esp, &sys, &log);
+		nd = list_disks(&cands);
+		for ( i = 0; i < nd; i++ ) {
+			er = scan((CONST char *)cands[i], bi->esp_guid, &esp, &sys, &log);
 			if ( er < E_OK || esp < 0 ) {
 				continue;
 			}
-			name_of(knl_bootvol_name, cands[i], esp);
-			if ( sys >= 0 ) name_of(knl_sysvol_name, cands[i], sys);
-			if ( log >= 0 ) name_of(knl_logvol_name, cands[i], log);
+			name_of(knl_bootvol_name, (CONST char *)cands[i], esp);
+			if ( sys >= 0 ) name_of(knl_sysvol_name, (CONST char *)cands[i], sys);
+			if ( log >= 0 ) name_of(knl_logvol_name, (CONST char *)cands[i], log);
 			tm_printf((UB *)"bootdisk: started from %s: EFI system partition %s, system volume %s, records %s\n",
-				  cands[i], knl_bootvol_name, ( sys >= 0 ) ? (char *)knl_sysvol_name : "(none)",
+				  (char *)cands[i], knl_bootvol_name, ( sys >= 0 ) ? (char *)knl_sysvol_name : "(none)",
 				  ( log >= 0 ) ? (char *)knl_logvol_name : "(none)");
 			tm_sprintf((UB *)knl_bootdisk_note, (UB *)"disk %s, ESP %s, system volume %s, after %d ms",
-				   cands[i], knl_bootvol_name, ( sys >= 0 ) ? (char *)knl_sysvol_name : "(none)", waited);
+				   (char *)cands[i], knl_bootvol_name, ( sys >= 0 ) ? (char *)knl_sysvol_name : "(none)", waited);
+			Kfree(cands);
 			return TRUE;
 		}
+		if ( nd > 0 ) Kfree(cands);
 		if ( waited >= tmo ) {
 			break;
 		}
@@ -232,24 +323,26 @@ IMPORT CONST T_BOOTINFO	*knl_bootinfo;
 EXPORT BOOL knl_bootdisk_again( void )
 {
 	CONST T_BOOTINFO	*bi = knl_bootinfo;
-	INT			i, esp, sys, log;
+	INT			i, nd, esp, sys, log;
+	DISKNM			*cands;
 
 	if ( bi == NULL || ( bi->flags & BI_F_ESP_GUID ) == 0 ) {
 		return FALSE;
 	}
-	for ( i = 0; cands[i] != NULL; i++ ) {
-		if ( scan(cands[i], bi->esp_guid, &esp, &sys, &log) < E_OK || esp < 0 ) {
+	nd = list_disks(&cands);
+	for ( i = 0; i < nd; i++ ) {
+		if ( scan((CONST char *)cands[i], bi->esp_guid, &esp, &sys, &log) < E_OK || esp < 0 ) {
 			continue;
 		}
-		name_of(knl_bootvol_name, cands[i], esp);
-		if ( sys >= 0 ) name_of(knl_sysvol_name, cands[i], sys);
+		name_of(knl_bootvol_name, (CONST char *)cands[i], esp);
+		if ( sys >= 0 ) name_of(knl_sysvol_name, (CONST char *)cands[i], sys);
 		if ( log >= 0 ) {
-			name_of(knl_logvol_name, cands[i], log);
+			name_of(knl_logvol_name, (CONST char *)cands[i], log);
 		} else {
 			knl_logvol_name[0] = '\0';
 		}
 		tm_printf((UB *)"bootdisk: the disk started from is back as %s: EFI system partition %s,"
-			  " system volume %s, records %s\n", cands[i], knl_bootvol_name,
+			  " system volume %s, records %s\n", (char *)cands[i], knl_bootvol_name,
 			  ( sys >= 0 ) ? (char *)knl_sysvol_name : "(none)",
 			  ( log >= 0 ) ? (char *)knl_logvol_name : "(none)");
 		return TRUE;

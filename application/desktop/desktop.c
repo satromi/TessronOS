@@ -87,7 +87,57 @@
 #define MOD_CTRL	( HID_MOD_LCTRL | HID_MOD_RCTRL )
 #define MOD_SHIFT	( HID_MOD_LSHIFT | HID_MOD_RSHIFT )
 
-LOCAL DTWIN	dt_win[DT_MAX_WIN];
+/*
+ * The desktop's own windows (the notices, 管理情報, the disks' record,
+ * a window of each program it shows itself): as many as are open, each
+ * entry allocated once and never freed -- a DTWIN is held by pointer
+ * wherever its window is worked -- in a table of dt_nwin that grows, the
+ * one before kept, when every entry is in use.
+ */
+#define DT_WIN_FIRST	32
+
+LOCAL DTWIN	*dt_wtab0[1];
+LOCAL DTWIN	**dt_wtab = dt_wtab0;
+LOCAL INT	dt_nwin = 0;
+#define DTW(i)		( *dt_wtab[(i)] )
+
+/* A free window's entry, the table made larger when none is: NULL for no memory */
+LOCAL DTWIN *win_slot( void )
+{
+	DTWIN	**t, *e;
+	INT	i, n;
+
+	for ( i = 0; i < dt_nwin; i++ ) {
+		if ( !dt_wtab[i]->used ) {
+			return dt_wtab[i];
+		}
+	}
+	if ( dt_nwin > 0x0FFFFFFF / 2 ) {
+		return NULL;
+	}
+	n = ( dt_nwin > 0 ) ? dt_nwin * 2 : DT_WIN_FIRST;
+	t = (DTWIN **)Kmalloc(sizeof(DTWIN *) * (SZ)n);
+	e = (DTWIN *)Kcalloc((SZ)( n - dt_nwin ), sizeof(DTWIN));
+	if ( t == NULL || e == NULL ) {
+		if ( t != NULL ) Kfree(t);
+		if ( e != NULL ) Kfree(e);
+		return NULL;
+	}
+	for ( i = 0; i < n; i++ ) {
+		t[i] = ( i < dt_nwin ) ? dt_wtab[i] : &e[i - dt_nwin];
+	}
+	__sync_synchronize();
+	dt_wtab = t;			/* the table before is not freed: it may be being read */
+	__sync_synchronize();
+	i = dt_nwin;
+	dt_nwin = n;
+	return dt_wtab[i];
+}
+
+EXPORT INT dt_win_room( void )
+{
+	return dt_nwin;
+}
 LOCAL UW	dt_layout = 0;		/* wm_layout_serial as the windows were last drawn at */
 LOCAL BOOL	dt_stop = FALSE;
 LOCAL BOOL	dt_poweroff = FALSE;	/* the person chose to turn the machine off */
@@ -285,9 +335,9 @@ EXPORT DTWIN *dt_win_of( INT wid )
 	if ( wid <= 0 ) {
 		return NULL;
 	}
-	for ( i = 0; i < DT_MAX_WIN; i++ ) {
-		if ( dt_win[i].used && dt_win[i].wid == wid ) {
-			return &dt_win[i];
+	for ( i = 0; i < dt_nwin; i++ ) {
+		if ( DTW(i).used && DTW(i).wid == wid ) {
+			return &DTW(i);
 		}
 	}
 
@@ -348,9 +398,9 @@ EXPORT void dt_draw_all( void )
 {
 	INT	i, n, *w;
 
-	for ( i = 0; i < DT_MAX_WIN; i++ ) {
-		if ( dt_win[i].used ) {
-			dt_draw(&dt_win[i]);
+	for ( i = 0; i < dt_nwin; i++ ) {
+		if ( DTW(i).used ) {
+			dt_draw(&DTW(i));
 		}
 	}
 	w = (INT *)Kmalloc(sizeof(INT) * 256);
@@ -495,10 +545,10 @@ LOCAL void close_requests( void )
 		if ( m.event != OB_E_CLOSE ) {
 			continue;
 		}
-		for ( i = 0; i < DT_MAX_WIN; i++ ) {
-			if ( dt_win[i].used && wm_obj_uuid(dt_win[i].wid, &u) >= E_OK
+		for ( i = 0; i < dt_nwin; i++ ) {
+			if ( DTW(i).used && wm_obj_uuid(DTW(i).wid, &u) >= E_OK
 			  && ts_uuid_cmp(&u, &m.uuid) == 0 ) {
-				win_close(&dt_win[i]);
+				win_close(&DTW(i));
 				wm_update();
 				break;
 			}
@@ -1357,9 +1407,8 @@ LOCAL void carry_release( INT px, INT py )
  */
 LOCAL ER carry_duplicate( DTWIN *t, CONST TS_UUID *target, BOOL tmpl, TS_UUID *copy )
 {
-	UB		start[WM_LABEL_MAX], name[WM_LABEL_MAX], *own, *pbase = NULL;
+	UB		*start = NULL, *name, *own, *pbase = NULL;
 	CONST char	*base = dt_base_name(target);
-	INT		k = 0, i;
 	ER		er = E_OK;
 
 	/* the program's name copied: the panel below lets the list of programs be read again */
@@ -1371,15 +1420,17 @@ LOCAL ER carry_duplicate( DTWIN *t, CONST TS_UUID *target, BOOL tmpl, TS_UUID *c
 	if ( base == NULL && tmpl && own != NULL ) {
 		base = (CONST char *)own;
 	}
-	/* what fits of the name in the box; a copy's keeps room for のコピー */
+	/* the name whole in the box; a copy's with のコピー after it */
 	if ( base != NULL ) {
-		k = dt_fit(start, WM_LABEL_MAX, (CONST UB *)base);
+		start = dt_cat(base, NULL);
 	} else if ( own != NULL && own[0] != 0 ) {
-		k = dt_fit(start, WM_LABEL_MAX - 16, own);
-		for ( i = 0; "のコピー"[i] != 0 && k < WM_LABEL_MAX - 1; i++ ) start[k++] = (UB)"のコピー"[i];
+		start = dt_copy_name(own);
 	}
-	start[k] = 0;
-	if ( !dt_ask_name(t, "新しい実身の名称を入力してください", start, name, WM_LABEL_MAX) ) {
+	name = dt_ask_name_all(t, "新しい実身の名称を入力してください", start);
+	if ( start != NULL ) {
+		Kfree(start);
+	}
+	if ( name == NULL ) {
 		er = E_ABORT;
 	} else if ( om_store_copy(target, name, TRUE, copy) < E_OK ) {
 		(void)wm_msg_put("実身を作れませんでした");
@@ -1387,6 +1438,9 @@ LOCAL ER carry_duplicate( DTWIN *t, CONST TS_UUID *target, BOOL tmpl, TS_UUID *c
 	} else if ( base != NULL ) {
 		dt_template_made(target, copy);	/* made by the user, from the template */
 		tm_printf((UB *)"desktop: %s made from the template %s\n", name, base);
+	}
+	if ( name != NULL ) {
+		Kfree(name);
 	}
 	if ( own != NULL ) {
 		Kfree(own);
@@ -1595,10 +1649,12 @@ LOCAL ER carry_place( CONST T_DTREQ *rq, BOOL more, TS_UUID *p_into, ID asker )
  * with DT_F_LINK): the record that holds such a link is the program's
  * while it runs, so what a window opened from it writes into the link
  * is sent to the program, on the channel it named, for it to put into
- * its record itself. An entry stands until the program ends, or until
- * the table is full and it is the oldest.
+ * its record itself. An entry stands until the program ends: the table
+ * grows as links are opened (twice as large when it is full). Only when
+ * there is not the memory to make it larger does the oldest entry make
+ * way, and that is said on the console.
  */
-#define PLINK_MAX	64
+#define PLINK_FIRST	64
 
 typedef struct {
 	BOOL	used;
@@ -1612,8 +1668,34 @@ typedef struct {
 	BOOL	tail;			/* it asked in the form of now: told with a tail */
 } PLINK;
 
-LOCAL PLINK	plink[PLINK_MAX];
+LOCAL PLINK	*plink = NULL;		/* plink_n entries, in use or free */
+LOCAL INT	plink_n = 0;
 LOCAL UINT	plink_age = 0;
+
+/*
+ * A table twice as large (or of first, when there is none), the entries
+ * kept and the new ones free: FALSE when there is not the memory
+ */
+LOCAL BOOL dt_grow( void **p_tab, INT *p_n, SZ each, INT first )
+{
+	INT	n = ( *p_n > 0 ) ? *p_n * 2 : first;
+	UB	*t;
+
+	if ( *p_n > 0x3FFFFFFF / (INT)each / 2 ) {
+		return FALSE;
+	}
+	t = (UB *)Kcalloc((SZ)n, each);
+	if ( t == NULL ) {
+		return FALSE;
+	}
+	if ( *p_tab != NULL ) {
+		knl_memcpy(t, *p_tab, each * (SZ)*p_n);
+		Kfree(*p_tab);
+	}
+	*p_tab = t;
+	*p_n = n;
+	return TRUE;
+}
 
 /* The link being opened now from a program's window, while DT_RQ_OPEN opens it */
 LOCAL BOOL	plink_opening = FALSE;
@@ -1623,7 +1705,7 @@ LOCAL void plink_put( CONST PLINK *e )
 {
 	INT	i, k = -1;
 
-	for ( i = 0; i < PLINK_MAX; i++ ) {
+	for ( i = 0; i < plink_n; i++ ) {
 		if ( plink[i].used && ts_uuid_cmp(&plink[i].parent, &e->parent) == 0
 		  && ts_uuid_cmp(&plink[i].vobjid, &e->vobjid) == 0 ) {
 			k = i;			/* the same link opened again: told as it asks now */
@@ -1634,8 +1716,18 @@ LOCAL void plink_put( CONST PLINK *e )
 		}
 	}
 	if ( k < 0 ) {
-		for ( k = 0, i = 1; i < PLINK_MAX; i++ ) {
-			if ( plink[i].age < plink[k].age ) k = i;
+		i = plink_n;
+		if ( dt_grow((void **)&plink, &plink_n, sizeof(PLINK), PLINK_FIRST) ) {
+			k = i;			/* the first of the new room */
+		} else if ( plink_n > 0 ) {
+			for ( k = 0, i = 1; i < plink_n; i++ ) {
+				if ( plink[i].age < plink[k].age ) k = i;
+			}
+			tm_printf((UB *)"desktop: no memory for the links opened from programs' windows: the oldest of %d is forgotten\n",
+				  plink_n);
+		} else {
+			tm_printf((UB *)"desktop: no memory to keep a link opened from a program's window\n");
+			return;
 		}
 	}
 	plink[k] = *e;
@@ -1648,7 +1740,7 @@ LOCAL PLINK *plink_of( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UU
 {
 	INT	i;
 
-	for ( i = 0; i < PLINK_MAX; i++ ) {
+	for ( i = 0; i < plink_n; i++ ) {
 		PLINK	*e = &plink[i];
 
 		if ( !e->used || ts_uuid_cmp(&e->parent, parent) != 0 || ts_uuid_cmp(&e->vobjid, vobjid) != 0 ) {
@@ -1662,6 +1754,54 @@ LOCAL PLINK *plink_of( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_UU
 	}
 	return NULL;
 }
+
+#if USE_KTEST
+/*
+ * For a test: n links of programs' windows kept, more than the table
+ * had room for once (64), and n of the desktop's window entries taken:
+ * answers how many of each are there, both n when none was lost (the
+ * least of the two). What the test put is taken away again.
+ */
+EXPORT INT dt_tables_test( INT n )
+{
+	PLINK	e;
+	DTWIN	**w;
+	INT	i, k, links = 0, wins = 0;
+
+	knl_memset(&e, 0, sizeof(e));
+	for ( i = 0; i < n; i++ ) {
+		e.parent.b[0] = 0xEE;
+		e.parent.b[1] = (UB)( i & 0xFF );
+		e.parent.b[2] = (UB)( i >> 8 );
+		plink_put(&e);
+	}
+	for ( k = 0; k < plink_n; k++ ) {
+		if ( plink[k].used && plink[k].parent.b[0] == 0xEE ) {
+			links++;
+			plink[k].used = FALSE;
+		}
+	}
+	w = (DTWIN **)Kcalloc((SZ)( n > 0 ? n : 1 ), sizeof(DTWIN *));
+	for ( i = 0; w != NULL && i < n; i++ ) {
+		w[i] = win_slot();
+		if ( w[i] == NULL ) break;
+		w[i]->used = TRUE;
+		w[i]->wid = -1;			/* none of the window layer's: never drawn or worked */
+		wins++;
+	}
+	for ( i = 0, k = wins; w != NULL && i < k; i++ ) {
+		INT	j;
+
+		for ( j = 0; j < i && w[j] != w[i]; j++ ) ;
+		if ( j < i ) wins = -1;		/* one entry given twice */
+	}
+	for ( i = 0; w != NULL && i < k; i++ ) {
+		w[i]->used = FALSE;
+	}
+	if ( w != NULL ) Kfree(w);
+	return ( links < wins ) ? links : wins;
+}
+#endif
 
 /* What the window did to the link, sent to the program that holds it */
 LOCAL ER plink_tell( CONST PLINK *e, UINT how, CONST TS_UUID *into, CONST UB *text )
@@ -1814,9 +1954,11 @@ LOCAL BOOL plink_take( T_DTREQ *rq, ID asker, PLINK *e )
  * record is saved, and the look is kept with the entry: asked again
  * (〈再表示〉 of the window), the answer gives the last one told. An
  * entry goes when its window's process has ended or its channel is
- * gone; one link may have several windows.
+ * gone; one link may have several windows. The table grows as windows
+ * ask; only when there is not the memory does the oldest make way, said
+ * on the console.
  */
-#define LWATCH_MAX	64
+#define LWATCH_FIRST	64
 
 typedef struct {
 	BOOL	used;
@@ -1831,7 +1973,8 @@ typedef struct {
 	BOOL	tail;			/* it asked in the form of now: told with a tail */
 } LWATCH;
 
-LOCAL LWATCH	lwatch[LWATCH_MAX];
+LOCAL LWATCH	*lwatch = NULL;		/* lwatch_n entries, in use or free */
+LOCAL INT	lwatch_n = 0;
 LOCAL UINT	lwatch_age = 0;
 
 /* An entry whose process has ended let go: FALSE then */
@@ -1857,7 +2000,7 @@ LOCAL ER lwatch_req( T_DTREQ *rq, T_DTANS *an, ID asker )
 	if ( !plink_take(rq, asker, &e) ) {
 		return E_PAR;
 	}
-	for ( i = 0; i < LWATCH_MAX; i++ ) {
+	for ( i = 0; i < lwatch_n; i++ ) {
 		LWATCH	*w = &lwatch[i];
 
 		if ( !lwatch_live(w) ) {
@@ -1870,6 +2013,19 @@ LOCAL ER lwatch_req( T_DTREQ *rq, T_DTANS *an, ID asker )
 			continue;
 		}
 		if ( !again && ( k < 0 || ( lwatch[k].used && w->age < lwatch[k].age ) ) ) k = i;
+	}
+	if ( !again && ( k < 0 || lwatch[k].used ) ) {
+		/* every entry in use: room for more, the oldest made way for only when there is no memory */
+		i = lwatch_n;
+		if ( dt_grow((void **)&lwatch, &lwatch_n, sizeof(LWATCH), LWATCH_FIRST) ) {
+			k = i;
+		} else if ( k < 0 ) {
+			tm_printf((UB *)"desktop: no memory to keep a window told of its link\n");
+			return E_NOMEM;
+		} else {
+			tm_printf((UB *)"desktop: no memory for the windows told of their links: the oldest of %d is forgotten\n",
+				  lwatch_n);
+		}
 	}
 	/* a new window has the link's look as it was opened (T_PRCOPEN): none told yet */
 	if ( !again || ts_uuid_cmp(&lwatch[k].parent, &e.parent) != 0 || ts_uuid_cmp(&lwatch[k].vobjid, &e.vobjid) != 0 ) {
@@ -1912,7 +2068,7 @@ LOCAL void lwatch_tell( CONST TS_UUID *parent, CONST TS_UUID *vobjid, CONST TS_U
 	an->into = *target;
 	an->look = *look;
 	(void)plink_ids(text, &ids);
-	for ( i = 0; i < LWATCH_MAX; i++ ) {
+	for ( i = 0; i < lwatch_n; i++ ) {
 		LWATCH	*w = &lwatch[i];
 
 		if ( !lwatch_live(w) || ts_uuid_cmp(&w->parent, parent) != 0
@@ -2745,22 +2901,13 @@ EXPORT DTWIN *dt_own_open( CONST DTOWN *own, void *self, CONST T_DPRECT *o, UINT
 	DTWIN	*d = NULL;
 	INT	i, wid;
 
-	for ( i = 0; i < DT_MAX_WIN; i++ ) {
-		if ( !dt_win[i].used ) {
-			d = &dt_win[i];
-			break;
-		}
-	}
+	(void)i;
+	d = win_slot();
 	if ( d == NULL ) {
-		(void)wm_msg_put("これ以上ウインドウを開けません。どれかを閉じてください");
+		(void)wm_msg_put("メモリが足りないため、ウインドウを開けません");
 		return NULL;
 	}
-	{
-		UB	t[WM_TITLE_MAX];
-
-		(void)dt_fit(t, WM_TITLE_MAX, (CONST UB *)title);	/* the window manager's room for a title */
-		wid = wm_open(o, attr, (CONST char *)t);
-	}
+	wid = wm_open(o, attr, title);		/* the title whole: the band shows what fits */
 	if ( wid < 0 ) {
 		return NULL;
 	}
@@ -2801,11 +2948,15 @@ EXPORT void dt_own_ground( DTWIN *d )
 
 EXPORT DTWIN *dt_own_next( CONST DTOWN *own, DTWIN *d )
 {
-	INT	i = ( d != NULL ) ? (INT)( d - dt_win ) + 1 : 0;
+	INT	i = 0;
 
-	for ( ; i < DT_MAX_WIN; i++ ) {
-		if ( dt_win[i].used && dt_win[i].own == own ) {
-			return &dt_win[i];
+	/* after d: its place found, the entries being each allocated on its own */
+	while ( d != NULL && i < dt_nwin && dt_wtab[i] != d ) i++;
+	if ( d != NULL ) i++;
+
+	for ( ; i < dt_nwin; i++ ) {
+		if ( DTW(i).used && DTW(i).own == own ) {
+			return &DTW(i);
 		}
 	}
 	return NULL;
@@ -2851,9 +3002,9 @@ LOCAL void own_poll( void )
 {
 	INT	i;
 
-	for ( i = 0; i < DT_MAX_WIN; i++ ) {
-		if ( dt_win[i].used && dt_win[i].own != NULL && dt_win[i].own->poll != NULL ) {
-			dt_win[i].own->poll(&dt_win[i]);
+	for ( i = 0; i < dt_nwin; i++ ) {
+		if ( DTW(i).used && DTW(i).own != NULL && DTW(i).own->poll != NULL ) {
+			DTW(i).own->poll(&DTW(i));
 		}
 	}
 }
@@ -3030,7 +3181,7 @@ LOCAL ER first_close_req( CONST T_DTREQ *rq )
 /* The window at a place of the table (0 to DT_MAX_WIN - 1), used or not */
 EXPORT DTWIN *dt_win_at( INT i )
 {
-	return ( i >= 0 && i < DT_MAX_WIN ) ? &dt_win[i] : NULL;
+	return ( i >= 0 && i < dt_nwin ) ? &DTW(i) : NULL;
 }
 
 LOCAL BOOL str_is( CONST UB *a, CONST char *b )
@@ -3444,9 +3595,10 @@ EXPORT void dt_fullscreen( DTWIN *d )
  * the window, the one way both times, so that the two never disagree
  * about where it stood. A window is known by its object's UUID as well
  * as its number: a number given again to a window opened later does not
- * find the place of the one before.
+ * find the place of the one before. The table grows as windows are made
+ * full; an entry whose window has gone is used again first.
  */
-#define DT_FULL_MAX	32
+#define DT_FULL_FIRST	32
 
 typedef struct {
 	INT		wid;		/* 0: the entry is free */
@@ -3454,13 +3606,14 @@ typedef struct {
 	T_DPRECT	restore;
 } DTFULL;
 
-LOCAL DTFULL	dt_full[DT_FULL_MAX];
+LOCAL DTFULL	*dt_full = NULL;	/* dt_nfull entries */
+LOCAL INT	dt_nfull = 0;
 
 LOCAL DTFULL *full_of( INT wid, CONST TS_UUID *win )
 {
 	INT	i;
 
-	for ( i = 0; i < DT_FULL_MAX; i++ ) {
+	for ( i = 0; i < dt_nfull; i++ ) {
 		if ( dt_full[i].wid == wid && ts_uuid_cmp(&dt_full[i].win, win) == 0
 		  && wm_obj_wid(&dt_full[i].win) == wid ) {
 			return &dt_full[i];
@@ -3469,17 +3622,33 @@ LOCAL DTFULL *full_of( INT wid, CONST TS_UUID *win )
 	return NULL;
 }
 
-/* A free entry, or one whose window has gone */
+/* A free entry, or one whose window has gone, the table made larger when none is: NULL for no memory */
 LOCAL DTFULL *full_free( void )
 {
-	INT	i;
+	DTFULL	*t;
+	INT	i, n;
 
-	for ( i = 0; i < DT_FULL_MAX; i++ ) {
+	for ( i = 0; i < dt_nfull; i++ ) {
 		if ( dt_full[i].wid <= 0 || wm_obj_wid(&dt_full[i].win) != dt_full[i].wid ) {
 			return &dt_full[i];
 		}
 	}
-	return NULL;
+	if ( dt_nfull > 0x0FFFFFFF / 2 ) {
+		return NULL;
+	}
+	n = ( dt_nfull > 0 ) ? dt_nfull * 2 : DT_FULL_FIRST;
+	t = (DTFULL *)Kcalloc((SZ)n, sizeof(DTFULL));
+	if ( t == NULL ) {
+		return NULL;
+	}
+	if ( dt_full != NULL ) {
+		knl_memcpy(t, dt_full, sizeof(DTFULL) * (SZ)dt_nfull);
+		Kfree(dt_full);
+	}
+	dt_full = t;
+	i = dt_nfull;
+	dt_nfull = n;
+	return &dt_full[i];
 }
 
 /* change FALSE: the window left as it is, only whether it is so said */
@@ -3519,7 +3688,7 @@ EXPORT ER dt_obj_fullscreen( INT wid, BOOL change, BOOL *p_full )
 		}
 	} else {
 		f = full_free();
-		er = ( f == NULL ) ? E_LIMIT : full_rect(&o, &w.outer);
+		er = ( f == NULL ) ? E_NOMEM : full_rect(&o, &w.outer);
 		if ( er >= E_OK ) {
 			er = wm_move(wid, &o);
 		}
@@ -3807,8 +3976,27 @@ LOCAL void ask_label( UB *to, CONST char *s )
  * thing. Answers TRUE with the name in 'out' when it was agreed to and
  * is not empty.
  */
+LOCAL BOOL ask_name( DTWIN *d, CONST char *prompt, CONST UB *start, UB *out, INT max, UB **p_all );
+
 EXPORT BOOL dt_ask_name( DTWIN *d, CONST char *prompt, CONST UB *start,
 			 UB *out, INT max )
+{
+	return ask_name(d, prompt, start, out, max, NULL);
+}
+
+/* The same, the name whole in memory the caller Kfree's: NULL abandoned, empty or no memory */
+EXPORT UB *dt_ask_name_all( DTWIN *d, CONST char *prompt, CONST UB *start )
+{
+	UB	*all = NULL;
+
+	if ( !ask_name(d, prompt, start, NULL, 0, &all) ) {
+		if ( all != NULL ) Kfree(all);
+		return NULL;
+	}
+	return all;
+}
+
+LOCAL BOOL ask_name( DTWIN *d, CONST char *prompt, CONST UB *start, UB *out, INT max, UB **p_all )
 {
 	T_WMPANEL	*def;
 	T_WMWIN		w;
@@ -3816,7 +4004,7 @@ EXPORT BOOL dt_ask_name( DTWIN *d, CONST char *prompt, CONST UB *start,
 	INT		pid, cx, cy;
 	UINT		ans = WM_ANS_NONE;
 
-	if ( d == NULL || out == NULL || max < 2
+	if ( d == NULL || ( p_all == NULL && ( out == NULL || max < 2 ) )
 	  || wm_ref(d->wid, &w) < E_OK ) {
 		return FALSE;
 	}
@@ -3845,7 +4033,11 @@ EXPORT BOOL dt_ask_name( DTWIN *d, CONST char *prompt, CONST UB *start,
 	def->part[1].num  = ASK_BOX;
 	def->part[1].r.left = 22;  def->part[1].r.top = 46;
 	def->part[1].r.right = ASK_W - 22;  def->part[1].r.bottom = 72;
-	def->part[1].caret = dt_fit(def->part[1].text, WM_LABEL_MAX, start);
+	if ( start != NULL && wm_part_set_text(&def->part[1], start, -1) < E_OK ) {
+		wm_panel_free(def);
+		dt_no_memory(d);		/* not asked with the name cut */
+		return FALSE;
+	}
 
 	def->part[2].type   = WM_PT_BUTTON;
 	def->part[2].num    = ASK_CANCEL;
@@ -3894,15 +4086,20 @@ EXPORT BOOL dt_ask_name( DTWIN *d, CONST char *prompt, CONST UB *start,
 		}
 		wm_update();
 	}
-	out[0] = 0;
+	if ( out != NULL && max > 0 ) out[0] = 0;
+	if ( p_all != NULL ) *p_all = NULL;
 	if ( ans == WM_ANS_OK ) {
-		wm_panel_text(pid, ASK_BOX, out, max);
+		if ( p_all != NULL ) {
+			if ( wm_panel_text_all(pid, ASK_BOX, p_all) < 0 ) ans = WM_ANS_CANCEL;
+		} else {
+			wm_panel_text(pid, ASK_BOX, out, max);
+		}
 	}
 	wm_panel_close(pid);
 	dt_draw(d);
 	wm_update();
 
-	return (BOOL)( ans == WM_ANS_OK && out[0] != 0 );
+	return (BOOL)( ans == WM_ANS_OK && ( ( p_all != NULL ) ? ( *p_all != NULL && (*p_all)[0] != 0 ) : out[0] != 0 ) );
 }
 
 /* ---------------------------------------------------------------- winding */
@@ -4192,8 +4389,8 @@ LOCAL void video_confirm( DTWIN *d )
 		(void)screen_set(vm_ow, vm_oh);
 		tm_sprintf((UB *)s, (UB *)"%dx%d", (INT)vm_ow, (INT)vm_oh);
 		tm_printf((UB *)"TessronOS desktop: the screen put back to %s\n", s);
-		for ( i = 0; i < DT_MAX_WIN; i++ ) {
-			if ( dt_win[i].used ) dt_draw(&dt_win[i]);
+		for ( i = 0; i < dt_nwin; i++ ) {
+			if ( DTW(i).used ) dt_draw(&DTW(i));
 		}
 		(void)dt_res_wall(WM_WALL_FIT);
 		wm_composite();
@@ -4377,8 +4574,8 @@ LOCAL void screen_redraw( void )
 {
 	INT	i;
 
-	for ( i = 0; i < DT_MAX_WIN; i++ ) {
-		if ( dt_win[i].used ) dt_draw(&dt_win[i]);
+	for ( i = 0; i < dt_nwin; i++ ) {
+		if ( DTW(i).used ) dt_draw(&DTW(i));
 	}
 	(void)dt_res_wall(WM_WALL_FIT);
 	(void)wm_composite();
@@ -5299,9 +5496,9 @@ LOCAL void desktop_run( void )
 			INT	i;
 
 			dt_layout = wm_layout_serial();
-			for ( i = 0; i < DT_MAX_WIN; i++ ) {
-				if ( dt_win[i].used ) {
-					dt_draw(&dt_win[i]);
+			for ( i = 0; i < dt_nwin; i++ ) {
+				if ( DTW(i).used ) {
+					dt_draw(&DTW(i));
 				}
 			}
 			wm_update();
@@ -5504,8 +5701,8 @@ LOCAL void desktop_run( void )
 		goto the_session;
 	}
 	dt_fault_close_all();
-	for ( i = 0; i < DT_MAX_WIN; i++ ) {
-		win_close(&dt_win[i]);
+	for ( i = 0; i < dt_nwin; i++ ) {
+		win_close(&DTW(i));
 	}
 	req_stop();				/* nobody left to read for */
 	om_store_empty();

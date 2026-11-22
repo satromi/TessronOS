@@ -21,8 +21,10 @@
  *	it links to, the notices of the objects it links to, what a window
  *	opened from one of its links did to that link, 新たな実身に保存,
  *	where the window stood, 全画面表示, 背景色変更, 屑実身操作, the
- *	items 実行 and トレー of the menu -- are here. What is particular
- *	to each program is told through T_TAHOST.
+ *	item トレー of the menu -- are here. What is particular to each
+ *	program is told through T_TAHOST. The 仮身操作, 実身操作 and 実行 of
+ *	a link are the shared part's of every program (ts/tvvop.h), asked
+ *	through ta_tv_asker.
  *
  *	The converter of かな漢字 works for a text being edited (T_DDED,
  *	include/ts/docedit.h): its keys, what it is composing drawn at the
@@ -40,6 +42,7 @@
 #include <ts/ui.h>
 #include <ts/dtreq.h>
 #include <ts/docedit.h>
+#include <ts/tvvop.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -134,9 +137,10 @@ IMPORT ER   ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms );
 IMPORT void ta_req_part( UINT kind, CONST UB *s, SZ len );
 IMPORT CONST UB *ta_ans_part( UINT kind, SZ *p_len );
 IMPORT SZ   ta_read_whole( ID k, UB **p_buf, SZ *p_cap, TMO tmo );
-IMPORT void link_open( CONST T_VOBJ *v );
-IMPORT void ta_link_open( CONST T_VOBJ *v, UINT flags, INT rank );	/* DT_F_AUTO: 自動起動, at place rank */
-IMPORT BOOL ta_link_named( T_DTREQ *rq, CONST TS_UUID *vobjid );	/* DT_RQ_ATTR of that link: DT_F_LINK */
+IMPORT void ta_link_open( CONST T_VOBJ *v, UINT flags, INT rank );	/* opened by DT_F_AUTO: 自動起動, at place rank */
+/* The 仮身操作 (ts/tvvop.h): asked through ask_desktop, the links named at the window's channel */
+IMPORT void ta_tv_asker( T_TVASK *a );
+IMPORT BOOL ta_tv_named( TS_UUID *p_parent, TS_UUID *p_chan );
 
 /* ---------------------------------------------------------------- the record */
 
@@ -181,8 +185,6 @@ IMPORT void ta_trash_open( void );		/* 屑実身操作 */
 /* ---------------------------------------------------------------- the menu */
 
 IMPORT void ta_tray_menu( ID mid );		/* トレー: the sets in it */
-IMPORT INT  ta_exec_menu( ID mid, CONST T_VOBJ *v );	/* 実行 for the link v: how many programs */
-IMPORT void ta_exec_app( CONST T_VOBJ *v, INT index );
 
 /* ---------------------------------------------------------------- the converter of かな漢字 */
 

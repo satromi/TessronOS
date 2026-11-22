@@ -3617,7 +3617,7 @@ EXPORT void de_link_after( T_DDED *d, CONST TS_UUID *orig )
 	T_TAD		*rec = (*d->rec);
 	T_TADNODE	*was = NULL, *now = NULL;
 	T_VOBJ		v = { .recno = 0 };
-	INT		i, n;
+	INT		i, n, was_run = -1;
 
 	d->host->model(d);
 	n = tad_lnk_count(rec);
@@ -3636,11 +3636,34 @@ EXPORT void de_link_after( T_DDED *d, CONST TS_UUID *orig )
 		} else if ( tad_lnk_get(rec, r->link, &v) >= E_OK
 			 && ts_uuid_cmp(&v.vobjid, orig) == 0 ) {
 			was = r->node;
+			was_run = i;
 		}
 	}
 	tad_vobj_clear(&v);
 	if ( was != NULL && now != NULL && was != now ) {
+		INT	pi, at = 0;
+
+		/* the place right after the old link, in its paragraph (the link is one place) */
+		for ( pi = 0; pi < (*d->doc)->npara; pi++ ) {
+			CONST T_TVPARA	*p = &(*d->doc)->para[pi];
+
+			if ( was_run >= p->first && was_run < p->first + p->n ) {
+				for ( i = p->first; i <= was_run; i++ ) {
+					at += run_units(&(*d->doc)->run[i]);
+				}
+				break;
+			}
+		}
 		tad_node_move(now, was->parent, was->next);
+		/* what stood after that place in the paragraph moves on by the one place put in */
+		if ( pi < (*d->doc)->npara ) {
+			if ( d->cpara == pi && d->cpos > at ) {
+				d->cpos++;
+			}
+			if ( d->apara == pi && d->apos > at ) {
+				d->apos++;
+			}
+		}
 	}
 }
 

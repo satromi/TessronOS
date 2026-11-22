@@ -21,15 +21,18 @@
 #define __PDRAW_H__
 
 #include <ts/part.h>
+#include <ts/tsmozc.h>
 
 #define PD_FH		16		/* the letters of parts: sixteen high, sixteen wide */
 #define PD_GAP		1		/* between the letters in a box: a sixteenth of one */
 #define PD_SS_BAR	20		/* the room a scrolling selector keeps for its bar */
-#define PD_TAG_MAX	32		/* tags in one panel of them */
 
-/* A conversion under way in a box, as the box shows it */
-#define PD_CONV_TEXT	256
-#define PD_CONV_CL	32
+/*
+ * A conversion under way in a box, as the box shows it: as much as the
+ * converter answers (T_KCOUT), its letters and its clauses
+ */
+#define PD_CONV_TEXT	TSMOZC_TEXT_MAX
+#define PD_CONV_CL	TSMOZC_CL_MAX
 #define PD_CAND_MAX	1024
 #define PD_CAND_ROWS	9
 
@@ -60,6 +63,8 @@ struct T_WMNAMES {
 	INT		ncol;		/* columns the names make, 0 not measured */
 	ID		colfid;		/* the face they were measured in */
 	INT		nat[PD_COL_MAX];	/* the widest entry of each column */
+	UW		*off;		/* names that cannot be chosen: a bit each, from bit 0 of off[0]; NULL none */
+	INT		noff;		/* the words of off */
 	UB		b[];
 };
 
@@ -68,6 +73,10 @@ IMPORT T_WMNAMES *pd_names_new( INT n );
 /* A copy of a block, of the bytes it uses; NULL for none or no memory (*p_er says which) */
 IMPORT T_WMNAMES *pd_names_dup( CONST T_WMNAMES *nm, ER *p_er );
 IMPORT void pd_names_free( T_WMNAMES *nm );
+/* Whether name idx (1 up) of the part cannot be chosen */
+IMPORT BOOL pd_name_off( CONST T_WMPART *pt, INT idx );
+/* The names that cannot be chosen, nw words of bits for the part's names: E_NOMEM leaves them as they were */
+IMPORT ER pd_names_set_off( T_WMPART *pt, CONST UW *w, INT nw );
 
 /*
  * The name numbered i (0 up) of a part's names that start 'at' bytes in
@@ -127,6 +136,8 @@ IMPORT INT pd_tb_at( CONST T_WMPART *pt, CONST T_DPRECT *r, INT x );
  */
 IMPORT INT pd_tag_at( T_WMPART *pt, INT x, INT y, T_DPRECT *p_tab );
 IMPORT INT pd_tag_show( T_WMPART *pt, INT num );
+/* The tags that can be seen, at most max: their numbers, rectangles, frames as drawn and whether they cannot be chosen */
+IMPORT INT pd_tag_list( T_WMPART *pt, INT *num, T_DPRECT *r, T_DPRECT *frame, BOOL *off, INT max );
 IMPORT void pd_tag_turn( INT gid, CONST T_DPRECT *tab );	/* a tag held: turned over */
 /* The sheet the parts of the tag shown stand on, in the panel's coordinates */
 IMPORT void pd_tag_sheet( T_WMPART *pt, T_DPRECT *out );

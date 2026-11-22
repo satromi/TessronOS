@@ -26,21 +26,54 @@
 
 /* ---------------------------------------------------------------- whole parts */
 
+/*
+ * Every record of the object open as key (xfu_sys_alloc, the caller's),
+ * how many in *p_cnt: listed again with twice the room while they fill
+ * it. NULL when there is no memory or the list cannot be read.
+ */
+EXPORT T_OBREC *xfu_recs( ID key, INT *p_cnt )
+{
+	T_OBREC	*r;
+	INT	cap = 16, cnt;
+
+	*p_cnt = 0;
+	for ( ;; ) {
+		r = (T_OBREC *)xfu_sys_alloc(sizeof(T_OBREC) * (SZ)cap);
+		if ( r == NULL ) {
+			return NULL;
+		}
+		cnt = 0;
+		if ( ob_lst_rec(key, r, cap, &cnt) < E_OK ) {
+			xfu_sys_free(r);
+			return NULL;
+		}
+		if ( cnt < cap ) {
+			*p_cnt = cnt;
+			return r;
+		}
+		xfu_sys_free(r);
+		cap *= 2;
+	}
+}
+
 EXPORT UB *xfu_rec_all( ID key, INT recno, SZ *p_size )
 {
-	T_OBREC	rec[16];
+	T_OBREC	*rec;
 	UB	*buf;
 	SZ	size = 0, got = 0, n;
 	INT	cnt = 0, i;
 
-	if ( ob_lst_rec(key, rec, 16, &cnt) < E_OK ) {
+	rec = xfu_recs(key, &cnt);
+	if ( rec == NULL ) {
 		return NULL;
 	}
-	for ( i = 0; i < cnt && i < 16 && rec[i].recno != recno; i++ ) ;
-	if ( i >= cnt || i >= 16 ) {
+	for ( i = 0; i < cnt && rec[i].recno != recno; i++ ) ;
+	if ( i >= cnt ) {
+		xfu_sys_free(rec);
 		return NULL;
 	}
 	size = (SZ)rec[i].size;
+	xfu_sys_free(rec);
 	buf = (UB *)xfu_sys_alloc(size + 1);
 	if ( buf == NULL ) {
 		return NULL;
@@ -387,14 +420,40 @@ EXPORT void xfu_tick( XFU *x, D bytes )
 	}
 }
 
+EXPORT BOOL xfu_uuids_room( TS_UUID **p_list, INT n, INT *p_cap, INT first )
+{
+	INT	cap;
+	TS_UUID	*nl;
+
+	if ( *p_list != NULL && n < *p_cap ) {
+		return TRUE;
+	}
+	cap = ( *p_cap > 0 ) ? *p_cap * 2 : first;
+	nl = (TS_UUID *)xfu_sys_alloc(sizeof(TS_UUID) * (SZ)cap);
+	if ( nl == NULL ) {
+		return FALSE;
+	}
+	if ( *p_list != NULL ) {
+		xfu_mcpy(nl, *p_list, sizeof(TS_UUID) * (SZ)n);
+		xfu_sys_free(*p_list);
+	}
+	*p_list = nl;
+	*p_cap = cap;
+	return TRUE;
+}
+
 EXPORT void xfu_made( XFU *x, CONST TS_UUID *u )
 {
-	if ( x->made == NULL ) {
-		x->made = (TS_UUID *)xfu_sys_alloc(sizeof(TS_UUID) * XFU_OBJ_MAX);
+	/*
+	 * every object made is kept, so that a stop throws all of them away
+	 * again; one there is no memory to keep stops the work
+	 */
+	if ( !xfu_uuids_room(&x->made, x->nmade, &x->madecap, 64) ) {
+		x->st.last = E_NOMEM;
+		x->stop = TRUE;
+		return;
 	}
-	if ( x->made != NULL && x->nmade < XFU_OBJ_MAX ) {
-		x->made[x->nmade++] = *u;
-	}
+	x->made[x->nmade++] = *u;
 }
 
 EXPORT void xfu_unmade( XFU *x, CONST TS_UUID *u )

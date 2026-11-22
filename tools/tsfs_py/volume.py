@@ -18,9 +18,9 @@ from .btree import BTree, TREE_GC, TREE_OBJ, TREE_ORPHAN
 from .error import TsfsError
 from .groups import Maps, fresh_map, head_fields, head_problems, map_crcs
 from .journal import Journal
-from .layout import (BLOCK_SIZE, COMPAT_GROWN, INCOMPAT_GROWING, NIL_UUID,
-                     ST_CLEAN, Superblock, gen_uuid7, grown_count, layout,
-                     now_tron)
+from .layout import (BLOCK_SIZE, COMPAT_GROWN, INCOMPAT_FMT5, INCOMPAT_GROWING,
+                     NIL_UUID, ST_CLEAN, VERSION, VERSION5, Superblock,
+                     gen_uuid7, grown_count, layout, now_tron)
 from .obj import ObjectBlock
 
 
@@ -132,10 +132,13 @@ class Volume(object):
 
     @classmethod
     def format(cls, dev, label="", vol_uuid=None, mkfs_time=None,
-               journal_seq=None):
+               journal_seq=None, version=VERSION):
         """Make a volume as ts_format_blk does: the journal head cleared,
         each group's map and head, superblock B (generation 1), A
-        (generation 2), and a copy of A in each spare."""
+        (generation 2), and a copy of A in each spare. `version` is 4 or 5 (the
+        superblock's version 5 and FMT5)."""
+        if version not in (VERSION, VERSION5):
+            raise TsfsError("there is no version %r of the format" % version)
         nblk = dev.nblk
         jblocks, agb, agn = layout(nblk)
         # the superblock keeps the label's first bytes, cut at a whole letter
@@ -153,6 +156,9 @@ class Volume(object):
         sb.state = ST_CLEAN
         sb.mkfs_time = now_tron() if mkfs_time is None else mkfs_time
         sb.vol_uuid = vol_uuid if vol_uuid is not None else gen_uuid7()
+        if version == VERSION5:
+            sb.version = VERSION5
+            sb.incompat |= INCOMPAT_FMT5
         sb.set_label(label)
 
         vol = cls(dev, sb, writable=True)
@@ -209,6 +215,13 @@ class Volume(object):
         self.maps.write(self, groups=range(n0 - 1, new.ag_count))
         self.write_sb(both=True, spares=True)
         self.dev.flush()
+
+    @property
+    def v5(self):
+        return self.sb.v5
+
+    def limits(self):
+        return self.sb.limits()
 
     # ------------------------------------------------------------ blocks
 

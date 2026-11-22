@@ -135,12 +135,23 @@ EXPORT ER wm_pict_draw( INT gid, INT num, ID owner, CONST T_DPRECT *box,
 	if ( w <= 0 || h <= 0 ) {
 		return E_PAR;
 	}
-	/* an entry of the box can be larger than a stack wants to hold */
-	def = (UB *)Kmalloc(DB_MAX_SIZE);
-	if ( def == NULL ) {
-		return E_NOMEM;
+	/* the entry as large as the box keeps it, asked again if it was put anew meanwhile */
+	for ( ;; ) {
+		INT	size = db_size(DB_PICT, num, owner);
+
+		if ( size <= 0 ) {
+			return E_NOEXS;
+		}
+		def = (UB *)Kmalloc((SZ)size);
+		if ( def == NULL ) {
+			return E_NOMEM;
+		}
+		got = db_get(DB_PICT, num, owner, def, (SZ)size);
+		if ( got != E_LIMIT ) {
+			break;
+		}
+		Kfree(def);
 	}
-	got = db_get(DB_PICT, num, owner, def, DB_MAX_SIZE);
 	if ( got < 0 ) {
 		Kfree(def);
 		return E_NOEXS;

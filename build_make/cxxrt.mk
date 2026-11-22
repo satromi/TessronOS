@@ -135,6 +135,11 @@ CRT_BEGIN := $(shell $(CC) -print-file-name=crtbegin.o)
 CRT_END   := $(shell $(CC) -print-file-name=crtend.o)
 
 # $(call CXXRT_LINK,出力,オブジェクトとソース)
+# このビルドの C++ の実行時の置き場を言う(tools/mesa/build.sh などのスクリプトが結ぶ)
+.PHONY: print-cxxrt-dir
+print-cxxrt-dir:
+	@echo $(abspath $(CXXRT_OUT))
+
 CXXRT_LINK = $(CXX) $(TSPOSIX_CXXFLAGS) -nostdlib -nostartfiles -static -T $(CXXRT_LD) \
 	-Wl,--build-id=none -Wl,--gc-sections -o $(1) $(CRT_I) $(CRT_BEGIN) $(2) \
 	-Wl,--whole-archive $(CXXRT_LIB) $(PTH_LIB) -Wl,--no-whole-archive \
@@ -175,7 +180,7 @@ ifeq ($(ARCH),x86_64)
 BROWSER_OUT      := $(UOBJ)
 BROWSER_ARCH_ENV := TS_ARCH=x86_64
 else
-BROWSER_OUT      := obj
+BROWSER_OUT      := $(UOBJ)
 BROWSER_ARCH_ENV :=
 endif
 ifeq ($(BROWSER),1)
@@ -205,7 +210,7 @@ $(BROWSER_SPEECH_REC): $(BROWSER_BIN)
 
 EXTRA_RECS += $(BROWSER_SPEECH_REC)
 else
-# 前の Blink のビルドが共有の obj/rec に残した音声のレコードは、このビルドのブラウザには無い
+# 同じ BUILD_ID の前の Blink のビルドが $(UOBJ)/rec に残した音声のレコードは、このビルドのブラウザには無い
 SYS_VOL_EXCLUDE += 01a0d8c4-5b20-7a10-9b31-6c2e8f4d1a57_2.bin
 endif
 
@@ -232,7 +237,7 @@ GL_DEPS   := $(wildcard $(GL_BUILD) $(TOP)/tools/mesa/translate.py \
 
 # $(call GL_LINK,出力,オブジェクト): C++ のプログラムと同じ結び方に、libtsgl.a を加える
 GL_GROUP := -Wl,--start-group $(GL_LIB) -Wl,--end-group
-GL_LINK = $(call CXXRT_LINK,$(1),$(2) $(GL_GROUP))
+GL_LINK = $(SHARED_S) $(call CXXRT_LINK,$(1),$(2) $(GL_GROUP))
 
 # 小物「歯車」のプログラム実身のレコード1。make GL=1 のときは OpenGL ES を結んだもの、
 # そうでないときは作り方を言うだけの小さなもの。メタデータとレコード0は etc/def にある
@@ -250,7 +255,7 @@ endif
 
 $(GL_LIB): $(GL_DEPS) $(CXXRT_LIB) $(PTH_LIB)
 	@echo 'GL  $@'
-	@bash $(GL_BUILD) all
+	@LIBDIR=$(abspath $(CXXRT_OUT)) $(SHARED_X) bash $(GL_BUILD) all
 
 $(UOBJ)/gl/%.o: $(TOP)/application/glgears/%.c $(GL_LIB) $(APP_HDRS)
 	@mkdir -p $(dir $@)

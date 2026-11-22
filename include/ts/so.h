@@ -28,7 +28,9 @@
 #else
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
-#define SO_MAX		MEMP_NUM_NETCONN	/* socket numbers run 0 .. SO_MAX - 1 */
+#define SO_MAX		MEMP_NUM_NETCONN	/* lwIP's fixed table: socket numbers run 0 .. SO_MAX - 1 */
+#define SO_BLK		16
+#define SO_NUM_CEIL	( ( SO_MAX + SO_BLK - 1 ) / SO_BLK * SO_BLK )
 #endif
 #include <ts/uuid.h>
 
@@ -236,37 +238,56 @@ IMPORT BOOL knl_so_mine( INT s, ID owner );
 IMPORT void knl_so_prc_end( ID pid );
 
 /*
- * The two limits on the sockets there are (design 9.2), as Linux and
- * NetBSD limit descriptors: the system's table (SO_MAX), whose last
- * SO_KERNEL_RESERVE numbers only the kernel is given, so that its name
- * lookups, DHCP, SLAAC and the clock go on when the processes have
- * taken the rest (E_LIMIT, ENFILE); and each process's own (EX_MFILE,
- * EMFILE), as RLIMIT_NOFILE: a soft limit that is the one that holds, and
- * a hard one the soft may be raised to. A process starts with its
- * parent's, the first ones with SO_PRC_SOFT and SO_PRC_HARD. Anyone may
- * lower either and raise the soft one up to the hard one; only an
- * administrator raises the hard one, and never past SO_PRC_CEIL, so that
+ * The two limits on the sockets there are (design 9.2.2), as Linux and
+ * NetBSD limit descriptors: the system's (knl_so_sysmax, as kern.maxfiles
+ * and fs.file-max), whose last SO_KERNEL_RESERVE sockets only the kernel
+ * is given, so that its name lookups, DHCP, SLAAC and the clock go on
+ * when the processes have taken the rest (E_LIMIT, ENFILE); and each
+ * process's own (EX_MFILE, EMFILE), as RLIMIT_NOFILE: a soft limit that
+ * is the one that holds, and a hard one the soft may be raised to.
+ *
+ * The system's limit is SO_SYS_WANT, or what the stack can hold if that
+ * is fewer (the rump kernel's own maxfiles, read as the stack comes up),
+ * and below SO_NUM_CEIL. A process starts with its parent's limits, the
+ * first ones with SO_PRC_SOFT_WANT and SO_PRC_HARD_WANT, the hard one no
+ * more than three quarters of what the processes may have in all
+ * (knl_so_prc_first). Anyone may lower either and raise the soft one up
+ * to the hard one; only an administrator raises the hard one, and never
+ * past knl_so_prc_ceil -- the system's limit less the kernel's -- so that
  * no one program can take the table from the others.
- *	knl_prc_so_cur		the soft limit of process pid; SO_PRC_SOFT for
- *				an owner that is no process
- *	knl_prc_so_limit	both of them
+ *	knl_so_sysmax		the system's limit
+ *	knl_so_prc_ceil		the most a process's hard limit may be
+ *	knl_so_prc_first	the first process's two limits
+ *	knl_prc_so_cur		the soft limit of process pid; the first one
+ *				for an owner that is no process
+ *	knl_prc_so_limit	both of them, held to knl_so_prc_ceil
  *	knl_prc_so_setlimit	both of them set; raise: the hard one may go up
  */
 #if TS_NETSTACK_NETBSD
 #define SO_KERNEL_RESERVE	32
+#define SO_SYS_WANT		4096
 #else
 #define SO_KERNEL_RESERVE	0		/* lwIP: no numbers kept back */
+#define SO_SYS_WANT		SO_MAX
 #endif
-#define SO_PRC_CEIL		( SO_MAX - SO_KERNEL_RESERVE )
-#define SO_PRC_HARD		( ( SO_PRC_CEIL < 768 ) ? SO_PRC_CEIL : 768 )
-#define SO_PRC_SOFT		( ( SO_PRC_HARD < 512 ) ? SO_PRC_HARD : 512 )
+#define SO_PRC_SOFT_WANT	1024
+#define SO_PRC_HARD_WANT	2048
 #ifndef EX_MFILE
 #define EX_MFILE		(-24)		/* the process's limit (include/ts/fs.h) */
 #endif
 
+IMPORT INT  knl_so_sysmax( void );
+IMPORT INT  knl_so_prc_ceil( void );
+IMPORT void knl_so_prc_first( INT *p_cur, INT *p_max );
 IMPORT INT  knl_prc_so_cur( ID pid );
 IMPORT ER   knl_prc_so_limit( ID pid, INT *p_cur, INT *p_max );
 IMPORT ER   knl_prc_so_setlimit( ID pid, INT cur, INT max, BOOL raise );
+
+/*
+ * How many sockets are open in all, and in *p_room how many numbers the
+ * table has made room for so far (a multiple of SO_BLK)
+ */
+IMPORT INT  knl_so_count( INT *p_room );
 
 /*
  * Each socket is a real object (OB_T_CHANNEL, OB_S_SOCKET, peripheral_
@@ -275,7 +296,9 @@ IMPORT ER   knl_prc_so_setlimit( ID pid, INT cur, INT max, BOOL raise );
  * protocol as asked; accepted: those of the socket it came to) and
  * when it is closed, before the number can be given out again (gone).
  * A socket made before the object layer is up, or before there is a
- * clock to make a UUID with, has no object.
+ * clock to make a UUID with, has no object. The manager's table grows
+ * with the stack's: knl_so_obj_room makes room for numbers 0 .. n - 1
+ * before the stack gives one of them out (E_NOMEM: no memory for it).
  *	so_getobj	the UUID of socket s's object (E_ID: no such socket,
  *			E_NOEXS: it has none)
  *	knl_so_obj_list	the numbers and UUIDs of the objects of the
@@ -286,6 +309,7 @@ IMPORT ER   knl_prc_so_setlimit( ID pid, INT cur, INT max, BOOL raise );
  *			slices, coming out with E_DISWAI when the process
  *			is being ended (so_prc.c)
  */
+IMPORT ER   knl_so_obj_room( INT n );
 IMPORT void knl_so_obj_made( INT s, ID owner, INT domain, INT type, INT protocol );
 IMPORT void knl_so_obj_accepted( INT s, INT from, ID owner );
 IMPORT void knl_so_obj_gone( INT s );

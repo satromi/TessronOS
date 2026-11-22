@@ -143,6 +143,7 @@ typedef struct {
  */
 #define GPU_ENG_RENDER		0
 #define GPU_ENG_COPY		1
+#define GPU_ENG_VIDEO		2	/* the video engine: the kernel's jobs only (its H.264 decoder) */
 #define GPU_HWC_MAX		16	/* hardware contexts of a space */
 #define GPU_BATCH_FRESH		0x0001	/* the context made anew before the batch runs */
 

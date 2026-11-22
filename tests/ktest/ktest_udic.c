@@ -260,6 +260,28 @@ LOCAL INT obj_read( UB *buf, INT max )
 	return ( er < E_OK ) ? (INT)er : (INT)asz;
 }
 
+/* What the object holds, whole, into kept (memory taken for it); its length, or below 0 */
+LOCAL INT obj_keep( void )
+{
+	TS_UUID	u;
+	T_OBREC	r[8];
+	ID	k;
+	SZ	size = 0;
+	INT	cnt = 0, i;
+
+	if ( ts_str_to_uuid(SYSDEF_DICT_USER, &u) < E_OK ) return E_SYS;
+	k = ob_opn_obj(&u, OB_OP_R);
+	if ( k <= 0 ) return (INT)k;
+	if ( ob_lst_rec(k, r, 8, &cnt) >= E_OK ) {
+		for ( i = 0; i < cnt && i < 8; i++ ) {
+			if ( r[i].recno == 1 ) size = (SZ)r[i].size;
+		}
+	}
+	ob_cls_obj(k);
+	kept = (UB *)Kmalloc(size + 1);
+	return ( kept != NULL ) ? obj_read(kept, (INT)size + 1) : -1;
+}
+
 LOCAL ER obj_write( CONST UB *buf, INT len )
 {
 	TS_UUID	u;
@@ -290,8 +312,7 @@ LOCAL void test_store( void )
 	KT_ASSERT(t != NULL);
 	if ( t == NULL ) return;
 	if ( kept == NULL ) {
-		kept = (UB *)Kmalloc(UD_TEXT_MAX);
-		kept_len = ( kept != NULL ) ? obj_read(kept, UD_TEXT_MAX) : -1;
+		kept_len = obj_keep();
 	}
 	KT_ASSERT(kept_len >= 0);
 	KT_ASSERT_ER(obj_words("あいう\t愛宇\t名詞\nてすろん\t手須論\t固有名詞\n"), E_OK);
@@ -367,8 +388,7 @@ LOCAL void test_convert( void )
 	KT_ASSERT(out != NULL);
 	if ( out == NULL ) return;
 	if ( kept == NULL ) {
-		kept = (UB *)Kmalloc(UD_TEXT_MAX);
-		kept_len = ( kept != NULL ) ? obj_read(kept, UD_TEXT_MAX) : -1;
+		kept_len = obj_keep();
 	}
 	KT_ASSERT_ER(kc_start(), E_OK);
 	KT_ASSERT_ER(obj_words("てすろん\t手須論\t固有名詞\n"), E_OK);
@@ -471,8 +491,7 @@ LOCAL void test_person( void )
 	KT_ASSERT(t != NULL);
 	if ( t == NULL ) return;
 	if ( kept == NULL ) {
-		kept = (UB *)Kmalloc(UD_TEXT_MAX);
-		kept_len = ( kept != NULL ) ? obj_read(kept, UD_TEXT_MAX) : -1;
+		kept_len = obj_keep();
 	}
 	KT_ASSERT_ER(kc_start(), E_OK);
 	KT_ASSERT_ER(ts_str_to_uuid(SYSDEF_DICT_USER, &shared), E_OK);
@@ -528,6 +547,81 @@ LOCAL void test_person( void )
 	Kfree(t);
 }
 
+/* a reading, a word and a text of any length */
+LOCAL void test_long( void )
+{
+	INT	big = 700 * 1024, i, len = 0, bad = 0, n;
+	UB	*t = (UB *)Kmalloc(big), *y = (UB *)Kmalloc(1000), *w = (UB *)Kmalloc(big), *in = (UB *)Kmalloc(4000);
+	UB	out[8];
+	UDENT	e[2];
+
+	KT_ASSERT(t != NULL && y != NULL && w != NULL && in != NULL);
+	if ( t == NULL || y == NULL || w == NULL || in == NULL ) goto out;
+
+	/* a reading of 300 bytes and a word of 2000: put, looked up in katakana, found by the end of the word */
+	for ( i = 0; i < 100; i++ ) {
+		y[i * 3] = 0xE3;  y[i * 3 + 1] = 0x81;  y[i * 3 + 2] = 0x82;		/* あ */
+	}
+	for ( i = 0; i < 2000; i++ ) w[i] = (UB)( 'a' + i % 26 );
+	w[1990] = 'Z';  w[1991] = 'Q';
+	KT_ASSERT_ER(ud_put(t, &len, big, y, 300, w, 2000, UD_POS_NOUN), E_OK);
+	KT_ASSERT_EQ(ud_count(t, len), 1);
+	for ( i = 0; i < 100; i++ ) {
+		in[i * 3] = 0xE3;  in[i * 3 + 1] = 0x82;  in[i * 3 + 2] = 0xA2;		/* ア */
+	}
+	KT_ASSERT_EQ(ud_lookup(t, len, in, 300, e, 2), 1);
+	KT_ASSERT_EQ(e[0].nyomi, 300);
+	KT_ASSERT_EQ(e[0].nword, 2000);
+	KT_ASSERT(ud_match(&e[0], (CONST UB *)"ZQ", 2));
+	KT_ASSERT(!ud_match(&e[0], (CONST UB *)"ZR", 2));
+	KT_ASSERT(ud_match(&e[0], in, 300));
+	KT_ASSERT_ER(ud_del(t, &len, in, 300, w, 2000), E_OK);
+	KT_ASSERT_EQ(len, 0);
+	/* a reading that does not fit the caller's buffer is E_PAR, never cut */
+	KT_ASSERT_EQ(ud_yomi(y, 300, out, sizeof(out)), E_PAR);
+
+	/* a line of any length read in: UTF-8 as it lies, UTF-16 made in the free end of the text */
+	{
+		INT	k = 0;
+
+		for ( i = 0; i < 300; i++ ) in[k++] = y[i];
+		in[k++] = '\t';
+		for ( i = 0; i < 1000; i++ ) in[k++] = (UB)( 'a' + i % 26 );
+		in[k++] = '\n';
+		len = 0;
+		KT_ASSERT_EQ(ud_import(t, &len, big, in, k, &bad), 1);
+		KT_ASSERT_EQ(bad, 0);
+		KT_ASSERT_EQ(ud_lookup(t, len, y, 300, e, 2), 1);
+		KT_ASSERT_EQ(e[0].nword, 1000);
+
+		k = 0;
+		in[k++] = 0xFF;  in[k++] = 0xFE;
+		for ( i = 0; i < 200; i++ ) { in[k++] = 0x42;  in[k++] = 0x30; }		/* あ (U+3042) */
+		in[k++] = '\t';  in[k++] = 0;
+		for ( i = 0; i < 600; i++ ) { in[k++] = 'w';  in[k++] = 0; }
+		in[k++] = '\n';  in[k++] = 0;
+		len = 0;
+		KT_ASSERT_EQ(ud_import(t, &len, big, in, k, &bad), 1);
+		KT_ASSERT_EQ(ud_lookup(t, len, y, 300, e, 2), 0);		/* 200 letters: not the reading of 100 */
+		KT_ASSERT_EQ(e[0].nyomi, 300);
+		n = ud_count(t, len);
+		KT_ASSERT_EQ(n, 1);
+		KT_ASSERT_EQ(ud_import(t, &len, 700, in, k, &bad), E_LIMIT);	/* the line's UTF-8 does not fit beside it */
+	}
+
+	/* a text over 512KB: one word of 600KB */
+	for ( i = 0; i < 600 * 1024; i++ ) w[i] = (UB)( 'a' + i % 26 );
+	len = 0;
+	KT_ASSERT_ER(ud_put(t, &len, big, y, 300, w, 600 * 1024, UD_POS_NOUN), E_OK);
+	KT_ASSERT_EQ(ud_count(t, len), 1);
+	KT_ASSERT(len > 600 * 1024);
+out:
+	if ( t != NULL ) Kfree(t);
+	if ( y != NULL ) Kfree(y);
+	if ( w != NULL ) Kfree(w);
+	if ( in != NULL ) Kfree(in);
+}
+
 LOCAL void test_restore( void )
 {
 	if ( kept != NULL && kept_len >= 0 ) {
@@ -544,6 +638,7 @@ EXPORT void ktest_udic( void )
 {
 	tm_printf((UB *)"\n[udic] ユーザ辞書と単語登録 (design 11.16)\n");
 	KT_RUN(test_text);
+	KT_RUN(test_long);
 	KT_RUN(test_import);
 	KT_RUN(test_store);
 	KT_RUN(test_convert);

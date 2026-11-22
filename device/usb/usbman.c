@@ -1453,9 +1453,18 @@ LOCAL void dev_info( USBDEV *d, T_USBDEV *o )
 	o->protocol  = d->ddesc[6];
 	o->role      = (UINT)d->role;
 	o->hub_ports = (UINT)d->hub_ports;
+	/*
+	 * The record of a fixed size the programs know: the name cut at a
+	 * whole letter. The whole one is knl_usb_dev_product's (the device
+	 * object's PRODUCT).
+	 */
 	for ( k = 0; k < (INT)sizeof(o->name) - 1 && d->product[k] != 0; k++ ) {
 		o->name[k] = d->product[k];
 	}
+	while ( k > 0 && d->product[k] != 0 && ( d->product[k] & 0xc0 ) == 0x80 ) {
+		k--;				/* not inside a letter */
+	}
+	o->name[k] = 0;
 	for ( k = 0; k < (INT)sizeof(o->devnm) - 1 && d->devnm[k] != 0; k++ ) {
 		o->devnm[k] = d->devnm[k];
 	}
@@ -1493,6 +1502,34 @@ EXPORT INT ts_usb_lst_dev( T_USBDEV *buf, INT max )
 	}
 	knl_usb_unlock();
 
+	return n;
+}
+
+/*
+ * A device's product string, UTF-8, whole: its length (bytes, without the
+ * terminator), what was written is cut only when max is smaller than
+ * that (OB_USB_PRODUCT_MAX is never smaller), E_NOEXS for no device
+ */
+EXPORT INT knl_usb_dev_product( INT dev, UB *buf, INT max )
+{
+	USBDEV	*d;
+	INT	n = E_NOEXS, k;
+
+	if ( usb_lock_id <= 0 ) {
+		return E_NOEXS;
+	}
+	knl_usb_lock();
+	d = dev_of_handle(dev);
+	if ( d != NULL ) {
+		for ( n = 0; d->product[n] != 0; n++ ) ;
+		for ( k = 0; buf != NULL && k < max - 1 && k < n; k++ ) {
+			buf[k] = d->product[k];
+		}
+		if ( buf != NULL && max > 0 ) {
+			buf[k] = 0;
+		}
+	}
+	knl_usb_unlock();
 	return n;
 }
 

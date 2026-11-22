@@ -78,9 +78,8 @@
 #include <ts/proc.h>
 #include "desktop.h"
 
-#define DK_WAIT		16		/* records waiting for their disk to be put back */
-#define DK_PATH		64		/* bytes of a volume's path kept here */
-#define DK_TO		8		/* other volumes offered to save to */
+#define DK_WAIT_FIRST	16		/* records waiting for their disk: room made first, doubled when full */
+#define DK_PATH		FS_PATH_MAX	/* bytes of a volume's path: as long as a volume keeps one */
 
 #define PN_TO		40		/* where changes of a window whose disk went are to go */
 
@@ -95,7 +94,8 @@ typedef struct {
 	UB	*name;			/* its object's, whole (Kmalloc); NULL for want of memory */
 } DKWAIT;
 
-LOCAL DKWAIT	dk_wait[DK_WAIT];
+LOCAL DKWAIT	*dk_wait;		/* as many as are waiting (Kmalloc) */
+LOCAL INT	dk_nwait = 0;		/* entries dk_wait has room for */
 LOCAL UW	dk_volser = 0;		/* knl_obfile_serial as last followed */
 LOCAL UW	dk_devser = 0;		/* knl_obdev_serial */
 LOCAL BOOL	dk_started = FALSE;
@@ -111,7 +111,7 @@ LOCAL BOOL	dk_sysgone = FALSE;	/* its disk is out */
  * for the one before (and closed for a volume it never was on). One
  * asked to close because its disk went is said closed once it is gone.
  */
-#define DK_WINS		64
+#define DK_WINS_FIRST	64		/* windows room is made for first */
 
 typedef struct {
 	INT	wid;
@@ -125,8 +125,13 @@ typedef struct {
 /* A name kept for when its object can no longer be read: "実身" when it has none or there is no memory */
 #define dk_name(p)	( ( (p) != NULL ) ? (CONST char *)(p) : "実身" )
 
-LOCAL DKWIN	dk_win[DK_WINS];
+/*
+ * The table grows and is never let go: a pointer into it (rescue_do
+ * holds one while a panel is up) stays good when it is grown meanwhile.
+ */
+LOCAL DKWIN	*dk_win;
 LOCAL INT	dk_nwin = 0;
+LOCAL INT	dk_wcap = 0;		/* entries dk_win has room for */
 
 /* ---------------------------------------------------------------- small things */
 
@@ -495,7 +500,7 @@ LOCAL BOOL wait_put( CONST TS_UUID *vuuid, CONST TS_UUID *id, INT recno, UB *xml
 {
 	INT	i;
 
-	for ( i = 0; i < DK_WAIT; i++ ) {
+	for ( i = 0; i < dk_nwait; i++ ) {
 		if ( dk_wait[i].used && ts_uuid_cmp(&dk_wait[i].id, id) == 0 && dk_wait[i].recno == recno ) {
 			Kfree(dk_wait[i].xml);		/* the newer changes stand */
 			if ( dk_wait[i].name != NULL ) Kfree(dk_wait[i].name);
@@ -503,7 +508,24 @@ LOCAL BOOL wait_put( CONST TS_UUID *vuuid, CONST TS_UUID *id, INT recno, UB *xml
 			dk_wait[i].used = FALSE;
 		}
 	}
-	for ( i = 0; i < DK_WAIT; i++ ) {
+	for ( i = 0; i < dk_nwait && dk_wait[i].used; i++ ) ;
+	if ( i == dk_nwait ) {
+		/* every place used: as many as wait, the room doubled */
+		INT	cap = ( dk_nwait > 0 ) ? dk_nwait * 2 : DK_WAIT_FIRST;
+		DKWAIT	*nw = (DKWAIT *)Kmalloc(sizeof(DKWAIT) * (SZ)cap);
+
+		if ( nw == NULL ) {
+			return FALSE;
+		}
+		knl_memset(nw, 0, sizeof(DKWAIT) * (SZ)cap);
+		if ( dk_wait != NULL ) {
+			knl_memcpy(nw, dk_wait, sizeof(DKWAIT) * (SZ)dk_nwait);
+			Kfree(dk_wait);
+		}
+		dk_wait = nw;
+		dk_nwait = cap;
+	}
+	for ( ; i < dk_nwait; i++ ) {
 		if ( !dk_wait[i].used ) {
 			dk_wait[i].used = TRUE;
 			dk_wait[i].vuuid = *vuuid;
@@ -518,6 +540,46 @@ LOCAL BOOL wait_put( CONST TS_UUID *vuuid, CONST TS_UUID *id, INT recno, UB *xml
 	return FALSE;
 }
 
+#if USE_KTEST
+/*
+ * For the tests: n records kept as if their disk had gone (a volume no
+ * disk has, so none is written back), how many of them are kept, and
+ * then all of them let go again
+ */
+EXPORT INT dt_disk_wait_test( INT n )
+{
+	TS_UUID	vu, id;
+	INT	i, kept = 0;
+	UB	*xml;
+
+	knl_memset(&vu, 0xEE, sizeof(vu));
+	for ( i = 0; i < n; i++ ) {
+		knl_memset(&id, 0, sizeof(id));
+		id.b[0] = 0xEE;
+		id.b[14] = (UB)( i >> 8 );
+		id.b[15] = (UB)i;
+		xml = (UB *)Kmalloc(8);
+		if ( xml == NULL ) break;
+		knl_memcpy(xml, "<tad/>", 7);
+		if ( !wait_put(&vu, &id, 0, xml, 7, (CONST UB *)"試験") ) {
+			Kfree(xml);
+			break;
+		}
+	}
+	for ( i = 0; i < dk_nwait; i++ ) {
+		DKWAIT	*w = &dk_wait[i];
+
+		if ( !w->used || ts_uuid_cmp(&w->vuuid, &vu) != 0 ) continue;
+		kept++;
+		Kfree(w->xml);
+		if ( w->name != NULL ) Kfree(w->name);
+		w->name = NULL;
+		w->used = FALSE;
+	}
+	return kept;
+}
+#endif
+
 /* The records kept for a volume that is back, written to it */
 LOCAL void wait_done( void )
 {
@@ -525,7 +587,7 @@ LOCAL void wait_done( void )
 	INT	i;
 	ER	er;
 
-	for ( i = 0; i < DK_WAIT; i++ ) {
+	for ( i = 0; i < dk_nwait; i++ ) {
 		DKWAIT	*w = &dk_wait[i];
 
 		if ( !w->used || !knl_obfile_vuuid_on(&w->vuuid) ) {
@@ -553,6 +615,55 @@ LOCAL void wait_done( void )
 }
 
 /*
+ * Every window wm_list gives, in memory of its own (Kmalloc, the
+ * caller's): how many. Asked again with more room while it fills it.
+ */
+EXPORT INT dt_wins( INT **p_wids )
+{
+	INT	*w, n, cap;
+
+	*p_wids = NULL;
+	for ( cap = 64; ; cap *= 2 ) {
+		w = (INT *)Kmalloc(sizeof(INT) * (SZ)cap);
+		if ( w == NULL ) {
+			return 0;
+		}
+		n = wm_list(w, cap);
+		if ( n < cap ) {
+			break;
+		}
+		Kfree(w);
+	}
+	*p_wids = w;
+	return n;
+}
+
+/*
+ * Every volume attached, by its path, in rows of FS_PATH_MAX bytes (Kmalloc,
+ * the caller's): how many. Asked again with more room while it fills it.
+ */
+EXPORT INT dt_vols( UB (**p_to)[FS_PATH_MAX] )
+{
+	UB	(*to)[DK_PATH];
+	INT	k, n;
+
+	*p_to = NULL;
+	for ( k = knl_obfile_nvol() + 8; ; k *= 2 ) {
+		to = (UB (*)[DK_PATH])Kmalloc(sizeof(UB) * DK_PATH * (SZ)k);
+		if ( to == NULL ) {
+			return 0;
+		}
+		n = knl_obfile_vols((UB *)to, DK_PATH, k);
+		if ( n < k ) {
+			break;
+		}
+		Kfree(to);
+	}
+	*p_to = to;
+	return n;
+}
+
+/*
  * A window whose disk went with changes not saved: the person says
  * where they go -- another volume attached, the disk when it is put
  * back, or nowhere -- in a panel over host. xml (Kmalloc, size bytes)
@@ -572,8 +683,7 @@ LOCAL void rescue( DTWIN *host, CONST TS_UUID *id, UINT body, CONST TS_UUID *vuu
 	TS_UUID		nid;
 	ER		er;
 
-	to = (UB (*)[DK_PATH])Kmalloc(sizeof(UB) * DK_PATH * DK_TO);
-	n = ( to != NULL ) ? knl_obfile_vols((UB *)to, DK_PATH, DK_TO) : 0;
+	n = dt_vols(&to);
 	for ( i = 0; i < n; i++ ) {
 		if ( knl_obfile_vol_ref((CONST char *)to[i], &ref) >= E_OK && !ref.rdonly ) {
 			if ( m != i ) knl_memcpy(to[m], to[i], DK_PATH);
@@ -653,6 +763,11 @@ LOCAL void rescue( DTWIN *host, CONST TS_UUID *id, UINT body, CONST TS_UUID *vuu
 		(void)wm_msg_put(( msg != NULL ) ? (CONST char *)msg : "変更は、ディスクを挿し直したときに保存します");
 		if ( msg != NULL ) Kfree(msg);
 	} else {
+		/* no memory to keep them: said, not lost without a word */
+		tm_printf((UB *)"disk: changes of %s cannot be kept: no memory\n", dk_name(name));
+		msg = dt_cat("「", dk_name(name), "」の変更は、メモリが足りないため保存できませんでした", NULL);
+		(void)wm_msg_put(( msg != NULL ) ? (CONST char *)msg : "変更は、メモリが足りないため保存できませんでした");
+		if ( msg != NULL ) Kfree(msg);
 		Kfree(xml);
 	}
     out:
@@ -885,7 +1000,7 @@ LOCAL void close_lost_parts( void )
 {
 	INT	i;
 
-	for ( i = 0; i < DT_MAX_WIN; i++ ) {
+	for ( i = 0; i < dt_win_room(); i++ ) {
 		DTWIN	*d = dt_win_at(i);
 
 		if ( d == NULL || !d->used || d->own == NULL || d->own->lost == NULL
@@ -966,21 +1081,47 @@ LOCAL void close_gone( void )
 LOCAL void note_windows( BOOL all )
 {
 	DKWIN	*was;
-	INT	*wids, n, i, k, nw = 0;
+	INT	*wids, n, i, k, nw = 0, cap;
 	TS_UUID	id;
-	BOOL	seen[DK_WINS];
+	BOOL	*seen;
 
-	knl_memset(seen, 0, sizeof(seen));
-	wids = (INT *)Kmalloc(sizeof(INT) * DK_WINS);
-	was = (DKWIN *)Kmalloc(sizeof(DKWIN) * DK_WINS);
-	if ( wids == NULL || was == NULL ) {
-		if ( wids != NULL ) Kfree(wids);
+	/* every window: the list asked again with more room while it fills it */
+	for ( cap = ( dk_wcap > DK_WINS_FIRST ) ? dk_wcap + 8 : DK_WINS_FIRST; ; cap *= 2 ) {
+		wids = (INT *)Kmalloc(sizeof(INT) * (SZ)cap);
+		if ( wids == NULL ) {
+			return;
+		}
+		n = wm_list(wids, cap);
+		if ( n < cap ) {
+			break;
+		}
+		Kfree(wids);
+	}
+	if ( n > dk_wcap ) {
+		DKWIN	*nt = (DKWIN *)Kmalloc(sizeof(DKWIN) * (SZ)n);
+
+		if ( nt == NULL ) {
+			Kfree(wids);
+			return;
+		}
+		if ( dk_nwin > 0 ) {
+			knl_memcpy(nt, dk_win, sizeof(DKWIN) * (SZ)dk_nwin);
+		}
+		dk_win = nt;			/* the one before kept: see dk_win */
+		dk_wcap = n;
+	}
+	was = (DKWIN *)Kmalloc(sizeof(DKWIN) * (SZ)( dk_nwin + 1 ));
+	seen = (BOOL *)Kmalloc(sizeof(BOOL) * (SZ)( dk_nwin + 1 ));
+	if ( was == NULL || seen == NULL ) {
 		if ( was != NULL ) Kfree(was);
+		if ( seen != NULL ) Kfree(seen);
+		Kfree(wids);
 		return;
 	}
-	n = wm_list(wids, DK_WINS);
-	if ( n > DK_WINS ) n = DK_WINS;
-	knl_memcpy(was, dk_win, sizeof(DKWIN) * (SZ)dk_nwin);
+	knl_memset(seen, 0, sizeof(BOOL) * (SZ)( dk_nwin + 1 ));
+	if ( dk_nwin > 0 ) {
+		knl_memcpy(was, dk_win, sizeof(DKWIN) * (SZ)dk_nwin);
+	}
 	for ( i = 0; i < n; i++ ) {
 		DKWIN	*e = &dk_win[nw];
 		T_WMWIN	w;
@@ -1027,6 +1168,7 @@ LOCAL void note_windows( BOOL all )
 		}
 	}
 	dk_nwin = nw;
+	Kfree(seen);
 	Kfree(was);
 	Kfree(wids);
 }
@@ -2018,6 +2160,40 @@ LOCAL ER grow_ask( CONST T_DTREQ *rq, T_DTANS *an )
 }
 
 /*
+ * 形式を新しくする: the volume of the link's object (the system's away
+ * from a link), its name, its device and the version of its format. The
+ * program converts it itself (ob_cnv_vol), as ディスク修復 checks one.
+ */
+LOCAL ER form_ask( CONST T_DTREQ *rq, T_DTANS *an )
+{
+	UB		path[DK_PATH], *name;
+	T_OBFVREF	ref;
+	T_VOBJ		lv = { .recno = 0 };
+	BOOL		req = FALSE;
+	INT		f;
+
+	if ( !grow_target(req_link(rq, &lv), path, DK_PATH, &ref) ) {
+		return E_NOSPT;
+	}
+	f = knl_ob_cnv_form((CONST char *)path, &req);
+	if ( f < E_OK ) {
+		return E_NOSPT;
+	}
+	name = disk_name((CONST char *)path);
+	if ( name == NULL ) {
+		return E_NOMEM;
+	}
+	tm_printf((UB *)"disk: form %s is of version %d%s\n", path, f, req ? ", to be converted" : "");
+	(void)dt_ans_cat(an, (CONST UB *)(CONST char *)name, -1);
+	Kfree(name);
+	(void)dt_ans_cat(an, (CONST UB *)"\t", 1);
+	(void)dt_ans_cat(an, (CONST UB *)(CONST char *)path, -1);
+	an->how = (UINT)f;
+	if ( ref.system ) an->flags |= DT_F_DISK_SYS;
+	return E_OK;
+}
+
+/*
  * 拡張: the partition of the volume and the volume on it made larger, to
  * the size asked (grab_x megabytes), the room looked at again first.
  * Not while the volume is being checked.
@@ -2147,6 +2323,7 @@ EXPORT ER dt_disk_req( CONST T_DTREQ *rq, T_DTANS *an, ID pid )
 	case DT_DISK_MAKE:	return create_do(rq, an, pid);
 	case DT_DISK_GROWS:	return grow_ask(rq, an);
 	case DT_DISK_GROW:	return grow_do(rq, an, pid);
+	case DT_DISK_FORM:	return form_ask(rq, an);
 	case DT_DISK_LOG:	return log_do(rq, pid);
 	case DT_DISK_MENU:
 	case DT_DISK_REMOVE: {
@@ -2206,12 +2383,91 @@ EXPORT void dt_disk_menu( DTWIN *d, CONST char *code, CONST T_VOBJ *v )
  * ディスク修復 is started to show what the repair found and did, once for
  * a start of the machine (a desktop started again by 強制終了 does not).
  */
+/*
+ * At start: what the conversion of the format before the volumes were
+ * attached came to (ob_cnv_boot_result), in a notice of the desktop's.
+ * When the check found damage, ディスク修復 is started to show what it
+ * found, unless it is started for a repair at this start already.
+ */
+#define NOTE_CNV	1		/* the desktop's own number of the notice */
+
+LOCAL void cnv_boot( void )
+{
+	T_TSFSCNV	r;
+	T_OBFVREF	ref;
+	UB		dev[TSFSCK_DEVNM_MAX], *name = NULL, *t;
+	CONST char	*what;
+	CONST DTPROG	*p;
+	TS_UUID		u;
+	BOOL		sys;
+	SZ		n;
+
+	(void)ob_cnv_boot_result(dev, sizeof(dev), &r, NULL, 0);
+	if ( r.state == TSFSCNV_S_NONE || r.state == TSFSCNV_S_NOTV4 ) {
+		return;
+	}
+#ifdef CNF_OB_SYSVOL
+	(void)ref;
+	sys = (BOOL)( knl_strcmp((CONST char *)dev, (CONST char *)CNF_OB_SYSVOL) == 0 );
+#else
+	sys = (BOOL)( knl_obfile_vol_ref((CONST char *)dev, &ref) >= E_OK && ref.system );
+#endif
+	switch ( r.state ) {
+	case TSFSCNV_S_DONE:
+		what = sys ? "システムのディスクを新しい形式に変えました。" : "」を新しい形式に変えました。";
+		break;
+	case TSFSCNV_S_DAMAGE:
+		what = "ディスクに障害が見つかったので、形式を変えませんでした。"
+		       "ディスク修復で修復してから、もう一度変えてください。";
+		break;
+	default:
+		what = "ディスクの読み書きに失敗したので、形式を変えませんでした。";
+		break;
+	}
+	if ( !sys && r.state == TSFSCNV_S_DONE ) {
+		name = disk_name((CONST char *)dev);
+		if ( name == NULL ) {
+			what = "ディスクを新しい形式に変えました。";
+		}
+	}
+	n = (SZ)knl_strlen(what) + ( ( name != NULL ) ? (SZ)knl_strlen((CONST char *)name) : 0 ) + 64;
+	t = (UB *)Kmalloc((size_t)n);
+	if ( t != NULL ) {
+		INT	at = 0;
+		CONST char *head = "ディスクの形式\n";
+
+		for ( ; *head != 0; head++ ) t[at++] = (UB)*head;
+		if ( name != NULL ) {
+			CONST char *q = "ディスク「";
+
+			for ( ; *q != 0; q++ ) t[at++] = (UB)*q;
+			for ( q = (CONST char *)name; *q != 0; q++ ) t[at++] = (UB)*q;
+		}
+		for ( ; *what != 0; what++ ) t[at++] = (UB)*what;
+		t[at] = 0;
+		(void)dt_note_own(NOTE_CNV, "システム", (CONST char *)t);
+		Kfree(t);
+	}
+	if ( name != NULL ) Kfree(name);
+	tm_printf((UB *)"disk: the conversion at start of %s shown: state %d, %d found, %d ms\n",
+		  dev, (INT)r.state, r.ck.problems, (INT)r.total_ms);
+	if ( r.state == TSFSCNV_S_DAMAGE && ob_chk_boot_result(NULL, 0, NULL, NULL, 0) <= 0
+	  && ts_str_to_uuid(SYSDEF_PROG_DISKFIX, &u) >= E_OK && ( p = dt_prog_of(&u) ) != NULL ) {
+		tm_printf((UB *)"disk: the check before the conversion shown by its program\n");
+		(void)dt_prog_run(NULL, p, NULL);
+	}
+}
+
 EXPORT void dt_fix_boot( void )
 {
 	CONST DTPROG	*p;
 	TS_UUID		u;
 
-	if ( knl_fq_restarts() > 0 || ob_chk_boot_result(NULL, 0, NULL, NULL, 0) <= 0 ) {
+	if ( knl_fq_restarts() > 0 ) {
+		return;
+	}
+	cnv_boot();
+	if ( ob_chk_boot_result(NULL, 0, NULL, NULL, 0) <= 0 ) {
 		return;
 	}
 	if ( ts_str_to_uuid(SYSDEF_PROG_DISKFIX, &u) < E_OK || ( p = dt_prog_of(&u) ) == NULL ) {

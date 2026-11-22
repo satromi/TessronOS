@@ -1,0 +1,96 @@
+# システム環境設定's upper tags pulled out (docs/tessronos 10.6, 11.6): an upper tag that has a lower
+# row (〈画面〉, 〈機器〉) stands for the page last shown in that row, so pulling it carries the link
+# of that page, and the outline is the frame of the tag as drawn. For tools/ui_run.py with the kernel
+# of make TARGET=_QEMU_VIRT_ DESKTOP=1 UITEST=1 and the test disk of a KTEST=1 build. The window is
+# at 160,80, opened on 〈画面〉〈配色〉; the upper tags 〈機器〉 〈画面〉 〈書体〉 are at y 124, x 192,
+# 235, 278; the lower row of 〈画面〉 is 〈背景〉 〈配色〉 〈ウィンドウ〉 at y 151, x 192, 235, 300.
+# BTRON, the first window, shows left of it at 100,200 and above it at 300,60; the ground is at 60,500.
+openapp 01a0d8c4-52b6-7b52-9d72-3e8fa01b2c42 {"tessronos-sysenv":{"data":"colour"}}
+expect sysenv: page "colour"
+expect sysenv: ready
+wait 800
+move 900 700
+wait 300
+# 〈画面〉 pulled out while 〈配色〉 is the page of its row: the link of 〈配色〉; the outline is the frame
+# (the name's box is 4 dots narrower each side)
+logmark
+move 235 124
+down
+move 240 125
+expectsince tvpage: tag 4 pulled out, page "colour", outline
+move 170 170
+wait 300
+move 100 200
+wait 500
+up
+expectsince sysenv: link of page "colour" carried (0)
+expectsince tvpage: object "システム環境設定：配色" of page "colour" made (0)
+expectsince tvpage: link of page "colour" carried, named "システム環境設定：配色" (0)
+expectsince cabinet: dropped 1
+wait 800
+shot stpu_colour
+# the link put shows the name of the page's object, システム環境設定：配色, in its band (the letters
+# right of the pointer, recorded from a run that put it)
+shotsum stpu_colour 128 191 262 205
+want ok cbadb9652ec53b10
+# the page shown stays
+nwin システム環境設定
+want ok 1
+# the window brought forward again (BTRON came to the front with the drop), and 〈ウィンドウ〉 chosen
+# in the lower row: now 〈画面〉 stands for that page
+logmark
+click 600 95
+wait 300
+click 300 151
+wait 800
+logmark
+move 235 124
+down
+move 240 125
+expectsince tvpage: tag 5 pulled out, page "window", outline
+move 250 100
+wait 300
+move 300 60
+wait 500
+up
+expectsince sysenv: link of page "window" carried (0)
+expectsince tvpage: object "システム環境設定：ウィンドウ" of page "window" made (0)
+expectsince tvpage: link of page "window" carried, named "システム環境設定：ウィンドウ" (0)
+expectsince cabinet: dropped 1
+wait 800
+click 600 95
+wait 300
+# 〈機器〉, whose row has not shown any page yet, stands for its own page (機器情報): carried the same
+logmark
+move 192 124
+down
+move 197 125
+expectsince tvpage: tag 1 pulled out, page "devices", outline
+move 250 100
+wait 300
+move 330 60
+wait 500
+up
+expectsince sysenv: link of page "devices" carried (0)
+expectsince tvpage: object "システム環境設定：機器情報" of page "devices" made (0)
+expectsince tvpage: link of page "devices" carried, named "システム環境設定：機器情報" (0)
+expectsince cabinet: dropped 1
+wait 800
+click 600 95
+wait 300
+# a tag without a lower row, 〈バージョン〉, let go over the ground: refused as for any program's
+# link, nothing is put, and the page shown stays
+logmark
+move 340 124
+down
+move 345 125
+expectsince tvpage: tag 7 pulled out, page "version", outline
+move 200 300
+wait 300
+move 60 500
+wait 500
+up
+expectsince sysenv: link of page "version" carried (-42)
+absent tvpage: object "システム環境設定：バージョン"
+wait 500
+absent !OACV!

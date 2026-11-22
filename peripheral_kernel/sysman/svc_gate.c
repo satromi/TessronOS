@@ -736,6 +736,8 @@ LOCAL const SBXCALL sbx_calls[] = {
 	{ TSN_OB_CHK_VOL,	TS_SBX_SYS },
 	{ TSN_OB_CHK_REQ,	TS_SBX_SYS },
 	{ TSN_OB_CHK_BOOT,	TS_SBX_SYS },
+	{ TSN_OB_CNV_VOL,	TS_SBX_SYS },
+	{ TSN_OB_CNV_BOOT,	TS_SBX_SYS },
 };
 
 LOCAL CONST char * const sbx_prefix[SBX_CLASSES] = {
@@ -1701,6 +1703,58 @@ LOCAL BOOL user_str( CONST UB *src, UB *dst, INT max )
 	return TRUE;
 }
 
+/*
+ * A string of the process's ending at its nought or (stop) at a line's
+ * end, as long as it is: copied in, allocated (*p_out, to be Kfree'd),
+ * and its bytes answered; E_MACV when it cannot be read, E_NOMEM.
+ */
+LOCAL INT user_str_all( CONST UB *src, BOOL stop, UB **p_out )
+{
+	INT	n = 0;
+	UB	c, *d;
+
+	for ( ;; ) {
+		if ( ( n == 0 || ( ( (UBINT)( src + n ) ) & ( PAGE_SIZE - 1 ) ) == 0 )
+		  && !user_ok(src + n, 1, FALSE) ) {
+			return E_MACV;
+		}
+		c = UACCESS(src[n]);
+		if ( c == 0 || ( stop && c == '\n' ) ) {
+			break;
+		}
+		if ( n == 0x7FFFFFFE ) {
+			return E_PAR;
+		}
+		n++;
+	}
+	d = (UB *)Kmalloc((SZ)n + 1);
+	if ( d == NULL ) {
+		return E_NOMEM;
+	}
+	if ( n > 0 ) knl_ua_get(d, src, (SZ)n);
+	d[n] = 0;
+	*p_out = d;
+	return n;
+}
+
+/* An item's code of the process's: whole, never longer than MN_CODE_MAX - 1 (E_PAR) */
+LOCAL ER user_code( CONST UB *src, UB *dst )
+{
+	INT	i;
+
+	for ( i = 0; i < MN_CODE_MAX; i++ ) {
+		if ( ( i == 0 || ( ( (UBINT)( src + i ) ) & ( PAGE_SIZE - 1 ) ) == 0 )
+		  && !user_ok(src + i, 1, FALSE) ) {
+			return E_MACV;
+		}
+		dst[i] = UACCESS(src[i]);
+		if ( dst[i] == 0 ) {
+			return E_OK;
+		}
+	}
+	return E_PAR;
+}
+
 LOCAL ER user_rect( CONST T_DPRECT *r, T_DPRECT *out )
 {
 	if ( !user_ok(r, sizeof(*r), FALSE) ) {
@@ -2563,31 +2617,78 @@ LOCAL INT svc_mn_chg_atr( ID mid, CONST TS_UUID *def, CONST char *code, UINT atr
 	TS_UUID		d;
 	CONST TS_UUID	*pd;
 	UB		c[MN_CODE_MAX];
+	ER		er;
 
 	if ( !mn_mine(mid) ) return E_ID;
-	if ( user_def(def, &d, &pd) < E_OK || !user_str((CONST UB *)code, c, sizeof(c)) ) {
-		return E_MACV;
-	}
+	if ( user_def(def, &d, &pd) < E_OK ) return E_MACV;
+	er = user_code((CONST UB *)code, c);
+	if ( er < E_OK ) return er;
 	return mn_chg_atr(mid, pd, (CONST char *)c, atr);
 }
 
+/*
+ * The labels of a list: n of them stride bytes apart, or (stride 0) one
+ * after another each ending in its nought, as long as each is
+ */
 LOCAL ER svc_mn_set_lst( ID mid, CONST TS_UUID *def, CONST char *code,
 			 CONST UB *labels, INT stride, INT n )
 {
 	TS_UUID		d;
 	CONST TS_UUID	*pd;
-	UB		c[MN_CODE_MAX], *l;
+	UB		c[MN_CODE_MAX], *l = NULL;
+	SZ		size;
+	INT		k;
 	ER		er;
 
 	if ( !mn_mine(mid) ) return E_ID;
-	if ( n < 0 || stride <= 0 || stride > 4096 ) return E_PAR;
-	if ( user_def(def, &d, &pd) < E_OK || !user_str((CONST UB *)code, c, sizeof(c))
-	  || ( n > 0 && !user_ok(labels, (SZ)stride * n, FALSE) ) ) {
-		return E_MACV;
+	if ( n < 0 || stride < 0 ) return E_PAR;
+	if ( user_def(def, &d, &pd) < E_OK ) return E_MACV;
+	er = user_code((CONST UB *)code, c);
+	if ( er < E_OK ) return er;
+	if ( stride > 0 ) {
+		if ( (SZ)stride * n > (SZ)0x7FFFFFFF ) return E_PAR;
+		size = (SZ)stride * n;
+		if ( n > 0 && !user_ok(labels, size, FALSE) ) return E_MACV;
+		l = (UB *)Kmalloc(( size > 0 ) ? size : 1);
+		if ( l == NULL ) return E_NOMEM;
+		if ( n > 0 ) knl_ua_get(l, labels, size);
+	} else {
+		/* each label measured and copied in turn, into one block that grows */
+		CONST UB *s = labels;
+		SZ	at = 0, room = 0;
+
+		for ( k = 0; k < n; k++ ) {
+			UB	*one, *g;
+			INT	len = user_str_all(s, FALSE, &one);
+
+			if ( len < 0 ) {
+				if ( l != NULL ) Kfree(l);
+				return (ER)len;
+			}
+			if ( at + len + 1 > room ) {
+				room = ( at + len + 1 ) * 2;
+				g = (UB *)Kmalloc(room);
+				if ( g == NULL ) {
+					Kfree(one);
+					if ( l != NULL ) Kfree(l);
+					return E_NOMEM;
+				}
+				if ( l != NULL ) {
+					knl_memcpy(g, l, at);
+					Kfree(l);
+				}
+				l = g;
+			}
+			knl_memcpy(l + at, one, (SZ)len + 1);
+			Kfree(one);
+			at += (SZ)len + 1;
+			s += len + 1;
+		}
+		if ( l == NULL ) {
+			l = (UB *)Kmalloc(1);
+			if ( l == NULL ) return E_NOMEM;
+		}
 	}
-	l = (UB *)Kmalloc((SZ)stride * ( n > 0 ? n : 1 ));
-	if ( l == NULL ) return E_NOMEM;
-	if ( n > 0 ) knl_ua_get(l, labels, (SZ)stride * n);
 	er = mn_set_lst(mid, pd, (CONST char *)c, l, stride, n);
 	Kfree(l);
 	return er;
@@ -2598,11 +2699,12 @@ LOCAL ER svc_mn_chg_idx( ID mid, CONST TS_UUID *def, CONST char *code, INT index
 	TS_UUID		d;
 	CONST TS_UUID	*pd;
 	UB		c[MN_CODE_MAX];
+	ER		er;
 
 	if ( !mn_mine(mid) ) return E_ID;
-	if ( user_def(def, &d, &pd) < E_OK || !user_str((CONST UB *)code, c, sizeof(c)) ) {
-		return E_MACV;
-	}
+	if ( user_def(def, &d, &pd) < E_OK ) return E_MACV;
+	er = user_code((CONST UB *)code, c);
+	if ( er < E_OK ) return er;
 	return mn_chg_idx(mid, pd, (CONST char *)c, index, atr);
 }
 
@@ -2793,30 +2895,23 @@ LOCAL INT svc_kc_list( INT kid, UB *buf, INT size, INT *p_count, INT *p_first, I
  * foot of the screen): a line of UTF-8, taken into the kernel first, or
  * NULL to take the one there away. It stays until the next press or key.
  */
-#define MSG_PUT_MAX	256
-
 LOCAL ER svc_wm_msg_put( CONST UB *utf8 )
 {
-	UB	line[MSG_PUT_MAX];
-	INT	n = 0;
+	UB	*line;
+	INT	n;
+	ER	er;
 
 	if ( utf8 == NULL ) {
 		return wm_msg_put(NULL);
 	}
-	while ( n < MSG_PUT_MAX - 1 ) {
-		/* each page of it asked about as it is reached */
-		if ( ( n == 0 || ( ( (UBINT)( utf8 + n ) ) & 0xFFF ) == 0 )
-		  && !user_ok(utf8 + n, 1, FALSE) ) {
-			return E_MACV;
-		}
-		line[n] = UACCESS(utf8[n]);
-		if ( line[n] == 0 || line[n] == '\n' ) {
-			break;
-		}
-		n++;
+	/* the line as long as it is, to its nought or its line's end */
+	n = user_str_all(utf8, TRUE, &line);
+	if ( n < 0 ) {
+		return (ER)n;
 	}
-	line[n] = 0;
-	return wm_msg_put((CONST char *)line);
+	er = wm_msg_put((CONST char *)line);
+	Kfree(line);
+	return er;
 }
 
 /*
@@ -3601,6 +3696,7 @@ LOCAL const SVCRIGHT svc_rights[] = {
 	{ TSN_OB_SET_DOM,	TSN_RIGHT_ADMIN },
 	{ TSN_OB_CHK_VOL,	TSN_RIGHT_ADMIN },
 	{ TSN_OB_CHK_REQ,	TSN_RIGHT_ADMIN },
+	{ TSN_OB_CNV_VOL,	TSN_RIGHT_ADMIN },
 	{ TSN_WM_SET_LOOK,	TSN_RIGHT_CONF_USER },
 	{ TSN_KM_SET,		TSN_RIGHT_CONF_DEV },
 };

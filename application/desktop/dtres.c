@@ -571,12 +571,11 @@ LOCAL INT faces_now( CONST TS_UUID *u, FACESET *fs )
  */
 #define FS_PN_NAME	1
 #define FS_PN_TO	10
-#define FS_PN_TO_MAX	8
 
 LOCAL ER font_save( CONST T_DTREQ *rq, T_DTANS *an )
 {
 	DTWIN		*host = dt_host_of(&rq->win);
-	UB		(*to)[64], t[WM_LABEL_MAX];
+	UB		(*to)[FS_PATH_MAX], t[WM_LABEL_MAX];
 	T_OBFVREF	ref;
 	T_OBCRE		c;
 	T_WMPANEL	*def;
@@ -592,15 +591,14 @@ LOCAL ER font_save( CONST T_DTREQ *rq, T_DTANS *an )
 	if ( host == NULL || ( own = knl_ob_name(&rq->target, NULL, &er) ) == NULL ) {
 		return ( host == NULL || er != E_NOMEM ) ? E_NOEXS : E_NOMEM;
 	}
-	to = (UB (*)[64])Kmalloc(sizeof(UB) * 64 * FS_PN_TO_MAX);
+	n = dt_vols(&to);
 	if ( to == NULL ) {
 		Kfree(own);
 		return E_NOMEM;
 	}
-	n = knl_obfile_vols((UB *)to, 64, FS_PN_TO_MAX);
 	for ( i = 0; i < n; i++ ) {
 		if ( knl_obfile_vol_ref((CONST char *)to[i], &ref) >= E_OK && !ref.rdonly ) {
-			if ( m != i ) knl_memcpy(to[m], to[i], 64);
+			if ( m != i ) knl_memcpy(to[m], to[i], FS_PATH_MAX);
 			m++;
 		}
 	}

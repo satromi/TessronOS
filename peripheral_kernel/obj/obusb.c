@@ -42,6 +42,7 @@
 typedef struct {
 	BOOL		used;
 	T_USBDEV	d;
+	UB		product[OB_USB_PRODUCT_MAX];	/* the product string whole (d.name is cut) */
 	UB		name[OB_USB_NAME_MAX];
 	UB		port[OB_USB_PATH_MAX];
 	TS_UUID		uuid;
@@ -169,7 +170,7 @@ LOCAL INT info_text( CONST UODEV *u, UB *t, INT max )
 	n = line(t, knl_oj_put(t, n, max, "\n"), max, "KIND");
 	n = knl_oj_put(t, n, max, kind_of(d));
 	n = line(t, knl_oj_put(t, n, max, "\n"), max, "PRODUCT");
-	n = knl_oj_put(t, n, max, ( d->name[0] != 0 ) ? (CONST char *)d->name : "(no name)");
+	n = knl_oj_put(t, n, max, ( u->product[0] != 0 ) ? (CONST char *)u->product : "(no name)");
 	n = knl_oj_put(t, n, max, "\n");
 	if ( d->role == USB_ROLE_HUB ) {
 		n = line(t, n, max, "HUB_PORTS");
@@ -259,7 +260,7 @@ LOCAL INT usb_attr( void *ctx, UB *j, INT n, INT max )
 	n = knl_oj_put(j, n, max, "\",\"port\":");
 	n = knl_oj_put_str(j, n, max, u.port);
 	n = knl_oj_put(j, n, max, ",\"product\":");
-	n = knl_oj_put_str(j, n, max, ( u.d.name[0] != 0 ) ? u.d.name : (CONST UB *)"");
+	n = knl_oj_put_str(j, n, max, ( u.product[0] != 0 ) ? u.product : (CONST UB *)"");
 	return knl_oj_put(j, n, max, ( u.d.role == USB_ROLE_HUB ) ? ",\"hub\":true" : ",\"hub\":false");
 }
 
@@ -406,6 +407,9 @@ LOCAL void sync( void )
 		}
 		knl_memset(&e, 0, sizeof(e));
 		e.d = d[k];
+		if ( knl_usb_dev_product(d[k].dev, e.product, sizeof(e.product)) < E_OK ) {
+			e.product[0] = 0;
+		}
 		(void)knl_obusb_path(&d[k], e.port, sizeof(e.port));
 		i = knl_oj_put(e.name, 0, OB_USB_NAME_MAX, "usb");
 		(void)knl_oj_put(e.name, i, OB_USB_NAME_MAX, (CONST char *)e.port);

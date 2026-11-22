@@ -30,11 +30,11 @@ import os
 import uuid
 
 from .error import TsfsError
-from .layout import NIL_UUID, now_ns
+from .layout import EXT_API_MAX, NIL_UUID, V4_EXT_MAX, Limits, now_ns
 from . import meta as metamod
-from .obj import ICON_MAX, OB_ICON, is_icon
+from .obj import ICON_MAX, META_LIMIT, OB_ICON, is_icon
 from .obj import (F_DELETABLE, F_EDITABLE, F_READABLE, ICON_REC, LK_EXTERNAL,
-                  MAX_LINK, MAX_REC, MAX_RES, META_MAX, OB_META, OB_NLINK,
+                  OB_META, OB_NLINK,
                   OB_NPLACE, OB_NRES, OB_LINK, OB_PLACE, OB_RES, RID_ICON,
                   RID_PLACE, LinkEntry, ObjectBlock, PlaceEntry, ResEntry,
                   sort_links)
@@ -64,13 +64,14 @@ class ObjectSet(object):
         self.pins = 0
 
 
-def scan(dirs, problems, over=0, exclude=()):
+def scan(dirs, problems, over=0, exclude=(), ext_max=V4_EXT_MAX):
     """Every object set in the directories, {UUID: ObjectSet}. A file
     that two directories both have is taken from the first. The first
     `over` directories replace what the others have on purpose, so a
     file of theirs that another directory has too is not a problem.
     The files named in `exclude` (names, not paths) are not taken: the
-    records of a program the build leaves out."""
+    records of a program the build leaves out. A resource whose
+    extension is longer than ext_max bytes is left out with a problem."""
     sets = {}
     exclude = set(exclude)
     over_dirs = set(dirs[:over])
@@ -85,7 +86,7 @@ def scan(dirs, problems, over=0, exclude=()):
             path = os.path.join(d, name)
             if name in exclude or not os.path.isfile(path):
                 continue
-            c = metamod.classify(name)
+            c = metamod.classify(name, ext_max)
             if c is None:
                 continue
             kind, u, det = c
@@ -130,9 +131,12 @@ def _read(path):
         return f.read()
 
 
-def prepare(s):
+def prepare(s, lim=None):
     """Check one set and work out its metadata, records and links; sets
-    s.problem when it cannot be taken in."""
+    s.problem when it cannot be taken in. `lim` is the volume's Limits
+    (those of version 4 when None)."""
+    if lim is None:
+        lim = Limits(False)
     if s.problem:
         return
     if s.json is None:
@@ -154,8 +158,8 @@ def prepare(s):
         s.problem = "the records are at positions %s, not 0..%d" % (
             sorted(s.recs), n - 1)
         return
-    if n > MAX_REC:
-        s.problem = "%d records, more than %d" % (n, MAX_REC)
+    if Limits.over(n, lim.max_rec):
+        s.problem = "%d records, more than %d" % (n, lim.max_rec)
         return
     # the icon is a part of its own, beside the metadata, not a resource
     s.icon = None
@@ -172,15 +176,16 @@ def prepare(s):
             s.problem = "%s is neither an ICO nor a PNG" % path
             return
         s.icon = data
-    if len(s.res) > MAX_RES:
-        s.problem = "%d resources, more than %d" % (len(s.res), MAX_RES)
+    if Limits.over(len(s.res), lim.max_res):
+        s.problem = "%d resources, more than %d" % (len(s.res), lim.max_res)
         return
     s.kinds = [s.recs[p][0] for p in range(n)]
     s.records = metamod.records_for(d, s.kinds)
     s.stored = metamod.stored_text(raw, s.records)
-    if len(s.stored) > META_MAX:
+    most = lim.meta_max or META_LIMIT
+    if len(s.stored) > most:
         s.problem = "the metadata is %d bytes, more than %d" % (len(s.stored),
-                                                                META_MAX)
+                                                                most)
         return
     now = now_ns()
     dates = []
@@ -201,8 +206,8 @@ def prepare(s):
         if r["rt"] != metamod.RT_XTAD:
             continue
         if not metamod.scan_links(_read(s.recs[pos][1]), r["rid"], links,
-                                  MAX_LINK):
-            s.problem = "more than %d links" % MAX_LINK
+                                  lim.max_link or None):
+            s.problem = "more than %d links" % lim.max_link
             return
     s.links = links
 
@@ -217,10 +222,11 @@ def build(vol, dirs, roots=None, problems=None, over=0, hold=(), exclude=()):
     屑実身. Answers (objects written, [(UUID, why) skipped])."""
     if problems is None:
         problems = []
-    sets = scan(dirs, problems, over, exclude)
+    lim = vol.sb.limits()
+    sets = scan(dirs, problems, over, exclude, lim.ext_max or EXT_API_MAX)
     skipped = []
     for u in sorted(sets, key=lambda x: x.bytes):
-        prepare(sets[u])
+        prepare(sets[u], lim)
         if sets[u].problem:
             skipped.append((u, sets[u].problem))
     good = dict((u, s) for u, s in sets.items() if not s.problem)
@@ -334,7 +340,8 @@ def export_object(vol, obj_uuid, blk, outdir, problems):
     if not metamod.is_object(raw):
         problems.append("%s: the metadata is not a JSON object; written as it "
                         "is" % obj_uuid)
-    order, _named = metamod.order_of(raw, o.placements())
+    order, _named = metamod.order_of(raw, o.placements(),
+                                     vol.sb.limits().max_rec)
     pos_of = {}
     for pos, (e, _rt, _sub) in enumerate(order):
         pos_of.setdefault(e.rid, pos)

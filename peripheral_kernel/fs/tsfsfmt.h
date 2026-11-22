@@ -32,14 +32,31 @@
  *	 256	which units of the inline area are taken (56 bits)
  *	 264	holds: the part of the count no link of the volume makes
  *	 288	where the icon is (a place, 32 bytes); all 0 when it has none
+ *	 320	version 5: the spare place (a place, 32 bytes), runs the
+ *		object owns that no record and no management part does;
+ *		all 0 when it is empty (TSFSO_F_SPARE when it is not)
  *	 512	the inline area, 56 units of 64 bytes
  *
  *	A place (32 bytes) is one of
- *	   0	form: none, inline, a run, an extent tree
+ *	   0	form: none, inline, a run, an extent tree, a tree of two
+ *		levels, a run tree (version 5), the runs to give back
+ *		(version 5, the spare place only)
  *	   8	bytes
  *	  16	inline: offset (16 bits) and units (16 bits)
  *		a run: first block; its length at 24
  *		an extent tree: the block of its leaf; extents at 24
+ *		a run tree: the block of its root node; runs at 24
+ *		the runs to give back: the rid of the record whose runs
+ *		past `bytes` go
+ *
+ *	A node of a run tree (version 5), one block with the common head
+ *	(kind "TFTB"):
+ *	  64	entries
+ *	  68	level, 0 at the leaves
+ *	 128	up to 165 entries of 24 bytes: at a leaf the logical
+ *		block, the block and the blocks of a run; at an index the
+ *		first logical block of the child, the child's block and the
+ *		blocks below it
  *
  *	The metadata text, the icon and the tables are management parts:
  *	inline, or a run of blocks each with the common head (kind "TFTB")
@@ -60,7 +77,10 @@
  *	   0	rid of the record it belongs to; all ones for the icon; the
  *		top bit and a place for one written before its record was
  *	   4	its number within that record
- *	   8	file name extension, 16 bytes padded with NUL
+ *	   8	file name extension, 16 bytes padded with NUL; on a version
+ *		5 volume, when the first byte is 0xFF, the offset (+4) and
+ *		the length (+8, 32 bits each) of the extension in the
+ *		string area behind the entries of the table
  *	  24	bytes
  *	  32	where the bytes are (a place)
  *
@@ -109,6 +129,7 @@
 #define OB_INLMAP	256
 #define OB_PINS		264
 #define OB_ICON		288
+#define OB_SPARE	320		/* version 5 */
 #define OB_INLINE	TSFSO_HEAD_SIZE
 #define INL_UNITS	( TSFSO_INLINE_BYTES / TSFSO_INLINE_UNIT )
 
@@ -123,6 +144,8 @@
 #define F_RUN		2
 #define F_TREE		3
 #define F_TREE2		4		/* an index of leaves (TSFSBLK_INCOMPAT_XT2) */
+#define F_TREEN		5		/* a run tree of any depth (version 5) */
+#define F_TRIM		6		/* the spare place: the runs of record PL_A past PL_BYTES (version 5) */
 
 /* a placement table entry */
 #define PE_SIZE		48
@@ -140,6 +163,9 @@
 #define RS_PLACE	32
 #define RID_ICON	0xFFFFFFFFU
 #define RID_PLACE	0x80000000U	/* owner by place: its record was not there yet */
+#define RSX_MARK	0xFF		/* RS_EXT's first byte: the extension is in the string area */
+#define RSX_OFF		4		/* from RS_EXT: its offset in the string area */
+#define RSX_LEN		8		/* from RS_EXT: its length */
 
 /* a link table entry */
 #define LK_SIZE		48
@@ -157,6 +183,9 @@
 #define XL_N		64
 #define XL_ENT		128
 #define XL_ESZ		24
+
+/* a node of a run tree (version 5): entries at XL_N, the entries from XL_ENT */
+#define XN_LEVEL	68
 
 /* a node of a B+tree */
 #define OFF_TYPE	64

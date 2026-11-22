@@ -170,6 +170,16 @@ LOCAL void test_menu( void )
 	KT_ASSERT_EQ(mn_get_atr(mid, NULL, "copy"), MN_GREY);
 	KT_ASSERT_ER(mn_fnd_key(mid, 'C', &sel), E_NOEXS);
 	KT_ASSERT_EQ(mn_chg_atr(mid, NULL, "copy", 0), 1);
+	KT_ASSERT_EQ(mn_atr_decided(mid, NULL, "copy"), 1);	/* a program set it */
+	{
+		ID	fresh;
+
+		/* a menu just made has none set by a program, whatever its definition says */
+		KT_ASSERT_ER(mn_cre_men(&cab, &fresh), E_OK);
+		KT_ASSERT_EQ(mn_atr_decided(fresh, NULL, "copy"), 0);
+		KT_ASSERT_EQ(mn_atr_decided(fresh, NULL, "no.such.code"), E_NOEXS);
+		(void)mn_del_men(fresh);
+	}
 	KT_ASSERT_ER(mn_fnd_key(mid, 'c', &sel), E_OK);
 	KT_ASSERT(mn_is(&sel, "copy"));
 

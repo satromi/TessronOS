@@ -963,6 +963,7 @@ LOCAL void kt_main_task( INT stacd, void *exinf )
 	RUN_SUITE_SCRATCH(tsfsjrnl);
 	RUN_SUITE_SCRATCH(tsfsobj);
 	RUN_SUITE_SCRATCH(dfix);
+	RUN_SUITE_SCRATCH(tsfsconv);
 	RUN_SUITE(ob);
 	RUN_SUITE(psx);
 	RUN_SUITE_QEMU_USB(vols, "no QEMU monitor to plug disks in through");

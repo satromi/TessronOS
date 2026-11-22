@@ -27,13 +27,15 @@
 #ifndef _DEVICE_GPU_INTEL_IGT_H_
 #define _DEVICE_GPU_INTEL_IGT_H_
 
+#include "sysman/pfalloc.h"
 #include "../gpudev.h"
 #include "sysdepend/x64/igt_ggtt.h"
 #include "igt_regs.h"
 
 #define IGT_RCS		0		/* the render engine */
 #define IGT_BCS		1		/* the copy (blitter) engine */
-#define IGT_NENG	2
+#define IGT_VCS		2		/* the video engine (MFX), the kernel's jobs only */
+#define IGT_NENG	3
 
 #define IGT_RING_BYTES	( 16 * 1024 )	/* a context's ring */
 #define IGT_KVA_TOP	0x100000000ULL	/* the kernel's space: 32 bit addresses */
@@ -71,8 +73,11 @@ struct igt_vm {
 typedef struct {
 	CONST char	*name;
 	UW		base;
-	UINT		shift;		/* its bits in GT interrupt register 0, and in its own RING_IMR */
+	UINT		iir;		/* the GT interrupt register its bits are in: 0, or 1 for the video engine */
+	UINT		shift;		/* its bits in that register, and in its own RING_IMR */
 	UW		grdom;		/* its reset bit */
+	UW		mocs;		/* its table of memory object control states */
+	BOOL		up;		/* started: takes jobs (the video engine may stay down while the others run) */
 	UD		img_bytes;	/* its context image */
 	PFRAME		*hwsp_pf;
 	UW		*hwsp;		/* its status page */
@@ -251,5 +256,8 @@ IMPORT void	igt_test_start( void );
 IMPORT ER	igt_compose_init( void );
 IMPORT BOOL	igt_compose_check( void );
 IMPORT INT	igt_compose_used( void );	/* 0 the processor, 1 the copy engine, 2 the render engine */
+
+/* ---------------------------------------------------------------- igt_vdec.c */
+IMPORT void	igt_vdec_start( void );		/* the H.264 decoder on the video engine: checked, then offered */
 
 #endif /* _DEVICE_GPU_INTEL_IGT_H_ */

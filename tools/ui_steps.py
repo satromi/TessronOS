@@ -23,7 +23,11 @@ LONG_STEPS = ("mkbig", "sum", "sync", "waitwin", "sysup")
 
 
 def step_timeout(line):
-    return 1800 if line.split()[0] == "sysup" else 900 if line.split()[0] in LONG_STEPS else 30
+    w = line.split()
+    if w[0] == "kanji":
+        # the desktop waits up to S seconds (60 when not given) before it answers
+        return (int(w[1]) if len(w) > 1 and w[1].isdigit() else 60) + 30
+    return 1800 if w[0] == "sysup" else 900 if w[0] in LONG_STEPS else 30
 
 
 def shot_same(a, b, box):

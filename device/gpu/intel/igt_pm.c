@@ -982,7 +982,7 @@ LOCAL void pm_task( INT stacd, void *exinf )
 				  "RC6 off from now on, the wells kept awake\n");
 		}
 		now = igt_now_us();
-		jobs = knl_igt.eng[IGT_RCS].jobs + knl_igt.eng[IGT_BCS].jobs;
+		jobs = knl_igt.eng[IGT_RCS].jobs + knl_igt.eng[IGT_BCS].jobs + knl_igt.eng[IGT_VCS].jobs;
 		if ( now - f_t0 >= (UD)FREQ_MS * 1000 ) {
 			FSAMP	fs;
 			UD	wrun, wq, aw, all;

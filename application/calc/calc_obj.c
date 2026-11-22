@@ -18,9 +18,10 @@
  *	counts its object once more, one that went once less, unless the
  *	store counts the links of its records itself.
  *
- *	The 仮身操作 and 実身操作 of a link in a cell are the desktop's,
- *	asked for (ts/dtreq.h); what it answers the link is to become is
- *	written into the cell. Links dropped on the window are put in the
+ *	The 仮身操作, 実身操作 and 実行 of a link in a cell are lib/libtv's
+ *	(ts/tvvop.h), the desktop asked as for any program's link; what it
+ *	answers the link is to become is written into the cell, and a link
+ *	to a copy it made is put in the first empty cell under it. Links dropped on the window are put in the
  *	cells from the one they were let go over to the right, one a cell;
  *	a link carried out of the window is put where it is let go.
  *
@@ -38,6 +39,7 @@
 #include <ts/hid.h>
 #include <ts/tray.h>
 #include <ts/tadlnk.h>
+#include <ts/tvvop.h>
 #include "../dtask.h"
 
 /* The words of the next request and the last answer, as long as they are (dtask.h) */
@@ -370,127 +372,12 @@ ER ask_desktop( T_DTREQ *rq, T_DTANS *an, INT wait_ms )
 	return er;
 }
 
-/* The applist of link el, whole, in the next request's tail (ct_link_req) */
-static void link_req( T_DTREQ *rq, CONST UB *el, INT n )
-{
-	if ( dq_room(&g_dq, ct_link_room(el, n)) >= E_OK ) {
-		(void)ct_link_req(rq, el, n, g_dq.tail, &g_dq.tailsz, g_dq.cap);
-	}
-}
-
-/* The same with the link named for the desktop (ct_link_from): FALSE when it cannot be */
-static BOOL link_from( T_DTREQ *rq, CONST TS_UUID *parent, CONST UB *el, INT n )
-{
-	return (BOOL)( dq_room(&g_dq, ct_link_room(el, n)) >= E_OK
-		    && ct_link_from(rq, parent, &g_lch, el, n, g_dq.tail, &g_dq.tailsz, g_dq.cap) >= E_OK );
-}
-
 /* The link in the cell in hand, and its element */
 static CXCELL *the_link( void )
 {
 	CXCELL	*c = cx_get(&g_s, g_col, g_row);
 
 	return ( c != NULL && c->kind == CX_LINK && c->el != NULL ) ? c : NULL;
-}
-
-static UINT col_attr( CONST CXCELL *c, CONST char *name )
-{
-	UB	col[16];
-
-	if ( ct_attr(c->el, c->ellen, name, col, sizeof(col)) == 7 && col[0] == '#' ) {
-		return (UINT)strtoul((char *)col + 1, NULL, 16);
-	}
-	return 0xFFFFFFFFU;
-}
-
-static CONST char *CONST disp_attr[6] = { "namedisp", "roledisp", "typedisp", "updatedisp", "framedisp", "pictdisp" };
-
-static void ask_of( CONST CXCELL *c, UINT req, T_DTREQ *rq )
-{
-	T_DPRECT	r;
-	INT		i;
-
-	memset(rq, 0, sizeof(*rq));
-	rq->req = req;
-	(void)link_target(c, &rq->target);
-	rq->recno = -1;
-	link_box(c, &r);
-	rq->look.w = r.right - r.left;
-	rq->look.h = r.bottom - r.top;
-	rq->look.chsz = ct_attr_int(c->el, c->ellen, "chsz", 0);
-	rq->look.frcol = col_attr(c, "frcol");
-	rq->look.chcol = col_attr(c, "chcol");
-	rq->look.tbcol = col_attr(c, "tbcol");
-	rq->look.bgcol = col_attr(c, "bgcol");
-	for ( i = 0; i < 6; i++ ) {
-		if ( ct_attr_bool(c->el, c->ellen, disp_attr[i], (BOOL)( i == 0 || i == 5 )) ) rq->look.disp |= 1U << i;
-	}
-	rq->look.autoopen = ct_attr_bool(c->el, c->ellen, "autoopen", FALSE) ? 1 : 0;
-	if ( ct_attr_bool(c->el, c->ellen, "hidden", FALSE) ) rq->flags |= DT_F_HIDDEN;
-	ct_link_was(rq, c->el, c->ellen);	/* where it is in the sheet's record */
-	/* its relationship and applist, whole, in the tail: a link carried out keeps them */
-	{
-		INT	rl = ct_attr_text(c->el, c->ellen, "relationship", NULL, 0);
-
-		if ( rl > 0 ) {
-			UB	*t = (UB *)malloc((size_t)rl + 1);
-
-			if ( t == NULL ) {
-				g_dq.er = E_NOMEM;		/* the request fails rather than go without it */
-			} else {
-				(void)ct_attr_text(c->el, c->ellen, "relationship", t, rl + 1);
-				(void)dq_part(&g_dq, DT_TAIL_REL, t, rl);
-				free(t);
-			}
-		}
-	}
-	link_req(rq, c->el, c->ellen);
-}
-
-/*
- * 仮身属性変更 of a link named for the desktop as opening it names it
- * (DT_F_LINK), so that the windows opened from the link are told its new
- * look; the wordWrap (grab_x) the naming writes is put back as the
- * request had it
- */
-static void attr_named( T_DTREQ *rq, CONST TS_UUID *parent, CONST UB *el, INT n )
-{
-	INT	gx = rq->grab_x;
-	UINT	was = g_dq.tailsz;
-
-	if ( g_lport <= 0 ) return;
-	/* the naming's parts after ask_of's (its applist, put again, is found first either way) */
-	if ( !link_from(rq, parent, el, n) ) g_dq.tailsz = was;
-	rq->grab_x = gx;
-}
-
-void link_open( INT col, INT row )
-{
-	CXCELL	*c = cx_get(&g_s, col, row);
-	T_DTREQ	rq;
-	T_DTANS	an;
-	UB	*nm;
-	char	s[120];
-	ER	er;
-
-	if ( c == NULL || c->kind != CX_LINK ) return;
-	memset(&rq, 0, sizeof(rq));
-	rq.req = DT_RQ_OPEN;
-	if ( !link_target(c, &rq.target) ) return;
-	rq.recno = -1;
-	/* what the window opened does to the link comes back to be put in the sheet (DT_F_LINK) */
-	if ( g_lport > 0 && link_from(&rq, &g_obj, c->el, c->ellen) ) {
-		rq.look.frcol = col_attr(c, "frcol");
-		rq.look.chcol = col_attr(c, "chcol");
-		rq.look.tbcol = col_attr(c, "tbcol");
-		rq.look.bgcol = col_attr(c, "bgcol");
-	}
-	er = ask_desktop(&rq, &an, 3000);
-	nm = name_of(&rq.target);
-	snprintf(s, sizeof(s), "opened %s (%d)", (CONST char *)NM_OR_EMPTY(nm), (INT)er);
-	free(nm);
-	note(s);
-	if ( er < E_OK ) say("開けませんでした");
 }
 
 /* The cell's link with attributes set (a value of NULL takes one off) */
@@ -512,162 +399,6 @@ static BOOL link_edit( CXCELL *c, CONST CTSET *set, INT n )
 	free(tmp);
 	if ( ok ) g_changed = TRUE;
 	return ok;
-}
-
-/* The applist of the link: its own, or its object's */
-static INT app_json( CONST CXCELL *c, UB **p_out )
-{
-	T_JSON	root, al;
-	TS_UUID	u;
-	INT	n;
-
-	/* the link's own: no longer than the link it is written in */
-	*p_out = malloc((size_t)c->ellen + 1);
-	if ( *p_out == NULL ) return 0;
-	n = ct_attr_text(c->el, c->ellen, "applist", *p_out, c->ellen + 1);
-	if ( n > 0 ) return n;
-	if ( !link_target(c, &u) ) return 0;
-	n = meta_of(&u);
-	if ( n <= 0 || js_parse((CONST UB *)g_meta, n, &root) < E_OK || js_get(&root, "applist", &al) < E_OK ) {
-		(*p_out)[0] = 0;
-		return 0;
-	}
-	free(*p_out);
-	*p_out = malloc((size_t)al.len + 1);
-	if ( *p_out == NULL ) return 0;
-	memcpy(*p_out, al.s, (size_t)al.len);
-	(*p_out)[al.len] = 0;
-	return al.len;
-}
-
-static INT	g_napp;
-static INT	g_appcap;			/* entries the three tables have room for */
-static UB	(*g_app_id)[CT_APP_ID], (*g_app_name)[CT_APP_NAME];
-static BOOL	*g_app_kind;			/* offered for the object's kind, not in its applist */
-
-/* Room for 'want' programs, what is there kept */
-static BOOL app_room( INT want )
-{
-	UB	(*id)[CT_APP_ID], (*name)[CT_APP_NAME];
-	BOOL	*kind;
-
-	if ( want <= g_appcap ) return TRUE;
-	id = realloc(g_app_id, CT_APP_ID * (size_t)want);
-	if ( id != NULL ) g_app_id = id;
-	name = realloc(g_app_name, CT_APP_NAME * (size_t)want);
-	if ( name != NULL ) g_app_name = name;
-	kind = realloc(g_app_kind, sizeof(BOOL) * (size_t)want);
-	if ( kind != NULL ) g_app_kind = kind;
-	if ( id == NULL || name == NULL || kind == NULL ) return FALSE;
-	g_appcap = want;
-	return TRUE;
-}
-
-
-/* 実行: the list the desktop's own links show (DT_RQ_APPS), asked entry by entry */
-void exec_menu( ID mid )
-{
-	UB		(*rows)[WM_LABEL_MAX];
-	CXCELL		*c = the_link();
-	TS_UUID		ed;
-	T_DTREQ		rq;
-	T_DTANS		an;
-	INT		n = 1, k;
-
-	g_napp = 0;
-	for ( k = 0; c != NULL && k < n; k++ ) {
-		ask_of(c, DT_RQ_APPS, &rq);
-		rq.recno = k;
-		memset(&an, 0, sizeof(an));
-		if ( ask_desktop(&rq, &an, 3000) < E_OK ) break;
-		n = (INT)an.how;
-		if ( !app_room(n) ) break;
-		if ( ct_app_entry((CONST T_DTANS *)g_dq.ans, g_app_id[g_napp], g_app_name[g_napp], &g_app_kind[g_napp]) ) g_napp++;
-	}
-	rows = malloc(WM_LABEL_MAX * (size_t)( g_napp + 1 ));
-	if ( rows == NULL ) g_napp = 0;
-	for ( k = 0; k < g_napp; k++ ) snprintf((char *)rows[k], WM_LABEL_MAX, "%s", (char *)g_app_name[k]);
-	if ( rows != NULL && ui_uuid(SYSDEF_MENU_EXEC, &ed) >= E_OK ) {
-		(void)mn_set_lst(mid, &ed, "exec.app", (CONST UB *)rows, WM_LABEL_MAX, g_napp);
-	}
-	free(rows);
-	(void)mn_chg_atr(mid, NULL, "exec", ( c == NULL || g_napp == 0 ) ? MN_GREY : 0);
-}
-
-BOOL app_kept( void )
-{
-	CXCELL	*c = the_link();
-	UB	*j = NULL;
-	INT	n;
-	BOOL	kept = FALSE;
-
-	if ( c != NULL ) {
-		n = app_json(c, &j);
-		kept = ( n > 0 ) ? ct_app_locked(j, n) : FALSE;
-	}
-	free(j);
-	return kept;
-}
-
-static void app_keep( CXCELL *c )
-{
-	UB	*j = NULL, *out = NULL;
-	CTBUF	b;
-	CTSET	set;
-	INT	n;
-	BOOL	keep;
-
-	n = app_json(c, &j);
-	if ( j != NULL ) out = malloc((size_t)n + 64);	/* with "defaultOpenLock" put in */
-	if ( j != NULL && out != NULL ) {
-		keep = !ct_app_locked(j, n);
-		ct_buf(&b, out, n + 64);
-		set.name = "applist";
-		set.value = b.p;
-		if ( n > 0 && ct_app_lock(&b, j, n, keep) >= E_OK && link_edit(c, &set, 1) ) {
-			note(keep ? "kept" : "let go");
-			say(keep ? "起動アプリを固定しました" : "起動アプリを最新にしました");
-		} else {
-			say("起動アプリを持たない実身です");
-		}
-	}
-	free(j);
-	free(out);
-}
-
-/* The look the desktop's 属性変更 answered, written into the link */
-static void link_look( CXCELL *c, CONST T_DTANS *an )
-{
-	char	col[4][8], cs[12];
-	CTSET	set[16];
-	CONST UINT *v[4];
-	static CONST char *CONST cn[4] = { "frcol", "chcol", "tbcol", "bgcol" };
-	INT	n = 0, k;
-
-	v[0] = &an->look.frcol;
-	v[1] = &an->look.chcol;
-	v[2] = &an->look.tbcol;
-	v[3] = &an->look.bgcol;
-	if ( an->look.chsz > 0 ) {
-		snprintf(cs, sizeof(cs), "%d", an->look.chsz);
-		set[n].name = "chsz";
-		set[n++].value = (CONST UB *)cs;
-	}
-	for ( k = 0; k < 4; k++ ) {
-		if ( *v[k] == 0xFFFFFFFFU ) continue;
-		snprintf(col[k], sizeof(col[k]), "#%06x", *v[k] & 0x00FFFFFFU);
-		set[n].name = cn[k];
-		set[n++].value = (CONST UB *)col[k];
-	}
-	for ( k = 0; k < 6; k++ ) {
-		set[n].name = disp_attr[k];
-		set[n++].value = (CONST UB *)( ( ( an->look.disp >> k ) & 1 ) ? "true" : "false" );
-	}
-	set[n].name = "autoopen";
-	set[n++].value = (CONST UB *)( an->look.autoopen ? "true" : "false" );
-	set[n].name = "hidden";
-	set[n++].value = (CONST UB *)( ( an->flags & DT_F_HIDDEN ) ? "true" : "false" );
-	(void)link_edit(c, set, n);
 }
 
 /* A link to a new object put in the first empty cell under the link in hand */
@@ -745,90 +476,124 @@ void link_told( CONST T_DTANS *an )
 	}
 }
 
+/* ---------------------------------------------------------------- 仮身操作 and 実身操作 */
+
+/* A cell's link as the 仮身操作 take it, its words in memory of their own */
+typedef struct {
+	T_TVLINK	l;
+	UB		*words;
+} CLINK;
+
+static BOOL clink_of( CXCELL *c, CLINK *k )
+{
+	INT	room = CT_VOP_ROOM(c->ellen);
+
+	k->words = malloc((size_t)room);
+	if ( k->words == NULL ) {
+		say("メモリが足りません");
+		return FALSE;
+	}
+	(void)ct_vop_link(&k->l, c->el, c->ellen, k->words, room);
+	link_box(c, &k->l.box);
+	k->l.app = c;
+	return TRUE;
+}
+
+static void clink_free( CLINK *k )
+{
+	free(k->words);
+	k->words = NULL;
+}
+
+/* What came while the desktop was asked, taken after each answer */
+static void vop_after( void )
+{
+	settle();
+}
+
+/* The links are named for the desktop (DT_F_LINK) while it has the channel to tell */
+static BOOL vop_named( TS_UUID *p_parent, TS_UUID *p_chan )
+{
+	if ( g_lport <= 0 ) return FALSE;
+	*p_parent = g_obj;
+	*p_chan = g_lch;
+	return TRUE;
+}
+
+/* What the desktop answered, written into the cell's link */
+static BOOL vop_put( T_TVLINK *l, UINT what, CONST T_TVPUT *p )
+{
+	CXCELL		*c = (CXCELL *)l->app;
+	CTSET		set[CT_VOP_LOOK_SET];
+	CTVOPTXT	t;
+
+	if ( what == TV_VOP_W_LOOK ) return link_edit(c, set, ct_vop_look(p->an, set, &t));
+	set[0].name = ( what == TV_VOP_W_REL ) ? "relationship" : "applist";
+	set[0].value = ( p->len > 0 ) ? p->text : NULL;
+	return link_edit(c, set, 1);
+}
+
+/* 実身複製 and 新版作成: the copy's link in the first empty cell under the link */
+static void vop_put_copy( T_TVLINK *l, CONST TS_UUID *copy, UINT why )
+{
+	link_below((CXCELL *)l->app, copy);
+}
+
+static void vop_changed( void )
+{
+	g_changed = TRUE;
+}
+
+static CONST T_TVVOP *vop( void )
+{
+	static T_TVVOP	h;
+	static DQTV	d;
+
+	if ( h.put == NULL ) {
+		dq_tv_asker(&h.ask, &d, &g_dq, &g_win, vop_after);
+		h.note = note;
+		h.say = say;
+		h.named = vop_named;
+		h.put = vop_put;
+		h.put_copy = vop_put_copy;
+		h.changed = vop_changed;
+	}
+	return &h;
+}
+
+void link_open( INT col, INT row )
+{
+	CXCELL	*c = cx_get(&g_s, col, row);
+	TS_UUID	u;
+	CLINK	k;
+
+	if ( c == NULL || c->kind != CX_LINK || !link_target(c, &u) || !clink_of(c, &k) ) return;
+	(void)tv_vop_open(vop(), &k.l);
+	clink_free(&k);
+}
+
+void link_menu( ID mid, BOOL on )
+{
+	CXCELL	*c = on ? the_link() : NULL;
+	CLINK	k;
+
+	if ( c == NULL || !clink_of(c, &k) ) {
+		tv_vop_menu(vop(), mid, NULL);
+		return;
+	}
+	tv_vop_menu(vop(), mid, &k.l);
+	clink_free(&k);
+}
+
 void link_op( CONST char *code, INT index )
 {
 	CXCELL	*c = the_link();
-	T_DTREQ	rq;
-	T_DTANS	an;
-	UB	*nm;
-	char	s[160];
 	TS_UUID	u;
-	ER	er;
+	CLINK	k;
 
-	if ( c == NULL || !link_target(c, &u) ) return;
-	if ( strcmp(code, "exec.app") == 0 && ( index < 0 || index >= g_napp ) ) return;
-	nm = name_of(&u);
-	memset(&an, 0, sizeof(an));
-	if ( strcmp(code, "vobj.open") == 0 ) {
-		link_open(g_col, g_row);
-	} else if ( strcmp(code, "vobj.close") == 0 ) {
-		ask_of(c, DT_RQ_CLOSE, &rq);
-		(void)ask_desktop(&rq, &an, 5000);
-	} else if ( strcmp(code, "vobj.attr") == 0 ) {
-		ask_of(c, DT_RQ_ATTR, &rq);
-		attr_named(&rq, &g_obj, c->el, c->ellen);
-		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-			link_look(c, &an);
-			snprintf(s, sizeof(s), "attr %s", (CONST char *)NM_OR_EMPTY(nm));
-			note(s);
-			say("仮身属性を変更しました");
-		}
-	} else if ( strcmp(code, "vobj.relation") == 0 ) {
-		ask_of(c, DT_RQ_RELATION, &rq);
-		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-			CONST UB	*t = dq_ans_text(&g_dq, DT_TAIL_TEXT);
-			CTSET		set;
-
-			set.name = "relationship";
-			set.value = ( t[0] != 0 ) ? t : NULL;
-			(void)link_edit(c, &set, 1);
-			snprintf(s, sizeof(s), "relation %s [%.80s]", (CONST char *)NM_OR_EMPTY(nm), (CONST char *)t);
-			note(s);
-			say("続柄を変更しました");
-		}
-	} else if ( strcmp(code, "vobj.reconnect") == 0 ) {
-		T_OBREF	ref;
-
-		if ( ob_ref_obj(&u, &ref) < E_OK ) say("実身に接続できませんでした");
-	} else if ( strcmp(code, "real.rename") == 0 ) {
-		ask_of(c, DT_RQ_RENAME, &rq);
-		if ( ask_desktop(&rq, &an, 30 * 60 * 1000) >= E_OK ) {
-			snprintf(s, sizeof(s), "renamed %.80s", (CONST char *)dq_ans_text(&g_dq, DT_TAIL_TEXT));
-			note(s);
-		}
-	} else if ( strcmp(code, "real.duplicate") == 0 || strcmp(code, "real.newversion") == 0 ) {
-		BOOL	dup = (BOOL)( code[5] == 'd' );
-
-		ask_of(c, dup ? DT_RQ_DUPLICATE : DT_RQ_NEWVER, &rq);
-		er = ask_desktop(&rq, &an, 30 * 60 * 1000);
-		if ( er >= E_OK ) {
-			/* the copy is linked to by nothing yet: its link is counted when the sheet is written */
-			link_below(c, &an.into);
-			snprintf(s, sizeof(s), "%s %s", dup ? "duplicated" : "new version", (CONST char *)NM_OR_EMPTY(nm));
-			note(s);
-			say(dup ? "実身を複製しました" : "新版を作成しました");
-		}
-	} else if ( strcmp(code, "real.lock") == 0 || strcmp(code, "real.unlock") == 0 ) {
-		app_keep(c);
-	} else if ( strcmp(code, "real.info") == 0 ) {
-		ask_of(c, DT_RQ_INFO, &rq);
-		(void)ask_desktop(&rq, &an, 5000);
-	} else if ( strcmp(code, "real.network") == 0 ) {
-		ask_of(c, DT_RQ_NETWORK, &rq);
-		(void)ask_desktop(&rq, &an, 5000);
-	} else if ( strcmp(code, "real.search") == 0 ) {
-		ask_of(c, DT_RQ_SEARCH, &rq);
-		(void)ask_desktop(&rq, &an, 30 * 60 * 1000);
-	} else if ( strcmp(code, "exec.app") == 0 ) {
-		ask_of(c, DT_RQ_EXEC, &rq);
-		(void)dq_part(&g_dq, DT_TAIL_NAME, g_app_id[index], -1);
-		if ( app_kept() ) rq.flags |= DT_F_KEEP;
-		if ( g_app_kind[index] ) rq.flags |= DT_F_KIND;
-		er = ask_desktop(&rq, &an, 5000);
-		snprintf(s, sizeof(s), "exec %s %s (%d)", (CONST char *)NM_OR_EMPTY(nm), (char *)g_app_id[index], (INT)er);
-		note(s);
-	}
-	free(nm);
+	if ( c == NULL || !link_target(c, &u) || !clink_of(c, &k) ) return;
+	(void)tv_vop_command(vop(), &k.l, code, index);
+	clink_free(&k);
 	g_dirty = TRUE;
 }
 
@@ -946,58 +711,25 @@ void dropped( void )
 
 /*
  * The link in the cell in hand, carried out of the window: the desktop
- * follows the pointer with its outline and answers where it was let go.
- * Over a window that takes links, it is put there and, unless the
- * second button went down on the way (a copy), taken out of the cell.
- * Pressed twice before it was carried, a link to a copy of its object is
- * put there and the cell keeps its own.
+ * follows the pointer with its outline and answers where it was let go
+ * (tv_vop_carry_out). Over a window that takes links, it is put there
+ * and, unless the second button went down on the way (a copy), taken out
+ * of the cell. Pressed twice before it was carried, a link to a copy of
+ * its object is put there and the cell keeps its own.
  */
 void carry_out( INT x0, INT y0, BOOL twice )
 {
 	CXCELL		*c = the_link();
-	T_DTREQ		rq;
-	T_DTANS		an;
-	T_DPRECT	r;
-	UB		*nm;
+	T_TVCARRY	r;
 	TS_UUID		u;
-	BOOL		copy, given;
-	char		s[120];
-	ER		er;
-	UINT		seq;
+	CLINK		k;
 
-	if ( c == NULL || !link_target(c, &u) ) return;
-	nm = name_of(&u);
-	link_box(c, &r);
-	ask_of(c, DT_RQ_CARRY, &rq);
-	rq.flags |= DT_F_TO_PROG;
-	rq.grab_x = x0 - r.left;
-	rq.grab_y = y0 - r.top;
-	memset(&an, 0, sizeof(an));
-	er = ask_desktop(&rq, &an, 30 * 60 * 1000);
-	if ( er < E_OK ) {
-		free(nm);
-		g_dirty = TRUE;
-		return;
-	}
-	seq = rq.seq;
-	copy = (BOOL)( an.how == DT_HOW_COPY );
-	given = (BOOL)( ( an.flags & DT_F_TO_PROG ) != 0 );
-	ask_of(c, DT_RQ_PLACE, &rq);
-	rq.carry = seq;
-	if ( twice ) rq.flags |= DT_F_DUPLICATE;
-	memset(&an, 0, sizeof(an));
-	er = ask_desktop(&rq, &an, 10 * 60 * 1000);
-	snprintf(s, sizeof(s), "carried %s (%d)%s", (CONST char *)NM_OR_EMPTY(nm), (INT)er,
-		 twice ? " as a new object" : copy ? " as a copy" : "");
-	free(nm);
-	note(s);
-	if ( er >= E_OK && !twice && !copy ) {
+	if ( c == NULL || !link_target(c, &u) || !clink_of(c, &k) ) return;
+	if ( tv_vop_carry_out(vop(), &k.l, 1, NULL, x0, y0, twice, NULL, &r) >= E_OK && r.moved ) {
 		cell_clear(g_col, g_row);
 		g_link_on = FALSE;
-		say("仮身を移動しました");
-	} else if ( er >= E_OK && !given ) {
-		say(twice ? "実身を複製しました" : "仮身を複写しました");
 	}
+	clink_free(&k);
 	g_dirty = TRUE;
 }
 
